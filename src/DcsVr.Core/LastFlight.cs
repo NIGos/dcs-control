@@ -6,11 +6,12 @@ using System.Text.RegularExpressions;
 namespace DcsVr.Core;
 
 /// <summary>Where the last DCS session left its traces. Every source is optional.</summary>
-/// <param name="DcsLog">Saved Games\DCS\Logs\dcs.log: the session's start and end (UTC).</param>
+/// <param name="DcsLog">Saved Games\DCS\Logs\dcs.log: the session's start and end (UTC). The prefetch fix's
+/// DcsQvCullPrefetch.log is read from the engine optimizations module next to it (Saved Games\DCS\Scripts\DcsQvCull).</param>
 /// <param name="PimaxLogDirectory">%LOCALAPPDATA%\Pimax\runtime with pvr_srv_log_*.txt: frames the headset received.</param>
 /// <param name="ManagedProfiles">The app's managed\profiles folder: OFXR's flight logs in each profile's ofxr folder.</param>
 /// <param name="BoostStatus">%LOCALAPPDATA%\DcsControl\boost\status.json written by the CPU Boost helper.</param>
-/// <param name="DcsBin">DCS's bin folder: DcsVrPrefetchFix.log and Cheeky's CheekyFoveatedDLSS logs.</param>
+/// <param name="DcsBin">DCS's bin folder: Cheeky's CheekyFoveatedDLSS logs.</param>
 public sealed record FlightSources(string? DcsLog, string? PimaxLogDirectory = null, string? ManagedProfiles = null, string? BoostStatus = null, string? DcsBin = null);
 
 /// <summary>A summary of the last DCS session, read from logs after DCS exits. Parts without a source are null.</summary>
@@ -33,7 +34,7 @@ public sealed record FramegenShare(int Seconds2x, int Seconds3x, int Switches, b
 public sealed record FrameTimes(double P50Ms, double P90Ms, int Seconds);
 /// <param name="State">"ran", "not-started" or "failed".</param>
 public sealed record NeuralState(string State, string? Version, int Toggles, bool? OnAtExit, string? Error);
-public sealed record BoostResult(string State, int Moved, int Restored, IReadOnlyList<string> Errors, string? Prefetch);
+public sealed record BoostResult(string State, int Moved, int Restored, IReadOnlyList<string> Errors);
 /// <param name="AverageCallsPerSecond">Average over the 10 s reports with any calls.</param>
 /// <param name="SkippedPercent">Share of all calls the fix skipped, weighted by calls.</param>
 public sealed record PrefetchResult(double AverageCallsPerSecond, double PeakCallsPerSecond, double SkippedPercent, int Reports);
@@ -60,7 +61,7 @@ public static partial class LastFlight
             ofxr?.Share, ofxr?.Times,
             ReadCheeky(sources.DcsBin, start, end),
             boost?.Result,
-            sources.DcsBin is { } bin ? ReadPrefetch(Path.Combine(bin, "DcsVrPrefetchFix.log"), start, end) : null);
+            ReadPrefetch(PrefetchLog(log), start, end));
     }
 
     // ---- dcs.log ---------------------------------------------------------------------------------------------------
@@ -270,19 +271,23 @@ public static partial class LastFlight
             var restored = r.TryGetProperty("restored", out var re) && re.ValueKind == JsonValueKind.Number && re.TryGetInt32(out var count) ? count : 0;
             var state = r.TryGetProperty("state", out var st) ? st.GetString() ?? "" : "";
             var pid = r.TryGetProperty("dcsPid", out var p) && p.ValueKind == JsonValueKind.Number && p.TryGetInt32(out var number) ? number : (int?)null;
-            var prefetch = r.TryGetProperty("prefetch", out var pf) && pf.ValueKind == JsonValueKind.String ? pf.GetString() : null;
             // DCS's own priority and affinity are listed first as "DCS (PID n): …"; the rest are other processes moved.
             var moved = changed.Count(c => !c.StartsWith("DCS (PID", StringComparison.Ordinal));
-            return new(at, pid, new(state, moved, restored, List(r, "errors"), prefetch));
+            return new(at, pid, new(state, moved, restored, List(r, "errors")));
         }
         catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException) { return null; }
     }
 
     // ---- Prefetch fix ------------------------------------------------------------------------------------------------
 
-    private static PrefetchResult? ReadPrefetch(string path, DateTimeOffset start, DateTimeOffset end)
+    /// <summary>The engine optimizations module's DcsQvCullPrefetch.log for the Saved Games folder of
+    /// <paramref name="dcsLog"/> (Saved Games\DCS*\Logs\dcs.log → Saved Games\DCS*\Scripts\DcsQvCull).</summary>
+    public static string? PrefetchLog(string dcsLog) =>
+        Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(dcsLog))) is { } savedGames ? Path.Combine(savedGames, "Scripts", "DcsQvCull", "DcsQvCullPrefetch.log") : null;
+
+    private static PrefetchResult? ReadPrefetch(string? path, DateTimeOffset start, DateTimeOffset end)
     {
-        try { return File.Exists(path) ? ParsePrefetch(Cached(path, () => ReadLines(path, 8L * 1024 * 1024, l => l.Contains("calls/s=", StringComparison.Ordinal))) ?? [], start, end) : null; }
+        try { return path is not null && File.Exists(path) ? ParsePrefetch(Cached(path, () => ReadLines(path, 8L * 1024 * 1024, l => l.Contains("calls/s=", StringComparison.Ordinal))) ?? [], start, end) : null; }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
     }
 

@@ -128,12 +128,6 @@ public static partial class BoostPlanner
                     Running: match is not null, NeedsAdministrator: match is { AccessibleForSetInfo: false }));
             }
 
-        notes.Add(profile.BoostPrefetch switch
-        {
-            PrefetchFix.Skip => @"Prefetch fix: DCS loads it at start (bin\dxgi2.dll); repeated terrain prefetches within 5 s are skipped. Statistics in bin\DcsVrPrefetchFix.log.",
-            PrefetchFix.Observe => @"Prefetch fix: DCS loads it at start (bin\dxgi2.dll) and only counts prefetch calls in bin\DcsVrPrefetchFix.log.",
-            _ => "Prefetch fix: off."
-        });
         if (profile.BoostElevated && processes.Any(p => p.NeedsAdministrator))
             notes.Add("Some targets run under another account; they can be changed only with the administrator rights this profile requests.");
 

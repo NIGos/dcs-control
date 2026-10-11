@@ -136,8 +136,8 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         var index = -1;
         try
         {
-            // 2. Paths an earlier profile wrote that this one does not use go back to their originals (a dxgi2.dll
-            // the new profile has no prefetch fix for, for example).
+            // 2. Paths an earlier profile wrote that this one does not use go back to their originals (the dxgi.dll
+            // loader and dxgi2.dll prefetch fix that 0.5.4 and earlier put in bin, for example).
             var planned = plan.Files.Select(f => System.IO.Path.GetFullPath(f.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
             foreach (var stale in baseline.Files.AsEnumerable().Reverse().Where(f => !planned.Contains(f.Path)).ToArray())
             {

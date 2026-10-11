@@ -112,6 +112,50 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// backed up the first time a path is written).</summary>
     /// <param name="fovea">Pimax Play's values as already read by the caller (so a stamp it keeps matches the plan);
     /// read now when omitted.</param>
+    /// <summary>
+    /// Another program's dxgi.dll in DCS's bin folder (ReShade, an overlay) that the profile's loader would set aside
+    /// while it is applied: not one of this app's loaders and not the one the applied profile installed. Null when the
+    /// profile needs no loader or the file is ours. The pilot is told before Launch, not after.
+    /// </summary>
+    public ForeignDxgi? ForeignDxgi(VrProfile profile, InventorySnapshot inventory)
+    {
+        var launch = profile.ForLaunch();
+        if (!launch.UsesCheeky || inventory.DcsExecutable is not { } exe || Path.GetDirectoryName(exe) is not { } bin) return null;
+        var path = Path.Combine(bin, "dxgi.dll");
+        try
+        {
+            if (!File.Exists(path)) return null;
+            var hash = Hashing.FileSha256(path);
+            var ours = new[] { "components/cheeky/dxgi.dll", "components/cheeky-focus/dxgi.dll" }.Select(p => Path.Combine(DistributionRoot, p)).Where(File.Exists).Select(Hashing.FileSha256);
+            var installed = ReadAppliedProfile()?.Journal.Entries.Any(e => string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase) && e.InstalledSha256 == hash) == true;
+            if (installed || ours.Contains(hash, StringComparer.OrdinalIgnoreCase)) return null;
+            var info = FileVersionInfo.GetVersionInfo(path);
+            var product = new[] { info.ProductName, info.FileDescription, info.CompanyName }.FirstOrDefault(n => !string.IsNullOrWhiteSpace(n))?.Trim();
+            return new(path, product, hash);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    /// <summary>
+    /// The pilot's own dxgi.dll to chain after the DLSS 5 loader as bin\dxgi2.dll: the one in bin now, or the one an
+    /// earlier apply set aside (its backup). Null when there is none, when chaining is off, or when bin\dxgi2.dll
+    /// belongs to another program (it is never replaced for this).
+    /// </summary>
+    public byte[]? ChainedDxgi(VrProfile profile, InventorySnapshot inventory)
+    {
+        if (!profile.KeepOtherDxgi || !profile.ForLaunch().UsesCheeky || inventory.DcsExecutable is not { } exe || Path.GetDirectoryName(exe) is not { } bin) return null;
+        try
+        {
+            var originals = Originals.Read().Files;
+            OriginalFile? Recorded(string name) => originals.FirstOrDefault(f => string.Equals(Path.GetFullPath(f.Path), Path.GetFullPath(Path.Combine(bin, name)), StringComparison.OrdinalIgnoreCase));
+            var second = Path.Combine(bin, "dxgi2.dll");
+            if (File.Exists(second) && Recorded("dxgi2.dll") is not { Foreign: false }) return null;
+            if (ForeignDxgi(profile, inventory) is { } now) return File.ReadAllBytes(now.Path);
+            return Recorded("dxgi.dll") is { Foreign: true, BackupFile: { } backup } ? File.ReadAllBytes(PathPolicy.UnderRoot(Originals.Directory, backup)) : null;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { return null; }
+    }
+
     public ApplyPlan Preview(VrProfile profile, InventorySnapshot inventory, FoveaResolution? fovea = null)
     {
         // A focus area that follows Pimax Play is read now, so the plan holds exactly the values that will be written.
@@ -191,16 +235,6 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 else if (!File.Exists(ofxrLayer) || Hashing.FileSha256(ofxrLayer) != File.ReadAllText(ofxrLayer + ".sha256").Trim())
                     throw new InvalidDataException("The OFXR layer is modified or incomplete.");
             }
-            string? prefetchFix = null;
-            if (profile.UsesPrefetchFix)
-            {
-                // Loaded through the verified focus-adapter dxgi.dll loader, also when the profile has no Cheeky.
-                focus ??= Path.Combine(DistributionRoot, "components/cheeky-focus");
-                prefetchFix = Path.Combine(DistributionRoot, "components/boost/prefetch_fix.dll");
-                foreach (var path in new[] { PathPolicy.UnderRoot(focus, "dxgi.dll"), prefetchFix })
-                    if (!File.Exists(path) || Hashing.FileSha256(path) != File.ReadAllText(path + ".sha256").Trim())
-                        throw new InvalidDataException("The CPU Boost prefetch fix is modified or incomplete.");
-            }
             string? engine = null;
             if (profile.EngineOptimizations)
             {
@@ -220,7 +254,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 if (!File.Exists(pupilShift) || !File.Exists(pupilShift + ".sha256") || Hashing.FileSha256(pupilShift) != File.ReadAllText(pupilShift + ".sha256").Trim())
                     throw new InvalidDataException("The pupil shift layer is modified or incomplete.");
             }
-            return new DeploymentPlanner(new(ofxr, cheeky, layer, quad, focus, ofxrLayer, prefetchFix, engine, pupilShift)).Build(profile, inventory, ManagedRoot, draft, appliedFovea, ownedSettings, savedNeuralSha);
+            return new DeploymentPlanner(new(ofxr, cheeky, layer, quad, focus, ofxrLayer, engine, pupilShift)).Build(profile, inventory, ManagedRoot, draft, appliedFovea, ownedSettings, savedNeuralSha, ChainedDxgi(profile, inventory));
         }
         string Import(string id)
         {
@@ -601,6 +635,12 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
 /// <param name="Executable">DCS.exe from the applied launch.json.</param>
 /// <param name="OptionsPath">The options.lua the profile changed; null when it left options.lua untouched.</param>
 /// <param name="Fovea">pimax-fovea.json: Pimax Play's converted values written at Apply; null when not used.</param>
+/// <summary>Another program's dxgi.dll in DCS's bin folder; Product is its name from the file's version information, if any.</summary>
+public sealed record ForeignDxgi(string Path, string? Product, string Sha256)
+{
+    public string Name => Product ?? "another program";
+}
+
 public sealed record AppliedProfile(TransactionJournal Journal, VrProfile Profile, string ProfilePath, string? Executable, string? OptionsPath, AppliedFovea? Fovea);
 /// <summary>What Launch DCS (or Apply without launching) did to the installed configuration. SettingsRealigned: the
 /// profile's own DCS settings in options.lua were set back in place.</summary>

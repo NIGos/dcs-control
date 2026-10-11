@@ -43,10 +43,10 @@ void Counting() {
   Check(ConfiguredCount(gw) == 3 && ActiveCount(gw) == 1 && LatchedCount(gw) == 1,
         "status word: configured includes idle and latched features");
   Check(ConfiguredCount(Compose(g, 4, true, true)) == 3, "status word: kill switch leaves the configured count");
-  // The payload's real composition (no DCS modules here): running, within the 17 features.
+  // The payload's real composition (no DCS modules here): running, within the 18 features.
   const uint64_t real = ComputeStatus();
-  Check(Running(real) && ActiveCount(real) + LatchedCount(real) <= 17 && ConfiguredCount(real) <= 17,
-        "status word: ComputeStatus reports running and at most 17 production features");
+  Check(Running(real) && ActiveCount(real) + LatchedCount(real) <= 18 && ConfiguredCount(real) <= 18,
+        "status word: ComputeStatus reports running and at most 18 production features");
 }
 
 void Handover() {

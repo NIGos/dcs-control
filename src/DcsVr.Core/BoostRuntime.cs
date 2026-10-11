@@ -655,7 +655,6 @@ public sealed class BoostRuntime
         {
             State = state,
             DcsPid = _attachedPid ?? _dcsPid,
-            Prefetch = _profile.UsesPrefetchFix ? _profile.BoostPrefetch.ToString().ToLowerInvariant() + @" (loaded by DCS, see bin\DcsVrPrefetchFix.log)" : "off",
             Source = _topology.Source,
             SourceDescription = _topology.Description,
             RenderCores = _topology.RenderCores,

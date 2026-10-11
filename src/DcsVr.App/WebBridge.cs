@@ -62,8 +62,8 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     }
     private readonly Lock _flightLock = new();
     private (string Key, DateTime At, object Reply)? _flightCache;
-    /// <summary>Last flight: read-only, from the logs DCS, the headset runtime, OFXR, Cheeky, CPU Boost and the prefetch
-    /// fix leave behind; answered outside the command lock and reused for 10 s.</summary>
+    /// <summary>Last flight: read-only, from the logs DCS, the headset runtime, OFXR, Cheeky, CPU Boost and the engine
+    /// optimizations' prefetch fix leave behind; answered outside the command lock and reused for 10 s.</summary>
     private Task<string>? LastFlightRequest(string json)
     {
         if (json.Length > 1024 || !json.Contains("\"lastFlight\"", StringComparison.Ordinal)) return null;
@@ -137,7 +137,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             var draftProfile = JsonData.Deserialize<VrProfile>(data.GetProperty("profile").GetRawText());
             var log = DcsLogPath(Empty(data.GetProperty("options").GetString()) ?? _options ?? _inventory.OptionsPath);
             var key = JsonData.Serialize(new { draftProfile.Desktop, draftProfile.CpuBoost, draftProfile.BoostDcsPriority, draftProfile.BoostMoveVrRuntime, draftProfile.BoostMoveBackgroundApps,
-                draftProfile.BoostBackgroundApps, draftProfile.BoostPrefetch, draftProfile.BoostElevated, draftProfile.Runtime, log,
+                draftProfile.BoostBackgroundApps, draftProfile.BoostElevated, draftProfile.Runtime, log,
                 draftProfile.FreeVramApps, draftProfile.FlightDisplayWidth, draftProfile.FlightDisplayHeight, draftProfile.FlightDisplayRefresh });
             lock (_boostCacheLock)
                 if (_boostCache is { } cached && cached.Key == key && DateTime.UtcNow - cached.At < TimeSpan.FromSeconds(3)) return Task.FromResult(Reply(id, cached.Reply));
@@ -527,7 +527,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         else if (_profile.KeepDcsLauncher && LaunchSafety.LauncherRestartUnknown) issues.Insert(0, new("dcs-launcher", IssueSeverity.Warning, LaunchSafety.LauncherUnknownMessage));
         return new { version = ProductInfo.Version, profile = _profile, dcs = _dcs, options = _options, inventory = CurrentInventory, pimax = PimaxView(),
             activeRoute = new { route = activeRoute.Route?.ToString(), summary = activeRoute.Summary },
-            issues, cadence = Enum.IsDefined(_profile.FpsLimit) ? FramePacing.Describe(HeadsetRefresh.Resolve(_profile), CurrentInventory) : null, headsetRefresh = HeadsetRefresh.Detect(_profile.Runtime), dcsCustomIpd = CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD_enable") == "true" ? CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD")?.Trim('"') : null, gpu = new { nvidiaRtx = GpuInfo.Unknown || GpuInfo.HasNvidiaRtx, names = GpuInfo.Names }, status = _status, report = _report,
+            issues, cadence = Enum.IsDefined(_profile.FpsLimit) ? FramePacing.Describe(HeadsetRefresh.Resolve(_profile), CurrentInventory) : null, headsetRefresh = HeadsetRefresh.Detect(_profile.Runtime), foreignDxgi = service.ForeignDxgi(_profile, CurrentInventory), dcsCustomIpd = CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD_enable") == "true" ? CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD")?.Trim('"') : null, gpu = new { nvidiaRtx = GpuInfo.Unknown || GpuInfo.HasNvidiaRtx, names = GpuInfo.Names }, status = _status, report = _report,
             plan = _plan is null ? null : new { foveaStamp = _previewFoveaStamp, files = _plan.Files.Select(f => new { f.Path, f.Purpose, bytes = f.Content.Length, replaces = f.ExpectedSha256 is not null, f.LuaChanges }), environment = _plan.LaunchEnvironment },
             // Recovery: one record of original files, restored with one action.
             originals = new { count = originals.Count, files = originals.Files, state = originals.State, lastAction = originals.LastAction, lastActionAt = originals.LastActionAt, folder = originals.Folder },

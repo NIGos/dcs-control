@@ -35,11 +35,15 @@ public static class Readiness
             Add("elevation", CheckState.Pass, "Runs without admin rights", "DCS starts without administrator rights, so the OpenXR loader uses the profile's headset software and add-ons.");
         }
         catch (InvalidOperationException e) { Add("elevation", CheckState.Error, "Runs without admin rights", e.Message); }
-        // DCS's bin folder receives the Cheeky loader and, with CPU Boost, the prefetch fix (dxgi.dll, dxgi2.dll and its settings).
+        // DCS's bin folder receives only the Cheeky loader and its files (DLSS 5, Foveated SR); everything else goes to Saved Games.
         LaunchSafety.ForgetWriteProbes();
         var writable = LaunchSafety.UnwritableFolders(profile, inventory);
         Add("write-access", writable.Count == 0 ? CheckState.Pass : CheckState.Error, "Write access to game folders",
             writable.Count == 0 ? "The profile can write its files as the current user." : "Not writable as the current user: " + string.Join(" ", writable.Select(f => f + ": " + LaunchSafety.WriteAdvice(f))));
+        if (service.ForeignDxgi(profile, inventory) is { } dxgi)
+            Add("foreign-dxgi", CheckState.Warning, "Another program's dxgi.dll", profile.KeepOtherDxgi
+                ? $"DCS's bin folder has {dxgi.Name}'s dxgi.dll ({dxgi.Path}). DLSS 5 needs that file name, so Launch DCS backs it up and loads it after the DLSS 5 loader as dxgi2.dll: {dxgi.Name} keeps working. If DCS misbehaves with both, turn off Keep another program's dxgi.dll on the DLSS 5 page."
+                : $"DCS's bin folder has {dxgi.Name}'s dxgi.dll ({dxgi.Path}). DLSS 5 needs that file name: Launch DCS backs it up and sets it aside while this profile is applied, so {dxgi.Name} is off in DCS until Back to stock DCS puts it back.");
         var running = profile.Desktop ? new ActiveRouteState(null, "", default) : ActiveRouteProvider();
         if (running.Route is { } activeRoute && activeRoute != profile.Runtime)
             Add("route-mismatch", CheckState.Error, "Headset route", running.Summary + " This profile uses " + (profile.Runtime == RuntimeKind.Pimax ? "the Pimax runtime" : "Sboys through SteamVR") + ". Switch the profile route, or close the other runtime, before launching.");

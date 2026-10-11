@@ -81,7 +81,7 @@ for f in json.loads((release/'release-manifest.json').read_text(encoding='utf-8-
     # Components added after 0.2.3 (the deferred OFXR layer) have no baseline to compare against.
     # Components rebuilt on purpose from patched sources (Cheeky OpenXR layer with the DCS quad layout export, the
     # focus adapter) must match their own published hash instead; every other component stays byte-identical.
-    rebuilt = p.removesuffix('.sha256') in ('components/CheekyOpenXRLayer.dll', 'components/quadviews/XR_APILAYER_MBUCCHIA_quad_views_foveated.dll') or p.startswith('components/cheeky-focus/') or p.startswith('components/boost/') or p.startswith('components/dcsqvcull/') or p.startswith('components/pupilshift/')
+    rebuilt = p.removesuffix('.sha256') in ('components/CheekyOpenXRLayer.dll', 'components/quadviews/XR_APILAYER_MBUCCHIA_quad_views_foveated.dll') or p.startswith('components/cheeky-focus/') or p.startswith('components/dcsqvcull/') or p.startswith('components/pupilshift/')
     if rebuilt:
         sidecar = release/'files'/(p + '.sha256')
         if not p.endswith('.sha256') and sidecar.exists():

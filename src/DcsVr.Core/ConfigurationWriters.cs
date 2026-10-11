@@ -150,6 +150,12 @@ public static class ConfigurationWriters
         SkipSameConstantBuffer={(p.EngineEffectBufferSkip ? 1 : 0)}
         SkipSameConstantUpload=0
 
+        [Prefetch]
+        ; Terrain prefetch fix: skip (repeats of a range within WindowMs are skipped; a prefetch is only a hint), observe
+        ; (only counted) or off. Statistics every 10 s in DcsQvCullPrefetch.log next to this file.
+        Mode={(p.UsesPrefetchFix ? p.BoostPrefetch.ToString().ToLowerInvariant() : "off")}
+        WindowMs=5000
+
         [Log]
         StatsIntervalSec=2
         DumpViews=3
@@ -240,6 +246,7 @@ public static class ConfigurationWriters
         BenchTriPlain=0
         BenchEngine=0
         BenchMicro=0
+        BenchPrefetch=0
         Quick=0
         MotionSeconds=60
 

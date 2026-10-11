@@ -9,10 +9,9 @@ namespace DcsVr.Core;
 /// second cycle calls the runtime's xrWaitFrame on the render thread (reproduced offline and in the headset on
 /// 2026-10-03). The fork also creates private swapchains only for submitted swapchains, which replaces our earlier
 /// defer-until-submitted patch for Quad Views.</param>
-/// <param name="PrefetchFixDll">CPU Boost prefetch fix (native/prefetch_fix), loaded by DCS as bin\dxgi2.dll through Cheeky's dxgi.dll loader.</param>
 /// <param name="EngineDirectory">DCS engine optimizations (native/dcsqvcull): DcsQvCull.dll, DcsQvCullPayload.dll and DcsQvCull.lua.</param>
 /// <param name="PupilShiftDll">Pupil shift OpenXR layer (native/pupil_shift): XR_APILAYER_DCSVR_pupil_shift.dll.</param>
-public sealed record ComponentLocations(string? OfxrDirectory, string? CheekyDirectory, string? CheekyLayerDll, string? QuadViewsDirectory = null, string? QuadFocusDirectory = null, string? OfxrLayerDll = null, string? PrefetchFixDll = null, string? EngineDirectory = null, string? PupilShiftDll = null);
+public sealed record ComponentLocations(string? OfxrDirectory, string? CheekyDirectory, string? CheekyLayerDll, string? QuadViewsDirectory = null, string? QuadFocusDirectory = null, string? OfxrLayerDll = null, string? EngineDirectory = null, string? PupilShiftDll = null);
 
 public sealed class DeploymentPlanner(ComponentLocations components)
 {
@@ -29,7 +28,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
     /// deployed bytes must match it.</param>
     /// <remarks>Existing files are never a conflict: Apply backs up an original the first time it writes a path and
     /// overwrites afterwards (see <see cref="OriginalsStore"/>).</remarks>
-    public ApplyPlan Build(VrProfile profile, InventorySnapshot inventory, string managedRoot, VrProfile? savedProfile = null, AppliedFovea? appliedFovea = null, IReadOnlyDictionary<string, string?>? ownedSettings = null, string? neuralSha256 = null)
+    public ApplyPlan Build(VrProfile profile, InventorySnapshot inventory, string managedRoot, VrProfile? savedProfile = null, AppliedFovea? appliedFovea = null, IReadOnlyDictionary<string, string?>? ownedSettings = null, string? neuralSha256 = null, byte[]? chainedDxgi = null)
     {
         // Optimizations only: none of the VR settings the profile keeps for later is deployed.
         profile = profile.ForLaunch();
@@ -72,15 +71,6 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         environment["DCSVR_ENGINE_HOTKEY"] = framegen && profile.EngineOptimizations ? NeuralHotkeys.Environment(profile.EngineToggleKey, NeuralHotkeys.EngineDefault) : "0:0";
         // And its Pupil shift line names the layer's switch (patch 0015).
         environment["DCSVR_PUPIL_HOTKEY"] = framegen && profile.UsesPupilShift ? NeuralHotkeys.Environment(profile.PupilShiftToggleKey, NeuralHotkeys.PupilDefault) : "0:0";
-        // The prefetch fix reads its mode from the DCS process environment; absent (a Steam or launcher start) it stays off.
-        environment["DCSVR_PREFETCH_MODE"] = profile.UsesPrefetchFix ? profile.BoostPrefetch.ToString().ToLowerInvariant() : "off";
-        if (profile.UsesPrefetchFix)
-        {
-            environment["DCSVR_PREFETCH_LOG"] = PathPolicy.UnderRoot(bin, "DcsVrPrefetchFix.log");
-            // Each repeated range still gets one real prefetch per window: 5 s instead of the fix's 1 s default cut the
-            // remaining calls about 5x (flights showed 5.6k-29.6k real calls/s left with 1 s). Prefetch is only a hint.
-            environment["DCSVR_PREFETCH_WINDOW_MS"] = "5000";
-        }
         // The Steam edition restarts itself through Steam when started directly, and the new process loses this
         // environment (verified with DCS 2.9.30: the restarted process had no layers). Steam's own launch variables
         // tell the game it was already started by Steam, so the original process keeps the profile environment.
@@ -158,12 +148,6 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         if (optionChanges.Count > 0) Add(optionsPath, utf8.GetBytes(patched), "Profile DCS settings",
             luaChanges: optionChanges.Keys.Select(key => new LuaValueChange(key, originalLua.Get(key.Split('.')), installedLua.Get(key.Split('.'))!)).ToArray());
 
-        if (!profile.UsesCheeky && profile.UsesPrefetchFix)
-        {
-            // Without Cheeky, its dxgi.dll loader alone (no host) still forwards DXGI and loads the prefetch fix as dxgi2.dll.
-            var focus = RequireDirectory(components.QuadFocusDirectory, "Verified loader binaries are unavailable.");
-            AddLoader(focus);
-        }
         if (profile.UsesCheeky)
         {
             var cheeky = RequireDirectory(profile.UsesQuadFocus ? components.QuadFocusDirectory : components.CheekyDirectory,
@@ -202,7 +186,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             var module = Path.Combine(scripts, "DcsQvCull");
             Add(Path.Combine(module, "DcsQvCull.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.dll")), "DCS engine optimizations loader",
                 // What the module writes while DCS runs; all of it goes with the module on restore.
-                runtimeLogs: [.. new[] { "DcsQvCull.log", "report_*.txt", "profile_*.txt", "bench_*.csv", "run_suite.flag", "run_motion.flag", "toggle_engine.flag", Path.Combine("payload", "active_*.dll"), Path.Combine("cache", "*.qvc"), Path.Combine("cache", "*.qvc.*.tmp") }.Select(name => Path.Combine(module, name))]);
+                runtimeLogs: [.. new[] { "DcsQvCull.log", "DcsQvCullPrefetch.log", "report_*.txt", "profile_*.txt", "bench_*.csv", "run_suite.flag", "run_motion.flag", "toggle_engine.flag", Path.Combine("payload", "active_*.dll"), Path.Combine("cache", "*.qvc"), Path.Combine("cache", "*.qvc.*.tmp") }.Select(name => Path.Combine(module, name))]);
             Add(Path.Combine(module, "payload", "DcsQvCullPayload.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCullPayload.dll")), "DCS engine optimizations");
             AddIni(Path.Combine(module, "DcsQvCull.ini"), ConfigurationWriters.DcsQvCull(profile), "DCS engine optimization settings");
             // Written last, removed first on restore: the hook never points at a module that is gone.
@@ -320,16 +304,10 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             Add(PathPolicy.UnderRoot(bin, loader), File.ReadAllBytes(PathPolicy.UnderRoot(source, loader)), "Cheeky loader " + loader, ownHashes: Variants(loader),
                 runtimeLogs: new[] { "CheekyFoveatedDLSS-Loader.log", "CheekyFoveatedDLSS/CheekyFoveatedDLSS-Host.log", "CheekyFoveatedDLSS/CheekyFoveatedDLSS-Standalone.log" }
                     .Select(log => PathPolicy.UnderRoot(bin, log)).ToArray());
-            if (!profile.UsesPrefetchFix) return;
-            // The loader chains to bin\dxgi2.dll; another chained DXGI mod there is backed up and replaced likewise.
-            var fix = components.PrefetchFixDll is { } dll && File.Exists(dll) ? File.ReadAllBytes(dll) : throw new InvalidDataException("The CPU Boost prefetch fix is unavailable.");
-            Add(Path.Combine(bin, "dxgi2.dll"), fix, "CPU Boost prefetch fix", runtimeLogs: [PathPolicy.UnderRoot(bin, "DcsVrPrefetchFix.log")]);
-            // Its settings next to it, so it also works when DCS is started without DCS Control (Steam, a shortcut).
-            // UTF-16 with a byte order mark: GetPrivateProfileStringW reads that as Unicode (a log path with any
-            // characters); without it Windows would read the file in the ANSI code page.
-            var prefetchSettings = "; Written by DCS Control for the applied profile (CPU Boost prefetch fix). Back to stock DCS removes it.\r\n[PrefetchFix]\r\n"
-                + "Mode=" + profile.BoostPrefetch.ToString().ToLowerInvariant() + "\r\nWindowMs=5000\r\nLog=" + PathPolicy.UnderRoot(bin, "DcsVrPrefetchFix.log") + "\r\n";
-            Add(Path.Combine(bin, "DcsControlPrefetchFix.ini"), Encoding.Unicode.GetPreamble().Concat(Encoding.Unicode.GetBytes(prefetchSettings)).ToArray(), "CPU Boost prefetch fix settings");
+            // The pilot's own dxgi.dll (ReShade, an overlay) keeps working: the loader chains to bin\dxgi2.dll, so it is
+            // installed there; Back to stock DCS removes this copy and puts the original back as dxgi.dll.
+            if (chainedDxgi is not null)
+                Add(PathPolicy.UnderRoot(bin, "dxgi2.dll"), chainedDxgi, "Your own dxgi.dll (ReShade, an overlay), loaded after the DLSS 5 loader");
         }
         void Add(string path, byte[] content, string purpose, IReadOnlyList<LuaValueChange>? luaChanges = null, IReadOnlyDictionary<string, string>? iniValues = null, IReadOnlyList<string>? runtimeLogs = null, IReadOnlyCollection<string>? ownHashes = null)
         {

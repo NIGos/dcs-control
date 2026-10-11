@@ -60,15 +60,8 @@ New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/ofxr') -F
 $deferredOfxr = Join-Path $payloadRoot 'components/ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/ofxr-djules75/XR_APILAYER_XRFrameBridge_diagnostic.dll') -Destination $deferredOfxr -Force
 (Get-FileHash -LiteralPath $deferredOfxr -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($deferredOfxr + '.sha256') -Encoding ascii
-# CPU Boost prefetch fix (scripts/build-prefetch-fix.ps1), loaded by DCS as bin\dxgi2.dll when the profile enables it.
-# Rebuilt and tested on every release so a stale DLL can never ship.
-& (Join-Path $PSScriptRoot 'build-prefetch-fix.ps1')
-New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/boost') -Force | Out-Null
-$prefetchFix = Join-Path $payloadRoot 'components/boost/prefetch_fix.dll'
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/prefetch-fix/prefetch_fix.dll') -Destination $prefetchFix -Force
-(Get-FileHash -LiteralPath $prefetchFix -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($prefetchFix + '.sha256') -Encoding ascii
 # DCS engine optimizations (scripts/build-dcsqvcull.ps1), installed in Saved Games\DCS\Scripts when the profile enables
-# them. Rebuilt and tested on every release like the prefetch fix.
+# them (the terrain prefetch fix included). Rebuilt and tested on every release so a stale DLL can never ship.
 & (Join-Path $PSScriptRoot 'build-dcsqvcull.ps1')
 New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/dcsqvcull') -Force | Out-Null
 foreach ($source in @('artifacts/native/dcsqvcull/DcsQvCull.dll','artifacts/native/dcsqvcull/DcsQvCullPayload.dll','native/dcsqvcull/lua/DcsQvCull.lua')) {

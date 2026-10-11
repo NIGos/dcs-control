@@ -268,6 +268,9 @@ struct Config {
   bool suiteSrvTailTrimVerify = false;     // [Suite] SrvTailTrimVerify
   int suiteSrvTailTrimVerifySec = 10;      // [Suite] SrvTailTrimVerifySec
   bool suiteBenchSrvTailTrim = false;      // [Suite] BenchSrvTailTrim (bench mode 31)
+  int prefetchMode = 0;                    // [Prefetch] Mode: off (0) | observe (1) | skip (2), prefetch_fix.h
+  uint32_t prefetchWindowMs = 1000;        // [Prefetch] WindowMs: repeat window (1-60000)
+  bool suiteBenchPrefetch = false;         // [Suite] BenchPrefetch (bench mode 33: observe vs skip)
   int holdYawDeg = -1;               // [Suite] HoldYawDeg: constant view yaw for unattended runs (-1 = off)
   bool suiteYawScan = false;         // [Suite] YawScan: fps per held yaw, 0..345 in 15 deg steps
   bool suiteYawProfile = false;      // [Suite] YawProfile: cost split and bound per held yaw (view_profile.h)
@@ -324,6 +327,7 @@ void ApplyShadowRecorder();
 void ApplyGBufferRecorder();
 void ApplyPassFlush();
 void ApplySrvTailTrim(bool on);
+void ApplyPrefetch();
 void ApplyHoldYaw(int deg);
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_debugHole{false};
@@ -635,6 +639,16 @@ void LoadConfig(bool initial) {
   if (c.suiteSrvTailTrimVerifySec < 1) c.suiteSrvTailTrimVerifySec = 1;
   if (c.suiteSrvTailTrimVerifySec > 120) c.suiteSrvTailTrimVerifySec = 120;
   c.suiteBenchSrvTailTrim = GetPrivateProfileIntW(L"Suite", L"BenchSrvTailTrim", 0, ini.c_str()) != 0;
+  {
+    wchar_t mode[32] = {};
+    GetPrivateProfileStringW(L"Prefetch", L"Mode", L"off", mode, 32, ini.c_str());
+    c.prefetchMode = _wcsicmp(mode, L"skip") == 0 ? 2 : _wcsicmp(mode, L"observe") == 0 ? 1 : 0;
+    if (c.prefetchMode == 0 && _wcsicmp(mode, L"off") != 0 && mode[0])
+      Log("config: [Prefetch] Mode=%ls not understood (off, observe or skip); off", mode);
+    const int w = static_cast<int>(GetPrivateProfileIntW(L"Prefetch", L"WindowMs", 1000, ini.c_str()));
+    c.prefetchWindowMs = static_cast<uint32_t>(std::max(1, std::min(60000, w)));
+  }
+  c.suiteBenchPrefetch = GetPrivateProfileIntW(L"Suite", L"BenchPrefetch", 0, ini.c_str()) != 0;
   c.holdYawDeg = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"HoldYawDeg", -1, ini.c_str()));
   c.suiteYawScan = GetPrivateProfileIntW(L"Suite", L"YawScan", 0, ini.c_str()) != 0;
   c.suiteYawProfile = GetPrivateProfileIntW(L"Suite", L"YawProfile", 0, ini.c_str()) != 0;
@@ -705,6 +719,7 @@ void LoadConfig(bool initial) {
   ApplyGBufferRecorder();
   ApplyPassFlush();
   ApplySrvTailTrim(c.srvTailTrim && !g_engineOff.load());
+  ApplyPrefetch();
   ApplyHoldYaw(c.holdYawDeg);
   SetTimerResolution(c.fineTimer);
   g_d3dMode = c.d3dFilter ? 1 : 0;
@@ -1311,6 +1326,13 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
 #include "motion.h"
 #include "view_profile.h"
 #include "vram_count.h"
+#include "prefetch_fix.h"
+
+// [Prefetch] Mode/WindowMs, live: off (or the kill switch) = every patched
+// slot restored to the real function; observe = installed, pass-through.
+void ApplyPrefetch() {
+  pffix::Apply(g_engineOff.load() ? pffix::kOff : g_cfg.prefetchMode, g_cfg.prefetchWindowMs);
+}
 
 void ApplyThreadsMax(void* scene) {
   if (g_cfg.collectThreadsMax <= 0 || g_threadsApplied.exchange(true)) return;
@@ -2130,6 +2152,7 @@ void SetEngineOff(bool off) {
   ApplyGBufferRecorder();
   ApplyPassFlush();
   ApplySrvTailTrim(g_cfg.srvTailTrim && !off);
+  ApplyPrefetch();
   // The texture hook only does work when dedupe is on: otherwise remove it.
   ApplyTextureHook();
   ApplyTimerConfig();
@@ -2142,7 +2165,8 @@ void SetEngineOff(bool off) {
 //   ShadowInstancing, ShadowBatching, ShadowPlanAsync, ShadowTextureSkip,
 //   ShadowRecorder, GBufferRecorder; [Timing] TaskQueueClock, ShaderTimeCache;
 //   [Texture] StreamDedupe; [Effects] SkipSameConstantBuffer;
-//   [Scene] CostWeights, PartitionBoost; [D3D] SplitFilter.
+//   [Scene] CostWeights, PartitionBoost; [D3D] SplitFilter; [Prefetch] Mode=skip
+//   (18 features).
 // Latched = off for the rest of the session (build or verify mismatch,
 // contained exception, install failed with its DLL loaded).
 uint64_t ComputeStatus() {
@@ -2187,6 +2211,7 @@ uint64_t ComputeStatus() {
       {gbrec::g_on.load() && gbrec::Ready() && gbWorked, gbrec::g_disabled.load() || gbrec::g_state.load() < 0,
        g_cfg.gbufferRecorder},
       {sfilt::Live(), sfilt::g_disabled.load() || sfilt::g_state.load() < 0, g_cfg.splitFilter},
+      {pffix::Active(), pffix::g_state.load() < 0, g_cfg.prefetchMode == pffix::kSkip},
   };
   return qvstatus::Compose(f, sizeof(f) / sizeof(f[0]), true, g_engineOff.load());
 }
@@ -2294,7 +2319,8 @@ void CheckConfiguration() {
   };
   const Mod mods[] = {
       {L"XR_APILAYER_MBUCCHIA_quad_views_foveated.dll", "Quad-Views-Foveated layer", true},
-      {L"dxgi2.dll", "prefetch fix (bin/dxgi2.dll)", true},
+      // The old loader-chain prefetch fix; replaced by [Prefetch] (prefetch_fix.h), which takes over its slots.
+      {L"dxgi2.dll", "old prefetch fix (bin/dxgi2.dll, now in the payload)", false},
       {L"PiOpenXR_64.dll", "Pimax OpenXR runtime", true},
       {L"CheekyOpenXRLayer.dll", "Cheeky OpenXR layer (absent in base)", false},
       {L"XR_APILAYER_XRFrameBridge_diagnostic.dll", "OFXR frame bridge / frame-gen (absent in base)", false},
@@ -2320,6 +2346,11 @@ void CheckConfiguration() {
     double age = (a.QuadPart - b.QuadPart) / 1e7;
     Log("  prefetch fix log last written %.0f s ago%s", age, age > 60 ? "   <-- fix not active?" : "");
   }
+  Log("  payload prefetch fix: %s, mode %s, pointers=%u imports=%u takeovers=%llu",
+      pffix::g_state.load() == 1 ? "installed" : pffix::g_state.load() < 0 ? "unavailable" : "not installed",
+      pffix::g_mode.load() == pffix::kSkip ? "skip" : pffix::g_mode.load() == pffix::kObserve ? "observe" : "off",
+      pffix::g_livePointers.load(), pffix::g_liveImports.load(),
+      static_cast<unsigned long long>(pffix::g_takeovers.load()));
   Log("  keep fraction %.2f, QVFR edge smoothing %.2f", EffectiveKeep(), g_qvSmoothing.load());
   // OpenXR session state (DCS log) and headset screen state (Pimax runtime log):
   // with the headset still for longer than Pimax's "Headset Sleep" time the
@@ -3096,6 +3127,21 @@ DWORD WINAPI SuiteThread(void*) {
     }
     Chime(1000, 60);
   }
+  if (ok && g_cfg.suiteBenchPrefetch && !g_benchAbort) {
+    // Both variants installed (same hook path), so the A/B is the skip alone.
+    if (pffix::g_state.load() == 0) pffix::Install(pffix::kObserve);
+    if (pffix::g_state.load() == 1) {
+      Log("-- A/B: terrain prefetch fix (OFF = observe, every call to the kernel; ON = repeats skipped) --");
+      const uint64_t c0 = pffix::SumCalls(), s0 = pffix::SumSkipped();
+      ok = RunBenchmark(33, false);  // ends with ApplyPrefetch (the configured state back)
+      const uint64_t c = pffix::SumCalls() - c0, sk = pffix::SumSkipped() - s0;
+      Log("  prefetch calls during the bench: %llu, skipped %.1f%% (ON blocks only skip)",
+          static_cast<unsigned long long>(c), c ? 100.0 * static_cast<double>(sk) / static_cast<double>(c) : 0.0);
+      Chime(1000, 60);
+    } else {
+      Log("  prefetch fix unavailable this session: bench skipped");
+    }
+  }
   if (ok && g_cfg.suiteBenchSrvTailTrim && !g_benchAbort && SrvTailTrimReady()) {
     Log("-- A/B: setShaderResources identical-tail trim (OFF = stock call sites, ON = trim, no counting) --");
     ok = RunBenchmark(31, false);  // ends with ApplySrvTailTrim (the configured state back)
@@ -3474,6 +3520,7 @@ DWORD WINAPI WorkerThread(void*) {
     if (now - lastCfg >= 1000) {
       lastCfg = now;
       LoadConfig(false);
+      pffix::Tick();  // new modules (terrain DLLs per mission), slot verify, 10 s statistics line
       g_statusSink.Publish(ComputeStatus());  // last second's states (the retries below show next time)
       // NGModel.dll may load after the payload: retry until the hook installs.
       if (g_shadowTexSkipOn.load() && (shadowtex::g_state.load() == 0 || shadowinst::g_state.load() == 0) &&
@@ -3728,6 +3775,10 @@ void SetBenchVariant(bool on) {
     plod::g_swapOn = on;
     return;
   }
+  if (g_benchActiveMode.load() == 33) {
+    pffix::g_mode = on ? pffix::kSkip : pffix::kObserve;
+    return;
+  }
   if (g_benchActiveMode.load() == 31) {
     if (on)
       srvtrim::Attach(false);
@@ -3882,6 +3933,13 @@ extern "C" __declspec(dllexport) int DcsQvPayload_Start(const DcsQvLoaderApi* ap
   return 0;
 }
 
+// The prefetch fix's replacements (0 = PrefetchVirtualMemory, 1 =
+// GetProcAddress): lets a later payload generation recognize and take over
+// slots this one still holds (prefetch_fix.h).
+extern "C" __declspec(dllexport) void* DcsQvPayload_PrefetchHooks(unsigned which) {
+  return which == 0 ? reinterpret_cast<void*>(&pffix::Replacement) : reinterpret_cast<void*>(&pffix::FixedGetProc);
+}
+
 // Optional export, called by the loader before DcsQvPayload_Start.
 extern "C" __declspec(dllexport) void DcsQvPayload_SetStatusWord(std::atomic<uint64_t>* word) {
   g_statusSink.Attach(word);
@@ -3893,6 +3951,9 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   // Worker and suite out first: neither may install a hook after the
   // Shutdown calls below (bounded wait, see StopWorkerThreads).
   StopWorkerThreads(15000);
+  // Prefetch fix: every slot still ours back to the real kernel function,
+  // in-flight calls drained (the module is pinned: copies stay callable).
+  pffix::Uninstall(2000);
   threadtune::Restore();
   allocslab::Invalidate();
   posesweep::Release();  // hold and sweep off, xrLocateViews back to pass-through

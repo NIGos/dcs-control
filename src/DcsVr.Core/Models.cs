@@ -19,7 +19,7 @@ public enum IssueSeverity { Info, Warning, Error }
 public enum FoveaSource { PimaxPlay, Profile }
 public enum BoostPriority { Normal, AboveNormal, High }
 /// <summary>DCS's repeated PrefetchVirtualMemory calls (edterrain/edCore workers): leave them, only count them, or
-/// skip a range already prefetched within the last second.</summary>
+/// skip a range already prefetched within the window ([Prefetch] in DcsQvCull.ini, an engine optimization).</summary>
 public enum PrefetchFix { Off, Observe, Skip }
 
 public sealed record VrProfile
@@ -30,7 +30,7 @@ public sealed record VrProfile
     public RuntimeKind Runtime { get; init; } = RuntimeKind.Pimax;
     /// <summary>Optimizations only, for another headset or a monitor: DCS runs exactly as the user set it up (VR or not,
     /// with the OpenXR runtime and layers of the PC), and the app adds only the features that are not VR (Engine
-    /// Optimizations, CPU Boost with the prefetch fix, Free VRAM before flight): no runtime, layer or VR option of its
+    /// Optimizations with the prefetch fix, CPU Boost, Free VRAM before flight): no runtime, layer or VR option of its
     /// own. The VR settings stay in the profile for the next Pimax or Sboys flight; <see cref="ForLaunch"/> is what
     /// runs.</summary>
     public bool Desktop { get; init; }
@@ -161,7 +161,13 @@ public sealed record VrProfile
     /// the list did. Kept so those profiles still load; always empty after loading.</summary>
     public IReadOnlyList<string> BoostCloseApps { get => _boostCloseApps; init => _boostCloseApps = new(value); }
     private readonly NameList _boostCloseApps = new([]);
+    /// <summary>The terrain prefetch fix, an Engine Optimizations option run by the DCS engine optimizations module
+    /// ([Prefetch] in DcsQvCull.ini). Named for CPU Boost, where it was a sub-option deployed as bin\dxgi2.dll until
+    /// 0.5.4; the JSON name stays so saved profiles keep loading.</summary>
     public PrefetchFix BoostPrefetch { get; init; } = PrefetchFix.Skip;
+    /// <summary>Another program's dxgi.dll in DCS's bin (ReShade, an overlay) keeps working with DLSS 5: it is loaded after
+    /// the DLSS 5 loader as bin\dxgi2.dll (the loader chains to that file). Off: it is only set aside while applied.</summary>
+    public bool KeepOtherDxgi { get; init; } = true;
     /// <summary>Ask for administrator rights (UAC) so services running under other accounts can be moved too.</summary>
     public bool BoostElevated { get; init; }
 
@@ -274,8 +280,9 @@ public sealed record VrProfile
     /// <summary>The pupil shift layer is deployed: only for a VR flight with eye-tracked Quad Views.</summary>
     public bool UsesPupilShift => PupilShift && !Desktop && QuadViews != QuadProvider.None && Gaze == GazeMode.EyeTracked;
 
-    /// <summary>The prefetch fix is deployed (bin\dxgi2.dll) and enabled through the launch environment.</summary>
-    public bool UsesPrefetchFix => CpuBoost && BoostPrefetch != PrefetchFix.Off;
+    /// <summary>The engine optimizations module runs the prefetch fix ([Prefetch] Mode in DcsQvCull.ini), also in
+    /// Optimizations only and when DCS starts from Steam or a shortcut.</summary>
+    public bool UsesPrefetchFix => EngineOptimizations && BoostPrefetch != PrefetchFix.Off;
     /// <summary>The boost helper is started with DCS: for CPU Boost, Free VRAM before flight or the monitor mode.</summary>
     public bool UsesBoostHelper => CpuBoost || FreeVram || UsesLowerMonitor || UsesTobiiPause;
     /// <summary>The desktop Tobii pause is for a Pimax next to a desktop tracker, never with <see cref="Desktop"/>.</summary>

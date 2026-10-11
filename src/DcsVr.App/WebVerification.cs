@@ -11,8 +11,9 @@ namespace DcsVr.App;
 internal static class WebVerification
 {
     /// <summary>Logs of one flight in the formats DCS Control reads (see LastFlight): 2× most of the time, 3× for a
-    /// stretch, DLSS 5 on, CPU Boost restored with one service it could not move, the prefetch fix skipping repeats.</summary>
-    private static FlightSources WriteFlightFixture(string root, DateTimeOffset start, DateTimeOffset end)
+    /// stretch, DLSS 5 on, CPU Boost restored with one service it could not move, the engine optimizations' prefetch fix
+    /// skipping repeats (in <paramref name="savedGames"/>\Scripts\DcsQvCull).</summary>
+    private static FlightSources WriteFlightFixture(string root, string savedGames, DateTimeOffset start, DateTimeOffset end)
     {
         var invariant = System.Globalization.CultureInfo.InvariantCulture;
         string Local(DateTimeOffset t, string format) => t.ToLocalTime().ToString(format, invariant);
@@ -31,9 +32,11 @@ internal static class WebVerification
         var boost = Path.Combine(Directory.CreateDirectory(Path.Combine(root, "boost")).FullName, "status.json");
         File.WriteAllText(boost, JsonData.Serialize(new { schemaVersion = 1, state = "restored", updatedAt = end.AddSeconds(5), dcsPid = 4242,
             changed = new[] { "DCS (PID 4242): priority AboveNormal", "DCS (PID 4242): affinity all CPUs 0xFFFF", "PimaxClient (PID 31476): Normal, affinity 0xFC03", "pi_server (PID 8736): High, affinity 0xFC03", "steamwebhelper (PID 32368): BelowNormal, affinity 0xC000" },
-            closed = Array.Empty<string>(), restored = 3, errors = new[] { "platform_runtime_VR4PIMAXP3B_service (PID 32536): Access is denied. (it may need the administrator rights option)" }, prefetch = "skip (loaded by DCS, see bin\\DcsVrPrefetchFix.log)" }));
+            closed = Array.Empty<string>(), restored = 3, errors = new[] { "platform_runtime_VR4PIMAXP3B_service (PID 32536): Access is denied. (it may need the administrator rights option)" } }));
         var bin = Directory.CreateDirectory(Path.Combine(root, "bin")).FullName;
-        File.WriteAllLines(Path.Combine(bin, "DcsVrPrefetchFix.log"), [Local(start.AddSeconds(4), "yyyy-MM-dd HH:mm:ss") + " prefetch fix started mode=skip window_ms=5000",
+        // The engine optimizations module's prefetch fix, in Saved Games\DCS\Scripts\DcsQvCull next to the Logs folder.
+        var module = Directory.CreateDirectory(Path.Combine(savedGames, "Scripts", "DcsQvCull")).FullName;
+        File.WriteAllLines(Path.Combine(module, "DcsQvCullPrefetch.log"), [Local(start.AddSeconds(4), "yyyy-MM-dd HH:mm:ss") + " prefetch fix started mode=skip window_ms=1000",
             .. Enumerable.Range(1, 250).Select(i => Local(start.AddSeconds(4 + i * 10), "yyyy-MM-dd HH:mm:ss") + $" calls/s={(i < 20 ? 0 : 150000 + i % 13 * 9000)} skipped={(i < 20 ? "0.0" : "99.4")}% pointers=1 imports=41 lookups=0 faults=0")]);
         var cheeky = Directory.CreateDirectory(Path.Combine(bin, "CheekyFoveatedDLSS")).FullName;
         var standalone = Path.Combine(cheeky, "CheekyFoveatedDLSS-Standalone.log"); var host = Path.Combine(cheeky, "CheekyFoveatedDLSS-Host.log");
@@ -136,7 +139,7 @@ internal static class WebVerification
         var logs = Path.GetDirectoryName(At(@"Logs\dcs.log", @"Saved Games\DCS\Logs\dcs.log"))!;
         var views = new[] { (0, 1074, 1060), (1, 1074, 1060), (2, 3478, 2048), (3, 3478, 2048), (0, 5424, 5356), (1, 5424, 5356) }
             .Select(v => $"2026-10-04 14:38:35.814 INFO    VISUALIZER (Main): [16:38:35.949][Info   ] OpenXR:     View [{v.Item1}]: Recommended Width={v.Item2} Height={v.Item3} SampleCount=1");
-        // The last flight, as DCS, the Pimax runtime, OFXR, Cheeky, CPU Boost and the prefetch fix log it (formats copied from
+        // The last flight, as DCS, the Pimax runtime, OFXR, Cheeky, CPU Boost and the engine optimizations' prefetch fix log it (formats copied from
         // real logs; never the user's own): 2026-10-04 14:30:00-15:12:40 UTC, DCS PID 4242.
         var sessionStart = new DateTimeOffset(2026, 10, 4, 14, 30, 0, TimeSpan.Zero); var sessionEnd = sessionStart.AddSeconds(2560.5);
         // The log also carries DCS's CPU classification (a Ryzen 7 9800X3D), so What Boost will do is read from it and
@@ -147,7 +150,7 @@ internal static class WebVerification
             "render cores: {4, 5, 6, 7, 8, 9, 2, 3}", "IO cores: {}", "unavailable cores: {}"];
         File.WriteAllLines(Path.Combine(logs, "dcs.log"), ["=== Log opened UTC 2026-10-04 14:30:00", .. cpu.Select(line => "2026-10-04 14:30:01.120 INFO    EDCORE (Main): " + line), .. views, "2026-10-04 14:38:35.900 INFO    VISUALIZER (Main): done",
             "2026-10-04 15:12:40.500 INFO    VISUALIZER (31660): render thread has stopped", "=== Log closed."]);
-        var flight = WriteFlightFixture(Path.Combine(fixture, "flight"), sessionStart, sessionEnd);
+        var flight = WriteFlightFixture(Path.Combine(fixture, "flight"), Path.GetDirectoryName(logs)!, sessionStart, sessionEnd);
         PimaxFovea.SettingsPath = pimax;
         HeadsetRefresh.PimaxLogFolder = Path.Combine(fixture, "no-pimax-logs"); HeadsetRefresh.PimaxRuntimeFolder = Path.Combine(fixture, "no-pimax-runtime"); HeadsetRefresh.SteamVrSettings = Path.Combine(fixture, "no-steamvr.vrsettings");
         GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 4090", "NVIDIA", "32.0.15.0")];

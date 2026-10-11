@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 const pages = [
   ['overview','Overview','What runs when you press Launch DCS, and how your last flight went.','Status at a glance','M3.5 16.5a8.5 8.5 0 1 1 17 0 M12 16.5l4.2-5.8 M6.3 11.4l1.1.7 M12 8.2v1.3 M17.7 11.4l-1.1.7 M13.3 16.5a1.3 1.3 0 1 1-2.6 0 1.3 1.3 0 0 1 2.6 0Z M5 20h14'],
   ['engine','Engine Optimizations','CPU optimizations inside DCS for every pilot, on a monitor or in VR: less work on its render and model threads, the same image.','CPU work inside DCS','M12 8.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4Z M12 3v2.6 M12 18.4V21 M3 12h2.6 M18.4 12H21 M5.6 5.6l1.9 1.9 M16.5 16.5l1.9 1.9 M5.6 18.4l1.9-1.9 M16.5 7.5l1.9-1.9','Engine'],
-  ['boost','CPU Boost','Process priority, CPU cores and the prefetch fix, plus helpers that free VRAM and lighten the monitor while DCS runs.','CPU, VRAM & monitor','M6 6h12v12H6Z M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3 M12.8 8.5 10.2 12.3h3.6l-2.6 3.7'],
+  ['boost','CPU Boost','Process priority and CPU cores, plus helpers that free VRAM and lighten the monitor while DCS runs.','CPU, VRAM & monitor','M6 6h12v12H6Z M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3 M12.8 8.5 10.2 12.3h3.6l-2.6 3.7'],
   ['foveation','Quad Views','Foveated rendering: high detail where you look, less in the periphery.','Foveated rendering','M3 8V5a2 2 0 0 1 2-2h3 M16 3h3a2 2 0 0 1 2 2v3 M21 16v3a2 2 0 0 1-2 2h-3 M8 21H5a2 2 0 0 1-2-2v-3 M6 12c1.6-2.7 3.6-4 6-4s4.4 1.3 6 4c-1.6 2.7-3.6 4-6 4s-4.4-1.3-6-4Z M14 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z'],
   ['dlss','DLSS 5','NVIDIA DLSS 5 on the image, and Foveated Super Resolution.','Neural rendering','M10 3c.6 3.8 2.2 5.4 6 6-3.8.6-5.4 2.2-6 6-.6-3.8-2.2-5.4-6-6 3.8-.6 5.4-2.2 6-6Z M18 14c.3 1.8 1.1 2.6 3 3-1.9.4-2.7 1.2-3 3-.3-1.8-1.1-2.6-3-3 1.9-.4 2.7-1.2 3-3Z'],
   ['framegen','Framegen','OFXR frame generation, the DCS frame limit and in-headset diagnostics.','Generation & limit','M3 10h11v10H3Z M6.5 10V6.5h11v10H14 M10 6.5V3h11v10h-3.5'],
@@ -30,6 +30,8 @@ let state, profile, dcs = '', options = '', page = 'overview', busy = false, pla
 let sequence = 0, toastTimer, searchResults = [], lastProvider = 'QuadViewsFoveated', lastFrameGen = 'Nvidia', savedDraftJson = null, draftTimer, flight = null;
 const pending = new Map(), fields = [], invalid = new Set();
 const clone = value => JSON.parse(JSON.stringify(value));
+let pendingDxgiAction = null;
+const dxgiAcknowledged = dxgi => { try { return localStorage.getItem('dxgiAck:'+dxgi.sha256) === '1'; } catch { return false; } };
 const NO_TIMEOUT = new Set(['browse','save','import','export','importSboys','prepareSboys','diagnosticPackage','launch','apply','restore','grantWriteAccess']);
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const empty = value => value.trim() || null;
@@ -174,8 +176,9 @@ const PRIORITY = {Normal:'Normal priority',AboveNormal:'Above normal',High:'High
 function featureSummary(key, p) {
   if (key === 'engine') {
     if (!p.engineOptimizations) return 'Off · DCS as shipped';
-    const n = ENGINE_PARTS.filter(k => p[k]).length;
-    return `${n} of ${ENGINE_PARTS.length} on · stays on outside the app`;
+    // The terrain prefetch fix counts as one more part when it skips repeats (Observe only counts calls).
+    const n = ENGINE_PARTS.filter(k => p[k]).length + (p.boostPrefetch === 'Skip' ? 1 : 0);
+    return `${n} of ${ENGINE_PARTS.length + 1} on · stays on outside the app`;
   }
   if (key === 'quad') {
     if (p.quadViews === 'None') return 'Off · normal stereo rendering';
@@ -201,7 +204,7 @@ function featureSummary(key, p) {
   const helpers = [p.freeVram ? 'VRAM freed' : null, vr && p.pauseTobiiDesktop ? 'desktop Tobii paused' : null, vr && p.smallDcsWindow ? 'small DCS window' : null, vr && p.lowerMonitor ? `monitor ${p.flightDisplayWidth}×${p.flightDisplayHeight}` : null];
   if (!p.cpuBoost) return ['Off · Windows scheduling', ...helpers].filter(Boolean).join(' · ');
   const apps = p.boostMoveBackgroundApps ? (p.boostBackgroundApps || []).length : 0;
-  return [PRIORITY[p.boostDcsPriority] || p.boostDcsPriority, apps ? apps+' apps moved' : null, p.boostPrefetch === 'Skip' ? 'prefetch fix' : p.boostPrefetch === 'Observe' ? 'prefetch observed' : null, ...helpers].filter(Boolean).join(' · ');
+  return [PRIORITY[p.boostDcsPriority] || p.boostDcsPriority, apps ? apps+' apps moved' : null, ...helpers].filter(Boolean).join(' · ');
 }
 /** Short notes under a feature, only when they matter: [kind, text, field to reveal, link label]. */
 function featureNotes(p) {
@@ -461,6 +464,7 @@ function buildFields() {
   field(c,'neuralStyle','Model style','The look of the DLSS 5 model.','select',[['Standard','Standard · default'],['Natural','Natural'],['Cinematic','Cinematic']],nr);
   field(c,'neuralBeforeUpscaling','Process at render resolution','On: before DLSS upscaling, faster but less detail. Off: at output resolution, more detail and more GPU.','toggle',null,nr);
   field(c,'neuralToggleKey','In-flight toggle key','Turns DLSS 5 on and off in flight to compare. Click, then press the keys. Default Ctrl+Shift+F12.','hotkey',null,nr);
+  field(c,'keepOtherDxgi','Keep another program\'s dxgi.dll working','ReShade or an overlay with its own dxgi.dll in DCS\'s bin keeps working with DLSS 5: it is loaded after the DLSS 5 loader. Off: it is set aside while this profile is applied. Back to stock DCS puts the original back either way.','toggle',null,p => Boolean(p.neuralRendering || p.foveatedDlss));
   let column = document.createElement('div'); column.className = 'column'; column.id = 'neuralLeft'; $('neuralControls').append(column);
   column = document.createElement('div'); column.className = 'column'; column.id = 'neuralRight'; $('neuralControls').append(column);
   c = card('neuralLeft','Structure & appearance','Defaults: 1×, masks off.');
@@ -499,13 +503,12 @@ function buildFields() {
   field(c,'renderedFpsCap','Custom limit','Frames DCS renders per second.','number',[30,300,.5],p => p.fpsLimit === 'Custom','FPS');
   field(c,'disableDcsVSync','Desktop VSync off','Stops VSync of the DCS window on the monitor from holding back the frame rate (graphics.sync = false). Headset sync is unaffected.','toggle');
   // CPU Boost page: started with Launch DCS, undone when DCS exits.
-  c = card('boostControls','CPU Boost','Starts with Launch DCS in this app and is undone when DCS exits. The prefetch fix also works when DCS starts from Steam or a shortcut.');
+  c = card('boostControls','CPU Boost','Starts with Launch DCS in this app and is undone when DCS exits.');
   field(c,'cpuBoost','CPU Boost','Applies the options below to the next DCS launch.','toggle');
   field(c,'boostDcsPriority','DCS priority','Above normal suits most setups. High can starve audio, input and headset services when DCS uses every core.','select',[['Normal','Normal'],['AboveNormal','Above normal · recommended'],['High','High']],boost);
   field(c,'boostMoveVrRuntime','Move VR runtime and headset services','Keeps Pimax or SteamVR services off the cores DCS uses for its main and render threads.','toggle',null,p => boost(p) && !p.desktop);
   field(c,'boostMoveBackgroundApps','Move background apps','Moves the apps below to the slowest cores at below-normal priority while DCS runs.','toggle',null,boost);
   field(c,'boostBackgroundApps','Background apps','Process names, one per line, without .exe.','list',null,p => boost(p) && p.boostMoveBackgroundApps);
-  field(c,'boostPrefetch','Prefetch fix','Stops DCS terrain threads from prefetching the same memory over and over. Measured: about 1.7 cores freed, 3–5% more FPS when CPU-bound, no change when GPU-bound. Tested in single player. Observe only counts the calls.','select',[['Off','Off'],['Observe','Observe · count only'],['Skip','Skip repeats · recommended']],boost);
   field(c,'boostElevated','Administrator rights','Asks once (UAC) when DCS starts, so services running under other accounts can be moved too. DCS still starts as your user. Without it those services are left as they are.','toggle',null,boost);
   // Flight helpers: each one on its own, with or without CPU Boost; started with Launch DCS, undone when DCS exits.
   c = card('boostControls','Flight helpers','Each works on its own, with or without CPU Boost. Started with Launch DCS and undone when DCS exits.');
@@ -536,6 +539,7 @@ function buildFields() {
   field(c,'engineStateFilter','Redundant state filter','DCS sets graphics state (shaders, buffers, textures) that is already set, hundreds of thousands of times a frame. The repeat is skipped where DCS makes the call. Verified identical; measured about 1.2% less CPU and 0.5 to 1% more FPS. Turns itself off after a DCS update.','toggle',null,engine);
   field(c,'engineEffectBufferSkip','Effect constant-buffer skip','The effect system sets the same constant buffer again although it is already set. The repeat is skipped. Measured together with the counter below: 3.6% more FPS.','toggle',null,engine);
   field(c,'enginePlainCounter','Statistics counter without lock','A triangle counter used only for statistics is updated without a locked instruction, which made all model threads wait on one cache line.','toggle',null,engine);
+  field(c,'boostPrefetch','Terrain prefetch fix','DCS’s terrain workers ask Windows to prefetch the same memory ranges about a million times a second. The fix skips the repeats; a prefetch is only a hint, so the image cannot change. Observe only counts the calls. Measured in an A/B: about 4% less DCS CPU, more on CPU-bound scenes.','select',[['Off','Off'],['Observe','Observe · count only'],['Skip','Skip repeats · recommended']],engine);
   field(c,'engineToggleKey','In-flight switch','Turns all the optimizations above off and back on in flight, to compare: one beep off, two beeps on. Click, then press the keys. Default Alt+Shift+F11.','hotkey',null,engine);
   field(c,'engineBeeps','Beeps','Sound feedback for the in-flight switch and the test suite.','toggle',null,engine);
   field(c,'engineDevMode','Developer mode','Off for normal flying and for testing a release. On: for working on the module, DCS hot-reloads the payload below whenever it changes and takes every engine setting from the settings file below instead of this page.','toggle',null,engine);
@@ -920,7 +924,7 @@ const CHECK_INFO = {
   'quad-cheeky':['Quad Views and DLSS',{page:'foveation',label:'Open'}], 'quad-runtime':['Quad Views provider',{reveal:'quadViews',label:'Open'}], 'quad-adapter-provider':['Quad Views provider',{reveal:'quadViewsLayerDirectory',label:'Open'}],
   'quad-focus':['Focus adapter',null], 'pimax-native-replaced':['Quad Views provider',null], 'fovea-source':['Focus area source',{reveal:'foveaSource',label:'Open'}],
   'boost-launcher':['CPU Boost app lists',{page:'boost',label:'Open'}], 'boost-app-name':['CPU Boost app lists',{page:'boost',label:'Open'}], 'boost-app-wildcard':['CPU Boost app lists',{page:'boost',label:'Open'}],
-  'boost-choice':['CPU Boost',{page:'boost',label:'Open'}], 'monitor-mode':['Monitor mode in flight',{reveal:'flightDisplayMode',label:'Open'}], 'boost-high-priority':['DCS priority',{reveal:'boostDcsPriority',label:'Open'}],
+  'boost-choice':['CPU Boost',{page:'boost',label:'Open'}], 'engine-prefetch':['Terrain prefetch fix',{reveal:'boostPrefetch',label:'Open'}], 'monitor-mode':['Monitor mode in flight',{reveal:'flightDisplayMode',label:'Open'}], 'boost-high-priority':['DCS priority',{reveal:'boostDcsPriority',label:'Open'}],
   'framegen-factor':['Generated frames',{reveal:'frameGenFactor',label:'Open'}], 'flow-preset':['Optical flow',{reveal:'flowPreset',label:'Open'}], 'flow-scale':['Optical flow',{reveal:'nvidiaFlowScale',label:'Open'}],
   'fps-mode':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}], 'fps-under-target':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}],
   'refresh-rate':['Refresh rate',{reveal:'refreshFromHeadset',label:'Open'}], 'external-limiters':['Other FPS limits',null], 'runtime-reprojection':['Motion smoothing',null],
@@ -929,6 +933,7 @@ const CHECK_INFO = {
   'active-backup':['Applied profile',{page:'recovery',label:'Stock DCS'}], 'deployment':['Files and components',{page:'diagnostics',label:'Review',review:true}],
   'write-access':['Write access to game folders',{action:'grantWriteAccess',label:'Grant access'}], 'write-blocked':['Write access to game folders',null],
   'dlss-gpu':['DLSS 5 graphics card',{page:'dlss',label:'Open'}], 'framegen-gpu':['Frame generation graphics card',{reveal:'frameGen',label:'Open'}],
+  'foreign-dxgi':['Another program\'s dxgi.dll',null],
   'pupil-gaze':['Pupil shift',{page:'pupil',label:'Open'}], 'pupil-radius':['Pupil shift',{reveal:'pupilShiftEyeRadiusMm',label:'Open'}], 'pupil-image':['Pupil shift',{reveal:'pupilShiftVirtualImageM',label:'Open'}],
   'pupil-hotkey':['Pupil shift switch',{reveal:'pupilShiftToggleKey',label:'Open'}], 'pupil-hotkey-dcs':['Pupil shift switch',{reveal:'pupilShiftToggleKey',label:'Open'}],
   'neural-area':['DLSS 5 area',{reveal:'neuralFocusArea',label:'Open'}], 'neural-depth':['Depth convention',{reveal:'neuralDepth',label:'Open'}]
@@ -1008,7 +1013,7 @@ function renderFlight() {
   if (f.frameTime) rows.push(['DCS frame time',`${fmt(f.frameTime.p50Ms,1)} ms`,`median, ${fmt(f.frameTime.p90Ms,1)} ms p90 · CPU or GPU, the longer`]);
   if (f.dlss5) rows.push(['DLSS 5',f.dlss5.state === 'ran' ? 'Ran' : f.dlss5.state === 'failed' ? 'Failed' : 'Not started',f.dlss5.state === 'failed' ? f.dlss5.error : [f.dlss5.version ? 'runtime '+f.dlss5.version : 'no 3D scene reached', f.dlss5.toggles ? `toggled ${f.dlss5.toggles}×, ${f.dlss5.onAtExit ? 'on' : 'off'} at exit` : null].filter(Boolean).join(' · '),f.dlss5.state === 'failed']);
   if (f.boost) rows.push(['CPU Boost',f.boost.state === 'restored' ? 'Restored' : f.boost.state === 'running' ? 'Running' : f.boost.state,`${f.boost.moved} apps moved, ${f.boost.restored} restored`+(f.boost.errors.length ? ` · ${f.boost.errors.length} need admin rights` : ''),f.boost.errors.length > 0]);
-  if (f.prefetch) rows.push(['Prefetch fix',f.prefetch.averageCallsPerSecond ? `${fmt(f.prefetch.skippedPercent,1)}% skipped` : 'No calls',f.prefetch.averageCallsPerSecond ? `${fmt(f.prefetch.averageCallsPerSecond/1000,0)}k calls/s average · ${fmt(f.prefetch.peakCallsPerSecond/1000,0)}k peak` : 'Loaded; DCS made no repeated prefetch calls']);
+  if (f.prefetch) rows.push(['Terrain prefetch fix',f.prefetch.averageCallsPerSecond ? `${fmt(f.prefetch.skippedPercent,1)}% skipped` : 'No calls',f.prefetch.averageCallsPerSecond ? `${fmt(f.prefetch.averageCallsPerSecond/1000,0)}k calls/s average · ${fmt(f.prefetch.peakCallsPerSecond/1000,0)}k peak` : 'Loaded; DCS made no repeated prefetch calls']);
   body.innerHTML = rows.length ? `<dl class="flight-grid">${rows.map(([k,v,d,warn]) => `<div class="flight-item${warn ? ' warn' : ''}"><dt>${k}</dt><dd><b>${escape(v)}</b><small title="${escape(d)}">${escape(d)}</small></dd></div>`).join('')}</dl>` : '<p class="fine">DCS ran, but no headset, frame generation or CPU Boost logs cover this session.</p>';
 }
 function renderDiagnostics() { renderInventory(); renderEdits(); }
@@ -1058,7 +1063,7 @@ function renderSearch() {
     ['boost','What happens at launch','Cores, processes, VRAM to free, the monitor mode and the DCS window the CPU Boost page would change on this PC.','boostPlan'],
     ['diagnostics','Files Launch will write','Review files: every file and DCS setting Launch DCS writes for this profile.','planCard'],
     ['diagnostics','Checks','Must fix, check yourself and OK: what stands between this draft and a flight.','checkGroups'],
-    ['overview','Last flight','Headset FPS, frame generation 2×/3×, DCS frame time, DLSS 5, CPU Boost and the prefetch fix from the last flight.','flightCard'],
+    ['overview','Last flight','Headset FPS, frame generation 2×/3×, DCS frame time, DLSS 5, CPU Boost and the terrain prefetch fix (Engine Optimizations) from the last flight.','flightCard'],
     ['diagnostics','Diagnostic report','Export detected files, compatibility and backups.','export'],
     ['support','Diagnostic package','One ZIP with the logs and settings needed to understand a problem, for a report.','diagnosticPackage'],
     ['support','DLSS 5 not applied','Why DLSS 5 did not reach the focus area in the last session.','dlssFocus'],
@@ -1080,6 +1085,23 @@ async function initialize() {
   const groups = {engine:'Every pilot',foveation:'VR',setup:'Setup & safety'};
   pages.forEach((p,index) => { if (groups[p[0]]) { const g = document.createElement('div'); g.className = 'rail-group'; g.id = 'railGroup-'+p[0]; g.textContent = groups[p[0]]; $('navigation').append(g); } const b = document.createElement('button'); b.id = 'nav-'+p[0]; b.className = 'nav-item'; b.title = index < 9 ? p[1]+' (Ctrl '+(index+1)+')' : p[1]; b.setAttribute('aria-label',p[1]); b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${p[4]}"/></svg><div><b>${p[5] || p[1]}</b><small>${p[3]}</small></div>`; b.addEventListener('click',() => navigate(p[0])); $('navigation').append(b); });
   buildFields(); buildFeatureList(); navigate('overview');
+  // Launch and Apply ask once before setting another program's dxgi.dll aside (ReShade, an overlay).
+  ['launch','apply'].forEach(id => $(id).addEventListener('click',e => {
+    const dxgi = state?.foreignDxgi; if (!dxgi || dxgiAcknowledged(dxgi)) return;
+    e.stopImmediatePropagation(); pendingDxgiAction = id;
+    const name = dxgi.product || 'another program';
+    $('dxgiText').textContent = `DCS's bin folder has ${name}'s dxgi.dll, and DLSS 5 needs that file name. Keep it working: it is backed up and loaded after the DLSS 5 loader (as dxgi2.dll), so ${name} still runs in DCS. Set it aside: it is backed up and off in DCS while this profile is applied.`;
+    $('dxgiDialog').showModal();
+  }));
+  $('cancelDxgi').addEventListener('click',() => { pendingDxgiAction = null; $('dxgiDialog').close(); });
+  // The choice is the profile's (Keep another program's dxgi.dll, DLSS 5 page); the question is asked once per file.
+  const decideDxgi = keep => {
+    $('dxgiDialog').close(); const dxgi = state?.foreignDxgi; if (dxgi) try { localStorage.setItem('dxgiAck:'+dxgi.sha256,'1'); } catch {}
+    if (profile.keepOtherDxgi !== keep) { profile.keepOtherDxgi = keep; showProfile(['keepOtherDxgi']); change(); }
+    const action = pendingDxgiAction; pendingDxgiAction = null; if (action) run(action).catch(()=>{});
+  };
+  $('confirmDxgi').addEventListener('click',() => decideDxgi(true));
+  $('asideDxgi').addEventListener('click',() => decideDxgi(false));
   [['launch','launch'],['apply','apply'],['refresh','refresh'],['importProfile','import'],['saveProfile','save'],['resetNeural','resetNeural'],['export','export'],['prepareSboys','prepareSboys'],['importSboys','importSboys'],['openSboys','openSboys'],['checkReadiness','checkReadiness']].forEach(([id,action]) => $(id).addEventListener('click',() => run(action).catch(()=>{})));
   $('refreshBoostPlan').addEventListener('click',() => refreshBoostPlan(0));
   $('refreshEngine').addEventListener('click',() => refreshEngine());

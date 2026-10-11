@@ -170,8 +170,6 @@ public static partial class Diagnostics
             {
                 Folder("dcs/bin/CheekyFoveatedDLSS", Path.Combine(bin, "CheekyFoveatedDLSS"));
                 File_("dcs/bin/CheekyFoveatedDLSS-Loader.log", Path.Combine(bin, "CheekyFoveatedDLSS-Loader.log"));
-                File_("dcs/bin/DcsVrPrefetchFix.log", Path.Combine(bin, "DcsVrPrefetchFix.log"));
-                File_("dcs/bin/DcsControlPrefetchFix.ini", Path.Combine(bin, "DcsControlPrefetchFix.ini"));
                 Text("dcs/bin/modules.txt", bin, BinaryVersions(bin));
             }
 

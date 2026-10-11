@@ -127,7 +127,8 @@ public static class LaunchSafety
         : WriteAccessAdvice + (ControlledFolderAccessOn() ? " Windows Security's Controlled folder access is on: if the folder is already writable, allow DCS Control there (Ransomware protection → Allow an app through Controlled folder access)." : "");
 
     /// <summary>Every game folder a profile writes to: Saved Games\DCS\Config (options.lua), Saved Games\DCS\Scripts
-    /// (the engine optimizations' hook and module) and, for the Cheeky loader or the prefetch fix, DCS's bin folder.</summary>
+    /// (the engine optimizations' hook and module, prefetch fix included) and, only for the Cheeky loader (DLSS 5,
+    /// Foveated SR), DCS's bin folder. Optimizations only never needs the DCS install folder.</summary>
     public static IReadOnlyList<string> ProfileFolders(VrProfile profile, InventorySnapshot inventory)
     {
         var folders = new List<string>();
@@ -136,7 +137,7 @@ public static class LaunchSafety
             folders.Add(config);
             if (profile.EngineOptimizations && Path.GetDirectoryName(config) is { } savedGames) folders.Add(Path.Combine(savedGames, "Scripts"));
         }
-        if ((profile.ForLaunch().UsesCheeky || profile.UsesPrefetchFix) && inventory.DcsExecutable is { } exe && Path.GetDirectoryName(exe) is { } bin) folders.Add(bin);
+        if (profile.ForLaunch().UsesCheeky && inventory.DcsExecutable is { } exe && Path.GetDirectoryName(exe) is { } bin) folders.Add(bin);
         return folders;
     }
 

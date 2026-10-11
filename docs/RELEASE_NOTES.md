@@ -1,3 +1,12 @@
+# 0.5.5 preview
+
+**Terrain prefetch fix moved into Engine Optimizations**: the fix for DCS's terrain workers, which ask Windows to prefetch the same memory ranges about a million times a second, now runs inside the engine optimizations module instead of a separate DLL. It is an option on the Engine Optimizations page (Off, Observe, Skip repeats; Skip by default) and no longer part of CPU Boost. Measured in an A/B: about 4 % less DCS CPU, more on CPU-bound scenes.
+- **No more files in DCS's install folder unless DLSS 5 is used**: without DLSS 5 or Foveated SR, nothing goes to DCS's `bin` folder (no `dxgi.dll` loader, no `dxgi2.dll`, no `DcsControlPrefetchFix.ini`), so Optimizations only never needs write access to Program Files.
+- **Works from Steam and shortcuts** like the rest of the module: its settings are in `DcsQvCull.ini` ([Prefetch]), its statistics in `Saved Games\DCS\Scripts\DcsQvCull\DcsQvCullPrefetch.log`, read by the Last flight card.
+- **Migration is automatic**: saved profiles keep their setting, and the next Launch DCS (or Apply) removes the `dxgi.dll` and `dxgi2.dll` an earlier version put in `bin` and puts back your own `dxgi.dll` if you had one.
+
+**ReShade (or another dxgi.dll mod) keeps working with DLSS 5**: Checks names it, and Launch DCS asks once. Keep it working loads it after the DLSS 5 loader as dxgi2.dll; Set it aside keeps it off while the profile is applied. It is backed up either way and Back to stock DCS puts it back. Before, it was replaced without a question beforehand.
+
 # 0.5.4 preview
 
 **DCS under Program Files works**: Windows protects Program Files, so Launch DCS stopped with "Access to the path … is denied" when DCS was installed there. DCS Control now checks before writing anything and, when a folder it needs is protected, asks Windows once (its own prompt) to give your account Modify permission on that folder only, then carries on. Back to stock DCS does the same. Checks shows it as "Write access to game folders" with a Grant access button, and names Windows Security's Controlled folder access when it is on.

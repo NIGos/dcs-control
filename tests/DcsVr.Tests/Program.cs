@@ -469,7 +469,7 @@ Test("The draft is kept across restarts and a damaged file is ignored", () =>
     Require(loaded.Profile.QuadViews == QuadProvider.QuadViewsFoveated && loaded.Profile.QuadFocusAdapter, "settled like the checklist");
     File.WriteAllText(store.Path, "{ not json"); Require(store.Load() is null);
 });
-Test("Last flight: dcs.log session, Pimax frames, OFXR modes and frame time, DLSS 5, CPU Boost and prefetch fix", () =>
+Test("Last flight: dcs.log session, Pimax frames, OFXR modes and frame time, DLSS 5, CPU Boost and the engine prefetch fix", () =>
 {
     var start = new DateTimeOffset(2026, 10, 5, 17, 37, 28, TimeSpan.Zero);
     var invariant = System.Globalization.CultureInfo.InvariantCulture;
@@ -524,9 +524,9 @@ Test("Last flight: dcs.log session, Pimax frames, OFXR modes and frame time, DLS
     Require(LastFlight.ParsePimax([P(start.AddSeconds(60), 24208, 90, 90, 0, 0).Replace("Missed:(a:0", "Missed:(a:99999999999999999999"), P(start.AddSeconds(61), 24208, 90, 90, 1, 0).Replace("a:90,", "a:9.0.0,")], start, start.AddMinutes(5), null) is null);
     Require(LastFlight.ParseOfxr(["seq=1 ms=0 tid=1 phase=I op=latency_status result=99999999999999999999 dur_us=0 a=1 b=0 c=0", "seq=2 ms=0 tid=1 phase=I op=latency_status result=12 dur_us=0 a=99999999999999999999999 b=0 c=0"]) is null);
     Require(LastFlight.ParseBoostStatus("{\"updatedAt\":\"2026-10-05T17:43:18+00:00\",\"dcsPid\":1.5,\"restored\":1e30,\"state\":\"restored\"}") is { DcsPid: null, Result.Restored: 0 });
-    // CPU Boost status.json and the prefetch fix's 10 s reports.
+    // CPU Boost status.json (an older one still naming the prefetch fix) and the engine prefetch fix's 10 s reports.
     var boost = LastFlight.ParseBoostStatus("{\"schemaVersion\":1,\"state\":\"restored\",\"updatedAt\":\"2026-10-05T17:43:18.0943102+00:00\",\"dcsPid\":24208,\"changed\":[\"DCS (PID 24208): priority AboveNormal\",\"DCS (PID 24208): affinity all CPUs 0xFFFF\",\"PimaxClient (PID 31476): Normal, affinity 0xFC03\",\"steamwebhelper (PID 32368): BelowNormal, affinity 0xC000\"],\"closed\":[],\"restored\":2,\"errors\":[\"Tobii.Service (PID 4616): Access is denied. (it may need the administrator rights option)\"],\"prefetch\":\"skip (loaded by DCS, see bin\\\\DcsVrPrefetchFix.log)\"}")!;
-    Require(boost.DcsPid == 24208 && boost.Result is { State: "restored", Moved: 2, Restored: 2, Errors.Count: 1 } && boost.Result.Prefetch!.StartsWith("skip"));
+    Require(boost.DcsPid == 24208 && boost.Result is { State: "restored", Moved: 2, Restored: 2, Errors.Count: 1 });
     Require(LastFlight.ParseBoostStatus("{broken") is null && LastFlight.ParseBoostStatus("{\"state\":\"running\"}") is null);
     string F(DateTimeOffset t, string rest) => L(t, "yyyy-MM-dd HH:mm:ss") + " " + rest;
     var prefetch = LastFlight.ParsePrefetch([F(start.AddSeconds(-4), "prefetch fix started mode=skip window_ms=5000"), F(start.AddSeconds(6), "calls/s=0 skipped=0.0% pointers=1 imports=18 lookups=0 faults=0"),
@@ -543,7 +543,11 @@ Test("Last flight: dcs.log session, Pimax frames, OFXR modes and frame time, DLS
     Make($"last-flight/managed/profiles/older/ofxr/ofxr-bridge-flight-{L(start.AddDays(-1), "yyyyMMdd-HHmmss")}-pid18932.log", "seq=1 ms=0 tid=1 phase=I op=latency_status result=13 dur_us=0 a=50000 b=0 c=0\n");
     var status = Make("last-flight/boost/status.json", "{\"state\":\"restored\",\"updatedAt\":\"2026-10-05T17:43:18+00:00\",\"dcsPid\":24208,\"changed\":[\"PimaxClient (PID 1): Normal, affinity 0xFC03\"],\"restored\":1,\"errors\":[]}");
     var bin = Path.Combine(flight, "DCSWorld/bin");
-    Make("last-flight/DCSWorld/bin/DcsVrPrefetchFix.log", F(start.AddSeconds(256), "calls/s=1000 skipped=50.0% pointers=1 imports=40 lookups=0 faults=0"));
+    // The prefetch fix's log is DcsQvCullPrefetch.log in the engine optimizations module next to dcs.log's Saved Games
+    // folder; the 0.5.4 bin\DcsVrPrefetchFix.log is no longer read.
+    Make("last-flight/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCullPrefetch.log", F(start.AddSeconds(256), "calls/s=1000 skipped=50.0% pointers=1 imports=40 lookups=0 faults=0"));
+    Make("last-flight/DCSWorld/bin/DcsVrPrefetchFix.log", F(start.AddSeconds(256), "calls/s=1000 skipped=10.0% pointers=1 imports=40 lookups=0 faults=0"));
+    Require(LastFlight.PrefetchLog(dcsLog) == Path.GetFullPath(Path.Combine(flight, "Saved Games/DCS/Scripts/DcsQvCull/DcsQvCullPrefetch.log")));
     // Two sessions in the same append-only log: the earlier one failed, the last one ran.
     var cheeky = Make("last-flight/DCSWorld/bin/CheekyFoveatedDLSS/CheekyFoveatedDLSS-Standalone.log", "17:02:11.100 [T1200] Cheeky 0.5.3 Standalone initializing; runtime remains resident until game exit\n"
         + "17:02:12.000 [T1200] DLSS-NR feature creation failed error=-1\n19:37:24.334 [T26404] Cheeky 0.5.3 Standalone initializing; runtime remains resident until game exit\n"
@@ -725,11 +729,12 @@ Test("An installation from before the rename keeps its state folder; a new one u
 Test("Optimizations only leaves DCS, its VR setting, runtime and layers as the user has them, and adds only the optimizations", () =>
 {
     var exe = Make("desktop/bin/DCS.exe", "fixture");
-    var options = Make("desktop/options.lua", "options = {\n\t[\"VR\"] = {\n\t\t[\"enable\"] = true,\n\t},\n\t[\"graphics\"] = {\n\t\t[\"maxFPS\"] = 144,\n\t\t[\"width\"] = 2560,\n\t\t[\"height\"] = 1440,\n\t\t[\"fullScreen\"] = true,\n\t},\n}\n");
-    var loaderDir = Path.GetDirectoryName(Make("desktop/components/cheeky-focus/dxgi.dll", "loader"))!; var fix = Make("desktop/components/boost/prefetch_fix.dll", "fix");
+    var options = Make("desktop/sg/DCS/Config/options.lua", "options = {\n\t[\"VR\"] = {\n\t\t[\"enable\"] = true,\n\t},\n\t[\"graphics\"] = {\n\t\t[\"maxFPS\"] = 144,\n\t\t[\"width\"] = 2560,\n\t\t[\"height\"] = 1440,\n\t\t[\"fullScreen\"] = true,\n\t},\n}\n");
+    var engine = Path.GetDirectoryName(Make("desktop/components/dcsqvcull/DcsQvCull.dll", "loader"))!;
+    Make("desktop/components/dcsqvcull/DcsQvCullPayload.dll", "payload"); Make("desktop/components/dcsqvcull/DcsQvCull.lua", "-- hook");
     // No OpenXR runtime on this PC at all.
     var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options };
-    var vr = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, NeuralRendering = true, FrameGen = FrameGeneration.Nvidia, CpuBoost = true, BoostPrefetch = PrefetchFix.Skip,
+    var vr = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, NeuralRendering = true, FrameGen = FrameGeneration.Nvidia, CpuBoost = true, EngineOptimizations = true, BoostPrefetch = PrefetchFix.Skip,
         SmallDcsWindow = true, LowerMonitor = true, PauseTobiiDesktop = true, FpsLimit = FpsLimitMode.MatchRefresh, DisableDcsVSync = true };
     var desktop = ProfileValidation.ResolveFeatures(vr with { Desktop = true });
     // The VR settings stay in the profile for the next VR flight (an app restart, Pimax again); none of them runs.
@@ -738,13 +743,17 @@ Test("Optimizations only leaves DCS, its VR setting, runtime and layers as the u
     Require(launch.QuadViews == QuadProvider.None && !launch.NeuralRendering && launch.FrameGen == FrameGeneration.Off && !launch.UsesCheeky && !launch.UsesQuadFocus && !desktop.UsesTobiiPause, "VR features off at launch");
     Require(ProfileValidation.ResolveFeatures(desktop with { Desktop = false }) is { QuadViews: QuadProvider.QuadViewsFoveated, NeuralRendering: true, UsesQuadFocus: true }, "Pimax again brings them back");
     Require(desktop.SmallDcsWindow && desktop.LowerMonitor && !desktop.UsesSmallDcsWindow && !desktop.UsesLowerMonitor && desktop.UsesBoostHelper && !desktop.BoostHelperElevated, "VR helpers kept for later but not run");
-    var planner = new DeploymentPlanner(new(null, null, null, QuadFocusDirectory: loaderDir, PrefetchFixDll: fix));
+    var planner = new DeploymentPlanner(new(null, null, null, EngineDirectory: engine));
     var plan = planner.Build(desktop, inventory, Path.Combine(root, "desktop/managed"));
     // No OpenXR variable at all: the PC's own runtime and layers (another headset, its own Quad Views) stay in charge.
-    Require(plan.LaunchEnvironment.Keys.All(k => !k.StartsWith("XR", StringComparison.OrdinalIgnoreCase) && !k.StartsWith("DISABLE_", StringComparison.OrdinalIgnoreCase)) && plan.LaunchEnvironment["DCSVR_PREFETCH_MODE"] == "skip", string.Join(",", plan.LaunchEnvironment.Keys));
+    Require(plan.LaunchEnvironment.Keys.All(k => !k.StartsWith("XR", StringComparison.OrdinalIgnoreCase) && !k.StartsWith("DISABLE_", StringComparison.OrdinalIgnoreCase) && !k.StartsWith("DCSVR_PREFETCH", StringComparison.OrdinalIgnoreCase)), string.Join(",", plan.LaunchEnvironment.Keys));
     // options.lua is not touched: VR on or off, frame limit, window and vertical sync stay the user's.
     Require(plan.Files.All(f => f.Path != options));
-    Require(plan.Files.Any(f => f.Path.EndsWith("dxgi2.dll", StringComparison.OrdinalIgnoreCase)) && plan.Files.All(f => !f.Path.Contains("quadviews", StringComparison.OrdinalIgnoreCase) && !f.Path.Contains("ofxr", StringComparison.OrdinalIgnoreCase)));
+    // The optimizations (prefetch fix included, in DcsQvCull.ini) go to Saved Games; nothing to DCS's install folder.
+    var ini = Encoding.Unicode.GetString(plan.Files.Single(f => f.Path.EndsWith("DcsQvCull.ini", StringComparison.OrdinalIgnoreCase)).Content);
+    Require(ini.Contains("Mode=skip") && plan.Files.All(f => !f.Path.StartsWith(Path.GetDirectoryName(Path.GetFullPath(exe))!, StringComparison.OrdinalIgnoreCase)));
+    Require(!LaunchSafety.ProfileFolders(desktop, inventory).Contains(Path.GetDirectoryName(exe)!, StringComparer.OrdinalIgnoreCase));
+    Require(plan.Files.All(f => !f.Path.Contains("quadviews", StringComparison.OrdinalIgnoreCase) && !f.Path.Contains("ofxr", StringComparison.OrdinalIgnoreCase)));
     // The readiness checks never ask for a runtime or a headset.
     Require(!ProfileValidation.Validate(desktop, inventory).Any(i => i.Severity == IssueSeverity.Error));
     // A former Sboys user without SteamVR, and VR settings that need a runtime file, never block Optimizations only.
@@ -775,30 +784,47 @@ Test("Another mod's dxgi.dll is backed up, replaced and reported, and Back to st
     Require(store.Status().Files.Single(f => f.Path == other) is { Action: "restore", Foreign: true });
     Require(store.RestoreOriginals().Complete && File.ReadAllText(other) == "other-mod" && File.ReadAllText(options) == Lua);
 });
-Test("CPU Boost prefetch fix deploys as the loader's dxgi2.dll, only when enabled, over another chained mod", () =>
+Test("The prefetch fix is an engine optimization: nothing in DCS's bin without DLSS 5, and a 0.5.4 profile's dxgi.dll and dxgi2.dll go in the next apply", () =>
 {
-    var exe = Make("prefetch/bin/DCS.exe", "fixture"); var options = Make("prefetch/options.lua", Lua);
-    var runtime = Make("prefetch/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("prefetch/runtime.dll", "fixture");
-    var loaderDir = Path.GetDirectoryName(Make("prefetch/components/cheeky-focus/dxgi.dll", "loader"))!; var fix = Make("prefetch/components/boost/prefetch_fix.dll", "fix");
-    var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime };
-    var planner = new DeploymentPlanner(new(null, null, null, QuadFocusDirectory: loaderDir, PrefetchFixDll: fix));
-    var boost = new VrProfile { QuadViews = QuadProvider.None, CpuBoost = true, BoostPrefetch = PrefetchFix.Skip };
-    var plan = planner.Build(boost, inventory, Path.Combine(root, "prefetch/managed"));
-    var bin = Path.GetDirectoryName(exe)!;
-    var loaderIndex = plan.Files.ToList().FindIndex(f => f.Path == Path.Combine(bin, "dxgi.dll")); var fixIndex = plan.Files.ToList().FindIndex(f => f.Path == Path.Combine(bin, "dxgi2.dll"));
-    Require(loaderIndex >= 0 && fixIndex > loaderIndex); // restored first, before its loader
-    Require(plan.LaunchEnvironment["DCSVR_PREFETCH_MODE"] == "skip" && plan.LaunchEnvironment["DCSVR_PREFETCH_LOG"] == Path.Combine(bin, "DcsVrPrefetchFix.log") && plan.LaunchEnvironment["DCSVR_PREFETCH_WINDOW_MS"] == "5000");
-    // The same settings next to the fix, so it also works when DCS starts from Steam or a shortcut.
-    var settingsBytes = plan.Files.Single(f => f.Path == Path.Combine(bin, "DcsControlPrefetchFix.ini")).Content;
-    Require(settingsBytes[0] == 0xFF && settingsBytes[1] == 0xFE, "UTF-16 LE with a byte order mark, so Windows reads any path");
-    var settings = Encoding.Unicode.GetString(settingsBytes, 2, settingsBytes.Length - 2);
-    Require(settings.Contains("[PrefetchFix]") && settings.Contains("Mode=skip") && settings.Contains("WindowMs=5000") && settings.Contains("Log=" + Path.Combine(bin, "DcsVrPrefetchFix.log")), settings);
-    var off = planner.Build(boost with { BoostPrefetch = PrefetchFix.Off }, inventory, Path.Combine(root, "prefetch/managed-off"));
-    Require(off.Files.All(f => !f.Path.EndsWith("dxgi.dll", StringComparison.OrdinalIgnoreCase) && !f.Path.EndsWith("dxgi2.dll", StringComparison.OrdinalIgnoreCase) && !f.Path.EndsWith("PrefetchFix.ini", StringComparison.OrdinalIgnoreCase)) && off.LaunchEnvironment["DCSVR_PREFETCH_MODE"] == "off");
-    Require(planner.Build(boost with { CpuBoost = false }, inventory, Path.Combine(root, "prefetch/managed-noboost")).LaunchEnvironment["DCSVR_PREFETCH_MODE"] == "off");
-    // Another chained DXGI mod already there is listed as replaced (Apply backs it up), never refused.
-    Make("prefetch/bin/dxgi2.dll", "other-mod");
-    Require(planner.Build(boost, inventory, Path.Combine(root, "prefetch/managed-other")).Files.Single(f => f.Path == Path.Combine(bin, "dxgi2.dll")).ExpectedSha256 == Hashing.BytesSha256(Encoding.UTF8.GetBytes("other-mod")));
+    foreach (var (name, userDxgi, desktop) in new[] { ("clean", (string?)null, false), ("reshade", "user's ReShade", true) })
+    {
+        var dir = "prefetch-move/" + name;
+        var exe = Make(dir + "/game/bin/DCS.exe", "fixture"); var options = Make(dir + "/sg/DCS/Config/options.lua", Lua);
+        var runtime = Make(dir + "/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make(dir + "/runtime.dll", "fixture");
+        var components = Path.GetDirectoryName(Make(dir + "/components/dcsqvcull/DcsQvCull.dll", "loader"))!;
+        Make(dir + "/components/dcsqvcull/DcsQvCullPayload.dll", "payload"); Make(dir + "/components/dcsqvcull/DcsQvCull.lua", "-- hook");
+        var bin = Path.GetDirectoryName(Path.GetFullPath(exe))!; var dxgi = Path.Combine(bin, "dxgi.dll"); var dxgi2 = Path.Combine(bin, "dxgi2.dll");
+        var oldIni = Path.Combine(bin, "DcsControlPrefetchFix.ini"); var oldLog = Path.Combine(bin, "DcsVrPrefetchFix.log");
+        if (userDxgi is not null) File.WriteAllText(dxgi, userDxgi);
+        var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime };
+        var store = new OriginalsStore(Path.Combine(root, "originals/" + dir));
+        // What 0.5.4 applied for CPU Boost with the prefetch fix and no Cheeky: the loader alone, the fix and its settings.
+        FileMutation Old(string path, string content, IReadOnlyList<string>? logs = null) => new(path, File.Exists(path) ? Hashing.FileSha256(path) : null, Encoding.UTF8.GetBytes(content), "0.5.4", RuntimeLogs: logs, Root: bin);
+        store.Apply(new("boost", "0.5.4", [Old(dxgi, "focus loader"), Old(dxgi2, "prefetch fix", [oldLog]), Old(oldIni, "[PrefetchFix]\nMode=skip\n")],
+            new Dictionary<string, string> { ["DCSVR_PREFETCH_MODE"] = "skip" }, exe));
+        File.WriteAllText(oldLog, "2026-10-10 20:00:00 calls/s=1000 skipped=99.0% pointers=1 imports=40 lookups=0 faults=0");
+        Require(File.ReadAllText(dxgi) == "focus loader" && File.Exists(dxgi2));
+        // 0.5.5: CPU Boost with Engine Optimizations and the fix on Skip writes nothing in bin and no prefetch variable.
+        var profile = new VrProfile { QuadViews = QuadProvider.None, CpuBoost = true, EngineOptimizations = true, BoostPrefetch = PrefetchFix.Skip, Desktop = desktop };
+        var planner = new DeploymentPlanner(new(null, null, null, EngineDirectory: components));
+        var plan = planner.Build(profile, inventory, Path.Combine(root, dir + "/managed"));
+        Require(plan.Files.All(f => !f.Path.StartsWith(bin + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)), "Nothing in DCS's bin: " + string.Join(", ", plan.Files.Select(f => f.Path)));
+        Require(plan.LaunchEnvironment.Keys.All(k => !k.StartsWith("DCSVR_PREFETCH", StringComparison.OrdinalIgnoreCase)));
+        Require(!LaunchSafety.ProfileFolders(profile, inventory).Contains(bin, StringComparer.OrdinalIgnoreCase), "The DCS install folder is not needed");
+        // The normal apply takes the old files out (the user's own dxgi.dll comes back) and writes [Prefetch] in the same step.
+        var applied = store.Apply(plan);
+        Require(!File.Exists(dxgi2) && !File.Exists(oldIni) && !File.Exists(oldLog), "dxgi2.dll, its settings and its log are gone");
+        Require(userDxgi is null ? !File.Exists(dxgi) : File.ReadAllText(dxgi) == userDxgi, "dxgi.dll removed, or the user's own put back");
+        Require(applied.PutBack.Count >= 3 && applied.ReplacedForeign.Count == 0, "Put back: " + string.Join(", ", applied.PutBack));
+        var module = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(options)))!, "Scripts", "DcsQvCull");
+        var ini = File.ReadAllText(Path.Combine(module, "DcsQvCull.ini")).ReplaceLineEndings("\n");
+        Require(ini.Contains("[Prefetch]\n") && ini.Contains("\nMode=skip\nWindowMs=5000\n"), ini);
+        Require(store.Status().Files.All(f => !f.Path.StartsWith(bin + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)), "The DCS install is no longer recorded as changed");
+        // Off writes Mode=off; CPU Boost without Engine Optimizations has no prefetch fix and writes nothing at all for it.
+        Require(ConfigurationWriters.DcsQvCull(profile with { BoostPrefetch = PrefetchFix.Off }).Contains("\nMode=off"));
+        Require(planner.Build(profile with { EngineOptimizations = false }, inventory, Path.Combine(root, dir + "/managed-noengine")).Files.All(f => !f.Path.Contains("DcsQvCull") && !f.Path.StartsWith(bin + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)));
+        Require(store.RestoreOriginals().Complete && !Directory.Exists(module) && (userDxgi is null ? !File.Exists(dxgi) : File.ReadAllText(dxgi) == userDxgi));
+    }
 });
 Test("Pupil shift is deployed first in the layer chain with its ini, only for eye-tracked Quad Views", () =>
 {
@@ -856,6 +882,28 @@ Test("Other environments: AMD/Intel graphics, OpenBeta Saved Games, 3× at 72 Hz
     Require(small.HasRanking && !small.BackgroundCores.Contains(3) && small.VrRuntimeCores.Count == 0, "small CPU");
     // An 8.3 short name of the profile folder is removed from the diagnostic package too.
     Require(!Diagnostics.Redactor("Giuseppe", @"C:\Users\Giuseppe", "PC-01")(@"TEMP=C:\Users\GIUSEP~1\AppData\Local\Temp").Contains("GIUSEP"));
+});
+Test("Another program's dxgi.dll in DCS's bin is reported before Launch sets it aside; ours never is", () =>
+{
+    var distribution = Path.Combine(root, "dxgi/distribution");
+    Make("dxgi/distribution/components/cheeky/dxgi.dll", "our loader");
+    var service = new ControlService(distribution, Path.Combine(root, "dxgi/state"));
+    var exe = Make("dxgi/game/bin/DCS.exe", "fixture");
+    var inventory = new InventorySnapshot { DcsExecutable = exe };
+    var dlss = new VrProfile { NeuralRendering = true, QuadViews = QuadProvider.QuadViewsFoveated };
+    Require(service.ForeignDxgi(dlss, inventory) is null, "no dxgi.dll");
+    Make("dxgi/game/bin/dxgi.dll", "ReShade bytes");
+    Require(service.ForeignDxgi(dlss, inventory) is { Name: "another program" } found && found.Path.EndsWith("dxgi.dll"), "a foreign one");
+    Require(service.ForeignDxgi(new VrProfile { QuadViews = QuadProvider.PimaxNative }, inventory) is null, "no loader needed, nothing to say");
+    // Kept working: the pilot's own file is chained after the DLSS 5 loader as dxgi2.dll; never when off, and never over
+    // another program's dxgi2.dll.
+    Require(service.ChainedDxgi(dlss, inventory) is { } chained && Encoding.UTF8.GetString(chained) == "ReShade bytes", "chained");
+    Require(service.ChainedDxgi(dlss with { KeepOtherDxgi = false }, inventory) is null, "set aside instead");
+    Make("dxgi/game/bin/dxgi2.dll", "someone else's chained mod");
+    Require(service.ChainedDxgi(dlss, inventory) is null, "another program's dxgi2.dll stays");
+    File.Delete(Path.Combine(root, "dxgi/game/bin/dxgi2.dll"));
+    Make("dxgi/game/bin/dxgi.dll", "our loader");
+    Require(service.ForeignDxgi(dlss, inventory) is null, "our own loader");
 });
 Test("Writes survive a file held for a moment, keep read-only files read-only, and a protected folder is a warning Launch resolves", () =>
 {
@@ -1009,8 +1057,12 @@ Test("DCS engine optimizations install in Saved Games Scripts with every ini key
     Require(!ProfileValidation.Validate(on).Any(i => i.Code is "engine-hotkey" or "hotkey-conflict"));
     Require(ProfileValidation.Validate(on with { EngineToggleKey = "120:3" }).Any(i => i.Code == "engine-hotkey" && i.Severity == IssueSeverity.Error));
     Require(ProfileValidation.Validate(on with { EngineToggleKey = "119:3" }).Any(i => i.Code == "engine-hotkey") && ini.Contains("TightCasters=0") && ini.Contains("BenchShadow=0"));
-    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "CostWeightsSanity=0", "Beeps=1", "BenchCostWeights=0", "Terrain=0", "SkipSameConstantUpload=0", "BenchCbUpload=0", "LowPowerPacer=0", "BenchPacer=0", "MotionSweep=0", "FrameHeapSlabs=1", "TaskQueueClock=1", "BenchFrameHeap=0", "MotionProfile=0", "MotionTaxi=0", "MotionCounters=1", "BigModelPages=1", "BigPageBytes=4194304", "ShadowInstancing=1", "ShadowBatching=1", "ShadowPlanAsync=1", "ShadowTextureSkip=1", "ShadowInstCompile=0", "ShadowInstVerify=0", "BenchShadowInst=0", "BenchBigPages=0", "BenchShadowTex=0", "BenchTexTable=0", "YawScan=0", "HoldYawDeg=-1", "GBufferBatching=0", "GBufferInstCompile=0", "GBufferInstVerify=0", "BenchGBufferInst=0", "ParallelUpload=0", "BenchParallelUpload=0", "BenchShadowPlanAsync=0", "DirectUploadCount=0", "FxApplyCount=0", "GBufferTexCount=0", "BenchAllocSlabs=0", "BenchTexDedupe=0", "BenchCbSkip=0", "BenchTriPlain=0", "BenchEngine=0", "BenchMicro=0", "Quick=0", "SigScan=1", "DirectUpload=0", "DirectUploadVerify=0", "BenchDirectUpload=0", "SplitFilter=1", "SplitFilterOps=0x4ff", "Meter=0", "SplitFilterVerify=0", "BenchSplitFilter=0", "JoinTailCount=0", "SrvSpanCount=0", "ShadowRecorder=1", "ShadowRecorderScope=0x30f", "ShadowRecorderWaitUs=200", "ShadowRecorderPriority=0", "ShadowRecorderSplit=0xf", "ShadowRecorderInstancing=1", "ShadowRecVerify=0", "ShadowRecVerifySec=5", "BenchShadowRecorder=0", "ShadowRecCount=0", "GBufferRecorder=1", "GBufferRecorderScope=0x10055", "GBufferRecorderMaxSegments=12", "GBufferRecorderHelpers=2", "GBufferRecorderWaitUs=300", "GBufferRecorderIsland=30", "GBufferRecorderRedo=1", "GBufferRecorderSwapAhead=1", "GBufferBatching=0", "GBufferRecVerify=0", "GBufferRecVerifySec=6", "GBufferRecVerifyStride=0", "BenchGBufferRecorder=0", "GBufferRecCount=0", "GBufferRecStateDump=0", "GpuPassTiming=0", "YawProfile=0", "RotationProfile=0", $"ShadowRecorderHelpers={(Environment.ProcessorCount <= 8 ? 1 : 3)}", "GBufferRecorderCockpit=0", "GBufferRecorderByOrdinal=1", "SrvTailTrim=0", "PassFlush=0", "FrameStartGap=0", "RunnableThreads=0", "VramCount=0", "GpuPassStats=0", "ForwardRecCount=0", "BenchPassFlush=0", "SrvTailTrimVerify=0", "BenchSrvTailTrim=0" })
+    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "CostWeightsSanity=0", "Beeps=1", "BenchCostWeights=0", "Terrain=0", "SkipSameConstantUpload=0", "BenchCbUpload=0", "LowPowerPacer=0", "BenchPacer=0", "MotionSweep=0", "FrameHeapSlabs=1", "TaskQueueClock=1", "BenchFrameHeap=0", "MotionProfile=0", "MotionTaxi=0", "MotionCounters=1", "BigModelPages=1", "BigPageBytes=4194304", "ShadowInstancing=1", "ShadowBatching=1", "ShadowPlanAsync=1", "ShadowTextureSkip=1", "ShadowInstCompile=0", "ShadowInstVerify=0", "BenchShadowInst=0", "BenchBigPages=0", "BenchShadowTex=0", "BenchTexTable=0", "YawScan=0", "HoldYawDeg=-1", "GBufferBatching=0", "GBufferInstCompile=0", "GBufferInstVerify=0", "BenchGBufferInst=0", "ParallelUpload=0", "BenchParallelUpload=0", "BenchShadowPlanAsync=0", "DirectUploadCount=0", "FxApplyCount=0", "GBufferTexCount=0", "BenchAllocSlabs=0", "BenchTexDedupe=0", "BenchCbSkip=0", "BenchTriPlain=0", "BenchEngine=0", "BenchMicro=0", "Quick=0", "SigScan=1", "DirectUpload=0", "DirectUploadVerify=0", "BenchDirectUpload=0", "SplitFilter=1", "SplitFilterOps=0x4ff", "Meter=0", "SplitFilterVerify=0", "BenchSplitFilter=0", "JoinTailCount=0", "SrvSpanCount=0", "ShadowRecorder=1", "ShadowRecorderScope=0x30f", "ShadowRecorderWaitUs=200", "ShadowRecorderPriority=0", "ShadowRecorderSplit=0xf", "ShadowRecorderInstancing=1", "ShadowRecVerify=0", "ShadowRecVerifySec=5", "BenchShadowRecorder=0", "ShadowRecCount=0", "GBufferRecorder=1", "GBufferRecorderScope=0x10055", "GBufferRecorderMaxSegments=12", "GBufferRecorderHelpers=2", "GBufferRecorderWaitUs=300", "GBufferRecorderIsland=30", "GBufferRecorderRedo=1", "GBufferRecorderSwapAhead=1", "GBufferBatching=0", "GBufferRecVerify=0", "GBufferRecVerifySec=6", "GBufferRecVerifyStride=0", "BenchGBufferRecorder=0", "GBufferRecCount=0", "GBufferRecStateDump=0", "GpuPassTiming=0", "YawProfile=0", "RotationProfile=0", $"ShadowRecorderHelpers={(Environment.ProcessorCount <= 8 ? 1 : 3)}", "GBufferRecorderCockpit=0", "GBufferRecorderByOrdinal=1", "SrvTailTrim=0", "PassFlush=0", "FrameStartGap=0", "RunnableThreads=0", "VramCount=0", "GpuPassStats=0", "ForwardRecCount=0", "BenchPassFlush=0", "SrvTailTrimVerify=0", "BenchSrvTailTrim=0", "[Prefetch]", "Mode=skip", "WindowMs=5000", "BenchPrefetch=0" })
         Require(ini.Contains(key), "DcsQvCull.ini lacks " + key);
+    // The terrain prefetch fix is an engine optimization: the profile's mode, off when the option is off.
+    Require(ConfigurationWriters.DcsQvCull(on with { BoostPrefetch = PrefetchFix.Observe }).Contains("\nMode=observe") && ConfigurationWriters.DcsQvCull(on with { BoostPrefetch = PrefetchFix.Off }).Contains("\nMode=off")
+        && ConfigurationWriters.DcsQvCull(on with { EngineOptimizations = false }).Contains("\nMode=off") && on.UsesPrefetchFix && !(on with { EngineOptimizations = false, CpuBoost = true }).UsesPrefetchFix
+        && (on with { Desktop = true }).ForLaunch().UsesPrefetchFix);
     var trimmed = ConfigurationWriters.DcsQvCull(on with { EngineModelAllocator = false, EngineTextureDedupe = false, EngineEffectBufferSkip = false, EnginePlainCounter = false, EngineCostWeights = false, EngineBeeps = false, EngineFrameHeap = false, EngineShadowInstancing = false, EngineStateFilter = false, EngineShadowRecorder = false, EngineGBufferRecorder = false });
     Require(trimmed.Contains("SlabBytes=4096") && trimmed.Contains("SplitFilter=0") && trimmed.Contains("ShadowRecorder=0") && trimmed.Contains("GBufferRecorder=0") && !trimmed.Contains("\nAllocSlabs=1") && trimmed.Contains("PlainTriangleCounter=0") && trimmed.Contains("StreamDedupe=0") && trimmed.Contains("SkipSameConstantBuffer=0") && trimmed.Contains("CostWeights=0") && trimmed.Contains("Beeps=0") && trimmed.Contains("FrameHeapSlabs=0") && trimmed.Contains("BigModelPages=0") && trimmed.Contains("ShadowInstancing=0") && trimmed.Contains("ShadowBatching=0") && trimmed.Contains("ShadowPlanAsync=0") && trimmed.Contains("ShadowTextureSkip=0")
         && ConfigurationWriters.DcsQvCull(on with { EngineShaderTimeCache = false }).Contains("TaskQueueClock=0"));
@@ -1897,7 +1949,8 @@ Test("Boost plan lists Pimax services, DCS and admin need, and excludes an ances
     Require(plan.Processes.Single(p => p.Name == "PimaxClient").Running);
     Require(plan.Processes.Single(p => p.Name == "msedge") is { Category: "Background", Running: false });
     Require(plan.Notes.Any(n => n.Contains("Skipped background app msedge")));
-    Require(plan.Notes.Any(n => n.StartsWith("Prefetch fix: DCS loads it at start")));
+    // The prefetch fix is an engine optimization now, no longer part of what CPU Boost does.
+    Require(plan.Notes.All(n => !n.Contains("refetch", StringComparison.Ordinal)));
 });
 Test("Boost plan leaves SteamVR compositor untouched on the Sboys route", () =>
 {

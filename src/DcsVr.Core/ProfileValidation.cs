@@ -106,7 +106,7 @@ public static class ProfileValidation
         }
         if (profile.CpuBoost)
         {
-            if (!Enum.IsDefined(profile.BoostDcsPriority) || !Enum.IsDefined(profile.BoostPrefetch)) Error("boost-choice", "Select a recognized DCS priority and prefetch fix.");
+            if (!Enum.IsDefined(profile.BoostDcsPriority)) Error("boost-choice", "Select a recognized DCS priority.");
             if (profile.BoostDcsPriority == BoostPriority.High)
                 issues.Add(new("boost-high-priority", IssueSeverity.Warning, "High priority lets DCS take CPU time ahead of the VR compositor, headset services, audio and input handling. When DCS saturates the CPU this can cause stutter, tracking or input lag, or audio dropouts. Above normal is recommended; use High only if you have tested it."));
         }
@@ -116,6 +116,7 @@ public static class ProfileValidation
             Error("pupil-image", $"Virtual image distance must be {VrProfile.PupilShiftVirtualImageMin}–{VrProfile.PupilShiftVirtualImageMax} m.");
         if (profile.PupilShift && !profile.Desktop && !profile.UsesPupilShift)
             issues.Add(new("pupil-gaze", IssueSeverity.Warning, "Pupil shift needs eye-tracked Quad Views: it reads the gaze from the focus views. With this profile it is not installed."));
+        if (profile.EngineOptimizations && !Enum.IsDefined(profile.BoostPrefetch)) Error("engine-prefetch", "Select a recognized terrain prefetch fix mode.");
         if (profile.EngineOptimizations && profile.EngineTimerRefreshUs is < VrProfile.EngineTimerRefreshMin or > VrProfile.EngineTimerRefreshMax)
             Error("engine-timer", $"Streaming timer refresh must be {VrProfile.EngineTimerRefreshMin}–{VrProfile.EngineTimerRefreshMax} µs.");
         if (profile.EngineOptimizations && profile.EngineDevMode)

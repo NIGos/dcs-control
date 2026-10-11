@@ -236,6 +236,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "fwd_rec_count_test.h"
 #include "srv_tail_trim_test.h"
 #include "status_word_test.h"
+#include "prefetch_fix_test.h"
 #include "gpu_split_test.h"
 #include "gap_attrib_test.h"
 #include "gpu_dedup_test.h"
@@ -320,6 +321,12 @@ int main() {
   // QV_SRVTRIM_ONLY=1: only the setShaderResources tail trim tests (R15 F2).
   if (getenv("QV_SRVTRIM_ONLY")) {
     strtest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_PFFIX_ONLY=1: only the terrain prefetch fix tests (prefetch_fix.h).
+  if (getenv("QV_PFFIX_ONLY")) {
+    pfxtest::Run();
     printf("%d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;
   }
@@ -1518,6 +1525,8 @@ int main() {
   strtest::Run();
   // DcsQvCull_Status word (status_word.h): bit layout, feature counting, loader/payload handover.
   swtest::Run();
+  // Terrain prefetch fix: modes, window, spin guard, unload/reload safety, old dxgi2 fix take-over, log line.
+  pfxtest::Run();
   gstest::Run();
   gatest::Run();
   gddtest::Run();

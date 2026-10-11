@@ -136,5 +136,4 @@ public sealed record BoostStatus
     public string? Tobii { get; init; }
     public int Restored { get; init; }
     public IReadOnlyList<string> Errors { get; init; } = [];
-    public string Prefetch { get; init; } = "off";
 }

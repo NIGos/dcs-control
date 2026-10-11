@@ -13,6 +13,11 @@
 //               this field
 //   0           not running / not ready (no payload, payload swap, after stop)
 //
+// Production optimizations counted: 18 (ComputeStatus in main.cpp; the 18th
+// is the terrain prefetch fix, [Prefetch] Mode=skip, prefetch_fix.h: active
+// while installed in skip mode with patched pointers or imports, latched
+// when the kernel functions or the install folder cannot be resolved).
+//
 // The loader owns the 64-bit word and hands its address to the payload
 // (DcsQvPayload_SetStatusWord) before DcsQvPayload_Start. The payload's
 // worker recomputes the word about once per second and publishes it through
