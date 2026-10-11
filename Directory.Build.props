@@ -6,7 +6,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <Deterministic>true</Deterministic>
     <!-- Single source for the product version. Scripts read VersionPrefix/VersionSuffix from this file. -->
-    <VersionPrefix>0.5.5</VersionPrefix>
+    <VersionPrefix>0.5.6</VersionPrefix>
     <VersionSuffix>preview</VersionSuffix>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Authors>DCS Control contributors</Authors>

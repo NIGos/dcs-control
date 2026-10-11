@@ -32,7 +32,7 @@ const pending = new Map(), fields = [], invalid = new Set();
 const clone = value => JSON.parse(JSON.stringify(value));
 let pendingDxgiAction = null;
 const dxgiAcknowledged = dxgi => { try { return localStorage.getItem('dxgiAck:'+dxgi.sha256) === '1'; } catch { return false; } };
-const NO_TIMEOUT = new Set(['browse','save','import','export','importSboys','prepareSboys','diagnosticPackage','launch','apply','restore','grantWriteAccess']);
+const NO_TIMEOUT = new Set(['browse','save','import','export','importSboys','prepareSboys','diagnosticPackage','launch','apply','restore','grantWriteAccess','updateInstall']);
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const empty = value => value.trim() || null;
 const num = value => String(Number(Number(value).toFixed(4)));
@@ -1081,6 +1081,122 @@ function revealSetting(f) {
   target.scrollIntoView({block:'center'}); target.classList.remove('highlight'); void target.offsetWidth; target.classList.add('highlight');
   if (!f.element.hidden && !f.input.disabled) { if (!['INPUT','BUTTON','SELECT','TEXTAREA'].includes(f.input.tagName)) f.input.tabIndex = -1; f.input.focus({preventScroll:true}); }
 }
+// ---- Updates and What's new ----------------------------------------------------------------------------------------
+let updates = null, updateBannerHidden = false, updateError = null, updatePolling = false, updateNotesShown = null;
+const shortVersion = v => String(v || '').split('-')[0];
+const sizeText = bytes => bytes >= 1048576 ? (bytes/1048576).toFixed(1)+' MB' : Math.max(1,Math.round((bytes || 0)/1024))+' KB';
+/** Release notes as plain text: paragraphs, headings and (nested) bullet lists built with text nodes, never innerHTML,
+ *  because the notes are untrusted text from GitHub. **bold** shows bold; code marks and links show as their text. */
+function notesFragment(markdown) {
+  const out = document.createDocumentFragment(); let lists = [], para = null;
+  const inline = (el, text) => {
+    const plain = text.replace(/`([^`]*)`/g,'$1').replace(/\[([^\]]+)\]\([^)\s]*\)/g,'$1');
+    plain.split(/\*\*(.+?)\*\*/).forEach((part,i) => { if (!part) return; if (i % 2) { const b = document.createElement('b'); b.textContent = part; el.append(b); } else el.append(document.createTextNode(part)); });
+    return el;
+  };
+  for (const raw of String(markdown ?? '').replace(/\r/g,'').split('\n')) {
+    const line = raw.replace(/\s+$/,'');
+    if (!line.trim()) { lists = []; para = null; continue; }
+    const bullet = /^(\s*)[-*+]\s+(.*)$/.exec(line), heading = /^#{1,6}\s+(.*)$/.exec(line);
+    if (bullet) {
+      let depth = Math.min(Math.floor(bullet[1].length / 2), 3); while (depth && !lists[depth-1]) depth--;
+      lists.length = depth + 1; para = null;
+      if (!lists[depth]) { const ul = document.createElement('ul'); (depth ? lists[depth-1].lastElementChild : out).append(ul); lists[depth] = ul; }
+      lists[depth].append(inline(document.createElement('li'), bullet[2]));
+    }
+    else if (heading) { lists = []; para = null; out.append(inline(document.createElement('h3'), heading[1])); }
+    else if (lists.length && /^\s/.test(line)) inline(lists[lists.length-1].lastElementChild, ' ' + line.trim());
+    else if (para) inline(para, ' ' + line.trim());
+    else { lists = []; para = inline(document.createElement('p'), line.trim()); out.append(para); }
+  }
+  return out;
+}
+/** The banner on the Overview, the dot on the rail's version, the Updates card (Diagnostics) and the open update dialog. */
+function renderUpdates() {
+  const u = updates, next = u?.update;
+  $('updateBanner').hidden = !next || updateBannerHidden;
+  if (next) $('updateBannerText').textContent = `DCS Control ${next.short} is available`;
+  $('railUpdate').hidden = !next;
+  $('appVersionButton').title = next ? `DCS Control ${next.short} is available. Click for what's new in this version.` : "What's new in this version";
+  $('updateAuto').checked = Boolean(u?.enabled);
+  const checked = u?.checkedAt ? ` Checked ${new Date(u.checkedAt).toLocaleString('en-GB')}.` : '';
+  $('updateCheckStatus').textContent = !u ? '' : u.checking ? 'Checking GitHub…' : next ? `DCS Control ${next.short} is available.${checked}` : u.error ? u.error + checked
+    : u.checkedAt ? `You have the latest version (${shortVersion(u.current)}).${checked}` : u.enabled ? 'Not checked yet.' : 'Automatic checks are off. Check now still asks GitHub.';
+  $('updateCheckNow').disabled = Boolean(u?.checking || u?.installing);
+  if ($('updateDialog').open) renderUpdateDialog();
+}
+function renderUpdateDialog() {
+  const u = updates, next = u?.update;
+  $('updateTitle').textContent = next ? `DCS Control ${next.short}` : 'DCS Control';
+  $('updateMeta').textContent = next ? `Installed: ${shortVersion(u.current)}` + (next.published ? ` · released ${new Date(next.published).toLocaleDateString('en-GB')}` : '') + (next.bytes ? ` · ${sizeText(next.bytes)}` : '') : 'No update is available.';
+  if (updateNotesShown !== (next?.version ?? null)) { $('updateNotes').replaceChildren(notesFragment(next ? next.notes || 'No release notes.' : '')); updateNotesShown = next?.version ?? null; }
+  $('updatePortable').hidden = !next || !u.portable;
+  if (next && u.portable) $('updatePortable').textContent = `This copy runs from ${u.appFolder}. The update installs DCS Control in ${u.installFolder}, with Start menu and desktop shortcuts; afterwards you can delete ${u.appFolder}. Your profiles and backups stay where they are.`;
+  const d = u?.downloaded, progress = $('updateProgress');
+  $('updateProgressRow').hidden = !u?.installing && !d;
+  if (d?.total) progress.value = Math.min(1, d.done / d.total); else progress.removeAttribute('value');
+  $('updateProgressText').textContent = d ? sizeText(d.done) + (d.total ? ' of ' + sizeText(d.total) : '') : 'Starting…';
+  $('updateStatus').textContent = updateError || u?.message || (next && !next.canInstall ? 'This release has no installer to download: open its release page.' : '');
+  $('updateStatus').classList.toggle('error', Boolean(updateError));
+  $('updateInstall').disabled = !next?.canInstall || Boolean(u?.installing) || busy;
+  // While downloading, closing the dialog cancels the download; once the setup runs there is nothing left to cancel.
+  $('updateLater').textContent = u?.handedOff ? 'Close' : u?.installing ? 'Cancel download' : 'Later';
+}
+/** Asks the backend (at start: only when checks are on and the last check is over 6 hours old; Check now: always). */
+async function checkUpdates(force) {
+  if (updates) { updates.checking = true; renderUpdates(); }
+  try { updates = await request('updateCheck',{force}); }
+  catch (error) { if (updates) updates.error = error.message; }
+  finally { if (updates) updates.checking = false; renderUpdates(); }
+}
+async function setUpdateChecks(on) {
+  try { updates = await request('updateSettings',{checkForUpdates:on}); } catch (error) { showError(error); }
+  renderUpdates();
+}
+function openUpdateDialog(start) {
+  if (!updates?.update) return;
+  updateError = null; renderUpdateDialog();
+  if (!$('updateDialog').open) $('updateDialog').showModal();
+  if (start && updates.update.canInstall) installUpdate();
+}
+/** Download, signature check and hand-over to the setup; the backend closes DCS Control once the setup runs. */
+async function installUpdate() {
+  if (!updates?.update?.canInstall || updates.installing) return;
+  if (busy) { updateError = 'Finish the current operation first, then update.'; renderUpdateDialog(); return; }
+  updateError = null; updates.installing = true; updates.downloaded = null; renderUpdateDialog();
+  updatePolling = true;
+  const poll = setInterval(() => request('updateStatus').then(r => { if (updatePolling) { updates = r; renderUpdates(); } }).catch(()=>{}), 300);
+  try { const r = await request('updateInstall'); updatePolling = false; updates = r; }
+  catch (error) { updatePolling = false; updateError = error.message; try { updates = await request('updateStatus'); } catch { updates.installing = false; } }
+  finally { updatePolling = false; clearInterval(poll); renderUpdates(); renderUpdateDialog(); }
+}
+/** This version's section of the release notes: once at the first start after an update, and from the rail's version. */
+async function showWhatsNew(startup) {
+  try {
+    const r = await request('whatsNew',{startup});
+    if (!r.show) return false;
+    $('whatsNewTitle').textContent = `What's new in DCS Control ${r.short}`;
+    $('whatsNewNotes').replaceChildren(notesFragment(r.notes || 'This copy has no release notes. They are on the Releases page on GitHub.'));
+    if (!$('whatsNewDialog').open) $('whatsNewDialog').showModal();
+    return true;
+  } catch (error) { if (!startup) showError(error); return false; }
+}
+function initializeUpdates() {
+  $('appVersionButton').addEventListener('click',() => showWhatsNew(false));
+  $('whatsNewOpen').addEventListener('click',() => showWhatsNew(false));
+  $('whatsNewClose').addEventListener('click',() => $('whatsNewDialog').close());
+  $('updateNotesOpen').addEventListener('click',() => openUpdateDialog(false));
+  // From an installation Update starts at once; an unzipped copy first says where the update goes.
+  $('updateOpen').addEventListener('click',() => openUpdateDialog(!updates?.portable));
+  $('updateHide').addEventListener('click',() => { updateBannerHidden = true; renderUpdates(); });
+  const leaveUpdate = () => { if (updates?.installing && !updates.handedOff) request('updateCancel').catch(()=>{}); };
+  $('updateLater').addEventListener('click',() => { leaveUpdate(); $('updateDialog').close(); });
+  $('updateDialog').addEventListener('cancel',leaveUpdate);
+  $('updatePage').addEventListener('click',() => request('updatePage').catch(showError));
+  $('updateInstall').addEventListener('click',() => installUpdate());
+  $('updateCheckNow').addEventListener('click',() => checkUpdates(true));
+  $('updateAuto').addEventListener('change',e => setUpdateChecks(e.target.checked));
+}
 async function initialize() {
   const groups = {engine:'Every pilot',foveation:'VR',setup:'Setup & safety'};
   pages.forEach((p,index) => { if (groups[p[0]]) { const g = document.createElement('div'); g.className = 'rail-group'; g.id = 'railGroup-'+p[0]; g.textContent = groups[p[0]]; $('navigation').append(g); } const b = document.createElement('button'); b.id = 'nav-'+p[0]; b.className = 'nav-item'; b.title = index < 9 ? p[1]+' (Ctrl '+(index+1)+')' : p[1]; b.setAttribute('aria-label',p[1]); b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${p[4]}"/></svg><div><b>${p[5] || p[1]}</b><small>${p[3]}</small></div>`; b.addEventListener('click',() => navigate(p[0])); $('navigation').append(b); });
@@ -1114,8 +1230,9 @@ async function initialize() {
   $('pupilLog').addEventListener('click',() => request('pupilOpenLog').catch(showError));
   $('searchOpen').addEventListener('click',openSearch); $('searchClose').addEventListener('click',() => $('searchDialog').close()); $('searchInput').addEventListener('input',renderSearch); $('searchInput').addEventListener('keydown',e => { if (e.key === 'Enter') { e.preventDefault(); revealSetting(searchResults[0]); } });
   $('refreshFlight').addEventListener('click',() => loadFlight(0)); $('resetApplied').addEventListener('click',resetToApplied);
+  initializeUpdates();
   document.addEventListener('keydown',e => { if (e.ctrlKey && (e.code === 'KeyK' || e.key.toLowerCase() === 'k')) { e.preventDefault(); if (!$('searchDialog').open) openSearch(); } const digit = /^Digit([1-9])$/.exec(e.code)?.[1] ?? (/^[1-9]$/.test(e.key) ? e.key : null); if (e.ctrlKey && !e.altKey && digit && Number(digit) <= pages.length) { e.preventDefault(); navigate(pages[Number(digit)-1][0]); } });
-  try { sync(await request('ready')); loadFlight(); window.uiReady = true; }
+  try { sync(await request('ready')); loadFlight(); window.uiReady = true; showWhatsNew(true); checkUpdates(false); }
   catch(e) { showError(e); }
 }
 initialize();
@@ -1126,7 +1243,7 @@ function adoptDraft(next) {
   showProfile(); change(); boostChanged();
 }
 // Test hooks exercise the same controls and command bridge; the fixture host never starts DCS or opens dialogs.
-window.dcsUi = {request,run,saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); },navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,get boostRequests(){return boostSequence;},get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
+window.dcsUi = {request,run,checkUpdates,installUpdate,setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); },navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,get boostRequests(){return boostSequence;},get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
 document.addEventListener('click', e => { const stage = e.target.closest('.stage[data-page], [data-open-page]'); if (stage && !busy) navigate(stage.dataset.page || stage.dataset.openPage); });
 document.addEventListener('click', e => {
   const link = e.target.closest('[data-reveal]'); if (!link || busy) return;

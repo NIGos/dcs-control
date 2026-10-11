@@ -1,4 +1,5 @@
 using System.IO;
+using System.Net.Http;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Interop;
@@ -106,6 +107,34 @@ internal static class WebVerification
         if (service.Originals.Status() is not { Count: 0, Current: null }) throw new IOException("The documentation fixture was not restored.");
     }
 
+    /// <summary>GitHub's release list as the update check sees it, served without network: a newer pre-release (this
+    /// version's patch + 1) with its setup and signature, a higher draft and a malformed tag that must be ignored, an older
+    /// release. The setup is signed with a throwaway key that replaces the release key for this run only, and its first
+    /// download arrives altered (the signature must refuse it). The release notes carry markup that must stay text. This
+    /// version's release notes come from a fixture RELEASE_NOTES.md, and the settings record an earlier version, so What's
+    /// new opens at start like after an update.</summary>
+    private static (Updates Updates, string NotesPath, string Version, UpdateFixtureHandler Handler) UpdateFixture(string root, string stateRoot)
+    {
+        var current = ReleaseVersion.Parse(ProductInfo.Version) ?? throw new InvalidOperationException("The product version is not a release version.");
+        var next = (current with { Patch = current.Patch + 1 }).ToString();
+        using var key = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+        var setup = System.Text.Encoding.UTF8.GetBytes("Offline update fixture. Never executed.");
+        var signature = Convert.ToBase64String(key.SignData(setup, System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.DSASignatureFormat.IeeeP1363FixedFieldConcatenation));
+        var name = $"DcsControl-{next}-Setup.exe"; var download = $"https://github.com/NIGos/dcs-control/releases/download/v{next}/";
+        const string notes = "**Hostile notes check** <img src=x onerror=\"window.notesInjected=true\"> <script>window.notesInjected=true</script>\n\n- First bullet with `code`\n  - Nested bullet\n- Second bullet\n\nA [link](https://example.invalid/) in a paragraph.";
+        object Release(string tag, bool draft, string body, object[] assets) => new { tag_name = tag, draft, prerelease = true, html_url = Updates.ReleasesPage + "/tag/" + tag, body, published_at = "2026-10-11T12:00:00Z", assets };
+        var releases = JsonSerializer.Serialize(new[] {
+            Release("v99.0.0", true, "A draft is never offered.", []), Release("nightly", false, "Not a version.", []),
+            Release("v" + next, false, notes, [new { name, browser_download_url = download + name, size = setup.Length }, new { name = name + ".sig", browser_download_url = download + name + ".sig", size = signature.Length }]),
+            Release("v0.4.0-preview", false, "Older.", []) });
+        var handler = new UpdateFixtureHandler(new Dictionary<string, byte[]> { [Updates.ReleasesUrl] = System.Text.Encoding.UTF8.GetBytes(releases),
+            [download + name] = setup, [download + name + ".sig"] = System.Text.Encoding.ASCII.GetBytes(signature) }, download + name);
+        var notesPath = Path.Combine(Directory.CreateDirectory(Path.Combine(root, "release-notes")).FullName, "RELEASE_NOTES.md");
+        File.WriteAllText(notesPath, $"# {current.Short}{(current.Suffix.Length > 0 ? " " + current.Suffix : "")}\n\n**Fixture notes** for this version, <b>not markup</b>.\n- One\n- Two\n\n# 0.4.0 preview\n\nOlder notes that must not show.\n");
+        new AppSettingsStore(stateRoot).Save(new(true, "0.4.0-preview"));
+        return (new Updates(stateRoot, handler, publicKeyPem: key.ExportSubjectPublicKeyInfoPem(), downloadRoot: Path.Combine(root, "update-downloads")), notesPath, next, handler);
+    }
+
     public static async Task Run(string output)
     {
         output = Path.GetFullPath(output); Directory.CreateDirectory(Path.GetDirectoryName(output)!);
@@ -154,7 +183,8 @@ internal static class WebVerification
         PimaxFovea.SettingsPath = pimax;
         HeadsetRefresh.PimaxLogFolder = Path.Combine(fixture, "no-pimax-logs"); HeadsetRefresh.PimaxRuntimeFolder = Path.Combine(fixture, "no-pimax-runtime"); HeadsetRefresh.SteamVrSettings = Path.Combine(fixture, "no-steamvr.vrsettings");
         GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 4090", "NVIDIA", "32.0.15.0")];
-        var bridge = new WebBridge(service,capture: (_,_) => inventory,offline:true,flightSources:(_,_) => flight with { DcsLog = Path.Combine(logs, "dcs.log") });
+        var update = UpdateFixture(Path.Combine(fixture, "updates"), service.StateRoot);
+        var bridge = new WebBridge(service,capture: (_,_) => inventory,offline:true,flightSources:(_,_) => flight with { DcsLog = Path.Combine(logs, "dcs.log") },updates:update.Updates,releaseNotesPath:update.NotesPath);
         using var source = new HwndSource(new HwndSourceParameters("DCS Control offline web verification") { Width = 1320, Height = 920, WindowStyle = unchecked((int)0x80000000), PositionX = -32000, PositionY = -32000 });
         var env = await CoreWebView2Environment.CreateAsync(null,Path.Combine(fixture,"browser"),new CoreWebView2EnvironmentOptions("--disable-background-networking --disable-component-update --no-first-run --disable-renderer-backgrounding --disable-background-timer-throttling --disable-features=CalculateNativeWinOcclusion"));
         Log("Environment ready");
@@ -170,7 +200,7 @@ internal static class WebVerification
             // A signed x64 DLL that is not NVIDIA's, named like the runtime: it must never become the saved copy.
             var invalidRuntime = Path.Combine(fixture,"not-nvidia/nvngx_dlssnr.dll"); Directory.CreateDirectory(Path.GetDirectoryName(invalidRuntime)!);
             File.Copy(Path.Combine(AppContext.BaseDirectory,"WebView2Loader.dll"),invalidRuntime,true);
-            await core.AddScriptToExecuteOnDocumentCreatedAsync("window.offlineFixture="+JsonSerializer.Serialize(new { neuralRuntimePath = neural, invalidRuntimePath = invalidRuntime, pimaxMode = fine ? "Fine" : "Quick" })+";");
+            await core.AddScriptToExecuteOnDocumentCreatedAsync("window.offlineFixture="+JsonSerializer.Serialize(new { neuralRuntimePath = neural, invalidRuntimePath = invalidRuntime, pimaxMode = fine ? "Fine" : "Quick", updateVersion = update.Version })+";");
             Log("Controller ready");
             core.NavigationStarting += (_,e) => Log("Navigation: "+e.Uri+" cancelled="+e.Cancel);
             core.ProcessFailed += (_,e) => Log("Process failed: "+e.ProcessFailedKind+" "+e.Reason);
@@ -193,6 +223,14 @@ internal static class WebVerification
             File.WriteAllText(output+"-checks.json",checks.GetRawText());
             if (!checks.GetProperty("passed").GetBoolean()) throw new IOException("Web interface verification failed: "+checks.GetRawText());
             if (new DraftStore(service.StateRoot).Load() is null) throw new IOException("The draft was not kept for the next start.");
+            // The update: the altered first download was deleted, the second kept with its signature; nothing else was fetched.
+            var downloads = Directory.Exists(update.Updates.DownloadRoot) ? Directory.GetFiles(update.Updates.DownloadRoot, "*", SearchOption.AllDirectories).Select(Path.GetFileName).Order(StringComparer.Ordinal).ToArray() : [];
+            var setupName = $"DcsControl-{update.Version}-Setup.exe";
+            if (!downloads.SequenceEqual([setupName, setupName + ".sig"]) || !update.Updates.VerifyFile(Path.Combine(update.Updates.DownloadRoot, update.Version, setupName)))
+                throw new IOException("The update download did not end with only the verified setup: " + string.Join(", ", downloads));
+            if (update.Handler.Requests.Any(r => !r.StartsWith("https://api.github.com/", StringComparison.Ordinal) && !r.StartsWith("https://github.com/NIGos/dcs-control/releases/download/", StringComparison.Ordinal)))
+                throw new IOException("The update asked another address: " + string.Join(", ", update.Handler.Requests));
+            if (new AppSettingsStore(service.StateRoot).Load().LastSeenVersion != ProductInfo.Version) throw new IOException("What's new was not recorded as seen.");
             // The neutral demo layout alone keeps the regular renders (release previews); DCSVR_SMOKE_DOC_VIEWS=1 makes the
             // documentation screenshots instead.
             if (demoRoot is not null && Environment.GetEnvironmentVariable("DCSVR_SMOKE_DOC_VIEWS") == "1") { await DocumentationViews(core, controller, service, output, neural, Log); return; }
@@ -306,10 +344,31 @@ internal static class WebVerification
                 if (service.Originals.Status() is not { Count: 0, Current: null } || File.Exists(settings.Path)) throw new IOException("Restore after the in-place update did not complete cleanly.");
             }
             finally { File.WriteAllText(pimax, pimaxBefore); }
+            // The update banner on the Overview (the smoke hid it), then the update dialog with the fixture's release notes.
+            await core.ExecuteScriptAsync("document.getElementById('updateBanner').hidden=false;");
+            await Capture("update-available");
+            await core.ExecuteScriptAsync("document.getElementById('updateNotesOpen').click();");
+            await Capture("update-dialog");
+            await core.ExecuteScriptAsync("document.getElementById('updateLater').click();document.getElementById('updateBanner').hidden=true;");
             File.WriteAllText(output+"-renders.json",JsonData.Serialize(screenshots));
             var after = File.ReadAllText(options);
             if (after != "options={graphics={Upscaling=\"DLSS\"},VR={enable=false}}") throw new IOException("Fixture restoration was incomplete.");
         }
         finally { controller.Close(); }
+    }
+}
+
+/// <summary>The update check's network in the offline verification: fixed answers by URL, every request recorded. The
+/// setup's first download arrives with one byte changed.</summary>
+internal sealed class UpdateFixtureHandler(IReadOnlyDictionary<string, byte[]> answers, string alteredOnce) : HttpMessageHandler
+{
+    private int _altered;
+    public System.Collections.Concurrent.ConcurrentQueue<string> Requests { get; } = new();
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var url = request.RequestUri!.AbsoluteUri; Requests.Enqueue(url);
+        if (!answers.TryGetValue(url, out var bytes)) return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.NotFound));
+        if (url == alteredOnce && Interlocked.Exchange(ref _altered, 1) == 0) { bytes = (byte[])bytes.Clone(); bytes[0] ^= 1; }
+        return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) });
     }
 }

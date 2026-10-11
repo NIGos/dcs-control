@@ -1,6 +1,6 @@
 # DCS Control — User Guide
 
-**Version 0.5.5-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`.
+**Version 0.5.6-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`.
 
 > **Early beta.** DCS Control has been flown mostly on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe — but please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
 
@@ -11,6 +11,7 @@
 - [What the app does](#what-the-app-does)
 - [Requirements](#requirements)
 - [Install](#install)
+- [Updates](#updates)
 - [First run](#first-run)
 - [The features](#the-features)
 - [Launch DCS](#launch-dcs)
@@ -56,27 +57,49 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
   - **Pimax Play** (the original Pimax OpenXR runtime), or
   - **SteamVR with the Sboys driver** (CustomHeadsetOpenVR 1.3.0; for SLAM tracking it needs Pimax EVO).
 - **DCS World 2.9**, Steam edition or standalone.
-- **Microsoft Edge WebView2 Runtime** (already on most Windows 10 and 11 PCs) and the **Microsoft Visual C++ x64 runtime 14.50 or newer**. `Install DCS Control.cmd` checks both and installs them from Microsoft if they are missing.
+- **Microsoft Edge WebView2 Runtime** (already on most Windows 10 and 11 PCs) and the **Microsoft Visual C++ x64 runtime 14.50 or newer**. The setup (and `Install DCS Control.cmd`) checks both and installs them from Microsoft if they are missing.
 - For DLSS 5: your own signed NVIDIA **`nvngx_dlssnr.dll`, version 310.8** (see [DLSS 5](#dlss-5)). It is not included and the app does not download it.
 
 ## Install
 
-Download `DcsControl-0.5.5-preview-win-x64.zip` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and extract it to a folder of your choice. Then either:
+**With the setup (recommended):** download `DcsControl-0.5.6-preview-Setup.exe` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and double-click it. Its first page lets you choose:
+
+- the **install folder**: `%LOCALAPPDATA%\Programs\DcsControl` unless you pick another one with **Browse...** (it shows the space needed and free). Any folder your Windows user can write to works, for example `D:\Games\DcsControl`; `Program Files` needs administrator rights, so it is refused. A folder that already holds other files gets a `DcsControl` folder inside it;
+- whether DCS Control goes in the **Start menu** and on the **desktop**.
+
+**Install** then checks the files it carries, installs WebView2 / the C++ runtime from Microsoft if they are missing (this step may need internet access and an administrator prompt for the C++ runtime), installs DCS Control for your Windows user (no administrator rights) with an entry in **Settings → Apps → Installed apps**, and offers to open it.
+
+It waits until DCS and DCS Control are closed (the page says which one is still open). Running it again over an installed copy updates it in place; if anything goes wrong the installation is rolled back to the version you had. Its log is `%TEMP%\DcsControl-Setup.log`.
+
+**Portable, from the ZIP:** download `DcsControl-0.5.6-preview-win-x64.zip` and extract it to a folder of your choice. Then either:
 
 - **Run it directly:** double-click `DcsControl.exe` in the extracted folder (.NET is included), or
-- **Install it:** double-click `Install DCS Control.cmd`. It verifies the files, installs the app for your Windows user under `%LOCALAPPDATA%\Programs\DcsControl`, adds **DCS Control** to the Start menu, and installs WebView2 / the C++ runtime from Microsoft if they are missing (this step may need internet access and an administrator prompt for the C++ runtime).
+- **Install it:** double-click `Install DCS Control.cmd`. It does what the setup does, in a console window, with the Start menu entry but no desktop shortcut.
 
 The folder contains only three things: **`DcsControl.exe`** (the app), **`Install DCS Control.cmd`** and a **`files`** folder with everything else (keep it next to `DcsControl.exe`), plus a short `README.txt`. The folder can be anywhere: Desktop, Downloads, another drive. The app keeps its own data (backups, profiles) in `%LOCALAPPDATA%`, so moving the folder loses nothing.
 
 **How the app finds DCS:** the standalone version from Windows' list of installed programs ("DCS World", also OpenBeta), the Steam version from your Steam libraries, and your settings from `Saved Games\DCS` (or `DCS.openbeta`). If it finds nothing, or you have more than one install, pick `DCS.exe` and `options.lua` on the **DCS & headset** page.
 
-If you had **DCS VR Control** installed (the app's name before 0.5.0), `Install DCS Control.cmd` replaces it and its Start menu entry; your backups and profiles stay where they are and Back to stock DCS keeps working.
+If you had **DCS VR Control** installed (the app's name before 0.5.0), the setup (or `Install DCS Control.cmd`) replaces it and its Start menu entry; your backups and profiles stay where they are and Back to stock DCS keeps working.
 
 Installing the app does not touch DCS or your VR software. Nothing is written into DCS until you press **Launch DCS** (or **Apply without launching**).
 
 The preview is not code-signed, so Windows SmartScreen may warn you the first time you open it.
 
 > **Always open the app from the Start menu or from Explorer**, not from a script runner or another program's terminal. See [the DCS launcher option](#the-dcs-launcher-option) for why.
+
+## Updates
+
+When DCS Control starts it asks GitHub whether a newer release is out (at most every 6 hours; only the list of releases is fetched, nothing about your PC is sent). When there is one, the **Overview** shows **DCS Control 0.5.x is available** with:
+
+- **What's new**: that release's notes;
+- **Update**: downloads the release's setup, checks its **signature** against the release key built into the app (a download that does not match is deleted and nothing is installed), closes DCS Control, installs the new version and starts it again. Your profiles, backups and the applied profile stay as they are.
+
+Update refuses while DCS runs. A copy started from an unzipped folder is updated by installing DCS Control in the standard folder (`%LOCALAPPDATA%\Programs\DcsControl`, with Start menu and desktop shortcuts); the dialog says so, and afterwards you can delete the old folder. A dot next to the version number at the bottom of the left rail also means an update is available; × hides the banner until the next start.
+
+On the **Diagnostics** page, **Check for updates when DCS Control starts** turns the automatic check off (it is on by default) and **Check now** asks GitHub at once. Without internet nothing happens: no update is shown.
+
+**What's new** after an update: the first start of a new version shows its release notes once. Click the version number at the bottom of the left rail (or **What's new in this version** on the Diagnostics page) to see them again.
 
 ## First run
 
@@ -365,8 +388,8 @@ DLSS 5 and Foveated SR need the file name `dxgi.dll` in DCS's `bin` folder. When
 ### How do I uninstall?
 
 1. Open the app and press **Back to stock DCS** (Stock DCS page) with DCS closed.
-2. Run `files\Uninstall.cmd` from the installed (or extracted) folder. It removes the application files after checking them; your profiles and backups stay.
-3. If you want everything gone, delete `%LOCALAPPDATA%\DcsControl` (or `%LOCALAPPDATA%\DcsVrControl` if you used the app before 0.5.0) afterwards (only after Back to stock DCS — it holds the backups).
+2. Uninstall **DCS Control** in **Settings → Apps → Installed apps**, or double-click `Uninstall DCS Control.exe` in the installed folder. Its window says what it removes (the application files after checking them, the shortcuts and the Apps entry). If DCS still has DCS Control's changes, it offers **Put DCS back to stock first** (on by default), so step 1 can be done there too. Your profiles and backups stay, unless you tick **Also delete my DCS Control profiles, settings and logs**. A copy installed with `Install DCS Control.cmd` uninstalls with `files\Uninstall.cmd`; a portable copy is just a folder: delete it.
+3. To remove the profiles later by hand, delete `%LOCALAPPDATA%\DcsControl` (or `%LOCALAPPDATA%\DcsVrControl` if you used the app before 0.5.0), only after Back to stock DCS — it holds the backups.
 
 The Sboys driver, if you installed it, is managed by its own tool.
 

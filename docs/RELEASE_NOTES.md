@@ -1,3 +1,13 @@
+# 0.5.6 preview
+
+**One-file setup**: `DcsControl-0.5.6-preview-Setup.exe` installs DCS Control for your Windows user, in `%LOCALAPPDATA%\Programs\DcsControl` or a folder you choose (it shows the space needed and free), with the Start menu and desktop shortcuts you tick and an entry in Settings → Apps. **Uninstall DCS Control** (Settings → Apps, or `Uninstall DCS Control.exe` in the folder) is a window too: it can put DCS back to stock first and, if you ask, delete your profiles and settings. No administrator rights, no console windows; WebView2 and the Visual C++ runtime come from Microsoft when they are missing, and an installed copy is updated in place (a failed update rolls back). It waits until DCS and DCS Control are closed. The ZIP stays available for a portable copy.
+
+**Updates from the app**: when a newer release is on GitHub, the Overview shows "DCS Control 0.5.x is available" with **What's new** (the release notes) and **Update**. Update downloads the setup, checks its signature against the release key built into the app (a file that does not match is deleted and nothing is installed), closes DCS Control, installs and starts the new version. It refuses while DCS runs. From an unzipped copy the update installs DCS Control in the standard folder and says that the old folder can be deleted.
+- The check asks GitHub at most every 6 hours and never sends anything about your PC; it can be turned off on the Diagnostics page (**Check for updates when DCS Control starts**), where **Check now** asks at once.
+- Without internet nothing changes: no update is shown.
+
+**What's new**: the first start after an update shows that version's release notes once; click the version number at the bottom of the left rail to see them again.
+
 # 0.5.5 preview
 
 **Terrain prefetch fix moved into Engine Optimizations**: the fix for DCS's terrain workers, which ask Windows to prefetch the same memory ranges about a million times a second, now runs inside the engine optimizations module instead of a separate DLL. It is an option on the Engine Optimizations page (Off, Observe, Skip repeats; Skip by default) and no longer part of CPU Boost. Measured in an A/B: about 4 % less DCS CPU, more on CPU-bound scenes.

@@ -1,4 +1,6 @@
-param([switch]$NoRestore)
+# -Sign: a release for publishing; it fails when the release signing key is missing (without it, a developer build
+# warns and leaves the setup and ZIP unsigned).
+param([switch]$NoRestore, [switch]$Sign)
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $env:DOTNET_CLI_TELEMETRY_OPTOUT='1'
@@ -137,10 +139,10 @@ $presets | Set-Content -LiteralPath (Join-Path $payloadRoot 'profiles/presets.js
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0files\scripts\installer.ps1" -Action Install -InstallPrerequisites
 pause
 '@ | Set-Content -LiteralPath (Join-Path $releaseRoot 'Install DCS Control.cmd') -Encoding ascii
+# One line ending in exit: the uninstaller removes this file, and cmd must not read it again afterwards.
 @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\installer.ps1" -Action Uninstall
-pause
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\installer.ps1" -Action Uninstall & pause & exit /b
 '@ | Set-Content -LiteralPath (Join-Path $payloadRoot 'Uninstall.cmd') -Encoding ascii
 # The top of the release folder also holds a short README next to the launcher and the installer command.
 @"
@@ -149,6 +151,7 @@ DCS Control $version
 
 Start: double-click DcsControl.exe (it can stay in this folder, anywhere you like).
 Install with a Start menu entry: double-click "Install DCS Control.cmd".
+(DcsControl-$version-Setup.exe on the Releases page installs it in one step, with Start menu and desktop shortcuts.)
 
 The files folder holds the rest of the app: leave it next to DcsControl.exe.
 
@@ -165,4 +168,11 @@ $releaseZip = $releaseRoot + '.zip'
 if (Test-Path -LiteralPath $releaseZip) { Remove-Item -LiteralPath $releaseZip }
 [IO.Compression.ZipFile]::CreateFromDirectory($releaseRoot, $releaseZip, [IO.Compression.CompressionLevel]::Optimal, $true)
 (Get-FileHash -LiteralPath $releaseZip -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($releaseZip + '.sha256') -Encoding ascii
+# The setup a pilot downloads: native/setup with this ZIP appended (scripts/build-setup.ps1). It and the ZIP are signed
+# with the release key (scripts/sign-release.ps1); DCS Control's updater installs only a setup whose signature verifies.
+$setup = Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-Setup.exe"
+& (Join-Path $PSScriptRoot 'build-setup.ps1') -Package $releaseZip -Output $setup | Out-Null
+(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($setup + '.sha256') -Encoding ascii
+& (Join-Path $PSScriptRoot 'sign-release.ps1') -Files $setup, $releaseZip -Required:$Sign
+Write-Output $setup
 Write-Output $releaseZip

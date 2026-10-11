@@ -1,8 +1,12 @@
 """Verify archives, packaged assets and recorded offline results without launching software."""
 import argparse
+import base64
 import hashlib
+import os
+import re
 import json
 from pathlib import Path
+import struct
 import subprocess
 import zipfile
 
@@ -46,6 +50,8 @@ for kind, archive in [('binary', Path(str(release)+'.zip')), ('source', root/f'a
             for n in z.namelist():
                 if n.lower().endswith(('.json', '.txt', '.md', '.cmd', '.ps1', '.ini', '.cfg', '.lua', '.html', '.js', '.css')):
                     assert home not in z.read(n).lower() and home.replace(b'\\', b'/') not in z.read(n).lower(), 'Build machine path in the package: ' + n
+                    # The release signing key never leaves the release machine's %USERPROFILE%\.dcs-control-signing.
+                    assert b'PRIVATE KEY' not in z.read(n), 'A private key in the package: ' + n
             result['manifestFiles'] = len(manifest['files'])
         else:
             assert not any(n.startswith('upstream/') and n.lower().endswith(('.exe','.dll','.lib','.pdb')) for n in z.namelist()), 'General-purpose vendor build binaries were bundled'
@@ -58,11 +64,53 @@ for kind, archive in [('binary', Path(str(release)+'.zip')), ('source', root/f'a
         result[kind] = {'path':str(archive), 'bytes':archive.stat().st_size, 'sha256':digest(archive.read_bytes()), 'entries':len(z.namelist())}
         assert Path(str(archive)+'.sha256').read_text().strip() == result[kind]['sha256']
 
+# The setup: the setup program followed by exactly this release's ZIP, its SHA-256, offset and length and the marker the
+# setup checks before it unpacks anything.
+setup = root/f'artifacts/release/DcsControl-{version}-Setup.exe'
+setup_bytes = setup.read_bytes()
+zip_bytes = Path(str(release)+'.zip').read_bytes()
+offset, length = struct.unpack('<QQ', setup_bytes[-24:-8])
+assert setup_bytes[-8:] == b'DCSCSFX1' and offset + length + 56 == len(setup_bytes), 'Setup trailer'
+assert setup_bytes[offset:offset+length] == zip_bytes and setup_bytes[-56:-24] == hashlib.sha256(zip_bytes).digest(), 'The setup does not carry this release ZIP'
+assert setup_bytes[:2] == b'MZ' and b'requestedExecutionLevel level="asInvoker"' in setup_bytes[:offset], 'The setup must run without administrator rights'
+assert Path(str(setup)+'.sha256').read_text().strip() == digest(setup_bytes)
+assert not any(p.lower().endswith(('.pem', '.key', '.pfx')) for p in os.listdir(setup.parent)), 'A key file next to the release files'
+
+# The setup and the ZIP are signed with the release key: base64 of the IEEE P1363 (r, s) ECDSA P-256 / SHA-256
+# signature, checked with the public key DCS Control embeds (src/DcsVr.Core/Updates.cs), as its updater does.
+public_pem = re.search(r'-----BEGIN PUBLIC KEY-----[\s\S]+?-----END PUBLIC KEY-----', (root/'src/DcsVr.Core/Updates.cs').read_text(encoding='utf-8')).group(0)
+public_pem = '\n'.join(line.strip() for line in public_pem.splitlines()) + '\n'
+def signature_valid(path):
+    signature = base64.b64decode(Path(str(path)+'.sig').read_text(encoding='ascii').strip(), validate=True)
+    assert len(signature) == 64, 'Signature length: ' + path.name
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+    except ImportError:
+        # Without the cryptography module, .NET (PowerShell 7) verifies it the way the app does.
+        script = ('$k=[Security.Cryptography.ECDsa]::Create();$k.ImportFromPem($env:DCSC_PUBLIC_KEY);$s=[IO.File]::OpenRead($env:DCSC_FILE);'
+                  'try{if($k.VerifyData($s,[Convert]::FromBase64String($env:DCSC_SIGNATURE),[Security.Cryptography.HashAlgorithmName]::SHA256,'
+                  '[Security.Cryptography.DSASignatureFormat]::IeeeP1363FixedFieldConcatenation)){exit 0}else{exit 1}}finally{$s.Dispose()}')
+        env = dict(os.environ, DCSC_PUBLIC_KEY=public_pem, DCSC_FILE=str(path), DCSC_SIGNATURE=base64.b64encode(signature).decode())
+        return subprocess.run(['pwsh', '-NoProfile', '-Command', script], env=env).returncode == 0
+    key = serialization.load_pem_public_key(public_pem.encode())
+    assert isinstance(key, ec.EllipticCurvePublicKey) and key.curve.name == 'secp256r1'
+    try:
+        key.verify(encode_dss_signature(int.from_bytes(signature[:32], 'big'), int.from_bytes(signature[32:], 'big')), path.read_bytes(), ec.ECDSA(hashes.SHA256()))
+        return True
+    except InvalidSignature:
+        return False
+for signed in (setup, Path(str(release)+'.zip')):
+    assert signature_valid(signed), 'Release signature does not verify: ' + signed.name
+result['setup'] = {'path': str(setup), 'bytes': len(setup_bytes), 'sha256': digest(setup_bytes), 'signed': True}
+
 result['manager'] = json.loads(Path(args.manager).read_text(encoding='utf-8-sig'))
 assert result['manager']['passed'] == result['manager']['total'] and result['manager']['total'] >= 124
 fixture = Path(args.fixture)
 result['installer'] = json.loads((fixture/'result.json').read_text(encoding='utf-8-sig'))
-assert result['installer']['passed'] and result['installer']['previousReleaseUpgradeChecked']
+assert result['installer']['passed'] and result['installer']['previousReleaseUpgradeChecked'] and result['installer'].get('setupChecked'), 'The setup was not installed and uninstalled in the release test'
 # Both runs pass every check they make; the installed run (with the NR runtime) makes at least as many, and every
 # render fits its window. The counts come from the runs themselves, never from numbers kept here.
 for name, prefix in [('packagedWebView',release/'files/docs/interface'),('installedWebView',fixture/'gui')]:
@@ -97,4 +145,4 @@ for path, expected in baseline.items():
 result['actualSettingsReadOnlyCheck'] = baseline
 output = root/f'artifacts/release-verification-{version.split("-")[0]}.json'
 output.write_text(json.dumps(result,indent=2),encoding='utf-8')
-print(json.dumps({'passed':True,'evidence':str(output),'managerChecks':result['manager']['total'],'webViewChecks':result['packagedWebView']['checks'],'installedWebViewChecks':result['installedWebView']['checks'],'rendersPerRun':result['packagedWebView']['renders'],'binaryBytes':result['binary']['bytes']}))
+print(json.dumps({'passed':True,'evidence':str(output),'managerChecks':result['manager']['total'],'webViewChecks':result['packagedWebView']['checks'],'installedWebViewChecks':result['installedWebView']['checks'],'rendersPerRun':result['packagedWebView']['renders'],'binaryBytes':result['binary']['bytes'],'setupBytes':result['setup']['bytes'],'signed':True}))

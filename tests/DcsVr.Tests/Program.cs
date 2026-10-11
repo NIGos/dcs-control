@@ -2628,6 +2628,144 @@ Test("Monitor mode: set for the flight only, put back exactly, kept when the use
     Require(ProfileValidation.Validate(new VrProfile { LowerMonitor = true, FlightDisplayWidth = 100 }).Any(i => i.Code == "monitor-mode") && !ProfileValidation.Validate(new VrProfile { LowerMonitor = true }).Any(i => i.Code == "monitor-mode"));
 });
 
+// --- Updates: versions, release selection, the 6-hour throttle, signatures, release notes, app settings (no network) ---
+Test("Release versions read tags with or without v and order pre-releases before their release", () =>
+{
+    Require(ReleaseVersion.Parse("v0.5.6-preview") is { Major: 0, Minor: 5, Patch: 6, Suffix: "preview" } && ReleaseVersion.Parse("0.5.6") is { Suffix: "" });
+    Require(ReleaseVersion.IsNewer("v0.5.6-preview", "0.5.5-preview") && ReleaseVersion.IsNewer("0.5.6", "0.5.6-preview") && !ReleaseVersion.IsNewer("0.5.6-preview", "0.5.6"));
+    Require(ReleaseVersion.IsNewer("v1.0.0-preview", "0.99.99") && ReleaseVersion.IsNewer("0.10.0", "0.9.9") && !ReleaseVersion.IsNewer("v0.5.5-preview", "0.5.5-preview"));
+    Require(ReleaseVersion.IsNewer("0.5.6-preview.10", "0.5.6-preview.9") && ReleaseVersion.IsNewer("0.5.6-rc", "0.5.6-preview") && ReleaseVersion.IsNewer("0.5.6-preview.1", "0.5.6-preview"));
+    Require(ReleaseVersion.Parse(ProductInfo.Version) is not null, "the product version is a release version");
+    foreach (var bad in new[] { "", "latest", "v1.2", "v1.2.3.4", "1.2.3-", "1.2.3-pre view", "vv1.2.3", "1.2.3+build", "v1.2.3-preview..1", "x1.2.3", "1234567.0.0" })
+        Require(ReleaseVersion.Parse(bad) is null && !ReleaseVersion.IsNewer(bad, "0.0.1"), "malformed tag accepted: " + bad);
+});
+Exception? Failure(Task task) { try { task.Wait(); return null; } catch (AggregateException e) { return e.InnerException; } }
+const string ReleaseDownload = "https://github.com/NIGos/dcs-control/releases/download/";
+string ReleaseList(params object[] releases) => System.Text.Json.JsonSerializer.Serialize(releases);
+object GitHubRelease(string tag, bool draft = false, bool assets = true, string? body = null, string? assetRoot = null) => new
+{
+    tag_name = tag, draft, prerelease = tag.Contains('-'), html_url = Updates.ReleasesPage + "/tag/" + tag, body = body ?? "Notes for " + tag, published_at = "2026-10-11T10:00:00Z",
+    assets = assets ? new object[] {
+        new { name = $"DcsControl-{tag.TrimStart('v')}-win-x64.zip", browser_download_url = (assetRoot ?? ReleaseDownload + tag + "/") + $"DcsControl-{tag.TrimStart('v')}-win-x64.zip", size = 900 },
+        new { name = $"DcsControl-{tag.TrimStart('v')}-Setup.exe", browser_download_url = (assetRoot ?? ReleaseDownload + tag + "/") + $"DcsControl-{tag.TrimStart('v')}-Setup.exe", size = 1000 },
+        new { name = $"DcsControl-{tag.TrimStart('v')}-Setup.exe.sig", browser_download_url = (assetRoot ?? ReleaseDownload + tag + "/") + $"DcsControl-{tag.TrimStart('v')}-Setup.exe.sig", size = 88 } } : Array.Empty<object>()
+};
+Test("Release selection ignores drafts and malformed tags, takes the highest newer release and finds its setup and signature", () =>
+{
+    var json = ReleaseList(GitHubRelease("v9.0.0", draft: true), GitHubRelease("nightly"), GitHubRelease("v0.5.7-preview"), GitHubRelease("v0.5.8-preview", body: "**New** things"), GitHubRelease("v0.5.4-preview"));
+    var update = Updates.Select(json, "0.5.6-preview")!;
+    Require(update.Version == "0.5.8-preview" && update.Tag == "v0.5.8-preview" && update.Short == "0.5.8" && update.Notes == "**New** things" && update.PageUrl == Updates.ReleasesPage + "/tag/v0.5.8-preview");
+    Require(update.CanInstall && update.SetupName == "DcsControl-0.5.8-preview-Setup.exe" && update.SetupUrl == ReleaseDownload + "v0.5.8-preview/DcsControl-0.5.8-preview-Setup.exe"
+        && update.SignatureUrl == update.SetupUrl + ".sig" && update.SetupBytes == 1000 && update.Published == new DateTimeOffset(2026, 10, 11, 10, 0, 0, TimeSpan.Zero));
+    Require(Updates.Select(json, "0.5.8-preview") is null && Updates.Select(json, "0.5.8") is null && Updates.Select("[]", "0.5.6-preview") is null, "nothing newer, nothing offered");
+    Require(Updates.Select(ReleaseList(GitHubRelease("v0.5.7")), "0.5.7-preview")?.Version == "0.5.7", "the release after its pre-release");
+    // A release without a setup (or with assets off this repository's download path) can only be opened on GitHub.
+    Require(Updates.Select(ReleaseList(GitHubRelease("v0.5.7-preview", assets: false)), "0.5.6-preview") is { CanInstall: false, SetupUrl: null });
+    Require(Updates.Select(ReleaseList(GitHubRelease("v0.5.7-preview", assetRoot: "https://example.com/NIGos/dcs-control/releases/download/v0.5.7-preview/")), "0.5.6-preview") is { CanInstall: false });
+    Require(Updates.Select(ReleaseList(new { tag_name = "v0.5.7", draft = false, html_url = "https://evil.example/", body = (string?)null }), "0.5.6") is { PageUrl: Updates.ReleasesPage, Notes: "" });
+    Throws<System.Text.Json.JsonException>(() => Updates.Select("<html>", "0.5.6"));
+});
+Test("Update downloads only from this repository's release assets", () =>
+{
+    Require(Updates.AllowedAssetUrl(ReleaseDownload + "v0.5.7-preview/DcsControl-0.5.7-preview-Setup.exe"));
+    foreach (var url in new[] { "http://github.com/NIGos/dcs-control/releases/download/v1/x.exe", "https://github.com.evil.example/NIGos/dcs-control/releases/download/v1/x.exe",
+        "https://github.com/Other/dcs-control/releases/download/v1/x.exe", "https://github.com:8443/NIGos/dcs-control/releases/download/v1/x.exe", "https://github.com/NIGos/dcs-control/releases/download/../../x.exe", "not a url" })
+        Require(!Updates.AllowedAssetUrl(url), "allowed: " + url);
+});
+Test("The update check asks GitHub at most every 6 hours unless forced, and offline keeps what it knew", () =>
+{
+    var state = Path.Combine(root, "updates/throttle"); var now = new DateTimeOffset(2026, 10, 11, 8, 0, 0, TimeSpan.Zero);
+    var handler = new UrlFixtureHandler(new() { [Updates.ReleasesUrl] = Encoding.UTF8.GetBytes(ReleaseList(GitHubRelease("v0.5.7-preview"))) });
+    var updates = new Updates(state, handler, () => now, "0.5.6-preview");
+    Require(updates.Check().Result is { Error: null, Update.Version: "0.5.7-preview" } && handler.Requests.Count == 1);
+    now = now.AddHours(5.9); Require(updates.Check().Result.Update?.Version == "0.5.7-preview" && handler.Requests.Count == 1, "within 6 hours the cached check answers");
+    Require(updates.Check(force: true).Result.Update is not null && handler.Requests.Count == 2, "Check now always asks");
+    now = now.AddHours(6.1); Require(updates.Check().Result.Update is not null && handler.Requests.Count == 3, "after 6 hours it asks again");
+    Require(handler.Requests.All(r => r == Updates.ReleasesUrl) && handler.UserAgents.All(a => a.StartsWith("DcsControl/", StringComparison.Ordinal)), "only the release list, with a User-Agent");
+    // Offline: an error, not an exception, and the update found before is kept.
+    handler.Offline = true; now = now.AddHours(7);
+    var offline = updates.Check().Result;
+    Require(offline.Error is { Length: > 0 } && offline.Update?.Version == "0.5.7-preview" && offline.CheckedAt == now, "offline keeps the known update");
+    // A failed check is tried again after 30 minutes, not 6 hours.
+    handler.Offline = false; var asked = handler.Requests.Count;
+    now = now.AddMinutes(20); Require(updates.Check().Result.Error is not null && handler.Requests.Count == asked, "a failed check is kept for a while");
+    now = now.AddMinutes(15); Require(updates.Check().Result.Error is null && handler.Requests.Count == asked + 1, "a failed check is retried after 30 minutes");
+    handler.Offline = true;
+    Require(new Updates(Path.Combine(root, "updates/offline-first"), handler, () => now, "0.5.6-preview").Check().Result is { Update: null, Error: not null });
+    // A new installed version starts over: the cache was for another version, and an update that is no longer newer is dropped.
+    Require(new Updates(state, handler, () => now, "0.5.7-preview").Cached() is null);
+    AtomicFile.WriteText(updates.CachePath, "{ not json"); Require(updates.Cached() is null && updates.Check().Result.Error is not null, "a damaged cache is ignored");
+});
+Test("Release signatures: ECDSA P-256 over SHA-256 in IEEE P1363 form, a changed file or signature is refused", () =>
+{
+    using var key = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+    var publicPem = key.ExportSubjectPublicKeyInfoPem(); var data = Encoding.UTF8.GetBytes("setup bytes");
+    var signature = key.SignData(data, System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+    Require(signature.Length == 64 && Updates.Verify(new MemoryStream(data), signature, publicPem));
+    var changed = (byte[])data.Clone(); changed[0] ^= 1; Require(!Updates.Verify(new MemoryStream(changed), signature, publicPem), "changed file");
+    var forged = (byte[])signature.Clone(); forged[10] ^= 1; Require(!Updates.Verify(new MemoryStream(data), forged, publicPem), "changed signature");
+    Require(!Updates.Verify(new MemoryStream(data), signature, Updates.PublicKeyPem), "another key");
+    using var p384 = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP384);
+    Require(!Updates.Verify(new MemoryStream(data), new byte[96], p384.ExportSubjectPublicKeyInfoPem()), "only P-256");
+    Require(Updates.ParseSignature(Encoding.ASCII.GetBytes(Convert.ToBase64String(signature) + "\r\n")).SequenceEqual(signature));
+    Throws<InvalidDataException>(() => Updates.ParseSignature(Encoding.ASCII.GetBytes("not base64!")));
+    Throws<InvalidDataException>(() => Updates.ParseSignature(Encoding.ASCII.GetBytes(Convert.ToBase64String(new byte[70]))));
+});
+Test("The embedded release key is an ECDSA P-256 public key (and no private key)", () =>
+{
+    using var key = System.Security.Cryptography.ECDsa.Create(); key.ImportFromPem(Updates.PublicKeyPem);
+    Require(key.KeySize == 256 && (key.ExportParameters(false).Curve.Oid is { } curve && (curve.Value == "1.2.840.10045.3.1.7" || curve.FriendlyName is "nistP256" or "ECDSA_P256")) && !Updates.PublicKeyPem.Contains("PRIVATE", StringComparison.Ordinal));
+    Throws<System.Security.Cryptography.CryptographicException>(() => key.ExportParameters(true));
+});
+Test("A downloaded setup is kept only when its signature verifies; otherwise it is deleted", () =>
+{
+    using var key = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+    var setup = Encoding.UTF8.GetBytes("MZ setup fixture"); var update = Updates.Select(ReleaseList(GitHubRelease("v0.5.7-preview")), "0.5.6-preview")! with { SetupBytes = setup.Length };
+    var signature = Encoding.ASCII.GetBytes(Convert.ToBase64String(key.SignData(setup, System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.DSASignatureFormat.IeeeP1363FixedFieldConcatenation)));
+    var handler = new UrlFixtureHandler(new() { [update.SetupUrl!] = setup, [update.SignatureUrl!] = signature });
+    var downloads = Path.Combine(root, "updates/downloads");
+    var updates = new Updates(Path.Combine(root, "updates/download-state"), handler, currentVersion: "0.5.6-preview", publicKeyPem: key.ExportSubjectPublicKeyInfoPem(), downloadRoot: downloads);
+    var path = updates.Download(update).Result;
+    Require(path == Path.GetFullPath(Path.Combine(downloads, "0.5.7-preview", "DcsControl-0.5.7-preview-Setup.exe")) && File.ReadAllBytes(path).SequenceEqual(setup) && updates.VerifyFile(path));
+    File.WriteAllBytes(path, [.. setup, 0]); Require(!updates.VerifyFile(path), "a setup changed after the download is refused");
+    // Signed with another key (or altered on the way): refused and nothing is left behind.
+    var tampered = (byte[])setup.Clone(); tampered[3] ^= 1; handler.Answers[update.SetupUrl!] = tampered;
+    var refused = false; try { updates.Download(update).Wait(); } catch (AggregateException e) when (e.InnerException is InvalidDataException) { refused = true; }
+    Require(refused && Directory.GetFiles(downloads, "*", SearchOption.AllDirectories).Length == 0, "the refused setup and its signature are deleted");
+    Require(Failure(new Updates(Path.Combine(root, "updates/download-state"), handler, downloadRoot: downloads).Download(update)) is InvalidDataException, "the embedded key refuses a setup signed with another key");
+    // A release without a setup, or a size that does not match, never reaches the signature check.
+    Require(Failure(updates.Download(update with { SetupUrl = null })) is InvalidOperationException);
+    handler.Answers[update.SetupUrl!] = setup; Require(Failure(updates.Download(update with { SetupBytes = 5 })) is IOException);
+    updates.CleanDownloads(); Require(!Directory.EnumerateFileSystemEntries(downloads).Any());
+});
+Test("Release notes: the section of the running version, from its heading to the next", () =>
+{
+    var notes = "# 0.5.7 preview\r\n\r\n**New** in 0.5.7.\r\n- one\r\n\r\n# 0.5.6 preview\n\nSix.\n- a\n  - b\n\n# 0.5.5 preview\n\nFive.\n";
+    Require(Updates.ReleaseNotesSection(notes, "0.5.7-preview") == "**New** in 0.5.7.\n- one" && Updates.ReleaseNotesSection(notes, "0.5.6-preview") == "Six.\n- a\n  - b");
+    Require(Updates.ReleaseNotesSection(notes, "0.5.5-preview") == "Five." && Updates.ReleaseNotesSection(notes, "0.5.4-preview") is null && Updates.ReleaseNotesSection(notes, "garbage") is null);
+    Require(Updates.ReleaseNotesSection("# 1.0.0\n\nFinal.", "1.0.0") == "Final." && Updates.ReleaseNotesSection("# 0.5.6 preview\n\n# 0.5.5 preview\nx", "0.5.6-preview") is null);
+    var shipped = File.ReadAllText(Path.Combine(workspace, "docs/RELEASE_NOTES.md"));
+    Require(Updates.ReleaseNotesSection(shipped, ProductInfo.Version) is { Length: > 100 }, "docs/RELEASE_NOTES.md has a section for " + ProductInfo.Version);
+});
+Test("App settings: update checks on by default, saved, unknown keys tolerated; What's new once per version", () =>
+{
+    var state = Path.Combine(root, "app-settings"); var store = new AppSettingsStore(state);
+    // A settings file that cannot be read now is never saved over (the pilot's choices survive a damaged or locked file).
+    Directory.CreateDirectory(state); File.WriteAllText(store.Path, "{ damaged");
+    Require(store.Read() is null && store.Load() == new AppSettings() && !store.TakeWhatsNew("0.5.6-preview", true) && File.ReadAllText(store.Path) == "{ damaged", "a damaged file is left alone");
+    File.Delete(store.Path);
+    Require(store.Load() == new AppSettings(true, null));
+    store.Save(new(false, "0.5.5-preview")); Require(new AppSettingsStore(state).Load() == new AppSettings(false, "0.5.5-preview"));
+    AtomicFile.WriteText(store.Path, "{\"checkForUpdates\":false,\"aLaterSetting\":3}"); Require(store.Load() == new AppSettings(false, null));
+    AtomicFile.WriteText(store.Path, "not json"); Require(store.Load() == new AppSettings(true, null));
+    // A new installation records the version without showing; an update from a version that did not record it shows once.
+    var fresh = new AppSettingsStore(Path.Combine(root, "app-settings-fresh"));
+    Require(!fresh.TakeWhatsNew("0.5.6-preview", usedBefore: false) && fresh.Load().LastSeenVersion == "0.5.6-preview" && !fresh.TakeWhatsNew("0.5.6-preview", usedBefore: true));
+    var updated = new AppSettingsStore(Path.Combine(root, "app-settings-updated"));
+    Require(updated.TakeWhatsNew("0.5.6-preview", usedBefore: true) && !updated.TakeWhatsNew("0.5.6-preview", usedBefore: true));
+    Require(updated.TakeWhatsNew("0.5.7-preview", usedBefore: false) && updated.Load() is { LastSeenVersion: "0.5.7-preview", CheckForUpdates: true }, "a later version shows again; the check setting is kept");
+});
+
 foreach (var (name, action) in tests)
 {
     try { action(); Console.WriteLine("PASS " + name); }
@@ -2663,4 +2801,20 @@ sealed class FixtureHttpHandler(byte[] bytes) : HttpMessageHandler
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         => Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) });
+}
+
+/// <summary>Fixed answers by URL for the update tests; records each request and its User-Agent. Offline throws like a
+/// PC without network.</summary>
+sealed class UrlFixtureHandler(Dictionary<string, byte[]> answers) : HttpMessageHandler
+{
+    public Dictionary<string, byte[]> Answers { get; } = answers;
+    public List<string> Requests { get; } = [];
+    public List<string> UserAgents { get; } = [];
+    public bool Offline;
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        if (Offline) throw new HttpRequestException("No network (test fixture).");
+        var url = request.RequestUri!.AbsoluteUri; Requests.Add(url); UserAgents.Add(request.Headers.UserAgent.ToString());
+        return Task.FromResult(Answers.TryGetValue(url, out var bytes) ? new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) } : new HttpResponseMessage(System.Net.HttpStatusCode.NotFound));
+    }
 }

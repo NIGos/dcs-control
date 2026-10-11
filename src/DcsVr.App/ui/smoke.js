@@ -15,6 +15,35 @@ window.runWebSmoke = async function() {
   }
   try {
     check('Real WebView2 bridge bootstrap with the feature checklist',document.querySelectorAll('#featureList input[type=checkbox]').length === 5 && !$('profilePreset'));
+    // Updates and What's new, against the host's fixtures (never the network): the settings record an earlier version,
+    // so this version's notes open once at start; GitHub's fixture list offers the next patch version.
+    { const until = async test => { for (let i = 0; i < 150 && !test(); i++) await sleep(20); return test(); };
+      const notes = $('whatsNewNotes'), next = window.offlineFixture.updateVersion, short = next.split('-')[0];
+      check("What's new opens at the first start of a new version with only this version's notes, as text",await until(() => $('whatsNewDialog').open)
+        && notes.textContent.includes('Fixture notes') && notes.textContent.includes('<b>not markup</b>') && !notes.querySelector('b b, script, img') && notes.querySelectorAll('li').length === 2 && !notes.textContent.includes('Older notes'));
+      $('whatsNewClose').click();
+      check("What's new shows once per version",!$('whatsNewDialog').open && !(await ui.request('whatsNew',{startup:true})).show);
+      $('appVersionButton').click(); check("The rail's version number opens What's new again",await until(() => $('whatsNewDialog').open) && $('whatsNewTitle').textContent.includes(ui.state.version.split('-')[0]));
+      $('whatsNewClose').click();
+      check('An available update shows a banner on the Overview and a dot on the version',await until(() => !$('updateBanner').hidden) && $('updateBannerText').textContent === `DCS Control ${short} is available`
+        && !$('railUpdate').hidden && ui.updates.update.version === next && ui.updates.update.canInstall && $('updateAuto').checked);
+      check('Drafts, malformed tags and older releases are never offered',!ui.updates.update.version.startsWith('99.') && $('updateCheckStatus').textContent.includes(short));
+      $('updateNotesOpen').click(); const box = $('updateNotes');
+      check("The update's release notes are escaped text with paragraphs and bullets",$('updateDialog').open && !box.querySelector('img, script') && window.notesInjected === undefined
+        && box.textContent.includes('<img src=x') && box.querySelector('b')?.textContent === 'Hostile notes check' && box.querySelectorAll('li').length === 3 && box.querySelector('li ul li')
+        && box.textContent.includes('First bullet with code') && box.textContent.includes('A link in a paragraph') && !box.textContent.includes('example.invalid'));
+      check('An unzipped copy says where the update installs and that this folder can be deleted',!ui.updates.portable || (!$('updatePortable').hidden && $('updatePortable').textContent.includes('can delete')));
+      await ui.installUpdate();
+      check('A download whose signature does not match is refused',$('updateStatus').textContent.includes('signature does not match') && $('updateStatus').classList.contains('error') && !$('updateInstall').disabled);
+      await ui.installUpdate();
+      check('A verified download hands over to the setup (offline: not started)',$('updateStatus').textContent.includes("signature was verified") && !$('updateStatus').classList.contains('error') && !$('updateProgressRow').hidden);
+      $('updateLater').click();
+      $('updateAuto').click();
+      check('Turning the update check off is saved and hides the banner',await until(() => ui.updates && !ui.updates.enabled) && $('updateBanner').hidden && $('railUpdate').hidden && !(await ui.request('updateStatus')).enabled);
+      $('updateAuto').click(); await until(() => ui.updates.enabled);
+      await ui.checkUpdates(true);
+      check('Check now finds the update again with the check back on',ui.updates.enabled && !$('updateBanner').hidden && $('updateAuto').checked);
+      $('updateHide').click(); check('The banner can be hidden until the next start',$('updateBanner').hidden && !$('railUpdate').hidden); }
     check('One primary action: Launch DCS, with Review files, Apply without launching and Back to stock DCS as links',!$('preview') && !$('heroChips') && $('launch').classList.contains('launch') && $('reviewPlan').classList.contains('link-button') && $('apply').classList.contains('link-button') && $('apply').textContent === 'Apply without launching' && $('openRecovery').classList.contains('link-button') && !document.querySelector('.workflow').textContent.match(/Preview|Apply profile/));
     check('All editable profile controls available',ui.fields.length === 102 && document.querySelectorAll('#routeSwitch [data-route]').length === 3);
     check('Quality presets, self-reported limiters and the unused Sboys folder are gone',!$('tuningPreset') && !$('undoTune') && !$('tuningDialog') && !$('budgets') && !['externalLimiter','externalLimiterFps','runtimeReprojection','sboysDriverDirectory'].some(p => ui.fields.some(f => f.path === p)));

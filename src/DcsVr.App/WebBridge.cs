@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
 using System.Text.Json;
 using System.Windows;
 using DcsVr.Core;
@@ -9,7 +10,8 @@ namespace DcsVr.App;
 
 /// <summary>One serialized command channel. Web content never owns an approved deployment plan.</summary>
 internal sealed class WebBridge(ControlService service, Window? owner = null,
-    Func<string?, string?, InventorySnapshot>? capture = null, bool offline = false, Func<string?, string?, FlightSources>? flightSources = null)
+    Func<string?, string?, InventorySnapshot>? capture = null, bool offline = false, Func<string?, string?, FlightSources>? flightSources = null,
+    Updates? updates = null, string? releaseNotesPath = null)
 {
     private readonly SemaphoreSlim _commands = new(1);
     private InventorySnapshot _inventory = new();
@@ -98,6 +100,177 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             }
         }
     }
+    // ---- Updates and What's new: answered outside the command lock (a check waits up to 10 s, a download longer) ----
+    private readonly Updates _updates = updates ?? new Updates(service.StateRoot);
+    private AppSettingsStore Settings => new(service.StateRoot);
+    private readonly Lock _updateLock = new();
+    private Task<UpdateCheck>? _checking;
+    private UpdateCheck? _lastCheck;
+    private bool _installing, _cleaned, _handedOff;
+    private CancellationTokenSource? _downloadCancel;
+    private (long Done, long Total)? _downloaded;
+    private string? _updateMessage;
+    /// <summary>The folder above files\ (the installation, or the unzipped release); an installation has installation.json there.</summary>
+    private static string AppRoot => Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory))!;
+    private static bool Installed => File.Exists(Path.Combine(AppRoot, "installation.json"));
+    /// <summary>Where the update installs: this installation, or for an unzipped copy the installation Settings > Apps
+    /// knows (the pilot may have chosen its folder in the setup), else the standard folder.</summary>
+    private static string UpdateFolder()
+    {
+        if (Installed) return AppRoot;
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\DcsControl");
+            if (key?.GetValue("InstallLocation") is string location && Path.IsPathFullyQualified(location) && File.Exists(Path.Combine(location, "installation.json"))) return Path.GetFullPath(location);
+        }
+        catch (Exception e) when (e is System.Security.SecurityException or IOException or UnauthorizedAccessException or ArgumentException) { }
+        return ApplicationInstaller.DefaultDestination;
+    }
+    private Task<string>? UpdateRequest(string json)
+    {
+        if (json.Length > 1024 || !(json.Contains("\"update", StringComparison.Ordinal) || json.Contains("\"whatsNew\"", StringComparison.Ordinal))) return null;
+        string? id = null, action; JsonElement data;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            action = doc.RootElement.GetProperty("action").GetString();
+            if (action is not ("updateStatus" or "updateCheck" or "updateSettings" or "updateInstall" or "updateCancel" or "updatePage" or "whatsNew")) return null;
+            id = doc.RootElement.GetProperty("id").GetString();
+            data = doc.RootElement.TryGetProperty("data", out var d) ? d.Clone() : default;
+        }
+        catch (Exception e) when (e is JsonException or KeyNotFoundException or InvalidOperationException) { return Task.FromResult(JsonData.Serialize(new { id, ok = false, error = e.Message })); }
+        bool Flag(string name) => data.ValueKind == JsonValueKind.Object && data.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
+        return Answer();
+        async Task<string> Answer()
+        {
+            try
+            {
+                switch (action)
+                {
+                    case "updateCheck":
+                        // At start only while the pilot leaves the check on (and at most every 6 hours); Check now always asks.
+                        var force = Flag("force");
+                        if (force || Settings.Load().CheckForUpdates)
+                        {
+                            Task<UpdateCheck> running;
+                            lock (_updateLock) running = _checking ??= _updates.Check(force);
+                            // A check that was running when the pilot turned checks off does not announce its result.
+                            try { var result = await running; if (force || Settings.Load().CheckForUpdates) lock (_updateLock) _lastCheck = result; }
+                            finally { lock (_updateLock) if (_checking == running) _checking = null; }
+                            // Setups of earlier updates are not needed once a check runs in the version they installed:
+                            // removed once per start, before the reply (an update can only start after it).
+                            if (!offline && !_cleaned) { _cleaned = true; await Task.Run(_updates.CleanDownloads); }
+                        }
+                        break;
+                    case "updateSettings":
+                        var enabled = Flag("checkForUpdates");
+                        Settings.Save((Settings.Read() ?? throw new IOException("DCS Control's settings file could not be read just now. Try again.")) with { CheckForUpdates = enabled });
+                        // Turned off, no update is announced any more; turned on, the next check (or Check now) finds it again.
+                        if (!enabled) lock (_updateLock) _lastCheck = null;
+                        break;
+                    case "updatePage":
+                        EnsureInteractive();
+                        var page = _lastCheck?.Update?.PageUrl ?? Updates.ReleasesPage;
+                        if (!page.StartsWith(Updates.ReleasesPage, StringComparison.Ordinal)) page = Updates.ReleasesPage;
+                        using (Process.Start(new ProcessStartInfo(page) { UseShellExecute = true })) { }
+                        break;
+                    case "updateInstall": await InstallUpdate(); break;
+                    case "updateCancel": lock (_updateLock) if (!_handedOff) _downloadCancel?.Cancel(); break;
+                    case "whatsNew":
+                        // At start: this version's notes once, after an update. From the rail's version number: always.
+                        var notes = ReleaseNotes();
+                        var show = !Flag("startup") || (notes is not null && Settings.TakeWhatsNew(ProductInfo.Version, UsedBefore()));
+                        return Reply(id, new { show, version = ProductInfo.Version, @short = ReleaseVersion.Parse(ProductInfo.Version)?.Short ?? ProductInfo.Version, notes });
+                }
+                return Reply(id, UpdateView());
+            }
+            catch (Exception e)
+            {
+                if (e is not (IOException or InvalidDataException or InvalidOperationException or UnauthorizedAccessException or HttpRequestException or TaskCanceledException or System.ComponentModel.Win32Exception)) AppLog.Error("Update", e);
+                return JsonData.Serialize(new { id, ok = false, error = e is TaskCanceledException ? "The download timed out. Try again." : e.Message });
+            }
+        }
+    }
+    /// <summary>This version's section of docs\RELEASE_NOTES.md (shipped in files\docs); null when the copy has none.</summary>
+    private string? ReleaseNotes()
+    {
+        try
+        {
+            var path = releaseNotesPath ?? Path.Combine(AppContext.BaseDirectory, "docs", "RELEASE_NOTES.md");
+            return File.Exists(path) ? Updates.ReleaseNotesSection(File.ReadAllText(path), ProductInfo.Version) : null;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+    }
+    /// <summary>DCS Control was used before this start (a draft, a record of original files or a profile folder exists):
+    /// its first start of a new version is an update, not a new installation.</summary>
+    private bool UsedBefore() => File.Exists(Drafts.Path) || Directory.Exists(service.Originals.Directory) || Directory.Exists(service.ManagedRoot);
+    private object UpdateView()
+    {
+        UpdateCheck? check; bool checking;
+        lock (_updateLock) { check = _lastCheck; checking = _checking is not null; }
+        var u = check?.Update;
+        return new { enabled = Settings.Load().CheckForUpdates, current = ProductInfo.Version, checking, checkedAt = check?.CheckedAt, error = check?.Error,
+            update = u is null ? null : new { version = u.Version, @short = u.Short, pageUrl = u.PageUrl, notes = u.Notes, published = u.Published, canInstall = u.CanInstall, bytes = u.SetupBytes },
+            installing = _installing || _handedOff, handedOff = _handedOff, downloaded = _downloaded is { } d ? new { done = d.Done, total = d.Total } : null, message = _updateMessage,
+            portable = !Installed, appFolder = Shown(AppRoot), installFolder = Shown(UpdateFolder()) };
+    }
+    /// <summary>A folder as the update dialog names it; the offline verification's renders ship with the release, so there
+    /// the Windows user's profile folder reads %USERPROFILE%.</summary>
+    private string Shown(string path)
+    {
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return offline && profile.Length > 3 && path.StartsWith(profile, StringComparison.OrdinalIgnoreCase) ? "%USERPROFILE%" + path[profile.Length..] : path;
+    }
+    /// <summary>
+    /// Update: downloads the setup and its signature, verifies the signature with the release key (a mismatch deletes the
+    /// download and stops), refuses while DCS runs, then starts the setup, which replaces this installation (or, from an
+    /// unzipped copy, installs in the standard folder) once this process has exited, and closes the window.
+    /// </summary>
+    private async Task InstallUpdate()
+    {
+        var update = _lastCheck?.Update ?? throw new InvalidOperationException("No update is available. Use Check now first.");
+        if (!update.CanInstall) throw new InvalidOperationException("This release has no installer to download. Open its page on GitHub instead.");
+        CancellationTokenSource cancel;
+        lock (_updateLock)
+        {
+            if (_handedOff) throw new InvalidOperationException("The update is already installing.");
+            if (_installing) throw new InvalidOperationException("The update is already being downloaded.");
+            _installing = true; _downloadCancel = cancel = new();
+        }
+        var locked = false;
+        try
+        {
+            if (DcsRunning()) throw new InvalidOperationException("Close DCS before updating DCS Control.");
+            _downloaded = null; _updateMessage = "Downloading DCS Control " + update.Short + "…";
+            string setup;
+            try { setup = await _updates.Download(update, new Progress<(long Done, long Total)>(p => _downloaded = p), cancel.Token); }
+            catch (OperationCanceledException) when (cancel.IsCancellationRequested) { throw new InvalidOperationException("The download was cancelled. Nothing was installed."); }
+            _updateMessage = "Signature verified.";
+            if (offline) { _updateMessage = "Offline verification: the update's signature was verified; the setup was not started."; return; }
+            if (DcsRunning()) throw new InvalidOperationException("Close DCS before updating DCS Control.");
+            // Never in the middle of Launch, Apply or Back to stock DCS: the command lock is taken and kept until the app closes.
+            if (!await _commands.WaitAsync(0)) throw new InvalidOperationException("Finish the current operation (Launch, Apply, Back to stock DCS...), then update.");
+            locked = true;
+            // Held open (no writing or deleting) from the second check until the setup runs: the file waited in %TEMP%.
+            using var hold = new FileStream(setup, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (!_updates.VerifyFile(setup)) throw new InvalidDataException("The downloaded update changed after it was verified. Nothing was installed.");
+            // A signature covers the file, not the release it was offered as: the setup must be the version announced.
+            if (ReleaseVersion.Parse(FileVersionInfo.GetVersionInfo(setup).ProductVersion ?? "") is not { } carried || ReleaseVersion.Parse(update.Version) is not { } offered || carried.CompareTo(offered) != 0)
+                throw new InvalidDataException("The downloaded setup is not DCS Control " + update.Short + ". Nothing was installed.");
+            var start = new ProcessStartInfo(setup) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(setup)! };
+            foreach (var argument in new[] { "--update", "--wait-pid", Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture), "--relaunch", "--destination", UpdateFolder() }) start.ArgumentList.Add(argument);
+            // A failed update starts this copy again (an unzipped one is not where the update installs).
+            if (File.Exists(Path.Combine(AppRoot, "DcsControl.exe"))) { start.ArgumentList.Add("--relaunch-path"); start.ArgumentList.Add(Path.Combine(AppRoot, "DcsControl.exe")); }
+            using (Process.Start(start)) { }
+            lock (_updateLock) _handedOff = true;
+            _updateMessage = "Installing DCS Control " + update.Short + ". DCS Control closes now and starts again when it is done.";
+            AppLog.Info("Update to " + update.Version + " started: " + setup);
+            // Closed once the reply reached the page; the setup waits for this process to exit.
+            if (owner is not null) _ = Task.Delay(1500).ContinueWith(_ => owner.Dispatcher.BeginInvoke(owner.Close), TaskScheduler.Default);
+        }
+        catch { _downloaded = null; _updateMessage = null; if (locked) _commands.Release(); throw; }
+        finally { lock (_updateLock) { _installing = false; _downloadCancel = null; } cancel.Dispose(); }
+    }
     private FlightSources FlightSourcesNow()
     {
         var options = _options ?? _inventory.OptionsPath; var dcs = _dcs ?? _inventory.DcsExecutable;
@@ -171,6 +344,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             if (BoostPlanRequest(json) is { } boostPlan) return await boostPlan;
             if (SaveDraftRequest(json) is { } savedDraft) return savedDraft;
             if (LastFlightRequest(json) is { } lastFlight) return await lastFlight;
+            if (UpdateRequest(json) is { } update) return await update;
         }
         catch (Exception e) { AppLog.Error("Request", e); return JsonData.Serialize(new { id = RequestId(json), ok = false, error = e.Message }); }
         // Read-only and cheap: polled by the page so Launch and Restore lock while DCS runs.

@@ -22,7 +22,12 @@ try
             Console.WriteLine($"Installed {journal.Entries.Count} application files. Recovery transaction: {journal.Id}"); break;
         }
         case "app-uninstall":
-            Console.WriteLine(JsonData.Serialize(new ApplicationInstaller(Option("--destination") ?? ApplicationInstaller.DefaultDestination).Uninstall())); break;
+        {
+            // Incomplete (a file could not be restored): non-zero, so the installer keeps the shortcuts, the Apps entry and the journals.
+            var result = new ApplicationInstaller(Option("--destination") ?? ApplicationInstaller.DefaultDestination).Uninstall();
+            Console.WriteLine(JsonData.Serialize(result));
+            return result.Complete ? 0 : 2;
+        }
         case "inventory":
             Console.WriteLine(JsonData.Serialize(new WindowsInventory().Capture(Option("--dcs"), Option("--options")))); break;
         case "readiness":

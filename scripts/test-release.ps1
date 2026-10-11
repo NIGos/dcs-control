@@ -151,6 +151,47 @@ $notes=Join-Path $installRoot 'user-notes.txt'
 if($LASTEXITCODE -ne 0){throw 'Application uninstall fixture failed.'}
 if((Test-Path -LiteralPath (Join-Path $installRoot 'DcsControl.exe')) -or (Test-Path -LiteralPath (Join-Path $installRoot 'files/DcsControl.exe'))){throw 'Owned application executable was not removed.'}
 if([IO.File]::ReadAllText($notes) -ne 'Retain this unowned file.'){throw 'User file was changed.'}
-$result=@{passed=$true;fixtureRoot=$fixtureRoot;previousReleaseUpgradeChecked=$upgradeChecked;webViewChecks=$guiChecks.count;webViewRenders=$guiRenders.Count;neuralDeploymentCases=@($cases | Where-Object neural).Count;checks=@('release hashes','Windows PowerShell frontend','self-contained install','repeat install/update','installed CLI','actual WebView2 interaction and native bridge checks','Pimax and Sboys combined apply, apply over, back to stock DCS','optional signed NR hash and tuning deployment','installed launch contract without executing DCS','changed external runtime rejection','tampered focus adapter rejection','owned-file uninstall','unowned-file retention')}
+# The setup as a pilot's double-click or the app's updater runs it (--quiet: no window), into this fixture with scratch
+# Start menu and desktop folders and a scratch Apps & features key, twice (the second run updates in place), then
+# uninstalled the way Apps & features does it. The pilot's own installation, shortcuts and registry entry are never touched.
+$setupExe=Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-Setup.exe"
+$setupRoot=Join-Path $fixtureRoot 'setup-install'; $setupMenu=Join-Path $fixtureRoot 'setup-start-menu'; $setupDesktop=Join-Path $fixtureRoot 'setup-desktop'
+$setupKeyRoot='HKCU:\Software\DcsControl-ReleaseTest'; $setupKey="$setupKeyRoot\Uninstall\DcsControl"
+$setupTemps=@(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'DcsControl-Setup-*' -ErrorAction SilentlyContinue).Count
+try{
+    foreach($attempt in 1..2){
+        $setupStart=[Diagnostics.ProcessStartInfo]::new($setupExe); $setupStart.UseShellExecute=$false
+        foreach($argument in @('--quiet','--no-launch','--skip-prerequisites','--destination',$setupRoot,'--start-menu',$setupMenu,'--desktop',$setupDesktop,'--uninstall-key',$setupKey)){$setupStart.ArgumentList.Add($argument)}
+        if($attempt -eq 2){$setupStart.ArgumentList.Add('--update')}
+        $setupProcess=[Diagnostics.Process]::Start($setupStart)
+        if(-not $setupProcess.WaitForExit(600000)){$setupProcess.Kill($true);throw 'Setup timed out.'}
+        if($setupProcess.ExitCode -ne 0){throw "Setup failed ($($setupProcess.ExitCode)): $(Get-Content -LiteralPath (Join-Path ([IO.Path]::GetTempPath()) 'DcsControl-Setup.log') -Raw)"}
+        $setupProcess.Dispose()
+    }
+    $setupFull=[IO.Path]::GetFullPath($setupRoot).TrimEnd('\')
+    $ledger=Get-Content -LiteralPath (Join-Path $setupRoot 'installation.json') -Raw | ConvertFrom-Json
+    if($ledger.version -ne $version -or -not (Test-Path -LiteralPath (Join-Path $setupRoot 'files/DcsControl.exe'))){throw 'The setup did not install this release.'}
+    $shell=New-Object -ComObject WScript.Shell
+    foreach($link in (Join-Path $setupMenu 'DCS Control.lnk'),(Join-Path $setupDesktop 'DCS Control.lnk')){
+        if(-not (Test-Path -LiteralPath $link) -or $shell.CreateShortcut($link).TargetPath -ne (Join-Path $setupFull 'DcsControl.exe')){throw "Missing or wrong shortcut: $link"}
+    }
+    $entry=Get-ItemProperty -LiteralPath $setupKey
+    if($entry.DisplayName -ne 'DCS Control' -or $entry.DisplayVersion -ne $version -or $entry.Publisher -ne 'NIGos' -or $entry.InstallLocation -ne $setupFull -or $entry.NoModify -ne 1 -or $entry.NoRepair -ne 1 -or $entry.EstimatedSize -le 0 `
+        -or $entry.DisplayIcon -ne ((Join-Path $setupFull 'DcsControl.exe')+',0') -or $entry.UninstallString -ne ('"' + (Join-Path $setupFull 'Uninstall DCS Control.exe') + '" --uninstall')){throw 'Wrong Apps & features entry: ' + ($entry | Out-String)}
+    if(@(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'DcsControl-Setup-*' -ErrorAction SilentlyContinue).Count -gt $setupTemps){throw 'The setup left its temporary folder behind.'}
+    # The uninstaller the setup put into the installation is the setup without its package.
+    $uninstaller=Join-Path $setupRoot 'Uninstall DCS Control.exe'
+    if(-not (Test-Path -LiteralPath $uninstaller) -or (Get-Item -LiteralPath $uninstaller).Length -ge (Get-Item -LiteralPath $setupExe).Length/4){throw 'The setup did not write its uninstaller (or wrote it with the package).'}
+    # Uninstall as Settings > Apps runs it, from a copy outside the installation (the one inside copies itself to %TEMP% first).
+    $uninstallCopy=Join-Path $fixtureRoot 'setup-uninstaller.exe'; Copy-Item -LiteralPath $uninstaller -Destination $uninstallCopy -Force
+    $uninstallStart=[Diagnostics.ProcessStartInfo]::new($uninstallCopy); $uninstallStart.UseShellExecute=$false
+    foreach($argument in @('--uninstall','--quiet','--destination',$setupRoot,'--start-menu',$setupMenu,'--desktop',$setupDesktop,'--uninstall-key',$setupKey)){$uninstallStart.ArgumentList.Add($argument)}
+    $uninstallProcess=[Diagnostics.Process]::Start($uninstallStart)
+    if(-not $uninstallProcess.WaitForExit(300000)){$uninstallProcess.Kill($true);throw 'Uninstall timed out.'}
+    if($uninstallProcess.ExitCode -ne 0){throw "Uninstalling the setup installation failed ($($uninstallProcess.ExitCode)): $(Get-Content -LiteralPath (Join-Path ([IO.Path]::GetTempPath()) 'DcsControl-Uninstall.log') -Raw)"}
+    $uninstallProcess.Dispose(); Remove-Item -LiteralPath $uninstallCopy -Force
+    if((Test-Path -LiteralPath $setupRoot) -or (Test-Path -LiteralPath (Join-Path $setupMenu 'DCS Control.lnk')) -or (Test-Path -LiteralPath (Join-Path $setupDesktop 'DCS Control.lnk')) -or (Test-Path -LiteralPath $setupKey)){throw 'Uninstall left the installation folder, a shortcut or the Apps & features entry.'}
+} finally { Remove-Item -LiteralPath $setupKeyRoot -Recurse -Force -ErrorAction SilentlyContinue }
+$result=@{passed=$true;fixtureRoot=$fixtureRoot;previousReleaseUpgradeChecked=$upgradeChecked;setupChecked=$true;webViewChecks=$guiChecks.count;webViewRenders=$guiRenders.Count;neuralDeploymentCases=@($cases | Where-Object neural).Count;checks=@('release hashes','Windows PowerShell frontend','self-contained install','repeat install/update','installed CLI','actual WebView2 interaction and native bridge checks','Pimax and Sboys combined apply, apply over, back to stock DCS','optional signed NR hash and tuning deployment','installed launch contract without executing DCS','changed external runtime rejection','tampered focus adapter rejection','owned-file uninstall','unowned-file retention')}
 $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $fixtureRoot 'result.json') -Encoding utf8
 Write-Output "PASS release fixture: $fixtureRoot"

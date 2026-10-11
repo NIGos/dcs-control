@@ -445,3 +445,27 @@ details.detected-card[open]>summary{margin-bottom:10px}
 @media(max-width:900px){#shell{grid-template-columns:52px minmax(0,1fr) 240px}.setting{grid-template-columns:1fr}.setting>select,.setting>.setting-number,.setting>.path-row{grid-column:1;grid-row:auto;margin-top:6px}.pipeline{grid-template-columns:1fr}.wordmark b{font-size:34px}.wordmark span{font-size:16px}.page-heading,#scrollArea{padding-left:18px;padding-right:18px}}
 /* Windows high contrast: switches show on/off and the selected route stays marked without background colours. */
 @media (forced-colors: active){.switch{border:1px solid ButtonText}.switch:before{background:ButtonText}.switch:checked{background:Highlight}.switch:checked:before{background:HighlightText}.route-switch button.selected{outline:3px solid Highlight;outline-offset:-3px}.status-dot{forced-color-adjust:none}}
+/* Updates: the rail's version opens What's new (a dot when an update is available), a banner on the Overview, and the
+   release notes as plain text (built with textContent, never as HTML). */
+button.rail-version{display:inline-flex;align-items:center;gap:5px;border:0;background:transparent;cursor:pointer}
+button.rail-version:hover{color:var(--soft)}
+.rail-update{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px #f5a01a33}
+.rail-update[hidden]{display:none}
+.update-banner{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;padding:10px 12px 10px 16px;margin:0 0 12px;background:var(--s0);border:1px solid var(--line);border-left:3px solid var(--cyan);border-radius:var(--radius);font-size:13px;color:var(--text)}
+.update-banner[hidden]{display:none}
+.update-banner .update-dot{width:8px;height:8px;border-radius:50%;background:var(--cyan);flex-shrink:0}
+.update-banner #updateBannerText{flex:1 1 auto;min-width:0}
+.update-links{display:inline-flex;align-items:center;gap:8px;color:var(--faint)}
+.update-banner .icon-button{font-size:18px;line-height:1;padding:0 4px;cursor:pointer}
+.notes-dialog{width:min(680px,calc(100vw - 48px))}
+.release-notes{max-height:44vh;overflow:auto;margin:12px 0 4px;padding:4px 14px 8px;border:1px solid var(--line);border-radius:var(--radius);background:var(--bg);font-size:13px;line-height:1.55;color:var(--soft);overflow-wrap:anywhere}
+.release-notes p{margin:8px 0}
+.release-notes h3{margin:12px 0 4px;font:700 12px var(--display);letter-spacing:.6px;text-transform:uppercase;color:var(--muted)}
+.release-notes ul{margin:6px 0;padding-left:20px}
+.release-notes li{margin:3px 0}
+.release-notes b{color:var(--text)}
+.update-progress{display:flex;align-items:center;gap:10px;margin-top:10px;font-size:12px;color:var(--soft)}
+.update-progress[hidden]{display:none}
+.update-progress progress{flex:1;height:8px;accent-color:var(--accent)}
+#updatesCard .setting{margin-top:4px}
+#updateStatus.error{color:var(--red)}

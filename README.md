@@ -39,7 +39,7 @@ After each flight the Overview shows a **Last flight** summary.
 ## Quick start
 
 1. **You need:** Windows 10 or 11 (64-bit; tested on 11) and DCS World 2.9. For the VR features: a Pimax headset with Pimax Play (or SteamVR with the Sboys driver) and an NVIDIA RTX GPU; for DLSS 5 your own `nvngx_dlssnr.dll` (tested with 310.8, not included).
-2. **Download** `DcsControl-0.5.5-preview-win-x64.zip` from [Releases](https://github.com/NIGos/dcs-control/releases), unzip it anywhere and double-click `DcsControl.exe`. Inside you find only `DcsControl.exe`, `Install DCS Control.cmd` (adds it to the Start menu) and a `files` folder that must stay next to it.
+2. **Download** `DcsControl-0.5.6-preview-Setup.exe` from [Releases](https://github.com/NIGos/dcs-control/releases) and double-click it: it installs DCS Control for your Windows user (no administrator rights) in the folder you choose, with Start menu and desktop shortcuts, then opens it. Uninstall it from Settings → Apps. Or take `DcsControl-0.5.6-preview-win-x64.zip` for a portable copy: unzip it anywhere and double-click `DcsControl.exe` (keep the `files` folder next to it). The app tells you when a newer release is out and updates itself after checking the release signature.
 3. **Choose how you fly** in the right panel: **Pimax**, **Sboys**, or **Optimizations only** (monitor or another headset). **Detect my setup** and **Guided setup** can do it for you.
 4. **Tick the features** you want. Each one has its own page if you want to adjust it.
 5. **Press Launch DCS.** Engine Optimizations then stay on whenever DCS starts. The VR features and CPU Boost need DCS to be started from the app.
@@ -51,6 +51,7 @@ The **[User Guide](docs/USER_GUIDE.md)** explains every feature, what it costs, 
 - **Single player only so far.** With DLSS 5 or Foveated SR the app places a `dxgi.dll` loader and Cheeky's files in DCS's `bin` folder; with Engine Optimizations (terrain prefetch fix included) it adds a hook and a module in `Saved Games\DCS\Scripts`. Without DLSS 5 nothing in the DCS install changes. Multiplayer and server integrity checks haven't been tested.
 - **Frame generation adds latency**, more in 3× than in 2×. Head movement stays smooth; the mouse cursor moves at DCS's own frame rate.
 - **Start the app from the Start menu or Explorer**, not as administrator.
+- **Updates**: the app asks GitHub for a newer release at most every 6 hours (turn it off on the Diagnostics page). Update installs only a setup signed with the release key built into the app.
 - **Formerly DCS VR Control.** The app was renamed in 0.5.0. Installing it replaces the old install; your backups and profiles are kept.
 - **Before updating or repairing DCS**, close it and use **Back to stock DCS**.
 
@@ -98,7 +99,9 @@ The first time the app writes a path it backs up the original (or notes that the
 ./scripts/test-release.ps1
 ```
 
-Build scripts pin upstream revisions. Tests use isolated DCS fixtures and never start DCS. `scripts/package-sources.py` builds the corresponding-source ZIP. More: [validation](docs/VALIDATION.md), [adapter contracts](docs/QUAD_FOCUS_ADAPTER.md), [interface notes](docs/INTERFACE.md), [third-party components](docs/THIRD_PARTY.md).
+Build scripts pin upstream revisions. Tests use isolated DCS fixtures and never start DCS. `scripts/package-sources.py` builds the corresponding-source ZIP.
+
+`build-release.ps1` also makes `DcsControl-<version>-Setup.exe` (`native/setup`, built by `scripts/build-setup.ps1`, with the release ZIP appended) and signs the setup and the ZIP with `scripts/sign-release.ps1`: `<file>.sig` is the base64 of an ECDSA P-256 / SHA-256 signature in IEEE P1363 form, made with the private key in `%USERPROFILE%\.dcs-control-signing\release-signing-key.pem` (never in the repository or a release) and checked against the public key in `src/DcsVr.Core/Updates.cs`. Without the key a developer build warns and stays unsigned; `build-release.ps1 -Sign` fails instead. Publish the setup, the ZIP, the sources ZIP and their `.sha256` and `.sig` files with the release; the in-app updater needs `DcsControl-<version>-Setup.exe` and `DcsControl-<version>-Setup.exe.sig`. More: [validation](docs/VALIDATION.md), [adapter contracts](docs/QUAD_FOCUS_ADAPTER.md), [interface notes](docs/INTERFACE.md), [third-party components](docs/THIRD_PARTY.md).
 
 ### Command line
 
