@@ -959,6 +959,7 @@ enum : int { kBuildNone = 0, kBuildOk, kBuildNoVector, kBuildOversize, kBuildVar
 enum : int { kStartIdle = 0, kStartArmed = 1, kStartRun = 2, kStartAbort = 3 };
 enum : int { kGoWait = 0, kGoRun = 1, kGoAbort = 2 };
 constexpr DWORD kStartWaitMs = 250;  // an armed job waits this long for its vector to be final
+constexpr DWORD kStartLateWaitMs = 100;  // JobMain: a start that raced the timeout publishes vec
 
 struct Item {
   uint32_t mat;      // mats[] or ~0u
@@ -1105,6 +1106,12 @@ struct VarRestore {
   uint8_t* var;
   void* value;
   uint8_t seg;
+  // A texture value is resolved at restore time from its set's entry (the
+  // newest one after a re-record), not kept as the view picked at build: a
+  // re-recorded segment draws with the swapped entry's view, and the build's
+  // view may have been released by then (SetResource on freed memory).
+  const TexEntry* e = nullptr;
+  uint64_t size = 0;
 };
 struct Dd {
   uint64_t a, b;
@@ -1137,6 +1144,7 @@ struct Job {
   D3D11_VIEWPORT vp[kVp] = {};
   D3D11_RECT sc[kVp] = {};
   ID3D11Buffer* ctxBuf[2][3] = {};  // ours (VS, PS b6-b8), bound in the lists; null where DCS binds none
+  ID3D11Buffer* ctxRef[2][3] = {};  // Arm's references on ctxBuf (released with the other target references)
   ID3D11SamplerState* pool[2][kSampSlots] = {};  // VS, PS: DCS's s5-s15 at the front entry (references)
   uint8_t ratio[kRatioLen] = {};
   void* ratioFb = nullptr;
@@ -1271,6 +1279,8 @@ void ReleaseRedo(Job& j) {
 void ReleaseTargetRefs(Job& j) {
   for (auto*& p : j.rtv) SafeRel(p);
   SafeRel(j.dsv);
+  for (auto& row : j.ctxRef)
+    for (auto*& p : row) SafeRel(p);
   for (auto& row : j.pool)
     for (auto*& p : row) SafeRel(p);
 }
@@ -1716,9 +1726,14 @@ void PreChunks(Job& j, int t) {
 bool WaitPre(Job& j) {
   const int64_t t0 = defrec::Qpc();
   const double k = defrec::QpcToUs();
-  while (j.preDone.load(std::memory_order_acquire) < j.n) {
+  for (uint32_t spin = 0; j.preDone.load(std::memory_order_acquire) < j.n; ++spin) {
     if ((defrec::Qpc() - t0) * k > kPreWaitUs) return false;
-    _mm_pause();
+    // Yield after a short spin (as ClosePhase): on 2-4 core CPUs a pure spin
+    // can hold the core the helper it waits for needs, so the job ran late.
+    if (spin < 4096)
+      _mm_pause();
+    else
+      SwitchToThread();
   }
   return true;
 }
@@ -1980,7 +1995,7 @@ int FinishBuild(Job& j) {
     auto* item = *reinterpret_cast<uint8_t**>(r + 0x10);
     const bool recorded = it.seg != kNoSeg;
     const Cand* cd = recorded ? &j.cands[it.cand] : nullptr;
-    auto note = [&](uint8_t* var, void* value) -> bool {
+    auto note = [&](uint8_t* var, void* value, const TexEntry* te = nullptr, uint64_t tsize = 0) -> bool {
       if (!var) return true;
       if (*reinterpret_cast<void**>(var) == nullptr ||
           (*reinterpret_cast<void***>(var))[31] != env.setResource)
@@ -1988,7 +2003,7 @@ int FinishBuild(Job& j) {
       if (!DdInsert(j, reinterpret_cast<uintptr_t>(var), 7)) return true;
       if (!recorded) return true;
       if (j.varRestCount == kMaxRestores) return false;
-      j.varRest[j.varRestCount++] = {var, value, it.seg};
+      j.varRest[j.varRestCount++] = {var, value, it.seg, te, tsize};
       return true;
     };
     const uint32_t page = *reinterpret_cast<uint32_t*>(item + 0xd0);
@@ -2003,6 +2018,8 @@ int FinishBuild(Job& j) {
       const int64_t h = *reinterpret_cast<int64_t*>(m.mat + 0x240 + 8 * k);
       if (h == -1 || !*reinterpret_cast<void* const*>(en + k * 0x18 + 8)) continue;
       void* value = nullptr;
+      const TexEntry* te = nullptr;
+      uint64_t tsize = 0;
       if (recorded) {
         // The set's entry (Pass2One kept every set with a texture, in handle order).
         for (uint32_t q = 0; q < cd->setCount; ++q) {
@@ -2011,10 +2028,12 @@ int FinishBuild(Job& j) {
             ID3D11ShaderResourceView* v = nullptr;
             TexPick(*sr.e, sr.size, &v);
             value = v;  // the last set of h wins
+            te = sr.e;
+            tsize = sr.size;
           }
         }
       }
-      if (!note(VarOf(m.shader, h), value)) return j.result = kBuildVarClass;
+      if (!note(VarOf(m.shader, h), value, te, tsize)) return j.result = kBuildVarClass;
     }
   }
   // DCS's loop: [front, residual items and one exec entry per segment, in order].
@@ -2288,9 +2307,16 @@ void ReleaseHelpers(Job& j) {
 // finished by the worker that recorded it (the pool's own list stays empty).
 bool JobMain(defrec::Worker& w, void* u) {
   Job& j = *static_cast<Job*>(u);
-  WaitForSingleObject(j.start, kStartWaitMs);
+  const DWORD started = WaitForSingleObject(j.start, kStartWaitMs);
   int st = kStartArmed;
-  if (j.startState.compare_exchange_strong(st, kStartAbort, std::memory_order_acq_rel) || st != kStartRun) {
+  // StartJob may win the start between our timeout and this exchange: it
+  // stores j.vec after its own exchange and only then sets the event, so
+  // wait for that event (bounded) before reading j.vec. Before, the worker
+  // went on with j.vec still null (Arm clears it), BeginBuild faulted on
+  // j.vec[0] and the recorder latched off for the session (most likely at
+  // low fps, where starts land near the 250 ms timeout).
+  if (j.startState.compare_exchange_strong(st, kStartAbort, std::memory_order_acq_rel) || st != kStartRun ||
+      (started != WAIT_OBJECT_0 && WaitForSingleObject(j.start, kStartLateWaitMs) != WAIT_OBJECT_0)) {
     ReleaseHelpers(j);
     j.phase.store(kJobEmpty, std::memory_order_release);
     return false;
@@ -2503,6 +2529,8 @@ int ReplayAndCheckGuarded(const Job& j, const Seg& s, uint32_t* replays) {
   }
 }
 
+const TexEntry* RedoOf(const Job& j, const TexEntry* e);
+
 // After the pass, for the executed segments: the triangle counter, the
 // materials' and the FX variables' end state as DCS's stock loop leaves them.
 void RestoreRaw(const Job& j, const uint8_t* executed) {
@@ -2530,7 +2558,15 @@ void RestoreRaw(const Job& j, const uint8_t* executed) {
   for (uint32_t k = 0; k < j.varRestCount; ++k) {
     const VarRestore& vr = j.varRest[k];
     if (!executed[vr.seg]) continue;
-    (*reinterpret_cast<SetResFn**>(vr.var))[31](vr.var, vr.value);
+    void* value = vr.value;
+    if (vr.e) {
+      // The entry the segment's list drew with (PlanSegRaw's re-record chain).
+      const TexEntry* e = vr.e;
+      for (const TexEntry* r = RedoOf(j, e); r; r = RedoOf(j, e)) e = r;
+      ID3D11ShaderResourceView* v = nullptr;
+      if (TexPick(*e, vr.size, &v)) value = v;
+    }
+    (*reinterpret_cast<SetResFn**>(vr.var))[31](vr.var, value);
   }
 }
 
@@ -3086,6 +3122,11 @@ int GbFilter(unsigned long code, int lvl) {
     case EXCEPTION_IN_PAGE_ERROR:
     case EXCEPTION_INT_DIVIDE_BY_ZERO:
     case EXCEPTION_PRIV_INSTRUCTION:
+    // A C++ exception thrown by our own code at this level (std::bad_alloc
+    // from a table, string or vector on the render thread) is contained the
+    // same way; before, it unwound into DCS's frames and ended the process.
+    // DCS's own throws happen above `lvl` and are still left to DCS.
+    case 0xE06D7363:  // MSVC C++ exception
       return EXCEPTION_EXECUTE_HANDLER;
     default:
       return EXCEPTION_CONTINUE_SEARCH;
@@ -3754,6 +3795,8 @@ int ExecSegment(PassCtx& pc, int k) {
     defrec::PassState before = {}, after = {};
     const bool t9 = pc.verify == 2;
     if (t9) defrec::Capture(g_ctx, &before);
+    const bool gs = gsplit::g_on.load(std::memory_order_relaxed) != 0;  // [Suite] GpuSplit
+    if (gs) gsplit::Bracket(1, pc.slot, true);
     const int64_t e0 = defrec::Qpc();
     if (redo) {
       g_ctx->ExecuteCommandList(j.redoCl[k], TRUE);
@@ -3763,6 +3806,14 @@ int ExecSegment(PassCtx& pc, int k) {
     }
     t_segExecuted = true;
     pc.executeNs += NsSince(e0);
+    if (gs) {
+      gsplit::Bracket(1, pc.slot, false);
+      for (uint32_t c = j.segs[k].candFirst; c < j.segs[k].candEnd; ++c) {
+        const Cand& cd = j.cands[c];
+        if (cd.alive && cd.mesh)
+          gsplit::MeshDraw(1, pc.slot, cd.mesh->ib, cd.mesh->ibFormat, cd.mesh->indexCount, 1, false, nullptr, 0);
+      }
+    }
     pflush::AfterExecute();  // [Model] PassFlush 0x20 (one relaxed load when off)
     if (t9) {
       defrec::Capture(g_ctx, &after);
@@ -4960,7 +5011,11 @@ bool Arm(int s) {
   memcpy(j.vp, l.vp, sizeof(j.vp));
   memcpy(j.sc, l.sc, sizeof(j.sc));
   for (int st = 0; st < 2; ++st)
-    for (int k = 0; k < 3; ++k) j.ctxBuf[st][k] = l.ctxBytes[st][k] ? sl.ours[st][k] : nullptr;
+    for (int k = 0; k < 3; ++k)
+      // Referenced: LearnTarget may replace sl.ours (a size change) while
+      // this job still records on a worker, which then bound a released
+      // buffer. Released with the job's other target references.
+      if ((j.ctxRef[st][k] = j.ctxBuf[st][k] = l.ctxBytes[st][k] ? sl.ours[st][k] : nullptr)) j.ctxRef[st][k]->AddRef();
   for (int st = 0; st < 2; ++st)
     for (UINT q = kPoolFirst; q < kSampSlots; ++q)
       if ((j.pool[st][q] = l.pool[st][q])) j.pool[st][q]->AddRef();
@@ -5223,6 +5278,20 @@ bool Install() {
   auto fail = [](const char* why) {
     Log("gbuffer recorder: %s; unavailable", why);
     g_state = -1;
+    // Latched off and Shutdown frees nothing unless ready: free what this
+    // attempt allocated (jobs ~20 MB each, stock lists, tables) and its
+    // context/device references. No worker runs here (pool stopped or not
+    // started), and nothing is chained yet.
+    for (auto& p : g_jobPub) p.store(nullptr);
+    for (Slot& sl : g_slot) {
+      FreeJob(sl.job);
+      if (sl.stockList) VirtualFree(sl.stockList, 0, MEM_RELEASE);
+      sl.stockList = nullptr;
+    }
+    FreeTables(g_tab);
+    FreeTex(g_tex);
+    SafeRel(g_ctx);
+    SafeRel(g_dev);
     return false;
   };
   if (!gbpass::Install()) {
@@ -5344,7 +5413,8 @@ bool Install() {
 
 bool Ready() { return g_state.load() == 1 && !g_disabled.load(); }
 
-void Shutdown() {
+// True when its objects were released (false: left alive, still in use).
+bool Shutdown() {
   g_shutdown = true;
   g_on = false;
   if (g_chained.exchange(false)) {
@@ -5357,7 +5427,7 @@ void Shutdown() {
     shrec::SortObserverFn so = &OnSorted;
     shrec::g_sortObserver2.compare_exchange_strong(so, nullptr);
   }
-  if (g_state.load() != 1) return;
+  if (g_state.load() != 1) return true;
   for (int i = 0; i < 400 && (g_inside.load() != 0 || shrec::g_sortInside.load() != 0); ++i) Sleep(5);
   for (Slot& sl : g_slot)
     if (sl.job) {
@@ -5366,7 +5436,10 @@ void Shutdown() {
       SetEvent(sl.job->start);
       ReleaseHelpers(*sl.job);
     }
-  const bool stopped = g_pool.Stop();
+  // A pass still inside after the wait may be in TakeList/Wait on the pool:
+  // stopping it then (Teardown releases lists and contexts) raced the render
+  // thread (double Release). Leave everything alive instead.
+  const bool stopped = g_inside.load() == 0 && g_pool.Stop();
   if (g_ownSort && shrec::g_state.load() != 1) {
     if (!shrec::PatchSortSites(false)) Log("gbuffer recorder: WARNING could not restore Scene's sort call sites");
     if (shrec::g_sortStub)
@@ -5384,7 +5457,7 @@ void Shutdown() {
   g_ownRenderHook = false;
   if (!stopped || g_inside.load() != 0) {
     Log("gbuffer recorder: a pass or a worker was still running at unload; its objects are left alive");
-    return;
+    return false;
   }
   for (auto& p : g_jobPub) p.store(nullptr);
   for (Slot& sl : g_slot) {
@@ -5409,6 +5482,7 @@ void Shutdown() {
   SafeRel(g_ctx);
   SafeRel(g_dev);
   g_state = -1;
+  return true;
 }
 
 void ResetCounters() {

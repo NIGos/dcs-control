@@ -24,9 +24,9 @@ if ($Component -eq 'cheeky') {
     $testText = [IO.File]::ReadAllText($testFile).Replace('CheekyMixedCalibrationTests]=] PROPERTIES  TIMEOUT "60"', 'CheekyMixedCalibrationTests]=] PROPERTIES  TIMEOUT "300"')
     [IO.File]::WriteAllText($testFile, $testText)
 }
-& ctest @testOptions
+& $nativeWrapper ctest @testOptions
 if ($LASTEXITCODE -ne 0) { throw 'Native tests failed.' }
 if ($Component -eq 'cheeky') {
-    & ctest --test-dir $nativeBuild --output-on-failure --parallel 1 -R MixedCalibration
+    & $nativeWrapper ctest --test-dir $nativeBuild --output-on-failure --parallel 1 -R MixedCalibration
     if ($LASTEXITCODE -ne 0) { throw 'Mixed calibration tests failed.' }
 }

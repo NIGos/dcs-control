@@ -128,7 +128,8 @@ public static class ConfigurationWriters
         ShadowRecorderPriority=0
         ShadowRecorderSplit=0xf
         ShadowRecorderInstancing=1
-        ShadowRecorderHelpers=3
+        ; Helper threads per shadow cascade: 1 on CPUs with 8 logical cores or fewer, so DCS keeps its own threads.
+        ShadowRecorderHelpers={(Environment.ProcessorCount <= 8 ? 1 : 3)}
         GBufferRecorder={(p.EngineGBufferRecorder ? 1 : 0)}
         GBufferRecorderScope=0x10055
         GBufferRecorderMaxSegments=12
@@ -278,7 +279,7 @@ public static class ConfigurationWriters
         """;
 
     /// <summary>PupilShift.ini, next to the pupil shift layer, which re-reads it about once a second while DCS runs.</summary>
-    public static string PupilShift(VrProfile p) => $"""
+    public static string PupilShift(VrProfile p, double? ipdMm = null) => $"""
         ; DCS Control pupil shift layer. Changes apply live while DCS runs.
         [PupilShift]
         Enabled=1
@@ -290,6 +291,9 @@ public static class ConfigurationWriters
         VirtualImageM={Number(p.PupilShiftVirtualImageM)}
         ; Gaze beyond this angle is treated as this angle.
         MaxGazeDeg=35
+        ; Eye distance in millimetres, 0 = the headset's own: DCS's custom IPD, which the layer applies itself (DCS would
+        ; otherwise replace the eyes' sideways position after the layer and undo the pupil's sideways shift).
+        Ipd={Number(ipdMm ?? 0)}
         ; Testing only: a fixed gaze instead of the eye tracker.
         SimulateGaze=0
         SimulateGazeXDeg=0

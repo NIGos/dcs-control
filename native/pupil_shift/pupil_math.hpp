@@ -39,20 +39,39 @@ inline Vec3 gaze_from_focus_fov(const Fov& f) {
     return g * (1.0f / length(g));
 }
 
-// Limits the gaze to max_deg off the forward axis.
-inline Vec3 clamp_gaze(Vec3 g, float max_deg) {
+inline Vec3 normalized(Vec3 a) { const float l = length(a); return l > 1e-9f ? a * (1.0f / l) : Vec3{0, 0, -1}; }
+
+// Limits the gaze to max_deg off rest (both unit vectors): the direction the eye looks when it looks straight ahead.
+inline Vec3 clamp_gaze(Vec3 g, Vec3 rest, float max_deg) {
     const float max_rad = max_deg * 3.14159265f / 180.0f;
-    const float angle = std::acos(std::clamp(-g.z, -1.0f, 1.0f));
-    if (angle <= max_rad) return g;
-    const float lateral = std::sqrt(g.x * g.x + g.y * g.y);
-    if (lateral < 1e-9f) return {0, 0, -1};
-    const float s = std::sin(max_rad) / lateral;
-    return {g.x * s, g.y * s, -std::cos(max_rad)};
+    const float cosine = std::clamp(dot(g, rest), -1.0f, 1.0f);
+    if (std::acos(cosine) <= max_rad) return g;
+    const Vec3 side = g - rest * cosine;
+    if (length(side) < 1e-9f) return rest;
+    return rest * std::cos(max_rad) + normalized(side) * std::sin(max_rad);
 }
 
-// Pupil position relative to its straight-ahead position, for an eye of rotation radius r.
-inline Vec3 pupil_offset(Vec3 gaze, float radius) {
-    return Vec3{gaze.x, gaze.y, gaze.z + 1.0f} * radius;
+// Pupil position relative to where it is when the eye looks along rest, for an eye of rotation radius r.
+inline Vec3 pupil_offset(Vec3 gaze, Vec3 rest, float radius) { return (gaze - rest) * radius; }
+
+// Straight ahead for both eyes: the mean of the two primary views' forward axes (world space). Headsets whose views
+// are canted outwards (Pimax: a few degrees) would otherwise read a straight gaze as turned towards the nose.
+inline Vec3 head_forward(Quat left, Quat right) { return normalized(rotate(left, {0, 0, -1}) + rotate(right, {0, 0, -1})); }
+// Angle between the two primary views' forward axes, degrees (the views' cant, logged).
+inline float cant_deg(Quat left, Quat right) {
+    return std::acos(std::clamp(dot(rotate(left, {0, 0, -1}), rotate(right, {0, 0, -1})), -1.0f, 1.0f)) * 57.29578f;
+}
+
+// Moves the two eye positions symmetrically along the line between them so they are ipd apart (world space);
+// returns the move of each eye. DCS's own custom IPD replaces the eyes' sideways position after this layer, so the
+// layer applies that IPD itself and DCS's option is turned off: the pupil's sideways shift then reaches DCS.
+inline void ipd_moves(Vec3 left, Vec3 right, float ipd, Vec3& move_left, Vec3& move_right) {
+    const Vec3 between = right - left;
+    const float distance = length(between);
+    if (ipd <= 0 || distance < 1e-6f) { move_left = move_right = {}; return; }
+    const Vec3 u = between * (1.0f / distance);
+    const float half = 0.5f * (ipd - distance);
+    move_left = u * -half; move_right = u * half;
 }
 
 // Frustum for rendering from a pupil displaced by d (view-local), such that, once the image is
@@ -70,6 +89,7 @@ struct Settings {
     float eye_radius{0.0105f};       // pupil to rotation centre, metres
     float virtual_image{1.5f};       // lens virtual image distance, metres
     float max_gaze_deg{35.0f};
+    float ipd{};                     // metres; 0 = the runtime's own eye distance
     float simulate_x_deg{0}, simulate_y_deg{0};
     bool simulate{};
 };

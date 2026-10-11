@@ -36,12 +36,19 @@ std::atomic<bool> g_stop{false};
 HANDLE g_threads[kHelpers] = {};
 HANDLE g_wake[kHelpers] = {};
 
+// done: 1 = idle/finished, 0 = queued, 2 = a helper is copying, 3 = the
+// caller took the chunk back (helper gone or too slow). Exactly one side
+// claims a queued chunk (0 -> 2 or 0 -> 3), so the caller never Unmaps while
+// a helper still writes into the mapping.
 struct Job {
   std::atomic<uint8_t*> dst{nullptr};
   const uint8_t* src = nullptr;
   size_t len = 0;
   std::atomic<int> done{1};
 };
+std::atomic<int> g_inHook{0};      // calls inside Hook (Shutdown waits for 0 before closing the events)
+std::atomic<bool> g_busy{false};   // one split update at a time (g_jobs is shared)
+constexpr uint64_t kTakeBackCycles = 50'000'000;  // ~10-20 ms: a helper not started by then is not waited for
 Job g_jobs[kHelpers];
 std::atomic<uint64_t> g_calls{0}, g_bytes{0}, g_cycles{0};
 // Direct upload (direct_upload.h) shares this slot (R16 risk R6): it is asked
@@ -55,13 +62,19 @@ DWORD WINAPI Helper(void* arg) {
   while (!g_stop.load()) {
     WaitForSingleObject(g_wake[i], 100);
     Job& j = g_jobs[i];
-    if (j.done.load(std::memory_order_acquire)) continue;
+    int queued = 0;
+    if (!j.done.compare_exchange_strong(queued, 2, std::memory_order_acq_rel)) continue;
     memcpy(j.dst.load(std::memory_order_relaxed), j.src, j.len);
     j.done.store(1, std::memory_order_release);
   }
   return 0;
 }
 
+bool SplitUpdate(void* self, uint32_t offset, const void* data, int32_t size);
+
+// Shutdown waits on g_inHook before it stops the helpers and closes their
+// events; a second thread updating at the same time takes the stock path
+// (g_jobs is shared: a concurrent split could hand a helper a torn job).
 bool __fastcall Hook(void* self, uint32_t offset, const void* data, int32_t size) {
   if (UpdateFn pre = g_pre.load(std::memory_order_acquire))
     if (pre(self, offset, data, size)) return true;
@@ -69,6 +82,18 @@ bool __fastcall Hook(void* self, uint32_t offset, const void* data, int32_t size
   if (!g_on.load(std::memory_order_relaxed) || size < static_cast<int32_t>(kMinBytes) ||
       *reinterpret_cast<int32_t*>(b + 0x44) != 3)
     return g_orig(self, offset, data, size);
+  g_inHook.fetch_add(1);
+  if (g_stop.load() || g_busy.exchange(true, std::memory_order_acquire)) {
+    g_inHook.fetch_sub(1);
+    return g_orig(self, offset, data, size);
+  }
+  const bool r = SplitUpdate(self, offset, data, size);
+  g_busy.store(false, std::memory_order_release);
+  g_inHook.fetch_sub(1);
+  return r;
+}
+
+bool SplitUpdate(void* self, uint32_t offset, const void* data, int32_t size) {
   const uint64_t t0 = __rdtsc();
   void** vt = *static_cast<void***>(self);
   uint8_t* p = reinterpret_cast<MapFn>(vt[3])(self, 1);
@@ -79,7 +104,9 @@ bool __fastcall Hook(void* self, uint32_t offset, const void* data, int32_t size
   size_t pos = chunk;  // the caller copies [0, chunk)
   for (int i = 0; i < kHelpers; ++i) {
     Job& j = g_jobs[i];
-    const size_t len = pos >= total ? 0 : (pos + chunk > total ? total - pos : chunk);
+    // The last helper takes the rest: chunk is rounded from total / 3, so
+    // 3 * chunk can fall 1-2 bytes short of total (never copied before).
+    const size_t len = pos >= total ? 0 : (pos + chunk > total || i == kHelpers - 1 ? total - pos : chunk);
     if (len == 0) continue;
     j.src = src + pos;
     j.len = len;
@@ -89,14 +116,34 @@ bool __fastcall Hook(void* self, uint32_t offset, const void* data, int32_t size
     pos += len;
   }
   memcpy(dst, src, chunk < total ? chunk : total);
-  for (int i = 0; i < kHelpers; ++i)
-    while (!g_jobs[i].done.load(std::memory_order_acquire)) _mm_pause();
+  // Bounded: a chunk no helper has started (helpers stopping, or starved on a
+  // busy CPU) is taken back and copied here. Before, this spun forever when
+  // a payload stop ended the helpers between their wake and this wait.
+  for (int i = 0; i < kHelpers; ++i) {
+    Job& j = g_jobs[i];
+    const uint64_t w0 = __rdtsc();
+    for (;;) {
+      const int s = j.done.load(std::memory_order_acquire);
+      if (s == 1) break;
+      if (s == 0 && (g_stop.load(std::memory_order_relaxed) || __rdtsc() - w0 > kTakeBackCycles)) {
+        int queued = 0;
+        if (j.done.compare_exchange_strong(queued, 3, std::memory_order_acq_rel)) {
+          memcpy(j.dst.load(std::memory_order_relaxed), j.src, j.len);
+          j.done.store(1, std::memory_order_release);
+          break;
+        }
+      }
+      _mm_pause();  // s == 2: a helper is copying (finishes in bounded time)
+    }
+  }
   reinterpret_cast<UnmapFn>(vt[4])(self);
   g_calls.fetch_add(1, std::memory_order_relaxed);
   g_bytes.fetch_add(total, std::memory_order_relaxed);
   g_cycles.fetch_add(__rdtsc() - t0, std::memory_order_relaxed);
   return true;
 }
+
+void StopHelpers();
 
 bool StartHelpers() {
   g_stop = false;
@@ -110,9 +157,16 @@ bool StartHelpers() {
 }
 
 bool Install() {
-  if (g_state.load() != 0) return g_state.load() > 0;
+  // Claimed atomically (-2 while installing): the payload worker, the suite
+  // and direct upload all call this, and two first calls used to start two
+  // helper sets and hook the slot twice.
+  int idle = 0;
+  if (!g_state.compare_exchange_strong(idle, -2)) return g_state.load() > 0;
   auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"dx11backend.dll"));
-  if (!base) return false;
+  if (!base) {
+    g_state = 0;  // not loaded yet: retried
+    return false;
+  }
   g_state = -1;
   auto** vtbl = reinterpret_cast<void**>(base + kVtableRva);
   if (!allocslab::RttiIs(base, vtbl, ".?AVDX11StructuredBuffer@RenderAPI@@") ||
@@ -127,7 +181,10 @@ bool Install() {
     Log("parallel upload: DX11StructuredBuffer::update does not match this build; skipped");
     return false;
   }
-  if (!StartHelpers()) return false;
+  if (!StartHelpers()) {
+    StopHelpers();  // the helpers that did start
+    return false;
+  }
   g_slot = &vtbl[kSlot];
   g_orig = reinterpret_cast<UpdateFn>(SlotOriginal(g_slot));
   if (!HookSlot(g_slot, reinterpret_cast<void*>(&Hook), nullptr)) return false;
@@ -153,6 +210,14 @@ void StopHelpers() {
 void Shutdown() {
   g_on = false;
   if (g_slot && g_orig) UnhookSlot(g_slot, reinterpret_cast<void*>(g_orig));
+  // A call in flight still sets the helpers' events: wait for it (bounded;
+  // it takes its chunks back once g_stop is set) before closing them.
+  g_stop = true;
+  for (int i = 0; i < 400 && g_inHook.load() != 0; ++i) Sleep(5);
+  if (g_inHook.load() != 0) {
+    Log("parallel upload: an update was still running at unload; helpers left running");
+    return;
+  }
   StopHelpers();
 }
 

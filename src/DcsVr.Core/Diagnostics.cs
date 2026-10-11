@@ -30,7 +30,6 @@ public static partial class Diagnostics
 
     [GeneratedRegex(@"DCS quad focus: reject handle=0x[0-9A-F]+ count=\d+ reason=(?<reason>[\w-]+)(?:.*?size_route=(?<route>[\w-]+))?(?:.*?ngx=\(\d+,\d+ (?<ngx>\d+x\d+)\))?")] private static partial Regex RejectRegex();
     [GeneratedRegex(@"focusL=\(-?\d+,-?\d+ (?<size>\d+x\d+)")] private static partial Regex FocusSizeRegex();
-    [GeneratedRegex(@"DLSS-NR (\S+) feature-\d+ runtime initialized")] private static partial Regex NeuralInitRegex();
 
     /// <summary>Reads the last session of CheekyFoveatedDLSS-Standalone.log in <paramref name="dcsBin"/>\CheekyFoveatedDLSS.</summary>
     public static DlssFocusReport DiagnoseDlssFocus(string? dcsBin)
@@ -58,7 +57,7 @@ public static partial class Diagnostics
         var evidence = new List<string>();
         foreach (var line in lines)
         {
-            if (NeuralInitRegex().Match(line) is { Success: true } init) version ??= init.Groups[1].Value;
+            if (LastFlight.NeuralInitRegex().Match(line) is { Success: true } init) version ??= init.Groups[1].Value;
             if (line.Contains("DCS quad focus: mapped focus accepted", StringComparison.Ordinal)) { accepted++; if (evidence.Count < 12) evidence.Add(line.Trim()); continue; }
             if (FocusSizeRegex().Match(line) is { Success: true } f) focusSize = f.Groups["size"].Value;
             if (RejectRegex().Match(line) is not { Success: true } r) continue;
@@ -208,7 +207,7 @@ public static partial class Diagnostics
         $"DCS Control {ProductInfo.Version} diagnostic package, {DateTimeOffset.Now:yyyy-MM-dd HH:mm zzz}.\n"
         + "Logs and settings of DCS, DCS Control's components and the headset software. The Windows user name, PC name and e-mail addresses are replaced by <user>, <pc> and <e-mail>; account tokens, account ids and the headset's serial number by <token>, <id> and <serial>.\n"
         + "Large logs are cut to their last 8 MB (marked below).\n\n"
-        + string.Join("\n", entries.Select(e => $"{e.Name}  ({e.Bytes:N0} bytes{(e.Truncated ? ", last part" : "")})  from {e.Source}"));
+        + string.Join("\n", entries.Select(e => string.Create(CultureInfo.InvariantCulture, $"{e.Name}  ({e.Bytes:N0} bytes{(e.Truncated ? ", last part" : "")})  from {e.Source}")));
 
     /// <summary>Replaces the Windows user name (also in the user's profile folder), the PC name and e-mail addresses.</summary>
     internal static Func<string, string> Redactor() => Redactor(Environment.UserName, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Environment.MachineName);
@@ -230,6 +229,8 @@ public static partial class Diagnostics
             // Short names are removed where they are a profile folder, anywhere else only from three letters up.
             if (folder.Length is > 0 and < 3) text = Regex.Replace(text, @"(?<=Users[\\/]{1,2})" + Regex.Escape(folder) + @"(?=[\\/""]|$)", "<user>", RegexOptions.IgnoreCase);
             foreach (var name in names) text = Regex.Replace(text, @"(?<![\w])" + Regex.Escape(name) + @"(?![\w])", "<user>", RegexOptions.IgnoreCase);
+            // An 8.3 short name of the profile folder ("C:\Users\GIUSEP~1") starts with the name too.
+            text = ShortProfileRegex().Replace(text, "<user>");
             if (machine.Length >= 3) text = Regex.Replace(text, @"(?<![\w-])" + Regex.Escape(machine) + @"(?![\w-])", "<pc>", RegexOptions.IgnoreCase);
             text = TokenRegex().Replace(text, "${key}${sep}<token>");
             text = AccountRegex().Replace(text, "${key}${sep}<id>");
@@ -240,6 +241,7 @@ public static partial class Diagnostics
         };
     }
     [GeneratedRegex(@"[\w.+-]+@[\w-]+(\.[\w-]+)+")] private static partial Regex EmailRegex();
+    [GeneratedRegex(@"(?<=Users[\\/]{1,2})[^\\/\s]{1,6}~\d+", RegexOptions.IgnoreCase)] private static partial Regex ShortProfileRegex();
     [GeneratedRegex(@"(?<key>\b(?:access_?token|refresh_?token|token|authorization|bearer)\b)(?<sep>[""']?\s*[:=]\s*[""']?\s*)(?!<token>)[^\s,""'}]+", RegexOptions.IgnoreCase)] private static partial Regex TokenRegex();
     [GeneratedRegex(@"(?<key>\b(?:user_?id|account_?id)\b)(?<sep>[""']?\s*[:=]\s*[""']?)\w+", RegexOptions.IgnoreCase)] private static partial Regex AccountRegex();
     [GeneratedRegex(@"(?<key>\b(?:serial(?:[ _]?number)?|hmd_?sn|device_?sn|sn)\b)(?<sep>[""']?\s*[:=]\s*[""']?)[A-Z0-9][A-Z0-9-]{5,}", RegexOptions.IgnoreCase)] private static partial Regex SerialRegex();

@@ -6,7 +6,8 @@ public static class ProfileValidation
     /// helper), DCS itself, and core Windows processes: CPU Boost never moves or closes them, whatever pattern matches.</summary>
     public static IReadOnlySet<string> BoostProtectedProcesses { get; } = new HashSet<string>(
     [
-        "steam", "explorer", "EpicGamesLauncher", "DCS", "DCS_updater", "DcsControl", "DcsVrControl", "DcsVr.Cli",
+        "steam", "steamservice", "explorer", "EpicGamesLauncher", "DCS", "DCS_updater", "DcsControl", "DcsVrControl", "DcsVr.Cli",
+        "cmd", "powershell", "pwsh", "conhost", "dllhost", "devenv",
         "csrss", "winlogon", "dwm", "svchost", "lsass", "services", "wininit", "smss", "System", "Idle",
         "System Idle Process", "Registry", "Memory Compression", "fontdrvhost", "audiodg"
     ], StringComparer.OrdinalIgnoreCase);
@@ -63,7 +64,7 @@ public static class ProfileValidation
         if (profile.NvidiaFlowScale is not (50 or 75 or 100)) Error("flow-scale", "Optical flow resolution must be 50%, 75%, or 100%.");
         if (!Enum.IsDefined(profile.FlowPreset)) Error("flow-preset", "Select fast, medium, or slow optical flow.");
         if (!Enum.IsDefined(profile.FpsLimit)) Error("fps-mode", "Select a recognized DCS frame limit.");
-        Range("refresh-rate", profile.HeadsetRefreshHz, 60, 240);
+        Range("refresh-rate", profile.HeadsetRefreshHz, 50, 240);
         Range("rendered-fps-cap", profile.RenderedFpsCap, 30, 300);
         if (profile.Runtime == RuntimeKind.SboysSteamVr && profile.QuadViews == QuadProvider.PimaxNative)
             Error("quad-runtime", "Pimax native Quad Views works only on the Pimax route. Select Bundled Quad Views as the Quad Views provider, or switch the route to Pimax.");
@@ -83,7 +84,6 @@ public static class ProfileValidation
             // slow down or end the game it is meant to help.
             static string Normalize(string name) => name.Trim() is var n && n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? n[..^4] : n.Trim();
             var lists = new List<(string Label, IReadOnlyList<string>? Names)>();
-            if (profile.CpuBoost) lists.Add(("close", profile.BoostCloseApps));
             if (profile.FreeVram) lists.Add(("close", profile.FreeVramApps));
             if (profile.CpuBoost && profile.BoostMoveBackgroundApps) lists.Add(("move", profile.BoostBackgroundApps));
             foreach (var (label, names) in lists)
@@ -173,11 +173,25 @@ public static class ProfileValidation
                 || (profile.EngineOptimizations && NeuralHotkeys.Same(pupil, profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault)))
                 Error("hotkey-conflict", "The pupil shift switch needs a key of its own (DLSS 5, the diagnostic panel or the engine optimizations use it).");
         }
+        // NVIDIA-only processing on a PC without an NVIDIA RTX card would install files that cannot run.
+        if (!profile.Desktop && !GpuInfo.Unknown && !GpuInfo.HasNvidiaRtx)
+        {
+            if (profile.UsesCheeky)
+                Error("dlss-gpu", $"DLSS 5 and Foveated Super Resolution need an NVIDIA RTX graphics card; this PC has {GpuInfo.Names}. Turn them off on the DLSS 5 page.");
+            if (profile.FrameGen == FrameGeneration.Nvidia)
+                Error("framegen-gpu", $"NVIDIA optical-flow frame generation needs an NVIDIA RTX graphics card; this PC has {GpuInfo.Names}. Choose FidelityFX on the Framegen page: it runs on any graphics card.");
+        }
         if (profile.NeuralRendering && string.IsNullOrWhiteSpace(profile.NeuralRuntimePath))
             Error("neural-runtime", "Select a compatible NVIDIA nvngx_dlssnr.dll for DLSS 5. The app keeps a verified copy, so it is asked for once.");
         if (inventory is not null)
         {
             if (inventory.DcsRunning) Error("dcs-running", "Close DCS before applying or restoring a profile.");
+            // Checked before anything is written, so Launch never stops half way on a protected folder.
+            foreach (var folder in LaunchSafety.UnwritableFolders(profile, inventory))
+                // Not blocking: Launch DCS asks Windows for the permission itself (one prompt) before writing anything.
+                issues.Add(LaunchSafety.PermissionsDenyWrite(folder) && LaunchSafety.CanGrant(folder)
+                    ? new("write-access", IssueSeverity.Warning, $"DCS Control cannot write to {folder} yet (usual for DCS under Program Files). Launch DCS asks Windows for permission with one prompt, or press Grant access now.")
+                    : new("write-blocked", IssueSeverity.Error, $"DCS Control cannot write to {folder}. {LaunchSafety.BlockedAdvice}"));
             // Not blocking: without a bridge Quad Views reports no eye tracking and keeps a fixed focus region.
             if (GazeBridge.Required(profile) && GazeBridge.Find(inventory) is null && !GazeBridge.RuntimeProvidesGaze(inventory))
                 issues.Add(new("gaze-bridge-missing", IssueSeverity.Warning, "No enabled OpenXR gaze bridge was found. Eye-tracked focus on the Sboys route falls back to a fixed focus region until OpenXR-Eye-Trackers is installed."));
@@ -185,7 +199,7 @@ public static class ProfileValidation
             else if (profile.SmoothCursor && profile.FrameGen != FrameGeneration.Off &&
                      !File.Exists(Path.Combine(Path.GetDirectoryName(inventory.DcsExecutable) ?? "", "Visualizer.dll")))
                 issues.Add(new("smooth-cursor-images", IssueSeverity.Info, "Smooth mouse cursor: DCS's cursor images (Visualizer.dll) are not next to DCS.exe. Frame generation reads them from the running game, or uses a plain arrow."));
-            if (inventory.OptionsPath is null) Error("options-not-found", "Select your DCS Config/options.lua file.");
+            if (inventory.OptionsPath is null) Error("options-not-found", @"DCS's settings file (Saved Games\DCS\Config\options.lua) was not found." + " If DCS was never started on this PC, start it once to the main menu and close it, then press Rescan this PC; otherwise select the options.lua DCS uses.");
             if (profile.Runtime == RuntimeKind.SboysSteamVr && !profile.Desktop && inventory.SteamVrRuntime is null && profile.RuntimeManifestPath is null)
                 Error("steamvr-not-found", "SteamVR OpenXR manifest not found.");
         }

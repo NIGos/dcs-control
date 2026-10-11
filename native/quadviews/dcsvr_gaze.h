@@ -45,6 +45,7 @@ class GazeFilter {
     // tracker noise by microseconds read as thousands of degrees per second; the earlier sample stays the reference.
     void UpdateSpeed(int64_t time, float x, float y, float z, const GazeSettings& s) {
         if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) || time == m_lastTime) return;
+        if (m_lastTime != 0 && time < m_lastTime) return;  // an older display time: neither a sample nor the reference
         const float length = std::sqrt(x * x + y * y + z * z);
         if (length <= 0.f) return;
         if (m_lastTime != 0 && time > m_lastTime) {
@@ -79,6 +80,8 @@ class GazeFilter {
                 const float lead = s.leadMs / 1000.f / dt;
                 e.lead = {std::clamp((projected.x - e.previous.x) * lead, -s.maxExtend, s.maxExtend),
                           std::clamp((projected.y - e.previous.y) * lead, -s.maxExtend, s.maxExtend)};
+            } else if (m_inSaccade) {
+                e.lead = {};  // a saccade right after a gap: no lead yet, never the previous saccade's
             }
             e.previous = projected;
             e.time = time;

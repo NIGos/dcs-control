@@ -1419,7 +1419,7 @@ bool RecordOnPool(defrec::Pool& pool, Job& j, std::vector<ID3D11CommandList*>& c
       args[r] = {&j, r, false};
       if (!pool.Submit(r, &RoleFn, &args[r], nullptr)) return false;
     }
-    pool.Wait(10000);
+    pool.Wait(60000);
     for (int r = 0; r < kThreads; ++r)
       if (!args[r].ok) return false;
   } else {
@@ -1438,7 +1438,7 @@ bool RecordOnPool(defrec::Pool& pool, Job& j, std::vector<ID3D11CommandList*>& c
         !pool.Submit(0, &JobMain, &j, nullptr))
       return false;
     if (!StartJob(j, j.vec, false)) return false;
-    pool.Wait(10000);
+    pool.Wait(60000);
     for (int w = 0; w < 3; ++w)
       if (pool.Busy(w)) return false;
     if (j.result != kBuildOk || !j.segCount || j.recFail.load()) return false;
@@ -1631,7 +1631,7 @@ void DeviceTests(srtest::Compiler& comp) {
       ++want;
       j->redoArg[k] = {j, static_cast<uint8_t>(k), 0};
       j->redoState[k].store(kRedoRun);
-      if (pool.Submit(0, &RedoMain, &j->redoArg[k], nullptr)) pool.Wait(10000);
+      if (pool.Submit(0, &RedoMain, &j->redoArg[k], nullptr)) pool.Wait(60000);
       done += j->redoState[k].load() == kRedoOk && j->redoCl[k];
     }
     bool ssR = false;

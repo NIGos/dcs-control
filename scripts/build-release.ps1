@@ -92,14 +92,12 @@ foreach ($filename in @('XR_APILAYER_MBUCCHIA_quad_views_foveated.dll','openxr-a
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'installer.ps1') -Destination (Join-Path $payloadRoot 'scripts/installer.ps1') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'README.md') -Destination (Join-Path $payloadRoot 'README.md') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'PLAN_DCS_VR.md') -Destination $payloadRoot -Force
 # The policy's version and corresponding-source name always match this build (GPL source offer).
 $policy = Get-Content -LiteralPath (Join-Path $workspaceRoot 'distribution-policy.json') -Raw | ConvertFrom-Json
 $policy.version = $version; $policy.correspondingSource = "DcsControl-$version-sources.zip"
 $policy | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $payloadRoot 'distribution-policy.json') -Encoding utf8
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'docs/SETUP.md') -Destination (Join-Path $payloadRoot 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot 'docs/FRAME_PACING.md') -Destination (Join-Path $payloadRoot 'docs') -Force
-foreach ($doc in @('docs/INTERFACE.md','docs/VALIDATION.md','docs/FIRST_FLIGHT.md','docs/THIRD_PARTY.md','docs/RELEASE_NOTES.md','docs/APPROACHES.md','docs/QUAD_FOCUS_ADAPTER.md','docs/NEURAL_TUNING.md','docs/PERFORMANCE.md','docs/performance-results.json','docs/APP_ICON.md','docs/USER_GUIDE.md','docs/app-icon-preview.png')) { Copy-Item -LiteralPath (Join-Path $workspaceRoot $doc) -Destination (Join-Path $payloadRoot 'docs') -Force }
+Get-ChildItem -LiteralPath (Join-Path $workspaceRoot 'docs') -File | Where-Object { $_.Extension -in '.md', '.json', '.png' } |
+    ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $payloadRoot 'docs') -Force }
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'docs/screenshots') -Destination (Join-Path $payloadRoot 'docs') -Recurse -Force
 $renderStart = [Diagnostics.ProcessStartInfo]::new((Join-Path $releaseRoot 'DcsControl.exe'))
 $renderStart.UseShellExecute = $false; $renderStart.CreateNoWindow = $true
@@ -117,12 +115,13 @@ if ($renderProcess.ExitCode -ne 0) { throw 'Release interface render failed.' }
 $renderProcess.Dispose()
 Remove-Item -LiteralPath $demoRoot -Recurse -Force -ErrorAction SilentlyContinue
 Get-ChildItem -LiteralPath $renderRoot -File | Where-Object { $_.Name -like 'interface-*.png' -or $_.Name -eq 'interface-checks.json' -or $_.Name -eq 'interface-renders.json' } | Copy-Item -Destination (Join-Path $payloadRoot 'docs') -Force
+Remove-Item -LiteralPath $renderRoot -Recurse -Force -ErrorAction SilentlyContinue # copied into the payload; nothing else reads it
 # The render list names each image by its file name only: the build folder (and the build machine's user name) never ships.
 $rendersFile = Join-Path $payloadRoot 'docs/interface-renders.json'
 $renders = @(Get-Content -LiteralPath $rendersFile -Raw | ConvertFrom-Json)
 foreach ($render in $renders) { if ($render.PSObject.Properties['path']) { $render.path = Split-Path -Leaf $render.path } }
 ConvertTo-Json -InputObject $renders -Depth 8 | Set-Content -LiteralPath $rendersFile -Encoding utf8
-foreach ($index in 0..42) { if (-not (Test-Path -LiteralPath (Join-Path $payloadRoot "docs/interface-$index.png"))) { throw 'Release interface preview is incomplete.' } }
+if ($renders.Count -eq 0 -or @($renders | Where-Object { -not (Test-Path -LiteralPath (Join-Path $payloadRoot ('docs/' + $_.path))) }).Count) { throw 'Release interface preview is incomplete.' }
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'LICENSE') -Destination (Join-Path $payloadRoot 'licenses/Manager-MIT.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/nuget/microsoft.web.webview2/1.0.4258.31/LICENSE.txt') -Destination (Join-Path $payloadRoot 'licenses/WebView2-SDK.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/nuget/microsoft.web.webview2/1.0.4258.31/NOTICE.txt') -Destination (Join-Path $payloadRoot 'licenses/WebView2-NOTICE.txt') -Force
@@ -137,7 +136,9 @@ Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/packages/Mi
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/quadviews/packages/Microsoft.Windows.ImplementationLibrary.1.0.220201.1/ThirdPartyNotices.txt') -Destination (Join-Path $payloadRoot 'licenses/WIL-ThirdPartyNotices.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/packages/cheeky/licenses') -Destination (Join-Path $payloadRoot 'licenses/Cheeky-dependencies') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/sboys/LICENCE.md') -Destination (Join-Path $payloadRoot 'licenses/Sboys-GPL-2.0.md') -Force
-& $dotnet (Join-Path $payloadRoot 'DcsVr.Cli.dll') presets | Set-Content -LiteralPath (Join-Path $payloadRoot 'profiles/presets.json') -Encoding utf8
+$presets = & $dotnet (Join-Path $payloadRoot 'DcsVr.Cli.dll') presets
+if ($LASTEXITCODE -ne 0 -or -not $presets) { throw 'Preset export failed.' }
+$presets | Set-Content -LiteralPath (Join-Path $payloadRoot 'profiles/presets.json') -Encoding utf8
 @'
 @echo off
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0files\scripts\installer.ps1" -Action Install -InstallPrerequisites

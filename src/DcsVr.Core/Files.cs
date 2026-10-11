@@ -24,11 +24,49 @@ public static class AtomicFile
         {
             using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, FileOptions.WriteThrough))
             { stream.Write(bytes); stream.Flush(flushToDisk: true); }
-            File.Move(temporary, path, overwrite: true);
+            // A file the pilot made read-only (options.lua, typically) is replaced and stays read-only.
+            var attributes = File.Exists(path) ? File.GetAttributes(path) : (FileAttributes?)null;
+            var readOnly = attributes is { } a && a.HasFlag(FileAttributes.ReadOnly);
+            if (readOnly) File.SetAttributes(path, attributes!.Value & ~FileAttributes.ReadOnly);
+            try { Retry(() => File.Move(temporary, path, overwrite: true)); }
+            finally { if (readOnly && File.Exists(path)) File.SetAttributes(path, File.GetAttributes(path) | FileAttributes.ReadOnly); }
+            RemoveLeftovers(directory);
         }
-        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        finally { if (File.Exists(temporary)) try { File.Delete(temporary); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { } }
+    }
+
+    /// <summary>Temporary files of a write that a crash or power loss interrupted (".dcs-vr-*.tmp", older than an hour)
+    /// are removed the next time the folder is written; a current write's file is never touched.</summary>
+    private static void RemoveLeftovers(string directory)
+    {
+        try
+        {
+            foreach (var file in new DirectoryInfo(directory).EnumerateFiles(".dcs-vr-*.tmp"))
+                if (DateTime.UtcNow - file.LastWriteTimeUtc > TimeSpan.FromHours(1)) file.Delete();
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+    }
+
+    /// <summary>Runs <paramref name="action"/> again for about 2 s while another program holds the file (an antivirus
+    /// scanning a new DLL, Windows Search, OneDrive): sharing and lock violations, and access denied on a file that is
+    /// being scanned. A real permission problem still fails after the last try.</summary>
+    public static void Retry(Action action)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try { action(); return; }
+            catch (Exception e) when (attempt < 8 && (e is UnauthorizedAccessException || (e is IOException io && (io.HResult & 0xFFFF) is 32 or 33)))
+            { Thread.Sleep(50 * attempt); }
+        }
     }
     public static void WriteText(string path, string content) => Write(path, new UTF8Encoding(false).GetBytes(content));
+}
+
+/// <summary>UTF-8 without a byte order mark that refuses invalid bytes instead of replacing them: options.lua is read
+/// and written back with it, so a file saved in another encoding is reported, never silently changed.</summary>
+internal static class StrictUtf8
+{
+    public static readonly UTF8Encoding Encoding = new(false, true);
 }
 
 public static class PathPolicy
@@ -63,7 +101,9 @@ public static class PathPolicy
         var stop = root is null ? null : Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         while (!string.IsNullOrEmpty(current))
         {
-            if ((File.Exists(current) || Directory.Exists(current)) && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+            // Only real links count: OneDrive Files On-Demand and other cloud files carry a reparse point too, with no link target.
+            if ((File.Exists(current) || Directory.Exists(current)) && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0
+                && (File.Exists(current) ? new FileInfo(current).LinkTarget : new DirectoryInfo(current).LinkTarget) is not null)
                 throw new InvalidDataException("Symlink and junction destinations are unsupported: " + current);
             if (stop is null) return;
             current = Path.GetDirectoryName(current);

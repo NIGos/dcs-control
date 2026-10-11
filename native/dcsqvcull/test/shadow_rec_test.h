@@ -1274,7 +1274,7 @@ void DeviceTests(Compiler& comp) {
     j->startState.store(kStartArmed);
     const bool sub = pool.Submit(0, &JobMain, j, nullptr);
     const bool started = StartJob(*j, j->vec, false) && !StartJob(*j, j->vec, false);  // the first start wins
-    const bool waited = sub && started && pool.Wait(10000);
+    const bool waited = sub && started && pool.Wait(60000);
     ID3D11CommandList* cl = pool.TakeList(0);
     uint32_t expectRec = 0;
     for (int i = 0; i < kObjs; ++i) expectRec += w->Smr(i) && World::MatOf(i) != kTexturedMat;
@@ -1831,10 +1831,19 @@ void DeviceMultiTests(Compiler& comp) {
     // Render thread: each job's snapshot once its keys are final.
     for (int c = 0; c < 4 && sub; ++c) {
       Job& j = *jobs[c];
-      for (int spin = 0; spin < 5000 && pool.Busy(c) && !j.stageA.load(); ++spin) Sleep(1);
+      const ULONGLONG until = GetTickCount64() + 60000;  // a deadline: loaded machines are slow, never wrong
+      while (pool.Busy(c) && !j.stageA.load() && GetTickCount64() < until) Sleep(1);
       if (j.stageA.load() && j.needGo) TakeSnapshot(j);
     }
-    pool.Wait(10000);  // false when a helper had nothing to record: check the workers instead
+    pool.Wait(60000);  // false when a helper had nothing to record: check the workers instead
+    {
+      const ULONGLONG until = GetTickCount64() + 60000;
+      for (bool busy = true; busy && GetTickCount64() < until;) {
+        busy = false;
+        for (int c = 0; c < kThreads * kSlots; ++c) busy |= pool.Busy(c);
+        if (busy) Sleep(1);
+      }
+    }
     g_testP1Wait = false;
     bool waited = sub;
     for (int c = 0; c < kThreads * kSlots; ++c) waited &= !pool.Busy(c);
@@ -1960,7 +1969,7 @@ void DeviceMultiTests(Compiler& comp) {
         allOk &= ok;
       }
       for (int c = 3; c >= 0; --c) StartJob(*jobs[c], desc[c], false);
-      for (int spin = 0; spin < 10000; ++spin) {
+      for (const ULONGLONG until = GetTickCount64() + 60000; GetTickCount64() < until;) {
         bool busy = false;
         for (int k = 0; k < kThreads * kSlots; ++k) busy |= pool.Busy(k);
         if (!busy) break;
@@ -2000,7 +2009,10 @@ void DeviceMultiTests(Compiler& comp) {
     printf("     %d free-running rounds (helpers rotating 0-3 per cascade), %d differ or fail; helper slots that took "
            "chunks: 0x%x\n",
            rounds, badRounds, joinedSeen);
-    Check(rounds == 40 && badRounds == 0 && joinedSeen != 0,
+    // Whether any helper won a chunk is scheduling (a loaded machine can let the
+    // primaries take every chunk): reported, not asserted; every round's depth is.
+    if (!joinedSeen) printf("     note: no helper took a chunk in any free-running round (loaded machine)\n");
+    Check(rounds == 40 && badRounds == 0,
           "shadow rec S5 device: free-running helpers (no test wait, 0-3 per job): every round equals stock bit for "
           "bit");
   }

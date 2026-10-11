@@ -90,8 +90,11 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         // Saved Games\DCS*\Scripts, next to Config: where the DCS engine optimizations' Lua hook and module go.
         var scripts = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(optionsPath)!)!, "Scripts");
         var optionsBytes = File.ReadAllBytes(optionsPath);
-        var utf8 = new UTF8Encoding(false, true);
-        var text = utf8.GetString(optionsBytes);
+        var utf8 = StrictUtf8.Encoding;
+        string text;
+        try { text = utf8.GetString(optionsBytes); }
+        // Hand-edited and saved in another encoding: nothing is written into it, and the pilot reads how to fix it.
+        catch (DecoderFallbackException) { throw new InvalidDataException(optionsPath + " is not saved as UTF-8 (it was probably edited and saved in another encoding). Open it in Notepad, choose Save as → Encoding UTF-8, and launch again; DCS reads it either way."); }
         // Settings an earlier profile changed start from the user's own values.
         foreach (var (key, original) in ownedSettings ?? new Dictionary<string, string?>())
         {
@@ -127,6 +130,15 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         // straight into the game; KeepDcsLauncher leaves the launcher alone (the restarted DCS inherits the profile
         // environment). Restored with the profile.
         if (!profile.KeepDcsLauncher && current.Get("miscellaneous") is not null) Require("miscellaneous.launcher", false);
+        // DCS's custom IPD replaces each eye's sideways position after the OpenXR layers, which would undo Pupil shift's
+        // sideways move: the layer applies the same IPD itself and DCS's option is off while the profile is applied
+        // (owned like every key here: Back to stock DCS turns it on again).
+        double? pupilIpd = null;
+        if (profile.UsesPupilShift && current.Get("VR", "custom_IPD_enable")?.Trim() == "true" && CustomIpd(current.Get("VR", "custom_IPD")) is { } customIpd)
+        {
+            pupilIpd = customIpd;
+            Require("VR.custom_IPD_enable", false);
+        }
         // Small DCS window in VR: the desktop mirror becomes a 1280×720 window. The headset image is rendered at the
         // headset's own resolution either way; DCS and Windows only keep smaller desktop buffers. The aspect follows the
         // window when DCS stores one. Owned keys like every setting above: Back to stock DCS puts the user's values back.
@@ -192,7 +204,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                 // What the module writes while DCS runs; all of it goes with the module on restore.
                 runtimeLogs: [.. new[] { "DcsQvCull.log", "report_*.txt", "profile_*.txt", "bench_*.csv", "run_suite.flag", "run_motion.flag", "toggle_engine.flag", Path.Combine("payload", "active_*.dll"), Path.Combine("cache", "*.qvc"), Path.Combine("cache", "*.qvc.*.tmp") }.Select(name => Path.Combine(module, name))]);
             Add(Path.Combine(module, "payload", "DcsQvCullPayload.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCullPayload.dll")), "DCS engine optimizations");
-            AddText(Path.Combine(module, "DcsQvCull.ini"), ConfigurationWriters.DcsQvCull(profile), "DCS engine optimization settings");
+            AddIni(Path.Combine(module, "DcsQvCull.ini"), ConfigurationWriters.DcsQvCull(profile), "DCS engine optimization settings");
             // Written last, removed first on restore: the hook never points at a module that is gone.
             Add(Path.Combine(scripts, "Hooks", "DcsQvCull.lua"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.lua")), "DCS engine optimizations hook");
         }
@@ -240,7 +252,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             var ofxr = forkDll is null ? RequireDirectory(components.OfxrDirectory, "OFXR package has not been imported.") : null;
             var dll = PathPolicy.UnderRoot(profileRoot, "ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll");
             Add(dll, File.ReadAllBytes(forkDll ?? PathPolicy.UnderRoot(ofxr!, "ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll")), "OFXR framegen");
-            AddText(PathPolicy.UnderRoot(profileRoot, "ofxr/ofxr_bridge.ini"), ConfigurationWriters.Ofxr(profile, Path.GetDirectoryName(exe)), "Framegen settings");
+            AddIni(PathPolicy.UnderRoot(profileRoot, "ofxr/ofxr_bridge.ini"), ConfigurationWriters.Ofxr(profile, Path.GetDirectoryName(exe)), "Framegen settings");
             AddText(PathPolicy.UnderRoot(layersRoot, "ofxr.json"), ConfigurationWriters.LayerManifest("XR_APILAYER_XRFrameBridge_diagnostic", dll, forkDll is null ? 116 : 401, "DCS Control · OFXR Bridge"), "Profile OFXR manifest");
             layerNames.Add("XR_APILAYER_XRFrameBridge_diagnostic");
         }
@@ -273,7 +285,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             var folder = PathPolicy.UnderRoot(profileRoot, "pupilshift");
             var dll = PathPolicy.UnderRoot(folder, "XR_APILAYER_DCSVR_pupil_shift.dll");
             Add(dll, File.ReadAllBytes(source), "Pupil shift OpenXR layer", runtimeLogs: [PathPolicy.UnderRoot(folder, "PupilShift.log")]);
-            var pupilIni = ConfigurationWriters.PupilShift(profile);
+            var pupilIni = ConfigurationWriters.PupilShift(profile, pupilIpd);
             Add(PathPolicy.UnderRoot(folder, "PupilShift.ini"), new UTF8Encoding(false).GetBytes(pupilIni), "Pupil shift settings", iniValues: IniFile.Parse(pupilIni));
             AddText(PathPolicy.UnderRoot(layersRoot, "pupil-shift.json"), ConfigurationWriters.LayerManifest("XR_APILAYER_DCSVR_pupil_shift", dll, 1, "DCS Control · pupil shift"), "Profile pupil shift manifest");
             layerNames.Insert(0, "XR_APILAYER_DCSVR_pupil_shift");
@@ -289,7 +301,13 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         AddText(PathPolicy.UnderRoot(profileRoot, "launch.json"), JsonData.Serialize(new LaunchConfiguration(exe, environment, dependencies, File.Exists(autoexec) ? [] : [autoexec])), "Profile launch environment");
         return new(profile.Id, profile.Name, files, environment, exe);
 
+        // VR.custom_IPD in millimetres ("64" or 64); null outside 40-90 mm.
+        static double? CustomIpd(string? raw) =>
+            raw is not null && double.TryParse(raw.Trim().Trim('"'), System.Globalization.NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && mm is >= 40 and <= 90 ? mm : null;
         void AddText(string path, string content, string purpose) => Add(path, new UTF8Encoding(false).GetBytes(content), purpose);
+        // Read by GetPrivateProfileString, which takes a file without a BOM as the ANSI code page: UTF-16 with a BOM keeps
+        // paths with accented or Cyrillic letters (the DCS folder, Saved Games) intact.
+        void AddIni(string path, string content, string purpose) => Add(path, [.. Encoding.Unicode.GetPreamble(), .. Encoding.Unicode.GetBytes(content)], purpose);
         // The same file in both Cheeky builds (upstream and focus adapter): either one already there is ours.
         string[] Variants(string relative) => new[] { components.CheekyDirectory, components.QuadFocusDirectory }
             .Where(d => d is not null && File.Exists(Path.Combine(d, relative))).Select(d => Hashing.FileSha256(Path.Combine(d!, relative))).ToArray();

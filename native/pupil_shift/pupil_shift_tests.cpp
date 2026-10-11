@@ -38,16 +38,16 @@ int main() {
     // Pupil offset: straight gaze is zero; 25 deg right moves r*sin sideways and r*(1-cos) back.
     {
         const float r = 0.0105f;
-        const Vec3 z = pupil_offset({0, 0, -1}, r);
+        const Vec3 z = pupil_offset({0, 0, -1}, {0, 0, -1}, r);
         check(length(z) < 1e-9f, "straight gaze offset", length(z), 0);
         const float s = std::sin(25 * 3.14159265f / 180), c = std::cos(25 * 3.14159265f / 180);
-        const Vec3 o = pupil_offset({s, 0, -c}, r);
+        const Vec3 o = pupil_offset({s, 0, -c}, {0, 0, -1}, r);
         check(std::fabs(o.x - r * s) < 1e-7f, "offset x", o.x, r * s);
         check(std::fabs(o.z - r * (1 - c)) < 1e-7f, "offset z", o.z, r * (1 - c));
     }
     // Clamp keeps the direction and limits the angle.
     {
-        const Vec3 g = clamp_gaze({std::sin(0.8f), 0, -std::cos(0.8f)}, 30);
+        const Vec3 g = clamp_gaze({std::sin(0.8f), 0, -std::cos(0.8f)}, {0, 0, -1}, 30);
         check(std::fabs(std::acos(-g.z) - 30 * 3.14159265f / 180) < 1e-5f, "clamp angle", std::acos(-g.z), 0.5236);
         check(g.x > 0 && std::fabs(g.y) < 1e-7f, "clamp direction", g.x, g.y);
     }
@@ -63,7 +63,7 @@ int main() {
         const float D = 1.5f, r = 0.0105f;
         for (float gaze_deg : {0.0f, 15.0f, 25.0f, 35.0f}) {
             const float s = std::sin(gaze_deg * 3.14159265f / 180), c = std::cos(gaze_deg * 3.14159265f / 180);
-            const Vec3 P = pupil_offset({s, 0.3f * s, -c}, r);
+            const Vec3 P = pupil_offset({s, 0.3f * s, -c}, {0, 0, -1}, r);
             const Fov fr = shifted_fov(fo, P, D);
             for (float dist : {1000.0f, 5.0f, 0.7f, 0.4f})
                 for (float ang : {-30.0f, 0.0f, 10.0f, 30.0f}) {
@@ -86,6 +86,31 @@ int main() {
                     }
                 }
         }
+    }
+    // Canted views: straight ahead is the head's forward, so a straight gaze moves no pupil.
+    {
+        const float a = 6 * 3.14159265f / 180 / 2;  // each view turned 3 deg outwards about +Y
+        const Quat left{0, std::sin(a / 2), 0, std::cos(a / 2)}, right{0, -std::sin(a / 2), 0, std::cos(a / 2)};
+        check(std::fabs(cant_deg(left, right) - 6) < 1e-3f, "cant", cant_deg(left, right), 6);
+        const Vec3 head = head_forward(left, right);
+        check(std::fabs(head.x) < 1e-6f && std::fabs(head.z + 1) < 1e-6f, "head forward", head.x, head.z);
+        const Vec3 rest = rotate(conjugate(left), head);
+        const Vec3 straight = pupil_offset(rest, rest, 0.0105f);
+        check(length(straight) < 1e-9f, "straight gaze on canted view", length(straight), 0);
+        // The old view-axis reference would have moved it about 0.55 mm (3 deg on a 10.5 mm radius).
+        check(length(pupil_offset(rest, {0, 0, -1}, 0.0105f)) > 0.0005f, "view-axis reference moves it", length(pupil_offset(rest, {0, 0, -1}, 0.0105f)), 0);
+        const Vec3 limited = clamp_gaze(normalized(Vec3{1, 0, -1}), rest, 30);
+        check(std::fabs(std::acos(std::clamp(dot(limited, rest), -1.0f, 1.0f)) * 57.29578f - 30) < 1e-3f, "clamp about rest", 0, 30);
+    }
+    // DCS's custom IPD applied by the layer: both eyes move by the same amount along the line between them.
+    {
+        Vec3 ml, mr;
+        const Vec3 l{-0.03277f, 0.01f, 0.002f}, r{0.03277f, 0.01f, 0.002f};  // 65.54 mm
+        ipd_moves(l, r, 0.064f, ml, mr);
+        check(std::fabs(length((r + mr) - (l + ml)) - 0.064f) < 1e-6f, "ipd distance", length((r + mr) - (l + ml)), 0.064);
+        check(length((l + ml + r + mr) * 0.5f - (l + r) * 0.5f) < 1e-7f, "ipd keeps the centre", 0, 0);
+        ipd_moves(l, r, 0, ml, mr);
+        check(length(ml) == 0 && length(mr) == 0, "no ipd, no move", 0, 0);
     }
     std::printf("%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

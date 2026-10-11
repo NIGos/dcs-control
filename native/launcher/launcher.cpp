@@ -27,7 +27,7 @@ const wchar_t* Arguments(const wchar_t* line, const wchar_t* self) {
 }
 }  // namespace
 
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int show) {
     wchar_t self[MAX_PATH * 4]{};
     const DWORD length = GetModuleFileNameW(nullptr, self, ARRAYSIZE(self));
     if (length == 0 || length >= ARRAYSIZE(self)) return 1;
@@ -43,6 +43,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     const wchar_t* rest = Arguments(GetCommandLineW(), self);
     if (*rest) command += L" " + std::wstring(rest);
     STARTUPINFOW startup{sizeof(startup)};
+    // A shortcut's "Run: Minimized/Maximized" reaches the app too.
+    startup.dwFlags = STARTF_USESHOWWINDOW; startup.wShowWindow = static_cast<WORD>(show);
     PROCESS_INFORMATION process{};
     // The caller's working directory, so relative arguments mean the same as for the launcher; the app itself finds
     // everything next to its own executable.

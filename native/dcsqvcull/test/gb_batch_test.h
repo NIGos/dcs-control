@@ -10,10 +10,8 @@ namespace gbbtest {
 
 using namespace gbbatch;
 
-const std::wstring kBin = L"E:\\SteamLibrary\\steamapps\\common\\DCSWorld\\bin\\";
-uint8_t* LoadBin(const wchar_t* name) {
-  return reinterpret_cast<uint8_t*>(LoadLibraryExW((kBin + name).c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES));
-}
+// nullptr when DCS is not installed (dcs_install.h): the callers SKIP.
+uint8_t* LoadBin(const wchar_t* name) { return reinterpret_cast<uint8_t*>(dcsinstall::LoadBinary(name)); }
 
 // Called from main() before the shadow-tex test patches NGModel's image.
 void BuildChecks() {

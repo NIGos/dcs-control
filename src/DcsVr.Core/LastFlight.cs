@@ -238,7 +238,8 @@ public static partial class LastFlight
         if (error is { Length: > 160 }) error = error[..157] + "…";
         return new(version is not null && error is null ? "ran" : error is not null ? "failed" : "not-started", version, toggles, on, error);
     }
-    [GeneratedRegex(@"DLSS-NR (\S+) feature-\d+ runtime initialized")] private static partial Regex NeuralInitRegex();
+    /// <summary>Cheeky's line when the DLSS 5 runtime starts; group 1 is the runtime version. Also read by <see cref="Diagnostics"/>.</summary>
+    [GeneratedRegex(@"DLSS-NR (\S+) feature-\d+ runtime initialized")] internal static partial Regex NeuralInitRegex();
     /// <summary>The lines after the last line that matches <paramref name="start"/>; all lines when none does (a log
     /// from before the markers, or one whose start is beyond the read limit).</summary>
     private static List<string> LastSession(IEnumerable<string> lines, Func<string, bool> start)

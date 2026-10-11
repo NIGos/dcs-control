@@ -432,8 +432,19 @@ ULONG RefCount(IUnknown* p) {
   return p->Release();
 }
 
+// Waits that must complete (they only time out on a hung worker): generous,
+// so a loaded machine never turns a slow recording into a failure.
+constexpr DWORD kLongWaitMs = 60000;
+
 bool SleepJob(Worker& w, void* u) {
   Sleep(*static_cast<DWORD*>(u));
+  w.dc->ClearState();
+  return true;
+}
+// Blocks until the test opens the gate: a job that is still running exactly as
+// long as the test needs, whatever the scheduler does (a timed sleep is not).
+bool GateJob(Worker& w, void* u) {
+  WaitForSingleObject(*static_cast<HANDLE*>(u), INFINITE);
   w.dc->ClearState();
   return true;
 }
@@ -581,7 +592,7 @@ void Run() {
       args[k] = {&s, k * kDraws / 4, (k + 1) * kDraws / 4, var.batched};
       sub = pool.Submit(k, &RecordJob, &args[k], &ps[k]) && sub;
     }
-    const bool waited = pool.Wait(5000);
+    const bool waited = pool.Wait(kLongWaitMs);
     SetForeign(s, s.imm, imm1);
     for (int k = 0; k < 4; ++k) Clear(s, k);
     PassState before{}, after{};
@@ -609,7 +620,7 @@ void Run() {
     Capture(s.imm, &full);
     JobArgs all{&s, 0, kDraws, var.batched};
     sub = pool.Submit(1, &RecordJob, &all, &full);
-    bool ok = sub && pool.Wait(5000);
+    bool ok = sub && pool.Wait(kLongWaitMs);
     Clear(s, 0);
     ok = ok && pool.ExecuteAll(s.imm) == 1;
     bad = Diff(Read(s, 0), refFull);
@@ -623,7 +634,7 @@ void Run() {
       args[k] = {&s, k * kDraws / 4, (k + 1) * kDraws / 4, var.batched};
       sub = pool.Submit(k, &RecordJob, &args[k], &full) && sub;
     }
-    ok = sub && pool.Wait(5000);
+    ok = sub && pool.Wait(kLongWaitMs);
     Clear(s, 0);
     ok = ok && pool.ExecuteAll(s.imm) == 4;
     bad = Diff(Read(s, 0), refFull);
@@ -635,7 +646,7 @@ void Run() {
     // Negative control for the restore check: with FALSE the state is reset.
     if (var.mode == CbMode::kDiscard) {
       JobArgs one{&s, 0, 10, false};
-      sub = pool.Submit(0, &RecordJob, &one, &full) && pool.Wait(5000);
+      sub = pool.Submit(0, &RecordJob, &one, &full) && pool.Wait(kLongWaitMs);
       SetForeign(s, s.imm, imm1);
       PassState b0{}, a0{};
       Capture(s.imm, &b0);
@@ -658,31 +669,36 @@ void Run() {
 
   // Failure paths.
   {
+    TestSpin spin("deferred rec failure paths");
     Pool pool;
     PoolConfig pc;
     pc.workers = 2;
     pc.name = "defrec test";
     bool ok = pool.Start(s.dev, pc);
     // A job that gives up: failure reported, pool stays on.
-    ok = ok && pool.Submit(0, &FailJob, nullptr, nullptr) && !pool.Wait(2000) && pool.Status(0) == kIdle &&
+    ok = ok && pool.Submit(0, &FailJob, nullptr, nullptr) && !pool.Wait(kLongWaitMs) && pool.Status(0) == kIdle &&
          !pool.Disabled() && pool.At(0).failed == 1;
     Check(ok, "deferred rec: a job returning false reports failure, the pool stays on");
     // A job past the wait timeout: refused until it finished, its late list dropped.
-    DWORD ms = 300;
-    const bool sub = pool.Submit(1, &SleepJob, &ms, nullptr);
+    // The job blocks on a gate the test opens after the refusal (no timed sleeps).
+    HANDLE gate = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const bool sub = pool.Submit(1, &GateJob, &gate, nullptr);
     const bool waitedLate = pool.Wait(20);
-    const bool refused = !pool.Submit(1, &SleepJob, &ms, nullptr);
-    Sleep(600);
+    const bool refused = !pool.Submit(1, &GateJob, &gate, nullptr);
+    SetEvent(gate);
+    const ULONGLONG until = GetTickCount64() + 60000;
+    while (pool.Busy(1) && GetTickCount64() < until) Sleep(1);
     DWORD ms0 = 0;
     const bool resubmit = !pool.Busy(1) && pool.Status(1) == kOk && pool.Submit(1, &SleepJob, &ms0, nullptr);
-    const bool waited = pool.Wait(2000);
+    const bool waited = pool.Wait(kLongWaitMs);
+    CloseHandle(gate);
     ID3D11CommandList* l = pool.TakeList(1);
     Check(sub && !waitedLate && pool.timeouts() == 1 && refused && pool.refused() == 1 && resubmit && waited && l,
           "deferred rec: a job past the timeout is not waited for, the worker is refused until it finished");
     Rel(l);
     // A faulting job: caught, reported, pool latched off.
     const bool fsub = pool.Submit(0, &FaultJob, nullptr, nullptr);
-    const bool fwait = pool.Wait(2000);
+    const bool fwait = pool.Wait(kLongWaitMs);
     printf("     fault: worker 0 code 0x%08lx\n", static_cast<unsigned long>(pool.At(0).faultCode));
     Check(fsub && !fwait && pool.At(0).faults == 1 && pool.At(0).faultCode == EXCEPTION_ACCESS_VIOLATION &&
               pool.Disabled() && !pool.Submit(1, &FailJob, nullptr, nullptr),

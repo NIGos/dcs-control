@@ -13,13 +13,13 @@
 #include <openxr/openxr_loader_negotiation.h>
 
 #include <array>
+#include <cstdint>
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <deque>
 #include <mutex>
-#include <thread>
 #include <string>
 #include <vector>
 
@@ -69,7 +69,7 @@ float ini_float(const wchar_t* key, float fallback, const std::wstring& path) {
     if (!text[0]) return fallback;
     wchar_t* end{};
     const float value = std::wcstof(text, &end);
-    return end != text ? value : fallback;
+    return end != text && std::isfinite(value) ? value : fallback;
 }
 
 // "virtual-key:modifiers"; false (keeps the previous key) for anything else.
@@ -96,13 +96,15 @@ void reload_settings_locked(bool force) {
     s.eye_radius = std::clamp(ini_float(L"EyeRadiusMm", 10.5f, path), 0.0f, 30.0f) / 1000.0f;
     s.virtual_image = std::clamp(ini_float(L"VirtualImageM", 1.5f, path), 0.2f, 100.0f);
     s.max_gaze_deg = std::clamp(ini_float(L"MaxGazeDeg", 35.0f, path), 0.0f, 60.0f);
-    s.simulate_x_deg = ini_float(L"SimulateGazeXDeg", 0, path);
-    s.simulate_y_deg = ini_float(L"SimulateGazeYDeg", 0, path);
+    const float ipd_mm = ini_float(L"Ipd", 0, path);
+    s.ipd = ipd_mm >= 40 && ipd_mm <= 90 ? ipd_mm / 1000.0f : 0;
+    s.simulate_x_deg = std::clamp(ini_float(L"SimulateGazeXDeg", 0, path), -60.0f, 60.0f);
+    s.simulate_y_deg = std::clamp(ini_float(L"SimulateGazeYDeg", 0, path), -60.0f, 60.0f);
     s.simulate = ini_float(L"SimulateGaze", 0, path) != 0;
     settings = s;
-    log("settings: enabled=%d eye_radius=%.1fmm virtual_image=%.2fm max_gaze=%.0fdeg simulate=%d (%.1f, %.1f) toggle=%d:%d\n",
+    log("settings: enabled=%d eye_radius=%.1fmm virtual_image=%.2fm max_gaze=%.0fdeg simulate=%d (%.1f, %.1f) toggle=%d:%d ipd=%.1fmm\n",
         s.enabled, s.eye_radius * 1000, s.virtual_image, s.max_gaze_deg, s.simulate, s.simulate_x_deg, s.simulate_y_deg,
-        toggle_vk, toggle_mods);
+        toggle_vk, toggle_mods, s.ipd * 1000);
 }
 
 // The in-flight switch (default Ctrl+Shift+F10) turns the correction off and on, for A/B comparison
@@ -115,8 +117,22 @@ void poll_hotkey_locked() {
     if (down && !hotkey_down) {
         toggled_off = !toggled_off;
         log("hotkey: correction %s\n", toggled_off ? "OFF" : "ON");
-        // Beep() blocks for its duration: off the render thread, so the switch itself causes no hitch.
-        std::thread([off = toggled_off] { Beep(off ? 600 : 1200, 80); }).detach();
+        // Beep() blocks for its duration: off the render thread, so the switch itself causes no hitch. The thread holds
+        // a reference to this DLL and drops it as it ends, so the loader unloading the layer can't remove its code first.
+        HMODULE self{};
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&poll_hotkey_locked), &self)) {
+            const auto frequency = static_cast<std::uintptr_t>(toggled_off ? 600 : 1200);
+            if (HANDLE thread = CreateThread(nullptr, 0, [](LPVOID parameter) -> DWORD {
+                    Beep(static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(parameter)), 80);
+                    HMODULE module{};
+                    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                        reinterpret_cast<LPCWSTR>(&poll_hotkey_locked), &module);
+                    FreeLibraryAndExitThread(module, 0);
+                }, reinterpret_cast<LPVOID>(frequency), 0, nullptr))
+                CloseHandle(thread);
+            else
+                FreeLibrary(self);
+        }
     }
     hotkey_down = down;
 }
@@ -141,10 +157,11 @@ struct Stats {
     float gaze_min_x{1e9f}, gaze_max_x{-1e9f}, gaze_min_y{1e9f}, gaze_max_y{-1e9f};
     float eye_min_x{1e9f}, eye_max_x{-1e9f}, eye_min_z{1e9f}, eye_max_z{-1e9f};
     float shift_max_mm{};
+    float cant_deg{}, runtime_ipd_mm{}, rendered_ipd_mm{};
     ULONGLONG start{};
 } stats;
 
-void account_locked(const XrView* views, std::uint32_t count, const Vec3* gaze, float shift_mm) {
+void account_locked(const XrView* views, std::uint32_t count, const Vec3* gaze, float shift_mm, float cant, float rendered_ipd_mm) {
     if (!stats.start) stats.start = GetTickCount64();
     ++stats.frames;
     if (gaze) {
@@ -154,8 +171,11 @@ void account_locked(const XrView* views, std::uint32_t count, const Vec3* gaze, 
         stats.gaze_min_y = std::min(stats.gaze_min_y, gy); stats.gaze_max_y = std::max(stats.gaze_max_y, gy);
         stats.shift_max_mm = std::max(stats.shift_max_mm, shift_mm);
     }
+    stats.cant_deg = cant;
+    stats.rendered_ipd_mm = rendered_ipd_mm;
     if (count >= 2) {
         const Vec3 l = to_vec(views[0].pose.position), r = to_vec(views[1].pose.position);
+        stats.runtime_ipd_mm = length(r - l) * 1000;
         const Vec3 local = rotate(conjugate(to_quat(views[0].pose.orientation)), l - (l + r) * 0.5f);
         stats.eye_min_x = std::min(stats.eye_min_x, local.x); stats.eye_max_x = std::max(stats.eye_max_x, local.x);
         stats.eye_min_z = std::min(stats.eye_min_z, local.z); stats.eye_max_z = std::max(stats.eye_max_z, local.z);
@@ -164,12 +184,14 @@ void account_locked(const XrView* views, std::uint32_t count, const Vec3* gaze, 
         const unsigned restored = restored_views.exchange(0);
         if (stats.shifted)
             log("stats: frames=%u shifted=%u restored=%u gaze x[%.1f..%.1f] y[%.1f..%.1f] deg, max shift %.2f mm; "
-                "runtime left eye vs head x[%.2f..%.2f] z[%.2f..%.2f] mm\n",
+                "runtime left eye vs head x[%.2f..%.2f] z[%.2f..%.2f] mm; cant %.1f deg, runtime IPD %.1f mm, rendered IPD %.1f mm\n",
                 stats.frames, stats.shifted, restored, stats.gaze_min_x, stats.gaze_max_x, stats.gaze_min_y, stats.gaze_max_y,
-                stats.shift_max_mm, stats.eye_min_x * 1000, stats.eye_max_x * 1000, stats.eye_min_z * 1000, stats.eye_max_z * 1000);
+                stats.shift_max_mm, stats.eye_min_x * 1000, stats.eye_max_x * 1000, stats.eye_min_z * 1000, stats.eye_max_z * 1000,
+                stats.cant_deg, stats.runtime_ipd_mm, stats.rendered_ipd_mm);
         else
-            log("stats: frames=%u shifted=0 (%s); runtime left eye vs head x[%.2f..%.2f] mm\n",
-                stats.frames, !settings.enabled || toggled_off ? "correction off" : "no gaze source", stats.eye_min_x * 1000, stats.eye_max_x * 1000);
+            log("stats: frames=%u shifted=0 (%s); runtime left eye vs head x[%.2f..%.2f] mm; cant %.1f deg, runtime IPD %.1f mm, rendered IPD %.1f mm\n",
+                stats.frames, !settings.enabled || toggled_off ? "correction off" : "no gaze source", stats.eye_min_x * 1000, stats.eye_max_x * 1000,
+                stats.cant_deg, stats.runtime_ipd_mm, stats.rendered_ipd_mm);
         const std::uint64_t tenths = static_cast<std::uint64_t>(std::clamp(stats.shift_max_mm * 10.0f + 0.5f, 0.0f, 255.0f));
         status_word.store(1ULL | (settings.enabled && !toggled_off ? 2ULL : 0) | (stats.shifted ? 4ULL : 0) |
             (settings.simulate ? 8ULL : 0) | (restored ? 16ULL : 0) | (tenths << 8), std::memory_order_release);
@@ -202,9 +224,27 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_LocateViews(XrSession session, const XrViewL
     Vec3 gaze_log{};
     bool have_gaze{};
     float shift_mm{};
+    const Quat q_left = to_quat(views[0].pose.orientation), q_right = to_quat(views[1].pose.orientation);
+    const Vec3 rest_world = head_forward(q_left, q_right);
+    // The eye distance DCS's custom IPD would set (DCS replaces the eyes' sideways position after this layer, so its
+    // option is off and the layer applies the same value). Applied whatever the switch says: the switch compares the
+    // pupil shift only, at the same IPD.
+    bool moved_ipd{};
+    if (settings.enabled && settings.ipd > 0) {
+        Vec3 move[2];
+        ipd_moves(to_vec(views[0].pose.position), to_vec(views[1].pose.position), settings.ipd, move[0], move[1]);
+        for (std::uint32_t v = 0; v < n; ++v) {
+            views[v].pose.position.x += move[v % 2].x;
+            views[v].pose.position.y += move[v % 2].y;
+            views[v].pose.position.z += move[v % 2].z;
+        }
+        moved_ipd = true;
+    }
     if (settings.enabled && !toggled_off && (quad || settings.simulate)) {
         for (std::uint32_t eye = 0; eye < 2; ++eye) {
             const Quat qp = to_quat(views[eye].pose.orientation);
+            // Straight ahead in this eye's frame: the head's forward, not the (possibly canted) view axis.
+            const Vec3 rest = rotate(conjugate(qp), rest_world);
             Vec3 gaze;
             if (settings.simulate) {
                 gaze = Vec3{std::tan(settings.simulate_x_deg / 57.2958f), std::tan(settings.simulate_y_deg / 57.2958f), -1};
@@ -214,8 +254,8 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_LocateViews(XrSession session, const XrViewL
                 const Vec3 local = gaze_from_focus_fov(to_fov(views[eye + 2].fov));
                 gaze = rotate(conjugate(qp), rotate(to_quat(views[eye + 2].pose.orientation), local));
             }
-            gaze = clamp_gaze(gaze, settings.max_gaze_deg);
-            const Vec3 offset = pupil_offset(gaze, settings.eye_radius);
+            gaze = clamp_gaze(normalized(gaze), rest, settings.max_gaze_deg);
+            const Vec3 offset = pupil_offset(gaze, rest, settings.eye_radius);
             const Vec3 world = rotate(qp, offset);
             for (std::uint32_t v = eye; v < n; v += 2) {
                 const Quat qv = to_quat(views[v].pose.orientation);
@@ -230,8 +270,9 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_LocateViews(XrSession session, const XrViewL
         have_gaze = true;
     }
     for (std::uint32_t i = 0; i < n; ++i) frame.shifted[i] = views[i];
-    account_locked(frame.original.data(), n, have_gaze ? &gaze_log : nullptr, shift_mm);
-    if (have_gaze) {
+    account_locked(frame.original.data(), n, have_gaze ? &gaze_log : nullptr, shift_mm, cant_deg(q_left, q_right),
+        length(to_vec(views[1].pose.position) - to_vec(views[0].pose.position)) * 1000);
+    if (have_gaze || moved_ipd) {
         frames.push_back(frame);
         while (frames.size() > 8) frames.pop_front();
     }
@@ -295,6 +336,7 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_EndFrame(XrSession session, const XrFrameEnd
 }
 
 XRAPI_ATTR XrResult XRAPI_CALL hook_GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function) {
+    if (next_gipa == nullptr) return XR_ERROR_HANDLE_INVALID;
     const XrResult result = next_gipa(instance, name, function);
     if (XR_FAILED(result) || name == nullptr) return result;
     if (std::strcmp(name, "xrLocateViews") == 0) {
@@ -347,7 +389,7 @@ extern "C" __declspec(dllexport) XRAPI_ATTR XrResult XRAPI_CALL xrNegotiateLoade
     return XR_SUCCESS;
 }
 
-BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID) {
+BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(module);
         wchar_t path[MAX_PATH]{};
@@ -356,7 +398,7 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID) {
         module_dir = module_dir.substr(0, module_dir.find_last_of(L"\\/") + 1);
         _wfopen_s(&log_file, (module_dir + L"PupilShift.log").c_str(), L"w");
         log("%s loaded\n", layer_name);
-    } else if (reason == DLL_PROCESS_DETACH && log_file) {
+    } else if (reason == DLL_PROCESS_DETACH && log_file && reserved == nullptr) {  // at process exit the CRT is going away too
         std::fclose(log_file);
     }
     return TRUE;

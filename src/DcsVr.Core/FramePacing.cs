@@ -8,12 +8,13 @@ public sealed record CadencePlan(double RefreshHz, double RequiredRenderedFps, d
 public static class FramePacing
 {
     // DCS's installed optionsDb.lua exposes graphics.maxFPS as 30..300.
-    // OFXR 0.2.1 has runtime pacing, but no configurable FPS limiter INI key.
+    // OFXR (the djules75 fork, 0.2.9.1) paces at run time but has no FPS limiter INI key.
     public static double? RequestedCap(VrProfile profile) => profile.FpsLimit switch
     {
         FpsLimitMode.Preserve => null,
         FpsLimitMode.RuntimeHeadroom => 300,
-        FpsLimitMode.MatchRefresh => profile.HeadsetRefreshHz / Multiplier(profile),
+        // Never below DCS's own minimum (30): 3× at 72 or 75 Hz would ask for 24-25 FPS.
+        FpsLimitMode.MatchRefresh => Math.Max(30, profile.HeadsetRefreshHz / Multiplier(profile)),
         FpsLimitMode.Custom => profile.RenderedFpsCap,
         _ => throw new InvalidDataException("Unknown FPS limit mode.")
     };
@@ -62,7 +63,7 @@ public static class FramePacing
             profile.DisableDcsVSync ? "The profile will set graphics.sync = false. The original value is backed up. OpenXR runtime synchronization remains active."
             : "Preserved: " + (sync ?? "not detected") + ". Desktop VSync is separate from OpenXR synchronization; verify its effect in DCS."));
         // Other limiters and runtime motion smoothing cannot be read or verified here, so they are always checks the
-        // user does; the profile's old self-reported values (ExternalLimiter, RuntimeReprojection) are not used.
+        // user does (an old profile's self-reported values are dropped when it loads).
         checks.Add(new("external-limiters", CheckState.Manual, "NVIDIA / RTSS / other FPS limits",
             "Check NVIDIA Max Frame Rate (global and for DCS), Background Application Max Frame Rate and RTSS: a second limiter can fight with the DCS frame limit and frame generation. This app does not read or change them."
             + (inventory.LimiterProcesses.Count == 0 ? " No RTSS process was detected; that does not prove every limit is off." : " Running: " + string.Join(", ", inventory.LimiterProcesses) + "; a running process does not prove an active limit.")));

@@ -630,8 +630,9 @@ void Uninstall() {
     CloseHandle(g_refresher);
     g_refresher = nullptr;
   }
-  int n = g_vtblCount.load();
-  for (int v = 0; v < n; ++v) Withdraw(v);
+  // Under SEH, as the refresher does: it stops exactly when the context
+  // table became inaccessible, and a plain Withdraw then faulted here.
+  if (!SafeRefresh(false)) Log("d3d meter: context table not accessible at unload; left as is");
   g_vtblCount = 0;
   if (g_rendererDrawSlot && !g_captured.load()) RestoreDrawSlot();
 }

@@ -182,10 +182,8 @@ void Device() {
     gpt::OnBoundary(A, false, 0);
     // d3d11 itself switches some entries after a Flush: only check that none is ours.
     for (int i = 0; i < gpt::kOpCount; ++i) untouched &= vt[DcsQv_ContextSlot(gpt::kSlotNames[i])] != gpt::kHooks[i];
-    ctx->Flush();
-    Sleep(2);
+    gpttest::WaitGpuIdle(dev, ctx);  // queries ready by the next boundary, loaded GPU or not
   }
-  Sleep(30);
   gpt::g_want = 0;
   gpt::OnBoundary(A, true, 0);  // deactivates
   gpt::g_light = false;

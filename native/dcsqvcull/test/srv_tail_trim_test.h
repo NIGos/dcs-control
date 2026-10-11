@@ -1,6 +1,6 @@
 // Offline test for srv_tail_trim.h (R15 F2): the trimmed setShaderResources
-// against a C++ transcription of dx11backend 0x1ac20 (and, when DCS_BIN is
-// set, against the real function bytes copied from dx11backend.dll):
+// against a C++ transcription of dx11backend 0x1ac20 (and, when DCS is
+// installed (dcs_install.h), against the real function bytes copied from dx11backend.dll):
 //  1. fake cache arrays and a fake device: named grow / shrink / prefix / tail
 //     cases with the exact bound ranges, then a seeded random sequence; after
 //     every call the renderer bytes (counts and caches of all stages) and the
@@ -177,16 +177,14 @@ void Logic() {
 void* __cdecl MemsetShim(void* d, int c, size_t n) { return memset(d, c, n); }
 
 void RealBytes() {
-  char dir[MAX_PATH] = {};
-  if (!GetEnvironmentVariableA("DCS_BIN", dir, MAX_PATH)) {
-    printf("SKIP srv trim: DCS_BIN not set (real setShaderResources bytes)\n");
+  if (!dcsinstall::Found()) {  // DCS_BIN / DCS_ROOT, Steam, registry (dcs_install.h)
+    dcsinstall::Skip("srv trim (real setShaderResources bytes)");
     return;
   }
-  char path[MAX_PATH];
-  snprintf(path, sizeof(path), "%s\\dx11backend.dll", dir);
-  HMODULE m = LoadLibraryExA(path, nullptr, LOAD_LIBRARY_AS_IMAGE_RESOURCE | LOAD_LIBRARY_AS_DATAFILE);
+  const std::wstring path = dcsinstall::Bin() + L"dx11backend.dll";
+  HMODULE m = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_AS_IMAGE_RESOURCE | LOAD_LIBRARY_AS_DATAFILE);
   if (!m) {
-    printf("SKIP srv trim: %s not mapped\n", path);
+    printf("SKIP srv trim: %ls not mapped\n", path.c_str());
     return;
   }
   const uint8_t* base = sigscan::ImageBase(m);

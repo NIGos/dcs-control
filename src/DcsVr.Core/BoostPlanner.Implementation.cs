@@ -15,21 +15,11 @@ public static partial class BoostPlanner
 {
     public const string DcsProcessName = "DCS";
 
-    /// <summary>Processes that must never be confined: they start DCS (children inherit affinity, so confining them
-    /// would confine DCS too) or are core OS processes. Used together with
-    /// <see cref="ProfileValidation.BoostProtectedProcesses"/>.</summary>
-    internal static readonly IReadOnlySet<string> KnownLaunchers = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-    {
-        "steam", "steamservice", "explorer", "DcsControl", "DcsVrControl", "DcsVr.Cli", "cmd", "powershell", "pwsh",
-        "conhost", "svchost", "services", "wininit", "winlogon", "System", "System Idle Process", "Registry",
-        "dllhost", "devenv", "lsass", "csrss", "smss", "fontdrvhost", "dwm"
-    };
-
     /// <summary>True for a process name CPU Boost never moves or closes, whatever pattern matched it.</summary>
     internal static bool IsProtectedName(string name)
     {
         var trimmed = TrimExe(name.Trim());
-        return KnownLaunchers.Contains(trimmed) || ProfileValidation.BoostProtectedProcesses.Contains(trimmed);
+        return ProfileValidation.BoostProtectedProcesses.Contains(trimmed);
     }
 
     /// <summary>The one process-name matcher CPU Boost uses (plan, runtime and validation): <c>*</c> matches any run
@@ -63,12 +53,6 @@ public static partial class BoostPlanner
         ],
         _ => []
     };
-
-    static partial void DescribeImplementation(VrProfile profile, string? dcsLogPath, ref BoostPlan? plan)
-    {
-        var topology = CpuTopology.Detect(dcsLogPath);
-        plan = Compose(profile, topology, CaptureProcesses(), FreeVram.DedicatedVideoMemory(), new WindowsDisplayModes());
-    }
 
     /// <summary>Builds the plan from a profile, a CPU ranking and a process snapshot, plus the video memory per process
     /// and the displays for the flight helpers. Pure: changes nothing.</summary>

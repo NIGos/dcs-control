@@ -14,6 +14,7 @@
 #include <string>
 
 #include "loader_api.h"
+#include "log_utf8.h"
 
 namespace {
 
@@ -34,7 +35,7 @@ void Logf(const char* fmt, ...) {
   char buf[1024];
   va_list ap;
   va_start(ap, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
+  qvlog::FormatV(buf, sizeof(buf), fmt, ap);  // %ls as UTF-8 (log_utf8.h)
   va_end(ap);
   LogLine(buf);
 }
@@ -101,25 +102,32 @@ FILETIME g_payloadTime{};
 // read by DcsQvCull_Status. Owned here so it outlives every payload.
 std::atomic<uint64_t> g_status{0};
 
-bool LoadPayload(const std::wstring& src) {
+// LoadPayload results. A copy or LoadLibrary failure is usually transient
+// (the file still being written, or held by a scanner without read sharing):
+// the watcher retries it instead of waiting for the next change of the file.
+enum LoadResult { kLoadOk = 1, kLoadFailed = 0, kLoadRetry = -1 };
+
+LoadResult LoadPayload(const std::wstring& src) {
   // Load a uniquely named copy so the deployed file is never locked.
   wchar_t name[64];
   swprintf_s(name, L"active_%llu.dll", GetTickCount64());
   std::wstring copy = g_dir + L"payload\\" + name;
   if (!CopyFileW(src.c_str(), copy.c_str(), FALSE)) {
     Logf("loader: copy of payload failed (%lu)", GetLastError());
-    return false;
+    DeleteFileW(copy.c_str());  // a partial copy, if any
+    return kLoadRetry;
   }
   HMODULE m = LoadLibraryW(copy.c_str());
   if (!m) {
     Logf("loader: LoadLibrary of payload failed (%lu)", GetLastError());
-    return false;
+    DeleteFileW(copy.c_str());  // not mapped: removable
+    return kLoadRetry;
   }
   auto start = reinterpret_cast<DcsQvPayloadStartFn>(GetProcAddress(m, "DcsQvPayload_Start"));
   auto stop = reinterpret_cast<DcsQvPayloadStopFn>(GetProcAddress(m, "DcsQvPayload_Stop"));
   if (!start || !stop) {
     Logf("loader: payload exports missing");
-    return false;  // module stays loaded but inert
+    return kLoadFailed;  // module stays loaded but inert
   }
   // Optional (payloads built before the status word lack it: status stays 0).
   auto setStatus = reinterpret_cast<DcsQvPayloadSetStatusWordFn>(GetProcAddress(m, "DcsQvPayload_SetStatusWord"));
@@ -141,7 +149,7 @@ bool LoadPayload(const std::wstring& src) {
   g_stopActive = stop;
   // The new payload patches from its own worker thread; slots it does not
   // claim within 60 s are restored by the watcher (see Watcher()).
-  return true;
+  return kLoadOk;
 }
 
 DWORD WINAPI Watcher(void*) {
@@ -159,6 +167,7 @@ DWORD WINAPI Watcher(void*) {
   const std::wstring ini = g_dir + L"DcsQvCull.ini";
   std::wstring lastSrc;
   ULONGLONG staleCheckAt = 0;
+  int retries = 0;  // transient load failures of the current file version
   for (;;) {
     // Dev mode: [Dev] PayloadPath in the ini points at a developer build
     // (for example the build folder), hot-reloaded from there; the deployed
@@ -171,13 +180,22 @@ DWORD WINAPI Watcher(void*) {
       if (!lastSrc.empty() || src != deployed) Logf("loader: payload source %ls", src.c_str());
       lastSrc = src;
       g_payloadTime = FILETIME{};  // force a load from the new source
+      retries = 0;
     }
     WIN32_FILE_ATTRIBUTE_DATA fad;
     if (GetFileAttributesExW(src.c_str(), GetFileExInfoStandard, &fad) &&
         CompareFileTime(&fad.ftLastWriteTime, &g_payloadTime) != 0) {
       Sleep(500);  // let the writer finish
-      g_payloadTime = fad.ftLastWriteTime;
-      if (LoadPayload(src)) staleCheckAt = GetTickCount64() + 60000;
+      const LoadResult r = LoadPayload(src);
+      if (r == kLoadRetry && ++retries < 5) {
+        // g_payloadTime left as is: the same version is tried again in 2 s.
+        // (Before, a failed copy or load was not retried until the file
+        // changed again, which could leave DCS without a payload.)
+      } else {
+        g_payloadTime = fad.ftLastWriteTime;
+        retries = 0;
+      }
+      if (r == kLoadOk) staleCheckAt = GetTickCount64() + 60000;
     }
     if (staleCheckAt && GetTickCount64() > staleCheckAt) {
       staleCheckAt = 0;

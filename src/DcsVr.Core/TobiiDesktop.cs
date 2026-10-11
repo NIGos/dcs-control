@@ -103,10 +103,15 @@ public static class TobiiDesktop
     {
         var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "sc.exe")) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
         start.ArgumentList.Add(verb); start.ArgumentList.Add(service);
-        using var process = Process.Start(start) ?? throw new IOException("sc.exe could not be started.");
-        var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
-        process.WaitForExit(30000);
-        return (process.ExitCode, output);
+        try
+        {
+            using var process = Process.Start(start) ?? throw new IOException("sc.exe could not be started.");
+            var error = process.StandardError.ReadToEndAsync();
+            var output = process.StandardOutput.ReadToEnd();
+            if (!process.WaitForExit(30000)) { try { process.Kill(); } catch (InvalidOperationException) { } return (-1, "sc.exe did not answer within 30 s."); }
+            return (process.ExitCode, output + error.Result);
+        }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or IOException or InvalidOperationException) { return (-1, "sc.exe: " + e.Message); }
     }
 
     private static Process[] SafeGetProcesses(string name)

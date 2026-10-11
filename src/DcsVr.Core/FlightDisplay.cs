@@ -51,9 +51,6 @@ public sealed class FlightDisplay(IDisplayModes displays, string markerPath)
     public SavedDisplayMode? Previous { get; private set; }
     public DisplayMode? Applied { get; private set; }
 
-    /// <summary>Default suggestion when a profile turns the feature on.</summary>
-    public static DisplayMode Suggested { get; } = new(1920, 1080, 60);
-
     public static DisplayMode Target(VrProfile profile) => new(profile.FlightDisplayWidth, profile.FlightDisplayHeight, profile.FlightDisplayRefresh);
 
     /// <summary>The plan for the primary display, or null when no display can be read.</summary>

@@ -30,9 +30,9 @@ let state, profile, dcs = '', options = '', page = 'overview', busy = false, pla
 let sequence = 0, toastTimer, searchResults = [], lastProvider = 'QuadViewsFoveated', lastFrameGen = 'Nvidia', savedDraftJson = null, draftTimer, flight = null;
 const pending = new Map(), fields = [], invalid = new Set();
 const clone = value => JSON.parse(JSON.stringify(value));
+const NO_TIMEOUT = new Set(['browse','save','import','export','importSboys','prepareSboys','diagnosticPackage','launch','apply','restore','grantWriteAccess']);
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const empty = value => value.trim() || null;
-const pct = value => Math.round(value*100)+'%';
 const num = value => String(Number(Number(value).toFixed(4)));
 /** A profile's own focus values in Pimax Play's Quick units, converted exactly like Pimax Quick (Pimax stores 4 decimals):
  *  Horizontal/Vertical FOV q leaves a focus of 1 − q of the view; Center Resolution c is a pixel density of
@@ -50,7 +50,8 @@ function request(action, data = {}) {
   return new Promise((resolve,reject) => {
     if (!window.chrome?.webview) { reject(new Error('Open this interface in DCS Control to connect to its local services.')); return; }
     const id = String(++sequence);
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error('The operation timed out. Rescan this PC before retrying.')); },120000);
+    // A file dialog, a Windows prompt or a download waits for the pilot as long as it takes.
+    const timer = NO_TIMEOUT.has(action) ? null : setTimeout(() => { pending.delete(id); reject(new Error('The operation timed out. Rescan this PC before retrying.')); },120000);
     pending.set(id,{resolve,reject,timer}); window.chrome.webview.postMessage({id,action,data});
   });
 }
@@ -92,7 +93,7 @@ function setFieldValue(f, value) {
   if (f.map) value = f.map.get(profile);
   if (f.type === 'hotkey') { f.input.value = value ?? ''; showHotkey(f); f.element.classList.remove('invalid'); return; }
   if (f.type === 'toggle') f.input.checked = value; else if (f.type === 'list') f.input.value = (value || []).join('\n'); else f.input.value = value ?? '';
-  if (f.range) f.range.value = value; f.element.classList.remove('invalid'); f.input.setAttribute('aria-invalid','false'); f.error && (f.error.hidden = true);
+  if (f.range) { f.range.value = value; paintRange(f.range); } f.element.classList.remove('invalid'); f.input.setAttribute('aria-invalid','false'); f.error && (f.error.hidden = true);
 }
 function sync(next) {
   state = next; if (next.version) $('appVersion').textContent = next.version.split('-')[0]; profile = clone(next.profile); dcs = next.dcs ?? ''; options = next.options ?? ''; plan = next.plan; draftChanged = false; invalid.clear();
@@ -133,7 +134,8 @@ function setFeature(p, key, on) {
   if (key === 'quad') p.quadViews = on ? (p.quadViews !== 'None' ? p.quadViews : lastProvider) : 'None';
   // Checking it turns DLSS 5 on unless Foveated Super Resolution already runs; unchecking turns both off.
   if (key === 'dlss') { if (!on) { p.neuralRendering = false; p.foveatedDlss = false; } else if (!p.neuralRendering && !p.foveatedDlss) p.neuralRendering = true; }
-  if (key === 'framegen') p.frameGen = on ? (p.frameGen !== 'Off' ? p.frameGen : lastFrameGen) : 'Off';
+  // Without an NVIDIA RTX card, frame generation starts as FidelityFX (it runs on any graphics card).
+  if (key === 'framegen') p.frameGen = on ? (p.frameGen !== 'Off' ? p.frameGen : state?.gpu?.nvidiaRtx === false && lastFrameGen === 'Nvidia' ? 'FidelityFx' : lastFrameGen) : 'Off';
   if (key === 'boost') p.cpuBoost = on;
   if (key === 'engine') p.engineOptimizations = on;
   return resolveFeatures(p);
@@ -233,7 +235,7 @@ function renderFeatures() {
 /** Back to the applied profile's settings, exactly as Launch DCS would use them. */
 function resetToApplied() {
   if (busy || !state?.appliedDraft) return;
-  profile = clone(state.appliedDraft);
+  profile = clone(state.appliedDraft); invalid.clear();
   // The DCS install and options.lua the applied profile was written to.
   if (state.appliedDcs) dcs = state.appliedDcs; if (state.appliedOptions) options = state.appliedOptions;
   fields.forEach(f => { if (f.path === 'dcs') setFieldValue(f, dcs); else if (f.path === 'options') setFieldValue(f, options); });
@@ -248,7 +250,7 @@ function change() {
   if (profile.frameGen !== 'Off') lastFrameGen = profile.frameGen;
   showProfile(FEATURE_FIELDS);
   plan = null; draftChanged = true; $('statusDot').classList.remove('error');
-  if (state) { state.readiness = null; renderDiagnostics(); }
+  if (state) { state.readiness = null; renderEdits(); }
   $('status').textContent = 'Profile edited. Launch DCS applies it; Review files lists what it writes.';
   request('changed').catch(showError); updateControls(); saveDraftSoon();
   if (page === 'engine') renderEngine();
@@ -279,7 +281,7 @@ function field(panel,path,title,description,type,values,condition,unit='',hide=n
   else {
     inputMarkup = `<label class="setting-label" for="${id}">${title}</label><p id="help-${path}">${description}</p>`;
     if (type === 'select') inputMarkup += `<select id="${id}" aria-describedby="help-${path}">${values.map(([v,t]) => `<option value="${v}">${t}</option>`).join('')}</select>`;
-    if (type === 'number') inputMarkup += `<div class="setting-number"><input id="range-${path}" type="range" min="${values[0]}" max="${values[1]}" step="${values[2]}" aria-label="${title} slider"><input id="${id}" type="number" min="${values[0]}" max="${values[1]}" step="any" aria-describedby="help-${path} error-${path}"><span class="number-unit">${unit}</span></div><span id="error-${path}" class="input-error" hidden></span>`;
+    if (type === 'number') inputMarkup += `<div class="setting-number"><input id="range-${path}" type="range" min="${values[0]}" max="${values[1]}" step="${values[2]}" aria-label="${title} slider"><input id="${id}" class="number-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" min="${values[0]}" max="${values[1]}" aria-describedby="help-${path} error-${path}"><span class="number-unit">${unit}</span></div><span id="error-${path}" class="input-error" hidden></span>`;
     if (type === 'path') inputMarkup += `<div class="path-row"><input id="${id}" type="text" spellcheck="false" aria-describedby="help-${path}"><button class="button secondary" id="browse-${path}">Browse</button></div>`;
     if (type === 'list') inputMarkup += `<textarea id="${id}" class="list-input" rows="5" spellcheck="false" aria-describedby="help-${path}"></textarea>`;
     if (type === 'hotkey') inputMarkup += `<div class="hotkey-row"><button type="button" id="${id}" class="hotkey-capture" aria-describedby="help-${path} keynote-${path}"></button><span id="keynote-${path}" class="hotkey-note" role="status"></span></div>`;
@@ -290,10 +292,11 @@ function field(panel,path,title,description,type,values,condition,unit='',hide=n
   input.addEventListener(type === 'toggle' || type === 'select' || type === 'hotkey' ? 'change' : 'input', () => {
     let value = type === 'toggle' ? input.checked : input.value;
     if (type === 'number') {
-      const n = Number(value), valid = value !== '' && Number.isFinite(n) && n >= values[0] && n <= values[1];
+      // "0,5" (a decimal comma, typed on many European keyboards and number pads) reads as 0.5.
+      const n = Number(String(value).trim().replace(',', '.')), valid = String(value).trim() !== '' && Number.isFinite(n) && n >= values[0] && n <= values[1];
       element.classList.toggle('invalid',!valid); input.setAttribute('aria-invalid',String(!valid)); error.hidden = valid;
       if (!valid) { invalid.add(path); error.textContent = `Enter a value from ${values[0]} to ${values[1]}.`; change(); return; }
-      invalid.delete(path); value = n; range.value = n;
+      invalid.delete(path); value = n; range.value = n; paintRange(range);
     } else if (type === 'select' && typeof values[0][0] === 'number') value = Number(value);
     else if (type === 'list') value = value.split(/[\n,;]/).map(s => s.trim()).filter(Boolean);
     if (path === 'dcs') dcs = value; else if (path === 'options') options = value; else if (map) map.set(profile,value); else profile[path] = type === 'path' ? empty(value) : value;
@@ -348,7 +351,6 @@ const HOTKEYS = {
 };
 /** Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down belong to the engine optimizations module itself. */
 const engineReserved = ([vk,mods]) => mods === 3 && ((vk >= 0x77 && vk <= 0x7B) || vk === 33 || vk === 34);
-const hotkeyOf = path => parseKey(profile?.[path] ?? HOTKEYS[path].fallback);
 const isDcsDefault = k => Boolean(k && k[0] && state?.dcsDefaultKeys?.includes(keyCode(k)));
 /** The recorded key, and a note when DCS binds it by default (it still works; DCS reacts too). */
 function showHotkey(f, message, kind) {
@@ -493,7 +495,7 @@ function buildFields() {
   c = card('pacingControls','DCS frame limit','Written to DCS\'s options.lua; the original values are backed up when the profile is applied.');
   field(c,'fpsLimit','Frame limit','Match refresh: DCS renders exactly the frames the headset needs (half or a third with frame generation), so none are wasted.','select',[['Preserve','Keep the current DCS limit'],['MatchRefresh','Match refresh (recommended)'],['RuntimeHeadroom','Very high (300 FPS)'],['Custom','Custom limit']]);
   field(c,'refreshFromHeadset','Read the refresh rate from the headset','Pimax Play: the rate the headset runs at now, or in its last session. Sboys: SteamVR\'s refresh rate. Off: set it below.','toggle');
-  field(c,'headsetRefreshHz','Headset refresh rate','Used when it is set by hand, or when the headset software has not reported one yet.','number',[60,240,.5],p => !p.refreshFromHeadset || !state?.headsetRefresh,'Hz');
+  field(c,'headsetRefreshHz','Headset refresh rate','Used when it is set by hand, or when the headset software has not reported one yet.','number',[50,240,.5],p => !p.refreshFromHeadset || !state?.headsetRefresh,'Hz');
   field(c,'renderedFpsCap','Custom limit','Frames DCS renders per second.','number',[30,300,.5],p => p.fpsLimit === 'Custom','FPS');
   field(c,'disableDcsVSync','Desktop VSync off','Stops VSync of the DCS window on the monitor from holding back the frame rate (graphics.sync = false). Headset sync is unaffected.','toggle');
   // CPU Boost page: started with Launch DCS, undone when DCS exits.
@@ -572,7 +574,7 @@ function navigate(id) {
   if (profile?.desktop && VR_PAGES.includes(id)) id = 'overview';
   const entry = pages.find(p => p[0] === id); if (!entry) return; page = id;
   pages.forEach(p => { $('page-'+p[0]).hidden = p[0] !== id; $('nav-'+p[0]).classList.toggle('selected',p[0] === id); $('nav-'+p[0]).setAttribute('aria-current',p[0] === id ? 'page' : 'false'); });
-  $('crumb').textContent = entry[1]; $('pageTitle').textContent = entry[1]; $('pageDescription').textContent = id === 'dlss' && profile && profile.quadViews !== 'None' ? 'DLSS 5 neural rendering on the Quad Views focus area.' : entry[2]; $('pageNumber').textContent = String(pages.indexOf(entry)+1).padStart(2,'0'); $('scrollArea').scrollTop = 0;
+  $('pageTitle').textContent = entry[1]; $('pageDescription').textContent = id === 'dlss' && profile && profile.quadViews !== 'None' ? 'DLSS 5 neural rendering on the Quad Views focus area.' : entry[2]; $('scrollArea').scrollTop = 0;
   if (id === 'foveation' && profile) rereadPimax(false);
   if (id === 'boost' && profile) refreshBoostPlan(0);
   if (id === 'engine' && profile) refreshEngine();
@@ -675,6 +677,8 @@ async function engineAction(action, data) {
 const usesPupilShift = p => Boolean(p.pupilShift && !p.desktop && p.quadViews !== 'None' && p.gaze === 'EyeTracked');
 /** What the profile still needs for a gaze, with a link to the setting that gives it. */
 function renderPupilNeeds() {
+  const ipd = $('pupilIpd');
+  if (ipd) { const mm = state?.dcsCustomIpd; ipd.hidden = !mm || !profile?.pupilShift; ipd.textContent = mm ? `DCS's custom IPD (${mm} mm) is applied by Pupil shift: the same ${mm} mm, set by the layer, because DCS would otherwise reset each eye's sideways position and undo the pupil's sideways move. Launch DCS turns DCS's own option off while this profile is applied; Back to stock DCS turns it on again.` : ''; }
   const box = $('pupilNeeds'); if (!box || !profile) return;
   const need = profile.quadViews === 'None' ? ['Pupil shift needs Quad Views with eye-tracked focus: it reads your gaze from the focus area. Quad Views is off.','quadViews','Turn on Quad Views']
     : profile.gaze !== 'EyeTracked' ? ['Pupil shift needs eye-tracked focus: it reads your gaze from the focus area, and Focus movement is Fixed.','gaze','Set Focus movement'] : null;
@@ -704,7 +708,9 @@ function renderPupil() {
     ['Largest pupil shift', s.sessionMaxShiftMm ? s.sessionMaxShiftMm.toFixed(1)+' mm' : '—'],
     ['Seconds with a gaze', `${s.secondsWithGaze} of ${s.seconds}`],
     ['Runtime poses given back', s.restoredViews == null ? '—' : s.restoredViews > 0 ? 'Yes: the headset places the image as without the layer' : 'No'],
-    ['In-flight switch', s.hotkey ? keyLabel(parseKey(s.hotkey)) : '—']
+    ['In-flight switch', s.hotkey ? keyLabel(parseKey(s.hotkey)) : '—'],
+    ['Headset views turned outwards (cant)', s.last?.cantDeg != null ? s.last.cantDeg.toFixed(1)+'°, straight ahead taken between them' : '—'],
+    ['Eye distance: headset / DCS renders', s.last?.runtimeIpdMm != null ? `${s.last.runtimeIpdMm.toFixed(1)} / ${s.last.renderedIpdMm.toFixed(1)} mm` : '—']
   ] : [];
   box.innerHTML = `<div class="engine-state ${tone}"><b>${escape(label)}</b><span>${escape(s.summary)}</span></div>${pending}`
     + s.warnings.map(w => `<p class="pimax-note warn">${escape(w)}</p>`).join('')
@@ -846,7 +852,7 @@ function updatePanelScroll() {
 function renderCadence() {
   const fg = profile.frameGen !== 'Off', multiplier = fg ? (profile.frameGenFactor === 3 ? 3 : 2) : 1, hz = refreshHz(profile), target = hz / multiplier;
   const detected = Number(state?.inventory?.dcsSettings?.['graphics.maxFPS']);
-  const cap = profile.fpsLimit === 'Preserve' ? (Number.isFinite(detected) && detected > 0 ? detected : null) : profile.fpsLimit === 'RuntimeHeadroom' ? 300 : profile.fpsLimit === 'MatchRefresh' ? target : profile.renderedFpsCap;
+  const cap = profile.fpsLimit === 'Preserve' ? (Number.isFinite(detected) && detected > 0 ? detected : null) : profile.fpsLimit === 'RuntimeHeadroom' ? 300 : profile.fpsLimit === 'MatchRefresh' ? Math.max(30, target) : profile.renderedFpsCap;
   const n = value => Number(value.toFixed(3)).toLocaleString('en-US');
   const metrics = [
     ['DCS NEEDS TO RENDER',n(target)+' FPS',fg ? (profile.frameGenFactor === 0 ? 'Half the refresh rate; a third while DCS falls behind.' : multiplier === 3 ? 'A third of the refresh rate.' : 'Half the refresh rate.') : 'The full refresh rate; frame generation is off.'],
@@ -921,6 +927,8 @@ const CHECK_INFO = {
   'route-mismatch':['Headset route',{page:'setup',label:'Open'}], 'steamvr-not-found':['SteamVR',{guide:'steamvr',label:'Guide'}],
   'gaze-bridge-missing':['Eye tracking on Sboys',{guide:'gaze',label:'Guide'}], 'runtime':['OpenXR runtime',{page:'setup',label:'Open'}],
   'active-backup':['Applied profile',{page:'recovery',label:'Stock DCS'}], 'deployment':['Files and components',{page:'diagnostics',label:'Review',review:true}],
+  'write-access':['Write access to game folders',{action:'grantWriteAccess',label:'Grant access'}], 'write-blocked':['Write access to game folders',null],
+  'dlss-gpu':['DLSS 5 graphics card',{page:'dlss',label:'Open'}], 'framegen-gpu':['Frame generation graphics card',{reveal:'frameGen',label:'Open'}],
   'pupil-gaze':['Pupil shift',{page:'pupil',label:'Open'}], 'pupil-radius':['Pupil shift',{reveal:'pupilShiftEyeRadiusMm',label:'Open'}], 'pupil-image':['Pupil shift',{reveal:'pupilShiftVirtualImageM',label:'Open'}],
   'pupil-hotkey':['Pupil shift switch',{reveal:'pupilShiftToggleKey',label:'Open'}], 'pupil-hotkey-dcs':['Pupil shift switch',{reveal:'pupilShiftToggleKey',label:'Open'}],
   'neural-area':['DLSS 5 area',{reveal:'neuralFocusArea',label:'Open'}], 'neural-depth':['Depth convention',{reveal:'neuralDepth',label:'Open'}]
@@ -941,6 +949,7 @@ function actionHtml(a) {
   if (a.reveal) return `<button class="link-button" data-reveal="${escape(a.reveal)}"${a.browse ? ' data-browse-after="1"' : ''}>${escape(a.label)} →</button>`;
   if (a.guide) return `<button class="link-button" data-guide="${escape(a.guide)}">${escape(a.label)} ↗</button>`;
   if (a.review) return `<button class="link-button" data-review="1">${escape(a.label)} →</button>`;
+  if (a.action) return `<button class="link-button" data-run="${escape(a.action)}">${escape(a.label)} →</button>`;
   return a.page === page ? '' : `<button class="link-button" data-open-page="${escape(a.page)}">${escape(a.label)} →</button>`;
 }
 function renderChecks() {
@@ -959,6 +968,7 @@ document.addEventListener('click', e => {
   const line = e.target.closest('.check-line'); if (line) { const r = line.closest('.check-row'); r.classList.toggle('expanded'); line.setAttribute('aria-expanded',String(r.classList.contains('expanded'))); }
   const guide = e.target.closest('[data-guide]'); if (guide && !busy && guide.closest('#checkGroups')) request('openGuide',{guide:guide.dataset.guide}).catch(showError);
   if (e.target.closest('#checkGroups [data-review]') && !busy) run('preview').catch(()=>{});
+  const action = e.target.closest('#checkGroups [data-run]'); if (action && !busy) run(action.dataset.run).catch(()=>{});
 });
 /** Overview: what Launch DCS will do now, the profile, and the checks in one line. */
 function renderDashboard() {
@@ -1001,8 +1011,17 @@ function renderFlight() {
   if (f.prefetch) rows.push(['Prefetch fix',f.prefetch.averageCallsPerSecond ? `${fmt(f.prefetch.skippedPercent,1)}% skipped` : 'No calls',f.prefetch.averageCallsPerSecond ? `${fmt(f.prefetch.averageCallsPerSecond/1000,0)}k calls/s average · ${fmt(f.prefetch.peakCallsPerSecond/1000,0)}k peak` : 'Loaded; DCS made no repeated prefetch calls']);
   body.innerHTML = rows.length ? `<dl class="flight-grid">${rows.map(([k,v,d,warn]) => `<div class="flight-item${warn ? ' warn' : ''}"><dt>${k}</dt><dd><b>${escape(v)}</b><small title="${escape(d)}">${escape(d)}</small></dd></div>`).join('')}</dl>` : '<p class="fine">DCS ran, but no headset, frame generation or CPU Boost logs cover this session.</p>';
 }
-function renderDiagnostics() {
+function renderDiagnostics() { renderInventory(); renderEdits(); }
+/** What an edit changes: the checks, the files Launch will write and the overview. */
+function renderEdits() {
   renderChecks();
+  $('fileCount').textContent = plan ? plan.files.length+' FILES' : 'NOT REVIEWED';
+  $('plannedFiles').innerHTML = plannedFilesHtml();
+  $('report').textContent = state.report;
+  renderDashboard();
+}
+/** What was detected on this PC (redrawn after a rescan, not on every edit). */
+function renderInventory() {
   const i = state.inventory;
   const info = [['DCS executable',i.dcsExecutable || 'Not detected'],['Saved Games options',i.optionsPath || 'Not detected'],['Pimax runtime',i.pimaxRuntime || 'Not detected'],['SteamVR runtime',i.steamVrRuntime || 'Not detected'],['Active global runtime',i.activeRuntime || 'Not detected'],['Pimax version',i.pimaxVersion || 'Not detected'],['Pimax Play Quad Views',state.pimax?.found ? state.pimax.summary : 'Settings not found'],['DCS process',i.dcsRunning ? 'Running' : 'Closed'],['DCS rendered FPS cap',i.dcsSettings['graphics.maxFPS'] || 'Not detected'],['DCS desktop VSync',i.dcsSettings['graphics.sync'] || 'Not detected'],['Legacy autoexec cap',i.autoexecMaxFps || (i.autoexecPath ? 'Unknown · review file' : 'No autoexec.cfg detected')],['RTSS processes',(i.limiterProcesses || []).join(', ') || 'Not detected · driver caps still need checking']];
   $('inventory').innerHTML = info.map(([k,v]) => `<dt>${k}</dt><dd>${escape(v)}</dd>`).join('');
@@ -1010,10 +1029,9 @@ function renderDiagnostics() {
   $('inventoryFiles').innerHTML = i.files.map(file => `<div class="file"><b>${escape(file.path)}</b><p>${file.exists ? 'Present' : 'Missing'} · ${escape(file.version || 'No version')}<br><span>${escape(file.sha256 || 'No hash captured')}</span></p></div>`).join('') + i.layers.map(layer => `<div class="file"><b>${escape(layer.name || layer.manifestPath)}</b><p>${escape(layer.scope)} · ${layer.enabled ? 'Enabled' : 'Disabled'} · library ${layer.libraryExists ? 'present' : 'missing'}</p><span>${escape(layer.libraryPath)}</span></div>`).join('');
   if (!i.files.length && !i.layers.length) $('inventoryFiles').innerHTML = '<p class="fine">No file or layer facts were returned by this inventory.</p>';
   $('inventoryTime').textContent = new Date(i.capturedAt).toLocaleTimeString('en-GB');
-  $('fileCount').textContent = plan ? plan.files.length+' FILES' : 'NOT REVIEWED';
-  $('plannedFiles').innerHTML = plan ? plan.files.map(f => `<div class="file"><b>${f.replaces ? '~' : '+'} ${escape(f.path)}</b><p>${escape(f.purpose)} <span>· ${f.bytes.toLocaleString('en-US')} bytes</span></p>${(f.luaChanges || []).map(c => `<p>${escape(c.path)}: ${escape(c.previousRaw ?? 'absent')} → ${escape(c.installedRaw)}</p>`).join('')}</div>`).join('') : '<p class="fine">Review files lists every file Launch DCS writes or changes for this profile, with the DCS settings it changes. Nothing is written until you launch.</p>';
-  $('report').textContent = state.report;
-  renderDashboard();
+}
+function plannedFilesHtml() {
+  return plan ? plan.files.map(f => `<div class="file"><b>${f.replaces ? '~' : '+'} ${escape(f.path)}</b><p>${escape(f.purpose)} <span>· ${f.bytes.toLocaleString('en-US')} bytes</span></p>${(f.luaChanges || []).map(c => `<p>${escape(c.path)}: ${escape(c.previousRaw ?? 'absent')} → ${escape(c.installedRaw)}</p>`).join('')}</div>`).join('') : '<p class="fine">Review files lists every file Launch DCS writes or changes for this profile, with the DCS settings it changes. Nothing is written until you launch.</p>';
 }
 /** Recovery: one record of the original files DCS Control changed, restored with one button. */
 const ORIGINAL_ACTIONS = {restore:'restore the backup', remove:'remove (DCS Control created it)', settings:'set back DCS Control\'s settings only'};
@@ -1053,7 +1071,7 @@ function renderSearch() {
 function revealSetting(f) {
   if (!f) return; if ($('searchDialog').open) $('searchDialog').close(); if (f.path !== 'featureList') navigate(f.page);
   // Focus values that follow Pimax Play are shown in the Pimax block instead of the hidden fields.
-  const target = f.element.hidden ? $('pimaxFovea') : f.element;
+  const target = f.element.hidden ? (f.page === 'foveation' ? $('pimaxFovea') : f.element.closest('.card') ?? f.element) : f.element;
   for (let box = target.closest('details'); box; box = box.parentElement.closest('details')) box.open = true;
   target.scrollIntoView({block:'center'}); target.classList.remove('highlight'); void target.offsetWidth; target.classList.add('highlight');
   if (!f.element.hidden && !f.input.disabled) { if (!['INPUT','BUTTON','SELECT','TEXTAREA'].includes(f.input.tagName)) f.input.tabIndex = -1; f.input.focus({preventScroll:true}); }
@@ -1074,14 +1092,14 @@ async function initialize() {
   $('pupilLog').addEventListener('click',() => request('pupilOpenLog').catch(showError));
   $('searchOpen').addEventListener('click',openSearch); $('searchClose').addEventListener('click',() => $('searchDialog').close()); $('searchInput').addEventListener('input',renderSearch); $('searchInput').addEventListener('keydown',e => { if (e.key === 'Enter') { e.preventDefault(); revealSetting(searchResults[0]); } });
   $('refreshFlight').addEventListener('click',() => loadFlight(0)); $('resetApplied').addEventListener('click',resetToApplied);
-  document.addEventListener('keydown',e => { if (e.ctrlKey && e.key.toLowerCase() === 'k') { e.preventDefault(); if (!$('searchDialog').open) openSearch(); } if (e.ctrlKey && /^[1-9]$/.test(e.key) && Number(e.key) <= pages.length) { e.preventDefault(); navigate(pages[Number(e.key)-1][0]); } });
+  document.addEventListener('keydown',e => { if (e.ctrlKey && (e.code === 'KeyK' || e.key.toLowerCase() === 'k')) { e.preventDefault(); if (!$('searchDialog').open) openSearch(); } const digit = /^Digit([1-9])$/.exec(e.code)?.[1] ?? (/^[1-9]$/.test(e.key) ? e.key : null); if (e.ctrlKey && !e.altKey && digit && Number(digit) <= pages.length) { e.preventDefault(); navigate(pages[Number(digit)-1][0]); } });
   try { sync(await request('ready')); loadFlight(); window.uiReady = true; }
   catch(e) { showError(e); }
 }
 initialize();
 /** Takes a profile and DCS paths chosen elsewhere (guided setup) as the draft, exactly like editing them here. */
 function adoptDraft(next) {
-  profile = clone(next.profile); if (next.dcs !== undefined) dcs = next.dcs ?? ''; if (next.options !== undefined) options = next.options ?? '';
+  profile = clone(next.profile); invalid.clear(); if (next.dcs !== undefined) dcs = next.dcs ?? ''; if (next.options !== undefined) options = next.options ?? '';
   fields.forEach(f => { if (f.path === 'dcs') setFieldValue(f, dcs); else if (f.path === 'options') setFieldValue(f, options); });
   showProfile(); change(); boostChanged();
 }
@@ -1128,12 +1146,11 @@ $('detectSetup').addEventListener('click', async () => {
 $('cancelDetect').addEventListener('click', () => $('detectDialog').close());
 $('confirmDetect').addEventListener('click', () => {
   $('detectDialog').close(); if (!detectedProfile) return;
-  profile = clone(detectedProfile); detectedProfile = null; showProfile(); change(); boostChanged();
+  profile = clone(detectedProfile); detectedProfile = null; invalid.clear(); showProfile(); change(); boostChanged();
 });
 // Orange fill on slider tracks, as in the launcher.
 function paintRange(range) { const min = Number(range.min), max = Number(range.max), value = Number(range.value); range.style.setProperty('--fill', (max > min ? (value - min) / (max - min) * 100 : 0) + '%'); }
 document.addEventListener('input', e => { if (e.target.type === 'range') paintRange(e.target); });
-new MutationObserver(() => document.querySelectorAll('input[type=range]').forEach(paintRange)).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class', 'hidden'] });
 // Radio-group keyboard behaviour for the route switch: arrows move the selection.
 $('routeSwitch').addEventListener('keydown', e => {
   if (!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) return;

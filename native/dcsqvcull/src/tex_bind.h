@@ -373,6 +373,10 @@ bool Install() {
     return false;
   }
   g_table = static_cast<Entry*>(calloc(kTable, sizeof(Entry)));
+  if (!g_table) {  // checked: the hook and SetAttached(false) use it unconditionally
+    Log("constant buffer upload: no memory for the table; skipped");
+    return false;
+  }
   g_slot = &vtbl[kSlot];
   g_orig = reinterpret_cast<Fn>(SlotOriginal(g_slot));
   return true;

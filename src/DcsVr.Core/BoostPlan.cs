@@ -4,7 +4,7 @@ namespace DcsVr.Core;
 public enum CoreRankingSource { None, DcsLog, Windows }
 
 /// <summary>One process CPU Boost would change, as shown before launch.</summary>
-/// <param name="Category">"DCS", "VR runtime", "Background" or "Close".</param>
+/// <param name="Category">"DCS", "VR runtime" or "Background".</param>
 /// <param name="Action">Plain-language change, e.g. "Priority Above normal, all CPUs".</param>
 /// <param name="NeedsAdministrator">Runs under another account (a service): changeable only with administrator rights.</param>
 public sealed record BoostProcess(string Name, string Category, string Action, bool Running, bool NeedsAdministrator);
@@ -37,15 +37,6 @@ public sealed record BoostPlan(
 public static partial class BoostPlanner
 {
     /// <summary>Describes what CPU Boost would do; never changes processes.</summary>
-    public static BoostPlan Describe(VrProfile profile, string? dcsLogPath = null) => DescribeCore(profile, dcsLogPath);
-
-    // Filled in by the CPU Boost implementation; until then Boost reports itself as unavailable.
-    static partial void DescribeImplementation(VrProfile profile, string? dcsLogPath, ref BoostPlan? plan);
-
-    private static BoostPlan DescribeCore(VrProfile profile, string? dcsLogPath)
-    {
-        BoostPlan? plan = null;
-        DescribeImplementation(profile, dcsLogPath, ref plan);
-        return plan ?? new(profile.CpuBoost, CoreRankingSource.None, "CPU Boost is not available in this build.", [], [], [], [], []);
-    }
+    public static BoostPlan Describe(VrProfile profile, string? dcsLogPath = null) =>
+        Compose(profile, CpuTopology.Detect(dcsLogPath), CaptureProcesses(), FreeVram.DedicatedVideoMemory(), new WindowsDisplayModes());
 }

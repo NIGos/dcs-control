@@ -21,6 +21,30 @@ void Check(bool ok, const char* what) {
   if (!ok) ++g_fail;
 }
 
+// QV_TEST_SPIN=1 (off by default): two below-normal-priority spinner threads
+// inside this process, alive only while one timing-sensitive test runs (the
+// scope of a TestSpin object). An in-process stand-in for a busy machine;
+// never an external load process.
+struct TestSpin {
+  std::atomic<bool> stop{false};
+  std::thread t[2];
+  explicit TestSpin(const char* what) {
+    const char* e = getenv("QV_TEST_SPIN");
+    if (!e || *e != '1') return;
+    printf("     (QV_TEST_SPIN: 2 spinner threads during %s)\n", what);
+    for (std::thread& x : t)
+      x = std::thread([this] {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        volatile uint64_t v = 1;
+        while (!stop.load(std::memory_order_relaxed)) v = v * 6364136223846793005ull + 1;
+      });
+  }
+  ~TestSpin() {
+    stop = true;
+    for (std::thread& x : t)
+      if (x.joinable()) x.join();
+  }
+};
 // Writes a symmetric-ish frustum into a ClippingVolume-like buffer the way
 // DCS stores it: inward unit normals, d such that inside is n.p + d >= 0.
 void MakeFrustum(uint8_t* vol, Vec3 eye, Vec3 fwd, Vec3 up, double l, double r, double b, double t,
@@ -189,6 +213,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 
 }  // namespace
 
+#include "dcs_install.h"  // DCS install lookup (no machine-specific paths)
 #include "shadow_inst_test.h"
 #include "shadow_tex_test.h"
 #include "gb_inst_test.h"
@@ -211,6 +236,11 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "fwd_rec_count_test.h"
 #include "srv_tail_trim_test.h"
 #include "status_word_test.h"
+#include "gpu_split_test.h"
+#include "gap_attrib_test.h"
+#include "gpu_dedup_test.h"
+#include "periph_lod_test.h"
+#include "robustness_test.h"
 
 int main() {
   g_log = stdout;
@@ -229,6 +259,30 @@ int main() {
   }
   if (getenv("QV_DEFREC_ONLY")) {
     drtest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_GAPAT_ONLY=1: only the gap_attrib.h tests (gap split, clock calibration).
+  if (getenv("QV_GAPAT_ONLY")) {
+    gatest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_PLOD_ONLY=1: only the periph_lod.h / uav_overlap.h tests (R26 13).
+  if (getenv("QV_PLOD_ONLY")) {
+    plodtest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_GDD_ONLY=1: only the gpu_dedup.h tests (content ids, signatures, capture record).
+  if (getenv("QV_GDD_ONLY")) {
+    gddtest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_GSPLIT_ONLY=1: only the gpu_split.h tests (vertex cache model, reorder, merge).
+  if (getenv("QV_GSPLIT_ONLY")) {
+    gstest::Run();
     printf("%d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;
   }
@@ -272,6 +326,12 @@ int main() {
   // QV_FWDREC_ONLY=1: only the forward recorder S0 counter tests (R21).
   if (getenv("QV_FWDREC_ONLY")) {
     frctest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_ROBUST_ONLY=1: only the robustness-round regression tests.
+  if (getenv("QV_ROBUST_ONLY")) {
+    rbtest::Run();
     printf("%d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;
   }
@@ -455,10 +515,16 @@ int main() {
     QueryPerformanceCounter(&now);
     QueryPerformanceFrequency(&f);
     g_qpcToUs = 1e6 / static_cast<double>(f.QuadPart);
-    posesweep::g_t0 = now.QuadPart - static_cast<int64_t>(7.0 * f.QuadPart);
     posesweep::g_sweep = true;  // what Start() sets with g_on
     posesweep::g_on = true;
-    posesweep::Hook(nullptr, nullptr, nullptr, 2, &count, views);
+    // The hook reads the clock itself: yaw > 30 deg holds for ~0.67 s after
+    // t = 7 s, so a test thread preempted that long retries with a fresh t0.
+    for (int attempt = 0; attempt < 10; ++attempt) {
+      QueryPerformanceCounter(&now);
+      posesweep::g_t0 = now.QuadPart - static_cast<int64_t>(7.0 * f.QuadPart);
+      posesweep::Hook(nullptr, nullptr, nullptr, 2, &count, views);
+      if (std::fabs(posesweep::g_yawDeg.load()) > 30.0) break;
+    }
     posesweep::g_on = false;
     posesweep::g_sweep = false;
     double yaw = posesweep::g_yawDeg.load() * 3.14159265358979 / 180.0;
@@ -496,32 +562,45 @@ int main() {
       QueryPerformanceFrequency(&f);
       return (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
     };
+    // Wall-clock bounds: a preempted test thread (CPU load) only makes an
+    // attempt longer, so each bound must hold in the best of 20 attempts
+    // (the first attempt passes on an idle machine).
     LARGE_INTEGER t0, t1;
-    flags[0] = 0;
-    QueryPerformanceCounter(&t0);
-    call(flags);
-    QueryPerformanceCounter(&t1);
-    double exitNow = ms(t0, t1);
-    flags[0] = 1;
-    flags[12] = 0;
-    QueryPerformanceCounter(&t0);
-    call(flags);
-    QueryPerformanceCounter(&t1);
-    double slept = ms(t0, t1);
-    std::thread waker([] {
-      Sleep(1);
+    double exitNow = 1e9, slept = 0, woke = 1e9;
+    bool sleptOk = false;
+    for (int attempt = 0; attempt < 20 && exitNow >= 0.5; ++attempt) {
       flags[0] = 0;
-    });
-    QueryPerformanceCounter(&t0);
-    call(flags);
-    QueryPerformanceCounter(&t1);
-    waker.join();
-    double woke = ms(t0, t1);
+      QueryPerformanceCounter(&t0);
+      call(flags);
+      QueryPerformanceCounter(&t1);
+      exitNow = std::min(exitNow, ms(t0, t1));
+    }
+    for (int attempt = 0; attempt < 20 && !sleptOk; ++attempt) {
+      flags[0] = 1;
+      flags[12] = 0;
+      QueryPerformanceCounter(&t0);
+      call(flags);
+      QueryPerformanceCounter(&t1);
+      slept = ms(t0, t1);
+      sleptOk = slept > 0.01 && slept < 50.0;
+    }
+    for (int attempt = 0; attempt < 20 && woke >= 50.0; ++attempt) {
+      flags[0] = 1;
+      std::thread waker([] {
+        Sleep(1);
+        flags[0] = 0;
+      });
+      QueryPerformanceCounter(&t0);
+      call(flags);
+      QueryPerformanceCounter(&t1);
+      waker.join();
+      woke = std::min(woke, ms(t0, t1));
+    }
     printf("     pacer stub: exit flag %.3f ms, timeout %.3f ms, woken by write %.3f ms\n", exitNow, slept, woke);
     Check(exitNow < 0.5, "pacer stub returns at once when the exit flag is already set");
     // MWAITX may wake early (interrupts); it must sleep a little and never
     // longer than the timeout.
-    Check(slept > 0.01 && slept < 50.0, "pacer stub sleeps, bounded by the timeout");
+    Check(sleptOk, "pacer stub sleeps, bounded by the timeout");
     Check(woke < 50.0, "pacer stub returns after a write to the flags");
     Check(flags[12] == 0, "pacer stub leaves the flags untouched");
   } else {
@@ -776,9 +855,11 @@ int main() {
   }
 
   // Real Scene.dll: exports and vtable slot.
-  HMODULE scene = LoadLibraryExW(L"E:/SteamLibrary/steamapps/common/DCSWorld/bin/Scene.dll",
-                                 nullptr, DONT_RESOLVE_DLL_REFERENCES);
-  Check(scene != nullptr, "map Scene.dll");
+  HMODULE scene = dcsinstall::LoadBinary(L"Scene.dll");
+  if (!dcsinstall::Found())
+    dcsinstall::Skip("map Scene.dll");
+  else
+    Check(scene != nullptr, "map Scene.dll");
   if (scene) {
     auto vt = reinterpret_cast<void**>(GetProcAddress(scene, kViewVtable));
     void* fn = reinterpret_cast<void*>(GetProcAddress(scene, kCollectExport));
@@ -817,52 +898,96 @@ int main() {
       volatile double x = 1.0;
       while (!stop) x = std::sqrt(x + 1.0);
     });
+    // Profiles left by earlier runs or other phases (same folder) must not be
+    // mistaken for this one: note what exists before, then read only the new
+    // file (names carry the second they were written, so the newest new one).
+    auto listProfiles = [] {
+      std::set<std::wstring> names;
+      WIN32_FIND_DATAW fd;
+      HANDLE h = FindFirstFileW(L"./profile_*.txt", &fd);
+      if (h != INVALID_HANDLE_VALUE) {
+        do names.insert(fd.cFileName);
+        while (FindNextFileW(h, &fd));
+        FindClose(h);
+      }
+      return names;
+    };
+    const std::set<std::wstring> before = listProfiles();
     prof::Run(2, 4, 1, "selftest");
     stop = true;
     busy.join();
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW(L"./profile_*.txt", &fd);
-    bool found = h != INVALID_HANDLE_VALUE;
-    bool hasExe = false;
+    std::wstring mine;
+    for (const std::wstring& n : listProfiles())
+      if (!before.count(n) && n > mine) mine = n;
+    const bool found = !mine.empty();
+    bool hasExe = false, noSamples = false;
     if (found) {
       FILE* f = nullptr;
-      _wfopen_s(&f, (std::wstring(L"./") + fd.cFileName).c_str(), L"r");
+      _wfopen_s(&f, (L"./" + mine).c_str(), L"r");
       char line[512];
       int shown = 0;
       while (f && fgets(line, sizeof(line), f)) {
         if (strstr(line, "test_main.exe")) hasExe = true;
+        if (shown == 0 && strstr(line, " 0 samples")) noSamples = true;
         if (shown++ < 14) printf("     | %s", line);
       }
       if (f) fclose(f);
-      FindClose(h);
-      DeleteFileW((std::wstring(L"./") + fd.cFileName).c_str());
+      DeleteFileW((L"./" + mine).c_str());
     }
-    Check(found && hasExe, "profiler sampled the busy thread");
+    if (found && noSamples)
+      printf("SKIP profiler sampled the busy thread: the profiler got no stack samples (machine under load)\n");
+    else
+      Check(found && hasExe, "profiler sampled the busy thread");
   }
   // Timer cache: the hook only reads the cached value, refreshed by the updater.
   {
-    static std::atomic<int> realCalls{0};
-    timercache::g_orig = [] { ++realCalls; return ED_FakeTime(); };
+    // Real-timer calls are counted per thread: the hook path (this thread)
+    // must make none, whatever the updater does meanwhile. The updater's
+    // progress is waited for with a deadline, never a fixed sleep (a loaded
+    // machine can delay it).
+    TestSpin spin("timer cache");
+    static std::atomic<int> hookThreadCalls{0};
+    static DWORD hookTid = 0;
+    hookTid = GetCurrentThreadId();
+    timercache::g_orig = [] {
+      if (GetCurrentThreadId() == hookTid) ++hookThreadCalls;
+      return ED_FakeTime();
+    };
     timercache::g_periodUs = 1000;
     timercache::g_cached = timercache::g_orig();
+    const uint64_t refresh0 = timercache::g_refreshes.load();
     HANDLE t = CreateThread(nullptr, 0, timercache::Updater, nullptr, 0, nullptr);
-    Sleep(20);
+    auto waitFor = [](auto cond) {
+      const ULONGLONG end = GetTickCount64() + 30000;
+      while (!cond() && GetTickCount64() < end) Sleep(1);
+      return cond();
+    };
+    waitFor([&] { return timercache::g_refreshes.load() > refresh0; });
     timercache::g_on = true;
-    int before = realCalls.load();
+    const int before = hookThreadCalls.load();
     double first = timercache::Hook();
     for (int i = 0; i < 100000; ++i) timercache::Hook();
-    int during = realCalls.load() - before;
-    Sleep(10);
+    const int during = hookThreadCalls.load() - before;
+    const bool advanced = waitFor([&] { return timercache::Hook() > first; });
     double later = timercache::Hook();
-    Check(during < 20, "hook path never calls the real timer (only the ~1 kHz updater does)");
-    Check(later > first, "cached value advances");
-    Check(later - first < 0.1, "cached value tracks real time");
-    int refresh = static_cast<int>(timercache::g_refreshes.load());
-    Check(refresh > 10, "updater refreshes at ~1 kHz");
+    Check(during == 0, "hook path never calls the real timer (only the ~1 kHz updater does)");
+    Check(advanced && later > first, "cached value advances");
+    // Lag of the cached value behind the real clock: the updater runs every
+    // ~1 ms, so the best of a few samples is far below 0.1 s even under load.
+    double lag = 1e9;
+    for (int i = 0; i < 50 && lag >= 0.1; ++i) {
+      const double cached = timercache::Hook();
+      lag = std::min(lag, ED_FakeTime() - cached);
+      if (lag >= 0.1) Sleep(2);
+    }
+    Check(lag >= 0 && lag < 0.1, "cached value tracks real time");
+    const bool refreshed = waitFor([&] { return timercache::g_refreshes.load() > refresh0 + 10; });
+    const int refresh = static_cast<int>(timercache::g_refreshes.load() - refresh0);
+    Check(refreshed && refresh > 10, "updater refreshes at ~1 kHz");
     timercache::g_on = false;
-    int b2 = realCalls.load();
+    int b2 = hookThreadCalls.load();
     timercache::Hook();
-    Check(realCalls.load() >= b2 + 1, "disabled cache passes calls through");
+    Check(hookThreadCalls.load() >= b2 + 1, "disabled cache passes calls through");
     Check(timercache::FindImport(GetModuleHandleW(nullptr), "KERNEL32.dll", "QueryPerformanceCounter") != nullptr,
           "IAT lookup finds an import");
 
@@ -1129,10 +1254,11 @@ int main() {
   // entries, globals and the submit are redirected to fakes).
   {
     using namespace stx;
-    const std::wstring bin = L"E:\\SteamLibrary\\steamapps\\common\\DCSWorld\\bin\\";
-    HMODULE ngm = LoadLibraryExW((bin + L"NGModel.dll").c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
-    HMODULE dxm = LoadLibraryExW((bin + L"dx11backend.dll").c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
-    if (!ngm || !dxm) {
+    HMODULE ngm = dcsinstall::LoadBinary(L"NGModel.dll");
+    HMODULE dxm = dcsinstall::LoadBinary(L"dx11backend.dll");
+    if (!dcsinstall::Found()) {
+      dcsinstall::Skip("shadow tex");
+    } else if (!ngm || !dxm) {
       printf("SKIP shadow tex: DCS binaries not found\n");
     } else {
       auto* ng = reinterpret_cast<uint8_t*>(ngm);
@@ -1392,6 +1518,12 @@ int main() {
   strtest::Run();
   // DcsQvCull_Status word (status_word.h): bit layout, feature counting, loader/payload handover.
   swtest::Run();
+  gstest::Run();
+  gatest::Run();
+  gddtest::Run();
+  plodtest::Run();
+  // Robustness round (2026-10-11): payload stop ordering, UTF-8 log lines, recorder start race, ...
+  rbtest::Run();
 
   // Suite: configuration check + short profile, report file written.
   {

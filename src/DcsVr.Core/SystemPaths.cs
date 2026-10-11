@@ -6,7 +6,7 @@ namespace DcsVr.Core;
 /// <summary>Windows path facts CPU Boost and the DCS-running guard need: the real (possibly redirected) Saved Games
 /// folder, a canonical form of a path that sees through junctions, symbolic links and 8.3 short names, and the image
 /// path of a running process. Read-only.</summary>
-internal static class SystemPaths
+public static class SystemPaths
 {
     /// <summary>The Saved Games known folder (FOLDERID_SavedGames), which may be redirected to another drive; falls
     /// back to %USERPROFILE%\Saved Games.</summary>
@@ -60,10 +60,6 @@ internal static class SystemPaths
         var r = Path.TrimEndingDirectorySeparator(Canonical(root));
         return p.Equals(r, StringComparison.OrdinalIgnoreCase) || p.StartsWith(r + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
-
-    /// <summary>True when both paths name the same file after canonicalization.</summary>
-    public static bool SameFile(string a, string b) =>
-        Path.TrimEndingDirectorySeparator(Canonical(a)).Equals(Path.TrimEndingDirectorySeparator(Canonical(b)), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Full image path of a running process, readable with PROCESS_QUERY_LIMITED_INFORMATION (works for
     /// processes of the same user without reading their memory); null when it cannot be read.</summary>

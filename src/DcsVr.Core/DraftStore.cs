@@ -20,8 +20,6 @@ public sealed class DraftStore(string stateRoot)
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidDataException or NotSupportedException) { return null; }
     }
-
-    public void Delete() { try { File.Delete(Path); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { } }
 }
 
 /// <param name="Dcs">DCS.exe selected with the draft; null when detected.</param>

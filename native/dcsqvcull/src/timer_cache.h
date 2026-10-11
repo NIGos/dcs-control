@@ -18,6 +18,10 @@ std::atomic<int> g_periodUs{1000};
 std::atomic<double> g_cached{0.0};
 std::atomic<uint64_t> g_refreshes{0};
 std::atomic<bool> g_stopUpdater{false};
+// edtime.h's stub (patched once per process) reads the g_cached of the payload
+// that wrote it. After a hot reload that payload's updater is stopped, so this
+// payload's updater also refreshes that copy (null when the stub is ours).
+std::atomic<std::atomic<double>*> g_mirror{nullptr};
 
 double Hook() {
   if (!g_on.load(std::memory_order_relaxed)) return g_orig();
@@ -31,7 +35,9 @@ DWORD WINAPI Updater(void*) {
   HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
                                         TIMER_ALL_ACCESS);
   while (!g_stopUpdater.load()) {
-    g_cached.store(g_orig(), std::memory_order_relaxed);
+    const double now = g_orig();
+    g_cached.store(now, std::memory_order_relaxed);
+    if (std::atomic<double>* m = g_mirror.load(std::memory_order_relaxed)) m->store(now, std::memory_order_relaxed);
     g_refreshes.fetch_add(1, std::memory_order_relaxed);
     int us = std::max(100, g_periodUs.load());
     if (timer) {

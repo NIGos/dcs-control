@@ -13,7 +13,6 @@ public enum NeuralDepthMode { Game, Normal, Reversed }
 public enum NeuralStyle { Standard, Natural, Cinematic }
 public enum NvidiaFlowPreset { Fast, Medium, Slow }
 public enum FpsLimitMode { Preserve, RuntimeHeadroom, MatchRefresh, Custom }
-public enum ExternalPacingState { Unknown, Off, Active }
 public enum IssueSeverity { Info, Warning, Error }
 /// <summary>Where the bundled Quad Views focus area comes from: Pimax Play's own Quad Views settings, read (never
 /// written) at preview, apply and launch, or the values stored in the profile.</summary>
@@ -140,20 +139,9 @@ public sealed record VrProfile
     /// <summary>Keep the DCS launcher window when launching from the app. Off: the profile sets
     /// miscellaneous.launcher = false (restored with the profile) and DCS goes straight into the game.</summary>
     public bool KeepDcsLauncher { get; init; }
-    /// <summary>No longer asked for (the app cannot read or verify other limiters or motion smoothing; preflight lists
-    /// them as checks you do yourself); kept so profiles saved by earlier versions still load.</summary>
-    public ExternalPacingState ExternalLimiter { get; init; }
-    /// <summary>No longer used; kept so profiles saved by earlier versions still load.</summary>
-    public double ExternalLimiterFps { get; init; } = 45;
-    /// <summary>No longer used; kept so profiles saved by earlier versions still load.</summary>
-    public ExternalPacingState RuntimeReprojection { get; init; }
-    /// <summary>No longer required; kept so profiles saved by earlier versions still load.</summary>
-    public bool ExperimentalAcknowledged { get; init; }
     public string? NeuralRuntimePath { get; init; }
     public string? RuntimeManifestPath { get; init; }
     public string? QuadViewsLayerDirectory { get; init; }
-    /// <summary>Never used by deployment (the registered Sboys driver is used); kept so profiles saved by earlier versions still load.</summary>
-    public string? SboysDriverDirectory { get; init; }
     public TrackingKind Tracking { get; init; }
     /// <summary>New profiles (presets, the checklist, Detect my setup) follow Pimax Play. A saved profile without this
     /// property predates it and always used its own values, so <see cref="JsonData"/> loads it as <see cref="FoveaSource.Profile"/>.</summary>
@@ -378,19 +366,41 @@ public static class JsonData
         return options;
     }
 
-    /// <summary>Reads a profile with the plain options, then marks a profile saved without "foveaSource" (written before
-    /// the setting existed) as using its own focus values instead of silently switching it to Pimax Play.</summary>
+    /// <summary>Settings earlier versions saved and this one no longer has: the self-reported limiter, its FPS and the
+    /// runtime motion smoothing (preflight lists them as checks you do yourself), the experimental consent and the Sboys
+    /// driver folder (the registered driver is used). Dropped when a profile loads, in any casing.</summary>
+    private static readonly HashSet<string> ObsoleteProfileKeys = new(["externalLimiter", "externalLimiterFps", "runtimeReprojection",
+        "experimentalAcknowledged", "sboysDriverDirectory"], StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Reads a profile with the plain options, without the <see cref="ObsoleteProfileKeys"/> (unknown keys are
+    /// refused), then marks a profile saved without "foveaSource" (written before the setting existed) as using its own
+    /// focus values instead of silently switching it to Pimax Play.</summary>
     private sealed class VrProfileConverter(JsonSerializerOptions plain) : JsonConverter<VrProfile>
     {
         public override VrProfile Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
         {
             using var document = JsonDocument.ParseValue(ref reader);
-            var profile = document.Deserialize<VrProfile>(plain) ?? throw new JsonException("The profile is empty.");
+            var profile = (document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.EnumerateObject().Any(p => ObsoleteProfileKeys.Contains(p.Name))
+                ? JsonSerializer.Deserialize<VrProfile>(WithoutObsoleteKeys(document.RootElement), plain)
+                : document.Deserialize<VrProfile>(plain)) ?? throw new JsonException("The profile is empty.");
             if (document.RootElement.ValueKind == JsonValueKind.Object && !document.RootElement.TryGetProperty("foveaSource", out _))
                 profile = profile with { FoveaSource = FoveaSource.Profile };
             return MigrateCloseApps(profile, document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.TryGetProperty("freeVram", out _));
         }
         public override void Write(Utf8JsonWriter writer, VrProfile value, JsonSerializerOptions options) => JsonSerializer.Serialize(writer, value, plain);
+
+        private static byte[] WithoutObsoleteKeys(JsonElement profile)
+        {
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream))
+            {
+                writer.WriteStartObject();
+                foreach (var property in profile.EnumerateObject())
+                    if (!ObsoleteProfileKeys.Contains(property.Name)) property.WriteTo(writer);
+                writer.WriteEndObject();
+            }
+            return stream.ToArray();
+        }
     }
 
     /// <summary>The CPU Boost "Close when DCS starts" list became Free VRAM before flight. A profile saved before

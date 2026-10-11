@@ -2,7 +2,7 @@
 
 The main window renders the actual local web application through WebView2, with a small WPF native host for window lifetime and Windows file dialogs. The configuration screens use HTML, CSS and JavaScript. There is no web server, external UI framework, CDN, remote font or background telemetry polling.
 
-The visual direction follows DCS's dark graphite surfaces, clear launcher navigation and aviation context, using original amber/blue graphics and an original fighter illustration. The eight pages separate the features (Quad Views, DLSS 5, Framegen, CPU Boost), file paths, checks and restoration. The frame-rate summary shows what DCS must render, the DCS frame limit and the headset refresh rate, calculated from the settings rather than measured. Pipeline graphics describe the profile; they do not claim live gaze or FPS.
+The visual direction follows DCS's dark graphite surfaces, clear launcher navigation and aviation context, using original amber/blue graphics and an original fighter illustration. The pages separate the features (Quad Views, DLSS 5, Framegen, CPU Boost), file paths, checks and restoration. The frame-rate summary shows what DCS must render, the DCS frame limit and the headset refresh rate, calculated from the settings rather than measured. Pipeline graphics describe the profile; they do not claim live gaze or FPS.
 
 ## Controls and motion
 
@@ -37,7 +37,7 @@ WebView2 uses Chromium's multi-process model. Moving the UI to web technologies 
 
 Guided setup is a three-step local WebView2 dialog: Choose, Check, Fly (five steps before 0.4.2). The dialog uses a progress stepper, distinct pass/error/manual check states, official guide actions, fixed footer controls, keyboard-modal behavior and restrained motion with reduced-motion support. A scrollable body keeps actions visible on compact/high-DPI screens. The Choose step uses the same four feature checkboxes as the right panel, with the same automatic dependencies and inline notes; route and feature selection preserves all numerical quality fields. Back, Cancel and missing-dependency states are exercised through the actual native bridge. See [SETUP.md](SETUP.md).
 
-Verification captures eight pages, the key capture field and the Choose and Check setup steps at each of the four viewport/scaling combinations, three right-panel states and Recovery with a profile applied (its file list open): 48 images per run. The Fly step ends with the same **Launch DCS** as the panel (restore the applied profile if any, apply the checked profile, start DCS); nothing is written before it. **Keep as draft without launching** takes the choice into the editor only. Dialog/installer actions that require desktop interaction and clean-machine prerequisite installation remain untested.
+Verification captures nine pages (every page but Pupil shift and Diagnostics), the key capture field and the Choose and Check setup steps at each of the four viewport/scaling combinations, three right-panel states and Recovery with a profile applied (its file list open): 52 images per run. The Fly step ends with the same **Launch DCS** as the panel (restore the applied profile if any, apply the checked profile, start DCS); nothing is written before it. **Keep as draft without launching** takes the choice into the editor only. Dialog/installer actions that require desktop interaction and clean-machine prerequisite installation remain untested.
 
 ## Pages (0.4.2)
 

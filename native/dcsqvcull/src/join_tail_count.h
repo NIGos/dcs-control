@@ -255,13 +255,18 @@ void Measure(int ms, std::atomic<uint64_t>& frames, double qpcToUs) {
     Log("  %s", why);
     return;
   }
-  if (!g_chunks) {
-    g_chunks = static_cast<ChunkEv*>(VirtualAlloc(nullptr, sizeof(ChunkEv) * kMaxChunks, MEM_COMMIT | MEM_RESERVE,
+  // All three or none: a partial failure used to leave g_chunks set, and the
+  // next run skipped the allocation and wrote through a null g_joins.
+  if (!g_chunks || !g_spins || !g_joins) {
+    if (!g_chunks)
+      g_chunks = static_cast<ChunkEv*>(VirtualAlloc(nullptr, sizeof(ChunkEv) * kMaxChunks, MEM_COMMIT | MEM_RESERVE,
+                                                    PAGE_READWRITE));
+    if (!g_spins)
+      g_spins = static_cast<SpinEv*>(VirtualAlloc(nullptr, sizeof(SpinEv) * kMaxSpins, MEM_COMMIT | MEM_RESERVE,
                                                   PAGE_READWRITE));
-    g_spins = static_cast<SpinEv*>(VirtualAlloc(nullptr, sizeof(SpinEv) * kMaxSpins, MEM_COMMIT | MEM_RESERVE,
-                                                PAGE_READWRITE));
-    g_joins = static_cast<JoinRec*>(VirtualAlloc(nullptr, sizeof(JoinRec) * kMaxJoins, MEM_COMMIT | MEM_RESERVE,
-                                                 PAGE_READWRITE));
+    if (!g_joins)
+      g_joins = static_cast<JoinRec*>(VirtualAlloc(nullptr, sizeof(JoinRec) * kMaxJoins, MEM_COMMIT | MEM_RESERVE,
+                                                   PAGE_READWRITE));
     if (!g_chunks || !g_spins || !g_joins) {
       Log("  join tail counter: no memory for the event log");
       return;

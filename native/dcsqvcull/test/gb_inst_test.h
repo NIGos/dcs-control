@@ -747,8 +747,11 @@ void LifecycleGb(const Compiler& cc, const std::wstring& shaders, ID3D11Device* 
   b->Init(im, GbKeys()[0]);
   c->Init(im, GbKeys()[2]);
   std::atomic<bool> abort{false};
-  std::thread phase([&] { SuitePhaseGb(400, abort, nullptr); });
-  for (int i = 0; i < 2000 && !g_collectGb.load(); ++i) Sleep(1);
+  // The feed below must land inside the phase's collection window: 2 s, so a
+  // test thread preempted on a loaded machine still feeds in time (the window
+  // is a plain sleep in SuitePhaseGb; 400 ms was enough only when idle).
+  std::thread phase([&] { SuitePhaseGb(2000, abort, nullptr); });
+  for (const ULONGLONG until = GetTickCount64() + 30000; !g_collectGb.load() && GetTickCount64() < until;) Sleep(1);
   auto feed = [](Fake* f, uint32_t pass) {
     f->Pass(pass);
     gbcount::g_observer.load()(f->r, nullptr);
@@ -789,10 +792,10 @@ void Run() {
   Selection();
   // Build checks on the analysed NGModel.dll: the mirrored selection code.
   {
-    const std::wstring bin = L"E:\\SteamLibrary\\steamapps\\common\\DCSWorld\\bin\\";
-    auto* ng = reinterpret_cast<uint8_t*>(LoadLibraryExW((bin + L"NGModel.dll").c_str(), nullptr,
-                                                         DONT_RESOLVE_DLL_REFERENCES));
-    if (!ng) {
+    auto* ng = reinterpret_cast<uint8_t*>(dcsinstall::LoadBinary(L"NGModel.dll"));
+    if (!dcsinstall::Found()) {
+      dcsinstall::Skip("gbuffer inst build checks");
+    } else if (!ng) {
       printf("SKIP gbuffer inst: NGModel.dll not found\n");
     } else {
       auto** matVt = reinterpret_cast<void**>(ng + kModelMatVtbl);

@@ -1137,7 +1137,9 @@ bool Install() {
   return true;
 }
 
-void Shutdown() {
+// True when its objects were released (false: a pass still runs; the
+// caller then keeps gbverify's and shadow_inst's objects alive as well).
+bool Shutdown() {
   g_shutdown = true;
   g_on = false;
   if (gbpass::g_wrap.load() == &Wrap) gbpass::g_wrap = nullptr;
@@ -1145,7 +1147,7 @@ void Shutdown() {
   for (int i = 0; i < 400 && g_inWrap.load() != 0; ++i) Sleep(5);
   if (g_inWrap.load() != 0) {
     Log("g-buffer batching: a pass was still running at unload; its objects are left alive");
-    return;
+    return false;
   }
   if (g_srv) g_srv->Release();
   if (g_buf) g_buf->Release();
@@ -1153,6 +1155,7 @@ void Shutdown() {
   g_srv = nullptr;
   g_buf = nullptr;
   g_ctx = nullptr;
+  return true;
 }
 
 void ResetCounters() {
@@ -1385,11 +1388,16 @@ const char* PrepareCopies(Target& t) {
     cd.Usage = D3D11_USAGE_STAGING;
     cd.CPUAccessFlags = D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE;
   }
-  if (t.init && memcmp(&cd, &t.copyDesc, sizeof(cd)) == 0) return nullptr;
+  // Reused only when complete: a partly failed create (t.init made, t.a not)
+  // used to pass this check on the next pass, and CopyAll then copied into a
+  // null texture on the render thread.
+  if (t.init && t.a && (!t.ms || (t.srvInit && t.srvA)) && memcmp(&cd, &t.copyDesc, sizeof(cd)) == 0) return nullptr;
   ReleaseCopies(t);
   t.copyDesc = cd;
-  if (FAILED(g_dev->CreateTexture2D(&cd, nullptr, &t.init)) || FAILED(g_dev->CreateTexture2D(&cd, nullptr, &t.a)))
+  if (FAILED(g_dev->CreateTexture2D(&cd, nullptr, &t.init)) || FAILED(g_dev->CreateTexture2D(&cd, nullptr, &t.a))) {
+    ReleaseCopies(t);
     return "could not create the target copies";
+  }
   if (t.ms) {
     D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
     sd.Format = uintView;
@@ -1397,8 +1405,10 @@ const char* PrepareCopies(Target& t) {
     sd.Texture2DMSArray.FirstArraySlice = 0;
     sd.Texture2DMSArray.ArraySize = t.slices;
     if (FAILED(g_dev->CreateShaderResourceView(t.init, &sd, &t.srvInit)) ||
-        FAILED(g_dev->CreateShaderResourceView(t.a, &sd, &t.srvA)))
+        FAILED(g_dev->CreateShaderResourceView(t.a, &sd, &t.srvA))) {
+      ReleaseCopies(t);
       return "could not create the per-sample views";
+    }
   }
   return nullptr;
 }

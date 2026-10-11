@@ -14,7 +14,11 @@ public sealed record PupilRange(double Min, double Max);
 /// <param name="GazeY">Vertical gaze range, degrees.</param>
 /// <param name="MaxShiftMm">The largest pupil shift, millimetres.</param>
 /// <param name="RuntimeEyeX">Where the runtime itself puts the left eye sideways, relative to the head centre, millimetres.</param>
-public sealed record PupilShiftSecond(int Frames, int Shifted, int? Restored, PupilRange? GazeX, PupilRange? GazeY, double MaxShiftMm, PupilRange RuntimeEyeX, bool CorrectionOff);
+/// <param name="CantDeg">Angle between the two eyes' view axes (the headset's views turned outwards).</param>
+/// <param name="RuntimeIpdMm">The eye distance the headset reports.</param>
+/// <param name="RenderedIpdMm">The eye distance DCS renders with (DCS's custom IPD when the layer applies it).</param>
+public sealed record PupilShiftSecond(int Frames, int Shifted, int? Restored, PupilRange? GazeX, PupilRange? GazeY, double MaxShiftMm, PupilRange RuntimeEyeX, bool CorrectionOff,
+    double? CantDeg = null, double? RuntimeIpdMm = null, double? RenderedIpdMm = null);
 
 /// <summary>What the pupil shift layer reports in PupilShift.log, for the Pupil shift page.</summary>
 /// <param name="State">not-installed, waiting (installed, DCS has not loaded it yet), working, no-gaze, off, not-restored.</param>
@@ -27,7 +31,7 @@ public sealed record PupilShiftStatus(string State, string Summary, bool Live, s
     public const string LogName = "PupilShift.log";
     public const string LayerDll = "XR_APILAYER_DCSVR_pupil_shift.dll";
 
-    private static readonly Regex Stats = new(@"stats: frames=(\d+) shifted=(\d+)(?: restored=(\d+))?(?: gaze x\[(-?[\d.]+)\.\.(-?[\d.]+)\] y\[(-?[\d.]+)\.\.(-?[\d.]+)\] deg, max shift ([\d.]+) mm)?(?<off> \(correction off\))?.*?runtime left eye vs head x\[(-?[\d.]+)\.\.(-?[\d.]+)\]", RegexOptions.CultureInvariant);
+    private static readonly Regex Stats = new(@"stats: frames=(\d+) shifted=(\d+)(?: restored=(\d+))?(?: gaze x\[(-?[\d.]+)\.\.(-?[\d.]+)\] y\[(-?[\d.]+)\.\.(-?[\d.]+)\] deg, max shift ([\d.]+) mm)?(?<off> \(correction off\))?.*?runtime left eye vs head x\[(-?[\d.]+)\.\.(-?[\d.]+)\](?:.*?; cant (?<cant>[\d.]+) deg, runtime IPD (?<ripd>[\d.]+) mm, rendered IPD (?<ipd>[\d.]+) mm)?", RegexOptions.CultureInvariant);
     private static readonly Regex EndFrame = new(@"end_frame: restored (\d+) projection views", RegexOptions.CultureInvariant);
     private static readonly Regex Toggle = new(@"toggle=(\d+:\d)", RegexOptions.CultureInvariant);
 
@@ -66,7 +70,8 @@ public sealed record PupilShiftStatus(string State, string Summary, bool Live, s
             if (Stats.Match(line) is not { Success: true } m) continue;
             var second = new PupilShiftSecond(Int(m.Groups[1].Value), Int(m.Groups[2].Value), m.Groups[3].Success ? Int(m.Groups[3].Value) : null,
                 m.Groups[4].Success ? new PupilRange(Num(m.Groups[4].Value), Num(m.Groups[5].Value)) : null, m.Groups[6].Success ? new PupilRange(Num(m.Groups[6].Value), Num(m.Groups[7].Value)) : null,
-                m.Groups[8].Success ? Num(m.Groups[8].Value) : 0, new PupilRange(Num(m.Groups[9].Value), Num(m.Groups[10].Value)), m.Groups["off"].Success);
+                m.Groups[8].Success ? Num(m.Groups[8].Value) : 0, new PupilRange(Num(m.Groups[9].Value), Num(m.Groups[10].Value)), m.Groups["off"].Success,
+                m.Groups["cant"].Success ? Num(m.Groups["cant"].Value) : null, m.Groups["ripd"].Success ? Num(m.Groups["ripd"].Value) : null, m.Groups["ipd"].Success ? Num(m.Groups["ipd"].Value) : null);
             last = second; seconds++;
             if (second.Shifted == 0 || second.GazeX is not { } x || second.GazeY is not { } y) continue;
             withGaze++;
@@ -95,6 +100,7 @@ public sealed record PupilShiftStatus(string State, string Summary, bool Live, s
         return new(state, (live ? "" : "Last flight · ") + summary, live, log, time, last, gazeX, gazeY, maxShift, withGaze, seconds, restored, hotkey, warnings);
     }
 
-    private static int Int(string s) => int.Parse(s, NumberStyles.Integer, CultureInfo.InvariantCulture);
-    private static double Num(string s) => double.Parse(s, NumberStyles.Float, CultureInfo.InvariantCulture);
+    // Log text is never trusted: an unreadable number counts as 0.
+    private static int Int(string s) => int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) ? n : 0;
+    private static double Num(string s) => double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var n) ? n : 0;
 }

@@ -2051,18 +2051,47 @@ constexpr size_t kSeenSize = 4096;
 std::atomic<void*> g_seen[kSeenSize];
 std::atomic<void*> g_seenSetGb[kSeenSize];
 
+// Set when a whole scan found neither the shader nor a free or forgotten slot;
+// cleared by ForgetShader. Observe runs for every caster of every frame:
+// without it a full set cost a 4096-slot scan per caster on the render thread.
+std::atomic<bool> g_seenFull[2] = {};
+
 bool MarkSeen(void* shader, int kind = kKindShadow) {
   std::atomic<void*>* set = kind == kKindGb ? g_seenSetGb : g_seen;
+  std::atomic<bool>& full = g_seenFull[kind == kKindGb ? 1 : 0];
+  if (full.load(std::memory_order_relaxed)) return false;
+  // Forgotten shaders (ForgetShader's tombstone, 1) are skipped by the
+  // search and their slots reused by inserts: before, they were never
+  // reused, so destroyed shaders (mission reloads) filled the set for good.
+  void* const tomb = reinterpret_cast<void*>(uintptr_t{1});
+  std::atomic<void*>* reuse = nullptr;
   size_t i = (reinterpret_cast<uintptr_t>(shader) >> 4) * 0x9E3779B97F4A7C15ull >> 52 & (kSeenSize - 1);
   for (size_t probe = 0; probe < kSeenSize; ++probe, i = (i + 1) & (kSeenSize - 1)) {
     void* k = set[i].load(std::memory_order_relaxed);
     if (k == shader) return false;
+    if (k == tomb) {
+      if (!reuse) reuse = &set[i];
+      continue;
+    }
     if (!k) {
-      void* expected = nullptr;
-      if (set[i].compare_exchange_strong(expected, shader)) return true;
+      std::atomic<void*>* slot = reuse ? reuse : &set[i];
+      void* expected = reuse ? tomb : nullptr;
+      if (slot->compare_exchange_strong(expected, shader)) return true;
       if (expected == shader) return false;
+      if (reuse) {  // the tombstone went meanwhile: retry with the free slot
+        reuse = nullptr;
+        expected = nullptr;
+        if (set[i].compare_exchange_strong(expected, shader)) return true;
+        if (expected == shader) return false;
+      }
     }
   }
+  if (reuse) {
+    void* expected = tomb;
+    if (reuse->compare_exchange_strong(expected, shader)) return true;
+    if (expected == shader) return false;
+  }
+  full.store(true, std::memory_order_relaxed);
   return false;  // full: ignore
 }
 
@@ -2419,8 +2448,13 @@ void ForgetShader(void* shader) {
         g_texMap[i].shader.store(TexTomb(), std::memory_order_release);
         g_texForgotten.fetch_add(1);
       }
-  for (size_t i = 0; i < kSeenSize; ++i)
+  for (size_t i = 0; i < kSeenSize; ++i) {
     if (g_seen[i].load(std::memory_order_relaxed) == shader) g_seen[i].store(TexTomb());
+    // The G-buffer set too: a new shader at this address is collected again.
+    if (g_seenSetGb[i].load(std::memory_order_relaxed) == shader) g_seenSetGb[i].store(TexTomb());
+  }
+  g_seenFull[0].store(false, std::memory_order_relaxed);
+  g_seenFull[1].store(false, std::memory_order_relaxed);
   auto kill = [&](Snapshot* s) {
     if (s && s->shader == shader) s->dead = true;
   };
@@ -3284,9 +3318,20 @@ void CacheSave(const Snapshot& s, const KeyResult& r, const SourceLog& log) {
     ok = WriteFile(h, file.data(), static_cast<DWORD>(file.size()), &put, nullptr) && put == file.size();
     if (!ok) err = GetLastError();
     CloseHandle(h);
-    if (ok && !MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-      ok = false;
+    // A scanner or indexer briefly holding the target (or the fresh temp
+    // file) makes the rename fail with a sharing/lock/access error: retried
+    // (compile worker thread, never the render thread). Before, one such hit
+    // turned cache writes off for the whole session.
+    for (int attempt = 0; ok; ++attempt) {
+      if (MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) break;
       err = GetLastError();
+      const bool transient =
+          err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED || err == ERROR_LOCK_VIOLATION;
+      if (!transient || attempt >= 9) {
+        ok = false;
+        break;
+      }
+      Sleep(10);
     }
     if (!ok) DeleteFileW(tmp.c_str());
   }
@@ -3452,7 +3497,7 @@ DWORD WINAPI Worker(void*) {
 }
 
 // Render thread: first sight of a shader -> snapshot -> queue.
-void Observe(uint8_t* mat, int kind = kKindShadow) {
+void ObserveBody(uint8_t* mat, int kind) {
   uint8_t* sh = *reinterpret_cast<uint8_t**>(mat + 0x30);
   if (!sh || *reinterpret_cast<void**>(sh) != g_shaderVtbl) return;
   if (!MarkSeen(sh, kind)) return;
@@ -3477,6 +3522,16 @@ void Observe(uint8_t* mat, int kind = kKindShadow) {
   std::lock_guard<std::mutex> lock(g_mutex);
   g_queue.push_back(s);
   g_cv.notify_all();
+}
+
+// DCS's caster loop calls this: a std::bad_alloc (the 27 KB snapshot, the
+// queue) must not unwind into DCS's frames. The shader is then not compiled
+// this session (it is marked seen), as for any rejected snapshot.
+void Observe(uint8_t* mat, int kind = kKindShadow) {
+  try {
+    ObserveBody(mat, kind);
+  } catch (...) {
+  }
 }
 
 // Single-threaded device: create the VS objects here, a few per call.
@@ -3933,10 +3988,18 @@ const char* VerifyBuild(uint8_t* ng, uint8_t* dx) {
 }
 
 bool Install() {
-  if (g_state.load() != 0) return g_state.load() > 0;
+  // Claimed atomically (-3 while installing): the payload worker and a suite
+  // phase can both call it, and two first calls each started compile workers
+  // (only the last set's handles kept: Shutdown freed the results under the
+  // others) and allocated the maps twice.
+  int idle = 0;
+  if (!g_state.compare_exchange_strong(idle, -3)) return g_state.load() > 0;
   auto* ng = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
   auto* dx = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"dx11backend.dll"));
-  if (!ng || !dx) return false;  // retried later
+  if (!ng || !dx) {
+    g_state = 0;  // retried later
+    return false;
+  }
   g_state = -1;
   if (const char* why = VerifyBuild(ng, dx)) {
     Log("%s", why);
@@ -4294,7 +4357,11 @@ void SuitePhaseGbTex(int warmMs, int countMs, const std::atomic<bool>& abort, co
 }
 
 // Payload unload: stop collecting, join the workers, then release.
-void Shutdown() {
+// release = false: a user of the VS objects and compile results (shadow
+// batching, G-buffer batching, a recorder) could not be drained, so they are
+// left alive (the workers are still stopped). Before, they were released
+// while such a pass could still read them.
+void Shutdown(bool release = true) {
   if (g_state.load() <= 0) return;
   instcount::g_observer.store(nullptr);
   if (gbcount::g_observer.load() == &GbObserver) gbcount::g_observer.store(nullptr);
@@ -4318,6 +4385,11 @@ void Shutdown() {
   if (!joined || g_inObserver.load() != 0) {
     g_state = -2;
     Log("shadow inst: a compile worker did not stop within 60 s; its objects are leaked, not released");
+    return;
+  }
+  if (!release) {
+    g_state = -2;
+    Log("shadow inst: a pass using its shaders was still running at unload; its objects are left alive");
     return;
   }
   std::lock_guard<std::mutex> lock(g_mutex);

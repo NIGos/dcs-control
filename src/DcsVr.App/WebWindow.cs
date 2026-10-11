@@ -19,7 +19,7 @@ internal sealed class WebWindow : Window
     {
         Title = "DCS Control"; Width = 1320; Height = 920; MinWidth = 850; MinHeight = 620;
         Icon = BitmapFrame.Create(new Uri("pack://application:,,,/Assets/app-icon.ico", UriKind.Absolute));
-        WindowStartupLocation = WindowStartupLocation.CenterScreen; Background = new SolidColorBrush(Color.FromRgb(11, 14, 17));
+        WindowStartupLocation = WindowStartupLocation.CenterScreen;
         Width = Math.Min(Width, SystemParameters.WorkArea.Width - 40); Height = Math.Min(Height, SystemParameters.WorkArea.Height - 40);
         MinWidth = Math.Min(MinWidth, Width); MinHeight = Math.Min(MinHeight, Height);
         _view.DefaultBackgroundColor = System.Drawing.Color.FromArgb(255, 38, 38, 38);

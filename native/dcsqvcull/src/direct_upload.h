@@ -610,7 +610,12 @@ void Shutdown() {
   g_verify = false;
   for (int i = 0; i < 400 && (g_open.load() != 0 || g_busy.load() != 0); ++i) Sleep(5);
   if (g_open.load() != 0) {
-    if (uint8_t* mgr = g_mgr.load()) {
+    // Only restore from here when none of our hooks is running: with one in
+    // flight (the render thread in its upload/close, a culling thread
+    // writing through a mapping) a restore here raced it (double Unmap).
+    if (g_busy.load() != 0) {
+      Log("direct upload: a mapped window and a hook call were still active at unload; left to its own close");
+    } else if (uint8_t* mgr = g_mgr.load()) {
       Log("direct upload: a mapped window did not close within 2 s; restoring from the unload thread");
       CloseLocked(mgr, false);
     }

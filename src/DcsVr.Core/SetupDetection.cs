@@ -106,10 +106,18 @@ public static class SetupDetection
                 profile = profile with { Gaze = GazeMode.EyeTracked };
                 Set("gaze", "Focus movement", "Eye tracked", "Sboys 1.3 or newer exposes eye gaze through SteamVR OpenXR");
             }
-            else if (profile.Runtime == RuntimeKind.Pimax && (sources.ProcessRunning("Tobii.EyeX.Engine") || sources.ProcessRunning("platform_runtime_XR5EYECH")))
+            // Pimax's own eye-tracking services (Crystal family). Tobii.EyeX.Engine is the desktop Tobii Eye Tracker's
+            // and platform_runtime_IS5LEYET is the Tobii Eye Tracker 5: neither says anything about the headset.
+            else if (profile.Runtime == RuntimeKind.Pimax && (sources.ProcessRunning("platform_runtime_XR5EYECH") || sources.ProcessRunning("platform_runtime_VR4PIMAX")))
             {
                 profile = profile with { Gaze = GazeMode.EyeTracked };
                 Set("gaze", "Focus movement", "Eye tracked", "Pimax eye-tracking service is running");
+            }
+            // Pimax Play's service runs but no Pimax eye-tracking service does: a headset without eye tracking (Crystal Light, 8KX…).
+            else if (profile.Runtime == RuntimeKind.Pimax && (sources.ProcessRunning("PiService") || sources.ProcessRunning("PiServiceLauncher")))
+            {
+                profile = profile with { Gaze = GazeMode.Fixed };
+                Set("gaze", "Focus movement", "Fixed", "Pimax Play runs without an eye-tracking service (a headset without eye tracking)");
             }
             else if (profile.Runtime == RuntimeKind.SboysSteamVr && GazeBridge.Find(inventory) is null)
             {
@@ -214,7 +222,7 @@ public static class SetupDetection
         {
             using var document = JsonDocument.Parse(File.ReadAllText(settings));
             return document.RootElement.TryGetProperty("steamvr", out var steamvr) && steamvr.TryGetProperty("preferredRefreshRate", out var rate)
-                && rate.TryGetDouble(out var hz) && hz is >= 60 and <= 240 ? hz : null;
+                && rate.TryGetDouble(out var hz) && hz is >= 50 and <= 240 ? hz : null;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException) { return null; }
     }

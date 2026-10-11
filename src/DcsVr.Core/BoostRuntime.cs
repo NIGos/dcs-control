@@ -109,7 +109,10 @@ public sealed class BoostRuntime
 
         if (!profile.UsesBoostHelper) { output.WriteLine("CPU Boost, Free VRAM before flight and Lower the monitor are off in this profile; nothing to do."); return 0; }
 
-        using var mutex = new Mutex(initiallyOwned: false, MutexName, out _);
+        Mutex mutex;
+        try { mutex = new Mutex(initiallyOwned: false, MutexName, out _); }
+        catch (UnauthorizedAccessException) { error.WriteLine("CPU Boost is already running (as administrator)."); return 0; }
+        using var _mutex = mutex;
         var held = false;
         try { held = mutex.WaitOne(TimeSpan.Zero); } catch (AbandonedMutexException) { held = true; }
         if (!held) { error.WriteLine("CPU Boost is already running."); return 0; }
@@ -354,7 +357,15 @@ public sealed class BoostRuntime
         try { dcs.PriorityClass = priority; _dcsChanges.Add($"DCS (PID {dcs.Id}): priority {priority}"); }
         catch (Exception e) when (IsProcessAccess(e)) { _errors.Add("DCS priority: " + e.Message); }
         if (_topology.HasRanking && _allCpus != 0)
-            try { dcs.ProcessorAffinity = (nint)_allCpus; _dcsChanges.Add($"DCS (PID {dcs.Id}): affinity all CPUs 0x{_allCpus:X}"); }
+            try
+            {
+                // Widened only from a mask CPU Boost itself set (inherited from a confined launcher): a pilot who pins DCS
+                // on purpose (Process Lasso on the V-cache CCD, P-cores only) keeps that pinning.
+                var current = (ulong)dcs.ProcessorAffinity & _allCpus;
+                if (current == _allCpus) { }
+                else if (current == _vrMask || current == _bgMask) { dcs.ProcessorAffinity = (nint)_allCpus; _dcsChanges.Add($"DCS (PID {dcs.Id}): affinity all CPUs 0x{_allCpus:X}"); }
+                else _dcsChanges.Add($"DCS (PID {dcs.Id}): affinity 0x{current:X} kept (set outside CPU Boost)");
+            }
             catch (Exception e) when (IsProcessAccess(e)) { _errors.Add("DCS affinity: " + e.Message); }
     }
 
@@ -631,7 +642,9 @@ public sealed class BoostRuntime
 
     private void Log(string message)
     {
-        try { File.AppendAllText(Path.Combine(_boostDir, "boost.log"), $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss} {message}{Environment.NewLine}"); }
+        var log = Path.Combine(_boostDir, "boost.log");
+        try { if (new FileInfo(log) is { Exists: true, Length: > 1024 * 1024 }) File.Move(log, log + ".old", overwrite: true); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        try { File.AppendAllText(log, $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss} {message}{Environment.NewLine}"); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 

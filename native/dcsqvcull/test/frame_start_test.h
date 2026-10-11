@@ -277,7 +277,9 @@ void LiveDrain() {
     ctx->Flush();  // as the runtime's submit inside xrEndFrame
     if (f == 2) {  // the GPU finishes inside "xrEndFrame" (a flushing wait, as a drained frame)
       BOOL done = FALSE;
-      for (int i = 0; i < 400 && ctx->GetData(g_ev[g_evIdx], &done, sizeof(done), 0) != S_OK; ++i) Sleep(1);
+      // Deadline, not a spin count: a loaded GPU can take longer than 400 ms.
+      const ULONGLONG end = GetTickCount64() + 30000;
+      while (ctx->GetData(g_ev[g_evIdx], &done, sizeof(done), 0) != S_OK && GetTickCount64() < end) Sleep(1);
     }
     OnXrEndReturn(me);
     const int64_t c0 = Qpc();
@@ -305,7 +307,7 @@ void LiveDrain() {
     HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     OnXrEndEnter(me);
     dx->EnqueueSetEvent(ev);
-    counted = g_cur.enqN == 1 && WaitForSingleObject(ev, 2000) == WAIT_OBJECT_0;
+    counted = g_cur.enqN == 1 && WaitForSingleObject(ev, 30000) == WAIT_OBJECT_0;
     OnXrEndReturn(me);
     UninstallDriver();
     restored = (*reinterpret_cast<void***>(dx))[16] == reinterpret_cast<void*>(g_enqOrig);

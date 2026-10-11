@@ -156,7 +156,7 @@ public sealed class TransactionStore(string stateDirectory)
             {
                 case RestoreStep.Original:
                     // A created file the user already deleted still leaves its runtime logs behind.
-                    if (!File.Exists(entry.Path)) RemoveRuntimeLogs(entry);
+                    if (!File.Exists(entry.Path)) RuntimeFiles.Remove(entry.Path, entry.RuntimeLogs);
                     entry.Reverted = true; Save(root, journal); continue;
                 case RestoreStep.MergeLua:
                     if (TryRestoreLua(root, entry)) { entry.Reverted = true; Save(root, journal); } else conflicts.Add(entry.Path);
@@ -170,53 +170,14 @@ public sealed class TransactionStore(string stateDirectory)
                 if (Hashing.BytesSha256(bytes) != entry.PreviousSha256) throw new InvalidDataException("Backup integrity failed: restore stopped.");
                 AtomicFile.Write(entry.Path, bytes);
             }
-            else
-            {
-                File.Delete(entry.Path);
-                // Runtime files first, so the folder they leave empty goes too.
-                RemoveRuntimeLogs(entry);
-                RemoveEmptyCreatedFolder(entry);
-            }
-            RemoveRuntimeLogs(entry);
+            else File.Delete(entry.Path);
+            // Runtime files first, so the folder a removed file leaves empty goes too.
+            RuntimeFiles.Remove(entry.Path, entry.RuntimeLogs);
+            if (entry.BackupFile is null) RuntimeFiles.RemoveEmptyCreatedFolder(entry.Path, entry.Root);
             entry.Reverted = true; Save(root, journal);
         }
         journal.Status = conflicts.Count == 0 ? "restored" : "restore-conflicts"; Save(root, journal);
         return new(conflicts.Count == 0, conflicts);
-    }
-
-    /// <summary>A file this profile created was removed: an empty folder left behind below the authorized root (for example
-    /// bin\CheekyFoveatedDLSS after a restore resumed from a conflict) goes too. The root itself is never removed.</summary>
-    private static void RemoveEmptyCreatedFolder(JournalEntry entry)
-    {
-        try
-        {
-            var folder = Path.GetDirectoryName(entry.Path)!;
-            if (entry.Root is not { } authorized || !folder.StartsWith(Path.GetFullPath(authorized).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return;
-            PathPolicy.RejectReparsePoints(folder, authorized);
-            if (Directory.Exists(folder) && !Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder);
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { }
-    }
-
-    private static void RemoveRuntimeLogs(JournalEntry entry)
-    {
-        if (entry.RuntimeLogs is null) return;
-        var owner = Path.GetDirectoryName(entry.Path)!;
-        foreach (var log in entry.RuntimeLogs)
-        {
-            // Only declared runtime files inside the component's own folder tree; never anything the journal did not declare.
-            var full = Path.GetFullPath(log);
-            if (!RuntimeFiles.Allowed(full, owner)) continue;
-            // Best effort: a log held open by a viewer must never leave the restore half done.
-            try
-            {
-                PathPolicy.RejectReparsePoints(full, owner);
-                foreach (var file in RuntimeFiles.Matching(full)) File.Delete(file);
-                var folder = Path.GetDirectoryName(full)!;
-                if (!folder.Equals(owner, StringComparison.OrdinalIgnoreCase) && Directory.Exists(folder) && !Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder);
-            }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { }
-        }
     }
 
     private static bool TryRestoreLua(string root, JournalEntry entry)
@@ -236,7 +197,7 @@ public sealed class TransactionStore(string stateDirectory)
         if (Hashing.BytesSha256(backup) != entry.PreviousSha256) throw new InvalidDataException("Backup integrity failed: restore stopped.");
         try
         {
-            var utf8 = new System.Text.UTF8Encoding(false, true);
+            var utf8 = StrictUtf8.Encoding;
             var original = new LuaOptions(utf8.GetString(backup));
             var currentBytes = File.ReadAllBytes(entry.Path); var merged = utf8.GetString(currentBytes); var current = new LuaOptions(merged);
             foreach (var change in entry.LuaChanges!)
@@ -277,7 +238,7 @@ internal static class RuntimeFiles
     private static readonly string[] Named = [".log", ".flag"], Patterns = [".log", ".txt", ".csv", ".dll", ".qvc", ".tmp"];
 
     /// <summary>Declared inside the owner's folder tree. A single named file only as a log or a trigger flag; reports
-    /// and the component's copies of its own module (e.g. payloadctive_*.dll) only as a pattern, so a named library
+    /// and the component's copies of its own module (e.g. payload\active_*.dll) only as a pattern, so a named library
     /// or document is never deleted.</summary>
     public static bool Allowed(string full, string owner)
     {
@@ -299,5 +260,42 @@ internal static class RuntimeFiles
         // EnumerateFiles also matches 8.3 names and longer extensions ("*.dll" matches "x.dllx"): keep exact matches only.
         var regex = new System.Text.RegularExpressions.Regex("^" + System.Text.RegularExpressions.Regex.Escape(name).Replace(@"\*", ".*") + "$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         return Directory.EnumerateFiles(folder, name).Where(f => regex.IsMatch(Path.GetFileName(f))).ToArray();
+    }
+
+    /// <summary>Removes the runtime files <paramref name="path"/> declared, with the folders below its own that they
+    /// leave empty.</summary>
+    public static void Remove(string path, IEnumerable<string>? declared)
+    {
+        if (declared is null) return;
+        var owner = Path.GetDirectoryName(path)!;
+        foreach (var log in declared)
+        {
+            // Only declared runtime files inside the component's own folder tree; never anything that was not declared.
+            var full = Path.GetFullPath(log);
+            if (!Allowed(full, owner)) continue;
+            // Best effort: a log held open by a viewer must never leave the restore half done.
+            try
+            {
+                PathPolicy.RejectReparsePoints(full, owner);
+                foreach (var file in Matching(full)) AtomicFile.Retry(() => File.Delete(file));
+                var folder = Path.GetDirectoryName(full)!;
+                if (!folder.Equals(owner, StringComparison.OrdinalIgnoreCase) && Directory.Exists(folder) && !Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { }
+        }
+    }
+
+    /// <summary>A file DCS Control created was removed: an empty folder left behind below the authorized root (for
+    /// example bin\CheekyFoveatedDLSS) goes too. The root itself is never removed.</summary>
+    public static void RemoveEmptyCreatedFolder(string path, string? root)
+    {
+        try
+        {
+            var folder = Path.GetDirectoryName(path)!;
+            if (root is not { } authorized || !folder.StartsWith(Path.GetFullPath(authorized).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return;
+            PathPolicy.RejectReparsePoints(folder, authorized);
+            if (Directory.Exists(folder) && !Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { }
     }
 }

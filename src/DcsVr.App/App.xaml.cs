@@ -6,6 +6,9 @@ namespace DcsVr.App;
 
 public partial class App : Application
 {
+    private System.Threading.Mutex? _single;
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -20,12 +23,26 @@ public partial class App : Application
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             _ = RunWebSmoke(e.Args[1]); return;
         }
+        // One window at a time: a second start brings the open one forward (two copies would apply and restore the same
+        // game files against each other).
+        _single = new System.Threading.Mutex(true, @"Local\DcsControl.App", out var first);
+        if (!first)
+        {
+            try
+            {
+                foreach (var other in System.Diagnostics.Process.GetProcessesByName(System.Diagnostics.Process.GetCurrentProcess().ProcessName))
+                    using (other) if (other.Id != Environment.ProcessId && other.MainWindowHandle != IntPtr.Zero) { ShowWindow(other.MainWindowHandle, 9); SetForegroundWindow(other.MainWindowHandle); }
+            }
+            catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+            Shutdown(0); return;
+        }
         // Started inside another app's sandbox, Windows would keep the app's record of original files in a private copy
         // (see AppDataRedirection): the app starts again outside it, through Explorer, and this copy closes.
         if (e.Args.Length == 0 && DcsVr.Core.AppDataRedirection.Target() is { } redirected)
         {
             try
             {
+                _single?.ReleaseMutex(); _single?.Dispose(); _single = null;
                 using var outside = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe") { ArgumentList = { Environment.ProcessPath! }, UseShellExecute = false });
                 Shutdown(0); return;
             }

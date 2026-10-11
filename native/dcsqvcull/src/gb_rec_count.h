@@ -1215,6 +1215,18 @@ void AfterPass(int slot, size_t n, uint32_t modelItems) {
   else g_samplesDropped++;
 }
 
+// The vector's begin/end, read under SEH (the vector comes from an item index
+// ItemVector does not range-check): false when unreadable.
+bool ReadVecGuarded(void** vec, void* const** b, void* const** e) {
+  __try {
+    *b = static_cast<void* const*>(vec[0]);
+    *e = static_cast<void* const*>(vec[1]);
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
 void Wrap(void* pass, void* ctx, gbpass::ExecFn orig) {
   const gbpass::WrapFn prev = g_prevWrap;
   const DWORD tid = GetCurrentThreadId();
@@ -1241,9 +1253,12 @@ void Wrap(void* pass, void* ctx, gbpass::ExecFn orig) {
   t_n = 0;
   size_t n = 0;
   const uint64_t model0 = st.modelItems;
-  if (vec) {
-    auto* b = static_cast<void* const*>(vec[0]);
-    auto* e = static_cast<void* const*>(vec[1]);
+  void* const* b = nullptr;
+  void* const* e = nullptr;
+  if (vec && !ReadVecGuarded(vec, &b, &e)) {
+    st.faults++;
+    g_analyseFaults++;
+  } else if (vec) {
     if (b && e >= b && e - b <= 200000) {
       if (++g_passGen == 0) g_passGen = 1;
       n = static_cast<size_t>(e - b);

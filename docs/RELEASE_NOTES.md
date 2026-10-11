@@ -1,3 +1,46 @@
+# 0.5.4 preview
+
+**DCS under Program Files works**: Windows protects Program Files, so Launch DCS stopped with "Access to the path … is denied" when DCS was installed there. DCS Control now checks before writing anything and, when a folder it needs is protected, asks Windows once (its own prompt) to give your account Modify permission on that folder only, then carries on. Back to stock DCS does the same. Checks shows it as "Write access to game folders" with a Grant access button, and names Windows Security's Controlled folder access when it is on.
+
+**Sturdier file writes**: a file an antivirus, Windows Search or OneDrive holds for a moment no longer stops Launch or Back to stock DCS (the write waits up to about 2 s), and a file you made read-only (options.lua) is updated and stays read-only. Windows is asked for permission only when a write is actually refused, with one prompt for all folders, and never when the block is an antivirus, Controlled folder access or a read-only or network drive (those are named instead).
+
+**Pupil shift**: with DCS's custom IPD on, DCS reset each eye's sideways position after the layer, so the pupil's sideways move (the main part of the correction) never reached it. The layer now applies the same IPD itself and DCS's own option is off while the profile is applied (Back to stock DCS turns it on again). Straight ahead is taken between the two eyes' views, so headsets whose views are canted outwards no longer shift both pupils towards the nose. The page says what Pupil shift corrects and what not, and shows the measured cant and the eye distances.
+
+**Bug fixes and cleanup**:
+- Frame generation (OFXR patch 0016):
+  - a frame naming a swapchain could make OFXR's presenter thread use DCS's own D3D11 context;
+  - a GPU stall over 2 s could reuse a copy list still in use;
+  - a removed device was taken for work in progress;
+  - the panel could call the engine optimizations' module after Lua unloaded it;
+  - `visibility_mask=0` was ignored when DCS enabled the extension itself;
+  - several smaller fixes.
+- Engine optimizations: the module's authors fixed races at start and shutdown, a busy wait, leaks when a hook cannot install and log paths with accented letters. The shadow cache no longer turns itself off for the session when an antivirus holds a file for a moment. On graphics drivers without D3D11 command lists (common on AMD) the multi-threaded shadows and G-buffer are reported as not supported instead of failed; on CPUs with 8 logical cores or fewer the shadows use one helper thread.
+- Pupil shift: the switch's beep can't outlive the layer; a non-number in its settings file is ignored. Quad Views: a saccade right after a pause no longer reuses the previous saccade's look-ahead. The prefetch fix also catches lookups made through KernelBase. The launcher passes on "Run: Minimized".
+- The app:
+  - the diagnostic package and Grant access use the draft on screen;
+  - no timeout while a Windows dialog or prompt waits for you;
+  - the Framegen page shows the frame limit that is actually written;
+  - Undo changes clears fields left invalid;
+  - the checks page no longer redraws everything on every keystroke;
+  - CPU Boost and its checks protect the same processes;
+  - a failing Windows service command can't stop CPU Boost;
+  - boost.log rotates at 1 MB.
+- Removed: unused code and styles, obsolete profile settings (old profiles still load), and a planning document with a developer path that shipped in the release.
+
+**More PCs and setups**:
+- AMD and Intel graphics: DLSS 5, Foveated Super Resolution and NVIDIA frame generation are refused with a clear message (they need an NVIDIA RTX card), and frame generation starts as FidelityFX.
+- Pimax without eye tracking: a desktop Tobii eye tracker no longer counts as the headset's; a Pimax without eye tracking gets a fixed focus area.
+- Pimax Play installed outside Program Files is found through Windows' OpenXR registration.
+- DCS standalone found also through Eagle Dynamics' own registry entry; the Saved Games folder DCS really uses (DCS or DCS.openbeta, from dcs_variant.txt) is chosen; a DCS that was never started is told to start once.
+- Saved Games in OneDrive works (cloud files are no longer taken for links).
+- Paths with accented or Cyrillic letters: the frame-generation and engine settings files are written so their readers keep them intact.
+- CPU Boost keeps a DCS core pinning you set yourself (Process Lasso), never puts background apps on DCS's render cores and leaves the headset's services alone on small CPUs; a dcs.log from a previous CPU is no longer used.
+- 3× frame generation at 72 or 75 Hz no longer asks DCS for a frame limit below its minimum (30); refresh rates from 50 Hz are accepted.
+- User Account Control turned off: the app says what to do.
+- Only one DCS Control window at a time; an elevated CPU Boost helper is seen by the installer.
+- Decimal comma accepted in number fields; page shortcuts work on AZERTY and other layouts; switches stay visible in Windows high contrast.
+- An options.lua saved in another encoding, or a file an antivirus removed, gets a message that says what to do.
+
 # 0.5.3 preview
 
 **Diagnostics page**: explains the panel's "DLSS 5: ON but not applied" from the last DCS session (Cheeky's log): whether DCS's DLSS on the Quad Views focus views was identified and, if not, why in plain words (for example DCS running DLSS only on images that are not the focus views, another Quad Views layer in the way, DLSS used on more images than the four views) with what to check. **Create diagnostic package…** saves one ZIP with the app's report and the logs and settings of DCS, DLSS 5, frame generation, Quad Views, Pupil shift, the engine optimizations, CPU Boost and the headset software, the DLSS and DirectX file versions in DCS's bin folder, the OpenXR runtime and layers, and the Windows, CPU and GPU driver versions. Text only, each file cut to its last 8 MB; the Windows user name, PC name, e-mail addresses, and the account tokens, account ids and headset serial number in Pimax's logs are removed.

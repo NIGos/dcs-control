@@ -70,6 +70,11 @@ bool Install() {
       return false;
     }
     g_flag = existing + kPage;
+    // The stub's cached-time pointer (mov rax, imm64 at +21) is the earlier
+    // payload's timer cache, whose updater stopped with it: keep it fresh.
+    void* cached = nullptr;
+    if (allocslab::ReadBytes(existing + 21, &cached, 8) && cached && cached != &timercache::g_cached)
+      timercache::g_mirror = static_cast<std::atomic<double>*>(cached);
     g_state = 1;
     Log("task-queue clock: existing patch reused");
     return true;

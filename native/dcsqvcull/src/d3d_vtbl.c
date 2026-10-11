@@ -56,6 +56,19 @@ int DcsQv_ContextSlot(const char* name) {
       {"GenerateMips", SLOT(GenerateMips)},
       {"Dispatch", SLOT(Dispatch)},
       {"DispatchIndirect", SLOT(DispatchIndirect)},
+      /* gpu_dedup.h (R26 11) */
+      {"Map", SLOT(Map)},
+      {"Unmap", SLOT(Unmap)},
+      {"DrawIndexedInstancedIndirect", SLOT(DrawIndexedInstancedIndirect)},
+      {"DrawInstancedIndirect", SLOT(DrawInstancedIndirect)},
+      {"CopyStructureCount", SLOT(CopyStructureCount)},
+      {"UpdateSubresource1", SLOT(UpdateSubresource1)},
+      {"CopySubresourceRegion1", SLOT(CopySubresourceRegion1)},
+      {"ClearView", SLOT(ClearView)},
+      {"DiscardResource", SLOT(DiscardResource)},
+      {"DiscardView", SLOT(DiscardView)},
+      {"DiscardView1", SLOT(DiscardView1)},
+      {"CSSetShader", SLOT(CSSetShader)},
   };
   for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
     const char* a = table[i].n;

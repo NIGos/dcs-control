@@ -110,6 +110,16 @@
 // deferred_rec.h and split_filter.h.
 #pragma once
 
+// gpu_split.h (measure only, [Suite] GpuSplit; also called from gb_rec.h):
+// GPU query brackets and a mesh census around the recorders' replays. g_on
+// stays 0 unless that suite phase runs.
+namespace gsplit {
+std::atomic<int> g_on{0};
+void Bracket(int site, int idx, bool begin);
+void MeshDraw(int site, int idx, ID3D11Buffer* ib, DXGI_FORMAT fmt, UINT count, UINT weight, bool textured,
+              ID3D11Buffer* vb, UINT stride);
+}  // namespace gsplit
+
 namespace shrec {
 
 // ---------------------------------------------------------------------------
@@ -984,18 +994,25 @@ uint8_t TexBuildRaw(const gbbatch::TexEnv& env, TexEntry& e, ClassCensus* census
         e.mode = kTmAreas;
         e.nviews = static_cast<uint8_t>(nv);
         e.nthr = static_cast<uint8_t>(nt);
-        memcpy(e.views, e.gVb, static_cast<size_t>(nv) * 8);
+        // A view enters e.views only after its AddRef: a fault in the copies
+        // or an AddRef used to leave unreferenced (or garbage) pointers in
+        // e.views, which TexReleaseViews then Released, dropping DCS's own
+        // reference (use after free in DCS) or faulting on the render thread.
+        ID3D11ShaderResourceView* src[kTexViews];
+        memcpy(src, e.gVb, static_cast<size_t>(nv) * 8);
         memcpy(e.thr, e.gTb, static_cast<size_t>(nt) * 4);
-        for (int k = 0; k < e.nviews; ++k)
-          if (e.views[k]) e.views[k]->AddRef();
+        for (int k = 0; k < e.nviews; ++k) {
+          if (src[k]) src[k]->AddRef();
+          e.views[k] = src[k];
+        }
         e.usable = 1;
         return e.why = kTwOk;
       }
     }
   }
-  e.views[0] = v0;
   e.nviews = 1;
-  if (v0) v0->AddRef();
+  if (v0) v0->AddRef();  // before it enters e.views (see the multi-view case)
+  e.views[0] = v0;
   e.usable = 1;
   return e.why = kTwOk;
 }
@@ -1004,7 +1021,7 @@ uint8_t TexBuildGuarded(const gbbatch::TexEnv& env, TexEntry& e, ClassCensus* ce
   __try {
     return TexBuildRaw(env, e, census);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
-    // A view referenced before the fault keeps its reference: released with the entry.
+    // Only views already referenced are in e.views: released with the entry.
     e.usable = 0;
     return e.why = kTwFault;
   }
@@ -1192,6 +1209,7 @@ constexpr double kP1WaitUs = 20000.0;  // the primary waits this long for the he
 std::atomic<bool> g_testP1Wait{false};  // offline tests only: the helpers take the first shared chunks
 enum : int { kStartIdle = 0, kStartArmed = 1, kStartRun = 2, kStartAbort = 3 };
 constexpr DWORD kStartWaitMs = 250;  // an armed job waits this long for its vector to be final
+constexpr DWORD kStartLateWaitMs = 100;  // JobMain: a start that raced the timeout publishes vec
 constexpr int kThreads = 4;           // per job: the primary worker and up to 3 helpers
 constexpr uint32_t kChunksPerThread = 6;  // a phase's groups are shared in about this many chunks per thread
 constexpr uint32_t kMinChunk = 4;
@@ -1805,9 +1823,14 @@ void PreChunks(Job& j, int t) {
 bool WaitPre(Job& j) {
   const int64_t t0 = defrec::Qpc();
   const double k = defrec::QpcToUs();
-  while (j.preDone.load(std::memory_order_acquire) < j.n) {
+  for (uint32_t spin = 0; j.preDone.load(std::memory_order_acquire) < j.n; ++spin) {
     if ((defrec::Qpc() - t0) * k > kPreWaitUs) return false;
-    _mm_pause();
+    // Yield after a short spin (as ClosePhase): on 2-4 core CPUs a pure spin
+    // can hold the core the helper it waits for needs, so the job ran late.
+    if (spin < 4096)
+      _mm_pause();
+    else
+      SwitchToThread();
   }
   return true;
 }
@@ -2032,6 +2055,7 @@ bool PreAndCommit(Job& j) {
   double commitUs = 0;
   uint32_t next = 0;
   int64_t w0 = 0;  // start of a wait for a chunk a helper holds
+  uint32_t spins = 0;
   {
     LoadScope load(g_load);
     while (next < chunks) {
@@ -2051,12 +2075,18 @@ bool PreAndCommit(Job& j) {
           continue;
         }
       }
-      if (!w0) w0 = defrec::Qpc();
+      if (!w0) {
+        w0 = defrec::Qpc();
+        spins = 0;
+      }
       if ((defrec::Qpc() - w0) * k > kPreWaitUs) {
         j.commitUs = commitUs;
         return false;
       }
-      _mm_pause();
+      if (++spins < 4096)  // then yield: see WaitPre
+        _mm_pause();
+      else
+        SwitchToThread();
     }
   }
   const int64_t c0 = defrec::Qpc();
@@ -2569,9 +2599,16 @@ bool JobBody(defrec::Worker& w, Job& j);
 // The helpers are let go even when a DCS read faults (the pool latches off).
 bool JobMain(defrec::Worker& w, void* u) {
   Job& j = *static_cast<Job*>(u);
-  WaitForSingleObject(j.start, kStartWaitMs);
+  const DWORD started = WaitForSingleObject(j.start, kStartWaitMs);
   int st = kStartArmed;
-  if (j.startState.compare_exchange_strong(st, kStartAbort, std::memory_order_acq_rel) || st != kStartRun) {
+  // StartJob may win the start between our timeout and this exchange: it
+  // stores j.vec after its own exchange and only then sets the event, so
+  // wait for that event (bounded) before reading j.vec. Before, the worker
+  // went on with j.vec still null (Arm clears it), BeginBuild faulted on
+  // j.vec[0] and the recorder latched off for the session (most likely at
+  // low fps, where starts land near the 250 ms timeout).
+  if (j.startState.compare_exchange_strong(st, kStartAbort, std::memory_order_acq_rel) || st != kStartRun ||
+      (started != WAIT_OBJECT_0 && WaitForSingleObject(j.start, kStartLateWaitMs) != WAIT_OBJECT_0)) {
     ReleaseHelpers(j);  // nobody started it: the helpers end too
     j.phase.store(kJobEmpty, std::memory_order_release);
     return false;
@@ -3639,10 +3676,22 @@ void FirstCaster(PassCtx& pc) {
     } else {
       g_rtReplays += rt;
       g_ctx->CopyResource(cs.b7, t.b7);
+      const bool gs = gsplit::g_on.load(std::memory_order_relaxed) != 0;  // [Suite] GpuSplit
+      if (gs) gsplit::Bracket(0, pc.slot, true);
       const int64_t e0 = defrec::Qpc();
       for (ID3D11CommandList* l : pc.cl)
         if (l) g_ctx->ExecuteCommandList(l, TRUE);
       pc.executeNs = NsSince(e0);
+      if (gs) {
+        gsplit::Bracket(0, pc.slot, false);
+        const Job& gj = *pc.job;
+        for (uint32_t gi = 0; gi < gj.groupCount; ++gi) {
+          const Group& g = gj.groups[gi];
+          if (g.mesh)
+            gsplit::MeshDraw(0, pc.slot, g.mesh->ib, g.mesh->ibFormat, g.mesh->indexCount, g.count, gi >= gj.groupsTex,
+                             g.mesh->vb, g.mesh->stride);
+        }
+      }
       pflush::AfterExecute();  // [Model] PassFlush 0x20 (one relaxed load when off)
       if (sfilt::Live()) sfilt::g_sh.ForgetAll();  // restored exactly, but the filter's shadow is cheap to rebuild
       pc.state = kPsExecuted;
@@ -3722,9 +3771,15 @@ bool ReadProbeInRaw(void* self, ProbeIn& in) {
 void* FxPassVsGuarded(uint8_t* shader, uint64_t tech) {
   __try {
     auto* techBegin = *reinterpret_cast<uint8_t**>(shader + 0xb0);
+    auto* techEnd = *reinterpret_cast<uint8_t**>(shader + 0xb8);
+    // Range-checked as in FxStageDepsRaw: an out-of-range technique could
+    // read a function pointer from unrelated memory and call it (SEH only
+    // catches the cases that fault).
+    if (!techBegin || tech < 1 || tech > static_cast<uint64_t>((techEnd - techBegin) / 0x50)) return nullptr;
     auto* techObj = *reinterpret_cast<uint8_t**>(techBegin + (tech - 1) * 0x50 + 0x20);
     using PassFn = uint8_t*(__fastcall*)(void*, uint32_t);
     auto* fxpass = (*reinterpret_cast<PassFn**>(techObj))[7](techObj, 0);
+    if (!fxpass) return nullptr;
     auto* vsBlock = *reinterpret_cast<uint8_t**>(fxpass + 0xc0);
     return *reinterpret_cast<void**>(vsBlock + 0x18);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -3803,7 +3858,7 @@ bool TechNameGuarded(uint8_t* shader, uint64_t tech, char* out, size_t cap) {
 
 // Static facts of (shader, technique): reflection of shadow_inst's (b) VS of
 // pass 0 (render thread, once per key).
-const char* StaticFor(uint8_t* shader, uint64_t tech, KeyStatic& st) {
+const char* StaticForBody(uint8_t* shader, uint64_t tech, KeyStatic& st) {
   st = KeyStatic();
   const shadowinst::MapEntry* e = shadowinst::FindEntry(shader, tech, 0);
   if (!e || !e->result) return st.why = "shadow inst has no compile of the key";
@@ -3856,7 +3911,7 @@ bool NameIsMaterialTextureGuarded(uint8_t* mat, uint8_t* shader, const char* nam
   }
 }
 
-const char* NamesCheck(uint8_t* mat, uint8_t* shader, uint64_t tech, const KeyStatic& st) {
+const char* NamesCheckBody(uint8_t* mat, uint8_t* shader, uint64_t tech, const KeyStatic& st) {
   const shadowinst::MapEntry* e = shadowinst::FindEntry(shader, tech, 0);
   char techName[64];
   if (!e || !e->result || !TechNameGuarded(shader, tech, techName, sizeof(techName)))
@@ -3874,6 +3929,25 @@ const char* NamesCheck(uint8_t* mat, uint8_t* shader, uint64_t tech, const KeySt
     if (!NameIsMaterialTextureGuarded(mat, shader, n.c_str())) return "the pass reads a resource that is no material texture, CB, sbPositions or sampler";
   }
   return nullptr;
+}
+
+// Render-thread entries of the two above: they copy vectors and strings, and
+// a std::bad_alloc must not unwind into DCS's caster loop (the probe then
+// treats the key as not known, as for any other missing fact).
+const char* StaticFor(uint8_t* shader, uint64_t tech, KeyStatic& st) {
+  try {
+    return StaticForBody(shader, tech, st);
+  } catch (...) {
+    st = KeyStatic();
+    return st.why = "out of memory";
+  }
+}
+const char* NamesCheck(uint8_t* mat, uint8_t* shader, uint64_t tech, const KeyStatic& st) {
+  try {
+    return NamesCheckBody(mat, shader, tech, st);
+  } catch (...) {
+    return "out of memory";
+  }
 }
 
 // DCS's own draw of the caster, read back right after its D3D draw. Every
@@ -4122,8 +4196,13 @@ void SnapshotIfReady(int s, bool late) {
 void EachPass() {
   if (!g_snapBell.load(std::memory_order_relaxed)) return;
   if (!g_renderTid || GetCurrentThreadId() != g_renderTid) return;
-  if (!Active()) return;
+  // Counted before the check (as Wrap does): Shutdown sets g_shutdown and
+  // then waits for g_inside == 0, so a call past the check is always waited for.
   g_inside.fetch_add(1);
+  if (!Active()) {
+    g_inside.fetch_sub(1);
+    return;
+  }
   uint32_t bits = g_snapBell.exchange(0, std::memory_order_acquire);
   while (bits) {
     unsigned long s;
@@ -4139,8 +4218,11 @@ bool RearmIfIdle(int s);
 void AfterTopPass() {
   if (!g_renderTid || GetCurrentThreadId() != g_renderTid) return;
   ++g_topCount;
-  if (!Active()) return;
-  g_inside.fetch_add(1);
+  g_inside.fetch_add(1);  // before the check: see EachPass
+  if (!Active()) {
+    g_inside.fetch_sub(1);
+    return;
+  }
   TryMaintain();  // the texture table, when no job holds its lock
   for (int s = 0; s < kSlots; ++s) {
     SnapshotIfReady(s, false);
@@ -4803,6 +4885,15 @@ bool Install() {
   auto fail = [](const char* why) {
     Log("shadow recorder: %s; unavailable", why);
     g_state = -1;
+    // Latched off for the session and Shutdown frees nothing unless ready:
+    // free what this attempt allocated (jobs ~30 MB each, tables, offset
+    // buffers) instead of leaking it into every later payload generation.
+    // No worker runs here (the pool is not started or was stopped).
+    for (Casc& cs : g_casc) FreeJob(cs.job);
+    FreeTables(g_tab);
+    FreeTex(g_tex);
+    for (auto*& p : g_offSrv) SafeRel(p);
+    for (auto*& p : g_offBuf) SafeRel(p);
     return false;
   };
   if (!shadowbatch::g_psoDirect)
@@ -4883,7 +4974,9 @@ bool Install() {
 
 bool Ready() { return g_state.load() == 1 && !g_disabled.load(); }
 
-void Shutdown() {
+// True when its objects were released (false: left alive, still in use or
+// never installed by this payload with nothing to free).
+bool Shutdown() {
   g_shutdown = true;
   g_on = false;
   if (g_chained) {
@@ -4899,7 +4992,7 @@ void Shutdown() {
     ptiming::g_eachPass.compare_exchange_strong(ef, nullptr);
     g_chained = false;  // g_prevWrap/g_prevOverride stay for calls in flight
   }
-  if (g_state.load() != 1) return;
+  if (g_state.load() != 1) return true;
   const bool unpatched = PatchSortSites(false);
   // The stub (never freed) goes straight to the original from now on: a call
   // already past a site, or sites that could not be restored, never reach
@@ -4917,10 +5010,14 @@ void Shutdown() {
       SetEvent(cs.job->go);
       ReleaseHelpers(*cs.job);
     }
-  const bool stopped = g_pool.Stop();
+  // A pass still inside after the wait may be in TakeList/Wait/ExecuteAll on
+  // the pool: stopping it then (Teardown releases the lists and contexts)
+  // raced the render thread (double Release). Leave everything alive instead.
+  const bool busy = g_inside.load() != 0 || g_sortInside.load() != 0;
+  const bool stopped = !busy && g_pool.Stop();
   if (!stopped || g_inside.load() != 0 || g_sortInside.load() != 0) {
     Log("shadow recorder: a pass, a worker or a sort call was still running at unload; its objects are left alive");
-    return;
+    return false;
   }
   for (Casc& cs : g_casc) {
     FreeJob(cs.job);
@@ -4937,6 +5034,7 @@ void Shutdown() {
   for (auto*& p : g_offBuf) SafeRel(p);
   SafeRel(g_ctx);
   g_state = -1;
+  return true;
 }
 
 void ResetCounters() {

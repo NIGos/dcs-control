@@ -169,7 +169,13 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             try { Save(baseline); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
             var where = index >= 0 && index < plan.Files.Count ? " at " + plan.Files[index].Path : "";
             Log($"Apply of {plan.ProfileId} stopped{where}: {error.Message}");
-            throw new IOException($"Applying stopped{where}: {error.Message} The original files are still backed up: launch again, or use Back to stock DCS.", error);
+            // A protected folder gets the permission advice (Launch then asks Windows itself); a file refused although its
+            // folder is writable is something else holding it.
+            var folder = index >= 0 && index < plan.Files.Count ? System.IO.Path.GetDirectoryName(plan.Files[index].Path) : null;
+            var advice = error is not UnauthorizedAccessException ? ""
+                : folder is not null && !LaunchSafety.CanWrite(folder) ? " " + LaunchSafety.WriteAdvice(folder)
+                : " Windows refused this file although its folder is writable: an antivirus or Windows Security's Controlled folder access may be holding or blocking it.";
+            throw new IOException($"Applying stopped{where}: {error.Message}{advice} The original files are still backed up: launch again, or use Back to stock DCS.", error);
         }
     }
 
@@ -250,7 +256,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             PathPolicy.RejectReparsePoints(entry.Path, entry.Root);
             try
             {
-                var utf8 = new UTF8Encoding(false, true);
+                var utf8 = StrictUtf8.Encoding;
                 var bytes = File.ReadAllBytes(entry.Path); var text = utf8.GetString(bytes);
                 var drifted = entry.LuaChanges.Where(c => LuaOptions.NormalizeLiteral(new LuaOptions(text).Get(c.Path.Split('.'))) != LuaOptions.NormalizeLiteral(c.InstalledRaw)).ToArray();
                 if (drifted.Length == 0) continue;
@@ -288,7 +294,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
     /// the plan's settings set to the installed values.</summary>
     private static byte[] MergeSettings(string path, OriginalFile original, IReadOnlyList<LuaValueChange> changes)
     {
-        var utf8 = new UTF8Encoding(false, true);
+        var utf8 = StrictUtf8.Encoding;
         var text = utf8.GetString(File.ReadAllBytes(path));
         var planned = changes.Select(c => c.Path).ToHashSet(StringComparer.Ordinal);
         foreach (var (key, value) in (original.Settings ?? []).Where(s => !planned.Contains(s.Key)).ToArray())
@@ -324,7 +330,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         if (original.Settings is not null)
         {
             if (!File.Exists(original.Path)) { if (original.BackupFile is not null) AtomicFile.Write(original.Path, Backup()); return; }
-            var utf8 = new UTF8Encoding(false, true);
+            var utf8 = StrictUtf8.Encoding;
             try
             {
                 var current = File.ReadAllBytes(original.Path); var text = utf8.GetString(current);
@@ -345,14 +351,10 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             return;
         }
         if (original.BackupFile is not null) AtomicFile.Write(original.Path, Backup());
-        else
-        {
-            if (File.Exists(original.Path)) File.Delete(original.Path);
-            // Runtime files first, so the folder they leave empty goes too.
-            RemoveRuntimeLogs(original);
-            RemoveEmptyCreatedFolder(original);
-        }
-        RemoveRuntimeLogs(original);
+        else if (File.Exists(original.Path)) AtomicFile.Retry(() => { File.SetAttributes(original.Path, FileAttributes.Normal); File.Delete(original.Path); });
+        // Runtime files first, so the folder a removed file leaves empty goes too.
+        RuntimeFiles.Remove(original.Path, original.RuntimeLogs);
+        if (original.BackupFile is null) RuntimeFiles.RemoveEmptyCreatedFolder(original.Path, original.Root);
     }
 
     /// <summary>The original options.lua bytes when the file now differs from them only in the owned settings (the
@@ -364,7 +366,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         {
             var bytes = File.ReadAllBytes(PathPolicy.UnderRoot(Directory, original.BackupFile));
             if (Hashing.BytesSha256(bytes) != original.OriginalSha256) return null;
-            var probe = new UTF8Encoding(false, true).GetString(bytes);
+            var probe = StrictUtf8.Encoding.GetString(bytes);
             var now = new LuaOptions(current);
             foreach (var key in original.Settings.Keys)
             {
@@ -374,41 +376,6 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             return probe == current ? bytes : null;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException or DecoderFallbackException or ArgumentException) { return null; }
-    }
-
-    /// <summary>A file DCS Control created was removed: an empty folder left behind below the authorized root (for
-    /// example bin\CheekyFoveatedDLSS) goes too. The root itself is never removed.</summary>
-    private static void RemoveEmptyCreatedFolder(OriginalFile original)
-    {
-        try
-        {
-            var folder = System.IO.Path.GetDirectoryName(original.Path)!;
-            if (original.Root is not { } authorized || !folder.StartsWith(System.IO.Path.GetFullPath(authorized).TrimEnd(System.IO.Path.DirectorySeparatorChar) + System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return;
-            PathPolicy.RejectReparsePoints(folder, authorized);
-            if (System.IO.Directory.Exists(folder) && !System.IO.Directory.EnumerateFileSystemEntries(folder).Any()) System.IO.Directory.Delete(folder);
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { }
-    }
-
-    private static void RemoveRuntimeLogs(OriginalFile original)
-    {
-        if (original.RuntimeLogs is null) return;
-        var owner = System.IO.Path.GetDirectoryName(original.Path)!;
-        foreach (var log in original.RuntimeLogs)
-        {
-            // Only declared runtime files inside the component's own folder tree; never anything that was not declared.
-            var full = System.IO.Path.GetFullPath(log);
-            if (!RuntimeFiles.Allowed(full, owner)) continue;
-            // Best effort: a log held open by a viewer must never leave the restore half done.
-            try
-            {
-                PathPolicy.RejectReparsePoints(full, owner);
-                foreach (var file in RuntimeFiles.Matching(full)) File.Delete(file);
-                var folder = System.IO.Path.GetDirectoryName(full)!;
-                if (!folder.Equals(owner, StringComparison.OrdinalIgnoreCase) && System.IO.Directory.Exists(folder) && !System.IO.Directory.EnumerateFileSystemEntries(folder).Any()) System.IO.Directory.Delete(folder);
-            }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { }
-        }
     }
 
     private OriginalsBaseline LoadCore()
@@ -546,7 +513,12 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
     private FileStream Lock()
     {
         System.IO.Directory.CreateDirectory(Directory);
-        return new FileStream(System.IO.Path.Combine(Directory, "originals.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        // The CPU Boost helper or the CLI may hold it for a moment: wait up to about 5 s before giving up.
+        for (var attempt = 1; ; attempt++)
+        {
+            try { return new FileStream(System.IO.Path.Combine(Directory, "originals.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+            catch (IOException e) when (attempt < 25 && (e.HResult & 0xFFFF) is 32 or 33) { Thread.Sleep(200); }
+        }
     }
 
     private void Save(OriginalsBaseline baseline)

@@ -1,6 +1,6 @@
 /* Launcher theme, layered over app.css. Modelled on the structure of the DCS launcher (icon rail, flat charcoal
    settings rows, orange accent, right-hand control panel) with its own wordmark and artwork.
-   Remove the <link> to theme.css in index.html to return to the original look. */
+   app.css holds the base layout this theme builds on; both are loaded. */
 :root{
   --bg:#262626;--rail:#1c1c1c;--panel:#202020;--s0:#2b2b2b;--s1:#303030;--s2:#383838;--field:#1b1b1b;
   --line:#3a3a3a;--line-strong:#4a4a4a;--text:#f2f2f2;--soft:#d6d6d6;--muted:#a8a8a8;--faint:#8a8a8a;
@@ -11,11 +11,10 @@ body{background:var(--bg);font-size:14px;color:var(--text)}
 h1,h2,h3{font-family:var(--display)}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 p{color:var(--muted)}
-
 /* Icon rail */
 .rail{background:var(--rail);border-right:1px solid #111;padding:14px 8px;align-items:center}
 .rail .brand{padding:0 0 18px;justify-content:center}
-.rail .brand>div,.rail-label,.nav-item>div{display:none}
+.rail .brand>div,.nav-item>div{display:none}
 .rail .brand svg{width:30px;height:30px;fill:var(--accent)}
 .rail .brand img{width:34px;height:34px}
 nav{gap:4px;width:100%}
@@ -29,7 +28,6 @@ nav{gap:4px;width:100%}
 .rail .search-button>span{font-size:24px}
 .rail .search-button kbd{display:none}
 .rail .search-button:hover{background:#ffffff0d}
-
 /* Workspace: section title with a thin rule, like the launcher's option headers */
 .workspace{background:var(--bg)}
 .page-heading{display:block;padding:20px 28px 0;margin:0}
@@ -39,19 +37,15 @@ nav{gap:4px;width:100%}
 .page-heading p{margin-top:4px;font-size:12px;color:var(--muted)}
 #scrollArea{padding:18px 28px 28px}
 .eyebrow{color:var(--accent)}
-
 /* Surfaces: flat groups separated by space and rules */
 .card{background:transparent;border:0;border-radius:0;box-shadow:none;padding:4px 0 18px}
 .card-heading{padding:0 0 8px;margin-bottom:4px;border-bottom:1px solid var(--line)}
 .card .card-heading h2,.card>h2{font:600 13px "Segoe UI",Interface,sans-serif;letter-spacing:.6px;text-transform:uppercase;color:var(--soft)}
 .card .card-heading .fine{margin-top:2px}
 .two-column{gap:0 34px}
-.callout{background:#f5a01a14;border:1px solid #f5a01a40;border-radius:var(--radius)}
-.callout b{color:var(--accent-hi)}
 .inline-note{background:var(--s0);border-color:var(--line);color:var(--soft);border-radius:var(--radius)}
 .tag{border-color:var(--accent-dark);color:var(--accent);background:transparent;border-radius:3px}
 .tag.soft{border-color:var(--line-strong);color:var(--muted)}
-
 /* Settings rows: label on the left, control on the right */
 .setting{display:grid;grid-template-columns:minmax(0,1fr) minmax(170px,56%);column-gap:16px;align-items:center;padding:10px 0;border-top:0}
 .setting>.setting-label{grid-column:1;font:600 14px "Segoe UI",Interface,sans-serif;color:var(--text);margin:0}
@@ -61,24 +55,22 @@ nav{gap:4px;width:100%}
 .setting .switch-row{grid-column:1 / -1}
 .setting .switch-row .setting-label{font:600 14px "Segoe UI",Interface,sans-serif}
 .setting .switch-row p{font-size:11.5px;color:var(--faint);margin-top:2px}
-#componentControls .setting,#diagnosticControls .setting{grid-template-columns:1fr}
 /* Narrow groups put the label above the control so long choices are never cut. */
-.two-column>div,#pacingControls,#externalPacingControls,#qualityControls>div,#neuralControls>div{container-type:inline-size}
+.two-column>div,#pacingControls,#neuralControls>div{container-type:inline-size}
 @container (max-width:470px){.setting{grid-template-columns:1fr}.setting>select,.setting>.setting-number,.setting>.path-row{grid-column:1;grid-row:auto;margin-top:6px}}
-#componentControls .setting>.path-row,#diagnosticControls .setting>.path-row,#componentControls .setting>select{grid-column:1;grid-row:auto;margin-top:6px}
 /* Game & headset: the page uses the whole width when the Sboys card is hidden, and file paths run the full row under
    their title, so a long DCS or Saved Games path stays readable. */
 #page-setup .two-column:has(#sboysCard[hidden]){grid-template-columns:minmax(0,1fr)}
 #gameControls .setting>.path-row,#headsetControls .setting>.path-row{grid-column:1 / -1;grid-row:auto;margin-top:6px}
-select,input[type=text],input[type=number]{background:var(--field);border:0;border-radius:var(--radius);color:var(--accent);min-height:40px;font-size:14px;padding:8px 12px}
+select,input[type=text],input[type=number],input.number-input{background:var(--field);border:0;border-radius:var(--radius);color:var(--accent);min-height:40px;font-size:14px;padding:8px 12px}
 select{appearance:none;padding-right:34px;background-image:linear-gradient(45deg,transparent 50%,var(--accent) 50%),linear-gradient(135deg,var(--accent) 50%,transparent 50%);background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px;background-repeat:no-repeat}
-select:hover,input[type=text]:hover,input[type=number]:hover{background-color:#151515}
+select:hover,input[type=text]:hover,input[type=number]:hover,input.number-input:hover{background-color:#151515}
 select:focus,input:focus{outline:none;box-shadow:0 0 0 2px var(--accent-dark)}
 select:disabled,input:disabled{color:var(--faint)}
 option{background:#1b1b1b;color:var(--text)}
 .path-row input{color:var(--soft);font-size:12px}
 .setting-number{gap:10px}
-.setting-number input[type=number]{width:74px;min-height:32px;text-align:right;color:var(--text);background:transparent;padding:4px 2px;font-size:13px}
+.setting-number input[type=number],.setting-number input.number-input{width:74px;min-height:32px;text-align:right;color:var(--text);background:transparent;padding:4px 2px;font-size:13px}
 .number-unit{color:var(--faint)}
 input[type=range]{appearance:none;-webkit-appearance:none;height:16px;background:transparent}
 input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:linear-gradient(var(--accent),var(--accent)) 0/var(--fill,50%) 100% no-repeat,#3c3c3c}
@@ -89,7 +81,6 @@ input[type=range]:disabled::-webkit-slider-thumb{background:var(--faint)}
 .switch:checked{background:var(--accent);border-color:var(--accent)}
 .switch:checked:before{transform:translateX(22px);background:#1b1b1b}
 .setting.inactive{opacity:.42}
-
 /* Pipeline: three status tiles at the top of Flight setup */
 .pipeline{gap:10px;margin-bottom:20px}
 /* Overview tiles in two groups, one row each: the optimizations for every pilot (2), then the VR features (3). */
@@ -118,7 +109,6 @@ input[type=range]:disabled::-webkit-slider-thumb{background:var(--faint)}
 .budget strong{font-family:var(--display);color:#fff}
 .coverage{border-color:var(--line);border-radius:var(--radius)}
 .focus-box{border-color:var(--accent)}
-
 /* Buttons */
 .button{border-radius:var(--radius);font:600 13px "Segoe UI",Interface,sans-serif;letter-spacing:.3px;text-transform:uppercase}
 .button.secondary,.button.quiet{background:transparent;border:1.5px solid #d8d8d8;color:var(--text);border-radius:999px;padding:8px 18px}
@@ -126,7 +116,6 @@ input[type=range]:disabled::-webkit-slider-thumb{background:var(--faint)}
 .button.primary{background:var(--accent);border-color:var(--accent);color:#1b1b1b;box-shadow:none}
 .button.primary:hover:not(:disabled){background:var(--accent-hi);border-color:var(--accent-hi)}
 button:disabled{opacity:1;color:#8c8c8c!important;background:transparent!important;border-color:#4a4a4a!important;box-shadow:none!important}
-
 /* Right control panel */
 .control-panel{display:flex;flex-direction:column;min-height:0;background:var(--panel);border-left:1px solid #141414}
 .panel-top{flex:1;min-height:0;overflow:auto;padding:22px 22px 10px}
@@ -155,13 +144,9 @@ button:disabled{opacity:1;color:#8c8c8c!important;background:transparent!importa
 .route-live{min-height:16px;margin-top:8px;font-size:11.5px;line-height:1.45;color:var(--muted)}
 .route-live.mismatch{color:#ffd2c8}
 .route-live.mismatch:before{content:"Route mismatch · ";font-weight:700;color:var(--red)}
-.hero-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
-.chip{display:inline-flex;align-items:baseline;gap:6px;padding:4px 10px;border-radius:999px;background:var(--s2);font-size:12px;color:var(--text)}
-.chip small{font:600 9px var(--display);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
 .pill-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .pill{min-height:44px;border:1.5px solid #d8d8d8;border-radius:999px;background:transparent;color:var(--text);font:700 12px "Segoe UI",Interface,sans-serif;letter-spacing:.4px;text-transform:uppercase;cursor:pointer;padding:6px 10px}
 .pill:hover:not(:disabled){background:#ffffff12}
-
 /* Workflow in the panel: one large Launch DCS button, secondary actions as links below it */
 .workflow{display:flex;flex-direction:column;align-items:stretch;gap:12px;padding:14px 22px 16px;background:var(--panel);border-top:1px solid #141414;box-shadow:none}
 .workflow-status{align-items:flex-start}
@@ -180,9 +165,7 @@ button:disabled{opacity:1;color:#8c8c8c!important;background:transparent!importa
 .button.launch:hover:not(:disabled){background:var(--accent-hi)}
 .button.launch:disabled{border:1.5px solid #4a4a4a!important}
 .button.launch span{padding-left:2px}
-.panel-foot{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--faint)}
 .rail-version{margin:0;padding:0;font:11px Consolas,monospace;color:var(--faint)}
-
 /* Diagnostics, recovery and dialogs */
 .section-actions h2{font:600 15px "Segoe UI",Interface,sans-serif;letter-spacing:.4px;text-transform:uppercase}
 .issue{border-radius:var(--radius);font-size:13px;line-height:1.55;padding:11px 14px;background:var(--s0);border:1px solid var(--line);border-left:3px solid var(--accent)}
@@ -212,11 +195,8 @@ dialog::backdrop{background:#000000b0}
 .detect-notes:empty{display:none}
 ::-webkit-scrollbar-track{background:var(--bg)}
 ::-webkit-scrollbar-thumb{background:#4a4a4a;border:2px solid var(--bg)}
-
 @media(max-width:1180px){#shell{grid-template-columns:58px minmax(0,1fr) 270px}.two-column{grid-template-columns:1fr}.wordmark b{font-size:42px}.panel-top,.workflow{padding-left:16px;padding-right:16px}}
-@media(max-width:900px){#shell{grid-template-columns:52px minmax(0,1fr) 240px}.setting{grid-template-columns:1fr}.setting>select,.setting>.setting-number,.setting>.path-row{grid-column:1;grid-row:auto;margin-top:6px}.pipeline{grid-template-columns:1fr}.wordmark b{font-size:34px}.wordmark span{font-size:16px}.page-heading,#scrollArea{padding-left:18px;padding-right:18px}}
 @media(max-height:760px){.panel-top{padding-top:14px}.wordmark b{font-size:36px}.panel-section{margin-top:12px}.workflow{gap:8px;padding-top:10px;padding-bottom:10px}.workflow-actions .button{min-height:38px}.button.launch{min-height:44px}}
-.status-links{display:flex;gap:14px;margin-top:6px}.status-links .link-button[hidden]{display:none}
 /* Guided setup: problems first, passed checks and file paths folded away. */
 .setup-hint{display:block;margin-top:7px;color:var(--muted,#9a9a9a);font-size:11px;line-height:1.5}
 .setup-passed,.setup-files{margin:14px 0;border-top:1px solid #ffffff14;padding-top:10px}
@@ -253,17 +233,14 @@ dialog::backdrop{background:#000000b0}
 .control-panel .panel-top{padding-top:40px}
 .route-switch,.pill-grid,.workflow-actions{gap:10px}
 .pill-grid .pill{white-space:nowrap;padding-left:10px;padding-right:10px}
-.hero-chips{gap:8px}
 @media(min-width:1181px){
   #shell{grid-template-columns:184px minmax(0,1fr) 360px}
   .panel-top,.workflow{padding-left:26px;padding-right:26px}
   .panel-section{margin-top:22px}
   .panel-label{margin-bottom:10px}
-  .hero-chips{margin-top:12px}
 }
 @media(max-width:1180px){#shell{grid-template-columns:58px minmax(0,1fr) 300px}.panel-top,.workflow{padding-left:18px;padding-right:18px}.pill-grid .pill{white-space:normal}}
-@media(max-height:760px){.control-panel .panel-top{padding-top:34px}.wordmark b{font-size:30px}.wordmark span{font-size:16px}.panel-section{margin-top:10px}.panel-device{margin-top:2px}.hero-chips{margin-top:8px}}
-
+@media(max-height:760px){.control-panel .panel-top{padding-top:34px}.wordmark b{font-size:30px}.wordmark span{font-size:16px}.panel-section{margin-top:10px}.panel-device{margin-top:2px}}
 /* Feature checklist in the right panel: one row per feature, with its live summary and a link to its page. */
 .feature-list{display:grid;gap:8px}
 .feature{display:grid;grid-template-columns:minmax(0,1fr) 28px;align-items:center;column-gap:4px;padding:7px 4px 7px 10px;border:1px solid var(--line);border-left:3px solid #555;border-radius:var(--radius);background:var(--s0)}
@@ -390,7 +367,6 @@ details.advanced>summary:hover{color:var(--accent-hi)}
 .cadence-card .card-heading .fine{margin-top:2px}
 .cadence-card .budget-grid{margin:14px 0 0}
 .cadence-card .budget{margin-bottom:0}
-
 /* Overview: launch status, the five features, the last flight. */
 .dash-status{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 14px;background:var(--s0);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:var(--radius)}
 .dash-status:empty{display:none}
@@ -466,3 +442,6 @@ details.detected-card[open]>summary{margin-bottom:10px}
 .help-list{grid-template-columns:1fr}
 .help-list dt{color:var(--text);font-weight:600;margin-top:6px}
 .help-list dd{text-align:left;color:var(--muted)}
+@media(max-width:900px){#shell{grid-template-columns:52px minmax(0,1fr) 240px}.setting{grid-template-columns:1fr}.setting>select,.setting>.setting-number,.setting>.path-row{grid-column:1;grid-row:auto;margin-top:6px}.pipeline{grid-template-columns:1fr}.wordmark b{font-size:34px}.wordmark span{font-size:16px}.page-heading,#scrollArea{padding-left:18px;padding-right:18px}}
+/* Windows high contrast: switches show on/off and the selected route stays marked without background colours. */
+@media (forced-colors: active){.switch{border:1px solid ButtonText}.switch:before{background:ButtonText}.switch:checked{background:Highlight}.switch:checked:before{background:HighlightText}.route-switch button.selected{outline:3px solid Highlight;outline-offset:-3px}.status-dot{forced-color-adjust:none}}

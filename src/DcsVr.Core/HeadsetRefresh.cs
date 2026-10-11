@@ -69,7 +69,7 @@ public static partial class HeadsetRefresh
         // One second's rate dips when the compositor misses frames or a session ends mid-second: the median of the last
         // reports (the newest left out, it may be partial) is the panel's rate.
         var rates = CompositorRate().Matches(tail).Select(m => double.TryParse(m.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var hz) ? hz : 0)
-            .Where(hz => hz is >= 60 and <= 240).ToList();
+            .Where(hz => hz is >= 50 and <= 240).ToList();
         if (rates.Count == 0) return null;
         if (rates.Count > 3) rates.RemoveAt(rates.Count - 1);
         var recent = rates.TakeLast(15).Order().ToList();
@@ -103,7 +103,7 @@ public static partial class HeadsetRefresh
                 {
                     if (!line.Contains("Performance body", StringComparison.Ordinal)) continue;
                     var match = RefreshRate().Match(line);
-                    if (match.Success && double.TryParse(match.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var hz) && hz is >= 60 and <= 240) last = Math.Round(hz, 1);
+                    if (match.Success && double.TryParse(match.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var hz) && hz is >= 50 and <= 240) last = Math.Round(hz, 1);
                 }
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }

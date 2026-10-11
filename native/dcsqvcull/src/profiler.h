@@ -197,7 +197,7 @@ std::string Symbol(uint64_t key) {
 std::atomic<bool> g_running{false};
 
 // Profiles the `maxThreads` busiest threads for `seconds`. Blocking.
-void Run(int seconds, int maxThreads, int periodMs, const char* label) {
+void RunBody(int seconds, int maxThreads, int periodMs, const char* label) {
   if (g_running.exchange(true)) return;
   Log("profile: start %d s (%s)", seconds, label);
   SnapshotModules();
@@ -239,7 +239,11 @@ void Run(int seconds, int maxThreads, int periodMs, const char* label) {
 
   std::vector<uint64_t> start(threads.size());
   for (size_t i = 0; i < threads.size(); ++i) QueryThreadCycleTime(threads[i].h, &start[i]);
-  const size_t maxSamples = static_cast<size_t>(seconds) * 1000 / std::max(1, periodMs) * threads.size() + 16;
+  // Capped (about 330 MB of samples): [Profile] Seconds/PeriodMs/Threads are
+  // not bounded in the ini, and a several-GB request threw std::bad_alloc on
+  // this thread, which ended DCS.
+  const size_t maxSamples = (std::min)(
+      static_cast<size_t>(seconds) * 1000 / std::max(1, periodMs) * threads.size() + 16, size_t{1} << 20);
   std::vector<Sample> samples(maxSamples);
   size_t ns = 0;
   // Windows 11 ignores timeBeginPeriod for many processes; a high resolution
@@ -371,6 +375,16 @@ void Run(int seconds, int maxThreads, int periodMs, const char* label) {
   for (auto& th : threads) CloseHandle(th.h);
   Log("profile: done, %zu samples -> %ls", ns, name);
   g_running = false;
+}
+
+// A thread of its own (ProfileThread): an exception here would end DCS.
+void Run(int seconds, int maxThreads, int periodMs, const char* label) {
+  try {
+    RunBody(seconds, maxThreads, periodMs, label);
+  } catch (...) {
+    Log("profile: out of memory; aborted");
+    g_running = false;
+  }
 }
 
 }  // namespace prof

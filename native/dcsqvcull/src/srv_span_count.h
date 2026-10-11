@@ -182,11 +182,15 @@ const char* Check(uint8_t* dx) {
 }
 
 bool PatchSites(bool on) {
+  // Both originals saved before either site changes: when site 0 failed to
+  // patch, the restore wrote site 1's never-saved (zero) bytes into
+  // ApplyShaderBlock. Restoring an unpatched site now rewrites its own bytes.
+  if (on)
+    for (int i = 0; i < 2; ++i) memcpy(g_saved[i], g_dx + kSites[i], 5);
   for (int i = 0; i < 2; ++i) {
     uint8_t* site = g_dx + kSites[i];
     uint8_t b[5];
     if (on) {
-      memcpy(g_saved[i], site, 5);
       b[0] = 0xE8;
       const int32_t rel = static_cast<int32_t>(g_stub - (site + 5));
       memcpy(b + 1, &rel, 4);

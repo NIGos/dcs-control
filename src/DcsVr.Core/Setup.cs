@@ -2,37 +2,11 @@ using System.Text.Json;
 
 namespace DcsVr.Core;
 
-public enum SetupStage { Baseline, FrameGen, Foveated, Combined }
 public enum CheckState { Pass, Error, Warning, Manual }
 public sealed record ReadinessCheck(string Id, CheckState State, string Title, string Detail, string? Guide = null);
 public sealed record ReadinessReport(DateTimeOffset CapturedAt, string ProfileId, IReadOnlyList<ReadinessCheck> Checks)
 {
     public bool CanPrepare => Checks.All(c => c.State != CheckState.Error);
-    public bool HeadsetVerified => false;
-}
-
-public static class GuidedSetup
-{
-    // Route and test stage are explicit choices. Image-quality values are never reset here.
-    public static VrProfile Configure(VrProfile source, RuntimeKind route, SetupStage stage, GazeMode gaze, TrackingKind tracking)
-    {
-        if (!Enum.IsDefined(route) || !Enum.IsDefined(stage) || !Enum.IsDefined(gaze) || !Enum.IsDefined(tracking))
-            throw new ArgumentException("Invalid setup choice.");
-        var quad = stage is SetupStage.Foveated or SetupStage.Combined;
-        return source with
-        {
-            Runtime = route, Tracking = tracking, Gaze = gaze,
-            RuntimeManifestPath = source.Runtime == route ? source.RuntimeManifestPath : null,
-            QuadViews = quad ? QuadProvider.QuadViewsFoveated : QuadProvider.None,
-            QuadViewsLayerDirectory = quad ? null : source.QuadViewsLayerDirectory,
-            QuadFocusAdapter = stage == SetupStage.Combined,
-            NeuralRendering = stage == SetupStage.Combined,
-            // Quad Views already foveates; DLSS 5 runs through Cheeky on the focus views, so its own foveated SR stays off,
-            // as in the DLSS 5 + framegen + Quad Views presets.
-            FoveatedDlss = false,
-            FrameGen = stage is SetupStage.FrameGen or SetupStage.Combined ? (source.FrameGen == FrameGeneration.Off ? FrameGeneration.Nvidia : source.FrameGen) : FrameGeneration.Off
-        };
-    }
 }
 
 public static class Readiness
@@ -61,12 +35,11 @@ public static class Readiness
             Add("elevation", CheckState.Pass, "Runs without admin rights", "DCS starts without administrator rights, so the OpenXR loader uses the profile's headset software and add-ons.");
         }
         catch (InvalidOperationException e) { Add("elevation", CheckState.Error, "Runs without admin rights", e.Message); }
-        var writable = new List<string>();
-        if (inventory.OptionsPath is { } optionsFile && Path.GetDirectoryName(optionsFile) is { } config && !LaunchSafety.CanWrite(config)) writable.Add(config);
         // DCS's bin folder receives the Cheeky loader and, with CPU Boost, the prefetch fix (dxgi.dll, dxgi2.dll and its settings).
-        if ((profile.ForLaunch().UsesCheeky || profile.UsesPrefetchFix) && inventory.DcsExecutable is { } dcsExe && Path.GetDirectoryName(dcsExe) is { } bin && !LaunchSafety.CanWrite(bin)) writable.Add(bin);
+        LaunchSafety.ForgetWriteProbes();
+        var writable = LaunchSafety.UnwritableFolders(profile, inventory);
         Add("write-access", writable.Count == 0 ? CheckState.Pass : CheckState.Error, "Write access to game folders",
-            writable.Count == 0 ? "The profile can write its files as the current user." : "These folders are not writable as the current user: " + string.Join("; ", writable) + ". Grant your account Modify permission on them (common for installs under Program Files). Do not run the app as administrator: elevated DCS ignores the profile layers.");
+            writable.Count == 0 ? "The profile can write its files as the current user." : "Not writable as the current user: " + string.Join(" ", writable.Select(f => f + ": " + LaunchSafety.WriteAdvice(f))));
         var running = profile.Desktop ? new ActiveRouteState(null, "", default) : ActiveRouteProvider();
         if (running.Route is { } activeRoute && activeRoute != profile.Runtime)
             Add("route-mismatch", CheckState.Error, "Headset route", running.Summary + " This profile uses " + (profile.Runtime == RuntimeKind.Pimax ? "the Pimax runtime" : "Sboys through SteamVR") + ". Switch the profile route, or close the other runtime, before launching.");
@@ -99,7 +72,7 @@ public static class Readiness
             missingVc.Length == 0 && currentVc ? "Required x64 C++ runtime libraries are present. Version: " + vcVersion : "Install Microsoft C++ x64 runtime 14.50 or newer. Missing libraries: " + string.Join(", ", missingVc), "vcredist");
         if (profile.FrameGen == FrameGeneration.Nvidia)
             Add("optical-flow-driver", NativeBinary.IsX64(Path.Combine(Environment.SystemDirectory, "nvofapi64.dll")) ? CheckState.Pass : CheckState.Error,
-                "NVIDIA optical-flow driver", "OFXR requires the NVIDIA optical-flow driver. This is separate from NVIDIA DLSS Frame Generation.", "nvidia");
+                "NVIDIA optical-flow driver", "NVIDIA frame generation needs the NVIDIA optical-flow driver (part of the NVIDIA graphics driver, RTX cards). Update the NVIDIA driver, or choose FidelityFX on the Framegen page: it runs on any graphics card.", "nvidia");
         if (profile.Runtime == RuntimeKind.SboysSteamVr && !profile.Desktop)
         {
             var driver = inventory.Drivers.FirstOrDefault(d => d.Name.Contains("customheadset", StringComparison.OrdinalIgnoreCase));

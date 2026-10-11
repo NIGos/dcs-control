@@ -118,10 +118,10 @@ public sealed class ApplicationInstaller(string destination)
             foreach (var helper in helpers)
             {
                 if (helper.Id == Environment.ProcessId) continue;
-                string? image = null;
-                try { image = helper.MainModule?.FileName; }
-                catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException) { }
-                if (image is not null && Path.GetFullPath(image).StartsWith(Root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                // QueryFullProcessImageName reads an elevated helper too (MainModule is refused); a helper whose path
+                // cannot be read at all may be this installation's, so it blocks as well.
+                var image = SystemPaths.ProcessImagePath(helper.Id);
+                if (image is null || Path.GetFullPath(image).StartsWith(Root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("CPU Boost from this installation is still running with DCS. Close DCS first, then install or uninstall DCS Control.");
             }
         }

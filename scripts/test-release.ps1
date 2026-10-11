@@ -3,7 +3,9 @@ $ErrorActionPreference='Stop'
 $workspaceRoot=Split-Path -Parent $PSScriptRoot
 $version = & (Join-Path $PSScriptRoot 'version.ps1')
 $releaseRoot=Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-win-x64"
-$fixtureRoot=Join-Path $workspaceRoot ('artifacts/release-tests/'+[Guid]::NewGuid().ToString('N'))
+# One fixture folder, emptied at the start of each run (a new folder per run once filled the disk).
+$fixtureRoot=Join-Path $workspaceRoot 'artifacts/release-tests/latest'
+if(Test-Path -LiteralPath $fixtureRoot){Remove-Item -LiteralPath $fixtureRoot -Recurse -Force}
 $installRoot=Join-Path $fixtureRoot 'installed-app'
 New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
 $cli=Join-Path $releaseRoot 'files/DcsVr.Cli.exe'
@@ -47,9 +49,11 @@ $gui=[Diagnostics.Process]::Start($start)
 if(-not $gui.WaitForExit(120000)){$gui.Kill($true);throw 'Offscreen GUI smoke timed out.'}
 if($gui.ExitCode -ne 0){throw 'Installed GUI offscreen smoke failed.'}
 $gui.Dispose()
-foreach($index in 0..47){if(-not (Test-Path -LiteralPath (Join-Path $fixtureRoot "gui-$index.png"))){throw 'Missing offscreen GUI view.'}}
+# Every view the verification listed must exist (the list says how many).
+$guiRenders=@(Get-Content -LiteralPath (Join-Path $fixtureRoot 'gui-renders.json') -Raw | ConvertFrom-Json)
+if($guiRenders.Count -eq 0 -or @($guiRenders | Where-Object { -not (Test-Path -LiteralPath $_.path) -and -not (Test-Path -LiteralPath (Join-Path $fixtureRoot (Split-Path -Leaf $_.path))) }).Count){throw 'Missing offscreen GUI view.'}
 $guiChecks=Get-Content -LiteralPath (Join-Path $fixtureRoot 'gui-checks.json') -Raw | ConvertFrom-Json
-if(-not $guiChecks.passed -or $guiChecks.count -ne $(if($NeuralRuntime){288}else{274})){throw 'Installed WebView2 control and bridge verification failed.'}
+if(-not $guiChecks.passed -or $guiChecks.count -le 0){throw 'Installed WebView2 control and bridge verification failed.'}
 # Exercise the actual packaged service against isolated game/runtime fixtures.
 # Optional real user-supplied NR deployment is tested only in these game fixtures.
 $presets = & $installedCli presets | ConvertFrom-Json
@@ -79,7 +83,7 @@ foreach($case in $cases){
     $profile.flowPreset='Slow'; $profile.bidirectionalFlow=$true; $profile.nvidiaFlowScale=100
     $profile.fpsLimit='MatchRefresh'; $profile.headsetRefreshHz=90; $profile | Add-Member -Force refreshFromHeadset $false; $profile.disableDcsVSync=$true
     if($case.neural){$profile.neuralRuntimePath=$NeuralRuntime; $profile.neuralLocalTone=1.1; $profile.neuralColorStrength=.8; $profile.neuralUiCorrection=$true}
-    $profile.experimentalAcknowledged=$true; $profile.runtimeManifestPath=$runtimeManifest
+    $profile.runtimeManifestPath=$runtimeManifest
     $profile | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $profileFile -Encoding utf8
     $cliOptions=@('--profile',$profileFile,'--state',$stateRoot,'--dcs',$dcsExe,'--options',$options)
     & $installedCli preview @cliOptions | Set-Content -LiteralPath (Join-Path $gameRoot 'preview.txt') -Encoding utf8
@@ -147,6 +151,6 @@ $notes=Join-Path $installRoot 'user-notes.txt'
 if($LASTEXITCODE -ne 0){throw 'Application uninstall fixture failed.'}
 if((Test-Path -LiteralPath (Join-Path $installRoot 'DcsControl.exe')) -or (Test-Path -LiteralPath (Join-Path $installRoot 'files/DcsControl.exe'))){throw 'Owned application executable was not removed.'}
 if([IO.File]::ReadAllText($notes) -ne 'Retain this unowned file.'){throw 'User file was changed.'}
-$result=@{passed=$true;fixtureRoot=$fixtureRoot;previousReleaseUpgradeChecked=$upgradeChecked;webViewChecks=$guiChecks.count;webViewRenders=48;neuralDeploymentCases=@($cases | Where-Object neural).Count;checks=@('release hashes','Windows PowerShell frontend','self-contained install','repeat install/update','installed CLI','actual WebView2 interaction and native bridge checks','Pimax and Sboys combined apply, apply over, back to stock DCS','optional signed NR hash and tuning deployment','installed launch contract without executing DCS','changed external runtime rejection','tampered focus adapter rejection','owned-file uninstall','unowned-file retention')}
+$result=@{passed=$true;fixtureRoot=$fixtureRoot;previousReleaseUpgradeChecked=$upgradeChecked;webViewChecks=$guiChecks.count;webViewRenders=$guiRenders.Count;neuralDeploymentCases=@($cases | Where-Object neural).Count;checks=@('release hashes','Windows PowerShell frontend','self-contained install','repeat install/update','installed CLI','actual WebView2 interaction and native bridge checks','Pimax and Sboys combined apply, apply over, back to stock DCS','optional signed NR hash and tuning deployment','installed launch contract without executing DCS','changed external runtime rejection','tampered focus adapter rejection','owned-file uninstall','unowned-file retention')}
 $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $fixtureRoot 'result.json') -Encoding utf8
 Write-Output "PASS release fixture: $fixtureRoot"

@@ -920,7 +920,10 @@ const char* VerifyBuild(uint8_t* ng, uint8_t* dx) {
 }
 
 bool Install() {
-  if (g_state.load() != 0) return g_state.load() > 0;
+  // Claimed atomically (-3 while installing): the worker, shadow batching's
+  // install and a suite phase can race on the first call.
+  int idle = 0;
+  if (!g_state.compare_exchange_strong(idle, -3)) return g_state.load() > 0;
   auto* ng = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
   auto* dx = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"dx11backend.dll"));
   if (!ng || !dx) {
@@ -928,6 +931,7 @@ bool Install() {
     if (!logged.exchange(true))
       Log("shadow texture skip: could not find %s yet; not installed (retried every second)",
           ng ? "dx11backend.dll" : "NGModel.dll");
+    g_state = 0;
     return false;
   }
   if (const char* why = VerifyBuild(ng, dx)) {

@@ -41,10 +41,12 @@ Without a gaze, the layer does nothing.
 
 **`xrLocateViews`.** For each eye:
 
-- `pose += R_view * radius * (gaze - forward)`;
+- `pose += R_view * radius * (gaze - rest)`, where `rest` is straight ahead for the head: the mean of the two primary views' forward axes, expressed in this eye's frame. Headsets whose views are canted outwards (Sboys measures about 6° on the Crystal Super QLED) would otherwise read a straight gaze as turned towards the nose, a fixed shift of about 1.1 mm per eye (IPD 2.2 mm smaller). The gaze is clamped to `MaxGazeDeg` around `rest` too. The cant is logged.
 - the FOV tangents become `(tan - d.xy/D) / (1 + d.z/D)`, where `D` is the virtual image distance.
 
 The same offset in world space is applied to the eye's focus view.
+
+**DCS's custom IPD.** DCS (Visualizer.dll 2.9.30, per-frame view loop) replaces each view's sideways eye position with ±custom_IPD/2 when `VR.custom_IPD_enable` is on, which would discard the pupil's sideways shift: only the vertical and depth parts and the FOV change would reach DCS. When the profile uses Pupil shift and DCS's custom IPD is on, the app writes `Ipd=<custom_IPD>` in `PupilShift.ini` and turns `VR.custom_IPD_enable` off in options.lua (an owned key, restored by Back to stock DCS). The layer then moves both eyes symmetrically along the line between them to that distance (focus views follow their eye) before the pupil shift, whatever the in-flight switch says, so the switch compares the pupil shift alone at the same IPD. `xrEndFrame` still hands the runtime its own poses back. Without DCS's custom IPD nothing changes (`Ipd=0`).
 
 **`xrEndFrame`.** Projection views that still carry the values the layer handed out get the runtime's original pose and FOV back. The match is by display time and value, within 1e-4. The compositor and every layer below see the frame exactly as if the layer were absent; only the rendered content differs.
 
@@ -68,6 +70,7 @@ The same offset in world space is applied to the eye's focus view.
 - the gaze range;
 - the maximum shift;
 - how many projection views were given back to the runtime with its own poses (`restored=`);
+- the views' cant, the runtime's eye distance and the eye distance DCS renders with;
 - the runtime's own left-eye position relative to the head.
 
 If that last value moved with the gaze, the runtime would already be shifting the eye itself.

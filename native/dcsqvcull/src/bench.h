@@ -229,6 +229,7 @@ bool RunBenchmark(int mode, bool beeps) {
         : mode == 29 ? "bench: mode g-buffer recorder, OFF = DCS draws every item, ON = recorded G-buffer draws from command lists"
         : mode == 30 ? "bench: mode pass flush, OFF = no Flush, ON = Flush at the configured pass boundaries"
         : mode == 31 ? "bench: mode setShaderResources tail trim, OFF = stock call sites, ON = identical tail not rebound"
+        : mode == 32 ? "bench: mode periphery-only instancer LOD (LOSSY), OFF = stock tables, ON = scaled tables in the peripheral views"
                     : "bench: mode shadow instancing, OFF = one draw per caster, ON = one instanced draw per group");
   }
   if (mode == 1) {
@@ -384,6 +385,7 @@ bool RunBenchmark(int mode, bool beeps) {
             : mode == 29 ? "g-buffer recorder (R18 S3)"
             : mode == 30 ? "Flush at pass boundaries (R20 h)"
             : mode == 31 ? "setShaderResources identical-tail trim (R15 F2)"
+            : mode == 32 ? "periphery-only instancer LOD (R26 13, LOSSY)"
                         : "peripheral exclusion OFF/ON");
   if (beeps)
     for (int k = 0; k < 3; ++k) Chime(1500, 90);

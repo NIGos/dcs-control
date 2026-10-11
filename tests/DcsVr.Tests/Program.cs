@@ -5,11 +5,13 @@ using DcsVr.Core;
 
 if (args.FirstOrDefault() == "--environment-child") { Console.Write(Environment.GetEnvironmentVariable("XR_RUNTIME_JSON") + "|" + Environment.GetEnvironmentVariable("XR_ENABLE_API_LAYERS")); return 0; }
 var workspace = Path.GetFullPath(args.FirstOrDefault() ?? ".");
+if (!File.Exists(Path.Combine(workspace, "Directory.Build.props"))) { Console.Error.WriteLine("Run from the repository root, or pass it as the first argument: " + workspace); return 2; }
 var root = Path.Combine(workspace, "artifacts/tests/" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
 var tests = new List<(string Name, Action Test)>();
 Readiness.ActiveRouteProvider = () => new(null, "Test fixture: no running headset route.", TrackingKind.Unknown);
 PimaxFovea.SettingsPath = Path.Combine(root, "no-pimax-play/global.json"); // never the build machine's Pimax Play settings
 HeadsetRefresh.PimaxLogFolder = Path.Combine(root, "no-pimax-logs"); HeadsetRefresh.PimaxRuntimeFolder = Path.Combine(root, "no-pimax-runtime"); HeadsetRefresh.SteamVrSettings = Path.Combine(root, "no-steamvr.vrsettings");
+GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 4090", "NVIDIA", "32.0.15.0")]; // the verified pipeline's card, never the build machine's
 LaunchSafety.CurrentJob = () => default; // never the job object the test runner itself may run in
 void Test(string name, Action action) => tests.Add((name, action));
 void Require(bool value, string message = "Assertion failed") { if (!value) throw new Exception(message); }
@@ -53,7 +55,7 @@ Test("ZIP rejects symbolic links", () =>
 Test("Package digest rejects modified archive", () => { var z = Zip("digest.zip", ("a", "b")); Throws<InvalidDataException>(() => new ComponentCache(Path.Combine(root, "digest-cache")).Import(PackageCatalog.Get("ofxr"), z)); });
 foreach (var package in PackageCatalog.All)
     Test("Official package integrity " + package.Id, () => { var archive = Path.Combine(workspace, ".cache/packages", package.ArchiveName); Require(Hashing.FileSha256(archive) == package.Sha256); var d = new ComponentCache(Path.Combine(root, "package-cache")).Import(package, archive); Require(Directory.EnumerateFiles(d, "*", SearchOption.AllDirectories).Any()); });
-Test("Profile compatibility rejects Cheeky plus Pimax native Quad Views", () => Require(ProfileValidation.Validate(new() { NeuralRendering = true, ExperimentalAcknowledged = true }).Any(i => i.Code == "quad-cheeky" && i.Severity == IssueSeverity.Error)));
+Test("Profile compatibility rejects Cheeky plus Pimax native Quad Views", () => Require(ProfileValidation.Validate(new() { NeuralRendering = true }).Any(i => i.Code == "quad-cheeky" && i.Severity == IssueSeverity.Error)));
 Test("Foveated Super Resolution is stereo only: Quad Views turns it off and never deploys Cheeky for it", () =>
 {
     foreach (var provider in new[] { QuadProvider.QuadViewsFoveated, QuadProvider.PimaxNative })
@@ -77,21 +79,13 @@ Test("Foveated Super Resolution is stereo only: Quad Views turns it off and neve
 Test("Sboys cannot use native Pimax Quad Views", () => Require(ProfileValidation.Validate(new() { Runtime = RuntimeKind.SboysSteamVr }).Any(i => i.Code == "quad-runtime")));
 Test("Unknown profile schema and invalid numbers rejected", () => { var p = new VrProfile { SchemaVersion = 99, FoveaWidth = double.NaN, NeuralIntensity = 2 }; Require(ProfileValidation.Validate(p).Count(i => i.Severity == IssueSeverity.Error) == 3); });
 Test("Profile JSON roundtrip", () => Require(JsonData.Deserialize<VrProfile>(JsonData.Serialize(ProfilePresets.All[1])) == ProfilePresets.All[1]));
-Test("RenoDX tuning imports atomically and reaches the renderer", () =>
+Test("Advanced DLSS 5 tuning reaches the renderer", () =>
 {
-    var baseline = ProfilePresets.All[5];
-    var result = RenoSettings.Import("[Other]\nNRIntensity=garbage\n[RenoDX.DLSS5]\nNRIntensity=.6\nNRLocalTone=1.3\nNRLocalStructure=.8\nNRSkinStructure=1.1\nNRAutoMask=1\nNRUICorrection=true\nNRColorStrength=1.2\nNRTransferStrength=.9\nNRPaperWhiteScale=2\nNRDepthMode=2\nNRMVecScaleX=-1\nNRMVecScaleY=1\nNRPreset=3\nNeuralUplift=0", baseline);
-    Require(result.Imported.Count == 12 && result.Unmapped.SequenceEqual(new[] { "NRPreset", "NeuralUplift" }));
-    Require(result.Profile.NeuralRendering && result.Profile.FrameGen == baseline.FrameGen && result.Profile.NeuralRuntimePath == baseline.NeuralRuntimePath);
-    var ini = ConfigurationWriters.Cheeky(result.Profile);
+    var profile = ProfilePresets.All[5] with { NeuralIntensity = .6, NeuralLocalTone = 1.3, NeuralLocalStructure = .8, NeuralSkinStructure = 1.1, NeuralAutomaticMask = true, NeuralUiCorrection = true,
+        NeuralColorStrength = 1.2, NeuralTransferStrength = .9, NeuralPaperWhiteScale = 2, NeuralDepth = NeuralDepthMode.Reversed, NeuralMotionScaleX = -1, NeuralMotionScaleY = 1 };
+    var ini = ConfigurationWriters.Cheeky(profile);
     foreach (var expected in new[] { "NrIntensity=0.6", "NrLocalToneStrength=1.3", "NrLocalStructureStrength=0.8", "NrSkinStructureStrength=1.1", "NrAutomaticMask=1", "NrUiCorrection=1", "NrColorStrength=1.2", "NrHdrTransferStrength=0.9", "NrPaperWhiteScale=2", "NrDepthConvention=2", "NrMotionScaleXMultiplier=-1", "NrMotionScaleYMultiplier=1" }) Require(ini.Contains(expected), expected);
-    Require(JsonData.Deserialize<VrProfile>(JsonData.Serialize(result.Profile)) == result.Profile);
-});
-Test("RenoDX import rejects malformed, conflicting and out-of-range tuning", () =>
-{
-    foreach (var bad in new[] { "NRIntensity=2", "NRLocalTone=NaN", "NRMVecScaleY=5", "NRDepthMode=1.5", "NRAutoMask=yes", "NRColorStrength=1\nnrcolorstrength=1.5", "NRIntensity=.2\nNRPaperWhiteScale=0" })
-        Throws<InvalidDataException>(() => RenoSettings.Import("[RenoDX.DLSS5]\n" + bad, new()));
-    Throws<InvalidDataException>(() => RenoSettings.Import("[Other]\nNRIntensity=.5", new()));
+    Require(JsonData.Deserialize<VrProfile>(JsonData.Serialize(profile)) == profile);
 });
 Test("Neural tuning validates all runtime ranges", () =>
 {
@@ -474,7 +468,6 @@ Test("The draft is kept across restarts and a damaged file is ignored", () =>
     Require(loaded.Dcs == @"D:\DCS\bin\DCS.exe" && loaded.Options is null && loaded.Profile.QuadSharpening == .456789123456 && loaded.Profile.NeuralToggleKey == "75:7");
     Require(loaded.Profile.QuadViews == QuadProvider.QuadViewsFoveated && loaded.Profile.QuadFocusAdapter, "settled like the checklist");
     File.WriteAllText(store.Path, "{ not json"); Require(store.Load() is null);
-    store.Delete(); Require(!File.Exists(store.Path));
 });
 Test("Last flight: dcs.log session, Pimax frames, OFXR modes and frame time, DLSS 5, CPU Boost and prefetch fix", () =>
 {
@@ -596,7 +589,7 @@ Test("Baseline and framegen installation in isolated DCS fixture", () =>
     var exe = Make("fixture/bin/DCS.exe", "fixture"); var options = Make("fixture/options.lua", Lua); var runtime = Make("fixture/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("fixture/runtime.dll", "fixture");
     var inv = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime }; var before = Hashing.FileSha256(options);
     var ofxr = new ComponentCache(Path.Combine(root, "cache-plan")).Import(PackageCatalog.Get("ofxr"), Path.Combine(workspace, ".cache/packages", PackageCatalog.Get("ofxr").ArchiveName));
-    var planner = new DeploymentPlanner(new(ofxr, null, null)); var p = new VrProfile { FrameGen = FrameGeneration.Nvidia, ExperimentalAcknowledged = true };
+    var planner = new DeploymentPlanner(new(ofxr, null, null)); var p = new VrProfile { FrameGen = FrameGeneration.Nvidia };
     var plan = planner.Build(p, inv, Path.Combine(root, "fixture/managed")); Require(Hashing.FileSha256(options) == before); Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_XRFrameBridge_diagnostic");
     var store = new OriginalsStore(Path.Combine(root, "originals/full-plan")); store.Apply(plan); Require(new LuaOptions(File.ReadAllText(options)).Get("VR", "enable") == "true"); Require(store.RestoreOriginals().Complete); Require(Hashing.FileSha256(options) == before);
 });
@@ -605,16 +598,16 @@ Test("Software Quad Views plus framegen deploys per-process configuration", () =
 {
     var exe = Make("software-quad/bin/DCS.exe", "fixture"); var options = Make("software-quad/options.lua", Lua); var runtime = Make("software-quad/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("software-quad/runtime.dll", "fixture");
     var ofxr = new ComponentCache(Path.Combine(root, "software-quad/cache")).Import(PackageCatalog.Get("ofxr"), Path.Combine(workspace, ".cache/packages", PackageCatalog.Get("ofxr").ArchiveName));
-    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Tracking = TrackingKind.Lighthouse, QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Nvidia, Gaze = GazeMode.Fixed, ExperimentalAcknowledged = true };
+    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Tracking = TrackingKind.Lighthouse, QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Nvidia, Gaze = GazeMode.Fixed };
     var inv = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, SteamVrRuntime = runtime };
     var plan = new DeploymentPlanner(new(ofxr, null, null, Path.Combine(workspace, "external/quadviews/bin/x64/Release"), OfxrLayerDll: DeferredOfxr)).Build(p, inv, Path.Combine(root, "software-quad/managed"));
     Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_XRFrameBridge_diagnostic");
     Require(plan.LaunchEnvironment.ContainsKey("DCSVR_QUAD_SETTINGS")); Require(plan.Files.Any(f => f.Purpose == "Software Quad Views provider"));
     // Quad Views composites its four views; the fork build creates private swapchains only for the submitted pair.
     Require(Hashing.BytesSha256(plan.Files.Single(f => f.Path.EndsWith("XR_APILAYER_XRFrameBridge_diagnostic.dll")).Content) == Hashing.FileSha256(DeferredOfxr));
-    Require(Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("ofxr_bridge.ini")).Content).Contains("d3d11_bridge=1"));
+    Require(new StreamReader(new MemoryStream(plan.Files.Single(f => f.Path.EndsWith("ofxr_bridge.ini")).Content), Encoding.UTF8, true).ReadToEnd().Contains("d3d11_bridge=1"));
     // 0010: the smooth cursor's images are read from DCS.exe's own folder when the game has not loaded them.
-    var ofxrIni = Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("ofxr_bridge.ini")).Content);
+    var ofxrIni = new StreamReader(new MemoryStream(plan.Files.Single(f => f.Path.EndsWith("ofxr_bridge.ini")).Content), Encoding.UTF8, true).ReadToEnd();
     Require(ofxrIni.Contains("smooth_cursor=0") && ofxrIni.Contains("cursor_templates=" + Path.GetDirectoryName(Path.GetFullPath(exe))), "cursor_templates is DCS.exe's folder");
     var store = new OriginalsStore(Path.Combine(root, "originals/quad")); store.Apply(plan); var text = File.ReadAllText(plan.LaunchEnvironment["DCSVR_QUAD_SETTINGS"]); Require(text.Contains("[exe:DCS]")); Require(text.Contains("turbo_mode=0")); Require(text.Contains("stereo_output_multiplier=1")); Require(store.RestoreOriginals().Complete);
 });
@@ -625,7 +618,7 @@ Test("Cheeky and OFXR stereo stack installs and restores in isolated fixture", (
     var ofxr = cache.Import(PackageCatalog.Get("ofxr"), Path.Combine(workspace, ".cache/packages", PackageCatalog.Get("ofxr").ArchiveName));
     var cheeky = cache.Import(PackageCatalog.Get("cheeky"), Path.Combine(workspace, ".cache/packages", PackageCatalog.Get("cheeky").ArchiveName));
     var layer = Path.Combine(workspace, "artifacts/native/cheeky/bin/Release/CheekyOpenXRLayer.dll");
-    var p = new VrProfile { QuadViews = QuadProvider.None, FoveatedDlss = true, FrameGen = FrameGeneration.Nvidia, ExperimentalAcknowledged = true };
+    var p = new VrProfile { QuadViews = QuadProvider.None, FoveatedDlss = true, FrameGen = FrameGeneration.Nvidia };
     var inv = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime };
     var plan = new DeploymentPlanner(new(ofxr, cheeky, layer)).Build(p, inv, Path.Combine(root, "stereo/managed"));
     Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_CHEEKY_foveated_dlss;XR_APILAYER_XRFrameBridge_diagnostic");
@@ -775,7 +768,7 @@ Test("Another mod's dxgi.dll is backed up, replaced and reported, and Back to st
     var exe = Make("loaders/bin/DCS.exe", "fixture"); var options = Make("loaders/options.lua", Lua); var other = Make("loaders/bin/dxgi.dll", "other-mod");
     var runtime = Make("loaders/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("loaders/runtime.dll", "fixture");
     var cheeky = new ComponentCache(Path.Combine(root, "loaders/cache")).Import(PackageCatalog.Get("cheeky"), Path.Combine(workspace, ".cache/packages", PackageCatalog.Get("cheeky").ArchiveName));
-    var p = new VrProfile { QuadViews = QuadProvider.None, FoveatedDlss = true, ExperimentalAcknowledged = true };
+    var p = new VrProfile { QuadViews = QuadProvider.None, FoveatedDlss = true };
     var plan = new DeploymentPlanner(new(null, cheeky, Path.Combine(workspace, "artifacts/native/cheeky/bin/Release/CheekyOpenXRLayer.dll"))).Build(p, new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime }, Path.Combine(root, "loaders/managed"));
     var store = new OriginalsStore(Path.Combine(root, "originals/loaders"));
     Require(store.Apply(plan).ReplacedForeign.SequenceEqual([other]) && Hashing.FileSha256(other) == Hashing.FileSha256(Path.Combine(cheeky, "dxgi.dll")));
@@ -836,6 +829,58 @@ Test("Pupil shift is deployed first in the layer chain with its ini, only for ey
     Require(ProfileValidation.Validate(on with { EngineOptimizations = true, PupilShiftToggleKey = "120:3" }).Any(i => i.Code == "pupil-hotkey"));
     Require(!ProfileValidation.Validate(on with { PupilShift = false, EngineOptimizations = true, PupilShiftToggleKey = NeuralHotkeys.EngineDefault }).Any(i => i.Code == "hotkey-conflict"));
 });
+Test("Other environments: AMD/Intel graphics, OpenBeta Saved Games, 3× at 72 Hz, small CPUs, short profile names", () =>
+{
+    // NVIDIA-only processing on an AMD or Intel card is refused with what to choose instead; FidelityFX is fine.
+    var previous = GpuInfo.Adapters;
+    try
+    {
+        GpuInfo.Adapters = () => [new("AMD Radeon RX 7900 XTX", "AMD", "31.0")];
+        var issues = ProfileValidation.Validate(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, NeuralRendering = true, NeuralRuntimePath = @"C:\x\nvngx_dlssnr.dll", FrameGen = FrameGeneration.Nvidia });
+        Require(issues.Any(i => i.Code == "dlss-gpu" && i.Message.Contains("AMD Radeon")) && issues.Any(i => i.Code == "framegen-gpu" && i.Message.Contains("FidelityFX")));
+        Require(!ProfileValidation.Validate(new VrProfile { FrameGen = FrameGeneration.FidelityFx }).Any(i => i.Code.EndsWith("-gpu")), "FidelityFX runs anywhere");
+        Require(!ProfileValidation.Validate(new VrProfile { Desktop = true, FrameGen = FrameGeneration.Nvidia }).Any(i => i.Code.EndsWith("-gpu")), "Optimizations only runs none of it");
+        GpuInfo.Adapters = () => [];
+        Require(!ProfileValidation.Validate(new VrProfile { FrameGen = FrameGeneration.Nvidia }).Any(i => i.Code.EndsWith("-gpu")), "unknown adapters block nothing");
+        GpuInfo.Adapters = () => [new("NVIDIA GeForce GTX 1080 Ti", "NVIDIA", "32.0")];
+        Require(!GpuInfo.HasNvidiaRtx && GpuInfo.IsNvidiaRtx(new("NVIDIA RTX A4000", "NVIDIA", null)) && !GpuInfo.IsNvidiaRtx(new("Intel Arc A770", "Intel", null)));
+    }
+    finally { GpuInfo.Adapters = previous; }
+    // The Saved Games folder DCS uses comes from dcs_variant.txt.
+    Make("variant/openbeta/dcs_variant.txt", "openbeta\r\n"); Make("variant/stable/bin/DCS.exe", "fixture");
+    Require(WindowsInventory.DcsVariantFolder(Path.Combine(root, "variant/openbeta")) == "DCS.openbeta" && WindowsInventory.DcsVariantFolder(Path.Combine(root, "variant/stable")) is null && WindowsInventory.DcsVariantFolder(null) is null);
+    // 3× at 72 Hz asks DCS for no less than its minimum.
+    Require(FramePacing.RequestedCap(new() { FpsLimit = FpsLimitMode.MatchRefresh, HeadsetRefreshHz = 72, FrameGen = FrameGeneration.Nvidia, FrameGenFactor = 3 }) == 30);
+    // A small CPU: background apps never land on DCS's render cores, the headset services are not squeezed.
+    var small = CpuTopology.LimitToSystem(new CpuTopology(CoreRankingSource.DcsLog, "4 cores", 8, [0, 1, 2, 3], [4, 5], [3, 6, 7]), 1, 0xFF, 8);
+    Require(small.HasRanking && !small.BackgroundCores.Contains(3) && small.VrRuntimeCores.Count == 0, "small CPU");
+    // An 8.3 short name of the profile folder is removed from the diagnostic package too.
+    Require(!Diagnostics.Redactor("Giuseppe", @"C:\Users\Giuseppe", "PC-01")(@"TEMP=C:\Users\GIUSEP~1\AppData\Local\Temp").Contains("GIUSEP"));
+});
+Test("Writes survive a file held for a moment, keep read-only files read-only, and a protected folder is a warning Launch resolves", () =>
+{
+    // options.lua made read-only by the pilot: replaced, and still read-only.
+    var file = Make("resilience/Config/options.lua", "old");
+    File.SetAttributes(file, File.GetAttributes(file) | FileAttributes.ReadOnly);
+    AtomicFile.WriteText(file, "new");
+    Require(File.ReadAllText(file) == "new" && File.GetAttributes(file).HasFlag(FileAttributes.ReadOnly), "read-only kept");
+    File.SetAttributes(file, FileAttributes.Normal);
+    // Another program holding the file (an antivirus scan) for a moment: the write waits for it.
+    var held = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
+    var release = Task.Run(async () => { await Task.Delay(300); held.Dispose(); });
+    AtomicFile.WriteText(file, "after the scan");
+    release.Wait();
+    Require(File.ReadAllText(file) == "after the scan", "retried until released");
+    var tries = 0;
+    Throws<UnauthorizedAccessException>(() => AtomicFile.Retry(() => { tries++; throw new UnauthorizedAccessException(); }));
+    Require(tries == 8, "a real permission problem fails after the last try");
+    // Folders that do not exist are left to their own checks; writable ones are not reported.
+    Require(LaunchSafety.UnwritableFolders([Path.Combine(root, "resilience/Config"), Path.Combine(root, "no-such-folder")]).Count == 0);
+    var exe = Make("resilience/game/bin/DCS.exe", "fixture");
+    var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = file };
+    Require(!ProfileValidation.Validate(new VrProfile(), inventory).Any(i => i.Code == "write-access"), "writable folders raise nothing");
+    Require(LaunchSafety.WriteAccessAdvice.Contains("Grant access") && LaunchSafety.WriteAdvice().StartsWith(LaunchSafety.WriteAccessAdvice));
+});
 Test("Diagnostics explains DLSS 5 on the focus area from the last session of Cheeky's log", () =>
 {
     const string start = "22:29:05.544 [T16224] Cheeky 0.5.3 Standalone initializing; runtime remains resident until game exit";
@@ -889,6 +934,28 @@ Test("The diagnostic package collects DCS, component and headset logs as text, w
     Require(!text.Contains(@"Users\Al") && !text.Contains(@"Users\\Al") && !text.Contains("Users/Al") && !text.Contains("Nicol") && !text.Contains("RIG-01") && text.Contains("Algebra stays"), text);
     Require(!text.Contains("AAAABBBBCC") && !text.Contains("12345") && !text.Contains("X999TEST") && text.Contains("token: <token>") && text.Contains("userId=<id>") && text.Contains("serial number: <serial>"), text);
 });
+Test("Pupil shift takes over DCS's custom IPD (same value, applied by the layer) and leaves it alone otherwise", () =>
+{
+    var exe = Make("pupil-ipd/game/bin/DCS.exe", "fixture"); var runtime = Make("pupil-ipd/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("pupil-ipd/runtime.dll", "fixture");
+    var dll = Make("pupil-ipd/components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll", "layer");
+    var planner = new DeploymentPlanner(new(null, null, null, PupilShiftDll: dll));
+    var on = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, PupilShift = true };
+    string Ini(ApplyPlan plan) => Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("PupilShift.ini")).Content).ReplaceLineEndings("\n");
+    IReadOnlyList<LuaValueChange> Lua(ApplyPlan plan) => plan.Files.Single(f => f.Path.EndsWith("options.lua")).LuaChanges ?? [];
+    var custom = Make("pupil-ipd/sg/DCS/Config/options.lua", "options = {\n\t[\"VR\"] = {\n\t\t[\"custom_IPD\"] = \"64\",\n\t\t[\"custom_IPD_enable\"] = true,\n\t\t[\"enable\"] = true,\n\t},\n}\n");
+    var plan = planner.Build(on, new InventorySnapshot { DcsExecutable = exe, OptionsPath = custom, PimaxRuntime = runtime }, Path.Combine(root, "pupil-ipd/managed"));
+    Require(Ini(plan).Contains("Ipd=64\n") && Lua(plan).Any(c => c.Path == "VR.custom_IPD_enable" && c.InstalledRaw == "false"), "taken over");
+    // Without DCS's custom IPD (or without Pupil shift) nothing changes.
+    var plain = Make("pupil-ipd/sg2/DCS/Config/options.lua", "options = {\n\t[\"VR\"] = {\n\t\t[\"custom_IPD\"] = \"64\",\n\t\t[\"custom_IPD_enable\"] = false,\n\t\t[\"enable\"] = true,\n\t},\n}\n");
+    plan = planner.Build(on, new InventorySnapshot { DcsExecutable = exe, OptionsPath = plain, PimaxRuntime = runtime }, Path.Combine(root, "pupil-ipd/managed2"));
+    Require(Ini(plan).Contains("Ipd=0\n") && !Lua(plan).Any(c => c.Path.StartsWith("VR.custom_IPD")), "left alone");
+    plan = planner.Build(on with { PupilShift = false }, new InventorySnapshot { DcsExecutable = exe, OptionsPath = custom, PimaxRuntime = runtime }, Path.Combine(root, "pupil-ipd/managed3"));
+    Require(!Lua(plan).Any(c => c.Path.StartsWith("VR.custom_IPD")), "no Pupil shift, DCS keeps its IPD");
+    // The layer's log: the views' cant and the eye distances.
+    var folder = Path.Combine(root, "pupil-ipd/status"); Make("pupil-ipd/status/" + PupilShiftStatus.LayerDll, "layer");
+    Make("pupil-ipd/status/" + PupilShiftStatus.LogName, "10:00:02.000 stats: frames=90 shifted=90 restored=360 gaze x[-1.0..1.0] y[0.0..0.0] deg, max shift 0.20 mm; runtime left eye vs head x[-32.77..-32.77] z[0.00..0.00] mm; cant 6.1 deg, runtime IPD 65.5 mm, rendered IPD 64.0 mm\n");
+    Require(PupilShiftStatus.Read(folder, false).Last is { CantDeg: 6.1, RuntimeIpdMm: 65.5, RenderedIpdMm: 64.0 });
+});
 Test("The Pupil shift page reads the layer's log: working, no gaze, switched off, not installed", () =>
 {
     var folder = Path.Combine(root, "pupil-status"); Directory.CreateDirectory(folder);
@@ -931,7 +998,7 @@ Test("DCS engine optimizations install in Saved Games Scripts with every ini key
     // The hook is written last, so restore removes it first; nothing goes to the DCS install.
     Require(engineFiles.SequenceEqual([@"DcsQvCull\DcsQvCull.dll", @"DcsQvCull\payload\DcsQvCullPayload.dll", @"DcsQvCull\DcsQvCull.ini", @"Hooks\DcsQvCull.lua"]));
     Require(plan.Files.All(f => !f.Path.StartsWith(Path.GetDirectoryName(exe)!, StringComparison.OrdinalIgnoreCase)));
-    var ini = Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("DcsQvCull.ini")).Content);
+    var ini = new StreamReader(new MemoryStream(plan.Files.Single(f => f.Path.EndsWith("DcsQvCull.ini")).Content), Encoding.UTF8, true).ReadToEnd();
     foreach (var line in new[] { "[General]\nDiagnostics=0", "[Timing]\nShaderTimeCache=1\nTaskQueueClock=1\nCacheUs=1000", "[Scene]\nPartitionBoost=1\nCostWeights=1\nCostWeightsSanity=0\nCollectThreadsMax=0\nFineTimerResolution=0", "[Cull]\nEnabled=0\nDebugHole=0", "[D3D]\nMeter=0\nFilter=0", "BenchTimer=1\nBenchPartition=1\nBenchIsolation=0\nBenchThreads=0\nBenchTimerRes=0\nBenchFilter=0", "SelfTest=0\nProfile=0\nBenchCull=0" })
         Require(ini.ReplaceLineEndings("\n").Contains(line), "DcsQvCull.ini lacks " + line);
     var tuned = ConfigurationWriters.DcsQvCull(on with { EngineShaderTimeCache = false, EnginePartitionBoost = false, EngineTimerRefreshUs = 500, EngineDiagnosticHooks = true });
@@ -942,7 +1009,7 @@ Test("DCS engine optimizations install in Saved Games Scripts with every ini key
     Require(!ProfileValidation.Validate(on).Any(i => i.Code is "engine-hotkey" or "hotkey-conflict"));
     Require(ProfileValidation.Validate(on with { EngineToggleKey = "120:3" }).Any(i => i.Code == "engine-hotkey" && i.Severity == IssueSeverity.Error));
     Require(ProfileValidation.Validate(on with { EngineToggleKey = "119:3" }).Any(i => i.Code == "engine-hotkey") && ini.Contains("TightCasters=0") && ini.Contains("BenchShadow=0"));
-    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "CostWeightsSanity=0", "Beeps=1", "BenchCostWeights=0", "Terrain=0", "SkipSameConstantUpload=0", "BenchCbUpload=0", "LowPowerPacer=0", "BenchPacer=0", "MotionSweep=0", "FrameHeapSlabs=1", "TaskQueueClock=1", "BenchFrameHeap=0", "MotionProfile=0", "MotionTaxi=0", "MotionCounters=1", "BigModelPages=1", "BigPageBytes=4194304", "ShadowInstancing=1", "ShadowBatching=1", "ShadowPlanAsync=1", "ShadowTextureSkip=1", "ShadowInstCompile=0", "ShadowInstVerify=0", "BenchShadowInst=0", "BenchBigPages=0", "BenchShadowTex=0", "BenchTexTable=0", "YawScan=0", "HoldYawDeg=-1", "GBufferBatching=0", "GBufferInstCompile=0", "GBufferInstVerify=0", "BenchGBufferInst=0", "ParallelUpload=0", "BenchParallelUpload=0", "BenchShadowPlanAsync=0", "DirectUploadCount=0", "FxApplyCount=0", "GBufferTexCount=0", "BenchAllocSlabs=0", "BenchTexDedupe=0", "BenchCbSkip=0", "BenchTriPlain=0", "BenchEngine=0", "BenchMicro=0", "Quick=0", "SigScan=1", "DirectUpload=0", "DirectUploadVerify=0", "BenchDirectUpload=0", "SplitFilter=1", "SplitFilterOps=0x4ff", "Meter=0", "SplitFilterVerify=0", "BenchSplitFilter=0", "JoinTailCount=0", "SrvSpanCount=0", "ShadowRecorder=1", "ShadowRecorderScope=0x30f", "ShadowRecorderWaitUs=200", "ShadowRecorderPriority=0", "ShadowRecorderSplit=0xf", "ShadowRecorderInstancing=1", "ShadowRecVerify=0", "ShadowRecVerifySec=5", "BenchShadowRecorder=0", "ShadowRecCount=0", "GBufferRecorder=1", "GBufferRecorderScope=0x10055", "GBufferRecorderMaxSegments=12", "GBufferRecorderHelpers=2", "GBufferRecorderWaitUs=300", "GBufferRecorderIsland=30", "GBufferRecorderRedo=1", "GBufferRecorderSwapAhead=1", "GBufferBatching=0", "GBufferRecVerify=0", "GBufferRecVerifySec=6", "GBufferRecVerifyStride=0", "BenchGBufferRecorder=0", "GBufferRecCount=0", "GBufferRecStateDump=0", "GpuPassTiming=0", "YawProfile=0", "RotationProfile=0", "ShadowRecorderHelpers=3", "GBufferRecorderCockpit=0", "GBufferRecorderByOrdinal=1", "SrvTailTrim=0", "PassFlush=0", "FrameStartGap=0", "RunnableThreads=0", "VramCount=0", "GpuPassStats=0", "ForwardRecCount=0", "BenchPassFlush=0", "SrvTailTrimVerify=0", "BenchSrvTailTrim=0" })
+    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "CostWeightsSanity=0", "Beeps=1", "BenchCostWeights=0", "Terrain=0", "SkipSameConstantUpload=0", "BenchCbUpload=0", "LowPowerPacer=0", "BenchPacer=0", "MotionSweep=0", "FrameHeapSlabs=1", "TaskQueueClock=1", "BenchFrameHeap=0", "MotionProfile=0", "MotionTaxi=0", "MotionCounters=1", "BigModelPages=1", "BigPageBytes=4194304", "ShadowInstancing=1", "ShadowBatching=1", "ShadowPlanAsync=1", "ShadowTextureSkip=1", "ShadowInstCompile=0", "ShadowInstVerify=0", "BenchShadowInst=0", "BenchBigPages=0", "BenchShadowTex=0", "BenchTexTable=0", "YawScan=0", "HoldYawDeg=-1", "GBufferBatching=0", "GBufferInstCompile=0", "GBufferInstVerify=0", "BenchGBufferInst=0", "ParallelUpload=0", "BenchParallelUpload=0", "BenchShadowPlanAsync=0", "DirectUploadCount=0", "FxApplyCount=0", "GBufferTexCount=0", "BenchAllocSlabs=0", "BenchTexDedupe=0", "BenchCbSkip=0", "BenchTriPlain=0", "BenchEngine=0", "BenchMicro=0", "Quick=0", "SigScan=1", "DirectUpload=0", "DirectUploadVerify=0", "BenchDirectUpload=0", "SplitFilter=1", "SplitFilterOps=0x4ff", "Meter=0", "SplitFilterVerify=0", "BenchSplitFilter=0", "JoinTailCount=0", "SrvSpanCount=0", "ShadowRecorder=1", "ShadowRecorderScope=0x30f", "ShadowRecorderWaitUs=200", "ShadowRecorderPriority=0", "ShadowRecorderSplit=0xf", "ShadowRecorderInstancing=1", "ShadowRecVerify=0", "ShadowRecVerifySec=5", "BenchShadowRecorder=0", "ShadowRecCount=0", "GBufferRecorder=1", "GBufferRecorderScope=0x10055", "GBufferRecorderMaxSegments=12", "GBufferRecorderHelpers=2", "GBufferRecorderWaitUs=300", "GBufferRecorderIsland=30", "GBufferRecorderRedo=1", "GBufferRecorderSwapAhead=1", "GBufferBatching=0", "GBufferRecVerify=0", "GBufferRecVerifySec=6", "GBufferRecVerifyStride=0", "BenchGBufferRecorder=0", "GBufferRecCount=0", "GBufferRecStateDump=0", "GpuPassTiming=0", "YawProfile=0", "RotationProfile=0", $"ShadowRecorderHelpers={(Environment.ProcessorCount <= 8 ? 1 : 3)}", "GBufferRecorderCockpit=0", "GBufferRecorderByOrdinal=1", "SrvTailTrim=0", "PassFlush=0", "FrameStartGap=0", "RunnableThreads=0", "VramCount=0", "GpuPassStats=0", "ForwardRecCount=0", "BenchPassFlush=0", "SrvTailTrimVerify=0", "BenchSrvTailTrim=0" })
         Require(ini.Contains(key), "DcsQvCull.ini lacks " + key);
     var trimmed = ConfigurationWriters.DcsQvCull(on with { EngineModelAllocator = false, EngineTextureDedupe = false, EngineEffectBufferSkip = false, EnginePlainCounter = false, EngineCostWeights = false, EngineBeeps = false, EngineFrameHeap = false, EngineShadowInstancing = false, EngineStateFilter = false, EngineShadowRecorder = false, EngineGBufferRecorder = false });
     Require(trimmed.Contains("SlabBytes=4096") && trimmed.Contains("SplitFilter=0") && trimmed.Contains("ShadowRecorder=0") && trimmed.Contains("GBufferRecorder=0") && !trimmed.Contains("\nAllocSlabs=1") && trimmed.Contains("PlainTriangleCounter=0") && trimmed.Contains("StreamDedupe=0") && trimmed.Contains("SkipSameConstantBuffer=0") && trimmed.Contains("CostWeights=0") && trimmed.Contains("Beeps=0") && trimmed.Contains("FrameHeapSlabs=0") && trimmed.Contains("BigModelPages=0") && trimmed.Contains("ShadowInstancing=0") && trimmed.Contains("ShadowBatching=0") && trimmed.Contains("ShadowPlanAsync=0") && trimmed.Contains("ShadowTextureSkip=0")
@@ -1116,11 +1183,11 @@ Test("Combined profiles opt into the bounded focus adapter", () =>
     foreach (var p in ProfilePresets.All.Where(p => p.QuadFocusAdapter))
     {
         Require(p.UsesQuadFocus && p.NeuralRendering && p.FrameGen == FrameGeneration.Nvidia);
-        var issues = ProfileValidation.Validate(p with { ExperimentalAcknowledged = true, NeuralRuntimePath = "nvngx_dlssnr.dll" });
+        var issues = ProfileValidation.Validate(p with { NeuralRuntimePath = "nvngx_dlssnr.dll" });
         Require(!issues.Any(i => i.Severity == IssueSeverity.Error));
     }
 });
-Test("Focus adapter rejects unverified alternative compositors", () => Require(ProfileValidation.Validate(new() { QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, NeuralRendering = true, ExperimentalAcknowledged = true, QuadViewsLayerDirectory = "alternative" }).Any(i => i.Code == "quad-adapter-provider")));
+Test("Focus adapter rejects unverified alternative compositors", () => Require(ProfileValidation.Validate(new() { QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, NeuralRendering = true, QuadViewsLayerDirectory = "alternative" }).Any(i => i.Code == "quad-adapter-provider")));
 Test("Focus configuration avoids nested foveation and duplicate peripheral processing", () =>
 {
     var ini = ConfigurationWriters.Cheeky(ProfilePresets.All[5] with { QuadNeuralEdgeFade = false });
@@ -1154,7 +1221,7 @@ Test("Focus adapter fails closed when adapted binaries are missing", () =>
 {
     var exe = Make("missing-adapter/bin/DCS.exe", "fixture"); var options = Make("missing-adapter/options.lua", Lua);
     var runtime = Make("missing-adapter/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("missing-adapter/runtime.dll", "fixture");
-    var p = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, NeuralRendering = true, ExperimentalAcknowledged = true };
+    var p = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, NeuralRendering = true };
     Throws<InvalidDataException>(() => new DeploymentPlanner(new(null, "unused", "unused")).Build(p, new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime }, Path.Combine(root, "missing-adapter/managed")));
 });
 foreach (var runtimeKind in new[] { RuntimeKind.Pimax, RuntimeKind.SboysSteamVr })
@@ -1169,7 +1236,7 @@ foreach (var runtimeKind in new[] { RuntimeKind.Pimax, RuntimeKind.SboysSteamVr 
         var focus = Path.Combine(root, dir + "/focus"); Directory.CreateDirectory(Path.Combine(focus, "CheekyFoveatedDLSS"));
         File.Copy(Path.Combine(upstream, "dxgi.dll"), Path.Combine(focus, "dxgi.dll"));
         foreach (var name in new[] { "CheekyFoveatedDLSSHost.dll", "CheekyFoveatedDLSSRuntime.dll" }) File.Copy(Path.Combine(workspace, "artifacts/native/cheeky/bin/Release/CheekyFoveatedDLSS", name), Path.Combine(focus, "CheekyFoveatedDLSS", name));
-        var p = new VrProfile { Runtime = runtimeKind, QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, NeuralRendering = true, NeuralRuntimePath = neuralRuntime, FrameGen = FrameGeneration.Nvidia, Gaze = runtimeKind == RuntimeKind.Pimax ? GazeMode.EyeTracked : GazeMode.Fixed, ExperimentalAcknowledged = true };
+        var p = new VrProfile { Runtime = runtimeKind, QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, NeuralRendering = true, NeuralRuntimePath = neuralRuntime, FrameGen = FrameGeneration.Nvidia, Gaze = runtimeKind == RuntimeKind.Pimax ? GazeMode.EyeTracked : GazeMode.Fixed };
         var inv = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime, SteamVrRuntime = runtime };
         var plan = new DeploymentPlanner(new(ofxr, null, Path.Combine(workspace, "artifacts/native/cheeky/bin/Release/CheekyOpenXRLayer.dll"), Path.Combine(workspace, "external/quadviews/bin/x64/Release"), focus, DeferredOfxr)).Build(p, inv, Path.Combine(root, dir + "/managed"));
         Require(plan.LaunchEnvironment["DCSVR_QUAD_FOCUS"] == "1");
@@ -1246,19 +1313,6 @@ Test("Invalid quality controls cannot be deployed", () =>
         new VrProfile { QuadEdgeBlend = .51 }, new VrProfile { FlowPreset = (NvidiaFlowPreset)99 } };
     foreach (var p in invalid) Require(ProfileValidation.Validate(p).Any(i => i.Severity == IssueSeverity.Error));
 });
-Test("Guided setup keeps precise quality values across every route and stage", () =>
-{
-    var source = ProfilePresets.All[5] with { FoveaWidth = .61234567890123, NeuralLocalTone = 1.123456789, QuadFocusScale = 1.32, FlowPreset = NvidiaFlowPreset.Slow,
-        Id = "personal", NeuralRuntimePath = "owned.dll", RuntimeManifestPath = "override.json", ExperimentalAcknowledged = false };
-    foreach (var route in Enum.GetValues<RuntimeKind>()) foreach (var stage in Enum.GetValues<SetupStage>())
-    {
-        var p = GuidedSetup.Configure(source, route, stage, GazeMode.Fixed, TrackingKind.Lighthouse);
-        Require(p.FoveaWidth == source.FoveaWidth && p.NeuralLocalTone == source.NeuralLocalTone && p.QuadFocusScale == source.QuadFocusScale && p.FlowPreset == source.FlowPreset && p.Id == source.Id && p.NeuralRuntimePath == source.NeuralRuntimePath);
-        Require(!p.ExperimentalAcknowledged && (route == source.Runtime ? p.RuntimeManifestPath == source.RuntimeManifestPath : p.RuntimeManifestPath is null));
-        Require(p.NeuralRendering == (stage == SetupStage.Combined));
-    }
-});
-Test("Guided setup rejects undefined stage choices", () => Throws<ArgumentException>(() => GuidedSetup.Configure(new(), RuntimeKind.Pimax, (SetupStage)99, GazeMode.Fixed, TrackingKind.Slam)));
 Test("Steam libraries detect escaped paths and ignore app IDs", () =>
 {
     var steam = Path.GetFullPath(Path.Combine(root, "steam-discovery")); var library = Path.GetFullPath(Path.Combine(root, "steam-library"));
@@ -1280,7 +1334,7 @@ Test("Readiness rejects absent Sboys registration and gaze instead of claiming s
 {
     var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, Tracking = TrackingKind.Lighthouse };
     var report = Readiness.Check(p, new(), new ControlService(root, Path.Combine(root, "readiness-missing/state")));
-    Require(!report.CanPrepare && !report.HeadsetVerified && report.Checks.Any(c => c.Id == "sboys-registration" && c.State == CheckState.Error) && report.Checks.Any(c => c.Id == "gaze-bridge" && c.State == CheckState.Error));
+    Require(!report.CanPrepare && report.Checks.Any(c => c.Id == "sboys-registration" && c.State == CheckState.Error) && report.Checks.Any(c => c.Id == "gaze-bridge" && c.State == CheckState.Error));
 });
 Test("Readiness accepts registered driver and enabled gaze DLL as file facts only", () =>
 {
@@ -1288,7 +1342,7 @@ Test("Readiness accepts registered driver and enabled gaze DLL as file facts onl
     var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, Tracking = TrackingKind.Slam };
     var report = Readiness.Check(p, new() { Drivers = [new("CustomHeadsetOpenVR", root, true, false)], Layers = [new("Fixture", Make("readiness-present/gaze.json", "{\"file_format_version\":\"1.0.0\",\"api_layer\":{\"name\":\"XR_APILAYER_MBUCCHIA_eye_trackers\",\"library_path\":\"x.dll\",\"api_version\":\"1.0\",\"disable_environment\":\"DISABLE_XR_APILAYER_MBUCCHIA_eye_trackers\"}}"), true, "XR_APILAYER_MBUCCHIA_eye_trackers", dll, true)] }, new ControlService(root, Path.Combine(root, "readiness-present/state")));
     Require(report.Checks.Single(c => c.Id == "sboys-registration").State == CheckState.Pass && report.Checks.Single(c => c.Id == "gaze-bridge").State == CheckState.Pass);
-    Require(report.Checks.All(c => c.Id != "sboys-tracking") && !report.HeadsetVerified); // tracking does not change deployment
+    Require(report.Checks.All(c => c.Id != "sboys-tracking")); // tracking does not change deployment
 });
 Test("Readiness rejects a Sboys beta driver when preparing the pinned release", () =>
 {
@@ -1345,7 +1399,7 @@ foreach (var mode in Enum.GetValues<FpsLimitMode>())
     Test($"{route} framegen {mode} cap applies and restores without quality changes", () =>
     {
         var p = new VrProfile { Id = "fps-" + route + "-" + mode, Runtime = route, QuadViews = QuadProvider.None, FrameGen = FrameGeneration.Nvidia,
-            FpsLimit = mode, HeadsetRefreshHz = 90, RenderedFpsCap = 47.5, DisableDcsVSync = mode != FpsLimitMode.Preserve, ExperimentalAcknowledged = true, NeuralIntensity = .423456789 };
+            FpsLimit = mode, HeadsetRefreshHz = 90, RenderedFpsCap = 47.5, DisableDcsVSync = mode != FpsLimitMode.Preserve, NeuralIntensity = .423456789 };
         var f = PacingFixture(route + "-" + mode, p); var original = File.ReadAllText(f.Options);
         var changes = f.Plan.Files.Single(file => file.Path == f.Options).LuaChanges!;
         Require(changes.Any(c => c.Path == "graphics.maxFPS") == (mode != FpsLimitMode.Preserve));
@@ -1357,10 +1411,22 @@ foreach (var mode in Enum.GetValues<FpsLimitMode>())
         var saved = f.Plan.Files.Single(file => file.Path.EndsWith("profile.json")); Require(JsonData.Deserialize<VrProfile>(Encoding.UTF8.GetString(saved.Content)) == p);
         Require(f.Service.RestoreOriginals().Complete && File.ReadAllText(f.Options) == original);
     });
+Test("Profiles saved with settings that no longer exist still load", () =>
+{
+    // Earlier versions saved self-reported limiters, an experimental consent and a Sboys folder; scripts may still send them.
+    var profile = ProfilePresets.All[1];
+    var obsolete = "\"externalLimiter\": \"Active\", \"externalLimiterFps\": 30, \"runtimeReprojection\": \"Off\", \"experimentalAcknowledged\": true, \"sboysDriverDirectory\": \"C:\\\\Sboys\", \"ExperimentalAcknowledged\": false, ";
+    var json = JsonData.Serialize(profile).Insert(1, obsolete);
+    Require(JsonData.Deserialize<VrProfile>(json) == profile, "profile.json");
+    var draft = new SavedDraft(profile, null, null, DateTimeOffset.UnixEpoch);
+    var draftJson = JsonData.Serialize(draft).Replace("\"profile\": {", "\"profile\": {" + obsolete);
+    Require(draftJson.Contains("sboysDriverDirectory") && JsonData.Deserialize<SavedDraft>(draftJson).Profile == profile, "draft.json");
+    Throws<System.Text.Json.JsonException>(() => JsonData.Deserialize<VrProfile>(JsonData.Serialize(profile).Insert(1, "\"notASetting\": 1, ")));
+});
 Test("Legacy profiles default to preserving all FPS controls", () =>
 {
     var p = JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"legacy\",\"name\":\"Legacy\"}");
-    Require(p.FpsLimit == FpsLimitMode.Preserve && !p.DisableDcsVSync && p.ExternalLimiter == ExternalPacingState.Unknown && p.RuntimeReprojection == ExternalPacingState.Unknown);
+    Require(p.FpsLimit == FpsLimitMode.Preserve && !p.DisableDcsVSync);
 });
 Test("Disabling framegen removes the half-refresh cap", () =>
 {
@@ -1371,10 +1437,8 @@ Test("Disabling framegen removes the half-refresh cap", () =>
 Test("Fractional refresh preserves half-rate precision", () => Require(FramePacing.RequestedCap(new() { FpsLimit = FpsLimitMode.MatchRefresh, HeadsetRefreshHz = 89.5, FrameGen = FrameGeneration.Nvidia }) == 44.75));
 Test("FPS settings reject nonfinite rates and unrecognized modes", () =>
 {
-    foreach (var p in new[] { new VrProfile { HeadsetRefreshHz = double.NaN }, new() { HeadsetRefreshHz = 59 }, new() { RenderedFpsCap = double.PositiveInfinity }, new() { RenderedFpsCap = 29 }, new() { FpsLimit = (FpsLimitMode)90 } })
+    foreach (var p in new[] { new VrProfile { HeadsetRefreshHz = double.NaN }, new() { HeadsetRefreshHz = 49 }, new() { RenderedFpsCap = double.PositiveInfinity }, new() { RenderedFpsCap = 29 }, new() { FpsLimit = (FpsLimitMode)90 } })
         Require(ProfileValidation.Validate(p).Any(i => i.Severity == IssueSeverity.Error));
-    // Old self-reported limiter values are no longer shown, so they can never block a profile.
-    Require(!ProfileValidation.Validate(new() { ExternalLimiterFps = 0, ExternalLimiter = ExternalPacingState.Active, RuntimeReprojection = ExternalPacingState.Active }).Any(i => i.Severity == IssueSeverity.Error));
 });
 Test("FPS ceiling distinguishes fresh frames from the selected refresh", () =>
 {
@@ -1383,13 +1447,10 @@ Test("FPS ceiling distinguishes fresh frames from the selected refresh", () =>
     Require(FramePacing.Checks(p, new()).Any(c => c.Id == "fps-under-target" && c.State == CheckState.Warning));
     Require(FramePacing.Describe(p with { RenderedFpsCap = 300 }).ConfiguredOutputCeiling == 90);
 });
-Test("Other limiters and motion smoothing stay manual checks whatever an old profile reported", () =>
+Test("Other limiters and motion smoothing stay manual checks", () =>
 {
-    foreach (var state in Enum.GetValues<ExternalPacingState>())
-    {
-        var checks = FramePacing.Checks(new() { FrameGen = FrameGeneration.Nvidia, ExternalLimiter = state, RuntimeReprojection = state }, new());
-        Require(checks.Single(c => c.Id == "external-limiters").State == CheckState.Manual && checks.Single(c => c.Id == "runtime-reprojection").State == CheckState.Manual);
-    }
+    var checks = FramePacing.Checks(new() { FrameGen = FrameGeneration.Nvidia }, new());
+    Require(checks.Single(c => c.Id == "external-limiters").State == CheckState.Manual && checks.Single(c => c.Id == "runtime-reprojection").State == CheckState.Manual);
     Require(FramePacing.Checks(new(), new()).All(c => c.Id != "runtime-reprojection"));
 });
 Test("Preflight flags legacy caps and desktop VSync", () =>
@@ -1427,18 +1488,13 @@ foreach (var exists in new[] { false, true })
         AtomicFile.WriteText(f.Autoexec, "max_fps=20;"); Throws<IOException>(() => f.Service.PrepareLaunchApplied());
         Require(f.Service.RestoreOriginals().Complete && File.ReadAllText(f.Autoexec) == "max_fps=20;");
     });
-Test("Guided stages preserve customized pacing", () =>
-{
-    var p = new VrProfile { FpsLimit = FpsLimitMode.Custom, RenderedFpsCap = 47.5, HeadsetRefreshHz = 120 };
-    foreach (var stage in Enum.GetValues<SetupStage>()) Require(GuidedSetup.Configure(p, RuntimeKind.Pimax, stage, GazeMode.Fixed, TrackingKind.Unknown) is { FpsLimit: FpsLimitMode.Custom, RenderedFpsCap: 47.5 });
-});
 Test("Sboys gaze bridge loads explicitly below Quad Views", () =>
 {
     var exe = Make("gaze-order/bin/DCS.exe", "fixture"); var options = Make("gaze-order/options.lua", Lua); var runtime = Make("gaze-order/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("gaze-order/runtime.dll", "fixture");
     Make("gaze-order/gaze/eye.dll", "fixture");
     var manifest = Make("gaze-order/gaze/eye.json", "{\"file_format_version\":\"1.0.0\",\"api_layer\":{\"name\":\"XR_APILAYER_MBUCCHIA_eye_trackers\",\"library_path\":\"eye.dll\",\"api_version\":\"1.0\",\"implementation_version\":\"1\",\"description\":\"fixture\",\"disable_environment\":\"DISABLE_XR_APILAYER_MBUCCHIA_eye_trackers\"}}");
     var ofxr = new ComponentCache(Path.Combine(root, "gaze-order/cache")).Import(PackageCatalog.Get("ofxr"), Path.Combine(workspace, ".cache/packages", PackageCatalog.Get("ofxr").ArchiveName));
-    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Tracking = TrackingKind.Lighthouse, QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Nvidia, Gaze = GazeMode.EyeTracked, ExperimentalAcknowledged = true };
+    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Tracking = TrackingKind.Lighthouse, QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Nvidia, Gaze = GazeMode.EyeTracked };
     var inv = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, SteamVrRuntime = runtime, Layers = [new("CurrentUser", manifest, true, "XR_APILAYER_MBUCCHIA_eye_trackers", Path.Combine(root, "gaze-order/gaze/eye.dll"), true)] };
     var plan = new DeploymentPlanner(new(ofxr, null, null, Path.Combine(workspace, "external/quadviews/bin/x64/Release"), OfxrLayerDll: DeferredOfxr)).Build(p, inv, Path.Combine(root, "gaze-order/managed"));
     Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_XRFrameBridge_diagnostic;XR_APILAYER_MBUCCHIA_eye_trackers");
@@ -1497,7 +1553,7 @@ Test("Preview removes its verified extractions", () =>
     var (fixture, runtime, _, options, exe) = LaunchFixture("staging");
     Require(fixture.RestoreOriginals().Complete);
     var service = new ControlService(Path.Combine(workspace, ".cache"), fixture.StateRoot); // .cache/packages holds the pinned archives.
-    service.Preview(new() { FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.None, ExperimentalAcknowledged = true }, new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime });
+    service.Preview(new() { FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.None }, new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime });
     var staging = Path.Combine(service.StateRoot, "cache/staging");
     Require(!Directory.Exists(staging) || Directory.GetDirectories(staging).Length == 0);
 });
@@ -1559,7 +1615,7 @@ Test("Restore removes declared component logs only, never other files", () =>
 });
 Test("Eye-tracked Sboys profile without a gaze bridge is flagged, not blocked", () =>
 {
-    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Tracking = TrackingKind.Lighthouse, QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked, ExperimentalAcknowledged = true };
+    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Tracking = TrackingKind.Lighthouse, QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked };
     var issues = ProfileValidation.Validate(p, new InventorySnapshot { DcsExecutable = "x", OptionsPath = "y", SteamVrRuntime = "z" });
     Require(issues.Single(i => i.Code == "gaze-bridge-missing").Severity == IssueSeverity.Warning);
     Require(!ProfileValidation.Validate(p with { Gaze = GazeMode.Fixed }, new InventorySnapshot { DcsExecutable = "x", OptionsPath = "y", SteamVrRuntime = "z" }).Any(i => i.Code == "gaze-bridge-missing"));
@@ -1572,7 +1628,7 @@ Test("INI comparison is section-aware and ignores trailing comments", () =>
 });
 Test("Sboys 1.3 provides eye gaze through SteamVR without a bridge", () =>
 {
-    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, Tracking = TrackingKind.Slam, Gaze = GazeMode.EyeTracked, ExperimentalAcknowledged = true };
+    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, Tracking = TrackingKind.Slam, Gaze = GazeMode.EyeTracked };
     InventorySnapshot With(string version) => new() { DcsExecutable = "x", OptionsPath = "y", SteamVrRuntime = "z", Drivers = [new("CustomHeadsetOpenVR", root, true, false, version)] };
     Require(GazeBridge.RuntimeProvidesGaze(With("1.3.0")) && GazeBridge.RuntimeProvidesGaze(With("1.4.1")));
     Require(!GazeBridge.RuntimeProvidesGaze(With("1.3.0-beta.2")) && !GazeBridge.RuntimeProvidesGaze(With("1.2.9")));
@@ -1719,12 +1775,12 @@ Test("CPU Boost lists reject empty names and processes that start DCS", () =>
 {
     var p = new VrProfile { CpuBoost = true };
     Require(!ProfileValidation.Validate(p).Any(i => i.Code.StartsWith("boost")), "Default Boost lists are valid");
-    Require(ProfileValidation.Validate(p with { BoostCloseApps = ["notepad", " "] }).Any(i => i.Code == "boost-app-name" && i.Severity == IssueSeverity.Error));
+    Require(ProfileValidation.Validate(p with { FreeVram = true, FreeVramApps = ["notepad", " "] }).Any(i => i.Code == "boost-app-name" && i.Severity == IssueSeverity.Error));
     foreach (var name in new[] { "steam", "Steam.exe", "explorer", "EpicGamesLauncher", "DCS", "DcsControl" })
-        Require(ProfileValidation.Validate(p with { BoostCloseApps = [name] }).Any(i => i.Code == "boost-launcher" && i.Severity == IssueSeverity.Error), name);
+        Require(ProfileValidation.Validate(p with { FreeVram = true, FreeVramApps = [name] }).Any(i => i.Code == "boost-launcher" && i.Severity == IssueSeverity.Error), name);
     Require(ProfileValidation.Validate(p with { BoostBackgroundApps = ["msedge", "explorer"] }).Any(i => i.Code == "boost-launcher"));
     Require(!ProfileValidation.Validate(p with { BoostBackgroundApps = ["explorer"], BoostMoveBackgroundApps = false }).Any(i => i.Code == "boost-launcher"), "An unused move list is not checked");
-    Require(!ProfileValidation.Validate(p with { CpuBoost = false, BoostCloseApps = ["steam"] }).Any(i => i.Code.StartsWith("boost")), "Lists are checked only with Boost on");
+    Require(!ProfileValidation.Validate(p with { CpuBoost = false, BoostBackgroundApps = ["steam"] }).Any(i => i.Code.StartsWith("boost")), "Lists are checked only with Boost on");
     Require(ProfileValidation.Validate(p with { BoostDcsPriority = (BoostPriority)9 }).Any(i => i.Code == "boost-choice"));
     Require(ProfileValidation.Validate(new VrProfile { FoveaSource = (FoveaSource)7 }).Any(i => i.Code == "fovea-source"));
 });
@@ -1918,9 +1974,9 @@ Test("Boost validation refuses patterns that match protected processes or every 
     foreach (var pattern in new[] { "D*", "s*", "*team", "DCS_upd?ter", "audiodg", "DcsVr.Cli", "csrss.exe", "svc*", "*e*" })
         Require(ProfileValidation.Validate(p with { BoostBackgroundApps = [pattern] }).Any(i => i.Code == "boost-launcher" && i.Severity == IssueSeverity.Error), pattern);
     foreach (var pattern in new[] { "*", "**", "*.exe", "?*", "???" })
-        Require(ProfileValidation.Validate(p with { BoostCloseApps = [pattern] }).Any(i => i.Code == "boost-app-wildcard" && i.Severity == IssueSeverity.Error), pattern);
+        Require(ProfileValidation.Validate(p with { FreeVram = true, FreeVramApps = [pattern] }).Any(i => i.Code == "boost-app-wildcard" && i.Severity == IssueSeverity.Error), pattern);
     foreach (var pattern in new[] { "msedge*", "platform_runtime_*_service", "Spot?fy", "ms-teams" })
-        Require(!ProfileValidation.Validate(p with { BoostBackgroundApps = [pattern], BoostCloseApps = [pattern] }).Any(i => i.Severity == IssueSeverity.Error && i.Code.StartsWith("boost")), pattern);
+        Require(!ProfileValidation.Validate(p with { BoostBackgroundApps = [pattern], FreeVram = true, FreeVramApps = [pattern] }).Any(i => i.Severity == IssueSeverity.Error && i.Code.StartsWith("boost")), pattern);
     var high = ProfileValidation.Validate(p with { BoostDcsPriority = BoostPriority.High });
     Require(high.Any(i => i is { Code: "boost-high-priority", Severity: IssueSeverity.Warning } && i.Message.Contains("compositor")));
     Require(!high.Any(i => i.Code.StartsWith("boost") && i.Severity == IssueSeverity.Error));
@@ -2001,7 +2057,6 @@ Test("DCS-running guard compares canonical paths through junctions, Saved Games 
     Require(!ControlService.UsedByRunningDcs(Path.Combine(savedGames, "Other", "file.txt"), install, sg, managed));
     Require(!ControlService.UsedByRunningDcs(PathPolicy.UnderRoot(root, "guard/fixture/options.lua"), install, sg, managed), "fixture files elsewhere stay allowed");
     Require(!ControlService.UsedByRunningDcs(install + "-other\\bin\\DCS.exe", install, sg, managed), "a sibling with a common prefix is not inside");
-    Require(SystemPaths.SameFile(Path.Combine(link, "bin"), Path.Combine(install, "bin")));
     Directory.Delete(link); // removes the junction only
 });
 Test("Boost helper command passes the DCS executable and log, hidden when elevated", () =>
@@ -2526,7 +2581,11 @@ foreach (var (name, action) in tests)
     catch (Exception e) { failed.Add(name); Console.WriteLine("FAIL " + name + "\n" + e); }
 }
 var report = new { total = tests.Count, passed = tests.Count - failed.Count, failed, durationSeconds = timer.Elapsed.TotalSeconds, fixtureDirectory = root };
-AtomicFile.WriteText(Path.Combine(root, "result.json"), JsonData.Serialize(report)); Console.WriteLine(JsonData.Serialize(report)); return failed.Count == 0 ? 0 : 1;
+Console.WriteLine(JsonData.Serialize(report));
+// A fully passing run leaves nothing behind (each run used to add a fixture folder); a failing one keeps it to look at.
+if (failed.Count == 0) try { Directory.Delete(root, true); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+else AtomicFile.WriteText(Path.Combine(root, "result.json"), JsonData.Serialize(report));
+return failed.Count == 0 ? 0 : 1;
 
 /// <summary>A primary 3840×2160 144 Hz display for the monitor mode tests; records every call.</summary>
 sealed class FakeDisplays : IDisplayModes

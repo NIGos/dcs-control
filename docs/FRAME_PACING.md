@@ -1,8 +1,8 @@
 # Frame pacing and FPS limits
 
-Open **Framegen** before a live test. The tool preserves existing FPS limits and image-quality settings by default. Refresh rate is a value you enter after checking Pimax or SteamVR; it is not detected headset telemetry.
+Open **Framegen** before a live test. The tool preserves existing FPS limits and image-quality settings by default. The refresh rate is read from the headset software (Pimax Play's runtime as it runs, or SteamVR's setting on the Sboys route); the number field is only for setting it by hand.
 
-OFXR 0.2.1 produces one intermediate frame between rendered frames when synthesis succeeds. Its OpenXR presenter handles display pacing. The manager uses DCS's real `graphics.maxFPS` option for a rendered-frame cap; it does not write a fictitious OFXR limiter key. OFXR is optical-flow frame generation, separate from NVIDIA DLSS Frame Generation.
+OFXR (the djules75 fork 0.2.9.1 with DCS Control's patches) produces one (2×) or two (3×) generated frames per rendered frame, or switches between them (Auto). Its OpenXR presenter handles display pacing. The manager uses DCS's real `graphics.maxFPS` option for a rendered-frame cap; it does not write a fictitious OFXR limiter key. OFXR is optical-flow frame generation, separate from NVIDIA DLSS Frame Generation.
 
 | FPS limit mode | DCS change | Intended use |
 | --- | --- | --- |

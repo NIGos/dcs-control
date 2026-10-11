@@ -13,6 +13,25 @@ void* const kB = reinterpret_cast<void*>(0xB000);
 
 std::string NameOf(void* p) { return p == kA ? "A" : p == kB ? "B" : "?"; }
 
+// Flushes ctx and waits (event query, up to 30 s) until the GPU finished
+// everything submitted so far. The frames' queries are then ready by the
+// next boundary on a loaded GPU too: no frame is dropped from the ring or
+// read without its statistics because the GPU was busy with other work
+// (fixed sleeps were enough only on an idle GPU).
+inline void WaitGpuIdle(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+  D3D11_QUERY_DESC qd = {D3D11_QUERY_EVENT, 0};
+  ID3D11Query* q = nullptr;
+  if (FAILED(dev->CreateQuery(&qd, &q)) || !q) {
+    Sleep(50);
+    return;
+  }
+  ctx->End(q);
+  const ULONGLONG end = GetTickCount64() + 30000;
+  BOOL done = FALSE;
+  while (ctx->GetData(q, &done, sizeof(done), 0) != S_OK && GetTickCount64() < end) Sleep(1);
+  q->Release();
+}
+
 void Synthetic() {
   // Two consecutive frames, 1 MHz (1 tick = 1 us): A{ B } A, then xrEndFrame.
   std::vector<gpt::Done> done(2);
@@ -101,8 +120,7 @@ void Device() {
     gpt::OnBoundary(kB, false, 1);
     gpt::OnBoundary(kA, false, 0);
     ctx->ClearRenderTargetView(rtv, f == kFrames - 1 ? green : red);  // outside passes
-    ctx->Flush();
-    Sleep(2);
+    WaitGpuIdle(dev, ctx);
   }
   // A d3d11-style table rewrite of a hooked slot is taken back at the next boundary.
   const int cs = DcsQv_ContextSlot("CopyResource");
@@ -112,7 +130,7 @@ void Device() {
   Check(vt[cs] == gpt::kHooks[gpt::kCopyResource] && gpt::g_s.rehooks > rehooks,
         "gpu pass timing: re-hook after a rewrite");
   gpt::OnBoundary(kB, false, 1);
-  Sleep(50);
+  WaitGpuIdle(dev, ctx);
   gpt::g_want = 0;
   gpt::OnBoundary(kA, true, 0);  // deactivates
   // d3d11's entry: the one from before, or the variant it switched to meanwhile.
@@ -212,10 +230,8 @@ void Stats() {
     gpt::OnBoundary(kB, true, 1);
     gpt::OnBoundary(kB, false, 1);
     gpt::OnBoundary(kA, false, 0);
-    ctx->Flush();
-    Sleep(3);
+    WaitGpuIdle(dev, ctx);
   }
-  Sleep(50);
   gpt::g_want = 0;
   gpt::OnBoundary(kA, true, 0);  // deactivates (last reads, hooks out, queries released)
   std::vector<gpt::Done> got;

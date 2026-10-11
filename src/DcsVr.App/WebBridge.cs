@@ -36,7 +36,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             _profile = draft.Profile;
             if (draft.Dcs is { } dcs) _dcs = dcs;
             if (draft.Options is { } options) _options = options;
-            _status = applied is null ? "Your last draft is back. Launch DCS applies it." : "Your last draft is back; it differs from the applied profile. Reset to applied undoes it.";
+            _status = applied is null ? "Your last draft is back. Launch DCS applies it." : "Your last draft is back; it differs from the applied profile. Undo changes brings it back.";
         }
     }
     private DraftStore Drafts => new(service.StateRoot);
@@ -195,7 +195,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             id = root.GetProperty("id").GetString();
             var action = root.GetProperty("action").GetString();
             var data = root.GetProperty("data");
-            if (action is "preview" or "apply" or "launch" or "resetNeural" or "save" or "export" or "refresh" or "checkReadiness" or "prepareSboys" or "importSboys" or "openSboys" or "detect") ReadDraft(data);
+            if (action is "preview" or "apply" or "launch" or "resetNeural" or "save" or "export" or "refresh" or "checkReadiness" or "prepareSboys" or "importSboys" or "openSboys" or "detect" or "diagnosticPackage" or "grantWriteAccess") ReadDraft(data);
             switch (action)
             {
                 case "ready":
@@ -216,8 +216,12 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     await RefreshEyeResolution();
                     return Reply(id, new { pimax = PimaxView() });
                 case "checkReadiness":
+                    // The guided setup checks its candidate (replace=true): afterwards the page's own draft and paths
+                    // come back, so a cancelled wizard leaves nothing behind for later commands.
+                    var page = data.TryGetProperty("replace", out var replace) && replace.ValueKind == JsonValueKind.True ? (_profile, _dcs, _options) : ((VrProfile, string?, string?)?)null;
                     Invalidate(); await Capture();
                     _readiness = await Task.Run(() => Readiness.Check(_profile, CurrentInventory, service));
+                    if (page is { } wizardBefore) { (_profile, _dcs, _options) = wizardBefore; _plan = null; } // the wizard reads this check's report
                     if (FoveaFact(_profile) is { } fact)
                         _readiness = _readiness with { Checks = [.. _readiness.Checks, new("pimax-fovea", fact.Severity == IssueSeverity.Warning ? CheckState.Warning : CheckState.Pass, "Focus area from Pimax Play", fact.Message)] };
                     _status = _readiness.CanPrepare ? "Automatic checks done. Confirm the items under Check yourself." : "Setup needs attention. Resolve the listed blockers, then check again.";
@@ -245,16 +249,30 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         : ControlService.SameDraft(_profile, current.Profile) ? "This is the applied profile: Launch DCS writes nothing new" + (FoveaChanged(current) is null ? "." : " except Pimax Play's new focus values.")
                         : $"Launch DCS writes them over {current.Profile?.Name ?? current.Journal.ProfileId}; the original files stay backed up.")
                         + (fovea.Pimax is { } pimax ? " " + PimaxFovea.Summary(pimax) : fovea.Applies ? " " + fovea.Notes[0] : ""); break;
+                case "grantWriteAccess":
+                    EnsureInteractive(); await Capture();
+                    _status = await EnsureWritable(LaunchSafety.ProfileFolders(_profile, CurrentInventory), askedByPilot: true)
+                        ? "Write access granted: DCS Control can now write the profile's files." : "DCS Control can already write to every folder this profile uses.";
+                    Invalidate(); break;
                 case "apply":
                     // Apply without launching: the same steps as Launch DCS, with Pimax Play's values read now.
                     Invalidate(); await Capture();
-                    var synced = await Task.Run(() => service.SyncApplied(_profile, CurrentInventory));
+                    var synced = await WithWriteAccess(() => service.SyncApplied(_profile, CurrentInventory), () => LaunchSafety.ProfileFolders(_profile, CurrentInventory));
                     _status = synced.Message + " Start DCS with Launch DCS so it receives the profile's OpenXR environment.";
                     _report = SyncReport(synced); break;
                 case "restore":
                     // Back to stock DCS: every path DCS Control changed goes back to what was there before.
-                    Invalidate(); var restored = await Task.Run(service.RestoreOriginals);
-                    _status = restored.Complete ? "Back to stock DCS: every file and setting DCS Control changed is back to its original. DCS runs as if the app had never been used." : "Some original files could not be restored; they are still listed in Recovery.";
+                    Invalidate();
+                    var restored = await Task.Run(service.RestoreOriginals);
+                    // A file left behind in a protected folder (DCS under Program Files): one Windows prompt, then the rest.
+                    if (!restored.Complete && !offline)
+                    {
+                        var restoreFolders = await Task.Run(() => service.Originals.Read().Files.Select(f => Path.GetDirectoryName(f.Path)).OfType<string>().ToList());
+                        if (await Task.Run(() => { LaunchSafety.ForgetWriteProbes(); return LaunchSafety.UnwritableFolders(restoreFolders); }) is { Count: > 0 }
+                            && await EnsureWritable(restoreFolders, askedByPilot: false, throwWhenBlocked: false))
+                            restored = await Task.Run(service.RestoreOriginals);
+                    }
+                    _status = restored.Complete ? "Back to stock DCS: every file and setting DCS Control changed is back to its original. DCS runs as if the app had never been used." : "Some original files could not be restored; they are still listed on the Stock DCS page.";
                     _report = restored.Complete ? "Every file DCS Control changed is back to its original; owned DCS settings in options.lua were set back, your other edits kept." : string.Join("\n", restored.Conflicts); break;
                 case "engineStatus":
                     // Read-only: the DCS engine optimizations' own log, the newest test report and DCS's log.
@@ -328,7 +346,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         _status = LaunchStatus(checkedSync, "Offline verification: launch contract verified, DCS was not started.");
                         _report = SyncReport(checkedSync) + "\nLaunch contract verified: " + checkedStart.FileName; break;
                     }
-                    var (launched, dcsProcess) = await Task.Run(() => service.SyncAndLaunch(_profile, CurrentInventory));
+                    var (launched, dcsProcess) = await WithWriteAccess(() => service.SyncAndLaunch(_profile, CurrentInventory), () => LaunchSafety.ProfileFolders(_profile, CurrentInventory));
                     dcsProcess.Dispose();
                     _status = LaunchStatus(launched, "DCS launched."); _report = SyncReport(launched); break;
                 case "launchCheck":
@@ -424,6 +442,54 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     private static string SyncReport(LaunchSync sync) => sync.Message + "\nProfile: " + sync.Journal.ProfileId
         + (sync.ReplacedProfileId is { } replaced && replaced != sync.Journal.ProfileId && !sync.Message.Contains(" over " + replaced, StringComparison.Ordinal) ? "\nWritten over: " + replaced : "");
     private void EnsureInteractive() { if (offline) throw new InvalidOperationException("Interactive commands are disabled during offline verification."); }
+    /// <summary>Runs a step that writes game files (Launch, Apply). Only when Windows actually refuses a write (a
+    /// protected folder: DCS under Program Files) is it asked for the permission, once, and the step runs again; a
+    /// launch that writes nothing never asks.</summary>
+    private async Task<T> WithWriteAccess<T>(Func<T> step, Func<IReadOnlyList<string>> folders)
+    {
+        try { return await Task.Run(step); }
+        catch (Exception e) when (!offline && (e is UnauthorizedAccessException || e.InnerException is UnauthorizedAccessException))
+        {
+            if (!await EnsureWritable(folders(), askedByPilot: false)) throw;
+            return await Task.Run(step);
+        }
+    }
+
+    /// <summary>Folders whose permission change was declined or did not help in this session: not asked again.</summary>
+    private readonly HashSet<string> _grantRefused = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Makes <paramref name="folders"/> writable: one Windows prompt for the folders whose permissions keep this account
+    /// out (local NTFS only). A folder blocked by something else (antivirus, Controlled folder access, a read-only or
+    /// network drive) is never "fixed" with a prompt that cannot help: the pilot reads what blocks it instead. Returns
+    /// whether permissions were changed.
+    /// </summary>
+    private async Task<bool> EnsureWritable(IReadOnlyList<string> folders, bool askedByPilot, bool throwWhenBlocked = true)
+    {
+        var blocked = await Task.Run(() => { LaunchSafety.ForgetWriteProbes(); return LaunchSafety.UnwritableFolders(folders); });
+        if (blocked.Count == 0) return false;
+        var grantable = await Task.Run(() => blocked.Where(f => LaunchSafety.PermissionsDenyWrite(f) && LaunchSafety.CanGrant(f) && (askedByPilot || !_grantRefused.Contains(f))).ToList());
+        string Advice(IReadOnlyList<string> list) => string.Join(" ", list.Select(f => f + ": " + LaunchSafety.WriteAdvice(f)).Distinct());
+        if (grantable.Count == 0)
+        {
+            if (!throwWhenBlocked) return false;
+            throw new InvalidOperationException("DCS Control cannot write to " + string.Join("; ", blocked) + ". " + Advice(blocked));
+        }
+        _status = "Asking Windows for permission to write to " + string.Join(" and ", grantable) + "…";
+        if (!await Task.Run(() => LaunchSafety.GrantWriteAccess(grantable)))
+        {
+            _grantRefused.UnionWith(grantable);
+            if (!throwWhenBlocked) return false;
+            throw new InvalidOperationException("DCS Control cannot write to " + string.Join("; ", grantable) + " and the Windows prompt was declined. " + LaunchSafety.WriteAccessAdvice);
+        }
+        if (await Task.Run(() => LaunchSafety.UnwritableFolders(folders)) is { Count: > 0 } still)
+        {
+            _grantRefused.UnionWith(still);
+            if (!throwWhenBlocked) return true;
+            throw new InvalidOperationException("DCS Control still cannot write to " + string.Join("; ", still) + ". " + Advice(still));
+        }
+        return true;
+    }
     private async Task Capture()
     {
         _inventory = await Task.Run(() => capture is null ? new WindowsInventory().Capture(_dcs, _options) : capture(_dcs, _options));
@@ -461,7 +527,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         else if (_profile.KeepDcsLauncher && LaunchSafety.LauncherRestartUnknown) issues.Insert(0, new("dcs-launcher", IssueSeverity.Warning, LaunchSafety.LauncherUnknownMessage));
         return new { version = ProductInfo.Version, profile = _profile, dcs = _dcs, options = _options, inventory = CurrentInventory, pimax = PimaxView(),
             activeRoute = new { route = activeRoute.Route?.ToString(), summary = activeRoute.Summary },
-            issues, cadence = Enum.IsDefined(_profile.FpsLimit) ? FramePacing.Describe(HeadsetRefresh.Resolve(_profile), CurrentInventory) : null, headsetRefresh = HeadsetRefresh.Detect(_profile.Runtime), status = _status, report = _report,
+            issues, cadence = Enum.IsDefined(_profile.FpsLimit) ? FramePacing.Describe(HeadsetRefresh.Resolve(_profile), CurrentInventory) : null, headsetRefresh = HeadsetRefresh.Detect(_profile.Runtime), dcsCustomIpd = CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD_enable") == "true" ? CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD")?.Trim('"') : null, gpu = new { nvidiaRtx = GpuInfo.Unknown || GpuInfo.HasNvidiaRtx, names = GpuInfo.Names }, status = _status, report = _report,
             plan = _plan is null ? null : new { foveaStamp = _previewFoveaStamp, files = _plan.Files.Select(f => new { f.Path, f.Purpose, bytes = f.Content.Length, replaces = f.ExpectedSha256 is not null, f.LuaChanges }), environment = _plan.LaunchEnvironment },
             // Recovery: one record of original files, restored with one action.
             originals = new { count = originals.Count, files = originals.Files, state = originals.State, lastAction = originals.LastAction, lastActionAt = originals.LastActionAt, folder = originals.Folder },
@@ -512,5 +578,5 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     private static string DcsLogPath(string? options) =>
         options is not null && Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(options))) is { } profileRoot
             ? Path.Combine(profileRoot, "Logs", "dcs.log")
-            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Saved Games", "DCS", "Logs", "dcs.log");
+            : Path.Combine(SystemPaths.SavedGames(), "DCS", "Logs", "dcs.log");
 }

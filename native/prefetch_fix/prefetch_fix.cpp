@@ -160,7 +160,9 @@ void patch_get_proc_import(HMODULE module) {
             if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) continue;
             auto byName = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData);
             if (strcmp(reinterpret_cast<const char*>(byName->Name), "GetProcAddress") != 0) continue;
-            if (slots->u1.Function != reinterpret_cast<ULONG_PTR>(g_real_get_proc)) continue;
+            // kernel32's, or KernelBase's when the module imports it through an API set.
+            static const auto kernelbase = reinterpret_cast<ULONG_PTR>(GetProcAddress(GetModuleHandleW(L"KernelBase.dll"), "GetProcAddress"));
+            if (slots->u1.Function != reinterpret_cast<ULONG_PTR>(g_real_get_proc) && (kernelbase == 0 || slots->u1.Function != kernelbase)) continue;
             MEMORY_BASIC_INFORMATION info{};
             if (!VirtualQuery(&slots->u1.Function, &info, sizeof(info)) || info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD)) continue;
             // Code sharing the page stays executable while the slot is written.

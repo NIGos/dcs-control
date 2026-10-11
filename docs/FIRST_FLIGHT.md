@@ -1,6 +1,6 @@
 # First headset validation
 
-This procedure is for the first user-run DCS test. Development has not performed it.
+This procedure is a checklist for a first test on a new PC or headset.
 
 Run **Guided setup** first. [SETUP.md](SETUP.md) covers prerequisites, the Pimax/Sboys installation route and the automatic preflight. On the audited PC, Pimax baseline and combined preparation pass their automatic file checks. Sboys currently has driver 1.3.0-beta.2, no detected OpenXR gaze bridge and no selected tracking route in the generated test profile. Update to the pinned 1.3.0 through its About page, select the actual tracking hardware, and validate gaze or explicitly choose Fixed focus before that route's test. These are detected preparation requirements, not headset measurements.
 
@@ -21,6 +21,6 @@ Start with the original Pimax runtime and your existing working headset setup. C
 
 The full combined profile uses software Quad Views on both runtime routes. Disable competing Quad Views layers (for example a separately installed Quad-Views-Foveated); the app reports detected layer conflicts during preview. Keep Quad Views on in Pimax Play, as in the tested setup: the bundled one takes over from it for DCS. Do not select Pimax native as the provider in the app for this Cheeky adapter. The Pimax driver/runtime itself remains the original one on that route.
 
-Use **Launch DCS with applied profile** for every manager-managed test. Keep the application and backup state directory available. Close DCS and use Back to stock DCS before using a normal shortcut or repairing/updating game files.
+Use **Launch DCS** for every test. Keep the application and backup state directory available. Close DCS and use Back to stock DCS before using a normal shortcut or repairing/updating game files.
 
 Record three runs per configuration and compare median/p95 frame times. A higher FPS counter is useful only if both eyes show stable images with acceptable latency and readability. Run the best candidate for at least 30 minutes and test mission reload and recentering before considering it a usable preset.

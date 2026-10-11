@@ -149,13 +149,14 @@ void Reference(Plan& ref, void** vec, std::vector<uint32_t>* offs) {
 }
 
 bool WaitDone(int count) {
-  for (int t = 0; t < 2000; ++t) {
+  // A deadline, not a spin count: planner threads on a loaded machine are slow.
+  for (const ULONGLONG until = GetTickCount64() + 60000;;) {
     int done = 0;
     for (int k = 0; k < count; ++k) done += shadowbatch::g_learned[k].plan->state.load() == shadowbatch::kDone;
     if (done == count) return true;
+    if (GetTickCount64() >= until) return false;
     Sleep(1);
   }
-  return false;
 }
 
 std::vector<uint32_t> ReadBuffer(ID3D11Device* dev, ID3D11DeviceContext* ctx, uint32_t count) {

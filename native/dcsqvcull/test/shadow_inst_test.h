@@ -20,12 +20,133 @@ const std::wstring kFxoDirPath = [] {
   return std::wstring(profile) + L"\\Saved Games\\DCS\\fxo\\";
 }();
 const wchar_t* kFxoDir = kFxoDirPath.c_str();
-const wchar_t* kShaderDir = L"E:\\SteamLibrary\\steamapps\\common\\DCSWorld\\Bazar\\shaders\\";
+// The install's shader sources (empty when DCS is not found: nothing copied).
+const std::wstring kShaderDirPath = dcsinstall::Shaders();
+const wchar_t* kShaderDir = kShaderDirPath.c_str();
+
+constexpr const wchar_t* kTempPrefix = L"dcsqv_r12_test_";
+
+inline std::wstring TempBase() {
+  wchar_t t[MAX_PATH] = {};
+  const DWORD n = GetTempPathW(MAX_PATH, t);
+  return n && n < MAX_PATH ? std::wstring(t) : std::wstring();
+}
 
 std::wstring TempRoot() {
-  wchar_t t[MAX_PATH];
-  GetTempPathW(MAX_PATH, t);
-  return std::wstring(t) + L"dcsqv_r12_test\\";
+  // Per process: two test runs at once (or a leftover handle of an earlier
+  // run) must not share the cache folder.
+  return TempBase() + kTempPrefix + std::to_wstring(GetCurrentProcessId()) + L"\\";
+}
+
+// The only folders the tests ever delete recursively: one of the per-process
+// test folders, <temp>\dcsqv_r12_test_<digits>\, or a folder below one. An
+// empty path (which FindFirstFileW("*") would read as the current directory),
+// a relative path, the temp folder itself or anything else is refused.
+//
+// R29 incident: the first version cleaned up at exit through a reference to a
+// function-local static std::wstring whose destructor had already run (the
+// atexit handler was registered inside the static's initializer, so the
+// static was destroyed first). The handler saw an empty path and deleted every
+// file in the current directory (test\, a scratch build folder).
+inline bool IsOwnTempTree(const std::wstring& dir) {
+  const std::wstring base = TempBase();
+  if (base.size() < 4 || dir.size() <= base.size() || dir.back() != L'\\') return false;
+  if (_wcsnicmp(dir.c_str(), base.c_str(), base.size()) != 0) return false;
+  if (dir.find(L"..") != std::wstring::npos || dir.find(L'/') != std::wstring::npos) return false;
+  const std::wstring rest = dir.substr(base.size());
+  const size_t plen = wcslen(kTempPrefix);
+  if (rest.compare(0, plen, kTempPrefix) != 0) return false;
+  size_t i = plen;
+  while (i < rest.size() && iswdigit(rest[i])) ++i;
+  return i > plen && i < rest.size() && rest[i] == L'\\';
+}
+
+// Deletes a folder tree, only inside IsOwnTempTree (read-only attributes
+// cleared first). Returns false (deleting nothing) for any other path.
+inline bool RemoveTestTree(const std::wstring& dir) {
+  if (!IsOwnTempTree(dir)) return false;
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW((dir + L"*").c_str(), &fd);
+  if (h != INVALID_HANDLE_VALUE) {
+    do {
+      const std::wstring name = fd.cFileName;
+      if (name == L"." || name == L"..") continue;
+      const std::wstring p = dir + name;
+      if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;  // never follow links out
+      SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
+      if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        RemoveTestTree(p + L"\\");
+      else
+        DeleteFileW(p.c_str());
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+  }
+  RemoveDirectoryW(dir.c_str());
+  return true;
+}
+
+// Removes the test folders of test processes that are gone, and registers
+// this process's folder for removal at exit. The exit handler reads a heap
+// copy that is never destroyed (no static-destruction order involved).
+std::wstring* g_exitTempRoot = nullptr;
+inline void TempCleanupInit() {
+  if (g_exitTempRoot) return;
+  const std::wstring base = TempBase();
+  if (base.empty()) return;
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW((base + kTempPrefix + L"*").c_str(), &fd);
+  if (h != INVALID_HANDLE_VALUE) {
+    do {
+      if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+      const DWORD pid = wcstoul(fd.cFileName + wcslen(kTempPrefix), nullptr, 10);
+      if (!pid || pid == GetCurrentProcessId()) continue;
+      HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, pid);
+      const bool alive = p && WaitForSingleObject(p, 0) == WAIT_TIMEOUT;
+      if (p) CloseHandle(p);
+      if (!alive) RemoveTestTree(base + fd.cFileName + L"\\");
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+  }
+  g_exitTempRoot = new std::wstring(TempRoot());
+  atexit([] { RemoveTestTree(*g_exitTempRoot); });
+}
+
+// Guard: the cleanup deletes nothing outside its own folder. Canary files in
+// a sandbox (a sibling of the folder being removed) and in the current
+// directory must survive every call, including the empty path of the
+// incident; the folder itself must go.
+void CleanupGuardTests() {
+  const std::wstring root = TempRoot();
+  CreateDirectoryW(root.c_str(), nullptr);
+  const std::wstring sandbox = root + L"guard_keep\\";
+  const std::wstring doomed = root + L"guard_remove\\";
+  CreateDirectoryW(sandbox.c_str(), nullptr);
+  CreateDirectoryW(doomed.c_str(), nullptr);
+  CreateDirectoryW((doomed + L"sub\\").c_str(), nullptr);
+  const std::wstring cwdCanary = L".\\qv_cleanup_canary_" + std::to_wstring(GetCurrentProcessId()) + L".txt";
+  const std::vector<std::wstring> canaries = {sandbox + L"a.txt", sandbox + L"b.bin", cwdCanary};
+  for (const std::wstring& f : canaries) {
+    HANDLE h = CreateFileW(f.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+  }
+  for (const wchar_t* f : {L"x.txt", L"sub\\y.txt"}) {
+    HANDLE h = CreateFileW((doomed + f).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                           nullptr);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+  }
+  const std::wstring base = TempBase();
+  const bool refused = !RemoveTestTree(L"") && !RemoveTestTree(L".\\") && !RemoveTestTree(L"*") &&
+                       !RemoveTestTree(base) && !RemoveTestTree(base + kTempPrefix + L"\\") &&
+                       !RemoveTestTree(base + kTempPrefix + L"x\\") && !RemoveTestTree(root + L"..\\") &&
+                       !RemoveTestTree(root.substr(0, root.size() - 1)) && !RemoveTestTree(L"C:\\");
+  const bool removed = RemoveTestTree(doomed) && GetFileAttributesW(doomed.c_str()) == INVALID_FILE_ATTRIBUTES;
+  bool survived = true;
+  for (const std::wstring& f : canaries) survived &= GetFileAttributesW(f.c_str()) != INVALID_FILE_ATTRIBUTES;
+  Check(refused && removed && survived,
+        "test cleanup: deletes only inside its per-process temp folder (empty, relative, temp-root paths refused; "
+        "canaries in a sandbox and the current directory survive)");
+  for (const std::wstring& f : canaries) DeleteFileW(f.c_str());  // exact files this test created
+  RemoveDirectoryW(sandbox.c_str());
 }
 
 // Copies files matching the extensions from src to dst recursively (skips
@@ -376,7 +497,13 @@ void RuntimePath(const Compiler& cc, const std::wstring& shaders, ID3D11Device* 
 // Disk cache: round trip, hits without D3DCompile, invalidation
 // ---------------------------------------------------------------------------
 
+// Deletes the files of a cache folder: only inside the per-process test
+// folder (an empty or foreign path deletes nothing).
 void ClearDir(const std::wstring& dir) {
+  if (!IsOwnTempTree(dir)) {
+    printf("     ClearDir refused outside the test folder: %ls\n", dir.c_str());
+    return;
+  }
   for (const std::wstring& n : ListFiles(dir, L"*")) DeleteFileW((dir + n).c_str());
 }
 
@@ -410,6 +537,7 @@ std::string Serialized(const KeyResult& r) {
 }
 
 void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstring& root) {
+  TestSpin spin("shadow inst cache");
   const std::wstring savedRoot = g_root;
   const bool savedStop = shadowinst::g_stop.load();
   g_root = shaders;
@@ -522,21 +650,69 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
   const std::wstring inc = shaders + L"model\\common\\uniforms.hlsl";
   std::string orig;
   ReadWholeFile(inc, orig);
-  auto writeFile = [](const std::wstring& p, const std::string& text) {
-    HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    DWORD put = 0;
-    const bool ok = h != INVALID_HANDLE_VALUE && WriteFile(h, text.data(), static_cast<DWORD>(text.size()), &put, nullptr);
-    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-    return ok;
+  // Full sharing and retries (an antivirus or indexer may hold the file a
+  // moment under load): the test's own writes must not be what fails.
+  auto transient = [](DWORD e) {
+    return e == ERROR_SHARING_VIOLATION || e == ERROR_ACCESS_DENIED || e == ERROR_LOCK_VIOLATION;
   };
-  writeFile(inc, orig + "\n// cache test\n");
+  auto writeFile = [&](const std::wstring& p, const std::string& text) {
+    for (int attempt = 0; attempt < 50; ++attempt) {
+      HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (h == INVALID_HANDLE_VALUE) {
+        if (!transient(GetLastError())) return false;
+        Sleep(10);
+        continue;
+      }
+      DWORD put = 0;
+      const bool ok = WriteFile(h, text.data(), static_cast<DWORD>(text.size()), &put, nullptr) && put == text.size();
+      CloseHandle(h);
+      return ok;
+    }
+    return false;
+  };
+  auto readFile = [&](const std::wstring& p, std::string& out) {
+    for (int attempt = 0; attempt < 50; ++attempt) {
+      HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                             OPEN_EXISTING, 0, nullptr);
+      if (h == INVALID_HANDLE_VALUE) {
+        if (!transient(GetLastError())) return false;
+        Sleep(10);
+        continue;
+      }
+      LARGE_INTEGER sz{};
+      bool ok = GetFileSizeEx(h, &sz) && sz.QuadPart < (64ll << 20);
+      DWORD got = 0;
+      if (ok) {
+        out.resize(static_cast<size_t>(sz.QuadPart));
+        ok = out.empty() || (ReadFile(h, &out[0], static_cast<DWORD>(out.size()), &got, nullptr) && got == out.size());
+      }
+      CloseHandle(h);
+      return ok;
+    }
+    return false;
+  };
+  auto cacheWritable = [] {
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    return g_cacheWritable;
+  };
+  // The check needs a stored entry (CacheSave may fail while a scanner holds
+  // the folder) and the include edit on disk: without either it SKIPs with
+  // the reason instead of failing.
+  const bool entryStored = cacheWritable() && ListFiles(dir, L"s_*.qvc").size() == 1;
+  const bool edited = entryStored && writeFile(inc, orig + "\n// cache test\n");
   KeyResult r3;
   c0 = g_d3dCompiles.load();
-  CompileKeyCached(*s, r3);
+  if (edited) CompileKeyCached(*s, r3);
   const std::string sum3 = CacheSummary();
-  Check(!r3.cached && r3.ok && g_d3dCompiles.load() - c0 == 2 && sum3.find("source changed 1") != std::string::npos &&
-            sum3.find("model/common/uniforms.hlsl") != std::string::npos,
-        "shadow inst cache: a changed include content rejects the entry and recompiles");
+  if (!entryStored)
+    printf("SKIP shadow inst cache: changed include: the cache entry could not be written\n");
+  else if (!edited)
+    printf("SKIP shadow inst cache: changed include: the include edit could not be written\n");
+  else
+    Check(!r3.cached && r3.ok && g_d3dCompiles.load() - c0 == 2 && sum3.find("source changed 1") != std::string::npos &&
+              sum3.find("model/common/uniforms.hlsl") != std::string::npos,
+          "shadow inst cache: a changed include content rejects the entry and recompiles");
   printf("     %s\n", sum3.c_str());
   writeFile(inc, orig);
   KeyResult r3b;
@@ -544,7 +720,10 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
   KeyResult r3c;
   c0 = g_d3dCompiles.load();
   CompileKeyCached(*s, r3c);
-  Check(!r3b.cached && r3c.cached && g_d3dCompiles.load() == c0, "shadow inst cache: the rewritten entry hits again");
+  if (!edited || !cacheWritable())
+    printf("SKIP shadow inst cache: rewritten entry: the include edit or the cache entry could not be written\n");
+  else
+    Check(!r3b.cached && r3c.cached && g_d3dCompiles.load() == c0, "shadow inst cache: the rewritten entry hits again");
   // An include probe that found nothing must keep finding nothing: a file
   // appearing in front of the fallback path changes the lookup.
   {
@@ -603,24 +782,44 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
   CompileKeyCached(*s, r5b);  // rewritten with the real version
 
   // 5. A corrupted file (one payload byte flipped) and a truncated one.
+  // Needs the entry on disk: when the cache could not write it (a scanner
+  // held it beyond CacheSave's retries), this is skipped, not failed.
   {
     std::string bytes;
-    ReadWholeFile(dir + files[0], bytes);
-    bytes[bytes.size() / 2] ^= 0x5a;
-    writeFile(dir + files[0], bytes);
-    KeyResult r6;
-    c0 = g_d3dCompiles.load();
-    CompileKeyCached(*s, r6);
-    const bool corrupt = !r6.cached && r6.ok && g_d3dCompiles.load() - c0 == 2;
-    ReadWholeFile(dir + files[0], bytes);
-    writeFile(dir + files[0], bytes.substr(0, bytes.size() - 7));
-    KeyResult r7;
-    CompileKeyCached(*s, r7);
-    const std::string sum = CacheSummary();
-    Check(corrupt && !r7.cached && sum.find("checksum 1") != std::string::npos &&
-              sum.find("truncated 1") != std::string::npos,
-          "shadow inst cache: a corrupted or truncated file rejects the entry and recompiles");
-    printf("     %s\n", sum.c_str());
+    const char* skip = nullptr;
+    if (files.empty())
+      skip = "no cache entry was written";
+    else if (!cacheWritable())
+      skip = "the cache could not write its entry (cache writes off)";
+    else if (!readFile(dir + files[0], bytes) || bytes.size() < 64)
+      skip = "the cache entry is missing or unreadable";
+    bool corrupt = false;
+    if (!skip) {
+      bytes[bytes.size() / 2] ^= 0x5a;
+      if (!writeFile(dir + files[0], bytes)) skip = "the test could not overwrite the entry";
+    }
+    if (!skip) {
+      KeyResult r6;
+      c0 = g_d3dCompiles.load();
+      CompileKeyCached(*s, r6);
+      corrupt = !r6.cached && r6.ok && g_d3dCompiles.load() - c0 == 2;
+      // r6 rewrote the entry; it is the one truncated next.
+      if (!cacheWritable() || !readFile(dir + files[0], bytes) || bytes.size() < 64)
+        skip = "the recompiled entry was not rewritten";
+      else if (!writeFile(dir + files[0], bytes.substr(0, bytes.size() - 7)))
+        skip = "the test could not truncate the entry";
+    }
+    if (skip) {
+      printf("SKIP shadow inst cache: corrupted/truncated file check: %s\n", skip);
+    } else {
+      KeyResult r7;
+      CompileKeyCached(*s, r7);
+      const std::string sum = CacheSummary();
+      Check(corrupt && !r7.cached && sum.find("checksum 1") != std::string::npos &&
+                sum.find("truncated 1") != std::string::npos,
+            "shadow inst cache: a corrupted or truncated file rejects the entry and recompiles");
+      printf("     %s\n", sum.c_str());
+    }
   }
 
   // 6. No usable folder (a path below a file): works without the cache.
@@ -636,7 +835,9 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
     DeleteFileW(blocker.c_str());
   }
   // Read-only file in place: the write fails, is logged once, compiles go on.
-  {
+  if (files.empty()) {
+    printf("SKIP shadow inst cache: unwritable entry check: no cache entry was written earlier\n");
+  } else {
     CacheInit(dir, cc);
     ClearDir(dir);
     const std::wstring p = dir + files[0];
@@ -660,9 +861,11 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
 // Install (on the analysed binaries, loaded without imports), the observer
 // fed with fake casters, the compile workers, the suite summary, Shutdown.
 void Lifecycle(const Compiler& cc, const std::wstring& shaders, ID3D11Device* dev) {
-  const std::wstring bin = L"E:\\SteamLibrary\\steamapps\\common\\DCSWorld\\bin\\";
-  if (!dev || !LoadLibraryExW((bin + L"NGModel.dll").c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES) ||
-      !LoadLibraryExW((bin + L"dx11backend.dll").c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES) ||
+  if (!dcsinstall::Found()) {
+    dcsinstall::Skip("shadow inst lifecycle");
+    return;
+  }
+  if (!dev || !dcsinstall::LoadBinary(L"NGModel.dll") || !dcsinstall::LoadBinary(L"dx11backend.dll") ||
       !MakeStandInVs(cc, dev)) {
     printf("SKIP shadow inst: lifecycle needs the DCS binaries and a D3D11 device\n");
     return;
@@ -730,6 +933,8 @@ void Lifecycle(const Compiler& cc, const std::wstring& shaders, ID3D11Device* de
 }
 
 void Run() {
+  TempCleanupInit();  // stale folders of finished runs; this one's at exit
+  CleanupGuardTests();
   const std::wstring root = TempRoot();
   Compiler cc;
   if (!cc.Load()) {
@@ -739,7 +944,8 @@ void Run() {
   printf("     shadow inst: compiler %s, temp folder %ls\n", cc.path.c_str(), root.c_str());
   CreateDirectoryW(root.c_str(), nullptr);
   const int fxoCopied = CopyTree(kFxoDir, root + L"fxo\\", {L".fxo"}, nullptr);
-  const int srcCopied = CopyTree(kShaderDir, root + L"shaders\\", {L".fx", L".hlsl", L".h"}, L"fxo");
+  const int srcCopied =
+      dcsinstall::Found() ? CopyTree(kShaderDir, root + L"shaders\\", {L".fx", L".hlsl", L".h"}, L"fxo") : 0;
   printf("     shadow inst: copied %d .fxo files and %d shader sources\n", fxoCopied, srcCopied);
   const std::wstring shaders = root + L"shaders\\";
 
@@ -887,7 +1093,10 @@ void Run() {
 
   // ---- 3. Source edits on the real model sources ----
   if (!srcCopied) {
-    printf("SKIP shadow inst: shader sources not found\n");
+    if (!dcsinstall::Found())
+      dcsinstall::Skip("shadow inst (sources, cache, runtime path, lifecycle)");
+    else
+      printf("SKIP shadow inst: shader sources not found\n");
     return;
   }
   {
@@ -992,9 +1201,8 @@ void Run() {
 
   // ---- 6. Build checks on the analysed binaries ----
   {
-    const std::wstring bin = L"E:\\SteamLibrary\\steamapps\\common\\DCSWorld\\bin\\";
-    HMODULE ngm = LoadLibraryExW((bin + L"NGModel.dll").c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
-    HMODULE dxm = LoadLibraryExW((bin + L"dx11backend.dll").c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+    HMODULE ngm = dcsinstall::LoadBinary(L"NGModel.dll");
+    HMODULE dxm = dcsinstall::LoadBinary(L"dx11backend.dll");
     if (!ngm || !dxm) {
       printf("SKIP shadow inst: DCS binaries not found\n");
     } else {

@@ -1179,6 +1179,14 @@ bool InstallRenderer() {
     Log("batching: DX11Renderer does not match this build; skipped");
     return false;
   }
+  // The copy below has kVtblCopy entries: the entry after them must not be
+  // code of dx11backend (in 2.9.30 it is string data; checked against the
+  // shipped DLL). A relocated vtable of another build with more virtuals
+  // would otherwise send a call to slot 92+ through whatever follows the copy.
+  if (reloc::InCode(dx, static_cast<const uint8_t*>(vtbl[kVtblCopy]), 1)) {
+    Log("batching: DX11Renderer's vtable is longer than %d entries in this build; skipped", kVtblCopy);
+    return false;
+  }
   g_rendererApi = api;
   g_rendererObj = obj;
   g_rendererVtbl = vtbl;
@@ -1225,6 +1233,14 @@ bool Install() {
     return false;
   }
   g_state = -1;
+  // The context and buffer below are made on the payload worker: not allowed
+  // on a device created D3D11_CREATE_DEVICE_SINGLETHREADED (shadow_inst moves
+  // its own creates to the render thread for that case; both recorders refuse
+  // it). DCS 2.9.30 creates a thread-safe device, so this never triggers there.
+  if (shadowinst::g_deviceSingleThreaded) {
+    Log("shadow batching: the D3D11 device is single-threaded; off for this session");
+    return false;
+  }
   g_ng = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
   if (!g_ng) return false;
   const uint32_t smrRva = reloc::Rva(hooksig::NG_ShadowMapRenderable_vtbl, kSmrVtbl);
@@ -1233,7 +1249,11 @@ bool Install() {
   g_smrVtbl = g_ng + smrRva;
   g_modelMatVtbl = g_ng + matRva;
   shadowinst::g_device->GetImmediateContext(&g_ctx);
-  if (!CreateOffsetBuffer(shadowinst::g_device, kMaxOffsets, &g_buf, &g_srv)) return false;
+  if (!CreateOffsetBuffer(shadowinst::g_device, kMaxOffsets, &g_buf, &g_srv)) {
+    g_ctx->Release();  // latched off (-1): Shutdown does not release it
+    g_ctx = nullptr;
+    return false;
+  }
   // Leaders through slot 5's copy (no [item+0xd4] swap): the copy's build
   // checks (installing it does not attach the texture skip) and the tail jump.
   g_psoDirect = shadowtex::Install() && SmrRenderIsTailJump();
@@ -1251,7 +1271,9 @@ bool Install() {
   return true;
 }
 
-void Shutdown() {
+// True when its objects were released (false: a pass or planner still runs;
+// the caller then keeps shadow_inst's VS objects and results alive too).
+bool Shutdown() {
   g_shutdown = true;
   g_on = false;
   g_async = false;
@@ -1271,7 +1293,7 @@ void Shutdown() {
   for (int i = 0; i < 400 && (g_inWrap.load() != 0 || g_inQueue.load() != 0); ++i) Sleep(5);
   if (!joined || g_inWrap.load() != 0 || g_inQueue.load() != 0) {
     Log("shadow batching: a pass or planner thread was still running at unload; its objects are left alive");
-    return;
+    return false;
   }
   FreePlans();
   if (g_srv) g_srv->Release();
@@ -1280,6 +1302,7 @@ void Shutdown() {
   g_srv = nullptr;
   g_buf = nullptr;
   g_ctx = nullptr;
+  return true;
 }
 
 void LogCounters(const char* label) {

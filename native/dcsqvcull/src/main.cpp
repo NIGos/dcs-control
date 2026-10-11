@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "loader_api.h"
+#include "log_utf8.h"
 #include "reloc.h"
 #include "status_word.h"
 #include "scene_layout.h"
@@ -64,7 +65,7 @@ void Log(const char* fmt, ...) {
   char line[2048];
   va_list ap;
   va_start(ap, fmt);
-  vsnprintf(line, sizeof(line), fmt, ap);
+  qvlog::FormatV(line, sizeof(line), fmt, ap);  // %ls as UTF-8 (log_utf8.h)
   va_end(ap);
   if (g_api) {
     g_api->log(line);
@@ -118,7 +119,9 @@ std::string StopReportCapture() {
 }
 
 struct Config {
-  bool enabled = true;
+  // Defaults below equal LoadConfig's ini fallbacks (an empty or missing ini
+  // gives the same configuration as a fresh Config).
+  bool enabled = false;          // [Cull] Enabled (peripheral exclusion: opt-in)
   bool debugHole = false;
   // Fraction of the focus image (per axis, about its centre) that may be
   // excluded from the periphery. <0 = derive from Quad-Views-Foveated edge
@@ -141,11 +144,11 @@ struct Config {
   int profileSeconds = 20;
   int profileThreads = 24;
   int profilePeriodMs = 2;
-  bool suiteProfile = true;
+  bool suiteProfile = false;
   bool suiteSelfTest = false;
-  bool suiteBenchPartition = true;
-  bool suiteBenchIsolation = true;
-  bool suiteBenchTimerRes = true;
+  bool suiteBenchPartition = false;
+  bool suiteBenchIsolation = false;
+  bool suiteBenchTimerRes = false;
   bool diagnostics = false;      // measurement hooks always on
   int toggleVk = 122;            // [Hotkeys] Toggle, default Alt+Shift+F11
   int toggleMods = 6;
@@ -155,7 +158,7 @@ struct Config {
   double shadowMarginFrac = 0.03;
   double shadowMarginMin = 2.0;
   double shadowFloorY = -1000.0;  // lowest visible receiver height (m)
-  bool suiteBenchShadow = true;
+  bool suiteBenchShadow = false;
   bool allocSlabs = false;       // [Model] AllocSlabs, per-thread slabs for NGModel's instance-data allocator
   int slabBytes = 4096;
   bool suiteBenchAllocSlabs = false;
@@ -206,6 +209,21 @@ struct Config {
   bool suiteForwardRecCount = false;     // [Suite] ForwardRecCount (R21 S0: SimplePassData recorder counters and gates)
   bool suiteGpuPassTiming = false;       // [Suite] GpuPassTiming (gpu_pass_timing.h: GPU ms and context ops per pass)
   bool suiteGpuPassStats = false;        // [Suite] GpuPassStats (with GpuPassTiming: pipeline statistics and samples passed per pass)
+  int suiteGpuSplit = 0;                 // [Suite] GpuSplit (gpu_split.h: 1 = recorder replay brackets with GpuPassTiming, 2 = also the mesh census)
+  int suiteGpuSplitFrames = 60;          // [Suite] GpuSplitFrames (census frames)
+  int suiteGapAttrib = 0;                // [Suite] GapAttrib (gap_attrib.h: between-pass GPU gap attribution, seconds; 0 = off)
+  int suiteGapAttribCalEvery = 40;       // [Suite] GapAttribCalEvery (frames between GPU clock calibrations; 0 = none)
+  int suiteLodProbe = 0;                 // [Suite] LodProbe (lod_probe.h: LOSSY test, instancer LOD factors x percent/100 for one timing run; 0 = off)
+  bool suiteGapAttribDump = false;       // [Suite] GapAttribDump (1 = gap_passes.csv in the dev folder: pass intervals on the QPC clock)
+  int suiteGpuDedup = 0;                 // [Suite] GpuDedup (gpu_dedup.h: exact-redundancy census, frames captured; 0 = off)
+  int suiteGpuDedupWarm = 30;            // [Suite] GpuDedupWarm (frames of content-id tracking before the capture)
+  int suiteGpuDedupHashCap = 16384;      // [Suite] GpuDedupHashCap (largest mapped buffer hashed, bytes)
+  bool suiteGpuDedupSnap = false;        // [Suite] GpuDedupSnap (1 = also write the cascades' culled instance buffers)
+  int peripheralLodScale = 0;            // [Model] PeripheralLodScale (periph_lod.h: LOSSY prototype, periphery instancer LOD factors x percent/100; 0 = off)
+  int suiteUavOverlap = 0;               // [Suite] UavOverlap (uav_overlap.h: 1 = culling-chain passes, 2 = all passes inside NVAPI UAV overlap, 3/4 = 1/3 renamed duplicates of every chain dispatch; timing A/B; 0 = off)
+  int suitePeriphLodTiming = 0;          // [Suite] PeriphLodTiming (periph_lod.h: GPU timing OFF/ON x percent; 0 = off)
+  int suitePeriphLodImage = 0;           // [Suite] PeriphLodImage (periph_lod.h: frames of final per-view images per configuration; 0 = off)
+  bool suiteBenchPeripheralLod = false;  // [Suite] BenchPeripheralLod (bench mode 32, scale = PeriphLodTiming or 50)
   bool suiteVramCount = false;           // [Suite] VramCount (vram_count.h: DXGI budget/usage, our memory, texture tables)
   int suiteVramCountSec = 20;            // [Suite] VramCountSec
   bool suiteVramCountCreates = true;     // [Suite] VramCountCreates: count DCS's buffer/texture creates during the phase
@@ -264,14 +282,14 @@ struct Config {
   int suiteRunnableThreadsEvery = 16; // [Suite] RunnableThreadsEvery: frames between snapshots
   uint32_t bigPageBytes = 4u << 20;  // [Model] BigPageBytes
   bool suiteBenchFrameHeap = false;     // [Suite] MotionProfile: CPU profile of the sweep's translation phase        // [Suite] Quick: configuration check + A/B only
-  int suiteBenchFilter = 1;  // 1 = end-to-end A/B, 2 = also filter vs hooks
+  int suiteBenchFilter = 0;  // 1 = end-to-end A/B, 2 = also filter vs hooks
   bool d3dFilter = false;        // skip redundant D3D11 state calls
   bool fineTimer = false;
   bool partitionBoost = false;
-  bool suiteBenchCull = true;
+  bool suiteBenchCull = false;
   bool suiteBenchThreads = false;
-  bool suiteBenchTimer = true;
-  bool d3dMeter = true;          // count redundant D3D11 state calls
+  bool suiteBenchTimer = false;
+  bool d3dMeter = false;         // [D3D] Meter: count redundant D3D11 state calls (diagnostic)
   bool shaderTimeCache = true;   // cache dx11backend's per-draw ED_get_time
   int shaderTimeCacheUs = 1000;
 };
@@ -387,11 +405,19 @@ FILETIME g_devIniTime{};
 
 void LoadConfig(bool initial) {
   std::wstring ini = g_dir + L"DcsQvCull.ini";
-  WIN32_FILE_ATTRIBUTE_DATA fad;
+  WIN32_FILE_ATTRIBUTE_DATA fad{};
+  // A missing ini is read like an empty one: every key takes its fallback
+  // below, and the same Apply* calls run. Before, the payload kept the bare
+  // Config defaults (which had peripheral exclusion and the D3D meter on)
+  // and applied none of the features. Parsed once until the file appears.
+  static bool missing = false;
   if (!GetFileAttributesExW(ini.c_str(), GetFileExInfoStandard, &fad)) {
-    if (initial) Log("config: %ls not found, using defaults", ini.c_str());
-    g_enabled = g_cfg.enabled;
-    return;
+    if (missing && !initial) return;
+    missing = true;
+    Log("config: %ls not found, using defaults", ini.c_str());
+    fad = WIN32_FILE_ATTRIBUTE_DATA{};
+  } else {
+    missing = false;
   }
   wchar_t devIni[MAX_PATH] = {};
   GetPrivateProfileStringW(L"Dev", L"IniPath", L"", devIni, MAX_PATH, ini.c_str());
@@ -508,6 +534,21 @@ void LoadConfig(bool initial) {
   c.suiteForwardRecCount = GetPrivateProfileIntW(L"Suite", L"ForwardRecCount", 0, ini.c_str()) != 0;
   c.suiteGpuPassTiming = GetPrivateProfileIntW(L"Suite", L"GpuPassTiming", 0, ini.c_str()) != 0;
   c.suiteGpuPassStats = GetPrivateProfileIntW(L"Suite", L"GpuPassStats", 0, ini.c_str()) != 0;
+  c.suiteGpuSplit = GetPrivateProfileIntW(L"Suite", L"GpuSplit", 0, ini.c_str());
+  c.suiteGpuSplitFrames = (std::max)(1, (std::min)(600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"GpuSplitFrames", 60, ini.c_str()))));
+  c.suiteGapAttrib = (std::max)(0, (std::min)(60, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"GapAttrib", 0, ini.c_str()))));
+  c.suiteGapAttribCalEvery = (std::max)(0, (std::min)(1000, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"GapAttribCalEvery", 40, ini.c_str()))));
+  c.suiteGapAttribDump = GetPrivateProfileIntW(L"Suite", L"GapAttribDump", 0, ini.c_str()) != 0;
+  c.suiteLodProbe = (std::max)(0, (std::min)(100, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"LodProbe", 0, ini.c_str()))));
+  c.suiteGpuDedup = (std::max)(0, (std::min)(12, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"GpuDedup", 0, ini.c_str()))));
+  c.suiteGpuDedupWarm = (std::max)(2, (std::min)(1000, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"GpuDedupWarm", 30, ini.c_str()))));
+  c.suiteGpuDedupSnap = GetPrivateProfileIntW(L"Suite", L"GpuDedupSnap", 0, ini.c_str()) != 0;
+  c.suiteGpuDedupHashCap = (std::max)(0, (std::min)(1 << 24, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"GpuDedupHashCap", 16384, ini.c_str()))));
+  c.peripheralLodScale = (std::max)(0, (std::min)(99, static_cast<int>(GetPrivateProfileIntW(L"Model", L"PeripheralLodScale", 0, ini.c_str()))));
+  c.suiteUavOverlap = (std::max)(0, (std::min)(4, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"UavOverlap", 0, ini.c_str()))));
+  c.suitePeriphLodTiming = (std::max)(0, (std::min)(99, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"PeriphLodTiming", 0, ini.c_str()))));
+  c.suitePeriphLodImage = (std::max)(0, (std::min)(120, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"PeriphLodImage", 0, ini.c_str()))));
+  c.suiteBenchPeripheralLod = GetPrivateProfileIntW(L"Suite", L"BenchPeripheralLod", 0, ini.c_str()) != 0;
   c.suiteVramCount = GetPrivateProfileIntW(L"Suite", L"VramCount", 0, ini.c_str()) != 0;
   c.suiteVramCountSec = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"VramCountSec", 20, ini.c_str()));
   c.suiteVramCountCreates = GetPrivateProfileIntW(L"Suite", L"VramCountCreates", 1, ini.c_str()) != 0;
@@ -893,9 +934,13 @@ std::unordered_map<uint64_t, VolumeSlot> g_slots;
 uint8_t* AcquireVolume(uint64_t key) {
   std::lock_guard<std::mutex> lock(g_slotMutex);
   VolumeSlot& s = g_slots[key];
-  if (!s.buf[0]) {
+  if (!s.buf[0] || !s.buf[1]) {
+    // Checked: a failed allocation used to fault in memset with g_slotMutex
+    // held; SehPrepare's __except does not unwind the lock_guard, so the next
+    // collect call deadlocked the culling thread. Null = view not patched.
     for (auto& b : s.buf) {
-      b = static_cast<uint8_t*>(_aligned_malloc(0x700, 64));
+      if (!b) b = static_cast<uint8_t*>(_aligned_malloc(0x700, 64));
+      if (!b) return nullptr;
       memset(b, 0, 0x700);
     }
   }
@@ -957,10 +1002,12 @@ void RestoreD3dHooks();
 #include "pass_timing.h"
 #include "thread_tuning.h"
 #include <condition_variable>
+#include <functional>
+#include <thread>
 #include <d3dcompiler.h>
 #include <d3d11shader.h>
 #include <dxgi1_4.h>
-#include "deferred_rec.h"  // R15 A1 infrastructure (not wired yet)
+#include "deferred_rec.h"  // R15 A1: deferred-context worker pool of the shadow and G-buffer recorders
 namespace {
 
 void ApplyTimerConfig() {
@@ -1204,7 +1251,7 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
     uint64_t key = (static_cast<uint64_t>(*reinterpret_cast<uint32_t*>(ci + kCiViewportTag)) << 8) |
                    static_cast<uint64_t>(v.index);
     uint8_t* dst = AcquireVolume(key);
-    if (!MakeVolumeWithExclusion(dst, src, block)) continue;
+    if (!dst || !MakeVolumeWithExclusion(dst, src, block)) continue;
     // DCS culls every pass of a view (depth prepass, G-buffer, forward,
     // transparent...) in the same call, and passes of one view share one
     // ClippingVolume so Scene.dll culls them once. Swap the volume of all of
@@ -1247,6 +1294,12 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
 #include "gb_rec.h"
 #include "fwd_rec_count.h"
 #include "gpu_pass_timing.h"
+#include "gpu_split.h"
+#include "gap_attrib.h"
+#include "lod_probe.h"
+#include "gpu_dedup.h"
+#include "periph_lod.h"
+#include "uav_overlap.h"
 #include "run_threads.h"
 #include "frame_start.h"
 #include "frame_heap.h"
@@ -1455,11 +1508,21 @@ void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t*
   thread_local std::vector<ViewInfo> views;
   // Every info slot is patched at most once by the views and once by the shadows.
   thread_local std::vector<Patch> patchBuf;
-  if (patchBuf.size() < 2u * count + 16u) patchBuf.resize(2u * count + 16u);
+  // Sized only for calls we classify (count is DCS's; an unbounded count would
+  // size the buffer from it), and a failed allocation must not throw through
+  // DCS's frames: such a call is simply not classified.
+  bool havePatchBuf = false;
+  if (count <= kMaxCollectInfos) {
+    try {
+      if (patchBuf.size() < 2u * count + 16u) patchBuf.resize(2u * count + 16u);
+      havePatchBuf = true;
+    } catch (...) {
+    }
+  }
   Patch* patches = patchBuf.data();
   int pairs = 0;
   int patched = 0;
-  if (count >= 4 && count <= kMaxCollectInfos && infos) {
+  if (count >= 4 && count <= kMaxCollectInfos && infos && havePatchBuf) {
     if (!SehPrepare(count, infos, patches, patchBuf.size(), &pairs, &patched, &views))
       Log("ERROR: exception while preparing views; optimisation disabled");
   } else if (count > kMaxCollectInfos) {
@@ -2118,7 +2181,7 @@ uint64_t ComputeStatus() {
       {batchActive && shadowbatch::g_async.load() && shadowbatch::g_workersUp.load(),
        g_cfg.shadowPlanAsync && batchLatched, g_cfg.shadowPlanAsync && g_cfg.shadowBatch && g_cfg.shadowInst},
       {g_shadowTexSkipOn.load() && shadowtex::g_state.load() == 1 && shadowtex::g_attached.load(),
-       shadowtex::g_state.load() < 0, g_cfg.shadowTexSkip},
+       shadowtex::g_state.load() == -1, g_cfg.shadowTexSkip},  // -3 = installing (shadow_tex.h), not latched
       {shrec::g_on.load() && shrec::Ready() && shWorked, shrec::g_disabled.load() || shrec::g_state.load() < 0,
        g_cfg.shadowRecorder},
       {gbrec::g_on.load() && gbrec::Ready() && gbWorked, gbrec::g_disabled.load() || gbrec::g_state.load() < 0,
@@ -2202,6 +2265,25 @@ bool WaitForFocus() {
   return false;
 }
 
+// Folder of the process image (DCS.exe in DCS's bin folder), with trailing
+// backslash; empty when it cannot be read. Long paths are handled (the
+// buffer grows while GetModuleFileNameW truncates).
+std::wstring ProcessImageDir() {
+  std::wstring path(MAX_PATH, L'\0');
+  for (;;) {
+    const DWORD n = GetModuleFileNameW(nullptr, &path[0], static_cast<DWORD>(path.size()));
+    if (n == 0) return std::wstring();
+    if (n < path.size()) {
+      path.resize(n);
+      break;
+    }
+    if (path.size() >= 32768) return std::wstring();
+    path.resize(path.size() * 2);
+  }
+  const size_t slash = path.find_last_of(L"\\/");
+  return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash + 1);
+}
+
 // One-key test suite: configuration check, CPU profile, exclusion A/B and
 // collect-threads A/B, summarised in one report file.
 void CheckConfiguration() {
@@ -2222,8 +2304,12 @@ void CheckConfiguration() {
     bool present = GetModuleHandleW(m.file) != nullptr;
     Log("  %-50s %s%s", m.what, present ? "loaded" : "not loaded", present != m.wanted ? "   <-- check" : "");
   }
-  WIN32_FILE_ATTRIBUTE_DATA fad;
-  if (GetFileAttributesExW(L"E:\\SteamLibrary\\steamapps\\common\\DCSWorld\\bin\\DcsVrPrefetchFix.log", GetFileExInfoStandard, &fad)) {
+  WIN32_FILE_ATTRIBUTE_DATA fad{};
+  // The prefetch fix logs next to DCS.exe: DCS's bin folder from the process
+  // image (was a hard-coded install path of one machine).
+  const std::wstring binDir = ProcessImageDir();
+  if (!binDir.empty() &&
+      GetFileAttributesExW((binDir + L"DcsVrPrefetchFix.log").c_str(), GetFileExInfoStandard, &fad)) {
     FILETIME now;
     GetSystemTimeAsFileTime(&now);
     ULARGE_INTEGER a{}, b{};
@@ -2505,6 +2591,7 @@ DWORD WINAPI SuiteThread(void*) {
   InstallDiagnostics();
   g_benchRunningFlag = true;
   g_benchAbort = false;
+  if (g_stop.load()) g_benchAbort = true;  // payload stopping (StopWorkerThreads sets g_stop first)
   StartReportCapture();
   SYSTEMTIME st;
   GetLocalTime(&st);
@@ -2725,8 +2812,85 @@ DWORD WINAPI SuiteThread(void*) {
     Log("-- render passes, GPU time (D3D11 timestamps) and context copies/clears/dispatches per pass kind, with "
         "render-thread CPU for comparison (5 s) --");
     gpt::g_statsWanted = g_cfg.suiteGpuPassStats;
+    const bool split = g_cfg.suiteGpuSplit >= 1 && gsplit::BeginBrackets();
     gpt::Measure(5000, g_quadFrame);
+    if (split) gsplit::EndBrackets();
     gpt::g_statsWanted = false;
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteGapAttrib > 0 && !g_benchAbort) {
+    Log("-- between-pass GPU gaps: outside-pass ops bracketed, CPU issue time of every stamp, gap pipeline "
+        "statistics, GPU clock calibrated every %d frames (gap_attrib.h, %d s) --",
+        g_cfg.suiteGapAttribCalEvery, g_cfg.suiteGapAttrib);
+    gapat::g_dumpPath = g_cfg.suiteGapAttribDump && !g_devDir.empty() ? g_devDir + L"gap_passes.csv" : std::wstring();
+    gapat::Measure(g_cfg.suiteGapAttrib * 1000, g_cfg.suiteGapAttribCalEvery, g_quadFrame);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteGpuDedup > 0 && !g_benchAbort) {
+    Log("-- exact-redundancy census: content ids of every resource, signature of every dispatch and draw, %d frames "
+        "captured after %d (gpu_dedup.h) --",
+        g_cfg.suiteGpuDedup, g_cfg.suiteGpuDedupWarm);
+    gdd::Measure(g_cfg.suiteGpuDedup, g_cfg.suiteGpuDedupWarm, static_cast<size_t>(g_cfg.suiteGpuDedupHashCap),
+                 g_devDir, g_cfg.suiteGpuDedupSnap, g_quadFrame);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteLodProbe > 0 && g_cfg.suiteLodProbe < 100 && !g_benchAbort) {
+    Log("-- LOSSY test: instancer (trees, buildings) LOD factors x %.2f in all views for one GPU timing run, then "
+        "restored (lod_probe.h, 3 x 5 s) --",
+        g_cfg.suiteLodProbe / 100.0);
+    gpt::g_statsWanted = g_cfg.suiteGpuPassStats;
+    lodp::RunPhase(g_cfg.suiteLodProbe / 100.0, 5000, g_quadFrame);
+    gpt::g_statsWanted = false;
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteUavOverlap > 0 && !g_benchAbort) {
+    Log("-- MEASUREMENT ONLY (output may be wrong while ON in modes 1-2): %s, GPU timing OFF/ON/OFF/ON/OFF "
+        "(uav_overlap.h mode %d, 5 x 5 s) --",
+        g_cfg.suiteUavOverlap == 2   ? "NVAPI UAV overlap around every top-level pass"
+        : g_cfg.suiteUavOverlap == 1 ? "NVAPI UAV overlap around the culling-chain passes"
+                                     : "renamed duplicates of every culling-chain dispatch",
+        g_cfg.suiteUavOverlap);
+    gpt::g_statsWanted = g_cfg.suiteGpuPassStats;
+    uovl::RunPhase(g_cfg.suiteUavOverlap, g_quadFrame);
+    gpt::g_statsWanted = false;
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suitePeriphLodTiming > 0 && !g_benchAbort) {
+    Log("-- LOSSY prototype: periphery-only instancer LOD tables x %.2f, GPU timing OFF/ON/OFF/ON/OFF (periph_lod.h, "
+        "5 x 5 s) --",
+        g_cfg.suitePeriphLodTiming / 100.0);
+    gpt::g_statsWanted = g_cfg.suiteGpuPassStats;
+    plod::TimingPhase(g_cfg.suitePeriphLodTiming, g_engineOff.load() ? 0 : g_cfg.peripheralLodScale, g_quadFrame);
+    gpt::g_statsWanted = false;
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suitePeriphLodImage > 0 && !g_benchAbort && !g_devDir.empty()) {
+    const int pct = g_cfg.suitePeriphLodTiming > 0 ? g_cfg.suitePeriphLodTiming : 50;
+    Log("-- LOSSY prototype: final per-view images (CopyToHMDPass targets), periphery LOD x %.2f, OFF/ON/OFF, %d "
+        "frames each, raw files in the dev folder's plod folder (periph_lod.h) --",
+        pct / 100.0, g_cfg.suitePeriphLodImage);
+    plod::ImagePhase(pct, g_engineOff.load() ? 0 : g_cfg.peripheralLodScale, g_cfg.suitePeriphLodImage, g_devDir);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchPeripheralLod && !g_benchAbort) {
+    const int pct = g_cfg.suitePeriphLodTiming > 0 ? g_cfg.suitePeriphLodTiming : 50;
+    Log("-- A/B: periphery-only instancer LOD x %.2f (LOSSY; OFF = stock tables, ON = scaled tables in the peripheral "
+        "views) --",
+        pct / 100.0);
+    plod::Apply(pct);
+    if (plod::WaitReady(3000)) {
+      ok = RunBenchmark(32, false);
+      plod::LogCounters("after the A/B");
+    } else {
+      Log("  periph lod: tables not captured; A/B skipped");
+    }
+    plod::Apply(g_engineOff.load() ? 0 : g_cfg.peripheralLodScale);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteGpuSplit >= 2 && !g_benchAbort) {
+    Log("-- recorded meshes: index buffers read back once, post-transform vertex reuse as drawn and after a reorder "
+        "(gpu_split.h census, %d frames) --", g_cfg.suiteGpuSplitFrames);
+    gsplit::Census(g_cfg.suiteGpuSplitFrames);
     Chime(1000, 60);
   }
   if (ok && g_cfg.suiteVramCount && !g_benchAbort) {
@@ -3330,6 +3494,7 @@ DWORD WINAPI WorkerThread(void*) {
       if (g_cfg.gbufferRecorder && !g_engineOff.load() && gbrec::g_state.load() == 0 && !g_benchRunningFlag.load())
         ApplyGBufferRecorder();
       if (g_cfg.passFlush && !g_engineOff.load() && !pflush::Ready() && !g_benchRunningFlag.load()) ApplyPassFlush();
+      if (!g_benchRunningFlag.load()) plod::Apply(g_engineOff.load() ? 0 : g_cfg.peripheralLodScale);
       // Split filter: waits for dx11backend and the first draw; detaches after a verify mismatch.
       if (!g_benchRunningFlag.load() &&
           ((g_cfg.splitFilter && !g_engineOff.load() && sfilt::g_state.load() >= 0 && !sfilt::Live()) ||
@@ -3559,6 +3724,10 @@ void SetBenchVariant(bool on) {
     pflush::SetMask(on ? g_passFlushBenchMask.load() : 0);
     return;
   }
+  if (g_benchActiveMode.load() == 32) {
+    plod::g_swapOn = on;
+    return;
+  }
   if (g_benchActiveMode.load() == 31) {
     if (on)
       srvtrim::Attach(false);
@@ -3662,6 +3831,44 @@ void SetBenchVariant(bool on) {
   *p = on ? static_cast<uint32_t>(std::min(16, std::max(1, g_cfg.benchThreadsB))) : defaultThreads;
 }
 
+namespace {
+// The payload's worker thread, joined by DcsQvPayload_Stop.
+HANDLE g_workerThread = nullptr;
+
+// Sets g_stop and waits (bounded) until the worker has left its loop and no
+// suite runs. Before this, Stop tore the features down while the worker could
+// still be inside LoadConfig -> Apply*() -> Install(): a hook patched after
+// the feature's Shutdown, possibly after the loader had started the next
+// generation (then RestoreStale never restores it), left a stopped payload's
+// hook live with its workers already joined. Both threads poll g_stop /
+// g_benchAbort (worker every 50 ms, Install's Scene.dll wait every 500 ms);
+// the bounds only guard against a thread stuck in DCS. Returns true when both
+// are idle.
+bool StopWorkerThreads(DWORD timeoutMs) {
+  // g_stop before g_benchAbort: a suite starting right now clears g_benchAbort
+  // and then checks g_stop (SuiteThread), so one of the two sees the stop.
+  g_stop = true;
+  g_benchAbort = true;
+  bool idle = true;
+  if (g_workerThread) {
+    if (WaitForSingleObject(g_workerThread, timeoutMs) == WAIT_OBJECT_0) {
+      CloseHandle(g_workerThread);
+      g_workerThread = nullptr;
+    } else {
+      idle = false;
+      Log("payload: worker did not stop within %lu ms; continuing the stop", timeoutMs);
+    }
+  }
+  const ULONGLONG until = GetTickCount64() + timeoutMs;
+  while (g_benchRunningFlag.load() && GetTickCount64() < until) Sleep(20);
+  if (g_benchRunningFlag.load()) {
+    idle = false;
+    Log("payload: suite still running after %lu ms; continuing the stop", timeoutMs);
+  }
+  return idle;
+}
+}  // namespace
+
 #ifndef DCSQV_NO_ENTRY
 // Payload entry points, called by the loader (loader.cpp).
 extern "C" __declspec(dllexport) int DcsQvPayload_Start(const DcsQvLoaderApi* api) {
@@ -3671,7 +3878,7 @@ extern "C" __declspec(dllexport) int DcsQvPayload_Start(const DcsQvLoaderApi* ap
   Log("payload: started (build %s %s)", __DATE__, __TIME__);
   HANDLE t = CreateThread(nullptr, 0, WorkerThread, nullptr, 0, nullptr);
   if (!t) return 2;
-  CloseHandle(t);
+  g_workerThread = t;  // joined by DcsQvPayload_Stop
   return 0;
 }
 
@@ -3683,14 +3890,17 @@ extern "C" __declspec(dllexport) void DcsQvPayload_SetStatusWord(std::atomic<uin
 extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   Log("payload: stopping");
   g_statusSink.Detach();  // stores 0; this payload never writes the word again
-  g_benchAbort = true;
-  g_stop = true;
+  // Worker and suite out first: neither may install a hook after the
+  // Shutdown calls below (bounded wait, see StopWorkerThreads).
+  StopWorkerThreads(15000);
   threadtune::Restore();
   allocslab::Invalidate();
   posesweep::Release();  // hold and sweep off, xrLocateViews back to pass-through
   d3ds::Uninstall();
   srvspan::Shutdown();  // restores the ApplyShaderBlock call sites if a count was running
   srvtrim::Shutdown();  // the same two call sites back to stock if the trim was on
+  uovl::Shutdown();     // NVAPI overlap probe off (its region ends at the pass end)
+  plod::Shutdown();     // stock LOD tables back, view callback and vt[24] hook out (no-op unless used)
   gpt::Shutdown();      // GPU pass timing's context-table hooks and xrEndFrame hook, if a phase was running
   pflush::Shutdown();   // pass flush callback and xrBeginFrame hook out, our context reference released
   vramc::Shutdown();    // the VRAM count's device create hooks, if a phase was running
@@ -3699,15 +3909,18 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   shadowrec::Shutdown();  // chained pointers and class slots back before batching's own shutdown
   fwdreccount::Shutdown();  // forward S0: SimplePassData slot 19, chain, class slots, sort observer out
   gbreccount::Shutdown();  // G-buffer S0 chain, class slots, sort observer (and its own sort patch) out
-  gbrec::Shutdown();      // G-buffer recorder chain out, its workers joined (before the shadow recorder's sort sites)
-  shrec::Shutdown();      // recorder chain out, its worker joined, before batching's shutdown
+  // Each Shutdown below reports whether it drained its passes; if one did
+  // not, shadow_inst's VS objects and results (which they read) stay alive.
+  bool drained = gbrec::Shutdown();  // G-buffer recorder chain out, its workers joined (before the shadow recorder's sort sites)
+  drained &= shrec::Shutdown();      // recorder chain out, its worker joined, before batching's shutdown
   timercache::g_on = false;  // until the new payload re-patches, pass through
   timercache::g_stopUpdater = true;
-  gbbatch::Shutdown();      // G-buffer batching callbacks first
-  gbverify::Shutdown();
+  const bool gbDrained = gbbatch::Shutdown();  // G-buffer batching callbacks first
+  if (gbDrained) gbverify::Shutdown();  // else a pass (maybe inside Verify) still uses its copies
+  drained &= gbDrained;
   directupload::Shutdown();  // waits for mapped pages to be restored; before the update hook goes
   parupload::Shutdown();
-  shadowbatch::Shutdown();  // unhooks the batching callbacks before the VS objects go
-  shadowinst::Shutdown();  // joins the compile workers, then releases our VS objects
+  drained &= shadowbatch::Shutdown();  // unhooks the batching callbacks before the VS objects go
+  shadowinst::Shutdown(drained);  // joins the compile workers, then releases our VS objects (if nothing still reads them)
 }
 #endif

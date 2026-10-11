@@ -6,7 +6,7 @@ On this development PC the prerequisites are already present. Their missing-prer
 
 Open **Guided setup** in the right-hand panel:
 
-1. **Choose**: the headset route (Pimax Play or Sboys/SteamVR; the running route is preselected), the pipeline (DLSS 5 + framegen + Quad Views, Quad Views only, framegen only, or original) and, for pipelines with Quad Views, eye-tracked or fixed focus. Your current quality values are kept. Changing routes clears a runtime override that belonged to the previous route.
+1. **Choose**: the headset route (Pimax Play or Sboys/SteamVR; the running route is preselected), the features (Engine Optimizations, CPU Boost, Quad Views, DLSS 5, frame generation; or Optimizations only for a monitor or another headset) and, for pipelines with Quad Views, eye-tracked or fixed focus. Your current quality values are kept. Changing routes clears a runtime override that belonged to the previous route.
 2. **Check**: the app checks files, runtime architecture, package hashes, the neural DLL signature/version, Sboys registration, SteamVR add-on blocking and the gaze bridge. Problems are listed first; passed checks and file paths are folded away and open by themselves when a path is the problem. DLSS 5 needs your signed NVIDIA nvngx_dlssnr.dll (tested contract 310.8); the app does not download it. Nothing is written in this step.
 3. **Fly**: start the headset software and press **Launch DCS** here. It is the same button as in the right panel: the checked profile is written over whatever is applied (originals are backed up the first time a file is written), and DCS starts (DCS skips its own launcher window while a profile is applied) so DCS receives its private OpenXR environment. Keep Steam running for the Steam edition, and run neither DCS nor the app as administrator. The headset checks listed there need your eyes; they are never reported as automatic passes. **Back to stock DCS** in Recovery puts the original files back at any time.
 
@@ -21,7 +21,7 @@ For eye-tracked focus, enable and calibrate eye tracking in Pimax and verify tha
 ## Checks added in 0.4.2
 
 - **Standard user launch**: error when the app is elevated or DCS.exe has a Run-as-administrator compatibility flag; elevated processes ignore the private runtime and layers.
-- **Write access**: error when the Saved Games Config folder, or the DCS bin folder for Cheeky profiles, is not writable as the current user (common under Program Files). Grant Modify permission instead of elevating.
+- **Write access**: error when the Saved Games Config folder, or the DCS bin folder for Cheeky profiles, is not writable as the current user (common under Program Files). Launch DCS asks Windows for the permission itself (one prompt), and Checks has a Grant access button; never elevate the app instead.
 - **Other OpenXR layers**: warning listing enabled implicit layers; they load above the profile layers.
 - **Steam edition launch**: manual reminder to keep Steam running and confirm the layers loaded (`Available Layers` in dcs.log).
 - **Gaze bridge**: on the Sboys route the profile loads OpenXR-Eye-Trackers explicitly below Quad Views; without a bridge, eye-tracked focus falls back to a fixed region (warning).
@@ -44,7 +44,7 @@ Checks → **Run preflight** checks the current draft. **Export report** refresh
 ./DcsVr.Cli.exe readiness --profile profile.json --out readiness.json
 ```
 
-Exit status 2 means automatic preparation has blockers. `headsetVerified` remains false. Before launch, saved file/settings and external runtime/provider hashes are checked again. This does not certify the headset, gaze or private vendor services. Export a new report when changing drivers or runtime versions and Restore any active transaction before preparing another stage.
+Exit status 2 means automatic preparation has blockers. Before launch, saved file/settings and external runtime/provider hashes are checked again. This does not certify the headset, gaze or private vendor services. Export a new report when changing drivers or runtime versions and Restore any active transaction before preparing another stage.
 
 Use [FIRST_FLIGHT.md](FIRST_FLIGHT.md) for the detailed live acceptance procedure, including focus-hook trace evidence and both-eye presentation. Passthrough rendering, an accepted neural call, a rising FPS counter or a successful installer is not proof that the complete combined pipeline works.
 

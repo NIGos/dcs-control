@@ -172,6 +172,17 @@ bool Install() {
     // slot is on the next page and the trampoline right after the stub.
     uint8_t* page = nullptr;
     memcpy(&page, cur + 6, 8);
+    // Only our own layout (jmp [rip+0] to a page whose stub jumps through
+    // page+4096 and whose trampoline holds the original prologue): another
+    // tool's absolute jump here made us write the hook to target+4096.
+    uint8_t stub[6] = {}, tramp[17] = {};
+    const int32_t wantRel = static_cast<int32_t>(kPage - 6);
+    if (cur[2] || cur[3] || cur[4] || cur[5] || !page || !allocslab::ReadBytes(page, stub, 6) ||
+        !allocslab::ReadBytes(page + 16, tramp, 17) || stub[0] != 0xFF || stub[1] != 0x25 ||
+        memcmp(stub + 2, &wantRel, 4) != 0 || memcmp(tramp, kPrologue, 17) != 0) {
+      Log("pose sweep: xrLocateViews carries an unknown patch; skipped");
+      return false;
+    }
     g_slot = reinterpret_cast<void**>(page + kPage);
     g_tramp = reinterpret_cast<Fn>(static_cast<void*>(page + 16));
   } else if (memcmp(cur, kPrologue, 17) == 0) {

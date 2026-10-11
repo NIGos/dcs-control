@@ -1,5 +1,7 @@
 # Offline validation evidence
 
+> **Historical record.** This page keeps the evidence of earlier releases (0.2-0.4), including screens and counts that have changed since. The current checks run in `scripts/test-release.ps1` and `scripts/verify-web-release.py`.
+
 ## Frame pacing and FPS limiter verification (0.4.1, 3 October 2026)
 
 The Release build passes with zero warnings/errors. All 124 manager tests pass, including both runtime routes with preserved, headroom, refresh-matched and fractional custom caps; framegen-off matching; invalid/nonfinite values; missing-field restoration; owned-cap edit rejection; preservation of conflicting user edits; and changed/new autoexec launch guards. Quality tuning and guided stages retain customized pacing choices.

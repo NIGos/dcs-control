@@ -1,0 +1,1093 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1041,8 +1041,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         set_tests_properties(xrfg_layer_d3d11_bridge_fallback_eager PROPERTIES TIMEOUT 60)
+ 
+         # DCS VR Control (0006): late submissions and the 3X late-frame skip
+-        # on a runtime that paces like a display, with the skip on (the
+-        # default) and turned off by the ini.
++        # on a runtime that paces like a display, with the skip turned on and
++        # off by the ini (off by default since 0009).
+         foreach(skip_case on off)
+             if(skip_case STREQUAL "on")
+                 set(skip_ini "${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_late_skip.ini")
+diff --git a/include/xrfg/d3d11_bridge.hpp b/include/xrfg/d3d11_bridge.hpp
+--- a/include/xrfg/d3d11_bridge.hpp
++++ b/include/xrfg/d3d11_bridge.hpp
+@@ -60,8 +60,10 @@ struct D3D11BridgeSwapchainDescription {
+ // shared one. See SessionState::d3d11_bridge in the layer for why the
+ // runtime is handed a D3D12 session at all.
+ //
+-// Every method returns immediately; the two sides are ordered on shared
+-// fences, and the only CPU wait is wait_for_idle at teardown. DCS VR Control
++// The two sides are ordered on shared fences. The CPU waits are
++// wait_for_idle at teardown and, in the copy paths, a wait of at most 2 s
++// for a copy list whose previous use the layer's queue has not finished
++// (which fails as "no copy" if it is still unfinished). DCS VR Control
+ // (0006): two fences, one per direction - the application's context signals
+ // the hand-over on one, the layer's queue its reads on the other - so that
+ // neither fence ever has two signallers racing it backwards.
+diff --git a/include/xrfg/smooth_cursor_templates.hpp b/include/xrfg/smooth_cursor_templates.hpp
+--- a/include/xrfg/smooth_cursor_templates.hpp
++++ b/include/xrfg/smooth_cursor_templates.hpp
+@@ -30,12 +30,6 @@ struct CursorTemplateSet {
+     CursorTemplateSource source{CursorTemplateSource::none};
+ };
+ 
+-// The cursor resources a VR pilot moves (by resource id in Visualizer.dll):
+-// the cockpit's yellow cross (147) and green sight (145), and the menus'
+-// white dot (149). In the cockpit DCS draws them as a 2-degree spot
+-// projected into the scene (enlight's RayCursor; 0011).
+-[[nodiscard]] std::span<const std::uint16_t> dcs_cockpit_cursor_ids() noexcept;
+-
+ // Decodes the bits of one RT_CURSOR resource (a hotspot, then a DIB with its
+ // AND mask) into a 32x32 template. 32-bit images keep their alpha; 1, 4, 8
+ // and 24-bit ones take it from the AND mask. False for any other size or
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -18,6 +18,9 @@ deep_pipeline=1
+ ; games at a third of the headset's refresh rate. 0 off (default), 1 on.
+ ; Followed live in a running game that started with deep_pipeline=1.
+ triple_frame_gen=0
++; Switch between 2X and 3X by itself, on how the game keeps up. 0 off
++; (default), 1 on.
++adaptive_frame_gen=0
+ ; Under adaptive_frame_gen=1: a steady 3X tries 2X every 20 s (backing off to
+ ; 2 min after a failed try) and keeps it when it holds. 1 on (default), 0 off.
+ ; A stall of a second or more (a mission load) starts it over.
+@@ -30,6 +33,9 @@ late_frame_skip=0
+ ; A bridged D3D11 game hands every runtime a GPU queue of the layer's own, so
+ ; a submission waits only for what it shows. 1 on (default), 0 off.
+ own_binding_queue=1
++; Move the display time the game is told to the scanout its real frame lands
++; on under frame generation. 1 on (default), 0 off.
++display_time_correction=1
+ ; The in-headset diagnostic panel shows the GPU's memory. 0 off (default), 1 on.
+ diag_vram=0
+ ; A bridged D3D11 game's colour swapchains hold no runtime images while frame
+@@ -37,6 +43,9 @@ diag_vram=0
+ ; that name the game's own swapchain (and given back after 5 s without one).
+ ; 1 on (default), 0 off.
+ lazy_runtime_swapchains=1
++; How long, in ms, a runtime swapchain no frame names is kept before it is
++; given back (100 to 600000; anything else means 5000).
++lazy_runtime_reclaim_ms=5000
+ ; With it, frame generation reads the game's frames in place instead of
+ ; copying each into a history of its own. 1 on (default), 0 off.
+ history_in_place=1
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -318,8 +318,16 @@ std::uint32_t read_lazy_runtime_reclaim_ms(
+             return kDefault;
+         }
+         const auto ini_path = module_directory / L"ofxr_bridge.ini";
+-        return static_cast<std::uint32_t>(GetPrivateProfileIntW(
+-            L"ofxr", L"lazy_runtime_reclaim_ms", kDefault, ini_path.c_str()));
++        const UINT value = GetPrivateProfileIntW(
++            L"ofxr", L"lazy_runtime_reclaim_ms", kDefault, ini_path.c_str());
++        // DCS Control (0016): 0 or a negative value (read as a huge UINT)
++        // would reclaim at once or never; out of range means the default.
++        // (100, not more: the layer tests reclaim after 200 ms.)
++        constexpr UINT kMinimum = 100;
++        constexpr UINT kMaximum = 600000;
++        return value < kMinimum || value > kMaximum
++            ? kDefault
++            : static_cast<std::uint32_t>(value);
+     } catch (...) {
+         return kDefault;
+     }
+@@ -344,12 +352,19 @@ std::filesystem::path read_cursor_templates(
+             return {};
+         }
+         const auto ini_path = module_directory / L"ofxr_bridge.ini";
++        // DCS Control (0016): a value that fills the buffer comes back
++        // truncated (length == size - 1); grow it and read again.
+         std::wstring value(1024, L'\0');
+-        const DWORD length = GetPrivateProfileStringW(
+-            L"ofxr", L"cursor_templates", L"", value.data(),
+-            static_cast<DWORD>(value.size()), ini_path.c_str());
+-        value.resize(length);
+-        return std::filesystem::path(value);
++        for (;;) {
++            const DWORD length = GetPrivateProfileStringW(
++                L"ofxr", L"cursor_templates", L"", value.data(),
++                static_cast<DWORD>(value.size()), ini_path.c_str());
++            if (length + 1 < value.size() || value.size() >= 32768) {
++                value.resize(length);
++                return std::filesystem::path(value);
++            }
++            value.assign(value.size() * 2, L'\0');
++        }
+     } catch (...) {
+         return {};
+     }
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+--- a/src/core/diagnostic_overlay_model.cpp
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -79,9 +79,17 @@ std::string format_dlss_line(const DiagnosticInputs& in, DiagnosticColor& color)
+     if (!(s.flags & dcsvr_nr_enabled)) { color = DiagnosticColor::grey; return "DLSS 5: OFF"; }
+     if (s.nr_evaluations_per_second == 0U) {
+         color = DiagnosticColor::amber;
+-        const std::string reason = s.reason[0] ? std::string(s.reason, strnlen(s.reason, sizeof(s.reason)))
+-                                               : std::string("no NR evaluations");
+-        return "DLSS 5: ON but not applied (" + reason + ")";
++        std::string reason = s.reason[0] ? std::string(s.reason, strnlen(s.reason, sizeof(s.reason)))
++                                         : std::string("no NR evaluations");
++        // DCS Control (0016): the reason is cut to the panel's width with an
++        // ellipsis, so the closing parenthesis and the cut both show.
++        const std::string prefix = "DLSS 5: ON but not applied (";
++        const std::size_t columns = diagnostic_panel_columns(kDiagnosticPanelWidth);
++        if (columns > prefix.size() + 4 && prefix.size() + reason.size() + 1 > columns) {
++            reason.resize(columns - prefix.size() - 1 - 3);
++            reason += "...";
++        }
++        return prefix + reason + ")";
+     }
+     color = DiagnosticColor::green;
+     std::string detail;
+diff --git a/src/d3d11/d3d11_bridge.cpp b/src/d3d11/d3d11_bridge.cpp
+--- a/src/d3d11/d3d11_bridge.cpp
++++ b/src/d3d11/d3d11_bridge.cpp
+@@ -629,16 +629,28 @@ struct D3D11BridgeSwapchain::Impl {
+     // oldest, which cannot happen while the application's own frame loop
+     // paces the releases four per swapchain apart.
+     [[nodiscard]] HRESULT take_copy_list(CopyList** output) noexcept {
+-        CopyList& copy = copy_lists[next_copy_list];
++        const std::size_t taken = next_copy_list;
++        CopyList& copy = copy_lists[taken];
+         next_copy_list = (next_copy_list + 1) % kCopyListCount;
+         if (copy.fence_value != 0 &&
+             d3d12_fence->GetCompletedValue() < copy.fence_value) {
+             const HRESULT result = d3d12_fence->SetEventOnCompletion(
+                 copy.fence_value, fence_event);
+             if (FAILED(result)) {
++                next_copy_list = taken;
+                 return result;
+             }
+             WaitForSingleObject(fence_event, 2000);
++            // DCS Control (0016): the event is auto-reset and shared, so a
++            // stale signal or the 2 s timeout can end the wait early. Resetting
++            // a list the queue still executes is undefined; report no copy
++            // instead and retry the same list next time.
++            const std::uint64_t completed = d3d12_fence->GetCompletedValue();
++            if (completed == std::numeric_limits<std::uint64_t>::max() ||
++                completed < copy.fence_value) {
++                next_copy_list = taken;
++                return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
++            }
+         }
+         // Its timestamps are about to be overwritten.
+         harvest_copy_timing();
+@@ -944,8 +956,13 @@ struct D3D11BridgeSwapchain::Impl {
+             ExternalRead read = std::move(external_reads[index]);
+             external_reads[index] = {};
+             const std::uint64_t completed = read.fence->GetCompletedValue();
+-            if (completed == std::numeric_limits<std::uint64_t>::max() ||
+-                completed < read.value) {
++            // DCS Control (0016): UINT64_MAX is the removed-device answer, not
++            // a pending read; queuing a Wait on it would never resolve.
++            if (completed == std::numeric_limits<std::uint64_t>::max()) {
++                enabled = false;
++                return DXGI_ERROR_DEVICE_REMOVED;
++            }
++            if (completed < read.value) {
+                 HRESULT result = d3d12_queue->Wait(read.fence.Get(), read.value);
+                 if (SUCCEEDED(result)) {
+                     const std::uint64_t value = allocate();
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -38,6 +38,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <atomic>
+ #include <cmath>
+ #include <cstddef>
+ #include <cstring>
+@@ -92,6 +93,9 @@ constexpr UINT kMaskSrvDescriptor = 7;
+ constexpr UINT kCursorTemplateSrvDescriptor = 8;
+ constexpr UINT kCursorStateSrvDescriptor = 9;
+ constexpr UINT kMaskVerticesPerView = D3D12FrameSynthesizer::kMaxMaskVertices;
++// DCS Control (0016): repeated as kMaskVerticesPerView in frame_synthesis.hlsl.
++static_assert(kMaskVerticesPerView == 3072U,
++              "update kMaskVerticesPerView in frame_synthesis.hlsl as well");
+ constexpr UINT kUavDescriptorCount = 3;
+ constexpr UINT kDescriptorBlockSize =
+     kSrvDescriptorCount + kUavDescriptorCount;
+@@ -1150,6 +1154,11 @@ struct D3D12FrameSynthesizer::Impl {
+     ComPtr<ID3D12Resource> cursor_capture;
+     ComPtr<ID3D12Resource> cursor_capture_readback;
+     std::filesystem::path cursor_capture_directory;
++    // DCS Control (0016): the thread writing the last capture's files, joined
++    // before the next one starts and in ~Impl, so it cannot outlive the
++    // module; cursor_capture_writing is cleared by it as it finishes.
++    std::thread cursor_capture_thread;
++    std::atomic<bool> cursor_capture_writing{false};
+     std::uint32_t cursor_capture_limit{};
+     std::uint32_t cursor_capture_interval_ms{};
+     std::uint32_t cursor_captures{};
+@@ -1195,6 +1204,9 @@ struct D3D12FrameSynthesizer::Impl {
+     std::uint64_t cursor_log_milliseconds{};
+ 
+     ~Impl() {
++        if (cursor_capture_thread.joinable()) {
++            cursor_capture_thread.join();
++        }
+         // Nothing outside this object waits on the synthesis queue. Its work
+         // writes into the slot command allocators and reads the history
+         // slots, so releasing them with submissions still in flight is a
+@@ -2091,7 +2103,9 @@ struct D3D12FrameSynthesizer::Impl {
+         ID3D12GraphicsCommandList* command_list,
+         const std::pair<UINT, UINT>& mask) noexcept {
+         if (mask.second != 0) {
+-            command_list->DrawInstanced(mask.second, 1, mask.first, 0);
++            // DCS Control (0016): the shader finds the view's region from
++            // ViewIndex (mask.first), so the draw starts at vertex 0.
++            command_list->DrawInstanced(mask.second, 1, 0, 0);
+         } else {
+             command_list->DrawInstanced(3, 1, 0, 0);
+         }
+@@ -2723,6 +2737,14 @@ struct D3D12FrameSynthesizer::Impl {
+             fence_status(fence.Get(), cursor_capture_fence) != S_OK) {
+             return;
+         }
++        // DCS Control (0016): one writer at a time; the capture stays
++        // pending until the previous one's files are written.
++        if (cursor_capture_thread.joinable()) {
++            if (cursor_capture_writing.load(std::memory_order_acquire)) {
++                return;
++            }
++            cursor_capture_thread.join();
++        }
+         cursor_capture_pending = false;
+         const std::uint32_t index = ++cursor_captures;
+         void* mapped = nullptr;
+@@ -2744,10 +2766,14 @@ struct D3D12FrameSynthesizer::Impl {
+         bridge_flight_logger().event(BridgeFlightOperation::smooth_cursor, 4, index,
+             (*copy)[32], (*copy)[16]);
+         try {
+-            std::thread([copy, directory = cursor_capture_directory, index] {
+-                write_cursor_capture_files(*copy, directory, index);
+-            }).detach();
++            cursor_capture_writing.store(true, std::memory_order_release);
++            cursor_capture_thread = std::thread(
++                [this, copy, directory = cursor_capture_directory, index] {
++                    write_cursor_capture_files(*copy, directory, index);
++                    cursor_capture_writing.store(false, std::memory_order_release);
++                });
+         } catch (...) {
++            cursor_capture_writing.store(false, std::memory_order_release);
+         }
+     }
+ 
+@@ -4181,6 +4207,10 @@ struct D3D12FrameSynthesizer::Impl {
+                 release_state)};
+         slot.command_list->ResourceBarrier(static_cast<UINT>(finish.size()), finish.data());
+         dred_marker(slot.command_list.Get(), "OFXR DLSS-vector complete");
++        // DCS Control (0016): this path resolves no timestamps, so the
++        // readback still holds an earlier pair's marks; the detection's time
++        // must not be taken from them.
++        slot.cursor_timed = false;
+         return S_OK;
+     }
+ 
+diff --git a/src/d3d12/d3d12_history.cpp b/src/d3d12/d3d12_history.cpp
+--- a/src/d3d12/d3d12_history.cpp
++++ b/src/d3d12/d3d12_history.cpp
+@@ -281,28 +281,27 @@ struct D3D12SwapchainHistory::Impl {
+         } else {
+             slots.resize(D3D12SwapchainHistory::kSlotCount);
+         }
+-        for (HistorySlot& slot : slots) {
+-            if (in_place) {
+-                break;
+-            }
+-            HRESULT result = device->CreateCommittedResource(
+-                &heap_properties,
+-                D3D12_HEAP_FLAG_NONE,
+-                &history_description,
+-                D3D12_RESOURCE_STATE_COMMON,
+-                nullptr,
+-                IID_PPV_ARGS(slot.resource.GetAddressOf()));
+-            if (FAILED(result)) {
+-                if (failure_stage != nullptr) {
+-                    *failure_stage =
+-                        D3D12HistoryInitializationStage::create_slot_resource;
++        if (!in_place) {
++            for (HistorySlot& slot : slots) {
++                HRESULT result = device->CreateCommittedResource(
++                    &heap_properties,
++                    D3D12_HEAP_FLAG_NONE,
++                    &history_description,
++                    D3D12_RESOURCE_STATE_COMMON,
++                    nullptr,
++                    IID_PPV_ARGS(slot.resource.GetAddressOf()));
++                if (FAILED(result)) {
++                    if (failure_stage != nullptr) {
++                        *failure_stage =
++                            D3D12HistoryInitializationStage::create_slot_resource;
++                    }
++                    return result;
++                }
++                result = create_closed_command_list(
++                    queue_description.NodeMask, slot, failure_stage);
++                if (FAILED(result)) {
++                    return result;
+                 }
+-                return result;
+-            }
+-            result = create_closed_command_list(
+-                queue_description.NodeMask, slot, failure_stage);
+-            if (FAILED(result)) {
+-                return result;
+             }
+         }
+ 
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -821,13 +821,21 @@ struct FullscreenVertex {
+     float4 position : SV_Position;
+ };
+ 
++// DCS Control (0016): the vertex buffer holds one region of this many
++// vertices per target view (kMaskVerticesPerView in
++// d3d12_frame_synthesizer.cpp); the draw starts at vertex 0 and the shader
++// adds the region itself, since whether SV_VertexID includes
++// StartVertexLocation is not something to rely on.
++static const uint kMaskVerticesPerView = 3072u;
++
+ FullscreenVertex FullscreenTriangleVS(uint vertex_id : SV_VertexID) {
+     FullscreenVertex output;
+     // DCS VR Control (0008): only what the lens shows. The pixel shader
+     // works from SV_Position alone, so every pixel this covers comes out
+     // exactly as under the full-screen triangle.
+     if ((SynthesisFlags & 2u) != 0u) {
+-        output.position = float4(MaskVertices[vertex_id], 0.0, 1.0);
++        output.position = float4(
++            MaskVertices[ViewIndex * kMaskVerticesPerView + vertex_id], 0.0, 1.0);
+         return output;
+     }
+     float2 position = vertex_id == 0 ? float2(-1.0, -1.0)
+diff --git a/src/d3d12/smooth_cursor.hlsl b/src/d3d12/smooth_cursor.hlsl
+--- a/src/d3d12/smooth_cursor.hlsl
++++ b/src/d3d12/smooth_cursor.hlsl
+@@ -260,7 +260,9 @@ float srgb_to_linear(float value) {
+     return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4);
+ }
+ 
+-float template_luma(uint template_index, uint2 texel) {
++// DCS Control (0016): one template texel's colour, linear where the frames
++// are (Flags bit 0), shared by template_luma and shape_colour_match.
++float3 template_colour(uint template_index, uint2 texel) {
+     uint rgba = CursorTemplates[template_index * kTemplateTexels + texel.y * kTemplateSize + texel.x];
+     float3 colour = float3(
+         float(rgba & 0xffu),
+@@ -269,7 +271,11 @@ float template_luma(uint template_index, uint2 texel) {
+     if ((Flags & 1u) != 0u) {
+         colour = float3(srgb_to_linear(colour.r), srgb_to_linear(colour.g), srgb_to_linear(colour.b));
+     }
+-    return luma(colour);
++    return colour;
++}
++
++float template_luma(uint template_index, uint2 texel) {
++    return luma(template_colour(template_index, texel));
+ }
+ 
+ // A template is matched one of two ways (the info word's bit 16). One with
+@@ -410,13 +416,7 @@ float shape_colour_match(uint template_index, int2 position, float scale, uint s
+                 ? PreviousFrame.Load(int4(pixel, int(slice), 0))
+                 : CurrentFrame.Load(int4(pixel, int(slice), 0));
+             image += colour.rgb;
+-            uint rgba = CursorTemplates[template_index * kTemplateTexels + texel.y * kTemplateSize + texel.x];
+-            float3 own = float3(float(rgba & 0xffu), float((rgba >> 8) & 0xffu),
+-                float((rgba >> 16) & 0xffu)) / 255.0;
+-            if ((Flags & 1u) != 0u) {
+-                own = float3(srgb_to_linear(own.r), srgb_to_linear(own.g), srgb_to_linear(own.b));
+-            }
+-            sprite += own;
++            sprite += template_colour(template_index, texel);
+         }
+     }
+     float3 image_chroma = image / max(image.r + image.g + image.b, 1.0e-4);
+@@ -572,7 +572,7 @@ void CursorArgumentsCS() {
+ 
+ // One group per listed tile and template: every coarse candidate position
+ // of the tile (every second pixel, one per thread), at the tracked scale or
+-// all eight, against the template's coarse samples.
++// all ten (kScaleCount), against the template's coarse samples.
+ [numthreads(256, 1, 1)]
+ void CursorSearchCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupIndex) {
+     uint list_index = group_id.x;
+diff --git a/src/d3d12/smooth_cursor_templates.cpp b/src/d3d12/smooth_cursor_templates.cpp
+--- a/src/d3d12/smooth_cursor_templates.cpp
++++ b/src/d3d12/smooth_cursor_templates.cpp
+@@ -13,6 +13,9 @@ namespace {
+ // the menus (as seen in the headset). The control markers DCS shows over a
+ // switch last only while the mouse rests on it, when there is nothing to
+ // smooth, and every image searched costs a pass and is one more look-alike.
++// In the cockpit DCS draws them as a 2-degree spot projected into the scene
++// (enlight's RayCursor). DCS Control (0016): the unused accessor
++// dcs_cockpit_cursor_ids() is gone; the ids live only here.
+ constexpr std::array<std::uint16_t, 3> kCockpitCursorIds{147, 145, 149};
+ 
+ [[nodiscard]] std::uint32_t read_u32(std::span<const std::uint8_t> bytes, std::size_t at) noexcept {
+@@ -87,10 +90,6 @@ constexpr std::array<std::uint16_t, 3> kCockpitCursorIds{147, 145, 149};
+ 
+ }  // namespace
+ 
+-std::span<const std::uint16_t> dcs_cockpit_cursor_ids() noexcept {
+-    return kCockpitCursorIds;
+-}
+-
+ bool decode_cursor_resource(
+     std::span<const std::uint8_t> bits,
+     D3D12CursorTemplate* output) noexcept {
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -501,7 +501,9 @@ void BridgeFlightLogger::end(
+               (now.QuadPart - token.start_counter) * 1000000ll /
+               impl_->frequency.QuadPart)
+         : 0;
+-    if (quiet_operation(operation) && result >= 0 && duration < kQuietThresholdMicroseconds) {
++    // DCS Control (0016): only a plain success is quiet; S_FALSE and other
++    // positive results carry meaning (e.g. a stale copy taken) and are kept.
++    if (quiet_operation(operation) && result == 0 && duration < kQuietThresholdMicroseconds) {
+         return;
+     }
+     impl_->write(
+diff --git a/src/layer/gpu_stats_sampler.cpp b/src/layer/gpu_stats_sampler.cpp
+--- a/src/layer/gpu_stats_sampler.cpp
++++ b/src/layer/gpu_stats_sampler.cpp
+@@ -109,6 +109,7 @@ struct GpuStatsSampler::Impl {
+         std::int64_t process_max = 0;
+         std::int64_t adapter_max = 0;
+         bool ok = true;
++        bool backwards = false;
+         for (ULONG node = 0; node < nodes; ++node) {
+             std::int64_t process = 0;
+             std::int64_t whole = 0;
+@@ -118,6 +119,12 @@ struct GpuStatsSampler::Impl {
+                 break;
+             }
+             if (busy_primed) {
++                // DCS Control (0016): one engine's counter going backwards (a
++                // TDR or adapter reset) must not be hidden by the max over
++                // the other engines and read as an idle GPU.
++                if (process < process_previous[node] || whole < adapter_previous[node]) {
++                    backwards = true;
++                }
+                 process_max = std::max(process_max, process - process_previous[node]);
+                 adapter_max = std::max(adapter_max, whole - adapter_previous[node]);
+             }
+@@ -131,7 +138,8 @@ struct GpuStatsSampler::Impl {
+         if (busy_primed) {
+             latency::GpuBusySample sample{};
+             sample.at = now;
+-            sample.process_busy_delta = process_max * kRunningTimeUnit;
++            // A negative delta makes the meter start over (GpuBusyMeter::observe).
++            sample.process_busy_delta = backwards ? -1 : process_max * kRunningTimeUnit;
+             sample.adapter_busy_delta = adapter_max * kRunningTimeUnit;
+             sample.frames_delta = frame_count >= frames_previous
+                 ? frame_count - frames_previous
+diff --git a/src/layer/openxr_fps_overlay.cpp b/src/layer/openxr_fps_overlay.cpp
+--- a/src/layer/openxr_fps_overlay.cpp
++++ b/src/layer/openxr_fps_overlay.cpp
+@@ -116,10 +116,14 @@ struct OpenXrFpsOverlay::Impl {
+     // the module is absent (DCS loads it from a Lua hook, after OpenXR starts).
+     using EngineStatusFn = unsigned long long(__cdecl*)();
+     EngineStatusFn engine_status{};
++    // DCS Control (0016): a reference on the module that exports the
++    // status function, so a Lua FreeLibrary cannot leave it dangling.
++    HMODULE engine_module{};
+     std::uint64_t next_engine_lookup_ms{};
+     DiagnosticHotkey engine_hotkey;
+     // DCS Control (0015): the pupil shift layer's status export, looked up the same way.
+     EngineStatusFn pupil_status{};
++    HMODULE pupil_module{};
+     std::uint64_t next_pupil_lookup_ms{};
+     DiagnosticHotkey pupil_hotkey;
+     std::uint64_t next_status_open_ms{};
+@@ -142,6 +146,24 @@ struct OpenXrFpsOverlay::Impl {
+         if (event) CloseHandle(event);
+         if (status_view) UnmapViewOfFile(status_view);
+         if (status_mapping) CloseHandle(status_mapping);
++        if (engine_module) FreeLibrary(engine_module);
++        if (pupil_module) FreeLibrary(pupil_module);
++    }
++
++    // DCS Control (0016): GetModuleHandleExW with flags 0 takes a module
++    // reference, which the caller keeps for as long as it calls `name`.
++    template <typename Fn>
++    static Fn lookup_export(const wchar_t* module_name, const char* name, HMODULE& module) {
++        if (!GetModuleHandleExW(0, module_name, &module)) {
++            module = nullptr;
++            return nullptr;
++        }
++        auto function = reinterpret_cast<Fn>(GetProcAddress(module, name));
++        if (!function) {
++            FreeLibrary(module);
++            module = nullptr;
++        }
++        return function;
+     }
+ 
+     bool create_surface(Surface& surface, std::uint32_t surface_width, std::uint32_t surface_height) {
+@@ -364,8 +386,8 @@ struct OpenXrFpsOverlay::Impl {
+             const auto tick = GetTickCount64();
+             if (tick < next_pupil_lookup_ms) return;
+             next_pupil_lookup_ms = tick + 2000;
+-            if (HMODULE module = GetModuleHandleW(L"XR_APILAYER_DCSVR_pupil_shift.dll"))
+-                pupil_status = reinterpret_cast<EngineStatusFn>(GetProcAddress(module, "PupilShift_Status"));
++            pupil_status = lookup_export<EngineStatusFn>(
++                L"XR_APILAYER_DCSVR_pupil_shift.dll", "PupilShift_Status", pupil_module);
+             if (!pupil_status) return;
+         }
+         inputs.pupil = {true, pupil_status()};
+@@ -377,8 +399,8 @@ struct OpenXrFpsOverlay::Impl {
+             const auto tick = GetTickCount64();
+             if (tick < next_engine_lookup_ms) return;
+             next_engine_lookup_ms = tick + 2000;
+-            if (HMODULE module = GetModuleHandleW(L"DcsQvCull.dll"))
+-                engine_status = reinterpret_cast<EngineStatusFn>(GetProcAddress(module, "DcsQvCull_Status"));
++            engine_status = lookup_export<EngineStatusFn>(
++                L"DcsQvCull.dll", "DcsQvCull_Status", engine_module);
+             if (!engine_status) return;
+         }
+         inputs.engine = {true, engine_status()};
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -950,11 +950,12 @@ private:
+ // once-per-frame hold with its release delay, and the waits for a submission
+ // or for the queue to drain. Adaptive 2X/3X takes it from the thread that
+ // calls xrEndFrame, once a frame, to tell the application's own CPU time from
+-// the time the layer's pacing held it. Waits on any other thread are not
+-// counted: DCS World waits for its frames on a second thread while the render
+-// thread works, so that wait overlaps the application's work rather than
+-// adding to its interval (where it does hold the render thread back, it
+-// shows as CPU time - an overestimate, which keeps 3X).
++// the time the layer's pacing held it. This per-thread sum is only the
++// xrEndFrame thread's own; since 0007 the holds of every thread are also kept
++// as intervals (g_blocked_log below) and a hold on another thread - DCS
++// World's wait thread - counts where it delayed the frame, i.e. before its
++// xrBeginFrame (see sample_application_throughput). DCS Control (0016):
++// comment brought up to date.
+ thread_local std::int64_t t_application_blocked_ns = 0;
+ 
+ // DCS VR Control (0007): and every such hold, on whichever application
+@@ -1177,6 +1178,10 @@ struct SessionState {
+     XrViewConfigurationType view_configuration{XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO};
+     std::array<std::vector<float>, 2> visibility_masks;
+     std::uint32_t visibility_mask_fetched_version{};
++    // DCS Control (0016): fetches at the current version that failed; the
++    // version is latched only once both views came back, or after
++    // kVisibilityMaskAttempts tries (then failed views draw unmasked).
++    std::uint32_t visibility_mask_failures{};
+     // Application frames submitted on this session, counted only until the
+     // delivery connection is released. Guarded by frame_call_mutex.
+     std::uint32_t application_frames_submitted{};
+@@ -1605,7 +1610,8 @@ struct SessionState {
+     // it goes to the runtime unwritten, or when its slot comes with nothing
+     // queued and the previous frame is repeated. The runtime still has until
+     // its compositor runs to see the pixels (it waits on the binding queue),
+-    // which is the margin that test keeps. (DCS VR Control.)
++    // which is the margin that test kept. (DCS VR Control.) That was the
++    // test until 0004, below; SteamVR keeps the yes/no test above.
+     //
+     // DCS VR Control (0004): off SteamVR that yes/no test is replaced by how
+     // much earlier or later than its hand-over the first synthetic was
+@@ -2411,10 +2417,14 @@ struct SwapchainState {
+         // DCS VR Control (0008): `[ofxr] history_in_place`, read at creation
+         // (see ensure_swapchain_history).
+         bool history_in_place{};
+-        XrSwapchain probe{XR_NULL_HANDLE}; // the runtime's handle at creation
+         std::uint32_t next_acquire{};
+         XrSwapchain runtime{XR_NULL_HANDLE};
+         std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> runtime_images;
++        // DCS Control (0016): an image of `runtime` acquired by catch_up_lazy
++        // whose bounded wait timed out or failed. It is never released
++        // unwaited; the next catch-up waits for it instead of acquiring.
++        bool unwaited{};
++        std::uint32_t unwaited_index{};
+         std::chrono::steady_clock::time_point last_used{};
+         // Downstream submissions naming it that are in flight; it is not
+         // given back under one.
+@@ -4729,6 +4739,10 @@ XrResult layer_create_api_layer_instance_impl(
+     // DCS VR Control (0008): see Dispatch::get_visibility_mask.
+     bool asked_visibility_mask = false;
+     bool visibility_mask_added = false;
++    // DCS Control (0016): `[ofxr] visibility_mask=0` turns the feature off
++    // also when the application enabled XR_KHR_visibility_mask itself.
++    const bool visibility_mask_enabled =
++        xrfg::implicit_layer::read_visibility_mask(current_layer_directory());
+     try {
+         for (std::uint32_t index = 0; index < create_info->enabledExtensionCount; ++index) {
+             const char* const extension = create_info->enabledExtensionNames[index];
+@@ -4783,8 +4797,7 @@ XrResult layer_create_api_layer_instance_impl(
+         // DCS VR Control (0008): the runtime's visibility mask, for the
+         // generated frames' final draw, when it lists the extension and the
+         // ini leaves it on (`[ofxr] visibility_mask`).
+-        if (!asked_visibility_mask &&
+-            xrfg::implicit_layer::read_visibility_mask(current_layer_directory())) {
++        if (!asked_visibility_mask && visibility_mask_enabled) {
+             PFN_xrEnumerateInstanceExtensionProperties enumerate_extensions = nullptr;
+             bool runtime_has_mask = false;
+             if (XR_SUCCEEDED(next_get_instance_proc_addr(
+@@ -4891,7 +4904,7 @@ XrResult layer_create_api_layer_instance_impl(
+     }
+ 
+     // DCS VR Control (0008): see Dispatch::get_visibility_mask.
+-    if (visibility_mask_added || asked_visibility_mask) {
++    if (visibility_mask_enabled && (visibility_mask_added || asked_visibility_mask)) {
+         static_cast<void>(load_function(
+             next_get_instance_proc_addr,
+             created_instance,
+@@ -5614,6 +5627,7 @@ XrResult layer_begin_session_impl(
+             ? begin_info->primaryViewConfigurationType
+             : XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+         state->visibility_mask_fetched_version = 0;
++        state->visibility_mask_failures = 0;
+     }
+     return result;
+ }
+@@ -6242,7 +6256,6 @@ XrResult layer_create_swapchain_impl(
+                 swapchain_state->lazy.active = true;
+                 swapchain_state->lazy.history_in_place =
+                     xrfg::implicit_layer::read_history_in_place(current_layer_directory());
+-                swapchain_state->lazy.probe = created_swapchain;
+                 swapchain_state->handle = own_handle;
+                 state->lazy_swapchain_count.fetch_add(1, std::memory_order_acq_rel);
+                 // 8: lazy. a the application's handle, b the images it sees
+@@ -6378,6 +6391,7 @@ XrResult layer_destroy_swapchain_impl(XrSwapchain swapchain) {
+             runtime = state->lazy.runtime;
+             state->lazy.runtime = XR_NULL_HANDLE;
+             state->lazy.runtime_images.clear();
++            state->lazy.unwaited = false;
+         }
+         if (runtime != XR_NULL_HANDLE) {
+             static_cast<void>(state->session->dispatch->destroy_swapchain(runtime));
+@@ -7237,6 +7251,7 @@ XrResult layer_release_swapchain_image_impl(
+ // image is drawn). Logged as visibility_mask result=2. Returns the version
+ // the masks are at.
+ constexpr float kVisibilityMaskMargin = 1.03F;
++constexpr std::uint32_t kVisibilityMaskAttempts = 3;
+ 
+ std::uint32_t refresh_visibility_masks(SessionState& session) noexcept {
+     try {
+@@ -7247,14 +7262,16 @@ std::uint32_t refresh_visibility_masks(SessionState& session) noexcept {
+         if (session.visibility_mask_fetched_version == version) {
+             return version;
+         }
+-        session.visibility_mask_fetched_version = version;
+         for (auto& mask : session.visibility_masks) {
+             mask.clear();
+         }
+         if (dispatch->get_visibility_mask == nullptr ||
+             session.view_configuration != XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) {
++            session.visibility_mask_fetched_version = version;
++            session.visibility_mask_failures = 0;
+             return version;
+         }
++        bool complete = true;
+         for (std::uint32_t view = 0; view < session.visibility_masks.size(); ++view) {
+             XrVisibilityMaskKHR mask{XR_TYPE_VISIBILITY_MASK_KHR};
+             XrResult result = dispatch->get_visibility_mask(
+@@ -7308,6 +7325,7 @@ std::uint32_t refresh_visibility_masks(SessionState& session) noexcept {
+                             (static_cast<double>(output[vertex + 3]) - output[vertex + 1]));
+                 }
+             }
++            complete = complete && XR_SUCCEEDED(result);
+             const double rectangle =
+                 static_cast<double>(max_x - min_x) * static_cast<double>(max_y - min_y);
+             xrfg::bridge_flight_logger().event(
+@@ -7319,6 +7337,14 @@ std::uint32_t refresh_visibility_masks(SessionState& session) noexcept {
+                     ? static_cast<std::uint64_t>(std::min(1000.0, 1000.0 * area / rectangle))
+                     : 0U);
+         }
++        // DCS Control (0016): latch the version only once both views were
++        // fetched (or the attempts ran out); until then 0 keeps the
++        // generation's masks as they were and the next frame tries again.
++        if (!complete && ++session.visibility_mask_failures < kVisibilityMaskAttempts) {
++            return 0;
++        }
++        session.visibility_mask_failures = 0;
++        session.visibility_mask_fetched_version = version;
+         return version;
+     } catch (...) {
+         return 0;
+@@ -7402,6 +7428,7 @@ using OwnedCompositionLayer = std::variant<
+         }
+         state.lazy.runtime = handle;
+         state.lazy.runtime_images = std::move(images);
++        state.lazy.unwaited = false;
+         ++state.lazy.creations;
+         xrfg::bridge_flight_logger().event(
+             xrfg::BridgeFlightOperation::d3d11_bridge,
+@@ -7440,21 +7467,33 @@ using OwnedCompositionLayer = std::variant<
+         const auto& dispatch = session.dispatch;
+         const XrSwapchain runtime = state.lazy.runtime;
+         std::uint32_t index = 0;
+-        XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+-        const XrResult acquire_result = with_runtime_entry(&session, [&] {
+-            return dispatch->acquire_swapchain_image(runtime, &acquire_info, &index);
+-        });
+-        if (XR_FAILED(acquire_result)) {
+-            return E_FAIL;
++        if (state.lazy.unwaited) {
++            index = state.lazy.unwaited_index;
++        } else {
++            XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
++            const XrResult acquire_result = with_runtime_entry(&session, [&] {
++                return dispatch->acquire_swapchain_image(runtime, &acquire_info, &index);
++            });
++            if (XR_FAILED(acquire_result)) {
++                return E_FAIL;
++            }
+         }
++        // DCS Control (0016): bounded, on the application's thread. An image
++        // whose wait did not succeed must not be released (the runtime would
++        // refuse it, or worse); it stays acquired and is waited for next time.
+         XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+-        wait_info.timeout = XR_INFINITE_DURATION;
++        wait_info.timeout = 100'000'000; // 100 ms
+         const XrResult wait_result = with_runtime_entry(&session, [&] {
+             return dispatch->wait_swapchain_image(runtime, &wait_info);
+         });
++        if (wait_result != XR_SUCCESS && wait_result != XR_SESSION_LOSS_PENDING) {
++            state.lazy.unwaited = true;
++            state.lazy.unwaited_index = index;
++            return E_FAIL;
++        }
++        state.lazy.unwaited = false;
+         HRESULT copied = E_FAIL;
+-        if ((wait_result == XR_SUCCESS || wait_result == XR_SESSION_LOSS_PENDING) &&
+-            index < state.lazy.runtime_images.size()) {
++        if (index < state.lazy.runtime_images.size()) {
+             // Whatever the runtime queued on the binding queue to keep the
+             // image safe to write holds the copy too.
+             carry_reacquire_to_application(&session);
+@@ -7507,11 +7546,15 @@ struct LazyTranslation {
+ // What to name in place of `handle`: its runtime swapchain for a lazy one of
+ // this session (made and caught up here if the application's xrEndFrame did
+ // not, which it always should), the handle itself for any other, null when
+-// no runtime swapchain could be had.
++// no runtime swapchain could be had. DCS Control (0016): `presenter_thread`
++// never catches up - that reaches the bridge's hand-over on the
++// application's D3D11 immediate context, which only the application's
++// thread may use - and names the runtime swapchain as it is, if there is one.
+ [[nodiscard]] XrSwapchain resolve_lazy_handle(
+     SessionState& session,
+     XrSwapchain handle,
+-    LazyTranslation& storage) {
++    LazyTranslation& storage,
++    bool presenter_thread) {
+     if (!may_be_lazy_handle(handle)) {
+         return handle;
+     }
+@@ -7537,7 +7580,7 @@ struct LazyTranslation {
+         behind = swapchain_state->lazy.runtime == XR_NULL_HANDLE ||
+             (bridge && bridge->has_pending_copy());
+     }
+-    if (behind && bridge) {
++    if (behind && bridge && !presenter_thread) {
+         const HRESULT caught_up = catch_up_lazy(*swapchain_state, *bridge);
+         XrSwapchain runtime = XR_NULL_HANDLE;
+         {
+@@ -7613,11 +7656,12 @@ struct LazyTranslation {
+ // swapchains instead. A layer whose lazy swapchain has no runtime swapchain
+ // (none could be made) is left out rather than handed to the runtime with a
+ // handle it never issued. Layers of types this layer does not know are
+-// forwarded as they came.
++// forwarded as they came. `presenter_thread`: see resolve_lazy_handle.
+ [[nodiscard]] const XrFrameEndInfo* translate_lazy_swapchains(
+     SessionState& session,
+     const XrFrameEndInfo* info,
+-    LazyTranslation& storage) noexcept {
++    LazyTranslation& storage,
++    bool presenter_thread = false) noexcept {
+     try {
+         if (info == nullptr || info->layers == nullptr || info->layerCount == 0 ||
+             session.lazy_swapchain_count.load(std::memory_order_acquire) == 0) {
+@@ -7648,7 +7692,8 @@ struct LazyTranslation {
+                 copy.views.assign(projection->views, projection->views + projection->viewCount);
+                 for (XrCompositionLayerProjectionView& view : copy.views) {
+                     const XrSwapchain resolved =
+-                        resolve_lazy_handle(session, view.subImage.swapchain, storage);
++                        resolve_lazy_handle(
++                            session, view.subImage.swapchain, storage, presenter_thread);
+                     dropped = dropped || resolved == XR_NULL_HANDLE;
+                     view.subImage.swapchain = resolved;
+                 }
+@@ -7694,7 +7739,8 @@ struct LazyTranslation {
+                 },
+                 *owned);
+             XrSwapchain* field = layer_swapchain_field(header);
+-            const XrSwapchain resolved = resolve_lazy_handle(session, *field, storage);
++            const XrSwapchain resolved =
++                resolve_lazy_handle(session, *field, storage, presenter_thread);
+             if (resolved == XR_NULL_HANDLE) {
+                 continue;
+             }
+@@ -7705,8 +7751,24 @@ struct LazyTranslation {
+         storage.info.layers = storage.layers.empty() ? nullptr : storage.layers.data();
+         return &storage.info;
+     } catch (...) {
+-        return info;
+     }
++    // DCS Control (0016): never forward the layer's own (odd) handles, which
++    // the runtime did not issue: the frame without the layers naming them,
++    // or without any layer if even that cannot be built.
++    storage.info = *info;
++    try {
++        storage.layers.clear();
++        for (std::uint32_t index = 0; index < info->layerCount; ++index) {
++            if (!layer_names_lazy_handle(info->layers[index])) {
++                storage.layers.push_back(info->layers[index]);
++            }
++        }
++    } catch (...) {
++        storage.layers.clear();
++    }
++    storage.info.layerCount = static_cast<std::uint32_t>(storage.layers.size());
++    storage.info.layers = storage.layers.empty() ? nullptr : storage.layers.data();
++    return &storage.info;
+ }
+ 
+ // A private image left acquired so that it is handed to the runtime by
+@@ -8329,7 +8391,9 @@ void log_submission_timing(
+ }
+ 
+ // One observation for the 3X release delay, and the step when a window of
+-// them closes; see xrfg::latency::TripleReleaseTuner. presenter_mutex held;
++// them closes; see xrfg::latency::TripleReleaseTuner. The yes/no readiness
++// test, which only SteamVR still uses; off SteamVR the tuner is fed the
++// slack samples instead (drain_triple_slack, since 0004). presenter_mutex held;
+ // the report is for the caller to record once it has let go.
+ void observe_triple_release(
+     SessionState& state,
+@@ -9687,8 +9751,8 @@ void continuous_presenter_main(
+             // DCS VR Control (0008): a lazy swapchain the frame names goes
+             // down as its runtime swapchain.
+             LazyTranslation lazy_translation;
+-            const XrFrameEndInfo* const downstream =
+-                translate_lazy_swapchains(*state, &submitted, lazy_translation);
++            const XrFrameEndInfo* const downstream = translate_lazy_swapchains(
++                *state, &submitted, lazy_translation, /*presenter_thread=*/true);
+             join_runtime_queue_to_application(
+                 state.get(),
+                 request ? request->app_release_value
+@@ -10578,6 +10642,24 @@ void continuous_presenter_main(
+     state->presenter_condition.notify_all();
+ }
+ 
++// DCS Control (0016): the 3X pacing state that belongs to one presenter, one
++// scene and one shape - the release delay and the epoch its slack samples
++// are tagged with, a leader or probe due, the late-frame skip and the fences
++// of a leader handed over unwritten. Shared by the presenter's start, a scene
++// change and a live 2X/3X switch, which had drifted apart. The queue depth
++// (triple_depth) and the display time correction are re-armed by each
++// caller, which differ there. Under presenter_mutex.
++void reset_triple_state_locked(SessionState& state) noexcept {
++    state.triple_release.reset();
++    ++state.triple_release_epoch;
++    state.triple_release_probe_due = false;
++    state.triple_leader_due = false;
++    state.late_skip.reset();
++    state.late_skip_active = false;
++    state.presenter_skip_slot_consumed = false;
++    state.unwritten_leader_ready.clear();
++}
++
+ [[nodiscard]] bool start_continuous_presenter(
+     const std::shared_ptr<SessionState>& state,
+     std::shared_ptr<GeneratedFrameEndInfo> seed_frame,
+@@ -10628,10 +10710,11 @@ void continuous_presenter_main(
+         state->presenter_schedule_valid = false;
+         state->presenter_display_period = 0;
+         // DCS VR Control (0006): the late-frame skip starts over off.
++        // DCS Control (0016): and the rest of the 3X state with it, as at a
++        // scene change - the previous presenter's release delay, leader due
++        // and unwritten leaders said nothing about this one.
+         state->presenter_previous_real = false;
+-        state->presenter_skip_slot_consumed = false;
+-        state->late_skip.reset();
+-        state->late_skip_active = false;
++        reset_triple_state_locked(*state);
+         // DCS VR Control (0007): a new presenter's queue has no depth yet.
+         const std::uint32_t slots_before = state->triple_depth.slots;
+         state->triple_depth.arm(
+@@ -13157,19 +13240,6 @@ void note_bridged_submissions(
+     }
+ }
+ 
+-// DCS VR Control (0006): while generation rewrites a bridged swapchain's
+-// frames onto the layer's private swapchains, its releases do not copy into
+-// the runtime's images (D3D11BridgeSwapchain::set_defer_copies). Before any
+-// submission that may name such a swapchain directly goes downstream - a
+-// frame passed through for whatever reason, or a generated frame whose other
+-// layers name it - the image it released last is copied here, on the
+-// session's queue, and the release mark is moved past that copy, as 0002's
+-// catch-up does for a skipped swapchain. `frame` null: every bridged
+-// swapchain, named or not. `stop_deferring`: and their releases copy again
+-// from now on. The decision to defer is only ever made after a frame has
+-// gone to the runtime rewritten (update_bridged_copy_deferral), so a release
+-// that turns out to belong to a pass-through frame is always caught up here
+-// before that frame goes down.
+ // DCS VR Control (0008): the per-frame bridged-swapchain walks below work on
+ // per-thread scratch lists, so a frame allocates nothing once they have grown
+ // to the session's size. The bridges are held only for the walk.
+@@ -13227,6 +13297,20 @@ private:
+         state.bridged_copy_swapchains.load(std::memory_order_acquire) != 0;
+ }
+ 
++// DCS VR Control (0006): while generation rewrites a bridged swapchain's
++// frames onto the layer's private swapchains, its releases do not copy into
++// the runtime's images (D3D11BridgeSwapchain::set_defer_copies). Before any
++// submission that may name such a swapchain directly goes downstream - a
++// frame passed through for whatever reason, or a generated frame whose other
++// layers name it - the image it released last is copied here, on the
++// session's queue, and the release mark is moved past that copy, as 0002's
++// catch-up does for a skipped swapchain. `frame` null: every bridged
++// swapchain, named or not. `stop_deferring`: and their releases copy again
++// from now on. The decision to defer is only ever made after a frame has
++// gone to the runtime rewritten (update_bridged_copy_deferral), so a release
++// that turns out to belong to a pass-through frame is always caught up here
++// before that frame goes down. (DCS Control (0016): moved here from above
++// BridgedSwapchainWalkEntry, which it does not describe.)
+ // `lazy_frame` (DCS VR Control, 0008): the frame whose lazy swapchains are
+ // caught up (catch_up_lazy) - `frame` when that is given, otherwise the
+ // application's own frame the caller is about to hand over. Only lazy
+@@ -13444,6 +13528,7 @@ void reclaim_lazy_runtimes(const std::shared_ptr<SessionState>& state) noexcept
+                     now - lazy.last_used).count();
+                 lazy.runtime = XR_NULL_HANDLE;
+                 lazy.runtime_images.clear();
++                lazy.unwaited = false;
+             }
+             static_cast<void>(state->dispatch->destroy_swapchain(runtime));
+             xrfg::bridge_flight_logger().event(
+@@ -13516,14 +13601,7 @@ void apply_scene_change(const std::shared_ptr<SessionState>& state) noexcept {
+             slots_before = state->triple_depth.slots;
+             skip_was_on = state->late_skip.active();
+             state->triple_depth.arm(state->deep_pipeline, multiplier);
+-            state->triple_release.reset();
+-            ++state->triple_release_epoch;
+-            state->triple_release_probe_due = false;
+-            state->triple_leader_due = false;
+-            state->late_skip.reset();
+-            state->late_skip_active = false;
+-            state->presenter_skip_slot_consumed = false;
+-            state->unwritten_leader_ready.clear();
++            reset_triple_state_locked(*state);
+             const std::size_t shallow_mode = xrfg::latency::display_time_mode(
+                 multiplier, state->deep_pipeline, 0);
+             if (slots_before > 0 &&
+@@ -13819,20 +13897,12 @@ void apply_live_frame_multiplier(
+                 (target == 2U || state->triple_deep_supported);
+             deep = state->deep_pipeline;
+             state->triple_depth.arm(deep, target);
+-            // The release delay belongs to the shape it was found in.
+-            state->triple_release.reset();
+-            // DCS VR Control (0004): slack measured in the old shape is not
+-            // judged in the new one.
+-            ++state->triple_release_epoch;
+-            state->triple_release_probe_due = false;
+-            state->triple_leader_due = false;
+-            // DCS VR Control (0006): the late-frame skip belongs to 3X and
+-            // to the evidence it was found on; the queue is empty here.
+-            state->late_skip.reset();
+-            state->late_skip_active = false;
++            // The release delay belongs to the shape it was found in; slack
++            // measured in the old shape is not judged in the new one (0004);
++            // the late-frame skip belongs to 3X and to the evidence it was
++            // found on, and the queue is empty here (0006).
++            reset_triple_state_locked(*state);
+             state->presenter_previous_real = false;
+-            state->presenter_skip_slot_consumed = false;
+-            state->unwritten_leader_ready.clear(); // 0009
+             // The display time correction too, scaled to the new period or
+             // taken from what was learned in this shape before.
+             const auto display_period = static_cast<xrfg::latency::Nanoseconds>(
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -2123,6 +2123,8 @@ void test_in_place_history_matches_copies(
+ // view (two triangles, given as tangents); with the mask every pixel whose
+ // centre is in the left half is byte for byte the unmasked synthetic, and
+ // every pixel of the right half keeps what the destination held before.
++// DCS Control (0016): the right eye's mask covers the right half instead,
++// so a draw that read the other view's vertices shows.
+ void test_visibility_mask_draws_only_the_visible_area(
+     D3D12WarpFixture& fixture,
+     xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx) {
+@@ -2178,9 +2180,11 @@ void test_visibility_mask_draws_only_the_visible_area(
+                 const float up = std::tan(views[eye].fov.angle_up);
+                 const float down = std::tan(views[eye].fov.angle_down);
+                 const float middle = 0.5F * (left + right);
++                const float from = eye == 0 ? left : middle;
++                const float to = eye == 0 ? middle : right;
+                 const std::array<float, 12> half{
+-                    left, down, middle, down, middle, up,
+-                    left, down, middle, up, left, up};
++                    from, down, to, down, to, up,
++                    from, down, to, up, from, up};
+                 require(operation_succeeded(run.synthesizer->set_visibility_mask(eye, half)),
+                     "mask test: set_visibility_mask");
+             }
+@@ -2214,7 +2218,13 @@ void test_visibility_mask_draws_only_the_visible_area(
+             for (UINT x = 0; x < kWidth; ++x) {
+                 const std::size_t offset =
+                     (static_cast<std::size_t>(y) * kWidth + x) * kBytesPerPixel;
+-                const bool visible = 2U * x + 1U < kWidth; // centre left of the middle
++                // Centre left (right eye: right) of the middle. A centre on
++                // the middle line is the left edge of the right eye's mask,
++                // which the top-left rule may draw: not counted either way.
++                if (eye != 0 && 2U * x + 1U == kWidth) {
++                    continue;
++                }
++                const bool visible = eye == 0 ? 2U * x + 1U < kWidth : 2U * x + 1U > kWidth;
+                 const bool same_as_full =
+                     std::equal(full[eye].begin() + offset,
+                         full[eye].begin() + offset + kBytesPerPixel,
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+--- a/tests/diagnostic_overlay_tests.cpp
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -249,6 +249,32 @@ int main() {
+         require(diagnostic_panel_columns(kDiagnosticPanelWidth) >= 50, "panel too narrow");
+         require(diagnostic_panel_columns(kDiagnosticPanelWidth) >=
+             std::string("Framegen: OFXR FidelityFX 3x (NVIDIA failed) - not generating").size(), "framegen line cut");
++        // DCS Control (0016): the longest "not applied" reason is cut with an
++        // ellipsis to the panel's width, closing parenthesis included.
++        {
++            const std::string text = dlss(in, C::amber);
++            require(text.size() == diagnostic_panel_columns(kDiagnosticPanelWidth) &&
++                    text.size() >= 4 && text.compare(text.size() - 4, 4, "...)") == 0,
++                "long DLSS reason not cut to the panel: " + text);
++        }
++        // DCS Control (0016): every optional line at once still fits the
++        // panel's height - the last one is drawn.
++        {
++            in.show_vram = true;
++            in.vram = {true, 6ULL << 30, 7ULL << 30, 24ULL << 30, 32ULL << 30};
++            in.engine = {true, kEngineRunning | kEngineOn | (13ULL << 8)};
++            in.pupil = {true, kPupilRunning | kPupilOn | kPupilGaze | (32ULL << 8)};
++            in.hotkey = {0x7B, 6}; // Alt+Shift+F12
++            const auto all = format_diagnostic_lines(in);
++            require(all.size() == 8 && in.hotkey.virtual_key, "not every optional line present");
++            const auto pixels = rasterize_diagnostic_panel(kDiagnosticPanelWidth, kDiagnosticPanelHeight, all, false);
++            const unsigned last_top = 8 + static_cast<unsigned>(all.size() - 1) * 20;
++            bool last_inked = false;
++            for (unsigned y = last_top; y < last_top + 14 && y < kDiagnosticPanelHeight && !last_inked; ++y)
++                for (unsigned x = 0; x < kDiagnosticPanelWidth && !last_inked; ++x)
++                    last_inked = pixels[static_cast<std::size_t>(y) * kDiagnosticPanelWidth + x] != 0x99000000u;
++            require(last_inked, "the panel does not hold every optional line (" + std::to_string(all.size()) + ")");
++        }
+ 
+         // Raster: translucent background, coloured ink, BGRA swap, long lines cut, bad sizes refused.
+         std::vector<DiagnosticLine> sample{{"DLSS 5: ON", C::green}, {"Framegen: off", C::grey},

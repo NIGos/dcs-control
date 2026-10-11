@@ -1,6 +1,6 @@
 # DCS Control — User Guide
 
-**Version 0.5.3-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`.
+**Version 0.5.4-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`.
 
 > **Early beta.** DCS Control has been flown mostly on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe — but please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
 
@@ -24,13 +24,13 @@
 
 ## What the app does
 
-DCS Control makes DCS World faster and, on Pimax headsets, sets up VR, without you copying files by hand. It was called **DCS VR Control** before 0.5.0; it is no longer only for VR.
+DCS Control makes DCS World faster and, on Pimax headsets, runs **DLSS 5 + frame generation + Quad Views together in VR**, set up and launched with one button, without you copying files by hand. It was called **DCS VR Control** before 0.5.0; it is no longer only for VR.
 
 **For every pilot, on a monitor or with any headset**
 
 | Feature | What you get |
 | --- | --- |
-| **Engine Optimizations** | A small module DCS loads by itself from Saved Games takes CPU work off DCS's render and model threads, with exactly the same image: about +60 % FPS at a busy airfield when DCS is CPU-bound. Once applied it stays on every time DCS starts, also from Steam or a desktop shortcut. |
+| **Engine Optimizations** | A small module DCS loads by itself from Saved Games takes CPU work off DCS's render and model threads, with exactly the same image: about +50-60 % FPS at a busy airfield when DCS is CPU-bound. Once applied it stays on every time DCS starts, also from Steam or a desktop shortcut. |
 | **CPU Boost** | Gives DCS priority and its best CPU cores while it runs, keeps background apps off those cores, and fixes a DCS terrain loop that wastes CPU (the fix also works when DCS starts from Steam). Plus Free VRAM before flight. |
 
 Not on a Pimax? Choose **Optimizations only** in the right panel: DCS runs exactly as you set it up and the app adds only these two (see [Optimizations only](#optimizations-only-any-other-headset-or-no-vr)).
@@ -61,14 +61,14 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 ## Install
 
-Download `DcsControl-0.5.3-preview-win-x64.zip` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and extract it to a folder of your choice. Then either:
+Download `DcsControl-0.5.4-preview-win-x64.zip` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and extract it to a folder of your choice. Then either:
+
+- **Run it directly:** double-click `DcsControl.exe` in the extracted folder (.NET is included), or
+- **Install it:** double-click `Install DCS Control.cmd`. It verifies the files, installs the app for your Windows user under `%LOCALAPPDATA%\Programs\DcsControl`, adds **DCS Control** to the Start menu, and installs WebView2 / the C++ runtime from Microsoft if they are missing (this step may need internet access and an administrator prompt for the C++ runtime).
 
 The folder contains only three things: **`DcsControl.exe`** (the app), **`Install DCS Control.cmd`** and a **`files`** folder with everything else (keep it next to `DcsControl.exe`), plus a short `README.txt`. The folder can be anywhere: Desktop, Downloads, another drive. The app keeps its own data (backups, profiles) in `%LOCALAPPDATA%`, so moving the folder loses nothing.
 
 **How the app finds DCS:** the standalone version from Windows' list of installed programs ("DCS World", also OpenBeta), the Steam version from your Steam libraries, and your settings from `Saved Games\DCS` (or `DCS.openbeta`). If it finds nothing, or you have more than one install, pick `DCS.exe` and `options.lua` on the **DCS & headset** page.
-
-- **Run it directly:** double-click `DcsControl.exe` in the extracted folder (.NET is included), or
-- **Install it:** double-click `Install DCS Control.cmd`. It verifies the files, installs the app for your Windows user under `%LOCALAPPDATA%\Programs\DcsControl`, adds **DCS Control** to the Start menu, and installs WebView2 / the C++ runtime from Microsoft if they are missing (this step may need internet access and an administrator prompt for the C++ runtime).
 
 If you had **DCS VR Control** installed (the app's name before 0.5.0), `Install DCS Control.cmd` replaces it and its Start menu entry; your backups and profiles stay where they are and Back to stock DCS keeps working.
 
@@ -215,6 +215,21 @@ Four more options on the CPU Boost page, all off by default and usable without C
 
 Tested on DCS 2.9.30 in single player. Back to stock DCS (or turning the option off and launching) removes the hook, the module and everything it wrote.
 
+### Pupil shift (experimental)
+
+When your eyes turn, each pupil moves a few millimetres, but DCS renders both eyes from fixed points, so near objects shift slightly against far ones as you look around. With eye-tracked Quad Views, Pupil shift renders each eye from where its pupil is, then gives the headset its own poses back so the image is placed exactly as before. No GPU cost; off by default.
+
+- **Eye rotation radius** (about 10-11 mm) and **Lens image distance** (1-2 m) — the defaults suit most people.
+- **In-flight switch** (default Ctrl+Shift+F10) — turns it off and on to compare: a low beep off, a high beep on.
+- **DCS's custom IPD**: if you set one in DCS, Pupil shift applies the same value itself and DCS's own option is off while the profile is applied, because DCS would otherwise undo the pupil's sideways move. Back to stock DCS turns it on again.
+- The page shows the status from the layer's log (gaze range during the flight, largest shift, the headset views' cant and the eye distances) and what it corrects and what not. Details: [PUPIL_SHIFT.md](PUPIL_SHIFT.md).
+
+### Diagnostics
+
+- **DLSS 5 on the focus area**: after a session, says whether DLSS 5 reached the Quad Views focus area and, when the panel said "DLSS 5: ON but not applied", why, in plain words, with what to check.
+- **Create diagnostic package…**: one ZIP to attach to a report (see [Reporting a problem](#reporting-a-problem)).
+- What the in-headset panel's messages mean.
+
 ### Optimizations only (any other headset, or no VR)
 
 Another headset (Quest, Varjo, Reverb, Bigscreen…) or no headset at all? Pick **Optimizations only** under Pimax and Sboys in the right panel (also in Guided setup). DCS then runs exactly as you set it up, in VR or on the monitor, with your own VR settings, OpenXR runtime and layers (for example your own Quad Views or OpenXR Toolkit). The app adds only what is not VR:
@@ -311,12 +326,16 @@ Only a running DCS stops it. The folded list shows what will happen to each file
 3. Narrow it down: untick **Frame generation**, launch; then add features back one at a time (Quad Views → Frame generation → DLSS 5).
 4. If it still fails, **Back to stock DCS** and [report it](#reporting-a-problem) with the logs.
 
+### "Access to the path … is denied" (DCS under Program Files)
+
+Windows protects `Program Files`: a normal program cannot write there, whatever the antivirus exclusions or the read-only flag say. DCS Control writes a couple of files into DCS's `bin` folder (the DLSS 5 loader and the prefetch fix), so when DCS is installed there, **Launch DCS asks Windows once** (its own prompt) to give your account Modify permission on that folder, then carries on. You can also do it beforehand from **Checks → Write access to game folders → Grant access**, or by hand: folder Properties → Security → Edit → your account → Modify. Don't run DCS Control as administrator instead: DCS would start elevated and ignore the profile's layers. If Windows Security's **Controlled folder access** is on, the check says so: allow DCS Control there (Ransomware protection → Allow an app through Controlled folder access).
+
 ### DCS doesn't start
 
 - **Steam edition:** Steam must be running.
 - **Administrator:** don't run DCS or the app as administrator, and make sure `DCS.exe` has no "Run as administrator" compatibility flag. Checks flags both.
 - **With "Show the DCS launcher" on:** if pressing Play does nothing and `dcs.log` ends with "error code 5", the app was started from inside another program's job. Close it and start it from the Start menu or Explorer, or turn the option off.
-- **Write access:** if DCS is under `Program Files`, Checks may say the `bin` folder is not writable. Give your Windows user *Modify* permission on it rather than running as administrator.
+- **Write access:** if DCS is under `Program Files`, Launch DCS asks Windows once for permission to write to its `bin` folder (see [Access to the path … is denied](#access-to-the-path--is-denied-dcs-under-program-files)). Don't run the app as administrator instead.
 - Read the status line and Checks: any error during Launch stops before DCS starts and says why.
 
 ### Framegen 3× feels laggy
@@ -336,7 +355,7 @@ Only a running DCS stops it. The folded list shows what will happen to each file
 
 ### Multiplayer and Integrity Check
 
-**Not tested yet.** The prefetch fix and the DCS engine optimizations have only been tested in single-player, and the app adds files to DCS's `bin` folder (`dxgi.dll`, `dxgi2.dll`, Cheeky's files) and, with DCS Engine on, a hook in `Saved Games\DCS\Scripts`. Whether a server with Integrity Check accepts them has not been verified. If a server refuses you, **Back to stock DCS** before joining it, and please [report](#reporting-a-problem) what happened.
+**Not tested yet.** The prefetch fix and the DCS engine optimizations have only been tested in single-player, and the app adds files to DCS's `bin` folder (`dxgi.dll`, `dxgi2.dll`, Cheeky's files) and, with Engine Optimizations on, a hook in `Saved Games\DCS\Scripts`. Whether a server with Integrity Check accepts them has not been verified. If a server refuses you, **Back to stock DCS** before joining it, and please [report](#reporting-a-problem) what happened.
 
 ### How do I uninstall?
 

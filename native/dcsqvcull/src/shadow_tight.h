@@ -329,6 +329,7 @@ void PrepareShadows(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPa
     const uint8_t* src = cascadeVols[ci];
     uint64_t key = 0x5300000000ull | (static_cast<uint64_t>(ci) << 8);
     uint8_t* dst = AcquireVolume(key);
+    if (!dst) continue;  // allocation failed (AcquireVolume)
     if (!invert) {
       if (!CopyVolume(dst, src)) continue;
       int idx = *reinterpret_cast<int32_t*>(dst + kPlaneCount);

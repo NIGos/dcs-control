@@ -23,6 +23,10 @@
 // Included once from main.cpp inside its anonymous namespace.
 #pragma once
 
+namespace posesweep {
+bool PatchAllSuspended(uint8_t* addr, const uint8_t* bytes, size_t len);  // pose_sweep.h
+}
+
 namespace allocslab {
 
 constexpr uint32_t kAllocRva = 0xbf30;
@@ -352,14 +356,14 @@ void OnCollect() {
   uint8_t patch[14] = {0xFF, 0x25, 0, 0, 0, 0};
   DetourPage* pg = g_page;
   memcpy(patch + 6, &pg, 8);
-  DWORD old;
-  if (!VirtualProtect(target, 14, PAGE_EXECUTE_READWRITE, &old)) {
+  // With every other thread suspended and none inside the 14 bytes (as the
+  // other code patches do): a plain memcpy could be executed half-written by
+  // a thread entering allocate outside this collect's culling tasks.
+  if (!posesweep::PatchAllSuspended(target, patch, 14)) {
+    Log("model allocator: StructBufferManager::allocate could not be patched; not installed");
     g_state = -1;
     return;
   }
-  memcpy(target, patch, 14);
-  VirtualProtect(target, 14, old, &old);
-  FlushInstructionCache(GetCurrentProcess(), target, 14);
   g_state = 2;
   Log("model allocator: StructBufferManager::allocate detoured (slabs %s, %u bytes)", g_on.load() ? "ON" : "OFF",
       g_slabBytes.load());

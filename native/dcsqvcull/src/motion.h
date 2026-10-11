@@ -60,6 +60,8 @@ void Start(double tscHz) {
   wchar_t name[64];
   swprintf_s(name, L"motion_%04d%02d%02d_%02d%02d%02d.csv", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute,
              st.wSecond);
+  if (g_csv) fclose(g_csv);  // a recording that was never stopped
+  g_csv = nullptr;
   _wfopen_s(&g_csv, (g_dir + name).c_str(), L"w");
   if (g_csv)
     fprintf(g_csv, "t_s,deg_per_s,frame_ms,culling_ms,passes_ms,rt_cpu_ms,periph,focus,shadow,tex_req,tex_orig,"
@@ -151,9 +153,14 @@ void OnFrame(const std::vector<ViewInfo>& views, int64_t qpcNow, uint64_t collec
 
 void StopAndReport() {
   g_recording = false;
-  if (g_csv) {
-    fclose(g_csv);
-    g_csv = nullptr;
+  {
+    // Under the lock OnFrame writes with: it checks g_recording before taking
+    // it, so a frame in flight could otherwise fprintf to the closed FILE.
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_csv) {
+      fclose(g_csv);
+      g_csv = nullptr;
+    }
   }
   ptiming::g_recording = false;
   g_hookMeasure = false;

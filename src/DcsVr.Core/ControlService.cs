@@ -121,7 +121,9 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         // rate is the headset's own when it can be read.
         profile = HeadsetRefresh.Resolve(profile.ForLaunch());
         fovea ??= PimaxFovea.Resolve(profile);
-        profile = fovea.Profile;
+        // A fovea the caller resolved from the raw draft carries the draft's other settings: they are made launch-ready
+        // again (both steps change nothing a second time).
+        profile = HeadsetRefresh.Resolve(fovea.Profile.ForLaunch());
         // Checked and deployed with the saved runtime copy when the draft has no runtime file of its own; profile.json
         // keeps the draft's own (empty) path.
         profile = ResolveNeuralRuntime(profile, out var savedNeuralSha);
@@ -235,7 +237,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     public OriginalsApply Apply(ApplyPlan plan)
     {
         var originals = Originals;
-        EnsureDcsClosed(plan.Files.Select(f => f.Path).Append(plan.Executable).Concat(originals.Read().Files.Select(f => f.Path)));
+        EnsureDcsClosed(plan.Files.Select(f => f.Path).Append(plan.Executable).Concat(originals.Read().Files.Select(f => f.Path)), ManagedRoot);
         return originals.Apply(plan);
     }
     /// <summary>Back to stock DCS: every path DCS Control changed goes back to what was there before it first wrote
@@ -243,7 +245,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     public RestoreResult RestoreOriginals()
     {
         var originals = Originals;
-        EnsureDcsClosed(originals.Read().Files.Select(f => f.Path).Append(ManagedRoot));
+        EnsureDcsClosed(originals.Read().Files.Select(f => f.Path).Append(ManagedRoot), ManagedRoot);
         var result = originals.RestoreOriginals();
         // A saved runtime copy forgotten while this profile was applied is deleted once nothing installed uses it.
         if (result.Complete && !AppliedUsesSavedRuntime())
@@ -255,7 +257,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// app's managed folder under %LOCALAPPDATA%. Paths are compared in canonical form, so junctions, symbolic
     /// links, 8.3 names and moved installs are seen through. Without paths, or when a running DCS's location can't be
     /// read, any DCS blocks.</summary>
-    public static void EnsureDcsClosed(IEnumerable<string>? paths = null)
+    public static void EnsureDcsClosed(IEnumerable<string>? paths = null, string? managedRoot = null)
     {
         var running = Process.GetProcessesByName("DCS");
         try
@@ -263,7 +265,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             if (running.Length == 0) return;
             var targets = paths?.Where(p => !string.IsNullOrEmpty(p)).Select(SystemPaths.Canonical).ToArray();
             var savedGames = SystemPaths.SavedGamesCandidates();
-            var managed = Path.Combine(DefaultStateRoot, "managed");
+            var managed = managedRoot ?? Path.Combine(DefaultStateRoot, "managed");
             foreach (var process in running)
             {
                 string? root = null;
@@ -303,8 +305,6 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         AtomicFile.WriteText(output, JsonData.Serialize(report));
         return Path.GetFullPath(output);
     }
-
-    public Process LaunchApplied() => Start(PrepareLaunchApplied());
 
     private Process Start(ProcessStartInfo start)
     {
@@ -352,7 +352,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var applied = baseline.State == "applied" ? ReadAppliedProfile() : null;
         draft ??= applied?.Profile ?? throw new InvalidOperationException("No profile is applied yet. Open DCS Control and launch from there once.");
         // Every file involved: everything DCS Control wrote, the selected DCS install and options, the managed folder.
-        EnsureDcsClosed(baseline.Files.Select(f => f.Path).Concat(new[] { inventory.DcsExecutable, inventory.OptionsPath, ManagedRoot }.OfType<string>()));
+        EnsureDcsClosed(baseline.Files.Select(f => f.Path).Concat(new[] { inventory.DcsExecutable, inventory.OptionsPath, ManagedRoot }.OfType<string>()), ManagedRoot);
         string? reason = null;
         if (applied is not null && SameDraft(draft, applied.Profile) && SamePaths(inventory, applied))
         {
@@ -468,7 +468,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var utf8 = new UTF8Encoding(false); var provider = File.ReadAllText(source);
         // Exactly what Apply wrote for the old values, so the update changes nothing but the focus values.
         if (!File.Exists(settings) || !File.ReadAllBytes(settings).AsSpan().SequenceEqual(utf8.GetBytes(provider + "\n" + ConfigurationWriters.QuadViews(before)))) return false;
-        EnsureDcsClosed([settings, foveaFile]);
+        EnsureDcsClosed([settings, foveaFile], ManagedRoot);
         try
         {
             Originals.UpdateInstalled([(settings, utf8.GetBytes(provider + "\n" + ConfigurationWriters.QuadViews(now))),
@@ -523,7 +523,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     public ProcessStartInfo PrepareLaunchApplied()
     {
         var current = Originals.Read() is { State: "applied", Current: { } applied } ? applied : null;
-        EnsureDcsClosed(current?.Entries.Select(e => e.Path));
+        EnsureDcsClosed(current?.Entries.Select(e => e.Path), ManagedRoot);
         if (current is null) throw new InvalidOperationException("No profile is applied. Launch DCS from DCS Control to apply one.");
         var launch = VerifyInstalled(current);
         if (!File.Exists(launch.Executable)) throw new IOException("DCS executable is missing: " + launch.Executable);
@@ -554,7 +554,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     {
         foreach (var entry in journal.Entries)
         {
-            if (!File.Exists(entry.Path)) throw new IOException("An installed file is missing: " + entry.Path);
+            if (!File.Exists(entry.Path)) throw new IOException("An installed file is missing: " + entry.Path + ". If an antivirus removed it (check its quarantine), restore it there and add an exclusion for that folder; Launch DCS writes it again otherwise.");
             if (entry.LuaChanges is { Count: > 0 })
             {
                 if (ignoreLuaValues) continue;
@@ -570,7 +570,8 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             }
             else if (Hashing.FileSha256(entry.Path) != entry.InstalledSha256) throw new IOException("An installed file changed: " + entry.Path);
         }
-        var launchEntry = journal.Entries.Single(e => e.Path.EndsWith("launch.json", StringComparison.OrdinalIgnoreCase));
+        var launchEntry = journal.Entries.FirstOrDefault(e => Path.GetFileName(e.Path).Equals("launch.json", StringComparison.OrdinalIgnoreCase))
+            ?? throw new IOException("The applied profile has no launch.json.");
         var launch = JsonData.Deserialize<LaunchConfiguration>(File.ReadAllText(launchEntry.Path));
         foreach (var dependency in launch.Dependencies ?? [])
             if (!File.Exists(dependency.Key) || Hashing.FileSha256(dependency.Key) != dependency.Value)
@@ -601,8 +602,8 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
 /// <param name="OptionsPath">The options.lua the profile changed; null when it left options.lua untouched.</param>
 /// <param name="Fovea">pimax-fovea.json: Pimax Play's converted values written at Apply; null when not used.</param>
 public sealed record AppliedProfile(TransactionJournal Journal, VrProfile Profile, string ProfilePath, string? Executable, string? OptionsPath, AppliedFovea? Fovea);
-/// <summary>What Launch DCS (or Apply without launching) did to the installed configuration.</summary>
-/// <summary>SettingsRealigned: the profile's own DCS settings in options.lua were set back in place.</summary>
+/// <summary>What Launch DCS (or Apply without launching) did to the installed configuration. SettingsRealigned: the
+/// profile's own DCS settings in options.lua were set back in place.</summary>
 public enum LaunchSyncKind { Unchanged, FoveaUpdated, Applied, SettingsRealigned }
 /// <param name="ReplacedProfileId">The profile this one was written over.</param>
 /// <param name="Notes">Other programs' files replaced (backed up) by this apply, one sentence each.</param>

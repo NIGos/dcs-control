@@ -50,7 +50,11 @@ public sealed partial record CpuTopology(
         {
             try
             {
-                if (ParseDcsLog(ReadLogHead(log)) is { } fromLog) return fromLog with { Description = fromLog.Description + " (" + log + ")" };
+                var head = ReadLogHead(log);
+                if (ParseDcsLog(head) is { } fromLog) return fromLog with { Description = fromLog.Description + " (" + log + ")" };
+                // The newest log describes this CPU even when it gives no ranking (one performance class): an older log
+                // may come from the CPU before an upgrade, so it is not used.
+                if (PerformanceClassLine().IsMatch(head) || CoreSetLine().IsMatch(head)) break;
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
         }
@@ -158,7 +162,10 @@ public sealed partial record CpuTopology(
         if (!topology.HasRanking) return topology with { LogicalCount = count, AllCpusMask = systemMask };
         var render = topology.RenderCores.Where(Inside).ToArray();
         var vr = topology.VrRuntimeCores.Where(Inside).ToArray();
-        var background = topology.BackgroundCores.Where(Inside).ToArray();
+        // Background apps never share DCS's render cores (a small CPU's lowest class can reach them), and the headset's
+        // services are not squeezed onto fewer than four logical CPUs: then they stay where Windows puts them.
+        var background = topology.BackgroundCores.Where(Inside).Where(c => !render.Contains(c)).ToArray();
+        if (vr.Length < 4) vr = [];
         if (render.Length == 0 || background.Length == 0 || background.Length >= count)
             return None($"The CPU ranking ({topology.Description}) does not fit this PC's {count} available logical CPUs; CPU affinity will not be changed")
                 with { LogicalCount = count, AllCpusMask = systemMask };

@@ -32,7 +32,7 @@ set_target_properties(DcsQvCullTests PROPERTIES OUTPUT_NAME test_main)
 set(DCSQV_TEST_DIR ${CMAKE_CURRENT_BINARY_DIR}/test-run)
 file(MAKE_DIRECTORY ${DCSQV_TEST_DIR})
 add_test(NAME DcsQvCullTests COMMAND DcsQvCullTests WORKING_DIRECTORY ${DCSQV_TEST_DIR})
-set_tests_properties(DcsQvCullTests PROPERTIES PASS_REGULAR_EXPRESSION "\n0 failure\\(s\\)" TIMEOUT 300)
+set_tests_properties(DcsQvCullTests PROPERTIES PASS_REGULAR_EXPRESSION "\n0 failure\\(s\\)" TIMEOUT 900)  # about 4 min idle; much longer when another game loads the PC
 
 # The detour stub's code and pointer pages: a hot reload must never leave the stub without execute rights.
 add_executable(DcsQvCullDetourTests test/detour_test.cpp)
