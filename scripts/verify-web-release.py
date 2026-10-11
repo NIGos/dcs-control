@@ -63,7 +63,7 @@ assert result['manager']['passed'] == result['manager']['total'] and result['man
 fixture = Path(args.fixture)
 result['installer'] = json.loads((fixture/'result.json').read_text(encoding='utf-8-sig'))
 assert result['installer']['passed'] and result['installer']['previousReleaseUpgradeChecked']
-for name, prefix, count in [('packagedWebView',release/'files/docs/interface',272),('installedWebView',fixture/'gui',286)]:
+for name, prefix, count in [('packagedWebView',release/'files/docs/interface',274),('installedWebView',fixture/'gui',288)]:
     checks = json.loads(Path(str(prefix)+'-checks.json').read_text())
     assert checks['passed'] and checks['count'] == count
     renders = json.loads(Path(str(prefix)+'-renders.json').read_text())
@@ -106,4 +106,4 @@ result['nativePacing'] = {'passed':True,'sourceTests':40,'bundledDllLimiterTest'
 assert all(any(c['id'] == 'external-limiters' and c['state'] == 'Manual' for c in json.loads((root/f'artifacts/live-readiness-{version.split("-")[0]}'/f'{id}-report.json').read_text(encoding='utf-8-sig'))['checks']) for id in result['liveReadiness'])
 output = root/f'artifacts/release-verification-{version.split("-")[0]}.json'
 output.write_text(json.dumps(result,indent=2),encoding='utf-8')
-print(json.dumps({'passed':True,'evidence':str(output),'managerChecks':result['manager']['total'],'webViewChecks':272,'installedWebViewChecks':286,'rendersPerRun':52,'binaryBytes':result['binary']['bytes']}))
+print(json.dumps({'passed':True,'evidence':str(output),'managerChecks':result['manager']['total'],'webViewChecks':274,'installedWebViewChecks':288,'rendersPerRun':52,'binaryBytes':result['binary']['bytes']}))

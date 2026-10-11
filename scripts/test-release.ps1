@@ -49,7 +49,7 @@ if($gui.ExitCode -ne 0){throw 'Installed GUI offscreen smoke failed.'}
 $gui.Dispose()
 foreach($index in 0..47){if(-not (Test-Path -LiteralPath (Join-Path $fixtureRoot "gui-$index.png"))){throw 'Missing offscreen GUI view.'}}
 $guiChecks=Get-Content -LiteralPath (Join-Path $fixtureRoot 'gui-checks.json') -Raw | ConvertFrom-Json
-if(-not $guiChecks.passed -or $guiChecks.count -ne $(if($NeuralRuntime){286}else{272})){throw 'Installed WebView2 control and bridge verification failed.'}
+if(-not $guiChecks.passed -or $guiChecks.count -ne $(if($NeuralRuntime){288}else{274})){throw 'Installed WebView2 control and bridge verification failed.'}
 # Exercise the actual packaged service against isolated game/runtime fixtures.
 # Optional real user-supplied NR deployment is tested only in these game fixtures.
 $presets = & $installedCli presets | ConvertFrom-Json

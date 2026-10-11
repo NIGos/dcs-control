@@ -85,6 +85,8 @@ public sealed record PupilShiftStatus(string State, string Summary, bool Live, s
         var (state, summary) = last switch
         {
             null => ("waiting", "Loaded by DCS; no statistics yet."),
+            // After the flight, the whole flight counts: its last second (leaving VR, the switch pressed) says little.
+            _ when !live && withGaze > 0 && restored != 0 => ("working", string.Create(CultureInfo.InvariantCulture, $"Worked: each eye followed its pupil for {withGaze} of {seconds} seconds, up to {maxShift:0.0} mm.")),
             { CorrectionOff: true } => ("off", "Loaded, switched off in flight."),
             { Shifted: 0 } => ("no-gaze", "Loaded, but no gaze arrives: the profile needs eye-tracked Quad Views, and the headset's eye tracking must be on."),
             _ when restored == 0 => ("not-restored", "Shifting, but no projection view was handed back to the runtime unchanged: report it."),

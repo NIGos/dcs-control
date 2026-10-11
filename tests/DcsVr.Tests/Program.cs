@@ -700,9 +700,13 @@ Test("The live Pimax compositor rate wins over the last session's report", () =>
     var older = Path.Combine(runtime, "pvr_srv_log_26-10-09-20-19-29.txt");
     File.WriteAllText(older, "[PSRV] 0 Normal rendering fps:(a:89.9,c:89.996436) Missed:(a:0)\n");
     File.SetLastWriteTimeUtc(older, DateTime.UtcNow.AddHours(-2));
-    // Pimax Play switched from 90 to 72 Hz (display_timing_selection 0 to 1) in the newest log.
-    File.WriteAllText(Path.Combine(runtime, "pvr_srv_log_26-10-10-14-12-32.txt"), new string('x', 300 * 1024) + "\n[PSRV] 0 Normal rendering fps:(a:90.02,c:89.996436) Missed:(a:0)\n[PSRV] set display_timing_selection:1\n[PSRV] 31556 Warning rendering fps:(a:36.1,c:72.402376) Missed:(a:2)\n[PSRV] hmd: 493.15 FPS\n");
-    Require(HeadsetRefresh.ReadPimaxRuntime(runtime) is { Hz: 72.4, Source: "Pimax Play" }, "last compositor rate of the newest log");
+    // Pimax Play switched from 90 to 72 Hz (display_timing_selection 0 to 1) in the newest log; one second missed frames
+    // (c:66.1) and the last, partial second reads low too: neither is the panel's rate.
+    File.WriteAllText(Path.Combine(runtime, "pvr_srv_log_26-10-10-14-12-32.txt"), new string('x', 300 * 1024)
+        + string.Concat(Enumerable.Repeat("\n[PSRV] 0 Normal rendering fps:(a:90.02,c:89.996436) Missed:(a:0)", 4)) + "\n[PSRV] set display_timing_selection:1"
+        + string.Concat(Enumerable.Repeat("\n[PSRV] 31556 Normal rendering fps:(a:36.1,c:72.402376) Missed:(a:0)", 6)) + "\n[PSRV] 31556 Warning rendering fps:(a:30.2,c:66.1) Missed:(a:9)"
+        + string.Concat(Enumerable.Repeat("\n[PSRV] 31556 Normal rendering fps:(a:36.1,c:72.401) Missed:(a:0)", 4)) + "\n[PSRV] 31556 Normal rendering fps:(a:20.0,c:61.0) Missed:(a:0)\n[PSRV] hmd: 493.15 FPS\n");
+    Require(HeadsetRefresh.ReadPimaxRuntime(runtime) is { Hz: 72.4, Source: "Pimax Play" }, "the newest log's steady compositor rate");
     Require(HeadsetRefresh.ReadPimaxRuntime(Path.Combine(root, "no-such-runtime")) is null);
     var logs = Path.Combine(root, "pimax-session-logs"); Directory.CreateDirectory(logs);
     File.WriteAllText(Path.Combine(logs, "PiService__2026-10-10-14.log"), "x Performance body to send: {\"fps_analysis\":{\"fps_target\":90}}\n");
@@ -832,6 +836,59 @@ Test("Pupil shift is deployed first in the layer chain with its ini, only for ey
     Require(ProfileValidation.Validate(on with { EngineOptimizations = true, PupilShiftToggleKey = "120:3" }).Any(i => i.Code == "pupil-hotkey"));
     Require(!ProfileValidation.Validate(on with { PupilShift = false, EngineOptimizations = true, PupilShiftToggleKey = NeuralHotkeys.EngineDefault }).Any(i => i.Code == "hotkey-conflict"));
 });
+Test("Diagnostics explains DLSS 5 on the focus area from the last session of Cheeky's log", () =>
+{
+    const string start = "22:29:05.544 [T16224] Cheeky 0.5.3 Standalone initializing; runtime remains resident until game exit";
+    const string init = "22:29:30.000 [T1] DLSS-NR 310.8 feature-18 runtime initialized";
+    const string periphery = "22:30:14.011 [T10000] DCS quad focus: reject handle=0x247330A4030 count=2048 reason=no-proof matches=0 exact=0 copy=0 size_route=output-not-focus-size ngx=(0,0 816x804) resource=0x248068BB780";
+    const string detail = "22:30:14.012 [T10000] DCS quad focus: detail handle=0x247330A4030 focusL=(0,0 1520x1480 arr=0 flags=0x7 res=0x1 chain=0x2 size=differ) focusR=(0,0 1520x1480 arr=1 flags=0x7 res=0x1 chain=0x2 size=differ) copy_edges=0 submitted_copies=0";
+    const string accepted = "22:30:15.000 [T10000] DCS quad focus: mapped focus accepted handle=0x1 resource=0x2 route=size-bijection output=(0,0 1520x1480) census=focus2/peripheral2/other0";
+    var applied = Diagnostics.DiagnoseDlssFocus([start, init, periphery, detail, accepted]);
+    Require(applied.State == "applied" && applied.Accepted == 1 && applied.Rejected == 1 && applied.Version == "310.8" && applied.Explanation!.Contains("peripheral"), "peripheral rejections are normal");
+    // An earlier session's acceptance does not count for the last one.
+    var notApplied = Diagnostics.DiagnoseDlssFocus([start, accepted, start, init, periphery, detail, periphery]);
+    Require(notApplied.State == "not-applied" && notApplied.Reason == "no-proof/output-not-focus-size" && notApplied.Rejected == 2 && notApplied.DlssSize == "816x804" && notApplied.FocusSize == "1520x1480");
+    Require(notApplied.Explanation!.Contains("816×804") && notApplied.Explanation.Contains("1520×1480"), notApplied.Explanation);
+    Require(Diagnostics.DiagnoseDlssFocus([start, init]).State == "no-dlss");
+    Require(Diagnostics.DiagnoseDlssFocus(["x DCS quad focus: reject handle=0x1 count=1 reason=snapshot-unavailable layer_module=missing abi_compatible=0"]).Reason == "snapshot-unavailable");
+    Require(Diagnostics.DiagnoseDlssFocus(Path.Combine(root, "no-dcs-bin")).State == "no-session");
+});
+Test("The diagnostic package collects DCS, component and headset logs as text, with the user and PC names removed", () =>
+{
+    var saved = Path.Combine(root, "diag/Saved Games/DCS"); var bin = Path.Combine(root, "diag/game/bin");
+    var options = Make("diag/Saved Games/DCS/Config/options.lua", "options = { graphics = { } }");
+    Make("diag/Saved Games/DCS/Logs/dcs.log", "=== Log opened by " + Environment.UserName + " on " + Environment.MachineName + " at " + Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + "\\Saved Games, contact someone@example.com");
+    Make("diag/Saved Games/DCS/Scripts/Hooks/DcsQvCull.lua", "-- hook");
+    var exe = Make("diag/game/bin/DCS.exe", "fixture");
+    Make("diag/game/bin/CheekyFoveatedDLSS/CheekyFoveatedDLSS-Standalone.log", "Cheeky log");
+    Make("diag/game/bin/CheekyFoveatedDLSS/nvngx_dlssnr.dll", "binary");
+    var managed = Path.Combine(root, "diag/managed/profiles/p1");
+    Make("diag/managed/profiles/p1/ofxr/ofxr-bridge-flight-1.log", "ofxr");
+    Make("diag/managed/profiles/p1/ofxr/XR_APILAYER_x.dll", "binary");
+    var local = Path.Combine(root, "diag/local");
+    Make("diag/local/Pimax/runtime/pvr_srv_log_26-10-10-14-12-32.txt", new string('a', 10) + "rendering fps:(a:90.0,c:89.99)");
+    Make("diag/local/Pimax/runtime/pvr_srv_log_26-10-09-14-12-32.txt", "older");
+    File.SetLastWriteTimeUtc(Path.Combine(local, "Pimax/runtime/pvr_srv_log_26-10-09-14-12-32.txt"), DateTime.UtcNow.AddDays(-1));
+    var zip = Path.Combine(root, "diag/package.zip");
+    var entries = Diagnostics.CreatePackage(new(null, managed, options, exe, RuntimeKind.Pimax, local, Path.Combine(root, "diag/roaming")), "{\"report\":1}", zip);
+    using var archive = System.IO.Compression.ZipFile.OpenRead(zip);
+    var names = archive.Entries.Select(e => e.FullName).ToHashSet();
+    foreach (var name in new[] { "report.json", "dcs/Logs/dcs.log", "dcs/Config/options.lua", "dcs/Scripts/Hooks.txt", "dcs/bin/CheekyFoveatedDLSS/CheekyFoveatedDLSS-Standalone.log", "dcs/bin/modules.txt",
+        "dcs-control/applied-profile/ofxr/ofxr-bridge-flight-1.log", "pimax/runtime/pvr_srv_log_26-10-10-14-12-32.txt", "openxr.txt", "system.txt", "README.txt" })
+        Require(names.Contains(name), "missing " + name);
+    Require(!names.Any(n => n.EndsWith(".dll")) && !names.Contains("pimax/runtime/pvr_srv_log_26-10-09-14-12-32.txt"), "text only, newest runtime log");
+    string Read(string name) { using var reader = new StreamReader(archive.GetEntry(name)!.Open()); return reader.ReadToEnd(); }
+    var log = Read("dcs/Logs/dcs.log");
+    Require(log.Contains("<user>") && log.Contains("<pc>") && log.Contains("<e-mail>") && !log.Contains(Environment.UserName, StringComparison.OrdinalIgnoreCase) && !log.Contains("someone@example.com"), log);
+    Require(!Read("README.txt").Contains(Environment.UserName, StringComparison.OrdinalIgnoreCase) && entries.Count == archive.Entries.Count);
+    // Every spelling of the profile folder, a profile folder named differently from the user, short and non-ASCII
+    // names, and what Pimax's service logs carry.
+    var redact = Diagnostics.Redactor("Nicolò", @"C:\Users\Al", "RIG-01");
+    var text = redact(@"C:\Users\Al\Saved Games | C:\\Users\\Al\\x | C:/Users/Al/y | ""C:\\Users\\Al"" | pilot Nicolò and Nicol\u00F2 on RIG-01 | Algebra stays"
+        + "\n[RequestReportSn]   token: ECT:[[[AAAABBBBCCCCDDDDEE]]] | SetAccountInfo: userId=12345, isValid=1 | Pimax Crystal Super, serial number: X999TEST000000000001 | Serial:X999TEST000000000001 | map X999TEST000000000001platMap");
+    Require(!text.Contains(@"Users\Al") && !text.Contains(@"Users\\Al") && !text.Contains("Users/Al") && !text.Contains("Nicol") && !text.Contains("RIG-01") && text.Contains("Algebra stays"), text);
+    Require(!text.Contains("AAAABBBBCC") && !text.Contains("12345") && !text.Contains("X999TEST") && text.Contains("token: <token>") && text.Contains("userId=<id>") && text.Contains("serial number: <serial>"), text);
+});
 Test("The Pupil shift page reads the layer's log: working, no gaze, switched off, not installed", () =>
 {
     var folder = Path.Combine(root, "pupil-status"); Directory.CreateDirectory(folder);
@@ -849,9 +906,9 @@ Test("The Pupil shift page reads the layer's log: working, no gaze, switched off
     Require(working.State == "working" && working.SessionGazeX == new PupilRange(-20, 18) && working.SessionGazeY == new PupilRange(-6, 9.5) && working.SessionMaxShiftMm == 3.8, "session ranges");
     Require(working.SecondsWithGaze == 2 && working.Seconds == 2 && working.RestoredViews == 360 && working.Hotkey == "121:5" && working.Warnings.Count == 0 && !working.Live);
     File.AppendAllText(log, "10:00:04.000 stats: frames=90 shifted=0 (no gaze source); runtime left eye vs head x[-31.20..-31.20] mm\n");
-    Require(PupilShiftStatus.Read(folder, false).State == "no-gaze");
+    Require(PupilShiftStatus.Read(folder, true).State == "no-gaze" && PupilShiftStatus.Read(folder, false) is { State: "working", Live: false }, "live: the last second; after the flight: the whole flight");
     File.AppendAllText(log, "10:00:05.000 stats: frames=90 shifted=0 (correction off); runtime left eye vs head x[-31.20..-31.20] mm\n");
-    Require(PupilShiftStatus.Read(folder, false).State == "off");
+    Require(PupilShiftStatus.Read(folder, true).State == "off");
     // A runtime that already moves the eye with the gaze would get the correction twice.
     File.AppendAllText(log, "10:00:06.000 stats: frames=90 shifted=90 restored=360 gaze x[-1.0..1.0] y[0.0..0.0] deg, max shift 0.20 mm; runtime left eye vs head x[-33.00..-30.00] z[0.00..0.00] mm\n");
     Require(PupilShiftStatus.Read(folder, false).Warnings.Any(w => w.Contains("twice")));

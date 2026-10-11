@@ -19,6 +19,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -114,7 +115,8 @@ void poll_hotkey_locked() {
     if (down && !hotkey_down) {
         toggled_off = !toggled_off;
         log("hotkey: correction %s\n", toggled_off ? "OFF" : "ON");
-        Beep(toggled_off ? 600 : 1200, 80);
+        // Beep() blocks for its duration: off the render thread, so the switch itself causes no hitch.
+        std::thread([off = toggled_off] { Beep(off ? 600 : 1200, 80); }).detach();
     }
     hotkey_down = down;
 }
@@ -250,32 +252,40 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_EndFrame(XrSession session, const XrFrameEnd
     std::vector<std::vector<XrCompositionLayerProjectionView>> view_copies;
     std::vector<const XrCompositionLayerBaseHeader*> layers(info->layers, info->layers + info->layerCount);
     unsigned restored{};
+    bool passthrough{};
     {
         std::lock_guard lock(mutex);
-        const Frame* frame{};
+        // DCS may locate views more than once for one display time: every shift handed out for it is a candidate.
+        std::vector<const Frame*> candidates;
         for (auto it = frames.rbegin(); it != frames.rend(); ++it)
-            if (it->time == info->displayTime) { frame = &*it; break; }
-        if (frame == nullptr) return next_end_frame(session, info);
+            if (it->time == info->displayTime) candidates.push_back(&*it);
+        passthrough = candidates.empty();
+        if (!passthrough) {
         projections.reserve(layers.size());
         view_copies.reserve(layers.size());
         for (auto& layer : layers) {
             if (layer == nullptr || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
             const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
             view_copies.emplace_back(projection->views, projection->views + projection->viewCount);
-            for (std::uint32_t v = 0; v < projection->viewCount && v < frame->count; ++v) {
+            for (std::uint32_t v = 0; v < projection->viewCount; ++v) {
                 auto& view = view_copies.back()[v];
                 // Only views that still carry what this layer handed out are put back.
-                if (matches(frame->shifted[v], view.pose, view.fov)) {
+                for (const Frame* frame : candidates) {
+                    if (v >= frame->count || !matches(frame->shifted[v], view.pose, view.fov)) continue;
                     view.pose = frame->original[v].pose;
                     view.fov = frame->original[v].fov;
                     ++restored;
+                    break;
                 }
             }
             projections.push_back(*projection);
             projections.back().views = view_copies.back().data();
             layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projections.back());
         }
+        }
     }
+    // The runtime's xrEndFrame (and every layer below) runs outside the lock, so xrLocateViews never waits on it.
+    if (passthrough) return next_end_frame(session, info);
     static unsigned logged{};
     if (logged < 3) { ++logged; log("end_frame: restored %u projection views\n", restored); }
     restored_views.fetch_add(restored, std::memory_order_relaxed);

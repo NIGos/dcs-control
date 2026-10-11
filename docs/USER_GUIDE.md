@@ -1,6 +1,6 @@
 # DCS Control — User Guide
 
-**Version 0.5.2-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`.
+**Version 0.5.3-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`.
 
 > **Early beta.** DCS Control has been flown mostly on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe — but please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
 
@@ -61,7 +61,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 ## Install
 
-Download `DcsControl-0.5.2-preview-win-x64.zip` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and extract it to a folder of your choice. Then either:
+Download `DcsControl-0.5.3-preview-win-x64.zip` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and extract it to a folder of your choice. Then either:
 
 The folder contains only three things: **`DcsControl.exe`** (the app), **`Install DCS Control.cmd`** and a **`files`** folder with everything else (keep it next to `DcsControl.exe`), plus a short `README.txt`. The folder can be anywhere: Desktop, Downloads, another drive. The app keeps its own data (backups, profiles) in `%LOCALAPPDATA%`, so moving the folder loses nothing.
 
@@ -288,7 +288,7 @@ The **Checks** page lists every finding once:
 - **Check yourself** — things only you can verify (refresh rate in Pimax Play/SteamVR, other FPS limiters, motion smoothing, eye calibration, image quality).
 - **OK** — folded.
 
-**Check this PC** adds the runtime, C++ runtime, drivers, write access and headset checks. **Export report** saves a diagnostic report (see [Reporting a problem](#reporting-a-problem)). Below come the files Launch DCS will write and what was detected on this PC.
+**Check this PC** adds the runtime, C++ runtime, drivers, write access and headset checks. **Export report** saves a JSON report; the **Diagnostics** page's package holds it and the logs (see [Reporting a problem](#reporting-a-problem)). Below come the files Launch DCS will write and what was detected on this PC.
 
 ## Back to stock DCS
 
@@ -355,18 +355,11 @@ Only the `options.lua` values a feature needs — the frame limit, desktop VSync
 Please open an issue on [GitHub](https://github.com/NIGos/dcs-control/issues) with:
 
 1. **What you did and what happened** (route, features, 2×/3×/Auto, single-player or multiplayer).
-2. **The diagnostic report:** Checks → **Export report**. It lists detected files and versions, runtime manifests, OpenXR layers, saved DCS settings, problems found and the files DCS Control changed.
-3. **Logs** from the flight (zip them):
-   - `%USERPROFILE%\Saved Games\DCS\Logs\dcs.log`
-   - (If you used the app before 0.5.0, when it was DCS VR Control, these files are in `%LOCALAPPDATA%\DcsVrControl` instead.)
-   - `%LOCALAPPDATA%\DcsControl\app.log` and `%LOCALAPPDATA%\DcsControl\originals\originals.log`
-   - CPU Boost: `%LOCALAPPDATA%\DcsControl\boost\boost.log` and `status.json`
-   - Frame generation (with **OFXR log** on): `%LOCALAPPDATA%\DcsControl\managed\profiles\<profile>\ofxr\`
-   - DLSS 5 / Cheeky: the `.log` files in `<DCS folder>\bin\CheekyFoveatedDLSS\`
-   - Prefetch fix: `<DCS folder>\bin\DcsVrPrefetchFix.log`
-   - Pimax route: the newest `%LOCALAPPDATA%\Pimax\runtime\pvr_srv_log_*.txt`
+2. **The diagnostic package:** open the **Diagnostics** page and press **Create diagnostic package…** right after the flight that went wrong, before starting DCS again (DCS starts its log anew). It saves one ZIP with everything needed to understand the problem: the app's report (profile, what was detected, the checks, the last flight), `dcs.log`, `options.lua`, the logs and settings of DLSS 5 (Cheeky), frame generation (OFXR), Quad Views, Pupil shift, the engine optimizations and CPU Boost, the DLSS and DirectX file versions in DCS's `bin` folder, Pimax Play's or SteamVR's logs and settings, the OpenXR runtime and layers registered on the PC, and the Windows, CPU and GPU driver versions. Attach the ZIP to the issue.
 
-> **Privacy:** the report and the logs contain local paths, which usually include your Windows user name. Look them over and replace anything you don't want to share before posting.
+> **Privacy:** the package holds only text files. Your Windows user name, PC name and e-mail addresses are replaced by `<user>`, `<pc>` and `<e-mail>`, and the account tokens, account ids and headset serial number in Pimax's logs are removed; nothing is sent anywhere. You can open the ZIP and look it over before posting.
+
+**"DLSS 5: ON but not applied" in the headset?** The **Diagnostics** page reads the last DCS session and says whether DLSS 5 reached the Quad Views focus area, and if not, why (for example DCS running DLSS on images that are not the focus views, or another Quad Views layer in the way), with what to check.
 
 ## Support
 

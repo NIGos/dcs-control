@@ -39,7 +39,7 @@ After each flight the Overview shows a **Last flight** summary.
 ## Quick start
 
 1. **You need:** Windows 10 or 11 (64-bit; tested on 11) and DCS World 2.9. For the VR features: a Pimax headset with Pimax Play (or SteamVR with the Sboys driver) and an NVIDIA RTX GPU; for DLSS 5 your own `nvngx_dlssnr.dll` (tested with 310.8, not included).
-2. **Download** `DcsControl-0.5.2-preview-win-x64.zip` from [Releases](https://github.com/NIGos/dcs-control/releases), unzip it anywhere and double-click `DcsControl.exe`. Inside you find only `DcsControl.exe`, `Install DCS Control.cmd` (adds it to the Start menu) and a `files` folder that must stay next to it.
+2. **Download** `DcsControl-0.5.3-preview-win-x64.zip` from [Releases](https://github.com/NIGos/dcs-control/releases), unzip it anywhere and double-click `DcsControl.exe`. Inside you find only `DcsControl.exe`, `Install DCS Control.cmd` (adds it to the Start menu) and a `files` folder that must stay next to it.
 3. **Choose how you fly** in the right panel: **Pimax**, **Sboys**, or **Optimizations only** (monitor or another headset). **Detect my setup** and **Guided setup** can do it for you.
 4. **Tick the features** you want. Each one has its own page if you want to adjust it.
 5. **Press Launch DCS.** Engine Optimizations then stay on whenever DCS starts. The VR features and CPU Boost need DCS to be started from the app.

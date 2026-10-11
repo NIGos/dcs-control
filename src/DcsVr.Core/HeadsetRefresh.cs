@@ -22,7 +22,9 @@ public static partial class HeadsetRefresh
     /// <summary>SteamVR's settings; replaceable for tests.</summary>
     public static string SteamVrSettings { get; set; } = new DetectionSources().SteamVrSettings;
 
-    private static (string Key, HeadsetRefreshFact? Fact)? _pimaxCache;
+    private sealed record Cached(string Key, HeadsetRefreshFact? Fact, long At);
+    // Read by the interface, the checks and the launch at once: one immutable entry, swapped whole.
+    private static Cached? _pimaxCache, _detectCache;
 
     [GeneratedRegex(@"rendering fps:\(a:[\d.]+,c:(\d+(?:\.\d+)?)\)")] private static partial Regex CompositorRate();
     [GeneratedRegex(@"""fps_target""\s*:\s*(\d+(?:\.\d+)?)")] private static partial Regex RefreshRate();
@@ -30,9 +32,15 @@ public static partial class HeadsetRefresh
     /// <summary>The refresh rate of the profile's headset route, or null when it cannot be read.</summary>
     public static HeadsetRefreshFact? Detect(RuntimeKind runtime)
     {
-        if (runtime == RuntimeKind.SboysSteamVr)
-            return SetupDetection.ReadSteamVrRefresh(SteamVrSettings) is { } steam ? new(steam, "SteamVR") : null;
-        return ReadPimaxRuntime(PimaxRuntimeFolder) ?? ReadPimax(PimaxLogFolder);
+        // One answer for 3 s: a page refresh, its checks and the frame-rate summary ask several times and must agree.
+        var key = runtime + "|" + PimaxRuntimeFolder + "|" + PimaxLogFolder + "|" + SteamVrSettings;
+        var now = Environment.TickCount64;
+        if (Volatile.Read(ref _detectCache) is { } cached && cached.Key == key && now - cached.At < 3000) return cached.Fact;
+        var fact = runtime == RuntimeKind.SboysSteamVr
+            ? SetupDetection.ReadSteamVrRefresh(SteamVrSettings) is { } steam ? new HeadsetRefreshFact(steam, "SteamVR") : null
+            : ReadPimaxRuntime(PimaxRuntimeFolder) ?? ReadPimax(PimaxLogFolder);
+        Volatile.Write(ref _detectCache, new Cached(key, fact, now));
+        return fact;
     }
 
     /// <summary>
@@ -58,11 +66,14 @@ public static partial class HeadsetRefresh
             tail = System.Text.Encoding.UTF8.GetString(buffer);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
-        var matches = CompositorRate().Matches(tail);
-        for (var i = matches.Count - 1; i >= 0; i--)
-            if (double.TryParse(matches[i].Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var hz) && hz is >= 60 and <= 240)
-                return new(Math.Round(hz, 1), "Pimax Play");
-        return null;
+        // One second's rate dips when the compositor misses frames or a session ends mid-second: the median of the last
+        // reports (the newest left out, it may be partial) is the panel's rate.
+        var rates = CompositorRate().Matches(tail).Select(m => double.TryParse(m.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var hz) ? hz : 0)
+            .Where(hz => hz is >= 60 and <= 240).ToList();
+        if (rates.Count == 0) return null;
+        if (rates.Count > 3) rates.RemoveAt(rates.Count - 1);
+        var recent = rates.TakeLast(15).Order().ToList();
+        return new(Math.Round(recent[recent.Count / 2], 1), "Pimax Play");
     }
 
     /// <summary>The newest Pimax Play session report's refresh rate in <paramref name="folder"/>.</summary>
@@ -73,9 +84,9 @@ public static partial class HeadsetRefresh
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
         // The interface asks on every refresh: read the logs again only when the newest one changed.
         var key = folder + "|" + string.Join("|", logs.Take(1).Select(f => f.FullName + ":" + f.Length + ":" + f.LastWriteTimeUtc.Ticks));
-        if (_pimaxCache is { } cached && cached.Key == key) return cached.Fact;
+        if (Volatile.Read(ref _pimaxCache) is { } cached && cached.Key == key) return cached.Fact;
         var fact = ReadPimax(logs);
-        _pimaxCache = (key, fact);
+        Volatile.Write(ref _pimaxCache, new Cached(key, fact, 0));
         return fact;
     }
 

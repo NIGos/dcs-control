@@ -260,6 +260,34 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     // Read-only: the DCS engine optimizations' own log, the newest test report and DCS's log.
                     var engineOptions = EngineOptionsPath();
                     return Reply(id, new { status = engineOptions is null ? null : await Task.Run(() => EngineOptimizations.Read(engineOptions, DcsLogPath(engineOptions), DcsRunning())) });
+                case "dlssFocus":
+                    // Read-only: why DLSS 5 did or did not reach the focus area in the last session (Cheeky's log).
+                    var focusFallback = _dcs ?? _inventory.DcsExecutable;
+                    return Reply(id, new { report = await Task.Run(() =>
+                    {
+                        var exe = service.ReadAppliedProfile()?.Executable ?? focusFallback;
+                        return Diagnostics.DiagnoseDlssFocus(exe is null ? null : Path.GetDirectoryName(exe));
+                    }) });
+                case "diagnosticPackage":
+                    EnsureInteractive();
+                    var packageDialog = new SaveFileDialog { Filter = "Diagnostic package|*.zip", FileName = $"dcs-control-diagnostics-{DateTime.Now:yyyyMMdd-HHmm}.zip" };
+                    if (packageDialog.ShowDialog(owner) != true) break;
+                    await Capture(); _readiness = await Task.Run(() => Readiness.Check(_profile, CurrentInventory, service));
+                    var packageApplied = await Task.Run(service.ReadAppliedProfile);
+                    var packageDcs = packageApplied?.Executable ?? _dcs ?? CurrentInventory.DcsExecutable;
+                    var packageOptions = packageApplied?.OptionsPath ?? _options ?? CurrentInventory.OptionsPath;
+                    var packageSources = new DiagnosticSources(service.StateRoot, packageApplied is null ? null : Path.Combine(service.ManagedRoot, "profiles", packageApplied.Profile.Id),
+                        packageOptions, packageDcs, _profile.Runtime, SteamVrSettings: HeadsetRefresh.SteamVrSettings);
+                    var packageFocus = await Task.Run(() => Diagnostics.DiagnoseDlssFocus(packageDcs is null ? null : Path.GetDirectoryName(packageDcs)));
+                    var packageRefresh = await Task.Run(() => HeadsetRefresh.Detect(_profile.Runtime));
+                    var packageReport = JsonData.Serialize(new { schemaVersion = 1, version = ProductInfo.Version, created = DateTimeOffset.Now, dcsRunning = DcsRunning(),
+                        draft = _profile, applied = packageApplied?.Profile, inventory = CurrentInventory, issues = ProfileValidation.Validate(_profile, CurrentInventory), readiness = _readiness,
+                        lastFlight = await Task.Run(() => { try { return LastFlight.Read(FlightSourcesNow()); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; } }),
+                        dlssFocus = packageFocus, headsetRefresh = packageRefresh, originals = service.Originals.Status(), packages = PackageCatalog.All });
+                    var packaged = await Task.Run(() => Diagnostics.CreatePackage(packageSources, packageReport, packageDialog.FileName));
+                    _status = $"Diagnostic package saved: {Path.GetFileName(packageDialog.FileName)} ({packaged.Count} files). Attach it to your report.";
+                    using (var process = Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { "/select,", packageDialog.FileName }, UseShellExecute = false })) { }
+                    break;
                 case "pupilStatus":
                     // Read-only: the pupil shift layer's log in the applied profile's folder.
                     var pupilApplied = await Task.Run(service.ReadAppliedProfile);

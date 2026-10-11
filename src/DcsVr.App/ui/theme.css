@@ -459,3 +459,10 @@ details.detected-card[open]>summary{margin-bottom:10px}
 .hotkey-note.error{color:var(--red)}
 @container (max-width:470px){.setting>.hotkey-row{grid-column:1;grid-row:auto;margin-top:6px}}
 @media(max-width:900px){.setting>.hotkey-row{grid-column:1;grid-row:auto;margin-top:6px}}
+/* Diagnostics page: the package contents, Cheeky log lines and the panel messages (term above its meaning). */
+.plain-list{margin:4px 0 8px;padding-left:18px;font-size:12.5px;color:var(--text)}
+.plain-list li{margin:3px 0}
+.log-lines{margin:6px 0 0;padding:8px;max-height:220px;overflow:auto;background:#00000040;font:11px Consolas,monospace;white-space:pre-wrap;word-break:break-all;color:var(--muted)}
+.help-list{grid-template-columns:1fr}
+.help-list dt{color:var(--text);font-weight:600;margin-top:6px}
+.help-list dd{text-align:left;color:var(--muted)}

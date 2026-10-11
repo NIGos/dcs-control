@@ -10,6 +10,7 @@ const pages = [
   ['pupil','Pupil shift','Experimental. Each eye is rendered from where its pupil is as you look around, not from one fixed eye point.','Experimental · eye position','M2.5 12c2.2-3.7 5.4-5.5 9.5-5.5s7.3 1.8 9.5 5.5c-2.2 3.7-5.4 5.5-9.5 5.5S4.7 15.7 2.5 12Z M14.5 12a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0Z M17 3.5l2.5 2.5L17 8.5 M19.5 6h-5'],
   ['setup','DCS & headset','Where DCS is installed, its launcher and, for VR, the headset software.','Paths & launcher','M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-4.2l-1.8-2.4h-2L9.2 17H5a2 2 0 0 1-2-2Z M9.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z M17.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z'],
   ['diagnostics','Checks','What to fix before launching, what to check yourself, and the files Launch DCS writes.','Checks & reports','M9 3.5h6v3H9Z M9 5H6.5A1.5 1.5 0 0 0 5 6.5v13A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 17.5 5H15 M8.5 13.5l2.5 2.5 4.5-5'],
+  ['support','Diagnostics','Why something in the headset does not work as expected, and a diagnostic package to attach to a report.','Problems & support','M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17Z M9.6 9.4a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .8-1 1.5v.6 M12 16.4v.2'],
   ['recovery','Stock DCS','Back to stock DCS puts DCS back exactly as it was before DCS Control: every file and setting it changed, in one step.','Undo every change','M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9 M4.5 4.5V9H9 M12 8.5v3.5l2.5 1.8']
 ];
 /** Pages of the VR features, hidden in Optimizations only (no VR). */
@@ -576,6 +577,7 @@ function navigate(id) {
   if (id === 'boost' && profile) refreshBoostPlan(0);
   if (id === 'engine' && profile) refreshEngine();
   if (id === 'pupil' && profile) { renderPupilNeeds(); refreshPupil(); }
+  if (id === 'support' && profile) refreshDlssFocus();
   if (id === 'overview' && profile) loadFlight();
 }
 // ---- Pimax Play focus values ------------------------------------------------------------------------------------
@@ -646,7 +648,7 @@ async function refreshEngine() {
   const mine = ++engineSequence;
   try { const result = await request('engineStatus'); if (mine === engineSequence) { engineStatus = result.status; renderEngine(); } }
   catch (error) { if (mine === engineSequence) $('engineStatus').innerHTML = `<p class="fine">${escape(error.message)}</p>`; }
-  if (page === 'engine') engineTimer = setTimeout(refreshEngine, 5000);
+  if (page === 'engine' && mine === engineSequence) engineTimer = setTimeout(refreshEngine, 5000);
 }
 const ENGINE_STATE = {'not-installed':'Not installed', installed:'Installed', loaded:'Loaded', failed:'Load failed'};
 function renderEngine() {
@@ -687,7 +689,7 @@ async function refreshPupil() {
   const mine = ++pupilSequence;
   try { const result = await request('pupilStatus'); if (mine === pupilSequence) { pupilStatus = result.status; renderPupil(); } }
   catch (error) { if (mine === pupilSequence) $('pupilStatus').innerHTML = `<p class="fine">${escape(error.message)}</p>`; }
-  if (page === 'pupil') pupilTimer = setTimeout(refreshPupil, 5000);
+  if (page === 'pupil' && mine === pupilSequence) pupilTimer = setTimeout(refreshPupil, 5000);
 }
 const PUPIL_STATE = {'not-installed':['Not installed',''], waiting:['Installed',''], working:['Working','loaded'], 'no-gaze':['No gaze','failed'], off:['Switched off',''], 'not-restored':['Check the log','failed']};
 const degrees = r => r ? `${r.min > 0 ? '+' : ''}${r.min.toFixed(0)}° to ${r.max > 0 ? '+' : ''}${r.max.toFixed(0)}°` : '—';
@@ -708,6 +710,23 @@ function renderPupil() {
     + s.warnings.map(w => `<p class="pimax-note warn">${escape(w)}</p>`).join('')
     + (rows.length ? `<dl class="pimax-values">${rows.map(([k,v]) => `<dt>${escape(k)}</dt><dd>${escape(v)}</dd>`).join('')}</dl>` : '');
   $('pupilLog').disabled = busy || !s.logPath;
+}
+// ---- Diagnostics ---------------------------------------------------------------------------------------------------
+let dlssFocusSequence = 0;
+const FOCUS_STATE = {applied:['Applied','loaded'], 'not-applied':['Not applied','failed'], 'no-dlss':['No DLSS frames','failed'], 'no-session':['No session','']};
+/** Cheeky's log of the last DCS session: whether DLSS 5 reached the focus area, and if not why. */
+async function refreshDlssFocus() {
+  const mine = ++dlssFocusSequence, box = $('dlssFocus'); if (!box) return;
+  try {
+    const {report:r} = await request('dlssFocus'); if (mine !== dlssFocusSequence) return;
+    const [label, tone] = FOCUS_STATE[r.state] || [r.state,''];
+    const rows = [['DLSS-NR runtime',r.version],['Focus views identified',r.accepted ? String(r.accepted) : null],['Rejections',r.rejected ? String(r.rejected) : null],
+      ['DCS ran DLSS at',r.dlssSize?.replace('x','×')],['Focus views',r.focusSize?.replace('x','×')]].filter(([,v]) => v);
+    box.innerHTML = `<div class="engine-state ${tone}"><b>${escape(label)}</b><span>${escape(r.summary)}</span></div>`
+      + (r.explanation ? `<p class="pimax-note${r.state === 'applied' ? '' : ' warn'}">${escape(r.explanation)}</p>` : '')
+      + (rows.length ? `<dl class="pimax-values">${rows.map(([k,v]) => `<dt>${escape(k)}</dt><dd>${escape(v)}</dd>`).join('')}</dl>` : '')
+      + (r.evidence.length ? `<details class="advanced"><summary>Log lines<small>From CheekyFoveatedDLSS-Standalone.log</small></summary><pre class="log-lines">${escape(r.evidence.join('\n'))}</pre></details>` : '');
+  } catch (error) { if (mine === dlssFocusSequence) box.innerHTML = `<p class="fine">${escape(error.message)}</p>`; }
 }
 // ---- CPU Boost plan ---------------------------------------------------------------------------------------------
 let boostTimer, boostSequence = 0;
@@ -1023,6 +1042,8 @@ function renderSearch() {
     ['diagnostics','Checks','Must fix, check yourself and OK: what stands between this draft and a flight.','checkGroups'],
     ['overview','Last flight','Headset FPS, frame generation 2×/3×, DCS frame time, DLSS 5, CPU Boost and the prefetch fix from the last flight.','flightCard'],
     ['diagnostics','Diagnostic report','Export detected files, compatibility and backups.','export'],
+    ['support','Diagnostic package','One ZIP with the logs and settings needed to understand a problem, for a report.','diagnosticPackage'],
+    ['support','DLSS 5 not applied','Why DLSS 5 did not reach the focus area in the last session.','dlssFocus'],
     ['recovery','Stock DCS','Back to stock DCS: put back every file and setting DCS Control changed.','originals']
   ].map(([page,title,description,id]) => ({page,title,description,path:id,element:$(id),input:$(id)}));
   searchResults = [...fields,...shortcuts].filter(f => !(profile?.desktop && VR_PAGES.includes(f.page))).filter(f => !query || normalize(f.title+' '+f.description+' '+f.path+' '+pages.find(p => p[0] === f.page).slice(1,4).join(' ')).includes(query));
@@ -1039,7 +1060,7 @@ function revealSetting(f) {
 }
 async function initialize() {
   const groups = {engine:'Every pilot',foveation:'VR',setup:'Setup & safety'};
-  pages.forEach((p,index) => { if (groups[p[0]]) { const g = document.createElement('div'); g.className = 'rail-group'; g.id = 'railGroup-'+p[0]; g.textContent = groups[p[0]]; $('navigation').append(g); } const b = document.createElement('button'); b.id = 'nav-'+p[0]; b.className = 'nav-item'; b.title = p[1]+' (Ctrl '+(index+1)+')'; b.setAttribute('aria-label',p[1]); b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${p[4]}"/></svg><div><b>${p[5] || p[1]}</b><small>${p[3]}</small></div>`; b.addEventListener('click',() => navigate(p[0])); $('navigation').append(b); });
+  pages.forEach((p,index) => { if (groups[p[0]]) { const g = document.createElement('div'); g.className = 'rail-group'; g.id = 'railGroup-'+p[0]; g.textContent = groups[p[0]]; $('navigation').append(g); } const b = document.createElement('button'); b.id = 'nav-'+p[0]; b.className = 'nav-item'; b.title = index < 9 ? p[1]+' (Ctrl '+(index+1)+')' : p[1]; b.setAttribute('aria-label',p[1]); b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${p[4]}"/></svg><div><b>${p[5] || p[1]}</b><small>${p[3]}</small></div>`; b.addEventListener('click',() => navigate(p[0])); $('navigation').append(b); });
   buildFields(); buildFeatureList(); navigate('overview');
   [['launch','launch'],['apply','apply'],['refresh','refresh'],['importProfile','import'],['saveProfile','save'],['resetNeural','resetNeural'],['export','export'],['prepareSboys','prepareSboys'],['importSboys','importSboys'],['openSboys','openSboys'],['checkReadiness','checkReadiness']].forEach(([id,action]) => $(id).addEventListener('click',() => run(action).catch(()=>{})));
   $('refreshBoostPlan').addEventListener('click',() => refreshBoostPlan(0));
@@ -1048,6 +1069,8 @@ async function initialize() {
   $('engineReport').addEventListener('click',() => engineAction('engineOpen',{target:'report'}));
   $('engineLog').addEventListener('click',() => engineAction('engineOpen',{target:'log'}));
   $('refreshPupil').addEventListener('click',() => refreshPupil());
+  $('refreshDlssFocus').addEventListener('click',() => refreshDlssFocus());
+  $('diagnosticPackage').addEventListener('click',() => run('diagnosticPackage').catch(()=>{}));
   $('pupilLog').addEventListener('click',() => request('pupilOpenLog').catch(showError));
   $('searchOpen').addEventListener('click',openSearch); $('searchClose').addEventListener('click',() => $('searchDialog').close()); $('searchInput').addEventListener('input',renderSearch); $('searchInput').addEventListener('keydown',e => { if (e.key === 'Enter') { e.preventDefault(); revealSetting(searchResults[0]); } });
   $('refreshFlight').addEventListener('click',() => loadFlight(0)); $('resetApplied').addEventListener('click',resetToApplied);
