@@ -1,0 +1,150 @@
+diff --git a/include/xrfg/diagnostic_overlay_model.hpp b/include/xrfg/diagnostic_overlay_model.hpp
+--- a/include/xrfg/diagnostic_overlay_model.hpp
++++ b/include/xrfg/diagnostic_overlay_model.hpp
+@@ -186,6 +186,16 @@
+ };
+ inline constexpr std::uint64_t kPeripheryOn = 1ULL << 0;
+ inline constexpr std::uint64_t kPeripheryValid = 1ULL << 2;
++// DCS Control (0023): the bundled Quad Views' DcsVr_QuadViewsDisparityStatus()
++// (Far depth): bit 0 on, bit 2 the engine's depth was valid this frame, bit 3
++// the last field is held (a frame without depth). known is false without it.
++struct FarDepthStatus {
++    bool known{};
++    std::uint64_t bits{};
++};
++inline constexpr std::uint64_t kFarDepthOn = 1ULL << 0;
++inline constexpr std::uint64_t kFarDepthValid = 1ULL << 2;
++inline constexpr std::uint64_t kFarDepthHeld = 1ULL << 3;
+ 
+ struct DiagnosticInputs {
+     float output_fps{};        // what the overlay's counter shows
+@@ -210,6 +220,7 @@
+     // DCS Control (0018): the eye distance and the periphery stability pass.
+     PupilIpd ipd;
+     PeripheryStatus periphery;
++    FarDepthStatus far_depth; // 0023
+ };
+ 
+ [[nodiscard]] std::string format_dlss_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
+@@ -239,6 +250,10 @@
+ // 0020: "Periphery: starting" grey before its first frame, "Periphery: not
+ // updating" amber when its status stopped changing for 2 s.
+ [[nodiscard]] std::string format_periphery_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
++// DCS Control (0023): "Far depth: ON" green while the engine's depth arrives (or
++// is held for a frame), "Far depth: waiting for engine" grey while it is on
++// without depth. Empty when Far depth is off or the export is absent.
++[[nodiscard]] std::string format_far_depth_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
+ // DCS VR Control (0007): "VRAM 28.4 / 32.0 GB" - what every process has
+ // resident in the adapter's dedicated memory against that memory, where the
+ // adapter-wide figure can be read, followed by this process's own usage and
+@@ -250,7 +265,7 @@
+ [[nodiscard]] std::vector<DiagnosticLine> format_diagnostic_lines(const DiagnosticInputs& inputs);
+ 
+ inline constexpr std::uint32_t kDiagnosticPanelWidth = 768;
+-inline constexpr std::uint32_t kDiagnosticPanelHeight = 196; // DCS Control (0018): one more line
++inline constexpr std::uint32_t kDiagnosticPanelHeight = 216; // DCS Control (0018, 0023): two more lines
+ // Characters per line at the panel's fixed glyph scale; longer lines are cut.
+ [[nodiscard]] std::size_t diagnostic_panel_columns(std::uint32_t width) noexcept;
+ // Premultiplied RGBA (or BGRA) with a translucent dark background.
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+--- a/src/core/diagnostic_overlay_model.cpp
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -221,6 +221,14 @@
+ }
+ }
+ 
++std::string format_far_depth_line(const DiagnosticInputs& in, DiagnosticColor& color) {
++    const auto& f = in.far_depth;
++    if (!f.known || !(f.bits & kFarDepthOn)) return {};
++    if (f.bits & (kFarDepthValid | kFarDepthHeld)) { color = DiagnosticColor::green; return "Far depth: ON"; }
++    color = DiagnosticColor::grey;
++    return "Far depth: waiting for engine";
++}
++
+ std::string format_periphery_line(const DiagnosticInputs& in, DiagnosticColor& color) {
+     const auto& p = in.periphery;
+     if (!p.known) return {};
+@@ -280,6 +288,9 @@
+     DiagnosticLine periphery; // 0018
+     periphery.text = format_periphery_line(in, periphery.color);
+     if (!periphery.text.empty()) lines.push_back(std::move(periphery));
++    DiagnosticLine far_depth; // 0023
++    far_depth.text = format_far_depth_line(in, far_depth.color);
++    if (!far_depth.text.empty()) lines.push_back(std::move(far_depth));
+     lines.push_back({"App " + whole(in.app_fps) + " fps -> out " + whole(in.output_fps) + " fps",
+         DiagnosticColor::white});
+     if (in.show_vram) { // 0007
+diff --git a/src/layer/openxr_fps_overlay.cpp b/src/layer/openxr_fps_overlay.cpp
+--- a/src/layer/openxr_fps_overlay.cpp
++++ b/src/layer/openxr_fps_overlay.cpp
+@@ -137,6 +137,10 @@
+     std::uint64_t next_periphery_lookup_ms{};
+     // 0020: the update counter (bits 48-55) and when it last moved.
+     unsigned periphery_counter{0x100};
++    // DCS Control (0023): Far depth's status, from the same Quad Views module.
++    EngineStatusFn far_depth_status{};
++    HMODULE far_depth_module{};
++    std::uint64_t next_far_depth_lookup_ms{};
+     std::uint64_t periphery_moved_ms{};
+     std::uint64_t next_status_open_ms{};
+ 
+@@ -162,6 +166,7 @@
+         if (pupil_module) FreeLibrary(pupil_module);
+         if (pupil_ipd_module) FreeLibrary(pupil_ipd_module);
+         if (periphery_module) FreeLibrary(periphery_module);
++        if (far_depth_module) FreeLibrary(far_depth_module);
+     }
+ 
+     // DCS Control (0016): GetModuleHandleExW with flags 0 takes a module
+@@ -418,6 +423,19 @@
+         inputs.ipd = {true, pupil_ipd()};
+     }
+ 
++    // DCS Control (0023): Far depth, exported by the bundled Quad Views.
++    void read_far_depth(DiagnosticInputs& inputs) {
++        if (!far_depth_status) {
++            const auto tick = GetTickCount64();
++            if (tick < next_far_depth_lookup_ms) return;
++            next_far_depth_lookup_ms = tick + 2000;
++            far_depth_status = lookup_export<EngineStatusFn>(
++                L"XR_APILAYER_MBUCCHIA_quad_views_foveated.dll", "DcsVr_QuadViewsDisparityStatus", far_depth_module);
++            if (!far_depth_status) return;
++        }
++        inputs.far_depth = {true, far_depth_status()};
++    }
++
+     // DCS Control (0018): the bundled Quad Views' periphery stability pass.
+     void read_periphery(DiagnosticInputs& inputs) {
+         if (!periphery_status) {
+@@ -536,6 +554,7 @@
+             read_engine(inputs);
+             read_pupil(inputs);
+             read_periphery(inputs);
++            read_far_depth(inputs);
+             upload(panel, rasterize_diagnostic_panel(panel.width, panel.height,
+                 format_diagnostic_lines(inputs), bgra()));
+         }
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+--- a/tests/diagnostic_overlay_tests.cpp
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -157,6 +157,20 @@
+             const auto rows = [&](bool known) { in.periphery = {known, kPeripheryValid | kPeripheryOn | (40ULL << 16)}; return format_diagnostic_lines(in).size(); };
+             require(rows(true) == rows(false) + 1, "the periphery line is added only with the export");
+             in.periphery = {};
++
++            // DCS Control (0023): the Far depth line.
++            const auto far = [&](bool known, std::uint64_t bits, C expected) {
++                in.far_depth = {known, bits};
++                C color{};
++                auto text = format_far_depth_line(in, color);
++                if (!text.empty()) require(color == expected, "Far depth colour for: " + text);
++                return text;
++            };
++            require(far(true, kFarDepthOn | kFarDepthValid, C::green) == "Far depth: ON", "far depth on");
++            require(far(true, kFarDepthOn | kFarDepthHeld, C::green) == "Far depth: ON", "held field");
++            require(far(true, kFarDepthOn, C::grey) == "Far depth: waiting for engine", "no engine depth yet");
++            require(far(true, 0, C::grey).empty() && far(false, kFarDepthOn, C::grey).empty(), "off or absent: no line");
++            in.far_depth = {};
+         }
+ 
+         // Hotkey: same format as DCSVR_NR_HOTKEY.

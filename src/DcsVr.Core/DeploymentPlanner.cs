@@ -63,14 +63,18 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         }
         environment["DCSVR_QUAD_FOCUS"] = profile.UsesQuadFocus ? "1" : "0";
         environment["DCSVR_NR_HOTKEY"] = profile.NeuralRendering ? NeuralHotkeys.Environment(profile.NeuralToggleKey) : "0:0";
-        // The diagnostic panel is drawn by OFXR, so it exists only when framegen puts OFXR in the chain.
-        var framegen = profile.FrameGen != FrameGeneration.Off;
+        // The diagnostic panel is drawn by OFXR: with frame generation, or loaded for the panel alone (HeadsetPanel).
+        var framegen = profile.UsesHeadsetPanel;
         environment["DCSVR_DIAG_HOTKEY"] = framegen ? NeuralHotkeys.Environment(profile.DiagnosticOverlayKey, NeuralHotkeys.DiagnosticDefault) : "0:0";
         environment["DCSVR_DIAG_OVERLAY"] = framegen && profile.DiagnosticOverlayAtStart ? "1" : "0";
         // The panel's Engine line names the in-flight switch of the engine optimizations (OFXR fork patch 0013).
         environment["DCSVR_ENGINE_HOTKEY"] = framegen && profile.EngineOptimizations ? NeuralHotkeys.Environment(profile.EngineToggleKey, NeuralHotkeys.EngineDefault) : "0:0";
         // And its Pupil shift line names the layer's switch (patch 0015).
         environment["DCSVR_PUPIL_HOTKEY"] = framegen && profile.UsesPupilShift ? NeuralHotkeys.Environment(profile.PupilShiftToggleKey, NeuralHotkeys.PupilDefault) : "0:0";
+        // And its Depth boost line names Depth boost's switch (patch 0017).
+        environment["DCSVR_DEPTH_HOTKEY"] = framegen && profile.UsesDepthBoost ? NeuralHotkeys.Environment(profile.DepthBoostToggleKey, NeuralHotkeys.DepthBoostDefault) : "0:0";
+        // And its Far depth line names Far depth's switch (patch 0024).
+        environment["DCSVR_FARDEPTH_HOTKEY"] = framegen && profile.UsesFarDepth ? NeuralHotkeys.Environment(profile.FarDepthToggleKey, NeuralHotkeys.FarDepthDefault) : "0:0";
         // The Steam edition restarts itself through Steam when started directly, and the new process loses this
         // environment (verified with DCS 2.9.30: the restarted process had no layers). Steam's own launch variables
         // tell the game it was already started by Steam, so the original process keeps the profile environment.
@@ -78,7 +82,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
 
         var optionsPath = Path.GetFullPath(inventory.OptionsPath!);
         // Saved Games\DCS*\Scripts, next to Config: where the DCS engine optimizations' Lua hook and module go.
-        var scripts = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(optionsPath)!)!, "Scripts");
+        var scripts = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(optionsPath)!) ?? throw new InvalidDataException(@"options.lua must be in Saved Games\DCS\Config."), "Scripts");
         var optionsBytes = File.ReadAllBytes(optionsPath);
         var utf8 = StrictUtf8.Encoding;
         string text;
@@ -121,14 +125,34 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         // environment). Restored with the profile.
         if (!profile.KeepDcsLauncher && current.Get("miscellaneous") is not null) Require("miscellaneous.launcher", false);
         // DCS's custom IPD replaces each eye's sideways position after the OpenXR layers, which would undo Pupil shift's
-        // sideways move: the layer applies the same IPD itself and DCS's option is off while the profile is applied
-        // (owned like every key here: Back to stock DCS turns it on again).
+        // sideways move and Depth boost's IPD scale: the layer applies the same IPD itself (Depth boost scales it) and
+        // DCS's option is off while the profile is applied (owned like every key here: Back to stock DCS turns it on again).
+        // Which eye distance DCS renders with (VrProfile.EyeDistance): the headset's own turns DCS's custom IPD off;
+        // Manual sets it (through the layer when it runs, else through DCS's option); DcsCustom keeps DCS's value.
         double? pupilIpd = null;
-        if (profile.UsesPupilShift && current.Get("VR", "custom_IPD_enable")?.Trim() == "true" && CustomIpd(current.Get("VR", "custom_IPD")) is { } customIpd)
-        {
-            pupilIpd = customIpd;
-            Require("VR.custom_IPD_enable", false);
-        }
+        var dcsCustomOn = current.Get("VR", "custom_IPD_enable")?.Trim() == "true";
+        if (!profile.Desktop)
+            switch (profile.EyeDistance)
+            {
+                case EyeDistanceSource.Headset:
+                    if (dcsCustomOn) Require("VR.custom_IPD_enable", false);
+                    break;
+                case EyeDistanceSource.Manual when profile.UsesPerceptionLayer:
+                    pupilIpd = profile.EyeDistanceMm;
+                    if (dcsCustomOn) Require("VR.custom_IPD_enable", false);
+                    break;
+                case EyeDistanceSource.Manual:
+                    Require("VR.custom_IPD_enable", true);
+                    Require("VR.custom_IPD", profile.EyeDistanceMm.ToString("0.#", CultureInfo.InvariantCulture));
+                    break;
+                default:
+                    if (profile.UsesPerceptionLayer && dcsCustomOn && CustomIpd(current.Get("VR", "custom_IPD")) is { } customIpd)
+                    {
+                        pupilIpd = customIpd;
+                        Require("VR.custom_IPD_enable", false);
+                    }
+                    break;
+            }
         // Small DCS window in VR: the desktop mirror becomes a 1280×720 window. The headset image is rendered at the
         // headset's own resolution either way; DCS and Windows only keep smaller desktop buffers. The aspect follows the
         // window when DCS stores one. Owned keys like every setting above: Back to stock DCS puts the user's values back.
@@ -226,7 +250,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         // Optimizations only keeps the user's own OpenXR layers (for example their own Quad Views) as they are.
         else if (!profile.Desktop) environment["DISABLE_XR_APILAYER_MBUCCHIA_quad_views_foveated"] = "1";
 
-        if (profile.FrameGen != FrameGeneration.Off)
+        if (profile.FrameGen != FrameGeneration.Off || profile.UsesHeadsetPanel)
         {
             // The fork build is used whenever it is available; the upstream package is only a fallback for stereo
             // profiles in development fixtures, because software Quad Views needs the fork's submitted-only swapchains.
@@ -262,8 +286,9 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             layerNames.Add(gaze.Name!);
         }
         // Pupil shift sits first, next to DCS: it changes only what DCS renders and puts the runtime's own poses and
-        // FOVs back on the submitted views, so every layer below sees the frame as if it were not there.
-        if (profile.UsesPupilShift)
+        // FOVs back on the submitted views, so every layer below sees the frame as if it were not there. The same layer
+        // carries Depth boost, so it is deployed for either.
+        if (profile.UsesPerceptionLayer)
         {
             var source = components.PupilShiftDll is { } built && File.Exists(built) ? built : throw new InvalidDataException("The pupil shift layer is unavailable.");
             var folder = PathPolicy.UnderRoot(profileRoot, "pupilshift");

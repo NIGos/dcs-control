@@ -69,6 +69,10 @@ int DcsQv_ContextSlot(const char* name) {
       {"DiscardView", SLOT(DiscardView)},
       {"DiscardView1", SLOT(DiscardView1)},
       {"CSSetShader", SLOT(CSSetShader)},
+      /* fixation_depth.h: the viewport set with the G-buffer's depth target */
+      {"RSSetViewports", SLOT(RSSetViewports)},
+      /* fixation_depth.h: far depth pre-overlay copy point (draw entries) */
+      {"DrawAuto", SLOT(DrawAuto)},
   };
   for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
     const char* a = table[i].n;

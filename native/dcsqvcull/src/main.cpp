@@ -15,6 +15,8 @@
 
 #include <windows.h>
 #include <share.h>
+#include <winternl.h>   // NTSTATUS for d3dkmthk.h
+#include <d3dkmthk.h>   // D3DKMTQueryStatistics: GPU engine busy for the perf line and the governor (perf_mon.h)
 
 #include <atomic>
 #include <cmath>
@@ -35,6 +37,10 @@
 #include "reloc.h"
 #include "status_word.h"
 #include "scene_layout.h"
+#include "gov.h"       // R30: frame sampler, CPU/GPU-bound detector, governor stages (pure)
+#include "env_info.h"  // R30 L3: DCS version, OpenXR runtime and layers, streamers
+#include "dcsvr_depth_export.h"  // Far depth export contract with Quad Views (verbatim copy; far_depth.h)
+#include "dcsvr_perception_shm.h"  // Perception layer's shared blocks (verbatim copy of perception_shm.h; cockpit_ipd.h reads BoostOut)
 
 using namespace layout;
 
@@ -295,6 +301,47 @@ struct Config {
   bool d3dMeter = false;         // [D3D] Meter: count redundant D3D11 state calls (diagnostic)
   bool shaderTimeCache = true;   // cache dx11backend's per-draw ED_get_time
   int shaderTimeCacheUs = 1000;
+  // R30 field diagnostics (perf_mon.h) and the GPU-bound governor (gov.h).
+  bool recorderDetail = false;   // [Log] RecorderDetail: the recorders' full 10-s blocks (else one line each)
+  int perfIntervalSec = 10;      // [Log] PerfIntervalSec: perf/features lines (0 = off)
+  int vramIntervalSec = 60;      // [Log] VramIntervalSec: vram line (0 = off)
+  bool govEnabled = true;        // [Governor] Enabled
+  int govGpuBusyPct = 92;        // [Governor] GpuBusyPct: GPU busy at or above = the GPU is full
+  int govRenderIdlePct = 85;     // [Governor] RenderIdlePct: render thread busy at or below = it waits
+  int govCpuBusyPct = 92;        // [Governor] CpuBusyPct: render thread busy at or above = CPU-bound
+  int govGpuFreePct = 80;        // [Governor] GpuFreePct: GPU busy below = the GPU has headroom
+  int govGpuFullPct = 98;        // [Governor] GpuFullPct: GPU busy at or above = GPU-bound (render thread may spin-wait)
+  int govWindowSec = 8;          // [Governor] WindowSec: verdicts considered
+  int govNeedSec = 6;            // [Governor] NeedSec: of them needed for a step
+  int govDwellSec = 10;          // [Governor] MinDwellSec: minimum time per stage
+  double govMinGainPct = 2.0;    // [Governor] MinGainPct: fps gain a step down must show (and a step up may lose at most)
+  int govTrialSec = 20;          // [Governor] TrialSec: fps window before and after a step (after a 2 s settle)
+  int govRecheckSec = 10;        // [Governor] RecheckSec: the old stage again for this long (A-B-A; 0 = before/after only)
+  int govRevertBackoffSec = 300; // [Governor] RevertBackoffSec: a reverted stage is blocked this long (doubling)
+  // Depth boost's fixation depth (fixation_depth.h). Not an optimization:
+  // outside the kill switch and the status word's features.
+  bool fixationDepth = false;     // [Perception] FixationDepth: publish Local\DcsVrFixationDepth_v1
+  bool sceneCutReset = true;      // [Perception] SceneCutReset: reset Quad Views' temporal history on camera cuts
+  bool depthGrid = false;         // [Perception] DepthGrid: publish Local\DcsVrDepthGrid_v1 (32 x 32 grid of the left periphery)
+  int fixationDepthVerify = 0;    // [Perception] FixationDepthVerify: sample every view run in turn, log the view map
+  bool fixationDepthDump = false; // [Perception] FixationDepthDump: one window as a PGM in the dev folder
+  std::wstring fixationTestGaze;  // [Perception] FixationDepthTestGaze: "x,y" tangents written as GazeOut if absent
+  bool farDepthExport = false;    // [Perception] FarDepthExport: focus views' depth to Quad Views (when it wants them)
+  int farDepthSlots = 2;          // [Perception] FarDepthExportSlots: copies per focus view (1 or 2)
+  int farDepthLogProj = 0;        // [Perception] FarDepthLogProj: log the focus views' P20/P21 for N frames
+  bool farDepthPreOverlay = true; // [Perception] FarDepthPreOverlay: each focus view's colour before the overlays
+  int farDepthCoverageMode = 1;   // [Perception] FarDepthCoverageMode: hdr (1, the default; per-view fallback to overlay) or overlay (0)
+  bool farDepthPostOverlay = true; // [Perception] FarDepthPostOverlay: also each focus view's colour after the overlays (at (w, 0))
+  int farDepthOverlayTrace = 0;   // [Perception] FarDepthOverlayTrace: log the focus views' tone-map..overlay draws for N frames
+  // [Perception] CockpitTrueIpd* (cockpit_ipd.h, R31 option 3): cockpit passes at the true eye distance while
+  // Depth boost renders the world at the boosted one. All default off / neutral.
+  int cockpitTrueIpd = 0;          // CockpitTrueIpd: 0 off, 1 on, 2 observe (armed, nothing modified, logs only)
+  bool cockpitTrueIpdLighting = false;  // CockpitTrueIpdLighting: phase 2, cockpit-stencil pixels lit from the true eye
+  bool cockpitTrueIpdForward = true;    // CockpitTrueIpdForward: also TransparentCockpitPass / ...DecalPass
+  int cockpitTrueIpdLog = 0;       // CockpitTrueIpdLog: per-upload trace for the next N frames
+  double cockpitTrueIpdTestShiftMm = 0;  // CockpitTrueIpdTestShiftMm: dev only, shift per eye without the layer
+  int cockpitTrueIpdToggleVk = 118;  // CockpitTrueIpdToggle: in-flight A/B, default Alt+Shift+F7 (118:6); 0:0 off
+  int cockpitTrueIpdToggleMods = 6;
 };
 
 Config g_cfg;
@@ -338,6 +385,15 @@ std::atomic<bool> g_partitionBoost{false};  // see HookCollect
 // In-flight kill switch ([Hotkeys] Toggle): true turns off, together, the
 // measured optimizations the ini enabled. Reset whenever the ini changes.
 std::atomic<bool> g_engineOff{false};
+// R30 governor (gov.h, perf_mon.h): the recorders' stage (0 = as configured,
+// 1 = shadow split & 0x8, 2 = no helper lists, 3 = recorders paused), read by
+// ApplyShadowRecorder/ApplyGBufferRecorder; the last verdict and the
+// shader-variant warm-up for the status word.
+std::atomic<int> g_govStage{0};
+std::atomic<int> g_verdictNow{0};
+std::atomic<bool> g_warming{false};
+qvstatus::Feature g_featLast[18] = {};  // ComputeStatus's last states (the features line)
+void PerfOnToggle(bool off);
 
 // Parses "virtual-key:modifiers" (decimal; modifiers Ctrl 1, Alt 2, Shift 4).
 // "0:0" disables the key. Returns false for anything else malformed or out of
@@ -375,6 +431,17 @@ std::atomic<bool> g_cbUploadSkipOn{false};     // cbupload (tex_bind.h)
 std::atomic<bool> g_pacerLowPowerOn{false};    // pacer.h
 std::atomic<bool> g_taskClockOn{false};        // edtime.h
 std::atomic<bool> g_frameHeapOn{false};        // frame_heap.h
+// Frame-heap generation: +1 at every TFrameMemoryHeap<1>::reset_memory (frame_heap.h's
+// hook). The renderables the recorders' workers read live in that heap: a job whose
+// generation changed reads recycled memory (gb_rec.h HeapRecycled).
+std::atomic<uint64_t> g_frameHeapGen{1};
+// QPC of the last scene change: the G-buffer executions moved to another
+// render graph (gb_rec.h), or the Lua hook reported a simulation stop, a
+// mission load or a local player slot change. DCS frees the previous scene's
+// objects around it while frames still render (no heap reset in between), so
+// a recorder fault in a job started near it is contained per job
+// (shrec::SceneChanging) instead of latching the recorder off.
+std::atomic<int64_t> g_sceneChangeQpc{0};
 std::atomic<bool> g_shadowTexSkipOn{false};    // shadow_tex.h        // time the allocator/texture hooks (suite counters only)
 
 // System timer resolution for the DCS process (NtSetTimerResolution, 100 ns
@@ -406,6 +473,17 @@ double ReadDouble(const wchar_t* sec, const wchar_t* key, double def, const std:
 // next to that file.
 std::wstring g_devDir;
 FILETIME g_devIniTime{};
+
+// [Perception] FarDepthCoverageMode: "overlay" -> 0; absent, "hdr" or anything
+// else -> 1 (hdr, far_depth.h 5d/5e); "anything else" sets *invalid.
+int ParseFarCoverageMode(const wchar_t* m, bool* invalid) {
+  *invalid = false;
+  if (_wcsicmp(m, L"overlay") == 0) return 0;
+  if (m[0] && _wcsicmp(m, L"hdr") != 0) *invalid = true;
+  return 1;
+}
+bool g_farCovInvalidLogged = false;  // the invalid value is logged once per process
+int g_farCovInvalidLogs = 0;
 
 void LoadConfig(bool initial) {
   std::wstring ini = g_dir + L"DcsQvCull.ini";
@@ -682,6 +760,73 @@ void LoadConfig(bool initial) {
   c.profileSeconds = GetPrivateProfileIntW(L"Profile", L"Seconds", c.profileSeconds, ini.c_str());
   c.profileThreads = GetPrivateProfileIntW(L"Profile", L"Threads", c.profileThreads, ini.c_str());
   c.profilePeriodMs = GetPrivateProfileIntW(L"Profile", L"PeriodMs", c.profilePeriodMs, ini.c_str());
+  {
+    auto clampInt = [&](const wchar_t* sec, const wchar_t* key, int def, int lo, int hi) {
+      const int v = static_cast<int>(GetPrivateProfileIntW(sec, key, def, ini.c_str()));
+      return v < lo ? lo : v > hi ? hi : v;
+    };
+    c.recorderDetail = GetPrivateProfileIntW(L"Log", L"RecorderDetail", 0, ini.c_str()) != 0;
+    c.perfIntervalSec = clampInt(L"Log", L"PerfIntervalSec", 10, 0, 3600);
+    c.vramIntervalSec = clampInt(L"Log", L"VramIntervalSec", 60, 0, 3600);
+    c.govEnabled = GetPrivateProfileIntW(L"Governor", L"Enabled", 1, ini.c_str()) != 0;
+    c.govGpuBusyPct = clampInt(L"Governor", L"GpuBusyPct", 92, 1, 100);
+    c.govRenderIdlePct = clampInt(L"Governor", L"RenderIdlePct", 85, 1, 100);
+    c.govCpuBusyPct = clampInt(L"Governor", L"CpuBusyPct", 92, 1, 100);
+    c.govGpuFreePct = clampInt(L"Governor", L"GpuFreePct", 80, 1, 100);
+    c.govGpuFullPct = clampInt(L"Governor", L"GpuFullPct", 98, 1, 101);
+    c.govWindowSec = clampInt(L"Governor", L"WindowSec", 8, 1, 60);
+    c.govNeedSec = clampInt(L"Governor", L"NeedSec", 6, 1, 60);
+    c.govDwellSec = clampInt(L"Governor", L"MinDwellSec", 10, 1, 3600);
+    c.govMinGainPct = (std::max)(0.0, (std::min)(50.0, ReadDouble(L"Governor", L"MinGainPct", 2.0, ini)));
+    c.govTrialSec = clampInt(L"Governor", L"TrialSec", 20, 5, 60);
+    c.govRecheckSec = clampInt(L"Governor", L"RecheckSec", 10, 0, 60);
+    c.govRevertBackoffSec = clampInt(L"Governor", L"RevertBackoffSec", 300, 10, 3600);
+  }
+  c.fixationDepth = GetPrivateProfileIntW(L"Perception", L"FixationDepth", 0, ini.c_str()) != 0;
+  c.depthGrid = GetPrivateProfileIntW(L"Perception", L"DepthGrid", 0, ini.c_str()) != 0;
+  c.sceneCutReset = GetPrivateProfileIntW(L"Perception", L"SceneCutReset", 1, ini.c_str()) != 0;
+  c.fixationDepthVerify = GetPrivateProfileIntW(L"Perception", L"FixationDepthVerify", 0, ini.c_str());
+  c.fixationDepthDump = GetPrivateProfileIntW(L"Perception", L"FixationDepthDump", 0, ini.c_str()) != 0;
+  c.farDepthExport = GetPrivateProfileIntW(L"Perception", L"FarDepthExport", 0, ini.c_str()) != 0;
+  c.farDepthSlots = GetPrivateProfileIntW(L"Perception", L"FarDepthExportSlots", 2, ini.c_str()) == 1 ? 1 : 2;
+  c.farDepthLogProj = static_cast<int>(GetPrivateProfileIntW(L"Perception", L"FarDepthLogProj", 0, ini.c_str()));
+  c.farDepthLogProj = (std::max)(0, (std::min)(1000, c.farDepthLogProj));
+  c.farDepthPreOverlay = GetPrivateProfileIntW(L"Perception", L"FarDepthPreOverlay", 1, ini.c_str()) != 0;
+  {
+    wchar_t m[32] = {};
+    GetPrivateProfileStringW(L"Perception", L"FarDepthCoverageMode", L"hdr", m, 32, ini.c_str());
+    bool invalid = false;
+    c.farDepthCoverageMode = ParseFarCoverageMode(m, &invalid);
+    if (invalid && !g_farCovInvalidLogged) {
+      g_farCovInvalidLogged = true;
+      g_farCovInvalidLogs++;
+      Log("config: [Perception] FarDepthCoverageMode=%ls is invalid (hdr or overlay); hdr used", m);
+    }
+  }
+  c.farDepthPostOverlay = GetPrivateProfileIntW(L"Perception", L"FarDepthPostOverlay", 1, ini.c_str()) != 0;
+  c.farDepthOverlayTrace =
+      (std::max)(0, (std::min)(600, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"FarDepthOverlayTrace", 0,
+                                                                           ini.c_str()))));
+  c.cockpitTrueIpd = static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpd", 0, ini.c_str()));
+  if (c.cockpitTrueIpd < 0 || c.cockpitTrueIpd > 2) c.cockpitTrueIpd = 0;
+  c.cockpitTrueIpdLighting = GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdLighting", 0, ini.c_str()) != 0;
+  c.cockpitTrueIpdForward = GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdForward", 1, ini.c_str()) != 0;
+  c.cockpitTrueIpdLog =
+      (std::max)(0, (std::min)(600, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdLog", 0,
+                                                                           ini.c_str()))));
+  c.cockpitTrueIpdTestShiftMm =
+      (std::max)(-40.0, (std::min)(40.0, ReadDouble(L"Perception", L"CockpitTrueIpdTestShiftMm", 0.0, ini)));
+  {
+    wchar_t hk[64] = {};
+    GetPrivateProfileStringW(L"Perception", L"CockpitTrueIpdToggle", L"118:6", hk, 64, ini.c_str());
+    if (!ParseHotkey(hk, c.cockpitTrueIpdToggleVk, c.cockpitTrueIpdToggleMods))
+      Log("config: [Perception] CockpitTrueIpdToggle=%ls is invalid; key disabled", hk);
+  }
+  {
+    wchar_t g[64] = {};
+    GetPrivateProfileStringW(L"Perception", L"FixationDepthTestGaze", L"", g, 64, ini.c_str());
+    c.fixationTestGaze = g;
+  }
   if (c.statsIntervalSec < 1) c.statsIntervalSec = 1;
   g_cfg = c;
   if (!initial && g_engineOff.exchange(false)) Log("hotkey: engine optimizations back ON (ini changed)");
@@ -1005,7 +1150,9 @@ std::atomic<int64_t> g_firstQuadQpc{0};
 void SetBenchVariant(bool on);
 void BenchSetEngineOff(bool off);
 void RestoreD3dHooks();
+#include "exit_guard.h"  // DCS shutdown: quiesce, late faults on our threads end the thread only
 #include "gpu.h"
+#include "scene_cut.h"  // [Perception] SceneCutReset: Quad Views history reset on camera cuts
 #include "bench.h"
 #include "profiler.h"
 #include "timer_cache.h"
@@ -1239,6 +1386,14 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
   }
   if (pairs < 1) return;
   bool hold = UpdateGazeAndCheckHold(views);
+  // Camera cut detection (scene_cut.h): the left periphery's camera.
+  for (const ViewInfo& v : views)
+    if (v.role == 1 && v.fr.valid) {
+      const double pos[3] = {v.fr.apex.x, v.fr.apex.y, v.fr.apex.z};
+      const double fwd[3] = {v.fr.forward.x, v.fr.forward.y, v.fr.forward.z};
+      scenecut::OnCamera(pos, fwd);
+      break;
+    }
   if (!g_enabled.load() || g_faulted.load()) return;
   const bool hole = g_debugHole.load();
   if (hold && !hole) return;
@@ -1327,6 +1482,8 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
 #include "view_profile.h"
 #include "vram_count.h"
 #include "prefetch_fix.h"
+#include "fixation_depth.h"  // Depth boost: fixation depth publisher ([Perception] FixationDepth)
+#include "perf_mon.h"  // R30: env/perf/features/warmup/toggle/vram lines and the governor's driver
 
 // [Prefetch] Mode/WindowMs, live: off (or the kill switch) = every patched
 // slot restored to the real function; observe = installed, pass-through.
@@ -1544,9 +1701,10 @@ void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t*
   Patch* patches = patchBuf.data();
   int pairs = 0;
   int patched = 0;
+  bool classified = false;
   if (count >= 4 && count <= kMaxCollectInfos && infos && havePatchBuf) {
-    if (!SehPrepare(count, infos, patches, patchBuf.size(), &pairs, &patched, &views))
-      Log("ERROR: exception while preparing views; optimisation disabled");
+    classified = SehPrepare(count, infos, patches, patchBuf.size(), &pairs, &patched, &views);
+    if (!classified) Log("ERROR: exception while preparing views; optimisation disabled");
   } else if (count > kMaxCollectInfos) {
     static std::atomic<bool> once{false};
     if (!once.exchange(true)) Log("collect: a call with %u collections (above %u) is not classified", count, kMaxCollectInfos);
@@ -1565,6 +1723,8 @@ void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t*
 
   for (int i = 0; i < patched; ++i) *reinterpret_cast<uint8_t**>(patches[i].slot) = patches[i].original;
   if (pairs >= 1) PublishQuadViews(infos, views, t1.QuadPart);
+  // R30 L1: every frame's main call (quad or not) for the perf line and the governor.
+  perfgov::OnCollect(count, classified ? static_cast<int>(views.size()) : -1, classified ? pairs : -1, t1.QuadPart);
 
   uint64_t us = static_cast<uint64_t>((t1.QuadPart - t0.QuadPart) * g_qpcToUs);
   CensusRecord(count, infos, us);
@@ -1834,14 +1994,42 @@ void ApplyGBufferBatch() {
 // R17 S3-S6 recorder: installed on first use (needs shadow batching's hooks and
 // the compiled keys: retried every second); off = pass-through. Off while
 // G-buffer batching is on (its leaders swap [item+0xd4]).
+// The governor's stage (gov.h) picks the split mask and may pause it: the
+// same switches the kill switch and bench mode 28 use at run time (the split
+// mask is read when a job is armed; a job armed or started before a pause is
+// dropped as stale or fails its vector check at the pass: DCS draws stock).
+// The recorders' workers read DCS's per-frame renderables after the job
+// started; the frame-heap generation (frame_heap.h's reset_memory hooks) is
+// what tells them the heap was recycled under them (gb_rec.h HeapRecycled).
+// Without those hooks the generation never moves and that check is blind
+// (0.5.5 field crash: AV in RecordRange -> BuildWindow on [item+0xd4] after a
+// mission restart), so the recorders stay off. Logged once per recorder.
+inline bool RecycleGuardReadyFor(int frameHeapState) { return frameHeapState == 1; }
+bool RecycleGuardReady(const char* who) {
+  if (RecycleGuardReadyFor(frameheap::g_state.load())) return true;
+  static std::atomic<int> logged{0};
+  const int bit = who[0] == 's' ? 1 : 2;
+  if (!(logged.fetch_or(bit) & bit))
+    Log("%s: off for this session (the frame-heap reset hooks are not installed, so a job could read recycled "
+        "renderables)", who);
+  return false;
+}
+
 void ApplyShadowRecorder() {
+  const perfgov::StageSettings gs = perfgov::ForStage(g_govStage.load(), g_cfg.shadowRecorderSplit,
+                                                      static_cast<uint32_t>(g_cfg.gbufferRecorderHelpers));
   shrec::g_scope = g_cfg.shadowRecorderScope;
   shrec::g_waitUs = static_cast<uint32_t>(g_cfg.shadowRecorderWaitUs);
   shrec::g_priority = g_cfg.shadowRecorderPriority;  // THREAD_PRIORITY_* are -2..2
-  shrec::g_split = g_cfg.shadowRecorderSplit;
+  shrec::g_split = gs.shadowSplit;
   shrec::g_helpers = static_cast<uint32_t>(g_cfg.shadowRecorderHelpers);
   shrec::g_instancing = g_cfg.shadowRecorderInstancing;
-  const bool on = g_cfg.shadowRecorder && !g_engineOff.load() && !(g_cfg.gbufferBatch && g_cfg.shadowInst);
+  const bool on = g_cfg.shadowRecorder && !g_engineOff.load() && !gs.pause && !(g_cfg.gbufferBatch && g_cfg.shadowInst);
+  if (on && frameheap::g_state.load() == 0) frameheap::Install();  // the workers' recycled-heap check needs the generation
+  if (on && !RecycleGuardReady("shadow recorder")) {
+    shrec::g_on = false;
+    return;
+  }
   if (on && !shrec::Install()) {
     shrec::g_on = false;
     return;
@@ -1853,15 +2041,24 @@ void ApplyShadowRecorder() {
 // G-buffer keys: collected while it is on, retried every second); off =
 // pass-through. Off while G-buffer batching is on.
 void ApplyGBufferRecorder() {
+  const perfgov::StageSettings gs = perfgov::ForStage(g_govStage.load(), g_cfg.shadowRecorderSplit,
+                                                      static_cast<uint32_t>(g_cfg.gbufferRecorderHelpers));
   gbrec::g_scope = g_cfg.gbufferRecorderScope;
   gbrec::g_waitUs = static_cast<uint32_t>(g_cfg.gbufferRecorderWaitUs);
   gbrec::g_island = static_cast<uint32_t>(g_cfg.gbufferRecorderIsland);
   gbrec::g_stride = static_cast<uint32_t>(g_cfg.suiteGBufferRecVerifyStride);
   gbrec::g_maxSeg = static_cast<uint32_t>(g_cfg.gbufferRecorderMaxSegments);
-  gbrec::g_helpers = static_cast<uint32_t>(g_cfg.gbufferRecorderHelpers);
+  gbrec::g_helpers = gs.gbHelpers;
   gbrec::g_cockpit = g_cfg.gbufferRecorderCockpit;
   gbrec::g_byOrdinal = g_cfg.gbufferRecorderByOrdinal;
-  const bool on = g_cfg.gbufferRecorder && g_cfg.shadowInst && !g_engineOff.load() && !g_cfg.gbufferBatch;
+  const bool on = g_cfg.gbufferRecorder && g_cfg.shadowInst && !g_engineOff.load() && !gs.pause && !g_cfg.gbufferBatch;
+  // The frame-heap reset hooks (pass-through unless [Model] FrameHeapSlabs): the
+  // workers' recycled-memory check needs the generation (retried every second).
+  if (on && frameheap::g_state.load() == 0) frameheap::Install();
+  if (on && !RecycleGuardReady("gbuffer recorder")) {
+    gbrec::g_on = false;
+    return;
+  }
   if (on && (!shadowinst::g_onGb.load() || !shadowinst::g_gbInstalled.load())) shadowinst::SetOnGb(true);
   if (on && !gbrec::Install()) {
     gbrec::g_on = false;
@@ -2189,15 +2386,17 @@ uint64_t ComputeStatus() {
       {g_allocSlabsOn.load() && allocslab::g_state.load() == 2, allocslab::g_state.load() < 0, g_cfg.allocSlabs},
       {bigpages::g_wanted.load() && bigpages::g_state.load() == 1, bigpages::g_state.load() < 0, g_cfg.bigPages},
       {g_frameHeapOn.load() && frameheap::g_state.load() == 1, frameheap::g_state.load() < 0, g_cfg.frameHeapSlabs},
-      {g_triPlainOn.load() && tricount::g_plain.load(), g_triPlainOn.load() && !tricount::g_site && ngModel,
+      // Latched from the configuration, not the kill-switch-gated flag: a
+      // feature latched off this session stays latched under the kill switch.
+      {g_triPlainOn.load() && tricount::g_plain.load(), g_cfg.triPlain && !tricount::g_site && ngModel,
        g_cfg.triPlain},
       {g_taskClockOn.load() && edtime::g_state.load() == 1, edtime::g_state.load() < 0, g_cfg.taskClock},
       {timercache::g_on.load() && timercache::g_orig, g_cfg.shaderTimeCache && !timercache::g_orig,
        g_cfg.shaderTimeCache},
-      {g_texDedupeOn.load() && texbind::g_attached.load(), g_texDedupeOn.load() && !texbind::g_orig && dx11,
+      {g_texDedupeOn.load() && texbind::g_attached.load(), g_cfg.texDedupe && !texbind::g_orig && dx11,
        g_cfg.texDedupe},
-      {g_cbSkipOn.load() && cbskip::g_attached.load(), g_cbSkipOn.load() && !cbskip::g_orig && dx11, g_cfg.cbSkip},
-      {g_costWeightsOn.load() && partw::g_orig, g_costWeightsOn.load() && !partw::g_orig, g_cfg.costWeights},
+      {g_cbSkipOn.load() && cbskip::g_attached.load(), g_cfg.cbSkip && !cbskip::g_orig && dx11, g_cfg.cbSkip},
+      {g_costWeightsOn.load() && partw::g_orig, g_cfg.costWeights && !partw::g_orig, g_cfg.costWeights},
       {g_partitionBoost.load() && threadsDef >= 1 && threadsDef <= 32, threadsDef > 32, g_cfg.partitionBoost},
       {shadowinst::g_on.load() && shadowinst::g_state.load() == 1, shadowinst::g_state.load() == -1,
        g_cfg.shadowInst},
@@ -2213,7 +2412,11 @@ uint64_t ComputeStatus() {
       {sfilt::Live(), sfilt::g_disabled.load() || sfilt::g_state.load() < 0, g_cfg.splitFilter},
       {pffix::Active(), pffix::g_state.load() < 0, g_cfg.prefetchMode == pffix::kSkip},
   };
-  return qvstatus::Compose(f, sizeof(f) / sizeof(f[0]), true, g_engineOff.load());
+  static_assert(sizeof(f) / sizeof(f[0]) == sizeof(g_featLast) / sizeof(g_featLast[0]), "features line: 18 entries");
+  memcpy(g_featLast, f, sizeof(f));
+  const uint64_t w = qvstatus::Compose(f, sizeof(f) / sizeof(f[0]), true, g_engineOff.load());
+  return qvstatus::WithExtras(w, g_warming.load(), static_cast<uint32_t>(g_govStage.load()),
+                              static_cast<uint32_t>(g_verdictNow.load()), g_cfg.govEnabled);
 }
 
 bool ToggleEngine() {
@@ -2221,6 +2424,7 @@ bool ToggleEngine() {
   bool off = !g_engineOff.load();
   SetEngineOff(off);
   Log("hotkey: engine optimizations %s", off ? "OFF" : "ON");
+  PerfOnToggle(off);  // R30 L5: the 10 s before now, the 10 s after in 12 s
   return true;
 }
 
@@ -2326,9 +2530,18 @@ void CheckConfiguration() {
       {L"XR_APILAYER_XRFrameBridge_diagnostic.dll", "OFXR frame bridge / frame-gen (absent in base)", false},
   };
   Log("-- configuration --");
+  // R30 L8: name the runtime; Pimax and QVFR are only expected on a Pimax runtime (no false warnings for others).
+  const std::string runtime = envinfo::XrRuntime();
+  const bool pimax = runtime.find("Pimax") != std::string::npos || runtime.find("PiOpenXR") != std::string::npos ||
+                     GetModuleHandleW(L"PiOpenXR_64.dll") != nullptr;
+  Log("  OpenXR runtime: %s; view layout: %d views per frame, %d focus/peripheral pairs", runtime.c_str(),
+      perfgov::g_views.load(), perfgov::g_pairs.load());
   for (const Mod& m : mods) {
     bool present = GetModuleHandleW(m.file) != nullptr;
-    Log("  %-50s %s%s", m.what, present ? "loaded" : "not loaded", present != m.wanted ? "   <-- check" : "");
+    const bool pimaxOnly = wcscmp(m.file, L"PiOpenXR_64.dll") == 0 ||
+                           wcscmp(m.file, L"XR_APILAYER_MBUCCHIA_quad_views_foveated.dll") == 0;
+    const bool check = pimaxOnly && !pimax ? false : present != m.wanted;
+    Log("  %-50s %s%s", m.what, present ? "loaded" : "not loaded", check ? "   <-- check" : "");
   }
   WIN32_FILE_ATTRIBUTE_DATA fad{};
   // The prefetch fix logs next to DCS.exe: DCS's bin folder from the process
@@ -3397,9 +3610,12 @@ DWORD WINAPI SuiteThread(void*) {
   return 0;
 }
 
+void PerfOnToggle(bool off) { perfmon::OnToggle(off); }
+
 void StartBench() {
   if (g_benchRunningFlag.exchange(true)) return;
-  HANDLE t = CreateThread(nullptr, 0, SuiteThread, nullptr, 0, nullptr);
+  perfmon::GovForBench();  // stage 0: the benchmark measures the features as configured
+  HANDLE t = CreateThread(nullptr, 0, qvexit::Thread<SuiteThread>, nullptr, 0, nullptr);
   if (t)
     CloseHandle(t);
   else
@@ -3413,6 +3629,7 @@ DWORD WINAPI WorkerThread(void*) {
   QueryPerformanceFrequency(&f);
   g_qpcToUs = 1e6 / static_cast<double>(f.QuadPart);
   LoadConfig(true);
+  perfmon::Start();  // R30 L3: the env line (DCS, CPU, OpenXR runtime and layers, streamers)
   g_dumpsLeft = g_cfg.dumpViews;
   {
     LARGE_INTEGER a, b;
@@ -3439,9 +3656,9 @@ DWORD WINAPI WorkerThread(void*) {
   ULONGLONG lastStats = GetTickCount64();
   ULONGLONG lastCfg = lastStats;
   g_statusSink.Publish(ComputeStatus());  // hooks installed: running
-  while (!g_stop.load()) {
+  while (!g_stop.load() && !qvexit::Exiting()) {
     Sleep(50);
-    bool chord = KeyDown(VK_CONTROL) && KeyDown(VK_MENU);
+    bool chord = KeyDown(VK_CONTROL) && KeyDown(VK_MENU) && !KeyDown(VK_SHIFT);  // exactly Ctrl+Alt
     const bool dev = g_cfg.developerKeys;
     bool k9 = dev && chord && KeyDown(VK_F9);
     bool k10 = dev && chord && KeyDown(VK_F10);
@@ -3458,6 +3675,23 @@ DWORD WINAPI WorkerThread(void*) {
       }
     }
     fT = kT;
+    bool kC = g_cfg.cockpitTrueIpd == 1 && g_cfg.cockpitTrueIpdToggleVk > 0 &&
+              KeyDown(g_cfg.cockpitTrueIpdToggleVk) && ModifiersMatch(g_cfg.cockpitTrueIpdToggleMods);
+    static bool fC = false;
+    static ULONGLONG lastC = 0;
+    if (kC && !fC && GetTickCount64() - lastC >= 300) {
+      lastC = GetTickCount64();
+      bool off = !fixdepth::ckipd::g_userOff.load();
+      fixdepth::ckipd::g_userOff = off;
+      Log("hotkey: cockpit true IPD %s", off ? "OFF (cockpit at the boosted eye)" : "ON");
+      if (off) {
+        Chime(500, 120);
+      } else {
+        Chime(1200, 90);
+        Chime(1200, 90);
+      }
+    }
+    fC = kC;
     static bool f8 = false;
     if (k8 && !f8) {
       bool on = !g_shadowDebugInvert.load();
@@ -3488,7 +3722,7 @@ DWORD WINAPI WorkerThread(void*) {
     fDn = kDn;
     bool k12 = dev && chord && KeyDown(VK_F12);
     if (k12 && !f12 && !prof::g_running.load()) {
-      HANDLE t = CreateThread(nullptr, 0, ProfileThread, nullptr, 0, nullptr);
+      HANDLE t = CreateThread(nullptr, 0, qvexit::Thread<ProfileThread>, nullptr, 0, nullptr);
       if (t) CloseHandle(t);
     }
     f12 = k12;
@@ -3517,6 +3751,7 @@ DWORD WINAPI WorkerThread(void*) {
     f10 = k10;
 
     ULONGLONG now = GetTickCount64();
+    perfmon::Tick();  // once per second: samples, governor; perf/features/vram/env lines on their own cadence
     if (now - lastCfg >= 1000) {
       lastCfg = now;
       LoadConfig(false);
@@ -3542,6 +3777,17 @@ DWORD WINAPI WorkerThread(void*) {
         ApplyGBufferRecorder();
       if (g_cfg.passFlush && !g_engineOff.load() && !pflush::Ready() && !g_benchRunningFlag.load()) ApplyPassFlush();
       if (!g_benchRunningFlag.load()) plod::Apply(g_engineOff.load() ? 0 : g_cfg.peripheralLodScale);
+      // Fixation depth (Depth boost): not an optimization, so neither the kill
+      // switch nor a benchmark turns it off.
+      scenecut::Tick(g_cfg.sceneCutReset);
+      // Cockpit at the true eye distance (R31): configured before fixdepth::Tick, which installs it.
+      fixdepth::ckipd::Configure(g_cfg.cockpitTrueIpd, g_cfg.cockpitTrueIpdLighting, g_cfg.cockpitTrueIpdForward,
+                                 g_cfg.cockpitTrueIpdLog, g_cfg.cockpitTrueIpdTestShiftMm,
+                                 g_cfg.d3dMeter || g_cfg.suiteGpuPassTiming || g_cfg.suiteGpuDedup > 0);
+      fixdepth::Tick(g_cfg.fixationDepth, g_cfg.depthGrid, g_cfg.fixationDepthVerify, g_cfg.fixationTestGaze.c_str(),
+                     g_cfg.fixationDepthDump, g_devDir.empty() ? g_dir : g_devDir, g_cfg.farDepthExport,
+                     g_cfg.farDepthSlots, g_cfg.farDepthLogProj, g_cfg.farDepthPreOverlay, g_cfg.farDepthOverlayTrace,
+                     g_cfg.farDepthPostOverlay, g_cfg.farDepthCoverageMode);
       // Split filter: waits for dx11backend and the first draw; detaches after a verify mismatch.
       if (!g_benchRunningFlag.load() &&
           ((g_cfg.splitFilter && !g_engineOff.load() && sfilt::g_state.load() >= 0 && !sfilt::Live()) ||
@@ -3609,7 +3855,7 @@ DWORD WINAPI WorkerThread(void*) {
         now - motionStart >= (g_cfg.motionTaxi ? 8000u : 69000u) &&
         !prof::g_running.load()) {
       motionProfiled = true;
-      HANDLE t = CreateThread(nullptr, 0, ProfileThread, nullptr, 0, nullptr);
+      HANDLE t = CreateThread(nullptr, 0, qvexit::Thread<ProfileThread>, nullptr, 0, nullptr);
       if (t) CloseHandle(t);
     }
     if (!motionEnd) motionStart = 0;
@@ -3640,7 +3886,7 @@ DWORD WINAPI WorkerThread(void*) {
           DeleteFileW(pf.c_str());
           if (!g_benchRunningFlag.load()) {
             Log("profile: started by run_profile.flag");
-            if (HANDLE t = CreateThread(nullptr, 0, ProfileThread, nullptr, 0, nullptr)) CloseHandle(t);
+            if (HANDLE t = CreateThread(nullptr, 0, qvexit::Thread<ProfileThread>, nullptr, 0, nullptr)) CloseHandle(t);
           }
         }
       }
@@ -3668,13 +3914,20 @@ DWORD WINAPI WorkerThread(void*) {
       lastCensus = now;
       uint64_t fr = g_quadFrame.load();
       CensusDump(fr - censusFrames0);
-      // Shadow recorder outside suites: its counters every 10 s while on.
+      // Recorders outside suites: every 10 s while on, one summary line each
+      // ([Log] RecorderDetail=1: the full blocks, about 55 lines).
       if (shrec::g_on.load() && shrec::Ready() && !g_benchRunningFlag.load()) {
-        shrec::LogCounters("10 s", static_cast<double>(fr - censusFrames0));
+        if (g_cfg.recorderDetail)
+          shrec::LogCounters("10 s", static_cast<double>(fr - censusFrames0));
+        else
+          shrec::LogSummary("10 s", static_cast<double>(fr - censusFrames0));
         shrec::ResetCounters();
       }
       if (gbrec::g_on.load() && gbrec::Ready() && !g_benchRunningFlag.load()) {
-        gbrec::LogCounters("10 s", static_cast<double>(fr - censusFrames0));
+        if (g_cfg.recorderDetail)
+          gbrec::LogCounters("10 s", static_cast<double>(fr - censusFrames0));
+        else
+          gbrec::LogSummary("10 s", static_cast<double>(fr - censusFrames0));
         gbrec::ResetCounters();
       }
       censusFrames0 = fr;
@@ -3698,11 +3951,11 @@ DWORD WINAPI WorkerThread(void*) {
       uint64_t shNoLight = g_shadowStats.skipNoLight.exchange(0);
       uint64_t shNoRecv = g_shadowStats.skipReceiver.exchange(0);
       if (calls == 0) continue;
-      Log("stats: %s%s boost=%s slabs=%s texdedupe=%s timer=%s refresh/s=%.0f keep=%.2f saccades/s=%.1f calls/s=%.1f quad/s=%.1f maxViews=%llu "
+      Log("stats: %s%s boost=%s cull=%s engine=%s slabs=%s texdedupe=%s timer=%s refresh/s=%.0f keep=%.2f saccades/s=%.1f calls/s=%.1f quad/s=%.1f maxViews=%llu "
           "patched/quad=%.2f collect_ms/quad=%.3f collect_ms/s(all)=%.1f periph_rend/quad=%.0f "
           "focus_rend/quad=%.0f shadow=%s%s shadow_rend/quad=%.0f planes/frame=%.2f skips(light/receiver)=%llu/%llu",
-          g_enabled.load() ? "ON" : "OFF", g_faulted.load() ? " FAULTED" : "",
-          g_engineOff.load() ? "off" : "on", g_allocSlabsOn.load() ? "on" : "off", g_texDedupeOn.load() ? "on" : "off", timercache::g_on.load() ? "cache" : "real", tRefresh / secs, EffectiveKeep(),
+          g_enabled.load() ? "ON" : "OFF", g_faulted.load() ? " FAULTED" : "", g_engineOff.load() ? "off" : "on",
+          g_enabled.load() ? "on" : "off", g_engineOff.load() ? "off" : "on", g_allocSlabsOn.load() ? "on" : "off", g_texDedupeOn.load() ? "on" : "off", timercache::g_on.load() ? "cache" : "real", tRefresh / secs, EffectiveKeep(),
           sac / secs, calls / secs,
           q / secs, static_cast<unsigned long long>(mv), q ? double(pv) / q : 0.0,
           q ? usq / 1000.0 / q : 0.0, usa / 1000.0 / secs, q ? double(pr) / q : 0.0,
@@ -3918,6 +4171,45 @@ bool StopWorkerThreads(DWORD timeoutMs) {
   }
   return idle;
 }
+
+// A mission ends or another one starts loading (the Lua hook's
+// onSimulationStop / onMissionLoadBegin, through the loader): DCS is about to
+// free the mission's objects (renderables, items, meshes), possibly without a
+// frame-heap reset in between (no frame renders while it unloads). A new
+// generation makes every recorder job in flight stale: its workers stop
+// before their next read phase, and a fault that still slips in is contained
+// per job (RecycledFilter) instead of latching the recorder off for the
+// session (field report 0.5.5: "gbuffer recorder: disabled for this session
+// (exception 0xc0000005 ...)" after a mission restart).
+void OnMissionEvent(uint32_t event) {
+  g_sceneChangeQpc.store(defrec::Qpc(), std::memory_order_release);
+  g_frameHeapGen.fetch_add(1, std::memory_order_acq_rel);
+  Log("payload: %s; recorder jobs in flight are dropped",
+      event == 2 ? "mission load begins" : event == 3 ? "local player changed slot" : "simulation stopped");
+}
+
+// DCS is shutting down (the Lua hook's exit finalizer, through the loader's
+// DcsQvCull_Shutdown, before DCS frees its objects and closes the Lua state
+// that loaded us). Every payload thread that polls DCS on its own stops
+// touching DCS: the worker leaves its loop (perf/governor/scene-cut ticks,
+// prefetch slot checks, fixation-depth ticks, the 1-s Apply retries, status
+// publishing), suites and profiles abort, the D3D meter's refresher stops,
+// recorder jobs in flight are dropped. Hooks stay installed and the payload
+// stays mapped: DCS may still call them while it tears down, and they only
+// pass through or read our own memory. Not a Stop: nothing is released and
+// no slot is restored (D3D and DCS objects may already be gone). The timer
+// cache keeps refreshing (DCS's shutdown waits may read that clock).
+// Idempotent; called on the Lua thread (never under the loader lock).
+bool QuiesceForExit(DWORD timeoutMs) {
+  if (!qvexit::Begin()) return g_workerThread == nullptr;
+  Log("payload: DCS is shutting down; stopping the payload's threads (hooks stay in place)");
+  g_frameHeapGen.fetch_add(1, std::memory_order_acq_rel);
+  d3ds::g_stopRefresher = true;
+  const bool idle = StopWorkerThreads(timeoutMs);
+  g_statusSink.Detach();  // stores 0: "not running" for the app's panel
+  Log("payload: quiesced for exit (%s)", idle ? "worker stopped" : "worker still busy");
+  return idle;
+}
 }  // namespace
 
 #ifndef DCSQV_NO_ENTRY
@@ -3927,7 +4219,7 @@ extern "C" __declspec(dllexport) int DcsQvPayload_Start(const DcsQvLoaderApi* ap
   g_api = api;
   g_dir = api->dir;
   Log("payload: started (build %s %s)", __DATE__, __TIME__);
-  HANDLE t = CreateThread(nullptr, 0, WorkerThread, nullptr, 0, nullptr);
+  HANDLE t = CreateThread(nullptr, 0, qvexit::Thread<WorkerThread>, nullptr, 0, nullptr);
   if (!t) return 2;
   g_workerThread = t;  // joined by DcsQvPayload_Stop
   return 0;
@@ -3945,12 +4237,19 @@ extern "C" __declspec(dllexport) void DcsQvPayload_SetStatusWord(std::atomic<uin
   g_statusSink.Attach(word);
 }
 
+// Optional exports for the loader's Lua callbacks (loader_api.h).
+extern "C" __declspec(dllexport) int DcsQvPayload_Quiesce(uint32_t timeoutMs) {
+  return QuiesceForExit(timeoutMs) ? 1 : 0;
+}
+extern "C" __declspec(dllexport) void DcsQvPayload_MissionEvent(uint32_t event) { OnMissionEvent(event); }
+
 extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   Log("payload: stopping");
   g_statusSink.Detach();  // stores 0; this payload never writes the word again
   // Worker and suite out first: neither may install a hook after the
   // Shutdown calls below (bounded wait, see StopWorkerThreads).
-  StopWorkerThreads(15000);
+  const bool workerIdle = StopWorkerThreads(15000);
+  if (workerIdle) perfmon::Shutdown();  // the render-thread handle and our adapter reference (worker-owned)
   // Prefetch fix: every slot still ours back to the real kernel function,
   // in-flight calls drained (the module is pinned: copies stay callable).
   pffix::Uninstall(2000);
@@ -3962,6 +4261,7 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   srvtrim::Shutdown();  // the same two call sites back to stock if the trim was on
   uovl::Shutdown();     // NVAPI overlap probe off (its region ends at the pass end)
   plod::Shutdown();     // stock LOD tables back, view callback and vt[24] hook out (no-op unless used)
+  fixdepth::Shutdown(); // depth callback out and drained, worker joined, D3D objects and file mappings released
   gpt::Shutdown();      // GPU pass timing's context-table hooks and xrEndFrame hook, if a phase was running
   pflush::Shutdown();   // pass flush callback and xrBeginFrame hook out, our context reference released
   vramc::Shutdown();    // the VRAM count's device create hooks, if a phase was running

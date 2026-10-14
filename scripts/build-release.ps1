@@ -1,3 +1,4 @@
+#Requires -Version 7
 # -Sign: a release for publishing; it fails when the release signing key is missing (without it, a developer build
 # warns and leaves the setup and ZIP unsigned).
 param([switch]$NoRestore, [switch]$Sign)
@@ -13,7 +14,12 @@ $releaseRoot = Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-w
 # The user's real DCS settings are hashed before the pipeline; verify-web-release.py checks that nothing in
 # building, testing or verifying the release changed them. A profile the user applied earlier is fine.
 $actualDcs = @{}; foreach ($name in 'options.lua','autoexec.cfg') { $file = Join-Path $env:USERPROFILE "Saved Games/DCS/Config/$name"; if (Test-Path -LiteralPath $file) { $actualDcs[$file] = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash } }
+New-Item -ItemType Directory -Path (Join-Path $workspaceRoot 'artifacts/release') -Force | Out-Null
 $actualDcs | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $workspaceRoot 'artifacts/fps-actual-before.json') -Encoding utf8
+# An earlier build's signatures go first: a build that stops half way never leaves one next to new files.
+foreach ($signed in "artifacts/release/DcsControl-$version-win-x64.zip.sig", "artifacts/release/DcsControl-$version-Setup.exe.sig") {
+    Remove-Item -LiteralPath (Join-Path $workspaceRoot $signed) -Force -ErrorAction SilentlyContinue
+}
 if (Test-Path -LiteralPath $releaseRoot) {
     $resolvedRelease = (Resolve-Path -LiteralPath $releaseRoot).Path
     $allowedRelease = [IO.Path]::GetFullPath((Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-win-x64"))
@@ -33,10 +39,16 @@ foreach ($project in @('src/DcsVr.App','src/DcsVr.Cli')) {
     if ($LASTEXITCODE -ne 0) { throw 'Publish failed.' }
 }
 foreach ($dir in @('packages','components/quadviews','components/cheeky-focus/CheekyFoveatedDLSS','licenses','scripts','profiles','docs')) { New-Item -ItemType Directory -Path (Join-Path $payloadRoot $dir) -Force | Out-Null }
+# Quad Views, OFXR and Cheeky are copied as built: each must have been built from the sources and patches here now
+# (the source package carries those, so they must match what ships).
+. (Join-Path $PSScriptRoot 'build-stamp.ps1')
+foreach ($component in @('quadviews','ofxr','cheeky')) { Assert-BuildStampCurrent $component }
 foreach ($filename in @('dxgi.dll','CheekyFoveatedDLSS/CheekyFoveatedDLSSHost.dll','CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll')) {
     $target = Join-Path $payloadRoot "components/cheeky-focus/$filename"
     $source = if ($filename -eq 'dxgi.dll') { Join-Path $workspaceRoot ".cache/packages/cheeky/$filename" } else { Join-Path $workspaceRoot "artifacts/native/cheeky/bin/Release/$filename" }
     Copy-Item -LiteralPath $source -Destination $target -Force
+    # The loader is the pinned Cheeky archive's own dxgi.dll (checked below against the archive's digest).
+    if ($filename -eq 'dxgi.dll' -and (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne 'D9401877C6609106BD0D121EED5C29ECC5261E2C99378B1321EE16AD19AD3B0C') { throw 'Cheeky dxgi.dll is not the pinned one.' }
     (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($target + '.sha256') -Encoding ascii
 }
 # Cheeky stereo routes ship the three upstream binaries they use, taken from the pinned archive. The archive itself
@@ -104,11 +116,13 @@ if (Test-Path -LiteralPath $demoRoot) { Remove-Item -LiteralPath $demoRoot -Recu
 New-Item -ItemType Directory -Path $demoRoot -Force | Out-Null
 $renderStart.Environment['DCSVR_SMOKE_DEMO_ROOT'] = $demoRoot
 $renderStart.ArgumentList.Add('--web-smoke'); $renderStart.ArgumentList.Add((Join-Path $renderRoot 'interface'))
-$renderProcess = [Diagnostics.Process]::Start($renderStart)
-if (-not $renderProcess.WaitForExit(120000)) { $renderProcess.Kill($true); throw 'Release interface render timed out.' }
-if ($renderProcess.ExitCode -ne 0) { throw 'Release interface render failed.' }
-$renderProcess.Dispose()
-Remove-Item -LiteralPath $demoRoot -Recurse -Force -ErrorAction SilentlyContinue
+# The demo folder at the drive root goes in every case; a failed render keeps its folder (interface-checks.json says why).
+try {
+    $renderProcess = [Diagnostics.Process]::Start($renderStart)
+    if (-not $renderProcess.WaitForExit(120000)) { $renderProcess.Kill($true); throw "Release interface render timed out (see $renderRoot)." }
+    if ($renderProcess.ExitCode -ne 0) { throw "Release interface render failed (see $renderRoot)." }
+    $renderProcess.Dispose()
+} finally { Remove-Item -LiteralPath $demoRoot -Recurse -Force -ErrorAction SilentlyContinue }
 Get-ChildItem -LiteralPath $renderRoot -File | Where-Object { $_.Name -like 'interface-*.png' -or $_.Name -eq 'interface-checks.json' -or $_.Name -eq 'interface-renders.json' } | Copy-Item -Destination (Join-Path $payloadRoot 'docs') -Force
 Remove-Item -LiteralPath $renderRoot -Recurse -Force -ErrorAction SilentlyContinue # copied into the payload; nothing else reads it
 # The render list names each image by its file name only: the build folder (and the build machine's user name) never ships.

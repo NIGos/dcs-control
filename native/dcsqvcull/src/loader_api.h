@@ -34,3 +34,11 @@ using DcsQvPayloadStopFn = void (*)();
 // Optional export, called before Start: the loader-owned status word the
 // payload publishes to (see status_word.h); detached again by Stop.
 using DcsQvPayloadSetStatusWordFn = void (*)(std::atomic<uint64_t>* word);
+// Optional export: DCS is shutting down (the Lua hook's exit finalizer). The
+// payload's threads stop touching DCS; hooks stay. Waits up to timeoutMs;
+// nonzero when its worker stopped. Idempotent.
+using DcsQvPayloadQuiesceFn = int (*)(uint32_t timeoutMs);
+// Optional export: 1 = simulation stopped, 2 = mission load begins, 3 = the
+// local player changed slot (DCS frees the previous scene's objects next;
+// recorder jobs in flight are dropped).
+using DcsQvPayloadMissionEventFn = void (*)(uint32_t event);

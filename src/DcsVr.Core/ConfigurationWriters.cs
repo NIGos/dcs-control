@@ -54,9 +54,9 @@ public static class ConfigurationWriters
 
         """;
 
-    /// <summary>DcsQvCull.ini for the DCS engine optimizations. Every key the module reads is written: a missing key
+    /// <summary>DcsQvCull.ini for the DCS engine optimizations. Every key whose built-in default is not wanted is written: a missing key
     /// falls back to the module's built-in default, and several of those turn on experiments that measured no gain or a
-    /// loss (peripheral exclusion, the D3D11 state meter, extra suite phases), which stay off here. The test suite
+    /// loss (peripheral exclusion, the D3D11 state meter, extra suite phases), which stay off here. Keys left out (developer probes) default to off. The test suite
     /// (run_suite.flag or Ctrl+Alt+F11) compares the two optimizations off and on.</summary>
     public static string DcsQvCull(VrProfile p) => $"""
         ; Written by DCS Control for the applied profile; edits here are replaced the next time it is applied.
@@ -159,6 +159,49 @@ public static class ConfigurationWriters
         [Log]
         StatsIntervalSec=2
         DumpViews=3
+        ; A perf line every 10 s (fps, frame times, CPU- or GPU-bound), VRAM every 60 s; RecorderDetail=1 logs the
+        ; recorders' full 10-s blocks instead of one summary line.
+        RecorderDetail=0
+        PerfIntervalSec=10
+        VramIntervalSec=60
+
+        ; When the GPU is the limit, the recorders' extra GPU work is stepped down (and back up when the CPU is the
+        ; limit again); each step is kept only when it raises fps. The image never changes.
+        [Governor]
+        Enabled=1
+        GpuBusyPct=92
+        RenderIdlePct=85
+        CpuBusyPct=92
+        GpuFreePct=80
+        GpuFullPct=98
+        WindowSec=8
+        NeedSec=6
+        MinDwellSec=10
+        MinGainPct=2.0
+        TrialSec=20
+        RecheckSec=10
+        RevertBackoffSec=300
+
+        [Perception]
+        ; Depth boost's scene depth: DCS's depth buffer sampled around the gaze and published for the pupil shift layer
+        ; (docs/FIXATION_DEPTH.md). On only while the profile uses Depth boost.
+        FixationDepth={(p.UsesFixationDepth ? 1 : 0)}
+        ; Depth boost's predictive transition: a coarse 32 x 32 depth grid of the whole view, where a saccade's landing is
+        ; looked up. On with the scene depth, so the in-flight key can switch to Predictive.
+        DepthGrid={(p.UsesDepthGrid ? 1 : 0)}
+        ; A camera cut (F1/F2/F10, respawn, mission load) resets the bundled Quad Views' periphery history.
+        SceneCutReset=1
+        FixationDepthVerify=0
+        FixationDepthDump=0
+        ; Far depth (docs/FAR_DEPTH.md): the engine's depth for the bundled Quad Views, on with the profile's Far depth.
+        FarDepthExport={(p.UsesFarDepth ? 1 : 0)}
+        FarDepthExportSlots=2
+        ; The image before DCS draws its HUD and symbology, so the bundled Quad Views keeps them out of Far depth.
+        FarDepthPreOverlay=1
+        ; The HUD found as the change between copies before and after it in the HDR image (aircraft such as the F-16
+        ; draw it after DLSS, before the tonemap); the module falls back by itself when that image is not found.
+        FarDepthCoverageMode=hdr
+        FarDepthLogProj=0
 
         [Bench]
         Blocks=24
@@ -167,12 +210,14 @@ public static class ConfigurationWriters
         AutoStartSec=0
         ThreadsB=12
 
+        ; Ctrl+Alt+F11 in the cockpit: about 3 minutes of A/B, all optimizations OFF (stock DCS) against ON, written to
+        ; report_*.txt and bench_*.csv next to this file. Nothing runs until the key is pressed.
         [Suite]
         SelfTest=0
         Profile=0
         BenchCull=0
-        BenchTimer=1
-        BenchPartition=1
+        BenchTimer=0
+        BenchPartition=0
         BenchIsolation=0
         BenchThreads=0
         BenchTimerRes=0
@@ -244,10 +289,10 @@ public static class ConfigurationWriters
         BenchTexDedupe=0
         BenchCbSkip=0
         BenchTriPlain=0
-        BenchEngine=0
+        BenchEngine=1
         BenchMicro=0
         BenchPrefetch=0
-        Quick=0
+        Quick=1
         MotionSeconds=60
 
         [Dev]
@@ -266,30 +311,34 @@ public static class ConfigurationWriters
         deep_pipeline={(p.FrameGenDeepPipeline ? 1 : 0)}
         triple_frame_gen={(p.FrameGenFactor == 3 ? 1 : 0)}
         adaptive_frame_gen={(p.FrameGenFactor == VrProfile.FrameGenAuto ? 1 : 0)}
-        d3d11_bridge=1
+        d3d11_bridge={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}
         backend={(p.FrameGen == FrameGeneration.FidelityFx ? "fidelityfx" : "nvidia")}
         nvidia_preset={p.FlowPreset.ToString().ToLowerInvariant()}
         nvidia_input_scale={p.NvidiaFlowScale}
         nvidia_bidirectional={(p.BidirectionalFlow ? 1 : 0)}
         diag_vram={(p.DiagnosticVram ? 1 : 0)}
+        ; Panel only (no frame generation): DCS's instance gets no extension it did not ask for.
+        visibility_mask={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}
         smooth_cursor={(p.SmoothCursor ? 1 : 0)}
         cursor_templates={cursorTemplates ?? ""}
 
         [diagnostics]
-        logging_enabled={(p.DiagnosticRecorder ? 1 : 0)}
+        logging_enabled={(p.DiagnosticRecorder && p.FrameGen != FrameGeneration.Off ? 1 : 0)}
         max_file_mb=256
         flush_each_event=0
 
         [overlay]
-        position={(p.ShowOverlay ? "upper_right" : "off")}
+        position={(p.ShowOverlay && p.FrameGen != FrameGeneration.Off ? "upper_right" : "off")}
 
         """;
 
-    /// <summary>PupilShift.ini, next to the pupil shift layer, which re-reads it about once a second while DCS runs.</summary>
+    /// <summary>PupilShift.ini, next to the pupil shift layer, which re-reads it about once a second while DCS runs. The
+    /// layer carries Pupil shift ([PupilShift] Enabled) and Depth boost ([DepthBoost] Enabled), each on its own.</summary>
     public static string PupilShift(VrProfile p, double? ipdMm = null) => $"""
-        ; DCS Control pupil shift layer. Changes apply live while DCS runs.
+        ; DCS Control pupil shift layer (Pupil shift and Depth boost). Changes apply live while DCS runs.
+        ; [PupilShift] Enabled is the pupil correction; with 0 the layer still runs for Depth boost.
         [PupilShift]
-        Enabled=1
+        Enabled={(p.UsesPupilShift ? 1 : 0)}
         ; In-flight switch, virtual-key:modifiers (1 Ctrl, 2 Alt, 4 Shift); 0:0 off.
         Toggle={NeuralHotkeys.Environment(p.PupilShiftToggleKey, NeuralHotkeys.PupilDefault)}
         ; Pupil to eye rotation centre, millimetres.
@@ -305,6 +354,40 @@ public static class ConfigurationWriters
         SimulateGaze=0
         SimulateGazeXDeg=0
         SimulateGazeYDeg=0
+
+        ; Depth boost: the eye distance above (Ipd, or the headset's) times a scale that rises while the eyes fixate far
+        ; and returns to 1 when they fixate nearer than NearM (the cockpit). docs/PERCEPTION.md, docs/FIXATION_DEPTH.md.
+        [DepthBoost]
+        Enabled={(p.UsesDepthBoost ? 1 : 0)}
+        ; In-flight switch, virtual-key:modifiers (1 Ctrl, 2 Alt, 4 Shift); 0:0 off.
+        Toggle={NeuralHotkeys.Environment(p.DepthBoostToggleKey, NeuralHotkeys.DepthBoostDefault)}
+        ; realistic: scale 1 up to FarStartM, MaxScale from FarFullM (log ramp between); enhanced: the same from 3 m to 50 m.
+        Mode={(p.DepthBoostMode == DepthBoostMode.Enhanced ? "enhanced" : "realistic")}
+        MaxScale={Number(p.DepthBoostActiveMax)}
+        FarStartM={Number(p.DepthBoostMode == DepthBoostMode.Enhanced ? VrProfile.DepthBoostEnhancedStartM : p.DepthBoostFarStartM)}
+        FarFullM={Number(p.DepthBoostMode == DepthBoostMode.Enhanced ? VrProfile.DepthBoostEnhancedFullM : p.DepthBoostFarFullM)}
+        NearM={Number(p.DepthBoostNearM)}
+        ; Rates in millimetres of eye distance per second: towards MaxScale (below the disparity-change threshold for
+        ; the cockpit at 0.5 m), back towards 1, and the extra change allowed during a saccade.
+        UpMmPerS=5
+        DownMmPerS=40
+        SaccadeStepMm=4
+        ; MaxScale is capped so the return to 1 takes at most this long.
+        RecoverMs=800
+        ; Without a fresh gaze (a blink) the scale holds this long, then returns to 1.
+        HoldMs=500
+        ; gradual: the rates above, confirmed after the eyes land. predictive: during a saccade the landing is predicted
+        ; from Pimax PVR's gaze (sampled at PredictPollHz) and the engine's depth grid, and one step of at most
+        ; PredictMaxStepMm (and PredictDisparityDeg of disparity at the landing) is made in flight; the rest follows the
+        ; rates. Saccades predicted shorter than PredictMinDeg, or with less than PredictLeadFrames frames left, use gradual.
+        Transition={(p.DepthBoostTransition == DepthBoostTransition.Predictive ? "predictive" : "gradual")}
+        ; In-flight switch between the two, virtual-key:modifiers; one beep gradual, two beeps predictive; 0:0 off.
+        TransitionToggle={NeuralHotkeys.Environment(p.DepthBoostTransitionKey, NeuralHotkeys.DepthTransitionDefault)}
+        PredictMinDeg=8
+        PredictMaxStepMm=12
+        PredictDisparityDeg=0.4
+        PredictLeadFrames=0.5
+        PredictPollHz=500
 
         """;
 
@@ -340,6 +423,14 @@ public static class ConfigurationWriters
         dcsvr_saccade_max_extend=0.35
         dcsvr_saccade_hold_ms=40
         dcsvr_gaze_deadzone={(p.QuadGazeStabilize && p.Gaze == GazeMode.EyeTracked ? "0.5" : "0")}
+        dcsvr_temporal={(p.UsesPeripheryStability ? 1 : 0)}
+        dcsvr_temporal_tau_ms={Number(Math.Round(VrProfile.PeripheryStabilityMaxTauMs * Math.Clamp(p.PeripheryStabilityStrength, 0, 1), 1))}
+        dcsvr_temporal_ramp_deg=8
+        dcsvr_temporal_clip=1
+        dcsvr_temporal_debug=0
+        dcsvr_far_depth={(p.UsesFarDepth ? 1 : 0)}
+        dcsvr_far_depth_preset={p.FarDepthPreset.ToString().ToLowerInvariant()}
+        dcsvr_far_depth_toggle={(p.UsesFarDepth ? NeuralHotkeys.Environment(p.FarDepthToggleKey, NeuralHotkeys.FarDepthDefault) : "0:0")}
 
         """;
 

@@ -242,6 +242,13 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "gpu_dedup_test.h"
 #include "periph_lod_test.h"
 #include "robustness_test.h"
+#include "long_session_test.h"
+#include "gov_test.h"
+#include "fixation_depth_test.h"
+#include "scene_cut_test.h"
+#include "far_depth_test.h"  // Far depth engine export to Quad Views (layout, fake layer, WARP copy and push)
+#include "cockpit_ipd_test.h"  // R31 option 3: cockpit at the true eye distance (patch, matcher, WARP pipeline, split)
+#include "exit_guard_test.h"  // field report 0.5.5: exit and mission-restart crashes
 
 int main() {
   g_log = stdout;
@@ -284,6 +291,27 @@ int main() {
   // QV_GSPLIT_ONLY=1: only the gpu_split.h tests (vertex cache model, reorder, merge).
   if (getenv("QV_GSPLIT_ONLY")) {
     gstest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_COCKPITIPD_ONLY=1: only the cockpit-at-true-IPD tests (cockpit_ipd.h, R31 option 3).
+  if (getenv("QV_COCKPITIPD_ONLY")) {
+    cktest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_FIXDEPTH_ONLY=1: only the fixation depth tests (Depth boost).
+  if (getenv("QV_FIXDEPTH_ONLY")) {
+    fdtest::Run();
+    sctest::Run();
+    fartest::Run();
+    cktest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_GOV_ONLY=1: only the R30 tests (perf sampler, detector, governor, status bits, log lines).
+  if (getenv("QV_GOV_ONLY")) {
+    govtest::Run();
     printf("%d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;
   }
@@ -336,9 +364,21 @@ int main() {
     printf("%d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;
   }
+  // QV_EXIT_ONLY=1: only the field-report 0.5.5 tests (DCS exit race, mission restart).
+  if (getenv("QV_EXIT_ONLY")) {
+    extest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
   // QV_ROBUST_ONLY=1: only the robustness-round regression tests.
   if (getenv("QV_ROBUST_ONLY")) {
     rbtest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_LONGSESS_ONLY=1: only the long-session round's tests (reused meshes, table bounds, weights, pages, GPU share).
+  if (getenv("QV_LONGSESS_ONLY")) {
+    lstest::Run();
     printf("%d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;
   }
@@ -1018,6 +1058,35 @@ int main() {
         fprintf(f, "[Timing]\nShaderTimeCache=1\nCacheUs=1000\n[Scene]\nPartitionBoost=1\n[Hotkeys]\nToggle=122:6\n%s", extra);
         fclose(f);
       };
+      // [Perception] FarDepthCoverageMode: absent -> hdr (1), "overlay" -> 0,
+      // anything else -> hdr, logged once as invalid.
+      {
+        bool inv = true;
+        Check(ParseFarCoverageMode(L"", &inv) == 1 && !inv && ParseFarCoverageMode(L"hdr", &inv) == 1 && !inv &&
+                  ParseFarCoverageMode(L"HDR", &inv) == 1 && !inv && ParseFarCoverageMode(L"overlay", &inv) == 0 &&
+                  !inv && ParseFarCoverageMode(L"Overlay", &inv) == 0 && !inv &&
+                  ParseFarCoverageMode(L"ldr", &inv) == 1 && inv,
+              "FarDepthCoverageMode parse: empty/hdr -> hdr, overlay (any case) -> overlay, other -> hdr + invalid");
+        writeIni("");
+        LoadConfig(true);
+        Check(g_cfg.farDepthCoverageMode == 1, "ini: FarDepthCoverageMode absent -> hdr (the default)");
+        writeIni("[Perception]\nFarDepthCoverageMode=overlay\n");
+        LoadConfig(true);
+        Check(g_cfg.farDepthCoverageMode == 0, "ini: FarDepthCoverageMode=overlay -> overlay");
+        writeIni("[Perception]\nFarDepthCoverageMode=hdr\n");
+        LoadConfig(true);
+        Check(g_cfg.farDepthCoverageMode == 1, "ini: FarDepthCoverageMode=hdr -> hdr");
+        const int il0 = g_farCovInvalidLogs;
+        const bool was = g_farCovInvalidLogged;
+        g_farCovInvalidLogged = false;
+        writeIni("[Perception]\nFarDepthCoverageMode=bogus\n");
+        LoadConfig(true);
+        const bool firstRead = g_cfg.farDepthCoverageMode == 1 && g_farCovInvalidLogs == il0 + 1;
+        LoadConfig(true);
+        Check(firstRead && g_cfg.farDepthCoverageMode == 1 && g_farCovInvalidLogs == il0 + 1,
+              "ini: FarDepthCoverageMode=bogus -> hdr, logged once as invalid (not again on the next read)");
+        g_farCovInvalidLogged = was || g_farCovInvalidLogged;
+      }
       writeIni("");
       LoadConfig(true);
       Check(g_cfg.toggleVk == 122 && g_cfg.toggleMods == 6 && !g_cfg.developerKeys, "ini hotkey read, developer keys off");
@@ -1533,6 +1602,19 @@ int main() {
   plodtest::Run();
   // Robustness round (2026-10-11): payload stop ordering, UTF-8 log lines, recorder start race, ...
   rbtest::Run();
+  lstest::Run();
+  // R30: frame sampler, CPU/GPU-bound detector, governor hysteresis and stages, pause/resume, status bits, log lines.
+  govtest::Run();
+  // Field report 0.5.5: DCS exit race (loader freed under the payload), mission restart during a recorder job.
+  extest::Run();
+  // Depth boost: fixation depth (layout, seq guard, projection, window, summary, WARP pipeline, state restore).
+  fdtest::Run();
+  // Scene-cut reset for the bundled Quad Views (detector sequences, export seam).
+  sctest::Run();
+  // Far depth engine export (contract layout, CPU gProj capture, WARP copy/push, gating, ring, release, hot reload).
+  fartest::Run();
+  // Cockpit at the true eye distance (R31 option 3: patch math, matcher, upload filter, WARP pipeline, stencil split, off path).
+  cktest::Run();
 
   // Suite: configuration check + short profile, report file written.
   {

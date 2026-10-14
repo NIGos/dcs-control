@@ -97,6 +97,8 @@ public static partial class Diagnostics
     // ---- Diagnostic package --------------------------------------------------------------------------------------
 
     private const long TextLimit = 8L * 1024 * 1024;
+    /// <summary>A long log keeps its start too (the engine optimizations log their setup there, then grow every 10 s).</summary>
+    private const long HeadLimit = 512L * 1024;
     private static readonly string[] TextExtensions = [".log", ".txt", ".json", ".ini", ".lua", ".cfg", ".csv", ".vrsettings", ".xml"];
 
     /// <summary>Writes the package to <paramref name="zipPath"/>: <paramref name="report"/> (the app's own report as
@@ -126,7 +128,7 @@ public static partial class Diagnostics
                 try
                 {
                     var length = new FileInfo(path).Length;
-                    Text(name, path, Tail(path, TextLimit), length > TextLimit);
+                    Text(name, path, HeadAndTail(path, HeadLimit, TextLimit), length > HeadLimit + TextLimit);
                 }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Text(name + ".unreadable.txt", path, e.Message); }
             }
@@ -244,6 +246,23 @@ public static partial class Diagnostics
     [GeneratedRegex(@"(?<key>\b(?:user_?id|account_?id)\b)(?<sep>[""']?\s*[:=]\s*[""']?)\w+", RegexOptions.IgnoreCase)] private static partial Regex AccountRegex();
     [GeneratedRegex(@"(?<key>\b(?:serial(?:[ _]?number)?|hmd_?sn|device_?sn|sn)\b)(?<sep>[""']?\s*[:=]\s*[""']?)[A-Z0-9][A-Z0-9-]{5,}", RegexOptions.IgnoreCase)] private static partial Regex SerialRegex();
 
+    /// <summary>A file another program may be writing: whole up to <paramref name="head"/> + <paramref name="tail"/> bytes,
+    /// otherwise its first <paramref name="head"/> and last <paramref name="tail"/> bytes with a line saying what was left out.</summary>
+    internal static string HeadAndTail(string path, long head, long tail)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        var length = stream.Length;
+        if (length <= head + tail) { using var whole = new StreamReader(stream, Encoding.UTF8, true); return whole.ReadToEnd(); }
+        var start = new byte[head];
+        stream.ReadExactly(start);
+        var cut = Array.LastIndexOf(start, (byte)'\n') is var newline and > 0 ? newline + 1 : start.Length;
+        stream.Seek(-tail, SeekOrigin.End);
+        using var reader = new StreamReader(stream, Encoding.UTF8, true);
+        var end = reader.ReadToEnd();
+        var resume = end.IndexOf('\n') is var first and >= 0 && first < end.Length - 1 ? end[(first + 1)..] : end;
+        return Encoding.UTF8.GetString(start, 0, cut) + string.Create(CultureInfo.InvariantCulture, $"\n[... {length - head - tail:N0} bytes left out by the diagnostic package ...]\n") + resume;
+    }
+
     /// <summary>The last <paramref name="limit"/> bytes of a file another program may be writing.</summary>
     internal static string Tail(string path, long limit)
     {
@@ -313,6 +332,8 @@ public static partial class Diagnostics
             }
         }
         catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or IOException) { builder.Append(e.Message).Append('\n'); }
+        if (NvidiaSettings.ThreadedOptimizationForDcs() is { } threaded) builder.Append("NVIDIA Threaded optimization for DCS: ").Append(threaded.Value).Append(" (").Append(threaded.Where).Append(")\n");
+        if (NvidiaSettings.MfaaForDcs() is { } mfaa) builder.Append("NVIDIA MFAA for DCS: ").Append(mfaa.On ? "On" : "Off").Append(" (").Append(mfaa.Where).Append(")\n");
         builder.Append(CultureInfo.InvariantCulture, $"Physical memory about {GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024 * 1024 * 1024.0):0} GB\n");
         return builder.ToString();
     }

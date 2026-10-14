@@ -4042,7 +4042,7 @@ bool Install() {
     std::lock_guard<std::mutex> lock(g_cacheMutex);
     cacheDir = g_cacheDir;
   }
-  for (int i = 0; i < kWorkers; ++i) g_workers[i] = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
+  for (int i = 0; i < kWorkers; ++i) g_workers[i] = CreateThread(nullptr, 0, qvexit::Thread<Worker>, nullptr, 0, nullptr);
   instcount::g_observer.store(&Observer);
   g_state = 1;
   Log("shadow inst: ready (compiler %s; DCS process had %s; sources %ls; %d compile workers)",

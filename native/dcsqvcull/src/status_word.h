@@ -11,6 +11,17 @@
 //   bits 24-31  production optimizations switched on in the ini (0-255),
 //               regardless of the kill switch; 0 from payloads older than
 //               this field
+//   R30 (0 from payloads older than these fields):
+//   bit 3       warming up: shader variants still compiling (shadow
+//               instancing, batching, the texture skip and the recorders
+//               are only partly active until it clears)
+//   bits 32-33  GPU-bound governor stage: 0 as configured, 1 shadow
+//               recorder helper lists on cascade 3 only, 2 no helper lists,
+//               3 both recorders paused (DCS draws them stock)
+//   bits 34-36  load verdict over the last 8 s: 0 none (no frames or no
+//               reading), 1 CPU-bound, 2 GPU-bound, 3 mixed, 4 capped
+//               (neither the render thread nor the GPU full)
+//   bit 37      governor enabled ([Governor] Enabled)
 //   0           not running / not ready (no payload, payload swap, after stop)
 //
 // Production optimizations counted: 18 (ComputeStatus in main.cpp; the 18th
@@ -26,6 +37,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -39,6 +51,10 @@ constexpr int kActiveShift = 8;
 constexpr int kLatchedShift = 16;
 constexpr int kConfiguredShift = 24;
 constexpr uint32_t kCountMax = 255;
+constexpr uint64_t kWarming = 1ull << 3;
+constexpr int kStageShift = 32;     // 2 bits
+constexpr int kVerdictShift = 34;   // 3 bits
+constexpr uint64_t kGovernorOn = 1ull << 37;
 
 // One production optimization: active = doing its work right now (a
 // recorder counts only when it drew passes from command lists since the last
@@ -74,34 +90,52 @@ inline uint64_t Compose(const Feature* f, size_t n, bool running, bool engineOff
   return Pack(running, running && !engineOff, active, latched, configured);
 }
 
+// The R30 fields on top of a composed word (nothing when not running).
+inline uint64_t WithExtras(uint64_t w, bool warming, uint32_t stage, uint32_t verdict, bool governorOn) {
+  if (!w) return 0;
+  if (stage > 3) stage = 3;
+  if (verdict > 7) verdict = 0;
+  return w | (warming ? kWarming : 0) | (static_cast<uint64_t>(stage) << kStageShift) |
+         (static_cast<uint64_t>(verdict) << kVerdictShift) | (governorOn ? kGovernorOn : 0);
+}
+
 inline bool Running(uint64_t w) { return (w & kRunning) != 0; }
 inline bool Optimizing(uint64_t w) { return (w & kOptimizing) != 0; }
 inline bool AnyLatched(uint64_t w) { return (w & kLatched) != 0; }
 inline uint32_t ActiveCount(uint64_t w) { return static_cast<uint32_t>(w >> kActiveShift) & 0xff; }
 inline uint32_t LatchedCount(uint64_t w) { return static_cast<uint32_t>(w >> kLatchedShift) & 0xff; }
 inline uint32_t ConfiguredCount(uint64_t w) { return static_cast<uint32_t>(w >> kConfiguredShift) & 0xff; }
+inline bool Warming(uint64_t w) { return (w & kWarming) != 0; }
+inline uint32_t GovernorStage(uint64_t w) { return static_cast<uint32_t>(w >> kStageShift) & 3; }
+inline uint32_t Verdict(uint64_t w) { return static_cast<uint32_t>(w >> kVerdictShift) & 7; }
+inline bool GovernorOn(uint64_t w) { return (w & kGovernorOn) != 0; }
 
 // Payload side: the word it may write to. Publish and Detach are serialized,
 // so once Detach returns no further write reaches the (loader-owned) word.
+// Detach waits at most 2 s for the lock: a publisher that faulted inside
+// Publish (its thread ended by qvexit::Run, the lock never released) must not
+// hang the exit quiesce or a payload stop. The pointer is cleared regardless
+// (that publisher no longer runs).
 class Sink {
  public:
   void Attach(std::atomic<uint64_t>* word) {
-    std::lock_guard<std::mutex> lock(m_);
-    out_ = word;
+    std::lock_guard<std::timed_mutex> lock(m_);
+    out_.store(word, std::memory_order_release);
   }
   void Publish(uint64_t w) {
-    std::lock_guard<std::mutex> lock(m_);
-    if (out_) out_->store(w, std::memory_order_release);
+    std::lock_guard<std::timed_mutex> lock(m_);
+    if (std::atomic<uint64_t>* o = out_.load(std::memory_order_acquire)) o->store(w, std::memory_order_release);
   }
   void Detach() {
-    std::lock_guard<std::mutex> lock(m_);
-    if (out_) out_->store(0, std::memory_order_release);
-    out_ = nullptr;
+    std::unique_lock<std::timed_mutex> lock(m_, std::defer_lock);
+    const bool locked = lock.try_lock_for(std::chrono::milliseconds(2000));
+    std::atomic<uint64_t>* o = out_.exchange(nullptr, std::memory_order_acq_rel);
+    if (o && locked) o->store(0, std::memory_order_release);
   }
 
  private:
-  std::mutex m_;
-  std::atomic<uint64_t>* out_ = nullptr;
+  std::timed_mutex m_;
+  std::atomic<std::atomic<uint64_t>*> out_{nullptr};
 };
 
 }  // namespace qvstatus

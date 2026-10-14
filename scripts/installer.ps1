@@ -33,14 +33,16 @@ function Install-MicrosoftPrerequisite([string]$Name,[string]$Url,[string]$Argum
     $downloadRoot = Join-Path $installRoot '.prerequisite-downloads'
     New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
     $installer = Join-Path $downloadRoot ($Name + '.exe')
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Write-Output "Downloading missing prerequisite from Microsoft: $Name"
-    Invoke-WebRequest -Uri $Url -OutFile $installer -UseBasicParsing -TimeoutSec 120
-    $signature = Get-AuthenticodeSignature -LiteralPath $installer
-    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation,') { throw "Prerequisite signature rejected: $Name. Nothing was executed." }
-    $process = Start-Process -FilePath $installer -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
-    if ($process.ExitCode -notin @(0,3010,1641)) { throw "Microsoft prerequisite installer failed: $Name ($($process.ExitCode))." }
-    Remove-Item -LiteralPath $installer
+    # The download folder goes in every case, also when the download or the installer fails.
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Write-Output "Downloading missing prerequisite from Microsoft: $Name"
+        Invoke-WebRequest -Uri $Url -OutFile $installer -UseBasicParsing -TimeoutSec 120
+        $signature = Get-AuthenticodeSignature -LiteralPath $installer
+        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation,') { throw "Prerequisite signature rejected: $Name. Nothing was executed." }
+        $process = Start-Process -FilePath $installer -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
+        if ($process.ExitCode -notin @(0,3010,1641)) { throw "Microsoft prerequisite installer failed: $Name ($($process.ExitCode))." }
+    } finally { Remove-Item -LiteralPath $downloadRoot -Recurse -Force -ErrorAction SilentlyContinue }
     if ($process.ExitCode -in @(3010,1641)) { Write-Output 'Windows restart requested. Restart before the headset test.' }
 }
 $webViewVersion = Get-WebViewVersion

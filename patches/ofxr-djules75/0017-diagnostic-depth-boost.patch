@@ -1,0 +1,167 @@
+diff --git a/include/xrfg/diagnostic_overlay_model.hpp b/include/xrfg/diagnostic_overlay_model.hpp
+--- a/include/xrfg/diagnostic_overlay_model.hpp
++++ b/include/xrfg/diagnostic_overlay_model.hpp
+@@ -147,6 +147,18 @@
+ inline constexpr std::uint64_t kPupilGaze = 1ULL << 2;
+ inline constexpr std::uint64_t kPupilSimulated = 1ULL << 3;
+ inline constexpr std::uint64_t kPupilRestored = 1ULL << 4;
++// DCS Control (0017): Depth boost, carried by the same layer. Bit 5 on (enabled
++// and not switched off in flight), bit 6 the gaze carries each eye's vergence,
++// bit 7 the pupil correction is off in the profile (the layer runs for Depth
++// boost only), bits 16-23 the render IPD scale as round((s - 1) * 100), bits
++// 24-25 the fixation (1 cockpit, 2 far), bit 26 Depth boost enabled in the
++// profile, bit 27 the focus views share one gaze (no depth). A layer without
++// Depth boost leaves them 0: the 0015 line is unchanged.
++inline constexpr std::uint64_t kDepthOn = 1ULL << 5;
++inline constexpr std::uint64_t kDepthSource = 1ULL << 6;
++inline constexpr std::uint64_t kPupilDisabled = 1ULL << 7;
++inline constexpr std::uint64_t kDepthEnabled = 1ULL << 26;
++inline constexpr std::uint64_t kDepthConstant = 1ULL << 27;
+ 
+ struct DiagnosticInputs {
+     float output_fps{};        // what the overlay's counter shows
+@@ -166,6 +178,8 @@
+     // DCS Control (0015): the pupil shift layer and its in-flight switch.
+     PupilStatus pupil;
+     DiagnosticHotkey pupil_hotkey;
++    // DCS Control (0017): Depth boost's in-flight switch (DCSVR_DEPTH_HOTKEY).
++    DiagnosticHotkey depth_hotkey;
+ };
+ 
+ [[nodiscard]] std::string format_dlss_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
+@@ -180,6 +194,12 @@
+ [[nodiscard]] std::string format_engine_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
+ // DCS Control (0015): "Pupil shift: ON, 3.2 mm" green, "Pupil shift: no gaze"
+ // amber, "Pupil shift: OFF (Ctrl+Shift+F10)" grey. Empty without the layer.
++// 0017: with Depth boost on the same line, "Pupil shift: ON, 3.2 mm; Depth
++// x1.32 far"; Depth boost alone, "Depth boost: x1.32 far" green, "Depth
++// boost: x1.00 cockpit" green, "Depth boost: waiting" grey (no per-eye
++// vergence seen yet), "Depth boost: no depth (shared gaze)" amber, "Depth
++// boost: OFF (Alt+Shift+F10)" grey. One line either way: the panel's height
++// is unchanged.
+ [[nodiscard]] std::string format_pupil_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
+ // DCS VR Control (0007): "VRAM 28.4 / 32.0 GB" - what every process has
+ // resident in the adapter's dedicated memory against that memory, where the
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+--- a/src/core/diagnostic_overlay_model.cpp
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -176,10 +176,9 @@
+     return "Engine: ON (" + std::to_string(active) + ")";
+ }
+ 
+-std::string format_pupil_line(const DiagnosticInputs& in, DiagnosticColor& color) {
++namespace {
++std::string pupil_part(const DiagnosticInputs& in, DiagnosticColor& color) {
+     const auto& p = in.pupil;
+-    if (!p.known) return {};
+-    if (!(p.bits & kPupilRunning)) { color = DiagnosticColor::grey; return "Pupil shift: starting"; }
+     if (!(p.bits & kPupilOn)) {
+         color = DiagnosticColor::grey;
+         const auto key = diagnostic_hotkey_label(in.pupil_hotkey);
+@@ -191,6 +190,49 @@
+     const auto tenths = static_cast<unsigned>((p.bits >> 8) & 0xFFU);
+     color = DiagnosticColor::green;
+     return "Pupil shift: ON, " + std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + " mm";
++}
++
++// DCS Control (0017): Depth boost, "Depth boost: ..." alone or "Depth ..."
++// after the pupil shift.
++std::string depth_part(const DiagnosticInputs& in, DiagnosticColor& color, bool alone) {
++    const auto bits = in.pupil.bits;
++    const std::string name = alone ? "Depth boost: " : "Depth ";
++    if (!(bits & kDepthOn)) {
++        color = DiagnosticColor::grey;
++        const auto key = alone ? diagnostic_hotkey_label(in.depth_hotkey) : std::string();
++        return name + (key.empty() ? std::string("OFF") : "OFF (" + key + ")");
++    }
++    if (bits & kDepthConstant) { color = DiagnosticColor::amber; return name + (alone ? "no depth (shared gaze)" : "no depth"); }
++    if (!(bits & kDepthSource)) { color = DiagnosticColor::grey; return name + "waiting"; }
++    const auto percent = static_cast<unsigned>((bits >> 16) & 0xFFU);
++    const auto fixation = static_cast<unsigned>((bits >> 24) & 3U);
++    const auto hundredths = std::to_string(percent % 100);
++    color = DiagnosticColor::green;
++    return name + "x" + std::to_string(1U + percent / 100) + "." + (hundredths.size() < 2 ? "0" : "") + hundredths +
++        (fixation == 2U ? " far" : fixation == 1U ? " cockpit" : "");
++}
++}
++
++std::string format_pupil_line(const DiagnosticInputs& in, DiagnosticColor& color) {
++    const auto& p = in.pupil;
++    if (!p.known) return {};
++    const bool depth = (p.bits & kDepthEnabled) != 0;
++    if (!(p.bits & kPupilRunning)) {
++        color = DiagnosticColor::grey;
++        return depth && (p.bits & kPupilDisabled) ? "Depth boost: starting" : "Pupil shift: starting";
++    }
++    if (p.bits & kPupilDisabled) {
++        if (!depth) return {};
++        return depth_part(in, color, true);
++    }
++    auto text = pupil_part(in, color);
++    if (!depth) return text;
++    DiagnosticColor depth_color{};
++    text += "; " + depth_part(in, depth_color, false);
++    // The line takes the more urgent colour of its two parts.
++    if (color == DiagnosticColor::amber || depth_color == DiagnosticColor::amber) color = DiagnosticColor::amber;
++    else if (color == DiagnosticColor::green || depth_color == DiagnosticColor::green) color = DiagnosticColor::green;
++    return text;
+ }
+ 
+ std::vector<DiagnosticLine> format_diagnostic_lines(const DiagnosticInputs& in) {
+diff --git a/src/layer/openxr_fps_overlay.cpp b/src/layer/openxr_fps_overlay.cpp
+--- a/src/layer/openxr_fps_overlay.cpp
++++ b/src/layer/openxr_fps_overlay.cpp
+@@ -126,6 +126,7 @@
+     HMODULE pupil_module{};
+     std::uint64_t next_pupil_lookup_ms{};
+     DiagnosticHotkey pupil_hotkey;
++    DiagnosticHotkey depth_hotkey; // DCS Control (0017)
+     std::uint64_t next_status_open_ms{};
+ 
+     ~Impl() {
+@@ -382,6 +383,7 @@
+ 
+     void read_pupil(DiagnosticInputs& inputs) {
+         inputs.pupil_hotkey = pupil_hotkey;
++        inputs.depth_hotkey = depth_hotkey;
+         if (!pupil_status) {
+             const auto tick = GetTickCount64();
+             if (tick < next_pupil_lookup_ms) return;
+@@ -512,6 +514,7 @@
+     if (!parse_diagnostic_hotkey(environment("DCSVR_DIAG_HOTKEY"), impl_->hotkey)) impl_->hotkey = {};
+     if (!parse_diagnostic_hotkey(environment("DCSVR_ENGINE_HOTKEY"), impl_->engine_hotkey)) impl_->engine_hotkey = {};
+     if (!parse_diagnostic_hotkey(environment("DCSVR_PUPIL_HOTKEY"), impl_->pupil_hotkey)) impl_->pupil_hotkey = {};
++    if (!parse_diagnostic_hotkey(environment("DCSVR_DEPTH_HOTKEY"), impl_->depth_hotkey)) impl_->depth_hotkey = {};
+     impl_->toggle = DiagnosticToggle(environment("DCSVR_DIAG_OVERLAY") == "1");
+ }
+ OpenXrFpsOverlay::~OpenXrFpsOverlay() = default;
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+--- a/tests/diagnostic_overlay_tests.cpp
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -108,6 +108,26 @@
+             require(pupil(0, C::grey) == "Pupil shift: starting", "pupil not ready");
+             const auto with = [&](bool known) { in.pupil = {known, on}; return format_diagnostic_lines(in).size(); };
+             require(with(true) == with(false) + 1, "the pupil line is added only with the layer");
++
++            // DCS Control (0017): Depth boost on the same line, or alone.
++            in.depth_hotkey = {0x79, 6}; // Alt+Shift+F10
++            const auto boost = kDepthEnabled | kDepthOn | kDepthSource | (32ULL << 16) | (2ULL << 24);
++            require(pupil(on | boost, C::green) == "Pupil shift: ON, 3.2 mm; Depth x1.32 far", "both");
++            require(pupil(on | (boost & ~(0xFFULL << 16) & ~(3ULL << 24)) | (1ULL << 24), C::green) == "Pupil shift: ON, 3.2 mm; Depth x1.00 cockpit", "both, cockpit");
++            require(pupil(on | (boost & ~kDepthOn), C::green) == "Pupil shift: ON, 3.2 mm; Depth OFF", "depth switched off");
++            require(pupil(on | (boost | kDepthConstant), C::amber) == "Pupil shift: ON, 3.2 mm; Depth no depth", "shared gaze");
++            const auto alone = kPupilRunning | kPupilDisabled | kPupilRestored | boost;
++            require(pupil(alone, C::green) == "Depth boost: x1.32 far", "depth alone");
++            require(pupil((alone & ~(0xFFULL << 16)) | (5ULL << 16), C::green) == "Depth boost: x1.05 far", "two decimals");
++            require(pupil(alone & ~kDepthSource, C::grey) == "Depth boost: waiting", "no vergence yet");
++            require(pupil(alone | kDepthConstant, C::amber) == "Depth boost: no depth (shared gaze)", "no depth");
++            require(pupil(alone & ~kDepthOn, C::grey) == "Depth boost: OFF (Alt+Shift+F10)", "depth off in flight");
++            require(pupil(kPupilDisabled | kDepthEnabled, C::grey) == "Depth boost: starting", "depth not ready");
++            in.pupil = {true, kPupilRunning | kPupilDisabled};
++            C none{};
++            require(format_pupil_line(in, none).empty(), "neither: no line");
++            const auto lines = [&](std::uint64_t bits) { in.pupil = {true, bits}; return format_diagnostic_lines(in).size(); };
++            require(lines(on | boost) == lines(on) && lines(alone) == lines(on), "one line either way");
+         }
+ 
+         // Hotkey: same format as DCSVR_NR_HOTKEY.

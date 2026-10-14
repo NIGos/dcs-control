@@ -14,6 +14,23 @@ public enum NeuralStyle { Standard, Natural, Cinematic }
 public enum NvidiaFlowPreset { Fast, Medium, Slow }
 public enum FpsLimitMode { Preserve, RuntimeHeadroom, MatchRefresh, Custom }
 public enum IssueSeverity { Info, Warning, Error }
+/// <summary>Depth boost's curve from the distance looked at to the eye-distance scale (docs/FIXATION_DEPTH.md, "Modes").
+/// Realistic: normal depth up to <see cref="VrProfile.DepthBoostFarStartM"/> (150 m), where a headset's stereo is
+/// already as good as real stereo, then more up to <see cref="VrProfile.DepthBoostFarFullM"/> (400 m), where real stereo
+/// still works and the headset's pixels no longer resolve it. Enhanced: more depth from 3 m, the maximum from 50 m;
+/// not realistic (distant objects look nearer and the world smaller).</summary>
+public enum DepthBoostMode { Realistic, Enhanced }
+/// <summary>How Depth boost changes the eye distance when the eyes move between the cockpit and outside
+/// (docs/FIXATION_DEPTH.md, "Predictive transition"). Gradual: at the slow rates, confirmed after the eyes land.
+/// Predictive: during a long eye jump, the landing point is predicted from the eyes' speed (Pimax eye tracking, read
+/// about 500 times a second) and part of the change is made while the eyes are still moving; the rest follows the
+/// gradual rates. Falls back to Gradual without Pimax's per-eye gaze.</summary>
+public enum DepthBoostTransition { Gradual, Predictive }
+/// <summary>Far depth's strength (docs/FAR_DEPTH.md): how much depth is added to distant scenery.</summary>
+public enum FarDepthPreset { Subtle, Default, Strong }
+/// <summary>The eye distance DCS renders with: the headset's own (measured or set in Pimax Play / SteamVR), DCS's custom
+/// IPD from its VR options, or a value set here.</summary>
+public enum EyeDistanceSource { Headset, DcsCustom, Manual }
 /// <summary>Where the bundled Quad Views focus area comes from: Pimax Play's own Quad Views settings, read (never
 /// written) at preview, apply and launch, or the values stored in the profile.</summary>
 public enum FoveaSource { PimaxPlay, Profile }
@@ -119,6 +136,12 @@ public sealed record VrProfile
     /// <summary>Shows or hides the in-headset diagnostic panel (FPS, DLSS 5, framegen); drawn by OFXR, so framegen profiles only.</summary>
     public string DiagnosticOverlayKey { get; init; } = NeuralHotkeys.DiagnosticDefault;
     public bool DiagnosticOverlayAtStart { get; init; }
+    /// <summary>The in-headset panel without frame generation: OFXR is loaded only to draw it (no generation, no D3D11
+    /// bridge, DCS's frames pass straight through). With frame generation the panel is always there.</summary>
+    public bool HeadsetPanel { get; init; }
+    /// <summary>The in-headset panel can be shown in this flight (its key works).</summary>
+    /// Without frame generation OFXR is loaded for the panel only when it can be shown: its key is set, or it is visible at start.
+    public bool UsesHeadsetPanel => !Desktop && (FrameGen != FrameGeneration.Off || (HeadsetPanel && (DiagnosticOverlayAtStart || (NeuralHotkeys.TryParse(DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault, out var key) && !key.IsOff))));
     /// <summary>OFXR's in-headset VRAM counter (diag_vram in its ini); off by default.</summary>
     public bool DiagnosticVram { get; init; }
     public double NeuralMotionScaleX { get; init; } = 1;
@@ -277,8 +300,82 @@ public sealed record VrProfile
     /// <summary>Turns the correction off and on in flight, to compare (PupilShift.ini Toggle; the panel names it).</summary>
     public string PupilShiftToggleKey { get; init; } = NeuralHotkeys.PupilDefault;
     public const double PupilShiftEyeRadiusMin = 5, PupilShiftEyeRadiusMax = 15, PupilShiftVirtualImageMin = 0.5, PupilShiftVirtualImageMax = 5;
-    /// <summary>The pupil shift layer is deployed: only for a VR flight with eye-tracked Quad Views.</summary>
+    /// <summary>The pupil correction runs: only for a VR flight with eye-tracked Quad Views.</summary>
     public bool UsesPupilShift => PupilShift && !Desktop && QuadViews != QuadProvider.None && Gaze == GazeMode.EyeTracked;
+
+    /// <summary>Periphery stability (bundled Quad Views; native/quadviews/dcsvr_perception.h, docs/PERCEPTION.md): a
+    /// temporal low-pass on the periphery outside the focus area, against the shimmer its enlargement makes visible.
+    /// The history follows the head's rotation and is clipped to the current neighbourhood against trails; saccades
+    /// and gaps start it over. Works with a fixed or an eye-tracked focus.</summary>
+    public bool PeripheryStability { get; init; }
+    /// <summary>0 to 1: the filter's time constant as a share of <see cref="PeripheryStabilityMaxTauMs"/> (0.5 = 40 ms).
+    /// More steadies more; on content that moves on its own (outside world while the aircraft rolls) it can leave a
+    /// faint trail.</summary>
+    public double PeripheryStabilityStrength { get; init; } = 0.5;
+    public const double PeripheryStabilityMaxTauMs = 80;
+    /// <summary>The pass runs: a VR flight with the bundled Quad Views (dcsvr_temporal); Pimax's own quad views have no
+    /// such pass.</summary>
+    public bool UsesPeripheryStability => PeripheryStability && !Desktop && QuadViews == QuadProvider.QuadViewsFoveated;
+    /// <summary>Far depth (docs/FAR_DEPTH.md): more depth on distant scenery (about 50 m to 2 km), the cockpit exact. The
+    /// bundled Quad Views shifts each eye's image with the depth DCS drew, which the engine module hands it. Off by default.</summary>
+    public bool FarDepth { get; init; }
+    public FarDepthPreset FarDepthPreset { get; init; } = FarDepthPreset.Default;
+    /// <summary>Turns Far depth off and on in flight, to compare (bundled Quad Views' dcsvr_far_depth_toggle).</summary>
+    public string FarDepthToggleKey { get; init; } = NeuralHotkeys.FarDepthDefault;
+    /// <summary>It runs: a VR flight with the bundled Quad Views and Engine Optimizations (the depth comes from the engine module).</summary>
+    public bool UsesFarDepth => FarDepth && !Desktop && QuadViews == QuadProvider.QuadViewsFoveated && EngineOptimizations;
+    /// <summary>Depth boost (docs/PERCEPTION.md, docs/FIXATION_DEPTH.md): while the eyes fixate far, the render IPD is
+    /// scaled up (<see cref="DepthBoostMode"/>) so distant objects get stronger depth; while they fixate the cockpit it
+    /// returns to the normal IPD. The fixation depth comes from DCS's depth buffer at the gaze (the engine module, with
+    /// <see cref="EngineOptimizations"/>) and from the two eyes' vergence, in the pupil shift layer. Off by default.</summary>
+    public bool DepthBoost { get; init; }
+    /// <summary>Realistic (default) or Enhanced; each has its own strength.</summary>
+    public DepthBoostMode DepthBoostMode { get; init; } = DepthBoostMode.Realistic;
+    /// <summary>Enhanced's render IPD scale while fixating far (from 50 m): 1.4 renders a 64 mm IPD as 89.6 mm.</summary>
+    public double DepthBoostMax { get; init; } = 1.4;
+    /// <summary>Realistic's render IPD scale from <see cref="DepthBoostFarFullM"/> on: 1.25 renders 64 mm as 80 mm.</summary>
+    public double DepthBoostRealisticMax { get; init; } = 1.25;
+    /// <summary>Realistic: normal depth up to this distance looked at (metres).</summary>
+    public double DepthBoostFarStartM { get; init; } = 150;
+    /// <summary>Realistic: the full strength from this distance looked at (metres); a log ramp between.</summary>
+    public double DepthBoostFarFullM { get; init; } = 400;
+    /// <summary>A fixation nearer than this is the cockpit (normal IPD); beyond twice this it is far.</summary>
+    public double DepthBoostNearM { get; init; } = 1.5;
+    /// <summary>Turns Depth boost off and on in flight ([DepthBoost] Toggle; the panel names it).</summary>
+    public string DepthBoostToggleKey { get; init; } = NeuralHotkeys.DepthBoostDefault;
+    /// <summary>Gradual (default) or Predictive ([DepthBoost] Transition).</summary>
+    public DepthBoostTransition DepthBoostTransition { get; init; } = DepthBoostTransition.Gradual;
+    /// <summary>Switches between Gradual and Predictive in flight, to compare ([DepthBoost] TransitionToggle): one beep
+    /// gradual, two beeps predictive.</summary>
+    public string DepthBoostTransitionKey { get; init; } = NeuralHotkeys.DepthTransitionDefault;
+    public const double DepthBoostMaxMin = 1, DepthBoostMaxMax = 2, DepthBoostNearMin = 0.5, DepthBoostNearMax = 5;
+    public const double DepthBoostRealisticMaxMax = 1.5, DepthBoostFarStartMin = 50, DepthBoostFarStartMax = 1000, DepthBoostFarFullMax = 3000;
+    /// <summary>Enhanced's fixed curve: normal depth at 3 m, the full strength from 50 m.</summary>
+    public const double DepthBoostEnhancedStartM = 3, DepthBoostEnhancedFullM = 50;
+    /// <summary>The strength of the selected mode.</summary>
+    public double DepthBoostActiveMax => DepthBoostMode == DepthBoostMode.Enhanced ? DepthBoostMax : DepthBoostRealisticMax;
+    /// <summary>Depth boost runs: like Pupil shift, only for a VR flight with eye-tracked Quad Views.</summary>
+    public bool UsesDepthBoost => DepthBoost && !Desktop && QuadViews != QuadProvider.None && Gaze == GazeMode.EyeTracked;
+    /// <summary>The pupil shift layer (it carries both Pupil shift and Depth boost) is deployed, and takes over DCS's
+    /// custom IPD, when either runs.</summary>
+    public bool UsesPerceptionLayer => UsesPupilShift || UsesDepthBoost;
+    /// <summary>The engine module measures the scene depth at the gaze (DcsQvCull.ini [Perception] FixationDepth=1):
+    /// Depth boost with the engine optimizations. Without them Depth boost has the eyes' vergence only, which cannot
+    /// tell 150 m from 50 m: Realistic then stays at normal depth, Enhanced works on the vergence as before.</summary>
+    public bool UsesFixationDepth => UsesDepthBoost && EngineOptimizations;
+    /// <summary>The eye distance DCS renders with. Headset (default): the IPD the headset measured or was set to, the
+    /// realistic one; DCS's custom IPD is turned off while the profile is applied. DcsCustom: DCS's own custom IPD as it
+    /// is (the pupil shift layer applies it itself when it runs). Manual: <see cref="EyeDistanceMm"/>. VR flights only;
+    /// Back to stock DCS puts DCS's options back.</summary>
+    public EyeDistanceSource EyeDistance { get; init; } = EyeDistanceSource.Headset;
+    /// <summary>Manual's eye distance in millimetres.</summary>
+    public double EyeDistanceMm { get; init; } = 64;
+    public const double EyeDistanceMin = 50, EyeDistanceMax = 80;
+    /// <summary>The engine module publishes its coarse depth grid of the whole view (DcsQvCull.ini [Perception]
+    /// DepthGrid=1), where the predictive transition looks up a saccade's landing: whenever the scene depth is on
+    /// (Depth boost with Engine Optimizations), whatever transition the profile starts with, so the in-flight key can
+    /// switch to Predictive too. It costs well under 0.1 % of a frame (about 14 µs GPU, measured live).</summary>
+    public bool UsesDepthGrid => UsesFixationDepth;
 
     /// <summary>The engine optimizations module runs the prefetch fix ([Prefetch] Mode in DcsQvCull.ini), also in
     /// Optimizations only and when DCS starts from Steam or a shortcut.</summary>

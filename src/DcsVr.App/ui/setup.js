@@ -110,7 +110,10 @@
       else if (step === 2) {
         // The panel's own Launch DCS: restore the applied profile if any, apply this one, then start DCS.
         checking = true; render(); message('Applying and launching…');
-        adopt(); await ui().run('launch');
+        adopt();
+        // Another program's dxgi.dll: the same question as the Launch DCS button, which then launches.
+        if (ui().askDxgiFirst('launch')) { checking = false; el('setupDialog').close(); return; }
+        await ui().run('launch');
         checking = false; el('setupDialog').close();
       }
     } catch(e) { message(e.message); } finally { checking = false; if (el('setupDialog').open) render(); }

@@ -21,7 +21,7 @@ using GetFn = void*(__fastcall*)(void* heap, size_t size);
 using ResetFn = void(__fastcall*)(void* heap);
 GetFn g_orig = nullptr;
 ResetFn g_origReset = nullptr;
-std::atomic<uint64_t> g_gen{1};
+std::atomic<uint64_t>& g_gen = g_frameHeapGen;  // main.cpp: the recorders read it too
 std::atomic<bool>& g_on = g_frameHeapOn;
 constexpr size_t kSlab = 4096;
 constexpr size_t kMinFree = 1 << 20;

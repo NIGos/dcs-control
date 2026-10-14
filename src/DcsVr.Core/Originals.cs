@@ -138,11 +138,20 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         {
             // 2. Paths an earlier profile wrote that this one does not use go back to their originals (the dxgi.dll
             // loader and dxgi2.dll prefetch fix that 0.5.4 and earlier put in bin, for example).
-            var planned = plan.Files.Select(f => System.IO.Path.GetFullPath(f.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var stale in baseline.Files.AsEnumerable().Reverse().Where(f => !planned.Contains(f.Path)).ToArray())
+            var planned = new HashSet<OriginalFile>(originals, ReferenceEqualityComparer.Instance);
+            foreach (var stale in baseline.Files.AsEnumerable().Reverse().Where(f => !planned.Contains(f)).ToArray())
             {
-                RestoreEntry(stale, out _);
-                baseline.Files.Remove(stale); DeleteBackup(stale); Save(baseline);
+                try { RestoreEntry(stale, out _); }
+                catch (Exception error) when (error is InvalidDataException or FileNotFoundException or DirectoryNotFoundException)
+                {
+                    // A backup that is missing or damaged (quarantined by an antivirus, for example) must not block every
+                    // later apply: the entry stays listed for Back to stock DCS, which reports it.
+                    Log("Could not put back " + stale.Path + ": " + error.Message);
+                    continue;
+                }
+                // The baseline forgets the entry before its backup goes: a crash in between leaves an unused backup,
+                // never an entry pointing at a deleted one.
+                baseline.Files.Remove(stale); Save(baseline); DeleteBackup(stale);
                 putBack.Add(stale.Path);
             }
             // 3. Every file is written over whatever is there now.
@@ -153,8 +162,11 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                 var file = plan.Files[index]; var original = originals[index];
                 var full = System.IO.Path.GetFullPath(file.Path);
                 PathPolicy.RejectReparsePoints(full, file.Root);
-                var bytes = file.LuaChanges is { } changes ? MergeSettings(full, original, changes) : file.Content;
+                var released = new List<string>();
+                var bytes = file.LuaChanges is { } changes ? MergeSettings(full, original, changes, released) : file.Content;
                 AtomicFile.Write(full, bytes);
+                // Settings set back are forgotten only once the file says so: a failed write keeps their originals.
+                foreach (var key in released) original.Settings!.Remove(key);
                 entries.Add(new() { Path = full, InstalledSha256 = Hashing.BytesSha256(bytes), PreviousSha256 = original.OriginalSha256, LuaChanges = file.LuaChanges, IniValues = file.IniValues, RuntimeLogs = file.RuntimeLogs, Root = file.Root is null ? null : System.IO.Path.GetFullPath(file.Root), Applied = true });
             }
             baseline.Current = new() { Id = Guid.NewGuid().ToString("N"), ProfileId = plan.ProfileId, Status = "applied", Entries = entries };
@@ -198,7 +210,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             {
                 RestoreEntry(original, out var note);
                 if (note is not null) Log(note);
-                baseline.Files.Remove(original); DeleteBackup(original); Save(baseline); count++;
+                baseline.Files.Remove(original); Save(baseline); DeleteBackup(original); count++;
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException)
             {
@@ -292,7 +304,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
 
     /// <summary>options.lua as it is now, with owned settings this plan no longer changes set back to their originals and
     /// the plan's settings set to the installed values.</summary>
-    private static byte[] MergeSettings(string path, OriginalFile original, IReadOnlyList<LuaValueChange> changes)
+    private static byte[] MergeSettings(string path, OriginalFile original, IReadOnlyList<LuaValueChange> changes, List<string> released)
     {
         var utf8 = StrictUtf8.Encoding;
         var text = utf8.GetString(File.ReadAllBytes(path));
@@ -300,7 +312,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         foreach (var (key, value) in (original.Settings ?? []).Where(s => !planned.Contains(s.Key)).ToArray())
         {
             text = SetBack(text, key, value);
-            original.Settings!.Remove(key);
+            released.Add(key);
         }
         foreach (var change in changes) text = new LuaOptions(text).SetLiteral(change.Path.Split('.'), change.InstalledRaw);
         _ = new LuaOptions(text);
@@ -493,8 +505,14 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         return baseline;
     }
 
-    private static OriginalFile? Find(OriginalsBaseline baseline, string path) =>
-        baseline.Files.FirstOrDefault(f => f.Path.Equals(path, StringComparison.OrdinalIgnoreCase));
+    /// <summary>The recorded original of a path, also when it was recorded under another spelling of the same file (a
+    /// junction, subst drive or 8.3 name): two entries for one file would record DCS Control's own file as the original.</summary>
+    private static OriginalFile? Find(OriginalsBaseline baseline, string path)
+    {
+        if (baseline.Files.FirstOrDefault(f => f.Path.Equals(path, StringComparison.OrdinalIgnoreCase)) is { } same) return same;
+        var canonical = SystemPaths.Canonical(path);
+        return baseline.Files.FirstOrDefault(f => SystemPaths.Canonical(f.Path).Equals(canonical, StringComparison.OrdinalIgnoreCase));
+    }
 
     private string NextBackupName()
     {

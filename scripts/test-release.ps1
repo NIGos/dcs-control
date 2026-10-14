@@ -1,3 +1,4 @@
+#Requires -Version 7
 param([string]$NeuralRuntime)
 $ErrorActionPreference='Stop'
 $workspaceRoot=Split-Path -Parent $PSScriptRoot

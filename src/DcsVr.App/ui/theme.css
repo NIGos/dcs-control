@@ -32,7 +32,7 @@ nav{gap:4px;width:100%}
 .workspace{background:var(--bg)}
 .page-heading{display:block;padding:20px 28px 0;margin:0}
 .page-heading>div{border-bottom:1px solid var(--line-strong);padding-bottom:12px}
-.breadcrumb,.page-heading .eyebrow{display:none}
+.page-heading .eyebrow{display:none}
 .page-heading h1{font:600 17px/1.2 "Segoe UI",Interface,sans-serif;letter-spacing:.3px;text-transform:uppercase;color:var(--text)}
 .page-heading p{margin-top:4px;font-size:12px;color:var(--muted)}
 #scrollArea{padding:18px 28px 28px}
@@ -346,14 +346,13 @@ dialog::backdrop{background:#000000b0}
   .feature{padding:5px 4px 5px 10px}
   .feature-note{margin-top:4px;padding:3px 8px}
   .panel-profile{margin-top:6px}
-  .hero-chips{margin-top:6px}
   .pill{min-height:34px}
   .workflow{gap:8px;padding-top:9px;padding-bottom:12px}
   .workflow-status p{line-height:1.4}
   .workflow-actions .button.launch{min-height:46px;font-size:16px;letter-spacing:1.8px}
 }
 /* The wordmark shares the top row with the window buttons when the panel is wide enough to keep them apart. */
-@media(min-width:1181px) and (max-height:1000px){.control-panel .panel-top{padding-top:12px}.panel-section{margin-top:12px}.panel-label{margin-bottom:6px}.hero-chips{margin-top:6px}}
+@media(min-width:1181px) and (max-height:1000px){.control-panel .panel-top{padding-top:12px}.panel-section{margin-top:12px}.panel-label{margin-bottom:6px}}
 /* Real but rarely changed settings sit in a closed disclosure at the foot of their card; search and links open it. */
 details.advanced{margin-top:6px;border-top:1px solid var(--line);padding-top:0}
 details.advanced>summary{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 10px;padding:11px 0 9px;font:600 13px "Segoe UI",Interface,sans-serif;color:var(--soft);list-style:none}
@@ -469,3 +468,15 @@ button.rail-version:hover{color:var(--soft)}
 .update-progress progress{flex:1;height:8px;accent-color:var(--accent)}
 #updatesCard .setting{margin-top:4px}
 #updateStatus.error{color:var(--red)}
+/* Icon-only rail (narrow windows): the group labels do not fit 58 px, so they become thin separators. */
+@media(max-width:1180px){.rail-group{height:1px;margin:8px 8px;overflow:hidden;font-size:0;letter-spacing:0;background:#ffffff14}.rail-group:first-child{margin-top:4px}}
+/* What happens at launch: the short columns take only what they need, so Change does not wrap word by word. */
+.boost-table th:nth-child(3),.boost-table td:nth-child(3){width:1%;white-space:nowrap}
+.boost-table td:first-child{overflow-wrap:anywhere}
+/* Perception: the notes above a card keep the same gap as the cards themselves. */
+#pupilNeeds,#pupilIpd,#stabilityNeeds{margin:0 0 16px}
+/* First-start tour: a non-modal card at the bottom centre, clear of the rail and the right panel it points at, and an outline on its target. */
+.tour-dialog { position: fixed; left: 50%; transform: translateX(-50%); bottom: 24px; top: auto; right: auto; margin: 0; max-width: 380px; width: calc(100% - 32px); z-index: 50; border-radius: 12px; padding: 18px 20px; box-shadow: 0 12px 40px rgba(0,0,0,.35); }
+.tour-dialog h2 { margin: 4px 0 8px; }
+.tour-dialog .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+.tour-target { outline: 3px solid var(--accent, #4ea1ff); outline-offset: 3px; border-radius: 8px; }

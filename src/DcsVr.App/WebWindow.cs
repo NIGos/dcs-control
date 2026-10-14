@@ -15,6 +15,7 @@ namespace DcsVr.App;
 internal sealed class WebWindow : Window
 {
     private readonly WebView2 _view = new();
+    private WebBridge? _bridge;
     public WebWindow()
     {
         Title = "DCS Control"; Width = 1320; Height = 920; MinWidth = 850; MinHeight = 620;
@@ -41,7 +42,8 @@ internal sealed class WebWindow : Window
                 var environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(service.StateRoot, "webview"));
                 await _view.EnsureCoreWebView2Async(environment);
                 _view.CoreWebView2.Settings.IsNonClientRegionSupportEnabled = true;
-                WebHost.Configure(_view.CoreWebView2, new WebBridge(service, this));
+                _bridge = new WebBridge(service, this);
+                WebHost.Configure(_view.CoreWebView2, _bridge);
                 _view.CoreWebView2.Navigate(WebHost.Address);
             }
             catch (Exception e)
@@ -58,6 +60,15 @@ internal sealed class WebWindow : Window
                 else { core.Resume(); _view.Visibility = Visibility.Visible; }
             }
             catch (Exception e) when (e is InvalidOperationException or System.Runtime.InteropServices.COMException) { /* Closing or recreating the browser. */ }
+        };
+        // Alt+F4 or the taskbar would otherwise close the app halfway through writing DCS's files (the title-bar
+        // button already waits for the command to finish).
+        Closing += (_, e) =>
+        {
+            if (_bridge?.Writing is not { } writing) return;
+            e.Cancel = true;
+            MessageBox.Show(this, (writing == "restore" ? "Back to stock DCS" : writing == "launch" ? "Launch DCS" : "DCS Control") + " is still changing files. Close DCS Control when it has finished.",
+                "DCS Control", MessageBoxButton.OK, MessageBoxImage.Information);
         };
         Closed += (_, _) => _view.Dispose();
     }

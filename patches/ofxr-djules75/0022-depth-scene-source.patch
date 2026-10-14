@@ -1,0 +1,37 @@
+diff --git a/include/xrfg/diagnostic_overlay_model.hpp b/include/xrfg/diagnostic_overlay_model.hpp
+--- a/include/xrfg/diagnostic_overlay_model.hpp
++++ b/include/xrfg/diagnostic_overlay_model.hpp
+@@ -159,6 +159,9 @@
+ inline constexpr std::uint64_t kPupilDisabled = 1ULL << 7;
+ inline constexpr std::uint64_t kDepthEnabled = 1ULL << 26;
+ inline constexpr std::uint64_t kDepthConstant = 1ULL << 27;
++// DCS Control (0022): bits 28-29 what drives the fixation distance: 1 the
++// eyes' vergence, 2 the scene depth DCS drew where the pilot looks.
++inline constexpr unsigned kDepthFixSourceShift = 28;
+ // DCS Control (0018): the same layer's PupilShift_Ipd() export. Bits 0-15 the
+ // base eye distance in 0.01 mm (the profile's Ipd= or the runtime's), bits
+ // 16-31 the eye distance rendered now (the base times Depth boost's scale),
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+--- a/src/core/diagnostic_overlay_model.cpp
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -203,7 +203,8 @@
+         return name + (key.empty() ? std::string("OFF") : "OFF (" + key + ")");
+     }
+     if (bits & kDepthConstant) { color = DiagnosticColor::amber; return name + (alone ? "no depth (shared gaze)" : "no depth"); }
+-    if (!(bits & kDepthSource)) { color = DiagnosticColor::grey; return name + "waiting"; }
++    // 0022: waiting only while neither the eyes' vergence nor the scene depth drives it.
++    if (!(bits & kDepthSource) && ((bits >> kDepthFixSourceShift) & 3U) == 0U) { color = DiagnosticColor::grey; return name + "waiting"; }
+     const auto percent = static_cast<unsigned>((bits >> 16) & 0xFFU);
+     const auto fixation = static_cast<unsigned>((bits >> 24) & 3U);
+     const auto hundredths = std::to_string(percent % 100);
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+--- a/tests/diagnostic_overlay_tests.cpp
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -120,6 +120,7 @@
+             require(pupil(alone, C::green) == "Depth boost: x1.32 far", "depth alone");
+             require(pupil((alone & ~(0xFFULL << 16)) | (5ULL << 16), C::green) == "Depth boost: x1.05 far", "two decimals");
+             require(pupil(alone & ~kDepthSource, C::grey) == "Depth boost: waiting", "no vergence yet");
++            require(pupil((alone & ~kDepthSource) | (2ULL << kDepthFixSourceShift), C::green) == "Depth boost: x1.32 far", "the scene depth drives it without vergence");
+             require(pupil(alone | kDepthConstant, C::amber) == "Depth boost: no depth (shared gaze)", "no depth");
+             require(pupil(alone & ~kDepthOn, C::grey) == "Depth boost: OFF (Alt+Shift+F10)", "depth off in flight");
+             require(pupil(kPupilDisabled | kDepthEnabled, C::grey) == "Depth boost: starting", "depth not ready");

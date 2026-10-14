@@ -94,10 +94,26 @@ ExecFn g_orig = nullptr;
 using WrapFn = void (*)(void* pass, void* ctx, ExecFn orig);
 std::atomic<WrapFn> g_wrap{nullptr};
 int g_state = 0;  // 0 = not tried, 1 = hooked, -1 = build mismatch
+// Optional observer around the whole execution, before any wrapper
+// (cockpit_ipd.h, [Perception] CockpitTrueIpd: classifies the execution
+// before DCS's binder uploads cPerView inside it, restores after it).
+// nullptr unless that option is on: then Hook is exactly as before.
+using ObsFn = void (*)(void* pass, void* ctx, bool begin);
+std::atomic<ObsFn> g_obs{nullptr};
 
 void __fastcall Hook(void* pass, void* ctx) {
-  if (WrapFn w = g_wrap.load(std::memory_order_relaxed)) return w(pass, ctx, g_orig);
-  g_orig(pass, ctx);
+  const ObsFn obs = g_obs.load(std::memory_order_acquire);
+  if (!obs) {
+    if (WrapFn w = g_wrap.load(std::memory_order_relaxed)) return w(pass, ctx, g_orig);
+    g_orig(pass, ctx);
+    return;
+  }
+  obs(pass, ctx, true);
+  if (WrapFn w = g_wrap.load(std::memory_order_relaxed))
+    w(pass, ctx, g_orig);
+  else
+    g_orig(pass, ctx);
+  obs(pass, ctx, false);
 }
 
 // The pass's item vector {begin, end, cap}, or nullptr (empty static vector).

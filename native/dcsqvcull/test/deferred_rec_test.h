@@ -465,7 +465,27 @@ bool CreateDevice(Scene& s, bool* warp) {
                                      nullptr, &s.imm));
 }
 
+// The "unavailable" text names every capability, the flags and the adapter.
+void CapsFailureText() {
+  ID3D11Device* dev = nullptr;
+  if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &dev,
+                               nullptr, nullptr)) || !dev) {
+    printf("SKIP deferred rec caps text: no WARP device\n");
+    return;
+  }
+  Caps c = QueryCaps(dev);
+  c.commandLists = false;  // as a device without driver command lists reports it
+  const char* t = DescribeCapsFailure(dev, c);
+  printf("     | %s\n", t);
+  Check(strstr(t, "DriverCommandLists=0") && strstr(t, "ConstantBufferOffsetting=") &&
+            strstr(t, "ID3D11DeviceContext1=") && strstr(t, "creation flags 0x") && strstr(t, "vendor 0x1414") &&
+            strstr(t, "LUID ") && strstr(t, "native command lists"),
+        "deferred rec: the unavailable line lists each capability, the creation flags and DCS's adapter");
+  dev->Release();
+}
+
 void Run() {
+  CapsFailureText();
   Scene s;
   bool warp = false;
   if (!CreateDevice(s, &warp)) {

@@ -14,6 +14,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     Updates? updates = null, string? releaseNotesPath = null)
 {
     private readonly SemaphoreSlim _commands = new(1);
+    private volatile string? _writing;
+    /// <summary>Launch, Apply or Back to stock DCS while it changes files: the window does not close in the middle.</summary>
+    public string? Writing => _writing;
     private InventorySnapshot _inventory = new();
     private VrProfile _profile = new();
     private bool _shownApplied;
@@ -277,7 +280,8 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         if (flightSources is not null) return flightSources(dcs, options);
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         return new(DcsLogPath(options), Path.Combine(local, "Pimax", "runtime"), Path.Combine(service.ManagedRoot, "profiles"),
-            Path.Combine(service.StateRoot, "boost", "status.json"), dcs is null ? null : Path.GetDirectoryName(dcs));
+            Path.Combine(service.StateRoot, "boost", "status.json"), dcs is null ? null : Path.GetDirectoryName(dcs),
+            Path.Combine(local, "Quad-Views-Foveated", "Quad-Views-Foveated.log"));
     }
     /// <summary>"Pimax Play changed …" while the applied profile follows Pimax Play and its values changed since Apply;
     /// Launch DCS updates the focus area first.</summary>
@@ -328,6 +332,40 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         }
         catch (Exception e) { return Task.FromResult(JsonData.Serialize(new { id, ok = false, error = e.Message })); }
     }
+    /// <summary>engineStatus and pupilStatus are read-only and polled every 5 s, so they are answered outside the command
+    /// lock: a file dialog left open (Save, Import, a diagnostic package) would otherwise time them out.</summary>
+    private Task<string>? StatusRequest(string json)
+    {
+        if (json.Length > 128 * 1024 || !(json.Contains("\"engineStatus\"", StringComparison.Ordinal) || json.Contains("\"pupilStatus\"", StringComparison.Ordinal))) return null;
+        string? id = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var action = root.GetProperty("action").GetString();
+            if (action is not ("engineStatus" or "pupilStatus")) return null;
+            id = root.GetProperty("id").GetString();
+            return Answer(action == "engineStatus");
+            async Task<string> Answer(bool engine)
+            {
+                try
+                {
+                    if (engine)
+                    {
+                        // The DCS engine optimizations' own log, the newest test report and DCS's log.
+                        var engineOptions = EngineOptionsPath();
+                        return Reply(id, new { status = engineOptions is null ? null : await Task.Run(() => EngineOptimizations.Read(engineOptions, DcsLogPath(engineOptions), DcsRunning())) });
+                    }
+                    // The pupil shift layer's log in the applied profile's folder.
+                    var pupilApplied = await Task.Run(service.ReadAppliedProfile);
+                    var pupilFolder = pupilApplied?.Profile.ForLaunch().UsesPerceptionLayer == true ? PupilShiftStatus.Folder(service.ManagedRoot, pupilApplied.Profile.Id) : null;
+                    return Reply(id, new { status = await Task.Run(() => PupilShiftStatus.Read(pupilFolder, DcsRunning())) });
+                }
+                catch (Exception e) { return JsonData.Serialize(new { id, ok = false, error = e.Message }); }
+            }
+        }
+        catch (Exception e) { return Task.FromResult(JsonData.Serialize(new { id, ok = false, error = e.Message })); }
+    }
     private string? _previewFoveaStamp;
     private string? _dcs, _options, _sboys;
     private ApplyPlan? _plan;
@@ -345,6 +383,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             if (SaveDraftRequest(json) is { } savedDraft) return savedDraft;
             if (LastFlightRequest(json) is { } lastFlight) return await lastFlight;
             if (UpdateRequest(json) is { } update) return await update;
+            if (StatusRequest(json) is { } status) return await status;
         }
         catch (Exception e) { AppLog.Error("Request", e); return JsonData.Serialize(new { id = RequestId(json), ok = false, error = e.Message }); }
         // Read-only and cheap: polled by the page so Launch and Restore lock while DCS runs.
@@ -369,7 +408,12 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             id = root.GetProperty("id").GetString();
             var action = root.GetProperty("action").GetString();
             var data = root.GetProperty("data");
-            if (action is "preview" or "apply" or "launch" or "resetNeural" or "save" or "export" or "refresh" or "checkReadiness" or "prepareSboys" or "importSboys" or "openSboys" or "detect" or "diagnosticPackage" or "grantWriteAccess") ReadDraft(data);
+            // The guided setup checks its candidate (replace=true): the page's own draft and paths are kept from before.
+            var wizardBefore = action == "checkReadiness" && data.TryGetProperty("replace", out var replace) && replace.ValueKind == JsonValueKind.True
+                ? (_profile, _dcs, _options) : ((VrProfile, string?, string?)?)null;
+            if (action is "launch" or "apply" or "restore" or "grantWriteAccess") _writing = action;
+            // import and restore reply with the profile too: without the page's draft they would bring back an older one.
+            if (action is "preview" or "apply" or "launch" or "resetNeural" or "save" or "export" or "refresh" or "checkReadiness" or "import" or "restore" or "prepareSboys" or "importSboys" or "openSboys" or "detect" or "diagnosticPackage" or "grantWriteAccess") ReadDraft(data);
             switch (action)
             {
                 case "ready":
@@ -390,15 +434,19 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     await RefreshEyeResolution();
                     return Reply(id, new { pimax = PimaxView() });
                 case "checkReadiness":
-                    // The guided setup checks its candidate (replace=true): afterwards the page's own draft and paths
-                    // come back, so a cancelled wizard leaves nothing behind for later commands.
-                    var page = data.TryGetProperty("replace", out var replace) && replace.ValueKind == JsonValueKind.True ? (_profile, _dcs, _options) : ((VrProfile, string?, string?)?)null;
                     Invalidate(); await Capture();
                     _readiness = await Task.Run(() => Readiness.Check(_profile, CurrentInventory, service));
-                    if (page is { } wizardBefore) { (_profile, _dcs, _options) = wizardBefore; _plan = null; } // the wizard reads this check's report
                     if (FoveaFact(_profile) is { } fact)
                         _readiness = _readiness with { Checks = [.. _readiness.Checks, new("pimax-fovea", fact.Severity == IssueSeverity.Warning ? CheckState.Warning : CheckState.Pass, "Focus area from Pimax Play", fact.Message)] };
                     _status = _readiness.CanPrepare ? "Automatic checks done. Confirm the items under Check yourself." : "Setup needs attention. Resolve the listed blockers, then check again.";
+                    if (wizardBefore is { } before)
+                    {
+                        // The wizard reads this report; afterwards the page's draft and paths come back, and the Checks page
+                        // does not show a check made with the candidate. A cancelled wizard leaves nothing behind.
+                        var wizardReadiness = _readiness;
+                        (_profile, _dcs, _options) = before; Invalidate();
+                        return Reply(id, new { readiness = wizardReadiness });
+                    }
                     _report = JsonData.Serialize(_readiness); break;
                 case "openGuide":
                     EnsureInteractive(); var guide = data.GetProperty("guide").GetString();
@@ -448,10 +496,6 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     }
                     _status = restored.Complete ? "Back to stock DCS: every file and setting DCS Control changed is back to its original. DCS runs as if the app had never been used." : "Some original files could not be restored; they are still listed on the Stock DCS page.";
                     _report = restored.Complete ? "Every file DCS Control changed is back to its original; owned DCS settings in options.lua were set back, your other edits kept." : string.Join("\n", restored.Conflicts); break;
-                case "engineStatus":
-                    // Read-only: the DCS engine optimizations' own log, the newest test report and DCS's log.
-                    var engineOptions = EngineOptionsPath();
-                    return Reply(id, new { status = engineOptions is null ? null : await Task.Run(() => EngineOptimizations.Read(engineOptions, DcsLogPath(engineOptions), DcsRunning())) });
                 case "dlssFocus":
                     // Read-only: why DLSS 5 did or did not reach the focus area in the last session (Cheeky's log).
                     var focusFallback = _dcs ?? _inventory.DcsExecutable;
@@ -480,14 +524,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     _status = $"Diagnostic package saved: {Path.GetFileName(packageDialog.FileName)} ({packaged.Count} files). Attach it to your report.";
                     using (var process = Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { "/select,", packageDialog.FileName }, UseShellExecute = false })) { }
                     break;
-                case "pupilStatus":
-                    // Read-only: the pupil shift layer's log in the applied profile's folder.
-                    var pupilApplied = await Task.Run(service.ReadAppliedProfile);
-                    var pupilFolder = pupilApplied?.Profile.ForLaunch().UsesPupilShift == true ? PupilShiftStatus.Folder(service.ManagedRoot, pupilApplied.Profile.Id) : null;
-                    return Reply(id, new { status = await Task.Run(() => PupilShiftStatus.Read(pupilFolder, DcsRunning())) });
                 case "pupilOpenLog":
                     EnsureInteractive();
-                    var pupilLog = (await Task.Run(service.ReadAppliedProfile)) is { } applied && applied.Profile.ForLaunch().UsesPupilShift
+                    var pupilLog = (await Task.Run(service.ReadAppliedProfile)) is { } applied && applied.Profile.ForLaunch().UsesPerceptionLayer
                         ? Path.Combine(PupilShiftStatus.Folder(service.ManagedRoot, applied.Profile.Id), PupilShiftStatus.LogName) : null;
                     if (pupilLog is null || !File.Exists(pupilLog)) throw new InvalidOperationException("No log yet: the layer writes it when DCS starts VR.");
                     using (var process = Process.Start(new ProcessStartInfo(pupilLog) { UseShellExecute = true })) { } break;
@@ -596,7 +635,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             return Reply(id, State());
         }
         catch (Exception e) { return JsonData.Serialize(new { id, ok = false, error = e.Message }); }
-        finally { _commands.Release(); }
+        finally { _writing = null; _commands.Release(); }
     }
     /// <summary>The request's id, for an error reply; null when the message has none.</summary>
     internal static string? RequestId(string json)

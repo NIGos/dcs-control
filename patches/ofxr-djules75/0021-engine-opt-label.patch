@@ -1,0 +1,94 @@
+diff --git a/include/xrfg/diagnostic_overlay_model.hpp b/include/xrfg/diagnostic_overlay_model.hpp
+--- a/include/xrfg/diagnostic_overlay_model.hpp
++++ b/include/xrfg/diagnostic_overlay_model.hpp
+@@ -211,12 +211,12 @@
+ 
+ [[nodiscard]] std::string format_dlss_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
+ [[nodiscard]] std::string format_generation_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
+-// DCS Control (0013, 0014): with the count switched on in DcsQvCull.ini
+-// (bits 24-31): "Engine: all 17 on" green, "Engine: 12 of 17 on" amber (with
+-// ", 1 turned off" when some turned themselves off), "Engine: none on" red.
+-// A module without that count: "Engine: ON (13)" green, "Engine: ON, 1
+-// turned off" amber. Always "Engine: OFF (Alt+Shift+F11)" grey when switched
+-// off in flight, "Engine: starting" grey. Empty when the module is not loaded
++// DCS Control (0013, 0014; 0021 names it "Engine Opt.:"): with the count switched on in DcsQvCull.ini
++// (bits 24-31): "Engine Opt.: all 17 on" green, "Engine Opt.: 12 of 17 on" amber (with
++// ", 1 turned off" when some turned themselves off), "Engine Opt.: none on" red.
++// A module without that count: "Engine Opt.: ON (13)" green, "Engine Opt.: ON, 1
++// turned off" amber. Always "Engine Opt.: OFF (Alt+Shift+F11)" grey when switched
++// off in flight, "Engine Opt.: starting" grey. Empty when the module is not loaded
+ // (the line is then left out).
+ [[nodiscard]] std::string format_engine_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
+ // DCS Control (0015): "Pupil shift: ON, 3.2 mm" green, "Pupil shift: no gaze"
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+--- a/src/core/diagnostic_overlay_model.cpp
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -150,11 +150,11 @@
+ std::string format_engine_line(const DiagnosticInputs& in, DiagnosticColor& color) {
+     const auto& e = in.engine;
+     if (!e.known) return {};
+-    if (!(e.bits & kEngineRunning)) { color = DiagnosticColor::grey; return "Engine: starting"; }
++    if (!(e.bits & kEngineRunning)) { color = DiagnosticColor::grey; return "Engine Opt.: starting"; }
+     if (!(e.bits & kEngineOn)) {
+         color = DiagnosticColor::grey;
+         const auto key = diagnostic_hotkey_label(in.engine_hotkey);
+-        return key.empty() ? std::string("Engine: OFF") : "Engine: OFF (" + key + ")";
++        return key.empty() ? std::string("Engine Opt.: OFF") : "Engine Opt.: OFF (" + key + ")";
+     }
+     const auto active = static_cast<unsigned>((e.bits >> 8) & 0xFFU);
+     const auto latched = static_cast<unsigned>((e.bits >> 16) & 0xFFU);
+@@ -163,17 +163,17 @@
+     const auto configured = static_cast<unsigned>((e.bits >> 24) & 0xFFU);
+     if (configured) {
+         const auto off = latched ? ", " + std::to_string(latched) + " turned off" : std::string();
+-        if (active == 0) { color = DiagnosticColor::red; return "Engine: none on" + off; }
+-        if (active >= configured && !latched) { color = DiagnosticColor::green; return "Engine: all " + std::to_string(configured) + " on"; }
++        if (active == 0) { color = DiagnosticColor::red; return "Engine Opt.: none on" + off; }
++        if (active >= configured && !latched) { color = DiagnosticColor::green; return "Engine Opt.: all " + std::to_string(configured) + " on"; }
+         color = DiagnosticColor::amber;
+-        return "Engine: " + std::to_string(active) + " of " + std::to_string(configured) + " on" + off;
++        return "Engine Opt.: " + std::to_string(active) + " of " + std::to_string(configured) + " on" + off;
+     }
+     if ((e.bits & kEngineLatched) || latched) {
+         color = DiagnosticColor::amber;
+-        return "Engine: ON, " + std::to_string(latched ? latched : 1U) + " turned off";
++        return "Engine Opt.: ON, " + std::to_string(latched ? latched : 1U) + " turned off";
+     }
+     color = DiagnosticColor::green;
+-    return "Engine: ON (" + std::to_string(active) + ")";
++    return "Engine Opt.: ON (" + std::to_string(active) + ")";
+ }
+ 
+ namespace {
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+--- a/tests/diagnostic_overlay_tests.cpp
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -68,19 +68,19 @@
+                 return text;
+             };
+             in.engine_hotkey = {0x7A, 6}; // Alt+Shift+F11
+-            require(engine(kEngineRunning | kEngineOn | (13ULL << 8), C::green) == "Engine: ON (13)", "engine on");
+-            require(engine(kEngineRunning | (13ULL << 8), C::grey) == "Engine: OFF (Alt+Shift+F11)", "engine off in flight");
+-            require(engine(kEngineRunning | kEngineOn | kEngineLatched | (12ULL << 8) | (1ULL << 16), C::amber) == "Engine: ON, 1 turned off", "engine latched");
+-            require(engine(0, C::grey) == "Engine: starting", "engine not ready");
++            require(engine(kEngineRunning | kEngineOn | (13ULL << 8), C::green) == "Engine Opt.: ON (13)", "engine on");
++            require(engine(kEngineRunning | (13ULL << 8), C::grey) == "Engine Opt.: OFF (Alt+Shift+F11)", "engine off in flight");
++            require(engine(kEngineRunning | kEngineOn | kEngineLatched | (12ULL << 8) | (1ULL << 16), C::amber) == "Engine Opt.: ON, 1 turned off", "engine latched");
++            require(engine(0, C::grey) == "Engine Opt.: starting", "engine not ready");
+             // 0014: all, some or none of the optimizations switched on in the ini.
+             const auto count = [](std::uint64_t active, std::uint64_t latched, std::uint64_t configured) {
+                 return kEngineRunning | kEngineOn | (active << 8) | (latched << 16) | (configured << 24) | (latched ? kEngineLatched : 0);
+             };
+-            require(engine(count(17, 0, 17), C::green) == "Engine: all 17 on", "all on");
+-            require(engine(count(12, 0, 17), C::amber) == "Engine: 12 of 17 on", "some on");
+-            require(engine(count(15, 1, 17), C::amber) == "Engine: 15 of 17 on, 1 turned off", "some turned off");
+-            require(engine(count(0, 0, 17), C::red) == "Engine: none on", "none on");
+-            require(engine(count(0, 0, 17) & ~kEngineOn, C::grey) == "Engine: OFF (Alt+Shift+F11)", "off in flight wins");
++            require(engine(count(17, 0, 17), C::green) == "Engine Opt.: all 17 on", "all on");
++            require(engine(count(12, 0, 17), C::amber) == "Engine Opt.: 12 of 17 on", "some on");
++            require(engine(count(15, 1, 17), C::amber) == "Engine Opt.: 15 of 17 on, 1 turned off", "some turned off");
++            require(engine(count(0, 0, 17), C::red) == "Engine Opt.: none on", "none on");
++            require(engine(count(0, 0, 17) & ~kEngineOn, C::grey) == "Engine Opt.: OFF (Alt+Shift+F11)", "off in flight wins");
+             in.engine = {};
+             C color{};
+             require(format_engine_line(in, color).empty(), "no line without the module");

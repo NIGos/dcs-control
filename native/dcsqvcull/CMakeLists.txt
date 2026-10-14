@@ -24,11 +24,14 @@ target_compile_definitions(DcsQvCullPayload PRIVATE ${DCSQV_DEFS})
 # Offline checks (frustum decoding, Scene.dll export lookup, timer cache, partition boost, kill switch, suite report).
 enable_testing()
 add_executable(DcsQvCullTests test/test_main.cpp src/d3d_vtbl.c)
-target_compile_options(DcsQvCullTests PRIVATE /W4 /O2 /wd4201 $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
+target_compile_options(DcsQvCullTests PRIVATE /W4 /O2 /wd4201 /bigobj $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
 target_compile_definitions(DcsQvCullTests PRIVATE UNICODE _UNICODE NOMINMAX)
 target_link_libraries(DcsQvCullTests PRIVATE user32 kernel32)
 # The profiler check looks for its own module name in the samples.
 set_target_properties(DcsQvCullTests PROPERTIES OUTPUT_NAME test_main)
+# The shared-memory layout check reads the module's copy at <exe folder>\..\src (the peer's test\ and src\ layout).
+set_target_properties(DcsQvCullTests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test)
+configure_file(src/dcsvr_perception_shm.h ${CMAKE_CURRENT_BINARY_DIR}/src/dcsvr_perception_shm.h COPYONLY)
 set(DCSQV_TEST_DIR ${CMAKE_CURRENT_BINARY_DIR}/test-run)
 file(MAKE_DIRECTORY ${DCSQV_TEST_DIR})
 add_test(NAME DcsQvCullTests COMMAND DcsQvCullTests WORKING_DIRECTORY ${DCSQV_TEST_DIR})

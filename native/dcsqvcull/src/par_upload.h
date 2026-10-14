@@ -150,7 +150,7 @@ bool StartHelpers() {
   for (int i = 0; i < kHelpers; ++i) {
     g_jobs[i].done.store(1);
     g_wake[i] = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    g_threads[i] = CreateThread(nullptr, 0, Helper, reinterpret_cast<void*>(static_cast<intptr_t>(i)), 0, nullptr);
+    g_threads[i] = CreateThread(nullptr, 0, qvexit::Thread<Helper>, reinterpret_cast<void*>(static_cast<intptr_t>(i)), 0, nullptr);
     if (!g_wake[i] || !g_threads[i]) return false;
   }
   return true;

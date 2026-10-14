@@ -91,8 +91,8 @@ internal static class WebVerification
         await Shot("cpu-boost-plan", "boost");
         await Step("window.dcsUi.run('checkReadiness')");
         await Shot("checks", "diagnostics");
-        await Shot("framegen-hotkey-capture", "framegen", "(()=>{const key=document.getElementById('input-diagnosticOverlayKey');key.closest('details').open=true;key.click();window.dispatchEvent(new KeyboardEvent('keydown',{keyCode:17,ctrlKey:true,shiftKey:true,bubbles:true,cancelable:true}));document.getElementById('setting-diagnosticOverlayKey').scrollIntoView({block:'center'});})()");
-        await core.ExecuteScriptAsync("window.dispatchEvent(new KeyboardEvent('keydown',{keyCode:27,bubbles:true,cancelable:true}));document.getElementById('input-diagnosticOverlayKey').closest('details').open=false;");
+        await Shot("framegen-hotkey-capture", "osd", "(()=>{const key=document.getElementById('input-diagnosticOverlayKey');key.click();window.dispatchEvent(new KeyboardEvent('keydown',{keyCode:17,ctrlKey:true,shiftKey:true,bubbles:true,cancelable:true}));document.getElementById('setting-diagnosticOverlayKey').scrollIntoView({block:'center'});})()");
+        await core.ExecuteScriptAsync("window.dispatchEvent(new KeyboardEvent('keydown',{keyCode:27,bubbles:true,cancelable:true}));");
         await core.ExecuteScriptAsync("window.setupWizard.open(); window.setupWizard.choose({route:'Pimax',features:{quad:true,dlss:true,framegen:true,boost:true}});");
         await Shot("guided-setup-choose", null);
         await Step("window.setupWizard.next()");
@@ -183,6 +183,8 @@ internal static class WebVerification
         PimaxFovea.SettingsPath = pimax;
         HeadsetRefresh.PimaxLogFolder = Path.Combine(fixture, "no-pimax-logs"); HeadsetRefresh.PimaxRuntimeFolder = Path.Combine(fixture, "no-pimax-runtime"); HeadsetRefresh.SteamVrSettings = Path.Combine(fixture, "no-steamvr.vrsettings");
         GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 4090", "NVIDIA", "32.0.15.0")];
+        NvidiaSettings.ThreadedOptimizationForDcs = () => new(ThreadedOptimization.Auto, false);
+        NvidiaSettings.MfaaForDcs = () => new(false, false);
         var update = UpdateFixture(Path.Combine(fixture, "updates"), service.StateRoot);
         var bridge = new WebBridge(service,capture: (_,_) => inventory,offline:true,flightSources:(_,_) => flight with { DcsLog = Path.Combine(logs, "dcs.log") },updates:update.Updates,releaseNotesPath:update.NotesPath);
         using var source = new HwndSource(new HwndSourceParameters("DCS Control offline web verification") { Width = 1320, Height = 920, WindowStyle = unchecked((int)0x80000000), PositionX = -32000, PositionY = -32000 });
@@ -265,14 +267,14 @@ internal static class WebVerification
                 }
                 {
                     // The diagnostic panel key recording, with Ctrl+Shift held.
-                    await core.ExecuteScriptAsync("(()=>{const ui=window.dcsUi;ui.navigate('framegen');const key=document.getElementById('input-diagnosticOverlayKey');key.closest('details').open=true;key.click();window.dispatchEvent(new KeyboardEvent('keydown',{keyCode:17,ctrlKey:true,shiftKey:true,bubbles:true,cancelable:true}));document.getElementById('setting-diagnosticOverlayKey').scrollIntoView({block:'center'});})()");
+                    await core.ExecuteScriptAsync("(()=>{const ui=window.dcsUi;ui.navigate('osd');const key=document.getElementById('input-diagnosticOverlayKey');key.click();window.dispatchEvent(new KeyboardEvent('keydown',{keyCode:17,ctrlKey:true,shiftKey:true,bubbles:true,cancelable:true}));document.getElementById('setting-diagnosticOverlayKey').scrollIntoView({block:'center'});})()");
                     await Task.Delay(80);
                     var raw = await core.ExecuteScriptAsync("JSON.stringify({overflow:document.documentElement.scrollWidth>innerWidth,footerVisible:document.getElementById('launch').getBoundingClientRect().bottom<=innerHeight,headerVisible:document.getElementById('pageTitle').getBoundingClientRect().top>=0,capturing:document.getElementById('input-diagnosticOverlayKey').classList.contains('capturing'),viewport:[innerWidth,innerHeight]})");
                     using var parsed = JsonDocument.Parse(JsonSerializer.Deserialize<string>(raw)!);
                     if (parsed.RootElement.GetProperty("overflow").GetBoolean() || !parsed.RootElement.GetProperty("capturing").GetBoolean() || !parsed.RootElement.GetProperty("footerVisible").GetBoolean()) throw new IOException("Key capture layout failed.");
                     var path = output+$"-{index++}.png"; await using (var stream = File.Create(path)) await core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png,stream);
                     screenshots.Add(new { page="framegen-key-capture",width,height,scale,path,layout=parsed.RootElement.Clone() });
-                    await core.ExecuteScriptAsync("window.dispatchEvent(new KeyboardEvent('keydown',{keyCode:27,bubbles:true,cancelable:true}));document.getElementById('input-diagnosticOverlayKey').closest('details').open=false;");
+                    await core.ExecuteScriptAsync("window.dispatchEvent(new KeyboardEvent('keydown',{keyCode:27,bubbles:true,cancelable:true}));");
                 }
                 await core.ExecuteScriptAsync("window.setupWizard.open(); window.setupWizard.choose({route:'Pimax',features:{quad:false,dlss:false,framegen:false,boost:false}});");
                 for (var stage = 0; stage < 2; stage++)

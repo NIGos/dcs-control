@@ -787,7 +787,7 @@ bool StartWorkers() {
   g_sem = CreateSemaphoreW(nullptr, 0, 1 << 20, nullptr);
   if (!g_sem) return false;
   for (int i = 0; i < kWorkers; ++i) {
-    g_workers[i] = CreateThread(nullptr, 0, PlanWorker, nullptr, 0, nullptr);
+    g_workers[i] = CreateThread(nullptr, 0, qvexit::Thread<PlanWorker>, nullptr, 0, nullptr);
     if (!g_workers[i]) {
       g_workersStop = true;
       ReleaseSemaphore(g_sem, kWorkers, nullptr);

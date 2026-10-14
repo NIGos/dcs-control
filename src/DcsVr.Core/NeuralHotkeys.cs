@@ -26,6 +26,17 @@ public static class NeuralHotkeys
     public const string EngineDefault = "122:6";
     /// <summary>The pupil shift layer's in-flight switch: Ctrl+Shift+F10.</summary>
     public const string PupilDefault = "121:5";
+    /// <summary>Depth boost's in-flight switch: Alt+Shift+F10, free in DCS's default bindings (not in
+    /// <see cref="DcsDefaultCodes"/>) and outside the engine optimizations' Ctrl+Alt keys.</summary>
+    public const string DepthBoostDefault = "121:6";
+    /// <summary>Depth boost's transition switch (gradual / predictive): Alt+Shift+F9, free in DCS's default bindings (not
+    /// in <see cref="DcsDefaultCodes"/>) and outside the engine optimizations' Ctrl+Alt keys.</summary>
+    public const string DepthTransitionDefault = "120:6";
+    /// <summary>Far depth's in-flight switch: Alt+Shift+F8.</summary>
+    public const string FarDepthDefault = "119:6";
+    /// <summary>Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down, with or without Shift: the engine optimizations module's
+    /// own keys (its test suite, for one, starts on Ctrl+Alt+F11 whatever else is held).</summary>
+    public static bool EngineModuleKey(Hotkey key) => (key.Modifiers & 3) == 3 && key.VirtualKey is >= 0x77 and <= 0x7B or 0x21 or 0x22;
     /// <summary>The fixed choices of earlier versions, checked free in DCS's default keyboard bindings and the user's own
     /// bindings on 2026-10-04. Profiles may still hold these labels.</summary>
     public static IReadOnlyDictionary<string, (int VirtualKey, int Modifiers)> All { get; } = new Dictionary<string, (int, int)>(StringComparer.OrdinalIgnoreCase)

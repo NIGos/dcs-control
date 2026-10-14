@@ -662,7 +662,7 @@ bool PatchVtable(void** vtbl) {
   Repatch(n);
   if (!g_refresher) {
     g_stopRefresher = false;
-    g_refresher = CreateThread(nullptr, 0, Refresher, nullptr, 0, nullptr);
+    g_refresher = CreateThread(nullptr, 0, qvexit::Thread<Refresher>, nullptr, 0, nullptr);
   }
   Log("d3d meter: patched context vtable %p", vtbl);
   return true;

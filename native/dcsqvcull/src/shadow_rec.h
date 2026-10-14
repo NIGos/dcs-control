@@ -110,6 +110,12 @@
 // deferred_rec.h and split_filter.h.
 #pragma once
 
+// The long-session round (2026-10-12): mesh relearn at reused addresses and
+// table compaction here and in gb_rec.h, cost-weight eviction
+// (part_weights.h), retired big pages across hot reloads (big_pages.h), the
+// D3DKMT process handle (perf_mon.h). The offline tests key on it.
+#define QV_LONG_SESSION_FIXES 1
+
 // gpu_split.h (measure only, [Suite] GpuSplit; also called from gb_rec.h):
 // GPU query brackets and a mesh census around the recorders' replays. g_on
 // stays 0 unless that suite phase runs.
@@ -489,7 +495,13 @@ inline void AllCbDwords(uint64_t m[2]) {
 // ---------------------------------------------------------------------------
 // Key and mesh tables (inserts on the render thread, lock-free lookups on
 // the workers; entries are published with a release store of their key and
-// never removed before unload)
+// never changed in place but for their state and lastUse). Long sessions:
+// a compaction (render thread, CompactInto) copies the entries still worth
+// keeping into fresh tables, which the jobs armed from then on use; the old
+// tables (and every reference their entries hold) are freed once no armed or
+// running job snapshot points at them (MaintainTables). A mesh at a reused
+// address with another identity supersedes its entry (kStale, relearnt by a
+// probe: PublishProbedMesh).
 // ---------------------------------------------------------------------------
 struct KeyEntry {
   std::atomic<void*> shader{nullptr};
@@ -520,6 +532,7 @@ struct KeyEntry {
   UINT psTexSlot[kMaxPsTex] = {};
   uint32_t psSampDeps = 0xffff;  // PS sampler slots FX Apply sets (all 16 when the dependencies were not read)
   uint32_t retiredAt = 0;        // render entry + 1 when retired (state kRetired)
+  mutable std::atomic<uint32_t> lastUse{0};  // render entry of the last job lookup (compaction age)
 };
 
 // A key whose bound state differed between two probes (after the slots the
@@ -543,7 +556,35 @@ struct MeshEntry {
   ID3D11Buffer* ib = nullptr;
   DXGI_FORMAT ibFormat = DXGI_FORMAT_UNKNOWN;
   UINT indexCount = 0;
+  uint32_t staleAt = 0;  // render entry + 1 when superseded (state kStale)
+  mutable std::atomic<uint32_t> lastUse{0};  // render entry of the last job lookup (compaction age)
 };
+
+// A mesh entry superseded by a newer probe of the same (mesh, shader,
+// technique): the object at that address no longer has the probed identity
+// (MeshLive::fp: its buffer objects, buffers, index size, stride, elements,
+// count), typically DCS freed it and allocated another mesh there (mission
+// loads). Kept with its references (a job in flight may hold it), skipped by
+// lookups, dropped by the next compaction after kMeshCooldown. While one is
+// younger than that, the mesh is not relearnt again (a mesh whose fields
+// change every frame stays residual, as before, at no probe cost).
+constexpr int kStale = -3;
+constexpr uint32_t kMeshCooldown = kKeyCooldown;
+// Compaction: entries no job looked up for kEvictAge render entries are not
+// copied (relearnt by a probe if they come back). Due when a table reaches
+// half its size and has grown by 1/16 since the last compaction, or when an
+// insert was refused (table full) and kCompactRetry entries have passed.
+constexpr uint32_t kEvictAge = 3600;
+constexpr uint32_t kCompactRetry = 600;
+
+inline void Touch(std::atomic<uint32_t>& use, uint32_t gen) {
+  if (use.load(std::memory_order_relaxed) != gen) use.store(gen, std::memory_order_relaxed);
+}
+// `last` within `age` render entries of `now` (a later `last`, as the
+// G-buffer jobs' useGen = entry + 1, counts as young).
+inline bool Young(uint32_t now, uint32_t last, uint32_t age) {
+  return static_cast<int32_t>(now - last) <= static_cast<int32_t>(age);
+}
 
 struct Tables {
   KeyEntry* keys = nullptr;      // kKeyTable
@@ -617,9 +658,27 @@ const MeshEntry* FindMesh(const Tables& t, void* mesh, void* shader, uint64_t te
     const MeshEntry& e = t.meshes[i];
     void* k = e.mesh.load(std::memory_order_acquire);
     if (!k) return nullptr;
-    if (k == mesh && e.shader == shader && e.tech == tech && e.effect == effect && e.techBegin == techBegin) return &e;
+    if (k == mesh && e.shader == shader && e.tech == tech && e.effect == effect && e.techBegin == techBegin &&
+        e.state.load(std::memory_order_acquire) != kStale)
+      return &e;
   }
   return nullptr;
+}
+// An entry of the mesh was superseded less than kMeshCooldown render entries
+// before `now` (no further relearn yet).
+bool MeshCooling(const Tables& t, const void* mesh, const void* shader, uint64_t tech, const void* effect,
+                 const void* techBegin, uint32_t now) {
+  if (!t.meshes || !mesh) return false;
+  size_t i = MeshHash(mesh, shader, tech) & (kMeshTable - 1);
+  for (size_t p = 0; p < kMeshTable; ++p, i = (i + 1) & (kMeshTable - 1)) {
+    const MeshEntry& e = t.meshes[i];
+    void* k = e.mesh.load(std::memory_order_acquire);
+    if (!k) return false;
+    if (k == mesh && e.shader == shader && e.tech == tech && e.effect == effect && e.techBegin == techBegin &&
+        e.state.load(std::memory_order_acquire) == kStale && now + 1 - e.staleAt < kMeshCooldown)
+      return true;
+  }
+  return false;
 }
 MeshEntry* NewMesh(Tables& t, void* mesh, void* shader, uint64_t tech) {
   if (!t.meshes || t.meshesUsed >= kMeshTable * 3 / 4) return nullptr;
@@ -745,6 +804,199 @@ const char* ReadMeshGuarded(const uint8_t* mesh, MeshLive& m) {
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     return "mesh not readable";
   }
+}
+
+// The live mesh (read: `why` from ReadMesh) still is the object the entry
+// was probed from. Recordable entries: everything the recorded draw binds
+// (fp, buffers, stride, index format). Rejected entries: the same identity
+// (fp; 0 for both when ReadMesh refused it the same early way), so a new,
+// recordable mesh at the address of a refused one is probed again.
+inline bool MeshSame(const MeshLive& l, const char* why, const MeshEntry& e) {
+  if (e.state.load(std::memory_order_acquire) <= 0) return l.fp == e.fp;
+  return !why && l.fp == e.fp && l.vb == e.vb && l.ib == e.ib && l.stride == e.stride && l.ibFormat == e.ibFormat;
+}
+bool LiveMeshSameGuarded(const uint8_t* mesh, const MeshEntry& e) {
+  MeshLive l;
+  const char* why = ReadMeshGuarded(mesh, l);
+  return MeshSame(l, why, e);
+}
+
+// What publishing a probed mesh did.
+enum : int { kPmKnown = 0, kPmCooling, kPmFull, kPmNew, kPmRelearnt };
+
+// Publishes the mesh a probe drew (inserting thread; both recorders): `live`
+// and `liveWhy` are the probe's ReadMesh of it before the draw, `why` the
+// probe's verdict (CheckMesh), `il` the input layout the draw bound. An entry
+// of the same (mesh, shader, technique, fingerprint) with the same identity
+// means nothing new (kPmKnown); one with another identity (a new mesh at a
+// reused address) is superseded by the new entry (kPmRelearnt), unless an
+// entry of it was superseded less than kMeshCooldown ago (kPmCooling: nothing
+// learnt). Lookups between the old entry's kStale store and the new entry's
+// publication find neither (pending: residual, as for an unknown mesh).
+int PublishProbedMesh(Tables& t, void* mesh, void* shader, uint64_t tech, void* effect, void* techBegin,
+                      const MeshLive& live, const char* liveWhy, const char* why, ID3D11InputLayout* il,
+                      uint32_t now) {
+  MeshEntry* old = const_cast<MeshEntry*>(FindMesh(t, mesh, shader, tech, effect, techBegin));
+  if (old && MeshSame(live, liveWhy, *old)) return kPmKnown;
+  if (old && MeshCooling(t, mesh, shader, tech, effect, techBegin, now)) return kPmCooling;
+  MeshEntry* m = NewMesh(t, mesh, shader, tech);
+  if (!m) return kPmFull;
+  m->shader = shader;
+  m->tech = tech;
+  m->effect = effect;
+  m->techBegin = techBegin;
+  m->why = why;
+  m->fp = live.fp;  // rejected entries too: their identity (MeshSame)
+  if (!why) {
+    if ((m->il = il)) m->il->AddRef();
+    m->vb = live.vb;
+    m->stride = live.stride;
+    m->ib = live.ib;
+    m->ibFormat = live.ibFormat;
+    m->indexCount = 3 * live.count;
+  }
+  m->lastUse.store(now, std::memory_order_relaxed);
+  m->state.store(why ? -1 : 1, std::memory_order_relaxed);
+  if (old) {
+    old->staleAt = now + 1;
+    old->state.store(kStale, std::memory_order_release);
+  }
+  PublishMesh(t, *m, mesh);
+  return old ? kPmRelearnt : kPmNew;
+}
+
+// ---------------------------------------------------------------------------
+// Compaction (render thread; both recorders)
+// ---------------------------------------------------------------------------
+// Entries are copied whole: their atomics are plain lock-free words (the
+// source is no longer written but for lastUse, which a running job of the old
+// tables may still store), then every held reference is taken again, so each
+// table releases its own references when it is freed.
+static_assert(sizeof(std::atomic<void*>) == sizeof(void*) && std::atomic<void*>::is_always_lock_free &&
+                  sizeof(std::atomic<int>) == sizeof(int) && std::atomic<uint32_t>::is_always_lock_free,
+              "table entries are copied as plain words");
+template <class E>
+void CopyEntry(E& d, const E& s) {
+  memcpy(static_cast<void*>(&d), static_cast<const void*>(&s), sizeof(E));
+}
+inline void AddRefIf(IUnknown* p) {
+  if (p) p->AddRef();
+}
+
+struct CompactStats {
+  uint32_t keysIn = 0, keysOut = 0, meshesIn = 0, meshesOut = 0, readsIn = 0, readsOut = 0;
+  // Dropped: unused for kEvictAge, retired keys past their cooldown, superseded meshes past theirs.
+  uint32_t aged = 0, retired = 0, stale = 0;
+  double ms = 0;
+};
+
+// When a compaction is due (CompactDue) and what the last one left.
+struct CompactPlan {
+  uint32_t nextKeys = kKeyTable / 2, nextMeshes = kMeshTable / 2, nextReads = ~0u;
+  uint64_t fullAt = 0;  // the table-full count at the last compaction
+  uint32_t lastAt = 0;
+  bool ran = false;
+};
+inline bool CompactDue(const CompactPlan& p, uint32_t keys, uint32_t meshes, uint32_t reads, uint64_t full,
+                       uint32_t now) {
+  if (keys >= p.nextKeys || meshes >= p.nextMeshes || reads >= p.nextReads) return true;
+  return full != p.fullAt && (!p.ran || now - p.lastAt >= kCompactRetry);
+}
+inline uint32_t NextAt(uint32_t used, uint32_t size) {
+  const uint32_t a = used + size / 16;
+  return a > size / 2 ? a : size / 2;
+}
+inline void CompactDone(CompactPlan& p, uint32_t keys, uint32_t keySize, uint32_t meshes, uint64_t full,
+                        uint32_t now) {
+  p.nextKeys = NextAt(keys, keySize);
+  p.nextMeshes = NextAt(meshes, static_cast<uint32_t>(kMeshTable));
+  p.fullAt = full;
+  p.lastAt = now;
+  p.ran = true;
+}
+
+// The meshes worth keeping of `from`, into `to` (allocated, empty): looked up
+// in the last `age` render entries, or superseded within kMeshCooldown.
+void CompactMeshes(const Tables& from, Tables& to, uint32_t now, uint32_t age, CompactStats& cs) {
+  if (!from.meshes) return;
+  for (size_t i = 0; i < kMeshTable; ++i) {
+    const MeshEntry& e = from.meshes[i];
+    void* key = e.mesh.load(std::memory_order_acquire);
+    if (!key) continue;
+    ++cs.meshesIn;
+    if (e.state.load(std::memory_order_acquire) == kStale) {
+      if (now + 1 - e.staleAt >= kMeshCooldown) {
+        ++cs.stale;
+        continue;
+      }
+    } else if (!Young(now, e.lastUse.load(std::memory_order_relaxed), age)) {
+      ++cs.aged;
+      continue;
+    }
+    MeshEntry* d = NewMesh(to, key, e.shader, e.tech);
+    if (!d) {
+      ++cs.aged;
+      continue;
+    }
+    CopyEntry(*d, e);
+    AddRefIf(d->il);
+    PublishMesh(to, *d, key);
+    ++cs.meshesOut;
+  }
+}
+
+void AddRefKey(KeyEntry& k) {
+  AddRefIf(k.vs), AddRefIf(k.dss), AddRefIf(k.bs), AddRefIf(k.rs), AddRefIf(k.ps);
+  for (ID3D11SamplerState* q : k.psSamp) AddRefIf(q);
+}
+
+// The keys and meshes worth keeping of `from`, into `to` (allocated, empty).
+// Keys: looked up in the last `age` render entries; retired ones while they
+// cool down (KeyCooling). No reader of `to` exists yet.
+void CompactInto(const Tables& from, Tables& to, uint32_t now, uint32_t age, CompactStats& cs) {
+  if (from.keys)
+    for (size_t i = 0; i < kKeyTable; ++i) {
+      const KeyEntry& e = from.keys[i];
+      void* key = e.shader.load(std::memory_order_acquire);
+      if (!key) continue;
+      ++cs.keysIn;
+      if (e.state.load(std::memory_order_acquire) == kRetired) {
+        if (now + 1 - e.retiredAt >= kKeyCooldown) {
+          ++cs.retired;
+          continue;
+        }
+      } else if (!Young(now, e.lastUse.load(std::memory_order_relaxed), age)) {
+        ++cs.aged;
+        continue;
+      }
+      KeyEntry* d = NewKey(to, key, e.tech, e.flags);
+      if (!d) {
+        ++cs.aged;
+        continue;
+      }
+      CopyEntry(*d, e);
+      AddRefKey(*d);
+      PublishKey(to, *d, key);
+      ++cs.keysOut;
+    }
+  CompactMeshes(from, to, now, age, cs);
+}
+
+// A job snapshot `a` still points at one of `old`'s arrays.
+inline bool SharesArrays(const Tables& a, const Tables& old) {
+  return (old.keys && a.keys == old.keys) || (old.meshes && a.meshes == old.meshes);
+}
+
+inline std::string CompactText(const CompactStats& c) {
+  char b[320];
+  snprintf(b, sizeof(b),
+           "keys %u -> %u, meshes %u -> %u%s; dropped %u unused for %u render entries, %u retired keys and %u "
+           "superseded meshes past their cooldown; %.2f ms",
+           c.keysIn, c.keysOut, c.meshesIn, c.meshesOut,
+           c.readsIn ? (", read sets " + std::to_string(c.readsIn) + " -> " + std::to_string(c.readsOut)).c_str()
+                     : "",
+           c.aged, kEvictAge, c.retired, c.stale, c.ms);
+  return b;
 }
 
 // ---------------------------------------------------------------------------
@@ -1358,6 +1610,10 @@ struct ThreadOut {
 };
 
 struct Job {
+  // Frame-heap generation at the start (StartJob, 0 = not started that way:
+  // no check); the workers stop reading DCS's casters once it changes.
+  uint64_t heapGen = 0;
+  std::atomic<uint8_t> recycled{0};
   // Inputs (render thread, written only while the workers are idle).
   void** vec = nullptr;
   uint32_t flags = 0, scope = 0;
@@ -1376,6 +1632,10 @@ struct Job {
   void* execObj = nullptr;     // first entry of the caster list handed to DCS's loop
   const Env* env = nullptr;
   const Tables* tab = nullptr;
+  // The tables as Arm saw them (tab points here in the game): a compaction
+  // swaps g_tab's arrays; the old ones live until no armed or running job's
+  // snapshot points at them.
+  Tables tabSnap;
   ID3D11Buffer* offBuf[kThreads] = {};       // t127 buffers: primary, helper workers
   ID3D11ShaderResourceView* offSrv[kThreads] = {};
   bool splitAllowed = false;   // helper workers share the job (stage A reads, both phases' groups)
@@ -1680,12 +1940,13 @@ PreMat* PreMatFor(Job& j, int t, uint8_t* mat) {
   return nullptr;
 }
 
-// The mesh entry still describes the live mesh (once per entry per thread).
+// The mesh entry still describes the live mesh (once per entry per thread):
+// MeshSame (a rejected entry: the same identity).
 bool PreMeshOk(Job& j, int t, uint8_t* mesh, const MeshEntry* me) {
   auto live = [&] {
     MeshLive l;
-    return !ReadMesh(mesh, l) && l.fp == me->fp && l.vb == me->vb && l.ib == me->ib && l.stride == me->stride &&
-           l.ibFormat == me->ibFormat;
+    const char* why = ReadMesh(mesh, l);
+    return MeshSame(l, why, *me);
   };
   size_t s = Mix(reinterpret_cast<uintptr_t>(me)) & (kMeshCache - 1);
   for (uint32_t p = 0; p < kMeshCache; ++p, s = (s + 1) & (kMeshCache - 1)) {
@@ -1785,7 +2046,10 @@ void PreOne(Job& j, int t, size_t i) {
   if (!(j.scope & (textured ? kScopeTextured : kScopeUntextured)) || (textured && !pm->mask) || !pm->shaderOk)
     return;  // the material's decision is the reason
   p.me = FindMesh(*j.tab, p.mesh, pm->shader, pm->tech, pm->effect, pm->techBegin);
-  if (p.me && p.me->state.load(std::memory_order_acquire) > 0) p.meshOk = PreMeshOk(j, t, p.mesh, p.me) ? 1 : 0;
+  if (p.me) {
+    Touch(p.me->lastUse, j.useGen);
+    p.meshOk = PreMeshOk(j, t, p.mesh, p.me) ? 1 : 0;
+  }
   p.page = *reinterpret_cast<uint32_t*>(item + 0xd0);
   p.srv = PageSrv(env, p.page);
   p.pso = *reinterpret_cast<uint32_t*>(item + 0xd4);
@@ -1798,10 +2062,47 @@ void PreOne(Job& j, int t, size_t i) {
 
 // Reads the chunk starting at caster `from` on thread t and publishes it
 // (chunkGen, release: its Pre entries and thread t's tables it points into).
+// R30 (as gb_rec.h, live crash 2026-10-11): the casters live in DCS's frame
+// heap, reset for the next frame; a job whose pass did not come in its frame
+// (late, stale) must not read them after that. Checked before each read
+// phase; a fault that slips between check and read is contained per job when
+// the heap was recycled (RecycledFilter), else the pool still latches off.
+std::atomic<uint64_t> g_recycledJobs{0}, g_recycledFaults{0}, g_recycledAtPass{0};
+inline bool HeapRecycled(const Job& j) {
+  return j.heapGen && g_frameHeapGen.load(std::memory_order_acquire) != j.heapGen;
+}
+// Field report 0.5.5 (GitHub NIGos/dcs-control#1): a local player slot change
+// (spawn as a Combined Arms commander) at 21:54:13.258, the G-buffer
+// executions on a new render graph 166 ms later, a G-buffer worker's AV on
+// [item+0xd4] 66 ms after that: the job had started on the new graph's
+// frames (generation current) while DCS was still freeing the previous
+// unit's objects. A fault in a job started from 1 s before to 2 s after a
+// scene change (g_sceneChangeQpc) is that, not a recorder bug: contained per
+// job, like a recycled heap. Elsewhere a fault still latches the recorder off.
+constexpr double kSceneBeforeMs = 1000.0, kSceneAfterMs = 2000.0;
+inline bool SceneChangingAt(int64_t tStart, int64_t change, double qpcToUs) {
+  if (!change || !tStart) return false;
+  const double ms = static_cast<double>(tStart - change) * qpcToUs / 1000.0;
+  return ms > -kSceneBeforeMs && ms < kSceneAfterMs;
+}
+inline bool SceneChanging(int64_t tStart) {
+  return SceneChangingAt(tStart, g_sceneChangeQpc.load(std::memory_order_acquire), defrec::QpcToUs());
+}
+inline int RecycledFilter(unsigned long code, const Job& j) {
+  if (code == EXCEPTION_ACCESS_VIOLATION && (HeapRecycled(j) || SceneChanging(j.tStart))) {
+    g_recycledFaults.fetch_add(1, std::memory_order_relaxed);
+    return EXCEPTION_EXECUTE_HANDLER;
+  }
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+
 void PreChunk(Job& j, int t, uint32_t from) {
   const uint32_t n = static_cast<uint32_t>(j.n);
   const uint32_t to = from + kPreChunk < n ? from + kPreChunk : n;
-  for (uint32_t i = from; i < to; ++i) PreOne(j, t, i);
+  if (HeapRecycled(j))  // counted as read without touching a caster: the primary drops the job
+    j.recycled.store(1, std::memory_order_relaxed);
+  else
+    for (uint32_t i = from; i < to; ++i) PreOne(j, t, i);
   j.th[t].pre += to - from;
   j.chunkGen[from / kPreChunk].store(j.gen, std::memory_order_release);
   j.preDone.fetch_add(to - from, std::memory_order_release);
@@ -1883,6 +2184,7 @@ void DecideMaterial(Job& j, MatSlot& ms, const PreMat& pm) {
   ms.effect = pm.effect;
   ms.techBegin = pm.techBegin;
   ms.key = FindKey(*j.tab, ms.shader, ms.tech, j.flags, ms.effect, ms.techBegin);
+  if (ms.key) Touch(ms.key->lastUse, j.useGen);
   if (!ms.key && KeyCooling(*j.tab, ms.shader, ms.tech, j.flags, ms.effect, ms.techBegin, 0, true)) {
     ms.why = kRKeyCooling;  // relearnt by a probe once its cooldown ends (Want below)
   } else if (!ms.key) {
@@ -1925,8 +2227,14 @@ int Classify(Job& j, size_t i) {
     Want(j, i, ms->shader, ms->tech, p.mesh);
     return kRMeshPending;
   }
+  if (!p.meshOk) {
+    // Another object at the mesh's address (or its fields changed): probed
+    // again, unless an entry of it was superseded lately (MeshCooling).
+    if (!MeshCooling(*j.tab, p.mesh, ms->shader, ms->tech, ms->effect, ms->techBegin, j.useGen))
+      Want(j, i, ms->shader, ms->tech, p.mesh);
+    return kRMeshChanged;
+  }
   if (me->state.load(std::memory_order_acquire) <= 0) return kRMeshRejected;
-  if (!p.meshOk) return kRMeshChanged;
   bool full = false;
   ID3D11ShaderResourceView* srv = PageFor(j, p.page, p.srv, &full);
   if (!srv) return full ? kRTooMany : kRPage;
@@ -2060,6 +2368,11 @@ bool PreAndCommit(Job& j) {
     LoadScope load(g_load);
     while (next < chunks) {
       if (j.chunkGen[next].load(std::memory_order_acquire) == j.gen) {
+        if (j.recycled.load(std::memory_order_relaxed) || HeapRecycled(j)) {
+          j.recycled.store(1, std::memory_order_relaxed);
+          j.commitUs = commitUs;
+          return false;  // not committed: j.result stays kBuildNone
+        }
         const int64_t c0 = defrec::Qpc();
         const size_t from = static_cast<size_t>(next) * kPreChunk;
         CommitRange(j, from, from + kPreChunk < n ? from + kPreChunk : n);
@@ -2342,6 +2655,10 @@ bool RecordGroups(defrec::Worker& w, Job& j, uint32_t from, uint32_t to, int lis
   ID3D11DeviceContext* dc = w.dc;
   if (!w.dc1 || w.ring.Mode() != defrec::CbMode::kOffsets || !j.dsv || !j.b7) return false;
   if (from >= to) return true;
+  if (HeapRecycled(j)) {  // the groups' casters are read while recording: not after the heap reset
+    j.recycled.store(1, std::memory_order_relaxed);
+    return false;
+  }
   uint32_t* off = j.offsets[list];
   uint32_t nOff = 0;
   for (uint32_t gi = from; gi < to; ++gi) {
@@ -2585,6 +2902,8 @@ inline bool SharePhase(const Job& j, uint32_t groups) {
 bool StartJob(Job& j, void** vec, bool early) {
   int st = kStartArmed;
   if (!j.startState.compare_exchange_strong(st, kStartRun, std::memory_order_acq_rel)) return false;
+  j.heapGen = g_frameHeapGen.load(std::memory_order_acquire);
+  j.recycled.store(0, std::memory_order_relaxed);
   j.vec = vec;
   j.startedEarly = early;
   j.tStart = defrec::Qpc();
@@ -2617,7 +2936,18 @@ bool JobMain(defrec::Worker& w, void* u) {
   SRWLOCK* lock = j.texLock;
   if (lock) AcquireSRWLockShared(lock);
   __try {
-    r = JobBody(w, j);
+    __try {
+      r = JobBody(w, j);
+    } __except (RecycledFilter(GetExceptionCode(), j)) {
+      j.recycled.store(1, std::memory_order_relaxed);
+      j.chunkFail.store(true, std::memory_order_release);
+      j.phase.store(kJobBuilt, std::memory_order_release);  // the pass sees a failed job
+      r = false;
+    }
+    if (j.recycled.load(std::memory_order_relaxed)) {
+      g_recycledJobs.fetch_add(1, std::memory_order_relaxed);
+      j.chunkFail.store(true, std::memory_order_release);
+    }
   } __finally {
     ReleaseHelpers(j);
     if (lock) ReleaseSRWLockShared(lock);
@@ -2716,6 +3046,41 @@ int WaitPhase(Job& j, int t, int seen, int64_t t0) {
   }
 }
 
+// A helper's stage A and phases. A fault on a recycled heap (RecycledFilter)
+// fails the job instead of the pool; recActive is dropped again so the
+// primary's ClosePhase does not wait for it.
+bool HelperPhases(defrec::Worker& w, Job& j, int T, ThreadOut& o, bool* inside) {
+  PreChunks(j, T);
+  const int64_t t0 = defrec::Qpc();
+  bool ok = true;
+  for (int seen = kRpWait; ok;) {
+    const int ph = WaitPhase(j, T, seen, t0);
+    if (ph == kRpEnd || ph == kRpWait) break;
+    seen = ph;
+    j.recActive.fetch_add(1, std::memory_order_seq_cst);
+    *inside = true;
+    if (j.recClosed.load(std::memory_order_seq_cst) < ph) {
+      const int64_t r0 = defrec::Qpc();
+      ok = ph == kRpTex ? RecordChunksLocked(w, j, T, &o.draws, &o.cbBytes) : RecordChunks(w, j, T, &o.draws, &o.cbBytes);
+      o.recordUs += (defrec::Qpc() - r0) * defrec::QpcToUs();
+    }
+    *inside = false;
+    j.recActive.fetch_sub(1, std::memory_order_seq_cst);
+  }
+  return ok;
+}
+bool HelperBody(defrec::Worker& w, Job& j, int T, ThreadOut& o) {
+  bool inside = false;
+  __try {
+    return HelperPhases(w, j, T, o, &inside);
+  } __except (RecycledFilter(GetExceptionCode(), j)) {
+    if (inside) j.recActive.fetch_sub(1, std::memory_order_seq_cst);
+    j.recycled.store(1, std::memory_order_relaxed);
+    j.chunkFail.store(true, std::memory_order_release);
+    return false;
+  }
+}
+
 // Helper worker T (1..kThreads-1): its share of stage A, then chunks of each
 // phase while it is open, on its own list. Every wait is bounded.
 template <int T>
@@ -2725,21 +3090,7 @@ bool HelperMain(defrec::Worker& w, void* u) {
   WaitForSingleObject(j.preGo, kStartWaitMs + 50);
   if (j.preState.load(std::memory_order_acquire) != kGoRun) return false;
   ThreadOut& o = j.th[T];
-  PreChunks(j, T);
-  const int64_t t0 = defrec::Qpc();
-  bool ok = true;
-  for (int seen = kRpWait; ok;) {
-    const int ph = WaitPhase(j, T, seen, t0);
-    if (ph == kRpEnd || ph == kRpWait) break;
-    seen = ph;
-    j.recActive.fetch_add(1, std::memory_order_seq_cst);
-    if (j.recClosed.load(std::memory_order_seq_cst) < ph) {
-      const int64_t r0 = defrec::Qpc();
-      ok = ph == kRpTex ? RecordChunksLocked(w, j, T, &o.draws, &o.cbBytes) : RecordChunks(w, j, T, &o.draws, &o.cbBytes);
-      o.recordUs += (defrec::Qpc() - r0) * defrec::QpcToUs();
-    }
-    j.recActive.fetch_sub(1, std::memory_order_seq_cst);
-  }
+  const bool ok = HelperBody(w, j, T, o);
   o.drew = ok && o.draws > 0;  // nothing taken: no list, the others drew every chunk
   o.tDone = defrec::Qpc();
   return o.drew;
@@ -3159,6 +3510,8 @@ struct ProbeIn {
 std::atomic<uint32_t> g_logBudget{24};
 std::atomic<uint64_t> g_keysOk{0}, g_keysRejected{0}, g_keyDowngrades{0}, g_meshesOk{0}, g_meshesRejected{0},
     g_tableFull{0}, g_probeInconclusive{0}, g_keyRelearnt{0};
+// Meshes relearnt because another object took their address (PublishProbedMesh).
+std::atomic<uint64_t> g_meshRelearnt{0};
 std::atomic<uint32_t> g_diffLogBudget{32};
 
 void LogReject(const char* what, const ProbeIn& in, uint32_t flags, const char* why) {
@@ -3191,6 +3544,7 @@ bool ProcessProbe(Tables& t, const ProbeIn& in, const KeyStatic& st, const Probe
       return true;
     }
     if (relearn) g_keyRelearnt++;
+    k->lastUse.store(now, std::memory_order_relaxed);
     k->tech = in.tech;
     k->flags = c.flags;
     k->effect = in.effect;
@@ -3248,29 +3602,16 @@ bool ProcessProbe(Tables& t, const ProbeIn& in, const KeyStatic& st, const Probe
       return true;
     }
   }
-  if (k->state.load() <= 0 || FindMesh(t, in.mesh, in.shader, in.tech, in.effect, in.techBegin)) return true;
+  if (k->state.load() <= 0) return true;
   const char* mwhy = CheckMesh(c, f);
-  MeshEntry* m = NewMesh(t, in.mesh, in.shader, in.tech);
-  if (!m) {
+  const int pm = PublishProbedMesh(t, in.mesh, in.shader, in.tech, in.effect, in.techBegin, f.mesh, f.meshWhy, mwhy,
+                                   c.il, now);
+  if (pm == kPmKnown || pm == kPmCooling) return true;
+  if (pm == kPmFull) {
     g_tableFull++;
     return true;
   }
-  m->shader = in.shader;
-  m->tech = in.tech;
-  m->effect = in.effect;
-  m->techBegin = in.techBegin;
-  m->why = mwhy;
-  if (!mwhy) {
-    m->fp = f.mesh.fp;
-    if ((m->il = c.il)) m->il->AddRef();
-    m->vb = f.mesh.vb;
-    m->stride = f.mesh.stride;
-    m->ib = f.mesh.ib;
-    m->ibFormat = f.mesh.ibFormat;
-    m->indexCount = 3 * f.mesh.count;
-  }
-  m->state.store(mwhy ? -1 : 1, std::memory_order_relaxed);
-  PublishMesh(t, *m, in.mesh);
+  if (pm == kPmRelearnt) g_meshRelearnt++;
   if (mwhy) {
     g_meshesRejected++;
     LogReject("mesh", in, c.flags, mwhy);
@@ -3341,6 +3682,12 @@ instcount::OverrideFn g_prevOverride = nullptr;
 DWORD g_renderTid = 0;
 Env g_env;
 Tables g_tab;
+// Long sessions (render thread): the tables a compaction replaced, freed once
+// no job snapshot uses them; when the next compaction is due; totals.
+Tables g_tabOld;
+CompactPlan g_plan;
+CompactStats g_lastCompact;
+std::atomic<uint64_t> g_compactions{0}, g_oldFreed{0};
 defrec::Pool g_pool;  // worker Wk(s, t): cascade s's primary (t 0) and helpers (t 1..kThreads-1)
 inline int Wk(int s, int t) { return s + kSlots * t; }
 inline bool SlotBusy(int s) {
@@ -3987,7 +4334,14 @@ bool TryProbe(PassCtx& pc, void* self, void* ctx, uint64_t* ret) {
   const KeyEntry* k = FindKey(g_tab, in.shader, in.tech, pc.flags, in.effect, in.techBegin);
   if (k && k->state.load() <= 0) return false;
   if (!k && KeyCooling(g_tab, in.shader, in.tech, pc.flags, in.effect, in.techBegin, g_entryGen, false)) return false;
-  if (k && FindMesh(g_tab, in.mesh, in.shader, in.tech, in.effect, in.techBegin)) return false;  // already learned
+  if (k) {
+    // Already learned, unless the object at the address is another mesh now
+    // (and was not relearnt lately).
+    const MeshEntry* m = FindMesh(g_tab, in.mesh, in.shader, in.tech, in.effect, in.techBegin);
+    if (m && (LiveMeshSameGuarded(in.mesh, *m) ||
+              MeshCooling(g_tab, in.mesh, in.shader, in.tech, in.effect, in.techBegin, g_entryGen)))
+      return false;
+  }
   const bool textured = instcount::IsTextured(in.mat);
   const shadowtex::MaskEntry* mask = textured ? MaskForMat(in.mat) : nullptr;
   if (textured && !mask) return false;  // its read sets are not known now: probe it later
@@ -4306,6 +4660,7 @@ void TakeJob(PassCtx& pc, void** vec) {
     pc.reason = kPFailed;
     return;
   }
+  if (HeapRecycled(j)) g_recycledAtPass.fetch_add(1, std::memory_order_relaxed);  // diagnostic: expected 0
   st.jobsUsed++;
   st.buildNs += static_cast<uint64_t>(j.buildUs * 1000.0);
   st.commitNs += static_cast<uint64_t>(j.commitUs * 1000.0);
@@ -4527,7 +4882,8 @@ bool Arm(int s) {
   j.b7 = cs.b7;
   j.execObj = &g_execObj[s];
   j.env = &g_env;
-  j.tab = &g_tab;
+  j.tabSnap = g_tab;  // the arrays this job reads, whatever a compaction does meanwhile
+  j.tab = &j.tabSnap;
   j.tex = g_tex.e ? &g_tex : nullptr;
   j.texLock = &g_texLock;
   j.useGen = g_entryGen;
@@ -4605,6 +4961,48 @@ void ApplyPriority() {
   g_priorityApplied = p;
 }
 
+// The replaced tables are in use while a job armed with them is armed or
+// its workers run (render thread).
+bool OldTablesInUse() {
+  for (int s = 0; s < kSlots; ++s) {
+    const Casc& cs = g_casc[s];
+    if (cs.job && SharesArrays(cs.job->tabSnap, g_tabOld) && (cs.armed || SlotBusy(s))) return true;
+  }
+  return false;
+}
+
+// Long sessions (render thread, render entry, before this entry's jobs are
+// armed): frees the replaced tables once unused, then compacts when due
+// (CompactDue): the entries worth keeping are copied into new tables, which
+// every job armed from now on reads. Never two old sets: a compaction waits
+// until the last one's tables are freed.
+void MaintainTables() {
+  if (g_tabOld.keys || g_tabOld.meshes) {
+    if (OldTablesInUse()) return;
+    FreeTables(g_tabOld);
+    g_oldFreed++;
+  }
+  if (!g_tab.keys || !g_tab.meshes ||
+      !CompactDue(g_plan, g_tab.keysUsed, g_tab.meshesUsed, 0, g_tableFull.load(), g_entryGen))
+    return;
+  const int64_t t0 = defrec::Qpc();
+  Tables nt;
+  if (!AllocTables(nt)) {
+    FreeTables(nt);
+    CompactDone(g_plan, g_tab.keysUsed, kKeyTable, g_tab.meshesUsed, g_tableFull.load(), g_entryGen);
+    return;
+  }
+  CompactStats cs;
+  CompactInto(g_tab, nt, g_entryGen, kEvictAge, cs);
+  g_tabOld = g_tab;
+  g_tab = nt;
+  cs.ms = (defrec::Qpc() - t0) * defrec::QpcToUs() / 1000.0;
+  g_lastCompact = cs;
+  CompactDone(g_plan, g_tab.keysUsed, kKeyTable, g_tab.meshesUsed, g_tableFull.load(), g_entryGen);
+  Log("shadow recorder: tables compacted (#%llu, render entry %u): %s",
+      static_cast<unsigned long long>(++g_compactions), g_entryGen, CompactText(cs).c_str());
+}
+
 void OnRender(void* rg, void* renderables) {
   if (!g_renderTid || GetCurrentThreadId() != g_renderTid) return;
   g_inside.fetch_add(1);
@@ -4614,6 +5012,7 @@ void OnRender(void* rg, void* renderables) {
   ApplyPriority();
   const bool active = Active();
   if (active) TryMaintain();  // the texture table, before this entry's jobs take its lock
+  if (active) MaintainTables();  // the key and mesh tables (long sessions)
   const uint32_t scope = g_scope.load();
   // A job started before the last cascade pass of the previous entry (or
   // before that entry) was started for an earlier frame (e.g. while the
@@ -4891,6 +5290,8 @@ bool Install() {
     // No worker runs here (the pool is not started or was stopped).
     for (Casc& cs : g_casc) FreeJob(cs.job);
     FreeTables(g_tab);
+    FreeTables(g_tabOld);
+    g_plan = CompactPlan();
     FreeTex(g_tex);
     for (auto*& p : g_offSrv) SafeRel(p);
     for (auto*& p : g_offBuf) SafeRel(p);
@@ -4910,7 +5311,7 @@ bool Install() {
   if (shadowinst::g_deviceSingleThreaded) return fail("the D3D11 device is single-threaded");
   const defrec::Caps caps = defrec::QueryCaps(dev);
   if (!caps.commandLists || !caps.cbOffsetting || !caps.device1)
-    return fail("the driver lacks command lists or constant-buffer offsets");
+    return fail(defrec::DescribeCapsFailure(dev, caps));
   if (!AllocTables(g_tab)) return fail("no memory for the tables");
   if (!g_tex.e && !AllocTex(g_tex, 1u << 13)) return fail("no memory for the texture table");
   for (int s = 0; s < kSlots; ++s)
@@ -5027,6 +5428,8 @@ bool Shutdown() {
     SafeRel(cs.b7);
   }
   FreeTables(g_tab);
+  FreeTables(g_tabOld);  // no job runs: nothing reads the replaced tables either
+  g_plan = CompactPlan();
   FreeTex(g_tex);
   g_pendMissCount = g_pendStaleCount = 0;
   g_pendEvict = false;
@@ -5062,6 +5465,52 @@ void ResetCounters() {
   g_sortCalls = g_sortStarts = 0;
 }
 
+// R30 L7: the 10-s block as one line (the full block: [Log] RecorderDetail=1).
+// Summed over the cascades in scope: passes executed from command lists and
+// why the others were drawn stock (late = the job missed the wait budget),
+// jobs refused (worker still busy), casters drawn from lists (on helper
+// lists), the render thread's wait and replay/execute time, CB ring bytes.
+void LogSummary(const char* label, double frames) {
+  const double f = frames > 0 ? frames : 1.0;
+  const uint32_t scope = g_scope.load();
+  uint64_t passes = 0, exec = 0, late = 0, refused = 0, casters = 0, recorded = 0, helperDraws = 0, draws = 0;
+  uint64_t waitNs = 0, waitMax = 0, execNs = 0, cb = 0;
+  int cascades = 0;
+  for (int c = 0; c < kSlots; ++c) {
+    if (!InScope(scope, c)) continue;
+    ++cascades;
+    const Stat& s = g_casc[c].st;
+    passes += s.passes.load();
+    exec += s.passReason[kPExecuted].load();
+    late += s.passReason[kPLate].load();
+    refused += s.refused.load();
+    casters += s.casters.load();
+    recorded += s.recorded.load();
+    draws += s.draws.load() + s.drawsHelper.load();
+    helperDraws += s.drawsHelper.load();
+    waitNs += s.waitNs.load();
+    waitMax = (std::max)(waitMax, s.waitMaxNs.load());
+    execNs += s.execNs.load();
+    cb += s.cbBytes.load();
+  }
+  Log("  shadow recorder %s: %.0f frames, %d cascades (split 0x%x, helpers %u)%s; executed %llu of %llu passes "
+      "(%.1f%%), late %llu, other stock %llu; jobs refused %llu; casters from lists %.0f/frame of %.0f (%.1f%%, "
+      "helper lists %.1f%% of draws); render thread wait %.3f ms/frame (max %.3f), replay+execute %.3f ms/frame; CB "
+      "ring %.2f MB/frame; jobs stopped on a recycled frame heap %llu (faults contained %llu), used after a reset %llu; "
+      "tables keys %u meshes %u, meshes relearnt %llu, compactions %llu",
+      label, frames, cascades, g_split.load(), g_helpers.load(), g_disabled.load() ? ", DISABLED" : "",
+      static_cast<unsigned long long>(exec), static_cast<unsigned long long>(passes),
+      passes ? 100.0 * exec / passes : 0.0, static_cast<unsigned long long>(late),
+      static_cast<unsigned long long>(passes > exec + late ? passes - exec - late : 0),
+      static_cast<unsigned long long>(refused), recorded / f,
+      casters / f, casters ? 100.0 * recorded / casters : 0.0, draws ? 100.0 * helperDraws / draws : 0.0,
+      waitNs / 1e6 / f, waitMax / 1e6, execNs / 1e6 / f, cb / 1048576.0 / f,
+      static_cast<unsigned long long>(g_recycledJobs.exchange(0)),
+      static_cast<unsigned long long>(g_recycledFaults.exchange(0)),
+      static_cast<unsigned long long>(g_recycledAtPass.exchange(0)), g_tab.keysUsed, g_tab.meshesUsed,
+      static_cast<unsigned long long>(g_meshRelearnt.load()), static_cast<unsigned long long>(g_compactions.load()));
+}
+
 void LogCounters(const char* label, double frames) {
   const double f = frames > 0 ? frames : 1.0;
   const uint32_t scope = g_scope.load();
@@ -5077,6 +5526,12 @@ void LogCounters(const char* label, double frames) {
       g_tab.meshesUsed, static_cast<unsigned long long>(g_meshesOk.load()),
       static_cast<unsigned long long>(g_meshesRejected.load()), static_cast<unsigned long long>(g_tableFull.load()),
       static_cast<unsigned long long>(g_faults.load()));
+  Log("  shadow recorder %s tables: keys %u of %zu, meshes %u of %zu; meshes relearnt at a reused address %llu; "
+      "compactions %llu (replaced tables freed %llu%s)%s%s",
+      label, g_tab.keysUsed, kKeyTable, g_tab.meshesUsed, kMeshTable,
+      static_cast<unsigned long long>(g_meshRelearnt.load()), static_cast<unsigned long long>(g_compactions.load()),
+      static_cast<unsigned long long>(g_oldFreed.load()), g_tabOld.keys ? ", one set still in use" : "",
+      g_compactions.load() ? "; last: " : "", g_compactions.load() ? CompactText(g_lastCompact).c_str() : "");
   Log("  shadow recorder %s sort hook: %s; %.0f collection sorts/frame, %.2f job starts/frame from it", label,
       g_sortPatched ? "on" : "off (jobs start at render entry)", g_sortCalls.load() / f, g_sortStarts.load() / f);
   for (int c = 0; c < kSlots; ++c) {

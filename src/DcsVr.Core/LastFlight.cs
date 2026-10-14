@@ -12,11 +12,14 @@ namespace DcsVr.Core;
 /// <param name="ManagedProfiles">The app's managed\profiles folder: OFXR's flight logs in each profile's ofxr folder.</param>
 /// <param name="BoostStatus">%LOCALAPPDATA%\DcsControl\boost\status.json written by the CPU Boost helper.</param>
 /// <param name="DcsBin">DCS's bin folder: Cheeky's CheekyFoveatedDLSS logs.</param>
-public sealed record FlightSources(string? DcsLog, string? PimaxLogDirectory = null, string? ManagedProfiles = null, string? BoostStatus = null, string? DcsBin = null);
+/// <param name="QuadViewsLog">%LOCALAPPDATA%\Quad-Views-Foveated\Quad-Views-Foveated.log, rewritten at each start: whether
+/// eye tracking reached the bundled Quad Views.</param>
+public sealed record FlightSources(string? DcsLog, string? PimaxLogDirectory = null, string? ManagedProfiles = null, string? BoostStatus = null, string? DcsBin = null,
+    string? QuadViewsLog = null);
 
 /// <summary>A summary of the last DCS session, read from logs after DCS exits. Parts without a source are null.</summary>
 public sealed record FlightSummary(DateTimeOffset Start, DateTimeOffset End, bool Closed, int? DcsPid, HeadsetFrames? Headset, FramegenShare? Framegen,
-    FrameTimes? FrameTime, NeuralState? Dlss5, BoostResult? Boost, PrefetchResult? Prefetch)
+    FrameTimes? FrameTime, NeuralState? Dlss5, BoostResult? Boost, PrefetchResult? Prefetch, EyeTrackingState? EyeTracking = null)
 {
     public TimeSpan Duration => End - Start;
 }
@@ -37,6 +40,8 @@ public sealed record NeuralState(string State, string? Version, int Toggles, boo
 public sealed record BoostResult(string State, int Moved, int Restored, IReadOnlyList<string> Errors);
 /// <param name="AverageCallsPerSecond">Average over the 10 s reports with any calls.</param>
 /// <param name="SkippedPercent">Share of all calls the fix skipped, weighted by calls.</param>
+/// <summary>Quad Views' "Eye tracking is supported" or "is not supported" for the last session.</summary>
+public sealed record EyeTrackingState(bool Supported);
 public sealed record PrefetchResult(double AverageCallsPerSecond, double PeakCallsPerSecond, double SkippedPercent, int Reports);
 
 /// <summary>Reads <see cref="FlightSummary"/> defensively and cheaply: only the start and tail of dcs.log, only the
@@ -61,8 +66,40 @@ public static partial class LastFlight
             ofxr?.Share, ofxr?.Times,
             ReadCheeky(sources.DcsBin, start, end),
             boost?.Result,
-            ReadPrefetch(PrefetchLog(log), start, end));
+            ReadPrefetch(PrefetchLog(log), start, end),
+            ReadEyeTracking(sources.QuadViewsLog, start, end));
     }
+
+    // ---- Quad Views --------------------------------------------------------------------------------------------------
+
+    private static EyeTrackingState? ReadEyeTracking(string? path, DateTimeOffset start, DateTimeOffset end)
+    {
+        try
+        {
+            if (path is null || !File.Exists(path)) return null;
+            return ParseEyeTracking(Cached(path, () => ReadLines(path, 8L * 1024 * 1024, l => l.Contains("Eye tracking is", StringComparison.Ordinal) || l.Contains(" is active", StringComparison.Ordinal))) ?? [], start, end);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    /// <summary>"2026-10-13 15:19:14 +0200: Eye tracking is not supported", once per OpenXR instance: the last one after
+    /// the last "layer (v…) is active", within the session (a file can hold several DCS starts, or an older one).</summary>
+    public static EyeTrackingState? ParseEyeTracking(IEnumerable<string> lines, DateTimeOffset start, DateTimeOffset end)
+    {
+        EyeTrackingState? state = null;
+        foreach (var line in lines)
+        {
+            var m = QuadViewsLineRegex().Match(line);
+            if (!m.Success || !DateTimeOffset.TryParseExact(m.Groups[1].Value + m.Groups[2].Value.Insert(3, ":"), "yyyy-MM-dd HH:mm:sszzz", CultureInfo.InvariantCulture, DateTimeStyles.None, out var at)) continue;
+            if (at < start.AddMinutes(-1) || at > end.AddMinutes(1)) continue;
+            var text = m.Groups[3].Value;
+            if (text.Contains(" is active", StringComparison.Ordinal) && text.Contains("layer (v", StringComparison.Ordinal)) state = null;
+            else if (text.StartsWith("Eye tracking is not supported", StringComparison.Ordinal)) state = new(false);
+            else if (text.StartsWith("Eye tracking is supported", StringComparison.Ordinal)) state = new(true);
+        }
+        return state;
+    }
+    [GeneratedRegex(@"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ([+-]\d{4}): (.*)$")] private static partial Regex QuadViewsLineRegex();
 
     // ---- dcs.log ---------------------------------------------------------------------------------------------------
 

@@ -1,0 +1,42 @@
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -5421,7 +5421,10 @@
+             state->d3d11_device.Get(), current_layer_directory() / L"ofxr_bridge.ini",
+             state->steamvr_delivery.get());
+     } catch (...) {}
+-    if (state->graphics_binding == SessionGraphicsBinding::d3d11 &&
++    // DCS Control (0019): with generation off ([ofxr] enabled=0, read once at
++    // instance creation) nothing would ever use this D3D12 device and its
++    // high-priority queue: the in-headset panel draws on the D3D11 device.
++    if (state->graphics_binding == SessionGraphicsBinding::d3d11 && state->menu_enabled &&
+         (state->graphics_binding_capabilities & 3ULL) == 3ULL) {
+         const HRESULT bridge_device_result =
+             xrfg::create_d3d12_device_for_d3d11(
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+--- a/src/core/diagnostic_overlay_model.cpp
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -249,6 +249,11 @@
+     if (!depth) return text;
+     DiagnosticColor depth_color{};
+     text += "; " + depth_part(in, depth_color, false);
++    // DCS Control (0019): a line too long for the panel drops the eye distance
++    // rather than being cut in the middle of it.
++    if (const auto ipd = text.find(", IPD "); ipd != std::string::npos &&
++        text.size() > diagnostic_panel_columns(kDiagnosticPanelWidth))
++        text.erase(ipd);
+     // The line takes the more urgent colour of its two parts.
+     if (color == DiagnosticColor::amber || depth_color == DiagnosticColor::amber) color = DiagnosticColor::amber;
+     else if (color == DiagnosticColor::green || depth_color == DiagnosticColor::green) color = DiagnosticColor::green;
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+--- a/tests/diagnostic_overlay_tests.cpp
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -133,6 +133,8 @@
+             in.ipd = {true, 6560ULL | (7742ULL << 16) | (120ULL << 32) | (1ULL << 48)};
+             require(pupil(alone, C::green) == "Depth boost: x1.32 far, IPD 77.4 mm", "depth with the eye distance");
+             require(pupil(on | boost, C::green) == "Pupil shift: ON, 3.2 mm; Depth x1.32 far, IPD 77.4 mm", "both with the eye distance");
++            const auto cockpit = (on | boost | kPupilSimulated) & ~(3ULL << 24) | (1ULL << 24);
++            require(pupil(cockpit, C::amber) == "Pupil shift: ON, simulated gaze; Depth x1.32 cockpit", "too long: the IPD is dropped, not cut");
+             in.ipd = {true, 0};
+             require(pupil(alone, C::green) == "Depth boost: x1.32 far", "eye distance not known yet");
+             in.ipd = {};

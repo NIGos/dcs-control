@@ -1,0 +1,90 @@
+diff --git a/include/xrfg/diagnostic_overlay_model.hpp b/include/xrfg/diagnostic_overlay_model.hpp
+--- a/include/xrfg/diagnostic_overlay_model.hpp
++++ b/include/xrfg/diagnostic_overlay_model.hpp
+@@ -173,11 +173,16 @@
+ // filtered, bits 8-15 the strength x100, bits 16-31 frames filtered in the
+ // last second, bits 32-47 resets in the last second. known is false when the
+ // bundled Quad Views (or its export) is not loaded.
++// 0020: bit 0 means on and active (the opaque periphery, not the focus debug
++// view), bit 2 the status is valid (0 before the first frame), bits 48-55 an
++// update counter; stale is set by the panel when that counter stopped moving.
+ struct PeripheryStatus {
+     bool known{};
+     std::uint64_t bits{};
++    bool stale{};
+ };
+ inline constexpr std::uint64_t kPeripheryOn = 1ULL << 0;
++inline constexpr std::uint64_t kPeripheryValid = 1ULL << 2;
+ 
+ struct DiagnosticInputs {
+     float output_fps{};        // what the overlay's counter shows
+@@ -228,6 +233,8 @@
+ // periphery line: "Periphery: ON 0.50, 88 fps" green, "Periphery: ON, not
+ // filtering" amber (the pass runs but filtered nothing in the last second),
+ // "Periphery: OFF" grey. Empty without the bundled Quad Views' export.
++// 0020: "Periphery: starting" grey before its first frame, "Periphery: not
++// updating" amber when its status stopped changing for 2 s.
+ [[nodiscard]] std::string format_periphery_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
+ // DCS VR Control (0007): "VRAM 28.4 / 32.0 GB" - what every process has
+ // resident in the adapter's dedicated memory against that memory, where the
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+--- a/src/core/diagnostic_overlay_model.cpp
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -223,6 +223,8 @@
+ std::string format_periphery_line(const DiagnosticInputs& in, DiagnosticColor& color) {
+     const auto& p = in.periphery;
+     if (!p.known) return {};
++    if (!(p.bits & kPeripheryValid)) { color = DiagnosticColor::grey; return "Periphery: starting"; }
++    if (p.stale) { color = DiagnosticColor::amber; return "Periphery: not updating"; }
+     if (!(p.bits & kPeripheryOn)) { color = DiagnosticColor::grey; return "Periphery: OFF"; }
+     const auto frames = static_cast<unsigned>((p.bits >> 16) & 0xFFFFU);
+     if (frames == 0U) { color = DiagnosticColor::amber; return "Periphery: ON, not filtering"; }
+diff --git a/src/layer/openxr_fps_overlay.cpp b/src/layer/openxr_fps_overlay.cpp
+--- a/src/layer/openxr_fps_overlay.cpp
++++ b/src/layer/openxr_fps_overlay.cpp
+@@ -135,6 +135,9 @@
+     EngineStatusFn periphery_status{};
+     HMODULE periphery_module{};
+     std::uint64_t next_periphery_lookup_ms{};
++    // 0020: the update counter (bits 48-55) and when it last moved.
++    unsigned periphery_counter{0x100};
++    std::uint64_t periphery_moved_ms{};
+     std::uint64_t next_status_open_ms{};
+ 
+     ~Impl() {
+@@ -425,7 +428,11 @@
+                 L"XR_APILAYER_MBUCCHIA_quad_views_foveated.dll", "DcsVr_QuadViewsPeripheryStatus", periphery_module);
+             if (!periphery_status) return;
+         }
+-        inputs.periphery = {true, periphery_status()};
++        const auto bits = periphery_status();
++        const auto tick = GetTickCount64();
++        const auto counter = static_cast<unsigned>((bits >> 48) & 0xFFU);
++        if (counter != periphery_counter) { periphery_counter = counter; periphery_moved_ms = tick; }
++        inputs.periphery = {true, bits, (bits & kPeripheryValid) != 0 && tick - periphery_moved_ms > 2000};
+     }
+ 
+     void read_engine(DiagnosticInputs& inputs) {
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+--- a/tests/diagnostic_overlay_tests.cpp
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -145,11 +145,15 @@
+                 if (!text.empty()) require(color == expected, "Periphery colour for: " + text);
+                 return text;
+             };
+-            require(periphery(true, kPeripheryOn | 2ULL | (50ULL << 8) | (88ULL << 16) | (3ULL << 32), C::green) == "Periphery: ON 0.50, 88 fps", "periphery on");
+-            require(periphery(true, kPeripheryOn | (5ULL << 8), C::amber) == "Periphery: ON, not filtering", "periphery idle");
+-            require(periphery(true, 0, C::grey) == "Periphery: OFF", "periphery off");
++            const auto valid = kPeripheryValid;
++            require(periphery(true, valid | kPeripheryOn | 2ULL | (50ULL << 8) | (88ULL << 16) | (3ULL << 32), C::green) == "Periphery: ON 0.50, 88 fps", "periphery on");
++            require(periphery(true, valid | kPeripheryOn | (5ULL << 8), C::amber) == "Periphery: ON, not filtering", "periphery idle");
++            require(periphery(true, valid, C::grey) == "Periphery: OFF", "periphery off");
++            require(periphery(true, 0, C::grey) == "Periphery: starting", "before the first frame");
++            in.periphery = {true, valid | kPeripheryOn | (88ULL << 16), true};
++            { C color{}; require(format_periphery_line(in, color) == "Periphery: not updating" && color == C::amber, "stale status"); }
+             require(periphery(false, 0, C::grey).empty(), "no bundled Quad Views: no line");
+-            const auto rows = [&](bool known) { in.periphery = {known, kPeripheryOn | (40ULL << 16)}; return format_diagnostic_lines(in).size(); };
++            const auto rows = [&](bool known) { in.periphery = {known, kPeripheryValid | kPeripheryOn | (40ULL << 16)}; return format_diagnostic_lines(in).size(); };
+             require(rows(true) == rows(false) + 1, "the periphery line is added only with the export");
+             in.periphery = {};
+         }

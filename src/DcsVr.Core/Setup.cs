@@ -32,31 +32,33 @@ public static class Readiness
         {
             if (inventory.DcsExecutable is { } exe && File.Exists(exe)) LaunchSafety.EnsureNotElevated(exe);
             else if (LaunchSafety.CurrentProcessElevated) throw new InvalidOperationException("DCS Control is running as administrator. Reopen it without administrator rights.");
-            Add("elevation", CheckState.Pass, "Runs without admin rights", "DCS starts without administrator rights, so the OpenXR loader uses the profile's headset software and add-ons.");
+            Add("elevation", CheckState.Pass, "Runs without admin rights", "DCS starts without administrator rights, so it loads the headset software and add-ons this profile sets up.");
         }
         catch (InvalidOperationException e) { Add("elevation", CheckState.Error, "Runs without admin rights", e.Message); }
         // DCS's bin folder receives only the Cheeky loader and its files (DLSS 5, Foveated SR); everything else goes to Saved Games.
         LaunchSafety.ForgetWriteProbes();
         var writable = LaunchSafety.UnwritableFolders(profile, inventory);
-        Add("write-access", writable.Count == 0 ? CheckState.Pass : CheckState.Error, "Write access to game folders",
-            writable.Count == 0 ? "The profile can write its files as the current user." : "Not writable as the current user: " + string.Join(" ", writable.Select(f => f + ": " + LaunchSafety.WriteAdvice(f))));
+        // Folders Launch DCS can get access to itself (one Windows prompt) are a warning, as in ProfileValidation.
+        var grantable = writable.All(f => LaunchSafety.PermissionsDenyWrite(f) && LaunchSafety.CanGrant(f));
+        Add("write-access", writable.Count == 0 ? CheckState.Pass : grantable ? CheckState.Warning : CheckState.Error, "Write access to game folders",
+            writable.Count == 0 ? "DCS Control can write every file it needs." : "Not writable for your Windows user: " + string.Join(" ", writable.Select(f => f + ": " + LaunchSafety.WriteAdvice(f))));
         if (service.ForeignDxgi(profile, inventory) is { } dxgi)
             Add("foreign-dxgi", CheckState.Warning, "Another program's dxgi.dll", profile.KeepOtherDxgi
-                ? $"DCS's bin folder has {dxgi.Name}'s dxgi.dll ({dxgi.Path}). DLSS 5 needs that file name, so Launch DCS backs it up and loads it after the DLSS 5 loader as dxgi2.dll: {dxgi.Name} keeps working. If DCS misbehaves with both, turn off Keep another program's dxgi.dll on the DLSS 5 page."
-                : $"DCS's bin folder has {dxgi.Name}'s dxgi.dll ({dxgi.Path}). DLSS 5 needs that file name: Launch DCS backs it up and sets it aside while this profile is applied, so {dxgi.Name} is off in DCS until Back to stock DCS puts it back.");
+                ? $"DCS's bin folder has a dxgi.dll from {dxgi.Name} ({dxgi.Path}). DLSS 5 needs that file name, so Launch DCS backs it up and loads it together with DLSS 5: {dxgi.Name} keeps working. If DCS misbehaves with both, turn off Keep another program's dxgi.dll working on the DLSS 5 page."
+                : $"DCS's bin folder has a dxgi.dll from {dxgi.Name} ({dxgi.Path}). DLSS 5 needs that file name, so Launch DCS backs it up and sets it aside while this profile is applied: {dxgi.Name} is off in DCS until Back to stock DCS puts it back.");
         var running = profile.Desktop ? new ActiveRouteState(null, "", default) : ActiveRouteProvider();
         if (running.Route is { } activeRoute && activeRoute != profile.Runtime)
-            Add("route-mismatch", CheckState.Error, "Headset route", running.Summary + " This profile uses " + (profile.Runtime == RuntimeKind.Pimax ? "the Pimax runtime" : "Sboys through SteamVR") + ". Switch the profile route, or close the other runtime, before launching.");
+            Add("route-mismatch", CheckState.Error, "Headset route", running.Summary + " This profile uses " + (profile.Runtime == RuntimeKind.Pimax ? "the Pimax runtime" : "Sboys through SteamVR") + ". Change How you fly in the right panel, or close the other headset software, before launching.");
         else if (running.Route is not null) Add("route-mismatch", CheckState.Pass, "Headset route", running.Summary);
         if (inventory.DcsExecutable?.Contains(@"\steamapps\", StringComparison.OrdinalIgnoreCase) == true)
-            Add("steam-relaunch", CheckState.Manual, "Steam edition launch", "Keep Steam running and launch DCS from this app. The profile passes Steam's launch identifiers so DCS does not restart through Steam and lose the profile environment. After the first launch, confirm the OFXR overlay or 'Available Layers' in dcs.log.");
+            Add("steam-relaunch", CheckState.Manual, "Steam edition launch", "Keep Steam running and start DCS with Launch DCS in this app. DCS then starts with this profile instead of restarting through Steam without it.");
         if (profile.KeepDcsLauncher && LaunchSafety.LauncherRestartBlocked)
             Add("dcs-launcher", CheckState.Error, "DCS launcher", LaunchSafety.LauncherBlockedMessage);
         else if (profile.KeepDcsLauncher && LaunchSafety.LauncherRestartUnknown)
             Add("dcs-launcher", CheckState.Warning, "DCS launcher", LaunchSafety.LauncherUnknownMessage);
         var foreign = inventory.Layers.Where(l => l.Enabled && !GazeBridge.IsManaged(l, profile)).Select(l => l.Name ?? Path.GetFileName(l.ManifestPath)).ToArray();
         if (foreign.Length > 0 && !profile.Desktop)
-            Add("implicit-layers", CheckState.Warning, "Other VR add-ons (OpenXR layers)", "These implicit layers load above the profile layers and can intercept views, gaze or frames: " + string.Join(", ", foreign) + ". Disable them (for example with OpenXR API Layers GUI) for the first tests.");
+            Add("implicit-layers", CheckState.Warning, "Other VR add-ons (OpenXR layers)", "Other OpenXR add-ons are installed: " + string.Join(", ", foreign) + ". They load before this profile's add-ons and can change the image, eye tracking or frame timing. If something looks wrong, turn them off (for example with OpenXR API Layers GUI).");
         var manifest = profile.RuntimeManifestPath ?? (profile.Runtime == RuntimeKind.Pimax ? inventory.PimaxRuntime : inventory.SteamVrRuntime);
         if (!profile.Desktop) try
         {
@@ -76,7 +78,7 @@ public static class Readiness
             missingVc.Length == 0 && currentVc ? "Required x64 C++ runtime libraries are present. Version: " + vcVersion : "Install Microsoft C++ x64 runtime 14.50 or newer. Missing libraries: " + string.Join(", ", missingVc), "vcredist");
         if (profile.FrameGen == FrameGeneration.Nvidia)
             Add("optical-flow-driver", NativeBinary.IsX64(Path.Combine(Environment.SystemDirectory, "nvofapi64.dll")) ? CheckState.Pass : CheckState.Error,
-                "NVIDIA optical-flow driver", "NVIDIA frame generation needs the NVIDIA optical-flow driver (part of the NVIDIA graphics driver, RTX cards). Update the NVIDIA driver, or choose FidelityFX on the Framegen page: it runs on any graphics card.", "nvidia");
+                "NVIDIA optical-flow driver", "NVIDIA Optical Flow frame generation needs NVIDIA's optical-flow driver, part of the NVIDIA graphics driver for RTX cards. Update the NVIDIA driver, or choose FidelityFX on the Framegen page: it runs on any graphics card.", "nvidia");
         if (profile.Runtime == RuntimeKind.SboysSteamVr && !profile.Desktop)
         {
             var driver = inventory.Drivers.FirstOrDefault(d => d.Name.Contains("customheadset", StringComparison.OrdinalIgnoreCase));
@@ -101,22 +103,22 @@ public static class Readiness
             }
         }
         if (profile.Desktop)
-            Add("desktop", CheckState.Manual, "Optimizations only", "DCS runs as you set it up, with another headset or on the monitor, using your own VR settings and OpenXR runtime. The app adds only Engine Optimizations, CPU Boost and Free VRAM as selected.");
+            Add("desktop", CheckState.Manual, "Optimizations only", "DCS runs as you set it up, on the monitor or with another headset, with your own VR settings and headset software. DCS Control adds only Engine Optimizations, CPU Boost and the flight helpers you turned on.");
         else
-        Add("headset", CheckState.Manual, "Headset and tracking", "Connect your headset. Check image, IPD, tracking and resolution in Pimax Play (or SteamVR) before launching DCS.", profile.Runtime == RuntimeKind.Pimax ? "pimax" : "sboys");
+        Add("headset", CheckState.Manual, "Headset and tracking", "Connect your headset. Before launching DCS, check the image, IPD, tracking and resolution in Pimax Play (or SteamVR).", profile.Runtime == RuntimeKind.Pimax ? "pimax" : "sboys");
         if (profile.Gaze == GazeMode.EyeTracked && profile.QuadViews != QuadProvider.None)
-            Add("gaze-live", CheckState.Manual, "Eye calibration and focus motion", "Enable and calibrate eye tracking in Pimax. Verify focus follows both eyes in the headset; a detected layer does not prove gaze is valid.", "gaze");
+            Add("gaze-live", CheckState.Manual, "Eye calibration and focus motion", "Turn on and calibrate eye tracking in Pimax Play. Then check in the headset that the focus area follows your eyes.", "gaze");
         if (!profile.Desktop)
-        Add("pipeline-live", CheckState.Manual, "DCS stereo and image quality", "Test baseline → framegen → foveation → combined. Confirm both eyes, cockpit text, HUD, head motion, latency and focus boundaries.");
+        Add("pipeline-live", CheckState.Manual, "Image quality in the headset", "In the first flight, check both eyes, cockpit text, the HUD, head motion, latency and the edge of the focus area. If something looks wrong, turn the features on one at a time to find which one causes it.");
         try
         {
             if (service.Originals.Read() is { State: "applied", Current: { } current })
-                Add("active-backup", CheckState.Pass, "Applied settings", "Profile " + (service.ReadAppliedProfile()?.Profile?.Name ?? current.ProfileId) + " is applied. Launch DCS writes the new profile over it; the original files stay backed up.");
+                Add("active-backup", CheckState.Pass, "Applied settings", (service.ReadAppliedProfile()?.Profile?.Name ?? current.ProfileId) + " is applied. Launch DCS writes the new settings over it; the original files stay backed up.");
             var plan = service.Preview(profile, inventory);
-            Add("deployment", CheckState.Pass, "Packages, neural runtime and deployment", $"Verified hashes, component compatibility and {plan.Files.Count} planned files. No game files were changed.");
+            Add("deployment", CheckState.Pass, "Files and components", $"All components are verified and fit together; Launch DCS will write {plan.Files.Count} files. Nothing has been written yet.");
         }
         catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or JsonException)
-        { Add("deployment", CheckState.Error, "Packages, neural runtime and deployment", e.Message); }
+        { Add("deployment", CheckState.Error, "Files and components", e.Message); }
         return new(DateTimeOffset.UtcNow, profile.Id, checks);
     }
 }

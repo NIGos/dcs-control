@@ -12,6 +12,8 @@ Readiness.ActiveRouteProvider = () => new(null, "Test fixture: no running headse
 PimaxFovea.SettingsPath = Path.Combine(root, "no-pimax-play/global.json"); // never the build machine's Pimax Play settings
 HeadsetRefresh.PimaxLogFolder = Path.Combine(root, "no-pimax-logs"); HeadsetRefresh.PimaxRuntimeFolder = Path.Combine(root, "no-pimax-runtime"); HeadsetRefresh.SteamVrSettings = Path.Combine(root, "no-steamvr.vrsettings");
 GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 4090", "NVIDIA", "32.0.15.0")]; // the verified pipeline's card, never the build machine's
+NvidiaSettings.ThreadedOptimizationForDcs = () => new(ThreadedOptimization.Auto, false); // nor its driver settings
+NvidiaSettings.MfaaForDcs = () => new(false, false);
 LaunchSafety.CurrentJob = () => default; // never the job object the test runner itself may run in
 void Test(string name, Action action) => tests.Add((name, action));
 void Require(bool value, string message = "Assertion failed") { if (!value) throw new Exception(message); }
@@ -223,6 +225,30 @@ Test("Originals: a damaged backup is reported and kept listed; every other path 
     Require(!result.Complete && result.Conflicts.Single().StartsWith(a) && File.ReadAllText(a) == "a1" && File.ReadAllText(b) == "B", "Damaged backup never written");
     Require(store.Status() is { Count: 1, State: "restoring" } && store.Apply(Plan("p", Write(a, "a2"))).Current is not null, "Still listed, and never blocks the next apply");
 });
+Test("Originals: a path a new profile drops, with a damaged backup, stays listed and does not block the apply", () =>
+{
+    var a = Make("originals/stale-damaged/a.cfg", "A"); var b = Make("originals/stale-damaged/b.cfg", "B");
+    var store = new OriginalsStore(Path.Combine(root, "originals/stale-damaged/state"));
+    store.Apply(Plan("p", Write(a, "a1"), Write(b, "b1")));
+    File.WriteAllText(Directory.GetFiles(store.Directory, "*.original").Order().First(), "corrupt");
+    Require(store.Apply(Plan("q", Write(b, "b2"))).Current.Status == "applied" && File.ReadAllText(a) == "a1" && store.Status().Count == 2, "Applied; the damaged path is kept for Back to stock DCS");
+    var result = store.RestoreOriginals();
+    Require(!result.Complete && result.Conflicts.Single().StartsWith(a) && File.ReadAllText(b) == "B");
+});
+Test("Originals: options.lua settings a new profile drops keep their originals when the write fails", () =>
+{
+    var config = Path.Combine(root, "originals/lua-fail/Config"); var path = Make("originals/lua-fail/Config/options.lua", Lua);
+    var store = new OriginalsStore(Path.Combine(root, "originals/lua-fail/state"));
+    FileMutation Settings(params (string Key, string? Before, string After)[] changes)
+    {
+        var text = File.ReadAllText(path); foreach (var c in changes) text = new LuaOptions(text).SetLiteral(c.Key.Split('.'), c.After);
+        return new(path, Hashing.FileSha256(path), Encoding.UTF8.GetBytes(text), "options", changes.Select(c => new LuaValueChange(c.Key, c.Before, c.After)).ToArray(), Root: config);
+    }
+    store.Apply(Plan("a", Settings(("VR.enable", "false", "true"), ("VR.openxr_eyeGaze", null, "true"))));
+    Throws<IOException>(() => store.Apply(Plan("b", Settings(("VR.enable", "false", "true"))), _ => throw new IOException("Injected failure")));
+    Require(store.Status().Files.Single().Detail!.Contains("openxr_eyeGaze"), "The dropped setting's original is still recorded");
+    Require(store.RestoreOriginals().Complete && new LuaOptions(File.ReadAllText(path)) is var lua && lua.Get("VR", "openxr_eyeGaze") is null && lua.Get("VR", "enable") == "false", "Back to stock DCS still puts it back");
+});
 Test("Originals: an in-place update records the new bytes and Back to stock DCS still brings the original back", () =>
 {
     var settings = Make("originals/update/settings.cfg", "original"); var lua = Make("originals/update/options.lua", "options={VR={enable=false}}");
@@ -348,6 +374,26 @@ Test("Triple frame generation writes the fork's triple_frame_gen and paces DCS a
     Require(ConfigurationWriters.QuadViews(new VrProfile()).Contains("dcsvr_periphery_sharpen=0.3") && ConfigurationWriters.QuadViews(new VrProfile { QuadPeripheryContrast = 0 }).Split('\n').Any(l => l.Trim() == "dcsvr_periphery_sharpen=0"));
     Require(ProfileValidation.Validate(new VrProfile { QuadPeripheryContrast = 1.5 }).Any(i => i.Code == "quad-periphery-contrast"));
     Require(ConfigurationWriters.QuadViews(new VrProfile()).Contains("dcsvr_sharpen_taper=1") && ConfigurationWriters.QuadViews(new VrProfile { QuadSharpenTaper = false }).Contains("dcsvr_sharpen_taper=0"));
+    {
+        // Periphery stability: off by default; on only with the bundled Quad Views in a VR flight; strength 0..1 -> 0..80 ms.
+        bool Line(string text, string line) => text.ReplaceLineEndings("\n").Split('\n').Any(l => l.Trim() == line);
+        var bundled = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated };
+        Require(!new VrProfile().PeripheryStability && new VrProfile().PeripheryStabilityStrength == .5);
+        Require(Line(ConfigurationWriters.QuadViews(bundled), "dcsvr_temporal=0") && Line(ConfigurationWriters.QuadViews(bundled), "dcsvr_temporal_tau_ms=40"));
+        var on = bundled with { PeripheryStability = true };
+        var onText = ConfigurationWriters.QuadViews(on);
+        Require(on.UsesPeripheryStability && Line(onText, "dcsvr_temporal=1") && Line(onText, "dcsvr_temporal_ramp_deg=8") && Line(onText, "dcsvr_temporal_clip=1") && Line(onText, "dcsvr_temporal_debug=0"));
+        Require(Line(ConfigurationWriters.QuadViews(on with { PeripheryStabilityStrength = 1 }), "dcsvr_temporal_tau_ms=80") && Line(ConfigurationWriters.QuadViews(on with { PeripheryStabilityStrength = 0 }), "dcsvr_temporal_tau_ms=0") && Line(ConfigurationWriters.QuadViews(on with { PeripheryStabilityStrength = .3 }), "dcsvr_temporal_tau_ms=24"));
+        Require(Line(ConfigurationWriters.QuadViews(on with { Gaze = GazeMode.Fixed }), "dcsvr_temporal=1"), "a fixed focus is stabilised around its centre");
+        foreach (var off in new[] { on with { QuadViews = QuadProvider.PimaxNative }, on with { QuadViews = QuadProvider.None }, on with { Desktop = true } })
+            Require(!off.UsesPeripheryStability && Line(ConfigurationWriters.QuadViews(off), "dcsvr_temporal=0"));
+        Require(ProfileValidation.Validate(on with { PeripheryStabilityStrength = 1.5 }).Any(i => i.Code == "periphery-stability-strength" && i.Severity == IssueSeverity.Error));
+        Require(ProfileValidation.Validate(on with { PeripheryStabilityStrength = double.NaN }).Any(i => i.Code == "periphery-stability-strength"));
+        Require(!ProfileValidation.Validate(on).Any(i => i.Code.StartsWith("periphery-stability")));
+        Require(ProfileValidation.Validate(on with { QuadViews = QuadProvider.PimaxNative }).Any(i => i.Code == "periphery-stability-provider" && i.Severity == IssueSeverity.Warning));
+        Require(!ProfileValidation.Validate(on with { Desktop = true }).Any(i => i.Code == "periphery-stability-provider"), "Optimizations only keeps the VR setting for later without a warning");
+        Require(!ProfileValidation.Validate(on with { PeripheryStability = false, QuadViews = QuadProvider.PimaxNative }).Any(i => i.Code.StartsWith("periphery-stability")));
+    }
 });
 Test("The smoothness buffer writes OFXR's deep_pipeline in 2x, 3x and Auto, on unless the profile turns it off", () =>
 {
@@ -533,6 +579,12 @@ Test("Last flight: dcs.log session, Pimax frames, OFXR modes and frame time, DLS
         F(start.AddSeconds(256), "calls/s=22239 skipped=84.2% pointers=1 imports=40 lookups=0 faults=0"), F(start.AddSeconds(266), "calls/s=108385 skipped=98.3% pointers=1 imports=41 lookups=0 faults=0"),
         F(start.AddDays(-1), "calls/s=99999 skipped=0.0% pointers=1 imports=41 lookups=0 faults=0")], start, start.AddMinutes(6))!;
     Require(prefetch.Reports == 3 && prefetch.PeakCallsPerSecond == 108385 && prefetch.AverageCallsPerSecond == 65312 && prefetch.SkippedPercent == 95.9);
+    // Quad Views' eye tracking line: the last DCS start in the session counts; one before it or outside it does not.
+    string Q(DateTimeOffset t, string text) => t.ToString("yyyy-MM-dd HH:mm:ss zzz", System.Globalization.CultureInfo.InvariantCulture).Remove(t.ToString("yyyy-MM-dd HH:mm:ss zzz", System.Globalization.CultureInfo.InvariantCulture).Length - 3, 1) + ": " + text;
+    Require(LastFlight.ParseEyeTracking([Q(start.AddSeconds(5), "Quad-Views-Foveated layer (v1.1.3) is active"), Q(start.AddSeconds(6), "Eye tracking is not supported")], start, start.AddMinutes(6)) is { Supported: false }, "not supported");
+    Require(LastFlight.ParseEyeTracking([Q(start.AddSeconds(5), "Quad-Views-Foveated layer (v1.1.3) is active"), Q(start.AddSeconds(6), "Eye tracking is not supported"),
+        Q(start.AddSeconds(90), "Quad-Views-Foveated layer (v1.1.3) is active"), Q(start.AddSeconds(91), "Eye tracking is supported")], start, start.AddMinutes(6)) is { Supported: true }, "the last start counts");
+    Require(LastFlight.ParseEyeTracking([Q(start.AddDays(-1), "Eye tracking is not supported"), "garbage"], start, start.AddMinutes(6)) is null, "an older flight's line is not this one");
     // Read: every source found on disk, matched to the session by time and the DCS PID.
     var flight = Path.Combine(root, "last-flight");
     var dcsLog = Make("last-flight/Saved Games/DCS/Logs/dcs.log", "=== Log opened UTC 2026-10-05 17:37:28\n2026-10-05 17:37:30.358 INFO    APP (Main): Command line: \"DCS.exe\"\n2026-10-05 17:43:12.892 INFO    VISUALIZER (31660): render thread has stopped\n=== Log closed.\n");
@@ -604,7 +656,8 @@ Test("Software Quad Views plus framegen deploys per-process configuration", () =
     var ofxr = new ComponentCache(Path.Combine(root, "software-quad/cache")).Import(PackageCatalog.Get("ofxr"), Path.Combine(workspace, ".cache/packages", PackageCatalog.Get("ofxr").ArchiveName));
     var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Tracking = TrackingKind.Lighthouse, QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Nvidia, Gaze = GazeMode.Fixed };
     var inv = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, SteamVrRuntime = runtime };
-    var plan = new DeploymentPlanner(new(ofxr, null, null, Path.Combine(workspace, "external/quadviews/bin/x64/Release"), OfxrLayerDll: DeferredOfxr)).Build(p, inv, Path.Combine(root, "software-quad/managed"));
+    var quadPlanner = new DeploymentPlanner(new(ofxr, null, null, Path.Combine(workspace, "external/quadviews/bin/x64/Release"), OfxrLayerDll: DeferredOfxr));
+    var plan = quadPlanner.Build(p, inv, Path.Combine(root, "software-quad/managed"));
     Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_XRFrameBridge_diagnostic");
     Require(plan.LaunchEnvironment.ContainsKey("DCSVR_QUAD_SETTINGS")); Require(plan.Files.Any(f => f.Purpose == "Software Quad Views provider"));
     // Quad Views composites its four views; the fork build creates private swapchains only for the submitted pair.
@@ -613,6 +666,11 @@ Test("Software Quad Views plus framegen deploys per-process configuration", () =
     // 0010: the smooth cursor's images are read from DCS.exe's own folder when the game has not loaded them.
     var ofxrIni = new StreamReader(new MemoryStream(plan.Files.Single(f => f.Path.EndsWith("ofxr_bridge.ini")).Content), Encoding.UTF8, true).ReadToEnd();
     Require(ofxrIni.Contains("smooth_cursor=0") && ofxrIni.Contains("cursor_templates=" + Path.GetDirectoryName(Path.GetFullPath(exe))), "cursor_templates is DCS.exe's folder");
+    // Periphery stability reaches the bundled Quad Views' per-process settings: off by default, on with the profile.
+    string QuadSettings(ApplyPlan built) => Encoding.UTF8.GetString(built.Files.Single(f => f.Purpose == "Profile Quad Views settings").Content).ReplaceLineEndings("\n");
+    Require(QuadSettings(plan).Contains("\ndcsvr_temporal=0\n"));
+    var stable = QuadSettings(quadPlanner.Build(p with { PeripheryStability = true, PeripheryStabilityStrength = .25 }, inv, Path.Combine(root, "software-quad/managed-stable")));
+    Require(stable.Contains("\ndcsvr_temporal=1\n") && stable.Contains("\ndcsvr_temporal_tau_ms=20\n"), "strength 0.25 is a 20 ms time constant");
     var store = new OriginalsStore(Path.Combine(root, "originals/quad")); store.Apply(plan); var text = File.ReadAllText(plan.LaunchEnvironment["DCSVR_QUAD_SETTINGS"]); Require(text.Contains("[exe:DCS]")); Require(text.Contains("turbo_mode=0")); Require(text.Contains("stereo_output_multiplier=1")); Require(store.RestoreOriginals().Complete);
 });
 Test("Cheeky and OFXR stereo stack installs and restores in isolated fixture", () =>
@@ -987,7 +1045,7 @@ Test("Pupil shift takes over DCS's custom IPD (same value, applied by the layer)
     var exe = Make("pupil-ipd/game/bin/DCS.exe", "fixture"); var runtime = Make("pupil-ipd/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("pupil-ipd/runtime.dll", "fixture");
     var dll = Make("pupil-ipd/components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll", "layer");
     var planner = new DeploymentPlanner(new(null, null, null, PupilShiftDll: dll));
-    var on = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, PupilShift = true };
+    var on = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, PupilShift = true, EyeDistance = EyeDistanceSource.DcsCustom };
     string Ini(ApplyPlan plan) => Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("PupilShift.ini")).Content).ReplaceLineEndings("\n");
     IReadOnlyList<LuaValueChange> Lua(ApplyPlan plan) => plan.Files.Single(f => f.Path.EndsWith("options.lua")).LuaChanges ?? [];
     var custom = Make("pupil-ipd/sg/DCS/Config/options.lua", "options = {\n\t[\"VR\"] = {\n\t\t[\"custom_IPD\"] = \"64\",\n\t\t[\"custom_IPD_enable\"] = true,\n\t\t[\"enable\"] = true,\n\t},\n}\n");
@@ -999,10 +1057,210 @@ Test("Pupil shift takes over DCS's custom IPD (same value, applied by the layer)
     Require(Ini(plan).Contains("Ipd=0\n") && !Lua(plan).Any(c => c.Path.StartsWith("VR.custom_IPD")), "left alone");
     plan = planner.Build(on with { PupilShift = false }, new InventorySnapshot { DcsExecutable = exe, OptionsPath = custom, PimaxRuntime = runtime }, Path.Combine(root, "pupil-ipd/managed3"));
     Require(!Lua(plan).Any(c => c.Path.StartsWith("VR.custom_IPD")), "no Pupil shift, DCS keeps its IPD");
+    // Eye distance: the headset's own (default) turns DCS's custom IPD off, with or without the layer (the layer then
+    // uses the runtime's IPD, Ipd=0); Set here goes through the layer when it runs, else through DCS's own option.
+    foreach (var layer in new[] { true, false })
+    {
+        plan = planner.Build(on with { PupilShift = layer, EyeDistance = EyeDistanceSource.Headset }, new InventorySnapshot { DcsExecutable = exe, OptionsPath = custom, PimaxRuntime = runtime }, Path.Combine(root, $"pupil-ipd/headset-{layer}"));
+        Require(Lua(plan).Any(c => c.Path == "VR.custom_IPD_enable" && c.InstalledRaw == "false") && (!layer || Ini(plan).Contains("Ipd=0\n")), "headset IPD, layer " + layer);
+        plan = planner.Build(on with { PupilShift = layer, EyeDistance = EyeDistanceSource.Manual, EyeDistanceMm = 65.5 }, new InventorySnapshot { DcsExecutable = exe, OptionsPath = plain, PimaxRuntime = runtime }, Path.Combine(root, $"pupil-ipd/manual-{layer}"));
+        if (layer) Require(Ini(plan).Contains("Ipd=65.5\n") && !Lua(plan).Any(c => c.Path.StartsWith("VR.custom_IPD")), "manual through the layer");
+        else Require(Lua(plan).Any(c => c.Path == "VR.custom_IPD_enable" && c.InstalledRaw == "true") && Lua(plan).Any(c => c.Path == "VR.custom_IPD" && c.InstalledRaw == "\"65.5\""), "manual through DCS's option");
+    }
+    plan = planner.Build(on with { EyeDistance = EyeDistanceSource.Headset }, new InventorySnapshot { DcsExecutable = exe, OptionsPath = plain, PimaxRuntime = runtime }, Path.Combine(root, "pupil-ipd/headset-plain"));
+    Require(!Lua(plan).Any(c => c.Path.StartsWith("VR.custom_IPD")), "headset IPD already in use: nothing to change");
+    Require(ProfileValidation.Validate(on with { EyeDistance = EyeDistanceSource.Manual, EyeDistanceMm = 30 }).Any(i => i.Code == "eye-distance"), "manual range");
+    Require(JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"old\"}").EyeDistance == EyeDistanceSource.Headset, "older profiles use the headset's eye distance");
     // The layer's log: the views' cant and the eye distances.
     var folder = Path.Combine(root, "pupil-ipd/status"); Make("pupil-ipd/status/" + PupilShiftStatus.LayerDll, "layer");
     Make("pupil-ipd/status/" + PupilShiftStatus.LogName, "10:00:02.000 stats: frames=90 shifted=90 restored=360 gaze x[-1.0..1.0] y[0.0..0.0] deg, max shift 0.20 mm; runtime left eye vs head x[-32.77..-32.77] z[0.00..0.00] mm; cant 6.1 deg, runtime IPD 65.5 mm, rendered IPD 64.0 mm\n");
     Require(PupilShiftStatus.Read(folder, false).Last is { CantDeg: 6.1, RuntimeIpdMm: 65.5, RenderedIpdMm: 64.0 });
+});
+Test("Depth boost deploys the pupil shift layer on its own, with its section, its switch and DCS's custom IPD taken over", () =>
+{
+    var exe = Make("depth/game/bin/DCS.exe", "fixture"); var runtime = Make("depth/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("depth/runtime.dll", "fixture");
+    var dll = Make("depth/components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll", "layer");
+    var planner = new DeploymentPlanner(new(null, null, null, PupilShiftDll: dll));
+    var custom = Make("depth/sg/DCS/Config/options.lua", "options = {\n\t[\"VR\"] = {\n\t\t[\"custom_IPD\"] = \"64\",\n\t\t[\"custom_IPD_enable\"] = true,\n\t\t[\"enable\"] = true,\n\t},\n}\n");
+    var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = custom, PimaxRuntime = runtime };
+    string Ini(ApplyPlan plan) => Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("PupilShift.ini")).Content).ReplaceLineEndings("\n");
+    IReadOnlyList<LuaValueChange> Lua(ApplyPlan plan) => plan.Files.SingleOrDefault(f => f.Path.EndsWith("options.lua"))?.LuaChanges ?? [];
+    // Off by default.
+    Require(!new VrProfile().DepthBoost && !new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked }.UsesPerceptionLayer, "off by default");
+    var on = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, DepthBoost = true, DepthBoostMode = DepthBoostMode.Enhanced, DepthBoostMax = 1.3, DepthBoostNearM = 1.2, EyeDistance = EyeDistanceSource.DcsCustom };
+    var plan = planner.Build(on, inventory, Path.Combine(root, "depth/managed"));
+    Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"].Split(';')[0] == "XR_APILAYER_DCSVR_pupil_shift", "deployed first without Pupil shift");
+    var ini = Ini(plan);
+    Require(ini.Contains("[PupilShift]\nEnabled=0\n") && ini.Contains("[DepthBoost]\nEnabled=1\n") && ini.Contains("MaxScale=1.3\n") && ini.Contains("NearM=1.2\n")
+        && ini.Contains("Mode=enhanced\n") && ini.Contains("FarStartM=3\n") && ini.Contains("FarFullM=50\n")
+        && ini.Contains("Toggle=121:6\n") && ini.Contains("Toggle=121:5\n") && ini.Contains("UpMmPerS=5\n") && ini.Contains("DownMmPerS=40\n"), "both sections, each with its switch");
+    Require(ini.Contains("Ipd=64\n") && Lua(plan).Any(c => c.Path == "VR.custom_IPD_enable" && c.InstalledRaw == "false"), "custom IPD taken over for Depth boost alone");
+    Require(plan.LaunchEnvironment["DCSVR_DEPTH_HOTKEY"] == "0:0" && plan.LaunchEnvironment["DCSVR_PUPIL_HOTKEY"] == "0:0", "no panel without frame generation");
+    // Both on: one layer, both enabled. Pupil shift alone keeps its old ini (Depth boost off).
+    var both = Ini(planner.Build(on with { PupilShift = true }, inventory, Path.Combine(root, "depth/managed-both")));
+    Require(both.Contains("[PupilShift]\nEnabled=1\n") && both.Contains("[DepthBoost]\nEnabled=1\n"), "both");
+    var pupilOnly = Ini(planner.Build(on with { PupilShift = true, DepthBoost = false }, inventory, Path.Combine(root, "depth/managed-pupil")));
+    Require(pupilOnly.Contains("[PupilShift]\nEnabled=1\n") && pupilOnly.Contains("[DepthBoost]\nEnabled=0\n"), "Pupil shift alone");
+    // Without an eye-tracked gaze, or off: no layer, DCS keeps its IPD; the profile says why.
+    foreach (var off in new[] { on with { Gaze = GazeMode.Fixed }, on with { QuadViews = QuadProvider.None }, on with { DepthBoost = false }, on with { Desktop = true } })
+    {
+        var offPlan = planner.Build(off, inventory, Path.Combine(root, "depth/managed-off"));
+        Require(!offPlan.Files.Any(f => f.Path.Contains("pupilshift")) && !Lua(offPlan).Any(c => c.Path.StartsWith("VR.custom_IPD")), "not deployed");
+    }
+    Require(ProfileValidation.Validate(on with { Gaze = GazeMode.Fixed }).Any(i => i.Code == "depth-gaze" && i.Severity == IssueSeverity.Warning));
+    Require(ProfileValidation.Validate(on with { DepthBoostMax = 2.5 }).Any(i => i.Code == "depth-max" && i.Severity == IssueSeverity.Error));
+    Require(ProfileValidation.Validate(on with { DepthBoostMax = 0.9 }).Any(i => i.Code == "depth-max"));
+    Require(ProfileValidation.Validate(on with { DepthBoostNearM = 0.2 }).Any(i => i.Code == "depth-near" && i.Severity == IssueSeverity.Error));
+    Require(!ProfileValidation.Validate(on).Any(i => i.Code.StartsWith("depth") || i.Code == "hotkey-conflict"), "the defaults are valid, and Alt+Shift+F10 is not a DCS default");
+    // The switch: its own key, apart from Pupil shift's and the others.
+    Require(ProfileValidation.Validate(on with { PupilShift = true, DepthBoostToggleKey = NeuralHotkeys.PupilDefault }).Any(i => i.Code == "hotkey-conflict"));
+    Require(!ProfileValidation.Validate(on with { PupilShift = false, DepthBoostToggleKey = NeuralHotkeys.PupilDefault }).Any(i => i.Code == "hotkey-conflict"));
+    Require(ProfileValidation.Validate(on with { EngineOptimizations = true, DepthBoostToggleKey = NeuralHotkeys.EngineDefault }).Any(i => i.Code == "hotkey-conflict"));
+    Require(ProfileValidation.Validate(on with { EngineOptimizations = true, DepthBoostToggleKey = "120:3" }).Any(i => i.Code == "depth-hotkey"));
+    Require(ConfigurationWriters.PupilShift(on with { DepthBoostToggleKey = "Off" }).ReplaceLineEndings("\n").Split("[DepthBoost]")[1].Contains("Toggle=0:0\n"), "switch off");
+    // A profile saved before Depth boost existed reads as off.
+    Require(System.Text.Json.JsonSerializer.Deserialize<VrProfile>("{\"PupilShift\":true}") is { DepthBoost: false, DepthBoostMax: 1.4, DepthBoostNearM: 1.5, DepthBoostToggleKey: NeuralHotkeys.DepthBoostDefault });
+});
+Test("Depth boost modes: Realistic by default (x1 to 150 m, x1.25 from 400 m), Enhanced on request; the engine measures the scene depth with Engine Optimizations", () =>
+{
+    var realistic = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, DepthBoost = true };
+    Require(realistic is { DepthBoostMode: DepthBoostMode.Realistic, DepthBoostRealisticMax: 1.25, DepthBoostFarStartM: 150, DepthBoostFarFullM: 400, DepthBoostActiveMax: 1.25 }, "Realistic is the default");
+    var ini = ConfigurationWriters.PupilShift(realistic).ReplaceLineEndings("\n");
+    Require(ini.Contains("Mode=realistic\nMaxScale=1.25\nFarStartM=150\nFarFullM=400\n"), "Realistic in the layer's ini");
+    var enhanced = realistic with { DepthBoostMode = DepthBoostMode.Enhanced };
+    Require(ConfigurationWriters.PupilShift(enhanced).ReplaceLineEndings("\n").Contains("Mode=enhanced\nMaxScale=1.4\nFarStartM=3\nFarFullM=50\n"), "Enhanced: its own strength and the fixed 3-50 m curve");
+    Require(ConfigurationWriters.PupilShift(realistic with { DepthBoostFarStartM = 200, DepthBoostFarFullM = 600, DepthBoostRealisticMax = 1.3 }).ReplaceLineEndings("\n")
+        .Contains("MaxScale=1.3\nFarStartM=200\nFarFullM=600\n"), "Realistic's own distances and strength");
+    // Validation per mode: Realistic up to x1.5, Enhanced up to x2; the other mode's strength is not checked.
+    Require(!ProfileValidation.Validate(realistic).Any(i => i.Code.StartsWith("depth-") && i.Severity == IssueSeverity.Error), "the defaults are valid");
+    Require(ProfileValidation.Validate(realistic with { DepthBoostRealisticMax = 1.6 }).Any(i => i.Code == "depth-realistic-max" && i.Severity == IssueSeverity.Error), "Realistic above x1.5");
+    Require(!ProfileValidation.Validate(realistic with { DepthBoostMax = 2.5 }).Any(i => i.Code == "depth-max"), "Enhanced's strength is not checked in Realistic");
+    Require(!ProfileValidation.Validate(enhanced with { DepthBoostMax = 1.8 }).Any(i => i.Code.StartsWith("depth-") && i.Severity == IssueSeverity.Error), "Enhanced x1.8");
+    Require(!ProfileValidation.Validate(enhanced with { DepthBoostRealisticMax = 3, DepthBoostFarStartM = 1 }).Any(i => i.Code is "depth-realistic-max" or "depth-far"), "Realistic's values are not checked in Enhanced");
+    Require(ProfileValidation.Validate(realistic with { DepthBoostFarStartM = 40 }).Any(i => i.Code == "depth-far"), "Realistic starts at 50 m or more");
+    Require(ProfileValidation.Validate(realistic with { DepthBoostFarFullM = 160 }).Any(i => i.Code == "depth-far"), "the full strength at least 1.2 times the start");
+    Require(ProfileValidation.Validate(realistic with { DepthBoostFarFullM = 5000 }).Any(i => i.Code == "depth-far"), "at most 3000 m");
+    Require(ProfileValidation.Validate(realistic with { DepthBoostMode = (DepthBoostMode)7 }).Any(i => i.Code == "depth-mode"), "an unknown mode");
+    // Profiles: a saved Depth boost profile without a mode reads as Realistic; the mode round-trips as text.
+    Require(System.Text.Json.JsonSerializer.Deserialize<VrProfile>("{\"DepthBoost\":true,\"DepthBoostMax\":1.6}") is { DepthBoostMode: DepthBoostMode.Realistic, DepthBoostMax: 1.6, DepthBoostActiveMax: 1.25 }, "old profile");
+    var options = new System.Text.Json.JsonSerializerOptions { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(allowIntegerValues: false) } };
+    var json = System.Text.Json.JsonSerializer.Serialize(enhanced, options);
+    Require(json.Contains("\"DepthBoostMode\":\"Enhanced\"") && System.Text.Json.JsonSerializer.Deserialize<VrProfile>(json, options)!.DepthBoostMode == DepthBoostMode.Enhanced, "mode as text");
+    // The engine module samples the depth buffer only for Depth boost with Engine Optimizations ([Perception] FixationDepth).
+    Require(ConfigurationWriters.DcsQvCull(realistic with { EngineOptimizations = true }).ReplaceLineEndings("\n").Contains("[Perception]\n") &&
+        ConfigurationWriters.DcsQvCull(realistic with { EngineOptimizations = true }).ReplaceLineEndings("\n").Contains("FixationDepth=1\n"), "FixationDepth=1 with Depth boost");
+    Require(ConfigurationWriters.DcsQvCull(realistic with { EngineOptimizations = true, DepthBoost = false }).ReplaceLineEndings("\n").Contains("FixationDepth=0\n"), "off without Depth boost");
+    Require(ConfigurationWriters.DcsQvCull(realistic with { EngineOptimizations = true, Gaze = GazeMode.Fixed }).ReplaceLineEndings("\n").Contains("FixationDepth=0\n"), "off when Depth boost cannot run");
+    Require(realistic.UsesDepthBoost && !realistic.UsesFixationDepth && (realistic with { EngineOptimizations = true }).UsesFixationDepth, "vergence only without Engine Optimizations");
+});
+Test("Depth boost transition: Gradual by default, Predictive on request with its own switch (Alt+Shift+F9) and the engine's depth grid", () =>
+{
+    var on = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, DepthBoost = true, EngineOptimizations = true };
+    Require(on is { DepthBoostTransition: DepthBoostTransition.Gradual, DepthBoostTransitionKey: NeuralHotkeys.DepthTransitionDefault } && on.UsesDepthGrid, "Gradual by default, the grid for the in-flight switch");
+    var ini = ConfigurationWriters.PupilShift(on).ReplaceLineEndings("\n");
+    Require(ini.Contains("Transition=gradual\n") && ini.Contains("TransitionToggle=120:6\n") && ini.Contains("PredictLeadFrames=0.5\n") && ini.Contains("PredictMaxStepMm=12\n"), "the layer's ini: gradual, its switch");
+    var predictive = on with { DepthBoostTransition = DepthBoostTransition.Predictive };
+    Require(ConfigurationWriters.PupilShift(predictive).ReplaceLineEndings("\n").Contains("Transition=predictive\n"), "predictive in the layer's ini");
+    // The engine's grid with the scene depth (Depth boost + Engine Optimizations), whatever the starting transition: the
+    // in-flight key can select Predictive.
+    Require(ConfigurationWriters.DcsQvCull(on).ReplaceLineEndings("\n").Contains("DepthGrid=1\n"), "gradual: the grid too");
+    Require(ConfigurationWriters.DcsQvCull(predictive).ReplaceLineEndings("\n").Contains("DepthGrid=1\n") && predictive.UsesDepthGrid, "predictive: the grid");
+    Require(ConfigurationWriters.DcsQvCull(predictive with { DepthBoost = false }).ReplaceLineEndings("\n").Contains("DepthGrid=0\n"), "no Depth boost: no grid");
+    Require(ConfigurationWriters.DcsQvCull(predictive with { Gaze = GazeMode.Fixed }).ReplaceLineEndings("\n").Contains("DepthGrid=0\n"), "Depth boost cannot run: no grid");
+    // Without Engine Optimizations Predictive works as Gradual: a warning, not an error.
+    Require(ProfileValidation.Validate(predictive with { EngineOptimizations = false }).Any(i => i.Code == "depth-transition-grid" && i.Severity == IssueSeverity.Warning), "warning without the engine");
+    Require(!ProfileValidation.Validate(predictive).Any(i => i.Code.StartsWith("depth-transition") || i.Code == "hotkey-conflict"), "the defaults are valid, Alt+Shift+F9 is free");
+    Require(!NeuralHotkeys.IsDcsDefault(new Hotkey(0x78, 6), NeuralHotkeys.DcsDefaults), "Alt+Shift+F9 is not a DCS default");
+    // The switch needs a key of its own.
+    Require(ProfileValidation.Validate(on with { DepthBoostTransitionKey = NeuralHotkeys.DepthBoostDefault }).Any(i => i.Code == "hotkey-conflict"), "not Depth boost's switch");
+    Require(ProfileValidation.Validate(on with { DepthBoostTransitionKey = NeuralHotkeys.EngineDefault }).Any(i => i.Code == "hotkey-conflict"), "not the engine's");
+    Require(ProfileValidation.Validate(on with { PupilShift = true, DepthBoostTransitionKey = NeuralHotkeys.PupilDefault }).Any(i => i.Code == "hotkey-conflict"), "not Pupil shift's");
+    Require(ProfileValidation.Validate(on with { DepthBoostTransitionKey = "120:3" }).Any(i => i.Code == "depth-transition-hotkey"), "not the engine test suite's");
+    Require(ProfileValidation.Validate(on with { DepthBoostTransitionKey = "65:0" }).Any(i => i.Code == "depth-transition-hotkey"), "a letter needs a modifier");
+    Require(ConfigurationWriters.PupilShift(on with { DepthBoostTransitionKey = "Off" }).ReplaceLineEndings("\n").Contains("TransitionToggle=0:0\n"), "switch off");
+    Require(ProfileValidation.Validate(on with { DepthBoostTransition = (DepthBoostTransition)5 }).Any(i => i.Code == "depth-transition"), "an unknown transition");
+    // Profiles: an older profile reads as Gradual; the transition round-trips as text.
+    Require(System.Text.Json.JsonSerializer.Deserialize<VrProfile>("{\"DepthBoost\":true}") is { DepthBoostTransition: DepthBoostTransition.Gradual, DepthBoostTransitionKey: "120:6" }, "old profile");
+    var options = new System.Text.Json.JsonSerializerOptions { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(allowIntegerValues: false) } };
+    var json = System.Text.Json.JsonSerializer.Serialize(predictive, options);
+    Require(json.Contains("\"DepthBoostTransition\":\"Predictive\"") && System.Text.Json.JsonSerializer.Deserialize<VrProfile>(json, options)!.DepthBoostTransition == DepthBoostTransition.Predictive, "as text");
+});
+Test("The Pupil shift page reads Depth boost's transition: selected, the switch, the predict: line's steps, fallback", () =>
+{
+    var folder = Path.Combine(root, "depth-transition-status"); Directory.CreateDirectory(folder);
+    File.WriteAllText(Path.Combine(folder, PupilShiftStatus.LayerDll), "layer");
+    var log = Path.Combine(folder, PupilShiftStatus.LogName);
+    const string settings = "10:00:00.100 depth settings: enabled=1 mode=realistic max_scale=1.25 far=150..400m near=1.50m up=5.0mm/s down=40.0mm/s saccade_step=4.0mm recover=800ms hold=500ms pvr=1 key=121:6 transition=gradual transition_key=120:6 predict min=8.0deg max_step=12.0mm disparity=0.40deg lead=0.50frames poll=500Hz";
+    const string depth = "10:00:02.000 depth: on source=depth vergence=vergence fixation=far distance 500.00 m [480.00..520.00] scale 1.200 [1.000..1.200] target 1.250; frames=45 near=0 far=45 unknown=0 no_gaze=0 boosted=40 saccades=1 rejected=4; scene mode=realistic fresh=40 stale=2 moved=1 absent=0 shares near 0.02 far 0.97 ring 0.10/0.85 far_median 500.0 m edge=0 ambiguous=3 vetoes=0 depth_over_vergence=0 changes=1 landing_steps=0; pvr valid=45 invalid=0 eye_invalid=0 convergence 0.00 m; IPD base 64.0 mm, render 76.8 mm";
+    const string predict = "10:00:02.000 predict: transition=predictive in effect samples=500 rate 500 Hz saccades=3 dropped=0 predicted=3 steps=2 mean_step 8.44 mm confirmed=1 contradicted=1 expired=0 skipped short=1 no_grid=0 edge=0 ambiguous=0 outside=0 late=0 same=0; gain 1.02; grid fresh=45 stale=0";
+    File.WriteAllText(log, settings + "\n" + depth + "\n");
+    Require(PupilShiftStatus.Read(folder, true).Depth is { Transition: "gradual", TransitionHotkey: "120:6", Predictive: null }, "gradual from the settings line");
+    File.WriteAllText(log, settings + "\n10:00:01.000 hotkey: transition predictive\n" + depth + "\n" + predict + "\n" + predict + "\n");
+    var status = PupilShiftStatus.Read(folder, true).Depth;
+    Require(status is { Transition: "predictive", PredictiveSteps: 4, PredictiveConfirmed: 2, PredictiveContradicted: 2, PredictiveSaccades: 6,
+        Predictive: { InEffect: true, Steps: 2, MeanStepMm: 8.44, Short: 1, Confirmed: 1 } }, "the switch selected predictive; its steps counted");
+    File.WriteAllText(log, settings.Replace("transition=gradual", "transition=predictive") + "\n" + depth + "\n" +
+        "10:00:02.000 predict: transition=predictive fallback gradual: no usable Pimax PVR client (per-eye gaze) samples=0 rate 0 Hz saccades=0 dropped=0 predicted=0 steps=0 mean_step 0.00 mm confirmed=0 contradicted=0 expired=0 skipped short=0 no_grid=0 edge=0 ambiguous=0 outside=0 late=0 same=0; gain 1.00; grid fresh=0 stale=0\n");
+    Require(PupilShiftStatus.Read(folder, true).Depth is { Transition: "predictive", Predictive: { InEffect: false, Reason: "no usable Pimax PVR client (per-eye gaze)" } }, "fallback and why");
+    // An older log without the transition: none shown.
+    File.WriteAllText(log, "10:00:00.100 depth settings: enabled=1 max_scale=1.40 near=1.50m up=5.0mm/s down=40.0mm/s saccade_step=4.0mm recover=800ms hold=500ms key=121:6\n" + depth + "\n");
+    Require(PupilShiftStatus.Read(folder, true).Depth is { Transition: null, Hotkey: "121:6" }, "older log");
+});
+Test("The Pupil shift page reads Depth boost from the layer's log: working, probing, no depth, switched off, Pupil shift off", () =>
+{
+    var folder = Path.Combine(root, "depth-status"); Directory.CreateDirectory(folder);
+    File.WriteAllText(Path.Combine(folder, PupilShiftStatus.LayerDll), "layer");
+    var log = Path.Combine(folder, PupilShiftStatus.LogName);
+    string Depth(string state, string source, string fixation, double scale, double max, int near, int far, int boosted) => string.Create(System.Globalization.CultureInfo.InvariantCulture,
+        $"depth: {state} source={source} fixation={fixation} distance 25.00 m [0.70..999.00] scale {scale:0.000} [1.000..{max:0.000}] target {max:0.000}; frames=90 near={near} far={far} unknown=0 no_gaze=0 boosted={boosted} saccades=2 rejected=9; IPD base 64.0 mm, render {64 * scale:0.0} mm");
+    File.WriteAllText(log, string.Join("\n",
+        "10:00:00.000 XR_APILAYER_DCSVR_pupil_shift loaded",
+        "10:00:00.100 settings: enabled=0 eye_radius=10.5mm virtual_image=1.50m max_gaze=35deg simulate=0 (0.0, 0.0) toggle=121:5 ipd=64.0mm",
+        "10:00:00.100 depth settings: enabled=1 max_scale=1.40 near=1.50m up=5.0mm/s down=40.0mm/s saccade_step=4.0mm recover=800ms hold=500ms key=121:6",
+        "10:00:01.000 end_frame: restored 4 projection views",
+        "10:00:02.000 stats: frames=90 shifted=0 (pupil shift disabled); runtime left eye vs head x[-32.75..-32.75] mm; cant 6.0 deg, runtime IPD 65.5 mm, rendered IPD 64.0 mm",
+        Depth("on", "probing", "near", 1, 1, 90, 0, 0),
+        "10:00:03.000 stats: frames=90 shifted=0 (pupil shift disabled); runtime left eye vs head x[-32.75..-32.75] mm; cant 6.0 deg, runtime IPD 65.5 mm, rendered IPD 70.0 mm",
+        Depth("on", "vergence", "far", 1.25, 1.25, 0, 90, 80)) + "\n");
+    var status = PupilShiftStatus.Read(folder, false);
+    Require(status.State == "disabled" && status.Hotkey == "121:5", "Pupil shift off, the layer runs for Depth boost");
+    Require(status.Depth is { State: "working", SessionMaxScale: 1.25, Seconds: 2, Hotkey: "121:6" } d && Math.Abs(d.SecondsBoosted - 80.0 / 90) < 1e-9 && d.SecondsNear == 1 && d.Last is { RenderIpdMm: 80.0, Source: "vergence", Fixation: "far" }, "working");
+    File.AppendAllText(log, Depth("off (switch)", "vergence", "far", 1, 1.25, 0, 90, 0) + "\n");
+    Require(PupilShiftStatus.Read(folder, true).Depth?.State == "off", "switched off");
+    File.WriteAllText(log, "10:00:00.100 depth settings: enabled=1 max_scale=1.40 near=1.50m up=5.0mm/s down=40.0mm/s saccade_step=4.0mm recover=800ms hold=500ms key=121:6\n" + Depth("on", "constant", "near", 1, 1, 90, 0, 0) + "\n");
+    Require(PupilShiftStatus.Read(folder, true).Depth?.State == "no-depth", "one shared gaze: no depth");
+    File.WriteAllText(log, "10:00:00.100 depth settings: enabled=1 max_scale=1.40 near=1.50m up=5.0mm/s down=40.0mm/s saccade_step=4.0mm recover=800ms hold=500ms key=121:6\n" + Depth("on", "probing", "far", 1, 1, 0, 90, 0) + "\n");
+    Require(PupilShiftStatus.Read(folder, true).Depth?.State == "probing", "waiting for both distances");
+    // Pupil shift alone: no Depth boost section on the page.
+    File.WriteAllText(log, "10:00:00.100 settings: enabled=1 eye_radius=10.5mm virtual_image=1.50m max_gaze=35deg simulate=0 (0.0, 0.0) toggle=121:5 ipd=0.0mm\n10:00:00.100 depth settings: enabled=0 max_scale=1.40 near=1.50m up=5.0mm/s down=40.0mm/s saccade_step=4.0mm recover=800ms hold=500ms key=121:6\n");
+    Require(PupilShiftStatus.Read(folder, true) is { Depth: null, Hotkey: "121:5", State: "waiting" }, "Depth boost not on in the layer: no section");
+});
+Test("The Pupil shift page reads Depth boost's scene depth line: source, vergence, mode, edges, vetoes; Realistic without the scene depth", () =>
+{
+    var folder = Path.Combine(root, "depth-scene-status"); Directory.CreateDirectory(folder);
+    File.WriteAllText(Path.Combine(folder, PupilShiftStatus.LayerDll), "layer");
+    var log = Path.Combine(folder, PupilShiftStatus.LogName);
+    const string settings = "10:00:00.100 depth settings: enabled=1 mode=realistic max_scale=1.25 far=150..400m near=1.50m up=5.0mm/s down=40.0mm/s saccade_step=4.0mm recover=800ms hold=500ms pvr=1 key=121:6";
+    string Line(string source, string vergence, string mode, double scale, int fresh, int edge, int vetoes) => string.Create(System.Globalization.CultureInfo.InvariantCulture,
+        $"10:00:02.000 depth: on source={source} vergence={vergence} fixation=far distance 500.00 m [480.00..520.00] scale {scale:0.000} [1.000..{scale:0.000}] target 1.250; frames=90 near=0 far=90 unknown=0 no_gaze=0 boosted=80 saccades=1 rejected=4; scene mode={mode} fresh={fresh} stale=2 moved=1 absent=0 shares near 0.02 far 0.97 ring 0.10/0.85 far_median 500.0 m edge={edge} ambiguous=3 vetoes={vetoes} depth_over_vergence=0 changes=1 landing_steps=0; pvr valid=88 invalid=2 eye_invalid=1 convergence 0.00 m; IPD base 64.0 mm, render {64 * scale:0.0} mm");
+    File.WriteAllText(log, settings + "\n" + Line("depth", "vergence", "realistic", 1.2, 88, 5, 2) + "\n");
+    var status = PupilShiftStatus.Read(folder, true);
+    Require(status.Depth is { State: "working", Last: { Source: "depth", Vergence: "vergence", Mode: "realistic", SceneFresh: 88, EdgeFrames: 5, Vetoes: 2, RenderIpdMm: 76.8 } } d
+        && d.Summary.Contains("scene depth"), status.Depth?.State + " " + status.Depth?.Summary);
+    // Realistic on the vergence alone (no engine module): normal depth, and the page says why.
+    File.WriteAllText(log, settings + "\n" + Line("vergence", "vergence", "realistic", 1.0, 0, 0, 0) + "\n");
+    Require(PupilShiftStatus.Read(folder, true).Depth is { State: "no-scene" } ns && ns.Summary.Contains("Engine Optimizations"), "Realistic without the scene depth");
+    // Enhanced on the vergence alone works as before.
+    File.WriteAllText(log, settings + "\n" + Line("vergence", "vergence", "enhanced", 1.3, 0, 0, 0) + "\n");
+    Require(PupilShiftStatus.Read(folder, true).Depth?.State == "working", "Enhanced on vergence");
+    // Neither source: the vergence's state decides (one shared gaze, or still probing).
+    File.WriteAllText(log, settings + "\n" + Line("none", "constant", "enhanced", 1.0, 0, 0, 0) + "\n");
+    Require(PupilShiftStatus.Read(folder, true).Depth?.State == "no-depth", "no source, one shared gaze");
+    File.WriteAllText(log, settings + "\n" + Line("none", "probing", "enhanced", 1.0, 0, 0, 0) + "\n");
+    Require(PupilShiftStatus.Read(folder, true).Depth?.State == "probing", "no source, probing");
+    // After the flight the whole flight counts: the scene depth boosted, so it worked.
+    File.WriteAllText(log, settings + "\n" + Line("depth", "probing", "realistic", 1.25, 90, 0, 0) + "\n" + Line("none", "probing", "realistic", 1.0, 0, 0, 0) + "\n");
+    Require(PupilShiftStatus.Read(folder, false).Depth is { State: "working", SessionMaxScale: 1.25 }, "worked after the flight");
 });
 Test("The Pupil shift page reads the layer's log: working, no gaze, switched off, not installed", () =>
 {
@@ -1022,6 +1280,9 @@ Test("The Pupil shift page reads the layer's log: working, no gaze, switched off
     Require(working.SecondsWithGaze == 2 && working.Seconds == 2 && working.RestoredViews == 360 && working.Hotkey == "121:5" && working.Warnings.Count == 0 && !working.Live);
     File.AppendAllText(log, "10:00:04.000 stats: frames=90 shifted=0 (no gaze source); runtime left eye vs head x[-31.20..-31.20] mm\n");
     Require(PupilShiftStatus.Read(folder, true).State == "no-gaze" && PupilShiftStatus.Read(folder, false) is { State: "working", Live: false }, "live: the last second; after the flight: the whole flight");
+    // The bundled Quad Views says there is no real gaze (its fixed focus): no pupil moves, the gaze source ends the line.
+    File.AppendAllText(log, "10:00:04.500 stats: frames=90 shifted=0 (no valid gaze); runtime left eye vs head x[-31.20..-31.20] mm; cant 6.0 deg, runtime IPD 65.5 mm, rendered IPD 64.0 mm; gaze source=none (qv 0, focus 0, simulated 0, none 90; qv invalid 90, saccade 0)\n");
+    Require(PupilShiftStatus.Read(folder, true) is { State: "no-gaze", Last: { Shifted: 0, RenderedIpdMm: 64.0 } }, "Quad Views without a valid gaze: no gaze, rendered IPD read before the gaze source");
     File.AppendAllText(log, "10:00:05.000 stats: frames=90 shifted=0 (correction off); runtime left eye vs head x[-31.20..-31.20] mm\n");
     Require(PupilShiftStatus.Read(folder, true).State == "off");
     // A runtime that already moves the eye with the gaze would get the correction twice.
@@ -1047,7 +1308,7 @@ Test("DCS engine optimizations install in Saved Games Scripts with every ini key
     Require(engineFiles.SequenceEqual([@"DcsQvCull\DcsQvCull.dll", @"DcsQvCull\payload\DcsQvCullPayload.dll", @"DcsQvCull\DcsQvCull.ini", @"Hooks\DcsQvCull.lua"]));
     Require(plan.Files.All(f => !f.Path.StartsWith(Path.GetDirectoryName(exe)!, StringComparison.OrdinalIgnoreCase)));
     var ini = new StreamReader(new MemoryStream(plan.Files.Single(f => f.Path.EndsWith("DcsQvCull.ini")).Content), Encoding.UTF8, true).ReadToEnd();
-    foreach (var line in new[] { "[General]\nDiagnostics=0", "[Timing]\nShaderTimeCache=1\nTaskQueueClock=1\nCacheUs=1000", "[Scene]\nPartitionBoost=1\nCostWeights=1\nCostWeightsSanity=0\nCollectThreadsMax=0\nFineTimerResolution=0", "[Cull]\nEnabled=0\nDebugHole=0", "[D3D]\nMeter=0\nFilter=0", "BenchTimer=1\nBenchPartition=1\nBenchIsolation=0\nBenchThreads=0\nBenchTimerRes=0\nBenchFilter=0", "SelfTest=0\nProfile=0\nBenchCull=0" })
+    foreach (var line in new[] { "[General]\nDiagnostics=0", "[Timing]\nShaderTimeCache=1\nTaskQueueClock=1\nCacheUs=1000", "[Scene]\nPartitionBoost=1\nCostWeights=1\nCostWeightsSanity=0\nCollectThreadsMax=0\nFineTimerResolution=0", "[Cull]\nEnabled=0\nDebugHole=0", "[D3D]\nMeter=0\nFilter=0", "BenchTimer=0\nBenchPartition=0\nBenchIsolation=0\nBenchThreads=0\nBenchTimerRes=0\nBenchFilter=0", "SelfTest=0\nProfile=0\nBenchCull=0" })
         Require(ini.ReplaceLineEndings("\n").Contains(line), "DcsQvCull.ini lacks " + line);
     var tuned = ConfigurationWriters.DcsQvCull(on with { EngineShaderTimeCache = false, EnginePartitionBoost = false, EngineTimerRefreshUs = 500, EngineDiagnosticHooks = true });
     Require(tuned.Contains("ShaderTimeCache=0") && tuned.Contains("PartitionBoost=0") && tuned.Contains("CacheUs=500") && tuned.Contains("Diagnostics=1"));
@@ -1057,7 +1318,7 @@ Test("DCS engine optimizations install in Saved Games Scripts with every ini key
     Require(!ProfileValidation.Validate(on).Any(i => i.Code is "engine-hotkey" or "hotkey-conflict"));
     Require(ProfileValidation.Validate(on with { EngineToggleKey = "120:3" }).Any(i => i.Code == "engine-hotkey" && i.Severity == IssueSeverity.Error));
     Require(ProfileValidation.Validate(on with { EngineToggleKey = "119:3" }).Any(i => i.Code == "engine-hotkey") && ini.Contains("TightCasters=0") && ini.Contains("BenchShadow=0"));
-    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "CostWeightsSanity=0", "Beeps=1", "BenchCostWeights=0", "Terrain=0", "SkipSameConstantUpload=0", "BenchCbUpload=0", "LowPowerPacer=0", "BenchPacer=0", "MotionSweep=0", "FrameHeapSlabs=1", "TaskQueueClock=1", "BenchFrameHeap=0", "MotionProfile=0", "MotionTaxi=0", "MotionCounters=1", "BigModelPages=1", "BigPageBytes=4194304", "ShadowInstancing=1", "ShadowBatching=1", "ShadowPlanAsync=1", "ShadowTextureSkip=1", "ShadowInstCompile=0", "ShadowInstVerify=0", "BenchShadowInst=0", "BenchBigPages=0", "BenchShadowTex=0", "BenchTexTable=0", "YawScan=0", "HoldYawDeg=-1", "GBufferBatching=0", "GBufferInstCompile=0", "GBufferInstVerify=0", "BenchGBufferInst=0", "ParallelUpload=0", "BenchParallelUpload=0", "BenchShadowPlanAsync=0", "DirectUploadCount=0", "FxApplyCount=0", "GBufferTexCount=0", "BenchAllocSlabs=0", "BenchTexDedupe=0", "BenchCbSkip=0", "BenchTriPlain=0", "BenchEngine=0", "BenchMicro=0", "Quick=0", "SigScan=1", "DirectUpload=0", "DirectUploadVerify=0", "BenchDirectUpload=0", "SplitFilter=1", "SplitFilterOps=0x4ff", "Meter=0", "SplitFilterVerify=0", "BenchSplitFilter=0", "JoinTailCount=0", "SrvSpanCount=0", "ShadowRecorder=1", "ShadowRecorderScope=0x30f", "ShadowRecorderWaitUs=200", "ShadowRecorderPriority=0", "ShadowRecorderSplit=0xf", "ShadowRecorderInstancing=1", "ShadowRecVerify=0", "ShadowRecVerifySec=5", "BenchShadowRecorder=0", "ShadowRecCount=0", "GBufferRecorder=1", "GBufferRecorderScope=0x10055", "GBufferRecorderMaxSegments=12", "GBufferRecorderHelpers=2", "GBufferRecorderWaitUs=300", "GBufferRecorderIsland=30", "GBufferRecorderRedo=1", "GBufferRecorderSwapAhead=1", "GBufferBatching=0", "GBufferRecVerify=0", "GBufferRecVerifySec=6", "GBufferRecVerifyStride=0", "BenchGBufferRecorder=0", "GBufferRecCount=0", "GBufferRecStateDump=0", "GpuPassTiming=0", "YawProfile=0", "RotationProfile=0", $"ShadowRecorderHelpers={(Environment.ProcessorCount <= 8 ? 1 : 3)}", "GBufferRecorderCockpit=0", "GBufferRecorderByOrdinal=1", "SrvTailTrim=0", "PassFlush=0", "FrameStartGap=0", "RunnableThreads=0", "VramCount=0", "GpuPassStats=0", "ForwardRecCount=0", "BenchPassFlush=0", "SrvTailTrimVerify=0", "BenchSrvTailTrim=0", "[Prefetch]", "Mode=skip", "WindowMs=5000", "BenchPrefetch=0" })
+    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "CostWeightsSanity=0", "Beeps=1", "BenchCostWeights=0", "Terrain=0", "SkipSameConstantUpload=0", "BenchCbUpload=0", "LowPowerPacer=0", "BenchPacer=0", "MotionSweep=0", "FrameHeapSlabs=1", "TaskQueueClock=1", "BenchFrameHeap=0", "MotionProfile=0", "MotionTaxi=0", "MotionCounters=1", "BigModelPages=1", "BigPageBytes=4194304", "ShadowInstancing=1", "ShadowBatching=1", "ShadowPlanAsync=1", "ShadowTextureSkip=1", "ShadowInstCompile=0", "ShadowInstVerify=0", "BenchShadowInst=0", "BenchBigPages=0", "BenchShadowTex=0", "BenchTexTable=0", "YawScan=0", "HoldYawDeg=-1", "GBufferBatching=0", "GBufferInstCompile=0", "GBufferInstVerify=0", "BenchGBufferInst=0", "ParallelUpload=0", "BenchParallelUpload=0", "BenchShadowPlanAsync=0", "DirectUploadCount=0", "FxApplyCount=0", "GBufferTexCount=0", "BenchAllocSlabs=0", "BenchTexDedupe=0", "BenchCbSkip=0", "BenchTriPlain=0", "BenchEngine=1", "BenchMicro=0", "Quick=1", "SigScan=1", "DirectUpload=0", "DirectUploadVerify=0", "BenchDirectUpload=0", "SplitFilter=1", "SplitFilterOps=0x4ff", "Meter=0", "SplitFilterVerify=0", "BenchSplitFilter=0", "JoinTailCount=0", "SrvSpanCount=0", "ShadowRecorder=1", "ShadowRecorderScope=0x30f", "ShadowRecorderWaitUs=200", "ShadowRecorderPriority=0", "ShadowRecorderSplit=0xf", "ShadowRecorderInstancing=1", "ShadowRecVerify=0", "ShadowRecVerifySec=5", "BenchShadowRecorder=0", "ShadowRecCount=0", "GBufferRecorder=1", "GBufferRecorderScope=0x10055", "GBufferRecorderMaxSegments=12", "GBufferRecorderHelpers=2", "GBufferRecorderWaitUs=300", "GBufferRecorderIsland=30", "GBufferRecorderRedo=1", "GBufferRecorderSwapAhead=1", "GBufferBatching=0", "GBufferRecVerify=0", "GBufferRecVerifySec=6", "GBufferRecVerifyStride=0", "BenchGBufferRecorder=0", "GBufferRecCount=0", "GBufferRecStateDump=0", "GpuPassTiming=0", "YawProfile=0", "RotationProfile=0", $"ShadowRecorderHelpers={(Environment.ProcessorCount <= 8 ? 1 : 3)}", "GBufferRecorderCockpit=0", "GBufferRecorderByOrdinal=1", "SrvTailTrim=0", "PassFlush=0", "FrameStartGap=0", "RunnableThreads=0", "VramCount=0", "GpuPassStats=0", "ForwardRecCount=0", "BenchPassFlush=0", "SrvTailTrimVerify=0", "BenchSrvTailTrim=0", "[Prefetch]", "Mode=skip", "WindowMs=5000", "BenchPrefetch=0", "[Governor]", "Enabled=1", "GpuBusyPct=92", "MinGainPct=2.0", "GpuFullPct=98", "TrialSec=20", "RecheckSec=10", "RevertBackoffSec=300", "[Perception]", "FixationDepth=0", "DepthGrid=0", "SceneCutReset=1", "FarDepthExport=0", "FarDepthExportSlots=2", "RecorderDetail=0", "PerfIntervalSec=10", "VramIntervalSec=60" })
         Require(ini.Contains(key), "DcsQvCull.ini lacks " + key);
     // The terrain prefetch fix is an engine optimization: the profile's mode, off when the option is off.
     Require(ConfigurationWriters.DcsQvCull(on with { BoostPrefetch = PrefetchFix.Observe }).Contains("\nMode=observe") && ConfigurationWriters.DcsQvCull(on with { BoostPrefetch = PrefetchFix.Off }).Contains("\nMode=off")
@@ -2671,6 +2932,115 @@ Test("Update downloads only from this repository's release assets", () =>
     foreach (var url in new[] { "http://github.com/NIGos/dcs-control/releases/download/v1/x.exe", "https://github.com.evil.example/NIGos/dcs-control/releases/download/v1/x.exe",
         "https://github.com/Other/dcs-control/releases/download/v1/x.exe", "https://github.com:8443/NIGos/dcs-control/releases/download/v1/x.exe", "https://github.com/NIGos/dcs-control/releases/download/../../x.exe", "not a url" })
         Require(!Updates.AllowedAssetUrl(url), "allowed: " + url);
+});
+Test("The diagnostic package keeps a long log's start and end", () =>
+{
+    var path = Path.Combine(root, "diagnostic-head-tail.log"); Directory.CreateDirectory(root);
+    File.WriteAllText(path, "startup line\n" + string.Concat(Enumerable.Range(0, 2000).Select(i => $"block {i}\n")) + "last line\n");
+    var cut = Diagnostics.HeadAndTail(path, 100, 100);
+    Require(cut.StartsWith("startup line\n", StringComparison.Ordinal) && cut.EndsWith("last line\n", StringComparison.Ordinal) && cut.Contains("bytes left out by the diagnostic package", StringComparison.Ordinal), cut);
+    Require(cut.Split('\n').All(l => l.Length == 0 || l.StartsWith("block ", StringComparison.Ordinal) || l.StartsWith("startup", StringComparison.Ordinal) || l.StartsWith("last", StringComparison.Ordinal) || l.StartsWith("[...", StringComparison.Ordinal)), "only whole lines");
+    Require(Diagnostics.HeadAndTail(path, 1 << 20, 1 << 20) == File.ReadAllText(path), "a short file is whole");
+});
+Test("NVIDIA Threaded optimization Off is named before the flight and in the engine status, with where to change it", () =>
+{
+    var previous = NvidiaSettings.ThreadedOptimizationForDcs;
+    try
+    {
+        var profile = new VrProfile { EngineOptimizations = true };
+        NvidiaSettings.ThreadedOptimizationForDcs = () => new(ThreadedOptimization.Off, true);
+        var warning = ProfileValidation.Validate(profile).SingleOrDefault(i => i.Code == "nvidia-threaded-optimization");
+        Require(warning is { Severity: IssueSeverity.Warning } && warning.Message.Contains("DCS program profile", StringComparison.Ordinal) && warning.Message.Contains("Use global setting", StringComparison.Ordinal), warning?.Message ?? "no warning");
+        Require(EngineOptimizations.NoCommandListsAdvice().Contains("Threaded optimization is Off in the DCS program profile", StringComparison.Ordinal));
+        Require(!ProfileValidation.Validate(profile with { EngineShadowRecorder = false, EngineGBufferRecorder = false }).Any(i => i.Code == "nvidia-threaded-optimization"), "nothing to say when the recorders are off");
+        NvidiaSettings.ThreadedOptimizationForDcs = () => new(ThreadedOptimization.Off, false);
+        Require(ProfileValidation.Validate(profile).Single(i => i.Code == "nvidia-threaded-optimization").Message.Contains("Global settings: set Threaded optimization to Auto", StringComparison.Ordinal));
+        foreach (var fine in new ThreadedOptimizationSetting?[] { new(ThreadedOptimization.Auto, false), new(ThreadedOptimization.On, true), null })
+        {
+            NvidiaSettings.ThreadedOptimizationForDcs = () => fine;
+            Require(!ProfileValidation.Validate(profile).Any(i => i.Code == "nvidia-threaded-optimization"), "no warning for " + fine);
+        }
+        // MFAA on: the same effect, named with where to turn it off (GitHub issue #1).
+        NvidiaSettings.ThreadedOptimizationForDcs = () => new(ThreadedOptimization.Auto, false);
+        var previousMfaa = NvidiaSettings.MfaaForDcs;
+        try
+        {
+            NvidiaSettings.MfaaForDcs = () => new(true, true);
+            Require(ProfileValidation.Validate(profile).Single(i => i.Code == "nvidia-mfaa").Message.Contains("MFAA is On in the DCS program profile", StringComparison.Ordinal), "MFAA warning");
+            Require(EngineOptimizations.NoCommandListsAdvice().Contains("Antialiasing - MFAA is On", StringComparison.Ordinal), "MFAA advice");
+            NvidiaSettings.MfaaForDcs = () => new(false, true);
+            Require(!ProfileValidation.Validate(profile).Any(i => i.Code == "nvidia-mfaa"), "MFAA off: nothing");
+        }
+        finally { NvidiaSettings.MfaaForDcs = previousMfaa; }
+        // NVIDIA card, setting fine or unreadable: the other causes; no NVIDIA card: the driver itself.
+        Require(EngineOptimizations.NoCommandListsAdvice().Contains("integrated graphics", StringComparison.Ordinal));
+        var adapters = GpuInfo.Adapters;
+        try { GpuInfo.Adapters = () => [new("AMD Radeon RX 7900 XTX", "AMD", "31.0")]; Require(EngineOptimizations.NoCommandListsAdvice().Contains("common on AMD", StringComparison.Ordinal)); }
+        finally { GpuInfo.Adapters = adapters; }
+        // The module's own line (0.5.7) says which capability, the creation flags and DCS's adapter.
+        const string line = "shadow recorder: the D3D11 device lacks what the recorder needs: DriverCommandLists=0 ConstantBufferOffsetting=1 ID3D11DeviceContext1=1 creation flags 0x0 on {0} (vendor {1}, LUID 0:1) -- hint; unavailable";
+        Require(EngineOptimizations.NoCommandListsAdvice(string.Format(System.Globalization.CultureInfo.InvariantCulture, line, "AMD Radeon(TM) Graphics", "0x1002")).Contains("DCS runs on AMD Radeon(TM) Graphics, not on the NVIDIA card", StringComparison.Ordinal), "integrated graphics");
+        Require(EngineOptimizations.NoCommandListsAdvice(string.Format(System.Globalization.CultureInfo.InvariantCulture, line, "NVIDIA GeForce RTX 4090", "0x10de").Replace("flags 0x0", "flags 0x8 (PREVENT_INTERNAL_THREADING_OPTIMIZATIONS)", StringComparison.Ordinal)).Contains("hooked into DCS", StringComparison.Ordinal), "injector flag");
+        Require(EngineOptimizations.NoCommandListsAdvice("x: DriverCommandLists=1 ConstantBufferOffsetting=0 ID3D11DeviceContext1=1 on Y (vendor 0x10de)").Contains("ConstantBufferOffsetting missing", StringComparison.Ordinal), "another capability");
+    }
+    finally { NvidiaSettings.ThreadedOptimizationForDcs = previous; }
+});
+Test("A panel-only profile with bundled Quad Views plans through the service with the fork's OFXR in pass-through", () =>
+{
+    var dist = Path.Combine(root, "panel-only/dist");
+    var quadSource = Path.Combine(workspace, "external/quadviews/bin/x64/Release");
+    var quadDir = Path.Combine(dist, "components/quadviews"); Directory.CreateDirectory(quadDir);
+    foreach (var name in new[] { "XR_APILAYER_MBUCCHIA_quad_views_foveated.dll", "openxr-api-layer.json", "settings.cfg" })
+    { File.Copy(Path.Combine(quadSource, name), Path.Combine(quadDir, name), true); File.WriteAllText(Path.Combine(quadDir, name + ".sha256"), Hashing.FileSha256(Path.Combine(quadDir, name))); }
+    var ofxrDir = Path.Combine(dist, "components/ofxr"); Directory.CreateDirectory(ofxrDir);
+    var ofxrDll = Path.Combine(ofxrDir, "XR_APILAYER_XRFrameBridge_diagnostic.dll");
+    File.Copy(DeferredOfxr, ofxrDll, true); File.WriteAllText(ofxrDll + ".sha256", Hashing.FileSha256(ofxrDll));
+    var exe = Make("panel-only/bin/DCS.exe", "fixture"); var options = Make("panel-only/options.lua", Lua);
+    var runtime = Make("panel-only/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("panel-only/runtime.dll", "fixture");
+    var service = new ControlService(dist, Path.Combine(root, "panel-only/state"));
+    var draft = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Off, HeadsetPanel = true };
+    var plan = service.Preview(draft, new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime });
+    var ini = Encoding.Unicode.GetString(plan.Files.Single(f => f.Path.EndsWith("ofxr_bridge.ini")).Content).ReplaceLineEndings("\n");
+    Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"].Split(';').Contains("XR_APILAYER_XRFrameBridge_diagnostic") && ini.Contains("enabled=0\n") && ini.Contains("d3d11_bridge=0\n"), "OFXR deployed in pass-through");
+    Require(plan.LaunchEnvironment["DCSVR_DIAG_HOTKEY"] != "0:0", "the panel key works without frame generation");
+    // Without the panel, nothing of OFXR.
+    plan = service.Preview(draft with { HeadsetPanel = false }, new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime });
+    Require(!plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"].Contains("XRFrameBridge") && plan.LaunchEnvironment["DCSVR_DIAG_HOTKEY"] == "0:0", "no OFXR without frame generation or the panel");
+});
+Test("Far depth is off by default and switches the engine's depth export and Quad Views' pass together", () =>
+{
+    var off = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, EngineOptimizations = true };
+    Require(!off.FarDepth && !off.UsesFarDepth, "off by default");
+    Require(ConfigurationWriters.DcsQvCull(off).ReplaceLineEndings("\n").Contains("FarDepthExport=0\n") && ConfigurationWriters.QuadViews(off).ReplaceLineEndings("\n").Contains("dcsvr_far_depth=0\n"), "both off");
+    var on = off with { FarDepth = true, FarDepthPreset = FarDepthPreset.Strong };
+    Require(ConfigurationWriters.DcsQvCull(on).ReplaceLineEndings("\n").Contains("FarDepthCoverageMode=hdr\n"), "the HUD found in the HDR image (F-16: HUD after DLSS)");
+    Require(ConfigurationWriters.DcsQvCull(on).ReplaceLineEndings("\n").Contains("FarDepthExport=1\n") &&ConfigurationWriters.QuadViews(on).ReplaceLineEndings("\n").Contains("dcsvr_far_depth=1\ndcsvr_far_depth_preset=strong\n") && !ConfigurationWriters.QuadViews(on).Contains("allow_unmasked", StringComparison.Ordinal) && ConfigurationWriters.DcsQvCull(on).ReplaceLineEndings("\n").Contains("FarDepthPreOverlay=1\n"), "both on, with the preset and the HUD kept out");
+    Require(!(on with { EngineOptimizations = false }).UsesFarDepth && ProfileValidation.Validate(on with { EngineOptimizations = false }).Any(i => i.Code == "far-depth-needs"), "needs the engine module");
+    Require(!(on with { QuadViews = QuadProvider.PimaxNative }).UsesFarDepth, "needs the bundled Quad Views");
+    Require(ConfigurationWriters.QuadViews(on).ReplaceLineEndings("\n").Contains("dcsvr_far_depth_toggle=119:6\n") && ConfigurationWriters.QuadViews(off).ReplaceLineEndings("\n").Contains("dcsvr_far_depth_toggle=0:0\n"), "its in-flight switch, Alt+Shift+F8");
+    Require(ProfileValidation.Validate(on with { FarDepthToggleKey = NeuralHotkeys.EngineDefault }).Any(i => i.Code == "hotkey-conflict"), "the switch needs a key of its own");
+    // The module's test suite starts on Ctrl+Alt+F11 with Shift held too, and from any in-flight key.
+    Require(ProfileValidation.Validate(on with { FarDepthToggleKey = "122:7" }).Any(i => i.Code == "far-depth-hotkey" && i.Severity == IssueSeverity.Error), "Ctrl+Alt+Shift+F11 is the suite's");
+    Require(ProfileValidation.Validate(on with { NeuralRendering = true, NeuralToggleKey = "122:3" }).Any(i => i.Code == "neural-hotkey" && i.Severity == IssueSeverity.Error), "the DLSS 5 key too");
+    Require(!ProfileValidation.Validate(on with { NeuralRendering = true, NeuralToggleKey = "122:3", EngineOptimizations = false }).Any(i => i.Code == "neural-hotkey" && i.Message.Contains("test suite")), "only while the module runs");
+    // options.lua outside Saved Games\DCS*\Config: a warning, since DCS never reads it there.
+    Require(ProfileValidation.IsSavedGamesOptions(@"C:\Games\Saved Games\DCS.openbeta\Config\options.lua") && !ProfileValidation.IsSavedGamesOptions(@"D:\options.lua") && !ProfileValidation.IsSavedGamesOptions(@"D:\backup\options.lua"), "Saved Games location");
+    Require(ProfileValidation.Validate(new VrProfile(), new InventorySnapshot { OptionsPath = @"D:\backup\options.lua" }).Any(i => i.Code == "options-location" && i.Severity == IssueSeverity.Warning), "warned");
+});
+Test("The in-headset panel without frame generation loads OFXR only to draw it: no generation, no D3D11 bridge", () =>
+{
+    var panelOnly = new VrProfile { FrameGen = FrameGeneration.Off, HeadsetPanel = true };
+    Require(panelOnly.UsesHeadsetPanel && !new VrProfile { FrameGen = FrameGeneration.Off }.UsesHeadsetPanel && new VrProfile { FrameGen = FrameGeneration.Nvidia }.UsesHeadsetPanel, "who gets the panel");
+    Require(!(panelOnly with { Desktop = true }).UsesHeadsetPanel, "never on a monitor");
+    var ini = ConfigurationWriters.Ofxr(panelOnly with { ShowOverlay = true }).ReplaceLineEndings("\n");
+    Require(ini.Contains("enabled=0\n") && ini.Contains("d3d11_bridge=0\n") && ini.Contains("position=off"), "pass-through OFXR: " + ini);
+    var generating = ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia }).ReplaceLineEndings("\n");
+    Require(generating.Contains("enabled=1\n") && generating.Contains("d3d11_bridge=1\n"), "frame generation unchanged");
+    Require(ProfileValidation.Validate(panelOnly with { DiagnosticOverlayKey = "Ctrl+Alt+F11" }).Any(i => i.Code.StartsWith("diagnostic-hotkey", StringComparison.Ordinal)), "the panel key is checked without frame generation too");
+    Require(ini.Contains("logging_enabled=0\n") && ini.Contains("visibility_mask=0\n"), "no flight log, no visibility mask for the panel alone");
+    Require(generating.Contains("logging_enabled=1\n") && generating.Contains("visibility_mask=1\n"), "frame generation keeps them");
+    Require(!(panelOnly with { DiagnosticOverlayKey = "0:0", DiagnosticOverlayAtStart = false }).UsesHeadsetPanel && (panelOnly with { DiagnosticOverlayKey = "0:0", DiagnosticOverlayAtStart = true }).UsesHeadsetPanel, "a panel that can never show loads nothing");
+    Require(ProfileValidation.Validate(panelOnly with { NeuralRendering = true, NeuralRuntimePath = "x.dll", NeuralToggleKey = NeuralHotkeys.DiagnosticDefault }).Any(i => i.Code == "hotkey-conflict"), "DLSS 5 and the panel cannot share a key without frame generation either");
 });
 Test("The update check asks GitHub at most every 6 hours unless forced, and offline keeps what it knew", () =>
 {

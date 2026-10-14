@@ -91,7 +91,7 @@ bool Install(int periodUs) {
   GetTimeFn orig = reinterpret_cast<GetTimeFn>(SlotOriginal(slot));
   g_orig = orig;
   g_cached = orig();
-  HANDLE t = CreateThread(nullptr, 0, Updater, nullptr, 0, nullptr);
+  HANDLE t = CreateThread(nullptr, 0, qvexit::Thread<Updater>, nullptr, 0, nullptr);
   if (!t) {
     g_orig = nullptr;
     return false;

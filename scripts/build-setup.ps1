@@ -15,7 +15,7 @@ $numbers = @(([regex]::Match($version, '^\d+\.\d+\.\d+').Value -split '\.') + '0
 & $wrapper rc /nologo /i $build /fo (Join-Path $build 'setup.res') (Join-Path $source 'setup.rc')
 if ($LASTEXITCODE -ne 0) { throw 'Setup resources failed.' }
 $stub = Join-Path $build 'DcsControlSetup.exe'
-& $wrapper cl /nologo /utf-8 /std:c++20 /EHsc /O2 /W4 /WX /MT /DUNICODE /D_UNICODE "/I$build" "/Fo:$build\" "/Fe:$stub" (Join-Path $source 'setup.cpp') (Join-Path $build 'setup.res') user32.lib shell32.lib ole32.lib comctl32.lib bcrypt.lib shlwapi.lib advapi32.lib gdi32.lib /link /SUBSYSTEM:WINDOWS /MANIFEST:NO
+& $wrapper cl /nologo /utf-8 /std:c++20 /EHsc /O2 /W4 /WX /MT /DUNICODE /D_UNICODE "/I$build" "/Fo:$build/" "/Fe:$stub" (Join-Path $source 'setup.cpp') (Join-Path $build 'setup.res') user32.lib shell32.lib ole32.lib comctl32.lib bcrypt.lib shlwapi.lib advapi32.lib gdi32.lib /link /SUBSYSTEM:WINDOWS /MANIFEST:NO
 if ($LASTEXITCODE -ne 0) { throw 'Setup build failed.' }
 if (-not $Package) { return $stub }
 if (-not $Output) { throw 'Name the setup to write with -Output.' }

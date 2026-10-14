@@ -223,11 +223,12 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 }
             }
             string? ofxrLayer = null;
-            if (profile.FrameGen != FrameGeneration.Off)
+            // OFXR for frame generation, or for the in-headset panel alone (the fork draws it; the upstream package has none).
+            if (profile.FrameGen != FrameGeneration.Off || profile.UsesHeadsetPanel)
             {
                 // OFXR from the djules75 fork (DCS-compatible); see ComponentLocations.
                 ofxrLayer = Path.Combine(DistributionRoot, "components/ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll");
-                if (!File.Exists(ofxrLayer) && profile.QuadViews != QuadProvider.QuadViewsFoveated && File.Exists(Path.Combine(PackageRoot, PackageCatalog.Get("ofxr").ArchiveName)))
+                if (!File.Exists(ofxrLayer) && profile.FrameGen != FrameGeneration.Off && profile.QuadViews != QuadProvider.QuadViewsFoveated && File.Exists(Path.Combine(PackageRoot, PackageCatalog.Get("ofxr").ArchiveName)))
                 {
                     // Development distributions without the fork build: upstream package for stereo profiles only.
                     ofxrLayer = null; ofxr = Import("ofxr");
@@ -248,7 +249,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 }
             }
             string? pupilShift = null;
-            if (profile.ForLaunch().UsesPupilShift)
+            if (profile.ForLaunch().UsesPerceptionLayer)
             {
                 pupilShift = Path.Combine(DistributionRoot, "components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll");
                 if (!File.Exists(pupilShift) || !File.Exists(pupilShift + ".sha256") || Hashing.FileSha256(pupilShift) != File.ReadAllText(pupilShift + ".sha256").Trim())
@@ -400,12 +401,12 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                     VerifyInstalled(journal);
                     return new(fovea is null ? LaunchSyncKind.Unchanged : LaunchSyncKind.FoveaUpdated, fovea ?? "The applied profile is up to date.", journal);
                 }
-                catch (IOException e)
+                catch (Exception e) when (e is IOException or InvalidDataException) // InvalidDataException: options.lua no longer parses
                 {
                     reason = e.Message.TrimEnd('.');
                     // Only the profile's own DCS settings changed (DCS rewrote Max FPS, for example): they are set back in
                     // options.lua in place, keeping everything else DCS changed.
-                    if (LuaDriftOnly(journal) && originals.RealignLuaValues() is { Count: > 0 } realigned)
+                    if (e is IOException && LuaDriftOnly(journal) && originals.RealignLuaValues() is { Count: > 0 } realigned)
                     {
                         try
                         {

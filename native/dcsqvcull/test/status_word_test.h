@@ -47,6 +47,31 @@ void Counting() {
   const uint64_t real = ComputeStatus();
   Check(Running(real) && ActiveCount(real) + LatchedCount(real) <= 18 && ConfiguredCount(real) <= 18,
         "status word: ComputeStatus reports running and at most 18 production features");
+  // A feature latched off this session stays latched under the kill switch
+  // (CostWeights: configured, its hook never installed). It read "latched"
+  // only while the kill switch was off, so bit 2 and the latched count
+  // dropped when the pilot pressed it.
+  {
+    const bool cfg0 = g_cfg.costWeights, on0 = g_costWeightsOn.load(), off0 = g_engineOff.load();
+    auto* orig0 = partw::g_orig;
+    partw::g_orig = nullptr;
+    g_cfg.costWeights = true;
+    g_costWeightsOn = true;
+    g_engineOff = false;
+    const uint64_t live = ComputeStatus();
+    const bool latchedLive = g_featLast[8].latched;
+    g_costWeightsOn = false;  // what SetEngineOff(true) does to it
+    g_engineOff = true;
+    const uint64_t killed = ComputeStatus();
+    const bool latchedKilled = g_featLast[8].latched;
+    Check(latchedLive && latchedKilled && LatchedCount(killed) == LatchedCount(live) && AnyLatched(killed) &&
+              !Optimizing(killed),
+          "status word: a latched feature stays latched under the kill switch (bit 2, latched count)");
+    partw::g_orig = orig0;
+    g_cfg.costWeights = cfg0;
+    g_costWeightsOn = on0;
+    g_engineOff = off0;
+  }
 }
 
 void Handover() {

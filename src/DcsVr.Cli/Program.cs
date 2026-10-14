@@ -76,6 +76,7 @@ try
             var inventory = new WindowsInventory().Capture(Option("--dcs"), Option("--options"));
             Console.WriteLine(service.ExportDiagnostic(inventory, new(), Option("--out") ?? "diagnostic.json")); break;
         }
+        case "nvidia": { var (threaded, mfaa) = NvidiaSettings.Fresh(); Console.WriteLine(JsonData.Serialize(new { threadedOptimization = threaded, mfaa })); break; }
         case "inspect-binary": Console.WriteLine(JsonData.Serialize(NativeBinary.Inspect(Option("--file") ?? throw new ArgumentException("--file required")))); break;
         case "launch":
         {
@@ -90,7 +91,7 @@ try
         // Runs in its own process so it outlives the app; started automatically when a boosted profile launches DCS.
         case "boost": return BoostRuntime.Run(args[1..], Console.Out, Console.Error);
         default:
-            Console.WriteLine("DCS Control " + ProductInfo.Version + "\nCommands: inventory, readiness, detect, presets, validate, preview, apply, status, restore, diagnostic, inspect-binary, launch-check, launch, boost, app-verify, app-install, app-uninstall\nOptions: --profile file.json --dcs DCS.exe --options options.lua --state folder --distribution folder --out report.json\npreview leaves DCS and registry unchanged. apply writes the profile over whatever is installed; the first time it writes a path it backs up the original. status lists the original files and the applied profile. restore puts every original back (owned options.lua settings only). launch first brings the applied profile up to date (Pimax Play focus values)."); break;
+            Console.WriteLine("DCS Control " + ProductInfo.Version + "\nCommands: inventory, readiness, detect, presets, validate, preview, apply, status, restore, diagnostic, inspect-binary, launch-check, launch, boost, nvidia, app-verify, app-install, app-uninstall\nOptions: --profile file.json --dcs DCS.exe --options options.lua --state folder --distribution folder --out report.json\npreview leaves DCS and registry unchanged. apply writes the profile over whatever is installed; the first time it writes a path it backs up the original. status lists the original files and the applied profile. restore puts every original back (owned options.lua settings only). launch first brings the applied profile up to date (Pimax Play focus values)."); break;
     }
     return 0;
 }

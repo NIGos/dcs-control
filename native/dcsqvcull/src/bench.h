@@ -135,6 +135,28 @@ void Summarize(const std::vector<BenchBlock>& blocks, double tscHz, bool restore
                           {"shadow_renderables", &BlockMetrics::shadow},
                           {"gpu_util_%", &BlockMetrics::gpuUtil}};
   Log("==== BENCH RESULT: %s (%zu blocks, file %ls) ====", what, blocks.size(), name);
+  // R30: a frame-rate cap in both states (VD/SteamVR at refresh/N with SSW or a cap) pins fps: say so first.
+  {
+    std::vector<float> offIv, onIv;
+    for (const auto& b : blocks) {
+      if (!b.frames) continue;
+      std::vector<float>& d = b.on ? onIv : offIv;
+      d.insert(d.end(), b.intervalsMs.begin(), b.intervalsMs.end());
+    }
+    const perfgov::Cap offCap = perfgov::DetectCap(offIv), onCap = perfgov::DetectCap(onIv);
+    if (offCap.fps > 0 && onCap.fps > 0) {
+      if (offCap == onCap)
+        Log("NOTE: frame rate was locked at %.1f fps (refresh %d Hz / %d) in both OFF and ON blocks; fps cannot show "
+            "CPU gains in this run. Compare process_cpu_ms/frame and render-thread busy instead, or disable SSW / the "
+            "frame cap for the test",
+            onCap.fps, onCap.hz, onCap.div);
+      else
+        Log("NOTE: frame rate was locked in both states (OFF %.1f fps = %d/%d, ON %.1f fps = %d/%d); fps differences "
+            "are cap steps, not gains. Compare process_cpu_ms/frame and render-thread busy instead, or disable SSW / "
+            "the frame cap for the test",
+            offCap.fps, offCap.hz, offCap.div, onCap.fps, onCap.hz, onCap.div);
+    }
+  }
   for (const Field& fd : fields) {
     std::vector<double> diffsPct;
     double sumOn = 0, sumOff = 0;
@@ -248,6 +270,8 @@ bool RunBenchmark(int mode, bool beeps) {
   QueryPerformanceCounter(&q0);
   uint64_t tsc0 = __rdtsc();
   std::vector<BenchBlock> done;
+  int zeroQuad = 0;  // consecutive focused blocks without a quad-view frame
+  const uint64_t frames0 = perfgov::g_frames.load();
   for (int i = 0; i < blocks && !g_benchAbort; ++i) {
     bool on = (i % 2) == 1;
     SetBenchVariant(on);
@@ -289,6 +313,19 @@ bool RunBenchmark(int mode, bool beeps) {
     if (!focusedAtStart || g_focusLosses.load() != losses0 || !g_xrFocused.load()) {
       Log("bench: block %d/%d discarded (OpenXR session not FOCUSED)", i + 1, blocks);
       blk.frames = 0;
+    } else if (!blk.frames && ++zeroQuad >= 2 && !g_benchAbort) {
+      // R30 L8: focused, but no frame was classified as quad views: nothing to compare.
+      const int views = perfgov::g_views.load(), pairs = perfgov::g_pairs.load();
+      const uint64_t all = perfgov::g_frames.load() - frames0;
+      Log("bench: 0 quad-view frames in 2 blocks while %llu frames were drawn: this A/B bench counts only frames "
+          "with recognised quad views (a focus and a peripheral view per eye); the runtime shows %d views per frame "
+          "(%d focus/peripheral pairs)%s. Stopped: nothing to compare. Use the kill switch (Alt+Shift+F11) and the "
+          "perf: lines instead",
+          static_cast<unsigned long long>(all), views, pairs,
+          views >= 0 && views < 4 ? " (stereo)" : views < 0 ? " (no frame classified)" : "");
+      g_benchAbort = true;
+    } else if (blk.frames) {
+      zeroQuad = 0;
     }
     if (g_benchBlockEnd) g_benchBlockEnd(on, blk.frames != 0);
     Log("bench: block %d/%d %s frames=%llu", i + 1, blocks, on ? "ON " : "OFF",

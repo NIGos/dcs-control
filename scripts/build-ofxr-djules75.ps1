@@ -1,3 +1,4 @@
+#Requires -Version 7
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $sdkRoot = Join-Path $workspaceRoot 'external/ofxr/external/FidelityFX-SDK-v1.1.4'
@@ -85,6 +86,20 @@ $normalizedPatches = @($forkPatches | ForEach-Object {
     [IO.File]::WriteAllText($temp, [IO.File]::ReadAllText($_.FullName).Replace("`r`n", "`n"))
     [pscustomobject]@{ Name = $_.Name; FullName = $temp }
 })
+# The patch set applied last is recorded in the fork's .git folder. When any patch changed since (an earlier one edited,
+# for example), the checkout goes back to the pinned sources and every patch is applied again: finding only the newest
+# applied patch would take an edited earlier one as applied and build stale code. Ignored files (external/openvr) stay.
+$patchSha = [Security.Cryptography.SHA256]::Create()
+$patchSet = [Convert]::ToHexString($patchSha.ComputeHash([Text.Encoding]::UTF8.GetBytes((($normalizedPatches | ForEach-Object { $_.Name + "`n" + [IO.File]::ReadAllText($_.FullName) }) -join "`n"))))
+$patchMarker = Join-Path (& git -C $forkRoot rev-parse --absolute-git-dir) 'dcs-control-patches'
+$recordedSet = if (Test-Path -LiteralPath $patchMarker) { (Get-Content -LiteralPath $patchMarker -Raw).Trim() } else { $null }
+if ($recordedSet -and $recordedSet -ne $patchSet) {
+    Write-Host 'OFXR fork patches changed since they were applied: starting again from the pinned sources.'
+    & git -C $forkRoot checkout -- .
+    if ($LASTEXITCODE -ne 0) { throw 'OFXR fork source reset failed.' }
+    & git -C $forkRoot clean -fdq
+    if ($LASTEXITCODE -ne 0) { throw 'OFXR fork source reset failed.' }
+}
 try {
     # A later patch may edit files an earlier one created, so earlier patches no longer reverse-apply on a fully
     # patched tree. Find the newest applied patch first; everything before it counts as applied.
@@ -100,6 +115,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "OFXR fork patch $($forkPatch.Name) failed to apply." }
         Write-Host "Applied OFXR fork patch $($forkPatch.Name)."
     }
+    Set-Content -LiteralPath $patchMarker -Value $patchSet -Encoding ascii
 } finally { $normalizedPatches | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } }
 $forkBuild = Join-Path $workspaceRoot 'artifacts/native/ofxr-djules75'
 & $wrapper cmake -S $forkRoot -B $forkBuild -G Ninja -DCMAKE_BUILD_TYPE=Release "-DXRFG_FIDELITYFX_SDK_ROOT=$sdkRoot/sdk"
@@ -109,3 +125,5 @@ if ($LASTEXITCODE -ne 0) { throw 'OFXR fork build failed.' }
 # Tray lifecycle tests create a notification icon. Exclude them from offline verification.
 & $wrapper ctest --test-dir $forkBuild --output-on-failure --parallel 2 --timeout 300 -E tray_lifecycle
 if ($LASTEXITCODE -ne 0) { throw 'OFXR fork tests failed.' }
+# Built and tested: build-release.ps1 ships this DLL only while its sources and patches match this stamp.
+. (Join-Path $PSScriptRoot 'build-stamp.ps1'); Save-BuildStamp 'ofxr'

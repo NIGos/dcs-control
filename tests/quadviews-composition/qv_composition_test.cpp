@@ -5,7 +5,12 @@
 // the round and the rectangular focus area, with and without sharpening, with
 // the focus area centred and off centre. Exit code 0 on success.
 //
-//   qv_composition_test.exe <quad views openxr-api-layer dir> <FidelityFX-CAS ffx-cas dir>
+// With Far depth built in (dcsvr_depthwarp_ps.hlsli injected into ProjectionPS.hlsl), the reference is the shader the
+// build kept from before that injection (ProjectionPS.nofardepth.hlsl): the composition with every Far depth constant
+// at 0 must equal it pixel for pixel, with a non-zero field bound at t2 that it must not read. Given the DLL's generated
+// shader header, the same holds for the DLL's own bytecode against the reference compiled as fxc compiles it.
+//
+//   qv_composition_test.exe <quad views openxr-api-layer dir> <FidelityFX-CAS ffx-cas dir> [<built ProjectionPS.h>]
 
 #include <windows.h>
 #include <d3d11.h>
@@ -13,6 +18,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cctype>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -66,12 +72,12 @@ private:
 };
 
 ComPtr<ID3DBlob> compile(const std::string& source, const char* entry, const char* target, Includes& includes,
-    const std::vector<D3D_SHADER_MACRO>& macros = {}) {
+    const std::vector<D3D_SHADER_MACRO>& macros = {}, UINT flags = D3DCOMPILE_OPTIMIZATION_LEVEL3) {
     std::vector<D3D_SHADER_MACRO> defined = macros;
     defined.push_back({nullptr, nullptr});
     ComPtr<ID3DBlob> code, errors;
     if (FAILED(D3DCompile(source.data(), source.size(), "shader", defined.data(), &includes, entry, target,
-            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors))) {
+            flags, 0, &code, &errors))) {
         throw std::runtime_error(std::string("compile failed: ") +
             (errors ? static_cast<const char*>(errors->GetBufferPointer()) : entry));
     }
@@ -80,6 +86,26 @@ ComPtr<ID3DBlob> compile(const std::string& source, const char* entry, const cha
 
 void check(HRESULT result, const char* what) {
     if (FAILED(result)) throw std::runtime_error(what);
+}
+
+// The bytecode fxc wrote into the layer's generated header (const BYTE g_ProjectionPS[] = { 68, 88, ... };).
+std::vector<std::uint8_t> header_bytecode(const std::filesystem::path& path) {
+    const std::string text = read_text(path);
+    const auto start = text.find("g_ProjectionPS[]");
+    const auto open = start == std::string::npos ? start : text.find('{', start);
+    const auto close = open == std::string::npos ? open : text.find('}', open);
+    if (close == std::string::npos) throw std::runtime_error("no g_ProjectionPS in " + path.string());
+    std::vector<std::uint8_t> bytes;
+    for (std::size_t i = open + 1; i < close;) {
+        if (!std::isdigit(static_cast<unsigned char>(text[i]))) {
+            ++i;
+            continue;
+        }
+        std::size_t used = 0;
+        bytes.push_back(static_cast<std::uint8_t>(std::stoul(text.substr(i, 4), &used)));
+        i += used;
+    }
+    return bytes;
 }
 
 struct Case {
@@ -101,7 +127,11 @@ int main(int argc, char** argv) {
         Includes includes({layer_dir, cas_dir});
 
         const std::string projection_new = read_text(layer_dir / "ProjectionPS.hlsl");
-        std::string projection_old = projection_new;
+        // Far depth built in: the reference is the shader from before its injection, kept by the build.
+        const bool far_depth = projection_new.find("dcsvrDisparityField") != std::string::npos;
+        const std::string projection_base = far_depth ? read_text(layer_dir / "ProjectionPS.nofardepth.hlsl") : projection_new;
+        if (projection_base.empty()) throw std::runtime_error("ProjectionPS.nofardepth.hlsl missing: run scripts/build-quadviews.ps1");
+        std::string projection_old = projection_base;
         replace_once(projection_old, "[branch] if (!focusVisible && !debugFocusView) {", "[branch] if (false) {");
         replace_once(projection_old, "sourceFocusTexture.SampleLevel(sourceSampler, layer1TexCoord, 0)",
             "sourceFocusTexture.Sample(sourceSampler, layer1TexCoord)");
@@ -123,12 +153,19 @@ int main(int argc, char** argv) {
         const auto cs_code = compile(sharpening, "main", "cs_5_0", includes,
             {{"CAS_SAMPLE_FP16", "0"}, {"CAS_SAMPLE_SHARPEN_ONLY", "1"}, {"WIDTH", "64"}, {"HEIGHT", "1"}, {"DEPTH", "1"}});
         ComPtr<ID3D11VertexShader> vs;
-        ComPtr<ID3D11PixelShader> ps_new, ps_old;
+        ComPtr<ID3D11PixelShader> ps_new, ps_old, ps_dll, ps_base_fxc;
         ComPtr<ID3D11ComputeShader> cs;
         check(device->CreateVertexShader(vs_code->GetBufferPointer(), vs_code->GetBufferSize(), nullptr, &vs), "vs");
         check(device->CreatePixelShader(ps_new_code->GetBufferPointer(), ps_new_code->GetBufferSize(), nullptr, &ps_new), "ps new");
         check(device->CreatePixelShader(ps_old_code->GetBufferPointer(), ps_old_code->GetBufferSize(), nullptr, &ps_old), "ps old");
         check(device->CreateComputeShader(cs_code->GetBufferPointer(), cs_code->GetBufferSize(), nullptr, &cs), "cs");
+        // The DLL's own composition shader and the reference compiled with fxc's defaults (no flags: level 1).
+        if (far_depth && argc > 3 && std::filesystem::exists(argv[3])) {
+            const auto dll_code = header_bytecode(argv[3]);
+            check(device->CreatePixelShader(dll_code.data(), dll_code.size(), nullptr, &ps_dll), "ps dll");
+            const auto base_code = compile(projection_base, "main", "ps_5_0", includes, {}, 0);
+            check(device->CreatePixelShader(base_code->GetBufferPointer(), base_code->GetBufferSize(), nullptr, &ps_base_fxc), "ps base");
+        }
 
         // QV_BENCH=1: the composition's GPU time at a Crystal Super's size instead of the equality test.
         const bool bench = GetEnvironmentVariableA("QV_BENCH", nullptr, 0) != 0;
@@ -202,9 +239,26 @@ int main(int argc, char** argv) {
             check(device->CreateBuffer(&desc, nullptr, &created), "buffer");
             return created;
         };
-        const auto vs_constants = buffer(64), ps_constants = buffer(32), cs_constants = buffer(64);
+        const auto vs_constants = buffer(64), ps_constants = buffer(96), cs_constants = buffer(64);
 
-        const auto run = [&](const Case& c, bool optimized) {
+        // A Far depth field full of non-zero displacements, bound at t2 in every run: with the Far depth constants at 0
+        // the composition must not read it.
+        ComPtr<ID3D11ShaderResourceView> field_srv;
+        {
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = desc.Height = 256;
+            desc.MipLevels = desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_R16G16_FLOAT;
+            desc.SampleDesc.Count = 1;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            std::vector<std::uint16_t> halves(256 * 256 * 2, 0x2A00);  // 0.047 focus uv, about 28 px of a 600 px view
+            D3D11_SUBRESOURCE_DATA data{halves.data(), 256 * 4U, 0};
+            ComPtr<ID3D11Texture2D> field;
+            check(device->CreateTexture2D(&desc, &data, &field), "field");
+            check(device->CreateShaderResourceView(field.Get(), nullptr, &field_srv), "field srv");
+        }
+
+        const auto run = [&](const Case& c, bool optimized, ID3D11PixelShader* shader = nullptr) {
             // Sharpening (skipping tiles only in the optimized chain).
             ID3D11ShaderResourceView* focus_view = focus_srv.Get();
             if (c.sharpen) {
@@ -243,7 +297,9 @@ int main(int argc, char** argv) {
             float column_major[16];
             for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) column_major[j * 4 + i] = m[i][j];
             context->UpdateSubresource(vs_constants.Get(), 0, nullptr, column_major, 0, 0);
-            struct { float smoothing; std::uint32_t ignore_alpha, unpremultiplied, debug; float shape; float pad[3]; } p{};
+            // The upstream constants, then Far depth's (warp, reuse), all 0: Far depth off.
+            struct { float smoothing; std::uint32_t ignore_alpha, unpremultiplied, debug; float shape; float pad[3]; float warp[4]; float reuse[12]; } p{};
+            static_assert(sizeof(p) == 96);
             p.smoothing = c.smoothing;
             p.ignore_alpha = 0xFFFFFFFEu;
             p.unpremultiplied = c.unpremultiplied ? 1u : 0u;
@@ -258,14 +314,14 @@ int main(int argc, char** argv) {
             context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
             context->VSSetShader(vs.Get(), nullptr, 0);
             context->VSSetConstantBuffers(0, 1, vs_constants.GetAddressOf());
-            context->PSSetShader(optimized ? ps_new.Get() : ps_old.Get(), nullptr, 0);
+            context->PSSetShader(shader ? shader : optimized ? ps_new.Get() : ps_old.Get(), nullptr, 0);
             context->PSSetConstantBuffers(0, 1, ps_constants.GetAddressOf());
-            ID3D11ShaderResourceView* views[2] = {stereo_srv.Get(), focus_view};
-            context->PSSetShaderResources(0, 2, views);
+            ID3D11ShaderResourceView* views[3] = {stereo_srv.Get(), focus_view, field_srv.Get()};
+            context->PSSetShaderResources(0, 3, views);
             context->PSSetSamplers(0, 1, sampler.GetAddressOf());
             context->Draw(3, 0);
-            ID3D11ShaderResourceView* none[2]{};
-            context->PSSetShaderResources(0, 2, none);
+            ID3D11ShaderResourceView* none[3]{};
+            context->PSSetShaderResources(0, 3, none);
             if (bench) return std::vector<std::uint32_t>{};
             context->CopyResource(staging.Get(), target.Get());
             D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -336,6 +392,26 @@ int main(int argc, char** argv) {
         }
         std::printf(all_identical ? "Quad Views composition identical\n" : "Quad Views composition DIFFERS\n");
 
+        // Far depth off in the DLL itself: its bytecode, every Far depth constant 0 and the field bound, against the
+        // shader without Far depth compiled as fxc compiles it.
+        bool far_depth_off = true;
+        if (far_depth) {
+            if (!ps_dll) {
+                std::printf("Far depth off: the DLL's ProjectionPS.h not given or not found, source check only\n");
+            } else {
+                for (std::size_t i = 0; i < cases.size(); ++i) {
+                    const auto dll = run(cases[i], true, ps_dll.Get());
+                    const auto reference = run(cases[i], true, ps_base_fxc.Get());
+                    std::size_t differing = 0;
+                    for (std::size_t p = 0; p < dll.size(); ++p) differing += dll[p] != reference[p] ? 1U : 0U;
+                    std::printf("far depth off, DLL bytecode, case %zu: %zu differing pixels of %zu\n", i, differing, dll.size());
+                    far_depth_off = far_depth_off && differing == 0;
+                }
+                std::printf(far_depth_off ? "Quad Views composition with Far depth off identical to the composition without it (DLL bytecode)\n"
+                                          : "Quad Views composition with Far depth off DIFFERS from the composition without it\n");
+            }
+        }
+
         // Sharpening taper (focus radius in the shape's own norm): the same composition in the inner half of the focus area, a softer one in its edge band.
         bool taper_ok = true;
         for (const float shape : {2.f, 8.f}) {
@@ -357,7 +433,7 @@ int main(int argc, char** argv) {
             taper_ok = taper_ok && centre == 0 && band > 1000U;
         }
         std::printf(taper_ok ? "Quad Views sharpening taper only softens the edge band%s" : "Quad Views sharpening taper FAILED%s", "\n");
-        return all_identical && taper_ok ? 0 : 1;
+        return all_identical && taper_ok && far_depth_off ? 0 : 1;
     } catch (const std::exception& error) {
         std::printf("error: %s\n", error.what());
         return 2;

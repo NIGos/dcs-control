@@ -1,0 +1,203 @@
+diff --git a/include/xrfg/diagnostic_overlay_model.hpp b/include/xrfg/diagnostic_overlay_model.hpp
+--- a/include/xrfg/diagnostic_overlay_model.hpp
++++ b/include/xrfg/diagnostic_overlay_model.hpp
+@@ -159,6 +159,25 @@
+ inline constexpr std::uint64_t kPupilDisabled = 1ULL << 7;
+ inline constexpr std::uint64_t kDepthEnabled = 1ULL << 26;
+ inline constexpr std::uint64_t kDepthConstant = 1ULL << 27;
++// DCS Control (0018): the same layer's PupilShift_Ipd() export. Bits 0-15 the
++// base eye distance in 0.01 mm (the profile's Ipd= or the runtime's), bits
++// 16-31 the eye distance rendered now (the base times Depth boost's scale),
++// bits 32-47 the larger pupil offset in 0.01 mm, bit 48 the base is the
++// runtime's, bit 49 the profile's. 0 until known; known is false without it.
++struct PupilIpd {
++    bool known{};
++    std::uint64_t bits{};
++};
++// DCS Control (0018): the bundled Quad Views' DcsVr_QuadViewsPeripheryStatus()
++// export. Bit 0 the periphery stability pass is on, bit 1 the last frame was
++// filtered, bits 8-15 the strength x100, bits 16-31 frames filtered in the
++// last second, bits 32-47 resets in the last second. known is false when the
++// bundled Quad Views (or its export) is not loaded.
++struct PeripheryStatus {
++    bool known{};
++    std::uint64_t bits{};
++};
++inline constexpr std::uint64_t kPeripheryOn = 1ULL << 0;
+ 
+ struct DiagnosticInputs {
+     float output_fps{};        // what the overlay's counter shows
+@@ -180,6 +199,9 @@
+     DiagnosticHotkey pupil_hotkey;
+     // DCS Control (0017): Depth boost's in-flight switch (DCSVR_DEPTH_HOTKEY).
+     DiagnosticHotkey depth_hotkey;
++    // DCS Control (0018): the eye distance and the periphery stability pass.
++    PupilIpd ipd;
++    PeripheryStatus periphery;
+ };
+ 
+ [[nodiscard]] std::string format_dlss_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
+@@ -201,6 +223,12 @@
+ // boost: OFF (Alt+Shift+F10)" grey. One line either way: the panel's height
+ // is unchanged.
+ [[nodiscard]] std::string format_pupil_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
++// DCS Control (0018): with PupilShift_Ipd() the Depth part names the eye
++// distance rendered now, "Depth boost: x1.18 far, IPD 77.4 mm". And the
++// periphery line: "Periphery: ON 0.50, 88 fps" green, "Periphery: ON, not
++// filtering" amber (the pass runs but filtered nothing in the last second),
++// "Periphery: OFF" grey. Empty without the bundled Quad Views' export.
++[[nodiscard]] std::string format_periphery_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
+ // DCS VR Control (0007): "VRAM 28.4 / 32.0 GB" - what every process has
+ // resident in the adapter's dedicated memory against that memory, where the
+ // adapter-wide figure can be read, followed by this process's own usage and
+@@ -212,7 +240,7 @@
+ [[nodiscard]] std::vector<DiagnosticLine> format_diagnostic_lines(const DiagnosticInputs& inputs);
+ 
+ inline constexpr std::uint32_t kDiagnosticPanelWidth = 768;
+-inline constexpr std::uint32_t kDiagnosticPanelHeight = 176;
++inline constexpr std::uint32_t kDiagnosticPanelHeight = 196; // DCS Control (0018): one more line
+ // Characters per line at the panel's fixed glyph scale; longer lines are cut.
+ [[nodiscard]] std::size_t diagnostic_panel_columns(std::uint32_t width) noexcept;
+ // Premultiplied RGBA (or BGRA) with a translucent dark background.
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+--- a/src/core/diagnostic_overlay_model.cpp
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -208,9 +208,29 @@
+     const auto fixation = static_cast<unsigned>((bits >> 24) & 3U);
+     const auto hundredths = std::to_string(percent % 100);
+     color = DiagnosticColor::green;
+-    return name + "x" + std::to_string(1U + percent / 100) + "." + (hundredths.size() < 2 ? "0" : "") + hundredths +
++    auto text = name + "x" + std::to_string(1U + percent / 100) + "." + (hundredths.size() < 2 ? "0" : "") + hundredths +
+         (fixation == 2U ? " far" : fixation == 1U ? " cockpit" : "");
+-}
++    // DCS Control (0018): the eye distance rendered now, in tenths of a mm.
++    const auto rendered = static_cast<unsigned>((in.ipd.bits >> 16) & 0xFFFFU);
++    if (in.ipd.known && rendered > 0U) {
++        const auto tenths = (rendered + 5U) / 10U;
++        text += ", IPD " + std::to_string(tenths / 10U) + "." + std::to_string(tenths % 10U) + " mm";
++    }
++    return text;
++}
++}
++
++std::string format_periphery_line(const DiagnosticInputs& in, DiagnosticColor& color) {
++    const auto& p = in.periphery;
++    if (!p.known) return {};
++    if (!(p.bits & kPeripheryOn)) { color = DiagnosticColor::grey; return "Periphery: OFF"; }
++    const auto frames = static_cast<unsigned>((p.bits >> 16) & 0xFFFFU);
++    if (frames == 0U) { color = DiagnosticColor::amber; return "Periphery: ON, not filtering"; }
++    const auto strength = static_cast<unsigned>((p.bits >> 8) & 0xFFU);
++    const auto hundredths = std::to_string(strength % 100U);
++    color = DiagnosticColor::green;
++    return "Periphery: ON " + std::to_string(strength / 100U) + "." + (hundredths.size() < 2 ? "0" : "") + hundredths +
++        ", " + std::to_string(frames) + " fps";
+ }
+ 
+ std::string format_pupil_line(const DiagnosticInputs& in, DiagnosticColor& color) {
+@@ -249,6 +269,9 @@
+     DiagnosticLine pupil; // 0015
+     pupil.text = format_pupil_line(in, pupil.color);
+     if (!pupil.text.empty()) lines.push_back(std::move(pupil));
++    DiagnosticLine periphery; // 0018
++    periphery.text = format_periphery_line(in, periphery.color);
++    if (!periphery.text.empty()) lines.push_back(std::move(periphery));
+     lines.push_back({"App " + whole(in.app_fps) + " fps -> out " + whole(in.output_fps) + " fps",
+         DiagnosticColor::white});
+     if (in.show_vram) { // 0007
+diff --git a/src/layer/openxr_fps_overlay.cpp b/src/layer/openxr_fps_overlay.cpp
+--- a/src/layer/openxr_fps_overlay.cpp
++++ b/src/layer/openxr_fps_overlay.cpp
+@@ -127,6 +127,14 @@
+     std::uint64_t next_pupil_lookup_ms{};
+     DiagnosticHotkey pupil_hotkey;
+     DiagnosticHotkey depth_hotkey; // DCS Control (0017)
++    // DCS Control (0018): the layer's eye distance and the bundled Quad Views'
++    // periphery status, each with its own module reference.
++    EngineStatusFn pupil_ipd{};
++    HMODULE pupil_ipd_module{};
++    std::uint64_t next_ipd_lookup_ms{};
++    EngineStatusFn periphery_status{};
++    HMODULE periphery_module{};
++    std::uint64_t next_periphery_lookup_ms{};
+     std::uint64_t next_status_open_ms{};
+ 
+     ~Impl() {
+@@ -149,6 +157,8 @@
+         if (status_mapping) CloseHandle(status_mapping);
+         if (engine_module) FreeLibrary(engine_module);
+         if (pupil_module) FreeLibrary(pupil_module);
++        if (pupil_ipd_module) FreeLibrary(pupil_ipd_module);
++        if (periphery_module) FreeLibrary(periphery_module);
+     }
+ 
+     // DCS Control (0016): GetModuleHandleExW with flags 0 takes a module
+@@ -393,6 +403,29 @@
+             if (!pupil_status) return;
+         }
+         inputs.pupil = {true, pupil_status()};
++        // DCS Control (0018): a layer without PupilShift_Ipd() keeps the 0017 line.
++        if (!pupil_ipd) {
++            const auto tick = GetTickCount64();
++            if (tick < next_ipd_lookup_ms) return;
++            next_ipd_lookup_ms = tick + 2000;
++            pupil_ipd = lookup_export<EngineStatusFn>(
++                L"XR_APILAYER_DCSVR_pupil_shift.dll", "PupilShift_Ipd", pupil_ipd_module);
++            if (!pupil_ipd) return;
++        }
++        inputs.ipd = {true, pupil_ipd()};
++    }
++
++    // DCS Control (0018): the bundled Quad Views' periphery stability pass.
++    void read_periphery(DiagnosticInputs& inputs) {
++        if (!periphery_status) {
++            const auto tick = GetTickCount64();
++            if (tick < next_periphery_lookup_ms) return;
++            next_periphery_lookup_ms = tick + 2000;
++            periphery_status = lookup_export<EngineStatusFn>(
++                L"XR_APILAYER_MBUCCHIA_quad_views_foveated.dll", "DcsVr_QuadViewsPeripheryStatus", periphery_module);
++            if (!periphery_status) return;
++        }
++        inputs.periphery = {true, periphery_status()};
+     }
+ 
+     void read_engine(DiagnosticInputs& inputs) {
+@@ -495,6 +528,7 @@
+             read_status(inputs);
+             read_engine(inputs);
+             read_pupil(inputs);
++            read_periphery(inputs);
+             upload(panel, rasterize_diagnostic_panel(panel.width, panel.height,
+                 format_diagnostic_lines(inputs), bgra()));
+         }
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+--- a/tests/diagnostic_overlay_tests.cpp
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -128,6 +128,28 @@
+             require(format_pupil_line(in, none).empty(), "neither: no line");
+             const auto lines = [&](std::uint64_t bits) { in.pupil = {true, bits}; return format_diagnostic_lines(in).size(); };
+             require(lines(on | boost) == lines(on) && lines(alone) == lines(on), "one line either way");
++
++            // DCS Control (0018): the eye distance rendered now, and the periphery line.
++            in.ipd = {true, 6560ULL | (7742ULL << 16) | (120ULL << 32) | (1ULL << 48)};
++            require(pupil(alone, C::green) == "Depth boost: x1.32 far, IPD 77.4 mm", "depth with the eye distance");
++            require(pupil(on | boost, C::green) == "Pupil shift: ON, 3.2 mm; Depth x1.32 far, IPD 77.4 mm", "both with the eye distance");
++            in.ipd = {true, 0};
++            require(pupil(alone, C::green) == "Depth boost: x1.32 far", "eye distance not known yet");
++            in.ipd = {};
++            const auto periphery = [&](bool known, std::uint64_t bits, C expected) {
++                in.periphery = {known, bits};
++                C color{};
++                auto text = format_periphery_line(in, color);
++                if (!text.empty()) require(color == expected, "Periphery colour for: " + text);
++                return text;
++            };
++            require(periphery(true, kPeripheryOn | 2ULL | (50ULL << 8) | (88ULL << 16) | (3ULL << 32), C::green) == "Periphery: ON 0.50, 88 fps", "periphery on");
++            require(periphery(true, kPeripheryOn | (5ULL << 8), C::amber) == "Periphery: ON, not filtering", "periphery idle");
++            require(periphery(true, 0, C::grey) == "Periphery: OFF", "periphery off");
++            require(periphery(false, 0, C::grey).empty(), "no bundled Quad Views: no line");
++            const auto rows = [&](bool known) { in.periphery = {known, kPeripheryOn | (40ULL << 16)}; return format_diagnostic_lines(in).size(); };
++            require(rows(true) == rows(false) + 1, "the periphery line is added only with the export");
++            in.periphery = {};
+         }
+ 
+         // Hotkey: same format as DCSVR_NR_HOTKEY.

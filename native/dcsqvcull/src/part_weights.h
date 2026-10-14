@@ -52,13 +52,33 @@ std::atomic<bool>& g_on = g_costWeightsOn;
 std::atomic<bool>& g_sanity = g_costWeightsSanity;
 
 // Open-addressing table: object pointer -> smoothed cost (TSC cycles).
+//
+// Long sessions: objects come and go (mission loads, spawned and destroyed
+// units), so every slot remembers the epoch (Apply call) it was last measured
+// or asked for; Apply ages a few slots per call (Age) and frees those unused
+// for g_evictAge epochs: their slot becomes a tombstone (kTomb, which lookups
+// probe past and inserts reuse), and a rebuild in Apply drops the tombstones
+// once there are many. Before, the table only filled: new objects beyond its
+// 16-slot probe windows were never measured, and the dead objects' costs and
+// weights stayed in UpdateScale's sums. Weights only move chunk boundaries,
+// so a lookup racing an eviction can at worst misplace one boundary once.
 constexpr size_t kTable = 1 << 15;
+constexpr int kProbe = 16;
+void* const kTomb = reinterpret_cast<void*>(uintptr_t{1});  // an evicted slot (no object is at address 1)
 struct Slot {
   std::atomic<void*> obj{nullptr};
   std::atomic<float> cost{0};
   std::atomic<float> orig{0};  // DCS's own weight, captured before the first rewrite
+  std::atomic<uint32_t> seen{0};  // the epoch of the last measure or getter call
 };
 Slot g_table[kTable];
+constexpr uint32_t kEvictAge = 20000;  // Apply calls (several per frame: about 0.5-2 min)
+constexpr uint32_t kSweep = kTable / 256;  // slots aged per Apply call (a full sweep every 256 calls)
+std::atomic<uint32_t> g_evictAge{kEvictAge};  // the tests shorten it
+std::atomic<uint32_t> g_epoch{1};
+uint32_t g_cursor = 0;  // Apply only
+std::atomic<uint32_t> g_live{0}, g_tombs{0};
+std::atomic<uint64_t> g_evicted{0}, g_rebuilds{0}, g_noSlot{0};
 
 // Scene.dll multiplies an entry's weight by its visible count (the sizes of
 // the index vectors at +0x18, in 32-bit elements) [V Scene 0x180020618]. The
@@ -72,19 +92,51 @@ inline double VisibleCount(uint8_t* ent) {
 
 inline size_t Hash(void* p) { return ((reinterpret_cast<uintptr_t>(p) >> 4) * 0x9E3779B97F4A7C15ull) >> 49; }
 
+inline void Seen(Slot& s) {
+  const uint32_t e = g_epoch.load(std::memory_order_relaxed);
+  if (s.seen.load(std::memory_order_relaxed) != e) s.seen.store(e, std::memory_order_relaxed);
+}
+
+// The object's slot; with insert, a new one (an empty slot or the window's
+// first tombstone) when it has none. nullptr: not found, or the 16-slot
+// window is full.
 Slot* Find(void* obj, bool insert) {
+  if (!obj || obj == kTomb) return nullptr;
   size_t h = Hash(obj) & (kTable - 1);
-  for (size_t i = 0; i < 16; ++i) {
+  Slot* tomb = nullptr;
+  for (int i = 0; i < kProbe; ++i) {
     Slot& s = g_table[(h + i) & (kTable - 1)];
     void* cur = s.obj.load(std::memory_order_relaxed);
     if (cur == obj) return &s;
+    if (cur == kTomb) {
+      if (!tomb) tomb = &s;
+      continue;
+    }
     if (!cur) {
       if (!insert) return nullptr;
-      void* expect = nullptr;
-      if (s.obj.compare_exchange_strong(expect, obj)) return &s;
-      if (expect == obj) return &s;
+      Slot& d = tomb ? *tomb : s;
+      void* expect = tomb ? kTomb : nullptr;
+      if (d.obj.compare_exchange_strong(expect, obj)) {
+        d.seen.store(g_epoch.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        g_live.fetch_add(1, std::memory_order_relaxed);
+        if (tomb) g_tombs.fetch_sub(1, std::memory_order_relaxed);
+        return &d;
+      }
+      if (expect == obj) return &d;
+      return nullptr;  // lost a race for the slot: measured next time
     }
   }
+  if (insert && tomb) {
+    void* expect = kTomb;
+    if (tomb->obj.compare_exchange_strong(expect, obj)) {
+      tomb->seen.store(g_epoch.load(std::memory_order_relaxed), std::memory_order_relaxed);
+      g_live.fetch_add(1, std::memory_order_relaxed);
+      g_tombs.fetch_sub(1, std::memory_order_relaxed);
+      return tomb;
+    }
+    if (expect == obj) return tomb;
+  }
+  if (insert) g_noSlot.fetch_add(1, std::memory_order_relaxed);
   return nullptr;
 }
 
@@ -96,6 +148,7 @@ void __fastcall Hook(void* self, uint32_t count, void* infos, void* flags, void*
   if (Slot* s = Find(self, true)) {
     float old = s->cost.load(std::memory_order_relaxed);
     s->cost.store(old == 0 ? c : old * 0.8f + c * 0.2f, std::memory_order_relaxed);
+    Seen(*s);
   }
 }
 
@@ -118,6 +171,7 @@ float __fastcall Getter(void* self) {
   g_getterCalls.fetch_add(1, std::memory_order_relaxed);
   Slot* s = Find(self, true);
   if (!s) return w;
+  Seen(*s);
   if (s->orig.load(std::memory_order_relaxed) != w) s->orig.store(w, std::memory_order_relaxed);
   float c = s->cost.load(std::memory_order_relaxed);
   float k = g_scale.load(std::memory_order_relaxed);
@@ -131,7 +185,8 @@ float __fastcall Getter(void* self) {
 void UpdateScale() {
   double w = 0, c = 0;
   for (size_t i = 0; i < kTable; ++i) {
-    if (!g_table[i].obj.load(std::memory_order_relaxed)) continue;
+    void* o = g_table[i].obj.load(std::memory_order_relaxed);
+    if (!o || o == kTomb) continue;
     float cc = g_table[i].cost.load(std::memory_order_relaxed);
     float oo = g_table[i].orig.load(std::memory_order_relaxed);
     if (cc > 0 && oo > 0) {
@@ -221,8 +276,60 @@ void Census(uint8_t* view) {
   for (auto& kv : byClass) Log("  partition census: collection %s: %d entries, weight %.2f", kv.first.c_str(), kv.second.first, kv.second.second);
 }
 
+// Drops every tombstone: the live slots are inserted again from scratch
+// (Apply only; a slot that no longer fits its window is measured again).
+void Rebuild() {
+  struct Kept {
+    void* obj;
+    float cost, orig;
+    uint32_t seen;
+  };
+  static std::vector<Kept> live;
+  if (live.capacity() < kTable) live.reserve(kTable);  // once: no allocation per rebuild
+  live.clear();
+  for (Slot& s : g_table) {
+    void* o = s.obj.load(std::memory_order_relaxed);
+    if (o && o != kTomb)
+      live.push_back({o, s.cost.load(std::memory_order_relaxed), s.orig.load(std::memory_order_relaxed),
+                      s.seen.load(std::memory_order_relaxed)});
+    s.obj.store(nullptr, std::memory_order_relaxed);
+    s.cost.store(0, std::memory_order_relaxed);
+    s.orig.store(0, std::memory_order_relaxed);
+  }
+  g_live = 0;
+  g_tombs = 0;
+  for (const Kept& k : live)
+    if (Slot* s = Find(k.obj, true)) {
+      s->cost.store(k.cost, std::memory_order_relaxed);
+      s->orig.store(k.orig, std::memory_order_relaxed);
+      s->seen.store(k.seen, std::memory_order_relaxed);
+    }
+  g_rebuilds.fetch_add(1, std::memory_order_relaxed);
+}
+
+// One epoch: kSweep slots aged; those unused for g_evictAge epochs evicted
+// (tombstones), a rebuild once tombstones are an eighth of the table.
+void Age() {
+  const uint32_t now = g_epoch.fetch_add(1, std::memory_order_relaxed) + 1;
+  const uint32_t age = g_evictAge.load(std::memory_order_relaxed);
+  for (uint32_t k = 0; k < kSweep; ++k) {
+    Slot& s = g_table[g_cursor];
+    g_cursor = (g_cursor + 1) & (kTable - 1);
+    void* o = s.obj.load(std::memory_order_relaxed);
+    if (!o || o == kTomb || now - s.seen.load(std::memory_order_relaxed) <= age) continue;
+    s.obj.store(kTomb, std::memory_order_relaxed);
+    s.cost.store(0, std::memory_order_relaxed);
+    s.orig.store(0, std::memory_order_relaxed);
+    g_live.fetch_sub(1, std::memory_order_relaxed);
+    g_tombs.fetch_add(1, std::memory_order_relaxed);
+    g_evicted.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (g_tombs.load(std::memory_order_relaxed) > kTable / 8) Rebuild();
+}
+
 // Before the collect call (render thread, pool idle).
 void Apply(uint8_t* view) {
+  Age();
   UpdateScale();
   if (g_censusRequest.exchange(false)) Census(view);
 }

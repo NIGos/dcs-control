@@ -27,14 +27,14 @@ public static class FramePacing
             cap = PositiveNumber(raw);
         var label = profile.FpsLimit switch
         {
-            FpsLimitMode.Preserve => cap is null ? "Preserve existing DCS limit (not detected)" : "Preserve detected DCS limit",
-            FpsLimitMode.RuntimeHeadroom => "300 FPS headroom; OpenXR still paces frames",
-            FpsLimitMode.MatchRefresh => fg ? (profile.FrameGenFactor == VrProfile.FrameGenAuto ? "Half refresh; OFXR switches to two generated frames when DCS falls below it" : Multiplier(profile) == 3 ? "A third of the refresh for OFXR's two generated frames" : "Half refresh for OFXR's generated frame (2×)") : "Full refresh; frame generation is off",
-            _ => "Custom rendered-frame cap"
+            FpsLimitMode.Preserve => cap is null ? "Keeps DCS's own limit (none set)" : "Keeps DCS's own limit",
+            FpsLimitMode.RuntimeHeadroom => "Very high (300 FPS); the headset still sets the pace",
+            FpsLimitMode.MatchRefresh => fg ? (profile.FrameGenFactor == VrProfile.FrameGenAuto ? "Half the refresh rate; a second generated frame while DCS falls behind" : Multiplier(profile) == 3 ? "A third of the refresh rate, for two generated frames" : "Half the refresh rate, for one generated frame") : "The full refresh rate; frame generation is off",
+            _ => "Custom limit"
         };
         return new(profile.HeadsetRefreshHz, profile.HeadsetRefreshHz / Multiplier(profile), cap,
             cap is null ? null : Math.Min(profile.HeadsetRefreshHz, cap.Value * Multiplier(profile)), label, fg,
-            "Calculated cap ceiling, not measured FPS. GPU/CPU load, skipped synthesis, other limiters and runtime presentation can lower it." + (HeadsetRefresh.ReadFor(profile) is { } read ? " Refresh rate read from " + read.Source + "." : " Refresh rate is the value set here, not read from the headset."));
+            "Calculated, not measured: CPU or GPU load and other frame limits can lower it." + (HeadsetRefresh.ReadFor(profile) is { } read ? " Refresh rate read from " + read.Source + "." : " The refresh rate is the one set in DCS Control, not read from the headset."));
     }
 
     /// <summary>Displayed frames per rendered frame for the profile's frame generation. Auto targets 2 (half the
@@ -48,28 +48,28 @@ public static class FramePacing
         var plan = Describe(profile, inventory);
         var checks = new List<ReadinessCheck>
         {
-            new("fps-cap", plan.DcsCap is null ? CheckState.Manual : CheckState.Pass, "DCS frame limit", plan.CapDescription + (plan.DcsCap is null ? "." : string.Create(CultureInfo.InvariantCulture, $": {plan.DcsCap:0.###} FPS.")) + " Changes are previewed, backed up and restored with the profile."),
-            new("refresh-rate", HeadsetRefresh.ReadFor(profile) is null ? CheckState.Manual : CheckState.Pass, "Refresh rate", (HeadsetRefresh.ReadFor(profile) is { } read ? string.Create(CultureInfo.InvariantCulture, $"{read.Source}: {profile.HeadsetRefreshHz:0.###} Hz.") : string.Create(CultureInfo.InvariantCulture, $"Confirm {profile.HeadsetRefreshHz:0.###} Hz in Pimax Play or SteamVR.")) + string.Create(CultureInfo.InvariantCulture, $" Target: {plan.RequiredRenderedFps:0.###} rendered FPS") + (plan.FrameGeneration ? (profile.FrameGenFactor == VrProfile.FrameGenAuto ? " + generated frames: 1 (2×), or 2 (3×) when DCS falls behind." : Multiplier(profile) == 3 ? " + 2 generated frames per rendered frame (3×)." : " + 1 generated frame per rendered frame (2×).") : "; frame generation is off.") + " " + plan.Note)
+            new("fps-cap", plan.DcsCap is null ? CheckState.Manual : CheckState.Pass, "DCS frame limit", plan.CapDescription + (plan.DcsCap is null ? "." : string.Create(CultureInfo.InvariantCulture, $": {plan.DcsCap:0.###} FPS.")) + " Your original value is backed up and comes back with Back to stock DCS."),
+            new("refresh-rate", HeadsetRefresh.ReadFor(profile) is null ? CheckState.Manual : CheckState.Pass, "Refresh rate", (HeadsetRefresh.ReadFor(profile) is { } read ? string.Create(CultureInfo.InvariantCulture, $"{read.Source}: {profile.HeadsetRefreshHz:0.###} Hz.") : string.Create(CultureInfo.InvariantCulture, $"Make sure the headset runs at {profile.HeadsetRefreshHz:0.###} Hz in Pimax Play or SteamVR.")) + string.Create(CultureInfo.InvariantCulture, $" DCS needs to render {plan.RequiredRenderedFps:0.###} FPS") + (plan.FrameGeneration ? (profile.FrameGenFactor == VrProfile.FrameGenAuto ? ", plus one generated frame per rendered frame (two while DCS falls behind)." : Multiplier(profile) == 3 ? ", plus two generated frames per rendered frame (3×)." : ", plus one generated frame per rendered frame (2×).") : "; frame generation is off.") + " " + plan.Note)
         };
         if (plan.DcsCap is { } cap && cap + .01 < plan.RequiredRenderedFps)
-            checks.Add(new("fps-under-target", CheckState.Warning, "Frame limit too low", string.Create(CultureInfo.InvariantCulture, $"{cap:0.###} rendered FPS cannot supply {profile.HeadsetRefreshHz:0.###} fresh frames/s with this pipeline. Its calculated ceiling is {plan.ConfiguredOutputCeiling:0.###} FPS before other bottlenecks.")));
+            checks.Add(new("fps-under-target", CheckState.Warning, "Frame limit too low", string.Create(CultureInfo.InvariantCulture, $"A limit of {cap:0.###} FPS is below what DCS needs to render for {profile.HeadsetRefreshHz:0.###} Hz: at most {plan.ConfiguredOutputCeiling:0.###} frames per second reach the headset. Raise the limit or lower the refresh rate.")));
         if (inventory.AutoexecPath is not null)
             checks.Add(new("autoexec-pacing", inventory.AutoexecMaxFps is not null || inventory.AutoexecPacingUnknown ? CheckState.Warning : CheckState.Pass, "autoexec.cfg frame limit", inventory.AutoexecMaxFps is { } value
-                ? "Detected max_fps = " + value + ". This separate legacy cap may affect cadence. Review it before testing; the tool preserves autoexec.cfg."
-                : inventory.AutoexecPacingUnknown ? "autoexec.cfg contains unsupported commands; its pacing effect is unknown. Review custom caps and commands before testing. The tool preserves this file."
-                : "No max_fps assignment was found in the data-only autoexec.cfg. Review other custom pacing settings before testing. This file is preserved."));
+                ? "DCS's autoexec.cfg sets max_fps = " + value + ", a second frame limit that can hold DCS back. DCS Control leaves this file as it is: check that line yourself."
+                : inventory.AutoexecPacingUnknown ? "DCS's autoexec.cfg has commands DCS Control cannot read, so their effect on the frame rate is unknown. DCS Control leaves this file as it is: check it yourself."
+                : "DCS's autoexec.cfg sets no frame limit (max_fps). DCS Control leaves this file as it is."));
         var sync = inventory.DcsSettings.GetValueOrDefault("graphics.sync");
         checks.Add(new("dcs-vsync", !profile.DisableDcsVSync && sync == "true" ? CheckState.Warning : CheckState.Pass, "DCS desktop VSync",
-            profile.DisableDcsVSync ? "The profile will set graphics.sync = false. The original value is backed up. OpenXR runtime synchronization remains active."
-            : "Preserved: " + (sync ?? "not detected") + ". Desktop VSync is separate from OpenXR synchronization; verify its effect in DCS."));
+            profile.DisableDcsVSync ? "Desktop VSync is turned off at launch; your original value is backed up. The headset keeps its own sync."
+            : "Left as it is: " + (sync == "true" ? "on" : sync == "false" ? "off" : "not found") + ". VSync of the DCS window on the monitor can hold back the frame rate; Desktop VSync off on the Framegen page turns it off."));
         // Other limiters and runtime motion smoothing cannot be read or verified here, so they are always checks the
         // user does (an old profile's self-reported values are dropped when it loads).
         checks.Add(new("external-limiters", CheckState.Manual, "NVIDIA / RTSS / other FPS limits",
-            "Check NVIDIA Max Frame Rate (global and for DCS), Background Application Max Frame Rate and RTSS: a second limiter can fight with the DCS frame limit and frame generation. This app does not read or change them."
-            + (inventory.LimiterProcesses.Count == 0 ? " No RTSS process was detected; that does not prove every limit is off." : " Running: " + string.Join(", ", inventory.LimiterProcesses) + "; a running process does not prove an active limit.")));
+            "Check Max Frame Rate in the NVIDIA settings (global and for DCS), Background Application Max Frame Rate and RTSS: a second frame limit can fight with the DCS frame limit and frame generation. DCS Control does not read or change them."
+            + (inventory.LimiterProcesses.Count == 0 ? " RTSS is not running, but other limits may still be on." : " Running: " + string.Join(", ", inventory.LimiterProcesses) + " (it may or may not limit the frame rate).")));
         if (plan.FrameGeneration)
             checks.Add(new("runtime-reprojection", CheckState.Manual, "Runtime motion smoothing / Smart Smoothing",
-                "Turn off Pimax Smart Smoothing or SteamVR motion smoothing with frame generation: two stages that synthesize frames change latency and cadence. Rotational timewarp is separate. Set this in Pimax Play or SteamVR; this app does not change it."));
+                "With frame generation, turn off Smart Smoothing in Pimax Play (or Motion Smoothing in SteamVR): two kinds of generated frames on top of each other add latency and stutter. DCS Control does not change this setting."));
         return checks;
     }
 

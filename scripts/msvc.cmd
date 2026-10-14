@@ -9,7 +9,9 @@ set "VCVARS="
 set /p VCVARS=<"%VCVARS_LIST%"
 del "%VCVARS_LIST%" >nul 2>&1
 if not defined VCVARS goto :notoolset
-endlocal & call "%VCVARS%" >nul
+rem VsDevCmd runs a bare vswhere.exe from the Installer folder; with NoDefaultCurrentDirectoryInExePath set, cmd only
+rem finds it on PATH ("'vswhere.exe' is not recognized" otherwise).
+endlocal & set "PATH=%PATH%;%ProgramFiles(x86)%\Microsoft Visual Studio\Installer" & call "%VCVARS%" >nul
 if errorlevel 1 exit /b %errorlevel%
 %*
 exit /b %errorlevel%

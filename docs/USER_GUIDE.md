@@ -1,6 +1,6 @@
 # DCS Control — User Guide
 
-**Version 0.5.6-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`.
+**Version 0.5.8-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`.
 
 > **Early beta.** DCS Control has been flown mostly on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe — but please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
 
@@ -62,7 +62,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 ## Install
 
-**With the setup (recommended):** download `DcsControl-0.5.6-preview-Setup.exe` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and double-click it. Its first page lets you choose:
+**With the setup (recommended):** download `DcsControl-0.5.8-preview-Setup.exe` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and double-click it. Its first page lets you choose:
 
 - the **install folder**: `%LOCALAPPDATA%\Programs\DcsControl` unless you pick another one with **Browse...** (it shows the space needed and free). Any folder your Windows user can write to works, for example `D:\Games\DcsControl`; `Program Files` needs administrator rights, so it is refused. A folder that already holds other files gets a `DcsControl` folder inside it;
 - whether DCS Control goes in the **Start menu** and on the **desktop**.
@@ -71,7 +71,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 It waits until DCS and DCS Control are closed (the page says which one is still open). Running it again over an installed copy updates it in place; if anything goes wrong the installation is rolled back to the version you had. Its log is `%TEMP%\DcsControl-Setup.log`.
 
-**Portable, from the ZIP:** download `DcsControl-0.5.6-preview-win-x64.zip` and extract it to a folder of your choice. Then either:
+**Portable, from the ZIP:** download `DcsControl-0.5.8-preview-win-x64.zip` and extract it to a folder of your choice. Then either:
 
 - **Run it directly:** double-click `DcsControl.exe` in the extracted folder (.NET is included), or
 - **Install it:** double-click `Install DCS Control.cmd`. It does what the setup does, in a console window, with the Start menu entry but no desktop shortcut.
@@ -90,12 +90,14 @@ The preview is not code-signed, so Windows SmartScreen may warn you the first ti
 
 ## Updates
 
-When DCS Control starts it asks GitHub whether a newer release is out (at most every 6 hours; only the list of releases is fetched, nothing about your PC is sent). When there is one, the **Overview** shows **DCS Control 0.5.x is available** with:
+When DCS Control starts it asks GitHub whether a newer release is out (at most every 6 hours, or 30 minutes after a check that failed; only the list of releases is fetched, nothing about your PC is sent). When there is one, the **Overview** shows **DCS Control 0.5.x is available** with:
 
 - **What's new**: that release's notes;
-- **Update**: downloads the release's setup, checks its **signature** against the release key built into the app (a download that does not match is deleted and nothing is installed), closes DCS Control, installs the new version and starts it again. Your profiles, backups and the applied profile stay as they are.
+- **Update**: downloads the release's setup, checks its **signature** against the release key built into the app and that it is the version announced (a download that does not match is deleted and nothing is installed), closes DCS Control, installs the new version in the same folder and starts it again. Your profiles, backups and the applied profile stay as they are. **Cancel download** (or closing the dialog) stops the download; a download that receives nothing for a minute stops by itself.
 
-Update refuses while DCS runs. A copy started from an unzipped folder is updated by installing DCS Control in the standard folder (`%LOCALAPPDATA%\Programs\DcsControl`, with Start menu and desktop shortcuts); the dialog says so, and afterwards you can delete the old folder. A dot next to the version number at the bottom of the left rail also means an update is available; × hides the banner until the next start.
+Update refuses while DCS runs and while Launch DCS, Apply or Back to stock DCS is still working. If the update fails, the installation rolls back and the DCS Control you had opens again. A copy started from an unzipped folder is updated by installing DCS Control where the setup installed it before (Settings → Apps knows), otherwise in the standard folder (`%LOCALAPPDATA%\Programs\DcsControl`, with Start menu and desktop shortcuts); the dialog names the folder, and afterwards you can delete the unzipped one.
+
+Releases before 0.5.6 cannot update themselves: install 0.5.6 once with the setup (or the ZIP); from then on updates arrive in the app. A dot next to the version number at the bottom of the left rail also means an update is available; × hides the banner until the next start.
 
 On the **Diagnostics** page, **Check for updates when DCS Control starts** turns the automatic check off (it is on by default) and **Check now** asks GitHub at once. Without internet nothing happens: no update is shown.
 
@@ -231,11 +233,12 @@ Four more options on the CPU Boost page, all off by default and usable without C
 - **Redundant state filter** (on) — DCS's renderer sets graphics state (shaders, buffers, textures, samplers) that is already set, about 228,000 times a frame on an airfield; the repeat is skipped where DCS makes the call. Verified identical live (362 frames, no mismatch). Measured: about **+0.5 to +1 % FPS** and **1.2 % less CPU**. It turns itself off after a DCS update until it is checked against the new build.
 - All together about **+50-60 % FPS** depending on the scene (+46.0 % ±1.1 and +49.9 % ±3.7 in two runs, 42 → 63 FPS), p95 −34 %, with the image verified identical pixel by pixel; with everything on, the GPU becomes the limit (96-97 % busy), measured with the module's automatic A/B test (the in-flight switch off and on, 24 alternating blocks) at a busy VR airfield (Ryzen 7 9800X3D, RTX 5090, Pimax Crystal Super, Quad Views, no frame generation); the rendered objects were identical off and on. How much you gain depends on how CPU-bound you are; when the GPU is the limit, little or nothing. Each optimization checks the DCS build first; after a DCS update it looks for the code it patches by signature and checks the bytes it expects, and stays off, with a warning on the page, if it does not find them.
 - **In-flight switch** (Alt+Shift+F11 by default; click the field and press any other combination, Backspace for Off) turns all the optimizations off and back on during a flight so you can compare: one beep off, two beeps on (**Beeps** turns the sounds off). Applying a profile starts with them on again.
+- **GPU-bound guard** (always on) — when the graphics card, not the CPU, is the limit, the multi-threaded shadows and G-buffer cost a little GPU time for nothing. The module then steps them down (fewer shadow recorders, then no helper lists, then both paused) and back up when the CPU is the limit again. Each step is tried against the step before for 20 seconds each and kept only when it raises FPS by more than 2 %; a step that does not help is undone and not tried again for a while. It only switches between exact paths, so the image never changes. Every 10 seconds the module's log says whether the frame was CPU- or GPU-bound.
 - **Developer mode** (off; keep it off for normal flying and for testing a release) is for working on the module: when on, the page says so in Status in DCS, and DCS hot-reloads a payload DLL built elsewhere and takes every engine setting from a separate settings file (a `run_suite.flag` next to it starts the test suite). Logs and reports still go to `Saved Games\DCS\Scripts\DcsQvCull`.
 
 **Status in DCS** reads the module's own log: whether DCS loaded it and whether each optimization found what it needs in this DCS version. After a DCS update the module checks itself; a part that does not recognise the new build turns itself off and the page shows a warning.
 
-**Test suite:** in flight, in VR, with the headset on and awake, press **Run test suite** (or Ctrl+Alt+F11 in DCS). It measures each optimization off and on in alternating 5-second blocks for about 7 minutes and writes a report (**Open last report**). Keep your head still in a busy scene; blocks while the headset sleeps are thrown away. The module's developer keys are off; Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down stay reserved for it.
+**Test suite:** in flight, with the headset on and awake (or on the monitor), press **Run test suite** (or Ctrl+Alt+F11 in DCS). It compares all the optimizations off (stock DCS) against on, in alternating 5-second blocks for about 3 minutes, and writes a report (**Open last report**): two beeps when it starts, three high beeps when it is done, one long low beep when it stops. Keep your head still in a busy scene; blocks while the headset sleeps are thrown away. If it stops at once saying no frames were counted, the module did not recognise the headset's views: please report it with a diagnostic package. The module's developer keys are off; Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down stay reserved for it.
 
 Tested on DCS 2.9.30 in single player. Back to stock DCS (or turning the option off and launching) removes the hook, the module and everything it wrote.
 
@@ -247,6 +250,13 @@ When your eyes turn, each pupil moves a few millimetres, but DCS renders both ey
 - **In-flight switch** (default Ctrl+Shift+F10) — turns it off and on to compare: a low beep off, a high beep on.
 - **DCS's custom IPD**: if you set one in DCS, Pupil shift applies the same value itself and DCS's own option is off while the profile is applied, because DCS would otherwise undo the pupil's sideways move. Back to stock DCS turns it on again.
 - The page shows the status from the layer's log (gaze range during the flight, largest shift, the headset views' cant and the eye distances) and what it corrects and what not. Details: [PUPIL_SHIFT.md](PUPIL_SHIFT.md).
+
+### Periphery stability
+
+On the same page. Outside the sharp focus area the enlarged periphery shimmers on thin lines (canopy frame, power lines, horizon), and there the eye is most sensitive to flicker. Periphery stability blends each periphery frame with the previous one, moved with your head, and leaves the focus area untouched. A jump of the eyes, a pause or a large head turn starts it over. Bundled Quad Views only, fixed or eye-tracked focus; about 0.03 ms of GPU time; off by default.
+
+- **Strength** (0.5 by default): higher steadies more but can leave a faint trail on scenery that moves on its own, such as the ground while the aircraft rolls.
+- With Pimax native Quad Views or without Quad Views it is not applied; the page and Checks say so. Details and measurements: [PERCEPTION.md](PERCEPTION.md).
 
 ### Diagnostics
 
@@ -288,21 +298,26 @@ Good to know:
 
 ![Recording a hotkey](screenshots/framegen-hotkey-capture.png)
 
-| Key (default) | What it does | Where to change it |
-| --- | --- | --- |
-| **Ctrl+Shift+F12** | DLSS 5 on/off for this session (compare with and without) | DLSS 5 → In-flight toggle key |
-| **Alt+Shift+F12** | Show/hide the in-headset diagnostic panel | Framegen → In-headset diagnostics → Diagnostic panel key |
-| **Alt+Shift+F11** | DCS engine optimizations off/on (one beep off, two on) | Engine Optimizations → In-flight switch |
-| **Ctrl+Shift+F10** | Pupil shift off/on (low beep off, high beep on) | Pupil shift → In-flight switch |
-| **Ctrl+Alt+F11** | Start or stop the DCS engine optimizations' test suite | Fixed |
+All in-flight keys are on the **OSD** page, under **In-flight keys**. A key whose feature is off in the profile is greyed out.
+
+| Key (default) | What it does |
+| --- | --- |
+| **Alt+Shift+F12** | Show/hide the OSD (in-headset panel) |
+| **Alt+Shift+F11** | Engine Optimizations off/on (one beep off, two on) |
+| **Ctrl+Shift+F12** | DLSS 5 off/on, to compare |
+| **Ctrl+Shift+F10** | Pupil shift off/on (low beep off, high beep on) |
+| **Alt+Shift+F10** | Depth boost off/on (low beep off, high beep on) |
+| **Alt+Shift+F9** | Depth boost: Gradual or Predictive (one beep Gradual, two Predictive) |
+| **Ctrl+Alt+F11** | Start or stop the Engine Optimizations test suite (fixed) |
 
 To change a key, click the field and press the combination you want. Esc cancels, Backspace clears it. Keys need Ctrl, Alt or Shift unless they are F-keys, Pause, Insert, Home, End and similar. Windows' own shortcuts, the Windows key, another in-flight key's combination and the engine module's reserved keys (Ctrl+Alt+F8 to F12, Ctrl+Alt+Page Up/Down) are refused; a combination DCS binds by default is accepted with a note (and listed under Check yourself).
 
-The **diagnostic panel** (frame-generation profiles) is drawn in the headset and shows FPS, DLSS 5 state (on with GPU ms, off, or why it is not applied), the frame-generation backend and mode (2×, 3×, auto), and DCS (app) vs headset (output) FPS. With the engine optimizations on, an **Engine** line says whether all of them are working ("Engine: all 17 on", green), only some ("Engine: 12 of 17 on", amber; for a few seconds after a mission loads this is normal while the multi-threaded recorders learn the scene), none ("Engine: none on", red) or that you switched them off ("Engine: OFF (Alt+Shift+F11)"). With Pupil shift installed, a **Pupil shift** line shows "ON" with the largest pupil shift, "no gaze" or "OFF". Options under **In-headset diagnostics** (Framegen page):
+The **diagnostic panel** is drawn in the headset. With frame generation it is always available; without it, turn on **In-headset panel** on the **OSD** page: OFXR is then loaded only to draw the panel and leaves your frames untouched. It and shows FPS, DLSS 5 state (on with GPU ms, off, or why it is not applied), the frame-generation backend and mode (2×, 3×, auto), and DCS (app) vs headset (output) FPS. With the engine optimizations on, an **Engine** line says whether all of them are working ("Engine Opt.: all 17 on", green), only some ("Engine Opt.: 12 of 17 on", amber; for a few seconds after a mission loads this is normal while the multi-threaded recorders learn the scene), none ("Engine Opt.: none on", red) or that you switched them off ("Engine Opt.: OFF (Alt+Shift+F11)"). With Pupil shift installed, a **Pupil shift** line shows "ON" with the largest pupil shift, "no gaze" or "OFF"; with Depth boost it adds the strength and the eye distance DCS renders now ("Depth x1.18 far, IPD 77.4 mm"). With Periphery stability, a **Periphery** line shows "ON 0.50, 88 fps" (strength and frames steadied per second), "ON, not filtering" or "OFF". Options on the **OSD** page (which also lists every in-flight key):
 
-- **Panel visible at start**
+- **Visible at start**
 - **VRAM counter** — adds the video memory in use to the panel (off by default). Use it when you suspect VRAM is full.
-- **OFXR FPS counter** and **OFXR log** — for troubleshooting.
+
+The **OFXR FPS counter** and **OFXR log** stay on the Framegen page (frame generation only).
 
 ## After the flight: the Last flight card
 
@@ -354,6 +369,24 @@ Only a running DCS stops it. The folded list shows what will happen to each file
 
 Windows protects `Program Files`: a normal program cannot write there, whatever the antivirus exclusions or the read-only flag say. With DLSS 5 or Foveated SR, DCS Control writes a few files into DCS's `bin` folder (the DLSS 5 loader and Cheeky's files), so when DCS is installed there, **Launch DCS asks Windows once** (its own prompt) to give your account Modify permission on that folder, then carries on. You can also do it beforehand from **Checks → Write access to game folders → Grant access**, or by hand: folder Properties → Security → Edit → your account → Modify. Don't run DCS Control as administrator instead: DCS would start elevated and ignore the profile's layers. If Windows Security's **Controlled folder access** is on, the check says so: allow DCS Control there (Ransomware protection → Allow an app through Controlled folder access).
 
+### Far depth
+
+On the **Perception** page. It adds depth to distant scenery (about 50 m to 2 km): aircraft, ships and terrain stand out more, and the cockpit is not touched. It needs the bundled Quad Views and Engine Optimizations, which measure the depth DCS draws. **Strength**: Subtle, Default or Strong. The OSD shows "Far depth: ON", or "waiting for engine" until the depth arrives.
+
+### Eye distance (IPD)
+
+DCS renders with the eye distance your headset measured or was set to (Pimax Play or SteamVR): the world then has its true size and depth. If DCS's own *custom IPD* is on (often set to 64 mm because it was said to look better), Launch DCS turns it off while the profile is applied and Back to stock DCS turns it on again. To keep DCS's value choose **DCS's custom IPD** under Headset runtime → Eye distance, or **Set here** for a value of your own (50-80 mm). Pupil shift and Depth boost use the same eye distance.
+
+### Multi-threaded shadows and G-buffer are unavailable
+
+They need D3D11 command lists on DCS's graphics device. Every recent NVIDIA card has them, so on NVIDIA the cause is almost always one of these, and the DCS Engine page says which:
+
+- **NVIDIA Control Panel → Manage 3D settings → Threaded optimization is Off**, in Global settings or in the DCS World program profile (often recommended in older DCS VR guides). Set it back to **Auto** (in the DCS profile: *Use global setting*). Checks warns about it before you launch; DCS Control reads this setting but never changes it.
+- **DCS runs on the processor's integrated graphics** instead of the NVIDIA card: Windows Settings → System → Display → Graphics → DCS → High performance, or disable the integrated graphics.
+- **A program hooked into DCS** created the device with threading optimizations off (overlays, ReShade-like tools, some OpenXR layers): try once without them.
+
+On AMD cards the driver usually does not offer them. Everything else in the engine optimizations still runs.
+
 ### ReShade (or another dxgi.dll mod) with DLSS 5
 
 DLSS 5 and Foveated SR need the file name `dxgi.dll` in DCS's `bin` folder. When another program already has one there (ReShade, an overlay), Checks says so and Launch DCS asks once: **Keep it working** loads it after the DLSS 5 loader (as `dxgi2.dll`), **Set it aside** keeps it off while the profile is applied. It is backed up either way, and **Back to stock DCS** puts it back. If DCS misbehaves with both, turn off *Keep another program's dxgi.dll working* on the DLSS 5 page.
@@ -377,7 +410,7 @@ DLSS 5 and Foveated SR need the file name `dxgi.dll` in DCS's `bin` folder. When
 
 ### VRAM is full (stutters, textures loading late)
 
-- Turn on the **VRAM counter** (Framegen → In-headset diagnostics) to see it in the headset.
+- Turn on the **VRAM counter** (OSD page) to see it in the headset.
 - On the CPU Boost page: **Free VRAM before flight**, **Small DCS window in VR**, **Lower the monitor while flying**. What Boost will do shows how much the listed programs hold now.
 - Frame generation reserves a fixed amount of memory, sized by the headset image it receives; it does not grow during a flight. DCS's own texture and terrain settings are the other big lever.
 

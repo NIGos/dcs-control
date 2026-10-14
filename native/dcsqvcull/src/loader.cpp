@@ -7,6 +7,7 @@
 #include <share.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <map>
@@ -15,6 +16,7 @@
 
 #include "loader_api.h"
 #include "log_utf8.h"
+#include "module_pin.h"
 
 namespace {
 
@@ -97,6 +99,13 @@ DcsQvLoaderApi g_api;
 
 // ---- payload management ----
 DcsQvPayloadStopFn g_stopActive = nullptr;
+// The active payload's optional exit/mission exports (null for older payloads).
+std::atomic<DcsQvPayloadQuiesceFn> g_quiesceActive{nullptr};
+std::atomic<DcsQvPayloadMissionEventFn> g_missionActive{nullptr};
+// DCS is shutting down (DcsQvCull_Shutdown): the watcher loads nothing more.
+std::atomic<bool> g_exiting{false};
+// Serializes a payload swap (watcher) with the exit quiesce (Lua thread).
+std::timed_mutex g_swapMutex;
 FILETIME g_payloadTime{};
 // Status word (layout in status_word.h): written only by the active payload,
 // read by DcsQvCull_Status. Owned here so it outlives every payload.
@@ -131,6 +140,15 @@ LoadResult LoadPayload(const std::wstring& src) {
   }
   // Optional (payloads built before the status word lack it: status stays 0).
   auto setStatus = reinterpret_cast<DcsQvPayloadSetStatusWordFn>(GetProcAddress(m, "DcsQvPayload_SetStatusWord"));
+  auto quiesce = reinterpret_cast<DcsQvPayloadQuiesceFn>(GetProcAddress(m, "DcsQvPayload_Quiesce"));
+  auto mission = reinterpret_cast<DcsQvPayloadMissionEventFn>(GetProcAddress(m, "DcsQvPayload_MissionEvent"));
+  std::unique_lock<std::timed_mutex> swap(g_swapMutex);
+  if (g_exiting.load()) {
+    Logf("loader: DCS is shutting down; payload not started");
+    return kLoadFailed;
+  }
+  g_quiesceActive.store(nullptr);
+  g_missionActive.store(nullptr);
   g_status.store(0, std::memory_order_release);  // not ready during the swap
   DcsQvPayloadStopFn previous = g_stopActive;
   if (previous) {
@@ -147,6 +165,8 @@ LoadResult LoadPayload(const std::wstring& src) {
   if (setStatus) setStatus(&g_status);
   if (start(&g_api) != 0) Logf("loader: payload start reported an error");
   g_stopActive = stop;
+  g_quiesceActive.store(quiesce);
+  g_missionActive.store(mission);
   // The new payload patches from its own worker thread; slots it does not
   // claim within 60 s are restored by the watcher (see Watcher()).
   return kLoadOk;
@@ -168,7 +188,7 @@ DWORD WINAPI Watcher(void*) {
   std::wstring lastSrc;
   ULONGLONG staleCheckAt = 0;
   int retries = 0;  // transient load failures of the current file version
-  for (;;) {
+  while (!g_exiting.load()) {
     // Dev mode: [Dev] PayloadPath in the ini points at a developer build
     // (for example the build folder), hot-reloaded from there; the deployed
     // payload is used again when the key is cleared or the file is missing.
@@ -203,11 +223,58 @@ DWORD WINAPI Watcher(void*) {
     }
     Sleep(2000);
   }
+  return 0;
 }
 
 }  // namespace
 
 extern "C" __declspec(dllexport) int luaopen_DcsQvCull(void* /*lua_State*/) { return 0; }
+
+// Lua callbacks, fetched by the hook with package.loadlib (lua_CFunction
+// signature; they never touch the Lua state and return no values).
+//
+// DcsQvCull_Shutdown: DCS is exiting. The hook calls it from the finalizer of
+// a userdata it creates after loading this module, so it runs when DCS
+// closes the hooks' Lua state, before Lua's loadlib finalizer would
+// FreeLibrary this module (0.5.5 field crash: the payload's worker then
+// wrote the status word in this module's unmapped data, AV at
+// payload+0x136D1A right after "render thread has stopped"). The module is
+// pinned anyway (DllMain); this stops the watcher and quiesces the payload
+// (its threads stop touching DCS) while DCS's objects still exist.
+// Idempotent; bounded (3 s).
+extern "C" __declspec(dllexport) int DcsQvCull_Shutdown(void* /*lua_State*/) {
+  if (g_exiting.exchange(true)) return 0;
+  Logf("loader: DCS is shutting down (Lua state closing); quiescing the payload");
+  std::unique_lock<std::timed_mutex> swap(g_swapMutex, std::defer_lock);
+  if (!swap.try_lock_for(std::chrono::milliseconds(3000))) {
+    Logf("loader: a payload swap is still running; payload not quiesced");
+    return 0;
+  }
+  if (DcsQvPayloadQuiesceFn q = g_quiesceActive.load()) {
+    if (!q(3000)) Logf("loader: payload worker still busy after 3 s; left running");
+  }
+  g_status.store(0, std::memory_order_release);
+  Logf("loader: quiesced for exit");
+  return 0;
+}
+
+// DcsQvCull_SimulationStop / DcsQvCull_MissionLoadBegin: the hook's
+// onSimulationStop / onMissionLoadBegin callbacks. DCS is about to free the
+// mission's objects; the payload drops recorder jobs in flight.
+extern "C" __declspec(dllexport) int DcsQvCull_SimulationStop(void* /*lua_State*/) {
+  if (DcsQvPayloadMissionEventFn f = g_missionActive.load()) f(1);
+  return 0;
+}
+extern "C" __declspec(dllexport) int DcsQvCull_MissionLoadBegin(void* /*lua_State*/) {
+  if (DcsQvPayloadMissionEventFn f = g_missionActive.load()) f(2);
+  return 0;
+}
+// The local player changed slot (onPlayerChangeSlot for our own id): DCS
+// frees the previous unit's objects (0.5.5 field report, crash 1).
+extern "C" __declspec(dllexport) int DcsQvCull_SlotChange(void* /*lua_State*/) {
+  if (DcsQvPayloadMissionEventFn f = g_missionActive.load()) f(3);
+  return 0;
+}
 
 // Status for the DCS Control app's in-headset panel (bit layout in
 // status_word.h); lock-free, callable from any thread. 0 = not running.
@@ -218,6 +285,12 @@ extern "C" __declspec(dllexport) unsigned long long DcsQvCull_Status() {
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
   if (reason == DLL_PROCESS_ATTACH) {
     DisableThreadLibraryCalls(module);
+    // Never unmapped before the process ends: DCS's Lua frees C modules when
+    // it closes the hooks' state at exit, while the payload (loaded by us,
+    // never freed) still runs and uses our status word, log and registry,
+    // and the watcher thread runs our code.
+    if (!qvpin::PinModuleOf(reinterpret_cast<const void*>(&DcsQvCull_Status)))
+      OutputDebugStringW(L"DcsQvCull: could not pin the loader module\n");
     wchar_t path[MAX_PATH];
     GetModuleFileNameW(module, path, MAX_PATH);
     g_dir = path;

@@ -90,6 +90,48 @@ inline Caps QueryCaps(ID3D11Device* dev) {
   return c;
 }
 
+// Why the recorders cannot run on this device, for the "unavailable" log
+// line: each capability separately plus DCS's adapter (name, vendor, LUID).
+// DriverCommandLists=0 on an NVIDIA adapter that supports them is almost
+// always NVIDIA Control Panel "Threaded optimization" = Off for DCS: the
+// driver then reports no command-list support to the app. The text lives in a
+// static buffer (install runs once at a time).
+inline const char* DescribeCapsFailure(ID3D11Device* dev, const Caps& c) {
+  static char buf[512];
+  char adapter[200] = "unknown adapter";
+  UINT vendor = 0;
+  IDXGIDevice* xd = nullptr;
+  if (dev && SUCCEEDED(dev->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&xd))) && xd) {
+    IDXGIAdapter* ad = nullptr;
+    DXGI_ADAPTER_DESC d{};
+    if (SUCCEEDED(xd->GetAdapter(&ad)) && ad && SUCCEEDED(ad->GetDesc(&d))) {
+      char name[128] = {};
+      WideCharToMultiByte(CP_UTF8, 0, d.Description, -1, name, sizeof(name) - 1, nullptr, nullptr);
+      vendor = d.VendorId;
+      snprintf(adapter, sizeof(adapter), "%s (vendor 0x%04x, LUID %08lx:%08lx)", name, vendor,
+               static_cast<unsigned long>(d.AdapterLuid.HighPart), d.AdapterLuid.LowPart);
+    }
+    if (ad) ad->Release();
+    xd->Release();
+  }
+  // A device created with PREVENT_INTERNAL_THREADING_OPTIMIZATIONS (by DCS or
+  // by a layer/injector that creates or wraps it) also reports no command lists.
+  const UINT flags = dev ? dev->GetCreationFlags() : 0;
+  const char* hint = "";
+  if (!c.commandLists && (flags & D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS))
+    hint = " -- the device was created with PREVENT_INTERNAL_THREADING_OPTIMIZATIONS (check injectors/overlays)";
+  else if (!c.commandLists && vendor == 0x10de)
+    hint = " -- NVIDIA Control Panel for DCS: Threaded optimization Auto or On, and Antialiasing - MFAA Off (MFAA On "
+           "turns the driver's command lists off)";
+  else if (!c.commandLists && vendor != 0 && vendor != 0x10de)
+    hint = " -- this GPU's driver does not report native command lists";
+  snprintf(buf, sizeof(buf),
+           "the D3D11 device lacks what the recorder needs: DriverCommandLists=%d ConstantBufferOffsetting=%d "
+           "ID3D11DeviceContext1=%d creation flags 0x%x on %s%s",
+           c.commandLists ? 1 : 0, c.cbOffsetting ? 1 : 0, c.device1 ? 1 : 0, flags, adapter, hint);
+  return buf;
+}
+
 inline int64_t Qpc() {
   LARGE_INTEGER t;
   QueryPerformanceCounter(&t);
@@ -639,6 +681,9 @@ struct Worker {
   ID3D11CommandList* list = nullptr;
   DWORD faultCode = 0;
   void* faultAddr = nullptr;
+  uintptr_t faultData = 0;         // access violation: the address read or written
+  void* faultFrames[8] = {};       // the faulting stack (unwound from the exception context)
+  int faultFrameCount = 0;
   double lastRecordUs = 0, lastFinishUs = 0;
   // Stats.
   uint64_t jobs = 0, ok = 0, failed = 0, faults = 0;
@@ -697,7 +742,7 @@ class Pool {
       w.wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
       w.done = CreateEventW(nullptr, TRUE, TRUE, nullptr);
       w.state.store(kIdle);
-      w.thread = (w.wake && w.done) ? CreateThread(nullptr, 0, &Pool::ThreadMain, &w, 0, nullptr) : nullptr;
+      w.thread = (w.wake && w.done) ? CreateThread(nullptr, 0, qvexit::Thread<&Pool::ThreadMain>, &w, 0, nullptr) : nullptr;
       if (!w.thread) {
         Log("%s: worker thread creation failed; not started", cfg_.name);
         ++n_;
@@ -848,8 +893,53 @@ class Pool {
   static int Filter(EXCEPTION_POINTERS* ep, Worker* w) {
     w->faultCode = ep->ExceptionRecord->ExceptionCode;
     w->faultAddr = ep->ExceptionRecord->ExceptionAddress;
+    w->faultData = ep->ExceptionRecord->NumberParameters >= 2 ? ep->ExceptionRecord->ExceptionInformation[1] : 0;
+    w->faultFrameCount = UnwindFrames(*ep->ContextRecord, w->faultFrames, 8);
     return EXCEPTION_EXECUTE_HANDLER;
   }
+
+ public:
+  // Return addresses from an exception context (x64 unwind data; a frame
+  // without unwind data is taken as a leaf). At most n frames.
+  static int UnwindFrames(const CONTEXT& from, void** out, int n) {
+    CONTEXT ctx = from;  // a local: CONTEXT needs 16-byte alignment
+    int k = 0;
+    __try {
+      for (; k < n && ctx.Rip; ++k) {
+        out[k] = reinterpret_cast<void*>(ctx.Rip);
+        DWORD64 base = 0;
+        PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(ctx.Rip, &base, nullptr);
+        if (!fe) {
+          ctx.Rip = *reinterpret_cast<DWORD64*>(ctx.Rsp);
+          ctx.Rsp += 8;
+        } else {
+          void* hd = nullptr;
+          DWORD64 est = 0;
+          RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, fe, &ctx, &hd, &est, nullptr);
+        }
+      }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return k;
+  }
+  // "module+0xoffset" (or the raw address).
+  static void ModOff(const void* a, char* out, size_t n) {
+    HMODULE m = nullptr;
+    wchar_t path[MAX_PATH] = {};
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCWSTR>(a), &m) &&
+        GetModuleFileNameW(m, path, MAX_PATH)) {
+      const wchar_t* b = wcsrchr(path, L'\\');
+      char name[MAX_PATH] = {};
+      WideCharToMultiByte(CP_UTF8, 0, b ? b + 1 : path, -1, name, MAX_PATH, nullptr, nullptr);
+      snprintf(out, n, "%s+0x%llx", name,
+               static_cast<unsigned long long>(static_cast<const uint8_t*>(a) - reinterpret_cast<uint8_t*>(m)));
+    } else {
+      snprintf(out, n, "%p", a);
+    }
+  }
+
+ private:
 
   // 1 = list recorded, 0 = the job gave up / Finish failed, -1 = fault.
   // Plain function body (no unwinding objects) for __try.
@@ -897,9 +987,15 @@ class Pool {
       Discard(&w);
       if (r < 0) {
         ++w.faults;
-        char why[96];
-        snprintf(why, sizeof(why), "exception 0x%08lx at %p in worker %d", static_cast<unsigned long>(w.faultCode),
-                 w.faultAddr, w.index);
+        char why[640], at[160];
+        ModOff(w.faultAddr, at, sizeof(at));
+        int len = snprintf(why, sizeof(why), "exception 0x%08lx at %p (%s) in worker %d, data address 0x%llx; stack:",
+                           static_cast<unsigned long>(w.faultCode), w.faultAddr, at, w.index,
+                           static_cast<unsigned long long>(w.faultData));
+        for (int f = 1; f < w.faultFrameCount && len > 0 && len < static_cast<int>(sizeof(why)) - 2; ++f) {
+          ModOff(w.faultFrames[f], at, sizeof(at));
+          len += snprintf(why + len, sizeof(why) - len, " %s", at);
+        }
         w.pool->Disable(why);
       } else {
         ++w.failed;

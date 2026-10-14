@@ -1,9 +1,61 @@
+# 0.5.8 preview
+
+**Far depth** (off by default; Perception page): distant aircraft, ships and terrain get more depth, between about 50 m and 2 km, while the cockpit stays exactly as it is. The bundled Quad Views shifts each eye's image using the depth DCS drew, which Engine Optimizations measure; under 0.1 ms per frame. Subtle, Default or Strong. The OSD shows "Far depth: ON".
+
+**In-headset panel without frame generation**: the status panel (Alt+Shift+F12) no longer needs frame generation. Turn on *In-headset panel* on the new **OSD** page, which also lists every in-flight key: OFXR is loaded only to draw it and passes your frames through untouched. The panel now shows the eye distance DCS renders with Depth boost and a Periphery stability line.
+
+**Perception page** (renamed from Pupil shift): Pupil shift, Depth boost and Periphery stability together, with shorter descriptions. **First-start tour**: a short tour shows where everything is; take it again from the Diagnostics page.
+
+**Pupil shift**: the cockpit no longer jitters up and down. The gaze that moves the pupils is smoothed against the eye tracker's noise (more on a noisier tracker), follows smooth eye movements without steps and holds through blinks.
+
+**Eye distance** (Headset runtime card): DCS now renders with the eye distance your headset measured or was set to (Pimax Play, SteamVR), the realistic one, and DCS's custom IPD is turned off while a profile is applied (Back to stock DCS turns it on again). Choose *DCS's custom IPD* to keep the old behaviour, or *Set here* for a value of your own.
+
+**Periphery stability** (off by default; Perception page, bundled Quad Views only): steadies the shimmer that the enlarged periphery shows on thin lines (canopy frame, power lines, horizon) outside the sharp focus area, where the eye is most sensitive to flicker. Each periphery frame is blended with the previous one, moved with your head, with no effect inside the focus area; a jump of the eyes, a pause or a large head turn starts it over. One switch and a Strength slider. It costs about 0.03 ms of GPU time for both eyes. Offline it cut the periphery's frame-to-frame flicker by about 30 % (3X) to 40 % (2X) between 28 and 45 degrees. On scenery that moves on its own, such as the ground while the aircraft rolls, it can leave a faint trail. How it works and the measurements: docs/PERCEPTION.md.
+**Depth boost** (off by default, on the Perception page): while you look outside, both eyes are rendered gradually further apart (up to ×1.4 of your eye distance by default), so a wingman, a tanker or a target shows more stereo depth; when you look back into the cockpit it returns to your normal eye distance within about a second. Where you look is measured from the angle between your two eyes' gaze, read from the eye-tracked Quad Views focus views, in the Pupil shift layer, which now runs for either feature (each has its own switch). While the boost is up the world looks somewhat smaller; keep it off for landings for now. In-flight switch Alt+Shift+F10; the diagnostic panel shows the current scale. It acts only once it has seen you look both into the cockpit and outside; when both focus areas follow one shared gaze (the bundled Quad Views does this), it stays at the normal scale and the page says so. Not yet flown: docs/PERCEPTION.md has the design, the offline validation and the test plan.
+
+**Depth boost: Realistic and Enhanced, scene depth.** Depth boost now has two modes. **Realistic** (the default) keeps normal depth up to 150 m, where the headset already shows depth as well as your eyes would, and adds only the depth its pixels cannot show farther out (up to ×1.25 from 400 m): a wingman or a rejoin keeps its true distance. **Enhanced** is the previous behaviour (more depth from 3 m, ×1.4 from 50 m): more depth, not realistic. With Engine Optimizations the engine module measures the distance you look at in DCS's depth buffer around your gaze; edges such as the canopy frame, the glareshield or an MFD bezel never switch the boost, the HUD keeps normal depth, and a change happens only as your eyes land after a jump. On Pimax the layer also reads each eye's own gaze from the runtime's PVR client. Without Engine Optimizations Realistic stays at normal depth (the page says so) and Enhanced works on your eyes' vergence as before. docs/FIXATION_DEPTH.md has the rules and their validation.
+
+**Perception features are marked EXPERIMENTAL**: Pupil shift, Periphery stability, Far depth and Depth boost carry the tag on the Perception page. They are all off by default and still being tuned; tell us how they look in your aircraft.
+
+**Far depth keeps the HUD out**: the HUD and symbology that aircraft such as the F-16 draw after DLSS are now found in the HDR image, before and after they are drawn, so they are never shifted with the world behind them.
+
+**Last flight: eye tracking**: when the bundled Quad Views reports that eye tracking did not reach it, the Last flight page says so and suggests restarting the headset in Pimax Play (desktop Tobii software can hold the headset's tracker).
+
+**Fixes**:
+- Open Sboys tool and Back to stock DCS no longer stay greyed out after another command.
+- Cancelling Import, or Back to stock DCS, no longer brings back an older draft over unsaved changes.
+- The guided setup asks about another program's dxgi.dll before it launches, like Launch DCS, and a cancelled guided setup leaves nothing behind.
+- Back to stock DCS: a failed write of options.lua no longer forgets an original setting; another program's dxgi.dll reached through two paths (a junction, a subst drive) is recognised as one file; a damaged backup no longer blocks every later Apply.
+- Ctrl+Alt+F8 to F12 and Page Up/Down, with or without Shift, are refused for every in-flight key while Engine Optimizations run (the module's own keys).
+- Alt+F4 no longer closes DCS Control in the middle of Launch, Apply or Back to stock DCS.
+- An options.lua outside Saved Games\DCS\Config gets a warning; the write-access check says the same thing in Checks and in the profile check.
+- The OSD fields are greyed out for the monitor route; Checks link every key and range problem to its setting; the tour closes with Esc.
+- The release no longer contains the build machine's folder names (Quad Views' compiled-in source paths and symbol path); every file of both packages is checked.
+
+- Pupil shift layer: a NaN focus FOV no longer reaches DCS as a NaN eye position; views with a NaN FOV are restored at `xrEndFrame` too.
+- OFXR patch 0017: the panel's Pupil shift line carries Depth boost.
+
+# 0.5.7 preview
+
+**Engine optimizations on a GPU-bound PC**: when the graphics card is the limit (a fast CPU with a high headset resolution), the multi-threaded shadows and G-buffer used a little GPU time for no gain. The module now steps them down while the GPU is the limit and back up when the CPU is, keeping each step only when a paired 20-second test shows it raises FPS by more than 2 %. The image never changes.
+
+**Easier to tell what happens**:
+- **Test suite** (Run test suite, or Ctrl+Alt+F11 in DCS) now compares all the optimizations off against on, in about 3 minutes, and stops with a plain message when it sees no headset frames.
+- The module's log says at start which GPU, driver, VRAM, OpenXR runtime and layers, streaming apps (Virtual Desktop and others) and view layout it found, then every 10 seconds the FPS, frame times and whether the frame was CPU- or GPU-bound, and which optimizations are on, idle or off and why.
+- The diagnostic package keeps the start of a long log as well as its end, so the start-up lines survive a long flight.
+- **Multi-threaded shadows and G-buffer unavailable on an NVIDIA card?** Checks now warn before the flight when NVIDIA Control Panel's *Threaded optimization* is Off for DCS (a common DCS VR tweak: with it off the driver gives DCS no command lists) and say where to set it back to Auto. The app reads the setting and never changes it. When the module still cannot use them, the DCS Engine page names the reason: that setting, DCS running on integrated graphics, or a program hooked into DCS.
+
+**Fix**: the Pupil shift page and the diagnostic package can read the Pupil shift log while DCS runs (the layer kept it locked).
+
+**Docs**: install, uninstall and updates described for the setup; technical notes on the setup, the uninstaller and the updater.
+
 # 0.5.6 preview
 
 **One-file setup**: `DcsControl-0.5.6-preview-Setup.exe` installs DCS Control for your Windows user, in `%LOCALAPPDATA%\Programs\DcsControl` or a folder you choose (it shows the space needed and free), with the Start menu and desktop shortcuts you tick and an entry in Settings → Apps. **Uninstall DCS Control** (Settings → Apps, or `Uninstall DCS Control.exe` in the folder) is a window too: it can put DCS back to stock first and, if you ask, delete your profiles and settings. No administrator rights, no console windows; WebView2 and the Visual C++ runtime come from Microsoft when they are missing, and an installed copy is updated in place (a failed update rolls back). It waits until DCS and DCS Control are closed. The ZIP stays available for a portable copy.
 
 **Updates from the app**: when a newer release is on GitHub, the Overview shows "DCS Control 0.5.x is available" with **What's new** (the release notes) and **Update**. Update downloads the setup, checks its signature against the release key built into the app (a file that does not match is deleted and nothing is installed), closes DCS Control, installs and starts the new version. It refuses while DCS runs. From an unzipped copy the update installs DCS Control in the standard folder and says that the old folder can be deleted.
-- The check asks GitHub at most every 6 hours and never sends anything about your PC; it can be turned off on the Diagnostics page (**Check for updates when DCS Control starts**), where **Check now** asks at once.
+- The download can be cancelled, stops by itself when nothing arrives for a minute, and never starts while Launch DCS, Apply or Back to stock DCS is working. The setup must be the version announced, and a failed update gives you back the DCS Control you had.
+- The check asks GitHub at most every 6 hours (30 minutes after a failed check) and never sends anything about your PC; it can be turned off on the Diagnostics page (**Check for updates when DCS Control starts**), where **Check now** asks at once.
 - Without internet nothing changes: no update is shown.
 
 **What's new**: the first start after an update shows that version's release notes once; click the version number at the bottom of the left rail to see them again.

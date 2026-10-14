@@ -49,26 +49,38 @@ std::atomic<BoundaryFn> g_flushBoundary{nullptr};
 // the uav_overlap.h probe), called after g_boundary at a start and before it at
 // an end; nullptr unless [Model] PeripheralLodScale or a suite phase set it.
 std::atomic<BoundaryFn> g_viewBoundary{nullptr};
+// Optional fourth boundary callback (fixation_depth.h: the depth window after
+// a view's G-buffer passes), called after every other one at a start and
+// after every other one at an end; nullptr unless [Perception] FixationDepth.
+std::atomic<BoundaryFn> g_depthBoundary{nullptr};
+// The frame argument of the last top-level execute (diagnostics).
+std::atomic<uint64_t> g_execFrame{0};
 
 void __fastcall Hook(void* pass, uint64_t frame) {
-  if (t_depth == 0) g_topTid.store(GetCurrentThreadId(), std::memory_order_relaxed);
+  if (t_depth == 0) {
+    g_topTid.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    g_execFrame.store(frame, std::memory_order_relaxed);
+  }
   EachFn each = g_eachPass.load(std::memory_order_relaxed);
   BoundaryFn bnd = g_boundary.load(std::memory_order_relaxed);
   BoundaryFn fl = g_flushBoundary.load(std::memory_order_relaxed);
   BoundaryFn vb = g_viewBoundary.load(std::memory_order_relaxed);
+  BoundaryFn db = g_depthBoundary.load(std::memory_order_relaxed);
   if (!g_recording.load(std::memory_order_relaxed)) {
     AfterTopFn after = g_afterTop.load(std::memory_order_relaxed);
-    if (!after && !each && !bnd && !fl && !vb) return g_orig(pass, frame);
+    if (!after && !each && !bnd && !fl && !vb && !db) return g_orig(pass, frame);
     if (each) each();
     if (fl) fl(pass, true, t_depth);
     if (bnd) bnd(pass, true, t_depth);
     if (vb) vb(pass, true, t_depth);
+    if (db) db(pass, true, t_depth);
     ++t_depth;
     g_orig(pass, frame);
     const bool top = --t_depth == 0;
     if (vb) vb(pass, false, t_depth);
     if (bnd) bnd(pass, false, t_depth);
     if (fl) fl(pass, false, t_depth);
+    if (db) db(pass, false, t_depth);
     if (each) each();
     if (top && after) after();
     return;
@@ -77,6 +89,7 @@ void __fastcall Hook(void* pass, uint64_t frame) {
   if (fl) fl(pass, true, t_depth);
   if (bnd) bnd(pass, true, t_depth);
   if (vb) vb(pass, true, t_depth);
+  if (db) db(pass, true, t_depth);
   int d = t_depth++;
   if (d < 64) t_childUs[d] = 0;
   LARGE_INTEGER a, b;
@@ -98,6 +111,7 @@ void __fastcall Hook(void* pass, uint64_t frame) {
   if (vb) vb(pass, false, d);
   if (bnd) bnd(pass, false, d);
   if (fl) fl(pass, false, d);
+  if (db) db(pass, false, d);
   if (each) each();
   if (d == 0)
     if (AfterTopFn after = g_afterTop.load(std::memory_order_relaxed)) after();

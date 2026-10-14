@@ -1,3 +1,4 @@
+#Requires -Version 7
 param([ValidateSet('ofxr-core','cheeky')][string]$Component = 'ofxr-core')
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
@@ -30,3 +31,5 @@ if ($Component -eq 'cheeky') {
     & $nativeWrapper ctest --test-dir $nativeBuild --output-on-failure --parallel 1 -R MixedCalibration
     if ($LASTEXITCODE -ne 0) { throw 'Mixed calibration tests failed.' }
 }
+# Built and tested: build-release.ps1 ships the Cheeky DLLs only while their sources and patches match this stamp.
+if ($Component -eq 'cheeky') { . (Join-Path $PSScriptRoot 'build-stamp.ps1'); Save-BuildStamp 'cheeky' }

@@ -26,6 +26,14 @@ public static class ProfileValidation
         return profile with { QuadFocusAdapter = profile.UsesCheeky && profile.QuadViews == QuadProvider.QuadViewsFoveated };
     }
 
+    /// <summary>options.lua inside Saved Games\DCS*\Config, the only place DCS reads it from.</summary>
+    public static bool IsSavedGamesOptions(string path)
+    {
+        var config = Path.GetDirectoryName(Path.GetFullPath(path));
+        var profileRoot = config is null ? null : Path.GetDirectoryName(config);
+        return Path.GetFileName(path).Equals("options.lua", StringComparison.OrdinalIgnoreCase) && config is not null && profileRoot is not null
+            && Path.GetFileName(config).Equals("Config", StringComparison.OrdinalIgnoreCase) && Path.GetFileName(profileRoot).StartsWith("DCS", StringComparison.OrdinalIgnoreCase);
+    }
     public static IReadOnlyList<ValidationIssue> Validate(VrProfile profile, InventorySnapshot? inventory = null)
     {
         // What will run: Optimizations only is never held back by the VR settings it keeps for later.
@@ -49,6 +57,7 @@ public static class ProfileValidation
         Range("quad-sharpening", profile.QuadSharpening, 0, 1);
         Range("quad-periphery-contrast", profile.QuadPeripheryContrast, 0, 1);
         Range("quad-edge-blend", profile.QuadEdgeBlend, 0, .5);
+        Range("periphery-stability-strength", profile.PeripheryStabilityStrength, 0, 1);
         Range("neural-scale", profile.NeuralWorkingScale, .1, 1);
         Range("neural-intensity", profile.NeuralIntensity, 0, 1);
         Range("neural-local-tone", profile.NeuralLocalTone, 0, 2);
@@ -73,34 +82,34 @@ public static class ProfileValidation
         if (profile.UsesQuadFocus && !string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory))
             Error("quad-adapter-provider", "DLSS 5 with Quad Views needs the bundled Quad Views provider. Clear the Alternative Quad Views provider folder.");
         if (profile.UsesQuadFocus)
-            issues.Add(new("quad-focus", IssueSeverity.Info, "DLSS 5 runs on the two Quad Views focus views through the focus adapter, on DCS's own DLSS; the periphery keeps DCS's own image."));
+            issues.Add(new("quad-focus", IssueSeverity.Info, "DLSS 5 runs only on the focus area of Quad Views, on top of DCS's own DLSS. The periphery keeps DCS's normal image."));
         if (profile.Runtime == RuntimeKind.Pimax && profile.QuadViews == QuadProvider.QuadViewsFoveated)
-            issues.Add(new("pimax-native-replaced", IssueSeverity.Info, "Bundled Quad Views replaces the Pimax runtime's own Quad Views for DCS; keep Quad Views on in Pimax Play (the tested setup)." + (PimaxFovea.UsesPimaxPlay(profile)
-                ? "" : " Its focus area comes from this profile; Pimax Play's Quad View settings do not apply.")));
+            issues.Add(new("pimax-native-replaced", IssueSeverity.Info, "Bundled Quad Views takes over from Pimax's own Quad Views for DCS. Keep Quad Views turned on in Pimax Play (the tested setup)." + (PimaxFovea.UsesPimaxPlay(profile)
+                ? "" : " The focus area comes from this profile, not from Pimax Play's Quad View settings.")));
         if (!Enum.IsDefined(profile.FoveaSource)) Error("fovea-source", "Select Pimax Play or this profile as the focus area source.");
         if (profile.CpuBoost || profile.FreeVram)
         {
             // Names are process names without ".exe". Moving or closing a process that starts DCS (or DCS itself) would
             // slow down or end the game it is meant to help.
             static string Normalize(string name) => name.Trim() is var n && n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? n[..^4] : n.Trim();
-            var lists = new List<(string Label, IReadOnlyList<string>? Names)>();
-            if (profile.FreeVram) lists.Add(("close", profile.FreeVramApps));
-            if (profile.CpuBoost && profile.BoostMoveBackgroundApps) lists.Add(("move", profile.BoostBackgroundApps));
-            foreach (var (label, names) in lists)
+            var lists = new List<(string Feature, string Verb, string List, IReadOnlyList<string>? Names)>();
+            if (profile.FreeVram) lists.Add(("Free VRAM", "close", "Programs to close", profile.FreeVramApps));
+            if (profile.CpuBoost && profile.BoostMoveBackgroundApps) lists.Add(("CPU Boost", "move", "Background apps", profile.BoostBackgroundApps));
+            foreach (var (feature, label, list, names) in lists)
             {
                 if (names is null) continue;
-                if (names.Any(string.IsNullOrWhiteSpace)) Error("boost-app-name", "CPU Boost app names cannot be empty. Remove the empty entry from the " + label + " list.");
+                if (names.Any(string.IsNullOrWhiteSpace)) Error("boost-app-name", $"{list} has an empty line. Remove it.");
                 foreach (var name in names.Where(n => !string.IsNullOrWhiteSpace(n)).Select(Normalize).Distinct(StringComparer.OrdinalIgnoreCase))
                 {
                     // A pattern of wildcards only ("*", "?*", "*.exe") would match every process.
                     if (name.All(c => c is '*' or '?'))
-                    { Error("boost-app-wildcard", $"CPU Boost cannot {label} '{name}': it would match every process. Enter an app name; * and ? are allowed only as part of a name."); continue; }
+                    { Error("boost-app-wildcard", $"{feature} cannot {label} '{name}': it would match every program. Enter a program name; * and ? work only as part of a name."); continue; }
                     // Wildcards are matched exactly as at run time, so "D*" or "s*" is refused like "DCS" or "steam".
                     var hit = BoostProtectedProcesses.FirstOrDefault(p => BoostPlanner.MatchesProcessName(name, p));
                     if (hit is not null)
                         Error("boost-launcher", (string.Equals(hit, name, StringComparison.OrdinalIgnoreCase)
-                            ? $"CPU Boost cannot {label} {name}: it "
-                            : $"CPU Boost cannot {label} '{name}': it matches {hit}, which ") + $"starts DCS, is DCS itself or is a protected Windows process. Remove it from the {label} list.");
+                            ? $"{feature} cannot {label} {name}: it "
+                            : $"{feature} cannot {label} '{name}': it matches {hit}, which ") + $"starts DCS, is DCS itself or is a protected Windows process. Remove it from {list}.");
                 }
             }
         }
@@ -113,9 +122,30 @@ public static class ProfileValidation
         if (profile.PupilShift && profile.PupilShiftEyeRadiusMm is < VrProfile.PupilShiftEyeRadiusMin or > VrProfile.PupilShiftEyeRadiusMax)
             Error("pupil-radius", $"Eye rotation radius must be {VrProfile.PupilShiftEyeRadiusMin}–{VrProfile.PupilShiftEyeRadiusMax} mm.");
         if (profile.PupilShift && profile.PupilShiftVirtualImageM is < VrProfile.PupilShiftVirtualImageMin or > VrProfile.PupilShiftVirtualImageMax)
-            Error("pupil-image", $"Virtual image distance must be {VrProfile.PupilShiftVirtualImageMin}–{VrProfile.PupilShiftVirtualImageMax} m.");
+            Error("pupil-image", $"Lens image distance must be {VrProfile.PupilShiftVirtualImageMin}–{VrProfile.PupilShiftVirtualImageMax} m.");
         if (profile.PupilShift && !profile.Desktop && !profile.UsesPupilShift)
-            issues.Add(new("pupil-gaze", IssueSeverity.Warning, "Pupil shift needs eye-tracked Quad Views: it reads the gaze from the focus views. With this profile it is not installed."));
+            issues.Add(new("pupil-gaze", IssueSeverity.Warning, "Pupil shift needs Quad Views with an eye-tracked focus area, because it reads your gaze from it. With these settings it does not run."));
+        if (profile.PeripheryStability && !profile.Desktop && !profile.UsesPeripheryStability)
+            issues.Add(new("periphery-stability-provider", IssueSeverity.Warning, "Periphery stability runs in the bundled Quad Views only. With Pimax native Quad Views or with Quad Views off, it does not run."));
+        if (profile.FarDepth && !profile.Desktop && !profile.UsesFarDepth)
+            issues.Add(new("far-depth-needs", IssueSeverity.Warning, "Far depth needs the bundled Quad Views and Engine Optimizations (they measure the depth). With these settings it does not run."));
+        if (profile.FarDepth && !Enum.IsDefined(profile.FarDepthPreset)) Error("far-depth-preset", "Select Subtle, Default or Strong for Far depth.");
+        if (profile.DepthBoost && !Enum.IsDefined(profile.DepthBoostMode)) Error("depth-mode", "Select Realistic or Enhanced for Depth boost.");
+        if (profile.DepthBoost && !Enum.IsDefined(profile.DepthBoostTransition)) Error("depth-transition", "Select Gradual or Predictive for Depth boost's transition.");
+        if (profile.UsesDepthBoost && profile.DepthBoostTransition == DepthBoostTransition.Predictive && !profile.EngineOptimizations)
+            issues.Add(new("depth-transition-grid", IssueSeverity.Warning, "Depth boost's Predictive transition needs Engine Optimizations, which measure the distance where your eyes will land. Without them it works as Gradual."));
+        if (profile.DepthBoost && profile.DepthBoostMode == DepthBoostMode.Enhanced && profile.DepthBoostMax is < VrProfile.DepthBoostMaxMin or > VrProfile.DepthBoostMaxMax)
+            Error("depth-max", $"Depth boost's Enhanced strength must be ×{VrProfile.DepthBoostMaxMin}–×{VrProfile.DepthBoostMaxMax}.");
+        if (profile.DepthBoost && profile.DepthBoostMode == DepthBoostMode.Realistic && profile.DepthBoostRealisticMax is < VrProfile.DepthBoostMaxMin or > VrProfile.DepthBoostRealisticMaxMax)
+            Error("depth-realistic-max", $"Depth boost's Realistic strength must be ×{VrProfile.DepthBoostMaxMin}–×{VrProfile.DepthBoostRealisticMaxMax}.");
+        if (profile.DepthBoost && profile.DepthBoostMode == DepthBoostMode.Realistic &&
+            (profile.DepthBoostFarStartM is < VrProfile.DepthBoostFarStartMin or > VrProfile.DepthBoostFarStartMax || !double.IsFinite(profile.DepthBoostFarFullM) ||
+             profile.DepthBoostFarFullM < profile.DepthBoostFarStartM * 1.2 || profile.DepthBoostFarFullM > VrProfile.DepthBoostFarFullMax))
+            Error("depth-far", $"Depth boost's Realistic distances: normal depth up to {VrProfile.DepthBoostFarStartMin}–{VrProfile.DepthBoostFarStartMax} m, the full strength from at least 1.2 times that and at most {VrProfile.DepthBoostFarFullMax} m.");
+        if (profile.DepthBoost && profile.DepthBoostNearM is < VrProfile.DepthBoostNearMin or > VrProfile.DepthBoostNearMax)
+            Error("depth-near", $"Depth boost's cockpit distance must be {VrProfile.DepthBoostNearMin}–{VrProfile.DepthBoostNearMax} m.");
+        if (profile.DepthBoost && !profile.Desktop && !profile.UsesDepthBoost)
+            issues.Add(new("depth-gaze", IssueSeverity.Warning, "Depth boost needs Quad Views with an eye-tracked focus area, because it reads where each eye looks from it. With these settings it does not run."));
         if (profile.EngineOptimizations && !Enum.IsDefined(profile.BoostPrefetch)) Error("engine-prefetch", "Select a recognized terrain prefetch fix mode.");
         if (profile.EngineOptimizations && profile.EngineTimerRefreshUs is < VrProfile.EngineTimerRefreshMin or > VrProfile.EngineTimerRefreshMax)
             Error("engine-timer", $"Streaming timer refresh must be {VrProfile.EngineTimerRefreshMin}–{VrProfile.EngineTimerRefreshMax} µs.");
@@ -135,9 +165,9 @@ public static class ProfileValidation
         if (profile.UsesLowerMonitor && (profile.FlightDisplayWidth is < 640 or > 15360 || profile.FlightDisplayHeight is < 480 or > 8640 || profile.FlightDisplayRefresh is < 24 or > 1000))
             Error("monitor-mode", "Select a monitor mode from the list for Lower the monitor while flying.");
         if (profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory) && (profile.FoveaWidth > .9 || profile.FoveaHeight > .9))
-            issues.Add(new("quad-coverage-cap", IssueSeverity.Warning, "Bundled Quad Views renders a focus of at most 90% of the view per axis, which is Horizontal and Vertical FOV 10% in Pimax Play's Quick units. Lower values are kept in the profile and rendered as 10%."));
+            issues.Add(new("quad-coverage-cap", IssueSeverity.Warning, "Bundled Quad Views renders a focus area of at most 90% of the view in each direction, which is Horizontal and Vertical FOV 10% in Pimax Play's Quick units. Lower values stay in the profile but are rendered as 10%."));
         if (profile.FrameGenFactor is not (VrProfile.FrameGenAuto or 2 or 3))
-            Error("framegen-factor", "Frame generation produces 2 or 3 frames per rendered frame, or picks between them automatically.");
+            Error("framegen-factor", "Select Auto, 2× or 3× for Generated frames.");
         // In-flight keys: any key with Ctrl/Alt/Shift (or an F-key, Pause, Scroll Lock … alone). A key DCS binds by
         // default still works, so it is a warning; the two keys must differ when both are in use.
         void Key(string? value, string fallback, bool used, string code, string what)
@@ -148,31 +178,78 @@ public static class ProfileValidation
                 issues.Add(new(code + "-dcs", IssueSeverity.Warning, $"{NeuralHotkeys.Label(key)} ({what}) is a DCS default key binding: DCS reacts to it too. Choose another combination unless you have unbound it in DCS."));
         }
         Key(profile.NeuralToggleKey, NeuralHotkeys.Default, profile.NeuralRendering, "neural-hotkey", "DLSS 5 toggle");
-        Key(profile.DiagnosticOverlayKey, NeuralHotkeys.DiagnosticDefault, profile.FrameGen != FrameGeneration.Off, "diagnostic-hotkey", "diagnostic panel");
-        if (profile.NeuralRendering && profile.FrameGen != FrameGeneration.Off && NeuralHotkeys.TryParse(profile.NeuralToggleKey ?? NeuralHotkeys.Default, out var nrKey) && !nrKey.IsOff
+        Key(profile.DiagnosticOverlayKey, NeuralHotkeys.DiagnosticDefault, profile.UsesHeadsetPanel, "diagnostic-hotkey", "in-headset panel");
+        if (profile.NeuralRendering && profile.UsesHeadsetPanel && NeuralHotkeys.TryParse(profile.NeuralToggleKey ?? NeuralHotkeys.Default, out var nrKey) && !nrKey.IsOff
             && NeuralHotkeys.Same(profile.NeuralToggleKey ?? NeuralHotkeys.Default, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
-            Error("hotkey-conflict", "The DLSS 5 toggle and the diagnostic panel need different keys.");
-        Key(profile.EngineToggleKey, NeuralHotkeys.EngineDefault, profile.EngineOptimizations, "engine-hotkey", "engine optimizations switch");
+            Error("hotkey-conflict", "The DLSS 5 toggle and the in-headset panel need different keys.");
+        // The module starts its 3-minute test suite on Ctrl+Alt+F11 with any other modifier too: no in-flight key may use
+        // its keys while it runs.
+        if (profile.EngineOptimizations && profile.NeuralRendering && NeuralHotkeys.TryParse(profile.NeuralToggleKey ?? NeuralHotkeys.Default, out var nrSuite) && !nrSuite.IsOff && NeuralHotkeys.EngineModuleKey(nrSuite))
+            Error("neural-hotkey", $"{NeuralHotkeys.Label(nrSuite)} is used by the Engine Optimizations test suite. Choose another key.");
+        if (profile.EngineOptimizations && profile.UsesHeadsetPanel && NeuralHotkeys.TryParse(profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault, out var panelSuite) && !panelSuite.IsOff && NeuralHotkeys.EngineModuleKey(panelSuite))
+            Error("diagnostic-hotkey", $"{NeuralHotkeys.Label(panelSuite)} is used by the Engine Optimizations test suite. Choose another key.");
+        Key(profile.EngineToggleKey, NeuralHotkeys.EngineDefault, profile.EngineOptimizations, "engine-hotkey", "Engine Optimizations switch");
         // The module's own keys (Ctrl+Alt+F8 to F12, Ctrl+Alt+Page Up/Down) stay reserved for it.
         if (profile.EngineOptimizations && NeuralHotkeys.TryParse(profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault, out var engineKey) && !engineKey.IsOff)
         {
-            if (engineKey.Modifiers == 3 && engineKey.VirtualKey is >= 0x77 and <= 0x7B or 0x21 or 0x22)
-                Error("engine-hotkey", $"{NeuralHotkeys.Label(engineKey)} is used by the engine optimizations' test suite. Choose another key.");
+            if (NeuralHotkeys.EngineModuleKey(engineKey))
+                Error("engine-hotkey", $"{NeuralHotkeys.Label(engineKey)} is used by the Engine Optimizations test suite. Choose another key.");
             if ((profile.NeuralRendering && NeuralHotkeys.Same(profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
-                || (profile.FrameGen != FrameGeneration.Off && NeuralHotkeys.Same(profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault)))
-                Error("hotkey-conflict", "The engine optimizations switch needs a key of its own (the DLSS 5 toggle or the diagnostic panel uses it).");
+                || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault)))
+                Error("hotkey-conflict", "The Engine Optimizations switch needs a key of its own: the DLSS 5 toggle or the in-headset panel uses it.");
         }
         // Pupil shift's switch must differ from every other in-flight key in use.
-        Key(profile.PupilShiftToggleKey, NeuralHotkeys.PupilDefault, profile.UsesPupilShift, "pupil-hotkey", "pupil shift switch");
+        Key(profile.PupilShiftToggleKey, NeuralHotkeys.PupilDefault, profile.UsesPupilShift, "pupil-hotkey", "Pupil shift switch");
         if (profile.UsesPupilShift && NeuralHotkeys.TryParse(profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault, out var pupilKey) && !pupilKey.IsOff)
         {
             var pupil = profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault;
-            if (profile.EngineOptimizations && pupilKey.Modifiers == 3 && pupilKey.VirtualKey is >= 0x77 and <= 0x7B or 0x21 or 0x22)
-                Error("pupil-hotkey", $"{NeuralHotkeys.Label(pupilKey)} is used by the engine optimizations' test suite. Choose another key.");
+            if (profile.EngineOptimizations && NeuralHotkeys.EngineModuleKey(pupilKey))
+                Error("pupil-hotkey", $"{NeuralHotkeys.Label(pupilKey)} is used by the Engine Optimizations test suite. Choose another key.");
             if ((profile.NeuralRendering && NeuralHotkeys.Same(pupil, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
-                || (profile.FrameGen != FrameGeneration.Off && NeuralHotkeys.Same(pupil, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
+                || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(pupil, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
                 || (profile.EngineOptimizations && NeuralHotkeys.Same(pupil, profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault)))
-                Error("hotkey-conflict", "The pupil shift switch needs a key of its own (DLSS 5, the diagnostic panel or the engine optimizations use it).");
+                Error("hotkey-conflict", "The Pupil shift switch needs a key of its own: DLSS 5, the in-headset panel or Engine Optimizations use it.");
+        }
+        // Depth boost's switch likewise, Pupil shift's included.
+        Key(profile.DepthBoostToggleKey, NeuralHotkeys.DepthBoostDefault, profile.UsesDepthBoost, "depth-hotkey", "Depth boost switch");
+        if (profile.UsesDepthBoost && NeuralHotkeys.TryParse(profile.DepthBoostToggleKey ?? NeuralHotkeys.DepthBoostDefault, out var depthKey) && !depthKey.IsOff)
+        {
+            var depth = profile.DepthBoostToggleKey ?? NeuralHotkeys.DepthBoostDefault;
+            if (profile.EngineOptimizations && NeuralHotkeys.EngineModuleKey(depthKey))
+                Error("depth-hotkey", $"{NeuralHotkeys.Label(depthKey)} is used by the Engine Optimizations test suite. Choose another key.");
+            if ((profile.NeuralRendering && NeuralHotkeys.Same(depth, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
+                || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(depth, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
+                || (profile.EngineOptimizations && NeuralHotkeys.Same(depth, profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault))
+                || (profile.UsesPupilShift && NeuralHotkeys.Same(depth, profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault)))
+                Error("hotkey-conflict", "The Depth boost switch needs a key of its own: DLSS 5, the in-headset panel, Engine Optimizations or Pupil shift use it.");
+        }
+        // Depth boost's transition switch (gradual / predictive): a key of its own too, Depth boost's switch included.
+        Key(profile.DepthBoostTransitionKey, NeuralHotkeys.DepthTransitionDefault, profile.UsesDepthBoost, "depth-transition-hotkey", "Depth boost transition switch");
+        if (profile.UsesDepthBoost && NeuralHotkeys.TryParse(profile.DepthBoostTransitionKey ?? NeuralHotkeys.DepthTransitionDefault, out var transitionKey) && !transitionKey.IsOff)
+        {
+            var transition = profile.DepthBoostTransitionKey ?? NeuralHotkeys.DepthTransitionDefault;
+            if (profile.EngineOptimizations && NeuralHotkeys.EngineModuleKey(transitionKey))
+                Error("depth-transition-hotkey", $"{NeuralHotkeys.Label(transitionKey)} is used by the Engine Optimizations test suite. Choose another key.");
+            if ((profile.NeuralRendering && NeuralHotkeys.Same(transition, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
+                || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(transition, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
+                || (profile.EngineOptimizations && NeuralHotkeys.Same(transition, profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault))
+                || (profile.UsesPupilShift && NeuralHotkeys.Same(transition, profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault))
+                || NeuralHotkeys.Same(transition, profile.DepthBoostToggleKey ?? NeuralHotkeys.DepthBoostDefault))
+                Error("hotkey-conflict", "The Depth boost transition switch needs a key of its own: DLSS 5, the in-headset panel, Engine Optimizations, Pupil shift or the Depth boost switch use it.");
+        }
+        // Far depth's switch, read by the bundled Quad Views: a key of its own as well.
+        Key(profile.FarDepthToggleKey, NeuralHotkeys.FarDepthDefault, profile.UsesFarDepth, "far-depth-hotkey", "Far depth switch");
+        if (profile.UsesFarDepth && NeuralHotkeys.TryParse(profile.FarDepthToggleKey ?? NeuralHotkeys.FarDepthDefault, out var farKey) && !farKey.IsOff)
+        {
+            var far = profile.FarDepthToggleKey ?? NeuralHotkeys.FarDepthDefault;
+            if (profile.EngineOptimizations && NeuralHotkeys.EngineModuleKey(farKey))
+                Error("far-depth-hotkey", $"{NeuralHotkeys.Label(farKey)} is used by the Engine Optimizations test suite. Choose another key.");
+            if ((profile.NeuralRendering && NeuralHotkeys.Same(far, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
+                || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(far, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
+                || (profile.EngineOptimizations && NeuralHotkeys.Same(far, profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault))
+                || (profile.UsesPupilShift && NeuralHotkeys.Same(far, profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault))
+                || (profile.UsesDepthBoost && (NeuralHotkeys.Same(far, profile.DepthBoostToggleKey ?? NeuralHotkeys.DepthBoostDefault) || NeuralHotkeys.Same(far, profile.DepthBoostTransitionKey ?? NeuralHotkeys.DepthTransitionDefault))))
+                Error("hotkey-conflict", "The Far depth switch needs a key of its own: another in-flight switch uses it.");
         }
         // NVIDIA-only processing on a PC without an NVIDIA RTX card would install files that cannot run.
         if (!profile.Desktop && !GpuInfo.Unknown && !GpuInfo.HasNvidiaRtx)
@@ -182,8 +259,19 @@ public static class ProfileValidation
             if (profile.FrameGen == FrameGeneration.Nvidia)
                 Error("framegen-gpu", $"NVIDIA optical-flow frame generation needs an NVIDIA RTX graphics card; this PC has {GpuInfo.Names}. Choose FidelityFX on the Framegen page: it runs on any graphics card.");
         }
+        // NVIDIA's Threaded optimization Off (a common DCS VR tweak) makes the driver report no D3D11 command lists to
+        // DCS, so the multi-threaded shadows and G-buffer cannot run. Said before the flight; the app never changes it.
+        if (profile.EngineOptimizations && (profile.EngineShadowRecorder || profile.EngineGBufferRecorder)
+            && NvidiaSettings.ThreadedOptimizationForDcs() is { Value: ThreadedOptimization.Off } threaded)
+            issues.Add(new("nvidia-threaded-optimization", IssueSeverity.Warning, $"NVIDIA's Threaded optimization is Off in {threaded.Where}. With it off the driver gives DCS no D3D11 command lists, so Multi-threaded shadows and G-buffer (the biggest engine gains) cannot run; everything else still does. {threaded.Fix}, then launch DCS again."));
+        // MFAA on has the same effect (found by a pilot, GitHub issue #1).
+        if (profile.EngineOptimizations && (profile.EngineShadowRecorder || profile.EngineGBufferRecorder)
+            && NvidiaSettings.MfaaForDcs() is { On: true } mfaa)
+            issues.Add(new("nvidia-mfaa", IssueSeverity.Warning, $"NVIDIA's Antialiasing - MFAA is On in {mfaa.Where}. With it on the driver gives DCS no D3D11 command lists, so Multi-threaded shadows and G-buffer (the biggest engine gains) cannot run; everything else still does. {mfaa.Fix}, then launch DCS again."));
+        if (!profile.Desktop && profile.EyeDistance == EyeDistanceSource.Manual && !(profile.EyeDistanceMm is >= VrProfile.EyeDistanceMin and <= VrProfile.EyeDistanceMax))
+            Error("eye-distance", $"Eye distance must be between {VrProfile.EyeDistanceMin:0} and {VrProfile.EyeDistanceMax:0} mm.");
         if (profile.NeuralRendering && string.IsNullOrWhiteSpace(profile.NeuralRuntimePath))
-            Error("neural-runtime", "Select a compatible NVIDIA nvngx_dlssnr.dll for DLSS 5. The app keeps a verified copy, so it is asked for once.");
+            Error("neural-runtime", "DLSS 5 needs NVIDIA's runtime file, nvngx_dlssnr.dll. Select it on the DLSS 5 page: DCS Control keeps a verified copy, so you select it only once.");
         if (inventory is not null)
         {
             if (inventory.DcsRunning) Error("dcs-running", "Close DCS before applying or restoring a profile.");
@@ -195,14 +283,18 @@ public static class ProfileValidation
                     : new("write-blocked", IssueSeverity.Error, $"DCS Control cannot write to {folder}. {LaunchSafety.BlockedAdvice}"));
             // Not blocking: without a bridge Quad Views reports no eye tracking and keeps a fixed focus region.
             if (GazeBridge.Required(profile) && GazeBridge.Find(inventory) is null && !GazeBridge.RuntimeProvidesGaze(inventory))
-                issues.Add(new("gaze-bridge-missing", IssueSeverity.Warning, "No enabled OpenXR gaze bridge was found. Eye-tracked focus on the Sboys route falls back to a fixed focus region until OpenXR-Eye-Trackers is installed."));
-            if (inventory.DcsExecutable is null) Error("dcs-not-found", "Select the DCS executable you use for rendering.");
+                issues.Add(new("gaze-bridge-missing", IssueSeverity.Warning, "No eye-tracking bridge for SteamVR was found, so on the Sboys route the focus area stays fixed in the center. Install OpenXR-Eye-Trackers for an eye-tracked focus area."));
+            if (inventory.DcsExecutable is null) Error("dcs-not-found", "DCS was not found. Select DCS.exe in the bin folder of your DCS installation.");
             else if (profile.SmoothCursor && profile.FrameGen != FrameGeneration.Off &&
                      !File.Exists(Path.Combine(Path.GetDirectoryName(inventory.DcsExecutable) ?? "", "Visualizer.dll")))
-                issues.Add(new("smooth-cursor-images", IssueSeverity.Info, "Smooth mouse cursor: DCS's cursor images (Visualizer.dll) are not next to DCS.exe. Frame generation reads them from the running game, or uses a plain arrow."));
+                issues.Add(new("smooth-cursor-images", IssueSeverity.Info, "Smooth mouse cursor: DCS's cursor images (Visualizer.dll) were not found next to DCS.exe. Frame generation then takes them from the running game, or draws a plain arrow."));
             if (inventory.OptionsPath is null) Error("options-not-found", @"DCS's settings file (Saved Games\DCS\Config\options.lua) was not found." + " If DCS was never started on this PC, start it once to the main menu and close it, then press Rescan this PC; otherwise select the options.lua DCS uses.");
+            // The Saved Games folder (Scripts, Logs, the engine optimizations) is found from options.lua's place: one
+            // picked elsewhere would put them in a folder DCS never reads.
+            else if (!IsSavedGamesOptions(inventory.OptionsPath))
+                issues.Add(new("options-location", IssueSeverity.Warning, @"The selected options.lua is not in a DCS Saved Games folder (Saved Games\DCS\Config\options.lua). DCS reads only that one, and the engine optimizations and logs are found next to it: select the options.lua DCS uses."));
             if (profile.Runtime == RuntimeKind.SboysSteamVr && !profile.Desktop && inventory.SteamVrRuntime is null && profile.RuntimeManifestPath is null)
-                Error("steamvr-not-found", "SteamVR OpenXR manifest not found.");
+                Error("steamvr-not-found", "SteamVR was not found on this PC, and the Sboys route needs it. Install SteamVR and start it once.");
         }
         return issues;
     }

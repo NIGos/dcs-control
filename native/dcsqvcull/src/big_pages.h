@@ -21,6 +21,14 @@
 //
 // Turning it off restores the constant and the retired pages' capacities;
 // big pages created meanwhile stay (DCS handles any page size).
+//
+// Payload hot reload (dev): the list of retired pages used to live in the
+// payload, so a reload lost it and those pages (about 63.5 KB of GPU buffer
+// each) stayed at capacity 0 for the rest of the session, never used again
+// once big pages were turned off. The list now lives in a named mapping of
+// this process (SharedList), which every payload generation opens: the new
+// payload's per-frame reset restores what an older one retired. A page is
+// retired only when the list has room for it (else it simply stays in use).
 // Included once from main.cpp inside its anonymous namespace, after
 // alloc_slab.h and pose_sweep.h.
 #pragma once
@@ -40,13 +48,82 @@ struct Retired {
   uint32_t idx;
   uint32_t capBytes;
 };
-std::vector<Retired> g_retired;  // reset thread only
-std::atomic<uint64_t> g_retiredCount{0};
-
 bool WriteConst(uint32_t bytes) {
   uint8_t insn[5] = {0xB8};
   memcpy(insn + 1, &bytes, 4);
   return posesweep::PatchAllSuspended(g_insn, insn, 5);
+}
+
+// The retired pages, shared by every payload generation of this process
+// (reset thread only: one reset hook runs at a time, whichever payload's).
+constexpr uint32_t kSharedMagic = 0x31504751;  // "QGP1"
+constexpr uint32_t kMaxRetired = 8192;
+struct SharedRetired {
+  uint32_t magic;
+  uint32_t count;
+  Retired r[kMaxRetired];
+};
+SharedRetired* g_shared = nullptr;  // this payload's view (never unmapped: the mapping lives with the process)
+std::atomic<uint64_t> g_retiredCount{0};
+std::atomic<uint64_t> g_notRetired{0};  // small pages left in use because the list was full
+
+// The process's list (created zeroed by the first payload that asks).
+SharedRetired* SharedList() {
+  if (g_shared) return g_shared;
+  wchar_t name[96];
+  swprintf_s(name, L"Local\\DcsQvCull.BigPages.v1.%lu", GetCurrentProcessId());
+  HANDLE m = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(SharedRetired), name);
+  if (!m) return nullptr;
+  auto* v = static_cast<SharedRetired*>(MapViewOfFile(m, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedRetired)));
+  if (!v) {
+    CloseHandle(m);
+    return nullptr;
+  }
+  // The handle stays open (the mapping must outlive this payload: old
+  // payloads are never unloaded, and the next one opens it by name).
+  if (v->magic != kSharedMagic) {
+    v->count = 0;
+    v->magic = kSharedMagic;
+  }
+  g_shared = v;
+  return v;
+}
+
+// The per-frame reset of the model data pages (allocslab::HookReset, reset thread).
+void OnReset(void* mgr) {
+  const bool want = g_wanted.load(std::memory_order_relaxed);
+  if (want != g_applied) {
+    if (!WriteConst(want ? g_bigBytes : kStockBytes)) return;  // try again at the next reset
+    g_applied = want;
+  }
+  SharedRetired* sh = SharedList();
+  auto* b = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(mgr) + 8);
+  auto* e = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(mgr) + 0x10);
+  if (g_applied) {
+    // Retire every small page that still has capacity (and fits the list).
+    for (uint8_t* p = b; p && p < e; p += allocslab::kPageStride) {
+      auto* pg = reinterpret_cast<allocslab::Page*>(p);
+      if (pg->capBytes && pg->capBytes < g_bigBytes / 2) {
+        if (!sh || sh->count >= kMaxRetired) {
+          g_notRetired.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+        sh->r[sh->count++] = {pg->idx, pg->capBytes};
+        pg->capBytes = 0;
+      }
+    }
+  } else if (sh && sh->count) {
+    for (uint32_t k = 0; k < sh->count; ++k) {
+      const Retired& r = sh->r[k];
+      for (uint8_t* p = b; p && p < e; p += allocslab::kPageStride) {
+        auto* pg = reinterpret_cast<allocslab::Page*>(p);
+        if (pg->idx == r.idx && pg->capBytes == 0) pg->capBytes = r.capBytes;
+      }
+    }
+    Log("big model pages: off; %u retired small pages given back their capacity", sh->count);
+    sh->count = 0;
+  }
+  g_retiredCount.store(sh ? sh->count : 0, std::memory_order_relaxed);
 }
 
 bool Install() {
@@ -68,38 +145,14 @@ bool Install() {
     Log("big model pages: NGModel.dll does not match this build; skipped");
     return false;
   }
-  allocslab::g_onReset = [](void* mgr) {
-    const bool want = g_wanted.load(std::memory_order_relaxed);
-    if (want != g_applied) {
-      if (!WriteConst(want ? g_bigBytes : kStockBytes)) return;  // try again at the next reset
-      g_applied = want;
-    }
-    auto* b = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(mgr) + 8);
-    auto* e = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(mgr) + 0x10);
-    if (g_applied) {
-      // Retire every small page that still has capacity.
-      for (uint8_t* p = b; p && p < e; p += allocslab::kPageStride) {
-        auto* pg = reinterpret_cast<allocslab::Page*>(p);
-        if (pg->capBytes && pg->capBytes < g_bigBytes / 2) {
-          g_retired.push_back({pg->idx, pg->capBytes});
-          pg->capBytes = 0;
-        }
-      }
-    } else if (!g_retired.empty()) {
-      for (const Retired& r : g_retired) {
-        for (uint8_t* p = b; p && p < e; p += allocslab::kPageStride) {
-          auto* pg = reinterpret_cast<allocslab::Page*>(p);
-          if (pg->idx == r.idx && pg->capBytes == 0) pg->capBytes = r.capBytes;
-        }
-      }
-      g_retired.clear();
-    }
-    g_retiredCount.store(g_retired.size(), std::memory_order_relaxed);
-  };
+  const SharedRetired* sh = SharedList();  // before the reset hook can run (it reads g_shared)
+  allocslab::g_onReset = &OnReset;
   g_applied = imm != kStockBytes;
   if (g_applied) g_bigBytes = imm;  // left patched by a previous payload
   g_state = 1;
-  Log("big model pages: ready (page size %u bytes when on)", g_bigBytes);
+  Log("big model pages: ready (page size %u bytes when on; %u small pages retired by an earlier payload of this "
+      "process%s)",
+      g_bigBytes, sh ? sh->count : 0, sh ? "" : "; no shared list (named mapping failed): small pages stay in use");
   return true;
 }
 

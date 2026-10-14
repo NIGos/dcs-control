@@ -24,6 +24,15 @@ result = {'version': version, 'passed': True, 'actualDcsLaunched': False}
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
+HOME = str(Path.home()).lower()
+HOME_FORMS = {HOME.encode(), HOME.replace('\\', '/').encode(), HOME.encode('utf-16-le'), HOME.replace('\\', '/').encode('utf-16-le')}
+def personal_data(name, data):
+    """The build machine's user profile path (a user name) in UTF-8 or UTF-16, and the release signing key, which never
+    leaves the release machine's %USERPROFILE%\\.dcs-control-signing."""
+    low = data.lower()
+    assert not any(form in low for form in HOME_FORMS), 'Build machine path in the package: ' + name
+    assert b'PRIVATE' + b' KEY' not in data, 'A private key in the package: ' + name  # split: this script is in the source ZIP
+
 for kind, archive in [('binary', Path(str(release)+'.zip')), ('source', root/f'artifacts/release/DcsControl-{version}-sources.zip')]:
     with zipfile.ZipFile(archive) as z:
         assert z.testzip() is None, 'Archive CRC failed'
@@ -38,6 +47,8 @@ for kind, archive in [('binary', Path(str(release)+'.zip')), ('source', root/f'a
                     with zipfile.ZipFile(io.BytesIO(z.read(n))) as nested:
                         assert nested.testzip() is None
                         assert not any(p.lower().endswith(('nvngx_dlssnr.dll','nvofapi64.dll','_nvngx.dll')) for p in nested.namelist()), 'Vendor runtime accidentally bundled'
+                        for inner in nested.namelist():
+                            personal_data(n + '/' + inner, nested.read(inner))
             manifest = json.loads(z.read(release.name+'/release-manifest.json'))
             for f in manifest['files']:
                 data = z.read(release.name+'/'+f['path'].replace('\\','/'))
@@ -45,13 +56,10 @@ for kind, archive in [('binary', Path(str(release)+'.zip')), ('source', root/f'a
             for asset in ['ui/index.html','ui/app.js','ui/setup.js','ui/app.css','ui/theme.css','ui/keyart.svg','WebView2Loader.dll','Microsoft.Web.WebView2.Core.dll','licenses/WebView2-SDK.txt','licenses/QuadViews-THIRD-PARTY.txt','licenses/WIL-MIT.txt','docs/SETUP.md','docs/FRAME_PACING.md']:
                 assert release.name+'/files/'+asset in z.namelist(), asset
             assert not any('interface-fixture/' in n for n in z.namelist()), 'Test fixture accidentally bundled'
-            # No text file in the package may carry the build machine's user profile path (a user name).
-            home = str(Path.home()).lower().encode()
+            # No file in the package, binaries included (compiled-in source paths), may carry the build machine's user
+            # profile path (a user name); the setup carries this same ZIP.
             for n in z.namelist():
-                if n.lower().endswith(('.json', '.txt', '.md', '.cmd', '.ps1', '.ini', '.cfg', '.lua', '.html', '.js', '.css')):
-                    assert home not in z.read(n).lower() and home.replace(b'\\', b'/') not in z.read(n).lower(), 'Build machine path in the package: ' + n
-                    # The release signing key never leaves the release machine's %USERPROFILE%\.dcs-control-signing.
-                    assert b'PRIVATE KEY' not in z.read(n), 'A private key in the package: ' + n
+                personal_data(n, z.read(n))
             result['manifestFiles'] = len(manifest['files'])
         else:
             assert not any(n.startswith('upstream/') and n.lower().endswith(('.exe','.dll','.lib','.pdb')) for n in z.namelist()), 'General-purpose vendor build binaries were bundled'
@@ -61,6 +69,9 @@ for kind, archive in [('binary', Path(str(release)+'.zip')), ('source', root/f'a
                 assert z.read('manager/'+p) == (root/p).read_bytes(), 'Source differs: '+p
             assert 'manager/src/DcsVr.App/MainWindow.xaml' not in z.namelist(), 'Old GUI still packaged'
             result['managerSourceFiles'] = len(own)
+            # The source ZIP carries every untracked file and the upstream snapshots: the same check.
+            for n in z.namelist():
+                personal_data(n, z.read(n))
         result[kind] = {'path':str(archive), 'bytes':archive.stat().st_size, 'sha256':digest(archive.read_bytes()), 'entries':len(z.namelist())}
         assert Path(str(archive)+'.sha256').read_text().strip() == result[kind]['sha256']
 
