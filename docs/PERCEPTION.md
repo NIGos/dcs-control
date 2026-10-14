@@ -300,14 +300,25 @@ So the eye distance now changes in steps hidden by saccades and blinks, and stay
 
 - while fixating at most `DriftMmPerS` (0.5) either way, about 3 arcmin/s at 0.5 m;
 - per saccade (and its landing window), or per blink, up to `SaccadeStepMm` (4) upwards and `StepDownMm` (8)
-  downwards. Back to the cockpit therefore takes two saccades from ×1.25, with nothing moving in between: no pop, no
-  flicker between near and far;
+  downwards towards a lower far scale;
+- back to the cockpit in one go (`FullNearReturn=1`, the default): x1 inside the saccade or landing window that brings
+  the eyes there, as soon as the scene depth at the landing says near, ahead of the confirmation that follows about
+  100 ms later. The 2026-10-13 flights showed why: with 8 mm steps the cockpit stayed small until the next saccade, and
+  that step was seen as a jump ("very tiny" for half a second). If the cockpit is only confirmed after the landing
+  window, the scale returns at `NearReturnMmPerS` (80) and the next saccade finishes it. `FullNearReturn=0` restores the
+  steps of at most `StepDownMm` (range 0-40);
 - upwards only towards the median of the last three fixations' targets (one far glance does not start it, two of three
   do), downwards towards the current fixation's.
 
 There is no published threshold for disparity steps hidden by saccades. The step sizes come from the
 displacement-suppression literature (Bridgeman 1975; Li & Matin 1990; Bolte & Lappe 2015; Sun et al. 2018) and must be
 confirmed in the headset. `Stepped=0` restores the ramps described next.
+
+A disparity change at the cockpit (0.6 m) cannot be made invisible by rate alone: 26 mm of eye distance is about 150
+arcmin there, some 8 s at the ~18 arcmin/s shift threshold. The one-go return hides it in saccadic suppression as far as
+possible. Two later designs avoid the change altogether: Far depth's `near` preset (the world as if seen with 1.4 times
+the eye distance, the cockpit pinned by its stencil, FAR_DEPTH.md) and the engine's dual camera (DcsQvCull renders the
+cockpit at the true eye distance from the layer's `Local\DcsVrDepthBoost_v1` record; opt-in, not in 0.5.8).
 
 `DepthBoostController` (pure, in `pupil_math.hpp`), once per display time:
 
