@@ -4028,6 +4028,7 @@ void FirstCaster(PassCtx& pc) {
       const int64_t e0 = defrec::Qpc();
       for (ID3D11CommandList* l : pc.cl)
         if (l) g_ctx->ExecuteCommandList(l, TRUE);
+      sfilt::NotifyEcl(g_ctx);  // d3d11 toggled the context table's draw / update entries (in-pass hooks repair)
       pc.executeNs = NsSince(e0);
       if (gs) {
         gsplit::Bracket(0, pc.slot, false);

@@ -1080,7 +1080,10 @@ Test("Depth boost deploys the pupil shift layer on its own, with its section, it
 {
     var exe = Make("depth/game/bin/DCS.exe", "fixture"); var runtime = Make("depth/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("depth/runtime.dll", "fixture");
     var dll = Make("depth/components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll", "layer");
-    var planner = new DeploymentPlanner(new(null, null, null, PupilShiftDll: dll));
+    // Depth boost's dual camera brings the engine module, in its Perception-only mode without Engine Optimizations.
+    var depthEngine = Path.GetDirectoryName(Make("depth/components/dcsqvcull/DcsQvCull.dll", "loader"))!;
+    Make("depth/components/dcsqvcull/DcsQvCullPayload.dll", "payload"); Make("depth/components/dcsqvcull/DcsQvCull.lua", "-- hook");
+    var planner = new DeploymentPlanner(new(null, null, null, PupilShiftDll: dll, EngineDirectory: depthEngine));
     var custom = Make("depth/sg/DCS/Config/options.lua", "options = {\n\t[\"VR\"] = {\n\t\t[\"custom_IPD\"] = \"64\",\n\t\t[\"custom_IPD_enable\"] = true,\n\t\t[\"enable\"] = true,\n\t},\n}\n");
     var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = custom, PimaxRuntime = runtime };
     string Ini(ApplyPlan plan) => Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("PupilShift.ini")).Content).ReplaceLineEndings("\n");
@@ -1095,6 +1098,16 @@ Test("Depth boost deploys the pupil shift layer on its own, with its section, it
         && ini.Contains("Mode=enhanced\n") && ini.Contains("FarStartM=3\n") && ini.Contains("FarFullM=50\n")
         && ini.Contains("Toggle=121:6\n") && ini.Contains("Toggle=121:5\n") && ini.Contains("UpMmPerS=5\n") && ini.Contains("DownMmPerS=40\n"), "both sections, each with its switch");
     Require(ini.Contains("Ipd=64\n") && Lua(plan).Any(c => c.Path == "VR.custom_IPD_enable" && c.InstalledRaw == "false"), "custom IPD taken over for Depth boost alone");
+    // The dual camera's engine module comes with Depth boost alone, in its Perception-only mode.
+    var moduleIni = plan.Files.SingleOrDefault(f => f.Path.EndsWith("DcsQvCull.ini"));
+    Require(moduleIni is not null && plan.Files.Any(f => f.Path.EndsWith(Path.Combine("Hooks", "DcsQvCull.lua"))), "the engine module and its hook for Depth boost alone");
+    var moduleText = Encoding.Unicode.GetString(moduleIni!.Content.AsSpan(2)).ReplaceLineEndings("\n"); // UTF-16 with its BOM
+    Require(moduleText.Contains("PerceptionOnly=1\n") && moduleText.Contains("CockpitTrueIpd=1\n"), "Perception-only, dual camera on");
+    // Developer mode belongs to Engine Optimizations: its paths are not written for Depth boost alone.
+    var dev = on with { EngineDevMode = true, EngineDevPayloadPath = @"D:\dev\payload.dll", EngineDevIniPath = @"D:\dev\dev.ini" };
+    var devText = ConfigurationWriters.DcsQvCull(dev).ReplaceLineEndings("\n");
+    Require(devText.Contains("PayloadPath=\n") && devText.Contains("IniPath=\n"), "no developer paths without Engine Optimizations");
+    Require(ConfigurationWriters.DcsQvCull(dev with { EngineOptimizations = true }).Contains(@"PayloadPath=D:\dev\payload.dll"), "developer paths with them");
     Require(plan.LaunchEnvironment["DCSVR_DEPTH_HOTKEY"] == "0:0" && plan.LaunchEnvironment["DCSVR_PUPIL_HOTKEY"] == "0:0", "no panel without frame generation");
     // Both on: one layer, both enabled. Pupil shift alone keeps its old ini (Depth boost off).
     var both = Ini(planner.Build(on with { PupilShift = true }, inventory, Path.Combine(root, "depth/managed-both")));
@@ -1106,6 +1119,7 @@ Test("Depth boost deploys the pupil shift layer on its own, with its section, it
     {
         var offPlan = planner.Build(off, inventory, Path.Combine(root, "depth/managed-off"));
         Require(!offPlan.Files.Any(f => f.Path.Contains("pupilshift")) && !Lua(offPlan).Any(c => c.Path.StartsWith("VR.custom_IPD")), "not deployed");
+        Require(!offPlan.Files.Any(f => f.Path.EndsWith("DcsQvCull.ini")), "no engine module without Depth boost (or Engine Optimizations)");
     }
     Require(ProfileValidation.Validate(on with { Gaze = GazeMode.Fixed }).Any(i => i.Code == "depth-gaze" && i.Severity == IssueSeverity.Warning));
     Require(ProfileValidation.Validate(on with { DepthBoostMax = 2.5 }).Any(i => i.Code == "depth-max" && i.Severity == IssueSeverity.Error));
@@ -1151,35 +1165,30 @@ Test("Depth boost modes: Realistic by default (x1 to 150 m, x1.25 from 400 m), E
         ConfigurationWriters.DcsQvCull(realistic with { EngineOptimizations = true }).ReplaceLineEndings("\n").Contains("FixationDepth=1\n"), "FixationDepth=1 with Depth boost");
     Require(ConfigurationWriters.DcsQvCull(realistic with { EngineOptimizations = true, DepthBoost = false }).ReplaceLineEndings("\n").Contains("FixationDepth=0\n"), "off without Depth boost");
     Require(ConfigurationWriters.DcsQvCull(realistic with { EngineOptimizations = true, Gaze = GazeMode.Fixed }).ReplaceLineEndings("\n").Contains("FixationDepth=0\n"), "off when Depth boost cannot run");
-    Require(realistic.UsesDepthBoost && !realistic.UsesFixationDepth && (realistic with { EngineOptimizations = true }).UsesFixationDepth, "vergence only without Engine Optimizations");
+    // The dual camera: Depth boost always has the engine module, with Engine Optimizations or in its Perception-only mode.
+    Require(realistic.UsesDepthBoost && realistic.UsesFixationDepth && realistic.UsesEngineModule && !(realistic with { DepthBoost = false }).UsesEngineModule, "Depth boost installs the module");
+    var perceptionOnly = ConfigurationWriters.DcsQvCull(realistic with { EngineOptimizations = false }).ReplaceLineEndings("\n");
+    Require(perceptionOnly.Contains("PerceptionOnly=1\n") && perceptionOnly.Contains("FixationDepth=1\n") && perceptionOnly.Contains("CockpitTrueIpd=1\n")
+        && perceptionOnly.Contains("CockpitTrueIpdOverlayPath=cpu\n") && perceptionOnly.Contains("CockpitTrueIpdOwnship=2\n") && perceptionOnly.Contains("CockpitTrueIpdToggle=0:0\n"), "Perception-only with the dual camera");
+    var withEngine = ConfigurationWriters.DcsQvCull(realistic with { EngineOptimizations = true, OwnAircraftTrueDepth = false }).ReplaceLineEndings("\n");
+    Require(withEngine.Contains("PerceptionOnly=0\n") && withEngine.Contains("CockpitTrueIpd=1\n") && withEngine.Contains("CockpitTrueIpdOwnship=0\n"), "with the engine; own aircraft off");
+    Require(ConfigurationWriters.DcsQvCull(realistic with { EngineOptimizations = true, DepthBoost = false }).ReplaceLineEndings("\n").Contains("CockpitTrueIpd=0\n"), "no dual camera without Depth boost");
 });
-Test("Depth boost transition: Gradual by default, Predictive on request with its own switch (Alt+Shift+F9) and the engine's depth grid", () =>
+Test("Depth boost with the dual camera: always gradual, no transition switch; the engine's depth grid stays", () =>
 {
     var on = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, DepthBoost = true, EngineOptimizations = true };
-    Require(on is { DepthBoostTransition: DepthBoostTransition.Gradual, DepthBoostTransitionKey: NeuralHotkeys.DepthTransitionDefault } && on.UsesDepthGrid, "Gradual by default, the grid for the in-flight switch");
-    var ini = ConfigurationWriters.PupilShift(on).ReplaceLineEndings("\n");
-    Require(ini.Contains("Transition=gradual\n") && ini.Contains("TransitionToggle=120:6\n") && ini.Contains("PredictLeadFrames=0.5\n") && ini.Contains("PredictMaxStepMm=12\n"), "the layer's ini: gradual, its switch");
-    var predictive = on with { DepthBoostTransition = DepthBoostTransition.Predictive };
-    Require(ConfigurationWriters.PupilShift(predictive).ReplaceLineEndings("\n").Contains("Transition=predictive\n"), "predictive in the layer's ini");
-    // The engine's grid with the scene depth (Depth boost + Engine Optimizations), whatever the starting transition: the
-    // in-flight key can select Predictive.
-    Require(ConfigurationWriters.DcsQvCull(on).ReplaceLineEndings("\n").Contains("DepthGrid=1\n"), "gradual: the grid too");
-    Require(ConfigurationWriters.DcsQvCull(predictive).ReplaceLineEndings("\n").Contains("DepthGrid=1\n") && predictive.UsesDepthGrid, "predictive: the grid");
-    Require(ConfigurationWriters.DcsQvCull(predictive with { DepthBoost = false }).ReplaceLineEndings("\n").Contains("DepthGrid=0\n"), "no Depth boost: no grid");
-    Require(ConfigurationWriters.DcsQvCull(predictive with { Gaze = GazeMode.Fixed }).ReplaceLineEndings("\n").Contains("DepthGrid=0\n"), "Depth boost cannot run: no grid");
-    // Without Engine Optimizations Predictive works as Gradual: a warning, not an error.
-    Require(ProfileValidation.Validate(predictive with { EngineOptimizations = false }).Any(i => i.Code == "depth-transition-grid" && i.Severity == IssueSeverity.Warning), "warning without the engine");
-    Require(!ProfileValidation.Validate(predictive).Any(i => i.Code.StartsWith("depth-transition") || i.Code == "hotkey-conflict"), "the defaults are valid, Alt+Shift+F9 is free");
-    Require(!NeuralHotkeys.IsDcsDefault(new Hotkey(0x78, 6), NeuralHotkeys.DcsDefaults), "Alt+Shift+F9 is not a DCS default");
-    // The switch needs a key of its own.
-    Require(ProfileValidation.Validate(on with { DepthBoostTransitionKey = NeuralHotkeys.DepthBoostDefault }).Any(i => i.Code == "hotkey-conflict"), "not Depth boost's switch");
-    Require(ProfileValidation.Validate(on with { DepthBoostTransitionKey = NeuralHotkeys.EngineDefault }).Any(i => i.Code == "hotkey-conflict"), "not the engine's");
-    Require(ProfileValidation.Validate(on with { PupilShift = true, DepthBoostTransitionKey = NeuralHotkeys.PupilDefault }).Any(i => i.Code == "hotkey-conflict"), "not Pupil shift's");
-    Require(ProfileValidation.Validate(on with { DepthBoostTransitionKey = "120:3" }).Any(i => i.Code == "depth-transition-hotkey"), "not the engine test suite's");
-    Require(ProfileValidation.Validate(on with { DepthBoostTransitionKey = "65:0" }).Any(i => i.Code == "depth-transition-hotkey"), "a letter needs a modifier");
-    Require(ConfigurationWriters.PupilShift(on with { DepthBoostTransitionKey = "Off" }).ReplaceLineEndings("\n").Contains("TransitionToggle=0:0\n"), "switch off");
-    Require(ProfileValidation.Validate(on with { DepthBoostTransition = (DepthBoostTransition)5 }).Any(i => i.Code == "depth-transition"), "an unknown transition");
-    // Profiles: an older profile reads as Gradual; the transition round-trips as text.
+    var predictive = on with { DepthBoostTransition = DepthBoostTransition.Predictive, DepthBoostTransitionKey = NeuralHotkeys.DepthBoostDefault };
+    // The dual camera only moves the scale smoothly: a profile saved with Predictive and its key writes neither.
+    foreach (var profile in new[] { on, predictive })
+    {
+        var ini = ConfigurationWriters.PupilShift(profile).ReplaceLineEndings("\n");
+        Require(ini.Contains("Transition=gradual\n") && ini.Contains("TransitionToggle=0:0\n"), "gradual, no switch");
+    }
+    Require(!ProfileValidation.Validate(predictive).Any(i => i.Code.StartsWith("depth-transition") || i.Code == "hotkey-conflict"), "the old key is not checked");
+    // The grid served only the predictive transition: not captured any more; the scene depth at the gaze stays.
+    var engineIni = ConfigurationWriters.DcsQvCull(on with { EngineOptimizations = false }).ReplaceLineEndings("\n");
+    Require(engineIni.Contains("DepthGrid=0\n") && engineIni.Contains("FixationDepth=1\n"), "no grid, the fixation depth");
+    // Profiles: an older profile still loads; the transition round-trips as text.
     Require(System.Text.Json.JsonSerializer.Deserialize<VrProfile>("{\"DepthBoost\":true}") is { DepthBoostTransition: DepthBoostTransition.Gradual, DepthBoostTransitionKey: "120:6" }, "old profile");
     var options = new System.Text.Json.JsonSerializerOptions { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(allowIntegerValues: false) } };
     var json = System.Text.Json.JsonSerializer.Serialize(predictive, options);
@@ -1308,7 +1317,7 @@ Test("DCS engine optimizations install in Saved Games Scripts with every ini key
     Require(engineFiles.SequenceEqual([@"DcsQvCull\DcsQvCull.dll", @"DcsQvCull\payload\DcsQvCullPayload.dll", @"DcsQvCull\DcsQvCull.ini", @"Hooks\DcsQvCull.lua"]));
     Require(plan.Files.All(f => !f.Path.StartsWith(Path.GetDirectoryName(exe)!, StringComparison.OrdinalIgnoreCase)));
     var ini = new StreamReader(new MemoryStream(plan.Files.Single(f => f.Path.EndsWith("DcsQvCull.ini")).Content), Encoding.UTF8, true).ReadToEnd();
-    foreach (var line in new[] { "[General]\nDiagnostics=0", "[Timing]\nShaderTimeCache=1\nTaskQueueClock=1\nCacheUs=1000", "[Scene]\nPartitionBoost=1\nCostWeights=1\nCostWeightsSanity=0\nCollectThreadsMax=0\nFineTimerResolution=0", "[Cull]\nEnabled=0\nDebugHole=0", "[D3D]\nMeter=0\nFilter=0", "BenchTimer=0\nBenchPartition=0\nBenchIsolation=0\nBenchThreads=0\nBenchTimerRes=0\nBenchFilter=0", "SelfTest=0\nProfile=0\nBenchCull=0" })
+    foreach (var line in new[] { "[General]\n", "PerceptionOnly=0\nDiagnostics=0", "[Timing]\nShaderTimeCache=1\nTaskQueueClock=1\nCacheUs=1000", "[Scene]\nPartitionBoost=1\nCostWeights=1\nCostWeightsSanity=0\nCollectThreadsMax=0\nFineTimerResolution=0", "[Cull]\nEnabled=0\nDebugHole=0", "[D3D]\nMeter=0\nFilter=0", "BenchTimer=0\nBenchPartition=0\nBenchIsolation=0\nBenchThreads=0\nBenchTimerRes=0\nBenchFilter=0", "SelfTest=0\nProfile=0\nBenchCull=0" })
         Require(ini.ReplaceLineEndings("\n").Contains(line), "DcsQvCull.ini lacks " + line);
     var tuned = ConfigurationWriters.DcsQvCull(on with { EngineShaderTimeCache = false, EnginePartitionBoost = false, EngineTimerRefreshUs = 500, EngineDiagnosticHooks = true });
     Require(tuned.Contains("ShaderTimeCache=0") && tuned.Contains("PartitionBoost=0") && tuned.Contains("CacheUs=500") && tuned.Contains("Diagnostics=1"));
@@ -3022,7 +3031,7 @@ Test("Far depth is off by default and switches the engine's depth export and Qua
     // The module's test suite starts on Ctrl+Alt+F11 with Shift held too, and from any in-flight key.
     Require(ProfileValidation.Validate(on with { FarDepthToggleKey = "122:7" }).Any(i => i.Code == "far-depth-hotkey" && i.Severity == IssueSeverity.Error), "Ctrl+Alt+Shift+F11 is the suite's");
     Require(ProfileValidation.Validate(on with { NeuralRendering = true, NeuralToggleKey = "122:3" }).Any(i => i.Code == "neural-hotkey" && i.Severity == IssueSeverity.Error), "the DLSS 5 key too");
-    Require(!ProfileValidation.Validate(on with { NeuralRendering = true, NeuralToggleKey = "122:3", EngineOptimizations = false }).Any(i => i.Code == "neural-hotkey" && i.Message.Contains("test suite")), "only while the module runs");
+    Require(!ProfileValidation.Validate(on with { NeuralRendering = true, NeuralToggleKey = "122:3", EngineOptimizations = false }).Any(i => i.Code == "neural-hotkey" && i.Message.Contains("reserved by Engine Optimizations")), "only while the module runs");
     // options.lua outside Saved Games\DCS*\Config: a warning, since DCS never reads it there.
     Require(ProfileValidation.IsSavedGamesOptions(@"C:\Games\Saved Games\DCS.openbeta\Config\options.lua") && !ProfileValidation.IsSavedGamesOptions(@"D:\options.lua") && !ProfileValidation.IsSavedGamesOptions(@"D:\backup\options.lua"), "Saved Games location");
     Require(ProfileValidation.Validate(new VrProfile(), new InventorySnapshot { OptionsPath = @"D:\backup\options.lua" }).Any(i => i.Code == "options-location" && i.Severity == IssueSeverity.Warning), "warned");

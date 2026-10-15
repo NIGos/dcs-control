@@ -179,7 +179,7 @@ Two modes set how much, from the distance looked at (FIXATION_DEPTH.md, "Modes")
 150 m, where a headset's stereo is already about as good as real stereo (one pixel of disparity at ~46 px/deg falls
 near 170–190 m), then a log ramp to ×1.25 at 400 m and beyond, the band where real stereo still works (stereoacuity of
 20–30 arcsec reaches 450–650 m) and the headset's pixels no longer resolve it. A wingman or a rejoin keeps its true
-distance. It needs the scene depth (Engine Optimizations); on the eyes' vergence alone it stays at ×1. **Enhanced**: the
+distance. It needs the scene depth (the engine module, installed with Depth boost); on the eyes' vergence alone it stays at ×1. **Enhanced**: the
 v1 behaviour, more depth from 3 m and ×1.4 from 50 m. More depth, not realistic: distant objects look nearer and the
 world smaller. For realism the base IPD should be the headset's measured one (65.5 mm on the development PC); today the
 app hands the layer DCS's custom IPD when one is set.
@@ -208,10 +208,14 @@ disparity at any scale, so the horizon and sky do not move in depth; only finite
 - Pupil shift and Depth boost are independent: `[PupilShift] Enabled` and `[DepthBoost] Enabled` in `PupilShift.ini`.
   The layer is deployed, and DCS's custom IPD is taken over, when either is on (`VrProfile.UsesPerceptionLayer`).
 
-### Transition: gradual or predictive
+### Transition: gradual or predictive (Legacy=1 only)
 
-`[DepthBoost] Transition` (profile: Depth boost card, Transition; in flight: Alt+Shift+F9, one beep gradual, two
-beeps predictive). Gradual (default) changes the scale at the rates below, confirmed after the eyes land. Predictive
+Only the legacy path (`[DepthBoost] Legacy=1`, diagnostics) uses this: with the engine's dual camera the scale changes
+only smoothly, so there is nothing to predict. The app writes `Transition=gradual` and `TransitionToggle=0:0` and no
+longer offers the choice, and the engine's depth grid (`DepthGrid`) is read only by the predictive transition.
+
+`[DepthBoost] Transition` (in flight: `TransitionToggle`, e.g. Alt+Shift+F9, one beep gradual, two beeps
+predictive). Gradual (default) changes the scale at the rates below, confirmed after the eyes land. Predictive
 samples Pimax PVR's gaze at about 500 Hz, predicts a long saccade's landing at its velocity peak from the main sequence,
 looks the landing up in the engine module's coarse depth grid, and makes one capped step (12 mm of IPD, 0.4° of
 disparity at the landing) while the eyes are still in flight; the rest follows the gradual rates, and the landing's
@@ -221,7 +225,7 @@ Details, numbers and risks: FIXATION_DEPTH.md, "Predictive transition".
 ### Fixation depth
 
 The primary source is the scene depth at the gaze, measured by the engine module and published in shared memory; the
-binocular vergence below is the secondary one (vetoes, and the only source without Engine Optimizations). How the two
+binocular vergence below is the secondary one (vetoes, and the only source when no scene depth arrives). How the two
 are combined, and the rules for overlapping geometry, are in [FIXATION_DEPTH.md](FIXATION_DEPTH.md).
 
 ### The vergence source
@@ -320,6 +324,27 @@ possible. Two later designs avoid the change altogether: Far depth's `near` pres
 the eye distance, the cockpit pinned by its stencil, FAR_DEPTH.md) and the engine's dual camera (DcsQvCull renders the
 cockpit at the true eye distance from the layer's `Local\DcsVrDepthBoost_v1` record; opt-in, not in 0.5.8).
 
+**Depth boost with the engine's dual camera (the shipped design after 0.5.8).** The user's in-headset A/B (2026-10-14)
+preferred it, with no flicker: Depth boost now runs only with DcsQvCull's dual camera (`CockpitTrueIpd=1`), which renders
+the cockpit at the true eye distance while the world gets the boosted one. The layer writes `Local\DcsVrDepthBoost_v1`
+(BoostOut) for every display time once the block exists (flags 0 and scale 1 while Depth boost is off, and a final
+record when the session ends), and reads the engine's acknowledgement `Local\DcsVrCockpitStereo_v1` (CockpitStereo;
+perception_shm.h). While it is fresh and active:
+
+- the world's scale follows the usual far target and curve (Enhanced or Realistic), but a cockpit fixation keeps the last
+  far target, so glances at the instruments do not move the world;
+- the scale changes only smoothly, at `DualCameraMmPerS` (20, range 2-60) both ways, in equal steps per frame (the mean
+  frame period, not each display time's delta): no saccade or landing steps, no predictive jumps. A one-frame
+  mis-pairing in the engine then moves the cockpit by a fraction of a millimetre;
+- the cap is `MaxScale` itself (no fast return is needed, so `DownMmPerS x RecoverMs` no longer limits it);
+- it is left only after 300 ms without an active record, or at once on an explicit stop (the engine's key pause).
+
+Without a fresh acknowledgement Depth boost holds or slides back to x1 at the same rate. `[DepthBoost] Legacy=1`
+(diagnostics only, default 0) restores the gaze-driven path above, with the cockpit returning to x1 in saccades. The log
+names the path (`depth: path ...`) and, once a second in the dual-camera path, the target and the scale. Harness
+scenarios: `flight_dual_camera` (the acknowledgement every frame, with a 170 ms gap every 300 frames) and
+`flight_no_dual_camera` (Legacy=0 without it: x1 throughout).
+
 `DepthBoostController` (pure, in `pupil_math.hpp`), once per display time:
 
 - **Target**: from `FixationDecider` (FIXATION_DEPTH.md): in the far state the mode's curve of the far distance, on
@@ -367,9 +392,9 @@ altitude source yet).
 The app writes `Enabled`, `Toggle`, `Mode`, `MaxScale`, `FarStartM`, `FarFullM` and `NearM` from the profile
 (`DepthBoost`, `DepthBoostToggleKey`, `DepthBoostMode`, `DepthBoostRealisticMax` or `DepthBoostMax`,
 `DepthBoostFarStartM`/`DepthBoostFarFullM` for Realistic, 3/50 for Enhanced, `DepthBoostNearM`) and the rates at their
-defaults; the rates can be tuned in the deployed ini while DCS runs (re-read about once a second). With Engine
-Optimizations it also writes `[Perception] FixationDepth=1` in `DcsQvCull.ini` (`VrProfile.UsesFixationDepth`), which
-turns on the engine module's depth sampling.
+defaults; the rates can be tuned in the deployed ini while DCS runs (re-read about once a second). It also writes
+`[Perception] FixationDepth=1` in `DcsQvCull.ini` (`VrProfile.UsesFixationDepth`), which turns on the engine module's
+depth sampling; without Engine Optimizations the module runs in its Perception-only mode.
 
 ### Status and log
 
@@ -484,10 +509,10 @@ saccade step is taken then, and the return from ×1.4 takes 0.54 s more. A short
 ### In-headset test, in order
 
 1. Sources, in the first minute (Pupil shift page, or the `depth:` line): `source=depth` means the engine module's
-   scene depth arrives (Engine Optimizations on); `vergence=vergence` means per-eye vergence arrives (on Pimax, through
+   scene depth arrives (the engine module is loaded); `vergence=vergence` means per-eye vergence arrives (on Pimax, through
    PVR: `pvr: the runtime's PVR session found`, `pvr valid=`). Compare the `pvr ... convergence` column with the
-   estimated distance on a cockpit fixation. Realistic with neither scene depth nor a boost: the page says it needs
-   Engine Optimizations.
+   estimated distance on a cockpit fixation. Realistic with neither scene depth nor a boost: the page says none arrived
+   and points to the Engine Optimizations page.
 2. Phase 0 of the study, a fixed scale: with Depth boost off and Pupil shift on, set `Ipd=80`, then `Ipd=90` in the
    deployed `PupilShift.ini` while DCS runs (the app writes it again at the next launch) and compare a wingman at 50–150 m, a tanker at 50 m, terrain at 300 m. No benefit at 90 mm: stop.
 3. Depth boost on (Alt+Shift+F10 to compare): formation, rejoin, tanker; look in and out; watch the panel's scale.

@@ -36,10 +36,10 @@ public static partial class Diagnostics
     {
         var log = dcsBin is null ? null : Path.Combine(dcsBin, "CheekyFoveatedDLSS", "CheekyFoveatedDLSS-Standalone.log");
         if (log is null || !File.Exists(log))
-            return new("no-session", "No DLSS 5 session found: Cheeky's log is written when DCS starts with DLSS 5 on.", null, null, 0, 0, null, null, null, []);
+            return new("no-session", "No DLSS 5 session found yet. It appears after DCS starts with DLSS 5 on.", null, null, 0, 0, null, null, null, []);
         List<string> lines;
         try { lines = Tail(log, 16L * 1024 * 1024).Split('\n').Select(l => l.TrimEnd('\r')).ToList(); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return new("no-session", "Cheeky's log could not be read: " + e.Message, null, null, 0, 0, null, null, null, []); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return new("no-session", "DLSS 5's log could not be read: " + e.Message, null, null, 0, 0, null, null, null, []); }
         return DiagnoseDlssFocus(lines);
     }
 
@@ -70,7 +70,7 @@ public static partial class Diagnostics
         var dlssSize = dlssSizes.OrderByDescending(p => p.Value).Select(p => p.Key).FirstOrDefault();
         if (accepted > 0)
             // Rejections of the peripheral views are normal: DLSS 5 works on the focus views only.
-            return new("applied", $"Applied: DCS's DLSS on the focus views was identified{(version is null ? "" : $" (DLSS-NR {version})")}.", rejected > 0 ? "The rejections in the log are DCS's DLSS on the peripheral views, which DLSS 5 leaves alone. That is expected." : null,
+            return new("applied", $"Applied: DCS's DLSS on the focus views was identified{(version is null ? "" : $" (DLSS 5 runtime {version})")}.", rejected > 0 ? "The rejections in the log are DCS's DLSS on the peripheral views, which DLSS 5 leaves alone. That is expected." : null,
                 null, accepted, rejected, dlssSize, focusSize, version, evidence);
         if (rejected == 0)
             return new("no-dlss", "Not applied: DCS sent no DLSS frame in the last session.", "DLSS 5 works on DCS's own DLSS. In DCS, set Upscaling (or DLSS) to DLSS in the graphics or VR settings, and make sure the mission was loaded in VR (the main menu has no DLSS frames).",
@@ -87,7 +87,7 @@ public static partial class Diagnostics
         "ambiguous-match" => "More than one image matched the focus views, so neither was used. Send the diagnostic package.",
         "no-proof/output-not-focus-size" => $"DCS ran its DLSS only on images that are not the size of the focus views{(dlssSize is null ? "" : $" (DLSS on {dlssSize.Replace('x', '×')}")}{(focusSize is null ? (dlssSize is null ? "" : ")") : $", focus views {focusSize.Replace('x', '×')})")}. DLSS 5 needs DCS's DLSS on the focus views themselves. This happens when DCS renders without Quad Views (only two views), or when another Quad Views layer or the headset's own Quad Views shapes the views instead of the bundled one. Check that Quad Views is on in the profile and that no other Quad Views layer is installed.",
         "no-proof/handle-census" => "DCS used DLSS on more images than the four Quad Views views (for example also on a mirror or a second view), so the focus views could not be told apart. Turn off DLSS anywhere else DCS uses it, or send the diagnostic package.",
-        "no-proof/layout-unavailable" or "no-proof/layout-stale" or "no-proof/layout-session-mismatch" => "The bundled Quad Views did not publish its view layout to Cheeky. Check that the profile uses the bundled Quad Views with the focus adapter and that no other Quad Views layer is enabled.",
+        "no-proof/layout-unavailable" or "no-proof/layout-stale" or "no-proof/layout-session-mismatch" => "The bundled Quad Views did not share its view layout with DLSS 5. Check that the profile uses the bundled Quad Views with the focus adapter and that no other Quad Views layer is enabled.",
         "no-proof/eye-identity-required" => "Foveated processing needs to know which eye each image is for, and DCS's images could not be matched to an eye. Send the diagnostic package.",
         "no-proof/focus-pair-size-mismatch" or "no-proof/peripheral-pair-size-mismatch" or "no-proof/peripheral-equals-focus-size" => "The Quad Views layout is unusual: the two eyes' views differ in size, or the focus and peripheral views have the same size, so they cannot be told apart. Lower the peripheral resolution or raise the focus resolution.",
         "no-proof/snapshot-layout-mismatch" => "The gaze snapshot and the Quad Views layout disagree. Send the diagnostic package.",

@@ -1470,10 +1470,26 @@ using Us1Fn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext1*, ID3D11Resource*, U
                                        UINT, UINT, UINT);
 UsFn g_usOrig = nullptr;
 Us1Fn g_us1Orig = nullptr;
+bool g_ckRawUpload = false;  // cockpit ipd's helmet switch uploads (render thread): forwarded past every hook
 int g_usSlot = -1, g_us1Slot = -1;
 bool g_usArmed = false;    // the upload entries are ours in this arm
 bool g_lastUsOk = false;   // ... and were still ours at the pass end (diagnostic)
 void** g_armTable = nullptr;
+// Cockpit ipd's forward-pass arm (ArmUsOnly, below): g_usOnlyArm when it owns
+// the arm (upload entries, OM / viewport for the re-arm only); g_fwdNested
+// when it runs inside another feature's in-pass arm (far depth HDR / overlay /
+// trace, the verify trace) and shares its upload entries (g_fwdAddedUs: it
+// added them to an arm that had none; they go again at the forward pass end).
+bool g_usOnlyArm = false;
+bool g_usOnlyOm = false;  // the forward-pass arm also holds the OM / viewport entries
+bool g_fwdNested = false, g_fwdAddedUs = false;
+bool g_ovlAddedDraws = false;  // the draw entries were added to another feature's arm for a nested overlay pass
+// R32 r3: the arm held is cockpit ipd's (its own forward / overlay arm, its share of another feature's arm, its
+// lighting arm). Only such an arm takes R32's Unmap toggle point and the "normal, not ours" repair: with
+// CockpitTrueIpd=0 far depth's arms behave exactly as before R32 (Flush / Map / GetData, toggles repaired only
+// when the table shows them).
+bool g_ckLightArm = false;
+inline bool CkArm() { return g_usOnlyArm || g_fwdNested || g_ckLightArm; }
 void STDMETHODCALLTYPE UsHook(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, const D3D11_BOX* box,
                               const void* src, UINT rp, UINT dp);
 void STDMETHODCALLTYPE Us1Hook(ID3D11DeviceContext1* c, ID3D11Resource* r, UINT sub, const D3D11_BOX* box,
@@ -1486,41 +1502,131 @@ void STDMETHODCALLTYPE Us1Hook(ID3D11DeviceContext1* c, ID3D11Resource* r, UINT 
 // about 2.7 % of the focus views). Like gpu_pass_timing.h, the current entry
 // is taken as the original and the hook put back, after each forwarded
 // upload and at each OM / viewport call of the pass (render thread).
+// Table writes of the in-pass arms (hundreds per frame since the overlay passes arm their draw and toggle-point
+// entries): d3ds::WriteTablePointer asks VirtualQuery for every write (a system call each, ~1 ms per frame
+// live 2026-10-13); the context table lives in the context object's writable memory, so the region found
+// writable is remembered and written directly.
+uintptr_t g_rwBase = 0, g_rwEnd = 0;
+void FdWriteSlot(void** slot, void* value) {
+  const uintptr_t a = reinterpret_cast<uintptr_t>(slot);
+  if (a >= g_rwBase && a + sizeof(void*) <= g_rwEnd) {
+    InterlockedExchangePointer(slot, value);
+    return;
+  }
+  MEMORY_BASIC_INFORMATION mbi{};
+  if (VirtualQuery(slot, &mbi, sizeof(mbi)) &&
+      (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) && !(mbi.Protect & PAGE_GUARD)) {
+    g_rwBase = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+    g_rwEnd = g_rwBase + mbi.RegionSize;
+    InterlockedExchangePointer(slot, value);
+    return;
+  }
+  d3ds::WriteTablePointer(slot, value);  // not plainly writable: the protect / write / restore path
+}
+// Uninstall (config thread) stops every re-arm before it disarms: g_rearmOk
+// false, then g_hookBusy drained, so no render-thread re-arm can write a hook
+// back into the table after the disarm restored d3d11's entry.
+std::atomic<bool> g_rearmOk{true};
+std::atomic<int> g_hookBusy{0};
+struct HookBusy {
+  HookBusy() { g_hookBusy.fetch_add(1, std::memory_order_acq_rel); }
+  ~HookBusy() { g_hookBusy.fetch_sub(1, std::memory_order_acq_rel); }
+};
+// d3d11's own entries of the upload slots in the table's normal state (after
+// any call through them), learned after each upload of ours; a slot holding
+// something else (neither our hook nor these) is in the after-Flush state.
+void* g_usNormal = nullptr;
+void* g_us1Normal = nullptr;
+bool g_rearmAfterUpload = false;  // UsRearm runs right after our own forwarded upload (a switch there is benign)
+// Diagnostics: the last of our hooks DCS's render thread went through (0 none, 1 upload, 2 upload1, 3 draw, 4 OM,
+// 5 viewport, 10 + k toggle point k), and per kind how often a toggle was found right after the next one.
+int g_lastCall = 0;
+std::atomic<uint64_t> g_togglePrev[32] = {};
 void UsRearm() {
   void** vt = g_armTable;
+  if (!g_rearmOk.load(std::memory_order_acquire)) return;
   if (!g_usArmed || !vt || !g_s.ctx || *reinterpret_cast<void***>(g_s.ctx) != vt) return;
   void* cur = vt[g_usSlot];
+  // Found switched at a re-arm point that is not our own upload (OM / viewport / draw / toggle point) inside an
+  // overlay pass: uploads since the switch may have gone past the hook (counted per view).
+  // (Right after a draw of ours the repair comes before any upload: not counted.)
+  if (cur != reinterpret_cast<void*>(&UsHook) && !g_rearmAfterUpload && g_lastCall != 3 && ckipd::t_cls == ckipd::kClsOvl)
+    ckipd::NoteOvlMidLoss();
   if (cur != reinterpret_cast<void*>(&UsHook)) {
     g_usOrig = reinterpret_cast<UsFn>(cur);
-    d3ds::WriteTablePointer(&vt[g_usSlot], reinterpret_cast<void*>(&UsHook));
+    FdWriteSlot(&vt[g_usSlot], reinterpret_cast<void*>(&UsHook));
     fdexport::g_usRearms++;
   }
   cur = vt[g_us1Slot];
   if (cur != reinterpret_cast<void*>(&Us1Hook)) {
     g_us1Orig = reinterpret_cast<Us1Fn>(cur);
-    d3ds::WriteTablePointer(&vt[g_us1Slot], reinterpret_cast<void*>(&Us1Hook));
+    FdWriteSlot(&vt[g_us1Slot], reinterpret_cast<void*>(&Us1Hook));
     fdexport::g_usRearms++;
   }
 }
+// After each forwarded upload of the pass both the upload and the draw
+// entries are put back (InPassRearm, below): the binder's cPerView upload is
+// the last call before an effect's draw, so a draw-slot toggle before it (a
+// Flush / ExecuteCommandList, or one inside that very upload) no longer lets
+// the draw past the draw hooks (cockpit ipd's lighting split, live
+// 2026-10-13: ~0.3 % of the patched views lit from the boosted eye).
+void InPassRearm();
+// Cockpit ipd's upload path: DCS's immediate context on the render thread
+// only (its per-pass state is the render thread's); another thread's upload
+// on the same context is forwarded untouched (counted).
+inline const void* CkUpload(ID3D11Resource* r, UINT sub, const D3D11_BOX* box, const void* src, bool us1) {
+  if (!ckipd::g_on.load(std::memory_order_relaxed)) return src;
+  ckipd::CostScope cost(ckipd::kCostUpload);
+  if (GetCurrentThreadId() != ptiming::g_topTid.load(std::memory_order_relaxed)) {
+    ckipd::g_st.usOtherThread++;
+    return src;
+  }
+  return ckipd::OnUploadSeh(r, sub, box, src, us1);
+}
 void STDMETHODCALLTYPE UsHook(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, const D3D11_BOX* box,
                               const void* src, UINT rp, UINT dp) {
-  const bool ours = c == g_s.ctx;
+  HookBusy busy;
+  const bool ours = c == g_s.ctx && !g_ckRawUpload;
   if (ours) fdexport::NoteUpload(r, sub, box, src);  // DCS's original bytes, as before
   // Cockpit ipd: a patched private copy for a cockpit pass's cPerView; else DCS's pointer.
-  const void* fwd = ours && ckipd::g_on.load(std::memory_order_relaxed) ? ckipd::OnUploadSeh(r, sub, box, src, false)
-                                                                        : src;
+  const void* fwd = ours ? CkUpload(r, sub, box, src, false) : src;
   g_usOrig(c, r, sub, box, fwd, rp, dp);
-  if (ours) UsRearm();
+  if (ours) {
+    g_rearmAfterUpload = true;
+    InPassRearm();
+    g_rearmAfterUpload = false;
+    g_lastCall = 1;
+    g_usNormal = reinterpret_cast<void*>(g_usOrig);  // a call went through it: the table is in its normal state
+    g_us1Normal = reinterpret_cast<void*>(g_us1Orig);
+  }
 }
 void STDMETHODCALLTYPE Us1Hook(ID3D11DeviceContext1* c, ID3D11Resource* r, UINT sub, const D3D11_BOX* box,
                                const void* src, UINT rp, UINT dp, UINT flags) {
+  HookBusy busy;
   // NO_OVERWRITE / DISCARD keep the bytes' meaning: the source is the new content of the box.
-  const bool ours = static_cast<ID3D11DeviceContext*>(c) == g_s.ctx;
+  const bool ours = static_cast<ID3D11DeviceContext*>(c) == g_s.ctx && !g_ckRawUpload;
   if (ours) fdexport::NoteUpload(r, sub, box, src);
-  const void* fwd = ours && ckipd::g_on.load(std::memory_order_relaxed) ? ckipd::OnUploadSeh(r, sub, box, src, true)
-                                                                        : src;
+  const void* fwd = ours ? CkUpload(r, sub, box, src, true) : src;
   g_us1Orig(c, r, sub, box, fwd, rp, dp, flags);
-  if (ours) UsRearm();
+  if (ours) {
+    g_rearmAfterUpload = true;
+    InPassRearm();
+    g_rearmAfterUpload = false;
+    g_usNormal = reinterpret_cast<void*>(g_usOrig);
+    g_us1Normal = reinterpret_cast<void*>(g_us1Orig);
+  }
+}
+// Cockpit ipd's helmet camera switch (cockpit_ipd.h): an upload into the pass's own cPerView buffer that neither
+// the restore entries, far depth's matrices nor the patch may take for DCS's (whichever entry is in the table).
+void ckipd::RawUpload(ID3D11Resource* r, const D3D11_BOX* box, const void* src, bool us1) {
+  State& s = g_s;
+  if (!s.ctx) return;
+  g_ckRawUpload = true;
+  if (us1 && s.ctx1)
+    s.ctx1->UpdateSubresource1(r, 0, box, src, 0, 0, 0);
+  else
+    s.ctx->UpdateSubresource(r, 0, box, src, 0, 0);
+  g_ckRawUpload = false;
 }
 // Other modules that re-arm their own hooks in the same context table and
 // take whatever entry they find as d3d11's: gpu_pass_timing.h (copy / update /
@@ -1552,24 +1658,40 @@ int DrawPreSeh(int kind, UINT count, UINT inst);  // below; 1: copy after the dr
 void DrawPostSeh(int act);
 void DrawRearm() {
   void** vt = g_armTable;
+  if (!g_rearmOk.load(std::memory_order_acquire)) return;
   if (!g_drawArmed || !vt || !g_s.ctx || *reinterpret_cast<void***>(g_s.ctx) != vt) return;
   for (int k = 0; k < fdexport::kDkCount; ++k) {
     void* cur = vt[g_dSlot[k]];
     if (cur == DrawHookOf(k)) continue;
     g_dOrig[k] = cur;
-    d3ds::WriteTablePointer(&vt[g_dSlot[k]], DrawHookOf(k));
+    FdWriteSlot(&vt[g_dSlot[k]], DrawHookOf(k));
     fdexport::g_drawRearms++;
   }
 }
+void OvlDrawSeh(ID3D11DeviceContext* c);  // below (cockpit ipd: an overlay pass's draw, probe)
 #define FD_DRAW_BODY(KIND, FN, COUNT, INST, ...)                      \
+  HookBusy busy;                                                       \
+  ckipd::CostScope cost(ckipd::kCostDraw);                             \
   const bool ours = c == g_s.ctx && !g_fault.load(std::memory_order_relaxed); \
+  if (c == g_s.ctx) ckipd::LightDrawSeen();                           \
+  if (c == g_s.ctx && ckipd::t_cls == ckipd::kClsOvl) OvlDrawSeh(c);  \
   const int act = ours ? DrawPreSeh(KIND, COUNT, INST) : 0;            \
   reinterpret_cast<FN>(g_dOrig[KIND])(__VA_ARGS__);                    \
   if (ours) DrawPostSeh(act);
 bool SplitDrawSeh(ID3D11DeviceContext* c, UINT n, UINT sv);  // below (cockpit ipd phase 2)
 void STDMETHODCALLTYPE DhDraw(ID3D11DeviceContext* c, UINT n, UINT sv) {
-  if (ckipd::t_cls == ckipd::kClsLight && c == g_s.ctx && SplitDrawSeh(c, n, sv)) {
-    DrawRearm();
+  if (ckipd::t_cls == ckipd::kClsLight && c == g_s.ctx) {
+    HookBusy busy;
+    ckipd::LightDrawSeen();
+    if (SplitDrawSeh(c, n, sv)) {
+      DrawRearm();
+      return;
+    }
+    // Forwarded once as DCS's (seen above: not counted again by the body).
+    const bool ours = !g_fault.load(std::memory_order_relaxed);
+    const int act = ours ? DrawPreSeh(fdexport::kDkDraw, n, 1) : 0;
+    reinterpret_cast<DrawFnT>(g_dOrig[fdexport::kDkDraw])(c, n, sv);
+    if (ours) DrawPostSeh(act);
     return;
   }
   FD_DRAW_BODY(fdexport::kDkDraw, DrawFnT, n, 1, c, n, sv)
@@ -1599,10 +1721,11 @@ void* DrawHookOf(int k) {
       reinterpret_cast<void*>(&DhDrawInstancedIndirect)};
   return hooks[k];
 }
-// Into the current arm (g_armTable); not with another module's hooks in the table.
+// Into the current arm (g_armTable); not with another module's hooks in the
+// table, and not into the forward cockpit pass's own arm (it wants no draws).
 void ArmDraws() {
   void** vt = g_armTable;
-  if (g_drawArmed || !vt) return;
+  if (g_drawArmed || !vt || g_usOnlyArm) return;
   if (ForeignTableHooks()) {
     fdexport::g_drawSkipForeign++;
     return;
@@ -1612,7 +1735,7 @@ void ArmDraws() {
   for (int k = 0; k < fdexport::kDkCount; ++k)
     if (g_dSlot[k] < 0 || vt[g_dSlot[k]] == DrawHookOf(k)) return;  // unknown slot / a stale arm
   for (int k = 0; k < fdexport::kDkCount; ++k) g_dOrig[k] = vt[g_dSlot[k]];
-  for (int k = 0; k < fdexport::kDkCount; ++k) d3ds::WriteTablePointer(&vt[g_dSlot[k]], DrawHookOf(k));
+  for (int k = 0; k < fdexport::kDkCount; ++k) FdWriteSlot(&vt[g_dSlot[k]], DrawHookOf(k));
   g_drawArmed = true;
   fdexport::g_drawArms++;
 }
@@ -1623,7 +1746,7 @@ void DisarmDraws() {
   bool lost = false;
   for (int k = 0; k < fdexport::kDkCount; ++k) {
     if (vt[g_dSlot[k]] == DrawHookOf(k))
-      d3ds::WriteTablePointer(&vt[g_dSlot[k]], g_dOrig[k]);
+      FdWriteSlot(&vt[g_dSlot[k]], g_dOrig[k]);
     else
       lost = true;  // d3d11 switched it after our last re-arm: its entry stays
   }
@@ -1632,6 +1755,303 @@ void DisarmDraws() {
 void InPassRearm() {
   UsRearm();
   DrawRearm();
+}
+
+// d3d11 toggles 24 draw / copy / update / clear entries of the immediate
+// context's table whenever it flushes on a call that is not one of them
+// (offline, WARP and this PC's hardware driver, 2026-10-13: Flush,
+// ExecuteCommandList, GetData, a Map that has to wait; the toggle writes
+// "after flush" variants into the 24 slots, the first call through any of
+// them writes the normal ones back; command-buffer-full submissions inside a
+// draw or upload toggle nothing). Between the toggle and our next re-arm
+// point every upload and draw goes past our hooks: the first one after it
+// always (it is d3d11's "after flush" entry itself), the rest until an OM /
+// viewport call (overlay passes: about 80 effect uploads per pass and almost
+// no OM calls). Flush, Map and GetData are not among the 24: they are hooked
+// with the OM / viewport entries of every in-pass arm (toggle points), and
+// ExecuteCommandList is reported by the split filter's hook (or our recorders
+// after their own). After one of them, when the upload entry shows the toggle:
+// the table is put back to its normal state right away by one private 16-byte
+// upload through d3d11's current entry (the "after flush" variant restores
+// the normal 24), then our entries are re-armed on it. An arm taken on a
+// table still in the after-flush state (a toggle between passes: DLSS, the
+// runtime) is normalized the same way first.
+using FlushFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*);
+using MapFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, D3D11_MAP, UINT,
+                                         D3D11_MAPPED_SUBRESOURCE*);
+using GetDataFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Asynchronous*, void*, UINT, UINT);
+// Toggle points: Flush, Map, GetData (seen toggling offline and live) in every in-pass arm. In the overlay
+// passes also the state calls DCS's effects make between two draws (live 2026-10-13, probed one by one: the
+// table was found toggled right after IASetVertexBuffers, PSSetShaderResources, IASetIndexBuffer,
+// VSSetShaderResources, GSSetShader, i.e. d3d11 submits inside them; with only the draws and Flush / Map /
+// GetData re-arming, ~3 % of the frames still drew symbols at the boosted eye; with those five, view 0's
+// overlay pass still lost the arm mid-pass in ~6 % of its frames: every state call an effect makes is hooked
+// now, none of them a toggled entry) and the
+// draws themselves (CockpitIpdOverlayBegin). Only in the overlay arms: the G-buffer arms make thousands of
+// such calls per frame.
+enum TogglePoint {
+  // Basic (every in-pass arm): Flush, Map, GetData, Unmap (R32: the cpu path's observer reads a mapped
+  // constant buffer at its Unmap).
+  kTpFlush = 0, kTpMap, kTpGetData, kTpUnmap, kTpBasic,
+  kTpPSSetSRV = kTpBasic, kTpVSSetSRV, kTpIASetVB, kTpIASetIB, kTpGSSetShader, kTpBegin, kTpEnd, kTpVSSetCB,
+  kTpPSSetCB, kTpPSSetShader, kTpVSSetShader, kTpPSSetSamplers, kTpVSSetSamplers, kTpIASetLayout, kTpIASetTopo,
+  kTpGSSetSRV, kTpOMSetBlend, kTpOMSetDepth, kTpRSSetState,
+  // R32 4.5: the remaining state calls of an effect between two draws, none of them among d3d11's 22 toggled
+  // entries (probed on this PC's driver and on WARP, 2026-10-13: every draw / dispatch / copy / update / clear /
+  // resolve / GenerateMips entry toggles, so CopySubresourceRegion and the clears cannot be toggle points: they are
+  // toggled entries themselves, and the first call through one writes d3d11's normal entries back, which the next
+  // toggle point now repairs).
+  kTpVSSetCB1, kTpPSSetCB1, kTpGSSetCB1, kTpRSSetScissor, kTpGSSetCB, kTpGSSetSamplers, kTpCount
+};
+const char* const kTpNames[kTpCount] = {"Flush",               "Map",                "GetData",
+                                        "Unmap",                "PSSetShaderResources", "VSSetShaderResources", "IASetVertexBuffers",
+                                        "IASetIndexBuffer",     "GSSetShader",          "Begin",
+                                        "End",                  "VSSetConstantBuffers", "PSSetConstantBuffers",
+                                        "PSSetShader",          "VSSetShader",          "PSSetSamplers",
+                                        "VSSetSamplers",        "IASetInputLayout",     "IASetPrimitiveTopology",
+                                        "GSSetShaderResources", "OMSetBlendState",      "OMSetDepthStencilState",
+                                        "RSSetState",           "VSSetConstantBuffers1", "PSSetConstantBuffers1",
+                                        "GSSetConstantBuffers1", "RSSetScissorRects",   "GSSetConstantBuffers",
+                                        "GSSetSamplers"};
+void* g_tpOrig[kTpCount] = {};
+int g_tpSlot[kTpCount] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+                          -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+static_assert(kTpCount == 29, "g_tpSlot's initializer");
+bool g_tpExtended = false;  // the next ArmOmEntries also takes the overlay passes' state-call toggle points
+bool g_tpCk = false;        // the next ArmOmEntries is cockpit ipd's: R32's Unmap toggle point too (R32 r3)
+bool g_tpAddedUnmap = false;  // the Unmap point added to another feature's arm for a nested cockpit pass
+bool g_tpArmed[kTpCount] = {};
+std::atomic<uint64_t> g_tpHits[kTpCount] = {};  // the table found toggled right after this call
+// R32 4.5: the arm found "normal, not ours" right after this call (d3d11 had toggled the table and the first call
+// through a toggled entry wrote its normal entries over our hooks; UsToggled cannot see that state), repaired there.
+std::atomic<uint64_t> g_tpNormalRepair[kTpCount] = {};
+void* TogglePointHook(int k);  // below
+ID3D11Buffer* g_tinyCb = nullptr;   // our 16-byte constant buffer for the normalizing upload
+ID3D11Device* g_tinyDev = nullptr;  // its device (identity)
+// The table holds d3d11's "after flush" upload entry (neither ours nor the learned normal one).
+bool UsToggled(void** vt) {
+  void* cur = vt[g_usSlot];
+  return g_usNormal && cur != reinterpret_cast<void*>(&UsHook) && cur != g_usNormal;
+}
+// R32 4.5 (the hole UsToggled leaves): d3d11's toggle writes its "after flush" entries into its 22 toggled slots,
+// and the first call through any of them writes the NORMAL entries back into all of them. After that one call the
+// table looks normal (UsToggled false) while our upload / draw hooks are gone for the rest of the pass (probe
+// r32 tog.cpp, this PC's driver and WARP). True when an entry our current arm holds is not ours any more.
+bool ArmNotOurs(void** vt) {
+  if (!vt || vt != g_armTable) return false;
+  if (g_usArmed && (vt[g_usSlot] != reinterpret_cast<void*>(&UsHook) || vt[g_us1Slot] != reinterpret_cast<void*>(&Us1Hook)))
+    return true;
+  if (g_drawArmed)
+    for (int k = 0; k < fdexport::kDkCount; ++k)
+      if (g_dSlot[k] >= 0 && vt[g_dSlot[k]] != DrawHookOf(k)) return true;
+  return false;
+}
+// A toggle point found the arm "normal, not ours": put back right there (counted per call, so the live run names
+// the call d3d11 submits in).
+void RepairNormal(int point) {
+  if (point >= 0 && point < kTpCount) g_tpNormalRepair[point]++;
+  ckipd::g_st.tpNormalRepair++;
+  InPassRearm();
+}
+// One private upload through d3d11's current UpdateSubresource entry (render thread, DCS's context).
+void NormalizeTable(void** vt) {
+  State& s = g_s;
+  if (!s.ctx || !vt || g_usSlot < 0) return;
+  {
+    ID3D11Device* dev = nullptr;
+    s.ctx->GetDevice(&dev);
+    if (dev != g_tinyDev && g_tinyCb) {  // another device (a new DCS device, tests): its own buffer
+      g_tinyCb->Release();
+      g_tinyCb = nullptr;
+    }
+    if (!g_tinyCb && dev) {
+      D3D11_BUFFER_DESC d{};
+      d.ByteWidth = 16;
+      d.Usage = D3D11_USAGE_DEFAULT;
+      d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+      dev->CreateBuffer(&d, nullptr, &g_tinyCb);
+    }
+    g_tinyDev = g_tinyCb ? dev : nullptr;  // identity only
+    if (dev) dev->Release();
+    if (!g_tinyCb) return;
+  }
+  static const float kZero[4] = {};
+  void* cur = vt[g_usSlot];
+  UsFn fn = cur == reinterpret_cast<void*>(&UsHook) ? g_usOrig : reinterpret_cast<UsFn>(cur);
+  if (!fn) return;
+  fn(s.ctx, g_tinyCb, 0, nullptr, kZero, 0, 0);
+  ckipd::g_st.tblNormalized++;
+  // A slot that did not change on a call is d3d11's normal entry (another table set: learned anew).
+  if (vt[g_usSlot] == cur && cur != reinterpret_cast<void*>(&UsHook)) {
+    g_usNormal = cur;
+    g_us1Normal = vt[g_us1Slot];
+  }
+}
+// After a toggle point on DCS's context while an arm of ours is held (render
+// thread). sure: the call always toggles (Flush, ExecuteCommandList); else
+// only a table that shows the toggle is repaired (Map / GetData usually do not).
+void AfterToggle(bool sure, int point = -1) {
+  void** vt = g_armTable;
+  if (!vt || !g_s.ctx || *reinterpret_cast<void***>(g_s.ctx) != vt || !g_rearmOk.load(std::memory_order_acquire))
+    return;
+  const bool toggled = UsToggled(vt);
+  if (toggled && point >= 0 && point < kTpCount) g_tpHits[point]++;
+  if (toggled) g_togglePrev[g_lastCall < 32 ? g_lastCall : 31]++;
+  if (point >= 0) g_lastCall = 10 + point;
+  if (!toggled && !(sure && !g_usNormal)) {
+    // (Reported twice for one ExecuteCommandList when the split filter's hook and a recorder both report it: the
+    // second finds our hook back in the slot and does nothing more.)
+    if (sure)
+      InPassRearm();
+    else if (CkArm() && ArmNotOurs(vt))
+      RepairNormal(point);  // R32 4.5: a toggled entry was called since the toggle: normal entries over our hooks
+    return;
+  }
+  ckipd::g_st.tblToggles++;
+  if (ckipd::t_cls == ckipd::kClsOvl) ckipd::g_st.ovlToggles++;
+  if (g_usArmed || g_drawArmed) NormalizeTable(vt);
+  InPassRearm();
+}
+void AfterToggleSeh(bool sure, int point = -1) {
+  __try {
+    AfterToggle(sure, point);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    g_fault = true;
+  }
+}
+inline bool OnRenderCtx(ID3D11DeviceContext* c) {
+  if (c != g_s.ctx) return false;
+  if (GetCurrentThreadId() == ptiming::g_topTid.load(std::memory_order_relaxed)) return true;
+  ckipd::g_st.tpOtherThread++;  // a toggle point on DCS's context from another thread (not repaired here)
+  return false;
+}
+void STDMETHODCALLTYPE FlushHook(ID3D11DeviceContext* c) {
+  HookBusy busy;
+  reinterpret_cast<FlushFn>(g_tpOrig[kTpFlush])(c);
+  if (OnRenderCtx(c)) AfterToggleSeh(true, kTpFlush);
+}
+void TpAfter(ID3D11DeviceContext* c, int k);  // below
+HRESULT STDMETHODCALLTYPE MapHook(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, D3D11_MAP type, UINT flags,
+                                  D3D11_MAPPED_SUBRESOURCE* m) {
+  HookBusy busy;
+  const HRESULT hr = reinterpret_cast<MapFn>(g_tpOrig[kTpMap])(c, r, sub, type, flags, m);
+  if (OnRenderCtx(c)) {
+    if (ckipd::t_cls == ckipd::kClsOvl && SUCCEEDED(hr)) ckipd::OvlNoteMap(r, sub, type, m);  // diagnostic; cpu observer
+    AfterToggleSeh(false, kTpMap);
+  }
+  return hr;
+}
+// Unmap: a toggle point like the state calls; a constant buffer an open overlay pass mapped for writing is
+// observed first (the cpu path's learner: DCS's bytes as written).
+void STDMETHODCALLTYPE UnmapHook(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub) {
+  HookBusy busy;
+  // Only the render thread's own Unmap (R32 r3: another thread's Unmap of DCS's context, with an overlay pass
+  // open on the render thread, must not consume or observe that pass's mapping).
+  if (c == g_s.ctx && ckipd::t_cls == ckipd::kClsOvl &&
+      GetCurrentThreadId() == ptiming::g_topTid.load(std::memory_order_relaxed))
+    ckipd::OvlNoteUnmap(r, sub);
+  reinterpret_cast<void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT)>(g_tpOrig[kTpUnmap])(c, r, sub);
+  if (c == g_s.ctx) TpAfter(c, kTpUnmap);
+}
+HRESULT STDMETHODCALLTYPE GetDataHook(ID3D11DeviceContext* c, ID3D11Asynchronous* a, void* d, UINT n, UINT flags) {
+  HookBusy busy;
+  const HRESULT hr = reinterpret_cast<GetDataFn>(g_tpOrig[kTpGetData])(c, a, d, n, flags);
+  if (c == g_s.ctx) g_lastCall = 10 + kTpGetData;
+  if (OnRenderCtx(c)) AfterToggleSeh(false, kTpGetData);
+  return hr;
+}
+// After a state-call toggle point on DCS's context (R32 4.5): a table that shows the toggle is normalized and
+// re-armed (AfterToggle); one whose arm is "normal, not ours" (a toggled entry was called since the toggle, which
+// wrote d3d11's normal entries over our hooks: UsToggled cannot see it) is re-armed too (RepairNormal). Before
+// 2026-10-13 only the first case was repaired, so after one draw or upload the rest of the pass went past us.
+void TpAfter(ID3D11DeviceContext* c, int k) {
+  void** vt = *reinterpret_cast<void***>(c);
+  const bool tog = UsToggled(vt);
+  if ((tog || (CkArm() && ArmNotOurs(vt))) && OnRenderCtx(c)) {
+    if (tog) {
+      AfterToggleSeh(false, k);
+    } else {
+      __try {
+        RepairNormal(k);
+      } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_fault = true;
+      }
+    }
+  }
+  g_lastCall = 10 + k;
+}
+#define FD_TP_HOOK(NAME, K, PARAMS, ARGS)                                              \
+  void STDMETHODCALLTYPE NAME PARAMS {                                                \
+    HookBusy busy;                                                                    \
+    using Fn = void(STDMETHODCALLTYPE*) PARAMS;                                       \
+    reinterpret_cast<Fn>(g_tpOrig[K]) ARGS;                                           \
+    if (c == g_s.ctx) TpAfter(c, K);                                                  \
+  }
+FD_TP_HOOK(TpPSSetSRV, kTpPSSetSRV, (ID3D11DeviceContext * c, UINT s0, UINT n, ID3D11ShaderResourceView* const* v),
+           (c, s0, n, v))
+FD_TP_HOOK(TpVSSetSRV, kTpVSSetSRV, (ID3D11DeviceContext * c, UINT s0, UINT n, ID3D11ShaderResourceView* const* v),
+           (c, s0, n, v))
+FD_TP_HOOK(TpIASetVB, kTpIASetVB,
+           (ID3D11DeviceContext * c, UINT s0, UINT n, ID3D11Buffer* const* b, const UINT* st, const UINT* of),
+           (c, s0, n, b, st, of))
+FD_TP_HOOK(TpIASetIB, kTpIASetIB, (ID3D11DeviceContext * c, ID3D11Buffer * b, DXGI_FORMAT f, UINT o), (c, b, f, o))
+FD_TP_HOOK(TpGSSetShader, kTpGSSetShader,
+           (ID3D11DeviceContext * c, ID3D11GeometryShader * g, ID3D11ClassInstance* const* ci, UINT n), (c, g, ci, n))
+FD_TP_HOOK(TpBegin, kTpBegin, (ID3D11DeviceContext * c, ID3D11Asynchronous * a), (c, a))
+FD_TP_HOOK(TpEnd, kTpEnd, (ID3D11DeviceContext * c, ID3D11Asynchronous * a), (c, a))
+FD_TP_HOOK(TpVSSetCB, kTpVSSetCB, (ID3D11DeviceContext * c, UINT s0, UINT n, ID3D11Buffer* const* b), (c, s0, n, b))
+FD_TP_HOOK(TpPSSetCB, kTpPSSetCB, (ID3D11DeviceContext * c, UINT s0, UINT n, ID3D11Buffer* const* b), (c, s0, n, b))
+FD_TP_HOOK(TpPSSetShader, kTpPSSetShader,
+           (ID3D11DeviceContext * c, ID3D11PixelShader * sh, ID3D11ClassInstance* const* ci, UINT n), (c, sh, ci, n))
+FD_TP_HOOK(TpVSSetShader, kTpVSSetShader,
+           (ID3D11DeviceContext * c, ID3D11VertexShader * sh, ID3D11ClassInstance* const* ci, UINT n), (c, sh, ci, n))
+FD_TP_HOOK(TpPSSetSamplers, kTpPSSetSamplers,
+           (ID3D11DeviceContext * c, UINT s0, UINT n, ID3D11SamplerState* const* sm), (c, s0, n, sm))
+FD_TP_HOOK(TpVSSetSamplers, kTpVSSetSamplers,
+           (ID3D11DeviceContext * c, UINT s0, UINT n, ID3D11SamplerState* const* sm), (c, s0, n, sm))
+FD_TP_HOOK(TpIASetLayout, kTpIASetLayout, (ID3D11DeviceContext * c, ID3D11InputLayout * l), (c, l))
+FD_TP_HOOK(TpIASetTopo, kTpIASetTopo, (ID3D11DeviceContext * c, D3D11_PRIMITIVE_TOPOLOGY t), (c, t))
+FD_TP_HOOK(TpGSSetSRV, kTpGSSetSRV, (ID3D11DeviceContext * c, UINT s0, UINT n, ID3D11ShaderResourceView* const* v),
+           (c, s0, n, v))
+FD_TP_HOOK(TpOMSetBlend, kTpOMSetBlend, (ID3D11DeviceContext * c, ID3D11BlendState * b, const FLOAT f[4], UINT m),
+           (c, b, f, m))
+FD_TP_HOOK(TpOMSetDepth, kTpOMSetDepth, (ID3D11DeviceContext * c, ID3D11DepthStencilState * d, UINT r), (c, d, r))
+FD_TP_HOOK(TpRSSetState, kTpRSSetState, (ID3D11DeviceContext * c, ID3D11RasterizerState * r), (c, r))
+FD_TP_HOOK(TpVSSetCB1, kTpVSSetCB1,
+           (ID3D11DeviceContext * c, UINT s0, UINT n, ID3D11Buffer* const* b, const UINT* f, const UINT* m),
+           (c, s0, n, b, f, m))
+FD_TP_HOOK(TpPSSetCB1, kTpPSSetCB1,
+           (ID3D11DeviceContext * c, UINT s0, UINT n, ID3D11Buffer* const* b, const UINT* f, const UINT* m),
+           (c, s0, n, b, f, m))
+FD_TP_HOOK(TpGSSetCB1, kTpGSSetCB1,
+           (ID3D11DeviceContext * c, UINT s0, UINT n, ID3D11Buffer* const* b, const UINT* f, const UINT* m),
+           (c, s0, n, b, f, m))
+FD_TP_HOOK(TpRSSetScissor, kTpRSSetScissor, (ID3D11DeviceContext * c, UINT n, const D3D11_RECT* r), (c, n, r))
+FD_TP_HOOK(TpGSSetCB, kTpGSSetCB, (ID3D11DeviceContext * c, UINT s0, UINT n, ID3D11Buffer* const* b), (c, s0, n, b))
+FD_TP_HOOK(TpGSSetSamplers, kTpGSSetSamplers,
+           (ID3D11DeviceContext * c, UINT s0, UINT n, ID3D11SamplerState* const* sm), (c, s0, n, sm))
+#undef FD_TP_HOOK
+void* TogglePointHook(int k) {
+  static void* const hooks[kTpCount] = {
+      reinterpret_cast<void*>(&FlushHook),  reinterpret_cast<void*>(&MapHook),     reinterpret_cast<void*>(&GetDataHook),
+      reinterpret_cast<void*>(&UnmapHook),  reinterpret_cast<void*>(&TpPSSetSRV), reinterpret_cast<void*>(&TpVSSetSRV),  reinterpret_cast<void*>(&TpIASetVB),
+      reinterpret_cast<void*>(&TpIASetIB),  reinterpret_cast<void*>(&TpGSSetShader), reinterpret_cast<void*>(&TpBegin),
+      reinterpret_cast<void*>(&TpEnd),      reinterpret_cast<void*>(&TpVSSetCB),   reinterpret_cast<void*>(&TpPSSetCB),
+      reinterpret_cast<void*>(&TpPSSetShader), reinterpret_cast<void*>(&TpVSSetShader),
+      reinterpret_cast<void*>(&TpPSSetSamplers), reinterpret_cast<void*>(&TpVSSetSamplers),
+      reinterpret_cast<void*>(&TpIASetLayout), reinterpret_cast<void*>(&TpIASetTopo),
+      reinterpret_cast<void*>(&TpGSSetSRV), reinterpret_cast<void*>(&TpOMSetBlend),
+      reinterpret_cast<void*>(&TpOMSetDepth), reinterpret_cast<void*>(&TpRSSetState),
+      reinterpret_cast<void*>(&TpVSSetCB1), reinterpret_cast<void*>(&TpPSSetCB1), reinterpret_cast<void*>(&TpGSSetCB1),
+      reinterpret_cast<void*>(&TpRSSetScissor), reinterpret_cast<void*>(&TpGSSetCB),
+      reinterpret_cast<void*>(&TpGSSetSamplers)};
+  return hooks[k];
+}
+// The split filter's ExecuteCommandList hook (or a recorder after its own) on DCS's immediate context.
+void AfterEclEntry(void* ctx) {
+  if (!OnRenderCtx(static_cast<ID3D11DeviceContext*>(ctx))) return;
+  HookBusy busy;
+  AfterToggleSeh(true, -1);
 }
 // Far depth pre-overlay (far_depth.h 5): while an overlay-class pass runs, the
 // render target bound (identity) waiting for the viewport that follows it.
@@ -1674,13 +2094,24 @@ void KeepDsv(ID3D11DeviceContext* c, ID3D11DepthStencilView* d) {
 // With DLSS each view renders at its own resolution (measured: periphery
 // 476x468, focus 1176x1164) while the default frame buffer is 816x804, so
 // the viewport must be the one set inside the pass.
+// false while the OM / viewport entries are in only to re-arm the upload
+// entries (the forward cockpit pass's arm, ArmUsOnly): no DSV / viewport
+// capture, no pre-overlay bind tracking.
+bool g_omCapture = true;
+// [Perception] CockpitTrueIpdFrameDump: an HMD view's OverlayLDRPass / GUIPass is open while a dump captures it
+// (DumpPassBoundary): the OM / viewport hooks report its render target binds to cockpit_ipd.h, whichever feature
+// holds the arm (also an uploads-only arm, whose OM entries are re-arm points only). g_dumpArm: the arm is the
+// dump's own (taken when no other feature held one; given back at the pass end).
+bool g_dumpPass = false, g_dumpArm = false;
 void STDMETHODCALLTYPE VpHook(ID3D11DeviceContext* c, UINT n, const D3D11_VIEWPORT* v) {
-  if (c == g_s.ctx && n && v && g_seqN && g_seqVp[g_seqN - 1].Width == 0) g_seqVp[g_seqN - 1] = v[0];
+  HookBusy busy;
+  if (g_dumpPass && c == g_s.ctx && n && v) ckipd::DumpVpSet(v[0]);
+  if (g_omCapture && c == g_s.ctx && n && v && g_seqN && g_seqVp[g_seqN - 1].Width == 0) g_seqVp[g_seqN - 1] = v[0];
   // Pre-overlay: copied before DCS's call (the copy reads the target only;
   // the viewport is not needed bound for it).
-  if (g_overlayArm) OverlayViewport(c, n, v);
+  if (g_omCapture && g_overlayArm) OverlayViewport(c, n, v);
   g_vpOrig(c, n, v);
-  if (c == g_s.ctx) InPassRearm();
+  if (c == g_s.ctx) InPassRearm(), g_lastCall = 5;
 }
 D3D11_VIEWPORT g_passVp{};  // the viewport that goes with g_passDsv (Width 0 = unknown)
 // The DSV bound when the GBufferPass began: DCS's default frame buffer
@@ -1732,15 +2163,22 @@ ID3D11Resource* PassDepthTexNow() {
 }
 void STDMETHODCALLTYPE OmHook(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* r,
                               ID3D11DepthStencilView* d) {
-  KeepDsv(c, d);
-  if (g_overlayArm) OverlayBind(c, n, r);
+  HookBusy busy;
+  if (g_dumpPass && c == g_s.ctx) ckipd::DumpOmBind(n && r ? r[0] : nullptr);
+  if (g_omCapture) {
+    KeepDsv(c, d);
+    if (g_overlayArm) OverlayBind(c, n, r);
+  }
   g_omOrig(c, n, r, d);
-  if (c == g_s.ctx) InPassRearm();
+  if (c == g_s.ctx) InPassRearm(), g_lastCall = 4;
 }
 void STDMETHODCALLTYPE OmUavHook(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* r,
                                  ID3D11DepthStencilView* d, UINT us, UINT un, ID3D11UnorderedAccessView* const* u,
                                  const UINT* ic) {
-  if (n != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) {
+  HookBusy busy;
+  if (g_dumpPass && c == g_s.ctx && n != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
+    ckipd::DumpOmBind(n && r ? r[0] : nullptr);
+  if (g_omCapture && n != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) {
     KeepDsv(c, d);
     if (g_overlayArm) OverlayBind(c, n, r);
   }
@@ -1750,140 +2188,285 @@ void STDMETHODCALLTYPE OmUavHook(ID3D11DeviceContext* c, UINT n, ID3D11RenderTar
 
 // overlay: an overlay-class pass (pre-overlay copy; no upload hook).
 std::atomic<uint64_t> g_omSkipForeign{0};
-void ArmOm(bool overlay = false) {
-  State& s = g_s;
-  if (!s.ctx || g_armTable) return;
-  // gpu_dedup.h and the D3D meter re-arm OMSetRenderTargets* themselves
-  // (ForeignTableHooks): no in-pass arm while they hold the table.
-  if (gdd::g_hooked.load(std::memory_order_relaxed) || d3ds::g_vtblCount.load(std::memory_order_relaxed) > 0) {
-    g_omSkipForeign++;
-    return;
-  }
+// The OM / viewport slots (resolved once); false when unknown.
+bool OmSlots() {
   if (g_omSlot < 0) {
     g_omSlot = DcsQv_ContextSlot("OMSetRenderTargets");
     g_omUavSlot = DcsQv_ContextSlot("OMSetRenderTargetsAndUnorderedAccessViews");
     g_vpSlot = DcsQv_ContextSlot("RSSetViewports");
-    if (g_omSlot < 0 || g_omUavSlot < 0 || g_vpSlot < 0) return;
+    for (int k = 0; k < kTpCount; ++k) g_tpSlot[k] = DcsQv_ContextSlot(kTpNames[k]);
   }
-  void** vt = *reinterpret_cast<void***>(s.ctx);
-  g_omOrig = reinterpret_cast<OmFn>(vt[g_omSlot]);
-  g_omUavOrig = reinterpret_cast<OmUavFn>(vt[g_omUavSlot]);
-  g_vpOrig = reinterpret_cast<VpFn>(vt[g_vpSlot]);
-  if (reinterpret_cast<void*>(g_omOrig) == reinterpret_cast<void*>(&OmHook) ||
-      reinterpret_cast<void*>(g_omUavOrig) == reinterpret_cast<void*>(&OmUavHook) ||
-      reinterpret_cast<void*>(g_vpOrig) == reinterpret_cast<void*>(&VpHook))
-    return;  // a stale arm (should not happen)
-  g_armTable = vt;
-  d3ds::WriteTablePointer(&vt[g_omSlot], reinterpret_cast<void*>(&OmHook));
-  d3ds::WriteTablePointer(&vt[g_omUavSlot], reinterpret_cast<void*>(&OmUavHook));
-  d3ds::WriteTablePointer(&vt[g_vpSlot], reinterpret_cast<void*>(&VpHook));
-  // Far depth / cockpit ipd: the cPerView uploads, only while something uses them.
-  g_usArmed = false;
-  const bool wantUs = !overlay && (fdexport::WantUploads() || ckipd::WantUploads());
-  if (wantUs && ForeignTableHooks()) fdexport::g_usSkipForeign++;
-  if (wantUs && !ForeignTableHooks()) {
-    if (g_usSlot < 0) {
-      g_usSlot = DcsQv_ContextSlot("UpdateSubresource");
-      g_us1Slot = DcsQv_ContextSlot("UpdateSubresource1");
-    }
-    if (g_usSlot >= 0 && g_us1Slot >= 0 && vt[g_usSlot] != reinterpret_cast<void*>(&UsHook) &&
-        vt[g_us1Slot] != reinterpret_cast<void*>(&Us1Hook)) {
-      g_usOrig = reinterpret_cast<UsFn>(vt[g_usSlot]);
-      g_us1Orig = reinterpret_cast<Us1Fn>(vt[g_us1Slot]);
-      d3ds::WriteTablePointer(&vt[g_usSlot], reinterpret_cast<void*>(&UsHook));
-      d3ds::WriteTablePointer(&vt[g_us1Slot], reinterpret_cast<void*>(&Us1Hook));
-      g_usArmed = true;
-    }
-  }
+  return g_omSlot >= 0 && g_omUavSlot >= 0 && g_vpSlot >= 0;
 }
-
-bool g_usOnlyArm = false;  // the current arm holds only the upload (and maybe draw) entries
-void DisarmUsOnly();
-void DisarmOm() {
-  if (g_usOnlyArm) return DisarmUsOnly();
-  void** vt = g_armTable;
-  if (!vt) return;
-  DisarmDraws();
-  bool missed = false;
-  if (vt[g_omSlot] == reinterpret_cast<void*>(&OmHook))
-    d3ds::WriteTablePointer(&vt[g_omSlot], reinterpret_cast<void*>(g_omOrig));
-  else
-    missed = true;
-  if (missed) fdexport::g_omLost++;
-  if (vt[g_omUavSlot] == reinterpret_cast<void*>(&OmUavHook))
-    d3ds::WriteTablePointer(&vt[g_omUavSlot], reinterpret_cast<void*>(g_omUavOrig));
-  if (vt[g_vpSlot] == reinterpret_cast<void*>(&VpHook))
-    d3ds::WriteTablePointer(&vt[g_vpSlot], reinterpret_cast<void*>(g_vpOrig));
-  g_lastUsOk = false;
-  if (g_usArmed) {
-    bool usMissed = false;
-    if (vt[g_usSlot] == reinterpret_cast<void*>(&UsHook))
-      d3ds::WriteTablePointer(&vt[g_usSlot], reinterpret_cast<void*>(g_usOrig));
-    else
-      usMissed = true;
-    if (vt[g_us1Slot] == reinterpret_cast<void*>(&Us1Hook))
-      d3ds::WriteTablePointer(&vt[g_us1Slot], reinterpret_cast<void*>(g_us1Orig));
-    else
-      usMissed = true;
-    g_lastUsOk = !usMissed;
-    if (usMissed) fdexport::g_usLost++;  // lost after the last re-arm chance (diagnostic)
-    g_usArmed = false;
-  }
-  if (missed && !g_seqN) g_armMissed++;
-  g_lastArmOk = !missed;
-  g_armTable = nullptr;
-  g_ovRtv = nullptr;
-}
-
-// Cockpit ipd: a pass whose cPerView uploads are wanted without the OM /
-// viewport capture (TransparentCockpitPass, watched cockpit passes), or with
-// the draw entries too (phase 2, GBufferLightingPass). Same table, same
-// re-arm; never with another module's hooks in the table.
-bool ArmUsOnly(bool draws = false) {
-  State& s = g_s;
-  if (!s.ctx || g_armTable) return false;
-  if (ForeignTableHooks()) {
-    fdexport::g_usSkipForeign++;
-    return false;
-  }
+bool UsSlots() {
   if (g_usSlot < 0) {
     g_usSlot = DcsQv_ContextSlot("UpdateSubresource");
     g_us1Slot = DcsQv_ContextSlot("UpdateSubresource1");
   }
-  if (g_usSlot < 0 || g_us1Slot < 0) return false;
-  void** vt = *reinterpret_cast<void***>(s.ctx);
+  return g_usSlot >= 0 && g_us1Slot >= 0;
+}
+// The upload entries into vt (DCS's current ones become the originals);
+// false when they are ours already (a stale arm, should not happen).
+bool ArmUsEntries(void** vt) {
   if (vt[g_usSlot] == reinterpret_cast<void*>(&UsHook) || vt[g_us1Slot] == reinterpret_cast<void*>(&Us1Hook))
-    return false;  // a stale arm (should not happen)
+    return false;
+  // The table still in d3d11's after-Flush state (a Flush since the last call through it): put back to its normal
+  // entries first, else the first draw / copy / clear of the pass would replace our hooks with them.
+  if (UsToggled(vt) && GetCurrentThreadId() == ptiming::g_topTid.load(std::memory_order_relaxed)) {
+    NormalizeTable(vt);
+    ckipd::g_st.tblNormArm++;
+  }
   g_usOrig = reinterpret_cast<UsFn>(vt[g_usSlot]);
   g_us1Orig = reinterpret_cast<Us1Fn>(vt[g_us1Slot]);
-  g_armTable = vt;
-  d3ds::WriteTablePointer(&vt[g_usSlot], reinterpret_cast<void*>(&UsHook));
-  d3ds::WriteTablePointer(&vt[g_us1Slot], reinterpret_cast<void*>(&Us1Hook));
+  FdWriteSlot(&vt[g_usSlot], reinterpret_cast<void*>(&UsHook));
+  FdWriteSlot(&vt[g_us1Slot], reinterpret_cast<void*>(&Us1Hook));
   g_usArmed = true;
-  g_usOnlyArm = true;
-  if (draws) ArmDraws();
   return true;
 }
-void DisarmUsOnly() {
-  if (!g_usOnlyArm) return;
-  g_usOnlyArm = false;
+// The upload entries back (ours only: an entry d3d11 switched after our last
+// re-arm stays d3d11's). True when both were still ours.
+bool DisarmUsEntries(void** vt) {
+  bool ok = true;
+  if (vt[g_usSlot] == reinterpret_cast<void*>(&UsHook))
+    FdWriteSlot(&vt[g_usSlot], reinterpret_cast<void*>(g_usOrig));
+  else
+    ok = false;
+  if (vt[g_us1Slot] == reinterpret_cast<void*>(&Us1Hook))
+    FdWriteSlot(&vt[g_us1Slot], reinterpret_cast<void*>(g_us1Orig));
+  else
+    ok = false;
+  if (!ok) fdexport::g_usLost++;  // lost after the last re-arm chance (diagnostic)
+  g_usArmed = false;
+  return ok;
+}
+// The OM / viewport entries into vt; false when unknown or ours already.
+bool ArmOmEntries(void** vt) {
+  if (!OmSlots()) return false;
+  void* om = vt[g_omSlot];
+  void* omu = vt[g_omUavSlot];
+  void* vp = vt[g_vpSlot];
+  if (om == reinterpret_cast<void*>(&OmHook) || omu == reinterpret_cast<void*>(&OmUavHook) ||
+      vp == reinterpret_cast<void*>(&VpHook))
+    return false;  // a stale arm (should not happen)
+  g_omOrig = reinterpret_cast<OmFn>(om);
+  g_omUavOrig = reinterpret_cast<OmUavFn>(omu);
+  g_vpOrig = reinterpret_cast<VpFn>(vp);
+  FdWriteSlot(&vt[g_omSlot], reinterpret_cast<void*>(&OmHook));
+  FdWriteSlot(&vt[g_omUavSlot], reinterpret_cast<void*>(&OmUavHook));
+  FdWriteSlot(&vt[g_vpSlot], reinterpret_cast<void*>(&VpHook));
+  // The toggle points (Flush, Map, GetData: not among d3d11's toggled entries): a toggle repaired right after it.
+  for (int k = 0; k < kTpCount; ++k) {
+    g_tpArmed[k] = false;
+    if (k >= kTpBasic && !g_tpExtended) continue;
+    if (k == kTpUnmap && !g_tpCk) continue;  // R32: cockpit ipd's arms only
+    if (g_tpSlot[k] < 0 || vt[g_tpSlot[k]] == TogglePointHook(k)) continue;
+    g_tpOrig[k] = vt[g_tpSlot[k]];
+    FdWriteSlot(&vt[g_tpSlot[k]], TogglePointHook(k));
+    g_tpArmed[k] = true;
+  }
+  return true;
+}
+// The overlay passes' state-call toggle points into an arm held by another feature (a nested overlay pass);
+// DisarmTpExtended takes them out again at the overlay pass end (DisarmOmEntries too, when it comes first).
+bool g_tpAddedExt = false;
+void ArmTpExtended(void** vt) {
+  for (int k = kTpBasic; k < kTpCount; ++k) {
+    if (g_tpArmed[k] || g_tpSlot[k] < 0 || vt[g_tpSlot[k]] == TogglePointHook(k)) continue;
+    g_tpOrig[k] = vt[g_tpSlot[k]];
+    FdWriteSlot(&vt[g_tpSlot[k]], TogglePointHook(k));
+    g_tpArmed[k] = true;
+    g_tpAddedExt = true;
+  }
+}
+// R32's Unmap toggle point into another feature's arm while a cockpit pass is nested in it (the cpu path's
+// observer reads a mapped effect buffer at its Unmap); out again at the nested pass's end.
+void ArmTpUnmap(void** vt) {
+  if (!vt || g_tpArmed[kTpUnmap] || g_tpSlot[kTpUnmap] < 0 || vt[g_tpSlot[kTpUnmap]] == TogglePointHook(kTpUnmap))
+    return;
+  g_tpOrig[kTpUnmap] = vt[g_tpSlot[kTpUnmap]];
+  FdWriteSlot(&vt[g_tpSlot[kTpUnmap]], TogglePointHook(kTpUnmap));
+  g_tpArmed[kTpUnmap] = true;
+  g_tpAddedUnmap = true;
+}
+void DisarmTpUnmap(void** vt) {
+  if (!g_tpAddedUnmap) return;
+  g_tpAddedUnmap = false;
+  if (g_tpArmed[kTpUnmap] && vt && vt[g_tpSlot[kTpUnmap]] == TogglePointHook(kTpUnmap))
+    FdWriteSlot(&vt[g_tpSlot[kTpUnmap]], g_tpOrig[kTpUnmap]);
+  g_tpArmed[kTpUnmap] = false;
+}
+void DisarmTpExtended(void** vt) {
+  if (!g_tpAddedExt) return;
+  g_tpAddedExt = false;
+  for (int k = kTpBasic; k < kTpCount; ++k) {
+    if (g_tpArmed[k] && vt && vt[g_tpSlot[k]] == TogglePointHook(k)) FdWriteSlot(&vt[g_tpSlot[k]], g_tpOrig[k]);
+    g_tpArmed[k] = false;
+  }
+}
+// True when OMSetRenderTargets was still ours (the others are put back when ours).
+bool DisarmOmEntries(void** vt) {
+  bool missed = false;
+  if (vt[g_omSlot] == reinterpret_cast<void*>(&OmHook))
+    FdWriteSlot(&vt[g_omSlot], reinterpret_cast<void*>(g_omOrig));
+  else
+    missed = true;
+  if (vt[g_omUavSlot] == reinterpret_cast<void*>(&OmUavHook))
+    FdWriteSlot(&vt[g_omUavSlot], reinterpret_cast<void*>(g_omUavOrig));
+  if (vt[g_vpSlot] == reinterpret_cast<void*>(&VpHook))
+    FdWriteSlot(&vt[g_vpSlot], reinterpret_cast<void*>(g_vpOrig));
+  for (int k = 0; k < kTpCount; ++k) {
+    if (g_tpArmed[k] && vt[g_tpSlot[k]] == TogglePointHook(k))
+      FdWriteSlot(&vt[g_tpSlot[k]], g_tpOrig[k]);
+    g_tpArmed[k] = false;
+  }
+  g_tpAddedExt = false;
+  g_tpAddedUnmap = false;
+  return !missed;
+}
+
+// True when this call armed (false: no context, foreign hooks, unknown slots,
+// or an arm is held already, by the caller's own feature or another one).
+bool ArmOm(bool overlay = false) {
+  State& s = g_s;
+  if (!s.ctx || g_armTable) return false;
+  // gpu_dedup.h and the D3D meter re-arm OMSetRenderTargets* themselves
+  // (ForeignTableHooks): no in-pass arm while they hold the table.
+  if (gdd::g_hooked.load(std::memory_order_relaxed) || d3ds::g_vtblCount.load(std::memory_order_relaxed) > 0) {
+    g_omSkipForeign++;
+    return false;
+  }
+  void** vt = *reinterpret_cast<void***>(s.ctx);
+  if (!ArmOmEntries(vt)) return false;
+  g_armTable = vt;
+  g_omCapture = true;
+  // Far depth / cockpit ipd: the cPerView uploads, only while something uses them.
+  g_usArmed = false;
+  const bool wantUs = !overlay && (fdexport::WantUploads() || ckipd::WantUploads());
+  if (wantUs && ForeignTableHooks()) fdexport::g_usSkipForeign++;
+  if (wantUs && !ForeignTableHooks() && UsSlots()) ArmUsEntries(vt);
+  return true;
+}
+
+void DisarmUsOnly();
+void DisarmOm() {
+  if (g_usOnlyArm) {
+    // The forward cockpit pass's own arm: closed at that pass's end
+    // (CockpitIpdBoundary), never by another feature's pass end. With no
+    // cockpit pass open (uninstall, an end that never came) it goes here.
+    if (ckipd::PassOpen()) return;
+    return DisarmUsOnly();
+  }
   void** vt = g_armTable;
   if (!vt) return;
-  DisarmDraws();
-  if (g_usArmed) {
-    bool usMissed = false;
-    if (vt[g_usSlot] == reinterpret_cast<void*>(&UsHook))
-      d3ds::WriteTablePointer(&vt[g_usSlot], reinterpret_cast<void*>(g_usOrig));
-    else
-      usMissed = true;
-    if (vt[g_us1Slot] == reinterpret_cast<void*>(&Us1Hook))
-      d3ds::WriteTablePointer(&vt[g_us1Slot], reinterpret_cast<void*>(g_us1Orig));
-    else
-      usMissed = true;
-    if (usMissed) fdexport::g_usLost++;
-    g_usArmed = false;
+  if (g_fwdNested && g_usArmed && ckipd::PassOpen()) {
+    // The feature whose arm a forward cockpit pass nested in ends first: the
+    // arm passes to the forward pass (upload entries kept; OM / viewport kept
+    // for the re-arm only; draws out). Its end removes it (DisarmUsOnly).
+    DisarmDraws();
+    g_ovlAddedDraws = false;
+    g_omCapture = false;
+    g_usOnlyOm = true;
+    g_usOnlyArm = true;
+    g_fwdNested = g_fwdAddedUs = false;
+    g_ovRtv = nullptr;
+    ckipd::g_st.fwdHandover++;
+    return;
   }
+  g_fwdNested = g_fwdAddedUs = false;
+  DisarmDraws();
+  const bool missed = !DisarmOmEntries(vt);
+  if (missed) fdexport::g_omLost++;
+  g_lastUsOk = false;
+  if (g_usArmed) g_lastUsOk = DisarmUsEntries(vt);
+  if (missed && !g_seqN) g_armMissed++;
+  g_lastArmOk = !missed;
   g_armTable = nullptr;
+  g_ovRtv = nullptr;
+  g_ckLightArm = false;
+}
+
+// Cockpit ipd: a pass whose cPerView uploads are wanted without the OM /
+// viewport capture (TransparentCockpitPass, watched cockpit passes). Never
+// with another module's hooks in the table.
+//  - No arm held: its own arm. The upload entries, and the OM / viewport
+//    entries only as re-arm points (g_omCapture false: nothing captured).
+//    d3d11 switches the update entries after a Flush / ExecuteCommandList
+//    (UsRearm); an uploads-only arm with no other entry of ours could only
+//    re-arm after an upload it saw, so a switch between the pass begin and
+//    the binder's first cPerView upload sent that upload past us (live
+//    2026-10-13: 17 of 20776 forward passes, logged "not armed" by a
+//    classification slip in PassEnd; the counters showed the arm itself never
+//    failed). DCS binds the pass's frame buffer and viewport before its draws,
+//    so the OM / viewport hooks put the upload entries back before the upload.
+//  - Another feature's in-pass arm held (far depth HDR / overlay arm, the
+//    overlay trace, the verify trace; all ArmOm, same table): nested. Its
+//    upload entries are shared (or added when it has none, and removed again
+//    at the forward pass end); if that feature's pass ends first, the arm
+//    passes to the forward pass (DisarmOm), so neither end cuts the other's
+//    entries.
+// draws: the draw entries too (own arm only; unused today).
+bool ArmUsOnly(bool draws = false) {
+  State& s = g_s;
+  if (!s.ctx || g_usOnlyArm || g_fwdNested) return false;
+  if (ForeignTableHooks()) {
+    fdexport::g_usSkipForeign++;
+    return false;
+  }
+  if (!UsSlots()) return false;
+  void** vt = *reinterpret_cast<void***>(s.ctx);
+  if (g_armTable) {
+    if (draws || g_armTable != vt) return false;
+    if (g_usArmed) {
+      UsRearm();
+    } else {
+      if (!ArmUsEntries(vt)) return false;
+      g_fwdAddedUs = true;
+    }
+    ArmTpUnmap(vt);  // R32: the cockpit pass's own toggle point in the shared arm (out again at its end)
+    g_fwdNested = true;
+    ckipd::g_st.fwdNested++;
+    return true;
+  }
+  if (!ArmUsEntries(vt)) return false;
+  g_armTable = vt;
+  g_tpExtended = draws;  // an overlay pass's own arm: its state-call toggle points too
+  g_tpCk = true;         // cockpit ipd's own arm: R32's Unmap point too
+  g_usOnlyOm = ArmOmEntries(vt);
+  g_tpExtended = false;
+  g_tpCk = false;
+  g_omCapture = false;
+  if (draws) ArmDraws();  // before g_usOnlyArm: ArmDraws refuses the forward arm to other callers
+  g_usOnlyArm = true;
+  return true;
+}
+// The forward cockpit pass's end (and the uninstall through DisarmOm): its own
+// arm out, or its share of another feature's arm.
+void DisarmUsOnly() {
+  if (g_fwdNested) {
+    g_fwdNested = false;
+    if (g_ovlAddedDraws) DisarmDraws();  // added for a nested overlay pass: the outer arm had none
+    g_ovlAddedDraws = false;
+    void** vt = g_armTable;
+    DisarmTpExtended(vt);
+    DisarmTpUnmap(vt);
+    if (g_fwdAddedUs && g_usArmed && vt) DisarmUsEntries(vt);  // the outer arm had no upload entries
+    g_fwdAddedUs = false;
+    return;
+  }
+  if (!g_usOnlyArm) return;
+  g_usOnlyArm = false;
+  g_omCapture = true;
+  void** vt = g_armTable;
+  if (!vt) {
+    g_usOnlyOm = false;
+    return;
+  }
+  DisarmDraws();
+  if (g_usOnlyOm) DisarmOmEntries(vt);
+  g_usOnlyOm = false;
+  if (g_usArmed) DisarmUsEntries(vt);
+  g_armTable = nullptr;
+  g_ovRtv = nullptr;
 }
 
 // Captures the G-buffer's depth target (bound inside the pass), viewport and
@@ -3040,7 +3623,8 @@ void DrawPost(int act) {
     }
     CmpFinish();
   }
-  DrawRearm();
+  g_lastCall = 3;  // (before the re-arm: a toggle found here came from this draw, repaired before any upload)
+  InPassRearm();  // the upload entries too: a draw is also a point where d3d11 may have toggled them
 }
 
 int DrawPreSeh(int kind, UINT count, UINT inst) {
@@ -3059,12 +3643,25 @@ void DrawPostSeh(int act) {
   }
 }
 // Cockpit ipd phase 2: true when the draw was issued (split in two) here.
-bool SplitDrawGuarded(ID3D11DeviceContext* c, UINT n, UINT sv) {
+// After a fault inside the split DCS's state goes back exactly (the capture
+// FinishSplit restores) and the references are released; a fault after a
+// draw was issued counts as drawn (never DCS's draw a second time on top).
+void FinishSplitSeh(ckipd::SplitCap* cap) {
   __try {
-    return ckipd::SplitDraw(c, n, sv, [c, n, sv] { reinterpret_cast<DrawFnT>(g_dOrig[fdexport::kDkDraw])(c, n, sv); });
+    ckipd::FinishSplit(*cap);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    ckipd::t_lightBusy = false;
+  }
+}
+bool SplitDrawGuarded(ID3D11DeviceContext* c, UINT n, UINT sv) {
+  ckipd::SplitCap cap;
+  __try {
+    return ckipd::SplitDraw(
+        c, n, sv, [c, n, sv] { reinterpret_cast<DrawFnT>(g_dOrig[fdexport::kDkDraw])(c, n, sv); }, &cap);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     ckipd::g_fault = true;
-    return false;
+    FinishSplitSeh(&cap);
+    return cap.draws > 0;
   }
 }
 // Counted in ckipd::g_busy before g_on is read: ckipd::Stop clears g_on and
@@ -3074,6 +3671,55 @@ bool SplitDrawSeh(ID3D11DeviceContext* c, UINT n, UINT sv) {
   const bool r = ckipd::g_on.load() && ckipd::Active() && SplitDrawGuarded(c, n, sv);
   ckipd::g_busy.fetch_sub(1);
   return r;
+}
+// The lighting pass end (cockpit ipd phase 2): its outcome, then DCS's bytes
+// back into the cPerView buffer the arm forwarded at the true eye (before the
+// disarm: the restore goes through the still-armed upload entries, forwarded
+// unchanged). The class is always closed and the restore always done, also
+// after a fault.
+void RestoreAllSeh() {
+  __try {
+    ckipd::RestoreAll();
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    ckipd::g_fault = true;
+    ckipd::g_restN = 0;
+  }
+}
+void LightEndSeh() {
+  ckipd::g_busy.fetch_add(1);
+  if (ckipd::g_on.load()) {
+    __try {
+      ckipd::LightEnd();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      ckipd::g_fault = true;
+    }
+  }
+  ckipd::LightClose();
+  if (ckipd::g_on.load()) RestoreAllSeh();
+  ckipd::g_busy.fetch_sub(1);
+}
+// Cockpit ipd: a draw of an open overlay pass (draw entries armed only for the
+// draw probe, ckipd::OvlProbeDraws). The upload entries must still be ours: a
+// table toggle that nothing repaired would have sent the effect uploads before
+// this draw past the hooks (counted, then re-armed); the probe of the bound
+// constant buffers (ckipd::OvlDrawProbe).
+void OvlDrawSeh(ID3D11DeviceContext* c) {
+  if (GetCurrentThreadId() != ptiming::g_topTid.load(std::memory_order_relaxed)) return;
+  ckipd::g_busy.fetch_add(1);
+  if (ckipd::g_on.load() && ckipd::Active()) {
+    __try {
+      void** vt = g_armTable;
+      if (g_usArmed && vt && *reinterpret_cast<void***>(c) == vt &&
+          (vt[g_usSlot] != reinterpret_cast<void*>(&UsHook) || vt[g_us1Slot] != reinterpret_cast<void*>(&Us1Hook))) {
+        ckipd::g_st.ovlDrawSlotLost++;
+        UsRearm();
+      }
+      ckipd::OvlDrawProbe(c);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      ckipd::g_fault = true;
+    }
+  }
+  ckipd::g_busy.fetch_sub(1);
 }
 
 // Called while an overlay-class pass runs: `rtv` was bound by DCS in that pass
@@ -3310,10 +3956,7 @@ void HdrBoundary(void* pass, bool begin) {
   // Learn / re-check the source at this pass's first draw (hdr mode, also
   // while fallen back so the source can return (5e), or the trace).
   if ((fdexport::HdrMode() && (fdexport::g_mask & (1u << v))) || g_trOpen) {
-    if (!g_armTable) {
-      ArmOm(true);
-      g_hdrArmOwn = g_armTable != nullptr;
-    }
+    if (!g_armTable) g_hdrArmOwn = ArmOm(true);  // (a forward cockpit pass's arm is never taken as ours)
     ArmDraws();
     if (g_drawArmed) g_hdrLearnView = v;
   }
@@ -3397,8 +4040,10 @@ void OverlayPassBoundary(void* pass, bool begin) {
   if (begin) {
     bool ldr = false;
     if (g_overlayArm || !PreOverlayWaiting() || !IsOverlayPass(pass, &ldr)) return;
-    ArmOm(true);              // (already armed by the overlay trace window: kept)
-    if (!g_armTable) return;  // no context yet or the slots are unknown
+    ArmOm(true);  // (already armed by the overlay trace window: kept)
+    // No context yet, the slots are unknown, or a forward cockpit pass holds
+    // its own arm (no capture in it; not expected around an overlay pass).
+    if (!g_armTable || g_usOnlyArm) return;
     g_overlayArm = true;
     g_overlayLdr = ldr;
     g_ovRtv = nullptr;
@@ -3671,40 +4316,121 @@ void TraceStep(void* pass, bool begin, int depth) {
 
 bool ArmUsOnly(bool draws);
 void DisarmUsOnly();
-// The uploads-only arm still holds both upload entries of the table DCS's
-// context uses (no d3d11 table switch took them; nothing re-arms this arm).
+// The forward cockpit pass's arm (its own, or its share of another feature's)
+// still holds both upload entries of the table DCS's context uses at the pass
+// end (no d3d11 switch took them after the last re-arm point).
 bool UsOnlyArmIntact() {
   void** vt = g_armTable;
-  if (!g_usOnlyArm || !g_usArmed || !vt || !g_s.ctx || *reinterpret_cast<void***>(g_s.ctx) != vt) return false;
+  if (!(g_usOnlyArm || g_fwdNested) || !g_usArmed || !vt || !g_s.ctx || *reinterpret_cast<void***>(g_s.ctx) != vt)
+    return false;
   return vt[g_usSlot] == reinterpret_cast<void*>(&UsHook) && vt[g_us1Slot] == reinterpret_cast<void*>(&Us1Hook);
 }
-// Cockpit ipd (cockpit_ipd.h): the forward cockpit passes (their own
-// uploads-only arm) and, in phase 2, GBufferLightingPass of a patched view
-// (the in-pass arm with the draw entries: the OM / viewport calls re-arm them
-// after a d3d11 table switch). The begin paths start nothing unless
-// ckipd::Active(); the end paths run regardless (also after a fault), so a
-// pass of ours is always closed: restore, class, arm.
+// Cockpit ipd (cockpit_ipd.h): the forward cockpit passes (ArmUsOnly: their
+// own arm or nested in another feature's) and, in phase 2,
+// GBufferLightingPass of a patched view (the in-pass arm with the draw
+// entries: the OM / viewport calls re-arm them after a d3d11 table switch).
+// The begin paths start nothing unless ckipd::Active(); the end paths run
+// regardless (also after a fault), so a pass of ours is always closed:
+// restore, class, arm. Order at a forward pass end: PassEnd (its restore
+// uploads go through the still-armed hooks, forwarded unchanged), then the
+// arm; this runs before far depth's boundary work for the same boundary
+// (OnBoundaryInner), so a far depth arm ending at the same boundary finds
+// the forward share already gone.
 void CockpitIpdBoundary(void* pass, bool begin, int k) {
+  ckipd::CostScope cost(ckipd::kCostBoundary);
+  // Another pass's boundary inside an open forward cockpit pass: one more
+  // re-arm point (never at the pass's own end: its intact check must see a loss).
+  if ((g_usOnlyArm || g_fwdNested) && ckipd::PassOpen() && !ckipd::PassOwns(pass)) UsRearm();
   if (k != plod::kOther) return;
+  // R32 (ovl_cpu.h): which overlay pass of which HMD view is open (the record replay's view); at its end the
+  // backstop restore of DCS's camera bytes.
+  if (ckipd::ocpu::Installed()) ckipd::ocpu::PassBoundary(pass, begin, g_s.hmdOrd);
   if (begin) {
     if (ckipd::PassBegin(pass)) {
       ckipd::PassArmed(ArmUsOnly(false));
     } else if (PassIs(pass, "GBufferLightingPass") && ckipd::LightBegin(pass)) {
       bool ok = false;
       if (!g_armTable) {
+        g_tpCk = true;  // cockpit ipd's lighting arm: R32's Unmap point too
         ArmOm();
+        g_tpCk = false;
+        g_ckLightArm = g_armTable != nullptr;
         ok = g_armTable && g_usArmed;
         if (ok) ArmDraws();
         ok = ok && g_drawArmed;
         if (!ok) DisarmOm();
       }
-      if (!ok) ckipd::LightEnd();
+      if (!ok) ckipd::LightArmFailed();
     }
   } else if (ckipd::PassOwns(pass)) {
     ckipd::PassEnd(pass, UsOnlyArmIntact());
     DisarmUsOnly();
   } else if (ckipd::LightOwns(pass)) {
-    ckipd::LightEnd();
+    LightEndSeh();  // before the disarm: a repair draw goes through the still-armed draw entries
+    DisarmOm();
+  }
+}
+// Cockpit ipd's overlay passes (OverlayHDRPass, OverlayLDRPass, GUIPass of an
+// HMD view): begun after far depth's own begin work for the same boundary, so
+// far depth's overlay / trace arm (ArmOm, no upload entries) is already held
+// and ours nests in it (ArmUsOnly adds the upload entries and removes them at
+// our end, which comes first at the shared end boundary: CockpitIpdBoundary
+// runs before far depth's end work). With no arm held, its own arm.
+// The draw entries and the state-call toggle points (kTpBasic..: IASetVertexBuffers, PSSetShaderResources, ...)
+// are armed in every overlay pass of a moved view (live 2026-10-13: a draw or state call that makes d3d11
+// submit its command buffer leaves the table in the "after flush" state, and the next effect upload went past
+// the hook: one frame of HUD / MFD symbols at the boosted eye, every few seconds). Each of these hooks puts the
+// upload entries back right after the call (DrawPost -> InPassRearm, AfterToggle). The
+// draw probe (OvlDrawProbe: the diagnostics of the bound constant buffers) runs for a budget of passes only.
+void CockpitIpdOverlayBegin(void* pass) {
+  ckipd::CostScope cost(ckipd::kCostBoundary);
+  if (!ckipd::OvlBegin(pass)) return;
+  const bool ovl = ckipd::t_cls == ckipd::kClsOvl;
+  const bool own = !g_armTable;
+  // The cpu path (R32): the arm only observes the effect uploads (the learner's samples): the upload entries and
+  // the basic toggle points; no draw entries, no state-call toggle points (no image depends on them).
+  const bool full = ovl && !ckipd::PathCpu();
+  const bool ok = ArmUsOnly(full && own);
+  ckipd::PassArmed(ok);
+  if (!full) {
+    if (ok && g_fwdNested && ovl) ckipd::g_st.ovlNested++;
+    return;
+  }
+  if (ok && ovl && !own && g_fwdNested && !g_drawArmed) {  // nested in far depth's arm: its draw entries too
+    ArmDraws();
+    g_ovlAddedDraws = g_drawArmed;
+  }
+  if (ok && ovl && !own && g_fwdNested && g_armTable) ArmTpExtended(g_armTable);  // and its state-call points
+  if (ok && ovl && g_drawArmed && ckipd::OvlProbeDraws()) ckipd::OvlProbePassArmed();
+  if (ok && g_fwdNested && ovl) ckipd::g_st.ovlNested++;
+}
+
+// [Perception] CockpitTrueIpdFrameDump: an HMD view's OverlayLDRPass / GUIPass while a dump captures that view.
+// Its render target binds are the view's own image (between passes DCS has its default frame buffer bound, the
+// desktop mirror, the same for every view). Begun after far depth's begin work and before cockpit ipd's overlay
+// begin for the same boundary: an arm already held (far depth's) is used as it is, else the dump takes its own
+// (OM / viewport entries only, as far depth's overlay arm), and cockpit ipd's overlay arm nests in it as it nests
+// in far depth's. Ended after cockpit ipd's and far depth's end work (their shares are gone by then).
+void DumpPassBoundary(void* pass, bool begin) {
+  State& s = g_s;
+  if (begin) {
+    if (g_dumpPass) return;  // (nested: the outer watched pass keeps it)
+    char n[48];
+    PassName(pass, n, sizeof(n));
+    if (!ckipd::DumpPassWanted(s.hmdOrd, n)) return;
+    ckipd::DumpPassOpen(s.hmdOrd);
+    g_dumpPass = true;
+    if (!g_armTable) g_dumpArm = ArmOm(true);
+    return;
+  }
+  if (!g_dumpPass) return;
+  char n[48];
+  PassName(pass, n, sizeof(n));
+  if (strcmp(n, "OverlayLDRPass") != 0 && strcmp(n, "GUIPass") != 0) return;  // a nested pass
+  ckipd::DumpPassClose();
+  g_dumpPass = false;
+  if (g_dumpArm) {
+    g_dumpArm = false;
     DisarmOm();
   }
 }
@@ -3712,7 +4438,15 @@ void CockpitIpdBoundary(void* pass, bool begin, int k) {
 void OnBoundaryInner(void* pass, bool begin) {
   State& s = g_s;
   const int k = plod::KindRaw(pass);
+  if (ckipd::g_dumpActive && k == plod::kOther && s.hmdOrd >= 0 && s.hmdOrd <= 3) {  // CockpitTrueIpdFrameDump
+    char pn[48];
+    PassName(pass, pn, sizeof(pn));
+    ckipd::DumpNotePass(s.hmdOrd, pn, begin);
+  }
   if (ckipd::g_on.load(std::memory_order_relaxed)) CockpitIpdBoundary(pass, begin, k);
+  // [Perception] CockpitTrueIpdFrameDump: the views' final image at their CopyToHMDPass begin.
+  if (begin && k == plod::kHmd && ckipd::g_on.load(std::memory_order_relaxed) && ckipd::Active())
+    ckipd::DumpAtHmd(s.hmdOrd);
   // Far depth export: Quad Views' wanted views, once per frame at its first boundary.
   if (fdexport::g_on.load(std::memory_order_relaxed)) {
     fdexport::DecideFrame();
@@ -3739,6 +4473,12 @@ void OnBoundaryInner(void* pass, bool begin) {
       fdexport::DoPush(s.hmdOrd);
     }
   }
+  // [Perception] CockpitTrueIpdFrameDump: the views' overlay pass render targets (their own images).
+  if (k == plod::kOther &&
+      (g_dumpPass || (begin && (ckipd::g_dumpActive || ckipd::g_dumpReq.load(std::memory_order_relaxed) > 0) &&
+                      ckipd::g_on.load(std::memory_order_relaxed) && ckipd::Active())))
+    DumpPassBoundary(pass, begin);
+  if (begin && k == plod::kOther && ckipd::g_on.load(std::memory_order_relaxed)) CockpitIpdOverlayBegin(pass);
   if (s.hasPending || s.hasGridPending || s.hasFarPending) {
     // The water passes of the target view: depth with water after WaterSeaPass.
     if (!begin && (PassIs(pass, "WaterSeaPass") || PassIs(pass, "RiversPass"))) {
@@ -3762,6 +4502,12 @@ void OnBoundaryInner(void* pass, bool begin) {
         g_trOpen = false;
         DisarmOm();
         g_overlayArm = false;
+      }
+      if (g_dumpPass || g_dumpArm) {  // a frame dump's watched pass whose end did not come
+        ckipd::DumpPassClose();
+        g_dumpPass = false;
+        if (g_dumpArm) DisarmOm();
+        g_dumpArm = false;
       }
       if (g_passDsv) g_passDsv->Release();
       g_passDsv = nullptr;
@@ -3800,6 +4546,8 @@ void OnBoundaryInner(void* pass, bool begin) {
       dev->AddRef();
     else if (sfilt::Ctx* c = sfilt::g_ctx.load())
       c->GetDevice(&dev);
+    else
+      dev = pdev::Device();  // [General] PerceptionOnly: neither of them is installed
     if (!dev) return;
     const bool ok = EnsureDevice(dev);
     dev->Release();
@@ -3825,10 +4573,33 @@ void OnBoundaryInner(void* pass, bool begin) {
 std::atomic<int> g_busy{0};
 std::atomic<bool> g_installed{false};
 
+// Uninstall (config thread): a cockpit ipd pass of ours still open is closed
+// on the render thread at its next pass boundary (its restore and its arm),
+// so no patched bytes stay in a buffer DCS does not upload again.
+std::atomic<bool> g_ckCloseReq{false}, g_ckCloseDone{false};
+void CkCloseOnRenderThread() {
+  if (ckipd::PassOpen()) {
+    if (ckipd::t_cls == ckipd::kClsLight) {
+      LightEndSeh();
+      DisarmOm();
+    } else {
+      void* pass = ckipd::t_pass;
+      ckipd::PassEnd(pass, UsOnlyArmIntact());
+      DisarmUsOnly();
+    }
+  }
+  if (ckipd::g_restN) RestoreAllSeh();
+}
+
 // The boundary work (OnBoundary's __try).
 void OnBoundaryBody(void* pass, bool begin, int depth) {
   // Far depth export, uninstall: the layer's references and our copies
   // are released here, on the thread Quad Views reads them on.
+  if (g_ckCloseReq.load()) {
+    CkCloseOnRenderThread();
+    g_ckCloseReq = false;
+    g_ckCloseDone = true;
+  }
   if (fdexport::g_releaseReq.load()) {
     fdexport::ReleaseAll();
     if (g_s.hasFarPending) {
@@ -3971,12 +4742,16 @@ bool Install() {
       dev->AddRef();
     else if (sfilt::Ctx* c = sfilt::g_ctx.load())
       c->GetDevice(&dev);
+    else
+      dev = pdev::Device();  // [General] PerceptionOnly: neither of them is installed
     if (dev) {
       if (!EnsureDevice(dev)) ReleaseD3D();
       dev->Release();
     }
   }
   ptiming::g_depthBoundary = &OnBoundary;
+  g_rearmOk = true;
+  sfilt::g_afterEcl = &AfterEclEntry;
   g_installed = true;
   g_ckWith = ckipd::Wanted();
   if (g_ckWith) ckipd::Start();
@@ -4008,11 +4783,21 @@ void FarReleaseOnRenderThread() {
 void Uninstall() {
   if (!g_installed.load()) return;
   FarReleaseOnRenderThread();  // while the callback is still in
+  if (ckipd::g_on.load()) {
+    // A cockpit ipd pass still open is closed on the render thread (restore, arm), bounded like far depth's.
+    g_ckCloseDone = false;
+    g_ckCloseReq = true;
+    const ULONGLONG deadline = GetTickCount64() + 300;
+    while (!g_ckCloseDone.load() && GetTickCount64() < deadline) Sleep(1);
+    g_ckCloseReq = false;
+  }
   if (!g_installed.exchange(false)) return;
+  sfilt::g_afterEcl = nullptr;
   ckipd::g_on = false;  // the upload hooks forward DCS's bytes from now on
   ptiming::BoundaryFn me = &OnBoundary;
   ptiming::g_depthBoundary.compare_exchange_strong(me, nullptr);
   for (int i = 0; i < 200 && g_busy.load(); ++i) Sleep(5);
+  if (g_busy.load()) Log("fixation depth: the boundary callback was still running at the uninstall (1 s)");
   Sleep(50);  // a callback that loaded the pointer but had not entered yet
   ckipd::Stop();  // gbpass observer out and drained, BoostOut unmapped, phase-2 objects released
   g_ckWith = false;
@@ -4033,7 +4818,17 @@ void Uninstall() {
   g_cmpPassView = -1;
   g_trOpen = false;
   g_hdrArmOwn = false;
+  // No render-thread re-arm from here on: a hook running now may still re-arm, so wait for it (bounded); a hook
+  // entered later only forwards. Then our entries go (draw entries too).
+  g_rearmOk = false;
+  for (int i = 0; i < 200 && g_hookBusy.load(); ++i) Sleep(1);
+  if (g_hookBusy.load()) Log("fixation depth: a context hook was still running at the uninstall (200 ms)");
   DisarmOm();  // a pass that began before the callback went out (draw entries too)
+  g_rearmOk = true;  // nothing of ours is armed now (g_armTable null): a re-arm needs a new arm first
+  if (g_tinyCb) g_tinyCb->Release();
+  g_tinyCb = nullptr;
+  g_tinyDev = nullptr;
+  g_usNormal = g_us1Normal = nullptr;
   HdrRelease();
   g_overlayArm = false;
   if (g_passDsv) g_passDsv->Release();
@@ -4099,6 +4894,21 @@ void FarLogStats() {
 
 void LogStats() {
   if (fdexport::g_on.load()) FarLogStats();
+  {  // the context-table toggle points: the table found toggled right after each
+    char b[600] = "";
+    for (int k = 0; k < kTpCount; ++k) {
+      const size_t n = strlen(b);
+      snprintf(b + n, sizeof(b) - n, "%s%s %llu", k ? ", " : "", kTpNames[k], static_cast<unsigned long long>(g_tpHits[k].load()));
+    }
+    Log("fixation depth: context table found toggled right after: %s", b);
+    b[0] = 0;
+    for (int k = 0; k < 32; ++k)
+      if (const uint64_t v = g_togglePrev[k].load()) {
+        const size_t n = strlen(b);
+        snprintf(b + n, sizeof(b) - n, " [%d] %llu", k, static_cast<unsigned long long>(v));
+      }
+    Log("fixation depth: ... and the hook passed before it (1 upload, 3 draw, 4 OM, 5 viewport, 10+ point):%s", b);
+  }
   if (!g_coneOn.load() && !g_gridOn.load()) return;
   std::lock_guard<std::mutex> lock(g_statMutex);
   const DepthIn& d = g_last;

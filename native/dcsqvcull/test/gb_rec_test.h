@@ -442,6 +442,20 @@ void PureTests() {
     for (int k = 1; ok2 && k < n2; ++k) ok2 = runs[k][0] > runs[k - 1][0];
     ok2 = ok2 && why2[0] == 2 && why2[2] == 2;  // the shortest runs: beyond the limit
     Check(ok2, "gbuffer rec: at most 8 segments, the longest kept in vector order");
+    // Stage 2's ownship items (flag 2) never share a segment with the others (flag 1): runs split where the value
+    // changes, each run judged by the island on its own.
+    std::vector<uint8_t> h;
+    for (int q = 0; q < 40; ++q) h.push_back(1);
+    for (int q = 0; q < 35; ++q) h.push_back(2);
+    for (int q = 0; q < 5; ++q) h.push_back(1);
+    for (int q = 0; q < 3; ++q) h.push_back(2);
+    std::vector<uint8_t> why3(h.size(), 0);
+    const int n3 = PlanSegments(h.data(), h.size(), 30, 12, runs, why3.data());
+    bool ok3 = n3 == 2 && runs[0][0] == 0 && runs[0][1] == 40 && runs[1][0] == 40 && runs[1][1] == 75;
+    for (size_t i = 75; i < h.size(); ++i) ok3 = ok3 && why3[i] == 1;
+    ok3 = ok3 && why3[0] == 0 && why3[40] == 0;
+    Check(ok3, "gbuffer rec: a run splits where the flag value changes (ownship 2 / other 1), each part against the "
+               "island");
   }
   uint64_t m[2] = {};
   BaseOverrides(m);
@@ -997,6 +1011,181 @@ void JobTests() {
     for (uint32_t k = 0; k < j->segCount && strideOk; ++k) strideOk = j->segs[k].end - j->segs[k].first >= 6;
     Check(strideOk, "gbuffer rec job: the verify stride forces every 7th draw residual (island 6, at most 12 segments)");
   }
+  // Stage 2 ownship (cockpit_ipd.h, CockpitTrueIpdOwnship=2): a job started with the locked instance's key leaves
+  // its items residual (kROwnship) and brackets each run of them in the handed list with the switch entries; every
+  // other item keeps its decision unless its run got split below the island; no key: the list is today's.
+  {
+    InitJob(*j, *w, t, tt);
+    j->ownKey = nullptr;
+    BuildJob(*j);
+    std::vector<uint8_t> base(j->n);
+    for (size_t i = 0; i < j->n; ++i) base[i] = j->items[i].reason;
+    std::vector<void*> baseList(j->swapList, j->swapList + j->swapCount);
+    const Seg s0 = j->segs[0];
+    // The instance identity is the item's +0x18 (its texture entries' array, one per instance in DCS; one per item
+    // in this fixture): the key of item s0.first + 12 makes that one item the ownship.
+    const int ownIdx = static_cast<int>(s0.first + 12);
+    std::vector<int> own = {ownIdx};
+    void* const ownTag = *reinterpret_cast<void**>(w->item[ownIdx] + 0x18);
+    static int inE = 0, outE = 0;
+    void* const inE0 = g_ownInE;
+    void* const outE0 = g_ownOutE;
+    g_ownInE = &inE;
+    g_ownOutE = &outE;
+    InitJob(*j, *w, t, tt);
+    j->ownKey = ownTag;
+    j->ownRec = false;  // 0.5.9: ownship items residual
+    const bool built2 = BuildJob(*j) == kBuildOk;
+    bool ok = built2 && j->ownItems == own.size() && j->ownRuns == 1;
+    std::vector<bool> isOwn(j->n, false);
+    for (int i : own) isOwn[i] = true;
+    for (size_t i = 0; i < j->n && ok; ++i) {
+      const uint8_t r = j->items[i].reason;
+      if (isOwn[i])
+        ok = r == kROwnship && j->items[i].seg == kNoSeg;
+      else
+        ok = r == base[i] || r == kRIsland || r == kRSegments || (base[i] == kRIsland && r == kRecorded) ||
+             (base[i] == kRSegments && r == kRecorded);
+      if (!ok) printf("     (ownship job: item %zu reason %u, before %u, own %d)\n", i, r, base[i], (int)isOwn[i]);
+    }
+    // The list: between in and out only ownship items; every ownship item between them; balanced.
+    bool inside = false;
+    int ins = 0, outs = 0;
+    size_t ownSeen = 0;
+    for (uint32_t k = 0; k < j->swapCount && ok; ++k) {
+      void* e = j->swapList[k];
+      if (e == &inE) {
+        ok = !inside;
+        inside = true;
+        ++ins;
+      } else if (e == &outE) {
+        ok = inside;
+        inside = false;
+        ++outs;
+      } else {
+        int idx = -1;
+        for (int i = 0; i < kN; ++i)
+          if (e == w->rend[i]) idx = i;
+        const bool o = idx >= 0 && isOwn[idx];
+        ok = o == inside;
+        ownSeen += o;
+      }
+    }
+    const bool listOk = ok;
+    ok = ok && !inside && ins == 1 && outs == 1 && ownSeen == own.size();
+    if (!ok)
+      printf("     (ownship job: built %d, items %u (want %zu), runs %u, list ok %d, in %d out %d, own seen %zu, "
+             "segment 0 %u..%u)\n",
+             built2, j->ownItems, own.size(), j->ownRuns, listOk, ins, outs, ownSeen, s0.first, s0.end);
+    static int otherTag = 0;
+    InitJob(*j, *w, t, tt);
+    j->ownKey = &otherTag;  // a key with no item of it here: today's list
+    j->ownRec = true;
+    BuildJob(*j);
+    const bool noneSame = j->ownItems == 0 && j->ownRuns == 0 && j->ownRecItems == 0 &&
+                          std::vector<void*>(j->swapList, j->swapList + j->swapCount) == baseList;
+    Check(ok && noneSame,
+          "gbuffer rec job, ownship stage 2 (ownship items residual, 0.5.9): the locked instance's items residual "
+          "(kROwnship), each run bracketed by the switch entries in the handed list (balanced, nothing else inside), "
+          "the other items' decisions kept (but a run split below the island); with no item of the key here the list "
+          "is today's");
+    // Recorded ownship segments (the default): a single ownship item is a run below the island: residual (island),
+    // still bracketed; nothing else changes from the 0.5.9 build.
+    InitJob(*j, *w, t, tt);
+    j->ownKey = ownTag;
+    j->ownRec = true;
+    bool oneOk = BuildJob(*j) == kBuildOk && j->ownItems == 1 && j->ownRuns == 1 && j->ownRecItems == 0 &&
+                 j->items[ownIdx].reason == kRIsland && j->items[ownIdx].seg == kNoSeg;
+    // An ownship run of island + 4 items inside the longest recorded segment: recorded as a segment of its own,
+    // bracketed by exactly one switch-in / switch-out around its exec entry; the items before it (5) fall below the
+    // island; the rest of the old segment stays recorded when long enough.
+    uint32_t longest = 0;
+    InitJob(*j, *w, t, tt);
+    j->ownKey = nullptr;
+    BuildJob(*j);
+    for (uint32_t k = 1; k < j->segCount; ++k)
+      if (j->segs[k].end - j->segs[k].first > j->segs[longest].end - j->segs[longest].first) longest = k;
+    const Seg sl = j->segs[longest];
+    const uint32_t runN = kDefaultIsland + 4;
+    bool segOk = sl.end - sl.first >= runN + 5;
+    const uint32_t a = sl.first + 5, b = a + runN;
+    std::vector<void*> tag0(j->n);
+    for (size_t i = 0; i < j->n; ++i) tag0[i] = *reinterpret_cast<void**>(w->item[i] + 0x18);
+    void* const runTag = tag0[a];
+    if (segOk)
+      for (uint32_t i = a; i < b; ++i) *reinterpret_cast<void**>(w->item[i] + 0x18) = runTag;
+    InitJob(*j, *w, t, tt);
+    j->ownKey = runTag;
+    j->ownRec = true;
+    segOk = segOk && BuildJob(*j) == kBuildOk && j->ownItems == runN && j->ownRecItems == runN && j->ownRuns == 1;
+    const uint8_t ownSeg = segOk ? j->items[a].seg : kNoSeg;
+    segOk = segOk && ownSeg != kNoSeg && j->segs[ownSeg].first == a && j->segs[ownSeg].end == b;
+    for (uint32_t i = a; i < b && segOk; ++i) segOk = j->items[i].reason == kRecorded && j->items[i].seg == ownSeg;
+    for (uint32_t i = sl.first; i < a && segOk; ++i) segOk = j->items[i].reason == kRIsland;
+    const bool restRec = sl.end - b >= kDefaultIsland;
+    for (uint32_t i = b; i < sl.end && segOk; ++i)
+      segOk = restRec ? (j->items[i].reason == kRecorded && j->items[i].seg != ownSeg) : j->items[i].reason == kRIsland;
+    int ins2 = 0, outs2 = 0, inside2 = 0;
+    bool inner = segOk;
+    for (uint32_t k = 0; k < j->swapCount && inner; ++k) {
+      void* e = j->swapList[k];
+      if (e == &inE) {
+        ++ins2;
+        inner = !inside2;
+        inside2 = 1;
+      } else if (e == &outE) {
+        ++outs2;
+        inner = inside2 == 1 || inside2 == 2;
+        inside2 = 0;
+      } else if (inside2) {
+        inner = inside2 == 1 && e == j->execObj[ownSeg];  // only the ownship segment's exec entry inside
+        inside2 = 2;
+      }
+    }
+    segOk = segOk && inner && ins2 == 1 && outs2 == 1 && !inside2;
+    if (!segOk || !oneOk)
+      printf("     (ownship segment: one-item ok %d; longest segment %u..%u, run %u..%u, seg %u, items %u rec %u runs %u, "
+             "in %d out %d)\n",
+             oneOk, sl.first, sl.end, a, b, ownSeg, j->ownItems, j->ownRecItems, j->ownRuns, ins2, outs2);
+    for (size_t i = 0; i < j->n; ++i) *reinterpret_cast<void**>(w->item[i] + 0x18) = tag0[i];
+    j->ownKey = nullptr;
+    g_ownInE = inE0;
+    g_ownOutE = outE0;
+    Check(oneOk && segOk,
+          "gbuffer rec job, ownship stage 2: the locked instance's run recorded as a segment of its own (exactly its "
+          "items), its exec entry alone between one switch-in and one switch-out; the neighbours judged by the island "
+          "on their own; a single ownship item below the island stays residual and bracketed");
+  }
+  // Stage 2's fallback: the request consumed once, the vector handed to the stage-1 swap.
+  {
+    static int calls = 0;
+    calls = 0;
+    auto* const fn0 = g_ownSwapFn;
+    g_ownSwapFn = [](void** v) -> bool {
+      ++calls;
+      return v != nullptr;
+    };
+    void* vec[2] = {nullptr, nullptr};
+    const uint64_t f0 = g_own2Fallback.load();
+    const uint64_t w0 = g_own2FbWhy[kOwnFbScope].load(), w1 = g_own2FbWhy[kOwnFbStock].load(),
+                   w2 = g_own2FbWhy[kOwnFbKey].load();
+    t_own2 = true;
+    Own2Fallback(vec);
+    Own2Fallback(vec);
+    const bool fb = calls == 1 && !t_own2 && g_own2Fallback.load() == f0 + 1;
+    t_own2 = false;
+    Own2Fallback(vec);
+    t_own2 = true;
+    Own2Fallback(vec, kOwnFbStock);
+    t_own2 = true;
+    Own2Fallback(vec, kOwnFbKey);
+    const bool whyOk = g_own2FbWhy[kOwnFbScope].load() == w0 + 1 && g_own2FbWhy[kOwnFbStock].load() == w1 + 1 &&
+                       g_own2FbWhy[kOwnFbKey].load() == w2 + 1 && g_own2Fallback.load() == f0 + 3 && calls == 3;
+    g_ownSwapFn = fn0;
+    Check(fb && whyOk, "gbuffer rec, ownship stage 2: the fallback hands the vector to stage 1 once per request, "
+                       "never without one, counted by cause (outside the recorder's executions, stock anyway, a job "
+                       "for another instance)");
+  }
   FreeJob(j);
   FreeTex(tt);
   FreeTables(t);
@@ -1452,8 +1641,14 @@ bool RecordOnPool(defrec::Pool& pool, Job& j, std::vector<ID3D11CommandList*>& c
   return !cls.empty();
 }
 
+// Stage 2's ownship switch in the device harness: DCS's bound b7 (d.b7) holds the "true eye" bytes while in.
+const float kB7Dcs[64] = {0.9f, 1.3f, 0, 0};
+const float kB7True[64] = {0.83f, 1.45f, 0, 0};
+void OwnSwitchB7(Dev& d, bool in) { d.imm->UpdateSubresource(d.b7, 0, nullptr, in ? kB7True : kB7Dcs, 0, 0); }
+
 // Our pass: DCS's loop over the caster list; each exec entry copies DCS's
-// bound b6/b7 into ours and executes its segment (state compared around it).
+// bound b6/b7 into ours and executes its segment (state compared around it);
+// stage 2's switch entries (g_ownInE / g_ownOutE) switch DCS's b7.
 // late: every segment executed after the whole list (the order control).
 bool RunRecorded(Dev& d, World& w, Job& j, const std::vector<ID3D11CommandList*>& cls, const TexTable& tt, bool late,
                  bool* stateSame) {
@@ -1481,6 +1676,10 @@ bool RunRecorded(Dev& d, World& w, Job& j, const std::vector<ID3D11CommandList*>
   };
   for (uint32_t e = 1; e < j.swapCount; ++e) {
     void* p = j.swapList[e];
+    if (p && (p == g_ownInE || p == g_ownOutE)) {
+      OwnSwitchB7(d, p == g_ownInE);
+      continue;
+    }
     bool isExec = false;
     for (uint32_t k = 0; k < j.segCount; ++k)
       if (p == j.execObj[k]) {
@@ -1502,6 +1701,15 @@ void ResetDcsState(World& w) {
   memcpy(w.mat, w.matInit, sizeof(w.mat));
   for (auto& row : w.vars)
     for (FakeVar& v : row) v.value = nullptr;
+}
+
+// Issue #3 replay: the first access violation while armed bumps the frame-heap generation before the frame-based
+// handlers run (DCS's reset_memory landing between RecordRange's check and its read).
+std::atomic<int> g_raceResetArmed{0};
+LONG CALLBACK RaceResetVeh(EXCEPTION_POINTERS* ep) {
+  if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && g_raceResetArmed.exchange(0))
+    g_frameHeapGen.fetch_add(1);
+  return EXCEPTION_CONTINUE_SEARCH;
 }
 
 void DeviceTests(srtest::Compiler& comp) {
@@ -1610,6 +1818,125 @@ void DeviceTests(srtest::Compiler& comp) {
       Check(diff > 0, "gbuffer rec device: (control) the same lists out of order differ: the harness sees order");
     }
     for (auto*& l : cls) Rel(l);
+    // Stage 2's ownship recorded (live 2026-10-14: 0.5.9 left its items residual, so an execution showing mostly
+    // the ownship went stock). A run of island + 6 items of one instance inside the longest segment: recorded as a
+    // segment of its own between a switch-in and a switch-out of DCS's b7; the pass equals stock drawn with the
+    // ownship's b7 switched around the same items, bit for bit; the same lists without the switch differ (control).
+    {
+      setup(0);
+      ResetDcsState(*w);
+      BuildJob(*j);
+      uint32_t longest = 0;
+      for (uint32_t k = 1; k < j->segCount; ++k)
+        if (j->segs[k].end - j->segs[k].first > j->segs[longest].end - j->segs[longest].first) longest = k;
+      const uint32_t f0 = j->segs[longest].first, e0 = j->segs[longest].end;
+      const uint32_t runN = kDefaultIsland + 6, a = f0 + 3, b = a + runN;
+      bool ownOk = j->segCount > 0 && e0 - f0 >= runN + 3;
+      std::vector<void*> tag0(kN);
+      for (int i = 0; i < kN; ++i) tag0[i] = *reinterpret_cast<void**>(w->item[i] + 0x18);
+      void* const runTag = tag0[a];
+      // (the fixture's instance key is the texture entries' array: the run's items share item a's entries, in the
+      // stock draws too)
+      std::vector<std::vector<uint64_t>> ent0(kN, std::vector<uint64_t>(3 * kHandles));
+      for (int i = 0; i < kN; ++i) memcpy(ent0[i].data(), w->entries[i], sizeof(w->entries[i]));
+      if (ownOk)
+        for (uint32_t i = a; i < b; ++i) {
+          *reinterpret_cast<void**>(w->item[i] + 0x18) = runTag;
+          memcpy(w->entries[i], w->entries[a], sizeof(w->entries[i]));
+        }
+      // The stock reference: DCS's loop with the switch around the ownship's items.
+      ResetDcsState(*w);
+      PassSetup(d);
+      OwnSwitchB7(d, false);
+      for (int i = 0; i < kN; ++i) {
+        if (i == static_cast<int>(a)) OwnSwitchB7(d, true);
+        DrawItem(d, *w, i, tt);
+        if (i == static_cast<int>(b) - 1) OwnSwitchB7(d, false);
+      }
+      const std::vector<uint8_t> refOwn = ReadTargets(d);
+      ResetDcsState(*w);
+      PassSetup(d);
+      for (int i = 0; i < kN; ++i) DrawItem(d, *w, i, tt);
+      const std::vector<uint8_t> refNoSw = ReadTargets(d);
+      size_t diffRef = 0;
+      for (size_t k = 0; k < refNoSw.size() && k < refOwn.size(); ++k) diffRef += refNoSw[k] != refOwn[k];
+      static int inMark = 0, outMark = 0;
+      void* const in0 = g_ownInE;
+      void* const out0 = g_ownOutE;
+      g_ownInE = &inMark;
+      g_ownOutE = &outMark;
+      setup(0);
+      j->splitMin = 16;
+      j->ownKey = runTag;
+      j->ownRec = true;
+      ResetDcsState(*w);
+      // RecordOnPool's StartJob reads g_ownKey: published for the run's instance like cockpit_ipd.h does.
+      const void* pub0 = g_ownKey.load();
+      g_ownKey = runTag;
+      const bool recO = ownOk && RecordOnPool(pool, *j, cls, false);
+      g_ownKey = pub0;
+      const uint8_t ownSeg = recO ? j->items[a].seg : kNoSeg;
+      ownOk = recO && ownSeg != kNoSeg && j->segs[ownSeg].first == a && j->segs[ownSeg].end == b &&
+              j->ownRecItems == runN && j->ownRuns == 1;
+      bool ssO = false;
+      ResetDcsState(*w);
+      const bool runO = ownOk && RunRecorded(d, *w, *j, cls, tt, false, &ssO);
+      std::vector<uint8_t> gotO = ReadTargets(d);
+      size_t diffO = refOwn.size() == gotO.size() ? 0 : SIZE_MAX;
+      for (size_t k = 0; diffO != SIZE_MAX && k < refOwn.size(); ++k) diffO += refOwn[k] != gotO[k];
+      // Control: the same lists with the switch entries ignored (the ownship at DCS's b7) differ from refOwn.
+      g_ownInE = nullptr;
+      g_ownOutE = nullptr;
+      size_t diffC = 0;
+      if (runO) {
+        bool ssC = false;
+        ResetDcsState(*w);
+        // (the switch entries are now unknown objects to the harness: run the lists by hand, skipping them)
+        PassSetup(d);
+        for (uint32_t e = 1; e < j->swapCount; ++e) {
+          void* q = j->swapList[e];
+          if (q == &inMark || q == &outMark) continue;
+          bool isExec = false;
+          for (uint32_t k = 0; k < j->segCount; ++k)
+            if (q == j->execObj[k]) {
+              isExec = true;
+              ID3D11Buffer* now[2][3] = {};
+              d.imm->VSGetConstantBuffers(6, 3, now[0]);
+              d.imm->PSGetConstantBuffers(6, 3, now[1]);
+              for (int st = 0; st < 2; ++st)
+                for (int qq = 0; qq < 2; ++qq)
+                  if (j->ctxBuf[st][qq] && now[st][qq]) d.imm->CopyResource(j->ctxBuf[st][qq], now[st][qq]);
+              for (auto& row : now)
+                for (auto*& pp : row) Rel(pp);
+              for (uint32_t pc2 = j->segs[k].pieceFirst; pc2 < j->segs[k].pieceEnd; ++pc2)
+                d.imm->ExecuteCommandList(cls[pc2], TRUE);
+            }
+          if (isExec) continue;
+          int i = 0;
+          while (i < kN && w->rend[i] != q) ++i;
+          if (i < kN) DrawItem(d, *w, i, tt);
+        }
+        (void)ssC;
+        const std::vector<uint8_t> gotC = ReadTargets(d);
+        for (size_t k = 0; k < refOwn.size() && k < gotC.size(); ++k) diffC += refOwn[k] != gotC[k];
+      }
+      g_ownInE = in0;
+      g_ownOutE = out0;
+      j->ownKey = nullptr;
+      for (int i = 0; i < kN; ++i) {
+        *reinterpret_cast<void**>(w->item[i] + 0x18) = tag0[i];
+        memcpy(w->entries[i], ent0[i].data(), sizeof(w->entries[i]));
+      }
+      OwnSwitchB7(d, false);
+      printf("     ownship segment %u (%u..%u) of %u: %zu bytes differ from stock with the switch, control %zu, "
+             "switch effect on stock %zu\n",
+             ownSeg, a, b, j->segCount, diffO, diffC, diffRef);
+      Check(ownOk && runO && ssO && diffO == 0 && diffC > 0 && diffRef > 0,
+            "gbuffer rec device, ownship stage 2: the locked instance's run recorded as a segment of its own reads the "
+            "switched b7 at its exec entry: the pass equals stock with the switch bit for bit (6 RTs, depth, "
+            "stencil); without the switch entries the lists differ");
+      for (auto*& l : cls) Rel(l);
+    }
     // A texture's view changes after the job read it (another pass swapped its
     // mip sets): the segments using it are re-recorded with the new view on the
     // workers, and the pass equals stock drawn with the new view.
@@ -1653,6 +1980,56 @@ void DeviceTests(srtest::Compiler& comp) {
     Check(recR && planned && want > 0 && done == want && runR && ssR && diffR == 0 && diffO > 0,
           "gbuffer rec device: segments whose texture view changed after the job are re-recorded with the new view, "
           "bit-exact to stock; the old lists differ");
+    // Issue #3 replay (0.5.8 field fault: RecordRange <- RedoMain <- Pool::RunGuarded, data address -1): a
+    // re-record passes the heap-generation check, DCS resets its frame heap, the renderable's item pointer is then
+    // another allocation's bytes (non-canonical). Before the fix the pool latched the whole recorder off; now the
+    // fault is contained per job like JobMain's and the helpers'.
+    {
+      uint32_t rk = 0, rc = UINT32_MAX;
+      for (uint32_t k = 0; k < j->segCount && rc == UINT32_MAX; ++k)
+        for (uint32_t c = j->segs[k].candFirst; c < j->segs[k].candEnd; ++c)
+          if (j->cands[c].alive) {
+            rk = k;
+            rc = c;
+            break;
+          }
+      if (rc == UINT32_MAX) {
+        Check(false, "gbuffer rec redo race: a recorded candidate");
+      } else {
+        alignas(16) static uint8_t recycled[0x200];
+        memset(recycled, 0xcd, sizeof(recycled));
+        *reinterpret_cast<uint64_t*>(recycled + 0x10) = 0xdead00000000beefull;  // non-canonical, as in the log
+        void* const keep = j->snap[j->cands[rc].item];
+        j->snap[j->cands[rc].item] = recycled;
+        for (auto& st : j->redoState) st.store(kRedoNone);
+        j->heapGen = g_frameHeapGen.load();  // started this frame: the check before the read passes
+        j->redoStop = 0;
+        j->tStart = 0;                       // no scene change near it
+        const uint64_t contained0 = g_redoFaultsContained.load();
+        g_raceResetArmed = 1;  // the first access violation stands for "DCS reset the heap right after the check"
+        PVOID veh = AddVectoredExceptionHandler(1, &RaceResetVeh);
+        Rel(j->redoCl[rk]);  // the list of the view-change re-record above
+        j->redoArg[rk] = {j, static_cast<uint8_t>(rk), 0};
+        j->redoState[rk].store(kRedoRun);
+        const bool sub = pool.Submit(0, &RedoMain, &j->redoArg[rk], nullptr);
+        if (sub) pool.Wait(60000);
+        RemoveVectoredExceptionHandler(veh);
+        g_raceResetArmed = 0;
+        const bool failed = j->redoState[rk].load() == kRedoFail && !j->redoCl[rk];
+        const bool poolOn = !pool.Disabled() && pool.Status(0) != defrec::kFaulted;
+        printf("     redo race: fault %s, segment %u %s, pool %s\n",
+               g_redoFaultsContained.load() == contained0 + 1 ? "contained" : "NOT contained", rk,
+               failed ? "drawn stock" : "?", poolOn ? "on" : "LATCHED OFF");
+        Check(sub && failed && poolOn && g_redoFaultsContained.load() == contained0 + 1,
+              "gbuffer rec redo race (issue #3): a re-record that reads a renderable recycled after its generation "
+              "check is contained per job (segment stock, pool and recorder stay on)");
+        j->snap[j->cands[rc].item] = keep;
+        j->heapGen = 0;
+        for (auto& st : j->redoState) st.store(kRedoNone);
+        g_recycledFaults = 0;
+        g_redoFaultsContained = 0;
+      }
+    }
     w->SetView(0, d.texSrv[0]);
     ReleaseSegLists(*j);
     ReleaseRedo(*j);

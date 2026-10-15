@@ -110,6 +110,57 @@ inline uint32_t GovernorStage(uint64_t w) { return static_cast<uint32_t>(w >> kS
 inline uint32_t Verdict(uint64_t w) { return static_cast<uint32_t>(w >> kVerdictShift) & 7; }
 inline bool GovernorOn(uint64_t w) { return (w & kGovernorOn) != 0; }
 
+// ---- Dual camera status (DcsQvCull_DualCameraStatus; layout also in loader_api.h) ----
+// R31 option 3, [Perception] CockpitTrueIpd. A second loader-owned word, handed
+// to the payload through DcsQvPayload_SetDualCameraStatusWord, published by the
+// worker about once per second through its own Sink (0: not configured, no
+// payload, payload swap, after stop).
+//   bit 0       CockpitTrueIpd configured (1 or 2)
+//   bit 1       ON: the cockpit was patched (true eye distance) in the last
+//               rendered frame (mode 1, not paused, not faulted)
+//   bit 2       paused: switched off by its in-flight key (Alt+Shift+F7)
+//   bit 3       waiting for Depth boost: no BoostOut, BoostOut stale or dry,
+//               or the boost scale is 1.0 (not applied)
+//   bit 4       observe mode (CockpitTrueIpd=2)
+//   bits 5-7    0
+//   bits 8-15   current boost scale x100 rounded, clamped to 255 (140 =
+//               x1.40); 0 when no fresh BoostOut is read
+//   bits 16-31  frames patched in the last second, clamped to 65535
+//   bits 32-63  0
+constexpr uint64_t kDcConfigured = 1ull << 0;
+constexpr uint64_t kDcOn = 1ull << 1;
+constexpr uint64_t kDcPaused = 1ull << 2;
+constexpr uint64_t kDcWaiting = 1ull << 3;
+constexpr uint64_t kDcObserve = 1ull << 4;
+constexpr int kDcScaleShift = 8;    // 8 bits
+constexpr int kDcFramesShift = 16;  // 16 bits
+
+inline uint64_t PackDualCamera(bool configured, bool on, bool paused, bool waiting, bool observe, double scale,
+                               uint32_t framesPatchedPerSecond) {
+  if (!configured) return 0;
+  uint64_t s = 0;
+  if (scale > 0 && scale < 1e6) {  // false for NaN
+    const double x = scale * 100.0 + 0.5;
+    s = x >= 255.0 ? 255u : static_cast<uint64_t>(x);
+  }
+  const uint64_t fr = framesPatchedPerSecond > 65535u ? 65535u : framesPatchedPerSecond;
+  return kDcConfigured | (on ? kDcOn : 0) | (paused ? kDcPaused : 0) | (waiting ? kDcWaiting : 0) |
+         (observe ? kDcObserve : 0) | (s << kDcScaleShift) | (fr << kDcFramesShift);
+}
+// A count over dtMs as a per-second rate (0 when dtMs is 0), clamped to 65535.
+inline uint32_t RatePerSecond(uint64_t delta, uint64_t dtMs) {
+  if (!dtMs) return 0;
+  const uint64_t r = (delta * 1000 + dtMs / 2) / dtMs;
+  return r > 65535u ? 65535u : static_cast<uint32_t>(r);
+}
+inline bool DcConfigured(uint64_t w) { return (w & kDcConfigured) != 0; }
+inline bool DcOn(uint64_t w) { return (w & kDcOn) != 0; }
+inline bool DcPaused(uint64_t w) { return (w & kDcPaused) != 0; }
+inline bool DcWaiting(uint64_t w) { return (w & kDcWaiting) != 0; }
+inline bool DcObserve(uint64_t w) { return (w & kDcObserve) != 0; }
+inline uint32_t DcScaleX100(uint64_t w) { return static_cast<uint32_t>(w >> kDcScaleShift) & 0xff; }
+inline uint32_t DcFramesPerSecond(uint64_t w) { return static_cast<uint32_t>(w >> kDcFramesShift) & 0xffff; }
+
 // Payload side: the word it may write to. Publish and Detach are serialized,
 // so once Detach returns no further write reaches the (loader-owned) word.
 // Detach waits at most 2 s for the lock: a publisher that faulted inside

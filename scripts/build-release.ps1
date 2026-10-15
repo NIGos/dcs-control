@@ -42,6 +42,7 @@ foreach ($dir in @('packages','components/quadviews','components/cheeky-focus/Ch
 # Quad Views, OFXR and Cheeky are copied as built: each must have been built from the sources and patches here now
 # (the source package carries those, so they must match what ships).
 . (Join-Path $PSScriptRoot 'build-stamp.ps1')
+if ($env:DCSC_SKIP_TIMING_TESTS -eq '1') { throw 'DCSC_SKIP_TIMING_TESTS=1 is set: a release runs every test. Remove it and build again.' }
 foreach ($component in @('quadviews','ofxr','cheeky')) { Assert-BuildStampCurrent $component }
 foreach ($filename in @('dxgi.dll','CheekyFoveatedDLSS/CheekyFoveatedDLSSHost.dll','CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll')) {
     $target = Join-Path $payloadRoot "components/cheeky-focus/$filename"

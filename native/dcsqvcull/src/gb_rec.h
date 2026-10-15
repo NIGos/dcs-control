@@ -143,6 +143,54 @@
 
 namespace gbrec {
 
+// cockpit_ipd.h's ownship ([Perception] CockpitTrueIpdOwnship): an HMD view's world execution whose item vector
+// it handed DCS's loop with its own switch entries. The recorder steps aside for exactly that execution (DCS draws
+// it stock, over that vector; the slot stays bound and alive), and starts no job while the hint is set (an
+// execution stepped aside within the last frames), so no worker records a pass it will not execute.
+thread_local bool t_ownAside = false;
+std::atomic<bool> g_ownAsideHint{false};
+std::atomic<uint64_t> g_ownAsidePasses{0}, g_ownAsideJobsSkipped{0};
+// Stage 2 (CockpitTrueIpdOwnship=2): the recorder keeps the execution. Jobs started while g_ownKey names the locked
+// instance record its items in segments of their own (a run of ownship items never shares a segment with other
+// items: PlanSegments splits at the change) and bracket each run of them in the handed list, segment exec entries
+// and residual items alike, with cockpit_ipd.h's switch entries (g_ownInE / g_ownOutE: the true eye's cPerView in,
+// DCS's back). An ownship segment reads the switched cPerView: ExecSegment copies the b6-b8 DCS has bound at its
+// exec entry, i.e. after the switch-in. 0.5.9 left them residual (kROwnship): an execution that showed little but
+// the ownship (F-14 rear view: ~85 of ~88 items) then had nothing recordable left and went stock as a whole, and the
+// ownship's ~40-70 items per execution were drawn by DCS every frame, scale 1 included (live 2026-10-14). With
+// g_ownRecSegs off (tests) they stay residual as in 0.5.9. t_own2: cockpit_ipd.h's GbBegin asks for the ownship at
+// the true eye in this execution. The recorder uses its job only when the job was built for the same instance;
+// otherwise (no job, another key, a stock path, verify's stock run) it hands the vector to g_ownSwapFn (stage 1:
+// DCS's loop over the vector with the switch entries) and draws stock. All or nothing per execution, never a mix.
+std::atomic<const void*> g_ownKey{nullptr};
+std::atomic<bool> g_ownRecSegs{true};
+void* g_ownInE = nullptr;
+void* g_ownOutE = nullptr;
+bool (*g_ownSwapFn)(void** vec) = nullptr;
+thread_local bool t_own2 = false;
+uint64_t g_ownSwIn = 0, g_ownSwBoundDiff = 0;  // cockpit_ipd.h's switch-ins; of a struct not bound at VS b7
+void (*g_ownAwayFn)(bool on) = nullptr;  // cockpit_ipd.h: the ownship's camera moved far aside (verify's mask run)
+// Verify's ownship mask (stage 2): runs, failures, compares classified, differing texels inside / outside it.
+std::atomic<uint64_t> g_ownMaskRuns{0}, g_ownMaskFailed{0}, g_ownMaskCompares{0}, g_ownMaskIn{0}, g_ownMaskOut{0};  // cockpit_ipd.h's switch-ins done / without a source (verify diagnostics)
+std::atomic<uint64_t> g_own2Live{0}, g_own2Fallback{0}, g_own2Items{0}, g_own2Runs{0}, g_own2NoKey{0};
+std::atomic<uint64_t> g_own2RecItems{0};  // ownship items drawn from command lists in the executions kept
+// Why an execution fell back to stage 1 (the sum is g_own2Fallback):
+//  kOwnFbScope: not one of the recorder's executions (decal / A2C ordinals out of its scope, the recorder off or
+//               on another thread, a contained fault): stage 1 by design, nothing recorded was lost;
+//  kOwnFbStock: one of its executions, but drawn stock anyway (no job yet, late, failed, nothing recordable, item
+//               vector changed, verify's stock run): stage 1 costs nothing extra there;
+//  kOwnFbKey:   its job was ready but built for another instance (or none): the only case that drops a usable job.
+enum : int { kOwnFbScope = 0, kOwnFbStock = 1, kOwnFbKey = 2 };
+std::atomic<uint64_t> g_own2FbWhy[3] = {};
+// Stage 2's fallback for this execution (render thread, before DCS's loop runs over vec): stage 1's vector.
+void Own2Fallback(void** vec, int why = kOwnFbScope) {
+  if (!t_own2) return;
+  t_own2 = false;
+  g_own2Fallback++;
+  g_own2FbWhy[why >= 0 && why < 3 ? why : 0]++;
+  if (vec && g_ownSwapFn) g_ownSwapFn(vec);
+}
+
 using shrec::Mix;
 using shrec::SafeRel;
 
@@ -498,6 +546,7 @@ enum ItemReason : int {
   kRIsland,
   kRSegments,
   kRCockpitMix,
+  kROwnship,
   kReasons
 };
 const char* const kReasonName[kReasons] = {
@@ -526,7 +575,9 @@ const char* const kReasonName[kReasons] = {
     "forced residual (verify stride)",
     "in a run shorter than the island",
     "beyond the segment limit",
-    "its material is drawn both in and out of the cockpit here"};
+    "its material is drawn both in and out of the cockpit here",
+    "the ownship (stage 2: DCS draws it between the lists, at the true eye)"
+};
 
 // Per execution: every segment executed, or why the whole execution was stock.
 enum PassReason : int {
@@ -544,6 +595,7 @@ enum PassReason : int {
   kPNoEntry,
   kPVerifyAa,
   kPVerifyCapture,
+  kPOwnship,
   kPassReasons
 };
 const char* const kPassReasonName[kPassReasons] = {
@@ -560,7 +612,8 @@ const char* const kPassReasonName[kPassReasons] = {
     "the sampler pool s5-s15 differs from the learned one",
     "the front entry did not run",
     "verify: stock vs stock run",
-    "verify: targets not captured"};
+    "verify: targets not captured",
+    "ownship stage 2: the job was not built for the locked instance (stage 1 for this execution)"};
 
 // Per segment of an execution that passed the front checks.
 enum SegReason : int {
@@ -610,11 +663,13 @@ inline void AllDwords(uint64_t m[2]) {
   m[1] = (1ull << (kCbLen / 4 - 64)) - 1;
 }
 
-// Runs of recordable items (flag != 0) in vector order: runs shorter than
-// island are cleared; at most maxSeg runs are kept (the longest, the earlier
-// on equal length). Returns the runs kept as [first, end) pairs in vector
-// order; out must hold maxSeg pairs. Cleared items get demote[] = 1 and the
-// reason (island or segment limit) in why[] (1 = island, 2 = limit).
+// Runs of recordable items (flag != 0) in vector order; a run is items of
+// the same flag value (stage 2's ownship items carry 2, the others 1: the two
+// never share a segment). Runs shorter than island are cleared; at most
+// maxSeg runs are kept (the longest, the earlier on equal length). Returns
+// the runs kept as [first, end) pairs in vector order; out must hold maxSeg
+// pairs. Cleared items get the reason (island or segment limit) in why[]
+// (1 = island, 2 = limit).
 inline int PlanSegments(const uint8_t* flag, size_t n, uint32_t island, int maxSeg, uint32_t (*out)[2],
                         uint8_t* why) {
   struct Run {
@@ -628,7 +683,7 @@ inline int PlanSegments(const uint8_t* flag, size_t n, uint32_t island, int maxS
       continue;
     }
     size_t e = i;
-    while (e < n && flag[e]) ++e;
+    while (e < n && flag[e] == flag[i]) ++e;
     if (e - i >= island) {
       runs.push_back({static_cast<uint32_t>(i), static_cast<uint32_t>(e)});
     } else {
@@ -1108,6 +1163,7 @@ enum : int { kRedoNone = 0, kRedoWant, kRedoRun, kRedoOk, kRedoFail };
 struct Piece {
   uint32_t candFirst, candEnd, draws;
   uint8_t seg, role;  // role: 0 the primary, 1.. the helpers in their arrival order
+  uint8_t redo;       // 1: a segment re-recorded during its pass (RedoRecord): stops once that pass is over
   ID3D11CommandList* cl;
 };
 
@@ -1295,8 +1351,12 @@ struct Job {
   ReadWant readWants[kMaxReadWants];
   uint64_t wantKey[kWantTable];
   uint32_t wantGen[kWantTable];
-  void* swapList[kMaxItems + 2];
+  void* swapList[2 * kMaxItems + 4];  // + the ownship's switch entries (at most one pair per residual item)
   uint32_t swapCount = 0;
+  const void* ownKey = nullptr;  // stage 2: the ownship instance this job left residual (g_ownKey at its start)
+  uint32_t ownItems = 0, ownRuns = 0, ownRecItems = 0;  // ownship items, bracketed runs, items in segments
+  bool ownRec = true;  // stage 2: ownship items recorded in segments of their own (g_ownRecSegs at its start)
+  uint8_t own[kMaxItems];  // stage 2: the item is the ownship's (any SceneRenderable of the instance, any material)
   // Segments whose textures changed after the job read them (render thread
   // plans at the front and exec entries; the slot's idle workers re-record).
   TexEntry redoEnt[kMaxRedoEnts];  // the job's own entries built from the live textures (views referenced)
@@ -1305,6 +1365,11 @@ struct Job {
   std::atomic<int> redoState[kMaxSegments];
   ID3D11CommandList* redoCl[kMaxSegments];
   RedoArg redoArg[kMaxSegments];
+  // Issue #3: 1 once the job's pass returned (WrapSlot). A re-record still
+  // running then is useless (RedoReady gave up on it, the segment was drawn
+  // stock) and stops before its next read of a renderable, instead of reading
+  // on until the next frame's heap reset. 0 again at Arm (ReleaseRedo).
+  std::atomic<int> redoStop{0};
 };
 
 Job* NewJob() {
@@ -1342,6 +1407,7 @@ void ReleaseRedo(Job& j) {
   }
   j.redoEntCount = 0;
   for (auto& st : j.redoState) st.store(kRedoNone, std::memory_order_relaxed);
+  j.redoStop.store(0, std::memory_order_relaxed);
 }
 
 void ReleaseTargetRefs(Job& j) {
@@ -1668,6 +1734,7 @@ void AddRefreshT(Job& j, int t, const TexEntry* e) {
 // heap was recycled (RecycledFilter), and still latches the recorder off
 // otherwise (a real bug).
 std::atomic<uint64_t> g_recycledJobs{0}, g_recycledFaults{0}, g_recycledAtPass{0};
+std::atomic<uint64_t> g_redoFaultsContained{0};  // issue #3: of g_recycledFaults, in RedoMain
 // heapGen 0 = not started through StartJob (offline tests driving a job directly): no check.
 inline bool HeapRecycled(const Job& j) {
   return j.heapGen && g_frameHeapGen.load(std::memory_order_acquire) != j.heapGen;
@@ -1889,6 +1956,7 @@ int FinishBuild(Job& j);
 // segment limit, then FinishBuild. Plain.
 int CommitBuild(Job& j) {
   NextStamp(j);
+  j.ownItems = j.ownRuns = j.ownRecItems = 0;
   for (int t = 0; t < kThreads; ++t) {
     for (uint32_t k = 0; k < j.tmissCount[t]; ++k) AddMiss(j, j.tmiss[t][k].tex, j.tmiss[t][k].aux, j.tmiss[t][k].type);
     for (uint32_t k = 0; k < j.trefreshCount[t]; ++k) AddRefresh(j, j.trefresh[t][k]);
@@ -1897,6 +1965,20 @@ int CommitBuild(Job& j) {
     Item& it = j.items[i];
     it = {~0u, ~0u, ~0u, static_cast<uint8_t>(kRNotModel), kNoSeg, 0, 0};
     const Pre& p = j.pre[i];
+    // Stage 2: every SceneRenderable of the ownship instance (stage 1's test: any material, so also the ones the
+    // recorder never records) is bracketed in the handed list; the recordable ones go to segments of their own (or stay
+    // residual, kROwnship, with g_ownRecSegs off).
+    j.own[i] = 0;
+    if (j.ownKey) {
+      const auto* r = static_cast<const uint8_t*>(j.snap[i]);
+      if (r && *reinterpret_cast<void* const*>(r) == j.env->srVt) {
+        const auto* item = *reinterpret_cast<const uint8_t* const*>(r + 0x10);
+        if (item && *reinterpret_cast<void* const*>(item + 0x18) == j.ownKey) {
+          j.own[i] = 1;
+          ++j.ownItems;
+        }
+      }
+    }
     if (p.kind != kPreModel) continue;
     uint32_t mi = 0;
     const bool ck = j.cockpit && p.cockpit;  // a cockpit candidate (cockpit jobs)
@@ -1929,7 +2011,11 @@ int CommitBuild(Job& j) {
     }
     if (!sh) return j.result = kBuildOversize;
     it.writer = 1;
-    it.reason = kRecorded;  // candidate so far
+    // The ownship's items: recorded in segments of their own (g_ownRecSegs), else residual. Residual, they are
+    // still a writer and a reader of its shader's FX variables, so its shader is DCS's entirely when one of them
+    // inherits a variable (a residual draw after a recorded writer would read the stale value: live 2026-10-14,
+    // AH-64D, verify found the ownship's geometry off in 1 of 25 compares).
+    it.reason = static_cast<uint8_t>(j.own[i] && !j.ownRec ? kROwnship : kRecorded);  // candidate so far
     if (sh->unclean) continue;
     const ReadsEntry* rd =
         p.pm && p.pm->shader == m->shader && PmTech(p.pm, ck) == m->tech ? PmReads(p.pm, ck) : nullptr;
@@ -1953,7 +2039,7 @@ int CommitBuild(Job& j) {
     it.reason = static_cast<uint8_t>(why);
   }
   for (size_t i = 0; i < j.n; ++i) {
-    j.flag[i] = j.items[i].reason == kRecorded ? 1 : 0;
+    j.flag[i] = j.items[i].reason == kRecorded ? (j.own[i] ? 2 : 1) : 0;  // 2: an ownship segment's
     j.segWhy[i] = 0;
   }
   uint32_t runs[kMaxSegments][2];
@@ -2144,15 +2230,27 @@ int FinishBuild(Job& j) {
     }
   }
   // DCS's loop: [front, residual items and one exec entry per segment, in order].
+  // Stage 2: each run of ownship items bracketed by the switch entries (an exec entry or another residual item
+  // closes the run).
   j.swapCount = 0;
+  j.ownRuns = 0;
+  j.ownRecItems = 0;
   j.swapList[j.swapCount++] = j.front;
+  const bool wrap = j.ownItems && g_ownInE && g_ownOutE;
+  bool open = false;
   for (size_t i = 0; i < j.n; ++i) {
     const uint8_t s = j.items[i].seg;
-    if (s == kNoSeg)
-      j.swapList[j.swapCount++] = j.snap[i];
-    else if (i == j.segs[s].first)
-      j.swapList[j.swapCount++] = j.execObj[s];
+    const bool own = wrap && j.own[i];
+    if (own && s != kNoSeg) ++j.ownRecItems;
+    if (s != kNoSeg && i != j.segs[s].first) continue;
+    if (own != open) {
+      j.swapList[j.swapCount++] = own ? g_ownInE : g_ownOutE;
+      open = own;
+      if (own) ++j.ownRuns;
+    }
+    j.swapList[j.swapCount++] = s == kNoSeg ? j.snap[i] : j.execObj[s];
   }
+  if (open) j.swapList[j.swapCount++] = g_ownOutE;
   return j.result = kBuildOk;
 }
 
@@ -2208,6 +2306,7 @@ bool RecordRange(defrec::Worker& w, Job& j, const Piece& s, int role) {
       j.recycled.store(1, std::memory_order_relaxed);
       return false;
     }
+    if (s.redo && j.redoStop.load(std::memory_order_acquire)) return false;  // its pass is over (issue #3)
     defrec::CbSlice sl = w.ring.Alloc(kCbLen);
     if (!sl) return false;
     BuildWindow(j, cd, win);
@@ -2365,6 +2464,8 @@ bool RedoRecord(defrec::Worker& w, Job& j, uint32_t k, int role) {
   p.draws = sg.draws;
   p.seg = static_cast<uint8_t>(k);
   p.role = static_cast<uint8_t>(role);
+  p.redo = 1;
+  if (HeapRecycled(j) || j.redoStop.load(std::memory_order_acquire)) return false;  // queued past its pass
   w.ring.Reset();
   const bool ok = RecordRange(w, j, p, role);
   w.ring.Close();
@@ -2378,13 +2479,28 @@ bool RedoRecord(defrec::Worker& w, Job& j, uint32_t k, int role) {
   return true;
 }
 
+// Issue #3 (0.5.8, "gbuffer recorder: disabled for this session (exception
+// 0xc0000005 at +0x10bec8 in worker 7, data address 0xffffffffffffffff)",
+// stack RecordRange <- RedoMain <- Pool::RunGuarded): a re-record reads the
+// job's renderables like JobMain and the helpers do, and can lose the same
+// race against DCS's frame-heap reset between RecordRange's generation check
+// and BuildWindow's read of [renderable+0x10]+0xd4 (a recycled renderable:
+// the item pointer is another allocation's bytes, here non-canonical). JobMain
+// and HelperMain contain that fault per job (RecycledFilter); RedoMain did
+// not, so the pool latched the whole recorder off. Now contained the same way:
+// the segment is drawn stock (or already was), the recorder stays on.
 bool RedoMain(defrec::Worker& w, void* u) {
   RedoArg& a = *static_cast<RedoArg*>(u);
   Job& j = *a.j;
   bool ok = false;
   if (j.texLock) AcquireSRWLockShared(j.texLock);
   __try {
+   __try {
     ok = RedoRecord(w, j, a.seg, a.worker);
+   } __except (RecycledFilter(GetExceptionCode(), j)) {
+    ok = false;
+    g_redoFaultsContained.fetch_add(1, std::memory_order_relaxed);
+   }
   } __finally {
     if (j.texLock) ReleaseSRWLockShared(j.texLock);
     j.redoState[a.seg].store(ok ? kRedoOk : kRedoFail, std::memory_order_release);
@@ -2400,6 +2516,8 @@ bool StartJob(Job& j, void** vec, bool early) {
   j.heapGen = g_frameHeapGen.load(std::memory_order_acquire);
   j.recycled.store(0, std::memory_order_relaxed);
   j.vec = vec;
+  j.ownKey = g_ownKey.load(std::memory_order_acquire);
+  j.ownRec = g_ownRecSegs.load(std::memory_order_relaxed);
   j.startedEarly = early;
   j.tStart = defrec::Qpc();
   SetEvent(j.start);
@@ -3210,6 +3328,9 @@ inline void DropPoolLists(int s) {
 ID3D11DeviceContext* g_ctx = nullptr;
 ID3D11Device* g_dev = nullptr;
 uint32_t g_entryGen = 0;
+uint32_t g_activeEntryGen = 0;  // g_entryGen at the last render entry of the followed graph seen while Active()
+// A pass may arm its slot's next job only in a frame whose render entry the active recorder saw (WrapSlot).
+inline bool PassMayArm(bool armed) { return !armed && g_activeEntryGen == g_entryGen; }
 int64_t g_entryQpc = 0;
 int g_ordinal = 0;       // G-buffer executions since the last render entry (render thread)
 void* g_gbRg = nullptr;  // the render graph of the G-buffer executions
@@ -3931,6 +4052,7 @@ int ExecSegment(PassCtx& pc, int k) {
     } else {
       for (uint32_t q = j.segs[k].pieceFirst; q < j.segs[k].pieceEnd; ++q) g_ctx->ExecuteCommandList(pc.cl[q], TRUE);
     }
+    sfilt::NotifyEcl(g_ctx);  // d3d11 toggled the context table's draw / update entries (in-pass hooks repair)
     t_segExecuted = true;
     pc.executeNs += NsSince(e0);
     if (gs) {
@@ -4548,6 +4670,29 @@ bool StockListGuarded(Slot& sl, void** vec, size_t* count) {
 
 void RunPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** vec) {
   Slot& sl = g_slot[pc.slot];
+  if (t_own2) {
+    const void* key = g_ownKey.load(std::memory_order_acquire);
+    if (pc.state == kPsArmed && key && pc.job->ownKey == key) {
+      g_own2Live++;  // the job's list brackets the ownship's runs (none here: nothing to switch)
+      g_own2Items += pc.job->ownItems;
+      g_own2Runs += pc.job->ownRuns;
+      g_own2RecItems += pc.job->ownRecItems;
+      t_own2 = false;
+    } else {
+      if (!key) g_own2NoKey++;
+      // Stage 1's vector (the switch entries around the ownship's runs): a ready job dropped only for its key.
+      Own2Fallback(vec, pc.state == kPsArmed ? kOwnFbKey : kOwnFbStock);
+      if (pc.state == kPsArmed) {  // the job is not used: DCS's loop over that vector
+        pc.state = kPsStock;
+        pc.reason = kPOwnship;
+        g_pass = nullptr;
+        PrevWrap(pass, ctx, orig);
+        return;
+      }
+      // A stock run (verify's first run, a learning pass): the stock list below is built from that vector, so the
+      // front entry still runs (verify's capture) and the ownship is drawn as in the recorded run.
+    }
+  }
   g_pass = &pc;
   size_t count = 0;
   if (pc.state == kPsArmed) {
@@ -4584,9 +4729,11 @@ void RunPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** vec
 // (a view or load transition) is logged and retried, never latched.
 constexpr uint64_t kAaPasses = 3;
 const char* g_verifyWhy = nullptr;  // why the last capture failed
+std::atomic<bool> g_verifyNoLatch{false};  // [Suite] GBufferRecVerifyNoLatch (test only): log differences, stay on
 void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** vec) {
   Stat& st = g_slot[pc.slot].st;
   const bool aa = st.aaClean.load() < kAaPasses;
+  const bool own2 = t_own2;  // stage 2: every run decides the ownship alike (a stock run consumes the request)
   PassCtx a;
   a.slot = pc.slot;
   a.state = kPsStockRun;
@@ -4606,6 +4753,26 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
   }
   gbverify::CopyAll(true, true);    // A
   gbverify::CopyAll(false, false);  // init back into the targets
+  // Stage 2 (CockpitTrueIpdOwnship=2): the ownship mask. A third run, stock with the ownship's camera 10 km aside
+  // (out of the view), from the same init: a texel that differs from A there is one the ownship covers or shades
+  // (an ownship texel). The compare below then counts the stock-vs-recorded differences inside and outside it; only
+  // those outside (non-ownship texels, and every MSAA sample: no mask there) latch the recorder off.
+  bool masked = false;
+  if (own2 && !aa && g_ownAwayFn) {
+    PassCtx m;
+    m.slot = pc.slot;
+    m.state = kPsStockRun;
+    m.probesLeft = 0;
+    t_own2 = true;
+    g_ownAwayFn(true);
+    RunPass(m, pass, ctx, orig, vec);
+    g_ownAwayFn(false);
+    masked = gbverify::CopyAllMask();
+    gbverify::CopyAll(false, false);  // init back again
+    masked = masked && gbverify::BuildMask();
+    g_ownMaskRuns++;
+    if (!masked) g_ownMaskFailed++;
+  }
   PassCtx b;
   if (aa) {
     b.slot = pc.slot;
@@ -4615,6 +4782,7 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
   }
   b.verify = 2;
   b.probesLeft = 0;
+  t_own2 = own2;
   RunPass(b, pass, ctx, orig, vec);
   bool executed = false;
   if (!aa && b.state == kPsLive)
@@ -4625,7 +4793,20 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
     gbverify::CopyAll(true, false);  // B
     int64_t bad[gbverify::kMaxTargets];
     uint64_t texels = 0;
+    gbverify::g_badBox[0] = gbverify::g_badBox[1] = 1 << 30;
+    gbverify::g_badBox[2] = gbverify::g_badBox[3] = -1;
+    gbverify::g_maskOn = masked;
     const int64_t total = gbverify::CompareGuarded(bad, &texels);
+    gbverify::g_maskOn = false;
+    // Non-ownship differences: all of them without a mask; with one, the staging texels outside it plus every
+    // difference the mask cannot classify (MSAA samples).
+    const int64_t inMask = masked ? gbverify::g_badIn : 0;
+    const int64_t counted = total < 0 ? total : total - inMask;
+    if (masked && total >= 0) {
+      g_ownMaskIn += static_cast<uint64_t>(inMask);
+      g_ownMaskOut += static_cast<uint64_t>(counted);
+      g_ownMaskCompares++;
+    }
     if (total < 0) {
       st.verifyErrors++;
     } else {
@@ -4633,8 +4814,6 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
       st.verifyTexels += texels;
       if (aa) st.aaClean = total > 0 ? 0 : st.aaClean.load() + 1;
       if (total > 0) {
-        (aa ? st.verifyAaBad : st.verifyAbBad)++;
-        st.verifyBadTexels += static_cast<uint64_t>(total);
         std::string per;
         char buf[48];
         for (int i = 0; i < gbverify::kMaxTargets; ++i) {
@@ -4643,14 +4822,21 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
                    static_cast<long long>(bad[i]));
           per += buf;
         }
-        Log("gbuffer recorder verify: %s differs: %lld of %llu texels/samples (%s)",
+        Log("gbuffer recorder verify: %s differs: %lld of %llu texels/samples (%s); box %d,%d..%d,%d%s",
             aa ? "stock vs stock" : "stock vs recorded", static_cast<long long>(total),
-            static_cast<unsigned long long>(texels), per.c_str());
+            static_cast<unsigned long long>(texels), per.c_str(), gbverify::g_badBox[0], gbverify::g_badBox[1],
+            gbverify::g_badBox[2], gbverify::g_badBox[3],
+            masked ? ("; ownship texels " + std::to_string(inMask) + ", other " + std::to_string(counted)).c_str()
+                   : "");
+      }
+      if (counted > 0) {
+        (aa ? st.verifyAaBad : st.verifyAbBad)++;
+        st.verifyBadTexels += static_cast<uint64_t>(counted);
         if (aa)
           Log("gbuffer recorder verify: stock vs stock not reproducible in this frame (a transition?): retried, "
               "%llu consecutive equal compares needed before stock vs recorded",
               static_cast<unsigned long long>(kAaPasses));
-        else
+        else if (!g_verifyNoLatch.load(std::memory_order_relaxed))
           Disable("G-buffer differs between the stock and the recorded execution");
       }
     }
@@ -4811,7 +4997,10 @@ bool LearnVector(Slot& sl, void** vec, void* ctx) {
 
 void WrapSlot(int s, void* pass, void* ctx, gbpass::ExecFn orig) {
   void** vec = gbpass::ItemVector(pass, ctx);
-  if (!vec) return PrevWrap(pass, ctx, orig);
+  if (!vec) {
+    t_own2 = false;
+    return PrevWrap(pass, ctx, orig);
+  }
   Slot& sl = g_slot[s];
   LearnVector(sl, vec, ctx);
   sl.st.passes++;
@@ -4826,6 +5015,8 @@ void WrapSlot(int s, void* pass, void* ctx, gbpass::ExecFn orig) {
     VerifyPass(pc, pass, ctx, orig, vec);
   else
     RunPass(pc, pass, ctx, orig, vec);
+  // Issue #3: the pass is over; a re-record of its segments still on a worker stops before its next read.
+  if (mine) sl.job->redoStop.store(1, std::memory_order_release);
   for (auto*& c : pc.cl) SafeRel(c);
   Stat& st = sl.st;
   st.frontNs += pc.frontNs;
@@ -4858,7 +5049,10 @@ void WrapSlot(int s, void* pass, void* ctx, gbpass::ExecFn orig) {
   if (mine) {
     if (!SlotBusy(s)) Maintain(sl);
     RearmIfIdle(s);
-  } else if (!sl.armed) {
+  } else if (PassMayArm(sl.armed)) {
+    // Only in a frame whose render entry ran with the recorder active (issue #3: the recorder turned on mid-frame
+    // by the kill switch, the governor or the bench arms at the next entry, not in the rest of a frame it did not
+    // see begin: its ordinals, the vectors it learnt and the heap generation belong to that whole frame).
     Arm(s);
   }
 }
@@ -4997,13 +5191,27 @@ void* ExecGraphGuarded(void* ctx) {
 constexpr double kGraphStaleMs = 500.0, kStarvedMs = 5000.0;
 inline int64_t MsTicks(double ms) { return static_cast<int64_t>(ms / (defrec::QpcToUs() / 1000.0)); }
 
+// The ownship's step aside (t_ownAside): the execution drawn by DCS stock over the vector it was handed, the
+// slot's job left unused (dropped as stale at the next render entry), the slot counted as having run (its
+// starvation check). False: not stepped aside.
+bool AsideRun(int s, void* pass, void* ctx, gbpass::ExecFn orig) {
+  if (s < 0 || s >= kSlots || !t_ownAside) return false;
+  g_ownAsidePasses++;
+  g_slot[s].lastPassQpc = defrec::Qpc();
+  g_lastPassQpc = g_slot[s].lastPassQpc;
+  PrevWrap(pass, ctx, orig);
+  return true;
+}
+
 void WrapBody(void* pass, void* ctx, gbpass::ExecFn orig) {
   if (Active() && g_pool.Disabled()) Disable("worker fault (see the deferred rec line above)");
   if (!Active()) {
+    if (t_own2) Own2Fallback(gbpass::ItemVector(pass, ctx));
     PrevWrap(pass, ctx, orig);
   } else {
     if (!g_renderTid) g_renderTid = GetCurrentThreadId();
     if (GetCurrentThreadId() != g_renderTid) {
+      if (t_own2) Own2Fallback(gbpass::ItemVector(pass, ctx));
       PrevWrap(pass, ctx, orig);
     } else {
       if (FollowGraph(g_gbRg, g_gbRgEntryQpc, ExecGraphGuarded(ctx), defrec::Qpc(), MsTicks(kGraphStaleMs))) {
@@ -5051,10 +5259,14 @@ void WrapBody(void* pass, void* ctx, gbpass::ExecFn orig) {
         sl.lsm = k.sm;
         sl.lvrank = k.vrank;
       }
-      if (s < 0 || !EnsureSlot(s))
+      if (AsideRun(s, pass, ctx, orig)) {
+        // stepped aside for cockpit_ipd.h's ownship (stock)
+      } else if (s < 0 || !EnsureSlot(s)) {
+        if (t_own2) Own2Fallback(gbpass::ItemVector(pass, ctx));
         PrevWrap(pass, ctx, orig);
-      else
+      } else {
         WrapSlot(s, pass, ctx, orig);
+      }
     }
   }
 }
@@ -5068,7 +5280,10 @@ void Wrap(void* pass, void* ctx, gbpass::ExecFn orig) {
   } __except (GbFilter(GetExceptionCode(), lvl)) {
     Contained("the G-buffer pass wrap", GetExceptionCode(), lvl);
     g_pass = nullptr;
-    if (!t_passRan) PrevWrap(pass, ctx, orig);  // DCS's pass, stock (a fault there is DCS's)
+    if (!t_passRan) {
+      if (t_own2) Own2Fallback(gbpass::ItemVector(pass, ctx));
+      PrevWrap(pass, ctx, orig);  // DCS's pass, stock (a fault there is DCS's)
+    }
   }
   g_inside.fetch_sub(1);
 }
@@ -5319,6 +5534,7 @@ void OnRenderBody(void* rg, void* renderables) {
     }
   }
   const bool active = Active();
+  if (active && (!g_gbRg || rg == g_gbRg)) g_activeEntryGen = g_entryGen;
   // Paused (kill switch, bench mode 29, the R30 governor's stage 3): the
   // entry mark still advances, so a job a sort started just before the pause
   // counts as stale at the first entry after the resume (DropStale) instead
@@ -5342,6 +5558,10 @@ void OnRenderBody(void* rg, void* renderables) {
         continue;
       }
       if (!sl.armed && !Arm(s)) continue;
+      if (g_ownAsideHint.load(std::memory_order_relaxed)) {  // the ownship's passes are drawn stock: no job
+        g_ownAsideJobsSkipped++;
+        continue;
+      }
       if (count == SIZE_MAX) count = VectorCountGuarded(rg, renderables);
       if (sl.lvol || g_idMode) {  // this frame's index of the slot's execution (other views shift them)
         const int idx = sl.lvol ? CollFindVolGuarded(rg, sl.lsm, sl.lvol, sl.lvrank) : CollFindGuarded(rg, sl.id);
@@ -5754,7 +5974,8 @@ void LogSummary(const char* label, double frames) {
       "(%.1f%%), partly %llu, late %llu, other stock %llu; jobs refused %llu; items from lists %.0f/frame of %.0f "
       "(%.1f%%); render thread wait %.3f ms/frame (max %.3f), replay+execute %.3f ms/frame; CB ring %.2f MB/frame; "
       "%.2f G-buffer executions/frame, highest ordinal %llu, quad views %d known; frame heap %.2f resets/frame, jobs "
-      "stopped on a recycled heap %llu (faults contained %llu), used after a reset %llu; tables keys %u meshes %u, "
+      "stopped on a recycled heap %llu (faults contained %llu, %llu of them in re-records), used after a reset %llu; "
+      "tables keys %u meshes %u, "
       "meshes relearnt %llu, compactions %llu",
       label, frames, slots, g_helpers.load(), g_disabled.load() ? ", DISABLED" : "",
       static_cast<unsigned long long>(exec), static_cast<unsigned long long>(passes),
@@ -5765,6 +5986,7 @@ void LogSummary(const char* label, double frames) {
       static_cast<unsigned long long>(g_ordMax.load()), g_frameQuad.n, HeapResetsPerFrame(f),
       static_cast<unsigned long long>(g_recycledJobs.exchange(0)),
       static_cast<unsigned long long>(g_recycledFaults.exchange(0)),
+      static_cast<unsigned long long>(g_redoFaultsContained.exchange(0)),
       static_cast<unsigned long long>(g_recycledAtPass.exchange(0)), g_tab.keysUsed, g_tab.mesh.meshesUsed,
       static_cast<unsigned long long>(g_meshRelearnt.load()), static_cast<unsigned long long>(g_compactions.load()));
 }
@@ -5888,6 +6110,13 @@ void LogCounters(const char* label, double frames) {
   if (!gbverify::g_lastFormats.empty() && (g_verify.load() || g_slot[0].st.verifyAb.load()))
     Log("  gbuffer recorder %s verify: last captured targets: %s", label, gbverify::g_lastFormats.c_str());
   if (g_verifyWhy) Log("  gbuffer recorder %s verify: last capture failure: %s", label, g_verifyWhy);
+  if (g_ownMaskRuns.load())
+    Log("  gbuffer recorder %s verify, ownship stage 2: mask runs %llu (failed %llu), compares classified %llu; "
+        "differing texels in the ownship's texels %llu, elsewhere %llu",
+        label, static_cast<unsigned long long>(g_ownMaskRuns.load()),
+        static_cast<unsigned long long>(g_ownMaskFailed.load()),
+        static_cast<unsigned long long>(g_ownMaskCompares.load()), static_cast<unsigned long long>(g_ownMaskIn.load()),
+        static_cast<unsigned long long>(g_ownMaskOut.load()));
   uint64_t rt = 0, rtSeen = 0, rtDrawn = 0, rtBound = 0;
   for (int k = 0; k < kSlots; ++k) {
     rt += g_slot[k].st.rtReplays.load();

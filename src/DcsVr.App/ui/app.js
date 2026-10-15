@@ -2,16 +2,17 @@
 const $ = id => document.getElementById(id);
 const pages = [
   ['overview','Overview','What runs when you press Launch DCS, and how your last flight went.','Status at a glance','M3.5 16.5a8.5 8.5 0 1 1 17 0 M12 16.5l4.2-5.8 M6.3 11.4l1.1.7 M12 8.2v1.3 M17.7 11.4l-1.1.7 M13.3 16.5a1.3 1.3 0 1 1-2.6 0 1.3 1.3 0 0 1 2.6 0Z M5 20h14'],
+  ['guide','Feature guide','What each feature does, what to expect from it and what it costs, at a glance.','What to expect','M5 4h10l4 4v12H5Z M15 4v4h4 M8 12h8 M8 15.5h8 M8 9h4'],
   ['engine','Engine Optimizations','Makes DCS itself lighter on the CPU, on a monitor or in VR: more FPS, the same image.','CPU work inside DCS','M12 8.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4Z M12 3v2.6 M12 18.4V21 M3 12h2.6 M18.4 12H21 M5.6 5.6l1.9 1.9 M16.5 16.5l1.9 1.9 M5.6 18.4l1.9-1.9 M16.5 7.5l1.9-1.9','Engine'],
   ['boost','CPU Boost','Gives DCS priority and the best CPU cores, and frees video memory and desktop resources while you fly.','CPU, VRAM & monitor','M6 6h12v12H6Z M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3 M12.8 8.5 10.2 12.3h3.6l-2.6 3.7'],
-  ['foveation','Quad Views','Full detail where you look, lower resolution around it: less work for the GPU.','Foveated rendering','M3 8V5a2 2 0 0 1 2-2h3 M16 3h3a2 2 0 0 1 2 2v3 M21 16v3a2 2 0 0 1-2 2h-3 M8 21H5a2 2 0 0 1-2-2v-3 M6 12c1.6-2.7 3.6-4 6-4s4.4 1.3 6 4c-1.6 2.7-3.6 4-6 4s-4.4-1.3-6-4Z M14 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z'],
+  ['foveation','Quad Views','Full detail where you look, lower resolution around it: less work for the GPU. Periphery stability calms the periphery.','Foveated rendering','M3 8V5a2 2 0 0 1 2-2h3 M16 3h3a2 2 0 0 1 2 2v3 M21 16v3a2 2 0 0 1-2 2h-3 M8 21H5a2 2 0 0 1-2-2v-3 M6 12c1.6-2.7 3.6-4 6-4s4.4 1.3 6 4c-1.6 2.7-3.6 4-6 4s-4.4-1.3-6-4Z M14 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z'],
   ['dlss','DLSS 5','NVIDIA DLSS 5 neural rendering, and Foveated Super Resolution without Quad Views.','Neural rendering','M10 3c.6 3.8 2.2 5.4 6 6-3.8.6-5.4 2.2-6 6-.6-3.8-2.2-5.4-6-6 3.8-.6 5.4-2.2 6-6Z M18 14c.3 1.8 1.1 2.6 3 3-1.9.4-2.7 1.2-3 3-.3-1.8-1.1-2.6-3-3 1.9-.4 2.7-1.2 3-3Z'],
-  ['framegen','Framegen','Generated frames between the ones DCS renders (OFXR), and the DCS frame limit that goes with them.','Generation & limit','M3 10h11v10H3Z M6.5 10V6.5h11v10H14 M10 6.5V3h11v10h-3.5'],
-  ['pupil','Perception','How the image follows your eyes: Pupil shift, Periphery stability, Depth boost and Far depth.','Eyes · depth · periphery','M2.5 12c2.2-3.7 5.4-5.5 9.5-5.5s7.3 1.8 9.5 5.5c-2.2 3.7-5.4 5.5-9.5 5.5S4.7 15.7 2.5 12Z M14.5 12a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0Z M17 3.5l2.5 2.5L17 8.5 M19.5 6h-5'],
+  ['framegen','Framegen','Generated frames between the ones DCS renders, and the DCS frame limit that goes with them.','Generation & limit','M3 10h11v10H3Z M6.5 10V6.5h11v10H14 M10 6.5V3h11v10h-3.5'],
+  ['pupil','Perception','Eye distance, and how the image follows your eyes and shows depth: Pupil shift, Far depth and Depth boost.','Eyes & depth','M2.5 12c2.2-3.7 5.4-5.5 9.5-5.5s7.3 1.8 9.5 5.5c-2.2 3.7-5.4 5.5-9.5 5.5S4.7 15.7 2.5 12Z M14.5 12a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0Z M17 3.5l2.5 2.5L17 8.5 M19.5 6h-5'],
   ['osd','OSD','The in-headset panel (OSD) and every in-flight key, in one place.','Panel & in-flight keys','M3 5h18v11H3Z M8 20h8 M12 16v4 M6 8.5h6 M6 11.5h9'],
-  ['setup','DCS & headset','Where DCS is installed, the DCS launcher and, in VR, the headset software and eye distance.','Paths & launcher','M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-4.2l-1.8-2.4h-2L9.2 17H5a2 2 0 0 1-2-2Z M9.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z M17.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z'],
+  ['setup','DCS & headset','Where DCS is installed, the DCS launcher and, in VR, the headset software.','Paths & launcher','M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-4.2l-1.8-2.4h-2L9.2 17H5a2 2 0 0 1-2-2Z M9.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z M17.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z'],
   ['diagnostics','Checks','What to fix before launching, what to check yourself, and the files Launch DCS writes.','Checks & reports','M9 3.5h6v3H9Z M9 5H6.5A1.5 1.5 0 0 0 5 6.5v13A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 17.5 5H15 M8.5 13.5l2.5 2.5 4.5-5'],
-  ['support','Diagnostics','Why something in the headset does not work as expected, and a diagnostic package to attach to a report.','Problems & support','M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17Z M9.6 9.4a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .8-1 1.5v.6 M12 16.4v.2'],
+  ['support','Troubleshooting','Why something in the headset does not work as expected, and a diagnostic package to attach to a report.','Problems & support','M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17Z M9.6 9.4a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .8-1 1.5v.6 M12 16.4v.2'],
   ['recovery','Stock DCS','Back to stock DCS puts DCS back exactly as it was before DCS Control: every file and setting it changed, in one step.','Undo every change','M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9 M4.5 4.5V9H9 M12 8.5v3.5l2.5 1.8']
 ];
 /** Pages of the VR features, hidden in Optimizations only (no VR). */
@@ -119,7 +120,7 @@ function sync(next) {
   if (savedDraftJson === null) savedDraftJson = JSON.stringify(draft()); else saveDraftSoon();
   $('openSboys').disabled = !next.sboysReady;
   $('statusDot').classList.remove('error'); $('status').textContent = next.status + (next.foveaChanged ? ' ' + next.foveaChanged : '');
-  renderDiagnostics(); renderOriginals(); updateControls();
+  renderDiagnostics(); renderOriginals(); updateControls(); if (page === 'guide') renderGuide();
 }
 // ---- Features: what the checklist turns on, and what follows from it -------------------------------------------
 /** Foveated Super Resolution runs only in stereo: with Quad Views it would redo DCS's DLSS of the focus views instead of
@@ -269,7 +270,9 @@ function change() {
   $('status').textContent = 'Settings changed. Launch DCS applies them; Review files lists what it will write.';
   request('changed').catch(showError); updateControls(); saveDraftSoon();
   if (page === 'engine') renderEngine();
-  if (page === 'pupil') { renderPupilNeeds(); renderStabilityNeeds(); renderPupil(); }
+  if (page === 'pupil') { renderPupilNeeds(); renderPupil(); }
+  if (page === 'foveation') renderStabilityNeeds();
+  if (page === 'guide') renderGuide();
 }
 /** "What happens at launch" depends only on the Boost settings and the route: refreshed for those edits, not every edit. */
 function boostChanged() { if (page === 'boost') refreshBoostPlan(); }
@@ -359,13 +362,12 @@ function keyProblem([vk,mods]) {
   return null;
 }
 const HOTKEYS = {
-  neuralToggleKey:{others:['diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','depthBoostTransitionKey','farDepthToggleKey'],used:p => p.neuralRendering,name:'DLSS 5 toggle',fallback:'Ctrl+Shift+F12'},
-  diagnosticOverlayKey:{others:['neuralToggleKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','depthBoostTransitionKey','farDepthToggleKey'],used:p => !p.desktop && (p.frameGen !== 'Off' || p.headsetPanel),name:'in-headset panel',fallback:'Alt+Shift+F12'},
-  engineToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','pupilShiftToggleKey','depthBoostToggleKey','depthBoostTransitionKey','farDepthToggleKey'],used:p => p.engineOptimizations,name:'Engine Optimizations switch',fallback:'122:6'},
-  pupilShiftToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','depthBoostToggleKey','depthBoostTransitionKey','farDepthToggleKey'],used:p => usesPupilShift(p),name:'Pupil shift switch',fallback:'121:5'},
-  depthBoostToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostTransitionKey','farDepthToggleKey'],used:p => usesDepthBoost(p),name:'Depth boost switch',fallback:'121:6'},
-  depthBoostTransitionKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey'],used:p => usesDepthBoost(p),name:'Depth boost transition switch',fallback:'120:6'},
-  farDepthToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','depthBoostTransitionKey'],used:p => !p.desktop && p.farDepth && p.quadViews === 'QuadViewsFoveated' && p.engineOptimizations,name:'Far depth switch',fallback:'119:6'}
+  neuralToggleKey:{others:['diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey'],used:p => p.neuralRendering,name:'DLSS 5 toggle',fallback:'Ctrl+Shift+F12'},
+  diagnosticOverlayKey:{others:['neuralToggleKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey'],used:p => !p.desktop && (p.frameGen !== 'Off' || p.headsetPanel),name:'in-headset panel',fallback:'Alt+Shift+F12'},
+  engineToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey'],used:p => p.engineOptimizations,name:'Engine Optimizations switch',fallback:'122:6'},
+  pupilShiftToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','depthBoostToggleKey','farDepthToggleKey'],used:p => usesPupilShift(p),name:'Pupil shift switch',fallback:'121:5'},
+  depthBoostToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','farDepthToggleKey'],used:p => usesDepthBoost(p),name:'Depth boost switch',fallback:'121:6'},
+  farDepthToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey'],used:p => !p.desktop && p.farDepth && p.quadViews === 'QuadViewsFoveated' && p.engineOptimizations,name:'Far depth switch',fallback:'119:6'}
 };
 /** Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down, with or without Shift, belong to the engine optimizations module itself. */
 const engineReserved = ([vk,mods]) => (mods & 3) === 3 && ((vk >= 0x77 && vk <= 0x7B) || vk === 33 || vk === 34);
@@ -400,7 +402,7 @@ function captureHotkey(f) {
     if (problem) { showHotkey(f,problem,'error'); prompt(0); return; }
     const taken = info.others.find(o => HOTKEYS[o].used(profile) && (k => k && keyCode(k) === keyCode(next))(parseKey(profile[o] ?? HOTKEYS[o].fallback)));
     if (next[0] && taken) { showHotkey(f,`${keyLabel(next)} is already the ${HOTKEYS[taken].name} key.`,'error'); prompt(0); return; }
-    if (next[0] && engineReserved(next)) { showHotkey(f,`${keyLabel(next)} is used by the Engine Optimizations test suite.`,'error'); prompt(0); return; }
+    if (next[0] && engineReserved(next)) { showHotkey(f,`${keyLabel(next)} is reserved by Engine Optimizations.`,'error'); prompt(0); return; }
     const current = parseKey(button.value);
     stop();
     // The same combination keeps the profile's own spelling (an earlier version's label stays as it is).
@@ -460,7 +462,7 @@ function buildFields() {
   field(c,'quadRoundFocus','Round focus area','On: the focus area is a circle. Off: a rectangle with rounded corners, which keeps more detail in the corners. Either way its edge fades out over Focus edge blending.','toggle',null,quad);
   field(c,'quadSharpening','Focus sharpening','Extra sharpening inside the focus area. 0 is off.','number',[0,1,.01],quad,'ratio');
   field(c,'quadSharpenTaper','Sharpening fades at the edge','The sharpening fades out toward the edge of the focus area, so detail steps down gradually and the edge is harder to see. Almost no GPU cost.','toggle',null,quad);
-  field(c,'quadPeripheryContrast','Periphery contrast','Brings back the local contrast the periphery loses at its lower resolution, so it looks less blurry next to the focus area. Almost no GPU cost. 0 is off. Raise it slowly: too much makes the periphery shimmer (Periphery stability, on the Perception page, calms that).','number',[0,1,.05],quad,'ratio');
+  field(c,'quadPeripheryContrast','Periphery contrast','Brings back the local contrast the periphery loses at its lower resolution, so it looks less blurry next to the focus area. Almost no GPU cost. 0 is off. Raise it slowly: too much makes the periphery shimmer (Periphery stability, below, calms that).','number',[0,1,.05],quad,'ratio');
   const tracked = p => quad(p) && p.gaze === 'EyeTracked';
   field(c,'quadSaccadeLead','Focus ahead of fast eye movements','When your eyes jump, the focus area reaches ahead along the jump for a moment, so you land in full detail instead of waiting a frame or two (most noticeable with frame generation). No GPU cost: for that moment the focus area is a little less sharp.','toggle',null,tracked);
   field(c,'quadGazeStabilize','Steady focus while looking','Keeps the focus area still while your eyes rest (movements under half a degree), so eye-tracker noise does not make its edge shimmer. Real eye movements are followed at once.','toggle',null,tracked);
@@ -498,10 +500,10 @@ function buildFields() {
   field(c,'neuralMotionScaleX','Motion scale X','Horizontal motion vector multiplier.','number',[-4,4,.01],nr,'×');
   field(c,'neuralMotionScaleY','Motion scale Y','Vertical motion vector multiplier.','number',[-4,4,.01],nr,'×');
   // Frame generation page.
-  c = card('framegenControls','Frame generation','OFXR inserts generated frames between the frames DCS renders: DCS renders half (or a third) of the refresh rate, and the headset still gets every frame.');
-  field(c,'frameGen','Frame generation','NVIDIA Optical Flow needs an NVIDIA RTX card. FidelityFX works on any graphics card.','select',[['Off','Off'],['Nvidia','OFXR · NVIDIA Optical Flow'],['FidelityFx','OFXR · FidelityFX Optical Flow']]);
+  c = card('framegenControls','Frame generation','Adds generated frames between the frames DCS renders: DCS renders half (or a third) of the refresh rate, and the headset still gets a frame at every refresh.');
+  field(c,'frameGen','Frame generation','NVIDIA Optical Flow needs an NVIDIA RTX card. FidelityFX works on any graphics card.','select',[['Off','Off'],['Nvidia','NVIDIA Optical Flow (RTX cards)'],['FidelityFx','FidelityFX Optical Flow (any card)']]);
   field(c,'frameGenFactor','Generated frames','Auto: DCS renders half the refresh rate, and a second generated frame is added only while DCS cannot keep up. 3×: DCS always renders a third, with more latency and more artifacts in sideways motion.','select',[[0,'Auto · 2×, 3× when DCS falls behind'],[2,'2× · one generated frame'],[3,'3× · two generated frames']],p => p.frameGen !== 'Off');
-  field(c,'frameGenDeepPipeline','Smoothness buffer','On: OFXR holds one extra frame, which smooths out uneven DCS frame times but adds about 11 ms of latency (one refresh at 90 Hz). In 3× it uses the extra frame only when needed. Off: lower latency, more stutter when frame times vary.','toggle',null,p => p.frameGen !== 'Off');
+  field(c,'frameGenDeepPipeline','Smoothness buffer','On: holds one extra frame, which smooths out uneven DCS frame times but adds about 11 ms of latency (one refresh at 90 Hz). In 3× it uses the extra frame only when needed. Off: lower latency, more stutter when frame times vary.','toggle',null,p => p.frameGen !== 'Off');
   field(c,'smoothCursor','Smooth mouse cursor','Draws the mouse cursor at its in-between position in generated frames, so it moves smoothly. Where you click doesn\'t change.','toggle',null,p => p.frameGen !== 'Off');
   field(c,'nvidiaFlowScale','Optical flow resolution','The resolution motion is estimated at. Higher costs more GPU.','select',[[50,'50% · default'],[75,'75%'],[100,'100% · full']],flow);
   field(c,'flowPreset','Optical flow quality','How carefully motion is estimated. Slower is more careful and costs more GPU.','select',[['Fast','Fast'],['Medium','Medium · default'],['Slow','Slow · most analysis']],flow);
@@ -568,7 +570,11 @@ function buildFields() {
   field(c,'keepDcsLauncher','Show the DCS launcher','On: the DCS launcher opens first; press Play there. Off: Launch DCS goes straight into the game (Back to stock DCS turns the launcher back on).','toggle');
   // Pupil shift (native/pupil_shift): an OpenXR layer first in the chain; it needs the gaze of eye-tracked Quad Views.
   const pupil = p => p.pupilShift;
-  c = card('pupilControls','<span class="tag">EXPERIMENTAL</span> Pupil shift','Your pupils move a little when your eyes turn. This renders each eye from where its pupil really is, so the cockpit stays still when only your eyes move. Still being tuned: if the cockpit seems to move, turn it off.');
+  // Perception page: the eye distance DCS renders with first, since Pupil shift and Depth boost build on it.
+  c = card('eyeControls','Eye distance','The distance between your eyes that DCS renders with: it sets the size and depth of the world.');
+  field(c,'eyeDistance','Eye distance','The distance between your eyes that DCS renders with. The headset\'s own value (measured, or set in Pimax Play or SteamVR) gives the world its true size and depth. DCS\'s custom IPD changes the size of everything: leave it off unless you have a reason. Back to stock DCS restores DCS\'s own setting.','select',[['Headset','The headset\'s own (recommended)'],['DcsCustom','DCS\'s custom IPD (as set in DCS)'],['Manual','Set here']],p => !p.desktop);
+  field(c,'eyeDistanceMm','Eye distance value','Used when Eye distance is Set here.','number',[50,80,.5],p => !p.desktop && p.eyeDistance === 'Manual','mm');
+  c = card('pupilControls','<span class="tag">EXPERIMENTAL</span> Pupil shift','Your pupils move a little when your eyes turn. This renders each eye from where its pupil really is, so the cockpit stays still when only your eyes move. If the cockpit seems to move, turn it off.');
   field(c,'pupilShift','Pupil shift','Each eye is rendered from where its pupil is. No GPU cost.','toggle');
   field(c,'pupilShiftEyeRadiusMm','Eye rotation radius','How far the pupil sits from the point the eye turns around. 10 to 11 mm fits most people.','number',[5,15,.5],pupil,'mm');
   field(c,'pupilShiftVirtualImageM','Lens image distance','How far away the lens shows the image. 1 to 2 m is typical; it barely matters.','number',[.5,5,.1],pupil,'m');
@@ -585,19 +591,19 @@ function buildFields() {
   const depth = p => p.depthBoost, realistic = p => p.depthBoost && p.depthBoostMode !== 'Enhanced', enhanced = p => p.depthBoost && p.depthBoostMode === 'Enhanced';
   // Only the selected mode's strength and distances are shown, so the card never shows two Strength sliders.
   const enhancedMode = p => p.depthBoostMode === 'Enhanced';
-  c = card('depthControls','<span class="tag">EXPERIMENTAL</span> Depth boost','Distant aircraft and terrain get more depth while you look at them; the cockpit stays normal.');
-  field(c,'depthBoost','Depth boost','When you look far, the eyes are rendered a bit further apart for more depth. Looking back into the cockpit returns to normal within a second. Keep it off for landings for now. No GPU cost.','toggle');
-  field(c,'depthBoostMode','Mode','Realistic adds depth only beyond 150 m, where the headset shows less than your eyes would; it needs Engine Optimizations. Enhanced adds depth from 3 m: stronger, but the world looks smaller.','select',[['Realistic','Realistic (recommended)'],['Enhanced','Enhanced: more depth, not realistic']],depth);
+  c = card('depthControls','<span class="tag">EXPERIMENTAL</span> Depth boost','The world outside gets more depth; the cockpit stays exactly as it is.');
+  field(c,'depthBoost','Depth boost','The world is rendered with the eyes a bit further apart, following where you look and changing slowly. The cockpit, its displays and its lighting stay at your real eye distance; the HUD is unchanged. Keep it off for landings for now.','toggle');
+  field(c,'ownAircraftTrueDepth','Own aircraft at true depth','Helicopters and two-seaters: the other crew station or the front seat outside your cockpit stays at its real distance instead of looking closer. Still being checked on every aircraft.','toggle',null,depth);
+  field(c,'depthBoostMode','Mode','Realistic adds depth only beyond 150 m, where the headset shows less than your eyes would. Enhanced adds depth from 3 m: stronger, but the world looks smaller.','select',[['Realistic','Realistic (recommended)'],['Enhanced','Enhanced: more depth, not realistic']],depth);
   field(c,'depthBoostRealisticMax','Strength','How much more depth far away. ×1.25 turns an eye distance of 64 mm into 80 mm.','number',[1,1.5,.05],realistic,'×',enhancedMode);
   field(c,'depthBoostFarStartM','Normal depth up to','Nothing changes closer than this.','number',[50,1000,10],realistic,'m',enhancedMode);
   field(c,'depthBoostFarFullM','Full strength from','Full strength from this distance on; in between it grows gradually.','number',[60,3000,10],realistic,'m',enhancedMode);
-  field(c,'depthBoostMax','Strength','How much more depth from 50 m on. ×1.4 turns an eye distance of 64 mm into 90 mm. Capped at about ×1.5 so it can always return to normal quickly.','number',[1,2,.05],enhanced,'×',p => !enhancedMode(p));
-  field(c,'depthBoostNearM','Cockpit distance','Anything closer counts as the cockpit and keeps normal depth.','number',[.5,5,.1],depth,'m');
-  field(c,'depthBoostTransition','Transition','Gradual: the depth changes smoothly once your eyes settle. Predictive: part of the change already happens during a long eye jump; it needs Pimax eye tracking and Engine Optimizations, otherwise it works as Gradual.','select',[['Gradual','Gradual'],['Predictive','Predictive: part of the change during eye jumps']],depth);
+  field(c,'depthBoostMax','Strength','How much more depth from 50 m on. ×1.4 turns an eye distance of 64 mm into 90 mm.','number',[1,2,.05],enhanced,'×',p => !enhancedMode(p));
+  field(c,'depthBoostNearM','Cockpit distance','Looking closer than this counts as looking at the cockpit: the world keeps the depth it had. The cockpit itself always keeps your real eye distance.','number',[.5,5,.1],depth,'m');
   // The in-headset panel (OFXR): with frame generation always; without it OFXR is loaded only to draw the panel.
   const panelOn = p => !p.desktop && (p.frameGen !== 'Off' || p.headsetPanel);
   c = card('panelControls','OSD: in-headset panel','A small status panel in the headset: FPS, DLSS 5, Engine Optimizations, Pupil shift, Depth boost and Far depth. Show or hide it in flight with its key.');
-  field(c,'headsetPanel','In-headset panel','With frame generation the panel is always available. Without it, turn this on: OFXR is then loaded only to draw the panel and does not touch your frames.','toggle',null,p => !p.desktop && p.frameGen === 'Off');
+  field(c,'headsetPanel','In-headset panel','With frame generation the panel is always available. Without it, turn this on: the panel is then drawn on its own and your frames are not touched.','toggle',null,p => !p.desktop && p.frameGen === 'Off');
   field(c,'diagnosticOverlayAtStart','Visible at start','Each flight starts with the panel shown.','toggle',null,panelOn);
   field(c,'diagnosticVram','VRAM counter','Adds the video memory in use to the panel.','toggle',null,panelOn);
   // Every in-flight key in one card: capture fields, greyed out while their feature is off in this profile.
@@ -607,12 +613,9 @@ function buildFields() {
   field(c,'neuralToggleKey','DLSS 5','Off and on, to compare. Default Ctrl+Shift+F12.','hotkey',null,HOTKEYS.neuralToggleKey.used);
   field(c,'pupilShiftToggleKey','Pupil shift','Off and on, to compare. Low beep off, high beep on. Default Ctrl+Shift+F10.','hotkey',null,HOTKEYS.pupilShiftToggleKey.used);
   field(c,'depthBoostToggleKey','Depth boost','Off and on, to compare. Low beep off, high beep on. Default Alt+Shift+F10.','hotkey',null,HOTKEYS.depthBoostToggleKey.used);
-  field(c,'depthBoostTransitionKey','Depth boost transition','Gradual or Predictive, to compare. One beep Gradual, two beeps Predictive. Default Alt+Shift+F9.','hotkey',null,HOTKEYS.depthBoostTransitionKey.used);
   field(c,'farDepthToggleKey','Far depth','Off and on, to compare. Low beep off, two beeps on. Default Alt+Shift+F8.','hotkey',null,HOTKEYS.farDepthToggleKey.used);
-  { const fixed = document.createElement('p'); fixed.className = 'fine'; fixed.textContent = 'Engine Optimizations test suite: Ctrl+Alt+F11 (fixed).'; c.append(fixed); }
+  { const fixed = document.createElement('p'); fixed.className = 'fine'; fixed.textContent = 'Reserved by Engine Optimizations: Ctrl+Alt+F8 to F12, Page Up and Page Down (F11 starts the test suite).'; c.append(fixed); }
   c = card('headsetControls','Headset runtime','The headset software follows How you fly in the right panel: Pimax Play, or SteamVR for Sboys.');
-  field(c,'eyeDistance','Eye distance','The distance between your eyes that DCS renders with. The headset\'s own value (measured, or set in Pimax Play or SteamVR) gives the world its true size and depth. DCS\'s custom IPD is often set to 64 mm because it is said to look better, but it changes the size of everything. Back to stock DCS restores DCS\'s own setting.','select',[['Headset','The headset\'s own (recommended)'],['DcsCustom','DCS\'s custom IPD (as set in DCS)'],['Manual','Set here']],p => !p.desktop);
-  field(c,'eyeDistanceMm','Eye distance value','Used when Eye distance is Set here.','number',[50,80,.5],p => !p.desktop && p.eyeDistance === 'Manual','mm');
   more = disclosure(c,'Runtime override','Only for an OpenXR runtime that is not registered in Windows.');
   field(more,'runtimeManifestPath','OpenXR runtime file','The JSON file of an OpenXR runtime to use instead of the registered one. Normally leave it empty. Not used with Optimizations only.','path',null,p => !p.desktop);
 }
@@ -634,8 +637,10 @@ function navigate(id) {
   if (id === 'foveation' && profile) rereadPimax(false);
   if (id === 'boost' && profile) refreshBoostPlan(0);
   if (id === 'engine' && profile) refreshEngine();
-  if (id === 'pupil' && profile) { renderPupilNeeds(); renderStabilityNeeds(); refreshPupil(); }
+  if (id === 'pupil' && profile) { renderPupilNeeds(); refreshPupil(); }
+  if (id === 'foveation' && profile) renderStabilityNeeds();
   if (id === 'support' && profile) refreshDlssFocus();
+  if (id === 'guide') renderGuide();
   if (id === 'overview' && profile) loadFlight();
 }
 // ---- Pimax Play focus values ------------------------------------------------------------------------------------
@@ -713,13 +718,16 @@ function renderEngine() {
   const s = engineStatus, box = $('engineStatus'); if (!box) return;
   if (!s) { box.innerHTML = '<p class="fine">Select the DCS settings file on the DCS &amp; headset page first.</p>'; return; }
   const report = s.lastReport ? `<dt>Last test report</dt><dd>${escape(new Date(s.lastReportAt).toLocaleString('en-GB'))}</dd>` : '';
-  const pending = profile?.engineOptimizations !== (s.state !== 'not-installed') ? `<p class="fine">${profile.engineOptimizations ? 'Launch DCS installs it with this profile.' : 'Launch DCS removes it with this profile.'}</p>` : '';
+  // Depth boost alone installs the module too, with none of the optimizations (its Perception-only mode).
+  const moduleUsed = Boolean(profile && (profile.engineOptimizations || usesDepthBoost(profile)));
+  const pending = profile && moduleUsed !== (s.state !== 'not-installed') ? `<p class="fine">${moduleUsed ? 'Launch DCS installs it with this profile.' : 'Launch DCS removes it with this profile.'}</p>` : '';
+  const perceptionOnly = profile && !profile.engineOptimizations && usesDepthBoost(profile) ? '<p class="fine">Used by Depth boost only: none of the optimizations run, and there is no test suite.</p>' : '';
   const devNote = profile?.engineOptimizations && profile.engineDevMode ? '<p class="pimax-note warn">Developer mode is on: DCS loads the module and its settings from the developer paths, not the ones this release installs. Turn it off on the left for normal flying.</p>' : '';
-  box.innerHTML = devNote + `<div class="engine-state ${escape(s.state)}"><b>${escape(ENGINE_STATE[s.state] || s.state)}</b><span>${escape(s.summary)}</span></div>${pending}`
+  box.innerHTML = devNote + `<div class="engine-state ${escape(s.state)}"><b>${escape(ENGINE_STATE[s.state] || s.state)}</b><span>${escape(s.summary)}</span></div>${pending}${perceptionOnly}`
     + s.warnings.map(w => `<p class="pimax-note warn">${escape(w)}</p>`).join('')
     + (s.suiteRunning ? '<p class="pimax-note">The test suite is running in DCS. Keep the view still (in VR, keep the headset on); it takes about 7 minutes.</p>' : '')
     + `<dl class="pimax-values">${report}</dl>`;
-  $('engineSuite').disabled = busy || s.state !== 'loaded' || s.suiteRunning;
+  $('engineSuite').disabled = busy || s.state !== 'loaded' || s.suiteRunning || !profile?.engineOptimizations;
   $('engineReport').disabled = busy || !s.lastReport;
   $('engineLog').disabled = busy || !s.logPath;
 }
@@ -738,13 +746,14 @@ const usesDepthBoost = p => Boolean(p.depthBoost && eyeTrackedVr(p));
 const depthMax = p => p.depthBoostMode === 'Enhanced' ? p.depthBoostMax : p.depthBoostRealisticMax;
 /** The strength the layer actually reaches with an eye distance of mm: capped so the eye distance can always come back
  *  within RecoverMs (800 ms) at DownMmPerS (40 mm/s), i.e. 1 + 32 mm / eye distance (pupil_math.hpp depth_boost_cap). */
-const depthMaxAt = (p, mm) => Math.min(depthMax(p), mm > 1 ? 1 + 32 / mm : 1);
+// With the dual camera the world's eye distance is capped only by the strength (the cockpit keeps the real one).
+const depthMaxAt = (p, mm) => mm > 1 ? depthMax(p) : 1;
 const usesPerceptionLayer = p => usesPupilShift(p) || usesDepthBoost(p);
 /** What the profile still needs for a gaze, with a link to the setting that gives it. */
 function renderPupilNeeds() {
   const ipd = $('pupilIpd');
-  if (ipd && profile?.eyeDistance && profile.eyeDistance !== 'DcsCustom') { const set = profile.eyeDistance === 'Manual'; ipd.hidden = !(profile.pupilShift || profile.depthBoost); ipd.textContent = set ? `DCS renders with an eye distance of ${profile.eyeDistanceMm} mm (Set here)${profile.depthBoost ? `; Depth boost raises it while you look far (up to ×${Number(depthMaxAt(profile, profile.eyeDistanceMm)).toFixed(2)})` : ''}. DCS's own custom IPD is off while this profile is applied.` : `DCS renders with the headset's own eye distance${profile.depthBoost ? '; Depth boost raises it while you look far' : ''}.${state?.dcsCustomIpd ? ` DCS's custom IPD (${state.dcsCustomIpd} mm) is off while this profile is applied; Back to stock DCS turns it on again.` : ''}`; }
-  else if (ipd) { const mm = state?.dcsCustomIpd; ipd.hidden = !mm || !(profile?.pupilShift || profile?.depthBoost); ipd.textContent = mm ? `DCS renders with your custom IPD of ${mm} mm, but DCS Control sets it instead of DCS: otherwise DCS would undo the pupil's sideways move${profile?.depthBoost ? ' and Depth boost' : ''}.${profile?.depthBoost ? ` Depth boost raises it while you look far (×${Number(depthMaxAt(profile, mm)).toFixed(2)}: ${(mm * depthMaxAt(profile, mm)).toFixed(1)} mm).` : ''} DCS's own option is off while this profile is applied; Back to stock DCS turns it on again.` : ''; }
+  if (ipd && profile?.eyeDistance && profile.eyeDistance !== 'DcsCustom') { const set = profile.eyeDistance === 'Manual'; ipd.hidden = !(profile.pupilShift || profile.depthBoost); ipd.textContent = set ? `DCS renders with an eye distance of ${profile.eyeDistanceMm} mm (Set here)${profile.depthBoost ? `; Depth boost renders the world with up to ×${Number(depthMaxAt(profile, profile.eyeDistanceMm)).toFixed(2)}` : ''}. DCS's own custom IPD is off while this profile is applied.` : `DCS renders with the headset's own eye distance${profile.depthBoost ? '; Depth boost raises it while you look far' : ''}.${state?.dcsCustomIpd ? ` DCS's custom IPD (${state.dcsCustomIpd} mm) is off while this profile is applied; Back to stock DCS turns it on again.` : ''}`; }
+  else if (ipd) { const mm = state?.dcsCustomIpd; ipd.hidden = !mm || !(profile?.pupilShift || profile?.depthBoost); ipd.textContent = mm ? `DCS renders with your custom IPD of ${mm} mm, but DCS Control sets it instead of DCS: otherwise DCS would undo the pupil's sideways move${profile?.depthBoost ? ' and Depth boost' : ''}.${profile?.depthBoost ? ` Depth boost renders the world with ×${Number(depthMaxAt(profile, mm)).toFixed(2)}: ${(mm * depthMaxAt(profile, mm)).toFixed(1)} mm.` : ''} DCS's own option is off while this profile is applied; Back to stock DCS turns it on again.` : ''; }
   const box = $('pupilNeeds'); if (!box || !profile) return;
   const who = profile.depthBoost && !profile.pupilShift ? 'Depth boost needs' : profile.depthBoost ? 'Pupil shift and Depth boost need' : 'Pupil shift needs';
   const reads = profile.depthBoost && profile.pupilShift ? 'they read' : 'it reads';
@@ -772,7 +781,7 @@ async function refreshPupil() {
   if (page === 'pupil' && mine === pupilSequence) pupilTimer = setTimeout(refreshPupil, 5000);
 }
 const PUPIL_STATE = {'not-installed':['Not installed',''], waiting:['Installed',''], working:['Working','loaded'], 'no-gaze':['No gaze','failed'], off:['Switched off',''], 'not-restored':['Check the log','failed'], disabled:['Off','']};
-const DEPTH_STATE = {disabled:['Not running',''], waiting:['Installed',''], working:['Working','loaded'], probing:['Waiting for both distances',''], 'no-depth':['No depth from the gaze','failed'], 'no-scene':['Normal depth: needs Engine Optimizations',''], 'no-gaze':['No gaze','failed'], off:['Switched off','']};
+const DEPTH_STATE = {disabled:['Not running',''], waiting:['Installed',''], working:['Working','loaded'], probing:['Waiting for both distances',''], 'no-depth':['No depth from the gaze','failed'], 'no-scene':['Normal depth: no depth from DCS yet',''], 'no-gaze':['No gaze','failed'], off:['Switched off','']};
 /** Depth boost's part of the layer's log: the current scale and what it did this flight. */
 function depthStatusHtml(d) {
   if (!d) return '';
@@ -786,9 +795,6 @@ function depthStatusHtml(d) {
     ['Seconds looking at the cockpit / outside', `${d.secondsNear.toFixed(0)} / ${d.secondsFar.toFixed(0)}`],
     ['Eye distance: normal / now', l ? `${l.baseIpdMm.toFixed(1)} / ${l.renderIpdMm.toFixed(1)} mm` : '—'],
     ['In-flight switch', d.hotkey ? keyLabel(parseKey(d.hotkey)) : '—'],
-    ...(d.transition ? [['Transition', d.transition === 'predictive' ? (d.predictive && !d.predictive.inEffect ? `Predictive selected, working as Gradual: ${d.predictive.reason || 'no fast gaze'}` : 'Predictive') : 'Gradual']] : []),
-    ...(d.transition === 'predictive' || d.predictiveSaccades ? [['Steps during eye jumps this flight', `${d.predictiveSteps} (confirmed ${d.predictiveConfirmed}, reverted ${d.predictiveContradicted}) in ${d.predictiveSaccades} eye jumps`]] : []),
-    ...(d.transitionHotkey ? [['Transition switch', keyLabel(parseKey(d.transitionHotkey))]] : [])
   ] : [];
   return `<h3 class="boost-section">Depth boost</h3><div class="engine-state ${tone}"><b>${escape(label)}</b><span>${escape(d.summary)}</span></div>`
     + (rows.length ? `<dl class="pimax-values">${rows.map(([k,v]) => `<dt>${escape(k)}</dt><dd>${escape(v)}</dd>`).join('')}</dl>` : '');
@@ -804,7 +810,7 @@ function renderPupil() {
     ['Gaze range, left–right', degrees(s.sessionGazeX)], ['Gaze range, up–down', degrees(s.sessionGazeY)],
     ['Largest pupil shift', s.sessionMaxShiftMm ? s.sessionMaxShiftMm.toFixed(1)+' mm' : '—'],
     ['Seconds with a gaze', `${s.secondsWithGaze} of ${s.seconds}`],
-    ['Runtime poses given back', s.restoredViews == null ? '—' : s.restoredViews > 0 ? 'Yes: the headset places the image as without the layer' : 'No'],
+    ['Image placed as without Pupil shift', s.restoredViews == null ? '—' : s.restoredViews > 0 ? 'Yes' : 'No'],
     ['In-flight switch', s.hotkey ? keyLabel(parseKey(s.hotkey)) : '—'],
     ['Headset views turned outwards (cant)', s.last?.cantDeg != null ? s.last.cantDeg.toFixed(1)+'°, straight ahead taken between them' : '—'],
     ['Eye distance: headset / DCS renders', s.last?.runtimeIpdMm != null ? `${s.last.runtimeIpdMm.toFixed(1)} / ${s.last.renderedIpdMm.toFixed(1)} mm` : '—']
@@ -824,7 +830,7 @@ async function refreshDlssFocus() {
   try {
     const {report:r} = await request('dlssFocus'); if (mine !== dlssFocusSequence) return;
     const [label, tone] = FOCUS_STATE[r.state] || [r.state,''];
-    const rows = [['DLSS-NR runtime',r.version],['Focus views identified',r.accepted ? String(r.accepted) : null],['Rejections',r.rejected ? String(r.rejected) : null],
+    const rows = [['DLSS 5 runtime',r.version],['Focus views identified',r.accepted ? String(r.accepted) : null],['Rejections',r.rejected ? String(r.rejected) : null],
       ['DCS ran DLSS at',r.dlssSize?.replace('x','×')],['Focus views',r.focusSize?.replace('x','×')]].filter(([,v]) => v);
     box.innerHTML = `<div class="engine-state ${tone}"><b>${escape(label)}</b><span>${escape(r.summary)}</span></div>`
       + (r.explanation ? `<p class="pimax-note${r.state === 'applied' ? '' : ' warn'}">${escape(r.explanation)}</p>` : '')
@@ -905,7 +911,7 @@ function updateControls() {
     ['boost','CPU BOOST',on.boost,on.boost ? 'CPU Boost' : 'Off',featureSummary('boost',profile)],
     ['foveation','QUAD VIEWS',on.quad,profile.quadViews === 'None' ? 'Off' : profile.quadViews === 'PimaxNative' ? 'Pimax native' : 'Bundled Quad Views',featureSummary('quad',profile)],
     ['dlss','DLSS 5',on.dlss,profile.neuralRendering ? 'DLSS 5' : foveatedSr(profile) ? 'Foveated Super Resolution' : 'DLSS 5',featureSummary('dlss',profile)],
-    ['framegen','FRAME GENERATION',on.framegen,profile.frameGen === 'Off' ? 'Off' : profile.frameGen === 'Nvidia' ? 'OFXR · NVIDIA' : 'OFXR · FidelityFX',featureSummary('framegen',profile)]
+    ['framegen','FRAME GENERATION',on.framegen,profile.frameGen === 'Off' ? 'Off' : profile.frameGen === 'Nvidia' ? 'NVIDIA Optical Flow' : 'FidelityFX Optical Flow',featureSummary('framegen',profile)]
   ];
   // Two groups: the optimizations every pilot can use, then the VR features (not with Optimizations only).
   const names = {engine:'Engine Optimizations',boost:'CPU Boost',foveation:'Quad Views',dlss:'DLSS 5',framegen:'Frame generation'};
@@ -1034,19 +1040,18 @@ const CHECK_INFO = {
   'dlss-gpu':['DLSS 5 graphics card',{page:'dlss',label:'Open'}], 'framegen-gpu':['Frame generation graphics card',{reveal:'frameGen',label:'Open'}],
   'foreign-dxgi':['Another program\'s dxgi.dll',null],
   'pupil-gaze':['Pupil shift',{page:'pupil',label:'Open'}], 'pupil-radius':['Pupil shift',{reveal:'pupilShiftEyeRadiusMm',label:'Open'}], 'pupil-image':['Pupil shift',{reveal:'pupilShiftVirtualImageM',label:'Open'}],
-  'periphery-stability-strength':['Periphery stability',{reveal:'peripheryStabilityStrength',label:'Open'}], 'periphery-stability-provider':['Periphery stability',{page:'pupil',label:'Open'}], 'far-depth-needs':['Far depth',{page:'pupil',label:'Open'}],
+  'periphery-stability-strength':['Periphery stability',{reveal:'peripheryStabilityStrength',label:'Open'}], 'periphery-stability-provider':['Periphery stability',{page:'foveation',label:'Open'}], 'far-depth-needs':['Far depth',{page:'pupil',label:'Open'}],
   'pupil-hotkey':['Pupil shift switch',{reveal:'pupilShiftToggleKey',label:'Open'}], 'pupil-hotkey-dcs':['Pupil shift switch',{reveal:'pupilShiftToggleKey',label:'Open'}],
   'depth-gaze':['Depth boost',{page:'pupil',label:'Open'}], 'depth-max':['Depth boost',{reveal:'depthBoostMax',label:'Open'}], 'depth-near':['Depth boost',{reveal:'depthBoostNearM',label:'Open'}],
   'depth-mode':['Depth boost',{reveal:'depthBoostMode',label:'Open'}], 'depth-realistic-max':['Depth boost',{reveal:'depthBoostRealisticMax',label:'Open'}], 'depth-far':['Depth boost',{reveal:'depthBoostFarStartM',label:'Open'}],
   'depth-hotkey':['Depth boost switch',{reveal:'depthBoostToggleKey',label:'Open'}], 'depth-hotkey-dcs':['Depth boost switch',{reveal:'depthBoostToggleKey',label:'Open'}],
-  'depth-transition':['Depth boost',{reveal:'depthBoostTransition',label:'Open'}], 'depth-transition-grid':['Depth boost',{reveal:'depthBoostTransition',label:'Open'}],
-  'depth-transition-hotkey':['Depth boost transition switch',{reveal:'depthBoostTransitionKey',label:'Open'}], 'depth-transition-hotkey-dcs':['Depth boost transition switch',{reveal:'depthBoostTransitionKey',label:'Open'}],
+
   'neural-area':['DLSS 5 area',{reveal:'neuralFocusArea',label:'Open'}], 'neural-depth':['Depth convention',{reveal:'neuralDepth',label:'Open'}],
   'fovea-width':['Focus width',{reveal:'foveaWidth',label:'Open'}], 'fovea-height':['Focus height',{reveal:'foveaHeight',label:'Open'}], 'peripheral-scale':['Peripheral resolution',{reveal:'peripheralScale',label:'Open'}], 'quad-focus-scale':['Center resolution',{reveal:'quadFocusScale',label:'Open'}], 'quad-sharpening':['Focus sharpening',{reveal:'quadSharpening',label:'Open'}], 'quad-periphery-contrast':['Periphery contrast',{reveal:'quadPeripheryContrast',label:'Open'}], 'quad-edge-blend':['Focus edge blending',{reveal:'quadEdgeBlend',label:'Open'}], 'neural-scale':['Working scale',{reveal:'neuralWorkingScale',label:'Open'}], 'neural-intensity':['Intensity',{reveal:'neuralIntensity',label:'Open'}], 'neural-local-tone':['Local tone',{reveal:'neuralLocalTone',label:'Open'}], 'neural-local-structure':['Local structure',{reveal:'neuralLocalStructure',label:'Open'}], 'neural-skin-structure':['Skin structure',{reveal:'neuralSkinStructure',label:'Open'}], 'neural-color':['Color strength',{reveal:'neuralColorStrength',label:'Open'}], 'neural-transfer':['Transfer strength',{reveal:'neuralTransferStrength',label:'Open'}], 'neural-paper-white':['Paper white scale',{reveal:'neuralPaperWhiteScale',label:'Open'}], 'neural-motion-x':['Motion scale X',{reveal:'neuralMotionScaleX',label:'Open'}], 'neural-motion-y':['Motion scale Y',{reveal:'neuralMotionScaleY',label:'Open'}], 'rendered-fps-cap':['Custom limit',{reveal:'renderedFpsCap',label:'Open'}], 'far-depth-hotkey':['Far depth switch',{reveal:'farDepthToggleKey',label:'Change'}], 'far-depth-hotkey-dcs':['Far depth switch',{reveal:'farDepthToggleKey',label:'Change'}], 'far-depth-preset':['Far depth',{reveal:'farDepthPreset',label:'Open'}], 'schema':['Profile file',null], 'profile-id':['Profile name',null], 'profile-name':['Profile name',null], 'enum':['Profile file',null]
 };
 /** A key conflict opens the key its message names first (ProfileValidation's wording). */
 function conflictInfo(text) {
-  const key = [['Far depth','farDepthToggleKey'],['Depth boost transition','depthBoostTransitionKey'],['Depth boost switch','depthBoostToggleKey'],['Pupil shift switch','pupilShiftToggleKey'],
+  const key = [['Far depth','farDepthToggleKey'],['Depth boost switch','depthBoostToggleKey'],['Pupil shift switch','pupilShiftToggleKey'],
     ['Engine Optimizations switch','engineToggleKey'],['DLSS 5 toggle','neuralToggleKey']].find(([name]) => String(text).startsWith('The '+name))?.[1] || 'diagnosticOverlayKey';
   return ['In-flight keys',{reveal:key,label:'Change'}];
 }
@@ -1184,15 +1189,114 @@ function renderSearch() {
     ['diagnostics','Diagnostic report','Export report: what was detected on this PC, the checks and the backups, as a file.','export'],
     ['support','Diagnostic package','One ZIP with the logs and settings needed to understand a problem, for a report.','diagnosticPackage'],
     ['support','DLSS 5 not applied','Why DLSS 5 did not reach the focus area in the last session.','dlssFocus'],
-    ['recovery','Stock DCS','Back to stock DCS: put back every file and setting DCS Control changed.','originals']
+    ['recovery','Stock DCS','Back to stock DCS: put back every file and setting DCS Control changed.','originals'],
+    ['guide','Feature guide','What each feature does, what to expect from it and what it costs.','featureGuide']
   ].map(([page,title,description,id]) => ({page,title,description,path:id,element:$(id),input:$(id)}));
   searchResults = [...fields,...shortcuts].filter(f => !(profile?.desktop && VR_PAGES.includes(f.page))).filter(f => !query || normalize(f.title+' '+f.description+' '+f.path+' '+pages.find(p => p[0] === f.page).slice(1,4).join(' ')).includes(query));
   $('searchResults').innerHTML = searchResults.length ? searchResults.map((f,index) => `<button class="search-result" data-index="${index}"><div><b>${escape(f.title)}</b><small>${escape(f.description)}</small></div><span>${f.path === 'featureList' ? 'Right panel' : pages.find(p => p[0] === f.page)[1]} ›</span></button>`).join('') : '<div class="empty-state"><p>No settings match this search.</p></div>';
   $('searchResults').querySelectorAll('button').forEach(b => b.addEventListener('click',() => revealSetting(searchResults[Number(b.dataset.index)])));
 }
+// ---- Feature guide --------------------------------------------------------------------------------------------------
+/** What each feature gives, what to expect from it and what it costs, in a few lines each (Feature guide page).
+ *  impact: the one-word benefit on the card's badge; keyPath/keyText: its in-flight key (the profile's), if any. */
+const GUIDE_SECTIONS = [
+  ['every','Every pilot','On a monitor or any headset.'],
+  ['vr','VR','Pimax headsets (and Sboys for SteamVR).'],
+  ['perception','Perception','Experimental: new, off by default, and still being tuned. Feedback welcome.'],
+  ['safety','Safety net','']
+];
+const FEATURE_GUIDE = [
+  {section:'every', page:'engine', name:'Engine Optimizations', impact:'More FPS', on:p => p.engineOptimizations,
+   gives:'DCS needs less CPU time for every frame. The image stays exactly the same.',
+   expect:'The busier the scene, the bigger the gain: airfields, carriers and large missions run noticeably smoother. Little or no change when the graphics card is the limit.',
+   cost:'Nothing visible. The first start prepares some data for a few minutes.',
+   needs:'NVIDIA Threaded optimization not Off and MFAA off for DCS. Checks tells you.',
+   keyPath:'engineToggleKey', keyText:'off and on, to compare'},
+  {section:'every', page:'boost', name:'CPU Boost', impact:'Steadier', on:p => p.cpuBoost,
+   gives:'DCS gets priority and its best CPU cores; other programs step out of its way while you fly.',
+   expect:'Steadier frame times when other programs compete for the CPU. On a quiet PC the difference is small.',
+   cost:'None. Undone when DCS exits.'},
+  {section:'vr', page:'foveation', name:'Quad Views', impact:'More FPS', on:p => p.quadViews !== 'None',
+   gives:'Full detail where you look, lower resolution around it.',
+   expect:'Usually the biggest gain in VR. With eye tracking the sharp area follows your eyes and you rarely notice the edge.',
+   cost:'A softer periphery, where thin lines can shimmer.',
+   needs:'Eye tracking (Pimax Crystal) for a focus area that follows your eyes.'},
+  {section:'vr', page:'framegen', name:'Frame generation', impact:'Smoother', on:p => p.frameGen !== 'Off',
+   gives:'Generated frames between the ones DCS renders, so the headset gets a frame at every refresh.',
+   expect:'Smooth motion even when DCS can\'t keep up. Auto picks 2× or 3× by itself.',
+   cost:'A little latency (more in 3×); the mouse moves at DCS\'s own frame rate.',
+   needs:'An NVIDIA RTX card, or FidelityFX on any card.'},
+  {section:'vr', page:'dlss', name:'DLSS 5', impact:'New look', on:p => p.neuralRendering,
+   gives:'NVIDIA\'s neural rendering reworks the image; with Quad Views, only where you look.',
+   expect:'A different, more natural look of light and materials. Pair it with frame generation to keep the motion smooth.',
+   cost:'GPU time and video memory.',
+   needs:'An NVIDIA RTX card, your own nvngx_dlssnr.dll, and DCS\'s Upscaling set to DLSS.',
+   keyPath:'neuralToggleKey', keyText:'off and on'},
+  {section:'vr', page:'osd', name:'In-headset panel', impact:'Status', vr:true, on:p => !p.desktop && (p.frameGen !== 'Off' || p.headsetPanel),
+   gives:'A small panel in the headset: FPS and what each feature is doing right now.',
+   expect:'A quick look to see that everything runs, and to compare features with their keys.',
+   cost:'None.',
+   keyPath:'diagnosticOverlayKey', keyText:'show or hide'},
+  {section:'perception', page:'pupil', name:'Depth boost', impact:'More depth', on:p => usesDepthBoost(p),
+   gives:'The world outside gets more stereo depth, following where you look. The cockpit stays at your real eye distance.',
+   expect:'Wingmen, tankers and targets look more 3D. Keep it off for landings for now.',
+   cost:'Little GPU time.',
+   needs:'Quad Views with eye tracking.',
+   keyPath:'depthBoostToggleKey', keyText:'off and on'},
+  {section:'perception', page:'pupil', name:'Far depth', impact:'More depth', on:p => !p.desktop && p.farDepth && p.quadViews === 'QuadViewsFoveated' && p.engineOptimizations,
+   gives:'More depth for distant aircraft, ships and terrain, from about 50 m to 2 km.',
+   expect:'Far objects stand out more. The cockpit and the HUD stay exactly as they are.',
+   cost:'Under 0.1 ms per frame.',
+   needs:'The bundled Quad Views and Engine Optimizations.',
+   keyPath:'farDepthToggleKey', keyText:'off and on'},
+  {section:'perception', page:'pupil', name:'Pupil shift', impact:'Steadier cockpit', on:p => usesPupilShift(p),
+   gives:'Each eye is rendered from where its pupil really is.',
+   expect:'The cockpit stays still when only your eyes move. Subtle, most visible on close panels.',
+   cost:'No GPU cost.',
+   needs:'Quad Views with eye tracking.'},
+  {section:'perception', page:'foveation', name:'Periphery stability', impact:'Calmer image', on:p => !p.desktop && p.peripheryStability && p.quadViews === 'QuadViewsFoveated',
+   gives:'Calms the shimmer of thin lines (canopy frame, power lines, the horizon) outside the sharp area.',
+   expect:'A quieter periphery; the sharp area is not touched.',
+   cost:'Almost no GPU cost.',
+   needs:'The bundled Quad Views.'},
+  {section:'safety', page:'recovery', name:'Back to stock DCS', impact:'Undo all', on:() => false,
+   gives:'Puts back every file and setting DCS Control changed, in one step.',
+   expect:'DCS exactly as it was before. Your profiles stay, so Launch DCS applies them again.',
+   needs:'Use it before joining a multiplayer server, updating or repairing DCS.'}
+];
+const GUIDE_START = [
+  ['1','Every pilot','Turn on Engine Optimizations: more FPS where the CPU is the limit, same image.'],
+  ['2','In VR','Add Quad Views and Frame generation: the two that make the biggest difference.'],
+  ['3','Then explore','DLSS 5 for a new look, Perception for depth. Try one at a time with its key.']
+];
+function renderGuide() {
+  const box = $('featureGuide'); if (!box) return;
+  const desktop = Boolean(profile?.desktop);
+  const icon = id => pages.find(p => p[0] === id)?.[4] ?? '';
+  const shown = FEATURE_GUIDE.filter(g => !(desktop && (g.vr || VR_PAGES.includes(g.page))));
+  const card = g => {
+    const on = Boolean(profile && g.on(profile)), index = shown.indexOf(g);
+    const meta = [['Cost',g.cost],['Needs',g.needs]].filter(m => m[1]).map(([k,v]) => `<div><span>${k}</span><p>${escape(v)}</p></div>`).join('');
+    const parsed = g.keyPath && profile ? (parseKey(profile[g.keyPath]) ?? parseKey(HOTKEYS[g.keyPath].fallback)) : null;
+    const key = parsed && parsed[0] ? `<div class="guide-key"><kbd>${escape(keyLabel(parsed))}</kbd><span>${escape(g.keyText)}</span></div>` : '';
+    return `<article class="guide-card${on ? ' on' : ''}">`
+      + `<header><span class="guide-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${icon(g.page)}"/></svg></span>`
+      + `<div class="guide-title"><h3>${escape(g.name)}</h3>${on ? '<span class="guide-state">ON</span>' : ''}</div><span class="guide-impact">${escape(g.impact)}</span></header>`
+      + `<p class="guide-lead">${escape(g.gives)}</p><p class="guide-expect">${escape(g.expect)}</p>`
+      + `<div class="guide-meta">${meta}</div>`
+      + `<footer>${key}<button class="link-button" data-guide-page="${index}">Open →</button></footer></article>`;
+  };
+  const start = desktop ? '' : `<section class="guide-start" aria-label="Where to start">${GUIDE_START.map(([n,t,d]) => `<div><b>${n}</b><div><h3>${t}</h3><p>${d}</p></div></div>`).join('')}</section>`;
+  box.innerHTML = start + GUIDE_SECTIONS.map(([id,title,note]) => {
+    const items = shown.filter(g => g.section === id); if (!items.length) return '';
+    return `<section class="guide-section"><div class="guide-section-head"><h2>${title}</h2>${note ? `<p>${note}</p>` : ''}</div><div class="guide-grid">${items.map(card).join('')}</div></section>`;
+  }).join('');
+  box.querySelectorAll('[data-guide-page]').forEach(b => b.addEventListener('click',() => navigate(shown[Number(b.dataset.guidePage)].page)));
+}
 // ---- First-start tour -----------------------------------------------------------------------------------------------
 const TOUR = [
-  {title:'Welcome to DCS Control', text:'It sets DCS up for your headset (or the monitor) and makes it run faster. This short tour shows where everything is. You can open it again from the Diagnostics page.'},
+  {title:'Welcome to DCS Control', text:'It sets DCS up for your headset (or the monitor) and makes it run faster. This short tour shows where everything is. You can open it again from the Troubleshooting page.'},
+  {target:'#nav-guide', title:'Feature guide', text:'What each feature does, what to expect and what it costs, in a few lines each. A good place to start.'},
   {target:'#routeSwitch', title:'How you fly', text:'Pick Pimax, Sboys (SteamVR), or Optimizations only for a monitor or another headset.'},
   {target:'#featureList', title:'What to turn on', text:'Tick the features you want. The arrow next to each one opens its settings.'},
   {target:'#nav-diagnostics', title:'Checks', text:'Before you fly, Checks lists anything to fix, with a button that takes you to the setting.'},

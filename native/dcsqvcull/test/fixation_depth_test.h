@@ -429,6 +429,8 @@ struct FakePass {
   void* vt = nullptr;
   uint64_t len = 0;
   char name[40] = {};
+  uint8_t pad[0x30] = {};
+  uint8_t* node = nullptr;  // +0x68: a SimplePassData pass's resource node (none: no item vector)
 };
 FakePass MakePass(const char* n) {
   FakePass p;

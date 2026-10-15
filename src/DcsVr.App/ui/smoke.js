@@ -45,7 +45,7 @@ window.runWebSmoke = async function() {
       check('Check now finds the update again with the check back on',ui.updates.enabled && !$('updateBanner').hidden && $('updateAuto').checked);
       $('updateHide').click(); check('The banner can be hidden until the next start',$('updateBanner').hidden && !$('railUpdate').hidden); }
     check('One primary action: Launch DCS, with Review files, Apply without launching and Back to stock DCS as links',!$('preview') && !$('heroChips') && $('launch').classList.contains('launch') && $('reviewPlan').classList.contains('link-button') && $('apply').classList.contains('link-button') && $('apply').textContent === 'Apply without launching' && $('openRecovery').classList.contains('link-button') && !document.querySelector('.workflow').textContent.match(/Preview|Apply profile/));
-    check('All editable profile controls available',ui.fields.length === 120 && document.querySelectorAll('#routeSwitch [data-route]').length === 3);
+    check('All editable profile controls available',ui.fields.length === 119 && document.querySelectorAll('#routeSwitch [data-route]').length === 3);
     check('Quality presets, self-reported limiters and the unused Sboys folder are gone',!$('tuningPreset') && !$('undoTune') && !$('tuningDialog') && !$('budgets') && !['externalLimiter','externalLimiterFps','runtimeReprojection','sboysDriverDirectory'].some(p => ui.fields.some(f => f.path === p)));
     check('Rarely changed settings start folded away',[...document.querySelectorAll('details.advanced')].length === 5 && [...document.querySelectorAll('details.advanced')].every(d => !d.open) && $('setting-quadViewsLayerDirectory').closest('details') && $('setting-runtimeManifestPath').closest('details') && $('setting-neuralLocalTone').closest('details') && $('setting-diagnosticRecorder').closest('details') && $('setting-engineTimerRefreshUs').closest('details'));
     // Pimax Play's page exactly as Pimax Play shows it (labels, order, rounding), from the fixture's Quick 33 % or Fine 33/10 · 33/33.
@@ -66,8 +66,11 @@ window.runWebSmoke = async function() {
       document.querySelector(`#routeSwitch [data-route="${before.runtime}"]`).click();
       check('Pimax or Sboys after Optimizations only brings the VR features back',ui.profile.desktop === false && ui.profile.runtime === before.runtime && ui.profile.quadViews === before.quadViews && ui.profile.frameGen === before.frameGen && ui.profile.neuralRendering === before.neural && !$('feature-quad').hidden && !$('nav-foveation').hidden); }
     check('Legacy defaults preserve the DCS frame limit and VSync',ui.profile.fpsLimit === 'Preserve' && !ui.profile.disableDcsVSync);
-    for(const id of ['overview','foveation','dlss','framegen','pupil','boost','engine','setup','diagnostics','support','recovery']) { ui.navigate(id); check('Navigate '+id,!$('page-'+id).hidden && $('nav-'+id).getAttribute('aria-current') === 'page'); }
+    for(const id of ['overview','guide','foveation','dlss','framegen','pupil','boost','engine','setup','diagnostics','support','recovery']) { ui.navigate(id); check('Navigate '+id,!$('page-'+id).hidden && $('nav-'+id).getAttribute('aria-current') === 'page'); }
     check('The frame generation page is called Framegen',$('nav-framegen').textContent.startsWith('Framegen') && $('pageTitle').textContent !== 'Frame rate' && (ui.navigate('framegen'), $('pageTitle').textContent === 'Framegen'));
+    { ui.navigate('guide'); const cards = [...document.querySelectorAll('#featureGuide .guide-card')];
+      check('The Feature guide has a card per feature, each with its benefit and an Open button that leads to its page',cards.length >= 10 && cards.every(c => c.querySelector('.guide-impact') && c.querySelector('[data-guide-page]'))
+        && (cards[0].querySelector('[data-guide-page]').click(), page === 'engine' || $('nav-engine').classList.contains('selected'))); ui.navigate('overview'); }
     // Overview: launch status, the four feature tiles and the last flight, read from the fixture's logs.
     ui.navigate('overview');
     { const result = await ui.request('lastFlight'), f = result.flight;
@@ -129,7 +132,7 @@ window.runWebSmoke = async function() {
       check('The terrain prefetch fix is an Engine Optimizations field, Skip by default and gone from CPU Boost',f && f.page === 'engine' && ui.profile.boostPrefetch === 'Skip' && !$('setting-boostPrefetch').closest('details') && !document.querySelector('#page-boost [id="setting-boostPrefetch"]')); }
     { const was = ui.profile.engineOptimizations; edit('engineOptimizations',true); ui.navigate('engine'); const k = $('input-engineToggleKey');
       check('The engine optimizations switch is a capture field, Alt+Shift+F11 by default',ui.fields.find(f => f.path === 'engineToggleKey').type === 'hotkey' && ui.profile.engineToggleKey === '122:6' && k.textContent === 'Alt+Shift+F11');
-      k.click(); press(120,'ca'); check('The module test keys (Ctrl+Alt+F9 to F12) are refused for the switch',k.classList.contains('capturing') && $('keynote-engineToggleKey').textContent.includes('test suite') && ui.profile.engineToggleKey === '122:6');
+      k.click(); press(120,'ca'); check('The module test keys (Ctrl+Alt+F9 to F12) are refused for the switch',k.classList.contains('capturing') && $('keynote-engineToggleKey').textContent.includes('reserved by Engine Optimizations') && ui.profile.engineToggleKey === '122:6');
       press(27); edit('engineOptimizations',was); }
     { const was = {pupilShift:ui.profile.pupilShift, quadViews:ui.profile.quadViews, gaze:ui.profile.gaze, engine:ui.profile.engineOptimizations}; edit('engineOptimizations',true);
       edit('pupilShift',true); edit('quadViews','PimaxNative'); edit('gaze','EyeTracked'); ui.navigate('pupil'); const k = $('input-pupilShiftToggleKey');
@@ -138,14 +141,14 @@ window.runWebSmoke = async function() {
       edit('gaze','Fixed'); check('Without an eye-tracked gaze the page says why and links to the setting',!$('pupilNeeds').hidden && $('pupilNeeds').textContent.includes('Focus movement') && ($('pupilFix').click(), !$('page-foveation').hidden));
       edit('gaze',was.gaze); edit('quadViews',was.quadViews); edit('pupilShift',was.pupilShift); edit('engineOptimizations',was.engine); ui.navigate('pupil');
       await new Promise(r => setTimeout(r,300)); check('The pupil shift status reads the log through the bridge',!!$('pupilStatus').querySelector('.engine-state')); }
-    { const was = {on:ui.profile.peripheryStability, quadViews:ui.profile.quadViews, strength:ui.profile.peripheryStabilityStrength, neural:ui.profile.neuralRendering, foveated:ui.profile.foveatedDlss}; ui.navigate('pupil');
+    { const was = {on:ui.profile.peripheryStability, quadViews:ui.profile.quadViews, strength:ui.profile.peripheryStabilityStrength, neural:ui.profile.neuralRendering, foveated:ui.profile.foveatedDlss}; ui.navigate('foveation');
       const f = ui.fields.find(x => x.path === 'peripheryStabilityStrength');
-      check('Periphery stability is a card on the Perception page, off by default, marked experimental',f.page === 'pupil' && $('stabilityControls').textContent.includes('Periphery stability') && $('stabilityControls').textContent.includes('EXPERIMENTAL') && (was.on || f.input.disabled) && ui.fields.find(x => x.path === 'peripheryStability').type === 'toggle');
+      check('Periphery stability is a card on the Quad Views page, off by default, marked experimental',f.page === 'foveation' && $('stabilityControls').textContent.includes('Periphery stability') && $('stabilityControls').textContent.includes('EXPERIMENTAL') && (was.on || f.input.disabled) && ui.fields.find(x => x.path === 'peripheryStability').type === 'toggle');
       edit('peripheryStability',true); edit('quadViews','QuadViewsFoveated'); edit('peripheryStabilityStrength','0.25');
       check('With the bundled Quad Views it needs nothing and its strength is editable',$('stabilityNeeds').hidden && !f.input.disabled && ui.profile.peripheryStabilityStrength === 0.25);
       // Pimax native needs DLSS 5 and Foveated DLSS off (they force the bundled provider).
       edit('neuralRendering',false); edit('foveatedDlss',false); edit('quadViews','PimaxNative'); check('With Pimax native Quad Views the page says it is not applied and links to the provider',!$('stabilityNeeds').hidden && $('stabilityNeeds').textContent.includes('bundled Quad Views only') && ($('stabilityFix').click(), !$('page-foveation').hidden));
-      edit('quadViews',was.quadViews); edit('neuralRendering',was.neural); edit('foveatedDlss',was.foveated); edit('peripheryStabilityStrength',String(was.strength)); edit('peripheryStability',was.on); ui.navigate('pupil'); }
+      edit('quadViews',was.quadViews); edit('neuralRendering',was.neural); edit('foveatedDlss',was.foveated); edit('peripheryStabilityStrength',String(was.strength)); edit('peripheryStability',was.on); ui.navigate('foveation'); }
     // Depth boost: a card of its own on the Perception page, off by default, with its own switch; it needs the same gaze.
     { const was = {pupilShift:ui.profile.pupilShift, depthBoost:ui.profile.depthBoost, quadViews:ui.profile.quadViews, gaze:ui.profile.gaze, engine:ui.profile.engineOptimizations};
       check('Depth boost is off by default and its settings wait for it',ui.profile.depthBoost === false && ui.profile.depthBoostMax === 1.4 && ui.profile.depthBoostMode === 'Realistic' && ui.profile.depthBoostRealisticMax === 1.25 && $('input-depthBoostMax').disabled && $('setting-depthBoostMax').classList.contains('inactive') && $('input-depthBoostMode').disabled);
@@ -155,10 +158,7 @@ window.runWebSmoke = async function() {
         && $('depthControls').closest('#page-pupil') && $('depthControls').textContent.includes('EXPERIMENTAL') && $('depthControls').textContent.includes('landings')
         && ui.fields.find(f => f.path === 'depthBoostToggleKey').type === 'hotkey' && ui.profile.depthBoostToggleKey === '121:6' && k.textContent === 'Alt+Shift+F10' && !$('input-depthBoostRealisticMax').disabled && $('input-depthBoostMax').disabled);
       k.click(); press(121,'cs'); check('The Depth boost switch refuses the pupil shift switch',k.classList.contains('capturing') && ui.profile.depthBoostToggleKey === '121:6'); press(27);
-      { const t = $('input-depthBoostTransitionKey');
-        check('Gradual by default, with Predictive offered and its own switch (Alt+Shift+F9)',ui.profile.depthBoostTransition === 'Gradual' && !$('input-depthBoostTransition').disabled
-          && [...$('input-depthBoostTransition').options].some(o => o.value === 'Predictive') && ui.profile.depthBoostTransitionKey === '120:6' && t.textContent === 'Alt+Shift+F9');
-        t.click(); press(121,'as'); check('The transition switch refuses Depth boost\'s switch',t.classList.contains('capturing') && ui.profile.depthBoostTransitionKey === '120:6'); press(27); }
+      check('No transition choice or transition key: the dual camera only moves the depth smoothly',!$('input-depthBoostTransition') && !$('input-depthBoostTransitionKey') && !$('input-ownAircraftTrueDepth').disabled && ui.profile.ownAircraftTrueDepth === true);
       check('Realistic by default: its strength and distances, not Enhanced\'s strength',!$('input-depthBoostRealisticMax').disabled && !$('input-depthBoostFarStartM').disabled && $('input-depthBoostMax').disabled);
       edit('depthBoostRealisticMax','1.6'); check('A Realistic strength beyond ×1.5 is refused',$('setting-depthBoostRealisticMax').classList.contains('invalid')); edit('depthBoostRealisticMax','1.25');
       edit('depthBoostMode','Enhanced'); check('Enhanced: its own strength, Realistic\'s settings wait',!$('input-depthBoostMax').disabled && $('input-depthBoostRealisticMax').disabled && $('input-depthBoostFarFullM').disabled);
@@ -166,7 +166,7 @@ window.runWebSmoke = async function() {
       edit('pupilShift',false); edit('gaze','Fixed'); check('Without an eye-tracked gaze the page says Depth boost needs it',!$('pupilNeeds').hidden && $('pupilNeeds').textContent.includes('Depth boost needs'));
       edit('gaze',was.gaze); edit('quadViews',was.quadViews); edit('depthBoost',was.depthBoost); edit('pupilShift',was.pupilShift); edit('engineOptimizations',was.engine); ui.navigate('pupil'); }
     ui.navigate('support'); await new Promise(r => setTimeout(r,300));
-    check('Diagnostics explains DLSS 5 on the focus area from the last session and offers the diagnostic package',$('dlssFocus').textContent.includes('No session') && $('diagnosticPackage').textContent.startsWith('Create diagnostic package') && $('page-support').textContent.includes('<user>'));
+    check('Troubleshooting explains DLSS 5 on the focus area from the last session and offers the diagnostic package',$('dlssFocus').textContent.includes('No session') && $('diagnosticPackage').textContent.startsWith('Create diagnostic package') && $('page-support').textContent.includes('<user>'));
     { const cursor = ui.fields.find(f => f.path === 'smoothCursor');
       check('Smooth mouse cursor sits under Frame generation, off by default, and says the click does not move',cursor.page === 'framegen' && cursor.type === 'toggle' && ui.profile.smoothCursor === false && !$('setting-smoothCursor').closest('details') && $('setting-smoothCursor').textContent.includes("Where you click doesn't change")); }
     { const vram = ui.fields.find(f => f.path === 'diagnosticVram');

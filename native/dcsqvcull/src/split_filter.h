@@ -176,6 +176,12 @@ inline void Factor(const FLOAT* f, float (&out)[4]) {
 Shadow g_sh;
 std::atomic<Ctx*> g_live{nullptr};   // DCS's context while filtering, else null
 std::atomic<Ctx*> g_ctx{nullptr};    // DCS's immediate context once captured
+// Called after every ExecuteCommandList on an immediate context (d3d11 toggles the table's draw / copy / update
+// entries there; fixation_depth.h repairs its in-pass hooks at once). Set by fixation_depth.h's Install.
+std::atomic<void (*)(void* ctx)> g_afterEcl{nullptr};
+inline void NotifyEcl(void* ctx) {
+  if (auto f = g_afterEcl.load(std::memory_order_acquire)) f(ctx);
+}
 void** g_table = nullptr;            // its vtable (inside the context object)
 int g_slot[kHookCount] = {};
 void* volatile g_orig[kHookCount] = {};  // d3d11's entries, refreshed with every re-hook
@@ -372,6 +378,7 @@ void STDMETHODCALLTYPE H_ExecuteCommandList(Ctx* c, ID3D11CommandList* l, BOOL r
   Reset(c);
   Orig<decltype(&H_ExecuteCommandList)>(kHExecuteCommandList)(c, l, restore);
   if (Mine(c)) g_sh.ForgetAll();
+  NotifyEcl(c);
 }
 void STDMETHODCALLTYPE H_SwapDeviceContextState(Ctx* c, ID3DDeviceContextState* s, ID3DDeviceContextState** p) {
   Reset(c);

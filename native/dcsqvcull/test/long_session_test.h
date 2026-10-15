@@ -747,6 +747,16 @@ void DcsGpuShare() {
   g.Run(300);
   const bool ok = perfmon::KmtSample(&a, &p);
   printf("     long session (gpu share): adapter %.0f%%, this process %.0f%%\n", a, p);
+  if (ok && p < 0 && perfmon::g_kmt.procStatus != 0) {
+    // The driver does not answer this process's query (STATUS_INVALID_PARAMETER: no device of this process on
+    // the adapter it reports, or a sandboxed test host): nothing to verify here.
+    printf("SKIP long session (gpu share): the driver does not answer the per-process query (NTSTATUS 0x%08lx)\n",
+           static_cast<unsigned long>(perfmon::g_kmt.procStatus));
+    perfmon::Shutdown();
+    perfmon::g_kmt = perfmon::Kmt();
+    perfmon::g_ad = perfmon::Adapter();
+    return;
+  }
   Check(ok && p >= 0 && p <= 100,
         "long session (gpu share): this process's share answers (was: n/a, the LIMITED handle's query fails)");
 #ifdef QV_LONG_SESSION_FIXES

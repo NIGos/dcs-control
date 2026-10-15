@@ -42,7 +42,7 @@ public static class ProfileValidation
         void Error(string code, string text) => issues.Add(new(code, IssueSeverity.Error, text));
         void Range(string code, double value, double min, double max)
         {
-            if (!double.IsFinite(value) || value < min || value > max) Error(code, $"{code}: allowed range is {min} to {max}.");
+            if (!double.IsFinite(value) || value < min || value > max) Error(code, $"Allowed range: {min} to {max}.");
         }
         if (profile.SchemaVersion != 1) Error("schema", "Unsupported profile version.");
         if (string.IsNullOrWhiteSpace(profile.Id) || profile.Id.Length > 80 || profile.Id.Any(c => !char.IsAsciiLetterOrDigit(c) && c != '-'))
@@ -131,9 +131,6 @@ public static class ProfileValidation
             issues.Add(new("far-depth-needs", IssueSeverity.Warning, "Far depth needs the bundled Quad Views and Engine Optimizations (they measure the depth). With these settings it does not run."));
         if (profile.FarDepth && !Enum.IsDefined(profile.FarDepthPreset)) Error("far-depth-preset", "Select Subtle, Default or Strong for Far depth.");
         if (profile.DepthBoost && !Enum.IsDefined(profile.DepthBoostMode)) Error("depth-mode", "Select Realistic or Enhanced for Depth boost.");
-        if (profile.DepthBoost && !Enum.IsDefined(profile.DepthBoostTransition)) Error("depth-transition", "Select Gradual or Predictive for Depth boost's transition.");
-        if (profile.UsesDepthBoost && profile.DepthBoostTransition == DepthBoostTransition.Predictive && !profile.EngineOptimizations)
-            issues.Add(new("depth-transition-grid", IssueSeverity.Warning, "Depth boost's Predictive transition needs Engine Optimizations, which measure the distance where your eyes will land. Without them it works as Gradual."));
         if (profile.DepthBoost && profile.DepthBoostMode == DepthBoostMode.Enhanced && profile.DepthBoostMax is < VrProfile.DepthBoostMaxMin or > VrProfile.DepthBoostMaxMax)
             Error("depth-max", $"Depth boost's Enhanced strength must be ×{VrProfile.DepthBoostMaxMin}–×{VrProfile.DepthBoostMaxMax}.");
         if (profile.DepthBoost && profile.DepthBoostMode == DepthBoostMode.Realistic && profile.DepthBoostRealisticMax is < VrProfile.DepthBoostMaxMin or > VrProfile.DepthBoostRealisticMaxMax)
@@ -185,15 +182,15 @@ public static class ProfileValidation
         // The module starts its 3-minute test suite on Ctrl+Alt+F11 with any other modifier too: no in-flight key may use
         // its keys while it runs.
         if (profile.EngineOptimizations && profile.NeuralRendering && NeuralHotkeys.TryParse(profile.NeuralToggleKey ?? NeuralHotkeys.Default, out var nrSuite) && !nrSuite.IsOff && NeuralHotkeys.EngineModuleKey(nrSuite))
-            Error("neural-hotkey", $"{NeuralHotkeys.Label(nrSuite)} is used by the Engine Optimizations test suite. Choose another key.");
+            Error("neural-hotkey", $"{NeuralHotkeys.Label(nrSuite)} is reserved by Engine Optimizations (Ctrl+Alt+F8 to F12, Page Up and Page Down). Choose another key.");
         if (profile.EngineOptimizations && profile.UsesHeadsetPanel && NeuralHotkeys.TryParse(profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault, out var panelSuite) && !panelSuite.IsOff && NeuralHotkeys.EngineModuleKey(panelSuite))
-            Error("diagnostic-hotkey", $"{NeuralHotkeys.Label(panelSuite)} is used by the Engine Optimizations test suite. Choose another key.");
+            Error("diagnostic-hotkey", $"{NeuralHotkeys.Label(panelSuite)} is reserved by Engine Optimizations (Ctrl+Alt+F8 to F12, Page Up and Page Down). Choose another key.");
         Key(profile.EngineToggleKey, NeuralHotkeys.EngineDefault, profile.EngineOptimizations, "engine-hotkey", "Engine Optimizations switch");
         // The module's own keys (Ctrl+Alt+F8 to F12, Ctrl+Alt+Page Up/Down) stay reserved for it.
         if (profile.EngineOptimizations && NeuralHotkeys.TryParse(profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault, out var engineKey) && !engineKey.IsOff)
         {
             if (NeuralHotkeys.EngineModuleKey(engineKey))
-                Error("engine-hotkey", $"{NeuralHotkeys.Label(engineKey)} is used by the Engine Optimizations test suite. Choose another key.");
+                Error("engine-hotkey", $"{NeuralHotkeys.Label(engineKey)} is reserved by Engine Optimizations (Ctrl+Alt+F8 to F12, Page Up and Page Down). Choose another key.");
             if ((profile.NeuralRendering && NeuralHotkeys.Same(profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
                 || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault)))
                 Error("hotkey-conflict", "The Engine Optimizations switch needs a key of its own: the DLSS 5 toggle or the in-headset panel uses it.");
@@ -204,7 +201,7 @@ public static class ProfileValidation
         {
             var pupil = profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault;
             if (profile.EngineOptimizations && NeuralHotkeys.EngineModuleKey(pupilKey))
-                Error("pupil-hotkey", $"{NeuralHotkeys.Label(pupilKey)} is used by the Engine Optimizations test suite. Choose another key.");
+                Error("pupil-hotkey", $"{NeuralHotkeys.Label(pupilKey)} is reserved by Engine Optimizations (Ctrl+Alt+F8 to F12, Page Up and Page Down). Choose another key.");
             if ((profile.NeuralRendering && NeuralHotkeys.Same(pupil, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
                 || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(pupil, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
                 || (profile.EngineOptimizations && NeuralHotkeys.Same(pupil, profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault)))
@@ -216,26 +213,12 @@ public static class ProfileValidation
         {
             var depth = profile.DepthBoostToggleKey ?? NeuralHotkeys.DepthBoostDefault;
             if (profile.EngineOptimizations && NeuralHotkeys.EngineModuleKey(depthKey))
-                Error("depth-hotkey", $"{NeuralHotkeys.Label(depthKey)} is used by the Engine Optimizations test suite. Choose another key.");
+                Error("depth-hotkey", $"{NeuralHotkeys.Label(depthKey)} is reserved by Engine Optimizations (Ctrl+Alt+F8 to F12, Page Up and Page Down). Choose another key.");
             if ((profile.NeuralRendering && NeuralHotkeys.Same(depth, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
                 || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(depth, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
                 || (profile.EngineOptimizations && NeuralHotkeys.Same(depth, profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault))
                 || (profile.UsesPupilShift && NeuralHotkeys.Same(depth, profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault)))
                 Error("hotkey-conflict", "The Depth boost switch needs a key of its own: DLSS 5, the in-headset panel, Engine Optimizations or Pupil shift use it.");
-        }
-        // Depth boost's transition switch (gradual / predictive): a key of its own too, Depth boost's switch included.
-        Key(profile.DepthBoostTransitionKey, NeuralHotkeys.DepthTransitionDefault, profile.UsesDepthBoost, "depth-transition-hotkey", "Depth boost transition switch");
-        if (profile.UsesDepthBoost && NeuralHotkeys.TryParse(profile.DepthBoostTransitionKey ?? NeuralHotkeys.DepthTransitionDefault, out var transitionKey) && !transitionKey.IsOff)
-        {
-            var transition = profile.DepthBoostTransitionKey ?? NeuralHotkeys.DepthTransitionDefault;
-            if (profile.EngineOptimizations && NeuralHotkeys.EngineModuleKey(transitionKey))
-                Error("depth-transition-hotkey", $"{NeuralHotkeys.Label(transitionKey)} is used by the Engine Optimizations test suite. Choose another key.");
-            if ((profile.NeuralRendering && NeuralHotkeys.Same(transition, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
-                || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(transition, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
-                || (profile.EngineOptimizations && NeuralHotkeys.Same(transition, profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault))
-                || (profile.UsesPupilShift && NeuralHotkeys.Same(transition, profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault))
-                || NeuralHotkeys.Same(transition, profile.DepthBoostToggleKey ?? NeuralHotkeys.DepthBoostDefault))
-                Error("hotkey-conflict", "The Depth boost transition switch needs a key of its own: DLSS 5, the in-headset panel, Engine Optimizations, Pupil shift or the Depth boost switch use it.");
         }
         // Far depth's switch, read by the bundled Quad Views: a key of its own as well.
         Key(profile.FarDepthToggleKey, NeuralHotkeys.FarDepthDefault, profile.UsesFarDepth, "far-depth-hotkey", "Far depth switch");
@@ -243,12 +226,12 @@ public static class ProfileValidation
         {
             var far = profile.FarDepthToggleKey ?? NeuralHotkeys.FarDepthDefault;
             if (profile.EngineOptimizations && NeuralHotkeys.EngineModuleKey(farKey))
-                Error("far-depth-hotkey", $"{NeuralHotkeys.Label(farKey)} is used by the Engine Optimizations test suite. Choose another key.");
+                Error("far-depth-hotkey", $"{NeuralHotkeys.Label(farKey)} is reserved by Engine Optimizations (Ctrl+Alt+F8 to F12, Page Up and Page Down). Choose another key.");
             if ((profile.NeuralRendering && NeuralHotkeys.Same(far, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
                 || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(far, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
                 || (profile.EngineOptimizations && NeuralHotkeys.Same(far, profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault))
                 || (profile.UsesPupilShift && NeuralHotkeys.Same(far, profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault))
-                || (profile.UsesDepthBoost && (NeuralHotkeys.Same(far, profile.DepthBoostToggleKey ?? NeuralHotkeys.DepthBoostDefault) || NeuralHotkeys.Same(far, profile.DepthBoostTransitionKey ?? NeuralHotkeys.DepthTransitionDefault))))
+                || (profile.UsesDepthBoost && NeuralHotkeys.Same(far, profile.DepthBoostToggleKey ?? NeuralHotkeys.DepthBoostDefault)))
                 Error("hotkey-conflict", "The Far depth switch needs a key of its own: another in-flight switch uses it.");
         }
         // NVIDIA-only processing on a PC without an NVIDIA RTX card would install files that cannot run.

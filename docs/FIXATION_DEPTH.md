@@ -17,8 +17,9 @@ transition), `native/pupil_shift/pupil_shift_layer.cpp` (the wiring).
 
 1. **Scene depth at the gaze (primary).** The engine module (native/dcsqvcull, inside DCS, Direct3D 11) reads DCS's
    depth buffer of a focus view in a cone around the gaze. It converts the samples to metres with the view's projection
-   and publishes a summary each frame (see "Interface"). It runs with Engine Optimizations: the app writes
-   `[Perception] FixationDepth=1` in `DcsQvCull.ini` while the profile uses Depth boost (`VrProfile.UsesFixationDepth`).
+   and publishes a summary each frame (see "Interface"). It runs whenever the profile uses Depth boost: the app
+   writes `[Perception] FixationDepth=1` in `DcsQvCull.ini` (`VrProfile.UsesFixationDepth`), with Engine Optimizations or,
+   without them, in the module's Perception-only mode (`[General] PerceptionOnly=1`).
 2. **Binocular vergence (secondary).** Each eye's gaze, triangulated (`inverse_fixation_distance`). Vergence is too
    coarse to tell 50 m from 500 m, but it separates the cockpit (under 1.5 m) from outside, and it covers what the depth
    buffer gets wrong near the pilot (glass, symbology that is drawn far but seen near). It only counts once it has proven
@@ -27,7 +28,7 @@ transition), `native/pupil_shift/pupil_shift_layer.cpp` (the wiring).
    they never prove vergence.
 3. **Fallback.** Without either source, Depth boost stays at ×1.
 
-Without the engine module (Engine Optimizations off) Depth boost runs on the vergence alone: Enhanced works as Depth
+Without the engine module (a failed load; since 0.5.9 the app installs it with every Depth boost profile) Depth boost runs on the vergence alone: Enhanced works as Depth
 boost v1 did (the maximum while the vergence says far), Realistic stays at ×1, because vergence cannot tell whether a
 far object is nearer or farther than 150 m.
 
@@ -117,7 +118,8 @@ fixation's vergence into the first estimate after a saccade), and a gap in the g
 ## Predictive transition
 
 Two transitions, switchable live for A/B comparison: `[DepthBoost] Transition=gradual|predictive` in `PupilShift.ini`
-(re-read about every 90 frames) and the in-flight key `TransitionToggle` (default Alt+Shift+F9, `120:6`; one beep
+(re-read about every 90 frames) and the in-flight key `TransitionToggle` (legacy path only since 0.5.9: the app writes
+`Transition=gradual` and `TransitionToggle=0:0`; e.g. Alt+Shift+F9, `120:6`; one beep
 gradual, two beeps predictive; a changed ini value replaces the key's choice). **Gradual** (default) is everything
 above. **Predictive** adds one capped step *during* a long saccade, towards the scale of where the eyes will land; the
 rest of the change follows the gradual rates, and the landing's cone confirms or reverts it. Code:
@@ -257,9 +259,9 @@ struct DepthGrid {        // pack(8), 9264 bytes
 ```
 
 Published about 2 frames after the capture (GPU readback without a stall), each cell about 15 × 15 pixels of the
-periphery. `DepthGrid` is independent of `FixationDepth`; with both on they share the capture. The app writes
-`DepthGrid=1` whenever the scene depth is on (Depth boost with Engine Optimizations, `VrProfile.UsesDepthGrid`),
-whatever transition the profile starts with, so the in-flight key can switch to Predictive. Measured live it costs
+periphery. `DepthGrid` is independent of `FixationDepth`; with both on they share the capture. Since 0.5.9 the app
+writes `DepthGrid=0`: only the predictive transition reads the grid, and with the dual camera the transition is always
+gradual. Measured live it costs
 about 14 µs of GPU and 5 µs of render thread per frame.
 
 ## Pimax PVR per-eye gaze
@@ -314,7 +316,8 @@ valid and invalid queries, queries with a bad eye, mean convergence distance (`p
 before the session is found). The `depth settings:` line has the mode, MaxScale, the far distances and `pvr=`.
 `[DepthBoost] Trace=1` adds one `dtrace:` line per display time (gaze, vergence, summary, decider, target and scale), for
 diagnostics only. `PupilShiftStatus` reads the new line and older ones; the Pupil shift page shows where the distance
-comes from and, for Realistic without the scene depth, says that it needs Engine Optimizations.
+comes from and, for Realistic without the scene depth, says that none arrived and points to the Engine Optimizations page
+(where the module's state shows).
 
 Status word (`PupilShift_Status()`): bits 28–29 the source (0 none, 1 vergence, 2 scene depth), bit 30 on an edge,
 bit 31 vergence veto; the fixation (bits 24–25) is the decider's state; the distance (bits 48–59) the scene's median at

@@ -533,6 +533,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                 case "engineSuite":
                     EnsureInteractive();
                     var suiteOptions = EngineOptionsPath() ?? throw new InvalidOperationException("Select DCS's options.lua first.");
+                    // Installed for Depth boost alone, the module runs no test suite: the flag would wait for a later flight.
+                    if (service.ReadAppliedProfile() is { } suiteApplied && !suiteApplied.Profile.EngineOptimizations)
+                        throw new InvalidOperationException("The test suite compares Engine Optimizations off and on: turn them on and start DCS with Launch DCS first.");
                     return Reply(id, new { message = EngineOptimizations.StartSuite(suiteOptions, DcsRunning()) });
                 case "engineOpen":
                     EnsureInteractive();

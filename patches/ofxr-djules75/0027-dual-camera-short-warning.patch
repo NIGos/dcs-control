@@ -1,0 +1,83 @@
+diff --git a/include/xrfg/diagnostic_overlay_model.hpp b/include/xrfg/diagnostic_overlay_model.hpp
+--- a/include/xrfg/diagnostic_overlay_model.hpp
++++ b/include/xrfg/diagnostic_overlay_model.hpp
+@@ -242,7 +242,6 @@
+     FarDepthStatus far_depth; // 0023
+     DiagnosticHotkey far_depth_hotkey; // 0024: DCSVR_FARDEPTH_HOTKEY
+     DualCameraStatus dual_camera; // 0025
+-    DiagnosticHotkey dual_camera_hotkey; // 0025: DCSVR_DUALCAM_HOTKEY, else Alt+Shift+F7
+ };
+ 
+ [[nodiscard]] std::string format_dlss_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
+@@ -266,8 +265,8 @@
+ [[nodiscard]] std::string format_pupil_line(const DiagnosticInputs& inputs, DiagnosticColor& color);
+ // DCS Control (0026): with the dual camera configured (DcsQvCull_DualCameraStatus)
+ // the Depth part says "(dual camera)" while it draws the cockpit at the true eye
+-// distance, and turns amber with ", dual camera not patching" when Depth boost
+-// boosts but the cockpit is not corrected.
++// distance, and turns amber with ", no dual camera" when Depth boost boosts but
++// the cockpit is not corrected (0027: short enough for the panel with Pupil shift).
+ // DCS Control (0018): with PupilShift_Ipd() the Depth part names the eye
+ // distance rendered now, "Depth boost: x1.18 far, IPD 77.4 mm". And the
+ // periphery line: "Periphery: ON 0.50, 88 fps" green, "Periphery: ON, not
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+--- a/src/core/diagnostic_overlay_model.cpp
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -216,7 +216,7 @@
+         if (d.bits & kDualCameraOn) text += " (dual camera)";
+         else if (!(d.bits & (kDualCameraPaused | kDualCameraWaiting | kDualCameraObserve)) && percent > 0U) {
+             color = DiagnosticColor::amber;
+-            text += ", dual camera not patching";
++            text += ", no dual camera";
+         }
+     }
+     // DCS Control (0018): the eye distance rendered now, in tenths of a mm.
+diff --git a/src/layer/openxr_fps_overlay.cpp b/src/layer/openxr_fps_overlay.cpp
+--- a/src/layer/openxr_fps_overlay.cpp
++++ b/src/layer/openxr_fps_overlay.cpp
+@@ -125,7 +125,6 @@
+     EngineStatusFn dual_camera_status{};
+     HMODULE dual_camera_module{};
+     std::uint64_t next_dual_camera_lookup_ms{};
+-    DiagnosticHotkey dual_camera_hotkey;
+     // DCS Control (0015): the pupil shift layer's status export, looked up the same way.
+     EngineStatusFn pupil_status{};
+     HMODULE pupil_module{};
+@@ -470,7 +469,6 @@
+ 
+     // DCS Control (0025): an older DcsQvCull.dll has no such export; the line is then left out.
+     void read_dual_camera(DiagnosticInputs& inputs) {
+-        inputs.dual_camera_hotkey = dual_camera_hotkey;
+         if (!dual_camera_status) {
+             const auto tick = GetTickCount64();
+             if (tick < next_dual_camera_lookup_ms) return;
+@@ -606,8 +604,6 @@
+     if (!parse_diagnostic_hotkey(environment("DCSVR_PUPIL_HOTKEY"), impl_->pupil_hotkey)) impl_->pupil_hotkey = {};
+     if (!parse_diagnostic_hotkey(environment("DCSVR_DEPTH_HOTKEY"), impl_->depth_hotkey)) impl_->depth_hotkey = {};
+     if (!parse_diagnostic_hotkey(environment("DCSVR_FARDEPTH_HOTKEY"), impl_->far_depth_hotkey)) impl_->far_depth_hotkey = {};
+-    // The module's own default (DcsQvCull.ini [Perception] CockpitTrueIpdToggle=118:6) when DCS Control names none.
+-    if (!parse_diagnostic_hotkey(environment("DCSVR_DUALCAM_HOTKEY"), impl_->dual_camera_hotkey)) impl_->dual_camera_hotkey = {0x76, 6};
+     impl_->toggle = DiagnosticToggle(environment("DCSVR_DIAG_OVERLAY") == "1");
+ }
+ OpenXrFpsOverlay::~OpenXrFpsOverlay() = default;
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+--- a/tests/diagnostic_overlay_tests.cpp
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -188,11 +188,16 @@
+                 d.dual_camera = {true, kDualCameraConfigured | kDualCameraOn | (130ULL << 8) | (88ULL << 16)};
+                 require(format_pupil_line(d, color) == "Depth boost: x1.30 far (dual camera)" && color == C::green, "dual camera on");
+                 d.dual_camera = {true, kDualCameraConfigured};
+-                require(format_pupil_line(d, color) == "Depth boost: x1.30 far, dual camera not patching" && color == C::amber, "boosting without the dual camera");
++                require(format_pupil_line(d, color) == "Depth boost: x1.30 far, no dual camera" && color == C::amber, "boosting without the dual camera");
+                 d.dual_camera = {true, kDualCameraConfigured | kDualCameraWaiting};
+                 require(format_pupil_line(d, color) == "Depth boost: x1.30 far" && color == C::green, "waiting for Depth boost's scale");
+                 const auto lines = format_diagnostic_lines(d);
+                 for (const auto& line : lines) require(line.text.rfind("Dual camera", 0) != 0, "no separate line");
++                // 0027: with Pupil shift too, the warning still fits the panel.
++                d.pupil.bits = (d.pupil.bits & ~kPupilDisabled) | (31ULL << 8);
++                d.dual_camera = {true, kDualCameraConfigured};
++                const auto both = format_pupil_line(d, color);
++                require(both.size() <= diagnostic_panel_columns(kDiagnosticPanelWidth) && both.find("no dual camera") != std::string::npos, "fits with Pupil shift: " + both);
+             }
+             const auto running = kFarDepthOn | 2ULL | kFarDepthValid | (100ULL << 8) | (88ULL << 16) | (12ULL << 32);
+             require(far2(running, C::green) == "Far depth: ON, 88 fps, HUD 12%", "full gain shows just ON");

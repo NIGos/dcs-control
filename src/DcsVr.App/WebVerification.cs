@@ -185,6 +185,7 @@ internal static class WebVerification
         GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 4090", "NVIDIA", "32.0.15.0")];
         NvidiaSettings.ThreadedOptimizationForDcs = () => new(ThreadedOptimization.Auto, false);
         NvidiaSettings.MfaaForDcs = () => new(false, false);
+        LaunchSafety.SteamRunning = () => true; // the fixture is the Steam edition; the build machine's Steam does not matter
         var update = UpdateFixture(Path.Combine(fixture, "updates"), service.StateRoot);
         var bridge = new WebBridge(service,capture: (_,_) => inventory,offline:true,flightSources:(_,_) => flight with { DcsLog = Path.Combine(logs, "dcs.log") },updates:update.Updates,releaseNotesPath:update.NotesPath);
         using var source = new HwndSource(new HwndSourceParameters("DCS Control offline web verification") { Width = 1320, Height = 920, WindowStyle = unchecked((int)0x80000000), PositionX = -32000, PositionY = -32000 });
@@ -245,7 +246,7 @@ internal static class WebVerification
                 if (await core.ExecuteScriptAsync("window.renderRefreshPending") == "true") throw new IOException("Screenshot draft refresh timed out.");
                 controller.Bounds = new System.Drawing.Rectangle(0,0,width,height);
                 var controller3 = controller as CoreWebView2Controller; controller3.RasterizationScale = scale; controller3.ShouldDetectMonitorScaleChanges = false;
-                foreach (var page in new[] { "overview","foveation","dlss","framegen","boost","engine","setup","diagnostics","recovery" })
+                foreach (var page in new[] { "overview","guide","foveation","dlss","framegen","boost","engine","setup","diagnostics","recovery" })
                 {
                     if (page == "diagnostics")
                     {

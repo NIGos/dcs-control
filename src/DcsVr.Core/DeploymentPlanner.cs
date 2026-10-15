@@ -204,9 +204,10 @@ public sealed class DeploymentPlanner(ComponentLocations components)
 
         // DCS engine optimizations: a Lua hook in Saved Games loads the module; nothing in the DCS install changes. The
         // loader and the hook are locked while DCS runs, like every file Apply writes (it refuses while DCS is open).
-        if (profile.EngineOptimizations)
+        // Depth boost alone installs it too, in its Perception-only mode.
+        if (profile.UsesEngineModule)
         {
-            var engine = RequireDirectory(components.EngineDirectory, "The DCS engine optimizations are unavailable.");
+            var engine = RequireDirectory(components.EngineDirectory, profile.EngineOptimizations ? "The DCS engine optimizations are unavailable." : "Depth boost's engine module is unavailable.");
             var module = Path.Combine(scripts, "DcsQvCull");
             Add(Path.Combine(module, "DcsQvCull.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.dll")), "DCS engine optimizations loader",
                 // What the module writes while DCS runs; all of it goes with the module on restore.

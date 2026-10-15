@@ -50,6 +50,13 @@ public static class LaunchSafety
     /// launchers), never when it is started from the Start menu or Explorer. Replaceable for tests.
     /// </summary>
     public static Func<JobState> CurrentJob { get; set; } = ReadCurrentJob;
+    /// <summary>Steam runs: the Steam edition of DCS needs it before Launch DCS. Replaceable for tests (the offline
+    /// verification host must not depend on whether Steam happens to run on the build machine).</summary>
+    public static Func<bool> SteamRunning { get; set; } = () =>
+    {
+        var steam = System.Diagnostics.Process.GetProcessesByName("steam");
+        try { return steam.Length > 0; } finally { foreach (var process in steam) process.Dispose(); }
+    };
 
     /// <param name="InJob">The process belongs to a job object.</param>
     /// <param name="LimitFlags">JOBOBJECT_BASIC_LIMIT_INFORMATION.LimitFlags of the innermost job.</param>
@@ -135,7 +142,7 @@ public static class LaunchSafety
         if (inventory.OptionsPath is { } options && Path.GetDirectoryName(options) is { } config)
         {
             folders.Add(config);
-            if (profile.EngineOptimizations && Path.GetDirectoryName(config) is { } savedGames) folders.Add(Path.Combine(savedGames, "Scripts"));
+            if (profile.UsesEngineModule && Path.GetDirectoryName(config) is { } savedGames) folders.Add(Path.Combine(savedGames, "Scripts"));
         }
         if (profile.ForLaunch().UsesCheeky && inventory.DcsExecutable is { } exe && Path.GetDirectoryName(exe) is { } bin) folders.Add(bin);
         return folders;

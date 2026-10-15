@@ -1286,6 +1286,7 @@ struct Target {
   bool ms = false;
   ID3D11Texture2D* init = nullptr;     // init, then B
   ID3D11Texture2D* a = nullptr;
+  ID3D11Texture2D* m = nullptr;        // the ownship mask's run (gb_rec.h stage 2; staging targets only, on demand)
   ID3D11ShaderResourceView* srvInit = nullptr;  // MS only
   ID3D11ShaderResourceView* srvA = nullptr;
 };
@@ -1319,6 +1320,7 @@ void SafeRelease(T*& p) {
 void ReleaseCopies(Target& t) {
   SafeRelease(t.init);
   SafeRelease(t.a);
+  SafeRelease(t.m);
   SafeRelease(t.srvInit);
   SafeRelease(t.srvA);
 }
@@ -1444,6 +1446,58 @@ void CopyAll(bool toCopy, bool intoA) {
   }
 }
 
+// The ownship mask (gb_rec.h, CockpitTrueIpdOwnship=2): a third run with the ownship at DCS's camera, copied into
+// .m; a texel whose value in any staging target differs between A (the ownship at the true eye) and that run is an
+// ownship texel (its value depends on the ownship's camera). Per staging target of the same size as the first.
+std::vector<uint8_t> g_mask;
+UINT g_maskW = 0, g_maskH = 0, g_maskS = 0;
+bool g_maskOn = false;  // CompareStaging also counts the differing texels outside the mask (g_badOut)
+int64_t g_badOut = 0;   // the last CompareAll's differing texels outside the mask (staging targets)
+int64_t g_badIn = 0;    // ... inside it
+bool CopyAllMask() {  // the current targets into .m (created on demand); false: a target cannot take a mask
+  for (Target& t : g_t) {
+    if (!t.res) continue;
+    if (t.ms) return false;
+    if (!t.m && FAILED(g_dev->CreateTexture2D(&t.copyDesc, nullptr, &t.m))) return false;
+    for (UINT s = 0; s < t.slices; ++s)
+      g_ctx->CopySubresourceRegion(t.m, s, 0, 0, 0, t.res, D3D11CalcSubresource(t.mip, t.first + s, t.resMips), nullptr);
+  }
+  return true;
+}
+bool BuildMask() {  // A (.a) vs the mask run (.m): the ownship's texels
+  g_mask.clear();
+  g_maskW = g_maskH = g_maskS = 0;
+  for (Target& t : g_t) {
+    if (!t.res || !t.m) continue;
+    const D3D11_TEXTURE2D_DESC& d = t.copyDesc;
+    if (!g_maskW) {
+      g_maskW = d.Width, g_maskH = d.Height, g_maskS = d.ArraySize;
+      g_mask.assign(static_cast<size_t>(g_maskW) * g_maskH * g_maskS, 0);
+    }
+    if (d.Width != g_maskW || d.Height != g_maskH || d.ArraySize != g_maskS) continue;
+    const UINT bpt = TexelBytes(d.Format);
+    if (!bpt) return false;
+    for (UINT s = 0; s < d.ArraySize; ++s) {
+      D3D11_MAPPED_SUBRESOURCE ma, mm;
+      if (FAILED(g_ctx->Map(t.a, s, D3D11_MAP_READ, 0, &ma))) return false;
+      if (FAILED(g_ctx->Map(t.m, s, D3D11_MAP_READ, 0, &mm))) {
+        g_ctx->Unmap(t.a, s);
+        return false;
+      }
+      for (UINT y = 0; y < d.Height; ++y) {
+        const auto* ra = static_cast<const uint8_t*>(ma.pData) + static_cast<size_t>(y) * ma.RowPitch;
+        const auto* rm = static_cast<const uint8_t*>(mm.pData) + static_cast<size_t>(y) * mm.RowPitch;
+        if (memcmp(ra, rm, static_cast<size_t>(d.Width) * bpt) == 0) continue;
+        uint8_t* row = g_mask.data() + (static_cast<size_t>(s) * d.Height + y) * d.Width;
+        for (UINT x = 0; x < d.Width; ++x) row[x] |= memcmp(ra + x * bpt, rm + x * bpt, bpt) != 0;
+      }
+      g_ctx->Unmap(t.m, s);
+      g_ctx->Unmap(t.a, s);
+    }
+  }
+  return !g_mask.empty();
+}
+
 // Reads the bound views; nullptr, or why the pass cannot be compared.
 const char* Capture() {
   ReleaseViews();
@@ -1496,6 +1550,8 @@ void OnFirstItem() {
 }
 
 // ---- Compare ----
+// The bounding box (x0, y0, x1, y1) of the texels that differed in the last staging compares (diagnostics).
+int g_badBox[4] = {1 << 30, 1 << 30, -1, -1};
 int64_t CompareStaging(ID3D11Texture2D* a, ID3D11Texture2D* b, uint64_t* texels) {
   D3D11_TEXTURE2D_DESC d;
   a->GetDesc(&d);
@@ -1519,7 +1575,17 @@ int64_t CompareStaging(ID3D11Texture2D* a, ID3D11Texture2D* b, uint64_t* texels)
       const auto* ra = static_cast<const uint8_t*>(ma.pData) + static_cast<size_t>(y) * ma.RowPitch;
       const auto* rb = static_cast<const uint8_t*>(mb.pData) + static_cast<size_t>(y) * mb.RowPitch;
       if (memcmp(ra, rb, rowBytes) == 0) continue;
-      for (UINT x = 0; x < d.Width; ++x) bad += memcmp(ra + x * bpt, rb + x * bpt, bpt) != 0;
+      const bool masked = g_maskOn && d.Width == g_maskW && d.Height == g_maskH && d.ArraySize == g_maskS;
+      const uint8_t* mrow = masked ? g_mask.data() + (static_cast<size_t>(s) * d.Height + y) * d.Width : nullptr;
+      for (UINT x = 0; x < d.Width; ++x) {
+        if (memcmp(ra + x * bpt, rb + x * bpt, bpt) == 0) continue;
+        ++bad;
+        if (g_maskOn) (mrow && mrow[x] ? g_badIn : g_badOut)++;
+        g_badBox[0] = (std::min)(g_badBox[0], static_cast<int>(x));
+        g_badBox[1] = (std::min)(g_badBox[1], static_cast<int>(y));
+        g_badBox[2] = (std::max)(g_badBox[2], static_cast<int>(x));
+        g_badBox[3] = (std::max)(g_badBox[3], static_cast<int>(y));
+      }
     }
     *texels += static_cast<uint64_t>(d.Width) * d.Height;
     g_ctx->Unmap(b, s);
@@ -1614,6 +1680,7 @@ int64_t CompareMs(Target& t, uint64_t* texels) {
 // counts in bad[]; returns the total, or -1 on an error.
 int64_t CompareAll(int64_t bad[kMaxTargets], uint64_t* texels) {
   int64_t total = 0;
+  g_badIn = g_badOut = 0;
   for (int i = 0; i < kMaxTargets; ++i) {
     bad[i] = 0;
     Target& t = g_t[i];

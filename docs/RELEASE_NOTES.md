@@ -1,3 +1,17 @@
+# 0.5.9 preview
+
+**Depth boost, now with the dual camera** (experimental, off by default, Perception page): the world outside is rendered with your eyes a little further apart, following where you look and changing slowly, while the cockpit, its displays and its lighting stay at your real eye distance. The HUD stays where DCS draws it. Before, Depth boost widened the eye distance for the whole view and returned it to normal when you looked back into the cockpit; that step is gone. Realistic and Enhanced stay; the Gradual/Predictive choice and its Alt+Shift+F9 key are gone (the depth now always changes smoothly). Alt+Shift+F10 still turns it off and on in flight, and the in-headset panel shows "(dual camera)" on the Depth boost line.
+
+**Own aircraft at true depth** (on by default with Depth boost, experimental): in helicopters and two-seaters, the other crew station or the front seat outside your cockpit keeps its real distance instead of looking closer. It keeps the multi-threaded G-buffer running in views where your own aircraft fills the picture (the F-14's rear seat looking back, for example).
+
+**Depth boost without Engine Optimizations**: Depth boost needs DCS Control's engine module, which now also runs in a Perception-only mode: with Engine Optimizations off it is installed for Depth boost alone and none of the optimizations, the test suite or the engine keys run. Far depth still needs Engine Optimizations.
+
+**Feature guide** (new page, right under Overview): every feature in a few lines, with what you get, what to expect, what it costs, what it needs and its in-flight key, and whether it is on in your profile.
+
+**Tidier pages**: Eye distance moved to the Perception page, next to the features that build on it; Periphery stability moved to the Quad Views page, next to the other periphery settings; the Diagnostics page is now called Troubleshooting, so it is not mixed up with Checks. Texts across the app were reviewed: shorter, and no internal names where they don't help. The Ctrl+1 to Ctrl+9 page shortcuts follow the new order (Ctrl+2 is the Feature guide).
+
+**Fix (GitHub #3)**: switching Engine Optimizations off and back on in flight (Alt+Shift+F11) could turn the multi-threaded G-buffer off for the rest of the session. A late re-record of part of a frame could read objects DCS was already recycling; it now stops as soon as its frame is done, a fault there costs only that piece of one frame, and switching back on waits for the next full frame before the recorders start.
+
 # 0.5.8 preview
 
 **Far depth** (off by default; Perception page): distant aircraft, ships and terrain get more depth, between about 50 m and 2 km, while the cockpit stays exactly as it is. The bundled Quad Views shifts each eye's image using the depth DCS drew, which Engine Optimizations measure; under 0.1 ms per frame. Subtle, Default or Strong. The OSD shows "Far depth: ON".

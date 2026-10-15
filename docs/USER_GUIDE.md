@@ -99,11 +99,13 @@ Update refuses while DCS runs and while Launch DCS, Apply or Back to stock DCS i
 
 Releases before 0.5.6 cannot update themselves: install 0.5.6 once with the setup (or the ZIP); from then on updates arrive in the app. A dot next to the version number at the bottom of the left rail also means an update is available; × hides the banner until the next start.
 
-On the **Diagnostics** page, **Check for updates when DCS Control starts** turns the automatic check off (it is on by default) and **Check now** asks GitHub at once. Without internet nothing happens: no update is shown.
+On the **Troubleshooting** page, **Check for updates when DCS Control starts** turns the automatic check off (it is on by default) and **Check now** asks GitHub at once. Without internet nothing happens: no update is shown.
 
-**What's new** after an update: the first start of a new version shows its release notes once. Click the version number at the bottom of the left rail (or **What's new in this version** on the Diagnostics page) to see them again.
+**What's new** after an update: the first start of a new version shows its release notes once. Click the version number at the bottom of the left rail (or **What's new in this version** on the Troubleshooting page) to see them again.
 
 ## First run
+
+Not sure what to turn on? The **Feature guide** page (right under Overview) explains every feature in a few lines: what you get, what to expect, what it costs, what it needs and its in-flight key, and whether it is on in your profile. Its **Open** button takes you to the feature's settings.
 
 ### Detect my setup
 
@@ -253,12 +255,12 @@ When your eyes turn, each pupil moves a few millimetres, but DCS renders both ey
 
 ### Periphery stability
 
-On the same page. Outside the sharp focus area the enlarged periphery shimmers on thin lines (canopy frame, power lines, horizon), and there the eye is most sensitive to flicker. Periphery stability blends each periphery frame with the previous one, moved with your head, and leaves the focus area untouched. A jump of the eyes, a pause or a large head turn starts it over. Bundled Quad Views only, fixed or eye-tracked focus; about 0.03 ms of GPU time; off by default.
+On the **Quad Views** page, with the other periphery settings. Outside the sharp focus area the enlarged periphery shimmers on thin lines (canopy frame, power lines, horizon), and there the eye is most sensitive to flicker. Periphery stability blends each periphery frame with the previous one, moved with your head, and leaves the focus area untouched. A jump of the eyes, a pause or a large head turn starts it over. Bundled Quad Views only, fixed or eye-tracked focus; about 0.03 ms of GPU time; off by default.
 
 - **Strength** (0.5 by default): higher steadies more but can leave a faint trail on scenery that moves on its own, such as the ground while the aircraft rolls.
 - With Pimax native Quad Views or without Quad Views it is not applied; the page and Checks say so. Details and measurements: [PERCEPTION.md](PERCEPTION.md).
 
-### Diagnostics
+### Troubleshooting
 
 - **DLSS 5 on the focus area**: after a session, says whether DLSS 5 reached the Quad Views focus area and, when the panel said "DLSS 5: ON but not applied", why, in plain words, with what to check.
 - **Create diagnostic package…**: one ZIP to attach to a report (see [Reporting a problem](#reporting-a-problem)).
@@ -307,12 +309,12 @@ All in-flight keys are on the **OSD** page, under **In-flight keys**. A key whos
 | **Ctrl+Shift+F12** | DLSS 5 off/on, to compare |
 | **Ctrl+Shift+F10** | Pupil shift off/on (low beep off, high beep on) |
 | **Alt+Shift+F10** | Depth boost off/on (low beep off, high beep on) |
-| **Alt+Shift+F9** | Depth boost: Gradual or Predictive (one beep Gradual, two Predictive) |
+| **Alt+Shift+F8** | Far depth off/on, to compare (low beep off, two beeps on) |
 | **Ctrl+Alt+F11** | Start or stop the Engine Optimizations test suite (fixed) |
 
 To change a key, click the field and press the combination you want. Esc cancels, Backspace clears it. Keys need Ctrl, Alt or Shift unless they are F-keys, Pause, Insert, Home, End and similar. Windows' own shortcuts, the Windows key, another in-flight key's combination and the engine module's reserved keys (Ctrl+Alt+F8 to F12, Ctrl+Alt+Page Up/Down) are refused; a combination DCS binds by default is accepted with a note (and listed under Check yourself).
 
-The **diagnostic panel** is drawn in the headset. With frame generation it is always available; without it, turn on **In-headset panel** on the **OSD** page: OFXR is then loaded only to draw the panel and leaves your frames untouched. It and shows FPS, DLSS 5 state (on with GPU ms, off, or why it is not applied), the frame-generation backend and mode (2×, 3×, auto), and DCS (app) vs headset (output) FPS. With the engine optimizations on, an **Engine** line says whether all of them are working ("Engine Opt.: all 17 on", green), only some ("Engine Opt.: 12 of 17 on", amber; for a few seconds after a mission loads this is normal while the multi-threaded recorders learn the scene), none ("Engine Opt.: none on", red) or that you switched them off ("Engine Opt.: OFF (Alt+Shift+F11)"). With Pupil shift installed, a **Pupil shift** line shows "ON" with the largest pupil shift, "no gaze" or "OFF"; with Depth boost it adds the strength and the eye distance DCS renders now ("Depth x1.18 far, IPD 77.4 mm"). With Periphery stability, a **Periphery** line shows "ON 0.50, 88 fps" (strength and frames steadied per second), "ON, not filtering" or "OFF". Options on the **OSD** page (which also lists every in-flight key):
+The **diagnostic panel** is drawn in the headset. With frame generation it is always available; without it, turn on **In-headset panel** on the **OSD** page: OFXR is then loaded only to draw the panel and leaves your frames untouched. It and shows FPS, DLSS 5 state (on with GPU ms, off, or why it is not applied), the frame-generation backend and mode (2×, 3×, auto), and DCS (app) vs headset (output) FPS. With the engine optimizations on, an **Engine** line says whether all of them are working ("Engine Opt.: all 17 on", green), only some ("Engine Opt.: 12 of 17 on", amber; for a few seconds after a mission loads this is normal while the multi-threaded recorders learn the scene), none ("Engine Opt.: none on", red) or that you switched them off ("Engine Opt.: OFF (Alt+Shift+F11)"). With Pupil shift installed, a **Pupil shift** line shows "ON" with the largest pupil shift, "no gaze" or "OFF"; with Depth boost it adds the strength and the eye distance the world is rendered with ("Depth x1.18 far, IPD 77.4 mm"), followed by "(dual camera)" while the cockpit is drawn at your real eye distance, or an amber "no dual camera" when it is not. Depth boost alone has its own **Depth boost** line, and Far depth a **Far depth** line. With Periphery stability, a **Periphery** line shows "ON 0.50, 88 fps" (strength and frames steadied per second), "ON, not filtering" or "OFF". Options on the **OSD** page (which also lists every in-flight key):
 
 - **Visible at start**
 - **VRAM counter** — adds the video memory in use to the panel (off by default). Use it when you suspect VRAM is full.
@@ -342,7 +344,7 @@ The **Checks** page lists every finding once:
 - **Check yourself** — things only you can verify (refresh rate in Pimax Play/SteamVR, other FPS limiters, motion smoothing, eye calibration, image quality).
 - **OK** — folded.
 
-**Check this PC** adds the runtime, C++ runtime, drivers, write access and headset checks. **Export report** saves a JSON report; the **Diagnostics** page's package holds it and the logs (see [Reporting a problem](#reporting-a-problem)). Below come the files Launch DCS will write and what was detected on this PC.
+**Check this PC** adds the runtime, C++ runtime, drivers, write access and headset checks. **Export report** saves a JSON report; the **Troubleshooting** page's package holds it and the logs (see [Reporting a problem](#reporting-a-problem)). Below come the files Launch DCS will write and what was detected on this PC.
 
 ## Back to stock DCS
 
@@ -375,7 +377,7 @@ On the **Perception** page. It adds depth to distant scenery (about 50 m to 2 km
 
 ### Eye distance (IPD)
 
-DCS renders with the eye distance your headset measured or was set to (Pimax Play or SteamVR): the world then has its true size and depth. If DCS's own *custom IPD* is on (often set to 64 mm because it was said to look better), Launch DCS turns it off while the profile is applied and Back to stock DCS turns it on again. To keep DCS's value choose **DCS's custom IPD** under Headset runtime → Eye distance, or **Set here** for a value of your own (50-80 mm). Pupil shift and Depth boost use the same eye distance.
+DCS renders with the eye distance your headset measured or was set to (Pimax Play or SteamVR): the world then has its true size and depth. If DCS's own *custom IPD* is on (often set to 64 mm because it was said to look better), Launch DCS turns it off while the profile is applied and Back to stock DCS turns it on again. To keep DCS's value choose **DCS's custom IPD** under **Eye distance** on the Perception page, or **Set here** for a value of your own (50-80 mm). Pupil shift and Depth boost use the same eye distance.
 
 ### Multi-threaded shadows and G-buffer are unavailable
 
@@ -435,11 +437,11 @@ Only the `options.lua` values a feature needs — the frame limit, desktop VSync
 Please open an issue on [GitHub](https://github.com/NIGos/dcs-control/issues) with:
 
 1. **What you did and what happened** (route, features, 2×/3×/Auto, single-player or multiplayer).
-2. **The diagnostic package:** open the **Diagnostics** page and press **Create diagnostic package…** right after the flight that went wrong, before starting DCS again (DCS starts its log anew). It saves one ZIP with everything needed to understand the problem: the app's report (profile, what was detected, the checks, the last flight), `dcs.log`, `options.lua`, the logs and settings of DLSS 5 (Cheeky), frame generation (OFXR), Quad Views, Pupil shift, the engine optimizations and CPU Boost, the DLSS and DirectX file versions in DCS's `bin` folder, Pimax Play's or SteamVR's logs and settings, the OpenXR runtime and layers registered on the PC, and the Windows, CPU and GPU driver versions. Attach the ZIP to the issue.
+2. **The diagnostic package:** open the **Troubleshooting** page and press **Create diagnostic package…** right after the flight that went wrong, before starting DCS again (DCS starts its log anew). It saves one ZIP with everything needed to understand the problem: the app's report (profile, what was detected, the checks, the last flight), `dcs.log`, `options.lua`, the logs and settings of DLSS 5 (Cheeky), frame generation (OFXR), Quad Views, Pupil shift, the engine optimizations and CPU Boost, the DLSS and DirectX file versions in DCS's `bin` folder, Pimax Play's or SteamVR's logs and settings, the OpenXR runtime and layers registered on the PC, and the Windows, CPU and GPU driver versions. Attach the ZIP to the issue.
 
 > **Privacy:** the package holds only text files. Your Windows user name, PC name and e-mail addresses are replaced by `<user>`, `<pc>` and `<e-mail>`, and the account tokens, account ids and headset serial number in Pimax's logs are removed; nothing is sent anywhere. You can open the ZIP and look it over before posting.
 
-**"DLSS 5: ON but not applied" in the headset?** The **Diagnostics** page reads the last DCS session and says whether DLSS 5 reached the Quad Views focus area, and if not, why (for example DCS running DLSS on images that are not the focus views, or another Quad Views layer in the way), with what to check.
+**"DLSS 5: ON but not applied" in the headset?** The **Troubleshooting** page reads the last DCS session and says whether DLSS 5 reached the Quad Views focus area, and if not, why (for example DCS running DLSS on images that are not the focus views, or another Quad Views layer in the way), with what to check.
 
 ## Support
 

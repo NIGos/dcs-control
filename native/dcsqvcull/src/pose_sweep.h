@@ -16,7 +16,10 @@
 namespace posesweep {
 
 const wchar_t* const kModule = L"XR_APILAYER_MBUCCHIA_quad_views_foveated.dll";
-constexpr uint32_t kRva = 0x1aa70;  // DcsVrControl's bundled QVFR build of 2026-10-07
+// xrLocateViews of the known QVFR builds (the first whose prologue matches is used): DcsVrControl's bundled build of
+// 2026-10-07, and Perception's livetest build of 2026-10-14 (C5DA1374: the wrapper the layer's xrGetInstanceProcAddr
+// hands out for "xrLocateViews", found through that string's reference; the same prologue).
+constexpr uint32_t kRvas[] = {0x1aa70, 0x1ab10};
 const uint8_t kPrologue[17] = {0x40, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41,
                                0x57, 0x48, 0x81, 0xEC, 0xE8, 0x00, 0x00, 0x00};
 constexpr size_t kPage = 4096;
@@ -29,6 +32,29 @@ std::atomic<bool> g_on{false};
 std::atomic<int> g_state{0};
 std::atomic<int64_t> g_t0{0};
 std::atomic<double> g_yawDeg{0};
+// [Suite] HoldPitchDeg (test only): a constant pitch (degrees, positive = view down) about the tracking space's x
+// axis, applied under the yaw while the hook is on (aims an unattended view whose headset lies tilted).
+std::atomic<double> g_pitchDeg{0};
+// [Suite] HoldPose (test only): the head's pose frozen at the moment it is switched on (position and orientation;
+// the views keep the runtime's eye offsets and FOVs). An unattended headset's tracking can jump (live 2026-10-14:
+// the seated origin was lost mid-run and the eyes left the cockpit); a held pose keeps every capture at one pose.
+std::atomic<bool> g_holdPose{false};
+bool g_anchorSet = false;
+double g_anchorQ[4] = {0, 0, 0, 1}, g_anchorP[3] = {};
+inline void QMul(const double a[4], const double b[4], double o[4]) {  // (x, y, z, w)
+  const double x = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1];
+  const double y = a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0];
+  const double z = a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3];
+  const double w = a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2];
+  o[0] = x, o[1] = y, o[2] = z, o[3] = w;
+}
+inline void QRot(const double q[4], const double v[3], double o[3]) {
+  const double p[4] = {v[0], v[1], v[2], 0}, qc[4] = {-q[0], -q[1], -q[2], q[3]};
+  double t[4], r[4];
+  QMul(q, p, t);
+  QMul(t, qc, r);
+  o[0] = r[0], o[1] = r[1], o[2] = r[2];
+}
 
 // Why the sweep did not rotate (2026-10-09 runs): YawAt returned the held yaw
 // whenever a hold was active and 0 whenever [Suite] MotionTaxi=1, so with
@@ -90,10 +116,56 @@ int32_t __fastcall Hook(void* session, const void* info, void* state, uint32_t c
   const double fwd = ForwardAt(t);
   g_yawDeg = yawDeg;
   const float s = static_cast<float>(std::sin(yaw / 2)), c = static_cast<float>(std::cos(yaw / 2));
+  const double pitch = -g_pitchDeg.load(std::memory_order_relaxed) * 3.14159265358979 / 180.0;
+  const float ps = static_cast<float>(std::sin(pitch / 2)), pc = static_cast<float>(std::cos(pitch / 2));
+  const float cp = static_cast<float>(std::cos(pitch)), sp = static_cast<float>(std::sin(pitch));
   const uint32_t n = std::min(*count, cap);
+  // Rotations about the head (the mean of the views' positions), not the tracking space's origin: a seated origin
+  // away from the head would otherwise carry the eyes out of the cockpit (live 2026-10-14).
+  float hc[3] = {0, 0, 0};
+  for (uint32_t i = 0; i < n; ++i)
+    for (int k = 0; k < 3; ++k) hc[k] += reinterpret_cast<float*>(views + i * 64 + 32)[k] / static_cast<float>(n);
+  if (!g_holdPose.load(std::memory_order_relaxed)) {
+    g_anchorSet = false;
+  } else if (n) {
+    const float* q0 = reinterpret_cast<const float*>(views + 16);
+    const double qh[4] = {q0[0], q0[1], q0[2], q0[3]};
+    if (!g_anchorSet) {
+      for (int k = 0; k < 4; ++k) g_anchorQ[k] = qh[k];
+      for (int k = 0; k < 3; ++k) g_anchorP[k] = hc[k];
+      g_anchorSet = true;
+    }
+    const double qhc[4] = {-qh[0], -qh[1], -qh[2], qh[3]};
+    for (uint32_t i = 0; i < n; ++i) {  // each view's pose relative to the head, re-attached at the anchor
+      float* q = reinterpret_cast<float*>(views + i * 64 + 16);
+      float* p = q + 4;
+      const double qv[4] = {q[0], q[1], q[2], q[3]};
+      double rel[4], qn[4];
+      QMul(qhc, qv, rel);
+      QMul(g_anchorQ, rel, qn);
+      const double d[3] = {p[0] - hc[0], p[1] - hc[1], p[2] - hc[2]};
+      double dl[3], dw[3];
+      QRot(qhc, d, dl);
+      QRot(g_anchorQ, dl, dw);
+      for (int k = 0; k < 4; ++k) q[k] = static_cast<float>(qn[k]);
+      for (int k = 0; k < 3; ++k) p[k] = static_cast<float>(g_anchorP[k] + dw[k]);
+    }
+    for (int k = 0; k < 3; ++k) hc[k] = static_cast<float>(g_anchorP[k]);
+  }
   for (uint32_t i = 0; i < n; ++i) {
     float* q = reinterpret_cast<float*>(views + i * 64 + 16);  // XrView.pose.orientation x,y,z,w
     float* p = q + 4;                                          // pose.position x,y,z
+    for (int k = 0; k < 3; ++k) p[k] -= hc[k];
+    if (pitch != 0) {  // q = qx * q with qx = (ps, 0, 0, pc); p rotated about x
+      const float x0 = q[0], y0 = q[1], z0 = q[2], w0 = q[3];
+      q[0] = pc * x0 + ps * w0;
+      q[1] = pc * y0 - ps * z0;
+      q[2] = pc * z0 + ps * y0;
+      q[3] = pc * w0 - ps * x0;
+      const float py = p[1], pz = p[2];
+      p[1] = cp * py - sp * pz;
+      p[2] = sp * py + cp * pz;
+    }
     // q' = qy * q with qy = (0, s, 0, c)
     float x = q[0], y = q[1], z = q[2], w = q[3];
     q[0] = c * x + s * z;
@@ -105,6 +177,7 @@ int32_t __fastcall Hook(void* session, const void* info, void* state, uint32_t c
     float px = p[0], pz = p[2];
     p[0] = cy * px + sy * pz;
     p[2] = -sy * px + cy * pz - static_cast<float>(fwd);
+    for (int k = 0; k < 3; ++k) p[k] += hc[k];
   }
   return r;
 }
@@ -164,9 +237,19 @@ bool Install() {
     Log("pose sweep: Quad-Views-Foveated layer not loaded; skipped");
     return false;
   }
-  uint8_t* target = base + kRva;
+  uint8_t* target = nullptr;
   uint8_t cur[17];
-  if (!allocslab::ReadBytes(target, cur, 17)) return false;
+  for (uint32_t rva : kRvas) {  // the build whose xrLocateViews prologue (or our earlier patch) is there
+    if (!allocslab::ReadBytes(base + rva, cur, 17)) continue;
+    if (memcmp(cur, kPrologue, 17) == 0 || (cur[0] == 0xFF && cur[1] == 0x25)) {
+      target = base + rva;
+      break;
+    }
+  }
+  if (!target) {
+    Log("pose sweep: Quad-Views-Foveated build does not match; skipped");
+    return false;
+  }
   if (cur[0] == 0xFF && cur[1] == 0x25) {
     // Patched by an earlier payload: its jump leads to the stub page; the
     // slot is on the next page and the trampoline right after the stub.

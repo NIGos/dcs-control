@@ -249,6 +249,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "far_depth_test.h"  // Far depth engine export to Quad Views (layout, fake layer, WARP copy and push)
 #include "cockpit_ipd_test.h"  // R31 option 3: cockpit at the true eye distance (patch, matcher, WARP pipeline, split)
 #include "exit_guard_test.h"  // field report 0.5.5: exit and mission-restart crashes
+#include "perception_only_test.h"  // [General] PerceptionOnly: perception features only, no engine module
 
 int main() {
   g_log = stdout;
@@ -383,6 +384,12 @@ int main() {
     return g_fail ? 1 : 0;
   }
   // QV_VRAM_ONLY=1: only the GPU pass timing and VRAM census tests.
+  // QV_PO_ONLY=1: only the [General] PerceptionOnly tests.
+  if (getenv("QV_PO_ONLY")) {
+    potest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
   if (getenv("QV_VRAM_ONLY")) {
     gpttest::Run();
     vctest::Run();
@@ -1615,6 +1622,8 @@ int main() {
   fartest::Run();
   // Cockpit at the true eye distance (R31 option 3: patch math, matcher, upload filter, WARP pipeline, stencil split, off path).
   cktest::Run();
+  // [General] PerceptionOnly: no engine module, the perception features, status 0, keys inert, dual camera status.
+  potest::Run();
 
   // Suite: configuration check + short profile, report file written.
   {

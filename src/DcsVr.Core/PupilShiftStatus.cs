@@ -220,7 +220,7 @@ public sealed record PupilShiftStatus(string State, string Summary, bool Live, s
             _ when !live && proven && max > 1.0005 => ("working", string.Create(CultureInfo.InvariantCulture, $"Worked: up to ×{max:0.00}, boosted for {boosted:0} of {seconds} seconds.")),
             { On: false } => ("off", "Loaded, switched off in flight."),
             { Frames: > 0 } l when l.NoGaze == l.Frames => ("no-gaze", "No gaze arrives: the headset's eye tracking must be on. The scale stays normal."),
-            { Mode: "realistic" } when sceneLess => ("no-scene", "Realistic needs the distance you look at from the scene, which Engine Optimizations measure. With the eyes' vergence alone it keeps normal depth."),
+            { Mode: "realistic" } when sceneLess => ("no-scene", "Realistic needs the distance you look at from the scene, which DCS Control's engine module measures, and none arrived. Check the Engine Optimizations page (the module must be loaded); until then it keeps normal depth."),
             { Source: "constant" or "none" } l when l.VergenceState == "constant" => ("no-depth", "Both eyes' focus areas follow one shared gaze and no scene depth arrives, so the distance you look at cannot be measured. The scale stays normal."),
             { Source: "probing" or "none" } => ("probing", "Waiting to see you look at the cockpit and outside once; until then the scale stays normal."),
             { Source: "depth" } => ("working", string.Create(CultureInfo.InvariantCulture, $"Working from the scene depth: ×{last.Scale:0.00} now ({last.Fixation}), up to ×{max:0.00} this flight.")),

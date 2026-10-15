@@ -780,6 +780,59 @@ void Compare() {
   for (IUnknown* u : {static_cast<IUnknown*>(rtv), static_cast<IUnknown*>(dsv), static_cast<IUnknown*>(rt),
                       static_cast<IUnknown*>(ds)})
     if (u) u->Release();
+  // Stage 2's ownship mask (gb_rec.h): A has the "ownship" block (at the true eye), the mask run has none (its
+  // camera far aside); the mask is where they differ. B differs from A inside block 1 (an ownship texel class)
+  // and at one texel elsewhere: classified 6 inside, 1 outside.
+  {
+    using namespace gbverify;
+    ID3D11Texture2D* mt = MakeTarget(dev, DXGI_FORMAT_R8G8B8A8_UNORM, W, H, 1, 1, D3D11_BIND_RENDER_TARGET);
+    ID3D11RenderTargetView* mv = nullptr;
+    if (mt) dev->CreateRenderTargetView(mt, nullptr, &mv);
+    bool mok = mv != nullptr;
+    if (mok) {
+      ctx->OMSetRenderTargets(1, &mv, nullptr);
+      const float c0[4] = {0.1f, 0.2f, 0.3f, 1.0f};
+      ctx->ClearRenderTargetView(mv, c0);
+      mok = Capture() == nullptr;
+      auto block = [&](UINT x0, UINT y0, UINT w, UINT h, uint32_t v) {
+        std::vector<uint32_t> px(w * h, v);
+        D3D11_BOX bx = {x0, y0, 0, x0 + w, y0 + h, 1};
+        ctx->UpdateSubresource(mt, 0, &bx, px.data(), w * 4, 0);
+      };
+      if (mok) {
+        CopyAll(true, false);       // init
+        block(2, 2, 3, 2, 0xff0000ffu);  // A: the ownship at the true eye (6 texels)
+        CopyAll(true, true);        // A
+        CopyAll(false, false);
+        // the mask run: the ownship out of the view (nothing drawn)
+        mok = CopyAllMask();
+        CopyAll(false, false);
+        mok = mok && BuildMask();
+        block(2, 2, 3, 2, 0xff00ff00u);  // B: the ownship's texels differ (inside the mask)
+        block(20, 10, 1, 1, 0xffffffffu);  // and one non-ownship texel
+        CopyAll(true, false);       // B
+        int64_t bad[kMaxTargets];
+        uint64_t tx = 0;
+        g_maskOn = true;
+        const int64_t total = CompareGuarded(bad, &tx);
+        g_maskOn = false;
+        // The mask: the A block (6 texels).
+        size_t inMask = 0;
+        for (uint8_t v : g_mask) inMask += v;
+        mok = mok && total == 7 && g_badIn == 6 && g_badOut == 1 && inMask == 6;
+        if (!mok)
+          printf("     mask: total %lld in %lld out %lld, mask texels %zu\n", static_cast<long long>(total),
+                 static_cast<long long>(g_badIn), static_cast<long long>(g_badOut), inMask);
+      }
+      ReleaseViews();
+      ID3D11RenderTargetView* none = nullptr;
+      ctx->OMSetRenderTargets(1, &none, nullptr);
+    }
+    Check(mok, "gbuffer verify, ownship mask (stage 2): the texels where the ownship's two cameras differ form the "
+               "mask; differences inside it (6) and outside it (1) counted apart");
+    if (mv) mv->Release();
+    if (mt) mt->Release();
+  }
   // MSAA 4x: per-sample compare on the GPU, CS state restored.
   UINT q = 0;
   dev->CheckMultisampleQualityLevels(DXGI_FORMAT_R16G16B16A16_FLOAT, 4, &q);

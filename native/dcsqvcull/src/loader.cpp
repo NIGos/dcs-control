@@ -59,19 +59,37 @@ bool WriteSlot(void** slot, void* value) {
   return true;
 }
 
+// A slot read with SEH and no lock held (no C++ object in this frame): a payload may pass a slot it has not
+// verified, and a fault while g_regMutex is held would leave the registry locked for the session (every later
+// patch / restore / original lookup, and the next payload's install, would block).
+bool ReadSlotSafe(void** slot, void** out) {
+  __try {
+    *out = *slot;
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
 bool ApiPatch(void** slot, void* hook, void** original) {
+  void* cur = nullptr;
+  if (!ReadSlotSafe(slot, &cur)) return false;  // before the lock: nothing faults while it is held
   std::lock_guard<std::mutex> lock(g_regMutex);
   auto it = g_registry.find(slot);
-  if (it == g_registry.end()) it = g_registry.emplace(slot, Entry{*slot, 0}).first;
+  if (it == g_registry.end()) it = g_registry.emplace(slot, Entry{cur, 0}).first;
   it->second.generation = g_generation;
   if (original) *original = it->second.original;
   return WriteSlot(slot, hook);
 }
 
 void* ApiOriginal(void** slot) {
-  std::lock_guard<std::mutex> lock(g_regMutex);
-  auto it = g_registry.find(slot);
-  return it != g_registry.end() ? it->second.original : *slot;
+  {
+    std::lock_guard<std::mutex> lock(g_regMutex);
+    auto it = g_registry.find(slot);
+    if (it != g_registry.end()) return it->second.original;
+  }
+  void* cur = nullptr;  // not registered: the slot's own value, read after the lock is released
+  return ReadSlotSafe(slot, &cur) ? cur : nullptr;
 }
 
 void ApiRestore(void** slot) {
@@ -110,6 +128,9 @@ FILETIME g_payloadTime{};
 // Status word (layout in status_word.h): written only by the active payload,
 // read by DcsQvCull_Status. Owned here so it outlives every payload.
 std::atomic<uint64_t> g_status{0};
+// Dual camera status word (bits in loader_api.h): the same plumbing, read by
+// DcsQvCull_DualCameraStatus.
+std::atomic<uint64_t> g_dualStatus{0};
 
 // LoadPayload results. A copy or LoadLibrary failure is usually transient
 // (the file still being written, or held by a scanner without read sharing):
@@ -140,6 +161,8 @@ LoadResult LoadPayload(const std::wstring& src) {
   }
   // Optional (payloads built before the status word lack it: status stays 0).
   auto setStatus = reinterpret_cast<DcsQvPayloadSetStatusWordFn>(GetProcAddress(m, "DcsQvPayload_SetStatusWord"));
+  auto setDual = reinterpret_cast<DcsQvPayloadSetDualCameraStatusWordFn>(
+      GetProcAddress(m, "DcsQvPayload_SetDualCameraStatusWord"));
   auto quiesce = reinterpret_cast<DcsQvPayloadQuiesceFn>(GetProcAddress(m, "DcsQvPayload_Quiesce"));
   auto mission = reinterpret_cast<DcsQvPayloadMissionEventFn>(GetProcAddress(m, "DcsQvPayload_MissionEvent"));
   std::unique_lock<std::timed_mutex> swap(g_swapMutex);
@@ -150,12 +173,14 @@ LoadResult LoadPayload(const std::wstring& src) {
   g_quiesceActive.store(nullptr);
   g_missionActive.store(nullptr);
   g_status.store(0, std::memory_order_release);  // not ready during the swap
+  g_dualStatus.store(0, std::memory_order_release);
   DcsQvPayloadStopFn previous = g_stopActive;
   if (previous) {
     Logf("loader: stopping previous payload");
     previous();  // its worker threads exit; its hooks stay valid until repointed
     // Its Stop detached it from the status word: it never writes again.
     g_status.store(0, std::memory_order_release);
+    g_dualStatus.store(0, std::memory_order_release);
   }
   {
     std::lock_guard<std::mutex> lock(g_regMutex);
@@ -163,6 +188,7 @@ LoadResult LoadPayload(const std::wstring& src) {
   }
   Logf("loader: starting payload %ls (generation %u)", name, g_generation);
   if (setStatus) setStatus(&g_status);
+  if (setDual) setDual(&g_dualStatus);
   if (start(&g_api) != 0) Logf("loader: payload start reported an error");
   g_stopActive = stop;
   g_quiesceActive.store(quiesce);
@@ -280,6 +306,13 @@ extern "C" __declspec(dllexport) int DcsQvCull_SlotChange(void* /*lua_State*/) {
 // status_word.h); lock-free, callable from any thread. 0 = not running.
 extern "C" __declspec(dllexport) unsigned long long DcsQvCull_Status() {
   return g_status.load(std::memory_order_acquire);
+}
+
+// Dual camera status ([Perception] CockpitTrueIpd, bit layout in
+// loader_api.h); lock-free, callable from any thread. 0 = not configured or
+// not running (no payload, payload swap, after stop).
+extern "C" __declspec(dllexport) uint64_t DcsQvCull_DualCameraStatus() {
+  return g_dualStatus.load(std::memory_order_acquire);
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {

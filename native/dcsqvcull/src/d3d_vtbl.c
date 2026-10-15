@@ -73,6 +73,19 @@ int DcsQv_ContextSlot(const char* name) {
       {"RSSetViewports", SLOT(RSSetViewports)},
       /* fixation_depth.h: far depth pre-overlay copy point (draw entries) */
       {"DrawAuto", SLOT(DrawAuto)},
+      /* fixation_depth.h: d3d11 toggles the draw / copy / update entries on Flush (repaired after it) */
+      {"Flush", SLOT(Flush)},
+      /* fixation_depth.h: GetData flushes (d3d11 toggles the same entries; repaired after it) */
+      {"GetData", SLOT(GetData)},
+      /* fixation_depth.h: further re-arm points of the in-pass arms (not toggled by d3d11) */
+      {"Begin", SLOT(Begin)},
+      {"End", SLOT(End)},
+      {"GSSetShader", SLOT(GSSetShader)},
+      /* fixation_depth.h (R32 4.5): more overlay-pass toggle points, none of them among d3d11's 22 toggled entries */
+      {"RSSetScissorRects", SLOT(RSSetScissorRects)},
+      {"GSSetConstantBuffers", SLOT(GSSetConstantBuffers)},
+      {"GSSetSamplers", SLOT(GSSetSamplers)},
+      {"GSSetConstantBuffers1", SLOT(GSSetConstantBuffers1)},
   };
   for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
     const char* a = table[i].n;

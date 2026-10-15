@@ -237,7 +237,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                     throw new InvalidDataException("The OFXR layer is modified or incomplete.");
             }
             string? engine = null;
-            if (profile.EngineOptimizations)
+            if (profile.UsesEngineModule)
             {
                 // DCS engine optimizations (native/dcsqvcull), copied to Saved Games\DCS\Scripts.
                 engine = Path.Combine(DistributionRoot, "components/dcsqvcull");
@@ -567,9 +567,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         // Steam's launch identifiers stop the Steam edition from restarting itself, so Steam itself must already run.
         if (launch.Environment.ContainsKey("SteamAppId"))
         {
-            var steam = Process.GetProcessesByName("steam");
-            try { if (steam.Length == 0) throw new InvalidOperationException("Start Steam before launching the Steam edition of DCS."); }
-            finally { foreach (var process in steam) process.Dispose(); }
+            if (!LaunchSafety.SteamRunning()) throw new InvalidOperationException("Start Steam before launching the Steam edition of DCS.");
         }
         return BuildStartInfo(launch);
     }

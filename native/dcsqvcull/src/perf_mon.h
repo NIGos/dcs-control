@@ -47,7 +47,7 @@ ID3D11Device* DcsDevice() {
     c->GetDevice(&d);
     return d;
   }
-  return nullptr;
+  return pdev::Device();  // [General] PerceptionOnly (perception_device.h)
 }
 
 // DCS's render thread: the thread our pass hooks run on (0 = not seen yet).
@@ -154,7 +154,15 @@ struct Kmt {
   bool ok = false;
   LUID luid{};
   std::vector<ULONG> nodes;  // 3D engine nodes (node 0 when the metadata is not available)
+  // The previous sample per node and whether it is there (a flag, not a sentinel: D3DKMT's RunningTime can be
+  // negative; node 0 of the RTX 5090 reads about -3.0e9 x 100 ns and still counts up, so -1 as "none" made
+  // every sample of that node invalid and the GPU busy line n/a).
   std::vector<LONGLONG> lastAll, lastProc;
+  std::vector<char> haveAll, haveProc;
+  // The process query never answered with either handle kind (STATUS_INVALID_PARAMETER for a process that has no
+  // device on this adapter, or for a LIMITED handle): DCS's share stays n/a, no more switching / logging.
+  bool procUnsupported = false, procEver = false;
+  uint32_t procProbe = 0;  // while unsupported: samples since the last probe (one query per kKmtProbe samples)
   int64_t lastQpc = 0;
   // This process for D3DKMT_QUERYSTATISTICS_PROCESS_NODE ("(dcs N%)"). The
   // query needs PROCESS_QUERY_INFORMATION: a PROCESS_QUERY_LIMITED_INFORMATION
@@ -174,6 +182,7 @@ struct Kmt {
 };
 Kmt g_kmt;
 constexpr int kKmtRetry = 5;
+constexpr uint32_t kKmtProbe = 60;
 std::atomic<uint64_t> g_kmtReopens{0};  // D3DKMT re-opened after its adapter queries failed (LUID change)
 uint32_t g_kmtSwitchLogs = 0;
 
@@ -226,8 +235,10 @@ bool KmtOpen(LUID luid) {
   if (g_kmt.nodes.empty()) g_kmt.nodes.push_back(0);
   g_kmt.luid = luid;
   KmtSetSelf(0);
-  g_kmt.lastAll.assign(g_kmt.nodes.size(), -1);
-  g_kmt.lastProc.assign(g_kmt.nodes.size(), -1);
+  g_kmt.lastAll.assign(g_kmt.nodes.size(), 0);
+  g_kmt.lastProc.assign(g_kmt.nodes.size(), 0);
+  g_kmt.haveAll.assign(g_kmt.nodes.size(), 0);
+  g_kmt.haveProc.assign(g_kmt.nodes.size(), 0);
   g_kmt.ok = true;
   return true;
 }
@@ -245,6 +256,8 @@ bool KmtSample(double* all, double* proc) {
   double bestAll = -1, bestProc = -1;
   bool valid = wall100ns > 0;
   bool procAnswered = false;
+  const bool probeNow = g_kmt.procUnsupported && ++g_kmt.procProbe >= kKmtProbe;
+  if (probeNow) g_kmt.procProbe = 0;
   for (size_t k = 0; k < g_kmt.nodes.size(); ++k) {
     D3DKMT_QUERYSTATISTICS q{};
     q.Type = D3DKMT_QUERYSTATISTICS_NODE;
@@ -260,36 +273,57 @@ bool KmtSample(double* all, double* proc) {
     p.AdapterLuid = g_kmt.luid;
     p.hProcess = KmtSelf();
     p.QueryProcessNode.NodeId = g_kmt.nodes[k];
-    const NTSTATUS ps = g_kmt.qs(&p);
+    const bool askProc = !g_kmt.procUnsupported || probeNow;
+    const NTSTATUS ps = askProc ? g_kmt.qs(&p) : static_cast<NTSTATUS>(0xC000000DL);
     if (ps != 0) g_kmt.procStatus = ps;
     procAnswered |= ps == 0;
-    const LONGLONG b = ps == 0 ? p.QueryResult.ProcessNodeInformation.RunningTime.QuadPart : -1;
-    if (g_kmt.lastAll[k] < 0) valid = false;
+    const LONGLONG b = ps == 0 ? p.QueryResult.ProcessNodeInformation.RunningTime.QuadPart : 0;
+    if (!g_kmt.haveAll[k]) valid = false;
     if (valid) {
-      bestAll = (std::max)(bestAll, 100.0 * static_cast<double>(a - g_kmt.lastAll[k]) / wall100ns);
-      if (b >= 0 && g_kmt.lastProc[k] >= 0)
+      // A counter that went back (reset / wrap) gives no busy value for this node in this sample.
+      if (a >= g_kmt.lastAll[k])
+        bestAll = (std::max)(bestAll, 100.0 * static_cast<double>(a - g_kmt.lastAll[k]) / wall100ns);
+      if (ps == 0 && g_kmt.haveProc[k] && b >= g_kmt.lastProc[k])
         bestProc = (std::max)(bestProc, 100.0 * static_cast<double>(b - g_kmt.lastProc[k]) / wall100ns);
     }
     g_kmt.lastAll[k] = a;
+    g_kmt.haveAll[k] = 1;
     g_kmt.lastProc[k] = b;
+    g_kmt.haveProc[k] = ps == 0;
   }
   g_kmt.allFails = 0;
   if (procAnswered) {
     g_kmt.procFails = 0;
-  } else if (++g_kmt.procFails >= kKmtRetry) {
-    // No process answer for kKmtRetry samples: the other handle kind (its
-    // first sample primes again).
-    const int from = g_kmt.selfKind;
-    KmtSetSelf(1 - from);
-    g_kmt.procFails = 0;
-    ++g_kmt.switches;
-    g_kmt.lastProc.assign(g_kmt.nodes.size(), -1);
-    if (g_kmtSwitchLogs < 8) {
-      ++g_kmtSwitchLogs;
-      Log("perf: DCS's GPU share query failed for %d s (NTSTATUS 0x%08lx with the %s handle); now using the %s "
-          "handle",
-          kKmtRetry, static_cast<unsigned long>(g_kmt.procStatus), from == 0 ? "PROCESS_QUERY_INFORMATION" : "pseudo",
-          g_kmt.selfKind == 0 ? "PROCESS_QUERY_INFORMATION" : "pseudo");
+    g_kmt.procEver = true;
+    if (g_kmt.procUnsupported) {
+      g_kmt.procUnsupported = false;
+      Log("perf: DCS's GPU share query answers again (%s handle)", g_kmt.selfKind == 0 ? "PROCESS_QUERY_INFORMATION" : "pseudo");
+    }
+  } else if (!g_kmt.procUnsupported && ++g_kmt.procFails >= kKmtRetry) {
+    if (!g_kmt.procEver && g_kmt.switches >= 1) {
+      // Neither handle kind ever answered (STATUS_INVALID_PARAMETER: the driver keeps no statistics for a
+      // process without a device on this adapter). Degrade: the share n/a, probed once a minute, no switching.
+      g_kmt.procUnsupported = true;
+      g_kmt.procFails = 0;
+      g_kmt.procProbe = 0;
+      Log("perf: DCS's GPU share is not available (NTSTATUS 0x%08lx with both handle kinds; the driver answers "
+          "per-process statistics only for a process with a device on this adapter); shown as n/a, probed every %u s",
+          static_cast<unsigned long>(g_kmt.procStatus), kKmtProbe);
+    } else {
+      // No process answer for kKmtRetry samples: the other handle kind (its
+      // first sample primes again).
+      const int from = g_kmt.selfKind;
+      KmtSetSelf(1 - from);
+      g_kmt.procFails = 0;
+      ++g_kmt.switches;
+      g_kmt.haveProc.assign(g_kmt.nodes.size(), 0);
+      if (g_kmtSwitchLogs < 8) {
+        ++g_kmtSwitchLogs;
+        Log("perf: DCS's GPU share query failed for %d s (NTSTATUS 0x%08lx with the %s handle); now using the %s "
+            "handle",
+            kKmtRetry, static_cast<unsigned long>(g_kmt.procStatus), from == 0 ? "PROCESS_QUERY_INFORMATION" : "pseudo",
+            g_kmt.selfKind == 0 ? "PROCESS_QUERY_INFORMATION" : "pseudo");
+      }
     }
   }
   if (!valid) return false;
@@ -623,6 +657,10 @@ std::string RecheckText() {
 }
 
 void GovTick(const Sec& s) {
+  if (g_perceptionOnly.load()) {  // [General] PerceptionOnly: no recorder to govern, no governor action
+    g_gov.Reset(s.t);
+    return;
+  }
   perfgov::GovConfig c;
   c.enabled = g_cfg.govEnabled;
   c.windowSec = g_cfg.govWindowSec;

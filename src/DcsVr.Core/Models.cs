@@ -324,11 +324,16 @@ public sealed record VrProfile
     public string FarDepthToggleKey { get; init; } = NeuralHotkeys.FarDepthDefault;
     /// <summary>It runs: a VR flight with the bundled Quad Views and Engine Optimizations (the depth comes from the engine module).</summary>
     public bool UsesFarDepth => FarDepth && !Desktop && QuadViews == QuadProvider.QuadViewsFoveated && EngineOptimizations;
-    /// <summary>Depth boost (docs/PERCEPTION.md, docs/FIXATION_DEPTH.md): while the eyes fixate far, the render IPD is
-    /// scaled up (<see cref="DepthBoostMode"/>) so distant objects get stronger depth; while they fixate the cockpit it
-    /// returns to the normal IPD. The fixation depth comes from DCS's depth buffer at the gaze (the engine module, with
-    /// <see cref="EngineOptimizations"/>) and from the two eyes' vergence, in the pupil shift layer. Off by default.</summary>
+    /// <summary>Depth boost (docs/PERCEPTION.md, docs/FIXATION_DEPTH.md), the dual camera: the world outside is rendered
+    /// at a larger eye distance (<see cref="DepthBoostMode"/>), following where the eyes look and changing slowly, while
+    /// the engine module draws the cockpit at the true eye distance (DcsQvCull.ini [Perception] CockpitTrueIpd=1). The
+    /// fixation depth comes from DCS's depth buffer at the gaze (the engine module; with Engine Optimizations off it runs
+    /// in its Perception-only mode) and from the two eyes' vergence, in the pupil shift layer. Off by default.</summary>
     public bool DepthBoost { get; init; }
+    /// <summary>With Depth boost, the own aircraft's exterior seen from the cockpit (a helicopter's other crew station,
+    /// a two-seater's front seat) is drawn at the true eye distance too ([Perception] CockpitTrueIpdOwnship=2); without
+    /// it, it sits closer than it is. On by default.</summary>
+    public bool OwnAircraftTrueDepth { get; init; } = true;
     /// <summary>Realistic (default) or Enhanced; each has its own strength.</summary>
     public DepthBoostMode DepthBoostMode { get; init; } = DepthBoostMode.Realistic;
     /// <summary>Enhanced's render IPD scale while fixating far (from 50 m): 1.4 renders a 64 mm IPD as 89.6 mm.</summary>
@@ -359,10 +364,13 @@ public sealed record VrProfile
     /// <summary>The pupil shift layer (it carries both Pupil shift and Depth boost) is deployed, and takes over DCS's
     /// custom IPD, when either runs.</summary>
     public bool UsesPerceptionLayer => UsesPupilShift || UsesDepthBoost;
-    /// <summary>The engine module measures the scene depth at the gaze (DcsQvCull.ini [Perception] FixationDepth=1):
-    /// Depth boost with the engine optimizations. Without them Depth boost has the eyes' vergence only, which cannot
-    /// tell 150 m from 50 m: Realistic then stays at normal depth, Enhanced works on the vergence as before.</summary>
-    public bool UsesFixationDepth => UsesDepthBoost && EngineOptimizations;
+    /// <summary>The engine module measures the scene depth at the gaze (DcsQvCull.ini [Perception] FixationDepth=1)
+    /// whenever Depth boost runs, with or without the engine optimizations.</summary>
+    public bool UsesFixationDepth => UsesDepthBoost;
+    /// <summary>The engine module is installed: for Engine Optimizations, or for Depth boost's dual camera and scene
+    /// depth alone, in its Perception-only mode ([General] PerceptionOnly=1: none of the engine optimizations, no test
+    /// suite or engine keys).</summary>
+    public bool UsesEngineModule => EngineOptimizations || UsesDepthBoost;
     /// <summary>The eye distance DCS renders with. Headset (default): the IPD the headset measured or was set to, the
     /// realistic one; DCS's custom IPD is turned off while the profile is applied. DcsCustom: DCS's own custom IPD as it
     /// is (the pupil shift layer applies it itself when it runs). Manual: <see cref="EyeDistanceMm"/>. VR flights only;
@@ -371,11 +379,6 @@ public sealed record VrProfile
     /// <summary>Manual's eye distance in millimetres.</summary>
     public double EyeDistanceMm { get; init; } = 64;
     public const double EyeDistanceMin = 50, EyeDistanceMax = 80;
-    /// <summary>The engine module publishes its coarse depth grid of the whole view (DcsQvCull.ini [Perception]
-    /// DepthGrid=1), where the predictive transition looks up a saccade's landing: whenever the scene depth is on
-    /// (Depth boost with Engine Optimizations), whatever transition the profile starts with, so the in-flight key can
-    /// switch to Predictive too. It costs well under 0.1 % of a frame (about 14 µs GPU, measured live).</summary>
-    public bool UsesDepthGrid => UsesFixationDepth;
 
     /// <summary>The engine optimizations module runs the prefetch fix ([Prefetch] Mode in DcsQvCull.ini), also in
     /// Optimizations only and when DCS starts from Steam or a shortcut.</summary>

@@ -705,6 +705,8 @@ struct Options {
     float ini_ipd_mm{64.0f};
     float max_scale{1.4f}, up{5.0f}, down{40.0f}, saccade_step{4.0f};
     bool stepped{};                  // [DepthBoost] Stepped=1: steps in saccades only (the layer's default); 0: the ramps
+    bool dual_ack{};                 // the engine's dual camera acknowledges every frame (Local\DcsVrCockpitStereo_v1)
+    bool legacy{true};               // [DepthBoost] Legacy=1: the gaze-driven path these scenarios test (0: dual camera only)
     bool double_locate{true}, perturb{true}, foreign{true}, pipelined{true};
     bool qv_style{};                 // the runtime behaves like the bundled Quad Views (combined gaze, fixed focus)
     bool qv_export{};                // and its gaze export is loaded (the fake Quad Views DLL)
@@ -730,7 +732,7 @@ std::string ini_text(const Options& o, bool depth_enabled) {
     s << "[PupilShift]\nEnabled=" << (o.pupil ? 1 : 0) << "\nToggle=121:5\nEyeRadiusMm=10.5\nVirtualImageM=1.5\nMaxGazeDeg=35\nIpd=" << o.ini_ipd_mm
       << "\nSimulateGaze=" << (o.simulate ? 1 : 0) << "\nSimulateGazeXDeg=10\nSimulateGazeYDeg=-5\n\n[DepthBoost]\nEnabled=" << (depth_enabled ? 1 : 0)
       << "\nToggle=121:6\nMode=" << o.mode << "\nMaxScale=" << o.max_scale
-      << "\nNearM=1.5\nUpMmPerS=" << o.up << "\nDownMmPerS=" << o.down << "\nSaccadeStepMm=" << o.saccade_step << "\nRecoverMs=800\nHoldMs=500\nStepped=" << (o.stepped ? 1 : 0) << "\n";
+      << "\nNearM=1.5\nUpMmPerS=" << o.up << "\nDownMmPerS=" << o.down << "\nSaccadeStepMm=" << o.saccade_step << "\nRecoverMs=800\nHoldMs=500\nStepped=" << (o.stepped ? 1 : 0) << "\nLegacy=" << (o.legacy ? 1 : 0) << "\n";
     if (o.trace) s << "Trace=1\n";
     if (o.far_start_m > 0) s << "FarStartM=" << o.far_start_m << "\nFarFullM=" << o.far_full_m << "\n";
     return s.str();
@@ -926,7 +928,14 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
     SetEnvironmentVariableW(L"DCSVR_PERCEPTION_SHM_SUFFIX", suffix.c_str());
     dcsvr_perception::SharedBlock<dcsvr_perception::GazeOut> engine_gaze;
     dcsvr_perception::SharedBlock<dcsvr_perception::DepthIn> engine_depth;
-    if (!engine_gaze.open(dcsvr_perception::gaze_block_name, suffix.c_str()) || !engine_depth.open(dcsvr_perception::depth_block_name, suffix.c_str())) {
+    dcsvr_perception::SharedBlock<dcsvr_perception::BoostOut> engine_boost;
+    dcsvr_perception::SharedBlock<dcsvr_perception::CockpitStereo> engine_stereo;
+    if (o.dual_ack && !engine_stereo.open(dcsvr_perception::cockpit_stereo_block_name, suffix.c_str())) {
+        fail("harness opens the cockpit stereo block"); return sum;
+    }
+    std::uint64_t engine_frames = 0;
+    if (!engine_gaze.open(dcsvr_perception::gaze_block_name, suffix.c_str()) || !engine_depth.open(dcsvr_perception::depth_block_name, suffix.c_str()) ||
+        !engine_boost.open(dcsvr_perception::boost_block_name, suffix.c_str())) {
         fail("harness opens the shared-memory blocks"); return sum;
     }
     std::deque<dcsvr_perception::DepthIn> engine_queue;
@@ -1038,6 +1047,26 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
         for (int v = 0; v < 4; ++v) changed = changed || !bitwise_equal(views[v].pose, truth.views[v].pose) || !bitwise_equal(views[v].fov, truth.views[v].fov);
         modified[time] = changed;
 
+        // The engine's dual camera stand-in: an acknowledgement per frame, fresh for the next one, except a gap of 15
+        // frames (about 170 ms) every 300: the layer must ride it out (it leaves the mode only after 300 ms).
+        if (o.dual_ack && (++engine_frames % 300) >= 15) {
+            dcsvr_perception::CockpitStereo cs{};
+            cs.flags = dcsvr_perception::cockpit_stereo_flags::active;
+            cs.engineFrame = engine_frames;
+            LARGE_INTEGER now{};
+            QueryPerformanceCounter(&now);
+            cs.qpc = now.QuadPart;
+            dcsvr_perception::seqlock_write(engine_stereo.get(), cs);
+        }
+        // BoostOut (the engine's dual camera reads it): written for each located display time while Depth boost is on,
+        // with the scale the views carry.
+        if (st.depth_enabled && !eyes.lost) {
+            dcsvr_perception::BoostOut bo{};
+            const bool got_boost = dcsvr_perception::seqlock_read(engine_boost.get(), bo);
+            CHECK(got_boost && bo.displayTime == time && std::fabs(bo.scale - st.scale) < 1e-3 && bo.baseIpdM > 0.03f &&
+                      std::fabs(bo.renderedIpdM - bo.baseIpdM * bo.scale) < 1e-5f,
+                  "BoostOut written for each located display time with the applied scale", got_boost ? bo.scale : -1.0, st.scale, t);
+        }
         // GazeOut (written by the layer for this display time) and the engine module stand-in.
         dcsvr_perception::GazeOut go{};
         const bool got = dcsvr_perception::seqlock_read(engine_gaze.get(), go);
@@ -1169,7 +1198,8 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
         if (!st.depth_enabled) CHECK(st.scale == 1.0 && !st.depth_on, "status: Depth boost off means scale 1", st.scale, 0, t);
         if (st.depth_constant) sum.constant_flagged = true;
         if (st.depth_source) sum.source_proven = true;
-        if (!st.depth_source && !o.scene) CHECK(st.scale == 1.0, "no proven vergence source: scale 1", st.scale, 1, t);
+        // (With the dual camera acknowledged the world scale needs no fixation depth: the cockpit stays at the true eyes.)
+        if (!st.depth_source && !o.scene && !o.dual_ack) CHECK(st.scale == 1.0, "no proven vergence source: scale 1", st.scale, 1, t);
         if (st.fix_source == 2) ++sum.src_depth; else if (st.fix_source == 1) ++sum.src_vergence;
         if (st.edge) ++sum.edge_frames;
         if (st.veto) ++sum.veto_frames;
@@ -1211,7 +1241,18 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
             if (eyes.in_saccade) saccade_extra_mm = 0;
             current_label = eyes.label;
         }
-        if (!eyes.lost && st.depth_on && o.stepped) {
+        if (!eyes.lost && st.depth_on && o.dual_ack && last_processed >= 0) {
+            // The dual camera acknowledged: one world scale, approached at DualCameraMmPerS (20 mm/s) both ways, through
+            // cockpit fixations and saccades alike (a one-frame mis-pairing then moves the cockpit by under 0.5 mm).
+            const double delta_mm = (st.scale - last_scale) * base_mm, dt = t - last_processed, quant = 0.0002 * base_mm;
+            CHECK(std::fabs(delta_mm) <= 20.0 * std::max(dt, 1.0 / 90.0) + quant, "dual camera: the scale changes at most 20 mm/s",
+                  std::fabs(delta_mm) / std::max(dt, 1e-3), 20, t);
+            // The world's scale follows the far fixations but never returns to 1 for the cockpit (its last far target is
+            // kept there): boosted from 10 s on, through every cockpit glance of the flight.
+            if (t > 10.0) CHECK(st.scale > 1.05, "dual camera: cockpit glances keep the world boosted (no return to 1)", st.scale, 1.05, t);
+        }
+        if (st.depth_on && !o.legacy && !o.dual_ack) CHECK(st.scale == 1.0, "no dual camera (Legacy=0): x1 throughout", st.scale, 1, t);
+        if (!eyes.lost && st.depth_on && o.stepped && !o.dual_ack && o.legacy) {
             // Stepped: while fixating (outside a saccade and its window) up at most DriftMmPerS (0.5 mm/s), down at most
             // the late cockpit return (NearReturnMmPerS, 80 mm/s); within a saccade's window up at most one step
             // (SaccadeStepMm), down as far as x1 (FullNearReturn: the cockpit in one go).
@@ -1665,7 +1706,7 @@ struct PredSummary {
 std::string predict_ini(const PredOptions& o, const std::string& transition) {
     std::ostringstream s;
     s << "[PupilShift]\nEnabled=0\nToggle=121:5\nIpd=64\n\n[DepthBoost]\nEnabled=1\nToggle=121:6\nMode=realistic\nMaxScale=1.25\nFarStartM=150\nFarFullM=400\n"
-      << "NearM=1.5\nUpMmPerS=5\nDownMmPerS=40\nSaccadeStepMm=4\nRecoverMs=800\nHoldMs=500\nStepped=0\nTransition=" << transition
+      << "NearM=1.5\nUpMmPerS=5\nDownMmPerS=40\nSaccadeStepMm=4\nRecoverMs=800\nHoldMs=500\nStepped=0\nLegacy=1\nTransition=" << transition
       << "\nTransitionToggle=120:6\nPredictLeadFrames=" << o.lead_frames << "\nPredictPollHz=1000\nTrace=1\n";
     return s.str();
 }
@@ -2101,6 +2142,15 @@ int main(int argc, char** argv) {
         const Summary r = run(dll, out, fs);
         CHECK(r.far_hold_reach_s >= 0 || r.cockpit_boosted_fraction >= 0, "stepped flight ran", 0, 0, -1);
         results.push_back(r);
+        // The same flight with the engine's dual camera acknowledging every frame: one world scale, slow changes only.
+        Options fd = fs; fd.name = "flight_dual_camera"; fd.description = "the flight, Enhanced, the engine's dual camera acknowledged: one world scale";
+        fd.dual_ack = true;
+        fd.legacy = false;
+        results.push_back(run(dll, out, fd));
+        // The shipped default without the engine's dual camera: Depth boost never leaves x1.
+        Options fn = fs; fn.name = "flight_no_dual_camera"; fn.description = "the flight, Enhanced, Legacy=0 and no dual camera: x1 throughout";
+        fn.legacy = false;
+        results.push_back(run(dll, out, fn));
     }
     Options dh = dc; dh.name = "depth_hud_near_eyes_far"; dh.description = "HUD: depth near (combiner), eyes at infinity: depth wins, x1";
     dh.script.segments = hud_script(false); dh.script.noise_deg = 0.5f; dh.scene = hud_glass_scene;

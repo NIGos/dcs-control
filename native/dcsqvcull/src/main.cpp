@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <tuple>
@@ -56,6 +57,7 @@ FILE* g_log = nullptr;                   // standalone builds (tests) only
 const DcsQvLoaderApi* g_api = nullptr;   // set when running under the loader
 std::atomic<bool> g_stop{false};         // payload is being replaced
 qvstatus::Sink g_statusSink;             // loader-owned status word (status_word.h)
+qvstatus::Sink g_dualStatusSink;         // loader-owned dual camera status word (DcsQvCull_DualCameraStatus)
 bool g_reportCapture = false;  // guarded by g_logMutex
 DWORD g_reportThread = 0;      // only lines logged by the suite thread go to the report
 std::string g_reportBuf;
@@ -129,6 +131,7 @@ struct Config {
   // gives the same configuration as a fresh Config).
   bool enabled = false;          // [Cull] Enabled (peripheral exclusion: opt-in)
   bool debugHole = false;
+  bool perceptionOnly = false;   // [General] PerceptionOnly (see g_perceptionOnly)
   // Fraction of the focus image (per axis, about its centre) that may be
   // excluded from the periphery. <0 = derive from Quad-Views-Foveated edge
   // smoothing: only the area where the focus layer is fully opaque.
@@ -265,6 +268,8 @@ struct Config {
   bool gbufferRecorderByOrdinal = false;   // [Model] GBufferRecorderByOrdinal: slots by plain ordinal (before R24)
   bool suiteGBufferRecVerify = false;      // [Suite] GBufferRecVerify
   int suiteGBufferRecVerifySec = 6;        // [Suite] GBufferRecVerifySec
+  bool suiteGBufferRecVerifyLive = false;  // [Suite] GBufferRecVerifyLive: test only, the recorder's verify while flying
+  bool suiteGBufferRecVerifyNoLatch = false;  // [Suite] GBufferRecVerifyNoLatch: test only, differences logged only
   int suiteGBufferRecVerifyStride = 0;     // [Suite] GBufferRecVerifyStride: every N-th draw residual (R18 T10)
   bool suiteBenchGBufferRecorder = false;  // [Suite] BenchGBufferRecorder (bench mode 29)
   uint32_t passFlush = 0;                  // [Model] PassFlush: pass_flush.h mask (0 = off)
@@ -278,6 +283,9 @@ struct Config {
   uint32_t prefetchWindowMs = 1000;        // [Prefetch] WindowMs: repeat window (1-60000)
   bool suiteBenchPrefetch = false;         // [Suite] BenchPrefetch (bench mode 33: observe vs skip)
   int holdYawDeg = -1;               // [Suite] HoldYawDeg: constant view yaw for unattended runs (-1 = off)
+  double holdPitchDeg = 0;           // [Suite] HoldPitchDeg: test only, constant view pitch with the held yaw (down +)
+  bool holdPose = false;             // [Suite] HoldPose: test only, the head pose frozen (pose_sweep.h)
+  double poseRotateDps = 0;          // [Suite] PoseRotateDps: test only, constant-rate synthetic yaw turn (0 = off)
   bool suiteYawScan = false;         // [Suite] YawScan: fps per held yaw, 0..345 in 15 deg steps
   bool suiteYawProfile = false;      // [Suite] YawProfile: cost split and bound per held yaw (view_profile.h)
   int suiteYawProfileStep = 30;      // [Suite] YawProfileStep: degrees between profiled yaws
@@ -338,7 +346,17 @@ struct Config {
   int cockpitTrueIpd = 0;          // CockpitTrueIpd: 0 off, 1 on, 2 observe (armed, nothing modified, logs only)
   bool cockpitTrueIpdLighting = false;  // CockpitTrueIpdLighting: phase 2, cockpit-stencil pixels lit from the true eye
   bool cockpitTrueIpdForward = true;    // CockpitTrueIpdForward: also TransparentCockpitPass / ...DecalPass
+  bool cockpitTrueIpdHelmet = true;     // CockpitTrueIpdHelmet: helmet models drawn with their eye's camera
+  int cockpitTrueIpdOwnship = 0;        // CockpitTrueIpdOwnship: the own aircraft's exterior model at the true eye
+  bool cockpitTrueIpdOverlays = true;   // CockpitTrueIpdOverlays: also the per-view overlay passes (HUD / MFD symbology)
+  bool cockpitTrueIpdOverlayMvp = true; // CockpitTrueIpdOverlayMvp: in them, the effect buffers' CPU-built MVPs too
   int cockpitTrueIpdLog = 0;       // CockpitTrueIpdLog: per-upload trace for the next N frames
+  int cockpitTrueIpdPrevLog = 0;   // CockpitTrueIpdPrevLog: gPrevFrameViewProj trace for the next N frames
+  int cockpitTrueIpdFrameDump = 0;  // CockpitTrueIpdFrameDump: dev only, N frames of HMD views 2 / 3 as BMP + CSV
+  int cockpitTrueIpdMvpDump = 0;    // CockpitTrueIpdMvpDump: dev only, the first N overlay matrices, one line each
+  int cockpitTrueIpdFrameDumpViews = 0x0C;  // CockpitTrueIpdFrameDumpViews: digits 0-3 and m (mirror), default 23
+  bool cockpitTrueIpdOverlayRestore = false;  // CockpitTrueIpdOverlayRestore: effect buffers back to DCS's bytes per pass
+  int cockpitTrueIpdOverlayPath = 0;  // CockpitTrueIpdOverlayPath: cpu (0, default, R32) or d3d11 (1, A/B only)
   double cockpitTrueIpdTestShiftMm = 0;  // CockpitTrueIpdTestShiftMm: dev only, shift per eye without the layer
   int cockpitTrueIpdToggleVk = 118;  // CockpitTrueIpdToggle: in-flight A/B, default Alt+Shift+F7 (118:6); 0:0 off
   int cockpitTrueIpdToggleMods = 6;
@@ -376,6 +394,7 @@ void ApplyPassFlush();
 void ApplySrvTailTrim(bool on);
 void ApplyPrefetch();
 void ApplyHoldYaw(int deg);
+void ApplyPoseTest(double pitchDeg, double rateDps, bool holdPose);
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_debugHole{false};
 std::atomic<bool> g_faulted{false};
@@ -385,6 +404,29 @@ std::atomic<bool> g_partitionBoost{false};  // see HookCollect
 // In-flight kill switch ([Hotkeys] Toggle): true turns off, together, the
 // measured optimizations the ini enabled. Reset whenever the ini changes.
 std::atomic<bool> g_engineOff{false};
+// [General] PerceptionOnly=1 (default 0): the app installs DcsQvCull for Depth
+// boost alone (Engine Optimizations off). Latched by the initial config read
+// (a later ini change takes effect at the next DCS start). While set, only the
+// perception features are installed: fixation depth / DepthGrid, the far
+// depth export, CockpitTrueIpd (option 3, its R32 CPU path, StereoAck,
+// BoostOut) and CockpitTrueIpdOwnship (stage 1: the G-buffer recorder is off).
+// No engine optimization, recorder, benchmark, suite, diagnostics hook,
+// governor action, engine toggle or Ctrl+Alt key; DcsQvCull_Status stays 0.
+// The hooks it keeps, all pass-through or observing:
+//   - Scene.dll collectSceneObjectsRenderables (HookCollect): view
+//     classification only, for the eye separation (NoteCullSeparation,
+//     option 3's measured-separation record pick) and the camera cut
+//     (SceneCutReset); no volume patched, no thread limit touched.
+//   - GraphicsCore BaseRenderingPass::execute (pass_timing.h): fixation
+//     depth's pass-boundary callback; no timing recorded.
+//   - G-buffer pass execute (gb_batch.h gbpass): option 3's observer, no
+//     batching wrapper.
+//   - DX11Renderer::draw (perception_device.h): one call, to learn DCS's
+//     D3D11 context (shadow instancing / the split filter found it before);
+//     the slot is restored at once.
+//   - The perception modules' own hooks (fixation_depth.h, cockpit_ipd.h,
+//     ovl_cpu.h, far_depth.h), as with PerceptionOnly=0.
+std::atomic<bool> g_perceptionOnly{false};
 // R30 governor (gov.h, perf_mon.h): the recorders' stage (0 = as configured,
 // 1 = shadow split & 0x8, 2 = no helper lists, 3 = recorders paused), read by
 // ApplyShadowRecorder/ApplyGBufferRecorder; the last verdict and the
@@ -484,6 +526,92 @@ int ParseFarCoverageMode(const wchar_t* m, bool* invalid) {
 }
 bool g_farCovInvalidLogged = false;  // the invalid value is logged once per process
 int g_farCovInvalidLogs = 0;
+
+// [General] PerceptionOnly=1: the configuration that is applied. A fresh
+// Config (every suite, benchmark and diagnostics key off) with the engine
+// optimizations whose defaults are on switched off, the engine keys off, and
+// the [Perception] keys, the view classification thresholds and the log
+// cadence taken from the ini. A new engine feature whose Config default is
+// on must be added to the list below.
+Config PerceptionOnlyConfig(const Config& c) {
+  Config p;
+  p.perceptionOnly = true;
+  // Engine optimizations on by default.
+  p.shadowTexSkip = p.bigPages = p.shadowInst = p.shadowBatch = p.shadowPlanAsync = false;
+  p.shaderTimeCache = false;
+  p.govEnabled = false;
+  p.motionCounters = false;
+  // The engine toggle and the Ctrl+Alt keys (inert in the worker regardless).
+  p.toggleVk = p.toggleMods = 0;
+  p.developerKeys = false;
+  // View classification (HookCollect: eye separation, camera cuts); [Cull] Enabled stays off.
+  p.keepFraction = c.keepFraction;
+  p.safetyNdc = c.safetyNdc;
+  p.nativeKeepFraction = c.nativeKeepFraction;
+  p.saccadeDeg = c.saccadeDeg;
+  p.saccadeHoldFrames = c.saccadeHoldFrames;
+  p.focusRatio = c.focusRatio;
+  p.apexTolerance = c.apexTolerance;
+  // Log lines.
+  p.statsIntervalSec = c.statsIntervalSec;
+  p.dumpViews = c.dumpViews;
+  p.perfIntervalSec = c.perfIntervalSec;
+  p.vramIntervalSec = c.vramIntervalSec;
+  // [Perception]
+  p.fixationDepth = c.fixationDepth;
+  p.sceneCutReset = c.sceneCutReset;
+  p.depthGrid = c.depthGrid;
+  p.fixationDepthVerify = c.fixationDepthVerify;
+  p.fixationDepthDump = c.fixationDepthDump;
+  p.fixationTestGaze = c.fixationTestGaze;
+  p.farDepthExport = c.farDepthExport;
+  p.farDepthSlots = c.farDepthSlots;
+  p.farDepthLogProj = c.farDepthLogProj;
+  p.farDepthPreOverlay = c.farDepthPreOverlay;
+  p.farDepthCoverageMode = c.farDepthCoverageMode;
+  p.farDepthPostOverlay = c.farDepthPostOverlay;
+  p.farDepthOverlayTrace = c.farDepthOverlayTrace;
+  p.cockpitTrueIpd = c.cockpitTrueIpd;
+  p.cockpitTrueIpdLighting = c.cockpitTrueIpdLighting;
+  p.cockpitTrueIpdForward = c.cockpitTrueIpdForward;
+  p.cockpitTrueIpdHelmet = c.cockpitTrueIpdHelmet;
+  p.cockpitTrueIpdOwnship = c.cockpitTrueIpdOwnship;  // stage 2 runs as stage 1 (no G-buffer recorder)
+  p.cockpitTrueIpdOverlays = c.cockpitTrueIpdOverlays;
+  p.cockpitTrueIpdOverlayMvp = c.cockpitTrueIpdOverlayMvp;
+  p.cockpitTrueIpdLog = c.cockpitTrueIpdLog;
+  p.cockpitTrueIpdPrevLog = c.cockpitTrueIpdPrevLog;
+  p.cockpitTrueIpdFrameDump = c.cockpitTrueIpdFrameDump;
+  p.cockpitTrueIpdMvpDump = c.cockpitTrueIpdMvpDump;
+  p.cockpitTrueIpdFrameDumpViews = c.cockpitTrueIpdFrameDumpViews;
+  p.cockpitTrueIpdOverlayRestore = c.cockpitTrueIpdOverlayRestore;
+  p.cockpitTrueIpdOverlayPath = c.cockpitTrueIpdOverlayPath;
+  p.cockpitTrueIpdTestShiftMm = c.cockpitTrueIpdTestShiftMm;
+  p.cockpitTrueIpdToggleVk = c.cockpitTrueIpdToggleVk;
+  p.cockpitTrueIpdToggleMods = c.cockpitTrueIpdToggleMods;
+  return p;
+}
+
+// [General] PerceptionOnly: every engine-side runtime flag off (LoadConfig
+// applies nothing else in this mode).
+void PerceptionOnlyFlags() {
+  g_enabled = false;
+  g_debugHole = false;
+  g_partitionBoost = false;
+  g_engineOff = false;
+  g_allocSlabsOn = false;
+  g_texDedupeOn = false;
+  g_triPlainOn = false;
+  g_cbSkipOn = false;
+  g_costWeightsOn = false;
+  g_cbUploadSkipOn = false;
+  g_pacerLowPowerOn = false;
+  g_taskClockOn = false;
+  g_frameHeapOn = false;
+  g_shadowTexSkipOn = false;
+  g_shadowTight = false;
+  g_shadowDebugInvert = false;
+  g_d3dMode = 0;
+}
 
 void LoadConfig(bool initial) {
   std::wstring ini = g_dir + L"DcsQvCull.ini";
@@ -698,6 +826,8 @@ void LoadConfig(bool initial) {
   c.gbufferRecorderByOrdinal = GetPrivateProfileIntW(L"Model", L"GBufferRecorderByOrdinal", 0, ini.c_str()) != 0;
   c.suiteGBufferRecVerify = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerify", 0, ini.c_str()) != 0;
   c.suiteGBufferRecVerifySec = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerifySec", 6, ini.c_str());
+  c.suiteGBufferRecVerifyLive = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerifyLive", 0, ini.c_str()) != 0;
+  c.suiteGBufferRecVerifyNoLatch = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerifyNoLatch", 0, ini.c_str()) != 0;
   if (c.suiteGBufferRecVerifySec < 1) c.suiteGBufferRecVerifySec = 1;
   if (c.suiteGBufferRecVerifySec > 120) c.suiteGBufferRecVerifySec = 120;
   c.suiteGBufferRecVerifyStride = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerifyStride", 0, ini.c_str());
@@ -728,6 +858,9 @@ void LoadConfig(bool initial) {
   }
   c.suiteBenchPrefetch = GetPrivateProfileIntW(L"Suite", L"BenchPrefetch", 0, ini.c_str()) != 0;
   c.holdYawDeg = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"HoldYawDeg", -1, ini.c_str()));
+  c.holdPitchDeg = ReadDouble(L"Suite", L"HoldPitchDeg", 0.0, ini);
+  c.poseRotateDps = ReadDouble(L"Suite", L"PoseRotateDps", 0.0, ini);
+  c.holdPose = GetPrivateProfileIntW(L"Suite", L"HoldPose", 0, ini.c_str()) != 0;
   c.suiteYawScan = GetPrivateProfileIntW(L"Suite", L"YawScan", 0, ini.c_str()) != 0;
   c.suiteYawProfile = GetPrivateProfileIntW(L"Suite", L"YawProfile", 0, ini.c_str()) != 0;
   c.suiteYawProfileStep = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"YawProfileStep", 30, ini.c_str()));
@@ -811,9 +944,42 @@ void LoadConfig(bool initial) {
   if (c.cockpitTrueIpd < 0 || c.cockpitTrueIpd > 2) c.cockpitTrueIpd = 0;
   c.cockpitTrueIpdLighting = GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdLighting", 0, ini.c_str()) != 0;
   c.cockpitTrueIpdForward = GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdForward", 1, ini.c_str()) != 0;
+  c.cockpitTrueIpdHelmet = GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdHelmet", 1, ini.c_str()) != 0;
+  c.cockpitTrueIpdOwnship =
+      std::clamp(static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdOwnship", 0, ini.c_str())), 0, 2);
+  c.cockpitTrueIpdOverlays = GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdOverlays", 1, ini.c_str()) != 0;
+  c.cockpitTrueIpdOverlayMvp = GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdOverlayMvp", 1, ini.c_str()) != 0;
   c.cockpitTrueIpdLog =
       (std::max)(0, (std::min)(600, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdLog", 0,
                                                                            ini.c_str()))));
+  c.cockpitTrueIpdPrevLog = (std::max)(
+      0, (std::min)(150, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdPrevLog", 0, ini.c_str()))));
+  c.cockpitTrueIpdFrameDump = (std::max)(
+      0, (std::min)(600, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdFrameDump", 0, ini.c_str()))));
+  c.cockpitTrueIpdMvpDump = (std::max)(
+      0, (std::min)(2000, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdMvpDump", 0, ini.c_str()))));
+  {
+    wchar_t dv[32] = {};
+    GetPrivateProfileStringW(L"Perception", L"CockpitTrueIpdFrameDumpViews", L"23", dv, 32, ini.c_str());
+    int mask = 0;
+    for (const wchar_t* q = dv; *q; ++q) {
+      if (*q >= L'0' && *q <= L'3') mask |= 1 << (*q - L'0');
+      if (*q == L'm' || *q == L'M') mask |= 1 << 4;
+    }
+    c.cockpitTrueIpdFrameDumpViews = mask ? mask : 0x0C;
+  }
+  c.cockpitTrueIpdOverlayRestore =
+      GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdOverlayRestore", 0, ini.c_str()) != 0;
+  {
+    wchar_t op[32] = {};
+    GetPrivateProfileStringW(L"Perception", L"CockpitTrueIpdOverlayPath", L"cpu", op, 32, ini.c_str());
+    if (_wcsicmp(op, L"d3d11") == 0) {
+      c.cockpitTrueIpdOverlayPath = 1;
+    } else {
+      c.cockpitTrueIpdOverlayPath = 0;
+      if (_wcsicmp(op, L"cpu") != 0) Log("config: [Perception] CockpitTrueIpdOverlayPath=%ls is invalid; cpu", op);
+    }
+  }
   c.cockpitTrueIpdTestShiftMm =
       (std::max)(-40.0, (std::min)(40.0, ReadDouble(L"Perception", L"CockpitTrueIpdTestShiftMm", 0.0, ini)));
   {
@@ -828,7 +994,30 @@ void LoadConfig(bool initial) {
     c.fixationTestGaze = g;
   }
   if (c.statsIntervalSec < 1) c.statsIntervalSec = 1;
+  {
+    // [General] PerceptionOnly: latched by the initial read (the hooks it
+    // leaves out are never installed; nothing installed is taken out later).
+    const bool po = GetPrivateProfileIntW(L"General", L"PerceptionOnly", 0, ini.c_str()) != 0;
+    static bool poChangeLogged = false;
+    if (initial) {
+      g_perceptionOnly = po;
+      poChangeLogged = false;
+      if (po)
+        Log("config: perception only ([General] PerceptionOnly=1): fixation depth, far depth export and the cockpit "
+            "ipd options only; no engine optimization, recorder, benchmark, suite, governor action or engine key; "
+            "status word 0");
+    } else if (po != g_perceptionOnly.load() && !poChangeLogged) {
+      poChangeLogged = true;
+      Log("config: [General] PerceptionOnly=%d takes effect at the next DCS start (now %d)", po ? 1 : 0,
+          g_perceptionOnly.load() ? 1 : 0);
+    }
+    if (g_perceptionOnly.load()) c = PerceptionOnlyConfig(c);
+  }
   g_cfg = c;
+  if (g_perceptionOnly.load()) {
+    PerceptionOnlyFlags();
+    return;
+  }
   if (!initial && g_engineOff.exchange(false)) Log("hotkey: engine optimizations back ON (ini changed)");
   if (g_benchRunningFlag.load()) return;  // the benchmark owns the toggle while it runs
   g_enabled = c.enabled;
@@ -866,6 +1055,7 @@ void LoadConfig(bool initial) {
   ApplySrvTailTrim(c.srvTailTrim && !g_engineOff.load());
   ApplyPrefetch();
   ApplyHoldYaw(c.holdYawDeg);
+  ApplyPoseTest(c.holdPitchDeg, c.poseRotateDps, c.holdPose);
   SetTimerResolution(c.fineTimer);
   g_d3dMode = c.d3dFilter ? 1 : 0;
   g_shadowTight = c.shadowTight;
@@ -1394,7 +1584,7 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
       scenecut::OnCamera(pos, fwd);
       break;
     }
-  if (!g_enabled.load() || g_faulted.load()) return;
+  if (!g_enabled.load() || g_faulted.load() || g_perceptionOnly.load(std::memory_order_relaxed)) return;
   const bool hole = g_debugHole.load();
   if (hold && !hole) return;
   const double keep = EffectiveKeep();
@@ -1482,6 +1672,7 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
 #include "view_profile.h"
 #include "vram_count.h"
 #include "prefetch_fix.h"
+#include "perception_device.h"  // [General] PerceptionOnly: DCS's D3D11 context without the engine modules
 #include "fixation_depth.h"  // Depth boost: fixation depth publisher ([Perception] FixationDepth)
 #include "perf_mon.h"  // R30: env/perf/features/warmup/toggle/vram lines and the governor's driver
 
@@ -1489,6 +1680,35 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
 // slot restored to the real function; observe = installed, pass-through.
 void ApplyPrefetch() {
   pffix::Apply(g_engineOff.load() ? pffix::kOff : g_cfg.prefetchMode, g_cfg.prefetchWindowMs);
+}
+
+// [General] PerceptionOnly: the NGModel globals pointer the cockpit ipd's
+// helmet and ownship matching read (gbrec::g_env.globals; with
+// PerceptionOnly=0 the G-buffer recorder's install sets it). Taken once
+// NGModel is the analysed build: its location by signature (shadow_tex.h
+// ResolveAddrs), ModelMaterialMT's RTTI and two of its functions' code hashes
+// (shadow_tex.h VerifyBuild's NGModel code checks, without its slot checks:
+// reads and compares only, patches nothing, shadowtex::g_at untouched).
+// Worker, each second until decided.
+int g_poGlobals = 0;  // 0 = waiting for NGModel, 1 = set, -1 = build mismatch
+void PerceptionGlobalsTick() {
+  if (g_poGlobals != 0) return;
+  auto* ng = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
+  if (!ng) return;
+  shadowtex::Addrs a;
+  if (!shadowtex::ResolveAddrs(a) ||
+      !allocslab::RttiIs(ng, reinterpret_cast<void**>(ng + a.model), ".?AVModelMaterialMT@model@@") ||
+      !reloc::CodeIs(hooksig::NG_ModelMaterialMT_drawShadow, ng, shadowtex::kSlot5, shadowtex::kSlot5End,
+                     shadowtex::kSlot5Hash) ||
+      !reloc::CodeIs(hooksig::NG_ModelMaterialMT_submit, ng, shadowtex::kSubmit, shadowtex::kSubmitEnd,
+                     shadowtex::kSubmitHash)) {
+    g_poGlobals = -1;
+    Log("perception only: NGModel is not the analysed build; the cockpit ipd's helmet and ownship matching stay off");
+    return;
+  }
+  if (!gbrec::g_env.globals) gbrec::g_env.globals = reinterpret_cast<uint8_t* const*>(ng + a.globals);
+  g_poGlobals = 1;
+  Log("perception only: NGModel globals at NGModel+0x%x (the cockpit ipd's helmet and ownship matching)", a.globals);
 }
 
 void ApplyThreadsMax(void* scene) {
@@ -1507,7 +1727,8 @@ bool SehPrepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatche
                 int* patched, std::vector<ViewInfo>* views) {
   __try {
     Prepare(count, infos, patches, maxPatches, pairs, patched, *views);
-    if (g_shadowTight.load() && *pairs >= 1) PrepareShadows(count, infos, patches, maxPatches, patched);
+    if (g_shadowTight.load() && *pairs >= 1 && !g_perceptionOnly.load(std::memory_order_relaxed))
+      PrepareShadows(count, infos, patches, maxPatches, patched);
     return true;
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     g_faulted = true;
@@ -1643,6 +1864,18 @@ void PublishQuadViewsRaw(const uint8_t* infos, const ViewInfo* views, size_t n, 
   }
   gbrec::PublishQuadVolumes(vols, k, qpc);
 }
+// [Perception] CockpitTrueIpd: the frame's eye separation as DCS renders it, measured before its passes (the two
+// peripheral views' frustum apexes; only with exactly two peripheral / focus pairs). cockpit_ipd.h NoteCullSep.
+void NoteCullSeparation(const std::vector<ViewInfo>& views) {
+  const ViewInfo* p[2] = {};
+  int n = 0;
+  for (const ViewInfo& v : views)
+    if (v.role == 1 && v.partner >= 0 && v.fr.valid) {
+      if (n < 2) p[n] = &v;
+      ++n;
+    }
+  if (n == 2) fixdepth::ckipd::NoteCullSep(Len(p[1]->fr.apex - p[0]->fr.apex));
+}
 void PublishQuadViews(const uint8_t* infos, const std::vector<ViewInfo>& views, int64_t qpc) {
   __try {
     PublishQuadViewsRaw(infos, views.data(), views.size(), qpc);
@@ -1664,7 +1897,12 @@ void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t*
   void* scene = static_cast<uint8_t*>(self) - 8;
   if (!g_scene.exchange(scene)) Log("scene: DCSScene at %p", scene);
   g_lastCollectFlags = flags;
-  {
+  // [General] PerceptionOnly: observer only (no thread limit, partition or
+  // volume touched): the views are classified for the eye separation
+  // (NoteCullSeparation) and the camera cut (scene_cut.h), and DCS's call
+  // runs with its own arguments.
+  const bool po = g_perceptionOnly.load(std::memory_order_relaxed);
+  if (!po) {
     auto* tmax = reinterpret_cast<volatile uint32_t*>(static_cast<uint8_t*>(scene) + kSceneCollectThreadsMax);
     uint32_t expect = 0;
     g_defaultThreadsMax.compare_exchange_strong(expect, *tmax);
@@ -1681,8 +1919,8 @@ void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t*
     } else if (*tmax != g_defaultThreadsMax.load() && g_cfg.collectThreadsMax <= 0) {
       *tmax = g_defaultThreadsMax.load();
     }
+    ApplyThreadsMax(scene);
   }
-  ApplyThreadsMax(scene);
 
   thread_local std::vector<ViewInfo> views;
   // Every info slot is patched at most once by the views and once by the shadows.
@@ -1710,9 +1948,11 @@ void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t*
     if (!once.exchange(true)) Log("collect: a call with %u collections (above %u) is not classified", count, kMaxCollectInfos);
   }
 
-  if (allocslab::g_state.load(std::memory_order_relaxed) > 0) allocslab::OnCollect();
-  if (directupload::g_state.load(std::memory_order_relaxed) > 0) directupload::OnCollect();
-  if (partw::g_orig) SafeApplyWeights(static_cast<uint8_t*>(self));
+  if (!po) {  // never installed in PerceptionOnly; skipped outright
+    if (allocslab::g_state.load(std::memory_order_relaxed) > 0) allocslab::OnCollect();
+    if (directupload::g_state.load(std::memory_order_relaxed) > 0) directupload::OnCollect();
+    if (partw::g_orig) SafeApplyWeights(static_cast<uint8_t*>(self));
+  }
 
   LARGE_INTEGER t0, t1;
   const uint32_t joinId = jointail::Begin();  // 0 unless [Suite] JoinTailCount is counting
@@ -1722,7 +1962,8 @@ void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t*
   jointail::End(joinId);
 
   for (int i = 0; i < patched; ++i) *reinterpret_cast<uint8_t**>(patches[i].slot) = patches[i].original;
-  if (pairs >= 1) PublishQuadViews(infos, views, t1.QuadPart);
+  if (pairs >= 1 && !po) PublishQuadViews(infos, views, t1.QuadPart);  // the G-buffer recorder's filter
+  if (pairs >= 2 && fixdepth::ckipd::g_on.load(std::memory_order_relaxed)) NoteCullSeparation(views);
   // R30 L1: every frame's main call (quad or not) for the perf line and the governor.
   perfgov::OnCollect(count, classified ? static_cast<int>(views.size()) : -1, classified ? pairs : -1, t1.QuadPart);
 
@@ -1960,6 +2201,22 @@ void ApplyHoldYaw(int deg) {
     posesweep::Hold(true, deg);
   else if (posesweep::Holding())
     posesweep::Hold(false, 0);
+}
+
+// [Suite] HoldPitchDeg / PoseRotateDps (test only, posesweep): the held pitch, and a constant-rate synthetic yaw
+// turn started / stopped when the rate changes (head motion for unattended option-3 captures).
+void ApplyPoseTest(double pitchDeg, double rateDps, bool holdPose) {
+  posesweep::g_holdPose = holdPose;
+  posesweep::g_pitchDeg = std::max(-60.0, std::min(60.0, pitchDeg));
+  static double lastRate = 0;
+  if (rateDps == lastRate) return;
+  lastRate = rateDps;
+  if (rateDps > 0) {
+    if (posesweep::Start(rateDps)) Log("pose sweep: synthetic yaw turn at %.1f deg/s", rateDps);
+  } else {
+    posesweep::Stop();
+    Log("pose sweep: synthetic yaw turn stopped");
+  }
 }
 
 // Stage 2: batching on top of the compiled variants; retried every second
@@ -2318,9 +2575,29 @@ void ApplyShadowTexSkip() {
   shadowtex::SetAttached(on);
 }
 
+// The kill switch flipped (hotkey, bench mode 11, the suite's A/B): every
+// recorder job and re-record in flight belongs to the other state. A new
+// frame-heap generation makes them stale (their workers stop before their
+// next read of a renderable), and the scene-change mark contains a fault that
+// still slips in per job (shrec::SceneChanging) instead of latching a recorder
+// off for the session (issue #3: G-buffer recorder fault right after an
+// Alt+Shift+F11 off/on in flight). The heap's reset hooks stay installed and
+// keep counting while the kill switch is off; this only adds a step.
+void OnEngineSwitch() {
+  g_sceneChangeQpc.store(defrec::Qpc(), std::memory_order_release);
+  g_frameHeapGen.fetch_add(1, std::memory_order_acq_rel);
+}
+
 // Applies the kill switch state to every measured optimization.
 void SetEngineOff(bool off) {
   g_engineOff = off;
+  OnEngineSwitch();
+  // Off: the recorders stop first, so no job starts or arms while the rest is switched off (they only arm at a
+  // render entry seen while active, so on they start at the next frame after everything below is back).
+  if (off) {
+    ApplyShadowRecorder();
+    ApplyGBufferRecorder();
+  }
   g_partitionBoost = g_cfg.partitionBoost && !off;
   g_allocSlabsOn = g_cfg.allocSlabs && !off;
   g_texDedupeOn = g_cfg.texDedupe && !off;
@@ -2353,6 +2630,9 @@ void SetEngineOff(bool off) {
   // The texture hook only does work when dedupe is on: otherwise remove it.
   ApplyTextureHook();
   ApplyTimerConfig();
+  // The switch takes a while (the prefetch fix's module scan): the containment window (2 s after the mark) counts
+  // from its end, which covers the recorders' first frames back on.
+  g_sceneChangeQpc.store(defrec::Qpc(), std::memory_order_release);
 }
 
 // Status word for DcsQvCull_Status (status_word.h), recomputed by the worker
@@ -2419,8 +2699,11 @@ uint64_t ComputeStatus() {
                               static_cast<uint32_t>(g_verdictNow.load()), g_cfg.govEnabled);
 }
 
+// DcsQvCull_Status's word: 0 in PerceptionOnly (the app shows no Engine Opt line).
+uint64_t StatusWordNow() { return g_perceptionOnly.load() ? 0 : ComputeStatus(); }
+
 bool ToggleEngine() {
-  if (g_benchRunningFlag.load()) return false;
+  if (g_perceptionOnly.load() || g_benchRunningFlag.load()) return false;
   bool off = !g_engineOff.load();
   SetEngineOff(off);
   Log("hotkey: engine optimizations %s", off ? "OFF" : "ON");
@@ -2432,6 +2715,35 @@ bool ToggleEngine() {
 bool ModifiersMatch(int mods) {
   int held = (KeyDown(VK_CONTROL) ? 1 : 0) | (KeyDown(VK_MENU) ? 2 : 0) | (KeyDown(VK_SHIFT) ? 4 : 0);
   return held == mods;
+}
+
+// The worker's keys this poll (held, not edges). PerceptionOnly: only the
+// cockpit ipd's own toggle ([Perception] CockpitTrueIpdToggle); the engine
+// toggle and every Ctrl+Alt key are inert whatever the ini says.
+struct HeldKeys {
+  bool toggle = false, cockpit = false, f8 = false, f9 = false, f10 = false, f11 = false, f12 = false, up = false,
+       down = false;
+};
+using KeyDownFn = bool (*)(int vk);
+HeldKeys ReadKeys(const Config& c, bool perceptionOnly, KeyDownFn down) {
+  HeldKeys k;
+  auto mods = [&](int m) {
+    return ((down(VK_CONTROL) ? 1 : 0) | (down(VK_MENU) ? 2 : 0) | (down(VK_SHIFT) ? 4 : 0)) == m;
+  };
+  k.cockpit = c.cockpitTrueIpd == 1 && c.cockpitTrueIpdToggleVk > 0 && down(c.cockpitTrueIpdToggleVk) &&
+              mods(c.cockpitTrueIpdToggleMods);
+  if (perceptionOnly) return k;
+  const bool chord = down(VK_CONTROL) && down(VK_MENU) && !down(VK_SHIFT);  // exactly Ctrl+Alt
+  const bool dev = c.developerKeys;
+  k.toggle = c.toggleVk > 0 && down(c.toggleVk) && mods(c.toggleMods);
+  k.f8 = dev && chord && down(VK_F8);
+  k.f9 = dev && chord && down(VK_F9);
+  k.f10 = dev && chord && down(VK_F10);
+  k.f11 = chord && down(VK_F11);
+  k.f12 = dev && chord && down(VK_F12);
+  k.up = dev && chord && down(VK_PRIOR);
+  k.down = dev && chord && down(VK_NEXT);
+  return k;
 }
 
 DWORD WINAPI ProfileThread(void*) {
@@ -3613,6 +3925,7 @@ DWORD WINAPI SuiteThread(void*) {
 void PerfOnToggle(bool off) { perfmon::OnToggle(off); }
 
 void StartBench() {
+  if (g_perceptionOnly.load()) return;  // no benchmark or suite in PerceptionOnly
   if (g_benchRunningFlag.exchange(true)) return;
   perfmon::GovForBench();  // stage 0: the benchmark measures the features as configured
   HANDLE t = CreateThread(nullptr, 0, qvexit::Thread<SuiteThread>, nullptr, 0, nullptr);
@@ -3620,6 +3933,40 @@ void StartBench() {
     CloseHandle(t);
   else
     g_benchRunningFlag = false;
+}
+
+// [Perception] CockpitTrueIpdOwnship as applied. Stage 2 hands the ownship
+// executions to the G-buffer recorder (gb_rec.h), which PerceptionOnly never
+// installs: there it runs as stage 1 (cockpit_ipd.h OwnBegin; its GbBegin
+// also takes stage 1 whenever gbrec::Active() is false), logged once.
+int OwnshipMode(int configured, bool perceptionOnly) {
+  if (configured != 2 || !perceptionOnly) return configured;
+  static bool logged = false;
+  if (!logged) Log("cockpit ipd: CockpitTrueIpdOwnship=2 runs as stage 1 (perception only: no G-buffer recorder)");
+  logged = true;
+  return 1;
+}
+
+// The worker's per-second perception steps (with PerceptionOnly=1 the only
+// ones that install anything). Cockpit at the true eye distance (R31) is
+// configured before fixdepth::Tick, which installs it.
+void ConfigurePerception() {
+  scenecut::Tick(g_cfg.sceneCutReset);
+  fixdepth::ckipd::Configure(g_cfg.cockpitTrueIpd, g_cfg.cockpitTrueIpdLighting, g_cfg.cockpitTrueIpdForward,
+                             g_cfg.cockpitTrueIpdLog, g_cfg.cockpitTrueIpdTestShiftMm,
+                             g_cfg.d3dMeter || g_cfg.suiteGpuPassTiming || g_cfg.suiteGpuDedup > 0,
+                             g_cfg.cockpitTrueIpdPrevLog, g_cfg.cockpitTrueIpdOverlays,
+                             g_cfg.cockpitTrueIpdOverlayMvp, g_cfg.cockpitTrueIpdFrameDump,
+                             g_cfg.cockpitTrueIpdMvpDump, g_dir, g_cfg.cockpitTrueIpdOverlayRestore,
+                             g_cfg.cockpitTrueIpdFrameDumpViews, g_cfg.cockpitTrueIpdOverlayPath);
+  fixdepth::ckipd::g_cfgHelmet = g_cfg.cockpitTrueIpdHelmet;
+  fixdepth::ckipd::SetOwnship(OwnshipMode(g_cfg.cockpitTrueIpdOwnship, g_perceptionOnly.load()));
+}
+void TickFixationDepth() {
+  fixdepth::Tick(g_cfg.fixationDepth, g_cfg.depthGrid, g_cfg.fixationDepthVerify, g_cfg.fixationTestGaze.c_str(),
+                 g_cfg.fixationDepthDump, g_devDir.empty() ? g_dir : g_devDir, g_cfg.farDepthExport,
+                 g_cfg.farDepthSlots, g_cfg.farDepthLogProj, g_cfg.farDepthPreOverlay, g_cfg.farDepthOverlayTrace,
+                 g_cfg.farDepthPostOverlay, g_cfg.farDepthCoverageMode);
 }
 
 DWORD WINAPI WorkerThread(void*) {
@@ -3639,15 +3986,28 @@ DWORD WINAPI WorkerThread(void*) {
     QueryPerformanceCounter(&b);
     g_tscHz = (__rdtsc() - t0) / ((b.QuadPart - a.QuadPart) * g_qpcToUs / 1e6);
   }
-  if (!Install()) return 0;
-  if (g_cfg.diagnostics) InstallDiagnostics();
-  if (g_cfg.allocSlabs) allocslab::Prepare();
-  if (g_cfg.costWeights) partw::Install();
-  if (g_cfg.texDedupe) texbind::Install(g_tscHz);
-  ApplyShadowTexSkip();
-  if (timercache::Install(g_cfg.shaderTimeCacheUs)) ApplyTimerConfig();
-  ApplyTaskClock();
-  if (g_cfg.d3dMeter && !d3ds::Install()) Log("d3d meter: not installed");
+  const bool po = g_perceptionOnly.load();  // latched by LoadConfig(true)
+  if (!Install()) {  // the collect hook (observer only in PerceptionOnly: HookCollect)
+    if (!po || g_stop.load()) return 0;
+    Log("perception only: continuing without the collect hook (no measured eye separation, no camera cut "
+        "detection)");
+  }
+  if (po) {
+    // Perception only: nothing of the engine. DCS's device for the depth
+    // features (shadow instancing and the split filter are not there to find
+    // it) and the NGModel globals for the cockpit ipd, retried each second.
+    pdev::Install();
+    PerceptionGlobalsTick();
+  } else {
+    if (g_cfg.diagnostics) InstallDiagnostics();
+    if (g_cfg.allocSlabs) allocslab::Prepare();
+    if (g_cfg.costWeights) partw::Install();
+    if (g_cfg.texDedupe) texbind::Install(g_tscHz);
+    ApplyShadowTexSkip();
+    if (timercache::Install(g_cfg.shaderTimeCacheUs)) ApplyTimerConfig();
+    ApplyTaskClock();
+    if (g_cfg.d3dMeter && !d3ds::Install()) Log("d3d meter: not installed");
+  }
 
   bool f9 = false, f10 = false, f11 = false, f12 = false;
   ULONGLONG lastCensus = GetTickCount64();
@@ -3655,16 +4015,15 @@ DWORD WINAPI WorkerThread(void*) {
   bool autoStarted = false;
   ULONGLONG lastStats = GetTickCount64();
   ULONGLONG lastCfg = lastStats;
-  g_statusSink.Publish(ComputeStatus());  // hooks installed: running
+  g_statusSink.Publish(StatusWordNow());  // hooks installed: running (0 in PerceptionOnly)
   while (!g_stop.load() && !qvexit::Exiting()) {
     Sleep(50);
-    bool chord = KeyDown(VK_CONTROL) && KeyDown(VK_MENU) && !KeyDown(VK_SHIFT);  // exactly Ctrl+Alt
-    const bool dev = g_cfg.developerKeys;
-    bool k9 = dev && chord && KeyDown(VK_F9);
-    bool k10 = dev && chord && KeyDown(VK_F10);
-    bool k11 = chord && KeyDown(VK_F11);
-    bool k8 = dev && chord && KeyDown(VK_F8);
-    bool kT = g_cfg.toggleVk > 0 && KeyDown(g_cfg.toggleVk) && ModifiersMatch(g_cfg.toggleMods);
+    const HeldKeys keys = ReadKeys(g_cfg, po, &KeyDown);  // PerceptionOnly: the cockpit ipd toggle only
+    bool k9 = keys.f9;
+    bool k10 = keys.f10;
+    bool k11 = keys.f11;
+    bool k8 = keys.f8;
+    bool kT = keys.toggle;
     static bool fT = false;
     if (kT && !fT && ToggleEngine()) {
       if (g_engineOff.load()) {
@@ -3675,8 +4034,7 @@ DWORD WINAPI WorkerThread(void*) {
       }
     }
     fT = kT;
-    bool kC = g_cfg.cockpitTrueIpd == 1 && g_cfg.cockpitTrueIpdToggleVk > 0 &&
-              KeyDown(g_cfg.cockpitTrueIpdToggleVk) && ModifiersMatch(g_cfg.cockpitTrueIpdToggleMods);
+    bool kC = keys.cockpit;
     static bool fC = false;
     static ULONGLONG lastC = 0;
     if (kC && !fC && GetTickCount64() - lastC >= 300) {
@@ -3708,8 +4066,8 @@ DWORD WINAPI WorkerThread(void*) {
       }
     }
     f11 = k11;
-    bool kUp = dev && chord && KeyDown(VK_PRIOR);
-    bool kDn = dev && chord && KeyDown(VK_NEXT);
+    bool kUp = keys.up;
+    bool kDn = keys.down;
     static bool fUp = false, fDn = false;
     if ((kUp && !fUp) || (kDn && !fDn)) {
       double k = EffectiveKeep() + (kUp ? 0.05 : -0.05);
@@ -3720,13 +4078,13 @@ DWORD WINAPI WorkerThread(void*) {
     }
     fUp = kUp;
     fDn = kDn;
-    bool k12 = dev && chord && KeyDown(VK_F12);
+    bool k12 = keys.f12;
     if (k12 && !f12 && !prof::g_running.load()) {
       HANDLE t = CreateThread(nullptr, 0, qvexit::Thread<ProfileThread>, nullptr, 0, nullptr);
       if (t) CloseHandle(t);
     }
     f12 = k12;
-    if (!autoStarted && g_cfg.benchAutoStartSec > 0 && g_firstQuadQpc.load()) {
+    if (!autoStarted && !po && g_cfg.benchAutoStartSec > 0 && g_firstQuadQpc.load()) {
       LARGE_INTEGER now;
       QueryPerformanceCounter(&now);
       if ((now.QuadPart - g_firstQuadQpc.load()) * g_qpcToUs / 1e6 > g_cfg.benchAutoStartSec) {
@@ -3755,46 +4113,62 @@ DWORD WINAPI WorkerThread(void*) {
     if (now - lastCfg >= 1000) {
       lastCfg = now;
       LoadConfig(false);
-      pffix::Tick();  // new modules (terrain DLLs per mission), slot verify, 10 s statistics line
-      g_statusSink.Publish(ComputeStatus());  // last second's states (the retries below show next time)
+      if (!po) pffix::Tick();  // new modules (terrain DLLs per mission), slot verify, 10 s statistics line
+      g_statusSink.Publish(StatusWordNow());  // last second's states (the retries below show next time)
+      g_dualStatusSink.Publish(fixdepth::ckipd::DualCameraStatusNow());  // [Perception] CockpitTrueIpd
+      if (po) {  // PerceptionOnly: the perception prerequisites retried, no engine module
+        pdev::Install();
+        PerceptionGlobalsTick();
+      }
       // NGModel.dll may load after the payload: retry until the hook installs.
-      if (g_shadowTexSkipOn.load() && (shadowtex::g_state.load() == 0 || shadowinst::g_state.load() == 0) &&
-          !g_benchRunningFlag.load())
-        ApplyShadowTexSkip();
-      if (g_cfg.bigPages && !g_engineOff.load() && bigpages::g_state.load() == 0 && allocslab::g_state.load() >= 1 &&
-          !g_benchRunningFlag.load())
-        ApplyBigPages(true);
-      if (g_cfg.shadowInst && !g_engineOff.load() && shadowinst::g_state.load() == 0) ApplyShadowInst();
-      if (g_cfg.shadowBatch && g_cfg.shadowInst && !g_engineOff.load() && shadowbatch::g_state.load() == 0 &&
-          !g_benchRunningFlag.load())
-        ApplyShadowBatch();
-      if (g_cfg.gbufferBatch && g_cfg.shadowInst && !g_engineOff.load() && gbbatch::g_state.load() == 0 &&
-          !g_benchRunningFlag.load())
-        ApplyGBufferBatch();
-      if (g_cfg.shadowRecorder && !g_engineOff.load() && shrec::g_state.load() == 0 && !g_benchRunningFlag.load())
-        ApplyShadowRecorder();
-      if (g_cfg.gbufferRecorder && !g_engineOff.load() && gbrec::g_state.load() == 0 && !g_benchRunningFlag.load())
-        ApplyGBufferRecorder();
-      if (g_cfg.passFlush && !g_engineOff.load() && !pflush::Ready() && !g_benchRunningFlag.load()) ApplyPassFlush();
-      if (!g_benchRunningFlag.load()) plod::Apply(g_engineOff.load() ? 0 : g_cfg.peripheralLodScale);
+      if (!po) {
+        if (g_shadowTexSkipOn.load() && (shadowtex::g_state.load() == 0 || shadowinst::g_state.load() == 0) &&
+            !g_benchRunningFlag.load())
+          ApplyShadowTexSkip();
+        if (g_cfg.bigPages && !g_engineOff.load() && bigpages::g_state.load() == 0 && allocslab::g_state.load() >= 1 &&
+            !g_benchRunningFlag.load())
+          ApplyBigPages(true);
+        if (g_cfg.shadowInst && !g_engineOff.load() && shadowinst::g_state.load() == 0) ApplyShadowInst();
+        if (g_cfg.shadowBatch && g_cfg.shadowInst && !g_engineOff.load() && shadowbatch::g_state.load() == 0 &&
+            !g_benchRunningFlag.load())
+          ApplyShadowBatch();
+        if (g_cfg.gbufferBatch && g_cfg.shadowInst && !g_engineOff.load() && gbbatch::g_state.load() == 0 &&
+            !g_benchRunningFlag.load())
+          ApplyGBufferBatch();
+        if (g_cfg.shadowRecorder && !g_engineOff.load() && shrec::g_state.load() == 0 && !g_benchRunningFlag.load())
+          ApplyShadowRecorder();
+        if (g_cfg.gbufferRecorder && !g_engineOff.load() && gbrec::g_state.load() == 0 && !g_benchRunningFlag.load())
+          ApplyGBufferRecorder();
+        if (g_cfg.passFlush && !g_engineOff.load() && !pflush::Ready() && !g_benchRunningFlag.load()) ApplyPassFlush();
+        if (!g_benchRunningFlag.load()) plod::Apply(g_engineOff.load() ? 0 : g_cfg.peripheralLodScale);
+      }
       // Fixation depth (Depth boost): not an optimization, so neither the kill
       // switch nor a benchmark turns it off.
-      scenecut::Tick(g_cfg.sceneCutReset);
-      // Cockpit at the true eye distance (R31): configured before fixdepth::Tick, which installs it.
-      fixdepth::ckipd::Configure(g_cfg.cockpitTrueIpd, g_cfg.cockpitTrueIpdLighting, g_cfg.cockpitTrueIpdForward,
-                                 g_cfg.cockpitTrueIpdLog, g_cfg.cockpitTrueIpdTestShiftMm,
-                                 g_cfg.d3dMeter || g_cfg.suiteGpuPassTiming || g_cfg.suiteGpuDedup > 0);
-      fixdepth::Tick(g_cfg.fixationDepth, g_cfg.depthGrid, g_cfg.fixationDepthVerify, g_cfg.fixationTestGaze.c_str(),
-                     g_cfg.fixationDepthDump, g_devDir.empty() ? g_dir : g_devDir, g_cfg.farDepthExport,
-                     g_cfg.farDepthSlots, g_cfg.farDepthLogProj, g_cfg.farDepthPreOverlay, g_cfg.farDepthOverlayTrace,
-                     g_cfg.farDepthPostOverlay, g_cfg.farDepthCoverageMode);
+      ConfigurePerception();  // scene cut, cockpit ipd, helmet, ownship (PerceptionOnly too)
+      if (!po) {  // [Suite] GBufferRecVerifyLive (test only): the recorder's same-frame verify while flying, logged when off
+        gbrec::g_verifyNoLatch = g_cfg.suiteGBufferRecVerifyNoLatch;
+        static bool live = false;
+        static uint64_t f0 = 0;
+        if (g_cfg.suiteGBufferRecVerifyLive != live) {
+          live = g_cfg.suiteGBufferRecVerifyLive;
+          if (live) {
+            gbrec::ResetCounters();
+            f0 = g_quadFrame.load();
+            gbrec::g_verify = true;
+          } else {
+            gbrec::g_verify = false;
+            gbrec::LogCounters("verify (live)", static_cast<double>(g_quadFrame.load() - f0));
+          }
+        }
+      }
+      TickFixationDepth();  // installs / ticks the depth features (PerceptionOnly too)
       // Split filter: waits for dx11backend and the first draw; detaches after a verify mismatch.
-      if (!g_benchRunningFlag.load() &&
+      if (!po && !g_benchRunningFlag.load() &&
           ((g_cfg.splitFilter && !g_engineOff.load() && sfilt::g_state.load() >= 0 && !sfilt::Live()) ||
            (sfilt::g_disabled.load() && sfilt::g_attached.load())))
         ApplySplitFilter(g_cfg.splitFilter && !g_engineOff.load());
       // Srv tail trim: waits for dx11backend; detaches after a verify mismatch.
-      if (!g_benchRunningFlag.load() &&
+      if (!po && !g_benchRunningFlag.load() &&
           ((g_cfg.srvTailTrim && !g_engineOff.load() && srvtrim::g_state.load() == 0) ||
            (srvtrim::g_disabled.load() && srvtrim::g_patched.load())))
         ApplySrvTailTrim(g_cfg.srvTailTrim && !g_engineOff.load());
@@ -3829,7 +4203,8 @@ DWORD WINAPI WorkerThread(void*) {
       std::wstring mflag = g_dir + L"run_motion.flag";
       std::wstring mdev = g_devDir.empty() ? std::wstring() : g_devDir + L"run_motion.flag";
       if (!mdev.empty() && GetFileAttributesW(mdev.c_str()) != INVALID_FILE_ATTRIBUTES) mflag = mdev;
-      if (!motionEnd && !g_benchRunningFlag.load() && GetFileAttributesW(mflag.c_str()) != INVALID_FILE_ATTRIBUTES) {
+      if (!po && !motionEnd && !g_benchRunningFlag.load() &&
+          GetFileAttributesW(mflag.c_str()) != INVALID_FILE_ATTRIBUTES) {
         DeleteFileW(mflag.c_str());
         InstallDiagnostics();
         motion::g_counters = g_cfg.motionCounters;
@@ -3867,7 +4242,7 @@ DWORD WINAPI WorkerThread(void*) {
     }
     // Remote trigger: creating run_suite.flag next to the DLL starts the suite.
     static ULONGLONG lastFlag = 0;
-    if (now - lastFlag >= 1000) {
+    if (!po && now - lastFlag >= 1000) {  // PerceptionOnly: no engine toggle, profile or suite trigger
       lastFlag = now;
       // Remote kill switch: toggle_engine.flag (next to the DLL or the dev ini)
       // toggles every measured optimization, like the [Hotkeys] Toggle key.
@@ -4184,6 +4559,12 @@ bool StopWorkerThreads(DWORD timeoutMs) {
 void OnMissionEvent(uint32_t event) {
   g_sceneChangeQpc.store(defrec::Qpc(), std::memory_order_release);
   g_frameHeapGen.fetch_add(1, std::memory_order_acq_rel);
+  // R32: the cockpit symbology's learned record classes name heap objects of this mission: cleared by the render
+  // thread at its next frame end; that frame moves no symbology.
+  fixdepth::ckipd::ocpu::OnMissionEvent();
+  // Option 3's ownship (CockpitTrueIpdOwnship): the locked exterior instance belongs to this mission; unlocked at
+  // the render thread's next lock step / frame end, the next one locked on its own kOwnLockFrames later.
+  fixdepth::ckipd::OwnOnMissionEvent();
   Log("payload: %s; recorder jobs in flight are dropped",
       event == 2 ? "mission load begins" : event == 3 ? "local player changed slot" : "simulation stopped");
 }
@@ -4207,6 +4588,7 @@ bool QuiesceForExit(DWORD timeoutMs) {
   d3ds::g_stopRefresher = true;
   const bool idle = StopWorkerThreads(timeoutMs);
   g_statusSink.Detach();  // stores 0: "not running" for the app's panel
+  g_dualStatusSink.Detach();
   Log("payload: quiesced for exit (%s)", idle ? "worker stopped" : "worker still busy");
   return idle;
 }
@@ -4236,6 +4618,11 @@ extern "C" __declspec(dllexport) void* DcsQvPayload_PrefetchHooks(unsigned which
 extern "C" __declspec(dllexport) void DcsQvPayload_SetStatusWord(std::atomic<uint64_t>* word) {
   g_statusSink.Attach(word);
 }
+// Optional export, called by the loader before DcsQvPayload_Start: the dual
+// camera status word (DcsQvCull_DualCameraStatus, loader_api.h).
+extern "C" __declspec(dllexport) void DcsQvPayload_SetDualCameraStatusWord(std::atomic<uint64_t>* word) {
+  g_dualStatusSink.Attach(word);
+}
 
 // Optional exports for the loader's Lua callbacks (loader_api.h).
 extern "C" __declspec(dllexport) int DcsQvPayload_Quiesce(uint32_t timeoutMs) {
@@ -4246,6 +4633,7 @@ extern "C" __declspec(dllexport) void DcsQvPayload_MissionEvent(uint32_t event) 
 extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   Log("payload: stopping");
   g_statusSink.Detach();  // stores 0; this payload never writes the word again
+  g_dualStatusSink.Detach();
   // Worker and suite out first: neither may install a hook after the
   // Shutdown calls below (bounded wait, see StopWorkerThreads).
   const bool workerIdle = StopWorkerThreads(15000);
@@ -4257,6 +4645,7 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   allocslab::Invalidate();
   posesweep::Release();  // hold and sweep off, xrLocateViews back to pass-through
   d3ds::Uninstall();
+  pdev::Uninstall();    // [General] PerceptionOnly: DX11Renderer::draw back to DCS's if the first draw never came
   srvspan::Shutdown();  // restores the ApplyShaderBlock call sites if a count was running
   srvtrim::Shutdown();  // the same two call sites back to stock if the trim was on
   uovl::Shutdown();     // NVAPI overlap probe off (its region ends at the pass end)

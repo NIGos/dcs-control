@@ -11,6 +11,9 @@
 //   Local\DcsVrDepthBoost_v1       written by the pupil shift layer at each xrLocateViews (Depth boost on), read by the
 //                                  engine module: the eye distance DCS renders that display time with and the true one,
 //                                  so the engine can render the cockpit at the true distance (its dual camera option).
+//   Local\DcsVrCockpitStereo_v1    written by the engine module every rendered frame while its dual camera runs, read by
+//                                  the layer: while fresh and active, the cockpit stays at the true eye distance whatever
+//                                  the scale, so Depth boost keeps one world scale and changes it only slowly.
 //
 // All of them are named file mappings in the DCS process's session, little-endian, #pragma pack(8). Either side may create
 // either mapping (CreateFileMapping opens an existing one); a block that was never written reads as all zero, which
@@ -39,6 +42,7 @@ constexpr const wchar_t* gaze_block_name = L"Local\\DcsVrPerceptionGaze_v1";
 constexpr const wchar_t* depth_block_name = L"Local\\DcsVrFixationDepth_v1";
 constexpr const wchar_t* grid_block_name = L"Local\\DcsVrDepthGrid_v1";
 constexpr const wchar_t* boost_block_name = L"Local\\DcsVrDepthBoost_v1";
+constexpr const wchar_t* cockpit_stereo_block_name = L"Local\\DcsVrCockpitStereo_v1";
 constexpr const char* name_suffix_variable = "DCSVR_PERCEPTION_SHM_SUFFIX";
 
 #pragma pack(push, 8)
@@ -96,8 +100,21 @@ struct BoostOut {
     float renderedIpdM;           // the eye distance of the views returned to DCS (before any pupil shift)
     float reserved[5];            // 0
 };
+// Written by the engine module once per rendered frame while its dual camera option is on (CockpitTrueIpd). The layer
+// takes it as acknowledged while qpc is less than 200 ms old (QueryPerformanceCounter, the same clock in both) and flags
+// has active: then a one-frame mis-pairing of a BoostOut record must stay invisible, so Depth boost holds one world
+// scale (its maximum) and moves towards it at DualCameraMmPerS, with no cockpit-return steps (the cockpit needs none).
+struct CockpitStereo {
+    std::uint64_t seq;            // even = stable
+    std::uint32_t flags;          // cockpit_stereo_flags below
+    std::uint32_t reserved;       // 0
+    std::uint64_t engineFrame;    // the engine's frame counter
+    std::int64_t qpc;             // QueryPerformanceCounter at the write
+};
 #pragma pack(pop)
 
+static_assert(offsetof(CockpitStereo, flags) == 8 && offsetof(CockpitStereo, engineFrame) == 16 && offsetof(CockpitStereo, qpc) == 24 &&
+              sizeof(CockpitStereo) == 32, "CockpitStereo layout");
 static_assert(offsetof(BoostOut, displayTime) == 8 && offsetof(BoostOut, flags) == 16 && offsetof(BoostOut, frame) == 20 &&
               offsetof(BoostOut, scale) == 24 && offsetof(BoostOut, baseIpdM) == 28 && offsetof(BoostOut, renderedIpdM) == 32 &&
               sizeof(BoostOut) == 56, "BoostOut layout");
@@ -127,6 +144,10 @@ constexpr std::uint32_t water = 8u;       // water in the cone (from the stencil
 constexpr std::uint32_t after_water = 16u; // depth read after the water passes (water included in the distances)
 constexpr std::uint32_t periphery = 32u;  // the gaze cone left the focus view: the same eye's periphery was sampled
 }  // namespace depth_flags
+namespace cockpit_stereo_flags {
+constexpr std::uint32_t active = 1u;      // the dual camera renders the cockpit at the true eye distance (not paused)
+constexpr std::uint32_t observing = 2u;   // observing only (CockpitTrueIpd=2): nothing corrected, the layer ignores it
+}  // namespace cockpit_stereo_flags
 namespace boost_flags {
 constexpr std::uint32_t enabled = 1u;     // Depth boost enabled and not switched off in flight
 constexpr std::uint32_t applied = 2u;     // the views of displayTime carry renderedIpdM (scale != 1)

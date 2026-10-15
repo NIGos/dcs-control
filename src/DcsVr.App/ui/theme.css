@@ -480,3 +480,35 @@ button.rail-version:hover{color:var(--soft)}
 .tour-dialog h2 { margin: 4px 0 8px; }
 .tour-dialog .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
 .tour-target { outline: 3px solid var(--accent, #4ea1ff); outline-offset: 3px; border-radius: 8px; }
+/* Feature guide: where to start, then one section per kind of feature, cards in two columns where there is room. */
+#featureGuide { display: flex; flex-direction: column; gap: 22px; }
+.guide-start { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.guide-start > div { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: linear-gradient(180deg, var(--accent-dim), transparent 70%); }
+.guide-start b { flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: #1a1a1a; font: 700 14px var(--display); }
+.guide-start h3 { margin: 2px 0 4px; font: 600 14px var(--display); color: var(--text); letter-spacing: .3px; }
+.guide-start p { margin: 0; font: 12.5px/1.45 "Segoe UI", Interface, sans-serif; color: var(--soft); }
+.guide-section-head { display: flex; align-items: baseline; gap: 12px; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.guide-section-head h2 { margin: 0; font: 600 13px var(--display); letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent); }
+.guide-section-head p { margin: 0; font-size: 12px; color: var(--muted); }
+.guide-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; }
+.guide-card { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--s0); transition: border-color .15s var(--ease), background .15s var(--ease); }
+.guide-card:hover { border-color: var(--line-strong); background: var(--s1); }
+.guide-card.on { border-color: var(--accent-dark); box-shadow: inset 3px 0 0 var(--accent); }
+.guide-card header { display: flex; align-items: center; gap: 10px; }
+.guide-icon { flex: none; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; background: var(--accent-dim); }
+.guide-icon svg { width: 18px; height: 18px; fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.guide-title { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.guide-title h3 { margin: 0; font: 600 16px var(--display); color: var(--text); letter-spacing: .3px; }
+.guide-state { font: 700 10px var(--display); letter-spacing: 1px; color: var(--green); border: 1px solid var(--green); border-radius: 3px; padding: 1px 5px; }
+.guide-impact { flex: none; font: 600 11px var(--display); letter-spacing: .6px; text-transform: uppercase; color: var(--accent); background: var(--accent-dim); border-radius: 12px; padding: 3px 10px; }
+.guide-lead { margin: 0; font: 13.5px/1.45 "Segoe UI", Interface, sans-serif; color: var(--text); }
+.guide-expect { margin: 0; font: 12.5px/1.5 "Segoe UI", Interface, sans-serif; color: var(--soft); }
+.guide-meta { display: grid; gap: 6px; margin-top: 2px; padding-top: 8px; border-top: 1px solid var(--line); }
+.guide-meta > div { display: grid; grid-template-columns: 52px 1fr; gap: 8px; align-items: baseline; }
+.guide-meta span { font: 600 10px var(--display); letter-spacing: 1px; text-transform: uppercase; color: var(--faint); }
+.guide-meta p { margin: 0; font: 12px/1.45 "Segoe UI", Interface, sans-serif; color: var(--muted); }
+.guide-card footer { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 4px; }
+.guide-key { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.guide-key kbd { font: 600 11.5px Consolas, "Cascadia Mono", monospace; color: var(--text); background: var(--s2); border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 4px; padding: 2px 6px; }
+.guide-card footer .link-button { margin-left: auto; }
+@media (max-width: 1100px) { .guide-start { grid-template-columns: 1fr; } }

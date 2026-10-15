@@ -541,6 +541,117 @@ void StaleAcrossPause() {
         "gbuffer rec pause: a start after the last entry, an unstarted job or one given to an entry is not stale");
 }
 
+// ---- Issue #3 (0.5.8): Alt+Shift+F11 off and back on in flight ----
+// Replays the field log's sequence (dcsqvcull-1.log 20:34:38.190 OFF, 5 s of frames off, 20:34:43.49 ON in the
+// middle of a frame, the recorder's first frames back on) through the code that decides it: the kill switch's
+// generation step, the frame-heap reset hook with FrameHeap=off(killswitch), the G-buffer recorder's render
+// entry and the pass's arming rule, and a re-record of a job from before the switch.
+void __fastcall NoHeapReset(void*) {}
+
+void KillSwitchReplay() {
+  using namespace gbrec;
+  RecSave save;
+  const DWORD tid0 = g_renderTid;
+  void* const rg0 = g_gbRg;
+  const bool dis0 = g_disabled.load(), sd0 = g_shutdown.load(), batch0 = gbbatch::g_on.load(),
+             chained0 = gbreccount::g_chained.load(), heapOn0 = g_frameHeapOn.load();
+  const int64_t scene0 = g_sceneChangeQpc.load();
+  const auto reset0 = frameheap::g_origReset;
+  static int rg;
+  g_renderTid = GetCurrentThreadId();
+  g_gbRg = &rg;
+  g_state = 1;
+  g_disabled = false;
+  g_shutdown = false;
+  gbbatch::g_on = false;
+  gbreccount::g_chained = false;
+  frameheap::g_origReset = &NoHeapReset;
+  g_frameHeapOn = true;
+  Job* j = NewJob();
+  uint8_t* bad = static_cast<uint8_t*>(VirtualAlloc(nullptr, 1 << 16, MEM_RESERVE, PAGE_NOACCESS));
+  if (!j || !bad) {
+    printf("SKIP kill switch replay: no job memory\n");
+  } else {
+    // Engine ON: a frame the recorder sees from its render entry; a job of that frame (its pass queued re-records).
+    g_on = true;
+    frameheap::HookReset<0>(nullptr);
+    OnRenderBody(&rg, nullptr);
+    const bool armOn = PassMayArm(false) && !PassMayArm(true);
+    j->n = 4;
+    for (uint32_t i = 0; i < 4; ++i) {
+      j->snap[i] = bad;  // reading a renderable faults: the test sees any read
+      j->cands[i] = Cand();
+      j->cands[i].item = i;
+      j->cands[i].alive = 1;
+    }
+    j->heapGen = g_frameHeapGen.load();
+    j->tStart = defrec::Qpc();
+    j->redoStop = 0;
+    // 20:34:38.190 OFF: the switch's generation step, then the recorders off (SetEngineOff's order).
+    OnEngineSwitch();
+    g_on = false;
+    g_frameHeapOn = false;  // FrameHeap=off(killswitch): the slabs stop, the reset hooks stay
+    const bool staleAtOff = HeapRecycled(*j) && shrec::SceneChanging(j->tStart);
+    // 5 s off: DCS keeps resetting its frame heap every frame; the hooks keep counting.
+    const uint64_t g1 = g_frameHeapGen.load();
+    for (int f = 0; f < 3; ++f) {
+      frameheap::HookReset<0>(nullptr);
+      OnRenderBody(&rg, nullptr);
+    }
+    const bool genMoved = g_frameHeapGen.load() == g1 + 3;
+    const bool noArmOff = !PassMayArm(false);
+    // 20:34:43.49 ON between this frame's render entry and its G-buffer passes: those passes do not arm.
+    g_on = true;
+    g_frameHeapOn = true;
+    OnEngineSwitch();
+    const bool noArmMid = !PassMayArm(false);
+    // The next frame: its entry is seen active, its passes arm again.
+    frameheap::HookReset<0>(nullptr);
+    OnRenderBody(&rg, nullptr);
+    const bool armNext = PassMayArm(false);
+    // A re-record of the job from before the switch, run late (the field fault's path, RecordRange <- RedoMain):
+    // stopped by the generation before its first read of a renderable.
+    defrec::Worker w;
+    Piece p = Piece();
+    p.candFirst = 0;
+    p.candEnd = 4;
+    p.redo = 1;
+    j->recycled = 0;
+    const bool stoppedGen = !RecordRange(w, *j, p, 0) && j->recycled.load() == 1;
+    // A re-record of this frame's job queued past its pass: stopped by redoStop, still before any read.
+    j->heapGen = g_frameHeapGen.load();
+    j->recycled = 0;
+    j->redoStop = 1;
+    const bool stoppedPass = !HeapRecycled(*j) && !RecordRange(w, *j, p, 0) && j->recycled.load() == 0;
+    // A fault that still slips in within 2 s of the switch is contained per job, even on the current generation.
+    const bool contained = RecycledFilter(EXCEPTION_ACCESS_VIOLATION, *j) == EXCEPTION_EXECUTE_HANDLER;
+    printf("     kill switch replay: generation %llu -> %llu over 3 frames off; arm on %d, off %d, mid-frame %d, next %d\n",
+           static_cast<unsigned long long>(g1), static_cast<unsigned long long>(g_frameHeapGen.load()), armOn,
+           !noArmOff, !noArmMid, armNext);
+    Check(armOn && staleAtOff && genMoved,
+          "kill switch replay: the switch makes the jobs in flight stale; the frame-heap generation keeps moving while "
+          "FrameHeap is off (the reset hooks stay; only the slabs stop)");
+    Check(noArmOff && noArmMid && armNext,
+          "kill switch replay: no pass arms a job while off, nor in the frame the switch came back on in the middle "
+          "of; the next frame's passes do");
+    Check(stoppedGen && stoppedPass && contained,
+          "kill switch replay: a late re-record stops before reading a renderable (heap generation, its pass over); a "
+          "fault near the switch is contained per job");
+    g_recycledFaults = 0;
+  }
+  if (bad) VirtualFree(bad, 0, MEM_RELEASE);
+  if (j) FreeJob(j);
+  frameheap::g_origReset = reset0;
+  g_frameHeapOn = heapOn0;
+  g_sceneChangeQpc = scene0;
+  gbreccount::g_chained = chained0;
+  gbbatch::g_on = batch0;
+  g_shutdown = sd0;
+  g_disabled = dis0;
+  g_gbRg = rg0;
+  g_renderTid = tid0;
+}
+
 // ---- gb_rec live crash 2026-10-11 20:09:55: workers reading a recycled frame heap ----
 int FaultUnder(gbrec::Job& j, volatile int* bad, bool* handled) {
   __try {
@@ -698,6 +809,68 @@ void Lines() {
   Check(!rt.empty() && !layers.empty() && !st.empty() && !envinfo::CpuBrand().empty(),
         "env: OpenXR runtime, layers, streamers and CPU are named (or 'none')");
   printf("     env: runtime %s; layers %s; streamers %s\n", rt.c_str(), layers.c_str(), st.c_str());
+}
+
+// ---- D3DKMT with a fake driver: RunningTime negative (RTX 5090 node 0), the process query unanswered ----
+LONGLONG g_fakeRun = -3028944060LL;  // 100 ns units, counting up
+bool g_fakeProcAnswers = false;
+NTSTATUS APIENTRY FakeQs(const D3DKMT_QUERYSTATISTICS* q) {
+  auto* w = const_cast<D3DKMT_QUERYSTATISTICS*>(q);
+  if (q->Type == D3DKMT_QUERYSTATISTICS_NODE) {
+    w->QueryResult.NodeInformation.GlobalInformation.RunningTime.QuadPart = g_fakeRun;
+    return 0;
+  }
+  if (q->Type == D3DKMT_QUERYSTATISTICS_PROCESS_NODE) {
+    if (!g_fakeProcAnswers) return static_cast<NTSTATUS>(0xC000000DL);
+    w->QueryResult.ProcessNodeInformation.RunningTime.QuadPart = g_fakeRun / 4;
+    return 0;
+  }
+  return static_cast<NTSTATUS>(0xC000000DL);
+}
+void KmtFake() {
+  perfmon::g_kmt = perfmon::Kmt();
+  perfmon::g_kmt.qs = &FakeQs;
+  perfmon::g_kmt.ok = true;
+  perfmon::g_kmt.nodes = {0};
+  perfmon::g_kmt.lastAll.assign(1, 0), perfmon::g_kmt.lastProc.assign(1, 0);
+  perfmon::g_kmt.haveAll.assign(1, 0), perfmon::g_kmt.haveProc.assign(1, 0);
+  g_fakeProcAnswers = false;
+  double a = -1, p = -1;
+  // A negative counter that counts up: the first sample primes, the next ones are percentages (was: never valid,
+  // -1 doubled as "no previous sample").
+  const bool first = perfmon::KmtSample(&a, &p);
+  bool later = true;
+  int na = 0;
+  for (int i = 0; i < 2 * perfmon::kKmtRetry + 2; ++i) {
+    Sleep(15);
+    g_fakeRun += 20000;  // 2 ms busy per sample
+    double a2 = -1, p2 = -1;
+    const bool ok = perfmon::KmtSample(&a2, &p2);
+    later = later && ok && a2 > 0 && a2 <= 100;
+    na += p2 < 0;
+  }
+  // The process query never answered with either handle kind: one switch, then n/a without more switching.
+  const uint32_t sw = perfmon::g_kmt.switches;
+  const bool unsupported = perfmon::g_kmt.procUnsupported;
+  for (int i = 0; i < 3 * perfmon::kKmtRetry; ++i) {
+    g_fakeRun += 20000;
+    perfmon::KmtSample(&a, &p);
+  }
+  const bool noMoreSwitches = perfmon::g_kmt.switches == sw;
+  // The driver answers again: picked up at the next probe (once per kKmtProbe samples), then a share.
+  g_fakeProcAnswers = true;
+  bool back = false;
+  for (uint32_t i = 0; i < perfmon::kKmtProbe + 3 && !back; ++i) {
+    Sleep(1);
+    g_fakeRun += 20000;
+    back = perfmon::KmtSample(&a, &p) && p >= 0;
+  }
+  Check(!first && later && na == 2 * perfmon::kKmtRetry + 2 && sw == 1 && unsupported && noMoreSwitches && back &&
+            !perfmon::g_kmt.procUnsupported,
+        "gpu busy (D3DKMT, fake driver): a negative RunningTime that counts up gives a busy percentage (a valid "
+        "flag, not a -1 sentinel); a process query that never answers (0xC000000D, both handles) degrades to n/a "
+        "without more switching and recovers when the driver answers");
+  perfmon::g_kmt = perfmon::Kmt();
 }
 
 // ---- D3DKMT GPU busy on this machine's first adapter (read-only statistics) ----
@@ -1019,11 +1192,13 @@ void Run() {
   FpsProof();
   ApplyPath();
   StaleAcrossPause();
+  KillSwitchReplay();
   RecycledHeap();
   StatusBits();
   Lines();
   LinesRun();
   CapTests();
+  KmtFake();
   GpuBusy();
 }
 

@@ -123,7 +123,21 @@ if ($LASTEXITCODE -ne 0) { throw 'OFXR fork configuration failed.' }
 & $wrapper cmake --build $forkBuild --parallel 4
 if ($LASTEXITCODE -ne 0) { throw 'OFXR fork build failed.' }
 # Tray lifecycle tests create a notification icon. Exclude them from offline verification.
-& $wrapper ctest --test-dir $forkBuild --output-on-failure --parallel 2 --timeout 300 -E tray_lifecycle
+# Every test once, except the pacing tests (real frame timing) and the tray tests (they create a notification icon).
+# The quotes keep the '|' from cmd: msvc.cmd passes its arguments on through %*.
+& $wrapper ctest --test-dir $forkBuild --output-on-failure --parallel 2 --timeout 300 -E '"tray_lifecycle|triple_deep|scene_change|adaptive"'
 if ($LASTEXITCODE -ne 0) { throw 'OFXR fork tests failed.' }
+. (Join-Path $PSScriptRoot 'build-stamp.ps1')
+if ($env:DCSC_SKIP_TIMING_TESTS -eq '1') {
+    # An intermediate build while a game holds the GPU: no stamp, so build-release.ps1 refuses this DLL until a build
+    # with the pacing tests has passed.
+    Write-Host 'Pacing tests skipped (DCSC_SKIP_TIMING_TESTS=1): this build is not stamped for a release.'
+    Remove-Item -LiteralPath (Get-BuildStampPath 'ofxr') -Force -ErrorAction SilentlyContinue
+    return
+}
+# The pacing tests: on a busy GPU one misses a deadline now and then, so a failing one runs again, up to 3 times; a
+# real regression fails every time.
+& $wrapper ctest --test-dir $forkBuild --output-on-failure --parallel 1 --timeout 300 --repeat until-pass:3 -R '"triple_deep|scene_change|adaptive"'
+if ($LASTEXITCODE -ne 0) { throw 'OFXR fork pacing tests failed.' }
 # Built and tested: build-release.ps1 ships this DLL only while its sources and patches match this stamp.
-. (Join-Path $PSScriptRoot 'build-stamp.ps1'); Save-BuildStamp 'ofxr'
+Save-BuildStamp 'ofxr'

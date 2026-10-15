@@ -63,6 +63,9 @@ public static class ConfigurationWriters
         ; DcsQvCull re-reads this file every second while DCS runs.
 
         [General]
+        ; Installed for Depth boost alone (Engine Optimizations off): only the perception features run, none of the
+        ; optimizations, the test suite or the engine keys.
+        PerceptionOnly={(p.EngineOptimizations ? 0 : 1)}
         Diagnostics={(p.EngineDiagnosticHooks ? 1 : 0)}
         Beeps={(p.EngineBeeps ? 1 : 0)}
         LowPowerPacer=0
@@ -186,9 +189,8 @@ public static class ConfigurationWriters
         ; Depth boost's scene depth: DCS's depth buffer sampled around the gaze and published for the pupil shift layer
         ; (docs/FIXATION_DEPTH.md). On only while the profile uses Depth boost.
         FixationDepth={(p.UsesFixationDepth ? 1 : 0)}
-        ; Depth boost's predictive transition: a coarse 32 x 32 depth grid of the whole view, where a saccade's landing is
-        ; looked up. On with the scene depth, so the in-flight key can switch to Predictive.
-        DepthGrid={(p.UsesDepthGrid ? 1 : 0)}
+        ; The predictive transition's depth grid: unused with the dual camera (always gradual), so not captured.
+        DepthGrid=0
         ; A camera cut (F1/F2/F10, respawn, mission load) resets the bundled Quad Views' periphery history.
         SceneCutReset=1
         FixationDepthVerify=0
@@ -202,6 +204,16 @@ public static class ConfigurationWriters
         ; draw it after DLSS, before the tonemap); the module falls back by itself when that image is not found.
         FarDepthCoverageMode=hdr
         FarDepthLogProj=0
+        ; Depth boost's dual camera: the cockpit, its lighting and its displays at the true eye distance while the world
+        ; is rendered boosted; the HUD stays at DCS's camera. Its in-flight pause key is a developer key (off).
+        CockpitTrueIpd={(p.UsesDepthBoost ? 1 : 0)}
+        CockpitTrueIpdLighting=1
+        CockpitTrueIpdForward=1
+        CockpitTrueIpdHelmet=1
+        CockpitTrueIpdOverlays=1
+        CockpitTrueIpdOverlayPath=cpu
+        CockpitTrueIpdOwnship={(p.UsesDepthBoost && p.OwnAircraftTrueDepth ? 2 : 0)}
+        CockpitTrueIpdToggle=0:0
 
         [Bench]
         Blocks=24
@@ -297,8 +309,8 @@ public static class ConfigurationWriters
 
         [Dev]
         ; Developer mode: a payload built elsewhere, hot-reloaded, and an ini that replaces this one. Empty: off.
-        PayloadPath={(p.EngineDevMode ? p.EngineDevPayloadPath?.Trim() : null)}
-        IniPath={(p.EngineDevMode ? p.EngineDevIniPath?.Trim() : null)}
+        PayloadPath={(p.EngineOptimizations && p.EngineDevMode ? p.EngineDevPayloadPath?.Trim() : null)}
+        IniPath={(p.EngineOptimizations && p.EngineDevMode ? p.EngineDevIniPath?.Trim() : null)}
 
         """;
 
@@ -380,9 +392,9 @@ public static class ConfigurationWriters
         ; from Pimax PVR's gaze (sampled at PredictPollHz) and the engine's depth grid, and one step of at most
         ; PredictMaxStepMm (and PredictDisparityDeg of disparity at the landing) is made in flight; the rest follows the
         ; rates. Saccades predicted shorter than PredictMinDeg, or with less than PredictLeadFrames frames left, use gradual.
-        Transition={(p.DepthBoostTransition == DepthBoostTransition.Predictive ? "predictive" : "gradual")}
-        ; In-flight switch between the two, virtual-key:modifiers; one beep gradual, two beeps predictive; 0:0 off.
-        TransitionToggle={NeuralHotkeys.Environment(p.DepthBoostTransitionKey, NeuralHotkeys.DepthTransitionDefault)}
+        ; With the dual camera the scale only moves smoothly: the transition is gradual and has no in-flight switch.
+        Transition=gradual
+        TransitionToggle=0:0
         PredictMinDeg=8
         PredictMaxStepMm=12
         PredictDisparityDeg=0.4

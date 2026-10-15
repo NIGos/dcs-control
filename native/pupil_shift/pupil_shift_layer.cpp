@@ -21,7 +21,6 @@
 // PupilShift_Status() reports the state to the in-headset diagnostic panel (OFXR).
 #define XR_USE_PLATFORM_WIN32
 #include <windows.h>
-#include <share.h>
 #include <openxr/openxr.h>
 #include <openxr/openxr_loader_negotiation.h>
 
@@ -31,6 +30,7 @@
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <share.h>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -155,6 +155,21 @@ dcsvr_perception::SharedBlock<dcsvr_perception::DepthGrid> grid_block;
 // Local\DcsVrDepthBoost_v1: the eye distance of each display time, for the engine's dual camera (perception_shm.h).
 dcsvr_perception::SharedBlock<dcsvr_perception::BoostOut> boost_block;
 XrTime boost_out_time{};
+unsigned boost_retry{};
+float boost_last_base{};  // the base distance of the last record (for the final one at the session's end)
+// Local\DcsVrCockpitStereo_v1: the engine's acknowledgement that its dual camera keeps the cockpit at the true eye
+// distance (perception_shm.h). While fresh, Depth boost holds one world scale (cockpit_stereo_acked_locked).
+dcsvr_perception::SharedBlock<dcsvr_perception::CockpitStereo> stereo_block;
+unsigned stereo_retry{};
+bool stereo_acked{};
+std::int64_t stereo_last_ok{};  // QPC of the last active record
+float dual_far_target{1.0f};    // the last far fixation's target while the dual camera is acknowledged
+// [DepthBoost] Legacy=1 (diagnostics only): the gaze-driven Depth boost without the engine's dual camera, the cockpit
+// returning to x1 in saccades (PERCEPTION.md "Stepped"). Default 0: Depth boost only with the dual camera.
+bool depth_legacy{};
+int depth_path_logged{-1};  // the path last logged: 0 waiting (x1), 1 dual camera, 2 legacy
+unsigned dual_log_frames{};
+float dual_camera_mm_per_s{20.0f};
 std::uint32_t boost_out_frames{};
 dcsvr_perception::DepthGrid grid{};
 std::uint64_t grid_seq{}, grid_arrival{};
@@ -264,6 +279,9 @@ void reload_settings_locked(bool force) {
     d.fixation_drift_mm_per_s = std::clamp(ini_float(L"DriftMmPerS", 0.5f, path, L"DepthBoost"), 0.0f, 5.0f);
     d.step_down_mm = std::clamp(ini_float(L"StepDownMm", 8.0f, path, L"DepthBoost"), 0.0f, 40.0f);
     d.full_near_return = ini_float(L"FullNearReturn", 1, path, L"DepthBoost") != 0;
+    // With the engine's dual camera acknowledged: the one world scale is approached at this rate, both ways.
+    dual_camera_mm_per_s = std::clamp(ini_float(L"DualCameraMmPerS", 20.0f, path, L"DepthBoost"), 2.0f, 60.0f);
+    depth_legacy = ini_float(L"Legacy", 0, path, L"DepthBoost") != 0;
     d.near_return_mm_per_s = std::clamp(ini_float(L"NearReturnMmPerS", 80.0f, path, L"DepthBoost"), 5.0f, 400.0f);
     d.recover_ms = std::clamp(ini_float(L"RecoverMs", 800.0f, path, L"DepthBoost"), 200.0f, 3000.0f);
     d.hold_ms = std::clamp(ini_float(L"HoldMs", 500.0f, path, L"DepthBoost"), 0.0f, 2000.0f);
@@ -960,14 +978,53 @@ DepthMatcher::Read read_depth_block_locked() {
     return r;
 }
 
+// The engine's dual camera acknowledged (fresh and active): read once per frame, the mapping opened lazily (about once a
+// second until it exists; the engine may start after the layer). Logged when it starts and stops.
+bool cockpit_stereo_acked_locked() {
+    if (!stereo_block.get() && stereo_retry++ % 90 == 0) stereo_block.open(dcsvr_perception::cockpit_stereo_block_name, shm_suffix);
+    LARGE_INTEGER now{}, frequency{};
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&frequency);
+    const auto seconds = [&](std::int64_t ticks) { return static_cast<double>(ticks) / static_cast<double>(frequency.QuadPart); };
+    // Fresh: written less than 200 ms ago. Active and fresh enters (or keeps) the mode; an explicit stop (fresh, not
+    // active, not observing: the key's pause or the option turned off) leaves it at once; anything else (no block, a
+    // stale record, a dropped frame) leaves it only once nothing active came for 300 ms, so it never flickers.
+    dcsvr_perception::CockpitStereo cs{};
+    const bool read = stereo_block.get() && dcsvr_perception::seqlock_read(stereo_block.get(), cs);
+    const double age = read ? seconds(now.QuadPart - cs.qpc) : 1e9;
+    const bool fresh = age >= -0.05 && age < 0.2;
+    const bool observing = (cs.flags & dcsvr_perception::cockpit_stereo_flags::observing) != 0;
+    const bool active = fresh && (cs.flags & dcsvr_perception::cockpit_stereo_flags::active) && !observing;
+    bool acked = stereo_acked;
+    if (active) {
+        acked = true;
+        stereo_last_ok = now.QuadPart;
+    } else if (fresh && !observing) {
+        acked = false;
+    } else if (stereo_acked && seconds(now.QuadPart - stereo_last_ok) > 0.3) {
+        acked = false;
+    } else if (observing) {
+        acked = false;
+    }
+    if (acked != stereo_acked) {
+        if (acked) log("depth: engine dual camera acknowledged: one world scale, changed at most %.0f mm/s\n", dual_camera_mm_per_s);
+        else log("depth: engine dual camera gone (%s): the usual cockpit return\n", fresh && !observing ? "stopped" : observing ? "observing only" : "no fresh record for 300 ms");
+        stereo_acked = acked;
+    }
+    return acked;
+}
+
 // BoostOut for a display time, once per new time, while Depth boost is enabled (perception_shm.h): the true and the
 // rendered eye distance, for the engine's dual camera (the cockpit at the true distance).
 void write_boost_out_locked(XrTime time, float base_ipd_m, float rendered_ipd_m) {
-    if (!depth_settings.enabled || time <= boost_out_time) return;
+    // Once the block exists, a record for every display time, Depth boost enabled or not (then flags 0, scale 1): the
+    // engine never keeps an earlier frame's distance. It is only created while Depth boost is enabled.
+    if (time <= boost_out_time || (!depth_settings.enabled && !boost_block.get())) return;
     if (!boost_block.get()) {
-        if (shm_retry % 90 != 0) return;
+        // Its own retry count (about once a second): open_blocks_locked's stops counting once its two blocks are open.
+        if (boost_retry++ % 90 != 0) return;
         if (!boost_block.open(dcsvr_perception::boost_block_name, shm_suffix)) return;
-        log("perception: shared memory %ls%ls open\n", dcsvr_perception::boost_block_name, shm_suffix);
+        log("perception: shared memory %ls%ls created\n", dcsvr_perception::boost_block_name, shm_suffix);
     }
     boost_out_time = time;
     dcsvr_perception::BoostOut out{};
@@ -978,6 +1035,19 @@ void write_boost_out_locked(XrTime time, float base_ipd_m, float rendered_ipd_m)
     out.scale = base_ipd_m > 0.001f ? rendered_ipd_m / base_ipd_m : 1.0f;
     out.flags = (depth_active() ? dcsvr_perception::boost_flags::enabled : 0u) |
         (std::fabs(out.scale - 1.0f) > 1e-4f ? dcsvr_perception::boost_flags::applied : 0u);
+    dcsvr_perception::seqlock_write(boost_block.get(), out);
+    boost_last_base = base_ipd_m;
+}
+
+// The session or instance ends: a last record with nothing applied (flags 0, scale 1, rendered = base), for the display
+// time after the last one written, so the engine stops correcting.
+void write_boost_stop_locked() {
+    if (!boost_block.get() || !boost_out_time) return;
+    dcsvr_perception::BoostOut out{};
+    out.displayTime = ++boost_out_time;
+    out.frame = ++boost_out_frames;
+    out.baseIpdM = out.renderedIpdM = boost_last_base;
+    out.scale = 1.0f;
     dcsvr_perception::seqlock_write(boost_block.get(), out);
 }
 
@@ -1180,7 +1250,11 @@ void update_depth_locked(const XrView* views, std::uint32_t n, const EyeGazes& g
     // The scene depth for this gaze, from the engine module.
     const DepthMatcher::State scene = matcher.evaluate(read_depth_block_locked(), display_frames, cyclopean, fixation.valid());
     if (scene == DepthMatcher::State::fresh) last_fresh_scene_frame = display_frames;
-    const float cap = depth_boost_cap(depth_settings, base_ipd * 1000.0f);
+    // The engine's dual camera acknowledged (perception_shm.h CockpitStereo): the cockpit stays at the true eyes, so no
+    // fast return is ever needed and the cap is MaxScale itself (not limited by DownMmPerS x RecoverMs).
+    const bool dual = cockpit_stereo_acked_locked();
+    const float cap = dual ? std::clamp(std::isfinite(depth_settings.max_scale) ? depth_settings.max_scale : 1.0f, 1.0f, 2.0f)
+                           : depth_boost_cap(depth_settings, base_ipd * 1000.0f);
     FixationDecider::Input fi;
     fi.dt = dt;
     fi.gaze_valid = fixation.valid();
@@ -1233,7 +1307,69 @@ void update_depth_locked(const XrView* views, std::uint32_t n, const EyeGazes& g
     in.no_saccade_step = po.no_saccade_step;
     if (po.no_saccade_step) { in.saccade_started = false; in.landing_step = false; }
     const float scale_before = depth.scale();
-    depth.step(in, depth_settings);
+    if (dual) {
+        // The engine keeps the cockpit at the true eye distance. The world's scale still follows the gaze (the usual far
+        // target and curve), but a cockpit fixation keeps the last far target (the world does not breathe at every glance
+        // at the instruments), and the scale moves only smoothly, both ways, at DualCameraMmPerS: no saccade or landing
+        // steps, no predictive jumps, so a one-frame mis-pairing in the engine stays under 0.25 mm.
+        if (decider.state() == Fixation::far_ && std::isfinite(decider.target())) dual_far_target = decider.target();
+        DepthBoostSettings slow = depth_settings;
+        slow.stepped = false;
+        slow.full_near_return = false;
+        slow.saccade_step_mm = 0;
+        slow.up_mm_per_s = slow.down_mm_per_s = dual_camera_mm_per_s;
+        slow.recover_ms = 1e6f;  // the cap is MaxScale (depth_boost_cap)
+        slow.hold_ms = 1e6f;     // a lost gaze holds the scale
+        // Equal steps on every frame: the mean frame period, not this display time's delta (it alternates with the
+        // runtime's pacing, and the world's apparent speed then jitters into DLSS's history along cockpit edges).
+        in.dt = std::clamp(frame_period_s, 0.002f, 0.05f);
+        in.gaze_valid = true;
+        in.settled = true;
+        in.target = std::clamp(dual_far_target, 1.0f, cap);
+        in.far_rates = true;
+        in.saccade = false;
+        in.saccade_started = false;
+        in.landing_window = false;
+        in.landing_step = false;
+        in.jump_mm = std::nanf("");
+        in.hold = 0;
+        depth.step(in, slow);
+        if (++dual_log_frames % 90 == 1)
+            log("depth: dual camera: target %.3f (far %.3f, state %s) scale %.3f, cap %.2f\n", in.target, dual_far_target,
+                decider.state() == Fixation::far_ ? "far" : decider.state() == Fixation::near_ ? "near" : "unknown", depth.scale(), cap);
+    } else if (depth_legacy) {
+        dual_far_target = depth.scale();  // entering the dual mode starts from where the scale is
+        depth.step(in, depth_settings);
+    } else {
+        // Depth boost ships with the engine's dual camera only: without its fresh acknowledgement (the engine not
+        // running it, paused, or gone) the eye distance holds or slides back to x1 at DualCameraMmPerS, equal steps.
+        DepthBoostSettings slow = depth_settings;
+        slow.stepped = false;
+        slow.full_near_return = false;
+        slow.saccade_step_mm = 0;
+        slow.up_mm_per_s = slow.down_mm_per_s = dual_camera_mm_per_s;
+        slow.recover_ms = 1e6f;
+        slow.hold_ms = 1e6f;
+        in.dt = std::clamp(frame_period_s, 0.002f, 0.05f);
+        in.gaze_valid = true;
+        in.settled = true;
+        in.target = 1.0f;
+        in.far_rates = true;
+        in.saccade = false;
+        in.saccade_started = false;
+        in.landing_window = false;
+        in.landing_step = false;
+        in.jump_mm = std::nanf("");
+        in.hold = 0;
+        depth.step(in, slow);
+        dual_far_target = depth.scale();
+    }
+    if (const int path = dual ? 1 : depth_legacy ? 2 : 0; path != depth_path_logged) {
+        log("depth: path %s\n", path == 1 ? "dual camera (the engine keeps the cockpit at the true eye distance)" :
+            path == 2 ? "legacy (Legacy=1: gaze-driven, the cockpit returns to x1 in saccades)" :
+            "waiting for the engine's dual camera: x1 (slides back at DualCameraMmPerS)");
+        depth_path_logged = path;
+    }
     if (const auto& dd = gate.decision(); new_prediction && (dd.made || depth_trace)) {
         // One line per step (and per prediction with Trace=1): size and timing against the predicted saccade.
         const auto& p = dd.p;
@@ -1460,6 +1596,10 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_CreateSession(XrInstance instance, const XrS
 
 XRAPI_ATTR XrResult XRAPI_CALL hook_DestroySession(XrSession session) {
     {
+        std::lock_guard lock(mutex);
+        write_boost_stop_locked();
+    }
+    {
         std::lock_guard lock(eye_mutex);
         if (session == eye_state.session) {  // the space goes with the session; the binding stays with the instance
             eye_state.session = XR_NULL_HANDLE;
@@ -1480,6 +1620,7 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_DestroyInstance(XrInstance instance) {
         {
             std::lock_guard lock(mutex);
             qv_checked_late = false;
+            write_boost_stop_locked();
         }
         pvr_hook::restore();
     }
@@ -1906,6 +2047,12 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_CreateApiLayerInstance(const XrInstanceCreat
             }
             update_predict_wanted_locked();
             if (!GetEnvironmentVariableW(L"DCSVR_PERCEPTION_SHM_SUFFIX", shm_suffix, 64) || shm_suffix[0] == 0) shm_suffix[0] = 0;
+            // The engine's dual camera opens Local\DcsVrDepthBoost_v1 to read: created here, at instance creation, whenever
+            // Depth boost is enabled (write_boost_out_locked retries about once a second if this fails).
+            if (depth_settings.enabled && !boost_block.get()) {
+                const bool created = boost_block.open(dcsvr_perception::boost_block_name, shm_suffix);
+                log("perception: shared memory %ls%ls %s\n", dcsvr_perception::boost_block_name, shm_suffix, created ? "created" : "FAILED");
+            }
         }
         log("eye gaze: XR_EXT_eye_gaze_interaction %s (runtime %s)\n",
             app_enabled ? "enabled by the application" : inject ? "added by the layer" : refused ? "refused by the runtime" : "not enabled",
@@ -1953,6 +2100,7 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID reserved) {
     } else if (reason == DLL_PROCESS_DETACH && reserved == nullptr) {  // at process exit the CRT is going away too
         gaze_block.close();
         boost_block.close();
+        stereo_block.close();
         depth_block.close();
         grid_block.close();
         if (log_file) std::fclose(log_file);

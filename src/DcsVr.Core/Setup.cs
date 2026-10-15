@@ -62,7 +62,7 @@ public static class Readiness
         var manifest = profile.RuntimeManifestPath ?? (profile.Runtime == RuntimeKind.Pimax ? inventory.PimaxRuntime : inventory.SteamVrRuntime);
         if (!profile.Desktop) try
         {
-            using var json = JsonDocument.Parse(File.ReadAllText(manifest ?? throw new InvalidDataException("Runtime manifest was not detected.")));
+            using var json = JsonDocument.Parse(File.ReadAllText(manifest ?? throw new InvalidDataException("The headset's OpenXR runtime was not found. Start Pimax Play (or SteamVR) once, then press Rescan this PC.")));
             var relative = json.RootElement.GetProperty("runtime").GetProperty("library_path").GetString();
             var dll = Path.GetFullPath(relative ?? throw new InvalidDataException("Runtime library path is empty."), Path.GetDirectoryName(manifest)!);
             if (!NativeBinary.IsX64(dll)) throw new InvalidDataException("The selected runtime library is missing or is not x64: " + dll);
@@ -105,9 +105,9 @@ public static class Readiness
         if (profile.Desktop)
             Add("desktop", CheckState.Manual, "Optimizations only", "DCS runs as you set it up, on the monitor or with another headset, with your own VR settings and headset software. DCS Control adds only Engine Optimizations, CPU Boost and the flight helpers you turned on.");
         else
-        Add("headset", CheckState.Manual, "Headset and tracking", "Connect your headset. Before launching DCS, check the image, IPD, tracking and resolution in Pimax Play (or SteamVR).", profile.Runtime == RuntimeKind.Pimax ? "pimax" : "sboys");
+        Add("headset", CheckState.Manual, "Headset and tracking", "Connect your headset. Before launching DCS, check the image, eye distance, tracking and resolution in Pimax Play (or SteamVR).", profile.Runtime == RuntimeKind.Pimax ? "pimax" : "sboys");
         if (profile.Gaze == GazeMode.EyeTracked && profile.QuadViews != QuadProvider.None)
-            Add("gaze-live", CheckState.Manual, "Eye calibration and focus motion", "Turn on and calibrate eye tracking in Pimax Play. Then check in the headset that the focus area follows your eyes.", "gaze");
+            Add("gaze-live", CheckState.Manual, "Eye tracking calibration", "Turn on and calibrate eye tracking in Pimax Play. Then check in the headset that the focus area follows your eyes.", "gaze");
         if (!profile.Desktop)
         Add("pipeline-live", CheckState.Manual, "Image quality in the headset", "In the first flight, check both eyes, cockpit text, the HUD, head motion, latency and the edge of the focus area. If something looks wrong, turn the features on one at a time to find which one causes it.");
         try
