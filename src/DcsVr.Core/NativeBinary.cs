@@ -40,9 +40,13 @@ public static class NativeBinary
         catch (CryptographicException) { return false; }
     }
     /// <summary>The DLSS 5 runtime checks used for deployment and for the saved copy: the bytes are written to a private
-    /// file, so the checked file cannot be swapped between the checks and their use, then they must be an x64 PE with a
-    /// verifiable signature from organisation NVIDIA Corporation and the DLSS-NR 310.8 contract.</summary>
-    public static BinaryInspection VerifyNeuralRuntime(byte[] bytes)
+    /// file, so the checked file cannot be swapped between the checks and their use, then they must be an x64 PE with the
+    /// DLSS-NR 310.8 contract and a verifiable signature from organisation NVIDIA Corporation. With
+    /// <paramref name="allowModified"/> (a file the user selected) NVIDIA's runtime changed by a compatibility patch is
+    /// accepted too: the patches that run it on RTX 20, 30 and 40 cards rewrite its GPU code, which breaks NVIDIA's
+    /// signature. Such a file must carry no signature or NVIDIA's (now invalid) one; a file validly signed by anyone, or
+    /// signed by anyone but NVIDIA, is not NVIDIA's runtime and is refused.</summary>
+    public static BinaryInspection VerifyNeuralRuntime(byte[] bytes, bool allowModified = false)
     {
         var privateCopy = Path.Combine(Path.GetTempPath(), "dcsvr-" + Guid.NewGuid().ToString("N"), "nvngx_dlssnr.dll");
         BinaryInspection verification;
@@ -53,12 +57,22 @@ public static class NativeBinary
         }
         finally { try { Directory.Delete(Path.GetDirectoryName(privateCopy)!, recursive: true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
         if (verification.Sha256 != Hashing.BytesSha256(bytes)) throw new InvalidDataException("The DLSS 5 runtime changed during verification. Select it again.");
-        if (!verification.IsX64 || !verification.TrustedSignature || !IsNvidiaSigner(verification.Signer))
-            throw new InvalidDataException("The DLSS 5 runtime must be x64 with a verifiable NVIDIA signature.");
+        if (!verification.IsX64) throw new InvalidDataException("The DLSS 5 runtime must be the x64 nvngx_dlssnr.dll.");
         if (!SupportsNeuralContract(verification.Version))
             throw new InvalidDataException($"This renderer supports the DLSS-NR 310.8 contract; selected version is {verification.Version ?? "unknown"}.");
+        if (IsModifiedRuntime(verification))
+        {
+            var foreign = verification.TrustedSignature || (verification.Signer is not null && !IsNvidiaSigner(verification.Signer));
+            if (!allowModified || foreign)
+                throw new InvalidDataException(allowModified
+                    ? "This is not NVIDIA's nvngx_dlssnr.dll: it is signed by someone else."
+                    : "The DLSS 5 runtime must be x64 with a verifiable NVIDIA signature.");
+        }
         return verification;
     }
+
+    /// <summary>True for a runtime without a valid NVIDIA signature: NVIDIA's file changed by a compatibility patch.</summary>
+    public static bool IsModifiedRuntime(BinaryInspection verification) => !(verification.TrustedSignature && IsNvidiaSigner(verification.Signer));
     public static BinaryInspection Inspect(string path)
     {
         var bytes = File.ReadAllBytes(path);

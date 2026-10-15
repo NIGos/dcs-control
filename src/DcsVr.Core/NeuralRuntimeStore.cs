@@ -7,12 +7,13 @@ namespace DcsVr.Core;
 /// <param name="OriginalPath">The file the user selected or Detect found.</param>
 /// <param name="Forgotten">The user chose Forget while an applied profile was installed from this copy: new drafts no
 /// longer use it, and the file is deleted when that profile is restored.</param>
-public sealed record SavedNeuralRuntime(string Path, string? Version, string Sha256, long Bytes, string OriginalPath, DateTimeOffset SavedAt, bool Forgotten = false);
+/// <param name="Modified">NVIDIA's runtime changed by a compatibility patch (RTX 20, 30, 40): no valid NVIDIA signature.</param>
+public sealed record SavedNeuralRuntime(string Path, string? Version, string Sha256, long Bytes, string OriginalPath, DateTimeOffset SavedAt, bool Forgotten = false, bool Modified = false);
 
 /// <summary>
 /// The app's own copy of the user-supplied DLSS 5 runtime (state root\runtimes\nvngx_dlssnr.dll), so the file is selected
-/// once. Only a file that passes the deployment checks (x64, NVIDIA Corporation signature, DLSS-NR 310.8) is saved; only
-/// the latest is kept. A profile without a runtime path, or with a path that no longer exists, uses this copy.
+/// once. Only a file that passes the deployment checks (x64, DLSS-NR 310.8, NVIDIA Corporation signature or NVIDIA's file
+/// changed by a compatibility patch) is saved; only the latest is kept. A profile without a runtime path, or with a path that no longer exists, uses this copy.
 /// </summary>
 public sealed class NeuralRuntimeStore(string directory)
 {
@@ -52,10 +53,11 @@ public sealed class NeuralRuntimeStore(string directory)
             if (existing.Forgotten) { existing = existing with { Forgotten = false }; AtomicFile.WriteText(InfoPath, JsonData.Serialize(existing)); }
             return existing;
         }
-        var verification = NativeBinary.VerifyNeuralRuntime(bytes);
+        // The user selected this file: NVIDIA's runtime patched for RTX 20, 30 and 40 cards is accepted and recorded as such.
+        var verification = NativeBinary.VerifyNeuralRuntime(bytes, allowModified: true);
         // NVIDIA writes the version as "310,8,0,0"; it is recorded and shown as 310.8.0.0.
         var version = verification.Version?.Replace(" ", "").Replace(',', '.');
-        var saved = new SavedNeuralRuntime(DllPath, version, sha, bytes.LongLength, original, DateTimeOffset.UtcNow);
+        var saved = new SavedNeuralRuntime(DllPath, version, sha, bytes.LongLength, original, DateTimeOffset.UtcNow, Modified: NativeBinary.IsModifiedRuntime(verification));
         // Each file is replaced atomically; the record is written last, so a copy without a matching record is never used.
         try { File.Delete(InfoPath); } catch (DirectoryNotFoundException) { }
         AtomicFile.Write(DllPath, bytes);

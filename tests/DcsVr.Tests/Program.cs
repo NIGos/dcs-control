@@ -2690,6 +2690,33 @@ Test("Saved runtime: a selected signed runtime is saved once and used by drafts 
     Require(service.ForgetNeuralRuntime() == false && service.SavedRuntime.Read() is null && !File.Exists(saved.Path), "Forget deletes the copy when nothing applied uses it");
     Require(service.ResolveNeuralRuntime(stereoNeural).NeuralRuntimePath is null, "Forgotten copy no longer used");
 });
+Test("Saved runtime: NVIDIA's runtime changed by a compatibility patch is accepted when selected, never by Detect", () =>
+{
+    if (RealNeuralRuntime() is not { } real) { Console.WriteLine("SKIP patched runtime: no signed nvngx_dlssnr.dll (set DCSVR_TEST_NEURAL_PATH)"); return; }
+    // The RTX 20/30/40 patches rewrite GPU code inside NVIDIA's file: version and certificate stay, the signature breaks.
+    var patched = PathPolicy.UnderRoot(root, "saved-runtime/patched/source/nvngx_dlssnr.dll"); Directory.CreateDirectory(Path.GetDirectoryName(patched)!);
+    var bytes = File.ReadAllBytes(real); bytes[bytes.Length / 2] ^= 0xFF; File.WriteAllBytes(patched, bytes);
+    var inspection = NativeBinary.Inspect(patched);
+    Require(!inspection.TrustedSignature && NativeBinary.SupportsNeuralContract(inspection.Version) && NativeBinary.IsModifiedRuntime(inspection), "Fixture: signature broken, version kept");
+    Throws<InvalidDataException>(() => NativeBinary.VerifyNeuralRuntime(bytes)); // The strict check refuses it.
+    Require(NativeBinary.VerifyNeuralRuntime(bytes, allowModified: true).Sha256 == Hashing.BytesSha256(bytes), "Accepted for a file the user selected");
+    Require(!NativeBinary.IsModifiedRuntime(NativeBinary.Inspect(real)), "The signed original is not modified");
+    var (service, inventory, _) = NeuralFixture("patched");
+    var saved = service.RememberNeuralRuntime(patched);
+    Require(saved.Modified && saved.Sha256 == Hashing.BytesSha256(bytes) && NativeBinary.SupportsNeuralContract(saved.Version), "Saved and recorded as modified");
+    Require(JsonData.Deserialize<SavedNeuralRuntime>(File.ReadAllText(service.SavedRuntime.InfoPath)).Modified, "Recorded in the JSON");
+    var deployed = service.Preview(stereoNeural, inventory).Files.Single(f => f.Path.EndsWith(@"CheekyFoveatedDLSS\nvngx_dlssnr.dll", StringComparison.OrdinalIgnoreCase));
+    Require(Hashing.BytesSha256(deployed.Content) == saved.Sha256, "Deployed from the saved copy");
+    Require(service.Preview(stereoNeural with { NeuralRuntimePath = patched }, inventory).Files.Any(f => f.Path.EndsWith("nvngx_dlssnr.dll")), "Also as the profile's own file");
+    Require(!service.RememberNeuralRuntime(real).Modified, "Selecting the signed file again replaces it, not modified");
+    // Detect only ever picks validly signed files, even when a patched one sits in the folder it searches.
+    var downloads = PathPolicy.UnderRoot(root, "saved-runtime/patched-detect/downloads"); Directory.CreateDirectory(Path.Combine(downloads, "DLSSNR"));
+    File.Copy(patched, Path.Combine(downloads, "DLSSNR", "nvngx_dlssnr.dll"));
+    var store = new NeuralRuntimeStore(Path.Combine(root, "saved-runtime/patched-detect/state/runtimes"));
+    var sources = new DetectionSources { SteamVrServerLog = Path.Combine(root, "missing.txt"), PimaxPlaySettings = Path.Combine(root, "missing.json"), NeuralRuntimeFolders = [downloads], ProcessRunning = _ => false, SavedRuntimes = store };
+    SetupDetection.Detect(stereoNeural, new(), sources);
+    Require(store.Current() is null, "Detect ignored the patched file");
+});
 Test("Saved runtime: deployment copies the hash-checked saved copy; Forget while applied keeps it until restore", () =>
 {
     if (RealNeuralRuntime() is not { } real) { Console.WriteLine("SKIP saved runtime deployment: no signed nvngx_dlssnr.dll (set DCSVR_TEST_NEURAL_PATH)"); return; }

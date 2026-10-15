@@ -469,7 +469,7 @@ function buildFields() {
   // DLSS 5 page: on/off and the runtime file first, Foveated Super Resolution (stereo only) on its own, then the image controls.
   c = card('dlssControls','DLSS 5','NVIDIA\'s neural rendering. It needs NVIDIA\'s runtime file, which you provide: it is not included with DCS Control.');
   field(c,'neuralRendering','DLSS 5','Runs DLSS 5 on the image. With Quad Views, only on the focus area.','toggle');
-  field(c,'neuralRuntimePath','Runtime file','NVIDIA\'s nvngx_dlssnr.dll (tested: version 310.8). Select it once: DCS Control keeps a verified copy and uses it while this field is empty.','path',null,nr);
+  field(c,'neuralRuntimePath','Runtime file','NVIDIA\'s nvngx_dlssnr.dll (tested: version 310.8). On RTX 20, 30 and 40 cards, NVIDIA\'s file patched for them works too. Select it once: DCS Control keeps a verified copy and uses it while this field is empty.','path',null,nr);
   const savedBox = document.createElement('div'); savedBox.id = 'savedRuntime'; savedBox.className = 'saved-runtime'; savedBox.hidden = true; $('setting-neuralRuntimePath').append(savedBox);
   // Hidden with Quad Views (updateControls): there DLSS 5 builds on DCS's own DLSS of the focus views.
   c = card('foveatedDlssControls','Foveated Super Resolution','Without Quad Views only. Works with or without DLSS 5.');
@@ -695,7 +695,7 @@ function renderSavedRuntime() {
   box.hidden = !s && !retained; if (box.hidden) { box.innerHTML = ''; return; }
   const kept = retained ? `<p class="fine">The forgotten copy stays at ${escape(retained)} because the applied profile uses it. It is deleted once that profile is no longer applied.</p>` : '';
   if (!s) { box.innerHTML = kept; return; }
-  box.innerHTML = `<div class="saved-runtime-head"><div><b>Saved copy · version ${escape(s.version || 'unknown')} · from ${escape(s.originalPath)}</b><small>Kept at ${escape(s.path)} · NVIDIA signature verified · saved ${new Date(s.savedAt).toLocaleString('en-GB')}${s.originalExists ? '' : ' · the original file is gone, the copy is still used'}</small></div><div class="saved-runtime-actions"><button type="button" class="button secondary" id="changeRuntime"${busy ? ' disabled' : ''}>Change…</button><button type="button" class="button quiet" id="forgetRuntime"${busy ? ' disabled' : ''}>Forget</button></div></div>`
+  box.innerHTML = `<div class="saved-runtime-head"><div><b>Saved copy · version ${escape(s.version || 'unknown')} · from ${escape(s.originalPath)}</b><small>Kept at ${escape(s.path)} · ${s.modified ? 'NVIDIA\'s file changed by a compatibility patch, not signed by NVIDIA' : 'NVIDIA signature verified'} · saved${new Date(s.savedAt).toLocaleString('en-GB')}${s.originalExists ? '' : ' · the original file is gone, the copy is still used'}</small></div><div class="saved-runtime-actions"><button type="button" class="button secondary" id="changeRuntime"${busy ? ' disabled' : ''}>Change…</button><button type="button" class="button quiet" id="forgetRuntime"${busy ? ' disabled' : ''}>Forget</button></div></div>`
     + (own ? '<p class="fine">This profile uses the file entered above. Clear the field to use the saved copy.</p>' : '') + kept;
 }
 document.addEventListener('click', e => {

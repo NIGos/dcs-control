@@ -1,3 +1,9 @@
+# 0.5.10 preview
+
+**DLSS 5 on RTX 20, 30 and 40 cards (GitHub #4)**: NVIDIA's DLSS 5 runtime runs only on RTX 50 cards; on older cards DLSS 5 showed "ON but not applied". Community patches rewrite the runtime's GPU code for RTX 20, 30 and 40 cards, which breaks NVIDIA's signature, so DCS Control refused the patched file. Now a file you select with Browse is accepted when it is still NVIDIA's x64 nvngx_dlssnr.dll, version 310.8, with no signature or NVIDIA's own (now invalid) one; the saved copy says "NVIDIA's file changed by a compatibility patch". A file validly signed by anyone else is still refused, and Detect my setup only ever picks files with a valid NVIDIA signature. The patched file is not an NVIDIA release: use it at your own risk.
+
+**Video tour**: a five-minute narrated tour of DCS Control, with real footage of Engine Optimizations off and on at a busy airfield, is linked at the top of the README.
+
 # 0.5.9 preview
 
 **Depth boost, now with the dual camera** (experimental, off by default, Perception page): the world outside is rendered with your eyes a little further apart, following where you look and changing slowly, while the cockpit, its displays and its lighting stay at your real eye distance. The HUD stays where DCS draws it. Before, Depth boost widened the eye distance for the whole view and returned it to normal when you looked back into the cockpit; that step is gone. Realistic and Enhanced stay; the Gradual/Predictive choice and its Alt+Shift+F9 key are gone (the depth now always changes smoothly). Alt+Shift+F10 still turns it off and on in flight, and the in-headset panel shows "(dual camera)" on the Depth boost line.

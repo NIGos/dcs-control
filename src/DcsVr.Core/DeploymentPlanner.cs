@@ -197,7 +197,9 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                 // The app's saved copy must still be the file that was verified and recorded when it was saved.
                 if (neuralSha256 is not null && Hashing.BytesSha256(neuralBytes) != neuralSha256)
                     throw new InvalidDataException("The saved copy of the DLSS 5 runtime changed since it was saved. Select nvngx_dlssnr.dll again.");
-                NativeBinary.VerifyNeuralRuntime(neuralBytes);
+                // A file the user chose (the saved copy or the path in the profile) may be NVIDIA's runtime patched for
+                // RTX 20, 30 and 40 cards; Detect only ever picks validly signed files.
+                NativeBinary.VerifyNeuralRuntime(neuralBytes, allowModified: true);
                 Add(PathPolicy.UnderRoot(bin, "CheekyFoveatedDLSS/nvngx_dlssnr.dll"), neuralBytes, "User-supplied DLSS 5 runtime");
             }
         }

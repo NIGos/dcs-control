@@ -58,7 +58,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
   - **SteamVR with the Sboys driver** (CustomHeadsetOpenVR 1.3.0; for SLAM tracking it needs Pimax EVO).
 - **DCS World 2.9**, Steam edition or standalone.
 - **Microsoft Edge WebView2 Runtime** (already on most Windows 10 and 11 PCs) and the **Microsoft Visual C++ x64 runtime 14.50 or newer**. The setup (and `Install DCS Control.cmd`) checks both and installs them from Microsoft if they are missing.
-- For DLSS 5: your own signed NVIDIA **`nvngx_dlssnr.dll`, version 310.8** (see [DLSS 5](#dlss-5)). It is not included and the app does not download it.
+- For DLSS 5: your own signed NVIDIA **`nvngx_dlssnr.dll`, version 310.8** (see [DLSS 5](#dlss-5)). It is not included and the app does not download it. NVIDIA's runtime officially runs on RTX 50 cards; on RTX 20, 30 and 40 cards, NVIDIA's file changed by a community compatibility patch is accepted too.
 
 ## Install
 
@@ -161,6 +161,8 @@ The app uses its **bundled Quad Views** (Quad-Views-Foveated). This is the one t
 DLSS 5 runs NVIDIA's DLSS-NR neural model on the two Quad Views focus views. DCS's own DLSS keeps running as usual.
 
 **The runtime file — bring your own.** DLSS 5 needs NVIDIA's `nvngx_dlssnr.dll`, **version 310.8**, x64, signed by NVIDIA Corporation. It is not included in this app. Select it once with **Browse** (or let **Detect my setup** find it): the app checks it and keeps a **verified copy** in `%LOCALAPPDATA%\DcsControl\runtimes`, which every profile then uses. The page shows "Saved copy · version 310.8.0.0 · from …" with **Change…** and **Forget**. A file that fails the checks is refused and nothing is saved.
+
+**RTX 20, 30 and 40 cards.** NVIDIA's runtime runs only on RTX 50 cards: on older cards DLSS 5 shows "ON but not applied". Community patches (for example dlssnr-patcher) rewrite its GPU code for RTX 20, 30 and 40 cards, which breaks NVIDIA's signature. When you select such a file with **Browse**, DCS Control accepts it if it is still NVIDIA's x64 runtime, version 310.8, with no signature or NVIDIA's own (now invalid) one, and the saved copy says "NVIDIA's file changed by a compatibility patch". A file validly signed by anyone else is refused, and **Detect my setup** only ever picks files with a valid NVIDIA signature. The patched file is not NVIDIA's release: use it at your own risk, and expect a larger GPU cost than on RTX 50 cards.
 
 Settings:
 

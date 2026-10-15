@@ -107,6 +107,69 @@ internal static class WebVerification
         if (service.Originals.Status() is not { Count: 0, Current: null }) throw new IOException("The documentation fixture was not restored.");
     }
 
+    /// <summary>The feature video's stills: the neutral demo layout at 1920 × 1080 (1600 × 900 at 120 %), every feature
+    /// on (Depth boost and Far depth included), each page as a pilot sees it, then Launch DCS and Back to stock DCS.</summary>
+    private static async Task VideoViews(CoreWebView2 core, CoreWebView2Controller controller, ControlService service, string output, string? neural, Action<string> log)
+    {
+        var folder = Path.GetDirectoryName(output)!;
+        async Task Step(string script)
+        {
+            await core.ExecuteScriptAsync("window.docStep='pending';Promise.resolve().then(()=>"+script+").then(()=>window.docStep='done',e=>window.docStep='error:'+e.message)");
+            for (var wait = 0; wait < 1000 && await core.ExecuteScriptAsync("window.docStep") == "\"pending\""; wait++) await Task.Delay(20);
+            var result = JsonSerializer.Deserialize<string>(await core.ExecuteScriptAsync("window.docStep"));
+            if (result != "done") throw new IOException("Video step failed: " + script + " → " + result);
+        }
+        async Task Shot(string name, string? page, string prepare = "")
+        {
+            if (page is not null) await core.ExecuteScriptAsync("window.dcsUi.navigate("+JsonSerializer.Serialize(page)+");");
+            await core.ExecuteScriptAsync("document.getElementById('toast').hidden=true;document.getElementById('pages')?.scrollTo(0,0);" + prepare);
+            await Task.Delay(300);
+            var path = Path.Combine(folder, name + ".png"); await using (var stream = File.Create(path)) await core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, stream);
+            log("Video view: " + path);
+        }
+        const string Edit = "const edit=(path,value)=>{const f=window.dcsUi.fields.find(x=>x.path===path);if(f.type==='toggle')f.input.checked=value;else f.input.value=value;f.input.dispatchEvent(new Event(f.type==='toggle'||f.type==='select'?'change':'input',{bubbles:true}));};";
+        controller.Bounds = new System.Drawing.Rectangle(0, 0, 1600, 900);
+        var scaled = controller as CoreWebView2Controller; scaled.RasterizationScale = 1.2; scaled.ShouldDetectMonitorScaleChanges = false;
+        Readiness.ActiveRouteProvider = () => new(null, "Pimax Play is running and SteamVR is not. Use the Pimax route, or start SteamVR first for Sboys.", TrackingKind.Unknown);
+        if (neural is not null) await Step("window.dcsUi.saveRuntime("+JsonSerializer.Serialize(neural)+")");
+        // Stock first: a new profile with nothing on, as at the first start.
+        await Step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.Serialize(new VrProfile())+",{route:'Pimax',features:{}})});return ui.run('refresh',ui.draft());})()");
+        await Shot("v-overview-stock", "overview");
+        // The features ticked one at a time in the right panel, for the video's click-through.
+        var steps = new[] { "engine:true", "engine:true,boost:true", "engine:true,boost:true,quad:true", "engine:true,boost:true,quad:true,dlss:true", "engine:true,boost:true,quad:true,dlss:true,framegen:true" };
+        for (var step = 0; step < steps.Length; step++)
+        {
+            await Step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.Serialize(new VrProfile())+",{route:'Pimax',features:{"+steps[step]+"}})});return ui.run('refresh',ui.draft());})()");
+            await Shot($"v-step{step + 1}", "overview");
+        }
+        // Depth boost off, then on, on the Perception page.
+        await Shot("v-depth-off", "pupil", "(c=>{if(c)c.scrollIntoView({block:'start'});})(document.getElementById('depthControls'));");
+        // Then every feature, Depth boost and Far depth included.
+        await Step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.Serialize(new VrProfile())+",{route:'Pimax',features:{engine:true,boost:true,quad:true,dlss:true,framegen:true}})});return ui.run('refresh',ui.draft());})()");
+        await Step("(()=>{"+Edit+"edit('depthBoost',true);edit('farDepth',true);edit('peripheryStability',true);})()");
+        await Step("window.dcsUi.refreshBoostPlan ? window.dcsUi.refreshBoostPlan() : null");
+        await Shot("v-overview", "overview");
+        await Shot("v-guide", "guide");
+        await Shot("v-guide-perception", "guide", "(s=>{if(s)s.scrollIntoView({block:'start'});})([...document.querySelectorAll('.guide-section')][2]);");
+        await Shot("v-engine", "engine");
+        await Shot("v-boost", "boost");
+        await Shot("v-foveation", "foveation");
+        await Shot("v-framegen", "framegen");
+        await Shot("v-dlss", "dlss");
+        await Shot("v-perception", "pupil");
+        await Shot("v-perception-depth", "pupil", "(c=>{if(c)c.scrollIntoView({block:'start'});})(document.getElementById('depthControls'));");
+        await Shot("v-osd", "osd");
+        await Step("window.dcsUi.run('checkReadiness')");
+        await Shot("v-checks", "diagnostics");
+        await Step("window.dcsUi.run('launch')");
+        await Step("window.dcsUi.run('refresh',window.dcsUi.draft())");
+        await Shot("v-overview-applied", "overview");
+        await Shot("v-recovery", "recovery", "(f=>{if(f)f.open=true;})(document.getElementById('originalFiles'));");
+        await Step("window.dcsUi.run('restore')");
+        await Shot("v-recovery-restored", "recovery");
+        if (service.Originals.Status() is not { Count: 0, Current: null }) throw new IOException("The video fixture was not restored.");
+    }
+
     /// <summary>GitHub's release list as the update check sees it, served without network: a newer pre-release (this
     /// version's patch + 1) with its setup and signature, a higher draft and a malformed tag that must be ignored, an older
     /// release. The setup is signed with a throwaway key that replaces the release key for this run only, and its first
@@ -237,6 +300,8 @@ internal static class WebVerification
             // The neutral demo layout alone keeps the regular renders (release previews); DCSVR_SMOKE_DOC_VIEWS=1 makes the
             // documentation screenshots instead.
             if (demoRoot is not null && Environment.GetEnvironmentVariable("DCSVR_SMOKE_DOC_VIEWS") == "1") { await DocumentationViews(core, controller, service, output, neural, Log); return; }
+            // DCSVR_SMOKE_VIDEO_VIEWS=1: full-HD stills of the real interface for the feature video (artifacts/video).
+            if (demoRoot is not null && Environment.GetEnvironmentVariable("DCSVR_SMOKE_VIDEO_VIEWS") == "1") { await VideoViews(core, controller, service, output, neural, Log); return; }
             var screenshots = new List<object>(); var index = 0;
             await core.ExecuteScriptAsync("window.screenshotDraft=window.dcsUi.draft();");
             foreach (var (width,height,scale) in new[] { (1320,920,1d),(940,660,1d),(1320,920,1.5),(1700,1240,2d) })

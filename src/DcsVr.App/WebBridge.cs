@@ -583,7 +583,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     // as the app's copy, so it is not asked for again. Nothing in the draft or the game changes here.
                     var remembered = await Task.Run(() => service.RememberNeuralRuntime(data.GetProperty("path").GetString() ?? throw new InvalidDataException("Select nvngx_dlssnr.dll.")));
                     Invalidate();
-                    return Reply(id, new { savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), message = "Saved a verified copy of nvngx_dlssnr.dll " + remembered.Version + " at " + remembered.Path + ". DLSS 5 uses it from now on." });
+                    return Reply(id, new { savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), message = "Saved a verified copy of nvngx_dlssnr.dll " + remembered.Version + (remembered.Modified ? " (NVIDIA's file changed by a compatibility patch)" : "") + " at " + remembered.Path + ". DLSS 5 uses it from now on." });
                 case "forgetRuntime":
                     var kept = service.ForgetNeuralRuntime(); Invalidate();
                     return Reply(id, new { savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), message = kept
@@ -754,7 +754,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     }
     /// <summary>The app's saved DLSS 5 runtime copy, shown on the DLSS 5 page; null when there is none (or it was forgotten).</summary>
     private object? SavedRuntimeView() => service.SavedRuntime.Current() is { } s
-        ? new { path = s.Path, version = s.Version, sha256 = s.Sha256, originalPath = s.OriginalPath, originalExists = File.Exists(s.OriginalPath), savedAt = s.SavedAt } : null;
+        ? new { path = s.Path, version = s.Version, sha256 = s.Sha256, originalPath = s.OriginalPath, originalExists = File.Exists(s.OriginalPath), savedAt = s.SavedAt, modified = s.Modified } : null;
     /// <summary>A forgotten copy kept because the applied profile was installed from it.</summary>
     private string? RetainedRuntime() => service.SavedRuntime.Read() is { Forgotten: true } s ? s.Path : null;
     private static string Reply(string? id, object data) => JsonData.Serialize(new { id, ok = true, data });
