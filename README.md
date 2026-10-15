@@ -10,6 +10,11 @@ Everything the app changes is backed up and comes back with **Back to stock DCS*
 > **Early beta.** Flown mostly on one PC so far (Pimax Crystal Super, RTX 5090, Windows 11, DCS 2.9 Steam, single player), so expect rough edges. It was built with an AI coding assistant. Bug reports are very welcome: see [Reporting a problem](docs/USER_GUIDE.md#reporting-a-problem).
 
 <p align="center">
+  <a href="https://github.com/NIGos/dcs-control/releases/download/v0.5.9-preview/dcs-control-tour.mp4"><img src="docs/screenshots/video-tour.jpg" alt="Watch the 3:30 video tour of DCS Control" width="800"></a><br>
+  <sub>Video tour, narrated in English (<a href="https://github.com/NIGos/dcs-control/releases/download/v0.5.9-preview/dcs-control-tour.en.srt">subtitles</a>)</sub>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/overview-last-flight.png" alt="Overview: launch status, the features and a summary of the last flight" width="800">
 </p>
 
