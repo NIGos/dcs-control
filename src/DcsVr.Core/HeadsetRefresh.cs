@@ -19,6 +19,10 @@ public static partial class HeadsetRefresh
     public static string PimaxLogFolder { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Pimax", "PiService", "Log");
     /// <summary>The Pimax runtime's logs (the compositor's live rate); replaceable for tests.</summary>
     public static string PimaxRuntimeFolder { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Pimax", "runtime");
+    /// <summary>True while Pimax's server (pi_server, which writes pvr_srv_log_*.txt) runs; replaceable for tests.</summary>
+    public static Func<bool> PimaxRuntimeRunning { get; set; } = () => DetectionSources.AnyProcess("pi_server");
+    /// <summary>A server log not written for this long is a past session's, unless the Pimax server still runs.</summary>
+    internal static readonly TimeSpan StaleRuntimeLog = TimeSpan.FromMinutes(5);
     /// <summary>SteamVR's settings; replaceable for tests.</summary>
     public static string SteamVrSettings { get; set; } = new DetectionSources().SteamVrSettings;
 
@@ -46,7 +50,8 @@ public static partial class HeadsetRefresh
     /// <summary>
     /// The rate the Pimax compositor runs at now: its server log (pvr_srv_log_*.txt) reports every second
     /// "rendering fps:(a:&lt;app&gt;,c:&lt;compositor&gt;)", and the compositor rate is the panel's refresh (89.997 at 90 Hz,
-    /// 72.402 at 72 Hz). Follows a change in Pimax Play within a second, unlike the end-of-session report.
+    /// 72.402 at 72 Hz). Follows a change in Pimax Play within a second, unlike the end-of-session report. Null for a log
+    /// older than <see cref="StaleRuntimeLog"/> while the Pimax server is not running, so the session report is used.
     /// </summary>
     public static HeadsetRefreshFact? ReadPimaxRuntime(string folder)
     {
@@ -54,6 +59,10 @@ public static partial class HeadsetRefresh
         try { log = Directory.Exists(folder) ? new DirectoryInfo(folder).GetFiles("pvr_srv_log_*.txt").OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault() : null; }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
         if (log is null) return null;
+        // An old log with no Pimax server running is a past session's: the session report (ReadPimax) is labelled as
+        // such. An old log while the server runs is the rate the headset last ran at, labelled the same way.
+        var stale = DateTime.UtcNow - log.LastWriteTimeUtc > StaleRuntimeLog;
+        if (stale && !PimaxRuntimeRunning()) return null;
         string tail;
         try
         {
@@ -73,7 +82,7 @@ public static partial class HeadsetRefresh
         if (rates.Count == 0) return null;
         if (rates.Count > 3) rates.RemoveAt(rates.Count - 1);
         var recent = rates.TakeLast(15).Order().ToList();
-        return new(Math.Round(recent[recent.Count / 2], 1), "Pimax Play");
+        return new(Math.Round(recent[recent.Count / 2], 1), stale ? "Pimax Play, last session" : "Pimax Play");
     }
 
     /// <summary>The newest Pimax Play session report's refresh rate in <paramref name="folder"/>.</summary>

@@ -56,7 +56,15 @@ public static class Readiness
             Add("dcs-launcher", CheckState.Error, "DCS launcher", LaunchSafety.LauncherBlockedMessage);
         else if (profile.KeepDcsLauncher && LaunchSafety.LauncherRestartUnknown)
             Add("dcs-launcher", CheckState.Warning, "DCS launcher", LaunchSafety.LauncherUnknownMessage);
-        var foreign = inventory.Layers.Where(l => l.Enabled && !GazeBridge.IsManaged(l, profile)).Select(l => l.Name ?? Path.GetFileName(l.ManifestPath)).ToArray();
+        // DLSS 5 changes the image it runs on: with HUD_MFD_after_DLSS DCS draws the HUD and MFDs afterwards, sharp and
+        // without ghosting. DCS Control does not edit autoexec.cfg.
+        if (profile.NeuralRendering && inventory.OptionsPath is not null)
+            Add("hud-after-dlss", inventory.AutoexecHudAfterDlss == true ? CheckState.Pass : CheckState.Warning, "HUD after DLSS",
+                inventory.AutoexecHudAfterDlss == true ? "autoexec.cfg draws the HUD and MFDs after DLSS, so DLSS 5 leaves them sharp."
+                    : "Add the line HUD_MFD_after_DLSS = true to Saved Games\\DCS\\Config\\autoexec.cfg (create the file if it is missing). Without it DLSS 5 runs over the HUD and MFDs, which can blur or ghost them.");
+        if (!profile.Desktop && inventory.Layers.Any(l => l.Enabled && VectorXr.Is(l)))
+            Add("vectorxr", CheckState.Pass, "VectorXR", "VectorXR is installed. DCS Control keeps it off when it starts DCS for VR, so its frame generation, Quad Views and Depth do not stack on this profile's own. Started from Steam or a shortcut, DCS loads it as usual; your other games keep it.");
+        var foreign = inventory.Layers.Where(l => l.Enabled && !GazeBridge.IsManaged(l, profile) && !VectorXr.Is(l)).Select(l => l.Name ?? Path.GetFileName(l.ManifestPath)).ToArray();
         if (foreign.Length > 0 && !profile.Desktop)
             Add("implicit-layers", CheckState.Warning, "Other VR add-ons (OpenXR layers)", "Other OpenXR add-ons are installed: " + string.Join(", ", foreign) + ". They load before this profile's add-ons and can change the image, eye tracking or frame timing. If something looks wrong, turn them off (for example with OpenXR API Layers GUI).");
         var manifest = profile.RuntimeManifestPath ?? (profile.Runtime == RuntimeKind.Pimax ? inventory.PimaxRuntime : inventory.SteamVrRuntime);

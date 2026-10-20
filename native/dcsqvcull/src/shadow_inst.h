@@ -1872,6 +1872,7 @@ struct Snapshot {
   } defines[kMaxDefines];
   const char* why;  // set when the snapshot is unusable
   bool dead;        // the DX11Shader was destroyed meanwhile (ForgetShader): its texture reads are not published
+  Snapshot* inboxNext;  // R90 H2: link in g_inbox (render thread -> workers, no lock)
 };
 
 // Compiled result of one key (shared by every DX11Shader with that key).
@@ -1935,8 +1936,18 @@ struct MapEntry {
 };
 constexpr size_t kMapSize = 8192;  // power of two
 MapEntry* g_map = nullptr;
+// g_mapUsed: bumped by every publish and every forget (shadow_batch.h keys
+// its plans on it: any change to the map invalidates them). g_mapOccupied:
+// slots that are not empty (live entries and tombstones), the fill cap.
+// g_mapUsedKind: live entries per kind.
 std::atomic<uint32_t> g_mapUsed{0};
+std::atomic<uint32_t> g_mapOccupied{0};
 std::atomic<uint32_t> g_mapUsedKind[kKinds] = {};
+std::atomic<uint32_t> g_mapForgotten{0};
+std::atomic<bool> g_mapCapLogged{false};
+// A forgotten entry (ForgetShader). Lookups probe past it; PublishLocked
+// reuses it, so destroyed shaders (mission reloads) do not fill the map.
+inline void* MapTomb() { return reinterpret_cast<void*>(uintptr_t{1}); }
 
 inline size_t MapHash(const void* s, uint64_t tech, uint32_t pass) {
   uint64_t h = (reinterpret_cast<uintptr_t>(s) >> 4) * 0x9E3779B97F4A7C15ull;
@@ -1958,7 +1969,10 @@ const MapEntry* FindEntry(void* shader, uint64_t tech, uint32_t pass) {
     void* k = g_map[i].shader.load(std::memory_order_acquire);
     if (!k) return nullptr;
     const MapEntry& e = g_map[i];
-    if (k == shader && e.tech == tech && e.pass == pass && e.effect == effect && e.techBegin == techBegin) return &e;
+    // The re-load: the slot was not forgotten and reused while its fields were read.
+    if (k == shader && e.tech == tech && e.pass == pass && e.effect == effect && e.techBegin == techBegin &&
+        e.shader.load(std::memory_order_acquire) == k)
+      return &e;
   }
   return nullptr;
 }
@@ -2033,6 +2047,12 @@ std::condition_variable g_cv;
 std::vector<Snapshot*> g_queue;
 std::unordered_map<std::string, KeyResult*> g_results;  // by key
 std::vector<std::pair<Snapshot*, KeyResult*>> g_pendingCreate;  // single-threaded device: created on the render thread
+// R90 H2: new snapshots from the render thread (ObserveBody), a lock-free push-only stack. Moved into g_queue (in
+// arrival order) under g_mutex by whoever holds it next: the pushing thread when try_lock succeeds, a worker
+// before it waits (workers re-check every 100 ms), ForgetShader, Snap, Shutdown. Before, the render thread
+// took g_mutex for every new shader, behind a worker holding it while the driver created VS objects.
+std::atomic<Snapshot*> g_inbox{nullptr};
+std::atomic<uint32_t> g_inboxCount{0};
 std::atomic<uint32_t> g_pendingCount{0};
 HANDLE g_workers[kWorkers] = {};
 int g_busy = 0;  // workers inside a compile
@@ -2235,17 +2255,52 @@ void CheckDevice(const Snapshot& s) {
   g_deviceSingleThreaded = (flags & D3D11_CREATE_DEVICE_SINGLETHREADED) != 0;
 }
 
-// Creates the missing VS objects of one key. Caller holds g_mutex; runs on
-// a worker, or on the render thread for a single-threaded device.
-void CreateVsLocked(KeyResult& r) {
-  if (!r.ok || !g_device) return;
+// Creates the missing VS objects of one key on dev. R90 H2: a worker calls it without g_mutex for a key it is
+// still compiling (r is that worker's alone until it marks it done, and the device is free threaded); the
+// single-threaded device path calls it through CreateVsLocked.
+void CreateVsOn(ID3D11Device* dev, KeyResult& r) {
+  if (!r.ok || !dev) return;
   for (PassVs& p : r.vs) {
     if (p.vs) continue;
-    if (SUCCEEDED(g_device->CreateVertexShader(p.bytecode.data(), p.bytecode.size(), nullptr, &p.vs))) {
+    if (SUCCEEDED(dev->CreateVertexShader(p.bytecode.data(), p.bytecode.size(), nullptr, &p.vs))) {
       g_vsCreated.fetch_add(1);
       g_vsCreatedKind[r.kind == kKindGb ? kKindGb : kKindShadow].fetch_add(1);
     }
   }
+}
+// Caller holds g_mutex; runs on a worker, or on the render thread for a single-threaded device.
+void CreateVsLocked(KeyResult& r) { CreateVsOn(g_device, r); }
+
+// R90 H2: g_inbox into g_queue, oldest first. Caller holds g_mutex.
+void DrainInboxLocked() {
+  Snapshot* h = g_inbox.exchange(nullptr, std::memory_order_acquire);
+  Snapshot* fifo = nullptr;
+  while (h) {  // the stack is newest first
+    Snapshot* n = h->inboxNext;
+    h->inboxNext = fifo;
+    fifo = h;
+    h = n;
+  }
+  while (fifo) {
+    Snapshot* n = fifo->inboxNext;
+    fifo->inboxNext = nullptr;
+    g_queue.push_back(fifo);
+    g_inboxCount.fetch_sub(1, std::memory_order_relaxed);
+    fifo = n;
+  }
+}
+
+// R90 H2: the render thread's queue push; never waits for g_mutex.
+void InboxPush(Snapshot* s) {
+  Snapshot* h = g_inbox.load(std::memory_order_relaxed);
+  do {
+    s->inboxNext = h;
+  } while (!g_inbox.compare_exchange_weak(h, s, std::memory_order_release, std::memory_order_relaxed));
+  g_inboxCount.fetch_add(1, std::memory_order_relaxed);
+  std::unique_lock<std::mutex> lock(g_mutex, std::try_to_lock);
+  if (!lock.owns_lock()) return;  // a worker takes it within 100 ms
+  DrainInboxLocked();
+  g_cv.notify_all();
 }
 
 // Creates the key's VS objects if needed and publishes the shader's map
@@ -2253,6 +2308,7 @@ void CreateVsLocked(KeyResult& r) {
 void PublishLocked(const Snapshot& s, KeyResult& r) {
   if (!r.ok || !g_map) return;
   CreateVsLocked(r);
+  if (s.dead) return;  // destroyed meanwhile (ForgetShader already ran): its entries would never match or be reclaimed
   for (int t = 0; t < 2; ++t) {
     const TechVs* tv = nullptr;
     for (const TechVs& x : r.techs)
@@ -2260,15 +2316,36 @@ void PublishLocked(const Snapshot& s, KeyResult& r) {
     if (!tv) continue;
     for (uint32_t p = 0; p < s.passes[t] && p < tv->passVs.size(); ++p) {
       size_t i = MapHash(s.shader, s.tech[t], p);
+      MapEntry* slot = nullptr;  // the first tombstone on the chain, else the empty slot that ends it
       for (size_t probe = 0; probe < kMapSize; ++probe, i = (i + 1) & (kMapSize - 1)) {
         MapEntry& e = g_map[i];
         void* k = e.shader.load(std::memory_order_relaxed);
         if (k == s.shader && e.tech == s.tech[t] && e.pass == p) {
-          if (e.effect == s.effect && e.techBegin == s.techBegin) break;  // already published
+          if (e.effect == s.effect && e.techBegin == s.techBegin) {  // already published
+            slot = nullptr;
+            break;
+          }
           continue;  // stale entry of a destroyed shader at the same address: keep probing
         }
+        if (k == MapTomb()) {
+          if (!slot) slot = &e;
+          continue;
+        }
         if (k) continue;
-        if (g_mapUsed.load() >= kMapSize * 3 / 4) break;
+        if (!slot) {
+          if (g_mapOccupied.load() >= kMapSize * 3 / 4) {
+            if (!g_mapCapLogged.exchange(true))
+              Log("shadow inst: instancing map full (%u entries); shaders published later get no instanced VS",
+                  g_mapOccupied.load());
+            break;
+          }
+          slot = &e;
+          g_mapOccupied.fetch_add(1);
+        }
+        break;
+      }
+      if (slot) {
+        MapEntry& e = *slot;  // empty or a tombstone: lookups never match it while it is filled
         e.tech = s.tech[t];
         e.pass = p;
         e.effect = s.effect;
@@ -2300,7 +2377,6 @@ void PublishLocked(const Snapshot& s, KeyResult& r) {
         e.shader.store(s.shader, std::memory_order_release);
         g_mapUsed.fetch_add(1);
         g_mapUsedKind[r.kind == kKindGb ? kKindGb : kKindShadow].fetch_add(1);
-        break;
       }
     }
   }
@@ -2325,7 +2401,8 @@ struct TexEntry {
 constexpr size_t kTexMapSize = 4096;  // power of two
 inline void* TexTomb() { return reinterpret_cast<void*>(uintptr_t{1}); }
 TexEntry* g_texMap = nullptr;
-std::atomic<uint32_t> g_texMapUsed{0}, g_texForgotten{0};
+std::atomic<uint32_t> g_texMapUsed{0}, g_texForgotten{0};  // used: slots not empty (live and tombstones)
+std::atomic<bool> g_texMapCapLogged{false};
 std::atomic<bool> g_onTex{false};  // [Model] ShadowTextureSkip wants the shadow keys collected
 Snapshot* g_compiling[kWorkers] = {};  // under g_mutex: snapshots a worker is compiling
 
@@ -2344,7 +2421,10 @@ const TexEntry* FindTex(void* shader, uint64_t tech) {
     void* k = g_texMap[i].shader.load(std::memory_order_acquire);
     if (!k) return nullptr;
     const TexEntry& e = g_texMap[i];
-    if (k == shader && e.tech == tech && e.effect == effect && e.techBegin == techBegin) return &e;
+    // The re-load: the slot was not forgotten and reused while its fields were read.
+    if (k == shader && e.tech == tech && e.effect == effect && e.techBegin == techBegin &&
+        e.shader.load(std::memory_order_acquire) == k)
+      return &e;
   }
   return nullptr;
 }
@@ -2357,20 +2437,42 @@ void PublishTexLocked(const Snapshot& s, const KeyResult& r) {
     for (size_t i = 0; i < r.reads.size(); ++i)
       if (r.reads[i].name == s.techName[t]) idx = static_cast<int>(i);
     size_t i = TexHash(s.shader, s.tech[t]);
+    // The first tombstone on the chain is reused (lock-free readers probing
+    // past it see another key, or the tombstone, never a half-written match:
+    // FindTex re-loads the key after reading the fields); else the empty slot.
+    TexEntry* slot = nullptr;
     for (size_t probe = 0; probe < kTexMapSize; ++probe, i = (i + 1) & (kTexMapSize - 1)) {
       TexEntry& e = g_texMap[i];
       void* k = e.shader.load(std::memory_order_relaxed);
-      if (k == s.shader && e.tech == s.tech[t] && e.effect == s.effect && e.techBegin == s.techBegin) break;
-      if (k) continue;  // tombstones are not reused: lock-free readers may still probe past them
-      if (g_texMapUsed.load() >= kTexMapSize * 3 / 4) break;
+      if (k == s.shader && e.tech == s.tech[t] && e.effect == s.effect && e.techBegin == s.techBegin) {
+        slot = nullptr;  // already published
+        break;
+      }
+      if (k == TexTomb()) {
+        if (!slot) slot = &e;
+        continue;
+      }
+      if (k) continue;
+      if (!slot) {
+        if (g_texMapUsed.load() >= kTexMapSize * 3 / 4) {
+          if (!g_texMapCapLogged.exchange(true))
+            Log("shadow inst: texture-read map full (%u entries); shaders published later keep every texture set",
+                g_texMapUsed.load());
+          break;
+        }
+        slot = &e;
+        g_texMapUsed.fetch_add(1);
+      }
+      break;
+    }
+    if (slot) {
+      TexEntry& e = *slot;
       e.tech = s.tech[t];
       e.effect = s.effect;
       e.techBegin = s.techBegin;
       e.r = &r;
       e.reads = idx;
       e.shader.store(s.shader, std::memory_order_release);
-      g_texMapUsed.fetch_add(1);
-      break;
     }
   }
 }
@@ -2436,18 +2538,60 @@ int GbPassReadTextures(void* shader, uint64_t tech, uint32_t pass, std::vector<s
   return st;
 }
 
+// Linear-probing tombstones at the end of a cluster (the next slot empty)
+// become empty again, walking back over the cluster's trailing tombstones:
+// every key of the cluster lies before them, so no lookup needs to probe
+// past them (lock-free lookups give the same answer either way). Returns the
+// slots freed. Caller holds g_mutex (no insert meanwhile).
+template <class E>
+uint32_t TrimTombs(E* map, size_t size, void* tomb) {
+  uint32_t freed = 0;
+  for (size_t i = 0; i < size; ++i) {
+    if (map[i].shader.load(std::memory_order_relaxed) != tomb ||
+        map[(i + 1) & (size - 1)].shader.load(std::memory_order_relaxed) != nullptr)
+      continue;
+    for (size_t k = i; map[k].shader.load(std::memory_order_relaxed) == tomb; k = (k - 1) & (size - 1)) {
+      map[k].shader.store(nullptr, std::memory_order_release);
+      ++freed;
+    }
+  }
+  return freed;
+}
+
 // The DX11Shader is being destroyed (shadow_tex.h's destructor hook): forget
-// its texture-read entries and its seen mark, and keep queued or in-flight
-// snapshots of it from publishing texture reads.
+// its texture-read and instancing entries and its seen mark, and keep queued
+// or in-flight snapshots of it from publishing. Forgotten slots are reused by
+// later publishes (tombstones on a probe chain) or emptied (TrimTombs), so
+// destroyed shaders (mission reloads, slot changes) do not fill the maps:
+// before, both maps stopped publishing for good at 3/4 full.
 void ForgetShader(void* shader) {
   if (g_state.load() != 1 || !shader) return;
   std::lock_guard<std::mutex> lock(g_mutex);
-  if (g_texMap)
+  if (g_texMap) {
+    bool any = false;
     for (size_t i = 0; i < kTexMapSize; ++i)
       if (g_texMap[i].shader.load(std::memory_order_relaxed) == shader) {
         g_texMap[i].shader.store(TexTomb(), std::memory_order_release);
         g_texForgotten.fetch_add(1);
+        any = true;
       }
+    if (any) g_texMapUsed.fetch_sub(TrimTombs(g_texMap, kTexMapSize, TexTomb()));
+  }
+  // Its instancing entries (their VS objects stay with the KeyResult).
+  if (g_map) {
+    bool any = false;
+    for (size_t i = 0; i < kMapSize; ++i)
+      if (g_map[i].shader.load(std::memory_order_relaxed) == shader) {
+        g_map[i].shader.store(MapTomb(), std::memory_order_release);
+        g_mapUsedKind[g_map[i].kind == kKindGb ? kKindGb : kKindShadow].fetch_sub(1);
+        g_mapForgotten.fetch_add(1);
+        any = true;
+      }
+    if (any) {
+      g_mapOccupied.fetch_sub(TrimTombs(g_map, kMapSize, MapTomb()));
+      g_mapUsed.fetch_add(1);  // shadow_batch.h plans keyed on the map are rebuilt
+    }
+  }
   for (size_t i = 0; i < kSeenSize; ++i) {
     if (g_seen[i].load(std::memory_order_relaxed) == shader) g_seen[i].store(TexTomb());
     // The G-buffer set too: a new shader at this address is collected again.
@@ -2458,6 +2602,7 @@ void ForgetShader(void* shader) {
   auto kill = [&](Snapshot* s) {
     if (s && s->shader == shader) s->dead = true;
   };
+  DrainInboxLocked();  // R90 H2
   for (Snapshot* s : g_queue) kill(s);
   for (Snapshot* s : g_compiling) kill(s);
   for (auto& pc : g_pendingCreate) kill(pc.first);
@@ -3270,6 +3415,7 @@ const char* CacheLoad(const Snapshot& s, KeyResult& out, std::string& detail) {
   out.fxVars = std::move(r.fxVars);
   out.msA = out.msB = 0;
   out.cached = true;
+  prune::TouchOnHit(path);  // R90: last use for the cache's LRU cap (disk_prune.h)
   return nullptr;
 }
 
@@ -3310,14 +3456,16 @@ void CacheSave(const Snapshot& s, const KeyResult& r, const SourceLog& log) {
   file.append(reinterpret_cast<const char*>(&sum), 8);
   file += w.b;
   const std::wstring tmp = path + L"." + std::to_wstring(GetCurrentThreadId()) + L".tmp";
-  bool ok = false;
+  bool ok = false, tempOk = false;
   HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   DWORD err = GetLastError();
   if (h != INVALID_HANDLE_VALUE) {
     DWORD put = 0;
     ok = WriteFile(h, file.data(), static_cast<DWORD>(file.size()), &put, nullptr) && put == file.size();
     if (!ok) err = GetLastError();
+    tempOk = ok;
     CloseHandle(h);
+    bool clearedRo = false;
     // A scanner or indexer briefly holding the target (or the fresh temp
     // file) makes the rename fail with a sharing/lock/access error: retried
     // (compile worker thread, never the render thread). Before, one such hit
@@ -3325,6 +3473,15 @@ void CacheSave(const Snapshot& s, const KeyResult& r, const SourceLog& log) {
     for (int attempt = 0; ok; ++attempt) {
       if (MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) break;
       err = GetLastError();
+      // R63: a read-only target (Saved Games restored from a backup or a sync tool) is not transient: its
+      // attribute is cleared once, then the rename retried. Before, it failed every retry and turned saving off.
+      if (err == ERROR_ACCESS_DENIED && !clearedRo) {
+        clearedRo = true;
+        const DWORD a = GetFileAttributesW(path.c_str());
+        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_READONLY) &&
+            SetFileAttributesW(path.c_str(), a & ~FILE_ATTRIBUTE_READONLY))
+          continue;
+      }
       const bool transient =
           err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED || err == ERROR_LOCK_VIOLATION;
       if (!transient || attempt >= 9) {
@@ -3340,11 +3497,16 @@ void CacheSave(const Snapshot& s, const KeyResult& r, const SourceLog& log) {
   {
     std::lock_guard<std::mutex> lock(g_cacheMutex);
     first = g_cacheWriteFails++ == 0;
-    g_cacheWritable = false;  // read-only folder: stop trying, keep reading
+    // R63: only a temp file that cannot be written means the folder is (read-only folder, full disk): stop
+    // trying, keep reading. One target that cannot be replaced (a deny ACL) costs that entry only.
+    if (!tempOk) g_cacheWritable = false;
   }
-  if (first)
+  if (first && !tempOk)
     Log("shadow inst: cache: cannot write %ls (error %lu); continuing without saving", path.c_str(),
         static_cast<unsigned long>(err));
+  else if (first)
+    Log("shadow inst: cache: cannot replace %ls (error %lu); that entry is not saved, other entries still are",
+        path.c_str(), static_cast<unsigned long>(err));
 }
 
 // Worker: the snapshot's key from the disk cache, else compiled (at idle
@@ -3438,7 +3600,11 @@ DWORD WINAPI Worker(void*) {
     KeyResult* r = nullptr;
     {
       std::unique_lock<std::mutex> lock(g_mutex);
-      g_cv.wait(lock, [] { return g_stop.load() || !g_queue.empty(); });
+      for (;;) {  // R90 H2: the render thread's pushes may arrive without a notify (its try_lock failed)
+        DrainInboxLocked();
+        if (g_stop.load() || !g_queue.empty()) break;
+        g_cv.wait_for(lock, std::chrono::milliseconds(100));
+      }
       if (g_stop.load()) return 0;
       s = g_queue.front();
       g_queue.erase(g_queue.begin());
@@ -3466,11 +3632,21 @@ DWORD WINAPI Worker(void*) {
         }
     }
     CompileKeyCached(*s, *r);
+    ID3D11Device* dev = nullptr;
     {
       std::lock_guard<std::mutex> lock(g_mutex);
       for (Snapshot*& c : g_compiling)
         if (c == s) c = nullptr;
-      if (!g_deviceSingleThreaded) CreateVsLocked(*r);
+      if (!g_deviceSingleThreaded && g_device) {
+        dev = g_device;
+        dev->AddRef();
+      }
+    }
+    // R90 H2: outside g_mutex (the driver may take milliseconds per VS; the render thread's ForgetShader and
+    // the single-threaded drain wait on g_mutex). r is not done yet: no other thread reads its VS objects.
+    if (dev) {
+      CreateVsOn(dev, *r);
+      dev->Release();
     }
     const uint32_t idx = g_logIndex.fetch_add(1) + 1;
     if (!g_stop.load()) LogResult(*r, idx);
@@ -3508,8 +3684,8 @@ void ObserveBody(uint8_t* mat, int kind) {
   s->why = SnapshotGuarded(mat, sh, *s);
   if (s->why) {
     (kind == kKindGb ? g_rejectedGb : g_rejectedSnapshots).fetch_add(1);
-    std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_rejectLog.size() < 16) {
+    std::unique_lock<std::mutex> lock(g_mutex, std::try_to_lock);  // R90 H2: a sample line only; never wait
+    if (lock.owns_lock() && g_rejectLog.size() < 16) {
       char b[400];
       snprintf(b, sizeof(b), "%sshader %p (%s): %s", kind == kKindGb ? "g-buffer " : "", sh,
                s->path[0] ? s->path : "?", s->why);
@@ -3519,9 +3695,7 @@ void ObserveBody(uint8_t* mat, int kind) {
     return;
   }
   CheckDevice(*s);
-  std::lock_guard<std::mutex> lock(g_mutex);
-  g_queue.push_back(s);
-  g_cv.notify_all();
+  InboxPush(s);  // R90 H2
 }
 
 // DCS's caster loop calls this: a std::bad_alloc (the 27 KB snapshot, the
@@ -4026,6 +4200,9 @@ bool Install() {
   g_modelVtbl = ng + g_at.model;
   g_map = new MapEntry[kMapSize];
   g_mapUsed = 0;
+  g_mapOccupied = 0;
+  g_mapCapLogged = false;
+  g_texMapCapLogged = false;
   for (auto& u : g_mapUsedKind) u = 0;
   g_texMap = new TexEntry[kTexMapSize];
   g_texMapUsed = 0;
@@ -4116,7 +4293,7 @@ Totals Snap(int kind = kKindShadow) {
   const bool gb = kind == kKindGb;
   t.seen = (gb ? g_seenGb : g_seenShaders).load();
   t.rejected = (gb ? g_rejectedGb : g_rejectedSnapshots).load();
-  t.queued = static_cast<uint32_t>(g_queue.size() + g_pendingCreate.size());
+  t.queued = static_cast<uint32_t>(g_queue.size() + g_pendingCreate.size() + g_inboxCount.load());
   for (auto& kv : g_results) t.keys += kv.second->kind == kind;
   t.done = (gb ? g_keysDoneGb : g_keysDone).load();
   t.ok = (gb ? g_keysOkGb : g_keysOk).load();
@@ -4411,6 +4588,7 @@ void Shutdown(bool release = true) {
     delete kv.second;
   }
   g_results.clear();
+  DrainInboxLocked();  // R90 H2
   for (Snapshot* s : g_queue) delete s;
   g_queue.clear();
   for (auto& pc : g_pendingCreate) delete pc.first;

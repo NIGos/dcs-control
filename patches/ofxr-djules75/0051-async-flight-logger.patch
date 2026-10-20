@@ -1,0 +1,1127 @@
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -9,6 +9,11 @@
+ namespace xrfg {
+ 
+ enum class BridgeFlightOperation : std::uint32_t {
++    // DCS Control (0051): besides the header (result= the version, a= the
++    // cap in MB, b= flush_each_event, c= the process id), the close record
++    // (result 0) and a failed wrap's last line (result= the error, c=2):
++    // result 0, a= lines dropped because the writer thread's buffer was
++    // full (the disk held it up), b 0, c=3, written once it caught up.
+     logger,
+     negotiation,
+     instance_create,
+@@ -589,6 +594,22 @@
+     // with a truncate as its fallback; this fails both.
+     void test_fail_wraps() noexcept;
+ 
++    // DCS Control (0051): tests only. The writer thread's counters: lines
++    // dropped by a full buffer, lines in the buffer, WriteFile calls, and
++    // those made on a thread other than the writer (all of them with
++    // flush_each_event=1, none otherwise).
++    struct TestCounters {
++        std::uint64_t dropped{};
++        std::uint64_t queued{};
++        std::uint64_t file_writes{};
++        std::uint64_t caller_file_writes{};
++    };
++    [[nodiscard]] TestCounters test_counters() const noexcept;
++    // Holds the writer thread as a stalled disk would (until false).
++    void test_pause_writer(bool paused) noexcept;
++    // Waits until every line logged before the call is in the file.
++    void test_flush() noexcept;
++
+     // DCS Control (0048): `[diagnostics] frame_records=1` with logging on:
+     // write the per-real-frame records (BridgeFlightOperation::frame). One
+     // relaxed load, so a caller can test it on every frame for nothing.
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -6,10 +6,9 @@
+ #include <array>
+ #include <atomic>
+ #include <cstdio>
++#include <cstring>
+ #include <cwchar>
+-#include <limits>
+ #include <mutex>
+-#include <optional>
+ #include <string>
+ #include <system_error>
+ 
+@@ -188,20 +187,16 @@
+             return INVALID_HANDLE_VALUE;
+         }
+         const auto path = directory / log_file_name();
+-        // FILE_FLAG_OVERLAPPED is what makes the positioned writes in
+-        // Impl::write concurrent. Without it the kernel serialises every
+-        // WriteFile on the file object no matter which offset is passed, and
+-        // the two threads queue behind each other exactly as they did when a
+-        // lock held the file pointer: measured at 46.5 us p99 either way,
+-        // against 19.5 us with the flag. Removing it silently reverts this
+-        // whole change.
++        // DCS Control (0051): no FILE_FLAG_OVERLAPPED. One thread writes
++        // the file now (Impl), so there are no concurrent positioned writes
++        // for it to keep apart.
+         HANDLE file = CreateFileW(
+             path.c_str(),
+             GENERIC_WRITE,
+             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+             nullptr,
+             CREATE_ALWAYS,
+-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
++            FILE_ATTRIBUTE_NORMAL,
+             nullptr);
+         if (file != INVALID_HANDLE_VALUE) {
+             *output_path = path;
+@@ -237,52 +232,50 @@
+ } // namespace
+ 
+ namespace {
+-// DCS Control (0042): the thread's completion event, closed when the thread
+-// exits. The handle and the closed flag are trivial thread_locals, never
+-// destroyed, so a write after the closer ran (the close record written from
+-// ~BridgeFlightLogger, after the main thread's thread_locals are gone) reads
+-// null and writes with an event of its own instead (Impl::write_at).
+-thread_local HANDLE t_completion_event = nullptr;
+-thread_local bool t_completion_event_closed = false;
+-struct CompletionEventCloser {
+-    bool armed{};
+-    ~CompletionEventCloser() {
+-        if (t_completion_event != nullptr) {
+-            CloseHandle(t_completion_event);
+-            t_completion_event = nullptr;
+-        }
+-        t_completion_event_closed = true;
+-    }
+-};
+-thread_local CompletionEventCloser t_completion_event_closer;
++// DCS Control (0051): the flight log is written by a thread of its own. A
++// peer's WPR trace of DCS with frame records on counted 1,000-1,250
++// synchronous WriteFile calls a second on its render thread. Now a line is
++// formatted on the caller's thread as before and copied into a slot of a
++// fixed ring, a bounded lock-free queue (one compare-exchange claims a slot,
++// one release store publishes it): no allocation, lock or system call on
++// the caller's side. The writer thread drains the ring into one buffer and
++// writes it with one WriteFile once 64 KB have gathered or 100 ms have
++// passed. It is the only thread that touches the file, so the cap, the
++// rotation (0046) and a failed wrap's last line (0045) are plain sequential
++// code there, and the shared/exclusive lock and the offset reservations of
++// 0042-0046 are gone: each line lands right after the one before it, so the
++// file never has a gap, and the ring's order is the file's, which keeps
++// every caller thread's lines in the order it logged them. A full ring (the
++// writer held up by the disk) drops the line and counts it, and the writer
++// writes one record of the count (op=logger c=3) once it has caught up.
++// flush_each_event=1 keeps the synchronous write, with FlushFileBuffers, on
++// the caller's thread under a lock, for crash forensics; so does a writer
++// thread that could not be started.
++constexpr std::uint64_t kSlotCount = 16384; // 4 MB: 13 s of frame records
++constexpr std::uint32_t kSlotBytes = 244;   // the longest line is 225
++constexpr std::size_t kFlushBytes = 64 * 1024;
++constexpr std::uint64_t kFlushSlots = kFlushBytes / 128;
++constexpr ULONGLONG kFlushIntervalMs = 100;
++constexpr DWORD kPollMs = 10;
++constexpr DWORD kShutdownWaitMs = 2000;
++constexpr ULONGLONG kShutdownDrainMs = 1500;
+ } // namespace
+ 
+-[[nodiscard]] HANDLE write_completion_event() noexcept {
+-    // One event per thread, so two writes in flight never share completion
+-    // state.
+-    if (t_completion_event == nullptr && !t_completion_event_closed) {
+-        t_completion_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+-        t_completion_event_closer.armed = true;
+-    }
+-    return t_completion_event;
+-}
+-
+ struct BridgeFlightLogger::Impl {
++    // DCS Control (0051): one line of the ring. `sequence` is the ring
++    // position the slot is free for (claimable when it equals the enqueue
++    // position) or, once published, that position plus one.
++    struct Slot {
++        std::atomic<std::uint64_t> sequence{};
++        std::uint32_t length{};
++        char data[kSlotBytes]{};
++    };
++
+     HANDLE file{INVALID_HANDLE_VALUE};
+     LARGE_INTEGER frequency{};
+     LARGE_INTEGER origin{};
+-    // Held SHARED by every write and EXCLUSIVE only by a wrap. Shared holders
+-    // do not block each other, so the two threads no longer queue: the point
+-    // of this lock is to stop a wrap rebasing the offset while writes are in
+-    // flight, not to serialise the writes themselves. At 32 MB the exclusive
+-    // acquisition happens about once every 105 seconds.
+-    SRWLOCK wrap_lock = SRWLOCK_INIT;
+     std::atomic<std::uint64_t> next_sequence{1};
+     std::filesystem::path path;
+-    // The byte range a writer owns is claimed with one fetch_add; nothing
+-    // touches the handle's own file pointer, which is what used to need a
+-    // lock. Reservation order is the file's order.
+-    std::atomic<std::uint64_t> write_offset{0};
+     std::uint64_t maximum_bytes{32 * kMegabyte};
+     bool flush_each_event{};
+     // DCS Control (0042): atomic, as a failed wrap turns it off while other
+@@ -293,21 +286,40 @@
+     std::uint64_t header_maximum_mb{};
+     // DCS Control (0042): tests only (BridgeFlightLogger::test_fail_wraps).
+     std::atomic<bool> test_fail_wrap{};
+-    // DCS Control (0045): the lowest reservation past the cap since the last
+-    // wrap, kept under the shared lock before it is released, so whoever
+-    // takes the exclusive lock sees every one made. A failed wrap writes its
+-    // last line there: the reservations past the cap are never written, and
+-    // a line at a later one left the bytes before it zero.
+-    static constexpr std::uint64_t kNoReservation =
+-        std::numeric_limits<std::uint64_t>::max();
+-    std::atomic<std::uint64_t> first_over_cap{kNoReservation};
+-
+-    void note_over_cap(std::uint64_t at) noexcept {
+-        std::uint64_t seen = first_over_cap.load(std::memory_order_relaxed);
+-        while (at < seen &&
+-               !first_over_cap.compare_exchange_weak(
+-                   seen, at, std::memory_order_relaxed, std::memory_order_relaxed)) {
+-        }
++
++    // DCS Control (0051): the ring, shared by the callers and the writer.
++    std::unique_ptr<Slot[]> slots;
++    // The callers' and the writer's positions a cache line apart.
++    char enqueue_padding[64]{};
++    std::atomic<std::uint64_t> enqueue_position{0};
++    char dequeue_padding[64]{};
++    std::atomic<std::uint64_t> dequeue_position{0};
++    char dropped_padding[64]{};
++    std::atomic<std::uint64_t> dropped{0};
++    // The writer thread; null in the synchronous mode.
++    HANDLE thread{};
++    HANDLE wake{};
++    HANDLE done{};
++    std::atomic<DWORD> writer_thread_id{0};
++    std::atomic<bool> stop{};
++    std::atomic<bool> flush_requested{};
++    std::atomic<bool> test_paused{};
++    std::atomic<std::uint64_t> flushed_through{0};
++    std::atomic<std::uint64_t> file_writes{0};
++    std::atomic<std::uint64_t> caller_file_writes{0};
++    // The synchronous mode's callers take turns on the file under this.
++    SRWLOCK file_lock = SRWLOCK_INIT;
++    // The file's side: the writer thread's alone (or, in the synchronous
++    // mode, the caller's holding file_lock). write_offset is where the next
++    // write goes, the staged bytes not counted.
++    std::unique_ptr<char[]> staging;
++    std::size_t staged{};
++    std::uint64_t write_offset{0};
++    bool stopped_at_cap{};
++    std::uint64_t dropped_reported{};
++
++    [[nodiscard]] bool asynchronous() const noexcept {
++        return thread != nullptr;
+     }
+ 
+     [[nodiscard]] int format_line(
+@@ -343,56 +355,87 @@
+         return length <= 0 || static_cast<std::size_t>(length) >= line.size() ? 0 : length;
+     }
+ 
+-    // Positioned: the offset comes from the reservation, so concurrent
+-    // writers never contend for the file pointer. Synchronous to this
+-    // caller either way - the record has reached the OS by the time this
+-    // returns, which is what survives a crash.
+-    void write_at(const char* data, int length, std::uint64_t at) noexcept {
++    // DCS Control (0051): positioned and synchronous; returns the bytes
++    // written. Only the file's side calls it.
++    [[nodiscard]] std::size_t write_at(
++        const char* data, std::size_t length, std::uint64_t at) noexcept {
+         OVERLAPPED overlapped{};
+         overlapped.Offset = static_cast<DWORD>(at & 0xFFFFFFFFull);
+         overlapped.OffsetHigh = static_cast<DWORD>(at >> 32);
+-        overlapped.hEvent = write_completion_event();
+-        // DCS Control (0042): no event of the thread's (it has exited, or
+-        // none could be made): one for this write alone.
+-        HANDLE own_event = nullptr;
+-        if (overlapped.hEvent == nullptr) {
+-            own_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+-            if (own_event == nullptr) {
+-                return;
+-            }
+-            overlapped.hEvent = own_event;
++        file_writes.fetch_add(1, std::memory_order_relaxed);
++        if (GetCurrentThreadId() != writer_thread_id.load(std::memory_order_relaxed)) {
++            caller_file_writes.fetch_add(1, std::memory_order_relaxed);
+         }
+         DWORD written = 0;
+-        BOOL complete = WriteFile(
+-            file, data, static_cast<DWORD>(length), &written, &overlapped);
+-        if (!complete && GetLastError() == ERROR_IO_PENDING) {
+-            complete = GetOverlappedResult(file, &overlapped, &written, TRUE);
++        if (!WriteFile(file, data, static_cast<DWORD>(length), &written, &overlapped)) {
++            return 0;
+         }
+-        if (complete && flush_each_event) {
++        if (flush_each_event) {
+             static_cast<void>(FlushFileBuffers(file));
+         }
+-        if (own_event != nullptr) {
+-            CloseHandle(own_event);
++        return written;
++    }
++
++    // DCS Control (0051): the staged lines to the file, in one write. A
++    // failed write loses them but leaves no gap: the offset moves only by
++    // what was written.
++    void flush_staging() noexcept {
++        if (staged == 0 || file == INVALID_HANDLE_VALUE) {
++            staged = 0;
++            return;
++        }
++        write_offset += write_at(staging.get(), staged, write_offset);
++        staged = 0;
++    }
++
++    // DCS Control (0051): a line into the staging buffer, past the cap or
++    // not; full at 64 KB, when it is written first.
++    void append(const char* data, std::size_t length) noexcept {
++        if (staged + length > kFlushBytes) {
++            flush_staging();
++        }
++        std::memcpy(staging.get() + staged, data, length);
++        staged += length;
++    }
++
++    // DCS Control (0051): a line, wrapping first when it would take the
++    // file past the cap.
++    void stage(const char* data, std::size_t length) noexcept {
++        if (stopped_at_cap || file == INVALID_HANDLE_VALUE) {
++            return;
++        }
++        if (write_offset + staged + length > maximum_bytes) {
++            flush_staging();
++            wrap();
++            if (stopped_at_cap) {
++                return;
++            }
++        }
++        append(data, length);
++        if (!asynchronous()) {
++            flush_staging();
+         }
+     }
+ 
+-    // DCS Control (0042): a logger record of its own (the header again after
+-    // a wrap, or the last line), at `at` or else at the reserved end.
+-    // Exclusive lock held.
+-    void write_logger_record(
++    // DCS Control (0042): a logger record of the file's side (the header
++    // again after a wrap, the last line, the dropped count).
++    // DCS Control (0051): through the cap check (stage) or not (append).
++    void logger_record(
+         std::int64_t result, std::uint64_t a, std::uint64_t b, std::uint64_t c,
+-        std::optional<std::uint64_t> at = std::nullopt) noexcept {
++        bool capped) noexcept {
+         std::array<char, 384> record{};
+         LARGE_INTEGER now{};
+         QueryPerformanceCounter(&now);
+         const int length = format_line(
+             record, next_sequence.fetch_add(1, std::memory_order_relaxed),
+             now.QuadPart, 'I', BridgeFlightOperation::logger, result, 0, a, b, c);
+-        if (length != 0) {
+-            write_at(record.data(), length,
+-                at ? *at
+-                   : write_offset.fetch_add(
+-                         static_cast<std::uint64_t>(length), std::memory_order_relaxed));
++        if (length == 0) {
++            return;
++        }
++        if (capped) {
++            stage(record.data(), static_cast<std::size_t>(length));
++        } else {
++            append(record.data(), static_cast<std::size_t>(length));
+         }
+     }
+ 
+@@ -404,7 +447,8 @@
+     // False, with nothing changed, when the rename cannot be done (an older
+     // .prev held open by a reader without delete sharing) or the new file
+     // cannot be made; the caller then cuts the file back as before 0046.
+-    // Exclusive lock held, so no write is in flight on the old handle.
++    // DCS Control (0051): on the file's side, so no write is in flight on
++    // the old handle.
+     [[nodiscard]] bool rotate() noexcept {
+         try {
+             if (path.empty()) {
+@@ -416,15 +460,14 @@
+             if (!MoveFileExW(path.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+                 return false;
+             }
+-            // The same flags as create_log_file (FILE_FLAG_OVERLAPPED matters
+-            // for the positioned writes, see there).
++            // The same flags as create_log_file.
+             HANDLE fresh = CreateFileW(
+                 path.c_str(),
+                 GENERIC_WRITE,
+                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                 nullptr,
+                 CREATE_ALWAYS,
+-                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
++                FILE_ATTRIBUTE_NORMAL,
+                 nullptr);
+             if (fresh == INVALID_HANDLE_VALUE) {
+                 const DWORD error = GetLastError();
+@@ -443,6 +486,159 @@
+         }
+     }
+ 
++    // DCS Control (0051): the cap reached, with every line before it in
++    // the file. The file is rotated out to .prev and a fresh one opened
++    // (0046); only when that cannot be done is it cut back as before.
++    void wrap() noexcept {
++        LARGE_INTEGER beginning{};
++        if (test_fail_wrap.load(std::memory_order_relaxed) ||
++            (!rotate() &&
++             (!SetFilePointerEx(file, beginning, nullptr, FILE_BEGIN) ||
++              !SetEndOfFile(file)))) {
++            // DCS Control (0042): the file cannot be cut back, so the cap
++            // cannot hold: logging stops here, with a last line saying so
++            // (c = 2), and every later line is dropped.
++            // DCS Control (0045): right after the last line that fit, the
++            // place of the first that did not, so there is no gap before it.
++            const DWORD error = GetLastError();
++            stopped_at_cap = true;
++            active.store(false, std::memory_order_relaxed);
++            logger_record(static_cast<std::int64_t>(error), 0, 0, 2, false);
++            flush_staging();
++            return;
++        }
++        write_offset = 0;
++        // DCS Control (0042): the header again, so a wrapped file still says
++        // what wrote it and how.
++        logger_record(
++            XRFG_IMPLEMENTATION_VERSION, header_maximum_mb,
++            flush_each_event ? 1u : 0u, GetCurrentProcessId(), false);
++    }
++
++    // DCS Control (0051): the caller's side of the ring. Never waits: a
++    // full ring drops the line and counts it.
++    void enqueue(const char* data, int length) noexcept {
++        if (static_cast<std::uint32_t>(length) > kSlotBytes) {
++            dropped.fetch_add(1, std::memory_order_relaxed);
++            return;
++        }
++        std::uint64_t position = enqueue_position.load(std::memory_order_relaxed);
++        for (;;) {
++            Slot& slot = slots[position & (kSlotCount - 1)];
++            const std::uint64_t sequence = slot.sequence.load(std::memory_order_acquire);
++            const auto difference = static_cast<std::int64_t>(sequence - position);
++            if (difference == 0) {
++                if (enqueue_position.compare_exchange_weak(
++                        position, position + 1, std::memory_order_relaxed,
++                        std::memory_order_relaxed)) {
++                    std::memcpy(slot.data, data, static_cast<std::size_t>(length));
++                    slot.length = static_cast<std::uint32_t>(length);
++                    slot.sequence.store(position + 1, std::memory_order_release);
++                    return;
++                }
++            } else if (difference < 0) {
++                dropped.fetch_add(1, std::memory_order_relaxed);
++                return;
++            } else {
++                position = enqueue_position.load(std::memory_order_relaxed);
++            }
++        }
++    }
++
++    // DCS Control (0051): the writer's side. Every published line in ring
++    // order into the file. A slot claimed but not yet published ends the
++    // pass (its caller is between two instructions), except when stopping,
++    // which waits for it until `deadline`. Then, caught up, the count of
++    // lines a full ring dropped since the last one.
++    void drain(bool stopping, ULONGLONG deadline) noexcept {
++        std::uint64_t position = dequeue_position.load(std::memory_order_relaxed);
++        for (;;) {
++            Slot& slot = slots[position & (kSlotCount - 1)];
++            if (slot.sequence.load(std::memory_order_acquire) != position + 1) {
++                if (stopping &&
++                    position != enqueue_position.load(std::memory_order_acquire) &&
++                    GetTickCount64() < deadline) {
++                    SwitchToThread();
++                    continue;
++                }
++                break;
++            }
++            stage(slot.data, slot.length);
++            slot.sequence.store(position + kSlotCount, std::memory_order_release);
++            dequeue_position.store(++position, std::memory_order_release);
++        }
++        const std::uint64_t lost = dropped.load(std::memory_order_relaxed);
++        if (lost != dropped_reported) {
++            logger_record(0, lost - dropped_reported, 0, 3, true);
++            dropped_reported = lost;
++        }
++        flush_staging();
++    }
++
++    void writer_loop() noexcept {
++        ULONGLONG last_write = GetTickCount64();
++        for (;;) {
++            static_cast<void>(WaitForSingleObject(wake, kPollMs));
++            const bool stopping = stop.load(std::memory_order_acquire);
++            if (!stopping && test_paused.load(std::memory_order_relaxed)) {
++                continue;
++            }
++            const bool requested = flush_requested.exchange(false, std::memory_order_acq_rel);
++            const ULONGLONG now = GetTickCount64();
++            const std::uint64_t pending =
++                enqueue_position.load(std::memory_order_relaxed) -
++                dequeue_position.load(std::memory_order_relaxed);
++            if (stopping || requested || pending >= kFlushSlots ||
++                now - last_write >= kFlushIntervalMs) {
++                drain(stopping, now + kShutdownDrainMs);
++                last_write = now;
++                flushed_through.store(
++                    dequeue_position.load(std::memory_order_relaxed),
++                    std::memory_order_release);
++            }
++            if (stopping) {
++                return;
++            }
++        }
++    }
++
++    static DWORD WINAPI writer_main(void* parameter) noexcept {
++        auto* self = static_cast<Impl*>(parameter);
++        self->writer_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);
++        static_cast<void>(SetThreadDescription(GetCurrentThread(), L"OFXR flight log writer"));
++        self->writer_loop();
++        // Shutdown waits on this, not on the thread: a thread's exit needs
++        // the loader lock, which a static destructor at unload holds.
++        SetEvent(self->done);
++        return 0;
++    }
++
++    // DCS Control (0051): the writer thread and its ring, or false (with
++    // nothing left over) for the synchronous mode.
++    [[nodiscard]] bool start_writer() noexcept {
++        try {
++            slots = std::make_unique<Slot[]>(static_cast<std::size_t>(kSlotCount));
++        } catch (...) {
++            return false;
++        }
++        for (std::uint64_t index = 0; index < kSlotCount; ++index) {
++            slots[index].sequence.store(index, std::memory_order_relaxed);
++        }
++        wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
++        done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
++        if (wake != nullptr && done != nullptr) {
++            thread = CreateThread(nullptr, 0, &Impl::writer_main, this, 0, nullptr);
++        }
++        if (thread == nullptr) {
++            if (wake != nullptr) CloseHandle(wake);
++            if (done != nullptr) CloseHandle(done);
++            wake = done = nullptr;
++            slots.reset();
++            return false;
++        }
++        return true;
++    }
++
+     void write(
+         std::uint64_t sequence,
+         std::int64_t counter,
+@@ -453,7 +649,7 @@
+         std::uint64_t a,
+         std::uint64_t b,
+         std::uint64_t c) noexcept {
+-        if (!active.load(std::memory_order_relaxed) || file == INVALID_HANDLE_VALUE) {
++        if (!active.load(std::memory_order_relaxed)) {
+             return;
+         }
+ 
+@@ -464,64 +660,17 @@
+         if (length == 0) {
+             return;
+         }
+-
+-        const auto span = static_cast<std::uint64_t>(length);
+-        AcquireSRWLockShared(&wrap_lock);
+-        std::uint64_t at = write_offset.fetch_add(span, std::memory_order_relaxed);
+-        if (at + span > maximum_bytes) {
+-            // Past the cap. Promote to exclusive so the truncate cannot race a
+-            // write still in flight, then re-check: another thread may have
+-            // wrapped while this one was waiting for the lock, in which case
+-            // its reservation already stands and this one only needs a fresh
+-            // slot at the new base.
+-            note_over_cap(at); // DCS Control (0045)
+-            ReleaseSRWLockShared(&wrap_lock);
+-            AcquireSRWLockExclusive(&wrap_lock);
+-            // DCS Control (0042): logging stopped by a failed wrap while this
+-            // one waited.
+-            if (!active.load(std::memory_order_relaxed)) {
+-                ReleaseSRWLockExclusive(&wrap_lock);
+-                return;
+-            }
+-            if (write_offset.load(std::memory_order_relaxed) > maximum_bytes) {
+-                LARGE_INTEGER beginning{};
+-                // DCS Control (0046): the file is rotated out to .prev and a
+-                // fresh one opened; only when that cannot be done (the .prev
+-                // file is held open, say) is it cut back as before.
+-                if (test_fail_wrap.load(std::memory_order_relaxed) ||
+-                    (!rotate() &&
+-                     (!SetFilePointerEx(file, beginning, nullptr, FILE_BEGIN) ||
+-                      !SetEndOfFile(file)))) {
+-                    // DCS Control (0042): the file cannot be cut back, so the
+-                    // cap cannot hold: logging stops here, with a last line
+-                    // in this record's place saying so (c = 2). Every later
+-                    // reservation lies past it and is dropped.
+-                    // DCS Control (0045): in the first reservation's place
+-                    // past the cap, whichever writer gets here.
+-                    const DWORD error = GetLastError();
+-                    const std::uint64_t first =
+-                        first_over_cap.load(std::memory_order_relaxed);
+-                    write_logger_record(static_cast<std::int64_t>(error), 0, 0, 2,
+-                        first < at ? first : at);
+-                    active.store(false, std::memory_order_relaxed);
+-                    ReleaseSRWLockExclusive(&wrap_lock);
+-                    return;
+-                }
+-                write_offset.store(0, std::memory_order_relaxed);
+-                // DCS Control (0045): every reservation before it is void.
+-                first_over_cap.store(kNoReservation, std::memory_order_relaxed);
+-                // DCS Control (0042): the header again, so a wrapped file
+-                // still says what wrote it and how.
+-                write_logger_record(
+-                    XRFG_IMPLEMENTATION_VERSION, header_maximum_mb,
+-                    flush_each_event ? 1u : 0u, GetCurrentProcessId());
+-            }
+-            at = write_offset.fetch_add(span, std::memory_order_relaxed);
+-            ReleaseSRWLockExclusive(&wrap_lock);
+-            AcquireSRWLockShared(&wrap_lock);
++        if (asynchronous()) {
++            enqueue(line.data(), length);
++            return;
++        }
++        // DCS Control (0051): the synchronous mode, as before 0051 on the
++        // caller's thread, one caller at a time.
++        AcquireSRWLockExclusive(&file_lock);
++        if (active.load(std::memory_order_relaxed)) {
++            stage(line.data(), static_cast<std::size_t>(length));
+         }
+-        write_at(line.data(), length, at);
+-        ReleaseSRWLockShared(&wrap_lock);
++        ReleaseSRWLockExclusive(&file_lock);
+     }
+ };
+ 
+@@ -547,6 +696,8 @@
+         }
+ 
+         auto implementation = std::make_unique<Impl>();
++        // DCS Control (0051): up to 2048 MB (256 before), for DCS Control's
++        // 1024 with frame records.
+         const UINT maximum_mb = std::clamp<UINT>(
+             GetPrivateProfileIntW(
+                 kConfigurationSection,
+@@ -554,7 +705,7 @@
+                 32,
+                 config_path.c_str()),
+             1,
+-            256);
++            2048);
+         implementation->maximum_bytes =
+             static_cast<std::uint64_t>(maximum_mb) * kMegabyte;
+         implementation->header_maximum_mb = maximum_mb; // DCS Control (0042)
+@@ -577,7 +728,13 @@
+             }
+             return;
+         }
++        // DCS Control (0051): the staging buffer for either mode, and the
++        // writer thread unless flush_each_event asks for synchronous writes.
++        implementation->staging = std::make_unique<char[]>(kFlushBytes);
+         implementation->active = true;
++        if (!implementation->flush_each_event) {
++            static_cast<void>(implementation->start_writer());
++        }
+         impl_ = std::move(implementation);
+         // DCS Control (0048): the per-real-frame records, with logging only.
+         frame_records_.store(
+@@ -610,16 +767,40 @@
+         frame_records_.store(false, std::memory_order_relaxed); // 0048
+         g_frame_hold_timing.store(false, std::memory_order_relaxed);
+         event(BridgeFlightOperation::logger, 0);
+-        // Exclusive, so this waits out any write still inside the shared
+-        // section before the handle it is writing through is closed.
+-        AcquireSRWLockExclusive(&impl_->wrap_lock);
+-        impl_->active = false;
+-        if (impl_->file != INVALID_HANDLE_VALUE) {
+-            static_cast<void>(FlushFileBuffers(impl_->file));
+-            CloseHandle(impl_->file);
+-            impl_->file = INVALID_HANDLE_VALUE;
++        Impl& impl = *impl_;
++        impl.active = false;
++        if (impl.asynchronous()) {
++            // DCS Control (0051): the writer drains the ring and stops, in
++            // at most kShutdownWaitMs. At process exit it is gone already
++            // (every other thread ends before the static destructors run),
++            // so this thread drains the ring itself; the writer's staged
++            // lines are still in its buffer, at the offset they belong at.
++            if (WaitForSingleObject(impl.thread, 0) == WAIT_OBJECT_0) {
++                impl.drain(true, GetTickCount64() + kShutdownDrainMs);
++            } else {
++                impl.stop.store(true, std::memory_order_release);
++                SetEvent(impl.wake);
++                if (WaitForSingleObject(impl.done, kShutdownWaitMs) != WAIT_OBJECT_0) {
++                    // The disk is holding the writer: it keeps the Impl
++                    // (leaked) rather than have it freed under it.
++                    static_cast<void>(impl_.release());
++                    return;
++                }
++            }
++            CloseHandle(impl.thread);
++            CloseHandle(impl.wake);
++            CloseHandle(impl.done);
++            impl.thread = impl.wake = impl.done = nullptr;
++        } else {
++            // Waits out a write in progress on another thread.
++            AcquireSRWLockExclusive(&impl.file_lock);
++            ReleaseSRWLockExclusive(&impl.file_lock);
++        }
++        if (impl.file != INVALID_HANDLE_VALUE) {
++            static_cast<void>(FlushFileBuffers(impl.file));
++            CloseHandle(impl.file);
++            impl.file = INVALID_HANDLE_VALUE;
+         }
+-        ReleaseSRWLockExclusive(&impl_->wrap_lock);
+         impl_.reset();
+     } catch (...) {
+         impl_.reset();
+@@ -636,6 +817,42 @@
+     }
+ }
+ 
++// DCS Control (0051): the test hooks.
++BridgeFlightLogger::TestCounters BridgeFlightLogger::test_counters() const noexcept {
++    if (!impl_) {
++        return {};
++    }
++    TestCounters counters;
++    counters.dropped = impl_->dropped.load(std::memory_order_relaxed);
++    counters.queued = impl_->enqueue_position.load(std::memory_order_relaxed) -
++        impl_->dequeue_position.load(std::memory_order_relaxed);
++    counters.file_writes = impl_->file_writes.load(std::memory_order_relaxed);
++    counters.caller_file_writes =
++        impl_->caller_file_writes.load(std::memory_order_relaxed);
++    return counters;
++}
++
++void BridgeFlightLogger::test_pause_writer(bool paused) noexcept {
++    if (impl_) {
++        impl_->test_paused.store(paused, std::memory_order_relaxed);
++    }
++}
++
++void BridgeFlightLogger::test_flush() noexcept {
++    if (!impl_ || !impl_->asynchronous()) {
++        return;
++    }
++    const std::uint64_t target = impl_->enqueue_position.load(std::memory_order_acquire);
++    const ULONGLONG deadline = GetTickCount64() + 10000;
++    while (impl_->flushed_through.load(std::memory_order_acquire) < target &&
++           !impl_->test_paused.load(std::memory_order_relaxed) &&
++           GetTickCount64() < deadline) {
++        impl_->flush_requested.store(true, std::memory_order_release);
++        SetEvent(impl_->wake);
++        Sleep(1);
++    }
++}
++
+ std::int64_t BridgeFlightLogger::microseconds_for_counter(
+     std::int64_t counter) const noexcept {
+     if (impl_ == nullptr || impl_->frequency.QuadPart <= 0) {
+diff --git a/tests/bridge_flight_logger_tests.cpp b/tests/bridge_flight_logger_tests.cpp
+--- a/tests/bridge_flight_logger_tests.cpp
++++ b/tests/bridge_flight_logger_tests.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include <windows.h>
+ 
++#include <algorithm>
+ #include <array>
+ #include <filesystem>
+ #include <fstream>
+@@ -53,16 +54,74 @@
+ } // namespace
+ 
+ int main(int argc, char** argv) {
+-    if (argc == 2) {
++    if (argc == 2 || argc == 3) {
+         xrfg::BridgeFlightLogger child;
+         child.initialize(argv[1]);
+         child.event(xrfg::BridgeFlightOperation::application_wait_frame, 6, 11, 22, 33);
++        // DCS Control (0051): the writer thread writes within 100 ms; a
++        // synchronous log (flush_each_event=1, the third argument) at once.
++        if (argc == 2) {
++            Sleep(300);
++        }
+         TerminateProcess(GetCurrentProcess(), 73);
+         return 1;
+     }
+     try {
+         TempDirectory temporary;
+ 
++        // A child that logs one event and is terminated; true when the event
++        // is in its log.
++        const auto child_event_persisted = [](const fs::path& directory, bool synchronous) {
++            wchar_t exe[32768]{};
++            GetModuleFileNameW(nullptr, exe, 32768);
++            std::wstring command = L"\"" + std::wstring(exe) + L"\" \"" + directory.wstring() + L"\"";
++            if (synchronous) {
++                command += L" sync";
++            }
++            STARTUPINFOW startup{sizeof(startup)};
++            PROCESS_INFORMATION process{};
++            require(CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0,
++                nullptr, nullptr, &startup, &process) != FALSE, "child launch failed");
++            const DWORD wait = WaitForSingleObject(process.hProcess, 10000);
++            if (wait != WAIT_OBJECT_0) TerminateProcess(process.hProcess, 74);
++            DWORD code{};
++            GetExitCodeProcess(process.hProcess, &code);
++            CloseHandle(process.hThread);
++            CloseHandle(process.hProcess);
++            require(wait == WAIT_OBJECT_0 && code == 73, "child did not terminate as expected");
++            bool persisted = false;
++            for (const auto& item : fs::directory_iterator(directory)) {
++                if (item.path().extension() == ".log") {
++                    persisted |= read(item.path()).find(
++                        "op=app_wait_frame result=6 dur_us=0 a=11 b=22 c=33") != std::string::npos;
++                }
++            }
++            return persisted;
++        };
++        // A logger's directory with this ini.
++        const auto logger_directory = [&temporary](const char* name, const std::string& ini) {
++            const fs::path directory = temporary.path / name;
++            fs::create_directories(directory);
++            write(directory / "ofxr_bridge.ini", "[diagnostics]\r\nlogging_enabled=1\r\n" + ini);
++            return directory;
++        };
++        // The lines of a log.
++        const auto lines_of = [](const std::string& text) {
++            std::vector<std::string> lines;
++            std::size_t start = 0;
++            for (auto end = text.find("\r\n"); end != std::string::npos;
++                 start = end + 2, end = text.find("\r\n", start)) {
++                lines.push_back(text.substr(start, end - start));
++            }
++            return lines;
++        };
++        // A field's value in a line ("seq=", " a=", ...).
++        const auto field = [](const std::string& line, const std::string& key) {
++            const auto at = line.find(key);
++            require(at != std::string::npos, "a log line lacks a field");
++            return std::stoull(line.substr(at + key.size(), 24));
++        };
++
+         xrfg::BridgeFlightLogger disabled;
+         disabled.initialize(temporary.path / "disabled");
+         require(!disabled.enabled(), "missing INI must keep logging disabled");
+@@ -80,28 +139,13 @@
+             "max_file_mb=1\r\n"
+             "flush_each_event=0\r\n");
+ 
+-        wchar_t exe[32768]{};
+-        GetModuleFileNameW(nullptr, exe, 32768);
+-        std::wstring command = L"\"" + std::wstring(exe) + L"\" \"" + enabled_directory.wstring() + L"\"";
+-        STARTUPINFOW startup{sizeof(startup)};
+-        PROCESS_INFORMATION process{};
+-        require(CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0,
+-            nullptr, nullptr, &startup, &process) != FALSE, "child launch failed");
+-        const DWORD wait = WaitForSingleObject(process.hProcess, 10000);
+-        if (wait != WAIT_OBJECT_0) TerminateProcess(process.hProcess, 74);
+-        DWORD code{};
+-        GetExitCodeProcess(process.hProcess, &code);
+-        CloseHandle(process.hThread);
+-        CloseHandle(process.hProcess);
+-        require(wait == WAIT_OBJECT_0 && code == 73, "child did not terminate as expected");
+-        bool persisted = false;
+-        for (const auto& item : fs::directory_iterator(enabled_directory)) {
+-            if (item.path().extension() == ".log") {
+-                persisted |= read(item.path()).find(
+-                    "op=app_wait_frame result=6 dur_us=0 a=11 b=22 c=33") != std::string::npos;
+-            }
+-        }
+-        require(persisted, "last recorder event lost after forced termination");
++        // DCS Control (0051): a terminated process loses at most the writer
++        // thread's last 100 ms; with flush_each_event=1 nothing.
++        require(child_event_persisted(enabled_directory, false),
++            "last recorder event lost after forced termination");
++        require(child_event_persisted(
++                    logger_directory("sync-child", "flush_each_event=1\r\n"), true),
++            "synchronous log: event lost after forced termination");
+ 
+         xrfg::BridgeFlightLogger enabled;
+         enabled.initialize(enabled_directory);
+@@ -344,15 +388,23 @@
+             wrapping.initialize(wrap_directory);
+             require(wrapping.enabled(), "wrap: logging did not start");
+             const fs::path wrap_path = wrapping.log_path();
++            // DCS Control (0051): the writer thread wraps, so the test waits
++            // for it (test_flush) wherever it reads what a wrap did.
+             for (int index = 0; index < 20000; ++index) {
+                 wrapping.event(xrfg::BridgeFlightOperation::synthesis_pair, index, 1, 2, 3);
++                if (index % 1000 == 999) wrapping.test_flush();
+             }
++            wrapping.test_flush();
+             require(wrapping.enabled(), "wrap: a wrap that worked stopped logging");
+             wrapping.test_fail_wraps();
+             for (int index = 0; index < 20000 && wrapping.enabled(); ++index) {
+                 wrapping.event(xrfg::BridgeFlightOperation::synthesis_pair, index, 4, 5, 6);
++                if (index % 1000 == 999) wrapping.test_flush();
+             }
++            wrapping.test_flush();
+             require(!wrapping.enabled(), "wrap: a failed wrap did not stop logging");
++            require(wrapping.test_counters().caller_file_writes == 0,
++                "wrap: a caller wrote the file");
+             wrapping.event(xrfg::BridgeFlightOperation::synthesis_pair, 1, 7, 8, 9);
+             wrapping.shutdown();
+             const std::string wrapped = read(wrap_path);
+@@ -391,11 +443,14 @@
+             int written = 0;
+             for (; written < 40000 && !fs::exists(previous_path); ++written) {
+                 rotating.event(xrfg::BridgeFlightOperation::synthesis_pair, written, 1, 2, 3);
++                if (written % 100 == 99) rotating.test_flush(); // DCS Control (0051)
+             }
+             require(fs::exists(previous_path), "rotate: the cap did not rotate the log");
+             for (int extra = 0; extra < 100; ++extra, ++written) {
+                 rotating.event(xrfg::BridgeFlightOperation::synthesis_pair, written, 1, 2, 3);
+             }
++            rotating.test_flush();
++            require(rotating.test_counters().dropped == 0, "rotate: lines were dropped");
+             require(rotating.enabled(), "rotate: a rotation stopped logging");
+             const std::string header_tail =
+                 " dur_us=0 a=1 b=0 c=" + std::to_string(GetCurrentProcessId()) + "\r\n";
+@@ -440,7 +495,9 @@
+             require(holder != INVALID_HANDLE_VALUE, "rotate: could not hold the .prev file");
+             for (int index = 0; index < 20000; ++index) {
+                 rotating.event(xrfg::BridgeFlightOperation::synthesis_pair, index, 4, 5, 6);
++                if (index % 1000 == 999) rotating.test_flush(); // DCS Control (0051)
+             }
++            rotating.test_flush();
+             CloseHandle(holder);
+             require(rotating.enabled(), "rotate: a held .prev file stopped logging");
+             rotating.shutdown();
+@@ -480,6 +537,7 @@
+             for (auto& writer : writers) {
+                 writer.join();
+             }
++            racing.test_flush(); // DCS Control (0051)
+             require(!racing.enabled(), "wrap race: a failed wrap did not stop logging");
+             racing.shutdown();
+             const std::string raced = read(race_path);
+@@ -577,6 +635,206 @@
+                 "frame records: a record is missing or malformed");
+         }
+ 
++        // DCS Control (0051): max_file_mb is taken up to 2048.
++        for (const auto& [asked, kept] : {std::pair{1024, 1024}, std::pair{4096, 2048}}) {
++            const fs::path directory = logger_directory(
++                asked == 1024 ? "cap-1024" : "cap-4096",
++                "max_file_mb=" + std::to_string(asked) + "\r\n");
++            xrfg::BridgeFlightLogger capped;
++            capped.initialize(directory);
++            const fs::path capped_path = capped.log_path();
++            capped.shutdown();
++            const auto lines = lines_of(read(capped_path));
++            require(!lines.empty() && lines.front().find(" op=logger ") != std::string::npos &&
++                        field(lines.front(), " a=") == static_cast<unsigned long long>(kept),
++                "max_file_mb: the cap was not taken up to 2048");
++        }
++
++        // QueryPerformanceCounter ticks to microseconds.
++        LARGE_INTEGER frequency{};
++        QueryPerformanceFrequency(&frequency);
++        const auto now_ticks = [] {
++            LARGE_INTEGER now{};
++            QueryPerformanceCounter(&now);
++            return now.QuadPart;
++        };
++        const auto microseconds = [&frequency](long long ticks) {
++            return static_cast<double>(ticks) * 1e6 / static_cast<double>(frequency.QuadPart);
++        };
++        const auto percentile = [](std::vector<long long> values, double share) {
++            std::sort(values.begin(), values.end());
++            return values.empty() ? 0ll
++                : values[std::min(values.size() - 1, static_cast<std::size_t>(share * values.size()))];
++        };
++
++        // DCS Control (0051): 8 threads x 50,000 lines through the writer
++        // thread: every sequence number exactly once, each thread's lines in
++        // the order it logged them, no zero bytes.
++        {
++            const fs::path directory = logger_directory("stress", "max_file_mb=256\r\n");
++            xrfg::BridgeFlightLogger stress;
++            stress.initialize(directory);
++            require(stress.enabled(), "stress: logging did not start");
++            const fs::path stress_path = stress.log_path();
++            constexpr int kThreads = 8;
++            constexpr int kLines = 50000;
++            std::vector<std::thread> writers;
++            for (int writer = 0; writer < kThreads; ++writer) {
++                writers.emplace_back([&stress, writer] {
++                    for (int index = 0; index < kLines; ++index) {
++                        // Kept below the ring's 16,384 so no line is dropped:
++                        // what this checks is that none is lost or doubled.
++                        while (stress.test_counters().queued > 8192) {
++                            std::this_thread::yield();
++                        }
++                        stress.event(xrfg::BridgeFlightOperation::synthesis_pair, index, writer, 0, 0);
++                    }
++                });
++            }
++            for (auto& writer : writers) {
++                writer.join();
++            }
++            const auto counters = stress.test_counters();
++            require(counters.dropped == 0, "stress: lines were dropped");
++            require(counters.caller_file_writes == 0, "stress: a caller wrote the file");
++            stress.shutdown();
++            const std::string text = read(stress_path);
++            require(text.find('\0') == std::string::npos, "stress: the file has zero bytes");
++            const auto lines = lines_of(text);
++            require(lines.size() == static_cast<std::size_t>(kThreads) * kLines + 2,
++                "stress: the line count is wrong");
++            std::vector<unsigned char> seen(lines.size() + 1);
++            std::array<long long, kThreads> last{};
++            last.fill(-1);
++            for (const auto& line : lines) {
++                const auto sequence = field(line, "seq=");
++                require(sequence >= 1 && sequence <= lines.size() && seen[sequence] == 0,
++                    "stress: a sequence number is missing or doubled");
++                seen[sequence] = 1;
++                if (line.find(" op=synthesis_pair ") != std::string::npos) {
++                    const auto writer = field(line, " a=");
++                    const auto index = static_cast<long long>(field(line, " result="));
++                    require(writer < kThreads && index == last[writer] + 1,
++                        "stress: a thread's lines are out of order");
++                    last[writer] = index;
++                }
++            }
++            std::cout << "stress: " << lines.size() << " lines, " << counters.file_writes
++                      << " WriteFile calls\n";
++        }
++
++        // DCS Control (0051): a writer held up (as by a stalled disk): the
++        // callers never wait, a full ring drops lines, and the count is
++        // written once the writer catches up.
++        {
++            const fs::path directory = logger_directory("backpressure", "");
++            xrfg::BridgeFlightLogger stalled;
++            stalled.initialize(directory);
++            const fs::path stalled_path = stalled.log_path();
++            stalled.test_flush();
++            stalled.test_pause_writer(true);
++            constexpr int kLines = 40000;
++            std::vector<long long> costs;
++            costs.reserve(kLines);
++            for (int index = 0; index < kLines; ++index) {
++                const long long start = now_ticks();
++                stalled.event(xrfg::BridgeFlightOperation::synthesis_pair, index, 1, 2, 3);
++                costs.push_back(now_ticks() - start);
++            }
++            const auto counters = stalled.test_counters();
++            const double worst = microseconds(*std::max_element(costs.begin(), costs.end()));
++            const double p999 = microseconds(percentile(costs, 0.999));
++            std::cout << "backpressure: dropped " << counters.dropped << " of " << kLines
++                      << ", caller p99.9 " << p999 << " us, max " << worst << " us\n";
++            require(counters.dropped > 0 && counters.dropped + counters.queued == kLines,
++                "backpressure: a full ring did not drop and count lines");
++            require(p999 < 1000.0, "backpressure: a caller waited on the stalled writer");
++            stalled.test_pause_writer(false);
++            stalled.test_flush();
++            stalled.shutdown();
++            const std::string text = read(stalled_path);
++            require(text.find('\0') == std::string::npos, "backpressure: the file has zero bytes");
++            const std::string record =
++                " a=" + std::to_string(counters.dropped) + " b=0 c=3\r\n";
++            require(text.find(record) != std::string::npos &&
++                        text.find(record) == text.rfind(record) &&
++                        text.find(" op=logger result=0 dur_us=0" + record) != std::string::npos,
++                "backpressure: the dropped-lines record is missing");
++            std::size_t kept = 0;
++            for (const auto& line : lines_of(text)) {
++                kept += line.find(" op=synthesis_pair ") != std::string::npos ? 1 : 0;
++            }
++            require(kept == kLines - counters.dropped, "backpressure: kept lines miscounted");
++        }
++
++        // DCS Control (0051): what a call costs its caller. No WriteFile on
++        // the caller's thread, and p99 under 20 us, with 4 threads logging;
++        // flush_each_event=1 writes on the caller's thread, for comparison.
++        {
++            const fs::path directory = logger_directory("cost", "max_file_mb=256\r\n");
++            xrfg::BridgeFlightLogger costly;
++            costly.initialize(directory);
++            constexpr int kThreads = 4;
++            constexpr int kLines = 50000;
++            std::vector<std::vector<long long>> costs(kThreads);
++            std::vector<std::thread> writers;
++            for (int writer = 0; writer < kThreads; ++writer) {
++                writers.emplace_back([&, writer] {
++                    auto& mine = costs[static_cast<std::size_t>(writer)];
++                    mine.reserve(kLines);
++                    for (int index = 0; index < kLines; ++index) {
++                        while (costly.test_counters().queued > 8192) {
++                            std::this_thread::yield();
++                        }
++                        const long long start = now_ticks();
++                        costly.event(xrfg::BridgeFlightOperation::frame, index, writer, 2, 3);
++                        mine.push_back(now_ticks() - start);
++                    }
++                });
++            }
++            for (auto& writer : writers) {
++                writer.join();
++            }
++            std::vector<long long> all;
++            for (const auto& mine : costs) {
++                all.insert(all.end(), mine.begin(), mine.end());
++            }
++            costly.test_flush();
++            const auto counters = costly.test_counters();
++            costly.shutdown();
++            const double p50 = microseconds(percentile(all, 0.5));
++            const double p99 = microseconds(percentile(all, 0.99));
++            std::cout << "caller cost (async, " << kThreads << " threads): p50 " << p50
++                      << " us, p99 " << p99 << " us, max "
++                      << microseconds(*std::max_element(all.begin(), all.end()))
++                      << " us; WriteFile " << counters.file_writes << " (callers "
++                      << counters.caller_file_writes << ") for " << all.size() << " lines\n";
++            require(counters.caller_file_writes == 0 && counters.file_writes > 0,
++                "caller cost: a caller wrote the file");
++            require(p99 < 20.0, "caller cost: p99 over 20 us");
++
++            const fs::path sync_directory =
++                logger_directory("cost-sync", "flush_each_event=1\r\n");
++            xrfg::BridgeFlightLogger synchronous;
++            synchronous.initialize(sync_directory);
++            const fs::path sync_path = synchronous.log_path();
++            std::vector<long long> sync_costs;
++            for (int index = 0; index < 2000; ++index) {
++                const long long start = now_ticks();
++                synchronous.event(xrfg::BridgeFlightOperation::frame, index, 9, 2, 3);
++                sync_costs.push_back(now_ticks() - start);
++            }
++            const auto sync_counters = synchronous.test_counters();
++            require(sync_counters.caller_file_writes >= 2001 &&
++                        read(sync_path).find(" op=frame result=1999 dur_us=0 a=9 b=2 c=3\r\n") !=
++                            std::string::npos,
++                "flush_each_event=1: lines were not written on the caller's thread");
++            synchronous.shutdown();
++            std::cout << "caller cost (flush_each_event=1): p50 "
++                      << microseconds(percentile(sync_costs, 0.5)) << " us, p99 "
++                      << microseconds(percentile(sync_costs, 0.99)) << " us\n";
++        }
++
+         std::cout << "Bridge flight logger tests passed.\n";
+         return 0;
+     } catch (const std::exception& exception) {

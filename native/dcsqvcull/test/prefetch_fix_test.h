@@ -439,6 +439,44 @@ void Stress(void** imp, void* impKernel) {
         "prefetch stress: switching under load never faults, leaves nothing in flight, restores the slots");
 }
 
+// R39 [Prefetch] TableBits: K distinct ranges cycling within the window. With
+// the 2^16 table, collisions let about e^(-K/2^16)... of the repeats through;
+// with 2^20 nearly every repeat is found. Same keys and windows either way.
+double RepeatSkipShare(unsigned bits, int keys) {
+  Check(pffix::SetTableBits(bits) && pffix::TableBits() == pffix::ClampTableBits(bits), "prefetch table: size set");
+  int skipped = 0, total = 0;
+  uint64_t now = 5000;
+  for (int cycle = 0; cycle < 3; ++cycle)
+    for (int k = 0; k < keys; ++k, ++now) {
+      const bool s = pffix::SeenRecently(0x10000000ull + static_cast<ULONG_PTR>(k) * 0x10000, 1, 0x10000, now / 1000,
+                                         1000000);
+      if (cycle > 0) {
+        skipped += s;
+        ++total;
+      }
+    }
+  return total ? double(skipped) / total : 0;
+}
+void TableBits() {
+  const int kKeys = 30000;
+  const double s16 = RepeatSkipShare(16, kKeys);
+  const double s20 = RepeatSkipShare(20, kKeys);
+  printf("     (prefetch table: %d ranges cycling, repeats found %.1f %% with 2^16, %.1f %% with 2^20)\n", kKeys,
+         100 * s16, 100 * s20);
+  Check(s16 < 0.80 && s20 > 0.95, "prefetch table: a 2^20 table finds the repeats a 2^16 table loses to collisions");
+  // First calls are never skipped, at any size (the hints DCS gets per window are unchanged).
+  pffix::SetTableBits(22);
+  bool firstPass = true;
+  for (int k = 0; k < 1000; ++k)
+    firstPass &= !pffix::SeenRecently(0x7000000000ull + static_cast<ULONG_PTR>(k) * 4096, 2, 8192, 100, 1000);
+  Check(firstPass && pffix::TableBits() == 22, "prefetch table: 2^22 keeps first calls passing");
+  Check(pffix::ClampTableBits(3) == 16 && pffix::ClampTableBits(40) == 22, "prefetch table: bits clamped to 16-22");
+  pffix::SetTableBits(16);
+  Check(pffix::TableBits() == 16 && pffix::g_tab.load() == &pffix::g_staticTable,
+        "prefetch table: back to the static 2^16 table");
+  for (auto& e : pffix::g_table) e.store(0);
+}
+
 void Run() {
   wchar_t tmp[MAX_PATH] = {};
   GetTempPathW(MAX_PATH, tmp);
@@ -454,6 +492,7 @@ void Run() {
   if (!imp || !g_probeStored) return;
 
   Pure();
+  TableBits();
   Modes(imp, impKernel);
   Unload(imp, impKernel);
   OldFix(imp, impKernel);

@@ -182,6 +182,15 @@ std::atomic<void (*)(void* ctx)> g_afterEcl{nullptr};
 inline void NotifyEcl(void* ctx) {
   if (auto f = g_afterEcl.load(std::memory_order_acquire)) f(ctx);
 }
+// R53: called before every ExecuteCommandList on an immediate context (focus_bcast_run.h closes an open broadcast
+// block first: a command list binds its own targets). Set by focus_bcast_run.h; nullptr when unused.
+std::atomic<void (*)(void* ctx)> g_beforeEcl{nullptr};
+inline void NotifyBeforeEcl(void* ctx) {
+  if (auto f = g_beforeEcl.load(std::memory_order_acquire)) f(ctx);
+}
+// Called after d3d11 rewrote the context table (slots 7..147: CSSetShader too) and our hooks went back in, on the
+// thread that found it (the filtering thread). Set by chain_fast.h (its CSSetShader hook goes back in as well).
+std::atomic<void (*)()> g_afterRewrite{nullptr};
 void** g_table = nullptr;            // its vtable (inside the context object)
 int g_slot[kHookCount] = {};
 void* volatile g_orig[kHookCount] = {};  // d3d11's entries, refreshed with every re-hook
@@ -202,6 +211,8 @@ struct Counters {
 };
 Counters g_c;
 std::atomic<uint64_t> g_rewrites{0}, g_switches{0};
+// R48: re-hooks refused because another hook of this payload held one of our slots (see RepatchLocked).
+std::atomic<uint64_t> g_oursOnTop{0};
 std::mutex g_sampleMutex;
 std::vector<std::string> g_samples;
 
@@ -209,6 +220,7 @@ void ResetCounters() {
   memset(&g_c, 0, sizeof(g_c));
   g_rewrites = 0;
   g_switches = 0;
+  g_oursOnTop = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +387,7 @@ void STDMETHODCALLTYPE H_ClearState(Ctx* c) {
   if (Mine(c)) g_sh.ForgetAll();
 }
 void STDMETHODCALLTYPE H_ExecuteCommandList(Ctx* c, ID3D11CommandList* l, BOOL restore) {
+  NotifyBeforeEcl(c);  // R53
   Reset(c);
   Orig<decltype(&H_ExecuteCommandList)>(kHExecuteCommandList)(c, l, restore);
   if (Mine(c)) g_sh.ForgetAll();
@@ -684,11 +697,24 @@ __declspec(noinline) void Capture(Ctx* c) {
 // Puts the hooks back where d3d11 replaced them, taking d3d11's new pointer
 // as the original. The shadow is forgotten first: calls made while a hook was
 // gone were not seen. Caller holds g_patchLock.
+// R48: never over another hook of this payload. Such a hook took ours as its
+// original when it went in (fixation_depth.h's state-call toggle points, a
+// re-arming suite hook); taking it as ours made the two forward to each other
+// until the stack ran out (R47: DCS gone without a crash report). It is left on
+// top: the slot's calls reach ours through it, or, if it forwards to d3d11
+// directly, each site call of that op finds the slot not ours (Hooked), forgets
+// the shadow and forwards; ours goes back once the slot shows d3d11 again.
 bool RepatchLocked() {
   void** vt = g_table;
   bool reverted = false;
-  for (int i = 0; i < kHookCount; ++i)
-    if (On(i) && vt[g_slot[i]] != kHooks[i]) reverted = true;
+  for (int i = 0; i < kHookCount; ++i) {
+    if (!On(i) || vt[g_slot[i]] == kHooks[i]) continue;
+    if (d3ds::InPayload(vt[g_slot[i]])) {
+      g_oursOnTop.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
+    reverted = true;
+  }
   if (!reverted) return false;
   g_sh.ForgetAll();
   g_rewrites.fetch_add(1, std::memory_order_relaxed);
@@ -696,11 +722,12 @@ bool RepatchLocked() {
   for (int i = 0; i < kHookCount; ++i) {
     if (!On(i)) continue;
     void* cur = vt[g_slot[i]];
-    if (cur == kHooks[i]) continue;
+    if (cur == kHooks[i] || d3ds::InPayload(cur)) continue;  // R48: not over a hook of ours
     if (cur != g_orig[i]) g_switches.fetch_add(1, std::memory_order_relaxed);
     g_orig[i] = cur;
     d3ds::WriteTablePointer(&vt[g_slot[i]], kHooks[i]);
   }
+  if (auto f = g_afterRewrite.load(std::memory_order_acquire)) f();
   return true;
 }
 
@@ -844,54 +871,10 @@ bool WriteSitesSuspended(bool on) {
       memcpy(want[i], g_savedSite[i], 6);
     }
   }
-  for (int attempt = 0; attempt < 50; ++attempt) {
-    HANDLE held[2048];
-    int nHeld = 0;
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap == INVALID_HANDLE_VALUE) return false;
-    THREADENTRY32 te{sizeof(te)};
-    bool clear = true;
-    for (BOOL ok = Thread32First(snap, &te); ok && nHeld < 2048; ok = Thread32Next(snap, &te)) {
-      if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId()) continue;
-      HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
-      if (!h) continue;
-      if (SuspendThread(h) == static_cast<DWORD>(-1)) {
-        CloseHandle(h);
-        continue;
-      }
-      held[nHeld++] = h;
-      CONTEXT ctx{};
-      ctx.ContextFlags = CONTEXT_CONTROL;
-      if (GetThreadContext(h, &ctx))
-        for (int i = 0; i < g_siteCount; ++i) {
-          const uintptr_t a = reinterpret_cast<uintptr_t>(g_base + g_sites[i].rva);
-          if (ctx.Rip > a && ctx.Rip < a + 6) clear = false;
-        }
-    }
-    CloseHandle(snap);
-    bool done = false;
-    if (clear) {
-      done = true;
-      for (int i = 0; i < g_siteCount; ++i) {
-        uint8_t* site = g_base + g_sites[i].rva;
-        DWORD old;
-        if (!VirtualProtect(site, 6, PAGE_EXECUTE_READWRITE, &old)) {
-          done = false;
-          continue;
-        }
-        memcpy(site, want[i], 6);
-        VirtualProtect(site, 6, old, &old);
-        FlushInstructionCache(GetCurrentProcess(), site, 6);
-      }
-    }
-    for (int k = 0; k < nHeld; ++k) {
-      ResumeThread(held[k]);
-      CloseHandle(held[k]);
-    }
-    if (clear) return done;
-    Sleep(2);
-  }
-  return false;
+  // R90: qvpatch::WriteSuspended (patch_threads.h; [General] PatchMode).
+  qvpatch::Site s[kMaxSites];
+  for (int i = 0; i < g_siteCount; ++i) s[i] = {g_base + g_sites[i].rva, want[i], 6};
+  return qvpatch::WriteSuspended(s, g_siteCount, 50);
 }
 
 void UnhookTables() {
@@ -1044,11 +1027,12 @@ void LogCounters(const char* label, double frames) {
   }
   Log("  split filter (%s): ops 0x%x, %.0f frames, %s%s; site calls %.0f/frame, skipped %.0f/frame (%.1f%%), foreign calls "
       "%.0f/frame, foreign invalidations %.1f/frame, table rewrites found at a site %.1f/frame (re-hooks %llu, "
-      "implementation switches %llu), other context or not live %.0f/frame, verify mismatches %llu",
+      "implementation switches %llu, refused over another hook of ours %llu), other context or not live %.0f/frame, "
+      "verify mismatches %llu",
       label, g_active, frames, Live() ? "live" : "not live", g_disabled.load() ? ", DISABLED" : "", calls / frames,
       skipped / frames, calls ? 100.0 * skipped / calls : 0.0, foreign / frames, c.resets / frames, c.lost / frames,
       static_cast<unsigned long long>(g_rewrites.load()), static_cast<unsigned long long>(g_switches.load()),
-      c.other / frames, static_cast<unsigned long long>(mism));
+      static_cast<unsigned long long>(g_oursOnTop.load()), c.other / frames, static_cast<unsigned long long>(mism));
   for (int i = 0; i < kOpCount; ++i) {
     if (!c.calls[i] && !c.foreign[i]) continue;
     Log("    %-8s site calls/frame %7.0f  skipped %5.1f%%  foreign calls/frame %6.0f  mismatches %llu", kOpNames[i],

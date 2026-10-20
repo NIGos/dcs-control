@@ -63,21 +63,22 @@ public static class TobiiDesktop
         return (stopped, errors);
     }
 
-    /// <summary>Starts the services <see cref="Pause"/> stopped; returns what went wrong.</summary>
-    public static IReadOnlyList<string> Resume(IEnumerable<string> services)
+    /// <summary>Starts the services <see cref="Pause"/> stopped; returns what went wrong. Without <paramref name="wait"/>
+    /// the start is only requested (logoff and shutdown leave a few seconds for everything).</summary>
+    public static IReadOnlyList<string> Resume(IEnumerable<string> services, bool wait = true)
     {
         var errors = new List<string>();
         foreach (var service in services)
         {
             if (State(service) == "RUNNING") continue;
-            var (ok, message) = Control("start", service, "RUNNING");
+            var (ok, message) = Control("start", service, "RUNNING", wait);
             if (!ok) errors.Add($"Start {service}: {message}");
         }
         return errors;
     }
 
     /// <summary>The service's state as sc.exe reports it ("RUNNING", "STOPPED", …); null when it cannot be queried.</summary>
-    private static string? State(string service)
+    public static string? State(string service)
     {
         var (exit, output) = Sc("query", service);
         if (exit != 0) return null;
@@ -85,11 +86,12 @@ public static class TobiiDesktop
         return line?.Split(' ', StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(3);
     }
 
-    private static (bool Ok, string Message) Control(string verb, string service, string target)
+    private static (bool Ok, string Message) Control(string verb, string service, string target, bool wait = true)
     {
         var (exit, output) = Sc(verb, service);
         // 1062: not started (stop), 1056: already running (start).
         if (exit != 0 && exit != 1062 && exit != 1056) return (false, output.Trim().Split('\n').LastOrDefault()?.Trim() ?? $"sc {verb} failed ({exit})");
+        if (!wait) return (true, "requested");
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
         while (DateTime.UtcNow < deadline)
         {

@@ -19,7 +19,7 @@ public sealed record FlightSources(string? DcsLog, string? PimaxLogDirectory = n
 
 /// <summary>A summary of the last DCS session, read from logs after DCS exits. Parts without a source are null.</summary>
 public sealed record FlightSummary(DateTimeOffset Start, DateTimeOffset End, bool Closed, int? DcsPid, HeadsetFrames? Headset, FramegenShare? Framegen,
-    FrameTimes? FrameTime, NeuralState? Dlss5, BoostResult? Boost, PrefetchResult? Prefetch, EyeTrackingState? EyeTracking = null)
+    FrameTimes? FrameTime, NeuralState? Dlss5, BoostResult? Boost, PrefetchResult? Prefetch, EyeTrackingState? EyeTracking = null, FrameCap? Cap = null)
 {
     public TimeSpan Duration => End - Start;
 }
@@ -28,7 +28,8 @@ public sealed record FlightSummary(DateTimeOffset Start, DateTimeOffset End, boo
 /// <param name="Missed">Frames the runtime had to show without a new application frame.</param>
 public sealed record HeadsetFrames(double AverageFps, double CompositorFps, double AtRefreshShare, long Missed, long Discarded, int Seconds);
 /// <summary>Seconds OFXR ran at each frame multiplier (from its once-a-second latency_status), and its switches.</summary>
-public sealed record FramegenShare(int Seconds2x, int Seconds3x, int Switches, bool Adaptive)
+/// <param name="Seconds1x">Seconds at full rate with generation paused (adaptive cadence's 1X).</param>
+public sealed record FramegenShare(int Seconds2x, int Seconds3x, int Switches, bool Adaptive, int Seconds1x = 0)
 {
     public double Share3x => Seconds2x + Seconds3x == 0 ? 0 : (double)Seconds3x / (Seconds2x + Seconds3x);
 }
@@ -43,6 +44,18 @@ public sealed record BoostResult(string State, int Moved, int Restored, IReadOnl
 /// <summary>Quad Views' "Eye tracking is supported" or "is not supported" for the last session.</summary>
 public sealed record EyeTrackingState(bool Supported);
 public sealed record PrefetchResult(double AverageCallsPerSecond, double PeakCallsPerSecond, double SkippedPercent, int Reports);
+/// <summary>How long the frame rate was held by the headset runtime (Virtual Desktop's or Meta's motion smoothing at
+/// half the refresh rate, for example), from the engine optimizations module's 10 s performance reports. While held,
+/// neither CPU nor GPU is the limit and no optimization can raise the frame rate.</summary>
+/// <param name="Fps">The rate it was held at, when the module named it (36 for 72 Hz / 2); null otherwise.</param>
+/// <param name="RefreshHz">The headset refresh rate it was derived from; null when not named.</param>
+/// <param name="Divider">Refresh rate / held rate (2 for 72 Hz / 2); 1 is DCS at the full refresh rate, not a hold.</param>
+/// <param name="CappedReports">Reports the module judged capped.</param>
+/// <param name="Reports">All reports of the session.</param>
+public sealed record FrameCap(double? Fps, double? RefreshHz, int CappedReports, int Reports, int? Divider = null)
+{
+    public double Share => Reports == 0 ? 0 : (double)CappedReports / Reports;
+}
 
 /// <summary>Reads <see cref="FlightSummary"/> defensively and cheaply: only the start and tail of dcs.log, only the
 /// lines that matter in the other logs, and each parsed file is cached by size and timestamp.</summary>
@@ -57,8 +70,9 @@ public static partial class LastFlight
         if (sources.DcsLog is not { } log || Session(log) is not { } session) return null;
         var (start, end, closed) = session;
         var (ofxrPath, ofxrPid) = FindOfxrLog(sources.ManagedProfiles, start, end);
-        var ofxr = ofxrPath is null ? null : Cached(ofxrPath, () => ParseOfxr(ReadLines(ofxrPath, MaxTail, l => l.Contains("op=latency_status ", StringComparison.Ordinal) || l.Contains("op=adaptive_switch ", StringComparison.Ordinal))));
-        var boost = sources.BoostStatus is { } status && File.Exists(status) ? Cached(status, () => ParseBoostStatus(File.ReadAllText(status))) : null;
+        // A log still being written or replaced by its program is skipped, never the whole summary.
+        var ofxr = Safe(() => ofxrPath is null ? null : ParseOfxr(OfxrLines(ofxrPath, ofxrPid)));
+        var boost = Safe(() => sources.BoostStatus is { } status && File.Exists(status) ? Cached(status, () => ParseBoostStatus(File.ReadAllText(status))) : null);
         if (boost is not null && !(boost.UpdatedAt >= start.AddMinutes(-1) && boost.UpdatedAt <= end.AddMinutes(10))) boost = null;
         var pid = ofxrPid ?? boost?.DcsPid;
         return new(start, end, closed, pid,
@@ -67,7 +81,8 @@ public static partial class LastFlight
             ReadCheeky(sources.DcsBin, start, end),
             boost?.Result,
             ReadPrefetch(PrefetchLog(log), start, end),
-            ReadEyeTracking(sources.QuadViewsLog, start, end));
+            ReadEyeTracking(sources.QuadViewsLog, start, end),
+            ReadFrameCap(ModuleLog(log), start, end));
     }
 
     // ---- Quad Views --------------------------------------------------------------------------------------------------
@@ -206,6 +221,83 @@ public static partial class LastFlight
     }
     [GeneratedRegex(@"^ofxr-bridge-flight-(\d{8}-\d{6})-pid(\d+)\.log$", RegexOptions.IgnoreCase)] private static partial Regex OfxrFileRegex();
 
+    /// <summary>Deletes all but the newest <paramref name="keep"/> OFXR flight logs (with their .prev segments) across
+    /// the profiles: every DCS start writes one, up to twice its size cap, and only the last flight is read. A log in
+    /// use is left alone. Returns how many files were deleted.</summary>
+    public static int PruneOfxrLogs(string? profiles, int keep = 8)
+    {
+        var deleted = 0;
+        try
+        {
+            if (profiles is null || !Directory.Exists(profiles)) return 0;
+            var old = Directory.EnumerateDirectories(profiles).Select(d => Path.Combine(d, "ofxr")).Where(Directory.Exists)
+                .SelectMany(d => Directory.EnumerateFiles(d, "ofxr-bridge-flight-*.log"))
+                .Select(f => (Path: f, Match: OfxrFileRegex().Match(Path.GetFileName(f))))
+                .Where(x => x.Match.Success)
+                .OrderByDescending(x => x.Match.Groups[1].Value, StringComparer.Ordinal).ThenByDescending(x => x.Path, StringComparer.OrdinalIgnoreCase)
+                .Skip(keep).Select(x => x.Path).ToList();
+            foreach (var log in old)
+                foreach (var file in new[] { OfxrPreviousSegment(log), log })
+                    try { if (File.Exists(file)) { File.Delete(file); deleted++; } }
+                    catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        return deleted;
+    }
+
+    /// <summary>Deletes the smooth cursor's diagnostic captures (cursor-capture-&lt;pid&gt;-&lt;n&gt;-*.bmp and -info.txt, OFXR
+    /// patch 0011) of all but the newest <paramref name="keep"/> DCS processes across the profiles: with the flight log on,
+    /// every DCS start adds up to 8 sets of about 3 MB, and nothing in the app reads them. The newest process's captures
+    /// always stay; a file in use is left alone. Returns how many files were deleted.</summary>
+    public static int PruneCursorCaptures(string? profiles, int keep = 4)
+    {
+        var deleted = 0;
+        try
+        {
+            if (profiles is null || !Directory.Exists(profiles)) return 0;
+            var old = Directory.EnumerateDirectories(profiles).Select(d => Path.Combine(d, "ofxr")).Where(Directory.Exists)
+                .SelectMany(d => new DirectoryInfo(d).EnumerateFiles("cursor-capture-*"))
+                .Select(f => (File: f, Match: CursorCaptureRegex().Match(f.Name)))
+                .Where(x => x.Match.Success)
+                .GroupBy(x => x.File.DirectoryName + "|" + x.Match.Groups[1].Value, StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(g => g.Max(x => x.File.LastWriteTimeUtc)).ThenByDescending(g => g.Key, StringComparer.OrdinalIgnoreCase)
+                .Skip(Math.Max(1, keep)).SelectMany(g => g.Select(x => x.File)).ToList();
+            foreach (var file in old)
+                try { file.Delete(); deleted++; }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        return deleted;
+    }
+    [GeneratedRegex(@"^cursor-capture-(\d+)-\d+-(?:previous\.bmp|current\.bmp|overview\.bmp|info\.txt)$", RegexOptions.IgnoreCase)] private static partial Regex CursorCaptureRegex();
+
+    /// <summary>The flight log's summary lines, after those of its .prev segment when that belongs to the same session:
+    /// at its size cap OFXR renames the log to &lt;name&gt;.prev.log and starts it again (fork patch 0046), so a long
+    /// flight is in both. The segment counts only when its header record names the same process.</summary>
+    private static List<string>? OfxrLines(string path, int? pid)
+    {
+        static bool Keep(string l) => l.Contains("op=latency_status ", StringComparison.Ordinal) || l.Contains("op=adaptive_switch ", StringComparison.Ordinal);
+        var current = Cached(path, () => ReadLines(path, MaxTail, Keep));
+        var previous = OfxrPreviousSegment(path);
+        // The earlier segment is optional: unreadable or another process's, the summary covers the current one.
+        List<string>? earlier = null;
+        if (pid is { } p && File.Exists(previous))
+            earlier = Safe(() => OfxrHeaderPid(ReadHead(previous, 512)) == p ? Cached(previous, () => ReadLines(previous, MaxTail, Keep)) : null);
+        return earlier is null ? current : current is null ? earlier : [.. earlier, .. current];
+    }
+
+    /// <summary>ofxr-bridge-flight-…-pidN.log → ofxr-bridge-flight-…-pidN.prev.log, the segment OFXR rotated out last.</summary>
+    public static string OfxrPreviousSegment(string path) => Path.Combine(Path.GetDirectoryName(path) ?? "", Path.GetFileNameWithoutExtension(path) + ".prev" + Path.GetExtension(path));
+
+    /// <summary>The process id in a flight log's header record (its first line: op=logger, c = the process id), or null.</summary>
+    public static int? OfxrHeaderPid(string head)
+    {
+        var end = head.IndexOf('\n');
+        var m = OfxrHeaderRegex().Match(end < 0 ? head : head[..end]);
+        return m.Success && int.TryParse(m.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var pid) ? pid : null;
+    }
+    [GeneratedRegex(@"\bphase=I op=logger result=-?\d+ dur_us=\d+ a=\d+ b=\d+ c=(\d+)\r?$")] private static partial Regex OfxrHeaderRegex();
+
     public sealed record OfxrResult(FramegenShare? Share, FrameTimes? Times);
 
     /// <summary>latency_status (once a second: result = multiplier, +10 under adaptive control; a = that second's p90 of
@@ -213,7 +305,7 @@ public static partial class LastFlight
     public static OfxrResult? ParseOfxr(IEnumerable<string>? lines)
     {
         if (lines is null) return null;
-        int two = 0, three = 0, switches = 0; var adaptive = false; var frames = new List<double>();
+        int one = 0, two = 0, three = 0, switches = 0; var adaptive = false; var frames = new List<double>();
         foreach (var line in lines)
         {
             var m = OfxrLineRegex().Match(line);
@@ -224,15 +316,19 @@ public static partial class LastFlight
             if (m.Groups[1].Value == "latency_status")
             {
                 adaptive |= result >= 10;
-                if (result % 10 == 2) two++; else if (result % 10 == 3) three++;
+                // 11 is adaptive cadence at 1X (generation paused at full rate).
+                if (result == 11) one++; else if (result % 10 == 2) two++; else if (result % 10 == 3) three++;
                 if (a > 0 && a < 1_000_000) frames.Add(a / 1000.0);
             }
-            // Reason 5 is adaptive control turned on or off; the others change the multiplier between 2 and 3.
+            // Reason 5 is adaptive control turned on or off; the others change the multiplier between 2 and 3. Adaptive
+            // cadence: 8 enters 1X, 9-12 leave it; 13 turns cadence on or off.
+            else if (result is >= 8 and <= 12) switches++;
+            // 13 with a and b both 2 or 3 is cadence moving the session between 3X and 2X; with 0 it only turns cadence on or off.
             else if (result != 5 && a != b && a is 2 or 3 && b is 2 or 3) switches++;
         }
-        if (two + three == 0 && frames.Count == 0) return null;
+        if (one + two + three == 0 && frames.Count == 0) return null;
         frames.Sort();
-        return new(two + three == 0 ? null : new(two, three, switches, adaptive), frames.Count == 0 ? null : new(Percentile(frames, .5), Percentile(frames, .9), frames.Count));
+        return new(one + two + three == 0 ? null : new(two, three, switches, adaptive, one), frames.Count == 0 ? null : new(Percentile(frames, .5), Percentile(frames, .9), frames.Count));
     }
     [GeneratedRegex(@"\bop=(latency_status|adaptive_switch) result=(-?\d+) dur_us=\d+ a=(\d+) b=(\d+)")] private static partial Regex OfxrLineRegex();
     private static double Percentile(List<double> sorted, double q) => Math.Round(sorted[Math.Clamp((int)Math.Ceiling(q * sorted.Count) - 1, 0, sorted.Count - 1)], 1);
@@ -347,7 +443,61 @@ public static partial class LastFlight
     }
     [GeneratedRegex(@"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) calls/s=(\d+(?:\.\d+)?) skipped=(\d+(?:\.\d+)?)%")] private static partial Regex PrefetchRegex();
 
+    // ---- Frame rate held by the runtime ------------------------------------------------------------------------------
+
+    /// <summary>The engine optimizations module's DcsQvCull.log next to <paramref name="dcsLog"/>'s Saved Games folder.</summary>
+    public static string? ModuleLog(string dcsLog) =>
+        Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(dcsLog))) is { } savedGames ? EngineOptimizations.ModuleLog(Path.Combine(savedGames, "Scripts", "DcsQvCull")) : null;
+
+    private static FrameCap? ReadFrameCap(string? path, DateTimeOffset start, DateTimeOffset end)
+    {
+        try
+        {
+            if (path is null || !File.Exists(path)) return null;
+            // The module starts its log afresh with each DCS start and stamps lines with the time of day only, so the
+            // log belongs to this session when it was last written during it.
+            var written = new DateTimeOffset(File.GetLastWriteTimeUtc(path), TimeSpan.Zero);
+            if (written < start.AddMinutes(-1) || written > end.AddMinutes(10)) return null;
+            return ParseFrameCap(Cached(path, () => ReadLines(path, 8L * 1024 * 1024, l => l.Contains(" perf: fps=", StringComparison.Ordinal) || l.Contains("governor: capped at", StringComparison.Ordinal) || l.Contains("loader started", StringComparison.Ordinal))) ?? []);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    /// <summary>"perf: fps=35.4 … verdict=capped 36.0 fps = 72/2 (…)" every 10 s, and "governor: capped at 36.0 fps
+    /// (72 Hz / 2)"; only the lines after the last loader start count (one DCS session). Null without reports.</summary>
+    public static FrameCap? ParseFrameCap(IEnumerable<string> lines)
+    {
+        int reports = 0, capped = 0; double? fps = null, hz = null; int? divider = null;
+        foreach (var line in lines)
+        {
+            if (line.Contains("loader started", StringComparison.Ordinal)) { reports = 0; capped = 0; fps = null; hz = null; divider = null; continue; }
+            if (GovernorCapRegex().Match(line) is { Success: true } g)
+            {
+                if (Number(Dot(g.Groups[1].Value)) is { } held && Number(Dot(g.Groups[2].Value)) is { } headset) { fps = held; hz = headset; divider = Divide(g.Groups[3].Value); }
+                continue;
+            }
+            var m = PerfRegex().Match(line);
+            if (!m.Success) continue;
+            reports++;
+            if (!m.Groups[1].Value.Equals("capped", StringComparison.OrdinalIgnoreCase)) continue;
+            capped++;
+            if (Number(Dot(m.Groups[2].Value)) is { } rate && Number(Dot(m.Groups[3].Value)) is { } refresh) { fps = rate; hz = refresh; divider = Divide(m.Groups[4].Value); }
+        }
+        return reports == 0 ? null : new(fps, hz, capped, reports, divider);
+        // Payloads before R62 wrote numbers in the user's locale ("36,0" in comma-decimal regions).
+        static string Dot(string text) => text.Replace(',', '.');
+        static int? Divide(string text) => int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n is >= 1 and <= 8 ? n : null;
+    }
+    [GeneratedRegex(@" perf: fps=\S+ .* verdict=([A-Za-z]+)(?: (\d+(?:[.,]\d+)?) fps = (\d+(?:[.,]\d+)?)/(\d+))?")] private static partial Regex PerfRegex();
+    [GeneratedRegex(@"governor: capped at (\d+(?:[.,]\d+)?) fps \((\d+(?:[.,]\d+)?) Hz / (\d+)\)")] private static partial Regex GovernorCapRegex();
+
     // ---- Reading ---------------------------------------------------------------------------------------------------
+
+    private static T? Safe<T>(Func<T?> read) where T : class
+    {
+        try { return read(); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+    }
 
     /// <summary>A finite number, or null: log lines are never trusted to be well formed.</summary>
     private static double? Number(string text) => double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) && double.IsFinite(value) ? value : null;

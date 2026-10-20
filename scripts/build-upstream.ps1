@@ -25,7 +25,10 @@ if ($Component -eq 'cheeky') {
     $testText = [IO.File]::ReadAllText($testFile).Replace('CheekyMixedCalibrationTests]=] PROPERTIES  TIMEOUT "60"', 'CheekyMixedCalibrationTests]=] PROPERTIES  TIMEOUT "300"')
     [IO.File]::WriteAllText($testFile, $testText)
 }
-& $nativeWrapper ctest @testOptions
+# ctest runs directly, not through msvc.cmd: cmd would split the exclusion pattern at its '|'.
+$ctest = (& $nativeWrapper where ctest | Select-Object -First 1)
+if (-not $ctest) { throw 'ctest not found.' }
+& $ctest @testOptions
 if ($LASTEXITCODE -ne 0) { throw 'Native tests failed.' }
 if ($Component -eq 'cheeky') {
     & $nativeWrapper ctest --test-dir $nativeBuild --output-on-failure --parallel 1 -R MixedCalibration

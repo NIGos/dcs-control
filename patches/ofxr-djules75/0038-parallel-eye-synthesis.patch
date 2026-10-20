@@ -1,0 +1,784 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1446,6 +1446,13 @@
+         add_test(NAME xrfg_d3d12_dcs_motion COMMAND xrfg_d3d12_history_tests)
+         set_tests_properties(xrfg_d3d12_dcs_motion PROPERTIES
+             ENVIRONMENT "XRFG_TEST_DCS_MOTION=1" TIMEOUT 600)
++        # DCS Control (0038): [ofxr] parallel_eye_synthesis (a synthesis queue
++        # per eye swapchain; at 2 the optical-flow jobs in one chain) against
++        # the shared queue, every byte of every output, then back to back; on
++        # NVIDIA hardware, it passes as skipped without one.
++        add_test(NAME xrfg_d3d12_parallel_eye_synthesis COMMAND xrfg_d3d12_history_tests)
++        set_tests_properties(xrfg_d3d12_parallel_eye_synthesis PROPERTIES
++            ENVIRONMENT "XRFG_TEST_PARALLEL_EYES=1" TIMEOUT 600)
+ 
+         # DCS Control (0031): the cockpit mask consumer against a fake producer
+         # (shared atlases and fences with NT handles, as DCS Control's engine
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -43,6 +43,20 @@
+     d3d11_publish,
+     runtime_identity,
+     presenter_submission,
++    // The presenter's holds and slots (openxr_layer.cpp). result=400 a 2X
++    // synthetic held for the deeper pipeline's depth (younger than a display
++    // period); 401 one held because its output was not written yet; 402 a
++    // synthetic too young to go that was handed over anyway, there being no
++    // previous frame to repeat (DCS: its pipelined presenter never keeps
++    // one) - written or not, the depth hold was not available; 405 (DCS
++    // Control 0038) one a period old or more and still not written at its
++    // hand-over, handed over anyway for the same reason (before 0038 this
++    // was counted in 402): the runtime waits for it on the GPU, and it is
++    // late only if it is still unwritten at the next slot. For 400-402 and
++    // 405, a is its age in microseconds, b the display period in
++    // microseconds, c its sequence. 403 and 404: the 3X deeper pipeline's
++    // re-presented and given-back slots (a the slots in force, b the period
++    // in microseconds, c the session's count).
+     presenter_transition,
+     nvidia_gpu_stages,
+     nvidia_gpu_total,
+diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
+--- a/include/xrfg/d3d12_frame_synthesizer.hpp
++++ b/include/xrfg/d3d12_frame_synthesizer.hpp
+@@ -242,6 +242,28 @@
+     float interpolation_fraction{0.5F};
+ };
+ 
++// DCS Control (0038): under `[ofxr] parallel_eye_synthesis=2`, the order in
++// which several synthesizers (one per application swapchain: DCS has one per
++// eye), each on a queue of its own, hand their NVIDIA optical-flow jobs to the
++// engine, shared between them. Each job waits for the one handed over before
++// it (whichever synthesizer it came from), so the engine never has two jobs
++// in flight, as when they all shared one queue. The last job's output fence
++// point, under mutex.
++struct D3D12OpticalFlowChain {
++    D3D12OpticalFlowChain() noexcept = default;
++    D3D12OpticalFlowChain(const D3D12OpticalFlowChain&) = delete;
++    D3D12OpticalFlowChain& operator=(const D3D12OpticalFlowChain&) = delete;
++    ~D3D12OpticalFlowChain() {
++        if (fence != nullptr) {
++            fence->Release();
++        }
++    }
++
++    std::mutex mutex;
++    ID3D12Fence* fence{}; // AddRef'd; null until the first job
++    std::uint64_t value{};
++};
++
+ // Owns a rolling exclusive history lease. Each resource supports at most two
+ // bounded projection views. They ordinarily map one-to-one to at most two
+ // array slices, while a single slice may also contain two non-overlapping
+@@ -403,6 +425,12 @@
+     // XRFG_DCS_MOTION); every pixel they do not hold for, as above.
+     void set_cockpit_mask(std::shared_ptr<D3D12CockpitMaskFrame> frame) noexcept;
+ 
++    // DCS Control (0038): the optical-flow order this synthesizer's NVIDIA
++    // jobs join (null: none, the default - its jobs wait only for its own).
++    // Set before the first submission; kept across reconfigure. Changes no
++    // pixel: only when the engine starts a job.
++    void set_optical_flow_chain(std::shared_ptr<D3D12OpticalFlowChain> chain) noexcept;
++
+     // DCS Control (0034): more synthetic destination images, after the ones
+     // initialize took (a second synthetic slot made when it is first needed):
+     // they take the next flat indices, in the order given. The same checks
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -194,6 +194,17 @@
+ // default and when the key is missing. Read once per session.
+ [[nodiscard]] bool read_content_time_fraction(
+     const std::filesystem::path& module_directory) noexcept;
++// DCS Control (0038). `[ofxr] parallel_eye_synthesis`: where synthesis runs
++// on a queue of the layer's own (a D3D12 session, or a D3D11 one through the
++// bridge), each application swapchain's synthesizer gets a queue of its own,
++// so one eye's synthesis stops waiting behind the other's, with the same
++// pixels. 1: the eyes' NVIDIA optical-flow jobs may run on the engine at the
++// same time; 2: they keep one order between them
++// (xrfg::D3D12OpticalFlowChain), one job at a time as on one queue. 0 (off),
++// the default, when the key is missing and for anything else. Read once per
++// session.
++[[nodiscard]] std::uint32_t read_parallel_eye_synthesis(
++    const std::filesystem::path& module_directory) noexcept;
+ // DCS Control (0034). `[ofxr] lazy_synthetic_slot`: adaptive 2X/3X at the
+ // shallow depth makes the synthetic ring's second slot (one more private
+ // swapchain per application swapchain) only when 3X, or adaptive cadence's
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -36,6 +36,12 @@
+ ; moves evenly when the game's frame times wander. 1 on, 0 off (default). Read
+ ; when the game starts its session.
+ content_time_fraction=0
++; Generate each eye's frame on a GPU queue of its own, so one eye no longer
++; waits for the other's: generated frames are ready sooner, with the same
++; pixels. 1 on; 2 on, but the eyes' motion search still one after the other
++; (no faster, for comparison); 0 off (default). Read when the game starts its
++; session.
++parallel_eye_synthesis=0
+ ; NVIDIA flow: the parts of the image with no motion left are composed the short
+ ; way, to the same image, for less GPU time. 1 on, 0 off (default). Read when
+ ; the game starts its session.
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -347,6 +347,22 @@
+     return read_ofxr_switch(module_directory, L"content_time_fraction", false);
+ }
+ 
++// DCS Control (0038).
++std::uint32_t read_parallel_eye_synthesis(
++    const std::filesystem::path& module_directory) noexcept {
++    try {
++        if (module_directory.empty()) {
++            return 0;
++        }
++        const auto ini_path = module_directory / L"ofxr_bridge.ini";
++        const UINT value = GetPrivateProfileIntW(
++            L"ofxr", L"parallel_eye_synthesis", 0, ini_path.c_str());
++        return value <= 2U ? value : 0U;
++    } catch (...) {
++        return 0;
++    }
++}
++
+ // DCS Control (0034).
+ bool read_lazy_synthetic_slot(const std::filesystem::path& module_directory) noexcept {
+     return read_ofxr_switch(module_directory, L"lazy_synthetic_slot", true);
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -1374,6 +1374,8 @@
+     // next submission's; previous_cockpit_mask the retained capture's; the
+     // pair_ ones are what the pair being recorded binds.
+     std::shared_ptr<D3D12CockpitMaskFrame> pending_cockpit_mask;
++    // DCS Control (0038): set_optical_flow_chain (null: none).
++    std::shared_ptr<D3D12OpticalFlowChain> optical_flow_chain;
+     std::shared_ptr<D3D12CockpitMaskFrame> previous_cockpit_mask;
+     std::shared_ptr<D3D12CockpitMaskFrame> pair_mask_current;
+     std::shared_ptr<D3D12CockpitMaskFrame> pair_mask_previous;
+@@ -7560,11 +7562,29 @@
+ 
+         std::uint64_t preceding_eye_value = 0;
+         std::uint64_t eye0_fence_value = 0;
++        // DCS Control (0038): with an optical-flow chain, the first job waits
++        // for the last job any synthesizer in it handed the engine; held for
++        // the whole loop, so the chain's order is the order of the executes.
++        std::unique_lock<std::mutex> chain_lock;
++        if (optical_flow_chain) {
++            chain_lock = std::unique_lock<std::mutex>(optical_flow_chain->mutex);
++        }
++        const auto advance_chain = [this](std::uint64_t value) noexcept {
++            if (!optical_flow_chain) return;
++            if (optical_flow_chain->fence != nvidia_fence.Get()) {
++                if (optical_flow_chain->fence != nullptr) {
++                    optical_flow_chain->fence->Release();
++                }
++                optical_flow_chain->fence = nvidia_fence.Get();
++                optical_flow_chain->fence->AddRef();
++            }
++            optical_flow_chain->value = value;
++        };
+         for (UINT eye_index = 0;
+              eye_index < image_description.DepthOrArraySize;
+              ++eye_index) {
+             NvidiaEyeResources& eye = slot.nvidia_eyes[eye_index];
+-            std::array<NV_OF_FENCE_POINT, 2> input_fence_points{};
++            std::array<NV_OF_FENCE_POINT, 3> input_fence_points{};
+             input_fence_points[0].fence = fence.Get();
+             input_fence_points[0].value = pack_ready_value;
+             UINT input_fence_count = 1;
+@@ -7574,6 +7594,17 @@
+                 input_fence_points[input_fence_count].value =
+                     preceding_eye_value;
+                 ++input_fence_count;
++            } else if (optical_flow_chain &&
++                       optical_flow_chain->fence != nullptr &&
++                       optical_flow_chain->fence != nvidia_fence.Get() &&
++                       optical_flow_chain->value != 0) {
++                // DCS Control (0038): another synthesizer's job, last in the
++                // chain (this one's own are ordered by the queue wait above).
++                input_fence_points[input_fence_count].fence =
++                    optical_flow_chain->fence;
++                input_fence_points[input_fence_count].value =
++                    optical_flow_chain->value;
++                ++input_fence_count;
+             }
+ 
+             NV_OF_EXECUTE_INPUT_PARAMS_D3D12 input{};
+@@ -7604,6 +7635,7 @@
+                 return result;
+             }
+             preceding_eye_value = next_nvidia_fence_value;
++            advance_chain(next_nvidia_fence_value); // DCS Control (0038)
+             if (eye_index == 0) {
+                 eye0_fence_value = next_nvidia_fence_value;
+                 if (marker_list) {
+@@ -7622,6 +7654,9 @@
+             last_nvidia_fence_value = next_nvidia_fence_value;
+             ++next_nvidia_fence_value;
+         }
++        if (chain_lock.owns_lock()) {
++            chain_lock.unlock(); // DCS Control (0038)
++        }
+         result = queue->Wait(nvidia_fence.Get(), last_nvidia_fence_value);
+         if (FAILED(result)) {
+             synthesis_enabled = false;
+@@ -8291,6 +8326,7 @@
+             impl_->history, current, synthetic, impl_->view_format, impl_->release_state,
+             backend, options, impl_->nvidia_gpu_timing_enabled);
+         if (FAILED(result)) return result;
++        candidate->optical_flow_chain = impl_->optical_flow_chain; // DCS Control (0038)
+         impl_ = std::move(candidate);
+         return S_OK;
+     } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+@@ -8432,6 +8468,18 @@
+         }
+     } catch (...) {
+     }
++}
++
++// DCS Control (0038).
++void D3D12FrameSynthesizer::set_optical_flow_chain(
++    std::shared_ptr<D3D12OpticalFlowChain> chain) noexcept {
++    try {
++        std::scoped_lock lock(mutex_);
++        if (impl_ != nullptr) {
++            impl_->optical_flow_chain = std::move(chain);
++        }
++    } catch (...) {
++    }
+ }
+ 
+ HRESULT D3D12FrameSynthesizer::set_smooth_cursor(
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1424,6 +1424,14 @@
+     // holds only this. Null when the application binds D3D11, where
+     // d3d12_queue is already the layer's own bridge queue.
+     Microsoft::WRL::ComPtr<ID3D12CommandQueue> d3d12_synthesis_queue;
++    // DCS Control (0038): `[ofxr] parallel_eye_synthesis` (0, 1 or 2), set
++    // only where there is a d3d12_synthesis_queue: each application
++    // swapchain's synthesizer then gets a queue of its own like it
++    // (own_synthesis_queue). At 2 their NVIDIA optical-flow jobs keep one
++    // order through optical_flow_chain (null otherwise). 0: every
++    // synthesizer shares d3d12_synthesis_queue, as before.
++    std::uint32_t parallel_eye_synthesis{};
++    std::shared_ptr<xrfg::D3D12OpticalFlowChain> optical_flow_chain;
+     // The queue the runtime is handed at session creation, in place of the
+     // application's, on a native D3D12 session. Null where that could not be
+     // arranged, and then d3d12_queue is what the runtime has.
+@@ -3235,6 +3243,34 @@
+     }
+ }
+ 
++// DCS Control (0038): under `[ofxr] parallel_eye_synthesis`, a synthesis
++// queue for one application swapchain alone, made like the session's
++// d3d12_synthesis_queue. DCS renders one swapchain per eye, and on one shared
++// queue the second eye's pack waited behind the first eye's whole synthesis,
++// the composition's wait for its optical flow included, so its flow could not
++// start before the first eye's had finished. On queues of their own both
++// eyes' flows go to the engine as soon as their packs are done, and the first
++// eye's composition runs beside the second's flow. Measured on an RTX 5090
++// (two 4800x4800 eyes, flow at 2400x2400), the pair is written about 0.9 ms
++// (2X) to 1.3 ms (3X) sooner at the median. At 2 the flows keep one order
++// (D3D12OpticalFlowChain) and that gain is gone: it is there for comparison.
++// Null - the shared queue - when off or where the queue cannot be made.
++[[nodiscard]] Microsoft::WRL::ComPtr<ID3D12CommandQueue> own_synthesis_queue(
++    SessionState& session) noexcept {
++    Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
++    if (session.parallel_eye_synthesis == 0 || !session.d3d12_synthesis_queue ||
++        !session.d3d12_device) {
++        return queue;
++    }
++    const D3D12_COMMAND_QUEUE_DESC description =
++        session.d3d12_synthesis_queue->GetDesc();
++    if (FAILED(session.d3d12_device->CreateCommandQueue(
++            &description, IID_PPV_ARGS(queue.GetAddressOf())))) {
++        queue.Reset();
++    }
++    return queue;
++}
++
+ template <typename Initialize>
+ [[nodiscard]] HRESULT initialize_synthesis_with_fallback(
+     SessionState& session,
+@@ -3526,12 +3562,17 @@
+             current.d3d12_resources.size(),
+             synthetic.d3d12_resources.size(),
+             state->create_info.arraySize};
++        // DCS Control (0038): under parallel_eye_synthesis, a queue of this
++        // swapchain's own (the synthesizer holds it); null: the shared one.
++        const Microsoft::WRL::ComPtr<ID3D12CommandQueue> own_queue =
++            own_synthesis_queue(*state->session);
+         const HRESULT gpu_result = initialize_synthesis_with_fallback(
+             *state->session, initialize_record,
+             [&](xrfg::D3D12OpticalFlowBackend backend) {
+         return synthesizer->initialize(
+             state->session->d3d12_device.Get(),
+-            state->session->d3d12_synthesis_queue
++            own_queue ? own_queue.Get()
++            : state->session->d3d12_synthesis_queue
+                 ? state->session->d3d12_synthesis_queue.Get()
+                 : state->session->d3d12_queue.Get(),
+             state->d3d12_history,
+@@ -3587,6 +3628,12 @@
+         generation->private_info = private_info; // DCS Control (0034)
+         if (state && state->session) {
+             configure_smooth_cursor(*state->session, *synthesizer); // 0010
++            // DCS Control (0038): at 2, the jobs of a queue of its own join
++            // the session's optical-flow order.
++            if (own_queue && state->session->optical_flow_chain) {
++                synthesizer->set_optical_flow_chain(
++                    state->session->optical_flow_chain);
++            }
+         }
+         generation->synthesizer = std::move(synthesizer);
+         if (failure_reason != nullptr) {
+@@ -5521,6 +5568,9 @@
+     // DCS Control (0037).
+     state->content_time_fraction =
+         xrfg::implicit_layer::read_content_time_fraction(current_layer_directory());
++    // DCS Control (0038): taken up with the synthesis queue below.
++    const std::uint32_t parallel_eye_synthesis =
++        xrfg::implicit_layer::read_parallel_eye_synthesis(current_layer_directory());
+     const bool cadence_requested =
+         state->cadence_configured && adaptive_requested && triple_binding;
+     if (triple_requested && triple_binding && !cadence_requested) {
+@@ -5728,6 +5778,17 @@
+             state->d3d12_synthesis_queue.Reset();
+         } else {
+             state->graphics_binding_capabilities |= 8ULL;
++            // DCS Control (0038): capability 256, a queue per swapchain;
++            // 512 as well with the optical-flow jobs one at a time.
++            if (parallel_eye_synthesis != 0) {
++                state->parallel_eye_synthesis = parallel_eye_synthesis;
++                state->graphics_binding_capabilities |= 256ULL;
++            }
++            if (parallel_eye_synthesis == 2) {
++                state->optical_flow_chain =
++                    std::make_shared<xrfg::D3D12OpticalFlowChain>();
++                state->graphics_binding_capabilities |= 512ULL;
++            }
+         }
+     }
+     xrfg::bridge_flight_logger().event(
+@@ -9708,10 +9769,13 @@
+                     } else {
+                         if (too_young || not_written) {
+                             // Recorded below as 402: would have held.
++                            // DCS Control (0038): 402 for one too young
++                            // (would have held for depth, 400), 405 for one
++                            // not written (would have held for it, 401).
+                             held_age_ns = std::chrono::duration_cast<
+                                 std::chrono::nanoseconds>(age).count();
+                             held_sequence = front->sequence;
+-                            held_reason = 402;
++                            held_reason = too_young ? 402 : 405;
+                         }
+                         request = front;
+                         state->presenter_submissions.pop_front();
+@@ -9866,6 +9930,10 @@
+             // of those, handed over anyway because there was no frame to
+             // repeat. a is its age in microseconds, b the display period in
+             // microseconds, c its sequence.
++            // DCS Control (0038): 402 is now the first of those only (too
++            // young: younger than a display period, written or not); 405 the
++            // second (a period old or more and still not written), handed
++            // over anyway. Same a, b, c.
+             log_triple_release(release_report);
+             // DCS VR Control (0007): result=403, a slot the 3X deeper
+             // pipeline re-presented to deepen itself. a= the slots now in
+diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
+--- a/tests/cockpit_mask_tests.cpp
++++ b/tests/cockpit_mask_tests.cpp
+@@ -1395,6 +1395,16 @@
+     const bool motion_on = xrfg::implicit_layer::read_dcs_motion(directory);
+     write("[ofxr]\ndcs_motion=0\n");
+     const bool motion_off = xrfg::implicit_layer::read_dcs_motion(directory);
++    // DCS Control (0038): and [ofxr] parallel_eye_synthesis, 0 unless 1 or 2.
++    const std::uint32_t parallel_missing = xrfg::implicit_layer::read_parallel_eye_synthesis(directory);
++    write("[ofxr]\nparallel_eye_synthesis=1\n");
++    const std::uint32_t parallel_on = xrfg::implicit_layer::read_parallel_eye_synthesis(directory);
++    write("[ofxr]\nparallel_eye_synthesis=2\n");
++    const std::uint32_t parallel_chained = xrfg::implicit_layer::read_parallel_eye_synthesis(directory);
++    write("[ofxr]\nparallel_eye_synthesis=3\n");
++    const std::uint32_t parallel_bad = xrfg::implicit_layer::read_parallel_eye_synthesis(directory);
++    write("[ofxr]\nparallel_eye_synthesis=0\n");
++    const std::uint32_t parallel_off = xrfg::implicit_layer::read_parallel_eye_synthesis(directory);
+     write("[ofxr]\ncockpit_mask=1\nnvidia_occlusion_aware=3\nfast_composition=1\n");
+     const bool on = xrfg::implicit_layer::read_cockpit_mask(directory);
+     const auto level = xrfg::implicit_layer::read_nvidia_occlusion_aware(directory);
+@@ -1430,6 +1440,9 @@
+         "ini: cockpit_depth is 1 on, off otherwise"); // DCS Control (0035)
+     require(!motion_missing && motion_on && !motion_off && !xrfg::implicit_layer::read_dcs_motion({}),
+         "ini: dcs_motion is 1 on, off otherwise"); // DCS Control (0036)
++    require(parallel_missing == 0 && parallel_on == 1 && parallel_chained == 2 && parallel_bad == 0 &&
++            parallel_off == 0 && xrfg::implicit_layer::read_parallel_eye_synthesis({}) == 0,
++        "ini: parallel_eye_synthesis is 1 or 2, 0 otherwise"); // DCS Control (0038)
+     std::cout << "cockpit mask: [ofxr] cockpit_mask and nvidia_occlusion_aware=3 read\n";
+ }
+ 
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -5262,6 +5262,334 @@
+               << stats.jump << " busy " << stats.busy << '\n';
+ }
+ 
++// DCS Control (0038): `[ofxr] parallel_eye_synthesis`. Two application
++// swapchains, one per eye, each with its own history and synthesizer - DCS's
++// shape - submitted the way the layer submits a frame (both captures, then
++// eye 0's pair, then eye 1's). Mode 0, shared: both synthesizers on one
++// synthesis queue, as before. 1, parallel: a queue each. 2, chained: a queue
++// each, their optical-flow jobs in one D3D12OpticalFlowChain (the key's
++// values). A pair is "written" when the later eye's synthetic
++// is (its gpu_end_qpc, before the current copy), measured from the earlier
++// eye's pack.
++struct EyeSwapchain {
++    std::array<ComPtr<ID3D12Resource>, 3> sources{};
++    std::array<ComPtr<ID3D12Resource>, 2> currents{};
++    std::array<ComPtr<ID3D12Resource>, 2> synthetics{};
++    std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
++    std::unique_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
++    ComPtr<ID3D12Fence> completion;
++};
++
++struct EyeSwapchainRun {
++    // Per pair: both eyes' synthetics, then (3X) their second synthetics,
++    // then both current copies.
++    std::vector<std::vector<std::uint8_t>> outputs;
++    std::vector<double> written_us; // per pair, both eyes
++    std::vector<double> eye0_written_us;
++};
++
++[[nodiscard]] ComPtr<ID3D12CommandQueue> synthesis_queue(D3D12WarpFixture& fixture) {
++    D3D12_COMMAND_QUEUE_DESC description{};
++    description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
++    description.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH; // as the layer's
++    ComPtr<ID3D12CommandQueue> queue;
++    require_hresult(fixture.device()->CreateCommandQueue(&description,
++        IID_PPV_ARGS(queue.GetAddressOf())), "parallel eyes: synthesis queue");
++    return queue;
++}
++
++EyeSwapchainRun run_eye_swapchains(D3D12WarpFixture& fixture, UINT width, UINT height, int pairs,
++    int mode, bool triple, bool read_outputs, bool paced,
++    const xrfg::D3D12NvidiaOpticalFlowOptions& options = {}) {
++    constexpr UINT kFrames = 3;
++    std::array<EyeSwapchain, kEyeCount> eyes{};
++    // Three frames of a textured scene moving 12 px a frame, different per eye.
++    StereoPattern background;
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        background[eye].resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
++        for (UINT y = 0; y < height; ++y) {
++            for (UINT x = 0; x < width; ++x) {
++                const RgbaBytes texel =
++                    cursor_background_texel((x + 7U * y / 5U) % kCursorWidth, y % kCursorHeight, eye);
++                std::copy(texel.begin(), texel.end(), background[eye].begin() +
++                    static_cast<std::ptrdiff_t>((static_cast<std::size_t>(y) * width + x) * kBytesPerPixel));
++            }
++        }
++    }
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        for (auto& source : eyes[eye].sources) source = create_single_slice_texture(fixture, width, height);
++    }
++    for (UINT frame = 0; frame < kFrames; ++frame) {
++        StereoPattern image = background;
++        for (UINT eye = 0; eye < kEyeCount; ++eye) {
++            std::rotate(image[eye].begin(), image[eye].begin() + frame * 12U * kBytesPerPixel, image[eye].end());
++        }
++        // Uploaded as a two-slice texture, each slice copied into its eye's own.
++        const ComPtr<ID3D12Resource> staging = create_source_texture(fixture, width, height);
++        upload_pattern(fixture, staging.Get(), image);
++        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
++            const D3D12_RESOURCE_BARRIER to_source = transition_barrier(
++                staging.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
++            list->ResourceBarrier(1, &to_source);
++            for (UINT eye = 0; eye < kEyeCount; ++eye) {
++                ID3D12Resource* const target = eyes[eye].sources[frame].Get();
++                const D3D12_RESOURCE_BARRIER to_dest = transition_barrier(
++                    target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
++                list->ResourceBarrier(1, &to_dest);
++                D3D12_TEXTURE_COPY_LOCATION source{};
++                source.pResource = staging.Get();
++                source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++                source.SubresourceIndex = eye;
++                D3D12_TEXTURE_COPY_LOCATION destination{};
++                destination.pResource = target;
++                destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++                destination.SubresourceIndex = 0;
++                list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
++                const D3D12_RESOURCE_BARRIER back = transition_barrier(
++                    target, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
++                list->ResourceBarrier(1, &back);
++            }
++            const D3D12_RESOURCE_BARRIER restore = transition_barrier(
++                staging.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
++            list->ResourceBarrier(1, &restore);
++        });
++    }
++    // The layer's queues: one shared, or one per swapchain and the chain.
++    const ComPtr<ID3D12CommandQueue> shared = synthesis_queue(fixture);
++    const auto chain = mode == 2 ? std::make_shared<xrfg::D3D12OpticalFlowChain>() : nullptr;
++    std::array<ComPtr<ID3D12CommandQueue>, kEyeCount> queues{};
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        EyeSwapchain& swapchain = eyes[eye];
++        queues[eye] = mode != 0 ? synthesis_queue(fixture) : shared;
++        // Private swapchains rest in COMMON on a synthesis queue of their own.
++        for (auto& c : swapchain.currents) c = create_single_slice_texture(fixture, width, height);
++        for (auto& s : swapchain.synthetics) s = create_single_slice_texture(fixture, width, height);
++        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
++            for (auto* set : {&swapchain.currents, &swapchain.synthetics}) {
++                for (auto& texture : *set) {
++                    const D3D12_RESOURCE_BARRIER to_common = transition_barrier(
++                        texture.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
++                    list->ResourceBarrier(1, &to_common);
++                }
++            }
++        });
++        std::array<ID3D12Resource*, kFrames> source_pointers{};
++        for (UINT i = 0; i < kFrames; ++i) source_pointers[i] = swapchain.sources[i].Get();
++        std::array<ID3D12Resource*, 2> current_pointers{swapchain.currents[0].Get(), swapchain.currents[1].Get()};
++        std::array<ID3D12Resource*, 2> synthetic_pointers{
++            swapchain.synthetics[0].Get(), swapchain.synthetics[1].Get()};
++        swapchain.history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++        require(operation_succeeded(swapchain.history->initialize(fixture.device(), fixture.queue(),
++                    std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
++                    D3D12_RESOURCE_STATE_RENDER_TARGET)), "parallel eyes: history");
++        swapchain.synthesizer = std::make_unique<xrfg::D3D12FrameSynthesizer>();
++        require(operation_succeeded(swapchain.synthesizer->initialize(fixture.device(), queues[eye].Get(),
++                    swapchain.history,
++                    std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
++                    std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
++                    kFormat, D3D12_RESOURCE_STATE_COMMON,
++                    xrfg::D3D12OpticalFlowBackend::nvidia, options, true)), "parallel eyes: synthesizer");
++        if (chain) swapchain.synthesizer->set_optical_flow_chain(chain);
++        require_hresult(swapchain.synthesizer->completion_fence(swapchain.completion.GetAddressOf()),
++            "parallel eyes: completion fence");
++    }
++    const ReprojectionViews stereo = make_reprojection_views();
++    LARGE_INTEGER frequency{};
++    QueryPerformanceFrequency(&frequency);
++    const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
++    EyeSwapchainRun run;
++    for (int frame = 0; frame <= pairs; ++frame) {
++        const UINT slot = static_cast<UINT>(frame) % kFrames;
++        std::array<xrfg::D3D12HistoryCaptureTicket, kEyeCount> captures{};
++        for (UINT eye = 0; eye < kEyeCount; ++eye) {
++            HRESULT captured = E_FAIL;
++            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
++            do {
++                captured = eyes[eye].history->capture(slot, &captures[eye]);
++                if (captured == HRESULT_FROM_WIN32(ERROR_BUSY)) Sleep(0);
++            } while (captured == HRESULT_FROM_WIN32(ERROR_BUSY) &&
++                     std::chrono::steady_clock::now() < deadline);
++            require(operation_succeeded(captured) &&
++                        operation_succeeded(eyes[eye].history->commit(captures[eye])), "parallel eyes: capture");
++        }
++        std::array<xrfg::D3D12FrameSynthesisTicket, kEyeCount> tickets{};
++        for (UINT eye = 0; eye < kEyeCount; ++eye) {
++            const std::span<const xrfg::D3D12ReprojectionView> view(stereo.data() + eye, 1);
++            HRESULT submitted = E_FAIL;
++            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
++            do {
++                submitted = frame == 0
++                    ? eyes[eye].synthesizer->submit_prime(captures[eye], view, 0, &tickets[eye])
++                    : eyes[eye].synthesizer->submit_pair(captures[eye], view, view, 0, 0, &tickets[eye],
++                          std::nullopt, {}, false, triple ? 1.0F / 3.0F : 0.5F,
++                          triple ? std::optional<xrfg::D3D12ExtraSynthetic>(
++                                       xrfg::D3D12ExtraSynthetic{1, 2.0F / 3.0F})
++                                 : std::nullopt);
++                if (submitted == HRESULT_FROM_WIN32(ERROR_BUSY)) Sleep(0);
++            } while (submitted == HRESULT_FROM_WIN32(ERROR_BUSY) &&
++                     std::chrono::steady_clock::now() < deadline);
++            require(operation_succeeded(submitted), "parallel eyes: submission at frame " +
++                std::to_string(frame) + " HRESULT " + std::to_string(static_cast<std::int32_t>(submitted)));
++        }
++        if (!paced && !read_outputs) {
++            continue; // back to back: the queues and the chain under load
++        }
++        for (UINT eye = 0; eye < kEyeCount; ++eye) {
++            ID3D12Fence* const fence = eyes[eye].completion.Get();
++            if (fence->GetCompletedValue() < tickets[eye].fence_value) {
++                require_hresult(fence->SetEventOnCompletion(tickets[eye].fence_value, event),
++                    "parallel eyes: completion event");
++                require(WaitForSingleObject(event, 5000) == WAIT_OBJECT_0, "parallel eyes: pair never completed");
++            }
++        }
++        if (frame > 0) {
++            std::array<xrfg::D3D12NvidiaGpuTiming, kEyeCount> timings{};
++            bool timed = true;
++            for (UINT eye = 0; eye < kEyeCount; ++eye) {
++                xrfg::D3D12NvidiaGpuTiming timing{};
++                bool found = false;
++                while (eyes[eye].synthesizer->consume_nvidia_gpu_timing(&timing) == S_OK) {
++                    if (timing.current_serial == captures[eye].serial) {
++                        timings[eye] = timing;
++                        found = true;
++                    }
++                }
++                timed = timed && found && timings[eye].gpu_begin_qpc != 0 && timings[eye].gpu_end_qpc != 0;
++            }
++            if (timed) {
++                const std::uint64_t begin = std::min(timings[0].gpu_begin_qpc, timings[1].gpu_begin_qpc);
++                const std::uint64_t end = std::max(timings[0].gpu_end_qpc, timings[1].gpu_end_qpc);
++                const auto us = [&](std::uint64_t ticks) {
++                    return static_cast<double>(ticks) * 1.0e6 / static_cast<double>(frequency.QuadPart);
++                };
++                run.written_us.push_back(us(end - begin));
++                run.eye0_written_us.push_back(us(timings[0].gpu_end_qpc - begin));
++            }
++        }
++        if (read_outputs && frame > 0) {
++            for (UINT eye = 0; eye < kEyeCount; ++eye) {
++                run.outputs.push_back(readback_single_slice(fixture, eyes[eye].synthetics[0].Get(),
++                    D3D12_RESOURCE_STATE_COMMON));
++            }
++            for (UINT eye = 0; triple && eye < kEyeCount; ++eye) {
++                run.outputs.push_back(readback_single_slice(fixture, eyes[eye].synthetics[1].Get(),
++                    D3D12_RESOURCE_STATE_COMMON));
++            }
++            for (UINT eye = 0; eye < kEyeCount; ++eye) {
++                run.outputs.push_back(readback_single_slice(fixture, eyes[eye].currents[0].Get(),
++                    D3D12_RESOURCE_STATE_COMMON));
++            }
++        }
++        if (paced) Sleep(4); // an idle GPU before each pair, as between DCS frames
++    }
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        require(operation_succeeded(eyes[eye].synthesizer->wait_for_idle()), "parallel eyes: idle");
++    }
++    CloseHandle(event);
++    fixture.require_no_debug_errors();
++    return run;
++}
++
++// Every channel of every pixel of every output, shared against parallel and
++// chained, at 2X, 3X and with bidirectional flow and the occlusion handling;
++// then both back to back (no CPU wait between pairs) for a while: two
++// optical-flow jobs in flight at once on the engine (parallel), and the
++// chain's deadlock check (chained).
++void run_parallel_eye_synthesis_equivalence() {
++    D3D12WarpFixture fixture(true);
++    constexpr UINT kSide = 1024;
++    xrfg::D3D12NvidiaOpticalFlowOptions bidirectional{};
++    bidirectional.bidirectional = true;
++    bidirectional.occlusion_aware = 2;
++    struct Case {
++        bool triple;
++        xrfg::D3D12NvidiaOpticalFlowOptions options;
++        const char* name;
++    };
++    const std::array<Case, 3> cases{
++        Case{false, {}, "2X"}, Case{true, {}, "3X"}, Case{false, bidirectional, "2X bidirectional"}};
++    for (const Case& c : cases) {
++        const EyeSwapchainRun shared = run_eye_swapchains(fixture, kSide, kSide, 6, 0, c.triple, true, false,
++            c.options);
++        std::size_t bytes = 0;
++        for (int mode : {1, 2}) {
++            const EyeSwapchainRun other = run_eye_swapchains(fixture, kSide, kSide, 6, mode, c.triple, true, false,
++                c.options);
++            require(!shared.outputs.empty() && shared.outputs.size() == other.outputs.size(),
++                std::string("parallel eyes ") + c.name + ": outputs missing");
++            for (std::size_t i = 0; i < shared.outputs.size(); ++i) {
++                require(shared.outputs[i] == other.outputs[i],
++                    std::string("parallel eyes ") + c.name + " mode " + std::to_string(mode) + ": output " +
++                        std::to_string(i) + " differs");
++                bytes += shared.outputs[i].size();
++            }
++        }
++        // Not trivially equal: a synthetic is not its current frame.
++        require(shared.outputs[0] != shared.outputs[c.triple ? 4U : 2U],
++            std::string("parallel eyes ") + c.name + ": synthetic equals the current frame");
++        std::cout << "parallel eye synthesis " << c.name << ": " << shared.outputs.size()
++                  << " outputs, " << bytes << " bytes (parallel and chained) identical to the shared queue"
++                  << std::endl;
++    }
++    const auto started = std::chrono::steady_clock::now();
++    for (int mode : {1, 2}) {
++        static_cast<void>(run_eye_swapchains(fixture, kSide, kSide, 400, mode, false, false, false));
++        static_cast<void>(run_eye_swapchains(fixture, kSide, kSide, 200, mode, true, false, false));
++    }
++    std::cout << "parallel eye synthesis: 1200 pairs back to back in "
++              << std::chrono::duration_cast<std::chrono::milliseconds>(
++                     std::chrono::steady_clock::now() - started).count()
++              << " ms, no stall" << std::endl;
++}
++
++// XRFG_TEST_PARALLEL_EYES_BENCH=1 on NVIDIA hardware: GPU time from the first
++// eye's pack to both synthetics written, per pair, shared against parallel and
++// chained, alternately on the same clocks, at 2X and 3X. XRFG_PARALLEL_EYES_SIZE=<n>
++// for an n x n eye image (default 4800: a flow input of 2400 at
++// nvidia_input_scale=50, about the 2.9 ms flow of a live Pimax flight).
++void bench_parallel_eye_synthesis() {
++    D3D12WarpFixture fixture(true);
++    UINT side = 4800;
++    char text[16]{};
++    if (GetEnvironmentVariableA("XRFG_PARALLEL_EYES_SIZE", text, sizeof(text)) > 0) {
++        side = static_cast<UINT>(std::strtoul(text, nullptr, 10));
++    }
++    xrfg::D3D12NvidiaOpticalFlowOptions options{};
++    options.input_scale = xrfg::D3D12NvidiaInputScale::half;
++    const auto percentile = [](std::vector<double> values, double p) {
++        if (values.empty()) return 0.0;
++        std::sort(values.begin(), values.end());
++        return values[static_cast<std::size_t>(p * static_cast<double>(values.size() - 1))];
++    };
++    for (bool triple : {false, true}) {
++        std::array<std::vector<double>, 3> total, eye0;
++        for (int round = 0; round < 4; ++round) {
++            for (int mode : {0, 1, 2}) {
++                const EyeSwapchainRun run = run_eye_swapchains(fixture, side, side, 40, mode, triple, false, true,
++                    options);
++                // The first pairs warm up.
++                if (run.written_us.size() > 4) {
++                    total[mode].insert(total[mode].end(), run.written_us.begin() + 4, run.written_us.end());
++                    eye0[mode].insert(eye0[mode].end(), run.eye0_written_us.begin() + 4, run.eye0_written_us.end());
++                }
++            }
++        }
++        std::cout << "parallel eyes bench " << side << "x" << side << " x2 swapchains " << (triple ? "3X" : "2X")
++                  << ": written (both eyes) p10/p50/p90 us";
++        const char* const names[] = {"shared", "parallel", "chained"};
++        for (int mode : {0, 1, 2}) {
++            std::cout << " " << names[mode] << " " << percentile(total[mode], 0.1) << "/"
++                      << percentile(total[mode], 0.5) << "/" << percentile(total[mode], 0.9);
++        }
++        std::cout << "; eye 0 written p50 us";
++        for (int mode : {0, 1, 2}) {
++            std::cout << " " << names[mode] << " " << percentile(eye0[mode], 0.5);
++        }
++        std::cout << " (" << total[0].size() << " pairs each)" << std::endl;
++    }
++    fixture.require_no_debug_errors();
++}
++
+ // DCS Control (0033): whether a hardware NVIDIA adapter is present (the
+ // fast composition's tests need the optical-flow engine).
+ bool nvidia_hardware_present() {
+@@ -5322,6 +5650,21 @@
+             bench_fixture.require_no_debug_errors();
+             return 0;
+         }
++        // DCS Control (0038): [ofxr] parallel_eye_synthesis against the shared
++        // synthesis queue, every byte, and its time to written.
++        if (GetEnvironmentVariableA("XRFG_TEST_PARALLEL_EYES", nullptr, 0)) {
++            if (!nvidia_hardware_present()) {
++                std::cout << "D3D12 parallel eye synthesis tests skipped: no NVIDIA hardware adapter\n";
++                return 0;
++            }
++            run_parallel_eye_synthesis_equivalence();
++            std::cout << "D3D12 parallel eye synthesis tests passed\n";
++            return 0;
++        }
++        if (GetEnvironmentVariableA("XRFG_TEST_PARALLEL_EYES_BENCH", nullptr, 0)) {
++            bench_parallel_eye_synthesis();
++            return 0;
++        }
+         if (GetEnvironmentVariableA("XRFG_TEST_NVIDIA_QUALITY", nullptr, 0)) {
+             run_nvidia_fast_controls();
+             return 0;

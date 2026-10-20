@@ -185,8 +185,10 @@ void dcs_trace_feature_create(unsigned route, std::uint32_t feature, const NgxPa
 constexpr std::uint64_t dcs_idle_view_ms = 5000;
 
 void dcs_release_idle_views(const void* created) noexcept {
-    // The composite's cached views may hold the previous mission's targets.
+    // The composite's and the depth conversion's cached views may hold the
+    // previous mission's targets and depth buffers (each keeps its resource alive).
     dcs_flush_composite_views();
+    dcs_flush_transport_depth_views();
     struct Idle { const void* handle; double idle_s; std::uint64_t evaluations; };
     std::vector<Idle> idle;
     {
@@ -204,7 +206,15 @@ void dcs_release_idle_views(const void* created) noexcept {
     for (const auto& view : idle) {
         const auto before = dcs_vram_sample();
         auto* const handle = static_cast<const NgxHandle*>(view.handle);
-        release_d3d11_transport_view(handle);
+        // Bounded GPU wait on DCS's render thread: a view whose private work has not
+        // completed is kept and retried at the next create.
+        if (!release_d3d11_transport_view(handle, dcs_transport_release_wait_ms)) {
+            std::lock_guard lock(dcs_ledger_mutex);
+            for (auto& record : dcs_ledger) if (record.handle == view.handle) record.idle_released = false;
+            trace_event("FEATURE_IDLE kept handle=%p: its private DX12 work is still running; retried at the next create",
+                view.handle);
+            continue;
+        }
         release_d3d11_peripheral_dlaa_view(handle);
         const auto after = dcs_vram_sample();
         trace_event("FEATURE_IDLE released private resources handle=%p idle_s=%.1f evaluations=%llu "
@@ -262,3 +272,7 @@ struct DcsDeferredCreateValuesScope {
     const NgxHandle* handle, const NgxParameters* parameters, NgxResult& result) noexcept;
 [[nodiscard]] bool dcs_deferred_keep_transport(const D3D11RuntimeCallbacks& runtime, ID3D11DeviceContext* context,
     const NgxHandle* handle, const NgxParameters* parameters, const Settings& settings, NgxResult& result) noexcept;
+// A brief run of transport failures on an accepted deferred view is held (bilinear) instead of creating DCS's feature.
+[[nodiscard]] bool dcs_deferred_hold_transport_failure(ID3D11DeviceContext* context, const NgxHandle* handle,
+    const NgxParameters* parameters, NgxResult& held) noexcept;
+void dcs_deferred_transport_ok(const NgxHandle* handle) noexcept;

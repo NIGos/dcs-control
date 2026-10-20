@@ -103,6 +103,57 @@ inline Stripe& MyStripe() { return g_stripes[(__readgsdword(0x48) >> 2) & (kStri
 constexpr unsigned kTableBits = 16;
 std::atomic<uint64_t> g_table[1u << kTableBits];
 
+// R39: [Prefetch] TableBits (16-22, default 20 since R41; 16 = the static table above). The
+// table is direct-mapped, so a range whose slot another range took since its
+// last call passes through although it is a repeat. Live (F-4 Germany,
+// 2026-10-16) about 2.7-3.1 M calls/s still pass 29 % to the kernel with 2^16
+// entries, which a collision rate of e^(-K/2^16) explains for K = about 22 k
+// distinct ranges per loader cycle [I]. A larger table only finds more true
+// repeats (same key, inside the window), so the hints DCS sees per window are
+// unchanged. Larger tables are allocated on first use and never freed: a
+// caller may still hold the old pointer, and the module is pinned anyway.
+constexpr unsigned kMinTableBits = kTableBits, kMaxTableBits = 22;
+struct Table {
+  std::atomic<uint64_t>* e;
+  uint64_t mask;
+  unsigned bits;
+};
+Table g_staticTable{g_table, (1u << kTableBits) - 1, kTableBits};
+Table g_bigTables[kMaxTableBits + 1] = {};  // [bits]: e == nullptr until first use
+std::atomic<const Table*> g_tab{&g_staticTable};
+
+inline unsigned ClampTableBits(unsigned bits) {
+  return bits < kMinTableBits ? kMinTableBits : bits > kMaxTableBits ? kMaxTableBits : bits;
+}
+unsigned TableBits() { return g_tab.load(std::memory_order_acquire)->bits; }
+void ClearTable(const Table& t) {
+  for (uint64_t i = 0; i <= t.mask; ++i) t.e[i].store(0, std::memory_order_relaxed);
+}
+// Worker / config thread. False (table unchanged) when the allocation fails.
+bool SetTableBits(unsigned bits) {
+  bits = ClampTableBits(bits);
+  const Table* cur = g_tab.load(std::memory_order_acquire);
+  if (cur->bits == bits) return true;
+  Table* t = &g_staticTable;
+  if (bits != kTableBits) {
+    t = &g_bigTables[bits];
+    if (!t->e) {
+      const size_t n = size_t(1) << bits;
+      void* m = VirtualAlloc(nullptr, n * sizeof(std::atomic<uint64_t>), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+      if (!m) return false;
+      t->e = static_cast<std::atomic<uint64_t>*>(m);  // zero-filled by the system
+      t->mask = n - 1;
+      t->bits = bits;
+    } else {
+      ClearTable(*t);  // not published now: stale writes from a caller that still holds it are only hints
+    }
+  } else {
+    ClearTable(*t);
+  }
+  g_tab.store(t, std::memory_order_release);
+  return true;
+}
+
 thread_local uint32_t t_skipRun = 0;
 thread_local uint64_t t_spinStart = 0;
 
@@ -111,7 +162,9 @@ inline bool SeenRecently(ULONG_PTR address, ULONG_PTR count, ULONG_PTR bytes, ui
   h ^= h >> 31;
   h *= 0xD6E8FEB86659FD93ull;
   h ^= h >> 32;
-  std::atomic<uint64_t>& e = g_table[h & ((1u << kTableBits) - 1)];
+  // Index bits 0..21 and tag bits 24..63 never overlap (kMaxTableBits <= 24).
+  const Table* tab = g_tab.load(std::memory_order_acquire);
+  std::atomic<uint64_t>& e = tab->e[h & tab->mask];
   const uint64_t tag = (h >> 24) | 1;
   const uint64_t cur = e.load(std::memory_order_relaxed);
   if ((cur >> 24) == tag && ((now - cur) & 0xFFFFFF) < window) return true;
@@ -441,6 +494,24 @@ bool IsCandidate(HMODULE m, const std::wstring& path) {
          !ExportByName(m, "luaopen_DcsQvCull") && !ExportByName(m, "DcsQvPayload_PrefetchHooks");
 }
 
+// The stats log is appended to across sessions (a line every 10 s while DCS
+// runs): when it has grown past kLogCap it becomes <name>.prev.log (one
+// previous file kept, replaced) and a new one starts. Called at Install.
+constexpr uint64_t kLogCap = 1u << 20;
+std::wstring PrevLogPath(const std::wstring& path) {
+  const size_t dot = path.find_last_of(L'.');
+  const size_t sep = path.find_last_of(L"\\/");
+  const bool ext = dot != std::wstring::npos && (sep == std::wstring::npos || dot > sep);
+  return (ext ? path.substr(0, dot) : path) + L".prev.log";
+}
+bool RotateLogIfLarge(const std::wstring& path, uint64_t cap) {
+  WIN32_FILE_ATTRIBUTE_DATA fad;
+  if (path.empty() || !GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad)) return false;
+  const uint64_t size = (static_cast<uint64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+  if (size <= cap) return false;
+  return MoveFileExW(path.c_str(), PrevLogPath(path).c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+}
+
 void LogFileLine(const char* text) {
   if (g_logPath.empty()) return;
   const HANDLE file = CreateFileW(g_logPath.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -765,7 +836,9 @@ bool Install(int mode) {
     }
   }
   if (g_logPath.empty()) g_logPath = g_dir + L"DcsQvCullPrefetch.log";
+  RotateLogIfLarge(g_logPath, kLogCap);
   for (auto& e : g_table) e.store(0, std::memory_order_relaxed);
+  if (const Table* t = g_tab.load(std::memory_order_acquire); t != &g_staticTable) ClearTable(*t);
   g_warLogged = false;
   g_oldLogged = false;
   g_mode = mode;

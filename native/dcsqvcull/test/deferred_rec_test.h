@@ -716,6 +716,29 @@ void Run() {
     Check(sub && !waitedLate && pool.timeouts() == 1 && refused && pool.refused() == 1 && resubmit && waited && l,
           "deferred rec: a job past the timeout is not waited for, the worker is refused until it finished");
     Rel(l);
+    // R75: a worker sets its done event after publishing the job's final state, so the previous job's SetEvent can
+    // land after the next Submit reset the event (gb_rec_test's view-change re-record: Wait returned while the
+    // re-record still ran, about 1 run in 150). Replayed deterministically: that late signal set by hand while a
+    // gated job runs. Wait must still wait for the job (here until its own timeout), then the job finishes normally.
+    {
+      HANDLE g2 = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      const uint64_t to0 = pool.timeouts();
+      const bool sub2 = pool.Submit(1, &GateJob, &g2, nullptr);
+      SetEvent(pool.At(1).done);  // the previous job's late SetEvent
+      const int64_t w0 = Qpc();
+      const bool waited2 = pool.Wait(200);
+      const double waitedMs = (Qpc() - w0) * QpcToUs() / 1000.0;
+      const bool busy2 = pool.Busy(1);
+      SetEvent(g2);
+      const ULONGLONG until2 = GetTickCount64() + 60000;
+      while (pool.Busy(1) && GetTickCount64() < until2) Sleep(1);
+      ID3D11CommandList* l2 = pool.TakeList(1);
+      CloseHandle(g2);
+      printf("     stale done signal: Wait returned after %.1f ms (timeout 200)\n", waitedMs);
+      Check(sub2 && !waited2 && busy2 && waitedMs >= 150.0 && pool.timeouts() == to0 + 1 && l2,
+            "deferred rec: a stale done signal (the previous job's late SetEvent) does not end Wait while the job runs");
+      Rel(l2);
+    }
     // A faulting job: caught, reported, pool latched off.
     const bool fsub = pool.Submit(0, &FaultJob, nullptr, nullptr);
     const bool fwait = pool.Wait(kLongWaitMs);

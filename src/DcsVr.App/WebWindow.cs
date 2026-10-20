@@ -62,7 +62,7 @@ internal sealed class WebWindow : Window
             catch (Exception e) when (e is InvalidOperationException or System.Runtime.InteropServices.COMException) { /* Closing or recreating the browser. */ }
         };
         // Alt+F4 or the taskbar would otherwise close the app halfway through writing DCS's files (the title-bar
-        // button already waits for the command to finish).
+        // button waits for a running command to finish, then closes).
         Closing += (_, e) =>
         {
             if (_bridge?.Writing is not { } writing) return;

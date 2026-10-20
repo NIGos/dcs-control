@@ -1,0 +1,1622 @@
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -464,6 +464,17 @@
+     //     symbology (0-23), the current frame's (24-47), the last fallback
+     //     reason (48-55: 0 none, 1 no sRGB view of the images, 2 the passes
+     //     or a clean copy could not be made, 3 the DLSS motion-vector path).
++    //   result=21 (DCS Control 0053), developer only (`[diagnostics]
++    //     hud_capture=N`): one HUD capture set read back, its files
++    //     hud-<pid>-<eye>-<a>-k<k>of<N>-sym<s>-{synth,prev,cur}.bmp and
++    //     -info.txt next to this log (pid: the logger record's). a= the
++    //     current real frame's display time (XrTime ns, 0 unknown); b= the
++    //     eye (0-7), k (8-23), N (24-39), s = hud_symbology (40), the
++    //     region's source (41-43: 0 the pair's own symbology, 1 the block's
++    //     slot of this frame, 2 its newest slot, 3 the centred 1024 square),
++    //     0049 cleaned and re-added this pair (44), the synthetic's k of the
++    //     cadence (48-51) and the cadence (52-55); c= the region in eye
++    //     pixels: x (0-15), y (16-31), width (32-47), height (48-63).
+     cockpit_mask,
+     // DCS Control (0034): the second synthetic slot of a session that made
+     // its ring with one (adaptive 2X/3X at the shallow depth: 3X's second
+@@ -639,6 +650,12 @@
+     [[nodiscard]] bool frame_records() const noexcept {
+         return frame_records_.load(std::memory_order_relaxed);
+     }
++    // DCS Control (0053): `[diagnostics] hud_capture=N` with logging on, a
++    // developer key (the app never writes it): how many HUD capture sets
++    // per eye to write next to the log (D3D12HudCaptureOptions); 0 none.
++    [[nodiscard]] std::uint32_t hud_capture() const noexcept {
++        return hud_capture_.load(std::memory_order_relaxed);
++    }
+ 
+     // Places a QueryPerformanceCounter value on this log's own timeline,
+     // so a GPU timestamp calibrated to QPC can be compared directly with
+@@ -681,6 +698,7 @@
+     struct Impl;
+     std::unique_ptr<Impl> impl_;
+     std::atomic<bool> frame_records_{false}; // DCS Control (0048)
++    std::atomic<std::uint32_t> hud_capture_{0}; // DCS Control (0053)
+ };
+ 
+ // DCS Control (0048): how long the calling thread has waited on the CPU for a
+diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
+--- a/include/xrfg/d3d12_frame_synthesizer.hpp
++++ b/include/xrfg/d3d12_frame_synthesizer.hpp
+@@ -16,6 +16,7 @@
+ #include <mutex>
+ #include <optional>
+ #include <span>
++#include <string> // DCS Control (0053)
+ #include <vector>
+ 
+ namespace xrfg {
+@@ -125,6 +126,38 @@
+     std::uint32_t capture_interval_ms{5000};
+ };
+ 
++// DCS Control (0053): `[diagnostics] hud_capture=N`, a developer's diagnostic
++// for measuring HUD smear (hud_symbology on against off). Shared by every
++// synthesizer of the process (both eyes, recreated swapchains): how many
++// sets each eye has taken and when its last one was.
++struct D3D12HudCaptureBudget {
++    std::mutex mutex;
++    std::array<std::uint32_t, 2> taken{};
++    std::array<std::uint64_t, 2> last_milliseconds{};
++};
++
++// DCS Control (0053): with limit != 0, the first `limit` synthesized outputs
++// per eye that have a HUD window, at most one per eye every interval_ms, are
++// read back with the same region of their two real frames (as the synthesis
++// gets them, before any HUD removal) and written to `directory` as 24-bit
++// BMPs of the bytes as stored:
++// hud-<pid>-<eye>-<displayTimeNs>-k<k>of<N>-sym<0|1>-<synth|prev|cur>.bmp
++// (k the set's number for that eye, N = limit, sym = hud_symbology; a format
++// that is not 8-bit RGBA / BGRA is written as .raw) and -info.txt; one
++// cockpit_mask result=21 flight-log record per set. The region: 0049's
++// windows of the eye (xrfg/hud_symbology.hpp), from the pair's symbology or
++// the block's header read alone (block_name; empty: the environment's), else
++// a centred 1024 square. The copies ride the pair's own list into one
++// readback buffer, mapped once its fence passed; the files are written on a
++// thread of their own. limit 0: nothing at all.
++struct D3D12HudCaptureOptions {
++    std::filesystem::path directory;
++    std::uint32_t limit{};
++    std::uint32_t interval_ms{500};
++    std::wstring block_name;
++    std::shared_ptr<D3D12HudCaptureBudget> budget;
++};
++
+ // Running totals since set_smooth_cursor. The GPU counts are as of the latest
+ // completed work slot, so they trail the submissions by a frame or two.
+ struct D3D12SmoothCursorStats {
+@@ -417,6 +450,10 @@
+         std::int32_t x, std::int32_t y, std::uint64_t milliseconds) noexcept;
+     [[nodiscard]] HRESULT smooth_cursor_stats(
+         D3D12SmoothCursorStats* stats) noexcept;
++    // DCS Control (0053): the HUD captures (D3D12HudCaptureOptions); any
++    // time, from the next pair on. A limit of 0 turns them off.
++    [[nodiscard]] HRESULT set_hud_capture(
++        const D3D12HudCaptureOptions& options) noexcept;
+     // DCS Control (0031): the cockpit mask of the frame the next submission
+     // captures (submit_prime or submit_pair; null: none), from
+     // CockpitMaskConsumer. A pair whose current frame has one composes the
+diff --git a/include/xrfg/hud_symbology.hpp b/include/xrfg/hud_symbology.hpp
+--- a/include/xrfg/hud_symbology.hpp
++++ b/include/xrfg/hud_symbology.hpp
+@@ -25,6 +25,7 @@
+ #include <array>
+ #include <cstdint>
+ #include <memory>
++#include <string> // DCS Control (0053)
+ 
+ namespace xrfg {
+ 
+@@ -126,4 +127,68 @@
+     std::unique_ptr<Impl> impl_;
+ };
+ 
++// DCS Control (0053): `[diagnostics] hud_capture=N`, a developer's diagnostic
++// (D3D12HudCaptureOptions): the region of a stereo eye image a HUD capture
++// reads back, and where it came from. It is 0049's own: the eye's symbology
++// windows (periphery 1:1, focus through focus_rect) as hud_pass_rect maps
++// them without a rotation (2 pixels around), the union over the frames that
++// carry it; read from the frame's symbology (hud_symbology on) or, without
++// it, from the block's header alone (HudSymbologyWindowReader: no texture
++// opened, no heartbeat stored); with no block a centred square.
++enum class HudCaptureSource : std::uint32_t {
++    pair = 0,         // the pair's own frames' symbology (0049, hud_symbology on)
++    block_frame = 1,  // the block's slot of the current frame (read only)
++    block_newest = 2, // the block's newest slot with a layout (none of this frame)
++    fallback = 3,     // no block: a centred kHudCaptureFallbackSide square
++};
++inline constexpr std::uint32_t kHudCaptureFallbackSide = 1024;
++
++// Eye `eye`'s region in its eye image (width x height, eye pixels from its
++// top left); false where that eye has nothing present (or no focus layout).
++[[nodiscard]] bool hud_capture_eye_region(const D3D12HudSymbology& symbology, std::uint32_t eye,
++    std::uint32_t width, std::uint32_t height, HudImageRect& region) noexcept;
++// The fallback: a centred side x side square, clamped to the image.
++[[nodiscard]] HudImageRect hud_capture_fallback_region(
++    std::uint32_t width, std::uint32_t height, std::uint32_t side = kHudCaptureFallbackSide) noexcept;
++// The smallest rectangle holding both (an empty one is ignored).
++[[nodiscard]] HudImageRect hud_capture_union(const HudImageRect& a, const HudImageRect& b) noexcept;
++// The symbology of slot `slot` of a symbology header (dcsvr_symbology::Header,
++// read with its seqlock): the views present by consumer rule 1 and 0049's own
++// checks, the eyes' focus rects; nothing else is read. False: no view and no
++// eye usable.
++[[nodiscard]] bool hud_symbology_from_header(const void* header, int slot, D3D12HudSymbology& symbology) noexcept;
++// Local\DcsVrSymbology_v1 with the suffix in DCSVR_PERCEPTION_SHM_SUFFIX (as
++// CockpitMaskConsumer's suffix_from_environment).
++[[nodiscard]] std::wstring hud_symbology_block_name_from_environment();
++
++// DCS Control (0053): the symbology block's windows, read only: the mapping
++// opened FILE_MAP_READ (looked for at most once a second while missing), the
++// header copied with the same seqlock read 0049 uses, never a heartbeat.
++class HudSymbologyWindowReader final {
++public:
++    explicit HudSymbologyWindowReader(std::wstring name) noexcept;
++    ~HudSymbologyWindowReader();
++    HudSymbologyWindowReader(const HudSymbologyWindowReader&) = delete;
++    HudSymbologyWindowReader& operator=(const HudSymbologyWindowReader&) = delete;
++
++    struct Result {
++        // false: no block, a header that is not this process's active one,
++        // or no slot with a focus layout; the caller falls back.
++        bool block{};
++        HudCaptureSource source{HudCaptureSource::fallback};
++        std::uint64_t seq{};
++        std::uint32_t generation{};
++        D3D12HudSymbology symbology{};
++    };
++    // The slot of `display_time` (XrTime; 0 unknown), else the newest slot
++    // with a focus layout.
++    [[nodiscard]] Result read(std::int64_t display_time) noexcept;
++
++private:
++    std::wstring name_;
++    void* mapping_{};
++    const void* view_{};
++    std::uint64_t next_open_ms_{};
++};
++
+ }  // namespace xrfg
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -145,6 +145,15 @@
+ ; hand-overs.
+ ; Needs logging_enabled=1. 1 on, 0 off (default).
+ frame_records=0
++; Developer key (DCS Control never writes it): the first N generated frames
++; per eye that have a HUD window, at most one per eye every 500 ms, are read
++; back as hud-<pid>-<eye>-<displayTimeNs>-k<k>of<N>-sym<0|1>-<role>.bmp (role
++; synth, prev, cur: the generated frame and its two real frames, before any
++; HUD removal) plus -info.txt, next to the log; the region is the HUD's window
++; from the engine module's symbology block, else a centred 1024 square. The
++; bytes are the swapchain's as stored. Needs logging_enabled=1. 0 none
++; (default).
++hud_capture=0
+ 
+ [overlay]
+ position=upper_right
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -1143,6 +1143,148 @@
+     };
+ }
+ 
++// DCS Control (0053): the HUD capture's formats. The bytes of a texel as
++// stored (0: not captured).
++[[nodiscard]] UINT hud_capture_bytes_per_pixel(DXGI_FORMAT format) noexcept {
++    switch (format) {
++    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
++    case DXGI_FORMAT_R8G8B8A8_UNORM:
++    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
++    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
++    case DXGI_FORMAT_B8G8R8A8_UNORM:
++    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
++    case DXGI_FORMAT_B8G8R8X8_TYPELESS:
++    case DXGI_FORMAT_B8G8R8X8_UNORM:
++    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
++    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
++    case DXGI_FORMAT_R10G10B10A2_UNORM:
++    case DXGI_FORMAT_R11G11B10_FLOAT:
++        return 4;
++    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
++    case DXGI_FORMAT_R16G16B16A16_FLOAT:
++    case DXGI_FORMAT_R16G16B16A16_UNORM:
++        return 8;
++    default:
++        return 0;
++    }
++}
++
++// The channel order of an 8-bit RGBA / BGRA texel (a 24-bit BMP of its
++// bytes): 1 R G B A, 2 B G R A; 0 another format (written as .raw).
++[[nodiscard]] int hud_capture_bmp_order(DXGI_FORMAT format) noexcept {
++    switch (format) {
++    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
++    case DXGI_FORMAT_R8G8B8A8_UNORM:
++    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
++        return 1;
++    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
++    case DXGI_FORMAT_B8G8R8A8_UNORM:
++    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
++    case DXGI_FORMAT_B8G8R8X8_TYPELESS:
++    case DXGI_FORMAT_B8G8R8X8_UNORM:
++    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
++        return 2;
++    default:
++        return 0;
++    }
++}
++
++[[nodiscard]] std::string hud_capture_format_name(DXGI_FORMAT format) {
++    const char* name = nullptr;
++    switch (format) {
++    case DXGI_FORMAT_R8G8B8A8_TYPELESS: name = "R8G8B8A8_TYPELESS"; break;
++    case DXGI_FORMAT_R8G8B8A8_UNORM: name = "R8G8B8A8_UNORM"; break;
++    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: name = "R8G8B8A8_UNORM_SRGB"; break;
++    case DXGI_FORMAT_B8G8R8A8_TYPELESS: name = "B8G8R8A8_TYPELESS"; break;
++    case DXGI_FORMAT_B8G8R8A8_UNORM: name = "B8G8R8A8_UNORM"; break;
++    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: name = "B8G8R8A8_UNORM_SRGB"; break;
++    case DXGI_FORMAT_B8G8R8X8_TYPELESS: name = "B8G8R8X8_TYPELESS"; break;
++    case DXGI_FORMAT_B8G8R8X8_UNORM: name = "B8G8R8X8_UNORM"; break;
++    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB: name = "B8G8R8X8_UNORM_SRGB"; break;
++    case DXGI_FORMAT_R10G10B10A2_TYPELESS: name = "R10G10B10A2_TYPELESS"; break;
++    case DXGI_FORMAT_R10G10B10A2_UNORM: name = "R10G10B10A2_UNORM"; break;
++    case DXGI_FORMAT_R11G11B10_FLOAT: name = "R11G11B10_FLOAT"; break;
++    case DXGI_FORMAT_R16G16B16A16_TYPELESS: name = "R16G16B16A16_TYPELESS"; break;
++    case DXGI_FORMAT_R16G16B16A16_FLOAT: name = "R16G16B16A16_FLOAT"; break;
++    case DXGI_FORMAT_R16G16B16A16_UNORM: name = "R16G16B16A16_UNORM"; break;
++    default: break;
++    }
++    return std::string("DXGI_FORMAT_") + (name != nullptr ? name : "UNKNOWN") + " (" +
++        std::to_string(static_cast<unsigned>(format)) + ")";
++}
++
++// What the stored bytes are, from the format the swapchain is viewed in.
++[[nodiscard]] const char* hud_capture_encoding(DXGI_FORMAT view_format) noexcept {
++    switch (view_format) {
++    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
++    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
++    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
++        return "srgb8, as stored in the swapchain";
++    case DXGI_FORMAT_R8G8B8A8_UNORM:
++    case DXGI_FORMAT_B8G8R8A8_UNORM:
++    case DXGI_FORMAT_B8G8R8X8_UNORM:
++        return "unorm8 without sRGB (the bytes as the game wrote them), as stored in the swapchain";
++    case DXGI_FORMAT_R16G16B16A16_FLOAT:
++        return "float16 RGBA (linear), as stored in the swapchain, written raw (.raw, 8 bytes a pixel)";
++    case DXGI_FORMAT_R10G10B10A2_UNORM:
++        return "unorm10 packed R10G10B10A2, as stored in the swapchain, written raw (.raw, 4 bytes a pixel)";
++    case DXGI_FORMAT_R11G11B10_FLOAT:
++        return "float11/11/10 packed, as stored in the swapchain, written raw (.raw, 4 bytes a pixel)";
++    default:
++        return "as stored in the swapchain, written raw (.raw)";
++    }
++}
++
++[[nodiscard]] bool hud_capture_write_file(const std::filesystem::path& path, const std::vector<std::uint8_t>& bytes) noexcept {
++    HANDLE handle = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
++    if (handle == INVALID_HANDLE_VALUE) {
++        return false;
++    }
++    DWORD written = 0;
++    const BOOL ok = WriteFile(handle, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
++    CloseHandle(handle);
++    return ok != FALSE && written == bytes.size();
++}
++
++// One image of a HUD capture set, `width` x `height` texels `row_pitch` apart
++// at `pixels`: a 24-bit bottom-up BMP of its bytes (the R, G and B bytes as
++// stored, alpha dropped; no conversion), or for another format its rows as
++// stored (.raw, top-down, tightly packed).
++[[nodiscard]] std::vector<std::uint8_t> hud_capture_image_file(const std::uint8_t* pixels, UINT width, UINT height,
++    UINT row_pitch, UINT bytes_per_pixel, int order) {
++    std::vector<std::uint8_t> file;
++    if (order == 0) {
++        const std::size_t row = static_cast<std::size_t>(width) * bytes_per_pixel;
++        file.resize(row * height);
++        for (UINT y = 0; y < height; ++y) {
++            std::memcpy(file.data() + row * y, pixels + static_cast<std::size_t>(row_pitch) * y, row);
++        }
++        return file;
++    }
++    const UINT row = (width * 3U + 3U) & ~3U;
++    file.assign(54U + static_cast<std::size_t>(row) * height, 0U);
++    const auto put32 = [&](std::size_t at, std::uint32_t value) {
++        for (int b = 0; b < 4; ++b) file[at + b] = static_cast<std::uint8_t>(value >> (8 * b));
++    };
++    file[0] = 'B'; file[1] = 'M';
++    put32(2, static_cast<std::uint32_t>(file.size())); put32(10, 54); put32(14, 40);
++    put32(18, width); put32(22, height);
++    file[26] = 1; file[28] = 24;
++    put32(34, row * height);
++    for (UINT y = 0; y < height; ++y) {
++        std::uint8_t* out = file.data() + 54 + static_cast<std::size_t>(height - 1U - y) * row;
++        const std::uint8_t* in = pixels + static_cast<std::size_t>(row_pitch) * y;
++        for (UINT x = 0; x < width; ++x) {
++            const std::uint8_t* texel = in + static_cast<std::size_t>(x) * 4U;
++            // BMP stores B, G, R.
++            out[x * 3U] = order == 1 ? texel[2] : texel[0];
++            out[x * 3U + 1U] = texel[1];
++            out[x * 3U + 2U] = order == 1 ? texel[0] : texel[2];
++        }
++    }
++    return file;
++}
++
+ }  // namespace
+ 
+ struct D3D12FrameSynthesizer::Impl {
+@@ -1677,10 +1819,57 @@
+     D3D12SmoothCursorStats cursor_logged{};
+     std::uint64_t cursor_log_milliseconds{};
+ 
++    // DCS Control (0053): the HUD captures (set_hud_capture). Each set is one
++    // eye's region of the synthetic and of its two real frames, in one
++    // readback buffer at `offset`s (rows `row_pitch` apart); recorded into a
++    // pair's list (recorded), pending until that pair's fence passes, then
++    // read and written by a thread of its own (hud_capture_writing until it
++    // is done; nothing is recorded meanwhile).
++    struct HudCaptureImage {
++        UINT64 offset{};
++        UINT row_pitch{};
++        DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
++        UINT bytes_per_pixel{};
++    };
++    struct HudCaptureSet {
++        std::string stem;
++        std::string info;
++        UINT width{};
++        UINT height{};
++        std::array<HudCaptureImage, 3> images{}; // synth, prev, cur
++        std::uint64_t log_a{};
++        std::uint64_t log_b{};
++        std::uint64_t log_c{};
++    };
++    enum class HudCaptureState { idle, recorded, pending };
++    D3D12HudCaptureOptions hud_capture_options;
++    bool hud_capture_on{};
++    std::unique_ptr<HudSymbologyWindowReader> hud_capture_reader;
++    ComPtr<ID3D12Resource> hud_capture_readback;
++    UINT64 hud_capture_readback_size{};
++    std::vector<HudCaptureSet> hud_capture_sets;
++    HudCaptureState hud_capture_state{HudCaptureState::idle};
++    std::uint64_t hud_capture_fence{};
++    std::thread hud_capture_thread;
++    std::atomic<bool> hud_capture_writing{false};
++    // What 0049 did with the pair being recorded (its code 20 outcome):
++    // views left as before (and the last reason), views cleaned, and the
++    // re-adds into each synthetic output.
++    struct HudCaptureOutcome {
++        bool fallback{};
++        std::uint32_t reason{};
++        UINT cleaned_views{};
++        std::array<UINT, 2> readds{};
++    };
++    HudCaptureOutcome hud_capture_outcome{};
++
+     ~Impl() {
+         if (cursor_capture_thread.joinable()) {
+             cursor_capture_thread.join();
+         }
++        if (hud_capture_thread.joinable()) { // DCS Control (0053)
++            hud_capture_thread.join();
++        }
+         // Nothing outside this object waits on the synthesis queue. Its work
+         // writes into the slot command allocators and reads the history
+         // slots, so releasing them with submissions still in flight is a
+@@ -1699,6 +1888,13 @@
+             const std::uint64_t drain = next_acquire_fence_value++;
+             if (SUCCEEDED(queue->Signal(acquire_fence.Get(), drain))) {
+                 static_cast<void>(wait_for_fence(acquire_fence.Get(), drain));
++                // DCS Control (0053): the queue has drained: a pending HUD
++                // capture's copies ran (its fence may be a deferred copy's
++                // that nothing signals now).
++                write_hud_captures(true);
++                if (hud_capture_thread.joinable()) {
++                    hud_capture_thread.join();
++                }
+             }
+         }
+         if (ffx_context_created) {
+@@ -4580,6 +4776,11 @@
+     // DCS Control (0049): a pair's symbology fallback, counted where its
+     // current frame's mask counts (cockpit_mask result=20).
+     void count_hud_fallback(std::uint32_t reason, std::uint64_t views) noexcept {
++        // DCS Control (0053): and for the HUD capture's info file.
++        hud_capture_outcome.fallback = true;
++        if (reason != kHudFallbackNone) {
++            hud_capture_outcome.reason = reason;
++        }
+         D3D12CockpitMaskFrame* const current = pair_mask_current.get();
+         if (current == nullptr || !current->counters) {
+             return;
+@@ -4760,6 +4961,7 @@
+         hud_pair.next_call = D3D12HudSymbologyPasses::kCallsPerSlot / 2U;
+         *previous_resource = hud_clean[previous_entry].texture.Get();
+         *current_resource = hud_clean[current_entry].texture.Get();
++        hud_capture_outcome.cleaned_views = active_views; // DCS Control (0053)
+         if (current->counters) {
+             current->counters->hud_views.fetch_add(active_views, std::memory_order_relaxed);
+         }
+@@ -4826,6 +5028,9 @@
+                     (from_current ? current->counters->hud_from_current : current->counters->hud_from_previous)
+                         .fetch_add(1U, std::memory_order_relaxed);
+                 }
++                if (recorded && output < hud_capture_outcome.readds.size()) { // DCS Control (0053)
++                    ++hud_capture_outcome.readds[output];
++                }
+             }
+         }
+     }
+@@ -4843,6 +5048,431 @@
+         hud_pair = {};
+     }
+ 
++    // DCS Control (0053): see D3D12HudCaptureOptions.
++    void set_hud_capture(const D3D12HudCaptureOptions& options) {
++        hud_capture_options = options;
++        if (!hud_capture_options.budget) {
++            hud_capture_options.budget = std::make_shared<D3D12HudCaptureBudget>();
++        }
++        if (hud_capture_options.block_name.empty()) {
++            hud_capture_options.block_name = hud_symbology_block_name_from_environment();
++        }
++        hud_capture_reader.reset();
++        hud_capture_on = hud_capture_options.limit != 0U && !hud_capture_options.directory.empty();
++    }
++
++    // DCS Control (0053): what 0049 did with this pair, for the info file.
++    [[nodiscard]] std::string hud_capture_outcome_text(UINT output) const {
++        if (!hud_enabled()) {
++            return "off (hud_symbology=0" + std::string(nvidia_options.cockpit_mask ? "" : ", cockpit_mask=0") +
++                "): nothing taken out or put back";
++        }
++        if (hud_capture_outcome.cleaned_views != 0U) {
++            const UINT readds = output < hud_capture_outcome.readds.size() ? hud_capture_outcome.readds[output] : 0U;
++            return "cleaned and re-added (code 20): " + std::to_string(hud_capture_outcome.cleaned_views) +
++                " view(s) taken out of both real frames, " + std::to_string(readds) +
++                " view(s) put back into this synthetic from the " +
++                (hud_readd_from_current(synthetic_output_fraction(output)) ? "current" : "previous") + " frame";
++        }
++        if (hud_capture_outcome.fallback) {
++            static constexpr const char* reasons[] = {"one frame of the pair without symbology there",
++                "no sRGB view of the images", "the passes or a clean copy could not be made",
++                "the DLSS motion-vector path"};
++            const std::uint32_t reason = hud_capture_outcome.reason < 4U ? hud_capture_outcome.reason : 0U;
++            return std::string("left as before (code 20 fallback): ") + reasons[reason];
++        }
++        return "not applied: neither real frame carried symbology";
++    }
++
++    // DCS Control (0053): the HUD capture of this pair, recorded on `list`
++    // after the composition and the re-add, where the pair's resources
++    // stand as the current copy expects them: the real previous frame in
++    // COMMON, the real current one in COMMON when 0049 made a clean copy of
++    // it (else still readable by the shaders), the synthetics in
++    // release_state. Each eye due a set gets its region of the synthetic
++    // (one output, alternating at 3X) and of the two real frames (the
++    // RollingSources: before any removal) copied into the readback buffer.
++    void record_hud_capture(ID3D12GraphicsCommandList* list, const RollingSource& previous_source,
++        const RollingSource& current_source, std::span<const D3D12ReprojectionView> target_views,
++        std::uint32_t synthetic_destination_index, bool current_cleaned) noexcept {
++        if (!hud_capture_on || hud_capture_state != HudCaptureState::idle ||
++            hud_capture_writing.load(std::memory_order_acquire)) {
++            return;
++        }
++        try {
++            record_hud_capture_sets(list, previous_source, current_source, target_views,
++                synthetic_destination_index, current_cleaned);
++        } catch (...) {
++            hud_capture_sets.clear();
++            hud_capture_state = HudCaptureState::idle;
++        }
++    }
++
++    void record_hud_capture_sets(ID3D12GraphicsCommandList* list, const RollingSource& previous_source,
++        const RollingSource& current_source, std::span<const D3D12ReprojectionView> target_views,
++        std::uint32_t synthetic_destination_index, bool current_cleaned) {
++        D3D12HudCaptureBudget& budget = *hud_capture_options.budget;
++        const std::uint64_t now = GetTickCount64();
++        const std::uint32_t limit = hud_capture_options.limit;
++        const auto due = [&](UINT eye) {
++            return budget.taken[eye] < limit &&
++                (budget.last_milliseconds[eye] == 0 ||
++                    now - budget.last_milliseconds[eye] >= hud_capture_options.interval_ms);
++        };
++        std::array<bool, 2> eye_due{};
++        std::array<std::uint32_t, 2> next_k{};
++        {
++            std::scoped_lock lock(budget.mutex);
++            for (UINT eye = 0; eye < 2U; ++eye) {
++                eye_due[eye] = due(eye);
++                next_k[eye] = budget.taken[eye] + 1U;
++            }
++        }
++        if (!eye_due[0] && !eye_due[1]) {
++            return;
++        }
++        const UINT width = static_cast<UINT>(image_description.Width);
++        const UINT height = image_description.Height;
++        const UINT array_size = image_description.DepthOrArraySize;
++        D3D12CockpitMaskFrame* const current = pair_mask_current.get();
++        D3D12CockpitMaskFrame* const previous_frame = pair_mask_previous.get();
++        const std::int64_t display_time = current != nullptr ? current->display_time : 0;
++        std::optional<HudSymbologyWindowReader::Result> block;
++        const UINT outputs = synthetic_output_count();
++        struct Planned {
++            UINT eye{};
++            UINT view{};
++            UINT output{};
++            HudImageRect region{};
++            HudCaptureSource source{};
++            std::uint64_t block_seq{};
++            std::array<ID3D12Resource*, 3> resources{};
++            std::array<UINT, 3> slices{};
++            std::array<D3D12ImageRect, 3> eye_rects{};
++        };
++        std::vector<Planned> planned;
++        std::array<bool, 2> eye_done{};
++        const UINT view_count = static_cast<UINT>(target_views.size());
++        for (UINT index = 0; index < view_count && index < previous_source.view_count &&
++             index < current_source.view_count; ++index) {
++            const UINT eye = cockpit_mask_eye(target_views[index], index);
++            if (eye >= 2U || !eye_due[eye] || eye_done[eye]) {
++                continue;
++            }
++            const D3D12ImageRect eye_rect = resolved_rect(target_views[index].image_rect, width, height);
++            Planned plan{};
++            plan.eye = eye;
++            plan.view = index;
++            // 0049's windows, from the pair's own symbology where it has it.
++            if (hud_enabled()) {
++                for (D3D12CockpitMaskFrame* frame : {previous_frame, current}) {
++                    HudImageRect region{};
++                    if (frame != nullptr && frame->hud &&
++                        hud_capture_eye_region(frame->hud_symbology, eye, eye_rect.width, eye_rect.height, region)) {
++                        plan.region = hud_capture_union(plan.region, region);
++                    }
++                }
++            }
++            if (plan.region.width != 0U) {
++                plan.source = HudCaptureSource::pair;
++            } else {
++                // Else the block's header alone (no texture, no heartbeat).
++                if (!block) {
++                    if (!hud_capture_reader) {
++                        hud_capture_reader = std::make_unique<HudSymbologyWindowReader>(hud_capture_options.block_name);
++                    }
++                    block = hud_capture_reader->read(display_time);
++                }
++                if (block->block) {
++                    if (!hud_capture_eye_region(block->symbology, eye, eye_rect.width, eye_rect.height, plan.region)) {
++                        continue; // no HUD window in this eye: not a capture
++                    }
++                    plan.source = block->source;
++                    plan.block_seq = block->seq;
++                } else {
++                    plan.region = hud_capture_fallback_region(eye_rect.width, eye_rect.height);
++                    plan.source = HudCaptureSource::fallback;
++                }
++            }
++            if (plan.region.width == 0U || plan.region.height == 0U) {
++                continue;
++            }
++            plan.output = outputs == 2U ? (next_k[eye] - 1U) % 2U : 0U;
++            const std::uint32_t destination_index =
++                synthetic_output_destination(plan.output, synthetic_destination_index);
++            if (destination_index >= synthetic_destinations.size()) {
++                continue;
++            }
++            plan.resources = {synthetic_destinations[destination_index].resource.Get(),
++                previous_source.resource.Get(), current_source.resource.Get()};
++            const std::array<const D3D12ReprojectionView*, 3> views{
++                &target_views[index], &previous_source.views[index], &current_source.views[index]};
++            bool usable = true;
++            for (std::size_t role = 0; role < 3U; ++role) {
++                plan.slices[role] = resolved_array_slice(*views[role], index, view_count, array_size);
++                plan.eye_rects[role] = resolved_rect(views[role]->image_rect, width, height);
++                usable = usable && plan.resources[role] != nullptr &&
++                    plan.slices[role] != std::numeric_limits<UINT>::max() &&
++                    hud_capture_bytes_per_pixel(plan.resources[role]->GetDesc().Format) != 0U &&
++                    std::uint64_t(plan.region.x) + plan.region.width <= plan.eye_rects[role].width &&
++                    std::uint64_t(plan.region.y) + plan.region.height <= plan.eye_rects[role].height;
++            }
++            if (!usable) {
++                continue;
++            }
++            eye_done[eye] = true;
++            planned.push_back(plan);
++        }
++        if (planned.empty()) {
++            return;
++        }
++        // The readback layout: every image's rows 256-byte aligned, each
++        // image 512-byte aligned.
++        std::vector<HudCaptureSet> sets;
++        UINT64 total = 0;
++        for (const Planned& plan : planned) {
++            HudCaptureSet set{};
++            set.width = plan.region.width;
++            set.height = plan.region.height;
++            for (std::size_t role = 0; role < 3U; ++role) {
++                HudCaptureImage& image = set.images[role];
++                image.format = plan.resources[role]->GetDesc().Format;
++                image.bytes_per_pixel = hud_capture_bytes_per_pixel(image.format);
++                image.row_pitch = (set.width * image.bytes_per_pixel + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1U) &
++                    ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1U);
++                total = (total + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1U) &
++                    ~static_cast<UINT64>(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1U);
++                image.offset = total;
++                total += static_cast<UINT64>(image.row_pitch) * set.height;
++            }
++            sets.push_back(std::move(set));
++        }
++        if (!hud_capture_readback || hud_capture_readback_size < total) {
++            hud_capture_readback.Reset();
++            hud_capture_readback_size = 0;
++            D3D12_HEAP_PROPERTIES heap{};
++            heap.Type = D3D12_HEAP_TYPE_READBACK;
++            heap.CreationNodeMask = queue->GetDesc().NodeMask == 0 ? 1U : queue->GetDesc().NodeMask;
++            heap.VisibleNodeMask = heap.CreationNodeMask;
++            const D3D12_RESOURCE_DESC description = buffer_description(total, D3D12_RESOURCE_FLAG_NONE);
++            if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
++                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(hud_capture_readback.GetAddressOf())))) {
++                hud_capture_readback.Reset();
++                return;
++            }
++            hud_capture_readback->SetName(L"OFXR HUD Capture Readback");
++            hud_capture_readback_size = total;
++        }
++        // Claim the sets (k is the eye's set number of N).
++        std::array<std::uint32_t, 2> k{};
++        {
++            std::scoped_lock lock(budget.mutex);
++            for (const Planned& plan : planned) {
++                if (!due(plan.eye)) {
++                    return;
++                }
++            }
++            for (const Planned& plan : planned) {
++                k[plan.eye] = ++budget.taken[plan.eye];
++                budget.last_milliseconds[plan.eye] = now;
++            }
++        }
++        // The resources' states as the current copy expects them here, to
++        // copy sources and back. A destination named twice is moved once.
++        std::vector<D3D12_RESOURCE_BARRIER> to_copy;
++        const auto add_state = [&](ID3D12Resource* resource, D3D12_RESOURCE_STATES state) {
++            for (const D3D12_RESOURCE_BARRIER& barrier : to_copy) {
++                if (barrier.Transition.pResource == resource) {
++                    return;
++                }
++            }
++            to_copy.push_back(transition_barrier(resource, state, D3D12_RESOURCE_STATE_COPY_SOURCE));
++        };
++        for (const Planned& plan : planned) {
++            add_state(plan.resources[0], release_state);
++            add_state(plan.resources[1], D3D12_RESOURCE_STATE_COMMON);
++            add_state(plan.resources[2], current_cleaned ? D3D12_RESOURCE_STATE_COMMON : kShaderReadState);
++        }
++        std::vector<D3D12_RESOURCE_BARRIER> back(to_copy);
++        for (D3D12_RESOURCE_BARRIER& barrier : back) {
++            std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
++        }
++        dred_marker(list, "OFXR HUD capture");
++        list->ResourceBarrier(static_cast<UINT>(to_copy.size()), to_copy.data());
++        static constexpr const char* roles[] = {"synth", "prev", "cur"};
++        static constexpr const char* sources[] = {"the pair's own symbology (0049, hud_symbology on)",
++            "the symbology block's slot of this frame (header read only)",
++            "the symbology block's newest slot (none of this frame; header read only)",
++            "no symbology block: a centred 1024 square"};
++        const bool symbology = hud_enabled();
++        for (std::size_t index = 0; index < planned.size(); ++index) {
++            const Planned& plan = planned[index];
++            HudCaptureSet& set = sets[index];
++            for (std::size_t role = 0; role < 3U; ++role) {
++                const HudCaptureImage& image = set.images[role];
++                D3D12_TEXTURE_COPY_LOCATION source{};
++                source.pResource = plan.resources[role];
++                source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++                source.SubresourceIndex = plan.slices[role];
++                D3D12_TEXTURE_COPY_LOCATION destination{};
++                destination.pResource = hud_capture_readback.Get();
++                destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++                destination.PlacedFootprint.Offset = image.offset;
++                destination.PlacedFootprint.Footprint = {image.format, set.width, set.height, 1, image.row_pitch};
++                const D3D12ImageRect& rect = plan.eye_rects[role];
++                const D3D12_BOX box{rect.offset_x + plan.region.x, rect.offset_y + plan.region.y, 0,
++                    rect.offset_x + plan.region.x + set.width, rect.offset_y + plan.region.y + set.height, 1};
++                list->CopyTextureRegion(&destination, 0, 0, 0, &source, &box);
++            }
++            const std::uint32_t k_value = k[plan.eye];
++            const UINT cadence = outputs + 1U;
++            const bool cleaned = hud_capture_outcome.cleaned_views != 0U;
++            set.stem = "hud-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(plan.eye) + "-" +
++                std::to_string(display_time) + "-k" + std::to_string(k_value) + "of" + std::to_string(limit) +
++                "-sym" + (symbology ? "1" : "0");
++            char fraction[32]{};
++            std::snprintf(fraction, sizeof(fraction), "%.4f", synthetic_output_fraction(plan.output));
++            std::string info;
++            info += "stem: " + set.stem + "\n";
++            info += "display_time_ns: " + std::to_string(display_time) +
++                " (the current real frame's XrTime; 0 unknown)\n";
++            info += "k/N: " + std::to_string(k_value) + "/" + std::to_string(limit) +
++                " (this eye's capture set k of hud_capture=N)\n";
++            info += "cadence: " + std::to_string(cadence) + "X; this synthetic is " + std::to_string(plan.output + 1U) +
++                " of the pair's " + std::to_string(outputs) + ", at fraction " + fraction +
++                " between prev (0) and cur (1)\n";
++            info += std::string("hud_symbology: ") + (symbology ? "1" : "0") + " (cockpit_mask " +
++                (nvidia_options.cockpit_mask ? "1" : "0") + ")\n";
++            info += "eye: " + std::to_string(plan.eye) + " (view " + std::to_string(plan.view) + ")\n";
++            info += "region: x=" + std::to_string(plan.region.x) + " y=" + std::to_string(plan.region.y) +
++                " w=" + std::to_string(set.width) + " h=" + std::to_string(set.height) +
++                " (eye pixels, from the eye image's top left)\n";
++            info += "eye_image: " + std::to_string(plan.eye_rects[0].width) + "x" +
++                std::to_string(plan.eye_rects[0].height) + " at " + std::to_string(plan.eye_rects[0].offset_x) + "," +
++                std::to_string(plan.eye_rects[0].offset_y) + ", array slice " + std::to_string(plan.slices[0]) +
++                " of the swapchain image\n";
++            info += std::string("region_source: ") + sources[static_cast<std::uint32_t>(plan.source)];
++            if (plan.source == HudCaptureSource::block_frame || plan.source == HudCaptureSource::block_newest) {
++                info += ", slot seq " + std::to_string(plan.block_seq);
++            }
++            info += "\n";
++            info += "swapchain_format: " + hud_capture_format_name(image_description.Format) + ", viewed as " +
++                hud_capture_format_name(view_format) + "\n";
++            for (std::size_t role = 0; role < 3U; ++role) {
++                info += std::string("format_") + roles[role] + ": " +
++                    hud_capture_format_name(set.images[role].format) + "\n";
++            }
++            info += std::string("encoding: ") + hud_capture_encoding(view_format) + "\n";
++            info += std::string("file: ") +
++                (hud_capture_bmp_order(set.images[0].format) != 0
++                        ? "24-bit BMP, bottom-up; each pixel's stored R, G, B bytes (alpha dropped), not converted"
++                        : ".raw, top-down rows of the stored texels, tightly packed") +
++                "\n";
++            info += "hud_0049: " + hud_capture_outcome_text(plan.output) + "\n";
++            set.info = std::move(info);
++            set.log_a = static_cast<std::uint64_t>(display_time);
++            set.log_b = static_cast<std::uint64_t>(plan.eye & 0xffU) |
++                (static_cast<std::uint64_t>(k_value & 0xffffU) << 8U) |
++                (static_cast<std::uint64_t>(limit & 0xffffU) << 24U) |
++                (static_cast<std::uint64_t>(symbology ? 1U : 0U) << 40U) |
++                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(plan.source) & 7U) << 41U) |
++                (static_cast<std::uint64_t>(cleaned ? 1U : 0U) << 44U) |
++                (static_cast<std::uint64_t>((plan.output + 1U) & 0xfU) << 48U) |
++                (static_cast<std::uint64_t>(cadence & 0xfU) << 52U);
++            set.log_c = static_cast<std::uint64_t>(plan.region.x & 0xffffU) |
++                (static_cast<std::uint64_t>(plan.region.y & 0xffffU) << 16U) |
++                (static_cast<std::uint64_t>(set.width & 0xffffU) << 32U) |
++                (static_cast<std::uint64_t>(set.height & 0xffffU) << 48U);
++        }
++        list->ResourceBarrier(static_cast<UINT>(back.size()), back.data());
++        hud_capture_sets = std::move(sets);
++        hud_capture_state = HudCaptureState::recorded;
++    }
++
++    // DCS Control (0053): after the pair's submission: its capture waits for
++    // `fence_value`, or is dropped with a submission that failed.
++    void commit_hud_capture(bool submitted, std::uint64_t fence_value) noexcept {
++        if (hud_capture_state != HudCaptureState::recorded) {
++            return;
++        }
++        if (submitted && fence_value != 0) {
++            hud_capture_state = HudCaptureState::pending;
++            hud_capture_fence = fence_value;
++        } else {
++            hud_capture_sets.clear();
++            hud_capture_state = HudCaptureState::idle;
++        }
++    }
++
++    // DCS Control (0053): a capture recorded into a pair that never got
++    // submitted (an error path) is dropped before the next one records.
++    void drop_unsubmitted_hud_capture() noexcept {
++        if (hud_capture_state == HudCaptureState::recorded) {
++            hud_capture_sets.clear();
++            hud_capture_state = HudCaptureState::idle;
++        }
++    }
++
++    // DCS Control (0053): the pending capture, once its fence passed (`ready`:
++    // the caller knows it did): a flight-log record per set here, the
++    // readback mapped and the files written on a thread of its own. Nothing
++    // waits.
++    void write_hud_captures(bool ready) noexcept {
++        if (hud_capture_state != HudCaptureState::pending || !hud_capture_readback) {
++            return;
++        }
++        if (!ready && fence_status(fence.Get(), hud_capture_fence) != S_OK) {
++            return;
++        }
++        if (hud_capture_thread.joinable()) {
++            if (hud_capture_writing.load(std::memory_order_acquire)) {
++                return;
++            }
++            hud_capture_thread.join();
++        }
++        hud_capture_state = HudCaptureState::idle;
++        try {
++            auto sets = std::make_shared<std::vector<HudCaptureSet>>(std::move(hud_capture_sets));
++            hud_capture_sets.clear();
++            for (const HudCaptureSet& set : *sets) {
++                bridge_flight_logger().event(
++                    BridgeFlightOperation::cockpit_mask, 21, set.log_a, set.log_b, set.log_c);
++            }
++            hud_capture_writing.store(true, std::memory_order_release);
++            hud_capture_thread = std::thread(
++                [this, sets, readback = hud_capture_readback, size = hud_capture_readback_size,
++                    directory = hud_capture_options.directory] {
++                    void* mapped = nullptr;
++                    const D3D12_RANGE read_range{0, static_cast<SIZE_T>(size)};
++                    if (SUCCEEDED(readback->Map(0, &read_range, &mapped)) && mapped != nullptr) {
++                        static constexpr const wchar_t* roles[] = {L"-synth", L"-prev", L"-cur"};
++                        try {
++                            for (const HudCaptureSet& set : *sets) {
++                                const std::wstring stem(set.stem.begin(), set.stem.end());
++                                for (std::size_t role = 0; role < 3U; ++role) {
++                                    const HudCaptureImage& image = set.images[role];
++                                    const int order = hud_capture_bmp_order(image.format);
++                                    static_cast<void>(hud_capture_write_file(
++                                        directory / (stem + roles[role] + (order != 0 ? L".bmp" : L".raw")),
++                                        hud_capture_image_file(static_cast<const std::uint8_t*>(mapped) + image.offset,
++                                            set.width, set.height, image.row_pitch, image.bytes_per_pixel, order)));
++                                }
++                                static_cast<void>(hud_capture_write_file(directory / (stem + L"-info.txt"),
++                                    std::vector<std::uint8_t>(set.info.begin(), set.info.end())));
++                            }
++                        } catch (...) {
++                        }
++                        const D3D12_RANGE no_write{0, 0};
++                        readback->Unmap(0, &no_write);
++                    }
++                    hud_capture_writing.store(false, std::memory_order_release);
++                });
++        } catch (...) {
++            hud_capture_sets.clear();
++            hud_capture_writing.store(false, std::memory_order_release);
++        }
++    }
++
+     // DCS Control (0033): view `view_index`'s composition with `pipeline`.
+     // With still tiles classified for this pair, drawn twice under opposite
+     // predicates on the view's decision: by `pipeline`'s still-tile
+@@ -7065,6 +7695,9 @@
+         synthesis->ResourceBarrier(
+             before_current_copy_count,
+             before_current_copy.data());
++        // DCS Control (0053): the developer's HUD capture, now and then.
++        record_hud_capture(synthesis, previous_source, current_source, target_views,
++            synthetic_destination_index, current_cleaned);
+         if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
+             // Last mark of the pair's synthesis, before the current copy
+             // that is submitted separately. The span therefore covers
+@@ -7182,6 +7815,7 @@
+         if (used_game_motion == nullptr) return E_POINTER;
+         *used_game_motion = false;
+         hud_pair = {}; // DCS Control (0049)
++        hud_capture_outcome = {}; // DCS Control (0053)
+         if (valid_game_motion_pair(previous_source, current_source)) {
+             const HRESULT result = record_game_motion_pair(slot, previous_source,
+                 current_source, target_views, synthetic_destination_index,
+@@ -7409,6 +8043,9 @@
+         slot.command_list->ResourceBarrier(
+             current_cleaned ? 2U : 1U,
+             before_current_copy.data());
++        // DCS Control (0053): the developer's HUD capture, now and then.
++        record_hud_capture(slot.command_list.Get(), previous_source, current_source, target_views,
++            synthetic_destination_index, current_cleaned);
+         if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
+             // Last mark of the pair's synthesis, before the current copy
+             // that is submitted separately. The span therefore covers
+@@ -8124,6 +8761,9 @@
+         const auto usable_fraction = [](float fraction) noexcept {
+             return fraction > 0.05F && fraction < 0.95F ? fraction : 0.5F;
+         };
++        // DCS Control (0053): a HUD capture whose pair has completed goes to
++        // its writer (nothing pending: one comparison).
++        write_hud_captures(false);
+         synthetic_fraction = usable_fraction(interpolation_fraction);
+         extra_synthetic_destination.reset();
+         // DCS Control (0031): consumed by this submission whatever happens.
+@@ -8353,6 +8993,7 @@
+         pair_mask_previous_bound = false;
+         pair_depth_bound = false; // DCS Control (0035)
+         pair_motion_bound = false; // DCS Control (0036)
++        drop_unsubmitted_hud_capture(); // DCS Control (0053)
+         result = record_pair(
+             slot,
+             previous,
+@@ -8435,6 +9076,7 @@
+                            slot, work_slot_index, &next, &fence_value,
+                            defer_current_copy);
+         finish_cursor_pair(slot, cursor_previous_serial, current.serial, SUCCEEDED(result));
++        commit_hud_capture(SUCCEEDED(result), fence_value); // DCS Control (0053)
+         log_smooth_cursor();
+         if (FAILED(result)) {
+             if (next.active()) {
+@@ -8582,6 +9224,8 @@
+         for (WorkSlot* slot : ordered) {
+             harvest_dcs_motion(*slot);
+         }
++        // DCS Control (0053): and a pending HUD capture is written.
++        write_hud_captures(false);
+         return result;
+     }
+ };
+@@ -8851,6 +9495,21 @@
+     } catch (...) {
+         return E_FAIL;
+     }
++}
++
++// DCS Control (0053).
++HRESULT D3D12FrameSynthesizer::set_hud_capture(
++    const D3D12HudCaptureOptions& options) noexcept {
++    try {
++        std::scoped_lock lock(mutex_);
++        if (impl_ == nullptr) {
++            return E_UNEXPECTED;
++        }
++        impl_->set_hud_capture(options);
++        return S_OK;
++    } catch (...) {
++        return E_FAIL;
++    }
+ }
+ 
+ void D3D12FrameSynthesizer::note_cursor_position(
+diff --git a/src/d3d12/hud_symbology.cpp b/src/d3d12/hud_symbology.cpp
+--- a/src/d3d12/hud_symbology.cpp
++++ b/src/d3d12/hud_symbology.cpp
+@@ -2,6 +2,7 @@
+ // xrfg/hud_symbology.hpp and hud_symbology.hlsl).
+ 
+ #include "xrfg/hud_symbology.hpp"
++#include "xrfg/dcsvr_symbology.h" // DCS Control (0053)
+ 
+ #include <windows.h>
+ #include <wrl/client.h>
+@@ -519,4 +520,182 @@
+     return true;
+ }
+ 
++// DCS Control (0053) ---------------------------------------------------------
++
++bool hud_capture_eye_region(const D3D12HudSymbology& symbology, std::uint32_t eye, std::uint32_t width,
++    std::uint32_t height, HudImageRect& region) noexcept {
++    region = {};
++    if (!symbology.eye_present(eye) || width == 0 || height == 0) {
++        return false;
++    }
++    const D3D12_RECT rect = hud_pass_rect(hud_eye_input(symbology, eye), HudImageRect{0, 0, width, height});
++    if (rect.right <= rect.left || rect.bottom <= rect.top) {
++        return false;
++    }
++    region = {static_cast<std::uint32_t>(rect.left), static_cast<std::uint32_t>(rect.top),
++        static_cast<std::uint32_t>(rect.right - rect.left), static_cast<std::uint32_t>(rect.bottom - rect.top)};
++    return true;
++}
++
++HudImageRect hud_capture_fallback_region(std::uint32_t width, std::uint32_t height, std::uint32_t side) noexcept {
++    const std::uint32_t w = std::min(width, side);
++    const std::uint32_t h = std::min(height, side);
++    return {(width - w) / 2U, (height - h) / 2U, w, h};
++}
++
++HudImageRect hud_capture_union(const HudImageRect& a, const HudImageRect& b) noexcept {
++    if (a.width == 0 || a.height == 0) {
++        return b;
++    }
++    if (b.width == 0 || b.height == 0) {
++        return a;
++    }
++    const std::uint64_t right = std::max<std::uint64_t>(std::uint64_t(a.x) + a.width, std::uint64_t(b.x) + b.width);
++    const std::uint64_t bottom =
++        std::max<std::uint64_t>(std::uint64_t(a.y) + a.height, std::uint64_t(b.y) + b.height);
++    const std::uint32_t x = std::min(a.x, b.x);
++    const std::uint32_t y = std::min(a.y, b.y);
++    return {x, y, static_cast<std::uint32_t>(right - x), static_cast<std::uint32_t>(bottom - y)};
++}
++
++bool hud_symbology_from_header(const void* header_bytes, int slot, D3D12HudSymbology& out) noexcept {
++    namespace csy = dcsvr_symbology;
++    out = {};
++    if (header_bytes == nullptr || slot < 0 || slot >= csy::slot_count) {
++        return false;
++    }
++    const csy::Header& header = *static_cast<const csy::Header*>(header_bytes);
++    const csy::EmissionSlot& source = header.slot[slot];
++    const auto finite4 = [](const float (&values)[4]) {
++        return std::isfinite(values[0]) && std::isfinite(values[1]) && std::isfinite(values[2]) &&
++            std::isfinite(values[3]);
++    };
++    // As 0049's pair_hud: Quad Views' edge blend (its defaults where unknown),
++    // the focus rect from the tangents, else rectNorm.
++    const bool qv_known = (header.flags & csy::header_flags::qv_settings) != 0;
++    const float smoothing = qv_known ? header.qv.smoothenFocusViewEdges : 0.2F;
++    const float shape = qv_known ? header.qv.focusViewShape : 0.0F;
++    out.focus_smoothing = std::isfinite(smoothing) ? std::clamp(smoothing, 0.0F, 0.5F) : 0.2F;
++    out.focus_shape = std::isfinite(shape) ? std::clamp(shape, 0.0F, 16.0F) : 0.0F;
++    out.alpha_valid = (header.emissionFlags & csy::emission_flags::alpha_valid) != 0;
++    out.emission_flags = header.emissionFlags;
++    if (csy::layout_usable(header, slot)) {
++        for (int eye = 0; eye < csy::eye_count; ++eye) {
++            const csy::EyeFocus& focus = source.focus.eye[eye];
++            float rect[4]{};
++            bool ok = finite4(focus.eyeFovTan) && finite4(focus.focusFovTan) &&
++                csy::focus_rect(focus.eyeFovTan, focus.focusFovTan, rect) && finite4(rect);
++            if (!ok && finite4(focus.rectNorm) && focus.rectNorm[2] > focus.rectNorm[0] &&
++                focus.rectNorm[3] > focus.rectNorm[1]) {
++                std::copy(std::begin(focus.rectNorm), std::end(focus.rectNorm), std::begin(rect));
++                ok = true;
++            }
++            out.eyes[static_cast<std::size_t>(eye)].layout = ok;
++            out.eyes[static_cast<std::size_t>(eye)].focus_rect = {rect[0], rect[1], rect[2], rect[3]};
++        }
++    }
++    for (int view = 0; view < csy::max_views; ++view) {
++        const csy::EmissionView& m = source.view[view];
++        if (!csy::view_present(header, slot, view) ||
++            !cockpit_rect_inside(m.x, m.y, m.capW, m.capH, header.atlasW, header.atlasH) ||
++            !cockpit_rect_inside(m.winX, m.winY, m.winW, m.winH, m.outW, m.outH) || m.winW > m.capW ||
++            m.winH > m.capH) {
++            continue;
++        }
++        D3D12HudSymbologyView& entry = out.views[static_cast<std::size_t>(view)];
++        entry.present = true;
++        entry.x = m.x;
++        entry.y = m.y;
++        entry.out_width = m.outW;
++        entry.out_height = m.outH;
++        entry.window_x = m.winX;
++        entry.window_y = m.winY;
++        entry.window_width = m.winW;
++        entry.window_height = m.winH;
++        entry.flags = m.flags;
++    }
++    return out.eye_present(0) || out.eye_present(1);
++}
++
++std::wstring hud_symbology_block_name_from_environment() {
++    std::wstring name = dcsvr_symbology::block_name;
++    std::array<wchar_t, 128> suffix{};
++    const DWORD length = GetEnvironmentVariableW(
++        L"DCSVR_PERCEPTION_SHM_SUFFIX", suffix.data(), static_cast<DWORD>(suffix.size()));
++    if (length > 0 && length < suffix.size()) {
++        name.append(suffix.data(), length);
++    }
++    return name;
++}
++
++HudSymbologyWindowReader::HudSymbologyWindowReader(std::wstring name) noexcept : name_(std::move(name)) {}
++
++HudSymbologyWindowReader::~HudSymbologyWindowReader() {
++    if (view_ != nullptr) {
++        UnmapViewOfFile(view_);
++    }
++    if (mapping_ != nullptr) {
++        CloseHandle(static_cast<HANDLE>(mapping_));
++    }
++}
++
++HudSymbologyWindowReader::Result HudSymbologyWindowReader::read(std::int64_t display_time) noexcept {
++    namespace csy = dcsvr_symbology;
++    Result result{};
++    if (view_ == nullptr) {
++        const std::uint64_t now = GetTickCount64();
++        if (next_open_ms_ != 0 && now < next_open_ms_) {
++            return result;
++        }
++        next_open_ms_ = now + 1000U;
++        // Read only: never the reader heartbeat (the producer's "wanted").
++        HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, name_.c_str());
++        if (mapping == nullptr) {
++            return result;
++        }
++        const void* view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, sizeof(csy::Header));
++        if (view == nullptr) {
++            CloseHandle(mapping);
++            return result;
++        }
++        mapping_ = mapping;
++        view_ = view;
++    }
++    // The header is 2 KB: on the heap, once per read (a capture's rate).
++    std::unique_ptr<csy::Header> header;
++    try {
++        header = std::make_unique<csy::Header>();
++    } catch (...) {
++        return result;
++    }
++    if (!csy::seqlock_read(static_cast<const csy::Header*>(view_), *header) ||
++        !csy::header_usable(*header, GetCurrentProcessId())) {
++        return result;
++    }
++    int slot = csy::find_slot(*header, display_time);
++    result.source = HudCaptureSource::block_frame;
++    if (slot < 0 || !csy::layout_usable(*header, slot)) {
++        slot = -1;
++        for (int index = 0; index < csy::slot_count; ++index) {
++            const csy::EmissionSlot& s = header->slot[index];
++            if ((s.flags & csy::slot_flags::valid) == 0 || s.seq == 0 || !csy::layout_usable(*header, index)) {
++                continue;
++            }
++            if (slot < 0 || s.seq > header->slot[slot].seq) {
++                slot = index;
++            }
++        }
++        result.source = HudCaptureSource::block_newest;
++    }
++    if (slot < 0) {
++        result.source = HudCaptureSource::fallback;
++        return result;
++    }
++    static_cast<void>(hud_symbology_from_header(header.get(), slot, result.symbology));
++    result.block = true;
++    result.seq = header->slot[slot].seq;
++    result.generation = header->generation;
++    return result;
++}
++
+ }  // namespace xrfg
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -748,6 +748,16 @@
+         if (frame_records_.load(std::memory_order_relaxed)) {
+             g_frame_hold_timing.store(true, std::memory_order_relaxed);
+         }
++        // DCS Control (0053): the developer's HUD captures, with logging only.
++        hud_capture_.store(
++            std::min<UINT>(
++                GetPrivateProfileIntW(
++                    kConfigurationSection,
++                    L"hud_capture",
++                    0,
++                    config_path.c_str()),
++                10000U),
++            std::memory_order_relaxed);
+         event(
+             BridgeFlightOperation::logger,
+             XRFG_IMPLEMENTATION_VERSION,
+@@ -765,6 +775,7 @@
+             return;
+         }
+         frame_records_.store(false, std::memory_order_relaxed); // 0048
++        hud_capture_.store(0, std::memory_order_relaxed); // 0053
+         g_frame_hold_timing.store(false, std::memory_order_relaxed);
+         event(BridgeFlightOperation::logger, 0);
+         Impl& impl = *impl_;
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -3361,12 +3361,33 @@
+     std::uint32_t array_size{};
+ };
+ 
++// DCS Control (0053): `[diagnostics] hud_capture=N` (a developer key, with the
++// flight log on): a new synthesizer's HUD captures go next to the log, N per
++// eye for the whole process (one budget shared by every synthesizer).
++void configure_hud_capture(xrfg::D3D12FrameSynthesizer& synthesizer) noexcept {
++    const std::uint32_t limit = xrfg::bridge_flight_logger().hud_capture();
++    if (limit == 0) {
++        return;
++    }
++    try {
++        static const auto budget = std::make_shared<xrfg::D3D12HudCaptureBudget>();
++        xrfg::D3D12HudCaptureOptions options{};
++        options.directory = xrfg::bridge_flight_logger().log_path().parent_path();
++        options.limit = limit;
++        options.budget = budget;
++        static_cast<void>(synthesizer.set_hud_capture(options));
++    } catch (...) {
++    }
++}
++
+ // DCS VR Control (0010): turns the smooth cursor on for a new synthesizer when
+ // the ini asks for it, with the game's own cursor images (loaded once a
+ // session; see load_dcs_cursor_templates). Logged as smooth_cursor result=2.
++// DCS Control (0053): every new synthesizer passes here: its HUD captures too.
+ void configure_smooth_cursor(
+     SessionState& session,
+     xrfg::D3D12FrameSynthesizer& synthesizer) noexcept {
++    configure_hud_capture(synthesizer); // DCS Control (0053)
+     if (!session.smooth_cursor) {
+         return;
+     }
+diff --git a/tests/bridge_flight_logger_tests.cpp b/tests/bridge_flight_logger_tests.cpp
+--- a/tests/bridge_flight_logger_tests.cpp
++++ b/tests/bridge_flight_logger_tests.cpp
+@@ -563,6 +563,8 @@
+             off.initialize(off_directory);
+             require(off.enabled() && !off.frame_records(),
+                 "frame records: on with frame_records=0");
++            // DCS Control (0053): no hud_capture key, no HUD captures.
++            require(off.hud_capture() == 0, "hud capture: on without the key");
+             off.shutdown();
+ 
+             const fs::path no_log_directory = temporary.path / "frames-no-log";
+@@ -571,11 +573,13 @@
+                 no_log_directory / "ofxr_bridge.ini",
+                 "[diagnostics]\r\n"
+                 "logging_enabled=0\r\n"
+-                "frame_records=1\r\n");
++                "frame_records=1\r\n"
++                "hud_capture=3\r\n"); // DCS Control (0053)
+             xrfg::BridgeFlightLogger no_log;
+             no_log.initialize(no_log_directory);
+             require(!no_log.enabled() && !no_log.frame_records(),
+                 "frame records: on with logging off");
++            require(no_log.hud_capture() == 0, "hud capture: on with logging off");
+ 
+             const fs::path on_directory = temporary.path / "frames-on";
+             fs::create_directories(on_directory);
+@@ -583,11 +587,13 @@
+                 on_directory / "ofxr_bridge.ini",
+                 "[diagnostics]\r\n"
+                 "logging_enabled=1\r\n"
+-                "frame_records=1\r\n");
++                "frame_records=1\r\n"
++                "hud_capture=3\r\n"); // DCS Control (0053)
+             xrfg::BridgeFlightLogger on;
+             on.initialize(on_directory);
+             require(on.enabled() && on.frame_records(),
+                 "frame records: off with frame_records=1");
++            require(on.hud_capture() == 3, "hud capture: not 3 with hud_capture=3");
+             const fs::path on_path = on.log_path();
+             on.timed_event(xrfg::BridgeFlightOperation::frame, 7, 9000,
+                 123456789012345ULL, 22222, 2ULL | (1ULL << 9) | (1ULL << 11));
+diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
+--- a/tests/cockpit_mask_tests.cpp
++++ b/tests/cockpit_mask_tests.cpp
+@@ -45,7 +45,9 @@
+ #include <functional>
+ #include <fstream>
+ #include <iostream>
++#include <iterator> // DCS Control (0053)
+ #include <limits>
++#include <map> // DCS Control (0053)
+ #include <memory>
+ #include <stdexcept>
+ #include <string>
+diff --git a/tests/hud_symbology_tests.inc b/tests/hud_symbology_tests.inc
+--- a/tests/hud_symbology_tests.inc
++++ b/tests/hud_symbology_tests.inc
+@@ -1433,6 +1433,325 @@
+               << " without\n";
+ }
+ 
++// DCS Control (0053): `[diagnostics] hud_capture=N`, the developer's HUD
++// captures. A fake symbology block with only a header (bogus texture
++// handles), a run of pairs through the synthesizer, the files read back.
++
++// A symbology block with a header alone: views 0 and 1 (the peripheries)
++// present with the window (32, 24, 64, 48) of a 128 x 96 output, a focus
++// layout, one slot for `display_time`; texture handles that open nothing.
++class HudHeaderOnlyBlock final {
++public:
++    HudHeaderOnlyBlock(const std::wstring& name, std::int64_t display_time) {
++        mapping_ = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 4096, name.c_str());
++        require(mapping_ != nullptr, "hud capture block: CreateFileMappingW");
++        block_ = static_cast<csy::Header*>(MapViewOfFile(mapping_, FILE_MAP_ALL_ACCESS, 0, 0, 4096));
++        require(block_ != nullptr, "hud capture block: MapViewOfFile");
++        csy::Header header{};
++        header.magic = csy::block_magic;
++        header.version = csy::block_version;
++        header.structSize = sizeof(csy::Header);
++        header.flags = csy::header_flags::active | csy::header_flags::fence | csy::header_flags::idle;
++        header.generation = 7;
++        header.slotCount = csy::slot_count;
++        header.format = csy::format_rgba16f;
++        header.atlasW = 256;
++        header.atlasH = 128;
++        header.ownerPid = GetCurrentProcessId();
++        for (int index = 0; index < csy::slot_count; ++index) {
++            header.textureHandle[index] = 0xDEAD0000U + static_cast<std::uint64_t>(index);
++            header.classTextureHandle[index] = 0xBEEF0000U + static_cast<std::uint64_t>(index);
++        }
++        csy::EmissionSlot& slot = header.slot[1];
++        slot.seq = 41;
++        slot.displayTime = display_time;
++        slot.flags = csy::slot_flags::valid | csy::slot_flags::display_time;
++        slot.viewMask = 15U;
++        for (int view = 0; view < 2; ++view) {
++            csy::EmissionView& entry = slot.view[view];
++            entry.flags = csy::view_flags::valid | csy::view_flags::present;
++            entry.x = static_cast<std::uint32_t>(view) * 128U;
++            entry.capW = 128;
++            entry.capH = 96;
++            entry.outW = 128;
++            entry.outH = 96;
++            entry.winX = 32;
++            entry.winY = 24;
++            entry.winW = 64;
++            entry.winH = 48;
++        }
++        for (int eye = 0; eye < csy::eye_count; ++eye) {
++            const float eye_tan[4]{-1.0F, 1.0F, 0.8F, -0.8F};
++            const float focus_tan[4]{-0.4F, 0.3F, 0.25F, -0.35F};
++            std::memcpy(slot.focus.eye[eye].eyeFovTan, eye_tan, sizeof(eye_tan));
++            std::memcpy(slot.focus.eye[eye].focusFovTan, focus_tan, sizeof(focus_tan));
++        }
++        slot.focus.flags = csy::layout_flags::layout_valid;
++        header.newestSeq = slot.seq;
++        header.newestSlot = 1;
++        csy::seqlock_write(block_, header);
++    }
++    ~HudHeaderOnlyBlock() {
++        UnmapViewOfFile(block_);
++        CloseHandle(mapping_);
++    }
++    HudHeaderOnlyBlock(const HudHeaderOnlyBlock&) = delete;
++    HudHeaderOnlyBlock& operator=(const HudHeaderOnlyBlock&) = delete;
++    std::uint64_t reader_heartbeat() const {
++        return csy::reader_heartbeat_of(block_).load(std::memory_order_acquire);
++    }
++
++private:
++    HANDLE mapping_{};
++    csy::Header* block_{};
++};
++
++std::string hud_capture_read_text(const std::filesystem::path& path) {
++    std::ifstream file(path, std::ios::binary);
++    return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
++}
++
++// The capture files of a run: name -> size.
++std::map<std::string, std::uintmax_t> hud_capture_files(const std::filesystem::path& directory) {
++    std::map<std::string, std::uintmax_t> files;
++    if (std::filesystem::exists(directory)) {
++        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
++            const std::string name = entry.path().filename().string();
++            if (name.rfind("hud-", 0) == 0) {
++                files[name] = entry.file_size();
++            }
++        }
++    }
++    return files;
++}
++
++// `pairs` pairs of one still stereo frame through the FidelityFX synthesis,
++// each frame with a mask frame (display time 5000 + its number) carrying
++// the periphery window (32, 24, 64, 48) when `key` is on; HUD captures as
++// `options` say (interval 0). The files are written when the synthesizer
++// goes.
++void hud_capture_run(Gpu& gpu, bool key, const xrfg::D3D12HudCaptureOptions& options, int pairs,
++    const std::vector<std::uint8_t>& frame_bytes, const HudScene& scene) {
++    const DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
++    const auto image = [&] {
++        return hud_texture(gpu, kHudSynthWidth, kHudSynthHeight, format, 2, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
++            D3D12_HEAP_FLAG_NONE, D3D12_RESOURCE_STATE_RENDER_TARGET);
++    };
++    std::array<ComPtr<ID3D12Resource>, 2> sources{image(), image()};
++    auto current = image();
++    auto synthetic = image();
++    hud_upload(gpu, sources[0].Get(), frame_bytes, kHudSynthWidth * 4U, D3D12_RESOURCE_STATE_RENDER_TARGET);
++    hud_upload(gpu, sources[1].Get(), frame_bytes, kHudSynthWidth * 4U, D3D12_RESOURCE_STATE_RENDER_TARGET);
++    std::array<ID3D12Resource*, 2> input{sources[0].Get(), sources[1].Get()};
++    std::array<ID3D12Resource*, 1> current_out{current.Get()};
++    std::array<ID3D12Resource*, 1> synthetic_out{synthetic.Get()};
++    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++    require_hresult(history->initialize(gpu.device.Get(), gpu.queue.Get(), input, D3D12_RESOURCE_STATE_RENDER_TARGET),
++        "hud capture: history");
++    xrfg::D3D12NvidiaOpticalFlowOptions flow{};
++    flow.cockpit_mask = true;
++    flow.hud_symbology = key;
++    {
++        xrfg::D3D12FrameSynthesizer synth;
++        require_hresult(synth.initialize(gpu.device.Get(), gpu.queue.Get(), history, current_out, synthetic_out,
++                            format, D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::fidelity_fx,
++                            flow),
++            "hud capture: initialize");
++        require_hresult(synth.set_hud_capture(options), "hud capture: set_hud_capture");
++        const auto views = hud_synthesis_views();
++        const auto mask_frame = [&](int number) {
++            auto frame = hud_synthesis_frame(gpu, scene, key, static_cast<std::uint64_t>(number) + 1U);
++            frame->display_time = 5000 + number;
++            return frame;
++        };
++        xrfg::D3D12HistoryCaptureTicket ticket{};
++        xrfg::D3D12FrameSynthesisTicket output{};
++        require_hresult(history->capture(0, &ticket), "hud capture: capture 0");
++        require_hresult(history->commit(ticket), "hud capture: commit 0");
++        synth.set_cockpit_mask(mask_frame(0));
++        require_hresult(synth.submit_prime(ticket, views, 0, &output), "hud capture: prime");
++        hud_run(gpu, [](ID3D12GraphicsCommandList*) {});
++        for (int pair = 1; pair <= pairs; ++pair) {
++            require_hresult(history->capture(static_cast<std::uint32_t>(pair % 2), &ticket), "hud capture: capture");
++            require_hresult(history->commit(ticket), "hud capture: commit");
++            synth.set_cockpit_mask(mask_frame(pair));
++            require_hresult(synth.submit_pair(ticket, views, views, 0, 0, &output, std::nullopt, {}, false, 0.5F,
++                                std::nullopt),
++                "hud capture: pair");
++            hud_run(gpu, [](ID3D12GraphicsCommandList*) {}); // the pair done
++            Sleep(40); // the previous set's writer done (a set records only then)
++        }
++        require_hresult(synth.wait_for_idle(), "hud capture: idle");
++    }
++}
++
++void test_hud_capture(Gpu& gpu) {
++    namespace fs = std::filesystem;
++    // The pure parts: the fallback square, the union, a header's windows.
++    const xrfg::HudImageRect square = xrfg::hud_capture_fallback_region(2000, 1800);
++    const xrfg::HudImageRect clamped = xrfg::hud_capture_fallback_region(800, 600);
++    require(square.x == 488 && square.y == 388 && square.width == 1024 && square.height == 1024 &&
++            clamped.x == 0 && clamped.y == 0 && clamped.width == 800 && clamped.height == 600,
++        "hud capture: the centred 1024 square, clamped to the image");
++    const xrfg::HudImageRect both = xrfg::hud_capture_union({10, 20, 30, 40}, {5, 50, 10, 20});
++    const xrfg::HudImageRect one = xrfg::hud_capture_union({}, {5, 50, 10, 20});
++    require(both.x == 5 && both.y == 20 && both.width == 35 && both.height == 50 && one.x == 5 && one.width == 10,
++        "hud capture: the union of two regions");
++
++    // The OFF arm's window: the block's header alone, no texture opened (its
++    // handles are bogus), no heartbeat stored.
++    const std::wstring block_name = std::wstring(csy::block_name) + test_suffix(L"hudcap");
++    {
++        HudHeaderOnlyBlock block(block_name, 5001);
++        xrfg::HudSymbologyWindowReader reader(block_name);
++        const auto exact = reader.read(5001);
++        xrfg::HudImageRect region{};
++        require(exact.block && exact.source == xrfg::HudCaptureSource::block_frame && exact.seq == 41 &&
++                exact.symbology.views[0].present && exact.symbology.views[1].present &&
++                !exact.symbology.views[2].present &&
++                xrfg::hud_capture_eye_region(exact.symbology, 0, kHudSynthWidth, kHudSynthHeight, region) &&
++                region.x == 30 && region.y == 22 && region.width == 68 && region.height == 52,
++            "hud capture: the block's slot of this frame gives 0049's window (2 px around)");
++        const auto newest = reader.read(9999);
++        require(newest.block && newest.source == xrfg::HudCaptureSource::block_newest && newest.seq == 41,
++            "hud capture: no slot of this frame: the newest one");
++        require(block.reader_heartbeat() == 0, "hud capture: the read-only reader stored a heartbeat");
++        xrfg::HudSymbologyWindowReader missing(block_name + L"-none");
++        require(!missing.read(5001).block, "hud capture: no block is not a block");
++    }
++
++    HudScene scene;
++    scene.width = kHudSynthWidth;
++    scene.height = kHudSynthHeight;
++    scene.atlas_width = kHudSynthWidth;
++    scene.atlas_height = kHudSynthHeight;
++    scene.emission.assign(static_cast<std::size_t>(kHudSynthWidth) * kHudSynthHeight * 8U, 0);
++    scene.classes.assign(static_cast<std::size_t>(kHudSynthWidth) * kHudSynthHeight, 0);
++    std::vector<std::uint8_t> eye_bytes(static_cast<std::size_t>(kHudSynthWidth) * kHudSynthHeight * 4U);
++    for (std::size_t at = 0; at < eye_bytes.size(); ++at) {
++        eye_bytes[at] = static_cast<std::uint8_t>((at * 37U + at / 512U) % 251U);
++    }
++    std::vector<std::uint8_t> frame_bytes(eye_bytes);
++    frame_bytes.insert(frame_bytes.end(), eye_bytes.begin(), eye_bytes.end());
++    const std::string pid = std::to_string(GetCurrentProcessId());
++    const fs::path root = fs::temp_directory_path() / ("ofxr-hud-capture-" + pid);
++    fs::remove_all(root);
++    const auto options_for = [&](const char* name, std::uint32_t limit, const std::wstring& block) {
++        xrfg::D3D12HudCaptureOptions options{};
++        options.directory = root / name;
++        fs::create_directories(options.directory);
++        options.limit = limit;
++        options.interval_ms = 0;
++        options.block_name = block;
++        options.budget = std::make_shared<xrfg::D3D12HudCaptureBudget>();
++        return options;
++    };
++    const auto bmp_size = [](std::uint32_t width, std::uint32_t height) {
++        return static_cast<std::uintmax_t>(54U + ((width * 3U + 3U) & ~3U) * height);
++    };
++    // N sets per eye: each three BMPs of `width` x `height` and an info file.
++    const auto check_sets = [&](const fs::path& directory, const char* sym, std::uint32_t width,
++                                std::uint32_t height, const char* source, const char* what) {
++        const auto files = hud_capture_files(directory);
++        require(files.size() == 2U * 2U * 4U, std::string("hud capture: ") + what + ": " +
++                std::to_string(files.size()) + " files, not 2 sets of 4 per eye");
++        for (int eye = 0; eye < 2; ++eye) {
++            for (int k = 1; k <= 2; ++k) {
++                const std::string prefix = "hud-" + pid + "-" + std::to_string(eye) + "-";
++                const std::string tail = "-k" + std::to_string(k) + "of2-" + sym;
++                std::string stem;
++                for (const auto& entry : files) {
++                    const std::string& name = entry.first;
++                    const std::size_t at = name.find(tail);
++                    if (name.rfind(prefix, 0) == 0 && at != std::string::npos && name.find("-info.txt") != std::string::npos) {
++                        stem = name.substr(0, at + tail.size());
++                    }
++                }
++                require(!stem.empty(), std::string("hud capture: ") + what + ": no set " + prefix + "*" + tail);
++                const std::string display_time = stem.substr(prefix.size(), stem.size() - prefix.size() - tail.size());
++                require(std::stoll(display_time) > 5000, std::string("hud capture: ") + what + ": the display time");
++                for (const char* role : {"-synth.bmp", "-prev.bmp", "-cur.bmp"}) {
++                    const auto found = files.find(stem + role);
++                    require(found != files.end() && found->second == bmp_size(width, height),
++                        std::string("hud capture: ") + what + ": " + stem + role + " missing or not " +
++                            std::to_string(width) + "x" + std::to_string(height));
++                }
++                const std::string info = hud_capture_read_text(directory / (stem + "-info.txt"));
++                const std::string region_line = "w=" + std::to_string(width) + " h=" + std::to_string(height);
++                require(info.find("encoding: srgb8, as stored in the swapchain") != std::string::npos &&
++                        info.find(region_line) != std::string::npos && info.find(source) != std::string::npos &&
++                        info.find("R8G8B8A8_UNORM_SRGB") != std::string::npos &&
++                        info.find("k/N: " + std::to_string(k) + "/2") != std::string::npos,
++                    std::string("hud capture: ") + what + ": the info file\n" + info);
++            }
++        }
++        return files;
++    };
++
++    // hud_capture=2, hud_symbology on: two sets per eye, 0049's window from
++    // the pair's own symbology, 0049 cleaned and re-added the pair.
++    const auto on = options_for("on", 2, block_name + L"-none");
++    hud_capture_run(gpu, true, on, 6, frame_bytes, scene);
++    check_sets(on.directory, "sym1", 68, 52, "the pair's own symbology", "hud_symbology on");
++    {
++        const auto files = hud_capture_files(on.directory);
++        std::string info_name;
++        for (const auto& entry : files) {
++            const std::string& name = entry.first;
++            if (name.find("-0-") != std::string::npos && name.find("-k1of2-") != std::string::npos &&
++                name.find("-info.txt") != std::string::npos) {
++                info_name = name;
++            }
++        }
++        const std::string info = hud_capture_read_text(on.directory / info_name);
++        require(info.find("hud_0049: cleaned and re-added") != std::string::npos && info.find("x=30 y=22") != std::string::npos,
++            "hud capture: on: 0049's outcome and the region's origin\n" + info);
++        // The real frame's bytes as stored, unconverted: the cur BMP's first
++        // row (bottom-up, B G R) is eye 0's row 22 from x 30.
++        const std::string stem = info_name.substr(0, info_name.size() - std::string("-info.txt").size());
++        const std::string cur = hud_capture_read_text(on.directory / (stem + "-cur.bmp"));
++        const std::size_t row = (68U * 3U + 3U) & ~3U;
++        bool same = cur.size() == bmp_size(68, 52);
++        for (std::uint32_t x = 0; same && x < 68U; ++x) {
++            const std::size_t texel = (static_cast<std::size_t>(22) * kHudSynthWidth + 30U + x) * 4U;
++            const std::size_t at = 54U + row * 51U + x * 3U;
++            same = static_cast<std::uint8_t>(cur[at]) == eye_bytes[texel + 2U] &&
++                static_cast<std::uint8_t>(cur[at + 1U]) == eye_bytes[texel + 1U] &&
++                static_cast<std::uint8_t>(cur[at + 2U]) == eye_bytes[texel];
++        }
++        require(same, "hud capture: the cur BMP is not the stored bytes of the region");
++    }
++    // hud_capture=0: nothing at all.
++    const auto zero = options_for("zero", 0, block_name);
++    hud_capture_run(gpu, true, zero, 3, frame_bytes, scene);
++    require(hud_capture_files(zero.directory).empty(), "hud capture: hud_capture=0 wrote files");
++    // The OFF arm: hud_symbology off, the window from the block's header.
++    {
++        HudHeaderOnlyBlock block(block_name, 5001);
++        const auto off = options_for("off", 2, block_name);
++        hud_capture_run(gpu, false, off, 6, frame_bytes, scene);
++        check_sets(off.directory, "sym0", 68, 52, "the symbology block's", "hud_symbology off");
++        require(block.reader_heartbeat() == 0, "hud capture: the OFF arm stored a heartbeat");
++        const auto files = hud_capture_files(off.directory);
++        for (const auto& entry : files) {
++            const std::string& name = entry.first;
++            if (name.find("-k1of2-") != std::string::npos && name.find("-info.txt") != std::string::npos) {
++                const std::string info = hud_capture_read_text(off.directory / name);
++                require(info.find("slot of this frame") != std::string::npos &&
++                        info.find("hud_0049: off") != std::string::npos,
++                    "hud capture: off: the first set is the block's slot of its frame\n" + info);
++            }
++        }
++    }
++    // No block: the centred square, clamped to the 128 x 96 eye.
++    const auto fallback = options_for("fallback", 2, block_name + L"-none");
++    hud_capture_run(gpu, false, fallback, 6, frame_bytes, scene);
++    check_sets(fallback.directory, "sym0", kHudSynthWidth, kHudSynthHeight, "a centred 1024 square", "no block");
++    fs::remove_all(root);
++    std::cout << "hud capture: hud_capture=2 writes 2 sets per eye (3 BMPs and info), 0 nothing; the OFF arm's "
++                 "window from a header-only block (no texture, no heartbeat); the square without a block\n";
++}
++
+ void test_hud_symbology(Gpu& gpu) {
+     test_hud_nearest_frame();
+     test_hud_pairing_and_copies(gpu);
+@@ -1443,4 +1762,5 @@
+     test_hud_collimated_rotation(gpu);
+     test_hud_mask_overlay_dilation(gpu);
+     test_hud_synthesis(gpu);
++    test_hud_capture(gpu); // DCS Control (0053)
+ }

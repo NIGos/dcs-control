@@ -1,0 +1,1511 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1354,7 +1354,8 @@
+         # DCS Control (0029): the runtime stalls the presenter for 2.5 s in
+         # 3X with the deeper pipeline: the application's frame calls stay
+         # bounded, generation fails open once (result=950) and the frames
+-        # pass through after it.
++        # pass through after it. DCS Control (0040): until the latch re-arms
++        # in flight (result=951 a= 4), without a second trip.
+         add_test(
+             NAME xrfg_layer_presenter_stall
+             COMMAND "${CMAKE_COMMAND}"
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -366,7 +366,8 @@
+     //     generation.
+     //   result=5, a copy of a mask never completed and masks are off for the
+     //     session: a= the copy, b= the completed value, c= how long it waited
+-    //     in ms.
++    //     in ms. DCS Control (0040): off until result=15 unless c= 0 (the
++    //     device removed, or a fence signal failed: for the session).
+     //   result=6, the consumer could not be made (once): a= the HRESULT.
+     //   result=7 (DCS Control 0034), with result=3: what the synthesis did
+     //     with the masks over those 10 s, per eye of each pair that bound one.
+@@ -409,6 +410,11 @@
+     //     the MV atlas width (0-31) and height (32-63), c= the header flags.
+     //   result=14 (0036), a motion handle did not open (once per
+     //     generation): a= the HRESULT, b= which slot, c= the generation.
++    //   result=15 (DCS Control 0040), masks back on after a result=5 stall:
++    //     the copy queue ran everything queued before it and the stall's
++    //     hold passed (1 s, doubled for each stall after the first, at most
++    //     60 s). a= the last copy, b= stalls this session, c= how long the
++    //     stall lasted in ms.
+     cockpit_mask,
+     // DCS Control (0034): the second synthetic slot of a session that made
+     // its ring with one (adaptive 2X/3X at the shallow depth: 3X's second
+diff --git a/include/xrfg/cockpit_mask.hpp b/include/xrfg/cockpit_mask.hpp
+--- a/include/xrfg/cockpit_mask.hpp
++++ b/include/xrfg/cockpit_mask.hpp
+@@ -165,6 +165,94 @@
+     return std::isfinite(largest) ? largest : std::numeric_limits<float>::infinity();
+ }
+ 
++// DCS Control (0040): whether the rect (x, y, width, height) lies inside a
++// texture of `texture_width` x `texture_height` texels, in 64 bits: the
++// producer contracts' own view_usable() adds x + w in 32, where a rect near
++// the top of the range wraps and passes.
++[[nodiscard]] constexpr bool cockpit_rect_inside(std::uint32_t x, std::uint32_t y, std::uint32_t width,
++    std::uint32_t height, std::uint64_t texture_width, std::uint64_t texture_height) noexcept {
++    return std::uint64_t(x) + width <= texture_width && std::uint64_t(y) + height <= texture_height;
++}
++
++// DCS Control (0040): DCS's motion vectors' backoff (0036), one decision per
++// pair for every eye. A pixel whose MV fails the colour check is composed by
++// both the MVs and the flow (about 1.7 times the flow's cost): where more
++// than a fifth of the sampled pixels of kWindowPairs pairs fell back (thick
++// smoke or cloud, a scene the MVs do not describe), the next kBackoffPairs
++// pairs take the flow alone, as before 0036. 0036 kept this per synthesizer,
++// that is per eye in DCS (a swapchain each), so the two eyes could decide
++// apart and one compose along the MVs while the other took the flow, for a
++// second or two. Now the consumer's frames share one: the first eye to ask
++// about a pair (its current frame's display time) decides, and every other
++// eye asking about that pair gets the same answer; both eyes' results feed
++// one window.
++class DcsMotionBackoff {
++public:
++    static constexpr std::uint64_t kWindowPairs = 32;
++    static constexpr std::uint64_t kBackoffPairs = 96;
++
++    // Whether the pair whose current frame has display time `pair` takes the
++    // flow alone.
++    [[nodiscard]] bool backing_off(std::int64_t pair) noexcept {
++        std::scoped_lock lock(mutex_);
++        for (const Decision& decision : decided_) {
++            if (decision.known && decision.pair == pair) {
++                return decision.back_off;
++            }
++        }
++        const bool back_off = left_ != 0;
++        if (back_off) {
++            --left_;
++        }
++        decided_[next_] = {true, pair, back_off};
++        next_ = (next_ + 1) % decided_.size();
++        return back_off;
++    }
++    // One eye's sampled pixels along its MVs and back to the flow, of the
++    // pair `pair`. The window counts a pair once, when it first sees a newer
++    // one than before.
++    void add(std::int64_t pair, std::uint64_t pixels, std::uint64_t fallbacks) noexcept {
++        std::scoped_lock lock(mutex_);
++        window_pixels_ += pixels;
++        window_fallbacks_ += fallbacks;
++        if (window_seen_ && pair <= window_last_pair_) {
++            return;
++        }
++        window_seen_ = true;
++        window_last_pair_ = pair;
++        if (++window_pairs_ >= kWindowPairs) {
++            if (window_fallbacks_ * 5U > window_pixels_ + window_fallbacks_) {
++                left_ = kBackoffPairs;
++            }
++            window_pixels_ = 0;
++            window_fallbacks_ = 0;
++            window_pairs_ = 0;
++        }
++    }
++    // The pairs it still holds the MVs off for.
++    [[nodiscard]] std::uint64_t remaining() noexcept {
++        std::scoped_lock lock(mutex_);
++        return left_;
++    }
++
++private:
++    struct Decision {
++        bool known{};
++        std::int64_t pair{};
++        bool back_off{};
++    };
++    std::mutex mutex_;
++    // The last pairs decided: the eyes are at most a few pairs apart.
++    std::array<Decision, 16> decided_{};
++    std::size_t next_{};
++    std::uint64_t left_{};
++    std::uint64_t window_pixels_{};
++    std::uint64_t window_fallbacks_{};
++    std::uint64_t window_pairs_{};
++    std::int64_t window_last_pair_{};
++    bool window_seen_{};
++};
++
+ // DCS Control (0034): what the synthesis did with the masks it was handed,
+ // per eye of each pair that bound one; the consumer logs them with its ten
+ // second counters (cockpit_mask result=7) and starts them over.
+@@ -195,6 +283,8 @@
+     std::atomic<std::uint64_t> motion_backoff_pairs{};
+     std::atomic<std::uint64_t> motion_pixels{};
+     std::atomic<std::uint64_t> motion_fallback_pixels{};
++    // DCS Control (0040): the backoff itself, shared by every eye.
++    DcsMotionBackoff motion_backoff;
+ };
+ 
+ // DCS Control (0036): one eye's DCS motion vectors in a frame (R70 Stage 2,
+@@ -371,7 +461,10 @@
+     no_view = 11,         // neither eye's view is valid in that slot
+     ring_busy = 12,       // every private copy is still in use
+     copy_failed = 13,     // recording or queueing the copy failed
+-    stalled = 14,         // a copy never completed: off for the session
++    // A copy did not complete in time: off until the copy queue has run
++    // everything and the backoff has passed (DCS Control 0040), or for the
++    // session when the device is removed or a fence signal failed.
++    stalled = 14,
+     disabled = 15,        // not initialized
+ };
+ 
+@@ -482,6 +575,9 @@
+     std::uint64_t releases_signalled{};
+     std::uint64_t heartbeats_stored{};
+     std::uint64_t heartbeats_stopped{};
++    // DCS Control (0040): copy stalls, and the recoveries from them.
++    std::uint64_t stalls{};
++    std::uint64_t stall_recoveries{};
+     CockpitMaskLookup last{CockpitMaskLookup::none};
+     CockpitMaskPresence presence{CockpitMaskPresence::absent};
+     std::uint32_t generation{};
+@@ -519,8 +615,17 @@
+     // copy, so it never overwrites a slot being copied.
+     bool use_release_fence{true};
+     // A copy outstanding this long: the copy queue is taken as stuck, its
+-    // dependants are released and masks are off for the session.
++    // dependants are released and masks are off.
+     std::uint32_t stall_milliseconds{1000};
++    // DCS Control (0040): and back on once the copy queue has run everything
++    // queued before the stall (a DCS frame of over a second, a mission load,
++    // is no reason to lose masks, depth and MVs for the session), but not
++    // before this long after the stall, doubled for each stall after the
++    // first (at most kMaximumStallRecoveryMilliseconds), so a queue that keeps
++    // stalling does not flap. A removed device, or a fence signal that
++    // failed, is off for the session.
++    std::uint32_t stall_recovery_milliseconds{1000};
++    static constexpr std::uint32_t kMaximumStallRecoveryMilliseconds = 60000;
+     // Minimum interval between two presence-change log lines.
+     std::uint32_t log_interval_milliseconds{1000};
+     // Private copies kept.
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -1142,6 +1142,16 @@
+ // kQuiet (adaptive control's scene settle) in which a wait that runs out
+ // keeps waiting instead: a mission's first frames, or a presenter's first,
+ // may take that long.
++//
++// DCS Control (0040): and in flight. In the pipelined presenter mode none of
++// those comes after a single hitch of the runtime's (one xrEndFrame over
++// half a second), so frame generation stayed off until the next mission. The
++// frames passed through meanwhile still go through the presenter, with
++// bounded waits for it to drain and to hand their frame to the runtime: once
++// kHealthyFrames of them in a row did both within kHealthyWait, and at least
++// rearm_delay() has passed since the trip (2 s, doubled with each trip this
++// session, at most 64 s, so a runtime that keeps hitching is not chased),
++// the latch is re-armed.
+ enum class StallVerdict : std::uint32_t {
+     keep_waiting = 0,
+     tripped = 1,  // the latch tripped now: the caller logs it, once
+@@ -1152,10 +1162,19 @@
+     static constexpr Nanoseconds kWaitBound = 500 * kMillisecond;
+     static constexpr Nanoseconds kStalledWaitBound = 250 * kMillisecond;
+     static constexpr Nanoseconds kQuiet = 2 * kSecond;
++    // DCS Control (0040).
++    static constexpr std::uint32_t kHealthyFrames = 90;
++    static constexpr Nanoseconds kHealthyWait = 50 * kMillisecond;
++    static constexpr Nanoseconds kRearmDelay = 2 * kSecond;
++    static constexpr std::uint32_t kRearmDelayDoublings = 5; // 64 s
+ 
+     bool stalled{};
+     std::uint32_t trips{};
+     Nanoseconds quiet_until{-1};
++    // DCS Control (0040): when the latch last tripped, and the passed-through
++    // frames since whose waits were all well within the bound.
++    Nanoseconds tripped_at{};
++    std::uint32_t healthy_frames{};
+ 
+     [[nodiscard]] Nanoseconds wait_bound() const noexcept {
+         return stalled ? kStalledWaitBound : kWaitBound;
+@@ -1163,6 +1182,7 @@
+     // A bounded wait ran out at `now`.
+     [[nodiscard]] StallVerdict timed_out(Nanoseconds now) noexcept {
+         if (stalled) {
++            healthy_frames = 0; // DCS Control (0040)
+             return StallVerdict::stalled;
+         }
+         if (now < quiet_until) {
+@@ -1170,11 +1190,38 @@
+         }
+         stalled = true;
+         ++trips;
++        tripped_at = now; // DCS Control (0040)
++        healthy_frames = 0;
+         return StallVerdict::tripped;
+     }
+     void rearm(Nanoseconds now) noexcept {
+         stalled = false;
+         quiet_until = now + kQuiet;
++        healthy_frames = 0; // DCS Control (0040)
++    }
++    // DCS Control (0040): how long a trip holds at least, doubled with each
++    // trip after the first.
++    [[nodiscard]] Nanoseconds rearm_delay() const noexcept {
++        const std::uint32_t doublings =
++            std::min<std::uint32_t>(trips > 0 ? trips - 1 : 0, kRearmDelayDoublings);
++        return kRearmDelay << doublings;
++    }
++    // DCS Control (0040): a frame passed through while stalled, all its
++    // bounded waits held (`waits_held`), together `waited` long. True when
++    // the latch should be re-armed now (the caller re-arms and logs it).
++    [[nodiscard]] bool passed_through(Nanoseconds now, Nanoseconds waited, bool waits_held) noexcept {
++        if (!stalled) {
++            healthy_frames = 0;
++            return false;
++        }
++        if (!waits_held || waited < 0 || waited > kHealthyWait) {
++            healthy_frames = 0;
++            return false;
++        }
++        if (healthy_frames < kHealthyFrames) {
++            ++healthy_frames;
++        }
++        return healthy_frames >= kHealthyFrames && now - tripped_at >= rearm_delay();
+     }
+ };
+ 
+@@ -1218,6 +1265,15 @@
+ // jitter). Nothing when either release is missing, out of order, or the
+ // interval implausible - no longer than the synthetics need, or more than
+ // twice the cadence - and the caller keeps its own answer. Clamped to [0, 1].
++//
++// DCS Control (0040): `previous_frames`, where known (not 0), is the previous
++// frame's own cadence. The interval between the two releases is the previous
++// frame's hold - its cadence - not the current one's, so across a change of
++// cadence (adaptive cadence's 2 <-> 3, or a 2X <-> 3X switch) the regular
++// interval read as a late or early frame: 3 -> 2 put the synthetic at 2/3
++// instead of 1/2, and 2 -> 3 flipped between 0.05 and 1/3 on a release's
++// jitter. The regular cadence, and the twice-the-cadence bound, are the
++// previous frame's; the synthetics' own positions stay the current frame's.
+ inline constexpr Nanoseconds kRegularBandDivisor = 4; // a quarter period
+ 
+ [[nodiscard]] inline std::optional<float> measured_interpolation_fraction(
+@@ -1225,13 +1281,15 @@
+     Nanoseconds current_release,
+     Nanoseconds period,
+     std::uint32_t frames,
+-    std::uint32_t index) noexcept {
++    std::uint32_t index,
++    std::uint32_t previous_frames = 0) noexcept {
+     if (period <= 0 || frames < 2 || index + 1 >= frames ||
+         previous_release <= 0 || current_release <= previous_release) {
+         return std::nullopt;
+     }
+     const Nanoseconds interval = current_release - previous_release;
+-    const Nanoseconds cadence = period * static_cast<Nanoseconds>(frames);
++    const Nanoseconds cadence = period *
++        static_cast<Nanoseconds>(previous_frames != 0 ? previous_frames : frames);
+     if (interval <= period * static_cast<Nanoseconds>(frames - 1) ||
+         interval > cadence * 2) {
+         return std::nullopt;
+diff --git a/src/d3d12/cockpit_mask.cpp b/src/d3d12/cockpit_mask.cpp
+--- a/src/d3d12/cockpit_mask.cpp
++++ b/src/d3d12/cockpit_mask.cpp
+@@ -180,6 +180,12 @@
+     std::int64_t last_display_time{};
+     std::uint64_t last_release_value{};
+     bool stalled{};
++    // DCS Control (0040): a stall that never ends (the device removed, a
++    // fence signal failed); otherwise when the last one started (QPC) and
++    // how long it holds at least, ms (see stall_recovery_milliseconds).
++    bool stall_permanent{};
++    std::int64_t stall_qpc{};
++    std::uint64_t stall_hold_ms{};
+ 
+     CockpitMaskConsumerStats stats{};
+     // Logging: presence from what the last second saw.
+@@ -555,8 +561,11 @@
+             const cmv::MotionView& view = source.view[eye];
+             // NaN means unknown: that view is not used (the producer resets
+             // the slot as well).
++            // DCS Control (0040): the rect in 64 bits (view_usable's sum can
++            // wrap in 32).
+             if (!finite4(view.fovTan) || !(view.fovTan[1] > view.fovTan[0]) ||
+                 !(view.fovTan[2] > view.fovTan[3]) || view.w < 2 || view.h < 2 ||
++                !cockpit_rect_inside(view.x, view.y, view.w, view.h, header.atlasW, header.atlasH) ||
+                 !std::isfinite(view.jitterCurPx[0]) || !std::isfinite(view.jitterCurPx[1]) ||
+                 !std::isfinite(view.jitterPrevPx[0]) || !std::isfinite(view.jitterPrevPx[1])) {
+                 continue;
+@@ -594,6 +603,13 @@
+                 return pairing;
+             }
+         }
++        // DCS Control (0040): and inside the textures as opened (the copy's
++        // box, and the private copies made at that size).
++        if (!cockpit_rect_inside(left, top, right - left, bottom - top, motion_opened->atlas_width,
++                motion_opened->atlas_height)) {
++            pairing.result = CockpitMotionLookup::no_view;
++            return pairing;
++        }
+         pairing.source = motion_opened->textures[static_cast<std::size_t>(motion_slot)].Get();
+         pairing.class_source = motion_opened->with_class
+             ? motion_opened->class_textures[static_cast<std::size_t>(motion_slot)].Get()
+@@ -873,6 +889,18 @@
+         if (!opened) {
+             return;
+         }
++        // DCS Control (0040): release signals queued after its last copy
++        // name its release fence: kept until a done_fence signal behind them
++        // has run, as the copies' textures are.
++        if (opened->release_fence && last_release_value != 0 && !stalled) {
++            const std::uint64_t value = next_copy_value;
++            if (SUCCEEDED(queue->Signal(done_fence.Get(), value))) {
++                ++next_copy_value;
++                last_copy_value = value;
++                last_copy_qpc = qpc_now(); // the stall check times it as a copy
++                opened->last_use_copy_value = value;
++            }
++        }
+         try {
+             retired.push_back(std::move(*opened));
+         } catch (...) {
+@@ -899,28 +927,70 @@
+             motion_retired.end());
+     }
+ 
++    [[nodiscard]] double milliseconds_since(std::int64_t now, std::int64_t then) const noexcept {
++        return double(now - then) * 1000.0 / double(std::max<std::int64_t>(qpc_frequency, 1));
++    }
++
++    // DCS Control (0040): a stall that holds for the session, logged once.
++    void stall_for_good(std::uint64_t completed) noexcept {
++        if (!stall_permanent) {
++            if (!stalled) {
++                ++stats.stalls;
++            }
++            stall_permanent = true;
++            stalled = true;
++            log(5, last_copy_value, completed, 0);
++        }
++    }
++
+     // The copy queue never finished a copy (the producer's fence not
+     // signalled, a hang): release whatever waits on our fence and stop.
++    // DCS Control (0040): until the copy queue has run everything queued
++    // before the stall and the backoff has passed (result=15), unless the
++    // device is gone.
+     [[nodiscard]] bool check_stall(std::int64_t now) noexcept {
+         if (stalled) {
+-            return true;
++            if (stall_permanent) {
++                return true;
++            }
++            const std::uint64_t completed = completed_copies();
++            if (completed == std::numeric_limits<std::uint64_t>::max()) {
++                stall_for_good(completed);
++                return true;
++            }
++            const double stalled_ms = milliseconds_since(now, stall_qpc);
++            // done_fence is signalled by the copy queue alone, after
++            // copy_fence: once it reaches the last copy, every copy and
++            // every signal of copy_fence queued before the stall has run,
++            // so nothing of the stall's is left to land on a later frame.
++            if (completed < last_copy_value || stalled_ms < double(stall_hold_ms)) {
++                return true;
++            }
++            stalled = false;
++            ++stats.stall_recoveries;
++            log(15, last_copy_value, stats.stalls, static_cast<std::uint64_t>(stalled_ms));
++            return false;
+         }
+         const std::uint64_t completed = completed_copies();
+         if (completed == std::numeric_limits<std::uint64_t>::max()) {
+-            stalled = true;
+-            log(5, last_copy_value, completed, 0);
++            stall_for_good(completed);
+             return true;
+         }
+         if (last_copy_value == 0 || completed >= last_copy_value) {
+             return false;
+         }
+-        const double waited_ms =
+-            double(now - last_copy_qpc) * 1000.0 / double(std::max<std::int64_t>(qpc_frequency, 1));
++        const double waited_ms = milliseconds_since(now, last_copy_qpc);
+         if (waited_ms < double(options.stall_milliseconds)) {
+             return false;
+         }
+         static_cast<void>(copy_fence->Signal(last_copy_value));
+         stalled = true;
++        // DCS Control (0040): the hold doubles with each stall.
++        ++stats.stalls;
++        stall_qpc = now;
++        const std::uint64_t shift = std::min<std::uint64_t>(stats.stalls - 1U, 16U);
++        stall_hold_ms = std::min<std::uint64_t>(std::uint64_t(options.stall_recovery_milliseconds) << shift,
++            CockpitMaskConsumerOptions::kMaximumStallRecoveryMilliseconds);
+         log(5, last_copy_value, completed, static_cast<std::uint64_t>(waited_ms));
+         return true;
+     }
+@@ -1167,8 +1237,10 @@
+                 continue;
+             }
+             const cm::MaskView& view = source.view[eye];
++            // DCS Control (0040): the rect in 64 bits (the depth's, on the
++            // same grid, is checked equal to this one).
+             if (!(view.fovTan[1] > view.fovTan[0]) || !(view.fovTan[2] > view.fovTan[3]) ||
+-                view.x + view.w > opened->atlas_width || view.y + view.h > opened->atlas_height) {
++                !cockpit_rect_inside(view.x, view.y, view.w, view.h, opened->atlas_width, opened->atlas_height)) {
+                 continue;
+             }
+             views[eye].valid = true;
+@@ -1268,15 +1340,14 @@
+         }
+         ID3D12CommandList* lists[] = {entry->list.Get()};
+         queue->ExecuteCommandLists(1, lists);
+-        const std::uint64_t copy_value = next_copy_value;
+-        if (FAILED(queue->Signal(copy_fence.Get(), copy_value)) ||
+-            FAILED(queue->Signal(done_fence.Get(), copy_value))) {
+-            stalled = true;
+-            return CockpitMaskLookup::copy_failed;
+-        }
+-        ++next_copy_value;
+-        // After the copy on the same queue: the slot is ours no longer.
+-        signal_release(source.maskSeq);
++        // DCS Control (0040): the list runs whatever the signals below do,
++        // so its textures (the entry's, the producer's it reads) count as in
++        // use from here: noted before the signals, which may fail. A failed
++        // one never completes the copy (done_fence stays short of it): masks
++        // are off for the session, and the textures it names are kept to
++        // the end (the destructor's drain does not wait on a stalled queue
++        // and leaks them).
++        const std::uint64_t copy_value = next_copy_value++;
+         entry->copy_value = copy_value;
+         last_copy_value = copy_value;
+         last_copy_qpc = now;
+@@ -1287,6 +1358,13 @@
+         if (with_motion && motion_opened) { // DCS Control (0036)
+             motion_opened->last_use_copy_value = copy_value;
+         }
++        if (FAILED(queue->Signal(copy_fence.Get(), copy_value)) ||
++            FAILED(queue->Signal(done_fence.Get(), copy_value))) {
++            stall_for_good(completed_copies());
++            return CockpitMaskLookup::copy_failed;
++        }
++        // After the copy on the same queue: the slot is ours no longer.
++        signal_release(source.maskSeq);
+ 
+         D3D12CockpitMaskFrame& frame = *entry->frame;
+         frame.clear_readers();
+@@ -1585,6 +1663,17 @@
+     try {
+         std::scoped_lock lock(impl_->mutex);
+         impl_->last_frame.reset();
++        // DCS Control (0040): the release fence's signals (signal_release)
++        // go on the queue after the last copy's done_fence signal, and name
++        // the producer's fence this frees: one more done_fence signal behind
++        // everything queued, so the drain below covers them as well.
++        if (!impl_->stalled && impl_->queue && impl_->done_fence) {
++            const std::uint64_t final_value = impl_->next_copy_value;
++            if (SUCCEEDED(impl_->queue->Signal(impl_->done_fence.Get(), final_value))) {
++                ++impl_->next_copy_value;
++                impl_->last_copy_value = final_value;
++            }
++        }
+         // The copies read the producer's textures and write ours: keep them
+         // alive until the queue is done, and leak them if it never is (a
+         // stalled queue: not waited for at all).
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -554,13 +554,8 @@
+ // The sky's MVs (the camera's motion at infinity, R70 T2) instead of its flow
+ // (the fixtures: a little closer to the true middle frame, and no worse).
+ constexpr bool kDcsMotionSkyDefault = true;
+-// The MVs' backoff. A pixel whose MV fails the colour check is composed by
+-// both the MVs and the flow (about 1.7 times the flow's cost): where more
+-// than a fifth of the sampled pixels of kDcsMotionWindowPairs pairs fell
+-// back (thick smoke or cloud, a scene the MVs do not describe), the next
+-// kDcsMotionBackoffPairs pairs take the flow alone, as before 0036.
+-constexpr std::uint64_t kDcsMotionWindowPairs = 32;
+-constexpr std::uint64_t kDcsMotionBackoffPairs = 96;
++// The MVs' backoff: DCS Control (0040) moved it to the consumer, one for
++// every eye (xrfg::DcsMotionBackoff).
+ 
+ constexpr UINT kSynthesisConstantCount =
+     static_cast<UINT>(sizeof(SynthesisParameters) / sizeof(UINT));
+@@ -1212,6 +1207,9 @@
+         // DCS Control (0036): the same for the MVs' counters.
+         std::uint64_t motion_order{};
+         std::shared_ptr<CockpitMaskPairCounters> motion_sink;
++        // DCS Control (0040): the pair (its current frame's display time),
++        // for the shared backoff's window.
++        std::int64_t motion_pair{};
+         std::uint64_t fence_value{};
+         UINT timing_query_base{};
+         bool timing_pending{};
+@@ -1476,12 +1474,6 @@
+     std::uint64_t dcs_motion_next_order{1};
+     std::uint64_t dcs_motion_harvested_order{};
+     std::array<std::uint32_t, 2> dcs_motion_harvested{};
+-    // The backoff's window (sampled pixels along MVs and back to the flow,
+-    // pairs) and the pairs it still holds the MVs off for.
+-    std::uint64_t dcs_motion_window_pixels{};
+-    std::uint64_t dcs_motion_window_fallbacks{};
+-    std::uint64_t dcs_motion_window_pairs{};
+-    std::uint64_t dcs_motion_backoff_left{};
+     [[nodiscard]] bool dcs_motion_enabled() const noexcept {
+         return nvidia_options.dcs_motion && nvidia_options.cockpit_mask &&
+             backend == D3D12OpticalFlowBackend::nvidia;
+@@ -3898,24 +3890,20 @@
+         write_cockpit_mask_block(slot, previous_texture, current_texture, previous_depth, current_depth);
+         write_cockpit_mask_view(slot, true, any_depth);
+ 
+-        std::array<D3D12_RESOURCE_BARRIER, 6> before{};
++        // DCS Control (0040): no barrier on the frames' masks and depth: the
++        // consumer's textures, read by every eye's synthesizer, each on a
++        // queue of its own under [ofxr] parallel_eye_synthesis, where two
++        // queues' explicit transitions of one resource at once are undefined.
++        // They rest in COMMON (made there; the copy queue's writes decay back
++        // to it), are only read here, and are promoted implicitly to
++        // NON_PIXEL_SHADER_RESOURCE by the first read and decay back to COMMON
++        // when the work completes - what the explicit pair did, per queue.
++        std::array<D3D12_RESOURCE_BARRIER, 2> before{};
+         UINT before_count = 0;
+         before[before_count++] = transition_barrier(
+             target, D3D12_RESOURCE_STATE_COMMON,
+             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+-        before[before_count++] = transition_barrier(
+-            current_texture, D3D12_RESOURCE_STATE_COMMON,
+-            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+-        if (previous_texture != current_texture) {
+-            before[before_count++] = transition_barrier(
+-                previous_texture, D3D12_RESOURCE_STATE_COMMON,
+-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+-        }
+         if (any_depth) {
+-            before[before_count++] = transition_barrier(
+-                current_depth, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+-            before[before_count++] = transition_barrier(
+-                previous_depth, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+             before[before_count++] = transition_barrier(cockpit_depth_counters.Get(),
+                 D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+         }
+@@ -3943,24 +3931,12 @@
+             list->Dispatch(
+                 (parameters.output_width + 7U) / 8U, (parameters.output_height + 7U) / 8U, 1);
+         }
+-        std::array<D3D12_RESOURCE_BARRIER, 6> after{};
++        std::array<D3D12_RESOURCE_BARRIER, 2> after{};
+         UINT after_count = 0;
+         after[after_count++] = transition_barrier(
+             target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+-        after[after_count++] = transition_barrier(
+-            current_texture, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+-            D3D12_RESOURCE_STATE_COMMON);
+-        if (previous_texture != current_texture) {
+-            after[after_count++] = transition_barrier(
+-                previous_texture, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+-                D3D12_RESOURCE_STATE_COMMON);
+-        }
+         if (any_depth) {
+-            after[after_count++] = transition_barrier(
+-                current_depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+-            after[after_count++] = transition_barrier(
+-                previous_depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+             after[after_count++] = transition_barrier(cockpit_depth_counters.Get(),
+                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+         }
+@@ -4169,11 +4145,10 @@
+             return;
+         }
+         // Backing off (the MVs fell back too often lately): the flow alone.
+-        if (dcs_motion_backoff_left != 0) {
+-            --dcs_motion_backoff_left;
+-            if (current->counters) {
+-                current->counters->motion_backoff_pairs.fetch_add(1U, std::memory_order_relaxed);
+-            }
++        // DCS Control (0040): decided once per pair for every eye (the
++        // consumer's DcsMotionBackoff), so the eyes never compose apart.
++        if (current->counters && current->counters->motion_backoff.backing_off(current->display_time)) {
++            current->counters->motion_backoff_pairs.fetch_add(1U, std::memory_order_relaxed);
+             return;
+         }
+         const UINT outputs = std::clamp(synthetic_output_count(), 1U, 2U);
+@@ -4264,15 +4239,12 @@
+         device->CreateUnorderedAccessView(nullptr, nullptr, &null_target,
+             offset_cpu_handle(start, base + kSrvDescriptorCount + 2U, descriptor_increment));
+ 
+-        std::array<D3D12_RESOURCE_BARRIER, 4> before{};
++        // DCS Control (0040): none on the frame's MV and class copies (the
++        // consumer's, read by every eye's queue): promoted from COMMON by the
++        // read and decayed back, as the masks' (record_cockpit_mask).
++        std::array<D3D12_RESOURCE_BARRIER, 2> before{};
+         UINT before_count = 0;
+         before[before_count++] = transition_barrier(
+-            source, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+-        if (classes != nullptr) {
+-            before[before_count++] = transition_barrier(
+-                classes, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+-        }
+-        before[before_count++] = transition_barrier(
+             dcs_motion_target.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+         before[before_count++] = transition_barrier(
+             dcs_motion_scatter.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+@@ -4308,15 +4280,9 @@
+                 2, static_cast<UINT>(sizeof(DcsMotionParameters) / sizeof(UINT)), &views[index], 0);
+             list->Dispatch((views[index].output_width + 7U) / 8U, (views[index].output_height + 7U) / 8U, 1);
+         }
+-        std::array<D3D12_RESOURCE_BARRIER, 4> after{};
++        std::array<D3D12_RESOURCE_BARRIER, 2> after{};
+         UINT after_count = 0;
+         after[after_count++] = transition_barrier(
+-            source, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+-        if (classes != nullptr) {
+-            after[after_count++] = transition_barrier(
+-                classes, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+-        }
+-        after[after_count++] = transition_barrier(
+             dcs_motion_scatter.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+         after[after_count++] = transition_barrier(
+             dcs_motion_counters.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+@@ -4326,6 +4292,7 @@
+             current->counters->motion_pairs.fetch_add(1U, std::memory_order_relaxed);
+         }
+         slot.motion_sink = current->counters;
++        slot.motion_pair = current->display_time; // DCS Control (0040)
+     }
+ 
+     // DCS Control (0036): after the composition: the MVs' targets back to
+@@ -4381,17 +4348,10 @@
+                 if (pixels < 0x80000000U && fallbacks < 0x80000000U) {
+                     dcs_motion_harvested = values;
+                     dcs_motion_harvested_order = slot.motion_order;
+-                    dcs_motion_window_pixels += pixels;
+-                    dcs_motion_window_fallbacks += fallbacks;
+-                    if (++dcs_motion_window_pairs >= kDcsMotionWindowPairs) {
+-                        if (dcs_motion_window_fallbacks * 5U > dcs_motion_window_pixels + dcs_motion_window_fallbacks) {
+-                            dcs_motion_backoff_left = kDcsMotionBackoffPairs;
+-                        }
+-                        dcs_motion_window_pixels = 0;
+-                        dcs_motion_window_fallbacks = 0;
+-                        dcs_motion_window_pairs = 0;
+-                    }
+                     if (slot.motion_sink) {
++                        // DCS Control (0040): into the window every eye
++                        // shares.
++                        slot.motion_sink->motion_backoff.add(slot.motion_pair, pixels, fallbacks);
+                         slot.motion_sink->motion_pixels.fetch_add(
+                             std::uint64_t(pixels) * kDcsMotionSampledPixels, std::memory_order_relaxed);
+                         slot.motion_sink->motion_fallback_pixels.fetch_add(
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -580,6 +580,10 @@
+     // poseQpc, steady clock ns; 0 not known). Only under `[ofxr]
+     // slot_content_time`.
+     std::int64_t slot_content_ns{};
++    // DCS Control (0040): the frame's own cadence (presenter frames it was
++    // held for: frames_per_frame), 0 not known; the next frame's measured
++    // fraction compares the release interval with it.
++    std::uint32_t frames{};
+ };
+ 
+ struct ProjectionViewReference {
+@@ -1492,7 +1496,9 @@
+     // calls while the application observes a virtual half-rate loop.
+     std::mutex presenter_mutex;
+     std::condition_variable presenter_condition;
+-    std::mutex presenter_content_mutex;
++    // DCS Control (0040): timed, so the application's takes of it can be
++    // bounded (lock_presenter_content_bounded).
++    std::timed_mutex presenter_content_mutex;
+     std::deque<std::shared_ptr<PresenterSubmission>> presenter_submissions;
+     std::shared_ptr<GeneratedFrameEndInfo> presenter_last_frame;
+     std::thread presenter_thread;
+@@ -2725,7 +2731,7 @@
+ struct PresenterResourceLifetimeGuard {
+     explicit PresenterResourceLifetimeGuard(const std::shared_ptr<SessionState>& state);
+     std::unique_lock<std::mutex> frame_lock;
+-    std::unique_lock<std::mutex> content_lock;
++    std::unique_lock<std::timed_mutex> content_lock;
+ };
+ void schedule_generation_quarantine(
+     const std::shared_ptr<SessionState>& state,
+@@ -11180,6 +11186,7 @@
+     idle = 2,
+     submission = 3,
+     pair = 4,
++    content = 5, // DCS Control (0040): presenter_content_mutex
+ };
+ 
+ // Waits on presenter_condition, presenter_mutex held through `lock`, until
+@@ -11213,8 +11220,9 @@
+ // result=950: an application wait for the presenter ran out and generation
+ // fails open until a scene change, a new presenter or the runtime focusing
+ // the session again. a= which wait (1 capacity, 2 idle, 3 a submission, 4
+-// the once-per-pair hold), b= its bound in milliseconds, c= trips this
+-// session. Never under presenter_mutex.
++// the once-per-pair hold, 5 the presenter's content lock - DCS Control
++// 0040), b= its bound in milliseconds, c= trips this session. Never under
++// presenter_mutex.
+ void log_generation_stall(PresenterWaitKind kind, std::uint32_t trips) noexcept {
+     xrfg::bridge_flight_logger().event(
+         xrfg::BridgeFlightOperation::presenter_transition,
+@@ -11225,9 +11233,53 @@
+         trips);
+ }
+ 
++// DCS Control (0040): takes presenter_content_mutex into `lock`, bounded as the
++// waits for the presenter are (GenerationStall::wait_bound, the quiet period
++// riding out a long one). The presenter holds it across the runtime's
++// xrEndFrame, so a presenter wedged in there held the application's thread
++// with it for good. False when the bound gave up: the latch has tripped
++// (logged here, result=950 a= 5, once) and the caller fails open, touching
++// nothing the lock guards. Neither presenter_mutex nor the content lock may
++// be held by the caller (presenter_mutex is taken between tries).
++[[nodiscard]] bool lock_presenter_content_bounded(
++    SessionState& state, std::unique_lock<std::timed_mutex>& lock) {
++    lock = std::unique_lock<std::timed_mutex>(
++        state.presenter_content_mutex, std::defer_lock);
++    for (;;) {
++        xrfg::latency::Nanoseconds bound = 0;
++        {
++            std::scoped_lock presenter_lock(state.presenter_mutex);
++            bound = state.generation_stall.wait_bound();
++        }
++        if (lock.try_lock_for(std::chrono::nanoseconds(bound))) {
++            return true;
++        }
++        xrfg::latency::StallVerdict verdict{};
++        std::uint32_t trips = 0;
++        {
++            std::scoped_lock presenter_lock(state.presenter_mutex);
++            verdict = state.generation_stall.timed_out(
++                steady_nanoseconds(std::chrono::steady_clock::now()));
++            if (verdict == xrfg::latency::StallVerdict::tripped) {
++                state.generation_stalled = true;
++                ++state.generation_stall_serial;
++            }
++            trips = state.generation_stall.trips;
++        }
++        if (verdict == xrfg::latency::StallVerdict::keep_waiting) {
++            continue;
++        }
++        if (verdict == xrfg::latency::StallVerdict::tripped) {
++            log_generation_stall(PresenterWaitKind::content, trips);
++        }
++        return false;
++    }
++}
++
+ // Re-arms the latch: a scene change, a new presenter, the session focused
+ // again. presenter_mutex held. result=951 when it was tripped (a= what
+-// re-armed it: 1 scene change, 2 presenter, 3 focus), logged by the caller.
++// re-armed it: 1 scene change, 2 presenter, 3 focus, 4 in flight - DCS
++// Control 0040, see note_stalled_pass_through), logged by the caller.
+ [[nodiscard]] bool rearm_generation_stall_locked(SessionState& state) noexcept {
+     const bool was_stalled = state.generation_stall.stalled;
+     state.generation_stall.rearm(
+@@ -11241,6 +11293,31 @@
+         xrfg::BridgeFlightOperation::presenter_transition, 951, by, 0, 0);
+ }
+ 
++// DCS Control (0040): a frame passed through the presenter while the latch is
++// tripped, `waited` long in all, its bounded waits all held (`waits_held`).
++// Enough such frames in a row, well within the bound, and long enough after
++// the trip, re-arm the latch in flight (xrfg::latency::GenerationStall::
++// passed_through; result=951 with a= 4). Takes presenter_mutex.
++void note_stalled_pass_through(
++    SessionState& state, std::chrono::nanoseconds waited, bool waits_held) noexcept {
++    try {
++        bool rearmed = false;
++        {
++            std::scoped_lock lock(state.presenter_mutex);
++            if (state.generation_stall.passed_through(
++                    steady_nanoseconds(std::chrono::steady_clock::now()),
++                    static_cast<xrfg::latency::Nanoseconds>(waited.count()),
++                    waits_held)) {
++                rearmed = rearm_generation_stall_locked(state);
++            }
++        }
++        if (rearmed) {
++            log_generation_stall_rearmed(4);
++        }
++    } catch (...) {
++    }
++}
++
+ // DCS Control (0016): the 3X pacing state that belongs to one presenter, one
+ // scene and one shape - the release delay and the epoch its slack samples
+ // are tagged with, a leader or probe due, the late-frame skip and the fences
+@@ -11448,7 +11525,10 @@
+ // DCS Control (0032): `frames`, where given, is the frame's own cadence
+ // under adaptive cadence (1, 2 or 3 presenter frames); 0 is the multiplier,
+ // as before.
+-void wait_for_presenter_pair(
++// DCS Control (0040): true when the hold's bound ran out (the stall latch
++// tripped then, or had before), for the caller to branch on: the latch
++// itself may be re-armed (the session focused) before it reads it.
++[[nodiscard]] bool wait_for_presenter_pair(
+     const std::shared_ptr<SessionState>& state,
+     std::uint32_t frames = 0) noexcept {
+     try {
+@@ -11491,11 +11571,11 @@
+             if (stall_tripped) {
+                 log_generation_stall(PresenterWaitKind::pair, trips);
+             }
+-            return;
++            return true;
+         }
+         if (XR_FAILED(state->presenter_failure) ||
+             state->presenter_stop_requested) {
+-            return;
++            return false;
+         }
+         // Diagnostic only, and the number this hold is judged by. Assigning
+         // the presenter's serial rather than advancing by the pair means an
+@@ -11635,11 +11715,16 @@
+             served);
+     } catch (...) {
+     }
++    return false;
+ }
+ 
+ // DCS Control (0029): bounded. Past the bound it returns XR_SUCCESS with
+ // the stall latch tripped (generation_stalled): the frame goes on, and the
+ // caller passes it through instead of generating.
++// DCS Control (0040): XR_TIMEOUT_EXPIRED (a success code) past the bound, for
++// the caller to branch on: a re-arm (the session focused) between the
++// timeout and the caller's read of generation_stalled cleared the latch, and
++// the frame went on without the room it waited for.
+ [[nodiscard]] XrResult wait_for_presenter_capacity(
+     const std::shared_ptr<SessionState>& state,
+     std::size_t maximum_outstanding) noexcept {
+@@ -11659,7 +11744,7 @@
+             if (stall_tripped) {
+                 log_generation_stall(PresenterWaitKind::capacity, trips);
+             }
+-            return XR_SUCCESS;
++            return XR_TIMEOUT_EXPIRED; // DCS Control (0040)
+         }
+         if (XR_FAILED(state->presenter_failure)) {
+             return state->presenter_failure;
+@@ -11720,7 +11805,14 @@
+         // The content lock must be acquired AFTER the drain: the presenter
+         // needs it to complete the very submissions we are waiting for.
+         static_cast<void>(wait_for_presenter_idle(state, false));
+-        content_lock = std::unique_lock<std::mutex>(state->presenter_content_mutex);
++        // DCS Control (0040): bounded first, so a presenter wedged in the
++        // runtime trips the latch and is logged (result=950 a= 5); then on
++        // without a bound, as before: the caller is about to destroy what
++        // the presenter may still be using, so failing open is not an
++        // option here.
++        if (!lock_presenter_content_bounded(*state, content_lock)) {
++            content_lock.lock();
++        }
+         std::scoped_lock lock(state->presenter_mutex);
+         state->presenter_last_frame.reset();
+         state->presenter_skip_repeat.reset(); // DCS VR Control (0006)
+@@ -11766,7 +11858,9 @@
+ // back out of the queue if the presenter has not reached it yet. One the
+ // presenter has already taken is being handed to the runtime and is waited
+ // for as before: returning would leave the runtime reading freed memory.
+-// `ran_out`, where given, is set when the bound ran out.
++// `ran_out`, where given, is set when the bound ran out and the borrowed
++// frame was taken back out of the queue (DCS Control 0040: not when the
++// presenter had it and it completed).
+ [[nodiscard]] XrResult wait_for_presenter_submission(
+     const std::shared_ptr<SessionState>& state,
+     const std::shared_ptr<PresenterSubmission>& request,
+@@ -11781,11 +11875,13 @@
+         bool stall_tripped = false;
+         if (!wait_presenter_bounded(*state, lock, done, stall_tripped)) {
+             bool released = request->owned_frame != nullptr;
++            bool erased = false; // DCS Control (0040)
+             if (!released) {
+                 auto& queue = state->presenter_submissions;
+                 const auto queued = std::find(queue.begin(), queue.end(), request);
+                 if (queued != queue.end()) {
+                     queue.erase(queued);
++                    erased = true;
+                     if (state->outstanding_presenter_submissions != 0) {
+                         --state->outstanding_presenter_submissions;
+                     }
+@@ -11797,7 +11893,10 @@
+             if (!released) {
+                 state->presenter_condition.wait(lock, done);
+             }
+-            if (ran_out != nullptr) {
++            // DCS Control (0040): only where the borrowed frame was taken
++            // back out (never shown): one the presenter had taken and
++            // completed was handed to the runtime.
++            if (ran_out != nullptr && erased) {
+                 *ran_out = true;
+             }
+             const std::uint32_t trips = state->generation_stall.trips;
+@@ -13142,7 +13241,8 @@
+             current_snapshot.released_at_ns,
+             static_cast<xrfg::latency::Nanoseconds>(period),
+             frames,
+-            index)) {
++            index,
++            previous_snapshot->frames)) { // DCS Control (0040)
+         return *measured;
+     }
+     if (own_cadence) {
+@@ -14832,8 +14932,15 @@
+         bool was_probing = false;
+         bool stall_rearmed = false; // DCS Control (0029)
+         xrfg::latency::Nanoseconds correction = 0;
++        // DCS Control (0040): bounded. A presenter wedged in the runtime's
++        // xrEndFrame holds the content lock: the reset is skipped (the
++        // latch has tripped, so nothing is generated meanwhile; the stall
++        // re-arms in flight or at the next scene change).
++        std::unique_lock<std::timed_mutex> content_lock;
++        if (!lock_presenter_content_bounded(*state, content_lock)) {
++            return;
++        }
+         {
+-            std::scoped_lock content_lock(state->presenter_content_mutex);
+             std::scoped_lock lock(state->presenter_mutex);
+             multiplier = state->frames_per_application_frame;
+             slots_before = state->triple_depth.slots;
+@@ -14862,6 +14969,7 @@
+             // scene's first frames in its quiet period.
+             stall_rearmed = rearm_generation_stall_locked(*state);
+         }
++        content_lock.unlock(); // DCS Control (0040): where the scope ended
+         if (stall_rearmed) {
+             log_generation_stall_rearmed(1);
+         }
+@@ -15762,7 +15870,7 @@
+         (end_info == nullptr || end_info->type != XR_TYPE_FRAME_END_INFO)) {
+         return XR_ERROR_VALIDATION_FAILURE;
+     }
+-    std::unique_lock<std::mutex> presenter_content_lock;
++    std::unique_lock<std::timed_mutex> presenter_content_lock;
+     // Drains the presenter and takes the content lock. Used by the paths that
+     // hand the runtime the application's own composition unchanged: they have
+     // no private output of their own, so the retained repeat has to be settled
+@@ -15778,8 +15886,11 @@
+         if (idle_result != XR_SUCCESS) {
+             return idle_result;
+         }
+-        presenter_content_lock =
+-            std::unique_lock<std::mutex>(state->presenter_content_mutex);
++        // DCS Control (0040): and the content lock, bounded the same way:
++        // XR_TIMEOUT_EXPIRED as the drain's.
++        if (!lock_presenter_content_bounded(*state, presenter_content_lock)) {
++            return XR_TIMEOUT_EXPIRED;
++        }
+         return XR_SUCCESS;
+     };
+ 
+@@ -15888,6 +15999,9 @@
+                 static_cast<std::int64_t>(queued));
+         }
+     };
++    // DCS Control (0040): the drain before a pass-through ran out (for
++    // note_stalled_pass_through).
++    bool bypass_exclusive_timed_out = false;
+     const auto bypass_generation =
+         [&](GenerationPrepareReason reason) -> XrResult {
+             // DCS Control (0032): nothing of this frame's names a private
+@@ -15897,6 +16011,7 @@
+             if (XR_FAILED(exclusive_result)) {
+                 return exclusive_result;
+             }
++            bypass_exclusive_timed_out = exclusive_result == XR_TIMEOUT_EXPIRED;
+             // DCS Control (0029): the presenter did not drain within the
+             // stall bound. Failing open: this frame is not shown (the
+             // runtime keeps showing what it has) and the application goes
+@@ -15989,13 +16104,25 @@
+     // through, as with the tray's off switch. The generation continuity is
+     // cleared once per trip, so the first frame after a re-arm primes rather
+     // than pairing with one from before the stall.
+-    const auto bypass_stalled = [&]() -> XrResult {
++    // DCS Control (0040): and a frame passed through the presenter counts
++    // towards re-arming the latch in flight; `waits_held` false for one whose
++    // admission wait already ran out.
++    const auto bypass_stalled = [&](bool waits_held = true) -> XrResult {
+         const std::uint32_t serial = state->generation_stall_serial.load();
+         if (state->generation_stall_cleared != serial) {
+             state->generation_stall_cleared = serial;
+             clear_generation_continuity(state);
+         }
+-        return bypass_generation(GenerationPrepareReason::generation_stalled);
++        const auto started = std::chrono::steady_clock::now();
++        const XrResult result =
++            bypass_generation(GenerationPrepareReason::generation_stalled);
++        if (use_continuous_presenter) {
++            note_stalled_pass_through(*state,
++                std::chrono::steady_clock::now() - started,
++                waits_held && XR_SUCCEEDED(result) &&
++                    !bypass_exclusive_timed_out && !borrowed_wait_ran_out);
++        }
++        return result;
+     };
+ 
+     bool generation_cooling_down = false;
+@@ -16255,6 +16382,11 @@
+         }
+         // DCS Control (0029): the wait ran out: nothing is prepared yet, so
+         // the frame passes through.
++        // DCS Control (0040): on the wait's own answer, whatever the latch
++        // says by now.
++        if (capacity_result == XR_TIMEOUT_EXPIRED) {
++            return bypass_stalled(false);
++        }
+         if (state->generation_stalled.load()) {
+             return bypass_stalled();
+         }
+@@ -16265,8 +16397,13 @@
+             // the hand-over; a prime costs the presenter one frame, not two.
+             // It returns without an error on a presenter failure; the enqueue
+             // below is what refuses the frame.
+-            wait_for_presenter_pair(state, cadence_hold_frames); // 0032
++            const bool hold_ran_out =
++                wait_for_presenter_pair(state, cadence_hold_frames); // 0032
+             // DCS Control (0029): the hold ran out: pass the frame through.
++            // DCS Control (0040): on the hold's own answer.
++            if (hold_ran_out) {
++                return bypass_stalled(false);
++            }
+             if (state->generation_stalled.load()) {
+                 return bypass_stalled();
+             }
+@@ -16286,6 +16423,11 @@
+     const std::uint32_t frames_per_frame = cadence_frame
+         ? std::max<std::uint32_t>(2U, cadence_record->frames)
+         : state->frames_per_application_frame.load();
++    // DCS Control (0040): the cadence the next frame's release interval
++    // follows (its hold): the frame's own, 1 at adaptive cadence's 1X.
++    current_snapshot.frames = cadence_frame
++        ? std::max<std::uint32_t>(1U, cadence_record->frames)
++        : frames_per_frame;
+     // DCS VR Control (0006): while the 3X late-frame skip is on, the frame's
+     // first synthetic is not made - its slot re-presents the previous real
+     // frame - and its one synthetic is the second, at the second's instant.
+@@ -16377,7 +16519,7 @@
+     // presenter kept submitting throughout. Hold it only across the handoff.
+     if (use_continuous_presenter) {
+         presenter_content_lock =
+-            std::unique_lock<std::mutex>(state->presenter_content_mutex);
++            std::unique_lock<std::timed_mutex>(state->presenter_content_mutex);
+     }
+     GenerationPrepareReason prepare_reason = prepared.reason;
+     XrSwapchain failed_prepare_swapchain = prepared.failed_swapchain;
+@@ -16665,6 +16807,11 @@
+                 result = wait_for_presenter_capacity(
+                     state,
+                     state->deep_pipeline ? 3 : frames_per_frame);
++                // DCS Control (0040): the pair is queued; a bound that ran
++                // out only lets the application go on.
++                if (result == XR_TIMEOUT_EXPIRED) {
++                    result = XR_SUCCESS;
++                }
+             }
+         } else if (presenter_first_frame) {
+             catch_up_bridged_copies(state, &presenter_first_frame->info, false); // 0006
+@@ -16885,7 +17032,7 @@
+     if (use_continuous_presenter && cadence_one && presenter_first_frame &&
+         !pair_ready && XR_SUCCEEDED(result)) {
+         frame_call_lock.unlock();
+-        wait_for_presenter_pair(state, 1U);
++        static_cast<void>(wait_for_presenter_pair(state, 1U));
+         return result;
+     }
+ 
+@@ -16916,7 +17063,7 @@
+         // cadence.
+         frame_call_lock.unlock();
+         if (!presenter_hold_at_admission(*state)) {
+-            wait_for_presenter_pair(state, cadence_hold_frames);
++            static_cast<void>(wait_for_presenter_pair(state, cadence_hold_frames));
+         }
+         return result;
+     }
+diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
+--- a/tests/cockpit_mask_tests.cpp
++++ b/tests/cockpit_mask_tests.cpp
+@@ -29,6 +29,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <chrono> // DCS Control (0040)
+ #include <cmath>
+ #include <cstdint>
+ #include <cstring>
+@@ -920,6 +921,183 @@
+     std::cout << "cockpit mask: a stalled copy turns masks and the heartbeat off; the end clears it\n";
+ }
+ 
++// DCS Control (0040): a stall ends once the copy queue has run everything
++// queued before it and the stall's hold has passed (result=15), the hold
++// doubling with each stall; the frames after it are copied as before.
++void test_stall_recovers(Gpu& gpu) {
++    const std::wstring suffix = test_suffix(L"recover");
++    FakeProducer producer(gpu, suffix);
++    auto options = test_options(suffix);
++    options.stall_milliseconds = 100;
++    options.stall_recovery_milliseconds = 300;
++    xrfg::CockpitMaskConsumer consumer;
++    std::vector<std::int64_t> logged;
++    require_hresult(consumer.initialize(gpu.device.Get(),
++                        [&logged](std::int64_t code, std::uint64_t, std::uint64_t, std::uint64_t) {
++                            logged.push_back(code);
++                        },
++                        options),
++        "consumer initialize");
++    std::int64_t time = 2100;
++    for (std::uint64_t stall = 1; stall <= 2; ++stall) {
++        const std::uint64_t held = producer.commit(time, 255);
++        require(consumer.acquire(time++) != nullptr, "recover: paired before the stall");
++        Sleep(180);
++        producer.commit(time, 255);
++        require(consumer.acquire(time++) == nullptr &&
++                consumer.stats().last == xrfg::CockpitMaskLookup::stalled && consumer.stats().stalls == stall,
++            "recover: the copy that never completed stalls the masks");
++        const auto stalled_at = std::chrono::steady_clock::now();
++        const DWORD hold = 300U << (stall - 1U);
++        if (stall == 1) {
++            // The queue catches up at once: off for the hold all the same.
++            producer.signal(held);
++            Sleep(hold / 2U);
++            producer.commit(time, 255);
++            require(consumer.acquire(time++) == nullptr &&
++                    consumer.stats().last == xrfg::CockpitMaskLookup::stalled,
++                "recover: off for the hold though the queue caught up");
++        } else {
++            // Still behind past the hold: off however long it takes.
++            Sleep(hold + 50U);
++            producer.commit(time, 255);
++            require(consumer.acquire(time++) == nullptr &&
++                    consumer.stats().last == xrfg::CockpitMaskLookup::stalled,
++                "recover: off while the copy queue is still behind");
++            producer.signal(held);
++        }
++        std::shared_ptr<xrfg::D3D12CockpitMaskFrame> back;
++        std::uint64_t back_seq = 0;
++        for (int attempt = 0; attempt < 300 && back == nullptr; ++attempt) {
++            back_seq = producer.commit(time, 128);
++            producer.signal(back_seq);
++            back = consumer.acquire(time++);
++            if (back == nullptr) {
++                Sleep(10);
++            }
++        }
++        const auto off_for = std::chrono::duration_cast<std::chrono::milliseconds>(
++            std::chrono::steady_clock::now() - stalled_at);
++        require(back != nullptr && consumer.stats().stall_recoveries == stall,
++            "recover: masks are back once the queue caught up");
++        require(off_for.count() >= static_cast<long long>(hold) - 20,
++            "recover: not before the hold (doubled for the second stall): " + std::to_string(off_for.count()) +
++                " ms");
++        gpu.wait(back->ready_fence.Get(), back->ready_value);
++        require(gpu.readback(back->texture.Get()) == producer.last_pattern_, "recover: the copy holds the new slot");
++        back.reset();
++    }
++    require(std::count(logged.begin(), logged.end(), 5) == 2 && std::count(logged.begin(), logged.end(), 15) == 2,
++        "recover: two stalls (result=5) and two recoveries (result=15) logged");
++    std::cout << "cockpit mask: a stall ends once the copy queue has caught up, after a doubling hold\n";
++}
++
++// DCS Control (0040): the release fence's signals queued after the last copy
++// have run once the consumer is gone (the end waits for one more done_fence
++// signal behind them).
++void test_end_drains_release_signals(Gpu& gpu) {
++    const std::wstring suffix = test_suffix(L"enddrain");
++    FakeProducer producer(gpu, suffix);
++    std::uint64_t newest = 0;
++    {
++        xrfg::CockpitMaskConsumer consumer;
++        require_hresult(consumer.initialize(gpu.device.Get(), {}, test_options(suffix)), "consumer initialize");
++        const std::uint64_t seq = producer.commit(2500, 255);
++        producer.signal(seq);
++        require(consumer.acquire(2500) != nullptr, "end drain: paired");
++        newest = producer.commit(2501, 255);
++        producer.signal(newest);
++        require(consumer.acquire(2599) == nullptr && consumer.stats().last == xrfg::CockpitMaskLookup::no_slot,
++            "end drain: no slot, the newest released");
++    }
++    require(producer.release_fence_->GetCompletedValue() >= newest,
++        "end drain: the release signal queued after the last copy has run");
++    std::cout << "cockpit mask: the end drains the release signals as well\n";
++}
++
++// DCS Control (0040): a rect whose x + w wraps in 32 bits passes the
++// contracts' own view_usable(); the consumer checks in 64 bits and leaves
++// that eye out (its mask and its MVs), the other eye as before.
++void test_wrapped_rects(Gpu& gpu) {
++    const std::wstring suffix = test_suffix(L"wrap");
++    FakeProducer producer(gpu, suffix);
++    FakeMotionProducer motion(gpu, suffix, producer);
++    auto options = test_options(suffix);
++    options.dcs_motion = true;
++    xrfg::CockpitMaskConsumer consumer;
++    require_hresult(consumer.initialize(gpu.device.Get(), {}, options), "consumer initialize");
++    const std::uint64_t seq = producer.commit(2700, 255);
++    const int slot = static_cast<int>(producer.header_.newestSlot);
++    cm::MaskView& mask_view = producer.header_.slot[slot].view[1];
++    mask_view.x = 0xFFFFFFF0U;
++    mask_view.w = 0x20U;
++    producer.publish();
++    require(cm::view_usable(producer.header_, slot, 1), "wrap: the mask contract's check passes it");
++    motion.commit(producer, 2690);
++    cmv::MotionView& motion_view = motion.header_.slot[slot].view[1];
++    motion_view.x = 0xFFFFFFF8U;
++    motion_view.w = 0x10U;
++    motion.publish();
++    require(cmv::view_usable(motion.header_, slot, 1), "wrap: the motion contract's check passes it");
++    producer.signal(seq);
++    const auto frame = consumer.acquire(2700);
++    require(frame != nullptr && frame->views[0].valid && !frame->views[1].valid,
++        "wrap: the wrapped mask rect is left out, the other eye kept");
++    require(frame->motion && frame->motion_views[0].valid && !frame->motion_views[1].valid,
++        "wrap: the wrapped MV rect is left out, the other eye kept");
++    gpu.wait(frame->ready_fence.Get(), frame->ready_value);
++    std::cout << "cockpit mask: rects that wrap in 32 bits are left out\n";
++}
++
++// DCS Control (0040): the rect check, and the MVs' backoff decided once per
++// pair for every eye.
++void test_rects_and_motion_backoff() {
++    require(xrfg::cockpit_rect_inside(0, 0, 48, 20, 48, 20) && !xrfg::cockpit_rect_inside(1, 0, 48, 20, 48, 20) &&
++            !xrfg::cockpit_rect_inside(0, 1, 48, 20, 48, 20),
++        "rect: the edges");
++    require(!xrfg::cockpit_rect_inside(0xFFFFFFF0U, 0, 0x20U, 20, 48, 20) &&
++            !xrfg::cockpit_rect_inside(0, 0xFFFFFFFFU, 48, 2, 48, 20),
++        "rect: a sum that wraps in 32 bits is outside");
++    {
++        xrfg::DcsMotionBackoff backoff;
++        // Over a fifth of the pixels fell back in every pair: the window
++        // closes on its 32nd pair, the left eye having decided it already.
++        for (std::int64_t pair = 1; pair < 32; ++pair) {
++            require(!backoff.backing_off(pair) && !backoff.backing_off(pair), "backoff: not yet");
++            backoff.add(pair, 10, 10);
++            backoff.add(pair, 10, 10);
++        }
++        // A late result of an earlier pair (the other eye's) is no new pair.
++        for (int late = 0; late < 8; ++late) {
++            backoff.add(5, 10, 10);
++        }
++        require(backoff.remaining() == 0, "backoff: a late result does not close the window");
++        require(!backoff.backing_off(32), "backoff: the left eye decides pair 32");
++        backoff.add(32, 10, 10);
++        require(backoff.remaining() == xrfg::DcsMotionBackoff::kBackoffPairs, "backoff: the window closed");
++        require(!backoff.backing_off(32), "backoff: the right eye gets the left eye's answer for pair 32");
++        std::uint64_t held = 0;
++        for (std::int64_t pair = 33; pair < 33 + 200; ++pair) {
++            const bool left = backoff.backing_off(pair);
++            const bool right = backoff.backing_off(pair);
++            require(left == right, "backoff: both eyes decide alike");
++            held += left ? 1U : 0U;
++        }
++        require(held == xrfg::DcsMotionBackoff::kBackoffPairs, "backoff: the MVs held off for its pairs");
++    }
++    {
++        // A healthy window: no backoff.
++        xrfg::DcsMotionBackoff backoff;
++        for (std::int64_t pair = 1; pair <= 64; ++pair) {
++            require(!backoff.backing_off(pair), "healthy: no backoff");
++            backoff.add(pair, 100, 10);
++            backoff.add(pair, 100, 10);
++        }
++        require(backoff.remaining() == 0, "healthy: nothing held");
++    }
++    std::cout << "cockpit mask: 64-bit rects, and one MV backoff decision per pair\n";
++}
++
+ void test_heartbeat_is_throttled(Gpu& gpu) {
+     const std::wstring suffix = test_suffix(L"throttle");
+     FakeProducer producer(gpu, suffix);
+@@ -1605,6 +1783,7 @@
+     try {
+         test_ini();
+         test_parallax_and_focus_math(); // DCS Control (0034)
++        test_rects_and_motion_backoff(); // DCS Control (0040)
+         Gpu gpu;
+         test_missing_block_retries_once_a_second(gpu);
+         test_pairing_gpu_wait_release_and_heartbeat(gpu);
+@@ -1615,6 +1794,9 @@
+         test_motion_pairing_and_heartbeats(gpu); // DCS Control (0036)
+         test_slot_time(gpu); // DCS Control (0039)
+         test_stall_stops_the_heartbeat(gpu);
++        test_stall_recovers(gpu); // DCS Control (0040)
++        test_end_drains_release_signals(gpu); // DCS Control (0040)
++        test_wrapped_rects(gpu); // DCS Control (0040)
+         std::cout << "cockpit mask consumer tests passed\n";
+         return 0;
+     } catch (const std::exception& error) {
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -1894,6 +1894,64 @@
+             "the quiet is the scene settle");
+     }
+     {
++        // DCS Control (0040): re-armed in flight, after kHealthyFrames frames
++        // passed through with every wait well within the bound and
++        // rearm_delay() after the trip, which doubles with each trip.
++        GenerationStall stall;
++        const Nanoseconds healthy = 12 * kMillisecond;
++        require(!stall.passed_through(kSecond, healthy, true), "armed: nothing to re-arm");
++        require(stall.timed_out(10 * kSecond) == StallVerdict::tripped && stall.trips == 1, "tripped");
++        require(stall.rearm_delay() == 2 * kSecond, "the first trip holds 2 s");
++        Nanoseconds now = 10 * kSecond;
++        bool rearm = false;
++        std::uint32_t frames = 0;
++        // Healthy frames at 90/s: enough of them before 2 s, but not the delay.
++        while (!rearm && now < 20 * kSecond) {
++            now += 11 * kMillisecond;
++            ++frames;
++            rearm = stall.passed_through(now, healthy, true);
++            require(!rearm || now - 10 * kSecond >= 2 * kSecond, "not before the delay");
++        }
++        require(rearm && now - 10 * kSecond < 2 * kSecond + 20 * kMillisecond,
++            "re-armed once the delay passed: " + std::to_string(frames) + " frames");
++        stall.rearm(now);
++        require(!stall.stalled, "re-armed");
++        // The second trip: 4 s, and a slow frame or a wait that ran out starts
++        // the count over.
++        now += 5 * kSecond; // past the quiet period
++        require(stall.timed_out(now) == StallVerdict::tripped && stall.trips == 2, "tripped again");
++        require(stall.rearm_delay() == 4 * kSecond, "doubled");
++        const Nanoseconds tripped = now;
++        now += 5 * kSecond;
++        for (std::uint32_t i = 0; i + 1 < GenerationStall::kHealthyFrames; ++i) {
++            now += 11 * kMillisecond;
++            require(!stall.passed_through(now, healthy, true), "counting");
++        }
++        require(!stall.passed_through(now + kMillisecond, GenerationStall::kHealthyWait + 1, true),
++            "a slow frame starts over");
++        for (std::uint32_t i = 0; i + 1 < GenerationStall::kHealthyFrames; ++i) {
++            now += 11 * kMillisecond;
++            require(!stall.passed_through(now, healthy, true), "counting again");
++        }
++        require(stall.timed_out(now) == StallVerdict::stalled, "a wait runs out again");
++        require(!stall.passed_through(now, healthy, true), "and the count starts over");
++        require(!stall.passed_through(now, healthy, false), "a frame whose wait ran out does not count");
++        std::uint32_t needed = 0;
++        do {
++            now += 11 * kMillisecond;
++            ++needed;
++        } while (!stall.passed_through(now, healthy, true));
++        require(needed == GenerationStall::kHealthyFrames && now - tripped >= 4 * kSecond,
++            "re-armed after a full run of healthy frames");
++        // The delay doubles to at most 64 s.
++        for (int trip = 0; trip < 10; ++trip) {
++            stall.rearm(now);
++            now += 5 * kSecond;
++            require(stall.timed_out(now) == StallVerdict::tripped, "trips");
++        }
++        require(stall.rearm_delay() == 64 * kSecond, "at most 64 s");
++    }
++    {
+         // Stalled for good: the wait gives up after its bound and trips once.
+         StalledRuntime runtime(std::chrono::seconds(30));
+         GenerationStall stall; // never re-armed: no quiet period
+@@ -2013,6 +2071,34 @@
+     require(!measured_interpolation_fraction(at(0), at(6.5), kPeriod, 3, 0), "past twice the cadence");
+     require(!measured_interpolation_fraction(at(0), at(4), 0, 3, 0), "no period");
+     require(!measured_interpolation_fraction(at(0), at(4), kPeriod, 3, 2), "no third synthetic");
++    // DCS Control (0040): across a change of cadence the release interval is
++    // the previous frame's hold. 3 -> 2: three periods is that frame's
++    // regular cadence, not a late frame (it was measured at 2/3).
++    require(near(measured_interpolation_fraction(at(0), at(3), kPeriod, 2, 0), 2.0 / 3.0),
++        "without the previous cadence: three periods read as late at 2X");
++    require(!measured_interpolation_fraction(at(0), at(3), kPeriod, 2, 0, 3), "3 -> 2 on cadence");
++    require(!measured_interpolation_fraction(at(0), at(3.2), kPeriod, 2, 0, 3), "3 -> 2 jitter");
++    // 2 -> 3: two periods and a little is the previous frame's cadence; it
++    // flipped between ~0.05 and the fixed answer on the release's jitter.
++    require(measured_interpolation_fraction(at(0), at(2.1), kPeriod, 3, 0).has_value(),
++        "without the previous cadence: 2.1 periods read as early at 3X");
++    require(!measured_interpolation_fraction(at(0), at(2.1), kPeriod, 3, 0, 2) &&
++            !measured_interpolation_fraction(at(0), at(2.1), kPeriod, 3, 1, 2),
++        "2 -> 3 on cadence");
++    // Still measured off the previous cadence: 2 -> 3 a period late, 3 -> 2
++    // a period late.
++    require(near(measured_interpolation_fraction(at(0), at(3), kPeriod, 3, 0, 2), 1.0 / 3.0) &&
++            near(measured_interpolation_fraction(at(0), at(3), kPeriod, 3, 1, 2), 2.0 / 3.0),
++        "2 -> 3, late: the measured interval");
++    require(near(measured_interpolation_fraction(at(0), at(4), kPeriod, 2, 0, 3), 0.75),
++        "3 -> 2, late: the measured interval");
++    require(!measured_interpolation_fraction(at(0), at(6.5), kPeriod, 2, 0, 3) &&
++            near(measured_interpolation_fraction(at(0), at(5.5), kPeriod, 2, 0, 3), 1.0 - 1.0 / 5.5),
++        "3 -> 2: twice the previous cadence bounds it");
++    // The same cadence given explicitly: as without it.
++    require(near(measured_interpolation_fraction(at(0), at(4), kPeriod, 3, 0, 3), 0.5) &&
++            !measured_interpolation_fraction(at(0), at(3), kPeriod, 3, 0, 3),
++        "an unchanged cadence: as before");
+ }
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -273,6 +273,10 @@
+ // checked by layer_call_chain_depth.cmake), and once the runtime answers
+ // again the application's frames must reach it passed through: its own
+ // swapchain, no synthetic.
++// DCS Control (0040): until the latch re-arms in flight (GenerationStall::
++// passed_through: a run of frames whose waits held well within the bound,
++// and its delay after the trip): then synthetics again, without a second
++// trip (result=950 still once).
+ bool g_presenter_stall_mode = false;
+ std::atomic<int> g_presenter_stall_ms{0};
+ constexpr int kPresenterStallMs = 2500;
+@@ -4449,7 +4453,9 @@
+                 std::scoped_lock lock(g_end_records_mutex);
+                 stall_recovered_from = g_end_records.size();
+             }
+-            for (int index = 0; sequence_succeeded && index < 120; ++index) {
++            // DCS Control (0040): long enough for the re-arm in flight and a
++            // stretch of generation after it.
++            for (int index = 0; sequence_succeeded && index < 360; ++index) {
+                 sequence_succeeded = run_frame(true);
+             }
+             g_simulated_render_us = 0;
+@@ -4943,21 +4949,28 @@
+                 std::scoped_lock lock(g_end_records_mutex);
+                 records = g_end_records;
+             }
++            // DCS Control (0040): the frames passed through from the stall
++            // to the first synthetic after it (the re-arm in flight), and the
++            // synthetics from there on (those still queued at the stall,
++            // before the first frame passed through, are the old run's).
+             std::size_t original_after = 0;
+             std::size_t synthetic_after_stall = 0;
+-            const std::size_t tail_from = stall_recovered_from + 30;
+-            for (std::size_t index = tail_from;
++            bool resumed = false;
++            for (std::size_t index = stall_from;
+                  index + 6 < records.size(); ++index) {
+-                original_after +=
+-                    records[index].target == SubmittedTarget::original ? 1U : 0U;
+-                synthetic_after_stall +=
+-                    records[index].target == SubmittedTarget::synthetic ? 1U : 0U;
++                if (records[index].target == SubmittedTarget::synthetic) {
++                    resumed = resumed || original_after != 0;
++                    synthetic_after_stall += resumed ? 1U : 0U;
++                } else if (!resumed &&
++                           records[index].target == SubmittedTarget::original) {
++                    ++original_after;
++                }
+             }
+             const bool stall_valid = sequence_succeeded && teardown_succeeded &&
+                 presenter_seen && violations == 0 &&
+                 synthetic_before_stall >= 100 &&
+                 stall_longest_frame_ms < 1500.0 && stall_frames >= 4 &&
+-                original_after >= 60 && synthetic_after_stall == 0 &&
++                original_after >= 60 && synthetic_after_stall >= 100 &&
+                 g_waited_display_times.empty() && !g_begun_display_time;
+             if (!stall_valid) {
+                 std::cerr << "DCS presenter stall validation failed: sequence="
+@@ -4978,7 +4991,8 @@
+                       << stall_frames << " frames through a " << kPresenterStallMs
+                       << " ms runtime stall, longest " << stall_longest_frame_ms
+                       << " ms; " << original_after
+-                      << " passed through after it, no synthetic\n";
++                      << " passed through after it, then generation re-armed in flight ("
++                      << synthetic_after_stall << " synthetics)\n";
+             return EXIT_SUCCESS;
+         }
+         if (g_triple_deep_mode) {

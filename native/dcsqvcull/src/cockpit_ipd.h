@@ -673,6 +673,10 @@ struct Matcher {
     Rec rec;
     Rec lagRec[kLags];
     bool lagOk[kLags] = {};
+    // R77: the ambiguity window's records (pick - 1 .. pick + 1), also candidates of VerifiedH: with lag + ahead
+    // >= 2 they lie past lagRec.
+    Rec ambRec[3];
+    int ambN = 0;
   };
 
   // The FOV fingerprint: the boost record (back index) whose displayTime is
@@ -804,12 +808,16 @@ struct Matcher {
         // view 0 (left periphery) can differ from view 2 (left focus) by
         // b - a for one frame at the focus inset's edge, against all four
         // views off by b - a with a wrong pick.
+        // R77: the window is the pick's neighbours in the ring; it was capped at back index kLags - 1, so with
+        // lag + ahead >= 2 the older neighbour (and from 3 on the pick itself) was left out and a step there was
+        // not seen as ambiguous.
         double lo = 1e9, hi = -1e9;
-        const int b1 = std::min(std::min(count - 1, kLags - 1), pick + 1);
+        const int b1 = std::min(count - 1, pick + 1);
         for (int b = std::max(0, pick - 1); b <= b1; ++b) {
           const double h = RecH(At(b));
           lo = std::min(lo, h);
           hi = std::max(hi, h);
+          if (o.ambN < 3) o.ambRec[o.ambN++] = At(b);
         }
         o.hSpread = hi - lo;
         o.hLo = lo;
@@ -858,21 +866,25 @@ struct Matcher {
   bool VerifiedH(double sep, const LatchOut& lo, double* h) const {
     if (lo.stale || !lo.ambiguous || !(sep > 0)) return false;
     const double meas = sep / K();
-    double res[kLags];
+    // R77: the lag records and the ambiguity window's (which a lag + ahead >= 2 puts past them)
+    constexpr int kCand = kLags + 3;
+    const Rec* cand[kCand] = {};
+    int nc = 0;
+    for (int L = 0; L < kLags; ++L)
+      if (lo.lagOk[L]) cand[nc++] = &lo.lagRec[L];
+    for (int k = 0; k < lo.ambN && k < 3; ++k) cand[nc++] = &lo.ambRec[k];
+    double res[kCand];
     int best = -1;
-    for (int L = 0; L < kLags; ++L) {
-      res[L] = 1e9;
-      if (!lo.lagOk[L]) continue;
-      res[L] = std::fabs(meas - (RecIpd(lo.lagRec[L]) + bias));
-      if (best < 0 || res[L] < res[best]) best = L;
+    for (int i = 0; i < nc; ++i) {
+      res[i] = std::fabs(meas - (RecIpd(*cand[i]) + bias));
+      if (best < 0 || res[i] < res[best]) best = i;
     }
     if (best < 0 || !(res[best] <= kVerTol)) return false;
-    const double ipdBest = RecIpd(lo.lagRec[best]);
-    for (int L = 0; L < kLags; ++L)
-      if (L != best && lo.lagOk[L] && std::fabs(RecIpd(lo.lagRec[L]) - ipdBest) > 0.5e-3 &&
-          !(res[L] >= res[best] + kVerMargin))
+    const double ipdBest = RecIpd(*cand[best]);
+    for (int i = 0; i < nc; ++i)
+      if (i != best && std::fabs(RecIpd(*cand[i]) - ipdBest) > 0.5e-3 && !(res[i] >= res[best] + kVerMargin))
         return false;
-    *h = RecH(lo.lagRec[best]);
+    *h = RecH(*cand[best]);
     return true;
   }
 
@@ -955,12 +967,7 @@ bool g_boostMissingLogged = false;
 
 std::wstring BoostName() {
   if (!g_boostNameOverride.empty()) return g_boostNameOverride;
-  std::wstring n = psh::boost_block_name;
-  char suf[64] = {};
-  const DWORD k = GetEnvironmentVariableA(psh::name_suffix_variable, suf, sizeof(suf));
-  if (k > 0 && k < sizeof(suf))
-    for (DWORD i = 0; i < k; ++i) n += static_cast<wchar_t>(static_cast<unsigned char>(suf[i]));
-  return n;
+  return perc_sfx::Name(psh::boost_block_name);  // R79: the shared suffix rule (perception_suffix.h)
 }
 
 // Config thread: once per second while missing.
@@ -1055,12 +1062,7 @@ std::atomic<uint64_t> g_ackOpens{0}, g_ackWrites{0};
 
 std::wstring AckName() {
   if (!g_ackNameOverride.empty()) return g_ackNameOverride;
-  std::wstring n = psh::cockpit_stereo_block_name;
-  char suf[64] = {};
-  const DWORD k = GetEnvironmentVariableA(psh::name_suffix_variable, suf, sizeof(suf));
-  if (k > 0 && k < sizeof(suf))
-    for (DWORD i = 0; i < k; ++i) n += static_cast<wchar_t>(static_cast<unsigned char>(suf[i]));
-  return n;
+  return perc_sfx::Name(psh::cockpit_stereo_block_name);  // R79: the shared suffix rule (perception_suffix.h)
 }
 
 // Config thread (Start, then TickCfg once per second while it failed).
@@ -1187,6 +1189,7 @@ struct CostScope {
 std::mutex g_traceMutex;
 std::vector<std::string> g_trace;  // render thread fills (under g_traceMutex), Tick logs
 double g_lastH = 0, g_lastScale = 1;
+double g_lastBoostH = NAN;  // R77: the last latch's Frame::boostH (tests, diagnostics)
 int g_lastPath = 0;
 
 void TraceLine(const char* fmt, ...) {
@@ -1265,6 +1268,10 @@ struct Frame {
   // Off (offNext, offMulti, offView0) with the gPrev tail still applied to views not patched in full (TailOff).
   bool offTail = false;
   double h = 0;
+  // R77: Depth boost's per-eye shift DCS renders this frame with (the record the latch / measured pick / view 1's
+  // verification decided), before the gates that leave the cockpit unmoved (inert, the limit, the pause): h is
+  // what the dual camera applied. NaN: not known (no latch, stale / dry, an off frame, an undecided ambiguity).
+  double boostH = NAN;
   int path = kPathNone;
   Matcher::LatchOut lo;
   ViewFrame v[4];
@@ -1295,6 +1302,13 @@ int g_relGood = 0, g_relLogs = 0, g_gateLogs = 0;
 bool g_prevTraced = false;  // CockpitTrueIpdPrevLog: this frame wrote trace lines
 bool g_offNext = false;
 uint64_t g_frame = 0;
+// R77: the per-eye shift limit. Was 40 mm, below the layer's own maximum (Enhanced MaxScale 2 x Ipd up to 90 mm / 2
+// = 45 mm): such a frame was left unpatched while the StereoAck stayed active, so the cockpit was drawn at the
+// boosted eye distance. Now above that maximum; a frame past it (a record no valid setting makes) also takes the
+// ack down for kTooBigHoldFrames, so the layer returns to its own cockpit handling instead of trusting ours.
+constexpr double kMaxShiftM = 50e-3;
+constexpr uint64_t kTooBigHoldFrames = 90;
+int64_t g_tooBigAt = -1;  // g_frame of the last frame past kMaxShiftM (-1: none)
 Matcher g_match;
 Axis g_axis;
 GazeRing g_gaze;
@@ -1359,6 +1373,18 @@ uint64_t g_ovlRestFrame = ~0ull;
 // StereoAck: the previous write's active flag.
 bool g_ackWasActive = false;
 int g_ackDropLogs = 0, g_ambAckLogs = 0;
+// R63: evidence that the engine can move the cockpit at all; the ack is active only with it (the layer drops its own
+// cockpit steps on an active ack). A D3D11 device learnt (fixation_depth.h's context: in PerceptionOnly
+// perception_device.h's, which gives up on a wrapped context), and cockpit passes being intercepted: kAckMissFrames
+// frames that drew a cockpit pass, or identified none of their G-buffer executions, without view 0's cockpit upload
+// latched clear it until a frame latches one again. Not patches: at scale 1 nothing is patched, and the layer only
+// raises the scale on an active ack.
+constexpr int kAckMissFrames = 45;
+int g_ackMissRun = 0;
+uint64_t g_ackIdExecs = 0, g_ackIdFails = 0;
+bool g_ackNoEvidence = false;  // the previous frame end lacked it (one log line per change)
+int g_ackEvidenceLogs = 0;
+bool g_ackAssumeDevice = false;  // tests: device evidence without fixation_depth.h's D3D11 context
 void ResetMvpState();  // below (the overlay MVP path's per-view cache and dump budget)
 void DumpEndFrame();   // below ([Perception] CockpitTrueIpdFrameDump)
 void DumpCapture(ID3D11Resource* res, const D3D11_VIEWPORT& vp, int view, int src, int binds);  // below
@@ -1616,6 +1642,7 @@ void ResetRender() {
   memset(g_prevDw, 0, sizeof(g_prevDw));
   g_offNext = false;
   g_frame = 0;
+  g_tooBigAt = -1;  // R77
   g_match = Matcher{};
   g_axis = Axis{};
   g_gaze = GazeRing{};
@@ -1658,6 +1685,8 @@ void ResetRender() {
   g_ackWasActive = false;
   g_ackDropLogs = g_ambAckLogs = 0;
   g_ackHold = AckHold{};
+  g_ackMissRun = 0;
+  g_ackNoEvidence = false;
   ResetMvpState();
 }
 
@@ -1794,10 +1823,12 @@ void LatchFrame(const uint8_t* s0) {
   // larger one (live 2026-10-14, AH-64D, Depth boost off: view 0's cockpit at the boosted eye for that frame, views
   // 1-3 right). The frame's own eye separation, measured before it renders, picks the record the way view 1's
   // |C1 - C0| does (VerifiedH), so every view gets it.
+  bool ambDecided = false;  // R77: the ambiguity decided by the frame's measured separation
   if (!f.lo.stale && f.lo.ambiguous && f.cullSep > 0 && !g_match.fault) {
     double hv = 0;
     if (g_match.VerifiedH(f.cullSep, f.lo, &hv)) {
       h = hv;
+      ambDecided = true;
       g_ambByCull++;
     } else {
       g_ambCullUndecided++;
@@ -1819,6 +1850,10 @@ void LatchFrame(const uint8_t* s0) {
       g_pickNone++;
     }
   }
+  // R77: the boost DCS renders with, before the gates below (an ambiguity not decided here: views 1-3's
+  // verification may decide it, else unknown)
+  f.boostH = f.lo.stale || (f.lo.ambiguous && !ambDecided) ? NAN : h;
+  g_lastBoostH = f.boostH;
   const bool real = !f.lo.stale && (RecH(f.lo.rec) != 0 || f.lo.ambiguous);
   if (f.lo.stale) (f.lo.dry ? g_st.offDry : g_st.offStale)++;
   else if (!real) g_st.offScale1++;
@@ -1847,8 +1882,10 @@ void LatchFrame(const uint8_t* s0) {
   // An ambiguous frame with a plausible record beyond the limit: view 0 not
   // patched (views 1-3 follow their verified record, with the same limit).
   const double hBig = f.lo.ambiguous ? std::max(std::fabs(f.lo.hLo), std::fabs(f.lo.hHi)) : std::fabs(h);
-  if (std::fabs(h) > 40e-3 || hBig > 40e-3) {
-    if (g_st.tooBig++ == 0) Log("cockpit ipd: per-eye shift %.1f mm > 40 mm ignored", std::max(std::fabs(h), hBig) * 1e3);
+  if (std::fabs(h) > kMaxShiftM || hBig > kMaxShiftM) {
+    if (g_st.tooBig++ == 0)
+      Log("cockpit ipd: per-eye shift %.1f mm > %.0f mm ignored", std::max(std::fabs(h), hBig) * 1e3, kMaxShiftM * 1e3);
+    g_tooBigAt = static_cast<int64_t>(g_frame);
     h = 0;
   }
   if (std::fabs(h) < 0.05e-3) h = 0;
@@ -1930,8 +1967,11 @@ void VerifyFrame() {
       double hv = 0;
       const char* why = nullptr;
       if (!g_match.fault && g_match.VerifiedH(sep, f.lo, &hv)) {
+        f.boostH = hv;  // R77: the verified record, before the gates
+        g_lastBoostH = hv;
         if (hv != 0 && InertNow(&why)) hv = 0;
-        if (std::fabs(hv) > 40e-3 || std::fabs(hv) < 0.05e-3 || g_userOff.load(std::memory_order_relaxed)) hv = 0;
+        if (std::fabs(hv) > kMaxShiftM) g_tooBigAt = static_cast<int64_t>(g_frame);  // R77
+        if (std::fabs(hv) > kMaxShiftM || std::fabs(hv) < 0.05e-3 || g_userOff.load(std::memory_order_relaxed)) hv = 0;
         f.h = hv;
         g_lastH = hv;
         g_st.pairAmbVerified++;
@@ -2995,14 +3035,24 @@ double g_dcsEye[2][3] = {};
 double g_dcsUp[3] = {}, g_dcsFwd[3] = {};  // (trace) view 0's up / forward axes
 int g_helmetTraceLines = 0;
 uint64_t g_dcsEyeFrame[2] = {~0ull, ~0ull};
-// Model-path verdicts per material (render thread): 1 helmet, 0 not, -1 unreadable.
+// Model-path verdicts per material (render thread): 1 helmet, 0 not, -1 unreadable. Open addressing on the
+// material pointer. Each entry keeps the material's name pointer (+0x20), compared at every hit: a material freed
+// and another allocated at its address is judged again. The table is cleared when 3/4 full, and at a mission
+// event or a gap scene cut (HelmetOnMissionEvent / ocpu::SceneCuts, consumed at the next HelmetSwap), when DCS
+// frees and reuses the cockpit's heap objects. Before, a linear 512-entry table, cleared only at Stop, kept stale
+// verdicts across missions (a new helmet material on a freed "not helmet" address was drawn from the true eye),
+// and once full re-parsed every unlisted material's path at each lookup (linear scan of 512 plus the parse).
 struct HelmetMatEntry {
   const void* mat = nullptr;
+  const void* name = nullptr;  // [mat+0x20] when judged
   int8_t verdict = -1;
 };
-constexpr int kHelmetMats = 512;
+constexpr int kHelmetMats = 2048;  // power of two
 HelmetMatEntry g_helmetMats[kHelmetMats];
 int g_helmetMatN = 0;
+std::atomic<int> g_helmetResetReq{0};  // a mission event (Lua thread)
+uint64_t g_helmetCuts = 0;             // ocpu::SceneCuts() at the last reset check (render thread)
+std::atomic<uint64_t> g_helmetMatResets{0};
 std::atomic<uint64_t> g_helmetItems{0}, g_helmetSwitches{0}, g_helmetRefused{0}, g_helmetLists{0},
     g_helmetHeadCentred{0}, g_helmetFar{0};
 std::atomic<int> g_helmetLastAnchor{-1};
@@ -3034,7 +3084,11 @@ struct HelmetBind {
 };
 HelmetBind t_helmetBind;
 
-void ReleaseHelmet() { g_helmetMatN = 0; }
+void ClearHelmetMats() {
+  for (HelmetMatEntry& e : g_helmetMats) e = HelmetMatEntry{};
+  g_helmetMatN = 0;
+}
+void ReleaseHelmet() { ClearHelmetMats(); }
 void InitHelmetVtbl() {
   for (auto*& p : g_helmetVtbl) p = reinterpret_cast<void*>(&HelmetNop);
   g_helmetVtbl[1] = reinterpret_cast<void*>(&HelmetVt1);
@@ -3067,10 +3121,25 @@ bool HelmetNameRaw(const uint8_t* mat, bool* helmet) {
   *helmet = strstr(s, "helmet") != nullptr;
   return true;
 }
-HelmetMatEntry g_helmetMatSpill;  // (the table full: verdicts not kept)
+inline size_t HelmetMatHash(const void* mat) {
+  return static_cast<size_t>((reinterpret_cast<uintptr_t>(mat) >> 4) * 0x9E3779B97F4A7C15ull >> 40) &
+         (kHelmetMats - 1);
+}
 HelmetMatEntry* HelmetEntry(const uint8_t* mat) {
-  for (int i = 0; i < g_helmetMatN; ++i)
-    if (g_helmetMats[i].mat == mat) return &g_helmetMats[i];
+  const void* name = nullptr;
+  __try {
+    name = *reinterpret_cast<const void* const*>(mat + 0x20);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    name = nullptr;
+  }
+  if (g_helmetMatN >= kHelmetMats * 3 / 4) {
+    ClearHelmetMats();
+    g_helmetMatResets.fetch_add(1, std::memory_order_relaxed);
+  }
+  size_t i = HelmetMatHash(mat);
+  while (g_helmetMats[i].mat && g_helmetMats[i].mat != mat) i = (i + 1) & (kHelmetMats - 1);
+  HelmetMatEntry* e = &g_helmetMats[i];
+  if (e->mat == mat && e->name == name) return e;
   bool helmet = false;
   int v = -1;
   __try {
@@ -3078,8 +3147,8 @@ HelmetMatEntry* HelmetEntry(const uint8_t* mat) {
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     v = -1;
   }
-  HelmetMatEntry* e = g_helmetMatN < kHelmetMats ? &g_helmetMats[g_helmetMatN++] : &g_helmetMatSpill;
-  *e = HelmetMatEntry{mat, static_cast<int8_t>(v)};
+  if (!e->mat) ++g_helmetMatN;
+  *e = HelmetMatEntry{mat, name, static_cast<int8_t>(v)};
   return e;
 }
 // The world origin of an item (its sbPositions element in the page's CPU data), false when not readable.
@@ -3246,8 +3315,22 @@ bool HelmetSwapRaw(void** vec) {
   vec[1] = g_helmetList + n;
   return true;
 }
+// main.cpp's OnMissionEvent (Lua thread): the cockpit's materials and model instances are about to be freed.
+inline void HelmetOnMissionEvent() { g_helmetResetReq.store(1, std::memory_order_release); }
+// At a pass begin (render thread): a mission event or a gap scene cut since the last check clears the material
+// verdicts and the instance sides (keyed by heap pointers DCS may now reuse).
+void HelmetConsumeReset() {
+  const uint64_t cuts = ocpu::SceneCuts();
+  if (!g_helmetResetReq.load(std::memory_order_relaxed) && cuts == g_helmetCuts) return;
+  g_helmetResetReq.store(0, std::memory_order_relaxed);
+  g_helmetCuts = cuts;
+  ClearHelmetMats();
+  for (HelmetInst& h : g_helmetInst) h = HelmetInst{};
+  g_helmetMatResets.fetch_add(1, std::memory_order_relaxed);
+}
 void HelmetSwap(void** vec) {
   if (!g_cfgHelmet.load(std::memory_order_relaxed) || !vec || t_helmetSwap.vec) return;
+  HelmetConsumeReset();
   __try {
     HelmetSwapRaw(vec);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -3428,10 +3511,40 @@ uint8_t g_ownAwayBytes[kMaxSrc];
 std::atomic<uint64_t> g_own2Passes{0}, g_own2Unused{0}, g_ownSwitchIdle{0}, g_ownSwRetarget{0};
 
 const void* g_ownSrVtOverride = nullptr;  // tests: the fake SceneRenderable vtable (no NGModel.dll)
+// R63 U5: the SceneRenderable vtable of the NGModel image at `ng`, by RTTI: the recorded RVA when its locator names
+// model::SceneRenderable (the analysed build), else the one vtable with that RTTI (a rebuild that moved .rdata).
+// nullptr when neither: ownship matching stays off. *moved: found away from `recorded`.
+constexpr char kSrRtti[] = ".?AVSceneRenderable@model@@";
+const void* ResolveSrVtbl(const uint8_t* ng, uint32_t recorded, bool* moved) {
+  *moved = false;
+  if (!ng) return nullptr;
+  auto* const* at = reinterpret_cast<void* const*>(ng + recorded);
+  if (sigscan::InImage(ng, at, 8)) {
+    const char* n = sigscan::RttiName(ng, at);
+    if (n && strcmp(n, kSrRtti) == 0) return at;
+  }
+  void** v = sigscan::FindVtable(ng, kSrRtti);
+  *moved = v != nullptr;
+  return v;
+}
+std::atomic<const uint8_t*> g_srNg{nullptr};
+std::atomic<const void*> g_srVt{nullptr};
 const void* SrVtbl() {
   if (g_ownSrVtOverride) return g_ownSrVtOverride;
   const auto* ng = reinterpret_cast<const uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
-  return ng ? static_cast<const void*>(ng + gbbatch::kSrVtbl) : g_ownSrVtOverride;
+  if (!ng) return nullptr;
+  if (g_srNg.load(std::memory_order_acquire) == ng) return g_srVt.load(std::memory_order_relaxed);
+  bool moved = false;
+  const void* vt = ResolveSrVtbl(ng, gbbatch::kSrVtbl, &moved);
+  g_srVt.store(vt, std::memory_order_relaxed);
+  if (g_srNg.exchange(ng, std::memory_order_acq_rel) != ng) {
+    if (!vt)
+      Log("cockpit ipd: ownship matching off (SceneRenderable vtable not in this NGModel build)");
+    else if (moved)
+      Log("cockpit ipd: ownship: SceneRenderable vtable at NGModel+0x%llx (recorded 0x%x; found by RTTI)",
+          static_cast<unsigned long long>(static_cast<const uint8_t*>(vt) - ng), gbbatch::kSrVtbl);
+  }
+  return vt;
 }
 inline bool OwnPathExcluded(const char* p) {  // (lower case)
   return strstr(p, "cockpit") != nullptr || strstr(p, "helmet") != nullptr;
@@ -4021,8 +4134,8 @@ void WorldTraceRaw(void** vec, int t, uint32_t tag) {
   auto** b = static_cast<uint8_t**>(vec[0]);
   auto** e = static_cast<uint8_t**>(vec[1]);
   if (!b || e < b) return;
-  const auto* ng = reinterpret_cast<const uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
-  const void* srVt = ng ? ng + gbbatch::kSrVtbl : nullptr;
+  const void* srVt = SrVtbl();  // R63 U5: by RTTI, not the raw recorded RVA
+  if (!srVt) return;
   double mid[3], ax[3], ipd = 0;
   for (int k = 0; k < 3; ++k) {
     mid[k] = 0.5 * (g_dcsEye[0][k] + g_dcsEye[1][k]);
@@ -4586,6 +4699,10 @@ void PassEnd(void* pass, bool armIntact = true) {
 
 // The frame's state for DualCameraStatusNow (render thread writes at EndFrame).
 std::atomic<bool> g_dcBoostOk{false}, g_dcPatched{false};
+// R62: the last frame drew a cockpit pass (view 0 latched, or a cockpit G-buffer pass in any view); frames that did,
+// counted for the per-second sample (an external view draws none: nothing to patch, not a failure).
+std::atomic<bool> g_dcCockpit{false};
+std::atomic<uint64_t> g_dcCockpitFrames{0};
 std::atomic<float> g_dcScale{0.0f};  // the newest BoostOut record's scale (1 when not applied); 0 without BoostOut
 std::atomic<int64_t> g_dcQpc{0};     // QPC of the last EndFrame
 
@@ -4594,12 +4711,38 @@ bool BoostFresh() {
   return g_boostView.load(std::memory_order_relaxed) && !g_match.Stale(g_frame) && !g_match.Dry();
 }
 
+// R63: the frame end's evidence for an active StereoAck (g_ackMissRun above); *why when there is none.
+bool AckEvidence(const Frame& f, const char** why) {
+  const uint64_t ex = g_st.gbExecs.load(std::memory_order_relaxed), fl = g_st.idFail.load(std::memory_order_relaxed);
+  const bool noneIdentified = ex > g_ackIdExecs && fl >= g_ackIdFails && fl - g_ackIdFails == ex - g_ackIdExecs;
+  g_ackIdExecs = ex;
+  g_ackIdFails = fl;
+  if (f.latched || f.anyPatched)
+    g_ackMissRun = 0;
+  else if ((f.ckTotal > 0 || noneIdentified) && g_ackMissRun < kAckMissFrames)
+    ++g_ackMissRun;
+  if (!g_s.ctx && !g_ackAssumeDevice) {
+    *why = "no D3D11 device learnt";
+    return false;
+  }
+  if (g_ackMissRun >= kAckMissFrames) {
+    *why = "cockpit passes drawn but none intercepted";
+    return false;
+  }
+  return true;
+}
+
 // EndFrame: the StereoAck write (when the block is open) and the status inputs.
 void AckFrame(const Frame& f) {
   const int mode = g_cfgMode.load(std::memory_order_relaxed);
   const bool boostOk = BoostFresh();
   const char* why = nullptr;
-  const bool healthy = Active() && !InertNow(&why) && !g_relRefuted.load(std::memory_order_relaxed);
+  const char* noEvidence = nullptr;
+  const bool evidence = AckEvidence(f, &noEvidence);
+  // R77: a recent frame past the shift limit was not patched: the engine does not hold the cockpit at the true eye
+  const bool tooBig = g_tooBigAt >= 0 && g_frame - static_cast<uint64_t>(g_tooBigAt) < kTooBigHoldFrames;
+  const bool healthy =
+      Active() && !InertNow(&why) && !g_relRefuted.load(std::memory_order_relaxed) && evidence && !tooBig;
   const int64_t q = QpcNow();
   float scale = 0.0f;
   if (boostOk && g_match.count) {
@@ -4609,6 +4752,9 @@ void AckFrame(const Frame& f) {
   g_dcBoostOk.store(boostOk, std::memory_order_relaxed);
   g_dcScale.store(scale, std::memory_order_relaxed);
   g_dcPatched.store(f.anyPatched && !f.observe, std::memory_order_relaxed);
+  const bool cockpit = f.latched || f.ckTotal > 0;
+  g_dcCockpit.store(cockpit, std::memory_order_relaxed);
+  if (cockpit) g_dcCockpitFrames.fetch_add(1, std::memory_order_relaxed);
   g_dcQpc.store(q, std::memory_order_release);
   if (psh::CockpitStereo* b = g_ackView.load(std::memory_order_relaxed)) {
     const bool paused = g_userOff.load(std::memory_order_relaxed);
@@ -4638,6 +4784,8 @@ void AckFrame(const Frame& f) {
         const char* reason = !Active()             ? "fault"
                              : InertNow(&inert)    ? inert
                              : g_relRefuted.load() ? "gPrevFrameViewProj refuted"
+                             : !evidence           ? noEvidence
+                             : tooBig              ? "per-eye shift above the engine's limit"
                              : paused              ? "paused (in-flight key)"
                              : !boostAck           ? "BoostOut not fresh (stale / dry) for longer than the hold"
                                                    : "?";
@@ -4645,6 +4793,18 @@ void AckFrame(const Frame& f) {
       }
     }
     g_ackWasActive = act;
+    if (mode == 1 && !evidence != g_ackNoEvidence) {
+      g_ackNoEvidence = !evidence;
+      if (g_ackEvidenceLogs < 10) {
+        ++g_ackEvidenceLogs;
+        if (!evidence)
+          Log("cockpit ipd: frame %llu: stereo ack held inactive (%s); the layer keeps its own cockpit steps",
+              static_cast<unsigned long long>(g_frame), noEvidence);
+        else
+          Log("cockpit ipd: frame %llu: stereo ack may be active again (cockpit pass intercepted)",
+              static_cast<unsigned long long>(g_frame));
+      }
+    }
   }
 }
 // At fixation_depth.h's frame end.
@@ -6021,6 +6181,8 @@ struct DualRate {
   uint64_t last = 0;
   ULONGLONG lastMs = 0;
   bool have = false;
+  uint64_t lastCk = 0;  // R62: g_dcCockpitFrames at the previous call
+  bool haveCk = false;
 };
 DualRate g_dcRate;
 uint64_t DualCameraStatusNow() {
@@ -6046,9 +6208,20 @@ uint64_t DualCameraStatusNow() {
   const bool boostOk = recent && g_dcBoostOk.load(std::memory_order_relaxed);
   const double scale = boostOk ? g_dcScale.load(std::memory_order_relaxed) : 0.0;
   const bool paused = g_userOff.load();
-  const bool on = mode == 1 && recent && !paused && Active() && g_dcPatched.load(std::memory_order_relaxed);
+  // R62: ON when the last frame or a frame of the last second was patched (the last frame alone flickered "no dual
+  // camera" on the panel whenever the one sampled frame was gated: camera cut, gPrev check).
+  const bool on = mode == 1 && recent && !paused && Active() &&
+                  (g_dcPatched.load(std::memory_order_relaxed) || perSec > 0);
   const bool waiting = !boostOk || !(std::fabs(scale - 1.0) >= 1e-3);
-  return ::qvstatus::PackDualCamera(true, on, paused, waiting, mode == 2, scale, perSec);
+  // R62: no cockpit pass in the last frame nor in the last second (external view): not a failure (status_word.h
+  // bit 5); the panel warned "no dual camera" in amber for the whole external view.
+  const uint64_t ckCur = g_dcCockpitFrames.load(std::memory_order_relaxed);
+  const bool cockpitInSecond = g_dcRate.haveCk && ckCur != g_dcRate.lastCk;
+  g_dcRate.lastCk = ckCur;
+  g_dcRate.haveCk = true;
+  const bool noCockpit = mode == 1 && recent && !paused && !g_dcCockpit.load(std::memory_order_relaxed) &&
+                         !cockpitInSecond;
+  return ::qvstatus::PackDualCamera(true, on, paused, waiting, mode == 2, scale, perSec, noCockpit);
 }
 
 // fixation_depth.h's Tick, each second while the option is wanted.

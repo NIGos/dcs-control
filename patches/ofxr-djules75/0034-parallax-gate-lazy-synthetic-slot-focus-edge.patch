@@ -1,0 +1,2106 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1020,6 +1020,19 @@
+                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/adaptive-frame-gen"
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_adaptive_frame_gen.cmake")
+         set_tests_properties(xrfg_layer_adaptive_frame_gen PROPERTIES TIMEOUT 120)
++        # DCS Control (0034): adaptive at the shallow depth, starting in 2X:
++        # the synthetic ring's second slot is made only when 3X first needs
++        # it, and 3X starts only once it is in (one synthetic slot while 2X
++        # holds: xrfg_layer_adaptive_2x_*).
++        add_test(
++            NAME xrfg_layer_adaptive_lazy_slot
++            COMMAND "${CMAKE_COMMAND}"
++                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                "-DADAPTIVE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_adaptive_lazy.ini"
++                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/adaptive-lazy-slot"
++                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_adaptive_lazy_slot.cmake")
++        set_tests_properties(xrfg_layer_adaptive_lazy_slot PROPERTIES TIMEOUT 120)
+         # DCS Control (0032): the same with `adaptive_cadence=0` written out:
+         # whole-mode 2X/3X exactly as with no key.
+         add_test(
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -354,7 +354,29 @@
+     //     session: a= the copy, b= the completed value, c= how long it waited
+     //     in ms.
+     //   result=6, the consumer could not be made (once): a= the HRESULT.
++    //   result=7 (DCS Control 0034), with result=3: what the synthesis did
++    //     with the masks over those 10 s, per eye of each pair that bound one.
++    //     a= eyes, b= of them with the same-pixel cockpit rule off for head
++    //     translation (the cockpit's parallax at 0.6 m over 0.5 px), c= of
++    //     them with the moving focus edge's band (0-15), the largest
++    //     parallax judged in 1/100 px (32-63).
+     cockpit_mask,
++    // DCS Control (0034): the second synthetic slot of a session that made
++    // its ring with one (adaptive 2X/3X at the shallow depth: 3X's second
++    // slot only once 3X, or adaptive cadence's frame of three, first needs
++    // it). a= the application swapchain, b and c as below.
++    //   result=1, wanted: its creation started on a thread of its own; b= why
++    //     (1 a switch to 3X, 2 adaptive cadence's frame of three, 3 a scene
++    //     change that looked heavy enough for 3X, 4 armed while wanted).
++    //   result=2, ready and taken into the ring, before any frame of three
++    //     uses it; b= the creation's time in us, c= the bytes its images take
++    //     (width x height x layers x 4 x images).
++    //   result=3, failed (the session stays at 2X shapes): b= the XrResult
++    //     or HRESULT, c= 1 creation refused, 2 an image count unlike the first
++    //     slot's, 3 the synthesizer refused the images.
++    //   result=4, a switch to 3X (or a frame of three) held at 2X for now:
++    //     the slot is not ready yet; b= the target. Once per wait.
++    synthetic_slot,
+ };
+ 
+ struct BridgeFlightToken {
+diff --git a/include/xrfg/cockpit_mask.hpp b/include/xrfg/cockpit_mask.hpp
+--- a/include/xrfg/cockpit_mask.hpp
++++ b/include/xrfg/cockpit_mask.hpp
+@@ -13,13 +13,19 @@
+ // Anything missing, stale or failed is "no mask for this frame": the
+ // composition as before. Nothing here waits on the CPU for the GPU.
+ 
++#include "xrfg/pose.hpp"
++
+ #include <d3d12.h>
+ #include <wrl/client.h>
+ 
++#include <algorithm>
+ #include <array>
++#include <atomic>
++#include <cmath>
+ #include <cstddef>
+ #include <cstdint>
+ #include <functional>
++#include <limits>
+ #include <memory>
+ #include <mutex>
+ #include <string>
+@@ -28,6 +34,142 @@
+ 
+ namespace xrfg {
+ 
++// DCS Control (0034): the cockpit's same-pixel rule needs the cockpit still on
++// screen after the rotation pre-warp, and only a head that did not translate
++// leaves it there: the eyes move whenever the head leans and, about the neck,
++// whenever it turns (100 deg/s is 15 px at 0.6 m in 2X). So each eye of each
++// pair is judged once, on the CPU, by the cockpit's worst-case parallax: the
++// eye's translation between the two real frames (their submitted view poses,
++// metres) seen at kCockpitParallaxNearMeters, the nearest cockpit the mask is
++// built around, in output pixels of the target view. Over
++// kCockpitParallaxLimitPixels (or [ofxr] cockpit_parallax_limit) the rule is
++// off for that eye and pair wherever the flow stays in the cockpit: such a
++// masked pixel takes the flow, its own vector kept (frame_synthesis.hlsl).
++// Where the flow left the cockpit - the world's motion taken for a thin
++// cockpit part, the case the flow is weakest at - the rule stays. The world
++// beside the cockpit is handled as in 0031 either way.
++inline constexpr float kCockpitParallaxNearMeters = 0.6F;
++inline constexpr float kCockpitParallaxLimitPixels = 0.5F;
++// DCS Control (0034): the moving focus edge. Quad Views' focus inset (a change
++// of resolution, and of DLSS's tone and detail) moves with the gaze and, in
++// the rotation pre-warped pair the flow sees, with every head turn as well:
++// the flow can take that edge for motion. Where it moved between the two real
++// frames by more than kFocusEdgeMovedPixels, the flow's confidence is lowered
++// within kFocusBandFraction of the view's width of both frames' edges (to
++// 1 - kFocusBandDepth at the edge itself, back to 1 at the band's limit), so
++// the composition leans on the two frames at the very pixel there.
++inline constexpr float kFocusBandFraction = 0.03F;
++inline constexpr float kFocusEdgeMovedPixels = 0.5F;
++inline constexpr float kFocusBandDepth = 0.5F;
++
++namespace cockpit_mask_detail {
++[[nodiscard]] inline Vec3 rotate(const Quaternion& q, const Vec3& v) noexcept {
++    // v + 2 * cross(q.xyz, cross(q.xyz, v) + w * v), as frame_synthesis.hlsl.
++    const Vec3 c1{q.y * v.z - q.z * v.y + q.w * v.x, q.z * v.x - q.x * v.z + q.w * v.y,
++        q.x * v.y - q.y * v.x + q.w * v.z};
++    return {v.x + 2.0F * (q.y * c1.z - q.z * c1.y), v.y + 2.0F * (q.z * c1.x - q.x * c1.z),
++        v.z + 2.0F * (q.x * c1.y - q.y * c1.x)};
++}
++
++[[nodiscard]] inline Quaternion unit(const Quaternion& q) noexcept {
++    const float length = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
++    return length > 1.0e-12F ? Quaternion{q.x / length, q.y / length, q.z / length, q.w / length}
++                             : Quaternion{};
++}
++}  // namespace cockpit_mask_detail
++
++// DCS Control (0034): the cockpit's worst-case parallax between two real
++// frames of one eye, in output pixels: the eye's translation from `previous`
++// to `current` (tracking space, metres) in the current view's own frame, seen
++// at `near_m`. Across the view axis it shifts every point at that distance by
++// |d_perp| / near_m in tangent; along it, a point at tangent t by t * |d_z| /
++// near_m, the most at the view's widest tangents. `tangents` are the current
++// view's left, right, up, down tangents and `width` x `height` its image
++// rectangle, which give the pixels per unit of tangent. 0 for an unusable
++// view.
++[[nodiscard]] inline float cockpit_parallax_pixels(const Pose& previous, const Pose& current,
++    const std::array<float, 4>& tangents, float width, float height,
++    float near_m = kCockpitParallaxNearMeters) noexcept {
++    const float tangent_width = tangents[1] - tangents[0];
++    const float tangent_height = std::abs(tangents[2] - tangents[3]);
++    if (!(tangent_width > 1.0e-6F) || !(tangent_height > 1.0e-6F) || !(width > 0.0F) ||
++        !(height > 0.0F) || !(near_m > 0.0F)) {
++        return 0.0F;
++    }
++    const Quaternion q = cockpit_mask_detail::unit(current.orientation);
++    const Quaternion inverse{-q.x, -q.y, -q.z, q.w};
++    const Vec3 moved{current.position.x - previous.position.x,
++        current.position.y - previous.position.y, current.position.z - previous.position.z};
++    const Vec3 local = cockpit_mask_detail::rotate(inverse, moved);
++    if (!std::isfinite(local.x) || !std::isfinite(local.y) || !std::isfinite(local.z)) {
++        return 0.0F;
++    }
++    const float focal_x = width / tangent_width;
++    const float focal_y = height / tangent_height;
++    const float across = std::sqrt(local.x * focal_x * local.x * focal_x +
++                             local.y * focal_y * local.y * focal_y) /
++        near_m;
++    const float widest_x = std::max(std::abs(tangents[0]), std::abs(tangents[1])) * focal_x;
++    const float widest_y = std::max(std::abs(tangents[2]), std::abs(tangents[3])) * focal_y;
++    const float along =
++        std::abs(local.z) * std::sqrt(widest_x * widest_x + widest_y * widest_y) / near_m;
++    return across + along;
++}
++
++// DCS Control (0034): how far the focus inset's edge moved between two real
++// frames as the composition sees it, in output pixels: the previous frame's
++// focus rectangle (`previous_focus`, its own left, right, up, down tangents)
++// carried into the current camera by the pair's rotation (`target_to_previous`,
++// x y z w: the rotation the composition maps the current view into the
++// previous one with) against the current one's, the largest move of the four
++// corners. `target_tangents` and `width` x `height` as cockpit_parallax_pixels.
++[[nodiscard]] inline float focus_edge_motion_pixels(const std::array<float, 4>& previous_focus,
++    const std::array<float, 4>& current_focus, const std::array<float, 4>& target_to_previous,
++    const std::array<float, 4>& target_tangents, float width, float height) noexcept {
++    const float tangent_width = target_tangents[1] - target_tangents[0];
++    const float tangent_height = std::abs(target_tangents[2] - target_tangents[3]);
++    if (!(tangent_width > 1.0e-6F) || !(tangent_height > 1.0e-6F) || !(width > 0.0F) ||
++        !(height > 0.0F)) {
++        return 0.0F;
++    }
++    const float focal_x = width / tangent_width;
++    const float focal_y = height / tangent_height;
++    // Previous to target: the inverse of target_to_previous.
++    const Quaternion q = cockpit_mask_detail::unit(
++        {target_to_previous[0], target_to_previous[1], target_to_previous[2], target_to_previous[3]});
++    const Quaternion previous_to_target{-q.x, -q.y, -q.z, q.w};
++    float largest = 0.0F;
++    for (int corner = 0; corner < 4; ++corner) {
++        const float x = previous_focus[corner & 1];
++        const float y = previous_focus[2 + (corner >> 1)];
++        const Vec3 ray = cockpit_mask_detail::rotate(previous_to_target, {x, y, -1.0F});
++        if (!(ray.z < -1.0e-5F)) {
++            return std::numeric_limits<float>::infinity();
++        }
++        const float moved_x = (ray.x / -ray.z - current_focus[corner & 1]) * focal_x;
++        const float moved_y = (ray.y / -ray.z - current_focus[2 + (corner >> 1)]) * focal_y;
++        largest = std::max(largest, std::sqrt(moved_x * moved_x + moved_y * moved_y));
++    }
++    return std::isfinite(largest) ? largest : std::numeric_limits<float>::infinity();
++}
++
++// DCS Control (0034): what the synthesis did with the masks it was handed,
++// per eye of each pair that bound one; the consumer logs them with its ten
++// second counters (cockpit_mask result=7) and starts them over.
++struct CockpitMaskPairCounters {
++    std::atomic<std::uint64_t> eyes{};            // eyes composed with a mask bound
++    std::atomic<std::uint64_t> parallax_skips{};  // ... the same-pixel rule off (head translation)
++    std::atomic<std::uint64_t> focus_band_eyes{}; // ... the moving focus edge's band applied
++    std::atomic<std::uint32_t> parallax_max_centipixels{}; // the largest parallax judged, 1/100 px
++};
++
++// DCS Control (0034): one eye's focus inset in a frame (the producer's focus
++// view of that eye, 2 + eye), by its tangents: left, right, up, down.
++struct D3D12CockpitFocusView {
++    bool valid{};
++    std::array<float, 4> fov_tan{};
++};
++
+ // One eye's mask inside a D3D12CockpitMaskFrame's texture.
+ struct D3D12CockpitMaskView {
+     bool valid{};
+@@ -56,6 +198,12 @@
+     std::array<D3D12CockpitMaskView, 2> views{};
+     std::int64_t display_time{};
+     std::uint64_t mask_seq{};
++    // DCS Control (0034): the focus insets of this frame (Quad Views' focus
++    // views, when the producer exports them: [Perception] CockpitMaskViews=15),
++    // per eye; and where the synthesis counts what it did with the mask (null:
++    // nowhere).
++    std::array<D3D12CockpitFocusView, 2> focus{};
++    std::shared_ptr<CockpitMaskPairCounters> counters;
+ 
+     // A submission that reads the texture completes at `value` of `fence`.
+     void note_reader(ID3D12Fence* fence, std::uint64_t value) noexcept;
+diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
+--- a/include/xrfg/d3d12_frame_synthesizer.hpp
++++ b/include/xrfg/d3d12_frame_synthesizer.hpp
+@@ -208,6 +208,12 @@
+     // same image for less GPU time. Without it the composition is exactly as
+     // before.
+     bool fast_composition{};
++    // DCS Control (0034): [ofxr] cockpit_parallax_limit. With a cockpit mask
++    // bound, an eye whose cockpit parallax between the pair's two real frames
++    // (xrfg::cockpit_parallax_pixels) is over this many output pixels has the
++    // mask's same-pixel rule off: its masked pixels take the flow. 0: the
++    // rule as 0031 had it, whatever the head did.
++    float cockpit_parallax_limit_pixels{kCockpitParallaxLimitPixels};
+ };
+ 
+ // A second synthetic produced from the same pair, for a session that hands
+@@ -372,6 +378,13 @@
+     // submission. Without one the composition is as before.
+     void set_cockpit_mask(std::shared_ptr<D3D12CockpitMaskFrame> frame) noexcept;
+ 
++    // DCS Control (0034): more synthetic destination images, after the ones
++    // initialize took (a second synthetic slot made when it is first needed):
++    // they take the next flat indices, in the order given. The same checks
++    // as initialize's; on failure nothing changes. Between submissions.
++    [[nodiscard]] HRESULT add_synthetic_destinations(
++        std::span<ID3D12Resource* const> synthetic_destination_images) noexcept;
++
+     // Caller excludes presenter use and new history captures. Keeps XR destinations.
+     [[nodiscard]] HRESULT reconfigure(D3D12OpticalFlowBackend backend,
+         D3D12NvidiaOpticalFlowOptions options) noexcept;
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -173,6 +173,22 @@
+ // (0) by default and when the key is missing. Read once per session.
+ [[nodiscard]] bool read_cockpit_mask(
+     const std::filesystem::path& module_directory) noexcept;
++// DCS Control (0034). `[ofxr] lazy_synthetic_slot`: adaptive 2X/3X at the
++// shallow depth makes the synthetic ring's second slot (one more private
++// swapchain per application swapchain) only when 3X, or adaptive cadence's
++// frame of three, first needs it, on a thread of its own; 3X waits at 2X
++// until it is there. On (1) by default; 0 makes both slots at arming, as
++// before. Read once per session.
++[[nodiscard]] bool read_lazy_synthetic_slot(
++    const std::filesystem::path& module_directory) noexcept;
++// DCS Control (0034). `[ofxr] cockpit_parallax_limit`: the cockpit's
++// worst-case parallax between two real frames (at 0.6 m, in output pixels)
++// over which the cockpit mask's same-pixel rule is off for that eye and pair
++// (xrfg::cockpit_parallax_pixels). 0.5 by default (also for a missing or
++// unreadable value); 0 turns the gate off (0031's rule as it was). Read once
++// per session.
++[[nodiscard]] float read_cockpit_parallax_limit(
++    const std::filesystem::path& module_directory) noexcept;
+ 
+ // DCS Control (0033). `[ofxr] fast_composition`: the NVIDIA composition
+ // composes still tiles directly, to the same image
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -1362,6 +1362,9 @@
+     // The 1X backoff in force (0: none), and when 1X may next be entered.
+     Nanoseconds backoff{};
+     Nanoseconds one_allowed_at{};
++    // DCS Control (0034): 2 -> 3 was due but 3 is not allowed yet (see
++    // CadenceController::set_three_allowed): the level stays 2.
++    bool three_held{};
+ };
+ 
+ class CadenceController {
+@@ -1390,6 +1393,12 @@
+     CadenceStep scene_changed(Nanoseconds now) noexcept;
+     // Cadence or generation stopped: 1X, if in force, is left; back to 2.
+     CadenceStep stop(Nanoseconds now) noexcept;
++    // DCS Control (0034): whether a frame of three may be decided (the
++    // caller's second synthetic slot exists). While not, a 2 -> 3 that is
++    // due leaves the level at 2 and says so (CadenceStep::three_held), and
++    // nothing else of the decision changes; it is taken as soon as it is
++    // allowed and still due. Allowed by default.
++    void set_three_allowed(bool allowed) noexcept { three_allowed_ = allowed; }
+ 
+     [[nodiscard]] std::uint32_t level() const noexcept { return level_; }
+     [[nodiscard]] Nanoseconds backoff() const noexcept { return backoff_; }
+@@ -1437,6 +1446,7 @@
+     Nanoseconds one_entered_at_{-1};
+     Nanoseconds one_allowed_at_{};
+     Nanoseconds backoff_{};
++    bool three_allowed_{true}; // DCS Control (0034)
+ };
+ 
+ // DCS Control (0032): the display time a frame of cadence `frames` is told,
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -3,6 +3,7 @@
+ #include <windows.h>
+ 
+ #include <array>
++#include <cmath>
+ #include <cwchar>
+ #include <system_error>
+ #include <vector>
+@@ -331,6 +332,35 @@
+     return read_ofxr_switch(module_directory, L"cockpit_mask", false);
+ }
+ 
++// DCS Control (0034).
++bool read_lazy_synthetic_slot(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"lazy_synthetic_slot", true);
++}
++
++float read_cockpit_parallax_limit(const std::filesystem::path& module_directory) noexcept {
++    constexpr float kDefault = 0.5F;
++    try {
++        if (module_directory.empty()) {
++            return kDefault;
++        }
++        const auto ini_path = module_directory / L"ofxr_bridge.ini";
++        std::array<wchar_t, 32> value{};
++        const DWORD length = GetPrivateProfileStringW(L"ofxr", L"cockpit_parallax_limit", L"",
++            value.data(), static_cast<DWORD>(value.size()), ini_path.c_str());
++        if (length == 0 || length >= value.size() - 1) {
++            return kDefault;
++        }
++        wchar_t* end = nullptr;
++        const float parsed = std::wcstof(value.data(), &end);
++        if (end == value.data() || !std::isfinite(parsed) || parsed < 0.0F || parsed > 10000.0F) {
++            return kDefault;
++        }
++        return parsed;
++    } catch (...) {
++        return kDefault;
++    }
++}
++
+ // DCS Control (0033).
+ bool read_fast_composition(const std::filesystem::path& module_directory) noexcept {
+     return read_ofxr_switch(module_directory, L"fast_composition", false);
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -1097,6 +1097,18 @@
+     const bool enough = stats.judged_samples >= config_.min_samples;
+     if (level_ == 2) {
+         const bool missed = step.late_episodes >= config_.up_late_episodes;
++        if ((missed ||
++                (enough &&
++                    stats.judged > fraction_of(config_.up_fraction, two_periods))) &&
++            !three_allowed_) {
++            // DCS Control (0034): due, but there is no slot for a frame of
++            // three yet: 2 holds (and 1X is not entered from a frame this
++            // heavy either).
++            step.three_held = true;
++            one_fit_since_ = -1;
++            fill(step);
++            return step;
++        }
+         if (missed ||
+             (enough &&
+              stats.judged > fraction_of(config_.up_fraction, two_periods))) {
+diff --git a/src/d3d12/cockpit_mask.cpp b/src/d3d12/cockpit_mask.cpp
+--- a/src/d3d12/cockpit_mask.cpp
++++ b/src/d3d12/cockpit_mask.cpp
+@@ -15,6 +15,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <cmath>
+ #include <cstddef>
+ #include <limits>
+ #include <optional>
+@@ -147,6 +148,11 @@
+     std::uint64_t last_presence_log_ms{};
+     std::uint64_t last_stats_log_ms{};
+     CockpitMaskConsumerStats stats_at_log{};
++    // DCS Control (0034): what the synthesis did with the masks (every frame
++    // handed out points here), logged and started over with the ten second
++    // counters.
++    std::shared_ptr<CockpitMaskPairCounters> pair_counters =
++        std::make_shared<CockpitMaskPairCounters>();
+     mutable std::mutex mutex;
+ 
+     ~Impl() {
+@@ -523,6 +529,23 @@
+             right = std::max(right, view.x + view.w);
+             bottom = std::max(bottom, view.y + view.h);
+         }
++        // DCS Control (0034): the focus views' tangents (2 left, 3 right),
++        // where the producer exports them; their texels are not needed.
++        std::array<D3D12CockpitFocusView, 2> focus{};
++        for (int eye = 0; eye < 2; ++eye) {
++            const int focus_view = 2 + eye;
++            if (!cm::view_usable(header, slot, focus_view)) {
++                continue;
++            }
++            const cm::MaskView& view = source.view[focus_view];
++            if (!(view.fovTan[1] > view.fovTan[0]) || !(view.fovTan[2] > view.fovTan[3]) ||
++                !std::isfinite(view.fovTan[0]) || !std::isfinite(view.fovTan[1]) ||
++                !std::isfinite(view.fovTan[2]) || !std::isfinite(view.fovTan[3])) {
++                continue;
++            }
++            focus[eye].valid = true;
++            focus[eye].fov_tan = {view.fovTan[0], view.fovTan[1], view.fovTan[2], view.fovTan[3]};
++        }
+         if (!views[0].valid && !views[1].valid) {
+             signal_release(header.newestMaskSeq);
+             return CockpitMaskLookup::no_view;
+@@ -575,6 +598,8 @@
+         frame.ready_fence = copy_fence;
+         frame.ready_value = copy_value;
+         frame.views = views;
++        frame.focus = focus; // DCS Control (0034)
++        frame.counters = pair_counters;
+         frame.display_time = display_time;
+         frame.mask_seq = source.maskSeq;
+         last_frame = entry->frame;
+@@ -633,6 +658,15 @@
+                         (saturate16(stats.stale - stats_at_log.stale) << 16U) |
+                         (saturate16(stats.other_misses - stats_at_log.other_misses) << 32U) |
+                         (static_cast<std::uint64_t>(result) << 48U));
++                // DCS Control (0034): and what the synthesis did with them.
++                if (pair_counters) {
++                    const std::uint64_t eyes = pair_counters->eyes.exchange(0);
++                    const std::uint64_t skips = pair_counters->parallax_skips.exchange(0);
++                    const std::uint64_t band = pair_counters->focus_band_eyes.exchange(0);
++                    const std::uint64_t largest =
++                        pair_counters->parallax_max_centipixels.exchange(0);
++                    log(7, eyes, skips, saturate16(band) | (std::min<std::uint64_t>(largest, 0xffffffffULL) << 32U));
++                }
+             }
+             last_stats_log_ms = now_ms;
+             stats_at_log = stats;
+diff --git a/src/d3d12/cockpit_mask.hlsl b/src/d3d12/cockpit_mask.hlsl
+--- a/src/d3d12/cockpit_mask.hlsl
++++ b/src/d3d12/cockpit_mask.hlsl
+@@ -18,19 +18,34 @@
+ //
+ // Same root signature as frame_synthesis.hlsl: t0/t1 and u0 of the slot's
+ // cockpit-mask descriptor block, and these constants in the 62 at b0.
++//
++// DCS Control (0034): the output is two channels (R8G8). x is the mask as
++// above, except that a cockpit texel is 0.875 instead of 1 for an eye whose
++// head translation leaves the cockpit moving on screen (Flags bit 2, judged
++// on the CPU: xrfg::cockpit_parallax_pixels): the composition's same-pixel
++// rule takes 1 only, everything else takes >= 0.75 as before. y is how much
++// the flow's confidence is lowered for the moving focus edge, 0 to 1 (Flags
++// bit 3, both frames' focus insets given and moved apart: within FocusBand
++// pixels of either frame's inset outline, 1 at the outline itself), and 0
++// everywhere without it.
+ 
+ SamplerState LinearClamp : register(s0);
+ Texture2D<float> PreviousMask : register(t0);
+ Texture2D<float> CurrentMask : register(t1);
+-RWTexture2DArray<float> TargetMask : register(u0);
++RWTexture2DArray<float2> TargetMask : register(u0);
+ 
+ cbuffer CockpitMaskParameters : register(b0) {
+     uint OutputWidth;
+     uint OutputHeight;
+     uint Cell;
+-    uint Reserved;
++    // DCS Control (0034): the focus band's half width in target pixels
++    // (asfloat), with Flags bit 3.
++    uint FocusBandBits;
+     uint Slice;
+     // Bit 0: the previous frame's mask is bound; bit 1: the current one's.
++    // DCS Control (0034): bit 2, the cockpit's same-pixel rule is off for
++    // this eye (head translation); bit 3, the focus band (CurrentFocus and
++    // PreviousFocus).
+     uint Flags;
+     uint Padding0;
+     uint Padding1;
+@@ -43,6 +58,10 @@
+     float4 CurrentFov;
+     float4 PreviousRect;
+     float4 PreviousFov;
++    // DCS Control (0034): each frame's focus inset of this eye, its own
++    // left, right, up, down tangents.
++    float4 CurrentFocus;
++    float4 PreviousFocus;
+ };
+ 
+ float3 rotate_by_quaternion(float4 quaternion, float3 input_vector) {
+@@ -94,6 +113,34 @@
+     return result;
+ }
+ 
++// DCS Control (0034): the distance in target pixels from `tangent` to the
++// outline of the inset `focus` (left, right, up, down tangents) of the frame
++// whose tangents those are, `pixels_per_tangent` apart per axis.
++float focus_outline_distance(float2 tangent, float4 focus, float2 pixels_per_tangent) {
++    float2 centre = float2(focus.x + focus.y, focus.z + focus.w) * 0.5;
++    float2 half_size = abs(float2(focus.y - focus.x, focus.z - focus.w)) * 0.5;
++    float2 q = (abs(tangent - centre) - half_size) * pixels_per_tangent;
++    // Outside: to the rectangle; inside: to its nearest side.
++    return length(max(q, 0.0)) + abs(min(max(q.x, q.y), 0.0));
++}
++
++// DCS Control (0034): 1 on either frame's focus outline, down to 0 at
++// FocusBandBits pixels from both (a smooth fall-off: no step the eye could
++// see in the confidence it lowers).
++float focus_band(float2 tangent) {
++    float width = asfloat(FocusBandBits);
++    float2 pixels_per_tangent = TargetRect.zw /
++        max(abs(float2(TargetTangents.y - TargetTangents.x, TargetTangents.z - TargetTangents.w)),
++            float2(1.0e-6, 1.0e-6));
++    float distance = focus_outline_distance(tangent, CurrentFocus, pixels_per_tangent);
++    float3 ray = rotate_by_quaternion(TargetToPrevious, float3(tangent, -1.0));
++    if (ray.z < -1.0e-5) {
++        distance = min(distance,
++            focus_outline_distance(ray.xy / -ray.z, PreviousFocus, pixels_per_tangent));
++    }
++    return width > 0.0 ? 1.0 - smoothstep(0.0, width, distance) : 0.0;
++}
++
+ [numthreads(8, 8, 1)]
+ void CockpitMaskResampleCS(uint3 thread_id : SV_DispatchThreadID) {
+     if (thread_id.x >= OutputWidth || thread_id.y >= OutputHeight) {
+@@ -116,5 +163,12 @@
+             value.x = mask_around(PreviousMask, PreviousRect, PreviousFov, ray.xy / -ray.z, false).x;
+         }
+     }
+-    TargetMask[uint3(thread_id.xy, Slice)] = value.x > 0.0 ? 1.0 : (value.y > 0.0 ? 0.5 : 0.0);
++    // DCS Control (0034): a cockpit texel the same-pixel rule may not take.
++    float cockpit = (Flags & 4u) != 0u ? 0.875 : 1.0;
++    float band = 0.0;
++    [branch] if ((Flags & 8u) != 0u) {
++        band = focus_band(tangent);
++    }
++    TargetMask[uint3(thread_id.xy, Slice)] =
++        float2(value.x > 0.0 ? cockpit : (value.y > 0.0 ? 0.5 : 0.0), band);
+ }
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -399,7 +399,9 @@
+     UINT output_width{};
+     UINT output_height{};
+     UINT cell{};
+-    UINT reserved{};
++    // DCS Control (0034): the focus band's half width in target pixels, as
++    // the bits of a float (flags bit 3).
++    UINT focus_band_bits{};
+     UINT slice{};
+     UINT flags{};
+     UINT padding0{};
+@@ -411,8 +413,19 @@
+     std::array<float, 4> current_fov{};
+     std::array<float, 4> previous_rect{};
+     std::array<float, 4> previous_fov{};
++    // DCS Control (0034): each frame's focus inset of the eye.
++    std::array<float, 4> current_focus{};
++    std::array<float, 4> previous_focus{};
+ };
+-static_assert(sizeof(CockpitMaskParameters) == sizeof(UINT) * 36U);
++static_assert(sizeof(CockpitMaskParameters) == sizeof(UINT) * 44U);
++static_assert(sizeof(CockpitMaskParameters) <= sizeof(UINT) * 62U);
++// DCS Control (0034): cockpit_mask.hlsl's Flags bits 2 (the cockpit's
++// same-pixel rule off for the eye: head translation) and 3 (the focus band).
++constexpr UINT kCockpitMaskParallaxFlag = 4U;
++constexpr UINT kCockpitMaskFocusBandFlag = 8U;
++// DCS Control (0034): the target-view mask's format: the mask and the focus
++// band's confidence (cockpit_mask.hlsl).
++constexpr DXGI_FORMAT kCockpitMaskTargetFormat = DXGI_FORMAT_R8G8_UNORM;
+ 
+ constexpr UINT kSynthesisConstantCount =
+     static_cast<UINT>(sizeof(SynthesisParameters) / sizeof(UINT));
+@@ -3177,7 +3190,7 @@
+         description = texture2d_description(
+             (width + cockpit_mask_cell - 1U) / cockpit_mask_cell,
+             (image_description.Height + cockpit_mask_cell - 1U) / cockpit_mask_cell,
+-            DXGI_FORMAT_R8_UNORM,
++            kCockpitMaskTargetFormat, // DCS Control (0034)
+             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+         description.DepthOrArraySize = static_cast<UINT16>(kMaxReprojectionViews);
+         result = device->CreateCommittedResource(
+@@ -3194,7 +3207,9 @@
+     // the constant-0 texture.
+     void write_cockpit_mask_view(WorkSlot& slot, bool bound) noexcept {
+         D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+-        view.Format = DXGI_FORMAT_R8_UNORM;
++        // DCS Control (0034): the constant-0 texture stays one channel (its
++        // second reads 0: no focus band).
++        view.Format = bound ? kCockpitMaskTargetFormat : DXGI_FORMAT_R8_UNORM;
+         view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+         view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+         view.Texture2DArray.MipLevels = 1;
+@@ -3232,7 +3247,7 @@
+                 resource, &view, offset_cpu_handle(start, base + index, descriptor_increment));
+         }
+         D3D12_UNORDERED_ACCESS_VIEW_DESC target{};
+-        target.Format = DXGI_FORMAT_R8_UNORM;
++        target.Format = kCockpitMaskTargetFormat; // DCS Control (0034)
+         target.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+         target.Texture2DArray.ArraySize = kMaxReprojectionViews;
+         device->CreateUnorderedAccessView(
+@@ -3316,6 +3331,58 @@
+                 parameters.previous_fov = view.fov_tan;
+                 previous_used = true;
+             }
++            // DCS Control (0034): this eye's head translation between the
++            // two real frames, as the cockpit's parallax on screen, and the
++            // moving focus edge; both judged once here, per eye and pair.
++            if ((parameters.flags & 2U) != 0U) {
++                const float parallax = cockpit_parallax_pixels(previous_source.views[index].pose,
++                    target_views[index].pose, mapping.target_tangents, mapping.target_rect[2],
++                    mapping.target_rect[3]);
++                const float limit = nvidia_options.cockpit_parallax_limit_pixels;
++                if (limit > 0.0F && !(parallax <= limit)) {
++                    parameters.flags |= kCockpitMaskParallaxFlag;
++                }
++                const D3D12CockpitFocusView* const current_focus =
++                    current_eye < 2U && current->focus[current_eye].valid ? &current->focus[current_eye]
++                                                                          : nullptr;
++                const D3D12CockpitFocusView* const previous_focus = previous_frame != nullptr &&
++                        previous_eye < 2U && previous_frame->focus[previous_eye].valid
++                    ? &previous_frame->focus[previous_eye]
++                    : nullptr;
++                bool band = false;
++                if (current_focus != nullptr && previous_focus != nullptr) {
++                    const float moved = focus_edge_motion_pixels(previous_focus->fov_tan,
++                        current_focus->fov_tan, mapping.target_to_source_rotation,
++                        mapping.target_tangents, mapping.target_rect[2], mapping.target_rect[3]);
++                    band = moved > kFocusEdgeMovedPixels;
++                    if (band) {
++                        const float band_pixels = kFocusBandFraction * mapping.target_rect[2];
++                        parameters.flags |= kCockpitMaskFocusBandFlag;
++                        std::memcpy(&parameters.focus_band_bits, &band_pixels, sizeof(float));
++                        parameters.current_focus = current_focus->fov_tan;
++                        parameters.previous_focus = previous_focus->fov_tan;
++                    }
++                }
++                if (current->counters) {
++                    CockpitMaskPairCounters& counters = *current->counters;
++                    counters.eyes.fetch_add(1U, std::memory_order_relaxed);
++                    if ((parameters.flags & kCockpitMaskParallaxFlag) != 0U) {
++                        counters.parallax_skips.fetch_add(1U, std::memory_order_relaxed);
++                    }
++                    if (band) {
++                        counters.focus_band_eyes.fetch_add(1U, std::memory_order_relaxed);
++                    }
++                    const float clamped = std::isfinite(parallax)
++                        ? std::min(parallax * 100.0F, 4.0e9F)
++                        : 4.0e9F;
++                    const auto centipixels = static_cast<std::uint32_t>(std::max(clamped, 0.0F));
++                    std::uint32_t seen = counters.parallax_max_centipixels.load(std::memory_order_relaxed);
++                    while (centipixels > seen &&
++                           !counters.parallax_max_centipixels.compare_exchange_weak(
++                               seen, centipixels, std::memory_order_relaxed)) {
++                    }
++                }
++            }
+             any = any || parameters.flags != 0U;
+         }
+         if (!any) {
+@@ -4037,6 +4104,56 @@
+         return S_OK;
+     }
+ 
++    // DCS Control (0034): see D3D12FrameSynthesizer::add_synthetic_destinations.
++    // The render target views are made again for the longer list (they are
++    // read when a list is recorded, never later, so the old heap can go).
++    [[nodiscard]] HRESULT add_synthetic_destinations(
++        std::span<ID3D12Resource* const> images) noexcept {
++        if (device == nullptr || queue == nullptr || images.empty()) {
++            return E_INVALIDARG;
++        }
++        const auto known = [this](ID3D12Resource* resource) noexcept {
++            const auto same = [resource](const Destination& destination) noexcept {
++                return destination.resource.Get() == resource;
++            };
++            return std::any_of(current_destinations.begin(), current_destinations.end(), same) ||
++                std::any_of(synthetic_destinations.begin(), synthetic_destinations.end(), same);
++        };
++        for (std::size_t index = 0; index < images.size(); ++index) {
++            ID3D12Resource* const image = images[index];
++            if (image == nullptr || !same_adapter(device.Get(), image) ||
++                !copy_compatible(image_description, image->GetDesc()) ||
++                !compatible_view_format(image->GetDesc().Format, view_format) ||
++                (image->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0 ||
++                known(image) ||
++                std::find(images.begin(), images.begin() + static_cast<std::ptrdiff_t>(index), image) !=
++                    images.begin() + static_cast<std::ptrdiff_t>(index)) {
++                return E_INVALIDARG;
++            }
++        }
++        try {
++            const std::size_t kept = synthetic_destinations.size();
++            const ComPtr<ID3D12DescriptorHeap> kept_heap = rtv_heap;
++            const UINT kept_base = current_rtv_base;
++            for (ID3D12Resource* image : images) {
++                Destination destination{};
++                destination.resource = image;
++                synthetic_destinations.push_back(std::move(destination));
++            }
++            rtv_heap.Reset();
++            const HRESULT result = create_rtv_heap(queue->GetDesc().NodeMask);
++            if (FAILED(result)) {
++                synthetic_destinations.resize(kept);
++                rtv_heap = kept_heap;
++                current_rtv_base = kept_base;
++                return result;
++            }
++            return S_OK;
++        } catch (...) {
++            return E_OUTOFMEMORY;
++        }
++    }
++
+     [[nodiscard]] HRESULT initialize(
+         ID3D12Device* input_device,
+         ID3D12CommandQueue* input_queue,
+@@ -7157,6 +7274,19 @@
+     } catch (...) {
+         return E_FAIL;
+     }
++}
++
++HRESULT D3D12FrameSynthesizer::add_synthetic_destinations(
++    std::span<ID3D12Resource* const> synthetic_destination_images) noexcept {
++    try {
++        std::scoped_lock lock(mutex_);
++        if (!impl_) {
++            return E_UNEXPECTED;
++        }
++        return impl_->add_synthetic_destinations(synthetic_destination_images);
++    } catch (...) {
++        return E_FAIL;
++    }
+ }
+ 
+ HRESULT D3D12FrameSynthesizer::reconfigure(D3D12OpticalFlowBackend backend,
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -24,7 +24,11 @@
+ // view (cockpit_mask.hlsl): one texel per cell of the view's rectangle, slice
+ // ViewIndex, 1 where either real frame's mask covers it. Read only when
+ // SynthesisFlags bit 4 is set; a constant-0 1x1 texture otherwise.
+-Texture2DArray<float> CockpitMask : register(t10);
++// DCS Control (0034): two channels: x the mask (1 the cockpit the same-pixel
++// rule may take, 0.875 the cockpit it may not: head translation), y how much
++// the flow's confidence is lowered for the moving focus edge (0: none; a
++// one-channel texture reads 0 there).
++Texture2DArray<float2> CockpitMask : register(t10);
+ RWTexture2D<float4> PackedColor : register(u0);
+ // The NVIDIA pack is compiled twice: once for BGRA8 inputs, and once with
+ // XRFG_NVIDIA_LUMA_INPUT for R8 inputs, which the engine takes as grayscale
+@@ -910,6 +914,10 @@
+     return XRFG_COCKPIT_MASK != 0 && (SynthesisFlags & 16u) != 0u;
+ }
+ 
++// DCS Control (0034): xrfg::kFocusBandDepth, the confidence left on the
++// moving focus edge itself being 1 minus this.
++static const float kFocusBandDepth = 0.5;
++
+ bool occlusion_choice_outside_mask_only() {
+     return (SynthesisFlags & 32u) != 0u;
+ }
+@@ -917,13 +925,18 @@
+ // The mask at target pixel `pixel` of this view (cockpit_mask.hlsl): 1 the
+ // cockpit, 0.5 within three mask texels of it, 0 elsewhere (outside the
+ // view's rectangle as well: a load out of range reads 0).
+-float cockpit_mask_at(float2 pixel) {
++// DCS Control (0034): both channels of that texel (see CockpitMask).
++float2 cockpit_mask_texel(float2 pixel) {
+     float cell = float(4u << ((SynthesisFlags >> 6) & 3u));
+     float2 relative = pixel - PreviousMappings[ViewIndex].TargetRect.xy + 0.5;
+     int2 texel = int2(floor(relative / cell));
+     return CockpitMask.Load(int4(texel, int(ViewIndex), 0));
+ }
+ 
++float cockpit_mask_at(float2 pixel) {
++    return cockpit_mask_texel(pixel).x;
++}
++
+ bool cockpit_masked(float2 pixel) {
+     return cockpit_mask_at(pixel) >= 0.75;
+ }
+@@ -1226,7 +1239,7 @@
+             int2 last_texel = int2(floor((float2(last_pixel) - origin + 0.5) / cell));
+             for (int y = first_texel.y; y <= last_texel.y && still; ++y) {
+                 for (int x = first_texel.x; x <= last_texel.x; ++x) {
+-                    if (CockpitMask.Load(int4(x, y, int(ViewIndex), 0)) >= 0.25) {
++                    if (CockpitMask.Load(int4(x, y, int(ViewIndex), 0)).x >= 0.25) {
+                         still = false;
+                     }
+                 }
+@@ -1372,19 +1385,61 @@
+             // content changes) takes the flow below as without a mask.
+             // One read of the mask per pixel; 0 (away from the cockpit, and
+             // without a mask) skips everything below that concerns it.
+-            float cockpit_code = cockpit_mask_bound() && !use_game_motion_pipeline &&
++            float2 cockpit_texel = cockpit_mask_bound() && !use_game_motion_pipeline &&
+                     repeated_capture_flag() == 0
+-                ? cockpit_mask_at(pixel) : 0.0;
++                ? cockpit_mask_texel(pixel) : float2(0.0, 0.0);
++            float cockpit_code = cockpit_texel.x;
++            // DCS Control (0034): for an eye whose head translated between
++            // the two frames (the resample wrote 0.875, not 1) the cockpit
++            // moved on screen, and the two frames at the very pixel are a
++            // double image. There a masked pixel the rule takes is composed
++            // along its own flow vector instead, where that vector stays in
++            // the cockpit (both ends masked: the cockpit's own parallax) and
++            // the frames agree at its ends. Where the flow left the cockpit
++            // (it took the world's motion: a thin cockpit part against a
++            // moving world, where the flow is weakest) or its ends disagree,
++            // the frames at the very pixel are still the better answer.
++            bool cockpit_translated = cockpit_code >= 0.75 && cockpit_code < 0.9375;
+             bool cockpit_pixel = false;
+             CameraSample cockpit_previous = (CameraSample)0;
++            float4 cockpit_current = current_fallback.color;
+             [branch] if (!preserve_stationary && cockpit_code >= 0.75) {
+                 cockpit_previous = sample_previous_target(pixel, Slice, ViewIndex);
+                 cockpit_pixel = sample_match(cockpit_previous, current_fallback) >= 0.5;
++                [branch] if (cockpit_pixel && cockpit_translated) {
++                    float cockpit_spread = 0.0;
++                    float2 cockpit_flow = flow_for_pixel_spread(
++                        pixel, Slice, ViewIndex, flow_value_scale, use_nvidia_cost, cockpit_spread);
++                    if (!input_pose_compensated) {
++                        cockpit_flow -= previous_coverage.coordinate - pixel;
++                    }
++                    float t = synthesis_fraction();
++                    float2 previous_end = pixel + cockpit_flow * t;
++                    float2 current_end = pixel - cockpit_flow * (1.0 - t);
++                    [branch] if (cockpit_masked(previous_end) && cockpit_masked(current_end)) {
++                        CameraSample along_previous =
++                            sample_previous_target(previous_end, Slice, ViewIndex);
++                        CameraSample along_current =
++                            sample_current_target(current_end, Slice, ViewIndex);
++                        // The ends agree with each other and with the
++                        // frames at the pixel (which agree: the cockpit is
++                        // locally alike there, so a vector that stayed on it
++                        // finds the same): never the world behind a thin
++                        // part, which the dilated mask can still cover.
++                        if (along_previous.valid >= 0.5 && along_current.valid >= 0.5 &&
++                            sample_match(along_previous, along_current) >= 0.5 &&
++                            sample_match(along_previous, cockpit_previous) >= 0.5 &&
++                            sample_match(along_current, current_fallback) >= 0.5) {
++                            cockpit_previous = along_previous;
++                            cockpit_current = along_current.color;
++                        }
++                    }
++                }
+             }
+             if (cockpit_pixel) {
+                 output_color = saturate(lerp(
+                     cockpit_previous.color,
+-                    current_fallback.color,
++                    cockpit_current,
+                     synthesis_fraction()));
+             } else if (preserve_stationary) {
+                 output_color = saturate(lerp(
+@@ -1498,7 +1553,12 @@
+                             cockpit_masked(pixel - float2(reach, 0.0)) ||
+                             cockpit_masked(pixel + float2(0.0, reach)) ||
+                             cockpit_masked(pixel - float2(0.0, reach));
+-                        [branch] if (previous_in_mask || current_in_mask || beside_mask) {
++                        // DCS Control (0034): a cockpit vector (a masked pixel
++                        // of a translated eye, both ends in the mask) is the
++                        // cockpit's own parallax: kept.
++                        bool cockpit_vector = cockpit_translated && previous_in_mask && current_in_mask;
++                        [branch] if (!cockpit_vector &&
++                            (previous_in_mask || current_in_mask || beside_mask)) {
+                             float2 replacement;
+                             if (cockpit_world_vector(
+                                     pixel, residual_backward, flow_value_scale, replacement)) {
+@@ -1535,6 +1595,9 @@
+                             abs(previous_sample.color.g - current_sample.color.g),
+                             abs(previous_sample.color.b - current_sample.color.b)));
+                     float confidence = saturate(1.0 - disagreement * 6.0);
++                    // DCS Control (0034): lowered (never to 0) about the
++                    // moving focus edge; 0 elsewhere and without its data.
++                    confidence *= 1.0 - kFocusBandDepth * cockpit_texel.y;
+                     float4 stable_midpoint = lerp(
+                         sample_previous_target(pixel, Slice, ViewIndex).color,
+                         current_fallback.color,
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -116,6 +116,8 @@
+         return "vram_status";
+     case BridgeFlightOperation::cockpit_mask: // DCS Control (0031)
+         return "cockpit_mask";
++    case BridgeFlightOperation::synthetic_slot: // DCS Control (0034)
++        return "synthetic_slot";
+     case BridgeFlightOperation::synthesis_frame_start_wait:
+         return "synthesis_frame_start_wait";
+     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1349,6 +1349,21 @@
+     // the session move between them without making a swapchain. Cleared
+     // with the ring by fall_back_to_shallow_pipeline.
+     bool two_slot_synthetic_ring{};
++    // DCS Control (0034): the ring's second synthetic slot is made only when
++    // first needed (`[ofxr] lazy_synthetic_slot`, on by default): set at
++    // creation for adaptive 2X/3X at the shallow depth on a D3D12 binding (the
++    // D3D11 bridge's included), whose 2X uses one slot only. The deeper
++    // pipeline uses both at 2X already and a session that starts in 3X needs
++    // both at once: those make both at arming, as before. Wanted latches at
++    // the first need (every generation then gets its slot; one armed later
++    // makes both at once); ready_all once every generation has it. Failed: a
++    // creation was refused, and 3X stays out of reach for the session.
++    bool lazy_second_synthetic{};
++    std::atomic<bool> second_synthetic_wanted{false};
++    std::atomic<bool> second_synthetic_ready_all{false};
++    std::atomic<bool> second_synthetic_failed{false};
++    // The xrEndFrame thread: a held switch has been logged (once per wait).
++    bool second_synthetic_hold_logged{};
+     // The switch can be followed live: a binding 3X covers, and a ring it
+     // fits in.
+     bool triple_switchable{};
+@@ -2267,6 +2282,10 @@
+ constexpr std::size_t kSyntheticSlotCountDeep = 2;
+ constexpr std::size_t kPrivateRingSlotMax = 2;
+ 
++// DCS Control (0034): a second synthetic slot being made on a thread of its
++// own (see SessionState::lazy_second_synthetic).
++struct LazySyntheticSlot;
++
+ struct FrameGenerationSwapchainState {
+     std::array<PrivateSwapchainState, kCurrentSlotCount> current{};
+     // Destination images are addressed by a flat index across every slot, so
+@@ -2283,6 +2302,11 @@
+     // DCS VR Control (0008): the Dispatch::visibility_mask_version whose
+     // masks the synthesizer has (0: none yet).
+     std::uint32_t visibility_mask_version{};
++    // DCS Control (0034): what the private swapchains were made with (the
++    // second synthetic slot is made the same way, later), and that slot's
++    // creation once started. Under the swapchain's call_mutex.
++    XrSwapchainCreateInfo private_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
++    std::shared_ptr<LazySyntheticSlot> lazy_slot;
+ };
+ 
+ // DCS VR Control (0004): harvested whenever the synthesizer times (with
+@@ -2794,6 +2818,11 @@
+     }
+ }
+ 
++// DCS Control (0034): waits for a second synthetic slot's creation to end
++// and destroys what it made if the ring never took it. Defined below.
++void retire_lazy_synthetic_slot(
++    const std::shared_ptr<Dispatch>& dispatch, LazySyntheticSlot& slot) noexcept;
++
+ void destroy_frame_generation_swapchains(
+     const std::shared_ptr<SwapchainState>& state) noexcept {
+     try {
+@@ -2807,6 +2836,9 @@
+         }
+ 
+         const auto& dispatch = state->session->dispatch;
++        if (generation->lazy_slot) {
++            retire_lazy_synthetic_slot(dispatch, *generation->lazy_slot);
++        }
+         for (PrivateSwapchainState& image : generation->synthetic) {
+             static_cast<void>(
+                 release_private_image(state->session.get(), dispatch, image));
+@@ -2974,6 +3006,66 @@
+     return true;
+ }
+ 
++// DCS Control (0034): the second synthetic slot of a ring made with one,
++// created on a thread of its own so that no application thread ever waits on
++// a swapchain creation (a full-size image set takes the runtime tens of
++// milliseconds). The thread fills `created` and sets `done`; the
++// application's xrEndFrame thread takes it into the ring
++// (adopt_second_synthetic) under the swapchain's call_mutex, between two
++// frames, and only then may a frame of three use it.
++struct LazySyntheticSlot {
++    std::mutex mutex;
++    std::thread worker;
++    bool started{};
++    bool done{};
++    bool succeeded{};
++    bool adopted{};
++    bool failure_logged{};
++    XrResult refusal{XR_SUCCESS};
++    CreatedPrivateSwapchain created;
++    std::chrono::steady_clock::time_point started_at{};
++    std::chrono::steady_clock::time_point finished_at{};
++
++    LazySyntheticSlot() = default;
++    LazySyntheticSlot(const LazySyntheticSlot&) = delete;
++    LazySyntheticSlot& operator=(const LazySyntheticSlot&) = delete;
++    // Normally joined by retire_lazy_synthetic_slot. Otherwise (the last
++    // reference may be the thread's own) never joined from here: a slot the
++    // ring never took is then left to the runtime's session teardown.
++    ~LazySyntheticSlot() {
++        if (worker.joinable()) {
++            worker.detach();
++        }
++    }
++};
++
++void retire_lazy_synthetic_slot(
++    const std::shared_ptr<Dispatch>& dispatch, LazySyntheticSlot& slot) noexcept {
++    try {
++        std::thread worker;
++        {
++            std::scoped_lock lock(slot.mutex);
++            worker = std::move(slot.worker);
++        }
++        if (worker.joinable()) {
++            if (worker.get_id() == std::this_thread::get_id()) {
++                worker.detach();
++                return;
++            }
++            worker.join();
++        }
++        std::scoped_lock lock(slot.mutex);
++        if (slot.done && slot.succeeded && !slot.adopted &&
++            slot.created.state.handle != XR_NULL_HANDLE && dispatch &&
++            dispatch->destroy_swapchain != nullptr) {
++            static_cast<void>(dispatch->destroy_swapchain(slot.created.state.handle));
++        }
++        slot.created.state.handle = XR_NULL_HANDLE;
++        slot.adopted = true;
++    } catch (...) {
++    }
++}
++
+ struct CreatedPrivateRing {
+     std::array<CreatedPrivateSwapchain, kPrivateRingSlotMax> slots{};
+     // Every slot's destination images end to end, in slot order, which is the
+@@ -3172,6 +3264,11 @@
+ 
+ [[nodiscard]] std::size_t synthetic_slot_count_for(
+     const SessionState& session) noexcept {
++    // DCS Control (0034): one until the second is first needed.
++    if (session.two_slot_synthetic_ring && session.lazy_second_synthetic &&
++        !session.second_synthetic_wanted.load()) {
++        return kSyntheticSlotCountShallow;
++    }
+     return session.two_slot_synthetic_ring ? kSyntheticSlotCountDeep
+                                            : kSyntheticSlotCountShallow;
+ }
+@@ -3473,6 +3570,7 @@
+         auto generation = std::make_shared<FrameGenerationSwapchainState>();
+         adopt_current_ring(generation, current);
+         adopt_synthetic_ring(generation, synthetic);
++        generation->private_info = private_info; // DCS Control (0034)
+         if (state && state->session) {
+             configure_smooth_cursor(*state->session, *synthesizer); // 0010
+         }
+@@ -3674,6 +3772,7 @@
+         auto generation = std::make_shared<FrameGenerationSwapchainState>();
+         adopt_current_ring(generation, current);
+         adopt_synthetic_ring(generation, synthetic);
++        generation->private_info = private_info; // DCS Control (0034)
+         if (state && state->session) {
+             configure_smooth_cursor(*state->session, *synthesizer); // 0010
+         }
+@@ -3950,6 +4049,7 @@
+         auto generation = std::make_shared<FrameGenerationSwapchainState>();
+         adopt_current_ring(generation, current);
+         adopt_synthetic_ring(generation, synthetic);
++        generation->private_info = private_info; // DCS Control (0034)
+         if (state && state->session) {
+             configure_smooth_cursor(*state->session, *synthesizer); // 0010
+         }
+@@ -5179,7 +5279,9 @@
+         // DCS Control (0031): fixed for the session.
+         xrfg::implicit_layer::read_cockpit_mask(current_layer_directory()),
+         // DCS Control (0033): fixed for the session.
+-        xrfg::implicit_layer::read_fast_composition(current_layer_directory())};
++        xrfg::implicit_layer::read_fast_composition(current_layer_directory()),
++        // DCS Control (0034): fixed for the session.
++        xrfg::implicit_layer::read_cockpit_parallax_limit(current_layer_directory())};
+     // One display period of extra depth, bought with one display period of
+     // latency: every synthetic is held until it is a period old, so synthesis
+     // gets a period to finish instead of the gap the game leaves. On by
+@@ -5411,6 +5513,12 @@
+     state->two_slot_synthetic_ring =
+         state->deep_pipeline || state->frames_per_application_frame > 2 ||
+         (adaptive_requested && triple_binding);
++    // DCS Control (0034): adaptive at the shallow depth, starting in 2X, on a
++    // D3D12 binding: the second slot waits for its first need.
++    state->lazy_second_synthetic = state->two_slot_synthetic_ring &&
++        !state->deep_pipeline && state->frames_per_application_frame <= 2 &&
++        state->graphics_binding == SessionGraphicsBinding::d3d12 &&
++        xrfg::implicit_layer::read_lazy_synthetic_slot(current_layer_directory());
+     state->triple_switchable =
+         triple_binding && state->two_slot_synthetic_ring;
+     if (triple_binding && !state->triple_switchable) {
+@@ -13463,7 +13571,8 @@
+         static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward,
+         state->nvidia_options.occlusion_aware, // DCS Control (0030): the session's
+         state->nvidia_options.cockpit_mask, // DCS Control (0031): the session's
+-        state->nvidia_options.fast_composition}; // DCS Control (0033): the session's
++        state->nvidia_options.fast_composition, // DCS Control (0033): the session's
++        state->nvidia_options.cockpit_parallax_limit_pixels}; // DCS Control (0034): the session's
+     const bool changed = state->control_reconfigure_required || backend != state->optical_flow_backend ||
+         options.preset != state->nvidia_options.preset ||
+         options.input_scale != state->nvidia_options.input_scale ||
+@@ -14181,6 +14290,190 @@
+         figure);
+ }
+ 
++// DCS Control (0034): the bytes a slot's images take, for the log: four a
++// texel (the colour formats a game hands a headset), every layer and image.
++[[nodiscard]] std::uint64_t private_slot_bytes(
++    const XrSwapchainCreateInfo& info, std::size_t images) noexcept {
++    return static_cast<std::uint64_t>(info.width) * info.height *
++        std::max<std::uint32_t>(info.arraySize, 1U) * 4ULL * images;
++}
++
++// DCS Control (0034): starts making `generation`'s second synthetic slot, on
++// a thread of its own, once. The swapchain's call_mutex is held.
++void start_second_synthetic(
++    const std::shared_ptr<SwapchainState>& swapchain,
++    FrameGenerationSwapchainState& generation,
++    std::uint64_t reason) noexcept {
++    try {
++        if (generation.synthetic_slot_count >= kSyntheticSlotCountDeep) {
++            return;
++        }
++        if (!generation.lazy_slot) {
++            generation.lazy_slot = std::make_shared<LazySyntheticSlot>();
++        }
++        const std::shared_ptr<LazySyntheticSlot> slot = generation.lazy_slot;
++        std::scoped_lock lock(slot->mutex);
++        if (slot->started) {
++            return;
++        }
++        slot->started = true;
++        slot->started_at = std::chrono::steady_clock::now();
++        const XrSwapchainCreateInfo info = generation.private_info;
++        try {
++            slot->worker = std::thread([swapchain, slot, info]() noexcept {
++                CreatedPrivateSwapchain created;
++                XrResult refusal = XR_SUCCESS;
++                bool succeeded = false;
++                try {
++                    succeeded = create_private_swapchain(swapchain, info, &created, &refusal);
++                } catch (...) {
++                    succeeded = false;
++                }
++                try {
++                    std::scoped_lock done_lock(slot->mutex);
++                    slot->created = std::move(created);
++                    slot->succeeded = succeeded && slot->created.state.handle != XR_NULL_HANDLE;
++                    slot->refusal = refusal;
++                    slot->finished_at = std::chrono::steady_clock::now();
++                    slot->done = true;
++                } catch (...) {
++                }
++            });
++        } catch (...) {
++            // No thread: taken as a creation that failed.
++            slot->done = true;
++            slot->succeeded = false;
++            slot->refusal = XR_ERROR_RUNTIME_FAILURE;
++        }
++        xrfg::bridge_flight_logger().event(
++            xrfg::BridgeFlightOperation::synthetic_slot, 1,
++            handle_value(swapchain->handle), reason, 0);
++    } catch (...) {
++    }
++}
++
++// DCS Control (0034): takes a made second synthetic slot into the ring - the
++// synthesizer's destinations, then the ring itself - between two frames, so
++// that the next frame may use it. The swapchain's call_mutex is held. True
++// once the generation has both slots.
++[[nodiscard]] bool adopt_second_synthetic(
++    const std::shared_ptr<SwapchainState>& swapchain,
++    FrameGenerationSwapchainState& generation) noexcept {
++    try {
++        if (generation.synthetic_slot_count >= kSyntheticSlotCountDeep) {
++            return true;
++        }
++        const std::shared_ptr<LazySyntheticSlot> slot = generation.lazy_slot;
++        if (!slot) {
++            return false;
++        }
++        std::unique_lock lock(slot->mutex);
++        if (!slot->done || slot->adopted) {
++            return false;
++        }
++        std::thread worker = std::move(slot->worker);
++        lock.unlock();
++        // Done: the thread is returning.
++        if (worker.joinable()) {
++            worker.join();
++        }
++        lock.lock();
++        const std::shared_ptr<SessionState> session = swapchain->session;
++        const auto fail = [&](std::uint64_t detail, std::uint64_t which) {
++            if (slot->created.state.handle != XR_NULL_HANDLE && session && session->dispatch &&
++                session->dispatch->destroy_swapchain != nullptr) {
++                static_cast<void>(session->dispatch->destroy_swapchain(slot->created.state.handle));
++            }
++            slot->created.state.handle = XR_NULL_HANDLE;
++            slot->adopted = true;
++            if (session) {
++                session->second_synthetic_failed = true;
++            }
++            if (!slot->failure_logged) {
++                slot->failure_logged = true;
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::synthetic_slot, 3,
++                    handle_value(swapchain->handle), detail, which);
++            }
++            return false;
++        };
++        if (!slot->succeeded || !session) {
++            return fail(static_cast<std::uint64_t>(static_cast<std::int64_t>(slot->refusal)), 1);
++        }
++        const std::vector<ID3D12Resource*>& resources = slot->created.d3d12_resources;
++        if (resources.empty() || resources.size() != generation.synthetic_images_per_slot ||
++            !generation.synthesizer) {
++            return fail(resources.size(), 2);
++        }
++        HRESULT result = E_FAIL;
++        {
++            std::scoped_lock gpu_lock(session->gpu_mutex);
++            result = generation.synthesizer->add_synthetic_destinations(
++                std::span<ID3D12Resource* const>(resources.data(), resources.size()));
++        }
++        if (FAILED(result)) {
++            return fail(static_cast<std::uint32_t>(result), 3);
++        }
++        generation.synthetic[kSyntheticSlotCountShallow] = slot->created.state;
++        slot->created.state.handle = XR_NULL_HANDLE;
++        slot->adopted = true;
++        generation.synthetic_slot_count = kSyntheticSlotCountDeep;
++        const auto took = std::chrono::duration_cast<std::chrono::microseconds>(
++            slot->finished_at - slot->started_at);
++        xrfg::bridge_flight_logger().event(
++            xrfg::BridgeFlightOperation::synthetic_slot, 2,
++            handle_value(swapchain->handle),
++            static_cast<std::uint64_t>(std::max<std::int64_t>(took.count(), 0)),
++            private_slot_bytes(generation.private_info, resources.size()));
++        return true;
++    } catch (...) {
++        return false;
++    }
++}
++
++// DCS Control (0034): whether a frame of three may come - every generation
++// of the session has its second synthetic slot, or the session makes none
++// lazily. Otherwise each missing one is started (`reason`: see
++// BridgeFlightOperation::synthetic_slot) and each made one taken in; false
++// until all are in, or for good once one failed. The first call latches
++// wanted: a swapchain that arms afterwards makes both slots at once. The
++// application's xrEndFrame thread, no swapchain lock held.
++[[nodiscard]] bool second_synthetic_ready(
++    const std::shared_ptr<SessionState>& state, std::uint64_t reason) noexcept {
++    if (!state->lazy_second_synthetic || state->second_synthetic_ready_all.load()) {
++        return true;
++    }
++    if (state->second_synthetic_failed.load()) {
++        return false;
++    }
++    state->second_synthetic_wanted = true;
++    bool all = true;
++    try {
++        for (const auto& swapchain : find_swapchains(state)) {
++            std::scoped_lock call_lock(swapchain->call_mutex);
++            std::shared_ptr<FrameGenerationSwapchainState> generation;
++            {
++                std::scoped_lock lock(swapchain->mutex);
++                generation = swapchain->frame_generation;
++            }
++            if (!generation || generation->synthetic_slot_count >= kSyntheticSlotCountDeep) {
++                continue;
++            }
++            start_second_synthetic(swapchain, *generation, reason);
++            if (!adopt_second_synthetic(swapchain, *generation)) {
++                all = false;
++            }
++        }
++    } catch (...) {
++        return false;
++    }
++    if (all && !state->second_synthetic_failed.load()) {
++        state->second_synthetic_ready_all = true;
++        return true;
++    }
++    return false;
++}
++
+ // DCS Control (0032): a cadence step's level put in force - the next
+ // xrWaitFrame takes it as its frame's cadence - with its records. The
+ // display time the application is told needs no rebase for it: it follows
+@@ -14288,6 +14581,31 @@
+         // DCS Control (0032): adaptive cadence leaves 1X at once and starts
+         // over from 2.
+         std::optional<xrfg::latency::CadenceStep> cadence_step;
++        // DCS Control (0034): the stall is the moment to make the ring's
++        // second synthetic slot (made lazily) unseen, when 3X looks near:
++        // the scene before it worked, at its p90, past the 3X -> 2X headroom
++        // bound of two periods (the band a heavier new scene crosses into 3X
++        // from).
++        bool heavy_for_two = false;
++        if (state->adaptive_active.load() && state->lazy_second_synthetic &&
++            !state->second_synthetic_wanted.load() && multiplier == 2) {
++            XrDuration period = 0;
++            {
++                std::scoped_lock lock(state->presenter_mutex);
++                period = state->presenter_display_period;
++            }
++            std::scoped_lock adaptive_lock(state->adaptive_mutex);
++            // The last three seconds before the stall.
++            const auto before = state->adaptive_controller.stats(
++                now_ns, gap + 3 * xrfg::latency::kSecond);
++            heavy_for_two = period > 0 && before.p90 > 0 &&
++                static_cast<double>(before.p90) >
++                    xrfg::latency::AdaptiveConfig{}.downshift_fraction * 2.0 *
++                        static_cast<double>(period);
++        }
++        if (heavy_for_two) {
++            static_cast<void>(second_synthetic_ready(state, 3));
++        }
+         if (state->adaptive_active.load()) {
+             std::scoped_lock adaptive_lock(state->adaptive_mutex);
+             was_probing = state->adaptive_controller.probing();
+@@ -14439,6 +14757,11 @@
+             // One decision per application frame; the next xrWaitFrame takes
+             // it as its frame's own cadence.
+             xrfg::latency::CadenceStep step{};
++            // DCS Control (0034): a frame of three only once the ring's
++            // second synthetic slot is in (made lazily: see
++            // SessionState::lazy_second_synthetic).
++            const bool three_ready = !state->lazy_second_synthetic ||
++                state->second_synthetic_ready_all.load();
+             {
+                 std::scoped_lock adaptive_lock(state->adaptive_mutex);
+                 const std::uint32_t missed = state->adaptive_missed_slots.exchange(0);
+@@ -14448,9 +14771,23 @@
+                 }
+                 state->adaptive_controller.add_late_leaders(
+                     now_ns, state->adaptive_late_leaders.exchange(0));
++                state->cadence_controller.set_three_allowed(three_ready);
+                 step = state->cadence_controller.decide(
+                     now_ns, static_cast<xrfg::latency::Nanoseconds>(period));
+             }
++            if (step.three_held) {
++                // Started (once), and taken in once made: the next decision
++                // may then be three.
++                static_cast<void>(second_synthetic_ready(state, 2));
++                if (!state->second_synthetic_hold_logged) {
++                    state->second_synthetic_hold_logged = true;
++                    xrfg::bridge_flight_logger().event(
++                        xrfg::BridgeFlightOperation::synthetic_slot, 4, 0, 3,
++                        state->second_synthetic_failed.load() ? 1U : 0U);
++                }
++            } else if (step.level == 3) {
++                state->second_synthetic_hold_logged = false;
++            }
+             apply_cadence_step(*state, step);
+             // adaptive_throughput result=6, once a second; see
+             // bridge_flight_logger.hpp.
+@@ -14636,6 +14973,23 @@
+                         : 0U);
+             }
+         }
++        // DCS Control (0034): 3X needs the ring's second synthetic slot, made
++        // only now if the session makes it lazily. Until it is in, the
++        // session stays at 2X: nothing changes and the next decision is
++        // taken as this one was (the controller decides the same again, a
++        // manual change is seen again).
++        if (target == 3 && current != 3) {
++            if (!second_synthetic_ready(state, 1)) {
++                if (!state->second_synthetic_hold_logged) {
++                    state->second_synthetic_hold_logged = true;
++                    xrfg::bridge_flight_logger().event(
++                        xrfg::BridgeFlightOperation::synthetic_slot, 4, 0, target,
++                        state->second_synthetic_failed.load() ? 1U : 0U);
++                }
++                return;
++            }
++            state->second_synthetic_hold_logged = false;
++        }
+         if (target == 0 || target == current) {
+             if (reason == AdaptiveReason::manual) {
+                 if (adaptive && ini_triple != state->adaptive_ini_triple) {
+diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
+--- a/tests/cockpit_mask_tests.cpp
++++ b/tests/cockpit_mask_tests.cpp
+@@ -19,6 +19,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <cmath>
+ #include <cstdint>
+ #include <cstring>
+ #include <filesystem>
+@@ -295,20 +296,26 @@
+         record.qpcCommit = qpc_now();
+         record.flags = cm::slot_flags::valid | cm::slot_flags::display_time;
+         record.viewMask = view_mask;
+-        for (int view = 0; view < 2; ++view) {
++        // DCS Control (0034): views 2 and 3 (the focus insets) with
++        // view_mask's bits 2 and 3, their tangents from focus_tan_ (their
++        // rects alias the periphery's: only the tangents are read).
++        for (int view = 0; view < cm::max_views; ++view) {
+             cm::MaskView& entry = record.view[view];
+-            entry.flags = (view_mask & (1U << view)) != 0 ? cm::view_flags::valid | cm::view_flags::stencil : 0U;
+-            entry.x = static_cast<std::uint32_t>(view) * kViewWidth;
++            const bool focus = view >= 2;
++            entry.flags = (view_mask & (1U << view)) != 0
++                ? cm::view_flags::valid | cm::view_flags::stencil | (focus ? cm::view_flags::focus : 0U)
++                : 0U;
++            entry.x = static_cast<std::uint32_t>(view % 2) * kViewWidth;
+             entry.y = 0;
+             entry.w = kViewWidth;
+             entry.h = kAtlasHeight;
+             entry.srcW = kViewWidth * 2;
+             entry.srcH = kAtlasHeight * 2;
+             entry.divisor = 2;
+-            entry.fovTan[0] = -1.0F;
+-            entry.fovTan[1] = 1.0F;
+-            entry.fovTan[2] = 0.8F;
+-            entry.fovTan[3] = -0.8F;
++            entry.fovTan[0] = focus ? focus_tan_[0] : -1.0F;
++            entry.fovTan[1] = focus ? focus_tan_[1] : 1.0F;
++            entry.fovTan[2] = focus ? focus_tan_[2] : 0.8F;
++            entry.fovTan[3] = focus ? focus_tan_[3] : -0.8F;
+         }
+         header_.newestMaskSeq = mask_seq_;
+         header_.newestSlot = static_cast<std::uint32_t>(slot);
+@@ -335,6 +342,8 @@
+     cm::Header header_{};
+     std::vector<std::uint8_t> last_pattern_;
+     ComPtr<ID3D12Fence> release_fence_;
++    // DCS Control (0034): the focus views' tangents commit() writes.
++    std::array<float, 4> focus_tan_{-0.3F, 0.25F, 0.2F, -0.35F};
+ 
+ private:
+     void close_handles(bool keep = false) {
+@@ -566,6 +575,103 @@
+     std::cout << "cockpit mask: the heartbeat is stored at most every 250 ms\n";
+ }
+ 
++// DCS Control (0034): the focus views' tangents come with the frame (views 2
++// and 3, when the producer exports them), per eye; and every frame points at
++// the consumer's counters.
++void test_focus_views_and_counters(Gpu& gpu) {
++    const std::wstring suffix = test_suffix(L"focus");
++    FakeProducer producer(gpu, suffix);
++    xrfg::CockpitMaskConsumer consumer;
++    require_hresult(consumer.initialize(gpu.device.Get(), {}, test_options(suffix)), "consumer initialize");
++    std::uint64_t seq = producer.commit(5000, 255, 15U);
++    producer.signal(seq);
++    const auto both = consumer.acquire(5000);
++    require(both != nullptr && both->focus[0].valid && both->focus[1].valid &&
++            both->focus[0].fov_tan == producer.focus_tan_ && both->focus[1].fov_tan == producer.focus_tan_,
++        "focus: both eyes' insets and their tangents");
++    require(both->counters != nullptr, "focus: the frame points at the counters");
++    seq = producer.commit(5001, 255, 3U);
++    producer.signal(seq);
++    const auto none = consumer.acquire(5001);
++    require(none != nullptr && !none->focus[0].valid && !none->focus[1].valid,
++        "focus: none without the focus views");
++    require(none->counters == both->counters, "focus: one set of counters for every frame");
++    seq = producer.commit(5002, 255, 7U);
++    producer.signal(seq);
++    const auto left = consumer.acquire(5002);
++    require(left != nullptr && left->focus[0].valid && !left->focus[1].valid, "focus: the left inset alone");
++    producer.focus_tan_ = {0.4F, 0.2F, 0.2F, -0.2F}; // right < left: unusable
++    seq = producer.commit(5003, 255, 15U);
++    producer.signal(seq);
++    const auto bad = consumer.acquire(5003);
++    require(bad != nullptr && !bad->focus[0].valid && !bad->focus[1].valid, "focus: unusable tangents are not taken");
++    std::cout << "cockpit mask: the focus insets' tangents and the pair counters\n";
++}
++
++// DCS Control (0034): the cockpit's parallax between two real frames
++// (xrfg::cockpit_parallax_pixels) and the focus edge's move
++// (xrfg::focus_edge_motion_pixels).
++void test_parallax_and_focus_math() {
++    const auto within = [](float a, float b, float tolerance) { return std::abs(a - b) <= tolerance; };
++    xrfg::Pose previous{};
++    xrfg::Pose current{};
++    // Tangents -1..1 over 1000 px: 500 px per unit of tangent.
++    const std::array<float, 4> square{-1.0F, 1.0F, 1.0F, -1.0F};
++    require(xrfg::cockpit_parallax_pixels(previous, current, square, 1000.0F, 1000.0F) == 0.0F,
++        "parallax: none for a still head");
++    current.position.x = 0.003F;
++    require(within(xrfg::cockpit_parallax_pixels(previous, current, square, 1000.0F, 1000.0F),
++                0.003F * 500.0F / 0.6F, 1.0e-3F),
++        "parallax: 3 mm across the view axis at 0.6 m");
++    current.position = {0.0F, -0.002F, 0.0F};
++    require(within(xrfg::cockpit_parallax_pixels(previous, current, square, 1000.0F, 1000.0F),
++                0.002F * 500.0F / 0.6F, 1.0e-3F),
++        "parallax: vertical as well");
++    // 0.1 mm: under the 0.5 px the rule allows.
++    current.position = {0.0001F, 0.0F, 0.0F};
++    require(xrfg::cockpit_parallax_pixels(previous, current, square, 1000.0F, 1000.0F) <
++            xrfg::kCockpitParallaxLimitPixels,
++        "parallax: a tenth of a millimetre is under the limit");
++    // Along the axis: the widest tangent's corner moves the most.
++    current.position = {0.0F, 0.0F, -0.003F};
++    require(within(xrfg::cockpit_parallax_pixels(previous, current, square, 1000.0F, 1000.0F),
++                0.003F * std::sqrt(2.0F) * 500.0F / 0.6F, 1.0e-2F),
++        "parallax: along the view axis, at the widest corner");
++    // In the current view's own frame: turned 90 degrees about y, a move
++    // along tracking x is along its axis.
++    const float half = std::sqrt(0.5F);
++    current.orientation = {0.0F, half, 0.0F, half};
++    current.position = {0.003F, 0.0F, 0.0F};
++    require(within(xrfg::cockpit_parallax_pixels(previous, current, square, 1000.0F, 1000.0F),
++                0.003F * std::sqrt(2.0F) * 500.0F / 0.6F, 1.0e-2F),
++        "parallax: the translation is taken in the current view's frame");
++    // R68's neck pivot: 100 deg/s with the eyes 9 cm from the yaw axis is
++    // 0.157 m/s, 3.49 mm a pair in 2X at 90 Hz; at 46 px/deg (2636 px per
++    // unit of tangent at the centre) that is 15.3 px at 0.6 m.
++    current = {};
++    current.position.x = 0.157F * 0.0222F;
++    require(within(xrfg::cockpit_parallax_pixels(previous, current, square, 5272.0F, 5272.0F), 15.3F, 0.2F),
++        "parallax: R68's 15 px for a 100 deg/s turn");
++    require(xrfg::cockpit_parallax_pixels(previous, current, {1.0F, -1.0F, 1.0F, -1.0F}, 1000.0F, 1000.0F) == 0.0F,
++        "parallax: an unusable view gives none");
++
++    const std::array<float, 4> identity{0.0F, 0.0F, 0.0F, 1.0F};
++    const std::array<float, 4> inset{-0.3F, 0.3F, 0.3F, -0.3F};
++    require(xrfg::focus_edge_motion_pixels(inset, inset, identity, square, 1000.0F, 1000.0F) == 0.0F,
++        "focus: an inset that stayed has not moved");
++    const std::array<float, 4> moved{-0.29F, 0.31F, 0.3F, -0.3F};
++    require(within(xrfg::focus_edge_motion_pixels(inset, moved, identity, square, 1000.0F, 1000.0F), 5.0F, 1.0e-2F),
++        "focus: the gaze moved the inset by 0.01 (5 px)");
++    // The head turned 1 degree with the gaze still: the same inset in each
++    // frame's own tangents, moved on the pre-warped pair.
++    const float angle = 0.5F * 3.14159265F / 180.0F;
++    const std::array<float, 4> turned{0.0F, std::sin(angle), 0.0F, std::cos(angle)};
++    require(xrfg::focus_edge_motion_pixels(inset, inset, turned, square, 1000.0F, 1000.0F) >
++            xrfg::kFocusEdgeMovedPixels,
++        "focus: a head turn moves the inset on the pre-warped pair");
++    std::cout << "cockpit mask: the parallax and focus edge figures\n";
++}
++
+ // `[ofxr] cockpit_mask`: 1 on, missing or anything else off; and
+ // `nvidia_occlusion_aware` takes 3.
+ void test_ini() {
+@@ -579,14 +685,32 @@
+     const bool missing = xrfg::implicit_layer::read_cockpit_mask(directory);
+     // DCS Control (0033): and [ofxr] fast_composition, off unless 1.
+     const bool fast_missing = xrfg::implicit_layer::read_fast_composition(directory);
++    // DCS Control (0034): and [ofxr] lazy_synthetic_slot, on unless 0.
++    const bool lazy_missing = xrfg::implicit_layer::read_lazy_synthetic_slot(directory);
+     write("[ofxr]\ncockpit_mask=1\nnvidia_occlusion_aware=3\nfast_composition=1\n");
+     const bool on = xrfg::implicit_layer::read_cockpit_mask(directory);
+     const auto level = xrfg::implicit_layer::read_nvidia_occlusion_aware(directory);
+     const bool fast_on = xrfg::implicit_layer::read_fast_composition(directory);
+-    write("[ofxr]\ncockpit_mask=0\nnvidia_occlusion_aware=4\nfast_composition=0\n");
++    write("[ofxr]\ncockpit_mask=0\nnvidia_occlusion_aware=4\nfast_composition=0\nlazy_synthetic_slot=0\n");
+     const bool off = xrfg::implicit_layer::read_cockpit_mask(directory);
+     const auto out_of_range = xrfg::implicit_layer::read_nvidia_occlusion_aware(directory);
+     const bool fast_off = xrfg::implicit_layer::read_fast_composition(directory);
++    const bool lazy_off = xrfg::implicit_layer::read_lazy_synthetic_slot(directory);
++    require(lazy_missing && !lazy_off, "ini: lazy_synthetic_slot is on unless 0");
++    // DCS Control (0034): [ofxr] cockpit_parallax_limit, 0.5 px unless a
++    // usable number is given (0: the gate off).
++    const float limit_missing = xrfg::implicit_layer::read_cockpit_parallax_limit(directory);
++    write("[ofxr]\ncockpit_parallax_limit=2.5\n");
++    const float limit_set = xrfg::implicit_layer::read_cockpit_parallax_limit(directory);
++    write("[ofxr]\ncockpit_parallax_limit=0\n");
++    const float limit_off = xrfg::implicit_layer::read_cockpit_parallax_limit(directory);
++    write("[ofxr]\ncockpit_parallax_limit=fast\n");
++    const float limit_bad = xrfg::implicit_layer::read_cockpit_parallax_limit(directory);
++    write("[ofxr]\ncockpit_parallax_limit=-1\n");
++    const float limit_negative = xrfg::implicit_layer::read_cockpit_parallax_limit(directory);
++    require(limit_missing == 0.5F && limit_set == 2.5F && limit_off == 0.0F && limit_bad == 0.5F &&
++            limit_negative == 0.5F && xrfg::implicit_layer::read_cockpit_parallax_limit({}) == 0.5F,
++        "ini: cockpit_parallax_limit");
+     std::error_code ignored;
+     std::filesystem::remove_all(directory, ignored);
+     require(!missing && on && !off && !xrfg::implicit_layer::read_cockpit_mask({}),
+@@ -602,10 +726,12 @@
+ int main() {
+     try {
+         test_ini();
++        test_parallax_and_focus_math(); // DCS Control (0034)
+         Gpu gpu;
+         test_missing_block_retries_once_a_second(gpu);
+         test_pairing_gpu_wait_release_and_heartbeat(gpu);
+         test_heartbeat_is_throttled(gpu);
++        test_focus_views_and_counters(gpu); // DCS Control (0034)
+         test_stall_stops_the_heartbeat(gpu);
+         std::cout << "cockpit mask consumer tests passed\n";
+         return 0;
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -5390,6 +5390,7 @@
+         test_in_place_history_matches_copies(fixture); // DCS VR Control (0008)
+         test_visibility_mask_draws_only_the_visible_area(fixture); // 0008
+         test_cockpit_mask_composition(fixture); // DCS Control (0031)
++        test_focus_edge_band(fixture); // DCS Control (0034)
+         test_synthesis_on_a_dedicated_queue(fixture);
+         test_double_wide_single_slice_views(fixture);
+         test_stereo_motion_synthesis_beats_same_pixel_blend(fixture);
+@@ -5469,6 +5470,9 @@
+             test_cockpit_mask_composition( // DCS Control (0031)
+                 nvidia_fixture,
+                 xrfg::D3D12OpticalFlowBackend::nvidia);
++            test_focus_edge_band( // DCS Control (0034)
++                nvidia_fixture,
++                xrfg::D3D12OpticalFlowBackend::nvidia);
+             test_stereo_motion_synthesis_beats_same_pixel_blend(
+                 nvidia_fixture,
+                 xrfg::D3D12OpticalFlowBackend::nvidia,
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -2061,6 +2061,32 @@
+ // Over 95% of the period at 1X (10.6 ms), well inside two.
+ constexpr Nanoseconds kOneHeavy = 12 * kMillisecond;
+ 
++// DCS Control (0034): no frame of three before the caller allows it (its
++// second synthetic slot is made lazily): a 2 -> 3 that is due holds the level
++// at 2 and says so, and is taken at the first decision once allowed.
++void cadence_three_allowed_tests() {
++    constexpr Nanoseconds kHeavy = 25 * kMillisecond; // over 95% of 22.2 ms
++    CadenceSim sim;
++    sim.controller.set_three_allowed(false);
++    bool held = false;
++    for (int index = 0; index < 60; ++index) {
++        const CadenceStep step = sim.frame(kHeavy, 20 * kMillisecond);
++        require(step.level == 2, "three not allowed: the level stays 2");
++        held = held || step.three_held;
++    }
++    require(held && sim.changes == 0, "three not allowed: held, and said so");
++    sim.controller.set_three_allowed(true);
++    const CadenceStep step = sim.frame(kHeavy, 20 * kMillisecond);
++    require(step.level == 3 && step.previous == 2 && !step.three_held,
++        "three allowed: taken at the first decision");
++    // Light: a frame of three that is not due is never held.
++    CadenceSim light;
++    light.controller.set_three_allowed(false);
++    for (int index = 0; index < 60; ++index) {
++        require(!light.frame(15 * kMillisecond, 14 * kMillisecond).three_held, "light: nothing held");
++    }
++}
++
+ void cadence_choice_tests() {
+     constexpr Nanoseconds kLight = 15 * kMillisecond;
+     constexpr Nanoseconds kHeavy = 25 * kMillisecond; // over 95% of 22.2 ms
+@@ -2530,6 +2556,7 @@
+         generation_stall_tests(); // DCS Control (0029)
+         measured_interpolation_tests(); // DCS Control (0029)
+         cadence_choice_tests(); // DCS Control (0032)
++        cadence_three_allowed_tests(); // DCS Control (0034)
+         cadence_one_tests();
+         cadence_one_exit_tests();
+         cadence_backoff_tests();
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -85,6 +85,14 @@
+ // expects the ring sizes the layer will actually ask for: one synthetic slot
+ // per application swapchain shallow, two deep.
+ bool g_deep_pipeline = false;
++// DCS Control (0034): the layer makes the synthetic ring's second slot only
++// when 3X first needs it (adaptive at the shallow depth, starting in 2X).
++bool g_lazy_second_synthetic = false;
++// DCS Control (0034): projection layers handed to the runtime that name the
++// second synthetic slot, and the synthetic creations when the session first
++// handed the application three periods (dcs-adaptive's upshift).
++std::atomic<std::uint32_t> g_synthetic_b_end_frames{0};
++std::uint32_t g_synthetic_creates_at_upshift = 0;
+ // Frames the layer hands the runtime per application frame: 3 when the ini
+ // beside the layer turns "3X Frame Gen" on, and the virtual period the
+ // application is served follows it.
+@@ -1102,6 +1110,10 @@
+                     }
+                 }
+                 const XrSwapchain handle = projection->views[view_index].subImage.swapchain;
++                // DCS Control (0034): the second synthetic slot shown.
++                if (handle == g_synthetic_swapchain_b && view_index == 0) {
++                    g_synthetic_b_end_frames.fetch_add(1, std::memory_order_relaxed);
++                }
+                 const SubmittedTarget view_target =
+                     is_application_swapchain(handle)
+                         ? SubmittedTarget::original
+@@ -2674,10 +2686,21 @@
+             L"ofxr", L"late_frame_skip", 0, ini.wstring().c_str()) != 0;
+         // Adaptive 2X/3X reserves 3X's ring from the start, on a binding 3X
+         // covers - any but a D3D11 session left on the interop.
++        // DCS Control (0034): except at the shallow depth starting in 2X on a
++        // D3D12 binding (the D3D11 bridge's included), where the second
++        // synthetic slot is made only when 3X first needs it
++        // (`lazy_synthetic_slot`, on unless the ini says 0): one synthetic
++        // slot for a run that stays in 2X.
+         if (GetPrivateProfileIntW(
+                 L"ofxr", L"adaptive_frame_gen", 0, ini.wstring().c_str()) != 0 &&
+             !(g_d3d11_interop_mode && !g_d3d11_bridge_mode)) {
+-            g_deep_pipeline = true;
++            g_lazy_second_synthetic = !g_deep_pipeline && g_frames_per_application_frame == 2 &&
++                !g_vulkan_mode &&
++                GetPrivateProfileIntW(
++                    L"ofxr", L"lazy_synthetic_slot", 1, ini.wstring().c_str()) != 0;
++            if (!g_lazy_second_synthetic) {
++                g_deep_pipeline = true;
++            }
+         }
+     }
+     if (argc == 4 && !g_split_eye_mode && !g_double_wide_mode &&
+@@ -4501,6 +4524,10 @@
+                 } else if (phase == 1 && multiplier == 3) {
+                     adaptive_upshift_seen = true;
+                     phase = 2;
++                    // DCS Control (0034): what existed when the application
++                    // was first handed 3X's period.
++                    g_synthetic_creates_at_upshift =
++                        g_synthetic_private_creates.load(std::memory_order_relaxed);
+                 }
+             }
+             // Over 85% of two periods (17 ms at the fake's 10 ms), well
+@@ -5160,18 +5187,31 @@
+             // correction no frame is exact in any shape.
+             const auto told_and_shown = collect_told_and_shown();
+             const bool settled = settled_exact();
++            // DCS Control (0034): a session that made the second synthetic
++            // slot lazily had made it (one swapchain: two synthetic slots)
++            // before the application was first handed 3X's period, and 3X
++            // showed it.
++            const bool lazy_slot_valid = !g_adaptive_latency_mode || !g_lazy_second_synthetic ||
++                (g_synthetic_creates_at_upshift == 2U &&
++                    g_synthetic_private_creates.load(std::memory_order_relaxed) == 2U &&
++                    g_synthetic_b_end_frames.load(std::memory_order_relaxed) > 0U);
+             valid = sequence_succeeded && teardown_succeeded &&
+                 presenter_seen && violations == 0 && settled &&
+                 settle_frames < kSettleBound &&
+                 (!g_adaptive_latency_mode ||
+                  (adaptive_downshift_seen && adaptive_upshift_seen &&
+                   !adaptive_moved_after)) &&
++                lazy_slot_valid &&
+                 g_waited_display_times.empty() && !g_begun_display_time;
+             if (!valid) {
+                 std::cerr << "DCS display-time validation failed: sequence="
+                           << sequence_succeeded << " teardown="
+                           << teardown_succeeded << " promoted="
+-                          << presenter_seen << " downshift="
++                          << presenter_seen << " lazy-slot=" << lazy_slot_valid
++                          << " creates-at-upshift=" << g_synthetic_creates_at_upshift
++                          << " creates=" << g_synthetic_private_creates.load()
++                          << " second-slot-shown=" << g_synthetic_b_end_frames.load()
++                          << " downshift="
+                           << adaptive_downshift_seen << " upshift="
+                           << adaptive_upshift_seen << " moved-after="
+                           << adaptive_moved_after << " real="
+@@ -5186,7 +5226,11 @@
+                 std::cerr << '\n';
+                 return EXIT_FAILURE;
+             }
+-            std::cout << (g_adaptive_latency_mode
++            std::cout << (g_adaptive_latency_mode && g_lazy_second_synthetic
++                    ? "OpenXR DCS adaptive 2X/3X test passed (lazy second synthetic slot): "
++                      "2X -> 3X with the slot made before 3X's first frame, and real "
++                      "frames shown at the time the application was told"
++                    : g_adaptive_latency_mode
+                     ? "OpenXR DCS adaptive 2X/3X test passed: 3X -> 2X -> 3X, "
+                       "and real frames shown at the time the application was "
+                       "told"
+diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
+--- a/tests/nvidia_fast_patterns.inc
++++ b/tests/nvidia_fast_patterns.inc
+@@ -306,7 +306,10 @@
+     const xrfg::D3D12NvidiaOpticalFlowOptions& options,
+     const std::array<std::shared_ptr<xrfg::D3D12CockpitMaskFrame>, 2>& cockpit_mask = {},
+     xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::nvidia,
+-    bool cockpit_mask_session = true) {
++    bool cockpit_mask_session = true,
++    // DCS Control (0034): the previous capture's views, where they differ
++    // from the current one's (a head that moved between the two).
++    const ReprojectionViews* previous_views = nullptr) {
+     std::array<ComPtr<ID3D12Resource>, 2> sources{
+         create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
+     auto current = create_source_texture(fixture, width, height);
+@@ -332,7 +335,8 @@
+     require_hresult(history->capture(0, &ca), "occlusion A");
+     require_hresult(history->commit(ca), "occlusion commit A");
+     synth.set_cockpit_mask(cockpit_mask[0]); // DCS Control (0031)
+-    require_hresult(synth.submit_prime(ca, views, 0, &output), "occlusion prime");
++    require_hresult(synth.submit_prime(ca, previous_views != nullptr ? *previous_views : views, 0, &output),
++        "occlusion prime");
+     fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+     require_hresult(history->capture(1, &cb), "occlusion B");
+     require_hresult(history->commit(cb), "occlusion commit B");
+@@ -489,6 +493,179 @@
+             "cockpit mask: the patch is not composed along the flow without the mask");
+         require(mae_masked <= mae_none * 1.02 + 0.01, "cockpit mask: the rest of the image is worse");
+     }
++
++    // DCS Control (0034): the cockpit's parallax gate. A head that moved
++    // less than the rule allows (0.05 mm: 0.01 px at 0.6 m here) leaves the
++    // masked composition byte for byte as a still head's. One that leaned 2 cm
++    // (5.5 px) composes a masked pixel along its own flow where that stays in
++    // the cockpit and agrees at its ends: the patch (which does move) comes
++    // no further from the true middle frame than the frames at the very
++    // pixel, the thin bars (whose flow, if any, is the world's) are still
++    // the frames at the very pixel, and the rest is no worse.
++    const auto still = run({mask, mask});
++    ReprojectionViews nudged = views;
++    for (auto& view : nudged) {
++        view.pose.position.x -= 0.00005F;
++    }
++    require(synthesize_nvidia_pair(fixture, previous, current, width, height, options, {mask, mask}, backend,
++                true, &nudged) == still,
++        "cockpit parallax: a head still within the limit changes the composition");
++    ReprojectionViews leaned = views;
++    for (auto& view : leaned) {
++        view.pose.position.x -= 0.02F;
++    }
++    const auto leaned_masked = synthesize_nvidia_pair(
++        fixture, previous, current, width, height, options, {mask, mask}, backend, true, &leaned);
++    // [ofxr] cockpit_parallax_limit=0: the gate off, 0031's rule whatever the
++    // head did (the camera mapping is rotation alone: as a still head).
++    xrfg::D3D12NvidiaOpticalFlowOptions ungated = options;
++    ungated.cockpit_parallax_limit_pixels = 0.0F;
++    require(synthesize_nvidia_pair(fixture, previous, current, width, height, ungated, {mask, mask}, backend,
++                true, &leaned) == still,
++        "cockpit parallax: the gate is not off with a limit of 0");
++    const auto leaned_none = synthesize_nvidia_pair(
++        fixture, previous, current, width, height, options, {}, backend, true, &leaned);
++    std::vector<std::uint8_t> patch_inside(cockpit.size(), 0);
++    for (UINT y = 76; y < 108; ++y) {
++        for (UINT x = 76; x < 108; ++x) {
++            patch_inside[static_cast<std::size_t>(y) * width + x] = 1;
++        }
++    }
++    const int leaned_inside = worst_on(leaned_masked, leaned_none, patch_inside);
++    const double leaned_rest = masked_mae(leaned_masked, middle, width, height, rest);
++    const double leaned_rest_none = masked_mae(leaned_none, middle, width, height, rest);
++    std::cout << "cockpit parallax ("
++              << (backend == xrfg::D3D12OpticalFlowBackend::nvidia ? "NVIDIA" : "FidelityFX")
++              << "): leaned 2 cm, patch against the unmasked composition worst " << leaned_inside
++              << ", patch against the same pixel worst " << worst_on(leaned_masked, same_pixel, patch_inside)
++              << " (still head " << worst_on(still, same_pixel, patch_inside) << "); the still bars worst "
++              << worst_on(leaned_masked, middle, cockpit) << " (unmasked " << worst_on(leaned_none, middle, cockpit)
++              << "); the rest mae "
++              << leaned_rest << " (without a mask " << leaned_rest_none << ")" << std::endl;
++    const double leaned_patch = masked_mae(leaned_masked, middle, width, height, patch_inside);
++    const double still_patch = masked_mae(still, middle, width, height, patch_inside);
++    std::cout << "cockpit parallax: the patch against the true middle frame mae " << leaned_patch
++              << " leaned, " << still_patch << " still head (the same pixel)" << std::endl;
++    require(leaned_patch <= still_patch + 1.0e-9,
++        "cockpit parallax: a translated eye's masked pixels are no closer to the middle frame");
++    // Where the flow left the cockpit (the thin bars, whose flow is the
++    // world's on the optical-flow engine) the frames at the very pixel stay;
++    // where it ends within the dilated mask beside a bar, its ends agree
++    // with the bar within the rule's test (a few levels of the bilinear
++    // sample at the bar's edge), never the world's 113.
++    require(worst_on(leaned_masked, middle, cockpit) <= 8,
++        "cockpit parallax: a thin still cockpit part takes the world's flow");
++    require(leaned_rest <= leaned_rest_none * 1.02 + 0.01, "cockpit parallax: the rest of the image is worse");
++}
++
++// DCS Control (0034): the moving focus edge. A still, textured world under
++// Quad Views' focus inset (brighter here), which the gaze moved 12 px right
++// and 6 px down between the two captures: a brightness edge that moves while
++// nothing in the scene does. With both frames' insets given (as the cockpit
++// mask's focus views carry them) the flow's confidence is lowered within 3 %
++// of the width of both edges: there the composition comes no further from
++// the two frames at the very pixel than without, and everywhere else it is
++// byte for byte the composition without them. Without one frame's inset, or
++// with insets that did not move, nothing changes at all.
++void test_focus_edge_band(D3D12WarpFixture& fixture,
++    xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx) {
++    constexpr UINT width = 320, height = 240;
++    const ReprojectionViews views = make_reprojection_views();
++    struct Inset {
++        int left, top, right, bottom; // pixel edges
++    };
++    const Inset inset_a{100, 70, 200, 160};
++    const Inset inset_b{112, 76, 212, 166};
++    const auto scene = [&](const Inset& inset) {
++        StereoPattern image;
++        for (UINT eye = 0; eye < kEyeCount; ++eye) {
++            auto& bytes = image[eye];
++            bytes.resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
++            for (UINT y = 0; y < height; ++y) {
++                for (UINT x = 0; x < width; ++x) {
++                    auto texel = occlusion_texture(double(x), double(y), 0);
++                    const bool inside = int(x) >= inset.left && int(x) < inset.right && int(y) >= inset.top &&
++                        int(y) < inset.bottom;
++                    if (inside) {
++                        for (auto& c : texel) c = static_cast<std::uint8_t>(std::min(255, int(c) + 40));
++                    }
++                    const std::size_t i = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
++                    bytes[i] = texel[0];
++                    bytes[i + 1] = texel[1];
++                    bytes[i + 2] = texel[2];
++                    bytes[i + 3] = 255;
++                }
++            }
++        }
++        return image;
++    };
++    const auto previous = scene(inset_a);
++    const auto current = scene(inset_b);
++    const auto tangents_of = [&](const Inset& inset, UINT eye) {
++        const auto& fov = views[eye].fov;
++        const float left = std::tan(fov.angle_left), right = std::tan(fov.angle_right);
++        const float up = std::tan(fov.angle_up), down = std::tan(fov.angle_down);
++        return std::array<float, 4>{left + (right - left) * float(inset.left) / float(width),
++            left + (right - left) * float(inset.right) / float(width),
++            up + (down - up) * float(inset.top) / float(height),
++            up + (down - up) * float(inset.bottom) / float(height)};
++    };
++    // No cockpit in view: an empty mask, carrying the insets.
++    const auto frame_with = [&](const Inset* inset) {
++        auto frame = make_cockpit_mask_frame(fixture, width, height, {}, 2, views);
++        for (UINT eye = 0; eye < kEyeCount && inset != nullptr; ++eye) {
++            frame->focus[eye].valid = true;
++            frame->focus[eye].fov_tan = tangents_of(*inset, eye);
++        }
++        return frame;
++    };
++    const xrfg::D3D12NvidiaOpticalFlowOptions options{};
++    const auto run = [&](std::array<std::shared_ptr<xrfg::D3D12CockpitMaskFrame>, 2> frames) {
++        return synthesize_nvidia_pair(fixture, previous, current, width, height, options, frames, backend);
++    };
++    const auto without = run({frame_with(nullptr), frame_with(nullptr)});
++    const auto with = run({frame_with(&inset_a), frame_with(&inset_b)});
++    require(run({frame_with(nullptr), frame_with(&inset_b)}) == without,
++        "focus band: one frame's inset alone changes the composition");
++    require(run({frame_with(&inset_b), frame_with(&inset_b)}) == without,
++        "focus band: an inset that did not move changes the composition");
++    // The band: within 3 % of the width (9.6 px) of either outline, and the
++    // mask's cell (4 px) beyond, where its texel may reach.
++    const float reach = xrfg::kFocusBandFraction * float(width) + 6.0F;
++    const auto outline_distance = [](const Inset& inset, float x, float y) {
++        const float cx = 0.5F * float(inset.left + inset.right), cy = 0.5F * float(inset.top + inset.bottom);
++        const float qx = std::abs(x - cx) - 0.5F * float(inset.right - inset.left);
++        const float qy = std::abs(y - cy) - 0.5F * float(inset.bottom - inset.top);
++        const float outside = std::sqrt(std::max(qx, 0.0F) * std::max(qx, 0.0F) + std::max(qy, 0.0F) * std::max(qy, 0.0F));
++        return outside + std::abs(std::min(std::max(qx, qy), 0.0F));
++    };
++    std::vector<std::uint8_t> band(static_cast<std::size_t>(width) * height, 0), away(band.size(), 0);
++    for (UINT y = 0; y < height; ++y) {
++        for (UINT x = 0; x < width; ++x) {
++            const float px = float(x) + 0.5F, py = float(y) + 0.5F;
++            const float distance = std::min(outline_distance(inset_a, px, py), outline_distance(inset_b, px, py));
++            band[static_cast<std::size_t>(y) * width + x] = distance <= reach ? 1 : 0;
++            away[static_cast<std::size_t>(y) * width + x] = distance > reach ? 1 : 0;
++        }
++    }
++    const StereoPattern same_pixel = midpoint_pattern(previous, current);
++    const double band_with = masked_mae(with, same_pixel, width, height, band);
++    const double band_without = masked_mae(without, same_pixel, width, height, band);
++    int away_worst = 0;
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        for (std::size_t at = 0; at < away.size(); ++at) {
++            if (away[at] == 0) continue;
++            for (UINT c = 0; c < 3; ++c) {
++                away_worst = std::max(away_worst,
++                    std::abs(int(with[eye][at * kBytesPerPixel + c]) - int(without[eye][at * kBytesPerPixel + c])));
++            }
++        }
++    }
++    std::cout << "focus band (" << (backend == xrfg::D3D12OpticalFlowBackend::nvidia ? "NVIDIA" : "FidelityFX")
++              << "): about the moving edge, from the same pixel mae " << band_with << " (without the insets "
++              << band_without << "); away from it, against without, worst " << away_worst << std::endl;
++    require(away_worst == 0, "focus band: the composition changed away from the moving edge");
++    require(band_with <= band_without + 1.0e-9, "focus band: the moving edge is composed further from the frames");
+ }
+ 
+ // The moving-edge region: where the foreground covers a pixel at some of the
+diff --git a/tests/layer_adaptive_lazy_slot.cmake b/tests/layer_adaptive_lazy_slot.cmake
+new file mode 100644
+--- /dev/null
++++ b/tests/layer_adaptive_lazy_slot.cmake
+@@ -0,0 +1,80 @@
++# DCS Control (0034): runs the dcs-adaptive call-chain scenario with adaptive
++# 2X/3X at the shallow depth starting in 2X (ADAPTIVE_INI beside the layer
++# DLL): the application is light, then heavy enough for 3X. The synthetic
++# ring's second slot must be made only then, on its own thread, and be in
++# before the session switches: the flight log must show it wanted, then
++# ready, then the switch to 3X - never 3X first, never a failure. The call
++# chain itself checks that both synthetic slots existed when the application
++# was first handed 3X's period, that 3X showed the second one, and that real
++# frames were shown at the time the application was told.
++foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN ADAPTIVE_INI WORK_DIR)
++    if(NOT DEFINED ${required_variable})
++        message(FATAL_ERROR "${required_variable} was not provided")
++    endif()
++endforeach()
++
++file(REMOVE_RECURSE "${WORK_DIR}")
++file(MAKE_DIRECTORY "${WORK_DIR}")
++file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
++file(COPY "${ADAPTIVE_INI}" DESTINATION "${WORK_DIR}")
++get_filename_component(adaptive_ini_name "${ADAPTIVE_INI}" NAME)
++file(RENAME "${WORK_DIR}/${adaptive_ini_name}" "${WORK_DIR}/ofxr_bridge.ini")
++
++get_filename_component(layer_name "${LAYER_DLL}" NAME)
++execute_process(
++    COMMAND "${CALL_CHAIN}"
++        "${WORK_DIR}/${layer_name}"
++        "${WORK_DIR}/fake-runtime.log"
++        dcs-adaptive
++    RESULT_VARIABLE call_chain_result
++    OUTPUT_VARIABLE call_chain_output
++    ERROR_VARIABLE call_chain_error)
++if(NOT call_chain_result EQUAL 0)
++    message(FATAL_ERROR
++        "Call chain 'dcs-adaptive' (lazy second synthetic slot) failed (${call_chain_result}):\n"
++        "${call_chain_output}\n${call_chain_error}")
++endif()
++message(STATUS "${call_chain_output}")
++
++file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++list(LENGTH flight_logs flight_log_count)
++if(NOT flight_log_count EQUAL 1)
++    message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++endif()
++list(GET flight_logs 0 flight_log)
++file(READ "${flight_log}" contents)
++
++# The session's shape at creation: 2X, the shallow depth.
++string(FIND "${contents}" "op=presenter_transition result=700 dur_us=0 a=2 b=0 c=0" created)
++if(created EQUAL -1)
++    message(FATAL_ERROR "The session did not start in 2X at the shallow depth")
++endif()
++# Wanted for a switch to 3X (b=1), or by a scene change that looked heavy (b=3).
++string(REGEX MATCH "op=synthetic_slot result=1 dur_us=0 a=[0-9]+ b=[13] c=0" wanted "${contents}")
++if(wanted STREQUAL "")
++    message(FATAL_ERROR "The second synthetic slot was never asked for")
++endif()
++string(FIND "${contents}" "${wanted}" wanted_at)
++string(REGEX MATCH "op=synthetic_slot result=2 dur_us=0 a=[0-9]+ b=[0-9]+ c=[1-9][0-9]*" ready "${contents}")
++if(ready STREQUAL "")
++    message(FATAL_ERROR "The second synthetic slot was never taken into the ring")
++endif()
++string(FIND "${contents}" "${ready}" ready_at)
++string(FIND "${contents}" "op=synthetic_slot result=3 " failed)
++if(NOT failed EQUAL -1)
++    message(FATAL_ERROR "The second synthetic slot failed")
++endif()
++# The live switch to 3X (c=2), the shallow depth.
++string(FIND "${contents}" "op=presenter_transition result=700 dur_us=0 a=3 b=0 c=2" triple_at)
++if(triple_at EQUAL -1)
++    message(FATAL_ERROR "No live switch to 3X")
++endif()
++if(NOT (created LESS wanted_at AND wanted_at LESS ready_at AND ready_at LESS triple_at))
++    message(FATAL_ERROR
++        "Out of order: created ${created}, wanted ${wanted_at}, ready ${ready_at}, 3X ${triple_at}")
++endif()
++string(REGEX MATCH "op=adaptive_switch result=[23] dur_us=0 a=2 b=3 c=[0-9]+" upshift "${contents}")
++if(upshift STREQUAL "")
++    message(FATAL_ERROR "No 2X -> 3X adaptive switch for a slow or late application")
++endif()
++message(STATUS "Lazy second synthetic slot: ${wanted} / ${ready}")
+diff --git a/tests/ofxr_bridge_adaptive_lazy.ini b/tests/ofxr_bridge_adaptive_lazy.ini
+new file mode 100644
+--- /dev/null
++++ b/tests/ofxr_bridge_adaptive_lazy.ini
+@@ -0,0 +1,19 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++; DCS Control (0034): adaptive 2X/3X at the shallow depth, starting in 2X:
++; the synthetic ring's second slot is made only when 3X first needs it.
++deep_pipeline=0
++triple_frame_gen=0
++adaptive_frame_gen=1
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right

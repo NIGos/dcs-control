@@ -1748,6 +1748,19 @@ inline int RecycledFilter(unsigned long code, const Job& j) {
   return EXCEPTION_CONTINUE_SEARCH;
 }
 
+// R73 (shadow_rec.h R61, second layer): a renderable, item or material pointer
+// that is not a plausible heap object (shrec::PlausiblePtr: 8-aligned, at or
+// above 64 KB, below 0x800000000000) means the vector names recycled memory.
+// The job is dropped like one on a recycled heap: JobMain does not commit it
+// (kBuildRecycled), DCS draws the pass stock. Steady state: DCS's objects are
+// heap allocations (16-aligned), so this never fires there.
+std::atomic<uint64_t> g_implausible{0};  // items whose pointers were not plausible (their jobs dropped)
+inline void Implausible(Job& j, Pre& p) {
+  g_implausible.fetch_add(1, std::memory_order_relaxed);
+  j.recycled.store(1, std::memory_order_relaxed);
+  p.kind = kPreNone;
+}
+
 void PreOne(Job& j, int t, size_t i) {
   const Env& env = *j.env;
   Pre& p = j.pre[i];
@@ -1762,9 +1775,12 @@ void PreOne(Job& j, int t, size_t i) {
   p.meshCode = kRMeshPending;
   p.texCode = kRTexUnusable;
   auto* r = static_cast<uint8_t*>(j.snap[i]);
+  if (r && !shrec::PlausiblePtr(r)) return Implausible(j, p);
   if (!r || *reinterpret_cast<void**>(r) != env.srVt) return;
   auto* item = *reinterpret_cast<uint8_t**>(r + 0x10);
+  if (item && !shrec::PlausiblePtr(item)) return Implausible(j, p);
   auto* mat = item ? *reinterpret_cast<uint8_t**>(item + 0x10) : nullptr;
+  if (mat && !shrec::PlausiblePtr(mat)) return Implausible(j, p);
   if (!mat || *reinterpret_cast<void**>(mat) != env.modelVt) return;
   p.kind = kPreModel;
   p.item = item;
@@ -1892,11 +1908,16 @@ void PreChunks(Job& j, int t) {
 }
 
 // Primary: every chunk read (the helpers' last ones included). False after
-// kPreWaitUs (a helper stalled: the job is not built).
+// kPreWaitUs (a helper stalled: the job is not built). True at once when the
+// job is recycled: a helper whose stage-A read faulted (contained) never
+// counts its chunk, and the job is dropped anyway (the caller sees recycled);
+// before, the primary waited the full kPreWaitUs holding the texture lock.
+// Helpers still reading keep the slot busy (SlotBusy), as after a timeout.
 bool WaitPre(Job& j) {
   const int64_t t0 = defrec::Qpc();
   const double k = defrec::QpcToUs();
   for (uint32_t spin = 0; j.preDone.load(std::memory_order_acquire) < j.n; ++spin) {
+    if (j.recycled.load(std::memory_order_relaxed)) return true;
     if ((defrec::Qpc() - t0) * k > kPreWaitUs) return false;
     // Yield after a short spin (as ClosePhase): on 2-4 core CPUs a pure spin
     // can hold the core the helper it waits for needs, so the job ran late.
@@ -2532,6 +2553,25 @@ void ReleaseHelpers(Job& j) {
   if (j.recState.compare_exchange_strong(st, kGoAbort, std::memory_order_acq_rel)) SetEvent(j.recGo);
 }
 
+// Stage A on the primary after BeginBuild (JobMain; R73's offline test): the
+// helpers let go, its own chunks, the wait for theirs, then the commit unless
+// a chunk was not read (recycled heap, an implausible item pointer). The
+// job's result (kBuildOk when committed).
+int PreAndCommit(Job& j, int64_t t0) {
+  j.preState.store(kGoRun, std::memory_order_release);
+  SetEvent(j.preGo);
+  PreChunks(j, 0);
+  j.tPreDone = defrec::Qpc();
+  j.preUs = (j.tPreDone - t0) * defrec::QpcToUs();
+  if (!WaitPre(j))
+    j.result = kBuildPreLate;
+  else if (j.recycled.load(std::memory_order_relaxed) || HeapRecycled(j))
+    j.result = kBuildRecycled;  // some chunks were not read: never committed
+  else
+    CommitBuild(j);
+  return j.result;
+}
+
 // The primary worker: the start (sort hook or render entry), stage A with
 // the helpers (reads in chunks, then the serial commit), the pieces, its own
 // recording. The helpers record theirs on their own contexts. Every list is
@@ -2558,19 +2598,7 @@ bool JobMain(defrec::Worker& w, void* u) {
   // (the pool latches off then).
   __try {
    __try {
-    if (BeginBuild(j) == kBuildOk) {
-      j.preState.store(kGoRun, std::memory_order_release);
-      SetEvent(j.preGo);
-      PreChunks(j, 0);
-      j.tPreDone = defrec::Qpc();
-      j.preUs = (j.tPreDone - t0) * defrec::QpcToUs();
-      if (!WaitPre(j))
-        j.result = kBuildPreLate;
-      else if (j.recycled.load(std::memory_order_relaxed) || HeapRecycled(j))
-        j.result = kBuildRecycled;  // some chunks were not read: never committed
-      else
-        CommitBuild(j);
-    }
+    if (BeginBuild(j) == kBuildOk) PreAndCommit(j, t0);
     j.tBuilt = defrec::Qpc();
     j.commitUs = (j.tBuilt - (j.tPreDone ? j.tPreDone : t0)) * defrec::QpcToUs();
     j.buildUs = (j.tBuilt - t0) * defrec::QpcToUs();
@@ -2630,7 +2658,8 @@ bool HelperMain(defrec::Worker& w, void* u) {
       j.recUs[role] = (j.tRecDone[role] - r0) * defrec::QpcToUs();
     }
    } __except (RecycledFilter(GetExceptionCode(), j)) {
-    // A fault in stage A: count the chunk out so the primary is not left waiting (its job fails).
+    // A fault in stage A: its chunk is never counted; the primary's WaitPre
+    // stops waiting on recycled (the job fails).
     j.recycled.store(1, std::memory_order_relaxed);
     j.recFail.store(1, std::memory_order_release);
    }
@@ -3308,6 +3337,8 @@ shrec::CompactStats g_lastCompact;
 std::atomic<uint64_t> g_compactions{0}, g_oldFreed{0};
 TexTable g_tex;
 SRWLOCK g_texLock = SRWLOCK_INIT;
+shrec::TexIdle g_texIdle;  // R77: the table released at a mission event / while the recorder is inactive
+inline void NoteMissionEvent() { g_texIdle.eventGen.fetch_add(1, std::memory_order_acq_rel); }
 defrec::Pool g_pool;  // worker s + g_poolSlots * k: slot s's primary (k 0) and helpers (k 1, 2)
 inline int Wk(int s, int k) { return s + g_poolSlots * k; }
 // Worker k of slot s exists (a slot past the pool's slots has none).
@@ -3527,6 +3558,66 @@ constexpr double kSlackMs = 2.0;
 constexpr uint32_t kSlackIsland = 12;
 inline void NoteSlack(Slot& sl, double ms) { sl.slackMs = sl.slackMs < 0 ? ms : 0.5 * (sl.slackMs + ms); }
 std::atomic<Job*> g_jobPub[kSlots];  // the slots' jobs for the sort observer (published once allocated)
+
+// R73 (shadow_rec.h R61 for the cascades): the frame-heap generation when
+// Scene's sort last finished one of the G-buffer graph's collections (any of
+// them; 0: never). A render-entry start needs it current (EntryVectorFresh):
+// the scene was parsed and sorted since the last heap reset.
+//   Live R73 (qvbench_fg_sea_wind): 16-24 G-buffer collection sorts per frame
+// in flight, 0 in the F10 map (the G-buffer passes still run there, 8 per
+// frame, on vectors no sort rebuilt: the R61 structure). A per-collection
+// record (R61's rule for the cascades) also refused non-empty collections
+// that DCS refills without that sort in flight (F2 view changes: up to 40%
+// of a 10-s block's passes), so the G-buffer rule is graph-wide.
+std::atomic<uint64_t> g_graphSortGen{0};
+std::atomic<void*> g_sortRg{nullptr};  // g_gbRg for the pool threads (LearnVector)
+constexpr uint32_t kSortColls = 4096;  // collections of the graph's array the sort observer recognises
+std::atomic<uint64_t> g_unsortedStarts{0};  // render-entry starts skipped: no sort since the last heap reset
+std::atomic<uint64_t> g_entryStarts{0};     // render-entry starts made (the gate passed)
+std::atomic<uint64_t> g_unsortedEmpty{0};   // of those, on an empty vector with no sort since the last reset
+std::atomic<uint64_t> g_sortsNoted{0};      // Scene's sorts of the G-buffer graph's collections (NoteSorted)
+
+// An empty collection vector (begin == end, or no storage): it names no renderable. A fault reading the header
+// (the graph's own array) counts as not empty: the gate then skips the start.
+bool VectorEmptyGuarded(void** vec) {
+  __try {
+    return vec[0] == vec[1];
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+// Notes a finished sort of `out` when it is one of the G-buffer graph's collections (pool thread).
+void NoteSorted(void** out) {
+  void* rg = g_sortRg.load(std::memory_order_acquire);
+  uint8_t* base = rg ? shrec::ArrayBaseGuarded(rg) : nullptr;
+  if (!base) return;
+  const intptr_t d = reinterpret_cast<uint8_t*>(out) - base;
+  if (d < 0 || d % 24 || d / 24 >= static_cast<intptr_t>(kSortColls)) return;
+  g_graphSortGen.store(g_frameHeapGen.load(std::memory_order_acquire), std::memory_order_release);
+  g_sortsNoted.fetch_add(1, std::memory_order_relaxed);
+}
+
+void OnSorted(void** out);
+// The sort observer is ours and the sort call sites are patched: Scene's sorts are recorded.
+inline bool SortRecorded() {
+  return shrec::g_sortPatched && shrec::g_sortObserver2.load(std::memory_order_relaxed) == &OnSorted;
+}
+
+// R73: a render-entry start may read the collections' vectors: Scene's sort
+// finished one of the G-buffer graph's collections since the last frame-heap
+// reset. Always true without the sort hook (no record: the old behaviour).
+// In normal frames the sorts run after the frame's resets and before render
+// entry; when DCS renders the G-buffer graph without parsing the scene again
+// (the F10 map), the vectors are an earlier frame's and may name recycled
+// memory (the R55 / R60 shadow faults in F10).
+inline bool EntryVectorFreshAt(bool recorded, uint64_t sortGen, uint64_t heapGen) {
+  return !recorded || sortGen == heapGen;
+}
+bool EntryVectorFresh() {
+  return EntryVectorFreshAt(SortRecorded(), g_graphSortGen.load(std::memory_order_acquire),
+                            g_frameHeapGen.load(std::memory_order_acquire));
+}
 
 void NoteMax(std::atomic<uint64_t>& a, uint64_t v) {
   uint64_t cur = a.load();
@@ -4040,6 +4131,7 @@ int ExecSegment(PassCtx& pc, int k) {
     sl.st.rtReplays += rt;
   }
   if (!why) {
+    sfilt::NotifyBeforeEcl(g_ctx);  // R53: an open focus-broadcast block closes first (the lists bind DCS's targets)
     defrec::PassState before = {}, after = {};
     const bool t9 = pc.verify == 2;
     if (t9) defrec::Capture(g_ctx, &before);
@@ -4332,9 +4424,8 @@ void DumpState(uint8_t* shader, uint64_t tech, const shrec::Capture& c) {
 // The ini in use: the deployed one, or the one its [Dev] IniPath names.
 std::wstring DumpIni() {
   std::wstring ini = g_dir + L"DcsQvCull.ini";
-  wchar_t dev[MAX_PATH] = {};
-  GetPrivateProfileStringW(L"Dev", L"IniPath", L"", dev, MAX_PATH, ini.c_str());
-  if (dev[0] && GetFileAttributesW(dev) != INVALID_FILE_ATTRIBUTES) ini = dev;
+  const qvdev::DevPath dev = qvdev::ReadDevPath(L"IniPath", ini);  // R62: as LoadConfig reads it
+  if (dev.state == qvdev::kDevOk) ini = dev.path;
   return ini;
 }
 
@@ -4992,6 +5083,7 @@ bool LearnVector(Slot& sl, void** vec, void* ctx) {
   sl.learn.idx = idx;
   sl.learn.haveVec = true;
   g_gbRg = rg;
+  g_sortRg.store(rg, std::memory_order_release);
   return true;
 }
 
@@ -5162,6 +5254,17 @@ void Rebind() {
   }
 }
 
+// R62: the two fallback lines below keep the recorder running. They avoid the
+// app's "turned itself off" vocabulary (EngineOptimizations.cs: "off for this
+// session", "disabled for this session", "could not", ...), which made the app
+// warn that the multi-threaded G-buffer had turned itself off.
+constexpr const char kIdentityDroppedFmt[] =
+    "gbuffer recorder: execution identity dropped for this session (%s); the scope bits are plain ordinals again, "
+    "the recorder keeps running";
+constexpr const char kQuadFilterDroppedLine[] =
+    "gbuffer recorder: quad-view filter dropped for this session (30 frames in which no G-buffer execution used a "
+    "quad view's volume); every execution counts again, the recorder keeps running";
+
 // Identity binding off for the session: the slots by plain ordinal (render
 // thread). Logged once with the reason.
 void FallbackToOrdinal(const char* why) {
@@ -5176,7 +5279,7 @@ void FallbackToOrdinal(const char* why) {
     sl.learn.ratioOk = false;
   }
   g_ordinal = 0;
-  Log("gbuffer recorder: execution identity off for this session (%s); the scope bits are plain ordinals again", why);
+  Log(kIdentityDroppedFmt, why);
 }
 
 // The graph of a G-buffer execution, followed when the old one went stale. Plain.
@@ -5496,8 +5599,7 @@ void OnRenderBody(void* rg, void* renderables) {
     // The quad filter matched nothing in a whole frame of executions (volumes not the executions' own): off.
     if (g_frameQuad.n && g_frameExecs && !g_frameCounted && ++g_quadMissFrames >= 30 && g_quadFilterOn) {
       g_quadFilterOn = false;
-      Log("gbuffer recorder: quad-view filter off for this session (30 frames in which no G-buffer execution used a "
-          "quad view's volume); every execution counts again");
+      Log("%s", kQuadFilterDroppedLine);
     } else if (g_frameCounted) {
       g_quadMissFrames = 0;
     }
@@ -5534,6 +5636,7 @@ void OnRenderBody(void* rg, void* renderables) {
     }
   }
   const bool active = Active();
+  shrec::TexIdleStep(g_tex, g_texLock, g_texIdle, active);  // R77
   if (active && (!g_gbRg || rg == g_gbRg)) g_activeEntryGen = g_entryGen;
   // Paused (kill switch, bench mode 29, the R30 governor's stage 3): the
   // entry mark still advances, so a job a sort started just before the pause
@@ -5569,7 +5672,24 @@ void OnRenderBody(void* rg, void* renderables) {
         sl.learn.idx = static_cast<uint32_t>(idx);
       }
       if (sl.learn.idx >= count) continue;
-      StartJob(j, reinterpret_cast<void**>(static_cast<uint8_t*>(renderables) + sl.learn.idx * 24), false);
+      // R73: not started by the sort hook and no G-buffer collection sorted
+      // since the last frame-heap reset: the vector may name recycled memory.
+      // Not started; it stays armed (a later sort may start it, else its start
+      // wait expires and it is dropped as stale) and the pass is drawn stock.
+      void** const vec = reinterpret_cast<void**>(static_cast<uint8_t*>(renderables) + sl.learn.idx * 24);
+      if (j.startState.load(std::memory_order_acquire) == kStartArmed) {
+        if (!EntryVectorFresh()) {
+          // An empty vector names nothing (the job builds no segment, the
+          // pass is stock as before): started as before, counted apart.
+          if (!VectorEmptyGuarded(vec)) {
+            g_unsortedStarts.fetch_add(1, std::memory_order_relaxed);
+            continue;
+          }
+          g_unsortedEmpty.fetch_add(1, std::memory_order_relaxed);
+        }
+        g_entryStarts.fetch_add(1, std::memory_order_relaxed);
+      }
+      StartJob(j, vec, false);
       j.entryGen = g_entryGen;
     }
   }
@@ -5590,9 +5710,9 @@ void OnRender(void* rg, void* renderables) {
 // A collection's vector is final (Scene's sort, pool thread): start the armed
 // job watching it.
 void OnSortedBody(void** out) {
-  if (!g_on.load(std::memory_order_relaxed) || g_disabled.load(std::memory_order_relaxed) ||
-      g_shutdown.load(std::memory_order_relaxed))
-    return;
+  if (g_shutdown.load(std::memory_order_relaxed)) return;
+  NoteSorted(out);  // R73: every sort (armed or not, on or off), for the render-entry start's check
+  if (!g_on.load(std::memory_order_relaxed) || g_disabled.load(std::memory_order_relaxed)) return;
   for (int s = 0; s < kSlots; ++s) {
     Job* j = g_jobPub[s].load(std::memory_order_acquire);
     if (!j || j->startState.load(std::memory_order_acquire) != kStartArmed) continue;
@@ -5976,7 +6096,10 @@ void LogSummary(const char* label, double frames) {
       "%.2f G-buffer executions/frame, highest ordinal %llu, quad views %d known; frame heap %.2f resets/frame, jobs "
       "stopped on a recycled heap %llu (faults contained %llu, %llu of them in re-records), used after a reset %llu; "
       "tables keys %u meshes %u, "
-      "meshes relearnt %llu, compactions %llu",
+      "meshes relearnt %llu, compactions %llu; render-entry starts %llu (%llu of them on an empty "
+      "unsorted vector), skipped (no G-buffer collection sorted since the last heap reset) %llu, implausible "
+      "items %llu, "
+      "G-buffer collection sorts %.1f/frame",
       label, frames, slots, g_helpers.load(), g_disabled.load() ? ", DISABLED" : "",
       static_cast<unsigned long long>(exec), static_cast<unsigned long long>(passes),
       passes ? 100.0 * exec / passes : 0.0, static_cast<unsigned long long>(partial),
@@ -5988,7 +6111,11 @@ void LogSummary(const char* label, double frames) {
       static_cast<unsigned long long>(g_recycledFaults.exchange(0)),
       static_cast<unsigned long long>(g_redoFaultsContained.exchange(0)),
       static_cast<unsigned long long>(g_recycledAtPass.exchange(0)), g_tab.keysUsed, g_tab.mesh.meshesUsed,
-      static_cast<unsigned long long>(g_meshRelearnt.load()), static_cast<unsigned long long>(g_compactions.load()));
+      static_cast<unsigned long long>(g_meshRelearnt.load()), static_cast<unsigned long long>(g_compactions.load()),
+      static_cast<unsigned long long>(g_entryStarts.exchange(0)),
+      static_cast<unsigned long long>(g_unsortedEmpty.exchange(0)),
+      static_cast<unsigned long long>(g_unsortedStarts.exchange(0)),
+      static_cast<unsigned long long>(g_implausible.exchange(0)), g_sortsNoted.exchange(0) / f);
 }
 
 void LogCounters(const char* label, double frames) {

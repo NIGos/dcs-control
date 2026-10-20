@@ -61,7 +61,8 @@ public static class BoostAttach
         var hintAlive = hintPid is { } hint && candidates.Any(c => c.Pid == hint);
         foreach (var candidate in candidates.OrderBy(c => c.StartTime))
         {
-            if (now - candidate.StartTime < minLifetime) continue;
+            // Both in UTC: Process.StartTime is local time, and a DST change would otherwise shift the lifetime by an hour.
+            if (now.ToUniversalTime() - candidate.StartTime.ToUniversalTime() < minLifetime) continue;
             if (hintAlive) { if (candidate.Pid == hintPid) return candidate.Pid; continue; }
             if (executable is not null && (candidate.ImagePath is null || !string.Equals(candidate.ImagePath, executable, StringComparison.OrdinalIgnoreCase))) continue;
             return candidate.Pid;
@@ -106,6 +107,24 @@ public sealed class BoostLedger
         }
         change = new BoostChange(pid, name, startTicks, originalAffinity, originalPriority, targetAffinity, targetPriority);
         _changes[(pid, startTicks)] = change;
+        return true;
+    }
+
+    /// <summary>Records a process a confined one started after it was confined: it inherited what CPU Boost applied to its
+    /// parent, the parent's mask and/or the priority CPU Boost gave it. What it inherited is recorded with all CPUs and
+    /// Normal as its original, as <see cref="TryRecord"/> does for an unknown; anything else stays as it is. False when it
+    /// is already recorded, inherited nothing, or its parent is not recorded or started after it (a recycled PID).</summary>
+    public bool TryRecordInherited(int pid, string name, long startTicks, int parentPid, ulong currentAffinity, string currentPriority, ulong allCpusMask)
+    {
+        if (_changes.ContainsKey((pid, startTicks))) return false;
+        var parent = _changes.Values.FirstOrDefault(c => c.Pid == parentPid && c.Pid != pid && c.StartTicks <= startTicks);
+        if (parent is null) return false;
+        var affinity = currentAffinity == parent.AppliedAffinity;
+        var priority = !string.Equals(parent.AppliedPriority, parent.OriginalPriority, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(currentPriority, parent.AppliedPriority, StringComparison.OrdinalIgnoreCase);
+        if (!affinity && !priority) return false;
+        foreach (var stale in _changes.Keys.Where(k => k.Pid == pid).ToArray()) _changes.Remove(stale);
+        _changes[(pid, startTicks)] = new BoostChange(pid, name, startTicks, affinity ? allCpusMask : currentAffinity, priority ? "Normal" : currentPriority, currentAffinity, currentPriority);
         return true;
     }
 

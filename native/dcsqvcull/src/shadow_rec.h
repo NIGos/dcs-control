@@ -1393,6 +1393,34 @@ void FreeTex(TexTable& t) {
   t = TexTable();
 }
 
+// R77: the texture table's references on DCS's views were released only by our jobs' upkeep (eviction after a job,
+// the 3/4 wipe), so with the recorder idle (off, paused, F10 map, the menu, a mission or map load) they pinned the
+// previous scene's textures in VRAM until recording had run ~600-1500 entries on the next one. Wiped (render thread,
+// exclusive lock, so no job reads it) at the first entry after a mission event and after the recorder goes inactive.
+struct TexIdle {
+  std::atomic<uint32_t> eventGen{0};  // bumped by NoteMissionEvent (any thread)
+  uint32_t seen = 0;
+  bool pending = false, wasActive = false;
+  uint64_t wipes = 0;
+};
+// Render thread, at its entry; true when the table was wiped now (a busy lock retries at the next entry).
+inline bool TexIdleStep(TexTable& t, SRWLOCK& lock, TexIdle& s, bool active) {
+  if (const uint32_t g = s.eventGen.load(std::memory_order_acquire); g != s.seen) s.seen = g, s.pending = true;
+  if (s.wasActive && !active) s.pending = true;
+  s.wasActive = active;
+  if (!s.pending) return false;
+  if (!t.e || !t.live) {
+    s.pending = false;
+    return false;
+  }
+  if (!TryAcquireSRWLockExclusive(&lock)) return false;
+  TexWipe(t);
+  ReleaseSRWLockExclusive(&lock);
+  s.pending = false;
+  ++s.wipes;
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Environment of a job (DCS's classes and globals; fakes in the tests)
 // ---------------------------------------------------------------------------
@@ -2009,6 +2037,26 @@ int PreTextures(Job& j, int t, Pre& p, const PreMat& pm) {
   return kRecorded;
 }
 
+// R61: a pointer read from a caster that can be dereferenced as a DCS heap
+// object: 8-aligned, above the first 64 KB, in the 47-bit user range. The
+// renderable, its item and its material are such objects. The faults of R55
+// and R59/R60 (F10 map after a mission restart) were [mat] with mat read from
+// recycled memory: 0xc600000005 (unaligned) and a non-canonical one.
+inline bool PlausiblePtr(const void* p) {
+  const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+  return a >= 0x10000 && a < 0x800000000000ull && (a & 7) == 0;
+}
+std::atomic<uint64_t> g_implausible{0};  // casters whose pointers were not plausible (their jobs dropped)
+
+// A caster pointer that is not plausible: the vector is not this frame's
+// (recycled memory). The job is dropped like one on a recycled heap: the
+// primary does not commit it (PreAndCommit, j.recycled).
+inline void Implausible(Job& j, Pre& p) {
+  g_implausible.fetch_add(1, std::memory_order_relaxed);
+  j.recycled.store(1, std::memory_order_relaxed);
+  p.code = kRNotModel;
+}
+
 void PreOne(Job& j, int t, size_t i) {
   const Env& env = *j.env;
   Pre& p = j.pre[i];
@@ -2021,12 +2069,15 @@ void PreOne(Job& j, int t, size_t i) {
   p.texCode = kRecorded;
   p.meshOk = 0;
   void* r = j.snap[i];
+  if (r && !PlausiblePtr(r)) return Implausible(j, p);
   if (!r || *static_cast<void**>(r) != env.smrVt) {
     p.code = kRNotSmr;
     return;
   }
   auto* item = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(r) + 0x10);
+  if (item && !PlausiblePtr(item)) return Implausible(j, p);
   auto* mat = item ? *reinterpret_cast<uint8_t**>(item + 0x10) : nullptr;
+  if (mat && !PlausiblePtr(mat)) return Implausible(j, p);
   if (!mat || *reinterpret_cast<void**>(mat) != env.modelVt) {
     p.code = kRNotModel;
     return;
@@ -2387,6 +2438,13 @@ bool PreAndCommit(Job& j) {
           PreChunk(j, 0, from);
           continue;
         }
+      }
+      // A helper whose stage-A read faulted (contained, HelperBody) never
+      // publishes its chunk: the job is dropped anyway, so do not wait out
+      // kPreWaitUs for it (helpers still reading keep the slot busy).
+      if (j.recycled.load(std::memory_order_relaxed)) {
+        j.commitUs = commitUs;
+        return false;  // not committed: j.result stays kBuildNone
       }
       if (!w0) {
         w0 = defrec::Qpc();
@@ -3779,9 +3837,14 @@ struct Casc {
   int64_t lateEntry = 0, latePassQpc = 0;  // the render entry and pass time of a late job (0: none)
   bool lateMaint = false;  // the late job's table maintenance is still due
   uint32_t boost = 0;      // jobs left with one more helper (a recent job was late or tight)
+  // R61: the frame-heap generation when Scene's sort last finished this
+  // cascade's vector (the sort hook, pool thread; 0: never). A render-entry
+  // start needs it current (EntryVectorFresh).
+  std::atomic<uint64_t> sortGen{0};
   Stat st;
 };
 Casc g_casc[kSlots];
+std::atomic<uint64_t> g_unsortedStarts{0};  // render-entry starts skipped: vector not sorted since the last heap reset
 std::atomic<uint64_t> g_probes{0}, g_probeOdd{0}, g_probeLeaders{0}, g_faults{0}, g_probePool{0};
 // Texture table (the render thread maintains it; workers read it under the lock, shared).
 TexTable g_tex;
@@ -3794,6 +3857,8 @@ TexMiss g_pendMiss[kMaxTexKeys];
 const TexEntry* g_pendStale[kMaxTexKeys];
 uint32_t g_pendMissCount = 0, g_pendStaleCount = 0, g_pendGen = 0;
 bool g_pendEvict = false;
+TexIdle g_texIdle;  // R77
+inline void NoteMissionEvent() { g_texIdle.eventGen.fetch_add(1, std::memory_order_acq_rel); }
 
 // A finished job's misses and stale entries, queued (render thread, its workers idle).
 void QueueMaint(const Job& j) {
@@ -5004,6 +5069,8 @@ void MaintainTables() {
       static_cast<unsigned long long>(++g_compactions), g_entryGen, CompactText(cs).c_str());
 }
 
+bool EntryVectorFresh(const Casc& cs);
+
 void OnRender(void* rg, void* renderables) {
   if (!g_renderTid || GetCurrentThreadId() != g_renderTid) return;
   g_inside.fetch_add(1);
@@ -5012,6 +5079,10 @@ void OnRender(void* rg, void* renderables) {
   ++g_entryGen;
   ApplyPriority();
   const bool active = Active();
+  if (TexIdleStep(g_tex, g_texLock, g_texIdle, active)) {  // R77: its misses / stale entries named the old table
+    g_pendMissCount = g_pendStaleCount = 0;
+    g_pendEvict = false;
+  }
   if (active) TryMaintain();  // the texture table, before this entry's jobs take its lock
   if (active) MaintainTables();  // the key and mesh tables (long sessions)
   const uint32_t scope = g_scope.load();
@@ -5038,6 +5109,14 @@ void OnRender(void* rg, void* renderables) {
     if (!cs.armed && !Arm(s)) continue;
     if (count == SIZE_MAX) count = VectorCountGuarded(rg, renderables);
     if (cs.learn.idx >= count) continue;
+    // R61: not started by the sort hook and its vector not sorted since the
+    // last frame-heap reset (the F10 map: the cascades' collections are not
+    // rebuilt while the heap is recycled under their old pointers): the
+    // vector names recycled memory. Not started; the pass is drawn stock.
+    if (j.startState.load(std::memory_order_acquire) == kStartArmed && !EntryVectorFresh(cs)) {
+      g_unsortedStarts.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
     // The latest start: the vector is final now (the sort hook may have started it already).
     StartJob(j, reinterpret_cast<void**>(static_cast<uint8_t*>(renderables) + cs.learn.idx * 24), false);
     j.entryGen = g_entryGen;
@@ -5106,12 +5185,24 @@ void OnSorted(void** out) {
   if (!g_on.load(std::memory_order_relaxed) || g_disabled.load(std::memory_order_relaxed)) return;  // off: no starts
   for (int s = 0; s < kSlots; ++s) {
     Job* j = g_casc[s].job;
-    if (!j || j->startState.load(std::memory_order_acquire) != kStartArmed) continue;
+    // R61: every sort of the cascade's vector is noted (armed or not), for the render-entry start's check.
+    if (!j || !j->armRg) continue;
     uint8_t* base = ArrayBaseGuarded(j->armRg);
-    if (base && reinterpret_cast<uint8_t*>(out) == base + static_cast<size_t>(j->armIdx) * 24 &&
-        StartJob(*j, out, true))
-      g_sortStarts++;
+    if (!base || reinterpret_cast<uint8_t*>(out) != base + static_cast<size_t>(j->armIdx) * 24) continue;
+    g_casc[s].sortGen.store(g_frameHeapGen.load(std::memory_order_acquire), std::memory_order_release);
+    if (j->startState.load(std::memory_order_acquire) == kStartArmed && StartJob(*j, out, true)) g_sortStarts++;
   }
+}
+
+// R61: a render-entry start may read the cascade's vector: Scene's sort
+// finished it since the last frame-heap reset (always true without the sort
+// hook: no record, the old behaviour). In normal frames the sort runs after
+// the frame's resets and before render entry; in the F10 map the heap is
+// reset many times per frame while the cascades' vectors keep the pointers
+// of the last world frame (the R55 / R60 faults in PreOne).
+bool EntryVectorFresh(const Casc& cs) {
+  return !g_sortPatched ||
+         cs.sortGen.load(std::memory_order_acquire) == g_frameHeapGen.load(std::memory_order_acquire);
 }
 
 uint64_t __fastcall SortHook(void* scene, void* ci, void** out, void* x) {
@@ -5144,54 +5235,12 @@ const char* CheckSortSites(uint8_t* base) {
 
 // Rewrites `n` 5-byte `call rel32` sites at once with every other thread
 // suspended, retrying while one stands inside a site (split_filter.h's way).
+// R90: qvpatch::WriteSuspended (patch_threads.h; [General] PatchMode).
 bool WriteCallSitesSuspended(uint8_t* const* sites, const uint8_t (*want)[5], int n) {
-  for (int attempt = 0; attempt < 50; ++attempt) {
-    HANDLE held[2048];
-    int nHeld = 0;
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap == INVALID_HANDLE_VALUE) return false;
-    THREADENTRY32 te{sizeof(te)};
-    bool clear = true;
-    for (BOOL ok = Thread32First(snap, &te); ok && nHeld < 2048; ok = Thread32Next(snap, &te)) {
-      if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId()) continue;
-      HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
-      if (!h) continue;
-      if (SuspendThread(h) == static_cast<DWORD>(-1)) {
-        CloseHandle(h);
-        continue;
-      }
-      held[nHeld++] = h;
-      CONTEXT ctx{};
-      ctx.ContextFlags = CONTEXT_CONTROL;
-      if (GetThreadContext(h, &ctx))
-        for (int i = 0; i < n; ++i) {
-          const uintptr_t a = reinterpret_cast<uintptr_t>(sites[i]);
-          if (ctx.Rip > a && ctx.Rip < a + 5) clear = false;
-        }
-    }
-    CloseHandle(snap);
-    bool done = false;
-    if (clear) {
-      done = true;
-      for (int i = 0; i < n; ++i) {
-        DWORD old;
-        if (!VirtualProtect(sites[i], 5, PAGE_EXECUTE_READWRITE, &old)) {
-          done = false;
-          continue;
-        }
-        memcpy(sites[i], want[i], 5);
-        VirtualProtect(sites[i], 5, old, &old);
-        FlushInstructionCache(GetCurrentProcess(), sites[i], 5);
-      }
-    }
-    for (int k = 0; k < nHeld; ++k) {
-      ResumeThread(held[k]);
-      CloseHandle(held[k]);
-    }
-    if (clear) return done;
-    Sleep(2);
-  }
-  return false;
+  qvpatch::Site s[8];
+  if (n > 8) return false;
+  for (int i = 0; i < n; ++i) s[i] = {sites[i], want[i], 5};
+  return qvpatch::WriteSuspended(s, n, 50);
 }
 
 // The `call rel32` bytes of a site to `target`.
@@ -5498,7 +5547,8 @@ void LogSummary(const char* label, double frames) {
       "(%.1f%%), late %llu, other stock %llu; jobs refused %llu; casters from lists %.0f/frame of %.0f (%.1f%%, "
       "helper lists %.1f%% of draws); render thread wait %.3f ms/frame (max %.3f), replay+execute %.3f ms/frame; CB "
       "ring %.2f MB/frame; jobs stopped on a recycled frame heap %llu (faults contained %llu), used after a reset %llu; "
-      "tables keys %u meshes %u, meshes relearnt %llu, compactions %llu",
+      "tables keys %u meshes %u, meshes relearnt %llu, compactions %llu; render-entry starts skipped (vector not "
+      "sorted since the last heap reset) %llu, implausible casters %llu",
       label, frames, cascades, g_split.load(), g_helpers.load(), g_disabled.load() ? ", DISABLED" : "",
       static_cast<unsigned long long>(exec), static_cast<unsigned long long>(passes),
       passes ? 100.0 * exec / passes : 0.0, static_cast<unsigned long long>(late),
@@ -5509,7 +5559,9 @@ void LogSummary(const char* label, double frames) {
       static_cast<unsigned long long>(g_recycledJobs.exchange(0)),
       static_cast<unsigned long long>(g_recycledFaults.exchange(0)),
       static_cast<unsigned long long>(g_recycledAtPass.exchange(0)), g_tab.keysUsed, g_tab.meshesUsed,
-      static_cast<unsigned long long>(g_meshRelearnt.load()), static_cast<unsigned long long>(g_compactions.load()));
+      static_cast<unsigned long long>(g_meshRelearnt.load()), static_cast<unsigned long long>(g_compactions.load()),
+      static_cast<unsigned long long>(g_unsortedStarts.exchange(0)),
+      static_cast<unsigned long long>(g_implausible.exchange(0)));
 }
 
 void LogCounters(const char* label, double frames) {

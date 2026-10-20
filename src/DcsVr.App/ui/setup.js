@@ -111,8 +111,9 @@
         // The panel's own Launch DCS: restore the applied profile if any, apply this one, then start DCS.
         checking = true; render(); message('Applying and launching…');
         adopt();
-        // Another program's dxgi.dll: the same question as the Launch DCS button, which then launches.
-        if (ui().askDxgiFirst('launch')) { checking = false; el('setupDialog').close(); return; }
+        // Another program's dxgi.dll: the same question as the Launch DCS button, which then launches. The checks first
+        // catch up with the adopted draft (its DLSS 5 may have just turned on).
+        if (await ui().askDxgiFresh('launch')) { checking = false; el('setupDialog').close(); return; }
         await ui().run('launch');
         checking = false; el('setupDialog').close();
       }

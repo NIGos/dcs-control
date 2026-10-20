@@ -56,6 +56,14 @@ public partial class App : Application
         // A monitor mode the boost helper changed for a flight and could not set back (it was ended) is set back now.
         try { if (DcsVr.Core.BoostRuntime.RestoreLeftoverDisplay(DcsVr.Core.ControlService.DefaultStateRoot) is { } restored) AppLog.Info("Monitor mode: " + restored); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception) { AppLog.Error("Monitor mode restore", error); }
+        // The same for process priorities and CPUs CPU Boost changed (a helper ended from Task Manager or crashed).
+        try { if (DcsVr.Core.BoostRuntime.RestoreLeftoverProcesses(DcsVr.Core.ControlService.DefaultStateRoot) is int processes) AppLog.Info($"CPU Boost: {processes} processes changed by an ended helper restored."); }
+        catch (Exception error) { AppLog.Error("CPU Boost leftover restore", error); }
+        // And the programs Free VRAM closed for that flight: reopened once, as the signed-in user.
+        try { if (DcsVr.Core.BoostRuntime.ReopenLeftoverPrograms(DcsVr.Core.ControlService.DefaultStateRoot) is { } reopened) foreach (var line in reopened) AppLog.Info("Free VRAM: " + line); }
+        catch (Exception error) { AppLog.Error("Free VRAM leftover reopen", error); }
+        // Desktop Tobii services it stopped need administrator rights: the page offers Start Tobii (check "tobii-paused").
+        if (DcsVr.Core.BoostRuntime.TobiiLeftPaused(DcsVr.Core.ControlService.DefaultStateRoot)) AppLog.Info("Desktop Tobii: still stopped by an ended helper; the page offers Start Tobii.");
         new WebWindow().Show();
     }
     private DateTime _lastErrorShown;

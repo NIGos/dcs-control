@@ -55,6 +55,7 @@
 #include <vector>
 
 #include "perception_shm.h"
+#include "dcsvr_pupil_fov.h"
 #include "pupil_math.hpp"  // vector helpers only; the expectations below are computed independently of the layer
 #include "predictive_depth.hpp"  // the main sequence, for the synthetic saccades
 #include "pvr_gaze.hpp"    // the PVR ABI (the fake client's table)
@@ -723,6 +724,7 @@ struct Options {
     float stale_from{-1}, stale_to{-1};  // the engine publishes nothing in this window (seconds)
     int pvr{};                       // fake Pimax PVR client: 0 none, 1 the runtime calls through the table, 2 through copies
     bool simulate{};                 // SimulateGaze=1 at (10, -5) degrees
+    bool publish_gaze{};             // [PupilShift] PublishGaze=1 (GazeOut for the engine module's Visual realism)
     unsigned seed{12345};            // the tracker noise's generator
     bool trace{};                    // [DepthBoost] Trace=1 (the layer logs every display time)
 };
@@ -730,7 +732,7 @@ struct Options {
 std::string ini_text(const Options& o, bool depth_enabled) {
     std::ostringstream s;
     s << "[PupilShift]\nEnabled=" << (o.pupil ? 1 : 0) << "\nToggle=121:5\nEyeRadiusMm=10.5\nVirtualImageM=1.5\nMaxGazeDeg=35\nIpd=" << o.ini_ipd_mm
-      << "\nSimulateGaze=" << (o.simulate ? 1 : 0) << "\nSimulateGazeXDeg=10\nSimulateGazeYDeg=-5\n\n[DepthBoost]\nEnabled=" << (depth_enabled ? 1 : 0)
+      << "\nSimulateGaze=" << (o.simulate ? 1 : 0) << "\nSimulateGazeXDeg=10\nSimulateGazeYDeg=-5\n" << (o.publish_gaze ? "PublishGaze=1\n" : "") << "\n[DepthBoost]\nEnabled=" << (depth_enabled ? 1 : 0)
       << "\nToggle=121:6\nMode=" << o.mode << "\nMaxScale=" << o.max_scale
       << "\nNearM=1.5\nUpMmPerS=" << o.up << "\nDownMmPerS=" << o.down << "\nSaccadeStepMm=" << o.saccade_step << "\nRecoverMs=800\nHoldMs=500\nStepped=" << (o.stepped ? 1 : 0) << "\nLegacy=" << (o.legacy ? 1 : 0) << "\n";
     if (o.trace) s << "Trace=1\n";
@@ -752,6 +754,8 @@ struct Summary {
     // source, edge and veto frames, GazeOut blocks checked; Pimax PVR: valid queries.
     double hold_range_mm{}, hold_span_mm{}, x1_return_s{-1}, max_step_mm{}, max_window_step_mm{}, max_scale{1};
     unsigned hold_changes{}, hold_segments{}, published{}, src_depth{}, src_vergence{}, edge_frames{}, veto_frames{}, gaze_out_checked{};
+    // Local\DcsVrPupilFov_v1: entries checked at xrLocateViews and at xrEndFrame, frames read with enabled=0.
+    unsigned fov_located{}, fov_submitted{}, fov_disabled{};
     bool has_scene{};
 };
 
@@ -938,6 +942,14 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
         !engine_boost.open(dcsvr_perception::boost_block_name, suffix.c_str())) {
         fail("harness opens the shared-memory blocks"); return sum;
     }
+    // Local\DcsVrPupilFov_v1, as the engine module reads it (opened first here: the layer opens the existing mapping).
+    dcsvr_perception::SharedBlock<dcsvr_pupil_fov::Block> engine_fov;
+    if (!engine_fov.open(dcsvr_pupil_fov::block_name, suffix.c_str())) { fail("harness opens the pupil FOV block"); return sum; }
+    static dcsvr_pupil_fov::Block fov_copy{};
+    const auto same = [](float a, float b) { return a == b || (std::isnan(a) && std::isnan(b)); };
+    const auto same_fov = [&](const float* f, const XrFovf& x) {
+        return same(f[0], x.angleLeft) && same(f[1], x.angleRight) && same(f[2], x.angleUp) && same(f[3], x.angleDown);
+    };
     std::deque<dcsvr_perception::DepthIn> engine_queue;
     SegmentCheck seg;
     sum.has_scene = static_cast<bool>(o.scene);
@@ -1011,6 +1023,23 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
         end.layerCount = 2;
         end.layers = layers;
         CHECK(layer.end(reinterpret_cast<XrSession>(static_cast<std::uintptr_t>(1)), &end) == XR_SUCCESS, "end frame succeeds", 0, 0, seconds_of(time));
+        // Local\DcsVrPupilFov_v1 at xrEndFrame: the entry confirmed from what DCS submitted. The layer's views carry the
+        // pair it handed out (original = the runtime's); a view DCS changed itself is an identity pair as submitted.
+        if (modified[time] && dcsvr_perception::seqlock_read(engine_fov.get(), fov_copy) && fov_copy.enabled) {
+            const dcsvr_pupil_fov::Entry* e = dcsvr_pupil_fov::find(fov_copy, time);
+            CHECK(e && (e->flags & dcsvr_pupil_fov::entry_flags::submitted) && e->viewCount == 4, "PupilFov: entry confirmed at xrEndFrame", e != nullptr, 0, seconds_of(time));
+            const RuntimeFrame& truth = fake.located[time];
+            for (int v = 0; e && v < 4; ++v) {
+                const auto& w = e->views[v];
+                if (fake.expect_foreign[v])
+                    CHECK(same_fov(w.shiftedFov, pv[v].fov) && same_fov(w.originalFov, pv[v].fov) && w.positionDelta[0] == 0 && w.positionDelta[1] == 0 &&
+                        w.positionDelta[2] == 0, "PupilFov: a view DCS changed itself is an identity pair as submitted", v, 0, seconds_of(time));
+                else
+                    CHECK(same_fov(w.shiftedFov, located[v].fov) && same_fov(w.originalFov, truth.views[v].fov),
+                        "PupilFov at xrEndFrame: shifted = located, original = the runtime's", v, 0, seconds_of(time));
+            }
+            ++sum.fov_submitted;
+        }
     };
 
     // The layer's pupil gaze filter (PupilGazeFilter, unit-tested on its own), run on the same gaze, so the expected
@@ -1070,7 +1099,10 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
         // GazeOut (written by the layer for this display time) and the engine module stand-in.
         dcsvr_perception::GazeOut go{};
         const bool got = dcsvr_perception::seqlock_read(engine_gaze.get(), go);
-        if ((st.depth_enabled || o.simulate) && !eyes.lost) {
+        // Without Depth boost, SimulateGaze or PublishGaze the layer writes no GazeOut at all.
+        if (!o.depth && !o.simulate && !o.publish_gaze && !o.on_frame)
+            CHECK(!got || go.displayTime == 0, "no GazeOut without Depth boost, SimulateGaze or PublishGaze", static_cast<double>(go.displayTime), 0, t);
+        if ((st.depth_enabled || o.simulate || o.publish_gaze) && !eyes.lost) {
             ++sum.gaze_out_checked;
             CHECK(got && go.displayTime == time && go.viewCount == 4 && (go.seq & 1) == 0, "GazeOut written for each located display time", got, static_cast<double>(go.displayTime - time), t);
             for (int v = 0; got && v < 4; ++v) {
@@ -1084,6 +1116,9 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
                 CHECK(got && (go.flags & dcsvr_perception::gaze_flags::valid) && std::fabs(go.gazeTan[0][0] - std::tan(rad(10))) < 1e-4f &&
                     std::fabs(go.gazeTan[0][1] - std::tan(rad(-5))) < 1e-4f && std::fabs(go.gazeTan[1][0] - std::tan(rad(10))) < 1e-4f,
                     "SimulateGaze: GazeOut valid with the simulated gaze in each eye's frame", go.gazeTan[0][0], std::tan(rad(10)), t);
+            if (o.publish_gaze && !st.depth_enabled && eyes.mode == GazeMode::tracked)
+                CHECK(got && (go.flags & dcsvr_perception::gaze_flags::valid) && std::isfinite(go.gazeTan[0][0] + go.gazeTan[1][0]),
+                    "PublishGaze: GazeOut valid with a tracked gaze, Depth boost off", go.flags, 0, t);
             if (o.scene && eyes.mode == GazeMode::tracked && !o.script.combined)
                 CHECK(got && (go.flags & dcsvr_perception::gaze_flags::valid), "GazeOut valid with a tracked gaze", go.flags, 0, t);
             if (o.pvr == 1 && st.depth_source && eyes.mode == GazeMode::tracked)
@@ -1097,6 +1132,43 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
             while (engine_queue.size() > static_cast<std::size_t>(o.latency_frames)) {
                 if (!(t >= o.stale_from && t < o.stale_to)) { dcsvr_perception::seqlock_write(engine_depth.get(), engine_queue.front()); ++sum.published; }
                 engine_queue.pop_front();
+            }
+        }
+
+        // Local\DcsVrPupilFov_v1 at xrLocateViews: enabled while Pupil shift or Depth boost is configured, and then an
+        // entry for this display time whose shifted FOVs are what xrLocateViews returned and whose originals are the
+        // runtime's; with both off (PublishGaze alone included) enabled=0 and no entries.
+        {
+            const bool got_fov = dcsvr_perception::seqlock_read(engine_fov.get(), fov_copy);
+            CHECK(got_fov && fov_copy.magic == dcsvr_pupil_fov::magic_value && fov_copy.version == dcsvr_pupil_fov::version_value &&
+                fov_copy.size == sizeof(dcsvr_pupil_fov::Block) && fov_copy.ringSize == dcsvr_pupil_fov::ring_size &&
+                fov_copy.writerPid == GetCurrentProcessId(), "PupilFov: header written by the layer", got_fov, fov_copy.magic, t);
+            const bool shift_on = !st.pupil_disabled || st.depth_enabled;
+            CHECK(got_fov && fov_copy.enabled == (shift_on ? 1u : 0u), "PupilFov: enabled = Pupil shift or Depth boost configured", fov_copy.enabled, shift_on, t);
+            if (got_fov && !fov_copy.enabled) {
+                bool empty = fov_copy.newestDisplayTime == 0;
+                for (const auto& e : fov_copy.entries) empty = empty && e.displayTime == 0;
+                CHECK(empty, "PupilFov: no entries while disabled", static_cast<double>(fov_copy.newestDisplayTime), 0, t);
+                ++sum.fov_disabled;
+            }
+            if (got_fov && shift_on && !eyes.lost) {
+                const dcsvr_pupil_fov::Entry* e = dcsvr_pupil_fov::find(fov_copy, time);
+                CHECK(e && e->viewCount == 4 && !(e->flags & dcsvr_pupil_fov::entry_flags::submitted) && fov_copy.newestDisplayTime == time,
+                    "PupilFov: an entry for each located display time", e != nullptr, 0, t);
+                bool any_shift = false;
+                for (int v = 0; e && v < 4; ++v) {
+                    const auto& w = e->views[v];
+                    CHECK(same_fov(w.shiftedFov, views[v].fov), "PupilFov: shifted FOV = what xrLocateViews returned", v, w.shiftedFov[0], t);
+                    CHECK(same_fov(w.originalFov, truth.views[v].fov), "PupilFov: original FOV = the runtime's", v, w.originalFov[0], t);
+                    const float dp = std::fabs(w.positionDelta[0] - (views[v].pose.position.x - truth.views[v].pose.position.x)) +
+                        std::fabs(w.positionDelta[1] - (views[v].pose.position.y - truth.views[v].pose.position.y)) +
+                        std::fabs(w.positionDelta[2] - (views[v].pose.position.z - truth.views[v].pose.position.z));
+                    CHECK(dp < 1e-7f, "PupilFov: position delta = located - runtime", dp, v, t);
+                    CHECK(std::fabs(std::fabs(w.orientationDelta[3]) - 1.0f) < 1e-5f, "PupilFov: orientation delta identity", w.orientationDelta[3], v, t);
+                    any_shift = any_shift || !same_fov(w.shiftedFov, truth.views[v].fov);
+                }
+                if (e && o.pupil && any_shift) CHECK(e->flags & dcsvr_pupil_fov::entry_flags::pupil, "PupilFov: pupil flag on a shifted FOV", e->flags, 0, t);
+                ++sum.fov_located;
             }
         }
 
@@ -1356,7 +1428,8 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
     sum.restored_views = fake.checked_views;
     sum.foreign_views = fake.foreign_views;
     // Without any gaze and without Ipd the layer changes nothing: every view passes through untouched (checked bitwise).
-    const bool untouched = o.xr_never_valid && o.ini_ipd_mm <= 0;
+    // Likewise with Pupil shift and Depth boost both off (PublishGaze alone only reads the gaze).
+    const bool untouched = (o.xr_never_valid && o.ini_ipd_mm <= 0) || (!o.pupil && !o.depth);
     if (untouched) CHECK(fake.checked_views == 0 && fake.foreign_views > 0, "no gaze, no Ipd: every view passes through", fake.checked_views, fake.foreign_views, -1);
     else CHECK(fake.checked_views > 0, "views were checked at xrEndFrame", 0, 0, -1);
     // The input side, as the runtime saw it.
@@ -1404,6 +1477,16 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
         CHECK(pvr_passes_through(), "after xrDestroyInstance the PVR detours pass straight through", 0, 0, -1);
         fake.pvr_mode = 0;
     }
+    // Local\DcsVrPupilFov_v1 over the run, and after xrDestroyInstance (the layer closed it: enabled 0, no entries).
+    const bool any_modified = std::any_of(modified.begin(), modified.end(), [](const auto& m) { return m.second; });
+    if (o.pupil || o.depth) CHECK(sum.fov_located > 0 && (sum.fov_submitted > 0) == any_modified, "PupilFov: entries checked at xrLocateViews (and xrEndFrame when views were shifted)", sum.fov_located, sum.fov_submitted, -1);
+    else CHECK(sum.fov_disabled > 0 && sum.fov_located == 0 && sum.fov_submitted == 0, "PupilFov: shift off, enabled=0 throughout", sum.fov_disabled, sum.fov_located, -1);
+    {
+        const bool got = dcsvr_perception::seqlock_read(engine_fov.get(), fov_copy);
+        CHECK(got && !fov_copy.enabled && fov_copy.newestDisplayTime == 0 && fov_copy.entries[0].displayTime == 0,
+            "PupilFov: disabled and cleared at xrDestroyInstance", got, fov_copy.enabled, -1);
+    }
+    engine_fov.close();
     engine_gaze.close();
     engine_depth.close();
     FreeLibrary(layer.module);
@@ -1420,7 +1503,7 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
     if (o.depth && !o.on_frame) CHECK(std::regex_search(text, std::regex("depth: \\S+ source=\\w+ vergence=\\w+ fixation=\\w+ .*scene mode=" + o.mode + " fresh=")), "log: depth line with the scene segment", 0, 0, -1);
     if (o.scene) CHECK(std::regex_search(text, std::regex("scene mode=\\w+ fresh=[1-9]")), "log: fresh depth summaries counted", 0, 0, -1);
     if (o.depth && !o.scene && !o.on_frame) CHECK(std::regex_search(text, std::regex("fresh=0 stale=0 moved=0 absent=[1-9]")), "log: no engine module: summaries absent", 0, 0, -1);
-    if (o.depth || o.simulate) CHECK(text.find("perception: shared memory") != std::string::npos && text.find("FAILED") == std::string::npos, "log: shared memory open", 0, 0, -1);
+    if (o.depth || o.simulate || o.publish_gaze) CHECK(text.find("perception: shared memory") != std::string::npos && text.find("FAILED") == std::string::npos, "log: shared memory open", 0, 0, -1);
     if (o.pvr == 1) {
         CHECK(text.find("pvr: Pimax PVR client found (interface 1.32, 2 table(s), 6 slot(s) observed)") != std::string::npos, "log: PVR client found, both tables", 0, 0, -1);
         CHECK(text.find("pvr: the runtime's PVR session found") != std::string::npos, "log: PVR session found", 0, 0, -1);
@@ -2078,6 +2161,9 @@ int main(int argc, char** argv) {
     Options f = a; f.name = "pupil_only"; f.description = "Pupil shift alone (Depth boost disabled), Ipd=64";
     f.depth = false;
     results.push_back(run(dll, out, f));
+    Options pg = f; pg.name = "publish_gaze_out"; pg.description = "PublishGaze=1, Depth boost and Pupil shift off: GazeOut carries the tracked gaze (Visual realism)";
+    pg.pupil = false; pg.publish_gaze = true;
+    results.push_back(run(dll, out, pg));
 
     // The live bug (2026-10-11): nobody wearing the headset, the bundled Quad Views' fixed focus read as a gaze.
     Options q = a; q.name = "qv_export"; q.description = "bundled Quad Views with its gaze export: combined gaze, fixed focus without a gaze";

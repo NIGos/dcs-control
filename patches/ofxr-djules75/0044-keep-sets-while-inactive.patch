@@ -1,0 +1,1019 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1476,6 +1476,27 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         endif()
+         add_test(NAME xrfg_cockpit_mask_tests COMMAND xrfg_cockpit_mask_tests)
+ 
++        # DCS Control (0044): the producer's generations reinstalled over and
++        # over (a D3D11 producer, the D3D12 reader, a hardware adapter), the
++        # process's dedicated video memory per generation. Run by hand, not by
++        # ctest: xrfg_cockpit_mask_import_bench consumer|idle|raw12|none.
++        add_executable(xrfg_cockpit_mask_import_bench tests/cockpit_mask_import_bench.cpp)
++        target_include_directories(xrfg_cockpit_mask_import_bench PRIVATE include)
++        target_link_libraries(xrfg_cockpit_mask_import_bench PRIVATE
++            xrfg_d3d12_history
++            d3d11
++            d3d12
++            dxgi
++            pdh)
++        target_compile_features(xrfg_cockpit_mask_import_bench PRIVATE cxx_std_20)
++        if(MSVC)
++            target_compile_options(xrfg_cockpit_mask_import_bench PRIVATE
++                /W4 /permissive- /EHsc)
++            target_compile_definitions(xrfg_cockpit_mask_import_bench PRIVATE
++                NOMINMAX
++                WIN32_LEAN_AND_MEAN)
++        endif()
++
+         add_executable(xrfg_vertical_fov_tests tests/vertical_fov_tests.cpp)
+         target_include_directories(xrfg_vertical_fov_tests PRIVATE include)
+         target_link_libraries(xrfg_vertical_fov_tests PRIVATE xrfg_d3d12_history d3d12 dxgi)
+diff --git a/include/xrfg/cockpit_mask.hpp b/include/xrfg/cockpit_mask.hpp
+--- a/include/xrfg/cockpit_mask.hpp
++++ b/include/xrfg/cockpit_mask.hpp
+@@ -606,6 +606,9 @@ struct CockpitMaskConsumerStats {
+     std::uint32_t sets_opened{};
+     std::uint32_t sets_retired{};
+     std::uint64_t sets_dropped{};
++    // DCS Control (0044): acquires that found the export off with the
++    // generation opened: the sets kept, nothing copied.
++    std::uint64_t inactive_kept{};
+ };
+ 
+ struct CockpitMaskConsumerOptions {
+diff --git a/src/d3d12/cockpit_mask.cpp b/src/d3d12/cockpit_mask.cpp
+--- a/src/d3d12/cockpit_mask.cpp
++++ b/src/d3d12/cockpit_mask.cpp
+@@ -123,6 +123,22 @@ void store_motion_reader_heartbeat(void* block, std::int64_t qpc) noexcept {
+         std::isfinite(values[3]);
+ }
+ 
++// DCS Control (0044): the export off (header_flags::active clear) with the
++// generation the reader opened, in its process and on its adapter: the
++// producer keeps its textures, fences and NT handles while off and
++// republishes the same generation when on again, so the opened set is kept
++// (nothing paired or copied while off) and never imported again. Every
++// import of a shared NT handle (D3D11 or D3D12 reader, the same allocation or
++// a new one) adds its size to the process's "Dedicated Usage" for good, even
++// once released (xrfg_cockpit_mask_import_bench); the memory itself is freed.
++template <typename Header>
++[[nodiscard]] bool inactive_same_generation(const Header& header, std::uint32_t magic, std::uint32_t version,
++    std::uint32_t active, std::uint32_t generation, DWORD process_id, std::uint64_t adapter_luid) noexcept {
++    return header.magic == magic && header.version == version && (header.flags & active) == 0 &&
++        header.generation != 0 && header.generation == generation && header.ownerPid == process_id &&
++        header.adapterLuid == adapter_luid;
++}
++
+ }  // namespace
+ 
+ struct CockpitMaskConsumer::Impl {
+@@ -521,7 +537,13 @@ struct CockpitMaskConsumer::Impl {
+             return pairing;
+         }
+         if (!cmv::header_usable(header, process_id) || header.adapterLuid != adapter_luid) {
+-            retire_motion_opened();
++            // DCS Control (0044): kept while the export is off with the same
++            // generation.
++            if (!motion_opened ||
++                !inactive_same_generation(header, cmv::block_magic, cmv::block_version, cmv::header_flags::active,
++                    motion_opened->generation, process_id, adapter_luid)) {
++                retire_motion_opened();
++            }
+             pairing.result = CockpitMotionLookup::header_unusable;
+             return pairing;
+         }
+@@ -784,7 +806,13 @@ struct CockpitMaskConsumer::Impl {
+         }
+         if (!cd::header_usable(header, process_id) || header.adapterLuid != adapter_luid ||
+             header.atlasW != mask.atlasW || header.atlasH != mask.atlasH) {
+-            retire_depth_opened();
++            // DCS Control (0044): kept while the export is off with the same
++            // generation.
++            if (!depth_opened ||
++                !inactive_same_generation(header, cd::block_magic, cd::block_version, cd::header_flags::active,
++                    depth_opened->generation, process_id, adapter_luid)) {
++                retire_depth_opened();
++            }
+             pairing.result = CockpitDepthLookup::header_unusable;
+             return pairing;
+         }
+@@ -1258,6 +1286,17 @@ struct CockpitMaskConsumer::Impl {
+         }
+         if (!cm::header_usable(header, process_id) ||
+             (header.flags & cm::header_flags::fence) == 0 || header.fenceHandle == 0) {
++            // DCS Control (0044): the export off with the generation opened:
++            // every set kept (the depth's and the motion's too), nothing
++            // paired or copied; the slots already held go back as on a frame
++            // without a copy (the release fence is kept open).
++            if (opened &&
++                inactive_same_generation(header, cm::block_magic, cm::block_version, cm::header_flags::active,
++                    opened->generation, process_id, adapter_luid)) {
++                ++stats.inactive_kept;
++                release_unused(header.generation, header.newestMaskSeq);
++                return CockpitMaskLookup::header_unusable;
++            }
+             retire_all_opened(); // DCS Control (0043)
+             return CockpitMaskLookup::header_unusable;
+         }
+diff --git a/tests/cockpit_mask_import_bench.cpp b/tests/cockpit_mask_import_bench.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/cockpit_mask_import_bench.cpp
+@@ -0,0 +1,713 @@
++// DCS Control (0044): the producer's generations reinstalled over and over
++// (DCS Control's engine module re-exporting: new shared R8 and R16G16 atlases
++// with NT handles and new shared fences each time, the old NT handles closed
++// two generations later), with a D3D11 producer and a D3D12 reader on the same
++// hardware adapter, in one process, as in DCS. Reports the process's video
++// memory per generation: DXGI QueryVideoMemoryInfo (local) and PDH
++// "\GPU Process Memory(pid_*)\Dedicated Usage" (what Task Manager shows).
++//
++// Not part of ctest (it needs a hardware adapter and runs for minutes):
++//   xrfg_cockpit_mask_import_bench <mode> [generations] [frames] [atlasW] [atlasH]
++// mode: none      the producer alone (nothing opened)
++//       raw12     a D3D12 reader opens and releases every generation's handles
++//       raw12copy the same, and copies from each opened texture
++//       reopen12  one generation, opened and released by the D3D12 reader
++//                 again and again
++//       raw11     a second D3D11 device opens and releases them
++//       consumer  xrfg::CockpitMaskConsumer with the depth companion (acquire)
++//       idle      the consumer opens the generation, then the header goes
++//                 inactive and active again with the same generation (the
++//                 producer keeps its textures, fences and handles)
++// Experiments (raw12*): XRFG_IMPORT_BENCH_TEXTURES=0 / _FENCES=0 opens no
++// texture / fence, _EVICT=1 evicts the textures before releasing them,
++// _IMMEDIATE=1 releases them at once.
++// Measured on an RTX 5090 (2026-10-19): every import of a shared texture's
++// NT handle adds the texture's size to Dedicated Usage for good (raw12,
++// raw12copy, reopen12, raw11 and consumer alike; fences add nothing; evicting
++// or releasing at once changes nothing, neither does releasing the D3D12
++// device), while DXGI's local usage and budget and nvidia-smi stay flat: the
++// count grows past the card's size, the memory is freed. `none` and, with
++// DCS Control (0044), `idle` stay flat. Exits 2 when `idle` grows Dedicated
++// Usage by more than 1 MB a cycle (XRFG_IMPORT_BENCH_LIMIT_MB to change it).
++
++#include "xrfg/cockpit_mask.hpp"
++#include "xrfg/dcsvr_cockpit_depth.h"
++#include "xrfg/dcsvr_cockpit_mask.h"
++
++#include <windows.h>
++#include <d3d11_4.h>
++#include <d3d12.h>
++#include <dxgi1_6.h>
++#include <pdh.h>
++#include <wrl/client.h>
++
++#include <array>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <deque>
++#include <memory>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++namespace {
++
++using Microsoft::WRL::ComPtr;
++namespace cm = dcsvr_cockpit_mask;
++namespace cd = dcsvr_cockpit_depth;
++
++void check(HRESULT result, const char* what) {
++    if (FAILED(result)) {
++        char text[160];
++        std::snprintf(text, sizeof(text), "%s failed: 0x%08lx", what, static_cast<unsigned long>(result));
++        throw std::runtime_error(text);
++    }
++}
++
++std::int64_t qpc_now() {
++    LARGE_INTEGER value{};
++    QueryPerformanceCounter(&value);
++    return value.QuadPart;
++}
++
++std::int64_t qpc_frequency() {
++    LARGE_INTEGER value{};
++    QueryPerformanceFrequency(&value);
++    return value.QuadPart;
++}
++
++// An integer from the environment (experiments), or `fallback`.
++int env_int(const char* name, int fallback) {
++    char value[32]{};
++    const DWORD length = GetEnvironmentVariableA(name, value, sizeof(value));
++    return length > 0 && length < sizeof(value) ? std::atoi(value) : fallback;
++}
++
++double mb(std::uint64_t bytes) {
++    return double(bytes) / (1024.0 * 1024.0);
++}
++
++// PDH "\GPU Process Memory(pid_<this>_*)\Dedicated Usage", summed over the
++// instances (one per adapter).
++class DedicatedUsage final {
++public:
++    DedicatedUsage() {
++        if (PdhOpenQueryW(nullptr, 0, &query_) != ERROR_SUCCESS) {
++            query_ = nullptr;
++            return;
++        }
++        const std::wstring path =
++            L"\\GPU Process Memory(pid_" + std::to_wstring(GetCurrentProcessId()) + L"_*)\\Dedicated Usage";
++        if (PdhAddEnglishCounterW(query_, path.c_str(), 0, &counter_) != ERROR_SUCCESS) {
++            counter_ = nullptr;
++        }
++    }
++    ~DedicatedUsage() {
++        if (query_ != nullptr) {
++            PdhCloseQuery(query_);
++        }
++    }
++    DedicatedUsage(const DedicatedUsage&) = delete;
++    DedicatedUsage& operator=(const DedicatedUsage&) = delete;
++
++    // Bytes, or -1 when PDH has no counter.
++    double read() {
++        if (counter_ == nullptr || PdhCollectQueryData(query_) != ERROR_SUCCESS) {
++            return -1.0;
++        }
++        DWORD size = 0, count = 0;
++        PdhGetFormattedCounterArrayW(counter_, PDH_FMT_LARGE, &size, &count, nullptr);
++        std::vector<std::uint8_t> buffer(size + 16);
++        auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
++        if (PdhGetFormattedCounterArrayW(counter_, PDH_FMT_LARGE, &size, &count, items) != ERROR_SUCCESS) {
++            return -1.0;
++        }
++        double total = 0.0;
++        for (DWORD index = 0; index < count; ++index) {
++            total += double(items[index].FmtValue.largeValue);
++        }
++        return total;
++    }
++
++private:
++    PDH_HQUERY query_{};
++    PDH_HCOUNTER counter_{};
++};
++
++// One generation of what the engine module shares.
++struct Generation {
++    std::uint32_t id{};
++    std::array<ComPtr<ID3D11Texture2D>, cm::slot_count> mask{};
++    std::array<ComPtr<ID3D11UnorderedAccessView>, cm::slot_count> mask_uav{};
++    std::array<HANDLE, cm::slot_count> mask_handle{};
++    std::array<ComPtr<ID3D11Texture2D>, cd::slot_count> depth{};
++    std::array<ComPtr<ID3D11UnorderedAccessView>, cd::slot_count> depth_uav{};
++    std::array<HANDLE, cd::slot_count> depth_handle{};
++    ComPtr<ID3D11Fence> fence;
++    HANDLE fence_handle{};
++    ComPtr<ID3D11Fence> release_fence;
++    HANDLE release_fence_handle{};
++
++    // The engine releases its objects at once and closes the handles later.
++    void release_objects() {
++        for (auto& texture : mask) texture.Reset();
++        for (auto& view : mask_uav) view.Reset();
++        for (auto& texture : depth) texture.Reset();
++        for (auto& view : depth_uav) view.Reset();
++        fence.Reset();
++        release_fence.Reset();
++    }
++    void close_handles() {
++        for (HANDLE& handle : mask_handle) {
++            if (handle != nullptr) CloseHandle(handle);
++            handle = nullptr;
++        }
++        for (HANDLE& handle : depth_handle) {
++            if (handle != nullptr) CloseHandle(handle);
++            handle = nullptr;
++        }
++        for (HANDLE* handle : {&fence_handle, &release_fence_handle}) {
++            if (*handle != nullptr) CloseHandle(*handle);
++            *handle = nullptr;
++        }
++    }
++};
++
++class Producer final {
++public:
++    Producer(IDXGIAdapter1* adapter, const std::wstring& suffix, UINT width, UINT height)
++        : width_(width), height_(height) {
++        ComPtr<ID3D11Device> device;
++        ComPtr<ID3D11DeviceContext> context;
++        check(D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION,
++                  device.GetAddressOf(), nullptr, context.GetAddressOf()),
++            "D3D11CreateDevice");
++        check(device.As(&device_), "ID3D11Device5");
++        check(context.As(&context_), "ID3D11DeviceContext4");
++        DXGI_ADAPTER_DESC1 description{};
++        adapter->GetDesc1(&description);
++        luid_ = static_cast<std::uint64_t>(description.AdapterLuid.LowPart) |
++            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(description.AdapterLuid.HighPart)) << 32U);
++        mask_mapping_ = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 4096,
++            (std::wstring(cm::block_name) + suffix).c_str());
++        depth_mapping_ = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 4096,
++            (std::wstring(cd::block_name) + suffix).c_str());
++        if (mask_mapping_ == nullptr || depth_mapping_ == nullptr) throw std::runtime_error("CreateFileMappingW");
++        mask_block_ = static_cast<cm::Header*>(MapViewOfFile(mask_mapping_, FILE_MAP_ALL_ACCESS, 0, 0, 4096));
++        depth_block_ = static_cast<cd::Header*>(MapViewOfFile(depth_mapping_, FILE_MAP_ALL_ACCESS, 0, 0, 4096));
++        if (mask_block_ == nullptr || depth_block_ == nullptr) throw std::runtime_error("MapViewOfFile");
++    }
++    ~Producer() {
++        for (auto& old : old_) {
++            old.release_objects();
++            old.close_handles();
++        }
++        current_.release_objects();
++        current_.close_handles();
++        UnmapViewOfFile(mask_block_);
++        UnmapViewOfFile(depth_block_);
++        CloseHandle(mask_mapping_);
++        CloseHandle(depth_mapping_);
++    }
++    Producer(const Producer&) = delete;
++    Producer& operator=(const Producer&) = delete;
++
++    // A reinstall: new atlases, fences and handles, a new generation; the
++    // old objects released, their handles closed `keep` generations later.
++    void reinstall(std::size_t keep = 2) {
++        if (current_.id != 0) {
++            current_.release_objects();
++            old_.push_back(current_);
++            current_ = {};
++        }
++        while (old_.size() > keep) {
++            old_.front().close_handles();
++            old_.pop_front();
++        }
++        Generation next{};
++        next.id = ++generation_;
++        D3D11_TEXTURE2D_DESC description{};
++        description.Width = width_;
++        description.Height = height_;
++        description.MipLevels = description.ArraySize = 1;
++        description.Format = DXGI_FORMAT_R8_UNORM;
++        description.SampleDesc.Count = 1;
++        description.Usage = D3D11_USAGE_DEFAULT;
++        description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
++        description.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
++        const auto make = [&](ComPtr<ID3D11Texture2D>& texture, ComPtr<ID3D11UnorderedAccessView>& view,
++                              HANDLE& handle) {
++            check(device_->CreateTexture2D(&description, nullptr, texture.GetAddressOf()), "CreateTexture2D");
++            check(device_->CreateUnorderedAccessView(texture.Get(), nullptr, view.GetAddressOf()), "UAV");
++            ComPtr<IDXGIResource1> resource;
++            check(texture.As(&resource), "IDXGIResource1");
++            check(resource->CreateSharedHandle(
++                      nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &handle),
++                "CreateSharedHandle(texture)");
++            const float zero[4] = {};
++            context_->ClearUnorderedAccessViewFloat(view.Get(), zero);
++        };
++        for (int index = 0; index < cm::slot_count; ++index) {
++            make(next.mask[index], next.mask_uav[index], next.mask_handle[index]);
++        }
++        description.Format = DXGI_FORMAT_R16G16_FLOAT;
++        for (int index = 0; index < cd::slot_count; ++index) {
++            make(next.depth[index], next.depth_uav[index], next.depth_handle[index]);
++        }
++        check(device_->CreateFence(seq_, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(next.fence.GetAddressOf())),
++            "CreateFence");
++        check(next.fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &next.fence_handle), "fence handle");
++        check(device_->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(next.release_fence.GetAddressOf())),
++            "CreateFence(release)");
++        check(next.release_fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &next.release_fence_handle),
++            "release fence handle");
++        context_->Flush();
++        current_ = next;
++
++        mask_ = {};
++        mask_.magic = cm::block_magic;
++        mask_.version = cm::block_version;
++        mask_.structSize = sizeof(cm::Header);
++        mask_.flags = cm::header_flags::active | cm::header_flags::fence | cm::header_flags::release_fence |
++            cm::header_flags::reader_heartbeat;
++        mask_.generation = current_.id;
++        mask_.slotCount = cm::slot_count;
++        mask_.format = cm::format_r8_unorm;
++        mask_.atlasW = width_;
++        mask_.atlasH = height_;
++        mask_.ownerPid = GetCurrentProcessId();
++        mask_.adapterLuid = luid_;
++        for (int index = 0; index < cm::slot_count; ++index) {
++            mask_.textureHandle[index] = reinterpret_cast<std::uintptr_t>(current_.mask_handle[index]);
++        }
++        mask_.fenceHandle = reinterpret_cast<std::uintptr_t>(current_.fence_handle);
++        mask_.releaseFenceHandle = reinterpret_cast<std::uintptr_t>(current_.release_fence_handle);
++        mask_.qpcFrequency = qpc_frequency();
++
++        depth_ = {};
++        depth_.magic = cd::block_magic;
++        depth_.version = cd::block_version;
++        depth_.structSize = sizeof(cd::Header);
++        depth_.flags = cd::header_flags::active | cd::header_flags::fence | cd::header_flags::reader_heartbeat |
++            cd::header_flags::shares_mask_fence;
++        depth_.generation = current_.id;
++        depth_.slotCount = cd::slot_count;
++        depth_.format = cd::format_r16g16_float;
++        depth_.atlasW = width_;
++        depth_.atlasH = height_;
++        depth_.ownerPid = GetCurrentProcessId();
++        depth_.adapterLuid = luid_;
++        for (int index = 0; index < cd::slot_count; ++index) {
++            depth_.textureHandle[index] = reinterpret_cast<std::uintptr_t>(current_.depth_handle[index]);
++        }
++        depth_.fenceHandle = mask_.fenceHandle;
++        depth_.qpcFrequency = qpc_frequency();
++        depth_.revision = cd::contract_revision;
++        publish();
++    }
++
++    // The export off (or on again) with the same generation: textures,
++    // fences and handles kept.
++    void set_active(bool active) {
++        if (active) {
++            mask_.flags |= cm::header_flags::active;
++            depth_.flags |= cd::header_flags::active;
++        } else {
++            mask_.flags &= ~cm::header_flags::active;
++            depth_.flags &= ~cd::header_flags::active;
++        }
++        publish();
++    }
++
++    // A frame: both slots cleared (written) and committed, the fence signalled.
++    void commit(std::int64_t display_time) {
++        const int slot = next_slot_;
++        next_slot_ = (next_slot_ + 1) % cm::slot_count;
++        const float value[4] = {float(seq_ % 7) / 7.0F, 0.5F, 0.0F, 0.0F};
++        context_->ClearUnorderedAccessViewFloat(current_.mask_uav[slot].Get(), value);
++        context_->ClearUnorderedAccessViewFloat(current_.depth_uav[slot].Get(), value);
++        const std::uint64_t seq = ++seq_;
++        const UINT view_width = width_ / 2;
++        cm::MaskSlot& record = mask_.slot[slot];
++        record = {};
++        record.maskSeq = seq;
++        record.engineFrame = seq;
++        record.displayTime = display_time;
++        record.qpcCommit = qpc_now();
++        record.flags = cm::slot_flags::valid | cm::slot_flags::display_time | cm::slot_flags::depth;
++        record.viewMask = 3U;
++        cd::DepthSlot& depth = depth_.slot[slot];
++        depth = {};
++        depth.seq = seq;
++        depth.engineFrame = seq;
++        depth.displayTime = display_time;
++        depth.qpcCommit = record.qpcCommit;
++        depth.flags = cd::slot_flags::valid | cd::slot_flags::display_time | cd::slot_flags::poses;
++        depth.viewMask = 3U;
++        for (int view = 0; view < 2; ++view) {
++            cm::MaskView& entry = record.view[view];
++            entry.flags = cm::view_flags::valid | cm::view_flags::stencil;
++            entry.x = static_cast<std::uint32_t>(view) * view_width;
++            entry.y = 0;
++            entry.w = view_width;
++            entry.h = height_;
++            entry.srcW = view_width * 2;
++            entry.srcH = height_ * 2;
++            entry.divisor = 2;
++            entry.fovTan[0] = -1.0F;
++            entry.fovTan[1] = 1.0F;
++            entry.fovTan[2] = 0.8F;
++            entry.fovTan[3] = -0.8F;
++            cd::DepthView& grid = depth.view[view];
++            grid.flags = cd::view_flags::valid | cd::view_flags::same_grid_as_mask | cd::view_flags::pose;
++            grid.x = entry.x;
++            grid.y = entry.y;
++            grid.w = entry.w;
++            grid.h = entry.h;
++            grid.srcW = entry.srcW;
++            grid.srcH = entry.srcH;
++            grid.divisor = entry.divisor;
++            std::memcpy(grid.fovTan, entry.fovTan, sizeof(grid.fovTan));
++            grid.poseOrientation[3] = 1.0F;
++            grid.posePosition[1] = 1.2F;
++        }
++        mask_.newestMaskSeq = seq;
++        mask_.newestSlot = static_cast<std::uint32_t>(slot);
++        depth_.newestSeq = seq;
++        depth_.newestSlot = static_cast<std::uint32_t>(slot);
++        check(context_->Signal(current_.fence.Get(), seq), "ID3D11DeviceContext4::Signal");
++        context_->Flush();
++        publish();
++    }
++
++    [[nodiscard]] std::uint64_t seq() const {
++        return seq_;
++    }
++
++private:
++    void publish() {
++        mask_.heartbeatQpc = depth_.heartbeatQpc = qpc_now();
++        cd::seqlock_write(depth_block_, depth_);
++        cm::seqlock_write(mask_block_, mask_);
++    }
++
++public:
++    Generation current_{};
++
++private:
++    UINT width_{}, height_{};
++    std::uint64_t luid_{};
++    ComPtr<ID3D11Device5> device_;
++    ComPtr<ID3D11DeviceContext4> context_;
++    HANDLE mask_mapping_{}, depth_mapping_{};
++    cm::Header* mask_block_{};
++    cd::Header* depth_block_{};
++    cm::Header mask_{};
++    cd::Header depth_{};
++    std::deque<Generation> old_;
++    std::uint32_t generation_{5000};
++    std::uint64_t seq_{};
++    int next_slot_{};
++};
++
++// The D3D12 reader without the consumer: every texture and fence of a
++// generation opened (and with `copy`, each texture copied once on a copy
++// queue that waits for the producer's fence), released at the next one.
++class RawReader final {
++public:
++    RawReader(ID3D12Device* device, bool copy) : device_(device), copy_(copy) {
++        D3D12_COMMAND_QUEUE_DESC description{};
++        description.Type = D3D12_COMMAND_LIST_TYPE_COPY;
++        check(device_->CreateCommandQueue(&description, IID_PPV_ARGS(queue_.GetAddressOf())), "copy queue");
++        check(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(done_.GetAddressOf())), "fence");
++        check(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(allocator_.GetAddressOf())),
++            "allocator");
++        check(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, allocator_.Get(), nullptr,
++                  IID_PPV_ARGS(list_.GetAddressOf())),
++            "list");
++        check(list_->Close(), "Close");
++        event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
++    }
++    ~RawReader() {
++        drain();
++        CloseHandle(event_);
++    }
++    RawReader(const RawReader&) = delete;
++    RawReader& operator=(const RawReader&) = delete;
++
++    void open(const Generation& generation, std::uint64_t seq) {
++        release();
++        if (env_int("XRFG_IMPORT_BENCH_TEXTURES", 1) != 0) {
++            for (HANDLE handle : generation.mask_handle) open_texture(handle);
++            for (HANDLE handle : generation.depth_handle) open_texture(handle);
++        }
++        if (env_int("XRFG_IMPORT_BENCH_FENCES", 1) != 0) {
++            for (HANDLE handle : {generation.fence_handle, generation.release_fence_handle}) {
++                ComPtr<ID3D12Fence> fence;
++                check(device_->OpenSharedHandle(handle, IID_PPV_ARGS(fence.GetAddressOf())),
++                    "OpenSharedHandle(fence)");
++                fences_.push_back(fence);
++            }
++        }
++        if (!copy_ || textures_.empty() || fences_.empty()) {
++            if (env_int("XRFG_IMPORT_BENCH_IMMEDIATE", 0) != 0) {
++                release();
++            }
++            return;
++        }
++        if (!copies_.empty() && copies_[0]->GetDesc().Width != textures_[0]->GetDesc().Width) {
++            copies_.clear();
++        }
++        if (copies_.empty()) {
++            for (const auto& texture : textures_) {
++                D3D12_HEAP_PROPERTIES heap{};
++                heap.Type = D3D12_HEAP_TYPE_DEFAULT;
++                D3D12_RESOURCE_DESC description = texture->GetDesc();
++                description.Flags = D3D12_RESOURCE_FLAG_NONE;
++                ComPtr<ID3D12Resource> copy;
++                check(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
++                          D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(copy.GetAddressOf())),
++                    "copy texture");
++                copies_.push_back(copy);
++            }
++        }
++        check(allocator_->Reset(), "allocator Reset");
++        check(list_->Reset(allocator_.Get(), nullptr), "list Reset");
++        for (std::size_t index = 0; index < textures_.size(); ++index) {
++            list_->CopyResource(copies_[index].Get(), textures_[index].Get());
++        }
++        check(list_->Close(), "Close");
++        check(queue_->Wait(fences_[0].Get(), seq), "Wait");
++        ID3D12CommandList* lists[] = {list_.Get()};
++        queue_->ExecuteCommandLists(1, lists);
++        check(queue_->Signal(done_.Get(), ++done_value_), "Signal");
++        if (env_int("XRFG_IMPORT_BENCH_IMMEDIATE", 0) != 0) {
++            release();
++        }
++    }
++    void release() {
++        drain();
++        if (env_int("XRFG_IMPORT_BENCH_EVICT", 0) != 0 && !textures_.empty()) {
++            std::vector<ID3D12Pageable*> pageables;
++            for (const auto& texture : textures_) pageables.push_back(texture.Get());
++            check(device_->Evict(static_cast<UINT>(pageables.size()), pageables.data()), "Evict");
++        }
++        textures_.clear();
++        fences_.clear();
++    }
++
++private:
++    void open_texture(HANDLE handle) {
++        ComPtr<ID3D12Resource> texture;
++        check(device_->OpenSharedHandle(handle, IID_PPV_ARGS(texture.GetAddressOf())), "OpenSharedHandle(texture)");
++        textures_.push_back(texture);
++    }
++    void drain() {
++        if (done_->GetCompletedValue() < done_value_) {
++            done_->SetEventOnCompletion(done_value_, event_);
++            WaitForSingleObject(event_, 10000);
++        }
++    }
++
++    ID3D12Device* device_;
++    bool copy_;
++    ComPtr<ID3D12CommandQueue> queue_;
++    ComPtr<ID3D12Fence> done_;
++    std::uint64_t done_value_{};
++    ComPtr<ID3D12CommandAllocator> allocator_;
++    ComPtr<ID3D12GraphicsCommandList> list_;
++    HANDLE event_{};
++    std::vector<ComPtr<ID3D12Resource>> textures_;
++    std::vector<ComPtr<ID3D12Fence>> fences_;
++    std::vector<ComPtr<ID3D12Resource>> copies_;
++};
++
++int run(int argc, char** argv) {
++    const std::string mode = argc > 1 ? argv[1] : "consumer";
++    const int generations = argc > 2 ? std::atoi(argv[2]) : 200;
++    const int frames = argc > 3 ? std::atoi(argv[3]) : 6;
++    const UINT width = argc > 4 ? static_cast<UINT>(std::atoi(argv[4])) : 1280U;
++    const UINT height = argc > 5 ? static_cast<UINT>(std::atoi(argv[5])) : 640U;
++    if (mode != "none" && mode != "raw12" && mode != "raw12copy" && mode != "reopen12" && mode != "raw11" &&
++        mode != "consumer" && mode != "idle") {
++        throw std::runtime_error("mode: none | raw12 | raw12copy | reopen12 | raw11 | consumer | idle");
++    }
++
++    ComPtr<IDXGIFactory6> factory;
++    check(CreateDXGIFactory2(0, IID_PPV_ARGS(factory.GetAddressOf())), "CreateDXGIFactory2");
++    ComPtr<IDXGIAdapter1> adapter;
++    check(factory->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
++              IID_PPV_ARGS(adapter.GetAddressOf())),
++        "EnumAdapterByGpuPreference");
++    DXGI_ADAPTER_DESC1 adapter_description{};
++    adapter->GetDesc1(&adapter_description);
++    if ((adapter_description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) {
++        std::printf("import bench: no hardware adapter, skipped\n");
++        return 0;
++    }
++    ComPtr<IDXGIAdapter3> adapter3;
++    check(adapter.As(&adapter3), "IDXGIAdapter3");
++    ComPtr<ID3D12Device> device;
++    check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.GetAddressOf())),
++        "D3D12CreateDevice");
++
++    const std::wstring suffix = L"_xrfg_import_bench_" + std::to_wstring(GetCurrentProcessId());
++    Producer producer(adapter.Get(), suffix, width, height);
++    ComPtr<ID3D11Device1> reader11;
++    ComPtr<ID3D11DeviceContext> reader11_context;
++    if (mode == "raw11") {
++        ComPtr<ID3D11Device> device11;
++        check(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION,
++                  device11.GetAddressOf(), nullptr, reader11_context.GetAddressOf()),
++            "D3D11CreateDevice(reader)");
++        check(device11.As(&reader11), "ID3D11Device1");
++    }
++    auto raw_owner = std::make_unique<RawReader>(device.Get(), mode == "raw12copy");
++    RawReader& raw = *raw_owner;
++    auto consumer_owner = std::make_unique<xrfg::CockpitMaskConsumer>();
++    xrfg::CockpitMaskConsumer& consumer = *consumer_owner;
++    const bool use_consumer = mode == "consumer" || mode == "idle";
++    if (use_consumer) {
++        xrfg::CockpitMaskConsumerOptions options;
++        options.suffix_from_environment = false;
++        options.suffix = suffix;
++        options.retry_milliseconds = 0;
++        options.heartbeat_store_milliseconds = 0;
++        options.cockpit_depth = true;
++        check(consumer.initialize(device.Get(), {}, options), "consumer initialize");
++    }
++    DedicatedUsage dedicated;
++    const auto local_usage = [&]() {
++        DXGI_QUERY_VIDEO_MEMORY_INFO info{};
++        adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info);
++        return info.CurrentUsage;
++    };
++    const auto budget = [&]() {
++        DXGI_QUERY_VIDEO_MEMORY_INFO info{};
++        adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info);
++        return info.Budget;
++    };
++    const double first_budget = double(budget());
++
++    std::printf("import bench: %ls, mode %s, %d generations x %d frames, atlas %ux%u (mask R8 + depth R16G16, "
++                "%.1f MB a generation)\n",
++        adapter_description.Description, mode.c_str(), generations, frames, width, height,
++        mb(std::uint64_t(width) * height * 5U * cm::slot_count));
++    std::int64_t display_time = 1000;
++    std::uint64_t paired = 0, misses = 0;
++    double first_dedicated = 0.0, first_local = 0.0;
++    double last_dedicated = 0.0, last_local = 0.0;
++    constexpr int kWarmup = 4;
++    for (int generation = 0; generation < generations; ++generation) {
++        if (mode == "idle" && generation > 0) {
++            // The export off and on again: the same generation, the same
++            // textures and handles.
++            producer.set_active(false);
++            for (int frame = 0; frame < 2; ++frame) {
++                if (consumer.acquire(display_time++) != nullptr) {
++                    throw std::runtime_error("idle: a frame from an inactive header");
++                }
++            }
++            producer.set_active(true);
++        } else {
++            // reopen12: one generation, opened again and again.
++            if (mode != "reopen12" || generation == 0) {
++                producer.reinstall();
++            }
++        }
++        for (int frame = 0; frame < frames; ++frame) {
++            producer.commit(display_time);
++            if (use_consumer) {
++                auto acquired = consumer.acquire(display_time);
++                acquired ? ++paired : ++misses;
++            }
++            ++display_time;
++        }
++        if (mode == "raw11") {
++            // A D3D11 reader (the producer's own harness): opened, released.
++            std::vector<ComPtr<ID3D11Texture2D>> opened;
++            for (HANDLE handle : producer.current_.mask_handle) {
++                ComPtr<ID3D11Texture2D> texture;
++                check(reader11->OpenSharedResource1(handle, IID_PPV_ARGS(texture.GetAddressOf())), "OpenSharedResource1");
++                opened.push_back(texture);
++            }
++            for (HANDLE handle : producer.current_.depth_handle) {
++                ComPtr<ID3D11Texture2D> texture;
++                check(reader11->OpenSharedResource1(handle, IID_PPV_ARGS(texture.GetAddressOf())), "OpenSharedResource1");
++                opened.push_back(texture);
++            }
++            opened.clear();
++            reader11_context->Flush();
++        }
++        if (mode == "raw12" || mode == "raw12copy" || mode == "reopen12") {
++            raw.open(producer.current_, producer.seq());
++        }
++        if (use_consumer) {
++            consumer.drop_idle();
++        }
++        Sleep(2);
++        if (generation == kWarmup || generation + 1 == generations || (generation + 1) % 25 == 0) {
++            if (use_consumer) {
++                // The copies land: what is kept now is kept for good.
++                const ULONGLONG deadline = GetTickCount64() + 2000;
++                while (consumer.stats().sets_retired != 0 && GetTickCount64() < deadline) {
++                    Sleep(5);
++                    consumer.drop_idle();
++                }
++            }
++            Sleep(50);
++            const double dedicated_now = dedicated.read();
++            const double local_now = double(local_usage());
++            if (generation == kWarmup) {
++                first_dedicated = dedicated_now;
++                first_local = local_now;
++            }
++            last_dedicated = dedicated_now;
++            last_local = local_now;
++            const auto stats = use_consumer ? consumer.stats() : xrfg::CockpitMaskConsumerStats{};
++            std::printf("  generation %4d: dedicated %8.1f MB, DXGI local %8.1f MB, opened %u retired %u "
++                        "(mask %llu, depth %llu generations opened), paired %llu, misses %llu\n",
++                generation + 1, mb(std::uint64_t(dedicated_now)), mb(std::uint64_t(local_now)), stats.sets_opened,
++                stats.sets_retired, static_cast<unsigned long long>(stats.generations_opened),
++                static_cast<unsigned long long>(stats.depth_generations_opened),
++                static_cast<unsigned long long>(paired), static_cast<unsigned long long>(misses));
++        }
++    }
++    raw.release();
++    // What the D3D12 device keeps: the reader and the device gone.
++    const double budget_now = double(budget());
++    consumer_owner.reset();
++    raw_owner.reset();
++    device.Reset();
++    Sleep(200);
++    std::printf("import bench: DXGI local budget %.1f MB at the start, %.1f MB at the end; dedicated %.1f MB with "
++                "the D3D12 device released\n",
++        mb(std::uint64_t(first_budget)), mb(std::uint64_t(budget_now)), mb(std::uint64_t(dedicated.read())));
++    const int counted = generations - kWarmup - 1;
++    const double growth = counted > 0 ? (last_dedicated - first_dedicated) / double(counted) : 0.0;
++    const double local_growth = counted > 0 ? (last_local - first_local) / double(counted) : 0.0;
++    std::printf("import bench: %s: dedicated %+.2f MB a generation, DXGI local %+.2f MB a generation\n", mode.c_str(),
++        growth / (1024.0 * 1024.0), local_growth / (1024.0 * 1024.0));
++    if (use_consumer && paired == 0) {
++        throw std::runtime_error("the consumer paired no frame");
++    }
++    const double limit_mb = double(env_int("XRFG_IMPORT_BENCH_LIMIT_MB", 1));
++    if (mode == "idle" && first_dedicated >= 0.0 && growth / (1024.0 * 1024.0) > limit_mb) {
++        std::printf("import bench: FAILED, the dedicated usage grows with the generations\n");
++        return 2;
++    }
++    return 0;
++}
++
++}  // namespace
++
++int main(int argc, char** argv) {
++    try {
++        return run(argc, argv);
++    } catch (const std::exception& error) {
++        std::fprintf(stderr, "import bench failed: %s\n", error.what());
++        return 1;
++    }
++}
+diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
+--- a/tests/cockpit_mask_tests.cpp
++++ b/tests/cockpit_mask_tests.cpp
+@@ -1968,7 +1968,12 @@ void test_ini() {
+ // the export is off), each kept while a copy may still read it, and dropped
+ // once the copies complete even without another acquire (drop_idle, called
+ // on every xrEndFrame, generation on or off).
+-void test_unusable_header_retires_all_sets(Gpu& gpu) {
++// DCS Control (0044): but the export off with the same generation (the
++// producer keeps its textures, fences and handles while off) keeps all three
++// sets opened, with nothing paired or copied, and on again they pair without
++// being imported again (every import grows the process's dedicated usage for
++// good); a generation change or another adapter retires them.
++void test_inactive_header_keeps_sets(Gpu& gpu) {
+     const std::wstring suffix = test_suffix(L"retireall");
+     FakeProducer producer(gpu, suffix);
+     FakeDepthProducer depth(gpu, suffix, producer);
+@@ -1978,64 +1983,114 @@ void test_unusable_header_retires_all_sets(Gpu& gpu) {
+     options.dcs_motion = true;
+     xrfg::CockpitMaskConsumer consumer;
+     require_hresult(consumer.initialize(gpu.device.Get(), {}, options), "consumer initialize");
+-    std::uint64_t seq = producer.commit(9000, 255);
+-    depth.commit(producer);
+-    motion.commit(producer, 8990);
++    const auto commit = [&](std::int64_t time) {
++        const std::uint64_t value = producer.commit(time, 255);
++        depth.commit(producer);
++        motion.commit(producer, time - 10);
++        return value;
++    };
++    const auto set_active = [&](bool active) {
++        if (active) {
++            producer.header_.flags |= cm::header_flags::active;
++            depth.header_.flags |= cd::header_flags::active;
++            motion.header_.flags |= cmv::header_flags::active;
++        } else {
++            producer.header_.flags &= ~cm::header_flags::active;
++            depth.header_.flags &= ~cd::header_flags::active;
++            motion.header_.flags &= ~cmv::header_flags::active;
++        }
++    };
++    const auto drop_all = [&](const char* step) {
++        const ULONGLONG deadline = GetTickCount64() + 10000;
++        xrfg::CockpitMaskConsumerStats now = consumer.stats();
++        while (now.sets_retired != 0 && GetTickCount64() <= deadline) {
++            Sleep(5);
++            consumer.drop_idle();
++            now = consumer.stats();
++        }
++        require(now.sets_retired == 0, std::string(step) + ": the retired sets dropped once their copies completed");
++        return now;
++    };
++    std::uint64_t seq = commit(9000);
+     auto frame = consumer.acquire(9000);
+-    require(frame != nullptr && frame->depth && frame->motion, "retire all: mask, depth and motion paired");
++    require(frame != nullptr && frame->depth && frame->motion, "inactive keeps: mask, depth and motion paired");
+     require(consumer.stats().sets_opened == 3 && consumer.stats().sets_retired == 0,
+-        "retire all: three sets opened");
++        "inactive keeps: three sets opened");
+     // The copy waits for the producer's fence: still outstanding.
+     Sleep(50);
+-    require(frame->ready_fence->GetCompletedValue() < frame->ready_value, "retire all: the copy is outstanding");
++    require(frame->ready_fence->GetCompletedValue() < frame->ready_value, "inactive keeps: the copy is outstanding");
+ 
+-    // The export goes off: the header inactive.
+-    producer.header_.flags &= ~cm::header_flags::active;
+-    producer.publish();
++    // The export goes off, the same generation; a slot that matches a frame
++    // is still in the headers: nothing paired, nothing copied.
++    set_active(false);
++    commit(9100);
++    xrfg::CockpitMaskConsumerStats before = consumer.stats();
+     require(consumer.acquire(9100) == nullptr && consumer.stats().last == xrfg::CockpitMaskLookup::header_unusable,
+-        "retire all: an inactive header");
++        "inactive keeps: an inactive header gives no mask");
+     xrfg::CockpitMaskConsumerStats stats = consumer.stats();
+-    require(stats.sets_opened == 0 && stats.sets_retired == 3,
+-        "retire all: the depth and motion sets retired with the mask's (opened " +
+-            std::to_string(stats.sets_opened) + ", retired " + std::to_string(stats.sets_retired) + ")");
+-    // Idle (no acquire): kept while the copy may still read them.
++    require(stats.sets_opened == 3 && stats.sets_retired == 0 && stats.inactive_kept == before.inactive_kept + 1,
++        "inactive keeps: the three sets stay opened (opened " + std::to_string(stats.sets_opened) + ", retired " +
++            std::to_string(stats.sets_retired) + ")");
++    require(stats.paired == before.paired && stats.depth_paired == before.depth_paired &&
++            stats.motion_paired == before.motion_paired,
++        "inactive keeps: nothing copied from an inactive block");
+     consumer.drop_idle();
+-    require(consumer.stats().sets_retired == 3 && consumer.stats().sets_dropped == 0,
+-        "retire all: nothing dropped while the copy is outstanding");
++    require(consumer.stats().sets_opened == 3 && consumer.stats().sets_dropped == 0,
++        "inactive keeps: drop_idle keeps the opened sets");
+ 
++    // On again, the same generation: paired without another import.
++    set_active(true);
+     producer.signal(seq);
+     gpu.wait(frame->ready_fence.Get(), frame->ready_value);
+     frame.reset();
+-    // done_fence follows the copy fence on the copy queue: dropped by
+-    // drop_idle alone once it lands.
+-    const ULONGLONG deadline = GetTickCount64() + 10000;
+-    while (true) {
+-        consumer.drop_idle();
+-        stats = consumer.stats();
+-        if (stats.sets_retired == 0 || GetTickCount64() > deadline) {
+-            break;
+-        }
+-        Sleep(5);
+-    }
+-    require(stats.sets_retired == 0 && stats.sets_dropped == 3,
+-        "retire all: the three sets dropped once their copies completed, without an acquire (dropped " +
+-            std::to_string(stats.sets_dropped) + ")");
+-
+-    // Active again: all three opened afresh, and paired.
+-    producer.header_.flags |= cm::header_flags::active;
+-    seq = producer.commit(9200, 255);
+-    depth.commit(producer);
+-    motion.commit(producer, 9100);
++    seq = commit(9200);
+     auto again = consumer.acquire(9200);
+-    require(again != nullptr && again->depth && again->motion && consumer.stats().sets_opened == 3,
+-        "retire all: paired again once active");
++    require(again != nullptr && again->depth && again->motion, "inactive keeps: paired again once active");
+     stats = consumer.stats();
+-    require(stats.generations_opened == 2 && stats.depth_generations_opened == 2 &&
+-            stats.motion_generations_opened == 2,
+-        "retire all: each set opened again");
++    require(stats.generations_opened == 1 && stats.depth_generations_opened == 1 &&
++            stats.motion_generations_opened == 1 && stats.sets_opened == 3,
++        "inactive keeps: no set imported again for the same generation");
+     producer.signal(seq);
+     gpu.wait(again->ready_fence.Get(), again->ready_value);
+-    std::cout << "cockpit mask: an unusable header retires the mask, depth and motion sets, dropped once copied\n";
++    again.reset();
++
++    // Off, then on with a new generation: the old sets retired, kept while a
++    // copy may still read them, dropped without another acquire.
++    set_active(false);
++    producer.publish();
++    require(consumer.acquire(9250) == nullptr && consumer.stats().sets_opened == 3,
++        "inactive keeps: off again, still kept");
++    producer.make_resources();
++    depth.header_.generation = motion.header_.generation = producer.header_.generation;
++    depth.header_.fenceHandle = motion.header_.fenceHandle = producer.header_.fenceHandle;
++    set_active(true);
++    seq = commit(9300);
++    auto fresh = consumer.acquire(9300);
++    require(fresh != nullptr && fresh->depth && fresh->motion, "inactive keeps: the new generation paired");
++    stats = consumer.stats();
++    require(stats.generations_opened == 2 && stats.depth_generations_opened == 2 &&
++            stats.motion_generations_opened == 2 && stats.sets_opened == 3,
++        "inactive keeps: a generation change imports every set again");
++    const std::uint64_t dropped = stats.sets_dropped;
++    stats = drop_all("generation change");
++    require(stats.sets_dropped == dropped + 3,
++        "inactive keeps: the old generation's three sets dropped (dropped " +
++            std::to_string(stats.sets_dropped - dropped) + ")");
++
++    // Another adapter retires all three at once (DCS Control (0043)).
++    producer.header_.adapterLuid ^= 1U;
++    producer.publish();
++    require(consumer.acquire(9400) == nullptr &&
++            consumer.stats().last == xrfg::CockpitMaskLookup::adapter_mismatch,
++        "inactive keeps: another adapter");
++    stats = consumer.stats();
++    require(stats.sets_opened == 0 && stats.sets_retired == 3,
++        "inactive keeps: another adapter retires the three sets");
++    producer.signal(seq);
++    gpu.wait(fresh->ready_fence.Get(), fresh->ready_value);
++    fresh.reset();
++    drop_all("another adapter");
++    std::cout << "cockpit mask: the export off with the same generation keeps the sets, a new one drops them\n";
+ }
+ 
+ }  // namespace
+@@ -2061,7 +2116,7 @@ int main() {
+         test_copy_failures_release(gpu); // DCS Control (0041)
+         test_inactive_header_at_open(gpu); // DCS Control (0041)
+         test_wrapped_rects(gpu); // DCS Control (0040)
+-        test_unusable_header_retires_all_sets(gpu); // DCS Control (0043)
++        test_inactive_header_keeps_sets(gpu); // DCS Control (0043), (0044)
+         std::cout << "cockpit mask consumer tests passed\n";
+         return 0;
+     } catch (const std::exception& error) {

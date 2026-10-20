@@ -41,6 +41,11 @@ public sealed class ApplicationInstaller(string destination)
         var manifest = VerifySource(sourceRoot);
         var journals = Transactions.List();
         ValidateJournalScope(journals);
+        // An update cut short (power loss, the setup ended) is rolled back first, so the next update can run.
+        var interrupted = journals.Where(j => j.Status is "prepared" or "applying" or "restore-conflicts").ToArray();
+        foreach (var journal in interrupted)
+            if (!Transactions.Restore(journal.Id).Complete) throw new InvalidOperationException("The interrupted application update could not be rolled back; reinstall DCS Control.");
+        if (interrupted.Length > 0) journals = Transactions.List();
         if (journals.Any(j => j.Status is not ("applied" or "restored"))) throw new InvalidOperationException("Restore the interrupted application installation before updating.");
         var owned = CurrentOwned(journals);
         foreach (var entry in owned.Values) VerifyOwned(entry, Root);
@@ -67,6 +72,11 @@ public sealed class ApplicationInstaller(string destination)
         var journals = Transactions.List();
         ValidateJournalScope(journals);
         if (!journals.Any(j => j.Status != "restored")) throw new InvalidOperationException("No application installation to restore.");
+        // An update cut short is rolled back first, as before an update, so its half-written files are not "modified".
+        var interrupted = journals.Where(j => j.Status is "prepared" or "applying").ToArray();
+        foreach (var journal in interrupted)
+            if (Transactions.Restore(journal.Id) is { Complete: false } partial) return partial;
+        if (interrupted.Length > 0) journals = Transactions.List();
         foreach (var entry in CurrentOwned(journals).Values) VerifyOwned(entry, Root);
         foreach (var journal in journals.Where(j => j.Status != "restored"))
         {

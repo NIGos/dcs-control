@@ -24,6 +24,23 @@ namespace qvexit {
 std::atomic<bool> g_exiting{false};       // DCS is shutting down (DcsQvPayload_Quiesce)
 std::atomic<uint64_t> g_contained{0};     // thread-ending faults contained (all threads)
 std::atomic<uint64_t> g_containedExit{0}; // of which after g_exiting was set
+// R52: thread bodies started through Run / RunVoid (every payload thread). The
+// worker placement pass (thread_place.h) re-runs soon after it changes,
+// instead of polling with a system-wide thread snapshot.
+std::atomic<uint32_t> g_threadStarts{0};
+// R90: the ids of those threads, in start order, for thread_place.h's tracked placement (PlaceRecheckMode=1):
+// it adopts them from here instead of finding them in a thread snapshot. A bounded ring: entry i holds
+// (i + 1) << 32 | thread id once written; a reader that falls more than kStartRing behind re-discovers.
+constexpr uint32_t kStartRing = 256;
+std::atomic<uint64_t> g_startRing[kStartRing] = {};
+std::atomic<uint32_t> g_startHead{0};
+inline void NoteStart() {
+  g_threadStarts.fetch_add(1, std::memory_order_relaxed);
+  g_tOurThread = true;  // R90: Log() writes this thread's lines synchronously (main.cpp)
+  const uint32_t i = g_startHead.fetch_add(1, std::memory_order_acq_rel);
+  g_startRing[i % kStartRing].store((static_cast<uint64_t>(i + 1) << 32) | GetCurrentThreadId(),
+                                    std::memory_order_release);
+}
 
 inline bool Exiting() { return g_exiting.load(std::memory_order_acquire); }
 // True the first time (the caller does the one-time quiesce).
@@ -108,6 +125,7 @@ constexpr DWORD kFaultExit = 0xDEADu;
 
 // Runs body(arg); a containable fault that escapes it ends the thread (kFaultExit).
 inline DWORD Run(LPTHREAD_START_ROUTINE body, void* arg) {
+  NoteStart();
   Fault f;
   __try {
     return body(arg);
@@ -125,6 +143,7 @@ DWORD WINAPI Thread(void* arg) {
 
 // std::thread bodies (no argument).
 inline void RunVoid(void (*body)()) {
+  NoteStart();
   Fault f;
   __try {
     body();

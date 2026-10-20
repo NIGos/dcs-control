@@ -1,0 +1,411 @@
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -210,6 +210,10 @@
+     //   13 adaptive cadence turned on (a=0, b= the multiplier, 2) or off
+     //      (a= the multiplier, b=0); or, a=3 b=2, the switch into its 2X
+     //      shape from 3X.
++    // DCS Control (0047): for results 1-7, c's p90 is bits 0-31; bits 32-39
++    // are the back-off level the switch left (3X holds 5 s doubled per
++    // level, at most 40 s, before it may leave; see AdaptiveConfig::
++    // reversal_window).
+     adaptive_switch,
+     // DCS VR Control. Once a second while the presenter runs: result= the
+     // frame multiplier, plus 10 under adaptive control; a= the p90 over that
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -538,6 +538,31 @@
+     // and the first probe comes scene_probe_delay after that.
+     Nanoseconds scene_settle{2 * kSecond};
+     Nanoseconds scene_probe_delay{4 * kSecond};
++
++    // DCS Control (0047): reversals back the controller off. A 66 minute
++    // soak over a steady sea (90 Hz) switched 118 times, 61 of them under
++    // 10 s after the one before, at exactly min_dwell (5 s) or settle plus
++    // the doubled downshift_window (7 s, 13 s). The work was never near a
++    // threshold - p90 5-10 ms in both shapes against 18.9 ms down and
++    // 22.2 ms up - and every upshift but five was `late`: first synthetics
++    // handed over late in bursts of 3-10 episodes a second in 2X, a signal
++    // 3X does not have, so 3X found headroom and went back as soon as the
++    // dwell let it, over and over. The work thresholds keep their 15% band;
++    // what changed is how long 3X holds. A return to 3X within
++    // reversal_window of leaving it (2X did not hold) raises the back-off
++    // level by one, and 3X then stays at least min_dwell doubled per level,
++    // at most max_hold (5, 10, 20, 40 s), before it may leave again (the
++    // flap-doubled downshift_window still applies beside it). Each
++    // backoff_decay (60 s) without such a return takes a level off (halves
++    // the hold, as the stall latch's re-arm delay decays in 0042). A probe
++    // and its failure are trials with a backoff of their own and are not
++    // counted. Only 3X -> 2X waits: 2X -> 3X keeps min_dwell at every level,
++    // so late first synthetics are never kept on screen longer than before;
++    // in a ping-pong the session sits in 3X (clean on the soak) and tries 2X
++    // less and less often.
++    Nanoseconds reversal_window{60 * kSecond};
++    Nanoseconds max_hold{40 * kSecond};
++    Nanoseconds backoff_decay{60 * kSecond};
+ };
+ 
+ enum class AdaptiveReason : std::uint32_t {
+@@ -668,6 +693,12 @@
+     [[nodiscard]] Nanoseconds downshift_window() const noexcept {
+         return downshift_window_;
+     }
++    // DCS Control (0047): the back-off level at `now`, decayed by the clean
++    // time since the last quick return to 3X, and the hold it puts before
++    // 3X may leave (min_dwell at level 0); see
++    // AdaptiveConfig::reversal_window.
++    [[nodiscard]] std::uint32_t backoff_level(Nanoseconds now) const noexcept;
++    [[nodiscard]] Nanoseconds hold(Nanoseconds now) const noexcept;
+     // Over (now - span, now], ignoring what fell within settle of a switch.
+     [[nodiscard]] AdaptiveStats stats(
+         Nanoseconds now, Nanoseconds span) const noexcept;
+@@ -710,6 +741,14 @@
+     // DCS VR Control (0009): nothing is decided before this, and nothing
+     // before it is counted (scene_changed()).
+     Nanoseconds quiet_until_{-1};
++    // DCS Control (0047): the back-off. The level, the time its decay counts
++    // from, and the last counted switch (when, and to which mode).
++    std::uint32_t backoff_level_{};
++    Nanoseconds backoff_at_{};
++    Nanoseconds backoff_switch_at_{-1};
++    std::uint32_t backoff_switch_to_{};
++    // The highest level that still lengthens the hold.
++    [[nodiscard]] std::uint32_t backoff_cap() const noexcept;
+     // Missed-slot episodes after `from`, up to `now`.
+     [[nodiscard]] std::uint32_t late_episodes_since(
+         Nanoseconds from, Nanoseconds now) const noexcept;
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -431,6 +431,46 @@
+     probe_interval_ = config_.probe_interval;
+     next_probe_at_ = now + probe_interval_;
+     quiet_until_ = -1; // 0009
++    // DCS Control (0047): a start (a manual choice, a scene change) owes
++    // nothing to the switches before it.
++    backoff_level_ = 0;
++    backoff_at_ = now;
++    backoff_switch_at_ = -1;
++    backoff_switch_to_ = mode_;
++}
++
++std::uint32_t AdaptiveFrameGenController::backoff_cap() const noexcept {
++    // DCS Control (0047): 3 for 5 s doubled up to 40 s.
++    std::uint32_t cap = 0;
++    Nanoseconds hold = config_.min_dwell;
++    while (hold > 0 && hold < config_.max_hold && cap < 16) {
++        hold *= 2;
++        ++cap;
++    }
++    return cap;
++}
++
++std::uint32_t AdaptiveFrameGenController::backoff_level(Nanoseconds now) const noexcept {
++    // DCS Control (0047): one level off per backoff_decay since the last
++    // reversal (or the last decay step a switch took).
++    if (backoff_level_ == 0 || config_.backoff_decay <= 0 || now <= backoff_at_) {
++        return backoff_level_;
++    }
++    const Nanoseconds steps = (now - backoff_at_) / config_.backoff_decay;
++    return steps >= static_cast<Nanoseconds>(backoff_level_)
++        ? 0U
++        : backoff_level_ - static_cast<std::uint32_t>(steps);
++}
++
++Nanoseconds AdaptiveFrameGenController::hold(Nanoseconds now) const noexcept {
++    // DCS Control (0047): min_dwell doubled per level, at most max_hold
++    // (never below min_dwell).
++    Nanoseconds hold = config_.min_dwell;
++    const std::uint32_t level = backoff_level(now);
++    for (std::uint32_t i = 0; i < level && hold < config_.max_hold; ++i) {
++        hold *= 2;
++    }
++    return std::max(config_.min_dwell, std::min(hold, std::max(config_.max_hold, config_.min_dwell)));
+ }
+ 
+ void AdaptiveFrameGenController::scene_changed(Nanoseconds now) noexcept {
+@@ -599,7 +639,9 @@
+         decision.threshold = static_cast<Nanoseconds>(
+             config_.downshift_fraction * static_cast<double>(two_periods));
+         decision.stats = stats(now, downshift_window_);
+-        if (quiet || now - last_switch_ < config_.min_dwell ||
++        // DCS Control (0047): the back-off's hold (min_dwell at level 0);
++        // only this direction waits it out, 3X being the clean shape.
++        if (quiet || now - last_switch_ < hold(now) ||
+             now - (last_switch_ + config_.settle) < downshift_window_ ||
+             (quiet_until_ >= 0 && now - quiet_until_ < downshift_window_)) {
+             return decision;
+@@ -687,6 +729,28 @@
+ void AdaptiveFrameGenController::switched(
+     std::uint32_t to, Nanoseconds now, AdaptiveReason reason) noexcept {
+     to = to > 2 ? 3U : 2U;
++    // DCS Control (0047): the back-off. The level decays first (whole
++    // backoff_decay steps; the part of a step still running carries over),
++    // then a return to 3X within reversal_window of the counted switch into
++    // 2X raises it and restarts the clean time. Probes are not counted.
++    if (to != mode_ && reason != AdaptiveReason::probe &&
++        reason != AdaptiveReason::probe_failed) {
++        const std::uint32_t decayed = backoff_level(now);
++        if (decayed != backoff_level_) {
++            backoff_at_ += static_cast<Nanoseconds>(backoff_level_ - decayed) *
++                config_.backoff_decay;
++            backoff_level_ = decayed;
++        }
++        if (to == 3 && backoff_switch_at_ >= 0 && backoff_switch_to_ == 2 &&
++            now - backoff_switch_at_ < config_.reversal_window) {
++            backoff_level_ = std::min(backoff_level_ + 1, backoff_cap());
++            backoff_at_ = now;
++        } else if (backoff_level_ == 0) {
++            backoff_at_ = now;
++        }
++        backoff_switch_at_ = now;
++        backoff_switch_to_ = to;
++    }
+     if (to == 2 && mode_ > 2) {
+         // DCS VR Control (0007): a probe is a trial, not a downshift the
+         // headroom rule made: it leaves the headroom rule's flap record
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -15269,6 +15269,8 @@
+         std::uint32_t target = 0;
+         AdaptiveReason reason = AdaptiveReason::none;
+         std::int64_t decided_p90_ns = -1;
++        // DCS Control (0047): for adaptive_switch's c, bits 32-39.
++        std::uint32_t backoff_level = 0;
+         xrfg::latency::AdaptiveDecision probe_decision{}; // DCS VR Control (0007)
+         bool adaptive = state->adaptive_active.load();
+         bool adaptive_toggled = false;
+@@ -15704,6 +15706,8 @@
+                 // DCS VR Control (0007): with the reason, so a probe is known.
+                 state->adaptive_controller.switched(target, now_ns, reason);
+             }
++            // DCS Control (0047): the back-off level this switch left.
++            backoff_level = state->adaptive_controller.backoff_level(now_ns);
+             state->adaptive_missed_slots = 0;
+             state->adaptive_late_leaders = 0;
+         }
+@@ -15714,14 +15718,18 @@
+             deep ? 1u : 0u,
+             2);
+         if (adaptive || adaptive_toggled) {
++            // DCS Control (0047): c= the p90 (bits 0-31) and the back-off
++            // level (32-39).
+             xrfg::bridge_flight_logger().event(
+                 xrfg::BridgeFlightOperation::adaptive_switch,
+                 static_cast<std::int64_t>(reason),
+                 current,
+                 target,
+-                decided_p90_ns > 0
+-                    ? static_cast<std::uint64_t>(decided_p90_ns / 1000)
+-                    : 0U);
++                (decided_p90_ns > 0
++                     ? std::min<std::uint64_t>(
++                           static_cast<std::uint64_t>(decided_p90_ns / 1000), 0xFFFFFFFFULL)
++                     : 0U) |
++                    (static_cast<std::uint64_t>(std::min<std::uint32_t>(backoff_level, 0xFFU)) << 32));
+         }
+         if (state->display_time_correction_enabled) {
+             // result 0: rebased by a switch rather than measured.
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -780,6 +780,189 @@
+ }
+ 
+ // ---------------------------------------------------------------------------
++// DCS Control (0047): the reversal back-off.
++
++struct SwitchLog {
++    std::vector<Nanoseconds> at;
++    std::vector<std::uint32_t> to;
++    std::vector<AdaptiveDecision> decisions;
++};
++
++// Frames at the shape's paced rate, `work3` in 3X and `work2` in 2X, with a
++// missed slot every `late_gap2` in 2X (0: none); every switch is applied,
++// and the run ends after `max_switches` of them (0: no limit).
++SwitchLog drive_switches(AdaptiveFrameGenController& controller, Nanoseconds& now,
++    Nanoseconds seconds, Nanoseconds work3, Nanoseconds work2, Nanoseconds late_gap2,
++    std::size_t max_switches = 0) {
++    SwitchLog log{};
++    const Nanoseconds end = now + seconds;
++    Nanoseconds next_late = now;
++    while (now < end) {
++        const bool two = controller.mode() == 2;
++        now += kPeriod * controller.mode();
++        const Nanoseconds work = two ? work2 : work3;
++        controller.add_frame(now, work, work);
++        if (two && late_gap2 > 0 && now >= next_late) {
++            controller.add_late(now);
++            next_late = now + late_gap2;
++        }
++        const auto decision = controller.evaluate(now, kPeriod);
++        if (decision.target != 0 && decision.target != controller.mode()) {
++            log.at.push_back(now);
++            log.to.push_back(decision.target);
++            log.decisions.push_back(decision);
++            controller.switched(decision.target, now, decision.reason);
++            if (max_switches != 0 && log.at.size() >= max_switches) {
++                break;
++            }
++        }
++    }
++    return log;
++}
++
++// The soak's shape: 9 ms of work in either shape, and in 2X a missed slot
++// every 200 ms (about five episodes a second).
++constexpr Nanoseconds kSoakWork = 9 * kMillisecond;
++constexpr Nanoseconds kSoakLate = 200 * kMillisecond;
++
++void backoff_tests() {
++    const Nanoseconds start = 50 * kSecond;
++    const Nanoseconds slack = 200 * kMillisecond;
++    {
++        // The soak's ping-pong: every return to 3X is at min_dwell, and each
++        // quick one doubles the next 3X stay: 5, 10, 20, 40 s, then the
++        // flap-doubled downshift window's 49 s (48 + the settle).
++        AdaptiveFrameGenController controller;
++        controller.start(2, start);
++        Nanoseconds now = start;
++        const auto log = drive_switches(controller, now, 190 * kSecond, kSoakWork, kSoakWork,
++            kSoakLate);
++        require(log.at.size() >= 10, "the ping-pong still switches");
++        const Nanoseconds three_stays[] = {5 * kSecond, 10 * kSecond, 20 * kSecond,
++            40 * kSecond, 49 * kSecond};
++        Nanoseconds before = start;
++        std::size_t threes = 0;
++        for (std::size_t i = 0; i < log.at.size(); ++i) {
++            const Nanoseconds stay = log.at[i] - before;
++            if (log.to[i] == 3) {
++                require(log.decisions[i].reason == AdaptiveReason::late, "up on missed slots");
++                require(stay >= 5 * kSecond && stay <= 5 * kSecond + slack,
++                    "2X -> 3X at min_dwell at every level");
++            } else {
++                require(log.decisions[i].reason == AdaptiveReason::headroom, "down on headroom");
++                if (threes < 5) {
++                    require(stay >= three_stays[threes] && stay <= three_stays[threes] + slack,
++                        "3X stay " + std::to_string(threes) + " doubles");
++                }
++                ++threes;
++            }
++            before = log.at[i];
++        }
++        require(threes >= 5, "five 3X stays");
++        require(controller.backoff_level(now) == 3, "level 3 at most");
++        // Without the back-off (0046's controller: a hold that never grows)
++        // the same 190 s switch more, and 3X is left after 5 s at first.
++        AdaptiveConfig old_config{};
++        old_config.max_hold = old_config.min_dwell;
++        AdaptiveFrameGenController old_controller(old_config);
++        old_controller.start(2, start);
++        Nanoseconds old_now = start;
++        const auto old_log = drive_switches(old_controller, old_now, 190 * kSecond,
++            kSoakWork, kSoakWork, kSoakLate);
++        require(old_log.at.size() > log.at.size(), "the switches thin out");
++        require(old_log.at[3] - old_log.at[2] < 7 * kSecond + slack, "0046 left 3X within 7 s");
++    }
++    {
++        // At level 3, 2X -> 3X still takes min_dwell: on missed slots and on
++        // overload (24 ms, over two periods) alike.
++        for (int which = 0; which < 2; ++which) {
++            AdaptiveFrameGenController controller;
++            controller.start(2, start);
++            Nanoseconds now = start;
++            // Up 5, down 10, up 15, down 25, up 30, down 50, up 55 (level
++            // 3), down 95.
++            drive_switches(controller, now, 120 * kSecond, kSoakWork, kSoakWork, kSoakLate, 7);
++            const auto down = drive_switches(controller, now, 60 * kSecond, kSoakWork,
++                kSoakWork, 0, 1);
++            require(down.at.size() == 1 && controller.mode() == 2 &&
++                controller.backoff_level(now) == 3, "in 2X at level 3");
++            const auto up = which == 0
++                ? drive_switches(controller, now, 20 * kSecond, kSoakWork, kSoakWork, kSoakLate, 1)
++                : drive_switches(controller, now, 20 * kSecond, kSoakWork, 24 * kMillisecond, 0, 1);
++            require(up.at.size() == 1 && up.decisions[0].reason ==
++                (which == 0 ? AdaptiveReason::late : AdaptiveReason::slow), "with its reason");
++            require(up.at[0] - down.at[0] >= 5 * kSecond &&
++                up.at[0] - down.at[0] <= 5 * kSecond + slack, "at min_dwell");
++        }
++    }
++    {
++        // A sustained clean 2X never pays any hold: it stays, and when it
++        // does need 3X later it goes as soon as the evidence says so.
++        AdaptiveFrameGenController controller;
++        controller.start(2, start);
++        Nanoseconds now = start;
++        require(drive_switches(controller, now, 200 * kSecond, kSoakWork, kSoakWork, 0).at.empty(),
++            "clean 2X stays");
++        require(controller.backoff_level(now) == 0, "and owes nothing");
++        const Nanoseconds from = now;
++        const auto up = drive_switches(controller, now, 10 * kSecond, kSoakWork,
++            30 * kMillisecond, 0, 1);
++        require(up.at.size() == 1 && up.at[0] - from <= kSecond, "at once");
++    }
++    {
++        // The level decays: one off per clean minute since the last quick
++        // return to 3X; a return long after leaving it does not raise it.
++        AdaptiveFrameGenController controller;
++        controller.start(2, start);
++        Nanoseconds now = start;
++        const auto log = drive_switches(controller, now, 120 * kSecond, kSoakWork, kSoakWork,
++            kSoakLate, 7);
++        const Nanoseconds raised = log.at.at(6); // the return at 55 s: level 3
++        require(controller.backoff_level(raised) == 3, "level 3");
++        require(controller.backoff_level(raised + 59 * kSecond) == 3 &&
++            controller.hold(raised + 59 * kSecond) == 40 * kSecond, "a minute holds it");
++        require(controller.backoff_level(raised + 60 * kSecond) == 2 &&
++            controller.hold(raised + 60 * kSecond) == 20 * kSecond, "a clean minute halves the hold");
++        require(controller.backoff_level(raised + 120 * kSecond) == 1 &&
++            controller.hold(raised + 120 * kSecond) == 10 * kSecond, "two, a quarter");
++        require(controller.backoff_level(raised + 180 * kSecond) == 0 &&
++            controller.hold(raised + 180 * kSecond) == 5 * kSecond, "three, back to min_dwell");
++        // Down at 95 s; clean 2X until 150 s after the raise (level 1),
++        // then missed slots: the return is long after leaving 3X.
++        const auto calm = drive_switches(controller, now, raised + 150 * kSecond - now,
++            kSoakWork, kSoakWork, 0);
++        require(calm.at.size() == 1 && calm.to[0] == 2 && controller.backoff_level(now) == 1,
++            "down once, decayed to 1");
++        const auto up = drive_switches(controller, now, 20 * kSecond, kSoakWork, kSoakWork,
++            kSoakLate, 1);
++        require(up.at.size() == 1 && controller.backoff_level(up.at[0]) == 1, "not raised");
++        // 3X then holds level 1's 10 s, and a quick return raises it to 2.
++        const auto pair = drive_switches(controller, now, 40 * kSecond, kSoakWork, kSoakWork,
++            kSoakLate, 2);
++        require(pair.at.size() == 2 && pair.at[0] - up.at[0] >= 10 * kSecond &&
++            pair.at[0] - up.at[0] <= 10 * kSecond + slack, "level 1's 10 s in 3X");
++        require(pair.at[1] - pair.at[0] <= 5 * kSecond + slack &&
++            controller.backoff_level(pair.at[1]) == 2, "raised by the quick return");
++        // A start (a manual choice, a scene change) clears it.
++        controller.start(3, now);
++        require(controller.backoff_level(now) == 0 && controller.hold(now) == 5 * kSecond,
++            "start clears the back-off");
++    }
++    {
++        // Probes are trials with a back-off of their own: a failed one does
++        // not raise the level.
++        AdaptiveConfig config{};
++        config.probe = true;
++        AdaptiveFrameGenController controller(config);
++        controller.start(3, start);
++        const Nanoseconds at = start + 30 * kSecond;
++        controller.switched(2, at, AdaptiveReason::probe);
++        controller.switched(3, at + 2 * kSecond, AdaptiveReason::probe_failed);
++        require(controller.backoff_level(at + 2 * kSecond) == 0, "probes are not counted");
++    }
++}
++
++// ---------------------------------------------------------------------------
+ // DCS VR Control (0006): late submissions, the late-frame skip, and the
+ // synthesis GPU split.
+ 
+@@ -3158,6 +3341,7 @@
+         triple_slack_tests();
+         display_time_tests();
+         adaptive_tests();
++        backoff_tests(); // DCS Control (0047)
+         late_submission_tests();
+         late_skip_tests();
+         gpu_split_tests();

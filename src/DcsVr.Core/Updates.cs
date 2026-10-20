@@ -12,7 +12,8 @@ namespace DcsVr.Core;
 /// suffixes compare part by part, numbers as numbers (preview.10 &gt; preview.9).</summary>
 public sealed partial record ReleaseVersion(int Major, int Minor, int Patch, string Suffix) : IComparable<ReleaseVersion>
 {
-    [GeneratedRegex(@"^v?(\d{1,6})\.(\d{1,6})\.(\d{1,6})(?:-([0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*))?$", RegexOptions.CultureInvariant)]
+    // ASCII digits only: \d also matches other scripts' digits, which int.Parse would then reject for the whole check.
+    [GeneratedRegex(@"^v?([0-9]{1,6})\.([0-9]{1,6})\.([0-9]{1,6})(?:-([0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*))?$", RegexOptions.CultureInvariant)]
     private static partial Regex Pattern();
 
     /// <summary>The version of a tag or product version; null when it is not one (a malformed tag is ignored, never guessed).</summary>

@@ -140,10 +140,23 @@ void Log(const std::wstring& line) {
 }
 
 std::wstring Decode(const std::string& bytes) {
-    // Windows PowerShell writes redirected output in the console's code page; the setup's own lines are UTF-8.
-    const UINT page = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0) > 0 ? CP_UTF8 : GetOEMCP();
-    std::wstring text(static_cast<size_t>(MultiByteToWideChar(page, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0)), L'\0');
-    MultiByteToWideChar(page, 0, bytes.data(), static_cast<int>(bytes.size()), text.data(), static_cast<int>(text.size()));
+    // Windows PowerShell writes redirected output in the console's code page; the setup's own lines are UTF-8. The log
+    // mixes both, so each line is decoded on its own: UTF-8 when it is valid UTF-8, the OEM code page otherwise (a user
+    // name with an accent in a PowerShell line must not turn the setup's own lines into mojibake).
+    std::wstring text;
+    size_t start = 0;
+    while (start < bytes.size()) {
+        size_t end = bytes.find('\n', start);
+        end = end == std::string::npos ? bytes.size() : end + 1;
+        const char* line = bytes.data() + start;
+        const int length = static_cast<int>(end - start);
+        const UINT page = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, line, length, nullptr, 0) > 0 ? CP_UTF8 : GetOEMCP();
+        const int wide = MultiByteToWideChar(page, 0, line, length, nullptr, 0);
+        const size_t at = text.size();
+        text.resize(at + static_cast<size_t>(wide));
+        MultiByteToWideChar(page, 0, line, length, text.data() + at, wide);
+        start = end;
+    }
     return text;
 }
 

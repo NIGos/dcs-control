@@ -127,6 +127,8 @@
 // (Inside main.cpp's anonymous namespace: no standard headers here; main.cpp
 // has <algorithm>, <condition_variable>, <thread>, d3d11_1.h, d3dcompiler.h.)
 
+#include "perception_suffix.h"  // R79: DCSVR_PERCEPTION_SHM_SUFFIX, one rule for every block
+
 namespace fixdepth {
 
 // ---------------------------------------------------------------------------
@@ -210,10 +212,17 @@ inline bool IsWaterStencil(uint32_t st) {
   return t == kStencilWater || t == kStencilUnderwater;
 }
 
-// Mapping names (tests use their own).
-std::wstring g_gazeName = L"Local\\DcsVrPerceptionGaze_v1";
-std::wstring g_depthName = L"Local\\DcsVrFixationDepth_v1";
-std::wstring g_gridName = L"Local\\DcsVrDepthGrid_v1";
+// Mapping names. R79 (R77c N1): the base names (= dcsvr_perception_shm.h's)
+// plus DCSVR_PERCEPTION_SHM_SUFFIX, read at each open attempt like BoostOut,
+// StereoAck and the periphery filter's GazeOut (perception_suffix.h). Tests
+// may set an override (non-empty: used as it is); empty = the suffixed name.
+constexpr const wchar_t* kGazeBase = L"Local\\DcsVrPerceptionGaze_v1";
+constexpr const wchar_t* kDepthBase = L"Local\\DcsVrFixationDepth_v1";
+constexpr const wchar_t* kGridBase = L"Local\\DcsVrDepthGrid_v1";
+std::wstring g_gazeName, g_depthName, g_gridName;  // test overrides ("" = none)
+std::wstring GazeName() { return g_gazeName.empty() ? perc_sfx::Name(kGazeBase) : g_gazeName; }
+std::wstring DepthName() { return g_depthName.empty() ? perc_sfx::Name(kDepthBase) : g_depthName; }
+std::wstring GridName() { return g_gridName.empty() ? perc_sfx::Name(kGridBase) : g_gridName; }
 
 // ---------------------------------------------------------------------------
 // Seq guard
@@ -862,6 +871,19 @@ std::atomic<uint64_t> g_frames{0}, g_runs{0}, g_dispatches{0}, g_published{0}, g
     g_noGaze{0}, g_staleGaze{0}, g_noTarget{0}, g_ringFull{0}, g_noSrv{0}, g_badProj{0}, g_mismatch{0},
     g_noMatch{0}, g_matchOk{0}, g_retarget{0}, g_omUnbinds{0}, g_mapLate{0}, g_badCb{0};
 std::atomic<bool> g_fault{false};
+// R69: the first fault of this load, for the log (fault latched line): the SEH site (its source line), the
+// exception code and the faulting address as module + offset (Tick resolves the module).
+std::atomic<int> g_faultSite{0};
+std::atomic<uint32_t> g_faultCode{0};
+std::atomic<uintptr_t> g_faultAddr{0};
+inline int FaultNote(EXCEPTION_POINTERS* ep, int site) {
+  int none = 0;
+  if (ep && ep->ExceptionRecord && g_faultSite.compare_exchange_strong(none, site)) {
+    g_faultCode = ep->ExceptionRecord->ExceptionCode;
+    g_faultAddr = reinterpret_cast<uintptr_t>(ep->ExceptionRecord->ExceptionAddress);
+  }
+  return EXCEPTION_EXECUTE_HANDLER;
+}
 // Which outputs are on ([Perception] FixationDepth, DepthGrid); either alone
 // or both (then they share the boundary callback, the in-pass capture and
 // the frame logic).
@@ -948,6 +970,8 @@ struct Run {
   UINT mipLevels = 1;
   bool armOk = false, cpuProj = false;
   float proj[16] = {}, viewInv[16] = {};
+  float origin[3] = {};    // R71: this pass's gOrigin (DCS's floating render origin) when originOk
+  bool originOk = false;
 };
 
 struct State {
@@ -969,7 +993,7 @@ struct State {
   int gridHead = 0, gridCount = 0;
   Run gridPending;
   bool hasGridPending = false;
-  SrvEntry srv[4];
+  SrvEntry srv[8];  // R65: 8 (was 4): the cockpit mask samples up to four HMD views' targets besides the cone / grid
   Run run;
   // Frame.
   uint64_t frame = 0;
@@ -997,6 +1021,10 @@ struct State {
   uint64_t gazeSeqFrame = 0;
 };
 State g_s;
+// R51 VrFx (color_pass.h FxViewPre): every HMD view's last G-buffer run (its depth target and cPerView), kept until
+// the view's next run; render thread only.
+Run g_fxRun[4];
+bool g_fxRunValid[4] = {};
 
 #include "far_depth.h"  // [Perception] FarDepthExport: the focus views' depth for Quad Views' Far depth
 
@@ -1018,6 +1046,7 @@ std::atomic<float> g_testGx{0}, g_testGy{0};
 void PassName(void* pass, char* out, size_t cap);
 bool ForeignTableHooks();
 ID3D11Resource* PassDepthTexNow();
+#include "sym_trace.h"  // R94: [Perception] SymbologyTrace (dev, default off): the live HUD trace (ovl_cpu.h reports into it)
 #include "cockpit_ipd.h"
 
 // ---------------------------------------------------------------------------
@@ -1035,9 +1064,38 @@ struct Job {
 std::mutex g_jobMutex;
 std::condition_variable g_jobCv;
 std::vector<Job> g_jobs;
+// R60: jobs queued and jobs finished (processed, or dropped from a full queue): equal once the worker is idle (tests
+// wait for that instead of a fixed time after the queue emptied).
+std::atomic<uint64_t> g_jobsQueued{0}, g_jobsDone{0};
 std::thread g_worker;
 std::atomic<bool> g_workerStop{false};
 int g_mismatchStreak = 0;  // worker only
+// R91 (R90 phase 2, M4): the per-frame readback copies (Poll, PollGrid) reuse their buffers: the render thread takes
+// one from this pool (empty: a new one), the worker gives it back after the job. Without it every frame allocated
+// and freed one or two vectors (a cone readback ~36 KB, the grid ~16 KB) across the two threads.
+std::mutex g_poolMutex;
+std::vector<std::vector<float>> g_dataPool;  // under g_poolMutex; at most kDataPoolMax
+constexpr size_t kDataPoolMax = 8;
+std::atomic<uint64_t> g_poolReuses{0}, g_poolNew{0};
+std::vector<float> TakeData() {
+  {
+    std::lock_guard<std::mutex> lock(g_poolMutex);
+    if (!g_dataPool.empty()) {
+      std::vector<float> v = std::move(g_dataPool.back());
+      g_dataPool.pop_back();
+      g_poolReuses++;
+      return v;
+    }
+  }
+  g_poolNew++;
+  return std::vector<float>();
+}
+void GiveData(std::vector<float>&& v) {
+  if (!v.capacity()) return;
+  v.clear();
+  std::lock_guard<std::mutex> lock(g_poolMutex);
+  if (g_dataPool.size() < kDataPoolMax) g_dataPool.push_back(std::move(v));
+}
 
 void Publish(const DepthIn& d) {
   void* v = g_depthView.load();
@@ -1220,7 +1278,7 @@ void ProcessJob(const Job& j) {
 void ProcessJobSeh(const Job& j) {
   __try {
     ProcessJob(j);
-  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  } __except (FaultNote(GetExceptionInformation(), __LINE__)) {
     g_fault = true;
   }
 }
@@ -1236,13 +1294,19 @@ void WorkerLoop() {
       g_jobs.erase(g_jobs.begin());
     }
     if (!g_fault.load()) ProcessJobSeh(j);
+    GiveData(std::move(j.data));  // R91 (M4)
+    g_jobsDone.fetch_add(1, std::memory_order_release);
   }
 }
 
 void PushJob(Job&& j) {
   {
     std::lock_guard<std::mutex> lock(g_jobMutex);
-    if (g_jobs.size() >= 8) g_jobs.erase(g_jobs.begin());  // the worker is stuck: keep the newest
+    if (g_jobs.size() >= 8) {  // the worker is stuck: keep the newest
+      g_jobs.erase(g_jobs.begin());
+      g_jobsDone.fetch_add(1, std::memory_order_release);
+    }
+    g_jobsQueued.fetch_add(1, std::memory_order_release);
     g_jobs.push_back(std::move(j));
   }
   g_jobCv.notify_one();
@@ -1252,6 +1316,9 @@ void PushJob(Job&& j) {
 // Render thread
 // ---------------------------------------------------------------------------
 
+namespace cmask {  // R65 cockpit_mask.h (included after RunCs)
+void DropPending();
+}
 void ReleaseRun(Run& r) {
   if (r.dsv) r.dsv->Release();
   if (r.cb) r.cb->Release();
@@ -1260,9 +1327,15 @@ void ReleaseRun(Run& r) {
 
 void ReleaseD3D() {
   State& s = g_s;
+  for (int i = 0; i < 4; ++i) {  // R51
+    if (g_fxRunValid[i]) ReleaseRun(g_fxRun[i]);
+    g_fxRunValid[i] = false;
+    cpass::g_fxView[i] = cpass::FxViewIn{};
+  }
   // Far depth: the layer's references first (every generation pushed), then
   // our copies (before the device reference goes).
   fdexport::ReleaseAll();
+  cmask::DropPending();  // R65: DCS's targets held for the mask (its own objects: cmask::Uninstall / EnsureBase)
   ReleaseRun(s.farPending);
   ReleaseRun(s.run);
   ReleaseRun(s.pending);
@@ -1574,6 +1647,10 @@ void InPassRearm();
 // Cockpit ipd's upload path: DCS's immediate context on the render thread
 // only (its per-pass state is the render thread's); another thread's upload
 // on the same context is forwarded untouched (counted).
+// R53: an observer of DCS's uploads while these entries are armed (focus_bcast_run.h reads the TerrainContext here
+// when this hook holds the upload slot); DCS's original bytes, before any patch. nullptr when unused.
+void (*g_uploadObserver)(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, const D3D11_BOX* box,
+                         const void* src) = nullptr;
 inline const void* CkUpload(ID3D11Resource* r, UINT sub, const D3D11_BOX* box, const void* src, bool us1) {
   if (!ckipd::g_on.load(std::memory_order_relaxed)) return src;
   ckipd::CostScope cost(ckipd::kCostUpload);
@@ -1588,6 +1665,7 @@ void STDMETHODCALLTYPE UsHook(ID3D11DeviceContext* c, ID3D11Resource* r, UINT su
   HookBusy busy;
   const bool ours = c == g_s.ctx && !g_ckRawUpload;
   if (ours) fdexport::NoteUpload(r, sub, box, src);  // DCS's original bytes, as before
+  if (ours && g_uploadObserver) g_uploadObserver(c, r, sub, box, src);  // R53
   // Cockpit ipd: a patched private copy for a cockpit pass's cPerView; else DCS's pointer.
   const void* fwd = ours ? CkUpload(r, sub, box, src, false) : src;
   g_usOrig(c, r, sub, box, fwd, rp, dp);
@@ -1606,6 +1684,7 @@ void STDMETHODCALLTYPE Us1Hook(ID3D11DeviceContext1* c, ID3D11Resource* r, UINT 
   // NO_OVERWRITE / DISCARD keep the bytes' meaning: the source is the new content of the box.
   const bool ours = static_cast<ID3D11DeviceContext*>(c) == g_s.ctx && !g_ckRawUpload;
   if (ours) fdexport::NoteUpload(r, sub, box, src);
+  if (ours && g_uploadObserver) g_uploadObserver(static_cast<ID3D11DeviceContext*>(c), r, sub, box, src);  // R53
   const void* fwd = ours ? CkUpload(r, sub, box, src, true) : src;
   g_us1Orig(c, r, sub, box, fwd, rp, dp, flags);
   if (ours) {
@@ -1846,6 +1925,7 @@ bool ArmNotOurs(void** vt) {
       if (g_dSlot[k] >= 0 && vt[g_dSlot[k]] != DrawHookOf(k)) return true;
   return false;
 }
+extern int g_cpView;  // R47 (colour pass, below): a ToneMappingPass armed, its tone-map draw still to come
 // A toggle point found the arm "normal, not ours": put back right there (counted per call, so the live run names
 // the call d3d11 submits in).
 void RepairNormal(int point) {
@@ -1903,7 +1983,8 @@ void AfterToggle(bool sure, int point = -1) {
     // second finds our hook back in the slot and does nothing more.)
     if (sure)
       InPassRearm();
-    else if (CkArm() && ArmNotOurs(vt))
+    else if ((CkArm() || (g_cpView >= 0 && (cpass::g_armRepair.load(std::memory_order_relaxed) & 2))) &&
+             ArmNotOurs(vt))  // R47: the colour pass's tone-map arm too
       RepairNormal(point);  // R32 4.5: a toggled entry was called since the toggle: normal entries over our hooks
     return;
   }
@@ -1915,7 +1996,7 @@ void AfterToggle(bool sure, int point = -1) {
 void AfterToggleSeh(bool sure, int point = -1) {
   __try {
     AfterToggle(sure, point);
-  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  } __except (FaultNote(GetExceptionInformation(), __LINE__)) {
     g_fault = true;
   }
 }
@@ -1967,13 +2048,14 @@ HRESULT STDMETHODCALLTYPE GetDataHook(ID3D11DeviceContext* c, ID3D11Asynchronous
 void TpAfter(ID3D11DeviceContext* c, int k) {
   void** vt = *reinterpret_cast<void***>(c);
   const bool tog = UsToggled(vt);
-  if ((tog || (CkArm() && ArmNotOurs(vt))) && OnRenderCtx(c)) {
+  const bool cpRep = g_cpView >= 0 && (cpass::g_armRepair.load(std::memory_order_relaxed) & 2);  // R47
+  if ((tog || ((CkArm() || cpRep) && ArmNotOurs(vt))) && OnRenderCtx(c)) {
     if (tog) {
       AfterToggleSeh(false, k);
     } else {
       __try {
         RepairNormal(k);
-      } __except (EXCEPTION_EXECUTE_HANDLER) {
+      } __except (FaultNote(GetExceptionInformation(), __LINE__)) {
         g_fault = true;
       }
     }
@@ -2063,6 +2145,24 @@ void OverlayBind(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* 
   if (c != g_s.ctx) return;
   g_ovRtv = n && r ? r[0] : nullptr;
 }
+// R74b (cockpit_overlay.h, mask v1.1): while an HMD view's OverlayHDRPass is open with the mask's overlay note, the
+// pass's first render target 0 (AddRef'd; cockpit_overlay.h takes it at the pass end) and the first viewport after it.
+extern bool g_trOpen;
+bool g_cmOvlArm = false;
+ID3D11RenderTargetView* g_cmOvlRtv = nullptr;  // reference
+D3D11_VIEWPORT g_cmOvlVp{};
+bool g_cmOvlWantVp = false;
+void CmOvlBind(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* r) {
+  if (c != g_s.ctx || g_cmOvlRtv || !n || !r || !r[0]) return;
+  g_cmOvlRtv = r[0];
+  g_cmOvlRtv->AddRef();
+  g_cmOvlWantVp = true;
+}
+void CmOvlViewport(ID3D11DeviceContext* c, UINT n, const D3D11_VIEWPORT* v) {
+  if (c != g_s.ctx || !g_cmOvlWantVp || !n || !v) return;
+  g_cmOvlVp = v[0];
+  g_cmOvlWantVp = false;
+}
 void OverlayViewport(ID3D11DeviceContext* c, UINT n, const D3D11_VIEWPORT* v) {
   if (c != g_s.ctx || !g_ovRtv || !n || !v) return;
   ID3D11RenderTargetView* rtv = g_ovRtv;
@@ -2079,6 +2179,38 @@ int g_traceDsvN = 0;
 ID3D11DepthStencilView* g_seq[8] = {};
 D3D11_VIEWPORT g_seqVp[8] = {};  // the first viewport DCS set after each bind (Width 0 = none)
 int g_seqN = 0;
+// R70: the motion-vector render target (the single R16G16_FLOAT / R16G16B16A16_FLOAT RTV) bound with each recorded DSV,
+// while the motion export wants it (g_mvWanted, set by cockpit_mask.h's ConfigureMotion); no references, as g_seq.
+std::atomic<bool> g_mvWanted{false};
+ID3D11RenderTargetView* g_seqMv[8] = {};
+ID3D11RenderTargetView* g_passMv = nullptr;  // reference: the MV RTV of g_passDsv's entry (PickPassDsv)
+ID3D11RenderTargetView* g_runMv = nullptr;   // reference: the current run's MV RTV (the latest pass that had one)
+std::atomic<uint64_t> g_mvAmbiguous{0};      // a bind with more than one 16-bit float RG / RGBA target
+// The MV candidate among a bind's render targets: exactly one R16G16_FLOAT or R16G16B16A16_FLOAT view.
+ID3D11RenderTargetView* MvOfBind(UINT n, ID3D11RenderTargetView* const* r) {
+  if (!r) return nullptr;
+  ID3D11RenderTargetView* found = nullptr;
+  int count = 0;
+  for (UINT k = 0; k < n && k < 8; ++k) {
+    if (!r[k]) continue;
+    D3D11_RENDER_TARGET_VIEW_DESC d{};
+    r[k]->GetDesc(&d);
+    if ((d.Format == DXGI_FORMAT_R16G16_FLOAT || d.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) &&
+        d.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D && d.Texture2D.MipSlice == 0) {
+      found = r[k];
+      ++count;
+    }
+  }
+  if (count > 1) {
+    g_mvAmbiguous++;
+    return nullptr;
+  }
+  return found;
+}
+// R69: a GBufferPass begin was seen by this install since the last end. The entries above are DCS's views WITHOUT a
+// reference, valid only while that pass runs: a pass end whose begin came before an install (a reinstall mid-pass)
+// must not use them (live: an AddRef on a released DSV, 0xc0000005 in PickPassDsv after a CockpitDepthExport toggle).
+bool g_gbBegun = false;
 void KeepDsv(ID3D11DeviceContext* c, ID3D11DepthStencilView* d) {
   if (!d || c != g_s.ctx) return;
   if (g_traceDsvN < 4 && (!g_traceDsvN || g_traceDsv[g_traceDsvN - 1] != d)) g_traceDsv[g_traceDsvN++] = d;
@@ -2089,7 +2221,13 @@ void KeepDsv(ID3D11DeviceContext* c, ID3D11DepthStencilView* d) {
     --g_seqN;
   }
   g_seqVp[g_seqN] = D3D11_VIEWPORT{};
+  g_seqMv[g_seqN] = nullptr;
   g_seq[g_seqN++] = d;
+}
+// R70: the MV target bound with the DSV just recorded (the latest bind of that entry that had one wins).
+void KeepMv(ID3D11DeviceContext* c, ID3D11DepthStencilView* d, UINT n, ID3D11RenderTargetView* const* r) {
+  if (!d || c != g_s.ctx || !g_mvWanted.load(std::memory_order_relaxed) || !g_seqN || g_seq[g_seqN - 1] != d) return;
+  if (ID3D11RenderTargetView* mv = MvOfBind(n, r)) g_seqMv[g_seqN - 1] = mv;
 }
 // With DLSS each view renders at its own resolution (measured: periphery
 // 476x468, focus 1176x1164) while the default frame buffer is 816x804, so
@@ -2103,6 +2241,8 @@ bool g_omCapture = true;
 // holds the arm (also an uploads-only arm, whose OM entries are re-arm points only). g_dumpArm: the arm is the
 // dump's own (taken when no other feature held one; given back at the pass end).
 bool g_dumpPass = false, g_dumpArm = false;
+extern bool g_geoActive;  // R41 GeoOnlyProbe (defined with the probes below)
+extern uint64_t g_geoVps;
 void STDMETHODCALLTYPE VpHook(ID3D11DeviceContext* c, UINT n, const D3D11_VIEWPORT* v) {
   HookBusy busy;
   if (g_dumpPass && c == g_s.ctx && n && v) ckipd::DumpVpSet(v[0]);
@@ -2110,7 +2250,16 @@ void STDMETHODCALLTYPE VpHook(ID3D11DeviceContext* c, UINT n, const D3D11_VIEWPO
   // Pre-overlay: copied before DCS's call (the copy reads the target only;
   // the viewport is not needed bound for it).
   if (g_omCapture && g_overlayArm) OverlayViewport(c, n, v);
-  g_vpOrig(c, n, v);
+  if (g_omCapture && g_cmOvlArm) CmOvlViewport(c, n, v);  // R74b
+  if (g_geoActive && c == g_s.ctx && n && v) {  // R41 [Suite] GeoOnlyProbe: every triangle set up, no pixel written
+    D3D11_VIEWPORT off[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+    const UINT m = std::min<UINT>(n, D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE);
+    for (UINT i = 0; i < m; ++i) off[i] = D3D11_VIEWPORT{-64.0f, -64.0f, 16.0f, 16.0f, v[i].MinDepth, v[i].MaxDepth};
+    ++g_geoVps;
+    g_vpOrig(c, m, off);
+  } else {
+    g_vpOrig(c, n, v);
+  }
   if (c == g_s.ctx) InPassRearm(), g_lastCall = 5;
 }
 D3D11_VIEWPORT g_passVp{};  // the viewport that goes with g_passDsv (Width 0 = unknown)
@@ -2124,16 +2273,22 @@ ID3D11DepthStencilView* g_beginDsv = nullptr;
 // g_passDsv with its viewport.
 void PickPassDsv() {
   g_passVp = D3D11_VIEWPORT{};
+  int at = -1;
   for (int i = g_seqN - 1; i >= 0; --i)
     if (g_seq[i] != g_beginDsv) {
       g_passDsv = g_seq[i];
       g_passVp = g_seqVp[i];
+      at = i;
       break;
     }
   if (!g_passDsv && g_seqN) {
     g_passDsv = g_seq[g_seqN - 1];
     g_passVp = g_seqVp[g_seqN - 1];
+    at = g_seqN - 1;
   }
+  if (g_passMv) g_passMv->Release();  // R70
+  g_passMv = (at >= 0 && g_passDsv) ? g_seqMv[at] : nullptr;
+  if (g_passMv) g_passMv->AddRef();
   if (g_passDsv) {
     g_passDsv->AddRef();
   } else {
@@ -2167,7 +2322,9 @@ void STDMETHODCALLTYPE OmHook(ID3D11DeviceContext* c, UINT n, ID3D11RenderTarget
   if (g_dumpPass && c == g_s.ctx) ckipd::DumpOmBind(n && r ? r[0] : nullptr);
   if (g_omCapture) {
     KeepDsv(c, d);
+    KeepMv(c, d, n, r);  // R70
     if (g_overlayArm) OverlayBind(c, n, r);
+    if (g_cmOvlArm) CmOvlBind(c, n, r);  // R74b
   }
   g_omOrig(c, n, r, d);
   if (c == g_s.ctx) InPassRearm(), g_lastCall = 4;
@@ -2180,7 +2337,9 @@ void STDMETHODCALLTYPE OmUavHook(ID3D11DeviceContext* c, UINT n, ID3D11RenderTar
     ckipd::DumpOmBind(n && r ? r[0] : nullptr);
   if (g_omCapture && n != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) {
     KeepDsv(c, d);
+    KeepMv(c, d, n, r);  // R70
     if (g_overlayArm) OverlayBind(c, n, r);
+    if (g_cmOvlArm) CmOvlBind(c, n, r);  // R74b
   }
   g_omUavOrig(c, n, r, d, us, un, u, ic);
   if (c == g_s.ctx) InPassRearm();
@@ -2239,6 +2398,20 @@ bool DisarmUsEntries(void** vt) {
   g_usArmed = false;
   return ok;
 }
+bool InD3d11(const void* p);  // below (R47)
+// R48: one rule for every toggle-point arm, counted when it leaves a point out (before, R49's skips were silent and
+// the basic points and R32's Unmap point took any pointer). The state-call points (kTpBasic..): d3d11's own entry
+// only (R47 / R49: the split filter owns several of these slots). The basic points (Flush, Map, GetData, Unmap): not
+// over another hook of this payload (gpu_dedup.h's Map / Unmap hooks re-arm after every call they forward, taking
+// whatever is there as d3d11's: the same mutual forwarding); a third-party hook there is chained over as before.
+std::atomic<uint64_t> g_tpSkipForeign{0};
+inline bool TpSlotFree(void** vt, int k) {
+  if (g_tpSlot[k] < 0 || vt[g_tpSlot[k]] == TogglePointHook(k)) return false;
+  const void* cur = vt[g_tpSlot[k]];
+  if (InD3d11(cur) || (k < kTpBasic && !d3ds::InPayload(cur))) return true;
+  g_tpSkipForeign.fetch_add(1, std::memory_order_relaxed);
+  return false;
+}
 // The OM / viewport entries into vt; false when unknown or ours already.
 bool ArmOmEntries(void** vt) {
   if (!OmSlots()) return false;
@@ -2259,7 +2432,9 @@ bool ArmOmEntries(void** vt) {
     g_tpArmed[k] = false;
     if (k >= kTpBasic && !g_tpExtended) continue;
     if (k == kTpUnmap && !g_tpCk) continue;  // R32: cockpit ipd's arms only
-    if (g_tpSlot[k] < 0 || vt[g_tpSlot[k]] == TogglePointHook(k)) continue;
+    // R49: the state-call points (an overlay pass's own arm, cockpit ipd's d3d11 overlay path) only over d3d11's
+    // own entry: never into a slot the split filter owns (mutual forwarding, see InD3d11 below). R48: TpSlotFree.
+    if (!TpSlotFree(vt, k)) continue;
     g_tpOrig[k] = vt[g_tpSlot[k]];
     FdWriteSlot(&vt[g_tpSlot[k]], TogglePointHook(k));
     g_tpArmed[k] = true;
@@ -2268,10 +2443,31 @@ bool ArmOmEntries(void** vt) {
 }
 // The overlay passes' state-call toggle points into an arm held by another feature (a nested overlay pass);
 // DisarmTpExtended takes them out again at the overlay pass end (DisarmOmEntries too, when it comes first).
+// R49: cockpit ipd's nested d3d11 overlay path uses ArmTpExtendedD3d11Only too (the unguarded variant is gone).
 bool g_tpAddedExt = false;
-void ArmTpExtended(void** vt) {
+// R47: the colour pass's tone-map arm takes only the state-call points whose entry is d3d11's own. The split
+// filter (split_filter.h) hooks VS/PS shader, constant buffer, sampler, layout, topology and raster entries and puts
+// its hook back whenever it finds another pointer there, taking that pointer as its original: with ours in such a
+// slot (ours forwarding to its hook, its hook forwarding to ours) a call recursed until the stack ran out (live
+// 2026-10-16 21:24 / 21:42 / 21:45: DCS gone without a crash report as soon as the tone maps were swapped). The
+// points d3d11 was seen submitting in (PSSetShaderResources, VSSetShaderResources, IASetVertexBuffers,
+// IASetIndexBuffer, GSSetShader) are not among the split filter's.
+bool InD3d11(const void* p) {
+  static uintptr_t lo = 0, hi = 0;  // d3d11.dll's image (loaded before any context exists; never unloaded under DCS)
+  if (!lo) {
+    if (const HMODULE d3d = GetModuleHandleW(L"d3d11.dll")) {
+      const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(d3d);
+      const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(reinterpret_cast<const uint8_t*>(d3d) + dos->e_lfanew);
+      hi = reinterpret_cast<uintptr_t>(d3d) + nt->OptionalHeader.SizeOfImage;
+      lo = reinterpret_cast<uintptr_t>(d3d);
+    }
+  }
+  const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+  return lo && a >= lo && a < hi;
+}
+void ArmTpExtendedD3d11Only(void** vt) {
   for (int k = kTpBasic; k < kTpCount; ++k) {
-    if (g_tpArmed[k] || g_tpSlot[k] < 0 || vt[g_tpSlot[k]] == TogglePointHook(k)) continue;
+    if (g_tpArmed[k] || !TpSlotFree(vt, k)) continue;  // d3d11's own entry only (R48: counted)
     g_tpOrig[k] = vt[g_tpSlot[k]];
     FdWriteSlot(&vt[g_tpSlot[k]], TogglePointHook(k));
     g_tpArmed[k] = true;
@@ -2281,8 +2477,7 @@ void ArmTpExtended(void** vt) {
 // R32's Unmap toggle point into another feature's arm while a cockpit pass is nested in it (the cpu path's
 // observer reads a mapped effect buffer at its Unmap); out again at the nested pass's end.
 void ArmTpUnmap(void** vt) {
-  if (!vt || g_tpArmed[kTpUnmap] || g_tpSlot[kTpUnmap] < 0 || vt[g_tpSlot[kTpUnmap]] == TogglePointHook(kTpUnmap))
-    return;
+  if (!vt || g_tpArmed[kTpUnmap] || !TpSlotFree(vt, kTpUnmap)) return;  // R48: not over a hook of ours
   g_tpOrig[kTpUnmap] = vt[g_tpSlot[kTpUnmap]];
   FdWriteSlot(&vt[g_tpSlot[kTpUnmap]], TogglePointHook(kTpUnmap));
   g_tpArmed[kTpUnmap] = true;
@@ -2530,7 +2725,14 @@ bool CaptureRun(Run& r) {
   // upload entries need not: cpuProj requires this pass's upload, and every
   // upload of a view's cPerView in one pass carries the same gViewInv/gProj.
   r.armOk = g_lastArmOk;
-  r.cpuProj = fdexport::WantUploads() && fdexport::TakeProj(cb, first, num, r.proj, r.viewInv);
+  UINT cbBytes = 0;  // R71: a whole-buffer binding's span (gOrigin at byte 0x610 is read only inside it)
+  if (cb && fdexport::WantUploads()) {
+    D3D11_BUFFER_DESC bd{};
+    cb->GetDesc(&bd);
+    cbBytes = bd.ByteWidth;
+  }
+  r.cpuProj = fdexport::WantUploads() &&
+              fdexport::TakeProj(cb, first, num, r.proj, r.viewInv, r.origin, &r.originOk, cbBytes);
   ID3D11DepthStencilState* dss = nullptr;
   UINT ref = 0;
   c->OMGetDepthStencilState(&dss, &ref);
@@ -2592,7 +2794,7 @@ bool ReadGaze(GazeOut& g) {
     if (g_testWriterSeq != 0 && cur != g_testWriterSeq) {
       g_testWriterYielded = true;
       Log("fixation depth: another writer updates %ls (seq %llu, ours %llu): test gaze writes stopped",
-          g_gazeName.c_str(), static_cast<unsigned long long>(cur), static_cast<unsigned long long>(g_testWriterSeq));
+          GazeName().c_str(), static_cast<unsigned long long>(cur), static_cast<unsigned long long>(g_testWriterSeq));
     }
   }
   if (g_testGaze.load() && v && g_gazeOwned && !g_testWriterYielded.load()) {
@@ -2696,12 +2898,19 @@ void RestoreState(ID3D11DeviceContext* c, ID3D11DeviceContext1* c1, Saved& sv) {
 // Runs one of our compute shaders on DCS's context: our parameters as b0,
 // the run's cPerView as b1 (with its *1 range), `srvs` as t0-t1, `uav` as
 // u0. Every binding touched is saved before and put back after (see 5).
+// R69: uav1 (optional) is bound as u1 too; DCS's CS UAV 1 is saved and put back exactly.
+// R70: srv2 (optional) is bound as t2 too; DCS's CS SRV 2 is saved and put back exactly.
 void RunCs(const Run& r, ID3D11Buffer* params, ID3D11ComputeShader* cs, ID3D11ShaderResourceView* const* srvs,
-           ID3D11UnorderedAccessView* uav, UINT groupsX, UINT groupsY) {
+           ID3D11UnorderedAccessView* uav, UINT groupsX, UINT groupsY, ID3D11UnorderedAccessView* uav1 = nullptr,
+           ID3D11ShaderResourceView* srv2 = nullptr) {
   State& s = g_s;
   ID3D11DeviceContext* c = s.ctx;
   Saved sv;
   SaveState(c, s.ctx1, sv);
+  ID3D11UnorderedAccessView* savedU1 = nullptr;
+  if (uav1) c->CSGetUnorderedAccessViews(1, 1, &savedU1);
+  ID3D11ShaderResourceView* savedT2 = nullptr;
+  if (srv2) c->CSGetShaderResources(2, 1, &savedT2);
   // DCS's DSV on the sampled texture would make d3d11 null our SRV: unbind
   // the output targets for the dispatch (OM UAVs kept), put them back after.
   {
@@ -2738,11 +2947,26 @@ void RunCs(const Run& r, ID3D11Buffer* params, ID3D11ComputeShader* cs, ID3D11Sh
   }
   c->CSSetShader(cs, nullptr, 0);
   c->CSSetShaderResources(0, 2, srvs);
+  if (srv2) c->CSSetShaderResources(2, 1, &srv2);
   const UINT keep = static_cast<UINT>(-1);
-  c->CSSetUnorderedAccessViews(0, 1, &uav, &keep);
+  if (uav1) {
+    ID3D11UnorderedAccessView* both[2] = {uav, uav1};
+    const UINT keep2[2] = {keep, keep};
+    c->CSSetUnorderedAccessViews(0, 2, both, keep2);
+  } else {
+    c->CSSetUnorderedAccessViews(0, 1, &uav, &keep);
+  }
   c->Dispatch(groupsX, groupsY, 1);
   ID3D11ShaderResourceView* nullSrv[2] = {};
   c->CSSetShaderResources(0, 2, nullSrv);  // before OM restore re-binds the DSV
+  if (uav1) {
+    c->CSSetUnorderedAccessViews(1, 1, &savedU1, &keep);
+    if (savedU1) savedU1->Release();
+  }
+  if (srv2) {
+    c->CSSetShaderResources(2, 1, &savedT2);
+    if (savedT2) savedT2->Release();
+  }
   RestoreState(c, s.ctx1, sv);
 }
 
@@ -2832,6 +3056,8 @@ bool Dispatch(const Run& r, Slot& sl) {
   }
   return true;
 }
+
+#include "cockpit_mask.h"  // R65: [Perception] CockpitMaskExport (per-view cockpit mask for a frame-generation layer)
 
 // Debug (with a dump request): the whole depth texture copied and read back
 // right away (one stall), to check the shader's samples against the truth.
@@ -2995,6 +3221,7 @@ void Poll() {
       if (SUCCEEDED(hr)) {
         const size_t n = static_cast<size_t>(kHeader) + 2 * static_cast<size_t>(sl.G) * sl.G;
         const float* f = static_cast<const float*>(m.pData);
+        j.data = TakeData();  // R91 (M4): a buffer of an earlier frame
         j.data.assign(f, f + n);
         s.ctx->Unmap(sl.staging, 0);
         j.gpu = true;
@@ -3037,6 +3264,17 @@ void PassName(void* pass, char* out, size_t cap) {
 
 void FlushPending(bool afterWater, bool seaEnd = false);
 void FarCapture(const Run& r, int idx, bool seaEnd);
+
+// R51 VrFx: keeps HMD view idx's run (references) and copies its gProj into the colour pass's state on the GPU.
+void FxKeepRun(const Run& r, int idx) {
+  if (idx < 0 || idx > 3) return;
+  if (g_fxRunValid[idx]) ReleaseRun(g_fxRun[idx]);
+  g_fxRun[idx] = r;
+  if (r.dsv) r.dsv->AddRef();
+  if (r.cb) r.cb->AddRef();
+  g_fxRunValid[idx] = true;
+  cpass::FxNoteProj(g_s.ctx, idx, r.cb, r.cbFirst);
+}
 
 void CloseRun() {
   State& s = g_s;
@@ -3104,6 +3342,10 @@ void CloseRun() {
         s.waterSeen = false;
       }
     }
+    // R65 cockpit mask: the configured HMD views, sampled at their WaterSeaPass end (or before their transparents).
+    if (hmd && cmask::Active()) cmask::NoteRun(r, idx, s.lastHmdCount, g_runMv);  // R70: with the run's MV target
+    // R51 VrFx: every HMD view's run (GazeDof's depth; both effects' projection).
+    if (hmd && idx >= 0 && idx <= 3 && vrfx::Wanted()) FxKeepRun(r, idx);
     if (!g_coneOn.load()) target = false;
     if (target && !s.sampled) {
       s.sampled = true;
@@ -3219,6 +3461,7 @@ void PollGrid() {
     j.latency = static_cast<double>(s.frame - sl.frame);
     if (SUCCEEDED(hr)) {
       const float* f = static_cast<const float*>(m.pData);
+      j.data = TakeData();  // R91 (M4)
       j.data.assign(f, f + kGridWords);
       s.ctx->Unmap(sl.staging, 0);
       j.gpu = true;
@@ -3283,7 +3526,7 @@ void FarCapture(const Run& r, int idx, bool seaEnd) {
   }
   const int slots = std::clamp(fdexport::g_slots.load(), 1, fdexport::kMaxSlots);
   const int slot = static_cast<int>(s.frame % static_cast<uint64_t>(slots));
-  ID3D11Texture2D* t = fdexport::EnsureTex(s.dev, idx, slot, r.rawFmt, r.texW, r.texH);
+  ID3D11Texture2D* t = fdexport::EnsureTex(s.dev, idx, slot, r.rawFmt, r.texW, r.texH, slots);  // R91: all slots
   if (!t) {
     fdexport::g_skipFormat++;
     return;
@@ -3386,7 +3629,7 @@ void FarPreCopy(int view, ID3D11RenderTargetView* rtv, ID3D11Resource* res, cons
     post = false;
     fdexport::g_postSkipWide++;
   }
-  ID3D11Texture2D* pre = fdexport::EnsurePreTex(s.dev, view, slot, dstFmt, post ? 2 * bw : bw, bh);
+  ID3D11Texture2D* pre = fdexport::EnsurePreTex(s.dev, view, slot, dstFmt, post ? 2 * bw : bw, bh, slots);  // R91
   if (!pre) {
     fdexport::g_preSkipFormat++;
     return;
@@ -3457,6 +3700,10 @@ struct HdrSrc {
 };
 HdrSrc g_hdr[2];
 bool g_hdrLogged[2] = {};
+// R91 (R90 phase 2, M3): the "HDR source of HMD view" line at most this often per view and install (a source that
+// alternates between two resources logged one line per frame on the render thread); the learns stay counted.
+constexpr int kHdrSrcLogMax = 8;
+int g_hdrLogN[2] = {};
 int g_hdrLearnView = -1;  // ToneMappingPass of this view: its first draw's PS SRV 0 is learnt
 bool g_hdrArmOwn = false;  // the learning arm is ours (no overlay / trace arm under it)
 bool g_dlssSeen[2] = {};   // this frame: the view's DLSSPass ended
@@ -3466,6 +3713,7 @@ void HdrRelease() {
     h = HdrSrc{};
   }
   g_hdrLogged[0] = g_hdrLogged[1] = false;
+  g_hdrLogN[0] = g_hdrLogN[1] = 0;  // R91
   g_hdrLearnView = -1;
   g_dlssSeen[0] = g_dlssSeen[1] = false;
 }
@@ -3553,11 +3801,875 @@ void TraceDraw(int kind, UINT count, UINT inst, ID3D11RenderTargetView* rtv, ID3
   fdexport::TraceLine(l);
 }
 
+// ---------------------------------------------------------------------------
+// R41 live probes (dev, measure only; [Color] ToneProbe / SwapProbe, [Suite] GeoOnlyProbe; color_grade.h).
+// Nothing here runs while the keys are 0. Each probe reads state at a pass's first draw (the draw entries of an
+// arm, as 5d's HDR learning) and reads back through staging copies with a Map wait (dev only: a few frames).
+// ---------------------------------------------------------------------------
+int g_tpView = -1;            // ToneMappingPass of this view: its first draw is probed
+bool g_tpArmOwn = false;
+int g_tpFramesLeft = 0;       // probe frames left in the running session
+bool g_tpThisFrame = false;   // this frame is probed (decided at view 0's ToneMappingPass)
+int g_tpSession = 0;
+bool g_tpHdrDone[4] = {};     // one HDR file per view and session
+bool g_tpCbDone[4] = {};      // one full cb0 dump per view and session
+std::wstring g_tpDir;
+// R91 (R90 phase 2): the tone probe's HDR files and folders are written by the config thread (Tick), not the render
+// thread (a file write can stall for ms on a filter driver or a reader of the folder).
+struct TpFile {
+  std::wstring root, dir, name;
+  std::vector<float> data;
+};
+std::mutex g_tpFileMutex;
+std::vector<TpFile> g_tpFiles;  // under g_tpFileMutex
+std::wstring g_tpRoot;          // render thread: tone_probe\ of this session's g_tpDir
+void WriteToneProbeFiles() {
+  std::vector<TpFile> files;
+  {
+    std::lock_guard<std::mutex> lock(g_tpFileMutex);
+    files.swap(g_tpFiles);
+  }
+  for (const TpFile& f : files) {
+    CreateDirectoryW(f.root.c_str(), nullptr);
+    CreateDirectoryW(f.dir.c_str(), nullptr);
+    FILE* fp = nullptr;
+    if (_wfopen_s(&fp, (f.dir + f.name).c_str(), L"wb") == 0 && fp) {
+      fwrite(f.data.data(), sizeof(float), f.data.size(), fp);
+      fclose(fp);
+    }
+  }
+}
+int g_spView = -1;            // CopyToHMDPass of this view: its first draw is probed
+bool g_spArmOwn = false;
+int g_spFramesLeft = 0;
+bool g_spThisFrame = false;
+struct SwapSeen {
+  ID3D11Resource* dst = nullptr;  // the RTV's resource (swapchain image), AddRef'd
+  ID3D11Resource* src = nullptr;  // PS SRV 0's resource (the view's LDR image), AddRef'd
+  UINT dstSub = 0, srcSub = 0;
+  D3D11_VIEWPORT vp{};
+};
+SwapSeen g_spSeen;
+// R71: [Perception] CockpitFgDump: HMD view 0 / 1's CopyToHMDPass, its first draw's target (the swapchain image) and
+// PS SRV 0 (its source), kept until the pass end, where cmask::FgNoteColour copies the submitted box.
+int g_fgView = -1;
+bool g_fgArmOwn = false;
+SwapSeen g_fgSeen;
+// R71 live: a view's CopyToHMDPass whose draw was not seen (draw arm refused or lost: ~1 frame in 36) takes its copy
+// source instead, the view's LDR image as seen in the previous frame (the bytes DCS copies unchanged: R41 verdict A).
+int g_fgWant = -1;                         // the CopyToHMDPass (view) that should be captured
+ID3D11Resource* g_fgLastSrc[2] = {};       // the view's last copy source (AddRef'd while a dump runs)
+UINT g_fgLastSrcSub[2] = {};
+uint64_t g_fgLastSrcFrame[2] = {};
+std::atomic<uint64_t> g_fgArmMiss{0}, g_fgDrawMiss{0}, g_fgFallback{0};
+// GeoOnlyProbe: the focus views' main GBufferPass is open (first GBufferPass of HMD view 2 / 3).
+bool g_geoActive = false;
+int g_geoLastView = -1;
+uint64_t g_geoPasses = 0, g_geoVps = 0;
+
+const char* ProbeFmtName(DXGI_FORMAT f) {
+  switch (f) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS: return "R8G8B8A8_TYPELESS";
+    case DXGI_FORMAT_R8G8B8A8_UNORM: return "R8G8B8A8_UNORM";
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return "R8G8B8A8_UNORM_SRGB";
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS: return "B8G8R8A8_TYPELESS";
+    case DXGI_FORMAT_B8G8R8A8_UNORM: return "B8G8R8A8_UNORM";
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return "B8G8R8A8_UNORM_SRGB";
+    case DXGI_FORMAT_R16G16B16A16_FLOAT: return "R16G16B16A16_FLOAT";
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS: return "R16G16B16A16_TYPELESS";
+    case DXGI_FORMAT_R11G11B10_FLOAT: return "R11G11B10_FLOAT";
+    case DXGI_FORMAT_R32_FLOAT: return "R32_FLOAT";
+    case DXGI_FORMAT_R32G32_FLOAT: return "R32G32_FLOAT";
+    case DXGI_FORMAT_R32G32B32A32_FLOAT: return "R32G32B32A32_FLOAT";
+    case DXGI_FORMAT_R16_FLOAT: return "R16_FLOAT";
+    case DXGI_FORMAT_R10G10B10A2_UNORM: return "R10G10B10A2_UNORM";
+    case DXGI_FORMAT_UNKNOWN: return "UNKNOWN";
+    default: return "other";
+  }
+}
+
+// A staging copy of a resource, mapped; Done unmaps and releases.
+struct ProbeMap {
+  ID3D11Resource* st = nullptr;
+  D3D11_MAPPED_SUBRESOURCE m{};
+  bool ok = false;
+  void Done(ID3D11DeviceContext* c) {
+    if (st) {
+      if (ok) c->Unmap(st, 0);
+      st->Release();
+    }
+    st = nullptr;
+    ok = false;
+  }
+};
+bool ProbeReadTex(ID3D11Texture2D* t, UINT sub, const D3D11_BOX* box, ProbeMap& pm) {
+  State& s = g_s;
+  D3D11_TEXTURE2D_DESC td{};
+  t->GetDesc(&td);
+  if (td.SampleDesc.Count != 1 || !s.dev) return false;
+  const UINT mip = sub % td.MipLevels;
+  D3D11_TEXTURE2D_DESC sd{};
+  sd.Width = box ? box->right - box->left : std::max(1u, td.Width >> mip);
+  sd.Height = box ? box->bottom - box->top : std::max(1u, td.Height >> mip);
+  sd.MipLevels = sd.ArraySize = 1;
+  sd.Format = td.Format;
+  sd.SampleDesc.Count = 1;
+  sd.Usage = D3D11_USAGE_STAGING;
+  sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  ID3D11Texture2D* st = nullptr;
+  if (FAILED(s.dev->CreateTexture2D(&sd, nullptr, &st)) || !st) return false;
+  s.ctx->CopySubresourceRegion(st, 0, 0, 0, 0, t, sub, box);
+  pm.st = st;
+  pm.ok = SUCCEEDED(s.ctx->Map(st, 0, D3D11_MAP_READ, 0, &pm.m));
+  return pm.ok;
+}
+bool ProbeReadBuf(ID3D11Buffer* b, ProbeMap& pm) {
+  State& s = g_s;
+  D3D11_BUFFER_DESC bd{};
+  b->GetDesc(&bd);
+  if (!bd.ByteWidth || !s.dev) return false;
+  D3D11_BUFFER_DESC sd{};
+  sd.ByteWidth = bd.ByteWidth;
+  sd.Usage = D3D11_USAGE_STAGING;
+  sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  sd.StructureByteStride = bd.StructureByteStride;
+  sd.MiscFlags = bd.MiscFlags & (D3D11_RESOURCE_MISC_BUFFER_STRUCTURED | D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS);
+  ID3D11Buffer* st = nullptr;
+  if (FAILED(s.dev->CreateBuffer(&sd, nullptr, &st)) || !st) return false;
+  s.ctx->CopyResource(st, b);
+  pm.st = st;
+  pm.ok = SUCCEEDED(s.ctx->Map(st, 0, D3D11_MAP_READ, 0, &pm.m));
+  return pm.ok;
+}
+void ProbeLogFloats(const char* what, const void* p, UINT bytes, bool half) {
+  char l[900];
+  int n = snprintf(l, sizeof(l), "tone probe:   %s:", what);
+  const UINT cnt = std::min<UINT>(half ? bytes / 2 : bytes / 4, 24);
+  for (UINT i = 0; i < cnt && n < static_cast<int>(sizeof(l)) - 24; ++i) {
+    const float v = half ? cgrade::HalfToFloat(static_cast<const uint16_t*>(p)[i]) : static_cast<const float*>(p)[i];
+    n += snprintf(l + n, sizeof(l) - n, " %.6g", v);
+  }
+  Log("%s", l);
+}
+
+// ToneMappingPass's first draw of view g_tpView.
+void ToneProbeDraw(const D3D11_VIEWPORT& vp) {
+  State& s = g_s;
+  const int v = g_tpView;
+  g_tpView = -1;
+  if (!s.dev) return;
+  ID3D11RenderTargetView* rtv = nullptr;
+  s.ctx->OMGetRenderTargets(1, &rtv, nullptr);
+  D3D11_RENDER_TARGET_VIEW_DESC rd{};
+  D3D11_TEXTURE2D_DESC rtd{};
+  if (rtv) {
+    rtv->GetDesc(&rd);
+    ID3D11Resource* r = nullptr;
+    rtv->GetResource(&r);
+    ID3D11Texture2D* t = nullptr;
+    if (r && SUCCEEDED(r->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&t))) && t) {
+      t->GetDesc(&rtd);
+      t->Release();
+    }
+    if (r) r->Release();
+    rtv->Release();
+  }
+  Log("tone probe: session %d view %d ToneMappingPass first draw: target RTV %s (%d) on texture %s (%d) %ux%u, "
+      "viewport %.0f,%.0f %.0fx%.0f",
+      g_tpSession, v, ProbeFmtName(rd.Format), static_cast<int>(rd.Format), ProbeFmtName(rtd.Format),
+      static_cast<int>(rtd.Format), rtd.Width, rtd.Height, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height);
+  ID3D11ShaderResourceView* srvs[8] = {};
+  s.ctx->PSGetShaderResources(0, 8, srvs);
+  for (int i = 0; i < 8; ++i) {
+    ID3D11ShaderResourceView* sv = srvs[i];
+    if (!sv) continue;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+    sv->GetDesc(&sd);
+    ID3D11Resource* r = nullptr;
+    sv->GetResource(&r);
+    sv->Release();
+    if (!r) continue;
+    D3D11_RESOURCE_DIMENSION dim{};
+    r->GetType(&dim);
+    if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+      ID3D11Buffer* b = static_cast<ID3D11Buffer*>(r);
+      D3D11_BUFFER_DESC bd{};
+      b->GetDesc(&bd);
+      Log("tone probe:  t%d buffer %u bytes, view %s (%d), stride %u", i, bd.ByteWidth, ProbeFmtName(sd.Format),
+          static_cast<int>(sd.Format), bd.StructureByteStride);
+      ProbeMap pm;
+      if (bd.ByteWidth <= 65536 && ProbeReadBuf(b, pm)) {
+        char w[32];
+        snprintf(w, sizeof(w), "t%d floats", i);
+        ProbeLogFloats(w, pm.m.pData, std::min<UINT>(96, bd.ByteWidth), false);
+      }
+      pm.Done(s.ctx);
+    } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+      ID3D11Texture2D* t = static_cast<ID3D11Texture2D*>(r);
+      D3D11_TEXTURE2D_DESC td{};
+      t->GetDesc(&td);
+      Log("tone probe:  t%d texture %ux%u mips %u array %u, texture %s (%d), view %s (%d)", i, td.Width, td.Height,
+          td.MipLevels, td.ArraySize, ProbeFmtName(td.Format), static_cast<int>(td.Format), ProbeFmtName(sd.Format),
+          static_cast<int>(sd.Format));
+      const bool f32 = td.Format == DXGI_FORMAT_R32_FLOAT || td.Format == DXGI_FORMAT_R32G32_FLOAT ||
+                       td.Format == DXGI_FORMAT_R32G32B32A32_FLOAT || td.Format == DXGI_FORMAT_R32_TYPELESS;
+      const bool f16 = td.Format == DXGI_FORMAT_R16_FLOAT || td.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ||
+                       td.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS;
+      if ((f32 || f16) && td.Width * td.Height <= 64 && td.SampleDesc.Count == 1) {
+        ProbeMap pm;
+        if (ProbeReadTex(t, 0, nullptr, pm)) {
+          char w[32];
+          snprintf(w, sizeof(w), "t%d texels", i);
+          UINT bpp = 4;
+          if (td.Format == DXGI_FORMAT_R32G32B32A32_FLOAT) bpp = 16;
+          else if (td.Format == DXGI_FORMAT_R32G32_FLOAT || td.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ||
+                   td.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS) bpp = 8;
+          else if (td.Format == DXGI_FORMAT_R16_FLOAT) bpp = 2;
+          ProbeLogFloats(w, pm.m.pData, std::min<UINT>(td.Width * bpp, pm.m.RowPitch), f16);
+        }
+        pm.Done(s.ctx);
+      }
+      const bool hdr = td.Format == DXGI_FORMAT_R16G16B16A16_FLOAT || td.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS;
+      if (hdr && td.Width >= 256 && td.SampleDesc.Count == 1 && cgrade::g_toneProbeHdr.load() && !g_tpHdrDone[v] &&
+          !g_tpDir.empty()) {
+        g_tpHdrDone[v] = true;
+        ProbeMap pm;
+        const UINT sub = sd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY
+                             ? D3D11CalcSubresource(0, sd.Texture2DArray.FirstArraySlice, td.MipLevels)
+                             : 0;
+        if (ProbeReadTex(t, sub, nullptr, pm)) {
+          const unsigned f = v >= 2 ? 8u : 4u;
+          std::vector<float> ds;
+          unsigned ow = 0, oh = 0;
+          cgrade::DownsampleHalf(static_cast<const uint8_t*>(pm.m.pData), pm.m.RowPitch, td.Width, td.Height, f, ds,
+                                 &ow, &oh);
+          pm.Done(s.ctx);
+          const cgrade::LumStats ls = cgrade::LumStatsOf(ds);
+          wchar_t fn[96];
+          swprintf_s(fn, L"hdr_s%d_v%d_%ux%u_f%u_%ux%u.f32", g_tpSession, v, td.Width, td.Height, f, ow, oh);
+          {  // R91: written by the config thread (fixation_depth.h Tick)
+            std::lock_guard<std::mutex> lock(g_tpFileMutex);
+            if (g_tpFiles.size() < 16) g_tpFiles.push_back(TpFile{g_tpRoot, g_tpDir, fn, std::move(ds)});
+          }
+          Log("tone probe:  t%d HDR source of view %d: %ls queued (RGB float32, 1/%u box); luminance over the "
+              "texture: mean %.5g, log-avg %.5g, p1 %.5g, p50 %.5g, p99 %.5g, max %.5g",
+              i, v, fn, f, ls.mean, ls.logAvg, ls.p1, ls.p50, ls.p99, ls.max);
+        }
+        pm.Done(s.ctx);
+      }
+    } else {
+      Log("tone probe:  t%d resource dimension %d, view %s (%d)", i, static_cast<int>(dim), ProbeFmtName(sd.Format),
+          static_cast<int>(sd.Format));
+    }
+    r->Release();
+  }
+  ID3D11Buffer* cbs[4] = {};
+  s.ctx->PSGetConstantBuffers(0, 4, cbs);
+  for (int i = 0; i < 4; ++i) {
+    if (!cbs[i]) continue;
+    D3D11_BUFFER_DESC bd{};
+    cbs[i]->GetDesc(&bd);
+    if (i == 0 && bd.ByteWidth <= 4096) {
+      ProbeMap pm;
+      if (ProbeReadBuf(cbs[i], pm)) {
+        const float* f = static_cast<const float*>(pm.m.pData);
+        const UINT rows = std::min<UINT>(bd.ByteWidth / 16, g_tpCbDone[v] ? 11u : 64u);
+        for (UINT r = 0; r < rows; ++r)
+          Log("tone probe:  b0 view %d +0x%03x: %.6g %.6g %.6g %.6g", v, r * 16, f[r * 4], f[r * 4 + 1],
+              f[r * 4 + 2], f[r * 4 + 3]);
+        g_tpCbDone[v] = true;
+      }
+      pm.Done(s.ctx);
+    } else {
+      Log("tone probe:  b%d %u bytes", i, bd.ByteWidth);
+    }
+    cbs[i]->Release();
+  }
+}
+
+// CopyToHMDPass's first draw of view g_spView: the target and the source, kept until the pass end.
+void SwapProbeDraw(const D3D11_VIEWPORT& vp) {
+  State& s = g_s;
+  const int v = g_spView;
+  g_spView = -1;
+  ID3D11RenderTargetView* rtv = nullptr;
+  s.ctx->OMGetRenderTargets(1, &rtv, nullptr);
+  ID3D11ShaderResourceView* srv = nullptr;
+  s.ctx->PSGetShaderResources(0, 1, &srv);
+  D3D11_RENDER_TARGET_VIEW_DESC rd{};
+  D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+  D3D11_TEXTURE2D_DESC dtd{}, stdd{};
+  SwapSeen& w = g_spSeen;
+  if (rtv) {
+    rtv->GetDesc(&rd);
+    rtv->GetResource(&w.dst);
+    rtv->Release();
+    ID3D11Texture2D* t = nullptr;
+    if (w.dst && SUCCEEDED(w.dst->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&t))) && t) {
+      t->GetDesc(&dtd);
+      t->Release();
+      w.dstSub = rd.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2DARRAY
+                     ? D3D11CalcSubresource(rd.Texture2DArray.MipSlice, rd.Texture2DArray.FirstArraySlice, dtd.MipLevels)
+                     : rd.Texture2D.MipSlice;
+    }
+  }
+  if (srv) {
+    srv->GetDesc(&sd);
+    srv->GetResource(&w.src);
+    srv->Release();
+    ID3D11Texture2D* t = nullptr;
+    if (w.src && SUCCEEDED(w.src->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&t))) && t) {
+      t->GetDesc(&stdd);
+      t->Release();
+      w.srcSub = sd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY
+                     ? D3D11CalcSubresource(sd.Texture2DArray.MostDetailedMip, sd.Texture2DArray.FirstArraySlice,
+                                            stdd.MipLevels)
+                     : sd.Texture2D.MostDetailedMip;
+    }
+  }
+  w.vp = vp;
+  Log("swap probe: view %d CopyToHMDPass first draw: RTV %s (%d) dim %d on texture %s (%d) %ux%u array %u sub %u; "
+      "PS SRV0 %s (%d) on texture %s (%d) %ux%u; viewport %.0f,%.0f %.0fx%.0f",
+      v, ProbeFmtName(rd.Format), static_cast<int>(rd.Format), static_cast<int>(rd.ViewDimension),
+      ProbeFmtName(dtd.Format), static_cast<int>(dtd.Format), dtd.Width, dtd.Height, dtd.ArraySize, w.dstSub,
+      ProbeFmtName(sd.Format), static_cast<int>(sd.Format), ProbeFmtName(stdd.Format), static_cast<int>(stdd.Format),
+      stdd.Width, stdd.Height, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height);
+}
+// CopyToHMDPass end: a 64 x 64 box of the source against the same box of the target (1:1 copy).
+void SwapProbeEnd(int v) {
+  State& s = g_s;
+  SwapSeen& w = g_spSeen;
+  if (w.dst && w.src && s.dev) {
+    ID3D11Texture2D *dt = nullptr, *st = nullptr;
+    w.dst->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&dt));
+    w.src->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&st));
+    if (dt && st) {
+      D3D11_TEXTURE2D_DESC dd{}, sd{};
+      dt->GetDesc(&dd);
+      st->GetDesc(&sd);
+      const UINT cx = static_cast<UINT>(w.vp.TopLeftX + w.vp.Width / 2);
+      const UINT cy = static_cast<UINT>(w.vp.TopLeftY + w.vp.Height / 2);
+      const bool oneToOne = std::fabs(w.vp.Width - static_cast<float>(sd.Width)) < 1 &&
+                            std::fabs(w.vp.Height - static_cast<float>(sd.Height)) < 1;
+      const UINT sx = static_cast<UINT>(w.vp.Width / 2), sy = static_cast<UINT>(w.vp.Height / 2);
+      const D3D11_BOX db{cx - 32, cy - 32, 0, cx + 32, cy + 32, 1}, sb{sx - 32, sy - 32, 0, sx + 32, sy + 32, 1};
+      ProbeMap dm, sm;
+      const bool fit = cx >= 32 && cy >= 32 && sx >= 32 && sy >= 32 && cx + 32 <= dd.Width && cy + 32 <= dd.Height &&
+                       sx + 32 <= sd.Width && sy + 32 <= sd.Height;
+      const bool ok = fit && ProbeReadTex(dt, w.dstSub, &db, dm) && ProbeReadTex(st, w.srcSub, &sb, sm);
+      if (ok) {
+        std::vector<uint8_t> a(64 * 64 * 4), b(64 * 64 * 4);
+        for (int y = 0; y < 64; ++y) {
+          memcpy(&a[y * 256], static_cast<const uint8_t*>(sm.m.pData) + y * sm.m.RowPitch, 256);
+          memcpy(&b[y * 256], static_cast<const uint8_t*>(dm.m.pData) + y * dm.m.RowPitch, 256);
+        }
+        const cgrade::CopyClass c = cgrade::ClassifyCopy(a.data(), b.data(), 64 * 64);
+        double ma = 0, mb = 0;
+        int dark = 0, darkEq = 0;
+        for (int i = 0; i < 64 * 64; ++i)
+          for (int ch = 0; ch < 3; ++ch) {
+            ma += a[i * 4 + ch];
+            mb += b[i * 4 + ch];
+            if (a[i * 4 + ch] < 40) {
+              ++dark;
+              if (a[i * 4 + ch] == b[i * 4 + ch]) ++darkEq;
+            }
+          }
+        Log("swap probe: view %d 64x64 box (source %u,%u -> target %u,%u, 1:1 %s): channels %d, equal %d, "
+            "sRGB-encoded %d, other %d; mean byte source %.2f target %.2f; source bytes < 40: %d (%d equal); "
+            "first px source %u %u %u target %u %u %u; verdict %c (A = bytes copied unchanged, B = encoded again)",
+            v, sx, sy, cx, cy, oneToOne ? "yes" : "no", c.n, c.equal, c.srgb, c.other, ma / (64 * 64 * 3),
+            mb / (64 * 64 * 3), dark, darkEq, a[0], a[1], a[2], b[0], b[1], b[2], cgrade::CopyVerdict(c));
+      } else {
+        Log("swap probe: view %d: box readback not possible (target %ux%u, source %ux%u)", v, dd.Width, dd.Height,
+            sd.Width, sd.Height);
+      }
+      dm.Done(s.ctx);
+      sm.Done(s.ctx);
+    }
+    if (dt) dt->Release();
+    if (st) st->Release();
+  }
+  if (w.dst) w.dst->Release();
+  if (w.src) w.src->Release();
+  w = SwapSeen{};
+}
+
+// R71: CopyToHMDPass's first draw of view g_fgView (CockpitFgDump): the target and the source, no log.
+void FgDraw(const D3D11_VIEWPORT& vp) {
+  State& s = g_s;
+  g_fgView = -1;
+  SwapSeen& w = g_fgSeen;
+  if (w.dst || w.src) return;
+  ID3D11RenderTargetView* rtv = nullptr;
+  s.ctx->OMGetRenderTargets(1, &rtv, nullptr);
+  ID3D11ShaderResourceView* srv = nullptr;
+  s.ctx->PSGetShaderResources(0, 1, &srv);
+  if (rtv) {
+    D3D11_RENDER_TARGET_VIEW_DESC rd{};
+    rtv->GetDesc(&rd);
+    rtv->GetResource(&w.dst);
+    rtv->Release();
+    ID3D11Texture2D* t = nullptr;
+    D3D11_TEXTURE2D_DESC td{};
+    if (w.dst && SUCCEEDED(w.dst->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&t))) && t) {
+      t->GetDesc(&td);
+      t->Release();
+      w.dstSub = rd.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2DARRAY
+                     ? D3D11CalcSubresource(rd.Texture2DArray.MipSlice, rd.Texture2DArray.FirstArraySlice, td.MipLevels)
+                     : rd.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D ? rd.Texture2D.MipSlice : 0;
+    }
+  }
+  if (srv) {
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+    srv->GetDesc(&sd);
+    srv->GetResource(&w.src);
+    srv->Release();
+    ID3D11Texture2D* t = nullptr;
+    D3D11_TEXTURE2D_DESC td{};
+    if (w.src && SUCCEEDED(w.src->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&t))) && t) {
+      t->GetDesc(&td);
+      t->Release();
+      w.srcSub = sd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY
+                     ? D3D11CalcSubresource(sd.Texture2DArray.MostDetailedMip, sd.Texture2DArray.FirstArraySlice,
+                                            td.MipLevels)
+                     : sd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D ? sd.Texture2D.MostDetailedMip : 0;
+    }
+  }
+  w.vp = vp;
+}
+// R71: CopyToHMDPass end of view v: DCS's copy is in the stream; the submitted box goes to the dump's record.
+void FgEnd(int v) {
+  SwapSeen& w = g_fgSeen;
+  cmask::FgNoteColour(v, w.dst, w.dstSub, w.vp, w.src, w.srcSub);
+  if (w.src && (v == 0 || v == 1)) {  // the fallback of a later frame whose draw is not seen
+    if (g_fgLastSrc[v] != w.src) {
+      if (g_fgLastSrc[v]) g_fgLastSrc[v]->Release();
+      g_fgLastSrc[v] = w.src;
+      w.src->AddRef();
+    }
+    g_fgLastSrcSub[v] = w.srcSub;
+    g_fgLastSrcFrame[v] = g_s.frame;
+  }
+  if (w.dst) w.dst->Release();
+  if (w.src) w.src->Release();
+  w = SwapSeen{};
+}
+
+void ProbeDisarm(bool& own) {
+  if (own && !g_trOpen && !g_overlayArm && !g_hdrArmOwn && !g_dumpPass) DisarmOm();
+  own = false;
+}
+
+// From OnBoundaryInner, before its own work for the boundary (hmdOrd not yet advanced at a CopyToHMDPass end).
+void ProbeBoundary(void* pass, bool begin, int k) {
+  State& s = g_s;
+  const int v = s.hmdOrd;
+  static int geoDbg = 0;
+  if (k == plod::kGBuffer && begin && cgrade::g_geoOnlyProbe.load(std::memory_order_relaxed) && geoDbg < 24) {
+    ++geoDbg;
+    Log("probe: GeoOnlyProbe: GBufferPass begin, HMD ordinal %d, last view %d, ctx %p", v, g_geoLastView,
+        static_cast<void*>(s.ctx));
+  }
+  if (v < 0 || v > 3 || !s.ctx) return;
+  if (k == plod::kGBuffer) {
+    if (begin) {
+      g_geoActive = false;
+      if (cgrade::g_geoOnlyProbe.load(std::memory_order_relaxed) && (v == 2 || v == 3) && g_geoLastView != v) {
+        g_geoActive = true;  // the view's first GBufferPass: the main pass (the decal pass follows)
+        ++g_geoPasses;
+      }
+      g_geoLastView = v;
+    } else {
+      if (g_geoActive && g_geoPasses % 600 == 1)
+        Log("probe: GeoOnlyProbe: %llu focus main G-buffer passes so far, %llu viewports set off target",
+            static_cast<unsigned long long>(g_geoPasses), static_cast<unsigned long long>(g_geoVps));
+      g_geoActive = false;
+    }
+    return;
+  }
+  if (k == plod::kHmd) {
+    // R71: CockpitFgDump: views 0 / 1's submitted image (their CopyToHMDPass's first draw arms, its end copies).
+    if (begin) {
+      g_fgWant = -1;
+      if ((v == 0 || v == 1) && g_fgView < 0 && !g_fgSeen.dst && !g_fgSeen.src && cmask::FgColourWanted()) {
+        g_fgWant = v;
+        if (!g_armTable) g_fgArmOwn = ArmOm(true);
+        ArmDraws();
+        if (g_drawArmed) {
+          g_fgView = v;
+        } else {
+          g_fgArmMiss++;
+          ProbeDisarm(g_fgArmOwn);
+        }
+      }
+    } else {
+      g_fgView = -1;
+      if (g_fgSeen.dst || g_fgSeen.src) {
+        FgEnd(v);
+      } else if (g_fgWant == v && (v == 0 || v == 1)) {
+        g_fgDrawMiss++;
+        if (g_fgLastSrc[v] && g_s.frame - g_fgLastSrcFrame[v] <= 2) {  // the same image target as in the last frame
+          cmask::FgNoteColour(v, nullptr, 0, D3D11_VIEWPORT{}, g_fgLastSrc[v], g_fgLastSrcSub[v]);
+          g_fgFallback++;
+        }
+        static int logged = 0;
+        if (logged < 8) {
+          ++logged;
+          Log("cockpit mask: frame-generation dump: view %d CopyToHMDPass without a seen draw (draw arm %s); colour %s",
+              v, g_fgArmMiss.load() ? "refused at least once" : "held", g_fgLastSrc[v] ? "from its copy source" : "missing");
+        }
+      }
+      g_fgWant = -1;
+      ProbeDisarm(g_fgArmOwn);
+      if (!cmask::FgColourWanted())
+        for (int i = 0; i < 2; ++i)
+          if (g_fgLastSrc[i]) {
+            g_fgLastSrc[i]->Release();
+            g_fgLastSrc[i] = nullptr;
+          }
+    }
+    if (begin) {
+      if (v == 0) {
+        if (g_spFramesLeft <= 0) {
+          const int r = cgrade::g_swapProbeReq.exchange(0);
+          if (r > 0) g_spFramesLeft = std::min(r, 30);
+        }
+        g_spThisFrame = g_spFramesLeft > 0;
+        if (g_spThisFrame) --g_spFramesLeft;
+      }
+      if (g_spThisFrame && g_spView < 0) {
+        if (!g_armTable) g_spArmOwn = ArmOm(true);
+        ArmDraws();
+        if (g_drawArmed)
+          g_spView = v;
+        else
+          ProbeDisarm(g_spArmOwn);
+      }
+    } else {
+      g_spView = -1;
+      if (g_spSeen.dst || g_spSeen.src) SwapProbeEnd(v);
+      ProbeDisarm(g_spArmOwn);
+      if (v == 3) g_geoLastView = -1;
+    }
+    return;
+  }
+  if (k != plod::kOther) return;
+  char n[48];
+  PassName(pass, n, sizeof(n));
+  if (strcmp(n, "ToneMappingPass") != 0) return;
+  if (!begin) {
+    g_tpView = -1;
+    ProbeDisarm(g_tpArmOwn);
+    return;
+  }
+  if (v == 0) {
+    if (g_tpFramesLeft <= 0) {
+      const int r = cgrade::g_toneProbeReq.exchange(0);
+      if (r > 0) {
+        g_tpFramesLeft = std::min(r, 600);
+        ++g_tpSession;
+        for (int i = 0; i < 4; ++i) g_tpHdrDone[i] = g_tpCbDone[i] = false;
+        std::wstring base;
+        {
+          std::lock_guard<std::mutex> lock(ckipd::g_dumpDirMutex);
+          base = ckipd::g_dumpBase;
+        }
+        const size_t at = base.rfind(L"cockpit_frames\\");
+        g_tpDir.clear();
+        if (at != std::wstring::npos) {
+          SYSTEMTIME st;
+          GetLocalTime(&st);
+          wchar_t sub[48];
+          swprintf_s(sub, L"tone_probe\\%04u%02u%02u_%02u%02u%02u\\", st.wYear, st.wMonth, st.wDay, st.wHour,
+                     st.wMinute, st.wSecond);
+          g_tpRoot = base.substr(0, at) + L"tone_probe\\";
+          g_tpDir = base.substr(0, at) + sub;  // R91: made by the config thread with the session's first file
+        }
+        Log("tone probe: session %d, %d frames, views mask 0x%x, HDR files %d (%ls)", g_tpSession, g_tpFramesLeft,
+            cgrade::g_toneProbeViews.load(), cgrade::g_toneProbeHdr.load(), g_tpDir.c_str());
+      }
+    }
+    g_tpThisFrame = g_tpFramesLeft > 0;
+    if (g_tpThisFrame) --g_tpFramesLeft;
+  }
+  if (g_tpThisFrame && (cgrade::g_toneProbeViews.load() & (1 << v)) && g_tpView < 0) {
+    if (!g_armTable) g_tpArmOwn = ArmOm(true);
+    ArmDraws();
+    if (g_drawArmed)
+      g_tpView = v;
+    else
+      ProbeDisarm(g_tpArmOwn);
+  }
+}
+bool ProbesWanted() {
+  return g_tpFramesLeft > 0 || g_tpView >= 0 || g_tpArmOwn || g_spFramesLeft > 0 || g_spView >= 0 || g_spArmOwn ||
+         g_spSeen.dst || g_spSeen.src || g_geoActive || g_geoLastView >= 0 ||
+         g_fgView >= 0 || g_fgArmOwn || g_fgSeen.dst || g_fgSeen.src || cmask::FgColourWanted() ||  // R71
+         g_fgLastSrc[0] || g_fgLastSrc[1] ||
+         cgrade::g_toneProbeReq.load(std::memory_order_relaxed) > 0 ||
+         cgrade::g_swapProbeReq.load(std::memory_order_relaxed) > 0 ||
+         cgrade::g_geoOnlyProbe.load(std::memory_order_relaxed) != 0;
+}
+
+// ---------------------------------------------------------------------------
+// R42 colour modes ([Color] Mode / Timing; color_pass.h). The draw entries are armed in each HMD view's
+// ToneMappingPass (its first draw: DCS's tone map, pixel shader swapped for ours by cpass::ToneDrawPre, put back by
+// cpass::ToneDrawPost right after) and, while the views' image sizes are learnt, in their CopyToHMDPass (PS SRV 0 =
+// the view's LDR image). Nothing is armed while both keys are 0. A fault in our part turns the colour modes off
+// (cpass::g_fault), not fixation depth.
+// ---------------------------------------------------------------------------
+int g_cpView = -1;         // ToneMappingPass of this HMD view is open with our draw arm: its first draw is the tone map
+bool g_cpArmOwn = false;
+int g_cpDrawView = -1;     // the draw in flight is that view's tone map (ToneDrawPre ran)
+int g_cpAct = 0;
+int g_cpLearnView = -1;    // CopyToHMDPass of this view: its first draw's PS SRV 0 is the view's image
+bool g_cpLearnArmOwn = false;
+bool g_cpTpAdded = false;  // R47: the state-call toggle points were added to the arm for this ToneMappingPass
+uint64_t g_cpArmFail = 0;  // arms refused (another module's context hooks hold the table)
+
+// ---------------------------------------------------------------------------
+// R94: [Perception] SymbologyTrace (sym_trace.h; dev, measure only). In each HMD view's ToneMappingPass of a learn or
+// traced frame the draw entries are armed (as the R41 tone probe does: its own arm when none is held, else nested);
+// the first draw learns the tone map's PS SRV0 / RTV 0 and, in a traced frame, copies the source. Nothing runs while
+// no session is active (one bool test per boundary).
+// ---------------------------------------------------------------------------
+int g_stTmView = -1;     // ToneMappingPass of this HMD view is open with the draw arm: its first draw is traced
+bool g_stArmOwn = false;
+void SymTraceDisarm() {
+  if (g_stArmOwn && !g_trOpen && !g_overlayArm && !g_hdrArmOwn && !g_dumpPass && !g_tpArmOwn && !g_spArmOwn &&
+      !g_fgArmOwn && !g_cpArmOwn && !g_cpLearnArmOwn)
+    DisarmOm();
+  g_stArmOwn = false;
+}
+void SymTraceBoundary(void* pass, bool begin, int k) {
+  State& s = g_s;
+  symtr::OnBoundary(pass, begin, k);
+  if (k == plod::kGBuffer && begin && (g_stTmView >= 0 || g_stArmOwn)) {  // a ToneMappingPass whose end did not come
+    g_stTmView = -1;
+    SymTraceDisarm();
+    return;
+  }
+  if (k != plod::kOther) return;
+  const int v = s.hmdOrd;
+  if (v < 0 || v > 3 || !s.ctx) return;
+  char n[48];
+  PassName(pass, n, sizeof(n));
+  if (strcmp(n, "ToneMappingPass") != 0) return;
+  if (!begin) {
+    g_stTmView = -1;
+    SymTraceDisarm();
+    return;
+  }
+  if (!symtr::g_learn || g_stTmView >= 0) return;
+  if (!g_armTable) g_stArmOwn = ArmOm(true);
+  ArmDraws();
+  if (g_drawArmed)
+    g_stTmView = v;
+  else
+    SymTraceDisarm();
+}
+// The tone map's first draw of view g_stTmView (DrawPre, before the colour pass's pixel shader swap).
+void SymTraceToneDraw(const D3D11_VIEWPORT& vp) {
+  const int v = g_stTmView;
+  g_stTmView = -1;
+  symtr::ToneDraw(v, g_s.ctx, vp);
+  if (symtr::g_on.load(std::memory_order_relaxed) && symtr::g_tone && g_tpView < 0) {  // the R41 tone probe's lines
+    Log("symtrace: frame %llu view %d tone probe:", static_cast<unsigned long long>(symtr::g_frameNo), v);
+    g_tpView = v;
+    ToneProbeDraw(vp);
+  }
+}
+// R46: s.hmdOrd counts CopyToHMDPass ends since a frame start this install saw (EndFrame). Fixation depth installs
+// from the config thread at any point of a frame (it does at each colour mode 0 -> 1/2 switch): until the next frame
+// start hmdOrd is stale, and the views of that partial frame were numbered wrongly (the R46 log: view 0 "learnt"
+// the focus size 2028x2004, then the focus views' tone maps were rejected as "size not the view's": a grey fovea for
+// a frame). Until then a tone map's view is kViewUnknown: swapped all the same, nothing learnt.
+bool g_cpSynced = false;
+// The colour pass's view for a boundary: 0..3, cpass::kViewUnknown (frame not synced yet), -1: not an HMD view (a
+// pass begin after the 4th CopyToHMDPass of a synced frame: left alone, as before R46).
+int ColorView(bool synced, int hmdOrd, bool begin) {
+  if (!synced) return cpass::kViewUnknown;
+  if (hmdOrd >= 0 && hmdOrd <= 3) return hmdOrd;
+  return begin ? -1 : cpass::kViewUnknown;  // an end still closes what its begin opened
+}
+
+// R51 VrFx: the inputs of HMD view v's tone map (render thread, at its ToneMappingPass begin): the view's depth SRV
+// and depth viewport; at view 0 the frame's gaze (GazeOut, newest) and FixationDepth's newest published record.
+void FxInputs(int v) {
+  if (v < 0 || v > 3) return;
+  cpass::FxViewIn& vi = cpass::g_fxView[v];
+  vi = cpass::FxViewIn{};
+  if (g_fxRunValid[v] && g_fxRun[v].variant == 0 && g_fxRun[v].tex) {  // Texture2D depth only (the PS's fxDepth)
+    if (const SrvEntry* e = FindSrv(g_fxRun[v])) {
+      vi.depth = e->srv;
+      vi.depthTex = g_fxRun[v].tex;
+      const D3D11_VIEWPORT& p = g_fxRun[v].vp;
+      vi.dv[0] = p.TopLeftX, vi.dv[1] = p.TopLeftY, vi.dv[2] = p.Width, vi.dv[3] = p.Height;
+      vi.valid = vi.depth != nullptr && p.Width > 0 && p.Height > 0;
+    }
+  }
+  if (v != 0) return;
+  static uint64_t lastGazeSeq = 0, gazeSeqFrame = 0, lastDepthSeq = 0, depthSeqFrame = 0;
+  const uint64_t frame = g_s.frame;
+  cpass::FxFrameIn& in = cpass::g_fxIn;
+  in = cpass::FxFrameIn{};
+  GazeOut g{};
+  if (void* gv = g_gazeView.load()) {
+    if (SeqRead(gv, g)) {
+      if (g.seq != lastGazeSeq) lastGazeSeq = g.seq, gazeSeqFrame = frame;
+      in.gazeValid = (g.flags & kGazeValid) && frame - gazeSeqFrame <= 30;
+      in.saccade = (g.flags & kGazeSaccade) != 0;
+      const uint32_t n = std::min<uint32_t>(g.viewCount, 4);
+      for (uint32_t i = 0; i < n; ++i) in.gaze[i][0] = g.gazeTan[i][0], in.gaze[i][1] = g.gazeTan[i][1];
+      if (n == 2) in.gaze[2][0] = in.gaze[0][0], in.gaze[2][1] = in.gaze[0][1];  // two views: the left eye's
+    }
+  }
+  DepthIn d{};
+  if (void* dv = g_depthView.load()) {
+    if (SeqRead(dv, d)) {
+      if (d.seq != lastDepthSeq) lastDepthSeq = d.seq, depthSeqFrame = frame;
+      in.depthValid = (d.flags & kDepthValid) && d.medianM > 0 && frame - depthSeqFrame <= 10;
+      in.medianM = d.medianM;
+      in.conf = vrfx::HistConf(d.histogram);
+    }
+  }
+}
+
+void ColorBoundary(void* pass, bool begin, int k) {
+  State& s = g_s;
+  if (!s.ctx) return;
+  const int v = ColorView(g_cpSynced, s.hmdOrd, begin);
+  if (v < 0) return;
+  if (k == plod::kHmd) {
+    if (begin) {
+      if (v <= 3 && cpass::Wanted() && cpass::NeedLearn() && g_cpLearnView < 0) {
+        if (!g_armTable) g_cpLearnArmOwn = ArmOm(true);
+        ArmDraws();
+        if (g_drawArmed)
+          g_cpLearnView = v;
+        else
+          ProbeDisarm(g_cpLearnArmOwn), g_cpArmFail++;
+      }
+    } else {
+      g_cpLearnView = -1;
+      ProbeDisarm(g_cpLearnArmOwn);
+      cpass::HmdEnd(v);
+    }
+    return;
+  }
+  if (k != plod::kOther) return;
+  char n[48];
+  PassName(pass, n, sizeof(n));
+  if (strcmp(n, "ToneMappingPass") != 0) return;
+  if (!begin) {
+    g_cpView = -1;
+    if (g_cpTpAdded && g_armTable) DisarmTpExtended(g_armTable);  // R47
+    g_cpTpAdded = false;
+    ProbeDisarm(g_cpArmOwn);
+    cpass::TonePassEnd();  // R46: a miss when a mode was on and this view's tone map was not swapped
+    return;
+  }
+  if (!cpass::Wanted()) return;
+  cpass::NoteDevice(s.dev);
+  if (g_cpView >= 0) return;
+  if (vrfx::Wanted()) FxInputs(v);  // R51
+  cpass::TonePassBegin(v);
+  if (!g_armTable) g_cpArmOwn = ArmOm(true);
+  // R47: this arm has no upload entries, so nothing put a table still in d3d11's "after flush" state (a Flush or a
+  // submit since the last call through it, e.g. between two views) back to normal: the first upload / copy of the
+  // pass (DCS's cbTonemapParams update) then wrote d3d11's normal draw entries over ours and the tone-map draw went
+  // past the hook (live: 1-25 such misses per 10 s in steady Enhanced, none rejected). One private 16-byte upload
+  // through the current entry normalizes it (a no-op on a normal table) and teaches UsToggled the normal entry.
+  if ((cpass::g_armRepair.load(std::memory_order_relaxed) & 1) && g_armTable && !g_drawArmed && !ForeignTableHooks() &&
+      UsSlots() &&
+      GetCurrentThreadId() == ptiming::g_topTid.load(std::memory_order_relaxed))
+    NormalizeTable(g_armTable);
+  ArmDraws();
+  if (g_drawArmed) {
+    g_cpView = v;
+    // R47: the live miss (21:09:11, one focus view, no reject): a state call between this begin and the tone-map draw
+    // made d3d11 submit and write its "after flush" draw entries over ours, so DCS's draw went past the hook. The
+    // overlay passes' state-call toggle points (PSSetShaderResources, PSSetShader, ...) re-arm right after such a call.
+    if (!g_tpAddedExt && g_armTable && (cpass::g_armRepair.load(std::memory_order_relaxed) & 2)) {
+      ArmTpExtendedD3d11Only(g_armTable);
+      g_cpTpAdded = g_tpAddedExt;
+    }
+  } else {
+    ProbeDisarm(g_cpArmOwn), g_cpArmFail++;
+  }
+  cpass::TonePassArmed(g_drawArmed);
+}
+// CopyToHMDPass's first draw of view g_cpLearnView: the size of its PS SRV 0 (the view's tone-mapped image).
+void ColorLearnDraw() {
+  const int v = g_cpLearnView;
+  g_cpLearnView = -1;
+  // R95 (Dev's open item: Quad Views' swapchain format): the view's CopyToHMDPass target (DCS's swapchain image) as
+  // bound, logged at each change of its view / resource format.
+  {
+    ID3D11RenderTargetView* rtv = nullptr;
+    g_s.ctx->OMGetRenderTargets(1, &rtv, nullptr);
+    if (rtv) {
+      D3D11_RENDER_TARGET_VIEW_DESC rd{};
+      rtv->GetDesc(&rd);
+      ID3D11Resource* res = nullptr;
+      rtv->GetResource(&res);
+      D3D11_TEXTURE2D_DESC td{};
+      D3D11_RESOURCE_DIMENSION dim{};
+      if (res) res->GetType(&dim);
+      if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) static_cast<ID3D11Texture2D*>(res)->GetDesc(&td);
+      static int lastView = -1, lastRes = -1;
+      if (static_cast<int>(rd.Format) != lastView || static_cast<int>(td.Format) != lastRes) {
+        lastView = static_cast<int>(rd.Format), lastRes = static_cast<int>(td.Format);
+        Log("colour: HMD view %d CopyToHMDPass target: view format %d, resource format %d (%ux%u)%s", v, lastView, lastRes,
+            td.Width, td.Height,
+            rd.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || rd.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+                ? ": sRGB view (the swapchain decodes as sRGB)"
+                : "");
+      }
+      if (res) res->Release();
+      rtv->Release();
+    }
+  }
+  ID3D11ShaderResourceView* srv = nullptr;
+  g_s.ctx->PSGetShaderResources(0, 1, &srv);
+  if (!srv) return;
+  ID3D11Resource* r = nullptr;
+  srv->GetResource(&r);
+  srv->Release();
+  if (!r) return;
+  D3D11_RESOURCE_DIMENSION dim{};
+  r->GetType(&dim);
+  if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+    D3D11_TEXTURE2D_DESC td{};
+    static_cast<ID3D11Texture2D*>(r)->GetDesc(&td);
+    cpass::NoteLdr(v, td.Width, td.Height);
+  }
+  r->Release();
+}
+int ColorPreSeh(int v) {
+  __try {
+    return cpass::ToneDrawPre(g_s.ctx, v);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    cpass::g_fault = true;
+    return 0;
+  }
+}
+void ColorPostSeh(int v, int act) {
+  __try {
+    cpass::ToneDrawPost(g_s.ctx, v, act);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    cpass::g_fault = true;
+  }
+}
+
 // Before a draw DCS issues while the draw entries are ours. Returns 1 when the
 // pre-overlay copy is due right after it.
 int DrawPre(int kind, UINT count, UINT inst) {
   State& s = g_s;
-  if (!s.ctx || (!g_cmp.pending && !g_trOpen && g_hdrLearnView < 0)) return 0;
+  if (!s.ctx || (!g_cmp.pending && !g_trOpen && g_hdrLearnView < 0 && g_tpView < 0 && g_spView < 0 && g_cpView < 0 &&
+                 g_cpLearnView < 0 && g_fgView < 0 && g_stTmView < 0))
+    return 0;
   ID3D11RenderTargetView* rtv = nullptr;
   s.ctx->OMGetRenderTargets(1, &rtv, nullptr);
   ID3D11Resource* res = nullptr;
@@ -3571,6 +4683,21 @@ int DrawPre(int kind, UINT count, UINT inst) {
   if (!nvp) vp = D3D11_VIEWPORT{};
   if (g_trOpen) TraceDraw(kind, count, inst, rtv, res, vp, nvp);
   if (g_hdrLearnView >= 2) HdrLearnDraw(vp, nvp);
+  if (g_tpView >= 0) ToneProbeDraw(vp);
+  if (g_stTmView >= 0) SymTraceToneDraw(vp);  // R94: before the colour pass's pixel shader swap below
+  if (g_spView >= 0) SwapProbeDraw(vp);
+  if (g_fgView >= 0) FgDraw(vp);  // R71: CockpitFgDump
+  if (g_cpLearnView >= 0) ColorLearnDraw();  // R42: the view's image size (CopyToHMDPass source)
+  if (const int cpv = g_cpView; cpv >= 0) {  // R42: the tone map's pixel shader swapped for this one draw
+    // R47: the state-call toggle points have done their job (the draw reached the hook): out before our own state
+    // and query calls (the swap, the timing queries), which must not go through them (a DCS crash at the first
+    // timed frame with them armed).
+    if (g_cpTpAdded && g_armTable) DisarmTpExtended(g_armTable);
+    g_cpTpAdded = false;
+    g_cpDrawView = cpv;  // R58: the value tested (the config thread's uninstall may clear g_cpView meanwhile)
+    g_cpView = -1;
+    g_cpAct = ColorPreSeh(g_cpDrawView);
+  }
   int act = 0;
   if (g_cmp.pending) {
     if (!res || res != g_cmp.res) {
@@ -3611,6 +4738,11 @@ int DrawPre(int kind, UINT count, UINT inst) {
 }
 
 void DrawPost(int act) {
+  if (g_cpDrawView >= 0) {  // R42: DCS's pixel shader back first
+    ColorPostSeh(g_cpDrawView, g_cpAct);
+    g_cpDrawView = -1;
+    g_cpAct = 0;
+  }
   if (act == 1 && g_cmp.rtv && g_cmp.view >= 2) {
     const int view = g_cmp.view;
     ID3D11Resource* res = nullptr;
@@ -3630,7 +4762,7 @@ void DrawPost(int act) {
 int DrawPreSeh(int kind, UINT count, UINT inst) {
   __try {
     return DrawPre(kind, count, inst);
-  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  } __except (FaultNote(GetExceptionInformation(), __LINE__)) {
     g_fault = true;
     return 0;
   }
@@ -3638,7 +4770,7 @@ int DrawPreSeh(int kind, UINT count, UINT inst) {
 void DrawPostSeh(int act) {
   __try {
     DrawPost(act);
-  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  } __except (FaultNote(GetExceptionInformation(), __LINE__)) {
     g_fault = true;
   }
 }
@@ -3828,10 +4960,15 @@ void HdrLearnDraw(const D3D11_VIEWPORT& vp, UINT nvp) {
   if (h.res) h.vp = nvp ? vp : D3D11_VIEWPORT{0, 0, static_cast<float>(h.texW), static_cast<float>(h.texH), 0, 1};
   if (h.res && (!g_hdrLogged[view - 2] || !same)) {
     g_hdrLogged[view - 2] = true;
-    Log("far depth: HDR source of HMD view %d (ToneMappingPass PS SRV0): res %p %ux%u format %u (SRV format %u), "
-        "subresource %u, draw viewport %.1f,%.1f %.1fx%.1f",
-        view, static_cast<void*>(h.res), h.texW, h.texH, static_cast<unsigned>(h.texFmt),
-        static_cast<unsigned>(h.viewFmt), h.sub, h.vp.TopLeftX, h.vp.TopLeftY, h.vp.Width, h.vp.Height);
+    int& n = g_hdrLogN[view - 2];  // R91 (M3)
+    if (n < kHdrSrcLogMax) {
+      ++n;
+      Log("far depth: HDR source of HMD view %d (ToneMappingPass PS SRV0): res %p %ux%u format %u (SRV format %u), "
+          "subresource %u, draw viewport %.1f,%.1f %.1fx%.1f%s",
+          view, static_cast<void*>(h.res), h.texW, h.texH, static_cast<unsigned>(h.texFmt),
+          static_cast<unsigned>(h.viewFmt), h.sub, h.vp.TopLeftX, h.vp.TopLeftY, h.vp.Width, h.vp.Height,
+          n == kHdrSrcLogMax ? "; further changes of this view are counted (HDR source learns), not logged" : "");
+    }
   }
   if (g_trOpen && g_trView == view) {
     char l[260];
@@ -3878,7 +5015,7 @@ void FarHdrPre(int view) {
   const int slots = std::clamp(fdexport::g_slots.load(), 1, fdexport::kMaxSlots);
   const int slot = static_cast<int>(s.frame % static_cast<uint64_t>(slots));
   const DXGI_FORMAT dstFmt = fdexport::TypelessOf(h.texFmt);
-  ID3D11Texture2D* pre = fdexport::EnsurePreTex(s.dev, view, slot, dstFmt, 2 * bw, bh);
+  ID3D11Texture2D* pre = fdexport::EnsurePreTex(s.dev, view, slot, dstFmt, 2 * bw, bh, slots);  // R91
   if (!pre) {
     fdexport::g_preSkipFormat++;
     return;
@@ -4015,7 +5152,7 @@ void HdrWatchFrame() {
 void FarPreOverlaySeh(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp) {
   __try {
     FarPreOverlay(rtv, vp);
-  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  } __except (FaultNote(GetExceptionInformation(), __LINE__)) {
     g_fault = true;
   }
 }
@@ -4226,6 +5363,17 @@ bool PassIs(void* pass, const char* name) {
   return strcmp(n, name) == 0;
 }
 
+// R46: hmdOrd is stale until the next frame start after an install from the config thread (g_cpSynced false).
+// R48: a re-install (Depth boost off and on again while flying) also kept the previous install's hmdOrd and
+// lastHmdCount: the rest of that frame's views were numbered from the old count and cockpit ipd (its guard:
+// lastHmdCount >= 2, hmdOrd <= 3) took a pass for another HMD view (another eye's shift) for a frame. Now every
+// install starts from the counts of the first one (no HMD view known until a frame start).
+void UnsyncViewCount() {
+  g_cpSynced = false;
+  g_s.hmdOrd = 0;
+  g_s.lastHmdCount = 0;
+}
+
 void EndFrame() {
   State& s = g_s;
   CloseRun();
@@ -4242,6 +5390,7 @@ void EndFrame() {
   s.sampled = false;
   s.lastHmdCount = s.hmdOrd;
   s.hmdOrd = 0;
+  g_cpSynced = true;  // R46: hmdOrd counts from a frame start from here on
   s.content = false;
   g_dlssSeen[0] = g_dlssSeen[1] = false;
   if (fdexport::g_on.load(std::memory_order_relaxed)) {
@@ -4249,9 +5398,11 @@ void EndFrame() {
     HdrWatchFrame();
   }
   if (ckipd::g_on.load(std::memory_order_relaxed)) ckipd::EndFrame();
+  if (cmask::g_on.load(std::memory_order_relaxed)) cmask::OnEndFrame();  // R65: a frame xrEndFrame did not commit
   ++s.verifyCounter;
   ++s.frame;
   g_frames++;
+  symtr::EndFrame();  // R94: the traced frame's text out, its copies polled, the next frame's role (cheap while idle)
   Poll();
   PollGrid();
   if ((s.frame & 63) == 0) EvictSrvs();
@@ -4400,7 +5551,7 @@ void CockpitIpdOverlayBegin(void* pass) {
     ArmDraws();
     g_ovlAddedDraws = g_drawArmed;
   }
-  if (ok && ovl && !own && g_fwdNested && g_armTable) ArmTpExtended(g_armTable);  // and its state-call points
+  if (ok && ovl && !own && g_fwdNested && g_armTable) ArmTpExtendedD3d11Only(g_armTable);  // its state-call points (R49: d3d11's own only)
   if (ok && ovl && g_drawArmed && ckipd::OvlProbeDraws()) ckipd::OvlProbePassArmed();
   if (ok && g_fwdNested && ovl) ckipd::g_st.ovlNested++;
 }
@@ -4438,6 +5589,16 @@ void DumpPassBoundary(void* pass, bool begin) {
 void OnBoundaryInner(void* pass, bool begin) {
   State& s = g_s;
   const int k = plod::KindRaw(pass);
+  // R74b: mask v1.1 overlay symbology, an HMD view's OverlayHDRPass begin: its pre signature and its arm, before any
+  // other work of this boundary (no arm held yet; far depth's and cockpit ipd's overlay arms nest in ours).
+  if (begin && k == plod::kOther && cmask::covl::Wanted()) cmask::covl::Boundary(pass, true, s.hmdOrd);
+  // R95: the symbology export's view windows (OverlayHDRPass begin, before any arm of this boundary: its constant
+  // uploads), its pass watch until the tone map, the overlay pass's end (an open run closes).
+  if (k == plod::kOther && cmask::SymWanted() && cmask::Active()) cmask::sym::Boundary(pass, begin, s.hmdOrd);
+  if (ProbesWanted()) ProbeBoundary(pass, begin, k);  // R41 live probes (dev, measure only)
+  if (symtr::Busy() || g_stTmView >= 0 || g_stArmOwn) SymTraceBoundary(pass, begin, k);  // R94 (dev, measure only)
+  if (cpass::Wanted() || g_cpView >= 0 || g_cpLearnView >= 0 || g_cpArmOwn || g_cpLearnArmOwn || cpass::g_tp.open)
+    ColorBoundary(pass, begin, k);  // R42 colour modes
   if (ckipd::g_dumpActive && k == plod::kOther && s.hmdOrd >= 0 && s.hmdOrd <= 3) {  // CockpitTrueIpdFrameDump
     char pn[48];
     PassName(pass, pn, sizeof(pn));
@@ -4473,24 +5634,38 @@ void OnBoundaryInner(void* pass, bool begin) {
       fdexport::DoPush(s.hmdOrd);
     }
   }
+  // R74b: the OverlayHDRPass end, after cockpit ipd's and far depth's end work: post signature and the 128 texels.
+  if (!begin && k == plod::kOther && (g_cmOvlArm || cmask::covl::g_passView >= 0)) cmask::covl::Boundary(pass, false, s.hmdOrd);
   // [Perception] CockpitTrueIpdFrameDump: the views' overlay pass render targets (their own images).
   if (k == plod::kOther &&
       (g_dumpPass || (begin && (ckipd::g_dumpActive || ckipd::g_dumpReq.load(std::memory_order_relaxed) > 0) &&
                       ckipd::g_on.load(std::memory_order_relaxed) && ckipd::Active())))
     DumpPassBoundary(pass, begin);
   if (begin && k == plod::kOther && ckipd::g_on.load(std::memory_order_relaxed)) CockpitIpdOverlayBegin(pass);
-  if (s.hasPending || s.hasGridPending || s.hasFarPending) {
+  if (s.hasPending || s.hasGridPending || s.hasFarPending || cmask::HasPending()) {
     // The water passes of the target view: depth with water after WaterSeaPass.
     if (!begin && (PassIs(pass, "WaterSeaPass") || PassIs(pass, "RiversPass"))) {
       s.waterSeen = true;
-      if (PassIs(pass, "WaterSeaPass")) FlushPending(true, true);
+      if (PassIs(pass, "WaterSeaPass")) {
+        cmask::Flush(0);  // R65
+        FlushPending(true, true);
+      }
     } else if (begin && (k == plod::kGBuffer || k == plod::kLights || k == plod::kHmd || k == plod::kCascade ||
                          k == plod::kHeight || PassIs(pass, "GBufferLightingPass"))) {
+      if (cmask::HasPending()) cmask::Flush(PassIs(pass, "GBufferLightingPass") ? 1 : 3);  // R65
       FlushPending(s.waterSeen);
+    } else if (begin && k == plod::kOther && cmask::HasPending()) {
+      // R65: never after a transparent pass of the view (DCS's transparent cockpit materials write COCKPIT into the
+      // stencil: the canopy glass would become cockpit).
+      char pn[48];
+      PassName(pass, pn, sizeof(pn));
+      if (strstr(pn, "Transparent")) cmask::Flush(2);
     }
   }
   if (begin) {
     if (k == plod::kGBuffer) {
+      cmask::covl::Abort();  // R74b: an OverlayHDRPass whose end did not come
+      cmask::sym::Abort();   // R95: the same for the symbology's runs
       if (g_hdrArmOwn || g_hdrLearnView >= 0) {  // a ToneMappingPass whose end did not come
         g_hdrLearnView = -1;
         if (g_hdrArmOwn && !g_overlayArm && !g_trOpen) DisarmOm();
@@ -4503,6 +5678,13 @@ void OnBoundaryInner(void* pass, bool begin) {
         DisarmOm();
         g_overlayArm = false;
       }
+      if (g_cpView >= 0 || g_cpLearnView >= 0 || g_cpArmOwn || g_cpLearnArmOwn) {  // R42: a pass whose end did not come
+        if (g_cpTpAdded && g_armTable) DisarmTpExtended(g_armTable);  // R47
+        g_cpTpAdded = false;
+        g_cpView = g_cpLearnView = -1;
+        if ((g_cpArmOwn || g_cpLearnArmOwn) && !g_overlayArm && !g_trOpen && !g_hdrArmOwn) DisarmOm();
+        g_cpArmOwn = g_cpLearnArmOwn = false;
+      }
       if (g_dumpPass || g_dumpArm) {  // a frame dump's watched pass whose end did not come
         ckipd::DumpPassClose();
         g_dumpPass = false;
@@ -4511,7 +5693,10 @@ void OnBoundaryInner(void* pass, bool begin) {
       }
       if (g_passDsv) g_passDsv->Release();
       g_passDsv = nullptr;
+      if (g_passMv) g_passMv->Release();  // R70
+      g_passMv = nullptr;
       g_seqN = 0;
+      g_gbBegun = true;  // R69
       g_beginDsv = nullptr;
       if (s.ctx) {
         s.ctx->OMGetRenderTargets(0, nullptr, &g_beginDsv);
@@ -4537,7 +5722,9 @@ void OnBoundaryInner(void* pass, bool begin) {
   }
   if (k != plod::kGBuffer) return;
   DisarmOm();
-  if (s.ctx && !g_passDsv) PickPassDsv();
+  if (s.ctx && !g_passDsv && g_gbBegun) PickPassDsv();  // R69: only for a pass whose begin this install saw
+  if (!g_gbBegun) g_seqN = 0;
+  g_gbBegun = false;
   if (!s.ctx) {
     // DCS's device (shadow instancing or the split filter found it); its
     // immediate context is the one the passes run on.
@@ -4558,7 +5745,12 @@ void OnBoundaryInner(void* pass, bool begin) {
     }
   }
   Run nr;
-  if (!CaptureRun(nr)) return;
+  ID3D11RenderTargetView* mv = g_passMv;  // R70: this pass's MV target (reference), with its DSV
+  g_passMv = nullptr;
+  if (!CaptureRun(nr)) {
+    if (mv) mv->Release();
+    return;
+  }
   s.content = true;
   if (s.run.open && !SameTarget(s.run, nr.tex, nr.slice, nr.vp)) CloseRun();
   nr.passes = 1;
@@ -4566,6 +5758,13 @@ void OnBoundaryInner(void* pass, bool begin) {
     // Same view: keep the latest pass's state (the main pass after the cockpit).
     nr.passes = s.run.passes + 1;
     ReleaseRun(s.run);
+  } else if (g_runMv) {  // R70: a new run; the previous run's MV target goes
+    g_runMv->Release();
+    g_runMv = nullptr;
+  }
+  if (mv) {  // R70: the latest pass of the run that had an MV target
+    if (g_runMv) g_runMv->Release();
+    g_runMv = mv;
   }
   s.run = nr;
 }
@@ -4632,7 +5831,7 @@ void OnBoundary(void* pass, bool begin, int depth) {
       CockpitIpdBoundary(pass, begin, plod::KindRaw(pass));
     else
       OnBoundaryBody(pass, begin, depth);
-  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  } __except (FaultNote(GetExceptionInformation(), __LINE__)) {
     g_fault = true;
   }
   g_busy.fetch_sub(1);
@@ -4646,7 +5845,7 @@ ULONGLONG g_lastLog = 0, g_lastOpen = 0;
 
 void OpenMappings() {
   if (!g_gridMap && g_gridOn.load()) {
-    g_gridMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 16384, g_gridName.c_str());
+    g_gridMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 16384, GridName().c_str());
     if (g_gridMap) {
       void* v = MapViewOfFile(g_gridMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(DepthGrid));
       if (!v) {
@@ -4658,7 +5857,7 @@ void OpenMappings() {
     }
   }
   if (!g_depthMap && g_coneOn.load()) {
-    g_depthMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 4096, g_depthName.c_str());
+    g_depthMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 4096, DepthName().c_str());
     if (g_depthMap) {
       void* v = MapViewOfFile(g_depthMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(DepthIn));
       if (!v) {
@@ -4670,10 +5869,11 @@ void OpenMappings() {
     }
   }
   if (!g_gazeMap) {
-    HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, g_gazeName.c_str());
+    const std::wstring gazeName = GazeName();
+    HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, gazeName.c_str());
     bool owned = false;
     if (!h && g_testGaze.load()) {
-      h = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 4096, g_gazeName.c_str());
+      h = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 4096, gazeName.c_str());
       owned = h != nullptr;
     }
     if (h) {
@@ -4682,7 +5882,7 @@ void OpenMappings() {
         g_gazeMap = h;
         g_gazeOwned = owned;
         g_gazeView = v;
-        Log("fixation depth: %ls %s", g_gazeName.c_str(),
+        Log("fixation depth: %ls %s", gazeName.c_str(),
             owned ? "created by the test gaze writer (no pupil shift layer)" : "opened (pupil shift layer)");
       } else {
         CloseHandle(h);
@@ -4715,6 +5915,10 @@ void CloseMappings() {
 }
 
 bool g_ckWith = false;  // installed with the cockpit ipd option wanted
+bool g_maskWith = false;  // R65: installed with the cockpit mask export wanted
+bool g_depthWith = false;  // R69: installed with the cockpit depth companion wanted
+bool g_motionWith = false;  // R70: installed with the motion-vector companion wanted
+bool g_symWith = false;  // R95: installed with the symbology companion wanted
 bool Install() {
   if (g_installed.load()) return true;
   if (!CompileShaders()) {
@@ -4726,6 +5930,15 @@ bool Install() {
   ptiming::Install();
   if (!ptiming::g_orig) return false;
   g_fault = false;
+  g_seqN = 0;          // R69: nothing recorded by a previous install is used (no references held on them)
+  if (g_passMv) g_passMv->Release();  // R70
+  g_passMv = nullptr;
+  if (g_runMv) g_runMv->Release();
+  g_runMv = nullptr;
+  g_traceDsvN = 0;
+  g_gbBegun = false;
+  g_faultSite = 0;  // R69: the next fault of this install is reported
+  g_faultLogged = false;
   g_workerStop = false;
   fdexport::g_stopping = false;
   fdexport::g_releaseReq = false;
@@ -4749,15 +5962,22 @@ bool Install() {
       dev->Release();
     }
   }
+  UnsyncViewCount();  // R46 / R48: the render thread may be mid-frame (before the boundary callback goes in)
+  cpass::g_tp.open = false;
   ptiming::g_depthBoundary = &OnBoundary;
   g_rearmOk = true;
   sfilt::g_afterEcl = &AfterEclEntry;
+  g_maskWith = cmask::Wanted();
+  g_depthWith = cmask::DepthWanted();
+  g_motionWith = cmask::MotionWanted();
+  g_symWith = cmask::SymWanted();  // R95
+  cmask::Install();  // R65: block mapped, xrEndFrame hooked (before the callback goes in: nothing to commit yet)
   g_installed = true;
   g_ckWith = ckipd::Wanted();
   if (g_ckWith) ckipd::Start();
-  Log("fixation depth: on (%ls%ls%ls, reads %ls)%s", g_coneOn.load() ? g_depthName.c_str() : L"",
-      g_coneOn.load() && g_gridOn.load() ? L" and " : L"", g_gridOn.load() ? g_gridName.c_str() : L"",
-      g_gazeName.c_str(),
+  Log("fixation depth: on (%ls%ls%ls, reads %ls)%s", g_coneOn.load() ? DepthName().c_str() : L"",
+      g_coneOn.load() && g_gridOn.load() ? L" and " : L"", g_gridOn.load() ? GridName().c_str() : L"",
+      GazeName().c_str(),
       fdexport::g_on.load() ? "; far depth export on (focus views to Quad Views' DcsVr_QuadViewsDepth)" : "");
   return true;
 }
@@ -4779,9 +5999,12 @@ void FarReleaseOnRenderThread() {
 }
 
 // Callback out and drained, worker joined, D3D objects released, mappings
-// closed. Safe to call when not installed.
-void Uninstall() {
+// closed. Safe to call when not installed. R85: keepExports (an export key
+// switched, Tick) keeps the cockpit exports' shared set held (cockpit_mask.h
+// top, 11.); false (Shutdown: the payload stop or reload) releases it.
+void Uninstall(bool keepExports = true) {
   if (!g_installed.load()) return;
+  cmask::UninstallHook();  // R65: xrEndFrame hook out and drained; no new capture or commit
   FarReleaseOnRenderThread();  // while the callback is still in
   if (ckipd::g_on.load()) {
     // A cockpit ipd pass still open is closed on the render thread (restore, arm), bounded like far depth's.
@@ -4818,11 +6041,22 @@ void Uninstall() {
   g_cmpPassView = -1;
   g_trOpen = false;
   g_hdrArmOwn = false;
+  // R58: g_cpDrawView (the tone-map draw in flight) is cleared only after the hooks drained below: cleared here, a
+  // draw between its ToneDrawPre and DrawPost skipped the restore (our PS and slots left bound, DCS's refs leaked).
+  g_cpView = g_cpLearnView = -1;  // R42
+  g_cpTpAdded = false;  // R47 (the entries go with the arm below)
+  g_cpSynced = false;  // R46
+  cpass::g_tp.open = false;
+  g_cpArmOwn = g_cpLearnArmOwn = false;
   // No render-thread re-arm from here on: a hook running now may still re-arm, so wait for it (bounded); a hook
   // entered later only forwards. Then our entries go (draw entries too).
   g_rearmOk = false;
   for (int i = 0; i < 200 && g_hookBusy.load(); ++i) Sleep(1);
   if (g_hookBusy.load()) Log("fixation depth: a context hook was still running at the uninstall (200 ms)");
+  g_cpDrawView = -1;  // R58: after the drain (see above)
+  g_cpAct = 0;
+  g_stTmView = -1;  // R94
+  g_stArmOwn = false;
   DisarmOm();  // a pass that began before the callback went out (draw entries too)
   g_rearmOk = true;  // nothing of ours is armed now (g_armTable null): a re-arm needs a new arm first
   if (g_tinyCb) g_tinyCb->Release();
@@ -4833,6 +6067,17 @@ void Uninstall() {
   g_overlayArm = false;
   if (g_passDsv) g_passDsv->Release();
   g_passDsv = nullptr;
+  cmask::Uninstall(keepExports);  // R65: after the callback drained: the block inactive; R85: the shared set held or released
+  fdexport::DropFrameModule();  // R91: a frame's Quad Views module reference whose frame end did not come
+  if (g_passMv) g_passMv->Release();  // R70: the MV targets of DCS held for the motion export
+  g_passMv = nullptr;
+  if (g_runMv) g_runMv->Release();
+  g_runMv = nullptr;
+  g_maskWith = false;
+  g_depthWith = false;
+  g_motionWith = false;
+  g_symWith = false;  // R95
+  symtr::Reset();  // R94: its copies and the targets it holds (before the device reference goes)
   ReleaseD3D();
   CloseMappings();
   Log("fixation depth: off");
@@ -4894,13 +6139,16 @@ void FarLogStats() {
 
 void LogStats() {
   if (fdexport::g_on.load()) FarLogStats();
+  cmask::LogStats();  // R65 (nothing when off)
   {  // the context-table toggle points: the table found toggled right after each
     char b[600] = "";
     for (int k = 0; k < kTpCount; ++k) {
       const size_t n = strlen(b);
       snprintf(b + n, sizeof(b) - n, "%s%s %llu", k ? ", " : "", kTpNames[k], static_cast<unsigned long long>(g_tpHits[k].load()));
     }
-    Log("fixation depth: context table found toggled right after: %s", b);
+    Log("fixation depth: context table found toggled right after: %s; toggle points left out (slot not d3d11's "
+        "own entry / held by another hook of ours) %llu",
+        b, static_cast<unsigned long long>(g_tpSkipForeign.load()));
     b[0] = 0;
     for (int k = 0; k < 32; ++k)
       if (const uint64_t v = g_togglePrev[k].load()) {
@@ -4910,8 +6158,35 @@ void LogStats() {
     Log("fixation depth: ... and the hook passed before it (1 upload, 3 draw, 4 OM, 5 viewport, 10+ point):%s", b);
   }
   if (!g_coneOn.load() && !g_gridOn.load()) return;
-  std::lock_guard<std::mutex> lock(g_statMutex);
-  const DepthIn& d = g_last;
+  // R91 (R90 phase 2): what g_statMutex guards is copied (and reset) under it, then logged without it: the render
+  // thread (Poll's timing) and the worker take it every frame, and Log can stall on the file for ms.
+  DepthIn d{};
+  std::string note;
+  int conv = -1;
+  double gridGpuAvg = 0, gridGpuMax = 0, gridCpuAvg = 0, gpuAvg = 0, gpuMax = 0, cpuAvg = 0, cpuMax = 0, latAvg = 0;
+  uint64_t gridGpuN = 0, gpuN = 0;
+  RankInfo rank[16];
+  {
+    std::lock_guard<std::mutex> lock(g_statMutex);
+    d = g_last;
+    note = g_lastNote;
+    conv = g_lastConv;
+    gridGpuAvg = g_gridUsN ? g_gridUsSum / g_gridUsN : 0.0;
+    gridGpuMax = g_gridUsMax;
+    gridGpuN = g_gridUsN;
+    gridCpuAvg = g_gridCpuN ? g_gridCpuUsSum / g_gridCpuN : 0.0;
+    g_gridUsSum = g_gridUsMax = g_gridCpuUsSum = 0;
+    g_gridUsN = g_gridCpuN = 0;
+    gpuAvg = g_gpuN ? g_gpuUsSum / g_gpuN : 0.0;
+    gpuMax = g_gpuUsMax;
+    gpuN = g_gpuN;
+    cpuAvg = g_cpuN ? g_cpuUsSum / g_cpuN : 0.0;
+    cpuMax = g_cpuUsMax;
+    latAvg = g_latN ? g_latSum / g_latN : 0.0;
+    g_gpuUsSum = g_gpuUsMax = g_cpuUsSum = g_cpuUsMax = g_latSum = 0;
+    g_gpuN = g_cpuN = g_latN = 0;
+    for (int i = 0; i < 16; ++i) rank[i] = g_rank[i];
+  }
   Log("fixation depth: frames %llu, runs %llu, dispatches %llu, published %llu (valid %llu); no gaze %llu, stale "
       "%llu, no target %llu, ring full %llu, map late %llu, no SRV %llu, bad cPerView %llu, bad projection %llu; "
       "view check ok %llu / mismatch %llu / no match %llu (convention %d), retargets %llu, OM unbinds %llu",
@@ -4923,17 +6198,15 @@ void LogStats() {
       static_cast<unsigned long long>(g_noSrv.load()), static_cast<unsigned long long>(g_badCb.load()),
       static_cast<unsigned long long>(g_badProj.load()), static_cast<unsigned long long>(g_matchOk.load()),
       static_cast<unsigned long long>(g_mismatch.load()), static_cast<unsigned long long>(g_noMatch.load()),
-      g_lastConv, static_cast<unsigned long long>(g_retarget.load()),
+      conv, static_cast<unsigned long long>(g_retarget.load()),
       static_cast<unsigned long long>(g_omUnbinds.load()));
   if (g_gridOn.load())
     Log("fixation depth: grid dispatches %llu, published %llu (valid %llu), ring full %llu, map late %llu; cost GPU %.1f "
         "us avg / %.1f max (%llu timed), render thread %.1f us avg",
         static_cast<unsigned long long>(g_gridDispatches.load()), static_cast<unsigned long long>(g_gridPublished.load()),
         static_cast<unsigned long long>(g_gridValid.load()), static_cast<unsigned long long>(g_gridRingFull.load()),
-        static_cast<unsigned long long>(g_gridLate.load()), g_gridUsN ? g_gridUsSum / g_gridUsN : 0.0, g_gridUsMax,
-        static_cast<unsigned long long>(g_gridUsN), g_gridCpuN ? g_gridCpuUsSum / g_gridCpuN : 0.0);
-  g_gridUsSum = g_gridUsMax = g_gridCpuUsSum = 0;
-  g_gridUsN = g_gridCpuN = 0;
+        static_cast<unsigned long long>(g_gridLate.load()), gridGpuAvg, gridGpuMax,
+        static_cast<unsigned long long>(gridGpuN), gridCpuAvg);
   Log("fixation depth: sampled after the water passes %llu, water in the cone %llu, periphery fallback %llu",
       static_cast<unsigned long long>(g_afterWater.load()), static_cast<unsigned long long>(g_waterFrames.load()),
       static_cast<unsigned long long>(g_periphFrames.load()));
@@ -4944,25 +6217,24 @@ void LogStats() {
       static_cast<unsigned long long>(g_stateChecks.load()), static_cast<unsigned long long>(g_stateDiffs.load()));
   Log("fixation depth: cost GPU %.1f us avg / %.1f max (%llu timed), render thread %.1f us avg / %.1f max; latency "
       "%.2f frames; sampled runs had %d..%d G-buffer passes",
-      g_gpuN ? g_gpuUsSum / g_gpuN : 0.0, g_gpuUsMax, static_cast<unsigned long long>(g_gpuN),
-      g_cpuN ? g_cpuUsSum / g_cpuN : 0.0, g_cpuUsMax, g_latN ? g_latSum / g_latN : 0.0, g_passesMin.load(),
+      gpuAvg, gpuMax, static_cast<unsigned long long>(gpuN), cpuAvg, cpuMax, latAvg, g_passesMin.load(),
       g_passesMax.load());
+  Log("fixation depth: readback buffers reused %llu, made %llu (R91)", static_cast<unsigned long long>(g_poolReuses.load()),
+      static_cast<unsigned long long>(g_poolNew.load()));
   g_passesMin = 0;
   g_passesMax = 0;
   Log("fixation depth: last flags %u view %u near %.2f far %.2f edge %.2f/%.2f median %.2f m nearest %.2f m far "
       "median %.1f m; %s",
       d.flags, d.view, d.nearShare, d.farShare, d.edgeNearShare, d.edgeFarShare, d.medianM, d.nearestM,
-      d.farMedianM, g_lastNote.c_str());
+      d.farMedianM, note.c_str());
   if (g_verify.load())
     for (int i = 0; i < 16; ++i) {
-      const RankInfo& r = g_rank[i];
+      const RankInfo& r = rank[i];
       if (!r.dcsSamples) continue;
       Log("fixation depth verify: run rank %d %dx%d fov L %+.3f R %+.3f U %+.3f D %+.3f -> GazeOut view %d, camera "
           "x %.4f, median %.2f m near %.2f (%d samples)",
           i, r.w, r.h, r.fov[0], r.fov[1], r.fov[2], r.fov[3], r.best, r.camX, r.median, r.nearShare, r.dcsSamples);
     }
-  g_gpuUsSum = g_gpuUsMax = g_cpuUsSum = g_cpuUsMax = g_latSum = 0;
-  g_gpuN = g_cpuN = g_latN = 0;
 }
 
 // Once per second from the config loop.
@@ -4970,10 +6242,15 @@ void Tick(bool coneOn, bool gridOn, int verify, const wchar_t* testGaze, bool du
           bool farOn = false, int farSlots = 2, int farLogProj = 0, bool farPreOverlay = true,
           int farOverlayTrace = 0, bool farPostOverlay = true, int farCoverageMode = 1) {
   const bool ckOn = ckipd::Wanted();  // [Perception] CockpitTrueIpd (ckipd::Configure, before this call)
-  const bool on = coneOn || gridOn || farOn || ckOn;
+  const bool maskOn = cmask::Wanted();  // R65: [Perception] CockpitMaskExport (cmask::Configure, before this call)
+  const bool depthOn = cmask::DepthWanted();  // R69: [Perception] CockpitDepthExport (cmask::ConfigureDepth)
+  const bool motionOn = cmask::MotionWanted();  // R70: [Perception] CockpitMotionExport (cmask::ConfigureMotion)
+  const bool symOn = cmask::SymWanted();  // R95: [Perception] SymbologyExport (cmask::ConfigureSymbology)
+  const bool on = coneOn || gridOn || farOn || ckOn || maskOn || cpass::Wanted();  // R42: the colour modes use the pass hooks too
   // A change of which outputs are on: reinstall (mappings and state follow).
   if (g_installed.load() &&
-      (coneOn != g_coneOn.load() || gridOn != g_gridOn.load() || farOn != fdexport::g_on.load() || ckOn != g_ckWith))
+      (coneOn != g_coneOn.load() || gridOn != g_gridOn.load() || farOn != fdexport::g_on.load() || ckOn != g_ckWith ||
+       maskOn != g_maskWith || depthOn != g_depthWith || motionOn != g_motionWith || symOn != g_symWith))
     Uninstall();
   g_coneOn = coneOn;
   g_gridOn = gridOn;
@@ -5002,6 +6279,8 @@ void Tick(bool coneOn, bool gridOn, int verify, const wchar_t* testGaze, bool du
     }
     for (const std::string& l : tl) Log("far depth overlay trace: %s", l.c_str());
   }
+  WriteToneProbeFiles();  // R91: [Color] ToneProbe's HDR files, off the render thread
+  symtr::WriteFiles();    // R94: [Perception] SymbologyTrace's frame texts and target copies
   {
     std::vector<fdexport::ProjLog> pl;
     {
@@ -5020,6 +6299,10 @@ void Tick(bool coneOn, bool gridOn, int verify, const wchar_t* testGaze, bool du
   g_testGy = ty;
   g_testGaze = test;
   g_verify = verify;
+  cmask::CloseBuried(false);  // R76: the mask export's old NT handles, closed after their grace (also while it is off)
+  // R85: a held set whose device was removed is released. R86: also while installed for other features with the mask
+  // export off (the cockpit mask not installed: its render-thread paths do not run).
+  if (!g_installed.load() || !g_maskWith) cmask::CheckHeld();
   if (!on) {
     Uninstall();
     return;
@@ -5029,8 +6312,26 @@ void Tick(bool coneOn, bool gridOn, int verify, const wchar_t* testGaze, bool du
     return;
   }
   if (ckOn) ckipd::TickCfg();
+  if (maskOn) cmask::Tick();
   if (g_fault.load()) {
-    if (!g_faultLogged) Log("fixation depth: fault latched; publishing stopped until the payload reloads");
+    if (!g_faultLogged) {
+      // R69: where (site = the SEH line in fixation_depth.h; the address as module + offset).
+      const uintptr_t at = g_faultAddr.load();
+      HMODULE mod = nullptr;
+      wchar_t name[MAX_PATH] = L"?";
+      if (at && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<LPCWSTR>(at), &mod) && mod) {
+        wchar_t full[MAX_PATH] = {};
+        if (GetModuleFileNameW(mod, full, MAX_PATH)) {
+          const wchar_t* sl = wcsrchr(full, L'\\');
+          wcsncpy_s(name, sl ? sl + 1 : full, _TRUNCATE);
+        }
+      }
+      Log("fixation depth: fault latched (SEH at fixation_depth.h line %d, code 0x%08x, address %ls+0x%llx); "
+          "publishing stopped until the payload reloads",
+          g_faultSite.load(), g_faultCode.load(), name,
+          static_cast<unsigned long long>(mod ? at - reinterpret_cast<uintptr_t>(mod) : at));
+    }
     g_faultLogged = true;
     return;
   }
@@ -5061,6 +6362,11 @@ void Tick(bool coneOn, bool gridOn, int verify, const wchar_t* testGaze, bool du
   }
 }
 
-void Shutdown() { Uninstall(); }
+void Shutdown() {
+  Uninstall(false);  // R85: the stop releases the cockpit exports' shared set (R76's records: a new generation, flags 0)
+  cmask::ReleaseHeld("payload stop");  // R85: a set held while the exports were off
+  cmask::CloseBuried(true);  // R76: the unload: no later Tick
+  cmask::StopBuilder();  // R91: the export's builder thread ends (a set it made and nobody took is released)
+}
 
 }  // namespace fixdepth

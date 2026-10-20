@@ -319,6 +319,42 @@ void Run() {
   sb::g_workersUp = false;
   for (int c = 0; c < kCasc; ++c) sb::g_learned[c].plan->state = sb::kIdle;
 
+  // R90 H1: a plan a planner thread is still building (it was preempted): the pass waits at most
+  //    g_planWaitCapUs, then builds its own plan inline (equal to the reference); the old cap waited 20 ms.
+  {
+    const uint32_t cap0 = sb::g_planWaitCapUs.load();
+    bool h1 = true;
+    double msNew = 0, msOld = 0;
+    for (int run = 0; run < 2; ++run) {
+      sb::ResetCounters();
+      sb::g_planWaitCapUs = run == 0 ? 300u : 20000u;
+      sb::g_workersUp = true;  // pretend: the plan below stays in kBuilding (no planner thread runs)
+      Plan* stuck = sb::g_learned[1].plan;
+      stuck->vec = w.Desc(1);
+      stuck->state = sb::kBuilding;
+      Reference(*ref, w.Desc(1), &refOffs);
+      LARGE_INTEGER a, b, f;
+      QueryPerformanceFrequency(&f);
+      QueryPerformanceCounter(&a);
+      Plan* got = sb::PlanForPass(w.Desc(1));
+      QueryPerformanceCounter(&b);
+      const double ms = (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
+      (run == 0 ? msNew : msOld) = ms;
+      h1 = h1 && got == &sb::g_syncPlan && SamePlan(*got, *ref) &&
+           std::equal(refOffs.begin(), refOffs.end(), sb::g_offsets) && sb::g_planTimeouts.load() == 1 &&
+           sb::g_planRender.load() == 1 && stuck->state.load() == sb::kBuilding;
+      sb::ReleasePlan(got);
+      stuck->state = sb::kIdle;
+      sb::g_workersUp = false;
+    }
+    sb::g_planWaitCapUs = cap0;
+    printf("     (R90 H1: stuck planner plan, pass returned after %.2f ms with the 300 us cap, %.2f ms with 20 ms)\n",
+           msNew, msOld);
+    Check(h1 && msNew < 10.0 && msOld >= 19.0,
+          "R90 H1 shadow plan: a plan still building after the wait cap (300 us) is built inline (equal plan, one "
+          "timeout); the pre-R90 cap waited 20 ms");
+  }
+
   // 6. Texture-skip masks: planner threads use cached masks only.
   const bool texOn0 = g_shadowTexSkipOn.load();
   const int texState0 = shadowtex::g_state.load();

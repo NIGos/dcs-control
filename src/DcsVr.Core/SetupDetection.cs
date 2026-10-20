@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 
@@ -35,11 +34,14 @@ public sealed record DetectionSources
     /// <summary>The app's saved DLSS 5 runtime copy: used when present, and a signed runtime found on this PC is saved
     /// there. Null leaves detection read-only (the runtime path is proposed instead).</summary>
     public NeuralRuntimeStore? SavedRuntimes { get; init; }
-    public Func<string, bool> ProcessRunning { get; init; } = name =>
-    {
-        var processes = Process.GetProcessesByName(name);
-        try { return processes.Length > 0; } finally { foreach (var process in processes) process.Dispose(); }
-    };
+    /// <summary>True when a process matches the name, or the pattern (<c>*</c>, <c>?</c>, as
+    /// <see cref="BoostPlanner.MatchesProcessName"/>): Pimax's eye-tracking services carry the headset's model in their
+    /// name (platform_runtime_VR4PIMAXP3B_service), so they are asked for by prefix.</summary>
+    public Func<string, bool> ProcessRunning { get; init; } = AnyProcess;
+
+    /// <summary>One toolhelp snapshot, matched with the CPU Boost matcher.</summary>
+    public static bool AnyProcess(string pattern) => AnyMatches(pattern, BoostPlanner.CaptureProcesses(testAccess: false).Processes.Select(p => p.Name));
+    internal static bool AnyMatches(string pattern, IEnumerable<string> names) => names.Any(name => BoostPlanner.MatchesProcessName(pattern, name));
 }
 
 /// <summary>
@@ -108,7 +110,7 @@ public static class SetupDetection
             }
             // Pimax's own eye-tracking services (Crystal family). Tobii.EyeX.Engine is the desktop Tobii Eye Tracker's
             // and platform_runtime_IS5LEYET is the Tobii Eye Tracker 5: neither says anything about the headset.
-            else if (profile.Runtime == RuntimeKind.Pimax && (sources.ProcessRunning("platform_runtime_XR5EYECH") || sources.ProcessRunning("platform_runtime_VR4PIMAX")))
+            else if (profile.Runtime == RuntimeKind.Pimax && (sources.ProcessRunning("platform_runtime_XR5EYECH*") || sources.ProcessRunning("platform_runtime_VR4PIMAX*")))
             {
                 profile = profile with { Gaze = GazeMode.EyeTracked };
                 Set("gaze", "Focus movement", "Eye tracked", "Pimax eye-tracking service is running");
@@ -192,12 +194,30 @@ public static class SetupDetection
 
     private static string Format(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
 
-    /// <summary>Reads the newest "Active HMD set to driver.serial" line from the end of the SteamVR server log.</summary>
+    private sealed record HmdCache(string Log, long Length, long WriteTicks, string? Hmd);
+    // The interface asks from State() on its own thread: the log is scanned again only when it changed.
+    private static HmdCache? _hmdCache;
+
+    /// <summary>Reads the newest "Active HMD set to driver.serial" line from the end of the SteamVR server log; the
+    /// answer is kept for as long as the log's length and time are unchanged.</summary>
     public static string? LastActiveHmd(string log)
     {
         try
         {
-            if (!File.Exists(log)) return null;
+            var info = new FileInfo(log);
+            if (!info.Exists) return null;
+            if (Volatile.Read(ref _hmdCache) is { } cached && cached.Log == log && cached.Length == info.Length && cached.WriteTicks == info.LastWriteTimeUtc.Ticks) return cached.Hmd;
+            var hmd = ScanActiveHmd(log);
+            Volatile.Write(ref _hmdCache, new HmdCache(log, info.Length, info.LastWriteTimeUtc.Ticks, hmd));
+            return hmd;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    private static string? ScanActiveHmd(string log)
+    {
+        try
+        {
             using var stream = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             // The line is written once per SteamVR start, so a long session can push it out of a tail window:
             // read the tail first, then the whole log.

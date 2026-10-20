@@ -808,18 +808,18 @@ void TestPipeline() {
         ob(&hmdPass, false);
       }
     }
-    c->Flush();  // DCS presents every frame
-    Sleep(4);    // and frames take time (WARP finishes the copy meanwhile)
+    // DCS presents every frame, and frames take time: the GPU has finished the frame's copy before the next frame
+    // maps it. R60: waited for (event query, 30 s deadline) instead of a 4 ms sleep, which WARP on a loaded CPU
+    // overran (the copy still drawing at the DO_NOT_WAIT map, the ring full: a group's result published late).
+    gpttest::WaitGpuIdle(dev, c);
   };
   auto latest = [&](DepthIn& d) {
-    for (int t = 0; t < 200; ++t) {
-      {
-        std::lock_guard<std::mutex> lock(g_jobMutex);
-        if (g_jobs.empty()) break;
-      }
-      Sleep(5);
-    }
-    Sleep(20);
+    // R60: until the worker has finished every job queued so far (a deadline, not a spin count), not a fixed 20 ms
+    // after the queue emptied: a worker preempted on a loaded machine published after the read.
+    for (const ULONGLONG until = GetTickCount64() + 30000;
+         g_jobsDone.load(std::memory_order_acquire) < g_jobsQueued.load(std::memory_order_acquire) &&
+         GetTickCount64() < until;)
+      Sleep(1);
     return SeqRead(g_depthView.load(), d);
   };
 
@@ -1022,13 +1022,56 @@ void TestPipeline() {
       OnBoundary(&other, true, 0);
       OnBoundary(&other, false, 0);
     }
-    c->Flush();
-    Sleep(4);
+    gpttest::WaitGpuIdle(dev, c);  // R60: as frame()
   }
   Check(latest(d) && !(d.flags & kDepthValid) && g_staleGaze.load() > 0, "fixdepth: a stale GazeOut publishes valid = 0");
 
-  // Hot-reload safe teardown.
-  Uninstall();
+  {
+    // R48: an install from the config thread in the middle of a frame (Depth boost off and on again while flying)
+    // with the previous install's counts still there (here: 1 HMD view ended, 4 last frame). Until the next frame
+    // start no pass may be taken as HMD view n (cockpit ipd's guard: lastHmdCount >= 2 and hmdOrd <= 3), as after
+    // the first install.
+    g_s.hmdOrd = 1;
+    g_s.lastHmdCount = 4;
+    g_cpSynced = true;
+#ifndef R48_PREFIX
+    UnsyncViewCount();  // what Install does now
+#else
+    g_cpSynced = false;  // what Install did before R48
+#endif
+    const bool partialOff = g_s.lastHmdCount < 2;
+    ++g_s.hmdOrd;  // a CopyToHMDPass end in the partial frame
+    EndFrame();
+    const bool synced = g_s.hmdOrd == 0 && g_cpSynced;
+    g_s.hmdOrd = 4;  // a whole frame: four CopyToHMDPass ends
+    EndFrame();
+    Check(partialOff && synced && g_s.lastHmdCount == 4,
+          "R48 fixdepth: after a mid-frame install no view index until a frame start; a whole frame counts again");
+  }
+  // R58: a tone-map draw in flight (ToneDrawPre ran, DrawPost to come) while the config thread uninstalls: the view
+  // its DrawPost restores must survive until the context hooks drained (it was cleared before the drain).
+  bool drawViewKept = false;
+  {
+    g_cpDrawView = 2;
+    std::atomic<bool> inHook{false};
+    std::thread draw([&] {
+      // R60: the uninstall's drain is bounded (200 x Sleep(1)); this draw must see g_rearmOk drop and read within
+      // it. At normal priority with Sleep(0) a loaded machine could keep it off the CPU past the drain (the view
+      // then read as -1). Above normal and spinning, it reacts at once; the deadline only guards a hang.
+      SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+      HookBusy busy;
+      inHook = true;
+      const ULONGLONG until = GetTickCount64() + 60000;
+      while (g_rearmOk.load() && GetTickCount64() < until) YieldProcessor();  // the uninstall reached the drain
+      drawViewKept = *static_cast<volatile int*>(&g_cpDrawView) == 2;  // what this draw's DrawPost would read
+    });
+    while (!inHook.load()) Sleep(0);
+    // Hot-reload safe teardown.
+    Uninstall();
+    draw.join();
+  }
+  Check(drawViewKept && g_cpDrawView == -1,
+        "R58 fixdepth: an in-flight tone-map draw keeps its view for the restore until the uninstall drained the hooks");
   Check(!g_installed.load() && !g_depthView.load() && !g_gazeView.load() && !g_gridView.load() && !g_s.dev &&
             !g_worker.joinable() &&
             !ptiming::g_depthBoundary.load(),
@@ -1048,9 +1091,9 @@ void TestPipeline() {
   Rel(dcsCs), Rel(dcsSrv), Rel(dcsUav), Rel(rtv), Rel(rtTex), Rel(b0), Rel(b1), Rel(cbA), Rel(cbB);
   if (gview) UnmapViewOfFile(gview);
   if (gm) CloseHandle(gm);
-  g_gazeName = L"Local\\DcsVrPerceptionGaze_v1";
-  g_depthName = L"Local\\DcsVrFixationDepth_v1";
-  g_gridName = L"Local\\DcsVrDepthGrid_v1";
+  g_gazeName.clear();  // R79: no overrides (the suffixed default names)
+  g_depthName.clear();
+  g_gridName.clear();
   g_gridOn = false;
   Rel(c), Rel(imm);
   const ULONG last = dev->Release();

@@ -343,6 +343,10 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
 
     private Process Start(ProcessStartInfo start)
     {
+        // Each DCS start writes a new OFXR flight log (up to twice its size cap); only the latest ones are kept.
+        LastFlight.PruneOfxrLogs(Path.Combine(ManagedRoot, "profiles"));
+        // With the flight log on, the smooth cursor also leaves diagnostic captures next to it at each start.
+        LastFlight.PruneCursorCaptures(Path.Combine(ManagedRoot, "profiles"));
         var process = Process.Start(start) ?? throw new IOException("DCS could not be launched.");
         TryStartCpuBoost(process.Id);
         return process;
@@ -393,6 +397,11 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         {
             if (!TryUpdatePimaxFovea(applied, out var fovea)) reason = "Pimax Play's focus values could not be updated in place";
             else if (SavedRuntimeReplaced(draft, applied.Journal)) reason = "the saved DLSS 5 runtime copy was replaced";
+            else if (FrameCapChanged(draft, applied.Journal, inventory)) reason = "the headset's refresh rate changed";
+            // The layer applies DCS's custom IPD itself and the profile turns DCS's option off; DCS turns it on again when the
+            // pilot sets another IPD in DCS, so the profile is written again with the new value (not just switched off).
+            else if (draft.ForLaunch() is { Desktop: false, EyeDistance: EyeDistanceSource.DcsCustom, UsesLayerEyeDistance: true }
+                     && inventory.DcsSettings.GetValueOrDefault("VR.custom_IPD_enable")?.Trim() == "true") reason = "DCS's custom IPD was changed in DCS";
             else
             {
                 var journal = originals.ReadCurrent() ?? applied.Journal;
@@ -436,7 +445,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     public (LaunchSync Sync, ProcessStartInfo Start) SyncAndPrepareLaunch(VrProfile? draft, InventorySnapshot inventory)
     {
         // Refused before anything is written: with the launcher kept, the game could not start (see LaunchSafety.CurrentJob).
-        if (draft?.KeepDcsLauncher == true && LaunchSafety.LauncherRestartBlocked) throw new InvalidOperationException(LaunchSafety.LauncherBlockedMessage);
+        if ((draft ?? ReadAppliedProfile()?.Profile)?.KeepDcsLauncher == true && LaunchSafety.LauncherRestartBlocked) throw new InvalidOperationException(LaunchSafety.LauncherBlockedMessage);
         var sync = SyncApplied(draft, inventory);
         return (sync, PrepareLaunchApplied());
     }
@@ -450,6 +459,19 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
 
     /// <summary>The installed profile differs only in owned DCS settings of options.lua: every other check of
     /// <see cref="VerifyInstalled"/> passes.</summary>
+    /// <summary>DCS's frame limit follows the headset's refresh rate (Match refresh, read from the headset): the pilot
+    /// switched the headset to another rate since the profile was applied, so the installed limit is out of date.</summary>
+    private static bool FrameCapChanged(VrProfile draft, TransactionJournal journal, InventorySnapshot inventory)
+    {
+        if (draft.Desktop) return false;
+        var wanted = FramePacing.RequestedCap(HeadsetRefresh.Resolve(draft.ForLaunch()));
+        // What the profile wrote, or (when options.lua already held the wanted value) what DCS has now.
+        var installed = journal.Entries.Where(e => e.LuaChanges is not null).SelectMany(e => e.LuaChanges!).LastOrDefault(c => c.Path == "graphics.maxFPS")?.InstalledRaw
+            ?? inventory.DcsSettings.GetValueOrDefault("graphics.maxFPS");
+        if (wanted is null || installed is null) return false;
+        return !double.TryParse(installed, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var had) || Math.Abs(had - wanted.Value) > 0.01;
+    }
+
     private static bool LuaDriftOnly(TransactionJournal journal)
     {
         try { VerifyInstalled(journal, ignoreLuaValues: true); return true; }
@@ -624,7 +646,11 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     public VrProfile LoadProfile(string path)
     {
         // Settled exactly like the interface's feature checklist, so a combination it fixes by itself is not an error here.
-        var p = ProfileValidation.ResolveFeatures(JsonData.Deserialize<VrProfile>(File.ReadAllText(path)));
+        VrProfile loaded;
+        try { loaded = JsonData.Deserialize<VrProfile>(File.ReadAllText(path)); }
+        // A report, another app's JSON or a profile from a newer version: say so instead of a serializer message.
+        catch (System.Text.Json.JsonException e) { throw new InvalidDataException($"This is not a DCS Control profile, or it was saved by a newer version of DCS Control. ({e.Message})", e); }
+        var p = ProfileValidation.ResolveFeatures(loaded);
         var errors = ProfileValidation.Validate(p).Where(i => i.Severity == IssueSeverity.Error && i.Code != "neural-runtime").ToArray();
         if (errors.Length > 0) throw new InvalidDataException(string.Join("\n", errors.Select(e => e.Message)));
         return p;

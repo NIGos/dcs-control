@@ -221,6 +221,9 @@ bool RunBenchmark(int mode, bool beeps) {
   const int blockMs = std::max(2000, g_cfg.benchBlockSec * 1000);
   const int settleMs = std::min(blockMs / 2, std::max(0, static_cast<int>(g_cfg.benchSettleSec * 1000)));
   const bool restoreOn = g_enabled.load();
+  // R77: the kill switch (Alt+Shift+F11) as the user left it: mode 11 switches it per block and used to end with
+  // everything ON, so a user who had switched the engine OFF found it ON and their next toggle turned it OFF.
+  const bool engineWasOff = g_engineOff.load();
   g_benchAbort = false;
   if (mode >= 2) {
     g_enabled = restoreOn;
@@ -346,7 +349,10 @@ bool RunBenchmark(int mode, bool beeps) {
     g_texDedupeOn = g_cfg.texDedupe && !g_engineOff.load();
     ApplyTextureHook();
   }
-  if (mode == 11) BenchSetEngineOff(false);
+  if (mode == 11) {
+    BenchSetEngineOff(engineWasOff);
+    if (engineWasOff) Log("bench: engine optimizations left OFF (the kill switch as before the A/B)");
+  }
   if (mode == 18) g_frameHeapOn = g_cfg.frameHeapSlabs && !g_engineOff.load();
   if (mode == 20) BenchUseCompactTexTable(true);
   if (mode == 21) ApplyBigPages(g_cfg.bigPages && !g_engineOff.load());

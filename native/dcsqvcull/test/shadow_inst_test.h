@@ -781,6 +781,37 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
   KeyResult r5b;
   CompileKeyCached(*s, r5b);  // rewritten with the real version
 
+  // R63 qvc-readonly-disables-cache: a stale entry with the read-only attribute (restored from a backup) is
+  // replaced on save (attribute cleared) and saving stays on; the next start hits it.
+  {
+    const std::vector<std::wstring> ro = ListFiles(dir, L"s_*.qvc");
+    const std::wstring rp = ro.empty() ? std::wstring() : dir + ro[0];
+    const DWORD a0 = ro.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(rp.c_str());
+    if (!cacheWritable() || ro.size() != 1 || a0 == INVALID_FILE_ATTRIBUTES ||
+        !SetFileAttributesW(rp.c_str(), a0 | FILE_ATTRIBUTE_READONLY)) {
+      printf("SKIP R63 shadow inst cache: read-only entry: no entry on disk or its attribute could not be set\n");
+    } else {
+      CacheInit(dir, cc, kCacheEditVersion + 2);  // the entry is now stale ("edit version")
+      KeyResult r6;
+      c0 = g_d3dCompiles.load();
+      CompileKeyCached(*s, r6);
+      const DWORD a1 = GetFileAttributesW(rp.c_str());
+      const bool stillOn = cacheWritable();
+      KeyResult r6b;
+      const uint64_t c1 = g_d3dCompiles.load();
+      CompileKeyCached(*s, r6b);
+      Check(!r6.cached && r6.ok && g_d3dCompiles.load() - c0 == 2 && stillOn && a1 != INVALID_FILE_ATTRIBUTES &&
+                !(a1 & FILE_ATTRIBUTE_READONLY) && r6b.cached && g_d3dCompiles.load() == c1 &&
+                ListFiles(dir, L"*.tmp").empty(),
+            "R63 shadow inst cache: a read-only stale entry is replaced (attribute cleared), saving stays on, the "
+            "rewritten entry hits");
+      SetFileAttributesW(rp.c_str(), FILE_ATTRIBUTE_NORMAL);
+      CacheInit(dir, cc);
+      KeyResult r6c;
+      CompileKeyCached(*s, r6c);  // rewritten with the real version
+    }
+  }
+
   // 5. A corrupted file (one payload byte flipped) and a truncated one.
   // Needs the entry on disk: when the cache could not write it (a scanner
   // held it beyond CacheSave's retries), this is skipped, not failed.
@@ -834,7 +865,9 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
           "shadow inst cache: without a usable folder keys compile as before");
     DeleteFileW(blocker.c_str());
   }
-  // Read-only file in place: the write fails, is logged once, compiles go on.
+  // R63: a read-only junk file in place is replaced (attribute cleared); an entry path that cannot be replaced at
+  // all (a folder of that name, as a deny ACL) is reported, the key still compiles and saving stays on for the
+  // others (was: the read-only file failed the write and turned saving off for the session).
   if (files.empty()) {
     printf("SKIP shadow inst cache: unwritable entry check: no cache entry was written earlier\n");
   } else {
@@ -846,10 +879,25 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
     KeyResult r9;
     CompileKeyCached(*s, r9);
     const std::string sum = CacheSummary();
+    KeyResult r9b;
+    CompileKeyCached(*s, r9b);
     SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
     Check(r9.ok && !r9.cached && sum.find("bad magic 1") != std::string::npos &&
-              sum.find("1 not written") != std::string::npos,
-          "shadow inst cache: an unwritable entry is reported and the key still compiles");
+              sum.find("not written") == std::string::npos && r9b.cached,
+          "shadow inst cache: a read-only junk entry is replaced (R63) and hits next time");
+    CacheInit(dir, cc);
+    ClearDir(dir);
+    const bool made = CreateDirectoryW(p.c_str(), nullptr) != 0;
+    KeyResult r10;
+    CompileKeyCached(*s, r10);
+    const std::string sum2 = CacheSummary();
+    RemoveDirectoryW(p.c_str());
+    if (!made)
+      printf("SKIP shadow inst cache: unreplaceable entry: the test folder could not be created\n");
+    else
+      Check(r10.ok && !r10.cached && sum2.find("1 not written") != std::string::npos && cacheWritable() &&
+                ListFiles(dir, L"*.tmp").empty(),
+            "shadow inst cache: an entry that cannot be replaced is reported, the key still compiles, saving stays on");
   }
   ClearDir(dir);
   delete s;

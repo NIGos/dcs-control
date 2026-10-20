@@ -3,6 +3,9 @@ using DcsVr.Core;
 try
 {
     var command = args.FirstOrDefault() ?? "help";
+    // A help flag anywhere only prints the commands: "launch --help" must never start DCS. The boost helper's own
+    // arguments are its business.
+    if (command != "boost" && args.Any(a => a is "--help" or "-h" or "/?" or "-?")) command = "help";
     string? Option(string name) { var i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
     // The release folder holds release-manifest.json next to files\, where this program lives.
     string ReleaseFolder() => File.Exists(Path.Combine(AppContext.BaseDirectory, "release-manifest.json")) ? AppContext.BaseDirectory : Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory))!;
@@ -49,14 +52,15 @@ try
         }
         case "validate":
         {
-            var profile = JsonData.Deserialize<VrProfile>(File.ReadAllText(Option("--profile") ?? throw new ArgumentException("--profile required")));
+            // Settled like the interface and LoadProfile, so the same file gives the same result from every entry point.
+            var profile = ProfileValidation.ResolveFeatures(JsonData.Deserialize<VrProfile>(File.ReadAllText(Option("--profile") ?? throw new ArgumentException("--profile required"))));
             var issues = ProfileValidation.Validate(service.ResolveNeuralRuntime(profile)); Console.WriteLine(JsonData.Serialize(issues));
             return issues.Any(i => i.Severity == IssueSeverity.Error) ? 2 : 0;
         }
         case "preview":
         case "apply":
         {
-            var p = JsonData.Deserialize<VrProfile>(File.ReadAllText(Option("--profile") ?? throw new ArgumentException("--profile required")));
+            var p = ProfileValidation.ResolveFeatures(JsonData.Deserialize<VrProfile>(File.ReadAllText(Option("--profile") ?? throw new ArgumentException("--profile required"))));
             var inventory = new WindowsInventory().Capture(Option("--dcs"), Option("--options"));
             var plan = service.Preview(p, inventory);
             Console.WriteLine(service.Describe(plan));
@@ -90,10 +94,14 @@ try
         }
         // Runs in its own process so it outlives the app; started automatically when a boosted profile launches DCS.
         case "boost": return BoostRuntime.Run(args[1..], Console.Out, Console.Error);
+        // Started elevated by the app (Start Tobii) when an ended helper left the desktop Tobii services stopped.
+        case "tobii-resume": return BoostRuntime.ResumeLeftoverTobii(service.StateRoot, Console.Out, Console.Error);
         default:
-            Console.WriteLine("DCS Control " + ProductInfo.Version + "\nCommands: inventory, readiness, detect, presets, validate, preview, apply, status, restore, diagnostic, inspect-binary, launch-check, launch, boost, nvidia, app-verify, app-install, app-uninstall\nOptions: --profile file.json --dcs DCS.exe --options options.lua --state folder --distribution folder --out report.json\npreview leaves DCS and registry unchanged. apply writes the profile over whatever is installed; the first time it writes a path it backs up the original. status lists the original files and the applied profile. restore puts every original back (owned options.lua settings only). launch first brings the applied profile up to date (Pimax Play focus values)."); break;
+            // An unknown command is an error (a typo must not look like success to a script); "help" is not.
+            if (command != "help") Console.Error.WriteLine("Unknown command: " + command);
+            Console.WriteLine("DCS Control " + ProductInfo.Version + "\nCommands: inventory, readiness, detect, presets, validate, preview, apply, status, restore, diagnostic, inspect-binary, launch-check, launch, boost, tobii-resume, nvidia, app-verify, app-install, app-uninstall\nOptions: --profile file.json --dcs DCS.exe --options options.lua --state folder --distribution folder --out report.json\npreview leaves DCS and registry unchanged. apply writes the profile over whatever is installed; the first time it writes a path it backs up the original. status lists the original files and the applied profile. restore puts every original back (owned options.lua settings only). launch first brings the applied profile up to date (Pimax Play focus values)."); if (command != "help") return 1; break;
     }
     return 0;
 }
-catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or System.Text.Json.JsonException)
+catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or System.Text.Json.JsonException or System.ComponentModel.Win32Exception or NotSupportedException or FormatException)
 { Console.Error.WriteLine(e.Message); return 1; }

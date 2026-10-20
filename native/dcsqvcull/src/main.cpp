@@ -26,6 +26,7 @@
 #include <cstring>
 #include <deque>
 #include <map>
+#include <set>
 #include <mutex>
 #include <tuple>
 #include <string>
@@ -35,13 +36,23 @@
 
 #include "loader_api.h"
 #include "log_utf8.h"
+#include "dev_path.h"  // R62: [Dev] IniPath read whole, an unusable one logged
 #include "reloc.h"
 #include "status_word.h"
 #include "scene_layout.h"
+#include "scene_check.h"  // R63 U2: partition boost only on a Scene.dll whose collect code uses +0x40 as verified
 #include "gov.h"       // R30: frame sampler, CPU/GPU-bound detector, governor stages (pure)
 #include "env_info.h"  // R30 L3: DCS version, OpenXR runtime and layers, streamers
 #include "dcsvr_depth_export.h"  // Far depth export contract with Quad Views (verbatim copy; far_depth.h)
+#include "dcsvr_cockpit_mask.h"  // R65: cockpit mask export for a frame-generation layer (cockpit_mask.h writes it)
+#include "dcsvr_cockpit_depth.h"  // R69: its depth companion (R68 Stage 1; cockpit_mask.h writes it)
+#include "dcsvr_motion.h"  // R70: its motion-vector companion (R68 Stage 2; cockpit_mask.h writes it)
+#include "dcsvr_symbology.h"  // R95: its symbology emission companion (R89; cockpit_mask.h's symbology.h writes it)
+#include "dcsvr_pupil_fov.h"  // R95: the pupil shift layer's FOV pairs (Dev's header, verbatim; the focus layout)
 #include "dcsvr_perception_shm.h"  // Perception layer's shared blocks (verbatim copy of perception_shm.h; cockpit_ipd.h reads BoostOut)
+#include "color_grade.h"  // R40: [Color] opt-in post-tonemap grading keys (default 0; pure parts, pass not wired yet)
+#include "color_pass.h"   // R42: [Color] Mode 0/1/2 (off / Fix / Enhanced): tone-map pixel shader swap (default 0)
+#include "sym_trace_cfg.h"  // R94: [Perception] SymbologyTrace keys (dev, default off; sym_trace.h does the trace)
 
 using namespace layout;
 
@@ -62,25 +73,212 @@ bool g_reportCapture = false;  // guarded by g_logMutex
 DWORD g_reportThread = 0;      // only lines logged by the suite thread go to the report
 std::string g_reportBuf;
 
-void Log(const char* fmt, ...) {
-  std::lock_guard<std::mutex> lock(g_logMutex);
-  if (!g_api && !g_log) return;
-  if (!g_api) {
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    fprintf(g_log, "%02d:%02d:%02d.%03d ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+// R90 (docs/research/R90_hitch_hunting.md F2): asynchronous log path for DCS's threads. Log() used to format,
+// write and flush (WriteFile) on the calling thread under two mutexes (this one, then the loader's): a render-
+// thread line could wait behind a worker's burst (the census, the perception block) or a write stalled by a
+// reader of the file (DCS Control and the harness read it) or a filter driver. Now:
+//   - a thread that did not start through qvexit (DCS's render, collect and Main threads) formats the line,
+//     stamps the local time and puts it into a bounded lock-free ring (Vyukov MPMC, kAsyncSlots lines); the
+//     payload's log writer thread writes the lines in ring order, so each thread's lines keep their order, with
+//     the time stamped at the call (through the loader's DcsQvCull_LogAt; a loader without it stamps the write
+//     time, at most one writer period later);
+//   - a full ring drops the line and counts it; the writer then logs "log: N lines from DCS threads dropped";
+//     R93 (docs/research/R92_live_hitch_fg.md D1): the ring is 4096 lines (was 256: ~950 lines of the first mission
+//     load's burst were dropped at every DCS start), and only a frame thread drops: a DCS thread that never ran one
+//     of our per-frame hooks (the loading / Main threads; qvalog::t_frameThread false) waits for ring space instead
+//     (the writer is woken; at most kFullWaitMs per line, then the line is dropped and counted). It still never
+//     writes the file itself. A frame thread (the render thread: HookCollect, the pass hook, the xrEndFrame hooks)
+//     never waits and never writes: a full ring drops its line, as before;
+//   - the payload's own threads (worker, recorders, suite) write synchronously as before; a synchronous line
+//     first drains the ring (a fault line of ours comes after every queued line), and Stop / Quiesce drain it.
+// [Log] Async=0 writes every line synchronously (the old path). The line format and the .prev roll are the
+// loader's, unchanged.
+thread_local bool g_tOurThread = false;  // set by qvexit::NoteStart: a payload thread (Run / RunVoid)
+
+namespace qvalog {
+constexpr uint32_t kAsyncSlots = 4096;  // power of two (R93: was 256); 8 MiB, committed as the ring is first used
+constexpr uint32_t kFullWaitMs = 250;   // R93: a non-frame DCS thread waits at most this long per line for ring space
+// R93: set on a DCS thread by our per-frame hooks (HookCollect, the top-level pass hook, the xrEndFrame hooks): the
+// render thread. Its lines never wait for ring space (a full ring drops them). Every other DCS thread may wait.
+thread_local bool t_frameThread = false;
+inline void NoteFrameThread() { t_frameThread = true; }
+struct Slot {
+  std::atomic<uint32_t> seq{0};
+  SYSTEMTIME st{};
+  char text[2048];
+};
+Slot g_ring[kAsyncSlots];
+const bool g_ringInit = [] {
+  for (uint32_t i = 0; i < kAsyncSlots; ++i) g_ring[i].seq.store(i, std::memory_order_relaxed);
+  return true;
+}();
+std::atomic<uint32_t> g_enq{0};
+uint32_t g_deq = 0;                 // under g_drainMutex
+std::mutex g_drainMutex;            // one consumer at a time (the writer, or a synchronous line)
+std::atomic<bool> g_on{false};      // writer running and [Log] Async=1: DCS threads enqueue
+std::atomic<bool> g_want{true};     // [Log] Async
+std::atomic<bool> g_testHold{false};  // tests: the writer leaves the ring alone
+std::atomic<uint64_t> g_queued{0}, g_dropped{0}, g_written{0};
+uint64_t g_droppedLogged = 0;       // under g_drainMutex
+// R93: lines a non-frame DCS thread queued after waiting for ring space, the longest wait (us), the drops by frame
+// threads (never waited) and the writer's wake event (set by a waiting thread; null: the writer polls every 10 ms).
+std::atomic<uint64_t> g_waited{0}, g_waitMaxUs{0}, g_frameDropped{0};
+uint64_t g_waitedLogged = 0;        // under g_drainMutex
+HANDLE g_wake = nullptr;
+using LogAtFn = void (*)(const char* line, const SYSTEMTIME* st);
+LogAtFn g_logAt = nullptr;          // the loader's DcsQvCull_LogAt (resolved at start; null: g_api->log)
+
+// Any thread. False when the ring is full (the caller counts the drop).
+bool Push(const char* line, const SYSTEMTIME& st) {
+  uint32_t pos = g_enq.load(std::memory_order_relaxed);
+  Slot* s;
+  for (;;) {
+    s = &g_ring[pos & (kAsyncSlots - 1)];
+    const uint32_t seq = s->seq.load(std::memory_order_acquire);
+    const int32_t dif = static_cast<int32_t>(seq - pos);
+    if (dif == 0) {
+      if (g_enq.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) break;
+    } else if (dif < 0) {
+      return false;  // full
+    } else {
+      pos = g_enq.load(std::memory_order_relaxed);
+    }
   }
+  s->st = st;
+  strncpy_s(s->text, sizeof(s->text), line, _TRUNCATE);
+  s->seq.store(pos + 1, std::memory_order_release);
+  g_queued.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
+// R93: a non-frame DCS thread with a full ring: wake the writer and retry for up to kFullWaitMs. 1: queued; 0: still
+// full (the caller counts the drop); -1: the async path went off meanwhile (the caller writes synchronously, as with
+// [Log] Async=0). Never touches the file or a log lock.
+int WaitPush(const char* line, const SYSTEMTIME& st) {
+  LARGE_INTEGER f, t0, t1;
+  QueryPerformanceFrequency(&f);
+  QueryPerformanceCounter(&t0);
+  const int64_t limit = static_cast<int64_t>(f.QuadPart) * kFullWaitMs / 1000;
+  for (;;) {
+    if (!g_on.load(std::memory_order_acquire)) return -1;
+    if (g_wake) SetEvent(g_wake);
+    Sleep(1);
+    const bool ok = Push(line, st);
+    QueryPerformanceCounter(&t1);
+    if (ok) {
+      g_waited.fetch_add(1, std::memory_order_relaxed);
+      const uint64_t us = static_cast<uint64_t>((t1.QuadPart - t0.QuadPart) * 1000000 / f.QuadPart);
+      uint64_t m = g_waitMaxUs.load(std::memory_order_relaxed);
+      while (us > m && !g_waitMaxUs.compare_exchange_weak(m, us, std::memory_order_relaxed)) {
+      }
+      return 1;
+    }
+    if (t1.QuadPart - t0.QuadPart >= limit) return 0;
+  }
+}
+
+// One line to the log file (caller holds g_logMutex). st: the time to stamp (nullptr = now).
+void Emit(const char* line, const SYSTEMTIME* st) {
+  if (g_api) {
+    if (st && g_logAt)
+      g_logAt(line, st);
+    else
+      g_api->log(line);
+    return;
+  }
+  if (!g_log) return;
+  SYSTEMTIME now;
+  if (!st) {
+    GetLocalTime(&now);
+    st = &now;
+  }
+  fprintf(g_log, "%02d:%02d:%02d.%03d %s\n", st->wHour, st->wMinute, st->wSecond, st->wMilliseconds, line);
+  fflush(g_log);
+}
+
+// Set while this thread drains: a contained fault inside a drain (the SEH unwind skips the lock's destructor)
+// must not make that thread's fault line wait for the drain lock it still holds.
+thread_local bool t_inDrain = false;
+
+bool Pending() {
+  if (t_inDrain) return false;
+  std::lock_guard<std::mutex> d(g_drainMutex);
+  const Slot& s = g_ring[g_deq & (kAsyncSlots - 1)];
+  return s.seq.load(std::memory_order_acquire) == g_deq + 1;
+}
+
+// Writes every queued line in ring order (writer thread, a synchronous line, Stop). Returns the lines written.
+uint32_t Drain() {
+  if (t_inDrain) return 0;
+  std::lock_guard<std::mutex> d(g_drainMutex);
+  t_inDrain = true;
+  uint32_t n = 0;
+  for (;;) {
+    Slot& s = g_ring[g_deq & (kAsyncSlots - 1)];
+    if (s.seq.load(std::memory_order_acquire) != g_deq + 1) break;  // empty, or the next slot not written yet
+    {
+      std::lock_guard<std::mutex> lock(g_logMutex);
+      Emit(s.text, &s.st);
+    }
+    s.seq.store(g_deq + kAsyncSlots, std::memory_order_release);
+    ++g_deq;
+    ++n;
+  }
+  g_written.fetch_add(n, std::memory_order_relaxed);
+  const uint64_t dropped = g_dropped.load(std::memory_order_relaxed);
+  if (dropped != g_droppedLogged) {
+    char line[160];
+    snprintf(line, sizeof(line), "log: %llu lines from DCS threads dropped (async log ring of %u lines full)",
+             static_cast<unsigned long long>(dropped - g_droppedLogged), kAsyncSlots);
+    g_droppedLogged = dropped;
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    Emit(line, nullptr);
+  }
+  const uint64_t waited = g_waited.load(std::memory_order_relaxed);
+  if (waited != g_waitedLogged) {  // R93: a burst a loading thread outran the ring with (nothing lost)
+    char line[200];
+    snprintf(line, sizeof(line),
+             "log: %llu lines from DCS non-frame threads waited for ring space (async log ring of %u lines full; "
+             "longest wait %.1f ms); none of them dropped",
+             static_cast<unsigned long long>(waited - g_waitedLogged), kAsyncSlots,
+             g_waitMaxUs.load(std::memory_order_relaxed) / 1000.0);
+    g_waitedLogged = waited;
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    Emit(line, nullptr);
+  }
+  t_inDrain = false;
+  return n;
+}
+}  // namespace qvalog
+
+void Log(const char* fmt, ...) {
+  if (!g_api && !g_log) return;
   char line[2048];
   va_list ap;
   va_start(ap, fmt);
   qvlog::FormatV(line, sizeof(line), fmt, ap);  // %ls as UTF-8 (log_utf8.h)
   va_end(ap);
-  if (g_api) {
-    g_api->log(line);
-  } else {
-    fprintf(g_log, "%s\n", line);
-    fflush(g_log);
+  if (!g_tOurThread && qvalog::g_on.load(std::memory_order_acquire)) {  // R90: DCS's threads never write
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    if (qvalog::Push(line, st)) return;
+    if (qvalog::t_frameThread) {  // R93: the render thread never waits: dropped and counted
+      qvalog::g_frameDropped.fetch_add(1, std::memory_order_relaxed);
+      qvalog::g_dropped.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    const int w = qvalog::WaitPush(line, st);  // R93: a loading / Main thread waits for ring space (bounded)
+    if (w > 0) return;
+    if (w == 0) {
+      qvalog::g_dropped.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    // w < 0: the async path went off while it waited: the synchronous path below (as with [Log] Async=0)
   }
+  if (qvalog::Pending()) qvalog::Drain();  // lines queued before this one first
+  std::lock_guard<std::mutex> lock(g_logMutex);
+  if (!g_api && !g_log) return;
+  qvalog::Emit(line, nullptr);
   if (g_reportCapture && GetCurrentThreadId() == g_reportThread) {
     g_reportBuf += line;
     g_reportBuf += '\n';
@@ -229,14 +427,33 @@ struct Config {
   int suiteGpuDedupHashCap = 16384;      // [Suite] GpuDedupHashCap (largest mapped buffer hashed, bytes)
   bool suiteGpuDedupSnap = false;        // [Suite] GpuDedupSnap (1 = also write the cascades' culled instance buffers)
   int peripheralLodScale = 0;            // [Model] PeripheralLodScale (periph_lod.h: LOSSY prototype, periphery instancer LOD factors x percent/100; 0 = off)
+  int suiteFocusGeomProbe = 0;           // [Suite] FocusGeomProbe (focus_bcast.h, R38 rank 2: view mask whose main GBufferPass runs geometry-only, timing A/B; 0 = off)
+  int focusBroadcast = 0;                // [D3D] FocusBroadcast (focus_bcast.h, R38 rank 2: 1 = readiness check only, nothing bound; 0 = off)
   int suiteUavOverlap = 0;               // [Suite] UavOverlap (uav_overlap.h: 1 = culling-chain passes, 2 = all passes inside NVAPI UAV overlap, 3/4 = 1/3 renamed duplicates of every chain dispatch; timing A/B; 0 = off)
   int suitePeriphLodTiming = 0;          // [Suite] PeriphLodTiming (periph_lod.h: GPU timing OFF/ON x percent; 0 = off)
   int suitePeriphLodImage = 0;           // [Suite] PeriphLodImage (periph_lod.h: frames of final per-view images per configuration; 0 = off)
   bool suiteBenchPeripheralLod = false;  // [Suite] BenchPeripheralLod (bench mode 32, scale = PeriphLodTiming or 50)
+  bool cascadeCache = false;             // [Shadows] CascadeCache (cascade_cache.h, R33: PROTOTYPE far-cascade static depth cache; 0 = off, nothing installed)
+  uint32_t cascadeCacheMask = 0xc;       // [Shadows] CascadeCacheMask: cascades by CascadeShadowPass number (bit 2 = about 70-370 m, bit 3 = about 370-1500 m; bit 0 always refreshes: its unsnapped box is never seen)
+  int cascadeCacheMaxAge = 4;            // [Shadows] CascadeCacheMaxAge: frames one capture may serve (1 = refresh every frame)
+  int cascadeCacheMarginPct = 3;         // [Shadows] CascadeCacheMarginPct: window margin per side, percent of DCS's cascade extent
+  int cascadeCacheVerify = 0;            // [Shadows] CascadeCacheVerify: compare every Nth reuse with a full redraw (test only; 0 = off)
+  bool suiteCascadeCacheTiming = false;  // [Suite] CascadeCacheTiming (cascade_cache.h: GPU timing OFF/ON/OFF/ON/OFF, 5 s each)
+  uint32_t chainFast = 7;                // [D3D] ChainFast (chain_fast.h, R34: shorter culling chains; bit 0 calcoffsets, bit 1 calccounters, bit 2 airflow offsets; default 7; 0 = off, nothing installed)
+  bool suiteChainFastTiming = false;     // [Suite] ChainFastTiming (chain_fast.h: GPU timing OFF/ON/OFF/ON/OFF, 5 s each)
+  int suiteChainFastVerify = 0;          // [Suite] ChainFastVerify: seconds of same-frame checks against the stock kernels (0 = off)
+  uint32_t shaderFast = 3;               // [D3D] ShaderFast (shader_fast.h, R36: wider grids for single-SM kernels; bit 0 grass cull, bit 1 IM2 counts clear; default 3; 0 = off)
+  bool suiteShaderFastTiming = false;    // [Suite] ShaderFastTiming (shader_fast.h: GPU timing OFF/ON/OFF/ON/OFF, 5 s each)
+  int suiteShaderFastVerify = 0;         // [Suite] ShaderFastVerify: seconds of same-frame checks against the stock kernels (0 = off)
+  int nightTone = 0;                     // [Night] NightTone (night_tone.h, R37: opt-in night darkening; 0 = off, nothing installed; 1 apply; 2 observe)
+  double nightFloor = 0, nightToe = 0, nightEv = 0;  // [Night] NightExposureFloor, NightToe, NightExposureEV (0 = DCS's value)
+  bool nightGate = true;                 // [Night] NightGate: scale by the night weight from the sun elevation
   bool suiteVramCount = false;           // [Suite] VramCount (vram_count.h: DXGI budget/usage, our memory, texture tables)
   int suiteVramCountSec = 20;            // [Suite] VramCountSec
   bool suiteVramCountCreates = true;     // [Suite] VramCountCreates: count DCS's buffer/texture creates during the phase
-  bool splitFilter = false;              // [D3D] SplitFilter (split_filter.h, R15 F5)
+  // R49: default 1 = the shipped setting (DCS Control writes SplitFilter=1; ChainFast and ShaderFast rely on the split
+  // filter's hooks). Before R49 the code default was 0, so an ini without the key ran without them.
+  bool splitFilter = true;               // [D3D] SplitFilter (split_filter.h, R15 F5)
   uint32_t splitFilterOps = 0x4ff;       // [D3D] SplitFilterOps (sfilt::kDefaultOps: no blend, no depth)
   bool suiteSplitFilterVerify = false;   // [Suite] SplitFilterVerify
   bool suiteBenchSplitFilter = false;    // [Suite] BenchSplitFilter (bench mode 27)
@@ -282,9 +499,23 @@ struct Config {
   int prefetchMode = 0;                    // [Prefetch] Mode: off (0) | observe (1) | skip (2), prefetch_fix.h
   uint32_t prefetchWindowMs = 1000;        // [Prefetch] WindowMs: repeat window (1-60000)
   bool suiteBenchPrefetch = false;         // [Suite] BenchPrefetch (bench mode 33: observe vs skip)
+  int prefetchTableBits = 20;              // [Prefetch] TableBits: repeat table 2^n entries (16-22, default 20; R39)
+  bool threadCensus = false;               // [Threads] Census: per-thread CPU/affinity lines (thread_place.h, R39)
+  int threadCensusSec = 60;                // [Threads] CensusSec (10-3600)
+  int placeRecheckSec = 60;                // [Threads] PlaceRecheckSec: placement re-check once nothing moved (R52; R44 used 10 s)
+  int placeRecheckMode = 1;                // [Threads] PlaceRecheckMode: 1 tracked handles, no system-wide snapshot (R90 default); 0 the snapshot pass
+  int patchMode = 1;                       // [General] PatchMode: 1 code-site writes without the system-wide snapshot (R90 default); 0 the Toolhelp path
+  bool asyncLog = true;                    // [Log] Async: DCS threads' log lines through the async ring (R90 default); 0 synchronous
+  int shadowPlanWaitUs = 300;              // [Model] ShadowPlanWaitUs: render-thread wait for a planner's plan before the inline one (R90 H1; 20000 = pre-R90)
+  int frameTimeline = 0;                   // [Perf] FrameTimeline: 0 off, 1 summaries, 2 + per-frame CSV (frame_timeline.h, R52)
+  int timelineSec = 10;                    // [Perf] TimelineSec: summary window (2-600 s)
+  bool poseProbe = false;                  // [Perf] PoseProbe: head pose re-located at xrBeginFrame / xrEndFrame (R52)
+  bool eventLog = false;                   // [Perf] EventLog: worker tasks, device creates, page faults per frame (R52)
+  int workerPlacement = 2;                 // [Threads] WorkerPlacement: 0 off, 1 all our threads off DCS's render core (R39; R41 §9 measured it slower), 2 selective (R44 default): threads off the render path moved, recorder workers / planners / upload helpers on the whole process mask
   int holdYawDeg = -1;               // [Suite] HoldYawDeg: constant view yaw for unattended runs (-1 = off)
   double holdPitchDeg = 0;           // [Suite] HoldPitchDeg: test only, constant view pitch with the held yaw (down +)
   bool holdPose = false;             // [Suite] HoldPose: test only, the head pose frozen (pose_sweep.h)
+  bool poseWallClock = false;        // [Suite] PoseWallClock: test only, the synthetic yaw from the wall clock at each locate (pre-R99) instead of its displayTime
   double poseRotateDps = 0;          // [Suite] PoseRotateDps: test only, constant-rate synthetic yaw turn (0 = off)
   bool suiteYawScan = false;         // [Suite] YawScan: fps per held yaw, 0..345 in 15 deg steps
   bool suiteYawProfile = false;      // [Suite] YawProfile: cost split and bound per held yaw (view_profile.h)
@@ -341,8 +572,29 @@ struct Config {
   int farDepthCoverageMode = 1;   // [Perception] FarDepthCoverageMode: hdr (1, the default; per-view fallback to overlay) or overlay (0)
   bool farDepthPostOverlay = true; // [Perception] FarDepthPostOverlay: also each focus view's colour after the overlays (at (w, 0))
   int farDepthOverlayTrace = 0;   // [Perception] FarDepthOverlayTrace: log the focus views' tone-map..overlay draws for N frames
+  // R65 cockpit mask export (cockpit_mask.h, contract dcsvr_cockpit_mask.h): per HMD view, where DCS drew cockpit
+  // geometry, for a frame-generation layer. Off by default.
+  bool cockpitMaskExport = false;  // [Perception] CockpitMaskExport
+  int cockpitMaskDivisor = 0;      // [Perception] CockpitMaskDivisor: source texels per mask texel (1-8; 0 auto: <= 512 wide)
+  int cockpitMaskViews = 3;        // [Perception] CockpitMaskViews: HMD view bit mask (3 periphery, 15 + focus)
+  double cockpitMaskNearM = 1.0;   // [Perception] CockpitMaskNearM: also nearer than this (m; 0 = stencil only)
+  int cockpitMaskDilate = 0;       // [Perception] CockpitMaskDilate: extra mask texels of max filter (0-4)
+  int cockpitMaskDump = 0;         // [Perception] CockpitMaskDump: write N committed masks as PGM (debug)
+  int cockpitMaskLog = 0;          // [Perception] CockpitMaskLog: log N commits (displayTime pairing check)
+  bool cockpitMaskOverlay = false; // [Perception] CockpitMaskOverlay (R74b): mask v1.1, 128 = overlay symbology (opt-in)
+  bool cockpitDepthExport = false; // [Perception] CockpitDepthExport (R69): the mask's depth companion (needs the mask)
+  int cockpitDepthDump = 0;        // [Perception] CockpitDepthDump: write N committed depth atlases (debug)
+  bool cockpitMotionExport = false; // [Perception] CockpitMotionExport (R70): DCS's MVs of views 0/1 (needs the mask)
+  bool cockpitMotionClass = true;   // [Perception] CockpitMotionClass: the class byte atlas with the MVs
+  int cockpitMotionDump = 0;        // [Perception] CockpitMotionDump: write N committed motion slots (debug)
+  int cockpitFgDump = 0;            // [Perception] CockpitFgDump (R71): N consecutive frames of MV / class / depth /
+                                    // colour + JSON for frame-generation fixtures (dev; needs mask, depth, motion)
+  bool symbologyExport = false;     // [Perception] SymbologyExport (R95): HUD / helmet emission companion (needs the mask)
+  bool symbologyAlpha = true;       // [Perception] SymbologyAlpha (R95): its coverage alpha (default 1)
+  bool symbologyPublishAlways = false;  // [Dev] SymbologyPublishAlways (R97): without the symbology reader's heartbeat
   // [Perception] CockpitTrueIpd* (cockpit_ipd.h, R31 option 3): cockpit passes at the true eye distance while
-  // Depth boost renders the world at the boosted one. All default off / neutral.
+  // Depth boost renders the world at the boosted one. CockpitTrueIpd defaults off (the app's ini turns it on);
+  // Forward, Helmet, Overlays and OverlayMvp default on (they act only with CockpitTrueIpd), the rest off / neutral.
   int cockpitTrueIpd = 0;          // CockpitTrueIpd: 0 off, 1 on, 2 observe (armed, nothing modified, logs only)
   bool cockpitTrueIpdLighting = false;  // CockpitTrueIpdLighting: phase 2, cockpit-stencil pixels lit from the true eye
   bool cockpitTrueIpdForward = true;    // CockpitTrueIpdForward: also TransparentCockpitPass / ...DecalPass
@@ -394,7 +646,8 @@ void ApplyPassFlush();
 void ApplySrvTailTrim(bool on);
 void ApplyPrefetch();
 void ApplyHoldYaw(int deg);
-void ApplyPoseTest(double pitchDeg, double rateDps, bool holdPose);
+void ApplyPoseTest(double pitchDeg, double rateDps, bool holdPose, bool wallClock);
+void ApplyR90Config();  // R90: PatchMode, [Log] Async (main.cpp, after patch_threads.h)
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_debugHole{false};
 std::atomic<bool> g_faulted{false};
@@ -411,7 +664,8 @@ std::atomic<bool> g_engineOff{false};
 // depth export, CockpitTrueIpd (option 3, its R32 CPU path, StereoAck,
 // BoostOut) and CockpitTrueIpdOwnship (stage 1: the G-buffer recorder is off).
 // No engine optimization, recorder, benchmark, suite, diagnostics hook,
-// governor action, engine toggle or Ctrl+Alt key; DcsQvCull_Status stays 0.
+// governor action, engine toggle or Ctrl+Alt key; DcsQvCull_Status reports
+// running + PerceptionOnly only (R62, status_word.h bit 38).
 // The hooks it keeps, all pass-through or observing:
 //   - Scene.dll collectSceneObjectsRenderables (HookCollect): view
 //     classification only, for the eye separation (NoteCullSeparation,
@@ -457,6 +711,11 @@ bool ParseHotkey(const wchar_t* text, int& vk, int& mods) {
   mods = static_cast<int>(m);
   return true;
 }
+// R42 colour modes (color_pass.h): the ini's [Color] values (config thread) and the ModeKey's choice
+// (-1 = none; it cycles 0 -> 1 -> 2 -> 0 until the ini's Mode changes).
+cpass::Cfg g_colorCfg;
+int g_colorKeyVk = 0, g_colorKeyMods = 0;  // [Color] ModeKey, off unless set
+std::atomic<int> g_colorKeyMode{-1};
 std::atomic<int> g_d3dMode{0};  // D3D11 filter mode, see d3dstate.h
 std::atomic<bool> g_shadowTight{false};        // shadow_tight.h
 std::atomic<bool> g_shadowDebugInvert{false};  // draw only the casters that would be removed
@@ -541,6 +800,12 @@ Config PerceptionOnlyConfig(const Config& c) {
   p.shaderTimeCache = false;
   p.govEnabled = false;
   p.motionCounters = false;
+  // R48: the R34 / R36 / R44 defaults that are on (ChainFast=7, ShaderFast=3, WorkerPlacement=2) were missing from
+  // this list. ChainFast / ShaderFast were held off by the worker's PerceptionOnly guard only, and WorkerPlacement
+  // (tplace::Tick, not guarded) only by the render thread staying unknown without the engine recorders.
+  p.chainFast = p.shaderFast = 0;
+  p.workerPlacement = 0;
+  p.splitFilter = false;  // R49: its Config default is now on (the shipped setting)
   // The engine toggle and the Ctrl+Alt keys (inert in the worker regardless).
   p.toggleVk = p.toggleMods = 0;
   p.developerKeys = false;
@@ -571,6 +836,19 @@ Config PerceptionOnlyConfig(const Config& c) {
   p.farDepthCoverageMode = c.farDepthCoverageMode;
   p.farDepthPostOverlay = c.farDepthPostOverlay;
   p.farDepthOverlayTrace = c.farDepthOverlayTrace;
+  p.cockpitMaskExport = c.cockpitMaskExport;  // R65
+  p.cockpitMaskDivisor = c.cockpitMaskDivisor;
+  p.cockpitMaskViews = c.cockpitMaskViews;
+  p.cockpitMaskNearM = c.cockpitMaskNearM;
+  p.cockpitMaskDilate = c.cockpitMaskDilate;
+  p.cockpitMaskDump = c.cockpitMaskDump;
+  p.cockpitMaskLog = c.cockpitMaskLog;
+  p.cockpitMaskOverlay = c.cockpitMaskOverlay;  // R74b
+  p.cockpitDepthExport = c.cockpitDepthExport;  // R69
+  p.cockpitDepthDump = c.cockpitDepthDump;
+  p.cockpitMotionExport = c.cockpitMotionExport;  // R70
+  p.cockpitMotionClass = c.cockpitMotionClass;
+  p.cockpitMotionDump = c.cockpitMotionDump;
   p.cockpitTrueIpd = c.cockpitTrueIpd;
   p.cockpitTrueIpdLighting = c.cockpitTrueIpdLighting;
   p.cockpitTrueIpdForward = c.cockpitTrueIpdForward;
@@ -613,8 +891,12 @@ void PerceptionOnlyFlags() {
   g_d3dMode = 0;
 }
 
+namespace pifilt { void ReadConfig(const wchar_t* ini); }  // R38 rank 1 (periph_inst_filter.h)
+namespace vsig { void ReadConfig(const wchar_t* ini); }    // R38 rank 2 G4 probe (vs_sig_probe.h)
+namespace fbcr { void ReadConfig(const wchar_t* ini); }    // R53: FastGS focus broadcast (focus_bcast_run.h)
 void LoadConfig(bool initial) {
   std::wstring ini = g_dir + L"DcsQvCull.ini";
+  const std::wstring deployedIni = ini;  // R97: [Dev] keys may live only in the deployed ini (dev mirrors drop [Dev])
   WIN32_FILE_ATTRIBUTE_DATA fad{};
   // A missing ini is read like an empty one: every key takes its fallback
   // below, and the same Apply* calls run. Before, the payload kept the bare
@@ -629,10 +911,15 @@ void LoadConfig(bool initial) {
   } else {
     missing = false;
   }
-  wchar_t devIni[MAX_PATH] = {};
-  GetPrivateProfileStringW(L"Dev", L"IniPath", L"", devIni, MAX_PATH, ini.c_str());
+  // R62: read whole (a path of 260+ characters was cut and dev mode stayed off silently); an unusable one is logged.
+  const qvdev::DevPath devPath = qvdev::ReadDevPath(L"IniPath", ini);
+  static std::wstring s_devIniReported;
+  if (qvdev::ReportOnce(devPath, &s_devIniReported))
+    Log("config: [Dev] IniPath ignored (%s): %ls; settings from the deployed ini", qvdev::Why(devPath),
+        devPath.path.c_str());
+  const wchar_t* devIni = devPath.path.c_str();
   WIN32_FILE_ATTRIBUTE_DATA dfad{};
-  const bool dev = devIni[0] && GetFileAttributesExW(devIni, GetFileExInfoStandard, &dfad);
+  const bool dev = devPath.state == qvdev::kDevOk && GetFileAttributesExW(devIni, GetFileExInfoStandard, &dfad);
   const FILETIME devTime = dev ? dfad.ftLastWriteTime : FILETIME{};
   if (!initial && CompareFileTime(&fad.ftLastWriteTime, &g_iniTime) == 0 &&
       CompareFileTime(&devTime, &g_devIniTime) == 0)
@@ -698,7 +985,8 @@ void LoadConfig(bool initial) {
   c.texDedupe = GetPrivateProfileIntW(L"Texture", L"StreamDedupe", 0, ini.c_str()) != 0;
   c.suiteBenchTexDedupe = GetPrivateProfileIntW(L"Suite", L"BenchTexDedupe", 0, ini.c_str()) != 0;
   c.suiteBenchEngine = GetPrivateProfileIntW(L"Suite", L"BenchEngine", 0, ini.c_str()) != 0;
-  c.motionSeconds = GetPrivateProfileIntW(L"Suite", L"MotionSeconds", 60, ini.c_str());
+  // R90: at most 10 min (a motion_*.csv grows ~3 KB/s; the key was unclamped above).
+  c.motionSeconds = std::min(600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"MotionSeconds", 60, ini.c_str())));
   c.suiteQuick = GetPrivateProfileIntW(L"Suite", L"Quick", 0, ini.c_str()) != 0;
   c.triPlain = GetPrivateProfileIntW(L"Model", L"PlainTriangleCounter", 0, ini.c_str()) != 0;
   c.suiteBenchTriPlain = GetPrivateProfileIntW(L"Suite", L"BenchTriPlain", 0, ini.c_str()) != 0;
@@ -755,14 +1043,48 @@ void LoadConfig(bool initial) {
   c.suiteGpuDedupSnap = GetPrivateProfileIntW(L"Suite", L"GpuDedupSnap", 0, ini.c_str()) != 0;
   c.suiteGpuDedupHashCap = (std::max)(0, (std::min)(1 << 24, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"GpuDedupHashCap", 16384, ini.c_str()))));
   c.peripheralLodScale = (std::max)(0, (std::min)(99, static_cast<int>(GetPrivateProfileIntW(L"Model", L"PeripheralLodScale", 0, ini.c_str()))));
+  c.suiteFocusGeomProbe = (std::max)(0, (std::min)(15, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"FocusGeomProbe", 0, ini.c_str()))));
+  c.focusBroadcast = (std::max)(0, (std::min)(1, static_cast<int>(GetPrivateProfileIntW(L"D3D", L"FocusBroadcast", 0, ini.c_str()))));
   c.suiteUavOverlap = (std::max)(0, (std::min)(4, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"UavOverlap", 0, ini.c_str()))));
   c.suitePeriphLodTiming = (std::max)(0, (std::min)(99, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"PeriphLodTiming", 0, ini.c_str()))));
   c.suitePeriphLodImage = (std::max)(0, (std::min)(120, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"PeriphLodImage", 0, ini.c_str()))));
   c.suiteBenchPeripheralLod = GetPrivateProfileIntW(L"Suite", L"BenchPeripheralLod", 0, ini.c_str()) != 0;
+  c.cascadeCache = GetPrivateProfileIntW(L"Shadows", L"CascadeCache", 0, ini.c_str()) != 0;
+  {
+    wchar_t mask[32];
+    GetPrivateProfileStringW(L"Shadows", L"CascadeCacheMask", L"0xc", mask, 32, ini.c_str());
+    c.cascadeCacheMask = static_cast<uint32_t>(wcstoul(mask, nullptr, 0)) & 0xf;  // decimal or 0x hex
+  }
+  c.cascadeCacheMaxAge = (std::max)(1, (std::min)(64, static_cast<int>(GetPrivateProfileIntW(L"Shadows", L"CascadeCacheMaxAge", 4, ini.c_str()))));
+  c.cascadeCacheMarginPct = (std::max)(0, (std::min)(25, static_cast<int>(GetPrivateProfileIntW(L"Shadows", L"CascadeCacheMarginPct", 3, ini.c_str()))));
+  c.cascadeCacheVerify = (std::max)(0, (std::min)(10000, static_cast<int>(GetPrivateProfileIntW(L"Shadows", L"CascadeCacheVerify", 0, ini.c_str()))));
+  c.suiteCascadeCacheTiming = GetPrivateProfileIntW(L"Suite", L"CascadeCacheTiming", 0, ini.c_str()) != 0;
+  {
+    wchar_t cf[32];
+    GetPrivateProfileStringW(L"D3D", L"ChainFast", L"7", cf, 32, ini.c_str());
+    c.chainFast = static_cast<uint32_t>(wcstoul(cf, nullptr, 0)) & 0x7;  // decimal or 0x hex
+  }
+  c.suiteChainFastTiming = GetPrivateProfileIntW(L"Suite", L"ChainFastTiming", 0, ini.c_str()) != 0;
+  c.suiteChainFastVerify = (std::max)(0, (std::min)(600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ChainFastVerify", 0, ini.c_str()))));
+  {
+    wchar_t sf[32];
+    GetPrivateProfileStringW(L"D3D", L"ShaderFast", L"3", sf, 32, ini.c_str());
+    c.shaderFast = static_cast<uint32_t>(wcstoul(sf, nullptr, 0)) & 0x3;  // R36, decimal or 0x hex
+  }
+  c.suiteShaderFastTiming = GetPrivateProfileIntW(L"Suite", L"ShaderFastTiming", 0, ini.c_str()) != 0;
+  c.suiteShaderFastVerify = (std::max)(0, (std::min)(600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ShaderFastVerify", 0, ini.c_str()))));
+  pifilt::ReadConfig(ini.c_str());  // R38 rank 1: [D3D] PeriphInstFilter* and its [Suite] keys (default 0)
+  vsig::ReadConfig(ini.c_str());    // R38 rank 2 G4: [Suite] FocusVsCensus (default 0)
+  fbcr::ReadConfig(ini.c_str());    // R53: [D3D] FocusBroadcast=2 / FocusBroadcast* and [Suite] FocusBcast* (default 0)
+  c.nightTone = static_cast<int>(GetPrivateProfileIntW(L"Night", L"NightTone", 0, ini.c_str()));  // R37
+  c.nightFloor = ReadDouble(L"Night", L"NightExposureFloor", 0.0, ini);
+  c.nightToe = ReadDouble(L"Night", L"NightToe", 0.0, ini);
+  c.nightEv = ReadDouble(L"Night", L"NightExposureEV", 0.0, ini);
+  c.nightGate = GetPrivateProfileIntW(L"Night", L"NightGate", 1, ini.c_str()) != 0;
   c.suiteVramCount = GetPrivateProfileIntW(L"Suite", L"VramCount", 0, ini.c_str()) != 0;
   c.suiteVramCountSec = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"VramCountSec", 20, ini.c_str()));
   c.suiteVramCountCreates = GetPrivateProfileIntW(L"Suite", L"VramCountCreates", 1, ini.c_str()) != 0;
-  c.splitFilter = GetPrivateProfileIntW(L"D3D", L"SplitFilter", 0, ini.c_str()) != 0;
+  c.splitFilter = GetPrivateProfileIntW(L"D3D", L"SplitFilter", 1, ini.c_str()) != 0;  // R49: default 1 (shipped)
   {
     wchar_t ops[32];
     GetPrivateProfileStringW(L"D3D", L"SplitFilterOps", L"0x4ff", ops, 32, ini.c_str());
@@ -855,12 +1177,40 @@ void LoadConfig(bool initial) {
       Log("config: [Prefetch] Mode=%ls not understood (off, observe or skip); off", mode);
     const int w = static_cast<int>(GetPrivateProfileIntW(L"Prefetch", L"WindowMs", 1000, ini.c_str()));
     c.prefetchWindowMs = static_cast<uint32_t>(std::max(1, std::min(60000, w)));
+    const int tb = static_cast<int>(GetPrivateProfileIntW(L"Prefetch", L"TableBits", 20, ini.c_str()));
+    c.prefetchTableBits = std::max(16, std::min(22, tb));
   }
   c.suiteBenchPrefetch = GetPrivateProfileIntW(L"Suite", L"BenchPrefetch", 0, ini.c_str()) != 0;
+  c.threadCensus = GetPrivateProfileIntW(L"Threads", L"Census", 0, ini.c_str()) != 0;
+  c.threadCensusSec = std::max(10, std::min(3600, static_cast<int>(GetPrivateProfileIntW(L"Threads", L"CensusSec", 60, ini.c_str()))));
+  {
+    // R44 (docsesearch\R44_autonomous_session.md section 1): default 2. With the placement pass made cheap
+    // (thread_place.h), CPU-bound airfield: 2 vs 0 fps +1.26 +- 0.39, p95 -0.57 +- 0.12 ms, render -0.29 ms
+    // (4/4 triplets; that start had DCS's affinity pass keep our recorder workers off the render core);
+    // GPU-bound Germany: no change (fps +0.15 +- 0.15, p95 -0.06 +- 0.20). 0 restores DCS's masks.
+    const int wp = static_cast<int>(GetPrivateProfileIntW(L"Threads", L"WorkerPlacement", 2, ini.c_str()));
+    c.workerPlacement = wp >= 0 && wp <= 2 ? wp : 2;
+  }
+  // R52 (docs/research/R52_pacing_latency.md): the placement pass's steady-state re-check (it takes a
+  // system-wide thread snapshot); new threads of ours still trigger a pass within 1 s.
+  c.placeRecheckSec = std::max(10, std::min(3600, static_cast<int>(GetPrivateProfileIntW(L"Threads", L"PlaceRecheckSec", 60, ini.c_str()))));
+  // R90 (docs/research/R90_hitch_hunting.md section 6): the lossless hitch fixes, each with its old path behind a key
+  // for the A/B. PlaceRecheckMode: the placement re-check over tracked handles (no system-wide snapshot); PatchMode:
+  // code-site writes without the system-wide snapshot, all suspensions batched; Async: DCS threads' log lines queued.
+  c.placeRecheckMode = GetPrivateProfileIntW(L"Threads", L"PlaceRecheckMode", 1, ini.c_str()) != 0 ? 1 : 0;
+  c.patchMode = GetPrivateProfileIntW(L"General", L"PatchMode", 1, ini.c_str()) != 0 ? 1 : 0;
+  c.asyncLog = GetPrivateProfileIntW(L"Log", L"Async", 1, ini.c_str()) != 0;
+  c.shadowPlanWaitUs = std::max(0, std::min(20000, static_cast<int>(GetPrivateProfileIntW(L"Model", L"ShadowPlanWaitUs", 300, ini.c_str()))));
+  // R52 measurement keys (measure only, all default 0).
+  c.frameTimeline = std::max(0, std::min(2, static_cast<int>(GetPrivateProfileIntW(L"Perf", L"FrameTimeline", 0, ini.c_str()))));
+  c.timelineSec = std::max(2, std::min(600, static_cast<int>(GetPrivateProfileIntW(L"Perf", L"TimelineSec", 10, ini.c_str()))));
+  c.poseProbe = GetPrivateProfileIntW(L"Perf", L"PoseProbe", 0, ini.c_str()) != 0;
+  c.eventLog = GetPrivateProfileIntW(L"Perf", L"EventLog", 0, ini.c_str()) != 0;
   c.holdYawDeg = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"HoldYawDeg", -1, ini.c_str()));
   c.holdPitchDeg = ReadDouble(L"Suite", L"HoldPitchDeg", 0.0, ini);
   c.poseRotateDps = ReadDouble(L"Suite", L"PoseRotateDps", 0.0, ini);
   c.holdPose = GetPrivateProfileIntW(L"Suite", L"HoldPose", 0, ini.c_str()) != 0;
+  c.poseWallClock = GetPrivateProfileIntW(L"Suite", L"PoseWallClock", 0, ini.c_str()) != 0;  // R99
   c.suiteYawScan = GetPrivateProfileIntW(L"Suite", L"YawScan", 0, ini.c_str()) != 0;
   c.suiteYawProfile = GetPrivateProfileIntW(L"Suite", L"YawProfile", 0, ini.c_str()) != 0;
   c.suiteYawProfileStep = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"YawProfileStep", 30, ini.c_str()));
@@ -940,6 +1290,36 @@ void LoadConfig(bool initial) {
   c.farDepthOverlayTrace =
       (std::max)(0, (std::min)(600, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"FarDepthOverlayTrace", 0,
                                                                            ini.c_str()))));
+  c.cockpitMaskExport = GetPrivateProfileIntW(L"Perception", L"CockpitMaskExport", 0, ini.c_str()) != 0;  // R65
+  c.cockpitMaskDivisor =
+      (std::max)(0, (std::min)(8, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitMaskDivisor", 0, ini.c_str()))));
+  c.cockpitMaskViews = static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitMaskViews", 3, ini.c_str())) & 15;
+  if (!c.cockpitMaskViews) c.cockpitMaskViews = 3;
+  c.cockpitMaskNearM = (std::max)(0.0, (std::min)(20.0, ReadDouble(L"Perception", L"CockpitMaskNearM", 1.0, ini)));
+  c.cockpitMaskDilate =
+      (std::max)(0, (std::min)(4, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitMaskDilate", 0, ini.c_str()))));
+  c.cockpitMaskDump =
+      (std::max)(0, (std::min)(300, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitMaskDump", 0, ini.c_str()))));
+  c.cockpitMaskLog =
+      (std::max)(0, (std::min)(1000, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitMaskLog", 0, ini.c_str()))));
+  c.cockpitMaskOverlay = GetPrivateProfileIntW(L"Perception", L"CockpitMaskOverlay", 0, ini.c_str()) != 0;  // R74b
+  c.cockpitDepthExport = GetPrivateProfileIntW(L"Perception", L"CockpitDepthExport", 0, ini.c_str()) != 0;  // R69
+  c.cockpitDepthDump =
+      (std::max)(0, (std::min)(300, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitDepthDump", 0, ini.c_str()))));
+  c.cockpitMotionExport = GetPrivateProfileIntW(L"Perception", L"CockpitMotionExport", 0, ini.c_str()) != 0;  // R70
+  c.cockpitMotionClass = GetPrivateProfileIntW(L"Perception", L"CockpitMotionClass", 1, ini.c_str()) != 0;
+  c.cockpitMotionDump =
+      (std::max)(0, (std::min)(300, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitMotionDump", 0, ini.c_str()))));
+  c.cockpitFgDump =  // R71
+      (std::max)(0, (std::min)(300, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitFgDump", 0, ini.c_str()))));
+  c.symbologyExport = GetPrivateProfileIntW(L"Perception", L"SymbologyExport", 0, ini.c_str()) != 0;  // R95
+  c.symbologyAlpha = GetPrivateProfileIntW(L"Perception", L"SymbologyAlpha", 1, ini.c_str()) != 0;
+  {  // R97: [Dev] SymbologyPublishAlways (default 0) from the settings' ini, else from the deployed one
+    int pa = static_cast<int>(GetPrivateProfileIntW(L"Dev", L"SymbologyPublishAlways", -1, ini.c_str()));
+    if (pa < 0 && ini != deployedIni)
+      pa = static_cast<int>(GetPrivateProfileIntW(L"Dev", L"SymbologyPublishAlways", -1, deployedIni.c_str()));
+    c.symbologyPublishAlways = pa > 0;
+  }
   c.cockpitTrueIpd = static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpd", 0, ini.c_str()));
   if (c.cockpitTrueIpd < 0 || c.cockpitTrueIpd > 2) c.cockpitTrueIpd = 0;
   c.cockpitTrueIpdLighting = GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdLighting", 0, ini.c_str()) != 0;
@@ -1013,7 +1393,77 @@ void LoadConfig(bool initial) {
     }
     if (g_perceptionOnly.load()) c = PerceptionOnlyConfig(c);
   }
+  {  // R40 [Color]: read and logged only; the grading pass is not wired yet (R40_color_oled.md section 6)
+    const cgrade::Params cp = cgrade::ReadIni(ini.c_str());
+    if (initial || !cgrade::Same(cp, cgrade::g_params)) {
+      cgrade::g_params = cp;
+      if (cgrade::Active(cp))
+        Log("config: [Color] SrgbMatch=%d BlackFloor=%d Contrast=%d Saturation=%d gamma %.2f: R40 keys, not used "
+            "(superseded by [Color] Mode and [ColorFix] / [ColorEnhanced], R42)",
+            cp.srgbMatch, cp.blackFloor, cp.contrast, cp.saturation, cp.outputGamma);
+    }
+  }
+  {  // R42 colour modes (color_pass.h): [Color] Mode / ModeKey / Timing, [ColorFix], [ColorEnhanced]
+    const int m = static_cast<int>(GetPrivateProfileIntW(L"Color", L"Mode", 0, ini.c_str()));
+    g_colorCfg.mode = m >= 0 && m <= 2 ? m : 0;
+    g_colorCfg.timing = GetPrivateProfileIntW(L"Color", L"Timing", 0, ini.c_str()) != 0 ? 1 : 0;
+    // R47 (dev A/B, default 3): bit 0 normalize the context table at the tone-map arm, bit 1 its state-call toggle
+    // points and the normal-not-ours repair.
+    cpass::g_armRepair = static_cast<int>(GetPrivateProfileIntW(L"Color", L"ArmRepair", 3, ini.c_str())) & 3;
+    g_colorCfg.fix = cgrade::ReadModeIni(ini.c_str(), 1);
+    g_colorCfg.enh = cgrade::ReadModeIni(ini.c_str(), 2);
+    wchar_t hk[64] = {};
+    GetPrivateProfileStringW(L"Color", L"ModeKey", L"0:0", hk, 64, ini.c_str());  // default off; 120:6 = Alt+Shift+F9
+    if (!ParseHotkey(hk, g_colorKeyVk, g_colorKeyMods)) Log("config: [Color] ModeKey=%ls is invalid; key disabled", hk);
+    static int lastIniMode = -1;
+    if (g_colorCfg.mode != lastIniMode) g_colorKeyMode = -1;  // a new ini value wins over the key's choice
+    lastIniMode = g_colorCfg.mode;
+  }
+  {  // R51 VrFx (vrfx.h, color_pass.h): [VrFx] GazeDof / GVision, default off; any change applies within a second
+    const vrfx::Params p = vrfx::ReadIni(ini.c_str());
+    static vrfx::Params last;
+    static bool first = true;
+    if (first || !vrfx::Same(p, last)) {
+      while (vrfx::g_paramLock.test_and_set(std::memory_order_acquire)) YieldProcessor();
+      vrfx::g_params = p;
+      vrfx::g_paramLock.clear(std::memory_order_release);
+      vrfx::g_paramVer++;
+      if (!first || p.dof || p.gv)
+        Log("config: [VrFx] GazeDof=%d (strength %.2f, max %.1f arcmin, saccade release %d, settle %.0f ms, fade-in "
+            "%.0f ms, tolerance %.2f D, fovea guard %.1f deg, pupil %s%.1f mm) GVision=%d (strength %.2f, use gaze %d, "
+            "red-out %d, tolerance %.1f G, mode %d)",
+            p.dof, p.dofStrength, p.dofMaxArcmin, p.dofSaccadeRelease, p.dofSettleMs, p.dofFadeInMs, p.dofToleranceD,
+            p.dofGuardDeg, p.dofPupilMm > 0 ? "fixed " : "from the scene; ", p.dofPupilMm, p.gv, p.gvStrength,
+            p.gvUseGaze, p.gvRedout, p.gvTolerance, p.gvMode);
+      last = p;
+      first = false;
+    }
+    vrfx::g_wantDof = p.dof != 0;
+    vrfx::g_wantGv = p.gv != 0;
+  }
+  {  // R41 live probes (dev, measure only; color_grade.h): a new non-zero value starts a probe session
+    static int lastTone = 0, lastSwap = 0, lastGeo = 0;
+    const int tone = static_cast<int>(GetPrivateProfileIntW(L"Color", L"ToneProbe", 0, ini.c_str()));
+    const int swap = static_cast<int>(GetPrivateProfileIntW(L"Color", L"SwapProbe", 0, ini.c_str()));
+    const int geo = GetPrivateProfileIntW(L"Suite", L"GeoOnlyProbe", 0, ini.c_str()) != 0 ? 1 : 0;
+    cgrade::g_toneProbeViews = static_cast<int>(GetPrivateProfileIntW(L"Color", L"ToneProbeViews", 15, ini.c_str())) & 15;
+    cgrade::g_toneProbeHdr = GetPrivateProfileIntW(L"Color", L"ToneProbeHdr", 0, ini.c_str()) != 0 ? 1 : 0;
+    if (tone != lastTone && tone > 0) cgrade::g_toneProbeReq = tone;
+    if (swap != lastSwap && swap > 0) cgrade::g_swapProbeReq = swap;
+    if (geo != lastGeo) Log("probe: [Suite] GeoOnlyProbe=%d (focus main G-buffer into an off-target viewport; lossy, test only)", geo);
+    cgrade::g_geoOnlyProbe = geo;
+    lastTone = tone;
+    lastSwap = swap;
+    lastGeo = geo;
+    // R94: [Perception] SymbologyTrace (dev, measure only; sym_trace_cfg.h): a new value > 0 starts a session.
+    const int st = static_cast<int>(GetPrivateProfileIntW(L"Perception", L"SymbologyTrace", 0, ini.c_str()));
+    symtrcfg::Configure(st, static_cast<int>(GetPrivateProfileIntW(L"Perception", L"SymbologyTraceViews", 15, ini.c_str())),
+                        static_cast<int>(GetPrivateProfileIntW(L"Perception", L"SymbologyTraceSegments", 0, ini.c_str())),
+                        static_cast<int>(GetPrivateProfileIntW(L"Perception", L"SymbologyTraceTone", 1, ini.c_str())),
+                        g_devDir.empty() ? g_dir : g_devDir);
+  }
   g_cfg = c;
+  ApplyR90Config();
   if (g_perceptionOnly.load()) {
     PerceptionOnlyFlags();
     return;
@@ -1055,7 +1505,7 @@ void LoadConfig(bool initial) {
   ApplySrvTailTrim(c.srvTailTrim && !g_engineOff.load());
   ApplyPrefetch();
   ApplyHoldYaw(c.holdYawDeg);
-  ApplyPoseTest(c.holdPitchDeg, c.poseRotateDps, c.holdPose);
+  ApplyPoseTest(c.holdPitchDeg, c.poseRotateDps, c.holdPose, c.poseWallClock);
   SetTimerResolution(c.fineTimer);
   g_d3dMode = c.d3dFilter ? 1 : 0;
   g_shadowTight = c.shadowTight;
@@ -1341,6 +1791,51 @@ void SetBenchVariant(bool on);
 void BenchSetEngineOff(bool off);
 void RestoreD3dHooks();
 #include "exit_guard.h"  // DCS shutdown: quiesce, late faults on our threads end the thread only
+#include "patch_threads.h"  // R90: this process's threads without a system-wide snapshot; suspended code writes
+#include "disk_prune.h"     // R90: output caps at payload start (newest-N families, .qvc LRU, orphaned .tmp)
+namespace {
+// R90: the log writer thread (qvalog above). Started by DcsQvPayload_Start, stopped (and the ring drained) by
+// Stop and Quiesce.
+HANDLE g_logWriter = nullptr;
+std::atomic<bool> g_logWriterStop{false};
+DWORD WINAPI LogWriterThread(void*) {
+  while (!g_logWriterStop.load(std::memory_order_acquire)) {
+    if (!qvalog::g_testHold.load(std::memory_order_relaxed)) qvalog::Drain();
+    if (qvalog::g_wake)
+      WaitForSingleObject(qvalog::g_wake, 10);  // R93: a thread waiting for ring space wakes the writer at once
+    else
+      Sleep(10);
+  }
+  qvalog::Drain();
+  return 0;
+}
+void StartAsyncLog() {
+  if (g_logWriter) return;
+  if (g_api && !qvalog::g_logAt) {  // the loader's DcsQvCull_LogAt (R90 loaders): lines keep their call time
+    HMODULE loader = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(g_api->log), &loader) &&
+        loader)
+      qvalog::g_logAt = reinterpret_cast<qvalog::LogAtFn>(GetProcAddress(loader, "DcsQvCull_LogAt"));
+  }
+  g_logWriterStop = false;
+  if (!qvalog::g_wake) qvalog::g_wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);  // R93 (kept for the payload)
+  g_logWriter = CreateThread(nullptr, 0, qvexit::Thread<LogWriterThread>, nullptr, 0, nullptr);
+  qvalog::g_on = g_logWriter && qvalog::g_want.load();
+}
+// Every later line is synchronous; the queued ones are written first (in order).
+void StopAsyncLog() {
+  qvalog::g_on = false;
+  if (g_logWriter) {
+    g_logWriterStop = true;
+    if (qvalog::g_wake) SetEvent(qvalog::g_wake);  // R93: out of its wait now
+    WaitForSingleObject(g_logWriter, 5000);
+    CloseHandle(g_logWriter);
+    g_logWriter = nullptr;
+  }
+  qvalog::Drain();
+}
+}  // namespace
 #include "gpu.h"
 #include "scene_cut.h"  // [Perception] SceneCutReset: Quad Views history reset on camera cuts
 #include "bench.h"
@@ -1359,6 +1854,7 @@ void RestoreD3dHooks();
 #include <d3dcompiler.h>
 #include <d3d11shader.h>
 #include <dxgi1_4.h>
+#include <d3d11_4.h>  // R65: ID3D11Device5 / ID3D11Fence (cockpit mask: shared fence)
 #include "deferred_rec.h"  // R15 A1: deferred-context worker pool of the shadow and G-buffer recorders
 namespace {
 
@@ -1382,6 +1878,10 @@ std::atomic<uint32_t> g_lastCollectFlags{0};  // last argument of collectSceneOb
 // count. Raising threadsMax to 8 and the argument to 7 yields the maximum of
 // 16 chunks, so one chunk of heavy models delays the render thread less.
 std::atomic<uint32_t> g_defaultThreadsMax{0};
+// R63 U2: 1 = the running Scene.dll's collect function reads scene+0x40 and
+// takes min(it, its last argument) (scenecheck::FindThreadsMaxUse, checked by
+// Install); -1 = it does not: nothing writes +0x40 or raises the argument.
+std::atomic<int> g_sceneLayout{0};
 std::atomic<bool> g_threadsApplied{false};
 
 struct ViewInfo {
@@ -1659,7 +2159,11 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
 #include "lod_probe.h"
 #include "gpu_dedup.h"
 #include "periph_lod.h"
+#include "cascade_cache.h"  // R33: far shadow cascade static depth cache ([Shadows] CascadeCache, prototype)
 #include "uav_overlap.h"
+#include "chain_fast.h"  // R34: shorter terrain/forest culling chains ([D3D] ChainFast, default 7)
+#include "shader_fast.h"  // R36: wider grids for two single-SM kernels ([D3D] ShaderFast, default 0)
+#include "night_tone.h"   // R37: opt-in night darkening through DCS's tone mapper ([Night] NightTone, default 0)
 #include "run_threads.h"
 #include "frame_start.h"
 #include "frame_heap.h"
@@ -1674,12 +2178,33 @@ void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, 
 #include "prefetch_fix.h"
 #include "perception_device.h"  // [General] PerceptionOnly: DCS's D3D11 context without the engine modules
 #include "fixation_depth.h"  // Depth boost: fixation depth publisher ([Perception] FixationDepth)
+#include "periph_inst_filter.h"  // R38 rank 1: periphery instance filter ([D3D] PeriphInstFilter, default 0)
+#include "focus_bcast.h"  // R38 rank 2: [Suite] FocusGeomProbe, [D3D] FocusBroadcast readiness (default 0)
+#include "vs_sig_probe.h"  // R38 rank 2 gate G4: [Suite] FocusVsCensus (measure only, default 0)
+#include "focus_bcast_run.h"  // R53: FastGS focus broadcast ([D3D] FocusBroadcast=2, default 0)
 #include "perf_mon.h"  // R30: env/perf/features/warmup/toggle/vram lines and the governor's driver
+#include "thread_place.h"  // R39: [Threads] Census (default off) / WorkerPlacement (R44: default 2, selective)
+#include "frame_timeline.h"  // R52: [Perf] FrameTimeline / PoseProbe / EventLog (measure only, default 0)
+// R90: the keys of the hitch fixes that are not read where they act (LoadConfig, every config read).
+void ApplyR90Config() {
+  qvpatch::g_mode = g_cfg.patchMode;
+  qvalog::g_want = g_cfg.asyncLog;
+  qvalog::g_on = g_logWriter && g_cfg.asyncLog;
+  shadowbatch::g_planWaitCapUs = static_cast<uint32_t>(g_cfg.shadowPlanWaitUs);
+}
 
 // [Prefetch] Mode/WindowMs, live: off (or the kill switch) = every patched
 // slot restored to the real function; observe = installed, pass-through.
 void ApplyPrefetch() {
   pffix::Apply(g_engineOff.load() ? pffix::kOff : g_cfg.prefetchMode, g_cfg.prefetchWindowMs);
+  // R39 [Prefetch] TableBits: the repeat table's size (16 = the original 2^16 table).
+  const unsigned bits = static_cast<unsigned>(g_cfg.prefetchTableBits);
+  if (pffix::TableBits() != bits) {
+    if (pffix::SetTableBits(bits))
+      Log("prefetch: repeat table 2^%u entries (%u KB)", bits, static_cast<unsigned>((8ull << bits) >> 10));
+    else
+      Log("prefetch: repeat table 2^%u could not be allocated; 2^%u kept", bits, pffix::TableBits());
+  }
 }
 
 // [General] PerceptionOnly: the NGModel globals pointer the cockpit ipd's
@@ -1712,7 +2237,7 @@ void PerceptionGlobalsTick() {
 }
 
 void ApplyThreadsMax(void* scene) {
-  if (g_cfg.collectThreadsMax <= 0 || g_threadsApplied.exchange(true)) return;
+  if (g_cfg.collectThreadsMax <= 0 || g_sceneLayout.load() != 1 || g_threadsApplied.exchange(true)) return;
   auto* p = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(scene) + kSceneCollectThreadsMax);
   uint32_t before = *p;
   uint32_t v = static_cast<uint32_t>(g_cfg.collectThreadsMax);
@@ -1894,6 +2419,7 @@ void SafeApplyWeights(uint8_t* view) {
 
 void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t* outs,
                             void* taskQueue, uint32_t flags) {
+  qvalog::NoteFrameThread();  // R93: DCS's render thread (its log lines never wait for ring space)
   void* scene = static_cast<uint8_t*>(self) - 8;
   if (!g_scene.exchange(scene)) Log("scene: DCSScene at %p", scene);
   g_lastCollectFlags = flags;
@@ -1906,13 +2432,22 @@ void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t*
     auto* tmax = reinterpret_cast<volatile uint32_t*>(static_cast<uint8_t*>(scene) + kSceneCollectThreadsMax);
     uint32_t expect = 0;
     g_defaultThreadsMax.compare_exchange_strong(expect, *tmax);
-    // Plausibility guard: the field holds DCS's worker-thread limit (6 on
-    // 2.9.30). Anything else means the layout changed: leave it alone.
+    // Layout: Install verified that this Scene.dll's collect code uses the
+    // field and the argument as on 2.9.30 (R63 U2; the value test alone is no
+    // layout check). Plausibility guard on top: the field holds DCS's
+    // worker-thread limit (6 on 2.9.30). Otherwise leave both alone.
     const uint32_t def = g_defaultThreadsMax.load();
-    const bool layoutOk = def >= 1 && def <= 32;
+    const bool codeOk = g_sceneLayout.load(std::memory_order_relaxed) == 1;
+    const bool layoutOk = codeOk && def >= 1 && def <= 32;
     if (!layoutOk) {
       static std::atomic<bool> warned{false};
-      if (!warned.exchange(true)) Log("partition boost: unexpected scene layout (value %u); disabled", def);
+      if (!warned.exchange(true)) {
+        if (!codeOk)
+          Log("partition boost: unexpected scene layout (Scene.dll collect code does not use +0x%zx as on 2.9.30); "
+              "disabled, field and argument left alone", kSceneCollectThreadsMax);
+        else
+          Log("partition boost: unexpected scene layout (value %u); disabled", def);
+      }
     } else if (g_partitionBoost.load()) {
       if (*tmax < 8) *tmax = 8;
       if (flags < 7) flags = 7;
@@ -1963,6 +2498,13 @@ void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t*
 
   for (int i = 0; i < patched; ++i) *reinterpret_cast<uint8_t**>(patches[i].slot) = patches[i].original;
   if (pairs >= 1 && !po) PublishQuadViews(infos, views, t1.QuadPart);  // the G-buffer recorder's filter
+  if (pairs >= 2 && fbcr::g_probe.load(std::memory_order_relaxed)) {  // R53 census: collect-time view matrices
+    int idx[8], role[8], par[8];
+    size_t nv = 0;
+    for (const ViewInfo& v : views)
+      if (nv < 8 && v.role) idx[nv] = v.index, role[nv] = v.role, par[nv] = v.partner, ++nv;
+    fbcr::OnCollect(infos, idx, role, par, nv);
+  }
   if (pairs >= 2 && fixdepth::ckipd::g_on.load(std::memory_order_relaxed)) NoteCullSeparation(views);
   // R30 L1: every frame's main call (quad or not) for the perf line and the governor.
   perfgov::OnCollect(count, classified ? static_cast<int>(views.size()) : -1, classified ? pairs : -1, t1.QuadPart);
@@ -2021,6 +2563,25 @@ const char kCollectExport[] =
     "PEAVTaskQueue@6@I@Z";
 constexpr int kCollectSlot = 3;
 
+// R63 U2: the collect function's own use of scene+0x40 and of its last
+// argument (scene_check.h). Read inside the image only, under ReadBytes.
+bool CheckSceneLayout(HMODULE scene, void* collect) {
+  const auto* base = reinterpret_cast<const uint8_t*>(scene);
+  const auto* fn = static_cast<const uint8_t*>(collect);
+  const IMAGE_NT_HEADERS64* nt = sigscan::NtHeaders(base);
+  if (!nt || fn < base) return false;
+  const size_t rva = static_cast<size_t>(fn - base);
+  if (rva >= nt->OptionalHeader.SizeOfImage) return false;
+  const size_t n = std::min<size_t>(scenecheck::kScanBytes, nt->OptionalHeader.SizeOfImage - rva);
+  std::vector<uint8_t> code(n);
+  if (!allocslab::ReadBytes(fn, code.data(), n)) return false;
+  const size_t at = scenecheck::FindThreadsMaxUse(code.data(), n);
+  if (at == SIZE_MAX) return false;
+  Log("scene: collect threads max verified (collect+0x%zx reads scene+0x%zx, capped by the last argument)", at,
+      kSceneCollectThreadsMax);
+  return true;
+}
+
 bool Install() {
   HMODULE scene = nullptr;
   for (int i = 0; i < 600 && !scene && !g_stop.load(); ++i) {
@@ -2043,6 +2604,7 @@ bool Install() {
         SlotOriginal(&vtable[kCollectSlot]), collect);
     return false;
   }
+  g_sceneLayout = CheckSceneLayout(scene, collect) ? 1 : -1;
   void* orig = nullptr;
   if (!HookSlot(&vtable[kCollectSlot], reinterpret_cast<void*>(&HookCollect), &orig)) {
     Log("ERROR: VirtualProtect failed (%lu)", GetLastError());
@@ -2186,6 +2748,7 @@ bool DirectUploadReady() {
 void ApplyBigPages(bool on) {
   if (bigpages::g_state.load() == 0) bigpages::g_bigBytes = g_cfg.bigPageBytes;
   if (on && !bigpages::Install()) return;
+  if (!on) bigpages::UndoLeftover();  // R63: what an earlier payload of this process left patched / retired
   bigpages::SetOn(on);
 }
 
@@ -2205,8 +2768,11 @@ void ApplyHoldYaw(int deg) {
 
 // [Suite] HoldPitchDeg / PoseRotateDps (test only, posesweep): the held pitch, and a constant-rate synthetic yaw
 // turn started / stopped when the rate changes (head motion for unattended option-3 captures).
-void ApplyPoseTest(double pitchDeg, double rateDps, bool holdPose) {
+void ApplyPoseTest(double pitchDeg, double rateDps, bool holdPose, bool wallClock) {
   posesweep::g_holdPose = holdPose;
+  if (posesweep::g_wallClock.exchange(wallClock) != wallClock)  // R99
+    Log("pose sweep: synthetic yaw from %s", wallClock ? "the wall clock at each locate ([Suite] PoseWallClock=1)"
+                                                       : "each locate's displayTime");
   posesweep::g_pitchDeg = std::max(-60.0, std::min(60.0, pitchDeg));
   static double lastRate = 0;
   if (rateDps == lastRate) return;
@@ -2344,6 +2910,24 @@ std::atomic<bool> g_passFlushPhase{false};  // bench mode 30 running: its xrBegi
 // R20 (h) [Model] PassFlush: Flush at the chosen pass boundaries; waits for
 // DCS's device and GraphicsCore (retried every second). 0 = callback removed,
 // xrBeginFrame hook removed: as without pass_flush.h.
+// R33 [Shadows] CascadeCache (cascade_cache.h, prototype): on/off with the
+// configured parameters; installs on first use (retried every second while
+// GraphicsCore or the terrain module are not loaded). Counters every 60 s.
+void ApplyCascadeCache() {
+  const bool on = g_cfg.cascadeCache && !g_engineOff.load();
+  cascache::Apply(on, g_cfg.cascadeCacheMask, static_cast<uint32_t>(g_cfg.cascadeCacheMaxAge),
+                  static_cast<uint32_t>(g_cfg.cascadeCacheMarginPct), static_cast<uint32_t>(g_cfg.cascadeCacheVerify));
+  static ULONGLONG last = 0;
+  if (on && cascache::g_on.load()) {
+    const ULONGLONG now = GetTickCount64();
+    if (!last) last = now;
+    if (now - last >= 60000) {
+      last = now;
+      cascache::LogCounters("periodic");
+    }
+  }
+}
+
 void ApplyPassFlush() {
   static uint32_t logged = 0;
   const uint32_t mask = g_engineOff.load() ? 0 : g_cfg.passFlush;
@@ -2677,7 +3261,8 @@ uint64_t ComputeStatus() {
        g_cfg.texDedupe},
       {g_cbSkipOn.load() && cbskip::g_attached.load(), g_cfg.cbSkip && !cbskip::g_orig && dx11, g_cfg.cbSkip},
       {g_costWeightsOn.load() && partw::g_orig, g_cfg.costWeights && !partw::g_orig, g_cfg.costWeights},
-      {g_partitionBoost.load() && threadsDef >= 1 && threadsDef <= 32, threadsDef > 32, g_cfg.partitionBoost},
+      {g_partitionBoost.load() && g_sceneLayout.load() == 1 && threadsDef >= 1 && threadsDef <= 32,
+       threadsDef > 32 || g_sceneLayout.load() < 0, g_cfg.partitionBoost},
       {shadowinst::g_on.load() && shadowinst::g_state.load() == 1, shadowinst::g_state.load() == -1,
        g_cfg.shadowInst},
       {batchActive, batchLatched, g_cfg.shadowBatch && g_cfg.shadowInst},
@@ -2699,14 +3284,69 @@ uint64_t ComputeStatus() {
                               static_cast<uint32_t>(g_verdictNow.load()), g_cfg.govEnabled);
 }
 
-// DcsQvCull_Status's word: 0 in PerceptionOnly (the app shows no Engine Opt line).
-uint64_t StatusWordNow() { return g_perceptionOnly.load() ? 0 : ComputeStatus(); }
+// DcsQvCull_Status's word. R62: in PerceptionOnly kRunning | kPerceptionOnly (was 0, which the in-headset panel
+// reads as "not running yet": a grey "Engine Opt.: starting" for the whole flight; nothing hid the line). A panel
+// unaware of bit 38 now shows "Engine Opt.: OFF"; one aware of it leaves the line out (status_word.h).
+uint64_t StatusWordNow() {
+  // R65: bits 39 / 40 (cockpit mask export) in both modes; 0 unless [Perception] CockpitMaskExport=1 and committing.
+  // R69: bit 41 (its depth companion) likewise. R70: bit 42 (its motion companion) likewise.
+  return (g_perceptionOnly.load() ? (qvstatus::kRunning | qvstatus::kPerceptionOnly) : ComputeStatus()) |
+         fixdepth::cmask::StatusBits();
+}
+
+// R42 colour modes: the ini's configuration (or the ModeKey's mode) and the sun to the pass; compile / create / log.
+void ColorTick() {
+  cpass::g_log = &Log;
+  cpass::Cfg c = g_colorCfg;
+  if (g_colorKeyMode.load() >= 0) c.mode = g_colorKeyMode.load();
+  float y = 0;
+  const bool sun = (c.mode != 0 || c.timing != 0 || vrfx::Wanted()) && nighttone::SunY(&y);  // R51: pupil estimate
+  if (vrfx::g_wantGv.load()) {  // R51: DCS's G-EFFECT option (options.lua, read only; every 10 s)
+    static ULONGLONG last = 0;
+    static int logged = -2;
+    const ULONGLONG now = GetTickCount64();
+    if (!last || now - last >= 10000) {
+      last = now;
+      int v = -1;
+      HANDLE h = CreateFileW((g_dir + L"..\\..\\Config\\options.lua").c_str(), GENERIC_READ,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+      if (h != INVALID_HANDLE_VALUE) {
+        std::string text(256 * 1024, '\0');
+        DWORD n = 0;
+        if (ReadFile(h, text.data(), static_cast<DWORD>(text.size()), &n, nullptr)) text.resize(n);
+        else text.clear();
+        CloseHandle(h);
+        v = vrfx::ParseGEffect(text);
+      }
+      vrfx::g_dcsGEffect = v;
+      if (v != logged) {
+        logged = v;
+        static const char* const kName[4] = {"unknown (options.lua not read)", "none", "reduced", "realistic"};
+        Log("vrfx: DCS's G-EFFECT option is %s: GVision mode %d (%s)", kName[v + 1],
+            vrfx::EffectiveGvMode(vrfx::g_params.gvMode, v),
+            vrfx::EffectiveGvMode(vrfx::g_params.gvMode, v) == 2 ? "full: ours darkens, tunnels and drains colour"
+                                                                  : "complement: DCS darkens, ours adds the gaze tunnel and colour loss");
+      }
+    }
+  }
+  cpass::Tick(c, sun, y);
+}
 
 bool ToggleEngine() {
   if (g_perceptionOnly.load() || g_benchRunningFlag.load()) return false;
   bool off = !g_engineOff.load();
+  const uint64_t w0 = qvpatch::g_writes.load(), h0 = qvpatch::g_heldUsTotal.load();
+  qvpatch::g_heldUsMax = 0;
+  const uint64_t t0 = qvpatch::NowUs();
   SetEngineOff(off);
+  const uint64_t t1 = qvpatch::NowUs();
   Log("hotkey: engine optimizations %s", off ? "OFF" : "ON");
+  // R90: what the switch cost (R82: 78 ms p50 render-thread spike per flag with the Toolhelp path).
+  Log("hotkey: switch took %.1f ms on the worker; %llu code-site writes, other threads held %.2f ms in total "
+      "(%.2f ms max, %u threads, PatchMode %d)",
+      (t1 - t0) / 1000.0, static_cast<unsigned long long>(qvpatch::g_writes.load() - w0),
+      (qvpatch::g_heldUsTotal.load() - h0) / 1000.0, qvpatch::g_heldUsMax.load() / 1000.0,
+      qvpatch::g_lastThreads.load(), qvpatch::g_mode.load());
   PerfOnToggle(off);  // R30 L5: the 10 s before now, the 10 s after in 12 s
   return true;
 }
@@ -2779,12 +3419,66 @@ std::string LastLineWith(const std::wstring& path, const char* marker) {
   return text.substr(b == std::string::npos ? 0 : b + 1, (e == std::string::npos ? text.size() : e) - (b == std::string::npos ? 0 : b + 1));
 }
 
-std::string XrSessionState() {
-  std::string st = LastLineWith(g_dir + L"..\\..\\Logs\\dcs.log", "XrEventDataSessionStateChanged");
+// The state a session-state line of dcs.log names ("... -> XR_SESSION_STATE_X ..."); empty when none.
+std::string XrStateOfLine(const std::string& st) {
   size_t a = st.rfind("->");
-  if (a == std::string::npos) return "unknown";
-  size_t e = st.find(' ', a);
+  if (a == std::string::npos) return {};
+  size_t e = st.find_first_of(" \r", a + 2);
   return st.substr(a + 2, (e == std::string::npos ? st.size() : e) - a - 2);
+}
+
+// The last OpenXR session state DCS logged. Each poll reads only what the log
+// gained since the previous one (all of it at the first poll, again after it
+// shrank: a new log), and a state found is kept until a newer line names
+// another. Before, every poll (each 2 s, the whole session) re-read the last
+// 4 MB of dcs.log, and once more than 4 MB followed the last state change
+// (which DCS logs only on transitions) the state read as "unknown", so a
+// worn, FOCUSED headset counted as a focus loss (suite waits, bench blocks
+// discarded).
+struct XrStateTail {
+  long long offset = 0;
+  std::string partial;  // the last line read, not finished yet
+  std::string state = "unknown";
+  std::string Poll(const std::wstring& path) {
+    FILE* f = _wfsopen(path.c_str(), L"rb", _SH_DENYNO);
+    if (!f) return state;
+    if (_fseeki64(f, 0, SEEK_END) == 0) {
+      const long long size = _ftelli64(f);
+      if (size < offset) {  // truncated or replaced
+        offset = 0;
+        partial.clear();
+        state = "unknown";
+      }
+    }
+    _fseeki64(f, offset, SEEK_SET);
+    static const char kMarker[] = "XrEventDataSessionStateChanged";
+    char buf[65536];
+    size_t r;
+    while ((r = fread(buf, 1, sizeof(buf), f)) > 0) {
+      offset += static_cast<long long>(r);
+      size_t from = 0;
+      for (size_t i = 0; i < r; ++i) {
+        if (buf[i] != '\n') continue;
+        partial.append(buf + from, i - from);
+        if (partial.find(kMarker) != std::string::npos) {
+          std::string s = XrStateOfLine(partial);
+          if (!s.empty()) state = s;
+        }
+        partial.clear();
+        from = i + 1;
+      }
+      if (partial.size() < 4096) partial.append(buf + from, std::min<size_t>(r - from, 4096));  // no line is longer
+    }
+    fclose(f);
+    return state;
+  }
+};
+
+std::string XrSessionState() {
+  static std::mutex m;  // the worker and the suite's report both ask
+  static XrStateTail tail;
+  std::lock_guard<std::mutex> lock(m);
+  return tail.Poll(g_dir + L"..\\..\\Logs\\dcs.log");
 }
 
 // Blocks until the session is FOCUSED (headset awake), up to 60 minutes.
@@ -3411,6 +4105,15 @@ DWORD WINAPI SuiteThread(void*) {
     gpt::g_statsWanted = false;
     Chime(1000, 60);
   }
+  if (ok && g_cfg.suiteFocusGeomProbe > 0 && !g_benchAbort) {
+    Log("-- LOSSY probe (5 s ON runs): main GBufferPass of view mask 0x%x geometry-only (off-target viewport), GPU "
+        "timing OFF/ON/OFF/ON/OFF (focus_bcast.h, 5 x 5 s) --",
+        g_cfg.suiteFocusGeomProbe);
+    gpt::g_statsWanted = g_cfg.suiteGpuPassStats;
+    fbc::RunPhase(static_cast<uint32_t>(g_cfg.suiteFocusGeomProbe), g_quadFrame);
+    gpt::g_statsWanted = false;
+    Chime(1000, 60);
+  }
   if (ok && g_cfg.suitePeriphLodTiming > 0 && !g_benchAbort) {
     Log("-- LOSSY prototype: periphery-only instancer LOD tables x %.2f, GPU timing OFF/ON/OFF/ON/OFF (periph_lod.h, "
         "5 x 5 s) --",
@@ -3418,6 +4121,55 @@ DWORD WINAPI SuiteThread(void*) {
     gpt::g_statsWanted = g_cfg.suiteGpuPassStats;
     plod::TimingPhase(g_cfg.suitePeriphLodTiming, g_engineOff.load() ? 0 : g_cfg.peripheralLodScale, g_quadFrame);
     gpt::g_statsWanted = false;
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteCascadeCacheTiming && !g_benchAbort) {
+    Log("-- PROTOTYPE: far shadow cascade cache, GPU timing OFF/ON/OFF/ON/OFF (cascade_cache.h, mask 0x%x, max age %d, "
+        "margin %d %%, 5 x 5 s) --",
+        g_cfg.cascadeCacheMask, g_cfg.cascadeCacheMaxAge, g_cfg.cascadeCacheMarginPct);
+    gpt::g_statsWanted = g_cfg.suiteGpuPassStats;
+    cascache::TimingPhase(g_cfg.cascadeCache && !g_engineOff.load(), g_cfg.cascadeCacheMask,
+                          static_cast<uint32_t>(g_cfg.cascadeCacheMaxAge), static_cast<uint32_t>(g_cfg.cascadeCacheMarginPct),
+                          g_quadFrame);
+    gpt::g_statsWanted = false;
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteChainFastTiming && !g_benchAbort) {
+    Log("-- PROTOTYPE: shorter culling chains, GPU timing OFF/ON/OFF/ON/OFF (chain_fast.h, mask 0x%x, 5 x 5 s) --",
+        g_cfg.chainFast ? g_cfg.chainFast : 7u);
+    gpt::g_statsWanted = g_cfg.suiteGpuPassStats;
+    chainfast::TimingPhase(g_engineOff.load() ? 0 : g_cfg.chainFast, g_quadFrame);
+    gpt::g_statsWanted = false;
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteChainFastVerify > 0 && !g_benchAbort) {
+    Log("-- PROTOTYPE: shorter culling chains, same-frame check against the stock kernels (chain_fast.h, mask 0x%x, "
+        "%d s) --",
+        g_cfg.chainFast, g_cfg.suiteChainFastVerify);
+    chainfast::VerifyPhase(g_cfg.suiteChainFastVerify, g_engineOff.load() ? 0 : g_cfg.chainFast, g_quadFrame);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteShaderFastTiming && !g_benchAbort) {
+    Log("-- PROTOTYPE: wider grids for single-SM kernels, GPU timing OFF/ON/OFF/ON/OFF (shader_fast.h, mask 0x%x, "
+        "5 x 5 s) --",
+        g_cfg.shaderFast ? g_cfg.shaderFast : 3u);
+    gpt::g_statsWanted = g_cfg.suiteGpuPassStats;
+    sfast::TimingPhase(g_engineOff.load() ? 0 : g_cfg.shaderFast, g_quadFrame);
+    gpt::g_statsWanted = false;
+    Chime(1000, 60);
+  }
+  if (ok && !g_benchAbort) {  // R38 rank 1: [Suite] PeriphCensus / PeriphInstTiming / PeriphInstVerify (no-op at 0)
+    gpt::g_statsWanted = g_cfg.suiteGpuPassStats;
+    pifilt::SuitePhases(g_quadFrame);
+    gpt::g_statsWanted = false;
+  }
+  if (ok && !g_benchAbort) vsig::SuitePhase(g_quadFrame);  // R38 rank 2 G4: [Suite] FocusVsCensus (no-op at 0)
+  if (ok && !g_benchAbort) fbcr::SuitePhases(g_quadFrame);  // R53: [Suite] FocusBcastProbe / Timing / Verify (no-op at 0)
+  if (ok && g_cfg.suiteShaderFastVerify > 0 && !g_benchAbort) {
+    Log("-- PROTOTYPE: wider grids for single-SM kernels, same-frame check against the stock kernels (shader_fast.h, "
+        "mask 0x%x, %d s) --",
+        g_cfg.shaderFast ? g_cfg.shaderFast : 3u, g_cfg.suiteShaderFastVerify);
+    sfast::VerifyPhase(g_cfg.suiteShaderFastVerify, g_engineOff.load() ? 0 : g_cfg.shaderFast, g_quadFrame);
     Chime(1000, 60);
   }
   if (ok && g_cfg.suitePeriphLodImage > 0 && !g_benchAbort && !g_devDir.empty()) {
@@ -3963,7 +4715,40 @@ void ConfigurePerception() {
   fixdepth::ckipd::SetOwnship(OwnshipMode(g_cfg.cockpitTrueIpdOwnship, g_perceptionOnly.load()));
 }
 void TickFixationDepth() {
-  fixdepth::Tick(g_cfg.fixationDepth, g_cfg.depthGrid, g_cfg.fixationDepthVerify, g_cfg.fixationTestGaze.c_str(),
+  // R65: the cockpit mask export rides on fixation depth's callback (fixdepth::Tick installs it).
+  // R69: its depth companion first (CockpitDepthExport needs CockpitMaskExport; without it nothing is mapped).
+  {
+    static bool loggedNoMask = false;
+    if (g_cfg.cockpitDepthExport && !g_cfg.cockpitMaskExport && !loggedNoMask) {
+      loggedNoMask = true;
+      Log("config: [Perception] CockpitDepthExport=1 needs CockpitMaskExport=1; depth companion off");
+    }
+    fixdepth::cmask::ConfigureDepth(g_cfg.cockpitDepthExport && g_cfg.cockpitMaskExport, g_cfg.cockpitDepthDump);
+    // R70: the motion companion (CockpitMotionExport needs CockpitMaskExport; independent of the depth).
+    static bool loggedNoMaskMv = false;
+    if (g_cfg.cockpitMotionExport && !g_cfg.cockpitMaskExport && !loggedNoMaskMv) {
+      loggedNoMaskMv = true;
+      Log("config: [Perception] CockpitMotionExport=1 needs CockpitMaskExport=1; motion companion off");
+    }
+    fixdepth::cmask::ConfigureMotion(g_cfg.cockpitMotionExport && g_cfg.cockpitMaskExport, g_cfg.cockpitMotionClass,
+                                     g_cfg.cockpitMotionDump);
+    // R71: the frame-generation fixture dump (dev folder in dev mode; a new value > 0 starts a session).
+    fixdepth::cmask::ConfigureFg(g_cfg.cockpitMaskExport ? g_cfg.cockpitFgDump : 0, g_devDir.empty() ? g_dir : g_devDir);
+    // R95: the symbology emission companion (SymbologyExport needs CockpitMaskExport).
+    static bool loggedNoMaskSym = false;
+    if (g_cfg.symbologyExport && !g_cfg.cockpitMaskExport && !loggedNoMaskSym) {
+      loggedNoMaskSym = true;
+      Log("config: [Perception] SymbologyExport=1 needs CockpitMaskExport=1; symbology companion off");
+    }
+    fixdepth::cmask::ConfigureSymbology(g_cfg.symbologyExport && g_cfg.cockpitMaskExport, g_cfg.symbologyAlpha,
+                                        g_cfg.symbologyPublishAlways);
+  }
+  fixdepth::cmask::covl::g_on = g_cfg.cockpitMaskOverlay;  // R74b: read per pass boundary (no reinstall)
+  fixdepth::cmask::Configure(g_cfg.cockpitMaskExport, g_cfg.cockpitMaskDivisor, g_cfg.cockpitMaskViews,
+                             g_cfg.cockpitMaskNearM, g_cfg.cockpitMaskDilate, g_cfg.cockpitMaskDump, g_cfg.cockpitMaskLog,
+                             g_devDir.empty() ? g_dir : g_devDir);
+  // R51: GazeDof needs FixationDepth's published cone (DepthIn): [VrFx] GazeDof turns it on by itself.
+  fixdepth::Tick(g_cfg.fixationDepth || vrfx::g_wantDof.load(), g_cfg.depthGrid, g_cfg.fixationDepthVerify, g_cfg.fixationTestGaze.c_str(),
                  g_cfg.fixationDepthDump, g_devDir.empty() ? g_dir : g_devDir, g_cfg.farDepthExport,
                  g_cfg.farDepthSlots, g_cfg.farDepthLogProj, g_cfg.farDepthPreOverlay, g_cfg.farDepthOverlayTrace,
                  g_cfg.farDepthPostOverlay, g_cfg.farDepthCoverageMode);
@@ -3975,7 +4760,24 @@ DWORD WINAPI WorkerThread(void*) {
   LARGE_INTEGER f;
   QueryPerformanceFrequency(&f);
   g_qpcToUs = 1e6 / static_cast<double>(f.QuadPart);
+  // R90 section 7: output caps, before the config read applies shadow instancing (its workers read cache\).
+  {
+    const qvdev::DevPath dp = qvdev::ReadDevPath(L"IniPath", g_dir + L"DcsQvCull.ini");
+    std::wstring devDir;
+    if (dp.state == qvdev::kDevOk) devDir = dp.path.substr(0, dp.path.find_last_of(L"\\/") + 1);
+    const ULONGLONG t0 = GetTickCount64();
+    const prune::Stats ps = prune::RunAtStart(g_dir, devDir.empty() ? g_dir : devDir);
+    if (ps.files || ps.dirs)
+      Log("disk: pruned %u files and %u folders (%.1f MB) in %llu ms (newest %u per output family, cache\\*.qvc "
+          "least recently used past %u MB or %u files, orphaned cache temp files)",
+          ps.files, ps.dirs, ps.bytes / 1048576.0, static_cast<unsigned long long>(GetTickCount64() - t0),
+          prune::kKeepFiles, static_cast<unsigned>(prune::kQvcCapBytes >> 20), prune::kQvcCapFiles);
+  }
   LoadConfig(true);
+  // R34 [D3D] ChainFast: the creation hook goes in first, before DCS loads the mission's terrain kernels.
+  if (!g_perceptionOnly.load() && g_cfg.chainFast && !g_engineOff.load()) chainfast::Apply(g_cfg.chainFast);
+  // R90 F4: the self tests' private device now, not when the first kernel turns up mid-flight.
+  if (!g_perceptionOnly.load() && (g_cfg.chainFast || g_cfg.shaderFast)) chainfast::AcquirePrivate();
   perfmon::Start();  // R30 L3: the env line (DCS, CPU, OpenXR runtime and layers, streamers)
   g_dumpsLeft = g_cfg.dumpViews;
   {
@@ -4015,7 +4817,7 @@ DWORD WINAPI WorkerThread(void*) {
   bool autoStarted = false;
   ULONGLONG lastStats = GetTickCount64();
   ULONGLONG lastCfg = lastStats;
-  g_statusSink.Publish(StatusWordNow());  // hooks installed: running (0 in PerceptionOnly)
+  g_statusSink.Publish(StatusWordNow());  // hooks installed: running (PerceptionOnly: running + bit 38 only)
   while (!g_stop.load() && !qvexit::Exiting()) {
     Sleep(50);
     const HeldKeys keys = ReadKeys(g_cfg, po, &KeyDown);  // PerceptionOnly: the cockpit ipd toggle only
@@ -4050,6 +4852,19 @@ DWORD WINAPI WorkerThread(void*) {
       }
     }
     fC = kC;
+    {  // R42: [Color] ModeKey (default off, e.g. 120:6 = Alt+Shift+F9) cycles the colour mode: off -> Fix -> Enhanced -> off
+      static bool fK = false;
+      const bool kK = g_colorKeyVk > 0 && KeyDown(g_colorKeyVk) && ModifiersMatch(g_colorKeyMods);
+      if (kK && !fK) {
+        const int cur = g_colorKeyMode.load() >= 0 ? g_colorKeyMode.load() : g_colorCfg.mode;
+        const int next = (cur + 1) % 3;
+        g_colorKeyMode = next;
+        Log("hotkey: colour mode %d (%s)", next, cpass::ModeName(next));
+        for (int i = 0; i <= next; ++i) Chime(next ? 900 : 400, 70);  // 1 low beep off, 2 beeps Fix, 3 Enhanced
+        ColorTick();
+      }
+      fK = kK;
+    }
     static bool f8 = false;
     if (k8 && !f8) {
       bool on = !g_shadowDebugInvert.load();
@@ -4109,9 +4924,24 @@ DWORD WINAPI WorkerThread(void*) {
     f10 = k10;
 
     ULONGLONG now = GetTickCount64();
-    perfmon::Tick();  // once per second: samples, governor; perf/features/vram/env lines on their own cadence
+    {
+      ftl::TaskScope ts(ftl::kTPerf);
+      perfmon::Tick();  // once per second: samples, governor; perf/features/vram/env lines on their own cadence
+    }
+    {
+      ftl::TaskScope ts(ftl::kTPlace);
+      tplace::Tick(g_cfg.threadCensus, g_cfg.threadCensusSec, g_engineOff.load() ? 0 : g_cfg.workerPlacement,
+                   g_cfg.placeRecheckSec, g_cfg.placeRecheckMode);  // R39 / R44 mode 2; R52 re-check; R90 mode
+    }
+    {
+      LARGE_INTEGER qf;
+      QueryPerformanceFrequency(&qf);
+      ftl::Tick({g_cfg.frameTimeline, g_cfg.timelineSec, g_cfg.poseProbe, g_cfg.eventLog}, g_dir, g_qpcToUs, g_tscHz,
+                qf.QuadPart);  // R52 measure only ([Perf] keys, default 0)
+    }
     if (now - lastCfg >= 1000) {
       lastCfg = now;
+      ftl::TaskScope ts(ftl::kTConfig);
       LoadConfig(false);
       if (!po) pffix::Tick();  // new modules (terrain DLLs per mission), slot verify, 10 s statistics line
       g_statusSink.Publish(StatusWordNow());  // last second's states (the retries below show next time)
@@ -4128,6 +4958,9 @@ DWORD WINAPI WorkerThread(void*) {
         if (g_cfg.bigPages && !g_engineOff.load() && bigpages::g_state.load() == 0 && allocslab::g_state.load() >= 1 &&
             !g_benchRunningFlag.load())
           ApplyBigPages(true);
+        else if ((!g_cfg.bigPages || g_engineOff.load()) && bigpages::g_state.load() == 0 &&
+                 !bigpages::g_undoDone.load() && !g_benchRunningFlag.load())
+          bigpages::UndoLeftover();  // R63: retried until NGModel / the reset hook is there
         if (g_cfg.shadowInst && !g_engineOff.load() && shadowinst::g_state.load() == 0) ApplyShadowInst();
         if (g_cfg.shadowBatch && g_cfg.shadowInst && !g_engineOff.load() && shadowbatch::g_state.load() == 0 &&
             !g_benchRunningFlag.load())
@@ -4141,10 +4974,26 @@ DWORD WINAPI WorkerThread(void*) {
           ApplyGBufferRecorder();
         if (g_cfg.passFlush && !g_engineOff.load() && !pflush::Ready() && !g_benchRunningFlag.load()) ApplyPassFlush();
         if (!g_benchRunningFlag.load()) plod::Apply(g_engineOff.load() ? 0 : g_cfg.peripheralLodScale);
+        if (!g_benchRunningFlag.load() && (g_cfg.cascadeCache || cascache::g_on.load())) ApplyCascadeCache();
+        if (!g_benchRunningFlag.load() && (g_cfg.chainFast || chainfast::g_mask.load()))
+          chainfast::Apply(g_engineOff.load() ? 0 : g_cfg.chainFast);  // R34 (default 7; off at 0)
+        if (!g_benchRunningFlag.load() && (g_cfg.shaderFast || sfast::g_mask.load()))
+          sfast::Apply(g_engineOff.load() ? 0 : g_cfg.shaderFast);  // R36 (default 3; off at 0)
+        fbcr::NoteFrames(g_quadFrame.load());  // R53: start gate (nothing created before frames flow)
+        if (g_cfg.focusBroadcast) fbc::Readiness(g_cfg.focusBroadcast);  // R38 rank 2: logs only (default 0)
+        if (!g_benchRunningFlag.load()) {  // R53: FastGS focus broadcast (default 0: nothing installed)
+          static bool fbcrDirs = false;
+          if (!fbcrDirs) fbcr::SetDirs(g_dir, g_devDir.empty() ? g_dir : g_devDir), fbcrDirs = true;
+          fbcr::Apply(g_engineOff.load());
+        }
+        if (!g_benchRunningFlag.load()) pifilt::Apply(g_engineOff.load());  // R38 rank 1 (default 0: nothing installed)
+        vsig::Apply();  // R38 rank 2 G4 probe: device hooks only while [Suite] FocusVsCensus > 0
       }
       // Fixation depth (Depth boost): not an optimization, so neither the kill
       // switch nor a benchmark turns it off.
       ConfigurePerception();  // scene cut, cockpit ipd, helmet, ownship (PerceptionOnly too)
+      nighttone::Tick({g_cfg.nightTone, g_cfg.nightFloor, g_cfg.nightToe, g_cfg.nightEv, g_cfg.nightGate});  // R37, opt-in
+      ColorTick();  // R42 colour modes, opt-in ([Color] Mode, default 0)
       if (!po) {  // [Suite] GBufferRecVerifyLive (test only): the recorder's same-frame verify while flying, logged when off
         gbrec::g_verifyNoLatch = g_cfg.suiteGBufferRecVerifyNoLatch;
         static bool live = false;
@@ -4244,6 +5093,7 @@ DWORD WINAPI WorkerThread(void*) {
     static ULONGLONG lastFlag = 0;
     if (!po && now - lastFlag >= 1000) {  // PerceptionOnly: no engine toggle, profile or suite trigger
       lastFlag = now;
+      ftl::TaskScope ts(ftl::kTFlags);
       // Remote kill switch: toggle_engine.flag (next to the DLL or the dev ini)
       // toggles every measured optimization, like the [Hotkeys] Toggle key.
       for (const std::wstring& tf : {g_dir + L"toggle_engine.flag",
@@ -4279,6 +5129,7 @@ DWORD WINAPI WorkerThread(void*) {
     static ULONGLONG lastXr = 0;
     if (now - lastXr >= 2000) {
       lastXr = now;
+      ftl::TaskScope ts(ftl::kTXrState);
       bool focused = XrSessionState() == "XR_SESSION_STATE_FOCUSED";
       if (g_xrFocused.exchange(focused) != focused) {
         if (!focused) g_focusLosses++;
@@ -4287,6 +5138,7 @@ DWORD WINAPI WorkerThread(void*) {
     }
     if (now - lastCensus >= 10000) {
       lastCensus = now;
+      ftl::TaskScope ts(ftl::kTCensus);
       uint64_t fr = g_quadFrame.load();
       CensusDump(fr - censusFrames0);
       // Recorders outside suites: every 10 s while on, one summary line each
@@ -4310,6 +5162,7 @@ DWORD WINAPI WorkerThread(void*) {
     if (now - lastStats >= static_cast<ULONGLONG>(g_cfg.statsIntervalSec) * 1000) {
       double secs = (now - lastStats) / 1000.0;
       lastStats = now;
+      ftl::TaskScope ts(ftl::kTStats);
       uint64_t calls = g_stats.calls.exchange(0);
       uint64_t q = g_stats.quadCalls.exchange(0);
       uint64_t pv = g_stats.patchedViews.exchange(0);
@@ -4319,7 +5172,8 @@ DWORD WINAPI WorkerThread(void*) {
       uint64_t fr = g_stats.focusRenderables.exchange(0);
       uint64_t mv = g_stats.maxViews.exchange(0);
       uint64_t sac = g_saccades.exchange(0);
-      uint64_t tRefresh = timercache::g_refreshes.exchange(0);
+      static uint64_t refreshPrev = 0;
+      uint64_t tRefresh = timercache::RefreshesSince(&refreshPrev);  // R63: g_refreshes stays monotonic
       uint64_t shRend = g_shadowStats.shadowRend.exchange(0);
       uint64_t shFrames = g_shadowStats.frames.exchange(0);
       uint64_t shPlanes = g_shadowStats.planes.exchange(0);
@@ -4504,7 +5358,7 @@ void SetBenchVariant(bool on) {
   }
   static uint32_t defaultThreads = 0;
   void* scene = g_scene.load();
-  if (!scene) return;
+  if (!scene || g_sceneLayout.load() != 1) return;
   auto* p = reinterpret_cast<volatile uint32_t*>(static_cast<uint8_t*>(scene) + kSceneCollectThreadsMax);
   if (!defaultThreads) defaultThreads = *p;
   *p = on ? static_cast<uint32_t>(std::min(16, std::max(1, g_cfg.benchThreadsB))) : defaultThreads;
@@ -4565,6 +5419,15 @@ void OnMissionEvent(uint32_t event) {
   // Option 3's ownship (CockpitTrueIpdOwnship): the locked exterior instance belongs to this mission; unlocked at
   // the render thread's next lock step / frame end, the next one locked on its own kOwnLockFrames later.
   fixdepth::ckipd::OwnOnMissionEvent();
+  // R59: the helmet switch's material verdicts and instance sides name this mission's heap objects too.
+  fixdepth::ckipd::HelmetOnMissionEvent();
+  cascache::OnMissionEvent();  // R33: every held cascade is re-rendered at the next frame
+  vrfx::NoteMissionEvent();  // R58: VrFx's G / DoF state belongs to the previous mission or aircraft
+  cpass::NoteMissionEvent();  // R77: so does the colour mode's eye-like adaptation
+  fixdepth::cmask::sym::NoteMissionEvent();  // R95: the symbology's learnt HUD field / helmet extent: another aircraft
+  // R77: the recorders' texture tables hold references on this scene's textures: released at their next entry.
+  gbrec::NoteMissionEvent();
+  shrec::NoteMissionEvent();
   Log("payload: %s; recorder jobs in flight are dropped",
       event == 2 ? "mission load begins" : event == 3 ? "local player changed slot" : "simulation stopped");
 }
@@ -4590,6 +5453,7 @@ bool QuiesceForExit(DWORD timeoutMs) {
   g_statusSink.Detach();  // stores 0: "not running" for the app's panel
   g_dualStatusSink.Detach();
   Log("payload: quiesced for exit (%s)", idle ? "worker stopped" : "worker still busy");
+  StopAsyncLog();  // R90: every queued line out now; the rest of the exit is synchronous
   return idle;
 }
 }  // namespace
@@ -4600,6 +5464,7 @@ extern "C" __declspec(dllexport) int DcsQvPayload_Start(const DcsQvLoaderApi* ap
   if (!api || api->version != kDcsQvLoaderApiVersion) return 1;
   g_api = api;
   g_dir = api->dir;
+  StartAsyncLog();  // R90: DCS threads' lines through the ring from here
   Log("payload: started (build %s %s)", __DATE__, __TIME__);
   HANDLE t = CreateThread(nullptr, 0, qvexit::Thread<WorkerThread>, nullptr, 0, nullptr);
   if (!t) return 2;
@@ -4629,6 +5494,32 @@ extern "C" __declspec(dllexport) int DcsQvPayload_Quiesce(uint32_t timeoutMs) {
   return QuiesceForExit(timeoutMs) ? 1 : 0;
 }
 extern "C" __declspec(dllexport) void DcsQvPayload_MissionEvent(uint32_t event) { OnMissionEvent(event); }
+// R51 VrFx GVision: the ownship's acceleration in G (body axes; y = normal load), from the Lua hook's
+// onSimulationFrame (Export LoGetAccelerationUnits) through the loader's DcsQvCull_GLoad.
+extern "C" __declspec(dllexport) void DcsQvPayload_GLoad(float gx, float gy, float gz, double modelTime) {
+  vrfx::NoteG(gx, gy, gz, modelTime);
+}
+// R90 F7: whether the G samples are used at all ([VrFx] GVision on). The Lua hook's onSimulationFrame asks
+// first (loader export DcsQvCull_GLoadWanted) and returns before any Export call or allocation when not.
+extern "C" __declspec(dllexport) int DcsQvPayload_GLoadWanted() { return vrfx::g_wantGv.load() ? 1 : 0; }
+
+// After Stop the loader keeps this payload's IAT and vtable hooks patched
+// until the next generation repoints each slot (one at a time, from its
+// worker) or RestoreStale puts the original back. Hooks that keep per-thread
+// state keyed on this payload's own counters must then pass straight through:
+// the frame heap and model allocator slabs are keyed on generations that only
+// this payload's reset hooks bump. Once the new payload has hooked a reset
+// slot but not yet the matching get/alloc slot, a reset no longer bumps the
+// old generation, and the old hook served a pre-reset slab that the original
+// then handed out again (two objects at one address).
+void PassThroughAfterStop() {
+  timercache::g_on = false;  // until the new payload re-patches, pass through
+  g_frameHeapOn = false;
+  g_allocSlabsOn = false;
+  // R63: our reset hook may still run until the next payload repoints the slot: from its next reset it puts the
+  // stock page size back and returns the retired pages (shared list) instead of retiring more.
+  bigpages::g_wanted = false;
+}
 
 extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   Log("payload: stopping");
@@ -4638,6 +5529,8 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   // Shutdown calls below (bounded wait, see StopWorkerThreads).
   const bool workerIdle = StopWorkerThreads(15000);
   if (workerIdle) perfmon::Shutdown();  // the render-thread handle and our adapter reference (worker-owned)
+  if (workerIdle) tplace::Shutdown();   // R39: our threads' previous affinity masks back (worker-owned)
+  ftl::Shutdown(workerIdle);            // R52 timeline: OpenXR dispatch and device create slots back (no-op unless used)
   // Prefetch fix: every slot still ours back to the real kernel function,
   // in-flight calls drained (the module is pinned: copies stay callable).
   pffix::Uninstall(2000);
@@ -4648,10 +5541,19 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   pdev::Uninstall();    // [General] PerceptionOnly: DX11Renderer::draw back to DCS's if the first draw never came
   srvspan::Shutdown();  // restores the ApplyShaderBlock call sites if a count was running
   srvtrim::Shutdown();  // the same two call sites back to stock if the trim was on
+  fbc::Shutdown();      // R38 rank 2 probe off, its RSSetViewports hook out (no-op unless used)
   uovl::Shutdown();     // NVAPI overlap probe off (its region ends at the pass end)
   plod::Shutdown();     // stock LOD tables back, view callback and vt[24] hook out (no-op unless used)
+  cascache::Shutdown(); // R33 cascade cache: SceneRender slot and the innermost execute out, textures released (no-op unless used)
   fixdepth::Shutdown(); // depth callback out and drained, worker joined, D3D objects and file mappings released
+  cpass::Shutdown();    // R42: our shaders and buffers (the draw hooks are out with fixation depth)
   gpt::Shutdown();      // GPU pass timing's context-table hooks and xrEndFrame hook, if a phase was running
+  fbcr::Shutdown();      // R53: blocks closed, callbacks and upload observer out, worker joined (no-op unless used)
+  vsig::Shutdown();      // R38 rank 2 G4 probe: device hooks out (no-op unless used)
+  pifilt::Shutdown();    // R38 rank 1: boundary callback and table arms out, DCS's lists stock (no-op unless used)
+  sfast::Shutdown();     // R36: Dispatch hook out, identified kernels and variants released (no-op unless used)
+  nighttone::Shutdown(); // R37: tone mapper fields and exposure bias back, addToneMappingPass import back (no-op unless used)
+  chainfast::Shutdown(); // R34: CSSetShader and CreateComputeShader hooks out, kernel pairs released (no-op unless used)
   pflush::Shutdown();   // pass flush callback and xrBeginFrame hook out, our context reference released
   vramc::Shutdown();    // the VRAM count's device create hooks, if a phase was running
   sfilt::Shutdown();    // call sites, FX call-table entries and context table back to stock
@@ -4663,7 +5565,7 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   // not, shadow_inst's VS objects and results (which they read) stay alive.
   bool drained = gbrec::Shutdown();  // G-buffer recorder chain out, its workers joined (before the shadow recorder's sort sites)
   drained &= shrec::Shutdown();      // recorder chain out, its worker joined, before batching's shutdown
-  timercache::g_on = false;  // until the new payload re-patches, pass through
+  PassThroughAfterStop();  // timer cache, frame heap and alloc slabs: our leftover hooks pass through
   timercache::g_stopUpdater = true;
   const bool gbDrained = gbbatch::Shutdown();  // G-buffer batching callbacks first
   if (gbDrained) gbverify::Shutdown();  // else a pass (maybe inside Verify) still uses its copies
@@ -4672,5 +5574,6 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   parupload::Shutdown();
   drained &= shadowbatch::Shutdown();  // unhooks the batching callbacks before the VS objects go
   shadowinst::Shutdown(drained);  // joins the compile workers, then releases our VS objects (if nothing still reads them)
+  StopAsyncLog();  // R90: the queued lines out; the next payload starts its own writer
 }
 #endif

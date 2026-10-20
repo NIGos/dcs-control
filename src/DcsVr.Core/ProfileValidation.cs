@@ -69,7 +69,8 @@ public static class ProfileValidation
         Range("neural-motion-x", profile.NeuralMotionScaleX, -4, 4);
         Range("neural-motion-y", profile.NeuralMotionScaleY, -4, 4);
         if (!Enum.IsDefined(profile.NeuralDepth)) Error("neural-depth", "Select game, normal, or reversed depth.");
-        if (!VrProfile.NeuralAreas.Contains(profile.NeuralFocusArea)) Error("neural-area", "DLSS 5 area must be the whole focus area or its central 80%, 70% or 50%.");
+        if (!VrProfile.FocusDlssPresets.Contains(profile.FocusDlssPreset)) Error("focus-preset", "Select DCS's own preset or E, K, L or M for the focus DLSS preset.");
+        if (!VrProfile.NeuralAreas.Contains(profile.NeuralFocusArea)) Error("neural-area", "DLSS 5 area must be the whole focus area or its central 90%, 80%, 70% or 50%.");
         if (profile.NvidiaFlowScale is not (50 or 75 or 100)) Error("flow-scale", "Optical flow resolution must be 50%, 75%, or 100%.");
         if (!Enum.IsDefined(profile.FlowPreset)) Error("flow-preset", "Select fast, medium, or slow optical flow.");
         if (!Enum.IsDefined(profile.FpsLimit)) Error("fps-mode", "Select a recognized DCS frame limit.");
@@ -143,6 +144,49 @@ public static class ProfileValidation
             Error("depth-near", $"Depth boost's cockpit distance must be {VrProfile.DepthBoostNearMin}–{VrProfile.DepthBoostNearMax} m.");
         if (profile.DepthBoost && !profile.Desktop && !profile.UsesDepthBoost)
             issues.Add(new("depth-gaze", IssueSeverity.Warning, "Depth boost needs Quad Views with an eye-tracked focus area, because it reads where each eye looks from it. With these settings it does not run."));
+        // Visual realism: the module clamps out-of-range values itself; the profile refuses them, like the other settings.
+        // Codes are "visual-" + the profile property (camelCase), so the Checks page can open the field.
+        void Visual(string property, double value, double min, double max, string unit = "")
+        {
+            if (!double.IsFinite(value) || value < min || value > max) Error("visual-" + char.ToLowerInvariant(property[0]) + property[1..], $"Allowed range: {min}{unit} to {max}{unit}.");
+        }
+        if (!Enum.IsDefined(profile.ColorMode)) Error("visual-colorMode", "Select Off, Fix or Enhanced for the color mode.");
+        if (!Enum.IsDefined(profile.GVisionMode)) Error("visual-gVisionMode", "Select Auto, Complement DCS or Full for G vision.");
+        Visual(nameof(VrProfile.ColorFixExposureEv), profile.ColorFixExposureEv, -2, 2, " EV");
+        Visual(nameof(VrProfile.ColorFixNightEv), profile.ColorFixNightEv, -2, 2, " EV");
+        Visual(nameof(VrProfile.ColorFixSaturation), profile.ColorFixSaturation, .5, 1.5);
+        Visual(nameof(VrProfile.ColorFixWarmth), profile.ColorFixWarmth, 0, 1);
+        Visual(nameof(VrProfile.ColorFixAdaptBright), profile.ColorFixAdaptBright, 0, 10, " s");
+        Visual(nameof(VrProfile.ColorFixAdaptDark), profile.ColorFixAdaptDark, 0, 30, " s");
+        Visual(nameof(VrProfile.ColorEnhancedExposureEv), profile.ColorEnhancedExposureEv, -2, 2, " EV");
+        Visual(nameof(VrProfile.ColorEnhancedNightEv), profile.ColorEnhancedNightEv, -2, 2, " EV");
+        Visual(nameof(VrProfile.ColorEnhancedSaturation), profile.ColorEnhancedSaturation, .5, 1.5);
+        Visual(nameof(VrProfile.ColorEnhancedWarmth), profile.ColorEnhancedWarmth, 0, 1);
+        Visual(nameof(VrProfile.ColorEnhancedAdaptBright), profile.ColorEnhancedAdaptBright, 0, 10, " s");
+        Visual(nameof(VrProfile.ColorEnhancedAdaptDark), profile.ColorEnhancedAdaptDark, 0, 30, " s");
+        Visual(nameof(VrProfile.NightVisionStrength), profile.NightVisionStrength, 0, 1);
+        Visual(nameof(VrProfile.NightVisionBlue), profile.NightVisionBlue, 0, 1);
+        Visual(nameof(VrProfile.NightVisionBlur), profile.NightVisionBlur, 0, 1);
+        Visual(nameof(VrProfile.NightVisionScotopic), profile.NightVisionScotopic, .0005, .5, " cd/m²");
+        Visual(nameof(VrProfile.NightVisionPhotopic), profile.NightVisionPhotopic, .05, 100, " cd/m²");
+        if (double.IsFinite(profile.NightVisionScotopic) && double.IsFinite(profile.NightVisionPhotopic) && profile.NightVisionPhotopic < 4 * profile.NightVisionScotopic)
+            Error("visual-nightVisionPhotopic", "The daylight level must be at least 4 times the full-night level.");
+        Visual(nameof(VrProfile.GlareStrength), profile.GlareStrength, 0, 1);
+        Visual(nameof(VrProfile.GlareThresholdEv), profile.GlareThresholdEv, 0, 8, " EV");
+        Visual(nameof(VrProfile.GlareRadius), profile.GlareRadius, 1, 20, "°");
+        Visual(nameof(VrProfile.GlareStreak), profile.GlareStreak, 0, 1);
+        Visual(nameof(VrProfile.GazeDofStrength), profile.GazeDofStrength, 0, 1);
+        Visual(nameof(VrProfile.GazeDofMaxArcmin), profile.GazeDofMaxArcmin, 1, 20, " arcmin");
+        Visual(nameof(VrProfile.GazeDofSettleMs), profile.GazeDofSettleMs, 0, 500, " ms");
+        Visual(nameof(VrProfile.GazeDofFadeInMs), profile.GazeDofFadeInMs, 50, 1000, " ms");
+        Visual(nameof(VrProfile.GazeDofToleranceD), profile.GazeDofToleranceD, .1, 1, " D");
+        Visual(nameof(VrProfile.GazeDofFoveaGuardDeg), profile.GazeDofFoveaGuardDeg, 0, 5, "°");
+        if (!double.IsFinite(profile.GazeDofPupilMm) || (profile.GazeDofPupilMm != 0 && profile.GazeDofPupilMm is < 2 or > 8))
+            Error("visual-gazeDofPupilMm", "Pupil size must be 0 (automatic) or 2 to 8 mm.");
+        Visual(nameof(VrProfile.GVisionStrength), profile.GVisionStrength, 0, 1);
+        Visual(nameof(VrProfile.GVisionTolerance), profile.GVisionTolerance, 4, 10, " G");
+        if (profile.GazeDof && !profile.Desktop && !profile.UsesGazeDof)
+            issues.Add(new("visual-gaze", IssueSeverity.Warning, "Eye-focus blur needs Quad Views with an eye-tracked focus area, because it reads your gaze from it. With these settings it does not run."));
         if (profile.EngineOptimizations && !Enum.IsDefined(profile.BoostPrefetch)) Error("engine-prefetch", "Select a recognized terrain prefetch fix mode.");
         if (profile.EngineOptimizations && profile.EngineTimerRefreshUs is < VrProfile.EngineTimerRefreshMin or > VrProfile.EngineTimerRefreshMax)
             Error("engine-timer", $"Streaming timer refresh must be {VrProfile.EngineTimerRefreshMin}–{VrProfile.EngineTimerRefreshMax} µs.");
@@ -153,6 +197,9 @@ public static class ProfileValidation
                 if (string.IsNullOrWhiteSpace(path)) { Error("engine-dev", $"Developer mode needs the {what}."); return; }
                 if (!Path.IsPathFullyQualified(path.Trim()) || !path.Trim().EndsWith(extension, StringComparison.OrdinalIgnoreCase) || path.Any(char.IsControl) || path.Contains(';'))
                     Error("engine-dev", $"The {what} must be a full path to a {extension} file.");
+                // DCS is not long-path aware: the module cannot open a path of 260 characters or more.
+                else if (path.Trim().Length >= 260)
+                    Error("engine-dev", $"The {what} path is too long for DCS (260 characters or more); use a shorter folder.");
                 else if (!File.Exists(path.Trim()))
                     issues.Add(new("engine-dev-missing", IssueSeverity.Warning, $"The {what} does not exist yet ({path.Trim()}); until it does, the module uses its installed copy."));
             }
@@ -233,6 +280,21 @@ public static class ProfileValidation
                 || (profile.UsesPupilShift && NeuralHotkeys.Same(far, profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault))
                 || (profile.UsesDepthBoost && NeuralHotkeys.Same(far, profile.DepthBoostToggleKey ?? NeuralHotkeys.DepthBoostDefault)))
                 Error("hotkey-conflict", "The Far depth switch needs a key of its own: another in-flight switch uses it.");
+        }
+        // The color mode key (Visual realism, off by default) likewise.
+        Key(profile.ColorModeKey, NeuralHotkeys.ColorModeDefault, profile.UsesColorModeKey, "color-hotkey", "color mode");
+        if (profile.UsesColorModeKey && NeuralHotkeys.TryParse(profile.ColorModeKey, out var colorKey))
+        {
+            var color = profile.ColorModeKey;
+            if (profile.EngineOptimizations && NeuralHotkeys.EngineModuleKey(colorKey))
+                Error("color-hotkey", $"{NeuralHotkeys.Label(colorKey)} is reserved by Engine Optimizations (Ctrl+Alt+F8 to F12, Page Up and Page Down). Choose another key.");
+            if ((profile.NeuralRendering && NeuralHotkeys.Same(color, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
+                || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(color, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
+                || (profile.EngineOptimizations && NeuralHotkeys.Same(color, profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault))
+                || (profile.UsesPupilShift && NeuralHotkeys.Same(color, profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault))
+                || (profile.UsesDepthBoost && NeuralHotkeys.Same(color, profile.DepthBoostToggleKey ?? NeuralHotkeys.DepthBoostDefault))
+                || (profile.UsesFarDepth && NeuralHotkeys.Same(color, profile.FarDepthToggleKey ?? NeuralHotkeys.FarDepthDefault)))
+                Error("hotkey-conflict", "The color mode key needs a key of its own: another in-flight switch uses it.");
         }
         // NVIDIA-only processing on a PC without an NVIDIA RTX card would install files that cannot run.
         if (!profile.Desktop && !GpuInfo.Unknown && !GpuInfo.HasNvidiaRtx)

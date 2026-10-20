@@ -137,7 +137,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                 case EyeDistanceSource.Headset:
                     if (dcsCustomOn) Require("VR.custom_IPD_enable", false);
                     break;
-                case EyeDistanceSource.Manual when profile.UsesPerceptionLayer:
+                case EyeDistanceSource.Manual when profile.UsesLayerEyeDistance:
                     pupilIpd = profile.EyeDistanceMm;
                     if (dcsCustomOn) Require("VR.custom_IPD_enable", false);
                     break;
@@ -146,9 +146,11 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                     Require("VR.custom_IPD", profile.EyeDistanceMm.ToString("0.#", CultureInfo.InvariantCulture));
                     break;
                 default:
-                    if (profile.UsesPerceptionLayer && dcsCustomOn && CustomIpd(current.Get("VR", "custom_IPD")) is { } customIpd)
+                    // DCS's custom IPD would undo the layer's eye positions, so it is turned off whenever the layer runs; an
+                    // IPD outside 40–90 mm (or missing) is not carried over and the layer keeps the headset's own.
+                    if (profile.UsesLayerEyeDistance && dcsCustomOn)
                     {
-                        pupilIpd = customIpd;
+                        pupilIpd = CustomIpd(current.Get("VR", "custom_IPD"));
                         Require("VR.custom_IPD_enable", false);
                     }
                     break;
@@ -206,14 +208,14 @@ public sealed class DeploymentPlanner(ComponentLocations components)
 
         // DCS engine optimizations: a Lua hook in Saved Games loads the module; nothing in the DCS install changes. The
         // loader and the hook are locked while DCS runs, like every file Apply writes (it refuses while DCS is open).
-        // Depth boost alone installs it too, in its Perception-only mode.
+        // Depth boost or a Visual realism feature alone installs it too, in its Perception-only mode.
         if (profile.UsesEngineModule)
         {
-            var engine = RequireDirectory(components.EngineDirectory, profile.EngineOptimizations ? "The DCS engine optimizations are unavailable." : "Depth boost's engine module is unavailable.");
+            var engine = RequireDirectory(components.EngineDirectory, profile.EngineOptimizations ? "The DCS engine optimizations are unavailable." : profile.UsesDepthBoost ? "Depth boost's engine module is unavailable." : "Visual realism's engine module is unavailable.");
             var module = Path.Combine(scripts, "DcsQvCull");
             Add(Path.Combine(module, "DcsQvCull.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.dll")), "DCS engine optimizations loader",
                 // What the module writes while DCS runs; all of it goes with the module on restore.
-                runtimeLogs: [.. new[] { "DcsQvCull.log", "DcsQvCullPrefetch.log", "report_*.txt", "profile_*.txt", "bench_*.csv", "run_suite.flag", "run_motion.flag", "toggle_engine.flag", Path.Combine("payload", "active_*.dll"), Path.Combine("cache", "*.qvc"), Path.Combine("cache", "*.qvc.*.tmp") }.Select(name => Path.Combine(module, name))]);
+                runtimeLogs: [.. new[] { "DcsQvCull.log", "DcsQvCull.prev.log", "DcsQvCull.*.log", "DcsQvCullPrefetch.log", "DcsQvCullPrefetch.prev.log", "motion_*.csv", "rotation_*.csv", "timeline_*.csv", "events_*.csv", "fbc_*.csv", "run_profile.flag", "report_*.txt", "profile_*.txt", "bench_*.csv", "run_suite.flag", "run_motion.flag", "toggle_engine.flag", Path.Combine("payload", "active_*.dll"), Path.Combine("cache", "*.qvc"), Path.Combine("cache", "*.qvc.*.tmp"), "gbrec_states*.jsonl", Path.Combine("tone_probe", "*.f32") }.Select(name => Path.Combine(module, name))]);
             Add(Path.Combine(module, "payload", "DcsQvCullPayload.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCullPayload.dll")), "DCS engine optimizations");
             AddIni(Path.Combine(module, "DcsQvCull.ini"), ConfigurationWriters.DcsQvCull(profile), "DCS engine optimization settings");
             // Written last, removed first on restore: the hook never points at a module that is gone.
@@ -290,7 +292,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         }
         // Pupil shift sits first, next to DCS: it changes only what DCS renders and puts the runtime's own poses and
         // FOVs back on the submitted views, so every layer below sees the frame as if it were not there. The same layer
-        // carries Depth boost, so it is deployed for either.
+        // carries Depth boost and publishes the gaze for Visual realism, so it is deployed for any of them.
         if (profile.UsesPerceptionLayer)
         {
             var source = components.PupilShiftDll is { } built && File.Exists(built) ? built : throw new InvalidDataException("The pupil shift layer is unavailable.");
@@ -302,6 +304,10 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             AddText(PathPolicy.UnderRoot(layersRoot, "pupil-shift.json"), ConfigurationWriters.LayerManifest("XR_APILAYER_DCSVR_pupil_shift", dll, 1, "DCS Control · pupil shift"), "Profile pupil shift manifest");
             layerNames.Insert(0, "XR_APILAYER_DCSVR_pupil_shift");
         }
+        // VectorXR is an implicit layer that sits above every add-on here: its frame generation, Quadviews and Depth
+        // would stack on Framegen, Quad Views, Cheeky and Depth boost (two frame generators, two Quad Views providers). It
+        // is turned off for DCS started with any VR profile; other games keep it.
+        if (!profile.Desktop) environment[VectorXr.DisableVariable] = "1";
         if (layerNames.Count > 0)
         {
             environment["XR_API_LAYER_PATH"] = layersRoot;
@@ -371,11 +377,12 @@ public static class GazeBridge
     /// <summary>
     /// Sboys 1.3 creates a SteamVR eye-tracking component, and SteamVR/OpenXR then reports
     /// XR_EXT_eye_gaze_interaction support (verified 2026-10-03 on a Crystal Super: supportsEyeGazeInteraction = 1).
-    /// Quad Views reads gaze through that extension, so no separate bridge is needed.
+    /// Quad Views reads gaze through that extension, so no separate bridge is needed. Major and minor only: "1.3" has no
+    /// build number and would sort below 1.3.0.
     /// </summary>
     public static bool RuntimeProvidesGaze(InventorySnapshot inventory) =>
         inventory.Drivers.Any(d => d.Name.Contains("customheadset", StringComparison.OrdinalIgnoreCase) && !d.Blocked
-            && Version.TryParse((d.Version ?? "").Split('-')[0], out var version) && version >= new Version(1, 3, 0) && !(d.Version ?? "").Contains('-'));
+            && Version.TryParse((d.Version ?? "").Split('-')[0], out var version) && (version.Major, version.Minor) is ( > 1, _) or (1, >= 3) && !(d.Version ?? "").Contains('-'));
 
     public static LayerFact? Find(InventorySnapshot inventory) =>
         inventory.Layers.FirstOrDefault(l => l.Enabled && l.LibraryExists && l.Name is not null && IsGazeLayer(l));
@@ -396,4 +403,13 @@ public static class GazeBridge
     public static bool IsManaged(LayerFact layer, VrProfile profile) =>
         layer.Name is "XR_APILAYER_MBUCCHIA_quad_views_foveated" or "XR_APILAYER_CHEEKY_foveated_dlss" or "XR_APILAYER_XRFrameBridge_diagnostic"
         || (Required(profile) && IsGazeLayer(layer));
+}
+
+/// <summary>VectorXR (DienerTech), an implicit OpenXR layer with its own frame generation, Quadviews and Depth: turned
+/// off for DCS started with a profile that loads DCS Control's own layers.</summary>
+public static class VectorXr
+{
+    public const string LayerName = "XR_APILAYER_DIENERTECH_VECTORXR";
+    public const string DisableVariable = "DISABLE_XR_APILAYER_DIENERTECH_VECTORXR";
+    public static bool Is(LayerFact layer) => string.Equals(layer.Name, LayerName, StringComparison.OrdinalIgnoreCase);
 }

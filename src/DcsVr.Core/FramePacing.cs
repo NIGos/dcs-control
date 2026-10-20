@@ -73,10 +73,63 @@ public static class FramePacing
         return checks;
     }
 
-    // Accept only plain data assignments; executable autoexec Lua is never run.
+    /// <summary>autoexec.cfg turns on HUD_MFD_after_DLSS: its last assignment outside comments says true.</summary>
+    public static bool HudAfterDlss(string text) =>
+        AutoexecAssignments(text).Assignments.LastOrDefault(a => a.Name == "HUD_MFD_after_DLSS").Value == "true";
+
+    // Line by line: one plain assignment per line ("max_fps = 90", "options.graphics.HUD_MFD_after_DLSS = true"), with
+    // "--" and "--[[ ]]" comments; anything else (a function call, a loop) makes the file's effect unknown. Nothing is ever run.
     public static (string? MaxFps, bool Unknown) ReadAutoexec(string text)
     {
-        try { return (new LuaOptions("options={\n" + text + "\n}").Get("max_fps"), false); }
-        catch (InvalidDataException) { return (null, true); }
+        var (assignments, unknown) = AutoexecAssignments(text);
+        var maxFps = assignments.LastOrDefault(a => a.Name == "max_fps").Value;
+        return (unknown ? null : maxFps, unknown);
+    }
+
+    private static (List<(string Name, string Value)> Assignments, bool Unknown) AutoexecAssignments(string text)
+    {
+        var assignments = new List<(string Name, string Value)>(); var unknown = false;
+        foreach (var raw in StripComments(text).Split('\n'))
+        {
+            var line = raw.Trim().TrimEnd(';').Trim();
+            if (line.Length == 0) continue;
+            var m = System.Text.RegularExpressions.Regex.Match(line, @"^(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)\s*=\s*(true|false|-?\d+(?:\.\d+)?|""[^""]*""|'[^']*')$");
+            if (!m.Success) { unknown = true; continue; }
+            assignments.Add((m.Groups[1].Value, m.Groups[2].Value));
+        }
+        return (assignments, unknown);
+    }
+
+    /// <summary>Lua text without its comments: "--" to the end of the line and "--[[ ]]" / "--[==[ ]==]" blocks (line
+    /// breaks kept), never inside a quoted string.</summary>
+    private static string StripComments(string text)
+    {
+        var result = new System.Text.StringBuilder(text.Length);
+        char quote = '\0';
+        for (var i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (quote != '\0')
+            {
+                result.Append(c);
+                if (c == '\\' && i + 1 < text.Length) result.Append(text[++i]);
+                else if (c == quote || c == '\n') quote = '\0';
+                continue;
+            }
+            if (c is '"' or '\'') { quote = c; result.Append(c); continue; }
+            if (c != '-' || i + 1 >= text.Length || text[i + 1] != '-') { result.Append(c); continue; }
+            var block = System.Text.RegularExpressions.Regex.Match(text[(i + 2)..], @"^\[(=*)\[");
+            int stop;
+            if (block.Success)
+            {
+                var close = "]" + block.Groups[1].Value + "]";
+                var at = text.IndexOf(close, i + 2 + block.Length, StringComparison.Ordinal);
+                stop = at < 0 ? text.Length : at + close.Length;
+            }
+            else stop = text.IndexOf('\n', i) is var eol && eol >= 0 ? eol : text.Length;
+            foreach (var skipped in text.AsSpan(i, stop - i)) if (skipped == '\n') result.Append('\n');
+            i = stop - 1;
+        }
+        return result.ToString();
     }
 }

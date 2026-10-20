@@ -1,0 +1,1085 @@
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -464,6 +464,27 @@
+     //     symbology (0-23), the current frame's (24-47), the last fallback
+     //     reason (48-55: 0 none, 1 no sRGB view of the images, 2 the passes
+     //     or a clean copy could not be made, 3 the DLSS motion-vector path).
++    //     DCS Control (0054): views in b with reason 0 are fallbacks too:
++    //     reason 0 means one frame of the pair had no symbology for that view
++    //     (not present, overflowed, no layout or not paired), so the pair was
++    //     composed as before; b is 0 only when every pair was cleaned.
++    //   result=22 (DCS Control 0054), a HUD symbology GPU allocation, logged
++    //     once when it is made (xrfg::HudAllocationRecord): a= the kind
++    //     (0-7: 1 a synthesizer's clean copy of a real frame, 2 the
++    //     consumer's private copy of a frame's emission atlas, 3 of its class
++    //     atlas, 4 a producer emission atlas opened, 5 a producer class atlas
++    //     opened (imports: their size counts in the process's dedicated
++    //     usage), 6 0053's capture read-back (a readback heap)), the DXGI
++    //     format (8-15), how many of the kind the owner holds with it
++    //     (16-31), the array size (32-47), the owner (48-55: 0 the consumer,
++    //     n the n-th synthesizer); b= width (0-31), height (32-63); c= its
++    //     size in bytes (0-39, GetResourceAllocationInfo) and the owner's
++    //     HUD bytes with it in MiB (40-63).
++    //   result=23 (DCS Control 0054), a view's coverage alpha latched off
++    //     (xrfg::HudAlphaLatch): its alpha_valid went from valid to invalid
++    //     within a symbology generation, so its re-adds stay additive until
++    //     the generation changes. a= the generation; b= the eye (0-7) and
++    //     the owner synthesizer (8-15); c= the current frame's mask seq.
+     //   result=21 (DCS Control 0053), developer only (`[diagnostics]
+     //     hud_capture=N`): one HUD capture set read back, its files
+     //     hud-<pid>-<eye>-<a>-k<k>of<N>-sym<s>-{synth,prev,cur}.bmp and
+diff --git a/include/xrfg/cockpit_mask.hpp b/include/xrfg/cockpit_mask.hpp
+--- a/include/xrfg/cockpit_mask.hpp
++++ b/include/xrfg/cockpit_mask.hpp
+@@ -304,6 +304,11 @@
+     std::atomic<std::uint64_t> hud_from_previous{};
+     std::atomic<std::uint64_t> hud_from_current{};
+     std::atomic<std::uint32_t> hud_fallback_reason{};
++    // DCS Control (0054): synthetic views re-composed with coverage alpha
++    // (both frames of the pair with it valid, the view not latched), and
++    // views latched additive (HudAlphaLatch: cockpit_mask result=23).
++    std::atomic<std::uint64_t> hud_alpha_readds{};
++    std::atomic<std::uint64_t> hud_alpha_latched{};
+ };
+ 
+ // DCS Control (0049): why the synthesis left a pair's symbology alone
+@@ -354,6 +359,8 @@
+     // emission_flags::alpha_valid: E.a is the symbols' coverage.
+     bool alpha_valid{};
+     std::uint32_t emission_flags{};
++    // DCS Control (0054): the symbology block's generation (HudAlphaLatch).
++    std::uint32_t generation{};
+     // Whether eye `eye` (0, 1) has symbology to take out this frame: a known
+     // focus layout and its periphery or its focus view present.
+     [[nodiscard]] bool eye_present(std::uint32_t eye) const noexcept {
+@@ -724,6 +731,13 @@
+     std::uint64_t hud_generations_opened{};
+     std::uint64_t hud_heartbeats_stored{};
+     CockpitHudLookup hud_last{CockpitHudLookup::none};
++    // DCS Control (0054): the frames' private symbology copies (an emission
++    // and a class copy each): in existence now (on frames or spare), made and
++    // freed so far, and taken over from a ring entry nobody held any more.
++    std::uint64_t hud_copies{};
++    std::uint64_t hud_copies_made{};
++    std::uint64_t hud_copies_freed{};
++    std::uint64_t hud_copies_reused{};
+ };
+ 
+ struct CockpitMaskConsumerOptions {
+diff --git a/include/xrfg/hud_symbology.hpp b/include/xrfg/hud_symbology.hpp
+--- a/include/xrfg/hud_symbology.hpp
++++ b/include/xrfg/hud_symbology.hpp
+@@ -191,4 +191,85 @@
+     std::uint64_t next_open_ms_{};
+ };
+ 
++// DCS Control (0054): the coverage alpha of a re-add, pair-wide and latched.
++// The first live run (R96) saw the producer's alpha_valid (each frame's
++// emission_flags::alpha_valid, D3D12HudSymbology::alpha_valid) flip 44 times
++// under yaw. A view is re-composed with coverage only when BOTH frames of the
++// pair have it valid; once the view has seen it go from valid to invalid
++// within a symbology generation it stays additive for the rest of that
++// generation (latched; a new generation starts over). Between the two the
++// synthetic differs by the composite's own a (C - W'), so the latch keeps
++// that step to one per generation instead of one per flip.
++class HudAlphaLatch final {
++public:
++    static constexpr std::uint32_t kViews = 8;
++    struct Decision {
++        bool alpha{};       // re-compose this pair's view with coverage
++        bool latched_now{}; // this pair latched the view (logged once: cockpit_mask result=23)
++    };
++    // View `view` (the eye of the stereo image) of a pair whose current
++    // frame has symbology generation `generation`: the previous and current
++    // frames' alpha_valid. Call once per pair and view, in pair order.
++    [[nodiscard]] Decision decide(
++        std::uint32_t generation, std::uint32_t view, bool previous_valid, bool current_valid) noexcept;
++    [[nodiscard]] bool latched(std::uint32_t view) const noexcept {
++        return view < kViews && latched_[view];
++    }
++    [[nodiscard]] std::uint32_t generation() const noexcept {
++        return generation_;
++    }
++
++private:
++    bool started_{};
++    std::uint32_t generation_{};
++    // The newer frame of the view's last pair: 0 none yet, 1 invalid, 2 valid.
++    std::array<std::uint8_t, kViews> last_{};
++    std::array<bool, kViews> latched_{};
++};
++
++// DCS Control (0054): the HUD symbology's GPU allocations, each logged once
++// when it is made (cockpit_mask result=22, the live run's VRAM accounting).
++enum class HudAllocationKind : std::uint32_t {
++    clean_copy = 1,           // a synthesizer's real frame with its symbology taken out (two per synthesizer)
++    symbology_copy = 2,       // the consumer's private copy of a frame's emission atlas (RGBA16F)
++    symbology_class_copy = 3, // and of its class atlas (R8_UINT)
++    producer_atlas = 4,       // a producer's emission atlas opened (an NT handle import, its size counted)
++    producer_class_atlas = 5, // a producer's class atlas opened
++    capture_readback = 6,     // 0053's developer capture read-back (a readback heap: not dedicated VRAM)
++};
++
++// Who holds an allocation: the consumer (the session's), or synthesizer n
++// (one per swapchain, numbered from 1 in the order they first make one).
++inline constexpr std::uint32_t kHudAllocationOwnerConsumer = 0;
++
++struct HudAllocation {
++    HudAllocationKind kind{};
++    DXGI_FORMAT format{};
++    std::uint32_t width{};
++    std::uint32_t height{};
++    std::uint32_t array_size{1};
++    // How many of this kind the owner holds with this one.
++    std::uint32_t count{};
++    std::uint32_t owner{};
++    // This one's size in bytes (GetResourceAllocationInfo).
++    std::uint64_t bytes{};
++};
++
++// result=22's fields: a= kind (0-7), DXGI format (8-15), count (16-31),
++// array size (32-47), owner (48-55); b= width (0-31), height (32-63); c= this
++// one's bytes (0-39) and the owner's HUD bytes with it, MiB (40-63).
++struct HudAllocationRecord {
++    std::uint64_t a{};
++    std::uint64_t b{};
++    std::uint64_t c{};
++};
++[[nodiscard]] HudAllocationRecord hud_allocation_record(
++    const HudAllocation& allocation, std::uint64_t owner_total_bytes) noexcept;
++[[nodiscard]] HudAllocation hud_allocation_from_record(
++    const HudAllocationRecord& record, std::uint64_t* owner_total_mib = nullptr) noexcept;
++// A texture's size: the device's (GetResourceAllocationInfo) when given one,
++// else bytes per texel x texels, rounded up to 64 KiB.
++[[nodiscard]] std::uint64_t hud_texture_bytes(ID3D12Device* device, std::uint32_t width, std::uint32_t height,
++    std::uint32_t array_size, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE) noexcept;
++
+ }  // namespace xrfg
+diff --git a/src/d3d12/cockpit_mask.cpp b/src/d3d12/cockpit_mask.cpp
+--- a/src/d3d12/cockpit_mask.cpp
++++ b/src/d3d12/cockpit_mask.cpp
+@@ -46,6 +46,7 @@
+ #include "xrfg/dcsvr_cockpit_mask.h"
+ #include "xrfg/dcsvr_motion.h" // DCS Control (0036)
+ #include "xrfg/dcsvr_symbology.h" // DCS Control (0049)
++#include "xrfg/hud_symbology.hpp" // DCS Control (0054): the allocation record
+ 
+ #include <windows.h>
+ 
+@@ -329,6 +330,10 @@
+     std::optional<HudOpened> hud_opened;
+     std::vector<HudOpened> hud_retired;
+     std::uint32_t hud_open_failure_logged_generation{};
++    // DCS Control (0054): the bytes of the frames' private symbology copies
++    // and of the producer atlases opened (result=22's owner total).
++    std::uint64_t hud_copy_bytes{};
++    std::uint64_t hud_import_bytes{};
+ 
+     ~Impl() {
+         stop_heartbeat();
+@@ -808,6 +813,49 @@
+             static_cast<void>(drain(1000));
+         }
+         hud_opened.reset();
++        // DCS Control (0054): the generation retired: the private copies no
++        // frame holds go with it (a held one goes when its entry is taken
++        // over without symbology: see lookup), and the imports' bytes.
++        hud_import_bytes = 0;
++        free_idle_hud_copies();
++    }
++
++    // DCS Control (0054): a ring entry nobody holds any more: no frame
++    // handed out, its copy complete, its readers done (free_entry's rule; a
++    // fence read, never a wait).
++    [[nodiscard]] bool entry_idle(RingEntry& entry, std::uint64_t completed) noexcept {
++        return entry.frame && entry.frame.use_count() == 1 && entry.copy_value <= completed &&
++            entry.frame->readers_complete();
++    }
++
++    // DCS Control (0054): one frame's private symbology copy freed.
++    void free_hud_copy(D3D12CockpitMaskFrame& frame) noexcept {
++        if (!frame.hud_texture && !frame.hud_class_texture) {
++            return;
++        }
++        for (ID3D12Resource* texture : {frame.hud_texture.Get(), frame.hud_class_texture.Get()}) {
++            if (texture != nullptr) {
++                const D3D12_RESOURCE_DESC description = texture->GetDesc();
++                const std::uint64_t bytes = hud_texture_bytes(device.Get(),
++                    static_cast<std::uint32_t>(description.Width), description.Height, 1U, description.Format);
++                hud_copy_bytes -= std::min(hud_copy_bytes, bytes);
++            }
++        }
++        frame.hud_texture.Reset();
++        frame.hud_class_texture.Reset();
++        frame.hud = false;
++        frame.hud_symbology = {};
++        stats.hud_copies -= std::min<std::uint64_t>(stats.hud_copies, 1U);
++        ++stats.hud_copies_freed;
++    }
++
++    void free_idle_hud_copies() noexcept {
++        const std::uint64_t completed = completed_copies();
++        for (RingEntry& entry : ring) {
++            if (entry_idle(entry, completed)) {
++                free_hud_copy(*entry.frame);
++            }
++        }
+     }
+ 
+     // DCS Control (0049): the emission and class textures of `header`'s
+@@ -867,6 +915,26 @@
+         retire_hud_opened();
+         hud_opened = std::move(next);
+         ++stats.hud_generations_opened;
++        // DCS Control (0054): the imports, in the allocation record
++        // (result=22): an import's size counts in the process's dedicated
++        // usage (0044's xrfg_cockpit_mask_import_bench), each generation again.
++        for (const bool class_atlas : {false, true}) {
++            const auto& textures = class_atlas ? hud_opened->class_textures : hud_opened->textures;
++            const D3D12_RESOURCE_DESC description = textures[0]->GetDesc();
++            HudAllocation allocation{};
++            allocation.kind = class_atlas ? HudAllocationKind::producer_class_atlas : HudAllocationKind::producer_atlas;
++            allocation.format = description.Format;
++            allocation.width = static_cast<std::uint32_t>(description.Width);
++            allocation.height = description.Height;
++            allocation.array_size = description.DepthOrArraySize;
++            allocation.count = static_cast<std::uint32_t>(csy::slot_count);
++            allocation.owner = kHudAllocationOwnerConsumer;
++            allocation.bytes = hud_texture_bytes(device.Get(), allocation.width, allocation.height,
++                allocation.array_size, description.Format);
++            hud_import_bytes += allocation.bytes * csy::slot_count;
++            const HudAllocationRecord record = hud_allocation_record(allocation, hud_copy_bytes + hud_import_bytes);
++            log(22, record.a, record.b, record.c);
++        }
+         log(17, header.generation,
+             static_cast<std::uint64_t>(header.atlasW) | (static_cast<std::uint64_t>(header.atlasH) << 32U),
+             static_cast<std::uint64_t>(header.flags) | (static_cast<std::uint64_t>(header.emissionFlags) << 32U));
+@@ -940,6 +1008,7 @@
+         out.focus_shape = std::isfinite(shape) ? std::clamp(shape, 0.0F, 16.0F) : 0.0F;
+         out.alpha_valid = (header.emissionFlags & csy::emission_flags::alpha_valid) != 0;
+         out.emission_flags = header.emissionFlags;
++        out.generation = header.generation; // DCS Control (0054): HudAlphaLatch
+         if (csy::layout_usable(header, hud_slot)) {
+             for (int eye = 0; eye < csy::eye_count; ++eye) {
+                 const csy::EyeFocus& focus = source.focus.eye[eye];
+@@ -1014,16 +1083,46 @@
+ 
+     // DCS Control (0049): a ring entry's symbology copies, made at first use
+     // (again when the producer's atlas changes size).
++    // DCS Control (0054): the copies are the frames', not the ring's: a frame
++    // that needs one takes over the copy of an entry nobody holds any more
++    // before a new one is made, so the copies in existence are the frames
++    // held at once (the synthesizers' pair, the GPU's readers, the one being
++    // copied), not the ring's six. Each one is the producer's atlas size
++    // (its capacity windows packed, no unused texel) and is logged when made
++    // (result=22).
+     [[nodiscard]] bool ensure_hud_textures(
+         D3D12CockpitMaskFrame& frame, std::uint32_t width, std::uint32_t height) noexcept {
+-        const auto make = [&](ComPtr<ID3D12Resource>& texture, DXGI_FORMAT format, const wchar_t* label) {
+-            if (texture) {
+-                const D3D12_RESOURCE_DESC current = texture->GetDesc();
+-                if (current.Width == width && current.Height == height) {
+-                    return true;
+-                }
+-                texture.Reset();
++        const auto fits = [&](const D3D12CockpitMaskFrame& holder) {
++            if (!holder.hud_texture || !holder.hud_class_texture) {
++                return false;
+             }
++            const D3D12_RESOURCE_DESC emission = holder.hud_texture->GetDesc();
++            const D3D12_RESOURCE_DESC classes = holder.hud_class_texture->GetDesc();
++            return emission.Width == width && emission.Height == height && classes.Width == width &&
++                classes.Height == height;
++        };
++        if (fits(frame)) {
++            return true;
++        }
++        free_hud_copy(frame);
++        const std::uint64_t completed = completed_copies();
++        for (RingEntry& other : ring) {
++            if (!other.frame || other.frame.get() == &frame || !other.frame->hud_texture ||
++                !entry_idle(other, completed)) {
++                continue;
++            }
++            if (!fits(*other.frame)) {
++                free_hud_copy(*other.frame);
++                continue;
++            }
++            frame.hud_texture = std::move(other.frame->hud_texture);
++            frame.hud_class_texture = std::move(other.frame->hud_class_texture);
++            other.frame->hud = false;
++            other.frame->hud_symbology = {};
++            ++stats.hud_copies_reused;
++            return true;
++        }
++        const auto make = [&](ComPtr<ID3D12Resource>& texture, DXGI_FORMAT format, const wchar_t* label) {
+             D3D12_HEAP_PROPERTIES heap{};
+             heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+             D3D12_RESOURCE_DESC description{};
+@@ -1041,10 +1140,34 @@
+                 return false;
+             }
+             texture->SetName(label);
++            // DCS Control (0054): logged once, when made (result=22).
++            HudAllocation allocation{};
++            allocation.kind = format == DXGI_FORMAT_R8_UINT ? HudAllocationKind::symbology_class_copy
++                                                            : HudAllocationKind::symbology_copy;
++            allocation.format = format;
++            allocation.width = width;
++            allocation.height = height;
++            allocation.count = static_cast<std::uint32_t>(stats.hud_copies + 1U);
++            allocation.owner = kHudAllocationOwnerConsumer;
++            allocation.bytes = hud_texture_bytes(device.Get(), width, height, 1U, format);
++            hud_copy_bytes += allocation.bytes;
++            const HudAllocationRecord record = hud_allocation_record(allocation, hud_copy_bytes + hud_import_bytes);
++            log(22, record.a, record.b, record.c);
+             return true;
+         };
+-        return make(frame.hud_texture, DXGI_FORMAT_R16G16B16A16_FLOAT, L"OFXR HUD Symbology Copy") &&
+-            make(frame.hud_class_texture, DXGI_FORMAT_R8_UINT, L"OFXR HUD Symbology Class Copy");
++        if (!make(frame.hud_texture, DXGI_FORMAT_R16G16B16A16_FLOAT, L"OFXR HUD Symbology Copy") ||
++            !make(frame.hud_class_texture, DXGI_FORMAT_R8_UINT, L"OFXR HUD Symbology Class Copy")) {
++            // DCS Control (0054): never half a copy.
++            if (frame.hud_texture) {
++                hud_copy_bytes -= std::min(hud_copy_bytes,
++                    hud_texture_bytes(device.Get(), width, height, 1U, DXGI_FORMAT_R16G16B16A16_FLOAT));
++                frame.hud_texture.Reset();
++            }
++            return false;
++        }
++        ++stats.hud_copies;
++        ++stats.hud_copies_made;
++        return true;
+     }
+ 
+     // DCS Control (0049): a frame's symbology pairing, by reason.
+@@ -1578,6 +1701,10 @@
+     }
+ 
+     [[nodiscard]] bool create_entry(RingEntry& entry, std::uint32_t width, std::uint32_t height) noexcept {
++        // DCS Control (0054): the frame it replaces gives its copy back.
++        if (entry.frame) {
++            free_hud_copy(*entry.frame);
++        }
+         try {
+             auto frame = std::make_shared<D3D12CockpitMaskFrame>();
+             D3D12_HEAP_PROPERTIES heap{};
+@@ -1777,6 +1904,12 @@
+             hud.result = CockpitHudLookup::no_texture;
+         }
+         const bool with_hud = hud.result == CockpitHudLookup::paired;
++        // DCS Control (0054): an entry taken over without symbology while no
++        // generation is opened gives its copy back (a copy held when the
++        // generation retired goes here).
++        if (!with_hud && !hud_opened) {
++            free_hud_copy(*entry->frame);
++        }
+         // DCS Control (0041): a copy that fails before it is queued releases
+         // the slots as a frame without one does (release_unused); one that
+         // fails after it releases its own slot behind it.
+@@ -2166,6 +2299,9 @@
+                     // DCS Control (0049): the HUD symbology: what the frames
+                     // carried (result=19) and what the synthesis did with it
+                     // (result=20).
++                    // DCS Control (0054): result=20's b counts fallbacks with
++                    // their reason; reason 0 means one frame of the pair had
++                    // no symbology for that view (composed as before).
+                     if (options.hud_symbology) {
+                         const auto saturate24 = [](std::uint64_t value) {
+                             return std::min<std::uint64_t>(value, 0xffffffU);
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -1732,6 +1732,37 @@
+         UINT next_call{};
+     };
+     HudPair hud_pair{};
++    // DCS Control (0054): the coverage alpha per eye, pair-wide and latched
++    // (HudAlphaLatch); this synthesizer's number in the allocation record
++    // (result=22, from 1; 0 until it needs one) and its HUD bytes.
++    HudAlphaLatch hud_alpha_latch;
++    std::uint32_t hud_owner{};
++    std::uint64_t hud_bytes{};
++    [[nodiscard]] std::uint32_t hud_allocation_owner() noexcept {
++        if (hud_owner == 0) {
++            static std::atomic<std::uint32_t> next_owner{1};
++            hud_owner = std::max<std::uint32_t>(next_owner.fetch_add(1, std::memory_order_relaxed) % 256U, 1U);
++        }
++        return hud_owner;
++    }
++    void log_hud_allocation(HudAllocationKind kind, const D3D12_RESOURCE_DESC& description, std::uint32_t count,
++        D3D12_HEAP_TYPE heap_type = D3D12_HEAP_TYPE_DEFAULT) noexcept {
++        HudAllocation allocation{};
++        allocation.kind = kind;
++        allocation.format = description.Format;
++        allocation.width = static_cast<std::uint32_t>(std::min<UINT64>(description.Width, 0xffffffffULL));
++        allocation.height = description.Height;
++        allocation.array_size = description.DepthOrArraySize;
++        allocation.count = count;
++        allocation.owner = hud_allocation_owner();
++        const D3D12_RESOURCE_ALLOCATION_INFO info = device->GetResourceAllocationInfo(0, 1, &description);
++        allocation.bytes = info.SizeInBytes != UINT64_MAX ? info.SizeInBytes : 0U;
++        if (heap_type == D3D12_HEAP_TYPE_DEFAULT) {
++            hud_bytes += allocation.bytes;
++        }
++        const HudAllocationRecord record = hud_allocation_record(allocation, hud_bytes);
++        bridge_flight_logger().event(BridgeFlightOperation::cockpit_mask, 22, record.a, record.b, record.c);
++    }
+     [[nodiscard]] bool hud_enabled() const noexcept {
+         return nvidia_options.hud_symbology && nvidia_options.cockpit_mask;
+     }
+@@ -4828,6 +4859,15 @@
+             }
+             clean.texture->SetName(L"OFXR HUD Symbology Clean Frame");
+             clean.serial = 0;
++            // DCS Control (0054): logged once, when made (result=22). Two per
++            // synthesizer (one per swapchain: per eye under Quad Views), the
++            // frames' own size: the pack, the flow and the composition read
++            // them whole in place of the real frames, so no window would do,
++            // and they are not shared between synthesizers (their pairs'
++            // passes may interleave on one queue, or run on queues of their
++            // own under parallel_eye_synthesis).
++            log_hud_allocation(HudAllocationKind::clean_copy, description,
++                static_cast<std::uint32_t>(&clean - hud_clean.data()) + 1U);
+         }
+         return true;
+     }
+@@ -4988,6 +5028,30 @@
+         const UINT slot_index = static_cast<UINT>(&slot - work_slots.data());
+         const UINT width = static_cast<UINT>(image_description.Width);
+         const UINT view_count = static_cast<UINT>(target_views.size());
++        // DCS Control (0054): coverage alpha only where both frames of the
++        // pair have it for the eye, and not after it fell from valid to
++        // invalid in this symbology generation (HudAlphaLatch: once per pair
++        // and eye, before the outputs; the latch logged once, result=23).
++        std::array<bool, HudAlphaLatch::kViews> alpha{};
++        for (UINT index = 0; index < view_count && index < current_source.view_count; ++index) {
++            const UINT eye = cockpit_mask_eye(current_source.views[index], index);
++            if (eye >= HudAlphaLatch::kViews || !current->hud_symbology.eye_present(eye) ||
++                !previous_frame->hud_symbology.eye_present(eye)) {
++                continue;
++            }
++            const HudAlphaLatch::Decision decision = hud_alpha_latch.decide(current->hud_symbology.generation, eye,
++                previous_frame->hud_symbology.alpha_valid, current->hud_symbology.alpha_valid);
++            alpha[eye] = decision.alpha;
++            if (decision.latched_now) {
++                bridge_flight_logger().event(BridgeFlightOperation::cockpit_mask, 23,
++                    current->hud_symbology.generation,
++                    static_cast<std::uint64_t>(eye) | (static_cast<std::uint64_t>(hud_allocation_owner()) << 8U),
++                    current->mask_seq);
++                if (current->counters) {
++                    current->counters->hud_alpha_latched.fetch_add(1U, std::memory_order_relaxed);
++                }
++            }
++        }
+         for (UINT output = 0; output < synthetic_output_count(); ++output) {
+             const bool from_current = hud_readd_from_current(synthetic_output_fraction(output));
+             const D3D12CockpitMaskFrame& frame = from_current ? *current : *previous_frame;
+@@ -5020,13 +5084,18 @@
+                 rotation.target_to_source = mapping.target_to_source_rotation;
+                 rotation.target_tangents = mapping.target_tangents;
+                 rotation.source_tangents = mapping.source_tangents;
++                // DCS Control (0054): the pair's decision, not the frame's own flag.
++                const bool with_alpha = eye < alpha.size() && alpha[eye];
+                 const bool recorded = hud_passes->record_readd(list, slot_index, hud_pair.next_call++, destination,
+                     srgb, slice, HudImageRect{rect.offset_x, rect.offset_y, rect.width, rect.height},
+                     hud_eye_input(frame.hud_symbology, eye), frame.hud_texture.Get(), frame.hud_class_texture.Get(),
+-                    clean, rotation, frame.hud_symbology.alpha_valid);
++                    clean, rotation, with_alpha);
+                 if (recorded && current->counters) {
+                     (from_current ? current->counters->hud_from_current : current->counters->hud_from_previous)
+                         .fetch_add(1U, std::memory_order_relaxed);
++                    if (with_alpha) { // DCS Control (0054)
++                        current->counters->hud_alpha_readds.fetch_add(1U, std::memory_order_relaxed);
++                    }
+                 }
+                 if (recorded && output < hud_capture_outcome.readds.size()) { // DCS Control (0053)
+                     ++hud_capture_outcome.readds[output];
+@@ -5262,6 +5331,8 @@
+             }
+             hud_capture_readback->SetName(L"OFXR HUD Capture Readback");
+             hud_capture_readback_size = total;
++            log_hud_allocation(HudAllocationKind::capture_readback, description, 1U, // DCS Control (0054)
++                D3D12_HEAP_TYPE_READBACK);
+         }
+         // Claim the sets (k is the eye's set number of N).
+         std::array<std::uint32_t, 2> k{};
+diff --git a/src/d3d12/hud_symbology.cpp b/src/d3d12/hud_symbology.cpp
+--- a/src/d3d12/hud_symbology.cpp
++++ b/src/d3d12/hud_symbology.cpp
+@@ -579,6 +579,7 @@
+     out.focus_shape = std::isfinite(shape) ? std::clamp(shape, 0.0F, 16.0F) : 0.0F;
+     out.alpha_valid = (header.emissionFlags & csy::emission_flags::alpha_valid) != 0;
+     out.emission_flags = header.emissionFlags;
++    out.generation = header.generation; // DCS Control (0054)
+     if (csy::layout_usable(header, slot)) {
+         for (int eye = 0; eye < csy::eye_count; ++eye) {
+             const csy::EyeFocus& focus = source.focus.eye[eye];
+@@ -698,4 +699,98 @@
+     return result;
+ }
+ 
++// DCS Control (0054) ---------------------------------------------------------
++
++HudAlphaLatch::Decision HudAlphaLatch::decide(
++    std::uint32_t generation, std::uint32_t view, bool previous_valid, bool current_valid) noexcept {
++    if (!started_ || generation != generation_) {
++        started_ = true;
++        generation_ = generation;
++        last_.fill(0);
++        latched_.fill(false);
++    }
++    Decision decision{};
++    if (view >= kViews) {
++        return decision;
++    }
++    // valid -> invalid anywhere in the view's sequence of frames: the newer
++    // frame of its last pair, this pair's older, this pair's newer.
++    const bool fell = (last_[view] == 2U && !previous_valid) || (previous_valid && !current_valid);
++    last_[view] = current_valid ? 2U : 1U;
++    if (fell && !latched_[view]) {
++        latched_[view] = true;
++        decision.latched_now = true;
++    }
++    decision.alpha = !latched_[view] && previous_valid && current_valid;
++    return decision;
++}
++
++HudAllocationRecord hud_allocation_record(const HudAllocation& allocation, std::uint64_t owner_total_bytes) noexcept {
++    const auto bits = [](std::uint64_t value, std::uint64_t width) {
++        const std::uint64_t limit = (std::uint64_t{1} << width) - 1U;
++        return std::min(value, limit);
++    };
++    HudAllocationRecord record{};
++    record.a = bits(static_cast<std::uint32_t>(allocation.kind), 8) |
++        (bits(static_cast<std::uint32_t>(allocation.format), 8) << 8U) | (bits(allocation.count, 16) << 16U) |
++        (bits(allocation.array_size, 16) << 32U) | (bits(allocation.owner, 8) << 48U);
++    record.b = static_cast<std::uint64_t>(allocation.width) | (static_cast<std::uint64_t>(allocation.height) << 32U);
++    const std::uint64_t mib = (owner_total_bytes + (std::uint64_t{1} << 20U) - 1U) >> 20U;
++    record.c = bits(allocation.bytes, 40) | (bits(mib, 24) << 40U);
++    return record;
++}
++
++HudAllocation hud_allocation_from_record(const HudAllocationRecord& record, std::uint64_t* owner_total_mib) noexcept {
++    HudAllocation allocation{};
++    allocation.kind = static_cast<HudAllocationKind>(record.a & 0xffU);
++    allocation.format = static_cast<DXGI_FORMAT>((record.a >> 8U) & 0xffU);
++    allocation.count = static_cast<std::uint32_t>((record.a >> 16U) & 0xffffU);
++    allocation.array_size = static_cast<std::uint32_t>((record.a >> 32U) & 0xffffU);
++    allocation.owner = static_cast<std::uint32_t>((record.a >> 48U) & 0xffU);
++    allocation.width = static_cast<std::uint32_t>(record.b & 0xffffffffU);
++    allocation.height = static_cast<std::uint32_t>(record.b >> 32U);
++    allocation.bytes = record.c & ((std::uint64_t{1} << 40U) - 1U);
++    if (owner_total_mib != nullptr) {
++        *owner_total_mib = record.c >> 40U;
++    }
++    return allocation;
++}
++
++std::uint64_t hud_texture_bytes(ID3D12Device* device, std::uint32_t width, std::uint32_t height,
++    std::uint32_t array_size, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags) noexcept {
++    if (device != nullptr) {
++        D3D12_RESOURCE_DESC description{};
++        description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++        description.Width = width;
++        description.Height = height;
++        description.DepthOrArraySize = static_cast<UINT16>(std::max<std::uint32_t>(array_size, 1U));
++        description.MipLevels = 1;
++        description.Format = format;
++        description.SampleDesc.Count = 1;
++        description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
++        description.Flags = flags;
++        const D3D12_RESOURCE_ALLOCATION_INFO info = device->GetResourceAllocationInfo(0, 1, &description);
++        if (info.SizeInBytes != 0 && info.SizeInBytes != UINT64_MAX) {
++            return info.SizeInBytes;
++        }
++    }
++    std::uint64_t texel = 4;
++    switch (format) {
++    case DXGI_FORMAT_R16G16B16A16_FLOAT:
++    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
++        texel = 8;
++        break;
++    case DXGI_FORMAT_R8_UINT:
++    case DXGI_FORMAT_R8_TYPELESS:
++    case DXGI_FORMAT_R8_UNORM:
++        texel = 1;
++        break;
++    default:
++        break;
++    }
++    const std::uint64_t raw = texel * width * height * std::max<std::uint32_t>(array_size, 1U);
++    constexpr std::uint64_t kAlignment = 64U * 1024U;
++    return (raw + kAlignment - 1U) / kAlignment * kAlignment;
++}
++
+ }  // namespace xrfg
+diff --git a/tests/hud_symbology_tests.inc b/tests/hud_symbology_tests.inc
+--- a/tests/hud_symbology_tests.inc
++++ b/tests/hud_symbology_tests.inc
+@@ -674,8 +674,10 @@
+     std::vector<std::uint8_t> pixel_class;
+ };
+ 
++// DCS Control (0054): `class_of` (x, y) instead of (x + y) % 4 when given.
+ HudScene hud_symbol_scene(UINT width, UINT height, std::array<UINT, 4> window,
+-    const std::function<std::array<std::uint8_t, 3>(UINT, UINT)>& background, HudSymbolModel& model) {
++    const std::function<std::array<std::uint8_t, 3>(UINT, UINT)>& background, HudSymbolModel& model,
++    const std::function<std::uint8_t(UINT, UINT)>& class_of = {}) {
+     HudScene scene;
+     scene.width = width;
+     scene.height = height;
+@@ -694,7 +696,8 @@
+             const auto c = background(x, y);
+             std::array<float, 3> f{hud_decode(c[0]), hud_decode(c[1]), hud_decode(c[2])};
+             const bool in = x >= window[0] && x < window[0] + window[2] && y >= window[1] && y < window[1] + window[3];
+-            const std::uint8_t klass = in ? static_cast<std::uint8_t>((x + y) % 4U) : 0U;
++            const std::uint8_t klass =
++                in ? (class_of ? class_of(x, y) : static_cast<std::uint8_t>((x + y) % 4U)) : 0U;
+             if (klass != 0) {
+                 // A HUD symbol: bright, mostly green, partly covering.
+                 const float a = 0.3F + 0.7F * random.next();
+@@ -1752,7 +1755,434 @@
+                  "window from a header-only block (no texture, no heartbeat); the square without a block\n";
+ }
+ 
++// DCS Control (0054): the coverage alpha, pair-wide and latched
++// (HudAlphaLatch). One texel's synthetic per pair, as the re-add composes it
++// (dcsvr_symbology::recomposite with the decision's a, else the additive
++// W' + E): with the latch it changes once per generation, by the composite's
++// own a (C - W'); without it (0049: each frame's own flag) at every flip.
++void test_hud_alpha_latch() {
++    {
++        xrfg::HudAlphaLatch latch;
++        // Pair-wide: one frame of the pair without a valid alpha, additive.
++        require(!latch.decide(1, 0, false, true).alpha && !latch.latched(0),
++            "hud alpha: invalid then valid is additive, not a fall");
++        require(latch.decide(1, 0, true, true).alpha, "hud alpha: both frames valid composes with coverage");
++        const auto fall = latch.decide(1, 0, true, false);
++        require(!fall.alpha && fall.latched_now && latch.latched(0), "hud alpha: valid then invalid latches the view");
++        require(!latch.decide(1, 0, false, true).alpha && !latch.decide(1, 0, true, true).alpha &&
++                !latch.decide(1, 0, true, true).latched_now,
++            "hud alpha: latched, additive for the rest of the generation (logged once)");
++        require(latch.decide(1, 1, true, true).alpha && !latch.latched(1), "hud alpha: the other eye is not latched");
++        require(latch.decide(2, 0, true, true).alpha && !latch.latched(0) && latch.generation() == 2,
++            "hud alpha: a new generation starts over");
++        // A fall seen across pairs (the last pair's newer frame valid, this
++        // pair's older one invalid: a skipped frame).
++        static_cast<void>(latch.decide(2, 1, true, true));
++        require(latch.decide(2, 1, false, false).latched_now, "hud alpha: a fall between pairs latches too");
++        require(!latch.decide(2, 7, false, false).alpha && !latch.decide(2, 8, true, true).alpha,
++            "hud alpha: views past kViews are additive");
++    }
++    // The flicker of R96: alpha_valid per frame, generation 3 then 4.
++    const std::vector<bool> valid{true, true, true, false, true, false, true, true, false, true, true, true};
++    const std::vector<std::uint32_t> generation{3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4};
++    const csy::Rgb world{0.30F, 0.42F, 0.25F};     // W', the synthetic's world under the symbol
++    const csy::Rgb clean{0.10F, 0.15F, 0.08F};     // C, the clean frame at the symbol's source
++    const csy::Rgb emission{0.40F, 0.55F, 0.12F};  // E
++    const float coverage = 0.8F;
++    const auto composite = [&](bool alpha) {
++        return alpha ? csy::recomposite(world, emission, coverage, clean)
++                     : csy::Rgb{world.r + emission.r, world.g + emission.g, world.b + emission.b};
++    };
++    const float step = coverage * std::max({std::abs(clean.r - world.r), std::abs(clean.g - world.g),
++                                      std::abs(clean.b - world.b)});
++    xrfg::HudAlphaLatch latch;
++    int changes = 0, changes_0049 = 0, latches = 0;
++    float largest = 0.0F;
++    csy::Rgb last{}, last_0049{};
++    for (std::size_t frame = 1; frame < valid.size(); ++frame) {
++        const auto decision = latch.decide(generation[frame], 0, valid[frame - 1], valid[frame]);
++        latches += decision.latched_now ? 1 : 0;
++        const csy::Rgb out = composite(decision.alpha);
++        const csy::Rgb out_0049 = composite(valid[frame]); // 0049: the re-added frame's own flag
++        if (frame > 1) {
++            const float jump = std::max({std::abs(out.r - last.r), std::abs(out.g - last.g), std::abs(out.b - last.b)});
++            largest = std::max(largest, jump);
++            changes += jump > 0.0F ? 1 : 0;
++            changes_0049 += (out_0049.r != last_0049.r || out_0049.g != last_0049.g || out_0049.b != last_0049.b) ? 1 : 0;
++        }
++        last = out;
++        last_0049 = out_0049;
++    }
++    std::cout << "hud alpha: R96-like flicker over 11 pairs, 2 generations: the synthetic changes " << changes
++              << " time(s) with the latch (0049: " << changes_0049 << "), the largest step " << largest
++              << " = a |C - W'| " << step << "\n";
++    // Generation 3: alpha, then the fall latches (one step); generation 4:
++    // alpha again (one step back).
++    require(latches == 1 && changes == 2 && changes_0049 >= 6, "hud alpha: one change per generation, not per flip");
++    require(std::abs(largest - step) < 1.0e-5F, "hud alpha: no step beyond the composite difference");
++}
++
++// DCS Control (0054): a run of pairs through one synthesizer (FidelityFX,
++// still frames), the frames' alpha_valid and generation as given; per pair
++// the current frame's re-adds with coverage and the latches.
++struct HudAlphaPair {
++    std::uint64_t alpha_readds{};
++    std::uint64_t latched{};
++    std::uint64_t views{};
++};
++
++std::vector<HudAlphaPair> hud_alpha_run(Gpu& gpu, const HudScene& scene, const std::vector<std::uint8_t>& frame_bytes,
++    const std::vector<bool>& valid, const std::vector<std::uint32_t>& generation) {
++    const DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
++    const auto image = [&] {
++        return hud_texture(gpu, kHudSynthWidth, kHudSynthHeight, format, 2, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
++            D3D12_HEAP_FLAG_NONE, D3D12_RESOURCE_STATE_RENDER_TARGET);
++    };
++    std::array<ComPtr<ID3D12Resource>, 2> sources{image(), image()};
++    auto current = image();
++    auto synthetic = image();
++    hud_upload(gpu, sources[0].Get(), frame_bytes, kHudSynthWidth * 4U, D3D12_RESOURCE_STATE_RENDER_TARGET);
++    hud_upload(gpu, sources[1].Get(), frame_bytes, kHudSynthWidth * 4U, D3D12_RESOURCE_STATE_RENDER_TARGET);
++    std::array<ID3D12Resource*, 2> input{sources[0].Get(), sources[1].Get()};
++    std::array<ID3D12Resource*, 1> current_out{current.Get()};
++    std::array<ID3D12Resource*, 1> synthetic_out{synthetic.Get()};
++    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++    require_hresult(history->initialize(gpu.device.Get(), gpu.queue.Get(), input, D3D12_RESOURCE_STATE_RENDER_TARGET),
++        "hud alpha run: history");
++    xrfg::D3D12NvidiaOpticalFlowOptions flow{};
++    flow.cockpit_mask = true;
++    flow.hud_symbology = true;
++    std::vector<HudAlphaPair> pairs;
++    xrfg::D3D12FrameSynthesizer synth;
++    require_hresult(synth.initialize(gpu.device.Get(), gpu.queue.Get(), history, current_out, synthetic_out, format,
++                        D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::fidelity_fx, flow),
++        "hud alpha run: initialize");
++    const auto views = hud_synthesis_views();
++    const auto mask_frame = [&](std::size_t number) {
++        auto frame = hud_synthesis_frame(gpu, scene, true, static_cast<std::uint64_t>(number) + 1U, valid[number]);
++        frame->hud_symbology.generation = generation[number];
++        frame->display_time = 7000 + static_cast<std::int64_t>(number);
++        return frame;
++    };
++    xrfg::D3D12HistoryCaptureTicket ticket{};
++    xrfg::D3D12FrameSynthesisTicket output{};
++    require_hresult(history->capture(0, &ticket), "hud alpha run: capture 0");
++    require_hresult(history->commit(ticket), "hud alpha run: commit 0");
++    synth.set_cockpit_mask(mask_frame(0));
++    require_hresult(synth.submit_prime(ticket, views, 0, &output), "hud alpha run: prime");
++    hud_run(gpu, [](ID3D12GraphicsCommandList*) {});
++    for (std::size_t number = 1; number < valid.size(); ++number) {
++        require_hresult(history->capture(static_cast<std::uint32_t>(number % 2), &ticket), "hud alpha run: capture");
++        require_hresult(history->commit(ticket), "hud alpha run: commit");
++        auto frame = mask_frame(number);
++        synth.set_cockpit_mask(frame);
++        require_hresult(
++            synth.submit_pair(ticket, views, views, 0, 0, &output, std::nullopt, {}, false, 0.5F, std::nullopt),
++            "hud alpha run: pair");
++        hud_run(gpu, [](ID3D12GraphicsCommandList*) {});
++        HudAlphaPair pair;
++        pair.alpha_readds = frame->counters->hud_alpha_readds.load();
++        pair.latched = frame->counters->hud_alpha_latched.load();
++        pair.views = frame->counters->hud_views.load();
++        pairs.push_back(pair);
++    }
++    require_hresult(synth.wait_for_idle(), "hud alpha run: idle");
++    return pairs;
++}
++
++void test_hud_alpha_synthesis(Gpu& gpu) {
++    // The scene of test_hud_synthesis: a green cross (class 1, coverage 0.85)
++    // over a smooth world; still, and moved 8 px.
++    const auto scene_at = [](int world_shift) {
++        HudScene scene;
++        scene.width = kHudSynthWidth;
++        scene.height = kHudSynthHeight;
++        scene.atlas_width = kHudSynthWidth;
++        scene.atlas_height = kHudSynthHeight;
++        scene.frame.assign(static_cast<std::size_t>(kHudSynthWidth) * kHudSynthHeight * 4U, 255);
++        scene.emission.assign(static_cast<std::size_t>(kHudSynthWidth) * kHudSynthHeight * 8U, 0);
++        scene.classes.assign(static_cast<std::size_t>(kHudSynthWidth) * kHudSynthHeight, 0);
++        for (UINT y = 0; y < kHudSynthHeight; ++y) {
++            for (UINT x = 0; x < kHudSynthWidth; ++x) {
++                const std::size_t at = static_cast<std::size_t>(y) * kHudSynthWidth + x;
++                const double wx = static_cast<double>(x) - world_shift;
++                std::array<float, 3> f{};
++                for (int ch = 0; ch < 3; ++ch) {
++                    const double value = 0.5 + 0.35 * std::sin(wx * 0.21 + ch) * std::cos(y * 0.17 + 0.5 * ch);
++                    f[ch] = hud_decode(static_cast<std::uint8_t>(std::clamp(value * 255.0, 0.0, 255.0)));
++                }
++                const bool symbol = ((x >= 60 && x < 64) && y >= 30 && y < 66) || ((y >= 46 && y < 50) && x >= 44 && x < 84);
++                if (symbol) {
++                    std::array<float, 4> e{};
++                    const std::array<float, 3> green{0.1F, 0.9F, 0.15F};
++                    for (int ch = 0; ch < 3; ++ch) {
++                        const float mixed = 0.15F * f[ch] + 0.85F * green[ch];
++                        e[ch] = mixed - f[ch];
++                        f[ch] = mixed;
++                    }
++                    e[3] = 0.85F;
++                    for (int ch = 0; ch < 4; ++ch) {
++                        const std::uint16_t half = hud_half(e[ch]);
++                        std::memcpy(&scene.emission[at * 8U + ch * 2U], &half, 2);
++                    }
++                    scene.classes[at] = 1;
++                }
++                for (int ch = 0; ch < 3; ++ch) {
++                    scene.frame[at * 4U + ch] = hud_encode(f[ch]);
++                }
++            }
++        }
++        return scene;
++    };
++    const auto stereo = [](const std::vector<std::uint8_t>& eye) {
++        std::vector<std::uint8_t> both(eye);
++        both.insert(both.end(), eye.begin(), eye.end());
++        return both;
++    };
++    const HudScene still = scene_at(0);
++    const HudScene moved = scene_at(8);
++    const auto frame_a = stereo(still.frame);
++    const auto frame_b = stereo(moved.frame);
++    // Pair-wide: with the world moving under the symbol the coverage
++    // composite differs from the additive one; a pair with one frame's alpha
++    // invalid (either one) is the additive pair, bit for bit.
++    const auto pair = [&](bool previous_alpha, bool current_alpha) {
++        return hud_synthesize(gpu, frame_a, frame_b, true,
++            {hud_synthesis_frame(gpu, still, true, 1, previous_alpha),
++                hud_synthesis_frame(gpu, moved, true, 2, current_alpha)})
++            .synthetic;
++    };
++    const auto additive = pair(false, false);
++    const auto both = pair(true, true);
++    require(both != additive, "hud alpha: the coverage composite differs from the additive one (moving world)");
++    require(pair(true, false) == additive && pair(false, true) == additive,
++        "hud alpha: a pair with one frame's alpha invalid is composed additively");
++    std::cout << "hud alpha: one frame of the pair without alpha_valid gives the additive pair bit for bit; both "
++                 "valid differ by up to "
++              << hud_max_difference(both, additive) << " code(s) (the composite difference)\n";
++    // The latch over a run of pairs: generation 7 valid, valid, valid, a
++    // fall, back valid twice; generation 8 valid twice.
++    const std::vector<bool> valid{true, true, true, false, true, true, true, true};
++    const std::vector<std::uint32_t> generation{7, 7, 7, 7, 7, 7, 8, 8};
++    const auto pairs = hud_alpha_run(gpu, still, frame_a, valid, generation);
++    require(pairs.size() == 7, "hud alpha run: seven pairs");
++    const std::array<std::uint64_t, 7> alpha_expected{2, 2, 0, 0, 0, 2, 2};
++    const std::array<std::uint64_t, 7> latch_expected{0, 0, 2, 0, 0, 0, 0};
++    for (std::size_t index = 0; index < pairs.size(); ++index) {
++        require(pairs[index].views == 2,
++            "hud alpha run: pair " + std::to_string(index + 1) + " cleaned both views");
++        require(pairs[index].alpha_readds == alpha_expected[index] && pairs[index].latched == latch_expected[index],
++            "hud alpha run: pair " + std::to_string(index + 1) + " composed " +
++                std::to_string(pairs[index].alpha_readds) + " view(s) with coverage, latched " +
++                std::to_string(pairs[index].latched) + " (expected " + std::to_string(alpha_expected[index]) + ", " +
++                std::to_string(latch_expected[index]) + ")");
++    }
++    std::cout << "hud alpha run: coverage on both eyes until the fall, additive (latched once per eye) for the rest "
++                 "of generation 7 even with both frames valid again, coverage again in generation 8\n";
++}
++
++// DCS Control (0054): a view with collimated symbology only (the producer
++// dropping the helmet class on overflow, HUD-only, instead of present = 0):
++// 0049 reads the class plane per texel, so it is a view like any other. The
++// removal takes out class 1 and nothing else, the re-add gives the frame
++// back, with and without coverage; and nothing in 0049's view checks needs a
++// helmet class (emission_flags without class_head_locked).
++void test_hud_class1_only(Gpu& gpu) {
++    xrfg::D3D12HudSymbologyPasses passes;
++    require_hresult(passes.initialize(gpu.device.Get(), 1), "hud passes initialize");
++    constexpr UINT width = 64, height = 48;
++    HudSymbolModel model;
++    const HudScene scene = hud_symbol_scene(width, height, {8, 6, 40, 30}, hud_noise_background, model,
++        [](UINT x, UINT y) { return static_cast<std::uint8_t>((x * 3U + y) % 5U < 2U ? 1U : 0U); });
++    std::size_t collimated = 0;
++    for (const std::uint8_t klass : model.pixel_class) {
++        require(klass == 0 || klass == 1, "hud class 1 only: the scene has no other class");
++        collimated += klass == 1 ? 1U : 0U;
++    }
++    require(collimated > 400, "hud class 1 only: symbols in the window");
++    HudTextures t = hud_textures(gpu, scene);
++    hud_record_removal(gpu, passes, scene, t);
++    const auto clean = hud_readback(gpu, t.clean.Get(), width * 4U);
++    float worst_linear = 0.0F;
++    for (UINT y = 0; y < height; ++y) {
++        for (UINT x = 0; x < width; ++x) {
++            const std::size_t at = static_cast<std::size_t>(y) * width + x;
++            if (model.pixel_class[at] == 1) {
++                const auto c = hud_noise_background(x, y);
++                for (int ch = 0; ch < 3; ++ch) {
++                    worst_linear = std::max(worst_linear, std::abs(hud_decode(clean[at * 4U + ch]) - hud_decode(c[ch])));
++                }
++            } else {
++                require(std::memcmp(&clean[at * 4U], &scene.frame[at * 4U], 4) == 0,
++                    "hud class 1 only: a pixel without symbology changed");
++            }
++        }
++    }
++    require(worst_linear < 0.006F, "hud class 1 only: the background under the symbols");
++    for (const bool alpha : {false, true}) {
++        hud_upload(gpu, t.destination.Get(), clean, width * 4U);
++        hud_record_readd(gpu, passes, scene, t, xrfg::HudRotation{}, alpha);
++        const int worst = hud_max_difference(hud_readback(gpu, t.destination.Get(), width * 4U), scene.frame);
++        require(worst <= 1, "hud class 1 only: removal then re-add does not give the frame back within a code");
++    }
++    xrfg::D3D12HudSymbology symbology{};
++    symbology.emission_flags = csy::emission_flags::hdr_overlay | csy::emission_flags::class_collimated |
++        csy::emission_flags::common_excluded;
++    symbology.views[0] = scene.eye.periphery;
++    symbology.eyes[0].layout = true;
++    symbology.eyes[0].focus_rect = scene.eye.focus_rect;
++    require(symbology.eye_present(0) && !symbology.eye_present(1),
++        "hud class 1 only: the view is present without a helmet class");
++    std::cout << "hud symbology: a class-1-only view (HUD only, no helmet class) cleaned and re-added within a code, "
++                 "worst linear "
++              << worst_linear << "\n";
++}
++
++// DCS Control (0054): the allocation record (cockpit_mask result=22). The
++// consumer against the fake producer, frames held as a synthesizer holds
++// them (its pair: the previous and the current), the records captured: the
++// private copies made are the frames held at once, not the ring's six; a
++// retired generation frees them. Then the totals at a 2 x 2700^2 stereo,
++// four-view config (Quad Views' periphery and focus per eye, the producer's
++// default atlas 2560 x 1024), before (0049) and after, from the records.
++void test_hud_allocations(Gpu& gpu) {
++    {
++        xrfg::HudAllocation allocation{};
++        allocation.kind = xrfg::HudAllocationKind::symbology_class_copy;
++        allocation.format = DXGI_FORMAT_R8_UINT;
++        allocation.width = 2560;
++        allocation.height = 1024;
++        allocation.array_size = 1;
++        allocation.count = 3;
++        allocation.owner = 2;
++        allocation.bytes = 2621440;
++        std::uint64_t total = 0;
++        const auto back =
++            xrfg::hud_allocation_from_record(xrfg::hud_allocation_record(allocation, 200ULL << 20U), &total);
++        require(back.kind == allocation.kind && back.format == allocation.format && back.width == 2560 &&
++                back.height == 1024 && back.array_size == 1 && back.count == 3 && back.owner == 2 &&
++                back.bytes == 2621440 && total == 200,
++            "hud allocations: the record round-trips");
++    }
++    struct Logged {
++        std::uint64_t a, b, c;
++    };
++    std::vector<Logged> records;
++    xrfg::CockpitMaskConsumerStats after_run{};
++    {
++        const std::wstring suffix = test_suffix(L"hudalloc");
++        FakeProducer producer(gpu, suffix);
++        FakeSymbologyProducer hud(gpu, suffix, producer);
++        auto options = test_options(suffix);
++        options.hud_symbology = true;
++        xrfg::CockpitMaskConsumer consumer;
++        require_hresult(consumer.initialize(gpu.device.Get(),
++                            [&records](std::int64_t code, std::uint64_t a, std::uint64_t b, std::uint64_t c) {
++                                if (code == 22) {
++                                    records.push_back({a, b, c});
++                                }
++                            },
++                            options),
++            "hud allocations: consumer initialize");
++        std::vector<std::shared_ptr<xrfg::D3D12CockpitMaskFrame>> held;
++        for (std::int64_t time = 14000; time < 14000 + 20; ++time) {
++            const std::uint64_t seq = producer.commit(time, 255);
++            hud.commit(producer);
++            auto frame = consumer.acquire(time);
++            require(frame != nullptr && frame->hud, "hud allocations: every frame paired with its symbology");
++            producer.signal(seq);
++            gpu.wait(frame->ready_fence.Get(), frame->ready_value);
++            Sleep(2); // the copy queue's done signal, just behind the copy (an entry is free after it)
++            held.push_back(std::move(frame));
++            if (held.size() > 2) {
++                held.erase(held.begin());
++            }
++        }
++        after_run = consumer.stats();
++        // The generation retired (export off with another generation): the
++        // copies nobody holds are freed, the held ones as their entries go.
++        held.clear();
++        hud.header_.flags &= ~csy::header_flags::active;
++        hud.header_.generation += 1;
++        hud.publish();
++        for (std::int64_t time = 14100; time < 14100 + 8; ++time) {
++            const std::uint64_t seq = producer.commit(time, 255);
++            auto frame = consumer.acquire(time);
++            require(frame != nullptr && !frame->hud, "hud allocations: no symbology once retired");
++            producer.signal(seq);
++            gpu.wait(frame->ready_fence.Get(), frame->ready_value);
++        }
++        require(consumer.stats().hud_copies == 0 && consumer.stats().hud_copies_freed == after_run.hud_copies_made,
++            "hud allocations: a retired generation frees the private copies");
++    }
++    std::size_t emission_copies = 0, class_copies = 0, imports = 0;
++    for (const Logged& logged : records) {
++        const auto allocation = xrfg::hud_allocation_from_record({logged.a, logged.b, logged.c});
++        emission_copies += allocation.kind == xrfg::HudAllocationKind::symbology_copy ? 1U : 0U;
++        class_copies += allocation.kind == xrfg::HudAllocationKind::symbology_class_copy ? 1U : 0U;
++        imports += allocation.kind == xrfg::HudAllocationKind::producer_atlas ||
++                allocation.kind == xrfg::HudAllocationKind::producer_class_atlas
++            ? 1U
++            : 0U;
++        require(allocation.width == kHudAtlasWidth && allocation.height == kHudAtlasHeight,
++            "hud allocations: every record at the producer's atlas size");
++    }
++    std::cout << "hud allocations: 20 frames, two held at a time: " << after_run.hud_copies_made
++              << " private copies made, " << after_run.hud_copies_reused << " taken over (0049: one per ring entry, "
++              << 6 << ")\n";
++    // Three: the two held and the one being copied (a fourth only if the copy
++    // queue's done signal lagged behind the frame's own fence).
++    require(after_run.hud_copies_made >= 3 && after_run.hud_copies_made <= 4 &&
++            emission_copies == after_run.hud_copies_made && class_copies == after_run.hud_copies_made &&
++            imports == 2,
++        "hud allocations: the private copies are the frames held at once, each logged once; the imports");
++
++    // The config's totals, from the records the code writes (each kind's
++    // record built as the code builds it, sizes from the device).
++    constexpr std::uint32_t eye_side = 2700;
++    constexpr std::uint32_t synthesizers = 2; // Quad Views: a swapchain per eye
++    constexpr std::uint32_t ring_size = 6;    // CockpitMaskConsumerOptions::ring_size
++    const std::uint32_t copies_after = static_cast<std::uint32_t>(after_run.hud_copies_made);
++    ID3D12Device* device = gpu.device.Get();
++    const auto record_total = [&](xrfg::HudAllocationKind kind, DXGI_FORMAT format, std::uint32_t w,
++                                  std::uint32_t h, std::uint32_t count, D3D12_RESOURCE_FLAGS flags) {
++        xrfg::HudAllocation allocation{};
++        allocation.kind = kind;
++        allocation.format = format;
++        allocation.width = w;
++        allocation.height = h;
++        allocation.count = count;
++        allocation.bytes = xrfg::hud_texture_bytes(device, w, h, 1U, format, flags);
++        const auto back = xrfg::hud_allocation_from_record(xrfg::hud_allocation_record(allocation, 0));
++        return back.bytes * back.count;
++    };
++    const auto mb = [](std::uint64_t bytes) {
++        const std::uint64_t tenths = (bytes + 50000U) / 100000U;
++        return std::to_string(tenths / 10U) + "." + std::to_string(tenths % 10U);
++    };
++    const std::uint64_t clean = record_total(xrfg::HudAllocationKind::clean_copy, DXGI_FORMAT_R8G8B8A8_TYPELESS,
++        eye_side, eye_side, 2U * synthesizers, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
++    const auto copies = [&](std::uint32_t count) {
++        return record_total(xrfg::HudAllocationKind::symbology_copy, DXGI_FORMAT_R16G16B16A16_FLOAT,
++                   csy::default_atlas_w, csy::default_atlas_h, count, D3D12_RESOURCE_FLAG_NONE) +
++            record_total(xrfg::HudAllocationKind::symbology_class_copy, DXGI_FORMAT_R8_UINT, csy::default_atlas_w,
++                csy::default_atlas_h, count, D3D12_RESOURCE_FLAG_NONE);
++    };
++    const std::uint64_t imported = copies(csy::slot_count);
++    const std::uint64_t before = clean + copies(ring_size);
++    const std::uint64_t after = clean + copies(copies_after);
++    std::cout << "hud allocations at 2 x 2700^2 stereo, 4 views (atlas 2560 x 1024): clean copies " << mb(clean)
++              << " MB (2 per synthesizer x " << synthesizers << "), private copies " << mb(copies(ring_size))
++              << " MB before (ring " << ring_size << ") -> " << mb(copies(copies_after)) << " MB after ("
++              << copies_after << " held), OFXR total " << mb(before) << " -> " << mb(after)
++              << " MB; plus the producer atlases' imports " << mb(imported)
++              << " MB counted in dedicated usage per generation opened\n";
++    require(after < before && before - after == copies(ring_size - copies_after),
++        "hud allocations: the private copies are the frames held, not the ring's");
++}
++
+ void test_hud_symbology(Gpu& gpu) {
++    test_hud_alpha_latch(); // DCS Control (0054)
+     test_hud_nearest_frame();
+     test_hud_pairing_and_copies(gpu);
+     test_hud_held_set(gpu);
+@@ -1763,4 +2193,7 @@
+     test_hud_mask_overlay_dilation(gpu);
+     test_hud_synthesis(gpu);
+     test_hud_capture(gpu); // DCS Control (0053)
++    test_hud_alpha_synthesis(gpu); // DCS Control (0054)
++    test_hud_class1_only(gpu);
++    test_hud_allocations(gpu);
+ }

@@ -1,0 +1,1953 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1100,6 +1100,36 @@
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_scene_change.cmake")
+             set_tests_properties(xrfg_layer_scene_change_${scene_case} PROPERTIES TIMEOUT 150)
+         endforeach()
++        # DCS Control (0029): the heavy phase of the scene change scenario
++        # with no load after it: the depth it took is given back a slot at a
++        # time while the light tail stays fresh. Named for the pacing tests'
++        # pass (a real-timing scenario).
++        add_test(
++            NAME xrfg_layer_triple_deep_shrink
++            COMMAND "${CMAKE_COMMAND}"
++                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                "-DSCENES_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_scenes_triple.ini"
++                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/triple-deep-shrink"
++                "-DCASE=shrink"
++                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_scene_change.cmake")
++        set_tests_properties(xrfg_layer_triple_deep_shrink PROPERTIES TIMEOUT 200)
++        # DCS Control (0029): the runtime stalls the presenter for 2.5 s in
++        # 3X with the deeper pipeline: the application's frame calls stay
++        # bounded, generation fails open once (result=950) and the frames
++        # pass through after it.
++        add_test(
++            NAME xrfg_layer_presenter_stall
++            COMMAND "${CMAKE_COMMAND}"
++                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_scenes_triple.ini"
++                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/presenter-stall"
++                "-DMODE=dcs-presenter-stall"
++                "-DEXPECT_FLIGHT=op=presenter_transition result=950 "
++                "-DEXPECT_FLIGHT_COUNT=1"
++                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
++        set_tests_properties(xrfg_layer_presenter_stall PROPERTIES TIMEOUT 120)
+ 
+         # NVIDIA optical flow cannot initialise on the fake runtime's WARP
+         # device, so an ini asking for it exercises the layer's fallback to
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -22,12 +22,20 @@
+ //   TripleDepth                (0007) the 3X deeper pipeline's one-slot shift
+ //   SceneChange                (0009) a stall of the application (a mission
+ //                              load) that starts every adaptive state over
++//   GenerationStall            (DCS Control 0029) the bound on the
++//                              application's waits for the presenter, and
++//                              the latch that fails generation open
++//   measured_interpolation_fraction
++//                              (DCS Control 0029) a synthetic's position
++//                              from measured release times after a late frame
+ //
+ // All times are nanoseconds on one monotonic timeline the caller chooses.
+ 
+ #include <array>
++#include <chrono>
+ #include <cstddef>
+ #include <cstdint>
++#include <optional>
+ 
+ namespace xrfg::latency {
+ 
+@@ -876,6 +884,20 @@
+ // Slots are given back only by a new shape: a switch, a new presenter, or a
+ // scene change (the application stalling drains the queue).
+ //
++// DCS Control (0029): and one at a time once the depth is more than it needs.
++// One late episode could add up to four periods (44 ms at 90 Hz) for the rest
++// of a mission. After kShrinkWindows windows in a row in which every first
++// synthetic was written more than half a period before its hand-over
++// (triple_depth_leader_spare) and none was late or missed, one slot is given
++// back: the presenter drops one queued first synthetic at its own slot (its
++// second synthetic, already written, takes that slot), the reverse of the
++// re-presented slot that took it. Never below kBaseSlots, the slot the arm
++// takes. Not within the dwell after a slot was taken (kDwellWindows windows,
++// doubled up to kMaxDwellWindows when a slot is taken within kFlapWindows of
++// one given back), so it cannot oscillate. Off SteamVR only: there a first
++// synthetic's slack is measured; SteamVR's yes/no lateness says nothing
++// about room to spare.
++//
+ // It is not done by holding every first synthetic until it is a period old
+ // (2X's deeper pipeline): under a pipelined application there is no frame to
+ // hold with, and a hold for age would add a slot every time the application
+@@ -892,6 +914,12 @@
+     static constexpr std::uint32_t kGrowLate = 3;
+     static constexpr std::uint32_t kGrowWindows = 2;
+     static constexpr std::uint32_t kGrowLateFast = 10;
++    // DCS Control (0029): giving slots back.
++    static constexpr std::uint32_t kBaseSlots = 1;
++    static constexpr std::uint32_t kShrinkWindows = 3;
++    static constexpr std::uint32_t kDwellWindows = 10;
++    static constexpr std::uint32_t kMaxDwellWindows = 80;
++    static constexpr std::uint32_t kFlapWindows = 30;
+ 
+     bool active{};               // 3X with the deeper pipeline in force
+     bool pending{};              // a slot is wanted
+@@ -900,6 +928,14 @@
+     std::uint32_t window{};
+     std::uint32_t window_late{};
+     std::uint32_t late_windows{}; // in a row
++    // DCS Control (0029).
++    bool shrink_pending{};             // a slot is to be given back
++    std::uint32_t given_back{};        // over the session, for the log
++    std::uint32_t window_spare{};
++    std::uint32_t spare_windows{};     // in a row
++    std::uint32_t dwell{};             // windows before one may be given back
++    std::uint32_t dwell_length{kDwellWindows};
++    std::uint32_t since_given_back{kFlapWindows}; // windows, saturating
+ 
+     void arm(bool deep_pipeline, std::uint32_t frames_per_application_frame) noexcept {
+         active = deep_pipeline && frames_per_application_frame > 2;
+@@ -908,28 +944,61 @@
+         window = 0;
+         window_late = 0;
+         late_windows = 0;
++        // DCS Control (0029): a new shape keeps no record of the old one's.
++        shrink_pending = false;
++        window_spare = 0;
++        spare_windows = 0;
++        dwell = 0;
++        dwell_length = kDwellWindows;
++        since_given_back = kFlapWindows;
+     }
+     // One first synthetic's slot (not a re-presented one of this): whether
+     // it was late. Returns true when this asks for one more slot.
+-    bool observe_leader(bool late) noexcept {
+-        if (!active || pending || slots >= kMaxSlots) {
++    // DCS Control (0029): and whether it had more than half a period to
++    // spare (triple_depth_leader_spare); enough windows of nothing but those
++    // set shrink_pending. A late one cancels a give-back still pending.
++    // Counted at kMaxSlots as well, where only a give-back can follow.
++    bool observe_leader(bool late, bool spare = false) noexcept {
++        if (!active || pending) {
+             return false;
+         }
+         ++window;
+         window_late += late ? 1U : 0U;
++        window_spare += spare && !late ? 1U : 0U;
++        if (late) {
++            shrink_pending = false;
++        }
+         if (window < kWindow) {
+             return false;
+         }
++        const bool all_spare = window_late == 0 && window_spare >= window;
+         late_windows = window_late >= kGrowLate ? late_windows + 1 : 0;
+         const bool fast = window_late >= kGrowLateFast; // 0009
+         window = 0;
+         window_late = 0;
+-        const bool grow = fast || late_windows >= kGrowWindows;
++        window_spare = 0;
++        const bool grow =
++            slots < kMaxSlots && (fast || late_windows >= kGrowWindows);
+         if (grow) {
+             late_windows = 0;
++            spare_windows = 0;
++            shrink_pending = false;
++            pending = true;
++            return true;
++        }
++        if (since_given_back < kFlapWindows) {
++            ++since_given_back;
++        }
++        if (dwell > 0) {
++            --dwell;
++        }
++        spare_windows = all_spare ? spare_windows + 1 : 0;
++        if (!shrink_pending && dwell == 0 && slots > kBaseSlots &&
++            spare_windows >= kShrinkWindows) {
++            shrink_pending = true;
++            spare_windows = 0;
+         }
+-        pending = grow;
+-        return grow;
++        return false;
+     }
+     // At a slot after a real frame (gen1_slot): whether this slot is the one
+     // re-presented. `leader_or_empty`: the front of the queue is a first
+@@ -945,6 +1014,37 @@
+         window = 0;
+         window_late = 0;
+         late_windows = 0;
++        // DCS Control (0029): the dwell after any grow; doubled when this
++        // slot came back soon after one was given back.
++        window_spare = 0;
++        spare_windows = 0;
++        shrink_pending = false;
++        dwell_length = since_given_back < kFlapWindows
++            ? (dwell_length * 2 < kMaxDwellWindows ? dwell_length * 2
++                                                   : kMaxDwellWindows)
++            : kDwellWindows;
++        dwell = dwell_length;
++        return true;
++    }
++    // DCS Control (0029): at a first synthetic's slot with a give-back
++    // pending: whether one slot is given back now. `can_drop`: the frame
++    // waiting is a first synthetic, written, with its second synthetic
++    // queued and written behind it (the caller drops the first). Never
++    // below kBaseSlots.
++    [[nodiscard]] bool give_back(bool can_drop) noexcept {
++        if (!shrink_pending || !can_drop || !active || pending ||
++            slots <= kBaseSlots) {
++            return false;
++        }
++        shrink_pending = false;
++        --slots;
++        ++given_back;
++        window = 0;
++        window_late = 0;
++        window_spare = 0;
++        late_windows = 0;
++        spare_windows = 0;
++        since_given_back = 0;
+         return true;
+     }
+     // DCS VR Control (0009): every slot it can take is taken and none is
+@@ -989,6 +1089,16 @@
+     return handed_late || (period > 0 && slack < -(period / 2));
+ }
+ 
++// DCS Control (0029): whether a first synthetic had room to spare for the
++// deeper pipeline to give a slot back: handed over on time and written more
++// than half a period before its hand-over. With one period less it would
++// still be written within half a period of its hand-over, which
++// triple_depth_leader_late counts as on time.
++[[nodiscard]] constexpr bool triple_depth_leader_spare(
++    Nanoseconds slack, Nanoseconds period, bool handed_late = false) noexcept {
++    return !handed_late && period > 0 && slack > period / 2;
++}
++
+ // The release delay's slack sample in 3X with the deeper pipeline: a period
+ // of the measured slack is the depth itself and is not given back as delay,
+ // so the tuner keeps that period in hand (it raises only past a period plus
+@@ -1002,4 +1112,129 @@
+     return deep_pipeline && period > 0 ? slack - period : slack;
+ }
+ 
++// ---------------------------------------------------------------------------
++// DCS Control (0029): the application's waits for the presenter, bounded.
++//
++// The application's xrEndFrame waits on the presenter thread four ways: for
++// room in its queue (capacity), for it to drain (idle), for a submission to
++// reach the runtime, and for the once-per-pair hold. None had a bound: a
++// presenter stalled in a runtime call, or behind a fence that never
++// signalled, froze the game with it. Each wait now runs kWaitBound at a time.
++// The first time one runs out the latch trips (logged once by the caller),
++// and from then on generation fails open: the application's frames pass
++// through without synthesis, as with the tray's off switch, and a wait that
++// runs out again - kStalledWaitBound, shorter, so the game keeps a usable
++// rate while the presenter is gone - lets the application go on without
++// it. The latch is re-armed by a scene change, a new presenter or the
++// runtime focusing the session again, each of which opens a quiet period of
++// kQuiet (adaptive control's scene settle) in which a wait that runs out
++// keeps waiting instead: a mission's first frames, or a presenter's first,
++// may take that long.
++enum class StallVerdict : std::uint32_t {
++    keep_waiting = 0,
++    tripped = 1,  // the latch tripped now: the caller logs it, once
++    stalled = 2,  // tripped before: fail open again, silently
++};
++
++struct GenerationStall {
++    static constexpr Nanoseconds kWaitBound = 500 * kMillisecond;
++    static constexpr Nanoseconds kStalledWaitBound = 250 * kMillisecond;
++    static constexpr Nanoseconds kQuiet = 2 * kSecond;
++
++    bool stalled{};
++    std::uint32_t trips{};
++    Nanoseconds quiet_until{-1};
++
++    [[nodiscard]] Nanoseconds wait_bound() const noexcept {
++        return stalled ? kStalledWaitBound : kWaitBound;
++    }
++    // A bounded wait ran out at `now`.
++    [[nodiscard]] StallVerdict timed_out(Nanoseconds now) noexcept {
++        if (stalled) {
++            return StallVerdict::stalled;
++        }
++        if (now < quiet_until) {
++            return StallVerdict::keep_waiting;
++        }
++        stalled = true;
++        ++trips;
++        return StallVerdict::tripped;
++    }
++    void rearm(Nanoseconds now) noexcept {
++        stalled = false;
++        quiet_until = now + kQuiet;
++    }
++};
++
++// Waits on `condition` (held through `lock`) until `predicate` holds, at
++// most bound() at a time. When a bound runs out, on_timeout() says whether
++// to keep waiting. True when the predicate held, false when given up.
++template <typename Condition, typename Lock, typename Predicate,
++          typename Bound, typename OnTimeout>
++[[nodiscard]] bool wait_bounded(
++    Condition& condition,
++    Lock& lock,
++    Predicate predicate,
++    Bound bound,
++    OnTimeout on_timeout) {
++    for (;;) {
++        if (condition.wait_for(
++                lock, std::chrono::nanoseconds(bound()), predicate)) {
++            return true;
++        }
++        if (!on_timeout()) {
++            return predicate();
++        }
++    }
++}
++
++// ---------------------------------------------------------------------------
++// DCS Control (0029): where a synthetic belongs, from measured times.
++//
++// The layer places synthetic `index` (of frames - 1, counted from the first
++// shown; it goes out frames - 1 - index display periods before its real
++// frame) at 1 - (frames - 1 - index) * period / interval of the way from the
++// previous application frame to the current one. The interval it had was
++// the difference of the display times the application was told - virtual
++// times, whole periods apart, so the fraction was always a third, two thirds
++// or a half. After a late application frame the content of the two frames is
++// further apart than that: this takes the interval from when the application
++// was released for each of them (its frame starts there), measured.
++//
++// Only off the regular cadence: within kRegularBand of frames periods the
++// fixed answer stands (the measured one would only add the release's
++// jitter). Nothing when either release is missing, out of order, or the
++// interval implausible - no longer than the synthetics need, or more than
++// twice the cadence - and the caller keeps its own answer. Clamped to [0, 1].
++inline constexpr Nanoseconds kRegularBandDivisor = 4; // a quarter period
++
++[[nodiscard]] inline std::optional<float> measured_interpolation_fraction(
++    Nanoseconds previous_release,
++    Nanoseconds current_release,
++    Nanoseconds period,
++    std::uint32_t frames,
++    std::uint32_t index) noexcept {
++    if (period <= 0 || frames < 2 || index + 1 >= frames ||
++        previous_release <= 0 || current_release <= previous_release) {
++        return std::nullopt;
++    }
++    const Nanoseconds interval = current_release - previous_release;
++    const Nanoseconds cadence = period * static_cast<Nanoseconds>(frames);
++    if (interval <= period * static_cast<Nanoseconds>(frames - 1) ||
++        interval > cadence * 2) {
++        return std::nullopt;
++    }
++    const Nanoseconds off = interval > cadence ? interval - cadence
++                                               : cadence - interval;
++    if (off <= period / kRegularBandDivisor) {
++        return std::nullopt;
++    }
++    const Nanoseconds before =
++        period * static_cast<Nanoseconds>(frames - 1 - index);
++    const double fraction = 1.0 -
++        static_cast<double>(before) / static_cast<double>(interval);
++    return static_cast<float>(
++        fraction < 0.0 ? 0.0 : (fraction > 1.0 ? 1.0 : fraction));
++}
++
+ } // namespace xrfg::latency
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -1064,6 +1064,8 @@
+     std::uint64_t qpc_frequency{};
+     ComPtr<ID3D12Resource> nvidia_timestamp_readback;
+     HANDLE fence_event{};
++    // DCS Control (0029): a bounded fence wait ran out (logged once).
++    bool fence_wait_timeout_logged{};
+     RollingSource previous;
+     RollingSource untracked_source;
+     D3D12_RESOURCE_DESC image_description{};
+@@ -3647,12 +3649,22 @@
+         return S_FALSE;
+     }
+ 
++    // DCS Control (0029): bounded. A fence that never signals - a deferred
++    // copy nobody flushed, a queue waiting on a value nobody signals - held
++    // the caller (the application's thread, a drain before a swapchain goes)
++    // for good. Past kFenceWaitBoundMs this fails with ERROR_TIMEOUT, which
++    // the callers treat as any fence failure: synthesis turns off. Logged
++    // once per synthesizer: presenter_transition result=952, a= the value
++    // waited for, b= the fence's completed value, c= the bound in ms.
++    static constexpr DWORD kFenceWaitBoundMs = 2000;
++
+     [[nodiscard]] HRESULT wait_for_fence(
+         ID3D12Fence* input_fence,
+         std::uint64_t value) noexcept {
+         if (fence_event == nullptr) {
+             return E_UNEXPECTED;
+         }
++        const ULONGLONG deadline = GetTickCount64() + kFenceWaitBoundMs;
+         for (;;) {
+             const HRESULT status = fence_status(input_fence, value);
+             if (status != S_FALSE) {
+@@ -3662,7 +3674,28 @@
+             if (FAILED(result)) {
+                 return result;
+             }
+-            if (WaitForSingleObject(fence_event, INFINITE) != WAIT_OBJECT_0) {
++            const ULONGLONG now = GetTickCount64();
++            const DWORD wait_result = now >= deadline
++                ? WAIT_TIMEOUT
++                : WaitForSingleObject(
++                      fence_event, static_cast<DWORD>(deadline - now));
++            if (wait_result == WAIT_TIMEOUT) {
++                const HRESULT last = fence_status(input_fence, value);
++                if (last != S_FALSE) {
++                    return last;
++                }
++                if (!fence_wait_timeout_logged) {
++                    fence_wait_timeout_logged = true;
++                    bridge_flight_logger().event(
++                        BridgeFlightOperation::presenter_transition,
++                        952,
++                        value,
++                        input_fence->GetCompletedValue(),
++                        kFenceWaitBoundMs);
++                }
++                return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
++            }
++            if (wait_result != WAIT_OBJECT_0) {
+                 const DWORD error = GetLastError();
+                 return HRESULT_FROM_WIN32(
+                     error == ERROR_SUCCESS ? ERROR_GEN_FAILURE : error);
+diff --git a/src/d3d12/d3d12_history.cpp b/src/d3d12/d3d12_history.cpp
+--- a/src/d3d12/d3d12_history.cpp
++++ b/src/d3d12/d3d12_history.cpp
+@@ -109,6 +109,8 @@
+     std::vector<ComPtr<ID3D12Resource>> source_images;
+     ComPtr<ID3D12Fence> producer_fence;
+     HANDLE fence_event{};
++    // DCS Control (0029): a bounded fence wait ran out (logged once).
++    bool fence_wait_timeout_logged{};
+     // kSlotCount slots of their own, or (in place) one per source.
+     std::vector<HistorySlot> slots;
+     D3D12_RESOURCE_STATES release_state{};
+@@ -345,6 +347,15 @@
+         return completed >= value ? S_OK : S_FALSE;
+     }
+ 
++    // DCS Control (0029): bounded, as the synthesizer's: past
++    // kFenceWaitBoundMs this fails with ERROR_TIMEOUT and wait_for_idle turns
++    // capture off, as for any fence failure. The event can carry a wake from
++    // an earlier wait that ran out, so a wake re-checks the fence and waits
++    // again within the same bound. Logged once per history:
++    // presenter_transition result=953, a= the value waited for, b= the
++    // fence's completed value, c= the bound in ms.
++    static constexpr DWORD kFenceWaitBoundMs = 2000;
++
+     [[nodiscard]] HRESULT wait_for_fence(
+         ID3D12Fence* fence,
+         std::uint64_t value) noexcept {
+@@ -355,15 +366,37 @@
+         if (fence_event == nullptr) {
+             return E_UNEXPECTED;
+         }
+-        const HRESULT event_result = fence->SetEventOnCompletion(value, fence_event);
+-        if (FAILED(event_result)) {
+-            return event_result;
+-        }
+-        if (WaitForSingleObject(fence_event, INFINITE) != WAIT_OBJECT_0) {
+-            const DWORD error = GetLastError();
+-            return HRESULT_FROM_WIN32(error == ERROR_SUCCESS ? ERROR_GEN_FAILURE : error);
++        const ULONGLONG deadline = GetTickCount64() + kFenceWaitBoundMs;
++        for (;;) {
++            const HRESULT event_result = fence->SetEventOnCompletion(value, fence_event);
++            if (FAILED(event_result)) {
++                return event_result;
++            }
++            const ULONGLONG now = GetTickCount64();
++            const DWORD wait_result = now >= deadline
++                ? WAIT_TIMEOUT
++                : WaitForSingleObject(fence_event, static_cast<DWORD>(deadline - now));
++            if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_TIMEOUT) {
++                const DWORD error = GetLastError();
++                return HRESULT_FROM_WIN32(error == ERROR_SUCCESS ? ERROR_GEN_FAILURE : error);
++            }
++            const HRESULT now_status = fence_status(fence, value);
++            if (now_status != S_FALSE) {
++                return now_status == S_OK ? S_OK : E_FAIL;
++            }
++            if (wait_result == WAIT_TIMEOUT) {
++                if (!fence_wait_timeout_logged) {
++                    fence_wait_timeout_logged = true;
++                    bridge_flight_logger().event(
++                        BridgeFlightOperation::presenter_transition,
++                        953,
++                        value,
++                        fence->GetCompletedValue(),
++                        kFenceWaitBoundMs);
++                }
++                return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
++            }
+         }
+-        return fence_status(fence, value) == S_OK ? S_OK : E_FAIL;
+     }
+ 
+     [[nodiscard]] HRESULT prepare_slot_for_capture(HistorySlot& slot) noexcept {
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -566,6 +566,10 @@
+     XrTime display_time{};
+     XrEnvironmentBlendMode environment_blend_mode{};
+     std::vector<ProjectionLayerSnapshot> layers;
++    // DCS Control (0029): when the once-per-pair hold released the
++    // application to start this frame (steady clock, ns; 0 not known), for
++    // xrfg::latency::measured_interpolation_fraction.
++    std::int64_t released_at_ns{};
+ };
+ 
+ struct ProjectionViewReference {
+@@ -1700,6 +1704,16 @@
+     // The 3X deeper pipeline's one re-presented slot (see
+     // xrfg::latency::TripleDepth). Guarded by presenter_mutex.
+     xrfg::latency::TripleDepth triple_depth;
++    // DCS Control (0029): the bound on the application's waits for the
++    // presenter and the latch that fails generation open when one runs out
++    // (xrfg::latency::GenerationStall). Guarded by presenter_mutex;
++    // generation_stalled mirrors the latch for the xrEndFrame thread, and
++    // generation_stall_serial counts trips so that thread clears the
++    // generation continuity once per trip (generation_stall_cleared, its own).
++    xrfg::latency::GenerationStall generation_stall;
++    std::atomic<bool> generation_stalled{false};
++    std::atomic<std::uint32_t> generation_stall_serial{0};
++    std::uint32_t generation_stall_cleared{};
+     // `[ofxr] diag_vram`. Fixed for the session.
+     bool diag_vram{};
+     // DCS VR Control (0011): when vram_status was last logged.
+@@ -8231,14 +8245,17 @@
+         // DCS VR Control (0009): off SteamVR the deeper pipeline judges
+         // each first synthetic here, by when it was written against its
+         // hand-over (see xrfg::latency::triple_depth_leader_late).
++        // DCS Control (0029): and whether it had room to spare, which over
++        // enough windows gives a slot back.
+         if (state.triple_depth.active && !state.dispatch->steamvr_runtime &&
+             state.frames_per_application_frame > 2) {
++            const auto leader_period = static_cast<xrfg::latency::Nanoseconds>(
++                state.presenter_display_period);
+             static_cast<void>(state.triple_depth.observe_leader(
+                 xrfg::latency::triple_depth_leader_late(
+-                    slack,
+-                    static_cast<xrfg::latency::Nanoseconds>(
+-                        state.presenter_display_period),
+-                    handed_late)));
++                    slack, leader_period, handed_late),
++                xrfg::latency::triple_depth_leader_spare(
++                    slack, leader_period, handed_late)));
+         }
+         // DCS VR Control (0007): with the deeper pipeline a period of it is
+         // the depth, kept in hand. DCS VR Control (0008): once a slot has
+@@ -8341,6 +8358,26 @@
+         front->owned_frame->leads_frame;
+ }
+ 
++// DCS Control (0029): a slot of the deeper pipeline can be given back at
++// this slot (xrfg::latency::TripleDepth::give_back): a first synthetic, not
++// one made under the late-frame skip, waits in front with its output
++// written, and its frame's second synthetic, written too, right behind it.
++// presenter_mutex held.
++[[nodiscard]] bool triple_depth_drop_safe_locked(const SessionState& state) noexcept {
++    if (!state.deep_pipeline || state.frames_per_application_frame <= 2 ||
++        state.presenter_submissions.size() < 2) {
++        return false;
++    }
++    const auto& front = state.presenter_submissions[0];
++    const auto& next = state.presenter_submissions[1];
++    return front->owned_frame && front->owned_frame->synthetic &&
++        front->owned_frame->leads_frame && !front->owned_frame->skip_led &&
++        synthetic_output_ready(*front->owned_frame) &&
++        next->owned_frame && next->owned_frame->synthetic &&
++        !next->owned_frame->leads_frame &&
++        synthetic_output_ready(*next->owned_frame);
++}
++
+ // DCS VR Control (0006): once a second on the presenter thread, the
+ // submission_timing records (see bridge_flight_logger.hpp): result=1 the
+ // submissions and the late ones by kind, result=2 in 3X off SteamVR the
+@@ -9065,6 +9102,10 @@
+         bool depth_slot = false;
+         std::uint32_t depth_inserted = 0;
+         std::uint32_t depth_slots = 0;
++        // DCS Control (0029): a slot given back here, and how many this
++        // session has given back, recorded after the lock.
++        bool depth_given_back = false;
++        std::uint32_t depth_given_total = 0;
+         // DCS VR Control (0008): the display time correction rebased by a
+         // slot taken: before, after and the mode, recorded after the lock.
+         bool depth_rebased = false;
+@@ -9212,6 +9253,44 @@
+                     }
+                 }
+                 state->presenter_skip_slot_consumed = false;
++                // DCS Control (0029): the deeper pipeline gives a slot back
++                // (xrfg::latency::TripleDepth::give_back), the reverse of the
++                // re-presented slot that took it: at a first synthetic's
++                // slot that first synthetic is dropped, as above, and its
++                // second synthetic, already written, takes the slot - every
++                // later frame goes out a period sooner. Never under the
++                // late-frame skip.
++                if (!depth_slot && gen1_slot && dropped_leader == nullptr &&
++                    state->triple_depth.shrink_pending &&
++                    !state->presenter_stop_requested &&
++                    !state->late_skip_active.load() &&
++                    state->triple_depth.give_back(
++                        triple_depth_drop_safe_locked(*state))) {
++                    dropped_leader = state->presenter_submissions.front();
++                    state->presenter_submissions.pop_front();
++                    depth_given_back = true;
++                    depth_slots = state->triple_depth.slots;
++                    depth_given_total = state->triple_depth.given_back;
++                    // Every real frame from here lands a period sooner: the
++                    // display time correction moves to the shape keyed by
++                    // the slots left, as a slot taken moves it (0008).
++                    if (state->display_time_correction_enabled) {
++                        depth_rebased = true;
++                        depth_correction_before =
++                            state->display_time_corrector.correction;
++                        depth_correction_mode = xrfg::latency::display_time_mode(
++                            state->frames_per_application_frame,
++                            state->deep_pipeline,
++                            depth_slots);
++                        depth_correction_after =
++                            xrfg::latency::rebase_display_time_for_depth(
++                                state->display_time_corrector,
++                                depth_correction_mode,
++                                -1,
++                                static_cast<xrfg::latency::Nanoseconds>(
++                                    state->presenter_display_period));
++                    }
++                }
+                 // DCS VR Control (0009): the first synthetic handed over
+                 // unwritten at the previous slot, judged now.
+                 if (!state->unwritten_leader_ready.empty()) {
+@@ -9472,6 +9551,19 @@
+                         state->presenter_display_period / 1000),
+                     depth_inserted);
+             }
++            // DCS Control (0029): result=404, a slot the 3X deeper pipeline
++            // gave back by dropping a written first synthetic. a= the slots
++            // now in force, b= the display period in microseconds, c= how
++            // many this session has given back.
++            if (depth_given_back) {
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::presenter_transition,
++                    404,
++                    depth_slots,
++                    static_cast<std::uint64_t>(
++                        state->presenter_display_period / 1000),
++                    depth_given_total);
++            }
+             // DCS VR Control (0008): result 0 (rebased, not measured), as a
+             // switch records it; c= the mode now keyed (3: one slot, 4: two).
+             if (depth_rebased) {
+@@ -9518,12 +9610,15 @@
+                     }
+                 }
+                 state->presenter_condition.notify_all();
+-                xrfg::bridge_flight_logger().event(
+-                    xrfg::BridgeFlightOperation::submission_timing,
+-                    4,
+-                    dropped_leader->sequence,
+-                    0,
+-                    0);
++                // DCS Control (0029): a slot given back is recorded as 404.
++                if (!depth_given_back) {
++                    xrfg::bridge_flight_logger().event(
++                        xrfg::BridgeFlightOperation::submission_timing,
++                        4,
++                        dropped_leader->sequence,
++                        0,
++                        0);
++                }
+             }
+             // A fresh frame whose images were left acquired: join the
+             // application's queue to synthesis and hand them to the runtime
+@@ -10645,6 +10740,74 @@
+     state->presenter_condition.notify_all();
+ }
+ 
++// DCS Control (0029): the application's waits for the presenter, bounded (see
++// xrfg::latency::GenerationStall). Which wait ran out, for the log.
++enum class PresenterWaitKind : std::uint64_t {
++    capacity = 1,
++    idle = 2,
++    submission = 3,
++    pair = 4,
++};
++
++// Waits on presenter_condition, presenter_mutex held through `lock`, until
++// `predicate` holds or the stall bound gives up. True when it held. Sets
++// `tripped` when this wait tripped the latch, for the caller to log once
++// presenter_mutex is released. Takes no lock of its own: nothing here adds
++// to the lock order.
++template <typename Predicate>
++[[nodiscard]] bool wait_presenter_bounded(
++    SessionState& state,
++    std::unique_lock<std::mutex>& lock,
++    Predicate predicate,
++    bool& tripped) {
++    return xrfg::latency::wait_bounded(
++        state.presenter_condition,
++        lock,
++        predicate,
++        [&] { return state.generation_stall.wait_bound(); },
++        [&] {
++            const auto verdict = state.generation_stall.timed_out(
++                steady_nanoseconds(std::chrono::steady_clock::now()));
++            if (verdict == xrfg::latency::StallVerdict::tripped) {
++                tripped = true;
++                state.generation_stalled = true;
++                ++state.generation_stall_serial;
++            }
++            return verdict == xrfg::latency::StallVerdict::keep_waiting;
++        });
++}
++
++// result=950: an application wait for the presenter ran out and generation
++// fails open until a scene change, a new presenter or the runtime focusing
++// the session again. a= which wait (1 capacity, 2 idle, 3 a submission, 4
++// the once-per-pair hold), b= its bound in milliseconds, c= trips this
++// session. Never under presenter_mutex.
++void log_generation_stall(PresenterWaitKind kind, std::uint32_t trips) noexcept {
++    xrfg::bridge_flight_logger().event(
++        xrfg::BridgeFlightOperation::presenter_transition,
++        950,
++        static_cast<std::uint64_t>(kind),
++        static_cast<std::uint64_t>(
++            xrfg::latency::GenerationStall::kWaitBound / 1'000'000),
++        trips);
++}
++
++// Re-arms the latch: a scene change, a new presenter, the session focused
++// again. presenter_mutex held. result=951 when it was tripped (a= what
++// re-armed it: 1 scene change, 2 presenter, 3 focus), logged by the caller.
++[[nodiscard]] bool rearm_generation_stall_locked(SessionState& state) noexcept {
++    const bool was_stalled = state.generation_stall.stalled;
++    state.generation_stall.rearm(
++        steady_nanoseconds(std::chrono::steady_clock::now()));
++    state.generation_stalled = false;
++    return was_stalled;
++}
++
++void log_generation_stall_rearmed(std::uint64_t by) noexcept {
++    xrfg::bridge_flight_logger().event(
++        xrfg::BridgeFlightOperation::presenter_transition, 951, by, 0, 0);
++}
++
+ // DCS Control (0016): the 3X pacing state that belongs to one presenter, one
+ // scene and one shape - the release delay and the epoch its slack samples
+ // are tagged with, a leader or probe due, the late-frame skip and the fences
+@@ -10669,7 +10832,7 @@
+     bool preserve_virtual_timeline,
+     std::optional<XrFrameState> adopted_frame_state) noexcept {
+     try {
+-        std::scoped_lock lock(state->presenter_mutex);
++        std::unique_lock lock(state->presenter_mutex);
+         if (state->presenter_active) {
+             return true;
+         }
+@@ -10734,9 +10897,16 @@
+                 -static_cast<std::int32_t>(slots_before),
+                 0));
+         }
++        // DCS Control (0029): a new presenter re-arms the stall latch, with
++        // its first frames in the quiet period.
++        const bool stall_rearmed = rearm_generation_stall_locked(*state);
+         state->presenter_stop_requested = false;
+         state->presenter_active = true;
+         state->presenter_thread = std::thread(continuous_presenter_main, state);
++        lock.unlock();
++        if (stall_rearmed) {
++            log_generation_stall_rearmed(2);
++        }
+         return true;
+     } catch (...) {
+         state->presenter_active = false;
+@@ -10851,7 +11021,10 @@
+             state->frames_per_application_frame;
+         const auto entered = std::chrono::steady_clock::now();
+         std::unique_lock lock(state->presenter_mutex);
+-        state->presenter_condition.wait(lock, [&] {
++        // DCS Control (0029): bounded; past the bound the application goes
++        // on (see xrfg::latency::GenerationStall).
++        bool stall_tripped = false;
++        const bool held = wait_presenter_bounded(*state, lock, [&] {
+             // A presenter with nothing queued and nothing to repeat stops
+             // counting until the application gives it something - which,
+             // when this is called at admission, is what it is waiting to do.
+@@ -10866,7 +11039,15 @@
+                    presenter_starved ||
+                    XR_FAILED(state->presenter_failure) ||
+                    state->presenter_stop_requested;
+-        });
++        }, stall_tripped);
++        if (!held) {
++            const std::uint32_t trips = state->generation_stall.trips;
++            lock.unlock();
++            if (stall_tripped) {
++                log_generation_stall(PresenterWaitKind::pair, trips);
++            }
++            return;
++        }
+         if (XR_FAILED(state->presenter_failure) ||
+             state->presenter_stop_requested) {
+             return;
+@@ -11005,18 +11186,30 @@
+     }
+ }
+ 
++// DCS Control (0029): bounded. Past the bound it returns XR_SUCCESS with
++// the stall latch tripped (generation_stalled): the frame goes on, and the
++// caller passes it through instead of generating.
+ [[nodiscard]] XrResult wait_for_presenter_capacity(
+     const std::shared_ptr<SessionState>& state,
+     std::size_t maximum_outstanding) noexcept {
+     try {
+         ApplicationBlockedScope blocked; // DCS VR Control (0004)
+         std::unique_lock lock(state->presenter_mutex);
+-        state->presenter_condition.wait(lock, [&] {
++        bool stall_tripped = false;
++        const bool room = wait_presenter_bounded(*state, lock, [&] {
+             return state->outstanding_presenter_submissions <=
+                        maximum_outstanding ||
+                    XR_FAILED(state->presenter_failure) ||
+                    state->presenter_stop_requested;
+-        });
++        }, stall_tripped);
++        if (!room) {
++            const std::uint32_t trips = state->generation_stall.trips;
++            lock.unlock();
++            if (stall_tripped) {
++                log_generation_stall(PresenterWaitKind::capacity, trips);
++            }
++            return XR_SUCCESS;
++        }
+         if (XR_FAILED(state->presenter_failure)) {
+             return state->presenter_failure;
+         }
+@@ -11028,16 +11221,36 @@
+     }
+ }
+ 
++// DCS Control (0029): with `fail_open`, bounded: past the bound it returns
++// XR_TIMEOUT_EXPIRED (a success code: nothing failed) with the stall latch
++// tripped, and the caller must not take the content lock or touch anything
++// the queue names. Without, as before: the swapchain and space teardown
++// (PresenterResourceLifetimeGuard) and a presenter's start must not go on
++// while a submission still names what they are about to change.
+ [[nodiscard]] XrResult wait_for_presenter_idle(
+-    const std::shared_ptr<SessionState>& state) noexcept {
++    const std::shared_ptr<SessionState>& state,
++    bool fail_open) noexcept {
+     try {
+         ApplicationBlockedScope blocked; // DCS VR Control (0004)
+         std::unique_lock lock(state->presenter_mutex);
+-        state->presenter_condition.wait(lock, [&] {
++        const auto idle = [&] {
+             return state->outstanding_presenter_submissions == 0 ||
+                    XR_FAILED(state->presenter_failure) ||
+                    state->presenter_stop_requested;
+-        });
++        };
++        if (!fail_open) {
++            state->presenter_condition.wait(lock, idle);
++        } else {
++            bool stall_tripped = false;
++            if (!wait_presenter_bounded(*state, lock, idle, stall_tripped)) {
++                const std::uint32_t trips = state->generation_stall.trips;
++                lock.unlock();
++                if (stall_tripped) {
++                    log_generation_stall(PresenterWaitKind::idle, trips);
++                }
++                return XR_TIMEOUT_EXPIRED;
++            }
++        }
+         if (XR_FAILED(state->presenter_failure)) {
+             return state->presenter_failure;
+         }
+@@ -11055,7 +11268,7 @@
+     if (continuous_presenter_active(state)) {
+         // The content lock must be acquired AFTER the drain: the presenter
+         // needs it to complete the very submissions we are waiting for.
+-        static_cast<void>(wait_for_presenter_idle(state));
++        static_cast<void>(wait_for_presenter_idle(state, false));
+         content_lock = std::unique_lock<std::mutex>(state->presenter_content_mutex);
+         std::scoped_lock lock(state->presenter_mutex);
+         state->presenter_last_frame.reset();
+@@ -11095,16 +11308,62 @@
+     return request;
+ }
+ 
++// DCS Control (0029): bounded. Past the bound the application goes on
++// with XR_SUCCESS and the stall latch tripped: an owned frame stays queued
++// (it names nothing of the application's), and a borrowed one - the
++// application's own end info, which must not outlive this call - is taken
++// back out of the queue if the presenter has not reached it yet. One the
++// presenter has already taken is being handed to the runtime and is waited
++// for as before: returning would leave the runtime reading freed memory.
++// `ran_out`, where given, is set when the bound ran out.
+ [[nodiscard]] XrResult wait_for_presenter_submission(
+     const std::shared_ptr<SessionState>& state,
+-    const std::shared_ptr<PresenterSubmission>& request) noexcept {
++    const std::shared_ptr<PresenterSubmission>& request,
++    bool* ran_out) noexcept {
+     try {
+         ApplicationBlockedScope blocked; // DCS VR Control (0004)
+         std::unique_lock lock(state->presenter_mutex);
+-        state->presenter_condition.wait(lock, [&] {
++        const auto done = [&] {
+             return request->completed || XR_FAILED(state->presenter_failure) ||
+                    state->presenter_stop_requested;
+-        });
++        };
++        bool stall_tripped = false;
++        if (!wait_presenter_bounded(*state, lock, done, stall_tripped)) {
++            bool released = request->owned_frame != nullptr;
++            if (!released) {
++                auto& queue = state->presenter_submissions;
++                const auto queued = std::find(queue.begin(), queue.end(), request);
++                if (queued != queue.end()) {
++                    queue.erase(queued);
++                    if (state->outstanding_presenter_submissions != 0) {
++                        --state->outstanding_presenter_submissions;
++                    }
++                    request->result = XR_SUCCESS;
++                    request->completed = true;
++                    released = true;
++                }
++            }
++            if (!released) {
++                state->presenter_condition.wait(lock, done);
++            }
++            if (ran_out != nullptr) {
++                *ran_out = true;
++            }
++            const std::uint32_t trips = state->generation_stall.trips;
++            const XrResult result = released
++                ? XR_SUCCESS
++                : request->completed
++                    ? request->result
++                    : XR_FAILED(state->presenter_failure)
++                        ? state->presenter_failure
++                        : XR_ERROR_SESSION_NOT_RUNNING;
++            lock.unlock();
++            state->presenter_condition.notify_all();
++            if (stall_tripped) {
++                log_generation_stall(PresenterWaitKind::submission, trips);
++            }
++            return result;
++        }
+         return request->completed
+             ? request->result
+             : XR_FAILED(state->presenter_failure)
+@@ -11810,6 +12069,10 @@
+     // a begin that cannot come before this call returns. Passed through;
+     // see SessionState::runtime_frame_waited_unbegun.
+     inline_wait_outstanding = 21,
++    // DCS Control (0029): an application wait for the presenter ran past its
++    // bound; frames pass through until the latch is re-armed (see
++    // xrfg::latency::GenerationStall).
++    generation_stalled = 22,
+ };
+ 
+ [[nodiscard]] constexpr GenerationPrepareReason classify_synthesis_failure(
+@@ -12320,6 +12583,14 @@
+ // out frames - 1 - index periods before the current frame. The fixed answer
+ // is then (index + 1) / frames - thirds, for 3X - which is also what the
+ // formula gives at the exact cadence.
++//
++// DCS Control (0029): the display times compared are the virtual ones the
++// application was told, whole periods apart, so this gave the fixed answer
++// even after a late application frame whose content is further from the
++// previous one's. Off the regular cadence the interval is taken from when
++// the application was released for each frame, measured
++// (xrfg::latency::measured_interpolation_fraction); on it, or with no such
++// measurement, the answer is as before.
+ [[nodiscard]] float synthetic_interpolation_fraction(
+     const std::shared_ptr<SessionState>& state,
+     const std::optional<ProjectionSnapshot>& previous_snapshot,
+@@ -12338,6 +12609,14 @@
+         std::scoped_lock lock(state->mutex);
+         period = state->minimum_runtime_display_period;
+     }
++    if (const auto measured = xrfg::latency::measured_interpolation_fraction(
++            previous_snapshot->released_at_ns,
++            current_snapshot.released_at_ns,
++            static_cast<xrfg::latency::Nanoseconds>(period),
++            frames,
++            index)) {
++        return *measured;
++    }
+     const XrTime interval =
+         current_snapshot.display_time - previous_snapshot->display_time;
+     // An interval no longer than the synthetics need cannot hold them at all,
+@@ -13596,6 +13875,7 @@
+         std::uint32_t slots_before = 0;
+         bool skip_was_on = false;
+         bool was_probing = false;
++        bool stall_rearmed = false; // DCS Control (0029)
+         xrfg::latency::Nanoseconds correction = 0;
+         {
+             std::scoped_lock content_lock(state->presenter_content_mutex);
+@@ -13619,6 +13899,12 @@
+             xrfg::latency::restart_display_time_learning(
+                 state->display_time_corrector);
+             correction = state->display_time_corrector.correction;
++            // DCS Control (0029): and the stall latch is re-armed, the new
++            // scene's first frames in its quiet period.
++            stall_rearmed = rearm_generation_stall_locked(*state);
++        }
++        if (stall_rearmed) {
++            log_generation_stall_rearmed(1);
+         }
+         if (state->adaptive_active.load()) {
+             std::scoped_lock adaptive_lock(state->adaptive_mutex);
+@@ -13647,6 +13933,12 @@
+         if (!state->triple_switchable) {
+             return;
+         }
++        // DCS Control (0029): nothing is generated while the stall latch is
++        // tripped, and a switch would wait for a presenter that may not
++        // drain. Decided again once it is re-armed.
++        if (state->generation_stalled.load()) {
++            return;
++        }
+         using xrfg::latency::AdaptiveReason;
+         const auto now = std::chrono::steady_clock::now();
+         const auto now_ns = steady_nanoseconds(now);
+@@ -13860,8 +14152,10 @@
+             }
+             return;
+         }
++        // DCS Control (0029): bounded; a presenter that did not drain in
++        // time (XR_TIMEOUT_EXPIRED) is one that did not drain.
+         if (use_continuous_presenter &&
+-            XR_FAILED(wait_for_presenter_idle(state))) {
++            wait_for_presenter_idle(state, true) != XR_SUCCESS) {
+             // Nothing changed; the next call decides again (and a manual
+             // change is still seen, its ini value not having been taken).
+             // DCS VR Control (0008): except a probe, which the controller
+@@ -14318,8 +14612,11 @@
+         if (!use_continuous_presenter || presenter_content_lock.owns_lock()) {
+             return XR_SUCCESS;
+         }
+-        const XrResult idle_result = wait_for_presenter_idle(state);
+-        if (XR_FAILED(idle_result)) {
++        // DCS Control (0029): bounded. XR_TIMEOUT_EXPIRED: the presenter
++        // did not drain in time and the stall latch has tripped; the caller
++        // takes nothing it would need the content lock for.
++        const XrResult idle_result = wait_for_presenter_idle(state, true);
++        if (idle_result != XR_SUCCESS) {
+             return idle_result;
+         }
+         presenter_content_lock =
+@@ -14368,12 +14665,17 @@
+         state->fps_overlay->application_frame(end_info);
+     }
+ 
++    // DCS Control (0029): the borrowed submission's wait ran out (the frame
++    // was taken back out of the queue): the presenter is not to be stopped
++    // after it, which would wait for a thread that may be stuck.
++    bool borrowed_wait_ran_out = false;
+     const auto submit_borrowed_to_presenter = [&]() -> XrResult {
+         auto request = enqueue_presenter_submission(state, nullptr, end_info);
+         if (presenter_content_lock.owns_lock()) {
+             presenter_content_lock.unlock();
+         }
+-        return wait_for_presenter_submission(state, request);
++        return wait_for_presenter_submission(
++            state, request, &borrowed_wait_ran_out);
+     };
+     const auto start_requested_pipelined_presenter =
+         [&](std::shared_ptr<GeneratedFrameEndInfo> seed_frame) -> XrResult {
+@@ -14399,7 +14701,7 @@
+             }
+             state->pipelined_presenter_start_requested = false;
+             state->steamvr_presenter_start_requested = false;
+-            return wait_for_presenter_idle(state);
++            return wait_for_presenter_idle(state, false);
+         };
+     const auto bypass_generation =
+         [&](GenerationPrepareReason reason) -> XrResult {
+@@ -14407,6 +14709,26 @@
+             if (XR_FAILED(exclusive_result)) {
+                 return exclusive_result;
+             }
++            // DCS Control (0029): the presenter did not drain within the
++            // stall bound. Failing open: this frame is not shown (the
++            // runtime keeps showing what it has) and the application goes
++            // on, rather than waiting on a presenter that may never come
++            // back. Recorded as generation_prepare with c=1.
++            if (exclusive_result == XR_TIMEOUT_EXPIRED) {
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::generation_prepare,
++                    static_cast<std::int64_t>(reason),
++                    0,
++                    0,
++                    1);
++                if (end_info != nullptr) {
++                    consume_application_frame(
++                        state,
++                        end_info->displayTime,
++                        consume_in_submission_order);
++                }
++                return XR_SUCCESS;
++            }
+             // DCS VR Control (0006): the application's own composition goes
+             // down: whatever a release left uncopied while generation ran is
+             // copied first, and releases copy again until it runs again.
+@@ -14459,7 +14781,8 @@
+                     return start_result;
+                 }
+             }
+-            if (use_continuous_presenter && !pipelined_presenter_mode) {
++            if (use_continuous_presenter && !pipelined_presenter_mode &&
++                !borrowed_wait_ran_out) {
+                 stop_continuous_presenter(state);
+                 std::scoped_lock lock(state->mutex);
+                 state->steamvr_throttled_wait_streak = 0;
+@@ -14470,6 +14793,19 @@
+             return end_result;
+         };
+ 
++    // DCS Control (0029): the stall latch has tripped: the frame passes
++    // through, as with the tray's off switch. The generation continuity is
++    // cleared once per trip, so the first frame after a re-arm primes rather
++    // than pairing with one from before the stall.
++    const auto bypass_stalled = [&]() -> XrResult {
++        const std::uint32_t serial = state->generation_stall_serial.load();
++        if (state->generation_stall_cleared != serial) {
++            state->generation_stall_cleared = serial;
++            clear_generation_continuity(state);
++        }
++        return bypass_generation(GenerationPrepareReason::generation_stalled);
++    };
++
+     bool generation_cooling_down = false;
+     bool structural_quarantine_active = false;
+     {
+@@ -14500,10 +14836,19 @@
+                     ? GenerationPrepareReason::structural_quarantine_active
+                     : GenerationPrepareReason::cooldown_active);
+     }
++    if (state->generation_stalled.load()) {
++        return bypass_stalled();
++    }
+ 
+     ProjectionSnapshot current_snapshot{};
+     const bool has_projection =
+         capture_projection_snapshot(end_info, &current_snapshot);
++    // DCS Control (0029): the release that started this frame, taken before
++    // any hold below moves it on to the next one's.
++    if (state->application_released_at != std::chrono::steady_clock::time_point{}) {
++        current_snapshot.released_at_ns =
++            steady_nanoseconds(state->application_released_at);
++    }
+     ProjectionMappingResult resource_mappings{};
+     if (has_projection) {
+         resource_mappings = build_projection_resource_mappings(current_snapshot);
+@@ -14565,7 +14910,11 @@
+             if (XR_FAILED(exclusive_result)) {
+                 return exclusive_result;
+             }
+-            release_session_generation_budget(state);
++            // DCS Control (0029): not drained (a stalled presenter): nothing
++            // is destroyed under it; the next refusal tries again.
++            if (exclusive_result == XR_SUCCESS) {
++                release_session_generation_budget(state);
++            }
+         }
+         return passthrough_result;
+     }
+@@ -14656,6 +15005,11 @@
+         if (XR_FAILED(capacity_result)) {
+             return capacity_result;
+         }
++        // DCS Control (0029): the wait ran out: nothing is prepared yet, so
++        // the frame passes through.
++        if (state->generation_stalled.load()) {
++            return bypass_stalled();
++        }
+         if (presenter_hold_at_admission(*state) && metadata_pairable) {
+             // The once-per-pair hold, ahead of synthesis rather than after the
+             // hand-over: see presenter_hold_at_admission for why the placement
+@@ -14664,6 +15018,10 @@
+             // It returns without an error on a presenter failure; the enqueue
+             // below is what refuses the frame.
+             wait_for_presenter_pair(state);
++            // DCS Control (0029): the hold ran out: pass the frame through.
++            if (state->generation_stalled.load()) {
++                return bypass_stalled();
++            }
+         }
+     }
+     // The synthetic is displayed one display period before the current frame,
+@@ -15075,7 +15433,7 @@
+                 // now, and it is final before the request ever leaves here.
+                 result = request->owned_frame ? XR_SUCCESS : request->result;
+             } else {
+-                result = wait_for_presenter_submission(state, request);
++                result = wait_for_presenter_submission(state, request, nullptr);
+             }
+         } else {
+             // DCS VR Control (0006): the application's own composition.
+@@ -15598,6 +15956,20 @@
+                     if (session_state->steamvr_delivery) {
+                         session_state->steamvr_delivery->mark_established();
+                     }
++                    // DCS Control (0029): the runtime focusing the session
++                    // (the headset back on, say) re-arms the stall latch.
++                    if (state_changed->state == XR_SESSION_STATE_FOCUSED) {
++                        bool stall_rearmed = false;
++                        {
++                            std::scoped_lock presenter_lock(
++                                session_state->presenter_mutex);
++                            stall_rearmed =
++                                rearm_generation_stall_locked(*session_state);
++                        }
++                        if (stall_rearmed) {
++                            log_generation_stall_rearmed(3);
++                        }
++                    }
+                 }
+             }
+         }
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -3,11 +3,17 @@
+ #include "xrfg/latency_control.hpp"
+ 
+ #include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
+ #include <cstdint>
+ #include <deque>
+ #include <iostream>
++#include <mutex>
++#include <optional>
+ #include <stdexcept>
+ #include <string>
++#include <thread>
+ #include <vector>
+ 
+ namespace {
+@@ -1664,6 +1670,349 @@
+     }
+ }
+ 
++// ---------------------------------------------------------------------------
++// DCS Control (0029): the deeper pipeline gives slots back.
++
++// One window of first synthetics, each with `slack` (the one at `late_at`
++// a missed slot); a slot asked for is taken at once, a give-back applied
++// when `drop_safe`.
++struct DepthFeed {
++    TripleDepth& depth;
++    bool drop_safe{true};
++    std::uint32_t given{};
++    std::uint32_t taken{};
++
++    void window(Nanoseconds slack, std::uint32_t late_at = TripleDepth::kWindow) {
++        for (std::uint32_t i = 0; i < TripleDepth::kWindow; ++i) {
++            const Nanoseconds sample = i == late_at ? -kPeriod : slack;
++            depth.observe_leader(
++                triple_depth_leader_late(sample, kPeriod),
++                triple_depth_leader_spare(sample, kPeriod));
++            if (depth.pending && depth.take(true, true, true)) {
++                ++taken;
++            }
++            if (depth.shrink_pending && depth.give_back(drop_safe)) {
++                ++given;
++            }
++        }
++    }
++};
++
++void triple_depth_shrink_tests() {
++    {
++        require(triple_depth_leader_spare(kPeriod / 2 + 1, kPeriod), "past half a period: spare");
++        require(!triple_depth_leader_spare(kPeriod / 2, kPeriod), "half a period: not spare");
++        require(!triple_depth_leader_spare(2 * kMillisecond, kPeriod), "2 ms: not spare");
++        require(!triple_depth_leader_spare(-kPeriod, kPeriod), "late: not spare");
++        require(!triple_depth_leader_spare(kPeriod, kPeriod, true), "handed over late: not spare");
++        require(!triple_depth_leader_spare(kPeriod, 0), "no period: nothing judged");
++        require(TripleDepth::kBaseSlots == 1, "the arm's slot is the base");
++    }
++    {
++        // Grow from one slot to three on a heavy stretch, then the frames
++        // come back on time with room: nothing is given back within the dwell
++        // after the last grow, then one slot once it has passed with
++        // kShrinkWindows clean windows, the next after as many again, and
++        // never below the base.
++        TripleDepth depth;
++        depth.arm(true, 3);
++        require(depth.take(true, true, true) && depth.slots == 1, "the base slot");
++        DepthFeed feed{depth};
++        feed.window(-12 * kMillisecond);
++        feed.window(-12 * kMillisecond);
++        require(depth.slots == 3 && feed.taken == 2, "heavy: three slots");
++        require(depth.dwell == TripleDepth::kDwellWindows, "a grow starts the dwell");
++        const Nanoseconds roomy = 8 * kMillisecond; // more than half a period
++        for (std::uint32_t w = 1; w < TripleDepth::kDwellWindows; ++w) {
++            feed.window(roomy);
++            require(feed.given == 0 && !depth.shrink_pending,
++                "within the dwell nothing is given back (window " + std::to_string(w) + ")");
++        }
++        feed.window(roomy);
++        require(feed.given == 1 && depth.slots == 2 && depth.given_back == 1,
++            "past the dwell, after three clean windows: one slot back");
++        for (std::uint32_t w = 1; w < TripleDepth::kShrinkWindows; ++w) {
++            feed.window(roomy);
++        }
++        require(feed.given == 1 && depth.slots == 2, "not before kShrinkWindows more");
++        feed.window(roomy);
++        require(feed.given == 2 && depth.slots == 1, "then the next");
++        for (std::uint32_t w = 0; w < 20; ++w) {
++            feed.window(roomy);
++        }
++        require(feed.given == 2 && depth.slots == 1 && !depth.shrink_pending,
++            "never below the base slot");
++        require(depth.inserted == 3, "grows counted");
++    }
++    {
++        // Any late first synthetic in a window - or one without room -
++        // keeps every slot: one late every other window never gives back.
++        TripleDepth depth;
++        depth.arm(true, 3);
++        require(depth.take(true, true, true), "first slot");
++        DepthFeed feed{depth};
++        feed.window(-12 * kMillisecond);
++        feed.window(-12 * kMillisecond);
++        require(depth.slots == 3, "three slots");
++        for (std::uint32_t w = 0; w < 4 * TripleDepth::kDwellWindows; ++w) {
++            feed.window(8 * kMillisecond, w % 2 == 0 ? 7U : TripleDepth::kWindow);
++        }
++        require(feed.given == 0 && depth.slots == 3, "a late window resets the count");
++        for (std::uint32_t w = 0; w < 4 * TripleDepth::kDwellWindows; ++w) {
++            // On time but under half a period of room: a period less would
++            // make it late.
++            feed.window(3 * kMillisecond);
++        }
++        require(feed.given == 0 && depth.slots == 3, "no room: nothing given back");
++        // A give-back pending is not applied while the presenter cannot drop
++        // safely, and a late first synthetic cancels it.
++        feed.drop_safe = false;
++        for (std::uint32_t w = 0; w < TripleDepth::kShrinkWindows; ++w) {
++            feed.window(8 * kMillisecond);
++        }
++        require(depth.shrink_pending && depth.slots == 3, "pending until a safe slot");
++        require(!depth.give_back(false), "not dropped without a written pair");
++        depth.observe_leader(true, false);
++        require(!depth.shrink_pending, "a late first synthetic cancels it");
++        depth.arm(true, 3);
++        require(!depth.shrink_pending && depth.dwell == 0 && depth.slots == 0, "arm starts over");
++    }
++    {
++        // The dwell: a slot taken soon after one was given back doubles it,
++        // up to the maximum; a long calm stretch brings it back.
++        TripleDepth depth;
++        depth.arm(true, 3);
++        require(depth.take(true, true, true), "first slot");
++        DepthFeed feed{depth};
++        feed.window(-kPeriod);
++        require(depth.slots == 2 && depth.dwell == TripleDepth::kDwellWindows, "base dwell");
++        for (std::uint32_t w = 0; w < TripleDepth::kDwellWindows; ++w) {
++            feed.window(8 * kMillisecond);
++        }
++        require(feed.given == 1 && depth.slots == 1, "given back");
++        feed.window(-kPeriod);
++        require(depth.slots == 2 && depth.dwell == 2 * TripleDepth::kDwellWindows,
++            "a grow right after a give-back doubles the dwell");
++        std::uint32_t windows = 0;
++        while (feed.given == 1 && windows < 200) {
++            feed.window(8 * kMillisecond);
++            ++windows;
++        }
++        require(windows == 2 * TripleDepth::kDwellWindows,
++            "the doubled dwell is held: " + std::to_string(windows));
++        for (int flap = 0; flap < 6; ++flap) {
++            feed.window(-kPeriod);
++            int guard = 0;
++            while (depth.slots > 1 && guard++ < 1000) {
++                feed.window(8 * kMillisecond);
++            }
++        }
++        require(depth.dwell_length == TripleDepth::kMaxDwellWindows, "up to the maximum");
++        for (std::uint32_t w = 0; w < TripleDepth::kFlapWindows; ++w) {
++            feed.window(8 * kMillisecond);
++        }
++        feed.window(-kPeriod);
++        require(depth.dwell == TripleDepth::kDwellWindows, "a calm stretch resets it");
++    }
++    {
++        // SteamVR's yes/no lateness carries no room: nothing is given back.
++        TripleDepth depth;
++        depth.arm(true, 3);
++        require(depth.take(true, true, true), "first slot");
++        for (std::uint32_t i = 0; i < 2 * TripleDepth::kWindow; ++i) {
++            depth.observe_leader(true);
++            if (depth.pending) {
++                require(depth.take(true, true, true), "taken");
++            }
++        }
++        for (std::uint32_t i = 0; i < 40 * TripleDepth::kWindow; ++i) {
++            depth.observe_leader(false);
++        }
++        require(!depth.shrink_pending && depth.slots == 3, "no room measured, nothing given");
++    }
++}
++
++// ---------------------------------------------------------------------------
++// DCS Control (0029): bounded waits on the presenter, failing open.
++
++// A fake runtime whose frame comes only after `stall` (or when released):
++// the presenter it would wake is stuck until then, and the application's
++// wait has to give up within its bound.
++struct StalledRuntime {
++    std::mutex mutex;
++    std::condition_variable condition;
++    bool frame_done{};
++    std::atomic<bool> release{false};
++    std::thread thread;
++    explicit StalledRuntime(std::chrono::milliseconds stall)
++        : thread([this, stall] {
++              const auto until = std::chrono::steady_clock::now() + stall;
++              while (!release.load() && std::chrono::steady_clock::now() < until) {
++                  std::this_thread::sleep_for(std::chrono::milliseconds(1));
++              }
++              {
++                  std::scoped_lock lock(mutex);
++                  frame_done = true;
++              }
++              condition.notify_all();
++          }) {}
++    StalledRuntime(const StalledRuntime&) = delete;
++    StalledRuntime& operator=(const StalledRuntime&) = delete;
++    ~StalledRuntime() {
++        release = true;
++        thread.join();
++    }
++};
++
++Nanoseconds steady_now_ns() {
++    return std::chrono::duration_cast<std::chrono::nanoseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++
++void generation_stall_tests() {
++    {
++        GenerationStall stall;
++        require(stall.wait_bound() == GenerationStall::kWaitBound, "500 ms while armed");
++        stall.rearm(10 * kSecond);
++        require(stall.timed_out(11 * kSecond) == StallVerdict::keep_waiting,
++            "within the quiet period after a re-arm: keep waiting");
++        require(!stall.stalled, "not tripped in the quiet");
++        require(stall.timed_out(12 * kSecond) == StallVerdict::tripped && stall.trips == 1,
++            "past the quiet: tripped, once");
++        require(stall.timed_out(13 * kSecond) == StallVerdict::stalled && stall.trips == 1,
++            "then failing open, not logged again");
++        require(stall.wait_bound() == GenerationStall::kStalledWaitBound,
++            "a shorter bound once stalled");
++        stall.rearm(20 * kSecond);
++        require(!stall.stalled && stall.wait_bound() == GenerationStall::kWaitBound, "re-armed");
++        require(stall.timed_out(21 * kSecond) == StallVerdict::keep_waiting, "a new quiet period");
++        require(stall.timed_out(23 * kSecond) == StallVerdict::tripped && stall.trips == 2,
++            "trips again");
++        require(GenerationStall::kQuiet == AdaptiveConfig{}.scene_settle,
++            "the quiet is the scene settle");
++    }
++    {
++        // Stalled for good: the wait gives up after its bound and trips once.
++        StalledRuntime runtime(std::chrono::seconds(30));
++        GenerationStall stall; // never re-armed: no quiet period
++        bool tripped = false;
++        const auto on_timeout = [&] {
++            const auto verdict = stall.timed_out(steady_now_ns());
++            tripped = tripped || verdict == StallVerdict::tripped;
++            return verdict == StallVerdict::keep_waiting;
++        };
++        const auto started = std::chrono::steady_clock::now();
++        std::unique_lock lock(runtime.mutex);
++        const bool done = wait_bounded(
++            runtime.condition, lock, [&] { return runtime.frame_done; },
++            [] { return 40 * kMillisecond; }, on_timeout);
++        const auto waited = std::chrono::steady_clock::now() - started;
++        require(!done && tripped && stall.stalled, "a stalled runtime trips the latch");
++        require(waited < std::chrono::seconds(2), "and the wait is bounded");
++        // Stalled again, already tripped: gives up again, silently.
++        tripped = false;
++        const bool again = wait_bounded(
++            runtime.condition, lock, [&] { return runtime.frame_done; },
++            [] { return 20 * kMillisecond; }, on_timeout);
++        require(!again && !tripped && stall.trips == 1,
++            "fails open again without a second trip");
++    }
++    {
++        // A stall shorter than the quiet period (a mission's first frames):
++        // the wait keeps waiting through it and nothing trips.
++        StalledRuntime runtime(std::chrono::milliseconds(150));
++        GenerationStall stall;
++        stall.rearm(steady_now_ns());
++        bool tripped = false;
++        std::unique_lock lock(runtime.mutex);
++        const bool done = wait_bounded(
++            runtime.condition, lock, [&] { return runtime.frame_done; },
++            [] { return 30 * kMillisecond; },
++            [&] {
++                const auto verdict = stall.timed_out(steady_now_ns());
++                tripped = tripped || verdict == StallVerdict::tripped;
++                return verdict == StallVerdict::keep_waiting;
++            });
++        require(done && !tripped && !stall.stalled, "the quiet period rides out a load");
++    }
++    {
++        // A healthy runtime: the predicate holds within the bound.
++        StalledRuntime runtime(std::chrono::milliseconds(5));
++        bool timed_out = false;
++        std::unique_lock lock(runtime.mutex);
++        const bool done = wait_bounded(
++            runtime.condition, lock, [&] { return runtime.frame_done; },
++            [] { return 2 * kSecond; },
++            [&] {
++                timed_out = true;
++                return false;
++            });
++        require(done && !timed_out, "a healthy wait never times out");
++    }
++}
++
++// ---------------------------------------------------------------------------
++// DCS Control (0029): interpolation positions from measured release times.
++
++void measured_interpolation_tests() {
++    const Nanoseconds start = 50 * kSecond;
++    const auto at = [&](double periods) {
++        return start + static_cast<Nanoseconds>(periods * static_cast<double>(kPeriod));
++    };
++    const auto near = [](std::optional<float> value, double expected) {
++        return value.has_value() && *value > expected - 0.002 && *value < expected + 0.002;
++    };
++    // The regular cadence, and jitter within a quarter period: the fixed
++    // answer stands.
++    require(!measured_interpolation_fraction(at(0), at(3), kPeriod, 3, 0), "3X on cadence");
++    require(!measured_interpolation_fraction(at(0), at(3.2), kPeriod, 3, 1), "3X jitter");
++    require(!measured_interpolation_fraction(at(0), at(1.8), kPeriod, 2, 0), "2X jitter");
++    // A late frame: four periods between releases in 3X. The first synthetic
++    // goes out two periods before its real frame: half way; the second three
++    // quarters.
++    require(near(measured_interpolation_fraction(at(0), at(4), kPeriod, 3, 0), 0.5),
++        "late: first at 1/2");
++    require(near(measured_interpolation_fraction(at(0), at(4), kPeriod, 3, 1), 0.75),
++        "late: second at 3/4");
++    // The frame after it, early: 2.5 periods.
++    require(near(measured_interpolation_fraction(at(4), at(6.5), kPeriod, 3, 0), 0.2),
++        "early: first at 0.2");
++    require(near(measured_interpolation_fraction(at(4), at(6.5), kPeriod, 3, 1), 0.6),
++        "early: second at 0.6");
++    // 2X, three periods: the synthetic one period before its frame.
++    require(near(measured_interpolation_fraction(at(0), at(3), kPeriod, 2, 0), 2.0 / 3.0),
++        "2X late");
++    // An irregular sequence: every answer within [0, 1], the first synthetic
++    // before the second, and each the measured formula's.
++    const std::vector<double> releases{0, 3, 4.6, 8.1, 11.0, 15.4, 17.9, 21.3, 25.0, 27.2};
++    std::size_t measured = 0;
++    for (std::size_t i = 1; i < releases.size(); ++i) {
++        const auto first = measured_interpolation_fraction(
++            at(releases[i - 1]), at(releases[i]), kPeriod, 3, 0);
++        const auto second = measured_interpolation_fraction(
++            at(releases[i - 1]), at(releases[i]), kPeriod, 3, 1);
++        require(first.has_value() == second.has_value(), "both or neither");
++        if (first) {
++            ++measured;
++            const double interval = releases[i] - releases[i - 1];
++            require(*first >= 0.0F && *first <= 1.0F && *second >= 0.0F && *second <= 1.0F,
++                "clamped to [0, 1]");
++            require(*first < *second, "the first before the second");
++            require(near(first, 1.0 - 2.0 / interval) && near(second, 1.0 - 1.0 / interval),
++                "the measured interval's position");
++        }
++    }
++    require(measured >= 5, "irregular intervals are measured: " + std::to_string(measured));
++    // Missing or implausible: nothing, and the caller keeps its own answer.
++    require(!measured_interpolation_fraction(0, at(4), kPeriod, 3, 0), "no previous release");
++    require(!measured_interpolation_fraction(at(4), at(4), kPeriod, 3, 0), "no interval");
++    require(!measured_interpolation_fraction(at(4), at(0), kPeriod, 3, 0), "out of order");
++    require(!measured_interpolation_fraction(at(0), at(2), kPeriod, 3, 0), "too short to hold two");
++    require(!measured_interpolation_fraction(at(0), at(6.5), kPeriod, 3, 0), "past twice the cadence");
++    require(!measured_interpolation_fraction(at(0), at(4), 0, 3, 0), "no period");
++    require(!measured_interpolation_fraction(at(0), at(4), kPeriod, 3, 2), "no third synthetic");
++}
++
+ } // namespace
+ 
+ int main() {
+@@ -1680,6 +2029,9 @@
+         gpu_busy_tests();
+         triple_depth_tests();
+         scene_change_tests(); // 0009
++        triple_depth_shrink_tests(); // DCS Control (0029)
++        generation_stall_tests(); // DCS Control (0029)
++        measured_interpolation_tests(); // DCS Control (0029)
+         std::cout << "Latency control tests passed\n";
+         return 0;
+     } catch (const std::exception& error) {
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -250,7 +250,24 @@
+ // second of every mission start): no switch in the scene's settle.
+ bool g_scenes_mode = false;
+ bool g_scenes_adaptive = false;
++// dcs-triple-shrink (DCS Control, 0029): dcs-triple-scenes without the
++// mission load - the heavy mission's depth is not given back by a scene
++// change - and a light stretch long enough for the deeper pipeline to give
++// slots back one by one. The light tail must still show every slot fresh
++// and nothing out of order; layer_triple_shrink.cmake checks the 404s.
++bool g_scenes_shrink = false;
+ int g_late_gpu_ms = 0;
++// dcs-presenter-stall (DCS Control, 0029): dcs-triple-deep's shape, then the
++// runtime's xrWaitFrame on the presenter thread stalls once for
++// kPresenterStallMs - a runtime that stops answering. The application's
++// frame calls must keep returning within the layer's bound (a frame never
++// takes a second), the layer must fail open (the flight log's result=950,
++// checked by layer_call_chain_depth.cmake), and once the runtime answers
++// again the application's frames must reach it passed through: its own
++// swapchain, no synthetic.
++bool g_presenter_stall_mode = false;
++std::atomic<int> g_presenter_stall_ms{0};
++constexpr int kPresenterStallMs = 2500;
+ // dcs-throughput-down / dcs-throughput-gpu (DCS VR Control, 0004):
+ // dcs-adaptive's shape, starting in 3X, with the application's CPU and GPU
+ // time per frame set apart - CPU by a sleep from the frame's start, GPU by a
+@@ -898,6 +915,15 @@
+             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+         }
+     }
++    // DCS Control (0029): dcs-presenter-stall's one stall.
++    if (g_presenter_stall_mode &&
++        GetCurrentThreadId() != g_test_application_thread_id &&
++        GetCurrentThreadId() !=
++            g_application_wait_thread_id.load(std::memory_order_acquire)) {
++        if (const int stall = g_presenter_stall_ms.exchange(0); stall > 0) {
++            std::this_thread::sleep_for(std::chrono::milliseconds(stall));
++        }
++    }
+     if (g_display_latency_mode &&
+         GetCurrentThreadId() != g_test_application_thread_id) {
+         pace_like_a_display();
+@@ -2524,7 +2550,7 @@
+             "d3d11-bridge-acquire-ahead|d3d11-bridge-unsubmitted|"
+             "d3d11-bridge-fallback|dcs-late-skip|dcs-triple-deep|"
+             "dcs-triple-deep-jitter|dcs-triple-deep-quad|dcs-triple-scenes|"
+-            "dcs-adaptive-scenes]\n";
++            "dcs-adaptive-scenes|dcs-presenter-stall|dcs-triple-shrink]\n";
+         return EXIT_FAILURE;
+     }
+     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
+@@ -2550,8 +2576,13 @@
+         // DCS VR Control (0009).
+         g_scenes_adaptive =
+             argc == 4 && std::strcmp(argv[3], "dcs-adaptive-scenes") == 0;
+-        g_scenes_mode = g_scenes_adaptive ||
++        g_scenes_shrink =
++            argc == 4 && std::strcmp(argv[3], "dcs-triple-shrink") == 0;
++        g_scenes_mode = g_scenes_adaptive || g_scenes_shrink ||
+             (argc == 4 && std::strcmp(argv[3], "dcs-triple-scenes") == 0);
++        // DCS Control (0029).
++        g_presenter_stall_mode =
++            argc == 4 && std::strcmp(argv[3], "dcs-presenter-stall") == 0;
+     }
+     {
+         const bool throughput_down =
+@@ -2565,7 +2596,7 @@
+         g_adaptive_latency_mode = g_adaptive_latency_mode || g_throughput_mode;
+     }
+     g_display_latency_mode = g_adaptive_latency_mode || g_late_skip_mode ||
+-        g_triple_deep_mode || g_scenes_mode ||
++        g_triple_deep_mode || g_scenes_mode || g_presenter_stall_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs-latency") == 0);
+     g_dcs_mode = g_dcs_d3d11_mode || g_display_latency_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs") == 0);
+@@ -4253,7 +4284,7 @@
+         // to reach its depth first, then until it has.
+         const int kOverlappingFrames =
+             (g_adaptive_latency_mode || g_late_skip_mode || g_triple_deep_mode ||
+-             g_scenes_mode) ? 0
++             g_scenes_mode || g_presenter_stall_mode) ? 0
+             : g_display_latency_mode
+                 ? (g_frames_per_application_frame > 2 ? 300 : 160)
+                 : 8;
+@@ -4264,7 +4295,8 @@
+         constexpr int kSettleBound = 400;
+         int settle_frames = 0;
+         if (g_display_latency_mode && !g_adaptive_latency_mode &&
+-            !g_late_skip_mode && !g_triple_deep_mode && !g_scenes_mode) {
++            !g_late_skip_mode && !g_triple_deep_mode && !g_scenes_mode &&
++            !g_presenter_stall_mode) {
+             settle_frames = run_until_settled(kSettleBound);
+         }
+         // dcs-triple-deep (0007): 14 s of a steady application, the last 8
+@@ -4318,7 +4350,10 @@
+             scene_marks[1] = scene_mark();
+             // The mission load: the application stops calling frame
+             // functions for a second and a half.
+-            precise_sleep(std::chrono::milliseconds(1500));
++            // DCS Control (0029): not in dcs-triple-shrink.
++            if (!g_scenes_shrink) {
++                precise_sleep(std::chrono::milliseconds(1500));
++            }
+             scene_marks[2] = scene_mark();
+             if (g_scenes_adaptive) {
+                 // The new scene's first frames.
+@@ -4328,7 +4363,8 @@
+                 }
+             }
+             g_simulated_render_us = light_us;
+-            for (int index = 0; sequence_succeeded && index < 330; ++index) {
++            for (int index = 0; sequence_succeeded &&
++                 index < (g_scenes_shrink ? 1000 : 330); ++index) {
+                 sequence_succeeded = run_frame(true);
+             }
+             scene_marks[3] = scene_mark();
+@@ -4336,6 +4372,49 @@
+             g_gpu_simulator.reset();
+             sequence_succeeded = sequence_succeeded && wait_for_queue_idle();
+         }
++        // dcs-presenter-stall (0029): generating, past the session's quiet
++        // period; then the runtime stalls the presenter while the
++        // application keeps running frames; then the runtime is back.
++        std::size_t stall_from = 0;
++        std::size_t stall_recovered_from = 0;
++        double stall_longest_frame_ms = 0.0;
++        int stall_frames = 0;
++        std::size_t synthetic_before_stall = 0;
++        if (g_presenter_stall_mode) {
++            g_simulated_render_us = 13'000;
++            for (int index = 0; sequence_succeeded && index < 200; ++index) {
++                sequence_succeeded = run_frame(true);
++            }
++            {
++                std::scoped_lock lock(g_end_records_mutex);
++                stall_from = g_end_records.size();
++                for (const EndFrameRecord& record : g_end_records) {
++                    synthetic_before_stall +=
++                        record.target == SubmittedTarget::synthetic ? 1U : 0U;
++                }
++            }
++            g_presenter_stall_ms = kPresenterStallMs;
++            const auto stall_until = std::chrono::steady_clock::now() +
++                std::chrono::milliseconds(kPresenterStallMs + 1000);
++            while (sequence_succeeded &&
++                   std::chrono::steady_clock::now() < stall_until) {
++                const auto frame_started = std::chrono::steady_clock::now();
++                sequence_succeeded = run_frame(true);
++                stall_longest_frame_ms = std::max(
++                    stall_longest_frame_ms,
++                    std::chrono::duration<double, std::milli>(
++                        std::chrono::steady_clock::now() - frame_started).count());
++                ++stall_frames;
++            }
++            {
++                std::scoped_lock lock(g_end_records_mutex);
++                stall_recovered_from = g_end_records.size();
++            }
++            for (int index = 0; sequence_succeeded && index < 120; ++index) {
++                sequence_succeeded = run_frame(true);
++            }
++            g_simulated_render_us = 0;
++        }
+         // dcs-late-skip (0006): where each phase starts in the records.
+         std::size_t late_skip_heavy_from = 0;
+         std::size_t late_skip_light_from = 0;
+@@ -4615,10 +4694,59 @@
+                 return EXIT_FAILURE;
+             }
+             std::cout << "OpenXR DCS scenes test passed ("
+-                      << (g_scenes_adaptive ? "adaptive" : "3X deep") << "):"
++                      << (g_scenes_adaptive ? "adaptive"
++                          : g_scenes_shrink ? "3X deep, no load" : "3X deep") << "):"
+                       << summary.str() << " final multiplier " << multiplier << '\n';
+             return EXIT_SUCCESS;
+         }
++        if (g_presenter_stall_mode) {
++            // 0029: the stall never held a frame call for long; the
++            // application kept making frames through it; and after it its
++            // frames reached the runtime passed through, its own swapchain
++            // and no synthetic (the last few submissions are the teardown's).
++            std::vector<EndFrameRecord> records;
++            {
++                std::scoped_lock lock(g_end_records_mutex);
++                records = g_end_records;
++            }
++            std::size_t original_after = 0;
++            std::size_t synthetic_after_stall = 0;
++            const std::size_t tail_from = stall_recovered_from + 30;
++            for (std::size_t index = tail_from;
++                 index + 6 < records.size(); ++index) {
++                original_after +=
++                    records[index].target == SubmittedTarget::original ? 1U : 0U;
++                synthetic_after_stall +=
++                    records[index].target == SubmittedTarget::synthetic ? 1U : 0U;
++            }
++            const bool stall_valid = sequence_succeeded && teardown_succeeded &&
++                presenter_seen && violations == 0 &&
++                synthetic_before_stall >= 100 &&
++                stall_longest_frame_ms < 1500.0 && stall_frames >= 4 &&
++                original_after >= 60 && synthetic_after_stall == 0 &&
++                g_waited_display_times.empty() && !g_begun_display_time;
++            if (!stall_valid) {
++                std::cerr << "DCS presenter stall validation failed: sequence="
++                          << sequence_succeeded << " teardown=" << teardown_succeeded
++                          << " promoted=" << presenter_seen
++                          << " violations=" << violations
++                          << " synthetic-before=" << synthetic_before_stall
++                          << " longest-frame-ms=" << stall_longest_frame_ms
++                          << " stall-frames=" << stall_frames
++                          << " original-after=" << original_after
++                          << " synthetic-after=" << synthetic_after_stall
++                          << " records=" << records.size()
++                          << " marks=" << stall_from << '/' << stall_recovered_from
++                          << '\n';
++                return EXIT_FAILURE;
++            }
++            std::cout << "OpenXR DCS presenter stall test passed: "
++                      << stall_frames << " frames through a " << kPresenterStallMs
++                      << " ms runtime stall, longest " << stall_longest_frame_ms
++                      << " ms; " << original_after
++                      << " passed through after it, no synthetic\n";
++            return EXIT_SUCCESS;
++        }
+         if (g_triple_deep_mode) {
+             // 0007: over the steady stretch, every slot a fresh frame - two
+             // synthetics and a real one per application frame, nothing
+diff --git a/tests/layer_call_chain_depth.cmake b/tests/layer_call_chain_depth.cmake
+--- a/tests/layer_call_chain_depth.cmake
++++ b/tests/layer_call_chain_depth.cmake
+@@ -65,3 +65,28 @@
+         "Call chain '${MODE}' at the other pipeline depth failed (${call_chain_result}):\n"
+         "${call_chain_output}\n${call_chain_error}")
+ endif()
++
++# DCS Control (0029): with EXPECT_FLIGHT, the flight log (logging_enabled=1 in
++# PIPELINE_INI) must hold that text EXPECT_FLIGHT_COUNT times (at least once
++# without a count).
++if(DEFINED EXPECT_FLIGHT)
++    file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++    list(LENGTH flight_logs flight_log_count)
++    if(NOT flight_log_count EQUAL 1)
++        message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++    endif()
++    list(GET flight_logs 0 flight_log)
++    file(STRINGS "${flight_log}" expected_lines REGEX "${EXPECT_FLIGHT}")
++    list(LENGTH expected_lines expected_count)
++    if(DEFINED EXPECT_FLIGHT_COUNT)
++        if(NOT expected_count EQUAL EXPECT_FLIGHT_COUNT)
++            message(FATAL_ERROR
++                "Flight log: '${EXPECT_FLIGHT}' ${expected_count} times, expected ${EXPECT_FLIGHT_COUNT}:\n"
++                "${expected_lines}")
++        endif()
++    elseif(expected_count EQUAL 0)
++        message(FATAL_ERROR "Flight log: no '${EXPECT_FLIGHT}'")
++    endif()
++    message(STATUS "Flight log: '${EXPECT_FLIGHT}' ${expected_count} times")
++    message(STATUS "${call_chain_output}")
++endif()
+diff --git a/tests/layer_scene_change.cmake b/tests/layer_scene_change.cmake
+--- a/tests/layer_scene_change.cmake
++++ b/tests/layer_scene_change.cmake
+@@ -12,6 +12,10 @@
+ #     submissions (the fake runs about 100 slots a second);
+ #   - adaptive: no adaptive switch within the scene's two-second settle,
+ #     whatever the new scene's first frames did.
++# DCS Control (0029): CASE shrink runs dcs-triple-shrink - the same heavy
++# phase with no load after it - and checks that the depth the heavy phase
++# took was given back a slot at a time (404, a >= 1 after a third slot) with
++# no scene change, and that the light tail is as fresh as the triple case's.
+ foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN SCENES_INI WORK_DIR CASE)
+     if(NOT DEFINED ${required_variable})
+         message(FATAL_ERROR "${required_variable} was not provided")
+@@ -33,6 +37,8 @@
+ 
+ if(CASE STREQUAL "adaptive")
+     set(mode dcs-adaptive-scenes)
++elseif(CASE STREQUAL "shrink")
++    set(mode dcs-triple-shrink)
+ else()
+     set(mode dcs-triple-scenes)
+ endif()
+@@ -65,6 +71,37 @@
+     message(FATAL_ERROR "The late-frame skip turned on with late_frame_skip at its default")
+ endif()
+ 
++# DCS Control (0029): CASE shrink, no load: the depth comes back by itself.
++if(CASE STREQUAL "shrink")
++    string(REGEX MATCH "ms=[0-9]+\\.[0-9]+ tid=[0-9]+ phase=I op=presenter_transition result=403 dur_us=0 a=3 " third_slot "${contents}")
++    if(third_slot STREQUAL "")
++        message(FATAL_ERROR "The heavy phase never took a third depth slot")
++    endif()
++    string(FIND "${contents}" "${third_slot}" third_slot_at)
++    string(SUBSTRING "${contents}" ${third_slot_at} -1 after_third)
++    string(REGEX MATCHALL "op=presenter_transition result=404 dur_us=0 a=[0-9]+ b=[0-9]+ c=[0-9]+" given_back "${after_third}")
++    list(LENGTH given_back given_back_count)
++    if(given_back_count EQUAL 0)
++        message(FATAL_ERROR "No depth slot was given back in the light stretch after the heavy phase")
++    endif()
++    foreach(record IN LISTS given_back)
++        string(REGEX REPLACE "^.* a=([0-9]+) .*$" "\\1" slots_left "${record}")
++        if(slots_left LESS 1)
++            message(FATAL_ERROR "A slot was given back below the base: ${record}")
++        endif()
++    endforeach()
++    string(FIND "${contents}" "op=scene_change" any_scene)
++    if(NOT any_scene EQUAL -1)
++        message(FATAL_ERROR "A scene change in a run without a load")
++    endif()
++    string(FIND "${contents}" "op=presenter_transition result=950 " any_stall)
++    if(NOT any_stall EQUAL -1)
++        message(FATAL_ERROR "A presenter wait ran out in a run without a stall")
++    endif()
++    set(scene "(none) ${given_back_count} slots given back: ${given_back}")
++endif()
++
++if(NOT CASE STREQUAL "shrink") # DCS Control (0029): the load's checks
+ # The stall itself, from the application's own xrEndFrame calls: where the
+ # behaviour is judged, whether or not the layer saw a scene change.
+ string(REGEX MATCHALL "ms=[0-9]+\\.[0-9]+ tid=[0-9]+ phase=B op=app_end_frame" end_frames "${contents}")
+@@ -145,6 +182,8 @@
+     message(FATAL_ERROR "No depth slot was taken again after the scene change")
+ endif()
+ 
++endif() # NOT shrink
++
+ # The last STEADY_SECONDS whole seconds before the teardown's.
+ string(REGEX MATCHALL "ms=[0-9]+\\.[0-9]+ tid=[0-9]+ phase=I op=submission_timing result=1 dur_us=0 a=[0-9]+ b=[0-9]+" tallies "${contents}")
+ list(LENGTH tallies tally_count)
+@@ -171,4 +210,8 @@
+         message(FATAL_ERROR "Not every slot fresh in the light scene after the load:${summary}")
+     endif()
+ endforeach()
++if(CASE STREQUAL "shrink")
++    message(STATUS "3X deep, no load: ${scene};${summary}")
++    return()
++endif()
+ message(STATUS "Scene change (3X deep): ${scene}; third slot in the heavy phase, depth re-armed after the load;${summary}")

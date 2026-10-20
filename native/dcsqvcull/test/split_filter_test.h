@@ -17,6 +17,34 @@ namespace sftest {
 namespace sf = sfilt;
 using Ctx = sf::Ctx;
 
+// R48: f(arg) on a thread with a 256 KB stack. True when it did not return: a stack overflow (two hooks forwarding
+// to each other) or still running after 10 s (the same cycle compiled to tail jumps). The thread is abandoned then.
+struct R48Call {
+  void (*fn)(void*);
+  void* arg;
+  volatile bool overflow;
+};
+DWORD WINAPI R48Thread(void* p) {
+  R48Call* c = static_cast<R48Call*>(p);
+  ULONG guarantee = 64 * 1024;  // room for the handler once the stack is gone
+  SetThreadStackGuarantee(&guarantee);
+  __try {
+    c->fn(c->arg);
+  } __except (GetExceptionCode() == EXCEPTION_STACK_OVERFLOW ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+    c->overflow = true;
+  }
+  return 0;
+}
+bool R48Cycles(void (*fn)(void*), void* arg) {
+  static R48Call c;  // outlives an abandoned thread
+  c = R48Call{fn, arg, false};
+  HANDLE t = CreateThread(nullptr, 256 * 1024, &R48Thread, &c, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+  if (!t) return false;
+  const bool done = WaitForSingleObject(t, 10000) == WAIT_OBJECT_0;
+  CloseHandle(t);
+  return !done || c.overflow;
+}
+
 void ShadowLogic() {
   void* a[4];
   sf::Shadow::Forget(a);
@@ -541,6 +569,44 @@ void Run() {
   reinterpret_cast<RsFn>(m + kFn[2])(c, o.rs[2]);
   Snap after = Take(c);
   Check(after.blend == o.blend[2] && after.rs == o.rs[2], "split filter: default ops, calls reach d3d11");
+  {
+    // R48 (the R47 crash): another hook of this payload in one of our slots that took ours as its original
+    // (fixation_depth.h's RSSetState toggle point, armed over our hook). The next site call finds the slot not ours;
+    // before R48 the re-hook took that hook as d3d11's entry: ours -> it -> ours, a stack overflow on that call.
+    void** vtc = *reinterpret_cast<void***>(c);
+    const int rs = sf::g_slot[sf::kRS];
+    void* const real = sf::g_orig[sf::kRS];
+    void* const tpOrig0 = fixdepth::g_tpOrig[fixdepth::kTpRSSetState];
+    fixdepth::g_tpOrig[fixdepth::kTpRSSetState] = sf::kHooks[sf::kRS];
+    d3ds::WriteTablePointer(&vtc[rs], fixdepth::TogglePointHook(fixdepth::kTpRSSetState));
+    struct Arg {
+      uint8_t* m;
+      Ctx* c;
+      ID3D11RasterizerState* r;
+    } a{m, c, o.rs[1]};
+    const bool cycles = R48Cycles([](void* p) {
+      Arg* x = static_cast<Arg*>(p);
+      reinterpret_cast<RsFn>(x->m + kFn[2])(x->c, x->r);  // the raster site
+    }, &a);
+    ID3D11RasterizerState* gotRs = nullptr;
+    c->RSGetState(&gotRs);
+    if (gotRs) gotRs->Release();
+    const bool kept = vtc[rs] == fixdepth::TogglePointHook(fixdepth::kTpRSSetState) && sf::g_orig[sf::kRS] == real;
+#ifndef R48_PREFIX
+    const bool counted = sf::g_oursOnTop.load() >= 1;
+#else
+    const bool counted = true;
+#endif
+    Check(!cycles && kept && gotRs == o.rs[1] && counted,
+          "R48 split filter: no re-hook over another hook of ours in its slot (no call cycle; the call reaches d3d11)");
+    sf::g_orig[sf::kRS] = real;
+    d3ds::WriteTablePointer(&vtc[rs], sf::kHooks[sf::kRS]);
+    fixdepth::g_tpOrig[fixdepth::kTpRSSetState] = tpOrig0;
+    reinterpret_cast<RsFn>(m + kFn[2])(c, o.rs[2]);  // ours again: the call forgets nothing it should keep
+    c->RSGetState(&gotRs);
+    if (gotRs) gotRs->Release();
+    Check(gotRs == o.rs[2], "R48 split filter: hook back after the other hook left, calls reach d3d11");
+  }
   sf::Detach();
   Check(memcmp(before, m, sizeof(before)) == 0, "split filter: detach (default ops) restores the module");
 

@@ -1,0 +1,194 @@
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -483,6 +483,8 @@
+     [[nodiscard]] std::filesystem::path log_path() const;
+     // DCS Control (0042): tests only. Every later wrap fails as a file that
+     // cannot be cut back would: logging stops at the cap with a last line.
++    // DCS Control (0046): a wrap is a rotation to <name>.prev<ext> first,
++    // with a truncate as its fallback; this fails both.
+     void test_fail_wraps() noexcept;
+ 
+     // Places a QueryPerformanceCounter value on this log's own timeline,
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -115,8 +115,10 @@
+ 
+ [diagnostics]
+ logging_enabled=0
+-; Raise for a long capture: at the usual record density 32 MB wraps at about
+-; ninety seconds and keeps only the tail. Edits here survive arming.
++; Raise for a long capture: at the usual record density 32 MB fills in about
++; ninety seconds. At the cap the log becomes <name>.prev.log (replacing an
++; older one) and a new log starts, so up to twice this is kept on disk. Edits
++; here survive arming.
+ max_file_mb=32
+ flush_each_event=0
+ 
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -386,6 +386,53 @@
+         }
+     }
+ 
++    // DCS Control (0046): the full log becomes <name>.prev<ext>, replacing an
++    // older one, and logging goes on in a new file under the log's own name,
++    // so a wrap keeps one whole earlier segment instead of losing it. The
++    // open file is renamed in place: create_log_file shares it for delete,
++    // which is what lets MoveFileExW move it while this handle stays open.
++    // False, with nothing changed, when the rename cannot be done (an older
++    // .prev held open by a reader without delete sharing) or the new file
++    // cannot be made; the caller then cuts the file back as before 0046.
++    // Exclusive lock held, so no write is in flight on the old handle.
++    [[nodiscard]] bool rotate() noexcept {
++        try {
++            if (path.empty()) {
++                return false;
++            }
++            std::filesystem::path previous = path;
++            previous.replace_filename(
++                path.stem().native() + L".prev" + path.extension().native());
++            if (!MoveFileExW(path.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING)) {
++                return false;
++            }
++            // The same flags as create_log_file (FILE_FLAG_OVERLAPPED matters
++            // for the positioned writes, see there).
++            HANDLE fresh = CreateFileW(
++                path.c_str(),
++                GENERIC_WRITE,
++                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
++                nullptr,
++                CREATE_ALWAYS,
++                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
++                nullptr);
++            if (fresh == INVALID_HANDLE_VALUE) {
++                const DWORD error = GetLastError();
++                // Back under its own name, so the fallback cuts the live
++                // log rather than leaving it named .prev. Should that fail
++                // too, the old handle still writes, into the .prev name.
++                static_cast<void>(MoveFileExW(previous.c_str(), path.c_str(), 0));
++                SetLastError(error);
++                return false;
++            }
++            CloseHandle(file);
++            file = fresh;
++            return true;
++        } catch (...) {
++            return false;
++        }
++    }
++
+     void write(
+         std::uint64_t sequence,
+         std::int64_t counter,
+@@ -428,9 +475,13 @@
+             }
+             if (write_offset.load(std::memory_order_relaxed) > maximum_bytes) {
+                 LARGE_INTEGER beginning{};
++                // DCS Control (0046): the file is rotated out to .prev and a
++                // fresh one opened; only when that cannot be done (the .prev
++                // file is held open, say) is it cut back as before.
+                 if (test_fail_wrap.load(std::memory_order_relaxed) ||
+-                    !SetFilePointerEx(file, beginning, nullptr, FILE_BEGIN) ||
+-                    !SetEndOfFile(file)) {
++                    (!rotate() &&
++                     (!SetFilePointerEx(file, beginning, nullptr, FILE_BEGIN) ||
++                      !SetEndOfFile(file)))) {
+                     // DCS Control (0042): the file cannot be cut back, so the
+                     // cap cannot hold: logging stops here, with a last line
+                     // in this record's place saying so (c = 2). Every later
+diff --git a/tests/bridge_flight_logger_tests.cpp b/tests/bridge_flight_logger_tests.cpp
+--- a/tests/bridge_flight_logger_tests.cpp
++++ b/tests/bridge_flight_logger_tests.cpp
+@@ -368,6 +368,89 @@
+             require(wrapped.size() <= 1024 * 1024 + 512, "wrap: the file grew past the cap");
+         }
+ 
++        // DCS Control (0046): at the cap the log is rotated to .prev, which
++        // keeps the whole first segment, and a new log starts with the header
++        // record; with the .prev file held open the wrap cuts the log back as
++        // before instead, and logging goes on.
++        {
++            const fs::path rotate_directory = temporary.path / "rotate";
++            fs::create_directories(rotate_directory);
++            write(
++                rotate_directory / "ofxr_bridge.ini",
++                "[diagnostics]\r\n"
++                "logging_enabled=1\r\n"
++                "max_file_mb=1\r\n");
++            xrfg::BridgeFlightLogger rotating;
++            rotating.initialize(rotate_directory);
++            require(rotating.enabled(), "rotate: logging did not start");
++            const fs::path rotate_path = rotating.log_path();
++            const fs::path previous_path = rotate_path.parent_path() /
++                (rotate_path.stem().wstring() + L".prev" + rotate_path.extension().wstring());
++            int written = 0;
++            for (; written < 40000 && !fs::exists(previous_path); ++written) {
++                rotating.event(xrfg::BridgeFlightOperation::synthesis_pair, written, 1, 2, 3);
++            }
++            require(fs::exists(previous_path), "rotate: the cap did not rotate the log");
++            for (int extra = 0; extra < 100; ++extra, ++written) {
++                rotating.event(xrfg::BridgeFlightOperation::synthesis_pair, written, 1, 2, 3);
++            }
++            require(rotating.enabled(), "rotate: a rotation stopped logging");
++            const std::string header_tail =
++                " dur_us=0 a=1 b=0 c=" + std::to_string(GetCurrentProcessId()) + "\r\n";
++            const auto starts_with_header = [&header_tail](const std::string& text) {
++                const auto end = text.find("\r\n");
++                return end != std::string::npos &&
++                    text.find(" phase=I op=logger result=") < end &&
++                    text.find(header_tail) == end + 2 - header_tail.size();
++            };
++            // The synthesis_pair results of a file, in file order.
++            const auto results = [](const std::string& text) {
++                std::vector<int> found;
++                const std::string key = " op=synthesis_pair result=";
++                for (auto at = text.find(key); at != std::string::npos; at = text.find(key, at + 1)) {
++                    found.push_back(std::stoi(text.substr(at + key.size(), 12)));
++                }
++                return found;
++            };
++            const std::string previous = read(previous_path);
++            const std::string current = read(rotate_path);
++            require(previous.find('\0') == std::string::npos && current.find('\0') == std::string::npos,
++                "rotate: a segment has zero bytes");
++            require(starts_with_header(previous) && starts_with_header(current),
++                "rotate: a segment does not start with the header record");
++            require(previous.size() <= 1024 * 1024 && previous.size() > 1024 * 1024 - 512,
++                "rotate: the previous segment is not the whole first one");
++            std::vector<int> all = results(previous);
++            require(!all.empty() && all.front() == 0, "rotate: the first segment lost its first event");
++            const std::vector<int> later = results(current);
++            all.insert(all.end(), later.begin(), later.end());
++            bool in_order = static_cast<int>(all.size()) == written;
++            for (int index = 0; in_order && index < written; ++index) {
++                in_order = all[static_cast<std::size_t>(index)] == index;
++            }
++            require(in_order, "rotate: events were lost or doubled across the rotation");
++
++            // A reader holding .prev without delete sharing: the rename
++            // cannot replace it, so the log is cut back and logging goes on.
++            HANDLE holder = CreateFileW(previous_path.c_str(), GENERIC_READ,
++                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
++                FILE_ATTRIBUTE_NORMAL, nullptr);
++            require(holder != INVALID_HANDLE_VALUE, "rotate: could not hold the .prev file");
++            for (int index = 0; index < 20000; ++index) {
++                rotating.event(xrfg::BridgeFlightOperation::synthesis_pair, index, 4, 5, 6);
++            }
++            CloseHandle(holder);
++            require(rotating.enabled(), "rotate: a held .prev file stopped logging");
++            rotating.shutdown();
++            require(read(previous_path) == previous, "rotate: the held .prev file changed");
++            const std::string cut = read(rotate_path);
++            require(cut.find('\0') == std::string::npos && starts_with_header(cut) &&
++                        cut.find(" a=1 b=2 c=3\r\n") == std::string::npos &&
++                        cut.find(" a=4 b=5 c=6\r\n") != std::string::npos &&
++                        cut.size() <= 1024 * 1024 + 512,
++                "rotate: with .prev held the log was not cut back");
++        }
++
+         // DCS Control (0045): several writers past the cap at a failed wrap:
+         // the last line goes in the first reservation's place past the cap,
+         // whichever writer writes it, so the file has no run of zero bytes.

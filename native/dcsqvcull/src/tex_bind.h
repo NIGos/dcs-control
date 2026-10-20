@@ -54,8 +54,15 @@ inline uint64_t Tick(uint64_t tsc) {
 
 // Full path with counters, used while the suite measures.
 uint64_t HookMeasured(void* tex, uint64_t packedSize) {
-  thread_local Entry table[4096];
+  // The table on the heap, per thread at its first measured call: a
+  // thread_local array (128 KB) went into the payload's static TLS, which
+  // Windows allocates and copies for every DCS thread, measured or not.
+  thread_local Entry* table = nullptr;
   thread_local Counters* c = nullptr;
+  if (!table) {
+    table = static_cast<Entry*>(calloc(4096, sizeof(Entry)));
+    if (!table) return g_orig(tex, packedSize);
+  }
   if (!c) {
     c = new Counters;
     std::lock_guard<std::mutex> lock(g_regMutex);

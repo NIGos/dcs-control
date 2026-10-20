@@ -1,0 +1,3328 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -235,6 +235,52 @@
+                     "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl")
+         endforeach()
+     endforeach()
++    # DCS Control (0035): the compositions with the cockpit depth compiled in
++    # as well (XRFG_COCKPIT_DEPTH=1), plain and with the still-tile path, and
++    # the depth's resample, used only with [ofxr] cockpit_depth for a pair
++    # whose frames carry depth: every other pair runs the shaders above,
++    # byte for byte as before 0035. Their own command, so the build compiles
++    # them beside the others.
++    set(XRFG_COCKPIT_DEPTH_RESAMPLE_HEADER "${XRFG_GENERATED_SHADER_DIR}/cockpit_mask_resample_depth_shader.hpp")
++    set(XRFG_COCKPIT_DEPTH_HEADERS "${XRFG_COCKPIT_DEPTH_RESAMPLE_HEADER}")
++    set(XRFG_COCKPIT_DEPTH_COMMANDS
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CockpitMaskResampleCS
++            /D XRFG_COCKPIT_DEPTH=1
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_COCKPIT_DEPTH_RESAMPLE_HEADER}" /Vn g_xrfg_cockpit_mask_resample_depth_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/cockpit_mask.hlsl")
++    foreach(XRFG_INDEX RANGE 0 ${XRFG_COCKPIT_MASK_VARIANT_LAST} 2)
++        math(EXPR XRFG_NAME_INDEX "${XRFG_INDEX} + 1")
++        list(GET XRFG_COCKPIT_MASK_VARIANTS ${XRFG_INDEX} XRFG_ENTRY)
++        list(GET XRFG_COCKPIT_MASK_VARIANTS ${XRFG_NAME_INDEX} XRFG_NAME)
++        set(XRFG_SUFFIXES "_masked_depth")
++        if(NOT XRFG_ENTRY STREQUAL "SynthesizeMidpointPS")
++            list(APPEND XRFG_SUFFIXES "_masked_depth_fast")
++        endif()
++        foreach(XRFG_SUFFIX ${XRFG_SUFFIXES})
++            if(XRFG_SUFFIX STREQUAL "_masked_depth_fast")
++                set(XRFG_FAST 1)
++            else()
++                set(XRFG_FAST 0)
++            endif()
++            set(XRFG_HEADER "${XRFG_GENERATED_SHADER_DIR}/${XRFG_NAME}${XRFG_SUFFIX}.hpp")
++            list(APPEND XRFG_COCKPIT_DEPTH_HEADERS "${XRFG_HEADER}")
++            list(APPEND XRFG_COCKPIT_DEPTH_COMMANDS
++                COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E ${XRFG_ENTRY}
++                    /D XRFG_COCKPIT_MASK=1 /D XRFG_COCKPIT_DEPTH=1 /D XRFG_FAST_COMPOSITION=${XRFG_FAST}
++                    /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++                    /Fh "${XRFG_HEADER}" /Vn g_xrfg_${XRFG_NAME}${XRFG_SUFFIX}
++                    "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl")
++        endforeach()
++    endforeach()
++    add_custom_command(
++        OUTPUT ${XRFG_COCKPIT_DEPTH_HEADERS}
++        COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
++        ${XRFG_COCKPIT_DEPTH_COMMANDS}
++        DEPENDS
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/cockpit_mask.hlsl"
++        VERBATIM)
+     foreach(XRFG_ENTRY_NAME ClassifyStillTilesCS:fast_composition_classify DecideStillTilesCS:fast_composition_decide)
+         string(REPLACE ":" ";" XRFG_ENTRY_PAIR "${XRFG_ENTRY_NAME}")
+         list(GET XRFG_ENTRY_PAIR 0 XRFG_ENTRY)
+@@ -417,7 +463,8 @@
+         "${XRFG_CURSOR_COMPOSITE_PIXEL_HEADER}"
+         "${XRFG_COCKPIT_MASK_RESAMPLE_HEADER}"
+         ${XRFG_COCKPIT_MASK_HEADERS}
+-        ${XRFG_FAST_COMPOSITION_HEADERS})
++        ${XRFG_FAST_COMPOSITION_HEADERS}
++        ${XRFG_COCKPIT_DEPTH_HEADERS})
+     target_include_directories(xrfg_d3d12_history
+         PUBLIC include "${XRFG_VULKAN_INCLUDE_DIR}"
+         PRIVATE
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -360,6 +360,19 @@
+     //     translation (the cockpit's parallax at 0.6 m over 0.5 px), c= of
+     //     them with the moving focus edge's band (0-15), the largest
+     //     parallax judged in 1/100 px (32-63).
++    //   result=8 (DCS Control 0035), with result=7 under [ofxr]
++    //     cockpit_depth: the cockpit depth over those 10 s. a= masked
++    //     pixels both real frames' depth reprojects (a solution on a cockpit
++    //     surface in each: the 6DoF reprojection composes them unless the two
++    //     frames disagree there), b= masked pixels without (0034's
++    //     composition: edges, moving parts, no depth), both counted per cell
++    //     of the target-view mask on the GPU; c= pairs that bound depth (0-23),
++    //     frames the consumer gave depth (24-47), the last frame's depth
++    //     lookup (48-55, xrfg::CockpitDepthLookup).
++    //   result=9 (0035), a depth handle did not open (once per generation):
++    //     a= the HRESULT, b= which slot, c= the generation.
++    //   result=10 (0035), the depth textures opened: a= the generation, b=
++    //     the atlas width (0-31) and height (32-63), c= the header flags.
+     cockpit_mask,
+     // DCS Control (0034): the second synthetic slot of a session that made
+     // its ring with one (adaptive 2X/3X at the shallow depth: 3X's second
+diff --git a/include/xrfg/cockpit_mask.hpp b/include/xrfg/cockpit_mask.hpp
+--- a/include/xrfg/cockpit_mask.hpp
++++ b/include/xrfg/cockpit_mask.hpp
+@@ -12,6 +12,10 @@
+ //
+ // Anything missing, stale or failed is "no mask for this frame": the
+ // composition as before. Nothing here waits on the CPU for the GPU.
++//
++// DCS Control (0035): with [ofxr] cockpit_depth, also the cockpit depth
++// companion (xrfg/dcsvr_cockpit_depth.h), copied with the mask (see
++// D3D12CockpitDepthView); a frame without it is a frame with its mask alone.
+ 
+ #include "xrfg/pose.hpp"
+ 
+@@ -161,8 +165,76 @@
+     std::atomic<std::uint64_t> parallax_skips{};  // ... the same-pixel rule off (head translation)
+     std::atomic<std::uint64_t> focus_band_eyes{}; // ... the moving focus edge's band applied
+     std::atomic<std::uint32_t> parallax_max_centipixels{}; // the largest parallax judged, 1/100 px
++    // DCS Control (0035): the cockpit depth (cockpit_mask result=8). Pairs
++    // that bound it for at least one eye, and, counted on the GPU by the
++    // resample (one per cell of the target-view mask, as pixels: cells times
++    // the cell's area), the masked cockpit pixels both real frames' depth
++    // reprojects (composed by the 6DoF reprojection unless the two frames
++    // disagree there) and those without (0031/0034 as before).
++    std::atomic<std::uint64_t> depth_pairs{};
++    std::atomic<std::uint64_t> depth_pixels{};
++    std::atomic<std::uint64_t> depth_fallback_pixels{};
++};
++
++// DCS Control (0035): the cockpit depth (R68 Stage 1, contract
++// xrfg/dcsvr_cockpit_depth.h). DCS Control's engine module writes, beside
++// each frame's cockpit mask and on the same grid, the cockpit's linear depth
++// (metres along the view axis; the nearest cockpit texel of each mask texel,
++// 0 where it has none) and the camera DCS drew that frame's cockpit from.
++// The cockpit is rigid and still in tracking space, so with the depth of both
++// real frames a cockpit pixel's position at any instant between them is a
++// closed-form function of the two cameras: the synthesis reprojects the
++// masked pixels in 6DoF (frame_synthesis.hlsl, XRFG_COCKPIT_DEPTH) instead of
++// 0034's same-pixel rule and parallax gate, which remain the fallback. One
++// eye's depth view of a frame: the cockpit camera's orientation and centre
++// (DCS's own submitted pose, its dual-camera shift taken off; tracking space
++// of the frame's XrSpace) and DLSS's jitter (render texels; for the record
++// only: the rect's tangents come from DCS's jittered projection, so the depth
++// texels are already where the jittered render put them).
++struct D3D12CockpitDepthView {
++    bool valid{};
++    Quaternion orientation{};
++    Vec3 cockpit_position{};
++    bool jitter_known{};
++    std::array<float, 2> jitter_px{};
+ };
+ 
++namespace cockpit_mask_detail {
++[[nodiscard]] inline bool finite(const Vec3& v) noexcept {
++    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
++}
++}  // namespace cockpit_mask_detail
++
++// DCS Control (0035): the cockpit camera's move from `previous` to `current`
++// (both frames' depth views of one eye), in the current camera's own frame
++// (OpenXR axes: x right, y up, z back), metres. The synthetic's target camera
++// at instant t has the current orientation and the centre
++// lerp(previous, current, t) (R68 answer 2), so a frame's camera sits
++// (1 - t) * delta (current) or -t * delta (previous) from it. False where
++// either view is unusable.
++[[nodiscard]] inline bool cockpit_camera_delta(const D3D12CockpitDepthView& previous,
++    const D3D12CockpitDepthView& current, Vec3& delta) noexcept {
++    delta = {};
++    if (!previous.valid || !current.valid || !cockpit_mask_detail::finite(previous.cockpit_position) ||
++        !cockpit_mask_detail::finite(current.cockpit_position)) {
++        return false;
++    }
++    const Quaternion& o = current.orientation;
++    const float length_squared = o.x * o.x + o.y * o.y + o.z * o.z + o.w * o.w;
++    if (!(length_squared > 1.0e-6F) || !std::isfinite(length_squared)) {
++        return false;
++    }
++    const Quaternion q = cockpit_mask_detail::unit(o);
++    const Quaternion inverse{-q.x, -q.y, -q.z, q.w};
++    const Vec3 moved{current.cockpit_position.x - previous.cockpit_position.x,
++        current.cockpit_position.y - previous.cockpit_position.y,
++        current.cockpit_position.z - previous.cockpit_position.z};
++    delta = cockpit_mask_detail::rotate(inverse, moved);
++    // More than a metre between two real frames is not a head.
++    return cockpit_mask_detail::finite(delta) &&
++        delta.x * delta.x + delta.y * delta.y + delta.z * delta.z < 1.0F;
++}
++
+ // DCS Control (0034): one eye's focus inset in a frame (the producer's focus
+ // view of that eye, 2 + eye), by its tangents: left, right, up, down.
+ struct D3D12CockpitFocusView {
+@@ -204,6 +276,18 @@
+     // nowhere).
+     std::array<D3D12CockpitFocusView, 2> focus{};
+     std::shared_ptr<CockpitMaskPairCounters> counters;
++    // DCS Control (0035): the frame's cockpit depth, with [ofxr]
++    // cockpit_depth: an R16G16_FLOAT texture laid out as `texture` (the same
++    // rects; x the nearest cockpit depth of the texel in metres, 0 none; y the
++    // farthest depth), copied with it and complete with it (ready_fence), and
++    // per eye the camera the cockpit was drawn from. `depth` false: none for
++    // this frame (depth_texture may still hold an older frame's).
++    Microsoft::WRL::ComPtr<ID3D12Resource> depth_texture;
++    bool depth{};
++    std::array<D3D12CockpitDepthView, 2> depth_views{};
++    // The XrSpace DCS submitted the poses in: two frames' cameras compare
++    // only within one.
++    std::uint64_t depth_space{};
+ 
+     // A submission that reads the texture completes at `value` of `fence`.
+     void note_reader(ID3D12Fence* fence, std::uint64_t value) noexcept;
+@@ -236,6 +320,26 @@
+     disabled = 15,        // not initialized
+ };
+ 
++// DCS Control (0035): why the last frame with a mask got its depth or not.
++// Anything but `paired` is that frame without depth: the mask alone, as 0034.
++// Values are logged.
++enum class CockpitDepthLookup : std::uint32_t {
++    none = 0,
++    paired = 1,            // the frame's depth, copied with its mask
++    off = 2,               // [ofxr] cockpit_depth is not on
++    no_block = 3,          // no depth block (the export is off), or not yet looked for
++    header_busy = 4,       // the writer held the seqlock through every attempt
++    header_unusable = 5,   // inactive, other version, process or adapter, other atlas
++    idle = 6,              // the producer idles (a heartbeat not fresh)
++    fence_mismatch = 7,    // not the mask's fence (one fence covers both)
++    generation_mismatch = 8, // made apart from the mask's textures
++    unpaired = 9,          // no depth slot of this frame's index, seq and generation
++    late_commit = 10,      // committed without DCS's poses
++    no_view = 11,          // no eye with a usable, posed view on the mask's grid
++    open_failed = 12,      // a shared handle did not open on this device
++    no_texture = 13,       // the private copy could not be made
++};
++
+ // Whether a mask is coming, as the flight log reports changes of it.
+ enum class CockpitMaskPresence : std::uint32_t {
+     absent = 0,   // no block
+@@ -257,6 +361,12 @@
+     CockpitMaskLookup last{CockpitMaskLookup::none};
+     CockpitMaskPresence presence{CockpitMaskPresence::absent};
+     std::uint32_t generation{};
++    // DCS Control (0035): the depth companion.
++    std::uint64_t depth_paired{};
++    std::uint64_t depth_misses{};
++    std::uint64_t depth_generations_opened{};
++    std::uint64_t depth_heartbeats_stored{};
++    CockpitDepthLookup depth_last{CockpitDepthLookup::none};
+ };
+ 
+ struct CockpitMaskConsumerOptions {
+@@ -281,6 +391,11 @@
+     // The reader heartbeat's store interval (the producer idles after 2 s
+     // without one).
+     std::uint32_t heartbeat_store_milliseconds{250};
++    // DCS Control (0035): [ofxr] cockpit_depth. Also read the cockpit depth
++    // companion (Local\DcsVrCockpitDepth_v1, the same suffix), opened only
++    // once the mask's block is, and store its reader heartbeat beside the
++    // mask's (the producer writes depth only while both are fresh).
++    bool cockpit_depth{false};
+ };
+ 
+ class CockpitMaskConsumer final {
+diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
+--- a/include/xrfg/d3d12_frame_synthesizer.hpp
++++ b/include/xrfg/d3d12_frame_synthesizer.hpp
+@@ -214,6 +214,13 @@
+     // mask's same-pixel rule off: its masked pixels take the flow. 0: the
+     // rule as 0031 had it, whatever the head did.
+     float cockpit_parallax_limit_pixels{kCockpitParallaxLimitPixels};
++    // DCS Control (0035): [ofxr] cockpit_depth (with cockpit_mask). The
++    // compositions that read the cockpit depth (and its resample) are made
++    // only with this; a pair whose two masks carry the depth of an eye
++    // composes that eye's masked pixels by their 6DoF reprojection between
++    // the two real frames' cockpit cameras, 0034's rules where it cannot.
++    // Without it, or without depth, the composition is exactly as before.
++    bool cockpit_depth{};
+ };
+ 
+ // A second synthetic produced from the same pair, for a session that hands
+@@ -376,6 +383,11 @@
+     // is in the world is used alone. The submission's queue waits on the GPU
+     // for the frame's copy; nothing waits on the CPU. Consumed by the next
+     // submission. Without one the composition is as before.
++    // DCS Control (0035): with [ofxr] cockpit_depth, a pair whose two frames
++    // carry the cockpit depth of an eye (D3D12CockpitMaskFrame::depth, the
++    // cameras in one XrSpace) composes that eye's masked pixels inside cockpit
++    // surfaces by their 6DoF reprojection (frame_synthesis.hlsl,
++    // XRFG_COCKPIT_DEPTH); every other pixel as above.
+     void set_cockpit_mask(std::shared_ptr<D3D12CockpitMaskFrame> frame) noexcept;
+ 
+     // DCS Control (0034): more synthetic destination images, after the ones
+diff --git a/include/xrfg/dcsvr_cockpit_depth.h b/include/xrfg/dcsvr_cockpit_depth.h
+new file mode 100644
+--- /dev/null
++++ b/include/xrfg/dcsvr_cockpit_depth.h
+@@ -0,0 +1,332 @@
++// DCS Control: cockpit depth companion export v1 (R68 Stage 1), the contract between DCS Control's engine module
++// (DcsQvCull, the writer) and a frame-generation layer (OFXR, the reader). It is a COMPANION of the cockpit mask
++// (dcsvr_cockpit_mask.h, Local\DcsVrCockpitMask_v1): the same compute pass writes both, in the same slot index, with
++// the same sequence number, committed in the same xrEndFrame and covered by the same single fence Signal. Design and
++// rationale: docs/research/R68_translation_framegen.md (section 6) and R65_cockpit_mask_export.md (the mask).
++//
++//   Local\DcsVrCockpitDepth_v1   written by the engine module per rendered frame ([Perception] CockpitDepthExport=1,
++//                                which requires CockpitMaskExport=1) while a reader stores its heartbeat in BOTH
++//                                blocks; read by the frame-generation layer at its xrEndFrame next to the mask.
++//
++// What a texel holds. One R16G16_FLOAT texel per mask texel: the SAME atlas size, the SAME per-view rects (x, y, w, h),
++// divisor, source size and fovTan as the mask slot of the same index (view_flags::same_grid_as_mask), so one tangent
++// mapping serves both. Over exactly the source block the mask texel covers (divisor x divisor texels plus the mask's
++// dilate apron):
++//   .x  nearest COCKPIT depth: the smallest depth among the block's cockpit texels (the mask's own test: stencil
++//       composition COCKPIT, or nearer than the mask's nearM); 0 when the block has no cockpit texel. Invariant:
++//       .x > 0  <=>  the mask texel is non-zero (255).
++//   .y  farthest depth: the largest depth among all texels of the block (the background, for disocclusion fill);
++//       65504 (sky_depth_m, the largest half float) for the sky (DCS's reverse-Z depth 0) and anything beyond it.
++// Units: METRES, linear, positive view-space distance ALONG THE VIEW AXIS (the clip w of DCS's projection: forward
++// distance, not the Euclidean ray length, not reversed-Z, not NDC). Computed from DCS's gProj of that view and frame
++// (reverse-Z, infinite far plane, near 0.02 m: w = near / d), viewport MinDepth/MaxDepth undone first. Half-float
++// precision: relative 2^-11 (0.3 mm at 0.6 m). The depth is that of DCS's opaque G-buffer + water, sampled at the same
++// point as the mask (before the transparent passes: canopy and HUD glass are not in it; the world behind shows).
++// Which camera: the cockpit texels were rendered by the COCKPIT camera, the world texels by DCS's (world) camera; with
++// the dual camera (Depth boost, worldMinusCockpitM != 0) they differ by a lateral shift only, which leaves the depth
++// along the view axis unchanged to well below half-float precision.
++//
++// Per view, beyond the mask's fields:
++//  - pose: DCS's own XrCompositionLayerProjectionView pose of this view and frame (orientation x, y, z, w; position
++//    x, y, z, metres), read from DCS's xrEndFrame before any API layer, in the space of DCS's projection layer
++//    (slot.xrSpace, the XrSpace handle DCS submitted it with; the same handle a lower layer receives). It is the WORLD
++//    camera (DCS renders with it; the pupil shift layer later gives the runtime its own poses back, so a lower layer
++//    must not use the runtime poses it receives to undo this frame's projection). Valid with view_flags::pose.
++//  - worldMinusCockpitM[3]: world camera centre minus cockpit camera centre, metres, in the VIEW's OWN SPACE with
++//    OpenXR axes (x right, y up, z backward; the orientation of `pose`). The cockpit camera centre is therefore
++//    pose.position - rotate(pose.orientation, worldMinusCockpitM) (cockpit_camera_position), with the same orientation.
++//    0 when the dual camera did not move this view's cockpit (off, external view, not patched this frame).
++//    view_flags::dual_camera when non-zero. A lateral vector in practice (|x| = h, y and z ~ 0).
++//  - boostShiftM: Depth boost's shift of DCS's camera from the unboosted eye along the view's +x (the eye axis),
++//    metres: -h for the left views (0, 2), +h for the right views (1, 3), h = (renderedIpd - baseIpd) / 2. With the
++//    dual camera on, worldMinusCockpitM.x == boostShiftM. NaN when unknown (view_flags::boost clear: the dual camera
++//    module is off, so the engine does not read the boost).
++//  - jitterPx[2]: DLSS jitter of this view and frame in RENDER (source) texels, +x right, +y down. Sign: a point
++//    appears in this frame's render at its unjittered position PLUS jitterPx; i.e. gProj = (unjittered projection of
++//    xrFov) followed by a shift of the image by jitterPx. Measured as gProj's view-axis NDC minus the one of DCS's
++//    submitted xrFov. NaN when unknown (view_flags::jitter clear: no CPU gProj or no submitted FOV for the view).
++//  - xrFov[4]: DCS's submitted XrFovf of the view (angleLeft, angleRight, angleUp, angleDown; radians). fovTan (the
++//    rect's edges) comes from gProj and so carries the jitter; xrFov does not.
++//
++// Pairing and synchronisation (the mask's, shared). slot.seq == the mask slot's maskSeq of the same index and frame
++// (it is the fence value). Use a depth slot only when, for the frame being processed (displayTime T):
++//   mask s = find_slot(maskHeader, T) >= 0, depth s' = find_slot(depthHeader, T) == s, depth.slot[s].seq ==
++//   mask.slot[s].maskSeq, both headers usable (same generation: depth.generation == mask.generation), and the view
++//   is valid in both. The mask slot also carries dcsvr_cockpit_mask::slot_flags::depth (16) when the companion holds
++//   that slot's depth. The engine writes the depth header BEFORE the mask header of a commit, so a reader that finds
++//   the mask slot finds the depth slot too. There is ONE fence: fenceHandle here is the SAME NT handle value as the
++//   mask block's fenceHandle (header_flags::shares_mask_fence); Wait(fence, seq) once covers mask and depth. The
++//   mask's release fence (when the reader uses it) holds the shared slot for both.
++// Generation. Mask and depth textures are made together: the depth header's generation always equals the mask
++// header's generation of the same layout; a reader re-opens both on any change.
++//
++// Reader heartbeat (R67 rules, per block). readerHeartbeatQpc (offset 2040, the last 8 bytes) is the one field the
++// reader writes (reader_heartbeat, outside the seqlock, FILE_MAP_READ | FILE_MAP_WRITE). The engine produces depth
++// only while BOTH the mask block's and this block's heartbeats are fresh (<= 2 s); otherwise this block is idle
++// (header_flags::idle; no depth write, no extra GPU work: the mask-only shader runs, or nothing when the mask is idle
++// too). A reader that wants depth stores both heartbeats (>= once per second, whatever the headers say).
++//
++// Versions. version (1) changes only on an incompatible layout change. revision (contract_revision) grows with additive
++// changes (new flags, a reserved field taken); a reader accepts any revision >= the one it was written for.
++//
++// Self-contained: <atomic>, <cmath>, <cstddef>, <cstdint>, <cstring>. #pragma pack(8), little-endian. The name takes
++// the optional suffix of the environment variable DCSVR_PERCEPTION_SHM_SUFFIX (as the mask; tests use it).
++#pragma once
++
++#include <atomic>
++#include <cmath>
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++
++namespace dcsvr_cockpit_depth {
++
++constexpr const wchar_t* block_name = L"Local\\DcsVrCockpitDepth_v1";
++constexpr const char* name_suffix_variable = "DCSVR_PERCEPTION_SHM_SUFFIX";
++constexpr std::uint32_t block_magic = 0x50444344u;  // "DCDP"
++constexpr std::uint32_t block_version = 1;
++constexpr std::uint32_t contract_revision = 1;      // R69: the first published contract
++constexpr int max_views = 4;
++constexpr int slot_count = 3;
++constexpr std::uint32_t format_r16g16_float = 34;   // DXGI_FORMAT_R16G16_FLOAT
++constexpr float sky_depth_m = 65504.0f;             // .y of the sky / beyond half float
++constexpr std::int64_t reader_heartbeat_period_ms = 1000;
++constexpr std::int64_t reader_heartbeat_timeout_ms = 2000;
++
++#pragma pack(push, 8)
++struct DepthView {                // 128 bytes
++    std::uint32_t flags;          // view_flags
++    std::uint32_t x, y, w, h;     // the view's rect in the slot texture (texels): identical to the mask view's rect
++    std::uint32_t srcW, srcH;     // DCS's depth viewport of the view (texels)
++    std::uint32_t divisor;        // source texels per texel, each axis (as the mask)
++    float fovTan[4];              // left, right, up, down tangents of the rect's outer edges (gProj, this frame; as the mask)
++    float nearM;                  // the mask's near-depth threshold (a texel nearer than this is cockpit; 0: stencil only)
++    float boostShiftM;            // DCS's camera minus the unboosted eye along +x (left -h, right +h); NaN unknown
++    float worldMinusCockpitM[3];  // world camera centre minus cockpit camera centre, view space (x right, y up, z back)
++    float jitterPx[2];            // DLSS jitter, render texels, +x right, +y down (image = unjittered + jitterPx); NaN unknown
++    float poseOrientation[4];     // DCS's submitted pose of the view: orientation x, y, z, w (slot.xrSpace)
++    float posePosition[3];        // ... position x, y, z (metres)
++    float xrFov[4];               // DCS's submitted XrFovf: angleLeft, angleRight, angleUp, angleDown (radians)
++    std::uint32_t reserved[2];    // 0
++};
++
++struct DepthSlot {                // 560 bytes
++    std::uint64_t seq;            // == the mask slot's maskSeq of this frame (the fence value); 0: never written
++    std::uint64_t engineFrame;    // the engine's frame counter (== the mask slot's)
++    std::int64_t displayTime;     // XrFrameEndInfo::displayTime DCS submitted this frame with (slot_flags::display_time)
++    std::int64_t qpcCommit;       // QueryPerformanceCounter at the commit
++    std::uint32_t flags;          // slot_flags
++    std::uint32_t viewMask;       // bit v: view[v] valid (holds this frame's depth)
++    std::uint64_t xrSpace;        // the XrSpace handle of DCS's projection layer (poses are in it); 0 unknown
++    DepthView view[max_views];
++};
++
++struct Header {                   // 2048 bytes
++    std::uint64_t seq;                // seqlock: even = stable
++    std::uint32_t magic;              // block_magic
++    std::uint32_t version;            // block_version
++    std::uint32_t structSize;         // sizeof(Header)
++    std::uint32_t flags;              // header_flags
++    std::uint32_t generation;         // == the mask header's generation (textures made together); never 0 while active
++    std::uint32_t slotCount;          // slot_count
++    std::uint32_t format;             // format_r16g16_float
++    std::uint32_t atlasW, atlasH;     // every slot texture's size (== the mask's atlas size)
++    std::uint32_t ownerPid;           // the process the handles belong to (DCS)
++    std::uint64_t adapterLuid;        // LowPart | HighPart << 32 of DCS's adapter
++    std::uint64_t textureHandle[slot_count];  // NT handles (D3D11_RESOURCE_MISC_SHARED_NTHANDLE), one per slot
++    std::uint64_t fenceHandle;        // the mask block's fence NT handle (the same value; header_flags::shares_mask_fence)
++    std::uint64_t newestSeq;          // the newest committed seq (0: none yet)
++    std::int64_t heartbeatQpc;        // QueryPerformanceCounter at the last write
++    std::int64_t qpcFrequency;        // QueryPerformanceFrequency
++    std::uint32_t newestSlot;         // the slot of newestSeq
++    std::uint32_t revision;           // contract_revision of the writer
++    std::uint32_t reserved0[2];       // 0
++    DepthSlot slot[slot_count];
++    std::uint64_t reserved1[29];      // 0
++    std::uint64_t readerHeartbeatQpc; // written by the READER only, outside the seqlock (R67 rules); 0 = no reader
++};
++#pragma pack(pop)
++
++static_assert(sizeof(DepthView) == 128 && offsetof(DepthView, x) == 4 && offsetof(DepthView, srcW) == 20 &&
++                  offsetof(DepthView, divisor) == 28 && offsetof(DepthView, fovTan) == 32 &&
++                  offsetof(DepthView, nearM) == 48 && offsetof(DepthView, boostShiftM) == 52 &&
++                  offsetof(DepthView, worldMinusCockpitM) == 56 && offsetof(DepthView, jitterPx) == 68 &&
++                  offsetof(DepthView, poseOrientation) == 76 && offsetof(DepthView, posePosition) == 92 &&
++                  offsetof(DepthView, xrFov) == 104 && offsetof(DepthView, reserved) == 120,
++              "DepthView layout");
++static_assert(sizeof(DepthSlot) == 560 && offsetof(DepthSlot, engineFrame) == 8 && offsetof(DepthSlot, displayTime) == 16 &&
++                  offsetof(DepthSlot, qpcCommit) == 24 && offsetof(DepthSlot, flags) == 32 &&
++                  offsetof(DepthSlot, viewMask) == 36 && offsetof(DepthSlot, xrSpace) == 40 && offsetof(DepthSlot, view) == 48,
++              "DepthSlot layout");
++static_assert(offsetof(Header, magic) == 8 && offsetof(Header, structSize) == 16 && offsetof(Header, flags) == 20 &&
++                  offsetof(Header, generation) == 24 && offsetof(Header, format) == 32 && offsetof(Header, atlasW) == 36 &&
++                  offsetof(Header, ownerPid) == 44 && offsetof(Header, adapterLuid) == 48 &&
++                  offsetof(Header, textureHandle) == 56 && offsetof(Header, fenceHandle) == 80 &&
++                  offsetof(Header, newestSeq) == 88 && offsetof(Header, heartbeatQpc) == 96 &&
++                  offsetof(Header, qpcFrequency) == 104 && offsetof(Header, newestSlot) == 112 &&
++                  offsetof(Header, revision) == 116 && offsetof(Header, slot) == 128 &&
++                  offsetof(Header, reserved1) == 128 + 560 * 3 && sizeof(Header) == 2048,
++              "Header layout");
++static_assert(offsetof(Header, readerHeartbeatQpc) == 2040 && offsetof(Header, readerHeartbeatQpc) % 8 == 0 &&
++                  offsetof(Header, readerHeartbeatQpc) + 8 == sizeof(Header),
++              "readerHeartbeatQpc: the last 8 bytes, 8-aligned");
++
++namespace header_flags {
++constexpr std::uint32_t active = 1u;             // the export runs (textures and handles valid)
++constexpr std::uint32_t fence = 2u;              // fenceHandle is set
++constexpr std::uint32_t reader_heartbeat = 8u;   // the writer honours readerHeartbeatQpc
++constexpr std::uint32_t idle = 16u;              // no fresh heartbeat (this block's or the mask's): no new slots
++constexpr std::uint32_t shares_mask_fence = 32u; // fenceHandle is the mask block's fence; values = its maskSeq
++}  // namespace header_flags
++namespace slot_flags {
++constexpr std::uint32_t valid = 1u;          // committed, at least one view valid
++constexpr std::uint32_t display_time = 2u;   // displayTime is DCS's xrEndFrame displayTime of this frame (pairable)
++constexpr std::uint32_t late_commit = 4u;    // committed without the xrEndFrame hook: not pairable, no poses
++constexpr std::uint32_t partial = 8u;        // a view of the mask slot has no depth in this frame
++constexpr std::uint32_t dual_camera = 16u;   // some view has worldMinusCockpitM != 0 this frame
++constexpr std::uint32_t poses = 32u;         // xrSpace and the views' pose / xrFov were read from DCS's xrEndFrame
++}  // namespace slot_flags
++namespace view_flags {
++constexpr std::uint32_t valid = 1u;              // the rect holds this frame's depth of the view
++constexpr std::uint32_t after_water = 2u;        // sampled at the view's WaterSeaPass end (as the mask)
++constexpr std::uint32_t focus = 16u;             // a focus view (2 / 3)
++constexpr std::uint32_t same_grid_as_mask = 32u; // rect, divisor, source size and fovTan equal the mask view's (always, v1)
++constexpr std::uint32_t dual_camera = 64u;       // worldMinusCockpitM != 0
++constexpr std::uint32_t jitter = 128u;           // jitterPx known
++constexpr std::uint32_t pose = 256u;             // poseOrientation / posePosition / xrFov known
++constexpr std::uint32_t boost = 512u;            // boostShiftM known
++}  // namespace view_flags
++
++// ---- Seqlock (the mask's protocol; copies bytes 8 .. 2039, never the reader's field) -----------------------------
++static_assert(sizeof(std::atomic<std::uint64_t>) == 8 && std::atomic<std::uint64_t>::is_always_lock_free, "seq");
++
++inline std::atomic<std::uint64_t>& seq_of(Header* h) { return *reinterpret_cast<std::atomic<std::uint64_t>*>(&h->seq); }
++
++inline void seqlock_write(Header* block, const Header& value) {
++    auto& seq = seq_of(block);
++    const std::uint64_t start = seq.load(std::memory_order_relaxed) | 1u;
++    seq.store(start, std::memory_order_relaxed);
++    std::atomic_thread_fence(std::memory_order_release);
++    constexpr std::size_t offset = sizeof(std::uint64_t);
++    constexpr std::size_t end = offsetof(Header, readerHeartbeatQpc);
++    std::memcpy(reinterpret_cast<unsigned char*>(block) + offset, reinterpret_cast<const unsigned char*>(&value) + offset,
++                end - offset);
++    std::atomic_thread_fence(std::memory_order_release);
++    seq.store(start + 1, std::memory_order_release);
++}
++
++inline bool seqlock_read(const Header* block, Header& out, int attempts = 4) {
++    auto& seq = seq_of(const_cast<Header*>(block));
++    for (int i = 0; i < attempts; ++i) {
++        const std::uint64_t before = seq.load(std::memory_order_acquire);
++        if (before == 0) return false;
++        if (before & 1u) continue;
++        std::memcpy(&out, block, sizeof(Header));
++        std::atomic_thread_fence(std::memory_order_acquire);
++        if (seq.load(std::memory_order_relaxed) == before) {
++            out.seq = before;
++            return true;
++        }
++    }
++    return false;
++}
++
++// ---- Reader heartbeat (outside the seqlock) ------------------------------------------------------------------------
++inline std::atomic<std::uint64_t>& reader_heartbeat_of(Header* h) {
++    return *reinterpret_cast<std::atomic<std::uint64_t>*>(&h->readerHeartbeatQpc);
++}
++inline void reader_heartbeat(Header* h, std::int64_t nowQpc) {
++    reader_heartbeat_of(h).store(static_cast<std::uint64_t>(nowQpc), std::memory_order_release);
++}
++inline bool reader_alive(const Header* h, std::int64_t nowQpc, std::int64_t qpcFrequency,
++                         std::int64_t maxAgeMs = reader_heartbeat_timeout_ms) {
++    const std::uint64_t hb = reader_heartbeat_of(const_cast<Header*>(h)).load(std::memory_order_acquire);
++    if (hb == 0 || qpcFrequency <= 0 || nowQpc <= 0) return false;
++    const std::int64_t limit = qpcFrequency / 1000 * maxAgeMs + qpcFrequency % 1000 * maxAgeMs / 1000;
++    const std::int64_t age = nowQpc - static_cast<std::int64_t>(hb);
++    return age <= limit && -age <= limit;
++}
++
++// ---- Reader helpers (pure) -----------------------------------------------------------------------------------------
++
++// The header describes a running export whose handles belong to process `pid`.
++inline bool header_usable(const Header& h, std::uint32_t pid) {
++    return h.magic == block_magic && h.version == block_version && h.structSize >= sizeof(Header) &&
++           (h.flags & header_flags::active) && h.generation != 0 && h.slotCount == slot_count &&
++           h.format == format_r16g16_float && h.ownerPid == pid && h.atlasW > 0 && h.atlasH > 0;
++}
++
++// The slot committed for the frame DCS submits with `displayTime`, or -1.
++inline int find_slot(const Header& h, std::int64_t displayTime) {
++    if (displayTime == 0) return -1;
++    int best = -1;
++    for (int i = 0; i < slot_count; ++i) {
++        const DepthSlot& s = h.slot[i];
++        const std::uint32_t need = slot_flags::valid | slot_flags::display_time;
++        if ((s.flags & need) != need || s.displayTime != displayTime || s.seq == 0) continue;
++        if (best < 0 || s.seq > h.slot[best].seq) best = i;
++    }
++    return best;
++}
++
++// Depth slot s pairs with the mask slot of the same index (maskSlotIndex from dcsvr_cockpit_mask::find_slot, its
++// maskSeq and the mask header's generation): same index, same seq, same generation.
++inline bool paired_with_mask(const Header& h, int s, int maskSlotIndex, std::uint64_t maskSeq, std::uint32_t maskGeneration) {
++    return s >= 0 && s < slot_count && s == maskSlotIndex && maskSeq != 0 && h.slot[s].seq == maskSeq &&
++           h.generation == maskGeneration;
++}
++
++// View v of slot s is usable (its rect inside the atlas).
++inline bool view_usable(const Header& h, int s, int v) {
++    if (s < 0 || s >= slot_count || v < 0 || v >= max_views) return false;
++    const DepthView& m = h.slot[s].view[v];
++    return (m.flags & view_flags::valid) && (h.slot[s].viewMask & (1u << v)) && m.w > 0 && m.h > 0 &&
++           m.x + m.w <= h.atlasW && m.y + m.h <= h.atlasH;
++}
++
++inline bool heartbeat_fresh(const Header& h, std::int64_t nowQpc, double maxAgeMs = 500.0) {
++    if (h.qpcFrequency <= 0 || h.heartbeatQpc <= 0 || nowQpc < h.heartbeatQpc) return false;
++    return double(nowQpc - h.heartbeatQpc) * 1000.0 / double(h.qpcFrequency) <= maxAgeMs;
++}
++
++// Texel (column, row) of view rect m for a direction given as tangents (x right, y up); false outside the rect.
++inline bool tan_to_texel(const DepthView& m, float tx, float ty, std::uint32_t& col, std::uint32_t& row) {
++    const float l = m.fovTan[0], r = m.fovTan[1], u = m.fovTan[2], d = m.fovTan[3];
++    if (!(r > l) || !(u > d)) return false;
++    const float fx = (tx - l) / (r - l), fy = (u - ty) / (u - d);
++    if (!(fx >= 0.0f && fx < 1.0f && fy >= 0.0f && fy < 1.0f)) return false;
++    col = static_cast<std::uint32_t>(fx * float(m.w));
++    row = static_cast<std::uint32_t>(fy * float(m.h));
++    if (col >= m.w) col = m.w - 1;
++    if (row >= m.h) row = m.h - 1;
++    return true;
++}
++
++// v rotated by unit quaternion q (x, y, z, w).
++inline void rotate(const float q[4], const float v[3], float out[3]) {
++    const float x = q[0], y = q[1], z = q[2], w = q[3];
++    const float tx = 2.0f * (y * v[2] - z * v[1]), ty = 2.0f * (z * v[0] - x * v[2]), tz = 2.0f * (x * v[1] - y * v[0]);
++    out[0] = v[0] + w * tx + (y * tz - z * ty);
++    out[1] = v[1] + w * ty + (z * tx - x * tz);
++    out[2] = v[2] + w * tz + (x * ty - y * tx);
++}
++
++// The cockpit camera's centre in slot.xrSpace: pose.position - rotate(pose.orientation, worldMinusCockpitM). Its
++// orientation is the pose's. false without view_flags::pose.
++inline bool cockpit_camera_position(const DepthView& m, float out[3]) {
++    if (!(m.flags & view_flags::pose)) return false;
++    float d[3];
++    rotate(m.poseOrientation, m.worldMinusCockpitM, d);
++    for (int i = 0; i < 3; ++i) out[i] = m.posePosition[i] - d[i];
++    return true;
++}
++
++// The point at depth z (metres along the view axis) behind tangent (tx, ty) of the view, in the cockpit camera's view
++// space (OpenXR axes: x right, y up, z backward): (tx * z, ty * z, -z).
++inline void unproject(float tx, float ty, float z, float out[3]) {
++    out[0] = tx * z;
++    out[1] = ty * z;
++    out[2] = -z;
++}
++
++}  // namespace dcsvr_cockpit_depth
+diff --git a/include/xrfg/dcsvr_cockpit_mask.h b/include/xrfg/dcsvr_cockpit_mask.h
+--- a/include/xrfg/dcsvr_cockpit_mask.h
++++ b/include/xrfg/dcsvr_cockpit_mask.h
+@@ -76,6 +76,10 @@
+ //    the old writer's header writes copy the whole block and reset the field to 0 at every commit; harmless, the old
+ //    writer produces masks regardless.
+ //
++// Depth companion (R69, v1 additive). With [Perception] CockpitDepthExport=1 the same pass also writes the cockpit
++// depth into Local\DcsVrCockpitDepth_v1 (dcsvr_cockpit_depth.h): same slot index, same seq (maskSeq), same commit, the
++// same fence. A mask slot whose depth was written carries slot_flags::depth (16); a v1 reader ignores the bit.
++//
+ // Self-contained: <atomic>, <cstddef>, <cstdint>, <cstring>. #pragma pack(8), little-endian. The name takes the optional
+ // suffix of the environment variable DCSVR_PERCEPTION_SHM_SUFFIX (as the Perception blocks; tests use it).
+ #pragma once
+@@ -182,6 +186,8 @@
+ constexpr std::uint32_t display_time = 2u;   // displayTime is DCS's xrEndFrame displayTime of this frame (pairable)
+ constexpr std::uint32_t late_commit = 4u;    // committed at the next frame's first pass (no xrEndFrame hook): not pairable
+ constexpr std::uint32_t partial = 8u;        // a configured view is missing in this frame
++constexpr std::uint32_t depth = 16u;         // R69 (v1, additive): the companion block Local\DcsVrCockpitDepth_v1
++                                             // (dcsvr_cockpit_depth.h) holds this slot's depth, same index and seq
+ }  // namespace slot_flags
+ namespace view_flags {
+ constexpr std::uint32_t valid = 1u;          // the rect holds this frame's mask of the view
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -173,6 +173,13 @@
+ // (0) by default and when the key is missing. Read once per session.
+ [[nodiscard]] bool read_cockpit_mask(
+     const std::filesystem::path& module_directory) noexcept;
++// DCS Control (0035). `[ofxr] cockpit_depth`: with cockpit_mask, also read the
++// cockpit depth DCS Control's engine module shares beside the mask
++// (Local\DcsVrCockpitDepth_v1) and compose the cockpit by its 6DoF
++// reprojection between the two real frames. Off (0) by default and when the
++// key is missing. Read once per session.
++[[nodiscard]] bool read_cockpit_depth(
++    const std::filesystem::path& module_directory) noexcept;
+ // DCS Control (0034). `[ofxr] lazy_synthetic_slot`: adaptive 2X/3X at the
+ // shallow depth makes the synthetic ring's second slot (one more private
+ // swapchain per application swapchain) only when 3X, or adaptive cadence's
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -21,6 +21,11 @@
+ ; world's motion is not carried across its edges. 1 on, 0 off (default). Read
+ ; when the game starts its session.
+ cockpit_mask=0
++; DCS, with cockpit_mask=1: also use the cockpit depth the engine module shares
++; beside the mask, so the cockpit in generated frames follows head movement
++; (leaning, and the eyes' sway as the head turns) exactly. 1 on, 0 off
++; (default). Read when the game starts its session.
++cockpit_depth=0
+ ; NVIDIA flow: the parts of the image with no motion left are composed the short
+ ; way, to the same image, for less GPU time. 1 on, 0 off (default). Read when
+ ; the game starts its session.
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -332,6 +332,11 @@
+     return read_ofxr_switch(module_directory, L"cockpit_mask", false);
+ }
+ 
++// DCS Control (0035).
++bool read_cockpit_depth(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"cockpit_depth", false);
++}
++
+ // DCS Control (0034).
+ bool read_lazy_synthetic_slot(const std::filesystem::path& module_directory) noexcept {
+     return read_ofxr_switch(module_directory, L"lazy_synthetic_slot", true);
+diff --git a/src/d3d12/cockpit_mask.cpp b/src/d3d12/cockpit_mask.cpp
+--- a/src/d3d12/cockpit_mask.cpp
++++ b/src/d3d12/cockpit_mask.cpp
+@@ -8,7 +8,17 @@
+ // slot is free again as soon as the copy has run (and the release fence, when
+ // the producer offers one, tells it exactly when).
+ 
++//
++// DCS Control (0035): with [ofxr] cockpit_depth the depth companion
++// (Local\DcsVrCockpitDepth_v1, R68 Stage 1) the same way: its block opened
++// once the mask's is, its reader heartbeat stored beside the mask's, its slot
++// paired with the mask slot already chosen (same index, seq and generation)
++// and copied on the same queue in the same list, after the same wait (one
++// fence covers both) and before the same release. Anything missing or failed
++// is that frame without depth: its mask alone.
++
+ #include "xrfg/cockpit_mask.hpp"
++#include "xrfg/dcsvr_cockpit_depth.h"
+ #include "xrfg/dcsvr_cockpit_mask.h"
+ 
+ #include <windows.h>
+@@ -24,6 +34,7 @@
+ 
+ using Microsoft::WRL::ComPtr;
+ namespace cm = dcsvr_cockpit_mask;
++namespace cd = dcsvr_cockpit_depth; // DCS Control (0035)
+ 
+ void D3D12CockpitMaskFrame::note_reader(ID3D12Fence* fence, std::uint64_t value) noexcept {
+     if (fence == nullptr || value == 0) {
+@@ -81,6 +92,16 @@
+     cm::reader_heartbeat(static_cast<cm::Header*>(block), qpc);
+ }
+ 
++// DCS Control (0035): "depth wanted", the depth header's own.
++void store_depth_reader_heartbeat(void* block, std::int64_t qpc) noexcept {
++    cd::reader_heartbeat(static_cast<cd::Header*>(block), qpc);
++}
++
++[[nodiscard]] bool finite4(const float (&values)[4]) noexcept {
++    return std::isfinite(values[0]) && std::isfinite(values[1]) && std::isfinite(values[2]) &&
++        std::isfinite(values[3]);
++}
++
+ }  // namespace
+ 
+ struct CockpitMaskConsumer::Impl {
+@@ -155,8 +176,41 @@
+         std::make_shared<CockpitMaskPairCounters>();
+     mutable std::mutex mutex;
+ 
++    // DCS Control (0035): the depth companion, opened only with
++    // options.cockpit_depth and once the mask's block is.
++    struct DepthOpened {
++        std::uint32_t generation{};
++        std::array<ComPtr<ID3D12Resource>, cd::slot_count> textures{};
++        std::uint32_t atlas_width{};
++        std::uint32_t atlas_height{};
++        std::uint64_t last_use_copy_value{};
++    };
++    // What one frame's depth pairing found: the producer's slot texture to
++    // copy and the eyes' views, or why there is none.
++    struct DepthPairing {
++        CockpitDepthLookup result{CockpitDepthLookup::none};
++        ID3D12Resource* source{};
++        std::array<D3D12CockpitDepthView, 2> views{};
++        std::uint64_t space{};
++    };
++    std::wstring depth_name;
++    HANDLE depth_mapping{};
++    const cd::Header* depth_block{};
++    void* depth_writable_block{};
++    std::int64_t depth_last_heartbeat_qpc{};
++    std::uint64_t depth_next_open_ms{};
++    std::optional<DepthOpened> depth_opened;
++    std::vector<DepthOpened> depth_retired;
++    std::uint32_t depth_open_failure_logged_generation{};
++
+     ~Impl() {
+         stop_heartbeat();
++        if (depth_block != nullptr) { // DCS Control (0035)
++            UnmapViewOfFile(depth_block);
++        }
++        if (depth_mapping != nullptr) {
++            CloseHandle(depth_mapping);
++        }
+         if (block != nullptr) {
+             UnmapViewOfFile(block);
+         }
+@@ -201,6 +255,11 @@
+             ++stats.heartbeats_stopped;
+         }
+         last_heartbeat_qpc = 0;
++        // DCS Control (0035): and "no depth wanted".
++        if (depth_writable_block != nullptr && depth_last_heartbeat_qpc != 0) {
++            store_depth_reader_heartbeat(depth_writable_block, 0);
++        }
++        depth_last_heartbeat_qpc = 0;
+     }
+ 
+     // "Masks wanted", whatever the header says (the producer starts only
+@@ -220,6 +279,236 @@
+         ++stats.heartbeats_stored;
+     }
+ 
++    // DCS Control (0035): "depth wanted", on the same terms as the mask's
++    // (the producer writes depth only while both are fresh).
++    void depth_heartbeat(std::int64_t now) noexcept {
++        if (depth_writable_block == nullptr) {
++            return;
++        }
++        const std::int64_t interval =
++            qpc_frequency * static_cast<std::int64_t>(options.heartbeat_store_milliseconds) / 1000;
++        if (depth_last_heartbeat_qpc != 0 && now - depth_last_heartbeat_qpc < interval) {
++            return;
++        }
++        store_depth_reader_heartbeat(depth_writable_block, now);
++        depth_last_heartbeat_qpc = now;
++        ++stats.depth_heartbeats_stored;
++    }
++
++    // DCS Control (0035): the depth block, looked for at most once a retry
++    // interval while missing (writable for the heartbeat; read-only if
++    // refused, when the producer stays idle).
++    [[nodiscard]] bool open_depth_block(std::uint64_t now_ms) noexcept {
++        if (depth_block != nullptr) {
++            return true;
++        }
++        if (depth_next_open_ms != 0 && now_ms < depth_next_open_ms) {
++            return false;
++        }
++        depth_next_open_ms = now_ms + options.retry_milliseconds;
++        bool writable = true;
++        depth_mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, depth_name.c_str());
++        if (depth_mapping == nullptr) {
++            writable = false;
++            depth_mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, depth_name.c_str());
++        }
++        if (depth_mapping == nullptr) {
++            return false;
++        }
++        void* view = MapViewOfFile(depth_mapping,
++            writable ? FILE_MAP_READ | FILE_MAP_WRITE : FILE_MAP_READ, 0, 0, sizeof(cd::Header));
++        if (view == nullptr) {
++            CloseHandle(depth_mapping);
++            depth_mapping = nullptr;
++            return false;
++        }
++        depth_block = static_cast<const cd::Header*>(view);
++        depth_writable_block = writable ? view : nullptr;
++        depth_last_heartbeat_qpc = 0;
++        return true;
++    }
++
++    void retire_depth_opened() noexcept {
++        if (!depth_opened) {
++            return;
++        }
++        try {
++            depth_retired.push_back(std::move(*depth_opened));
++        } catch (...) {
++            static_cast<void>(drain(1000));
++        }
++        depth_opened.reset();
++    }
++
++    // DCS Control (0035): the depth textures of `header`'s generation (the
++    // handles are this process's, as the mask's).
++    [[nodiscard]] CockpitDepthLookup open_depth_handles(const cd::Header& header) noexcept {
++        DepthOpened next{};
++        next.generation = header.generation;
++        next.atlas_width = header.atlasW;
++        next.atlas_height = header.atlasH;
++        const auto failed = [&](HRESULT result, std::uint64_t which) {
++            if (depth_open_failure_logged_generation != header.generation) {
++                depth_open_failure_logged_generation = header.generation;
++                log(9, static_cast<std::uint32_t>(result), which, header.generation);
++            }
++            return CockpitDepthLookup::open_failed;
++        };
++        for (int index = 0; index < cd::slot_count; ++index) {
++            const HRESULT result = device->OpenSharedHandle(
++                reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(header.textureHandle[index])),
++                IID_PPV_ARGS(next.textures[index].GetAddressOf()));
++            if (FAILED(result)) {
++                return failed(result, static_cast<std::uint64_t>(index));
++            }
++            const D3D12_RESOURCE_DESC description = next.textures[index]->GetDesc();
++            if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
++                (description.Format != DXGI_FORMAT_R16G16_FLOAT &&
++                    description.Format != DXGI_FORMAT_R16G16_TYPELESS) ||
++                description.Width < header.atlasW || description.Height < header.atlasH ||
++                description.SampleDesc.Count != 1) {
++                return failed(E_INVALIDARG, static_cast<std::uint64_t>(index));
++            }
++        }
++        cd::Header again{};
++        if (!cd::seqlock_read(depth_block, again) || again.generation != header.generation) {
++            return CockpitDepthLookup::generation_mismatch;
++        }
++        retire_depth_opened();
++        depth_opened = std::move(next);
++        ++stats.depth_generations_opened;
++        log(10, header.generation,
++            static_cast<std::uint64_t>(header.atlasW) | (static_cast<std::uint64_t>(header.atlasH) << 32U),
++            header.flags);
++        return CockpitDepthLookup::paired;
++    }
++
++    // DCS Control (0035): the depth slot of the mask slot `slot` already
++    // chosen for `display_time` (mask header `mask`, its usable eyes
++    // `views`), or why there is none. Never waits.
++    [[nodiscard]] DepthPairing pair_depth(const cm::Header& mask, int slot, std::int64_t display_time,
++        const std::array<D3D12CockpitMaskView, 2>& views) noexcept {
++        DepthPairing pairing{};
++        if (!options.cockpit_depth) {
++            pairing.result = CockpitDepthLookup::off;
++            return pairing;
++        }
++        if (depth_block == nullptr) {
++            pairing.result = CockpitDepthLookup::no_block;
++            return pairing;
++        }
++        cd::Header header{};
++        if (!cd::seqlock_read(depth_block, header)) {
++            pairing.result = CockpitDepthLookup::header_busy;
++            return pairing;
++        }
++        if (!cd::header_usable(header, process_id) || header.adapterLuid != adapter_luid ||
++            header.atlasW != mask.atlasW || header.atlasH != mask.atlasH) {
++            retire_depth_opened();
++            pairing.result = CockpitDepthLookup::header_unusable;
++            return pairing;
++        }
++        if ((header.flags & cd::header_flags::idle) != 0) {
++            pairing.result = CockpitDepthLookup::idle;
++            return pairing;
++        }
++        // One fence: the mask's, whose single Wait the copy already takes.
++        if ((header.flags & cd::header_flags::fence) == 0 ||
++            (header.flags & cd::header_flags::shares_mask_fence) == 0 ||
++            header.fenceHandle != mask.fenceHandle) {
++            pairing.result = CockpitDepthLookup::fence_mismatch;
++            return pairing;
++        }
++        if (header.generation != mask.generation) {
++            pairing.result = CockpitDepthLookup::generation_mismatch;
++            return pairing;
++        }
++        const cm::MaskSlot& mask_slot = mask.slot[slot];
++        const int depth_slot = cd::find_slot(header, display_time);
++        if ((mask_slot.flags & cm::slot_flags::depth) == 0 ||
++            !cd::paired_with_mask(header, depth_slot, slot, mask_slot.maskSeq, mask.generation)) {
++            pairing.result = CockpitDepthLookup::unpaired;
++            return pairing;
++        }
++        const cd::DepthSlot& source = header.slot[depth_slot];
++        if ((source.flags & cd::slot_flags::late_commit) != 0 ||
++            (source.flags & cd::slot_flags::poses) == 0) {
++            pairing.result = CockpitDepthLookup::late_commit;
++            return pairing;
++        }
++        bool any = false;
++        for (int eye = 0; eye < 2; ++eye) {
++            if (!views[eye].valid || !cd::view_usable(header, depth_slot, eye)) {
++                continue;
++            }
++            const cd::DepthView& view = source.view[eye];
++            const D3D12CockpitMaskView& grid = views[eye];
++            // The mask's own grid (the producer's contract, checked).
++            if ((view.flags & cd::view_flags::same_grid_as_mask) == 0 ||
++                (view.flags & cd::view_flags::pose) == 0 || view.x != grid.x || view.y != grid.y ||
++                view.w != grid.width || view.h != grid.height) {
++                continue;
++            }
++            float centre[3]{};
++            if (!finite4(view.poseOrientation) || !cd::cockpit_camera_position(view, centre) ||
++                !std::isfinite(centre[0]) || !std::isfinite(centre[1]) || !std::isfinite(centre[2])) {
++                continue;
++            }
++            D3D12CockpitDepthView& out = pairing.views[eye];
++            out.valid = true;
++            out.orientation = {view.poseOrientation[0], view.poseOrientation[1], view.poseOrientation[2],
++                view.poseOrientation[3]};
++            out.cockpit_position = {centre[0], centre[1], centre[2]};
++            out.jitter_known = (view.flags & cd::view_flags::jitter) != 0 &&
++                std::isfinite(view.jitterPx[0]) && std::isfinite(view.jitterPx[1]);
++            out.jitter_px = out.jitter_known ? std::array<float, 2>{view.jitterPx[0], view.jitterPx[1]}
++                                             : std::array<float, 2>{};
++            any = true;
++        }
++        if (!any) {
++            pairing.result = CockpitDepthLookup::no_view;
++            return pairing;
++        }
++        if (!depth_opened || depth_opened->generation != header.generation) {
++            const CockpitDepthLookup opened_result = open_depth_handles(header);
++            if (opened_result != CockpitDepthLookup::paired) {
++                pairing.result = opened_result;
++                return pairing;
++            }
++        }
++        pairing.source = depth_opened->textures[static_cast<std::size_t>(depth_slot)].Get();
++        pairing.space = source.xrSpace;
++        pairing.result = CockpitDepthLookup::paired;
++        return pairing;
++    }
++
++    // DCS Control (0035): a ring entry's depth copy, made at first use.
++    [[nodiscard]] bool ensure_depth_texture(D3D12CockpitMaskFrame& frame, std::uint32_t width,
++        std::uint32_t height) noexcept {
++        if (frame.depth_texture) {
++            return true;
++        }
++        D3D12_HEAP_PROPERTIES heap{};
++        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
++        D3D12_RESOURCE_DESC description{};
++        description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++        description.Width = width;
++        description.Height = height;
++        description.DepthOrArraySize = 1;
++        description.MipLevels = 1;
++        description.Format = DXGI_FORMAT_R16G16_FLOAT;
++        description.SampleDesc.Count = 1;
++        description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
++        if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
++                D3D12_RESOURCE_STATE_COMMON, nullptr,
++                IID_PPV_ARGS(frame.depth_texture.GetAddressOf())))) {
++            frame.depth_texture.Reset();
++            return false;
++        }
++        frame.depth_texture->SetName(L"OFXR Cockpit Depth Copy");
++        return true;
++    }
++
+     void close_block() noexcept {
+         writable_block = nullptr;
+         last_heartbeat_qpc = 0;
+@@ -253,6 +542,10 @@
+             std::remove_if(retired.begin(), retired.end(),
+                 [completed](const Opened& old) { return old.last_use_copy_value <= completed; }),
+             retired.end());
++        depth_retired.erase( // DCS Control (0035)
++            std::remove_if(depth_retired.begin(), depth_retired.end(),
++                [completed](const DepthOpened& old) { return old.last_use_copy_value <= completed; }),
++            depth_retired.end());
+     }
+ 
+     // The copy queue never finished a copy (the producer's fence not
+@@ -475,6 +768,11 @@
+             return state;
+         }
+         heartbeat(now);
++        // DCS Control (0035): the depth block once the mask's is there, and
++        // its heartbeat beside the mask's.
++        if (options.cockpit_depth && open_depth_block(now_ms)) {
++            depth_heartbeat(now);
++        }
+         last_block_ms = now_ms;
+         cm::Header header{};
+         if (!cm::seqlock_read(block, header)) {
+@@ -555,6 +853,13 @@
+             signal_release(header.newestMaskSeq);
+             return CockpitMaskLookup::ring_busy;
+         }
++        // DCS Control (0035): this frame's depth, if it has any to pair.
++        DepthPairing depth = pair_depth(header, slot, display_time, views);
++        if (depth.result == CockpitDepthLookup::paired &&
++            !ensure_depth_texture(*entry->frame, opened->atlas_width, opened->atlas_height)) {
++            depth.result = CockpitDepthLookup::no_texture;
++        }
++        const bool with_depth = depth.result == CockpitDepthLookup::paired;
+         if (FAILED(entry->allocator->Reset()) ||
+             FAILED(entry->list->Reset(entry->allocator.Get(), nullptr))) {
+             return CockpitMaskLookup::copy_failed;
+@@ -569,6 +874,13 @@
+         origin.SubresourceIndex = 0;
+         const D3D12_BOX box{left, top, 0, right, bottom, 1};
+         entry->list->CopyTextureRegion(&destination, left, top, 0, &origin, &box);
++        if (with_depth) {
++            // DCS Control (0035): the same rects of the depth slot (the same
++            // grid), in the same list: the one wait below covers both.
++            destination.pResource = entry->frame->depth_texture.Get();
++            origin.pResource = depth.source;
++            entry->list->CopyTextureRegion(&destination, left, top, 0, &origin, &box);
++        }
+         if (FAILED(entry->list->Close())) {
+             return CockpitMaskLookup::copy_failed;
+         }
+@@ -592,6 +904,9 @@
+         last_copy_value = copy_value;
+         last_copy_qpc = now;
+         opened->last_use_copy_value = copy_value;
++        if (with_depth && depth_opened) { // DCS Control (0035)
++            depth_opened->last_use_copy_value = copy_value;
++        }
+ 
+         D3D12CockpitMaskFrame& frame = *entry->frame;
+         frame.clear_readers();
+@@ -600,6 +915,16 @@
+         frame.views = views;
+         frame.focus = focus; // DCS Control (0034)
+         frame.counters = pair_counters;
++        // DCS Control (0035): the depth, or none for this frame.
++        frame.depth = with_depth;
++        frame.depth_views = with_depth ? depth.views : std::array<D3D12CockpitDepthView, 2>{};
++        frame.depth_space = with_depth ? depth.space : 0U;
++        stats.depth_last = depth.result;
++        if (with_depth) {
++            ++stats.depth_paired;
++        } else if (depth.result != CockpitDepthLookup::off) {
++            ++stats.depth_misses;
++        }
+         frame.display_time = display_time;
+         frame.mask_seq = source.maskSeq;
+         last_frame = entry->frame;
+@@ -666,6 +991,19 @@
+                     const std::uint64_t largest =
+                         pair_counters->parallax_max_centipixels.exchange(0);
+                     log(7, eyes, skips, saturate16(band) | (std::min<std::uint64_t>(largest, 0xffffffffULL) << 32U));
++                    // DCS Control (0035): and the cockpit depth's share.
++                    if (options.cockpit_depth) {
++                        const std::uint64_t pixels = pair_counters->depth_pixels.exchange(0);
++                        const std::uint64_t fallbacks = pair_counters->depth_fallback_pixels.exchange(0);
++                        const std::uint64_t pairs = pair_counters->depth_pairs.exchange(0);
++                        const auto saturate24 = [](std::uint64_t value) {
++                            return std::min<std::uint64_t>(value, 0xffffffU);
++                        };
++                        log(8, pixels, fallbacks,
++                            saturate24(pairs) |
++                                (saturate24(stats.depth_paired - stats_at_log.depth_paired) << 24U) |
++                                (static_cast<std::uint64_t>(stats.depth_last) << 48U));
++                    }
+                 }
+             }
+             last_stats_log_ms = now_ms;
+@@ -720,6 +1058,8 @@
+         } else {
+             impl->name += impl->options.suffix;
+         }
++        // DCS Control (0035): the depth companion's name, the same suffix.
++        impl->depth_name = cd::block_name + impl->name.substr(std::wstring(cm::block_name).size());
+         D3D12_COMMAND_QUEUE_DESC queue_description{};
+         queue_description.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+         HRESULT result = device->CreateCommandQueue(
+diff --git a/src/d3d12/cockpit_mask.hlsl b/src/d3d12/cockpit_mask.hlsl
+--- a/src/d3d12/cockpit_mask.hlsl
++++ b/src/d3d12/cockpit_mask.hlsl
+@@ -29,10 +29,51 @@
+ // pixels of either frame's inset outline, 1 at the outline itself), and 0
+ // everywhere without it.
+ 
++//
++// DCS Control (0035): compiled again with XRFG_COCKPIT_DEPTH=1 for a pair
++// whose two frames carry the cockpit depth (xrfg::D3D12CockpitMaskFrame's
++// depth_texture, R16G16_FLOAT on the mask's grid: x the nearest cockpit depth
++// of the texel in metres, 0 none). The output is then four channels
++// (R16G16B16A16_FLOAT): x and y as above (y stored as the R8 target would hold
++// it), z and w per frame (current, previous; Flags bits 4 and 5, set together
++// per eye) the inverse depth, along the TARGET view's axis, of the cockpit
++// point that frame shows at this cell's direction at the synthetic's instant:
++// the 6DoF reprojection's fixed point, solved here once per cell (see
++// solve_cell) so the composition needs no iteration. The cockpit is rigid and
++// still in tracking space; the synthetic at instant t is drawn in the current
++// frame's orientation from lerp(A, B, t) of the two frames' cockpit cameras,
++// so the current camera sits at (1 - t) * delta from it and the previous one
++// at -t * delta (DepthDelta: xyz delta = B - A in the current camera's frame,
++// w t). A cockpit point at depth z behind tangent s of a frame (in the target
++// orientation: the previous frame through the rotation its mask uses; a
++// depth d along its own axis is d / -ray.z along the target's) lies at
++// z * (s, -1) + D from the target camera, D the frame's offset, and shows at
++// tangent (z * s + D.xy) / (z - D.z): the frame's tangent for target tangent
++// p is s = p - (D.xy + p * D.z) / z, z its depth at s itself. Positive: on a
++// cockpit surface (the four source texels the cockpit at about one depth);
++// negative: at its edge (the nearest of them); 0: no cockpit, or no fixed
++// point. The source tangents are the mask's own (fovTan, DCS's jittered
++// projection): a depth texel is found where the jittered render drew it, so
++// DLSS's jitter needs no correction of its own. Counted per cell (u2,
++// cumulative): masked cells with both frames' solution on a cockpit surface
++// (word 0), masked cells without (word 1). Without the define the shader is
++// 0034's.
++
++#ifndef XRFG_COCKPIT_DEPTH
++#define XRFG_COCKPIT_DEPTH 0
++#endif
++
+ SamplerState LinearClamp : register(s0);
+ Texture2D<float> PreviousMask : register(t0);
+ Texture2D<float> CurrentMask : register(t1);
++#if XRFG_COCKPIT_DEPTH
++Texture2D<float2> PreviousDepth : register(t2);
++Texture2D<float2> CurrentDepth : register(t3);
++RWTexture2DArray<float4> TargetMask : register(u0);
++RWByteAddressBuffer DepthCounters : register(u2);
++#else
+ RWTexture2DArray<float2> TargetMask : register(u0);
++#endif
+ 
+ cbuffer CockpitMaskParameters : register(b0) {
+     uint OutputWidth;
+@@ -46,6 +87,8 @@
+     // DCS Control (0034): bit 2, the cockpit's same-pixel rule is off for
+     // this eye (head translation); bit 3, the focus band (CurrentFocus and
+     // PreviousFocus).
++    // DCS Control (0035): bits 4 and 5, both frames' cockpit depth (t2 the
++    // previous frame's, t3 the current one's; XRFG_COCKPIT_DEPTH only).
+     uint Flags;
+     uint Padding0;
+     uint Padding1;
+@@ -62,6 +105,10 @@
+     // left, right, up, down tangents.
+     float4 CurrentFocus;
+     float4 PreviousFocus;
++    // DCS Control (0035): xyz the cockpit camera's move from the previous
++    // frame to the current one in the current camera's frame (metres), w the
++    // synthetic's instant (XRFG_COCKPIT_DEPTH only).
++    float4 DepthDelta;
+ };
+ 
+ float3 rotate_by_quaternion(float4 quaternion, float3 input_vector) {
+@@ -141,16 +188,88 @@
+     return width > 0.0 ? 1.0 - smoothstep(0.0, width, distance) : 0.0;
+ }
+ 
+-[numthreads(8, 8, 1)]
+-void CockpitMaskResampleCS(uint3 thread_id : SV_DispatchThreadID) {
+-    if (thread_id.x >= OutputWidth || thread_id.y >= OutputHeight) {
+-        return;
++#if XRFG_COCKPIT_DEPTH
++// DCS Control (0035): the four depths `z` (Gather order: x (-, +), y (+, +), z (+, -), w (-, -))
++// at `weight` within them: bilinear where all four are the cockpit at about
++// one depth (positive), else the nearest one that is (negative), else 0.
++float blend_depth(float4 z, float2 weight) {
++    float4 candidates = float4(
++        z.x > 0.0 ? z.x : 1.0e9, z.y > 0.0 ? z.y : 1.0e9, z.z > 0.0 ? z.z : 1.0e9, z.w > 0.0 ? z.w : 1.0e9);
++    float nearest = min(min(candidates.x, candidates.y), min(candidates.z, candidates.w));
++    float farthest = max(max(z.x, z.y), max(z.z, z.w));
++    float4 weights = float4((1.0 - weight.x) * weight.y, weight.x * weight.y,
++        weight.x * (1.0 - weight.y), (1.0 - weight.x) * (1.0 - weight.y));
++    float result = nearest < 1.0e8 ? -nearest : 0.0;
++    if (all(z > 0.0) && farthest <= nearest * 1.1) {
++        result = dot(z, weights);
++    }
++    return result;
++}
++
++// DCS Control (0035): the cockpit depth of a frame at `tangent` (see above).
++float depth_around(Texture2D<float2> depth, float4 rect, float4 fov, float2 tangent) {
++    float left = fov.x, right = fov.y, up = fov.z, down = fov.w;
++    float result = 0.0;
++    bool usable = right > left && up > down && rect.z >= 2.0 && rect.w >= 2.0;
++    float2 fraction = usable
++        ? float2((tangent.x - left) / (right - left), (up - tangent.y) / (up - down))
++        : float2(-1.0, -1.0);
++    // Texel centres at whole numbers, from the rect's corner.
++    float2 position = fraction * rect.zw - 0.5;
++    if (usable && all(position >= -1.0) && all(position <= rect.zw)) {
++        float2 base = floor(position);
++        float width, height;
++        depth.GetDimensions(width, height);
++        // The corner the four texels share, kept inside the rect (never the
++        // next view's rect in the atlas).
++        float2 corner = clamp(rect.xy + base + 1.0, rect.xy + 1.0, rect.xy + rect.zw - 1.0);
++        result = blend_depth(depth.GatherRed(LinearClamp, corner / float2(width, height)), position - base);
++    }
++    return result;
++}
++
++// The fixed point of one frame (`previous_frame`: through the rotation, its
++// depth along the target's axis) for target tangent `tangent`, its camera at
++// `offset` from the target's: the signed inverse depth (see above), 0 none.
++float solve_cell(float2 tangent, float3 offset, bool previous_frame) {
++    float2 source = tangent;
++    float depth = 0.0;
++    float moved = 1.0e9;
++    bool settled = true;
++    // Half a target pixel, in tangent.
++    float tolerance = 0.5 * abs(TargetTangents.y - TargetTangents.x) / max(TargetRect.z, 1.0);
++    [unroll] for (uint step = 0; step < 4; ++step) {
++        float z = 0.0;
++        if (previous_frame) {
++            float3 ray = rotate_by_quaternion(TargetToPrevious, float3(source, -1.0));
++            z = ray.z < -1.0e-5
++                ? depth_around(PreviousDepth, PreviousRect, PreviousFov, ray.xy / -ray.z) / -ray.z
++                : 0.0;
++        } else {
++            z = depth_around(CurrentDepth, CurrentRect, CurrentFov, source);
++        }
++        settled = settled && z != 0.0;
++        depth = z;
++        float magnitude = max(abs(z), 1.0e-3);
++        float2 next = tangent - (offset.xy + tangent * offset.z) / magnitude;
++        moved = length(next - source);
++        source = settled ? next : source;
+     }
++    return settled && moved <= tolerance ? 1.0 / depth : 0.0;
++}
++
++groupshared uint g_depth_cells;
++groupshared uint g_fallback_cells;
++#endif
++
++// The resampled mask of the cell `cell` of this view: x the mask, y the focus
++// band; `tangent` its direction.
++float2 resample_cell(uint2 cell, out float2 tangent) {
+     // The centre of the cell, in the target's pixel coordinates (a pixel's
+     // own coordinate is its centre, as in frame_synthesis.hlsl).
+-    float2 pixel = TargetRect.xy + (float2(thread_id.xy) + 0.5) * float(Cell) - 0.5;
++    float2 pixel = TargetRect.xy + (float2(cell) + 0.5) * float(Cell) - 0.5;
+     float2 uv = (pixel - TargetRect.xy + 0.5) / max(TargetRect.zw, float2(1.0, 1.0));
+-    float2 tangent = float2(
++    tangent = float2(
+         lerp(TargetTangents.x, TargetTangents.y, uv.x),
+         lerp(TargetTangents.z, TargetTangents.w, uv.y));
+     float2 value = float2(0.0, 0.0);
+@@ -169,6 +288,58 @@
+     [branch] if ((Flags & 8u) != 0u) {
+         band = focus_band(tangent);
+     }
+-    TargetMask[uint3(thread_id.xy, Slice)] =
+-        float2(value.x > 0.0 ? cockpit : (value.y > 0.0 ? 0.5 : 0.0), band);
++    return float2(value.x > 0.0 ? cockpit : (value.y > 0.0 ? 0.5 : 0.0), band);
++}
++
++#if XRFG_COCKPIT_DEPTH
++[numthreads(8, 8, 1)]
++void CockpitMaskResampleCS(uint3 thread_id : SV_DispatchThreadID, uint group_index : SV_GroupIndex) {
++    if (group_index == 0u) {
++        g_depth_cells = 0u;
++        g_fallback_cells = 0u;
++    }
++    GroupMemoryBarrierWithGroupSync();
++    if (thread_id.x < OutputWidth && thread_id.y < OutputHeight) {
++        float2 tangent;
++        float2 mask = resample_cell(thread_id.xy, tangent);
++        float current_depth = 0.0;
++        float previous_depth = 0.0;
++        bool depth = (Flags & 48u) == 48u;
++        // Only where the composition reads it: the masked cells and the
++        // cells next to them (whose texels its bilinear reads reach).
++        [branch] if (depth && mask.x > 0.0) {
++            float t = DepthDelta.w;
++            current_depth = solve_cell(tangent, (1.0 - t) * DepthDelta.xyz, false);
++            previous_depth = solve_cell(tangent, -t * DepthDelta.xyz, true);
++        }
++        // The band as the R8 target holds it: the same composition as 0034.
++        TargetMask[uint3(thread_id.xy, Slice)] = float4(
++            mask.x, round(saturate(mask.y) * 255.0) / 255.0, current_depth, previous_depth);
++        if (depth && mask.x >= 0.75) {
++            if (current_depth > 0.0 && previous_depth > 0.0) {
++                InterlockedAdd(g_depth_cells, 1u);
++            } else {
++                InterlockedAdd(g_fallback_cells, 1u);
++            }
++        }
++    }
++    GroupMemoryBarrierWithGroupSync();
++    if (group_index == 0u) {
++        if (g_depth_cells != 0u) {
++            DepthCounters.InterlockedAdd(0u, g_depth_cells);
++        }
++        if (g_fallback_cells != 0u) {
++            DepthCounters.InterlockedAdd(4u, g_fallback_cells);
++        }
++    }
++}
++#else
++[numthreads(8, 8, 1)]
++void CockpitMaskResampleCS(uint3 thread_id : SV_DispatchThreadID) {
++    if (thread_id.x >= OutputWidth || thread_id.y >= OutputHeight) {
++        return;
++    }
++    float2 tangent;
++    TargetMask[uint3(thread_id.xy, Slice)] = resample_cell(thread_id.xy, tangent);
+ }
++#endif
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -67,6 +67,27 @@
+ #include "nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_fast.hpp"
+ #include "nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_fast.hpp"
+ #include "nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_fast.hpp"
++// DCS Control (0035): the cockpit depth's resample and the compositions with
++// the depth compiled in (XRFG_COCKPIT_DEPTH=1), plain and with the still-tile
++// path.
++#include "cockpit_mask_resample_depth_shader.hpp"
++#include "synthesize_midpoint_pixel_shader_masked_depth.hpp"
++#include "nvidia_synthesize_midpoint_pixel_shader_masked_depth.hpp"
++#include "nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_depth.hpp"
++#include "nvidia_fast_synthesize_midpoint_pixel_shader_masked_depth.hpp"
++#include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth.hpp"
++#include "nvidia_triple_synthesize_midpoint_pixel_shader_masked_depth.hpp"
++#include "nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_depth.hpp"
++#include "nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_depth.hpp"
++#include "nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth.hpp"
++#include "nvidia_synthesize_midpoint_pixel_shader_masked_depth_fast.hpp"
++#include "nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_fast.hpp"
++#include "nvidia_fast_synthesize_midpoint_pixel_shader_masked_depth_fast.hpp"
++#include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_fast.hpp"
++#include "nvidia_triple_synthesize_midpoint_pixel_shader_masked_depth_fast.hpp"
++#include "nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_fast.hpp"
++#include "nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_depth_fast.hpp"
++#include "nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_fast.hpp"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -416,8 +437,12 @@
+     // DCS Control (0034): each frame's focus inset of the eye.
+     std::array<float, 4> current_focus{};
+     std::array<float, 4> previous_focus{};
++    // DCS Control (0035): the cockpit camera's move between the two frames
++    // (current camera's frame, metres) and the instant the resample solves
++    // the 6DoF reprojection for.
++    std::array<float, 4> depth_delta{};
+ };
+-static_assert(sizeof(CockpitMaskParameters) == sizeof(UINT) * 44U);
++static_assert(sizeof(CockpitMaskParameters) == sizeof(UINT) * 48U);
+ static_assert(sizeof(CockpitMaskParameters) <= sizeof(UINT) * 62U);
+ // DCS Control (0034): cockpit_mask.hlsl's Flags bits 2 (the cockpit's
+ // same-pixel rule off for the eye: head translation) and 3 (the focus band).
+@@ -426,6 +451,18 @@
+ // DCS Control (0034): the target-view mask's format: the mask and the focus
+ // band's confidence (cockpit_mask.hlsl).
+ constexpr DXGI_FORMAT kCockpitMaskTargetFormat = DXGI_FORMAT_R8G8_UNORM;
++// DCS Control (0035): cockpit_mask.hlsl's Flags bits 4 and 5 (the current and
++// the previous frame's depth of the eye, set together); the target-view mask
++// a pair with depth writes instead (x and y as kCockpitMaskTargetFormat's, z
++// and w the current and previous frame's cockpit depth along the target
++// view's axis in metres: negative at a cockpit edge, 0 none); the source
++// depth's format; the resample's counters (cumulative cells: masked with both
++// frames' depth, masked without), copied per work slot to a readback region.
++constexpr UINT kCockpitMaskDepthFlags = 48U;
++constexpr DXGI_FORMAT kCockpitDepthTargetFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
++constexpr DXGI_FORMAT kCockpitDepthSourceFormat = DXGI_FORMAT_R16G16_FLOAT;
++constexpr UINT kCockpitDepthCounterBytes = 16;
++constexpr UINT kCockpitDepthReadbackStride = 64;
+ 
+ constexpr UINT kSynthesisConstantCount =
+     static_cast<UINT>(sizeof(SynthesisParameters) / sizeof(UINT));
+@@ -1068,6 +1105,12 @@
+         // Nonzero while this slot's copy of the cursor counters waits to be
+         // read: the order it was submitted in.
+         std::uint64_t cursor_order{};
++        // DCS Control (0035): nonzero while this slot's copy of the cockpit
++        // depth's counters waits to be read (the order its pair was
++        // recorded in), where to add them, and the cell's area in pixels.
++        std::uint64_t depth_order{};
++        std::shared_ptr<CockpitMaskPairCounters> depth_sink;
++        std::uint64_t depth_cell_area{};
+         std::uint64_t fence_value{};
+         UINT timing_query_base{};
+         bool timing_pending{};
+@@ -1264,11 +1307,66 @@
+         }
+         return nullptr;
+     }
++    // DCS Control (0035): the compositions that read the cockpit depth, each
++    // the counterpart of the one named (made only with
++    // nvidia_options.cockpit_depth); the depth's resample; the target-view
++    // mask with depth; the resample's counters and their readback; and what
++    // the pair being recorded binds (pair_depth_bound: the depth target, with
++    // per view the cockpit camera's move, x y z, and 1 where the view has
++    // depth, which the composition reads at GameMotionRect: a field only the
++    // game-motion composition reads otherwise).
++    ComPtr<ID3D12PipelineState> graphics_pipeline_depth;
++    ComPtr<ID3D12PipelineState> nvidia_graphics_pipeline_depth;
++    ComPtr<ID3D12PipelineState> nvidia_bidirectional_graphics_pipeline_depth;
++    ComPtr<ID3D12PipelineState> nvidia_triple_graphics_pipeline_depth;
++    ComPtr<ID3D12PipelineState> nvidia_triple_bidirectional_graphics_pipeline_depth;
++    ComPtr<ID3D12PipelineState> cockpit_mask_depth_pipeline;
++    ComPtr<ID3D12Resource> cockpit_depth_target;
++    ComPtr<ID3D12Resource> cockpit_depth_counters;
++    ComPtr<ID3D12Resource> cockpit_depth_readback;
++    bool pair_depth_bound{};
++    std::array<std::array<float, 4>, kMaxReprojectionViews> pair_depth_constants{};
++    std::uint64_t cockpit_depth_next_order{1};
++    std::uint64_t cockpit_depth_harvested_order{};
++    std::array<std::uint32_t, 2> cockpit_depth_harvested{};
++    [[nodiscard]] ID3D12PipelineState* depth_pipeline(ID3D12PipelineState* pipeline) const noexcept {
++        const std::array<std::pair<ID3D12PipelineState*, ID3D12PipelineState*>, 5> pairs{{
++            {graphics_pipeline.Get(), graphics_pipeline_depth.Get()},
++            {nvidia_graphics_pipeline.Get(), nvidia_graphics_pipeline_depth.Get()},
++            {nvidia_bidirectional_graphics_pipeline.Get(),
++                nvidia_bidirectional_graphics_pipeline_depth.Get()},
++            {nvidia_triple_graphics_pipeline.Get(), nvidia_triple_graphics_pipeline_depth.Get()},
++            {nvidia_triple_bidirectional_graphics_pipeline.Get(),
++                nvidia_triple_bidirectional_graphics_pipeline_depth.Get()},
++        }};
++        for (const auto& [plain, depth] : pairs) {
++            if (pipeline != nullptr && plain == pipeline) {
++                return depth;
++            }
++        }
++        return nullptr;
++    }
++    // The target-view mask the pair being recorded binds (t10).
++    [[nodiscard]] ID3D12Resource* bound_cockpit_mask_target() const noexcept {
++        return pair_depth_bound ? cockpit_depth_target.Get() : cockpit_mask_target.Get();
++    }
++    // The composition constants' per-view part of the depth (GameMotionRect),
++    // for the view about to be drawn; nothing without depth.
++    void apply_cockpit_depth(SynthesisParameters& parameters, UINT view_index) const noexcept {
++        if (pair_depth_bound && view_index < kMaxReprojectionViews) {
++            parameters.game_motion_rect = pair_depth_constants[view_index];
++        }
++    }
+     // The composition for `pipeline`: its masked counterpart while the pair
+     // being recorded binds a mask (record_cockpit_mask binds one only when
+     // that counterpart exists), else itself.
++    // DCS Control (0035): its depth counterpart while the pair binds depth.
+     [[nodiscard]] ID3D12PipelineState* composition_pipeline(
+         ID3D12PipelineState* pipeline) const noexcept {
++        ID3D12PipelineState* const depth = pair_depth_bound ? depth_pipeline(pipeline) : nullptr;
++        if (depth != nullptr) {
++            return depth;
++        }
+         ID3D12PipelineState* const masked = pair_mask_bound ? masked_pipeline(pipeline) : nullptr;
+         return masked != nullptr ? masked : pipeline;
+     }
+@@ -1483,7 +1581,16 @@
+         if (!fast_composition_enabled()) {
+             return shader;
+         }
+-        const std::array<std::pair<const void*, D3D12_SHADER_BYTECODE>, 16> variants{{
++        const std::array<std::pair<const void*, D3D12_SHADER_BYTECODE>, 24> variants{{
++            // DCS Control (0035): the depth compositions'.
++            {g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked_depth, {g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked_depth_fast, sizeof(g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked_depth_fast)}},
++            {g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_depth, {g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_fast, sizeof(g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_fast)}},
++            {g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_masked_depth, {g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_masked_depth_fast, sizeof(g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_masked_depth_fast)}},
++            {g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth, {g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_fast, sizeof(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_fast)}},
++            {g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_masked_depth, {g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_masked_depth_fast, sizeof(g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_masked_depth_fast)}},
++            {g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_depth, {g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_fast, sizeof(g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_fast)}},
++            {g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_depth, {g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_depth_fast, sizeof(g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_depth_fast)}},
++            {g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth, {g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_fast, sizeof(g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth_fast)}},
+             {g_xrfg_nvidia_synthesize_midpoint_pixel_shader, {g_xrfg_nvidia_synthesize_midpoint_pixel_shader_fast, sizeof(g_xrfg_nvidia_synthesize_midpoint_pixel_shader_fast)}},
+             {g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked, {g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked_fast, sizeof(g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked_fast)}},
+             {g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader, {g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_fast, sizeof(g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_fast)}},
+@@ -1619,6 +1726,18 @@
+         if (FAILED(result)) {
+             return result;
+         }
++        // DCS Control (0035): the depth's resample (where it cannot be made,
++        // no pair binds depth).
++        if (nvidia_options.cockpit_mask && nvidia_options.cockpit_depth) {
++            compute_description.CS = {
++                g_xrfg_cockpit_mask_resample_depth_shader,
++                sizeof(g_xrfg_cockpit_mask_resample_depth_shader),
++            };
++            if (FAILED(device->CreateComputePipelineState(
++                    &compute_description, IID_PPV_ARGS(cockpit_mask_depth_pipeline.GetAddressOf())))) {
++                cockpit_mask_depth_pipeline.Reset();
++            }
++        }
+         // DCS Control (0033): the still tiles' classification and decision.
+         if (fast_composition_enabled()) {
+             compute_description.CS = {
+@@ -1721,8 +1840,13 @@
+             graphics_description.PS = plain;
+         };
+         // DCS Control (0031): the masked counterparts, made the same way.
++        // DCS Control (0035): and with [ofxr] cockpit_depth their depth
++        // counterparts (one that cannot be made leaves its pairs to the
++        // masked composition).
+         const auto make_masked = [&](D3D12_SHADER_BYTECODE masked_shader,
+-                                     ComPtr<ID3D12PipelineState>& masked) -> HRESULT {
++                                     ComPtr<ID3D12PipelineState>& masked,
++                                     D3D12_SHADER_BYTECODE depth_shader,
++                                     ComPtr<ID3D12PipelineState>& depth) -> HRESULT {
+             if (!nvidia_options.cockpit_mask) {
+                 return S_OK;
+             }
+@@ -1732,13 +1856,25 @@
+                 &graphics_description, IID_PPV_ARGS(masked.ReleaseAndGetAddressOf()));
+             if (SUCCEEDED(made)) {
+                 make_still(masked.Get()); // DCS Control (0033)
++                if (nvidia_options.cockpit_depth) { // DCS Control (0035)
++                    graphics_description.PS = depth_shader;
++                    if (SUCCEEDED(device->CreateGraphicsPipelineState(
++                            &graphics_description, IID_PPV_ARGS(depth.ReleaseAndGetAddressOf())))) {
++                        make_still(depth.Get());
++                    } else {
++                        depth.Reset();
++                    }
++                }
+             }
+             graphics_description.PS = plain;
+             return made;
+         };
+         result = make_masked({g_xrfg_synthesize_midpoint_pixel_shader_masked,
+                                  sizeof(g_xrfg_synthesize_midpoint_pixel_shader_masked)},
+-            graphics_pipeline_masked);
++            graphics_pipeline_masked,
++            {g_xrfg_synthesize_midpoint_pixel_shader_masked_depth,
++                sizeof(g_xrfg_synthesize_midpoint_pixel_shader_masked_depth)},
++            graphics_pipeline_depth);
+         if (FAILED(result)) {
+             return result;
+         }
+@@ -1777,7 +1913,13 @@
+                       sizeof(g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_masked)}
+                 : D3D12_SHADER_BYTECODE{g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked,
+                       sizeof(g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked)},
+-            nvidia_graphics_pipeline_masked);
++            nvidia_graphics_pipeline_masked,
++            fast_preset
++                ? D3D12_SHADER_BYTECODE{g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_masked_depth,
++                      sizeof(g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_masked_depth)}
++                : D3D12_SHADER_BYTECODE{g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked_depth,
++                      sizeof(g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked_depth)},
++            nvidia_graphics_pipeline_depth);
+         if (FAILED(result)) {
+             return result;
+         }
+@@ -1805,7 +1947,13 @@
+                       sizeof(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked)}
+                 : D3D12_SHADER_BYTECODE{g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked,
+                       sizeof(g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked)},
+-            nvidia_bidirectional_graphics_pipeline_masked);
++            nvidia_bidirectional_graphics_pipeline_masked,
++            fast_preset
++                ? D3D12_SHADER_BYTECODE{g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth,
++                      sizeof(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth)}
++                : D3D12_SHADER_BYTECODE{g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_depth,
++                      sizeof(g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_depth)},
++            nvidia_bidirectional_graphics_pipeline_depth);
+         if (FAILED(result)) {
+             return result;
+         }
+@@ -1832,9 +1980,16 @@
+                                  sizeof(g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked)}
+                            : D3D12_SHADER_BYTECODE{g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_masked,
+                                  sizeof(g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_masked)},
+-                       nvidia_triple_graphics_pipeline_masked))) {
++                       nvidia_triple_graphics_pipeline_masked,
++                       fast
++                           ? D3D12_SHADER_BYTECODE{g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_depth,
++                                 sizeof(g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_depth)}
++                           : D3D12_SHADER_BYTECODE{g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_masked_depth,
++                                 sizeof(g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_masked_depth)},
++                       nvidia_triple_graphics_pipeline_depth))) {
+             // DCS Control (0031): a masked pair then takes two passes.
+             nvidia_triple_graphics_pipeline_masked.Reset();
++            nvidia_triple_graphics_pipeline_depth.Reset(); // DCS Control (0035)
+         }
+         make_still(nvidia_triple_graphics_pipeline.Get()); // DCS Control (0033)
+         graphics_description.PS = fast
+@@ -1850,8 +2005,15 @@
+                                  sizeof(g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked)}
+                            : D3D12_SHADER_BYTECODE{g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked,
+                                  sizeof(g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked)},
+-                       nvidia_triple_bidirectional_graphics_pipeline_masked))) {
++                       nvidia_triple_bidirectional_graphics_pipeline_masked,
++                       fast
++                           ? D3D12_SHADER_BYTECODE{g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth,
++                                 sizeof(g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_depth)}
++                           : D3D12_SHADER_BYTECODE{g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_depth,
++                                 sizeof(g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_depth)},
++                       nvidia_triple_bidirectional_graphics_pipeline_depth))) {
+             nvidia_triple_bidirectional_graphics_pipeline_masked.Reset();
++            nvidia_triple_bidirectional_graphics_pipeline_depth.Reset(); // DCS Control (0035)
+         }
+         make_still(nvidia_triple_bidirectional_graphics_pipeline.Get()); // DCS Control (0033)
+         return S_OK;
+@@ -3200,16 +3362,45 @@
+             cockpit_mask_zero->SetName(L"OFXR Cockpit Mask None");
+             cockpit_mask_target->SetName(L"OFXR Cockpit Mask Target");
+         }
++        // DCS Control (0035): with [ofxr] cockpit_depth, the target-view mask
++        // with depth (the same grid), the resample's counters (created
++        // zeroed) and their readback, one region per work slot. Where they
++        // cannot be made no pair binds depth.
++        if (SUCCEEDED(result) && nvidia_options.cockpit_mask && nvidia_options.cockpit_depth) {
++            description.Format = kCockpitDepthTargetFormat;
++            const D3D12_RESOURCE_DESC counters =
++                buffer_description(kCockpitDepthCounterBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
++            D3D12_HEAP_PROPERTIES readback_heap = heap;
++            readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
++            const D3D12_RESOURCE_DESC readback = buffer_description(
++                static_cast<UINT64>(work_slots.size()) * kCockpitDepthReadbackStride, D3D12_RESOURCE_FLAG_NONE);
++            if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
++                    D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(cockpit_depth_target.GetAddressOf()))) ||
++                FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &counters,
++                    D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(cockpit_depth_counters.GetAddressOf()))) ||
++                FAILED(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &readback,
++                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
++                    IID_PPV_ARGS(cockpit_depth_readback.GetAddressOf())))) {
++                cockpit_depth_target.Reset();
++                cockpit_depth_counters.Reset();
++                cockpit_depth_readback.Reset();
++            } else {
++                cockpit_depth_target->SetName(L"OFXR Cockpit Mask Target With Depth");
++                cockpit_depth_counters->SetName(L"OFXR Cockpit Depth Counters");
++            }
++        }
+         return result;
+     }
+ 
+     // DCS Control (0031): t10 of every view block: the target-view mask, or
+     // the constant-0 texture.
+-    void write_cockpit_mask_view(WorkSlot& slot, bool bound) noexcept {
++    // DCS Control (0035): `depth`: the target-view mask with depth.
++    void write_cockpit_mask_view(WorkSlot& slot, bool bound, bool depth = false) noexcept {
+         D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+         // DCS Control (0034): the constant-0 texture stays one channel (its
+         // second reads 0: no focus band).
+-        view.Format = bound ? kCockpitMaskTargetFormat : DXGI_FORMAT_R8_UNORM;
++        view.Format = bound ? (depth ? kCockpitDepthTargetFormat : kCockpitMaskTargetFormat)
++                            : DXGI_FORMAT_R8_UNORM;
+         view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+         view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+         view.Texture2DArray.MipLevels = 1;
+@@ -3218,7 +3409,8 @@
+             slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+         for (UINT block = 0; block < kMaxReprojectionViews; ++block) {
+             device->CreateShaderResourceView(
+-                bound ? cockpit_mask_target.Get() : cockpit_mask_zero.Get(),
++                bound ? (depth ? cockpit_depth_target.Get() : cockpit_mask_target.Get())
++                      : cockpit_mask_zero.Get(),
+                 &view,
+                 offset_cpu_handle(
+                     start,
+@@ -3229,8 +3421,12 @@
+ 
+     // DCS Control (0031): the resample's block: the two frames' masks (t0
+     // previous, t1 current), the target-view mask (u0), typed nulls besides.
+-    void write_cockpit_mask_block(
+-        WorkSlot& slot, ID3D12Resource* previous_mask, ID3D12Resource* current_mask) noexcept {
++    // DCS Control (0035): with depth, also t2/t3 the two frames' depth, u0
++    // the target-view mask with depth and u2 the counters.
++    void write_cockpit_mask_block(WorkSlot& slot, ID3D12Resource* previous_mask,
++        ID3D12Resource* current_mask, ID3D12Resource* previous_depth = nullptr,
++        ID3D12Resource* current_depth = nullptr) noexcept {
++        const bool depth = current_depth != nullptr && previous_depth != nullptr;
+         const D3D12_CPU_DESCRIPTOR_HANDLE start =
+             slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+         const UINT base = kCockpitMaskBlock * kDescriptorBlockSize;
+@@ -3242,21 +3438,38 @@
+         for (UINT index = 0; index < kSrvDescriptorCount; ++index) {
+             ID3D12Resource* resource = index == 0 ? previous_mask
+                 : index == 1                     ? current_mask
++                : !depth                         ? nullptr
++                : index == 2                     ? previous_depth
++                : index == 3                     ? current_depth
+                                                  : nullptr;
++            D3D12_SHADER_RESOURCE_VIEW_DESC typed = view;
++            if (depth && (index == 2 || index == 3)) {
++                typed.Format = kCockpitDepthSourceFormat;
++            }
+             device->CreateShaderResourceView(
+-                resource, &view, offset_cpu_handle(start, base + index, descriptor_increment));
++                resource, &typed, offset_cpu_handle(start, base + index, descriptor_increment));
+         }
+         D3D12_UNORDERED_ACCESS_VIEW_DESC target{};
+-        target.Format = kCockpitMaskTargetFormat; // DCS Control (0034)
++        target.Format = depth ? kCockpitDepthTargetFormat : kCockpitMaskTargetFormat; // 0034, 0035
+         target.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+         target.Texture2DArray.ArraySize = kMaxReprojectionViews;
+         device->CreateUnorderedAccessView(
+-            cockpit_mask_target.Get(), nullptr, &target,
++            depth ? cockpit_depth_target.Get() : cockpit_mask_target.Get(), nullptr, &target,
+             offset_cpu_handle(start, base + kSrvDescriptorCount, descriptor_increment));
+         D3D12_UNORDERED_ACCESS_VIEW_DESC null_target{};
+         null_target.Format = DXGI_FORMAT_R8_UNORM;
+         null_target.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+         for (UINT index = 1; index < kUavDescriptorCount; ++index) {
++            if (depth && index == 2) {
++                D3D12_UNORDERED_ACCESS_VIEW_DESC counters{};
++                counters.Format = DXGI_FORMAT_R32_TYPELESS;
++                counters.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
++                counters.Buffer.NumElements = kCockpitDepthCounterBytes / 4U;
++                counters.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
++                device->CreateUnorderedAccessView(cockpit_depth_counters.Get(), nullptr, &counters,
++                    offset_cpu_handle(start, base + kSrvDescriptorCount + index, descriptor_increment));
++                continue;
++            }
+             device->CreateUnorderedAccessView(
+                 nullptr, nullptr, &null_target,
+                 offset_cpu_handle(start, base + kSrvDescriptorCount + index, descriptor_increment));
+@@ -3281,6 +3494,8 @@
+         std::span<const D3D12ReprojectionView> target_views) noexcept {
+         pair_mask_bound = false;
+         pair_mask_previous_bound = false;
++        pair_depth_bound = false; // DCS Control (0035)
++        pair_depth_constants = {};
+         D3D12CockpitMaskFrame* const current = pair_mask_current.get();
+         D3D12CockpitMaskFrame* const previous_frame = pair_mask_previous.get();
+         // DCS Control (0031): only where the masked composition exists
+@@ -3295,6 +3510,17 @@
+             write_cockpit_mask_view(slot, false);
+             return 0;
+         }
++        // DCS Control (0035): depth only where its composition and resample
++        // exist ([ofxr] cockpit_depth made them), for a pair whose two frames
++        // both carry it, from cameras in one XrSpace.
++        const bool depth_possible = nvidia_options.cockpit_depth && cockpit_depth_target != nullptr &&
++            cockpit_depth_counters != nullptr && cockpit_depth_readback != nullptr &&
++            cockpit_mask_depth_pipeline != nullptr && depth_pipeline(plain) != nullptr &&
++            previous_frame != nullptr && previous_frame != current && current->depth &&
++            previous_frame->depth && current->depth_texture != nullptr &&
++            previous_frame->depth_texture != nullptr && current->depth_space != 0 &&
++            current->depth_space == previous_frame->depth_space;
++        bool any_depth = false;
+         std::array<CockpitMaskParameters, kMaxReprojectionViews> views{};
+         bool any = false;
+         bool previous_used = false;
+@@ -3383,6 +3609,26 @@
+                     }
+                 }
+             }
++            // DCS Control (0035): this eye's depth: both frames' (the mask of
++            // each frame bound as well) and the cockpit camera's move between
++            // them, in the current camera's frame.
++            Vec3 delta{};
++            if (depth_possible && (parameters.flags & 3U) == 3U && current_eye < 2U && previous_eye < 2U &&
++                cockpit_camera_delta(previous_frame->depth_views[previous_eye], current->depth_views[current_eye],
++                    delta)) {
++                parameters.flags |= kCockpitMaskDepthFlags;
++                pair_depth_constants[index] = {delta.x, delta.y, delta.z, 1.0F};
++                // The instant: the outputs' middle (3X: between its two;
++                // the solution moves little with it, and each output's own
++                // instant scales the move per pixel).
++                float instant = 0.0F;
++                const UINT outputs = std::max(synthetic_output_count(), 1U);
++                for (UINT output = 0; output < outputs; ++output) {
++                    instant += synthetic_output_fraction(output);
++                }
++                parameters.depth_delta = {delta.x, delta.y, delta.z, instant / static_cast<float>(outputs)};
++                any_depth = true;
++            }
+             any = any || parameters.flags != 0U;
+         }
+         if (!any) {
+@@ -3392,13 +3638,19 @@
+         ID3D12Resource* const current_texture = current->texture.Get();
+         ID3D12Resource* const previous_texture =
+             previous_used ? previous_frame->texture.Get() : current_texture;
+-        write_cockpit_mask_block(slot, previous_texture, current_texture);
+-        write_cockpit_mask_view(slot, true);
++        // DCS Control (0035): with depth, both frames' depth as well, into
++        // the target-view mask with depth (an eye without depth gets its mask
++        // there and depth 0).
++        ID3D12Resource* const current_depth = any_depth ? current->depth_texture.Get() : nullptr;
++        ID3D12Resource* const previous_depth = any_depth ? previous_frame->depth_texture.Get() : nullptr;
++        ID3D12Resource* const target = any_depth ? cockpit_depth_target.Get() : cockpit_mask_target.Get();
++        write_cockpit_mask_block(slot, previous_texture, current_texture, previous_depth, current_depth);
++        write_cockpit_mask_view(slot, true, any_depth);
+ 
+-        std::array<D3D12_RESOURCE_BARRIER, 3> before{};
++        std::array<D3D12_RESOURCE_BARRIER, 6> before{};
+         UINT before_count = 0;
+         before[before_count++] = transition_barrier(
+-            cockpit_mask_target.Get(), D3D12_RESOURCE_STATE_COMMON,
++            target, D3D12_RESOURCE_STATE_COMMON,
+             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+         before[before_count++] = transition_barrier(
+             current_texture, D3D12_RESOURCE_STATE_COMMON,
+@@ -3408,11 +3660,19 @@
+                 previous_texture, D3D12_RESOURCE_STATE_COMMON,
+                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+         }
++        if (any_depth) {
++            before[before_count++] = transition_barrier(
++                current_depth, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++            before[before_count++] = transition_barrier(
++                previous_depth, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++            before[before_count++] = transition_barrier(cockpit_depth_counters.Get(),
++                D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++        }
+         list->ResourceBarrier(before_count, before.data());
+         ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
+         list->SetDescriptorHeaps(1, heaps);
+         list->SetComputeRootSignature(root_signature.Get());
+-        list->SetPipelineState(cockpit_mask_pipeline.Get());
++        list->SetPipelineState(any_depth ? cockpit_mask_depth_pipeline.Get() : cockpit_mask_pipeline.Get());
+         const D3D12_GPU_DESCRIPTOR_HANDLE block = offset_gpu_handle(
+             slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart(),
+             kCockpitMaskBlock * kDescriptorBlockSize,
+@@ -3432,10 +3692,10 @@
+             list->Dispatch(
+                 (parameters.output_width + 7U) / 8U, (parameters.output_height + 7U) / 8U, 1);
+         }
+-        std::array<D3D12_RESOURCE_BARRIER, 3> after{};
++        std::array<D3D12_RESOURCE_BARRIER, 6> after{};
+         UINT after_count = 0;
+         after[after_count++] = transition_barrier(
+-            cockpit_mask_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
++            target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+         after[after_count++] = transition_barrier(
+             current_texture, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+@@ -3445,13 +3705,78 @@
+                 previous_texture, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                 D3D12_RESOURCE_STATE_COMMON);
+         }
++        if (any_depth) {
++            after[after_count++] = transition_barrier(
++                current_depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
++            after[after_count++] = transition_barrier(
++                previous_depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
++            after[after_count++] = transition_barrier(cockpit_depth_counters.Get(),
++                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
++        }
+         list->ResourceBarrier(after_count, after.data());
++        if (any_depth) {
++            // DCS Control (0035): the counters (cumulative) to this slot's
++            // readback region, read once the slot's work has completed.
++            const UINT slot_index = static_cast<UINT>(&slot - work_slots.data());
++            list->CopyBufferRegion(cockpit_depth_readback.Get(),
++                static_cast<UINT64>(slot_index) * kCockpitDepthReadbackStride, cockpit_depth_counters.Get(), 0,
++                kCockpitDepthCounterBytes);
++            const D3D12_RESOURCE_BARRIER counters_back = transition_barrier(cockpit_depth_counters.Get(),
++                D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
++            list->ResourceBarrier(1, &counters_back);
++            slot.depth_order = cockpit_depth_next_order++;
++            slot.depth_sink = current->counters;
++            slot.depth_cell_area = static_cast<std::uint64_t>(cockpit_mask_cell) * cockpit_mask_cell;
++            if (current->counters) {
++                current->counters->depth_pairs.fetch_add(1U, std::memory_order_relaxed);
++            }
++        }
+         pair_mask_bound = true;
+         pair_mask_previous_bound = previous_used;
++        pair_depth_bound = any_depth; // DCS Control (0035)
+         return kSynthesisCockpitMaskFlag |
+             (cockpit_mask_cell_code << kSynthesisCockpitMaskCellShift);
+     }
+ 
++    // DCS Control (0035): the cockpit depth's counters of a slot whose work
++    // has completed, added (as pixels) to where its pair's mask counts.
++    // Cumulative on the GPU: each read is taken against the newest one read
++    // before, so a slot read late adds nothing twice.
++    void harvest_cockpit_depth(WorkSlot& slot) noexcept {
++        if (slot.depth_order == 0 || cockpit_depth_readback == nullptr ||
++            fence_status(fence.Get(), slot.fence_value) != S_OK) {
++            return;
++        }
++        const UINT slot_index = static_cast<UINT>(&slot - work_slots.data());
++        const SIZE_T begin = static_cast<SIZE_T>(slot_index) * kCockpitDepthReadbackStride;
++        const D3D12_RANGE read_range{begin, begin + 2U * sizeof(std::uint32_t)};
++        void* mapped = nullptr;
++        if (SUCCEEDED(cockpit_depth_readback->Map(0, &read_range, &mapped)) && mapped != nullptr) {
++            std::array<std::uint32_t, 2> values{};
++            std::memcpy(values.data(), static_cast<const std::byte*>(mapped) + begin, sizeof(values));
++            const D3D12_RANGE no_write{0, 0};
++            cockpit_depth_readback->Unmap(0, &no_write);
++            if (slot.depth_order > cockpit_depth_harvested_order) {
++                const std::uint32_t pixels = values[0] - cockpit_depth_harvested[0];
++                const std::uint32_t fallbacks = values[1] - cockpit_depth_harvested[1];
++                // A region this slot's work never wrote reads as older
++                // counts: nothing to add then.
++                if (pixels < 0x80000000U && fallbacks < 0x80000000U) {
++                    cockpit_depth_harvested = values;
++                    cockpit_depth_harvested_order = slot.depth_order;
++                    if (slot.depth_sink) {
++                        slot.depth_sink->depth_pixels.fetch_add(
++                            pixels * slot.depth_cell_area, std::memory_order_relaxed);
++                        slot.depth_sink->depth_fallback_pixels.fetch_add(
++                            fallbacks * slot.depth_cell_area, std::memory_order_relaxed);
++                    }
++                }
++            }
++        }
++        slot.depth_order = 0;
++        slot.depth_sink.reset();
++    }
++
+     // DCS Control (0031): after the composition: the target-view mask back
+     // to COMMON, where the next pair's resample takes it from.
+     void finish_cockpit_mask(ID3D12GraphicsCommandList* list) noexcept {
+@@ -3459,7 +3784,7 @@
+             return;
+         }
+         const D3D12_RESOURCE_BARRIER barrier = transition_barrier(
+-            cockpit_mask_target.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
++            bound_cockpit_mask_target(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, // 0035
+             D3D12_RESOURCE_STATE_COMMON);
+         list->ResourceBarrier(1, &barrier);
+     }
+@@ -3586,10 +3911,11 @@
+                 flow, kShaderReadState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+         }
+         if (pair_mask_bound) {
++            ID3D12Resource* const mask_target = bound_cockpit_mask_target(); // DCS Control (0035)
+             before[count] = transition_barrier(
+-                cockpit_mask_target.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kShaderReadState);
++                mask_target, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kShaderReadState);
+             after[count++] = transition_barrier(
+-                cockpit_mask_target.Get(), kShaderReadState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
++                mask_target, kShaderReadState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+         }
+         list->ResourceBarrier(count, before.data());
+         ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
+@@ -4728,6 +5054,7 @@
+                 fence_status(fence.Get(), work_slots[index].fence_value);
+             if (status == S_OK) {
+                 harvest_cursor_stats(work_slots[index]); // DCS VR Control (0010)
++                harvest_cockpit_depth(work_slots[index]); // DCS Control (0035)
+                 const HRESULT timing_result =
+                     harvest_nvidia_gpu_timing(work_slots[index]);
+                 if (FAILED(timing_result)) {
+@@ -5659,8 +5986,13 @@
+         ID3D12PipelineState* const triple_plain = nvidia_options.bidirectional
+             ? nvidia_triple_bidirectional_graphics_pipeline.Get()
+             : nvidia_triple_graphics_pipeline.Get();
+-        ID3D12PipelineState* const triple_pipeline =
+-            pair_mask_bound ? masked_pipeline(triple_plain) : triple_plain;
++        // DCS Control (0035): with depth its depth counterpart, or the masked
++        // one where that could not be made (it reads the mask alone).
++        ID3D12PipelineState* const triple_depth =
++            pair_depth_bound && pair_mask_bound ? depth_pipeline(triple_plain) : nullptr;
++        ID3D12PipelineState* const triple_pipeline = triple_depth != nullptr ? triple_depth
++            : pair_mask_bound                                                ? masked_pipeline(triple_plain)
++                                                                             : triple_plain;
+         if (synthetic_output_count() == 2U && triple_pipeline != nullptr) {
+             synthesis->SetPipelineState(triple_pipeline);
+             const UINT first_rtvs[2] = {
+@@ -5706,6 +6038,7 @@
+                     parameters.synthesis_flags = view_masks[view_index].second != 0
+                         ? (parameters.synthesis_flags | 2U)
+                         : (parameters.synthesis_flags & ~2U);
++                    apply_cockpit_depth(parameters, view_index); // DCS Control (0035)
+                     synthesis->SetGraphicsRoot32BitConstants(
+                         2,
+                         kSynthesisConstantCount,
+@@ -5747,6 +6080,7 @@
+                 parameters.synthesis_flags = view_masks[view_index].second != 0
+                     ? (parameters.synthesis_flags | 2U)
+                     : (parameters.synthesis_flags & ~2U);
++                apply_cockpit_depth(parameters, view_index); // DCS Control (0035)
+                 const D3D12_GPU_DESCRIPTOR_HANDLE block = offset_gpu_handle(
+                     gpu_start,
+                     slice * kDescriptorBlockSize,
+@@ -6117,6 +6451,7 @@
+                 parameters.synthesis_flags = view_masks[view_index].second != 0
+                     ? (parameters.synthesis_flags | 2U)
+                     : (parameters.synthesis_flags & ~2U);
++                apply_cockpit_depth(parameters, view_index); // DCS Control (0035)
+                 slot.command_list->SetGraphicsRoot32BitConstants(
+                     2,
+                     kSynthesisConstantCount,
+@@ -7059,6 +7394,7 @@
+         pair_mask_previous = previous_cockpit_mask;
+         pair_mask_bound = false;
+         pair_mask_previous_bound = false;
++        pair_depth_bound = false; // DCS Control (0035)
+         result = record_pair(
+             slot,
+             previous,
+@@ -7217,6 +7553,17 @@
+         if (FAILED(result)) {
+             synthesis_enabled = false;
+         }
++        // DCS Control (0035): everything has completed: every slot's depth
++        // counters can be read, in the order they were recorded.
++        std::array<WorkSlot*, kWorkSlotCount> ordered{};
++        for (std::size_t index = 0; index < work_slots.size(); ++index) {
++            ordered[index] = &work_slots[index];
++        }
++        std::sort(ordered.begin(), ordered.end(),
++            [](const WorkSlot* a, const WorkSlot* b) { return a->depth_order < b->depth_order; });
++        for (WorkSlot* slot : ordered) {
++            harvest_cockpit_depth(*slot);
++        }
+         return result;
+     }
+ };
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -28,7 +28,17 @@
+ // rule may take, 0.875 the cockpit it may not: head translation), y how much
+ // the flow's confidence is lowered for the moving focus edge (0: none; a
+ // one-channel texture reads 0 there).
++// DCS Control (0035): with XRFG_COCKPIT_DEPTH=1, four channels for a pair
++// that binds the cockpit depth: z and w the current and the previous frame's
++// cockpit depth along this view's axis per cell (cockpit_mask.hlsl).
++#ifndef XRFG_COCKPIT_DEPTH
++#define XRFG_COCKPIT_DEPTH 0
++#endif
++#if XRFG_COCKPIT_DEPTH
++Texture2DArray<float4> CockpitMask : register(t10);
++#else
+ Texture2DArray<float2> CockpitMask : register(t10);
++#endif
+ RWTexture2D<float4> PackedColor : register(u0);
+ // The NVIDIA pack is compiled twice: once for BGRA8 inputs, and once with
+ // XRFG_NVIDIA_LUMA_INPUT for R8 inputs, which the engine takes as grayscale
+@@ -930,7 +940,7 @@
+     float cell = float(4u << ((SynthesisFlags >> 6) & 3u));
+     float2 relative = pixel - PreviousMappings[ViewIndex].TargetRect.xy + 0.5;
+     int2 texel = int2(floor(relative / cell));
+-    return CockpitMask.Load(int4(texel, int(ViewIndex), 0));
++    return CockpitMask.Load(int4(texel, int(ViewIndex), 0)).xy;
+ }
+ 
+ float cockpit_mask_at(float2 pixel) {
+@@ -981,6 +991,95 @@
+     return found;
+ }
+ 
++#if XRFG_COCKPIT_DEPTH
++// DCS Control (0035): the cockpit depth (R68 Stage 1; xrfg::D3D12CockpitMaskFrame
++// depth). The cockpit is rigid and still in tracking space. The synthetic at
++// instant t is drawn in the current (B) frame's orientation from the centre
++// lerp(A, B, t) of the two frames' cockpit cameras, so B's camera sits at
++// (1 - t) * delta from it and A's at -t * delta (A's image is already mapped
++// into B's orientation: its samples are taken in rotation-mapped target
++// coordinates), delta = B - A in B's frame (GameMotionRect.xyz, per view; w 1
++// where the view has depth). A cockpit point at depth z behind a frame's
++// tangent s lies at z * (s, -1) + D from the target camera (D the frame's
++// offset) and shows at target tangent p when s = p - (D.xy + p * D.z) / z.
++// The resample (cockpit_mask.hlsl) solved that fixed point per cell and keeps
++// each frame's 1 / z of the solution (z: current frame, w: previous; positive
++// on a cockpit surface, negative at its edge, 0 none): 1 / z is affine across
++// a plane in the target image, so its bilinear value is the solution at every
++// pixel of a flat surface, and the pixel needs no iteration. Both frames'
++// samples where both have a solution and agree (0031's test of two samples);
++// one frame's alone where only it has one (the other frame shows something
++// else there: a part moved, or out of its view); never at a cockpit edge
++// (cockpit_inverse_depth): no cockpit stretched into a hole. Elsewhere 0034's
++// composition, as before.
++bool cockpit_depth_bound() {
++    return cockpit_mask_bound() && GameMotionRect.w > 0.5;
++}
++
++// A frame's inverse depth at a target pixel from its four cells (`weight`
++// its place among them): bilinear where all four hold a cockpit surface's
++// solution, else 0. Never the edge: within a mask texel of it the cells may
++// hold the cockpit's move for a pixel of the world beside it, which the two
++// frames' agreement cannot tell from the cockpit where the world is smooth.
++float cockpit_inverse_depth(float4 cells, float2 weight) {
++    float4 weights = float4((1.0 - weight.x) * weight.y, weight.x * weight.y,
++        weight.x * (1.0 - weight.y), (1.0 - weight.x) * (1.0 - weight.y));
++    return all(cells > 0.0) ? dot(cells, weights) : 0.0;
++}
++
++// The four cells around target pixel `pixel`: where to gather them, and the
++// pixel's place among them.
++float3 cockpit_depth_cells(float2 pixel, out float2 weight) {
++    float4 rect = PreviousMappings[ViewIndex].TargetRect;
++    float cell = float(4u << ((SynthesisFlags >> 6) & 3u));
++    float2 cells = max(ceil(rect.zw / cell), float2(2.0, 2.0));
++    float2 position = (pixel - rect.xy + 0.5) / cell - 0.5;
++    float2 base = floor(position);
++    weight = position - base;
++    float width, height, slices;
++    CockpitMask.GetDimensions(width, height, slices);
++    return float3(clamp(base + 1.0, float2(1.0, 1.0), cells - 1.0) / float2(width, height), float(ViewIndex));
++}
++
++// The cockpit at `pixel` from both frames' depth (`color`), or false.
++bool cockpit_depth_compose(float2 pixel, out float4 color) {
++    color = float4(0.0, 0.0, 0.0, 1.0);
++    float4 rect = PreviousMappings[ViewIndex].TargetRect;
++    float4 tangents = PreviousMappings[ViewIndex].TargetTangents;
++    float2 weight;
++    float3 at = cockpit_depth_cells(pixel, weight);
++    float inverse_current = cockpit_inverse_depth(CockpitMask.GatherBlue(LinearClamp, at), weight);
++    float inverse_previous = cockpit_inverse_depth(CockpitMask.GatherAlpha(LinearClamp, at), weight);
++    // Pixels per unit of tangent, and this pixel's tangent.
++    float2 span = float2(tangents.y - tangents.x, tangents.w - tangents.z);
++    float2 scale = rect.zw / span;
++    float2 tangent = tangents.xz + (pixel - rect.xy + 0.5) / scale;
++    float t = synthesis_fraction();
++    // Each frame's displacement in pixels: -(D.xy + p * D.z) / z.
++    float2 move = -(GameMotionRect.xy + tangent * GameMotionRect.z) * scale;
++    CameraSample current = (CameraSample)0;
++    CameraSample previous = (CameraSample)0;
++    [branch] if (inverse_current > 0.0) {
++        current = sample_current_target(pixel + move * ((1.0 - t) * inverse_current), Slice, ViewIndex);
++    }
++    [branch] if (inverse_previous > 0.0) {
++        previous = sample_previous_target(pixel - move * (t * inverse_previous), Slice, ViewIndex);
++    }
++    bool done = false;
++    if (current.valid >= 0.5 && previous.valid >= 0.5) {
++        color = lerp(previous.color, current.color, t);
++        done = sample_match(previous, current) >= 0.5;
++    } else if (current.valid >= 0.5) {
++        color = current.color;
++        done = true;
++    } else if (previous.valid >= 0.5) {
++        color = previous.color;
++        done = true;
++    }
++    return done;
++}
++#endif
++
+ // DCS VR Control (0010): smooth mouse cursor. DCS draws its VR cursor as a
+ // small view-locked sprite after DLSS. Flow cannot carry a sprite that moves
+ // further than its own size between two real frames - each generated pixel
+@@ -1343,6 +1442,55 @@
+ #define XRFG_STILL_TILE_RETURN_TRIPLE(input)
+ #endif
+ 
++// DCS Control (0035): the cockpit depth's pixels, ahead of the composition: a
++// masked pixel of a view with depth whose 6DoF reprojection holds
++// (cockpit_depth_compose) is that and nothing more; every other pixel is
++// composed exactly as without depth. Up front, with nothing else live, so the
++// composition below keeps its registers. Under the same conditions as the
++// composition's cockpit rule: inside the image, a pair that advances (no
++// repeated capture, no scene change); where the previous frame does not cover
++// the pixel, the current frame's alone (on a cockpit surface).
++#if XRFG_COCKPIT_DEPTH
++bool cockpit_depth_pixel(FullscreenVertex input, bool check_scene_change, out float4 color) {
++    color = float4(0.0, 0.0, 0.0, 1.0);
++    bool done = false;
++    uint2 integer_pixel = uint2(input.position.xy);
++    [branch] if (cockpit_depth_bound() && repeated_capture_flag() == 0 && integer_pixel.x < Width &&
++        integer_pixel.y < Height && Slice < ArraySize &&
++        !(check_scene_change && (FlowAuxiliary.Load(int3(1, 0, 0)) & 0x0fU) != 0)) {
++        float2 pixel = float2(integer_pixel);
++        [branch] if (cockpit_mask_at(pixel) >= 0.75) {
++            done = cockpit_depth_compose(pixel, color);
++            color = saturate(color);
++        }
++    }
++    return done;
++}
++#define XRFG_COCKPIT_DEPTH_RETURN(input, check_scene_change) \
++    { \
++        float4 depth_color; \
++        [branch] if (cockpit_depth_pixel(input, check_scene_change, depth_color)) { \
++            return depth_color; \
++        } \
++    }
++// Both synthetics of the 3X pass from depth, or neither.
++#define XRFG_COCKPIT_DEPTH_RETURN_TRIPLE(input) \
++    { \
++        TripleOutputs depth_output; \
++        [branch] if (cockpit_depth_pixel(input, false, depth_output.first)) { \
++            g_synthesis_fraction = second_synthesis_fraction(); \
++            bool second = cockpit_depth_pixel(input, false, depth_output.second); \
++            g_synthesis_fraction = -1.0; \
++            [branch] if (second) { \
++                return depth_output; \
++            } \
++        } \
++    }
++#else
++#define XRFG_COCKPIT_DEPTH_RETURN(input, check_scene_change)
++#define XRFG_COCKPIT_DEPTH_RETURN_TRIPLE(input)
++#endif
++
+ float4 synthesize_midpoint(
+     FullscreenVertex input,
+     float flow_value_scale,
+@@ -1735,6 +1883,7 @@
+ }
+ 
+ float4 SynthesizeMidpointPS(FullscreenVertex input) : SV_Target {
++    XRFG_COCKPIT_DEPTH_RETURN(input, true) // DCS Control (0035)
+     return synthesize_midpoint(input, 1.0, false, false, false, false, false);
+ }
+ 
+@@ -1746,23 +1895,27 @@
+ // previous input the pack warped into the current camera (PackNvidiaFlowInput).
+ float4 SynthesizeNvidiaMidpointPS(FullscreenVertex input) : SV_Target {
+     XRFG_STILL_TILE_RETURN(input) // DCS Control (0033)
++    XRFG_COCKPIT_DEPTH_RETURN(input, false) // DCS Control (0035)
+     return synthesize_midpoint(input, 1.0 / 32.0, true, false, false, false, true);
+ }
+ 
+ float4 SynthesizeNvidiaBidirectionalMidpointPS(
+     FullscreenVertex input) : SV_Target {
+     XRFG_STILL_TILE_RETURN(input) // DCS Control (0033)
++    XRFG_COCKPIT_DEPTH_RETURN(input, false) // DCS Control (0035)
+     return synthesize_midpoint(input, 1.0 / 32.0, true, true, false, false, true);
+ }
+ 
+ float4 SynthesizeNvidiaFastMidpointPS(FullscreenVertex input) : SV_Target {
+     XRFG_STILL_TILE_RETURN(input) // DCS Control (0033)
++    XRFG_COCKPIT_DEPTH_RETURN(input, false) // DCS Control (0035)
+     return synthesize_midpoint(input, 1.0 / 32.0, true, false, true, false, true);
+ }
+ 
+ float4 SynthesizeNvidiaFastBidirectionalMidpointPS(
+     FullscreenVertex input) : SV_Target {
+     XRFG_STILL_TILE_RETURN(input) // DCS Control (0033)
++    XRFG_COCKPIT_DEPTH_RETURN(input, false) // DCS Control (0035)
+     return synthesize_midpoint(input, 1.0 / 32.0, true, true, true, false, true);
+ }
+ 
+@@ -1785,6 +1938,7 @@
+ 
+ TripleOutputs SynthesizeNvidiaTripleMidpointPS(FullscreenVertex input) {
+     XRFG_STILL_TILE_RETURN_TRIPLE(input) // DCS Control (0033)
++    XRFG_COCKPIT_DEPTH_RETURN_TRIPLE(input) // DCS Control (0035)
+     TripleOutputs output;
+     output.first = synthesize_midpoint(input, 1.0 / 32.0, true, false, false, false, true);
+     g_synthesis_fraction = second_synthesis_fraction();
+@@ -1794,6 +1948,7 @@
+ 
+ TripleOutputs SynthesizeNvidiaTripleBidirectionalMidpointPS(FullscreenVertex input) {
+     XRFG_STILL_TILE_RETURN_TRIPLE(input) // DCS Control (0033)
++    XRFG_COCKPIT_DEPTH_RETURN_TRIPLE(input) // DCS Control (0035)
+     TripleOutputs output;
+     output.first = synthesize_midpoint(input, 1.0 / 32.0, true, true, false, false, true);
+     g_synthesis_fraction = second_synthesis_fraction();
+@@ -1803,6 +1958,7 @@
+ 
+ TripleOutputs SynthesizeNvidiaTripleFastMidpointPS(FullscreenVertex input) {
+     XRFG_STILL_TILE_RETURN_TRIPLE(input) // DCS Control (0033)
++    XRFG_COCKPIT_DEPTH_RETURN_TRIPLE(input) // DCS Control (0035)
+     TripleOutputs output;
+     output.first = synthesize_midpoint(input, 1.0 / 32.0, true, false, true, false, true);
+     g_synthesis_fraction = second_synthesis_fraction();
+@@ -1812,6 +1968,7 @@
+ 
+ TripleOutputs SynthesizeNvidiaTripleFastBidirectionalMidpointPS(FullscreenVertex input) {
+     XRFG_STILL_TILE_RETURN_TRIPLE(input) // DCS Control (0033)
++    XRFG_COCKPIT_DEPTH_RETURN_TRIPLE(input) // DCS Control (0035)
+     TripleOutputs output;
+     output.first = synthesize_midpoint(input, 1.0 / 32.0, true, true, true, false, true);
+     g_synthesis_fraction = second_synthesis_fraction();
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -5281,7 +5281,10 @@
+         // DCS Control (0033): fixed for the session.
+         xrfg::implicit_layer::read_fast_composition(current_layer_directory()),
+         // DCS Control (0034): fixed for the session.
+-        xrfg::implicit_layer::read_cockpit_parallax_limit(current_layer_directory())};
++        xrfg::implicit_layer::read_cockpit_parallax_limit(current_layer_directory()),
++        // DCS Control (0035): fixed for the session (with cockpit_mask).
++        xrfg::implicit_layer::read_cockpit_mask(current_layer_directory()) &&
++            xrfg::implicit_layer::read_cockpit_depth(current_layer_directory())};
+     // One display period of extra depth, bought with one display period of
+     // latency: every synthetic is held until it is a period old, so synthesis
+     // gets a period to finish instead of the gap the game leaves. On by
+@@ -12473,12 +12476,17 @@
+         if (!session.cockpit_mask && !session.cockpit_mask_tried && session.d3d12_device) {
+             session.cockpit_mask_tried = true;
+             auto created = std::make_shared<xrfg::CockpitMaskConsumer>();
++            // DCS Control (0035): and the depth companion with [ofxr]
++            // cockpit_depth.
++            xrfg::CockpitMaskConsumerOptions consumer_options{};
++            consumer_options.cockpit_depth = session.nvidia_options.cockpit_depth;
+             const HRESULT result = created->initialize(
+                 session.d3d12_device.Get(),
+                 [](std::int64_t code, std::uint64_t a, std::uint64_t b, std::uint64_t c) {
+                     xrfg::bridge_flight_logger().event(
+                         xrfg::BridgeFlightOperation::cockpit_mask, code, a, b, c);
+-                });
++                },
++                consumer_options);
+             if (SUCCEEDED(result)) {
+                 session.cockpit_mask = std::move(created);
+             } else {
+@@ -13572,7 +13580,8 @@
+         state->nvidia_options.occlusion_aware, // DCS Control (0030): the session's
+         state->nvidia_options.cockpit_mask, // DCS Control (0031): the session's
+         state->nvidia_options.fast_composition, // DCS Control (0033): the session's
+-        state->nvidia_options.cockpit_parallax_limit_pixels}; // DCS Control (0034): the session's
++        state->nvidia_options.cockpit_parallax_limit_pixels, // DCS Control (0034): the session's
++        state->nvidia_options.cockpit_depth}; // DCS Control (0035): the session's
+     const bool changed = state->control_reconfigure_required || backend != state->optical_flow_backend ||
+         options.preset != state->nvidia_options.preset ||
+         options.input_scale != state->nvidia_options.input_scale ||
+diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
+--- a/tests/cockpit_mask_tests.cpp
++++ b/tests/cockpit_mask_tests.cpp
+@@ -6,8 +6,12 @@
+ // the release fence, staleness, generation and adapter changes, the copy
+ // stall, and the reader heartbeat (stored while consuming, stopped on a stall
+ // and at the end).
++// DCS Control (0035): and the cockpit depth companion beside it (the same
++// fence handle): pairing by slot, seq and generation, the late commit, the
++// idle and other-fence headers, both heartbeats, and [ofxr] cockpit_depth.
+ 
+ #include "xrfg/cockpit_mask.hpp"
++#include "xrfg/dcsvr_cockpit_depth.h"
+ #include "xrfg/dcsvr_cockpit_mask.h"
+ #include "xrfg/implicit_layer.hpp"
+ 
+@@ -34,6 +38,7 @@
+ 
+ using Microsoft::WRL::ComPtr;
+ namespace cm = dcsvr_cockpit_mask;
++namespace cd = dcsvr_cockpit_depth;
+ 
+ void require(bool condition, const std::string& message) {
+     if (!condition) {
+@@ -100,12 +105,14 @@
+ 
+     // Uploads `bytes` (kAtlasWidth x kAtlasHeight) into an R8 texture in COMMON,
+     // or reads one back.
+-    void upload(ID3D12Resource* texture, const std::vector<std::uint8_t>& bytes) {
+-        transfer(texture, const_cast<std::vector<std::uint8_t>*>(&bytes), true);
+-    }
+-    std::vector<std::uint8_t> readback(ID3D12Resource* texture) {
+-        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(kAtlasWidth) * kAtlasHeight);
+-        transfer(texture, &bytes, false);
++    // DCS Control (0035): `texel_bytes` per texel (4 for the depth's
++    // R16G16_FLOAT).
++    void upload(ID3D12Resource* texture, const std::vector<std::uint8_t>& bytes, UINT texel_bytes = 1) {
++        transfer(texture, const_cast<std::vector<std::uint8_t>*>(&bytes), true, kAtlasWidth * texel_bytes);
++    }
++    std::vector<std::uint8_t> readback(ID3D12Resource* texture, UINT texel_bytes = 1) {
++        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(kAtlasWidth) * kAtlasHeight * texel_bytes);
++        transfer(texture, &bytes, false, kAtlasWidth * texel_bytes);
+         return bytes;
+     }
+ 
+@@ -116,7 +123,7 @@
+     HANDLE event{};
+ 
+ private:
+-    void transfer(ID3D12Resource* texture, std::vector<std::uint8_t>* bytes, bool to_texture) {
++    void transfer(ID3D12Resource* texture, std::vector<std::uint8_t>* bytes, bool to_texture, UINT row_bytes) {
+         const D3D12_RESOURCE_DESC description = texture->GetDesc();
+         D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
+         UINT rows = 0;
+@@ -142,7 +149,7 @@
+             require_hresult(staging->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "Map(upload)");
+             for (UINT y = 0; y < rows; ++y) {
+                 std::memcpy(mapped + layout.Offset + static_cast<std::size_t>(y) * layout.Footprint.RowPitch,
+-                    bytes->data() + static_cast<std::size_t>(y) * kAtlasWidth, kAtlasWidth);
++                    bytes->data() + static_cast<std::size_t>(y) * row_bytes, row_bytes);
+             }
+             staging->Unmap(0, nullptr);
+         }
+@@ -176,8 +183,8 @@
+             std::uint8_t* mapped = nullptr;
+             require_hresult(staging->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "Map(readback)");
+             for (UINT y = 0; y < rows; ++y) {
+-                std::memcpy(bytes->data() + static_cast<std::size_t>(y) * kAtlasWidth,
+-                    mapped + layout.Offset + static_cast<std::size_t>(y) * layout.Footprint.RowPitch, kAtlasWidth);
++                std::memcpy(bytes->data() + static_cast<std::size_t>(y) * row_bytes,
++                    mapped + layout.Offset + static_cast<std::size_t>(y) * layout.Footprint.RowPitch, row_bytes);
+             }
+             staging->Unmap(0, nullptr);
+         }
+@@ -375,6 +382,156 @@
+     int next_slot_{};
+ };
+ 
++// DCS Control (0035): the depth companion as the engine module shares it:
++// its own block and R16G16_FLOAT slot atlases (NT handles of this process),
++// the mask producer's fence handle (one fence), committed into the slot the
++// mask producer just used, with its seq and generation.
++class FakeDepthProducer final {
++public:
++    FakeDepthProducer(Gpu& gpu, const std::wstring& suffix, const FakeProducer& mask) : gpu_(gpu) {
++        const std::wstring name = std::wstring(cd::block_name) + suffix;
++        mapping_ = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 4096, name.c_str());
++        require(mapping_ != nullptr, "depth producer: CreateFileMappingW");
++        block_ = static_cast<cd::Header*>(MapViewOfFile(mapping_, FILE_MAP_ALL_ACCESS, 0, 0, 4096));
++        require(block_ != nullptr, "depth producer: MapViewOfFile");
++        D3D12_HEAP_PROPERTIES heap{};
++        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
++        D3D12_RESOURCE_DESC description{};
++        description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++        description.Width = kAtlasWidth;
++        description.Height = kAtlasHeight;
++        description.DepthOrArraySize = 1;
++        description.MipLevels = 1;
++        description.Format = DXGI_FORMAT_R16G16_FLOAT;
++        description.SampleDesc.Count = 1;
++        for (int index = 0; index < cd::slot_count; ++index) {
++            require_hresult(gpu_.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &description,
++                                D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(textures_[index].GetAddressOf())),
++                "depth producer: slot texture");
++            require_hresult(gpu_.device->CreateSharedHandle(
++                                textures_[index].Get(), nullptr, GENERIC_ALL, nullptr, &handles_[index]),
++                "depth producer: texture handle");
++        }
++        header_.magic = cd::block_magic;
++        header_.version = cd::block_version;
++        header_.structSize = sizeof(cd::Header);
++        header_.flags = cd::header_flags::active | cd::header_flags::fence | cd::header_flags::reader_heartbeat |
++            cd::header_flags::shares_mask_fence;
++        header_.generation = mask.header_.generation;
++        header_.slotCount = cd::slot_count;
++        header_.format = cd::format_r16g16_float;
++        header_.atlasW = kAtlasWidth;
++        header_.atlasH = kAtlasHeight;
++        header_.ownerPid = GetCurrentProcessId();
++        header_.adapterLuid = mask.header_.adapterLuid;
++        for (int index = 0; index < cd::slot_count; ++index) {
++            header_.textureHandle[index] = reinterpret_cast<std::uintptr_t>(handles_[index]);
++        }
++        header_.fenceHandle = mask.header_.fenceHandle;
++        header_.qpcFrequency = qpc_frequency();
++        header_.revision = cd::contract_revision;
++        publish();
++    }
++    ~FakeDepthProducer() {
++        for (HANDLE handle : handles_) {
++            if (handle != nullptr) {
++                CloseHandle(handle);
++            }
++        }
++        if (block_ != nullptr) {
++            UnmapViewOfFile(block_);
++        }
++        if (mapping_ != nullptr) {
++            CloseHandle(mapping_);
++        }
++    }
++    FakeDepthProducer(const FakeDepthProducer&) = delete;
++    FakeDepthProducer& operator=(const FakeDepthProducer&) = delete;
++
++    // The depth of the mask producer's last commit (its slot, seq and
++    // display time), each eye posed: eye e at x = -0.03 + 0.06 e, turned 90
++    // degrees about y, the world camera 13 mm from the cockpit's along the
++    // eye's x (the dual camera); and the mask slot's depth bit set. Before
++    // the mask producer signals.
++    void commit(FakeProducer& mask,
++        std::uint32_t slot_flags = cd::slot_flags::valid | cd::slot_flags::display_time | cd::slot_flags::poses) {
++        const int slot = static_cast<int>(mask.header_.newestSlot);
++        const cm::MaskSlot& mask_slot = mask.header_.slot[slot];
++        pattern_.assign(static_cast<std::size_t>(kAtlasWidth) * kAtlasHeight * 4U, 0);
++        for (std::size_t texel = 0; texel < pattern_.size() / 4U; ++texel) {
++            // 0.5 m (half 0x3800) on every third texel, 65504 (0x7bff) behind.
++            const std::uint16_t nearest = texel % 3U == 0 ? 0x3800U : 0U;
++            const std::uint16_t farthest = 0x7bffU;
++            std::memcpy(&pattern_[texel * 4U], &nearest, 2);
++            std::memcpy(&pattern_[texel * 4U + 2U], &farthest, 2);
++        }
++        gpu_.upload(textures_[slot].Get(), pattern_, 4);
++        cd::DepthSlot& record = header_.slot[slot];
++        record = {};
++        record.seq = mask_slot.maskSeq;
++        record.engineFrame = mask_slot.engineFrame;
++        record.displayTime = mask_slot.displayTime;
++        record.qpcCommit = qpc_now();
++        record.flags = slot_flags;
++        record.viewMask = mask_slot.viewMask & 3U;
++        record.xrSpace = 0x1234;
++        const float half = std::sqrt(0.5F);
++        for (int view = 0; view < 2; ++view) {
++            cd::DepthView& entry = record.view[view];
++            const cm::MaskView& grid = mask_slot.view[view];
++            entry.flags = (record.viewMask & (1U << view)) != 0
++                ? cd::view_flags::valid | cd::view_flags::same_grid_as_mask | cd::view_flags::pose |
++                    cd::view_flags::jitter | cd::view_flags::dual_camera | cd::view_flags::boost
++                : 0U;
++            entry.x = grid.x;
++            entry.y = grid.y;
++            entry.w = grid.w;
++            entry.h = grid.h;
++            entry.srcW = grid.srcW;
++            entry.srcH = grid.srcH;
++            entry.divisor = grid.divisor;
++            std::memcpy(entry.fovTan, grid.fovTan, sizeof(entry.fovTan));
++            entry.boostShiftM = view == 0 ? -0.013F : 0.013F;
++            entry.worldMinusCockpitM[0] = entry.boostShiftM;
++            entry.jitterPx[0] = 0.25F;
++            entry.jitterPx[1] = -0.375F;
++            entry.poseOrientation[1] = half;
++            entry.poseOrientation[3] = half;
++            entry.posePosition[0] = -0.03F + 0.06F * static_cast<float>(view);
++            entry.posePosition[1] = 1.2F;
++            entry.xrFov[0] = -0.8F;
++            entry.xrFov[1] = 0.8F;
++            entry.xrFov[2] = 0.7F;
++            entry.xrFov[3] = -0.7F;
++        }
++        header_.newestSeq = record.seq;
++        header_.newestSlot = static_cast<std::uint32_t>(slot);
++        publish();
++        // The engine writes the depth header before the mask header.
++        mask.header_.slot[slot].flags |= cm::slot_flags::depth;
++        mask.publish();
++    }
++
++    void publish() {
++        header_.heartbeatQpc = qpc_now();
++        cd::seqlock_write(block_, header_);
++    }
++    std::uint64_t reader_heartbeat() const {
++        return cd::reader_heartbeat_of(block_).load(std::memory_order_acquire);
++    }
++
++    cd::Header header_{};
++    std::vector<std::uint8_t> pattern_;
++
++private:
++    Gpu& gpu_;
++    HANDLE mapping_{};
++    cd::Header* block_{};
++    std::array<ComPtr<ID3D12Resource>, cd::slot_count> textures_{};
++    std::array<HANDLE, cd::slot_count> handles_{};
++};
++
++
+ std::wstring test_suffix(const wchar_t* name) {
+     return std::wstring(L"_xrfg_test_") + name + L"_" + std::to_wstring(GetCurrentProcessId());
+ }
+@@ -608,6 +765,177 @@
+     std::cout << "cockpit mask: the focus insets' tangents and the pair counters\n";
+ }
+ 
++// DCS Control (0035): the depth of a frame comes with its mask when both
++// producers committed it (same slot, seq, generation; one fence: the copy
++// waits once), with each eye's cockpit camera (DCS's pose less the dual
++// camera's shift) and jitter; anything else is that frame without depth, its
++// mask as before. Both reader heartbeats are stored, and cleared at the end.
++void test_depth_pairing_and_heartbeats(Gpu& gpu) {
++    const std::wstring suffix = test_suffix(L"depth");
++    FakeProducer producer(gpu, suffix);
++    FakeDepthProducer depth(gpu, suffix, producer);
++    auto options = test_options(suffix);
++    options.cockpit_depth = true;
++    {
++        xrfg::CockpitMaskConsumer consumer;
++        std::vector<std::int64_t> logged;
++        require_hresult(consumer.initialize(gpu.device.Get(),
++                            [&logged](std::int64_t code, std::uint64_t, std::uint64_t, std::uint64_t) {
++                                logged.push_back(code);
++                            },
++                            options),
++            "consumer initialize");
++        std::uint64_t seq = producer.commit(6000, 255);
++        depth.commit(producer);
++        auto frame = consumer.acquire(6000);
++        require(frame != nullptr && frame->depth && frame->depth_texture != nullptr,
++            "depth: a paired frame carries its depth");
++        require(consumer.stats().depth_last == xrfg::CockpitDepthLookup::paired && consumer.stats().depth_paired == 1,
++            "depth: reported paired");
++        require(producer.reader_heartbeat() != 0 && depth.reader_heartbeat() != 0,
++            "depth: both reader heartbeats are stored");
++        require(frame->depth_space == 0x1234, "depth: the XrSpace of the poses");
++        // Eye 0: at x -0.03, turned 90 degrees about y (its +x is tracking
++        // -z), the world camera 13 mm from the cockpit's along its -x
++        // (tracking +z): the cockpit camera sits at z -0.013.
++        const xrfg::D3D12CockpitDepthView& left = frame->depth_views[0];
++        require(left.valid && std::abs(left.cockpit_position.x + 0.03F) < 1.0e-5F &&
++                std::abs(left.cockpit_position.y - 1.2F) < 1.0e-5F &&
++                std::abs(left.cockpit_position.z + 0.013F) < 1.0e-5F,
++            "depth: the cockpit camera is DCS's pose less the dual camera's shift");
++        require(left.jitter_known && left.jitter_px[0] == 0.25F && left.jitter_px[1] == -0.375F,
++            "depth: the jitter is carried");
++        // The cockpit camera's move from the left eye's camera to the right
++        // one's (tracking +0.06 x, +0.026 z), in the right camera's frame
++        // (turned 90 degrees about y: its +z is tracking +x, its +x tracking
++        // -z).
++        xrfg::Vec3 delta{};
++        require(xrfg::cockpit_camera_delta(frame->depth_views[0], frame->depth_views[1], delta) &&
++                std::abs(delta.x + 0.026F) < 1.0e-4F && std::abs(delta.z - 0.06F) < 1.0e-4F &&
++                std::abs(delta.y) < 1.0e-5F,
++            "depth: the camera move in the current camera's frame");
++        // One fence: the copy waits for the mask's seq, then holds both.
++        Sleep(50);
++        require(frame->ready_fence->GetCompletedValue() < frame->ready_value,
++            "depth: the copy waits for the shared fence");
++        producer.signal(seq);
++        gpu.wait(frame->ready_fence.Get(), frame->ready_value);
++        require(gpu.readback(frame->depth_texture.Get(), 4) == depth.pattern_, "depth: the copy holds the slot");
++        require(gpu.readback(frame->texture.Get()) == producer.last_pattern_, "depth: the mask copy is unchanged");
++        gpu.wait(producer.release_fence_.Get(), seq);
++        frame.reset();
++
++        const auto expect_no_depth = [&](xrfg::CockpitDepthLookup reason, const char* what) {
++            require(consumer.stats().depth_last == reason, std::string("depth: ") + what + " is not reported");
++        };
++        // Another seq in the same slot: not this frame's depth.
++        seq = producer.commit(6100, 255);
++        depth.commit(producer);
++        depth.header_.slot[producer.header_.newestSlot].seq = seq + 7;
++        depth.publish();
++        auto unpaired = consumer.acquire(6100);
++        require(unpaired != nullptr && !unpaired->depth, "depth: another seq gives the mask alone");
++        expect_no_depth(xrfg::CockpitDepthLookup::unpaired, "a seq mismatch");
++        unpaired.reset(); // the ring holds six
++        producer.signal(seq);
++        // A late commit: no poses.
++        seq = producer.commit(6200, 255);
++        depth.commit(producer, cd::slot_flags::valid | cd::slot_flags::display_time | cd::slot_flags::late_commit);
++        auto late = consumer.acquire(6200);
++        require(late != nullptr && !late->depth, "depth: a late commit gives the mask alone");
++        expect_no_depth(xrfg::CockpitDepthLookup::late_commit, "a late commit");
++        late.reset(); // the ring holds six
++        producer.signal(seq);
++        // The mask slot without the depth bit.
++        seq = producer.commit(6300, 255);
++        depth.commit(producer);
++        producer.header_.slot[producer.header_.newestSlot].flags &= ~cm::slot_flags::depth;
++        producer.publish();
++        auto unflagged = consumer.acquire(6300);
++        require(unflagged != nullptr && !unflagged->depth, "depth: a mask slot without the depth bit");
++        expect_no_depth(xrfg::CockpitDepthLookup::unpaired, "a mask slot without the bit");
++        unflagged.reset(); // the ring holds six
++        producer.signal(seq);
++        // Another generation than the mask's.
++        seq = producer.commit(6400, 255);
++        depth.header_.generation += 1;
++        depth.commit(producer);
++        auto other_generation = consumer.acquire(6400);
++        require(other_generation != nullptr && !other_generation->depth, "depth: another generation");
++        expect_no_depth(xrfg::CockpitDepthLookup::generation_mismatch, "another generation");
++        depth.header_.generation -= 1;
++        other_generation.reset(); // the ring holds six
++        producer.signal(seq);
++        // Another fence than the mask's.
++        seq = producer.commit(6500, 255);
++        depth.header_.fenceHandle += 4;
++        depth.commit(producer);
++        auto other_fence = consumer.acquire(6500);
++        require(other_fence != nullptr && !other_fence->depth, "depth: another fence");
++        expect_no_depth(xrfg::CockpitDepthLookup::fence_mismatch, "another fence");
++        depth.header_.fenceHandle -= 4;
++        other_fence.reset(); // the ring holds six
++        producer.signal(seq);
++        // Idle (a heartbeat not fresh at the producer).
++        seq = producer.commit(6600, 255);
++        depth.header_.flags |= cd::header_flags::idle;
++        depth.commit(producer);
++        auto idle = consumer.acquire(6600);
++        require(idle != nullptr && !idle->depth, "depth: an idle producer");
++        expect_no_depth(xrfg::CockpitDepthLookup::idle, "an idle producer");
++        depth.header_.flags &= ~cd::header_flags::idle;
++        idle.reset(); // the ring holds six
++        producer.signal(seq);
++        // And paired again.
++        seq = producer.commit(6700, 255);
++        depth.commit(producer);
++        auto again = consumer.acquire(6700);
++        require(again != nullptr && again->depth, "depth: paired again");
++        producer.signal(seq);
++        gpu.wait(again->ready_fence.Get(), again->ready_value);
++        require(consumer.stats().depth_misses == 6 && consumer.stats().depth_generations_opened == 1,
++            "depth: the misses and the generation opened");
++        require(std::find(logged.begin(), logged.end(), 10) != logged.end(), "depth: the textures opened (result=10)");
++    }
++    require(producer.reader_heartbeat() == 0 && depth.reader_heartbeat() == 0,
++        "depth: both heartbeats are cleared when the consumer goes");
++
++    // [ofxr] cockpit_depth off: the depth block is not even opened.
++    {
++        xrfg::CockpitMaskConsumer consumer;
++        require_hresult(consumer.initialize(gpu.device.Get(), {}, test_options(suffix)), "consumer initialize");
++        const std::uint64_t seq = producer.commit(6800, 255);
++        depth.commit(producer);
++        auto frame = consumer.acquire(6800);
++        require(frame != nullptr && !frame->depth, "depth off: the mask alone");
++        require(consumer.stats().depth_last == xrfg::CockpitDepthLookup::off && depth.reader_heartbeat() == 0,
++            "depth off: no depth heartbeat");
++        producer.signal(seq);
++        gpu.wait(frame->ready_fence.Get(), frame->ready_value);
++    }
++    std::cout << "cockpit depth: pairing (slot, seq, generation, fence), late commits, idle, both heartbeats\n";
++}
++
++// DCS Control (0035): with [ofxr] cockpit_depth but no depth block (the
++// export off), masks come as before.
++void test_depth_without_block(Gpu& gpu) {
++    const std::wstring suffix = test_suffix(L"nodepth");
++    FakeProducer producer(gpu, suffix);
++    auto options = test_options(suffix);
++    options.cockpit_depth = true;
++    xrfg::CockpitMaskConsumer consumer;
++    require_hresult(consumer.initialize(gpu.device.Get(), {}, options), "consumer initialize");
++    const std::uint64_t seq = producer.commit(7000, 255);
++    producer.signal(seq);
++    auto frame = consumer.acquire(7000);
++    require(frame != nullptr && !frame->depth && consumer.stats().depth_last == xrfg::CockpitDepthLookup::no_block,
++        "no depth block: the mask alone");
++    gpu.wait(frame->ready_fence.Get(), frame->ready_value);
++    require(gpu.readback(frame->texture.Get()) == producer.last_pattern_, "no depth block: the mask copy");
++    std::cout << "cockpit depth: no depth block, masks as before\n";
++}
++
++
+ // DCS Control (0034): the cockpit's parallax between two real frames
+ // (xrfg::cockpit_parallax_pixels) and the focus edge's move
+ // (xrfg::focus_edge_motion_pixels).
+@@ -687,6 +1015,12 @@
+     const bool fast_missing = xrfg::implicit_layer::read_fast_composition(directory);
+     // DCS Control (0034): and [ofxr] lazy_synthetic_slot, on unless 0.
+     const bool lazy_missing = xrfg::implicit_layer::read_lazy_synthetic_slot(directory);
++    // DCS Control (0035): and [ofxr] cockpit_depth, off unless 1.
++    const bool depth_missing = xrfg::implicit_layer::read_cockpit_depth(directory);
++    write("[ofxr]\ncockpit_depth=1\n");
++    const bool depth_on = xrfg::implicit_layer::read_cockpit_depth(directory);
++    write("[ofxr]\ncockpit_depth=0\n");
++    const bool depth_off = xrfg::implicit_layer::read_cockpit_depth(directory);
+     write("[ofxr]\ncockpit_mask=1\nnvidia_occlusion_aware=3\nfast_composition=1\n");
+     const bool on = xrfg::implicit_layer::read_cockpit_mask(directory);
+     const auto level = xrfg::implicit_layer::read_nvidia_occlusion_aware(directory);
+@@ -718,6 +1052,8 @@
+     require(level == 3 && out_of_range == 0, "ini: nvidia_occlusion_aware takes 3");
+     require(!fast_missing && fast_on && !fast_off && !xrfg::implicit_layer::read_fast_composition({}),
+         "ini: fast_composition is 1 on, off otherwise");
++    require(!depth_missing && depth_on && !depth_off && !xrfg::implicit_layer::read_cockpit_depth({}),
++        "ini: cockpit_depth is 1 on, off otherwise"); // DCS Control (0035)
+     std::cout << "cockpit mask: [ofxr] cockpit_mask and nvidia_occlusion_aware=3 read\n";
+ }
+ 
+@@ -732,6 +1068,8 @@
+         test_pairing_gpu_wait_release_and_heartbeat(gpu);
+         test_heartbeat_is_throttled(gpu);
+         test_focus_views_and_counters(gpu); // DCS Control (0034)
++        test_depth_pairing_and_heartbeats(gpu); // DCS Control (0035)
++        test_depth_without_block(gpu); // DCS Control (0035)
+         test_stall_stops_the_heartbeat(gpu);
+         std::cout << "cockpit mask consumer tests passed\n";
+         return 0;
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -5333,6 +5333,13 @@
+             std::cout << "D3D12 NVIDIA occlusion quality tests passed\n";
+             return 0;
+         }
++        // DCS Control (0035): the cockpit depth's GPU cost.
++        if (GetEnvironmentVariableA("XRFG_TEST_COCKPIT_DEPTH_BENCH", nullptr, 0)) {
++            D3D12WarpFixture bench_fixture(true);
++            bench_cockpit_depth_composition(bench_fixture, 5424, 5356);
++            bench_fixture.require_no_debug_errors();
++            return 0;
++        }
+         if (GetEnvironmentVariableA("XRFG_TEST_OCCLUSION_BENCH", nullptr, 0)) {
+             D3D12WarpFixture bench_fixture(true);
+             // DCS Control (0031): and level 3, and the cockpit mask's own
+@@ -5390,6 +5397,7 @@
+         test_in_place_history_matches_copies(fixture); // DCS VR Control (0008)
+         test_visibility_mask_draws_only_the_visible_area(fixture); // 0008
+         test_cockpit_mask_composition(fixture); // DCS Control (0031)
++        test_cockpit_depth_composition(fixture); // DCS Control (0035)
+         test_focus_edge_band(fixture); // DCS Control (0034)
+         test_synthesis_on_a_dedicated_queue(fixture);
+         test_double_wide_single_slice_views(fixture);
+@@ -5470,6 +5478,9 @@
+             test_cockpit_mask_composition( // DCS Control (0031)
+                 nvidia_fixture,
+                 xrfg::D3D12OpticalFlowBackend::nvidia);
++            test_cockpit_depth_composition( // DCS Control (0035)
++                nvidia_fixture,
++                xrfg::D3D12OpticalFlowBackend::nvidia);
+             test_focus_edge_band( // DCS Control (0034)
+                 nvidia_fixture,
+                 xrfg::D3D12OpticalFlowBackend::nvidia);
+diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
+--- a/tests/nvidia_fast_patterns.inc
++++ b/tests/nvidia_fast_patterns.inc
+@@ -309,7 +309,10 @@
+     bool cockpit_mask_session = true,
+     // DCS Control (0034): the previous capture's views, where they differ
+     // from the current one's (a head that moved between the two).
+-    const ReprojectionViews* previous_views = nullptr) {
++    const ReprojectionViews* previous_views = nullptr,
++    // DCS Control (0035): the current capture's views (and the target's),
++    // where they are not make_reprojection_views()'.
++    const ReprojectionViews* current_views = nullptr) {
+     std::array<ComPtr<ID3D12Resource>, 2> sources{
+         create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
+     auto current = create_source_texture(fixture, width, height);
+@@ -329,7 +332,7 @@
+     require_hresult(synth.initialize(fixture.device(), fixture.queue(), history,
+         current_out, synthetic_out, kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
+         backend, session_options), "occlusion initialize");
+-    const auto views = make_reprojection_views();
++    const auto views = current_views != nullptr ? *current_views : make_reprojection_views();
+     xrfg::D3D12HistoryCaptureTicket ca{}, cb{};
+     xrfg::D3D12FrameSynthesisTicket output{};
+     require_hresult(history->capture(0, &ca), "occlusion A");
+@@ -558,6 +561,481 @@
+     require(leaned_rest <= leaned_rest_none * 1.02 + 0.01, "cockpit parallax: the rest of the image is worse");
+ }
+ 
++// DCS Control (0035): the cockpit depth on the composition. A scene drawn
++// exactly (ray traced, per eye, from each camera): a textured cockpit bar on
++// a plane 0.5 m ahead, a sill 0.7 m ahead, and a textured world 5 m away;
++// three cameras per eye: the previous capture's, the current one's and the
++// true middle frame's (the current orientation, the centre halfway: R68's
++// target camera). Masks and depth as DCS Control's engine module shares them
++// (the mask max-filtered, the depth the nearest cockpit depth per texel of
++// `divisor` x `divisor` pixels, R16G16_FLOAT), and per eye the camera.
++std::uint16_t depth_test_half(float value) {
++    if (!(value > 0.0F)) {
++        return 0;
++    }
++    std::uint32_t bits = 0;
++    std::memcpy(&bits, &value, sizeof(bits));
++    const int exponent = static_cast<int>((bits >> 23) & 0xffU) - 127 + 15;
++    const std::uint32_t mantissa = bits & 0x7fffffU;
++    if (exponent >= 31) {
++        return 0x7bffU; // 65504, the contract's sky
++    }
++    if (exponent <= 0) {
++        return 0;
++    }
++    std::uint32_t half = (static_cast<std::uint32_t>(exponent) << 10) | (mantissa >> 13);
++    const std::uint32_t rest = mantissa & 0x1fffU;
++    if (rest > 0x1000U || (rest == 0x1000U && (half & 1U) != 0U)) {
++        ++half;
++    }
++    return static_cast<std::uint16_t>(half);
++}
++
++struct CockpitDepthScene {
++    StereoPattern image;
++    // Per eye and pixel: the cockpit's depth along the view axis (0: the
++    // world), and every pixel's depth.
++    std::array<std::vector<float>, kEyeCount> cockpit;
++    std::array<std::vector<float>, kEyeCount> depth;
++};
++
++xrfg::Vec3 depth_test_rotate(const xrfg::Quaternion& q, const xrfg::Vec3& v) {
++    const xrfg::Vec3 c1{q.y * v.z - q.z * v.y + q.w * v.x, q.z * v.x - q.x * v.z + q.w * v.y,
++        q.x * v.y - q.y * v.x + q.w * v.z};
++    return {v.x + 2.0F * (q.y * c1.z - q.z * c1.y), v.y + 2.0F * (q.z * c1.x - q.x * c1.z),
++        v.z + 2.0F * (q.x * c1.y - q.y * c1.x)};
++}
++
++// The bar spans x from bar_left to bar_right (metres).
++CockpitDepthScene cockpit_depth_scene(UINT width, UINT height, const ReprojectionViews& views,
++    float bar_left = -0.035F, float bar_right = 0.005F) {
++    CockpitDepthScene scene;
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        const auto& view = views[eye];
++        const double left = std::tan(view.fov.angle_left), right = std::tan(view.fov.angle_right);
++        const double up = std::tan(view.fov.angle_up), down = std::tan(view.fov.angle_down);
++        auto& bytes = scene.image[eye];
++        bytes.resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
++        scene.cockpit[eye].assign(static_cast<std::size_t>(width) * height, 0.0F);
++        scene.depth[eye].assign(static_cast<std::size_t>(width) * height, 0.0F);
++        const xrfg::Vec3 c = view.pose.position;
++        for (UINT y = 0; y < height; ++y) {
++            for (UINT x = 0; x < width; ++x) {
++                const double tx = left + (x + 0.5) / width * (right - left);
++                const double ty = up - (y + 0.5) / height * (up - down);
++                const xrfg::Vec3 d = depth_test_rotate(
++                    view.pose.orientation, {static_cast<float>(tx), static_cast<float>(ty), -1.0F});
++                // The plane z = -plane: its ray parameter is the depth along
++                // the view axis (d's component along the axis is 1).
++                const auto hit = [&](double plane, double& px, double& py) {
++                    const double s = (-plane - c.z) / d.z;
++                    px = c.x + s * d.x;
++                    py = c.y + s * d.y;
++                    return s;
++                };
++                double px = 0.0, py = 0.0;
++                std::array<std::uint8_t, 3> texel{};
++                double depth = hit(0.5, px, py);
++                bool cockpit = px >= bar_left && px < bar_right && py > -0.2 && py < 0.2;
++                if (cockpit) {
++                    texel = occlusion_texture(px * 2400.0, py * 2400.0, 1);
++                } else {
++                    depth = hit(0.7, px, py);
++                    cockpit = py >= -0.13 && py < -0.07;
++                    if (cockpit) {
++                        texel = occlusion_texture(px * 2400.0 + 500.0, py * 2400.0, 1);
++                    } else {
++                        depth = hit(5.0, px, py);
++                        texel = occlusion_texture(px * 240.0, py * 240.0, 0);
++                    }
++                }
++                const std::size_t at = static_cast<std::size_t>(y) * width + x;
++                scene.cockpit[eye][at] = cockpit ? static_cast<float>(depth) : 0.0F;
++                scene.depth[eye][at] = static_cast<float>(depth);
++                bytes[at * kBytesPerPixel] = texel[0];
++                bytes[at * kBytesPerPixel + 1] = texel[1];
++                bytes[at * kBytesPerPixel + 2] = texel[2];
++                bytes[at * kBytesPerPixel + 3] = 255;
++            }
++        }
++    }
++    return scene;
++}
++
++ComPtr<ID3D12Resource> upload_depth_test_texture(D3D12WarpFixture& fixture, UINT width, UINT height,
++    DXGI_FORMAT format, UINT texel_bytes, const std::vector<std::uint8_t>& bytes) {
++    ComPtr<ID3D12Resource> texture;
++    const D3D12_HEAP_PROPERTIES heap = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
++    D3D12_RESOURCE_DESC description{};
++    description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++    description.Width = width;
++    description.Height = height;
++    description.DepthOrArraySize = 1;
++    description.MipLevels = 1;
++    description.Format = format;
++    description.SampleDesc.Count = 1;
++    require_hresult(fixture.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
++                        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(texture.GetAddressOf())),
++        "cockpit depth test texture");
++    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
++    UINT rows = 0;
++    UINT64 row_size = 0, total = 0;
++    fixture.device()->GetCopyableFootprints(&description, 0, 1, 0, &layout, &rows, &row_size, &total);
++    ComPtr<ID3D12Resource> upload =
++        create_buffer(fixture, D3D12_HEAP_TYPE_UPLOAD, total, D3D12_RESOURCE_STATE_GENERIC_READ);
++    std::uint8_t* mapped = nullptr;
++    require_hresult(upload->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "cockpit depth test upload");
++    for (UINT y = 0; y < rows; ++y) {
++        std::memcpy(mapped + layout.Offset + static_cast<std::size_t>(y) * layout.Footprint.RowPitch,
++            bytes.data() + static_cast<std::size_t>(y) * width * texel_bytes, static_cast<std::size_t>(width) * texel_bytes);
++    }
++    upload->Unmap(0, nullptr);
++    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
++        D3D12_TEXTURE_COPY_LOCATION destination{};
++        destination.pResource = texture.Get();
++        destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++        D3D12_TEXTURE_COPY_LOCATION source{};
++        source.pResource = upload.Get();
++        source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++        source.PlacedFootprint = layout;
++        list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
++    });
++    return texture;
++}
++
++// The frame's mask (and, with `with_depth`, its depth and cameras) as the
++// consumer hands it on: both eyes side by side, complete at once.
++std::shared_ptr<xrfg::D3D12CockpitMaskFrame> make_cockpit_depth_frame(D3D12WarpFixture& fixture, UINT width,
++    UINT height, const CockpitDepthScene& scene, UINT divisor, const ReprojectionViews& views, bool with_depth,
++    const std::shared_ptr<xrfg::CockpitMaskPairCounters>& counters = {}) {
++    const UINT mask_width = (width + divisor - 1U) / divisor;
++    const UINT mask_height = (height + divisor - 1U) / divisor;
++    const UINT atlas_width = mask_width * kEyeCount;
++    std::vector<std::uint8_t> mask(static_cast<std::size_t>(atlas_width) * mask_height, 0);
++    std::vector<std::uint8_t> depth(static_cast<std::size_t>(atlas_width) * mask_height * 4U, 0);
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        for (UINT row = 0; row < mask_height; ++row) {
++            for (UINT column = 0; column < mask_width; ++column) {
++                float nearest = 0.0F, farthest = 0.0F;
++                for (UINT y = row * divisor; y < std::min(height, (row + 1U) * divisor); ++y) {
++                    for (UINT x = column * divisor; x < std::min(width, (column + 1U) * divisor); ++x) {
++                        const std::size_t at = static_cast<std::size_t>(y) * width + x;
++                        const float cockpit = scene.cockpit[eye][at];
++                        if (cockpit > 0.0F && (nearest == 0.0F || cockpit < nearest)) {
++                            nearest = cockpit;
++                        }
++                        farthest = std::max(farthest, scene.depth[eye][at]);
++                    }
++                }
++                const std::size_t texel = static_cast<std::size_t>(row) * atlas_width + eye * mask_width + column;
++                mask[texel] = nearest > 0.0F ? 255 : 0;
++                const std::uint16_t x = depth_test_half(nearest), y = depth_test_half(farthest);
++                std::memcpy(&depth[texel * 4U], &x, 2);
++                std::memcpy(&depth[texel * 4U + 2U], &y, 2);
++            }
++        }
++    }
++    auto frame = std::make_shared<xrfg::D3D12CockpitMaskFrame>();
++    frame->texture = upload_depth_test_texture(fixture, atlas_width, mask_height, DXGI_FORMAT_R8_UNORM, 1, mask);
++    require_hresult(fixture.device()->CreateFence(1, D3D12_FENCE_FLAG_NONE,
++                        IID_PPV_ARGS(frame->ready_fence.GetAddressOf())),
++        "cockpit depth test fence");
++    frame->ready_value = 1;
++    frame->counters = counters;
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        const auto& fov = views[eye].fov;
++        const float left = std::tan(fov.angle_left), right = std::tan(fov.angle_right);
++        const float up = std::tan(fov.angle_up), down = std::tan(fov.angle_down);
++        auto& view = frame->views[eye];
++        view.valid = true;
++        view.x = eye * mask_width;
++        view.y = 0;
++        view.width = mask_width;
++        view.height = mask_height;
++        view.fov_tan = {left, left + (right - left) * float(mask_width * divisor) / float(width), up,
++            up - (up - down) * float(mask_height * divisor) / float(height)};
++    }
++    if (with_depth) {
++        frame->depth_texture =
++            upload_depth_test_texture(fixture, atlas_width, mask_height, DXGI_FORMAT_R16G16_FLOAT, 4, depth);
++        frame->depth = true;
++        frame->depth_space = 0x5ace;
++        for (UINT eye = 0; eye < kEyeCount; ++eye) {
++            frame->depth_views[eye].valid = true;
++            frame->depth_views[eye].orientation = views[eye].pose.orientation;
++            frame->depth_views[eye].cockpit_position = views[eye].pose.position;
++        }
++    }
++    return frame;
++}
++
++// The cameras of one pair (previous, current, the true middle) for a head
++// that moved: both eyes 64 mm apart about a pivot `pivot_back` metres behind
++// them, turned by `yaw` radians (previous -yaw/2, current +yaw/2) and moved by
++// `lean` metres along x (previous -lean/2, current +lean/2); every view's
++// tangents +-tan_x x +-tan_y.
++std::array<ReprojectionViews, 3> cockpit_depth_cameras(
++    float yaw, float pivot_back, float lean, float tan_x = 0.3F, float tan_y = 0.225F) {
++    std::array<ReprojectionViews, 3> cameras{};
++    for (int which = 0; which < 3; ++which) {
++        ReprojectionViews views = make_reprojection_views();
++        const float side = which == 0 ? -0.5F : 0.5F;
++        const float angle = yaw * side;
++        for (UINT eye = 0; eye < kEyeCount; ++eye) {
++            auto& view = views[eye];
++            view.fov.angle_left = std::atan(-tan_x);
++            view.fov.angle_right = std::atan(tan_x);
++            view.fov.angle_up = std::atan(tan_y);
++            view.fov.angle_down = std::atan(-tan_y);
++            view.pose.orientation = {0.0F, std::sin(angle * 0.5F), 0.0F, std::cos(angle * 0.5F)};
++            const xrfg::Vec3 arm = depth_test_rotate(
++                view.pose.orientation, {eye == 0 ? -0.032F : 0.032F, 0.0F, -pivot_back});
++            view.pose.position = {arm.x + lean * side, arm.y, arm.z + pivot_back};
++        }
++        cameras[static_cast<std::size_t>(which)] = views;
++    }
++    // The middle: the current orientation, the centre halfway.
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        auto& middle = cameras[2][eye];
++        middle.pose.orientation = cameras[1][eye].pose.orientation;
++        const xrfg::Vec3 a = cameras[0][eye].pose.position, b = cameras[1][eye].pose.position;
++        middle.pose.position = {(a.x + b.x) * 0.5F, (a.y + b.y) * 0.5F, (a.z + b.z) * 0.5F};
++    }
++    return cameras;
++}
++
++// The mean absolute error and the 99th percentile of the largest channel
++// error where `where` (per eye and pixel) holds, inside a 32 px margin.
++struct DepthTestError {
++    double mae{};
++    int p99{};
++    std::size_t pixels{};
++};
++
++DepthTestError depth_test_error(const StereoPattern& image, const StereoPattern& truth, UINT width, UINT height,
++    const std::function<bool(UINT, UINT, UINT)>& where) {
++    DepthTestError error;
++    std::vector<int> worst;
++    double total = 0.0;
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        // The margin of the other tests: where the previous frame does not
++        // cover a pixel (a head turn) it is the current frame's, depth or not.
++        for (UINT y = 32; y + 32 < height; ++y) {
++            for (UINT x = 32; x + 32 < width; ++x) {
++                if (!where(eye, x, y)) continue;
++                const std::size_t i = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
++                int largest = 0;
++                for (UINT c = 0; c < 3; ++c) {
++                    const int e = std::abs(int(image[eye][i + c]) - int(truth[eye][i + c]));
++                    total += e;
++                    largest = std::max(largest, e);
++                }
++                worst.push_back(largest);
++            }
++        }
++    }
++    error.pixels = worst.size();
++    if (!worst.empty()) {
++        error.mae = total / (3.0 * double(worst.size()));
++        std::sort(worst.begin(), worst.end());
++        error.p99 = worst[std::min(worst.size() - 1, worst.size() * 99 / 100)];
++    }
++    return error;
++}
++
++// DCS Control (0035): 0034's composition (the masks alone) against 0035's
++// (the masks with depth) for one head motion, against the true middle frame.
++// Without [ofxr] cockpit_depth, or with it but frames without depth, the
++// composition is byte for byte 0034's. With depth the cockpit's interior
++// (its pixels three mask texels from any edge in the middle frame) is the
++// true middle frame within the texture's own bilinear sampling, far closer
++// than 0034's; every cockpit pixel is no further than 0034's on average (its
++// edges are composed as 0034 does); the world is no worse; and the counters
++// saw one pair and its pixels.
++void test_cockpit_depth_motion(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlowBackend backend,
++    const char* label, float yaw, float pivot_back, float lean) {
++    constexpr UINT width = 320, height = 240, divisor = 2;
++    const auto cameras = cockpit_depth_cameras(yaw, pivot_back, lean);
++    const CockpitDepthScene previous = cockpit_depth_scene(width, height, cameras[0]);
++    const CockpitDepthScene current = cockpit_depth_scene(width, height, cameras[1]);
++    const CockpitDepthScene middle = cockpit_depth_scene(width, height, cameras[2]);
++    auto counters = std::make_shared<xrfg::CockpitMaskPairCounters>();
++    const auto mask_previous = make_cockpit_depth_frame(fixture, width, height, previous, divisor, cameras[0], false);
++    const auto mask_current = make_cockpit_depth_frame(fixture, width, height, current, divisor, cameras[1], false);
++    const auto depth_previous =
++        make_cockpit_depth_frame(fixture, width, height, previous, divisor, cameras[0], true, counters);
++    const auto depth_current =
++        make_cockpit_depth_frame(fixture, width, height, current, divisor, cameras[1], true, counters);
++    xrfg::D3D12NvidiaOpticalFlowOptions options{};
++    const auto run = [&](const std::shared_ptr<xrfg::D3D12CockpitMaskFrame>& a,
++                         const std::shared_ptr<xrfg::D3D12CockpitMaskFrame>& b, bool depth_session) {
++        xrfg::D3D12NvidiaOpticalFlowOptions session = options;
++        session.cockpit_depth = depth_session;
++        return synthesize_nvidia_pair(fixture, previous.image, current.image, width, height, session, {a, b},
++            backend, true, &cameras[0], &cameras[1]);
++    };
++    const StereoPattern masked = run(mask_previous, mask_current, false);
++    require(run(depth_previous, depth_current, false) == masked,
++        "cockpit depth: depth is used although [ofxr] cockpit_depth is off");
++    require(run(mask_previous, mask_current, true) == masked,
++        "cockpit depth: frames without depth do not compose as 0034");
++    require(counters->depth_pairs.load() == 0, "cockpit depth: a pair counted without depth");
++    const StereoPattern with_depth = run(depth_previous, depth_current, true);
++    require(counters->depth_pairs.load() == 1 && counters->depth_pixels.load() > 0,
++        "cockpit depth: the pair and its pixels are not counted");
++    // The middle frame's cockpit, its interior, and the world.
++    const auto cockpit_at = [&](UINT eye, UINT x, UINT y) {
++        return middle.cockpit[eye][static_cast<std::size_t>(y) * width + x] > 0.0F;
++    };
++    const int reach = static_cast<int>(divisor) * 3;
++    const auto interior_at = [&](UINT eye, UINT x, UINT y) {
++        for (int dy = -reach; dy <= reach; ++dy) {
++            for (int dx = -reach; dx <= reach; ++dx) {
++                const int sx = std::clamp(int(x) + dx, 0, int(width) - 1);
++                const int sy = std::clamp(int(y) + dy, 0, int(height) - 1);
++                const float here = middle.cockpit[eye][static_cast<std::size_t>(y) * width + x];
++                const float there = middle.cockpit[eye][static_cast<std::size_t>(sy) * width + sx];
++                if (here <= 0.0F || there <= 0.0F || std::abs(there - here) > 0.05F) return false;
++            }
++        }
++        return true;
++    };
++    const auto world_at = [&](UINT eye, UINT x, UINT y) { return !cockpit_at(eye, x, y); };
++    const DepthTestError interior_masked = depth_test_error(masked, middle.image, width, height, interior_at);
++    const DepthTestError interior_depth = depth_test_error(with_depth, middle.image, width, height, interior_at);
++    const DepthTestError cockpit_masked = depth_test_error(masked, middle.image, width, height, cockpit_at);
++    const DepthTestError cockpit_depth = depth_test_error(with_depth, middle.image, width, height, cockpit_at);
++    const DepthTestError world_masked = depth_test_error(masked, middle.image, width, height, world_at);
++    const DepthTestError world_depth = depth_test_error(with_depth, middle.image, width, height, world_at);
++    std::cout << "cockpit depth (" << (backend == xrfg::D3D12OpticalFlowBackend::nvidia ? "NVIDIA" : "FidelityFX")
++              << ", " << label << "): cockpit interior mae " << interior_depth.mae << " p99 " << interior_depth.p99
++              << " (0034: mae " << interior_masked.mae << " p99 " << interior_masked.p99 << ", "
++              << interior_depth.pixels << " px); every cockpit pixel mae " << cockpit_depth.mae << " p99 "
++              << cockpit_depth.p99 << " (0034: mae " << cockpit_masked.mae << " p99 " << cockpit_masked.p99
++              << "); the world mae " << world_depth.mae << " (0034: " << world_masked.mae << "); counted "
++              << counters->depth_pixels.load() << " px with depth, " << counters->depth_fallback_pixels.load()
++              << " without" << std::endl;
++    require(interior_depth.pixels > 1000, "cockpit depth: the scene has no cockpit interior");
++    require(interior_depth.mae <= 1.5 && interior_depth.p99 <= 6,
++        "cockpit depth: the cockpit's interior is not the true middle frame");
++    // (Much closer with a flow that misses the cockpit's parallax; on the
++    // optical-flow engine 0034 can be close already for a head turn.)
++    require(interior_depth.mae <= interior_masked.mae + 0.01,
++        "cockpit depth: the cockpit's interior is further from the middle frame than 0034's");
++    require(cockpit_depth.mae <= cockpit_masked.mae, "cockpit depth: the cockpit is further from the middle frame");
++    require(world_depth.mae <= world_masked.mae * 1.02 + 0.01, "cockpit depth: the world is worse");
++}
++
++void test_cockpit_depth_composition(D3D12WarpFixture& fixture,
++    xrfg::D3D12OpticalFlowBackend backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx) {
++    // R68's normal lean: 0.3 m/s, a pair in 2X at 90 Hz (22.2 ms): 6.7 mm.
++    test_cockpit_depth_motion(fixture, backend, "lean 0.3 m/s", 0.0F, 0.0F, 0.3F * 2.0F / 90.0F);
++    // A head turn at 100 deg/s about a neck 9 cm behind the eyes: 2.2 deg
++    // and, at the eyes, 3.5 mm a pair.
++    test_cockpit_depth_motion(fixture, backend, "yaw 100 deg/s, neck pivot",
++        100.0F * 3.14159265F / 180.0F * 2.0F / 90.0F, 0.09F, 0.0F);
++}
++
++// DCS Control (0035): the cockpit depth's GPU cost on hardware at a headset's
++// eye image (XRFG_TEST_COCKPIT_DEPTH_BENCH). Two synthesizers on the same
++// frames, interleaved pair by pair: the masks alone (0034) and the masks with
++// depth; a head leaning at 0.3 m/s (2X at 90 Hz), 46 px per degree at the
++// centre, a cockpit covering about half of each eye, mask and depth texels
++// of 18 px (the periphery's /2 at 5424 px). The composition's time includes
++// the resample (and the depth's), as the layer logs it.
++void bench_cockpit_depth_composition(D3D12WarpFixture& fixture, UINT width, UINT height) {
++    constexpr UINT kFrames = 3;
++    constexpr int kPairs = 240;
++    constexpr UINT kDivisor = 18;
++    const float tan_x = float(width) * 0.5F / 2636.0F;
++    const float tan_y = float(height) * 0.5F / 2636.0F;
++    const auto pair = cockpit_depth_cameras(0.0F, 0.0F, 0.3F * 2.0F / 90.0F, tan_x, tan_y);
++    // Frames A, B, A: every pair moves the head the same distance.
++    const std::array<const ReprojectionViews*, kFrames> cameras{&pair[0], &pair[1], &pair[0]};
++    std::array<CockpitDepthScene, kFrames> scenes{};
++    scenes[0] = cockpit_depth_scene(width, height, pair[0], -0.45F, 0.05F);
++    scenes[1] = cockpit_depth_scene(width, height, pair[1], -0.45F, 0.05F);
++    scenes[2] = scenes[0];
++    struct Pipeline {
++        std::array<ComPtr<ID3D12Resource>, kFrames> sources{};
++        std::array<ComPtr<ID3D12Resource>, 2> currents{};
++        std::array<ComPtr<ID3D12Resource>, 1> synthetics{};
++        std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
++        std::unique_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
++        std::array<std::shared_ptr<xrfg::D3D12CockpitMaskFrame>, kFrames> masks{};
++        std::vector<std::uint64_t> composition;
++    };
++    auto counters = std::make_shared<xrfg::CockpitMaskPairCounters>();
++    std::array<Pipeline, 2> pipelines{};
++    for (UINT index = 0; index < pipelines.size(); ++index) {
++        Pipeline& pipeline = pipelines[index];
++        for (UINT frame = 0; frame < kFrames; ++frame) {
++            pipeline.sources[frame] = create_source_texture(fixture, width, height);
++            upload_pattern(fixture, pipeline.sources[frame].Get(), scenes[frame].image);
++            pipeline.masks[frame] = make_cockpit_depth_frame(
++                fixture, width, height, scenes[frame], kDivisor, *cameras[frame], index == 1, counters);
++        }
++        for (auto& c : pipeline.currents) c = create_source_texture(fixture, width, height);
++        for (auto& s : pipeline.synthetics) s = create_source_texture(fixture, width, height);
++        std::array<ID3D12Resource*, kFrames> source_pointers{};
++        for (UINT i = 0; i < kFrames; ++i) source_pointers[i] = pipeline.sources[i].Get();
++        std::array<ID3D12Resource*, 2> current_pointers{pipeline.currents[0].Get(), pipeline.currents[1].Get()};
++        std::array<ID3D12Resource*, 1> synthetic_pointers{pipeline.synthetics[0].Get()};
++        pipeline.history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++        require(operation_succeeded(pipeline.history->initialize(fixture.device(), fixture.queue(),
++                    std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
++                    D3D12_RESOURCE_STATE_RENDER_TARGET)), "depth bench: history");
++        xrfg::D3D12NvidiaOpticalFlowOptions options{};
++        options.cockpit_mask = true;
++        options.cockpit_depth = index == 1;
++        pipeline.synthesizer = std::make_unique<xrfg::D3D12FrameSynthesizer>();
++        require(operation_succeeded(pipeline.synthesizer->initialize(fixture.device(), fixture.queue(),
++                    pipeline.history,
++                    std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
++                    std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
++                    kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
++                    xrfg::D3D12OpticalFlowBackend::nvidia, options, true)), "depth bench: synthesizer");
++    }
++    for (int frame = 0; frame <= kPairs; ++frame) {
++        const UINT slot = static_cast<UINT>(frame) % kFrames;
++        for (UINT index = 0; index < pipelines.size(); ++index) {
++            Pipeline& pipeline = pipelines[index];
++            xrfg::D3D12HistoryCaptureTicket capture{};
++            xrfg::D3D12FrameSynthesisTicket ticket{};
++            require(operation_succeeded(pipeline.history->capture(slot, &capture)) &&
++                        operation_succeeded(pipeline.history->commit(capture)), "depth bench: capture");
++            pipeline.synthesizer->set_cockpit_mask(pipeline.masks[slot]);
++            const HRESULT submitted = frame == 0
++                ? pipeline.synthesizer->submit_prime(capture, *cameras[slot], 0, &ticket)
++                : pipeline.synthesizer->submit_pair(capture, *cameras[slot], *cameras[slot], 0,
++                      static_cast<std::uint32_t>(frame % 2), &ticket, std::nullopt, {}, false, 0.5F);
++            require(operation_succeeded(submitted), "depth bench: submission");
++            require_frame_start_gate(*pipeline.synthesizer, "depth bench: frame-start gate");
++            xrfg::D3D12NvidiaGpuTiming timing{};
++            while (pipeline.synthesizer->consume_nvidia_gpu_timing(&timing) == S_OK) {
++                if (timing.previous_serial == 0) continue;
++                pipeline.composition.push_back(timing.composition_microseconds);
++            }
++        }
++    }
++    require(operation_succeeded(pipelines[0].synthesizer->wait_for_idle()) &&
++                operation_succeeded(pipelines[1].synthesizer->wait_for_idle()), "depth bench: idle");
++    const auto median = [](std::vector<std::uint64_t> values) -> std::uint64_t {
++        if (values.empty()) return 0;
++        std::sort(values.begin(), values.end());
++        return values[values.size() / 2];
++    };
++    const std::uint64_t masked = median(pipelines[0].composition);
++    const std::uint64_t depth = median(pipelines[1].composition);
++    const double share = double(counters->depth_pixels.load()) /
++        double(std::max<std::uint64_t>(1, counters->depth_pairs.load())) / (2.0 * width * height);
++    std::cout << "cockpit depth bench " << width << "x" << height << " x2: composition median " << masked
++              << " us with the masks alone, " << depth << " us with depth (" << (std::int64_t(depth) - std::int64_t(masked))
++              << " us; " << pipelines[0].composition.size() << "/" << pipelines[1].composition.size()
++              << " pairs timed); depth pairs " << counters->depth_pairs.load() << ", " << int(share * 100.0 + 0.5)
++              << " % of the pixels masked with depth" << std::endl;
++}
++
+ // DCS Control (0034): the moving focus edge. A still, textured world under
+ // Quad Views' focus inset (brighter here), which the gaze moved 12 px right
+ // and 6 px down between the two captures: a brightness edge that moves while

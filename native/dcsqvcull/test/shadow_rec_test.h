@@ -2025,6 +2025,170 @@ void DeviceMultiTests(Compiler& comp) {
   delete w;
 }
 
+// ---------------------------------------------------------------------------
+// R61: mission restart, F10 map, governor split widened, then stage A
+// ---------------------------------------------------------------------------
+// R55 06:23:27 and R59/R60 15:14:17 (smoke, qvbench_f4_germany): "shadow
+// recorder: disabled for this session (exception 0xc0000005 ... PreOne+0x91",
+// [mat] with mat = [item+0x10] = 0xc600000005 (R55: non-canonical). Sequence:
+// mission RESTART (more than 2 s before: outside SceneChanging), the F10 map
+// (CMD=15, 1.2 s before the fault; the frame heap reset many times per frame,
+// the cascades' vectors not sorted again), the governor's split 0x8 -> 0xf
+// (15 ms before). The job's heap generation was current: neither HeapRecycled
+// nor SceneChanging contained the fault.
+std::atomic<int> g_r61Faults{0};
+struct R61Helper {
+  Job* j;
+  int t;
+};
+void R61HelperRun(R61Helper* h) {
+  __try {
+    PreChunks(*h->j, h->t);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    g_r61Faults.fetch_add(1);
+    h->j->recycled.store(1);
+  }
+}
+int R61Primary(Job* j) {  // 1 committed, 0 not committed, -1 faulted
+  __try {
+    return PreAndCommit(*j) ? 1 : 0;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    g_r61Faults.fetch_add(1);
+    return -1;
+  }
+}
+bool R61Faults(const void* p) {  // reading p faults (what PreOne+0x91 did with mat)
+  __try {
+    return *static_cast<const volatile uint64_t*>(p) == 0x1234 && false;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return true;
+  }
+}
+
+void RestartF10Tests() {
+  TexFakes fakes;
+  World* w = new World;
+  w->Init();
+  Tables t;
+  AllocTables(t);
+  // Saved globals.
+  const bool sortPatched0 = g_sortPatched, on0 = shrec::g_on.load(), dis0 = shrec::g_disabled.load();
+  const uint32_t split0 = shrec::g_split.load();
+  const int64_t scene0 = g_sceneChangeQpc.load();
+  Job* const casc0 = g_casc[0].job;
+  const uint64_t sortGen0 = g_casc[0].sortGen.load();
+  const uint64_t impl0 = g_implausible.load();
+  Job* j = NewJob();
+  bool ok = j != nullptr;
+  // The cascade's vector as RenderGraph+0xa18 holds it (collection 2 of 4).
+  alignas(16) uint8_t rg[0xa20] = {};
+  alignas(16) uint8_t arr[4 * 24] = {};
+  *reinterpret_cast<uint8_t**>(rg + 0xa18) = arr;
+  void** out = reinterpret_cast<void**>(arr + 2 * 24);
+  if (ok) {
+    j->armRg = rg;
+    j->armIdx = 2;
+    g_casc[0].job = j;
+    g_casc[0].sortGen.store(0);
+    g_sortPatched = true;
+    shrec::g_on = true;
+    shrec::g_disabled = false;
+    const double us = defrec::QpcToUs();
+    // 1. Mission restart, 10 s ago (its containment window is over); the new mission's frames sort the vector.
+    g_frameHeapGen.fetch_add(1);
+    g_sceneChangeQpc.store(defrec::Qpc() - static_cast<int64_t>(10e6 / us));
+    j->startState.store(kStartIdle);
+    OnSorted(out);
+    ok = g_casc[0].sortGen.load() == g_frameHeapGen.load() && EntryVectorFresh(g_casc[0]);
+    // An armed job is still started by the sort (early start unchanged).
+    j->startState.store(kStartArmed);
+    OnSorted(out);
+    ok = ok && j->startState.load() == kStartRun && j->vec == out && j->startedEarly;
+    // A vector at another index does not count as this cascade's.
+    g_casc[0].sortGen.store(0);
+    OnSorted(reinterpret_cast<void**>(arr + 1 * 24));
+    ok = ok && g_casc[0].sortGen.load() == 0 && !EntryVectorFresh(g_casc[0]);
+    OnSorted(out);
+    ok = ok && EntryVectorFresh(g_casc[0]);
+    Check(ok, "R61 restart: the sort hook notes the cascade's vector (armed or not) and still starts an armed job");
+    // 2. The F10 map: the frame heap reset, the vector not sorted again; the old casters' memory reused.
+    for (int r = 0; r < 3; ++r) g_frameHeapGen.fetch_add(1);
+    int bad[3] = {-1, -1, -1};
+    for (int i = 0, b = 0; i < kObjs && b < 3; ++i)
+      if (w->Smr(i) && i > 40 * b + 10) bad[b++] = i;
+    *reinterpret_cast<uint64_t*>(w->item[bad[0]] + 0x10) = 0xc600000005ull;      // R60's data address
+    *reinterpret_cast<uint64_t*>(w->item[bad[1]] + 0x10) = 0xdead0000beef0000ull;  // non-canonical (R55)
+    *reinterpret_cast<uint64_t*>(w->rend[bad[2]] + 0x10) = 0x3ull;                 // an item pointer of junk
+    const bool wouldFault = R61Faults(reinterpret_cast<void*>(0xc600000005ull)) &&
+                            R61Faults(reinterpret_cast<void*>(0xdead0000beef0000ull));
+    // 3. The governor widens the split: cascade 0 gets helpers again.
+    shrec::g_split = 0x8;
+    const bool narrow = ((shrec::g_split.load() >> 0) & 1) == 0;
+    shrec::g_split = 0xf;
+    const uint32_t helpers = ((shrec::g_split.load() >> 0) & 1) ? HelpersFor(kObjs, false, kThreads - 1) : 0;
+    // 4. Render entry: the armed job's vector was not sorted since the reset: not started.
+    ok = narrow && helpers > 0 && wouldFault && !EntryVectorFresh(g_casc[0]);
+    Check(ok, "R61 F10 map: after the heap resets an unsorted cascade vector is not started at render entry "
+              "(whatever the split)");
+    // 5. Started anyway (no sort hook: the old start path): stage A with the helpers on the recycled casters.
+    g_sortPatched = false;
+    ok = EntryVectorFresh(g_casc[0]);  // without the hook: no record, the old behaviour
+    InitJob(*j, *w, t);
+    j->scope = 0x30f;
+    j->heapGen = g_frameHeapGen.load();  // started now: the generation is current
+    j->tStart = defrec::Qpc();
+    j->recycled.store(0);
+    const bool notContained = !HeapRecycled(*j) && !SceneChanging(j->tStart) &&
+                              RecycledFilter(EXCEPTION_ACCESS_VIOLATION, *j) == EXCEPTION_CONTINUE_SEARCH;
+    const int faults0 = g_r61Faults.load();
+    int committed = 1;
+    if (BeginBuild(*j) == kBuildOk) {
+      std::atomic<bool> go{false};
+      R61Helper hs[kThreads];
+      std::thread th[kThreads];
+      for (uint32_t h = 1; h <= helpers; ++h) {
+        hs[h] = {j, static_cast<int>(h)};
+        th[h] = std::thread([&go, p = &hs[h]] {
+          while (!go.load()) _mm_pause();
+          R61HelperRun(p);
+        });
+      }
+      go = true;
+      committed = R61Primary(j);
+      for (uint32_t h = 1; h <= helpers; ++h) th[h].join();
+    }
+    ok = ok && notContained && g_r61Faults.load() == faults0 && committed == 0 && j->recycled.load() == 1 &&
+         j->result == kBuildNone && g_implausible.load() > impl0;
+    Check(ok, "R61 F10 map: stage A on recycled casters (unaligned / non-canonical material, junk item) drops the "
+              "job without a fault (primary and helpers), where neither the heap nor the scene check contains one");
+    // 6. Back in the world: sorted again, a healthy vector builds as before.
+    w->Init();
+    g_sortPatched = true;
+    OnSorted(out);
+    InitJob(*j, *w, t);
+    j->scope = 0x30f;
+    j->recycled.store(0);
+    ok = EntryVectorFresh(g_casc[0]) && BeginBuild(*j) == kBuildOk && R61Primary(j) == 1 &&
+         j->result == kBuildOk && j->recycled.load() == 0 && g_r61Faults.load() == faults0;
+    Check(ok, "R61 back from F10: the sorted vector starts at render entry and builds as before");
+  } else {
+    Check(false, "R61: test job");
+  }
+  g_casc[0].job = casc0;
+  g_casc[0].sortGen.store(sortGen0);
+  g_sortPatched = sortPatched0;
+  shrec::g_on = on0;
+  shrec::g_disabled = dis0;
+  shrec::g_split = split0;
+  g_sceneChangeQpc.store(scene0);
+  if (j) {
+    j->startState.store(kStartIdle);
+    FreeJob(j);
+  }
+  FreeTables(t);
+  delete w;
+}
+
 void Run() {
   MeshTests();
   TableTests();
@@ -2035,6 +2199,7 @@ void Run() {
   SchedulingTests();
   TextureJobTests();
   SortSiteTests();
+  RestartF10Tests();
   Compiler c;
   if (!c.Load()) {
     printf("SKIP shadow rec: d3dcompiler_47.dll not available\n");

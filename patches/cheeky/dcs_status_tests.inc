@@ -1,7 +1,43 @@
 // DCS VR Control: status block for the in-headset diagnostic overlay (dcs_status_block.hpp).
 // Included by tests/openxr_calibration_tests.cpp; uses its require().
+// The DLSS 5 key's session-only change (dcs_session_settings.hpp): saves keep the persisted value.
+void dcs_session_settings_test() {
+    using namespace cheeky::dcsvr;
+    const std::string on = "[CheekyFoveatedDLSS]\nSchemaVersion=1\nEnabled=0\nNrEnabled=1\nNrStyle=0\n";
+    const std::string off = "[CheekyFoveatedDLSS]\nSchemaVersion=1\nEnabled=0\nNrEnabled=0\nNrStyle=0\n";
+    const std::string off_styled = "[CheekyFoveatedDLSS]\nSchemaVersion=1\nEnabled=0\nNrEnabled=0\nNrStyle=2\n";
+    std::string value;
+    require(dcs_ini_value(on, "NrEnabled", value) && value == "1" && !dcs_ini_value(on, "Nr", value) &&
+        !dcs_ini_value(on, "Missing", value), "INI value lookup");
+    const auto saved = [](const DcsSessionOverrides& overrides) {
+        std::string text;
+        overrides.apply([&](const std::string& key, const std::string& v) { text += key + '=' + v + ';'; });
+        return text;
+    };
+    DcsSessionOverrides overrides;
+    overrides.session(on, off, {"NrEnabled"});
+    require(saved(overrides) == "NrEnabled=1;", "A session-only toggle saves the persisted value");
+    overrides.session(off, on, {"NrEnabled"});
+    require(overrides.empty(), "Toggled back: nothing to override");
+    overrides.session(on, off, {"NrEnabled"});
+    overrides.session(off, on, {"NrEnabled"});
+    overrides.session(on, off, {"NrEnabled"});
+    require(saved(overrides) == "NrEnabled=1;", "Repeated toggles keep the first persisted value");
+    overrides.persistent(off, off_styled, {"NrStyle"});
+    require(saved(overrides) == "NrEnabled=1;", "An unrelated saved change keeps the session override");
+    overrides.persistent(off_styled, off_styled, {"NrEnabled"});
+    require(overrides.empty(), "A saved change of the same key makes it persistent");
+    overrides.session(on, off, {"NrEnabled"});
+    overrides.persistent(off, on, {});
+    require(overrides.empty(), "Defaults that change the key make it persistent");
+    overrides.session(on, off, {"NrEnabled"});
+    overrides.clear();
+    require(overrides.empty(), "Defaults that leave the key unchanged still end the override");
+}
+
 void dcs_status_block_test() {
     using namespace cheeky::dcsvr;
+    dcs_session_settings_test();
     // ABI shared with the OFXR fork patch (include/xrfg/dcsvr_status.hpp pins the same values).
     require(sizeof(DcsVrStatusV1) == 128U && offsetof(DcsVrStatusV1, reason) == 72U && status_magic == 0x53525644U,
         "Status block layout changed");

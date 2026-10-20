@@ -85,9 +85,21 @@ void Analyse(void** vec, Stat& s) {
 using WrapFn = void (*)(void* pass, void* ctx, ExecFn orig);
 std::atomic<WrapFn> g_wrap{nullptr};
 
+// Optional innermost stand-in for DCS's execute (cascade_cache.h, R33): when
+// set, every wrapper's `orig` is this function, which calls g_orig itself
+// (so it sees the caster list the wrappers handed to DCS's loop). nullptr
+// when unused: the chain is exactly as before.
+std::atomic<ExecFn> g_inner{nullptr};
+
+ExecFn Innermost() {
+  const ExecFn i = g_inner.load(std::memory_order_relaxed);
+  return i ? i : g_orig;
+}
+
 void CallOrig(void* pass, void* ctx) {
-  if (WrapFn w = g_wrap.load(std::memory_order_relaxed)) return w(pass, ctx, g_orig);
-  g_orig(pass, ctx);
+  const ExecFn o = Innermost();
+  if (WrapFn w = g_wrap.load(std::memory_order_relaxed)) return w(pass, ctx, o);
+  o(pass, ctx);
 }
 
 void __fastcall Hook(void* pass, void* ctx) {

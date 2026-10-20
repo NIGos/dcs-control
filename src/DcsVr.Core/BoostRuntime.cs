@@ -60,6 +60,188 @@ public sealed class BoostRuntime
 
     /// <summary>The marker of a monitor mode the helper changed and has not yet set back.</summary>
     public static string DisplayMarkerPath(string stateRoot) => Path.Combine(stateRoot, "boost", "display-mode.json");
+    /// <summary>The processes CPU Boost changed and has not yet set back, written after every change, so a helper that
+    /// is ended (Task Manager, a crash) leaves them for the next app or helper start to restore.</summary>
+    public static string LedgerPath(string stateRoot) => Path.Combine(stateRoot, "boost", "ledger.json");
+    /// <summary>The programs Free VRAM closed and has not yet reopened (with "Reopen after the flight"), written after
+    /// every close, so a helper that is ended leaves them for the next app or helper start to reopen.</summary>
+    public static string ClosedPath(string stateRoot) => Path.Combine(stateRoot, "boost", "closed.json");
+    /// <summary>The marker of desktop Tobii services a helper stopped and has not yet started again.</summary>
+    public static string TobiiMarkerPath(string stateRoot) => Path.Combine(stateRoot, "boost", TobiiDesktop.MarkerFile);
+
+    /// <summary>At app start: true when a helper stopped the desktop Tobii services and could not start them again (it
+    /// was ended), and no helper runs now. After a restart the services start with Windows again: a marker whose services
+    /// all run asks for nothing and is removed.</summary>
+    public static bool TobiiLeftPaused(string stateRoot)
+    {
+        var marker = TobiiMarkerPath(stateRoot);
+        if (!File.Exists(marker) || HelperRunning()) return false;
+        try
+        {
+            if (JsonData.Deserialize<string[]>(ReadRecord(marker)).Any(service => TobiiDesktop.State(service) != "RUNNING")) return true;
+            File.Delete(marker);
+            return false;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidDataException) { return true; }
+    }
+
+    /// <summary>At app start: programs Free VRAM closed for a flight whose helper was ended before reopening them are
+    /// reopened now, once, as they were started (path, arguments, the program's folder). Nothing happens while a helper
+    /// runs, or while DCS runs (its helper was ended mid-flight: the programs would take its video memory back).
+    /// Returns what was done, or null when there was nothing to do.</summary>
+    public static IReadOnlyList<string>? ReopenLeftoverPrograms(string stateRoot) => HelperRunning() || DcsRunning() ? null : ReopenClosedFile(ClosedPath(stateRoot));
+
+    private static bool DcsRunning()
+    {
+        var running = Process.GetProcessesByName("DCS");
+        foreach (var process in running) process.Dispose();
+        return running.Length > 0;
+    }
+
+    internal static IReadOnlyList<string>? ReopenClosedFile(string path, Func<ReopenTarget, string?>? start = null)
+    {
+        if (TakeClosedFile(path) is not { } closed) return null;
+        var done = new List<string>();
+        foreach (var target in FreeVram.ReopenTargets(closed, RunningImages(closed)))
+            done.Add((start ?? FreeVram.StartAsUser)(target) is { } problem ? $"Could not reopen {target.Name}: {problem}" : $"Reopened {target.Name} ({target.ImagePath}).");
+        return done;
+    }
+
+    /// <summary>The closed programs a record names, taken from it once: it is renamed first, so an app start and a helper
+    /// start reading it together never both reopen them. Null when there is none, or when it is held by another program
+    /// for a moment (an antivirus scan): then it stays for the next start, never removed unread.</summary>
+    internal static ClosedProcess[]? TakeClosedFile(string path)
+    {
+        if (!File.Exists(path)) return null;
+        var claimed = path + "." + Guid.NewGuid().ToString("N") + ".taken";
+        try { File.Move(path, claimed); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+        ClosedProcess[] closed;
+        try { closed = JsonData.Deserialize<ClosedProcess[]>(ReadRecord(claimed)); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            try { File.Move(claimed, path); } catch (Exception again) when (again is IOException or UnauthorizedAccessException) { }
+            return null;
+        }
+        catch (Exception e) when (e is System.Text.Json.JsonException or InvalidDataException) { closed = []; }
+        // Once: the record goes before anything starts, so a program that cannot start is not tried at every start.
+        try { File.Delete(claimed); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        return closed;
+    }
+
+    /// <summary>Executables of the closed programs that run again (their own service restarted them).</summary>
+    private static List<string> RunningImages(IReadOnlyList<ClosedProcess> closed)
+    {
+        var running = new List<string>();
+        if (closed.Count == 0) return running;
+        foreach (var fact in BoostPlanner.CaptureProcesses(testAccess: false).Processes)
+            if (closed.Any(c => BoostPlanner.MatchesProcessName(c.Name, fact.Name)) && SystemPaths.ProcessImagePath(fact.Pid) is { } image) running.Add(image);
+        return running;
+    }
+
+    /// <summary>The <c>tobii-resume</c> command (elevated, started by the app): starts the desktop Tobii services a helper
+    /// stopped and could not start again. Returns a process exit code.</summary>
+    public static int ResumeLeftoverTobii(string stateRoot, TextWriter output, TextWriter error)
+    {
+        if (HelperRunning()) { error.WriteLine("A boost helper is running; it starts the desktop Tobii services again itself when DCS exits."); return 1; }
+        if (!FreeVram.IsElevated()) { error.WriteLine("Starting the desktop Tobii services needs administrator rights."); return 1; }
+        var (done, message) = ResumeTobiiMarker(TobiiMarkerPath(stateRoot));
+        (done ? output : error).WriteLine("Desktop Tobii: " + message);
+        return done ? 0 : 1;
+    }
+
+    /// <summary>Starts what a Tobii marker names (elevated only) and removes the marker once everything started.</summary>
+    private static (bool Done, string Message) ResumeTobiiMarker(string marker)
+    {
+        try
+        {
+            if (!File.Exists(marker)) return (true, "nothing is paused.");
+            // Only names that are still desktop Tobii services on this PC; the marker never names anything else to start.
+            var installed = TobiiDesktop.InstalledServices();
+            var leftover = JsonData.Deserialize<string[]>(File.ReadAllText(marker)).Where(s => installed.Contains(s, StringComparer.OrdinalIgnoreCase)).ToArray();
+            var errors = TobiiDesktop.Resume(leftover);
+            if (errors.Count > 0) return (false, string.Join("; ", errors));
+            File.Delete(marker);
+            return (true, leftover.Length == 0 ? "nothing left to start." : "started again " + string.Join(", ", leftover));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidDataException) { return (false, e.Message); }
+    }
+
+    /// <summary>The elevated <c>DcsVr.Cli tobii-resume</c> the app starts when the pilot asks; null without the CLI. The
+    /// state folder is passed: the elevated process may run as another administrator, with another LOCALAPPDATA.</summary>
+    public static ProcessStartInfo? TobiiResumeStart(string stateRoot, string? cliDirectory = null)
+    {
+        var directory = cliDirectory ?? AppContext.BaseDirectory;
+        var cli = new[] { "DcsVr.Cli.exe", "DcsVr.Cli" }.Select(name => Path.Combine(directory, name)).FirstOrDefault(File.Exists);
+        if (cli is null) return null;
+        var start = new ProcessStartInfo(cli) { WorkingDirectory = Path.GetDirectoryName(cli)!, UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
+        foreach (var argument in new[] { "tobii-resume", "--state", stateRoot }) start.ArgumentList.Add(argument);
+        return start;
+    }
+
+    /// <summary>At app start: processes a helper changed and could not set back (it was ended) get their original
+    /// priority and CPUs back, when they are still the same processes (PID, name and start time). Nothing happens while
+    /// a helper runs. Returns how many were restored, or null when there was nothing to do.</summary>
+    public static int? RestoreLeftoverProcesses(string stateRoot) => HelperRunning() ? null : RestoreLedgerFile(LedgerPath(stateRoot));
+
+    internal static int? RestoreLedgerFile(string path)
+    {
+        if (!File.Exists(path)) return null;
+        BoostChange[] changes;
+        try { changes = JsonData.Deserialize<BoostChange[]>(ReadRecord(path)); }
+        // Held by another program for a moment (an antivirus scan): kept for the next start, never deleted unread.
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+        catch (Exception e) when (e is System.Text.Json.JsonException or InvalidDataException) { changes = []; }
+        var results = changes.Select(change => (change, result: RestoreChange(change))).ToList();
+        // A process this start may not change (one an elevated helper moved) stays recorded for a helper with rights.
+        var denied = results.Where(r => r.result is null).Select(r => r.change).ToArray();
+        try
+        {
+            if (denied.Length == 0) File.Delete(path);
+            else AtomicFile.WriteText(path, JsonData.Serialize(denied));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        return results.Count(r => r.result == true);
+    }
+
+    /// <summary>Puts one recorded process back, only onto the same process it was taken from: true when restored, false
+    /// when that process is gone, null when it may not be changed from here (access denied).</summary>
+    private static bool? RestoreChange(BoostChange change)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(change.Pid);
+            if (!BoostLedger.SameProcess(change, SafeName(process), process.StartTime.Ticks)) return false;
+            if (change.OriginalAffinity != 0) process.ProcessorAffinity = (nint)change.OriginalAffinity;
+            if (Enum.TryParse<ProcessPriorityClass>(change.OriginalPriority, out var priority) && !string.Equals(change.OriginalPriority, change.AppliedPriority, StringComparison.Ordinal))
+                process.PriorityClass = priority;
+            return true;
+        }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException) { return false; } // gone (or exited)
+        catch (Exception e) when (IsProcessAccess(e)) { return null; }
+    }
+
+    private BoostChange[] _leftover = [];
+
+    /// <summary>A helper record, read again for a moment while another program (an antivirus scan) holds it.</summary>
+    private static string ReadRecord(string path)
+    {
+        var text = "";
+        AtomicFile.Retry(() => text = File.ReadAllText(path));
+        return text;
+    }
+
+    private static BoostChange[] ReadLedger(string path)
+    {
+        try { return File.Exists(path) ? JsonData.Deserialize<BoostChange[]>(ReadRecord(path)) : []; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidDataException) { return []; }
+    }
+
+    private void SaveLedger()
+    {
+        try { AtomicFile.WriteText(LedgerPath(Path.GetDirectoryName(_boostDir)!), JsonData.Serialize(_ledger.Changes.Concat(_leftover).ToArray())); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log("Could not record the changed processes: " + e.Message); }
+    }
 
     /// <summary>True while a boost helper runs in this session (it holds the helper mutex).</summary>
     public static bool HelperRunning()
@@ -138,6 +320,22 @@ public sealed class BoostRuntime
     private int Execute(TextWriter output)
     {
         Directory.CreateDirectory(_boostDir);
+        // An earlier helper that was ended before it could restore: its processes are put back first.
+        if (RestoreLedgerFile(LedgerPath(Path.GetDirectoryName(_boostDir)!)) is int earlier) Log($"Processes changed by an earlier flight: {earlier} restored.");
+        // Those this helper may not change (an elevated helper moved them) stay recorded alongside its own changes.
+        _leftover = ReadLedger(LedgerPath(Path.GetDirectoryName(_boostDir)!));
+        // Programs an earlier helper closed for Free VRAM and was ended before reopening. With Free VRAM and Reopen on
+        // for this flight they stay closed and are reopened with this flight's own; otherwise they are reopened now.
+        if (_profile.FreeVram && _profile.FreeVramReopen)
+        {
+            if (TakeClosedFile(ClosedPath(Path.GetDirectoryName(_boostDir)!)) is { Length: > 0 } earlierClosed)
+            {
+                _closedForVram.AddRange(earlierClosed);
+                SaveClosedRecord();
+                Log($"Free VRAM (earlier flight): {earlierClosed.Length} closed programs are reopened after this flight.");
+            }
+        }
+        else if (ReopenClosedFile(ClosedPath(Path.GetDirectoryName(_boostDir)!)) is { } reopened) foreach (var line in reopened) Log("Free VRAM (earlier flight): " + line);
         // Not disposed: a signal handler thread may still be waiting on them when Execute returns.
         var stopping = new ManualResetEventSlim(false);
         var finished = new ManualResetEventSlim(false);
@@ -249,11 +447,16 @@ public sealed class BoostRuntime
         }
         finally
         {
+            // At logoff or shutdown the desktop Tobii services go first: they outlive the session, and Windows ends this
+            // process within seconds. Their start is only requested, so the restores below still fit.
+            if (_sessionEnding) ResumeTobii(wait: false);
             var restored = RestoreOnce();
             // The monitor first: it is what the user sees, and a logoff leaves little time.
             RestoreDisplay("Restore");
             ResumeTobii();
             if (_profile.FreeVram && _profile.FreeVramReopen && !_sessionEnding) ReopenClosed();
+            // Nothing is reopened at logoff or shutdown, then or at the next start.
+            else DeleteClosedRecord();
             if (_attachedPid is not null)
             {
                 Log($"Restored {restored} of {_ledger.Changes.Count} changed processes.");
@@ -286,7 +489,7 @@ public sealed class BoostRuntime
                 hintGoneLogged = true;
                 Log($"DCS PID {hint} is not running (DCS may have restarted itself); waiting for DCS from {_dcsExecutable ?? "any location"}.");
             }
-            if (BoostAttach.Choose(candidates, _dcsPid, _dcsExecutable, MinDcsLifetime, DateTime.Now) is { } pid)
+            if (BoostAttach.Choose(candidates, _dcsPid, _dcsExecutable, MinDcsLifetime, DateTime.UtcNow) is { } pid)
             {
                 var expected = candidates.First(c => c.Pid == pid).StartTime;
                 Process? process = null;
@@ -393,10 +596,45 @@ public sealed class BoostRuntime
         var excluded = ExcludedPids(snapshot, dcsPid);
         foreach (var fact in snapshot.Processes)
         {
-            if (excluded.Contains(fact.Pid) || BoostPlanner.IsProtectedName(fact.Name)) continue;
+            // Another signed-in user's programs are never moved; services (session 0) are, for the VR runtime.
+            if (excluded.Contains(fact.Pid) || BoostPlanner.IsProtectedName(fact.Name) || snapshot.OtherSession(fact, services: true)) continue;
             if (vrPatterns.Any(p => BoostPlanner.MatchesProcessName(p, fact.Name))) Confine(fact, _vrMask, priority: null, ourMasks);
             else if (backgroundPatterns.Any(p => BoostPlanner.MatchesProcessName(p, fact.Name))) Confine(fact, _bgMask, ProcessPriorityClass.BelowNormal, ourMasks);
         }
+        RecordInherited(snapshot, excluded);
+    }
+
+    /// <summary>Processes a confined program started inherit its CPUs (and the priority CPU Boost gave it): they are
+    /// recorded too, so the restore gives them all CPUs again. Nothing is changed here.</summary>
+    private void RecordInherited(BoostSnapshot snapshot, HashSet<int> excluded)
+    {
+        var recorded = 0;
+        // Each pass adds the next generation (a child's own children).
+        for (var pass = 0; pass < 4; pass++)
+        {
+            var parents = _ledger.Changes.Select(c => c.Pid).ToHashSet();
+            var added = false;
+            foreach (var fact in snapshot.Processes)
+            {
+                if (!parents.Contains(fact.ParentPid) || fact.ParentPid == fact.Pid || excluded.Contains(fact.Pid) || BoostPlanner.IsProtectedName(fact.Name)
+                    || snapshot.OtherSession(fact, services: true) || _failed.Contains((fact.Pid, fact.Name))) continue;
+                Process? process = null;
+                try
+                {
+                    process = Process.GetProcessById(fact.Pid);
+                    var start = process.StartTime.Ticks;
+                    if (_ledger.Contains(fact.Pid, start)) continue;
+                    if (_ledger.TryRecordInherited(fact.Pid, fact.Name, start, fact.ParentPid, (ulong)(long)process.ProcessorAffinity, process.PriorityClass.ToString(), _allCpus)) { added = true; recorded++; }
+                }
+                catch (ArgumentException) { /* exited between the snapshot and now */ }
+                catch (Exception e) when (IsProcessAccess(e)) { _failed.Add((fact.Pid, fact.Name)); }
+                finally { process?.Dispose(); }
+            }
+            if (!added) break;
+        }
+        if (recorded == 0) return;
+        SaveLedger();
+        Log($"{recorded} process(es) started by confined programs recorded: the restore gives them all CPUs again.");
     }
 
     private void Confine(BoostProcessFact fact, ulong mask, ProcessPriorityClass? priority, IReadOnlyCollection<ulong> ourMasks)
@@ -416,7 +654,7 @@ public sealed class BoostRuntime
                 try { process.PriorityClass = p; appliedPriority = p; }
                 catch (Exception e) when (IsProcessAccess(e)) { _errors.Add($"{fact.Name} (PID {fact.Pid}) priority: {e.Message}"); }
             // Recorded only after the change succeeded, so status and restore list real changes only.
-            _ledger.TryRecord(fact.Pid, fact.Name, start, currentAffinity, currentPriority.ToString(), mask, appliedPriority.ToString(), _allCpus, ourMasks, out _);
+            if (_ledger.TryRecord(fact.Pid, fact.Name, start, currentAffinity, currentPriority.ToString(), mask, appliedPriority.ToString(), _allCpus, ourMasks, out _)) SaveLedger();
         }
         catch (ArgumentException) { /* exited between the snapshot and now */ }
         catch (Exception e) when (IsProcessAccess(e))
@@ -467,12 +705,13 @@ public sealed class BoostRuntime
                 try
                 {
                     var remaining = deadline - DateTime.UtcNow;
-                    if (process.WaitForExit(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero)) { _closed.Add(label); _closedForVram.Add(record); Log("Closed " + label + "."); continue; }
+                    if (process.WaitForExit(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero)) { _closed.Add(label); _closedForVram.Add(record); SaveClosedRecord(); Log("Closed " + label + "."); continue; }
                     if (!_profile.FreeVramForce) { Log($"{label} is still running after {CloseGrace.TotalSeconds:0} s; left running (End programs that do not close is off)."); continue; }
                     process.Kill();
                     process.WaitForExit(TimeSpan.FromSeconds(2));
                     _closed.Add(label + " (ended)");
                     _closedForVram.Add(record);
+                    SaveClosedRecord();
                     Log($"Ended {label}: it did not close within {CloseGrace.TotalSeconds:0} s.");
                 }
                 catch (Exception e) when (IsProcessAccess(e))
@@ -487,15 +726,30 @@ public sealed class BoostRuntime
     private void ReopenClosed()
     {
         if (_closedForVram.Count == 0) return;
-        var running = new List<string>();
-        foreach (var fact in BoostPlanner.CaptureProcesses(testAccess: false).Processes)
-            if (_closedForVram.Any(c => BoostPlanner.MatchesProcessName(c.Name, fact.Name)) && SystemPaths.ProcessImagePath(fact.Pid) is { } image) running.Add(image);
-        foreach (var target in FreeVram.ReopenTargets(_closedForVram, running))
+        // The record goes first: each program is reopened once, here, never again at the next start.
+        DeleteClosedRecord();
+        foreach (var target in FreeVram.ReopenTargets(_closedForVram, RunningImages(_closedForVram)))
         {
             var problem = FreeVram.StartAsUser(target);
-            if (problem is null) { _reopened.Add(target.Name); Log($"Reopened {target.Name} ({target.ImagePath} {target.Arguments})."); }
+            // Never its arguments: boost.log goes into the diagnostics package.
+            if (problem is null) { _reopened.Add(target.Name); Log($"Reopened {target.Name} ({target.ImagePath})."); }
             else { _errors.Add($"Reopen {target.Name}: {problem}"); Log($"Could not reopen {target.Name}: {problem}"); }
         }
+    }
+
+    /// <summary>Records what Free VRAM closed, for the next app or helper start when this helper is ended before it
+    /// reopens them. Only with "Reopen after the flight".</summary>
+    private void SaveClosedRecord()
+    {
+        if (!_profile.FreeVramReopen) return;
+        try { AtomicFile.WriteText(ClosedPath(Path.GetDirectoryName(_boostDir)!), JsonData.Serialize(_closedForVram.ToArray())); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log("Could not record the closed programs: " + e.Message); }
+    }
+
+    private void DeleteClosedRecord()
+    {
+        try { File.Delete(ClosedPath(Path.GetDirectoryName(_boostDir)!)); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 
     private void ApplyDisplay()
@@ -528,10 +782,10 @@ public sealed class BoostRuntime
         Log("Desktop Tobii: " + _tobiiStatus + (errors.Count > 0 ? "; " + string.Join("; ", errors) : ""));
     }
 
-    private void ResumeTobii()
+    private void ResumeTobii(bool wait = true)
     {
         if (_tobiiPaused.Count == 0) return;
-        var errors = TobiiDesktop.Resume(_tobiiPaused);
+        var errors = TobiiDesktop.Resume(_tobiiPaused, wait);
         _errors.AddRange(errors.Select(e => "Desktop Tobii: " + e));
         _tobiiStatus = errors.Count == 0 ? "started again " + string.Join(", ", _tobiiPaused) : "could not start everything again: " + string.Join("; ", errors);
         Log("Desktop Tobii: " + _tobiiStatus);
@@ -542,18 +796,9 @@ public sealed class BoostRuntime
     /// <summary>Services an earlier helper paused and could not start again (it was ended before DCS exited).</summary>
     private void ResumeLeftoverTobii()
     {
-        try
-        {
-            if (!File.Exists(TobiiMarker)) return;
-            // Only names that are still desktop Tobii services on this PC; the marker never names anything else to start.
-            var installed = TobiiDesktop.InstalledServices();
-            var leftover = JsonData.Deserialize<string[]>(File.ReadAllText(TobiiMarker)).Where(s => installed.Contains(s, StringComparer.OrdinalIgnoreCase)).ToArray();
-            if (!FreeVram.IsElevated()) { Log("Desktop Tobii (earlier flight): services still paused; they start again with the next elevated helper or a restart."); return; }
-            var errors = TobiiDesktop.Resume(leftover);
-            Log("Desktop Tobii (earlier flight): " + (errors.Count == 0 ? "started again " + string.Join(", ", leftover) : string.Join("; ", errors)));
-            if (errors.Count == 0) File.Delete(TobiiMarker);
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidDataException) { }
+        if (!File.Exists(TobiiMarker)) return;
+        if (!FreeVram.IsElevated()) { Log("Desktop Tobii (earlier flight): services still paused; they start again with the next elevated helper, Start Tobii in DCS Control or a restart."); return; }
+        Log("Desktop Tobii (earlier flight): " + ResumeTobiiMarker(TobiiMarker).Message);
     }
 
     private void RestoreDisplay(string reason)
@@ -599,19 +844,15 @@ public sealed class BoostRuntime
         {
             if (_restoreDone) return _restoredCount;
             _restoreDone = true;
-            foreach (var change in _ledger.Changes)
+            foreach (var change in _ledger.Changes) if (RestoreChange(change) == true) _restoredCount++;
+            var path = LedgerPath(Path.GetDirectoryName(_boostDir)!);
+            try
             {
-                try
-                {
-                    using var process = Process.GetProcessById(change.Pid);
-                    if (!BoostLedger.SameProcess(change, SafeName(process), process.StartTime.Ticks)) continue;
-                    if (change.OriginalAffinity != 0) process.ProcessorAffinity = (nint)change.OriginalAffinity;
-                    if (Enum.TryParse<ProcessPriorityClass>(change.OriginalPriority, out var priority) && !string.Equals(change.OriginalPriority, change.AppliedPriority, StringComparison.Ordinal))
-                        process.PriorityClass = priority;
-                    _restoredCount++;
-                }
-                catch (Exception e) when (e is ArgumentException || IsProcessAccess(e)) { /* gone or inaccessible */ }
+                // Leftovers of an earlier elevated helper wait for one with rights; nothing else stays recorded.
+                if (_leftover.Length == 0) File.Delete(path);
+                else AtomicFile.WriteText(path, JsonData.Serialize(_leftover));
             }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
             return _restoredCount;
         }
     }

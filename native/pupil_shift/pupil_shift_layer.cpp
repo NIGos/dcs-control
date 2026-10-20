@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "perception_shm.h"
+#include "dcsvr_pupil_fov.h"
 #include "pupil_math.hpp"
 #include "predictive_depth.hpp"
 #include "pvr_gaze.hpp"
@@ -252,10 +253,11 @@ void reload_settings_locked(bool force) {
     s.simulate_x_deg = std::clamp(ini_float(L"SimulateGazeXDeg", 0, path), -60.0f, 60.0f);
     s.simulate_y_deg = std::clamp(ini_float(L"SimulateGazeYDeg", 0, path), -60.0f, 60.0f);
     s.simulate = ini_float(L"SimulateGaze", 0, path) != 0;
+    s.publish_gaze = ini_float(L"PublishGaze", 0, path) != 0;
     settings = s;
-    log("settings: enabled=%d eye_radius=%.1fmm virtual_image=%.2fm max_gaze=%.0fdeg simulate=%d (%.1f, %.1f) toggle=%d:%d ipd=%.1fmm\n",
+    log("settings: enabled=%d eye_radius=%.1fmm virtual_image=%.2fm max_gaze=%.0fdeg simulate=%d (%.1f, %.1f) toggle=%d:%d ipd=%.1fmm publish_gaze=%d\n",
         s.enabled, s.eye_radius * 1000, s.virtual_image, s.max_gaze_deg, s.simulate, s.simulate_x_deg, s.simulate_y_deg,
-        pupil_key.vk, pupil_key.mods, s.ipd * 1000);
+        pupil_key.vk, pupil_key.mods, s.ipd * 1000, s.publish_gaze ? 1 : 0);
     // [DepthBoost]: off unless Enabled=1. The ranges are the app's; the layer clamps them again.
     DepthBoostSettings d;
     d.enabled = ini_float(L"Enabled", 0, path, L"DepthBoost") != 0;
@@ -954,7 +956,7 @@ pvr::Sample sample() {
 }  // namespace pvr_hook
 
 // ---- Shared memory with the engine module (perception_shm.h) -------------------------------------------------------
-// Opened lazily (Depth boost or SimulateGaze on), retried about once a second when a mapping cannot be created.
+// Opened lazily (Depth boost, SimulateGaze or PublishGaze on), retried about once a second when a mapping cannot be created.
 bool open_blocks_locked() {
     if (gaze_block.get() && depth_block.get()) return true;
     if (shm_retry++ % 90 != 0) return false;
@@ -1051,10 +1053,123 @@ void write_boost_stop_locked() {
     dcsvr_perception::seqlock_write(boost_block.get(), out);
 }
 
+// ---- Local\DcsVrPupilFov_v1 (dcsvr_pupil_fov.h) ---------------------------------------------------------------------
+// The FOV pairs of each display time: what DCS renders with and what Quad Views composes with. Created at instance
+// creation, closed with the last instance. The writer keeps its own copy of the block (no allocation per frame) and
+// publishes it whole under the seqlock, under the main mutex (no other lock).
+dcsvr_perception::SharedBlock<dcsvr_pupil_fov::Block> fov_block;
+dcsvr_pupil_fov::Block fov_mirror{};
+
+// The layer may change the views: the pupil shift or Depth boost configured (their hotkeys only pause them: identity
+// entries then).
+bool fov_shift_configured() { return settings.enabled || depth_settings.enabled; }
+
+void fov_publish_locked() {
+    if (fov_block.get()) dcsvr_perception::seqlock_write(fov_block.get(), fov_mirror);
+}
+
+void fov_clear_entries_locked() {
+    for (auto& e : fov_mirror.entries) e = dcsvr_pupil_fov::Entry{};
+    fov_mirror.newestDisplayTime = 0;
+}
+
+void fov_open_locked() {
+    if (!fov_block.get()) {
+        const bool created = fov_block.open(dcsvr_pupil_fov::block_name, shm_suffix);
+        log("perception: shared memory %ls%ls %s\n", dcsvr_pupil_fov::block_name, shm_suffix, created ? "created" : "FAILED");
+        if (!created) return;
+    }
+    fov_mirror = dcsvr_pupil_fov::Block{};
+    fov_mirror.magic = dcsvr_pupil_fov::magic_value;
+    fov_mirror.version = dcsvr_pupil_fov::version_value;
+    fov_mirror.size = sizeof(dcsvr_pupil_fov::Block);
+    fov_mirror.writerPid = GetCurrentProcessId();
+    fov_mirror.ringSize = dcsvr_pupil_fov::ring_size;
+    fov_mirror.enabled = fov_shift_configured() ? 1u : 0u;
+    fov_publish_locked();
+}
+
+// enabled follows the settings (re-read while running); turned off, the ring is cleared. Written only on a change.
+void fov_update_enabled_locked() {
+    const std::uint32_t on = fov_shift_configured() ? 1u : 0u;
+    if (!fov_block.get() || fov_mirror.enabled == on) return;
+    fov_mirror.enabled = on;
+    if (!on) fov_clear_entries_locked();
+    fov_publish_locked();
+}
+
+void fov_close_locked() {
+    if (!fov_block.get()) return;
+    fov_mirror.enabled = 0;
+    fov_clear_entries_locked();
+    fov_publish_locked();
+    fov_block.close();
+}
+
+// The entry of a display time: the one already written for it, else the next slot of the ring.
+dcsvr_pupil_fov::Entry* fov_entry_locked(XrTime time) {
+    for (auto& e : fov_mirror.entries)
+        if (e.displayTime == time) return &e;
+    auto& e = fov_mirror.entries[fov_mirror.writeCount++ % dcsvr_pupil_fov::ring_size];
+    e = dcsvr_pupil_fov::Entry{};
+    e.displayTime = time;
+    if (time > fov_mirror.newestDisplayTime) fov_mirror.newestDisplayTime = time;
+    return &e;
+}
+
+void fov_fill(dcsvr_pupil_fov::View& out, const XrPosef& original_pose, const XrFovf& original_fov, const XrPosef& shifted_pose,
+    const XrFovf& shifted_fov) {
+    out = dcsvr_pupil_fov::View{};
+    const XrFovf* f[2] = {&shifted_fov, &original_fov};
+    float* dst[2] = {out.shiftedFov, out.originalFov};
+    for (int k = 0; k < 2; ++k) { dst[k][0] = f[k]->angleLeft; dst[k][1] = f[k]->angleRight; dst[k][2] = f[k]->angleUp; dst[k][3] = f[k]->angleDown; }
+    out.positionDelta[0] = shifted_pose.position.x - original_pose.position.x;
+    out.positionDelta[1] = shifted_pose.position.y - original_pose.position.y;
+    out.positionDelta[2] = shifted_pose.position.z - original_pose.position.z;
+    // conjugate(a) * b (Hamilton product).
+    const Quat a = conjugate(to_quat(original_pose.orientation)), b = to_quat(shifted_pose.orientation);
+    out.orientationDelta[0] = a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y;
+    out.orientationDelta[1] = a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x;
+    out.orientationDelta[2] = a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w;
+    out.orientationDelta[3] = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z;
+}
+
+// At xrLocateViews, after the views are final: the pairs handed to DCS for this display time (a second locate rewrites
+// the same entry, keeping an xrEndFrame confirmation away until the next one).
+void write_fov_located_locked(XrTime time, const XrView* original, const XrView* shifted, std::uint32_t n, std::uint32_t flags) {
+    fov_update_enabled_locked();
+    if (!fov_block.get() || !fov_mirror.enabled || n > 4) return;
+    dcsvr_pupil_fov::Entry* e = fov_entry_locked(time);
+    e->viewCount = n;
+    e->flags = flags;
+    for (std::uint32_t v = 0; v < n; ++v) fov_fill(e->views[v], original[v].pose, original[v].fov, shifted[v].pose, shifted[v].fov);
+    for (std::uint32_t v = n; v < 4; ++v) e->views[v] = dcsvr_pupil_fov::View{};
+    fov_publish_locked();
+}
+
+// At xrEndFrame: the pairs of the views DCS submitted (the first projection layer). matched[v]: the frame whose shift
+// view v carried (its original was put back), or null for a view the layer did not change (identity, as submitted).
+void write_fov_submitted_locked(XrTime time, const XrCompositionLayerProjectionView* submitted, std::uint32_t n,
+    const Frame* const* matched) {
+    if (!fov_block.get() || !fov_mirror.enabled || n < 2 || n > 4) return;
+    dcsvr_pupil_fov::Entry* e = fov_entry_locked(time);
+    const std::uint32_t flags = e->flags | dcsvr_pupil_fov::entry_flags::submitted;
+    e->viewCount = n;
+    for (std::uint32_t v = 0; v < n; ++v) {
+        if (matched[v]) fov_fill(e->views[v], matched[v]->original[v].pose, matched[v]->original[v].fov, matched[v]->shifted[v].pose, matched[v]->shifted[v].fov);
+        else fov_fill(e->views[v], submitted[v].pose, submitted[v].fov, submitted[v].pose, submitted[v].fov);
+    }
+    for (std::uint32_t v = n; v < 4; ++v) e->views[v] = dcsvr_pupil_fov::View{};
+    e->flags = flags;
+    fov_publish_locked();
+}
+
 // GazeOut for a display time, once per new time, after the views are final (fovTan is what DCS renders with). The gaze
-// is Depth boost's (Pimax PVR per-eye, else the selected source), or SimulateGaze's direction in each eye's frame.
-void write_gaze_out_locked(XrTime time, const XrView* views, std::uint32_t n, Vec3 simulated) {
-    if (!(depth_settings.enabled || settings.simulate) || time <= gaze_out_time || !open_blocks_locked()) return;
+// is Depth boost's (Pimax PVR per-eye, else the selected source), or SimulateGaze's direction in each eye's frame, or
+// (PublishGaze without Depth boost) the frame's selected gaze, eye_gaze: Quad Views' export, the OpenXR eye gaze or the
+// focus views, in each primary view's frame.
+void write_gaze_out_locked(XrTime time, const XrView* views, std::uint32_t n, Vec3 simulated, const EyeGazes& eye_gaze) {
+    if (!gaze_out_wanted(depth_settings.enabled, settings.simulate, settings.publish_gaze) || time <= gaze_out_time || !open_blocks_locked()) return;
     gaze_out_time = time;
     dcsvr_perception::GazeOut out{};
     out.displayTime = time;
@@ -1067,6 +1182,9 @@ void write_gaze_out_locked(XrTime time, const XrView* views, std::uint32_t n, Ve
     } else if (depth_settings.enabled && depth_gaze.valid) {
         valid = true;
         world[0] = depth_gaze.world[0]; world[1] = depth_gaze.world[1];
+    } else if (!depth_settings.enabled && settings.publish_gaze && eye_gaze.source != GazeSource::none) {
+        valid = true;
+        for (int e = 0; e < 2; ++e) world[e] = rotate(to_quat(views[e].pose.orientation), eye_gaze.local[e]);
     }
     for (std::uint32_t v = 0; v < n && v < 4; ++v) {
         const XrFovf& f = views[v].fov;
@@ -1080,10 +1198,10 @@ void write_gaze_out_locked(XrTime time, const XrView* views, std::uint32_t n, Ve
     }
     if (!valid) for (auto& g : out.gazeTan) g[0] = g[1] = 0;
     out.flags = (valid ? dcsvr_perception::gaze_flags::valid : 0u) |
-        (valid && !settings.simulate && fixation.saccade() ? dcsvr_perception::gaze_flags::saccade : 0u) |
+        (valid && !settings.simulate && (depth_settings.enabled ? fixation.saccade() : eye_gaze.saccade) ? dcsvr_perception::gaze_flags::saccade : 0u) |
         (valid && !settings.simulate && depth_gaze.per_eye ? dcsvr_perception::gaze_flags::per_eye : 0u);
     const float w = fixation.inverse_distance();
-    out.vergenceM = fixation.source() == DepthSource::vergence && std::isfinite(w) ? (w < 0.001f ? 1000.0f : 1.0f / w) : 0.0f;
+    out.vergenceM = depth_settings.enabled && fixation.source() == DepthSource::vergence && std::isfinite(w) ? (w < 0.001f ? 1000.0f : 1.0f / w) : 0.0f;
     dcsvr_perception::seqlock_write(gaze_block.get(), out);
     // The matcher pairs the engine's summaries with this gaze (its head-frame direction).
     matcher.note_gaze(time, display_frames, depth_settings.enabled && depth_gaze.valid, depth_gaze.head_dir, depth_gaze.saccade);
@@ -1621,6 +1739,7 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_DestroyInstance(XrInstance instance) {
             std::lock_guard lock(mutex);
             qv_checked_late = false;
             write_boost_stop_locked();
+            fov_close_locked();
         }
         pvr_hook::restore();
     }
@@ -1755,7 +1874,13 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_LocateViews(XrSession session, const XrViewL
     uint32_t capacity, uint32_t* count, XrView* views) {
     const XrResult result = next_locate_views(session, info, state, capacity, count, views);
     if (XR_FAILED(result) || views == nullptr || capacity == 0 || count == nullptr || *count < 2 || *count > 4 || info == nullptr) return result;
-    if (!(state->viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) || !(state->viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT)) return result;
+    if (!(state->viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) || !(state->viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT)) {
+        // No eye distance is moved on this frame (tracking lost): the engine is told so (scale 1), instead of carrying the
+        // previous frame's shift onto a cockpit DCS now renders at the runtime's own eye distance.
+        std::lock_guard lock(mutex);
+        if (boost_last_base > 0.001f) write_boost_out_locked(info->displayTime, boost_last_base, boost_last_base);
+        return result;
+    }
 
     // The OpenXR eye gaze for this display time, in the views' base space (a runtime call: outside the main lock).
     const char* xr_absent{};
@@ -1899,8 +2024,10 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_LocateViews(XrSession session, const XrViewL
         frames.push_back(frame);
         while (frames.size() > 8) frames.pop_front();
     }
-    write_gaze_out_locked(info->displayTime, views, n, simulated);
+    write_gaze_out_locked(info->displayTime, views, n, simulated, eye_gaze);
     write_boost_out_locked(info->displayTime, base_ipd, rendered_ipd_now);
+    write_fov_located_locked(info->displayTime, frame.original.data(), views, n,
+        (have_gaze ? dcsvr_pupil_fov::entry_flags::pupil : 0u) | (moved_ipd ? dcsvr_pupil_fov::entry_flags::ipd : 0u));
     return result;
 }
 
@@ -1930,10 +2057,12 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_EndFrame(XrSession session, const XrFrameEnd
         if (!passthrough) {
         projections.reserve(layers.size());
         view_copies.reserve(layers.size());
+        bool fov_written{};
         for (auto& layer : layers) {
             if (layer == nullptr || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
             const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
             view_copies.emplace_back(projection->views, projection->views + projection->viewCount);
+            const Frame* matched[4]{};
             for (std::uint32_t v = 0; v < projection->viewCount; ++v) {
                 auto& view = view_copies.back()[v];
                 // Only views that still carry what this layer handed out are put back.
@@ -1941,9 +2070,15 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_EndFrame(XrSession session, const XrFrameEnd
                     if (v >= frame->count || !matches(frame->shifted[v], view.pose, view.fov)) continue;
                     view.pose = frame->original[v].pose;
                     view.fov = frame->original[v].fov;
+                    if (v < 4) matched[v] = frame;
                     ++restored;
                     break;
                 }
+            }
+            // Local\DcsVrPupilFov_v1: the pairs of the first projection layer, as DCS submitted it.
+            if (!fov_written && projection->views) {
+                fov_written = true;
+                write_fov_submitted_locked(info->displayTime, projection->views, projection->viewCount, matched);
             }
             projections.push_back(*projection);
             projections.back().views = view_copies.back().data();
@@ -2030,7 +2165,7 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_CreateApiLayerInstance(const XrInstanceCreat
             qv_checked_late = false;
             // Depth boost starts afresh with each instance; the shared-memory names may carry the harness's suffix.
             fixation = FixationEstimator{}; decider = FixationDecider{}; matcher = DepthMatcher{}; depth = DepthBoostController{};
-            depth_time = gaze_out_time = 0; display_frames = 0; depth_gaze = DepthGaze{};
+            depth_time = gaze_out_time = boost_out_time = 0; display_frames = 0; depth_gaze = DepthGaze{};
             pupil_filter = PupilGazeFilter{};
             pupil_lock = PupilLock{};
             pupil_filtered_valid = false;
@@ -2053,6 +2188,8 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_CreateApiLayerInstance(const XrInstanceCreat
                 const bool created = boost_block.open(dcsvr_perception::boost_block_name, shm_suffix);
                 log("perception: shared memory %ls%ls %s\n", dcsvr_perception::boost_block_name, shm_suffix, created ? "created" : "FAILED");
             }
+            // Local\DcsVrPupilFov_v1: whenever the layer runs (enabled says whether it shifts views).
+            fov_open_locked();
         }
         log("eye gaze: XR_EXT_eye_gaze_interaction %s (runtime %s)\n",
             app_enabled ? "enabled by the application" : inject ? "added by the layer" : refused ? "refused by the runtime" : "not enabled",
@@ -2100,6 +2237,7 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID reserved) {
     } else if (reason == DLL_PROCESS_DETACH && reserved == nullptr) {  // at process exit the CRT is going away too
         gaze_block.close();
         boost_block.close();
+        fov_block.close();
         stereo_block.close();
         depth_block.close();
         grid_block.close();

@@ -1,0 +1,707 @@
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -502,6 +502,32 @@
+     //     0049 cleaned and re-added this pair (44), the synthetic's k of the
+     //     cadence (48-51) and the cadence (52-55); c= the region in eye
+     //     pixels: x (0-15), y (16-31), width (32-47), height (48-63).
++    //   result=24 (DCS Control 0056), the HUD removal in place's restores
++    //     (0055: the symbology taken out of the history itself, the original
++    //     pixels put back from the window backups), per synthesizer
++    //     (xrfg::HudRestoreRecord). a= the record (0-7, below), the owner
++    //     synthesizer (8-15, as result=22's).
++    //     Record 1, every 10 s while any pair cleaned the HUD, and when the
++    //     synthesizer goes idle (torn down): b= pairs with the removal in
++    //     place that reached the GPU (0-23), restored after the pair (24-47),
++    //     restored by the NVIDIA restore list after a pair that failed after
++    //     its pack (48-63); c= restores lost (0-15, each logged at once as
++    //     record 2), pairs cleaned with 0049's full-size copies instead
++    //     (16-39), the seconds counted (40-55).
++    //     Record 2, at once, every time: a removal in place reached the GPU
++    //     and its restore could not be recorded or executed, so the history
++    //     may keep frames without their HUD (the displayed copies and later
++    //     pairs can show it missing). b= why (0-7: 1 the pair's list holds no
++    //     copy-back for a cleaned frame (its frame or backup missing), 2 the
++    //     NVIDIA pair failed after its pack and its restore list was gone, 3
++    //     the pair failed after its pack with no restore list recorded), the
++    //     losses this session (8-39); c= the work slot (0-7), the views
++    //     cleaned in the previous frame (8-15) and in the current (16-23).
++    //     Record 3, once per path and reason: the clean path a pair took. b=
++    //     1 in place, 2 0049/0054's full-size clean copies; c= why the copies
++    //     (0 in place; 1 [ofxr] hud_full_clean_copies, 2 the previous frame's
++    //     history cannot be drawn into (no render-target flag), 3 the
++    //     current one's).
+     cockpit_mask,
+     // DCS Control (0034): the second synthetic slot of a session that made
+     // its ring with one (adaptive 2X/3X at the shallow depth: 3X's second
+diff --git a/include/xrfg/hud_symbology.hpp b/include/xrfg/hud_symbology.hpp
+--- a/include/xrfg/hud_symbology.hpp
++++ b/include/xrfg/hud_symbology.hpp
+@@ -340,4 +340,68 @@
+ void set_hud_allocation_observer(HudAllocationObserver observer) noexcept;
+ void notify_hud_allocation(const HudAllocationRecord& record) noexcept;
+ 
++// DCS Control (0056): the removal in place's restores in the flight log
++// (cockpit_mask result=24, xrfg/bridge_flight_logger.hpp), per synthesizer.
++inline constexpr std::int64_t kHudRestoreResult = 24;
++inline constexpr std::uint64_t kHudRestoreSummaryMs = 10000;
++enum class HudRestoreRecordKind : std::uint32_t {
++    summary = 1, // every 10 s, and when the synthesizer goes idle
++    lost = 2,    // at once: a cleaned history whose restore did not run
++    path = 3,    // once per path and reason: in place or 0049's full copies
++};
++enum class HudRestoreLoss : std::uint32_t {
++    none = 0,
++    not_recorded = 1,    // the pair's list holds no copy-back for a cleaned frame
++    list_missing = 2,    // NVIDIA: failed after the pack, its restore list gone
++    no_restore_list = 3, // failed after the pack, no restore list recorded
++};
++enum class HudCleanPath : std::uint32_t {
++    in_place = 1,
++    full_copies = 2,
++};
++enum class HudCleanPathReason : std::uint32_t {
++    none = 0,                  // in place
++    full_copies_asked = 1,     // [ofxr] hud_full_clean_copies
++    previous_not_drawable = 2, // the previous frame's history is no render target
++    current_not_drawable = 3,  // the current frame's
++};
++struct HudRestoreCounts {
++    std::uint64_t pairs{};            // removals in place that reached the GPU
++    std::uint64_t restored{};         // put back after the pair
++    std::uint64_t failure_restored{}; // put back by the NVIDIA restore list
++    std::uint64_t lost{};             // not put back (record 2 each)
++    std::uint64_t full_copy_pairs{};  // cleaned with 0049's full-size copies
++    std::uint64_t seconds{};          // the time counted
++    [[nodiscard]] bool any() const noexcept {
++        return pairs != 0 || restored != 0 || failure_restored != 0 || lost != 0 || full_copy_pairs != 0;
++    }
++};
++struct HudRestoreRecord {
++    HudRestoreRecordKind kind{};
++    std::uint32_t owner{};
++    HudRestoreCounts counts{};      // summary
++    HudRestoreLoss loss{};          // lost
++    std::uint64_t losses{};         // lost: this session's, with this one
++    std::uint32_t slot{};           // lost: the work slot
++    std::uint32_t previous_views{}; // lost: views cleaned in the previous frame
++    std::uint32_t current_views{};  // lost: in the current one
++    HudCleanPath path{};            // path
++    HudCleanPathReason reason{};    // path
++};
++struct HudRestoreFields {
++    std::uint64_t a{};
++    std::uint64_t b{};
++    std::uint64_t c{};
++};
++[[nodiscard]] HudRestoreFields hud_restore_fields(const HudRestoreRecord& record) noexcept;
++[[nodiscard]] HudRestoreRecord hud_restore_from_fields(const HudRestoreFields& fields) noexcept;
++// For the tests: every result=24 record is also handed to this function
++// (null: none, the default), and a removal's restore can be dropped from the
++// pair's list (record 2's reason 1; false: never, the default).
++using HudRestoreObserver = void (*)(const HudRestoreFields& fields);
++void set_hud_restore_observer(HudRestoreObserver observer) noexcept;
++void notify_hud_restore(const HudRestoreFields& fields) noexcept;
++void set_hud_restore_drop_for_tests(bool drop) noexcept;
++[[nodiscard]] bool hud_restore_drop_for_tests() noexcept;
++
+ }  // namespace xrfg
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -1760,6 +1760,26 @@
+     std::array<ComPtr<ID3D12Resource>, 2> hud_backup{};
+     std::array<std::uint64_t, 2> hud_backup_bytes{};
+     bool hud_restore_armed{};
++    // DCS Control (0056): the pair being submitted's removal and restore, as
++    // far as the flight log is concerned (result=24): a removal in place
++    // recorded (views cleaned per frame), its copy-back recorded into the
++    // pair's own list, the list holding the removal and the one holding the
++    // copy-back submitted, a pair cleaned with full copies; the counts since
++    // the last summary, when it was, this session's losses, the paths logged
++    // (a bit per path x 4 + reason).
++    struct HudRestoreTrack {
++        bool removed{};
++        std::array<UINT, 2> views{};
++        bool restore_recorded{};
++        bool removal_submitted{};
++        bool restore_submitted{};
++        bool full_copies{};
++    };
++    HudRestoreTrack hud_track{};
++    HudRestoreCounts hud_restore_counts{};
++    std::uint64_t hud_restore_summary_ms{};
++    std::uint64_t hud_restore_losses{};
++    std::uint32_t hud_paths_logged{};
+     // DCS Control (0054): the coverage alpha per eye, pair-wide and latched
+     // (HudAlphaLatch); this synthesizer's number in the allocation record
+     // (result=22, from 1; 0 until it needs one) and its HUD bytes.
+@@ -1797,6 +1817,95 @@
+         notify_hud_allocation(record); // DCS Control (0055): the tests'
+         return allocation.bytes;
+     }
++    // DCS Control (0056): a result=24 record into the flight log (and the
++    // tests' observer).
++    void log_hud_restore(HudRestoreRecord record) noexcept {
++        record.owner = hud_allocation_owner();
++        const HudRestoreFields fields = hud_restore_fields(record);
++        bridge_flight_logger().event(BridgeFlightOperation::cockpit_mask, kHudRestoreResult, fields.a, fields.b,
++            fields.c);
++        notify_hud_restore(fields);
++    }
++    // DCS Control (0056): the clean path a pair takes, logged once per path
++    // and reason (record 3).
++    void log_hud_clean_path(HudCleanPathReason reason) noexcept {
++        const HudCleanPath path = reason == HudCleanPathReason::none ? HudCleanPath::in_place : HudCleanPath::full_copies;
++        const std::uint32_t bit = 1U << (static_cast<std::uint32_t>(path) * 4U + static_cast<std::uint32_t>(reason));
++        if ((hud_paths_logged & bit) != 0) {
++            return;
++        }
++        hud_paths_logged |= bit;
++        HudRestoreRecord record{};
++        record.kind = HudRestoreRecordKind::path;
++        record.path = path;
++        record.reason = reason;
++        log_hud_restore(record);
++    }
++    // DCS Control (0056): the counts since the last summary as record 1,
++    // when 10 s have passed (or `now`, the synthesizer going idle) and any
++    // pair cleaned the HUD.
++    void log_hud_restore_summary(bool now) noexcept {
++        const std::uint64_t ms = GetTickCount64();
++        if (hud_restore_summary_ms == 0) {
++            hud_restore_summary_ms = ms;
++        }
++        const std::uint64_t elapsed = ms - hud_restore_summary_ms;
++        if (!now && elapsed < kHudRestoreSummaryMs) {
++            return;
++        }
++        if (hud_restore_counts.any()) {
++            HudRestoreRecord record{};
++            record.kind = HudRestoreRecordKind::summary;
++            record.counts = hud_restore_counts;
++            record.counts.seconds = (elapsed + 500U) / 1000U;
++            log_hud_restore(record);
++        }
++        hud_restore_counts = {};
++        hud_restore_summary_ms = ms;
++    }
++    // DCS Control (0056): what became of the submitted pair's removal in
++    // place: put back after the pair, by the NVIDIA restore list (the pair
++    // failed after its pack), or lost: logged at once (record 2), as the
++    // history may then keep frames without their HUD.
++    void account_hud_restore(WorkSlot& slot, HRESULT result) noexcept {
++        const HudRestoreTrack track = hud_track;
++        hud_track = {};
++        if (track.full_copies && SUCCEEDED(result)) {
++            ++hud_restore_counts.full_copy_pairs;
++        }
++        HudRestoreLoss loss = HudRestoreLoss::none;
++        if (track.removed && track.removal_submitted) {
++            ++hud_restore_counts.pairs;
++            if (track.restore_submitted && track.restore_recorded) {
++                ++hud_restore_counts.restored;
++            } else if (track.restore_submitted) {
++                loss = HudRestoreLoss::not_recorded;
++            } else if (hud_restore_armed) {
++                if (restore_hud_after_failure(slot)) {
++                    ++hud_restore_counts.failure_restored;
++                } else {
++                    loss = HudRestoreLoss::list_missing;
++                }
++            } else {
++                loss = HudRestoreLoss::no_restore_list;
++            }
++        } else if (FAILED(result) && hud_restore_armed) {
++            static_cast<void>(restore_hud_after_failure(slot)); // as 0055
++        }
++        hud_restore_armed = false;
++        if (loss != HudRestoreLoss::none) {
++            ++hud_restore_counts.lost;
++            HudRestoreRecord record{};
++            record.kind = HudRestoreRecordKind::lost;
++            record.loss = loss;
++            record.losses = ++hud_restore_losses;
++            record.slot = static_cast<std::uint32_t>(&slot - work_slots.data());
++            record.previous_views = track.views[0];
++            record.current_views = track.views[1];
++            log_hud_restore(record);
++        }
++        log_hud_restore_summary(false);
++    }
+     [[nodiscard]] bool hud_enabled() const noexcept {
+         return nvidia_options.hud_symbology && nvidia_options.cockpit_mask;
+     }
+@@ -4972,24 +5081,39 @@
+ 
+     // DCS Control (0055): the history can be drawn into (the removal in
+     // place), and the pair is not asked for 0049's clean copies.
+-    [[nodiscard]] bool hud_in_place_usable(const RollingSource& previous_source,
++    // DCS Control (0056): as the reason it cannot (none: in place).
++    [[nodiscard]] HudCleanPathReason hud_clean_path_reason(const RollingSource& previous_source,
+         const RollingSource& current_source) const noexcept {
+         const auto drawable = [](ID3D12Resource* resource) {
+             return resource != nullptr &&
+                 (resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0;
+         };
+-        return !nvidia_options.hud_full_clean_copies && drawable(previous_source.resource.Get()) &&
+-            drawable(current_source.resource.Get());
++        if (nvidia_options.hud_full_clean_copies) {
++            return HudCleanPathReason::full_copies_asked;
++        }
++        if (!drawable(previous_source.resource.Get())) {
++            return HudCleanPathReason::previous_not_drawable;
++        }
++        if (!drawable(current_source.resource.Get())) {
++            return HudCleanPathReason::current_not_drawable;
++        }
++        return HudCleanPathReason::none;
+     }
+ 
+     // DCS Control (0055): the original pixels back into the pair's history
+     // from the backups, recorded on `list` with the two frames in the states
+     // given (and left in them); nothing without a removal in place.
+-    void record_hud_restore(ID3D12GraphicsCommandList* list, D3D12_RESOURCE_STATES previous_state,
++    // DCS Control (0056): false when a frame with a rectangle got no
++    // copy-back (no list, its frame or its backup missing).
++    bool record_hud_restore(ID3D12GraphicsCommandList* list, D3D12_RESOURCE_STATES previous_state,
+         D3D12_RESOURCE_STATES current_state) noexcept {
+-        if (!hud_pair.in_place || list == nullptr) {
+-            return;
++        if (!hud_pair.in_place) {
++            return true;
+         }
++        if (list == nullptr) {
++            return false;
++        }
++        bool complete = true;
+         const UINT mips = std::max<UINT>(image_description.MipLevels, 1U);
+         const std::array<D3D12_RESOURCE_STATES, 2> states{previous_state, current_state};
+         for (std::size_t role = 0; role < hud_pair.frames.size(); ++role) {
+@@ -4999,7 +5123,11 @@
+             for (UINT index = 0; index < frame.views; ++index) {
+                 any = any || frame.boxes[index].right > frame.boxes[index].left;
+             }
+-            if (!any || frame.frame == nullptr || backup == nullptr) {
++            if (!any) {
++                continue;
++            }
++            if (frame.frame == nullptr || backup == nullptr) {
++                complete = false; // DCS Control (0056)
+                 continue;
+             }
+             const std::array<D3D12_RESOURCE_BARRIER, 2> before{
+@@ -5029,6 +5157,18 @@
+                 transition_barrier(backup, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON)};
+             list->ResourceBarrier(static_cast<UINT>(after.size()), after.data());
+         }
++        return complete;
++    }
++
++    // DCS Control (0056): the copy-back after the pair, into its own list
++    // (noted for result=24; the tests can leave it out, record 2's reason 1).
++    void record_hud_restore_after_pair(ID3D12GraphicsCommandList* list, D3D12_RESOURCE_STATES previous_state,
++        D3D12_RESOURCE_STATES current_state) noexcept {
++        if (hud_restore_drop_for_tests()) {
++            hud_track.restore_recorded = false;
++            return;
++        }
++        hud_track.restore_recorded = record_hud_restore(list, previous_state, current_state);
+     }
+ 
+     // DCS Control (0055): the symbology taken out of the pair's two frames in
+@@ -5181,6 +5321,13 @@
+             slot.hud_restore_recorded = false;
+             return false;
+         }
++        // DCS Control (0056): taken out of the history: to be put back.
++        hud_track.removed = true;
++        for (std::size_t role = 0; role < frames.size(); ++role) {
++            for (UINT index = 0; index < frames[role].views; ++index) {
++                hud_track.views[role] += frames[role].boxes[index].right > frames[role].boxes[index].left ? 1U : 0U;
++            }
++        }
+         return true;
+     }
+ 
+@@ -5201,6 +5348,7 @@
+         ID3D12Resource** previous_resource, ID3D12Resource** current_resource) noexcept {
+         hud_pair = {};
+         slot.hud_restore_recorded = false; // DCS Control (0055)
++        hud_track = {}; // DCS Control (0056)
+         if (!hud_enabled()) {
+             return;
+         }
+@@ -5248,7 +5396,10 @@
+         // the pack, the flow and the composition then read the history itself
+         // (the resources stay the RollingSources'), put back by
+         // record_hud_restore once the compositions and the re-adds are done.
+-        const bool in_place = hud_in_place_usable(previous_source, current_source);
++        // DCS Control (0056): which, and why, logged once each (record 3).
++        const HudCleanPathReason path_reason = hud_clean_path_reason(previous_source, current_source);
++        const bool in_place = path_reason == HudCleanPathReason::none;
++        log_hud_clean_path(path_reason);
+         if (!ensure_hud_resources(!in_place)) {
+             count_hud_fallback(kHudFallbackPasses, view_count);
+             return;
+@@ -5328,6 +5479,7 @@
+             return;
+         }
+         hud_pair.active = true;
++        hud_track.full_copies = true; // DCS Control (0056)
+         hud_pair.previous_entry = previous_entry;
+         hud_pair.current_entry = current_entry;
+         hud_pair.next_call = D3D12HudSymbologyPasses::kCallsPerSlot / 2U;
+@@ -5442,9 +5594,10 @@
+     // history cleaned in place) and before its synthesis list (which puts it
+     // back): the slot's restore list, queued behind the pack, and a signal
+     // the slot is then tracked against. Nothing waits on the CPU.
+-    void restore_hud_after_failure(WorkSlot& slot) noexcept {
++    // DCS Control (0056): false when there was no list to execute.
++    bool restore_hud_after_failure(WorkSlot& slot) noexcept {
+         if (!slot.hud_restore_recorded || !slot.hud_restore_command_list) {
+-            return;
++            return false;
+         }
+         ID3D12CommandList* lists[] = {slot.hud_restore_command_list.Get()};
+         queue->ExecuteCommandLists(1, lists);
+@@ -5455,6 +5608,7 @@
+             last_submitted_fence_value = std::max(last_submitted_fence_value, next_fence_value);
+             ++next_fence_value;
+         }
++        return true;
+     }
+ 
+     // DCS Control (0049): after the pair was submitted, its clean copies hold
+@@ -8143,7 +8297,7 @@
+         // DCS Control (0055): the removal in place undone (every composition
+         // and re-add is above): the capture and the current copy below read
+         // the true originals.
+-        record_hud_restore(synthesis, D3D12_RESOURCE_STATE_COMMON,
++        record_hud_restore_after_pair(synthesis, D3D12_RESOURCE_STATE_COMMON, // DCS Control (0056)
+             current_cleaned ? D3D12_RESOURCE_STATE_COMMON : kShaderReadState);
+         // DCS Control (0053): the developer's HUD capture, now and then.
+         record_hud_capture(synthesis, previous_source, current_source, target_views,
+@@ -8266,6 +8420,7 @@
+         *used_game_motion = false;
+         hud_pair = {}; // DCS Control (0049)
+         slot.hud_restore_recorded = false; // DCS Control (0055)
++        hud_track = {}; // DCS Control (0056)
+         hud_capture_outcome = {}; // DCS Control (0053)
+         if (valid_game_motion_pair(previous_source, current_source)) {
+             const HRESULT result = record_game_motion_pair(slot, previous_source,
+@@ -8495,7 +8650,7 @@
+             current_cleaned ? 2U : 1U,
+             before_current_copy.data());
+         // DCS Control (0055): the removal in place undone, as the NVIDIA path.
+-        record_hud_restore(slot.command_list.Get(), D3D12_RESOURCE_STATE_COMMON,
++        record_hud_restore_after_pair(slot.command_list.Get(), D3D12_RESOURCE_STATE_COMMON, // DCS Control (0056)
+             current_cleaned ? D3D12_RESOURCE_STATE_COMMON : kShaderReadState);
+         // DCS Control (0053): the developer's HUD capture, now and then.
+         record_hud_capture(slot.command_list.Get(), previous_source, current_source, target_views,
+@@ -8783,6 +8938,9 @@
+         ID3D12CommandList* lists[] = {slot.command_list.Get()};
+         queue->ExecuteCommandLists(1, lists);
+         completion_unknown = true;
++        // DCS Control (0056): the removal and its copy-back are one list here.
++        hud_track.removal_submitted = true;
++        hud_track.restore_submitted = true;
+ 
+         std::uint64_t value = 0;
+         if (defer_current_copy) {
+@@ -8897,6 +9055,7 @@
+         // DCS Control (0055): the history now holds the frames with their
+         // symbology taken out until the synthesis list below runs.
+         hud_restore_armed = slot.hud_restore_recorded;
++        hud_track.removal_submitted = true; // DCS Control (0056)
+ 
+         const std::uint64_t pack_ready_value = next_fence_value;
+         result = queue->Signal(fence.Get(), pack_ready_value);
+@@ -9054,6 +9213,7 @@
+             slot.current_copy_command_list.Get()};
+         queue->ExecuteCommandLists(defer_current_copy ? 1U : 2U, synthesis_lists);
+         hud_restore_armed = false; // DCS Control (0055): it puts the pixels back
++        hud_track.restore_submitted = true; // DCS Control (0056)
+ 
+         // The synthetic's pixels exist once this signals. The current copy
+         // is held back so it is not queued ahead of the synthetic frame.
+@@ -9533,10 +9693,10 @@
+                      : execute_and_signal(
+                            slot, work_slot_index, &next, &fence_value,
+                            defer_current_copy);
+-        if (FAILED(result) && hud_restore_armed) {
+-            restore_hud_after_failure(slot); // DCS Control (0055)
+-        }
+-        hud_restore_armed = false;
++        // DCS Control (0055): an NVIDIA pair that failed after its pack is
++        // put back by the slot's restore list; DCS Control (0056): and every
++        // pair's restore accounted for (result=24).
++        account_hud_restore(slot, result);
+         finish_cursor_pair(slot, cursor_previous_serial, current.serial, SUCCEEDED(result));
+         commit_hud_capture(SUCCEEDED(result), fence_value); // DCS Control (0053)
+         log_smooth_cursor();
+@@ -9644,6 +9804,9 @@
+     }
+ 
+     [[nodiscard]] HRESULT wait_for_idle() noexcept {
++        // DCS Control (0056): the restores counted since the last summary
++        // (result=24) logged now, not lost with the synthesizer.
++        log_hud_restore_summary(true);
+         // last_submitted_fence_value is the value a deferred copy will signal,
+         // so waiting for it without submitting that copy would never return.
+         static_cast<void>(flush_pending_copy());
+diff --git a/src/d3d12/hud_symbology.cpp b/src/d3d12/hud_symbology.cpp
+--- a/src/d3d12/hud_symbology.cpp
++++ b/src/d3d12/hud_symbology.cpp
+@@ -840,4 +840,87 @@
+     }
+ }
+ 
++// DCS Control (0056): result=24's fields (xrfg/bridge_flight_logger.hpp),
++// each saturated to its width.
++HudRestoreFields hud_restore_fields(const HudRestoreRecord& record) noexcept {
++    const auto bits = [](std::uint64_t value, std::uint64_t width) {
++        const std::uint64_t limit = (std::uint64_t{1} << width) - 1U;
++        return std::min(value, limit);
++    };
++    HudRestoreFields fields{};
++    fields.a = bits(static_cast<std::uint32_t>(record.kind), 8) | (bits(record.owner, 8) << 8U);
++    switch (record.kind) {
++    case HudRestoreRecordKind::summary: {
++        const HudRestoreCounts& c = record.counts;
++        fields.b = bits(c.pairs, 24) | (bits(c.restored, 24) << 24U) | (bits(c.failure_restored, 16) << 48U);
++        fields.c = bits(c.lost, 16) | (bits(c.full_copy_pairs, 24) << 16U) | (bits(c.seconds, 16) << 40U);
++        break;
++    }
++    case HudRestoreRecordKind::lost:
++        fields.b = bits(static_cast<std::uint32_t>(record.loss), 8) | (bits(record.losses, 32) << 8U);
++        fields.c = bits(record.slot, 8) | (bits(record.previous_views, 8) << 8U) |
++            (bits(record.current_views, 8) << 16U);
++        break;
++    case HudRestoreRecordKind::path:
++        fields.b = bits(static_cast<std::uint32_t>(record.path), 8);
++        fields.c = bits(static_cast<std::uint32_t>(record.reason), 8);
++        break;
++    }
++    return fields;
++}
++
++HudRestoreRecord hud_restore_from_fields(const HudRestoreFields& fields) noexcept {
++    const auto at = [](std::uint64_t value, unsigned shift, unsigned width) {
++        return (value >> shift) & ((std::uint64_t{1} << width) - 1U);
++    };
++    HudRestoreRecord record{};
++    record.kind = static_cast<HudRestoreRecordKind>(at(fields.a, 0, 8));
++    record.owner = static_cast<std::uint32_t>(at(fields.a, 8, 8));
++    switch (record.kind) {
++    case HudRestoreRecordKind::summary:
++        record.counts.pairs = at(fields.b, 0, 24);
++        record.counts.restored = at(fields.b, 24, 24);
++        record.counts.failure_restored = at(fields.b, 48, 16);
++        record.counts.lost = at(fields.c, 0, 16);
++        record.counts.full_copy_pairs = at(fields.c, 16, 24);
++        record.counts.seconds = at(fields.c, 40, 16);
++        break;
++    case HudRestoreRecordKind::lost:
++        record.loss = static_cast<HudRestoreLoss>(at(fields.b, 0, 8));
++        record.losses = at(fields.b, 8, 32);
++        record.slot = static_cast<std::uint32_t>(at(fields.c, 0, 8));
++        record.previous_views = static_cast<std::uint32_t>(at(fields.c, 8, 8));
++        record.current_views = static_cast<std::uint32_t>(at(fields.c, 16, 8));
++        break;
++    case HudRestoreRecordKind::path:
++        record.path = static_cast<HudCleanPath>(at(fields.b, 0, 8));
++        record.reason = static_cast<HudCleanPathReason>(at(fields.c, 0, 8));
++        break;
++    }
++    return record;
++}
++
++namespace {
++std::atomic<HudRestoreObserver> g_hud_restore_observer{nullptr};
++std::atomic<bool> g_hud_restore_drop{false};
++}  // namespace
++
++void set_hud_restore_observer(HudRestoreObserver observer) noexcept {
++    g_hud_restore_observer.store(observer, std::memory_order_release);
++}
++
++void notify_hud_restore(const HudRestoreFields& fields) noexcept {
++    if (const HudRestoreObserver observer = g_hud_restore_observer.load(std::memory_order_acquire)) {
++        observer(fields);
++    }
++}
++
++void set_hud_restore_drop_for_tests(bool drop) noexcept {
++    g_hud_restore_drop.store(drop, std::memory_order_release);
++}
++
++bool hud_restore_drop_for_tests() noexcept {
++    return g_hud_restore_drop.load(std::memory_order_acquire);
++}
++
+ }  // namespace xrfg
+diff --git a/tests/hud_symbology_tests.inc b/tests/hud_symbology_tests.inc
+--- a/tests/hud_symbology_tests.inc
++++ b/tests/hud_symbology_tests.inc
+@@ -2250,17 +2250,33 @@
+     hud_observed_records().push_back(record);
+ }
+ 
++// DCS Control (0056): and the result=24 records (the restores).
++std::vector<xrfg::HudRestoreRecord>& hud_observed_restores() {
++    static std::vector<xrfg::HudRestoreRecord> records;
++    return records;
++}
++
++void hud_observe_restore(const xrfg::HudRestoreFields& fields) {
++    hud_observed_restores().push_back(xrfg::hud_restore_from_fields(fields));
++}
++
+ struct HudRunResult {
+     std::vector<std::vector<std::uint8_t>> synthetic;
+     std::vector<std::vector<std::uint8_t>> extra;
+     std::vector<std::vector<std::uint8_t>> current;
+     std::array<std::vector<std::uint8_t>, 2> sources;
+     std::vector<xrfg::HudAllocation> allocations;
++    // DCS Control (0056): the result=24 records, and how many had been
++    // logged when each pair's submission returned.
++    std::vector<xrfg::HudRestoreRecord> restores;
++    std::vector<std::size_t> restores_after_pair;
+ };
+ 
++// DCS Control (0056): `drop_restore`, the pairs' copy-back left out (the
++// tests' hook): the history keeps the frames without their HUD.
+ HudRunResult hud_synthesize_run(Gpu& gpu, const std::array<std::vector<std::uint8_t>, 2>& images,
+     const std::vector<std::shared_ptr<xrfg::D3D12CockpitMaskFrame>>& masks, bool full_copies, bool in_place_history,
+-    bool triple) {
++    bool triple, bool drop_restore = false) {
+     const DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+     // In place, the history is the sources themselves, resting in COMMON (as
+     // the D3D11 bridge's shared textures); else copied from RENDER_TARGET.
+@@ -2291,6 +2307,9 @@
+     options.hud_full_clean_copies = full_copies;
+     hud_observed_records().clear();
+     xrfg::set_hud_allocation_observer(&hud_observe_record);
++    hud_observed_restores().clear(); // DCS Control (0056)
++    xrfg::set_hud_restore_observer(&hud_observe_restore);
++    xrfg::set_hud_restore_drop_for_tests(drop_restore);
+     HudRunResult result;
+     {
+         xrfg::D3D12FrameSynthesizer synth;
+@@ -2316,6 +2335,7 @@
+             require_hresult(synth.submit_pair(ticket, views, views, 0, 0, &output, std::nullopt, {}, false,
+                                 triple ? 1.0F / 3.0F : 0.5F, extra_synthetic),
+                 "hud run: pair");
++            result.restores_after_pair.push_back(hud_observed_restores().size()); // DCS Control (0056)
+             hud_run(gpu, [](ID3D12GraphicsCommandList*) {});
+             result.synthetic.push_back(
+                 hud_readback(gpu, synthetic.Get(), kHudSynthWidth * 4U, D3D12_RESOURCE_STATE_RENDER_TARGET));
+@@ -2329,6 +2349,9 @@
+         require_hresult(synth.wait_for_idle(), "hud run: idle");
+     }
+     xrfg::set_hud_allocation_observer(nullptr);
++    xrfg::set_hud_restore_observer(nullptr); // DCS Control (0056)
++    xrfg::set_hud_restore_drop_for_tests(false);
++    result.restores = hud_observed_restores();
+     for (const xrfg::HudAllocationRecord& record : hud_observed_records()) {
+         result.allocations.push_back(xrfg::hud_allocation_from_record(record));
+     }
+@@ -2338,6 +2361,49 @@
+     return result;
+ }
+ 
++// DCS Control (0056): a run's result=24 records: the summaries' sums (pairs
++// in place, restored after the pair, none by the NVIDIA list, `lost`, pairs
++// with full copies), and one path record, the one expected.
++void hud_check_restore_records(const HudRunResult& run, const std::string& what, std::uint64_t pairs,
++    std::uint64_t restored, std::uint64_t full_copy_pairs, xrfg::HudCleanPathReason reason, std::uint64_t lost = 0) {
++    xrfg::HudRestoreCounts sum{};
++    std::size_t summaries = 0, paths = 0;
++    for (const xrfg::HudRestoreRecord& record : run.restores) {
++        require(record.owner != 0, what + "a record without its owner synthesizer");
++        if (record.kind == xrfg::HudRestoreRecordKind::summary) {
++            ++summaries;
++            sum.pairs += record.counts.pairs;
++            sum.restored += record.counts.restored;
++            sum.failure_restored += record.counts.failure_restored;
++            sum.lost += record.counts.lost;
++            sum.full_copy_pairs += record.counts.full_copy_pairs;
++        } else if (record.kind == xrfg::HudRestoreRecordKind::path) {
++            ++paths;
++            const xrfg::HudCleanPath path =
++                reason == xrfg::HudCleanPathReason::none ? xrfg::HudCleanPath::in_place : xrfg::HudCleanPath::full_copies;
++            require(record.path == path && record.reason == reason,
++                what + "the path record (path " + std::to_string(static_cast<std::uint32_t>(record.path)) +
++                    ", reason " + std::to_string(static_cast<std::uint32_t>(record.reason)) + ")");
++        }
++    }
++    require(summaries >= 1 && paths == 1,
++        what + "a summary and one path record (" + std::to_string(summaries) + ", " + std::to_string(paths) + ")");
++    require(sum.pairs == pairs && sum.restored == restored && sum.failure_restored == 0 && sum.lost == lost &&
++            sum.full_copy_pairs == full_copy_pairs,
++        what + "the summary's counts (pairs " + std::to_string(sum.pairs) + ", restored " +
++            std::to_string(sum.restored) + ", failure " + std::to_string(sum.failure_restored) + ", lost " +
++            std::to_string(sum.lost) + ", full copies " + std::to_string(sum.full_copy_pairs) + ")");
++    // The fields round-trip (saturated widths aside).
++    xrfg::HudRestoreRecord summary{};
++    summary.kind = xrfg::HudRestoreRecordKind::summary;
++    summary.owner = 3;
++    summary.counts = {7, 6, 1, 1, 9, 10};
++    const xrfg::HudRestoreRecord back = xrfg::hud_restore_from_fields(xrfg::hud_restore_fields(summary));
++    require(back.owner == 3 && back.counts.pairs == 7 && back.counts.restored == 6 && back.counts.failure_restored == 1 &&
++            back.counts.lost == 1 && back.counts.full_copy_pairs == 9 && back.counts.seconds == 10,
++        what + "result=24's fields do not round-trip");
++}
++
+ void test_hud_in_place(Gpu& gpu) {
+     // The scene of test_hud_synthesis: a green cross (class 1, coverage 0.85)
+     // over a smooth world, moved by `shift`; and a helmet bar (class 2).
+@@ -2462,7 +2528,47 @@
+             what + "result=22: 0049's two clean copies, or two window backups in place (" + std::to_string(full_clean) +
+                 ", " + std::to_string(full_windows) + ", " + std::to_string(place_clean) + ", " +
+                 std::to_string(place_windows) + ")");
++        // DCS Control (0056): result=24. Pairs cleaned: all five, or with
++        // the gap the three whose two frames carry symbology.
++        const std::uint64_t cleaned = c.gap ? 3U : 5U;
++        hud_check_restore_records(full, what + "result=24 (0049's copies): ", 0, 0, cleaned,
++            xrfg::HudCleanPathReason::full_copies_asked);
++        hud_check_restore_records(in_place, what + "result=24 (in place): ", cleaned, cleaned, 0,
++            xrfg::HudCleanPathReason::none);
++        hud_check_restore_records(shared, what + "result=24 (in place, shared): ", cleaned, cleaned, 0,
++            xrfg::HudCleanPathReason::none);
++    }
++    // DCS Control (0056): a pair whose copy-back is not in its list (the
++    // tests' hook): each loss logged at once (record 2, with that pair's
++    // submission), counted in the summary, and the history left without its
++    // HUD (which is why it must be loud).
++    {
++        const HudRunResult dropped = hud_synthesize_run(gpu, images, masks(false, false), false, true, false, true);
++        const std::string what = "hud in place (copy-back dropped): ";
++        std::uint64_t lost = 0;
++        for (const xrfg::HudRestoreRecord& record : dropped.restores) {
++            if (record.kind != xrfg::HudRestoreRecordKind::lost) {
++                continue;
++            }
++            ++lost;
++            require(record.loss == xrfg::HudRestoreLoss::not_recorded && record.losses == lost &&
++                    record.previous_views == 2 && record.current_views == 2 && record.owner != 0,
++                what + "record 2's fields (reason " + std::to_string(static_cast<std::uint32_t>(record.loss)) +
++                    ", loss " + std::to_string(record.losses) + ", views " + std::to_string(record.previous_views) +
++                    "/" + std::to_string(record.current_views) + ")");
++        }
++        require(lost == 5, what + "a record 2 per pair (" + std::to_string(lost) + ")");
++        // At once: the first pair's loss is in the log when its submission returns.
++        require(!dropped.restores_after_pair.empty() && dropped.restores_after_pair[0] >= 2 &&
++                dropped.restores[dropped.restores_after_pair[0] - 1U].kind == xrfg::HudRestoreRecordKind::lost,
++            what + "the loss logged with the pair, not only in the summary");
++        hud_check_restore_records(dropped, what, 5, 0, 0, xrfg::HudCleanPathReason::none, 5);
++        require(dropped.sources[0] != images[0] || dropped.sources[1] != images[1],
++            what + "the history kept its HUD without the copy-back (the hook did nothing)");
+     }
++    std::cout << "hud restore log (result=24): in place 5 pairs -> 5 restored, 0049's copies 5 full-copy pairs, "
++                 "a path record each; copy-back dropped -> 5 losses logged at once, history left HUD-less; "
++                 "NVIDIA failure restore untestable on WARP\n";
+     std::cout << "hud in place: 2X additive, 2X coverage, 3X and a gap over 5 pairs each: synthetics, 3X second "
+                  "synthetics and the real frames' copies bit-identical to 0049's clean copies (private history and "
+                  "in place), the sources their originals afterwards; two "

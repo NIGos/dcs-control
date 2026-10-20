@@ -542,6 +542,29 @@ std::atomic<uint64_t> g_rewrites{0}, g_variantSwitches{0};
 // overhead at all); true: hooks are (re)applied.
 std::atomic<bool> g_hooksWanted{true};
 
+// R48: p is code of this payload image (any hook of ours). A module that puts
+// its hook back into a context-table slot "taking whatever is there as
+// d3d11's entry" must not take another hook of ours: if that hook already
+// forwards to ours, the two then forward to each other until the stack runs
+// out (R47's split filter crash; DCS gone without a crash report). The image
+// range is read once from the PE header (no loader call per check).
+inline bool InPayload(const void* p) {
+  static uintptr_t lo = 0, hi = 0;
+  if (!hi) {
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&InPayload), &self) ||
+        !self)
+      return false;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(self);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(reinterpret_cast<const uint8_t*>(self) + dos->e_lfanew);
+    lo = reinterpret_cast<uintptr_t>(self);
+    hi = lo + nt->OptionalHeader.SizeOfImage;
+  }
+  const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+  return a >= lo && a < hi;
+}
+
 // Writes one vtable entry. DCS's immediate context keeps its table on the
 // heap (writable), other contexts may point into d3d11.dll's read-only data.
 void WriteTablePointer(void** slot, void* value) {

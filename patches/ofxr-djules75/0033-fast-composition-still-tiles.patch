@@ -1,0 +1,1491 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -198,6 +198,56 @@
+                 /Fh "${XRFG_HEADER}" /Vn g_xrfg_${XRFG_NAME}_masked
+                 "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl")
+     endforeach()
++    # DCS Control (0033): the NVIDIA compositions with the still-tile path
++    # compiled in (XRFG_FAST_COMPOSITION=1), plain and masked, and the passes
++    # that classify the tiles, used only with [ofxr] fast_composition=1:
++    # without it the composition runs the shaders above, as before 0033.
++    set(XRFG_FAST_COMPOSITION_VARIANTS
++        SynthesizeNvidiaMidpointPS nvidia_synthesize_midpoint_pixel_shader
++        SynthesizeNvidiaBidirectionalMidpointPS nvidia_bidirectional_synthesize_midpoint_pixel_shader
++        SynthesizeNvidiaFastMidpointPS nvidia_fast_synthesize_midpoint_pixel_shader
++        SynthesizeNvidiaFastBidirectionalMidpointPS nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader
++        SynthesizeNvidiaTripleMidpointPS nvidia_triple_synthesize_midpoint_pixel_shader
++        SynthesizeNvidiaTripleBidirectionalMidpointPS nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader
++        SynthesizeNvidiaTripleFastMidpointPS nvidia_triple_fast_synthesize_midpoint_pixel_shader
++        SynthesizeNvidiaTripleFastBidirectionalMidpointPS nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader)
++    set(XRFG_FAST_COMPOSITION_HEADERS)
++    set(XRFG_FAST_COMPOSITION_COMMANDS)
++    list(LENGTH XRFG_FAST_COMPOSITION_VARIANTS XRFG_FAST_COMPOSITION_VARIANT_LENGTH)
++    math(EXPR XRFG_FAST_COMPOSITION_VARIANT_LAST "${XRFG_FAST_COMPOSITION_VARIANT_LENGTH} - 1")
++    foreach(XRFG_INDEX RANGE 0 ${XRFG_FAST_COMPOSITION_VARIANT_LAST} 2)
++        math(EXPR XRFG_NAME_INDEX "${XRFG_INDEX} + 1")
++        list(GET XRFG_FAST_COMPOSITION_VARIANTS ${XRFG_INDEX} XRFG_ENTRY)
++        list(GET XRFG_FAST_COMPOSITION_VARIANTS ${XRFG_NAME_INDEX} XRFG_NAME)
++        foreach(XRFG_MASK 0 1)
++            if(XRFG_MASK)
++                set(XRFG_SUFFIX "_masked_fast")
++            else()
++                set(XRFG_SUFFIX "_fast")
++            endif()
++            set(XRFG_HEADER "${XRFG_GENERATED_SHADER_DIR}/${XRFG_NAME}${XRFG_SUFFIX}.hpp")
++            list(APPEND XRFG_FAST_COMPOSITION_HEADERS "${XRFG_HEADER}")
++            list(APPEND XRFG_FAST_COMPOSITION_COMMANDS
++                COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E ${XRFG_ENTRY}
++                    /D XRFG_COCKPIT_MASK=${XRFG_MASK} /D XRFG_FAST_COMPOSITION=1
++                    /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++                    /Fh "${XRFG_HEADER}" /Vn g_xrfg_${XRFG_NAME}${XRFG_SUFFIX}
++                    "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl")
++        endforeach()
++    endforeach()
++    foreach(XRFG_ENTRY_NAME ClassifyStillTilesCS:fast_composition_classify DecideStillTilesCS:fast_composition_decide)
++        string(REPLACE ":" ";" XRFG_ENTRY_PAIR "${XRFG_ENTRY_NAME}")
++        list(GET XRFG_ENTRY_PAIR 0 XRFG_ENTRY)
++        list(GET XRFG_ENTRY_PAIR 1 XRFG_NAME)
++        set(XRFG_HEADER "${XRFG_GENERATED_SHADER_DIR}/${XRFG_NAME}_shader.hpp")
++        list(APPEND XRFG_FAST_COMPOSITION_HEADERS "${XRFG_HEADER}")
++        list(APPEND XRFG_FAST_COMPOSITION_COMMANDS
++            COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E ${XRFG_ENTRY}
++                /D XRFG_COCKPIT_MASK=1 /D XRFG_FAST_COMPOSITION=1 /D XRFG_STILL_TILE_CLASSIFY=1
++                /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++                /Fh "${XRFG_HEADER}" /Vn g_xrfg_${XRFG_NAME}_shader
++                "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl")
++    endforeach()
+     add_custom_command(
+         OUTPUT
+             "${XRFG_PACK_INPUT_HEADER}"
+@@ -225,6 +275,7 @@
+             "${XRFG_CURSOR_COMPOSITE_PIXEL_HEADER}"
+             "${XRFG_COCKPIT_MASK_RESAMPLE_HEADER}"
+             ${XRFG_COCKPIT_MASK_HEADERS}
++            ${XRFG_FAST_COMPOSITION_HEADERS}
+         COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
+         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E PackFlowInput
+             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+@@ -324,6 +375,7 @@
+             /Fh "${XRFG_COCKPIT_MASK_RESAMPLE_HEADER}" /Vn g_xrfg_cockpit_mask_resample_shader
+             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/cockpit_mask.hlsl"
+         ${XRFG_COCKPIT_MASK_COMMANDS}
++        ${XRFG_FAST_COMPOSITION_COMMANDS}
+         DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
+@@ -364,7 +416,8 @@
+         "${XRFG_CURSOR_REGION_VERTEX_HEADER}"
+         "${XRFG_CURSOR_COMPOSITE_PIXEL_HEADER}"
+         "${XRFG_COCKPIT_MASK_RESAMPLE_HEADER}"
+-        ${XRFG_COCKPIT_MASK_HEADERS})
++        ${XRFG_COCKPIT_MASK_HEADERS}
++        ${XRFG_FAST_COMPOSITION_HEADERS})
+     target_include_directories(xrfg_d3d12_history
+         PUBLIC include "${XRFG_VULKAN_INCLUDE_DIR}"
+         PRIVATE
+@@ -1261,6 +1314,12 @@
+                 WIN32_LEAN_AND_MEAN)
+         endif()
+         add_test(NAME xrfg_d3d12_history_tests COMMAND xrfg_d3d12_history_tests)
++        # DCS Control (0033): [ofxr] fast_composition against the composition
++        # as before, every channel of every pixel, on NVIDIA hardware (the
++        # optical-flow engine); it passes as skipped without one.
++        add_test(NAME xrfg_d3d12_fast_composition COMMAND xrfg_d3d12_history_tests)
++        set_tests_properties(xrfg_d3d12_fast_composition PROPERTIES
++            ENVIRONMENT "XRFG_TEST_FAST_COMPOSITION=1" TIMEOUT 600)
+ 
+         # DCS Control (0031): the cockpit mask consumer against a fake producer
+         # (shared atlases and fences with NT handles, as DCS Control's engine
+diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
+--- a/include/xrfg/d3d12_frame_synthesizer.hpp
++++ b/include/xrfg/d3d12_frame_synthesizer.hpp
+@@ -199,6 +199,15 @@
+     // this; without it set_cockpit_mask is ignored and the composition is as
+     // before.
+     bool cockpit_mask{};
++    // DCS Control (0033): [ofxr] fast_composition. On the NVIDIA backend a
++    // pass before the composition finds the still tiles of each view (16 x 16
++    // pixels with exactly zero flow left after the head-rotation warp, away
++    // from the cockpit mask), and a view with at least an eighth of its tiles
++    // still is drawn by a counterpart of its composition that gives their
++    // pixels the value the full composition comes to there directly: the
++    // same image for less GPU time. Without it the composition is exactly as
++    // before.
++    bool fast_composition{};
+ };
+ 
+ // A second synthetic produced from the same pair, for a session that hands
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -174,6 +174,13 @@
+ [[nodiscard]] bool read_cockpit_mask(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS Control (0033). `[ofxr] fast_composition`: the NVIDIA composition
++// composes still tiles directly, to the same image
++// (D3D12NvidiaOpticalFlowOptions::fast_composition). Off (0) by default and
++// when the key is missing. Read once per session.
++[[nodiscard]] bool read_fast_composition(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // DCS VR Control (0008). `[ofxr] lazy_runtime_swapchains`: a bridged D3D11
+ // session's colour swapchains hold no runtime swapchain of their own while
+ // nothing is shown from it - the application renders into the bridge's
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -21,6 +21,10 @@
+ ; world's motion is not carried across its edges. 1 on, 0 off (default). Read
+ ; when the game starts its session.
+ cockpit_mask=0
++; NVIDIA flow: the parts of the image with no motion left are composed the short
++; way, to the same image, for less GPU time. 1 on, 0 off (default). Read when
++; the game starts its session.
++fast_composition=0
+ ; "Prefer FPS over latency" in the tray: one frame of extra depth for games that
+ ; only just reach half the headset's refresh rate, at about one frame of
+ ; latency. 1 on (default), 0 off. Read when the game starts its session.
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -331,6 +331,11 @@
+     return read_ofxr_switch(module_directory, L"cockpit_mask", false);
+ }
+ 
++// DCS Control (0033).
++bool read_fast_composition(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"fast_composition", false);
++}
++
+ bool read_lazy_runtime_swapchains(
+     const std::filesystem::path& module_directory) noexcept {
+     return read_ofxr_switch(module_directory, L"lazy_runtime_swapchains", true);
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -47,6 +47,26 @@
+ #include "nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked.hpp"
+ #include "nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked.hpp"
+ #include "nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked.hpp"
++// DCS Control (0033): the NVIDIA compositions with the still-tile path, and
++// the pass that classifies the tiles.
++#include "fast_composition_classify_shader.hpp"
++#include "fast_composition_decide_shader.hpp"
++#include "nvidia_synthesize_midpoint_pixel_shader_fast.hpp"
++#include "nvidia_synthesize_midpoint_pixel_shader_masked_fast.hpp"
++#include "nvidia_bidirectional_synthesize_midpoint_pixel_shader_fast.hpp"
++#include "nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_fast.hpp"
++#include "nvidia_fast_synthesize_midpoint_pixel_shader_fast.hpp"
++#include "nvidia_fast_synthesize_midpoint_pixel_shader_masked_fast.hpp"
++#include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_fast.hpp"
++#include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_fast.hpp"
++#include "nvidia_triple_synthesize_midpoint_pixel_shader_fast.hpp"
++#include "nvidia_triple_synthesize_midpoint_pixel_shader_masked_fast.hpp"
++#include "nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_fast.hpp"
++#include "nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_fast.hpp"
++#include "nvidia_triple_fast_synthesize_midpoint_pixel_shader_fast.hpp"
++#include "nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_fast.hpp"
++#include "nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_fast.hpp"
++#include "nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_fast.hpp"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -119,6 +139,17 @@
+ constexpr UINT kCockpitMaskBlock = kMaxReprojectionViews;
+ constexpr UINT kDescriptorCount =
+     kDescriptorBlockSize * (kMaxReprojectionViews + 1U);
++// DCS Control (0033): [ofxr] fast_composition. The still tiles' size (as
++// kStillTileSize in frame_synthesis.hlsl), the slot heap's one block more for
++// their classification (u0 the tiles' flags), only with the key, and the
++// views' blocks' descriptor the compositions read them from (t6, which the
++// NVIDIA compositions do not otherwise read).
++constexpr UINT kStillTileSize = 16;
++constexpr UINT kStillTilesBlock = kMaxReprojectionViews + 1U;
++constexpr UINT kStillTilesSrvDescriptor = 6;
++// Per view a uint count from byte 0 and a uint64 predicate from byte 64.
++constexpr UINT kStillPredicateBytes = 128;
++constexpr UINT kStillPredicateOffset = 64;
+ constexpr UINT kNvidiaTimestampCount = 5;
+ constexpr UINT kNvidiaTimestampPackBegin = 0;
+ constexpr UINT kNvidiaTimestampPackEnd = 1;
+@@ -1230,6 +1261,33 @@
+     }
+     UINT cockpit_mask_cell{4};
+     UINT cockpit_mask_cell_code{};
++    // DCS Control (0033): [ofxr] fast_composition's still tiles (one byte per
++    // tile, a slice per view), the pass that classifies them, and whether the
++    // pair being recorded did (record_still_tiles to finish_still_tiles).
++    ComPtr<ID3D12Resource> still_tiles;
++    ComPtr<ID3D12PipelineState> still_tiles_pipeline;
++    UINT still_tiles_width{};
++    UINT still_tiles_height{};
++    bool pair_still_tiles{};
++    // XRFG_TEST_STILL_TILES_ANY (tests): a view with one still tile draws the
++    // still-tile composition, instead of one with an eighth of them.
++    bool still_tiles_any{};
++    // The views' counts of still tiles and the predicates their composition
++    // draws are predicated on (frame_synthesis.hlsl, StillCounts), and the
++    // pass that sets them.
++    ComPtr<ID3D12Resource> still_predicates;
++    ComPtr<ID3D12PipelineState> still_decide_pipeline;
++    // Each NVIDIA composition (plain or masked) with its still-tile
++    // counterpart.
++    std::vector<std::pair<ID3D12PipelineState*, ComPtr<ID3D12PipelineState>>> still_pipelines;
++    [[nodiscard]] ID3D12PipelineState* still_pipeline(ID3D12PipelineState* pipeline) const noexcept {
++        for (const auto& [plain, still] : still_pipelines) {
++            if (pipeline != nullptr && plain == pipeline) {
++                return still.Get();
++            }
++        }
++        return nullptr;
++    }
+     bool synthesis_enabled{};
+     bool completion_unknown{};
+     bool ffx_context_created{};
+@@ -1398,6 +1456,46 @@
+         }
+     }
+ 
++    // DCS Control (0033): [ofxr] fast_composition, on the NVIDIA backend (the
++    // only one whose compositions have the still-tile path).
++    [[nodiscard]] bool fast_composition_enabled() const noexcept {
++        return nvidia_options.fast_composition && backend == D3D12OpticalFlowBackend::nvidia;
++    }
++    // DCS Control (0033): `shader`'s counterpart with the still-tile path
++    // (frame_synthesis.hlsl, XRFG_FAST_COMPOSITION) under [ofxr]
++    // fast_composition, else `shader` itself (also for the compositions that
++    // have none: FidelityFX and game motion).
++    [[nodiscard]] D3D12_SHADER_BYTECODE composition_shader(
++        D3D12_SHADER_BYTECODE shader) const noexcept {
++        if (!fast_composition_enabled()) {
++            return shader;
++        }
++        const std::array<std::pair<const void*, D3D12_SHADER_BYTECODE>, 16> variants{{
++            {g_xrfg_nvidia_synthesize_midpoint_pixel_shader, {g_xrfg_nvidia_synthesize_midpoint_pixel_shader_fast, sizeof(g_xrfg_nvidia_synthesize_midpoint_pixel_shader_fast)}},
++            {g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked, {g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked_fast, sizeof(g_xrfg_nvidia_synthesize_midpoint_pixel_shader_masked_fast)}},
++            {g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader, {g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_fast, sizeof(g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_fast)}},
++            {g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked, {g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_fast, sizeof(g_xrfg_nvidia_bidirectional_synthesize_midpoint_pixel_shader_masked_fast)}},
++            {g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader, {g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_fast, sizeof(g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_fast)}},
++            {g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_masked, {g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_masked_fast, sizeof(g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_masked_fast)}},
++            {g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader, {g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_fast, sizeof(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_fast)}},
++            {g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked, {g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_fast, sizeof(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_fast)}},
++            {g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader, {g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_fast, sizeof(g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_fast)}},
++            {g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_masked, {g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_masked_fast, sizeof(g_xrfg_nvidia_triple_synthesize_midpoint_pixel_shader_masked_fast)}},
++            {g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader, {g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_fast, sizeof(g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_fast)}},
++            {g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked, {g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_fast, sizeof(g_xrfg_nvidia_triple_bidirectional_synthesize_midpoint_pixel_shader_masked_fast)}},
++            {g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader, {g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_fast, sizeof(g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_fast)}},
++            {g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked, {g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_fast, sizeof(g_xrfg_nvidia_triple_fast_synthesize_midpoint_pixel_shader_masked_fast)}},
++            {g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader, {g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_fast, sizeof(g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_fast)}},
++            {g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked, {g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_fast, sizeof(g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader_masked_fast)}},
++        }};
++        for (const auto& [plain, fast] : variants) {
++            if (shader.pShaderBytecode == plain) {
++                return fast;
++            }
++        }
++        return shader;
++    }
++
+     [[nodiscard]] HRESULT create_root_signature_and_pipelines(UINT node_mask) noexcept {
+         std::array<D3D12_DESCRIPTOR_RANGE, 2> ranges{};
+         ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+@@ -1508,6 +1606,29 @@
+         if (FAILED(result)) {
+             return result;
+         }
++        // DCS Control (0033): the still tiles' classification and decision.
++        if (fast_composition_enabled()) {
++            compute_description.CS = {
++                g_xrfg_fast_composition_classify_shader,
++                sizeof(g_xrfg_fast_composition_classify_shader),
++            };
++            result = device->CreateComputePipelineState(
++                &compute_description,
++                IID_PPV_ARGS(still_tiles_pipeline.GetAddressOf()));
++            if (FAILED(result)) {
++                return result;
++            }
++            compute_description.CS = {
++                g_xrfg_fast_composition_decide_shader,
++                sizeof(g_xrfg_fast_composition_decide_shader),
++            };
++            result = device->CreateComputePipelineState(
++                &compute_description,
++                IID_PPV_ARGS(still_decide_pipeline.GetAddressOf()));
++            if (FAILED(result)) {
++                return result;
++            }
++        }
+ 
+         D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics_description{};
+         graphics_description.pRootSignature = root_signature.Get();
+@@ -1568,6 +1689,24 @@
+         if (FAILED(result)) {
+             return result;
+         }
++        // DCS Control (0033): beside an NVIDIA composition just made from
++        // graphics_description, its still-tile counterpart (under
++        // fast_composition; where it cannot be made the composition is drawn
++        // without it).
++        const auto make_still = [&](ID3D12PipelineState* plain_pipeline) {
++            const D3D12_SHADER_BYTECODE plain = graphics_description.PS;
++            const D3D12_SHADER_BYTECODE still = composition_shader(plain);
++            if (plain_pipeline == nullptr || still.pShaderBytecode == plain.pShaderBytecode) {
++                return;
++            }
++            graphics_description.PS = still;
++            ComPtr<ID3D12PipelineState> made;
++            if (SUCCEEDED(device->CreateGraphicsPipelineState(
++                    &graphics_description, IID_PPV_ARGS(made.GetAddressOf())))) {
++                still_pipelines.emplace_back(plain_pipeline, std::move(made));
++            }
++            graphics_description.PS = plain;
++        };
+         // DCS Control (0031): the masked counterparts, made the same way.
+         const auto make_masked = [&](D3D12_SHADER_BYTECODE masked_shader,
+                                      ComPtr<ID3D12PipelineState>& masked) -> HRESULT {
+@@ -1578,6 +1717,9 @@
+             graphics_description.PS = masked_shader;
+             const HRESULT made = device->CreateGraphicsPipelineState(
+                 &graphics_description, IID_PPV_ARGS(masked.ReleaseAndGetAddressOf()));
++            if (SUCCEEDED(made)) {
++                make_still(masked.Get()); // DCS Control (0033)
++            }
+             graphics_description.PS = plain;
+             return made;
+         };
+@@ -1615,6 +1757,7 @@
+         if (FAILED(result)) {
+             return result;
+         }
++        make_still(nvidia_graphics_pipeline.Get()); // DCS Control (0033)
+         const bool fast_preset = nvidia_options.preset == D3D12NvidiaPerformancePreset::fast;
+         result = make_masked(fast_preset
+                 ? D3D12_SHADER_BYTECODE{g_xrfg_nvidia_fast_synthesize_midpoint_pixel_shader_masked,
+@@ -1643,6 +1786,7 @@
+         if (FAILED(result)) {
+             return result;
+         }
++        make_still(nvidia_bidirectional_graphics_pipeline.Get()); // DCS Control (0033)
+         result = make_masked(fast_preset
+                 ? D3D12_SHADER_BYTECODE{g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked,
+                       sizeof(g_xrfg_nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader_masked)}
+@@ -1679,6 +1823,7 @@
+             // DCS Control (0031): a masked pair then takes two passes.
+             nvidia_triple_graphics_pipeline_masked.Reset();
+         }
++        make_still(nvidia_triple_graphics_pipeline.Get()); // DCS Control (0033)
+         graphics_description.PS = fast
+             ? D3D12_SHADER_BYTECODE{g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader,
+                   sizeof(g_xrfg_nvidia_triple_fast_bidirectional_synthesize_midpoint_pixel_shader)}
+@@ -1695,6 +1840,7 @@
+                        nvidia_triple_bidirectional_graphics_pipeline_masked))) {
+             nvidia_triple_bidirectional_graphics_pipeline_masked.Reset();
+         }
++        make_still(nvidia_triple_bidirectional_graphics_pipeline.Get()); // DCS Control (0033)
+         return S_OK;
+     }
+ 
+@@ -3251,6 +3397,219 @@
+         list->ResourceBarrier(1, &barrier);
+     }
+ 
++    // DCS Control (0033): the still tiles' flags, one byte per kStillTileSize
++    // pixels of the image, a slice per view. Only with fast_composition.
++    [[nodiscard]] HRESULT create_still_tiles(UINT node_mask) noexcept {
++        if (!fast_composition_enabled()) {
++            return S_OK;
++        }
++        still_tiles_any = GetEnvironmentVariableW(L"XRFG_TEST_STILL_TILES_ANY", nullptr, 0) != 0;
++        still_tiles_width = (static_cast<UINT>(image_description.Width) + kStillTileSize - 1U) / kStillTileSize;
++        still_tiles_height = (image_description.Height + kStillTileSize - 1U) / kStillTileSize;
++        const D3D12_HEAP_PROPERTIES heap = default_heap_properties(node_mask);
++        D3D12_RESOURCE_DESC description = texture2d_description(
++            still_tiles_width, still_tiles_height, DXGI_FORMAT_R8_UINT,
++            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
++        description.DepthOrArraySize = static_cast<UINT16>(kMaxReprojectionViews);
++        HRESULT result = device->CreateCommittedResource(
++            &heap, D3D12_HEAP_FLAG_NONE, &description, D3D12_RESOURCE_STATE_COMMON, nullptr,
++            IID_PPV_ARGS(still_tiles.GetAddressOf()));
++        if (FAILED(result)) {
++            return result;
++        }
++        still_tiles->SetName(L"OFXR Still Tiles");
++        // Created zeroed: no tile counted yet.
++        const D3D12_RESOURCE_DESC predicates = buffer_description(
++            kStillPredicateBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
++        result = device->CreateCommittedResource(
++            &heap, D3D12_HEAP_FLAG_NONE, &predicates, D3D12_RESOURCE_STATE_COMMON, nullptr,
++            IID_PPV_ARGS(still_predicates.GetAddressOf()));
++        if (SUCCEEDED(result)) {
++            still_predicates->SetName(L"OFXR Still Tile Predicates");
++        }
++        return result;
++    }
++
++    // DCS Control (0033): t6 of the views' blocks: the still tiles, which only
++    // the still-tile compositions read (the others read nothing there, or the
++    // game-motion composition its vectors, which it writes there itself).
++    void write_still_tiles_view(WorkSlot& slot) noexcept {
++        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
++        view.Format = DXGI_FORMAT_R8_UINT;
++        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
++        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
++        view.Texture2DArray.MipLevels = 1;
++        view.Texture2DArray.ArraySize = kMaxReprojectionViews;
++        const D3D12_CPU_DESCRIPTOR_HANDLE start =
++            slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
++        for (UINT block = 0; block < kMaxReprojectionViews; ++block) {
++            device->CreateShaderResourceView(
++                still_tiles.Get(),
++                &view,
++                offset_cpu_handle(
++                    start,
++                    block * kDescriptorBlockSize + kStillTilesSrvDescriptor,
++                    descriptor_increment));
++        }
++    }
++
++    // DCS Control (0033): records the classification of every view's tiles
++    // into still_tiles on `list`, before the composition and after the cockpit
++    // mask's resample (whose flag bits `parameters` carries; the views'
++    // blocks hold the flow and the mask), and binds them (t6). Does nothing
++    // without fast_composition.
++    void record_still_tiles(
++        ID3D12GraphicsCommandList* list,
++        WorkSlot& slot,
++        SynthesisParameters parameters,
++        std::span<const D3D12ReprojectionView> target_views) noexcept {
++        pair_still_tiles = false;
++        if (!fast_composition_enabled() || still_tiles == nullptr || still_tiles_pipeline == nullptr ||
++            still_predicates == nullptr || still_decide_pipeline == nullptr) {
++            return;
++        }
++        const D3D12_CPU_DESCRIPTOR_HANDLE start =
++            slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
++        const UINT base = kStillTilesBlock * kDescriptorBlockSize;
++        D3D12_UNORDERED_ACCESS_VIEW_DESC target{};
++        target.Format = DXGI_FORMAT_R8_UINT;
++        target.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
++        target.Texture2DArray.ArraySize = kMaxReprojectionViews;
++        device->CreateUnorderedAccessView(
++            still_tiles.Get(), nullptr, &target,
++            offset_cpu_handle(start, base + kSrvDescriptorCount, descriptor_increment));
++        D3D12_UNORDERED_ACCESS_VIEW_DESC counts{};
++        counts.Format = DXGI_FORMAT_R32_TYPELESS;
++        counts.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
++        counts.Buffer.NumElements = kStillPredicateBytes / 4U;
++        counts.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
++        device->CreateUnorderedAccessView(
++            still_predicates.Get(), nullptr, &counts,
++            offset_cpu_handle(start, base + kSrvDescriptorCount + 1U, descriptor_increment));
++        D3D12_UNORDERED_ACCESS_VIEW_DESC null_target{};
++        null_target.Format = DXGI_FORMAT_R8_UNORM;
++        null_target.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
++        for (UINT index = 2; index < kUavDescriptorCount; ++index) {
++            device->CreateUnorderedAccessView(
++                nullptr, nullptr, &null_target,
++                offset_cpu_handle(start, base + kSrvDescriptorCount + index, descriptor_increment));
++        }
++        write_still_tiles_view(slot);
++
++        // The flow and the cockpit mask wait in the pixel shader's state for
++        // the composition; this pass reads them from a compute shader.
++        std::array<D3D12_RESOURCE_BARRIER, 3U + kMaxReprojectionViews> before{};
++        std::array<D3D12_RESOURCE_BARRIER, 3U + kMaxReprojectionViews> after{};
++        UINT count = 0;
++        before[count] = transition_barrier(
++            still_tiles.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++        after[count++] = transition_barrier(
++            still_tiles.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
++            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
++        before[count] = transition_barrier(
++            still_predicates.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++        after[count++] = transition_barrier(
++            still_predicates.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
++            D3D12_RESOURCE_STATE_PREDICATION);
++        for (UINT eye = 0; eye < image_description.DepthOrArraySize && eye < kMaxReprojectionViews; ++eye) {
++            ID3D12Resource* const flow = slot.nvidia_eyes[eye].flow.Get();
++            before[count] = transition_barrier(
++                flow, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kShaderReadState);
++            after[count++] = transition_barrier(
++                flow, kShaderReadState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
++        }
++        if (pair_mask_bound) {
++            before[count] = transition_barrier(
++                cockpit_mask_target.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kShaderReadState);
++            after[count++] = transition_barrier(
++                cockpit_mask_target.Get(), kShaderReadState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
++        }
++        list->ResourceBarrier(count, before.data());
++        ID3D12DescriptorHeap* heaps[] = {slot.descriptor_heap.Get()};
++        list->SetDescriptorHeaps(1, heaps);
++        list->SetComputeRootSignature(root_signature.Get());
++        list->SetPipelineState(still_tiles_pipeline.Get());
++        const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start =
++            slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
++        list->SetComputeRootDescriptorTable(
++            1, offset_gpu_handle(gpu_start, base + kSrvDescriptorCount, descriptor_increment));
++        for (UINT view_index = 0; view_index < static_cast<UINT>(target_views.size()); ++view_index) {
++            const UINT slice = resolved_array_slice(
++                target_views[view_index],
++                view_index,
++                target_views.size(),
++                image_description.DepthOrArraySize);
++            parameters.slice = slice;
++            parameters.view_index = view_index;
++            // The views' blocks as the composition binds them: the flow (t2)
++            // and the cockpit mask (t10) of this view.
++            list->SetComputeRootDescriptorTable(
++                0, offset_gpu_handle(gpu_start, slice * kDescriptorBlockSize, descriptor_increment));
++            list->SetComputeRoot32BitConstants(2, kSynthesisConstantCount, &parameters, 0);
++            list->Dispatch((still_tiles_width + 7U) / 8U, (still_tiles_height + 7U) / 8U, 1);
++        }
++        // Every view counted: each one's predicate, and the counts back to 0.
++        // A view is drawn with the still-tile composition from an eighth of
++        // its tiles still: below that its other pixels' share of the still
++        // test outweighs the still ones' saving (measured break-even at 5424
++        // px, 2X, no mask: about 3/16).
++        D3D12_RESOURCE_BARRIER counted{};
++        counted.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
++        counted.UAV.pResource = still_predicates.Get();
++        list->ResourceBarrier(1, &counted);
++        parameters.game_motion_padding = still_tiles_any
++            ? 1U : std::max((still_tiles_width * still_tiles_height + 7U) / 8U, 1U);
++        list->SetComputeRoot32BitConstants(2, kSynthesisConstantCount, &parameters, 0);
++        list->SetPipelineState(still_decide_pipeline.Get());
++        list->Dispatch(1, 1, 1);
++        list->ResourceBarrier(count, after.data());
++        pair_still_tiles = true;
++    }
++
++    // DCS Control (0033): after the composition: the still tiles back to
++    // COMMON, where the next pair's classification takes them from.
++    void finish_still_tiles(ID3D12GraphicsCommandList* list) noexcept {
++        if (!pair_still_tiles) {
++            return;
++        }
++        const std::array<D3D12_RESOURCE_BARRIER, 2> barriers{
++            transition_barrier(
++                still_tiles.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
++                D3D12_RESOURCE_STATE_COMMON),
++            transition_barrier(
++                still_predicates.Get(), D3D12_RESOURCE_STATE_PREDICATION,
++                D3D12_RESOURCE_STATE_COMMON),
++        };
++        list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
++        pair_still_tiles = false;
++    }
++
++    // DCS Control (0033): view `view_index`'s composition with `pipeline`.
++    // With still tiles classified for this pair, drawn twice under opposite
++    // predicates on the view's decision: by `pipeline`'s still-tile
++    // counterpart where enough of the view's tiles are still, else by
++    // `pipeline` itself; exactly one of the two draws runs and both give the
++    // same image. Leaves `pipeline` set and predication off.
++    void draw_composition(
++        ID3D12GraphicsCommandList* list,
++        const std::pair<UINT, UINT>& mask,
++        ID3D12PipelineState* pipeline,
++        UINT view_index) noexcept {
++        ID3D12PipelineState* const still = pair_still_tiles ? still_pipeline(pipeline) : nullptr;
++        if (still == nullptr || view_index >= kMaxReprojectionViews) {
++            draw_view(list, mask);
++            return;
++        }
++        const UINT64 predicate = kStillPredicateOffset + 8ULL * view_index;
++        list->SetPredication(still_predicates.Get(), predicate, D3D12_PREDICATION_OP_EQUAL_ZERO);
++        list->SetPipelineState(still);
++        draw_view(list, mask);
++        list->SetPredication(still_predicates.Get(), predicate, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
++        list->SetPipelineState(pipeline);
++        draw_view(list, mask);
++        list->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
++    }
++
+     [[nodiscard]] HRESULT create_work_slots(UINT node_mask) noexcept {
+ 
+         descriptor_increment = device->GetDescriptorHandleIncrementSize(
+@@ -3373,7 +3732,8 @@
+ 
+             D3D12_DESCRIPTOR_HEAP_DESC descriptor_description{};
+             descriptor_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+-            descriptor_description.NumDescriptors = kDescriptorCount;
++            descriptor_description.NumDescriptors = kDescriptorCount +
++                (fast_composition_enabled() ? kDescriptorBlockSize : 0U); // DCS Control (0033)
+             descriptor_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+             descriptor_description.NodeMask = node_mask;
+             result = device->CreateDescriptorHeap(
+@@ -3898,6 +4258,10 @@
+         if (FAILED(result)) {
+             return result;
+         }
++        result = create_still_tiles(node_mask); // DCS Control (0033)
++        if (FAILED(result)) {
++            return result;
++        }
+         result = create_work_slots(node_mask);
+         if (FAILED(result)) {
+             return result;
+@@ -5154,6 +5518,9 @@
+         // views (counted in the composition's time).
+         parameters.synthesis_flags |= record_cockpit_mask(
+             synthesis, slot, previous_source, target_views);
++        // DCS Control (0033): the still tiles (counted in the composition's
++        // time as well).
++        record_still_tiles(synthesis, slot, parameters, target_views);
+ 
+         synthesis->SetDescriptorHeaps(1, heaps);
+         synthesis->SetGraphicsRootSignature(root_signature.Get());
+@@ -5229,7 +5596,8 @@
+                         0);
+                     if (output == 0U) {
+                         synthesis->OMSetRenderTargets(2, rtvs, FALSE, nullptr);
+-                        draw_view(synthesis, view_masks[view_index]);
++                        draw_composition(synthesis, view_masks[view_index], triple_pipeline,
++                            view_index); // DCS Control (0033)
+                     }
+                     // The cursor and the marker are per synthetic.
+                     synthesis->OMSetRenderTargets(1, &rtvs[output], FALSE, nullptr);
+@@ -5288,7 +5656,11 @@
+                     target_views[view_index].image_rect,
+                     static_cast<UINT>(image_description.Width),
+                     image_description.Height);
+-                draw_view(synthesis, view_masks[view_index]);
++                draw_composition(synthesis, view_masks[view_index], // DCS Control (0033)
++                    composition_pipeline(nvidia_options.bidirectional
++                        ? nvidia_bidirectional_graphics_pipeline.Get()
++                        : nvidia_graphics_pipeline.Get()),
++                    view_index);
+                 draw_cursor_region(synthesis, slot,
+                     composition_pipeline(nvidia_options.bidirectional
+                         ? nvidia_bidirectional_graphics_pipeline.Get()
+@@ -5299,6 +5671,7 @@
+         }
+ 
+         finish_cockpit_mask(synthesis); // DCS Control (0031)
++        finish_still_tiles(synthesis); // DCS Control (0033)
+         std::array<D3D12_RESOURCE_BARRIER,
+                    3U + 4U * kMaxReprojectionViews> before_current_copy{};
+         UINT before_current_copy_count = 0;
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -1145,6 +1145,191 @@
+     return output;
+ }
+ 
++// DCS Control (0033): [ofxr] fast_composition=1, still tiles. Compiled in
++// only for the shaders built with XRFG_FAST_COMPOSITION=1: the NVIDIA
++// compositions D3D12FrameSynthesizer makes only with that key (without it the
++// compositions are these shaders exactly as before 0033), and the pass that
++// classifies their tiles.
++//
++// A tile is still when synthesize_midpoint on the NVIDIA path
++// (pose-compensated flow) comes, at every pixel of it, to
++// saturate(lerp(previous at the pixel, current at the pixel, t)) - or to the
++// current frame alone where the previous frame's coverage or the current
++// rectangle ends, as at any pixel - whatever else it computes:
++//  - every flow cell any pixel of the tile interpolates (flow_for_pixel_spread:
++//    the same cells, bounds and clamps) is exactly zero, so every endpoint is
++//    the pixel itself, the flow midpoint and the stable midpoint are one
++//    value, and the confidence, cost, cycle, endpoint and stationary checks
++//    that weigh one against the other cannot change it; the moving-edge step
++//    needs a vector to move;
++//  - with the occlusion choice (levels 2 and 3) the cells it probes, up to
++//    five cells away, are zero too, so it finds no second motion (its edge
++//    weight is 0) and leaves the pixel as composed;
++//  - no pixel of it is within the cockpit mask's reach (below 0.25: none of
++//    the cockpit rules run);
++//  - or the pair repeats a capture, whose flow is zero and where none of
++//    those rules runs.
++// The tiles' flags, one byte per tile of kStillTileSize pixels (in the
++// image's own pixels, from 0), slice ViewIndex; the composition reads them at
++// t6, which the NVIDIA compositions do not otherwise read (the game-motion
++// composition's vectors). How many tiles of each view are still decides
++// which composition draws it (DecideStillTilesCS): where too few are, the
++// one without this path, so a view in motion costs only the classification.
++#ifndef XRFG_FAST_COMPOSITION
++#define XRFG_FAST_COMPOSITION 0
++#endif
++#if XRFG_FAST_COMPOSITION
++static const uint kStillTileSize = 16u;
++Texture2DArray<uint> StillTiles : register(t6);
++#ifndef XRFG_STILL_TILE_CLASSIFY
++#define XRFG_STILL_TILE_CLASSIFY 0
++#endif
++#if XRFG_STILL_TILE_CLASSIFY
++// The classification's own (compiled with XRFG_STILL_TILE_CLASSIFY=1).
++RWTexture2DArray<uint> StillTilesOut : register(u0);
++// Per view, from byte 0, the still tiles counted so far (a uint each); from
++// byte 64 the predicates the composition's draws are predicated on (a
++// uint64 each): 1 draw the still-tile composition, 0 the one without.
++RWByteAddressBuffer StillCounts : register(u1);
++static const uint kStillPredicateOffset = 64u;
++groupshared uint g_still_tiles;
++
++// The flow cell flow_for_pixel_spread starts its 2x2 interpolation from at
++// `pixel` (its top-left cell; the other is one further, within the bounds).
++int2 still_flow_cell(float2 pixel, FlowGridBounds bounds) {
++    float2 scaled = flow_input_coordinate(pixel);
++    float2 packed_coordinate = float2(scaled.x, scaled.y + float(Slice * PackedEyeStride));
++    float2 flow_coordinate = (packed_coordinate + 0.5) / float(FlowBlockSize) - 0.5;
++    float2 bounded = clamp(flow_coordinate, float2(bounds.minimum), float2(bounds.maximum));
++    return int2(floor(bounded));
++}
++
++// One thread per tile of the view's image (Width x Height), for view
++// ViewIndex: 1 still, 0 not; and the view's count of still tiles.
++[numthreads(8, 8, 1)]
++void ClassifyStillTilesCS(uint3 thread_id : SV_DispatchThreadID, uint group_index : SV_GroupIndex) {
++    if (group_index == 0u) {
++        g_still_tiles = 0u;
++    }
++    GroupMemoryBarrierWithGroupSync();
++    uint2 tiles = (uint2(Width, Height) + kStillTileSize - 1u) / kStillTileSize;
++    bool inside = thread_id.x < tiles.x && thread_id.y < tiles.y;
++    uint2 first_pixel = thread_id.xy * kStillTileSize;
++    uint2 last_pixel = min(first_pixel + kStillTileSize - 1u, uint2(Width, Height) - 1u);
++    bool still = inside;
++    if (inside && repeated_capture_flag() == 0) {
++        // The mask texels cockpit_mask_at reads for these pixels.
++        if (cockpit_mask_bound()) {
++            float cell = float(4u << ((SynthesisFlags >> 6) & 3u));
++            float2 origin = PreviousMappings[ViewIndex].TargetRect.xy;
++            int2 first_texel = int2(floor((float2(first_pixel) - origin + 0.5) / cell));
++            int2 last_texel = int2(floor((float2(last_pixel) - origin + 0.5) / cell));
++            for (int y = first_texel.y; y <= last_texel.y && still; ++y) {
++                for (int x = first_texel.x; x <= last_texel.x; ++x) {
++                    if (CockpitMask.Load(int4(x, y, int(ViewIndex), 0)) >= 0.25) {
++                        still = false;
++                    }
++                }
++            }
++        }
++        // The flow cells: rounding is monotonic, so the first pixel's start
++        // cell and the last pixel's start cell plus one bound every pixel's.
++        FlowGridBounds bounds = flow_grid_bounds(PreviousMappings[ViewIndex].TargetRect, Slice);
++        int reach = moving_edge_flag() && occlusion_choice_flag() ? 6 : 0;
++        int2 first_cell = max(still_flow_cell(float2(first_pixel), bounds) - reach, bounds.minimum);
++        int2 last_cell = min(still_flow_cell(float2(last_pixel), bounds) + 1 + reach, bounds.maximum);
++        for (int y = first_cell.y; y <= last_cell.y && still; ++y) {
++            for (int x = first_cell.x; x <= last_cell.x; ++x) {
++                int2 flow = BackwardFlow.Load(int3(x, y, 0));
++                if ((flow.x | flow.y) != 0) {
++                    still = false;
++                }
++            }
++        }
++    }
++    if (inside) {
++        StillTilesOut[uint3(thread_id.xy, ViewIndex)] = still ? 1u : 0u;
++        if (still) {
++            InterlockedAdd(g_still_tiles, 1u);
++        }
++    }
++    GroupMemoryBarrierWithGroupSync();
++    if (group_index == 0u && g_still_tiles != 0u) {
++        StillCounts.InterlockedAdd(ViewIndex * 4u, g_still_tiles);
++    }
++}
++
++// After every view's classification: each view's predicate, 1 where at
++// least GameMotionPadding of its tiles (an eighth of them; one for a test) are
++// still, and its count back to 0 for the next pair.
++[numthreads(1, 1, 1)]
++void DecideStillTilesCS() {
++    uint threshold = max(GameMotionPadding, 1u);
++    [unroll] for (uint view = 0u; view < 2u; ++view) {
++        uint count = StillCounts.Load(view * 4u);
++        StillCounts.Store2(kStillPredicateOffset + view * 8u, uint2(count >= threshold ? 1u : 0u, 0u));
++        StillCounts.Store(view * 4u, 0u);
++    }
++}
++#endif
++
++// Whether `input`'s pixel lies in a still tile; then its composition: the
++// two frames at the pixel, or the current frame alone where
++// synthesize_midpoint has no previous sample there (the same tests, in the
++// same order).
++bool still_tile_pixel(FullscreenVertex input, out float4 previous_color, out float4 current_color,
++    out bool blend) {
++    previous_color = float4(0.0, 0.0, 0.0, 1.0);
++    current_color = float4(0.0, 0.0, 0.0, 1.0);
++    blend = false;
++    uint2 integer_pixel = uint2(input.position.xy);
++    bool still = StillTiles.Load(int4(integer_pixel / kStillTileSize, ViewIndex, 0)) != 0u;
++    [branch] if (still) {
++        bool in_bounds = integer_pixel.x < Width && integer_pixel.y < Height && Slice < ArraySize;
++        if (in_bounds) {
++            float2 pixel = float2(integer_pixel);
++            CameraSample current = sample_current_target(pixel, Slice, ViewIndex);
++            CameraSample previous = sample_previous_target(pixel, Slice, ViewIndex);
++            current_color = current.color;
++            previous_color = previous.color;
++            blend = previous.valid >= 0.5 && current.valid >= 0.5;
++        }
++    }
++    return still;
++}
++#define XRFG_STILL_TILE_RETURN(input) \
++    { \
++        float4 still_previous; \
++        float4 still_current; \
++        bool still_blend; \
++        [branch] if (still_tile_pixel(input, still_previous, still_current, still_blend)) { \
++            return still_blend \
++                ? saturate(lerp(still_previous, still_current, synthesis_fraction())) \
++                : saturate(still_current); \
++        } \
++    }
++#define XRFG_STILL_TILE_RETURN_TRIPLE(input) \
++    { \
++        float4 still_previous; \
++        float4 still_current; \
++        bool still_blend; \
++        [branch] if (still_tile_pixel(input, still_previous, still_current, still_blend)) { \
++            TripleOutputs still_output; \
++            still_output.first = still_blend \
++                ? saturate(lerp(still_previous, still_current, synthesis_fraction())) \
++                : saturate(still_current); \
++            g_synthesis_fraction = second_synthesis_fraction(); \
++            still_output.second = still_blend \
++                ? saturate(lerp(still_previous, still_current, synthesis_fraction())) \
++                : saturate(still_current); \
++            return still_output; \
++        } \
++    }
++#else
++#define XRFG_STILL_TILE_RETURN(input)
++#define XRFG_STILL_TILE_RETURN_TRIPLE(input)
++#endif
++
+ float4 synthesize_midpoint(
+     FullscreenVertex input,
+     float flow_value_scale,
+@@ -1497,20 +1682,24 @@
+ // The NVIDIA variants read flow in signed S10.5 fixed point, and from a
+ // previous input the pack warped into the current camera (PackNvidiaFlowInput).
+ float4 SynthesizeNvidiaMidpointPS(FullscreenVertex input) : SV_Target {
++    XRFG_STILL_TILE_RETURN(input) // DCS Control (0033)
+     return synthesize_midpoint(input, 1.0 / 32.0, true, false, false, false, true);
+ }
+ 
+ float4 SynthesizeNvidiaBidirectionalMidpointPS(
+     FullscreenVertex input) : SV_Target {
++    XRFG_STILL_TILE_RETURN(input) // DCS Control (0033)
+     return synthesize_midpoint(input, 1.0 / 32.0, true, true, false, false, true);
+ }
+ 
+ float4 SynthesizeNvidiaFastMidpointPS(FullscreenVertex input) : SV_Target {
++    XRFG_STILL_TILE_RETURN(input) // DCS Control (0033)
+     return synthesize_midpoint(input, 1.0 / 32.0, true, false, true, false, true);
+ }
+ 
+ float4 SynthesizeNvidiaFastBidirectionalMidpointPS(
+     FullscreenVertex input) : SV_Target {
++    XRFG_STILL_TILE_RETURN(input) // DCS Control (0033)
+     return synthesize_midpoint(input, 1.0 / 32.0, true, true, true, false, true);
+ }
+ 
+@@ -1532,6 +1721,7 @@
+ }
+ 
+ TripleOutputs SynthesizeNvidiaTripleMidpointPS(FullscreenVertex input) {
++    XRFG_STILL_TILE_RETURN_TRIPLE(input) // DCS Control (0033)
+     TripleOutputs output;
+     output.first = synthesize_midpoint(input, 1.0 / 32.0, true, false, false, false, true);
+     g_synthesis_fraction = second_synthesis_fraction();
+@@ -1540,6 +1730,7 @@
+ }
+ 
+ TripleOutputs SynthesizeNvidiaTripleBidirectionalMidpointPS(FullscreenVertex input) {
++    XRFG_STILL_TILE_RETURN_TRIPLE(input) // DCS Control (0033)
+     TripleOutputs output;
+     output.first = synthesize_midpoint(input, 1.0 / 32.0, true, true, false, false, true);
+     g_synthesis_fraction = second_synthesis_fraction();
+@@ -1548,6 +1739,7 @@
+ }
+ 
+ TripleOutputs SynthesizeNvidiaTripleFastMidpointPS(FullscreenVertex input) {
++    XRFG_STILL_TILE_RETURN_TRIPLE(input) // DCS Control (0033)
+     TripleOutputs output;
+     output.first = synthesize_midpoint(input, 1.0 / 32.0, true, false, true, false, true);
+     g_synthesis_fraction = second_synthesis_fraction();
+@@ -1556,6 +1748,7 @@
+ }
+ 
+ TripleOutputs SynthesizeNvidiaTripleFastBidirectionalMidpointPS(FullscreenVertex input) {
++    XRFG_STILL_TILE_RETURN_TRIPLE(input) // DCS Control (0033)
+     TripleOutputs output;
+     output.first = synthesize_midpoint(input, 1.0 / 32.0, true, true, true, false, true);
+     g_synthesis_fraction = second_synthesis_fraction();
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -5177,7 +5177,9 @@
+         // DCS Control (0030): fixed for the session.
+         xrfg::implicit_layer::read_nvidia_occlusion_aware(current_layer_directory()),
+         // DCS Control (0031): fixed for the session.
+-        xrfg::implicit_layer::read_cockpit_mask(current_layer_directory())};
++        xrfg::implicit_layer::read_cockpit_mask(current_layer_directory()),
++        // DCS Control (0033): fixed for the session.
++        xrfg::implicit_layer::read_fast_composition(current_layer_directory())};
+     // One display period of extra depth, bought with one display period of
+     // latency: every synthetic is held until it is a period old, so synthesis
+     // gets a period to finish instead of the gap the game leaves. On by
+@@ -13460,7 +13462,8 @@
+         static_cast<xrfg::D3D12NvidiaPerformancePreset>(control.desired.preset),
+         static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward,
+         state->nvidia_options.occlusion_aware, // DCS Control (0030): the session's
+-        state->nvidia_options.cockpit_mask}; // DCS Control (0031): the session's
++        state->nvidia_options.cockpit_mask, // DCS Control (0031): the session's
++        state->nvidia_options.fast_composition}; // DCS Control (0033): the session's
+     const bool changed = state->control_reconfigure_required || backend != state->optical_flow_backend ||
+         options.preset != state->nvidia_options.preset ||
+         options.input_scale != state->nvidia_options.input_scale ||
+diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
+--- a/tests/cockpit_mask_tests.cpp
++++ b/tests/cockpit_mask_tests.cpp
+@@ -577,17 +577,23 @@
+     };
+     write("[ofxr]\nbackend=nvidia\n");
+     const bool missing = xrfg::implicit_layer::read_cockpit_mask(directory);
+-    write("[ofxr]\ncockpit_mask=1\nnvidia_occlusion_aware=3\n");
++    // DCS Control (0033): and [ofxr] fast_composition, off unless 1.
++    const bool fast_missing = xrfg::implicit_layer::read_fast_composition(directory);
++    write("[ofxr]\ncockpit_mask=1\nnvidia_occlusion_aware=3\nfast_composition=1\n");
+     const bool on = xrfg::implicit_layer::read_cockpit_mask(directory);
+     const auto level = xrfg::implicit_layer::read_nvidia_occlusion_aware(directory);
+-    write("[ofxr]\ncockpit_mask=0\nnvidia_occlusion_aware=4\n");
++    const bool fast_on = xrfg::implicit_layer::read_fast_composition(directory);
++    write("[ofxr]\ncockpit_mask=0\nnvidia_occlusion_aware=4\nfast_composition=0\n");
+     const bool off = xrfg::implicit_layer::read_cockpit_mask(directory);
+     const auto out_of_range = xrfg::implicit_layer::read_nvidia_occlusion_aware(directory);
++    const bool fast_off = xrfg::implicit_layer::read_fast_composition(directory);
+     std::error_code ignored;
+     std::filesystem::remove_all(directory, ignored);
+     require(!missing && on && !off && !xrfg::implicit_layer::read_cockpit_mask({}),
+         "ini: cockpit_mask is 1 on, off otherwise");
+     require(level == 3 && out_of_range == 0, "ini: nvidia_occlusion_aware takes 3");
++    require(!fast_missing && fast_on && !fast_off && !xrfg::implicit_layer::read_fast_composition({}),
++        "ini: fast_composition is 1 on, off otherwise");
+     std::cout << "cockpit mask: [ofxr] cockpit_mask and nvidia_occlusion_aware=3 read\n";
+ }
+ 
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -5262,6 +5262,27 @@
+               << stats.jump << " busy " << stats.busy << '\n';
+ }
+ 
++// DCS Control (0033): whether a hardware NVIDIA adapter is present (the
++// fast composition's tests need the optical-flow engine).
++bool nvidia_hardware_present() {
++    ComPtr<IDXGIFactory6> factory;
++    if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(factory.GetAddressOf())))) {
++        return false;
++    }
++    for (UINT index = 0;; ++index) {
++        ComPtr<IDXGIAdapter1> candidate;
++        if (FAILED(factory->EnumAdapterByGpuPreference(index, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
++                IID_PPV_ARGS(candidate.GetAddressOf())))) {
++            return false;
++        }
++        DXGI_ADAPTER_DESC1 description{};
++        if (SUCCEEDED(candidate->GetDesc1(&description)) && description.VendorId == 0x10deU &&
++            (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
++            return true;
++        }
++    }
++}
++
+ int main() {
+     const bool trace_test = std::getenv("XRFG_TEST_GPU_TRACE") != nullptr;
+     const auto trace_dir = std::filesystem::temp_directory_path() /
+@@ -5273,6 +5294,34 @@
+         xrfg::bridge_flight_logger().initialize(trace_dir);
+     }
+     try {
++        // DCS Control (0033): [ofxr] fast_composition against the composition
++        // as before, and its GPU time at a headset's resolution.
++        if (GetEnvironmentVariableA("XRFG_TEST_FAST_COMPOSITION", nullptr, 0)) {
++            if (!nvidia_hardware_present()) {
++                std::cout << "D3D12 fast composition tests skipped: no NVIDIA hardware adapter\n";
++                return 0;
++            }
++            run_fast_composition_equivalence();
++            std::cout << "D3D12 fast composition tests passed\n";
++            return 0;
++        }
++        if (GetEnvironmentVariableA("XRFG_TEST_FAST_COMPOSITION_BENCH", nullptr, 0)) {
++            D3D12WarpFixture bench_fixture(true);
++            for (UINT size : {2712U, 5424U}) {
++                const UINT height = size == 2712U ? 2678U : 5356U;
++                for (int scene : {0, 1, 2, 3}) {
++                    bench_fast_composition(bench_fixture, size, height, scene, false);
++                    bench_fast_composition(bench_fixture, size, height, scene, true);
++                }
++            }
++            for (int scene : {0, 1, 2, 3}) {
++                bench_fast_composition(bench_fixture, 5424, 5356, scene, true, true);
++            }
++            bench_synthetic_copy(bench_fixture, 2712, 2678);
++            bench_synthetic_copy(bench_fixture, 5424, 5356);
++            bench_fixture.require_no_debug_errors();
++            return 0;
++        }
+         if (GetEnvironmentVariableA("XRFG_TEST_NVIDIA_QUALITY", nullptr, 0)) {
+             run_nvidia_fast_controls();
+             return 0;
+diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
+--- a/tests/nvidia_fast_patterns.inc
++++ b/tests/nvidia_fast_patterns.inc
+@@ -854,3 +854,444 @@
+               << " pairs); whole pair median off " << median(pipelines[0].total) << " us, on "
+               << median(pipelines[1].total) << " us" << std::endl;
+ }
++
++// DCS Control (0033): [ofxr] fast_composition. The pair (a, b) composed with
++// `options` (and its masks, the previous capture seen from `previous_views`),
++// 2X halfway or with `triple` 3X at a third and two thirds: one image per
++// synthetic.
++std::vector<StereoPattern> synthesize_fast_composition_pair(D3D12WarpFixture& fixture,
++    const StereoPattern& a, const StereoPattern& b, UINT width, UINT height,
++    const xrfg::D3D12NvidiaOpticalFlowOptions& options,
++    const std::array<std::shared_ptr<xrfg::D3D12CockpitMaskFrame>, 2>& cockpit_mask, bool triple,
++    const ReprojectionViews& previous_views) {
++    std::array<ComPtr<ID3D12Resource>, 2> sources{
++        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
++    auto current = create_source_texture(fixture, width, height);
++    std::array<ComPtr<ID3D12Resource>, 2> synthetics{
++        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
++    std::array<ID3D12Resource*, 2> input{sources[0].Get(), sources[1].Get()};
++    std::array<ID3D12Resource*, 1> current_out{current.Get()};
++    std::array<ID3D12Resource*, 2> synthetic_out{synthetics[0].Get(), synthetics[1].Get()};
++    upload_pattern(fixture, sources[0].Get(), a);
++    upload_pattern(fixture, sources[1].Get(), b);
++    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++    require_hresult(history->initialize(fixture.device(), fixture.queue(), input,
++        D3D12_RESOURCE_STATE_RENDER_TARGET), "fast composition history");
++    xrfg::D3D12FrameSynthesizer synth;
++    require_hresult(synth.initialize(fixture.device(), fixture.queue(), history, current_out,
++        std::span<ID3D12Resource* const>(synthetic_out.data(), triple ? 2U : 1U), kFormat,
++        D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::nvidia, options),
++        "fast composition initialize");
++    const auto views = make_reprojection_views();
++    xrfg::D3D12HistoryCaptureTicket ca{}, cb{};
++    xrfg::D3D12FrameSynthesisTicket output{};
++    require_hresult(history->capture(0, &ca), "fast composition A");
++    require_hresult(history->commit(ca), "fast composition commit A");
++    synth.set_cockpit_mask(cockpit_mask[0]);
++    require_hresult(synth.submit_prime(ca, previous_views, 0, &output), "fast composition prime");
++    fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
++    require_hresult(history->capture(1, &cb), "fast composition B");
++    require_hresult(history->commit(cb), "fast composition commit B");
++    synth.set_cockpit_mask(cockpit_mask[1]);
++    require_hresult(triple
++            ? synth.submit_pair(cb, views, views, 0, 0, &output, std::nullopt, {}, false, 1.0F / 3.0F,
++                  xrfg::D3D12ExtraSynthetic{1, 2.0F / 3.0F})
++            : synth.submit_pair(cb, views, views, 0, 0, &output),
++        "fast composition pair");
++    std::vector<StereoPattern> images;
++    for (UINT index = 0; index < (triple ? 2U : 1U); ++index) {
++        images.push_back(readback_pattern(fixture, synthetics[index].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET));
++    }
++    require_hresult(synth.wait_for_idle(), "fast composition drain");
++    fixture.require_no_debug_errors();
++    return images;
++}
++
++// DCS Control (0033): the scenes the fast composition is compared on.
++struct FastCompositionScene {
++    std::string name;
++    StereoPattern previous;
++    StereoPattern current;
++    // The cockpit the mask covers (one byte a pixel, both eyes).
++    std::vector<std::uint8_t> cockpit;
++    // The previous capture's head yaw (radians) against the current one's.
++    float previous_yaw{};
++};
++
++// A world turning `degrees` about the image's centre behind still bars (a
++// canopy bow and a sill), as bench_occlusion_composition's roll; from row
++// `still_from` down the world does not turn.
++StereoPattern fast_composition_roll(UINT width, UINT height, double degrees, std::vector<std::uint8_t>* bars,
++    UINT still_from = 0xffffffffU) {
++    StereoPattern image;
++    const double cx = width * 0.5, cy = height * 0.5;
++    const double angle = degrees * 3.14159265358979 / 180.0;
++    const double ca = std::cos(angle), sa = std::sin(angle);
++    if (bars != nullptr) bars->assign(static_cast<std::size_t>(width) * height, 0);
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        auto& bytes = image[eye];
++        bytes.resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
++        for (UINT y = 0; y < height; ++y) {
++            for (UINT x = 0; x < width; ++x) {
++                const bool bar = (x >= width / 3 && x < width / 3 + 24) ||
++                    (y >= height * 3 / 4 && y < height * 3 / 4 + 20);
++                const double dx = x - cx, dy = y - cy;
++                const auto texel = bar ? occlusion_texture(x, y, 1)
++                    : y >= still_from ? occlusion_texture(x, y, 0)
++                                      : occlusion_texture(cx + ca * dx - sa * dy, cy + sa * dx + ca * dy, 0);
++                const std::size_t i = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
++                bytes[i] = texel[0];
++                bytes[i + 1] = texel[1];
++                bytes[i + 2] = texel[2];
++                bytes[i + 3] = 255;
++                if (bars != nullptr && eye == 0) (*bars)[static_cast<std::size_t>(y) * width + x] = bar ? 1 : 0;
++            }
++        }
++    }
++    return image;
++}
++
++// A still cockpit (a textured panel over the lower third, a canopy bow) over
++// a still world, with one object (`object_shift` px to the right of its
++// start) crossing it: most of the image has no motion at all.
++StereoPattern fast_composition_cockpit(UINT width, UINT height, int object_shift, std::vector<std::uint8_t>* panel) {
++    StereoPattern image;
++    if (panel != nullptr) panel->assign(static_cast<std::size_t>(width) * height, 0);
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        auto& bytes = image[eye];
++        bytes.resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
++        for (UINT y = 0; y < height; ++y) {
++            for (UINT x = 0; x < width; ++x) {
++                const bool cockpit = y >= height * 2 / 3 || (x >= width / 4 && x < width / 4 + width / 40);
++                const int ox = static_cast<int>(x) - object_shift;
++                const bool object = !cockpit && ox >= static_cast<int>(width / 2) &&
++                    ox < static_cast<int>(width / 2 + width / 18) && y >= height / 5 && y < height / 5 + height / 26;
++                const auto texel = cockpit ? occlusion_texture(x, y, 1)
++                    : object ? occlusion_texture(ox, y, 1) : occlusion_texture(x, y, 0);
++                const std::size_t i = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
++                bytes[i] = texel[0];
++                bytes[i + 1] = texel[1];
++                bytes[i + 2] = texel[2];
++                bytes[i + 3] = 255;
++                if (panel != nullptr && eye == 0) (*panel)[static_cast<std::size_t>(y) * width + x] = cockpit ? 1 : 0;
++            }
++        }
++    }
++    return image;
++}
++
++// XRFG_TEST_FAST_COMPOSITION=1 (the xrfg_d3d12_fast_composition test; skipped
++// without NVIDIA hardware): every scene composed with [ofxr] fast_composition
++// off and on, at each nvidia_occlusion_aware level, with and without a cockpit
++// mask, with and without the bidirectional flow, on both presets (Fast reads
++// the stationary and endpoint checks), and 3X at a third and two thirds:
++// every channel of every pixel the same within 1/255, and the largest
++// difference printed. A view with a single still tile is drawn with the
++// still-tile composition here (XRFG_TEST_STILL_TILES_ANY), so its path is
++// compared wherever any tile qualifies, not only from an eighth of them.
++void run_fast_composition_equivalence() {
++    SetEnvironmentVariableW(L"XRFG_TEST_STILL_TILES_ANY", L"1");
++    D3D12WarpFixture fixture(true);
++    constexpr UINT width = 1024, height = 768;
++    constexpr UINT kMaskDivisor = 8;
++    const ReprojectionViews mask_views = make_reprojection_views();
++    std::vector<FastCompositionScene> scenes;
++    const auto canopy = occlusion_scene(width, height, 2, 0).foreground;
++    {
++        FastCompositionScene scene{"static", occlusion_scene(width, height, 0, 0).image, {}, canopy};
++        scene.current = scene.previous;
++        scenes.push_back(std::move(scene));
++    }
++    {
++        FastCompositionScene scene{"head_turn", occlusion_scene(width, height, 2, 0).image, {}, canopy, 0.02F};
++        scene.current = scene.previous;
++        scenes.push_back(std::move(scene));
++    }
++    {
++        std::vector<std::uint8_t> bars;
++        auto previous = fast_composition_roll(width, height, 0.0, &bars);
++        scenes.push_back({"rolling_world", std::move(previous), fast_composition_roll(width, height, 1.0, nullptr), bars});
++    }
++    for (int kind : {0, 3, 4}) {
++        const auto previous = occlusion_scene(width, height, kind, 0);
++        scenes.push_back({std::string("moving_") + kOcclusionMotions[static_cast<std::size_t>(kind)].name,
++            previous.image, occlusion_scene(width, height, kind, 2).image, canopy});
++    }
++    {
++        const auto previous = occlusion_scene(width, height, 2, 0);
++        scenes.push_back({"cockpit_mask", previous.image, occlusion_scene(width, height, 2, 2).image,
++            previous.foreground});
++    }
++    {
++        std::vector<std::uint8_t> panel;
++        auto previous = fast_composition_cockpit(width, height, 0, &panel);
++        scenes.push_back({"still_cockpit", std::move(previous), fast_composition_cockpit(width, height, 20, nullptr), panel});
++    }
++    {
++        // Static HUD strokes over a moving background, and sparse moving
++        // objects over a still dark area (fast_control_pattern's kinds 1, 2).
++        std::vector<std::uint8_t> hud(static_cast<std::size_t>(width) * height, 0);
++        for (UINT y = height / 3; y < height * 2 / 3; ++y)
++            for (UINT x = width / 6 + 1; x < width * 5 / 6; ++x) hud[static_cast<std::size_t>(y) * width + x] = 1;
++        scenes.push_back({"hud_lines", fast_control_pattern(width, height, 0, 1),
++            fast_control_pattern(width, height, 24, 1), hud});
++        scenes.push_back({"sparse_objects", fast_control_pattern(width, height, 0, 2),
++            fast_control_pattern(width, height, 24, 2), canopy});
++    }
++    const auto preset_name = [](xrfg::D3D12NvidiaPerformancePreset preset) {
++        return preset == xrfg::D3D12NvidiaPerformancePreset::fast ? "fast" : "medium";
++    };
++    int worst_overall = 0;
++    std::size_t compared = 0;
++    for (const FastCompositionScene& scene : scenes) {
++        const auto mask = make_cockpit_mask_frame(fixture, width, height, scene.cockpit, kMaskDivisor, mask_views);
++        const ReprojectionViews previous_views = make_reprojection_views(scene.previous_yaw);
++        int worst_scene = 0;
++        std::size_t differing_scene = 0;
++        int combinations = 0;
++        for (auto preset : {xrfg::D3D12NvidiaPerformancePreset::medium, xrfg::D3D12NvidiaPerformancePreset::fast}) {
++            for (bool bidirectional : {false, true}) {
++                for (std::uint32_t level = 0; level < 4; ++level) {
++                    for (int masked = 0; masked < 2; ++masked) {
++                        for (bool triple : {false, true}) {
++                            // 3X on the defaults' shape (Medium, one-way) only.
++                            if (triple && (preset != xrfg::D3D12NvidiaPerformancePreset::medium || bidirectional)) {
++                                continue;
++                            }
++                            xrfg::D3D12NvidiaOpticalFlowOptions options;
++                            options.preset = preset;
++                            options.bidirectional = bidirectional;
++                            options.occlusion_aware = level;
++                            options.cockpit_mask = true;
++                            std::array<std::shared_ptr<xrfg::D3D12CockpitMaskFrame>, 2> frames{};
++                            if (masked != 0) frames = {mask, mask};
++                            const auto before = synthesize_fast_composition_pair(fixture, scene.previous,
++                                scene.current, width, height, options, frames, triple, previous_views);
++                            options.fast_composition = true;
++                            const auto after = synthesize_fast_composition_pair(fixture, scene.previous,
++                                scene.current, width, height, options, frames, triple, previous_views);
++                            int worst = 0;
++                            std::size_t differing = 0;
++                            for (std::size_t output = 0; output < before.size(); ++output) {
++                                for (UINT eye = 0; eye < kEyeCount; ++eye) {
++                                    const auto& x = before[output][eye];
++                                    const auto& y = after[output][eye];
++                                    require(x.size() == y.size(), "fast composition: image sizes differ");
++                                    for (std::size_t i = 0; i < x.size(); ++i) {
++                                        const int difference = std::abs(int(x[i]) - int(y[i]));
++                                        worst = std::max(worst, difference);
++                                        differing += difference != 0 ? 1U : 0U;
++                                    }
++                                    compared += x.size();
++                                }
++                            }
++                            if (worst != 0) {
++                                std::cout << "fast composition scene=" << scene.name << " preset="
++                                          << preset_name(preset) << " bidirectional=" << bidirectional
++                                          << " level=" << level << " mask=" << masked << (triple ? " 3X" : " 2X")
++                                          << ": max difference " << worst << ", " << differing << " channels differ"
++                                          << std::endl;
++                            }
++                            require(worst <= 1, "fast composition differs by more than 1/255 on " + scene.name);
++                            worst_scene = std::max(worst_scene, worst);
++                            differing_scene += differing;
++                            ++combinations;
++                        }
++                    }
++                }
++            }
++        }
++        std::cout << "fast composition scene=" << scene.name << ": " << combinations
++                  << " combinations, max difference " << worst_scene << ", " << differing_scene
++                  << " channels differ" << std::endl;
++        worst_overall = std::max(worst_overall, worst_scene);
++    }
++    SetEnvironmentVariableW(L"XRFG_TEST_STILL_TILES_ANY", nullptr);
++    // And as shipped (from an eighth of a view's tiles still), at the app's
++    // defaults: the still cockpit, and the rolling world (no view still
++    // enough: the composition without the path).
++    for (std::size_t index : {std::size_t{0}, std::size_t{2}, std::size_t{7}}) {
++        const FastCompositionScene& scene = scenes[index];
++        const auto mask = make_cockpit_mask_frame(fixture, width, height, scene.cockpit, kMaskDivisor, mask_views);
++        for (int masked = 0; masked < 2; ++masked) {
++            xrfg::D3D12NvidiaOpticalFlowOptions options;
++            options.occlusion_aware = 1;
++            options.cockpit_mask = true;
++            std::array<std::shared_ptr<xrfg::D3D12CockpitMaskFrame>, 2> frames{};
++            if (masked != 0) frames = {mask, mask};
++            const ReprojectionViews previous_views = make_reprojection_views(scene.previous_yaw);
++            const auto before = synthesize_fast_composition_pair(fixture, scene.previous, scene.current, width,
++                height, options, frames, false, previous_views);
++            options.fast_composition = true;
++            const auto after = synthesize_fast_composition_pair(fixture, scene.previous, scene.current, width,
++                height, options, frames, false, previous_views);
++            int worst = 0;
++            for (UINT eye = 0; eye < kEyeCount; ++eye) {
++                for (std::size_t i = 0; i < before[0][eye].size(); ++i) {
++                    worst = std::max(worst, std::abs(int(before[0][eye][i]) - int(after[0][eye][i])));
++                }
++                compared += before[0][eye].size();
++            }
++            require(worst <= 1, "fast composition (as shipped) differs by more than 1/255 on " + scene.name);
++            worst_overall = std::max(worst_overall, worst);
++        }
++    }
++    std::cout << "fast composition equivalence: " << compared << " channels compared, max difference "
++              << worst_overall << "/255" << std::endl;
++}
++
++// XRFG_TEST_FAST_COMPOSITION_BENCH=1 on NVIDIA hardware: the composition's
++// GPU time per pair (the synthesis queue, the graphics engine) with [ofxr]
++// fast_composition off and on, driven alternately so both see the same
++// clocks, at the app's defaults (Medium, one-way, level 1, the cockpit mask
++// with `with_mask`). Scene 0: a still cockpit over a still world with one
++// object crossing (mostly no motion); scene 1: the world rolling behind still
++// bars (motion nearly everywhere); scenes 2 and 3: that with the lowest
++// quarter, or the lowest eighth and a half, of the world still. `triple`: 3X
++// in one pass.
++void bench_fast_composition(D3D12WarpFixture& fixture, UINT width, UINT height, int scene, bool with_mask,
++    bool triple = false) {
++    constexpr UINT kFrames = 3;
++    constexpr int kPairs = 240;
++    struct Pipeline {
++        std::array<ComPtr<ID3D12Resource>, kFrames> sources{};
++        std::array<ComPtr<ID3D12Resource>, 2> currents{};
++        std::array<ComPtr<ID3D12Resource>, 2> synthetics{};
++        std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
++        std::unique_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
++        std::vector<std::uint64_t> composition;
++        std::vector<std::uint64_t> total;
++    };
++    std::array<StereoPattern, kFrames> frames{};
++    std::vector<std::uint8_t> cockpit;
++    for (UINT frame = 0; frame < kFrames; ++frame) {
++        frames[frame] = scene == 0
++            ? fast_composition_cockpit(width, height, static_cast<int>(frame) * 20, frame == 0 ? &cockpit : nullptr)
++            : fast_composition_roll(width, height, 0.4 * frame, frame == 0 ? &cockpit : nullptr,
++                  scene == 2 ? height * 3U / 4U : scene == 3 ? height * 13U / 16U : 0xffffffffU);
++    }
++    std::array<Pipeline, 2> pipelines{};
++    for (UINT index = 0; index < pipelines.size(); ++index) {
++        Pipeline& pipeline = pipelines[index];
++        for (UINT frame = 0; frame < kFrames; ++frame) {
++            pipeline.sources[frame] = create_source_texture(fixture, width, height);
++            upload_pattern(fixture, pipeline.sources[frame].Get(), frames[frame]);
++        }
++        for (auto& c : pipeline.currents) c = create_source_texture(fixture, width, height);
++        for (auto& s : pipeline.synthetics) s = create_source_texture(fixture, width, height);
++        std::array<ID3D12Resource*, kFrames> source_pointers{};
++        for (UINT i = 0; i < kFrames; ++i) source_pointers[i] = pipeline.sources[i].Get();
++        std::array<ID3D12Resource*, 2> current_pointers{pipeline.currents[0].Get(), pipeline.currents[1].Get()};
++        std::array<ID3D12Resource*, 2> synthetic_pointers{pipeline.synthetics[0].Get(), pipeline.synthetics[1].Get()};
++        pipeline.history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++        require(operation_succeeded(pipeline.history->initialize(fixture.device(), fixture.queue(),
++                    std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
++                    D3D12_RESOURCE_STATE_RENDER_TARGET)), "fast composition bench: history");
++        xrfg::D3D12NvidiaOpticalFlowOptions options{};
++        options.occlusion_aware = 1;
++        options.cockpit_mask = with_mask;
++        options.fast_composition = index == 1;
++        pipeline.synthesizer = std::make_unique<xrfg::D3D12FrameSynthesizer>();
++        require(operation_succeeded(pipeline.synthesizer->initialize(fixture.device(), fixture.queue(),
++                    pipeline.history,
++                    std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
++                    std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
++                    kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
++                    xrfg::D3D12OpticalFlowBackend::nvidia, options, true)), "fast composition bench: synthesizer");
++    }
++    const ReprojectionViews views = make_reprojection_views();
++    std::array<std::shared_ptr<xrfg::D3D12CockpitMaskFrame>, 2> masks{};
++    if (with_mask) {
++        for (auto& mask : masks) mask = make_cockpit_mask_frame(fixture, width, height, cockpit, 8, views);
++    }
++    for (int frame = 0; frame <= kPairs; ++frame) {
++        const UINT slot = static_cast<UINT>(frame) % kFrames;
++        for (Pipeline& pipeline : pipelines) {
++            xrfg::D3D12HistoryCaptureTicket capture{};
++            xrfg::D3D12FrameSynthesisTicket ticket{};
++            require(operation_succeeded(pipeline.history->capture(slot, &capture)) &&
++                        operation_succeeded(pipeline.history->commit(capture)), "fast composition bench: capture");
++            if (with_mask) pipeline.synthesizer->set_cockpit_mask(masks[static_cast<std::size_t>(frame) % 2U]);
++            const HRESULT submitted = frame == 0
++                ? pipeline.synthesizer->submit_prime(capture, views, 0, &ticket)
++                : triple
++                ? pipeline.synthesizer->submit_pair(capture, views, views, 0, 1, &ticket, std::nullopt, {}, false,
++                      1.0F / 3.0F, xrfg::D3D12ExtraSynthetic{1, 2.0F / 3.0F})
++                : pipeline.synthesizer->submit_pair(capture, views, views, 0,
++                      static_cast<std::uint32_t>(frame % 2), &ticket, std::nullopt, {}, false, 0.5F);
++            require(operation_succeeded(submitted), "fast composition bench: submission");
++            require_frame_start_gate(*pipeline.synthesizer, "fast composition bench: frame-start gate");
++            xrfg::D3D12NvidiaGpuTiming timing{};
++            while (pipeline.synthesizer->consume_nvidia_gpu_timing(&timing) == S_OK) {
++                if (timing.previous_serial == 0) continue;
++                pipeline.composition.push_back(timing.composition_microseconds);
++                pipeline.total.push_back(timing.total_microseconds);
++            }
++        }
++    }
++    require(operation_succeeded(pipelines[0].synthesizer->wait_for_idle()) &&
++                operation_succeeded(pipelines[1].synthesizer->wait_for_idle()), "fast composition bench: idle");
++    const auto median = [](std::vector<std::uint64_t> values) -> std::uint64_t {
++        if (values.empty()) return 0;
++        std::sort(values.begin(), values.end());
++        return values[values.size() / 2];
++    };
++    std::cout << "fast composition bench "
++              << (scene == 0 ? "still_cockpit" : scene == 1 ? "rolling_world"
++                  : scene == 2 ? "rolling_world_quarter_still" : "rolling_world_3/16_still")
++              << (with_mask ? " mask" : " no-mask") << (triple ? " 3X" : " 2X") << ' ' << width << "x" << height
++              << " x2 eyes: composition median off " << median(pipelines[0].composition) << " us, on "
++              << median(pipelines[1].composition) << " us (" << pipelines[1].composition.size()
++              << " pairs); whole pair median off " << median(pipelines[0].total) << " us, on "
++              << median(pipelines[1].total) << " us" << std::endl;
++}
++
++// DCS Control (0033): the GPU time of one full copy of a synthetic (both eyes,
++// RGBA8) on the graphics queue: what composing on an async compute queue
++// would add, since the runtime's sRGB swapchain images take no unordered
++// access and the composition would have to write an intermediate and copy it.
++// (At 2712 x 2678 both images fit in a large GPU's L2 cache here, which a
++// game's frame would not leave them.)
++void bench_synthetic_copy(D3D12WarpFixture& fixture, UINT width, UINT height) {
++    // Textured content (an image the hardware cannot compress away).
++    auto source = create_source_texture(fixture, width, height);
++    upload_pattern(fixture, source.Get(), fast_composition_roll(width, height, 0.0, nullptr));
++    auto destination = create_source_texture(fixture, width, height);
++    D3D12_QUERY_HEAP_DESC heap_description{};
++    heap_description.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
++    heap_description.Count = 2;
++    ComPtr<ID3D12QueryHeap> heap;
++    require_hresult(fixture.device()->CreateQueryHeap(&heap_description, IID_PPV_ARGS(heap.GetAddressOf())),
++        "copy bench query heap");
++    auto readback = create_buffer(fixture, D3D12_HEAP_TYPE_READBACK, 16, D3D12_RESOURCE_STATE_COPY_DEST);
++    UINT64 frequency = 0;
++    require_hresult(fixture.queue()->GetTimestampFrequency(&frequency), "copy bench frequency");
++    std::vector<std::uint64_t> times;
++    for (int run = 0; run < 60; ++run) {
++        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
++            const std::array<D3D12_RESOURCE_BARRIER, 2> before{
++                transition_barrier(source.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
++                    D3D12_RESOURCE_STATE_COPY_SOURCE),
++                transition_barrier(destination.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
++                    D3D12_RESOURCE_STATE_COPY_DEST)};
++            const std::array<D3D12_RESOURCE_BARRIER, 2> after{
++                transition_barrier(source.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
++                    D3D12_RESOURCE_STATE_RENDER_TARGET),
++                transition_barrier(destination.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
++                    D3D12_RESOURCE_STATE_RENDER_TARGET)};
++            list->ResourceBarrier(2, before.data());
++            list->EndQuery(heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
++            list->CopyResource(destination.Get(), source.Get());
++            list->EndQuery(heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
++            list->ResourceBarrier(2, after.data());
++            list->ResolveQueryData(heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, readback.Get(), 0);
++        });
++        std::uint64_t* mapped = nullptr;
++        require_hresult(readback->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "copy bench map");
++        times.push_back((mapped[1] - mapped[0]) * 1000000ULL / frequency);
++        readback->Unmap(0, nullptr);
++    }
++    std::sort(times.begin(), times.end());
++    std::cout << "synthetic copy bench " << width << "x" << height << " x2 eyes: median "
++              << times[times.size() / 2] << " us per synthetic" << std::endl;
++}

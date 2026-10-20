@@ -1,0 +1,2719 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -967,6 +967,28 @@
+                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/adaptive-frame-gen"
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_adaptive_frame_gen.cmake")
+         set_tests_properties(xrfg_layer_adaptive_frame_gen PROPERTIES TIMEOUT 120)
++        # DCS Control (0032): the same with `adaptive_cadence=0` written out:
++        # whole-mode 2X/3X exactly as with no key.
++        add_test(
++            NAME xrfg_layer_adaptive_frame_gen_cadence_off
++            COMMAND "${CMAKE_COMMAND}"
++                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                "-DADAPTIVE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_adaptive_cadence_off.ini"
++                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/adaptive-frame-gen-cadence-off"
++                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_adaptive_frame_gen.cmake")
++        set_tests_properties(xrfg_layer_adaptive_frame_gen_cadence_off PROPERTIES TIMEOUT 120)
++        # DCS Control (0032): adaptive cadence - each application frame's own
++        # synthetics, alternating one and two, in 2X's shape.
++        add_test(
++            NAME xrfg_layer_adaptive_cadence
++            COMMAND "${CMAKE_COMMAND}"
++                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                "-DCADENCE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_adaptive_cadence.ini"
++                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/adaptive-cadence"
++                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_adaptive_cadence.cmake")
++        set_tests_properties(xrfg_layer_adaptive_cadence PROPERTIES TIMEOUT 120)
+         # DCS VR Control (0004): adaptive control judges throughput, not
+         # pipeline latency. An application whose frames take far longer end to
+         # end than either its CPU or its GPU needs per frame goes to 2X; one
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -179,6 +179,20 @@
+     // turned on (a=0) or off (b=0). a= the multiplier before, b= after, c= the
+     // p90 in microseconds that decided it (0004: of max(CPU, GPU) per
+     // application frame, see adaptive_throughput; 0 when not measured).
++    // 6 (0007) a probe of 2X, 7 (0007) the probe failed.
++    // DCS Control (0032), adaptive cadence (`[ofxr] adaptive_cadence`), where
++    // a and b are cadence levels (1 = 1X, 2 = the 2/3 cadence):
++    //   8  2 -> 1X: a=2 b=1, c= the p90 GPU time at 1X (GPU less synthesis)
++    //      that let it in, us
++    //   9  1X -> 2 on missed slots: a=1 b=2, c= the missed-slot episodes in
++    //      the last second
++    //   10 1X -> 2 on work: a=1 b=2, c= the p90 of max(CPU, GPU) over the
++    //      last half second, us (over 95% of the period)
++    //   11 1X -> 2 on a scene change: a=1 b=2 c=0
++    //   12 1X -> 2 because adaptive cadence stopped: a=1 b=2 c=0
++    //   13 adaptive cadence turned on (a=0, b= the multiplier, 2) or off
++    //      (a= the multiplier, b=0); or, a=3 b=2, the switch into its 2X
++    //      shape from 3X.
+     adaptive_switch,
+     // DCS VR Control. Once a second while the presenter runs: result= the
+     // frame multiplier, plus 10 under adaptive control; a= the p90 over that
+@@ -186,11 +200,15 @@
+     // application frame (see adaptive_throughput), in microseconds, 0
+     // without samples; b= judged frames in bits 0-15, missed slots in bits
+     // 16-31; c= the display time correction in microseconds.
++    // DCS Control (0032): under adaptive cadence the multiplier is 2 (its
++    // shape; the frames' own cadences are in adaptive_throughput result=6),
++    // and 1 at 1X: result 11.
+     latency_status,
+     // DCS VR Control. The display time the application is told moved: result=
+     // the median residual that moved it, real presentation minus told, in
+     // microseconds (signed); a= the correction before, b= after, both in
+-    // microseconds; c= the shape (0 2X, 1 2X deep, 2 3X).
++    // microseconds; c= the shape (0 2X, 1 2X deep, 2 3X; 3-6 3X with 1-4
++    // deeper-pipeline slots; DCS Control 0032: 7 adaptive cadence's 1X).
+     display_time_correction,
+     // DCS VR Control (0004). Once a second under adaptive control, beside
+     // latency_status, over the same second; all times p90s in microseconds,
+@@ -226,6 +244,17 @@
+     //     latest scheduler sample: a= this process's busiest engine, b= the
+     //     adapter's busiest engine (every process), c= the adapter's load
+     //     projected to 2X (see projected_gpu_load_at_double_rate).
++    //   result=6 (DCS Control 0032), once a second under adaptive cadence
++    //     (xrfg::latency::CadenceController), over that second: a=
++    //     application frames queued by their own cadence, 16 bits each: 1X
++    //     (bits 0-15), 2 (16-31), 3 (32-47), and late - told more periods
++    //     after the frame before than its cadence, a slot the presenter lost
++    //     carried (48-63); b= the controller's prediction at the last frame,
++    //     p90 of max(CPU, GPU) in us (bits 0-31), and the p90 GPU time at 1X
++    //     (GPU less synthesis), us (32-63); c= changes of the controller's
++    //     cadence (bits 0-15), the 1X backoff in force in seconds (16-31),
++    //     seconds until 1X may next be entered (32-47), and slots missed at
++    //     1X - scanouts the runtime skipped and late hand-overs (48-63).
+     adaptive_throughput,
+     // DCS VR Control (0006). The presenter's submissions timed from the
+     // return of the runtime's xrWaitFrame for their slot to the call into the
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -136,6 +136,16 @@
+ [[nodiscard]] bool read_adaptive_probe(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS Control (0032). `[ofxr] adaptive_cadence`: under adaptive_frame_gen=1,
++// the session keeps 2X's shape and each application frame gets the
++// synthetics its own interval needs - one or two - instead of one
++// multiplier for seconds at a time, and an application with room to spare
++// at the full rate is shown unchanged (1X); see
++// xrfg::latency::CadenceController. Off unless set to 1. Read once per
++// session.
++[[nodiscard]] bool read_adaptive_cadence(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // DCS VR Control (0007). `[ofxr] own_binding_queue`: a D3D11 session the
+ // bridge took over hands every runtime a queue of the layer's own, as it
+ // always did on SteamVR, so a submission waits on the GPU only for what it
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -28,6 +28,9 @@
+ //   measured_interpolation_fraction
+ //                              (DCS Control 0029) a synthetic's position
+ //                              from measured release times after a late frame
++//   CadenceController          (DCS Control 0032) under `[ofxr]
++//                              adaptive_cadence`, each application frame's
++//                              own cadence: 1, 2 or 3 display periods
+ //
+ // All times are nanoseconds on one monotonic timeline the caller chooses.
+ 
+@@ -545,6 +548,14 @@
+     enabled = 5,      // adaptive turned on or off (caller's record)
+     probe = 6,        // (0007) 3X -> 2X, trying 2X from a stable 3X
+     probe_failed = 7, // (0007) 2X -> 3X, the probe missed slots or ran slow
++    // DCS Control (0032): adaptive cadence (CadenceController), the
++    // caller's records. a= the level before, b= after, c= see each.
++    one_entered = 8,      // 2 -> 1X; c= the p90 GPU at 1X, us
++    one_left_late = 9,    // 1X -> 2, missed slots; c= their episodes
++    one_left_slow = 10,   // 1X -> 2, p90 work over the period; c= it, us
++    one_left_scene = 11,  // 1X -> 2, a scene change; c= 0
++    one_left_stopped = 12, // 1X -> 2, cadence or generation stopped; c= 0
++    cadence = 13,         // cadence on (a=0) or off (b=0), or its 2X shape
+ };
+ 
+ // DCS VR Control (0007): what a probe did; see AdaptiveConfig::probe.
+@@ -1237,4 +1248,244 @@
+         fraction < 0.0 ? 0.0 : (fraction > 1.0 ? 1.0 : fraction));
+ }
+ 
++// ---------------------------------------------------------------------------
++// DCS Control (0032): per-frame cadence (`[ofxr] adaptive_cadence=1`, under
++// adaptive_frame_gen=1).
++//
++// Adaptive 2X/3X picks one multiplier for seconds at a time. An application
++// that can render 40 frames a second at 90 Hz is then held to 30 in 3X, or
++// in 2X misses a slot every few frames and the headset sees the previous
++// frame again. Under adaptive cadence the session keeps 2X's shape (its
++// queue, its depth, its release steering) and every application frame has a
++// cadence N of its own:
++//
++//   - N is this controller's decision as it stands when the application
++//     waits for the frame (xrWaitFrame): 2 when its next frame is predicted
++//     to fit in two periods, 3 when not, 1 at 1X. The application is handed
++//     N periods; the frame carries N, makes N - 1 synthetics at k / N and is
++//     held N presenter frames once it is queued. What it queues is what the
++//     presenter takes before the next release, so the queue keeps its depth
++//     whatever the mix.
++//   - The display time it is told advances by N periods from the frame
++//     before's (cadence_told_time), plus every slot the presenter lost in
++//     between (one the runtime skipped, one shown again) and less what a
++//     frame queued short of its own N (a prime, a pass-through). The queue
++//     is first in, first out, so the real frame lands exactly there, through
++//     every change of N.
++//   - 1X: an application with room to spare at the full rate is shown
++//     unchanged, one frame per period, no synthesis at all.
++//
++// A frame that turns out late anyway is shown where the slot it missed puts
++// it: its synthetics are placed by the measured interval (DCS Control 0029),
++// and the frames told after it carry the lost slot.
++//
++// The prediction is the p90 of max(CPU, GPU) per application frame (the
++// evidence AdaptiveFrameGenController judges) over the last `window`:
++//   2 -> 3   over up_fraction of two periods, or up_late_episodes missed-slot
++//            episodes at 2 within late_window
++//   3 -> 2   at most down_fraction of two periods, and a run of decisions at
++//            3 behind it: min_run_three, doubled (up to max_run_three) each
++//            time missed slots bring 3 back within flap_window of leaving
++//            it, back to min_run_three once 2 has held that long
++// so it does not flap on a margin (the 10-point band) or on an application
++// that cannot hold 2 for long (the run). Slots missed at 3 decide nothing:
++// there is nothing slower to go to.
++//
++// 1X, only ever from 2:
++//   enter   the p90s of CPU and of GPU at 1X (the GPU less the layer's
++//           synthesis, which 1X frees; its copies stay) both at most
++//           one_enter_fraction of the period, continuously for
++//           one_enter_hold with no missed slot, and one_spacing since the
++//           last change into or out of 1X (or the backoff, if longer)
++//   leave   one_exit_episodes missed-slot episodes within late_window, or the
++//           p90 over one_exit_window above one_exit_fraction of the period,
++//           or a scene change (at once); nothing is judged, and no sample or
++//           miss counts, in the first one_grace after entering. Back at 2,
++//           the misses 1X had are forgotten (they would send it on to 3)
++//   backoff an attempt that ends within one_failed_within (not by a scene
++//           change or a stop) failed: the next waits one_backoff_first, then
++//           twice that each time up to one_backoff_max; 1X held for
++//           one_reset_after clears it
++//
++// Cost: one decision per application frame, two small sorts of at most
++// kSamples values - about a microsecond on the xrEndFrame thread. No GPU
++// work. All times are nanoseconds on the caller's monotonic timeline.
++struct CadenceConfig {
++    Nanoseconds window{500 * kMillisecond};
++    std::uint32_t min_samples{6};
++    double up_fraction{0.95};
++    double down_fraction{0.85};
++    std::uint32_t min_run_three{10};
++    std::uint32_t max_run_three{640};
++    Nanoseconds flap_window{5 * kSecond};
++    Nanoseconds late_episode_gap{100 * kMillisecond};
++    Nanoseconds late_window{1 * kSecond};
++    std::uint32_t up_late_episodes{2};
++    Nanoseconds stall{250 * kMillisecond};
++    bool one_enabled{true};
++    double one_enter_fraction{0.80};
++    Nanoseconds one_enter_hold{5 * kSecond};
++    Nanoseconds one_spacing{15 * kSecond};
++    double one_exit_fraction{0.95};
++    Nanoseconds one_exit_window{500 * kMillisecond};
++    std::uint32_t one_exit_episodes{2};
++    Nanoseconds one_grace{1 * kSecond};
++    Nanoseconds one_failed_within{30 * kSecond};
++    Nanoseconds one_backoff_first{30 * kSecond};
++    Nanoseconds one_backoff_max{240 * kSecond};
++    Nanoseconds one_reset_after{60 * kSecond};
++};
++
++enum class CadenceEvent : std::uint32_t {
++    none = 0,
++    one_entered = 1,
++    one_left_late = 2,
++    one_left_slow = 3,
++    one_left_scene = 4,
++    one_left_stopped = 5,
++};
++
++struct CadenceStep {
++    // The cadence in force after this step (1, 2 or 3) and before it.
++    std::uint32_t level{2};
++    std::uint32_t previous{2};
++    CadenceEvent event{CadenceEvent::none};
++    // Over `window`: p90 of max(CPU, GPU), of CPU, and of GPU at 1X (the GPU
++    // less synthesis); -1 without samples.
++    Nanoseconds predicted{-1};
++    Nanoseconds predicted_cpu{-1};
++    Nanoseconds predicted_gpu_one{-1};
++    // Missed-slot episodes over late_window, since the level was entered.
++    std::uint32_t late_episodes{};
++    // The run of decisions at 3 a return to 2 needs now.
++    std::uint32_t run_required{};
++    // The 1X backoff in force (0: none), and when 1X may next be entered.
++    Nanoseconds backoff{};
++    Nanoseconds one_allowed_at{};
++};
++
++class CadenceController {
++public:
++    static constexpr std::size_t kSamples = 128;
++    static constexpr std::size_t kLateEvents = 64;
++
++    explicit CadenceController(CadenceConfig config = {}) noexcept;
++
++    // Starts over at 2, forgetting everything, the 1X backoff included.
++    void start(Nanoseconds now) noexcept;
++    // One application frame: its CPU time, its GPU time (negative: not
++    // measured) and, of that, the layer's synthesis (negative: none known).
++    // A negative CPU time, or either time over the stall bound, is ignored.
++    void add_frame(
++        Nanoseconds at,
++        Nanoseconds cpu,
++        Nanoseconds gpu,
++        Nanoseconds synthesis) noexcept;
++    // Missed slots at `at`, counted as episodes (late_episode_gap).
++    void add_late(Nanoseconds at, std::uint32_t count = 1) noexcept;
++    // Once per application frame. A non-positive period decides nothing.
++    CadenceStep decide(Nanoseconds now, Nanoseconds period) noexcept;
++    // A scene change: 1X is left at once, and every sample and missed slot
++    // is forgotten (the backoff is kept).
++    CadenceStep scene_changed(Nanoseconds now) noexcept;
++    // Cadence or generation stopped: 1X, if in force, is left; back to 2.
++    CadenceStep stop(Nanoseconds now) noexcept;
++
++    [[nodiscard]] std::uint32_t level() const noexcept { return level_; }
++    [[nodiscard]] Nanoseconds backoff() const noexcept { return backoff_; }
++    [[nodiscard]] Nanoseconds one_allowed_at() const noexcept {
++        return one_allowed_at_;
++    }
++
++private:
++    struct Sample {
++        Nanoseconds at{};
++        Nanoseconds cpu{};
++        Nanoseconds gpu{-1};
++        Nanoseconds synthesis{-1};
++    };
++    struct WindowStats {
++        Nanoseconds judged{-1};
++        Nanoseconds cpu{-1};
++        Nanoseconds gpu_one{-1};
++        std::uint32_t judged_samples{};
++        std::uint32_t gpu_samples{};
++    };
++    [[nodiscard]] WindowStats window_stats(
++        Nanoseconds from, Nanoseconds now) const noexcept;
++    [[nodiscard]] std::uint32_t late_episodes_between(
++        Nanoseconds from, Nanoseconds now) const noexcept;
++    void leave_one(Nanoseconds now, CadenceEvent event, CadenceStep& step) noexcept;
++    void fill(CadenceStep& step) const noexcept;
++
++    CadenceConfig config_;
++    std::uint32_t level_{2};
++    std::uint32_t run_three_{};
++    // When the level in force was entered; the last 3 -> 2 (-1: none); the
++    // run of decisions at 3 a return to 2 needs (flap protection).
++    Nanoseconds level_since_{};
++    Nanoseconds last_down_at_{-1};
++    std::uint32_t run_required_{};
++    std::array<Sample, kSamples> samples_{};
++    std::size_t sample_count_{};
++    std::size_t sample_next_{};
++    std::array<Nanoseconds, kLateEvents> late_at_{};
++    std::size_t late_count_{};
++    std::size_t late_next_{};
++    // Since when the 1X entry test has held; -1 when it does not.
++    Nanoseconds one_fit_since_{-1};
++    Nanoseconds one_entered_at_{-1};
++    Nanoseconds one_allowed_at_{};
++    Nanoseconds backoff_{};
++};
++
++// DCS Control (0032): the display time a frame of cadence `frames` is told,
++// from the one the frame before was told (`previous`, 0 for none), the slots
++// the presenter lost or gained since (`slip`, in periods: a slot the runtime
++// skipped or one shown again is +1, a frame that queued one short of its
++// cadence -1), and the presenter's own estimate (`estimate`: the prediction
++// at the application's release plus the frame's periods). The estimate where
++// there is no previous one, or where the two have drifted more than two
++// periods apart; the advanced time otherwise.
++[[nodiscard]] constexpr Nanoseconds cadence_told_time(
++    Nanoseconds previous,
++    std::uint32_t frames,
++    std::int64_t slip,
++    Nanoseconds estimate,
++    Nanoseconds period) noexcept {
++    if (previous <= 0 || period <= 0) {
++        return estimate;
++    }
++    const Nanoseconds advanced = previous +
++        (static_cast<Nanoseconds>(frames) + slip) * period;
++    const Nanoseconds apart =
++        advanced > estimate ? advanced - estimate : estimate - advanced;
++    return apart > 2 * period || advanced <= previous ? estimate : advanced;
++}
++
++// DCS Control (0032): how many of the presenter's submissions may still be
++// outstanding when a frame of cadence `frames` is prepared after one of
++// `previous` submissions, so that no private image it is about to write is
++// still named by one. The current ring alternates two slots, so the frame
++// before last must have gone (outstanding <= previous); the synthetic ring
++// has two slots - a frame of 3 takes both, so the previous frame's
++// synthetics must have gone as well (<= 1), and a frame of 2 after one of 3
++// takes the slot that one's first synthetic took (<= previous - 1). The
++// shallow pipeline keeps its bound of one.
++[[nodiscard]] constexpr std::size_t cadence_admission_bound(
++    std::uint32_t frames,
++    std::uint32_t previous,
++    bool deep_pipeline) noexcept {
++    if (!deep_pipeline || previous == 0) {
++        return 1;
++    }
++    std::size_t bound = previous;
++    if (frames >= 3 && previous >= 2) {
++        bound = 1;
++    } else if (frames == 2 && previous >= 3) {
++        bound = previous - 1;
++    }
++    return bound < 1 ? 1 : bound;
++}
++
+ } // namespace xrfg::latency
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -37,6 +37,12 @@
+ ; 2 min after a failed try) and keeps it when it holds. 1 on (default), 0 off.
+ ; A stall of a second or more (a mission load) starts it over.
+ adaptive_probe=1
++; Under adaptive_frame_gen=1: every game frame gets the generated frames its
++; own interval needs (one or two) instead of 2X or 3X for seconds at a time,
++; and a game with room to spare at the full refresh rate is shown as it is,
++; with no generated frames. 0 off (default), 1 on. Read when the game starts
++; its session.
++adaptive_cadence=0
+ ; 3X: while first synthetics keep missing their slot even with the deepest
+ ; pipeline, show the previous real frame in their slot instead (two fresh
+ ; frames in three). A last resort for a game below a third of the refresh
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -297,6 +297,11 @@
+     return read_ofxr_switch(module_directory, L"adaptive_probe", true);
+ }
+ 
++// DCS Control (0032): off unless set to 1.
++bool read_adaptive_cadence(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"adaptive_cadence", false);
++}
++
+ bool read_own_binding_queue(const std::filesystem::path& module_directory) noexcept {
+     return read_ofxr_switch(module_directory, L"own_binding_queue", true);
+ }
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -897,4 +897,296 @@
+     return others + process_load * 1.5;
+ }
+ 
++// ---------------------------------------------------------------------------
++// DCS Control (0032): per-frame cadence.
++
++namespace {
++
++// Nearest-rank p90 of the first n values of a cadence window (sorted in
++// place); -1 for none.
++[[nodiscard]] Nanoseconds cadence_p90(
++    std::array<Nanoseconds, CadenceController::kSamples>& values,
++    std::size_t n) noexcept {
++    if (n == 0) {
++        return -1;
++    }
++    std::sort(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(n));
++    const std::size_t rank = (n * 9 + 9) / 10; // ceil(0.9 n)
++    return values[std::max<std::size_t>(rank, 1) - 1];
++}
++
++[[nodiscard]] Nanoseconds fraction_of(double fraction, Nanoseconds value) noexcept {
++    return static_cast<Nanoseconds>(fraction * static_cast<double>(value));
++}
++
++} // namespace
++
++CadenceController::CadenceController(CadenceConfig config) noexcept
++    : config_(config) {
++    if (config_.min_samples == 0) {
++        config_.min_samples = 1;
++    }
++    config_.max_run_three = std::max(config_.max_run_three, config_.min_run_three);
++    run_required_ = config_.min_run_three;
++}
++
++void CadenceController::start(Nanoseconds now) noexcept {
++    level_ = 2;
++    run_three_ = 0;
++    level_since_ = now;
++    last_down_at_ = -1;
++    run_required_ = config_.min_run_three;
++    sample_count_ = 0;
++    sample_next_ = 0;
++    late_count_ = 0;
++    late_next_ = 0;
++    one_fit_since_ = -1;
++    one_entered_at_ = -1;
++    // Nothing into or out of 1X yet: the spacing does not apply.
++    one_allowed_at_ = now;
++    backoff_ = 0;
++}
++
++void CadenceController::add_frame(
++    Nanoseconds at,
++    Nanoseconds cpu,
++    Nanoseconds gpu,
++    Nanoseconds synthesis) noexcept {
++    if (cpu < 0 || cpu > config_.stall || gpu > config_.stall) {
++        return;
++    }
++    samples_[sample_next_] = Sample{at, cpu, gpu < 0 ? -1 : gpu,
++                                    synthesis < 0 ? -1 : synthesis};
++    sample_next_ = (sample_next_ + 1) % kSamples;
++    sample_count_ = std::min(sample_count_ + 1, kSamples);
++}
++
++void CadenceController::add_late(Nanoseconds at, std::uint32_t count) noexcept {
++    if (count == 0) {
++        return;
++    }
++    // A miss ends the 1X entry test's clean stretch, episode or not.
++    one_fit_since_ = -1;
++    if (late_count_ != 0) {
++        const Nanoseconds episode =
++            late_at_[(late_next_ + kLateEvents - 1) % kLateEvents];
++        if (at >= episode && at - episode < config_.late_episode_gap) {
++            return;
++        }
++    }
++    late_at_[late_next_] = at;
++    late_next_ = (late_next_ + 1) % kLateEvents;
++    late_count_ = std::min(late_count_ + 1, kLateEvents);
++}
++
++CadenceController::WindowStats CadenceController::window_stats(
++    Nanoseconds from, Nanoseconds now) const noexcept {
++    WindowStats stats{};
++    std::array<Nanoseconds, kSamples> judged{};
++    std::array<Nanoseconds, kSamples> cpu{};
++    std::array<Nanoseconds, kSamples> gpu_one{};
++    std::size_t judged_n = 0;
++    std::size_t cpu_n = 0;
++    std::size_t gpu_n = 0;
++    for (std::size_t index = 0; index < sample_count_; ++index) {
++        const Sample& sample = samples_[index];
++        if (sample.at <= from || sample.at > now) {
++            continue;
++        }
++        cpu[cpu_n++] = sample.cpu;
++        judged[judged_n++] = std::max(sample.cpu, sample.gpu);
++        if (sample.gpu >= 0) {
++            gpu_one[gpu_n++] = std::max<Nanoseconds>(
++                0, sample.gpu - std::max<Nanoseconds>(0, sample.synthesis));
++        }
++    }
++    stats.judged_samples = static_cast<std::uint32_t>(judged_n);
++    stats.gpu_samples = static_cast<std::uint32_t>(gpu_n);
++    stats.judged = cadence_p90(judged, judged_n);
++    stats.cpu = cadence_p90(cpu, cpu_n);
++    stats.gpu_one = cadence_p90(gpu_one, gpu_n);
++    return stats;
++}
++
++std::uint32_t CadenceController::late_episodes_between(
++    Nanoseconds from, Nanoseconds now) const noexcept {
++    std::uint32_t episodes = 0;
++    for (std::size_t index = 0; index < late_count_; ++index) {
++        if (late_at_[index] > from && late_at_[index] <= now) {
++            ++episodes;
++        }
++    }
++    return episodes;
++}
++
++void CadenceController::fill(CadenceStep& step) const noexcept {
++    step.level = level_;
++    step.run_required = run_required_;
++    step.backoff = backoff_;
++    step.one_allowed_at = one_allowed_at_;
++}
++
++void CadenceController::leave_one(
++    Nanoseconds now, CadenceEvent event, CadenceStep& step) noexcept {
++    const Nanoseconds held = one_entered_at_ >= 0 ? now - one_entered_at_ : 0;
++    const bool failed = held < config_.one_failed_within &&
++        (event == CadenceEvent::one_left_late ||
++         event == CadenceEvent::one_left_slow);
++    if (failed) {
++        backoff_ = backoff_ <= 0
++            ? config_.one_backoff_first
++            : std::min(backoff_ * 2, config_.one_backoff_max);
++    } else if (held >= config_.one_reset_after) {
++        backoff_ = 0;
++    }
++    one_allowed_at_ = now + std::max(config_.one_spacing, failed ? backoff_ : 0);
++    // Slots missed at 1X say nothing about 2: they would send it on to 3.
++    late_count_ = 0;
++    late_next_ = 0;
++    level_ = 2;
++    level_since_ = now;
++    run_three_ = 0;
++    one_fit_since_ = -1;
++    one_entered_at_ = -1;
++    step.event = event;
++}
++
++CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexcept {
++    CadenceStep step{};
++    step.previous = level_;
++    if (period <= 0) {
++        fill(step);
++        return step;
++    }
++    const Nanoseconds two_periods = period * 2;
++    if (level_ == 1) {
++        // Nothing from the first one_grace counts: the switch's own
++        // re-phasing.
++        const Nanoseconds judged_from = std::max(
++            now - config_.one_exit_window, one_entered_at_ + config_.one_grace);
++        const WindowStats stats = window_stats(judged_from, now);
++        step.predicted = stats.judged;
++        step.predicted_cpu = stats.cpu;
++        step.predicted_gpu_one = stats.gpu_one;
++        step.late_episodes = late_episodes_between(
++            std::max(now - config_.late_window,
++                     one_entered_at_ + config_.one_grace),
++            now);
++        if (now - one_entered_at_ >= config_.one_reset_after) {
++            backoff_ = 0;
++        }
++        if (now >= one_entered_at_ + config_.one_grace) {
++            if (step.late_episodes >= config_.one_exit_episodes) {
++                leave_one(now, CadenceEvent::one_left_late, step);
++            } else if (stats.judged_samples >= config_.min_samples &&
++                       stats.judged > fraction_of(config_.one_exit_fraction, period)) {
++                leave_one(now, CadenceEvent::one_left_slow, step);
++            }
++        }
++        fill(step);
++        return step;
++    }
++    const WindowStats stats = window_stats(now - config_.window, now);
++    step.predicted = stats.judged;
++    step.predicted_cpu = stats.cpu;
++    step.predicted_gpu_one = stats.gpu_one;
++    // Misses since the level was entered: at 2 they are 2's; at 3 they
++    // decide nothing.
++    step.late_episodes = late_episodes_between(
++        std::max(now - config_.late_window, level_since_), now);
++    const bool enough = stats.judged_samples >= config_.min_samples;
++    if (level_ == 2) {
++        const bool missed = step.late_episodes >= config_.up_late_episodes;
++        if (missed ||
++            (enough &&
++             stats.judged > fraction_of(config_.up_fraction, two_periods))) {
++            // Missing slots again within flap_window of leaving 3: 2 did not
++            // hold though the work said it would, so 3 is held twice as long
++            // this time. Work that grew is a change, not a flap.
++            run_required_ = missed && last_down_at_ >= 0 &&
++                    now - last_down_at_ < config_.flap_window
++                ? std::min(run_required_ * 2, config_.max_run_three)
++                : config_.min_run_three;
++            level_ = 3;
++            level_since_ = now;
++            run_three_ = 0;
++            one_fit_since_ = -1;
++            fill(step);
++            return step;
++        }
++        // 1X: from 2 only, on a clean stretch of one_enter_hold.
++        const Nanoseconds one_limit =
++            fraction_of(config_.one_enter_fraction, period);
++        const bool fits = config_.one_enabled && enough &&
++            stats.gpu_samples >= config_.min_samples &&
++            stats.cpu >= 0 && stats.cpu <= one_limit &&
++            stats.gpu_one >= 0 && stats.gpu_one <= one_limit &&
++            late_episodes_between(now - config_.late_window, now) == 0;
++        if (!fits) {
++            one_fit_since_ = -1;
++        } else if (one_fit_since_ < 0) {
++            one_fit_since_ = now;
++        }
++        if (fits && now - one_fit_since_ >= config_.one_enter_hold &&
++            now >= one_allowed_at_) {
++            level_ = 1;
++            level_since_ = now;
++            one_entered_at_ = now;
++            one_fit_since_ = -1;
++            // Into 1X counts as a change involving it.
++            one_allowed_at_ = now + config_.one_spacing;
++            step.event = CadenceEvent::one_entered;
++        }
++        fill(step);
++        return step;
++    }
++    // 3.
++    ++run_three_;
++    one_fit_since_ = -1;
++    if (run_three_ >= run_required_ && enough &&
++        stats.judged <= fraction_of(config_.down_fraction, two_periods)) {
++        level_ = 2;
++        level_since_ = now;
++        last_down_at_ = now;
++        run_three_ = 0;
++    }
++    fill(step);
++    return step;
++}
++
++CadenceStep CadenceController::scene_changed(Nanoseconds now) noexcept {
++    CadenceStep step{};
++    step.previous = level_;
++    if (level_ == 1) {
++        leave_one(now, CadenceEvent::one_left_scene, step);
++    }
++    level_ = 2;
++    level_since_ = now;
++    run_three_ = 0;
++    // A new scene: no flap record either.
++    last_down_at_ = -1;
++    run_required_ = config_.min_run_three;
++    sample_count_ = 0;
++    sample_next_ = 0;
++    late_count_ = 0;
++    late_next_ = 0;
++    one_fit_since_ = -1;
++    fill(step);
++    return step;
++}
++
++CadenceStep CadenceController::stop(Nanoseconds now) noexcept {
++    CadenceStep step{};
++    step.previous = level_;
++    if (level_ == 1) {
++        leave_one(now, CadenceEvent::one_left_stopped, step);
++    }
++    level_ = 2;
++    level_since_ = now;
++    run_three_ = 0;
++    one_fit_since_ = -1;
++    fill(step);
++    return step;
++}
++
+ } // namespace xrfg::latency
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -621,6 +621,14 @@
+ struct PendingApplicationFrame {
+     XrTime display_time{};
+     XrDuration display_period{};
++    // DCS Control (0032): under adaptive cadence (`cadence`), the frame's
++    // own cadence - its synthetics plus one, 1 at 1X - fixed at its
++    // xrWaitFrame, and the interval it was told since the frame before, in
++    // whole periods (more than its cadence: a lost slot carried, a late
++    // frame). 0 otherwise.
++    std::uint32_t frames{};
++    std::uint32_t told_periods{};
++    bool cadence{};
+ };
+ 
+ enum class GenerationQuarantineReason : std::int64_t {
+@@ -1004,6 +1012,9 @@
+     // The layer's own GPU time per frame, averaged over the last frames:
+     // synthesis and copy timings are harvested in bursts.
+     std::array<std::int64_t, 8> layer_ring{};
++    // DCS Control (0032): of it, synthesis alone (what 1X frees), averaged
++    // the same way.
++    std::array<std::int64_t, 8> synthesis_ring{};
+     // DCS VR Control (0006): the optical-flow engine waits, averaged the same
+     // way; logged, never judged.
+     std::array<std::int64_t, 8> optical_flow_ring{};
+@@ -1766,6 +1777,47 @@
+     // First synthetics handed over late in 3X, for adaptive control's status
+     // (AdaptiveStats::late_leaders); taken by the xrEndFrame thread.
+     std::atomic<std::uint32_t> adaptive_late_leaders{0};
++    // DCS Control (0032): adaptive cadence (`[ofxr] adaptive_cadence`, read
++    // once per session; see xrfg::latency::CadenceController). It runs while
++    // adaptive control does (cadence_running, written by the xrEndFrame
++    // thread): the session keeps 2X's shape, the controller (under
++    // adaptive_mutex) decides after each application frame the cadence the
++    // next one gets (cadence_hold: 1, 2 or 3), and the next xrWaitFrame
++    // takes it as that frame's own (PendingApplicationFrame::frames): its
++    // synthetics plus one, the periods it is handed and told, and the
++    // presenter frames the once-per-frame hold keeps it.
++    bool cadence_configured{};
++    std::atomic<bool> cadence_running{false};
++    std::atomic<std::uint32_t> cadence_hold{2};
++    xrfg::latency::CadenceController cadence_controller;
++    // The hold of the application's last release, which its display time
++    // counts from while that hold lasts (presenter_mutex). Outside adaptive
++    // cadence, frames_per_application_frame.
++    std::uint32_t application_release_frames{2};
++    // The display time the last frame was told, without the correction
++    // (presenter_mutex; 0: none, the next is anchored on the presenter's
++    // estimate), and the slots gained since - one per slot the presenter
++    // lost (the runtime skipped it, or the previous frame went out again),
++    // less what a frame queued short of its cadence - which the next frame's
++    // told time carries (see xrfg::latency::cadence_told_time).
++    XrTime cadence_told_base{};
++    std::atomic<std::int64_t> cadence_slip{0};
++    // The submissions the last application frame queued, for the admission
++    // bound (xrfg::latency::cadence_admission_bound). xrEndFrame thread.
++    std::uint32_t cadence_previous_frames{};
++    // Once a second, adaptive_throughput result=6: frames ended by their
++    // cadence (index 0: told more periods than that, 1-3: 1X, 2, 3) and
++    // changes of the controller's cadence (the xrEndFrame thread), and
++    // slots missed at 1X (the presenter's, from the runtime's predicted
++    // display times).
++    std::array<std::uint32_t, 4> cadence_frames_second{};
++    std::uint32_t cadence_changes_second{};
++    std::atomic<std::uint32_t> cadence_missed_second{0};
++    std::chrono::steady_clock::time_point cadence_status_at{};
++    // DCS Control (0032): synthesis's own GPU time, which layer_gpu_ns adds
++    // to the D3D11 bridge's copies: what 1X frees. Taken by the xrEndFrame
++    // thread.
++    std::atomic<std::int64_t> layer_synthesis_gpu_ns{0};
+     // Declared after everything its thread reports into, so it is destroyed
+     // (and its thread joined) before them.
+     std::unique_ptr<ReadinessProbe> readiness_probe;
+@@ -2247,10 +2299,13 @@
+ // that wait made a live DCS flight's synthesis read 7.4 ms for 1.5 ms of
+ // shader work - pushing adaptive control towards 3X. The waits go into
+ // layer_optical_flow_ns, logged beside it (adaptive_throughput result=3).
++// DCS Control (0032): and into layer_synthesis_gpu_ns, where given, the same
++// shader work again, kept apart from the D3D11 bridge's copies.
+ void log_completed_nvidia_gpu_timings(
+     std::atomic<std::int64_t>* layer_gpu_ns,
+     std::atomic<std::int64_t>* layer_optical_flow_ns,
+-    const std::shared_ptr<xrfg::D3D12FrameSynthesizer>& synthesizer) noexcept {
++    const std::shared_ptr<xrfg::D3D12FrameSynthesizer>& synthesizer,
++    std::atomic<std::int64_t>* layer_synthesis_gpu_ns = nullptr) noexcept {
+     if (!synthesizer) {
+         return;
+     }
+@@ -2282,6 +2337,9 @@
+         if (layer_gpu_ns != nullptr) {
+             layer_gpu_ns->fetch_add(split.shader);
+         }
++        if (layer_synthesis_gpu_ns != nullptr) {
++            layer_synthesis_gpu_ns->fetch_add(split.shader);
++        }
+         if (layer_optical_flow_ns != nullptr) {
+             layer_optical_flow_ns->fetch_add(split.optical_flow_wait);
+         }
+@@ -4100,6 +4158,15 @@
+         }
+         session->triple_switchable = false;
+         // Adaptive needs the ring this just gave up.
++        // DCS Control (0032): and so does adaptive cadence (its frames of 3).
++        if (session->cadence_running.exchange(false)) {
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::adaptive_switch,
++                static_cast<std::int64_t>(xrfg::latency::AdaptiveReason::cadence),
++                2,
++                0,
++                0);
++        }
+         if (session->adaptive_active.exchange(false)) {
+             xrfg::bridge_flight_logger().event(
+                 xrfg::BridgeFlightOperation::adaptive_switch,
+@@ -5323,7 +5390,13 @@
+     // Vulkan session never takes a presenter and stays at 3X's shallow depth.
+     state->triple_deep_supported =
+         state->graphics_binding == SessionGraphicsBinding::d3d12;
+-    if (triple_requested && triple_binding) {
++    // DCS Control (0032): adaptive cadence keeps 2X's shape, whatever
++    // triple_frame_gen says: each frame gets its own synthetics instead.
++    state->cadence_configured =
++        xrfg::implicit_layer::read_adaptive_cadence(current_layer_directory());
++    const bool cadence_requested =
++        state->cadence_configured && adaptive_requested && triple_binding;
++    if (triple_requested && triple_binding && !cadence_requested) {
+         state->frames_per_application_frame = 3;
+         state->deep_pipeline =
+             state->deep_pipeline_configured && state->triple_deep_supported;
+@@ -5355,6 +5428,19 @@
+             0,
+             state->frames_per_application_frame,
+             0);
++        // DCS Control (0032): and adaptive cadence with it.
++        if (cadence_requested) {
++            state->cadence_controller.start(
++                steady_nanoseconds(std::chrono::steady_clock::now()));
++            state->cadence_hold = 2;
++            state->cadence_running = true;
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::adaptive_switch,
++                static_cast<std::int64_t>(xrfg::latency::AdaptiveReason::cadence),
++                0,
++                state->frames_per_application_frame,
++                0);
++        }
+     }
+     state->display_time_corrector.mode = xrfg::latency::display_time_mode(
+         state->frames_per_application_frame, state->deep_pipeline);
+@@ -5723,6 +5809,10 @@
+     const bool use_continuous_presenter = continuous_presenter_active(state);
+     bool use_provisional_pipelined_wait = false;
+     bool forwarded_application_wait = false;
++    // DCS Control (0032): this frame's cadence under adaptive cadence (see
++    // PendingApplicationFrame::frames); 0 outside it.
++    std::uint32_t cadence_frames = 0;
++    std::uint32_t cadence_told_periods = 0;
+     if (!use_continuous_presenter && state->application_frame_in_progress) {
+         if (!state->application_frame_has_overlapping_wait) {
+             state->application_frame_has_overlapping_wait = true;
+@@ -5782,8 +5872,25 @@
+             state->presenter_stop_requested) {
+             return XR_ERROR_SESSION_NOT_RUNNING;
+         }
+-        const XrDuration virtual_period = (state->manual_control.stop_requested() || !state->menu_enabled)
++        const bool generation_off =
++            state->manual_control.stop_requested() || !state->menu_enabled;
++        // DCS Control (0032): adaptive cadence. The frame's own cadence is
++        // the controller's decision as it stands now (cadence_hold, 1, 2 or
++        // 3): it is handed that many periods - of the display's own, the
++        // smallest reported - and told a time that many later than the frame
++        // before (below). Re-anchored whenever it starts again.
++        const bool cadence = !generation_off && state->cadence_running.load();
++        const std::uint32_t cadence_level = cadence ? state->cadence_hold.load() : 0;
++        const XrDuration cadence_period = state->presenter_display_period > 0
++            ? state->presenter_display_period
++            : state->presenter_frame_state.predictedDisplayPeriod;
++        if (!cadence) {
++            state->cadence_told_base = 0;
++        }
++        const XrDuration virtual_period = generation_off
+             ? state->presenter_frame_state.predictedDisplayPeriod
++            : cadence
++            ? virtual_display_period(cadence_period, cadence_level)
+             : virtual_display_period(
+                 state->presenter_frame_state.predictedDisplayPeriod,
+                 state->frames_per_application_frame);
+@@ -5812,11 +5919,16 @@
+         // that is still this pair's; see application_release_display_time.
+         XrTime presenter_anchor =
+             state->presenter_frame_state.predictedDisplayTime;
+-        if (state->display_time_correction_enabled &&
++        // DCS Control (0032): for as long as that release's own hold lasts,
++        // which under adaptive cadence is 1, 2 or 3 frames - with or without
++        // the correction there: it is the estimate adaptive cadence's told
++        // time is anchored on.
++        if ((state->display_time_correction_enabled || cadence) &&
+             state->application_release_display_time != 0 &&
+             state->presenter_frame_serial >= state->application_release_serial &&
+             state->presenter_frame_serial - state->application_release_serial <
+-                state->frames_per_application_frame) {
++                (cadence ? state->application_release_frames
++                         : state->frames_per_application_frame.load())) {
+             presenter_anchor = state->application_release_display_time;
+         }
+         const XrTime anchor = add_display_duration(
+@@ -5842,13 +5954,36 @@
+         // comes back.
+         const XrTime ceiling = add_display_duration(anchor, virtual_period);
+         XrTime virtual_time = anchor;
+-        if (state->last_virtual_display_time != 0 &&
++        if (cadence) {
++            // DCS Control (0032): the display time the frame before was told
++            // (without the correction) plus this frame's periods, plus the
++            // slots the presenter lost since and less what a frame queued
++            // short of its cadence (cadence_slip): the queue is first in,
++            // first out, so the frame's real frame lands exactly there,
++            // whatever the mix of cadences. The estimate - the prediction at
++            // the release plus its periods - where there is no frame before,
++            // or the two drifted more than two periods apart (see
++            // xrfg::latency::cadence_told_time). Not the guard and the
++            // ceiling below: the drift bound is its own; the floor stands.
++            cadence_frames = cadence_level;
++            const XrTime estimate =
++                add_display_duration(presenter_anchor, virtual_period);
++            const XrTime base = static_cast<XrTime>(xrfg::latency::cadence_told_time(
++                static_cast<xrfg::latency::Nanoseconds>(state->cadence_told_base),
++                cadence_frames,
++                state->cadence_slip.exchange(0),
++                static_cast<xrfg::latency::Nanoseconds>(estimate),
++                static_cast<xrfg::latency::Nanoseconds>(cadence_period)));
++            state->cadence_told_base = base;
++            virtual_time = add_display_duration(base, display_time_correction);
++        }
++        if (!cadence && state->last_virtual_display_time != 0 &&
+             virtual_time <= state->last_virtual_display_time) {
+             virtual_time = add_display_duration(
+                 state->last_virtual_display_time,
+                 virtual_period);
+         }
+-        if (virtual_time > ceiling) {
++        if (!cadence && virtual_time > ceiling) {
+             xrfg::bridge_flight_logger().event(
+                 xrfg::BridgeFlightOperation::virtual_clock_clamp,
+                 0,
+@@ -5876,6 +6011,17 @@
+             virtual_time <= state->last_virtual_display_time) {
+             virtual_time = state->last_virtual_display_time + 1;
+         }
++        // DCS Control (0032): the interval told, in whole periods, for the
++        // second's record (more than the cadence: a late frame).
++        if (cadence) {
++            cadence_told_periods = state->last_virtual_display_time != 0 &&
++                    cadence_period > 0
++                ? static_cast<std::uint32_t>(std::min<XrDuration>(
++                      (virtual_time - state->last_virtual_display_time +
++                       cadence_period / 2) / cadence_period,
++                      255))
++                : cadence_frames;
++        }
+         state->last_virtual_display_time = virtual_time;
+         frame_state->predictedDisplayTime = virtual_time;
+         frame_state->predictedDisplayPeriod = virtual_period;
+@@ -6000,6 +6146,9 @@
+         state->pending_frames.push_back({
+             frame_state->predictedDisplayTime,
+             frame_state->predictedDisplayPeriod,
++            cadence_frames, // DCS Control (0032)
++            cadence_told_periods,
++            cadence_frames != 0,
+         });
+         constexpr std::size_t kMaximumPendingFrameRecords = 32;
+         while (state->pending_frames.size() > kMaximumPendingFrameRecords) {
+@@ -8941,9 +9090,33 @@
+         // application, at a time this thread does not know.
+         const auto wait_returned = std::chrono::steady_clock::now();
+         const bool slot_timed = !adopted_frame_state.has_value();
++        // DCS Control (0032): scanouts the runtime skipped, under adaptive
++        // cadence; recorded after the lock.
++        std::uint32_t cadence_skipped = 0;
+ 
+         {
+             std::scoped_lock lock(state->presenter_mutex);
++            // DCS Control (0032): a slot the runtime went past - its
++            // predicted display time advancing by more than a period, judged
++            // on the display's own - puts every frame still to go out a slot
++            // later (cadence_slip). And at 1X the application's frame is the
++            // only one a slot gets, so it is a missed slot: with a late
++            // hand-over (below), the miss signal a full rate has.
++            if (state->presenter_last_predicted_valid &&
++                state->presenter_display_period > 0 &&
++                state->cadence_running.load(std::memory_order_relaxed) &&
++                frame_state.predictedDisplayTime >
++                    state->presenter_last_predicted_display) {
++                const XrDuration period = state->presenter_display_period;
++                const XrDuration advance = frame_state.predictedDisplayTime -
++                    state->presenter_last_predicted_display;
++                if (advance < period * 8) {
++                    const XrDuration slots = (advance + period / 2) / period;
++                    cadence_skipped = slots > 1
++                        ? static_cast<std::uint32_t>(slots - 1)
++                        : 0U;
++                }
++            }
+             state->presenter_frame_state = frame_state;
+             state->presenter_frame_state.next = nullptr;
+             state->presenter_frame_state_valid = true;
+@@ -9038,6 +9211,14 @@
+             }
+         }
+         state->presenter_condition.notify_all();
++        if (cadence_skipped != 0) {
++            state->cadence_slip.fetch_add(cadence_skipped);
++            if (state->adaptive_active.load() &&
++                state->cadence_hold.load(std::memory_order_relaxed) == 1) {
++                state->adaptive_missed_slots.fetch_add(cadence_skipped);
++                state->cadence_missed_second.fetch_add(cadence_skipped);
++            }
++        }
+ 
+         // A successful runtime wait supplies the virtual application timing,
+         // but do not begin a frame until there is valid composition to submit.
+@@ -10606,6 +10787,12 @@
+                         !request->owned_frame->skip_led
+                     ? SubmissionKind::gen1
+                     : SubmissionKind::gen2;
++        // DCS Control (0032): a slot with nothing fresh in it (the previous
++        // frame again) puts every frame still to go out a slot later.
++        if (!request && XR_SUCCEEDED(end_result) &&
++            state->cadence_running.load(std::memory_order_relaxed)) {
++            state->cadence_slip.fetch_add(1);
++        }
+         const std::int64_t wait_to_submit = std::max<std::int64_t>(
+             0,
+             std::chrono::duration_cast<std::chrono::nanoseconds>(
+@@ -10719,7 +10906,12 @@
+                 wait_to_submit <= xrfg::latency::AdaptiveConfig{}.stall) {
+                 if (state->frames_per_application_frame == 2 && request) {
+                     // 2X: a slot that went out late is a slot missed.
++                    // DCS Control (0032): adaptive cadence's 1X as well.
+                     state->adaptive_missed_slots.fetch_add(1);
++                    if (state->cadence_running.load(std::memory_order_relaxed) &&
++                        state->cadence_hold.load(std::memory_order_relaxed) == 1) {
++                        state->cadence_missed_second.fetch_add(1);
++                    }
+                 } else if (submission_kind == SubmissionKind::gen1) {
+                     state->adaptive_late_leaders.fetch_add(1);
+                 }
+@@ -10881,6 +11073,10 @@
+         state->application_served_serial = 0;
+         state->application_release_display_time = 0;
+         state->application_release_serial = 0;
++        // DCS Control (0032): a new presenter's slots start again from its
++        // own prediction.
++        state->cadence_told_base = 0;
++        state->cadence_slip = 0;
+         // A schedule left over from a previous presenter would stall the first
+         // submission of this one.
+         // A display time from a previous presenter says nothing about this
+@@ -11021,8 +11217,12 @@
+ // It is called after the pair is handed over, except in the deeper pipeline on
+ // a D3D11 session, where it is called at admission, before the pair's
+ // synthesis is queued; see presenter_hold_at_admission.
++// DCS Control (0032): `frames`, where given, is the frame's own cadence
++// under adaptive cadence (1, 2 or 3 presenter frames); 0 is the multiplier,
++// as before.
+ void wait_for_presenter_pair(
+-    const std::shared_ptr<SessionState>& state) noexcept {
++    const std::shared_ptr<SessionState>& state,
++    std::uint32_t frames = 0) noexcept {
+     try {
+         ApplicationBlockedScope blocked; // DCS VR Control (0004)
+         // The pair rate does not follow this number: the application enqueues
+@@ -11030,8 +11230,12 @@
+         // three with 3X - so all it sets is the phase at which the
+         // application renders. The depth is not set here either - the
+         // presenter enforces it where it pops a submission.
+-        const std::uint64_t kPresenterFramesPerPair =
+-            state->frames_per_application_frame;
++        // DCS Control (0032): under adaptive cadence it is the frame's own
++        // cadence, so what it queued is what the presenter takes before the
++        // next release.
++        const std::uint64_t kPresenterFramesPerPair = frames != 0
++            ? frames
++            : state->frames_per_application_frame.load();
+         const auto entered = std::chrono::steady_clock::now();
+         std::unique_lock lock(state->presenter_mutex);
+         // DCS Control (0029): bounded; past the bound the application goes
+@@ -11083,6 +11287,9 @@
+             state->application_release_display_time =
+                 state->presenter_frame_state.predictedDisplayTime;
+             state->application_release_serial = reached;
++            // DCS Control (0032): and how long this hold lasts.
++            state->application_release_frames =
++                static_cast<std::uint32_t>(kPresenterFramesPerPair);
+         }
+         // Keep the application's completion off the pop boundary; see
+         // application_completion_phase. The step is decided here, under the
+@@ -11090,7 +11297,10 @@
+         std::chrono::nanoseconds release_offset{0};
+         std::int64_t steer_phase_us = -1;
+         std::int64_t steer_step_us = 0;
+-        if (state->frames_per_application_frame > 2) {
++        if (kPresenterFramesPerPair == 1) {
++            // DCS Control (0032): adaptive cadence's 1X. The application
++            // has one period for its frame; any delay is taken from it.
++        } else if (state->frames_per_application_frame > 2) {
+             // 3X is steered on synthesis readiness instead, on every
+             // runtime: see triple_release.
+             release_offset =
+@@ -12366,7 +12576,8 @@
+             log_completed_nvidia_gpu_timings(
+                 &state->session->layer_gpu_ns,
+                 &state->session->layer_optical_flow_ns,
+-                generation->synthesizer);
++                generation->synthesizer,
++                &state->session->layer_synthesis_gpu_ns); // DCS Control (0032)
+             if (generation->interop) {
+                 submit_result =
+                     generation->interop->prepare_synthesis();
+@@ -12648,12 +12859,18 @@
+ // the application was released for each frame, measured
+ // (xrfg::latency::measured_interpolation_fraction); on it, or with no such
+ // measurement, the answer is as before.
++// DCS Control (0032): `own_cadence` - a frame of adaptive cadence, whose
++// cadence `frames` is its own: off the measured interval, the fixed answer
++// k / frames. Its told interval also carries the slots the presenter lost
++// before it, which fall between earlier frames, not between this one and
++// the one before.
+ [[nodiscard]] float synthetic_interpolation_fraction(
+     const std::shared_ptr<SessionState>& state,
+     const std::optional<ProjectionSnapshot>& previous_snapshot,
+     const ProjectionSnapshot& current_snapshot,
+     std::uint32_t frames = 2,
+-    std::uint32_t index = 0) noexcept {
++    std::uint32_t index = 0,
++    bool own_cadence = false) noexcept {
+     const float kFixedMidpoint =
+         static_cast<float>(index + 1) / static_cast<float>(frames);
+     const XrDuration periods_before_current =
+@@ -12674,6 +12891,9 @@
+             index)) {
+         return *measured;
+     }
++    if (own_cadence) {
++        return kFixedMidpoint;
++    }
+     const XrTime interval =
+         current_snapshot.display_time - previous_snapshot->display_time;
+     // An interval no longer than the synthetics need cannot hold them at all,
+@@ -12754,6 +12974,39 @@
+     }
+ }
+ 
++// DCS Control (0032): the same lookup as latest_pending_application_period
++// below (see there for why it is made this way), returning the whole record:
++// the frame's cadence with its period.
++[[nodiscard]] std::optional<PendingApplicationFrame> latest_pending_application_frame(
++    const std::shared_ptr<SessionState>& state,
++    XrTime display_time,
++    bool consume_in_submission_order) noexcept {
++    try {
++        std::scoped_lock lock(state->mutex);
++        if (consume_in_submission_order) {
++            return state->pending_frames.empty()
++                ? std::nullopt
++                : std::optional<PendingApplicationFrame>{
++                      state->pending_frames.front()};
++        }
++        if (state->pending_frames.size() == 1) {
++            return state->pending_frames.front();
++        }
++        const auto frame = std::find_if(
++            state->pending_frames.begin(),
++            state->pending_frames.end(),
++            [display_time](const PendingApplicationFrame& candidate) {
++                return candidate.display_time == display_time;
++            });
++        if (frame == state->pending_frames.end()) {
++            return std::nullopt;
++        }
++        return *frame;
++    } catch (...) {
++        return std::nullopt;
++    }
++}
++
+ [[nodiscard]] std::optional<XrDuration> latest_pending_application_period(
+     const std::shared_ptr<SessionState>& state,
+     XrTime display_time,
+@@ -13884,6 +14137,61 @@
+     }
+ }
+ 
++// DCS Control (0032): a move into or out of 1X, as adaptive_switch (the
++// reasons are xrfg::latency::AdaptiveReason 8-12): a= the level before, b=
++// after, c= the reason's figure. Never under a lock.
++void log_cadence_event(const xrfg::latency::CadenceStep& step) noexcept {
++    using xrfg::latency::AdaptiveReason;
++    using xrfg::latency::CadenceEvent;
++    AdaptiveReason reason = AdaptiveReason::none;
++    std::uint64_t figure = 0;
++    const auto us = [](xrfg::latency::Nanoseconds ns) {
++        return ns > 0 ? static_cast<std::uint64_t>(ns / 1000) : 0U;
++    };
++    switch (step.event) {
++    case CadenceEvent::one_entered:
++        reason = AdaptiveReason::one_entered;
++        figure = us(step.predicted_gpu_one);
++        break;
++    case CadenceEvent::one_left_late:
++        reason = AdaptiveReason::one_left_late;
++        figure = step.late_episodes;
++        break;
++    case CadenceEvent::one_left_slow:
++        reason = AdaptiveReason::one_left_slow;
++        figure = us(step.predicted);
++        break;
++    case CadenceEvent::one_left_scene:
++        reason = AdaptiveReason::one_left_scene;
++        break;
++    case CadenceEvent::one_left_stopped:
++        reason = AdaptiveReason::one_left_stopped;
++        break;
++    default:
++        return;
++    }
++    xrfg::bridge_flight_logger().event(
++        xrfg::BridgeFlightOperation::adaptive_switch,
++        static_cast<std::int64_t>(reason),
++        step.previous,
++        step.level,
++        figure);
++}
++
++// DCS Control (0032): a cadence step's level put in force - the next
++// xrWaitFrame takes it as its frame's cadence - with its records. The
++// display time the application is told needs no rebase for it: it follows
++// what is queued, whatever the level (see SessionState::cadence_told_base).
++// The xrEndFrame thread, no lock held.
++void apply_cadence_step(
++    SessionState& state, const xrfg::latency::CadenceStep& step) noexcept {
++    state.cadence_hold = step.level;
++    if (step.level != step.previous) {
++        ++state.cadence_changes_second;
++    }
++    log_cadence_event(step);
++}
++
+ // Follows the tray's "3X Frame Gen" switch while the session runs. Called at
+ // the top of the application's xrEndFrame, under frame_call_mutex, before
+ // this frame is prepared.
+@@ -13923,6 +14231,10 @@
+ //     flap record, decides nothing for the scene's settle, and then decides
+ //     at once (AdaptiveFrameGenController::scene_changed).
+ // The mode itself is left as it is: the new scene's own evidence moves it.
++// DCS Control (0032): adaptive cadence keeps 2X's shape. It is switched into
++// once (from 3X, the way a manual change is) and then decides frame by frame
++// (xrfg::latency::CadenceController), with no switch of multiplier; a scene
++// change leaves 1X and starts its told time from the presenter again.
+ void apply_scene_change(const std::shared_ptr<SessionState>& state) noexcept {
+     try {
+         const std::int64_t gap = std::exchange(state->scene_change_gap_ns, -1);
+@@ -13959,6 +14271,10 @@
+             xrfg::latency::restart_display_time_learning(
+                 state->display_time_corrector);
+             correction = state->display_time_corrector.correction;
++            // DCS Control (0032): the stall drained the queue; adaptive
++            // cadence's told time starts again from the presenter's estimate.
++            state->cadence_told_base = 0;
++            state->cadence_slip = 0;
+             // DCS Control (0029): and the stall latch is re-armed, the new
+             // scene's first frames in its quiet period.
+             stall_rearmed = rearm_generation_stall_locked(*state);
+@@ -13966,12 +14282,21 @@
+         if (stall_rearmed) {
+             log_generation_stall_rearmed(1);
+         }
++        // DCS Control (0032): adaptive cadence leaves 1X at once and starts
++        // over from 2.
++        std::optional<xrfg::latency::CadenceStep> cadence_step;
+         if (state->adaptive_active.load()) {
+             std::scoped_lock adaptive_lock(state->adaptive_mutex);
+             was_probing = state->adaptive_controller.probing();
+             state->adaptive_controller.scene_changed(now_ns);
+             state->adaptive_missed_slots = 0;
+             state->adaptive_late_leaders = 0;
++            if (state->cadence_running.load()) {
++                cadence_step = state->cadence_controller.scene_changed(now_ns);
++            }
++        }
++        if (cadence_step) {
++            apply_cadence_step(*state, *cadence_step);
+         }
+         xrfg::bridge_flight_logger().event(
+             xrfg::BridgeFlightOperation::scene_change,
+@@ -14045,9 +14370,18 @@
+                     adaptive ? 0U : current,
+                     adaptive ? current : 0U,
+                     0);
+-            } else if (!adaptive || ini_triple != state->adaptive_ini_triple) {
++            } else if (!adaptive) {
+                 target = ini_target;
+                 reason = AdaptiveReason::manual;
++            } else if (ini_triple != state->adaptive_ini_triple) {
++                if (state->cadence_configured) {
++                    // DCS Control (0032): adaptive cadence keeps 2X's shape
++                    // whatever triple_frame_gen says; the value is only taken.
++                    state->adaptive_ini_triple = ini_triple;
++                } else {
++                    target = ini_target;
++                    reason = AdaptiveReason::manual;
++                }
+             }
+         }
+         XrDuration period = 0;
+@@ -14059,7 +14393,102 @@
+             std::scoped_lock lock(state->mutex);
+             period = state->minimum_runtime_display_period;
+         }
+-        if (adaptive && target == 0) {
++        // DCS Control (0032): adaptive cadence runs while adaptive control
++        // does, in 2X's shape: started here once the session is in it (from
++        // 3X, by a switch below), stopped when adaptive control is.
++        const bool cadence_wanted = adaptive && state->cadence_configured;
++        if (!cadence_wanted && state->cadence_running.load()) {
++            xrfg::latency::CadenceStep step{};
++            {
++                std::scoped_lock adaptive_lock(state->adaptive_mutex);
++                step = state->cadence_controller.stop(now_ns);
++            }
++            state->cadence_running = false;
++            apply_cadence_step(*state, step);
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::adaptive_switch,
++                static_cast<std::int64_t>(AdaptiveReason::cadence),
++                current,
++                0,
++                0);
++        }
++        if (cadence_wanted && !state->cadence_running.load() && target == 0) {
++            if (current == 2) {
++                {
++                    std::scoped_lock adaptive_lock(state->adaptive_mutex);
++                    state->cadence_controller.start(now_ns);
++                }
++                state->cadence_hold = 2;
++                state->cadence_running = true;
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::adaptive_switch,
++                    static_cast<std::int64_t>(AdaptiveReason::cadence),
++                    0,
++                    current,
++                    0);
++            } else {
++                target = 2;
++                reason = AdaptiveReason::cadence;
++            }
++        }
++        const bool cadence = state->cadence_running.load();
++        if (cadence && target == 0) {
++            // One decision per application frame; the next xrWaitFrame takes
++            // it as its frame's own cadence.
++            xrfg::latency::CadenceStep step{};
++            {
++                std::scoped_lock adaptive_lock(state->adaptive_mutex);
++                const std::uint32_t missed = state->adaptive_missed_slots.exchange(0);
++                if (missed != 0) {
++                    state->adaptive_controller.add_late(now_ns, missed);
++                    state->cadence_controller.add_late(now_ns, missed);
++                }
++                state->adaptive_controller.add_late_leaders(
++                    now_ns, state->adaptive_late_leaders.exchange(0));
++                step = state->cadence_controller.decide(
++                    now_ns, static_cast<xrfg::latency::Nanoseconds>(period));
++            }
++            apply_cadence_step(*state, step);
++            // adaptive_throughput result=6, once a second; see
++            // bridge_flight_logger.hpp.
++            if (period > 0 && now >= state->cadence_status_at) {
++                const bool first = state->cadence_status_at ==
++                    std::chrono::steady_clock::time_point{};
++                state->cadence_status_at = now + std::chrono::seconds(1);
++                const auto& frames = state->cadence_frames_second;
++                const auto field = [](std::uint64_t value) {
++                    return std::min<std::uint64_t>(value, 0xFFFFU);
++                };
++                const auto us = [](xrfg::latency::Nanoseconds ns) {
++                    return ns > 0
++                        ? std::min<std::uint64_t>(
++                              static_cast<std::uint64_t>(ns / 1000), 0xFFFFFFFFULL)
++                        : 0U;
++                };
++                const auto seconds = [](xrfg::latency::Nanoseconds ns) {
++                    return ns > 0 ? static_cast<std::uint64_t>(
++                                        ns / xrfg::latency::kSecond)
++                                  : 0U;
++                };
++                if (!first) {
++                    xrfg::bridge_flight_logger().event(
++                        xrfg::BridgeFlightOperation::adaptive_throughput,
++                        6,
++                        field(frames[1]) | (field(frames[2]) << 16) |
++                            (field(frames[3]) << 32) | (field(frames[0]) << 48),
++                        us(step.predicted) | (us(step.predicted_gpu_one) << 32),
++                        field(state->cadence_changes_second) |
++                            (field(seconds(step.backoff)) << 16) |
++                            (field(seconds(step.one_allowed_at - now_ns)) << 32) |
++                            (field(state->cadence_missed_second.exchange(0)) << 48));
++                } else {
++                    state->cadence_missed_second = 0;
++                }
++                state->cadence_frames_second = {};
++                state->cadence_changes_second = 0;
++            }
++        }
++        if (adaptive && target == 0 && !cadence) {
+             std::scoped_lock adaptive_lock(state->adaptive_mutex);
+             const std::uint32_t missed = state->adaptive_missed_slots.exchange(0);
+             if (missed != 0) {
+@@ -14137,9 +14566,13 @@
+                     ? state->display_time_corrector.correction
+                     : 0;
+             }
++            // DCS Control (0032): at adaptive cadence's 1X the multiplier
++            // is 1 (result 11).
++            const std::uint32_t shown_multiplier =
++                cadence && state->cadence_hold.load() == 1 ? 1U : current;
+             xrfg::bridge_flight_logger().event(
+                 xrfg::BridgeFlightOperation::latency_status,
+-                static_cast<std::int64_t>(current) + (adaptive ? 10 : 0),
++                static_cast<std::int64_t>(shown_multiplier) + (adaptive ? 10 : 0),
+                 stats.p90 > 0 ? static_cast<std::uint64_t>(stats.p90 / 1000) : 0U,
+                 std::min<std::uint64_t>(stats.samples, 0xFFFFU) |
+                     (std::min<std::uint64_t>(stats.late, 0xFFFFU) << 16) |
+@@ -14276,11 +14709,22 @@
+             // The once-per-frame hold counts from here in the new shape.
+             state->application_served_serial = state->presenter_frame_serial;
+             state->application_release_display_time = 0;
++            // DCS Control (0032): and adaptive cadence's told time.
++            state->cadence_told_base = 0;
++            state->cadence_slip = 0;
+         }
+         clear_generation_continuity(state);
+         if (adaptive) {
+             std::scoped_lock adaptive_lock(state->adaptive_mutex);
+-            if (reason == AdaptiveReason::manual) {
++            // DCS Control (0032): into adaptive cadence's 2X shape, which
++            // starts over as a manual choice does - and cadence with it.
++            if (reason == AdaptiveReason::cadence && target == 2) {
++                state->cadence_controller.start(now_ns);
++                state->cadence_hold = 2;
++                state->cadence_running = true;
++            }
++            if (reason == AdaptiveReason::manual ||
++                reason == AdaptiveReason::cadence) {
+                 state->adaptive_controller.start(target, now_ns);
+             } else {
+                 // DCS VR Control (0007): with the reason, so a probe is known.
+@@ -14477,15 +14921,22 @@
+     throughput.layer_ring[throughput.layer_next] = state.layer_gpu_ns.exchange(0);
+     throughput.optical_flow_ring[throughput.layer_next] =
+         state.layer_optical_flow_ns.exchange(0);
++    // DCS Control (0032).
++    throughput.synthesis_ring[throughput.layer_next] =
++        state.layer_synthesis_gpu_ns.exchange(0);
+     throughput.layer_next = (throughput.layer_next + 1) % throughput.layer_ring.size();
+     throughput.layer_filled =
+         std::min(throughput.layer_filled + 1, throughput.layer_ring.size());
+     std::int64_t layer_sum = 0;
+     std::int64_t optical_flow_sum = 0;
++    std::int64_t synthesis_sum = 0;
+     for (std::size_t index = 0; index < throughput.layer_filled; ++index) {
+         layer_sum += throughput.layer_ring[index];
+         optical_flow_sum += throughput.optical_flow_ring[index];
++        synthesis_sum += throughput.synthesis_ring[index];
+     }
++    const std::int64_t synthesis_per_frame =
++        synthesis_sum / static_cast<std::int64_t>(throughput.layer_filled);
+     const std::int64_t layer_per_frame =
+         layer_sum / static_cast<std::int64_t>(throughput.layer_filled);
+     const std::int64_t optical_flow_per_frame =
+@@ -14538,6 +14989,10 @@
+             if (projected_load >= 0.0) {
+                 state.adaptive_controller.set_projected_gpu_load(at, projected_load);
+             }
++            // DCS Control (0032): the same evidence, with synthesis's part.
++            if (state.cadence_running.load()) {
++                state.cadence_controller.add_frame(at, cpu, gpu, synthesis_per_frame);
++            }
+         } catch (...) {
+         }
+         auto& part = throughput.parts[throughput.parts_next];
+@@ -14763,8 +15218,37 @@
+             state->steamvr_presenter_start_requested = false;
+             return wait_for_presenter_idle(state, false);
+         };
++    // DCS Control (0032): under adaptive cadence, the frame's own cadence,
++    // fixed at its xrWaitFrame (PendingApplicationFrame::frames): it makes
++    // that many submissions less one synthetics, at k / N, and is held that
++    // many presenter frames once it is queued. At 1X it is shown unchanged -
++    // a prime, its frame alone - and nothing is synthesized. What it queues
++    // short of its cadence (a prime, a pass-through, a refusal), the next
++    // frame's told time gives back (cadence_slip).
++    const std::optional<PendingApplicationFrame> cadence_record =
++        use_continuous_presenter && state->cadence_running.load() &&
++                end_info != nullptr
++        ? latest_pending_application_frame(
++              state, end_info->displayTime, consume_in_submission_order)
++        : std::nullopt;
++    const bool cadence_frame =
++        cadence_record && cadence_record->cadence && cadence_record->frames != 0;
++    const bool cadence_one = cadence_frame && cadence_record->frames == 1;
++    // Its hold; 0 (the multiplier's, as before) for a frame told without one.
++    const std::uint32_t cadence_hold_frames =
++        cadence_frame ? cadence_record->frames : 0U;
++    const auto note_cadence_queued = [&](std::uint32_t queued) {
++        if (cadence_frame) {
++            state->cadence_slip.fetch_sub(
++                static_cast<std::int64_t>(cadence_record->frames) -
++                static_cast<std::int64_t>(queued));
++        }
++    };
+     const auto bypass_generation =
+         [&](GenerationPrepareReason reason) -> XrResult {
++            // DCS Control (0032): nothing of this frame's names a private
++            // image (the next one's admission bound under adaptive cadence).
++            state->cadence_previous_frames = 0;
+             const XrResult exclusive_result = enter_presenter_exclusive();
+             if (XR_FAILED(exclusive_result)) {
+                 return exclusive_result;
+@@ -14787,6 +15271,7 @@
+                         end_info->displayTime,
+                         consume_in_submission_order);
+                 }
++                note_cadence_queued(0); // DCS Control (0032)
+                 return XR_SUCCESS;
+             }
+             // DCS VR Control (0006): the application's own composition goes
+@@ -14834,6 +15319,9 @@
+                     end_info->displayTime,
+                     consume_in_submission_order);
+             }
++            // DCS Control (0032): the application's own frame, alone.
++            note_cadence_queued(
++                XR_SUCCEEDED(end_result) && !borrowed_wait_ran_out ? 1U : 0U);
+             if (XR_SUCCEEDED(end_result) && !use_continuous_presenter) {
+                 const XrResult start_result =
+                     start_requested_pipelined_presenter(nullptr);
+@@ -15015,8 +15503,10 @@
+             *previous_snapshot,
+             current_snapshot,
+             !state->deep_pipeline);
++    // DCS Control (0032): never at adaptive cadence's 1X.
+     const bool metadata_pairable =
+-        latest_application_frame && previous_snapshot && snapshots_compatible;
++        latest_application_frame && previous_snapshot && snapshots_compatible &&
++        !cadence_one;
+     if (previous_snapshot && !snapshots_compatible) {
+         if (!projection_resource_layout_compatible(
+                 *previous_snapshot,
+@@ -15056,10 +15546,18 @@
+     // application arrives while its previous frame's second synthetic is
+     // going out, and by then only that frame's real one is outstanding - so
+     // the two synthetic slots are free, as they are shallow.
++    // DCS Control (0032): under adaptive cadence the bound follows the
++    // frame's own cadence and the previous frame's submissions; see
++    // xrfg::latency::cadence_admission_bound.
+     if (use_continuous_presenter) {
+         const XrResult capacity_result = wait_for_presenter_capacity(
+             state,
+-            state->deep_pipeline && state->frames_per_application_frame <= 2
++            cadence_frame
++                ? xrfg::latency::cadence_admission_bound(
++                      metadata_pairable ? cadence_record->frames : 1U,
++                      state->cadence_previous_frames,
++                      state->deep_pipeline)
++                : state->deep_pipeline && state->frames_per_application_frame <= 2
+                 ? 2
+                 : 1);
+         if (XR_FAILED(capacity_result)) {
+@@ -15077,7 +15575,7 @@
+             // the hand-over; a prime costs the presenter one frame, not two.
+             // It returns without an error on a presenter failure; the enqueue
+             // below is what refuses the frame.
+-            wait_for_presenter_pair(state);
++            wait_for_presenter_pair(state, cadence_hold_frames); // 0032
+             // DCS Control (0029): the hold ran out: pass the frame through.
+             if (state->generation_stalled.load()) {
+                 return bypass_stalled();
+@@ -15093,7 +15591,11 @@
+     // application's frame interval it changes every frame rather than being a
+     // constant offset nobody would see. Alternating early and late is what
+     // reads as judder.
+-    const std::uint32_t frames_per_frame = state->frames_per_application_frame;
++    // DCS Control (0032): the frame's own cadence under adaptive cadence (2
++    // or 3; a 1X frame primes and makes none).
++    const std::uint32_t frames_per_frame = cadence_frame
++        ? std::max<std::uint32_t>(2U, cadence_record->frames)
++        : state->frames_per_application_frame.load();
+     // DCS VR Control (0006): while the 3X late-frame skip is on, the frame's
+     // first synthetic is not made - its slot re-presents the previous real
+     // frame - and its one synthetic is the second, at the second's instant.
+@@ -15116,7 +15618,8 @@
+         previous_snapshot,
+         current_snapshot,
+         frames_per_frame,
+-        skip_led_frame ? 1 : 0);
++        skip_led_frame ? 1 : 0,
++        cadence_frame); // DCS Control (0032)
+     // 3X: the second synthetic, a period after the first and a period before
+     // the real frame.
+     const std::optional<float> extra_interpolation_fraction =
+@@ -15126,7 +15629,8 @@
+                   previous_snapshot,
+                   current_snapshot,
+                   frames_per_frame,
+-                  1))
++                  1,
++                  cadence_frame))
+             : std::nullopt;
+     PreparedProjectionFrame prepared = prepare_projection_frame(
+         current_snapshot,
+@@ -15373,6 +15877,8 @@
+         submitted_end_info ? submitted_end_info->layerCount : 0);
+     const auto first_end_started = std::chrono::steady_clock::now();
+     XrResult result = XR_SUCCESS;
++    // DCS Control (0032): what this frame queued for the presenter.
++    std::uint32_t cadence_queued = 0;
+     if (use_continuous_presenter) {
+         if (pair_ready) {
+             // DCS VR Control: adaptive 2X/3X times this frame by its first
+@@ -15421,6 +15927,9 @@
+                 presenter_first_frame,
+                 presenter_extra_frame,
+                 presenter_current_frame);
++            if (XR_SUCCEEDED(result)) {
++                cadence_queued = presenter_extra_frame ? 3U : 2U; // 0032
++            }
+             if (XR_SUCCEEDED(result) && !readiness.fences.empty()) {
+                 state->readiness_probe->submit(std::move(readiness));
+             }
+@@ -15459,11 +15968,11 @@
+                 // while the rate stays at two retirements per application
+                 // frame and the log still reads a clean 45/s.
+                 // With 3X the whole frame is three submissions.
++                // DCS Control (0032): the frame's own, under adaptive
++                // cadence.
+                 result = wait_for_presenter_capacity(
+                     state,
+-                    state->deep_pipeline
+-                        ? 3
+-                        : state->frames_per_application_frame.load());
++                    state->deep_pipeline ? 3 : frames_per_frame);
+             }
+         } else if (presenter_first_frame) {
+             catch_up_bridged_copies(state, &presenter_first_frame->info, false); // 0006
+@@ -15471,6 +15980,7 @@
+                 state,
+                 presenter_first_frame,
+                 nullptr);
++            cadence_queued = request->owned_frame ? 1U : 0U; // 0032
+             if (!request->owned_frame) {
+                 // Refused: the presenter never saw this frame.
+                 run_private_releases(
+@@ -15479,7 +15989,9 @@
+             if (presenter_content_lock.owns_lock()) {
+                 presenter_content_lock.unlock();
+             }
+-            if (state->deep_pipeline) {
++            // DCS Control (0032): and at adaptive cadence's 1X, whose hold
++            // (below) paces the application instead.
++            if (state->deep_pipeline || cadence_one) {
+                 // Enqueue and return, exactly as a pair does. Waiting here
+                 // blocks the application until the presenter has submitted
+                 // this frame, which behind a deeper queue is most of the
+@@ -15499,7 +16011,10 @@
+             // DCS VR Control (0006): the application's own composition.
+             catch_up_bridged_copies(state, nullptr, true, end_info);
+             result = submit_borrowed_to_presenter();
++            cadence_queued =
++                XR_SUCCEEDED(result) && !borrowed_wait_ran_out ? 1U : 0U; // 0032
+         }
++        note_cadence_queued(cadence_queued); // DCS Control (0032)
+     } else {
+         // DCS VR Control (0006): the application's own composition, or a
+         // generated frame whose other layers may name a deferred swapchain.
+@@ -15552,6 +16067,23 @@
+     if (pair_ready) {
+         state->generation_steady_state_established = true;
+     }
++    // DCS Control (0032): what this frame queued, for the next frame's
++    // admission bound under adaptive cadence, and its cadence for the
++    // second's record (adaptive_throughput result=6).
++    if (use_continuous_presenter) {
++        state->cadence_previous_frames = pair_ready
++            ? (presenter_extra_frame ? 3U : 2U)
++            : presenter_first_frame ? 1U : 0U;
++        if (cadence_frame && (pair_ready || presenter_first_frame)) {
++            // Late: told more periods than its cadence, a lost slot carried.
++            const std::size_t index =
++                cadence_record->told_periods > cadence_record->frames ? 0U
++                : !pair_ready                                ? 1U
++                : presenter_extra_frame                      ? 3U
++                                                             : 2U;
++            ++state->cadence_frames_second[index];
++        }
++    }
+     // DCS VR Control (0006): this frame went to the runtime rewritten onto
+     // the private swapchains, or it did not; the next releases copy into the
+     // runtime's images accordingly. A frame that ends up passed through
+@@ -15656,6 +16188,15 @@
+         return XR_FAILED(start_result) ? start_result : result;
+     }
+ 
++    // DCS Control (0032): adaptive cadence's 1X. The frame went out alone and
++    // is held as a pair is (below), for its own cadence: one presenter frame.
++    if (use_continuous_presenter && cadence_one && presenter_first_frame &&
++        !pair_ready && XR_SUCCEEDED(result)) {
++        frame_call_lock.unlock();
++        wait_for_presenter_pair(state, 1U);
++        return result;
++    }
++
+     if (!pair_ready) {
+         return result;
+     }
+@@ -15679,9 +16220,11 @@
+         // thread must not be shut out of xrWaitFrame while this waits.
+         //
+         // Unless this frame was already held at admission.
++        // DCS Control (0032): under adaptive cadence, for the frame's own
++        // cadence.
+         frame_call_lock.unlock();
+         if (!presenter_hold_at_admission(*state)) {
+-            wait_for_presenter_pair(state);
++            wait_for_presenter_pair(state, cadence_hold_frames);
+         }
+         return result;
+     }
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -3,8 +3,10 @@
+ #include "xrfg/latency_control.hpp"
+ 
+ #include <algorithm>
++#include <array>
+ #include <atomic>
+ #include <chrono>
++#include <cmath>
+ #include <condition_variable>
+ #include <cstdint>
+ #include <deque>
+@@ -2013,6 +2015,501 @@
+     require(!measured_interpolation_fraction(at(0), at(4), kPeriod, 3, 2), "no third synthetic");
+ }
+ 
++// ---------------------------------------------------------------------------
++// DCS Control (0032): adaptive cadence.
++
++// The application under CadenceController: each frame ends one hold (the
++// level in force) after the one before, is fed, and a decision follows.
++struct CadenceSim {
++    CadenceController controller;
++    Nanoseconds now{10 * kSecond};
++    Nanoseconds started{10 * kSecond};
++    std::uint32_t changes{};
++    std::vector<CadenceStep> events;
++
++    explicit CadenceSim(CadenceConfig config = {}) : controller(config) {
++        controller.start(now);
++    }
++    CadenceStep frame(Nanoseconds cpu, Nanoseconds gpu, Nanoseconds synthesis = 0) {
++        now += kPeriod * controller.level();
++        controller.add_frame(now, cpu, gpu, synthesis);
++        const CadenceStep step = controller.decide(now, kPeriod);
++        changes += step.level != step.previous ? 1U : 0U;
++        if (step.event != CadenceEvent::none) {
++            events.push_back(step);
++        }
++        return step;
++    }
++    // Frames of the given work until `event`, at most `limit` of them;
++    // when it happened, or -1.
++    Nanoseconds until(CadenceEvent event, int limit, Nanoseconds cpu,
++        Nanoseconds gpu, Nanoseconds synthesis = 0) {
++        for (int index = 0; index < limit; ++index) {
++            if (frame(cpu, gpu, synthesis).event == event) {
++                return now;
++            }
++        }
++        return -1;
++    }
++};
++
++// Light enough for 1X: CPU 6 ms; GPU 10 ms of which 2 are synthesis, so 8 at
++// 1X - under 80% of the period (8.9 ms).
++constexpr Nanoseconds kOneCpu = 6 * kMillisecond;
++constexpr Nanoseconds kOneGpu = 10 * kMillisecond;
++constexpr Nanoseconds kOneSynthesis = 2 * kMillisecond;
++// Over 95% of the period at 1X (10.6 ms), well inside two.
++constexpr Nanoseconds kOneHeavy = 12 * kMillisecond;
++
++void cadence_choice_tests() {
++    constexpr Nanoseconds kLight = 15 * kMillisecond;
++    constexpr Nanoseconds kHeavy = 25 * kMillisecond; // over 95% of 22.2 ms
++    {
++        // Light for two periods: 2, and it never moves. Its GPU is 14 ms,
++        // so 1X is never in question.
++        CadenceSim sim;
++        for (int index = 0; index < 300; ++index) {
++            sim.frame(kLight, 14 * kMillisecond);
++        }
++        require(sim.controller.level() == 2 && sim.changes == 0 && sim.events.empty(),
++            "light: 2, no change");
++        // Heavy: 3 within a few frames - the first frames over two periods
++        // that put the window's p90 there.
++        int to_three = -1;
++        for (int index = 0; index < 30 && to_three < 0; ++index) {
++            if (sim.frame(kHeavy, 20 * kMillisecond).level == 3) {
++                to_three = index;
++            }
++        }
++        require(to_three >= 0 && to_three <= 3,
++            "heavy -> 3 within frames: " + std::to_string(to_three));
++        // Light again: not before the minimum run, and once the heavy frames
++        // have left the window (half a second), back to 2.
++        int to_two = -1;
++        for (int index = 0; index < 60 && to_two < 0; ++index) {
++            if (sim.frame(kLight, 14 * kMillisecond).level == 2) {
++                to_two = index;
++            }
++        }
++        require(to_two + 1 >= static_cast<int>(CadenceConfig{}.min_run_three) &&
++                to_two <= 20,
++            "light -> 2 after the run and the window: " + std::to_string(to_two));
++        require(sim.changes == 2, "two changes, no flapping");
++    }
++    {
++        // One frame in twenty over two periods is not a trend.
++        CadenceSim sim;
++        for (int index = 0; index < 600; ++index) {
++            sim.frame(index % 20 == 19 ? 24 * kMillisecond : kLight, 14 * kMillisecond);
++        }
++        require(sim.controller.level() == 2 && sim.changes == 0, "spikes: no change");
++    }
++    {
++        // A varying trace: alternating stretches of 2 and 3 follow the work,
++        // a stretch at a time - every change is a stretch's, none flaps.
++        CadenceSim sim;
++        std::uint32_t at_two = 0;
++        std::uint32_t at_three = 0;
++        for (int stretch = 0; stretch < 8; ++stretch) {
++            const bool heavy = stretch % 2 == 1;
++            for (int index = 0; index < 60; ++index) {
++                const CadenceStep step = sim.frame(
++                    heavy ? kHeavy : kLight, heavy ? 23 * kMillisecond : 14 * kMillisecond);
++                if (index == 59) {
++                    at_two += step.level == 2 ? 1U : 0U;
++                    at_three += step.level == 3 ? 1U : 0U;
++                }
++            }
++        }
++        require(at_two == 4 && at_three == 4, "each stretch ends at its own cadence");
++        require(sim.changes == 7, "one change per stretch: " + std::to_string(sim.changes));
++    }
++    {
++        // Between 85% and 95% of two periods (19.5 ms): whichever level is in
++        // force holds - the band is the hysteresis.
++        CadenceSim at_two;
++        for (int index = 0; index < 300; ++index) {
++            at_two.frame(19'500'000, 14 * kMillisecond);
++        }
++        require(at_two.controller.level() == 2 && at_two.changes == 0, "band holds 2");
++        CadenceSim at_three;
++        for (int index = 0; index < 10; ++index) {
++            at_three.frame(kHeavy, 20 * kMillisecond);
++        }
++        require(at_three.controller.level() == 3, "heavy to 3 first");
++        for (int index = 0; index < 300; ++index) {
++            at_three.frame(19'500'000, 14 * kMillisecond);
++        }
++        require(at_three.controller.level() == 3 && at_three.changes == 1, "band holds 3");
++        // A trace that wobbles across the band every frame does not flap.
++        CadenceSim wobble;
++        for (int index = 0; index < 600; ++index) {
++            wobble.frame(index % 2 == 0 ? 19 * kMillisecond : 20'500'000, 14 * kMillisecond);
++        }
++        require(wobble.changes == 0, "wobble inside the band: no change");
++    }
++    {
++        // Missed slots: one episode is not enough, two within a second are.
++        CadenceSim sim;
++        for (int index = 0; index < 50; ++index) {
++            sim.frame(kLight, 14 * kMillisecond);
++        }
++        sim.controller.add_late(sim.now, 1);
++        sim.controller.add_late(sim.now + 50 * kMillisecond, 1); // the same episode
++        sim.frame(kLight, 14 * kMillisecond);
++        sim.frame(kLight, 14 * kMillisecond);
++        require(sim.controller.level() == 2, "one episode: still 2");
++        for (int index = 0; index < 5; ++index) {
++            sim.frame(kLight, 14 * kMillisecond);
++        }
++        sim.controller.add_late(sim.now, 2);
++        require(sim.frame(kLight, 14 * kMillisecond).level == 3, "two episodes: 3");
++        // At 3 the misses decide nothing (they were 2's): back to 2 after
++        // the minimum run, the work being light.
++        int run = 0;
++        while (sim.frame(kLight, 14 * kMillisecond).level == 3 && run < 100) {
++            ++run;
++        }
++        require(run + 1 == static_cast<int>(CadenceConfig{}.min_run_three),
++            "3 -> 2 after the run: " + std::to_string(run + 1));
++        // 2 does not hold - misses again at once - so 3 is held twice as long
++        // each time it comes back within the flap window, up to the cap.
++        std::uint32_t expected = CadenceConfig{}.min_run_three;
++        for (int flap = 0; flap < 4; ++flap) {
++            sim.frame(kLight, 14 * kMillisecond);
++            sim.controller.add_late(sim.now, 1);
++            sim.frame(kLight, 14 * kMillisecond);
++            sim.controller.add_late(sim.now + 120 * kMillisecond, 1);
++            for (int index = 0; index < 8 && sim.controller.level() == 2; ++index) {
++                sim.frame(kLight, 14 * kMillisecond);
++            }
++            expected *= 2;
++            require(sim.controller.level() == 3, "missed again: 3");
++            run = 0;
++            while (sim.frame(kLight, 14 * kMillisecond).level == 3 && run < 1000) {
++                ++run;
++            }
++            require(run + 1 == static_cast<int>(expected),
++                "flap " + std::to_string(flap) + ": run " + std::to_string(run + 1));
++        }
++        // 2 held for the flap window: the next return to 3 needs the base run.
++        while (sim.now < sim.started + 60 * kSecond) {
++            sim.frame(kLight, 14 * kMillisecond);
++        }
++        for (int index = 0; index < 10; ++index) {
++            sim.frame(25 * kMillisecond, 20 * kMillisecond);
++        }
++        require(sim.controller.level() == 3, "heavy: 3");
++        run = 0;
++        while (sim.frame(kLight, 14 * kMillisecond).level == 3 && run < 1000) {
++            ++run;
++        }
++        // The heavy frames leave the window after half a second (15 frames).
++        require(run + 1 >= static_cast<int>(CadenceConfig{}.min_run_three) && run < 40,
++            "the base run again: " + std::to_string(run + 1));
++    }
++    {
++        // Stalls (a loading screen) are not a rate.
++        CadenceSim sim;
++        for (int index = 0; index < 50; ++index) {
++            sim.frame(index % 5 == 0 ? 300 * kMillisecond : kLight, 14 * kMillisecond);
++        }
++        require(sim.controller.level() == 2, "stalled frames are not counted");
++    }
++}
++
++void cadence_one_tests() {
++    {
++        // 1X: from 2 after five seconds of CPU and GPU-at-1X under 80% of
++        // the period, and no sooner.
++        CadenceSim sim;
++        const Nanoseconds entered =
++            sim.until(CadenceEvent::one_entered, 1000, kOneCpu, kOneGpu, kOneSynthesis);
++        require(entered >= sim.started + 5 * kSecond &&
++                entered <= sim.started + 5 * kSecond + 500 * kMillisecond,
++            "1X after five clean seconds");
++        require(sim.controller.level() == 1 && sim.events.back().previous == 2,
++            "1X from 2");
++        require(sim.events.back().predicted_gpu_one == kOneGpu - kOneSynthesis,
++            "the GPU at 1X is the GPU less synthesis");
++        // At 1X, light: it stays (ten seconds).
++        for (int index = 0; index < 900; ++index) {
++            sim.frame(kOneCpu, kOneGpu - kOneSynthesis, 0);
++        }
++        require(sim.controller.level() == 1 && sim.events.size() == 1, "1X holds");
++    }
++    {
++        // Never without a GPU figure, with the CPU over 80%, or with a GPU
++        // that synthesis does not free enough of (11 - 2 = 9 ms > 8.9).
++        CadenceSim no_gpu;
++        CadenceSim cpu;
++        CadenceSim gpu;
++        for (int index = 0; index < 600; ++index) {
++            no_gpu.frame(kOneCpu, -1);
++            cpu.frame(9'500'000, kOneGpu, kOneSynthesis);
++            gpu.frame(kOneCpu, 11 * kMillisecond, kOneSynthesis);
++        }
++        require(no_gpu.events.empty() && cpu.events.empty() && gpu.events.empty(),
++            "no 1X without the room for it");
++    }
++    {
++        // A missed slot starts the five seconds over.
++        CadenceSim sim;
++        for (int index = 0; index < 180; ++index) { // four seconds
++            sim.frame(kOneCpu, kOneGpu, kOneSynthesis);
++        }
++        sim.controller.add_late(sim.now, 1);
++        const Nanoseconds missed = sim.now;
++        const Nanoseconds entered =
++            sim.until(CadenceEvent::one_entered, 1000, kOneCpu, kOneGpu, kOneSynthesis);
++        require(entered >= missed + 5 * kSecond, "a miss restarts the clean stretch");
++    }
++    {
++        // Only ever from 2: held at 3 (a run it cannot leave), light enough
++        // for 1X, it does not go there.
++        CadenceConfig config{};
++        config.min_run_three = 100'000;
++        CadenceSim sim(config);
++        for (int index = 0; index < 10; ++index) {
++            sim.frame(25 * kMillisecond, 20 * kMillisecond);
++        }
++        require(sim.controller.level() == 3, "at 3");
++        for (int index = 0; index < 600; ++index) {
++            sim.frame(kOneCpu, kOneGpu, kOneSynthesis);
++        }
++        require(sim.controller.level() == 3 && sim.events.empty(), "not from 3");
++    }
++    {
++        // Off by the configuration.
++        CadenceConfig config{};
++        config.one_enabled = false;
++        CadenceSim sim(config);
++        for (int index = 0; index < 600; ++index) {
++            sim.frame(kOneCpu, kOneGpu, kOneSynthesis);
++        }
++        require(sim.events.empty() && sim.controller.level() == 2, "1X can be off");
++    }
++}
++
++// Runs light frames until 1X is entered; when.
++Nanoseconds enter_one(CadenceSim& sim) {
++    const Nanoseconds entered =
++        sim.until(CadenceEvent::one_entered, 20'000, kOneCpu, kOneGpu, kOneSynthesis);
++    require(entered >= 0, "1X entered");
++    return entered;
++}
++
++void cadence_one_exit_tests() {
++    {
++        // Slow at 1X: nothing is judged in the first second, then the p90
++        // over half a second (once there are samples after the grace) over
++        // 95% of the period leaves.
++        CadenceSim sim;
++        const Nanoseconds entered = enter_one(sim);
++        const Nanoseconds left =
++            sim.until(CadenceEvent::one_left_slow, 400, kOneHeavy, kOneHeavy);
++        require(left >= entered + kSecond &&
++                left <= entered + kSecond + 10 * kPeriod,
++            "slow: left after the grace");
++        require(sim.controller.level() == 2 && sim.events.back().previous == 1,
++            "back to 2");
++        require(sim.events.back().predicted == kOneHeavy, "with the p90 that left");
++    }
++    {
++        // Missed slots: in the grace they do not count; two episodes within
++        // a second after it leave.
++        CadenceSim sim;
++        const Nanoseconds entered = enter_one(sim);
++        sim.controller.add_late(entered + 200 * kMillisecond, 1);
++        sim.controller.add_late(entered + 600 * kMillisecond, 1);
++        while (sim.now < entered + 1500 * kMillisecond) {
++            sim.frame(kOneCpu, kOneGpu - kOneSynthesis, 0);
++        }
++        require(sim.controller.level() == 1, "misses in the grace ignored");
++        sim.controller.add_late(sim.now, 1);
++        require(sim.frame(kOneCpu, kOneGpu - kOneSynthesis, 0).level == 1, "one episode stays");
++        sim.controller.add_late(sim.now + 300 * kMillisecond, 1);
++        while (sim.now < entered + 1900 * kMillisecond) {
++            sim.frame(kOneCpu, kOneGpu - kOneSynthesis, 0);
++        }
++        require(sim.controller.level() == 2 &&
++                sim.events.back().event == CadenceEvent::one_left_late &&
++                sim.events.back().late_episodes == 2,
++            "two episodes in a second: left");
++    }
++    {
++        // A scene change leaves at once and forgets every sample: 1X needs
++        // five clean seconds of the new scene, and the spacing after it.
++        CadenceSim sim;
++        enter_one(sim);
++        const CadenceStep step = sim.controller.scene_changed(sim.now);
++        require(step.event == CadenceEvent::one_left_scene && step.level == 2 &&
++                step.previous == 1 && sim.controller.level() == 2,
++            "scene: left at once");
++        require(sim.controller.backoff() == 0, "a scene change is not a failure");
++        const Nanoseconds scene = sim.now;
++        const Nanoseconds again = enter_one(sim);
++        require(again >= scene + CadenceConfig{}.one_spacing &&
++                again <= scene + CadenceConfig{}.one_spacing + 3 * kPeriod,
++            "back after the spacing");
++    }
++    {
++        // A scene change at 2 forgets the clean stretch too.
++        CadenceSim sim;
++        for (int index = 0; index < 180; ++index) {
++            sim.frame(kOneCpu, kOneGpu, kOneSynthesis);
++        }
++        const CadenceStep step = sim.controller.scene_changed(sim.now);
++        require(step.event == CadenceEvent::none && step.level == 2, "scene at 2");
++        const Nanoseconds scene = sim.now;
++        require(enter_one(sim) >= scene + 5 * kSecond, "five seconds of the new scene");
++    }
++    {
++        // Stopped (cadence or generation off): left, back to 2, no backoff.
++        CadenceSim sim;
++        enter_one(sim);
++        const CadenceStep step = sim.controller.stop(sim.now);
++        require(step.event == CadenceEvent::one_left_stopped && step.level == 2 &&
++                sim.controller.backoff() == 0,
++            "stopped");
++    }
++}
++
++void cadence_backoff_tests() {
++    {
++        // Failed attempts (left within 30 s): 30, 60, 120, 240, 240 s.
++        CadenceSim sim;
++        const std::array<Nanoseconds, 5> expected{
++            30 * kSecond, 60 * kSecond, 120 * kSecond, 240 * kSecond, 240 * kSecond};
++        enter_one(sim);
++        for (const Nanoseconds backoff : expected) {
++            const Nanoseconds left =
++                sim.until(CadenceEvent::one_left_slow, 400, kOneHeavy, kOneHeavy);
++            require(left >= 0, "the attempt fails");
++            require(sim.controller.backoff() == backoff, "backoff " +
++                std::to_string(backoff / kSecond) + " s: " +
++                std::to_string(sim.controller.backoff() / kSecond));
++            const Nanoseconds again = enter_one(sim);
++            require(again >= left + backoff && again <= left + backoff + 3 * kPeriod,
++                "the next attempt waits the backoff: " +
++                    std::to_string((again - left) / kMillisecond) + " ms");
++        }
++    }
++    {
++        // Held for a minute: the backoff is cleared, and the next attempt
++        // waits the spacing alone (fifteen seconds).
++        CadenceSim sim;
++        enter_one(sim);
++        require(sim.until(CadenceEvent::one_left_slow, 400, kOneHeavy, kOneHeavy) >= 0, "fails");
++        require(sim.controller.backoff() == 30 * kSecond, "backed off");
++        const Nanoseconds entered = enter_one(sim);
++        while (sim.now < entered + 61 * kSecond) {
++            sim.frame(kOneCpu, kOneGpu - kOneSynthesis, 0);
++        }
++        require(sim.controller.level() == 1 && sim.controller.backoff() == 0,
++            "a minute at 1X clears the backoff");
++        const Nanoseconds left =
++            sim.until(CadenceEvent::one_left_slow, 400, kOneHeavy, kOneHeavy);
++        require(left >= 0 && sim.controller.backoff() == 0, "not a failure");
++        const Nanoseconds again = enter_one(sim);
++        require(again >= left + 15 * kSecond && again <= left + 15 * kSecond + 3 * kPeriod,
++            "the spacing alone");
++    }
++    {
++        // Held between 30 s and a minute: not a failure, the backoff stays
++        // as it was, and the spacing applies.
++        CadenceSim sim;
++        enter_one(sim);
++        require(sim.until(CadenceEvent::one_left_slow, 400, kOneHeavy, kOneHeavy) >= 0, "fails");
++        const Nanoseconds entered = enter_one(sim);
++        while (sim.now < entered + 40 * kSecond) {
++            sim.frame(kOneCpu, kOneGpu - kOneSynthesis, 0);
++        }
++        const Nanoseconds left =
++            sim.until(CadenceEvent::one_left_slow, 400, kOneHeavy, kOneHeavy);
++        require(left >= 0 && sim.controller.backoff() == 30 * kSecond, "unchanged");
++        require(enter_one(sim) <= left + 15 * kSecond + 3 * kPeriod, "spacing only");
++    }
++}
++
++void cadence_frame_tests() {
++    // A frame's told time: the one before's plus its cadence and the slots
++    // gained since; the presenter's estimate with nothing before, or once the
++    // two are more than two periods apart.
++    constexpr Nanoseconds kAt = 1000 * kPeriod;
++    require(cadence_told_time(0, 2, 0, kAt, kPeriod) == kAt, "nothing before: the estimate");
++    require(cadence_told_time(kAt, 2, 0, kAt + kPeriod, kPeriod) == kAt + 2 * kPeriod,
++        "two periods on, the estimate a period away");
++    require(cadence_told_time(kAt, 3, 0, kAt + kPeriod, kPeriod) == kAt + 3 * kPeriod,
++        "three, the estimate two away");
++    require(cadence_told_time(kAt, 1, 0, kAt + kPeriod, kPeriod) == kAt + kPeriod, "1X");
++    require(cadence_told_time(kAt, 2, 1, kAt + 2 * kPeriod, kPeriod) == kAt + 3 * kPeriod,
++        "a lost slot carried");
++    require(cadence_told_time(kAt, 2, -1, kAt + 2 * kPeriod, kPeriod) == kAt + kPeriod,
++        "a frame short of its cadence given back");
++    require(cadence_told_time(kAt, 2, 0, kAt + 5 * kPeriod, kPeriod) == kAt + 5 * kPeriod,
++        "drifted three periods: re-anchored");
++    require(cadence_told_time(kAt, 2, -3, kAt + 2 * kPeriod, kPeriod) == kAt + 2 * kPeriod,
++        "never at or before the one before");
++    // The admission bound: the frame before last gone, and the synthetic
++    // slots this one takes.
++    require(cadence_admission_bound(2, 2, true) == 2, "2 after 2: as 2X deep");
++    require(cadence_admission_bound(3, 2, true) == 1, "3 after 2: both slots");
++    require(cadence_admission_bound(3, 3, true) == 1, "3 after 3: as 3X");
++    require(cadence_admission_bound(2, 3, true) == 2, "2 after 3: its first synthetic gone");
++    require(cadence_admission_bound(1, 1, true) == 1, "1X after 1X");
++    require(cadence_admission_bound(1, 3, true) == 3, "1X after 3");
++    require(cadence_admission_bound(3, 1, true) == 1, "3 after 1X");
++    require(cadence_admission_bound(2, 0, true) == 1, "after a pass-through");
++    require(cadence_admission_bound(2, 2, false) == 1 &&
++                cadence_admission_bound(3, 3, false) == 1,
++        "the shallow pipeline keeps one");
++
++    // A first-in, first-out presenter over a mix of cadences, a prime (a
++    // frame that queued one, short of its cadence of two) and lost slots (a
++    // slot the runtime skipped, or one shown again): every real frame lands
++    // at the display time it was told - but a frame short of its own
++    // cadence, told before it was short, which lands that much earlier.
++    struct Frame {
++        std::uint32_t frames;
++        std::uint32_t queued;
++        bool slot_lost_after;
++    };
++    const std::vector<Frame> script{
++        {2, 2, false}, {2, 2, false}, {3, 3, false}, {3, 3, true},
++        {2, 2, false}, {1, 1, false}, {1, 1, true}, {1, 1, false},
++        {2, 2, false}, {2, 1, false}, {2, 2, false}, {3, 3, false},
++        {2, 2, true}, {3, 3, true}, {2, 2, false}, {2, 2, false}};
++    Nanoseconds slot = kAt;
++    Nanoseconds told = 0;
++    std::int64_t slip = 0;
++    std::optional<Nanoseconds> offset; // told less landed, as the first frame
++    std::size_t index = 0;
++    for (const Frame& frame : script) {
++        // The presenter's estimate, a period off: inside the drift bound.
++        const Nanoseconds estimate =
++            slot + static_cast<Nanoseconds>(frame.frames) * kPeriod;
++        told = cadence_told_time(told, frame.frames, slip, estimate, kPeriod);
++        slip = 0;
++        const Nanoseconds landed =
++            slot + static_cast<Nanoseconds>(frame.queued - 1) * kPeriod;
++        if (!offset) {
++            offset = told - landed;
++        }
++        require(told - landed - *offset ==
++                static_cast<Nanoseconds>(frame.frames - frame.queued) * kPeriod,
++            "frame " + std::to_string(index) + " lands where it was told");
++        slot += static_cast<Nanoseconds>(frame.queued) * kPeriod;
++        slip -= static_cast<std::int64_t>(frame.frames) -
++            static_cast<std::int64_t>(frame.queued);
++        if (frame.slot_lost_after) {
++            slot += kPeriod;
++            ++slip;
++        }
++        ++index;
++    }
++}
++
+ } // namespace
+ 
+ int main() {
+@@ -2032,6 +2529,11 @@
+         triple_depth_shrink_tests(); // DCS Control (0029)
+         generation_stall_tests(); // DCS Control (0029)
+         measured_interpolation_tests(); // DCS Control (0029)
++        cadence_choice_tests(); // DCS Control (0032)
++        cadence_one_tests();
++        cadence_one_exit_tests();
++        cadence_backoff_tests();
++        cadence_frame_tests();
+         std::cout << "Latency control tests passed\n";
+         return 0;
+     } catch (const std::exception& error) {
+diff --git a/tests/layer_adaptive_cadence.cmake b/tests/layer_adaptive_cadence.cmake
+new file mode 100644
+--- /dev/null
++++ b/tests/layer_adaptive_cadence.cmake
+@@ -0,0 +1,92 @@
++# DCS Control (0032): runs the dcs-cadence call-chain scenario with
++# `adaptive_frame_gen=1` and `adaptive_cadence=1` (CADENCE_INI beside the
++# layer DLL) and checks, from the flight log, that adaptive cadence ran: on at
++# creation in 2X's shape, never a switch of multiplier, its once-a-second
++# record and the status a flight log is read by, and 1X entered and left. The
++# call chain itself checks what was shown (the synthetics between every two
++# real frames).
++foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN CADENCE_INI WORK_DIR)
++    if(NOT DEFINED ${required_variable})
++        message(FATAL_ERROR "${required_variable} was not provided")
++    endif()
++endforeach()
++
++file(REMOVE_RECURSE "${WORK_DIR}")
++file(MAKE_DIRECTORY "${WORK_DIR}")
++file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
++file(COPY "${CADENCE_INI}" DESTINATION "${WORK_DIR}")
++get_filename_component(cadence_ini_name "${CADENCE_INI}" NAME)
++file(RENAME "${WORK_DIR}/${cadence_ini_name}" "${WORK_DIR}/ofxr_bridge.ini")
++
++get_filename_component(layer_name "${LAYER_DLL}" NAME)
++execute_process(
++    COMMAND "${CALL_CHAIN}"
++        "${WORK_DIR}/${layer_name}"
++        "${WORK_DIR}/fake-runtime.log"
++        dcs-cadence
++    RESULT_VARIABLE call_chain_result
++    OUTPUT_VARIABLE call_chain_output
++    ERROR_VARIABLE call_chain_error)
++message(STATUS "${call_chain_output}")
++if(NOT call_chain_result EQUAL 0)
++    message(FATAL_ERROR
++        "Call chain 'dcs-cadence' failed (${call_chain_result}):\n"
++        "${call_chain_output}\n${call_chain_error}")
++endif()
++
++file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++list(LENGTH flight_logs flight_log_count)
++if(NOT flight_log_count EQUAL 1)
++    message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++endif()
++list(GET flight_logs 0 flight_log)
++file(READ "${flight_log}" contents)
++
++foreach(expected IN ITEMS
++        # Adaptive on at creation, and adaptive cadence with it, in 2X.
++        "op=adaptive_switch result=5 dur_us=0 a=0 b=2 c=0"
++        "op=adaptive_switch result=13 dur_us=0 a=0 b=2 c=0"
++        # 2X's shape with the deeper pipeline, triple_frame_gen not asked for.
++        "op=presenter_transition result=700 dur_us=0 a=2 b=1 c=0"
++        # Its once-a-second record, and the status under adaptive control.
++        "op=adaptive_throughput result=6 "
++        "op=latency_status result=12 "
++        # 1X entered from 2, and its status.
++        "op=adaptive_switch result=8 dur_us=0 a=2 b=1 c="
++        "op=latency_status result=11 ")
++    string(FIND "${contents}" "${expected}" found)
++    if(found EQUAL -1)
++        message(FATAL_ERROR "The flight log is missing: ${expected}")
++    endif()
++endforeach()
++# 1X left again, on missed slots or on work.
++string(REGEX MATCH "op=adaptive_switch result=(9|10) dur_us=0 a=1 b=2 c=[0-9]+" left_one "${contents}")
++if(left_one STREQUAL "")
++    message(FATAL_ERROR "1X was never left")
++endif()
++# No switch of multiplier: the cadence is each frame's own.
++foreach(unexpected IN ITEMS
++        "op=presenter_transition result=700 dur_us=0 a=3 "
++        "op=adaptive_switch result=1 "
++        "op=adaptive_switch result=2 "
++        "op=adaptive_switch result=3 ")
++    string(FIND "${contents}" "${unexpected}" found)
++    if(NOT found EQUAL -1)
++        message(FATAL_ERROR "The flight log has: ${unexpected}")
++    endif()
++endforeach()
++# Both cadences queued within one second, in some second: a= 1X (bits 0-15),
++# 2 (16-31), 3 (32-47), late (48-63).
++string(REGEX MATCHALL "op=adaptive_throughput result=6 dur_us=0 a=[0-9]+" records "${contents}")
++set(mixed FALSE)
++foreach(record IN LISTS records)
++    string(REGEX REPLACE ".* a=([0-9]+)$" "\\1" packed "${record}")
++    math(EXPR at_two "(${packed} >> 16) & 65535")
++    math(EXPR at_three "(${packed} >> 32) & 65535")
++    if(at_two GREATER 0 AND at_three GREATER 0)
++        set(mixed TRUE)
++    endif()
++endforeach()
++if(NOT mixed)
++    message(FATAL_ERROR "No second with frames of both cadences in: ${records}")
++endif()
+diff --git a/tests/layer_adaptive_frame_gen.cmake b/tests/layer_adaptive_frame_gen.cmake
+--- a/tests/layer_adaptive_frame_gen.cmake
++++ b/tests/layer_adaptive_frame_gen.cmake
+@@ -64,3 +64,13 @@
+ if(upshift STREQUAL "")
+     message(FATAL_ERROR "No 2X -> 3X adaptive switch for a slow or late application")
+ endif()
++# DCS Control (0032): without `adaptive_cadence=1` (no key, or 0) adaptive
++# cadence never runs: whole-mode 2X/3X as before.
++string(REGEX MATCH "op=adaptive_switch result=(8|9|1[0-3]) " cadence "${contents}")
++if(NOT cadence STREQUAL "")
++    message(FATAL_ERROR "Adaptive cadence ran without adaptive_cadence=1: ${cadence}")
++endif()
++string(FIND "${contents}" "op=adaptive_throughput result=6 " cadence_status)
++if(NOT cadence_status EQUAL -1)
++    message(FATAL_ERROR "An adaptive cadence record without adaptive_cadence=1")
++endif()
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -268,6 +268,18 @@
+ bool g_presenter_stall_mode = false;
+ std::atomic<int> g_presenter_stall_ms{0};
+ constexpr int kPresenterStallMs = 2500;
++// dcs-cadence (DCS Control, 0032): dcs-latency's shape under adaptive cadence
++// (`adaptive_frame_gen=1`, `adaptive_cadence=1` in the ini beside the layer):
++// a frame that holds two periods (9 ms of render), then stretches of one
++// that needs three (24 ms) and of the light one again, alternating. The
++// session must stay in 2X's shape while every application frame gets the
++// synthetics its own interval needs: between two real frames shown, as many
++// synthetics as display periods less one between the times they were told,
++// one or two, both many times over; real frames shown at the time they were
++// told through the changes; nothing re-presented, nothing out of order.
++// Then light long enough for 1X - its frames shown alone, no synthetic - and
++// heavy until it leaves. layer_adaptive_cadence.cmake checks the flight log.
++bool g_cadence_mode = false;
+ // dcs-throughput-down / dcs-throughput-gpu (DCS VR Control, 0004):
+ // dcs-adaptive's shape, starting in 3X, with the application's CPU and GPU
+ // time per frame set apart - CPU by a sleep from the frame's start, GPU by a
+@@ -2550,7 +2562,8 @@
+             "d3d11-bridge-acquire-ahead|d3d11-bridge-unsubmitted|"
+             "d3d11-bridge-fallback|dcs-late-skip|dcs-triple-deep|"
+             "dcs-triple-deep-jitter|dcs-triple-deep-quad|dcs-triple-scenes|"
+-            "dcs-adaptive-scenes|dcs-presenter-stall|dcs-triple-shrink]\n";
++            "dcs-adaptive-scenes|dcs-presenter-stall|dcs-triple-shrink|"
++            "dcs-cadence]\n";
+         return EXIT_FAILURE;
+     }
+     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
+@@ -2583,6 +2596,8 @@
+         // DCS Control (0029).
+         g_presenter_stall_mode =
+             argc == 4 && std::strcmp(argv[3], "dcs-presenter-stall") == 0;
++        // DCS Control (0032).
++        g_cadence_mode = argc == 4 && std::strcmp(argv[3], "dcs-cadence") == 0;
+     }
+     {
+         const bool throughput_down =
+@@ -2597,6 +2612,7 @@
+     }
+     g_display_latency_mode = g_adaptive_latency_mode || g_late_skip_mode ||
+         g_triple_deep_mode || g_scenes_mode || g_presenter_stall_mode ||
++        g_cadence_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs-latency") == 0);
+     g_dcs_mode = g_dcs_d3d11_mode || g_display_latency_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs") == 0);
+@@ -4284,7 +4300,7 @@
+         // to reach its depth first, then until it has.
+         const int kOverlappingFrames =
+             (g_adaptive_latency_mode || g_late_skip_mode || g_triple_deep_mode ||
+-             g_scenes_mode || g_presenter_stall_mode) ? 0
++             g_scenes_mode || g_presenter_stall_mode || g_cadence_mode) ? 0
+             : g_display_latency_mode
+                 ? (g_frames_per_application_frame > 2 ? 300 : 160)
+                 : 8;
+@@ -4296,7 +4312,7 @@
+         int settle_frames = 0;
+         if (g_display_latency_mode && !g_adaptive_latency_mode &&
+             !g_late_skip_mode && !g_triple_deep_mode && !g_scenes_mode &&
+-            !g_presenter_stall_mode) {
++            !g_presenter_stall_mode && !g_cadence_mode) {
+             settle_frames = run_until_settled(kSettleBound);
+         }
+         // dcs-triple-deep (0007): 14 s of a steady application, the last 8
+@@ -4498,6 +4514,64 @@
+                 kFakeDisplayPeriod * 3;
+             g_simulated_render_ms = 0;
+         }
++        // dcs-cadence (0032): light (two periods), then heavy and light in
++        // turn, then light until the told time has settled. Where the
++        // alternation starts and ends in the records, and the cadences the
++        // application was handed (its predictedDisplayPeriod).
++        std::size_t cadence_from = 0;
++        std::size_t cadence_to = 0;
++        std::array<std::uint32_t, 4> cadence_handed{};
++        int cadence_settle_frames = 0;
++        bool cadence_one_seen = false;
++        bool cadence_one_left = false;
++        if (g_cadence_mode) {
++            constexpr int kLightUs = 0;
++            constexpr int kHeavyUs = 24'000;
++            const auto cadence_frame = [&](int render_us) {
++                g_simulated_render_us = render_us;
++                sequence_succeeded = sequence_succeeded && run_frame(true);
++                const XrDuration handed = pending.predictedDisplayPeriod / kFakeDisplayPeriod;
++                if (handed >= 1 && handed <= 3) {
++                    ++cadence_handed[static_cast<std::size_t>(handed)];
++                }
++            };
++            for (int index = 0; sequence_succeeded && index < 150; ++index) {
++                cadence_frame(kLightUs);
++            }
++            cadence_from = scene_mark();
++            for (int stretch = 0; sequence_succeeded && stretch < 6; ++stretch) {
++                for (int index = 0; sequence_succeeded && index < 50; ++index) {
++                    cadence_frame(stretch % 2 == 0 ? kHeavyUs : kLightUs);
++                }
++            }
++            // 1X: light for its five clean seconds (twelve at most), two
++            // seconds in it, then heavy until it leaves.
++            const auto one_until =
++                std::chrono::steady_clock::now() + std::chrono::seconds(12);
++            while (sequence_succeeded &&
++                   pending.predictedDisplayPeriod != kFakeDisplayPeriod &&
++                   std::chrono::steady_clock::now() < one_until) {
++                cadence_frame(kLightUs);
++            }
++            cadence_one_seen = pending.predictedDisplayPeriod == kFakeDisplayPeriod;
++            const auto one_held =
++                std::chrono::steady_clock::now() + std::chrono::seconds(2);
++            while (sequence_succeeded && cadence_one_seen &&
++                   std::chrono::steady_clock::now() < one_held) {
++                cadence_frame(kLightUs);
++            }
++            for (int index = 0; sequence_succeeded && cadence_one_seen && index < 300 &&
++                 pending.predictedDisplayPeriod == kFakeDisplayPeriod;
++                 ++index) {
++                cadence_frame(kHeavyUs);
++            }
++            cadence_one_left = cadence_one_seen &&
++                pending.predictedDisplayPeriod != kFakeDisplayPeriod;
++            cadence_to = scene_mark();
++            g_simulated_render_us = kLightUs;
++            cadence_settle_frames = run_until_settled(kSettleBound);
++            g_simulated_render_us = 0;
++        }
+         sequence_succeeded = sequence_succeeded &&
+             XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
+             capture_fresh_application_image() &&
+@@ -4584,6 +4658,139 @@
+                       << throughput_frames << " frames\n";
+             return EXIT_SUCCESS;
+         }
++        if (g_cadence_mode) {
++            // 0032: over the alternation, between every two real frames
++            // shown, as many synthetics as display periods less one between
++            // the times they were told - one and two, each many times over,
++            // changing back and forth - and no real frame re-presented, no
++            // slot empty, nothing out of order; the told time exact at the
++            // end, and on nearly every real frame through the changes.
++            std::vector<EndFrameRecord> records;
++            {
++                std::scoped_lock lock(g_end_records_mutex);
++                records = g_end_records;
++            }
++            std::vector<std::pair<float, XrTime>> told;
++            {
++                std::scoped_lock lock(g_told_mutex);
++                told = g_told_by_pose;
++            }
++            const auto told_for = [&](float pose_x) -> XrTime {
++                for (const auto& [pose, time] : told) {
++                    if (pose == pose_x) {
++                        return time;
++                    }
++                }
++                return -1;
++            };
++            std::size_t unordered = 0;
++            XrTime last_told = 0;
++            for (const EndFrameRecord& record : records) {
++                if (record.layer_count == 0 ||
++                    (record.target != SubmittedTarget::current &&
++                     record.target != SubmittedTarget::synthetic)) {
++                    continue;
++                }
++                const XrTime time = told_for(record.poses[0].position.x);
++                if (time >= 0) {
++                    unordered += time < last_told ? 1U : 0U;
++                    last_told = std::max(last_told, time);
++                }
++            }
++            std::size_t repeats = 0;
++            std::size_t empty = 0;
++            std::size_t pairs = 0;
++            std::size_t mismatched = 0;
++            std::size_t told_off = 0;
++            std::array<std::size_t, 4> by_synthetics{};
++            std::size_t cadence_changes = 0;
++            std::uint32_t previous_synthetics = 0;
++            XrTime previous_real_told = -1;
++            std::uint32_t synthetics = 0;
++            std::ostringstream mismatches;
++            const std::size_t end = std::min(cadence_to, records.size());
++            for (std::size_t index = cadence_from; index < end; ++index) {
++                const EndFrameRecord& record = records[index];
++                if (record.layer_count == 0) {
++                    ++empty;
++                    continue;
++                }
++                if (record.target == SubmittedTarget::synthetic) {
++                    ++synthetics;
++                    continue;
++                }
++                if (record.target != SubmittedTarget::current) {
++                    continue;
++                }
++                if (index > 0 && records[index - 1].target == SubmittedTarget::current &&
++                    records[index - 1].poses[0].position.x == record.poses[0].position.x) {
++                    ++repeats;
++                    continue;
++                }
++                const XrTime time = told_for(record.poses[0].position.x);
++                told_off += time != record.display_time ? 1U : 0U;
++                if (previous_real_told >= 0 && time > previous_real_told) {
++                    const XrDuration periods = (time - previous_real_told) / kFakeDisplayPeriod;
++                    ++pairs;
++                    if (periods < 1 || static_cast<XrDuration>(synthetics) != periods - 1) {
++                        ++mismatched;
++                        if (mismatched <= 8) {
++                            mismatches << ' ' << periods << '/' << synthetics;
++                        }
++                    } else {
++                        ++by_synthetics[std::min<std::size_t>(synthetics, 3)];
++                        cadence_changes += previous_synthetics != 0 &&
++                                previous_synthetics != synthetics
++                            ? 1U
++                            : 0U;
++                        previous_synthetics = synthetics;
++                    }
++                }
++                previous_real_told = time;
++                synthetics = 0;
++            }
++            const XrDuration multiplier =
++                pending.predictedDisplayPeriod / kFakeDisplayPeriod;
++            const bool settled = settled_exact();
++            valid = sequence_succeeded && teardown_succeeded && presenter_seen &&
++                violations == 0 && unordered == 0 && repeats == 0 && empty == 0 &&
++                pairs >= 150 && mismatched == 0 && by_synthetics[1] >= 40 &&
++                by_synthetics[2] >= 40 && cadence_changes >= 5 &&
++                // 1X: entered, its frames shown alone, and left again.
++                cadence_one_seen && cadence_one_left && by_synthetics[0] >= 30 &&
++                cadence_handed[1] >= 30 &&
++                told_off * 10 <= pairs && settled &&
++                cadence_settle_frames < kSettleBound && multiplier == 2 &&
++                cadence_handed[2] >= 40 && cadence_handed[3] >= 40 &&
++                g_waited_display_times.empty() && !g_begun_display_time;
++            std::ostringstream summary;
++            summary << "pairs " << pairs << " with none (1X) " << by_synthetics[0]
++                    << ", one synthetic " << by_synthetics[1]
++                    << ", two " << by_synthetics[2] << ", changes " << cadence_changes
++                    << ", mismatched " << mismatched << ", told off " << told_off
++                    << ", repeats " << repeats << ", empty " << empty
++                    << ", handed 1/2/3 " << cadence_handed[1] << '/' << cadence_handed[2]
++                    << '/' << cadence_handed[3] << ", 1X entered " << cadence_one_seen
++                    << " left " << cadence_one_left
++                    << ", settled after " << cadence_settle_frames;
++            if (!valid) {
++                std::cerr << "DCS cadence validation failed: sequence="
++                          << sequence_succeeded << " teardown=" << teardown_succeeded
++                          << " promoted=" << presenter_seen
++                          << " violations=" << violations
++                          << " unordered=" << unordered
++                          << " settled=" << settled
++                          << " multiplier=" << multiplier
++                          << " records=" << records.size()
++                          << " marks=" << cadence_from << '/' << cadence_to << "; "
++                          << summary.str() << "; first mismatches (periods/synthetics):"
++                          << mismatches.str() << '\n';
++                return EXIT_FAILURE;
++            }
++            std::cout << "OpenXR DCS adaptive cadence test passed: " << summary.str()
++                      << '\n';
++            return EXIT_SUCCESS;
++        }
+         if (g_scenes_mode) {
+             // 0009: each phase's steady tail (the last 300 submissions, three
+             // seconds at the fake's 100 Hz) shows a fresh frame in every slot
+diff --git a/tests/ofxr_bridge_adaptive_cadence.ini b/tests/ofxr_bridge_adaptive_cadence.ini
+new file mode 100644
+--- /dev/null
++++ b/tests/ofxr_bridge_adaptive_cadence.ini
+@@ -0,0 +1,18 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=1
++triple_frame_gen=0
++adaptive_frame_gen=1
++adaptive_cadence=1
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right
+diff --git a/tests/ofxr_bridge_adaptive_cadence_off.ini b/tests/ofxr_bridge_adaptive_cadence_off.ini
+new file mode 100644
+--- /dev/null
++++ b/tests/ofxr_bridge_adaptive_cadence_off.ini
+@@ -0,0 +1,19 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=1
++triple_frame_gen=1
++adaptive_frame_gen=1
++; DCS Control (0032): adaptive cadence off, as a missing key.
++adaptive_cadence=0
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right

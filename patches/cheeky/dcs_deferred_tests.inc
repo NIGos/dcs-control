@@ -6,8 +6,14 @@
 // DCS's own feature after the bound), 1 the startup path before the Quad Views
 // proof (private D3D12 SR without NR, then NR on the same textures; the idle
 // view's resources given back at the next mission's create), 2 DLSS 5
-// toggled off in flight (private D3D12 SR without NR, never DCS's feature).
+// toggled off in flight (private D3D12 SR without NR, never DCS's feature; the session-only key never reaches
+// the INI), 3 DLSS 5 evaluations that keep failing (stopped for the session after dcs_nr_failure_limit attempts,
+// the private SR goes on), 4 a transport that rejects frames (brief runs held with a bilinear upscale, only a
+// lasting one creates DCS's own feature).
 #include "dcs_quad_focus_policy.hpp"
+#include "dcs_nr_failure_latch.hpp"
+using cheeky::foveated_dlss::DcsNrFailureLatch;
+using cheeky::foveated_dlss::dcs_nr_failure_limit;
 std::uint32_t dcs_created_quality{~0U};
 void dcs_observe_created(const cheeky::foveated_dlss::NgxParameters* created) {
     dcs_created_quality = cheeky::foveated_dlss::get_ui(created, "PerfQualityValue");
@@ -133,14 +139,17 @@ void verify_dcs_deferred(CheekyRuntimeCommandFn command, CheekyRuntimeSnapshotFn
         layout.structure_size = sizeof(layout); layout.valid = 1U; layout.session_generation = 1U; layout.sequence = 1U;
         layout.width = {128U, 128U, 256U, 256U}; layout.height = {128U, 128U, 256U, 256U};
         layout.swapchain = {1U, 2U, 3U, 4U};
-        // proven=false: last published a second ago (DCS was loading). proven=true: this
-        // frame's snapshot names this NGX output as the left focus view (exact resource).
-        const auto publish_frame = [&](bool proven) {
+        // mode 0: last published a second ago (DCS was loading). 1 (proven): this frame's
+        // snapshot names this NGX output as the left focus view (exact resource). 2: published
+        // now, but the layer's mapping is not ready (no proof, the layout is fresh).
+        const auto publish_frame = [&](int mode) {
+            const bool proven = mode == 1;
             CheekyGazeSnapshotV1 sample{};
             sample.abi_version = CHEEKY_GAZE_ABI_VERSION; sample.structure_size = sizeof(sample);
-            sample.status_flags = dcs_quad_focus_required_flags; sample.view_count = 2U;
+            sample.status_flags = dcs_quad_focus_required_flags & (mode == 2 ? ~CHEEKY_GAZE_STATUS_MAPPING_READY : ~0U);
+            sample.view_count = 2U;
             sample.session_generation = 1U; sample.predicted_display_time = 1;
-            sample.publication_qpc = qpc() - (proven ? 0U : static_cast<std::uint64_t>(frequency.QuadPart));
+            sample.publication_qpc = qpc() - (mode != 0 ? 0U : static_cast<std::uint64_t>(frequency.QuadPart));
             for (unsigned eye = 0; eye < 2U; ++eye) {
                 auto& view = sample.views[eye];
                 view.structure_size = sizeof(view); view.view_index = eye; view.flags = CHEEKY_GAZE_VIEW_RESOURCE_VALID;
@@ -163,16 +172,17 @@ void verify_dcs_deferred(CheekyRuntimeCommandFn command, CheekyRuntimeSnapshotFn
                 ngx_succeeded(parameters.Get("PerfQualityValue", &bag_quality)) && bag_quality == 0;
         };
         const auto frame = [&](const NgxHandle* handle, bool proven) {
-            publish_frame(proven);
+            publish_frame(proven ? 1 : 0);
             require(ngx_succeeded(evaluate(context, handle, &parameters, nullptr)), "Focus view frame");
             context->Flush();
         };
         if (scenario == 1) {
             // 1. Mission start: DCS evaluates its focus views before the Quad Views proof exists.
-            publish_frame(false);
+            publish_frame(0);
             NgxHandle* focus{};
             require(ngx_succeeded(create(context, 1, &parameters, &focus)) && focus, "Deferred focus create");
-            require(log_count("focus=layout") >= 1U, "The focus extent is classified from the published layout");
+            require(log_count("focus=unclassified") == 1U && log_count("focus=layout") == 0U,
+                "A layout published a second ago never classifies a create");
             diverge_bag();
             dcs_clear(device, context, output, sentinel);
             const auto core_evaluates0 = counter(core, "CheekyFakeEvaluates");
@@ -183,7 +193,7 @@ void verify_dcs_deferred(CheekyRuntimeCommandFn command, CheekyRuntimeSnapshotFn
             require(counter(core, "CheekyFakeCreates") == creates0 && counter(core, "CheekyFakeEvaluates") == core_evaluates0 &&
                 log_count("DCS deferred DX11 DLSS materialized") == 0U, "Unproven focus frames never create or evaluate DCS's own feature");
             require(log_count("kept on the private D3D12 SR without NR") >= 1U && log_count("reason=focus-proof-pending") >= 1U,
-                "Unproven focus frames run on the private D3D12 SR");
+                "Unproven focus frames run on the private D3D12 SR (an older layout's focus extent may keep them there)");
             require(counter(ngx, "CheekyFakeEvaluates") >= snippet_evaluates0 + 8U && nr_evaluates() == nr_evaluates0,
                 "Private SR evaluated every unproven frame, NR never");
             require(contains(snapshot(get), "\"execution_path\":\"DX12 Transport\"") && output_written(), "The transport writes the focus output");
@@ -209,7 +219,9 @@ void verify_dcs_deferred(CheekyRuntimeCommandFn command, CheekyRuntimeSnapshotFn
             Sleep(5200U);
             const auto idle_before = log_count("FEATURE_IDLE released private resources");
             NgxHandle* next_mission{};
+            publish_frame(2);
             require(ngx_succeeded(create(context, 1, &parameters, &next_mission)) && next_mission, "Next mission's focus create");
+            require(log_count("focus=layout") == 1U, "A layout of this session published now classifies the create");
             require(log_count("FEATURE_IDLE released private resources") == idle_before + 1U,
                 "The next create releases the idle view's private resources");
             const auto released_allocations = allocations();
@@ -228,11 +240,137 @@ void verify_dcs_deferred(CheekyRuntimeCommandFn command, CheekyRuntimeSnapshotFn
             NgxHandle* peripheral{};
             require(ngx_succeeded(create(context, 1, &peripheral_parameters, &peripheral)) && peripheral &&
                 log_count("focus=unclassified") >= 1U, "Unclassifiable create is deferred");
-            publish_frame(false);
+            // An old layout never decides that a view is peripheral: the frame is held.
+            publish_frame(0);
+            require(ngx_succeeded(evaluate(context, peripheral, &peripheral_parameters, nullptr)), "Peripheral frame, old layout");
+            require(counter(core, "CheekyFakeCreates") == creates0 && log_count("reason=layout-unknown") >= 1U,
+                "An old layout's peripheral extent holds the view instead of creating DCS's own feature");
+            publish_frame(2);
             require(ngx_succeeded(evaluate(context, peripheral, &peripheral_parameters, nullptr)), "Peripheral frame");
             require(counter(core, "CheekyFakeCreates") == creates0 + 1U && log_count("reason=not-a-focus-extent") == 1U,
-                "A peripheral extent creates DCS's own feature on its first frame");
+                "A peripheral extent of a fresh layout creates DCS's own feature at once");
             require(ngx_succeeded(release(peripheral)) && counter(core, "CheekyFakeReleases") == releases0 + 1U, "Peripheral release");
+        } else if (scenario == 3) {
+            // DCS Control: DLSS 5 evaluations that keep failing stop for the session (dcs_nr_failure_latch.hpp).
+            // Policy first: a run below the limit retries; the limit, a lost-device result or a removed device
+            // closes the latch, and only the closing failure reports it.
+            {
+                DcsNrFailureLatch latch;
+                require(!latch.failed(1U, 0xBAD00007U, 0U) && !latch.failed(dcs_nr_failure_limit - 1U, 0xBAD00007U, 0U) &&
+                    !latch.active(), "Fewer than the limit of consecutive failures keep DLSS 5 retrying");
+                require(latch.failed(dcs_nr_failure_limit, 0xBAD00007U, 0U) && latch.active() &&
+                    !latch.failed(dcs_nr_failure_limit + 1U, 0xBAD00007U, 0U), "The limit stops DLSS 5, reported once");
+                DcsNrFailureLatch hung, removed;
+                require(hung.failed(1U, 0xBAD00007U, 0x887A0006U) && hung.active(), "A hung device stops DLSS 5 at its first failure");
+                require(removed.failed(1U, 0x887A0005U, 0U) && removed.active(), "A device-removed result stops DLSS 5 at once");
+            }
+            publish_frame(true);
+            NgxHandle* focus{};
+            require(ngx_succeeded(create(context, 1, &parameters, &focus)) && focus, "Deferred focus create");
+            bool active{};
+            for (unsigned i = 0; i < 100 && !active; ++i) {
+                frame(focus, true);
+                active = contains(snapshot(get), "\"nr\":\"Active\"");
+            }
+            require(active, "DLSS 5 active on the focus view");
+            const auto nr_module = GetModuleHandleW(L"nvngx_dlssnr.dll");
+            require(nr_module != nullptr, "DLSS-NR runtime fixture loaded");
+            const auto core_evaluates0 = counter(core, "CheekyFakeEvaluates");
+            // A short run of failed evaluations (a transient error) retries and recovers.
+            proc<void(*)(unsigned)>(nr_module, "CheekyFakeFailNextEvaluations")(5U);
+            for (unsigned i = 0; i < 12; ++i) frame(focus, true);
+            require(contains(snapshot(get), "\"nr\":\"Active\"") && log_count("DLSS-NR stopped for this session") == 0U,
+                "A transient run of failures recovers");
+            // A runtime that keeps failing: exactly the limit of attempts, then none for the rest of the session.
+            proc<void(*)(bool)>(nr_module, "CheekyFakeFailEvaluations")(true);
+            const auto failing0 = nr_evaluates();
+            for (unsigned i = 0; i < dcs_nr_failure_limit + 20U; ++i) frame(focus, true);
+            require(nr_evaluates() - failing0 == dcs_nr_failure_limit, "DLSS 5 is attempted exactly the limit of times");
+            require(log_count("DLSS-NR stopped for this session") == 1U, "The stop is logged once");
+            dcs_clear(device, context, output, sentinel);
+            frame(focus, true);
+            require(output_written() && contains(snapshot(get), "\"execution_path\":\"DX12 Transport\""),
+                "After the stop the focus view still gets its DLSS upscale from the private D3D12 SR");
+            // The runtime works again: DLSS 5 stays off until DCS restarts, and DCS's own feature was never needed.
+            proc<void(*)(bool)>(nr_module, "CheekyFakeFailEvaluations")(false);
+            const auto stopped = nr_evaluates();
+            for (unsigned i = 0; i < 10; ++i) frame(focus, true);
+            require(nr_evaluates() == stopped && !contains(snapshot(get), "\"nr\":\"Active\""), "DLSS 5 stays off for the session");
+            require(counter(core, "CheekyFakeCreates") == creates0 && counter(core, "CheekyFakeEvaluates") == core_evaluates0,
+                "The stop never creates or evaluates DCS's own feature");
+            require(ngx_succeeded(release(focus)) && counter(core, "CheekyFakeReleases") == releases0, "Release of the focus view");
+        } else if (scenario == 4) {
+            // DCS Control: the transport rejects frames of an accepted deferred focus view (slot timeout, private
+            // device or shared texture creation failing under VRAM pressure, a sync failure); here the private
+            // SR evaluation fails. DCS's own feature would never be freed again, so only a lasting failure creates it.
+            publish_frame(1);
+            NgxHandle* focus{};
+            require(ngx_succeeded(create(context, 1, &parameters, &focus)) && focus, "Deferred focus create");
+            bool active{};
+            for (unsigned i = 0; i < 100 && !active; ++i) {
+                frame(focus, true);
+                active = contains(snapshot(get), "\"execution_path\":\"DX12 Transport\"");
+            }
+            require(active, "The focus view runs on the transport");
+            const auto core_evaluates0 = counter(core, "CheekyFakeEvaluates");
+            const auto fail_next = proc<void(*)(unsigned)>(ngx, "CheekyFakeFailNextEvaluations");
+            const auto fail_all = proc<void(*)(bool)>(ngx, "CheekyFakeFailEvaluations");
+            const auto never_created = [&] {
+                return counter(core, "CheekyFakeCreates") == creates0 && counter(core, "CheekyFakeEvaluates") == core_evaluates0 &&
+                    log_count("DCS deferred DX11 DLSS materialized") == 0U;
+            };
+            const auto held_frame = [&] {
+                dcs_clear(device, context, output, sentinel);
+                frame(focus, true);
+                return dcs_pixel_is(dcs_read_pixel(device, context, output, 128U, 128U), scene) &&
+                    dcs_pixel_is(dcs_read_pixel(device, context, output, 0U, 0U), scene);
+            };
+            // 1. Three failing frames: each held with a bilinear upscale of DCS's render; then the transport resumes.
+            fail_next(3U);
+            for (unsigned i = 0; i < 3; ++i) require(held_frame(), "A failed transport frame is held with the upscaled render");
+            require(log_count("reason=transport-failed") >= 1U && never_created(), "Brief transport failures never create DCS's own feature");
+            dcs_clear(device, context, output, sentinel);
+            frame(focus, true);
+            require(output_written() && contains(snapshot(get), "\"execution_path\":\"DX12 Transport\""),
+                "The transport resumes on the next frame");
+            // 2. Failures separated by working frames never add up: a transported frame ends the run.
+            const auto started = GetTickCount64();
+            fail_next(1U);
+            require(held_frame(), "First isolated failure held");
+            while (GetTickCount64() - started <= 3300U) { frame(focus, true); Sleep(15); }
+            fail_next(1U);
+            require(held_frame(), "A failure more than the hold bound after the previous one is held too");
+            require(never_created() && log_count("transport-failure-timeout") == 0U,
+                "Only consecutive failures count towards the bound");
+            // 3. DLSS 5 off (private SR without NR): a failing frame is held the same way.
+            require(command(attachment, "1\n44\nset_session\nNrEnabled=0"), "DLSS 5 key: off");
+            for (unsigned i = 0; i < 2; ++i) frame(focus, true);
+            const auto unavailable = log_count("private D3D12 SR unavailable");
+            fail_next(2U);
+            for (unsigned i = 0; i < 2; ++i) require(held_frame(), "DLSS 5 off: a failed private SR frame is held");
+            require(log_count("private D3D12 SR unavailable") == unavailable + 2U && never_created(),
+                "DLSS 5 off: brief failures never create DCS's own feature");
+            dcs_clear(device, context, output, sentinel);
+            frame(focus, true);
+            require(output_written() && log_count("reason=dlss5-off") >= 1U, "DLSS 5 off: the private SR resumes");
+            require(command(attachment, "1\n45\nset_session\nNrEnabled=1"), "DLSS 5 key: on");
+            // 4. A lasting failure: held for the bound, then DCS's own feature (the genuine fallback).
+            fail_all(true);
+            const auto failing_since = GetTickCount64();
+            std::uint64_t materialized_after{};
+            while (!materialized_after && GetTickCount64() - failing_since < 8000U) {
+                publish_frame(1);
+                static_cast<void>(evaluate(context, focus, &parameters, nullptr)); // DCS's own feature fails here too.
+                context->Flush();
+                if (counter(core, "CheekyFakeCreates") != creates0) materialized_after = GetTickCount64() - failing_since;
+                else Sleep(20);
+            }
+            fail_all(false);
+            require(materialized_after >= 2900U && counter(core, "CheekyFakeCreates") == creates0 + 1U &&
+                log_count("reason=transport-failure-timeout") == 1U,
+                "A transport failing for longer than the bound creates DCS's own feature once");
+            require(ngx_succeeded(release(focus)) && counter(core, "CheekyFakeReleases") == releases0 + 1U,
+                "The materialized feature is released with the handle");
         } else {
             // DLSS 5 toggled off in flight on a proven focus view, then on again.
             publish_frame(true);
@@ -249,6 +387,27 @@ void verify_dcs_deferred(CheekyRuntimeCommandFn command, CheekyRuntimeSnapshotFn
             const auto with_nr = allocations();
             const auto core_evaluates0 = counter(core, "CheekyFakeEvaluates");
             require(command(attachment, "1\n41\nset_session\nNrEnabled=0"), "DLSS 5 key: off");
+            {
+                // The session-only key never reaches the INI, whatever saves the settings while it is off.
+                const auto ini_path = log_path.parent_path() / "CheekyFoveatedDLSS.ini";
+                const auto saved_nr = [&] {
+                    std::ifstream ini(ini_path);
+                    for (std::string line; std::getline(ini, line);)
+                        if (line.rfind("NrEnabled=", 0) == 0) return line.substr(10);
+                    return std::string{};
+                };
+                const auto written = [&] {
+                    std::error_code error;
+                    return std::filesystem::last_write_time(ini_path, error);
+                };
+                const auto stamp = written();
+                require(command(attachment, "1\n43\nsave"), "Save while DLSS 5 is off for the session");
+                for (unsigned i = 0; i < 300 && written() == stamp; ++i) Sleep(10);
+                Sleep(100);
+                require(written() != stamp && (saved_nr() == "1" || saved_nr() == "true"),
+                    "A save while the DLSS 5 key has it off keeps the persisted NrEnabled");
+                require(contains(snapshot(get), "\"NrEnabled\":false"), "...while the session keeps DLSS 5 off");
+            }
             const auto nr_evaluates_off = nr_evaluates();
             const auto snippet_evaluates_off = counter(ngx, "CheekyFakeEvaluates");
             dcs_clear(device, context, output, sentinel);

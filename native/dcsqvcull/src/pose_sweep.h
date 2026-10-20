@@ -7,6 +7,13 @@
 // and by [Suite] HoldYawDeg; off otherwise. The headset shows a swinging image
 // while it runs.
 //
+// R99: the time-varying yaw is a function of the locate's requested displayTime (XrViewLocateInfo::displayTime, XrTime
+// in ns), not of the wall clock at the call: t = (displayTime - t0) / 1e9 with t0 the first displayTime located after
+// Start. Every caller asking for one display time gets one pose (all its views rotated alike), and a display time
+// between two frames' gets the yaw in between. R98 found the wall-clock yaw invisible to frame generation: a layer
+// locating a synthetic frame right after DCS located the real one got the real one's yaw. [Suite] PoseWallClock=1 keeps
+// the old clock (a locate without a displayTime falls back to it too).
+//
 // The detour follows the allocator detour's rules: code and target pointer on
 // separate pages, and the 14-byte patch is written with every other thread of
 // the process suspended and outside the patched bytes.
@@ -32,6 +39,10 @@ std::atomic<bool> g_on{false};
 std::atomic<int> g_state{0};
 std::atomic<int64_t> g_t0{0};
 std::atomic<double> g_yawDeg{0};
+// R99: the sweep's time base. g_t0Xr: the first displayTime located since Start (0: not latched yet).
+std::atomic<int64_t> g_t0Xr{0};
+std::atomic<bool> g_wallClock{false};  // [Suite] PoseWallClock: the pre-R99 clock (QPC at each call)
+constexpr size_t kInfoDisplayTime = 24;  // XrViewLocateInfo: type, next, viewConfigurationType, displayTime (XrTime)
 // [Suite] HoldPitchDeg (test only): a constant pitch (degrees, positive = view down) about the tracking space's x
 // axis, applied under the yaw while the hook is on (aims an unattended view whose headset lies tilted).
 std::atomic<double> g_pitchDeg{0};
@@ -39,7 +50,9 @@ std::atomic<double> g_pitchDeg{0};
 // the views keep the runtime's eye offsets and FOVs). An unattended headset's tracking can jump (live 2026-10-14:
 // the seated origin was lost mid-run and the eyes left the cockpit); a held pose keeps every capture at one pose.
 std::atomic<bool> g_holdPose{false};
-bool g_anchorSet = false;
+// R99: the anchor is latched once by whichever caller comes first (0 unset, 1 being written, 2 set): two layers locating
+// at once must not each take their own.
+std::atomic<int> g_anchorState{0};
 double g_anchorQ[4] = {0, 0, 0, 1}, g_anchorP[3] = {};
 inline void QMul(const double a[4], const double b[4], double o[4]) {  // (x, y, z, w)
   const double x = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1];
@@ -97,6 +110,9 @@ inline double ComposeForward(bool sweeping, bool taxi, double t) {
   return t < 5 ? 0 : (t - 5) * 15.0;
 }
 
+// R99: the sweep's time in seconds for a locate at displayTime (ns) against the latched t0 (pure).
+inline double SweepSeconds(int64_t displayTime, int64_t t0) { return static_cast<double>(displayTime - t0) * 1e-9; }
+
 double YawAt(double t) {
   return ComposeYaw(Holding(), g_hold.load(std::memory_order_relaxed), g_sweep.load(std::memory_order_relaxed),
                     g_rateDps.load(std::memory_order_relaxed), t);
@@ -108,9 +124,22 @@ double ForwardAt(double t) {
 int32_t __fastcall Hook(void* session, const void* info, void* state, uint32_t cap, uint32_t* count, uint8_t* views) {
   int32_t r = g_tramp(session, info, state, cap, count, views);
   if (r < 0 || !g_on.load(std::memory_order_relaxed) || !views || !count) return r;
-  LARGE_INTEGER now;
-  QueryPerformanceCounter(&now);
-  double t = (now.QuadPart - g_t0.load()) * g_qpcToUs / 1e6;
+  int64_t dt = 0;
+  if (info && !g_wallClock.load(std::memory_order_relaxed))
+    memcpy(&dt, static_cast<const uint8_t*>(info) + kInfoDisplayTime, sizeof(dt));
+  double t;
+  if (dt > 0) {  // R99: the requested display time
+    int64_t t0 = g_t0Xr.load(std::memory_order_acquire);
+    if (t0 == 0) {  // the first locate since Start latches t0 (a concurrent first caller's value wins if it was first)
+      int64_t seen = 0;
+      t0 = g_t0Xr.compare_exchange_strong(seen, dt, std::memory_order_acq_rel) ? dt : seen;
+    }
+    t = SweepSeconds(dt, t0);
+  } else {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    t = (now.QuadPart - g_t0.load()) * g_qpcToUs / 1e6;
+  }
   const double yawDeg = YawAt(t);
   double yaw = yawDeg * 3.14159265358979 / 180.0;
   const double fwd = ForwardAt(t);
@@ -126,15 +155,17 @@ int32_t __fastcall Hook(void* session, const void* info, void* state, uint32_t c
   for (uint32_t i = 0; i < n; ++i)
     for (int k = 0; k < 3; ++k) hc[k] += reinterpret_cast<float*>(views + i * 64 + 32)[k] / static_cast<float>(n);
   if (!g_holdPose.load(std::memory_order_relaxed)) {
-    g_anchorSet = false;
+    g_anchorState.store(0, std::memory_order_release);
   } else if (n) {
     const float* q0 = reinterpret_cast<const float*>(views + 16);
     const double qh[4] = {q0[0], q0[1], q0[2], q0[3]};
-    if (!g_anchorSet) {
+    int st = g_anchorState.load(std::memory_order_acquire);
+    if (st == 0 && g_anchorState.compare_exchange_strong(st, 1, std::memory_order_acq_rel)) {
       for (int k = 0; k < 4; ++k) g_anchorQ[k] = qh[k];
       for (int k = 0; k < 3; ++k) g_anchorP[k] = hc[k];
-      g_anchorSet = true;
+      g_anchorState.store(2, std::memory_order_release);
     }
+    for (int i = 0; i < 100000 && g_anchorState.load(std::memory_order_acquire) == 1; ++i) YieldProcessor();
     const double qhc[4] = {-qh[0], -qh[1], -qh[2], qh[3]};
     for (uint32_t i = 0; i < n; ++i) {  // each view's pose relative to the head, re-attached at the anchor
       float* q = reinterpret_cast<float*>(views + i * 64 + 16);
@@ -183,50 +214,11 @@ int32_t __fastcall Hook(void* session, const void* info, void* state, uint32_t c
 }
 
 // Suspends every other thread, checks that none is inside [addr, addr+len),
-// writes, resumes. Retries a few times.
+// writes, resumes. Retries a few times. R90: through qvpatch::WriteSuspended
+// (patch_threads.h: no system-wide thread snapshot with [General] PatchMode=1).
 bool PatchAllSuspended(uint8_t* addr, const uint8_t* bytes, size_t len) {
-  for (int attempt = 0; attempt < 20; ++attempt) {
-    std::vector<HANDLE> held;
-    held.reserve(4096);  // no heap allocation while threads are suspended (one may hold the heap lock)
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap == INVALID_HANDLE_VALUE) return false;
-    THREADENTRY32 te{sizeof(te)};
-    bool clear = true;
-    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
-      if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId()) continue;
-      HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
-      if (!h) continue;
-      if (SuspendThread(h) == static_cast<DWORD>(-1)) {
-        CloseHandle(h);
-        continue;
-      }
-      held.push_back(h);
-      CONTEXT ctx{};
-      ctx.ContextFlags = CONTEXT_CONTROL;
-      if (GetThreadContext(h, &ctx)) {
-        uintptr_t rip = ctx.Rip, a = reinterpret_cast<uintptr_t>(addr);
-        if (rip > a && rip < a + len) clear = false;
-      }
-    }
-    CloseHandle(snap);
-    bool done = false;
-    if (clear) {
-      DWORD old;
-      if (VirtualProtect(addr, len, PAGE_EXECUTE_READWRITE, &old)) {
-        memcpy(addr, bytes, len);
-        VirtualProtect(addr, len, old, &old);
-        FlushInstructionCache(GetCurrentProcess(), addr, len);
-        done = true;
-      }
-    }
-    for (HANDLE h : held) {
-      ResumeThread(h);
-      CloseHandle(h);
-    }
-    if (done) return true;
-    Sleep(2);
-  }
-  return false;
+  const qvpatch::Site site{addr, bytes, len};
+  return qvpatch::WriteSuspended(&site, 1, 20);
 }
 
 bool Install() {
@@ -315,6 +307,7 @@ bool Start(double rateDps = 0) {
   QueryPerformanceCounter(&now);
   g_rateDps = rateDps > 0 ? rateDps : 0.0;
   g_t0 = now.QuadPart;
+  g_t0Xr = 0;  // R99: latched at the next locate's displayTime
   g_sweep = true;
   g_on = true;
   return true;

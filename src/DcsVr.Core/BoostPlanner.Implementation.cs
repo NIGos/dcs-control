@@ -4,12 +4,20 @@ namespace DcsVr.Core;
 
 /// <summary>One running process as CPU Boost sees it. <paramref name="AccessibleForSetInfo"/> is false when the
 /// process is owned by another account or session and cannot be opened for PROCESS_SET_INFORMATION without
-/// administrator rights.</summary>
-public sealed record BoostProcessFact(int Pid, string Name, int ParentPid, bool AccessibleForSetInfo);
+/// administrator rights. <paramref name="SessionId"/> is its Windows session (0: services), -1 when unknown.</summary>
+public sealed record BoostProcessFact(int Pid, string Name, int ParentPid, bool AccessibleForSetInfo, int SessionId = -1);
 
 /// <summary>A snapshot of running processes plus the real DCS PID, if any. Pure input to plan building, so plans can be
-/// tested without touching real processes.</summary>
-public sealed record BoostSnapshot(IReadOnlyList<BoostProcessFact> Processes, int? DcsPid);
+/// tested without touching real processes. <paramref name="OwnSession"/> is the session of the process that took it:
+/// when set, programs signed in under another user's session are never closed or moved.</summary>
+public sealed record BoostSnapshot(IReadOnlyList<BoostProcessFact> Processes, int? DcsPid, int? OwnSession = null)
+{
+    /// <summary>True when the process may not be closed or changed from this session: another user's session, or an
+    /// unknown one. Services (session 0) count as this session's only when <paramref name="services"/>: the VR
+    /// runtime's services are confined, never closed.</summary>
+    public bool OtherSession(BoostProcessFact process, bool services = false) =>
+        OwnSession is { } own && process.SessionId != own && !(services && process.SessionId == 0);
+}
 
 public static partial class BoostPlanner
 {
@@ -80,7 +88,7 @@ public static partial class BoostPlanner
         {
             skippedAsLauncher = false;
             BoostProcessFact? first = null;
-            foreach (var p in snapshot.Processes.Where(p => Matches(pattern, p.Name)))
+            foreach (var p in snapshot.Processes.Where(p => Matches(pattern, p.Name) && !snapshot.OtherSession(p, services: true)))
             {
                 if (p.Pid == snapshot.DcsPid || ancestors.Contains(p.Pid) || IsProtectedName(p.Name)) { skippedAsLauncher = true; continue; }
                 first ??= p;
@@ -169,8 +177,9 @@ public static partial class BoostPlanner
     {
         var facts = new List<BoostProcessFact>();
         int? dcsPid = null;
+        int? own = ProcessIdToSessionId((uint)Environment.ProcessId, out var ownSession) ? (int)ownSession : null;
         var snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (snapshot == new IntPtr(-1)) return new BoostSnapshot(facts, trackedDcsPid);
+        if (snapshot == new IntPtr(-1)) return new BoostSnapshot(facts, trackedDcsPid, own);
         try
         {
             var entry = new PROCESSENTRY32 { dwSize = (uint)Marshal.SizeOf<PROCESSENTRY32>() };
@@ -179,12 +188,13 @@ public static partial class BoostPlanner
                 var name = TrimExe(entry.szExeFile ?? "");
                 var pid = (int)entry.th32ProcessID;
                 var accessible = !testAccess || IsAccessibleForSetInfo(pid);
-                facts.Add(new BoostProcessFact(pid, name, (int)entry.th32ParentProcessID, accessible));
+                var session = ProcessIdToSessionId(entry.th32ProcessID, out var id) ? (int)id : -1;
+                facts.Add(new BoostProcessFact(pid, name, (int)entry.th32ParentProcessID, accessible, session));
                 if (string.Equals(name, DcsProcessName, StringComparison.OrdinalIgnoreCase)) dcsPid ??= pid;
             }
         }
         finally { CloseHandle(snapshot); }
-        return new BoostSnapshot(facts, trackedDcsPid ?? dcsPid);
+        return new BoostSnapshot(facts, trackedDcsPid ?? dcsPid, own);
     }
 
     static bool IsAccessibleForSetInfo(int pid)
@@ -218,4 +228,5 @@ public static partial class BoostPlanner
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern bool Process32Next(IntPtr snapshot, ref PROCESSENTRY32 entry);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
 }

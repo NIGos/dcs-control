@@ -34,7 +34,8 @@ public static class ConfigurationWriters
         NrUseSrFoveation={(p.UsesQuadFocus ? 0 : 1)}
         NrWidth={Number(p.UsesQuadFocus ? NeuralArea(p) : CheekyRange(p.FoveaWidth))}
         NrHeight={Number(p.UsesQuadFocus ? NeuralArea(p) : CheekyRange(p.FoveaHeight))}
-        NrRoundness={(p.UsesNeuralEdgeFade && p.QuadRoundFocus ? 1 : 0)}
+        NrRoundness={((p.UsesNeuralEdgeFade || p.UsesCentralNeuralArea) && p.QuadRoundFocus ? 1 : 0)}
+        CenterPreset={(p.UsesQuadFocus ? p.FocusDlssPreset : 0)}
         NrTransitionWidth={Number(p.UsesNeuralEdgeFade ? p.NeuralEdgeFeather : VrProfile.NeuralAreaFeather)}
         NrProcessingOrder={(p.NeuralBeforeUpscaling ? 1 : 0)}
         NrWorkingScale={Number(p.NeuralWorkingScale)}
@@ -53,6 +54,77 @@ public static class ConfigurationWriters
         NrAutomaticMask={(p.NeuralAutomaticMask ? 1 : 0)}
 
         """;
+
+    /// <summary>[PupilShift] PublishGaze, written only while Visual realism needs the gaze (eye-focus blur, G vision
+    /// following the eyes): with it off the layer's file stays as it was.</summary>
+    private static string PublishGazeLines(VrProfile p) => p.UsesGazePublish ? """
+
+
+        ; The gaze for the engine module's eye-focus blur and G vision, also without Depth boost.
+        PublishGaze=1
+        """ : "";
+
+    /// <summary>[Color] Mode, written only while a color mode can run (a mode or its key is set): with everything off the
+    /// file stays as it was before Visual realism existed.</summary>
+    private static string ColorModeLine(VrProfile p) => p.UsesColorMode ? $"""
+
+        Mode={(int)p.ColorMode}
+        """ : "";
+
+    /// <summary>Visual realism's sections after [Color]: each color mode's values while a color mode can run, [VrFx] while
+    /// Gaze DoF or G vision runs. Every GUI key is written; the tone curve's tuning keys and the developer probes are not
+    /// (the module's defaults).</summary>
+    private static string VisualSections(VrProfile p) => (p.UsesColorMode ? $"""
+
+
+        ; Color modes: Fix and Enhanced each have their own values; Night vision and glare are Enhanced only.
+        [ColorFix]
+        ExposureEV={Number(p.ColorFixExposureEv)}
+        NightEV={Number(p.ColorFixNightEv)}
+        Saturation={Number(p.ColorFixSaturation)}
+        Warmth={Number(p.ColorFixWarmth)}
+        AdaptBright={Number(p.ColorFixAdaptBright)}
+        AdaptDark={Number(p.ColorFixAdaptDark)}
+
+        [ColorEnhanced]
+        ExposureEV={Number(p.ColorEnhancedExposureEv)}
+        NightEV={Number(p.ColorEnhancedNightEv)}
+        Saturation={Number(p.ColorEnhancedSaturation)}
+        Warmth={Number(p.ColorEnhancedWarmth)}
+        AdaptBright={Number(p.ColorEnhancedAdaptBright)}
+        AdaptDark={Number(p.ColorEnhancedAdaptDark)}
+        NightVision={(p.NightVision ? 1 : 0)}
+        NightVisionStrength={Number(p.NightVisionStrength)}
+        NightVisionBlue={Number(p.NightVisionBlue)}
+        NightVisionBlur={Number(p.NightVisionBlur)}
+        NightVisionScotopic={Number(p.NightVisionScotopic)}
+        NightVisionPhotopic={Number(p.NightVisionPhotopic)}
+        Glare={(p.Glare ? 1 : 0)}
+        GlareStrength={Number(p.GlareStrength)}
+        GlareThresholdEV={Number(p.GlareThresholdEv)}
+        GlareRadius={Number(p.GlareRadius)}
+        GlareStreak={Number(p.GlareStreak)}
+        """ : "") + (p.UsesGazeDof || p.UsesGVision ? $"""
+
+
+        ; Gaze DoF (needs the gaze, from the pupil shift layer) and G vision (G from DCS's export, through the module's Lua hook).
+        [VrFx]
+        GazeDof={(p.UsesGazeDof ? 1 : 0)}
+        GazeDofStrength={Number(p.GazeDofStrength)}
+        GazeDofMaxArcmin={Number(p.GazeDofMaxArcmin)}
+        GazeDofSaccadeRelease={(p.GazeDofSaccadeRelease ? 1 : 0)}
+        GazeDofSettleMs={p.GazeDofSettleMs.ToString(CultureInfo.InvariantCulture)}
+        GazeDofFadeInMs={p.GazeDofFadeInMs.ToString(CultureInfo.InvariantCulture)}
+        GazeDofToleranceD={Number(p.GazeDofToleranceD)}
+        GazeDofFoveaGuardDeg={Number(p.GazeDofFoveaGuardDeg)}
+        GazeDofPupilMm={Number(p.GazeDofPupilMm)}
+        GVision={(p.UsesGVision ? 1 : 0)}
+        GVisionStrength={Number(p.GVisionStrength)}
+        GVisionUseGaze={(p.GVisionUseGaze ? 1 : 0)}
+        GVisionRedout={(p.GVisionRedout ? 1 : 0)}
+        GVisionTolerance={Number(p.GVisionTolerance)}
+        GVisionMode={(int)p.GVisionMode}
+        """ : "");
 
     /// <summary>DcsQvCull.ini for the DCS engine optimizations. Every key whose built-in default is not wanted is written: a missing key
     /// falls back to the module's built-in default, and several of those turn on experiments that measured no gain or a
@@ -106,6 +178,13 @@ public static class ConfigurationWriters
         Filter=0
         SplitFilter={(p.EngineStateFilter ? 1 : 0)}
         SplitFilterOps=0x4ff
+        ChainFast=7
+        ShaderFast=3
+        PeriphInstFilter=0
+        FocusBroadcast=0
+
+        [Shadows]
+        CascadeCache={(p.EngineShadowCache ? 1 : 0)}
 
         [Shadow]
         TightCasters=0
@@ -158,6 +237,17 @@ public static class ConfigurationWriters
         ; (only counted) or off. Statistics every 10 s in DcsQvCullPrefetch.log next to this file.
         Mode={(p.UsesPrefetchFix ? p.BoostPrefetch.ToString().ToLowerInvariant() : "off")}
         WindowMs=5000
+        TableBits=20
+
+        [Threads]
+        Census=0
+        WorkerPlacement=2
+        PlaceRecheckSec=60
+
+        [Color]{ColorModeLine(p)}
+        ModeKey={(p.UsesColorModeKey ? NeuralHotkeys.Environment(p.ColorModeKey, NeuralHotkeys.ColorModeDefault) : "0:0")}
+        ToneProbe=0
+        SwapProbe=0{VisualSections(p)}
 
         [Log]
         StatsIntervalSec=2
@@ -200,6 +290,28 @@ public static class ConfigurationWriters
         FarDepthExportSlots=2
         ; The image before DCS draws its HUD and symbology, so the bundled Quad Views keeps them out of Far depth.
         FarDepthPreOverlay=1
+        ; Cockpit mask for Framegen (R65): the cockpit stays still in generated frames. The module computes it only while
+        ; the frame generation layer reads it (its heartbeat), so it costs nothing otherwise.
+        CockpitMaskExport={(p.FrameGen != FrameGeneration.Off && !p.Desktop ? 1 : 0)}
+        CockpitMaskViews=3
+        CockpitMaskDivisor=0
+        CockpitMaskNearM=1.0
+        CockpitMaskDilate=0
+        CockpitMaskDump=0
+        CockpitMaskLog=0
+        ; Cockpit depth and DCS's motion vectors for Framegen (R69/R70): computed only while the frame generation layer reads
+        ; them (its heartbeats), so they cost nothing otherwise.
+        CockpitDepthExport={(p.FrameGen != FrameGeneration.Off && !p.Desktop ? 1 : 0)}
+        CockpitDepthDump=0
+        CockpitMotionExport={(p.FrameGen != FrameGeneration.Off && !p.Desktop ? 1 : 0)}
+        CockpitMotionClass=1
+        CockpitMotionDump=0
+        CockpitFgDump=0
+        ; HUD symbology in the cockpit mask (value 128, R74): not yet verified on lit symbols, off.
+        CockpitMaskOverlay=0
+        ; The HUD and helmet symbols as their own layer for frame generation (R95); needs the dual camera.
+        SymbologyExport={(p.UsesHudSymbology ? 1 : 0)}
+        SymbologyAlpha=1
         ; The HUD found as the change between copies before and after it in the HDR image (aircraft such as the F-16
         ; draw it after DLSS, before the tonemap); the module falls back by itself when that image is not found.
         FarDepthCoverageMode=hdr
@@ -293,6 +405,20 @@ public static class ConfigurationWriters
         SrvTailTrimVerifySec=10
         BenchSrvTailTrim=0
         BenchSplitFilter=0
+        CascadeCacheTiming=0
+        ChainFastTiming=0
+        ChainFastVerify=0
+        ShaderFastTiming=0
+        ShaderFastVerify=0
+        GeoOnlyProbe=0
+        PeriphCensus=0
+        PeriphInstTiming=0
+        PeriphInstVerify=0
+        FocusGeomProbe=0
+        FocusVsCensus=0
+        FocusBcastProbe=0
+        FocusBcastTiming=0
+        FocusBcastVerify=0
         JoinTailCount=0
         SrvSpanCount=0
         FxApplyCount=0
@@ -321,13 +447,38 @@ public static class ConfigurationWriters
         enabled={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}
         motion_vectors=off
         deep_pipeline={(p.FrameGenDeepPipeline ? 1 : 0)}
+        pipelined_deep_hold={(p.FrameGenDeepPipeline && p.FrameGenPipelinedDeepHold ? 1 : 0)}
+        async_arm={(p.FrameGenAsyncArm ? 1 : 0)}
         triple_frame_gen={(p.FrameGenFactor == 3 ? 1 : 0)}
         adaptive_frame_gen={(p.FrameGenFactor == VrProfile.FrameGenAuto ? 1 : 0)}
+        ; Per-frame 2X/3X and a full-rate 1X (patch 0032): off until it has flown in DCS.
+        adaptive_cadence=0
+        ; Cheaper composition of still tiles (patch 0033, bit-identical output): off until measured in DCS.
+        fast_composition=0
+        ; Synthetic frames placed by DCS's frame-start clock (patch 0037): off until an A/B in DCS shows it helps.
+        content_time_fraction=0
+        ; Both eyes synthesized on their own queues, about 1 ms sooner with identical output (patch 0038): off until flown.
+        parallel_eye_synthesis=0
+        ; Synthetic frames placed by DCS's own pose clock (patch 0039): smoother on paper, but fixed halves match the real
+        ; frames better; off until a headset A/B decides.
+        slot_content_time=0
         d3d11_bridge={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}
         backend={(p.FrameGen == FrameGeneration.FidelityFx ? "fidelityfx" : "nvidia")}
         nvidia_preset={p.FlowPreset.ToString().ToLowerInvariant()}
         nvidia_input_scale={p.NvidiaFlowScale}
         nvidia_bidirectional={(p.BidirectionalFlow ? 1 : 0)}
+        ; Moving edges: the flow endpoint solved per pixel (level 1). Measured better with the Medium preset and one-way
+        ; flow, the defaults; other combinations keep the plain sample (0).
+        nvidia_occlusion_aware={(p.FlowPreset == NvidiaFlowPreset.Medium && !p.BidirectionalFlow ? 1 : 0)}
+        ; The engine module's cockpit mask keeps the cockpit still in generated frames; without it (Engine Optimizations off)
+        ; nothing changes and nothing is spent.
+        cockpit_mask=1
+        ; The engine module's HUD symbols: taken out before frame generation and put back on the generated frames.
+        hud_symbology={(p.UsesHudSymbology ? 1 : 0)}
+        ; With the engine module's cockpit depth too, the cockpit is reprojected exactly when the head moves (no block: no cost).
+        cockpit_depth=1
+        ; DCS's own motion vectors for terrain, aircraft, water and sky, checked against the colours (NVIDIA path only).
+        dcs_motion={(p.FrameGen == FrameGeneration.Nvidia ? 1 : 0)}
         diag_vram={(p.DiagnosticVram ? 1 : 0)}
         ; Panel only (no frame generation): DCS's instance gets no extension it did not ask for.
         visibility_mask={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}
@@ -336,8 +487,8 @@ public static class ConfigurationWriters
 
         [diagnostics]
         logging_enabled={(p.DiagnosticRecorder && p.FrameGen != FrameGeneration.Off ? 1 : 0)}
-        max_file_mb=256
-        flush_each_event=0
+        max_file_mb={(p.DiagnosticFrameRecords ? 1024 : 256)}
+        flush_each_event=0{(p.DiagnosticFrameRecords ? "\nframe_records=1" : "")}
 
         [overlay]
         position={(p.ShowOverlay && p.FrameGen != FrameGeneration.Off ? "upper_right" : "off")}
@@ -365,7 +516,7 @@ public static class ConfigurationWriters
         ; Testing only: a fixed gaze instead of the eye tracker.
         SimulateGaze=0
         SimulateGazeXDeg=0
-        SimulateGazeYDeg=0
+        SimulateGazeYDeg=0{PublishGazeLines(p)}
 
         ; Depth boost: the eye distance above (Ipd, or the headset's) times a scale that rises while the eyes fixate far
         ; and returns to 1 when they fixate nearer than NearM (the cockpit). docs/PERCEPTION.md, docs/FIXATION_DEPTH.md.

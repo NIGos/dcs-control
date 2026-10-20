@@ -115,6 +115,24 @@ void PostDispatch(ID3D11DeviceContext* c, UINT x, UINT y, UINT z);
 void PostDispatchIndirect(ID3D11DeviceContext* c, ID3D11Buffer* b, UINT o);
 }  // namespace uovl
 
+// chain_fast.h ([Suite] ChainFastVerify, default 0): same-frame check of the
+// culling-chain kernels against the stock ones. Behind chainfast::g_verify
+// (relaxed load), false unless that phase runs.
+namespace chainfast {
+extern std::atomic<bool> g_verify;
+void PreDispatch(ID3D11DeviceContext* c);
+void PostDispatch(ID3D11DeviceContext* c, UINT x, UINT y, UINT z);
+void PostDispatchIndirect(ID3D11DeviceContext* c, ID3D11Buffer* b, UINT o);
+}  // namespace chainfast
+
+// shader_fast.h ([D3D] ShaderFast, default 0; R36): while this hook sits on DCS's Dispatch entry, it hands each
+// dispatch to TryDispatch, which issues the wider variant grid for an identified kernel (false: not handled).
+namespace sfast {
+extern std::atomic<bool> g_live;
+using DispFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT);
+bool TryDispatch(ID3D11DeviceContext* c, UINT x, UINT y, UINT z, DispFn next);
+}  // namespace sfast
+
 namespace gpt {
 
 constexpr int kRing = 6;            // frames in flight
@@ -352,7 +370,12 @@ void STDMETHODCALLTYPE H_GenerateMips(Ctx* c, ID3D11ShaderResourceView* v) {
 void STDMETHODCALLTYPE H_Dispatch(Ctx* c, UINT x, UINT y, UINT z) {
   CountOp(c, kDispatch);
   if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PreDispatch(c, x, y, z);
-  Orig<decltype(&H_Dispatch)>(kDispatch)(c, x, y, z);
+  const bool cfv = chainfast::g_verify.load(std::memory_order_relaxed);
+  if (cfv) chainfast::PreDispatch(c);
+  if (!sfast::g_live.load(std::memory_order_relaxed) ||
+      !sfast::TryDispatch(c, x, y, z, reinterpret_cast<sfast::DispFn>(Orig<decltype(&H_Dispatch)>(kDispatch))))
+    Orig<decltype(&H_Dispatch)>(kDispatch)(c, x, y, z);
+  if (cfv) chainfast::PostDispatch(c, x, y, z);
   if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PostWork();
   if (uovl::g_dup.load(std::memory_order_relaxed)) uovl::PostDispatch(c, x, y, z);
   Rearm(c, kDispatch);
@@ -360,7 +383,10 @@ void STDMETHODCALLTYPE H_Dispatch(Ctx* c, UINT x, UINT y, UINT z) {
 void STDMETHODCALLTYPE H_DispatchIndirect(Ctx* c, ID3D11Buffer* b, UINT o) {
   CountOp(c, kDispatchIndirect);
   if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PreDispatchIndirect(c, b, o);
+  const bool cfv = chainfast::g_verify.load(std::memory_order_relaxed);
+  if (cfv) chainfast::PreDispatch(c);
   Orig<decltype(&H_DispatchIndirect)>(kDispatchIndirect)(c, b, o);
+  if (cfv) chainfast::PostDispatchIndirect(c, b, o);
   if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PostWork();
   if (uovl::g_dup.load(std::memory_order_relaxed)) uovl::PostDispatchIndirect(c, b, o);
   Rearm(c, kDispatchIndirect);
@@ -1437,8 +1463,10 @@ bool FrameGpu(const Done& d, double* spanMs, double* busyMs, double* xrMs) {
   return true;
 }
 
-void Measure(int ms, std::atomic<uint64_t>& frameCounter) {
-  if (!Begin(frameCounter, false) && !g_sessDev) return;
+// light: timestamps only (no context-op hooks, no pipeline statistics); for callers whose own table arms must
+// not meet the op hooks (periph_inst_filter.h's timing phase).
+void Measure(int ms, std::atomic<uint64_t>& frameCounter, bool light = false) {
+  if (!Begin(frameCounter, light) && !g_sessDev) return;
   // CPU per pass over the same window, for comparison.
   ptiming::Reset();
   ptiming::g_recording = true;

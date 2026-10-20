@@ -89,7 +89,12 @@ public sealed class TransactionStore(string stateDirectory)
         }
         catch (Exception applyError)
         {
-            try { RestoreCore(root, journal); }
+            try
+            {
+                if (!RestoreCore(root, journal).Complete)
+                    throw new IOException($"Apply failed ({applyError.Message}) and rollback left files changed by another program. Restore transaction {journal.Id} from Recovery.", applyError);
+            }
+            catch (IOException rolled) when (rolled.InnerException == applyError) { throw; }
             catch (Exception rollbackError)
             {
                 // Keep the original failure visible; the journal remains for a manual restore.
@@ -137,6 +142,9 @@ public sealed class TransactionStore(string stateDirectory)
         PathPolicy.RejectReparsePoints(entry.Path, entry.Root);
         var current = File.Exists(entry.Path) ? Hashing.FileSha256(entry.Path) : null;
         if (current == entry.PreviousSha256) return RestoreStep.Original;
+        // The installed file is gone (an antivirus quarantined it, or it was deleted) and its original is backed up: the
+        // original goes back; nothing of anyone else's is at that path to protect.
+        if (current is null && !entry.Deleted && entry.BackupFile is not null) return RestoreStep.Replace;
         // A component that normalized its own configuration still holds exactly the owned values: restore it as installed.
         var normalized = current is not null && current != entry.InstalledSha256 && entry.IniValues is { Count: > 0 } && IniFile.Matches(File.ReadAllText(entry.Path), entry.IniValues);
         // Bytes of an interrupted in-place update are the transaction's own, not a user edit.
@@ -235,7 +243,7 @@ public sealed class TransactionStore(string stateDirectory)
 /// declared them. A declared name may hold a * in its file name; it then stands for the matching files of that folder.</summary>
 internal static class RuntimeFiles
 {
-    private static readonly string[] Named = [".log", ".flag"], Patterns = [".log", ".txt", ".csv", ".dll", ".qvc", ".tmp"];
+    private static readonly string[] Named = [".log", ".flag"], Patterns = [".log", ".txt", ".csv", ".dll", ".qvc", ".tmp", ".jsonl", ".f32"];
 
     /// <summary>Declared inside the owner's folder tree. A single named file only as a log or a trigger flag; reports
     /// and the component's copies of its own module (e.g. payload\active_*.dll) only as a pattern, so a named library
@@ -285,16 +293,21 @@ internal static class RuntimeFiles
         }
     }
 
-    /// <summary>A file DCS Control created was removed: an empty folder left behind below the authorized root (for
-    /// example bin\CheekyFoveatedDLSS) goes too. The root itself is never removed.</summary>
+    /// <summary>A file DCS Control created was removed: the empty folders left behind below the authorized root (for
+    /// example bin\CheekyFoveatedDLSS, or managed\profiles\&lt;id&gt; once its last subfolder went) go too. The root
+    /// itself is never removed.</summary>
     public static void RemoveEmptyCreatedFolder(string path, string? root)
     {
         try
         {
-            var folder = Path.GetDirectoryName(path)!;
-            if (root is not { } authorized || !folder.StartsWith(Path.GetFullPath(authorized).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return;
-            PathPolicy.RejectReparsePoints(folder, authorized);
-            if (Directory.Exists(folder) && !Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder);
+            if (root is not { } authorized) return;
+            var stop = Path.GetFullPath(authorized).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            for (var folder = Path.GetDirectoryName(path); folder is not null && folder.StartsWith(stop, StringComparison.OrdinalIgnoreCase); folder = Path.GetDirectoryName(folder))
+            {
+                PathPolicy.RejectReparsePoints(folder, authorized);
+                if (!Directory.Exists(folder) || Directory.EnumerateFileSystemEntries(folder).Any()) return;
+                Directory.Delete(folder);
+            }
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { }
     }

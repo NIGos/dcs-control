@@ -776,6 +776,9 @@ class Pool {
       if (w_[i].thread) out[k++] = GetThreadId(w_[i].thread);
     return k;
   }
+  // Start address of every pool worker thread (all pools share it); R44
+  // thread_place.h WorkerPlacement=2 keeps these threads on the process mask.
+  static const void* ThreadStart() { return reinterpret_cast<const void*>(&qvexit::Thread<&Pool::ThreadMain>); }
   const Caps& DeviceCaps() const { return caps_; }
   bool Disabled() const { return disabled_.load(std::memory_order_relaxed); }
   Worker& At(int i) { return w_[i]; }
@@ -835,14 +838,26 @@ class Pool {
       return false;
     };
     while (pending() && (Qpc() - t0) * k < cfg_.spinUs) _mm_pause();
-    if (pending()) {
+    // R75: the done events only wake this thread; the states decide. A worker
+    // sets its event after publishing the job's final state, so the previous
+    // job's SetEvent can land after Submit's ResetEvent and leave the event set
+    // while the new job runs (Wait returned with the job still running: the
+    // gb_rec_test view-change re-record flake). A set event of a worker that
+    // is still busy is reset and the states are read again before blocking
+    // (a real completion stored its state before its SetEvent: never lost).
+    for (;;) {
       HANDLE h[kMaxWorkers];
+      int idx[kMaxWorkers];
       DWORD c = 0;
       for (int i = 0; i < n_; ++i)
-        if ((mask & (1u << i)) && Busy(i)) h[c++] = w_[i].done;
+        if ((mask & (1u << i)) && Busy(i)) idx[c] = i, h[c++] = w_[i].done;
+      if (!c) break;
       const double spent = (Qpc() - t0) * k / 1000.0;
-      const DWORD left = spent >= timeoutMs ? 0 : static_cast<DWORD>(timeoutMs - spent);
-      WaitForMultipleObjects(c, h, TRUE, left);
+      if (spent >= timeoutMs) break;
+      const DWORD r = WaitForMultipleObjects(c, h, FALSE, static_cast<DWORD>(timeoutMs - spent));
+      if (r == WAIT_TIMEOUT || r == WAIT_FAILED) break;
+      for (DWORD q = 0; q < c; ++q)
+        if (Busy(idx[q]) && WaitForSingleObject(h[q], 0) == WAIT_OBJECT_0) ResetEvent(h[q]);
     }
     bool all = true;
     for (int i = 0; i < n_; ++i) {

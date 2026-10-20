@@ -1,0 +1,994 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1126,6 +1126,30 @@
+                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/adaptive-frame-gen"
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_adaptive_frame_gen.cmake")
+         set_tests_properties(xrfg_layer_adaptive_frame_gen PROPERTIES TIMEOUT 120)
++        # DCS Control (0048): the per-real-frame records, on (frame,
++        # frame_slot and frame_gpu with sane fields) and off (none).
++        add_test(
++            NAME xrfg_layer_frame_records
++            COMMAND "${CMAKE_COMMAND}"
++                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                "-DRECORDS_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_frame_records.ini"
++                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/frame-records"
++                "-DMODE=dcs-adaptive"
++                "-DFRAME_RECORDS=1"
++                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_frame_records.cmake")
++        set_tests_properties(xrfg_layer_frame_records PROPERTIES TIMEOUT 120)
++        add_test(
++            NAME xrfg_layer_frame_records_off
++            COMMAND "${CMAKE_COMMAND}"
++                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                "-DRECORDS_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_adaptive.ini"
++                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/frame-records-off"
++                "-DMODE=dcs-adaptive"
++                "-DFRAME_RECORDS=0"
++                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_frame_records.cmake")
++        set_tests_properties(xrfg_layer_frame_records_off PROPERTIES TIMEOUT 120)
+         # DCS Control (0034): adaptive at the shallow depth, starting in 2X:
+         # the synthetic ring's second slot is made only when 3X first needs
+         # it, and 3X starts only once it is in (one synthetic slot while 2X
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <atomic>
++#include <chrono>
+ #include <cstdint>
+ #include <filesystem>
+ #include <memory>
+@@ -465,6 +467,66 @@
+     //     (xrfg::CockpitSlotTimeLookup, 0-7) and source (8-15: 1 the motion
+     //     block, 2 the depth block).
+     content_time,
++    // DCS Control (0048): per-real-frame records, only with `[diagnostics]
++    // frame_records=1` (see BridgeFlightLogger::frame_records), to line DCS's
++    // own hitches up with the layer's hand-overs. All four carry the frame
++    // index in result: one count per session, from 1, taken at the
++    // application's xrEndFrame; frame_slot, frame_gpu and frame_hold name
++    // the frame record they belong to. QPC values are raw QueryPerformanceCounter
++    // counts, the clock DCS Control's engine module stamps its frames with
++    // (SlotTime poseQpc), so the two logs join on them directly.
++    //   frame, at the application's xrEndFrame entry (its thread):
++    //     dur_us= its xrWaitFrame's return (as the layer returned it, matched
++    //     by the display time it submits) to this entry, the application's
++    //     CPU frame as the layer sees it; 0 when that wait is not known.
++    //     a= the QPC at the entry.
++    //     b= the time since the previous xrEndFrame entry, us (0 the first).
++    //     c= the frame's cadence, presenter slots per application frame, in
++    //     bits 0-7: adaptive cadence's own (1X 1, 2, 3) where bit 8 is set,
++    //     else the frame multiplier (2 for 2X, 3 for 3X); bit 9 adaptive
++    //     2X/3X on; bit 10 generation off (menu or hotkey: the frame goes out
++    //     as it is, 1X); bit 11 its xrWaitFrame was found (dur_us is real).
++    //   frame_slot, when the presenter takes the frame for its slot (the
++    //     presenter thread; continuous presenter only, and so only real
++    //     frames the presenter hands over):
++    //     dur_us= how long after that slot's xrWaitFrame returned it was
++    //     taken (late past 2 ms, see submission_timing), 0 not timed.
++    //     a= the slot's predicted display time less the display time the
++    //     frame was told, the residual display_time_correction measures:
++    //     its size in us in bits 0-31, bit 32 set when negative (early);
++    //     bits 40-47 the periods late, that residual in whole display
++    //     periods rounded (0 on time or early): 1 or more is a frame that
++    //     landed that many refreshes after the time it was rendered for.
++    //     b= the display period, us.
++    //     c= the QPC when it was taken.
++    //   frame_gpu, when the frame's pair is written on the GPU (the fence the
++    //     presenter polls before it hands a first synthetic over, which
++    //     follows the copy of the application's frame), stamped by the thread
++    //     that already waits on it (the readiness probe: adaptive 2X/3X, or
++    //     3X off SteamVR; no wait is added, and frames without a pair have
++    //     no record):
++    //     dur_us= the frame's xrEndFrame entry to that completion, us.
++    //     a= the QPC at the completion (or when the wait gave up).
++    //     b= the fences waited (one per generated swapchain).
++    //     c= 0 complete, 1 not complete within the probe's 1 s or the device
++    //     removed (dur_us is then how long it was waited for).
++    //   frame_hold, when the application's xrEndFrame returns (its thread):
++    //     how long the layer held the application inside that call, split.
++    //     dur_us= the whole hold, exit less entry (the frame record's a).
++    //     a= the QPC at the exit.
++    //     b= pacing in bits 0-31, us: the presenter's holds on the
++    //     application (the once-per-frame hold with its release delay, the
++    //     capacity bound, waits for the presenter to drain or to take a
++    //     submission; the ApplicationBlockedScope holds); GPU in bits
++    //     32-63, us: CPU waits on fences (the layer's copies and synthesis,
++    //     the D3D11 bridge; see FrameHoldFenceWait).
++    //     c= the rest, us: the layer's own work, its locks, and the
++    //     runtime's xrEndFrame where the layer calls it on this thread
++    //     (inline, or a submission it waits for).
++    frame,
++    frame_slot,
++    frame_gpu,
++    frame_hold,
+ };
+ 
+ struct BridgeFlightToken {
+@@ -491,6 +553,13 @@
+     // with a truncate as its fallback; this fails both.
+     void test_fail_wraps() noexcept;
+ 
++    // DCS Control (0048): `[diagnostics] frame_records=1` with logging on:
++    // write the per-real-frame records (BridgeFlightOperation::frame). One
++    // relaxed load, so a caller can test it on every frame for nothing.
++    [[nodiscard]] bool frame_records() const noexcept {
++        return frame_records_.load(std::memory_order_relaxed);
++    }
++
+     // Places a QueryPerformanceCounter value on this log's own timeline,
+     // so a GPU timestamp calibrated to QPC can be compared directly with
+     // the ms column of every other record.
+@@ -531,6 +600,32 @@
+ private:
+     struct Impl;
+     std::unique_ptr<Impl> impl_;
++    std::atomic<bool> frame_records_{false}; // DCS Control (0048)
++};
++
++// DCS Control (0048): how long the calling thread has waited on the CPU for a
++// GPU fence (the layer's copies and synthesis, the D3D11 bridge), in ns,
++// summed for good; the frame_hold record takes an xrEndFrame's share as the
++// difference across the call. Header-only, so every library in the layer
++// adds to the one count. Timed only with frame_records on (set by the
++// logger's initialize): otherwise a wait costs one relaxed load more.
++inline std::atomic<bool> g_frame_hold_timing{false};
++inline thread_local std::int64_t t_fence_wait_ns = 0;
++
++struct FrameHoldFenceWait {
++    bool timed{g_frame_hold_timing.load(std::memory_order_relaxed)};
++    std::chrono::steady_clock::time_point started{
++        timed ? std::chrono::steady_clock::now()
++              : std::chrono::steady_clock::time_point{}};
++    FrameHoldFenceWait() = default;
++    FrameHoldFenceWait(const FrameHoldFenceWait&) = delete;
++    FrameHoldFenceWait& operator=(const FrameHoldFenceWait&) = delete;
++    ~FrameHoldFenceWait() {
++        if (timed) {
++            t_fence_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
++                std::chrono::steady_clock::now() - started).count();
++        }
++    }
+ };
+ 
+ [[nodiscard]] BridgeFlightLogger& bridge_flight_logger() noexcept;
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -121,6 +121,13 @@
+ ; here survive arming.
+ max_file_mb=32
+ flush_each_event=0
++; One record per real frame (op=frame at its xrEndFrame, op=frame_hold when
++; that call returns, with how long the layer held it and why, op=frame_slot
++; when the presenter takes it, op=frame_gpu when its pair is written), with
++; raw QueryPerformanceCounter values to line DCS hitches up with late
++; hand-overs.
++; Needs logging_enabled=1. 1 on, 0 off (default).
++frame_records=0
+ 
+ [overlay]
+ position=upper_right
+diff --git a/src/d3d11/d3d11_bridge.cpp b/src/d3d11/d3d11_bridge.cpp
+--- a/src/d3d11/d3d11_bridge.cpp
++++ b/src/d3d11/d3d11_bridge.cpp
+@@ -1,4 +1,5 @@
+ #include "xrfg/d3d11_bridge.hpp"
++#include "xrfg/bridge_flight_logger.hpp" // DCS Control (0048)
+ 
+ #include <array>
+ #include <limits>
+@@ -640,6 +641,7 @@
+         next_copy_list = (next_copy_list + 1) % kCopyListCount;
+         if (copy.fence_value != 0 &&
+             d3d12_fence->GetCompletedValue() < copy.fence_value) {
++            xrfg::FrameHoldFenceWait frame_hold_fence; // DCS Control (0048)
+             const HRESULT result = d3d12_fence->SetEventOnCompletion(
+                 copy.fence_value, fence_event);
+             if (FAILED(result)) {
+@@ -1052,6 +1054,7 @@
+         // take_copy_list, so a stale signal can end a wait early. Idle only
+         // once the fence says so (UINT64_MAX is a removed device), waiting
+         // again within the same 2 s otherwise.
++        xrfg::FrameHoldFenceWait frame_hold_fence; // DCS Control (0048)
+         const auto deadline = GetTickCount64() + 2000;
+         for (;;) {
+             const HRESULT result =
+diff --git a/src/d3d11/d3d11_d3d12_interop.cpp b/src/d3d11/d3d11_d3d12_interop.cpp
+--- a/src/d3d11/d3d11_d3d12_interop.cpp
++++ b/src/d3d11/d3d11_d3d12_interop.cpp
+@@ -1,4 +1,5 @@
+ #include "xrfg/d3d11_d3d12_interop.hpp"
++#include "xrfg/bridge_flight_logger.hpp" // DCS Control (0048)
+ 
+ #include <windows.h>
+ #include <dxgi1_2.h>
+@@ -767,6 +768,7 @@
+         if (completed >= last_fence_value) {
+             return S_OK;
+         }
++        xrfg::FrameHoldFenceWait frame_hold_fence; // DCS Control (0048)
+         HRESULT result = d3d12_fence->SetEventOnCompletion(
+             last_fence_value,
+             fence_event);
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -5481,6 +5481,7 @@
+         if (fence_event == nullptr) {
+             return E_UNEXPECTED;
+         }
++        xrfg::FrameHoldFenceWait frame_hold_fence; // DCS Control (0048)
+         const ULONGLONG deadline = GetTickCount64() + kFenceWaitBoundMs;
+         for (;;) {
+             const HRESULT status = fence_status(input_fence, value);
+@@ -5560,6 +5561,7 @@
+             last_submitted_fence_value,
+             fence->GetCompletedValue());
+ 
++        xrfg::FrameHoldFenceWait frame_hold_fence; // DCS Control (0048)
+         HRESULT result = S_FALSE;
+         const ULONGLONG deadline =
+             GetTickCount64() + timeout_milliseconds;
+diff --git a/src/d3d12/d3d12_history.cpp b/src/d3d12/d3d12_history.cpp
+--- a/src/d3d12/d3d12_history.cpp
++++ b/src/d3d12/d3d12_history.cpp
+@@ -366,6 +366,7 @@
+         if (fence_event == nullptr) {
+             return E_UNEXPECTED;
+         }
++        xrfg::FrameHoldFenceWait frame_hold_fence; // DCS Control (0048)
+         const ULONGLONG deadline = GetTickCount64() + kFenceWaitBoundMs;
+         for (;;) {
+             const HRESULT event_result = fence->SetEventOnCompletion(value, fence_event);
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -121,6 +121,14 @@
+         return "synthetic_slot";
+     case BridgeFlightOperation::content_time: // DCS Control (0039)
+         return "content_time";
++    case BridgeFlightOperation::frame: // DCS Control (0048)
++        return "frame";
++    case BridgeFlightOperation::frame_slot: // DCS Control (0048)
++        return "frame_slot";
++    case BridgeFlightOperation::frame_gpu: // DCS Control (0048)
++        return "frame_gpu";
++    case BridgeFlightOperation::frame_hold: // DCS Control (0048)
++        return "frame_hold";
+     case BridgeFlightOperation::synthesis_frame_start_wait:
+         return "synthesis_frame_start_wait";
+     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";
+@@ -569,6 +577,18 @@
+         }
+         implementation->active = true;
+         impl_ = std::move(implementation);
++        // DCS Control (0048): the per-real-frame records, with logging only.
++        frame_records_.store(
++            GetPrivateProfileIntW(
++                kConfigurationSection,
++                L"frame_records",
++                0,
++                config_path.c_str()) != 0,
++            std::memory_order_relaxed);
++        // And the fence waits' timing for the frame_hold record.
++        if (frame_records_.load(std::memory_order_relaxed)) {
++            g_frame_hold_timing.store(true, std::memory_order_relaxed);
++        }
+         event(
+             BridgeFlightOperation::logger,
+             XRFG_IMPLEMENTATION_VERSION,
+@@ -585,6 +605,8 @@
+         if (!impl_) {
+             return;
+         }
++        frame_records_.store(false, std::memory_order_relaxed); // 0048
++        g_frame_hold_timing.store(false, std::memory_order_relaxed);
+         event(BridgeFlightOperation::logger, 0);
+         // Exclusive, so this waits out any write still inside the shared
+         // section before the handle it is writing through is closed.
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -553,6 +553,9 @@
+     // app_release_counter at the application's xrEndFrame for this frame;
+     // see join_runtime_queue_to_application.
+     std::uint64_t app_release_value{};
++    // DCS Control (0048): the frame record of the application frame that
++    // queued it (SessionState::frame_record_end), 0 none.
++    std::uint64_t frame_record{};
+ };
+ 
+ struct ProjectionLayerSnapshot {
+@@ -775,6 +778,25 @@
+         at.time_since_epoch()).count();
+ }
+ 
++// DCS Control (0048): a span of QueryPerformanceCounter ticks in
++// microseconds, for the per-real-frame records (0 for a negative span).
++[[nodiscard]] std::uint64_t frame_record_microseconds(std::int64_t ticks) noexcept {
++    static const std::int64_t frequency = [] {
++        LARGE_INTEGER value{};
++        return QueryPerformanceFrequency(&value) ? value.QuadPart : 0;
++    }();
++    if (ticks <= 0 || frequency <= 0) {
++        return 0;
++    }
++    return static_cast<std::uint64_t>(
++        ticks / frequency * 1000000 + ticks % frequency * 1000000 / frequency);
++}
++
++[[nodiscard]] std::int64_t frame_record_counter() noexcept {
++    LARGE_INTEGER now{};
++    return QueryPerformanceCounter(&now) ? now.QuadPart : 0;
++}
++
+ // DCS VR Control (0004): one application frame's first synthetic in 3X off
+ // SteamVR - when it was written (the readiness probe) and when it was handed
+ // to the runtime (the presenter) - for the release delay's slack test; see
+@@ -843,6 +865,10 @@
+         std::chrono::steady_clock::time_point released_at{};
+         bool report_latency{};
+         std::shared_ptr<LeadReadiness> lead;
++        // DCS Control (0048): the frame record this pair belongs to and its
++        // xrEndFrame entry (QPC), for the frame_gpu record; 0 none.
++        std::uint64_t frame_record{};
++        std::int64_t frame_record_qpc{};
+     };
+ 
+     ReadinessProbe(
+@@ -943,6 +969,17 @@
+                         }
+                     }
+                 }
++                // DCS Control (0048): the frame_gpu record, complete or not.
++                if (item.frame_record != 0) {
++                    const std::int64_t done = frame_record_counter();
++                    xrfg::bridge_flight_logger().timed_event(
++                        xrfg::BridgeFlightOperation::frame_gpu,
++                        static_cast<std::int64_t>(item.frame_record),
++                        frame_record_microseconds(done - item.frame_record_qpc),
++                        static_cast<std::uint64_t>(done),
++                        item.fences.size(),
++                        complete ? 0U : 1U);
++                }
+                 if (!complete) {
+                     continue;
+                 }
+@@ -986,6 +1023,10 @@
+ // xrBeginFrame (see sample_application_throughput). DCS Control (0016):
+ // comment brought up to date.
+ thread_local std::int64_t t_application_blocked_ns = 0;
++// DCS Control (0048): the same holds, summed for good (never taken back),
++// for the frame_hold record's pacing share: the difference across one
++// xrEndFrame.
++thread_local std::int64_t t_frame_hold_pacing_ns = 0;
+ 
+ // DCS VR Control (0007): and every such hold, on whichever application
+ // thread, as an interval: a hold on the wait thread before the render thread
+@@ -1002,8 +1043,10 @@
+     ApplicationBlockedScope& operator=(const ApplicationBlockedScope&) = delete;
+     ~ApplicationBlockedScope() {
+         const auto ended = std::chrono::steady_clock::now();
+-        t_application_blocked_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
++        const std::int64_t held = std::chrono::duration_cast<std::chrono::nanoseconds>(
+             ended - started).count();
++        t_application_blocked_ns += held;
++        t_frame_hold_pacing_ns += held; // DCS Control (0048)
+         try {
+             std::scoped_lock lock(g_blocked_mutex);
+             g_blocked_log.add(
+@@ -1307,6 +1350,25 @@
+     std::mutex mutex;
+     std::mutex gpu_mutex;
+     std::deque<PendingApplicationFrame> pending_frames;
++    // DCS Control (0048): the per-real-frame records (`[diagnostics]
++    // frame_records`). Each xrWaitFrame the layer returns leaves its display
++    // time, return (QPC) and adaptive cadence in a small ring, without a
++    // lock: xrEndFrame finds its own by the display time it submits (DCS
++    // keeps two waits in flight, so the latest is not always it). A slot is
++    // reused only 16 waits later, far beyond any frame still in flight.
++    struct FrameRecordWait {
++        std::atomic<XrTime> display_time{0};
++        std::atomic<std::int64_t> returned_qpc{0};
++        std::atomic<std::uint32_t> frames{0};
++    };
++    std::array<FrameRecordWait, 16> frame_record_waits{};
++    std::atomic<std::uint32_t> frame_record_wait_next{0};
++    // The frames counted so far and the last xrEndFrame entry (QPC); and the
++    // frame being ended now, which the submissions it queues carry.
++    std::atomic<std::uint64_t> frame_record_count{0};
++    std::atomic<std::int64_t> frame_record_last_qpc{0};
++    std::atomic<std::uint64_t> frame_record_end{0};
++    std::atomic<std::int64_t> frame_record_end_qpc{0};
+     std::optional<ProjectionSnapshot> previous_projection;
+     XrTime generation_resume_display_time{};
+     std::chrono::steady_clock::time_point generation_resume_wall_time{};
+@@ -6054,6 +6116,103 @@
+     return info == nullptr || info->type == expected;
+ }
+ 
++// DCS Control (0048): an xrWaitFrame the layer returned, for the frame
++// record of the frame that submits its display time. Only with
++// frame_records on.
++void note_frame_record_wait(
++    SessionState& state, XrTime display_time, std::uint32_t frames) noexcept {
++    const std::int64_t returned = frame_record_counter();
++    auto& slot = state.frame_record_waits[
++        state.frame_record_wait_next.fetch_add(1, std::memory_order_relaxed) %
++        state.frame_record_waits.size()];
++    // Unmatched while it is being rewritten.
++    slot.display_time.store(0, std::memory_order_relaxed);
++    slot.returned_qpc.store(returned, std::memory_order_relaxed);
++    slot.frames.store(frames, std::memory_order_relaxed);
++    slot.display_time.store(display_time, std::memory_order_release);
++}
++
++// DCS Control (0048): the frame record, at the application's xrEndFrame
++// entry; see BridgeFlightOperation::frame. Only with frame_records on.
++// Returns the frame index and the entry (QPC) for its frame_hold record.
++std::pair<std::uint64_t, std::int64_t> log_frame_record(
++    SessionState& state, const XrFrameEndInfo* end_info) noexcept {
++    const std::int64_t entered = frame_record_counter();
++    const std::uint64_t index =
++        state.frame_record_count.fetch_add(1, std::memory_order_relaxed) + 1;
++    state.frame_record_end.store(index, std::memory_order_relaxed);
++    state.frame_record_end_qpc.store(entered, std::memory_order_relaxed);
++    const std::int64_t previous =
++        state.frame_record_last_qpc.exchange(entered, std::memory_order_relaxed);
++    std::uint64_t span_us = 0;
++    std::uint32_t cadence_frames = 0;
++    bool wait_found = false;
++    if (end_info != nullptr && end_info->displayTime != 0) {
++        for (const auto& slot : state.frame_record_waits) {
++            if (slot.display_time.load(std::memory_order_acquire) ==
++                end_info->displayTime) {
++                const std::int64_t returned =
++                    slot.returned_qpc.load(std::memory_order_relaxed);
++                cadence_frames = slot.frames.load(std::memory_order_relaxed);
++                span_us = frame_record_microseconds(entered - returned);
++                wait_found = returned != 0;
++                break;
++            }
++        }
++    }
++    const bool generation_off =
++        state.manual_control.stop_requested() || !state.menu_enabled.load();
++    std::uint64_t cadence = cadence_frames != 0
++        ? (cadence_frames & 0xFFU) | (1ULL << 8)
++        : (state.frames_per_application_frame.load() & 0xFFU);
++    cadence |= state.adaptive_active.load() ? (1ULL << 9) : 0;
++    cadence |= generation_off ? (1ULL << 10) : 0;
++    cadence |= wait_found ? (1ULL << 11) : 0;
++    xrfg::bridge_flight_logger().timed_event(
++        xrfg::BridgeFlightOperation::frame,
++        static_cast<std::int64_t>(index),
++        span_us,
++        static_cast<std::uint64_t>(entered),
++        previous != 0 ? frame_record_microseconds(entered - previous) : 0,
++        cadence);
++    return {index, entered};
++}
++
++// DCS Control (0048): the frame_hold record, written when the application's
++// xrEndFrame returns, by whichever path; see BridgeFlightOperation::
++// frame_hold. Made only with frame_records on.
++struct FrameHoldRecord {
++    std::uint64_t index{};
++    std::int64_t entered{};
++    std::int64_t pacing_ns{t_frame_hold_pacing_ns};
++    std::int64_t fence_ns{xrfg::t_fence_wait_ns};
++    FrameHoldRecord(std::uint64_t frame, std::int64_t entry) noexcept
++        : index(frame), entered(entry) {}
++    FrameHoldRecord(const FrameHoldRecord&) = delete;
++    FrameHoldRecord& operator=(const FrameHoldRecord&) = delete;
++    ~FrameHoldRecord() {
++        const std::int64_t exited = frame_record_counter();
++        const std::uint64_t total = frame_record_microseconds(exited - entered);
++        const std::uint64_t pacing = std::min<std::uint64_t>(
++            static_cast<std::uint64_t>(
++                std::max<std::int64_t>(0, t_frame_hold_pacing_ns - pacing_ns)) / 1000,
++            0xFFFFFFFFULL);
++        const std::uint64_t fence = std::min<std::uint64_t>(
++            static_cast<std::uint64_t>(
++                std::max<std::int64_t>(0, xrfg::t_fence_wait_ns - fence_ns)) / 1000,
++            0xFFFFFFFFULL);
++        const std::uint64_t rest =
++            total > pacing + fence ? total - pacing - fence : 0;
++        xrfg::bridge_flight_logger().timed_event(
++            xrfg::BridgeFlightOperation::frame_hold,
++            static_cast<std::int64_t>(index),
++            total,
++            static_cast<std::uint64_t>(exited),
++            pacing | (fence << 32),
++            rest);
++    }
++};
++
+ XrResult layer_wait_frame_impl(
+     XrSession session,
+     const XrFrameWaitInfo* wait_info,
+@@ -6432,6 +6591,12 @@
+             state->pending_frames.pop_front();
+         }
+     }
++    // DCS Control (0048): what the frame record of this frame needs.
++    if (XR_SUCCEEDED(result) && frame_state != nullptr &&
++        xrfg::bridge_flight_logger().frame_records()) {
++        note_frame_record_wait(
++            *state, frame_state->predictedDisplayTime, cadence_frames);
++    }
+     return result;
+ }
+ 
+@@ -9722,6 +9887,12 @@
+             std::uint32_t missed_slots = 0;
+             xrfg::latency::DisplayTimeStep display_time_step{};
+             std::size_t display_time_mode = 0;
++            // DCS Control (0048): the real frame taken for this slot, for its
++            // frame_slot record after the lock: its frame record, the slot's
++            // display time less the one it was told, and the period.
++            std::uint64_t frame_slot_record = 0;
++            std::int64_t frame_slot_residual_ns = 0;
++            std::int64_t frame_slot_period_ns = 0;
+             // DCS VR Control (0006): how long after its slot's wait this goes
+             // out, less the pace's own hold; and the late-frame skip's part in
+             // this slot, all decided under the lock and acted on after it.
+@@ -10017,6 +10188,18 @@
+                                        ? nullptr
+                                        : &request->owned_frame->info)
+                                 : request->borrowed_frame;
++                        // DCS Control (0048): the same residual, for the
++                        // frame_slot record, whatever the correction does.
++                        if (real_info != nullptr && request->frame_record != 0 &&
++                            real_info->displayTime > 0 &&
++                            frame_state.predictedDisplayTime > 0) {
++                            frame_slot_record = request->frame_record;
++                            frame_slot_residual_ns = static_cast<std::int64_t>(
++                                frame_state.predictedDisplayTime -
++                                real_info->displayTime);
++                            frame_slot_period_ns = static_cast<std::int64_t>(
++                                state->presenter_display_period);
++                        }
+                         if (real_info != nullptr &&
+                             state->display_time_correction_enabled &&
+                             frame_state.shouldRender == XR_TRUE &&
+@@ -10068,6 +10251,33 @@
+                 state->frames_per_application_frame == 2) {
+                 state->adaptive_missed_slots.fetch_add(missed_slots);
+             }
++            // DCS Control (0048): the frame_slot record; see
++            // BridgeFlightOperation::frame_slot.
++            if (frame_slot_record != 0) {
++                const std::int64_t taken = frame_record_counter();
++                const std::int64_t residual = frame_slot_residual_ns;
++                const std::uint64_t size_us = std::min<std::uint64_t>(
++                    static_cast<std::uint64_t>(residual < 0 ? -residual : residual) / 1000,
++                    0xFFFFFFFFULL);
++                std::uint64_t periods_late = 0;
++                if (residual > 0 && frame_slot_period_ns > 0) {
++                    periods_late = std::min<std::uint64_t>(
++                        static_cast<std::uint64_t>(
++                            (residual + frame_slot_period_ns / 2) / frame_slot_period_ns),
++                        255);
++                }
++                xrfg::bridge_flight_logger().timed_event(
++                    xrfg::BridgeFlightOperation::frame_slot,
++                    static_cast<std::int64_t>(frame_slot_record),
++                    slot_timed
++                        ? static_cast<std::uint64_t>(
++                              std::max<std::int64_t>(0, wait_to_pop.count()) / 1000)
++                        : 0,
++                    size_us | (residual < 0 ? (1ULL << 32) : 0) | (periods_late << 40),
++                    static_cast<std::uint64_t>(
++                        std::max<std::int64_t>(0, frame_slot_period_ns) / 1000),
++                    static_cast<std::uint64_t>(taken));
++            }
+             if (display_time_step.changed) {
+                 xrfg::bridge_flight_logger().event(
+                     xrfg::BridgeFlightOperation::display_time_correction,
+@@ -11965,6 +12175,9 @@
+         request->borrowed_frame = borrowed_frame;
+         request->queued_at = std::chrono::steady_clock::now();
+         request->app_release_value = state->app_end_frame_release_value;
++        // DCS Control (0048)
++        request->frame_record =
++            state->frame_record_end.load(std::memory_order_relaxed);
+         if (request->owned_frame) {
+             request->owned_frame->app_release_value =
+                 request->app_release_value;
+@@ -12093,6 +12306,9 @@
+         second->owned_frame = std::move(current);
+         second->queued_at = queued_at;
+         second->app_release_value = app_release_value;
++        // DCS Control (0048): the real frame's, for its frame_slot record.
++        second->frame_record =
++            state->frame_record_end.load(std::memory_order_relaxed);
+         if (second->owned_frame) {
+             second->owned_frame->app_release_value = app_release_value;
+         }
+@@ -16012,6 +16228,15 @@
+     if (!state || state->dispatch->end_frame == nullptr) {
+         return XR_ERROR_HANDLE_INVALID;
+     }
++    // DCS Control (0048): the per-real-frame record, before anything here
++    // can hold the frame.
++    // Its frame_hold record is written when this call returns, by
++    // whichever path.
++    std::optional<FrameHoldRecord> frame_hold;
++    if (xrfg::bridge_flight_logger().frame_records()) {
++        const auto [index, entered] = log_frame_record(*state, end_info);
++        frame_hold.emplace(index, entered);
++    }
+     // DCS VR Control (0009): a gap since the previous xrEndFrame long enough
+     // to be a scene change; handled below, before this frame is queued.
+     {
+@@ -16991,7 +17216,17 @@
+                     presenter_first_frame->lead_readiness = lead;
+                     readiness.lead = std::move(lead);
+                 }
+-                if (!readiness.report_latency && !readiness.lead) {
++                // DCS Control (0048): the frame_gpu record, from the wait
++                // this thread already makes; a frame recorded is waited for
++                // on its own account as well.
++                if (xrfg::bridge_flight_logger().frame_records()) {
++                    readiness.frame_record =
++                        state->frame_record_end.load(std::memory_order_relaxed);
++                    readiness.frame_record_qpc =
++                        state->frame_record_end_qpc.load(std::memory_order_relaxed);
++                }
++                if (!readiness.report_latency && !readiness.lead &&
++                    readiness.frame_record == 0) {
+                     readiness.fences.clear();
+                 }
+             }
+diff --git a/tests/bridge_flight_logger_tests.cpp b/tests/bridge_flight_logger_tests.cpp
+--- a/tests/bridge_flight_logger_tests.cpp
++++ b/tests/bridge_flight_logger_tests.cpp
+@@ -106,6 +106,8 @@
+         xrfg::BridgeFlightLogger enabled;
+         enabled.initialize(enabled_directory);
+         require(enabled.enabled(), "enabled INI did not start bridge logging");
++        // DCS Control (0048): off without frame_records.
++        require(!enabled.frame_records(), "frame records on without the key");
+         const fs::path log_path = enabled.log_path();
+         require(!log_path.empty() && log_path.parent_path() == enabled_directory,
+             "bridge log was not created beside the DLL configuration");
+@@ -488,6 +490,88 @@
+                 "wrap race: the failed wrap's last line is not the file's last");
+         }
+ 
++        // DCS Control (0048): `[diagnostics] frame_records` - off unless set,
++        // and only with logging on; the three records' names.
++        {
++            require(!disabled.frame_records(), "frame records: on without logging");
++            const fs::path off_directory = temporary.path / "frames-off";
++            fs::create_directories(off_directory);
++            write(
++                off_directory / "ofxr_bridge.ini",
++                "[diagnostics]\r\n"
++                "logging_enabled=1\r\n"
++                "frame_records=0\r\n");
++            xrfg::BridgeFlightLogger off;
++            off.initialize(off_directory);
++            require(off.enabled() && !off.frame_records(),
++                "frame records: on with frame_records=0");
++            off.shutdown();
++
++            const fs::path no_log_directory = temporary.path / "frames-no-log";
++            fs::create_directories(no_log_directory);
++            write(
++                no_log_directory / "ofxr_bridge.ini",
++                "[diagnostics]\r\n"
++                "logging_enabled=0\r\n"
++                "frame_records=1\r\n");
++            xrfg::BridgeFlightLogger no_log;
++            no_log.initialize(no_log_directory);
++            require(!no_log.enabled() && !no_log.frame_records(),
++                "frame records: on with logging off");
++
++            const fs::path on_directory = temporary.path / "frames-on";
++            fs::create_directories(on_directory);
++            write(
++                on_directory / "ofxr_bridge.ini",
++                "[diagnostics]\r\n"
++                "logging_enabled=1\r\n"
++                "frame_records=1\r\n");
++            xrfg::BridgeFlightLogger on;
++            on.initialize(on_directory);
++            require(on.enabled() && on.frame_records(),
++                "frame records: off with frame_records=1");
++            const fs::path on_path = on.log_path();
++            on.timed_event(xrfg::BridgeFlightOperation::frame, 7, 9000,
++                123456789012345ULL, 22222, 2ULL | (1ULL << 9) | (1ULL << 11));
++            on.timed_event(xrfg::BridgeFlightOperation::frame_slot, 7, 300,
++                1200ULL | (1ULL << 40), 11111, 123456789099999ULL);
++            on.timed_event(xrfg::BridgeFlightOperation::frame_gpu, 7, 15000,
++                123456789055555ULL, 2, 0);
++            on.timed_event(xrfg::BridgeFlightOperation::frame_hold, 7, 16000,
++                123456789177777ULL, 14000ULL | (1500ULL << 32), 500);
++            // The fence waits are timed while frame records are on.
++            {
++                const std::int64_t before = xrfg::t_fence_wait_ns;
++                {
++                    xrfg::FrameHoldFenceWait waiting;
++                    Sleep(2);
++                }
++                require(xrfg::t_fence_wait_ns - before >= 1000000,
++                    "frame records: a fence wait was not timed");
++            }
++            on.shutdown();
++            require(!on.frame_records(), "frame records: still on after shutdown");
++            {
++                const std::int64_t before = xrfg::t_fence_wait_ns;
++                {
++                    xrfg::FrameHoldFenceWait waiting;
++                    Sleep(2);
++                }
++                require(xrfg::t_fence_wait_ns == before,
++                    "frame records: a fence wait was timed with them off");
++            }
++            const std::string frames = read(on_path);
++            require(frames.find(" op=frame result=7 dur_us=9000 a=123456789012345 b=22222 c=2562\r\n") !=
++                        std::string::npos &&
++                    frames.find(" op=frame_slot result=7 dur_us=300 a=1099511628976 b=11111 c=123456789099999\r\n") !=
++                        std::string::npos &&
++                    frames.find(" op=frame_gpu result=7 dur_us=15000 a=123456789055555 b=2 c=0\r\n") !=
++                        std::string::npos &&
++                    frames.find(" op=frame_hold result=7 dur_us=16000 a=123456789177777 b=6442450958000 c=500\r\n") !=
++                        std::string::npos,
++                "frame records: a record is missing or malformed");
++        }
++
+         std::cout << "Bridge flight logger tests passed.\n";
+         return 0;
+     } catch (const std::exception& exception) {
+diff --git a/tests/layer_frame_records.cmake b/tests/layer_frame_records.cmake
+new file mode 100644
+--- /dev/null
++++ b/tests/layer_frame_records.cmake
+@@ -0,0 +1,216 @@
++# DCS Control (0048): the per-real-frame records (`[diagnostics]
++# frame_records`). Runs a call-chain scenario with RECORDS_INI beside the
++# layer DLL and checks the flight log: with FRAME_RECORDS=1, op=frame records
++# with sane fields (indices 1, 2, 3..., rising QPC values, spans and
++# intervals within reason, a known cadence, the frame's xrWaitFrame found),
++# a frame_hold record per frame whose split adds up to its hold, and
++# frame_slot and frame_gpu records that name frames that were recorded; with
++# FRAME_RECORDS=0, none of the four.
++foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN RECORDS_INI WORK_DIR MODE FRAME_RECORDS)
++    if(NOT DEFINED ${required_variable})
++        message(FATAL_ERROR "${required_variable} was not provided")
++    endif()
++endforeach()
++
++file(REMOVE_RECURSE "${WORK_DIR}")
++file(MAKE_DIRECTORY "${WORK_DIR}")
++file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
++file(COPY "${RECORDS_INI}" DESTINATION "${WORK_DIR}")
++get_filename_component(records_ini_name "${RECORDS_INI}" NAME)
++file(RENAME "${WORK_DIR}/${records_ini_name}" "${WORK_DIR}/ofxr_bridge.ini")
++
++get_filename_component(layer_name "${LAYER_DLL}" NAME)
++execute_process(
++    COMMAND "${CALL_CHAIN}"
++        "${WORK_DIR}/${layer_name}"
++        "${WORK_DIR}/fake-runtime.log"
++        ${MODE}
++    RESULT_VARIABLE call_chain_result
++    OUTPUT_VARIABLE call_chain_output
++    ERROR_VARIABLE call_chain_error)
++if(NOT call_chain_result EQUAL 0)
++    message(FATAL_ERROR
++        "Call chain '${MODE}' failed (${call_chain_result}):\n"
++        "${call_chain_output}\n${call_chain_error}")
++endif()
++
++file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++list(LENGTH flight_logs flight_log_count)
++if(NOT flight_log_count EQUAL 1)
++    message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++endif()
++list(GET flight_logs 0 flight_log)
++
++set(field_pattern "result=([0-9]+) dur_us=([0-9]+) a=([0-9]+) b=([0-9]+) c=([0-9]+)")
++file(STRINGS "${flight_log}" frame_lines REGEX " op=frame result=")
++file(STRINGS "${flight_log}" slot_lines REGEX " op=frame_slot result=")
++file(STRINGS "${flight_log}" gpu_lines REGEX " op=frame_gpu result=")
++file(STRINGS "${flight_log}" hold_lines REGEX " op=frame_hold result=")
++list(LENGTH frame_lines frame_count)
++list(LENGTH slot_lines slot_count)
++list(LENGTH gpu_lines gpu_count)
++list(LENGTH hold_lines hold_count)
++
++if(NOT FRAME_RECORDS)
++    if(NOT frame_count EQUAL 0 OR NOT slot_count EQUAL 0 OR NOT gpu_count EQUAL 0 OR
++       NOT hold_count EQUAL 0)
++        message(FATAL_ERROR
++            "frame_records off, yet the log has ${frame_count} frame, "
++            "${slot_count} frame_slot, ${gpu_count} frame_gpu and "
++            "${hold_count} frame_hold records")
++    endif()
++    message(STATUS "OFXR frame records off: none written")
++    return()
++endif()
++
++if(frame_count LESS 20)
++    message(FATAL_ERROR "Expected per-frame records, found ${frame_count}")
++endif()
++
++set(expected_index 1)
++set(previous_qpc 0)
++set(waits_found 0)
++foreach(line IN LISTS frame_lines)
++    if(NOT line MATCHES "${field_pattern}")
++        message(FATAL_ERROR "Malformed frame record: ${line}")
++    endif()
++    set(index ${CMAKE_MATCH_1})
++    set(span_us ${CMAKE_MATCH_2})
++    set(qpc ${CMAKE_MATCH_3})
++    set(interval_us ${CMAKE_MATCH_4})
++    set(cadence ${CMAKE_MATCH_5})
++    if(NOT index EQUAL expected_index)
++        message(FATAL_ERROR "Frame record ${index} where ${expected_index} was due: ${line}")
++    endif()
++    if(qpc EQUAL 0 OR NOT qpc GREATER previous_qpc)
++        message(FATAL_ERROR "Frame record QPC does not rise: ${line}")
++    endif()
++    # A fake frame is milliseconds; ten seconds is a broken clock.
++    if(span_us GREATER 10000000 OR interval_us GREATER 10000000)
++        message(FATAL_ERROR "Frame record span or interval out of range: ${line}")
++    endif()
++    if(index EQUAL 1)
++        if(NOT interval_us EQUAL 0)
++            message(FATAL_ERROR "The first frame record has an interval: ${line}")
++        endif()
++    elseif(interval_us EQUAL 0)
++        message(FATAL_ERROR "A later frame record has no interval: ${line}")
++    endif()
++    math(EXPR frames "${cadence} & 255")
++    if(frames LESS 1 OR frames GREATER 3)
++        message(FATAL_ERROR "Frame record cadence ${frames} not 1-3: ${line}")
++    endif()
++    math(EXPR unknown_bits "${cadence} & ~4095")
++    if(NOT unknown_bits EQUAL 0)
++        message(FATAL_ERROR "Frame record cadence has undocumented bits: ${line}")
++    endif()
++    math(EXPR wait_found "(${cadence} >> 11) & 1")
++    if(wait_found)
++        math(EXPR waits_found "${waits_found} + 1")
++    else()
++        if(NOT span_us EQUAL 0)
++            message(FATAL_ERROR "A span without its xrWaitFrame: ${line}")
++        endif()
++    endif()
++    set(previous_qpc ${qpc})
++    set(entry_${index} ${qpc})
++    math(EXPR expected_index "${expected_index} + 1")
++endforeach()
++math(EXPR last_index "${expected_index} - 1")
++# Most frames find their own wait (the fake application ends what it waited).
++math(EXPR waits_needed "${frame_count} / 2")
++if(waits_found LESS waits_needed)
++    message(FATAL_ERROR "Only ${waits_found} of ${frame_count} frame records found their xrWaitFrame")
++endif()
++
++# One frame_hold per frame, after its entry, its parts adding up to it.
++if(NOT hold_count EQUAL frame_count)
++    message(FATAL_ERROR "${hold_count} frame_hold records for ${frame_count} frames")
++endif()
++set(expected_index 1)
++set(paced_frames 0)
++foreach(line IN LISTS hold_lines)
++    if(NOT line MATCHES "${field_pattern}")
++        message(FATAL_ERROR "Malformed frame_hold record: ${line}")
++    endif()
++    set(index ${CMAKE_MATCH_1})
++    set(hold_us ${CMAKE_MATCH_2})
++    set(qpc ${CMAKE_MATCH_3})
++    set(split ${CMAKE_MATCH_4})
++    set(rest_us ${CMAKE_MATCH_5})
++    if(NOT index EQUAL expected_index)
++        message(FATAL_ERROR "frame_hold ${index} where ${expected_index} was due: ${line}")
++    endif()
++    if(NOT qpc GREATER entry_${index})
++        message(FATAL_ERROR "frame_hold exit is not after its frame's entry: ${line}")
++    endif()
++    if(hold_us GREATER 10000000)
++        message(FATAL_ERROR "frame_hold out of range: ${line}")
++    endif()
++    math(EXPR pacing_us "${split} & 4294967295")
++    math(EXPR fence_us "${split} >> 32")
++    math(EXPR parts_us "${pacing_us} + ${fence_us} + ${rest_us}")
++    # The parts are rounded down to whole microseconds each.
++    math(EXPR parts_low "${hold_us} - 3")
++    if(parts_us GREATER hold_us OR parts_us LESS parts_low)
++        if(NOT rest_us EQUAL 0)
++            message(FATAL_ERROR "frame_hold parts do not add up: ${line}")
++        endif()
++    endif()
++    if(pacing_us GREATER 0)
++        math(EXPR paced_frames "${paced_frames} + 1")
++    endif()
++    math(EXPR expected_index "${expected_index} + 1")
++endforeach()
++# The presenter holds the fake application once per frame at 2X/3X.
++if(paced_frames EQUAL 0)
++    message(FATAL_ERROR "No frame_hold record saw the presenter's pacing")
++endif()
++
++if(slot_count EQUAL 0)
++    message(FATAL_ERROR "No frame_slot record")
++endif()
++foreach(line IN LISTS slot_lines)
++    if(NOT line MATCHES "${field_pattern}")
++        message(FATAL_ERROR "Malformed frame_slot record: ${line}")
++    endif()
++    set(index ${CMAKE_MATCH_1})
++    set(residual ${CMAKE_MATCH_3})
++    set(period_us ${CMAKE_MATCH_4})
++    set(qpc ${CMAKE_MATCH_5})
++    if(index LESS 1 OR index GREATER last_index)
++        message(FATAL_ERROR "frame_slot names a frame never recorded: ${line}")
++    endif()
++    if(period_us LESS 1000 OR period_us GREATER 100000 OR qpc EQUAL 0)
++        message(FATAL_ERROR "frame_slot period or QPC out of range: ${line}")
++    endif()
++    math(EXPR unknown_bits "${residual} & ~((1 << 48) - 1) | ((${residual} >> 33) & 127)")
++    if(NOT unknown_bits EQUAL 0)
++        message(FATAL_ERROR "frame_slot residual has undocumented bits: ${line}")
++    endif()
++endforeach()
++
++if(gpu_count EQUAL 0)
++    message(FATAL_ERROR "No frame_gpu record")
++endif()
++foreach(line IN LISTS gpu_lines)
++    if(NOT line MATCHES "${field_pattern}")
++        message(FATAL_ERROR "Malformed frame_gpu record: ${line}")
++    endif()
++    set(index ${CMAKE_MATCH_1})
++    set(done_us ${CMAKE_MATCH_2})
++    set(qpc ${CMAKE_MATCH_3})
++    set(fences ${CMAKE_MATCH_4})
++    set(incomplete ${CMAKE_MATCH_5})
++    if(index LESS 1 OR index GREATER last_index)
++        message(FATAL_ERROR "frame_gpu names a frame never recorded: ${line}")
++    endif()
++    if(qpc EQUAL 0 OR fences LESS 1 OR done_us GREATER 10000000 OR NOT incomplete EQUAL 0)
++        message(FATAL_ERROR "frame_gpu fields out of range: ${line}")
++    endif()
++endforeach()
++
++message(STATUS
++    "OFXR frame records verified: ${frame_count} frame, ${slot_count} frame_slot, "
++    "${gpu_count} frame_gpu, ${hold_count} frame_hold (${paced_frames} paced; "
++    "${waits_found} with their xrWaitFrame)")
+diff --git a/tests/ofxr_bridge_frame_records.ini b/tests/ofxr_bridge_frame_records.ini
+new file mode 100644
+--- /dev/null
++++ b/tests/ofxr_bridge_frame_records.ini
+@@ -0,0 +1,18 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=1
++triple_frame_gen=1
++adaptive_frame_gen=1
++
++[diagnostics]
++logging_enabled=1
++frame_records=1
++
++[overlay]
++position=upper_right

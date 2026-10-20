@@ -45,9 +45,9 @@ window.runWebSmoke = async function() {
       check('Check now finds the update again with the check back on',ui.updates.enabled && !$('updateBanner').hidden && $('updateAuto').checked);
       $('updateHide').click(); check('The banner can be hidden until the next start',$('updateBanner').hidden && !$('railUpdate').hidden); }
     check('One primary action: Launch DCS, with Review files, Apply without launching and Back to stock DCS as links',!$('preview') && !$('heroChips') && $('launch').classList.contains('launch') && $('reviewPlan').classList.contains('link-button') && $('apply').classList.contains('link-button') && $('apply').textContent === 'Apply without launching' && $('openRecovery').classList.contains('link-button') && !document.querySelector('.workflow').textContent.match(/Preview|Apply profile/));
-    check('All editable profile controls available',ui.fields.length === 119 && document.querySelectorAll('#routeSwitch [data-route]').length === 3);
+    check('All editable profile controls available',ui.fields.length === 162 && document.querySelectorAll('#routeSwitch [data-route]').length === 3);
     check('Quality presets, self-reported limiters and the unused Sboys folder are gone',!$('tuningPreset') && !$('undoTune') && !$('tuningDialog') && !$('budgets') && !['externalLimiter','externalLimiterFps','runtimeReprojection','sboysDriverDirectory'].some(p => ui.fields.some(f => f.path === p)));
-    check('Rarely changed settings start folded away',[...document.querySelectorAll('details.advanced')].length === 5 && [...document.querySelectorAll('details.advanced')].every(d => !d.open) && $('setting-quadViewsLayerDirectory').closest('details') && $('setting-runtimeManifestPath').closest('details') && $('setting-neuralLocalTone').closest('details') && $('setting-diagnosticRecorder').closest('details') && $('setting-engineTimerRefreshUs').closest('details'));
+    check('Rarely changed settings start folded away',[...document.querySelectorAll('details.advanced')].length === 10 && [...document.querySelectorAll('details.advanced')].every(d => !d.open) && $('setting-quadViewsLayerDirectory').closest('details') && $('setting-runtimeManifestPath').closest('details') && $('setting-neuralLocalTone').closest('details') && $('setting-diagnosticRecorder').closest('details') && $('setting-engineTimerRefreshUs').closest('details') && $('setting-colorFixSaturation').closest('details') && $('setting-gazeDofSettleMs').closest('details') && !$('setting-colorMode').closest('details'));
     // Pimax Play's page exactly as Pimax Play shows it (labels, order, rounding), from the fixture's Quick 33 % or Fine 33/10 · 33/33.
     const fineFixture = window.offlineFixture.pimaxMode === 'Fine', pimaxShows = () => ui.state.pimax.controls.map(x => x.label+' '+x.value).join(', ');
     const expectedControls = fineFixture
@@ -66,7 +66,7 @@ window.runWebSmoke = async function() {
       document.querySelector(`#routeSwitch [data-route="${before.runtime}"]`).click();
       check('Pimax or Sboys after Optimizations only brings the VR features back',ui.profile.desktop === false && ui.profile.runtime === before.runtime && ui.profile.quadViews === before.quadViews && ui.profile.frameGen === before.frameGen && ui.profile.neuralRendering === before.neural && !$('feature-quad').hidden && !$('nav-foveation').hidden); }
     check('Legacy defaults preserve the DCS frame limit and VSync',ui.profile.fpsLimit === 'Preserve' && !ui.profile.disableDcsVSync);
-    for(const id of ['overview','guide','foveation','dlss','framegen','pupil','boost','engine','setup','diagnostics','support','recovery']) { ui.navigate(id); check('Navigate '+id,!$('page-'+id).hidden && $('nav-'+id).getAttribute('aria-current') === 'page'); }
+    for(const id of ['overview','guide','foveation','dlss','framegen','pupil','visual','boost','engine','setup','diagnostics','support','recovery']) { ui.navigate(id); check('Navigate '+id,!$('page-'+id).hidden && $('nav-'+id).getAttribute('aria-current') === 'page'); }
     check('The frame generation page is called Framegen',$('nav-framegen').textContent.startsWith('Framegen') && $('pageTitle').textContent !== 'Frame rate' && (ui.navigate('framegen'), $('pageTitle').textContent === 'Framegen'));
     { ui.navigate('guide'); const cards = [...document.querySelectorAll('#featureGuide .guide-card')];
       check('The Feature guide has a card per feature, each with its benefit and an Open button that leads to its page',cards.length >= 10 && cards.every(c => c.querySelector('.guide-impact') && c.querySelector('[data-guide-page]'))
@@ -302,8 +302,12 @@ window.runWebSmoke = async function() {
       edit(field.path,field.values[0]); check(field.path+' minimum accepted',!ui.invalid.has(field.path));
       edit(field.path,field.values[1]); check(field.path+' maximum accepted',!ui.invalid.has(field.path));
       edit(field.path,field.values[1]+1); check(field.path+' invalid entry rejected',ui.invalid.has(field.path));
-      edit(field.path,field.path === 'neuralPaperWhiteScale' ? 1 : field.path.includes('Motion') ? 1 : Math.max(field.values[0],Math.min(field.values[1],.55)));
+      // Back to a value in range; a whole-number field (0 to 500 ms) takes a whole number.
+      const back = field.path === 'neuralPaperWhiteScale' ? 1 : field.path.includes('Motion') ? 1 : Math.max(field.values[0],Math.min(field.values[1],.55));
+      edit(field.path,Number.isInteger(field.values[2]) ? Math.round(back) : back);
     }
+    // Values with a rule across fields: daylight at least 4 times the full-night level, pupil 0 (automatic) or 2 to 8 mm.
+    edit('nightVisionScotopic',.005); edit('nightVisionPhotopic',5); edit('gazeDofPupilMm',0);
     edit('foveaWidth',.55); edit('foveaHeight',.45); edit('quadFocusScale',150); edit('quadSharpening',.7); edit('quadEdgeBlend',.2); edit('neuralWorkingScale',.75); edit('neuralIntensity',.35);
     edit('headsetRefreshHz',90); edit('renderedFpsCap',45); edit('fpsLimit','MatchRefresh');
     edit('foveatedDlss',false); // Foveated Super Resolution is a stereo-only DLSS-page option, independent of the checklist.
@@ -357,7 +361,7 @@ window.runWebSmoke = async function() {
     // The DCS launcher: refused, and said so, only when this app runs inside a job that forbids breakaway.
     check('The launcher option reports whether the DCS launcher can start the game here',typeof ui.state.launcherBlocked === 'boolean' && typeof ui.state.launcherUnknown === 'boolean' && (!ui.state.launcherBlocked || ($('setting-keepDcsLauncher').textContent.includes('error 5') && (ui.profile.keepDcsLauncher || $('input-keepDcsLauncher').disabled))));
     if (ui.state.launcherBlocked) { ui.profile.keepDcsLauncher = true; ui.invalidate(); await ui.run('refresh'); check('With the launcher kept, Checks says why it cannot start the game',ui.checkItems().some(c => c.id === 'dcs-launcher' && c.group === 'fix')); ui.profile.keepDcsLauncher = false; ui.invalidate(); await ui.run('refresh'); }
-    else check('With the launcher kept and no job in the way, nothing blocks it',true);
+    else { ui.profile.keepDcsLauncher = true; ui.invalidate(); await ui.run('refresh'); check('With the launcher kept and no job in the way, nothing blocks it',ui.profile.keepDcsLauncher && !ui.checkItems().some(c => c.id === 'dcs-launcher' && c.group === 'fix')); ui.profile.keepDcsLauncher = false; ui.invalidate(); await ui.run('refresh'); }
     let offlineDownloadRejected = false; try { await ui.run('prepareSboys'); } catch(e) { offlineDownloadRejected = /Network downloads are disabled/.test(e.message); } check('Unbundled driver download is blocked in offline fixtures',offlineDownloadRejected);
     // Final screenshots show a complete configurable route, without an applied game modification.
     edit('quadViews','QuadViewsFoveated'); edit('foveatedDlss',true);

@@ -2295,6 +2295,102 @@ void TestReplica() {
               g_restoreBad == 0 && !ck::g_ovlInert.load(),
           "ovl cpu render point: the replays without a filter point decided through it (no whole-frame scan), "
           "moved, no failure or frame stop, currentContext bit-equal to DCS's after every replay");
+    // R94: [Perception] SymbologyTrace in traced frames through the render point: each replay's records (c9.c8 runs)
+    // and the records it drew, per HMD view and overlay pass; the blend state of each type's first drawn record;
+    // target copies at the drawn records' type changes (SymbologyTraceSegments); what DCS draws is unchanged.
+    {
+      ID3D11BlendState* bs = nullptr;
+      D3D11_BLEND_DESC bd{};
+      D3D11_RENDER_TARGET_BLEND_DESC& rb = bd.RenderTarget[0];
+      rb.BlendEnable = TRUE;
+      rb.SrcBlend = D3D11_BLEND_SRC_ALPHA, rb.DestBlend = D3D11_BLEND_INV_SRC_ALPHA, rb.BlendOp = D3D11_BLEND_OP_ADD;
+      rb.SrcBlendAlpha = D3D11_BLEND_ZERO, rb.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+      rb.BlendOpAlpha = D3D11_BLEND_OP_ADD, rb.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+      H.dev->CreateBlendState(&bd, &bs);
+      g_c->OMSetBlendState(bs, nullptr, 0xffffffffu);
+      g_c->OMSetRenderTargets(1, &g_rtv, nullptr);
+      const int keepViews = symtr::g_views, keepSegs = symtr::g_segs;
+      ID3D11Device* const keepDev = fixdepth::g_s.dev;
+      fixdepth::g_s.dev = H.dev;  // (the copies' staging textures)
+      symtr::g_views = 15;
+      symtr::g_segs = 2;
+      Tally tt;
+      bool rleOk = true, drawnOk = true, blendOk = true;
+      int rLines = 0, rLdr = 0;
+      for (int f = 0; f < 6; ++f) {
+        FrameOpts o;
+        o.nullFilter = true;
+        symtr::g_text.clear();
+        for (int v = 0; v < 4; ++v) symtr::g_segN[v] = 0, symtr::g_blendLogged[v] = 0;
+        symtr::g_on = true;
+        RunFrame(o);
+        symtr::g_on = false;
+        bool moved[4] = {true, true, true, true};
+        Analyse(tt, true, moved, 600 + f);
+        const std::string& tx = symtr::g_text;
+        for (int t = 0; t < 4; ++t) {
+          std::string recs, drawn;
+          int l1 = -1, n1 = 0, l2 = -1, n2 = 0;
+          std::set<int> types;
+          for (const Rec& r : g_list[t]) {
+            symtr::RleAdd(recs, l1, n1, r.elem < 0 ? -2 : r.c9 * 256 + r.c8);
+            if (r.elem >= 0) symtr::RleAdd(drawn, l2, n2, r.c9 * 256 + r.c8), types.insert(r.c9);
+          }
+          symtr::RleAdd(recs, l1, n1, -1);
+          symtr::RleAdd(drawn, l2, n2, -1);
+          char h[96];
+          snprintf(h, sizeof(h), "R %d H hmd %d dcsview %d recs %zu: ", t, t, t, g_list[t].size());
+          rleOk = rleOk && tx.find(std::string(h) + recs + "\n") != std::string::npos;
+          snprintf(h, sizeof(h), "D %d drawn ", t);
+          drawnOk = drawnOk && tx.find(std::string(h) + drawn + "\n") != std::string::npos;
+          for (int c9 : types) {
+            snprintf(h, sizeof(h), "B %d c9 %d blend en 1 src 5 dst 6 op 1 srcA 1 dstA 6 opA 1 write 0xf", t, c9);
+            blendOk = blendOk && tx.find(h) != std::string::npos;
+          }
+        }
+        rLines += r94::CountLines(tx, "R ");
+        for (int t = 0; t < 4; ++t) {
+          char h[16];
+          snprintf(h, sizeof(h), "R %d L ", t);
+          rLdr += r94::CountLines(tx, h);
+        }
+      }
+      size_t segs = 0;
+      bool segTarget = true;
+      for (const symtr::Cap& cp : symtr::g_caps) {
+        segs += cp.tag.rfind("seg", 0) == 0;
+        segTarget = segTarget && cp.w == 16 && cp.h == 16 && cp.fmt == DXGI_FORMAT_R8G8B8A8_UNORM;
+      }
+      printf("     (R94 trace through the render point: %d replay lines (%d LDR), %zu segment copies; draws %llu, hud %llu "
+             "bezel %llu neither %llu)\n",
+             rLines, rLdr, segs, (unsigned long long)tt.draws, (unsigned long long)tt.hudBad,
+             (unsigned long long)tt.bezelBad, (unsigned long long)tt.neither);
+      if (!blendOk) {
+        const size_t at = symtr::g_text.find("B 0 ");
+        printf("     (R94 blend line: %s)\n", at == std::string::npos ? "none" : symtr::g_text.substr(at, 200).c_str());
+      }
+      symtr::Reset();
+      fixdepth::g_s.dev = keepDev;
+      symtr::g_views = keepViews;
+      symtr::g_segs = keepSegs;
+      symtr::g_text.clear();
+      g_c->OMSetBlendState(nullptr, nullptr, 0xffffffffu);
+      ID3D11RenderTargetView* none = nullptr;
+      g_c->OMSetRenderTargets(1, &none, nullptr);
+      if (bs) bs->Release();
+      Check(rLines == 6 * 8 && rLdr == 6 * 4 && rleOk && drawnOk,
+            "R94 SymbologyTrace (ovl cpu render point): one line per replay with its HMD view, pass and DCS's record "
+            "runs (c9.c8, state records S), and the drawn records' runs through the render point");
+      Check(blendOk && segs == 6 * 4 * 2 && segTarget && symtr::g_caps.empty(),
+            "R94 SymbologyTrace (ovl cpu render point): each type's first drawn record logs the bound blend state "
+            "(SRC_ALPHA / INV_SRC_ALPHA, alpha ZERO / INV_SRC_ALPHA); SymbologyTraceSegments=2 copies the bound target "
+            "at the first 2 type changes per view; Reset releases them");
+      Check(tt.mismatch == 0 && tt.hudBad == 0 && tt.bezelBad == 0 && tt.neither == 0 && tt.labelBad == 0 &&
+                tt.guiBad == 0 && tt.eyeDisagree == 0,
+            "R94 SymbologyTrace (ovl cpu render point): the traced frames draw exactly what untraced ones draw (HUD at "
+            "DCS's camera, displays on their true-eye bezels)");
+    }
+
     // The context's VP in cPerView's layout (not DCS 2.9.30's row-major): the layout that is the view's camera is
     // taken per replay and ours written in it.
     g_ctxColMajor = true;

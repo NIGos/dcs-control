@@ -1,0 +1,2039 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1150,6 +1150,34 @@
+                 "-DFRAME_RECORDS=0"
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_frame_records.cmake")
+         set_tests_properties(xrfg_layer_frame_records_off PROPERTIES TIMEOUT 120)
++        # DCS Control (0050): the 2X deeper pipeline's hold on a pipelined
++        # presenter (pipelined_deep_hold on and off), and frame generation
++        # armed on a thread of its own while the runtime takes 80 ms per
++        # private swapchain (async_arm on and off).
++        foreach(deep_hold_case IN ITEMS pipelined_deep_hold pipelined_deep_hold_off
++                async_arm async_arm_off)
++            if(deep_hold_case MATCHES "^async_arm")
++                set(deep_hold_mode dcs-async-arm)
++            else()
++                set(deep_hold_mode dcs-deep-hold)
++            endif()
++            if(deep_hold_case MATCHES "_off$")
++                set(deep_hold_expect 0)
++            else()
++                set(deep_hold_expect 1)
++            endif()
++            add_test(
++                NAME xrfg_layer_${deep_hold_case}
++                COMMAND "${CMAKE_COMMAND}"
++                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                    "-DHOLD_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_${deep_hold_case}.ini"
++                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/${deep_hold_case}"
++                    "-DMODE=${deep_hold_mode}"
++                    "-DEXPECT=${deep_hold_expect}"
++                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_pipelined_deep_hold.cmake")
++            set_tests_properties(xrfg_layer_${deep_hold_case} PROPERTIES TIMEOUT 180)
++        endforeach()
+         # DCS Control (0034): adaptive at the shallow depth, starting in 2X:
+         # the synthetic ring's second slot is made only when 3X first needs
+         # it, and 3X starts only once it is in (one synthetic slot while 2X
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -59,6 +59,13 @@
+     // microseconds, c its sequence. 403 and 404: the 3X deeper pipeline's
+     // re-presented and given-back slots (a the slots in force, b the period
+     // in microseconds, c the session's count).
++    // DCS Control (0050): 406, a 2X synthetic held (as 400 or 401) with the
++    // previous real frame re-presented from the late-frame skip's copy
++    // (`[ofxr] pipelined_deep_hold`): a pipelined presenter keeps no other,
++    // so without it the hold was 402/405. a its age in microseconds, b the
++    // display period in microseconds in bits 0-31 and, in bit 32, 1 when it
++    // was held because its output was not written yet (401's case), c its
++    // sequence.
+     // DCS Control (0042): 960, the presenter thread started: a its OS thread
+     // id (GetCurrentThreadId; its start address is in ucrtbase, so tooling
+     // finds the thread by this id).
+@@ -527,6 +534,35 @@
+     frame_slot,
+     frame_gpu,
+     frame_hold,
++    // DCS Control (0050): a step of the layer's own that can hold a frame
++    // call for a long time, timed (the holds of 55-136 ms in xrEndFrame seen
++    // right after DCS leaves its F10 map). dur_us= the step's time, us; a=
++    // the same in whole ms; b= the swapchain (results 1, 2, 5) or the
++    // session (3, 4, 6); c= as below.
++    //   result=1, frame generation armed for a swapchain on the frame path
++    //     (ensure_frame_generation: private swapchains, synthesizer,
++    //     optical flow), every time it runs; c= 0 armed, 1 declined, 2
++    //     handed to a thread of its own (`[ofxr] async_arm`, result=5).
++    //   result=2, a lazy swapchain's runtime swapchain made
++    //     (create_lazy_runtime_locked), every time; c= 0 made, 1 failed.
++    //   result=3, the drain and content lock before a frame passes through
++    //     (enter_presenter_exclusive), when it took 1 ms or more; c= 0
++    //     drained, 1 the bound ran out, 2 failed.
++    //   result=4, the presenter drain before a swapchain or space is made,
++    //     enumerated or destroyed (PresenterResourceLifetimeGuard), when it
++    //     took 1 ms or more; c= 0.
++    //   result=5, frame generation armed on a thread of its own
++    //     (`[ofxr] async_arm`) and taken in by a later frame: dur_us and a
++    //     the thread's time; c= 0 taken in, 1 the thread failed, 2 what it
++    //     made could not be taken in (the optical flow changed meanwhile and
++    //     the synthesizer could not follow): both then armed on the frame
++    //     path at once, as before (result=1), and so for the rest of that
++    //     swapchain's life.
++    //   result=6, an application frame's capture waited for a slot the
++    //     2X hold was re-presenting from the private image it is about to
++    //     write (`[ofxr] pipelined_deep_hold`); c= 0 it went out, 1 the
++    //     50 ms bound ran out.
++    slow_step,
+ };
+ 
+ struct BridgeFlightToken {
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -237,6 +237,22 @@
+ [[nodiscard]] bool read_fast_composition(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS Control (0050). `[ofxr] pipelined_deep_hold`: at 2X with the deeper
++// pipeline on a pipelined presenter (DCS: wait and end on two threads), the
++// deeper pipeline's hold re-presents the previous real frame from the
++// late-frame skip's copy (one made of the layer's own projection layers
++// only), so the hold engages and the queue keeps its extra slot. Off (0) by
++// default and when the key is missing. Read once per session.
++[[nodiscard]] bool read_pipelined_deep_hold(
++    const std::filesystem::path& module_directory) noexcept;
++// DCS Control (0050). `[ofxr] async_arm`: frame generation for a swapchain a
++// projection layer names for the first time (a D3D12 session, the D3D11
++// bridge's included) is armed on a thread of its own; its frames pass
++// through until it is ready, instead of one long hold inside xrEndFrame. Off
++// (0) by default and when the key is missing. Read once per session.
++[[nodiscard]] bool read_async_arm(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // DCS VR Control (0008). `[ofxr] lazy_runtime_swapchains`: a bridged D3D11
+ // session's colour swapchains hold no runtime swapchain of their own while
+ // nothing is shown from it - the application renders into the bridge's
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -2047,4 +2047,71 @@
+     return bound < 1 ? 1 : bound;
+ }
+ 
++// DCS Control (0050): what the 2X deeper pipeline's hold re-presents for the
++// slot it holds a synthetic back from. A presenter outside the pipelined mode
++// keeps the frame it submitted last (`last_frame`); a pipelined one (DCS:
++// wait and end on two threads) keeps none, because the application may
++// destroy the handles a frame of its names as soon as its xrEndFrame
++// returns, so without another frame the hold never engaged. The late-frame
++// skip's copy (`skip_repeat`) is the last real frame, and only one made of
++// the layer's own projection layers (private swapchains, chains stripped):
++// nothing in it is the application's but the space, which a destroy settles
++// first. Under `[ofxr] pipelined_deep_hold`, at 2X with the deeper pipeline
++// on a pipelined presenter, the hold re-presents that.
++enum class DeepHoldRepeat : std::uint8_t {
++    none = 0,       // nothing to re-present: the synthetic goes now (402/405)
++    last_frame = 1, // the presenter's own last frame (400/401)
++    skip_repeat = 2 // the late-frame skip's copy (406)
++};
++
++// The shape of a frame a slot may re-present.
++struct RepeatCandidate {
++    bool present{};
++    bool synthetic{};
++    std::size_t composition_layers{}; // layers other than projections
++    std::size_t projections{};
++    std::uint32_t layer_count{};
++    // The application frame whose capture wrote the private images it names,
++    // counted per frame from 1 (0: not known).
++    std::uint64_t capture_epoch{};
++};
++
++// A real frame made of projection layers only (skip_repeat_safe's test).
++[[nodiscard]] constexpr bool projection_only_real(const RepeatCandidate& frame) noexcept {
++    return frame.present && !frame.synthetic && frame.composition_layers == 0 &&
++        frame.projections != 0 && frame.layer_count == frame.projections;
++}
++
++// Whether a later frame's capture may already be writing the private images
++// `frame_epoch`'s frame names: the current output alternates `slots` private
++// swapchains, so the capture `slots` frames later takes the same one again,
++// and a re-presented slot would then bind its new image (a newer frame shown
++// out of order). `capture_epoch` is the latest frame whose capture began.
++[[nodiscard]] constexpr bool capture_slot_reused(
++    std::uint64_t frame_epoch,
++    std::uint64_t capture_epoch,
++    std::uint64_t slots) noexcept {
++    return frame_epoch == 0 || capture_epoch >= frame_epoch + slots;
++}
++
++[[nodiscard]] constexpr DeepHoldRepeat deep_hold_repeat(
++    bool last_frame,
++    const RepeatCandidate& skip_repeat,
++    bool enabled,
++    bool deep_pipeline,
++    std::uint32_t frames_per_application_frame,
++    bool pipelined,
++    std::uint64_t capture_epoch,
++    std::uint64_t current_slots) noexcept {
++    if (last_frame) {
++        return DeepHoldRepeat::last_frame;
++    }
++    if (!enabled || !deep_pipeline || frames_per_application_frame > 2 ||
++        !pipelined || !projection_only_real(skip_repeat) ||
++        capture_slot_reused(skip_repeat.capture_epoch, capture_epoch, current_slots)) {
++        return DeepHoldRepeat::none;
++    }
++    return DeepHoldRepeat::skip_repeat;
++}
++
+ } // namespace xrfg::latency
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -57,6 +57,17 @@
+ ; latency. 1 on (default), 0 off. Read when the game starts its session.
+ ; Applies to 3X as well, on D3D12 and bridged D3D11 games.
+ deep_pipeline=1
++; With deep_pipeline=1 at 2X, in games that wait for frames on one thread and
++; end them on another (DCS): the extra frame of depth works there too, by
++; showing the previous game frame again once while it builds up. A game frame
++; that comes a few ms late then no longer costs a missed refresh. 1 on, 0 off
++; (default). Read when the game starts its session.
++pipelined_deep_hold=0
++; Set up frame generation for a new or resized view in the background: the
++; game's frames are shown as they are until it is ready (a fraction of a
++; second), instead of one long pause, for example when leaving DCS's map. 1 on,
++; 0 off (default). Read when the game starts its session.
++async_arm=0
+ ; "3X Frame Gen" in the tray: two generated frames for every game frame, for
+ ; games at a third of the headset's refresh rate. 0 off (default), 1 on.
+ ; Followed live in a running game that started with deep_pipeline=1.
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -402,6 +402,15 @@
+     return read_ofxr_switch(module_directory, L"fast_composition", false);
+ }
+ 
++// DCS Control (0050).
++bool read_pipelined_deep_hold(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"pipelined_deep_hold", false);
++}
++
++bool read_async_arm(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"async_arm", false);
++}
++
+ bool read_lazy_runtime_swapchains(
+     const std::filesystem::path& module_directory) noexcept {
+     return read_ofxr_switch(module_directory, L"lazy_runtime_swapchains", true);
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -129,6 +129,8 @@
+         return "frame_gpu";
+     case BridgeFlightOperation::frame_hold: // DCS Control (0048)
+         return "frame_hold";
++    case BridgeFlightOperation::slow_step: // DCS Control (0050)
++        return "slow_step";
+     case BridgeFlightOperation::synthesis_frame_start_wait:
+         return "synthesis_frame_start_wait";
+     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1893,6 +1893,20 @@
+     // otherwise. Reset wherever presenter_last_frame is, for the same
+     // reasons.
+     std::shared_ptr<GeneratedFrameEndInfo> presenter_skip_repeat;
++    // DCS Control (0050): `[ofxr] pipelined_deep_hold` (see
++    // hold_repeat_locked) and `[ofxr] async_arm` (see ensure_frame_generation),
++    // fixed for the session.
++    bool pipelined_deep_hold{};
++    bool async_arm{};
++    // DCS Control (0050): the application frames whose capture into the
++    // private current images has begun, counted from 1 (the frame's own
++    // number is GeneratedFrameEndInfo::capture_epoch), and the number of the
++    // frame a hold is re-presenting from the late-frame skip's copy while the
++    // presenter has it in the runtime's xrEndFrame (0 none): a capture that
++    // would take that frame's private slot again waits for it to go out
++    // (begin_capture_epoch). Under presenter_mutex.
++    std::uint64_t capture_epoch{};
++    std::uint64_t hold_repeat_in_flight{};
+     // First synthetics handed over late in 3X, for adaptive control's status
+     // (AdaptiveStats::late_leaders); taken by the xrEndFrame thread.
+     std::atomic<std::uint32_t> adaptive_late_leaders{0};
+@@ -2432,6 +2446,9 @@
+ // DCS Control (0034): a second synthetic slot being made on a thread of its
+ // own (see SessionState::lazy_second_synthetic).
+ struct LazySyntheticSlot;
++// DCS Control (0050): frame generation being armed on a thread of its own
++// (see arm_frame_generation_async).
++struct AsyncArmState;
+ 
+ struct FrameGenerationSwapchainState {
+     std::array<PrivateSwapchainState, kCurrentSlotCount> current{};
+@@ -2647,6 +2664,11 @@
+     // not retried every frame. Cleared whenever the history is rebuilt, which
+     // is the point at which the images themselves changed.
+     bool generation_declined{};
++    // DCS Control (0050): `[ofxr] async_arm`: the arming running on a thread
++    // of its own (under mutex), and, once one failed, arming on the frame
++    // path again for this swapchain (under call_mutex).
++    std::shared_ptr<AsyncArmState> async_arm;
++    bool async_arm_failed{};
+     // DCS VR Control (0008): a lazy bridged swapchain (`[ofxr]
+     // lazy_runtime_swapchains`). The application's handle names no runtime
+     // swapchain: it is the layer's own (this state's address with the low
+@@ -2974,9 +2996,13 @@
+ // and destroys what it made if the ring never took it. Defined below.
+ void retire_lazy_synthetic_slot(
+     const std::shared_ptr<Dispatch>& dispatch, LazySyntheticSlot& slot) noexcept;
++// DCS Control (0050): waits for an arming thread to end and destroys what it
++// made if no frame took it in. Defined below.
++void retire_async_arm(const std::shared_ptr<SwapchainState>& state) noexcept;
+ 
+ void destroy_frame_generation_swapchains(
+     const std::shared_ptr<SwapchainState>& state) noexcept {
++    retire_async_arm(state); // DCS Control (0050)
+     try {
+         std::shared_ptr<FrameGenerationSwapchainState> generation;
+         {
+@@ -3401,22 +3427,44 @@
+     return queue;
+ }
+ 
++// DCS Control (0050): frame generation armed on a thread of its own (`[ofxr]
++// async_arm`, see arm_frame_generation_async). What the thread is given -
++// taken on the application's xrEndFrame thread when it starts, so it reads
++// nothing of the session's that the frame path may change meanwhile - and
++// what it leaves for that thread to apply when it takes the generation in:
++// the history it made (published then, with the generation), a fallback
++// from NVIDIA to FidelityFX, and the smooth cursor and the optical-flow
++// order, which queue work of their own and are set then, under gpu_mutex.
++struct AsyncArmInputs {
++    xrfg::D3D12OpticalFlowBackend backend{};
++    xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options{};
++    std::size_t synthetic_slots{};
++    std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
++    bool history_new{};
++    bool nvidia_fell_back{};
++    bool own_queue{};
++};
++
+ template <typename Initialize>
+ [[nodiscard]] HRESULT initialize_synthesis_with_fallback(
+     SessionState& session,
+     const SynthesisInitializeRecord& record,
+-    Initialize&& initialize) {
+-    xrfg::D3D12OpticalFlowBackend backend = session.optical_flow_backend;
+-    if (backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
++    Initialize&& initialize,
++    AsyncArmInputs* async = nullptr) { // DCS Control (0050)
++    xrfg::D3D12OpticalFlowBackend backend =
++        async != nullptr ? async->backend : session.optical_flow_backend;
++    if (async == nullptr && backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
+         session.nvidia_backend_unavailable) {
+         backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
+     }
++    const xrfg::D3D12NvidiaOpticalFlowOptions& nvidia_options =
++        async != nullptr ? async->nvidia_options : session.nvidia_options;
+     const auto attempt = [&](xrfg::D3D12OpticalFlowBackend candidate) {
+         const auto token = xrfg::bridge_flight_logger().begin(
+             xrfg::BridgeFlightOperation::synthesis_initialize,
+             handle_value(session.handle),
+             (static_cast<std::uint64_t>(record.width) << 32) | record.height,
+-            optical_flow_configuration_code(candidate, session.nvidia_options));
++            optical_flow_configuration_code(candidate, nvidia_options));
+         const HRESULT result = initialize(candidate);
+         xrfg::bridge_flight_logger().end(
+             token,
+@@ -3434,9 +3482,14 @@
+             result,
+             handle_value(session.handle),
+             1,
+-            optical_flow_configuration_code(backend, session.nvidia_options));
+-        session.nvidia_backend_unavailable = true;
+-        session.optical_flow_backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
++            optical_flow_configuration_code(backend, nvidia_options));
++        if (async != nullptr) {
++            // DCS Control (0050): applied when the generation is taken in.
++            async->nvidia_fell_back = true;
++        } else {
++            session.nvidia_backend_unavailable = true;
++            session.optical_flow_backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
++        }
+         result = attempt(xrfg::D3D12OpticalFlowBackend::fidelity_fx);
+     }
+     return result;
+@@ -3463,13 +3516,21 @@
+ // arming frame passes through, and the next frame's release is the first
+ // capture either way. Callers hold the swapchain's call_mutex and the
+ // session's gpu_mutex. S_FALSE: already there; a failure leaves none.
++// DCS Control (0050): with `async` (a thread arming the swapchain, see
++// AsyncArmInputs), the history is made but not published: it goes into
++// async->history (history_new set), or the one published already does; the
++// caller's gpu_mutex is then not held (nothing here queues GPU work).
+ [[nodiscard]] HRESULT ensure_swapchain_history(
+-    const std::shared_ptr<SwapchainState>& state) noexcept {
++    const std::shared_ptr<SwapchainState>& state,
++    AsyncArmInputs* async = nullptr) noexcept {
+     try {
+         std::vector<ID3D12Resource*> resources;
+         {
+             std::scoped_lock lock(state->mutex);
+             if (state->d3d12_history) {
++                if (async != nullptr) {
++                    async->history = state->d3d12_history;
++                }
+                 return S_FALSE;
+             }
+             for (const auto& image : state->enumerated_d3d12_images) {
+@@ -3539,7 +3600,11 @@
+                 resources.size(),
+                 0);
+         }
+-        {
++        if (async != nullptr) {
++            // DCS Control (0050): published with the generation.
++            async->history = std::move(history);
++            async->history_new = true;
++        } else {
+             std::scoped_lock lock(state->mutex);
+             state->d3d12_history = std::move(history);
+             state->last_released_capture.reset();
+@@ -3585,7 +3650,8 @@
+ create_d3d12_frame_generation_swapchains(
+     const std::shared_ptr<SwapchainState>& state,
+     SwapchainEligibilityReason* failure_reason,
+-    std::uint64_t* failure_detail) {
++    std::uint64_t* failure_detail,
++    AsyncArmInputs* async = nullptr) { // DCS Control (0050)
+     CreatedPrivateRing current;
+     CreatedPrivateRing synthetic;
+     if (failure_reason != nullptr) {
+@@ -3597,7 +3663,7 @@
+     try {
+         // DCS VR Control (0006): taken now, on first use; see
+         // ensure_swapchain_history.
+-        if (const HRESULT history_result = ensure_swapchain_history(state);
++        if (const HRESULT history_result = ensure_swapchain_history(state, async);
+             FAILED(history_result) && history_result != E_INVALIDARG) {
+             if (failure_reason != nullptr) {
+                 *failure_reason =
+@@ -3609,6 +3675,10 @@
+             }
+             return nullptr;
+         }
++        // DCS Control (0050): on an arming thread, the history it made (not
++        // published yet) or the one that was.
++        const std::shared_ptr<xrfg::D3D12SwapchainHistory> history =
++            async != nullptr ? async->history : state->d3d12_history;
+         const auto& dispatch = state->session->dispatch;
+         const bool is_color =
+             (state->create_info.usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) != 0;
+@@ -3626,7 +3696,7 @@
+             dispatch->enumerate_swapchain_images == nullptr ||
+             state->session->d3d12_device == nullptr ||
+             state->session->d3d12_queue == nullptr ||
+-            !state->d3d12_history) {
++            !history) {
+             if (failure_reason != nullptr) {
+                 *failure_reason = protected_content
+                     ? SwapchainEligibilityReason::protected_content
+@@ -3669,7 +3739,8 @@
+         if (!create_private_ring(
+                 state,
+                 private_info,
+-                synthetic_slot_count_for(*state->session),
++                async != nullptr ? async->synthetic_slots // DCS Control (0050)
++                                 : synthetic_slot_count_for(*state->session),
+                 &synthetic,
+                 &refusal)) {
+             if (failure_reason != nullptr) {
+@@ -3705,7 +3776,7 @@
+             : state->session->d3d12_synthesis_queue
+                 ? state->session->d3d12_synthesis_queue.Get()
+                 : state->session->d3d12_queue.Get(),
+-            state->d3d12_history,
++            history, // DCS Control (0050)
+             std::span<ID3D12Resource* const>(
+                 current.d3d12_resources.data(),
+                 current.d3d12_resources.size()),
+@@ -3736,9 +3807,10 @@
+                 ? D3D12_RESOURCE_STATE_COMMON
+                 : D3D12_RESOURCE_STATE_RENDER_TARGET,
+             backend,
+-            state->session->nvidia_options,
++            async != nullptr ? async->nvidia_options // DCS Control (0050)
++                             : state->session->nvidia_options,
+             synthesis_gpu_timing_wanted());
+-            });
++            }, async);
+         if (FAILED(gpu_result)) {
+             if (failure_reason != nullptr) {
+                 *failure_reason =
+@@ -3756,7 +3828,10 @@
+         adopt_current_ring(generation, current);
+         adopt_synthetic_ring(generation, synthetic);
+         generation->private_info = private_info; // DCS Control (0034)
+-        if (state && state->session) {
++        if (async != nullptr) {
++            // DCS Control (0050): set when the generation is taken in.
++            async->own_queue = own_queue.Get() != nullptr;
++        } else if (state && state->session) {
+             configure_smooth_cursor(*state->session, *synthesizer); // 0010
+             // DCS Control (0038): at 2, the jobs of a queue of its own join
+             // the session's optical-flow order.
+@@ -4263,6 +4338,35 @@
+     }
+ }
+ 
++// DCS Control (0050): a slow_step record (see bridge_flight_logger.hpp): the
++// step's time since `started`, written when it reached `minimum_ms`.
++void log_slow_step(
++    std::int64_t result,
++    std::chrono::steady_clock::time_point started,
++    std::uint64_t handle,
++    std::uint64_t outcome,
++    std::int64_t minimum_ms = 0) noexcept {
++    const std::int64_t took_us = std::max<std::int64_t>(
++        0,
++        std::chrono::duration_cast<std::chrono::microseconds>(
++            std::chrono::steady_clock::now() - started).count());
++    if (took_us < minimum_ms * 1000) {
++        return;
++    }
++    xrfg::bridge_flight_logger().timed_event(
++        xrfg::BridgeFlightOperation::slow_step,
++        result,
++        static_cast<std::uint64_t>(took_us),
++        static_cast<std::uint64_t>(took_us / 1000),
++        handle,
++        outcome);
++}
++
++// DCS Control (0050): frame generation armed on a thread of its own (`[ofxr]
++// async_arm`); see ensure_frame_generation. Defined below.
++[[nodiscard]] std::optional<bool> arm_frame_generation_async(
++    const std::shared_ptr<SwapchainState>& state) noexcept;
++
+ [[nodiscard]] bool ensure_frame_generation(
+     const std::shared_ptr<SwapchainState>& state) noexcept {
+     try {
+@@ -4280,6 +4384,14 @@
+                 return true;
+             }
+         }
++        // DCS Control (0050): `[ofxr] async_arm`: on a thread of its own,
++        // the frames passing through until it is taken in; on here as before
++        // where it does not apply or the thread failed.
++        if (const std::optional<bool> async = arm_frame_generation_async(state)) {
++            return *async;
++        }
++        // DCS Control (0050): timed (slow_step result=1).
++        const auto arm_started = std::chrono::steady_clock::now();
+         const std::uint64_t auxiliary =
+             (static_cast<std::uint64_t>(state->enumerated_image_count) << 32) |
+             state->create_info.arraySize;
+@@ -4387,6 +4499,7 @@
+             log_swapchain_eligibility(state, reason, detail, auxiliary);
+             // DCS VR Control (0006): nothing will capture into it now.
+             release_swapchain_history(state);
++            log_slow_step(1, arm_started, handle_value(state->handle), 1); // 0050
+             return !budget_refusal(reason);
+         }
+         {
+@@ -4399,12 +4512,329 @@
+             SwapchainEligibilityReason::ready,
+             state->enumerated_image_count,
+             auxiliary);
++        log_slow_step(1, arm_started, handle_value(state->handle), 0); // 0050
+         return true;
+     } catch (...) {
+         return true;
+     }
+ }
+ 
++// DCS Control (0050): `[ofxr] async_arm`. Arming a swapchain - its private
++// swapchains (the runtime's xrCreateSwapchain, tens of milliseconds each),
++// its history and its synthesizer (pipelines, the optical-flow session) -
++// held the application's xrEndFrame for 55-136 ms right after DCS left its
++// F10 map. With the key it runs on a thread of its own, as 0034's second
++// synthetic slot does, and the frames pass through until a later xrEndFrame
++// takes the generation in (arm_frame_generation_async).
++//
++// Why it is safe off the frame path: the thread takes none of the layer's
++// locks but the swapchain's `mutex`, briefly (the history reads the
++// enumerated images and the bridge), so it can be joined from anywhere that
++// does not hold that one. It calls the runtime as 0034's thread does
++// (xrCreateSwapchain and xrEnumerateSwapchainImages on private swapchains
++// nothing else names yet). On the device it only creates objects - the
++// history's and the synthesizer's resources, pipelines, fences and its
++// optical-flow session - which D3D12 allows from any thread; nothing it does
++// queues GPU work (the smooth cursor's upload and the optical-flow order are
++// set when the generation is taken in, under gpu_mutex, as everything else
++// that queues work), so no queue sees work from it. What it reads of the
++// session's that the frame path may change - the backend, the optical-flow
++// options, the synthetic ring's size - is taken when it starts; a fallback
++// to FidelityFX and a change of options meanwhile are applied when the
++// generation is taken in. The history it makes is published only then, so no
++// capture runs into it before. Its result is never used once the swapchain
++// is torn down: destroy_frame_generation_swapchains (every swapchain and
++// session teardown, and the deeper pipeline's fallback) and the embedded
++// control's own arming retire it first: join, then destroy what it made.
++struct AsyncArmState {
++    std::mutex mutex;
++    std::thread worker;
++    bool done{};
++    AsyncArmInputs inputs;
++    std::shared_ptr<FrameGenerationSwapchainState> generation;
++    SwapchainEligibilityReason reason{SwapchainEligibilityReason::exception};
++    std::uint64_t detail{};
++    std::chrono::steady_clock::time_point started_at{};
++    std::chrono::steady_clock::time_point finished_at{};
++
++    AsyncArmState() = default;
++    AsyncArmState(const AsyncArmState&) = delete;
++    AsyncArmState& operator=(const AsyncArmState&) = delete;
++    // Normally joined (retire_async_arm, or the frame that takes it in).
++    // Otherwise (the last reference may be the thread's own) never joined
++    // from here, as LazySyntheticSlot.
++    ~AsyncArmState() {
++        if (worker.joinable()) {
++            worker.detach();
++        }
++    }
++};
++
++// A generation the arming thread made that no frame took in: its private
++// swapchains go back to the runtime. Nothing ever acquired them, and the
++// synthesizer queued no GPU work.
++void discard_async_generation(
++    const std::shared_ptr<SessionState>& session,
++    const std::shared_ptr<FrameGenerationSwapchainState>& generation) noexcept {
++    try {
++        if (!generation || !session || !session->dispatch ||
++            session->dispatch->destroy_swapchain == nullptr) {
++            return;
++        }
++        for (PrivateSwapchainState& image : generation->synthetic) {
++            if (image.handle != XR_NULL_HANDLE) {
++                static_cast<void>(session->dispatch->destroy_swapchain(image.handle));
++                image.handle = XR_NULL_HANDLE;
++            }
++        }
++        for (PrivateSwapchainState& image : generation->current) {
++            if (image.handle != XR_NULL_HANDLE) {
++                static_cast<void>(session->dispatch->destroy_swapchain(image.handle));
++                image.handle = XR_NULL_HANDLE;
++            }
++        }
++        generation->synthesizer.reset();
++    } catch (...) {
++    }
++}
++
++// Joins `arm`'s thread, unless it is this one.
++void join_async_arm(AsyncArmState& arm) noexcept {
++    try {
++        std::thread worker;
++        {
++            std::scoped_lock lock(arm.mutex);
++            worker = std::move(arm.worker);
++        }
++        if (worker.joinable()) {
++            if (worker.get_id() == std::this_thread::get_id()) {
++                worker.detach();
++            } else {
++                worker.join();
++            }
++        }
++    } catch (...) {
++    }
++}
++
++void retire_async_arm(const std::shared_ptr<SwapchainState>& state) noexcept {
++    try {
++        if (!state) {
++            return;
++        }
++        std::shared_ptr<AsyncArmState> arm;
++        {
++            std::scoped_lock lock(state->mutex);
++            arm = std::move(state->async_arm);
++        }
++        if (!arm) {
++            return;
++        }
++        join_async_arm(*arm);
++        std::shared_ptr<FrameGenerationSwapchainState> generation;
++        {
++            std::scoped_lock lock(arm->mutex);
++            generation = std::move(arm->generation);
++            arm->inputs.history.reset();
++        }
++        discard_async_generation(state->session, generation);
++    } catch (...) {
++    }
++}
++
++// Under `[ofxr] async_arm`, on a D3D12 session (the D3D11 bridge's included):
++// starts arming `state` on a thread of its own, or takes in what that thread
++// made. The swapchain's call_mutex is held (ensure_frame_generation).
++// nullopt: arm on the frame path as before (the key is off, another binding,
++// or the thread failed - the frame path then also handles a budget refusal
++// as it always has). true: arming is under way (the frame passes through) or
++// the generation was taken in.
++[[nodiscard]] std::optional<bool> arm_frame_generation_async(
++    const std::shared_ptr<SwapchainState>& state) noexcept {
++    try {
++        const std::shared_ptr<SessionState>& session = state->session;
++        if (!session->async_arm ||
++            session->graphics_binding != SessionGraphicsBinding::d3d12 ||
++            state->async_arm_failed) {
++            return std::nullopt;
++        }
++        std::shared_ptr<AsyncArmState> arm;
++        {
++            std::scoped_lock lock(state->mutex);
++            arm = state->async_arm;
++        }
++        if (!arm) {
++            arm = std::make_shared<AsyncArmState>();
++            // Taken here, on the thread that changes them.
++            arm->inputs.backend = session->optical_flow_backend;
++            if (arm->inputs.backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
++                session->nvidia_backend_unavailable) {
++                arm->inputs.backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
++            }
++            arm->inputs.nvidia_options = session->nvidia_options;
++            arm->inputs.synthetic_slots = synthetic_slot_count_for(*session);
++            arm->started_at = std::chrono::steady_clock::now();
++            {
++                std::scoped_lock lock(state->mutex);
++                state->async_arm = arm;
++            }
++            try {
++                std::scoped_lock arm_lock(arm->mutex);
++                arm->worker = std::thread([state, arm]() noexcept {
++                    AsyncArmInputs inputs;
++                    {
++                        std::scoped_lock lock(arm->mutex);
++                        inputs = arm->inputs;
++                    }
++                    SwapchainEligibilityReason reason =
++                        SwapchainEligibilityReason::exception;
++                    std::uint64_t detail = 0;
++                    std::shared_ptr<FrameGenerationSwapchainState> generation;
++                    try {
++                        generation = create_d3d12_frame_generation_swapchains(
++                            state, &reason, &detail, &inputs);
++                    } catch (...) {
++                        generation.reset();
++                    }
++                    try {
++                        std::scoped_lock lock(arm->mutex);
++                        arm->inputs = std::move(inputs);
++                        arm->generation = std::move(generation);
++                        arm->reason = reason;
++                        arm->detail = detail;
++                        arm->finished_at = std::chrono::steady_clock::now();
++                        arm->done = true;
++                    } catch (...) {
++                    }
++                });
++            } catch (...) {
++                // No thread: armed on the frame path instead.
++                {
++                    std::scoped_lock lock(state->mutex);
++                    state->async_arm.reset();
++                }
++                state->async_arm_failed = true;
++                return std::nullopt;
++            }
++            log_slow_step(1, arm->started_at, handle_value(state->handle), 2);
++            return true;
++        }
++        {
++            std::scoped_lock lock(arm->mutex);
++            if (!arm->done) {
++                return true;
++            }
++        }
++        join_async_arm(*arm);
++        {
++            std::scoped_lock lock(state->mutex);
++            if (state->async_arm == arm) {
++                state->async_arm.reset();
++            }
++        }
++        std::shared_ptr<FrameGenerationSwapchainState> generation;
++        AsyncArmInputs inputs;
++        SwapchainEligibilityReason reason{};
++        std::uint64_t detail = 0;
++        std::chrono::steady_clock::duration took{};
++        {
++            std::scoped_lock lock(arm->mutex);
++            generation = std::move(arm->generation);
++            inputs = std::move(arm->inputs);
++            reason = arm->reason;
++            detail = arm->detail;
++            took = arm->finished_at - arm->started_at;
++        }
++        const auto log_taken = [&](std::uint64_t outcome) {
++            const std::int64_t took_us = std::max<std::int64_t>(
++                0, std::chrono::duration_cast<std::chrono::microseconds>(took).count());
++            xrfg::bridge_flight_logger().timed_event(
++                xrfg::BridgeFlightOperation::slow_step,
++                5,
++                static_cast<std::uint64_t>(took_us),
++                static_cast<std::uint64_t>(took_us / 1000),
++                handle_value(state->handle),
++                outcome);
++        };
++        if (!generation || !generation->synthesizer) {
++            // Armed on the frame path now, as before: the same attempt, and a
++            // budget refusal handled where it always was.
++            log_swapchain_eligibility(state, reason, detail, 0);
++            log_taken(1);
++            state->async_arm_failed = true;
++            return std::nullopt;
++        }
++        // A history made by the thread is the one its synthesizer reads; one
++        // published meanwhile by another path would leave captures going
++        // elsewhere (no path does while the thread runs, but never mixed).
++        bool taken = true;
++        if (inputs.history_new) {
++            std::scoped_lock lock(state->mutex);
++            taken = !state->d3d12_history;
++        }
++        if (taken) {
++            std::scoped_lock gpu_lock(session->gpu_mutex);
++            if (inputs.nvidia_fell_back) {
++                // As initialize_synthesis_with_fallback does on the frame path.
++                session->nvidia_backend_unavailable = true;
++                session->optical_flow_backend =
++                    xrfg::D3D12OpticalFlowBackend::fidelity_fx;
++            }
++            // The menu changed the optical flow meanwhile: as the embedded
++            // control does to a generation it already has.
++            const xrfg::D3D12OpticalFlowBackend made_with = inputs.nvidia_fell_back
++                ? xrfg::D3D12OpticalFlowBackend::fidelity_fx
++                : inputs.backend;
++            xrfg::D3D12OpticalFlowBackend wanted = session->optical_flow_backend;
++            if (wanted == xrfg::D3D12OpticalFlowBackend::nvidia &&
++                session->nvidia_backend_unavailable) {
++                wanted = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
++            }
++            if (wanted != made_with ||
++                inputs.nvidia_options.preset != session->nvidia_options.preset ||
++                inputs.nvidia_options.input_scale != session->nvidia_options.input_scale ||
++                inputs.nvidia_options.bidirectional !=
++                    session->nvidia_options.bidirectional) {
++                taken = SUCCEEDED(generation->synthesizer->reconfigure(
++                    wanted, session->nvidia_options));
++            }
++            if (taken) {
++                configure_smooth_cursor(*session, *generation->synthesizer); // 0010
++                if (inputs.own_queue && session->optical_flow_chain) {
++                    generation->synthesizer->set_optical_flow_chain(
++                        session->optical_flow_chain); // DCS Control (0038)
++                }
++            }
++        }
++        if (!taken) {
++            discard_async_generation(session, generation);
++            log_taken(2);
++            state->async_arm_failed = true;
++            return std::nullopt;
++        }
++        {
++            std::scoped_lock lock(state->mutex);
++            if (inputs.history_new) {
++                state->d3d12_history = std::move(inputs.history);
++                state->last_released_capture.reset();
++                state->last_released_motion_vectors.reset();
++            }
++            state->frame_generation = std::move(generation);
++        }
++        state->generation_eligible_pending = false;
++        log_swapchain_eligibility(
++            state,
++            SwapchainEligibilityReason::ready,
++            state->enumerated_image_count,
++            (static_cast<std::uint64_t>(state->enumerated_image_count) << 32) |
++                state->create_info.arraySize);
++        log_taken(0);
++        return true;
++    } catch (...) {
++        return std::nullopt;
++    }
++}
++
+ // The deeper pipeline costs four private swapchains per application
+ // swapchain against the shallow one's three, and a runtime caps the session:
+ // SteamVR at 16. Ghostwire Tokyo under UEVR with depth submission creates
+@@ -5487,6 +5917,11 @@
+     // the private swapchain rings and the admission bounds.
+     state->deep_pipeline =
+         xrfg::implicit_layer::read_deep_pipeline(current_layer_directory());
++    // DCS Control (0050).
++    state->pipelined_deep_hold =
++        xrfg::implicit_layer::read_pipelined_deep_hold(current_layer_directory());
++    state->async_arm =
++        xrfg::implicit_layer::read_async_arm(current_layer_directory());
+     const bool triple_requested =
+         xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory());
+     // DCS VR Control: adaptive 2X/3X and the display time correction.
+@@ -8048,6 +8483,8 @@
+ // Makes the runtime swapchain of a lazy one. lazy_mutex held.
+ [[nodiscard]] bool create_lazy_runtime_locked(SwapchainState& state) noexcept {
+     try {
++        // DCS Control (0050): timed (slow_step result=2).
++        const auto step_started = std::chrono::steady_clock::now();
+         SessionState& session = *state.session;
+         const auto& dispatch = session.dispatch;
+         XrSwapchain handle = XR_NULL_HANDLE;
+@@ -8089,6 +8526,7 @@
+                 handle_value(state.handle),
+                 static_cast<std::uint64_t>(static_cast<std::int64_t>(result)),
+                 state.lazy.creations);
++            log_slow_step(2, step_started, handle_value(state.handle), 1); // 0050
+             return false;
+         }
+         state.lazy.runtime = handle;
+@@ -8102,6 +8540,7 @@
+             handle_value(state.handle),
+             handle_value(handle),
+             state.lazy.creations);
++        log_slow_step(2, step_started, handle_value(state.handle), 0); // 0050
+         return true;
+     } catch (...) {
+         return false;
+@@ -8511,6 +8950,10 @@
+     // As on PresenterSubmission, kept here as well so a repeat of this frame
+     // can make the same join.
+     std::uint64_t app_release_value{};
++    // DCS Control (0050): the application frame whose capture wrote the
++    // private images this frame names (SessionState::capture_epoch), 0 not
++    // known.
++    std::uint64_t capture_epoch{};
+ };
+ 
+ // Whether every output a synthetic names has been written. A fence that
+@@ -9014,6 +9457,43 @@
+                                       : state.presenter_skip_repeat;
+ }
+ 
++// DCS Control (0050): the frame the 2X deeper pipeline's hold re-presents
++// (xrfg::latency::deep_hold_repeat): the presenter's last frame, or, under
++// `[ofxr] pipelined_deep_hold`, at 2X with the deeper pipeline on a
++// pipelined presenter (which keeps no last frame: see the release of
++// presenter_last_frame after a submission), the late-frame skip's copy of
++// the last real frame - made of the layer's own projection layers only - as
++// long as no later frame's capture has begun writing the private slot it
++// names. Null: nothing to re-present. presenter_mutex held.
++[[nodiscard]] std::shared_ptr<GeneratedFrameEndInfo> hold_repeat_locked(
++    const SessionState& state) noexcept {
++    xrfg::latency::RepeatCandidate candidate{};
++    if (const auto& repeat = state.presenter_skip_repeat) {
++        candidate.present = true;
++        candidate.synthetic = repeat->synthetic;
++        candidate.composition_layers = repeat->composition_layers.size();
++        candidate.projections = repeat->projections.size();
++        candidate.layer_count = repeat->info.layerCount;
++        candidate.capture_epoch = repeat->capture_epoch;
++    }
++    switch (xrfg::latency::deep_hold_repeat(
++        state.presenter_last_frame != nullptr,
++        candidate,
++        state.pipelined_deep_hold,
++        state.deep_pipeline,
++        state.frames_per_application_frame.load(),
++        state.pipelined_presenter_mode,
++        state.capture_epoch,
++        kCurrentSlotCount)) {
++    case xrfg::latency::DeepHoldRepeat::last_frame:
++        return state.presenter_last_frame;
++    case xrfg::latency::DeepHoldRepeat::skip_repeat:
++        return state.presenter_skip_repeat;
++    default:
++        return nullptr;
++    }
++}
++
+ [[nodiscard]] bool triple_depth_slot_due_locked(const SessionState& state) noexcept {
+     if (!state.triple_depth.pending || !state.deep_pipeline ||
+         state.frames_per_application_frame <= 2 ||
+@@ -9880,6 +10360,8 @@
+             std::int64_t held_age_ns = -1;
+             std::uint64_t held_sequence = 0;
+             std::int64_t held_reason = 0;
++            // DCS Control (0050): a 406 held for 401's reason.
++            bool held_not_written = false;
+             // 3X release delay, recorded after the lock.
+             TripleReleaseReport release_report{};
+             // DCS VR Control: slots this cycle missed (adaptive 2X/3X), and a
+@@ -10078,14 +10560,28 @@
+                     // compositor keeps showing the previous image, reprojected,
+                     // instead of black. What this gives up is the slot of
+                     // depth the hold would have bought, for this frame only.
+-                    const bool can_hold =
+-                        state->presenter_last_frame != nullptr;
++                    // DCS Control (0050): or the late-frame skip's copy of
++                    // the last real frame, under `[ofxr]
++                    // pipelined_deep_hold` (hold_repeat_locked): recorded as
++                    // 406, and marked in flight until it has gone out, so no
++                    // capture takes its private slot meanwhile.
++                    const std::shared_ptr<GeneratedFrameEndInfo> hold_repeat =
++                        (too_young || not_written)
++                        ? hold_repeat_locked(*state)
++                        : nullptr;
++                    const bool can_hold = hold_repeat != nullptr;
+                     if ((too_young || not_written) && can_hold) {
+                         held_age_ns = std::chrono::duration_cast<
+                             std::chrono::nanoseconds>(age).count();
+                         held_sequence = front->sequence;
+                         held_reason = too_young ? 400 : 401;
+-                        repeated_frame = state->presenter_last_frame;
++                        if (hold_repeat != state->presenter_last_frame) {
++                            held_reason = 406;
++                            held_not_written = not_written;
++                            state->hold_repeat_in_flight =
++                                hold_repeat->capture_epoch;
++                        }
++                        repeated_frame = hold_repeat;
+                         // A synthetic not written a period after it was
+                         // queued is a slot the application missed.
+                         missed_slots += not_written ? 1U : 0U;
+@@ -10333,13 +10829,17 @@
+                     static_cast<std::uint64_t>(depth_correction_after / 1000),
+                     depth_correction_mode);
+             }
++            // DCS Control (0050): 406, held with the late-frame skip's copy;
++            // b's bit 32 set for 401's reason.
+             if (held_age_ns >= 0) {
+                 xrfg::bridge_flight_logger().event(
+                     xrfg::BridgeFlightOperation::presenter_transition,
+                     held_reason,
+                     static_cast<std::uint64_t>(held_age_ns / 1000),
+-                    static_cast<std::uint64_t>(
+-                        state->presenter_display_period / 1000),
++                    (static_cast<std::uint64_t>(
++                         state->presenter_display_period / 1000) &
++                     0xFFFFFFFFULL) |
++                        (held_not_written ? (1ULL << 32) : 0ULL),
+                     held_sequence);
+             }
+             // DCS VR Control (0006): a dropped first synthetic still owns its
+@@ -11370,6 +11870,9 @@
+             !state->dispatch->steamvr_runtime;
+         {
+             std::scoped_lock lock(state->presenter_mutex);
++            // DCS Control (0050): a slot re-presented from the late-frame
++            // skip's copy has gone out (notified below).
++            state->hold_repeat_in_flight = 0;
+             if (request) {
+                 request->result = end_result;
+                 request->completed = true;
+@@ -11690,6 +12193,7 @@
+         state->presenter_submissions.clear();
+         state->presenter_last_frame.reset();
+         state->presenter_skip_repeat.reset(); // DCS VR Control (0006)
++        state->hold_repeat_in_flight = 0; // DCS Control (0050)
+         state->presenter_frame_state = XrFrameState{XR_TYPE_FRAME_STATE};
+         if (!preserve_virtual_timeline) {
+             state->last_virtual_display_time = 0;
+@@ -11863,9 +12367,12 @@
+ // DCS Control (0040): true when the hold's bound ran out (the stall latch
+ // tripped then, or had before), for the caller to branch on: the latch
+ // itself may be re-armed (the session focused) before it reads it.
++// DCS Control (0050): `after_hand_over`, the frame's own submissions are
++// queued already (not at admission): see presenter_starved below.
+ [[nodiscard]] bool wait_for_presenter_pair(
+     const std::shared_ptr<SessionState>& state,
+-    std::uint32_t frames = 0) noexcept {
++    std::uint32_t frames = 0,
++    bool after_hand_over = false) noexcept {
+     try {
+         ApplicationBlockedScope blocked; // DCS VR Control (0004)
+         // The pair rate does not follow this number: the application enqueues
+@@ -11890,9 +12397,19 @@
+             // when this is called at admission, is what it is waiting to do.
+             // A pipelined application leaves it in that state after every
+             // submission, and so does a swapchain teardown.
++            // DCS Control (0050): after the hand-over, what the 2X hold
++            // re-presents (hold_repeat_locked) counts as something to repeat,
++            // so a pipelined presenter whose hold engages does not release
++            // the application early. Never at admission: there the queue is
++            // empty because the application has not queued its frame yet, and
++            // a pipelined presenter does not re-present on an empty queue (it
++            // waits for a submission), so it would stop counting. After the
++            // hand-over it counts through the frame's own submissions and
++            // once more as it waits, which is the pair.
+             const bool presenter_starved =
+                 state->presenter_submissions.empty() &&
+-                state->presenter_last_frame == nullptr;
++                (after_hand_over ? hold_repeat_locked(*state)
++                                 : state->presenter_last_frame) == nullptr;
+             return state->presenter_frame_serial >=
+                        state->application_served_serial +
+                            kPresenterFramesPerPair ||
+@@ -12092,6 +12609,60 @@
+     }
+ }
+ 
++// DCS Control (0050): numbers the application frame whose capture into the
++// private current images is about to begin (SessionState::capture_epoch;
++// GeneratedFrameEndInfo::capture_epoch of its real frame), under `[ofxr]
++// pipelined_deep_hold`. The runtime binds whichever image of a swapchain was
++// released last when xrEndFrame runs, so a slot the 2X hold re-presents from
++// the late-frame skip's copy must go out before a later capture takes the
++// private swapchain that copy names (every kCurrentSlotCount-th frame): if
++// the presenter has such a slot in the runtime's xrEndFrame now, this waits
++// for it, bounded at 50 ms (slow_step result=6). The presenter checks the
++// count under the same lock before it chooses the copy (hold_repeat_locked),
++// so a capture that began first is never re-presented over. presenter_mutex
++// only, as wait_for_presenter_capacity just before it; the presenter takes
++// no lock the application holds here.
++[[nodiscard]] std::uint64_t begin_capture_epoch(
++    const std::shared_ptr<SessionState>& state) noexcept {
++    try {
++        std::unique_lock lock(state->presenter_mutex);
++        const std::uint64_t next = state->capture_epoch + 1;
++        const auto blocked_by_repeat = [&] {
++            return state->hold_repeat_in_flight != 0 &&
++                xrfg::latency::capture_slot_reused(
++                    state->hold_repeat_in_flight, next, kCurrentSlotCount) &&
++                !XR_FAILED(state->presenter_failure) &&
++                !state->presenter_stop_requested;
++        };
++        bool waited = false;
++        bool ran_out = false;
++        const auto started = std::chrono::steady_clock::now();
++        if (blocked_by_repeat()) {
++            waited = true;
++            ApplicationBlockedScope blocked; // DCS VR Control (0004)
++            ran_out = !state->presenter_condition.wait_for(
++                lock, std::chrono::milliseconds(50),
++                [&] { return !blocked_by_repeat(); });
++        }
++        state->capture_epoch = next;
++        lock.unlock();
++        if (waited) {
++            const auto took = std::chrono::duration_cast<std::chrono::microseconds>(
++                std::chrono::steady_clock::now() - started).count();
++            xrfg::bridge_flight_logger().timed_event(
++                xrfg::BridgeFlightOperation::slow_step,
++                6,
++                static_cast<std::uint64_t>(std::max<std::int64_t>(took, 0)),
++                static_cast<std::uint64_t>(std::max<std::int64_t>(took, 0) / 1000),
++                handle_value(state->handle),
++                ran_out ? 1U : 0U);
++        }
++        return next;
++    } catch (...) {
++        return 0;
++    }
++}
++
+ // DCS Control (0029): with `fail_open`, bounded: past the bound it returns
+ // XR_TIMEOUT_EXPIRED (a success code: nothing failed) with the stall latch
+ // tripped, and the caller must not take the content lock or touch anything
+@@ -12137,6 +12708,8 @@
+     const std::shared_ptr<SessionState>& state)
+     : frame_lock(state->frame_call_mutex) {
+     if (continuous_presenter_active(state)) {
++        // DCS Control (0050): timed (slow_step result=4, from 1 ms).
++        const auto drain_started = std::chrono::steady_clock::now();
+         // The content lock must be acquired AFTER the drain: the presenter
+         // needs it to complete the very submissions we are waiting for.
+         static_cast<void>(wait_for_presenter_idle(state, false));
+@@ -12148,9 +12721,17 @@
+         if (!lock_presenter_content_bounded(*state, content_lock)) {
+             content_lock.lock();
+         }
+-        std::scoped_lock lock(state->presenter_mutex);
+-        state->presenter_last_frame.reset();
+-        state->presenter_skip_repeat.reset(); // DCS VR Control (0006)
++        {
++            // DCS Control (0050): this also drops what the 2X hold
++            // re-presents under `[ofxr] pipelined_deep_hold` (the skip's
++            // copy): a hold still pending was let go by the drain above (the
++            // held synthetic is a submission it waited for), and none can
++            // start again before the content lock is released.
++            std::scoped_lock lock(state->presenter_mutex);
++            state->presenter_last_frame.reset();
++            state->presenter_skip_repeat.reset(); // DCS VR Control (0006)
++        }
++        log_slow_step(4, drain_started, handle_value(state->handle), 0, 1); // 0050
+     }
+ }
+ 
+@@ -14370,6 +14951,9 @@
+     }
+     const decltype(swapchains) none;
+     for (const auto& chain : restart_needed ? none : swapchains) {
++        // DCS Control (0050): an arming thread's work is dropped; this arms
++        // below with the new configuration, as before.
++        retire_async_arm(chain);
+         std::unique_lock lock(chain->mutex);
+         // The same gates the enumeration path applies, and for the same reason.
+         //
+@@ -16336,19 +16920,28 @@
+         if (!use_continuous_presenter || presenter_content_lock.owns_lock()) {
+             return XR_SUCCESS;
+         }
++        // DCS Control (0050): timed (slow_step result=3, from 1 ms).
++        const auto exclusive_started = std::chrono::steady_clock::now();
++        const auto timed = [&](XrResult outcome) {
++            log_slow_step(3, exclusive_started, handle_value(state->handle),
++                outcome == XR_SUCCESS ? 0U
++                    : outcome == XR_TIMEOUT_EXPIRED ? 1U : 2U,
++                1);
++            return outcome;
++        };
+         // DCS Control (0029): bounded. XR_TIMEOUT_EXPIRED: the presenter
+         // did not drain in time and the stall latch has tripped; the caller
+         // takes nothing it would need the content lock for.
+         const XrResult idle_result = wait_for_presenter_idle(state, true);
+         if (idle_result != XR_SUCCESS) {
+-            return idle_result;
++            return timed(idle_result);
+         }
+         // DCS Control (0040): and the content lock, bounded the same way:
+         // XR_TIMEOUT_EXPIRED as the drain's.
+         if (!lock_presenter_content_bounded(*state, presenter_content_lock)) {
+-            return XR_TIMEOUT_EXPIRED;
++            return timed(XR_TIMEOUT_EXPIRED);
+         }
+-        return XR_SUCCESS;
++        return timed(XR_SUCCESS);
+     };
+ 
+     apply_scene_change(state); // DCS VR Control (0009)
+@@ -16933,6 +17526,14 @@
+                   cadence_frame,
+                   metadata_pairable)) // DCS Control (0039)
+             : std::nullopt;
++    // DCS Control (0050): this frame's number for the private slot its
++    // capture writes (begin_capture_epoch), under `[ofxr]
++    // pipelined_deep_hold` on the presenter path; 0 otherwise (its real frame
++    // is then never re-presented by the 2X hold).
++    const std::uint64_t frame_capture_epoch =
++        use_continuous_presenter && state->pipelined_deep_hold
++        ? begin_capture_epoch(state)
++        : 0;
+     PreparedProjectionFrame prepared = prepare_projection_frame(
+         current_snapshot,
+         std::span<const ProjectionResourceMapping>(
+@@ -17105,6 +17706,9 @@
+         clear_generation_continuity(state);
+     }
+ 
++    // DCS Control (0050): the frame whose capture wrote these images.
++    first_generated.capture_epoch = frame_capture_epoch;
++    current_generated.capture_epoch = frame_capture_epoch;
+     std::shared_ptr<GeneratedFrameEndInfo> presenter_first_frame;
+     first_generated.synthetic = pair_ready;
+     first_generated.leads_frame = pair_ready;
+@@ -17509,7 +18113,7 @@
+     if (use_continuous_presenter && cadence_one && presenter_first_frame &&
+         !pair_ready && XR_SUCCEEDED(result)) {
+         frame_call_lock.unlock();
+-        static_cast<void>(wait_for_presenter_pair(state, 1U));
++        static_cast<void>(wait_for_presenter_pair(state, 1U, true)); // 0050
+         return result;
+     }
+ 
+@@ -17540,7 +18144,8 @@
+         // cadence.
+         frame_call_lock.unlock();
+         if (!presenter_hold_at_admission(*state)) {
+-            static_cast<void>(wait_for_presenter_pair(state, cadence_hold_frames));
++            static_cast<void>(
++                wait_for_presenter_pair(state, cadence_hold_frames, true)); // 0050
+         }
+         return result;
+     }
+diff --git a/tests/bridge_flight_logger_tests.cpp b/tests/bridge_flight_logger_tests.cpp
+--- a/tests/bridge_flight_logger_tests.cpp
++++ b/tests/bridge_flight_logger_tests.cpp
+@@ -539,6 +539,9 @@
+                 123456789055555ULL, 2, 0);
+             on.timed_event(xrfg::BridgeFlightOperation::frame_hold, 7, 16000,
+                 123456789177777ULL, 14000ULL | (1500ULL << 32), 500);
++            // DCS Control (0050): a timed step.
++            on.timed_event(xrfg::BridgeFlightOperation::slow_step, 1, 98765,
++                98, 0x303, 2);
+             // The fence waits are timed while frame records are on.
+             {
+                 const std::int64_t before = xrfg::t_fence_wait_ns;
+@@ -568,6 +571,8 @@
+                     frames.find(" op=frame_gpu result=7 dur_us=15000 a=123456789055555 b=2 c=0\r\n") !=
+                         std::string::npos &&
+                     frames.find(" op=frame_hold result=7 dur_us=16000 a=123456789177777 b=6442450958000 c=500\r\n") !=
++                        std::string::npos &&
++                    frames.find(" op=slow_step result=1 dur_us=98765 a=98 b=771 c=2\r\n") !=
+                         std::string::npos,
+                 "frame records: a record is missing or malformed");
+         }
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -3333,6 +3333,85 @@
+     }
+ }
+ 
++// DCS Control (0050): what the 2X deeper pipeline's hold re-presents.
++void deep_hold_repeat_tests() {
++    RepeatCandidate real{};
++    real.present = true;
++    real.projections = 1;
++    real.layer_count = 1;
++    real.capture_epoch = 7;
++    // A pipelined presenter, 2X deep, key on: the skip repeat, while the
++    // capture after next has not begun (two current slots).
++    require(deep_hold_repeat(false, real, true, true, 2, true, 7, 2) ==
++                DeepHoldRepeat::skip_repeat,
++        "deep hold: a projection-only real frame is re-presented");
++    require(deep_hold_repeat(false, real, true, true, 2, true, 8, 2) ==
++                DeepHoldRepeat::skip_repeat,
++        "deep hold: the next frame's capture writes the other slot");
++    require(deep_hold_repeat(false, real, true, true, 2, true, 9, 2) ==
++                DeepHoldRepeat::none,
++        "deep hold: the slot's next capture has begun");
++    // The presenter's own last frame always comes first, key on or off.
++    require(deep_hold_repeat(true, real, true, true, 2, true, 7, 2) ==
++                DeepHoldRepeat::last_frame,
++        "deep hold: the last frame first");
++    require(deep_hold_repeat(true, RepeatCandidate{}, false, true, 2, false, 0, 2) ==
++                DeepHoldRepeat::last_frame,
++        "deep hold: key off keeps the last frame");
++    // Key off: as before, nothing without a last frame.
++    require(deep_hold_repeat(false, real, false, true, 2, true, 7, 2) ==
++                DeepHoldRepeat::none,
++        "deep hold: key off gives nothing");
++    // Not a synthetic, not a frame with other composition layers, not one
++    // with a layer that is no projection of the layer's own.
++    RepeatCandidate synthetic = real;
++    synthetic.synthetic = true;
++    require(deep_hold_repeat(false, synthetic, true, true, 2, true, 7, 2) ==
++                DeepHoldRepeat::none,
++        "deep hold: a synthetic is never re-presented");
++    RepeatCandidate quad = real;
++    quad.composition_layers = 1;
++    quad.layer_count = 2;
++    require(deep_hold_repeat(false, quad, true, true, 2, true, 7, 2) ==
++                DeepHoldRepeat::none,
++        "deep hold: a frame with a quad layer is never re-presented");
++    RepeatCandidate unowned = real;
++    unowned.layer_count = 2;
++    require(deep_hold_repeat(false, unowned, true, true, 2, true, 7, 2) ==
++                DeepHoldRepeat::none,
++        "deep hold: a frame with a layer of the application's");
++    RepeatCandidate empty = real;
++    empty.projections = 0;
++    empty.layer_count = 0;
++    require(deep_hold_repeat(false, empty, true, true, 2, true, 7, 2) ==
++                DeepHoldRepeat::none,
++        "deep hold: a frame with no layers");
++    require(deep_hold_repeat(false, RepeatCandidate{}, true, true, 2, true, 7, 2) ==
++                DeepHoldRepeat::none,
++        "deep hold: no frame at all");
++    RepeatCandidate unknown_epoch = real;
++    unknown_epoch.capture_epoch = 0;
++    require(deep_hold_repeat(false, unknown_epoch, true, true, 2, true, 1, 2) ==
++                DeepHoldRepeat::none,
++        "deep hold: a frame whose capture is not known");
++    // Only at 2X, deep, pipelined.
++    require(deep_hold_repeat(false, real, true, false, 2, true, 7, 2) ==
++                DeepHoldRepeat::none,
++        "deep hold: shallow pipeline");
++    require(deep_hold_repeat(false, real, true, true, 3, true, 7, 2) ==
++                DeepHoldRepeat::none,
++        "deep hold: 3X has its own re-presented slot");
++    require(deep_hold_repeat(false, real, true, true, 2, false, 7, 2) ==
++                DeepHoldRepeat::none,
++        "deep hold: not pipelined");
++    require(projection_only_real(real) && !projection_only_real(synthetic) &&
++                !projection_only_real(quad) && !projection_only_real(RepeatCandidate{}),
++        "deep hold: projection_only_real");
++    require(!capture_slot_reused(5, 6, 2) && capture_slot_reused(5, 7, 2) &&
++                capture_slot_reused(0, 0, 2),
++        "deep hold: capture_slot_reused");
++}
++
+ } // namespace
+ 
+ int main() {
+@@ -3361,6 +3440,7 @@
+         cadence_one_exit_tests();
+         cadence_backoff_tests();
+         cadence_frame_tests();
++        deep_hold_repeat_tests(); // DCS Control (0050)
+         std::cout << "Latency control tests passed\n";
+         return 0;
+     } catch (const std::exception& error) {
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -318,6 +318,47 @@
+ int g_throughput_gpu_ms = 0;
+ std::mutex g_told_mutex;
+ std::vector<std::pair<float, XrTime>> g_told_by_pose;
++// dcs-deep-hold (DCS Control, 0050): dcs-latency's shape at 2X with the
++// deeper pipeline and adaptive 2X/3X, and `pipelined_deep_hold` as the ini
++// beside the layer says: a steady application (12 ms of render), then the
++// same with 10 ms more every 50th frame (a few ms past its slack, as DCS's
++// +5 ms are past its ~2 ms), then the space the frames name is
++// destroyed right after a frame went in (a hold is then usually pending),
++// then the application's swapchain likewise. Nothing may name the space or
++// a swapchain once destroyed, no submission may be empty, and a real frame
++// the 2X hold re-presents must never name a private swapchain the layer has
++// acquired again since that frame first went down (a capture writing it).
++// The flight log is checked by layer_pipelined_deep_hold.cmake.
++bool g_deep_hold_mode = false;
++bool g_deep_hold_expected = false;
++std::atomic<bool> g_deep_hold_destroy_check{false};
++// dcs-async-arm (0050): dcs-latency's shape with every private swapchain's
++// creation taking g_slow_private_create_ms; with `async_arm=1` in the ini no
++// application xrEndFrame may take over 20 ms, and generation must start.
++bool g_async_arm_mode = false;
++bool g_async_arm_expected = false;
++int g_slow_private_create_ms = 0;
++double g_longest_end_frame_ms = 0.0;
++std::uint32_t g_longest_end_frame_at = 0;
++std::uint32_t g_end_frames_timed = 0;
++// The application frames timed: the first arming takes four private
++// swapchains, 320 ms at 80 ms each, and the frames passing through meanwhile
++// end at the application's own pace.
++constexpr std::uint32_t kArmingFrames = 60;
++// 0050: acquires of each private current swapchain, so a re-presented real
++// frame can be told from one whose private image a later capture took.
++std::mutex g_current_acquire_count_mutex;
++std::vector<std::pair<XrSwapchain, std::uint64_t>> g_current_acquire_counts;
++[[nodiscard]] std::uint64_t current_acquires(XrSwapchain swapchain, bool add) {
++    std::scoped_lock lock(g_current_acquire_count_mutex);
++    for (auto& [handle, count] : g_current_acquire_counts) {
++        if (handle == swapchain) {
++            return add ? ++count : count;
++        }
++    }
++    g_current_acquire_counts.emplace_back(swapchain, add ? 1U : 0U);
++    return add ? 1U : 0U;
++}
+ bool g_flight_simulator_mode = false;
+ bool g_destroy_pending_swapchain = false;
+ bool g_destroy_pending_space = false;
+@@ -414,6 +455,10 @@
+     std::uint32_t quad_layer_count{};
+     std::uint32_t quad_layer_index{
+         std::numeric_limits<std::uint32_t>::max()};
++    // DCS Control (0050): the private current swapchain the first view
++    // names, and how often it had been acquired by then.
++    XrSwapchain current_named{XR_NULL_HANDLE};
++    std::uint64_t current_named_acquires{};
+ };
+ 
+ struct LocateViewsRecord {
+@@ -1131,6 +1176,12 @@
+                 } else if (record.target != view_target) {
+                     record.target = SubmittedTarget::mixed;
+                 }
++                // DCS Control (0050).
++                if (view_index == 0 && recorded_views == 0 &&
++                    is_current_swapchain(handle)) {
++                    record.current_named = handle;
++                    record.current_named_acquires = current_acquires(handle, false);
++                }
+                 if (recorded_views < record.poses.size()) {
+                     record.poses[recorded_views] = projection->views[view_index].pose;
+                     record.fovs[recorded_views] = projection->views[view_index].fov;
+@@ -1178,11 +1229,18 @@
+         ++g_submission_after_destroy;
+         return XR_ERROR_HANDLE_INVALID;
+     }
+-    if (g_destroy_pending_space && saw_projection &&
++    if ((g_destroy_pending_space || g_deep_hold_mode) && saw_projection && // 0050
+         record.space != g_valid_composition_space.load(std::memory_order_acquire)) {
+         ++g_submission_after_destroy;
+         return XR_ERROR_HANDLE_INVALID;
+     }
++    // DCS Control (0050): nothing with a projection after the application's
++    // swapchain went (its private swapchains go first).
++    if (g_deep_hold_destroy_check.load(std::memory_order_acquire) && saw_projection &&
++        g_swapchain_destroyed.load(std::memory_order_acquire)) {
++        ++g_submission_after_destroy;
++        return XR_ERROR_HANDLE_INVALID;
++    }
+     if (g_flight_simulator_mode && saw_projection &&
+         record.space !=
+             g_valid_composition_space.load(std::memory_order_acquire)) {
+@@ -1266,6 +1324,12 @@
+     XrSession,
+     const XrSwapchainCreateInfo* create_info,
+     XrSwapchain* swapchain) {
++    // DCS Control (0050): dcs-async-arm: a private swapchain (only the layer
++    // asks for a transfer destination) takes the runtime this long.
++    if (g_slow_private_create_ms > 0 && create_info != nullptr &&
++        (create_info->usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) != 0) {
++        std::this_thread::sleep_for(std::chrono::milliseconds(g_slow_private_create_ms));
++    }
+     // The depth swapchain sits outside the call numbering the private slots
+     // are routed by.
+     if (g_d3d11_bridge_mode && create_info != nullptr &&
+@@ -1615,6 +1679,7 @@
+     const XrSwapchainImageAcquireInfo*,
+     std::uint32_t* index) {
+     if (is_current_swapchain(swapchain)) {
++        static_cast<void>(current_acquires(swapchain, true)); // DCS Control (0050)
+         const std::uint32_t call =
+             g_current_acquire_calls.fetch_add(1, std::memory_order_relaxed);
+         *index = call % static_cast<std::uint32_t>(g_current_swapchain_images.size());
+@@ -2579,7 +2644,7 @@
+             "d3d11-bridge-fallback|dcs-late-skip|dcs-triple-deep|"
+             "dcs-triple-deep-jitter|dcs-triple-deep-quad|dcs-triple-scenes|"
+             "dcs-adaptive-scenes|dcs-presenter-stall|dcs-triple-shrink|"
+-            "dcs-cadence]\n";
++            "dcs-cadence|dcs-deep-hold|dcs-async-arm]\n";
+         return EXIT_FAILURE;
+     }
+     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
+@@ -2614,6 +2679,10 @@
+             argc == 4 && std::strcmp(argv[3], "dcs-presenter-stall") == 0;
+         // DCS Control (0032).
+         g_cadence_mode = argc == 4 && std::strcmp(argv[3], "dcs-cadence") == 0;
++        // DCS Control (0050).
++        g_deep_hold_mode = argc == 4 && std::strcmp(argv[3], "dcs-deep-hold") == 0;
++        g_async_arm_mode = argc == 4 && std::strcmp(argv[3], "dcs-async-arm") == 0;
++        g_slow_private_create_ms = g_async_arm_mode ? 80 : 0;
+     }
+     {
+         const bool throughput_down =
+@@ -2628,7 +2697,7 @@
+     }
+     g_display_latency_mode = g_adaptive_latency_mode || g_late_skip_mode ||
+         g_triple_deep_mode || g_scenes_mode || g_presenter_stall_mode ||
+-        g_cadence_mode ||
++        g_cadence_mode || g_deep_hold_mode || g_async_arm_mode || // 0050
+         (argc == 4 && std::strcmp(argv[3], "dcs-latency") == 0);
+     g_dcs_mode = g_dcs_d3d11_mode || g_display_latency_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs") == 0);
+@@ -2688,6 +2757,11 @@
+         // DCS VR Control (0009): off unless the ini says 1, as the layer.
+         g_late_skip_expected = GetPrivateProfileIntW(
+             L"ofxr", L"late_frame_skip", 0, ini.wstring().c_str()) != 0;
++        // DCS Control (0050): off unless the ini says 1, as the layer.
++        g_deep_hold_expected = GetPrivateProfileIntW(
++            L"ofxr", L"pipelined_deep_hold", 0, ini.wstring().c_str()) != 0;
++        g_async_arm_expected = GetPrivateProfileIntW(
++            L"ofxr", L"async_arm", 0, ini.wstring().c_str()) != 0;
+         // Adaptive 2X/3X reserves 3X's ring from the start, on a binding 3X
+         // covers - any but a D3D11 session left on the interop.
+         // DCS Control (0034): except at the shallow depth starting in 2X on a
+@@ -3537,8 +3611,23 @@
+         // xrEndFrame, and a parity rule breaks the moment the schedule shifts
+         // by a frame.
+         g_application_in_end_frame.store(true, std::memory_order_release);
++        const auto end_started = std::chrono::steady_clock::now(); // 0050
+         const bool ended = XR_SUCCEEDED(end_frame(session, &frame_end_info));
+         g_application_in_end_frame.store(false, std::memory_order_release);
++        // DCS Control (0050): dcs-async-arm's bound.
++        {
++            const double end_ms = std::chrono::duration<double, std::milli>(
++                std::chrono::steady_clock::now() - end_started).count();
++            // The arming and the frames that pass through while it runs:
++            // after them the once-per-pair hold, a deliberate wait of up to
++            // two periods, is inside xrEndFrame as well.
++            if (end_ms > g_longest_end_frame_ms &&
++                g_end_frames_timed < kArmingFrames) {
++                g_longest_end_frame_ms = end_ms;
++                g_longest_end_frame_at = g_end_frames_timed;
++            }
++            ++g_end_frames_timed;
++        }
+         return ended;
+     };
+ 
+@@ -4327,7 +4416,8 @@
+         // to reach its depth first, then until it has.
+         const int kOverlappingFrames =
+             (g_adaptive_latency_mode || g_late_skip_mode || g_triple_deep_mode ||
+-             g_scenes_mode || g_presenter_stall_mode || g_cadence_mode) ? 0
++             g_scenes_mode || g_presenter_stall_mode || g_cadence_mode ||
++             g_deep_hold_mode || g_async_arm_mode) ? 0 // 0050
+             : g_display_latency_mode
+                 ? (g_frames_per_application_frame > 2 ? 300 : 160)
+                 : 8;
+@@ -4339,7 +4429,8 @@
+         int settle_frames = 0;
+         if (g_display_latency_mode && !g_adaptive_latency_mode &&
+             !g_late_skip_mode && !g_triple_deep_mode && !g_scenes_mode &&
+-            !g_presenter_stall_mode && !g_cadence_mode) {
++            !g_presenter_stall_mode && !g_cadence_mode &&
++            !g_deep_hold_mode && !g_async_arm_mode) { // 0050
+             settle_frames = run_until_settled(kSettleBound);
+         }
+         // dcs-triple-deep (0007): 14 s of a steady application, the last 8
+@@ -4605,15 +4696,83 @@
+             cadence_settle_frames = run_until_settled(kSettleBound);
+             g_simulated_render_us = 0;
+         }
+-        sequence_succeeded = sequence_succeeded &&
+-            XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
+-            capture_fresh_application_image() &&
+-            submit_frame(pending.predictedDisplayTime) &&
+-            wait_for_queue_idle();
++        // dcs-deep-hold (0050): steady, then 5 ms late every 50th frame,
++        // then the space and the swapchain destroyed right after a frame
++        // went in. The display times where the phases start go to stdout,
++        // for layer_pipelined_deep_hold.cmake to find in the flight log
++        // (projection_mapping's a).
++        std::size_t deep_hold_destroy_from = 0;
++        bool deep_hold_swapchain_destroyed = false;
++        if (g_deep_hold_mode) {
++            // The late frames go past the slack the steady ones leave by a
++            // few ms, as DCS's +5 ms do past its ~2 ms at 90 Hz. Here the
++            // steady frame leaves ~6.5 ms (a steady frame heavy enough to
++            // leave 2 ms has the test machine's GPU bracket near two
++            // periods, and adaptive control's work rule then moves 2X to 3X
++            // by itself), so they are 10 ms late.
++            constexpr int kSteadyUs = 12'000;
++            constexpr int kLateUs = 10'000;
++            g_simulated_render_us = kSteadyUs;
++            for (int index = 0; sequence_succeeded && index < 300; ++index) {
++                if (index == 150) {
++                    std::cout << "DEEP_HOLD_STEADY_FROM=" << pending.predictedDisplayTime << '\n';
++                }
++                sequence_succeeded = run_frame(true);
++            }
++            std::cout << "DEEP_HOLD_LATE_FROM=" << pending.predictedDisplayTime << '\n';
++            for (int index = 0; sequence_succeeded && index < 500; ++index) {
++                g_simulated_render_us = index % 50 == 25 ? kSteadyUs + kLateUs : kSteadyUs;
++                sequence_succeeded = run_frame(true);
++            }
++            g_simulated_render_us = kSteadyUs;
++            std::cout << "DEEP_HOLD_LATE_TO=" << pending.predictedDisplayTime << '\n';
++            {
++                std::scoped_lock lock(g_end_records_mutex);
++                deep_hold_destroy_from = g_end_records.size();
++            }
++            // The space: destroyed right after a frame went in, then the
++            // application goes on with another.
++            sequence_succeeded = sequence_succeeded && destroy_space &&
++                XR_SUCCEEDED(destroy_space(application_space));
++            application_space = fake_handle<XrSpace>(0x405);
++            projection.space = application_space;
++            g_valid_composition_space.store(application_space, std::memory_order_release);
++            for (int index = 0; sequence_succeeded && index < 60; ++index) {
++                sequence_succeeded = run_frame(true);
++            }
++            // The swapchain: the same, and nothing after it.
++            g_swapchain_destroyed.store(false, std::memory_order_release);
++            g_deep_hold_destroy_check.store(true, std::memory_order_release);
++            deep_hold_swapchain_destroyed = sequence_succeeded &&
++                XR_SUCCEEDED(destroy_swapchain(swapchain));
++            sequence_succeeded = sequence_succeeded && deep_hold_swapchain_destroyed;
++            std::this_thread::sleep_for(std::chrono::milliseconds(60));
++            g_simulated_render_us = 0;
++        }
++        // dcs-async-arm (0050): long enough for generation to start after
++        // the slow arming, and to run for a while.
++        if (g_async_arm_mode) {
++            g_simulated_render_us = 12'000;
++            for (int index = 0; sequence_succeeded && index < 200; ++index) {
++                sequence_succeeded = run_frame(true);
++            }
++            g_simulated_render_us = 0;
++            // The session's end submits no layers; checked up to here.
++            std::scoped_lock lock(g_end_records_mutex);
++            deep_hold_destroy_from = g_end_records.size();
++        }
++        if (!deep_hold_swapchain_destroyed) {
++            sequence_succeeded = sequence_succeeded &&
++                XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
++                capture_fresh_application_image() &&
++                submit_frame(pending.predictedDisplayTime) &&
++                wait_for_queue_idle();
++        }
+ 
+         const bool teardown_succeeded =
+             XR_SUCCEEDED(end_session(session)) &&
+-            XR_SUCCEEDED(destroy_swapchain(swapchain)) &&
++            (deep_hold_swapchain_destroyed ||
++             XR_SUCCEEDED(destroy_swapchain(swapchain))) &&
+             XR_SUCCEEDED(destroy_session(session)) &&
+             XR_SUCCEEDED(destroy_instance(instance));
+         FreeLibrary(module);
+@@ -4691,6 +4850,77 @@
+                       << throughput_frames << " frames\n";
+             return EXIT_SUCCESS;
+         }
++        if (g_deep_hold_mode || g_async_arm_mode) {
++            // DCS Control (0050): from the presenter on, no submission
++            // empty (up to the swapchain's destruction, after which the
++            // shutdown may end frames with nothing); every real frame shown
++            // again in a row (the 2X hold's re-presented slot) still names a
++            // private image no capture has taken since.
++            std::size_t empty = 0;
++            std::size_t repeats = 0;
++            std::size_t repeat_overwritten = 0;
++            std::size_t first_empty = 0;
++            {
++                std::scoped_lock lock(g_end_records_mutex);
++                const std::size_t until = deep_hold_destroy_from != 0
++                    ? deep_hold_destroy_from
++                    : g_end_records.size();
++                const EndFrameRecord* previous_current = nullptr;
++                for (std::size_t index = records_before_overlapping_frames;
++                     index < g_end_records.size(); ++index) {
++                    const EndFrameRecord& record = g_end_records[index];
++                    if (index < until && record.layer_count == 0) {
++                        if (empty == 0) {
++                            first_empty = index - records_before_overlapping_frames;
++                        }
++                        ++empty;
++                    }
++                    if (record.target != SubmittedTarget::current) {
++                        continue;
++                    }
++                    if (previous_current != nullptr &&
++                        previous_current->poses[0].position.x ==
++                            record.poses[0].position.x &&
++                        previous_current->current_named == record.current_named) {
++                        ++repeats;
++                        if (previous_current->current_named_acquires !=
++                            record.current_named_acquires) {
++                            ++repeat_overwritten;
++                        }
++                    } else {
++                        previous_current = &record;
++                    }
++                }
++            }
++            const bool arm_bound_kept = !g_async_arm_mode ||
++                (g_async_arm_expected ? g_longest_end_frame_ms <= 20.0
++                                      : g_longest_end_frame_ms >= 80.0);
++            valid = sequence_succeeded && teardown_succeeded && presenter_seen &&
++                violations == 0 && g_submission_after_destroy.load() == 0 &&
++                empty == 0 && repeat_overwritten == 0 && synthetic_total > 0 &&
++                arm_bound_kept &&
++                (!g_deep_hold_mode || !g_deep_hold_expected || repeats > 0);
++            std::ostringstream summary;
++            summary << "sequence=" << sequence_succeeded << " teardown=" << teardown_succeeded
++                    << " promoted=" << presenter_seen << " violations=" << violations
++                    << " after-destroy=" << g_submission_after_destroy.load()
++                    << " empty=" << empty << " (first " << first_empty << ")"
++                    << " repeats=" << repeats
++                    << " repeat-overwritten=" << repeat_overwritten
++                    << " synthetics=" << synthetic_total
++                    << " longest-end-frame-ms=" << g_longest_end_frame_ms
++                    << " (frame " << g_longest_end_frame_at << " of "
++                    << g_end_frames_timed << ")";
++            if (!valid) {
++                std::cerr << (g_deep_hold_mode ? "DCS deep hold" : "DCS async arm")
++                          << " validation failed: " << summary.str() << '\n';
++                return EXIT_FAILURE;
++            }
++            std::cout << (g_deep_hold_mode ? "OpenXR DCS deep hold test passed: "
++                                           : "OpenXR DCS async arm test passed: ")
++                      << summary.str() << '\n';
++            return EXIT_SUCCESS;
++        }
+         if (g_cadence_mode) {
+             // 0032: over the alternation, between every two real frames
+             // shown, as many synthetics as display periods less one between
+diff --git a/tests/layer_pipelined_deep_hold.cmake b/tests/layer_pipelined_deep_hold.cmake
+new file mode 100644
+--- /dev/null
++++ b/tests/layer_pipelined_deep_hold.cmake
+@@ -0,0 +1,192 @@
++# DCS Control (0050): the 2X deeper pipeline's hold on a pipelined presenter
++# (`[ofxr] pipelined_deep_hold`) and frame generation armed on a thread of its
++# own (`[ofxr] async_arm`). Runs a call-chain scenario with HOLD_INI beside the
++# layer DLL; the scenario checks what reached the fake runtime itself, and
++# this the flight log.
++#   MODE=dcs-deep-hold, EXPECT=1: holds with the late-frame skip's copy
++#   (presenter_transition 406) happen, none goes over as 402 once steady, and
++#   the late frames (a few ms past the steady frames' slack) cost adaptive
++#   2X/3X no missed slot, in 2X throughout (latency_status's
++#   late count, b bits 16-31, over the late stretch). EXPECT=0: as before
++#   0050 - no 406, and those late frames do cost missed slots.
++#   MODE=dcs-async-arm, EXPECT=1: generation armed on its thread and taken in
++#   (slow_step 5, c=0); EXPECT=0: armed on the frame path (slow_step 1, c=0)
++#   and never on a thread.
++foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN HOLD_INI WORK_DIR MODE EXPECT)
++    if(NOT DEFINED ${required_variable})
++        message(FATAL_ERROR "${required_variable} was not provided")
++    endif()
++endforeach()
++
++file(REMOVE_RECURSE "${WORK_DIR}")
++file(MAKE_DIRECTORY "${WORK_DIR}")
++file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
++file(COPY "${HOLD_INI}" DESTINATION "${WORK_DIR}")
++get_filename_component(hold_ini_name "${HOLD_INI}" NAME)
++file(RENAME "${WORK_DIR}/${hold_ini_name}" "${WORK_DIR}/ofxr_bridge.ini")
++
++get_filename_component(layer_name "${LAYER_DLL}" NAME)
++execute_process(
++    COMMAND "${CALL_CHAIN}"
++        "${WORK_DIR}/${layer_name}"
++        "${WORK_DIR}/fake-runtime.log"
++        ${MODE}
++    RESULT_VARIABLE call_chain_result
++    OUTPUT_VARIABLE call_chain_output
++    ERROR_VARIABLE call_chain_error)
++if(NOT call_chain_result EQUAL 0)
++    message(FATAL_ERROR
++        "Call chain '${MODE}' failed (${call_chain_result}):\n"
++        "${call_chain_output}\n${call_chain_error}")
++endif()
++message(STATUS "${call_chain_output}")
++
++file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++list(LENGTH flight_logs flight_log_count)
++if(NOT flight_log_count EQUAL 1)
++    message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++endif()
++list(GET flight_logs 0 flight_log)
++
++set(field_pattern "result=(-?[0-9]+) dur_us=([0-9]+) a=([0-9]+) b=([0-9]+) c=([0-9]+)")
++
++if(MODE STREQUAL "dcs-async-arm")
++    file(STRINGS "${flight_log}" step_lines REGEX " op=slow_step result=")
++    set(async_taken 0)
++    set(async_started 0)
++    set(armed_inline 0)
++    foreach(line IN LISTS step_lines)
++        if(NOT line MATCHES "${field_pattern}")
++            message(FATAL_ERROR "Malformed slow_step record: ${line}")
++        endif()
++        if(CMAKE_MATCH_1 EQUAL 5 AND CMAKE_MATCH_5 EQUAL 0)
++            math(EXPR async_taken "${async_taken} + 1")
++        elseif(CMAKE_MATCH_1 EQUAL 1 AND CMAKE_MATCH_5 EQUAL 2)
++            math(EXPR async_started "${async_started} + 1")
++        elseif(CMAKE_MATCH_1 EQUAL 1 AND CMAKE_MATCH_5 EQUAL 0)
++            math(EXPR armed_inline "${armed_inline} + 1")
++        endif()
++    endforeach()
++    if(EXPECT)
++        if(async_taken EQUAL 0 OR async_started EQUAL 0 OR NOT armed_inline EQUAL 0)
++            message(FATAL_ERROR
++                "async_arm=1: ${async_started} started and ${async_taken} taken in on a "
++                "thread, ${armed_inline} armed on the frame path")
++        endif()
++    elseif(armed_inline EQUAL 0 OR NOT async_started EQUAL 0 OR NOT async_taken EQUAL 0)
++        message(FATAL_ERROR
++            "async_arm=0: ${armed_inline} armed on the frame path, ${async_started} "
++            "started on a thread")
++    endif()
++    message(STATUS
++        "OFXR async arm verified (async_arm=${EXPECT}): ${async_started} started, "
++        "${async_taken} taken in, ${armed_inline} armed on the frame path")
++    return()
++endif()
++
++foreach(mark IN ITEMS STEADY_FROM LATE_FROM LATE_TO)
++    if(NOT call_chain_output MATCHES "DEEP_HOLD_${mark}=([0-9]+)")
++        message(FATAL_ERROR "The scenario printed no DEEP_HOLD_${mark}")
++    endif()
++    set(mark_${mark} "${CMAKE_MATCH_1}")
++endforeach()
++
++# In log order: the frames' display times (projection_mapping's a), the
++# presenter's holds and the once-a-second latency status.
++file(STRINGS "${flight_log}" lines
++    REGEX " op=(projection_mapping|presenter_transition|latency_status) result=")
++set(phase 0)
++set(held_406 0)
++set(held_406_unwritten 0)
++set(held_400 0)
++set(over_402_steady 0)
++set(over_402_total 0)
++set(late_in_stretch 0)
++set(status_in_stretch 0)
++set(status_2x_in_stretch 0)
++set(first_status_in_stretch 0)
++foreach(line IN LISTS lines)
++    if(NOT line MATCHES " op=([a-z_]+) ${field_pattern}")
++        continue()
++    endif()
++    set(op "${CMAKE_MATCH_1}")
++    set(result "${CMAKE_MATCH_2}")
++    set(a "${CMAKE_MATCH_4}")
++    set(b "${CMAKE_MATCH_5}")
++    if(op STREQUAL "projection_mapping")
++        if(phase EQUAL 0 AND a STREQUAL mark_STEADY_FROM)
++            set(phase 1)
++        elseif(phase EQUAL 1 AND a STREQUAL mark_LATE_FROM)
++            set(phase 2)
++        elseif(phase EQUAL 2 AND a STREQUAL mark_LATE_TO)
++            set(phase 3)
++        endif()
++    elseif(op STREQUAL "presenter_transition")
++        if(result EQUAL 406)
++            math(EXPR held_406 "${held_406} + 1")
++            math(EXPR unwritten "(${b} >> 32) & 1")
++            if(unwritten)
++                math(EXPR held_406_unwritten "${held_406_unwritten} + 1")
++            endif()
++        elseif(result EQUAL 400)
++            math(EXPR held_400 "${held_400} + 1")
++        elseif(result EQUAL 402)
++            math(EXPR over_402_total "${over_402_total} + 1")
++            if(phase GREATER_EQUAL 1 AND phase LESS 3)
++                math(EXPR over_402_steady "${over_402_steady} + 1")
++            endif()
++        endif()
++    elseif(op STREQUAL "latency_status" AND phase EQUAL 2)
++        math(EXPR late "(${b} >> 16) & 65535")
++        math(EXPR late_in_stretch "${late_in_stretch} + ${late}")
++        math(EXPR status_in_stretch "${status_in_stretch} + 1")
++        # result 12: adaptive control in 2X (13: 3X, where a missed slot is
++        # not counted at all).
++        if(result EQUAL 12)
++            math(EXPR status_2x_in_stretch "${status_2x_in_stretch} + 1")
++        endif()
++        if(status_in_stretch EQUAL 1)
++            set(first_status_in_stretch ${result})
++        endif()
++    endif()
++endforeach()
++if(NOT first_status_in_stretch EQUAL 12)
++    message(FATAL_ERROR
++        "The late stretch did not start in 2X (latency_status ${first_status_in_stretch})")
++endif()
++if(NOT phase EQUAL 3)
++    message(FATAL_ERROR "The flight log does not show the scenario's phases (reached ${phase})")
++endif()
++if(status_in_stretch LESS 3)
++    message(FATAL_ERROR "Only ${status_in_stretch} latency_status records over the late stretch")
++endif()
++set(summary
++    "406=${held_406} (${held_406_unwritten} unwritten) 400=${held_400} "
++    "402=${over_402_total} (${over_402_steady} once steady), missed slots over the "
++    "late stretch ${late_in_stretch} in ${status_in_stretch} s "
++    "(${status_2x_in_stretch} of them in 2X)")
++string(CONCAT summary ${summary})
++if(EXPECT)
++    if(NOT status_2x_in_stretch EQUAL status_in_stretch)
++        message(FATAL_ERROR "pipelined_deep_hold=1, yet the late stretch left 2X: ${summary}")
++    endif()
++    if(held_406 EQUAL 0)
++        message(FATAL_ERROR "pipelined_deep_hold=1, yet no hold with the skip's copy: ${summary}")
++    endif()
++    if(over_402_steady GREATER 2)
++        message(FATAL_ERROR "pipelined_deep_hold=1, yet synthetics still go over unheld: ${summary}")
++    endif()
++    if(NOT late_in_stretch EQUAL 0)
++        message(FATAL_ERROR "pipelined_deep_hold=1, yet late frames cost missed slots: ${summary}")
++    endif()
++else()
++    if(NOT held_406 EQUAL 0)
++        message(FATAL_ERROR "pipelined_deep_hold=0, yet holds with the skip's copy: ${summary}")
++    endif()
++    if(late_in_stretch EQUAL 0)
++        message(FATAL_ERROR
++            "pipelined_deep_hold=0: the late frames cost no missed slot, so the "
++            "scenario no longer tells the two apart: ${summary}")
++    endif()
++endif()
++message(STATUS "OFXR pipelined deep hold verified (pipelined_deep_hold=${EXPECT}): ${summary}")
+diff --git a/tests/ofxr_bridge_async_arm.ini b/tests/ofxr_bridge_async_arm.ini
+new file mode 100644
+--- /dev/null
++++ b/tests/ofxr_bridge_async_arm.ini
+@@ -0,0 +1,18 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=1
++triple_frame_gen=0
++adaptive_frame_gen=1
++async_arm=1
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right
+diff --git a/tests/ofxr_bridge_async_arm_off.ini b/tests/ofxr_bridge_async_arm_off.ini
+new file mode 100644
+--- /dev/null
++++ b/tests/ofxr_bridge_async_arm_off.ini
+@@ -0,0 +1,18 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=1
++triple_frame_gen=0
++adaptive_frame_gen=1
++async_arm=0
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right
+diff --git a/tests/ofxr_bridge_pipelined_deep_hold.ini b/tests/ofxr_bridge_pipelined_deep_hold.ini
+new file mode 100644
+--- /dev/null
++++ b/tests/ofxr_bridge_pipelined_deep_hold.ini
+@@ -0,0 +1,18 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=1
++triple_frame_gen=0
++adaptive_frame_gen=1
++pipelined_deep_hold=1
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right
+diff --git a/tests/ofxr_bridge_pipelined_deep_hold_off.ini b/tests/ofxr_bridge_pipelined_deep_hold_off.ini
+new file mode 100644
+--- /dev/null
++++ b/tests/ofxr_bridge_pipelined_deep_hold_off.ini
+@@ -0,0 +1,18 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=1
++triple_frame_gen=0
++adaptive_frame_gen=1
++pipelined_deep_hold=0
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right

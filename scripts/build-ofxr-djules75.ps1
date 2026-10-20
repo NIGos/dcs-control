@@ -70,6 +70,7 @@ if ((Get-FileHash -LiteralPath $openvrHeader -Algorithm SHA256).Hash -ne $openvr
 # a checkout that matches neither state stops the build. Restore a clean checkout with
 # `git -C external/ofxr-djules75 checkout -- .` plus `git -C external/ofxr-djules75 clean -n` (review, then -f).
 $forkPatches = @(Get-ChildItem -LiteralPath (Join-Path $workspaceRoot 'patches/ofxr-djules75') -Filter '*.patch' -File -ErrorAction SilentlyContinue | Sort-Object Name)
+if ($forkPatches.Count -eq 0) { throw 'No OFXR fork patches found in patches/ofxr-djules75: the build would ship the fork without DCS Control''s changes.' }
 function Test-ForkPatch([string]$patchFile, [switch]$Reverse) {
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -125,7 +126,7 @@ if ($LASTEXITCODE -ne 0) { throw 'OFXR fork build failed.' }
 # Tray lifecycle tests create a notification icon. Exclude them from offline verification.
 # Every test once, except the pacing tests (real frame timing) and the tray tests (they create a notification icon).
 # The quotes keep the '|' from cmd: msvc.cmd passes its arguments on through %*.
-& $wrapper ctest --test-dir $forkBuild --output-on-failure --parallel 2 --timeout 300 -E '"tray_lifecycle|triple_deep|scene_change|adaptive"'
+& $wrapper ctest --test-dir $forkBuild --output-on-failure --parallel 2 --timeout 300 -E '"tray_lifecycle|triple_deep|scene_change|adaptive|deep_hold|async_arm"'
 if ($LASTEXITCODE -ne 0) { throw 'OFXR fork tests failed.' }
 . (Join-Path $PSScriptRoot 'build-stamp.ps1')
 if ($env:DCSC_SKIP_TIMING_TESTS -eq '1') {
@@ -137,7 +138,7 @@ if ($env:DCSC_SKIP_TIMING_TESTS -eq '1') {
 }
 # The pacing tests: on a busy GPU one misses a deadline now and then, so a failing one runs again, up to 3 times; a
 # real regression fails every time.
-& $wrapper ctest --test-dir $forkBuild --output-on-failure --parallel 1 --timeout 300 --repeat until-pass:3 -R '"triple_deep|scene_change|adaptive"'
+& $wrapper ctest --test-dir $forkBuild --output-on-failure --parallel 1 --timeout 300 --repeat until-pass:3 -R '"triple_deep|scene_change|adaptive|deep_hold|async_arm"'
 if ($LASTEXITCODE -ne 0) { throw 'OFXR fork pacing tests failed.' }
 # Built and tested: build-release.ps1 ships this DLL only while its sources and patches match this stamp.
 Save-BuildStamp 'ofxr'

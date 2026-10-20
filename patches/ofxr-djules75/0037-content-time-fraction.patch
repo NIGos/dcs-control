@@ -1,0 +1,670 @@
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -187,6 +187,13 @@
+ // missing. Read once per session.
+ [[nodiscard]] bool read_dcs_motion(
+     const std::filesystem::path& module_directory) noexcept;
++// DCS Control (0037). `[ofxr] content_time_fraction`: place each synthetic
++// in the application's content time - its slot less the real frames' latency,
++// between the two frames' starts - instead of by the display times the
++// application was told (xrfg::latency::content_time_fraction). Off (0) by
++// default and when the key is missing. Read once per session.
++[[nodiscard]] bool read_content_time_fraction(
++    const std::filesystem::path& module_directory) noexcept;
+ // DCS Control (0034). `[ofxr] lazy_synthetic_slot`: adaptive 2X/3X at the
+ // shallow depth makes the synthetic ring's second slot (one more private
+ // swapchain per application swapchain) only when 3X, or adaptive cadence's
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -34,6 +34,7 @@
+ //
+ // All times are nanoseconds on one monotonic timeline the caller chooses.
+ 
++#include <algorithm>
+ #include <array>
+ #include <chrono>
+ #include <cstddef>
+@@ -1249,6 +1250,180 @@
+ }
+ 
+ // ---------------------------------------------------------------------------
++// DCS Control (0037): where a synthetic belongs, in the application's content
++// time (`[ofxr] content_time_fraction=1`).
++//
++// DCS's world advances with the wall clock between its frame starts, while
++// the display times it is told advance in whole periods. A synthetic shown at
++// slot s should show the world as it was at s less the pipeline's latency -
++// the same latency the real frames around it are shown with. Each real frame
++// has a latency of its own, told display time less content time (its frame
++// start): ContentLatencyTracker keeps the median of the last few, so one
++// frame's jitter or one quantized display step does not move it, and a lasting
++// change (a lost slot carried into the told times, a change of cadence) does
++// after half the window. Then
++//
++//     target = display(B) - (frames - 1 - index) * period - latency
++//     t      = (target - content(A)) / (content(B) - content(A))
++//
++// With a steady application this is the fixed k / frames. When the told
++// interval is a whole period longer or shorter than the content one, the
++// display time's fraction (1 - period / told interval) is off by up to a
++// third; this one follows the content. When the content interval jitters,
++// the synthetic stays on the constant-latency line instead of following
++// either neighbour.
++//
++// Nothing (the caller keeps its own answer) when a time is missing, out of
++// order or implausible, or the tracker has too few frames. The answer is held
++// within half a synthetic's spacing (0.5 / frames) of the caller's own, so an
++// error in the inputs can move a synthetic but never past its neighbour.
++inline constexpr std::size_t kContentLatencyWindow = 8;
++inline constexpr std::size_t kContentLatencyMinimum = 3;
++// A frame's latency this far from the window's is an outlier.
++inline constexpr Nanoseconds kContentLatencyJump = 100 * kMillisecond;
++// A gap this long between two real frames (a pause, a load) starts over.
++inline constexpr Nanoseconds kContentLatencyGap = 250 * kMillisecond;
++
++class ContentLatencyTracker {
++public:
++    // One real frame: the display time it was told and when it started (its
++    // content time), each in nanoseconds on a clock of its own. A frame that is
++    // missing either, goes back in time or follows a gap starts the window
++    // over.
++    void observe(Nanoseconds display, Nanoseconds content) noexcept {
++        if (display <= 0 || content <= 0) {
++            reset();
++            return;
++        }
++        if (last_display_ != 0 &&
++            (display <= last_display_ || content <= last_content_ ||
++             display - last_display_ > kContentLatencyGap ||
++             content - last_content_ > kContentLatencyGap)) {
++            reset();
++        }
++        last_display_ = display;
++        last_content_ = content;
++        // The two clocks may count from different epochs (the runtime's
++        // XrTime, the layer's steady clock), so a latency is judged against
++        // the window's, not on its own: one far from it is left out, and
++        // kContentLatencyMinimum of them in a row are the window from then
++        // on.
++        const Nanoseconds latency = display - content;
++        if (const auto current = this->latency()) {
++            const Nanoseconds off = latency > *current ? latency - *current
++                                                       : *current - latency;
++            if (off > kContentLatencyJump) {
++                pending_[outliers_++] = latency;
++                if (outliers_ < kContentLatencyMinimum) {
++                    return;
++                }
++                const auto pending = pending_;
++                const Nanoseconds keep_display = last_display_;
++                const Nanoseconds keep_content = last_content_;
++                reset();
++                last_display_ = keep_display;
++                last_content_ = keep_content;
++                for (const Nanoseconds value : pending) {
++                    record(value);
++                }
++                return;
++            }
++        }
++        outliers_ = 0;
++        record(latency);
++    }
++
++    void reset() noexcept {
++        count_ = 0;
++        next_ = 0;
++        outliers_ = 0;
++        last_display_ = 0;
++        last_content_ = 0;
++    }
++
++    // The median latency of the window (the mean of the middle two for an
++    // even count); nothing below kContentLatencyMinimum frames.
++    [[nodiscard]] std::optional<Nanoseconds> latency() const noexcept {
++        if (count_ < kContentLatencyMinimum) {
++            return std::nullopt;
++        }
++        std::array<Nanoseconds, kContentLatencyWindow> sorted{};
++        for (std::size_t i = 0; i < count_; ++i) {
++            sorted[i] = latencies_[i];
++        }
++        // Insertion sort: eight values, no allocation, noexcept.
++        for (std::size_t i = 1; i < count_; ++i) {
++            const Nanoseconds value = sorted[i];
++            std::size_t j = i;
++            while (j > 0 && sorted[j - 1] > value) {
++                sorted[j] = sorted[j - 1];
++                --j;
++            }
++            sorted[j] = value;
++        }
++        const std::size_t middle = count_ / 2;
++        return count_ % 2 != 0
++            ? sorted[middle]
++            : sorted[middle - 1] + (sorted[middle] - sorted[middle - 1]) / 2;
++    }
++
++    [[nodiscard]] std::size_t count() const noexcept { return count_; }
++
++private:
++    void record(Nanoseconds latency) noexcept {
++        latencies_[next_] = latency;
++        next_ = (next_ + 1) % latencies_.size();
++        count_ = count_ < latencies_.size() ? count_ + 1 : count_;
++    }
++
++    std::array<Nanoseconds, kContentLatencyWindow> latencies_{};
++    std::array<Nanoseconds, kContentLatencyMinimum> pending_{};
++    std::size_t count_{};
++    std::size_t next_{};
++    std::size_t outliers_{};
++    Nanoseconds last_display_{};
++    Nanoseconds last_content_{};
++};
++
++// `fallback` is the caller's own answer for this synthetic (the fixed k /
++// frames, or DCS Control 0029's), which bounds this one.
++[[nodiscard]] inline std::optional<float> content_time_fraction(
++    Nanoseconds previous_display,
++    Nanoseconds previous_content,
++    Nanoseconds current_display,
++    Nanoseconds current_content,
++    std::optional<Nanoseconds> latency,
++    Nanoseconds period,
++    std::uint32_t frames,
++    std::uint32_t index,
++    float fallback) noexcept {
++    if (period <= 0 || frames < 2 || index + 1 >= frames || !latency ||
++        previous_display <= 0 || previous_content <= 0 ||
++        current_display <= previous_display ||
++        current_content <= previous_content ||
++        !(fallback >= 0.0F && fallback <= 1.0F)) {
++        return std::nullopt;
++    }
++    const Nanoseconds interval = current_content - previous_content;
++    // Shorter than half a period, or longer than three times the cadence:
++    // not two consecutive frames of a running application.
++    if (interval < period / 2 ||
++        interval > period * static_cast<Nanoseconds>(frames) * 3) {
++        return std::nullopt;
++    }
++    const Nanoseconds before =
++        period * static_cast<Nanoseconds>(frames - 1 - index);
++    const Nanoseconds target = current_display - before - *latency;
++    double fraction = static_cast<double>(target - previous_content) /
++        static_cast<double>(interval);
++    const double band = 0.5 / static_cast<double>(frames);
++    const double low = std::max(0.0, static_cast<double>(fallback) - band);
++    const double high = std::min(1.0, static_cast<double>(fallback) + band);
++    fraction = fraction < low ? low : (fraction > high ? high : fraction);
++    return static_cast<float>(fraction);
++}
++
++// ---------------------------------------------------------------------------
+ // DCS Control (0032): per-frame cadence (`[ofxr] adaptive_cadence=1`, under
+ // adaptive_frame_gen=1).
+ //
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -31,6 +31,11 @@
+ ; sharp in generated frames; the optical flow covers everything they do not.
+ ; 1 on, 0 off (default). Read when the game starts its session.
+ dcs_motion=0
++; Place generated frames by when the game's frames actually started (its own
++; clock) instead of by the display times it was told, so the world in them
++; moves evenly when the game's frame times wander. 1 on, 0 off (default). Read
++; when the game starts its session.
++content_time_fraction=0
+ ; NVIDIA flow: the parts of the image with no motion left are composed the short
+ ; way, to the same image, for less GPU time. 1 on, 0 off (default). Read when
+ ; the game starts its session.
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -342,6 +342,11 @@
+     return read_ofxr_switch(module_directory, L"dcs_motion", false);
+ }
+ 
++// DCS Control (0037).
++bool read_content_time_fraction(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"content_time_fraction", false);
++}
++
+ // DCS Control (0034).
+ bool read_lazy_synthetic_slot(const std::filesystem::path& module_directory) noexcept {
+     return read_ofxr_switch(module_directory, L"lazy_synthetic_slot", true);
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -570,6 +570,11 @@
+     // application to start this frame (steady clock, ns; 0 not known), for
+     // xrfg::latency::measured_interpolation_fraction.
+     std::int64_t released_at_ns{};
++    // DCS Control (0037): when the application started this frame, its
++    // content time (steady clock, ns; 0 not known): the later of that
++    // release and the return of the frame's own xrWaitFrame. Only under
++    // `[ofxr] content_time_fraction`.
++    std::int64_t content_ns{};
+ };
+ 
+ struct ProjectionViewReference {
+@@ -629,6 +634,9 @@
+     std::uint32_t frames{};
+     std::uint32_t told_periods{};
+     bool cadence{};
++    // DCS Control (0037): when the layer's xrWaitFrame returned this frame
++    // to the application (steady clock, ns).
++    std::int64_t wait_returned_ns{};
+ };
+ 
+ enum class GenerationQuarantineReason : std::int64_t {
+@@ -1802,6 +1810,12 @@
+     // synthetics plus one, the periods it is handed and told, and the
+     // presenter frames the once-per-frame hold keeps it.
+     bool cadence_configured{};
++    // DCS Control (0037): `[ofxr] content_time_fraction` (read once per
++    // session): synthetics are placed in the application's content time
++    // (xrfg::latency::content_time_fraction), from the real frames' latency
++    // window (content_latency, under mutex).
++    bool content_time_fraction{};
++    xrfg::latency::ContentLatencyTracker content_latency;
+     std::atomic<bool> cadence_running{false};
+     std::atomic<std::uint32_t> cadence_hold{2};
+     xrfg::latency::CadenceController cadence_controller;
+@@ -5504,6 +5518,9 @@
+     // triple_frame_gen says: each frame gets its own synthetics instead.
+     state->cadence_configured =
+         xrfg::implicit_layer::read_adaptive_cadence(current_layer_directory());
++    // DCS Control (0037).
++    state->content_time_fraction =
++        xrfg::implicit_layer::read_content_time_fraction(current_layer_directory());
+     const bool cadence_requested =
+         state->cadence_configured && adaptive_requested && triple_binding;
+     if (triple_requested && triple_binding && !cadence_requested) {
+@@ -6265,6 +6282,8 @@
+             cadence_frames, // DCS Control (0032)
+             cadence_told_periods,
+             cadence_frames != 0,
++            // DCS Control (0037)
++            steady_nanoseconds(std::chrono::steady_clock::now()),
+         });
+         constexpr std::size_t kMaximumPendingFrameRecords = 32;
+         while (state->pending_frames.size() > kMaximumPendingFrameRecords) {
+@@ -12988,13 +13007,13 @@
+ // k / frames. Its told interval also carries the slots the presenter lost
+ // before it, which fall between earlier frames, not between this one and
+ // the one before.
+-[[nodiscard]] float synthetic_interpolation_fraction(
++[[nodiscard]] float display_interpolation_fraction(
+     const std::shared_ptr<SessionState>& state,
+     const std::optional<ProjectionSnapshot>& previous_snapshot,
+     const ProjectionSnapshot& current_snapshot,
+-    std::uint32_t frames = 2,
+-    std::uint32_t index = 0,
+-    bool own_cadence = false) noexcept {
++    std::uint32_t frames,
++    std::uint32_t index,
++    bool own_cadence) noexcept {
+     const float kFixedMidpoint =
+         static_cast<float>(index + 1) / static_cast<float>(frames);
+     const XrDuration periods_before_current =
+@@ -13031,6 +13050,44 @@
+     return 1.0F - static_cast<float>(period * periods_before_current) /
+                       static_cast<float>(interval);
+ }
++
++// DCS Control (0037): under `[ofxr] content_time_fraction`, the synthetic is
++// placed in the application's content time instead
++// (xrfg::latency::content_time_fraction): at its slot less the real frames'
++// latency, between the two frames' starts. The answer above stays the
++// fallback - for a frame without both content times, a latency window still
++// filling, or inputs that do not hold together - and bounds this one.
++[[nodiscard]] float synthetic_interpolation_fraction(
++    const std::shared_ptr<SessionState>& state,
++    const std::optional<ProjectionSnapshot>& previous_snapshot,
++    const ProjectionSnapshot& current_snapshot,
++    std::uint32_t frames = 2,
++    std::uint32_t index = 0,
++    bool own_cadence = false) noexcept {
++    const float fallback = display_interpolation_fraction(
++        state, previous_snapshot, current_snapshot, frames, index, own_cadence);
++    if (!state || !state->content_time_fraction || !previous_snapshot) {
++        return fallback;
++    }
++    XrDuration period = 0;
++    std::optional<xrfg::latency::Nanoseconds> latency;
++    {
++        std::scoped_lock lock(state->mutex);
++        period = state->minimum_runtime_display_period;
++        latency = state->content_latency.latency();
++    }
++    const auto content = xrfg::latency::content_time_fraction(
++        static_cast<xrfg::latency::Nanoseconds>(previous_snapshot->display_time),
++        previous_snapshot->content_ns,
++        static_cast<xrfg::latency::Nanoseconds>(current_snapshot.display_time),
++        current_snapshot.content_ns,
++        latency,
++        static_cast<xrfg::latency::Nanoseconds>(period),
++        frames,
++        index,
++        fallback);
++    return content ? *content : fallback;
++}
+ [[nodiscard]] PreparedProjectionFrame prepare_projection_frame(
+     const ProjectionSnapshot& snapshot,
+     std::span<const ProjectionResourceMapping> mappings,
+@@ -15770,6 +15827,25 @@
+         current_snapshot.released_at_ns =
+             steady_nanoseconds(state->application_released_at);
+     }
++    // DCS Control (0037): the frame's content time - it cannot have started
++    // before it was released or before its own xrWaitFrame returned (DCS
++    // keeps two waits in flight, so either can be the later) - and the
++    // real frame's latency into the window, once per real frame.
++    if (state->content_time_fraction && has_projection) {
++        std::int64_t wait_returned_ns = 0;
++        if (end_info != nullptr) {
++            if (const auto record = latest_pending_application_frame(
++                    state, end_info->displayTime, consume_in_submission_order)) {
++                wait_returned_ns = record->wait_returned_ns;
++            }
++        }
++        current_snapshot.content_ns =
++            std::max(current_snapshot.released_at_ns, wait_returned_ns);
++        std::scoped_lock lock(state->mutex);
++        state->content_latency.observe(
++            static_cast<xrfg::latency::Nanoseconds>(current_snapshot.display_time),
++            current_snapshot.content_ns);
++    }
+     ProjectionMappingResult resource_mappings{};
+     if (has_projection) {
+         resource_mappings = build_projection_resource_mappings(current_snapshot);
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -2016,6 +2016,273 @@
+ }
+ 
+ // ---------------------------------------------------------------------------
++// DCS Control (0037): synthetics placed in content time.
++
++namespace content_time {
++
++// Clocks with different epochs, as the layer's are (XrTime, steady clock).
++constexpr Nanoseconds kDisplayEpoch = 7'000 * kSecond;
++constexpr Nanoseconds kContentEpoch = 50 * kSecond;
++
++Nanoseconds periods(double value) {
++    return static_cast<Nanoseconds>(std::llround(value * static_cast<double>(kPeriod)));
++}
++
++// The layer's answer without 0037 for a told interval (display periods).
++float display_fraction(double told, std::uint32_t frames, std::uint32_t index) {
++    const double before = static_cast<double>(frames - 1 - index);
++    if (told <= static_cast<double>(frames - 1) || told > 2.0 * frames) {
++        return static_cast<float>(index + 1) / static_cast<float>(frames);
++    }
++    return static_cast<float>(1.0 - before / told);
++}
++
++struct Placement {
++    float fraction{};
++    float fallback{};
++    bool content{};              // content_time_fraction answered
++    double line_error{};         // shown content less the constant-latency line, periods
++    double display_line_error{}; // the same for the display fraction
++};
++
++// Runs real frames (told display and content start, in periods) through the
++// tracker and places each pair's synthetic `index` of `frames`. The line is
++// the true latency, `latency` periods.
++std::vector<Placement> run(
++    const std::vector<double>& told,
++    const std::vector<double>& content,
++    double latency,
++    std::uint32_t frames = 2,
++    std::uint32_t index = 0) {
++    ContentLatencyTracker tracker;
++    std::vector<Placement> out;
++    for (std::size_t i = 0; i < told.size(); ++i) {
++        const Nanoseconds display = kDisplayEpoch + periods(told[i]);
++        const Nanoseconds start = kContentEpoch + periods(content[i]);
++        tracker.observe(display, start);
++        if (i == 0) {
++            continue;
++        }
++        Placement placement;
++        placement.fallback = display_fraction(told[i] - told[i - 1], frames, index);
++        const auto value = content_time_fraction(
++            kDisplayEpoch + periods(told[i - 1]),
++            kContentEpoch + periods(content[i - 1]),
++            display,
++            start,
++            tracker.latency(),
++            kPeriod,
++            frames,
++            index,
++            placement.fallback);
++        placement.content = value.has_value();
++        placement.fraction = value ? *value : placement.fallback;
++        const double slot = told[i] - static_cast<double>(frames - 1 - index);
++        const double line = slot - latency;
++        const double interval = content[i] - content[i - 1];
++        placement.line_error = content[i - 1] + placement.fraction * interval - line;
++        placement.display_line_error =
++            content[i - 1] + placement.fallback * interval - line;
++        out.push_back(placement);
++    }
++    return out;
++}
++
++double worst(const std::vector<Placement>& placements, std::size_t from, bool display) {
++    double result = 0.0;
++    for (std::size_t i = from; i < placements.size(); ++i) {
++        const double error = display ? placements[i].display_line_error
++                                     : placements[i].line_error;
++        result = std::max(result, std::abs(error));
++    }
++    return result;
++}
++
++} // namespace content_time
++
++void content_time_tests() {
++    using namespace content_time;
++    const auto near = [](float value, double expected) {
++        return value > expected - 0.002 && value < expected + 0.002;
++    };
++    // A steady application: told and started two periods apart (2X), three
++    // (3X), at a constant latency: the fixed k / frames.
++    {
++        std::vector<double> told;
++        std::vector<double> content;
++        for (int i = 0; i < 12; ++i) {
++            told.push_back(2.0 * i + 3.0);
++            content.push_back(2.0 * i);
++        }
++        const auto placements = run(told, content, 3.0);
++        for (std::size_t i = kContentLatencyMinimum - 1; i < placements.size(); ++i) {
++            require(placements[i].content && near(placements[i].fraction, 0.5),
++                "steady 2X: one half");
++        }
++        for (double& value : told) {
++            value *= 1.5;
++        }
++        for (double& value : content) {
++            value *= 1.5;
++        }
++        for (std::uint32_t index = 0; index < 2; ++index) {
++            const auto triple = run(told, content, 4.5, 3, index);
++            for (std::size_t i = kContentLatencyMinimum - 1; i < triple.size(); ++i) {
++                require(triple[i].content &&
++                        near(triple[i].fraction, (index + 1) / 3.0),
++                    "steady 3X: thirds");
++            }
++        }
++    }
++    // Irregular display steps, steady content: an application at 2.25
++    // periods a frame in 2X (40 fps at 90 Hz) starts every 2.25 periods and
++    // is told the scanout after, 2 or 3 periods on. Told less started is
++    // 3.75, 3.5, 3.25 and 3 periods in turn: the line is their median,
++    // 3.375. The display fraction (1/2 or 2/3, with the told step) puts the
++    // world up to a quarter period off it; the content one keeps every
++    // synthetic on it.
++    {
++        std::vector<double> told;
++        std::vector<double> content;
++        for (int i = 0; i < 26; ++i) {
++            content.push_back(2.25 * i);
++            told.push_back(std::ceil(2.25 * i) + 3.0);
++        }
++        const auto placements = run(told, content, 3.375);
++        std::size_t answered = 0;
++        for (std::size_t i = kContentLatencyWindow; i < placements.size(); ++i) {
++            const Placement& placement = placements[i];
++            require(placement.content, "irregular display: answered");
++            ++answered;
++            require(placement.fraction >= placement.fallback - 0.25F - 1e-6F &&
++                    placement.fraction <= placement.fallback + 0.25F + 1e-6F,
++                "irregular display: within the band");
++            require(std::abs(placement.line_error) < 0.01,
++                "irregular display: on the line: " +
++                    std::to_string(placement.line_error));
++        }
++        require(answered >= 10, "irregular display: frames answered");
++        require(worst(placements, kContentLatencyWindow, true) > 0.2,
++            "irregular display: the display fraction is off the line");
++    }
++    // Steady display, irregular content: told two periods apart, started with
++    // up to 0.4 periods of jitter either way. The display fraction stays at
++    // 1/2 and carries every start's jitter onto the screen; the content one
++    // stays near the line, and a frame that starts late after one on time
++    // (more content between the two) has its synthetic nearer the previous
++    // frame, one that starts early nearer the current.
++    {
++        const std::vector<double> jitter{0.0, 0.3, -0.2, 0.4, -0.4, 0.1, 0.0, -0.3,
++            0.2, 0.35, -0.1, 0.0, 0.4, -0.25, 0.15, 0.0, -0.35, 0.25, 0.0, 0.3};
++        std::vector<double> told;
++        std::vector<double> content;
++        for (std::size_t i = 0; i < jitter.size(); ++i) {
++            told.push_back(2.0 * static_cast<double>(i) + 3.0);
++            content.push_back(2.0 * static_cast<double>(i) + jitter[i]);
++        }
++        const auto placements = run(told, content, 3.0);
++        std::size_t directed = 0;
++        for (std::size_t i = kContentLatencyWindow; i < placements.size(); ++i) {
++            const Placement& placement = placements[i];
++            require(placement.content, "irregular content: answered");
++            require(near(placement.fallback, 0.5), "irregular content: display at 1/2");
++            // The window's median is within 0.1 period of the line here.
++            require(std::abs(placement.line_error) < 0.1,
++                "irregular content: near the line: " +
++                    std::to_string(placement.line_error));
++            if (jitter[i] == 0.0 && jitter[i + 1] > 0.0) {
++                require(placement.fraction < 0.48F, "a late start: nearer the previous");
++                ++directed;
++            } else if (jitter[i] == 0.0 && jitter[i + 1] < 0.0) {
++                require(placement.fraction > 0.52F, "an early start: nearer the current");
++                ++directed;
++            }
++        }
++        require(directed >= 3, "irregular content: placements moved");
++        require(worst(placements, kContentLatencyWindow, false) <
++                    0.5 * worst(placements, kContentLatencyWindow, true),
++            "irregular content: nearer the line than the display fraction");
++    }
++    // Missing or implausible timestamps: nothing, and the caller keeps its
++    // own answer.
++    {
++        const Nanoseconds d0 = kDisplayEpoch;
++        const Nanoseconds c0 = kContentEpoch;
++        const std::optional<Nanoseconds> latency =
++            periods(3.0) + kDisplayEpoch - kContentEpoch;
++        const auto place = [&](Nanoseconds pd, Nanoseconds pc, Nanoseconds cd, Nanoseconds cc,
++                               std::optional<Nanoseconds> l, Nanoseconds period = kPeriod,
++                               std::uint32_t frames = 2, std::uint32_t index = 0,
++                               float fallback = 0.5F) {
++            return content_time_fraction(pd, pc, cd, cc, l, period, frames, index, fallback);
++        };
++        require(place(d0, c0, d0 + periods(2), c0 + periods(2), latency).has_value(),
++            "a complete pair answers");
++        require(!place(d0, 0, d0 + periods(2), c0 + periods(2), latency), "no previous start");
++        require(!place(d0, c0, d0 + periods(2), 0, latency), "no current start");
++        require(!place(0, c0, d0 + periods(2), c0 + periods(2), latency), "no previous display");
++        require(!place(d0, c0, d0 + periods(2), c0 + periods(2), std::nullopt), "no latency");
++        require(!place(d0, c0, d0, c0 + periods(2), latency), "no told interval");
++        require(!place(d0, c0 + periods(2), d0 + periods(2), c0, latency), "starts out of order");
++        require(!place(d0, c0, d0 + periods(2), c0 + periods(0.4), latency), "starts too close");
++        require(!place(d0, c0, d0 + periods(2), c0 + periods(6.5), latency), "starts too far apart");
++        require(!place(d0, c0, d0 + periods(2), c0 + periods(2), latency, 0), "no period");
++        require(!place(d0, c0, d0 + periods(2), c0 + periods(2), latency, kPeriod, 2, 1),
++            "no second synthetic in 2X");
++        require(!place(d0, c0, d0 + periods(2), c0 + periods(2), latency, kPeriod, 2, 0, -1.0F),
++            "no usable fallback");
++        // A latency far off: held to the band around the fallback.
++        const auto far = place(d0, c0, d0 + periods(2), c0 + periods(2), *latency + periods(5));
++        require(far && near(*far, 0.25), "held to the band");
++        // The tracker: nothing until it has three frames; a missing start, a
++        // clock going back or a gap starts it over.
++        ContentLatencyTracker tracker;
++        const auto feed = [&](double told, double start) {
++            tracker.observe(kDisplayEpoch + periods(told), kContentEpoch + periods(start));
++        };
++        feed(3, 0);
++        feed(5, 2);
++        require(!tracker.latency(), "two frames are not a window");
++        feed(7, 4);
++        require(tracker.latency() &&
++                    *tracker.latency() == kDisplayEpoch - kContentEpoch + periods(3),
++            "three frames are");
++        tracker.observe(kDisplayEpoch + periods(9), 0);
++        require(!tracker.latency() && tracker.count() == 0, "a missing start starts over");
++        feed(11, 8);
++        feed(13, 10);
++        feed(15, 12);
++        require(tracker.latency().has_value(), "filled again");
++        feed(14, 14);
++        require(tracker.count() == 1, "a display time going back starts over");
++        feed(17, 16);
++        feed(19, 18);
++        feed(21, 20);
++        require(tracker.count() == 4, "filling");
++        feed(21.0 + 30.0, 20.0 + 30.0); // a third of a second later
++        require(tracker.count() == 1, "a gap starts over");
++        // One outlier (a stray release, a frame of another clock) is left
++        // out; three in a row are the new latency.
++        ContentLatencyTracker outliers;
++        const auto feed_o = [&](double told, double start) {
++            outliers.observe(kDisplayEpoch + periods(told), kContentEpoch + periods(start));
++        };
++        for (int i = 0; i < 5; ++i) {
++            feed_o(2.0 * i + 3.0, 2.0 * i);
++        }
++        const auto before = outliers.latency();
++        feed_o(13.0 + 12.0, 10.0); // 12 periods (133 ms) later than the rest
++        require(outliers.latency() == before && outliers.count() == 5,
++            "one outlier is left out");
++        feed_o(15.0 + 12.0, 12.0);
++        feed_o(17.0 + 12.0, 14.0);
++        require(outliers.count() == 3 && outliers.latency() &&
++                    *outliers.latency() == kDisplayEpoch - kContentEpoch + periods(15),
++            "three in a row are the new latency");
++    }
++}
++
++// ---------------------------------------------------------------------------
+ // DCS Control (0032): adaptive cadence.
+ 
+ // The application under CadenceController: each frame ends one hold (the
+@@ -2555,6 +2822,7 @@
+         triple_depth_shrink_tests(); // DCS Control (0029)
+         generation_stall_tests(); // DCS Control (0029)
+         measured_interpolation_tests(); // DCS Control (0029)
++        content_time_tests(); // DCS Control (0037)
+         cadence_choice_tests(); // DCS Control (0032)
+         cadence_three_allowed_tests(); // DCS Control (0034)
+         cadence_one_tests();

@@ -1,0 +1,64 @@
+diff --git a/include/xrfg/diagnostic_overlay_model.hpp b/include/xrfg/diagnostic_overlay_model.hpp
+--- a/include/xrfg/diagnostic_overlay_model.hpp
++++ b/include/xrfg/diagnostic_overlay_model.hpp
+@@ -131,6 +131,8 @@
+ };
+ inline constexpr std::uint64_t kEngineRunning = 1ULL << 0;
+ inline constexpr std::uint64_t kEngineOn = 1ULL << 1;
++// DCS Control (0028): Perception only (engine optimizations off by design): no engine line.
++inline constexpr std::uint64_t kEnginePerceptionOnly = 1ULL << 38;
+ inline constexpr std::uint64_t kEngineLatched = 1ULL << 2;
+ // DCS Control (0025): DcsQvCull.dll's DcsQvCull_DualCameraStatus() (cockpit true
+ // IPD, the dual camera): bit 0 configured, bit 1 patched in the last frame, bit
+@@ -146,6 +148,8 @@
+ inline constexpr std::uint64_t kDualCameraPaused = 1ULL << 2;
+ inline constexpr std::uint64_t kDualCameraWaiting = 1ULL << 3;
+ inline constexpr std::uint64_t kDualCameraObserve = 1ULL << 4;
++// DCS Control (0028): an external view (F2, F10) has no cockpit to correct.
++inline constexpr std::uint64_t kDualCameraNoCockpit = 1ULL << 5;
+ 
+ // DCS Control (0015): what the pupil shift layer's PupilShift_Status() export
+ // reports (XR_APILAYER_DCSVR_pupil_shift.dll). Bit 0 running, bit 1
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+--- a/src/core/diagnostic_overlay_model.cpp
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -149,7 +149,7 @@
+ 
+ std::string format_engine_line(const DiagnosticInputs& in, DiagnosticColor& color) {
+     const auto& e = in.engine;
+-    if (!e.known) return {};
++    if (!e.known || (e.bits & kEnginePerceptionOnly)) return {};
+     if (!(e.bits & kEngineRunning)) { color = DiagnosticColor::grey; return "Engine Opt.: starting"; }
+     if (!(e.bits & kEngineOn)) {
+         color = DiagnosticColor::grey;
+@@ -214,7 +214,7 @@
+     // DCS Control (0026): the engine's dual camera keeps the cockpit at the true eye distance.
+     if (const auto& d = in.dual_camera; d.known && (d.bits & kDualCameraConfigured)) {
+         if (d.bits & kDualCameraOn) text += " (dual camera)";
+-        else if (!(d.bits & (kDualCameraPaused | kDualCameraWaiting | kDualCameraObserve)) && percent > 0U) {
++        else if (!(d.bits & (kDualCameraPaused | kDualCameraWaiting | kDualCameraObserve | kDualCameraNoCockpit)) && percent > 0U) {
+             color = DiagnosticColor::amber;
+             text += ", no dual camera";
+         }
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+--- a/tests/diagnostic_overlay_tests.cpp
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -72,6 +72,8 @@
+             require(engine(kEngineRunning | (13ULL << 8), C::grey) == "Engine Opt.: OFF (Alt+Shift+F11)", "engine off in flight");
+             require(engine(kEngineRunning | kEngineOn | kEngineLatched | (12ULL << 8) | (1ULL << 16), C::amber) == "Engine Opt.: ON, 1 turned off", "engine latched");
+             require(engine(0, C::grey) == "Engine Opt.: starting", "engine not ready");
++            // 0028: Perception only (bit 38): the engine optimizations are off by design, so no line.
++            require(engine(kEngineRunning | kEnginePerceptionOnly, C{}).empty(), "perception only: no engine line");
+             // 0014: all, some or none of the optimizations switched on in the ini.
+             const auto count = [](std::uint64_t active, std::uint64_t latched, std::uint64_t configured) {
+                 return kEngineRunning | kEngineOn | (active << 8) | (latched << 16) | (configured << 24) | (latched ? kEngineLatched : 0);
+@@ -191,6 +193,9 @@
+                 require(format_pupil_line(d, color) == "Depth boost: x1.30 far, no dual camera" && color == C::amber, "boosting without the dual camera");
+                 d.dual_camera = {true, kDualCameraConfigured | kDualCameraWaiting};
+                 require(format_pupil_line(d, color) == "Depth boost: x1.30 far" && color == C::green, "waiting for Depth boost's scale");
++                // 0028: an external view (F2, F10) has no cockpit to correct: no warning.
++                d.dual_camera = {true, kDualCameraConfigured | kDualCameraNoCockpit};
++                require(format_pupil_line(d, color) == "Depth boost: x1.30 far" && color == C::green, "external view: no dual camera warning");
+                 const auto lines = format_diagnostic_lines(d);
+                 for (const auto& line : lines) require(line.text.rfind("Dual camera", 0) != 0, "no separate line");
+                 // 0027: with Pupil shift too, the warning still fits the panel.

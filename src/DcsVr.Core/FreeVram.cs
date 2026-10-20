@@ -27,11 +27,11 @@ public static partial class FreeVram
 {
     /// <summary>Processes the list closes: a name matches a pattern (<see cref="BoostPlanner.MatchesProcessName"/>), and
     /// the process is not in <paramref name="excluded"/> (DCS, its ancestors, the helper and its parent) and not a
-    /// protected or launcher process.</summary>
+    /// protected or launcher process, and runs in this session (another signed-in user's programs are never closed).</summary>
     public static IReadOnlyList<BoostProcessFact> Targets(BoostSnapshot snapshot, IReadOnlyList<string> patterns, IReadOnlySet<int> excluded)
     {
         var names = patterns.Where(p => !string.IsNullOrWhiteSpace(p)).ToArray();
-        return snapshot.Processes.Where(p => !excluded.Contains(p.Pid) && !BoostPlanner.IsProtectedName(p.Name)
+        return snapshot.Processes.Where(p => !excluded.Contains(p.Pid) && !BoostPlanner.IsProtectedName(p.Name) && !snapshot.OtherSession(p)
             && names.Any(n => BoostPlanner.MatchesProcessName(n, p.Name))).ToArray();
     }
 
@@ -41,7 +41,7 @@ public static partial class FreeVram
         var result = new List<FreeVramApp>();
         foreach (var pattern in patterns.Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            var matching = snapshot.Processes.Where(p => BoostPlanner.MatchesProcessName(pattern, p.Name)).ToArray();
+            var matching = snapshot.Processes.Where(p => BoostPlanner.MatchesProcessName(pattern, p.Name) && !snapshot.OtherSession(p)).ToArray();
             var closable = matching.Where(p => !excluded.Contains(p.Pid) && !BoostPlanner.IsProtectedName(p.Name)).ToArray();
             long? bytes = dedicated is null ? null : closable.Sum(p => dedicated.TryGetValue(p.Pid, out var b) ? b : 0);
             result.Add(new(pattern.Trim(), closable.Length, bytes, closable.Any(p => !p.AccessibleForSetInfo), closable.Length < matching.Length));

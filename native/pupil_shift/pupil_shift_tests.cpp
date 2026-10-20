@@ -1057,6 +1057,10 @@ static void predictive_tests() {
 }
 
 int main() {
+    // GazeOut: written for Depth boost, SimulateGaze or PublishGaze (Visual realism without Depth boost), never otherwise.
+    check(!gaze_out_wanted(false, false, false), "no GazeOut with all three off");
+    check(gaze_out_wanted(false, false, true) && gaze_out_wanted(true, false, false) && gaze_out_wanted(false, true, false), "GazeOut for each of them");
+    check(!Settings{}.publish_gaze, "PublishGaze off by default");
     // Focus FOV centred on 20 deg right, 10 deg up gives that gaze.
     {
         const float cx = tan_deg(20), cy = tan_deg(10), h = 0.3f;

@@ -331,7 +331,12 @@ struct Settings {
     float ipd{};                     // metres; 0 = the runtime's own eye distance
     float simulate_x_deg{0}, simulate_y_deg{0};
     bool simulate{};
+    bool publish_gaze{};             // [PupilShift] PublishGaze: GazeOut for the engine module's gaze effects (Visual realism)
 };
+
+// GazeOut (perception_shm.h) is written while Depth boost, SimulateGaze or PublishGaze asks for it. PublishGaze serves
+// the engine module's eye-focus blur and G vision without Depth boost; with all three off the layer opens no block.
+inline bool gaze_out_wanted(bool depth_boost, bool simulate, bool publish_gaze) { return depth_boost || simulate || publish_gaze; }
 
 // ---- Depth boost -------------------------------------------------------------------------------------------------
 // A camera-based simplification of GazeStereo3D (Kellnhofer et al., SIGGRAPH 2016): while the eyes fixate far, the

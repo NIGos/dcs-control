@@ -160,10 +160,10 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                             // A check that was running when the pilot turned checks off does not announce its result.
                             try { var result = await running; if (force || Settings.Load().CheckForUpdates) lock (_updateLock) _lastCheck = result; }
                             finally { lock (_updateLock) if (_checking == running) _checking = null; }
-                            // Setups of earlier updates are not needed once a check runs in the version they installed:
-                            // removed once per start, before the reply (an update can only start after it).
-                            if (!offline && !_cleaned) { _cleaned = true; await Task.Run(_updates.CleanDownloads); }
                         }
+                        // Setups of earlier updates are not needed once this version runs: removed once per start, before
+                        // the reply (an update can only start after it), whether or not automatic checks are on.
+                        if (!offline && !_cleaned) { _cleaned = true; await Task.Run(_updates.CleanDownloads); }
                         break;
                     case "updateSettings":
                         var enabled = Flag("checkForUpdates");
@@ -252,7 +252,8 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             if (offline) { _updateMessage = "Offline verification: the update's signature was verified; the setup was not started."; return; }
             if (DcsRunning()) throw new InvalidOperationException("Close DCS before updating DCS Control.");
             // Never in the middle of Launch, Apply or Back to stock DCS: the command lock is taken and kept until the app closes.
-            if (!await _commands.WaitAsync(0)) throw new InvalidOperationException("Finish the current operation (Launch, Apply, Back to stock DCS...), then update.");
+            // A short wait: the checks that follow every edit hold the lock for a moment, which is not "an operation".
+            if (!await _commands.WaitAsync(TimeSpan.FromSeconds(5))) throw new InvalidOperationException("Finish the current operation (Launch, Apply, Back to stock DCS...), then update.");
             locked = true;
             // Held open (no writing or deleting) from the second check until the setup runs: the file waited in %TEMP%.
             using var hold = new FileStream(setup, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -398,8 +399,21 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             }
             catch (Exception e) { return JsonData.Serialize(new { id = statusId, ok = false, error = e.Message }); }
         }
+        // Title-bar buttons answer at once, not after a running command; the window refuses to close while files are written.
+        if (json.Length < 512 && json.Contains("\"window\"", StringComparison.Ordinal))
+        {
+            string? windowId = null;
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.GetProperty("action").GetString() == "window")
+                { windowId = doc.RootElement.GetProperty("id").GetString(); return Reply(windowId, Window(doc.RootElement.GetProperty("data").GetProperty("op").GetString())); }
+            }
+            catch (Exception e) { return JsonData.Serialize(new { id = windowId, ok = false, error = e.Message }); }
+        }
         await _commands.WaitAsync();
         string? id = null;
+        (VrProfile, string?, string?, InventorySnapshot, (int, int)?, string)? wizardBefore = null;
         try
         {
             if (json.Length > 128 * 1024) throw new InvalidDataException("The request is too large.");
@@ -408,9 +422,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             id = root.GetProperty("id").GetString();
             var action = root.GetProperty("action").GetString();
             var data = root.GetProperty("data");
-            // The guided setup checks its candidate (replace=true): the page's own draft and paths are kept from before.
-            var wizardBefore = action == "checkReadiness" && data.TryGetProperty("replace", out var replace) && replace.ValueKind == JsonValueKind.True
-                ? (_profile, _dcs, _options) : ((VrProfile, string?, string?)?)null;
+            // The guided setup checks its candidate (replace=true): the page's own draft, paths and scan are kept from before.
+            if (action == "checkReadiness" && data.TryGetProperty("replace", out var replace) && replace.ValueKind == JsonValueKind.True)
+                wizardBefore = (_profile, _dcs, _options, _inventory, _eyeResolution, _status);
             if (action is "launch" or "apply" or "restore" or "grantWriteAccess") _writing = action;
             // import and restore reply with the profile too: without the page's draft they would bring back an older one.
             if (action is "preview" or "apply" or "launch" or "resetNeural" or "save" or "export" or "refresh" or "checkReadiness" or "import" or "restore" or "prepareSboys" or "importSboys" or "openSboys" or "detect" or "diagnosticPackage" or "grantWriteAccess") ReadDraft(data);
@@ -419,7 +433,18 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                 case "ready":
                     if (!_shownApplied) { _shownApplied = true; ShowAppliedProfile(); }
                     await Capture(); break;
-                case "changed": Invalidate(); return Reply(id, new { invalidated = true });
+                case "changed":
+                    // Every edit: the checks and the dxgi.dll question follow the draft as it is now (the page shows them
+                    // without a full refresh). A draft that cannot be read yet (a value being typed) only drops the plan.
+                    // The DCS-status poll asks again with the same draft (keep): Review files and the checks stay.
+                    if (!(data.ValueKind == JsonValueKind.Object && data.TryGetProperty("keep", out var keep) && keep.ValueKind == JsonValueKind.True)) Invalidate();
+                    if (data.ValueKind != JsonValueKind.Object || !data.TryGetProperty("profile", out _)) return Reply(id, new { invalidated = true });
+                    try { ReadDraft(data); }
+                    catch (Exception e) when (e is JsonException or InvalidDataException or KeyNotFoundException or InvalidOperationException) { return Reply(id, new { invalidated = true }); }
+                    // Off the UI thread: the checks read the applied record (its lock) and the dxgi.dll check hashes files.
+                    var draftNow = _profile;
+                    var (issues, foreignDxgi, headsetRefresh) = await Task.Run(() => (Issues(), service.ForeignDxgi(draftNow, CurrentInventory), HeadsetRefresh.Detect(draftNow.Runtime)));
+                    return Reply(id, new { invalidated = true, issues, foreignDxgi, headsetRefresh });
                 case "detect":
                     EnsureInteractive();
                     // Proposes a profile from the running headset route and existing tool settings. Nothing is applied
@@ -427,7 +452,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     await Capture();
                     var detection = await Task.Run(() => SetupDetection.Detect(_profile, CurrentInventory, new DetectionSources { SavedRuntimes = service.SavedRuntime }));
                     _activeRoute = (DateTime.UtcNow, detection.Active);
-                    return Reply(id, new { profile = detection.Profile, detected = detection.Detected, notes = detection.Notes, active = detection.Active.Summary });
+                    var detectedRefresh = await Task.Run(() => HeadsetRefresh.Detect(detection.Profile.Runtime));
+                    return Reply(id, new { profile = detection.Profile, detected = detection.Detected, notes = detection.Notes, active = detection.Active.Summary,
+                        activeRoute = new { route = detection.Active.Route?.ToString(), summary = detection.Active.Summary }, headsetRefresh = detectedRefresh });
                 case "refresh": Invalidate(); await Capture(); _status = "PC rescanned."; break;
                 case "pimaxFovea":
                     // Read-only: Pimax Play's Quad View values as they are on disk now.
@@ -439,14 +466,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     if (FoveaFact(_profile) is { } fact)
                         _readiness = _readiness with { Checks = [.. _readiness.Checks, new("pimax-fovea", fact.Severity == IssueSeverity.Warning ? CheckState.Warning : CheckState.Pass, "Focus area from Pimax Play", fact.Message)] };
                     _status = _readiness.CanPrepare ? "Automatic checks done. Confirm the items under Check yourself." : "Setup needs attention. Resolve the listed blockers, then check again.";
-                    if (wizardBefore is { } before)
-                    {
-                        // The wizard reads this report; afterwards the page's draft and paths come back, and the Checks page
-                        // does not show a check made with the candidate. A cancelled wizard leaves nothing behind.
-                        var wizardReadiness = _readiness;
-                        (_profile, _dcs, _options) = before; Invalidate();
-                        return Reply(id, new { readiness = wizardReadiness });
-                    }
+                    // The wizard reads this report; afterwards (finally, even on an error) the page's draft, paths and scan come
+                    // back, and the Checks page does not show a check made with the candidate.
+                    if (wizardBefore is not null) return Reply(id, new { readiness = _readiness });
                     _report = JsonData.Serialize(_readiness); break;
                 case "openGuide":
                     EnsureInteractive(); var guide = data.GetProperty("guide").GetString();
@@ -548,6 +570,19 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         _ => throw new InvalidDataException("Unknown file.")
                     };
                     using (var process = Process.Start(new ProcessStartInfo(engineTarget) { UseShellExecute = true })) { } break;
+                case "resumeTobii":
+                    // Desktop Tobii services an ended helper left stopped: started again by the CLI, with one Windows prompt.
+                    EnsureInteractive();
+                    var tobii = BoostRuntime.TobiiResumeStart(service.StateRoot) ?? throw new InvalidOperationException("DcsVr.Cli was not found next to DCS Control. Restart the \"Tobii Service\" service in Services, or restart Windows.");
+                    _status = await Task.Run(() =>
+                    {
+                        try { using var process = Process.Start(tobii); process?.WaitForExit(); }
+                        catch (System.ComponentModel.Win32Exception e) when (e.NativeErrorCode == 1223) { return "The Windows prompt was declined: the desktop Tobii eye tracker is still stopped."; }
+                        return BoostRuntime.TobiiLeftPaused(service.StateRoot)
+                            ? "The desktop Tobii eye tracker could not be started. Restart the \"Tobii Service\" service in Services, or restart Windows."
+                            : "Desktop Tobii eye tracker started again.";
+                    });
+                    break;
                 case "openBackups":
                     EnsureInteractive(); Directory.CreateDirectory(service.Originals.Directory);
                     using (var process = Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { service.Originals.Directory }, UseShellExecute = false })) { } break;
@@ -612,7 +647,10 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     if (offline && !File.Exists(bundled) && !File.Exists(cached)) throw new InvalidOperationException("Network downloads are disabled during offline verification.");
                     var archive = await PackageAcquisition.Acquire(sboysPackage, Path.Combine(service.StateRoot, "cache"), File.Exists(bundled) ? bundled : null);
                     _sboys = await Task.Run(() => {
-                        var folder = new ComponentCache(Path.Combine(service.StateRoot, "cache")).Import(sboysPackage, archive);
+                        var sboysCache = new ComponentCache(Path.Combine(service.StateRoot, "cache"));
+                        // Each Prepare extracts a fresh copy; older ones not in use go after a week.
+                        sboysCache.RemoveStaleStaging(TimeSpan.FromHours(1));
+                        var folder = sboysCache.Import(sboysPackage, archive);
                         _sboysHashes = Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories).ToDictionary(p => p, Hashing.FileSha256, StringComparer.OrdinalIgnoreCase);
                         return Directory.EnumerateFiles(folder, "custom-headset-gui.exe", SearchOption.AllDirectories).Single();
                     });
@@ -622,29 +660,47 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     if (_sboysHashes is null || _sboysHashes.Any(f => !File.Exists(f.Key) || Hashing.FileSha256(f.Key) != f.Value))
                         throw new InvalidDataException("Prepared Sboys files changed. Prepare the official package again before opening it.");
                     using (var process = Process.Start(new ProcessStartInfo(_sboys) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(_sboys)! })) { } break;
-                case "window":
-                    // The page draws the title-bar buttons; the offline verification host has no window.
-                    if (owner is not null)
-                        switch (data.GetProperty("op").GetString())
-                        {
-                            case "minimize": owner.WindowState = WindowState.Minimized; break;
-                            case "maximize": owner.WindowState = owner.WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized; break;
-                            case "close": owner.Close(); break;
-                            default: throw new InvalidDataException("Unknown window command.");
-                        }
-                    return Reply(id, new { maximized = owner?.WindowState == WindowState.Maximized });
                 default: throw new InvalidDataException("Unknown interface command.");
             }
-            return Reply(id, State());
+            // Off the UI thread (it hashes dxgi.dll, reads the applied record and probes the headset); the fields it reads
+            // only change under the command lock, held until it returns. The keyboard layout is the UI thread's.
+            var keys = NeuralHotkeys.DcsDefaultsForCurrentLayout();
+            return Reply(id, await Task.Run(() => State(keys)));
         }
-        catch (Exception e) { return JsonData.Serialize(new { id, ok = false, error = e.Message }); }
-        finally { _writing = null; _commands.Release(); }
+        // An error before the id was read (a request too large, for example) still answers the page's request, so it
+        // never stays busy.
+        catch (Exception e) { return JsonData.Serialize(new { id = id ?? RequestId(json), ok = false, error = e.Message }); }
+        finally
+        {
+            if (wizardBefore is { } before) { (_profile, _dcs, _options, _inventory, _eyeResolution, _status) = before; Invalidate(); }
+            _writing = null; _commands.Release();
+        }
     }
     /// <summary>The request's id, for an error reply; null when the message has none.</summary>
     internal static string? RequestId(string json)
     {
         try { using var doc = JsonDocument.Parse(json); return doc.RootElement.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null; }
         catch (JsonException) { return null; }
+    }
+    /// <summary>The page draws the title-bar buttons; the offline verification host has no window.</summary>
+    private object Window(string? op)
+    {
+        if (owner is not null)
+            switch (op)
+            {
+                case "minimize": owner.WindowState = WindowState.Minimized; break;
+                case "maximize": owner.WindowState = owner.WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized; break;
+                // A running command (a saved runtime, a Sboys import, a diagnostic package) finishes first.
+                case "close": if (_commands.CurrentCount == 0) _ = CloseWhenIdle(owner); else owner.Close(); break;
+                default: throw new InvalidDataException("Unknown window command.");
+            }
+        return new { maximized = owner?.WindowState == WindowState.Maximized };
+    }
+    private async Task CloseWhenIdle(Window window)
+    {
+        await _commands.WaitAsync();
+        _commands.Release();
+        await window.Dispatcher.InvokeAsync(window.Close);
     }
     private InventorySnapshot CurrentInventory => _inventory with { DcsExecutable = _dcs, OptionsPath = _options };
     private void ReadDraft(JsonElement data)
@@ -729,18 +785,32 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         if (_activeRoute is { } cached && DateTime.UtcNow - cached.At < TimeSpan.FromSeconds(5)) return cached.Value;
         var value = SetupDetection.DetectActiveRoute(); _activeRoute = (DateTime.UtcNow, value); return value;
     }
-    private object State()
+    /// <summary>The draft's checks as the page lists them: validation, the running headset route, the Pimax focus
+    /// values and the DCS launcher.</summary>
+    private List<ValidationIssue> Issues(ActiveRouteState? route = null)
+    {
+        var activeRoute = route ?? ActiveRoute();
+        // DCS running is read now: the scan's flag would keep "Close DCS" listed after DCS exits.
+        var issues = ProfileValidation.Validate(service.ResolveNeuralRuntime(_profile), CurrentInventory with { DcsRunning = DcsRunning() }).ToList();
+        if (!_profile.Desktop && activeRoute.Route is { } running && running != _profile.Runtime)
+            issues.Insert(0, new("route-mismatch", IssueSeverity.Warning, activeRoute.Summary + " This profile uses " + (_profile.Runtime == RuntimeKind.Pimax ? "the Pimax runtime" : "Sboys through SteamVR") + ". Switch the route or use Detect my setup before applying."));
+        if (FoveaFact(_profile) is { } fact) issues.Add(fact);
+        // A helper ended mid-flight (Task Manager, a crash) left the desktop Tobii services stopped; starting them needs
+        // administrator rights, so the pilot is asked.
+        if (!offline && BoostRuntime.TobiiLeftPaused(service.StateRoot))
+            issues.Insert(0, new("tobii-paused", IssueSeverity.Warning, "The desktop Tobii eye tracker is still stopped from an earlier flight. Press Start Tobii (one Windows prompt), or restart the \"Tobii Service\" service."));
+        var launcherBlocked = LaunchSafety.LauncherRestartBlocked;
+        if (_profile.KeepDcsLauncher && launcherBlocked) issues.Insert(0, new("dcs-launcher", IssueSeverity.Error, LaunchSafety.LauncherBlockedMessage));
+        else if (_profile.KeepDcsLauncher && LaunchSafety.LauncherRestartUnknown) issues.Insert(0, new("dcs-launcher", IssueSeverity.Warning, LaunchSafety.LauncherUnknownMessage));
+        return issues;
+    }
+    private object State(IReadOnlySet<string> dcsDefaultKeys)
     {
         var originals = service.Originals.Status();
         var applied = originals.State == "applied" ? service.ReadAppliedProfile() : null;
         var activeRoute = ActiveRoute();
-        var issues = ProfileValidation.Validate(service.ResolveNeuralRuntime(_profile), CurrentInventory).ToList();
-        if (!_profile.Desktop && activeRoute.Route is { } running && running != _profile.Runtime)
-            issues.Insert(0, new("route-mismatch", IssueSeverity.Warning, activeRoute.Summary + " This profile uses " + (_profile.Runtime == RuntimeKind.Pimax ? "the Pimax runtime" : "Sboys through SteamVR") + ". Switch the route or use Detect my setup before applying."));
-        if (FoveaFact(_profile) is { } fact) issues.Add(fact);
+        var issues = Issues(activeRoute);
         var launcherBlocked = LaunchSafety.LauncherRestartBlocked;
-        if (_profile.KeepDcsLauncher && launcherBlocked) issues.Insert(0, new("dcs-launcher", IssueSeverity.Error, LaunchSafety.LauncherBlockedMessage));
-        else if (_profile.KeepDcsLauncher && LaunchSafety.LauncherRestartUnknown) issues.Insert(0, new("dcs-launcher", IssueSeverity.Warning, LaunchSafety.LauncherUnknownMessage));
         return new { version = ProductInfo.Version, profile = _profile, dcs = _dcs, options = _options, inventory = CurrentInventory, pimax = PimaxView(),
             activeRoute = new { route = activeRoute.Route?.ToString(), summary = activeRoute.Summary },
             issues, cadence = Enum.IsDefined(_profile.FpsLimit) ? FramePacing.Describe(HeadsetRefresh.Resolve(_profile), CurrentInventory) : null, headsetRefresh = HeadsetRefresh.Detect(_profile.Runtime), foreignDxgi = service.ForeignDxgi(_profile, CurrentInventory), dcsCustomIpd = CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD_enable") == "true" ? CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD")?.Trim('"') : null, gpu = new { nvidiaRtx = GpuInfo.Unknown || GpuInfo.HasNvidiaRtx, names = GpuInfo.Names }, status = _status, report = _report,
@@ -750,7 +820,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             launchReady = applied is not null, appliedProfile = applied?.Journal.ProfileId, appliedName = applied?.Profile?.Name ?? applied?.Journal.ProfileId,
             // The applied profile.json content, so the page labels a draft "Applied" only when it matches it.
             appliedDraft = applied?.Profile, appliedDcs = applied?.Executable, appliedOptions = applied?.OptionsPath, foveaChanged = FoveaChanged(applied), dcsRunning = DcsRunning(),
-            savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), sboysReady = _sboys is not null, launcherBlocked, launcherUnknown = LaunchSafety.LauncherRestartUnknown, dcsDefaultKeys = NeuralHotkeys.DcsDefaultsForCurrentLayout(), readiness = _readiness };
+            savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), sboysReady = _sboys is not null, launcherBlocked, launcherUnknown = LaunchSafety.LauncherRestartUnknown, dcsDefaultKeys, readiness = _readiness };
     }
     /// <summary>The app's saved DLSS 5 runtime copy, shown on the DLSS 5 page; null when there is none (or it was forgotten).</summary>
     private object? SavedRuntimeView() => service.SavedRuntime.Current() is { } s

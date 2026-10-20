@@ -699,6 +699,20 @@ inline bool ResetPending() {
 bool t_ovlOpen = false, t_ovlLdr = false, t_ovlGui = false;
 int t_ovlView = -1;
 
+// R95: the symbology export (cockpit_mask.h's symbology.h) learns each record's indicator type (+0xc9) before DCS
+// draws it, in the OverlayHDRPass of the HMD views whose bit is set here (it sets and clears them on the render
+// thread), and the replay's end. Set once at the export's install; nothing else of this file depends on them.
+std::atomic<uint32_t> g_symViews{0};
+void (*g_symRec)(int view, int c9) = nullptr;
+void (*g_symReplayEnd)(int view) = nullptr;
+std::atomic<uint64_t> g_symFaults{0};
+inline bool SymViewNow(const void* ra, bool recordLoop) {
+  const uint32_t m = g_symViews.load(std::memory_order_relaxed);
+  return m && t_ovlOpen && !t_ovlLdr && t_ovlView >= 0 && t_ovlView < 4 && (m & (1u << t_ovlView)) &&
+         (!recordLoop || !g_renderRet || ra == g_renderRet) &&
+         GetCurrentThreadId() == ptiming::g_topTid.load(std::memory_order_relaxed);
+}
+
 // One replay (render thread).
 struct Replay {
   bool open = false, moved = false, wasMoved = false, perRecord = false, abort = false, sampleOk = false;
@@ -1123,11 +1137,107 @@ bool OnRender(const uint8_t* ro) {
   ApplyRecord(rp, key, id.c9, id.c8);
   return t_tagValid;
 }
+// R94: [Perception] SymbologyTrace (sym_trace.h; dev, measure only). In a traced frame every replay on the render
+// thread reports its view's records (c9.c8 runs) and the records it draws (the render point) with the blend state of
+// the first record of each type; nothing here changes what DCS draws.
+void TraceReplay(void* self, int view) {
+  const uint8_t* h = static_cast<const uint8_t*>(self);
+  const uint8_t* recs = nullptr;
+  const int32_t *vb = nullptr, *ve = nullptr;
+  std::string s;
+  uint32_t n = 0;
+  if (h && allocslab::ReadBytes(h + kHRecs, &recs, sizeof(recs)) && allocslab::ReadBytes(h + kHViews, &vb, sizeof(vb)) &&
+      allocslab::ReadBytes(h + kHViewsEnd, &ve, sizeof(ve)) && recs && vb && ve >= vb && view >= 0 && view < ve - vb) {
+    int32_t packed = 0;
+    if (allocslab::ReadBytes(vb + view, &packed, sizeof(packed))) {
+      const uint32_t lo = static_cast<uint32_t>(packed) & 0xffffu, hi = static_cast<uint32_t>(packed) >> 16;
+      int last = -1, run = 0;
+      for (uint32_t i = lo; i < hi; ++i) {
+        const RecId id = ReadRec(recs + static_cast<size_t>(i) * kRecSize);
+        if (!id.ok) {
+          s += "(unreadable) ";
+          break;
+        }
+        ++n;
+        symtr::RleAdd(s, last, run, id.state ? -2 : id.c9 * 256 + id.c8);
+      }
+      symtr::RleAdd(s, last, run, -1);
+    } else {
+      s = "(range unreadable)";
+    }
+  } else {
+    s = "(handler unreadable)";
+  }
+  symtr::ReplayBegin(t_ovlOpen ? t_ovlView : -1, t_ovlOpen ? (t_ovlGui ? 'G' : t_ovlLdr ? 'L' : 'H') : '-', view, n,
+                     s);
+}
+bool TraceReplaySeh(void* self, int view) {
+  __try {
+    TraceReplay(self, view);
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+void TraceReplayEndSeh() {
+  __try {
+    symtr::ReplayEnd();
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  }
+}
+// The record a render call draws (its RenderObject +0x78 = record + 0x40): c9, or -1 unreadable.
+int TraceRenderPreSeh(const uint8_t* ro) {
+  __try {
+    const uint8_t* recp = nullptr;
+    uint8_t c[2] = {};
+    if (!allocslab::ReadBytes(ro + kRoRec, &recp, sizeof(recp)) || !recp ||
+        !allocslab::ReadBytes(recp - kRecFromRo + kRecC8, c, 2))
+      return -1;
+    symtr::RenderPre(c[1], c[0]);
+    return c[1];
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return -1;
+  }
+}
+void TraceRenderPostSeh(int c9) {
+  __try {
+    symtr::RenderPost(c9);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  }
+}
+inline bool TraceThread() {
+  return symtr::g_on.load(std::memory_order_relaxed) &&
+         GetCurrentThreadId() == ptiming::g_topTid.load(std::memory_order_relaxed);
+}
+
+// R95: the record's indicator type (RenderObject +0x78 = record + 0x40; -1 unreadable) to the symbology export, before
+// anything of this file runs for the record (its upload observer is not armed for our copy / dispatch calls yet).
+void SymRecordSeh(int view, const uint8_t* ro) {
+  __try {
+    int c9 = -1;
+    const uint8_t* recp = *reinterpret_cast<const uint8_t* const*>(ro + kRoRec);
+    if (recp) c9 = recp[-static_cast<ptrdiff_t>(kRecFromRo) + kRecC9];
+    g_symRec(view, c9);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    g_symFaults++;
+    g_symViews = 0;  // (the export's fault latch: no record of this frame is reported any more)
+  }
+}
+void SymReplayEndSeh(int view) {
+  __try {
+    g_symReplayEnd(view);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    g_symFaults++;
+    g_symViews = 0;
+  }
+}
+
 // CockpitBase's import of RenderObject::render. Only the record loop's call inside a replay of ours on this thread
 // is ours; every other call passes through.
 void RenderHook(void* ro, uint32_t pass) {
   void* const ra = _ReturnAddress();
   g_hookBusy.fetch_add(1, std::memory_order_acq_rel);
+  if (g_symRec && ro && SymViewNow(ra, true)) SymRecordSeh(t_ovlView, static_cast<const uint8_t*>(ro));  // R95
   bool mine = false;
   const Replay& rp = t_rp;
   if (rp.open && rp.viaRender && rp.tid == GetCurrentThreadId() && (!g_renderRet || ra == g_renderRet) &&
@@ -1144,12 +1254,17 @@ void RenderHook(void* ro, uint32_t pass) {
   } else {
     g_os.renderOther++;
   }
+  // R94: SymbologyTrace (a traced frame's replay on the render thread; the record loop's call only).
+  const int trC9 = TraceThread() && symtr::g_rep.open && (!g_renderRet || ra == g_renderRet)
+                       ? TraceRenderPreSeh(static_cast<const uint8_t*>(ro))
+                       : -1;
   __try {
     g_renderOrig(ro, pass);  // (never null: the original is set before the slot is written)
   } __finally {
     if (mine) t_tagValid = t_tagTrue = false;
     g_hookBusy.fetch_sub(1, std::memory_order_acq_rel);
   }
+  if (trC9 >= 0) TraceRenderPostSeh(trC9);
 }
 
 // One record range without a per-record point: every drawable record has a committed T key (true for a range that
@@ -1457,9 +1572,12 @@ void ReplayHook(void* self, int view, void* ctx, void* filter) {
     }
   }
   if (mine) g_replayOpen.fetch_add(1, std::memory_order_acq_rel);
+  const bool traced = orig && TraceThread() && TraceReplaySeh(self, view);  // R94: SymbologyTrace (dev)
   __try {
     if (orig) orig(self, view, ctx, filter);  // (never null: the original is set before the slot is written)
   } __finally {
+    if (traced) TraceReplayEndSeh();
+    if (g_symReplayEnd && SymViewNow(nullptr, false)) SymReplayEndSeh(t_ovlView);  // R95
     if (mine) {
       ReplayEnd();
       g_replayOpen.fetch_sub(1, std::memory_order_acq_rel);

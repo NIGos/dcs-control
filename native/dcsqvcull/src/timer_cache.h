@@ -16,7 +16,16 @@ GetTimeFn g_orig = nullptr;
 std::atomic<bool> g_on{false};
 std::atomic<int> g_periodUs{1000};
 std::atomic<double> g_cached{0.0};
-std::atomic<uint64_t> g_refreshes{0};
+std::atomic<uint64_t> g_refreshes{0};  // monotonic (R63): tex_bind.h's dedupe tick; never reset
+// R63: refreshes since *prev (the stats line's refresh/s), without resetting the counter: tex_bind.h's fast path
+// keys its same-tick test on it, and a reset every stats interval repeated the tick sequence (a stale entry could
+// match a bind ~2 s later).
+inline uint64_t RefreshesSince(uint64_t* prev) {
+  const uint64_t now = g_refreshes.load(std::memory_order_relaxed);
+  const uint64_t d = now >= *prev ? now - *prev : now;
+  *prev = now;
+  return d;
+}
 std::atomic<bool> g_stopUpdater{false};
 // edtime.h's stub (patched once per process) reads the g_cached of the payload
 // that wrote it. After a hot reload that payload's updater is stopped, so this

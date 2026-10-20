@@ -34,6 +34,8 @@ public static class NeuralHotkeys
     public const string DepthTransitionDefault = "120:6";
     /// <summary>Far depth's in-flight switch: Alt+Shift+F8.</summary>
     public const string FarDepthDefault = "119:6";
+    /// <summary>The color mode hotkey of the engine module ([Color] ModeKey): off unless chosen.</summary>
+    public const string ColorModeDefault = "Off";
     /// <summary>Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down, with or without Shift: the engine optimizations module's
     /// own keys (its test suite, for one, starts on Ctrl+Alt+F11 whatever else is held).</summary>
     public static bool EngineModuleKey(Hotkey key) => (key.Modifiers & 3) == 3 && key.VirtualKey is >= 0x77 and <= 0x7B or 0x21 or 0x22;

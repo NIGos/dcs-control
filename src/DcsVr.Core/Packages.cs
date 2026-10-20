@@ -38,14 +38,35 @@ public sealed class ComponentCache(string directory)
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { /* Retried by RemoveStaleStaging. */ }
     }
 
-    /// <summary>Cleans extractions left by interrupted previews. Prepared Sboys tools stay: the user may have them open.</summary>
-    public void RemoveStaleStaging(TimeSpan age)
+    /// <summary>Cleans extractions left by interrupted previews. Prepared Sboys tools (one per Prepare) stay for
+    /// <paramref name="preparedAge"/> (7 days by default), the newest always, and one whose tool is running is never
+    /// touched: the user may have it open.</summary>
+    public void RemoveStaleStaging(TimeSpan age, TimeSpan? preparedAge = null)
     {
         var staging = Path.Combine(DirectoryPath, "staging");
         if (!Directory.Exists(staging)) return;
+        var prepared = new List<string>();
         foreach (var directory in Directory.EnumerateDirectories(staging))
-            if (!Path.GetFileName(directory).StartsWith("sboys-", StringComparison.OrdinalIgnoreCase) && DateTime.UtcNow - Directory.GetCreationTimeUtc(directory) > age)
+            if (Path.GetFileName(directory).StartsWith("sboys-", StringComparison.OrdinalIgnoreCase)) prepared.Add(directory);
+            else if (DateTime.UtcNow - Directory.GetCreationTimeUtc(directory) > age) RemoveStaging(directory);
+        foreach (var directory in prepared.OrderByDescending(Directory.GetCreationTimeUtc).Skip(1))
+            if (DateTime.UtcNow - Directory.GetCreationTimeUtc(directory) > (preparedAge ?? TimeSpan.FromDays(7)) && !ProgramInUse(directory))
                 RemoveStaging(directory);
+    }
+
+    /// <summary>True when a program or library in <paramref name="directory"/> cannot be opened exclusively: a running
+    /// executable's image is locked, so the folder of an open tool is never half deleted.</summary>
+    private static bool ProgramInUse(string directory)
+    {
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+                .Where(f => f.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)))
+                try { using var _ = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return true; }
+            return false;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return true; }
     }
 
     public static void ExtractZip(string archivePath, string destination, IReadOnlyList<string>? excludedEntries = null)

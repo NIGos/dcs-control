@@ -35,6 +35,14 @@ public enum EyeDistanceSource { Headset, DcsCustom, Manual }
 /// written) at preview, apply and launch, or the values stored in the profile.</summary>
 public enum FoveaSource { PimaxPlay, Profile }
 public enum BoostPriority { Normal, AboveNormal, High }
+/// <summary>The engine module's color modes ([Color] Mode in DcsQvCull.ini, docs/USER_GUIDE.md "Visual realism"): Off is
+/// DCS's own image; Fix corrects DCS's VR color faults (lifted blacks, the left eye's exposure seam) and otherwise looks
+/// like DCS; Enhanced adds a filmic tone curve, richer color, golden-hour warmth, eye-like adaptation, night vision and
+/// glare.</summary>
+public enum ColorMode { Off, Fix, Enhanced }
+/// <summary>G vision's relation to DCS's own G-EFFECT ([VrFx] GVisionMode): Auto follows DCS's option; Complement leaves
+/// the darkening to DCS and adds the eye-centred tunnel and color loss; Full does all of it (for G-EFFECT None).</summary>
+public enum GVisionMode { Auto, Complement, Full }
 /// <summary>DCS's repeated PrefetchVirtualMemory calls (edterrain/edCore workers): leave them, only count them, or
 /// skip a range already prefetched within the window ([Prefetch] in DcsQvCull.ini, an engine optimization).</summary>
 public enum PrefetchFix { Off, Observe, Skip }
@@ -62,6 +70,18 @@ public sealed record VrProfile
     /// which absorbs DCS frame-time spikes at the cost of about one refresh period of latency (11 ms at 90 Hz). Applies
     /// to 2×, 3× and Auto (fork patch 0007); in 3× the extra slot is taken only under sustained lateness.</summary>
     public bool FrameGenDeepPipeline { get; init; } = true;
+    /// <summary>OFXR pipelined_deep_hold (fork patch 0050): with the smoothness buffer, DCS's split-thread presenter also
+    /// gets the held slot, so a DCS frame up to about a refresh late is absorbed (R92 live: late first synthetics 32/min
+    /// without it, about 2/min with it). On with the smoothness buffer, whose ~11 ms it costs; profile file only.</summary>
+    public bool FrameGenPipelinedDeepHold { get; init; } = true;
+    /// <summary>OFXR async_arm (fork patch 0050): frame generation for a new swapchain (leaving the F10 map) is prepared on
+    /// a worker thread; frames pass through meanwhile. Profile file only, off until flown.</summary>
+    public bool FrameGenAsyncArm { get; init; }
+    /// <summary>HUD symbology for frame generation (engine module R95, OFXR fork patch 0049): the HUD and helmet symbols
+    /// are taken out of the real frames, the generated frames are made from the world alone and the symbols put back, so
+    /// they stop smearing. Needs Depth boost's dual camera (the overlay render point). "Sharp HUD" on the Framegen page, off by default.</summary>
+    public bool FrameGenHudSymbology { get; init; }
+    public bool UsesHudSymbology => FrameGenHudSymbology && FrameGen != FrameGeneration.Off && !Desktop && UsesDepthBoost;
     /// <summary>OFXR smooth_cursor (fork patch 0010): generated frames find DCS's mouse cursor in the two real frames
     /// and draw it at its in-between position, so it moves at the headset's rate instead of fading between two places.
     /// Only the generated frames change; where a click lands does not. Off by default until flown.</summary>
@@ -126,7 +146,11 @@ public sealed record VrProfile
     /// (100 = whole focus view, 80, 70 or 50). The NR edge fades out over <see cref="NeuralAreaFeather"/>. One of
     /// <see cref="NeuralAreas"/>.</summary>
     public int NeuralFocusArea { get; init; } = 100;
-    public static IReadOnlyList<int> NeuralAreas { get; } = [100, 80, 70, 50];
+    /// <summary>DLSS preset for the focus views only (Cheeky CenterPreset): 0 keeps DCS's own preset; 5 = E, 11 = K,
+    /// 12 = L, 13 = M. The periphery keeps DCS's preset either way.</summary>
+    public int FocusDlssPreset { get; init; }
+    public static IReadOnlyList<int> FocusDlssPresets { get; } = [0, 5, 11, 12, 13];
+    public static IReadOnlyList<int> NeuralAreas { get; } = [100, 90, 80, 70, 50];
     /// <summary>Cheeky NrTransitionWidth for a central DLSS 5 area: the fade from DLSS 5 to the plain DLSS image spans
     /// half of this fraction of the focus view on each side (6%), independent of the area size.</summary>
     public const double NeuralAreaFeather = 0.12;
@@ -150,6 +174,9 @@ public sealed record VrProfile
     public NvidiaFlowPreset FlowPreset { get; init; } = NvidiaFlowPreset.Medium;
     public bool BidirectionalFlow { get; init; }
     public bool DiagnosticRecorder { get; init; } = true;
+    /// <summary>OFXR's per-frame records (frame_records, fork patch 0048) for hitch analysis; profile file only, off by
+    /// default. On, the flight log holds 1 GB before it rotates.</summary>
+    public bool DiagnosticFrameRecords { get; init; }
     /// <summary>OFXR's always-on FPS counter; the diagnostic panel (its own key) shows FPS on demand.</summary>
     public bool ShowOverlay { get; init; }
     public FpsLimitMode FpsLimit { get; init; }
@@ -257,6 +284,11 @@ public sealed record VrProfile
     /// set; the repeat is skipped at DCS's own call sites. Verified exact live (362 frames, 0 mismatches); measured
     /// about CPU −1.2 %, +0.5 to 1 % FPS. Turns itself off after a DCS update.</summary>
     public bool EngineStateFilter { get; init; } = true;
+    /// <summary>[Shadows] CascadeCache: the far shadow cascades (about 70 to 1500 m) are drawn every few frames and reused
+    /// in between. Measured −0.72 ms of GPU, 0.16 % of shadow texels differ; distant tree shadows update about 11 times a
+    /// second, so their wind sway can look stepped. Off by default; forced off with the engine switched off or in the
+    /// Perception-only mode.</summary>
+    public bool EngineShadowCache { get; init; }
     /// <summary>[Model] ShadowRecorder: the shadow cascades' draws are recorded on 8 worker threads (D3D11 deferred
     /// contexts) instead of DCS's render thread; cascade 1 stays as DCS draws it. Verified texel-identical live;
     /// measured +3 to +5 % FPS, p95 −4 to −7 %, at 4-7 % more total CPU and about 30 MB of memory.</summary>
@@ -315,7 +347,9 @@ public sealed record VrProfile
     public const double PeripheryStabilityMaxTauMs = 80;
     /// <summary>The pass runs: a VR flight with the bundled Quad Views (dcsvr_temporal); Pimax's own quad views have no
     /// such pass.</summary>
-    public bool UsesPeripheryStability => PeripheryStability && !Desktop && QuadViews == QuadProvider.QuadViewsFoveated;
+    public bool UsesPeripheryStability => PeripheryStability && !Desktop && UsesBundledQuadViews;
+    /// <summary>The bundled Quad Views provider (no alternative provider folder): only it has DCS Control's passes.</summary>
+    public bool UsesBundledQuadViews => QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(QuadViewsLayerDirectory);
     /// <summary>Far depth (docs/FAR_DEPTH.md): more depth on distant scenery (about 50 m to 2 km), the cockpit exact. The
     /// bundled Quad Views shifts each eye's image with the depth DCS drew, which the engine module hands it. Off by default.</summary>
     public bool FarDepth { get; init; }
@@ -323,7 +357,7 @@ public sealed record VrProfile
     /// <summary>Turns Far depth off and on in flight, to compare (bundled Quad Views' dcsvr_far_depth_toggle).</summary>
     public string FarDepthToggleKey { get; init; } = NeuralHotkeys.FarDepthDefault;
     /// <summary>It runs: a VR flight with the bundled Quad Views and Engine Optimizations (the depth comes from the engine module).</summary>
-    public bool UsesFarDepth => FarDepth && !Desktop && QuadViews == QuadProvider.QuadViewsFoveated && EngineOptimizations;
+    public bool UsesFarDepth => FarDepth && !Desktop && UsesBundledQuadViews && EngineOptimizations;
     /// <summary>Depth boost (docs/PERCEPTION.md, docs/FIXATION_DEPTH.md), the dual camera: the world outside is rendered
     /// at a larger eye distance (<see cref="DepthBoostMode"/>), following where the eyes look and changing slowly, while
     /// the engine module draws the cockpit at the true eye distance (DcsQvCull.ini [Perception] CockpitTrueIpd=1). The
@@ -361,16 +395,19 @@ public sealed record VrProfile
     public double DepthBoostActiveMax => DepthBoostMode == DepthBoostMode.Enhanced ? DepthBoostMax : DepthBoostRealisticMax;
     /// <summary>Depth boost runs: like Pupil shift, only for a VR flight with eye-tracked Quad Views.</summary>
     public bool UsesDepthBoost => DepthBoost && !Desktop && QuadViews != QuadProvider.None && Gaze == GazeMode.EyeTracked;
-    /// <summary>The pupil shift layer (it carries both Pupil shift and Depth boost) is deployed, and takes over DCS's
-    /// custom IPD, when either runs.</summary>
-    public bool UsesPerceptionLayer => UsesPupilShift || UsesDepthBoost;
+    /// <summary>The pupil shift layer (it carries Pupil shift and Depth boost, and publishes the gaze for Visual realism)
+    /// is deployed when any of them runs.</summary>
+    public bool UsesPerceptionLayer => UsesPupilShift || UsesDepthBoost || UsesGazePublish;
+    /// <summary>The layer moves the eyes (Pupil shift or Depth boost), so it takes over DCS's custom IPD. Publishing the
+    /// gaze alone moves nothing and leaves DCS's IPD as it is.</summary>
+    public bool UsesLayerEyeDistance => UsesPupilShift || UsesDepthBoost;
     /// <summary>The engine module measures the scene depth at the gaze (DcsQvCull.ini [Perception] FixationDepth=1)
     /// whenever Depth boost runs, with or without the engine optimizations.</summary>
     public bool UsesFixationDepth => UsesDepthBoost;
     /// <summary>The engine module is installed: for Engine Optimizations, or for Depth boost's dual camera and scene
-    /// depth alone, in its Perception-only mode ([General] PerceptionOnly=1: none of the engine optimizations, no test
-    /// suite or engine keys).</summary>
-    public bool UsesEngineModule => EngineOptimizations || UsesDepthBoost;
+    /// depth or a Visual realism feature alone, in its Perception-only mode ([General] PerceptionOnly=1: none of the
+    /// engine optimizations, no test suite or engine keys).</summary>
+    public bool UsesEngineModule => EngineOptimizations || UsesDepthBoost || UsesVisualRealism;
     /// <summary>The eye distance DCS renders with. Headset (default): the IPD the headset measured or was set to, the
     /// realistic one; DCS's custom IPD is turned off while the profile is applied. DcsCustom: DCS's own custom IPD as it
     /// is (the pupil shift layer applies it itself when it runs). Manual: <see cref="EyeDistanceMm"/>. VR flights only;
@@ -379,6 +416,81 @@ public sealed record VrProfile
     /// <summary>Manual's eye distance in millimetres.</summary>
     public double EyeDistanceMm { get; init; } = 64;
     public const double EyeDistanceMin = 50, EyeDistanceMax = 80;
+
+    // Visual realism (the engine module's [Color], [ColorFix], [ColorEnhanced] and [VrFx], re-read by DCS about every
+    // second). Every default is the module's own, and everything is off: a profile without these properties loads as off.
+    /// <summary>[Color] Mode. Off by default.</summary>
+    public ColorMode ColorMode { get; init; }
+    /// <summary>[Color] ModeKey: cycles Off, Fix and Enhanced in flight (1, 2 or 3 beeps). Off by default.</summary>
+    public string ColorModeKey { get; init; } = NeuralHotkeys.ColorModeDefault;
+    /// <summary>[ColorFix]: exposure offset (EV), extra exposure at night only (EV), scene-linear saturation, golden-hour
+    /// warmth (0 to 1) and the eye-like adaptation's time constants towards bright and dark (s; 0 = DCS's own only).</summary>
+    public double ColorFixExposureEv { get; init; }
+    public double ColorFixNightEv { get; init; }
+    public double ColorFixSaturation { get; init; } = 1;
+    public double ColorFixWarmth { get; init; }
+    public double ColorFixAdaptBright { get; init; }
+    public double ColorFixAdaptDark { get; init; }
+    /// <summary>[ColorEnhanced]: the same keys with Enhanced's own defaults.</summary>
+    public double ColorEnhancedExposureEv { get; init; }
+    public double ColorEnhancedNightEv { get; init; }
+    public double ColorEnhancedSaturation { get; init; } = 1.15;
+    public double ColorEnhancedWarmth { get; init; } = 0.35;
+    public double ColorEnhancedAdaptBright { get; init; } = 0.4;
+    public double ColorEnhancedAdaptDark { get; init; } = 1.5;
+    /// <summary>[ColorEnhanced] NightVision (Enhanced only): at night dim areas lose color and turn blue-grey, as rod vision
+    /// does; lights and lit symbology keep their color. On inside Enhanced by default.</summary>
+    public bool NightVision { get; init; } = true;
+    public double NightVisionStrength { get; init; } = 0.8;
+    public double NightVisionBlue { get; init; } = 0.4;
+    public double NightVisionBlur { get; init; } = 0.25;
+    /// <summary>Light levels (cd/m²) of full night and full day vision; day at least 4 times night.</summary>
+    public double NightVisionScotopic { get; init; } = 0.005;
+    public double NightVisionPhotopic { get; init; } = 5;
+    /// <summary>[ColorEnhanced] Glare (Enhanced only): a soft halo around very bright lights. On inside Enhanced by default.</summary>
+    public bool Glare { get; init; } = true;
+    public double GlareStrength { get; init; } = 0.35;
+    public double GlareThresholdEv { get; init; } = 3.5;
+    /// <summary>The wide halo's size in degrees of view.</summary>
+    public double GlareRadius { get; init; } = 5;
+    public double GlareStreak { get; init; } = 0.3;
+    /// <summary>[VrFx] GazeDof: things nearer or farther than where you look go slightly soft. It needs the gaze the pupil
+    /// shift layer publishes from the eye-tracked Quad Views focus (<see cref="UsesGazeDof"/>). Off by default.</summary>
+    public bool GazeDof { get; init; }
+    public double GazeDofStrength { get; init; } = 0.5;
+    public double GazeDofMaxArcmin { get; init; } = 6;
+    public bool GazeDofSaccadeRelease { get; init; } = true;
+    public int GazeDofSettleMs { get; init; } = 120;
+    public int GazeDofFadeInMs { get; init; } = 250;
+    public double GazeDofToleranceD { get; init; } = 0.3;
+    public double GazeDofFoveaGuardDeg { get; init; } = 2;
+    /// <summary>0 = estimated from the scene's brightness, else 2 to 8 mm.</summary>
+    public double GazeDofPupilMm { get; init; }
+    /// <summary>[VrFx] GVision: grey-out, tunnel vision, blackout and red-out under G (the G comes from DCS's export
+    /// through the module's Lua hook). Off by default.</summary>
+    public bool GVision { get; init; }
+    public double GVisionStrength { get; init; } = 1;
+    public bool GVisionUseGaze { get; init; } = true;
+    public bool GVisionRedout { get; init; } = true;
+    /// <summary>The sustained G of a full blackout (7.5: g-suit and straining).</summary>
+    public double GVisionTolerance { get; init; } = 7.5;
+    public GVisionMode GVisionMode { get; init; }
+    /// <summary>The color mode hotkey is set (it can switch to any mode in flight).</summary>
+    public bool UsesColorModeKey => !Desktop && NeuralHotkeys.TryParse(ColorModeKey ?? NeuralHotkeys.ColorModeDefault, out var key) && !key.IsOff;
+    /// <summary>The module's color modes run, or can be switched on in flight: VR flights only (the module replaces the
+    /// tone map of the headset's views).</summary>
+    public bool UsesColorMode => !Desktop && (ColorMode != ColorMode.Off || UsesColorModeKey);
+    /// <summary>A VR flight with an eye-tracked Quad Views focus: the pupil shift layer has a gaze to work with.</summary>
+    public bool UsesEyeTrackedVr => !Desktop && QuadViews != QuadProvider.None && Gaze == GazeMode.EyeTracked;
+    /// <summary>Gaze DoF runs: it needs the gaze, which the pupil shift layer publishes for the module (with Depth boost,
+    /// or its [PupilShift] PublishGaze for Visual realism alone).</summary>
+    public bool UsesGazeDof => GazeDof && UsesEyeTrackedVr;
+    public bool UsesGVision => GVision && !Desktop;
+    /// <summary>The pupil shift layer publishes the gaze for the engine module ([PupilShift] PublishGaze=1): for Gaze DoF,
+    /// and for G vision's tunnel following the eyes.</summary>
+    public bool UsesGazePublish => UsesGazeDof || (UsesGVision && GVisionUseGaze && UsesEyeTrackedVr);
+    /// <summary>Any Visual realism feature runs, so the engine module is installed for it (<see cref="UsesEngineModule"/>).</summary>
+    public bool UsesVisualRealism => UsesColorMode || UsesGazeDof || UsesGVision;
 
     /// <summary>The engine optimizations module runs the prefetch fix ([Prefetch] Mode in DcsQvCull.ini), also in
     /// Optimizations only and when DCS starts from Steam or a shortcut.</summary>
@@ -401,8 +513,8 @@ public sealed record VrProfile
     public bool UsesCentralNeuralArea => UsesQuadFocus && NeuralRendering && NeuralFocusArea < 100;
     public bool UsesNeuralEdgeFade => UsesQuadFocus && NeuralRendering && NeuralFocusArea >= 100 && QuadNeuralEdgeFade && QuadEdgeBlend > 0;
     /// <summary>Cheeky NrTransitionWidth for <see cref="UsesNeuralEdgeFade"/>: the Quad Views fade band (2 x the edge
-    /// blending, in focus radii), at most Cheeky's 0.3.</summary>
-    public double NeuralEdgeFeather => Math.Min(0.3, 2 * QuadEdgeBlend);
+    /// blending, in focus radii), at most Cheeky's 0.45 (wide enough for Quad Views' own band).</summary>
+    public double NeuralEdgeFeather => Math.Min(0.45, 2 * QuadEdgeBlend);
     /// <summary>What a launch runs: with <see cref="Desktop"/> (Optimizations only) the VR features are off, whatever the
     /// profile keeps for the next VR flight; otherwise the profile itself.</summary>
     public VrProfile ForLaunch() => Desktop
@@ -454,6 +566,9 @@ public sealed record InventorySnapshot
     public string? AutoexecPath { get; init; }
     public string? AutoexecMaxFps { get; init; }
     public bool AutoexecPacingUnknown { get; init; }
+    /// <summary>autoexec.cfg sets HUD_MFD_after_DLSS = true (DCS draws the HUD and MFDs after DLSS, so DLSS 5 never
+    /// smears them); null when there is no autoexec.cfg.</summary>
+    public bool? AutoexecHudAfterDlss { get; init; }
 }
 
 public static class JsonData

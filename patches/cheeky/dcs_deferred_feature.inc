@@ -21,8 +21,12 @@
 //     DCS-equivalent output); with no layout published at all, a bilinear
 //     upscale holds the view for at most dcs_deferred_unknown_hold_ms;
 //   * DLSS 5 toggled off in flight: the private D3D12 SR keeps running without NR;
-//   * the genuine fallbacks (transport unavailable or failed, a peripheral
-//     extent, a layout that never appears) create it exactly as before.
+//   * a transport that rejects frames (slot timeout, private device or shared
+//     texture creation failing under VRAM pressure, a sync failure): a bilinear
+//     upscale holds the view for at most dcs_deferred_unknown_hold_ms of
+//     consecutive failures, so a brief failure never creates DCS's feature;
+//   * the genuine fallbacks (transport unavailable or failing for longer, a
+//     peripheral extent, a layout that never appears) create it exactly as before.
 // Once created, the real feature lives until DCS releases its handle: NGX's
 // DX11 runtime does not return a released feature's VRAM while the game's other
 // DX11 DLSS features (the peripheral views) stay alive (measured: 0 MiB back
@@ -40,6 +44,7 @@ std::atomic<NgxD3D11Shutdown1Fn> real_core_shutdown_d3d11_1{};
 constexpr unsigned dcs_deferred_magic = 0x44435346U; // "DCSF"
 // A deferred view with no Quad Views layout at all is held (bilinear upscale) at
 // most this long; then DCS's own feature is created (stereo session, layer gone).
+// The same bound applies to a run of consecutive transport failures.
 constexpr std::uint64_t dcs_deferred_unknown_hold_ms = 3000;
 
 [[nodiscard]] bool dcs_quad_focus_env() noexcept {
@@ -109,8 +114,9 @@ struct DcsDeferredFeature {
     std::size_t slot{};
     DcsCreateValues create{};
     std::uint64_t created_ms{}, materializations{};
-    // Frames produced without DCS's own feature, and when an unknown layout was first seen.
-    std::uint64_t sr_only_frames{}, held_frames{}, unknown_since_ms{};
+    // Frames produced without DCS's own feature, when an unknown layout was first
+    // seen, and when the current run of consecutive transport failures began.
+    std::uint64_t sr_only_frames{}, held_frames{}, unknown_since_ms{}, transport_fail_since_ms{};
 };
 std::mutex dcs_deferred_mutex;
 std::vector<DcsDeferredFeature> dcs_deferred_features;
@@ -377,6 +383,71 @@ bool dcs_deferred_unmaterialized(const NgxHandle* handle) noexcept {
     return count <= 4U || (count & (count - 1U)) == 0U;
 }
 
+// The transport produced this frame: a later failure starts a new run.
+void dcs_deferred_transport_ok(const NgxHandle* handle) noexcept {
+    if (handle == nullptr || dcs_deferred_count.load(std::memory_order_acquire) == 0U) return;
+    std::lock_guard lock(dcs_deferred_mutex);
+    if (auto* entry = dcs_find_deferred_locked(handle)) entry->transport_fail_since_ms = 0U;
+}
+
+// Plain bilinear upscale of DCS's colour input into its output (dcs_hold_upscale.hpp).
+[[nodiscard]] bool dcs_deferred_bilinear(ID3D11DeviceContext* const context, const NgxParameters* const parameters) noexcept {
+    if (context == nullptr || parameters == nullptr) return false;
+    ID3D11Resource* color{};
+    ID3D11Resource* output{};
+    parameters->Get("Color", &color);
+    parameters->Get("Output", &output);
+    auto render_width = get_ui(parameters, "DLSS.Render.Subrect.Dimensions.Width");
+    auto render_height = get_ui(parameters, "DLSS.Render.Subrect.Dimensions.Height");
+    if (!render_width) render_width = get_ui(parameters, "Width");
+    if (!render_height) render_height = get_ui(parameters, "Height");
+    const DcsHoldUpscaleRegion region{get_ui(parameters, "DLSS.Input.Color.Subrect.Base.X"),
+        get_ui(parameters, "DLSS.Input.Color.Subrect.Base.Y"), render_width, render_height,
+        get_ui(parameters, "DLSS.Output.Subrect.Base.X"), get_ui(parameters, "DLSS.Output.Subrect.Base.Y"),
+        get_ui(parameters, "OutWidth"), get_ui(parameters, "OutHeight")};
+    return dcs_hold_upscale(context, color, output, region);
+}
+
+// The transport rejected a frame of an accepted deferred view (slot timeout,
+// private device start, shared texture creation under VRAM pressure, a sync
+// failure). DCS's own feature would never be freed again (~254 MiB), so a run
+// of consecutive failures is held with a bilinear upscale for at most
+// dcs_deferred_unknown_hold_ms; the view's transport resources are kept, so
+// the next frame retries the transport. False leaves the caller's fallback.
+bool dcs_deferred_hold_transport_failure(ID3D11DeviceContext* const context, const NgxHandle* const handle,
+    const NgxParameters* const parameters, NgxResult& held) noexcept {
+    if (!dcs_deferred_unmaterialized(handle) || context == nullptr || parameters == nullptr) return false;
+    const auto now = GetTickCount64();
+    std::uint64_t since{};
+    {
+        std::lock_guard lock(dcs_deferred_mutex);
+        auto* entry = dcs_find_deferred_locked(handle);
+        if (entry == nullptr) return false;
+        if (!entry->transport_fail_since_ms) entry->transport_fail_since_ms = now;
+        since = entry->transport_fail_since_ms;
+    }
+    if (now - since > dcs_deferred_unknown_hold_ms) {
+        trace_event("DCS deferred DX11 DLSS handle=%p: transport failing for %llu ms; DCS's own feature is created",
+            handle, static_cast<unsigned long long>(now - since));
+        dcs_deferred_fallback_reason = "transport-failure-timeout";
+        return false;
+    }
+    if (!dcs_deferred_bilinear(context, parameters)) {
+        trace_event("DCS deferred DX11 DLSS handle=%p: transport failed and the bilinear hold is unavailable; "
+            "DCS's own feature is created", handle);
+        dcs_deferred_fallback_reason = "transport-failed-hold-unavailable";
+        return false;
+    }
+    skip_dlss_nr_history(static_cast<DlssViewId>(reinterpret_cast<std::uintptr_t>(handle)));
+    diagnostic_note_d3d11_execution_path(D3D11ExecutionPath::game_fallback);
+    if (std::uint64_t frames{}; dcs_deferred_count_frame(handle, false, frames))
+        trace_event("DCS deferred DX11 DLSS held with a bilinear upscale handle=%p reason=transport-failed frames=%llu "
+            "failing_ms=%llu (DCS's own DX11 feature not created)", handle, static_cast<unsigned long long>(frames),
+            static_cast<unsigned long long>(now - since));
+    held = 1U;
+    return true;
+}
+
 // DCS's own feature is not needed for this frame: the private D3D12 SR runs on
 // the handle exactly as with DLSS 5 (full view, same inputs, same feature and
 // textures), only the NR pass is skipped. Its output is DCS's own upscale, so
@@ -402,10 +473,16 @@ bool dcs_deferred_unmaterialized(const NgxHandle* handle) noexcept {
             transport_result, nullptr);
     }
     if (!owned || !ngx_succeeded(transport_result)) {
-        trace_event("DCS deferred DX11 DLSS: private D3D12 SR unavailable handle=%p reason=%s owned=%u result=0x%08X; "
-            "DCS's own feature is created", handle, reason, owned ? 1U : 0U, unsigned(transport_result));
-        dcs_deferred_fallback_reason = "transport-unavailable";
+        trace_event("DCS deferred DX11 DLSS: private D3D12 SR unavailable handle=%p reason=%s owned=%u result=0x%08X",
+            handle, reason, owned ? 1U : 0U, unsigned(transport_result));
+        // A brief failure is held; only a lasting one creates DCS's own feature.
+        if (dcs_deferred_hold_transport_failure(context, handle, parameters, result)) return true;
+        if (!dcs_deferred_fallback_reason) dcs_deferred_fallback_reason = "transport-unavailable";
         return false;
+    }
+    {
+        std::lock_guard lock(dcs_deferred_mutex);
+        if (auto* entry = dcs_find_deferred_locked(handle)) entry->transport_fail_since_ms = entry->unknown_since_ms = 0U;
     }
     release_d3d11_peripheral_dlaa_view(handle);
     diagnostic_note_d3d11_execution_path(D3D11ExecutionPath::dx12_transport);
@@ -425,7 +502,15 @@ bool dcs_deferred_hold_unproven(const D3D11RuntimeCallbacks& runtime, ID3D11Devi
     if (!dcs_deferred_unmaterialized(handle) || parameters == nullptr) return false;
     const auto out_width = get_ui(parameters, "OutWidth");
     const auto out_height = get_ui(parameters, "OutHeight");
-    const int role = dcs_quad_focus_create_extent(out_width, out_height);
+    // A fresh layout of this session decides either way. An older one (DCS still
+    // loading) may only keep the view on the private SR, whose output is correct
+    // for any view; it never creates DCS's own feature.
+    int role = dcs_quad_focus_create_extent(out_width, out_height);
+    if (role < 0 && dcs_quad_focus_layout_extent(out_width, out_height) > 0) role = 1;
+    if (role >= 0) {
+        std::lock_guard lock(dcs_deferred_mutex);
+        if (auto* entry = dcs_find_deferred_locked(handle)) entry->unknown_since_ms = 0U;
+    }
     if (role > 0) // The published layout says focus extent: DCS-equivalent SR on the private feature.
         return dcs_deferred_sr_only(runtime, context, handle, parameters, current_settings(), "focus-proof-pending", result);
     const auto now = GetTickCount64();
@@ -442,6 +527,8 @@ bool dcs_deferred_hold_unproven(const D3D11RuntimeCallbacks& runtime, ID3D11Devi
         std::lock_guard lock(dcs_deferred_mutex);
         auto* entry = dcs_find_deferred_locked(handle);
         if (entry == nullptr) return false;
+        // The hold drops the transport view, so a later transport failure starts a run of its own.
+        entry->transport_fail_since_ms = 0U;
         if (!entry->unknown_since_ms) entry->unknown_since_ms = now;
         since = entry->unknown_since_ms;
     }
@@ -451,24 +538,12 @@ bool dcs_deferred_hold_unproven(const D3D11RuntimeCallbacks& runtime, ID3D11Devi
         dcs_deferred_fallback_reason = "layout-unknown-timeout";
         return false;
     }
-    ID3D11Resource* color{};
-    ID3D11Resource* output{};
-    parameters->Get("Color", &color);
-    parameters->Get("Output", &output);
-    auto render_width = get_ui(parameters, "DLSS.Render.Subrect.Dimensions.Width");
-    auto render_height = get_ui(parameters, "DLSS.Render.Subrect.Dimensions.Height");
-    if (!render_width) render_width = get_ui(parameters, "Width");
-    if (!render_height) render_height = get_ui(parameters, "Height");
-    const DcsHoldUpscaleRegion region{get_ui(parameters, "DLSS.Input.Color.Subrect.Base.X"),
-        get_ui(parameters, "DLSS.Input.Color.Subrect.Base.Y"), render_width, render_height,
-        get_ui(parameters, "DLSS.Output.Subrect.Base.X"), get_ui(parameters, "DLSS.Output.Subrect.Base.Y"),
-        out_width, out_height};
-    if (!dcs_hold_upscale(context, color, output, region)) {
+    if (!dcs_deferred_bilinear(context, parameters)) {
         trace_event("DCS deferred DX11 DLSS handle=%p: bilinear hold unavailable; DCS's own feature is created", handle);
         dcs_deferred_fallback_reason = "hold-unavailable";
         return false;
     }
-    release_d3d11_transport_view(handle);
+    static_cast<void>(release_d3d11_transport_view(handle, dcs_transport_release_wait_ms)); // Retried next frame on timeout.
     skip_dlss_nr_history(static_cast<DlssViewId>(reinterpret_cast<std::uintptr_t>(handle)));
     if (std::uint64_t frames{}; dcs_deferred_count_frame(handle, false, frames))
         trace_event("DCS deferred DX11 DLSS held with a bilinear upscale handle=%p reason=layout-unknown frames=%llu "
@@ -592,7 +667,8 @@ bool dcs_release_deferred_d3d11(NgxHandle* const handle, NgxResult& result) noex
         }
         return 1U;
     });
-    release_d3d11_transport_view(handle);
+    // The handle is gone for good: wait for its private work as upstream's ReleaseFeature does.
+    release_d3d11_transport_view(handle, dcs_transport_release_wait_forever);
     release_d3d11_peripheral_dlaa_view(handle);
     unregister_d3d11_game_feature(handle);
     const auto view_id = static_cast<DlssViewId>(reinterpret_cast<std::uintptr_t>(handle));

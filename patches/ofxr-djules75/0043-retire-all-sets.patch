@@ -1,0 +1,250 @@
+diff --git a/include/xrfg/cockpit_mask.hpp b/include/xrfg/cockpit_mask.hpp
+--- a/include/xrfg/cockpit_mask.hpp
++++ b/include/xrfg/cockpit_mask.hpp
+@@ -600,6 +600,12 @@ struct CockpitMaskConsumerStats {
+     std::uint64_t motion_generations_opened{};
+     std::uint64_t motion_heartbeats_stored{};
+     CockpitMotionLookup motion_last{CockpitMotionLookup::none};
++    // DCS Control (0043): the producer's opened sets (mask, depth, motion)
++    // held now, those retired but kept until the copies that read them
++    // complete, and the retired sets dropped since the start.
++    std::uint32_t sets_opened{};
++    std::uint32_t sets_retired{};
++    std::uint64_t sets_dropped{};
+ };
+ 
+ struct CockpitMaskConsumerOptions {
+@@ -692,6 +698,13 @@ public:
+     // are the ones acquire() opened.
+     [[nodiscard]] CockpitSlotTime slot_time(std::int64_t display_time) noexcept;
+ 
++    // DCS Control (0043): drops the retired sets (the producer's textures of
++    // a generation or header no longer used) whose copies have completed.
++    // A fence read alone: never waits. Called on every xrEndFrame, frame
++    // generation on or off: acquire() drops them too, but runs only while
++    // generation does.
++    void drop_idle() noexcept;
++
+     [[nodiscard]] CockpitMaskConsumerStats stats() const noexcept;
+ 
+ private:
+diff --git a/src/d3d12/cockpit_mask.cpp b/src/d3d12/cockpit_mask.cpp
+--- a/src/d3d12/cockpit_mask.cpp
++++ b/src/d3d12/cockpit_mask.cpp
+@@ -334,6 +334,9 @@ struct CockpitMaskConsumer::Impl {
+             store_motion_reader_heartbeat(motion_writable_block, 0);
+         }
+         motion_last_heartbeat_qpc = 0;
++        // DCS Control (0043): no lookup may follow (a stall, the end): the
++        // retired sets whose copies completed go now.
++        drop_retired();
+     }
+ 
+     // "Masks wanted", whatever the header says (the producer starts only
+@@ -925,8 +928,21 @@ struct CockpitMaskConsumer::Impl {
+         last_release_value = 0;
+     }
+ 
++    // DCS Control (0043): the mask's set and its companions' together: a
++    // header no longer usable (inactive, gone, another adapter) frees the
++    // depth and motion textures as well, instead of keeping them until the
++    // next pair_depth / pair_motion (none while the export is off). Each is
++    // kept until the copies that read it complete (drop_retired).
++    void retire_all_opened() noexcept {
++        retire_opened();
++        retire_depth_opened();
++        retire_motion_opened();
++    }
++
+     void drop_retired() noexcept {
+         const std::uint64_t completed = completed_copies();
++        // DCS Control (0043): counted (stats().sets_dropped).
++        const std::size_t before = retired.size() + depth_retired.size() + motion_retired.size();
+         retired.erase(
+             std::remove_if(retired.begin(), retired.end(),
+                 [completed](const Opened& old) { return old.last_use_copy_value <= completed; }),
+@@ -939,6 +955,7 @@ struct CockpitMaskConsumer::Impl {
+             std::remove_if(motion_retired.begin(), motion_retired.end(),
+                 [completed](const MotionOpened& old) { return old.last_use_copy_value <= completed; }),
+             motion_retired.end());
++        stats.sets_dropped += before - (retired.size() + depth_retired.size() + motion_retired.size());
+     }
+ 
+     [[nodiscard]] double milliseconds_since(std::int64_t now, std::int64_t then) const noexcept {
+@@ -1241,11 +1258,11 @@ struct CockpitMaskConsumer::Impl {
+         }
+         if (!cm::header_usable(header, process_id) ||
+             (header.flags & cm::header_flags::fence) == 0 || header.fenceHandle == 0) {
+-            retire_opened();
++            retire_all_opened(); // DCS Control (0043)
+             return CockpitMaskLookup::header_unusable;
+         }
+         if (header.adapterLuid != adapter_luid) {
+-            retire_opened();
++            retire_all_opened(); // DCS Control (0043)
+             return CockpitMaskLookup::adapter_mismatch;
+         }
+         last_header_generation = header.generation; // DCS Control (0041)
+@@ -1840,6 +1857,18 @@ CockpitSlotTime CockpitMaskConsumer::slot_time(std::int64_t display_time) noexce
+     }
+ }
+ 
++// DCS Control (0043).
++void CockpitMaskConsumer::drop_idle() noexcept {
++    if (impl_ == nullptr) {
++        return;
++    }
++    try {
++        std::scoped_lock lock(impl_->mutex);
++        impl_->drop_retired();
++    } catch (...) {
++    }
++}
++
+ CockpitMaskConsumerStats CockpitMaskConsumer::stats() const noexcept {
+     if (impl_ == nullptr) {
+         CockpitMaskConsumerStats none{};
+@@ -1848,7 +1877,13 @@ CockpitMaskConsumerStats CockpitMaskConsumer::stats() const noexcept {
+     }
+     try {
+         std::scoped_lock lock(impl_->mutex);
+-        return impl_->stats;
++        CockpitMaskConsumerStats out = impl_->stats;
++        // DCS Control (0043): the sets held now.
++        out.sets_opened = (impl_->opened ? 1U : 0U) + (impl_->depth_opened ? 1U : 0U) +
++            (impl_->motion_opened ? 1U : 0U);
++        out.sets_retired = static_cast<std::uint32_t>(
++            impl_->retired.size() + impl_->depth_retired.size() + impl_->motion_retired.size());
++        return out;
+     } catch (...) {
+         return {};
+     }
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -12865,6 +12865,23 @@ struct PreparedProjectionFrame {
+     return consumer ? consumer->slot_time(static_cast<std::int64_t>(display_time)) : none;
+ }
+ 
++// DCS Control (0043): the cockpit mask consumer's retired sets (mask, depth,
++// motion) whose copies completed, dropped on every xrEndFrame once a consumer
++// exists, frame generation on or off (acquire_cockpit_mask runs only while
++// it is on). A fence read: never waits.
++void drop_idle_cockpit_mask(SessionState& session) noexcept {
++    std::shared_ptr<xrfg::CockpitMaskConsumer> consumer;
++    try {
++        std::scoped_lock lock(session.cockpit_mask_mutex);
++        consumer = session.cockpit_mask;
++    } catch (...) {
++        return;
++    }
++    if (consumer) {
++        consumer->drop_idle();
++    }
++}
++
+ [[nodiscard]] PreparedGeneration prepare_frame_generation(
+     XrSwapchain application_swapchain,
+     bool request_pair,
+@@ -15951,6 +15968,8 @@ XrResult layer_end_frame_impl(
+         }
+         state->scene_last_end_entry = entered;
+     }
++    // DCS Control (0043): before any pass-through return below.
++    drop_idle_cockpit_mask(*state);
+     // DCS VR Control (0004): the frame's throughput evidence, before the
+     // layer queues anything of its own on the application's context; and
+     // the next frame's GPU bracket opened when this call returns.
+diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
+--- a/tests/cockpit_mask_tests.cpp
++++ b/tests/cockpit_mask_tests.cpp
+@@ -1963,6 +1963,81 @@ void test_ini() {
+     std::cout << "cockpit mask: [ofxr] cockpit_mask and nvidia_occlusion_aware=3 read\n";
+ }
+ 
++// DCS Control (0043): a mask header no longer usable retires the depth and
++// motion sets with the mask's (not kept until the next pairing, none while
++// the export is off), each kept while a copy may still read it, and dropped
++// once the copies complete even without another acquire (drop_idle, called
++// on every xrEndFrame, generation on or off).
++void test_unusable_header_retires_all_sets(Gpu& gpu) {
++    const std::wstring suffix = test_suffix(L"retireall");
++    FakeProducer producer(gpu, suffix);
++    FakeDepthProducer depth(gpu, suffix, producer);
++    FakeMotionProducer motion(gpu, suffix, producer);
++    auto options = test_options(suffix);
++    options.cockpit_depth = true;
++    options.dcs_motion = true;
++    xrfg::CockpitMaskConsumer consumer;
++    require_hresult(consumer.initialize(gpu.device.Get(), {}, options), "consumer initialize");
++    std::uint64_t seq = producer.commit(9000, 255);
++    depth.commit(producer);
++    motion.commit(producer, 8990);
++    auto frame = consumer.acquire(9000);
++    require(frame != nullptr && frame->depth && frame->motion, "retire all: mask, depth and motion paired");
++    require(consumer.stats().sets_opened == 3 && consumer.stats().sets_retired == 0,
++        "retire all: three sets opened");
++    // The copy waits for the producer's fence: still outstanding.
++    Sleep(50);
++    require(frame->ready_fence->GetCompletedValue() < frame->ready_value, "retire all: the copy is outstanding");
++
++    // The export goes off: the header inactive.
++    producer.header_.flags &= ~cm::header_flags::active;
++    producer.publish();
++    require(consumer.acquire(9100) == nullptr && consumer.stats().last == xrfg::CockpitMaskLookup::header_unusable,
++        "retire all: an inactive header");
++    xrfg::CockpitMaskConsumerStats stats = consumer.stats();
++    require(stats.sets_opened == 0 && stats.sets_retired == 3,
++        "retire all: the depth and motion sets retired with the mask's (opened " +
++            std::to_string(stats.sets_opened) + ", retired " + std::to_string(stats.sets_retired) + ")");
++    // Idle (no acquire): kept while the copy may still read them.
++    consumer.drop_idle();
++    require(consumer.stats().sets_retired == 3 && consumer.stats().sets_dropped == 0,
++        "retire all: nothing dropped while the copy is outstanding");
++
++    producer.signal(seq);
++    gpu.wait(frame->ready_fence.Get(), frame->ready_value);
++    frame.reset();
++    // done_fence follows the copy fence on the copy queue: dropped by
++    // drop_idle alone once it lands.
++    const ULONGLONG deadline = GetTickCount64() + 10000;
++    while (true) {
++        consumer.drop_idle();
++        stats = consumer.stats();
++        if (stats.sets_retired == 0 || GetTickCount64() > deadline) {
++            break;
++        }
++        Sleep(5);
++    }
++    require(stats.sets_retired == 0 && stats.sets_dropped == 3,
++        "retire all: the three sets dropped once their copies completed, without an acquire (dropped " +
++            std::to_string(stats.sets_dropped) + ")");
++
++    // Active again: all three opened afresh, and paired.
++    producer.header_.flags |= cm::header_flags::active;
++    seq = producer.commit(9200, 255);
++    depth.commit(producer);
++    motion.commit(producer, 9100);
++    auto again = consumer.acquire(9200);
++    require(again != nullptr && again->depth && again->motion && consumer.stats().sets_opened == 3,
++        "retire all: paired again once active");
++    stats = consumer.stats();
++    require(stats.generations_opened == 2 && stats.depth_generations_opened == 2 &&
++            stats.motion_generations_opened == 2,
++        "retire all: each set opened again");
++    producer.signal(seq);
++    gpu.wait(again->ready_fence.Get(), again->ready_value);
++    std::cout << "cockpit mask: an unusable header retires the mask, depth and motion sets, dropped once copied\n";
++}
++
+ }  // namespace
+ 
+ int main() {
+@@ -1986,6 +2061,7 @@ int main() {
+         test_copy_failures_release(gpu); // DCS Control (0041)
+         test_inactive_header_at_open(gpu); // DCS Control (0041)
+         test_wrapped_rects(gpu); // DCS Control (0040)
++        test_unusable_header_retires_all_sets(gpu); // DCS Control (0043)
+         std::cout << "cockpit mask consumer tests passed\n";
+         return 0;
+     } catch (const std::exception& error) {

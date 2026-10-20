@@ -158,11 +158,29 @@ bool dcs_quad_focus_processing_allowed(DlssViewId view_id, IUnknown* output,
 // output extent is a Quad Views focus extent of the published layout (and not a
 // peripheral one), 0 when a valid layout says it is not, -1 when no valid layout
 // is available yet (the creation then cannot be classified).
-int dcs_quad_focus_create_extent(unsigned width, unsigned height) noexcept {
+// require_fresh: only a layout of the snapshot's session published within the
+// last 250 ms (the size proof's own bound) counts; an older one may describe the
+// previous mission's swapchains.
+int dcs_quad_focus_extent(unsigned width, unsigned height, bool require_fresh) noexcept {
     std::lock_guard lock(coordinator_mutex);
     CheekyGazeSnapshotV1 sample{};
     DcsQuadLayoutV1 layout{};
     if (!load_snapshot(sample) || !dcs_quad_load_layout(layout) || !layout.valid) return -1;
+    if (require_fresh) {
+        LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency);
+        const auto freq = static_cast<std::uint64_t>(frequency.QuadPart);
+        const auto now = qpc_now();
+        if (layout.session_generation != sample.session_generation || !freq || !layout.publication_qpc ||
+            now < layout.publication_qpc || now - layout.publication_qpc > freq / 4U) return -1;
+    }
     const auto is = [&](unsigned view) { return layout.width[view] == width && layout.height[view] == height; };
     return (is(2) || is(3)) && !is(0) && !is(1) ? 1 : 0;
+}
+int dcs_quad_focus_create_extent(unsigned width, unsigned height) noexcept {
+    return dcs_quad_focus_extent(width, height, true);
+}
+// Any valid layout, however old: only used to keep a view on the private SR
+// (DCS-equivalent output for any view), never to create DCS's own feature.
+int dcs_quad_focus_layout_extent(unsigned width, unsigned height) noexcept {
+    return dcs_quad_focus_extent(width, height, false);
 }

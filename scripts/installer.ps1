@@ -58,8 +58,15 @@ if ($Action -eq 'Install') {
     if ($LASTEXITCODE -ne 0) { throw 'Package integrity failed. Prerequisite installation was not attempted.' }
 }
 if ($Action -eq 'Install' -and $InstallPrerequisites) {
-    if (-not $webViewVersion) { Install-MicrosoftPrerequisite 'WebView2' 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' '/silent /install' }
-    if ($needsCpp) { Install-MicrosoftPrerequisite 'VisualCpp-x64' 'https://aka.ms/vc14/vc_redist.x64.exe' '/install /passive /norestart' }
+    # A prerequisite that cannot be installed (a declined administrator prompt, no network) never stops the install or an
+    # update: the app checks for both when it starts and says what is missing.
+    foreach ($prerequisite in @(
+        @{ Needed = -not $webViewVersion; Name = 'WebView2'; Url = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'; Arguments = '/silent /install' },
+        @{ Needed = $needsCpp; Name = 'VisualCpp-x64'; Url = 'https://aka.ms/vc14/vc_redist.x64.exe'; Arguments = '/install /passive /norestart' })) {
+        if (-not $prerequisite.Needed) { continue }
+        try { Install-MicrosoftPrerequisite $prerequisite.Name $prerequisite.Url $prerequisite.Arguments }
+        catch { Write-Output ("$($prerequisite.Name) was not installed: " + $_.Exception.Message) }
+    }
 }
 Write-Output $(if (Get-WebViewVersion) { 'WebView2 Runtime detected.' } else { 'WebView2 Runtime missing. Install the Evergreen Runtime from https://developer.microsoft.com/microsoft-edge/webview2/ before opening the GUI.' })
 if ($needsCpp -and -not $InstallPrerequisites) { Write-Output 'Visual C++ x64 runtime 14.50 or newer is required. Run Install DCS Control.cmd to obtain official prerequisites.' }

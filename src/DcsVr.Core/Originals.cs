@@ -36,6 +36,9 @@ public sealed record OriginalsBaseline
     public string State { get; set; } = "clean";
     public DateTimeOffset? LastActionAt { get; set; }
     public string? LastAction { get; set; }
+    /// <summary>What the last complete apply installed whole (path → hashes), kept while an apply or Back to stock DCS
+    /// runs: a resumed run still tells the pilot's newer files from DCS Control's own.</summary>
+    public Dictionary<string, HashSet<string>>? LastInstalled { get; set; }
 }
 
 /// <param name="Action">restore (the backup is put back), remove (DCS Control created it) or settings (owned
@@ -90,8 +93,9 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
     /// <summary>The owned options.lua settings with their original values, for the planner (null when none).</summary>
     public IReadOnlyDictionary<string, string?>? OwnedSettings(string optionsPath)
     {
-        var full = System.IO.Path.GetFullPath(optionsPath);
-        return Read().Files.FirstOrDefault(f => f.Path.Equals(full, StringComparison.OrdinalIgnoreCase))?.Settings;
+        // Matched like Apply matches (also under another spelling of the same file: a junction, subst drive, 8.3 name or
+        // redirected Saved Games), so the planner sees the owned settings Apply will merge into.
+        return Find(Read(), System.IO.Path.GetFullPath(optionsPath))?.Settings;
     }
 
     /// <summary>
@@ -111,6 +115,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         var own = ownHashes?.Invoke() ?? new HashSet<string>();
         var replaced = new List<string>();
         var originals = new List<OriginalFile>();
+        var superseded = new List<OriginalFile>();
         // 1. The original of every path is recorded before anything is written.
         foreach (var file in plan.Files)
         {
@@ -123,6 +128,17 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                 if (original.Foreign) replaced.Add(full);
                 Log($"First write of {full}: " + (original.Foreign ? "another program's file, backed up as " + original.BackupFile : original.BackupFile is not null ? "original backed up as " + original.BackupFile : original.Leftover ? "a file identical to a DCS Control component, counted as absent" : "absent before"));
             }
+            else if (ReplacedSinceInstall(baseline, original, full, own, file) is { } newer)
+            {
+                // The pilot or another program put a newer file there after DCS Control installed its own (a ReShade
+                // update, for example): that file becomes the original Back to stock DCS puts back.
+                var at = baseline.Files.IndexOf(original);
+                superseded.Add(original);
+                original = Capture(file, full, own) with { Since = original.Since };
+                baseline.Files[at] = original;
+                if (original.Foreign) replaced.Add(full);
+                Log($"{full} was replaced after DCS Control installed it ({newer}); the new file is backed up as {original.BackupFile}.");
+            }
             if (file.LuaChanges is { } changes)
             {
                 original.Settings ??= [];
@@ -131,7 +147,12 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             if (file.RuntimeLogs is { Count: > 0 } logs) original.RuntimeLogs = [.. (original.RuntimeLogs ?? []).Union(logs.Select(System.IO.Path.GetFullPath), StringComparer.OrdinalIgnoreCase)];
             originals.Add(original);
         }
+        // What the last apply installed, read before the record is cleared: a stale file replaced since is the pilot's.
+        var installedBefore = InstalledHashes(baseline) ?? Recorded(baseline.LastInstalled);
+        baseline.LastInstalled = installedBefore;
         baseline.State = "applying"; baseline.Current = null; Save(baseline);
+        // The backups of originals a newer file took over from are no longer referenced once the record is saved.
+        foreach (var old in superseded) DeleteBackup(old);
         var putBack = new List<string>();
         var index = -1;
         try
@@ -141,11 +162,25 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             var planned = new HashSet<OriginalFile>(originals, ReferenceEqualityComparer.Instance);
             foreach (var stale in baseline.Files.AsEnumerable().Reverse().Where(f => !planned.Contains(f)).ToArray())
             {
-                try { RestoreEntry(stale, out _); }
-                catch (Exception error) when (error is InvalidDataException or FileNotFoundException or DirectoryNotFoundException)
+                if (RootGone(stale))
                 {
-                    // A backup that is missing or damaged (quarantined by an antivirus, for example) must not block every
-                    // later apply: the entry stays listed for Back to stock DCS, which reports it.
+                    Log($"{stale.Root} no longer exists; {stale.Path} is not put back (its backup stays as {stale.BackupFile ?? "none"}).");
+                    baseline.Files.Remove(stale); Save(baseline);
+                    continue;
+                }
+                try
+                {
+                    if (PilotsNewerFile(installedBefore, stale, own))
+                        // Updated by its program after DCS Control installed its file (a ReShade update): the newer file
+                        // stays, never the older original over it.
+                        Log($"{stale.Path} was replaced after DCS Control installed it; the newer file is left as it is.");
+                    else RestoreEntry(stale, out _);
+                }
+                catch (Exception error) when (error is InvalidDataException or FileNotFoundException or DirectoryNotFoundException or IOException or UnauthorizedAccessException)
+                {
+                    // A backup that is missing or damaged (quarantined by an antivirus, for example), or a stale file that
+                    // stays locked or protected (Controlled Folder Access), must not block every later apply: the entry
+                    // stays listed for Back to stock DCS, which reports it.
                     Log("Could not put back " + stale.Path + ": " + error.Message);
                     continue;
                 }
@@ -170,6 +205,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                 entries.Add(new() { Path = full, InstalledSha256 = Hashing.BytesSha256(bytes), PreviousSha256 = original.OriginalSha256, LuaChanges = file.LuaChanges, IniValues = file.IniValues, RuntimeLogs = file.RuntimeLogs, Root = file.Root is null ? null : System.IO.Path.GetFullPath(file.Root), Applied = true });
             }
             baseline.Current = new() { Id = Guid.NewGuid().ToString("N"), ProfileId = plan.ProfileId, Status = "applied", Entries = entries };
+            baseline.LastInstalled = null;
             baseline.State = "applied"; baseline.LastAction = "Applied " + plan.Description; baseline.LastActionAt = DateTimeOffset.UtcNow;
             Save(baseline);
             Log($"Applied {plan.ProfileId}: {entries.Count} files written, {putBack.Count} put back, {replaced.Count} other programs' files replaced.");
@@ -201,15 +237,36 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
     {
         using var exclusive = Lock();
         var baseline = LoadCore();
+        // What the applied profile installed, read before the record is cleared: a file replaced since is the pilot's.
+        var installed = InstalledHashes(baseline) ?? Recorded(baseline.LastInstalled);
+        var own = ownHashes?.Invoke() ?? new HashSet<string>();
+        baseline.LastInstalled = installed;
         baseline.State = "restoring"; baseline.Current = null; Save(baseline);
         var problems = new List<string>();
         var count = 0;
         foreach (var original in baseline.Files.AsEnumerable().Reverse().ToArray())
         {
+            // A DCS install or Saved Games folder removed since (another drive, DCS.openbeta): nothing is rebuilt there;
+            // the entry goes, its backup stays in the originals folder.
+            if (RootGone(original))
+            {
+                Log($"{original.Root} no longer exists; {original.Path} is not put back (its backup stays as {original.BackupFile ?? "none"}).");
+                baseline.Files.Remove(original); Save(baseline); count++;
+                continue;
+            }
             try
             {
-                RestoreEntry(original, out var note);
-                if (note is not null) Log(note);
+                if (PilotsNewerFile(installed, original, own))
+                {
+                    // Replaced after DCS Control installed its file (by the pilot or another program, a ReShade update for
+                    // example): the newer file is left where it is, neither overwritten with the older original nor removed.
+                    Log($"{original.Path} was replaced after DCS Control installed it; the newer file is left as it is.");
+                }
+                else
+                {
+                    RestoreEntry(original, out var note);
+                    if (note is not null) Log(note);
+                }
                 baseline.Files.Remove(original); Save(baseline); DeleteBackup(original); count++;
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException)
@@ -218,6 +275,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                 Log("Could not restore " + original.Path + ": " + error.Message);
             }
         }
+        if (problems.Count == 0) baseline.LastInstalled = null;
         baseline.State = problems.Count == 0 ? "clean" : "restoring";
         baseline.LastAction = problems.Count == 0 ? $"Restored {count} original files" : $"Restored {count} original files; {problems.Count} could not be restored";
         baseline.LastActionAt = DateTimeOffset.UtcNow;
@@ -332,6 +390,10 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
     private void RestoreEntry(OriginalFile original, out string? note)
     {
         note = null;
+        // Its folder is missing but not removed (RootGone said no: a drive or top folder that is not there now, an unmounted
+        // volume): nothing is rebuilt there and the entry stays listed until the folder is back.
+        if (original.Root is { } root && !System.IO.Directory.Exists(root))
+            throw new IOException("Its folder " + root + " is not available now (an offline or unmounted drive); it stays listed for Back to stock DCS.");
         PathPolicy.RejectReparsePoints(original.Path, original.Root);
         byte[] Backup()
         {
@@ -357,8 +419,11 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             catch (Exception error) when (error is InvalidDataException or DecoderFallbackException or ArgumentException)
             {
                 if (original.BackupFile is null) throw new InvalidDataException("The file cannot be read and has no backup: " + error.Message);
+                // The file as it is now (DCS's and the pilot's later changes) is kept next to the backups first.
+                var kept = KeepReplaced(original.Path);
                 AtomicFile.Write(original.Path, Backup());
-                note = $"{original.Path} could not be read ({error.Message}); the whole original file was put back.";
+                note = $"{original.Path} could not be read ({error.Message}); the whole original file was put back"
+                    + (kept is null ? "." : $"; the file as it was is kept as {kept}.");
             }
             return;
         }
@@ -512,6 +577,124 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         if (baseline.Files.FirstOrDefault(f => f.Path.Equals(path, StringComparison.OrdinalIgnoreCase)) is { } same) return same;
         var canonical = SystemPaths.Canonical(path);
         return baseline.Files.FirstOrDefault(f => SystemPaths.Canonical(f.Path).Equals(canonical, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Copies the file at <paramref name="path"/> into the originals folder as &lt;n&gt;.replaced before it is
+    /// overwritten or removed; returns the copy's path, or null when there was no file.</summary>
+    private string? KeepReplaced(string path)
+    {
+        if (!File.Exists(path)) return null;
+        System.IO.Directory.CreateDirectory(Directory);
+        // Copies are kept 90 days: long enough to recover a file by hand, not forever.
+        foreach (var stale in new DirectoryInfo(Directory).EnumerateFiles("*.replaced").Where(f => f.LastWriteTimeUtc < DateTime.UtcNow.AddDays(-90)))
+            try { stale.Delete(); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        var copy = System.IO.Path.Combine(Directory, $"{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}"[..24] + ".replaced");
+        AtomicFile.Write(copy, File.ReadAllBytes(path));
+        return copy;
+    }
+
+    /// <summary>The whole files the applied profile installed, by path, with the hashes it installed there (null when no
+    /// complete apply is recorded, so a later change cannot be told from DCS Control's own write). Files that only get
+    /// settings or values merged in (options.lua, component INIs) are not listed: they change legitimately.</summary>
+    private static Dictionary<string, HashSet<string>>? InstalledHashes(OriginalsBaseline baseline)
+    {
+        if (baseline.Current is not { } journal) return null;
+        var installed = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in journal.Entries.Where(e => e.LuaChanges is null && e.IniValues is null && !e.Deleted))
+        {
+            var path = SystemPaths.Canonical(entry.Path);
+            if (!installed.TryGetValue(path, out var hashes)) installed[path] = hashes = new(StringComparer.OrdinalIgnoreCase);
+            hashes.Add(entry.InstalledSha256);
+        }
+        return installed;
+    }
+
+    /// <summary>True when the file now at a path DCS Control installed whole is something else: neither the original,
+    /// nor what DCS Control installed there, nor any of its components. Used only for another program's file that DCS
+    /// Control replaced (dxgi.dll of ReShade, for example): when that program puts a newer version back, the newer one
+    /// is what the pilot has, so it is not overwritten with the older original. DCS Control's own files and the files
+    /// it created keep the rule that Back to stock DCS puts back exactly what was there before.</summary>
+    private static bool ReplacedAfterInstall(Dictionary<string, HashSet<string>> installed, string path, string now, string? original, IReadOnlySet<string> own)
+        => installed.TryGetValue(SystemPaths.Canonical(path), out var hashes) && !hashes.Contains(now)
+           && !string.Equals(now, original, StringComparison.OrdinalIgnoreCase) && !own.Contains(now) && !IsCheekyLoader(path);
+
+    /// <summary>True for a Cheeky DLSS loader (dxgi.dll) of any DCS Control version or copy (a dev build, another state
+    /// folder): it names its CheekyFoveatedDLSS folder. Never the pilot's own file, so never taken as a newer original.</summary>
+    private static bool IsCheekyLoader(string path)
+    {
+        try
+        {
+            if (new FileInfo(path).Length > 64L * 1024 * 1024) return false;
+            return File.ReadAllBytes(path).AsSpan().IndexOf("CheekyFoveatedDLSS"u8) >= 0;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    /// <summary>The hash of the file now at <paramref name="full"/> when it was replaced after DCS Control installed its
+    /// own whole file there (see <see cref="ReplacedAfterInstall"/>); null otherwise, and whenever that cannot be told (no
+    /// complete apply recorded, settings files, the app's own folder).</summary>
+    private static string? ReplacedSinceInstall(OriginalsBaseline baseline, OriginalFile original, string full, IReadOnlySet<string> own, FileMutation file)
+    {
+        // Another program's original, or a path that was empty and now holds another program's library (ReShade
+        // installed there while the profile was applied). A file DCS Control created and the pilot edited is simply
+        // written again.
+        if (!(original.Foreign || original.BackupFile is null && IsLibrary(full)) || original.Settings is not null || file.LuaChanges is not null || file.IniValues is not null || file.OwnedLocation || !File.Exists(full)) return null;
+        // After an interrupted apply the record is cleared; what that apply's predecessor installed is kept for this.
+        if ((InstalledHashes(baseline) ?? Recorded(baseline.LastInstalled)) is not { } installed) return null;
+        var now = Hashing.FileSha256(full);
+        if (now == Hashing.BytesSha256(file.Content) || file.OwnHashes?.Contains(now) == true) return null;
+        return ReplacedAfterInstall(installed, full, now, original.OriginalSha256, own) ? now : null;
+    }
+
+    /// <summary>A Windows program library (starts with "MZ"): what another program (ReShade, an overlay) puts in DCS's bin.</summary>
+    private static bool IsLibrary(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return false;
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return stream.ReadByte() == 'M' && stream.ReadByte() == 'Z';
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    /// <summary>The file now at the entry's path was put there by the pilot or another program after DCS Control installed
+    /// its own: another program's newer version of its file (a ReShade update), or another program's library on a path
+    /// that was empty (ReShade installed while the profile was applied). It stays where it is.</summary>
+    /// <summary>The recorded install hashes with the case-insensitive comparers the live ones use (JSON loses them).</summary>
+    private static Dictionary<string, HashSet<string>>? Recorded(Dictionary<string, HashSet<string>>? recorded) =>
+        recorded?.ToDictionary(p => p.Key, p => new HashSet<string>(p.Value, StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
+
+    private static bool PilotsNewerFile(Dictionary<string, HashSet<string>>? installed, OriginalFile original, IReadOnlySet<string> own)
+    {
+        if (installed is null || original.Settings is not null || !File.Exists(original.Path)) return false;
+        if (!original.Foreign && !(original.BackupFile is null && IsLibrary(original.Path))) return false;
+        return ReplacedAfterInstall(installed, original.Path, Hashing.FileSha256(original.Path), original.OriginalSha256, own);
+    }
+
+    /// <summary>The folder the entry was authorized under no longer exists (that DCS install or variant was removed). A
+    /// drive that is only offline (an external disk, a locked volume, a network share) is not "removed": its entries stay.
+    /// Neither is a root whose whole path is missing below the drive (the letter may now belong to another disk) or one
+    /// that is only unreadable: removed means a parent folder still exists and lists no such folder.</summary>
+    private static bool RootGone(OriginalFile original)
+    {
+        try
+        {
+            if (original.Root is not { } root || System.IO.Directory.Exists(root)) return false;
+            var full = System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(root));
+            var volume = System.IO.Path.GetPathRoot(full);
+            if (string.IsNullOrEmpty(volume) || !System.IO.Directory.Exists(volume)) return false;
+            var missing = full;
+            var parent = System.IO.Path.GetDirectoryName(missing);
+            while (parent is not null && !System.IO.Directory.Exists(parent))
+            {
+                missing = parent;
+                parent = System.IO.Path.GetDirectoryName(missing);
+            }
+            if (parent is null || string.Equals(System.IO.Path.TrimEndingDirectorySeparator(parent), System.IO.Path.TrimEndingDirectorySeparator(volume), StringComparison.OrdinalIgnoreCase)) return false;
+            return !System.IO.Directory.EnumerateFileSystemEntries(parent, System.IO.Path.GetFileName(missing)).Any();
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
     }
 
     private string NextBackupName()

@@ -17,6 +17,22 @@ public static class EngineOptimizations
     public static string ModuleDirectory(string optionsPath) =>
         Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(optionsPath))!)!, "Scripts", ModuleFolder);
 
+    /// <summary>The module's log of the latest DCS start: DcsQvCull.log, or DcsQvCull.&lt;pid&gt;.log written by a DCS started
+    /// while another one held DcsQvCull.log, whichever was written last (never the kept .prev.log).</summary>
+    public static string ModuleLog(string module)
+    {
+        var log = Path.Combine(module, "DcsQvCull.log");
+        try
+        {
+            if (!Directory.Exists(module)) return log;
+            var newest = new DirectoryInfo(module).EnumerateFiles("DcsQvCull.*.log")
+                .Where(f => System.Text.RegularExpressions.Regex.IsMatch(f.Name, @"^DcsQvCull\.[0-9]+\.log$"))
+                .Append(new FileInfo(log)).Where(f => f.Exists).MaxBy(f => f.LastWriteTimeUtc);
+            return newest?.FullName ?? log;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return log; }
+    }
+
     /// <summary>Reads DcsQvCull.log (rewritten at every DCS start) and the newest report. <paramref name="dcsLog"/> is
     /// DCS's own log, where a module that could not be loaded is reported.</summary>
     public static EngineStatus Read(string optionsPath, string? dcsLog, bool dcsRunning)
@@ -24,7 +40,7 @@ public static class EngineOptimizations
         var module = ModuleDirectory(optionsPath);
         var loader = Path.Combine(module, "DcsQvCull.dll");
         var hook = Path.Combine(Path.GetDirectoryName(module)!, "Hooks", "DcsQvCull.lua");
-        var log = Path.Combine(module, "DcsQvCull.log");
+        var log = ModuleLog(module);
         var (report, reportAt) = NewestReport(module);
         if (!File.Exists(loader) || !File.Exists(hook))
             return new("not-installed", "Launch DCS (or Apply without launching) installs it when Engine Optimizations is on.", [], false, false, false, false, module, null, report, reportAt, null);
@@ -38,7 +54,15 @@ public static class EngineOptimizations
             return new("installed", dcsRunning ? "Installed. DCS loads it when its interface starts." : "Installed. DCS loads it at its next start.", [], false, false, false, false, module, null, report, reportAt, null);
         }
         bool Has(string text) => lines.Any(l => l.Contains(text, StringComparison.Ordinal));
-        var loaded = Has("loader: starting payload");
+        // The loader's last outcome counts: a payload that failed to start after an earlier one ran is a failure now.
+        var payloadStart = lines.FindLastIndex(l => l.Contains("loader: starting payload", StringComparison.Ordinal));
+        var startFailed = lines.FindLastIndex(l => l.Contains("loader: payload start reported an error", StringComparison.Ordinal) || l.Contains("loader: payload exports missing", StringComparison.Ordinal) || l.Contains("loader: payload not loaded (", StringComparison.Ordinal));
+        if (startFailed > payloadStart)
+        {
+            var why = lines[startFailed][(lines[startFailed].IndexOf("loader: ", StringComparison.Ordinal) + 8)..].Trim();
+            return new("failed", "The module could not start: " + why + ". See DcsQvCull.log.", [why], false, false, false, false, module, log, report, reportAt, null);
+        }
+        var loaded = payloadStart >= 0;
         var timerAvailable = Has("timer cache: dx11backend!ED_get_time redirected");
         var lastStats = lines.LastOrDefault(l => l.Contains("stats: ", StringComparison.Ordinal));
         var timerActive = lastStats?.Contains("timer=cache", StringComparison.Ordinal) == true;
@@ -63,8 +87,12 @@ public static class EngineOptimizations
         // The newer optimizations check the DCS build first and stay off when it is not the one they were made for.
         foreach (var (prefix, name) in new[] { ("model allocator:", "model data allocator"), ("triangle counter:", "statistics counter"),
                      ("constant buffer skip:", "effect constant-buffer skip"), ("texture binds:", "texture streaming dedupe"), ("partition weights:", "culling partition by real cost"), ("frame heap:", "frame memory per thread"), ("task-queue clock:", "task queue clock cache"), ("shadow batching:", "shadow caster instancing"), ("shadow inst:", "shadow caster instancing"), ("big model pages:", "shadow caster instancing"), ("split filter", "redundant state filter"), ("shadow recorder", "multi-threaded shadow recorder"), ("gbuffer recorder", "multi-threaded G-buffer") })
-            if (lines.Any(l => l.Contains(prefix, StringComparison.Ordinal) && !l.Contains("not recordable", StringComparison.Ordinal) && !l.Contains("texture classes the table refused", StringComparison.Ordinal) && !l.Contains("the driver lacks command lists", StringComparison.Ordinal) && !l.Contains("the D3D11 device lacks what the recorder needs", StringComparison.Ordinal) && (l.Contains("does not match", StringComparison.Ordinal) || l.Contains("unexpected bytes", StringComparison.Ordinal) || l.Contains("unknown patch", StringComparison.Ordinal) || l.Contains("could not", StringComparison.Ordinal) || l.Contains("FAILED", StringComparison.Ordinal) || l.Contains("disabled for this session", StringComparison.Ordinal) || l.Contains("off for this session", StringComparison.Ordinal) || l.Contains("NOT SAFE", StringComparison.Ordinal) || l.Contains("latched", StringComparison.Ordinal) || (l.Contains("exception", StringComparison.OrdinalIgnoreCase) && l.Contains("contained", StringComparison.Ordinal)) || l.Contains("DISABLED", StringComparison.Ordinal) || l.EndsWith("; unavailable", StringComparison.Ordinal) || l.Contains("; jobs start at RenderGraph::render entry", StringComparison.Ordinal) || l.EndsWith("; off", StringComparison.Ordinal) || l.EndsWith("; skipped", StringComparison.Ordinal) || l.Contains("not installed", StringComparison.Ordinal) && !l.Contains("counters not installed", StringComparison.Ordinal))))
+            if (lines.Any(l => l.Contains(prefix, StringComparison.Ordinal) && !l.Contains("not recordable", StringComparison.Ordinal) && !l.Contains("texture classes the table refused", StringComparison.Ordinal) && !l.Contains("the driver lacks command lists", StringComparison.Ordinal) && !l.Contains("the D3D11 device lacks what the recorder needs", StringComparison.Ordinal) && !l.Contains("quad-view filter", StringComparison.Ordinal) && !l.Contains("execution identity", StringComparison.Ordinal) && (l.Contains("does not match", StringComparison.Ordinal) || l.Contains("unexpected bytes", StringComparison.Ordinal) || l.Contains("unknown patch", StringComparison.Ordinal) || l.Contains("could not", StringComparison.Ordinal) || l.Contains("FAILED", StringComparison.Ordinal) || l.Contains("disabled for this session", StringComparison.Ordinal) || l.Contains("off for this session", StringComparison.Ordinal) || l.Contains("NOT SAFE", StringComparison.Ordinal) || l.Contains("latched", StringComparison.Ordinal) || (l.Contains("exception", StringComparison.OrdinalIgnoreCase) && l.Contains("contained", StringComparison.Ordinal)) || l.Contains("DISABLED", StringComparison.Ordinal) || l.EndsWith("; unavailable", StringComparison.Ordinal) || l.Contains("; jobs start at RenderGraph::render entry", StringComparison.Ordinal) || l.EndsWith("; off", StringComparison.Ordinal) || l.EndsWith("; skipped", StringComparison.Ordinal) || l.Contains("not installed", StringComparison.Ordinal) && !l.Contains("counters not installed", StringComparison.Ordinal))))
                 warnings.Add($"{char.ToUpperInvariant(name[0])}{name[1..]} turned itself off: it does not recognise this DCS version, or one of its safety checks failed. The other optimizations still run.");
+        // Depth boost's dual camera finds the pilot's own aircraft through a table in NGModel.dll; a DCS build that moved it
+        // leaves that matching off (the dual camera itself keeps running).
+        if (Has("cockpit ipd: ownship matching off"))
+            warnings.Add("This DCS version changed something the dual camera uses to recognise your own aircraft, so that part is off. Depth boost still runs.");
         if (Has("ERROR: Scene.dll exports not found"))
             warnings.Add("This DCS version is not supported by the culling hook, so Culling partition boost is off. The other optimizations still run.");
         // A suite is running from its start line until its report line (statistics keep arriving after both).

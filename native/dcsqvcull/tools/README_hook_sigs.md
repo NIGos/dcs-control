@@ -26,7 +26,7 @@ The DLLs are only read: nothing in the DCS install is written.
 | `hooks_manifest.json` | Every location, with its source lines, install-time checks and signature |
 | `gen_hook_sigs.py` | Generates `src/hook_sigs.h` (the runtime relocation table) from the manifest |
 | `dcs_patch_check.py` | Checks the manifest against a DCS build and writes `dcs_patch_suggestion.json` with the new locations |
-| `test_patch_check.py` | Self-test on copies of the DLLs shifted in memory (optional) |
+| `test_patch_check.py`, `test_reloc.py` | Self-tests on copies of the DLLs shifted in memory (optional) |
 
 ## Steps
 
@@ -50,9 +50,10 @@ The DLLs are only read: nothing in the DCS install is written.
 3. **Optional self-tests:**
 
        python tools/test_patch_check.py
+       python tools/test_reloc.py
 
-   The runtime side of the relocation is tested by the module's own tests
-   (`DcsQvCullSigscanTests`, run by `scripts/build-dcsqvcull.ps1`).
+   `test_reloc.py` also needs `test/sigscan_test.exe`, built with
+   `test/build_sigscan_test.bat`.
 
 ## License
 

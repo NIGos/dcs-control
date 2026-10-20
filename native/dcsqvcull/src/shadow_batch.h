@@ -273,6 +273,10 @@ std::atomic<uint64_t> g_planRender{0};       // plans built on the render thread
 std::atomic<uint64_t> g_planStolen{0};       // ... of which queued but not started by a planner
 std::atomic<uint64_t> g_planWorkerBuilt{0};  // builds finished by planner threads
 std::atomic<uint64_t> g_planWaits{0}, g_planWaitUs{0}, g_planWaitMaxUs{0}, g_planTimeouts{0};
+// R90 H1 ([Model] ShadowPlanWaitUs, default 300; 20000 = the pre-R90 cap): how long the render thread spins for
+// a plan a planner thread is still building before it builds the pass's plan itself (the inline plan, the same
+// one a planner builds). A planner preempted mid-build used to hold the render thread up to 20 ms.
+std::atomic<uint32_t> g_planWaitCapUs{300};
 std::atomic<uint64_t> g_planMismatch{0}, g_planDeferred{0}, g_planFaults{0};
 // Queue diagnostics: render entries seen, entries that passed the gates,
 // entries whose vector did not match [rg+0xa18], entries that queued nothing.
@@ -619,7 +623,8 @@ Plan* PlanForPass(void** vec) {
       } else if (st == kBuilding) {
         LARGE_INTEGER a, b;
         QueryPerformanceCounter(&a);
-        const int64_t limit = static_cast<int64_t>(20000.0 / (g_qpcToUs > 0 ? g_qpcToUs : 1.0));  // 20 ms
+        const int64_t limit = static_cast<int64_t>(g_planWaitCapUs.load(std::memory_order_relaxed) /
+                                                   (g_qpcToUs > 0 ? g_qpcToUs : 1.0));  // R90 H1
         for (;;) {
           if (p->state.load(std::memory_order_acquire) != kBuilding) break;
           YieldProcessor();
@@ -633,7 +638,7 @@ Plan* PlanForPass(void** vec) {
         NoteMax(g_planWaitMaxUs, us);
       }
       if (p->state.load(std::memory_order_acquire) != kDone) {
-        g_planTimeouts++;  // still building: leave it to its planner thread
+        g_planTimeouts++;  // still building: leave it to its planner thread, build the pass's plan here
         break;
       }
       p->state.store(kInUse, std::memory_order_relaxed);

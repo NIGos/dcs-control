@@ -60,7 +60,9 @@ public sealed class WindowsInventory
             // Current releases keep identical copies in bin and bin-mt; bin is what Steam and the launcher start.
             executable = new[] { @"bin\DCS.exe", @"bin-mt\DCS.exe" }.Select(p => Path.Combine(dcsDirectory, p)).FirstOrDefault(File.Exists);
         if (executable is not null && !File.Exists(executable)) { observations.Add("The selected DCS executable does not exist."); executable = null; }
-        if (executable is not null) dcsDirectory ??= Path.GetDirectoryName(Path.GetDirectoryName(executable));
+        // A DCS.exe the pilot chose decides the install (and with it dcs_variant.txt, so the Saved Games folder): with a
+        // release and an open beta installed, the one found automatically may be the other.
+        if (executable is not null && (executableOverride is not null || dcsDirectory is null)) dcsDirectory = Path.GetDirectoryName(Path.GetDirectoryName(executable));
         var savedGames = new[] { SystemPaths.SavedGames(), Path.Combine(Environment.GetEnvironmentVariable("USERPROFILE") ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Saved Games") }
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         // DCS picks its Saved Games folder from dcs_variant.txt in its install ("openbeta" → Saved Games\DCS.openbeta);
@@ -102,10 +104,15 @@ public sealed class WindowsInventory
             catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException) { observations.Add(e.Message); }
         }
         string? autoexecPath = options is null ? null : Path.Combine(Path.GetDirectoryName(options)!, "autoexec.cfg");
-        string? autoexecFps = null; var autoexecUnknown = false;
+        string? autoexecFps = null; var autoexecUnknown = false; var hudAfterDlss = false;
         if (File.Exists(autoexecPath))
         {
-            try { (autoexecFps, autoexecUnknown) = FramePacing.ReadAutoexec(File.ReadAllText(autoexecPath)); files.Add(Fact(autoexecPath!)); }
+            try
+            {
+                var autoexecText = File.ReadAllText(autoexecPath);
+                (autoexecFps, autoexecUnknown) = FramePacing.ReadAutoexec(autoexecText); files.Add(Fact(autoexecPath!));
+                hudAfterDlss = FramePacing.HudAfterDlss(autoexecText);
+            }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { autoexecUnknown = true; observations.Add("Cannot inspect autoexec.cfg: " + e.Message); }
         }
         else autoexecPath = null;
@@ -130,7 +137,7 @@ public sealed class WindowsInventory
             PimaxVersion = pimax.Version, SboysConfigPath = File.Exists(sboysConfig) ? sboysConfig : null,
             SboysDirectory = drivers.FirstOrDefault(d => d.Name.Contains("customheadset", StringComparison.OrdinalIgnoreCase))?.Directory, DcsRunning = dcsRunning,
             Files = files, Layers = layers, Drivers = drivers, DcsSettings = settings, Observations = observations,
-            AutoexecPath = autoexecPath, AutoexecMaxFps = autoexecFps, AutoexecPacingUnknown = autoexecUnknown, LimiterProcesses = limiterProcesses
+            AutoexecPath = autoexecPath, AutoexecMaxFps = autoexecFps, AutoexecPacingUnknown = autoexecUnknown, AutoexecHudAfterDlss = autoexecPath is null ? null : hudAfterDlss,LimiterProcesses = limiterProcesses
         };
     }
 

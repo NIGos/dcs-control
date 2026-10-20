@@ -122,7 +122,7 @@ public static partial class Diagnostics
             }
             void File_(string name, string? path)
             {
-                if (path is null || !File.Exists(path)) return;
+                if (path is null || !File.Exists(path) || entries.Any(e => e.Name == name)) return;
                 // The package stays small enough to attach: once 150 MB of text is in, the remaining (older) files are listed only.
                 if (entries.Sum(e => e.Bytes) > 150L * 1024 * 1024) { entries.Add(new(name + " (left out: package size limit)", redactor(path), 0, true)); return; }
                 try
@@ -132,11 +132,11 @@ public static partial class Diagnostics
                 }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Text(name + ".unreadable.txt", path, e.Message); }
             }
-            void Folder(string prefix, string? folder, string pattern = "*", int newest = 20, SearchOption option = SearchOption.TopDirectoryOnly)
+            void Folder(string prefix, string? folder, string pattern = "*", int newest = 20, SearchOption option = SearchOption.TopDirectoryOnly, string? except = null)
             {
                 if (folder is null || !Directory.Exists(folder)) return;
                 IEnumerable<FileInfo> files;
-                try { files = new DirectoryInfo(folder).EnumerateFiles(pattern, option).Where(f => TextExtensions.Contains(f.Extension, StringComparer.OrdinalIgnoreCase)).OrderByDescending(f => f.LastWriteTimeUtc).Take(newest).ToList(); }
+                try { files = new DirectoryInfo(folder).EnumerateFiles(pattern, option).Where(f => TextExtensions.Contains(f.Extension, StringComparer.OrdinalIgnoreCase) && !string.Equals(f.Name, except, StringComparison.OrdinalIgnoreCase)).OrderByDescending(f => f.LastWriteTimeUtc).Take(newest).ToList(); }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return; }
                 foreach (var file in files) File_(prefix + "/" + Path.GetRelativePath(folder, file.FullName).Replace('\\', '/'), file.FullName);
             }
@@ -150,7 +150,8 @@ public static partial class Diagnostics
             if (sources.StateRoot is { } state)
             {
                 foreach (var name in new[] { "draft.json", "app.log" }) File_("dcs-control/" + name, Path.Combine(state, name));
-                Folder("dcs-control/boost", Path.Combine(state, "boost"));
+                // Never the record of programs Free VRAM closed: it holds their full command lines.
+                Folder("dcs-control/boost", Path.Combine(state, "boost"), except: "closed.json");
                 // What the app changed and how restoring went; never the backed-up files themselves.
                 File_("dcs-control/originals/baseline.json", Path.Combine(state, "originals", "baseline.json"));
                 File_("dcs-control/originals/originals.log", Path.Combine(state, "originals", "originals.log"));
@@ -163,6 +164,11 @@ public static partial class Diagnostics
                 File_("dcs/Logs/dcs.log.old", Path.Combine(savedGames, "Logs", "dcs.log.old"));
                 File_("dcs/Config/options.lua", options);
                 File_("dcs/Config/autoexec.cfg", Path.Combine(savedGames, "Config", "autoexec.cfg"));
+                // The module's log of the session before the last DCS start (kept by it at each start), as for dcs.log.old.
+                foreach (var name in new[] { "DcsQvCull.log", "DcsQvCull.prev.log", "DcsQvCullPrefetch.log", "DcsQvCullPrefetch.prev.log" })
+                    File_("dcs/Scripts/DcsQvCull/" + name, Path.Combine(savedGames, "Scripts", "DcsQvCull", name));
+                // A second DCS started while the first held the log writes DcsQvCull.<pid>.log.
+                Folder("dcs/Scripts/DcsQvCull", Path.Combine(savedGames, "Scripts", "DcsQvCull"), "DcsQvCull.*.log", 4);
                 Folder("dcs/Scripts/DcsQvCull", Path.Combine(savedGames, "Scripts", "DcsQvCull"), "*", 10);
                 var hooks = Path.Combine(savedGames, "Scripts", "Hooks");
                 try { if (Directory.Exists(hooks)) Text("dcs/Scripts/Hooks.txt", hooks, string.Join("\n", Directory.EnumerateFiles(hooks).Select(Path.GetFileName))); }

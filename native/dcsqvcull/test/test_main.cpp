@@ -16,9 +16,23 @@ double ED_FakeTime() {
 }
 
 int g_fail = 0;
+// R60: the names of the failed checks, repeated on stderr when the process exits (whichever return of main), so a
+// truncated stdout log still says which check failed.
+std::vector<std::string> g_failed;
+void PrintFailedChecks() {
+  fflush(stdout);
+  if (g_failed.empty()) return;
+  fprintf(stderr, "FAILED CHECKS (%zu):\n", g_failed.size());
+  for (const std::string& s : g_failed) fprintf(stderr, "  FAIL %s\n", s.c_str());
+  fflush(stderr);
+}
 void Check(bool ok, const char* what) {
   printf("%s %s\n", ok ? "PASS" : "FAIL", what);
-  if (!ok) ++g_fail;
+  if (!ok) {
+    ++g_fail;
+    if (g_failed.empty()) atexit(&PrintFailedChecks);
+    g_failed.push_back(what);
+  }
 }
 
 // QV_TEST_SPIN=1 (off by default): two below-normal-priority spinner threads
@@ -245,15 +259,81 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "long_session_test.h"
 #include "gov_test.h"
 #include "fixation_depth_test.h"
+#include "r94_test.h"  // R94: [Perception] SymbologyTrace, the dev live HUD trace (its helpers are used by far_depth_test / ovl_cpu_test)
 #include "scene_cut_test.h"
 #include "far_depth_test.h"  // Far depth engine export to Quad Views (layout, fake layer, WARP copy and push)
+#include "r84_test.h"  // R84 (R1b): live-object / handle / VRAM probe of the depth-export reinstall (used by the next)
+#include "cockpit_mask_test.h"  // R65: cockpit mask export (contract, layout, WARP max filter, xrEndFrame commit, reader fence)
 #include "cockpit_ipd_test.h"  // R31 option 3: cockpit at the true eye distance (patch, matcher, WARP pipeline, split)
 #include "exit_guard_test.h"  // field report 0.5.5: exit and mission-restart crashes
 #include "perception_only_test.h"  // [General] PerceptionOnly: perception features only, no engine module
+#include "cascade_cache_test.h"  // R33: far shadow cascade cache (math on census matrices, decisions, WARP replica)
+#include "chain_fast_test.h"  // R34: shorter culling chains (variants, creation hook, substitution, live check)
+#include "periph_inst_filter_test.h"  // R38 rank 1: periphery instance filter (bound, kernels, raster, DCS chain, boundaries)
+#include "shader_fast_test.h"  // R36: wider grids for single-SM kernels (variants, identification, Dispatch hook, live check)
+#include "night_tone_test.h"  // R37: [Night] opt-in night darkening through DCS's tone mapper (pure parts, hook, build checks)
+#include "color_grade_test.h"  // R40: [Color] opt-in grading, pure parts (curve, saturation, ini defaults, PS compiles)
+#include "color_mode_test.h"  // R42 [Color] Mode: Fix / Enhanced (pure parts and the pass on WARP)
+#include "vrfx_test.h"  // R51 [VrFx] GazeDof / GVision (keys, physiology, state machines, the pass on WARP)
+#include "thread_place_test.h"  // R39: [Threads] census and worker placement (mask rule, queries, round trip)
+#include "focus_bcast_test.h"  // R38 rank 2: broadcast building blocks, FocusGeomProbe arm, keys off by default
+#include "vs_sig_probe_test.h"  // R38 rank 2 G4: VS signature sources probe (key default 0)
+#include "focus_bcast_run_test.h"  // R53: FastGS focus broadcast (pure parts, archive, end-to-end on the NVIDIA GPU)
+#include "frame_timeline_test.h"  // R52: per-frame timeline, pose probe, event log (keys default 0); placement re-check
+#include "r59_stop_passthrough_test.h"  // R59 L1: old payload hooks pass through after Stop
+#include "r59_inst_map_test.h"  // R59: shadow_inst maps reuse destroyed shaders' slots
+#include "r59_prefault_test.h"  // R59: recycled job does not wait out kPreWaitUs
+#include "r59_helmet_cache_test.h"  // R59: helmet material verdicts (reuse, mission reset, no spill)
+#include "r59_tls_test.h"  // R59: no 128 KB static TLS table
+#include "r59_xr_state_test.h"  // R59: XR session state from the log's new bytes
+#include "r59_prefetch_log_test.h"  // R59: prefetch stats log rotated past 1 MB
+#include "r62_dev_ini_test.h"  // R62 a1: [Dev] IniPath of 260+ characters
+#include "r62_log_numbers_test.h"  // R62: log numbers keep '.' on comma-decimal regions
+#include "r62_gbrec_lines_test.h"  // R62: recorder fallback lines vs the app's "turned itself off" scan
+#include "r62_vrfx_gap_test.h"  // R62: VrFx state across an all-off gap
+#include "r62_night_tone_test.h"  // R62: night tone writes only live modules
+#include "r63_scene_check_test.h"  // R63 U2: partition boost only on a verified Scene.dll collect
+#include "r63_srvtbl_test.h"  // R63 U5: ownship SceneRenderable vtable by RTTI
+#include "r63_tex_tick_test.h"  // R63: the texture dedupe tick stays monotonic
+#include "r63_big_pages_test.h"  // R63: big pages undone by a next payload that has them off
+#include "r63_lua_hook_test.h"  // R63: the Lua hook loads the module by its exact path (';' in Saved Games)
+#include "r63_env_layers_test.h"  // R63: API layers turned off by the environment are marked in the log
+#include "r77_test.h"  // R77: uncovered-bugfix round (texture tables, suite kill switch, ...)
+#include "r79_test.h"  // R79: one DCSVR_PERCEPTION_SHM_SUFFIX rule for every shared block (R77c N1-N3)
+#include "r83_test.h"  // R83: R82 D1, no false MISSED tone-map swaps at VrFx transitions in Mode 0
+#include "r90_test.h"  // R90: lossless hitch fixes (patching, placement, async log, readbacks, Lua, disk, shadow inst)
+#include "r93_test.h"  // R93: R92's D1 (async log ring at DCS start) and D2 (FrameTimeline behind the cockpit mask)
+#include "r95_test.h"       // R95: the symbology emission export (contract, pure parts, ovl_cpu record point)
+#include "r95_tone_test.h"  // R95: the tone map's second evaluation on WARP (every colour mode and effect)
+#include "r95_pipe_test.h"  // R95: the whole path, the lifecycle (WARP; QV_R95_HW=1: also the GPU)
+#include "r95_hw_test.h"    // R95: the GPU cost bench (QV_R95_HW=1) and r95test::Run
+#include "r99_test.h"       // R99: the pose hook by displayTime; the symbology replay stage's cost
+#include "r101_test.h"      // R101: the learnt HUD field recovers after a bank (aging, recent fallback)
 
+// R60: QV_TEST_LOAD=<n> (off by default): n busy threads of normal priority inside this process for the whole run.
+// An in-process stand-in for a machine loaded by another program (as DCS loading a mission); never an external load
+// process. The threads are detached and end with the process.
+void StartTestLoad() {
+  const char* e = getenv("QV_TEST_LOAD");
+  const int n = e ? atoi(e) : 0;
+  if (n <= 0) return;
+  printf("     (QV_TEST_LOAD: %d busy threads during the whole run)\n", n);
+  for (int i = 0; i < n && i < 256; ++i)
+    std::thread([] {
+      volatile uint64_t v = 1;
+      for (;;) v = v * 6364136223846793005ull + 1;
+    }).detach();
+}
+
+#ifdef QV_TEST_NO_MAIN
+int TestMain() {
+#else
 int main() {
+#endif
+  if (getenv("QV_UNBUFFERED")) setvbuf(stdout, nullptr, _IONBF, 0);  // R97: the order of lines around a crash
   g_log = stdout;
   g_mute = true;
+  StartTestLoad();
   // QV_SF_STRESS=<n>: only the split-filter tests, n times (race hunting).
   if (const char* n = getenv("QV_SF_STRESS")) {
     for (int i = 0, k = atoi(n); i < k; ++i) sftest::Run();
@@ -272,8 +352,30 @@ int main() {
     return g_fail ? 1 : 0;
   }
   // QV_GAPAT_ONLY=1: only the gap_attrib.h tests (gap split, clock calibration).
+  if (getenv("QV_R95_ONLY")) {  // R95: only the symbology export's tests
+    r95test::Run();
+    r97test::Run();  // R97
+    r99test::Run();  // R99
+    r101test::Run();  // R101
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
   if (getenv("QV_GAPAT_ONLY")) {
     gatest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_FTL_ONLY=1: only the frame_timeline.h tests (R52).
+  if (getenv("QV_FTL_ONLY")) {
+    ftltest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_FBC_ONLY=1: only the focus_bcast.h tests (R38 rank 2).
+  if (getenv("QV_FBC_ONLY")) {
+    fbctest::Run();
+    fbcrtest::Run();
+    vsigtest::Run();
     printf("%d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;
   }
@@ -301,11 +403,18 @@ int main() {
     printf("%d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;
   }
+  // R69: QV_MASK_ONLY=1: only the cockpit mask / depth companion tests.
+  if (getenv("QV_MASK_ONLY")) {
+    mask65test::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
   // QV_FIXDEPTH_ONLY=1: only the fixation depth tests (Depth boost).
   if (getenv("QV_FIXDEPTH_ONLY")) {
     fdtest::Run();
     sctest::Run();
     fartest::Run();
+    mask65test::Run();
     cktest::Run();
     printf("%d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;
@@ -384,6 +493,36 @@ int main() {
     return g_fail ? 1 : 0;
   }
   // QV_VRAM_ONLY=1: only the GPU pass timing and VRAM census tests.
+  // QV_CC_ONLY=1: only the R33 cascade cache tests.
+  if (getenv("QV_CC_ONLY")) {
+    cctest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_NT_ONLY=1: only the R37 night tone tests.
+  if (getenv("QV_NT_ONLY")) {
+    nttest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_SHF_ONLY=1: only the R36 shader fast tests.
+  if (getenv("QV_SHF_ONLY")) {
+    shfasttest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_PIF_ONLY=1: only the R38 rank 1 periphery instance filter tests (QV_PIF_HW=1: also on the GPU).
+  if (getenv("QV_PIF_ONLY")) {
+    piftest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
+  // QV_CF_ONLY=1: only the R34 chain fast tests.
+  if (getenv("QV_CF_ONLY")) {
+    cftest::Run();
+    printf("%d failure(s)\n", g_fail);
+    return g_fail ? 1 : 0;
+  }
   // QV_PO_ONLY=1: only the [General] PerceptionOnly tests.
   if (getenv("QV_PO_ONLY")) {
     potest::Run();
@@ -1094,6 +1233,14 @@ int main() {
               "ini: FarDepthCoverageMode=bogus -> hdr, logged once as invalid (not again on the next read)");
         g_farCovInvalidLogged = was || g_farCovInvalidLogged;
       }
+      // R49: [D3D] SplitFilter defaults to 1 (the shipped setting; ChainFast / ShaderFast rely on it); 0 still turns it off.
+      writeIni("");
+      LoadConfig(true);
+      const bool sfDefault = g_cfg.splitFilter;
+      writeIni("[D3D]\nSplitFilter=0\n");
+      LoadConfig(true);
+      const bool sfOff = !g_cfg.splitFilter;
+      Check(sfDefault && sfOff, "ini: [D3D] SplitFilter absent -> 1 (the shipped default), SplitFilter=0 -> off");
       writeIni("");
       LoadConfig(true);
       Check(g_cfg.toggleVk == 122 && g_cfg.toggleMods == 6 && !g_cfg.developerKeys, "ini hotkey read, developer keys off");
@@ -1620,10 +1767,65 @@ int main() {
   sctest::Run();
   // Far depth engine export (contract layout, CPU gProj capture, WARP copy/push, gating, ring, release, hot reload).
   fartest::Run();
+  // R65 cockpit mask export (contract, layout, WARP max filter vs CPU, sample points, xrEndFrame commit, reader fence).
+  mask65test::Run();
   // Cockpit at the true eye distance (R31 option 3: patch math, matcher, upload filter, WARP pipeline, stencil split, off path).
   cktest::Run();
   // [General] PerceptionOnly: no engine module, the perception features, status 0, keys inert, dual camera status.
   potest::Run();
+  // R33 far shadow cascade cache: census-matrix math, refresh/reuse decisions, caster lists, WARP replica of the pass.
+  cctest::Run();
+  // R34 shorter culling chains: variants vs CPU transcription and stock stand-ins, hook path, live check, shutdown.
+  cftest::Run();
+  // R38 rank 1 periphery instance filter: bound proof model, kernels vs CPU, raster exactness, verify, boundaries.
+  piftest::Run();
+  // R36 wider grids for single-SM kernels: variants vs stock stand-ins, identification by output, Dispatch hook.
+  shfasttest::Run();
+  // R37 [Night]: opt-in night darkening through DCS's tone mapper (pure parts, hook on a fake module, build checks).
+  nttest::Run();
+  // R40 [Color]: opt-in post-tonemap grading, pure parts (all keys default 0 = identity).
+  cgtest::Run();
+  // R42 [Color] Mode (Fix / Enhanced): parameters, CPU reference, the pixel shader swap on WARP (default off).
+  cmtest::Run();
+  vfxtest::Run();
+  // R39 [Threads]: worker placement off DCS's exclusive render core (all keys default 0), census queries.
+  tptest::Run();
+  // R38 rank 2: focus/periphery geometry broadcast building blocks and the geometry-only probe (keys default 0).
+  fbctest::Run();
+  fbcrtest::Run();  // R53: FastGS focus broadcast
+  // R38 rank 2 gate G4: VS output-signature sources probe (key default 0).
+  vsigtest::Run();
+  // R52: per-frame timeline / pose probe / event log (measure only, keys default 0), placement re-check cadence.
+  ftltest::Run();
+  // R59 bug-fix sweep 2.
+  r59stop::Run();
+  r59map::Run();
+  r59pre::Run();
+  r59helmet::Run();
+  r59tls::Run();
+  r59xr::Run();
+  r59pflog::Run();
+  r62dev::Run();  // R62 contract bug-fix sweep (native side)
+  r62log::Run();
+  r62gbl::Run();
+  r62fx::Run();
+  r62nt::Run();
+  r63scene::Run();  // R63 joint bug-fix sweep 2 (native side)
+  r63sr::Run();
+  r63tick::Run();
+  r63big::Run();
+  r63lua::Run();
+  r63env::Run();
+  r77::Run();  // R77 uncovered-bugfix round (native side)
+  r79::Run();  // R79 suffix rule: a suffixed run opens every block under the suffixed names
+  r83::Run();  // R83 (R82 D1): miss accounting decides "due" from the state the swap goes by
+  r90::Run();  // R90: lossless hitch fixes
+  r93::Run();  // R93: async log start burst and render-thread no-I/O; FrameTimeline with the cockpit mask export
+  r94::Run();  // R94: SymbologyTrace (dev live HUD trace)
+  r95test::Run();  // R95: the symbology emission export (last: it installs and stops the cockpit mask export itself)
+  r97test::Run();  // R97: its fixes after the first live run
+  r99test::Run();  // R99: the pose hook by displayTime; the symbology replay stage's cost
+  r101test::Run();  // R101: the learnt HUD field recovers after a bank
 
   // Suite: configuration check + short profile, report file written.
   {

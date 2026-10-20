@@ -249,6 +249,46 @@ void TestUploads() {
   Check(fdexport::TakeProj(cb, 16, 32, p, v) && !memcmp(p, P, sizeof(p)),
         "far depth uploads: a boxed update covering the matrices is used (source at the box's left)");
   Check(!fdexport::TakeProj(cb, 0, 4096, p, v), "far depth uploads: the same buffer at another offset is another entry");
+  // R71: gOrigin (byte 0x610 of the struct) with the matrices, for the motion export's rebase check.
+  {
+    std::vector<float> big(16 * 4 + 0x970 / 4, 0.0f);
+    float* sb = big.data() + 16 * 4;
+    memcpy(sb, base, 512);
+    const float org[3] = {-12345.5f, 250.25f, 98765.0f};
+    memcpy(sb + 0x610 / 4, org, sizeof(org));
+    ID3D11Buffer* cb2 = reinterpret_cast<ID3D11Buffer*>(static_cast<uintptr_t>(0x6000));
+    float o[3] = {};
+    bool ook = true;
+    fdexport::BeginGBufferPass();
+    fdexport::NoteUpload(cb2, 0, nullptr, big.data());
+    const bool learn = !fdexport::TakeProj(cb2, 16, 0x970 / 16, p, v, o, &ook) && !ook;
+    fdexport::BeginGBufferPass();
+    fdexport::NoteUpload(cb2, 0, nullptr, big.data());
+    const bool got = fdexport::TakeProj(cb2, 16, 0x970 / 16, p, v, o, &ook) && ook && !memcmp(o, org, sizeof(o));
+    // A boxed update of the matrices only: no origin this pass.
+    fdexport::BeginGBufferPass();
+    D3D11_BOX mats{16 * 16 + 192, 0, 0, 16 * 16 + 320, 1, 1};
+    fdexport::NoteUpload(cb2, 0, &mats, sb + 192 / 4);
+    const bool noBox = fdexport::TakeProj(cb2, 16, 0x970 / 16, p, v, o, &ook) && !ook;
+    // A binding that does not reach gOrigin (32 constants = 512 bytes): the whole update is not read past it.
+    ID3D11Buffer* cb3 = reinterpret_cast<ID3D11Buffer*>(static_cast<uintptr_t>(0x7000));
+    fdexport::BeginGBufferPass();
+    fdexport::TakeProj(cb3, 16, 32, p, v, o, &ook);  // learned
+    fdexport::BeginGBufferPass();
+    fdexport::NoteUpload(cb3, 0, nullptr, big.data());
+    const bool shortSpan = fdexport::TakeProj(cb3, 16, 32, p, v, o, &ook) && !ook;
+    // A whole-buffer binding (no offsets) of a buffer of 0x970 + 256 bytes: its size is the span.
+    ID3D11Buffer* cb4 = reinterpret_cast<ID3D11Buffer*>(static_cast<uintptr_t>(0x8000));
+    fdexport::BeginGBufferPass();
+    fdexport::TakeProj(cb4, 0, 0, p, v, o, &ook, 0x970);  // learned
+    fdexport::BeginGBufferPass();
+    fdexport::NoteUpload(cb4, 0, nullptr, sb);
+    o[0] = o[1] = o[2] = 0;
+    const bool whole = fdexport::TakeProj(cb4, 0, 0, p, v, o, &ook, 0x970) && ook && !memcmp(o, org, sizeof(o));
+    Check(learn && got && noBox && shortSpan && whole,
+          "far depth uploads (R71): gOrigin taken with the matrices when the upload covers it (a whole update of a "
+          "binding or buffer that reaches byte 0x610); not from a boxed matrices-only update or a shorter binding");
+  }
   fdexport::ResetFrameState();
 }
 
@@ -815,6 +855,8 @@ void TestPipeline() {
   const size_t p0 = pushesNow();
   Check(fdexport::g_skipNoProj.load() == np0 && p0 == 2 && fdexport::g_uploadsSeen.load() > up0,
         "far depth: cPerView learned at a view's first GBufferPass end, its gProj taken from the next pass's upload");
+  Check(fdexport::g_texCreates.load() == 4,
+        "R91 far depth: a view's two slots are made in one go at its first copy (4 textures after the first pushes)");
   std::vector<ID3D11Texture2D*> ring2;
   bool sameFrame = true, sameGen = true, projOk = true, framesStep = true;
   uint64_t lastFrame = 0;
@@ -1210,6 +1252,75 @@ void TestPipeline() {
               has("view 3 OverlayLDRPass end", nullptr) && !DrawHooksIn(ctxTable),
           "far depth overlay trace: DLSSPass end .. CopyToHMDPass begin, every pass, draws with RTV format, "
           "ToneMappingPass's PS SRV0");
+
+    // R94: [Perception] SymbologyTrace on this HDR sequence, through the real boundary callback and draw arm (nested in
+    // far depth's ToneMappingPass learning arm or its own): the tone-map draw's source / target learnt, the four
+    // copies of the focus views per traced frame with the right content, far depth's own HDR pre / post copies
+    // unaffected, DCS's bindings in the overlay pass unchanged, no draw hook left.
+    {
+      wchar_t tp[MAX_PATH];
+      GetTempPathW(MAX_PATH, tp);
+      const std::wstring base = std::wstring(tp) + L"r94_fd_" + std::to_wstring(GetCurrentProcessId()) + L"\\";
+      r94::RemoveTree(base);
+      CreateDirectoryW(base.c_str(), nullptr);
+      const uint64_t hp1 = fdexport::g_hdrPre.load(), hq1 = fdexport::g_hdrPost.load();
+      const auto keepCov = fdexport::g_covMode.load();
+      fdexport::g_covMode = fdexport::kCovHdr;
+      for (int f = 0; f < 3; ++f) frame(order);  // back to HDR pre textures (recreated, see above)
+      const uint64_t hp2 = fdexport::g_hdrPre.load(), hq2 = fdexport::g_hdrPost.load();
+      ovlStateOk = true;
+      symtrcfg::Configure(2, 15, 0, 0, base);
+      for (int f = 0; f < 8; ++f) frame(order);  // request, learn, 2 traced, the maps
+      symtr::WriteFiles();
+      symtrcfg::Configure(0, 15, 0, 1, base);
+      const std::vector<std::wstring> ses = r94::Sessions(base);
+      bool files = ses.size() == 1, hudOk = files, preSame = files;
+      int caps = 0;
+      if (files) {
+        caps = r94::CountLines(r94::ReadText(ses[0] + L"captures.txt"), "f");
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((ses[0] + L"frame_*.txt").c_str(), &fd);
+        int frames = 0;
+        if (h != INVALID_HANDLE_VALUE) {
+          do {
+            ++frames;
+            const std::string ft = r94::ReadText(ses[0] + fd.cFileName);
+            preSame = preSame && r94::CountLines(ft, "T 2 ") == 1 && r94::CountLines(ft, "T 3 ") == 1 &&
+                      ft.find("pre_same 1") != std::string::npos && ft.find("pre_same 0") == std::string::npos;
+            // The HUD pixel (120, 110): hdr_pre the scene, hdr_post the HUD green 4.
+            const std::wstring F = std::wstring(fd.cFileName).substr(6, wcslen(fd.cFileName) - 10);
+            for (int view = 2; view <= 3; ++view) {
+              const std::vector<uint8_t> pre = r94::ReadAll(ses[0] + L"f" + F + L"_v" + std::to_wstring(view) + L"_hdr_pre.raw"),
+                                         post = r94::ReadAll(ses[0] + L"f" + F + L"_v" + std::to_wstring(view) + L"_hdr_post.raw");
+              if (pre.size() != 300 * 280 * 8 || post.size() != pre.size()) {
+                hudOk = false;
+                continue;
+              }
+              uint16_t a[4], b[4];
+              memcpy(a, &pre[(110 * 300 + 120) * 8], 8);
+              memcpy(b, &post[(110 * 300 + 120) * 8], 8);
+              hudOk = hudOk && cgrade::HalfToFloat(b[1]) == 4.0f && cgrade::HalfToFloat(a[1]) == 0.5f;
+            }
+          } while (FindNextFileW(h, &fd));
+          FindClose(h);
+        }
+        files = files && frames == 2;
+      }
+      const uint64_t hp3 = fdexport::g_hdrPre.load(), hq3 = fdexport::g_hdrPost.load();
+      printf("     (R94 trace on the far depth HDR sequence: %d copies listed; far depth hdr pre %llu post %llu over 8 "
+             "traced-session frames, %llu / %llu over the 3 before)\n",
+             caps, static_cast<unsigned long long>(hp3 - hp2), static_cast<unsigned long long>(hq3 - hq2),
+             static_cast<unsigned long long>(hp2 - hp1), static_cast<unsigned long long>(hq2 - hq1));
+      Check(files && caps == 16 && hudOk && preSame,
+            "R94 SymbologyTrace (far depth HDR sequence): 2 traced frames, views 2 / 3 each hdr_pre (scene), hdr_post "
+            "(HUD), ldr_tm, ldr_post (16 copies); the tone map's source learnt through the draw arm (pre_same 1)");
+      Check(hp3 - hp2 == 16 && hq3 - hq2 == 16 && ovlStateOk && !DrawHooksIn(ctxTable) && !symtr::Busy() &&
+                fixdepth::g_stTmView < 0 && !fixdepth::g_stArmOwn,
+            "R94 SymbologyTrace (far depth HDR sequence): far depth's own HDR pre / post copies every frame as "
+            "before, DCS's bindings unchanged, no draw hook and no trace arm left");
+      r94::RemoveTree(base);
+      fdexport::g_covMode = keepCov;  // (the overlay mode the tests below start from)
+    }
 
     // 6g. HDR fallback (far_depth.h 5e) on a sequence without a
     // ToneMappingPass (and so no source and no pre point): the scene in the
@@ -1678,7 +1789,9 @@ void TestPipeline() {
     Uninstall();
     done = true;
   });
-  for (int f = 0; f < 400 && !done.load(); ++f) {
+  // R60: frames until the uninstall returned (a deadline, not 400 frames: a loaded machine runs fewer frames in the
+  // uninstall's time, and once the frames stopped its release fell back off the render thread).
+  for (const ULONGLONG until = GetTickCount64() + 60000; !done.load() && GetTickCount64() < until;) {
     frame(order);
     Sleep(1);
   }
@@ -1730,13 +1843,13 @@ void TestPipeline() {
 
   // Teardown.
   g_coneOn = false;
-  g_depthName = L"Local\\DcsVrFixationDepth_v1";
+  g_depthName.clear();  // R79: no override (the suffixed default name)
   fdexport::g_on = false;
   fdexport::g_module = oldMod;
   fdexport::SetExportPrefix("DcsVr_QuadViews");
   g_verify = 0;
   shadowinst::g_device = oldDev;
-  g_gazeName = L"Local\\DcsVrPerceptionGaze_v1";
+  g_gazeName.clear();  // R79: no override
   {
     std::lock_guard<std::mutex> lock(g_m);
     for (auto*& t : g_held) Rel(t);

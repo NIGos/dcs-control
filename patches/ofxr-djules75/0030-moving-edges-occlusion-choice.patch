@@ -1,0 +1,1000 @@
+diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
+--- a/include/xrfg/d3d12_frame_synthesizer.hpp
++++ b/include/xrfg/d3d12_frame_synthesizer.hpp
+@@ -182,6 +182,13 @@
+     D3D12OpticalFlowInputScale input_scale{
+         D3D12OpticalFlowInputScale::half};
+     bool bidirectional{};
++    // DCS Control (0030): [ofxr] nvidia_occlusion_aware. 0: the composition
++    // as before. 1: at a moving edge each flow vector is followed to the
++    // pixel it belongs to (two fixed-point steps where the field changes).
++    // 2: that, and where the two frames still disagree there the frame that
++    // shows the pixel (revealed: current; covered: previous) instead of the
++    // cross-fade of both.
++    std::uint32_t occlusion_aware{0};
+ };
+ 
+ // A second synthetic produced from the same pair, for a session that hands
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -149,6 +149,13 @@
+ [[nodiscard]] bool read_diag_vram(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS Control (0030). `[ofxr] nvidia_occlusion_aware`: the NVIDIA
++// composition's moving-edge handling, 0 (default), 1 or 2
++// (D3D12NvidiaOpticalFlowOptions::occlusion_aware); anything else is 0. Read
++// once per session.
++[[nodiscard]] std::uint32_t read_nvidia_occlusion_aware(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // DCS VR Control (0008). `[ofxr] lazy_runtime_swapchains`: a bridged D3D11
+ // session's colour swapchains hold no runtime swapchain of their own while
+ // nothing is shown from it - the application renders into the bridge's
+diff --git a/layer/ofxr_bridge.ini b/layer/ofxr_bridge.ini
+--- a/layer/ofxr_bridge.ini
++++ b/layer/ofxr_bridge.ini
+@@ -9,6 +9,12 @@
+ ; matters at high headset resolutions.
+ nvidia_input_scale=50
+ nvidia_bidirectional=0
++; NVIDIA flow, at the edges of moving things: 0 as before (default); 1 follow
++; each motion to the pixel it belongs to; 2 that, and where something is being
++; covered or revealed show it from the frame that sees it instead of a blend of
++; both (sharper aircraft passing by, but can smear thin still cockpit frames
++; over a moving world). Read when the game starts its session.
++nvidia_occlusion_aware=0
+ ; "Prefer FPS over latency" in the tray: one frame of extra depth for games that
+ ; only just reach half the headset's refresh rate, at about one frame of
+ ; latency. 1 on (default), 0 off. Read when the game starts its session.
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -305,6 +305,22 @@
+     return read_ofxr_switch(module_directory, L"diag_vram", false);
+ }
+ 
++// DCS Control (0030).
++std::uint32_t read_nvidia_occlusion_aware(
++    const std::filesystem::path& module_directory) noexcept {
++    try {
++        if (module_directory.empty()) {
++            return 0;
++        }
++        const auto ini_path = module_directory / L"ofxr_bridge.ini";
++        const UINT value = GetPrivateProfileIntW(
++            L"ofxr", L"nvidia_occlusion_aware", 0, ini_path.c_str());
++        return value <= 2U ? value : 0U;
++    } catch (...) {
++        return 0;
++    }
++}
++
+ bool read_lazy_runtime_swapchains(
+     const std::filesystem::path& module_directory) noexcept {
+     return read_ofxr_switch(module_directory, L"lazy_runtime_swapchains", true);
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -333,6 +333,12 @@
+     return packed << 8U;
+ }
+ 
++// DCS Control (0030): SynthesisFlags bits 2 and 3, the NVIDIA composition's
++// moving-edge following and occlusion choice (frame_synthesis.hlsl). Bits
++// 0-7 survive the per-output fraction updates, which keep the low byte.
++constexpr UINT kSynthesisMovingEdgeFlag = 4U;
++constexpr UINT kSynthesisOcclusionChoiceFlag = 8U;
++
+ constexpr UINT kSynthesisConstantCount =
+     static_cast<UINT>(sizeof(SynthesisParameters) / sizeof(UINT));
+ static_assert(sizeof(CameraMapping) == sizeof(float) * 20U);
+@@ -1121,6 +1127,14 @@
+     std::uint32_t next_timing_slot{};
+     D3D12OpticalFlowBackend backend{D3D12OpticalFlowBackend::fidelity_fx};
+     D3D12NvidiaOpticalFlowOptions nvidia_options{};
++    // DCS Control (0030): read by the NVIDIA composition only.
++    [[nodiscard]] UINT occlusion_aware_flag() const noexcept {
++        return backend == D3D12OpticalFlowBackend::nvidia && nvidia_options.occlusion_aware != 0U
++            ? (nvidia_options.occlusion_aware >= 2U
++                  ? kSynthesisMovingEdgeFlag | kSynthesisOcclusionChoiceFlag
++                  : kSynthesisMovingEdgeFlag)
++            : 0U;
++    }
+     bool synthesis_enabled{};
+     bool completion_unknown{};
+     bool ffx_context_created{};
+@@ -4137,7 +4151,8 @@
+         slot.command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+ 
+         SynthesisParameters parameters{};
+-        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
++        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
++            occlusion_aware_flag(); // DCS Control (0030)
+         parameters.width = static_cast<UINT>(image_description.Width);
+         parameters.height = image_description.Height;
+         parameters.array_size = image_description.DepthOrArraySize;
+@@ -4370,7 +4385,8 @@
+         slot.command_list->SetPipelineState(pack_pipeline.Get());
+ 
+         SynthesisParameters parameters{};
+-        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
++        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
++            occlusion_aware_flag(); // DCS Control (0030)
+         parameters.width = static_cast<UINT>(image_description.Width);
+         parameters.height = image_description.Height;
+         parameters.array_size = image_description.DepthOrArraySize;
+@@ -4535,7 +4551,8 @@
+                 : nvidia_pack_pipeline.Get());
+ 
+         SynthesisParameters parameters{};
+-        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
++        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
++            occlusion_aware_flag(); // DCS Control (0030)
+         parameters.width = static_cast<UINT>(image_description.Width);
+         parameters.height = image_description.Height;
+         parameters.array_size = image_description.DepthOrArraySize;
+@@ -5076,7 +5093,8 @@
+         slot.command_list->SetPipelineState(pack_pipeline.Get());
+ 
+         SynthesisParameters parameters{};
+-        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
++        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
++            occlusion_aware_flag(); // DCS Control (0030)
+         parameters.width = static_cast<UINT>(image_description.Width);
+         parameters.height = image_description.Height;
+         parameters.array_size = image_description.DepthOrArraySize;
+@@ -5370,7 +5388,8 @@
+             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+ 
+         SynthesisParameters parameters{};
+-        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
++        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
++            occlusion_aware_flag(); // DCS Control (0030)
+         parameters.width = static_cast<UINT>(image_description.Width);
+         parameters.height = image_description.Height;
+         parameters.array_size = image_description.DepthOrArraySize;
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -432,12 +432,17 @@
+     return bounds;
+ }
+ 
+-float2 flow_for_pixel(
++// DCS Control (0030): flow_for_pixel, plus how far apart the four flow
++// vectors it interpolates are (the largest per-axis range, in full-resolution
++// pixels): how quickly the field changes here, which says whether following
++// the vector to its own endpoint (flow_fixed_point) can move the sample.
++float2 flow_for_pixel_spread(
+     float2 pixel,
+     uint slice,
+     uint view_index,
+     float value_scale,
+-    bool use_nvidia_input_scale) {
++    bool use_nvidia_input_scale,
++    out float spread) {
+     // The stride is zero where the backend packs eyes separately, so this
+     // is the scaled coordinate on that path and the scaled coordinate plus
+     // the eye offset on the stacked one.
+@@ -480,10 +485,32 @@
+     float2 result = lerp(top, bottom, fraction.y) * value_scale;
+     // Flow measured on a reduced input has proportionally smaller vectors.
+     result /= max(flow_input_scale(), float2(1.0e-6, 1.0e-6));
++    {
++        float2 a = load_backward_flow_clamped(top_left, bounds.minimum, bounds.maximum);
++        float2 b = load_backward_flow_clamped(
++            int2(bottom_right.x, top_left.y), bounds.minimum, bounds.maximum);
++        float2 c = load_backward_flow_clamped(
++            int2(top_left.x, bottom_right.y), bounds.minimum, bounds.maximum);
++        float2 d = load_backward_flow_clamped(bottom_right, bounds.minimum, bounds.maximum);
++        float2 range = (max(max(a, b), max(c, d)) - min(min(a, b), min(c, d))) *
++            value_scale / max(flow_input_scale(), float2(1.0e-6, 1.0e-6));
++        spread = max(range.x, range.y);
++    }
+     float magnitude = length(result);
+     return magnitude > 512.0 ? result * (512.0 / magnitude) : result;
+ }
+ 
++float2 flow_for_pixel(
++    float2 pixel,
++    uint slice,
++    uint view_index,
++    float value_scale,
++    bool use_nvidia_input_scale) {
++    float unused_spread;
++    return flow_for_pixel_spread(
++        pixel, slice, view_index, value_scale, use_nvidia_input_scale, unused_spread);
++}
++
+ float2 forward_flow_for_pixel(
+     float2 pixel,
+     uint slice,
+@@ -668,6 +695,188 @@
+     return stationary;
+ }
+ 
++// DCS Control (0030): moving edges on the NVIDIA path, SynthesisFlags bit 2
++// ([ofxr] nvidia_occlusion_aware=1 or 2). The flow is a current-to-previous
++// vector attached to the CURRENT pixel, so the pixel c that lands on the
++// output pixel p at instant t solves c = p - (1 - t) * flow(c): reading the
++// flow at p itself is exact only where the field is constant, and at a moving
++// edge it puts halos (1 - t) * |flow| wide around the object.
++bool moving_edge_flag() {
++    return (SynthesisFlags & 4u) != 0u;
++}
++
++// DCS Control (0030): SynthesisFlags bit 3 ([ofxr] nvidia_occlusion_aware=2)
++// adds the occlusion choice on top of bit 2: where the two frames still
++// disagree at a moving edge the pixel is being covered or revealed, and the
++// cross-fade at the same pixel shows both frames' content at half strength
++// there (a double image); occlusion_aware_midpoint takes the frame that
++// shows the pixel instead.
++bool occlusion_choice_flag() {
++    return (SynthesisFlags & 8u) != 0u;
++}
++
++// The flow cell under a pixel, without interpolation: a neighbour probe.
++float2 flow_point(float2 pixel, uint slice, uint view_index, float value_scale) {
++    float2 scaled = flow_input_coordinate(pixel);
++    float2 packed_coordinate = float2(scaled.x, scaled.y + float(slice * PackedEyeStride));
++    FlowGridBounds bounds = flow_grid_bounds(PreviousMappings[view_index].TargetRect, slice);
++    int2 cell = clamp(
++        int2(round((packed_coordinate + 0.5) / float(FlowBlockSize) - 0.5)),
++        bounds.minimum,
++        bounds.maximum);
++    return float2(BackwardFlow.Load(int3(cell, 0))) * value_scale /
++        max(flow_input_scale(), float2(1.0e-6, 1.0e-6));
++}
++
++// How alike two samples are, 1 for the same colour, 0 for unlike or missing.
++float sample_match(CameraSample a, CameraSample b) {
++    return a.valid >= 0.5 && b.valid >= 0.5
++        ? saturate(1.0 - rgb_error(a.color, b.color) * 6.0) : 0.0;
++}
++
++// One flow cell in full-resolution pixels.
++float flow_cell_pixels() {
++    return float(FlowBlockSize) / max(flow_input_scale().x, 1.0e-6);
++}
++
++// Two fixed-point steps of c = p - (1 - t) * flow(c), from `start`, as the
++// game-motion branch does. residual: how much the last step still moved the
++// vector (near zero where it converged; at an occlusion, or where the field is
++// noise, it does not, and the caller keeps the vector at the pixel there).
++float2 flow_fixed_point(
++    float2 pixel,
++    float2 start,
++    float fraction,
++    float value_scale,
++    bool use_nvidia_cost,
++    out float residual) {
++    float2 backward = start;
++    residual = 0.0;
++    [unroll] for (uint iteration = 0; iteration < 2; ++iteration) {
++        float2 next = flow_for_pixel(
++            pixel - (1.0 - fraction) * backward, Slice, ViewIndex, value_scale, use_nvidia_cost);
++        residual = length(next - backward);
++        backward = next;
++    }
++    return backward;
++}
++
++// Where the flow midpoint fails, which frame actually shows this pixel.
++// Two candidate motions: A, the one the midpoint used, and B, the most
++// different vector within a few cells (the other side of a moving edge). A
++// motion is "consistent" when the current frame shows content with that
++// motion at its current endpoint (it is its own fixed point).
++//  - A consistent and both endpoints agree: the midpoint stands (A first,
++//    so wherever the old path was right this changes nothing).
++//  - else B consistent and agreeing: the object whose path crosses this
++//    pixel at this instant though the flow here belongs to what is behind.
++//  - else revealed (the previous endpoint is confirmed taken by the other
++//    motion): the current frame's sample alone; covered (the current
++//    endpoint is confirmed taken by the other motion): the previous frame's.
++//  - else the old composition.
++// All of it as weights, faded in by how clearly there are two motions and
++// how strongly the frames disagree, so nothing switches hard from frame to
++// frame. With the bidirectional flow its cycle check is part of flow_trust.
++float4 occlusion_aware_midpoint(
++    float2 pixel,
++    float2 backward,
++    CameraSample previous_a,
++    CameraSample current_a,
++    float disagreement_a,
++    float flow_trust,
++    float4 composed,
++    float value_scale,
++    bool use_nvidia_cost) {
++    float fraction = synthesis_fraction();
++    float cell = flow_cell_pixels();
++    float2 current_a_at = pixel - (1.0 - fraction) * backward;
++    float residual_a = length(flow_for_pixel(
++        current_a_at, Slice, ViewIndex, value_scale, use_nvidia_cost) - backward);
++    static const float2 directions[4] = {
++        float2(1.0, 0.0), float2(-1.0, 0.0), float2(0.0, 1.0), float2(0.0, -1.0)};
++    float2 other = backward;
++    float split = 0.0;
++    [unroll] for (uint ring = 0; ring < 2; ++ring) {
++        float radius = cell * (ring == 0 ? 2.0 : 5.0);
++        [unroll] for (uint i = 0; i < 4; ++i) {
++            float2 probe = flow_point(pixel + directions[i] * radius, Slice, ViewIndex, value_scale);
++            float distance_to_a = length(probe - backward);
++            if (distance_to_a > split) {
++                split = distance_to_a;
++                other = probe;
++            }
++        }
++    }
++    float edge = smoothstep(1.0, 3.0, max(split, residual_a)) *
++        smoothstep(8.0 / 255.0, 16.0 / 255.0, disagreement_a);
++    float4 result = composed;
++    [branch] if (edge > 0.0) {
++        float consistent_a = current_a.valid >= 0.5
++            ? 1.0 - smoothstep(0.5, 2.0, residual_a) : 0.0;
++        float agree_a = previous_a.valid >= 0.5 && current_a.valid >= 0.5
++            ? saturate(1.0 - disagreement_a * 6.0) : 0.0;
++        float2 current_b_at = pixel - (1.0 - fraction) * other;
++        float residual_b = length(flow_for_pixel(
++            current_b_at, Slice, ViewIndex, value_scale, use_nvidia_cost) - other);
++        CameraSample previous_b = sample_previous_target(
++            pixel + fraction * other, Slice, ViewIndex);
++        CameraSample current_b = sample_current_target(current_b_at, Slice, ViewIndex);
++        float consistent_b = current_b.valid >= 0.5
++            ? 1.0 - smoothstep(0.5, 2.0, residual_b) : 0.0;
++        float agree_b = previous_b.valid >= 0.5 && current_b.valid >= 0.5
++            ? saturate(1.0 - rgb_error(previous_b.color, current_b.color) * 6.0) : 0.0;
++
++        float weight_a = consistent_a * agree_a * flow_trust;
++        float weight_b = consistent_b * agree_b * (1.0 - weight_a);
++        float remaining = saturate(1.0 - weight_a - weight_b);
++
++        // Only where something is left to explain and the flow is trusted
++        // at all: the four confirmations are most of this branch's cost.
++        float4 single = composed;
++        float certainty = 0.0;
++        [branch] if (remaining * flow_trust > 0.01) {
++            // Which frame shows it, confirmed rather than assumed: a candidate's
++            // previous endpoint is "taken" when the other motion carries what is
++            // there to the current frame (the occluder that hid it), and its
++            // current endpoint is taken when the other motion brings it there
++            // from the previous frame (the occluder that now hides it).
++            float2 previous_a_at = pixel + fraction * backward;
++            float2 previous_b_at = pixel + fraction * other;
++            float taken_previous_a = sample_match(previous_a,
++                sample_current_target(previous_a_at - other, Slice, ViewIndex));
++            float taken_previous_b = sample_match(previous_b,
++                sample_current_target(previous_b_at - backward, Slice, ViewIndex));
++            float taken_current_a = sample_match(current_a,
++                sample_previous_target(current_a_at + other, Slice, ViewIndex));
++            float taken_current_b = sample_match(current_b,
++                sample_previous_target(current_b_at + backward, Slice, ViewIndex));
++            // Revealed: the current endpoint is this motion's own, the previous
++            // one was behind the occluder: the current frame alone.
++            float revealed_a = consistent_a * taken_previous_a * (1.0 - agree_a);
++            float revealed_b = consistent_b * taken_previous_b * (1.0 - agree_b);
++            // Covered: the current endpoint is the occluder's, the previous one
++            // is not: the previous frame alone.
++            float covered_a = taken_current_a * (1.0 - taken_previous_a) * (1.0 - agree_a) *
++                (previous_a.valid >= 0.5 ? 1.0 : 0.0);
++            float covered_b = taken_current_b * (1.0 - taken_previous_b) * (1.0 - agree_b) *
++                (previous_b.valid >= 0.5 ? 1.0 : 0.0);
++            float explained = revealed_a + revealed_b + covered_a + covered_b;
++            single = (revealed_a * current_a.color + revealed_b * current_b.color +
++                covered_a * previous_a.color + covered_b * previous_b.color) / max(explained, 1.0e-4);
++            // Only as far as the flow here is trusted at all (its cost, and the
++            // cycle and endpoint checks where they run): a vector the engine
++            // could not match says nothing about which frame shows the pixel.
++            certainty = saturate(explained) * flow_trust;
++        }
++
++        float4 occlusion = weight_a * lerp(previous_a.color, current_a.color, fraction) +
++            weight_b * lerp(previous_b.color, current_b.color, fraction) +
++            remaining * lerp(composed, single, certainty);
++        result = saturate(lerp(composed, occlusion, edge));
++    }
++    return result;
++}
++
+ // DCS VR Control (0010): smooth mouse cursor. DCS draws its VR cursor as a
+ // small view-locked sprite after DLSS. Flow cannot carry a sprite that moves
+ // further than its own size between two real frames - each generated pixel
+@@ -888,6 +1097,12 @@
+                 CameraSample previous_sample = (CameraSample)0;
+                 CameraSample current_sample = (CameraSample)0;
+                 bool endpoints_valid = true;
++                // DCS Control (0030): the NVIDIA flow (pose-compensated) with
++                // the moving-edge handling switched on, on an advancing pair.
++                bool moving_edge_mode = input_pose_compensated && use_nvidia_cost &&
++                    !use_game_motion_pipeline && moving_edge_flag() &&
++                    repeated_capture_flag() == 0;
++                float2 edge_backward = float2(0.0, 0.0);
+                 if (use_game_motion_pipeline) {
+                     // A B-to-A vector is attached to its B endpoint. Sampling
+                     // it once at the desired midpoint is exact only for a
+@@ -930,17 +1145,44 @@
+                             current_endpoint, Slice, ViewIndex);
+                     }
+                 } else {
++                    float flow_spread = 0.0;
+                     raw_backward = repeated_capture_flag() != 0
+                         ? float2(0.0, 0.0)
+-                        : flow_for_pixel(
++                        : flow_for_pixel_spread(
+                             pixel,
+                             Slice,
+                             ViewIndex,
+                             flow_value_scale,
+-                            use_nvidia_cost);
++                            use_nvidia_cost,
++                            flow_spread);
+                     float2 residual_backward = input_pose_compensated
+                         ? raw_backward
+                         : raw_backward - (previous_coverage.coordinate - pixel);
++                    // DCS Control (0030): follow the vector to the pixel it
++                    // belongs to where that can move the sample by more than
++                    // a quarter of a pixel: (1 - t) * |flow| times how fast the
++                    // field changes per pixel. A uniform field skips this and
++                    // is composed exactly as before.
++                    [branch] if (moving_edge_mode &&
++                        (1.0 - synthesis_fraction()) * length(residual_backward) * flow_spread >
++                            0.25 * flow_cell_pixels()) {
++                        float fixed_point_residual;
++                        float2 fixed_point = flow_fixed_point(
++                            pixel,
++                            residual_backward,
++                            synthesis_fraction(),
++                            flow_value_scale,
++                            use_nvidia_cost,
++                            fixed_point_residual);
++                        // Where it did not converge (an occlusion, or a
++                        // field that is noise there) the vector at the
++                        // pixel, as before.
++                        residual_backward = lerp(
++                            fixed_point,
++                            residual_backward,
++                            smoothstep(0.5, 2.0, fixed_point_residual));
++                    }
++                    edge_backward = residual_backward;
+                     previous_sample = sample_previous_target(
+                         pixel + residual_backward * synthesis_fraction(), Slice, ViewIndex);
+                     current_sample = sample_current_target(
+@@ -965,10 +1207,12 @@
+                     if (use_nvidia_cost) {
+                         float consistency_confidence = 1.0;
+                         float cost_confidence = 1.0;
++                        float fast_confidence = 1.0;
+                         if (repeated_capture_flag() == 0) {
+                             if (validate_fast) {
+-                                confidence *= fast_endpoint_confidence(
++                                fast_confidence = fast_endpoint_confidence(
+                                     pixel, raw_backward, Slice, input_pose_compensated);
++                                confidence *= fast_confidence;
+                             }
+                             if (use_nvidia_bidirectional) {
+                                 float2 previous_coordinate = pixel + raw_backward;
+@@ -1016,6 +1260,22 @@
+                             stable_midpoint,
+                             flow_midpoint,
+                             confidence));
++                        // DCS Control (0030): where the frames disagree at a
++                        // moving edge, the frame that shows the pixel instead
++                        // of the cross-fade (occlusion_aware_midpoint).
++                        [branch] if (moving_edge_mode && occlusion_choice_flag() &&
++                            disagreement > 8.0 / 255.0) {
++                            output_color = occlusion_aware_midpoint(
++                                pixel,
++                                edge_backward,
++                                previous_sample,
++                                current_sample,
++                                disagreement,
++                                fast_confidence * consistency_confidence * cost_confidence,
++                                output_color,
++                                flow_value_scale,
++                                use_nvidia_cost);
++                        }
+                     } else {
+                         output_color = saturate(lerp(
+                             stable_midpoint,
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -5099,7 +5099,9 @@
+     state->nvidia_options = {
+         static_cast<xrfg::D3D12NvidiaPerformancePreset>(initial_control.desired.preset),
+         static_cast<xrfg::D3D12NvidiaInputScale>(initial_control.desired.scale),
+-        initial_control.desired.backward};
++        initial_control.desired.backward,
++        // DCS Control (0030): fixed for the session.
++        xrfg::implicit_layer::read_nvidia_occlusion_aware(current_layer_directory())};
+     // One display period of extra depth, bought with one display period of
+     // latency: every synthetic is held until it is a period old, so synthesis
+     // gets a period to finish instead of the gap the game leaves. On by
+@@ -13147,7 +13149,8 @@
+     }
+     const xrfg::D3D12NvidiaOpticalFlowOptions options{
+         static_cast<xrfg::D3D12NvidiaPerformancePreset>(control.desired.preset),
+-        static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward};
++        static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward,
++        state->nvidia_options.occlusion_aware}; // DCS Control (0030): the session's
+     const bool changed = state->control_reconfigure_required || backend != state->optical_flow_backend ||
+         options.preset != state->nvidia_options.preset ||
+         options.input_scale != state->nvidia_options.input_scale ||
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -5277,6 +5277,22 @@
+             run_nvidia_fast_controls();
+             return 0;
+         }
++        // DCS Control (0030): the occlusion handling against the true
++        // in-between frame, and its GPU cost at a headset's resolution.
++        if (GetEnvironmentVariableA("XRFG_TEST_NVIDIA_OCCLUSION_QUALITY", nullptr, 0)) {
++            run_nvidia_occlusion_controls();
++            std::cout << "D3D12 NVIDIA occlusion quality tests passed\n";
++            return 0;
++        }
++        if (GetEnvironmentVariableA("XRFG_TEST_OCCLUSION_BENCH", nullptr, 0)) {
++            D3D12WarpFixture bench_fixture(true);
++            for (std::uint32_t level = 1; level <= 2; ++level) {
++                bench_occlusion_composition(bench_fixture, 5424, 5356, 0, level);
++                bench_occlusion_composition(bench_fixture, 5424, 5356, 1, level);
++            }
++            bench_fixture.require_no_debug_errors();
++            return 0;
++        }
+         // DCS VR Control (0010): the smooth cursor on the optical-flow engine
+         // alone, and its GPU cost on hardware.
+         if (GetEnvironmentVariableA("XRFG_TEST_NVIDIA_CURSOR", nullptr, 0)) {
+@@ -5372,6 +5388,15 @@
+                 static_cast<DWORD>(bidirectional.size()));
+             nvidia_options.bidirectional = bidirectional_length == 1 &&
+                 bidirectional[0] == '1';
++            // DCS Control (0030): XRFG_TEST_NVIDIA_OCCLUSION=1 or 2 runs
++            // this suite at that nvidia_occlusion_aware level.
++            std::array<char, 8> occlusion{};
++            const DWORD occlusion_length = GetEnvironmentVariableA(
++                "XRFG_TEST_NVIDIA_OCCLUSION",
++                occlusion.data(),
++                static_cast<DWORD>(occlusion.size()));
++            nvidia_options.occlusion_aware = occlusion_length == 1 && occlusion[0] >= '0' &&
++                    occlusion[0] <= '2' ? static_cast<std::uint32_t>(occlusion[0] - '0') : 0U;
+             D3D12WarpFixture nvidia_fixture(true);
+             // DCS VR Control (0008): the in-place history on the optical-flow
+             // engine too (first: nothing below depends on it).
+diff --git a/tests/nvidia_fast_patterns.inc b/tests/nvidia_fast_patterns.inc
+--- a/tests/nvidia_fast_patterns.inc
++++ b/tests/nvidia_fast_patterns.inc
+@@ -97,3 +97,431 @@
+         }
+     }
+ }
++
++// DCS Control (0030): the moving-edge and occlusion handling against the true
++// in-between frame. Each scene is drawn at the previous capture, the current
++// capture and exactly halfway, from smooth non-repeating textures (sums of
++// sines at unrelated frequencies) that move rigidly with their layer, so a
++// sample taken from the wrong place or the wrong frame is an error, and the
++// flow has structure to match without repeated patterns to alias on.
++struct OcclusionScene {
++    StereoPattern image;
++    std::vector<std::uint8_t> foreground;
++};
++
++struct OcclusionMotion {
++    const char* name;
++    int foreground_dx, foreground_dy, background_dx, background_dy;
++};
++
++constexpr std::array<OcclusionMotion, 5> kOcclusionMotions{{
++    // A textured object passing over a textured, still background.
++    {"object", 24, 0, 0, 0},
++    // A thin bar (a canopy frame) sweeping across a still background.
++    {"thin_bar", 12, 0, 0, 0},
++    // A still canopy frame and HUD box while the world moves behind (a roll).
++    {"still_frame_moving_world", 0, 0, 20, -8},
++    // Both layers moving, in different directions (an aircraft passing by
++    // while the view turns).
++    {"both_moving", 20, 0, 0, -12},
++    // A bar moving further than its own width: no flow vector at the
++    // in-between position belongs to it (the limit of a one-pair method).
++    {"fast_thin_bar", 24, 0, 0, 0},
++}};
++
++// Hashed value noise, smoothly interpolated: structure at every position
++// with no period for the flow to alias on.
++double occlusion_noise(double x, double y, double cell, std::uint32_t seed) noexcept {
++    const double fx = x / cell, fy = y / cell;
++    const double ix = std::floor(fx), iy = std::floor(fy);
++    const auto hash = [seed](std::int64_t a, std::int64_t b) {
++        std::uint32_t h = static_cast<std::uint32_t>(a) * 0x8da6b343U ^
++            static_cast<std::uint32_t>(b) * 0xd8163841U ^ seed * 0xcb1ab31fU;
++        h ^= h >> 13; h *= 0x5bd1e995U; h ^= h >> 15;
++        return static_cast<double>(h & 0xffffU) / 65535.0;
++    };
++    const auto smooth = [](double t) { return t * t * (3.0 - 2.0 * t); };
++    const double tx = smooth(fx - ix), ty = smooth(fy - iy);
++    const auto a = static_cast<std::int64_t>(ix), b = static_cast<std::int64_t>(iy);
++    const double top = hash(a, b) + (hash(a + 1, b) - hash(a, b)) * tx;
++    const double bottom = hash(a, b + 1) + (hash(a + 1, b + 1) - hash(a, b + 1)) * tx;
++    return top + (bottom - top) * ty;
++}
++
++std::array<std::uint8_t, 3> occlusion_texture(double x, double y, int layer) noexcept {
++    std::array<std::uint8_t, 3> texel{};
++    for (std::uint32_t c = 0; c < 3; ++c) {
++        const std::uint32_t seed = static_cast<std::uint32_t>(layer) * 7U + c + 1U;
++        double value = 0.55 * occlusion_noise(x, y, 41.0, seed) +
++            0.30 * occlusion_noise(x, y, 13.0, seed + 17U) +
++            0.15 * occlusion_noise(x, y, 5.0, seed + 31U);
++        // The foreground darker on red, brighter on blue: an object over a scene.
++        value = layer == 0 ? 30.0 + 200.0 * value
++                           : (c == 0 ? 10.0 + 120.0 * value : c == 1 ? 40.0 + 150.0 * value : 90.0 + 160.0 * value);
++        texel[c] = static_cast<std::uint8_t>(std::clamp(value, 0.0, 255.0) + 0.5);
++    }
++    return texel;
++}
++
++bool occlusion_foreground(int kind, int x, int y, int width, int height) noexcept {
++    switch (kind) {
++    case 0:
++    case 3:
++        return x >= width * 3 / 10 && x < width * 3 / 10 + 240 && y >= height / 3 &&
++            y < height / 3 + 200;
++    case 1:
++        return x >= width * 2 / 5 && x < width * 2 / 5 + 16;
++    case 2:
++        // A canopy bow and a sill, and a HUD combiner's frame.
++        return (x >= width / 3 && x < width / 3 + 16) ||
++            (y >= height * 3 / 4 && y < height * 3 / 4 + 14) ||
++            (x >= width * 3 / 5 && x < width * 3 / 5 + 180 && y >= height / 4 &&
++                y < height / 4 + 140 &&
++                (x < width * 3 / 5 + 6 || x >= width * 3 / 5 + 174 || y < height / 4 + 6 ||
++                    y >= height / 4 + 134));
++    default:
++        return x >= width * 2 / 5 && x < width * 2 / 5 + 10;
++    }
++}
++
++// half_steps: 0 at the previous capture, 1 halfway, 2 at the current one.
++OcclusionScene occlusion_scene(UINT width, UINT height, int kind, int half_steps) {
++    const OcclusionMotion& motion = kOcclusionMotions[static_cast<std::size_t>(kind)];
++    const int fx = motion.foreground_dx * half_steps / 2;
++    const int fy = motion.foreground_dy * half_steps / 2;
++    const int bx = motion.background_dx * half_steps / 2;
++    const int by = motion.background_dy * half_steps / 2;
++    OcclusionScene scene;
++    scene.foreground.assign(static_cast<std::size_t>(width) * height, 0);
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        auto& bytes = scene.image[eye];
++        bytes.resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
++        for (UINT y = 0; y < height; ++y) {
++            for (UINT x = 0; x < width; ++x) {
++                const int ix = static_cast<int>(x);
++                const int iy = static_cast<int>(y);
++                const bool front = occlusion_foreground(kind, ix - fx, iy - fy,
++                    static_cast<int>(width), static_cast<int>(height));
++                const auto texel = front
++                    ? occlusion_texture(ix - fx, iy - fy, 1)
++                    : occlusion_texture(ix - bx, iy - by, 0);
++                const std::size_t i = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
++                bytes[i] = texel[0];
++                bytes[i + 1] = texel[1];
++                bytes[i + 2] = texel[2];
++                bytes[i + 3] = 255;
++                if (eye == 0) {
++                    scene.foreground[static_cast<std::size_t>(y) * width + x] = front ? 1 : 0;
++                }
++            }
++        }
++    }
++    return scene;
++}
++
++StereoPattern synthesize_nvidia_pair(D3D12WarpFixture& fixture, const StereoPattern& a,
++    const StereoPattern& b, UINT width, UINT height,
++    const xrfg::D3D12NvidiaOpticalFlowOptions& options) {
++    std::array<ComPtr<ID3D12Resource>, 2> sources{
++        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
++    auto current = create_source_texture(fixture, width, height);
++    auto synthetic = create_source_texture(fixture, width, height);
++    std::array<ID3D12Resource*, 2> input{sources[0].Get(), sources[1].Get()};
++    std::array<ID3D12Resource*, 1> current_out{current.Get()}, synthetic_out{synthetic.Get()};
++    upload_pattern(fixture, sources[0].Get(), a);
++    upload_pattern(fixture, sources[1].Get(), b);
++    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++    require_hresult(history->initialize(fixture.device(), fixture.queue(), input,
++        D3D12_RESOURCE_STATE_RENDER_TARGET), "occlusion history");
++    xrfg::D3D12FrameSynthesizer synth;
++    require_hresult(synth.initialize(fixture.device(), fixture.queue(), history,
++        current_out, synthetic_out, kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
++        xrfg::D3D12OpticalFlowBackend::nvidia, options), "occlusion initialize");
++    const auto views = make_reprojection_views();
++    xrfg::D3D12HistoryCaptureTicket ca{}, cb{};
++    xrfg::D3D12FrameSynthesisTicket output{};
++    require_hresult(history->capture(0, &ca), "occlusion A");
++    require_hresult(history->commit(ca), "occlusion commit A");
++    require_hresult(synth.submit_prime(ca, views, 0, &output), "occlusion prime");
++    fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
++    require_hresult(history->capture(1, &cb), "occlusion B");
++    require_hresult(history->commit(cb), "occlusion commit B");
++    require_hresult(synth.submit_pair(cb, views, views, 0, 0, &output), "occlusion pair");
++    auto image = readback_pattern(fixture, synthetic.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
++    require_hresult(synth.wait_for_idle(), "occlusion drain");
++    fixture.require_no_debug_errors();
++    return image;
++}
++
++// Mean absolute RGB error over both eyes, inside the margin, where `mask` is
++// set (or everywhere for an empty mask).
++double masked_mae(const StereoPattern& actual, const StereoPattern& expected, UINT width,
++    UINT height, const std::vector<std::uint8_t>& mask, UINT margin = 32) {
++    double total = 0.0;
++    std::size_t count = 0;
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        for (UINT y = margin; y + margin < height; ++y) {
++            for (UINT x = margin; x + margin < width; ++x) {
++                if (!mask.empty() && mask[static_cast<std::size_t>(y) * width + x] == 0) continue;
++                const std::size_t i = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
++                for (UINT c = 0; c < 3; ++c) {
++                    total += std::abs(int(actual[eye][i + c]) - int(expected[eye][i + c]));
++                }
++                count += 3;
++            }
++        }
++    }
++    return count == 0 ? 0.0 : total / static_cast<double>(count);
++}
++
++// The moving-edge region: where the foreground covers a pixel at some of the
++// three instants but not all, and where the background seen halfway is hidden
++// behind the foreground in either capture; grown by 4 px for the filtering
++// around it.
++std::vector<std::uint8_t> occlusion_edge_mask(int kind, UINT width, UINT height) {
++    const OcclusionMotion& motion = kOcclusionMotions[static_cast<std::size_t>(kind)];
++    const int w = static_cast<int>(width), h = static_cast<int>(height);
++    const auto front = [&](int x, int y, int fx, int fy) {
++        return occlusion_foreground(kind, x - fx, y - fy, w, h);
++    };
++    std::vector<std::uint8_t> raw(static_cast<std::size_t>(width) * height, 0);
++    for (int y = 0; y < h; ++y) {
++        for (int x = 0; x < w; ++x) {
++            const bool previous = front(x, y, 0, 0);
++            const bool middle = front(x, y, motion.foreground_dx / 2, motion.foreground_dy / 2);
++            const bool current = front(x, y, motion.foreground_dx, motion.foreground_dy);
++            bool edge = previous != middle || current != middle;
++            if (!middle) {
++                // The background point seen here halfway, in each capture.
++                const int ux = x - motion.background_dx / 2, uy = y - motion.background_dy / 2;
++                edge = edge || front(ux, uy, 0, 0) ||
++                    front(ux + motion.background_dx, uy + motion.background_dy,
++                        motion.foreground_dx, motion.foreground_dy);
++            }
++            raw[static_cast<std::size_t>(y) * width + x] = edge ? 1 : 0;
++        }
++    }
++    std::vector<std::uint8_t> grown(raw.size(), 0);
++    constexpr int kGrow = 4;
++    for (int y = 0; y < h; ++y) {
++        for (int x = 0; x < w; ++x) {
++            bool any = false;
++            for (int dy = -kGrow; dy <= kGrow && !any; ++dy) {
++                for (int dx = -kGrow; dx <= kGrow && !any; ++dx) {
++                    const int sx = x + dx, sy = y + dy;
++                    any = sx >= 0 && sy >= 0 && sx < w && sy < h &&
++                        raw[static_cast<std::size_t>(sy) * width + sx] != 0;
++                }
++            }
++            grown[static_cast<std::size_t>(y) * width + x] = any ? 1 : 0;
++        }
++    }
++    return grown;
++}
++
++// XRFG_TEST_NVIDIA_OCCLUSION_QUALITY=1 on NVIDIA hardware: every scene at
++// each nvidia_occlusion_aware level (0 the composition as before, 1 moving
++// edges followed, 2 with the occlusion choice), for each preset and with and
++// without the bidirectional flow; then the Fast/Medium controls above. Level
++// 1 must stay within 2 % of level 0 everywhere (the engine is deterministic
++// here; the allowance is for the few scenes where the followed vector is a
++// hair worse); level 2 must be better at the edges of the moving objects it
++// is for. Its cost on the still canopy frame over a moving world is printed,
++// not required: it is why level 2 is not the default.
++void run_nvidia_occlusion_controls() {
++    D3D12WarpFixture fixture(true);
++    constexpr UINT width = 1024, height = 768;
++    const auto preset_name = [](xrfg::D3D12NvidiaPerformancePreset preset) {
++        return preset == xrfg::D3D12NvidiaPerformancePreset::fast ? "fast" : "medium";
++    };
++    for (int kind = 0; kind < static_cast<int>(kOcclusionMotions.size()); ++kind) {
++        const auto previous = occlusion_scene(width, height, kind, 0);
++        const auto middle = occlusion_scene(width, height, kind, 1);
++        const auto current = occlusion_scene(width, height, kind, 2);
++        const auto edges = occlusion_edge_mask(kind, width, height);
++        const std::string name = kOcclusionMotions[static_cast<std::size_t>(kind)].name;
++        for (auto preset : {xrfg::D3D12NvidiaPerformancePreset::medium,
++                            xrfg::D3D12NvidiaPerformancePreset::fast}) {
++            for (bool bidirectional : {false, true}) {
++                std::array<double, 3> mae{}, edge{};
++                for (std::uint32_t level = 0; level < 3; ++level) {
++                    xrfg::D3D12NvidiaOpticalFlowOptions options;
++                    options.preset = preset;
++                    options.bidirectional = bidirectional;
++                    options.occlusion_aware = level;
++                    const auto image = synthesize_nvidia_pair(
++                        fixture, previous.image, current.image, width, height, options);
++                    mae[level] = masked_mae(image, middle.image, width, height, {});
++                    edge[level] = masked_mae(image, middle.image, width, height, edges);
++                }
++                std::cout << "occlusion scene=" << name << " preset=" << preset_name(preset)
++                          << " bidirectional=" << bidirectional << " mae " << mae[0] << " / "
++                          << mae[1] << " / " << mae[2] << " edge_mae " << edge[0] << " / "
++                          << edge[1] << " / " << edge[2] << std::endl;
++                require(mae[1] <= mae[0] * 1.02 + 0.01 && edge[1] <= edge[0] * 1.02 + 0.05,
++                    "moving-edge following is worse on " + name);
++                if (name == "object" || name == "thin_bar" || name == "both_moving") {
++                    require(edge[2] < edge[0] && mae[2] < mae[0],
++                        "the occlusion choice does not help on " + name);
++                }
++            }
++        }
++    }
++    constexpr UINT control_width = 1342, control_height = 1464;
++    for (int kind = 0; kind < 4; ++kind) {
++        const auto a = fast_control_pattern(control_width, control_height, 0, kind);
++        const auto b = fast_control_pattern(control_width, control_height, 24, kind);
++        const auto expected = fast_control_pattern(control_width, control_height, 12, kind);
++        for (auto preset : {xrfg::D3D12NvidiaPerformancePreset::fast,
++                            xrfg::D3D12NvidiaPerformancePreset::medium}) {
++            std::array<double, 3> mae{};
++            std::array<std::size_t, 3> changed{};
++            for (std::uint32_t level = 0; level < 3; ++level) {
++                xrfg::D3D12NvidiaOpticalFlowOptions options;
++                options.preset = preset;
++                options.occlusion_aware = level;
++                const auto image = synthesize_nvidia_pair(
++                    fixture, a, b, control_width, control_height, options);
++                mae[level] = masked_mae(image, expected, control_width, control_height, {});
++                for (UINT eye = 0; eye < 2; ++eye) for (UINT y = 32; y + 32 < control_height; ++y)
++                    for (UINT x = 32; x + 32 < control_width; ++x) {
++                        const auto i = (static_cast<std::size_t>(y) * control_width + x) * 4;
++                        if (a[eye][i] != b[eye][i] || b[eye][i] != expected[eye][i]) continue;
++                        changed[level] += std::abs(int(image[eye][i]) - int(expected[eye][i])) > 2;
++                    }
++            }
++            std::cout << "control kind=" << kind << " preset=" << preset_name(preset) << " mae "
++                      << mae[0] << " / " << mae[1] << " / " << mae[2] << " stationary_changed "
++                      << changed[0] << " / " << changed[1] << " / " << changed[2] << std::endl;
++            require(mae[1] <= mae[0] * 1.02 + 0.01,
++                "moving-edge following is worse on control kind " + std::to_string(kind));
++            if (preset == xrfg::D3D12NvidiaPerformancePreset::fast && kind == 0) {
++                require(changed[1] == 0 && changed[2] == 0,
++                    "Fast must not invent motion in identical high-contrast captures");
++            }
++        }
++    }
++}
++
++// XRFG_TEST_OCCLUSION_BENCH=1 on NVIDIA hardware: the 2X composition's GPU
++// time per pair at level 0 and at `level`, at a headset's resolution,
++// driven alternately so both see the same clocks. Two scenes: the world
++// rolling behind a still canopy frame and HUD box (a spatially varying
++// field: the fixed point runs over most of the image), and many textured
++// objects crossing a moving background (many occlusion edges).
++void bench_occlusion_composition(
++    D3D12WarpFixture& fixture, UINT width, UINT height, int scene, std::uint32_t level) {
++    constexpr UINT kFrames = 3;
++    constexpr int kPairs = 240;
++    struct Pipeline {
++        std::array<ComPtr<ID3D12Resource>, kFrames> sources{};
++        std::array<ComPtr<ID3D12Resource>, 2> currents{};
++        std::array<ComPtr<ID3D12Resource>, 1> synthetics{};
++        std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
++        std::unique_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
++        std::vector<std::uint64_t> composition;
++        std::vector<std::uint64_t> total;
++    };
++    std::array<StereoPattern, kFrames> frames{};
++    const double cx = width * 0.5, cy = height * 0.5;
++    for (UINT frame = 0; frame < kFrames; ++frame) {
++        // Roll: 0.4 degrees a frame (about 19 px at the image's edge).
++        const double angle = 0.4 * 3.14159265358979 / 180.0 * frame;
++        const double ca = std::cos(angle), sa = std::sin(angle);
++        for (UINT eye = 0; eye < kEyeCount; ++eye) {
++            auto& bytes = frames[frame][eye];
++            bytes.resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
++            for (UINT y = 0; y < height; ++y) {
++                for (UINT x = 0; x < width; ++x) {
++                    std::array<std::uint8_t, 3> texel;
++                    if (scene == 0) {
++                        const bool frame_bar = (x >= width / 3 && x < width / 3 + 40) ||
++                            (y >= height * 3 / 4 && y < height * 3 / 4 + 36);
++                        if (frame_bar) {
++                            texel = occlusion_texture(x, y, 1);
++                        } else {
++                            const double dx = x - cx, dy = y - cy;
++                            texel = occlusion_texture(cx + ca * dx - sa * dy, cy + sa * dx + ca * dy, 0);
++                        }
++                    } else {
++                        // A grid of 160 px objects, every other column moving
++                        // the other way, over a background drifting down.
++                        const int shift = static_cast<int>(frame) * 20;
++                        const int column = static_cast<int>(x) / 320;
++                        const int ox = static_cast<int>(x) - (column % 2 ? -shift : shift);
++                        const bool front = (ox % 320 + 320) % 320 < 160 && (static_cast<int>(y) % 400) < 160;
++                        texel = front ? occlusion_texture(ox, y, 1)
++                                      : occlusion_texture(x, static_cast<double>(y) - frame * 10.0, 0);
++                    }
++                    const std::size_t i = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
++                    bytes[i] = texel[0];
++                    bytes[i + 1] = texel[1];
++                    bytes[i + 2] = texel[2];
++                    bytes[i + 3] = 255;
++                }
++            }
++        }
++    }
++    std::array<Pipeline, 2> pipelines{};
++    for (UINT index = 0; index < pipelines.size(); ++index) {
++        Pipeline& pipeline = pipelines[index];
++        for (UINT frame = 0; frame < kFrames; ++frame) {
++            pipeline.sources[frame] = create_source_texture(fixture, width, height);
++            upload_pattern(fixture, pipeline.sources[frame].Get(), frames[frame]);
++        }
++        for (auto& c : pipeline.currents) c = create_source_texture(fixture, width, height);
++        for (auto& s : pipeline.synthetics) s = create_source_texture(fixture, width, height);
++        std::array<ID3D12Resource*, kFrames> source_pointers{};
++        for (UINT i = 0; i < kFrames; ++i) source_pointers[i] = pipeline.sources[i].Get();
++        std::array<ID3D12Resource*, 2> current_pointers{pipeline.currents[0].Get(), pipeline.currents[1].Get()};
++        std::array<ID3D12Resource*, 1> synthetic_pointers{pipeline.synthetics[0].Get()};
++        pipeline.history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++        require(operation_succeeded(pipeline.history->initialize(fixture.device(), fixture.queue(),
++                    std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
++                    D3D12_RESOURCE_STATE_RENDER_TARGET)), "occlusion bench: history");
++        xrfg::D3D12NvidiaOpticalFlowOptions options{};
++        options.occlusion_aware = index == 1 ? level : 0U;
++        pipeline.synthesizer = std::make_unique<xrfg::D3D12FrameSynthesizer>();
++        require(operation_succeeded(pipeline.synthesizer->initialize(fixture.device(), fixture.queue(),
++                    pipeline.history,
++                    std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
++                    std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
++                    kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
++                    xrfg::D3D12OpticalFlowBackend::nvidia, options, true)), "occlusion bench: synthesizer");
++    }
++    const ReprojectionViews views = make_reprojection_views();
++    for (int frame = 0; frame <= kPairs; ++frame) {
++        const UINT slot = static_cast<UINT>(frame) % kFrames;
++        for (Pipeline& pipeline : pipelines) {
++            xrfg::D3D12HistoryCaptureTicket capture{};
++            xrfg::D3D12FrameSynthesisTicket ticket{};
++            require(operation_succeeded(pipeline.history->capture(slot, &capture)) &&
++                        operation_succeeded(pipeline.history->commit(capture)), "occlusion bench: capture");
++            const HRESULT submitted = frame == 0
++                ? pipeline.synthesizer->submit_prime(capture, views, 0, &ticket)
++                : pipeline.synthesizer->submit_pair(capture, views, views, 0,
++                      static_cast<std::uint32_t>(frame % 2), &ticket, std::nullopt, {}, false, 0.5F);
++            require(operation_succeeded(submitted), "occlusion bench: submission");
++            require_frame_start_gate(*pipeline.synthesizer, "occlusion bench: frame-start gate");
++            xrfg::D3D12NvidiaGpuTiming timing{};
++            while (pipeline.synthesizer->consume_nvidia_gpu_timing(&timing) == S_OK) {
++                if (timing.previous_serial == 0) continue;
++                pipeline.composition.push_back(timing.composition_microseconds);
++                pipeline.total.push_back(timing.total_microseconds);
++            }
++        }
++    }
++    require(operation_succeeded(pipelines[0].synthesizer->wait_for_idle()) &&
++                operation_succeeded(pipelines[1].synthesizer->wait_for_idle()), "occlusion bench: idle");
++    const auto median = [](std::vector<std::uint64_t> values) -> std::uint64_t {
++        if (values.empty()) return 0;
++        std::sort(values.begin(), values.end());
++        return values[values.size() / 2];
++    };
++    std::cout << "occlusion bench " << (scene == 0 ? "roll" : "objects") << " level " << level << ' '
++              << width << "x" << height
++              << " x2 eyes: composition median off " << median(pipelines[0].composition) << " us, on "
++              << median(pipelines[1].composition) << " us (" << pipelines[1].composition.size()
++              << " pairs); whole pair median off " << median(pipelines[0].total) << " us, on "
++              << median(pipelines[1].total) << " us" << std::endl;
++}

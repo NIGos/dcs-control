@@ -95,3 +95,21 @@ int DcsQv_ContextSlot(const char* name) {
   }
   return -1;
 }
+
+/* Vtable slot indices of ID3D11Device (chain_fast.h, R34: CreateComputeShader). */
+int DcsQv_DeviceSlot(const char* name) {
+  static const struct {
+    const char* n;
+    int s;
+  } table[] = {
+      {"CreateComputeShader", (int)(offsetof(ID3D11DeviceVtbl, CreateComputeShader) / sizeof(void*))},
+      {"CreateBuffer", (int)(offsetof(ID3D11DeviceVtbl, CreateBuffer) / sizeof(void*))},
+  };
+  for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
+    const char* a = table[i].n;
+    const char* b = name;
+    while (*a && *a == *b) ++a, ++b;
+    if (*a == 0 && *b == 0) return table[i].s;
+  }
+  return -1;
+}

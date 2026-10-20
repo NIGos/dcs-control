@@ -483,7 +483,8 @@ replace(transport, """    return ready;
 # Texture fields in the evaluation path (slot -> view textures); timing/allocator fields stay per slot.
 value = (source / transport).read_text(encoding='utf-8')
 start = value.index('    auto& slot = view->slots[view->next_slot++ % transport_slot_count];')
-end = value.index('void release_d3d11_transport_view(', start)
+# The DCS review round turned the function's return type into bool; match either spelling.
+end = start + re.search(r'(?:void|bool) release_d3d11_transport_view\(', value[start:]).start()
 value = value[:start] + re.sub(r'\bslot\.(' + texture_fields + r')\b', r'textures.\1', value[start:end]) + value[end:]
 (source / transport).write_text(value, encoding='utf-8', newline='\n')
 replace(transport, """    auto& slot = view->slots[view->next_slot++ % transport_slot_count];
@@ -1323,14 +1324,28 @@ replace('src/d3d11_backend.cpp', '''    const bool views_ready = device != nullp
             [&](ID3D11UnorderedAccessView** created) { return device->CreateUnorderedAccessView(game_output, nullptr, created); }));''')
 
 # DLSS-NR's encode and decode sample their textures bilinearly; at working
-# scale 1.0 (the default) every sample falls on a texel centre, where the
-# weights are 1, 0, 0, 0. One load then gives the same bits as four.
+# scale 1.0 every sample falls on a texel centre, where the weights are
+# 1, 0, 0, 0. One load then gives the same bits as four.
+# DCS Control (2026-10-18): the test is uniform (the working size equals the
+# region), not per pixel: at other scales (0.75 by default) the decode then
+# costs what upstream's does (the per-pixel test cost +5 % there). Trees patched
+# with the per-pixel test are upgraded in place first.
+codec_path = source / 'src/nr_codec_shader.hpp'
+codec_text = codec_path.read_text(encoding='utf-8')
+for function, size in (('LoadSource0Bilinear', 'SourceSize'), ('LoadSource1Bilinear', 'RegionSize'), ('LoadSource2Bilinear', 'RegionSize')):
+    at = codec_text.find('float4 ' + function + '(')
+    legacy = '    [branch] if (any(fraction != float2(0.0, 0.0))) {'
+    end = codec_text.find('\n}\n', at)
+    if at >= 0 and legacy in codec_text[at:end]:
+        codec_text = codec_text[:at] + codec_text[at:end].replace(legacy, '    [branch] if (any(ProxySize != ' + size + ')) {') + codec_text[end:]
+if codec_text != codec_path.read_text(encoding='utf-8'):
+    codec_path.write_text(codec_text, encoding='utf-8', newline='\n')
 replace('src/nr_codec_shader.hpp', '''    return lerp(
         lerp(Source0.Load(int3(p00, 0)), Source0.Load(int3(p10, 0)), fraction.x),
         lerp(Source0.Load(int3(p01, 0)), Source0.Load(int3(p11, 0)), fraction.x),
         fraction.y
     );''', '''    float4 result = Source0.Load(int3(p00, 0));
-    [branch] if (any(fraction != float2(0.0, 0.0))) {
+    [branch] if (any(ProxySize != SourceSize)) {
         result = lerp(
             lerp(result, Source0.Load(int3(p10, 0)), fraction.x),
             lerp(Source0.Load(int3(p01, 0)), Source0.Load(int3(p11, 0)), fraction.x),
@@ -1343,7 +1358,7 @@ replace('src/nr_codec_shader.hpp', '''    return lerp(
         lerp(Source1.Load(int3(p01, 0)), Source1.Load(int3(p11, 0)), fraction.x),
         fraction.y
     );''', '''    float4 result = Source1.Load(int3(p00, 0));
-    [branch] if (any(fraction != float2(0.0, 0.0))) {
+    [branch] if (any(ProxySize != RegionSize)) {
         result = lerp(
             lerp(result, Source1.Load(int3(p10, 0)), fraction.x),
             lerp(Source1.Load(int3(p01, 0)), Source1.Load(int3(p11, 0)), fraction.x),
@@ -1356,7 +1371,7 @@ replace('src/nr_codec_shader.hpp', '''    return lerp(
         lerp(Source2.Load(int3(p01, 0)), Source2.Load(int3(p11, 0)), fraction.x),
         fraction.y
     );''', '''    float4 result = Source2.Load(int3(p00, 0));
-    [branch] if (any(fraction != float2(0.0, 0.0))) {
+    [branch] if (any(ProxySize != RegionSize)) {
         result = lerp(
             lerp(result, Source2.Load(int3(p10, 0)), fraction.x),
             lerp(Source2.Load(int3(p01, 0)), Source2.Load(int3(p11, 0)), fraction.x),
@@ -1420,5 +1435,341 @@ replace(nr, '''    view.settings_signature = 0U;
         dcs_vram_after_feature, dcs_vram_after_feature - dcs_vram_before_feature);
     trace_event(
         "DLSS-NR feature 18 created view=%llu''')
+
+# DCS Control (2026-10-18): the DLSS 5 focus round.
+# 1. The DLSS 5 edge fade (NrTransitionWidth) may span 0.45 of the NR area, so it can match the bundled Quad Views
+#    focus fade band (radius 0.6 to 1.0). The SR TransitionWidth keeps upstream's 0.30. The fade lies inside the NR
+#    region (decode weight 1 - smoothstep(1 - width / min(NrWidth, NrHeight), 1, distance)), so a wider fade moves
+#    its start inward and never grows the region, its textures or the NR cost.
+replace('src/settings.cpp', '''    store_float(
+        nr_transition_bits,
+        std::clamp(settings.nr_transition_width, 0.0F, 0.30F)
+    );''', '''    // DCS Control: the DLSS 5 edge fade may be as wide as the Quad Views focus fade (0.45); SR keeps 0.30.
+    store_float(
+        nr_transition_bits,
+        std::clamp(settings.nr_transition_width, 0.0F, 0.45F)
+    );''')
+replace('standalone/overlay_ui.cpp', 'slider("NR transition width", s.nr_transition_width, 0.0F, .3F, "%.3f");',
+    'slider("NR transition width", s.nr_transition_width, 0.0F, .45F, "%.3f"); // DCS Control: settings.cpp cap')
+replace('src/addon.cpp', '''                "NR transition width", &settings.nr_transition_width,
+                0.0F, 0.30F, "%.3f", ImGuiSliderFlags_AlwaysClamp''', '''                "NR transition width", &settings.nr_transition_width, // DCS Control: settings.cpp cap
+                0.0F, 0.45F, "%.3f", ImGuiSliderFlags_AlwaysClamp''')
+replace('uevr/scripts/cheeky_foveated_dlss.lua', 'slider("NR transition", "NrTransitionWidth", 0, 0.3)',
+    'slider("NR transition", "NrTransitionWidth", 0, 0.45) -- DCS Control: settings.cpp cap')
+shutil.copyfile(root / 'patches/cheeky/dcs_nr_focus_tests.inc', source / 'tests/dcs_nr_focus_tests.inc')
+replace('tests/openxr_calibration_tests.cpp', '''#include "dcs_status_tests.inc"
+int run_dcs_status_tests() {''', '''#include "dcs_nr_focus_tests.inc"
+int run_dcs_nr_focus_tests() {
+    try { dcs_nr_focus_test(); return 0; }
+    catch (const std::exception& e) { std::cerr << "DCS NR focus shape: " << e.what() << '\\n'; return 1; }
+}
+#include "dcs_status_tests.inc"
+int run_dcs_status_tests() {''')
+replace('tests/gaze_tests.cpp', '''    if (argc == 2 && std::strcmp(argv[1], "--dcs-status") == 0) { int run_dcs_status_tests(); return run_dcs_status_tests(); }''',
+    '''    if (argc == 2 && std::strcmp(argv[1], "--dcs-status") == 0) { int run_dcs_status_tests(); return run_dcs_status_tests(); }
+    if (argc == 2 && std::strcmp(argv[1], "--dcs-nr-focus") == 0) { int run_dcs_nr_focus_tests(); return run_dcs_nr_focus_tests(); }''')
+replace('CMakeLists.txt', 'add_test(NAME DcsVrStatusTests COMMAND CheekyTests --dcs-status)',
+    'add_test(NAME DcsVrStatusTests COMMAND CheekyTests --dcs-status)\nadd_test(NAME DcsNrFocusTests COMMAND CheekyTests --dcs-nr-focus)')
+
+# 3. DLSS 5 evaluations that keep failing stop for the session (dcs_nr_failure_latch.hpp): after
+#    dcs_nr_failure_limit consecutive failures on a view, or at once on a device-removed/hung result, instead of a
+#    retry with a history reset on every frame. The transport then runs SR only, as with DLSS 5 off.
+shutil.copyfile(root / 'patches/cheeky/dcs_nr_failure_latch.hpp', source / 'src/dcs_nr_failure_latch.hpp')
+replace(nr, '#include "dlss_nr_input.hpp"\n#include "dcs_vram_probe.hpp"\n',
+    '#include "dlss_nr_input.hpp"\n#include "dcs_vram_probe.hpp"\n#include "dcs_nr_failure_latch.hpp"\n')
+replace(nr, '''    std::deque<GpuResources> gpu_resources;
+    std::uint64_t gpu_use_sequence{};
+};''', '''    std::deque<GpuResources> gpu_resources;
+    std::uint64_t gpu_use_sequence{};
+    std::uint32_t dcs_failed_run{}; // DCS Control: consecutive failed evaluations (dcs_nr_failure_latch.hpp)
+};''')
+replace(nr, '''    if (!settings.nr_enabled) {
+        diagnostics.state = DlssNrState::disabled;
+        for (auto& view : views) view.was_enabled = false;
+        return false;
+    }
+''', '''    if (!settings.nr_enabled) {
+        diagnostics.state = DlssNrState::disabled;
+        for (auto& view : views) view.was_enabled = false;
+        return false;
+    }
+    // DCS Control: DLSS 5 stopped for this session after repeated failures; nothing is recorded.
+    if (dcs_nr_failure_latch().active()) {
+        diagnostics.state = DlssNrState::evaluation_failed;
+        diagnostics.skip_reason = dcs_nr_failure_latch_reason;
+        for (auto& view : views) view.was_enabled = false;
+        return false;
+    }
+''')
+replace(nr, '''        trace_event(
+            "DLSS-NR feature 18 evaluation failed view=%llu result=0x%08X",
+            static_cast<unsigned long long>(frame.view_id),
+            result
+        );
+        return false;''', '''        trace_event(
+            "DLSS-NR feature 18 evaluation failed view=%llu result=0x%08X",
+            static_cast<unsigned long long>(frame.view_id),
+            result
+        );
+        // DCS Control: a run of failures or a lost device stops DLSS 5 for the session (dcs_nr_failure_latch.hpp).
+        HRESULT dcs_removed = S_OK;
+        if (ID3D12Device* dcs_device{}; SUCCEEDED(frame.command_list->GetDevice(IID_PPV_ARGS(&dcs_device))) && dcs_device) {
+            dcs_removed = dcs_device->GetDeviceRemovedReason();
+            dcs_device->Release();
+        }
+        if (dcs_nr_failure_latch().failed(++view.dcs_failed_run, static_cast<std::uint32_t>(result),
+                static_cast<std::uint32_t>(dcs_removed)))
+            trace_event("DLSS-NR stopped for this session after %u consecutive failed evaluations view=%llu "
+                "result=0x%08X deviceRemovedReason=0x%08X; the game's DLSS image is used without DLSS 5",
+                view.dcs_failed_run, static_cast<unsigned long long>(frame.view_id), result,
+                static_cast<unsigned>(dcs_removed));
+        return false;''')
+replace(nr, '''    view.was_enabled = true;
+    history_guard.succeeded = true;''', '''    view.was_enabled = true;
+    view.dcs_failed_run = 0U; // DCS Control: the failure run is consecutive.
+    history_guard.succeeded = true;''')
+replace(transport, '#include "dcs_vram_probe.hpp"\n#include "depth_formats.hpp"\n',
+    '#include "dcs_vram_probe.hpp"\n#include "depth_formats.hpp"\n#include "dcs_nr_failure_latch.hpp"\n')
+replace(transport, '''    const NgxParameters* const parameters,
+    const Settings& settings,
+    const D3D11TransportNgx& ngx,
+    NgxResult& result,
+    const D3D11NativeEvaluate* const native
+) noexcept {
+''', '''    const NgxParameters* const parameters,
+    const Settings& dcs_input_settings,
+    const D3D11TransportNgx& ngx,
+    NgxResult& result,
+    const D3D11NativeEvaluate* const native
+) noexcept {
+''')
+replace(transport, '''    D3D12NgxInterceptionScope private_dx12_scope;
+    result = 0xBAD00005U;
+''', '''    D3D12NgxInterceptionScope private_dx12_scope;
+    // DCS Control: once DLSS 5 has stopped for the session (dcs_nr_failure_latch.hpp) the transport runs SR only:
+    // the same private SR feature and textures, no NR pass, as with DLSS 5 off.
+    Settings dcs_sr_only{};
+    const bool dcs_nr_stopped = dcs_input_settings.nr_enabled && !dcs_input_settings.dcs_nr_suppressed &&
+        dcs_nr_failure_latch().active();
+    if (dcs_nr_stopped) { dcs_sr_only = dcs_input_settings; dcs_sr_only.dcs_nr_suppressed = true; }
+    const Settings& settings = dcs_nr_stopped ? dcs_sr_only : dcs_input_settings;
+    result = 0xBAD00005U;
+''')
+replace('tests/runtime_host_tests.cpp', '''            else if (arg == "--transport-dcs-deferred-nr-off") { transport = dx11 = dcs_deferred_mode = true; dcs_deferred_scenario = 2; }
+''', '''            else if (arg == "--transport-dcs-deferred-nr-off") { transport = dx11 = dcs_deferred_mode = true; dcs_deferred_scenario = 2; }
+            else if (arg == "--transport-dcs-deferred-nr-fail") { transport = dx11 = dcs_deferred_mode = true; dcs_deferred_scenario = 3; }
+''')
+replace('tests/runtime_host_tests.cpp', '''        if (dcs_deferred_mode) {
+            verify_dcs_deferred(command, get, attachment,''', '''        if (dcs_deferred_mode && dcs_deferred_scenario == 3) { // DCS Control: failing DLSS 5 (dcs_nr_failure_latch.hpp)
+            verify_dcs_deferred(command, get, attachment, device11.Get(), context11.Get(), fake_ngx,
+                directory / "CheekyFoveatedDLSS-Standalone.log", bin, dcs_deferred_scenario);
+            detach(attachment);
+            puts("PASS: DCS focus view with failing DLSS 5: stopped for the session after the failure limit, private D3D12 SR goes on");
+            return 0;
+        }
+        if (dcs_deferred_mode) {
+            verify_dcs_deferred(command, get, attachment,''')
+replace('cmake/Standalone.cmake', '''    add_test(NAME CheekyRuntimeStandalone-TransportDcsDeferredNrOff COMMAND CheekyRuntimeHostTests --transport-dcs-deferred-nr-off)
+''', '''    add_test(NAME CheekyRuntimeStandalone-TransportDcsDeferredNrOff COMMAND CheekyRuntimeHostTests --transport-dcs-deferred-nr-off)
+    add_test(NAME CheekyRuntimeStandalone-TransportDcsDeferredNrFail COMMAND CheekyRuntimeHostTests --transport-dcs-deferred-nr-fail)
+''')
+
+# 4. Filtered fetches (SampleLevel through a linear clamp sampler) for the NR decode's proxy and neural reads were
+#    measured and rejected: the texture unit's 8-bit subtexel weights and reduced fp16 filter precision put the decode
+#    up to 2/1023 off in SDR and many fp16 ULPs off in HDR, where UpgradeToneMap divides by the proxy's luminance
+#    (tests/dcs_nr_codec_tests.cpp --sampled prints the numbers). The decode keeps its exact four-load bilinear.
+#    The fixture instead proves the shipped codec bit-identical to upstream's unconditional four-load lerp and the
+#    embedded bytecode current (see the regeneration step below).
+shutil.copyfile(root / 'patches/cheeky/dcs_nr_codec_tests.cpp', source / 'tests/dcs_nr_codec_tests.cpp')
+replace('CMakeLists.txt', '''add_test(NAME CheekyNrObserverTestsNoDebugLayer COMMAND CheekyNrObserverTests)
+''', '''add_test(NAME CheekyNrObserverTestsNoDebugLayer COMMAND CheekyNrObserverTests)
+# DCS Control: the shipped NR codec against upstream's four-load lerp, bit for bit (WARP and the hardware GPU).
+add_executable(CheekyDcsNrCodecTests tests/dcs_nr_codec_tests.cpp)
+target_compile_features(CheekyDcsNrCodecTests PRIVATE cxx_std_20)
+target_compile_definitions(CheekyDcsNrCodecTests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+target_include_directories(CheekyDcsNrCodecTests PRIVATE src)
+target_link_libraries(CheekyDcsNrCodecTests PRIVATE d3d12 dxgi d3dcompiler)
+set_target_properties(CheekyDcsNrCodecTests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
+if(MSVC)
+    target_compile_options(CheekyDcsNrCodecTests PRIVATE /W4 /permissive- /utf-8 /EHsc)
+endif()
+add_test(NAME DcsNrCodecTests COMMAND CheekyDcsNrCodecTests)
+set_tests_properties(DcsNrCodecTests PROPERTIES TIMEOUT 300)
+''')
+
+# Review round 2026-10-19 (DCS Control).
+# 1. A brief transport failure on an accepted deferred focus view is held with a bilinear upscale for at most
+#    dcs_deferred_unknown_hold_ms of consecutive failures instead of creating DCS's own ~254 MiB feature, which is
+#    never freed (dcs_deferred_hold_transport_failure in dcs_deferred_feature.inc). A transport success ends the run.
+replace(hooks, '''    D3D11PeripheralDlaaResult peripheral{};''', '''    // DCS VR Control: a brief transport failure on an accepted deferred focus view never creates DCS's own feature.
+    if (NgxResult held{}; settings.d3d11_use_d3d12_transport &&
+        dcs_deferred_hold_transport_failure(context, handle, parameters, held)) return held;
+    D3D11PeripheralDlaaResult peripheral{};''', count=2)
+replace(hooks, '''                current_transport_ngx(runtime), transport_result, &native)) {
+            release_d3d11_peripheral_dlaa_view(handle);''', '''                current_transport_ngx(runtime), transport_result, &native)) {
+            dcs_deferred_transport_ok(handle); // DCS VR Control: ends a run of transport failures.
+            release_d3d11_peripheral_dlaa_view(handle);''', count=2)
+
+# 3. The DLSS 5 key's session-only change ("set_session") must never reach the INI, but every later save wrote the
+#    whole live settings. The runtime keeps the persisted value of each field a session change overrode
+#    (dcs_session_settings.hpp) and the save worker writes those. Under DCS quad focus the two upstream Alt+Shift keys
+#    (DLSS toggle and DLSS-NR toggle, both saved to the INI) are off: DCS Control's own key owns DLSS 5 there.
+shutil.copyfile(root / 'patches/cheeky/dcs_session_settings.hpp', source / 'uevr/dcs_session_settings.hpp')
+replace('uevr/runtime.cpp', '#include "version.h"\n', '#include "version.h"\n#include "dcs_session_settings.hpp"\n')
+replace('uevr/runtime.cpp', '''                { std::lock_guard lock(s.mutex); settings = configured_settings(); revision = s.revision; }''',
+    '''                { std::lock_guard lock(s.mutex); settings = configured_settings(); revision = s.revision;
+                    // DCS VR Control: fields changed only for this session are saved with their persisted values.
+                    cheeky::dcsvr::dcs_session_overrides().apply([&](const std::string& key, const std::string& value) {
+                        static_cast<void>(set_named_setting(settings, key, value)); });
+                }''')
+replace('uevr/runtime.cpp', '''        auto settings = configured_settings();
+        if (action == "defaults") {''', '''        auto settings = configured_settings();
+        std::vector<std::string> dcs_keys; // DCS VR Control: the keys this transaction sets.
+        if (action == "defaults") {''')
+replace('uevr/runtime.cpp', '''                if (++count > 64) { s.message = "Too many settings"; return false; }''',
+    '''                if (++count > 64) { s.message = "Too many settings"; return false; }
+                dcs_keys.emplace_back(std::string_view(line).substr(0, eq));''')
+replace('uevr/runtime.cpp', '''        update_settings(settings); ++s.revision; s.applied_request = id;''', '''        {
+            const auto before = serialize_settings(configured_settings()), after = serialize_settings(settings);
+            if (action == "set_session") cheeky::dcsvr::dcs_session_overrides().session(before, after, dcs_keys);
+            else if (action.starts_with("defaults")) cheeky::dcsvr::dcs_session_overrides().clear();
+            else cheeky::dcsvr::dcs_session_overrides().persistent(before, after, dcs_keys);
+        }
+        update_settings(settings); ++s.revision; s.applied_request = id;''')
+replace('uevr/runtime.cpp', '''        static bool was_down{};
+        const bool down = (GetAsyncKeyState(VK_MENU)''', '''        // DCS VR Control: under DCS quad focus DCS Control's own key owns DLSS 5; these keys would save to the INI.
+        const bool dcs_quad_focus = [] {
+            wchar_t value[2]{};
+            return GetEnvironmentVariableW(L"DCSVR_QUAD_FOCUS", value, 2) == 1 && value[0] == L'1';
+        }();
+        static bool was_down{};
+        const bool down = (GetAsyncKeyState(VK_MENU)''')
+replace('uevr/runtime.cpp', '        if (down && !was_down) {', '        if (!dcs_quad_focus && down && !was_down) {')
+replace('uevr/runtime.cpp', '        if (nr_down && !nr_was_down) {', '        if (!dcs_quad_focus && nr_down && !nr_was_down) {')
+replace('tests/openxr_calibration_tests.cpp', '#include "../src/dcs_status_block.hpp"\n',
+    '#include "../src/dcs_status_block.hpp"\n#include "../uevr/dcs_session_settings.hpp"\n')
+
+# 4. The depth conversion's cached SRVs keep the game's depth buffers alive; a new mission's create drops them along
+#    with the composite's cached views (dcs_release_idle_views).
+# 5. Waiting for private DX12 work has a deadline where the DCS patches call it on DCS's render thread (gate rejection,
+#    bilinear hold, idle release): on timeout the view is kept whole and released on a later call. Teardown and the
+#    game's own ReleaseFeature keep the unbounded wait (their owners go away right after it).
+replace(transport, '''void drain_transport_work(TransportDevice& device, const std::uint64_t pending) noexcept {
+    if (!pending) return; // No private submissions (including partial initialization).''', '''// DCS VR Control: wait_ms bounds the wait; false when it ran out with the work still pending.
+bool drain_transport_work(TransportDevice& device, const std::uint64_t pending,
+    const std::uint32_t wait_ms = dcs_transport_release_wait_forever) noexcept {
+    if (!pending) return true; // No private submissions (including partial initialization).''')
+replace(transport, '''    if (removed()) return;
+    if (device.device11 != nullptr) {''', '''    if (removed()) return true;
+    if (device.device11 != nullptr) {''')
+replace(transport, '''    for (;;) {
+        if (removed()) return;
+        if (!signaled && device.queue12 && device.fence12)
+            signaled = SUCCEEDED(device.queue12->Signal(device.fence12, target));
+        const auto completed = device.fence12 ? device.fence12->GetCompletedValue() : 0;
+        if (signaled && completed >= target) return;''', '''    for (;;) {
+        if (removed()) return true;
+        if (!signaled && device.queue12 && device.fence12)
+            signaled = SUCCEEDED(device.queue12->Signal(device.fence12, target));
+        const auto completed = device.fence12 ? device.fence12->GetCompletedValue() : 0;
+        if (signaled && completed >= target) return true;
+        if (wait_ms != dcs_transport_release_wait_forever && GetTickCount64() - start >= wait_ms) {
+            trace_event("Transport release gave up waiting for private DX12 work after %u ms fence=%llu completed=%llu "
+                "signaled=%u; resources kept, released on a later call", wait_ms, static_cast<unsigned long long>(target),
+                static_cast<unsigned long long>(completed), signaled ? 1U : 0U);
+            return false;
+        }''')
+replace(transport, '''void release_d3d11_transport_view(const NgxHandle* const game_handle) noexcept {
+    D3D12NgxInterceptionScope private_dx12_scope;
+    if (game_handle == nullptr) return;''', '''bool release_d3d11_transport_view(const NgxHandle* const game_handle, const std::uint32_t wait_ms) noexcept {
+    D3D12NgxInterceptionScope private_dx12_scope;
+    if (game_handle == nullptr) return true;''')
+replace(transport, '''            drain_transport_work(device, pending_work(*iterator));
+            release_peripheral_dlaa_view(view_id);''', '''            // DCS VR Control: on timeout nothing is freed; the view stays whole for a later release.
+            if (!drain_transport_work(device, pending_work(*iterator), wait_ms)) return false;
+            release_peripheral_dlaa_view(view_id);''')
+replace(transport, '''            device.views.erase(iterator);
+            break;
+        }
+    }
+}
+
+void release_d3d11_d3d12_transport() noexcept {''', '''            device.views.erase(iterator);
+            break;
+        }
+    }
+    return true;
+}
+
+// DCS VR Control: drops the depth conversion's cached views of the game's depth
+// buffers (each keeps its buffer alive), e.g. the previous mission's.
+void dcs_flush_transport_depth_views() noexcept {
+    std::lock_guard lock(transport_mutex);
+    for (auto& device : transport_devices)
+        for (auto& cached : device.depth_source_views) { release(cached.srv); cached = {}; }
+}
+
+void release_d3d11_d3d12_transport() noexcept {''')
+replace('src/d3d11_d3d12_transport.hpp', '''void release_d3d11_transport_view(const NgxHandle* game_handle) noexcept;''', '''// DCS VR Control: wait_ms bounds the wait for the view's private DX12 work; on
+// timeout nothing is released and false is returned (call again later).
+inline constexpr std::uint32_t dcs_transport_release_wait_forever = 0xFFFFFFFFU;
+inline constexpr std::uint32_t dcs_transport_release_wait_ms = 1500U;
+bool release_d3d11_transport_view(const NgxHandle* game_handle,
+    std::uint32_t wait_ms = dcs_transport_release_wait_ms) noexcept;''')
+# The game's ReleaseFeature frees the handle for good: keep upstream's unbounded wait there.
+replace(hooks, '''    release_d3d11_transport_view(handle);
+    release_d3d11_peripheral_dlaa_view(handle);
+    unregister_d3d11_game_feature(handle);''', '''    release_d3d11_transport_view(handle, dcs_transport_release_wait_forever);
+    release_d3d11_peripheral_dlaa_view(handle);
+    unregister_d3d11_game_feature(handle);''', count=2)
+replace('src/backend.hpp', '''void release_d3d11_resources() noexcept;
+''', '''// DCS VR Control: drops the transport's cached depth views (d3d11_d3d12_transport.cpp).
+void dcs_flush_transport_depth_views() noexcept;
+void release_d3d11_resources() noexcept;
+''')
+
+# 6. A create is classified only by a layout of this session published within 250 ms; an older one only keeps a view
+#    on the private SR (dcs_quad_focus_layout_extent), never creates DCS's own feature.
+#    Inserted before the create_extent line, so the declaration step above still finds its own text on a re-run.
+replace('src/gaze_foveation.hpp', 'int dcs_quad_focus_create_extent(unsigned width, unsigned height) noexcept;\nbool dcs_quad_focus_processing_allowed(',
+    'int dcs_quad_focus_layout_extent(unsigned width, unsigned height) noexcept;\n'
+    'int dcs_quad_focus_create_extent(unsigned width, unsigned height) noexcept;\nbool dcs_quad_focus_processing_allowed(')
+
+# Fixture: transport failures on an accepted deferred focus view (dcs_deferred_tests.inc scenario 4).
+replace('tests/runtime_host_tests.cpp', '''            else if (arg == "--transport-dcs-deferred-nr-fail") { transport = dx11 = dcs_deferred_mode = true; dcs_deferred_scenario = 3; }
+''', '''            else if (arg == "--transport-dcs-deferred-nr-fail") { transport = dx11 = dcs_deferred_mode = true; dcs_deferred_scenario = 3; }
+            else if (arg == "--transport-dcs-deferred-transport-fail") { transport = dx11 = dcs_deferred_mode = true; dcs_deferred_scenario = 4; }
+''')
+replace('tests/runtime_host_tests.cpp', '''        if (dcs_deferred_mode && dcs_deferred_scenario == 3) {''', '''        if (dcs_deferred_mode && dcs_deferred_scenario == 4) { // DCS Control: transport failures (dcs_deferred_feature.inc)
+            verify_dcs_deferred(command, get, attachment, device11.Get(), context11.Get(), fake_ngx,
+                directory / "CheekyFoveatedDLSS-Standalone.log", bin, dcs_deferred_scenario);
+            detach(attachment);
+            puts("PASS: DCS deferred focus view with a failing transport: brief failures held, only a lasting one creates DCS's own feature");
+            return 0;
+        }
+        if (dcs_deferred_mode && dcs_deferred_scenario == 3) {''')
+replace('cmake/Standalone.cmake', '''    add_test(NAME CheekyRuntimeStandalone-TransportDcsDeferredNrFail COMMAND CheekyRuntimeHostTests --transport-dcs-deferred-nr-fail)
+''', '''    add_test(NAME CheekyRuntimeStandalone-TransportDcsDeferredNrFail COMMAND CheekyRuntimeHostTests --transport-dcs-deferred-nr-fail)
+    add_test(NAME CheekyRuntimeStandalone-TransportDcsDeferredTransportFail COMMAND CheekyRuntimeHostTests --transport-dcs-deferred-transport-fail)
+''')
+
+# The D3D shaders are embedded as bytecode (src/d3d_shaders.hpp, generated by Cheeky's scripts/build-d3d-shaders.py
+# with the Windows SDK fxc); the build never compiles HLSL. Regenerate it whenever the patched shader sources no
+# longer match it, so the shader patches above reach the GPU. (Until 2026-10-18 nothing did this: the 2026-10-07
+# single-load codec patch above changed only the source, never the shipped bytecode.)
+import os
+import subprocess
+import sys
+kits = Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')) / 'Windows Kits/10/bin'
+fxc_candidates = sorted(kits.glob('10.*/x64/fxc.exe'),
+    key=lambda path: tuple(int(part) for part in path.parent.parent.name.split('.') if part.isdigit()))
+if not fxc_candidates:
+    raise RuntimeError('fxc.exe (Windows 10/11 SDK) not found: it compiles the patched Cheeky shaders')
+shader_generator = [sys.executable, str(source / 'scripts/build-d3d-shaders.py'), '--fxc', str(fxc_candidates[-1])]
+if subprocess.run(shader_generator + ['--check'], capture_output=True, text=True).returncode != 0:
+    generated = subprocess.run(shader_generator, capture_output=True, text=True)
+    if generated.returncode != 0:
+        raise RuntimeError('Cheeky shader compilation failed:\n' + generated.stdout + generated.stderr)
+    print('Regenerated src/d3d_shaders.hpp from the patched shader sources.')
 
 print('Applied opt-in DCS quad focus adapter to the pinned Cheeky source.')

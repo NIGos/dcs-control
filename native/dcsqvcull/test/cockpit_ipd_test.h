@@ -653,6 +653,38 @@ void TestMatcher() {
               "patched with the pick (smallest plausible shift 0); |C1 - C0| verifies the old or the new record, "
               "a separation between them verifies none");
   }
+  // R77 ckipd-amb-window-capped: with lag 2 the pick is back index 2; a step between it and its older neighbour
+  // (back index 3) is ambiguous (the window was capped at index 2), and view 1 can verify that neighbour.
+  {
+    ck::Matcher m;
+    std::vector<ck::Rec> sent;
+    auto frame = [&](uint32_t n, double scale) {
+      sent.push_back(MakeRec(n, scale));
+      m.Push(sent.back(), n);
+      const auto lo = m.Latch(n, nullptr, nullptr);
+      m.Verify(ck::RecIpd(sent[sent.size() >= 3 ? sent.size() - 3 : 0]), lo);
+      return lo;
+    };
+    for (uint32_t n = 1; n <= 60; ++n) frame(n, n < 10 ? 1.0 : n < 40 ? 1.0 + (n - 10) * 0.01 : 1.3);
+    const bool lag2 = m.lag == 2;
+    frame(61, 1.0);
+    frame(62, 1.4);
+    frame(63, 1.4);
+    sent.push_back(MakeRec(64, 1.42));
+    m.Push(sent.back(), 64);
+    const auto lo = m.Latch(64, nullptr, nullptr);  // pick = back 2 (record 62, x1.4); its older neighbour: 61, x1
+    double hOld = -1, hPick = -1;
+    const bool vOld = m.VerifiedH(ck::RecIpd(sent[60]), lo, &hOld);
+    const bool vPick = m.VerifiedH(ck::RecIpd(sent[61]), lo, &hPick);
+    char what[220];
+    snprintf(what, sizeof(what),
+             "R77: cockpit ipd lag %d: a step at the pick's older neighbour is ambiguous (path %d, pick %d, spread %.1f mm, "
+             "h %.1f mm); view 1 verifies either record",
+             m.lag, lo.path, lo.pick, lo.hSpread * 1e3, lo.h * 1e3);
+    Check(lag2 && lo.path == ck::kPathLag && lo.pick == 2 && lo.ambiguous && lo.h == 0 && vOld && hOld == 0 && vPick &&
+              std::fabs(hPick - ck::RecH(sent[61])) < 1e-7,
+          what);
+  }
   // Ambiguity needs a step > 2 mm in h between plausible records: a saccade step (< 4 mm IPD) and a ramp are
   // not ambiguous; a step down while boosted (1.4 -> 1.25) gives view 0 the smaller (new) shift, never
   // more than either record; a step up likewise keeps the old smaller shift.
@@ -1009,7 +1041,9 @@ void TestBoostOut() {
   int reads = 0, torn = 0;
   const ULONGLONG t0 = GetTickCount64();
   uint32_t lastFrame = 0;
-  while (GetTickCount64() - t0 < 300) {
+  // At least 300 ms and until more than 50 records were read (R60: a deadline, not a fixed window: on a loaded
+  // machine the writer and this reader got few overlapping slices in 300 ms, reads <= 50 with nothing torn).
+  while (GetTickCount64() - t0 < 300 || (reads <= 50 && GetTickCount64() - t0 < 30000)) {
     ck::Poll();
     if (ck::g_match.count) {
       const ck::Rec& r = ck::g_match.At(0);
@@ -1610,6 +1644,21 @@ void STDMETHODCALLTYPE VbThenSubmit(ID3D11DeviceContext* c, UINT s0, UINT n, ID3
   reinterpret_cast<void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*)>(g_flushReal)(c);
 }
 
+// R49: the split filter's hook emulated in the PSSetShader slot (a pointer outside d3d11.dll). The real one puts
+// itself back whenever another pointer sits in its slot, taking that pointer as its original: a toggle point of ours
+// over it means mutual forwarding (live R47: stack overflow). It counts the calls that found its slot not its own.
+void* g_sfEmuOrig = nullptr;
+int g_sfEmuSlot = -1;
+int g_sfEmuCalls = 0, g_sfEmuOver = 0, g_sfEmuExtSeen = 0;
+void STDMETHODCALLTYPE SfEmuPSSetShader(ID3D11DeviceContext* c, ID3D11PixelShader* s, ID3D11ClassInstance* const* ci,
+                                        UINT n) {
+  ++g_sfEmuCalls;
+  void** vt = *reinterpret_cast<void***>(c);
+  if (vt[g_sfEmuSlot] != reinterpret_cast<void*>(&SfEmuPSSetShader)) ++g_sfEmuOver;
+  if (fixdepth::g_tpArmed[fixdepth::kTpPSSetSRV]) ++g_sfEmuExtSeen;  // the arm's d3d11-own points are in
+  reinterpret_cast<decltype(&SfEmuPSSetShader)>(g_sfEmuOrig)(c, s, ci, n);
+}
+
 void TestPipeline() {
   ID3D11Device* dev = nullptr;
   ID3D11DeviceContext* imm = nullptr;
@@ -1873,6 +1922,7 @@ void TestPipeline() {
   std::vector<uint8_t> prevPatchedVP[4];
   bool secondCk = false, swap0 = false, lightOn = false, fwdSwap = false;
   bool ovlOuter = false;     // the overlay passes inside far depth's overlay arm (ArmOm(true), no upload entries)
+  bool sfEmu = false;        // R49: a PSSetShader call (through the emulated split filter hook) inside each overlay pass
   bool lightAll = false;     // the lighting draw in every view (else view 0 with lightOn only)
   bool lightBlend = true;    // the lighting draw blends (additive) or writes
   bool maxBlendOn = false;   // the lighting draw blends with MAX (not invertible: no repair)
@@ -2384,6 +2434,7 @@ void TestPipeline() {
         if (ovlOuter) fixdepth::ArmOm(true);
         if (ovlFlush == 2 && fx >= 0) g_c->Flush();  // a Flush between passes (DLSS, the runtime): table toggled
         ob(&p, true);
+        if (sfEmu && fx >= 0) g_c->PSSetShader(nullptr, nullptr, 0);
         // The pass's first toggled-entry call (a clear) before any upload: on an arm taken over the after-flush
         // table it would write d3d11's normal entries over our hooks.
         if (ovlFlush == 2 && fx >= 0) g_c->ClearRenderTargetView(litRtv, clearC);
@@ -2692,8 +2743,9 @@ void TestPipeline() {
   gpt::g_opsHooked = false;
   Check(allDcs(), "cockpit ipd T5: another module's table hooks: the upload hook stays out, DCS's bytes");
   frame();  // tail of nothing: Dp was cleared by the unpatched frame
-  // h > 40 mm.
-  scale = 2.4;
+  // h > 50 mm (R77: 40 -> 50 mm, above the layer's maximum of 45 mm).
+  scale = 2.8;
+  ck::g_tooBigAt = -1;
   const uint64_t big0 = ck::g_st.tooBig.load();
   frame();
   bool bigTailOnly = true;  // the frame before was patched: only its tail may run
@@ -2701,8 +2753,11 @@ void TestPipeline() {
     const uint8_t* a = At(res[t].in[0], firstOf[t]);
     bigTailOnly = bigTailOnly && a && FieldIdentical(a, res[t].dcs.data(), ck::kOffViewInv);
   }
-  Check(bigTailOnly && ck::g_st.tooBig.load() > big0,
-        "cockpit ipd T5: per-eye shift > 40 mm ignored (the camera stays DCS's)");
+  Check(bigTailOnly && ck::g_st.tooBig.load() > big0 && ck::g_tooBigAt >= 0,
+        "cockpit ipd T5: per-eye shift > 50 mm ignored (the camera stays DCS's)");
+  Check(std::fabs(ck::g_lastBoostH - base * (scale - 1) / 2) < 1e-5 && ck::g_lastH == 0,
+        "R77: cockpit ipd T5: a frame left unmoved by a gate keeps the record's boost (boostH) apart from the applied h 0");
+  ck::g_tooBigAt = -1;
   scale = 1.4;
   frame();
   frame();
@@ -2794,6 +2849,39 @@ void TestPipeline() {
     Check(onOk && nestOk && tableSame && ck::g_st.ovlFail.load() == 0,
           "cockpit ipd overlays: on again: patched with the view's Dw; inside far depth's overlay arm nested and "
           "patched, the arm's upload entries removed at the pass end, no entry of ours left in the context table");
+    // R49: the split filter owns PSSetShader (emulated): the overlay passes' state-call toggle points (own arm and
+    // nested in far depth's) never go over its hook; d3d11's own points (PSSetShaderResources) still go in.
+    {
+      using namespace fixdepth;
+      g_sfEmuSlot = g_tpSlot[kTpPSSetShader];
+      if (g_sfEmuSlot >= 0) {
+        g_sfEmuOrig = vto[g_sfEmuSlot];
+        FdWriteSlot(&vto[g_sfEmuSlot], reinterpret_cast<void*>(&SfEmuPSSetShader));
+        g_sfEmuCalls = g_sfEmuOver = g_sfEmuExtSeen = 0;
+        sfEmu = true;
+        frame();  // own arms
+        const int ownCalls = g_sfEmuCalls, ownExt = g_sfEmuExtSeen;
+        ovlOuter = true;
+        frame();  // nested in far depth's arm
+        ovlOuter = false;
+        sfEmu = false;
+        const bool slotKept = vto[g_sfEmuSlot] == reinterpret_cast<void*>(&SfEmuPSSetShader);
+        FdWriteSlot(&vto[g_sfEmuSlot], g_sfEmuOrig);
+        bool imgOk = true;
+        for (int t = 0; t < 4; ++t) imgOk = imgOk && ovlAsGb(t);
+        if (!(ownCalls >= 8 && g_sfEmuCalls >= 16 && g_sfEmuOver == 0 && ownExt >= 8 && g_sfEmuExtSeen >= 16 &&
+              slotKept && imgOk))
+          printf("     (split filter emu: calls own %d all %d, over ours %d, d3d11 points armed own %d all %d, slot kept "
+                 "%d, overlays %d)\n",
+                 ownCalls, g_sfEmuCalls, g_sfEmuOver, ownExt, g_sfEmuExtSeen, slotKept, imgOk);
+        Check(ownCalls >= 8 && g_sfEmuCalls >= 16 && g_sfEmuOver == 0 && ownExt >= 8 && g_sfEmuExtSeen >= 16 &&
+                  slotKept && imgOk,
+              "cockpit ipd overlays R49: the d3d11 path's state-call toggle points (own arm and nested) never over a "
+              "foreign hook (the split filter's slot left alone), d3d11's own points still armed, overlays patched");
+      } else {
+        Check(false, "cockpit ipd overlays R49: PSSetShader slot known");
+      }
+    }
     // [Perception] CockpitTrueIpdOverlayMvp=0: the overlay passes' cPerView as before, the effect buffers DCS's.
     const uint64_t mvp0 = ck::g_st.mvpPatched.load();
     ConfigureD3d11(1, false, true, 0, 0, false, 0, true, false);
@@ -3043,6 +3131,13 @@ void TestPipeline() {
       dumpBindInPass = bindInPass;
       ConfigureD3d11(1, false, true, 0, 0, false, 0, overlays, true, 3, 0, dir);
       for (int i = 0; i < 6; ++i) frame();
+      // R60: the ring's slots are read back (DO_NOT_WAIT) at later frame ends; on a loaded CPU WARP had not
+      // finished the last captures within the 6 frames and they were never written. More frames, each after the
+      // GPU finished the previous one, until the dump has drained its ring (a deadline, not a frame count).
+      for (const ULONGLONG until = GetTickCount64() + 30000; ck::g_dumpActive && GetTickCount64() < until;) {
+        gpttest::WaitGpuIdle(dev, imm);
+        frame();
+      }
       dumpTarget = false;
       dumpBindInPass = true;
       for (int i = 0; i < 200 && bindInPass && ck::g_dumpWritten.load() < w0 + 6; ++i) Sleep(10);
@@ -4779,6 +4874,8 @@ void TestStereoAck() {
   fixdepth::g_fault = false;
   ck::g_userOff = false;
   ck::g_cfgForeign = false;
+  const bool oldAssume = ck::g_ackAssumeDevice;
+  ck::g_ackAssumeDevice = true;  // R63: the ack needs a learnt device; this test has no D3D11 context
 
   // Off (CockpitTrueIpd=0): Start refuses, nothing is created or written.
   ck::g_on = false;
@@ -4911,6 +5008,21 @@ void TestStereoAck() {
   ck::g_inertSelf = false;
   Check(rF && fF == 0 && !qvstatus::DcOn(wF) && rI && got.flags == 0,
         "cockpit ipd StereoAck: faulted or inert: active cleared (status not ON)");
+  // R77 ckipd-toobig-ack-active: a frame past the shift limit (not patched) takes the ack down for the hold.
+  {
+    push(1.4f, recFrame++);
+    const bool rA = frameEnd(true) && got.flags == ck::kStereoActive;
+    ck::g_tooBigAt = static_cast<int64_t>(ck::g_frame);
+    push(1.4f, recFrame++);
+    const bool rB = frameEnd(true) && got.flags == 0;
+    ck::g_frame += ck::kTooBigHoldFrames;
+    push(1.4f, recFrame++);
+    const bool rC = frameEnd(true) && got.flags == ck::kStereoActive;
+    ck::g_tooBigAt = -1;
+    Check(rA && rB && rC && ck::kMaxShiftM > (2.0 - 1.0) * 0.090 / 2,
+          "R77: cockpit ipd StereoAck: a per-eye shift past the limit (above the layer's 45 mm maximum) clears active "
+          "for the hold, then active again");
+  }
 
   // Observe (CockpitTrueIpd=2): observing only.
   ck::g_cfgMode = 2;
@@ -4924,6 +5036,51 @@ void TestStereoAck() {
   push(1.4f, recFrame++);
   const bool rBack = frameEnd(true);
   Check(rBack && got.flags == ck::kStereoActive, "cockpit ipd StereoAck: back on: active again");
+
+  // R62 e3: ON from the last second (a gated last frame no longer reads "no dual camera"); no cockpit pass drawn
+  // (external view) is bit 5, not a failure; a cockpit drawn and never patched still shows as not ON.
+  {
+    auto end2 = [&](bool patched, bool cockpit) {
+      ck::g_f = ck::Frame{};
+      ck::g_f.anyPatched = patched;
+      ck::g_f.latched = cockpit;
+      ck::g_f.observe = ck::Observe();
+      ck::EndFrame();
+    };
+    ck::DualCameraStatusNow();  // the per-second window starts here
+    push(1.4f, recFrame++);
+    end2(true, true);
+    push(1.4f, recFrame++);
+    end2(false, true);  // the sampled frame was gated (camera cut, gPrev check)
+    Sleep(5);
+    const uint64_t wGate = ck::DualCameraStatusNow();
+    push(1.4f, recFrame++);
+    end2(false, false);
+    Sleep(5);
+    ck::DualCameraStatusNow();  // a second with only external-view frames follows
+    push(1.4f, recFrame++);
+    end2(false, false);
+    push(1.4f, recFrame++);
+    end2(false, false);
+    Sleep(5);
+    const uint64_t wExt = ck::DualCameraStatusNow();
+    push(1.4f, recFrame++);
+    end2(false, true);
+    Sleep(5);
+    const uint64_t wFail = ck::DualCameraStatusNow();
+    Check(qvstatus::DcOn(wGate) && !qvstatus::DcNoCockpit(wGate),
+          "cockpit ipd dual status (R62): patched in the last second, last frame gated -> still ON");
+    Check(!qvstatus::DcOn(wExt) && qvstatus::DcNoCockpit(wExt) && !qvstatus::DcWaiting(wExt) &&
+              qvstatus::DcScaleX100(wExt) == 140,
+          "cockpit ipd dual status (R62): external view (no cockpit pass) -> no-cockpit bit, not a failure");
+    Check(!qvstatus::DcOn(wFail) && !qvstatus::DcNoCockpit(wFail),
+          "cockpit ipd dual status (R62): cockpit drawn but not patched -> not ON, no no-cockpit bit");
+    Check(qvstatus::PackDualCamera(true, true, false, false, false, 1.4, 90, true) ==
+              qvstatus::PackDualCamera(true, true, false, false, false, 1.4, 90) &&
+              qvstatus::PackDualCamera(true, false, false, false, false, 1.4, 0, true) ==
+              (1ull | 32ull | (140ull << 8)),
+          "dual status (R62): bit 5 no cockpit, never together with ON");
+  }
 
   // Hysteresis (live 2026-10-13: "BoostOut 9" drops from transient staleness): a gap of a frame or two
   // (stale, then dry) keeps the ack active and is bridged when records come again; no drop.
@@ -4983,6 +5140,76 @@ void TestStereoAck() {
           "ack is never held; a recovered gap is bridged and the next gap starts its own window");
   }
 
+  // R63 stereo-ack-active-without-any-patch: active only with evidence that the engine can move the cockpit.
+  {
+    auto endWith = [&](bool latched, int ckTotal, bool patched) {
+      ck::g_f = ck::Frame{};
+      ck::g_f.latched = latched;
+      ck::g_f.ckTotal = ckTotal;
+      ck::g_f.anyPatched = patched;
+      ck::g_f.observe = ck::Observe();
+      ck::EndFrame();
+      return rv && psh::seqlock_read(rv, got);
+    };
+    push(1.4f, recFrame++);
+    const bool e0 = endWith(true, 1, true) && got.flags == ck::kStereoActive;
+    // No D3D11 device (perception_device.h gave up on a wrapped context): never active, whatever else holds.
+    ID3D11DeviceContext* const ctx0 = fixdepth::g_s.ctx;
+    fixdepth::g_s.ctx = nullptr;
+    ck::g_ackAssumeDevice = false;
+    bool noDev = true;
+    for (int i = 0; i < 5; ++i) {
+      push(1.4f, recFrame++);
+      noDev = noDev && endWith(false, 0, false) && got.flags == 0;
+    }
+    Check(e0 && noDev && ck::g_ackNoEvidence,
+          "R63 StereoAck: no D3D11 device learnt -> flags 0 (the layer keeps its own cockpit steps), BoostOut fresh");
+    ck::g_ackAssumeDevice = true;
+    fixdepth::g_s.ctx = ctx0;
+    push(1.4f, recFrame++);
+    const bool back = endWith(true, 1, false) && got.flags == ck::kStereoActive;
+    // Scale 1 (latched, nothing to patch): active (the layer raises the scale only on an active ack).
+    bool s1 = true;
+    for (int i = 0; i < 60; ++i) {
+      push(1.0f, recFrame++);
+      s1 = s1 && endWith(true, 1, false) && got.flags == ck::kStereoActive;
+    }
+    Check(back && s1, "R63 StereoAck: device back -> active; at scale 1 (latched, nothing patched) stays active");
+    // External view (no cockpit pass, every execution identified): stays active.
+    bool ext = true;
+    for (int i = 0; i < 100; ++i) {
+      push(1.4f, recFrame++);
+      ck::g_st.gbExecs += 3;
+      ext = ext && endWith(false, 0, false) && got.flags == ck::kStereoActive;
+    }
+    Check(ext, "R63 StereoAck: external view (no cockpit pass) for 100 frames: still active");
+    // Cockpit drawn in every frame but view 0's upload never intercepted: inactive after kAckMissFrames.
+    bool before = true, after = false;
+    for (int i = 0; i < ck::kAckMissFrames; ++i) {
+      push(1.4f, recFrame++);
+      const bool r = endWith(false, 2, false);
+      if (i < ck::kAckMissFrames - 1) before = before && r && got.flags == ck::kStereoActive;
+      else after = r && got.flags == 0;
+    }
+    push(1.4f, recFrame++);
+    const bool relatch = endWith(true, 2, false) && got.flags == ck::kStereoActive;
+    Check(before && after && relatch,
+          "R63 StereoAck: cockpit drawn, never intercepted: active for 44 frames, inactive at 45, active once a "
+          "frame latches view 0 again");
+    // No G-buffer execution identified at all (a DCS update broke the identity): inactive likewise.
+    bool idf = true;
+    for (int i = 0; i < ck::kAckMissFrames; ++i) {
+      push(1.4f, recFrame++);
+      ck::g_st.gbExecs += 4;
+      ck::g_st.idFail += 4;
+      idf = endWith(false, 0, false) && got.flags == (i < ck::kAckMissFrames - 1 ? ck::kStereoActive : 0u);
+      if (!idf) break;
+    }
+    push(1.4f, recFrame++);
+    const bool relatch2 = endWith(true, 1, true) && got.flags == ck::kStereoActive;
+    Check(idf && relatch2, "R63 StereoAck: no G-buffer execution identified for 45 frames -> inactive; back on a latch");
+  }
+
   // Stop: flags 0 once, then unmapped (our view; the reader's copy keeps the last write).
   const uint64_t seqBefore = got.seq;
   ck::g_boostView = nullptr;  // fake: not ours to unmap
@@ -5004,6 +5231,7 @@ void TestStereoAck() {
   ck::g_cfgForeign = oldForeign;
   ck::g_cfgMode = oldMode;
   ck::g_boostView = oldBoost;
+  ck::g_ackAssumeDevice = oldAssume;
   SetEnvironmentVariableA(psh::name_suffix_variable, hadSuf ? oldSuf : nullptr);
   ResetCk();
 }

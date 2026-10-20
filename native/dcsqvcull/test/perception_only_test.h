@@ -157,12 +157,16 @@ void Config_() {
 
 void StatusAndKeys() {
   const Config& c = g_cfg;
-  Check(StatusWordNow() == 0, "perception only: DcsQvCull_Status word is 0 (no Engine Opt line)");
+  // R62 e1: running + PerceptionOnly and nothing else (was 0 = "Engine Opt.: starting" on the panel all flight).
+  Check(StatusWordNow() == (qvstatus::kRunning | qvstatus::kPerceptionOnly) && qvstatus::PerceptionOnly(StatusWordNow()) &&
+            !qvstatus::Optimizing(StatusWordNow()) && qvstatus::ConfiguredCount(StatusWordNow()) == 0,
+        "perception only: DcsQvCull_Status word is running + PerceptionOnly only (panel: not 'starting')");
   {
     std::atomic<uint64_t> word{0x55};
     g_statusSink.Attach(&word);
     g_statusSink.Publish(StatusWordNow());
-    Check(word.load() == 0, "perception only: the worker's status publish writes 0");
+    Check(word.load() == (qvstatus::kRunning | qvstatus::kPerceptionOnly),
+          "perception only: the worker's status publish writes running + PerceptionOnly");
     g_statusSink.Detach();
   }
   // Keys: the engine toggle (Alt+Shift+F11) and every Ctrl+Alt key inert; the cockpit ipd toggle live.
@@ -263,7 +267,10 @@ void Collect() {
   partw::g_orig = nullptr;
   g_faulted = false;
   g_perceptionOnly = false;
+  const int sl0 = g_sceneLayout.load();
+  g_sceneLayout = 1;  // R63 U2: a Scene.dll whose collect code was verified
   HookCollect(self, 5, infos, nullptr, nullptr, 3);
+  g_sceneLayout = sl0;
   allocslab::g_state = as0;
   directupload::g_state = du0;
   partw::g_orig = pw0;
@@ -466,7 +473,8 @@ void Unchanged() {
             g_partitionBoost.load(),
         "PerceptionOnly=0: the engine toggle works as before");
   const uint64_t w = StatusWordNow();
-  Check(qvstatus::Running(w), "PerceptionOnly=0: the status word reports running as before");
+  Check(qvstatus::Running(w) && !qvstatus::PerceptionOnly(w),
+        "PerceptionOnly=0: the status word reports running as before (no PerceptionOnly bit)");
   g_partitionBoost = false;
 }
 
@@ -483,6 +491,14 @@ void Run() {
   const bool po0 = g_perceptionOnly.load();
   g_dir = L"./";
   Config_();
+  {
+    // R48: the engine defaults that are on (ChainFast=7, ShaderFast=3, WorkerPlacement=2) are off in PerceptionOnly.
+    Config full;
+    const Config p = PerceptionOnlyConfig(full);
+    Check(full.chainFast == 7 && full.shaderFast == 3 && full.workerPlacement == 2 && p.chainFast == 0 &&
+              p.shaderFast == 0 && p.workerPlacement == 0,
+          "R48 perception only: ChainFast, ShaderFast and WorkerPlacement off");
+  }
   StatusAndKeys();
   Collect();
   Perception();

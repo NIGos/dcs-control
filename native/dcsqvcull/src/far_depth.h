@@ -36,7 +36,9 @@
 //     MipLevels 1, DEFAULT, BIND_SHADER_RESOURCE, single-sample. A ring of
 //     [Perception] FarDepthExportSlots (2, or 1 under VRAM pressure) per view,
 //     by engine frame. No binding is read or changed (state checked in
-//     FixationDepthVerify mode and in the tests).
+//     FixationDepthVerify mode and in the tests). R91 (R90 phase 2): a view's
+//     slots are made in one go at its first copy after a size or format change
+//     (one creation stall on the render thread, not a second one a frame later).
 //  5. Pre-overlay colour (v1.1, [Perception] FarDepthPreOverlay, default 1).
 //     DCS draws HUD/HMD symbology after DLSS (HUD_MFD_after_DLSS): per view
 //     ... ToneMappingPass, DepthResolverPass2, OverlayLDRPass, CopyToHMDPass,
@@ -132,7 +134,11 @@
 //     outputWidth/Height 0.
 //  7. Release. Every export call resolves the layer per call (GetModuleHandleEx
 //     with a module reference held during the call, as scene_cut.h): the
-//     OpenXR loader may unload and reload the layer. Before our textures are
+//     OpenXR loader may unload and reload the layer. R91 (R90 phase 2): the
+//     frame's Wanted and pushes share one resolution: DecideFrame references
+//     the module and resolves the exports once; the frame's last wanted push
+//     (else EndFrame, or the uninstall) lets it go; a push without it resolves
+//     per call as before. Before our textures are
 //     freed (device change, texture recreation, 120 unwanted frames, payload
 //     unload) DcsVr_QuadViewsDepthRelease(generation) is called for every
 //     generation pushed since the last release; the uninstall asks the render
@@ -230,14 +236,22 @@ HMODULE RefLayer() {
   return m;
 }
 
-// The wanted mask (0 when the layer or the export is missing or the
-// interface version is not 1).
-uint32_t QvWanted() {
-  HMODULE m = RefLayer();
-  if (!m) {
-    g_noLayer++;
-    return 0;
-  }
+// R91: the frame's layer module (referenced by DecideFrame, let go by EndFrame / DropFrameModule; render thread, or
+// the uninstall once the callback is out) and its push export.
+// It is let go as soon as every wanted view of the frame was pushed, so a last frame (DCS stops rendering, e.g. before
+// xrDestroyInstance unloads the layer) keeps no reference on the layer.
+HMODULE g_frameMod = nullptr;
+PFN_DcsVr_QuadViewsDepth g_frameDepth = nullptr;
+uint32_t g_frameWant = 0, g_framePushed = 0;  // the frame's wanted views (DecideFrame) and those pushed
+void DropFrameModule() {
+  if (g_frameMod) FreeLibrary(g_frameMod);
+  g_frameMod = nullptr;
+  g_frameDepth = nullptr;
+  g_frameWant = g_framePushed = 0;
+}
+
+// The wanted mask of the referenced module m (0 when an export is missing or the interface version is not 1).
+uint32_t WantedOf(HMODULE m) {
   uint32_t mask = 0;
   const auto api = reinterpret_cast<PFN_DcsVr_QuadViewsDepthApi>(GetProcAddress(m, g_nameApi.c_str()));
   const auto wanted = reinterpret_cast<PFN_DcsVr_QuadViewsDepthWanted>(GetProcAddress(m, g_nameWanted.c_str()));
@@ -248,6 +262,18 @@ uint32_t QvWanted() {
   } else {
     mask = wanted();
   }
+  return mask;
+}
+
+// The wanted mask (0 when the layer or the export is missing or the
+// interface version is not 1).
+uint32_t QvWanted() {
+  HMODULE m = RefLayer();
+  if (!m) {
+    g_noLayer++;
+    return 0;
+  }
+  const uint32_t mask = WantedOf(m);
   FreeLibrary(m);
   return mask;
 }
@@ -255,6 +281,13 @@ uint32_t QvWanted() {
 // Pushes one descriptor; returns the layer's result, or ~0u when the layer
 // or the export is missing (nothing was handed over).
 uint32_t QvPush(const DcsVrDepthView& d) {
+  if (g_frameMod) {  // R91: this frame's resolution (DecideFrame)
+    if (!g_frameDepth) {
+      g_noExport++;
+      return ~0u;
+    }
+    return g_frameDepth(&d);
+  }
   HMODULE m = RefLayer();
   if (!m) {
     g_noLayer++;
@@ -290,7 +323,14 @@ struct KnownCb {
   uint64_t serial = 0;  // pass serial of the last upload seen (0: none)
   float m[32] = {};     // bytes 192..320 of the struct: gViewInv, gProj (column-major)
   uint64_t lastUse = 0;
+  // R71: gOrigin (float3 at byte 0x610 of the struct: DCS's floating render origin) with the matrices, when the
+  // upload covers it: a boxed update over it, or a whole update of a binding known (span, from the bound constants)
+  // to reach it. oSerial: the pass of that copy.
+  UINT span = 0;        // bytes of the struct bound to the shader (cbNum * 16, or the buffer's size; 0 unknown)
+  float o[3] = {};
+  uint64_t oSerial = 0;
 };
+constexpr UINT kOriginOff = 0x610;  // cPerView gOrigin (cockpit_ipd.h kOffOrigin)
 KnownCb g_known[4];
 uint64_t g_passSerial = 0;  // GBufferPass begins (render thread)
 uint64_t g_useClock = 0;
@@ -309,6 +349,11 @@ void NoteUpload(ID3D11Resource* dst, UINT sub, const D3D11_BOX* box, const void*
     }
     memcpy(k.m, static_cast<const uint8_t*>(src) + (lo - left), sizeof(k.m));
     k.serial = g_passSerial;
+    const UINT olo = k.base + kOriginOff, ohi = olo + 12;
+    if (box ? (box->left <= olo && box->right >= ohi) : k.span >= kOriginOff + 12) {  // R71
+      memcpy(k.o, static_cast<const uint8_t*>(src) + (olo - left), sizeof(k.o));
+      k.oSerial = g_passSerial;
+    }
     g_uploadsSeen++;
     return;
   }
@@ -320,7 +365,11 @@ void BeginGBufferPass() { ++g_passSerial; }
 // At a GBufferPass end: the CPU matrices of the bound cPerView when it was
 // uploaded in this pass (logical P[r][c] at [r * 4 + c]); otherwise learns
 // the buffer for the next frames and returns false.
-bool TakeProj(ID3D11Buffer* cb, UINT cbFirst, UINT cbNum, float proj[16], float viewInv[16]) {
+// R71: origin / originOk (optional): this pass's gOrigin when the upload carried it.
+// bufBytes: the buffer's ByteWidth (0 unknown), the span of a whole-buffer binding.
+bool TakeProj(ID3D11Buffer* cb, UINT cbFirst, UINT cbNum, float proj[16], float viewInv[16], float* origin = nullptr,
+              bool* originOk = nullptr, UINT bufBytes = 0) {
+  if (originOk) *originOk = false;
   if (!cb) return false;
   const bool offsets = !(cbFirst == 0 && (cbNum == 4096 || cbNum == 0));
   const UINT base = offsets ? cbFirst * 16 : 0;
@@ -329,12 +378,17 @@ bool TakeProj(ID3D11Buffer* cb, UINT cbFirst, UINT cbNum, float proj[16], float 
   for (KnownCb& k : g_known) {
     if (k.res != res || k.base != base) continue;
     k.lastUse = g_useClock;
+    k.span = offsets ? cbNum * 16 : bufBytes;
     if (k.serial != g_passSerial || !g_passSerial) return false;
     for (int r = 0; r < 4; ++r)
       for (int c = 0; c < 4; ++c) {
         viewInv[r * 4 + c] = k.m[c * 4 + r];
         proj[r * 4 + c] = k.m[16 + c * 4 + r];
       }
+    if (origin && originOk && k.oSerial == g_passSerial) {
+      memcpy(origin, k.o, sizeof(k.o));
+      *originOk = true;
+    }
     return true;
   }
   KnownCb* slot = &g_known[0];
@@ -343,6 +397,7 @@ bool TakeProj(ID3D11Buffer* cb, UINT cbFirst, UINT cbNum, float proj[16], float 
   *slot = KnownCb{};
   slot->res = res;
   slot->base = base;
+  slot->span = offsets ? cbNum * 16 : bufBytes;
   slot->lastUse = g_useClock;
   return false;
 }
@@ -520,11 +575,17 @@ void ReleaseAll() {
 }
 
 // Our texture for (view, slot) matching DCS's depth; a mismatch recreates all
-// of them under a new generation.
-ID3D11Texture2D* EnsureTex(ID3D11Device* dev, int view, int slot, DXGI_FORMAT fmt, UINT w, UINT h) {
-  Tex& t = g_tex[view - 2][slot];
-  if (t.t && t.fmt == fmt && t.w == w && t.h == h) return t.t;
-  if (t.t) ReleaseAll();  // size or format changed: the layer must not mix generations
+// of them under a new generation. R91: the view's first `slots` slots are made
+// together (one stall, not one per slot at its first use).
+ID3D11Texture2D* EnsureTex(ID3D11Device* dev, int view, int slot, DXGI_FORMAT fmt, UINT w, UINT h, int slots = 1) {
+  Tex* ring = g_tex[view - 2];
+  auto fits = [&](const Tex& t) { return t.t && t.fmt == fmt && t.w == w && t.h == h; };
+  if (fits(ring[slot])) return ring[slot].t;
+  for (int k = 0; k < kMaxSlots; ++k)
+    if (ring[k].t && !fits(ring[k])) {
+      ReleaseAll();  // size or format changed: the layer must not mix generations
+      break;
+    }
   D3D11_TEXTURE2D_DESC d{};
   d.Width = w;
   d.Height = h;
@@ -534,22 +595,36 @@ ID3D11Texture2D* EnsureTex(ID3D11Device* dev, int view, int slot, DXGI_FORMAT fm
   d.SampleDesc.Count = 1;
   d.Usage = D3D11_USAGE_DEFAULT;
   d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-  ID3D11Texture2D* nt = nullptr;
-  if (FAILED(dev->CreateTexture2D(&d, nullptr, &nt)) || !nt) return nullptr;
-  g_texCreates++;
-  t = Tex{nt, fmt, w, h};
-  return nt;
+  const int n = std::clamp(std::max(slots, slot + 1), 1, kMaxSlots);
+  for (int k = 0; k < n; ++k) {
+    if (fits(ring[k])) continue;
+    ID3D11Texture2D* nt = nullptr;
+    if (FAILED(dev->CreateTexture2D(&d, nullptr, &nt)) || !nt) {
+      if (k == slot) return nullptr;
+      continue;  // retried at that slot's first use
+    }
+    g_texCreates++;
+    ring[k] = Tex{nt, fmt, w, h};
+  }
+  return ring[slot].t;
 }
 
 // Our pre-overlay texture for (view, slot); a mismatch recreates it under a
 // new generation (the layer's references to the old one are dropped first).
-ID3D11Texture2D* EnsurePreTex(ID3D11Device* dev, int view, int slot, DXGI_FORMAT fmt, UINT w, UINT h) {
-  Tex& t = g_pre[view - 2][slot];
-  if (t.t && t.fmt == fmt && t.w == w && t.h == h) return t.t;
-  if (t.t) {
-    ReleaseHeld();
-    t.t->Release();
-    t = Tex{};
+// R91: the view's first `slots` slots are made together (as EnsureTex).
+ID3D11Texture2D* EnsurePreTex(ID3D11Device* dev, int view, int slot, DXGI_FORMAT fmt, UINT w, UINT h, int slots = 1) {
+  Tex* ring = g_pre[view - 2];
+  auto fits = [&](const Tex& t) { return t.t && t.fmt == fmt && t.w == w && t.h == h; };
+  if (fits(ring[slot])) return ring[slot].t;
+  bool released = false;
+  for (int k = 0; k < kMaxSlots; ++k)
+    if (ring[k].t && !fits(ring[k])) {
+      if (!released) ReleaseHeld();
+      released = true;
+      ring[k].t->Release();
+      ring[k] = Tex{};
+    }
+  if (released) {
     NewGeneration();
     g_releases++;
   }
@@ -562,11 +637,18 @@ ID3D11Texture2D* EnsurePreTex(ID3D11Device* dev, int view, int slot, DXGI_FORMAT
   d.SampleDesc.Count = 1;
   d.Usage = D3D11_USAGE_DEFAULT;
   d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-  ID3D11Texture2D* nt = nullptr;
-  if (FAILED(dev->CreateTexture2D(&d, nullptr, &nt)) || !nt) return nullptr;
-  g_texCreates++;
-  t = Tex{nt, fmt, w, h};
-  return nt;
+  const int n = std::clamp(std::max(slots, slot + 1), 1, kMaxSlots);
+  for (int k = 0; k < n; ++k) {
+    if (fits(ring[k])) continue;
+    ID3D11Texture2D* nt = nullptr;
+    if (FAILED(dev->CreateTexture2D(&d, nullptr, &nt)) || !nt) {
+      if (k == slot) return nullptr;
+      continue;
+    }
+    g_texCreates++;
+    ring[k] = Tex{nt, fmt, w, h};
+  }
+  return ring[slot].t;
 }
 
 // 5e. A view's coverage mode switches: its pre-overlay textures go the way a
@@ -702,6 +784,8 @@ void DoPush(int view) {
   else if (g_preOn.load(std::memory_order_relaxed))
     g_preMissing++;
   const uint32_t res = QvPush(d);
+  g_framePushed |= 1u << view;  // R91: the frame's module goes after its last wanted view
+  if (g_frameMod && (g_framePushed & g_frameWant) == g_frameWant) DropFrameModule();
   if (res == ~0u) return;
   g_pushes++;
   if (res == DCSVR_DEPTH_PUSH_ACCEPTED) {
@@ -745,7 +829,24 @@ bool g_decided = false;       // the Wanted call of this frame was made
 void DecideFrame() {
   if (g_decided) return;
   g_decided = true;
-  g_mask = Active() ? QvWanted() & kFocusMask : 0;
+  DropFrameModule();  // (a frame whose end did not come)
+  g_mask = 0;
+  if (Active()) {
+    // R91: one module reference and one resolution per frame (Wanted, then this frame's pushes).
+    if (HMODULE m = RefLayer()) {
+      g_mask = WantedOf(m) & kFocusMask;
+      if (g_mask) {
+        g_frameMod = m;
+        g_frameDepth = reinterpret_cast<PFN_DcsVr_QuadViewsDepth>(GetProcAddress(m, g_nameDepth.c_str()));
+        g_frameWant = g_mask;
+        g_framePushed = 0;
+      } else {
+        FreeLibrary(m);
+      }
+    } else {
+      g_noLayer++;
+    }
+  }
   g_lastMask = g_mask;
 }
 
@@ -753,7 +854,11 @@ bool g_loggedThisFrame = false;  // a projection log entry was made this frame
 bool g_tracedThisFrame = false;  // an overlay trace window was open this frame
 
 // The upload capture is armed in GBufferPasses only when something uses it.
-bool WantUploads() { return Active() && (g_mask || g_logProjLeft.load() > 0); }
+// R65: cockpit_mask.h wants this pass's gProj too (the mask rect's FOV), with or without the export to Quad Views.
+std::atomic<bool> g_maskUploads{false};
+bool WantUploads() {
+  return (Active() && (g_mask || g_logProjLeft.load() > 0)) || g_maskUploads.load(std::memory_order_relaxed);
+}
 
 // Install: a clean render-thread state (no texture is held here: ReleaseAll ran at the uninstall).
 void ResetFrameState() {
@@ -767,6 +872,7 @@ void ResetFrameState() {
   g_useClock = 0;
   for (KnownCb& k : g_known) k = KnownCb{};
   for (PendingPush& p : g_pend) ClearPend(p);
+  DropFrameModule();  // R91
   g_target[0] = g_target[1] = nullptr;
   g_preLogged[0] = g_preLogged[1] = false;
   ResetCopyPoint();
@@ -796,6 +902,7 @@ void EndFrame() {
     g_tracedThisFrame = false;
     if (g_ovTraceLeft.load() > 0) g_ovTraceLeft--;
   }
+  DropFrameModule();  // R91: the frame's module reference (DecideFrame)
   g_decided = false;
 }
 

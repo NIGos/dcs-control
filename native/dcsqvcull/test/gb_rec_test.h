@@ -2331,6 +2331,218 @@ void PoolAndDumpTests() {
         "gbuffer rec: helpers per job follow the slot's measured work (capped by GBufferRecorderHelpers)");
 }
 
+// ---------------------------------------------------------------------------
+// R73: the R61 hazard sequence on the G-buffer recorder's render-entry start
+// ---------------------------------------------------------------------------
+// R61 (shadow_rec.h): in the F10 map DCS resets the frame heap many times per
+// frame without sorting the cascades' collections again; the job started at
+// render entry on the last world frame's vector (generation current, no
+// scene-change mark) and faulted in PreOne. gb_rec.h's OnRenderBody had the
+// same start (StartJob(..., false)) without a check. Sequence: a mission
+// restart outside the SceneChanging window, heap resets with no sort, the
+// items' memory reused, the render entry, stage A with the helpers.
+std::atomic<int> g_r73Faults{0};
+struct R73Helper {
+  Job* j;
+  int t;
+};
+void R73HelperRun(R73Helper* h) {
+  __try {
+    PreChunks(*h->j, h->t);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    g_r73Faults.fetch_add(1);
+    h->j->recycled.store(1);
+  }
+}
+int R73Primary(Job* j) {  // the job's result, -1 faulted
+  __try {
+    return PreAndCommit(*j, defrec::Qpc());
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    g_r73Faults.fetch_add(1);
+    return -1;
+  }
+}
+bool R73Faults(const void* p) {  // reading p faults (what PreOne's [mat] / [item+0x10] did)
+  __try {
+    return *static_cast<const volatile uint64_t*>(p) == 0x1234 && false;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return true;
+  }
+}
+// Stage A as JobMain runs it: BeginBuild, helpers (live threads) and the primary under SEH.
+int R73StageA(Job* j, int helpers) {
+  if (BeginBuild(*j) != kBuildOk) return j->result;
+  ResetEvent(j->preGo);
+  std::atomic<bool> go{false};
+  R73Helper hs[kThreads];
+  std::thread th[kThreads];
+  for (int h = 1; h <= helpers && h < kThreads; ++h) {
+    hs[h] = {j, h};
+    th[h] = std::thread([&go, p = &hs[h]] {
+      while (!go.load()) _mm_pause();
+      R73HelperRun(p);
+    });
+  }
+  go = true;
+  const int r = R73Primary(j);
+  for (int h = 1; h <= helpers && h < kThreads; ++h) th[h].join();
+  return r;
+}
+
+void RestartF10Tests() {
+  World* w = new World;
+  w->Init();
+  Tables t;
+  AllocTables(t);
+  TexTable tt;
+  AllocTex(tt, 256);
+  FakeView views[kTex], pages[kPages];
+  for (int k = 0; k < kTex; ++k) w->SetView(k, &views[k]);
+  for (int p = 0; p < kPages; ++p) w->SetPageSrv(p, &pages[p]);
+  PubAll(t, *w);
+  FillTex(tt, *w);
+  // Saved globals.
+  const bool sortPatched0 = shrec::g_sortPatched, on0 = g_on.load(), dis0 = g_disabled.load();
+  shrec::SortObserverFn const obs0 = shrec::g_sortObserver2.load();
+  void* const sortRg0 = g_sortRg.load();
+  Job* const pub0 = g_jobPub[0].load();
+  const int64_t scene0 = g_sceneChangeQpc.load();
+  const uint64_t gen0 = g_graphSortGen.load();
+  const uint64_t impl0 = g_implausible.load();
+  Job* j = NewJob();
+  bool ok = j != nullptr;
+  // The G-buffer graph's collections as RenderGraph+0xa18 holds them (the slot's collection is 2 of 4).
+  alignas(16) static uint8_t rg[0xa30] = {};
+  alignas(16) static uint8_t arr[4 * 24] = {};
+  *reinterpret_cast<uint8_t**>(rg + 0xa18) = arr;
+  *reinterpret_cast<uint8_t**>(rg + 0xa20) = arr + sizeof(arr);
+  void** out = reinterpret_cast<void**>(arr + 2 * 24);
+  if (ok) {
+    g_graphSortGen.store(0);
+    j->armRg = rg;
+    j->armIdx = 2;
+    j->armVol = nullptr;
+    j->armById = false;
+    g_jobPub[0].store(j);
+    g_sortRg.store(rg);
+    shrec::g_sortPatched = true;
+    shrec::g_sortObserver2 = &OnSorted;
+    g_on = true;
+    g_disabled = false;
+    const double us = defrec::QpcToUs();
+    // 1. Mission restart, 10 s ago (its containment window is over); the new mission's frames sort the vector.
+    g_frameHeapGen.fetch_add(1);
+    g_sceneChangeQpc.store(defrec::Qpc() - static_cast<int64_t>(10e6 / us));
+    j->startState.store(kStartIdle);
+    OnSorted(out);  // not armed: still noted
+    ok = SortRecorded() && g_graphSortGen.load() == g_frameHeapGen.load() && EntryVectorFresh();
+    // An armed job is still started by the sort (early start unchanged).
+    j->startState.store(kStartArmed);
+    OnSorted(out);
+    ok = ok && j->startState.load() == kStartRun && j->vec == out && j->startedEarly;
+    // Graph-wide (live R73: DCS refills some G-buffer collections without the sort in a parsed frame): another
+    // collection's sort of the same graph counts.
+    g_graphSortGen.store(0);
+    ok = ok && !EntryVectorFresh();
+    OnSorted(reinterpret_cast<void**>(arr + 1 * 24));
+    ok = ok && EntryVectorFresh();
+    // A vector outside the published graph's array (another graph's collection) is not noted.
+    void* foreign[3] = {};
+    g_graphSortGen.store(0);
+    OnSorted(foreign);
+    ok = ok && g_graphSortGen.load() == 0 && !EntryVectorFresh();
+    OnSorted(out);
+    ok = ok && EntryVectorFresh();
+    // Normal frame order: resets, then the sort, then render entry: fresh (steady state: no skip).
+    for (int f = 0; f < 3 && ok; ++f) {
+      g_frameHeapGen.fetch_add(1);
+      g_frameHeapGen.fetch_add(1);  // two resets per frame (R61 live: 2.00 resets/frame in flight)
+      OnSorted(out);
+      ok = EntryVectorFresh();
+    }
+    Check(ok, "R73 restart: the G-buffer sort observer notes every sort of the graph's collections (armed or not, any "
+              "collection, not another graph's), still starts an armed job early, and a normal frame (resets, sorts, "
+              "entry) passes the gate");
+    // 2. F10-like: the frame heap reset, the vector not sorted again; the old items' memory reused.
+    for (int r = 0; r < 3; ++r) g_frameHeapGen.fetch_add(1);
+    int bad[3] = {-1, -1, -1};
+    for (int i = 0, b = 0; i < kN && b < 3; ++i)
+      if (w->kind[i] == 0 && i > 40 * b + 10) bad[b++] = i;
+    ok = bad[2] >= 0;
+    if (ok) {
+      *reinterpret_cast<uint64_t*>(w->item[bad[0]] + 0x10) = 0xc600000005ull;      // R60's data address
+      *reinterpret_cast<uint64_t*>(w->item[bad[1]] + 0x10) = 0xdead0000beef0000ull;  // non-canonical (R55)
+      *reinterpret_cast<uint64_t*>(w->rend[bad[2]] + 0x10) = 0x3ull;                 // an item pointer of junk
+    }
+    const bool wouldFault = R73Faults(reinterpret_cast<void*>(0xc600000005ull)) &&
+                            R73Faults(reinterpret_cast<void*>(0xdead0000beef0000ull)) &&
+                            R73Faults(reinterpret_cast<void*>(0x13ull));
+    // 3. Render entry: the armed job's collection was not sorted since the reset: not started.
+    ok = ok && wouldFault && !EntryVectorFresh() && !EntryVectorFreshAt(true, 5, 8) && EntryVectorFreshAt(false, 5, 8);
+    Check(ok, "R73 F10 map: after heap resets with no G-buffer sort, the collection is not started at render entry");
+    // With no sort since the reset: an empty header names nothing (started as before, the pass stock), a non-empty
+    // one is gated, an unreadable header counts as non-empty (gated).
+    {
+      void* one[1] = {};
+      void* empty[3] = {one, one, one};
+      void* none[3] = {};
+      void* full[3] = {one, one + 1, one + 1};
+      ok = VectorEmptyGuarded(empty) && VectorEmptyGuarded(none) && !VectorEmptyGuarded(full) &&
+           !VectorEmptyGuarded(reinterpret_cast<void**>(0x10)) && !VectorEmptyGuarded(w->desc);
+      Check(ok, "R73 render-entry gate: only a non-empty unsorted vector is skipped (empty and null headers start as "
+                "before; an unreadable header is skipped)");
+    }
+    // 4. Started anyway (no sort hook: the old start path): stage A with two helpers on the recycled items.
+    shrec::g_sortPatched = false;
+    ok = EntryVectorFresh();  // without the hook: no record, the old behaviour
+    InitJob(*j, *w, t, tt);
+    j->heapGen = g_frameHeapGen.load();  // started now: the generation is current
+    j->tStart = defrec::Qpc();
+    j->recycled.store(0);
+    const bool notContained = !HeapRecycled(*j) && !shrec::SceneChanging(j->tStart) &&
+                              RecycledFilter(EXCEPTION_ACCESS_VIOLATION, *j) == EXCEPTION_CONTINUE_SEARCH;
+    const int faults0 = g_r73Faults.load();
+    const int res = R73StageA(j, kThreads - 1);
+    ok = ok && notContained && g_r73Faults.load() == faults0 && res == kBuildRecycled && j->recycled.load() == 1 &&
+         g_implausible.load() >= impl0 + 3;
+    Check(ok, "R73 F10 map: G-buffer stage A on recycled items (unaligned / non-canonical material, junk item) "
+              "drops the job without a fault (primary and helpers), where neither the heap nor the scene check "
+              "contains one");
+    // 5. Back in the world: sorted again, a healthy vector builds as before, no implausible item.
+    w->Init();
+    for (int k = 0; k < kTex; ++k) w->SetView(k, &views[k]);
+    for (int p = 0; p < kPages; ++p) w->SetPageSrv(p, &pages[p]);
+    shrec::g_sortPatched = true;
+    OnSorted(out);
+    InitJob(*j, *w, t, tt);
+    j->heapGen = g_frameHeapGen.load();
+    j->recycled.store(0);
+    const uint64_t impl1 = g_implausible.load();
+    const int res2 = R73StageA(j, kThreads - 1);
+    ok = EntryVectorFresh() && res2 == kBuildOk && j->recycled.load() == 0 && g_implausible.load() == impl1 &&
+         j->candCount > 0 && g_r73Faults.load() == faults0;
+    Check(ok, "R73 back from F10: the sorted collection starts at render entry and builds as before (no "
+              "implausible item in a healthy vector)");
+  } else {
+    Check(false, "R73: test job");
+  }
+  g_jobPub[0].store(pub0);
+  g_sortRg.store(sortRg0);
+  shrec::g_sortPatched = sortPatched0;
+  shrec::g_sortObserver2 = obs0;
+  g_on = on0;
+  g_disabled = dis0;
+  g_sceneChangeQpc.store(scene0);
+  g_graphSortGen.store(gen0);
+  if (j) {
+    j->startState.store(kStartIdle);
+    FreeJob(j);
+  }
+  FreeTex(tt);
+  FreeTables(t);
+  delete w;
+}
+
 void Run() {
   PureTests();
   TexTableTests();
@@ -2344,6 +2556,7 @@ void Run() {
   KeyVariantTests();
   PoolAndDumpTests();
   JobTests();
+  RestartF10Tests();
   if (c.compile) grtest::DeviceTests(c);
   printf("     sizeof(gbrec::Job) = %.1f MB\n", sizeof(Job) / 1048576.0);
 }

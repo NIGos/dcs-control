@@ -1,0 +1,399 @@
+diff --git a/include/xrfg/cockpit_mask.hpp b/include/xrfg/cockpit_mask.hpp
+--- a/include/xrfg/cockpit_mask.hpp
++++ b/include/xrfg/cockpit_mask.hpp
+@@ -643,6 +643,17 @@
+     // block is, with a reader heartbeat of its own (the producer copies MVs
+     // only while it and the mask's are fresh).
+     bool dcs_motion{false};
++    // DCS Control (0041): tests only. Makes one step of every copy fail as
++    // it would on a broken device (the list's Reset, its Close, the queue's
++    // Wait, the copy fence's Signal after the copy is queued), and is called
++    // after a block's handles opened, before the header is read again (0
++    // mask, 1 depth, 2 motion).
++    static constexpr std::uint32_t kTestFailListReset = 1;
++    static constexpr std::uint32_t kTestFailListClose = 2;
++    static constexpr std::uint32_t kTestFailQueueWait = 3;
++    static constexpr std::uint32_t kTestFailCopySignal = 4;
++    std::uint32_t test_copy_failure{0};
++    std::function<void(int)> test_before_open_recheck;
+ };
+ 
+ class CockpitMaskConsumer final {
+diff --git a/include/xrfg/dcsvr_cockpit_mask.h b/include/xrfg/dcsvr_cockpit_mask.h
+--- a/include/xrfg/dcsvr_cockpit_mask.h
++++ b/include/xrfg/dcsvr_cockpit_mask.h
+@@ -40,6 +40,10 @@
+ // another queue) signals `releaseFence` with the maskSeq it finished reading: the engine then never writes a slot whose
+ // maskSeq is above the completed value of releaseFence (that frame gets no mask instead; it never waits). A reader
+ // that never signals releaseFence (value stays 0) is not waited for: it must copy the slot out on its queue at once.
++// While active, a frame skipped because releaseFence holds every slot still refreshes heartbeatQpc (at least every
++// 100 ms; newestMaskSeq and the slots unchanged; R76), so a reader whose release is gated on a fresh header always gets
++// to release: a reader that finds a fresh header but no slot for its frame should signal releaseFence with
++// newestMaskSeq (it has nothing pending). Clarification only: no field, flag, size or version changes.
+ //
+ // Header updates. The block is guarded by the seqlock of dcsvr_perception_shm.h (seq odd while writing, even when
+ // stable; a reader copies between two equal even reads). One writer. The engine writes it at each commit and when it
+diff --git a/src/d3d12/cockpit_mask.cpp b/src/d3d12/cockpit_mask.cpp
+--- a/src/d3d12/cockpit_mask.cpp
++++ b/src/d3d12/cockpit_mask.cpp
+@@ -179,6 +179,10 @@
+     std::shared_ptr<D3D12CockpitMaskFrame> last_frame;
+     std::int64_t last_display_time{};
+     std::uint64_t last_release_value{};
++    // DCS Control (0041): the generation and newestMaskSeq of the last
++    // consistent, usable header (released from when the header is busy).
++    std::uint32_t last_header_generation{};
++    std::uint64_t last_header_newest_seq{};
+     bool stalled{};
+     // DCS Control (0040): a stall that never ends (the device removed, a
+     // fence signal failed); otherwise when the last one started (QPC) and
+@@ -476,7 +480,12 @@
+             }
+         }
+         cmv::Header again{};
+-        if (!cmv::seqlock_read(motion_block, again) || again.generation != header.generation) {
++        // DCS Control (0041): and still active.
++        if (options.test_before_open_recheck) {
++            options.test_before_open_recheck(2);
++        }
++        if (!cmv::seqlock_read(motion_block, again) || again.generation != header.generation ||
++            (again.flags & cmv::header_flags::active) == 0) {
+             return CockpitMotionLookup::generation_mismatch;
+         }
+         retire_motion_opened();
+@@ -734,7 +743,12 @@
+             }
+         }
+         cd::Header again{};
+-        if (!cd::seqlock_read(depth_block, again) || again.generation != header.generation) {
++        // DCS Control (0041): and still active.
++        if (options.test_before_open_recheck) {
++            options.test_before_open_recheck(1);
++        }
++        if (!cd::seqlock_read(depth_block, again) || again.generation != header.generation ||
++            (again.flags & cd::header_flags::active) == 0) {
+             return CockpitDepthLookup::generation_mismatch;
+         }
+         retire_depth_opened();
+@@ -1075,7 +1089,13 @@
+         // The handles stay open for 2 s after a generation change, so they
+         // were valid when opened only if the generation still holds now.
+         cm::Header again{};
+-        if (!cm::seqlock_read(block, again) || again.generation != header.generation) {
++        // DCS Control (0041): and still active (the handles of an inactive
++        // export may be gone).
++        if (options.test_before_open_recheck) {
++            options.test_before_open_recheck(0);
++        }
++        if (!cm::seqlock_read(block, again) || again.generation != header.generation ||
++            (again.flags & cm::header_flags::active) == 0) {
+             return CockpitMaskLookup::generation_changed;
+         }
+         retire_opened();
+@@ -1100,6 +1120,20 @@
+         }
+     }
+ 
++    // DCS Control (0041): every slot up to `newest` of `generation` back to
++    // the producer, on a frame that queues no copy of its own: the signal runs
++    // on the copy queue after every copy queued before it, so no slot is
++    // released while a copy of ours still reads it. Only for the generation
++    // opened (its release fence). Without it a producer that skips frames
++    // while we hold every slot (and, before R76, stopped refreshing its
++    // heartbeat then) and a reader that releases only on a fresh header lock
++    // each other out: no mask, depth or motion for the rest of the generation.
++    void release_unused(std::uint32_t generation, std::uint64_t newest) noexcept {
++        if (opened && opened->release_fence && opened->generation == generation) {
++            signal_release(newest);
++        }
++    }
++
+     [[nodiscard]] RingEntry* free_entry(std::uint32_t width, std::uint32_t height) noexcept {
+         const std::uint64_t completed = completed_copies();
+         const std::size_t count = ring.size();
+@@ -1201,6 +1235,8 @@
+         last_block_ms = now_ms;
+         cm::Header header{};
+         if (!cm::seqlock_read(block, header)) {
++            // DCS Control (0041): the last consistent header's slots back.
++            release_unused(last_header_generation, last_header_newest_seq);
+             return CockpitMaskLookup::header_busy;
+         }
+         if (!cm::header_usable(header, process_id) ||
+@@ -1212,7 +1248,13 @@
+             retire_opened();
+             return CockpitMaskLookup::adapter_mismatch;
+         }
++        last_header_generation = header.generation; // DCS Control (0041)
++        last_header_newest_seq = header.newestMaskSeq;
+         if (!cm::heartbeat_fresh(header, now, options.heartbeat_milliseconds)) {
++            // DCS Control (0041): stale, the slots go back all the same: a
++            // producer that holds its heartbeat while we hold every slot
++            // (before R76) publishes again only once they are released.
++            release_unused(header.generation, header.newestMaskSeq);
+             return CockpitMaskLookup::stale;
+         }
+         last_usable_ms = now_ms;
+@@ -1295,8 +1337,13 @@
+             motion.result = CockpitMotionLookup::no_texture;
+         }
+         const bool with_motion = motion.result == CockpitMotionLookup::paired;
+-        if (FAILED(entry->allocator->Reset()) ||
++        // DCS Control (0041): a copy that fails before it is queued releases
++        // the slots as a frame without one does (release_unused); one that
++        // fails after it releases its own slot behind it.
++        if (options.test_copy_failure == CockpitMaskConsumerOptions::kTestFailListReset ||
++            FAILED(entry->allocator->Reset()) ||
+             FAILED(entry->list->Reset(entry->allocator.Get(), nullptr))) {
++            release_unused(header.generation, header.newestMaskSeq);
+             return CockpitMaskLookup::copy_failed;
+         }
+         D3D12_TEXTURE_COPY_LOCATION destination{};
+@@ -1330,12 +1377,16 @@
+                     &destination, motion.box.left, motion.box.top, 0, &origin, &motion.box);
+             }
+         }
+-        if (FAILED(entry->list->Close())) {
++        if (FAILED(entry->list->Close()) ||
++            options.test_copy_failure == CockpitMaskConsumerOptions::kTestFailListClose) {
++            release_unused(header.generation, header.newestMaskSeq); // DCS Control (0041)
+             return CockpitMaskLookup::copy_failed;
+         }
+         // The producer signals maskSeq once the slot's writes are queued; the
+         // copy waits for it on the GPU, never here.
+-        if (FAILED(queue->Wait(opened->fence.Get(), source.maskSeq))) {
++        if (options.test_copy_failure == CockpitMaskConsumerOptions::kTestFailQueueWait ||
++            FAILED(queue->Wait(opened->fence.Get(), source.maskSeq))) {
++            release_unused(header.generation, header.newestMaskSeq); // DCS Control (0041)
+             return CockpitMaskLookup::copy_failed;
+         }
+         ID3D12CommandList* lists[] = {entry->list.Get()};
+@@ -1358,9 +1409,14 @@
+         if (with_motion && motion_opened) { // DCS Control (0036)
+             motion_opened->last_use_copy_value = copy_value;
+         }
+-        if (FAILED(queue->Signal(copy_fence.Get(), copy_value)) ||
++        if (options.test_copy_failure == CockpitMaskConsumerOptions::kTestFailCopySignal ||
++            FAILED(queue->Signal(copy_fence.Get(), copy_value)) ||
+             FAILED(queue->Signal(done_fence.Get(), copy_value))) {
+             stall_for_good(completed_copies());
++            // DCS Control (0041): the Wait and the copy are queued: the slot
++            // goes back behind them on the same queue (never a newer one, and
++            // never before the copy has read it), as after a copy that worked.
++            signal_release(source.maskSeq);
+             return CockpitMaskLookup::copy_failed;
+         }
+         // After the copy on the same queue: the slot is ours no longer.
+diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
+--- a/tests/cockpit_mask_tests.cpp
++++ b/tests/cockpit_mask_tests.cpp
+@@ -365,6 +365,11 @@
+     void clear_reader_heartbeat() {
+         cm::reader_heartbeat_of(block_).store(0, std::memory_order_release);
+     }
++    // DCS Control (0041): a header write that never ends (seq odd) until
++    // the next publish().
++    void hold_seqlock() {
++        cm::seq_of(block_).fetch_or(1U, std::memory_order_acq_rel);
++    }
+ 
+     cm::Header header_{};
+     std::vector<std::uint8_t> last_pattern_;
+@@ -1015,6 +1020,187 @@
+     std::cout << "cockpit mask: the end drains the release signals as well\n";
+ }
+ 
++// DCS Control (0041): R76. The reader pauses while the producer fills every
++// slot: all are held (above the release fence), and a producer before R76
++// then skips its frames without refreshing its heartbeat. The stale header
++// still releases them, so the producer publishes again and masks come back;
++// a header held busy releases what the last consistent one showed.
++void test_stale_heartbeat_releases_held_slots(Gpu& gpu) {
++    const std::wstring suffix = test_suffix(L"pause");
++    FakeProducer producer(gpu, suffix);
++    xrfg::CockpitMaskConsumer consumer;
++    require_hresult(consumer.initialize(gpu.device.Get(), {}, test_options(suffix)), "consumer initialize");
++    const std::uint64_t first = producer.commit(9000, 255);
++    producer.signal(first);
++    auto frame = consumer.acquire(9000);
++    require(frame != nullptr, "pause: paired before the pause");
++    gpu.wait(frame->ready_fence.Get(), frame->ready_value);
++    gpu.wait(producer.release_fence_.Get(), first);
++    frame.reset();
++    // The pause: every slot committed again, none released.
++    std::uint64_t newest = first;
++    for (int index = 0; index < cm::slot_count; ++index) {
++        newest = producer.commit(9001 + index, 255);
++        producer.signal(newest);
++    }
++    require(producer.release_fence_->GetCompletedValue() < newest - static_cast<std::uint64_t>(cm::slot_count - 1),
++        "pause: every slot is held");
++    // The old producer skips frames now, its heartbeat ageing.
++    producer.publish(800);
++    require(consumer.acquire(9100) == nullptr && consumer.stats().last == xrfg::CockpitMaskLookup::stale,
++        "pause: the header is stale");
++    gpu.wait(producer.release_fence_.Get(), newest, 2000);
++    require(producer.release_fence_->GetCompletedValue() == newest,
++        "pause: the stale header releases every slot up to newestMaskSeq");
++    // The producer may write again: masks are back with its next frame.
++    const std::uint64_t back = producer.commit(9101, 128);
++    producer.signal(back);
++    auto again = consumer.acquire(9101);
++    require(again != nullptr, "pause: masks are back once the producer publishes");
++    gpu.wait(again->ready_fence.Get(), again->ready_value);
++    require(gpu.readback(again->texture.Get()) == producer.last_pattern_, "pause: the copy holds the new slot");
++    gpu.wait(producer.release_fence_.Get(), back);
++    again.reset();
++
++    // Busy: the last consistent header's newest goes back.
++    const std::uint64_t paired = producer.commit(9200, 255);
++    const std::uint64_t later = producer.commit(9201, 255);
++    producer.signal(later);
++    auto busy_frame = consumer.acquire(9200);
++    require(busy_frame != nullptr, "busy: paired before");
++    gpu.wait(producer.release_fence_.Get(), paired);
++    require(producer.release_fence_->GetCompletedValue() == paired, "busy: the copy releases its own slot alone");
++    producer.hold_seqlock();
++    require(consumer.acquire(9202) == nullptr && consumer.stats().last == xrfg::CockpitMaskLookup::header_busy,
++        "busy: the header is held");
++    gpu.wait(producer.release_fence_.Get(), later, 2000);
++    require(producer.release_fence_->GetCompletedValue() == later,
++        "busy: the last consistent header's newestMaskSeq is released");
++    producer.publish();
++    gpu.wait(busy_frame->ready_fence.Get(), busy_frame->ready_value);
++    std::cout << "cockpit mask: a stale or busy header releases the held slots (R76)\n";
++}
++
++// DCS Control (0041): a copy that fails releases the slots: before it is
++// queued, up to newestMaskSeq at once (nothing of this frame is pending);
++// after it is queued, its own slot alone and only behind the copy (which
++// waits for the producer's fence).
++void test_copy_failures_release(Gpu& gpu) {
++    using Options = xrfg::CockpitMaskConsumerOptions;
++    int run = 0;
++    for (const std::uint32_t failure :
++        {Options::kTestFailListReset, Options::kTestFailListClose, Options::kTestFailQueueWait}) {
++        const std::wstring suffix = test_suffix((L"copyfail" + std::to_wstring(++run)).c_str());
++        FakeProducer producer(gpu, suffix);
++        auto options = test_options(suffix);
++        options.test_copy_failure = failure;
++        xrfg::CockpitMaskConsumer consumer;
++        require_hresult(consumer.initialize(gpu.device.Get(), {}, options), "consumer initialize");
++        producer.commit(9300, 255);
++        const std::uint64_t newest = producer.commit(9301, 255);
++        const std::string what = "copy failure " + std::to_string(failure) + ": ";
++        require(consumer.acquire(9300) == nullptr && consumer.stats().last == xrfg::CockpitMaskLookup::copy_failed,
++            what + "reported");
++        gpu.wait(producer.release_fence_.Get(), newest, 2000);
++        require(producer.release_fence_->GetCompletedValue() == newest, what + "newestMaskSeq released");
++    }
++    const std::wstring suffix = test_suffix(L"copyfail_signal");
++    FakeProducer producer(gpu, suffix);
++    auto options = test_options(suffix);
++    options.test_copy_failure = Options::kTestFailCopySignal;
++    xrfg::CockpitMaskConsumer consumer;
++    require_hresult(consumer.initialize(gpu.device.Get(), {}, options), "consumer initialize");
++    const std::uint64_t own = producer.commit(9400, 255);
++    const std::uint64_t newer = producer.commit(9401, 255);
++    require(consumer.acquire(9400) == nullptr && consumer.stats().last == xrfg::CockpitMaskLookup::copy_failed,
++        "copy failure after the copy: reported");
++    Sleep(100);
++    require(producer.release_fence_->GetCompletedValue() == 0,
++        "copy failure after the copy: nothing released before the copy has run");
++    producer.signal(own);
++    gpu.wait(producer.release_fence_.Get(), own, 2000);
++    Sleep(50);
++    require(producer.release_fence_->GetCompletedValue() == own && own < newer,
++        "copy failure after the copy: its own slot released behind it, not a newer one");
++    require(consumer.acquire(9401) == nullptr && consumer.stats().last == xrfg::CockpitMaskLookup::stalled,
++        "copy failure after the copy: masks off for the session");
++    std::cout << "cockpit mask: a failed copy releases the slots it no longer reads\n";
++}
++
++// DCS Control (0041): a header that turns inactive while the handles open
++// is rejected as a generation change is (mask, depth, motion), and the
++// next frame opens them.
++void test_inactive_header_at_open(Gpu& gpu) {
++    const std::wstring suffix = test_suffix(L"inactive_open");
++    FakeProducer producer(gpu, suffix);
++    FakeDepthProducer depth(gpu, suffix, producer);
++    FakeMotionProducer motion(gpu, suffix, producer);
++    std::uint32_t deactivate = 0; // bit per block: 1 mask, 2 depth, 4 motion
++    auto options = test_options(suffix);
++    options.cockpit_depth = true;
++    options.dcs_motion = true;
++    options.test_before_open_recheck = [&](int which) {
++        if ((deactivate & (1U << which)) == 0) {
++            return;
++        }
++        if (which == 0) {
++            producer.header_.flags &= ~cm::header_flags::active;
++            producer.publish();
++        } else if (which == 1) {
++            depth.header_.flags &= ~cd::header_flags::active;
++            depth.publish();
++        } else {
++            motion.header_.flags &= ~cmv::header_flags::active;
++            motion.publish();
++        }
++    };
++    xrfg::CockpitMaskConsumer consumer;
++    require_hresult(consumer.initialize(gpu.device.Get(), {}, options), "consumer initialize");
++    const auto commit = [&](std::int64_t time) {
++        const std::uint64_t seq = producer.commit(time, 255);
++        depth.commit(producer);
++        motion.commit(producer, time - 10);
++        return seq;
++    };
++    // The mask's header.
++    deactivate = 1U;
++    std::uint64_t seq = commit(9500);
++    require(consumer.acquire(9500) == nullptr &&
++            consumer.stats().last == xrfg::CockpitMaskLookup::generation_changed &&
++            consumer.stats().generations_opened == 0,
++        "inactive at open: the mask's handles are dropped");
++    deactivate = 0;
++    producer.header_.flags |= cm::header_flags::active;
++    producer.signal(seq);
++    // The depth's and the motion's headers.
++    deactivate = 2U | 4U;
++    seq = commit(9510);
++    auto alone = consumer.acquire(9510);
++    require(alone != nullptr && !alone->depth && !alone->motion && consumer.stats().generations_opened == 1,
++        "inactive at open: the mask alone");
++    require(consumer.stats().depth_last == xrfg::CockpitDepthLookup::generation_mismatch &&
++            consumer.stats().depth_generations_opened == 0,
++        "inactive at open: the depth's handles are dropped");
++    require(consumer.stats().motion_last == xrfg::CockpitMotionLookup::generation_mismatch &&
++            consumer.stats().motion_generations_opened == 0,
++        "inactive at open: the motion's handles are dropped");
++    producer.signal(seq);
++    gpu.wait(alone->ready_fence.Get(), alone->ready_value);
++    alone.reset();
++    deactivate = 0;
++    depth.header_.flags |= cd::header_flags::active;
++    motion.header_.flags |= cmv::header_flags::active;
++    // Active again: all three open and pair.
++    seq = commit(9520);
++    auto all = consumer.acquire(9520);
++    require(all != nullptr && all->depth && all->motion && consumer.stats().depth_generations_opened == 1 &&
++            consumer.stats().motion_generations_opened == 1,
++        "inactive at open: opened once active again");
++    producer.signal(seq);
++    gpu.wait(all->ready_fence.Get(), all->ready_value);
++    std::cout << "cockpit mask: a header inactive at open is rejected (mask, depth, motion)\n";
++}
++
+ // DCS Control (0040): a rect whose x + w wraps in 32 bits passes the
+ // contracts' own view_usable(); the consumer checks in 64 bits and leaves
+ // that eye out (its mask and its MVs), the other eye as before.
+@@ -1796,6 +1982,9 @@
+         test_stall_stops_the_heartbeat(gpu);
+         test_stall_recovers(gpu); // DCS Control (0040)
+         test_end_drains_release_signals(gpu); // DCS Control (0040)
++        test_stale_heartbeat_releases_held_slots(gpu); // DCS Control (0041)
++        test_copy_failures_release(gpu); // DCS Control (0041)
++        test_inactive_header_at_open(gpu); // DCS Control (0041)
+         test_wrapped_rects(gpu); // DCS Control (0040)
+         std::cout << "cockpit mask consumer tests passed\n";
+         return 0;
