@@ -8,6 +8,9 @@ $env:DOTNET_CLI_TELEMETRY_OPTOUT='1'
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'
 $env:DOTNET_GENERATE_ASPNET_CERTIFICATE='false'
 $env:NUGET_PACKAGES=Join-Path $workspaceRoot '.cache/nuget'
+$env:DCSC_FORCE_TESTS='1'  # a release never trusts the native test cache (scripts/test-cache.ps1)
+# Every copy of the shared-memory contract headers, the OFXR tree's included, must match before anything is built.
+& (Join-Path $PSScriptRoot 'check-contracts.ps1')
 $dotnet = Join-Path $workspaceRoot '.tools/dotnet/dotnet.exe'
 $version = & (Join-Path $PSScriptRoot 'version.ps1')
 $releaseRoot = Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-win-x64"

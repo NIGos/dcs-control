@@ -22,8 +22,20 @@ if ($Component -eq 'cheeky') {
     # Mixed WARP calibration is slow under concurrent GPU tests on this host.
     $testOptions += @('-E','([Oo]verlay|MixedCalibration)')
     $testFile = Join-Path $nativeBuild 'CTestTestfile.cmake'
-    $testText = [IO.File]::ReadAllText($testFile).Replace('CheekyMixedCalibrationTests]=] PROPERTIES  TIMEOUT "60"', 'CheekyMixedCalibrationTests]=] PROPERTIES  TIMEOUT "300"')
-    [IO.File]::WriteAllText($testFile, $testText)
+    # patch-cheeky.py already raises it to 300 in CMakeLists.txt; this pins it whatever the generated value is, and
+    # fails loudly when CMake's output no longer has the anchor (the old silent Replace never matched).
+    $timeoutAnchor = [regex]'(CheekyMixedCalibrationTests\]=\] PROPERTIES  TIMEOUT )"\d+"'
+    $testText = [IO.File]::ReadAllText($testFile)
+    if ($timeoutAnchor.Matches($testText).Count -ne 1) { throw "CTestTestfile.cmake: the MixedCalibration timeout anchor was not found exactly once ($timeoutAnchor)." }
+    [IO.File]::WriteAllText($testFile, $timeoutAnchor.Replace($testText, '$1"300"'))
+    # Each run's test data (captures, host-test output, per-process core discovery folders) is never read by a later
+    # run and grew to gigabytes: start every test run from empty folders.
+    $testBin = Join-Path $nativeBuild 'bin/Release'
+    foreach ($folder in 'uevr-test-data', 'standalone-host-tests', 'runtime-host-test-data') {
+        $path = Join-Path $testBin $folder
+        if (Test-Path -LiteralPath $path) { Get-ChildItem -LiteralPath $path -Force | Remove-Item -Recurse -Force }
+    }
+    Get-ChildItem -LiteralPath $testBin -Directory -Filter 'core-discovery-*' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
 }
 # ctest runs directly, not through msvc.cmd: cmd would split the exclusion pattern at its '|'.
 $ctest = (& $nativeWrapper where ctest | Select-Object -First 1)

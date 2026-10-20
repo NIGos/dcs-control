@@ -91,12 +91,7 @@ public sealed class BoostRuntime
     /// Returns what was done, or null when there was nothing to do.</summary>
     public static IReadOnlyList<string>? ReopenLeftoverPrograms(string stateRoot) => HelperRunning() || DcsRunning() ? null : ReopenClosedFile(ClosedPath(stateRoot));
 
-    private static bool DcsRunning()
-    {
-        var running = Process.GetProcessesByName("DCS");
-        foreach (var process in running) process.Dispose();
-        return running.Length > 0;
-    }
+    private static bool DcsRunning() => DcsProcess.AnyRunning();
 
     internal static IReadOnlyList<string>? ReopenClosedFile(string path, Func<ReopenTarget, string?>? start = null)
     {

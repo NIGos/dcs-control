@@ -6,7 +6,19 @@ using DcsVr.Core;
 if (args.FirstOrDefault() == "--environment-child") { Console.Write(Environment.GetEnvironmentVariable("XR_RUNTIME_JSON") + "|" + Environment.GetEnvironmentVariable("XR_ENABLE_API_LAYERS")); return 0; }
 var workspace = Path.GetFullPath(args.FirstOrDefault() ?? ".");
 if (!File.Exists(Path.Combine(workspace, "Directory.Build.props"))) { Console.Error.WriteLine("Run from the repository root, or pass it as the first argument: " + workspace); return 2; }
-var root = Path.Combine(workspace, "artifacts/tests/" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+// Each run gets its own folder (runs may overlap); a failed run's is kept to inspect, but only the newest few: every run
+// used to leave one behind (80 GB of them).
+var testsRoot = Path.Combine(workspace, "artifacts/tests");
+if (Directory.Exists(testsRoot))
+    foreach (var old in new DirectoryInfo(testsRoot).EnumerateDirectories().OrderByDescending(d => d.LastWriteTimeUtc).Skip(3))
+        try
+        {
+            // Some fixtures are read-only files, which Delete(true) refuses.
+            foreach (var file in old.EnumerateFiles("*", SearchOption.AllDirectories)) file.Attributes = FileAttributes.Normal;
+            old.Delete(true);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+var root = Path.Combine(testsRoot, Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
 var tests = new List<(string Name, Action Test)>();
 Readiness.ActiveRouteProvider = () => new(null, "Test fixture: no running headset route.", TrackingKind.Unknown);
 PimaxFovea.SettingsPath = Path.Combine(root, "no-pimax-play/global.json"); // never the build machine's Pimax Play settings
@@ -15,6 +27,10 @@ GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 4090", "NVIDIA", "32.0.15.0")]
 NvidiaSettings.ThreadedOptimizationForDcs = () => new(ThreadedOptimization.Auto, false); // nor its driver settings
 NvidiaSettings.MfaaForDcs = () => new(false, false);
 LaunchSafety.CurrentJob = () => default; // never the job object the test runner itself may run in
+DcsProcess.Provider = () => []; // never a DCS running on the build machine; the refusal tests set a fake one
+// A test that cannot run here calls Skip(reason) and returns: it is listed with its reason at the end of the run.
+var skipped = new List<(string Test, string Reason)>(); var currentTest = "";
+void Skip(string reason) { skipped.Add((currentTest, reason)); Console.WriteLine("SKIP " + currentTest + ": " + reason); }
 void Test(string name, Action action) => tests.Add((name, action));
 void Require(bool value, string message = "Assertion failed") { if (!value) throw new Exception(message); }
 void Throws<T>(Action action) where T : Exception { try { action(); } catch (T) { return; } throw new Exception("Expected " + typeof(T).Name); }
@@ -39,8 +55,10 @@ Test("Lua refuses replacing a table", () => Throws<InvalidDataException>(() => n
 Test("Lua BOM and long comments", () => Require(new LuaOptions("\uFEFF--[[hello]]\noptions={VR={enable=true}}").Get("VR", "enable") == "true"));
 Test("Lua actual DCS parse and patch without writing", () =>
 {
+    // Reads this PC's own options.lua: only on request, so the run never depends on the build machine.
+    if (Environment.GetEnvironmentVariable("DCSVR_TEST_REAL_OPTIONS") != "1") { Skip("reads the real Saved Games options.lua (set DCSVR_TEST_REAL_OPTIONS=1)"); return; }
     var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Saved Games/DCS/Config/options.lua");
-    if (!File.Exists(path)) return;
+    if (!File.Exists(path)) { Skip("no " + path); return; }
     var before = Hashing.FileSha256(path); var text = File.ReadAllText(path); var patch = LuaOptions.Patch(text, new Dictionary<string, object> { ["VR.openxr_quadView"] = false, ["VR.openxr_eyeGaze"] = false, ["VR.enable"] = true });
     Require(new LuaOptions(patch).Get("VR", "openxr_quadView") == "false"); Require(before == Hashing.FileSha256(path));
 });
@@ -1316,7 +1334,10 @@ Test("Depth boost modes: Realistic by default (x1 to 150 m, x1.25 from 400 m), E
 Test("Depth boost with the dual camera: always gradual, no transition switch; the engine's depth grid stays", () =>
 {
     var on = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, DepthBoost = true, EngineOptimizations = true };
-    var predictive = on with { DepthBoostTransition = DepthBoostTransition.Predictive, DepthBoostTransitionKey = NeuralHotkeys.DepthBoostDefault };
+    // Profiles saved with the removed transition choice and its key still load (the keys are dropped, in any casing).
+    var predictive = JsonData.Deserialize<VrProfile>(JsonData.Serialize(on).TrimEnd().TrimEnd('}') + ",\"depthBoostTransition\":\"Predictive\",\"depthBoostTransitionKey\":\"121:6\"}");
+    Require(predictive == on, "an old profile with the transition keys loads as the same profile");
+    Require(JsonData.Deserialize<VrProfile>("{\"depthBoost\":true,\"DepthBoostTransition\":\"Gradual\",\"DEPTHBOOSTTRANSITIONKEY\":\"120:6\"}").DepthBoost, "any casing");
     // The dual camera only moves the scale smoothly: a profile saved with Predictive and its key writes neither.
     foreach (var profile in new[] { on, predictive })
     {
@@ -1327,11 +1348,7 @@ Test("Depth boost with the dual camera: always gradual, no transition switch; th
     // The grid served only the predictive transition: not captured any more; the scene depth at the gaze stays.
     var engineIni = ConfigurationWriters.DcsQvCull(on with { EngineOptimizations = false }).ReplaceLineEndings("\n");
     Require(engineIni.Contains("DepthGrid=0\n") && engineIni.Contains("FixationDepth=1\n"), "no grid, the fixation depth");
-    // Profiles: an older profile still loads; the transition round-trips as text.
-    Require(System.Text.Json.JsonSerializer.Deserialize<VrProfile>("{\"DepthBoost\":true}") is { DepthBoostTransition: DepthBoostTransition.Gradual, DepthBoostTransitionKey: "120:6" }, "old profile");
-    var options = new System.Text.Json.JsonSerializerOptions { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(allowIntegerValues: false) } };
-    var json = System.Text.Json.JsonSerializer.Serialize(predictive, options);
-    Require(json.Contains("\"DepthBoostTransition\":\"Predictive\"") && System.Text.Json.JsonSerializer.Deserialize<VrProfile>(json, options)!.DepthBoostTransition == DepthBoostTransition.Predictive, "as text");
+    Require(!JsonData.Serialize(predictive).Contains("depthBoostTransition", StringComparison.OrdinalIgnoreCase), "and saves without them");
 });
 Test("Visual realism: all off writes the ini as before; each mode, the key and [VrFx] write their keys; the module for a visual feature alone", () =>
 {
@@ -1825,7 +1842,7 @@ foreach (var runtimeKind in new[] { RuntimeKind.Pimax, RuntimeKind.SboysSteamVr 
     Test("Combined focus deployment and restoration " + runtimeKind, () =>
     {
         // Cheeky runs with Quad Views only for DLSS 5, whose signed runtime file is never in the repository.
-        if (RealNeuralRuntime() is not { } neuralRuntime) { Console.WriteLine("SKIP combined focus deployment: no signed nvngx_dlssnr.dll (set DCSVR_TEST_NEURAL_PATH)"); return; }
+        if (RealNeuralRuntime() is not { } neuralRuntime) { Skip("no signed nvngx_dlssnr.dll (set DCSVR_TEST_NEURAL_PATH)"); return; }
         var dir = "combined-" + runtimeKind; var exe = Make(dir + "/bin/DCS.exe", "fixture"); var options = Make(dir + "/options.lua", Lua);
         var runtime = Make(dir + "/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make(dir + "/runtime.dll", "fixture");
         var ofxr = new ComponentCache(Path.Combine(root, dir + "/cache")).Import(PackageCatalog.Get("ofxr"), Path.Combine(workspace, ".cache/packages", PackageCatalog.Get("ofxr").ArchiveName));
@@ -2661,6 +2678,25 @@ Test("DCS-running guard compares canonical paths through junctions, Saved Games 
     Require(!ControlService.UsedByRunningDcs(install + "-other\\bin\\DCS.exe", install, sg, managed), "a sibling with a common prefix is not inside");
     Directory.Delete(link); // removes the junction only
 });
+Test("A running DCS refuses Apply and Restore for its files; none running, or files elsewhere, are allowed", () =>
+{
+    var install = PathPolicy.UnderRoot(root, "running-dcs/DCS World"); var exe = Make("running-dcs/DCS World/bin/DCS.exe", "fixture");
+    var managed = PathPolicy.UnderRoot(root, "running-dcs/state/managed"); var elsewhere = PathPolicy.UnderRoot(root, "running-dcs/elsewhere/file.txt");
+    var previous = DcsProcess.Provider;
+    try
+    {
+        ControlService.EnsureDcsClosed([Path.Combine(install, "bin", "dxgi.dll")], managed); // the test seam: none running
+        DcsProcess.Provider = () => [new(4242, exe)];
+        Require(DcsProcess.AnyRunning());
+        Throws<InvalidOperationException>(() => ControlService.EnsureDcsClosed([Path.Combine(install, "bin", "dxgi.dll")], managed));
+        Throws<InvalidOperationException>(() => ControlService.EnsureDcsClosed([Path.Combine(managed, "cheeky", "dxgi.dll")], managed));
+        Throws<InvalidOperationException>(() => ControlService.EnsureDcsClosed(null, managed));
+        ControlService.EnsureDcsClosed([elsewhere], managed);
+        DcsProcess.Provider = () => [new(4242, null)]; // location unreadable: any DCS blocks
+        Throws<InvalidOperationException>(() => ControlService.EnsureDcsClosed([elsewhere], managed));
+    }
+    finally { DcsProcess.Provider = previous; }
+});
 Test("Boost helper command passes the DCS executable and log, hidden when elevated", () =>
 {
     foreach (var elevated in new[] { false, true })
@@ -2950,7 +2986,7 @@ Test("Saved runtime: an invalid or wrongly named file is refused and nothing is 
 });
 Test("Saved runtime: a selected signed runtime is saved once and used by drafts without their own file", () =>
 {
-    if (RealNeuralRuntime() is not { } real) { Console.WriteLine("SKIP saved runtime selection: no signed nvngx_dlssnr.dll (set DCSVR_TEST_NEURAL_PATH)"); return; }
+    if (RealNeuralRuntime() is not { } real) { Skip("no signed nvngx_dlssnr.dll (set DCSVR_TEST_NEURAL_PATH)"); return; }
     var service = new ControlService(root, Path.Combine(root, "saved-runtime/select/state"));
     var saved = service.RememberNeuralRuntime(real);
     Require(saved.Path == Path.Combine(service.StateRoot, "runtimes", "nvngx_dlssnr.dll") && saved.OriginalPath == real && NativeBinary.SupportsNeuralContract(saved.Version), "Recorded");
@@ -2971,7 +3007,7 @@ Test("Saved runtime: a selected signed runtime is saved once and used by drafts 
 });
 Test("Saved runtime: NVIDIA's runtime changed by a compatibility patch is accepted when selected, never by Detect", () =>
 {
-    if (RealNeuralRuntime() is not { } real) { Console.WriteLine("SKIP patched runtime: no signed nvngx_dlssnr.dll (set DCSVR_TEST_NEURAL_PATH)"); return; }
+    if (RealNeuralRuntime() is not { } real) { Skip("no signed nvngx_dlssnr.dll (set DCSVR_TEST_NEURAL_PATH)"); return; }
     // The RTX 20/30/40 patches rewrite GPU code inside NVIDIA's file: version and certificate stay, the signature breaks.
     var patched = PathPolicy.UnderRoot(root, "saved-runtime/patched/source/nvngx_dlssnr.dll"); Directory.CreateDirectory(Path.GetDirectoryName(patched)!);
     var bytes = File.ReadAllBytes(real); bytes[bytes.Length / 2] ^= 0xFF; File.WriteAllBytes(patched, bytes);
@@ -2998,7 +3034,7 @@ Test("Saved runtime: NVIDIA's runtime changed by a compatibility patch is accept
 });
 Test("Saved runtime: deployment copies the hash-checked saved copy; Forget while applied keeps it until restore", () =>
 {
-    if (RealNeuralRuntime() is not { } real) { Console.WriteLine("SKIP saved runtime deployment: no signed nvngx_dlssnr.dll (set DCSVR_TEST_NEURAL_PATH)"); return; }
+    if (RealNeuralRuntime() is not { } real) { Skip("no signed nvngx_dlssnr.dll (set DCSVR_TEST_NEURAL_PATH)"); return; }
     var (service, inventory, options) = NeuralFixture("deploy");
     var original = File.ReadAllText(options);
     Throws<InvalidDataException>(() => service.Preview(stereoNeural, inventory)); // Nothing selected yet.
@@ -3027,7 +3063,7 @@ Test("Saved runtime: deployment copies the hash-checked saved copy; Forget while
 });
 Test("Saved runtime: Detect saves a found runtime and uses the copy for a profile whose file moved", () =>
 {
-    if (RealNeuralRuntime() is not { } real) { Console.WriteLine("SKIP saved runtime detection: no signed nvngx_dlssnr.dll (set DCSVR_TEST_NEURAL_PATH)"); return; }
+    if (RealNeuralRuntime() is not { } real) { Skip("no signed nvngx_dlssnr.dll (set DCSVR_TEST_NEURAL_PATH)"); return; }
     var folder = PathPolicy.UnderRoot(root, "saved-runtime/detect/downloads/DLSSNR"); Directory.CreateDirectory(folder);
     var found = Path.Combine(folder, "nvngx_dlssnr.dll"); File.Copy(real, found);
     var store = new NeuralRuntimeStore(Path.Combine(root, "saved-runtime/detect/state/runtimes"));
@@ -3844,8 +3880,10 @@ Test("E2E: state written by 0.5.10 (no lastInstalled, an older profile.json) kee
 });
 Test("E2E: the CLI's apply, launch-check and restore write exactly what the app writes", () =>
 {
-    var cli = Path.Combine(workspace, "src/DcsVr.Cli/bin/Release/net10.0-windows/DcsVr.Cli.exe");
-    if (!File.Exists(cli)) { Console.WriteLine("SKIP CLI parity: build src/DcsVr.Cli in Release first"); return; }
+    // The CLI built with this test run (DcsVr.Tests.csproj references it), never an older build lying around.
+    var cli = System.Reflection.Assembly.GetExecutingAssembly().GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+        .Cast<System.Reflection.AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "DcsVrCliPath")?.Value;
+    if (cli is null || !File.Exists(cli)) { Skip("the CLI built with the tests was not found (" + (cli ?? "no DcsVrCliPath") + ")"); return; }
     var neural = RealNeuralRuntime();
     var f = E2e("cli"); var baseTree = E2eTree(f, "game", "sg"); var lua = File.ReadAllBytes(f.Options);
     (int Code, string Output) Cli(params string[] arguments)
@@ -3878,6 +3916,83 @@ Test("E2E: the CLI's apply, launch-check and restore write exactly what the app 
         Require(File.ReadAllBytes(f.Options).AsSpan().SequenceEqual(lua) && E2eTree(f, "game", "sg").SequenceEqual(baseTree), step + ": the CLI's restore");
         E2eCheckClean(f, step + " CLI restore");
     }
+});
+Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveFeatures over a table of profiles (Node)", () =>
+{
+    // Until the bridge sends the computed flags, the UI repeats these rules; this keeps the two in step.
+    var eye = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked };
+    VrProfile[] table =
+    [
+        new(), new() { QuadViews = QuadProvider.None, FoveatedDlss = true }, new() { QuadViews = QuadProvider.QuadViewsFoveated, FoveatedDlss = true },
+        new() { QuadViews = QuadProvider.QuadViewsFoveated, FoveatedDlss = true, NeuralRendering = true }, new() { QuadViews = QuadProvider.PimaxNative, NeuralRendering = true },
+        new() { QuadViews = QuadProvider.PimaxNative, Runtime = RuntimeKind.SboysSteamVr }, new() { QuadViews = QuadProvider.PimaxNative, FoveatedDlss = true },
+        new() { QuadViews = QuadProvider.None, NeuralRendering = true, Runtime = RuntimeKind.SboysSteamVr },
+        eye with { PupilShift = true }, eye with { PupilShift = true, Desktop = true }, eye with { QuadViews = QuadProvider.PimaxNative, DepthBoost = true, DepthBoostMode = DepthBoostMode.Enhanced },
+        eye with { Gaze = GazeMode.Fixed, DepthBoost = true, PupilShift = true }, eye with { QuadViews = QuadProvider.None, DepthBoost = true, DepthBoostRealisticMax = 1.1 },
+        new() { ColorMode = ColorMode.Fix }, new() { ColorModeKey = "120:6" }, new() { ColorModeKey = "ctrl+shift+f12" }, new() { ColorModeKey = "0:3" }, new() { ColorModeKey = " junk " },
+        new() { Desktop = true, ColorMode = ColorMode.Enhanced, GVision = true, ColorModeKey = "120:6" }, eye with { GVision = true, GVisionUseGaze = true },
+        eye with { GVision = true, GVisionUseGaze = false }, eye with { GazeDof = true }, new() { GazeDof = true }, eye with { QuadViewsLayerDirectory = "   " },
+        eye with { QuadViewsLayerDirectory = @"C:\qv" }, eye with { Desktop = true, DepthBoost = true, GazeDof = true },
+    ];
+    var dir = PathPolicy.UnderRoot(root, "uses-rules"); Directory.CreateDirectory(dir);
+    var profiles = Path.Combine(dir, "profiles.json"); File.WriteAllText(profiles, "[" + string.Join(",", table.Select(JsonData.Serialize)) + "]");
+    var harness = Path.Combine(dir, "harness.js");
+    File.WriteAllText(harness, """
+        const fs = require('fs'), vm = require('vm');
+        const [, , appPath, profilesPath] = process.argv;
+        const regions = [...fs.readFileSync(appPath, 'utf8').matchAll(/\/\/ <uses-rules>\r?\n([\s\S]*?)\/\/ <\/uses-rules>/g)].map(m => m[1]);
+        if (regions.length === 0) throw new Error('No <uses-rules> region in app.js');
+        const profiles = JSON.parse(fs.readFileSync(profilesPath, 'utf8'));
+        const result = vm.runInNewContext(regions.join('\n') + `
+        ;profiles.map(p0 => {
+          const p = JSON.parse(JSON.stringify(p0)), r = resolveFeatures(JSON.parse(JSON.stringify(p0)));
+          return {eyeTrackedVr:eyeTrackedVr(p), usesPupilShift:usesPupilShift(p), usesDepthBoost:usesDepthBoost(p), usesPerceptionLayer:Boolean(usesPerceptionLayer(p)),
+            usesColorKey:usesColorKey(p), colorOn:Boolean(colorOn(p)), usesGazeDof:usesGazeDof(p), gVisionOn:gVisionOn(p), usesVisualRealism:Boolean(usesVisualRealism(p)),
+            usesGazePublish:Boolean(usesGazePublish(p)), foveatedSr:foveatedSr(p), dlss:featureState(p).dlss, stereoCheeky:stereoCheeky(p), quad:Boolean(quad(p)),
+            nativeAllowed:Boolean(nativeAllowed(p)), depthMax:depthMax(p), resolvedFoveatedDlss:Boolean(r.foveatedDlss), resolvedQuadViews:r.quadViews, resolvedQuadFocusAdapter:r.quadFocusAdapter};
+        })`, {profiles});
+        process.stdout.write(JSON.stringify(result));
+        """);
+    ProcessStartInfo start = new("node") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+    foreach (var argument in new[] { harness, Path.Combine(workspace, "src/DcsVr.App/ui/app.js"), profiles }) start.ArgumentList.Add(argument);
+    Process node;
+    try { node = Process.Start(start)!; }
+    catch (System.ComponentModel.Win32Exception) { Skip("node is not on PATH"); return; }
+    string output, error;
+    using (node)
+    {
+        var read = node.StandardOutput.ReadToEndAsync(); var readError = node.StandardError.ReadToEndAsync();
+        if (!node.WaitForExit(60000)) { node.Kill(true); throw new Exception("node timed out"); }
+        output = read.Result; error = readError.Result;
+        Require(node.ExitCode == 0, "node: " + error);
+    }
+    using var json = System.Text.Json.JsonDocument.Parse(output);
+    var rows = json.RootElement.EnumerateArray().ToArray(); Require(rows.Length == table.Length, "one result per profile");
+    var mismatches = new List<string>();
+    for (var i = 0; i < table.Length; i++)
+    {
+        var p = table[i]; var resolved = ProfileValidation.ResolveFeatures(p);
+        var expected = new Dictionary<string, object>
+        {
+            ["eyeTrackedVr"] = p.UsesEyeTrackedVr, ["usesPupilShift"] = p.UsesPupilShift, ["usesDepthBoost"] = p.UsesDepthBoost, ["usesPerceptionLayer"] = p.UsesPerceptionLayer,
+            ["usesColorKey"] = p.UsesColorModeKey, ["colorOn"] = p.UsesColorMode, ["usesGazeDof"] = p.UsesGazeDof, ["gVisionOn"] = p.UsesGVision, ["usesVisualRealism"] = p.UsesVisualRealism,
+            ["usesGazePublish"] = p.UsesGazePublish, ["foveatedSr"] = p.UsesFoveatedDlss, ["dlss"] = p.UsesCheeky, ["stereoCheeky"] = p.UsesCheeky && p.QuadViews == QuadProvider.None,
+            ["quad"] = p.UsesBundledQuadViews, ["nativeAllowed"] = ProfileValidation.ResolveFeatures(p with { QuadViews = QuadProvider.PimaxNative }).QuadViews == QuadProvider.PimaxNative,
+            ["depthMax"] = p.DepthBoostActiveMax, ["resolvedFoveatedDlss"] = resolved.FoveatedDlss, ["resolvedQuadViews"] = resolved.QuadViews.ToString(), ["resolvedQuadFocusAdapter"] = resolved.QuadFocusAdapter,
+        };
+        foreach (var (key, value) in expected)
+        {
+            if (!rows[i].TryGetProperty(key, out var actual)) { mismatches.Add($"profile {i}: {key} missing"); continue; }
+            var same = value switch
+            {
+                bool b => actual.ValueKind == (b ? System.Text.Json.JsonValueKind.True : System.Text.Json.JsonValueKind.False),
+                double d => actual.ValueKind == System.Text.Json.JsonValueKind.Number && Math.Abs(actual.GetDouble() - d) < 1e-9,
+                _ => actual.ValueKind == System.Text.Json.JsonValueKind.String && actual.GetString() == (string)value,
+            };
+            if (!same) mismatches.Add($"profile {i}: {key} UI={actual.GetRawText()} C#={value}");
+        }
+    }
+    Require(mismatches.Count == 0, "app.js differs from C#:\n  " + string.Join("\n  ", mismatches));
 });
 Test("E2E: CPU Boost and Free VRAM records left by an ended helper survive a moment when the file cannot be read", () =>
 {
@@ -3927,10 +4042,14 @@ Test("E2E: a DCS install removed from its folder drops its entries at Back to st
 });
 foreach (var (name, action) in tests)
 {
-    try { action(); Console.WriteLine("PASS " + name); }
+    currentTest = name; var skips = skipped.Count;
+    try { action(); Console.WriteLine((skipped.Count > skips ? "SKIPPED " : "PASS ") + name); }
     catch (Exception e) { failed.Add(name); Console.WriteLine("FAIL " + name + "\n" + e); }
 }
-var report = new { total = tests.Count, passed = tests.Count - failed.Count, failed, durationSeconds = timer.Elapsed.TotalSeconds, fixtureDirectory = root };
+// Skipped tests count as passed (as before) and are listed here, each with why, so a skip is never silent.
+Console.WriteLine($"{skipped.Count} test(s) skipped" + (skipped.Count == 0 ? "." : ":"));
+foreach (var (test, reason) in skipped) Console.WriteLine("  SKIP " + test + ": " + reason);
+var report = new { total = tests.Count, passed = tests.Count - failed.Count, failed, durationSeconds = timer.Elapsed.TotalSeconds, fixtureDirectory = root, skipped = skipped.Select(s => new { test = s.Test, reason = s.Reason }).ToArray() };
 Console.WriteLine(JsonData.Serialize(report));
 // A fully passing run leaves nothing behind (each run used to add a fixture folder); a failing one keeps it to look at.
 if (failed.Count == 0) try { Directory.Delete(root, true); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }

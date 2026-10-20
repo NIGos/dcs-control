@@ -1,6 +1,38 @@
 window.runWebSmoke = async function() {
   const checks = [], ui = window.dcsUi, $ = id => document.getElementById(id);
   function check(name,value) { if (!value) throw new Error(name); checks.push(name); }
+  // Every editable profile control, by path (in page order). Adding or removing a control means adding or removing it
+  // here; a failure names the paths that differ. frameGenPipelinedDeepHold is deliberately absent: it follows the
+  // Smoothness buffer and stays in the profile file only.
+  const PROFILE_FIELDS = [
+    'quadViews','gaze','quadTurbo','quadViewsLayerDirectory','foveaSource','quadFocusScale','pimaxPeripheral','pimaxHorizontalFov','pimaxVerticalFov',
+    'foveaWidth','foveaHeight','peripheralScale','quadEdgeBlend','quadRoundFocus','quadSharpening','quadSharpenTaper','quadPeripheryContrast','quadSaccadeLead','quadGazeStabilize',
+    'neuralRendering','neuralRuntimePath','foveatedDlss','neuralFocusArea','focusDlssPreset','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity',
+    'neuralStyle','keepOtherDxgi','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
+    'neuralTransferStrength','neuralPaperWhiteScale','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
+    'frameGen','frameGenFactor','frameGenDeepPipeline','frameGenHudSymbology','smoothCursor','nvidiaFlowScale','flowPreset','bidirectionalFlow','frameGenAsyncArm',
+    'showOverlay','diagnosticRecorder','diagnosticFrameRecords','fpsLimit','refreshFromHeadset','headsetRefreshHz','renderedFpsCap','disableDcsVSync',
+    'cpuBoost','boostDcsPriority','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVram','freeVramApps','freeVramReopen',
+    'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
+    'engineOptimizations','engineGBufferRecorder','engineModelAllocator','engineShaderTimeCache','engineTaskQueueClock','boostPrefetch','engineShadowRecorder',
+    'engineShadowInstancing','engineCostWeights','enginePartitionBoost','engineTextureDedupe','engineEffectBufferSkip','enginePlainCounter','engineFrameHeap',
+    'engineStateFilter','engineShadowCache','engineBeeps','engineDevMode','engineDevPayloadPath','engineDevIniPath','engineTimerRefreshUs','engineDiagnosticHooks',
+    'dcs','options','keepDcsLauncher',
+    'eyeDistance','eyeDistanceMm','pupilShift','pupilShiftEyeRadiusMm','pupilShiftVirtualImageM','peripheryStability','peripheryStabilityStrength','farDepth','farDepthPreset',
+    'depthBoost','ownAircraftTrueDepth','depthBoostMode','depthBoostRealisticMax','depthBoostFarStartM','depthBoostFarFullM','depthBoostMax','depthBoostNearM',
+    'colorMode','colorFixExposureEv','colorFixNightEv','colorFixSaturation','colorFixWarmth','colorFixAdaptBright','colorFixAdaptDark','colorEnhancedExposureEv',
+    'colorEnhancedNightEv','colorEnhancedSaturation','colorEnhancedWarmth','colorEnhancedAdaptBright','colorEnhancedAdaptDark','nightVision','nightVisionStrength',
+    'glare','glareStrength','nightVisionBlue','nightVisionBlur','nightVisionScotopic','nightVisionPhotopic','glareThresholdEv','glareRadius','glareStreak',
+    'gazeDof','gazeDofStrength','gazeDofMaxArcmin','gazeDofSaccadeRelease','gazeDofSettleMs','gazeDofFadeInMs','gazeDofToleranceD','gazeDofFoveaGuardDeg','gazeDofPupilMm',
+    'gVision','gVisionStrength','gVisionUseGaze','gVisionRedout','gVisionTolerance','gVisionMode',
+    'headsetPanel','diagnosticOverlayAtStart','diagnosticVram','diagnosticOverlayKey','engineToggleKey','neuralToggleKey','pupilShiftToggleKey','depthBoostToggleKey',
+    'farDepthToggleKey','colorModeKey','runtimeManifestPath'];
+  // Every folded disclosure (details.advanced), named by its id or the first setting inside it.
+  const ADVANCED_FOLDS = ['quadViewsLayerDirectory','neuralAdvanced','frameGenAsyncArm','showOverlay','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
+    'nightVisionBlue','gazeDofMaxArcmin','gVisionUseGaze','runtimeManifestPath'];
+  /** " (missing: …; extra: …)" between an expected list and the actual one; '' when they hold the same names once each. */
+  const listDiff = (expected,actual) => { const missing = expected.filter(x => !actual.includes(x)), extra = actual.filter(x => !expected.includes(x)), twice = actual.filter((x,i) => actual.indexOf(x) !== i);
+    return missing.length || extra.length || twice.length || expected.length !== actual.length ? ` (missing: ${missing.join(', ') || 'none'}; extra: ${extra.join(', ') || 'none'}${twice.length ? '; twice: '+twice.join(', ') : ''})` : ''; };
   function edit(path,value) { const f = ui.fields.find(x => x.path === path); if(f.type === 'toggle') f.input.checked = value; else f.input.value = value; f.input.dispatchEvent(new Event(f.type === 'toggle' || f.type === 'select' || f.type === 'hotkey' ? 'change' : 'input',{bubbles:true})); }
   // A key pressed while a capture field records: the page listens on window in the capture phase.
   const press = (keyCode,mods = '') => window.dispatchEvent(new KeyboardEvent('keydown',{keyCode,ctrlKey:mods.includes('c'),altKey:mods.includes('a'),shiftKey:mods.includes('s'),metaKey:mods.includes('w'),bubbles:true,cancelable:true}));
@@ -45,9 +77,12 @@ window.runWebSmoke = async function() {
       check('Check now finds the update again with the check back on',ui.updates.enabled && !$('updateBanner').hidden && $('updateAuto').checked);
       $('updateHide').click(); check('The banner can be hidden until the next start',$('updateBanner').hidden && !$('railUpdate').hidden); }
     check('One primary action: Launch DCS, with Review files, Apply without launching and Back to stock DCS as links',!$('preview') && !$('heroChips') && $('launch').classList.contains('launch') && $('reviewPlan').classList.contains('link-button') && $('apply').classList.contains('link-button') && $('apply').textContent === 'Apply without launching' && $('openRecovery').classList.contains('link-button') && !document.querySelector('.workflow').textContent.match(/Preview|Apply profile/));
-    check('All editable profile controls available',ui.fields.length === 162 && document.querySelectorAll('#routeSwitch [data-route]').length === 3);
+    { const diff = listDiff(PROFILE_FIELDS,ui.fields.map(f => f.path));
+      check('All editable profile controls available'+diff,!diff && document.querySelectorAll('#routeSwitch [data-route]').length === 3); }
     check('Quality presets, self-reported limiters and the unused Sboys folder are gone',!$('tuningPreset') && !$('undoTune') && !$('tuningDialog') && !$('budgets') && !['externalLimiter','externalLimiterFps','runtimeReprojection','sboysDriverDirectory'].some(p => ui.fields.some(f => f.path === p)));
-    check('Rarely changed settings start folded away',[...document.querySelectorAll('details.advanced')].length === 10 && [...document.querySelectorAll('details.advanced')].every(d => !d.open) && $('setting-quadViewsLayerDirectory').closest('details') && $('setting-runtimeManifestPath').closest('details') && $('setting-neuralLocalTone').closest('details') && $('setting-diagnosticRecorder').closest('details') && $('setting-engineTimerRefreshUs').closest('details') && $('setting-colorFixSaturation').closest('details') && $('setting-gazeDofSettleMs').closest('details') && !$('setting-colorMode').closest('details'));
+    const folds = [...document.querySelectorAll('details.advanced')], foldDiff = listDiff(ADVANCED_FOLDS,folds.map(d => d.id || d.querySelector('.setting')?.id.replace('setting-','') || '(empty fold)'));
+    check('Background preparation and per-frame records sit in the Framegen folds; the deep hold has no control',$('setting-frameGenAsyncArm').closest('details') && $('setting-diagnosticFrameRecords').closest('details') && !$('setting-frameGenPipelinedDeepHold') && ui.fields.find(f => f.path === 'frameGenAsyncArm').page === 'framegen' && ui.fields.find(f => f.path === 'diagnosticFrameRecords').page === 'framegen');
+    check('Rarely changed settings start folded away'+foldDiff,!foldDiff && folds.every(d => !d.open) &&$('setting-quadViewsLayerDirectory').closest('details') && $('setting-runtimeManifestPath').closest('details') && $('setting-neuralLocalTone').closest('details') && $('setting-diagnosticRecorder').closest('details') && $('setting-engineTimerRefreshUs').closest('details') && $('setting-colorFixSaturation').closest('details') && $('setting-gazeDofSettleMs').closest('details') && !$('setting-colorMode').closest('details'));
     // Pimax Play's page exactly as Pimax Play shows it (labels, order, rounding), from the fixture's Quick 33 % or Fine 33/10 · 33/33.
     const fineFixture = window.offlineFixture.pimaxMode === 'Fine', pimaxShows = () => ui.state.pimax.controls.map(x => x.label+' '+x.value).join(', ');
     const expectedControls = fineFixture

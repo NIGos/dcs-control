@@ -1,0 +1,6 @@
+# Allowed hits of scripts/check-personal-data.ps1: "<pattern name> <path glob>" per line ("*" = every pattern).
+# The checker and this list name the patterns themselves.
+* scripts/check-personal-data.ps1
+* scripts/personal-data-allow.txt
+
+

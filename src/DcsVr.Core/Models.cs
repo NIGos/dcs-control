@@ -20,12 +20,6 @@ public enum IssueSeverity { Info, Warning, Error }
 /// still works and the headset's pixels no longer resolve it. Enhanced: more depth from 3 m, the maximum from 50 m;
 /// not realistic (distant objects look nearer and the world smaller).</summary>
 public enum DepthBoostMode { Realistic, Enhanced }
-/// <summary>How Depth boost changes the eye distance when the eyes move between the cockpit and outside
-/// (docs/FIXATION_DEPTH.md, "Predictive transition"). Gradual: at the slow rates, confirmed after the eyes land.
-/// Predictive: during a long eye jump, the landing point is predicted from the eyes' speed (Pimax eye tracking, read
-/// about 500 times a second) and part of the change is made while the eyes are still moving; the rest follows the
-/// gradual rates. Falls back to Gradual without Pimax's per-eye gaze.</summary>
-public enum DepthBoostTransition { Gradual, Predictive }
 /// <summary>Far depth's strength (docs/FAR_DEPTH.md): how much depth is added to distant scenery.</summary>
 public enum FarDepthPreset { Subtle, Default, Strong }
 /// <summary>The eye distance DCS renders with: the headset's own (measured or set in Pimax Play / SteamVR), DCS's custom
@@ -72,10 +66,10 @@ public sealed record VrProfile
     public bool FrameGenDeepPipeline { get; init; } = true;
     /// <summary>OFXR pipelined_deep_hold (fork patch 0050): with the smoothness buffer, DCS's split-thread presenter also
     /// gets the held slot, so a DCS frame up to about a refresh late is absorbed (R92 live: late first synthetics 32/min
-    /// without it, about 2/min with it). On with the smoothness buffer, whose ~11 ms it costs; profile file only.</summary>
+    /// without it, about 2/min with it). On with the smoothness buffer, whose ~11 ms it costs; profile file only (no control: it follows the Smoothness buffer).</summary>
     public bool FrameGenPipelinedDeepHold { get; init; } = true;
     /// <summary>OFXR async_arm (fork patch 0050): frame generation for a new swapchain (leaving the F10 map) is prepared on
-    /// a worker thread; frames pass through meanwhile. Profile file only, off until flown.</summary>
+    /// a worker thread; frames pass through meanwhile. Off until flown; "Prepare in the background" in the Framegen page's Advanced fold.</summary>
     public bool FrameGenAsyncArm { get; init; }
     /// <summary>HUD symbology for frame generation (engine module R95, OFXR fork patch 0049): the HUD and helmet symbols
     /// are taken out of the real frames, the generated frames are made from the world alone and the symbols put back, so
@@ -174,7 +168,7 @@ public sealed record VrProfile
     public NvidiaFlowPreset FlowPreset { get; init; } = NvidiaFlowPreset.Medium;
     public bool BidirectionalFlow { get; init; }
     public bool DiagnosticRecorder { get; init; } = true;
-    /// <summary>OFXR's per-frame records (frame_records, fork patch 0048) for hitch analysis; profile file only, off by
+    /// <summary>OFXR's per-frame records (frame_records, fork patch 0048) for hitch analysis; "Per-frame records" in Frame generation diagnostics (Framegen page), off by
     /// default. On, the flight log holds 1 GB before it rotates.</summary>
     public bool DiagnosticFrameRecords { get; init; }
     /// <summary>OFXR's always-on FPS counter; the diagnostic panel (its own key) shows FPS on demand.</summary>
@@ -382,11 +376,6 @@ public sealed record VrProfile
     public double DepthBoostNearM { get; init; } = 1.5;
     /// <summary>Turns Depth boost off and on in flight ([DepthBoost] Toggle; the panel names it).</summary>
     public string DepthBoostToggleKey { get; init; } = NeuralHotkeys.DepthBoostDefault;
-    /// <summary>Gradual (default) or Predictive ([DepthBoost] Transition).</summary>
-    public DepthBoostTransition DepthBoostTransition { get; init; } = DepthBoostTransition.Gradual;
-    /// <summary>Switches between Gradual and Predictive in flight, to compare ([DepthBoost] TransitionToggle): one beep
-    /// gradual, two beeps predictive.</summary>
-    public string DepthBoostTransitionKey { get; init; } = NeuralHotkeys.DepthTransitionDefault;
     public const double DepthBoostMaxMin = 1, DepthBoostMaxMax = 2, DepthBoostNearMin = 0.5, DepthBoostNearMax = 5;
     public const double DepthBoostRealisticMaxMax = 1.5, DepthBoostFarStartMin = 50, DepthBoostFarStartMax = 1000, DepthBoostFarFullMax = 3000;
     /// <summary>Enhanced's fixed curve: normal depth at 3 m, the full strength from 50 m.</summary>
@@ -546,15 +535,12 @@ public sealed record DriverFact(string Name, string Directory, bool LibraryExist
 public sealed record InventorySnapshot
 {
     public DateTimeOffset CapturedAt { get; init; } = DateTimeOffset.UtcNow;
-    public string? DcsDirectory { get; init; }
     public string? DcsExecutable { get; init; }
     public string? OptionsPath { get; init; }
     public string? ActiveRuntime { get; init; }
     public string? PimaxRuntime { get; init; }
     public string? SteamVrRuntime { get; init; }
     public string? PimaxVersion { get; init; }
-    public string? SboysDirectory { get; init; }
-    public string? SboysConfigPath { get; init; }
     public bool DcsRunning { get; init; }
     public TrackingKind Tracking { get; init; }
     public IReadOnlyList<FileFact> Files { get; init; } = [];
@@ -590,9 +576,10 @@ public static class JsonData
 
     /// <summary>Settings earlier versions saved and this one no longer has: the self-reported limiter, its FPS and the
     /// runtime motion smoothing (preflight lists them as checks you do yourself), the experimental consent and the Sboys
-    /// driver folder (the registered driver is used). Dropped when a profile loads, in any casing.</summary>
+    /// driver folder (the registered driver is used), and Depth boost's transition choice and its key (the dual camera
+    /// only moves the depth gradually). Dropped when a profile loads, in any casing.</summary>
     private static readonly HashSet<string> ObsoleteProfileKeys = new(["externalLimiter", "externalLimiterFps", "runtimeReprojection",
-        "experimentalAcknowledged", "sboysDriverDirectory"], StringComparer.OrdinalIgnoreCase);
+        "experimentalAcknowledged", "sboysDriverDirectory", "depthBoostTransition", "depthBoostTransitionKey"], StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Reads a profile with the plain options, without the <see cref="ObsoleteProfileKeys"/> (unknown keys are
     /// refused), then marks a profile saved without "foveaSource" (written before the setting existed) as using its own

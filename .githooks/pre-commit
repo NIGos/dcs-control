@@ -1,0 +1,4 @@
+#!/bin/sh
+# Refuses a commit whose staged files hold personal data (scripts/check-personal-data.ps1).
+# Enable once per clone: git config core.hooksPath .githooks
+exec pwsh -NoProfile -ExecutionPolicy Bypass -File "$(git rev-parse --show-toplevel)/scripts/check-personal-data.ps1"

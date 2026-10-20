@@ -291,12 +291,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             && !PimaxFovea.SameFovea(resolved.Profile, applied.Fovea ?? AppliedFovea.From(applied.Profile, null))
             ? $"Pimax Play changed: focus will be updated to {pimax.Play.Short} at launch." : null;
     /// <summary>A running DCS.exe; the offline verification host reports none.</summary>
-    private bool DcsRunning()
-    {
-        if (offline) return false;
-        var running = Process.GetProcessesByName("DCS");
-        try { return running.Length > 0; } finally { foreach (var process in running) process.Dispose(); }
-    }
+    private bool DcsRunning() => !offline && DcsProcess.AnyRunning();
     private readonly Lock _boostCacheLock = new();
     private (DateTime At, string Key, object Reply)? _boostCache;
     /// <summary>"What Boost will do" is read-only and slow (it inspects running processes and the DCS log), so it is
