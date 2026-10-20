@@ -167,6 +167,9 @@ function renderPage() {
   if (page === 'guide') renderGuide();
 }
 // ---- Features: what the checklist turns on, and what follows from it -------------------------------------------
+// The <uses-rules> regions are pure twins of C# rules (VrProfile.Uses*, ProfileValidation.ResolveFeatures); the C# tests
+// run them in Node over a table of profiles and compare ("UI rules match C#"). Keep them free of DOM and app state.
+// <uses-rules>
 /** Foveated Super Resolution runs only in stereo: with Quad Views it would redo DCS's DLSS of the focus views instead of
  *  DLSS 5 building on it, so Quad Views turns it off (resolveFeatures) and hides it. */
 const foveatedSr = p => Boolean(p.foveatedDlss) && p.quadViews === 'None';
@@ -189,6 +192,7 @@ function resolveFeatures(p) {
   p.quadFocusAdapter = Boolean(cheeky && p.quadViews === 'QuadViewsFoveated');
   return p;
 }
+// </uses-rules>
 function setFeature(p, key, on) {
   if (key === 'quad') p.quadViews = on ? (p.quadViews !== 'None' ? p.quadViews : lastProvider) : 'None';
   // Checking it turns DLSS 5 on unless Foveated Super Resolution already runs; unchecking turns both off.
@@ -380,6 +384,7 @@ function field(panel,path,title,description,type,values,condition,unit='',hide=n
 }
 // ---- In-flight keys: recorded from the keyboard as "virtual-key:modifiers" (Ctrl 1, Alt 2, Shift 4) -----------------
 // Profiles of earlier versions hold one of the labels the old menu offered; they keep working (NeuralHotkeys.cs).
+// <uses-rules>
 const LEGACY_KEYS = {'Off':[0,0],'Ctrl+Shift+F12':[123,5],'Alt+Shift+F12':[123,6],'Ctrl+Alt+Shift+F10':[121,7],'Ctrl+Alt+Shift+F12':[123,7],'Ctrl+Alt+Shift+Home':[36,7],'Ctrl+Alt+Shift+End':[35,7],'Ctrl+Alt+Shift+Insert':[45,7]};
 const KEY_NAMES = {8:'Backspace',9:'Tab',13:'Enter',19:'Pause',20:'Caps Lock',27:'Esc',32:'Space',33:'Page Up',34:'Page Down',35:'End',36:'Home',37:'Left',38:'Up',39:'Right',40:'Down',44:'Print Screen',45:'Insert',46:'Delete',106:'Num *',107:'Num +',109:'Num -',110:'Num .',111:'Num /',144:'Num Lock',145:'Scroll Lock',186:';',187:'=',188:',',189:'-',190:'.',191:'/',192:'`',219:'[',220:'\\',221:']',222:"'",226:'\\ (102nd key)'};
 function parseKey(value) {
@@ -388,6 +393,7 @@ function parseKey(value) {
   const m = /^(\d{1,3}):([0-7])$/.exec(String(value).trim()); if (!m) return null;
   const vk = Number(m[1]), mods = Number(m[2]); return vk <= 254 && (vk || !mods) ? [vk,mods] : null;
 }
+// </uses-rules>
 const keyName = vk => vk >= 0x70 && vk <= 0x87 ? 'F'+(vk-0x6F) : (vk >= 48 && vk <= 57) || (vk >= 65 && vk <= 90) ? String.fromCharCode(vk) : vk >= 96 && vk <= 105 ? 'Num '+(vk-96) : KEY_NAMES[vk] || 'Key '+vk;
 const modifierNames = mods => [mods & 1 ? 'Ctrl' : null, mods & 2 ? 'Alt' : null, mods & 4 ? 'Shift' : null].filter(Boolean);
 const keyLabel = k => !k || !k[0] ? 'Off' : [...modifierNames(k[1]), keyName(k[0])].join('+');
@@ -460,7 +466,10 @@ function captureHotkey(f) {
   });
   button.addEventListener('blur',() => { if (button.classList.contains('capturing')) stop(); });
 }
-const nr = p => p.neuralRendering, flow = p => p.frameGen === 'Nvidia', quad = p => p.quadViews === 'QuadViewsFoveated' && !p.quadViewsLayerDirectory;
+// <uses-rules>
+/** quad: the bundled Quad Views (VrProfile.UsesBundledQuadViews); a blank layer folder is no folder. */
+const nr = p => p.neuralRendering, flow = p => p.frameGen === 'Nvidia', quad = p => p.quadViews === 'QuadViewsFoveated' && !String(p.quadViewsLayerDirectory ?? '').trim();
+// </uses-rules>
 const coverageOwned = p => quad(p) || stereoCheeky(p);
 const boost = p => p.cpuBoost;
 // Monitor modes as "1920x1080@60" in the select; the profile keeps width, height and refresh.
@@ -552,9 +561,14 @@ function buildFields() {
   field(c,'nvidiaFlowScale','Optical flow resolution','The resolution motion is estimated at. Higher costs more GPU.','select',[[50,'50% · default'],[75,'75%'],[100,'100% · full']],flow);
   field(c,'flowPreset','Optical flow quality','How carefully motion is estimated. Slower is more careful and costs more GPU.','select',[['Fast','Fast'],['Medium','Medium · default'],['Slow','Slow · most analysis']],flow);
   field(c,'bidirectionalFlow','Bidirectional flow','Estimates motion forwards and backwards. Costs more GPU.','toggle',null,flow);
+  // frameGenPipelinedDeepHold has no control: it follows the Smoothness buffer (on with it, off without it) and stays in
+  // the profile file only (ConfigurationWriters.Ofxr writes pipelined_deep_hold only with frameGenDeepPipeline).
+  more = disclosure(c,'Advanced','Keep the defaults unless you are troubleshooting.');
+  field(more,'frameGenAsyncArm','Prepare in the background','When a new view starts (leaving the F10 map), frame generation gets ready on another thread; frames pass through meanwhile.','toggle',null,p => p.frameGen !== 'Off');
   more = disclosure(c,'Frame generation diagnostics','OFXR\'s FPS counter and log. The in-headset panel is on the OSD page.');
   field(more,'showOverlay','OFXR FPS counter','OFXR\'s own FPS counter, always visible. The in-headset panel (OSD page) also shows FPS and can be hidden in flight.','toggle',null,p => p.frameGen !== 'Off');
   field(more,'diagnosticRecorder','OFXR log','Writes OFXR\'s log while you fly, for troubleshooting.','toggle',null,p => p.frameGen !== 'Off');
+  field(more,'diagnosticFrameRecords','Per-frame records','Adds a line for every frame to the OFXR log, to find stutters. The log grows to 1 GB before it starts over.','toggle',null,p => p.frameGen !== 'Off' && p.diagnosticRecorder);
   c = card('pacingControls','DCS frame limit','Set in DCS\'s own settings at launch. Back to stock DCS puts your values back.');
   field(c,'fpsLimit','Frame limit','Match refresh: DCS renders exactly the frames the headset needs (half or a third with frame generation), so none are wasted.','select',[['Preserve','Keep the current DCS limit'],['MatchRefresh','Match refresh (recommended)'],['RuntimeHeadroom','Very high (300 FPS)'],['Custom','Custom limit']]);
   field(c,'refreshFromHeadset','Read the refresh rate from the headset','Pimax Play: the rate the headset runs at now, or ran at in its last session. Sboys: SteamVR\'s refresh rate. Off: set it below.','toggle');
@@ -835,6 +849,7 @@ async function engineAction(action, data) {
   catch (error) { showError(error); }
 }
 // ---- Pupil shift -------------------------------------------------------------------------------------------------
+// <uses-rules>
 /** The layer is installed only for a VR flight with eye-tracked Quad Views (VrProfile.UsesPupilShift, UsesDepthBoost,
  *  UsesPerceptionLayer: it carries both). */
 const eyeTrackedVr = p => Boolean(!p.desktop && p.quadViews !== 'None' && p.gaze === 'EyeTracked');
@@ -842,9 +857,8 @@ const usesPupilShift = p => Boolean(p.pupilShift && eyeTrackedVr(p));
 const usesDepthBoost = p => Boolean(p.depthBoost && eyeTrackedVr(p));
 /** The strength of the selected Depth boost mode (VrProfile.DepthBoostActiveMax). */
 const depthMax = p => p.depthBoostMode === 'Enhanced' ? p.depthBoostMax : p.depthBoostRealisticMax;
-/** The strength the layer actually reaches with an eye distance of mm: capped so the eye distance can always come back
- *  within RecoverMs (800 ms) at DownMmPerS (40 mm/s), i.e. 1 + 32 mm / eye distance (pupil_math.hpp depth_boost_cap). */
-// With the dual camera the world's eye distance is capped only by the strength (the cockpit keeps the real one).
+/** The strength the layer reaches with an eye distance of mm (1 when it is unknown): with the dual camera the world's
+ *  eye distance is limited only by the selected strength, the cockpit keeps the real one. */
 const depthMaxAt = (p, mm) => mm > 1 ? depthMax(p) : 1;
 const usesPerceptionLayer = p => usesPupilShift(p) || usesDepthBoost(p) || usesGazePublish(p);
 // ---- Visual realism (VrProfile.UsesColorMode, UsesGazeDof, UsesGVision, UsesVisualRealism) ---------------------------
@@ -859,6 +873,7 @@ const gVisionOn = p => Boolean(!p.desktop && p.gVision);
 const usesVisualRealism = p => colorOn(p) || usesGazeDof(p) || gVisionOn(p);
 /** The layer publishes the gaze for the engine module (VrProfile.UsesGazePublish): eye-focus blur, G vision following the eyes. */
 const usesGazePublish = p => usesGazeDof(p) || Boolean(gVisionOn(p) && p.gVisionUseGaze && eyeTrackedVr(p));
+// </uses-rules>
 /** What the profile still needs for a gaze, with a link to the setting that gives it. */
 function renderPupilNeeds() {
   const ipd = $('pupilIpd');

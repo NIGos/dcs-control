@@ -12,7 +12,7 @@ The 0.2 preview implements an experimental three-way integration using a local C
 | CPU / memory | AMD Ryzen 7 9800X3D / 64 GiB |
 | GPU driver | Windows version 32.0.16.1714 |
 | DCS | Steam Edition, executable 2.9.30.28536 |
-| DCS directory | `E:\SteamLibrary\steamapps\common\DCSWorld` |
+| DCS directory | `<SteamLibrary>\steamapps\common\DCSWorld` |
 | Native DLSS DLL | 310.2.1.0 in `bin` and `bin-mt` |
 | Active OpenXR runtime | Pimax `PiOpenXR_64.json` |
 | Installed Pimax software | PimaxEVO 1.0.1.103 |

@@ -7,6 +7,9 @@ param([string]$OpenXrInclude)
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $wrapper = Join-Path $PSScriptRoot 'msvc.cmd'
+# The shared-memory contract headers this layer shares with the DCS engine module must match (the OFXR copies are
+# checked by the OFXR build).
+& (Join-Path $PSScriptRoot 'check-contracts.ps1') -Only 'native/'
 $build = Join-Path $workspaceRoot 'artifacts/native/pupil-shift'
 $configure = @('-S', (Join-Path $workspaceRoot 'native/pupil_shift'), '-B', $build, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release')
 if ($OpenXrInclude) { $configure += "-DOPENXR_INCLUDE=$($OpenXrInclude -replace '\\', '/')" }

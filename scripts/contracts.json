@@ -1,0 +1,53 @@
+{
+  "comment": "Shared-memory contract headers between DCS Control's components and the DcsQvCull engine module. Each header has one canonical copy; every copy must be byte-identical to it once CR and a UTF-8 BOM are removed. sha256 is that normalised content's hash. scripts/check-contracts.ps1 checks this; -Update rewrites the hashes from the canonical copies (only after both sides agreed the change).",
+  "contracts": [
+    {
+      "name": "dcsvr_perception_shm.h",
+      "canonical": "native/dcsqvcull/src/dcsvr_perception_shm.h",
+      "copies": [
+        "native/pupil_shift/perception_shm.h"
+      ],
+      "sha256": "DAB2C2C33F89961EF6CB5C59B6747FB366B8417CEA81B3717D8B4F5F3E180C6B"
+    },
+    {
+      "name": "dcsvr_cockpit_mask.h",
+      "canonical": "native/dcsqvcull/src/dcsvr_cockpit_mask.h",
+      "copies": [
+        "external/ofxr-djules75/include/xrfg/dcsvr_cockpit_mask.h"
+      ],
+      "sha256": "2555CFE0F8ECF6F646612B9687EAB10CCBF36E185FAB24CCF515DDC210BA8ACA"
+    },
+    {
+      "name": "dcsvr_cockpit_depth.h",
+      "canonical": "native/dcsqvcull/src/dcsvr_cockpit_depth.h",
+      "copies": [
+        "external/ofxr-djules75/include/xrfg/dcsvr_cockpit_depth.h"
+      ],
+      "sha256": "AE0E99EAF06F8239F7D53B63E772D064202537D11F37B45F9CFB1B43D403C22B"
+    },
+    {
+      "name": "dcsvr_motion.h",
+      "canonical": "native/dcsqvcull/src/dcsvr_motion.h",
+      "copies": [
+        "external/ofxr-djules75/include/xrfg/dcsvr_motion.h"
+      ],
+      "sha256": "91E8CE6625EFCF5FC97D22A9E69D177BA919AFB683513DDE98F77D7C259B8A6F"
+    },
+    {
+      "name": "dcsvr_symbology.h",
+      "canonical": "native/dcsqvcull/src/dcsvr_symbology.h",
+      "copies": [
+        "external/ofxr-djules75/include/xrfg/dcsvr_symbology.h"
+      ],
+      "sha256": "AAF6A4F7F9AFDE0DE9C28F5926E015F66412CEA21F01548EC8A1C71640F26C03"
+    },
+    {
+      "name": "dcsvr_pupil_fov.h",
+      "canonical": "native/pupil_shift/dcsvr_pupil_fov.h",
+      "copies": [
+        "native/dcsqvcull/src/dcsvr_pupil_fov.h"
+      ],
+      "sha256": "94C1E58CBA5ABE9D720A35A02BFC4B75BEAAD964BFC23CCA56A5A989625CCA3B"
+    }
+  ]
+}

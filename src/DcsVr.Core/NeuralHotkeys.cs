@@ -29,9 +29,6 @@ public static class NeuralHotkeys
     /// <summary>Depth boost's in-flight switch: Alt+Shift+F10, free in DCS's default bindings (not in
     /// <see cref="DcsDefaultCodes"/>) and outside the engine optimizations' Ctrl+Alt keys.</summary>
     public const string DepthBoostDefault = "121:6";
-    /// <summary>Depth boost's transition switch (gradual / predictive): Alt+Shift+F9, free in DCS's default bindings (not
-    /// in <see cref="DcsDefaultCodes"/>) and outside the engine optimizations' Ctrl+Alt keys.</summary>
-    public const string DepthTransitionDefault = "120:6";
     /// <summary>Far depth's in-flight switch: Alt+Shift+F8.</summary>
     public const string FarDepthDefault = "119:6";
     /// <summary>The color mode hotkey of the engine module ([Color] ModeKey): off unless chosen.</summary>

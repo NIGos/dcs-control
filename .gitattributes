@@ -4,3 +4,4 @@ patches/** text eol=lf
 scripts/*.py text eol=lf
 *.png binary
 *.ico binary
+.githooks/* text eol=lf

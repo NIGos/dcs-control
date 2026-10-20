@@ -83,8 +83,6 @@ public sealed class WindowsInventory
         var steamDirectory = installed.FirstOrDefault(p => p.Name.Equals("SteamVR", StringComparison.OrdinalIgnoreCase)).Directory;
         steamDirectory ??= libraries.Select(p => Path.Combine(p, "steamapps/common/SteamVR")).FirstOrDefault(p => File.Exists(Path.Combine(p, "steamxr_win64.json")));
         var steamManifest = steamDirectory is not null ? Path.Combine(steamDirectory, "steamxr_win64.json") : null;
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        var sboysConfig = Path.Combine(appData, "CustomHeadset/settings.json");
         var files = new List<FileFact>();
         if (executable is not null)
         {
@@ -126,16 +124,14 @@ public sealed class WindowsInventory
         var pimax = installed.FirstOrDefault(p => p.Name.Contains("Pimax", StringComparison.OrdinalIgnoreCase));
         var layers = ReadLayers(observations);
         var drivers = ReadDrivers(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "openvr/openvrpaths.vrpath"), steamDirectory, observations);
-        var running = Process.GetProcessesByName("DCS");
-        var dcsRunning = running.Length > 0;
-        foreach (var process in running) process.Dispose();
+        var dcsRunning = DcsProcess.AnyRunning();
         return new()
         {
-            DcsDirectory = dcsDirectory, DcsExecutable = executable, OptionsPath = options,
+            DcsExecutable = executable, OptionsPath = options,
             ActiveRuntime = activeRuntime, PimaxRuntime = File.Exists(pimaxManifest) ? pimaxManifest : null,
             SteamVrRuntime = steamManifest is not null && File.Exists(steamManifest) ? steamManifest : null,
-            PimaxVersion = pimax.Version, SboysConfigPath = File.Exists(sboysConfig) ? sboysConfig : null,
-            SboysDirectory = drivers.FirstOrDefault(d => d.Name.Contains("customheadset", StringComparison.OrdinalIgnoreCase))?.Directory, DcsRunning = dcsRunning,
+            PimaxVersion = pimax.Version,
+            DcsRunning = dcsRunning,
             Files = files, Layers = layers, Drivers = drivers, DcsSettings = settings, Observations = observations,
             AutoexecPath = autoexecPath, AutoexecMaxFps = autoexecFps, AutoexecPacingUnknown = autoexecUnknown, AutoexecHudAfterDlss = autoexecPath is null ? null : hudAfterDlss,LimiterProcesses = limiterProcesses
         };

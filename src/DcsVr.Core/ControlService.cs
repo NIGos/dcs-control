@@ -294,23 +294,19 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// read, any DCS blocks.</summary>
     public static void EnsureDcsClosed(IEnumerable<string>? paths = null, string? managedRoot = null)
     {
-        var running = Process.GetProcessesByName("DCS");
-        try
+        var running = DcsProcess.Running();
+        if (running.Count == 0) return;
+        var targets = paths?.Where(p => !string.IsNullOrEmpty(p)).Select(SystemPaths.Canonical).ToArray();
+        var savedGames = SystemPaths.SavedGamesCandidates();
+        var managed = managedRoot ?? Path.Combine(DefaultStateRoot, "managed");
+        foreach (var dcs in running)
         {
-            if (running.Length == 0) return;
-            var targets = paths?.Where(p => !string.IsNullOrEmpty(p)).Select(SystemPaths.Canonical).ToArray();
-            var savedGames = SystemPaths.SavedGamesCandidates();
-            var managed = managedRoot ?? Path.Combine(DefaultStateRoot, "managed");
-            foreach (var process in running)
-            {
-                string? root = null;
-                try { if (SystemPaths.ProcessImagePath(process.Id) is { } image) root = Path.GetDirectoryName(Path.GetDirectoryName(SystemPaths.Canonical(image))); }
-                catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or ArgumentException) { }
-                if (targets is null || root is null || targets.Any(t => UsedByRunningDcs(t, root, savedGames, managed)))
-                    throw new InvalidOperationException("Close DCS before applying or restoring the profile.");
-            }
+            string? root = null;
+            try { if (dcs.ImagePath is { } image) root = Path.GetDirectoryName(Path.GetDirectoryName(SystemPaths.Canonical(image))); }
+            catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or ArgumentException or IOException) { }
+            if (targets is null || root is null || targets.Any(t => UsedByRunningDcs(t, root, savedGames, managed)))
+                throw new InvalidOperationException("Close DCS before applying or restoring the profile.");
         }
-        finally { foreach (var process in running) process.Dispose(); }
     }
 
     /// <summary>True when <paramref name="target"/> may be in use by a DCS installed at <paramref name="dcsRoot"/>: inside

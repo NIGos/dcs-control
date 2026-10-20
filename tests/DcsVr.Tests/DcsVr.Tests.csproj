@@ -1,4 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework></PropertyGroup>
   <ItemGroup><ProjectReference Include="../../src/DcsVr.Core/DcsVr.Core.csproj" /></ItemGroup>
+  <!-- The CLI builds with the tests (same configuration) so the CLI parity test always runs a fresh DcsVr.Cli.exe; its
+       path is recorded in the test assembly (AssemblyMetadata "DcsVrCliPath"). -->
+  <ItemGroup><ProjectReference Include="../../src/DcsVr.Cli/DcsVr.Cli.csproj" ReferenceOutputAssembly="false" /></ItemGroup>
+  <Target Name="RecordCliPath" BeforeTargets="GetAssemblyAttributes">
+    <MSBuild Projects="../../src/DcsVr.Cli/DcsVr.Cli.csproj" Targets="GetTargetPath">
+      <Output TaskParameter="TargetOutputs" PropertyName="DcsVrCliDll" />
+    </MSBuild>
+    <ItemGroup><AssemblyMetadata Include="DcsVrCliPath" Value="$([System.IO.Path]::ChangeExtension('$(DcsVrCliDll)', '.exe'))" /></ItemGroup>
+  </Target>
 </Project>

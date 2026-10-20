@@ -1,16 +1,46 @@
-"""Apply the opt-in DCS focus-pair adaptation to the pinned Cheeky checkout."""
+"""Apply the opt-in DCS focus-pair adaptation to the pinned Cheeky checkout.
+
+Reset-then-apply, like the OFXR fork's patches: the patches only ever see a pristine tree at the pinned revision. A
+marker in the checkout's git folder records the hash of this script and patches/cheeky; while it matches, the tree is
+already patched and nothing runs. Otherwise every tracked file is restored, untracked files are removed (ignored build
+output stays), and the whole adaptation is applied again. Nothing is ever fetched.
+"""
 from pathlib import Path
+import hashlib
 import re
 import shutil
+import subprocess
 
 root = Path(__file__).resolve().parent.parent
 source = root / 'external/cheeky'
+pinned_revision = 'd6c18b2'
+
+def git(*arguments):
+    return subprocess.run(['git', '-C', str(source), *arguments], check=True, capture_output=True, text=True).stdout.strip()
+
+def patch_hash():
+    digest = hashlib.sha256(Path(__file__).resolve().read_bytes())
+    patches = root / 'patches/cheeky'
+    for path in sorted(p for p in patches.rglob('*') if p.is_file()):
+        digest.update(b'\0' + path.relative_to(patches).as_posix().encode('utf-8') + b'\0' + path.read_bytes())
+    return digest.hexdigest()
+
+if not git('rev-parse', 'HEAD').startswith(pinned_revision):
+    raise RuntimeError(f'external/cheeky is not at the pinned revision {pinned_revision}; check it out first (never fetched here)')
+marker = source / git('rev-parse', '--git-dir') / 'dcs-control-patches'  # an absolute git dir replaces source
+wanted = patch_hash()
+if marker.is_file() and marker.read_text(encoding='ascii').strip() == wanted:
+    print('Cheeky patches unchanged since they were applied; skipped.')
+    raise SystemExit(0)
+# A failed apply leaves no marker, so the next run resets again.
+marker.unlink(missing_ok=True)
+git('checkout', '--', '.')
+git('clean', '-fdq')
 
 def replace(relative, before, after, count=1):
+    """Replaces exactly `count` anchors; a pristine tree is the only valid input."""
     path = source / relative
     value = path.read_text(encoding='utf-8')
-    if after in value:
-        return
     actual = value.count(before)
     if actual != count:
         raise RuntimeError(f'{relative}: expected {count} anchors, found {actual}')
@@ -63,9 +93,9 @@ replace('openxr_layer/openxr_layer.cpp', '    if (XR_FAILED(result) || locate_in
     if (XR_FAILED(result) || locate_info == nullptr || count == nullptr ||
         views == nullptr || capacity < expected_views || *count != expected_views) {''')
 replace('openxr_layer/openxr_layer.cpp', '    // App views may be head-relative.', '    const auto* focus_views = views + (quad_focus ? 2U : 0U);\n\n    // App views may be head-relative.')
-# Repair the initial local pointer spelling as well as pristine checkouts.
+# The focus pair's views: every views[ inside this function reads focus_views[ (\bviews never matches focus_views).
 path = source / 'openxr_layer/openxr_layer.cpp'
-text = path.read_text(encoding='utf-8').replace('    if (quad_focus) views += 2; // Read the focus pair; never alter the application array.\n\n', '')
+text = path.read_text(encoding='utf-8')
 start = text.index('    const auto* focus_views = views + (quad_focus ? 2U : 0U);')
 # Rewrite only this function (it ends at the first column-0 brace), never later functions.
 end = text.index('\n}\n', start)
@@ -110,9 +140,8 @@ for name in ['evaluate_d3d11_impl', 'evaluate_d3d11_c_impl']:
     text = path.read_text(encoding='utf-8')
     start = text.index('NgxResult ' + name + '(')
     anchor = text.index('    const auto settings = current_settings();', start)
-    if 'DCS quad focus: preserving' not in text[start:anchor]:
-        text = text[:anchor] + gate + text[anchor:]
-        path.write_text(text, encoding='utf-8', newline='\n')
+    text = text[:anchor] + gate + text[anchor:]
+    path.write_text(text, encoding='utf-8', newline='\n')
 replace('src/hooks.cpp', '    ID3D11Resource* dcs_output{};', '    bool dcs_reset_original{};\n    ID3D11Resource* dcs_output{};', count=2)
 replace('src/hooks.cpp', 'get_ui(parameters, "OutWidth"), get_ui(parameters, "OutHeight"))) {', 'get_ui(parameters, "OutWidth"), get_ui(parameters, "OutHeight"), dcs_reset_original)) {', count=2)
 replace('src/hooks.cpp', '        release_d3d11_transport_view(handle);\n        diagnostic_note_d3d11_execution_path(D3D11ExecutionPath::game_fallback);', '''        release_d3d11_transport_view(handle);
@@ -1328,18 +1357,7 @@ replace('src/d3d11_backend.cpp', '''    const bool views_ready = device != nullp
 # 1, 0, 0, 0. One load then gives the same bits as four.
 # DCS Control (2026-10-18): the test is uniform (the working size equals the
 # region), not per pixel: at other scales (0.75 by default) the decode then
-# costs what upstream's does (the per-pixel test cost +5 % there). Trees patched
-# with the per-pixel test are upgraded in place first.
-codec_path = source / 'src/nr_codec_shader.hpp'
-codec_text = codec_path.read_text(encoding='utf-8')
-for function, size in (('LoadSource0Bilinear', 'SourceSize'), ('LoadSource1Bilinear', 'RegionSize'), ('LoadSource2Bilinear', 'RegionSize')):
-    at = codec_text.find('float4 ' + function + '(')
-    legacy = '    [branch] if (any(fraction != float2(0.0, 0.0))) {'
-    end = codec_text.find('\n}\n', at)
-    if at >= 0 and legacy in codec_text[at:end]:
-        codec_text = codec_text[:at] + codec_text[at:end].replace(legacy, '    [branch] if (any(ProxySize != ' + size + ')) {') + codec_text[end:]
-if codec_text != codec_path.read_text(encoding='utf-8'):
-    codec_path.write_text(codec_text, encoding='utf-8', newline='\n')
+# costs what upstream's does (the per-pixel test cost +5 % there).
 replace('src/nr_codec_shader.hpp', '''    return lerp(
         lerp(Source0.Load(int3(p00, 0)), Source0.Load(int3(p10, 0)), fraction.x),
         lerp(Source0.Load(int3(p01, 0)), Source0.Load(int3(p11, 0)), fraction.x),
@@ -1772,4 +1790,5 @@ if subprocess.run(shader_generator + ['--check'], capture_output=True, text=True
         raise RuntimeError('Cheeky shader compilation failed:\n' + generated.stdout + generated.stderr)
     print('Regenerated src/d3d_shaders.hpp from the patched shader sources.')
 
+marker.write_text(wanted + '\n', encoding='ascii')
 print('Applied opt-in DCS quad focus adapter to the pinned Cheeky source.')

@@ -3,6 +3,9 @@
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $wrapper = Join-Path $PSScriptRoot 'msvc.cmd'
+# The shared-memory contract headers this module shares with the pupil shift layer must match (the OFXR copies are
+# checked by the OFXR build).
+& (Join-Path $PSScriptRoot 'check-contracts.ps1') -Only 'native/'
 $build = Join-Path $workspaceRoot 'artifacts/native/dcsqvcull'
 & $wrapper cmake -S (Join-Path $workspaceRoot 'native/dcsqvcull') -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE -ne 0) { throw 'DcsQvCull configuration failed.' }
@@ -26,7 +29,7 @@ foreach ($name in @($testEnvironment.Keys)) {
     if (-not $callerEnvironment[$name] -and ($name -ne 'DCSVR_QV_DLL' -or (Test-Path -LiteralPath $testEnvironment[$name]))) { Set-Item "env:$name" $testEnvironment[$name] }
 }
 try {
-    $testSources = @((Join-Path $workspaceRoot 'native/dcsqvcull/test'), (Join-Path $workspaceRoot 'native/dcsqvcull/CMakeLists.txt'))
+    $testSources = @((Join-Path $workspaceRoot 'native/dcsqvcull/test'), (Join-Path $workspaceRoot 'native/dcsqvcull/lua'), (Join-Path $workspaceRoot 'native/dcsqvcull/CMakeLists.txt'))
     foreach ($name in @($testEnvironment.Keys)) { if ([Environment]::GetEnvironmentVariable($name)) { $testSources += [Environment]::GetEnvironmentVariable($name) } }
     if (-not (Test-NativeTestsCurrent $build $testSources)) {
         $testRun = Join-Path $build 'test-run'

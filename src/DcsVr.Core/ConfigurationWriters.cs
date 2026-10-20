@@ -6,6 +6,8 @@ namespace DcsVr.Core;
 public static class ConfigurationWriters
 {
     private static string Number(double value) => value.ToString("G9", CultureInfo.InvariantCulture);
+    /// <summary>An integer as the native readers parse it, whatever the PC's culture (a negative sign is always "-").</summary>
+    private static string Int(int value) => value.ToString(CultureInfo.InvariantCulture);
     // Cheeky clamps these ratios to 0.20..1 and rewrites its INI with the clamped value, which restore would then
     // report as a user edit. Write the value Cheeky will actually use (src/settings.cpp).
     private static double CheekyRange(double value) => Math.Clamp(value, 0.2, 1);
@@ -35,7 +37,7 @@ public static class ConfigurationWriters
         NrWidth={Number(p.UsesQuadFocus ? NeuralArea(p) : CheekyRange(p.FoveaWidth))}
         NrHeight={Number(p.UsesQuadFocus ? NeuralArea(p) : CheekyRange(p.FoveaHeight))}
         NrRoundness={((p.UsesNeuralEdgeFade || p.UsesCentralNeuralArea) && p.QuadRoundFocus ? 1 : 0)}
-        CenterPreset={(p.UsesQuadFocus ? p.FocusDlssPreset : 0)}
+        CenterPreset={Int(p.UsesQuadFocus ? p.FocusDlssPreset : 0)}
         NrTransitionWidth={Number(p.UsesNeuralEdgeFade ? p.NeuralEdgeFeather : VrProfile.NeuralAreaFeather)}
         NrProcessingOrder={(p.NeuralBeforeUpscaling ? 1 : 0)}
         NrWorkingScale={Number(p.NeuralWorkingScale)}
@@ -47,10 +49,10 @@ public static class ConfigurationWriters
         NrColorStrength={Number(p.NeuralColorStrength)}
         NrHdrTransferStrength={Number(p.NeuralTransferStrength)}
         NrPaperWhiteScale={Number(p.NeuralPaperWhiteScale)}
-        NrDepthConvention={(int)p.NeuralDepth}
+        NrDepthConvention={Int((int)p.NeuralDepth)}
         NrMotionScaleXMultiplier={Number(p.NeuralMotionScaleX)}
         NrMotionScaleYMultiplier={Number(p.NeuralMotionScaleY)}
-        NrStyle={(int)p.NeuralStyle}
+        NrStyle={Int((int)p.NeuralStyle)}
         NrAutomaticMask={(p.NeuralAutomaticMask ? 1 : 0)}
 
         """;
@@ -68,7 +70,7 @@ public static class ConfigurationWriters
     /// file stays as it was before Visual realism existed.</summary>
     private static string ColorModeLine(VrProfile p) => p.UsesColorMode ? $"""
 
-        Mode={(int)p.ColorMode}
+        Mode={Int((int)p.ColorMode)}
         """ : "";
 
     /// <summary>Visual realism's sections after [Color]: each color mode's values while a color mode can run, [VrFx] while
@@ -123,7 +125,7 @@ public static class ConfigurationWriters
         GVisionUseGaze={(p.GVisionUseGaze ? 1 : 0)}
         GVisionRedout={(p.GVisionRedout ? 1 : 0)}
         GVisionTolerance={Number(p.GVisionTolerance)}
-        GVisionMode={(int)p.GVisionMode}
+        GVisionMode={Int((int)p.GVisionMode)}
         """ : "");
 
     /// <summary>DcsQvCull.ini for the DCS engine optimizations. Every key whose built-in default is not wanted is written: a missing key
@@ -147,7 +149,7 @@ public static class ConfigurationWriters
         [Timing]
         ShaderTimeCache={(p.EngineShaderTimeCache ? 1 : 0)}
         TaskQueueClock={(p.EngineTaskQueueClock && p.EngineShaderTimeCache ? 1 : 0)}
-        CacheUs={Math.Clamp(p.EngineTimerRefreshUs, VrProfile.EngineTimerRefreshMin, VrProfile.EngineTimerRefreshMax)}
+        CacheUs={Int(Math.Clamp(p.EngineTimerRefreshUs, VrProfile.EngineTimerRefreshMin, VrProfile.EngineTimerRefreshMax))}
 
         [Hotkeys]
         ; Switches the optimizations above off and back on in flight ("virtual-key:modifiers", Ctrl 1, Alt 2, Shift 4; 0:0 off).
@@ -453,19 +455,12 @@ public static class ConfigurationWriters
         adaptive_frame_gen={(p.FrameGenFactor == VrProfile.FrameGenAuto ? 1 : 0)}
         ; Per-frame 2X/3X and a full-rate 1X (patch 0032): off until it has flown in DCS.
         adaptive_cadence=0
-        ; Cheaper composition of still tiles (patch 0033, bit-identical output): off until measured in DCS.
-        fast_composition=0
-        ; Synthetic frames placed by DCS's frame-start clock (patch 0037): off until an A/B in DCS shows it helps.
-        content_time_fraction=0
         ; Both eyes synthesized on their own queues, about 1 ms sooner with identical output (patch 0038): off until flown.
         parallel_eye_synthesis=0
-        ; Synthetic frames placed by DCS's own pose clock (patch 0039): smoother on paper, but fixed halves match the real
-        ; frames better; off until a headset A/B decides.
-        slot_content_time=0
         d3d11_bridge={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}
         backend={(p.FrameGen == FrameGeneration.FidelityFx ? "fidelityfx" : "nvidia")}
         nvidia_preset={p.FlowPreset.ToString().ToLowerInvariant()}
-        nvidia_input_scale={p.NvidiaFlowScale}
+        nvidia_input_scale={Int(p.NvidiaFlowScale)}
         nvidia_bidirectional={(p.BidirectionalFlow ? 1 : 0)}
         ; Moving edges: the flow endpoint solved per pixel (level 1). Measured better with the Medium preset and one-way
         ; flow, the defaults; other combinations keep the plain sample (0).
@@ -582,7 +577,7 @@ public static class ConfigurationWriters
         turbo_mode={(p.QuadTurbo ? 1 : 0)}
         dcsvr_saccade_widening={(p.QuadSaccadeLead && p.Gaze == GazeMode.EyeTracked ? 1 : 0)}
         dcsvr_saccade_speed=120
-        dcsvr_saccade_lead_ms={p.QuadSaccadeLeadMs}
+        dcsvr_saccade_lead_ms={Int(p.QuadSaccadeLeadMs)}
         dcsvr_saccade_max_extend=0.35
         dcsvr_saccade_hold_ms=40
         dcsvr_gaze_deadzone={(p.QuadGazeStabilize && p.Gaze == GazeMode.EyeTracked ? "0.5" : "0")}
