@@ -39,7 +39,7 @@
       "copies": [
         "external/ofxr-djules75/include/xrfg/dcsvr_symbology.h"
       ],
-      "sha256": "0F4FBAB606441CD587690C5657604483038AF6ADD6867E3C70000F16A822E456"
+      "sha256": "91235FE4AD49CBCEAE76630439D438508F7D41571D54A35689DB8CCD742FDAC7"
     },
     {
       "name": "dcsvr_pupil_fov.h",

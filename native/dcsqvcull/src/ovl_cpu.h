@@ -706,6 +706,9 @@ std::atomic<uint32_t> g_symViews{0};
 void (*g_symRec)(int view, int c9) = nullptr;
 void (*g_symReplayEnd)(int view) = nullptr;
 std::atomic<uint64_t> g_symFaults{0};
+// R115: the export's fault latch (symbology.h's sym::g_fault refers to it): set by the SEH handlers below, cleared at
+// the export's next install (sym::NoteInstall). While set, sym::Ready() is false: no view bit, no record, no E.
+std::atomic<bool> g_symFault{false};
 inline bool SymViewNow(const void* ra, bool recordLoop) {
   const uint32_t m = g_symViews.load(std::memory_order_relaxed);
   return m && t_ovlOpen && !t_ovlLdr && t_ovlView >= 0 && t_ovlView < 4 && (m & (1u << t_ovlView)) &&
@@ -1220,7 +1223,8 @@ void SymRecordSeh(int view, const uint8_t* ro) {
     g_symRec(view, c9);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     g_symFaults++;
-    g_symViews = 0;  // (the export's fault latch: no record of this frame is reported any more)
+    g_symFault = true;  // R115: latched until the export's next install (R95 cleared only this frame's bits)
+    g_symViews = 0;  // (no record of this frame is reported any more)
   }
 }
 void SymReplayEndSeh(int view) {
@@ -1228,6 +1232,7 @@ void SymReplayEndSeh(int view) {
     g_symReplayEnd(view);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     g_symFaults++;
+    g_symFault = true;  // R115
     g_symViews = 0;
   }
 }

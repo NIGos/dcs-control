@@ -383,6 +383,18 @@ void TestOvlGlue() {
         "R95 ovl_cpu render point: each record's indicator type (+0xc9) reported before DCS's render call, only in the "
         "asked views' OverlayHDRPass on the render thread; an unreadable record latches the reporting off; DCS's call "
         "always made");
+  // R115: the fault latches the export (sym::g_fault, read by sym::Ready()) beyond this frame: the next frame's
+  // PassBegin sets no view bit (R95 only cleared this frame's bits); the next install clears it (NoteInstall).
+  const bool latched = cmask::sym::g_fault.load();
+  cmask::sym::FrameBegin();
+  cmask::sym::PassBegin(3);
+  const bool noBits = oc::g_symViews.load() == 0 && !cmask::sym::Ready();
+  cmask::sym::NoteInstall();
+  const bool cleared = !cmask::sym::g_fault.load();
+  Check(latched && noBits && cleared,
+        "R115 symbology fault latch: a fault in the record render point sets sym::g_fault (export not Ready, no view "
+        "bit at the next PassBegin) until the next install clears it");
+  cmask::sym::g_fault = false;
   oc::t_ovlOpen = false, oc::t_ovlView = -1;
   oc::g_symViews = 0;
   oc::g_renderOrig = keepRender;

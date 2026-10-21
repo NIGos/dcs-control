@@ -564,6 +564,9 @@ std::atomic<bool> g_on{false};       // recording (hooks installed and FrameTime
 std::atomic<bool> g_poseOn{false};   // PoseProbe
 std::atomic<bool> g_evOn{false};     // EventLog
 void** g_disp = nullptr;             // the dispatch table the hooks are in
+// R115 (L7): one read of g_disp for a hook-side user (Stop may clear it while a chained hook still runs): tested and
+// indexed through the same copy, never re-read between the null check and the index.
+inline void** DispOnce() { return *static_cast<void** const volatile*>(&g_disp); }
 void* g_orig[kHooked] = {};
 void* g_hook[kHooked] = {};
 bool g_armed[kHooked] = {};
@@ -638,8 +641,9 @@ Pending* FindPending(int64_t t) {
 // The head pose (VIEW space) in `base` at `time`; false when not located.
 bool LocateHead(uint64_t base, int64_t time, XrPose* out) {
   const uint64_t view = g_viewSpace.load(std::memory_order_relaxed);
-  if (!g_disp || !view || !base || time <= 0) return false;
-  auto fn = reinterpret_cast<LocateSpaceFn>(g_disp[kSlotLocateSpace]);
+  void** const disp = DispOnce();  // R115 (L7)
+  if (!disp || !view || !base || time <= 0) return false;
+  auto fn = reinterpret_cast<LocateSpaceFn>(disp[kSlotLocateSpace]);
   if (!fn) return false;
   SpaceLocation loc{};
   loc.type = kTypeSpaceLocation;
@@ -658,8 +662,9 @@ bool LocateHead(uint64_t base, int64_t time, XrPose* out) {
 
 // Main thread, inside DCS's xrLocateViews hook: the VIEW space, once.
 void EnsureViewSpace(uint64_t session) {
-  if (g_spaceState.load(std::memory_order_relaxed) != 0 || !session || !g_disp) return;
-  auto fn = reinterpret_cast<CreateRefSpaceFn>(g_disp[kSlotCreateRefSpace]);
+  void** const disp = DispOnce();  // R115 (L7)
+  if (g_spaceState.load(std::memory_order_relaxed) != 0 || !session || !disp) return;
+  auto fn = reinterpret_cast<CreateRefSpaceFn>(disp[kSlotCreateRefSpace]);
   RefSpaceCreateInfo ci{};
   ci.type = kTypeRefSpaceCreateInfo;
   ci.referenceSpaceType = kRefSpaceView;
@@ -899,15 +904,24 @@ inline void Unchain(int i) {
     fixdepth::cmask::ctime::g_next.compare_exchange_strong(ours, nullptr);
   }
 }
+// R115 (T1): an original that is one of our own hooks (or the export's hook itself): calling it from ours would recurse
+// without end (outside the loader SlotOriginal is the slot's current value, which can be ours).
+inline bool IsOwnHook(const void* fn, int i) {
+  for (int k = 0; k < kHooked; ++k)
+    if (fn == kHookFn[k]) return true;
+  return fn == MaskHookFor(i);
+}
 // Hook i behind the export's hook when the export owns its slot.
 ChainState ChainBehindMask(int i, void** slot) {
   if (!MaskHookFor(i) || MaskSlotFor(i) != slot || *slot != MaskHookFor(i)) return kChainNo;
   if (kHookSlot[i] == kSlotEnd) {
-    if (!fixdepth::cmask::g_xeOrig) return kChainFail;
+    if (!fixdepth::cmask::g_xeOrig || IsOwnHook(reinterpret_cast<void*>(fixdepth::cmask::g_xeOrig), i))
+      return kChainFail;
     g_orig[i] = reinterpret_cast<void*>(fixdepth::cmask::g_xeOrig);  // the true original (the export's copy)
     fixdepth::cmask::g_xeNext.store(reinterpret_cast<fixdepth::cmask::XrEndFn>(kHookFn[i]), std::memory_order_release);
   } else {
-    if (!fixdepth::cmask::ctime::g_orig) return kChainFail;
+    if (!fixdepth::cmask::ctime::g_orig || IsOwnHook(reinterpret_cast<void*>(fixdepth::cmask::ctime::g_orig), i))
+      return kChainFail;
     g_orig[i] = reinterpret_cast<void*>(fixdepth::cmask::ctime::g_orig);
     fixdepth::cmask::ctime::g_next.store(reinterpret_cast<fixdepth::cmask::ctime::LocateFn>(kHookFn[i]),
                                          std::memory_order_release);

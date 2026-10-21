@@ -17,7 +17,7 @@
 //           tone map evaluated by the writer on the image before them; post-tone-map draws removed by a snapshot).
 //           So, per view, inside the window: dec(F) - E == dec(C) to the byte. DCS writes 2.2-gamma bytes into an
 //           R8G8B8A8_UNORM_SRGB swapchain; Quad Views decodes them as sRGB and composes in linear light.
-//      a    coverage alpha, valid only with emission_flags::alpha_valid ("coverage alpha valid"). v1: never set; a == 0.
+//      a    coverage alpha, valid only with emission_flags::alpha_valid ("coverage alpha valid"). The writer may set it and latches it off for the rest of the generation after a failed check (R97), so it can change within a generation; a == 0 where invalid.
 //  - Class atlas, R8_UINT (`classFormat`), the same sub-rects: per texel the class of the symbology that produced E.
 //
 // Capacity windows (Dev's decision: fixed capacities, no full-view rects). view[v] has a FIXED atlas sub-rect (x, y,
@@ -101,7 +101,7 @@
 // generation and handles are published. A new generation (objects released, old handles open >= 2 s) only on: a layout
 // change (a capacity, the views, the companion wanted while the held set lacks it: once per session; an output size or
 // DLSS mode change only when it changes a capacity or the atlas), a device change or removal, the payload stop or
-// reload, a latched fault. On such a release the writer publishes R76's record (a new non-zero generation, flags 0, no
+// reload, a builder fault (R115 H2). A latched symbology fault only turns the export off (inactive, no view present) until the next install, without a new generation (R115 S2). On such a release the writer publishes R76's record (a new non-zero generation, flags 0, no
 // handles) first, and RetireUnmapped writes it into this block too when the block is still mapped by a reader while the
 // writer does not map it (export off). A reader keeps its opened set across an inactive stretch with an unchanged
 // generation and drops it on a generation change.
@@ -203,7 +203,7 @@ struct Header {                   // 2048 bytes
     std::uint64_t newestSeq;
     std::int64_t heartbeatQpc, qpcFrequency;
     std::uint32_t newestSlot, revision;
-    std::uint32_t classFormat, emissionFlags;      // format_r8_uint; emission_flags (constant per generation)
+    std::uint32_t classFormat, emissionFlags;      // format_r8_uint; emission_flags (constant per generation, except alpha_valid)
     std::uint64_t classTextureHandle[slot_count];  // class atlases (NT handles)
     QvSettings qv;                                 // offset 152
     std::uint32_t fovSource;                       // offset 176: fov_source_* the writer currently publishes
@@ -223,11 +223,11 @@ constexpr std::uint32_t shares_mask_fence = 32u;
 constexpr std::uint32_t class_atlas = 64u;
 constexpr std::uint32_t qv_settings = 128u;       // header.qv was read (else all 0: Quad Views' settings unknown)
 }  // namespace header_flags
-namespace emission_flags {                        // what this writer can produce (constant per generation)
+namespace emission_flags {                        // what this writer can produce (constant per generation, except alpha_valid)
 constexpr std::uint32_t hdr_overlay = 1u;         // OverlayHDRPass content (F-16 / F/A-18 / A-10C HUD, F-4E sight,
                                                   // F-16 / F/A-18 helmet displays)
-constexpr std::uint32_t ldr_overlay = 2u;         // OverlayLDRPass content (A-10C Scorpion HMCS)
-constexpr std::uint32_t alpha_valid = 8u;         // "coverage alpha valid": E.a is the symbol coverage. v1: never set
+constexpr std::uint32_t ldr_overlay = 2u;         // reserved: never produced (OverlayLDRPass content, e.g. the A-10C Scorpion HMCS)
+constexpr std::uint32_t alpha_valid = 8u;         // "coverage alpha valid": E.a is the symbol coverage; may change within a generation (R97 latch)
 constexpr std::uint32_t class_collimated = 16u;
 constexpr std::uint32_t class_head_locked = 32u;
 constexpr std::uint32_t common_excluded = 64u;    // COMMON (MFD / DED) draws are excluded from E (always in v1)
@@ -236,17 +236,17 @@ namespace slot_flags {
 constexpr std::uint32_t valid = 1u;
 constexpr std::uint32_t display_time = 2u;
 constexpr std::uint32_t late_commit = 4u;         // no xrEndFrame hook: not pairable
-constexpr std::uint32_t partial = 8u;             // a configured view has no E this frame (see its view_flags)
+constexpr std::uint32_t partial = 8u;             // a configured view is not usable this frame (see its view_flags)
 }  // namespace slot_flags
 namespace view_flags {
 constexpr std::uint32_t valid = 1u;               // the view's record is this frame's (E may still be absent: present)
 constexpr std::uint32_t present = 2u;             // included symbology in the window this frame; clear -> skip the view
-constexpr std::uint32_t rejected = 4u;            // > 40 % of the world changed (a full-screen pass, NVG): no E
+constexpr std::uint32_t rejected = 4u;            // reserved: never produced (was: > 40 % of the world changed, NVG)
 constexpr std::uint32_t untouched_hdr = 8u;       // no pass wrote the HDR target between OverlayHDRPass and the tone map
 constexpr std::uint32_t own_tonemap = 16u;        // E evaluated inside the writer's tone-map PS (stock replica or a mode)
 constexpr std::uint32_t pre_dlss_hud = 32u;       // HUD_MFD_after_DLSS = false: the HUD went through DLSS; no E
 constexpr std::uint32_t overflow = 64u;           // the symbology's extent exceeded the capacity: present clear, no E
-constexpr std::uint32_t mfd_by_mask = 128u;       // COMMON draws excluded by the cockpit mask (segmentation unavailable)
+constexpr std::uint32_t mfd_by_mask = 128u;       // reserved: never produced (was: COMMON draws excluded by the cockpit mask)
 }  // namespace view_flags
 namespace layout_flags {
 constexpr std::uint32_t layout_valid = 1u;        // slot.focus describes this frame (four views seen)

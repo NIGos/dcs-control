@@ -60,13 +60,21 @@ inline NtGetNextThreadFn NextThreadFn() {
   return f;
 }
 
+// R115 P5: test hook (tests only; null in the payload): replaces NtGetNextThread so a test can make the
+// walk fail midway. Read once per walk (code-site writes and placement discovery), never per frame.
+NtGetNextThreadFn g_testNextThread = nullptr;
+
+constexpr LONG kStatusNoMoreEntries = static_cast<LONG>(0x8000001AL);  // STATUS_NO_MORE_ENTRIES
+
 // Calls keep = f(HANDLE) for every thread of this process, the calling thread included (handles with
 // `access`, from the process's own thread list: no system-wide snapshot). A handle f keeps (true) is
 // the caller's to close; the others are closed here. Returns the number of threads visited, -1 when
-// NtGetNextThread is unavailable.
+// NtGetNextThread is unavailable or fails before the end of the list (R115 P5: only
+// STATUS_NO_MORE_ENTRIES ends the walk; any other failure, e.g. access denied or handle quota, means
+// threads may have been missed, and the handles f kept are still the caller's to close).
 template <class F>
 int ForEachProcessThread(ACCESS_MASK access, F f) {
-  const NtGetNextThreadFn next = NextThreadFn();
+  const NtGetNextThreadFn next = g_testNextThread ? g_testNextThread : NextThreadFn();
   if (!next) return -1;
   HANDLE cur = nullptr;
   bool keptCur = false;
@@ -75,7 +83,8 @@ int ForEachProcessThread(ACCESS_MASK access, F f) {
     HANDLE h = nullptr;
     const LONG st = next(GetCurrentProcess(), cur, access, 0, 0, &h);
     if (cur && !keptCur) CloseHandle(cur);
-    if (st < 0 || !h) break;  // STATUS_NO_MORE_ENTRIES (or an error): done
+    if (st == kStatusNoMoreEntries) break;  // the end of the list: done
+    if (st < 0 || !h) return -1;            // R115 P5: an error mid-walk is not the end of the list
     ++n;
     cur = h;
     keptCur = f(h);
@@ -215,7 +224,9 @@ inline bool WriteSuspendedProcess(const Site* s, int n, int attempts) {
       CloseHandle(held[k]);
     }
     const uint64_t t2 = NowUs();
-    if (visited < 0 || overflow) return WriteSuspendedToolhelp(s, n, attempts);  // no NtGetNextThread / too many threads
+    // No NtGetNextThread, a failed walk (R115 P5: threads may have been missed; nothing was written and every
+    // thread held above is resumed) or too many threads: the Toolhelp path.
+    if (visited < 0 || overflow) return WriteSuspendedToolhelp(s, n, attempts);
     if (clear) {
       NoteWrite(t2 - t0, t1 - t0, static_cast<uint32_t>(nHeld), static_cast<uint32_t>(attempt + 1));
       return done;

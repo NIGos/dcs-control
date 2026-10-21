@@ -250,6 +250,50 @@ void Test(D3D_DRIVER_TYPE drv, bool hw) {
   cmask::sym::ResetLearn();  // the control widened the margins: learn afresh
   p.yaw = 0;
   for (int f = 0; f < 8; ++f) Frame(p, dt++);
+  // R115: a mission event (a slot change: another aircraft, no HUD and no helmet) while the old aircraft's read-backs
+  // are in flight: the frames after it learn nothing of the old symbology (R95-R113 learnt the pending read-backs of
+  // the frames before the event right after its reset).
+  {
+    namespace sy = cmask::sym;
+    for (int f = 0; f < 4; ++f) Frame(p, dt++);
+    bool before = true;
+    for (int v = 0; v < 4; ++v)
+      before = before && sy::g_l[v].col.ok && (!kHelmet[v].ok || !(v & 1) || sy::HelmetExtent(sy::g_l[v], sy::g_frameN).ok);
+    p.hudOn = p.helmetOn = false;
+    sy::NoteMissionEvent();
+    int oldCol = 0, oldHel = 0, oldExtra = 0;
+    for (int f = 0; f < 3; ++f) {
+      Frame(p, dt++);
+      for (int v = 0; v < 4; ++v) {
+        const sy::Learn& L = sy::g_l[v];
+        oldCol += L.col.ok || L.rec.ok;
+        oldHel += sy::HelmetExtent(L, sy::g_frameN).ok;
+        oldExtra += L.extra != 0;
+      }
+    }
+    char what[400];
+    sprintf_s(what, "R115 %s: after sym::NoteMissionEvent (another aircraft without HUD / helmet) the old aircraft's "
+                    "pending read-backs are not learnt: over 3 frames, view-frames with a field %d, a helmet extent %d, "
+                    "an extra margin %d (the HUD and helmet learnt before: %d)",
+              tag, oldCol, oldHel, oldExtra, before);
+    Check(before && oldCol == 0 && oldHel == 0 && oldExtra == 0, what);
+    p.hudOn = p.helmetOn = true;
+    for (int f = 0; f < 10; ++f) Frame(p, dt++);
+    // R115 (S6): a timed frame's disjoint query begun (TsBegin) and an uninstall's HoldRes before its FrameEnd: the
+    // queries made anew, the open state with them (the next timed frame begins a new one).
+    sy::g_timed = true;
+    int op = -1;
+    sy::TsBegin(op, sy::kGCopy);
+    sy::TsEnd(op);
+    const bool began = sy::g_ringOpen && op >= 0;
+    sy::ReleaseQueriesB();
+    sy::MakeQueriesB(r.dev);
+    Check(began && !sy::g_ringOpen && sy::g_tsOps == 0,
+          "R115 symbology timing: the queries released / made anew (HoldRes) between TsBegin and FrameEnd clear the "
+          "ring's open disjoint query (no End of a query never begun)");
+    sy::g_ringOpen = false, sy::g_tsOps = 0, sy::g_timed = false;
+    for (int f = 0; f < 2; ++f) Frame(p, dt++);
+  }
   // A pass between the overlay and the tone map (the night-vision position is unknown, R94): no E in that view.
   {
     p.nvgPass = true;
@@ -368,6 +412,17 @@ void Test(D3D_DRIVER_TYPE drv, bool hw) {
               s.h.slot[sl].focus.eye[1].rectNorm[2] > s.h.slot[sl].focus.eye[1].rectNorm[0],
           "R95 focus layout: a frame without DCS's submitted poses publishes the last frame's layout (never a slot "
           "without one)");
+    // R115: no present view with a degenerate fovTan (the reader divides by its spans): without the poses the views
+    // are valid, not present, and the slot partial.
+    int degenerate = 0, valid = 0;
+    for (int v = 0; v < 4 && sl >= 0; ++v) {
+      const csy::EmissionView& m = s.h.slot[sl].view[v];
+      valid += (m.flags & csy::view_flags::valid) != 0;
+      if (csy::view_present(s.h, sl, v) && (m.fovTan[0] == m.fovTan[1] || m.fovTan[2] == m.fovTan[3])) ++degenerate;
+    }
+    Check(sl >= 0 && degenerate == 0 && valid == 4 && (s.h.slot[sl].flags & csy::slot_flags::partial),
+          "R115 commit without DCS's submitted poses: no view present with fovTan {0, 0, 0, 0} (valid, present clear, "
+          "the slot partial)");
   }
   // The reader's heartbeat: absent -> idle (no symbology slot, the mask still commits); fresh -> active again.
   {
@@ -598,6 +653,65 @@ void Test(D3D_DRIVER_TYPE drv, bool hw) {
     Check(rel.gen != before.gen && rel.flags == 0 && rel.h[0] == 0 && IsActive(on) && on.gen != rel.gen,
           "R95 device removed (R86 V8): the export switch releases the set instead of holding it (R76's record: a new "
           "generation, flags 0); on again: a new set");
+  }
+  // R115: a fault in the record render point (ovl_cpu.h's SEH) latches the export off beyond its frame (R95: one
+  // frame), logged once; the next install clears it.
+  {
+    for (int f = 0; f < 3; ++f) Frame(p, dt++);
+    {
+      std::lock_guard<std::mutex> lock(g_logMutex);
+      g_reportBuf.clear();
+      g_reportThread = GetCurrentThreadId();
+      g_reportCapture = true;
+    }
+    alignas(16) uint8_t ro[0x100] = {};
+    memset(ro + ckipd::ocpu::kRoRec, 0xff, 8);  // an unreadable record pointer
+    const uint64_t f0 = ckipd::ocpu::g_symFaults.load();
+    ckipd::ocpu::SymRecordSeh(0, ro);
+    int presentAfter = 0;
+    for (int f = 0; f < 3; ++f) {
+      const int64_t d = dt;
+      Frame(p, dt++);
+      const SymRec s = ReadSym(p);
+      const int sl = s.ok ? csy::find_slot(s.h, d) : -1;
+      for (int v = 0; v < 4 && sl >= 0; ++v) presentAfter += (s.h.slot[sl].view[v].flags & csy::view_flags::present) != 0;
+    }
+    const bool notReady = cmask::sym::g_fault.load() && ckipd::ocpu::g_symViews.load() == 0;
+    cmask::sym::TickRenderPoint();
+    cmask::sym::TickRenderPoint();
+    std::string log;
+    {
+      std::lock_guard<std::mutex> lock(g_logMutex);
+      g_reportCapture = false;
+      log.swap(g_reportBuf);
+    }
+    int lines = 0;
+    for (size_t at = log.find("a fault in the record render point"); at != std::string::npos;
+         at = log.find("a fault in the record render point", at + 1))
+      ++lines;
+    std::string cost;
+    cmask::sym::StatsText(&cost);
+    configure(true, false, 2);  // the export off and on: its install
+    tick();
+    configure(true, true, 2);
+    tick();
+    for (int f = 0; f < 6; ++f) Frame(p, dt++);
+    const int64_t d = dt;
+    Frame(p, dt++);
+    const SymRec s = ReadSym(p);
+    const int sl = s.ok ? csy::find_slot(s.h, d) : -1;
+    int presentBack = 0;
+    for (int v = 0; v < 4 && sl >= 0; ++v) presentBack += (s.h.slot[sl].view[v].flags & csy::view_flags::present) != 0;
+    char what[400];
+    sprintf_s(what, "R115 %s: a record render point fault latches the export off (present views over 3 frames after "
+                    "it: %d, latched %d), logged once (%d lines; the cost line counts it: %d); the next install clears "
+                    "it (present again: %d)",
+              tag, presentAfter, notReady, lines, cost.find("record render point faults") != std::string::npos,
+              presentBack);
+    Check(ckipd::ocpu::g_symFaults.load() == f0 + 1 && presentAfter == 0 && notReady && lines == 1 &&
+              cost.find("record render point faults") != std::string::npos && presentBack == 4 &&
+              !cmask::sym::g_fault.load(),
+          what);
   }
   // L7 the stop (fixation_depth.h Shutdown's Uninstall(false)): R76's record, released.
   {

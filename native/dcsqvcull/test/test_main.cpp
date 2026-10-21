@@ -386,6 +386,7 @@ int main() {
   g_log = stdout;
   g_mute = true;
   UseTempOutputDir();
+  r90::NoteRingAtLoad();  // R115 (L2): the async log ring before any test (checked in r90::AsyncLog)
   StartTestLoad();
   // QV_SF_STRESS=<n>: only the split-filter tests, n times (race hunting).
   if (const char* n = getenv("QV_SF_STRESS")) {

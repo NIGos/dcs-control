@@ -81,10 +81,24 @@ inline std::vector<Entry> List(const std::wstring& dir, const wchar_t* pattern, 
   return out;
 }
 
+// What RemoveDumpDir deleted: the folder itself (removed) and, whether or not it could be removed, the
+// files inside it that were (R115 P7: counted either way).
+struct DirResult {
+  bool removed = false;
+  uint32_t files = 0;
+  uint64_t bytes = 0;
+};
+
 // Deletes a dump folder: its files, one level deep (our dump folders have no subfolders).
-inline bool RemoveDumpDir(const std::wstring& dir) {
-  for (const Entry& f : List(dir + L"\\", L"*", false)) DeleteFileW(f.path.c_str());
-  return RemoveDirectoryW(dir.c_str()) != 0;
+inline DirResult RemoveDumpDir(const std::wstring& dir) {
+  DirResult r;
+  for (const Entry& f : List(dir + L"\\", L"*", false))
+    if (DeleteFileW(f.path.c_str())) {
+      ++r.files;
+      r.bytes += f.size;
+    }
+  r.removed = RemoveDirectoryW(dir.c_str()) != 0;
+  return r;
 }
 
 struct Stats {
@@ -92,14 +106,24 @@ struct Stats {
   uint64_t bytes = 0;
 };
 
-// Keeps the newest `keep` (by last-write time); deletes the rest.
+// Keeps the newest `keep` (by last-write time); deletes the rest. Folders: the bytes are their files'
+// (a folder entry's own size is 0); a folder that stays (a file in it held open) counts the files that
+// did go as files.
 inline void KeepNewest(const std::wstring& dir, const wchar_t* pattern, uint32_t keep, bool dirs, Stats& st) {
   std::vector<Entry> v = List(dir, pattern, dirs);
   if (v.size() <= keep) return;
   std::sort(v.begin(), v.end(), [](const Entry& a, const Entry& b) { return a.written > b.written; });
   for (size_t i = keep; i < v.size(); ++i) {
-    if (dirs ? RemoveDumpDir(v[i].path) : DeleteFileW(v[i].path.c_str()) != 0) {
-      dirs ? ++st.dirs : ++st.files;
+    if (dirs) {
+      const DirResult r = RemoveDumpDir(v[i].path);
+      if (r.removed) {
+        ++st.dirs;
+      } else {
+        st.files += r.files;
+      }
+      st.bytes += r.bytes;
+    } else if (DeleteFileW(v[i].path.c_str())) {
+      ++st.files;
       st.bytes += v[i].size;
     }
   }
