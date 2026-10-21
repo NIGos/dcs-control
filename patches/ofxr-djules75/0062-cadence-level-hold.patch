@@ -1,0 +1,517 @@
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -94,6 +94,13 @@
+     // (0060's never re-armed: one 408 a session, none at its close). And 408
+     // with c=2 when the session's teardown comes at 1X before the
+     // application counted idle (it closed within the limit), once as well.
++    // DCS Control (0062): c=0 is the normal DCS exit. DCS takes ~3 s between
++    // its last frame and destroying the session, so the 150 ms rule stands
++    // the deadline down first (408 c=0, a ~150 ms or more) and the teardown
++    // finds it already recorded. c=1 when the runtime's STOPPING (or
++    // LOSS_PENDING, EXITING) came before that; c=2 only when the teardown
++    // wakes a 1X wait whose deadline was still armed (the application closed
++    // within the idle limit of its last frame).
+     // DCS Control (0042): 960, the presenter thread started: a its OS thread
+     // id (GetCurrentThreadId; its start address is in ucrtbase, so tooling
+     // finds the thread by this id).
+@@ -267,6 +274,14 @@
+     //      back-off level. R113: 2 and 3 land a different number of periods
+     //      from their told time, and the offset 0059 shared between them
+     //      moved 3 <-> 6 periods on every change of cadence.
++    //      DCS Control (0062): c's bits 32-47 are the moves of the record's
++    //      level (a) this session, not the session's (at most 65535; each
++    //      level counts its own). The hold at 2 and 3 is 30 s, doubled per
++    //      back-off level up to 120 s (back-off 2 at most, a level off per
++    //      240 s), counted from the level's last move or its last frame on
++    //      time in a run of ten, whichever is later: a reversal has to
++    //      persist the whole hold (R114: 3's offset moved +1, -1, +1, -2 with
++    //      a load swapped every 20 s).
+     //   15 (DCS Control 0061) a resync move the level's hysteresis blocked
+     //      (CadenceTimeResync::observe: a run against the level's last move
+     //      inside its hold), at most one record per level per second of told
+@@ -275,6 +290,7 @@
+     //      direction and size), c= the level's back-off level bits 0-7, the
+     //      moves its hold blocked since its last record (this one included)
+     //      bits 8-23, the hold in force in ms bits 24-39.
++    //      DCS Control (0062): the hold in ms is bits 24-47 (up to 120000).
+     // DCS Control (0047): for results 1-7, c's p90 is bits 0-31; bits 32-39
+     // are the back-off level the switch left (3X holds 5 s doubled per
+     // level, at most 40 s, before it may leave; see AdaptiveConfig::
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -1783,15 +1783,49 @@
+ // not yet learnt (no frame of it judged since the reset) is told the offset
+ // of the level judged last, so a 1X or 3 never visited starts where 2 is, as
+ // before; its first judged frame makes that its own.
++//
++// DCS Control (0062): the 2 and 3 levels' hold is longer, and counts from the
++// level's offset last confirmed, not only from its last move. R114 (DCS, mixed
++// scene, its load swapped every 20 s): 3's landing went between 4 and 5
++// periods with the load, and its offset moved +1, -1, +1, -2 in one mission
++// start - 0061's 2 s hold (16 s at most) let every phase of the square wave
++// through, and a hold from the move alone lets the opposite phase through
++// once it has run (the phase lasts 20 s, from 20 s after the move). Now the
++// hold is 30 s, doubled per back-off level up to 120 s (the reversal window
++// and the decay 240 s, so the back-off can still rise and fall), and while
++// the level's frames are on time at its offset (a run of kConfirmCadence, and
++// every frame after it) the hold counts from the latest of them
++// (CadenceResyncHysteresis::confirm_restarts_hold): a reversal has to
++// persist the whole hold on its own, which a 20 s load phase does not. A
++// genuine shift against the last move, every frame off from then on, moves
++// once the hold since its start has run (30 s at back-off 0); one the same
++// way as the last move is not held. 1X has no hold, as before.
++struct CadenceResyncHysteresis {
++    Nanoseconds reverse_hold;
++    Nanoseconds max_reverse_hold;
++    Nanoseconds reversal_window;
++    Nanoseconds backoff_decay;
++    std::uint32_t max_backoff;
++    bool confirm_restarts_hold;
++};
++// DCS Control (0062): the hold in force, and 0060/0061's (for tests).
++inline constexpr CadenceResyncHysteresis kCadenceResyncHysteresis{
++    30 * kSecond, 120 * kSecond, 240 * kSecond, 240 * kSecond, 2, true};
++inline constexpr CadenceResyncHysteresis kCadenceResyncHysteresis0061{
++    2 * kSecond, 16 * kSecond, 30 * kSecond, 60 * kSecond, 3, false};
++
+ struct CadenceTimeResync {
+     static constexpr std::uint32_t kConfirm = 3;
+     static constexpr std::uint32_t kConfirmCadence = 10; // 0060
+     static constexpr std::int64_t kMaxPeriods = 8;
+-    // DCS Control (0060): the 2/3 cadence's hysteresis (0061: per level).
+-    static constexpr Nanoseconds kReverseHold = 2 * kSecond;
+-    static constexpr Nanoseconds kMaxReverseHold = 16 * kSecond;
+-    static constexpr Nanoseconds kReversalWindow = 30 * kSecond;
+-    static constexpr Nanoseconds kBackoffDecay = 60 * kSecond;
++    // DCS Control (0060): the 2/3 cadence's hysteresis (0061: per level;
++    // 0062: kCadenceResyncHysteresis's, 30 s doubled up to 120 s).
++    static constexpr Nanoseconds kReverseHold = kCadenceResyncHysteresis.reverse_hold;
++    static constexpr Nanoseconds kMaxReverseHold = kCadenceResyncHysteresis.max_reverse_hold;
++    static constexpr Nanoseconds kReversalWindow = kCadenceResyncHysteresis.reversal_window;
++    static constexpr Nanoseconds kBackoffDecay = kCadenceResyncHysteresis.backoff_decay;
++    // DCS Control (0062): the hysteresis this instance uses (tests set 0061's).
++    CadenceResyncHysteresis hysteresis{kCadenceResyncHysteresis};
+     // DCS Control (0061): the levels (1X, 2, 3), and at most one record of the
+     // moves a level's hold blocked (adaptive_switch result=15) per
+     // kBlockedRecordInterval of told time.
+@@ -1808,6 +1842,15 @@
+     // DCS Control (0061): the level judged last (kLevels: none yet).
+     std::size_t last_level{kLevels};
+     std::uint32_t moves{};
++    // DCS Control (0062): the moves per level (adaptive_switch result=14's c
++    // bits 32-47 are the frame's level's).
++    PerLevel32 level_moves{};
++    // DCS Control (0062): where a level's hold counts from (its last move, or
++    // its last frame on time in a confirmed run, if later), its frames on time
++    // in a row (at most kConfirmCadence), and the runs on time that confirmed.
++    std::array<Nanoseconds, kLevels> hold_from{};
++    PerLevel32 on_time{};
++    std::uint32_t hold_restarts{};
+     // DCS Control (0060): a level's last move (told time, sign; 0 none), its
+     // back-off level and when that level's decay counts from (0061: per
+     // level), and the runs dropped by the holds.
+@@ -1847,19 +1890,22 @@
+         if (backoff[level] == 0 || now <= backoff_at[level]) {
+             return backoff[level];
+         }
+-        const Nanoseconds steps = (now - backoff_at[level]) / kBackoffDecay;
++        // DCS Control (0062): the instance's hysteresis, not the constants.
++        const Nanoseconds steps = (now - backoff_at[level]) / hysteresis.backoff_decay;
+         return steps >= static_cast<Nanoseconds>(backoff[level])
+             ? 0U
+             : backoff[level] - static_cast<std::uint32_t>(steps);
+     }
+     [[nodiscard]] Nanoseconds reverse_hold(
+         std::size_t level, Nanoseconds now) const noexcept {
+-        Nanoseconds hold = kReverseHold;
++        // DCS Control (0062): the instance's hysteresis.
++        const Nanoseconds max_hold = hysteresis.max_reverse_hold;
++        Nanoseconds hold = hysteresis.reverse_hold;
+         const std::uint32_t steps = backoff_level(level, now);
+-        for (std::uint32_t i = 0; i < steps && hold < kMaxReverseHold; ++i) {
++        for (std::uint32_t i = 0; i < steps && hold < max_hold; ++i) {
+             hold *= 2;
+         }
+-        return hold < kMaxReverseHold ? hold : kMaxReverseHold;
++        return hold < max_hold ? hold : max_hold;
+     }
+ 
+     // DCS Control (0061): 0 1X, 1 the 2 cadence, 2 the 3 cadence.
+@@ -1881,7 +1927,12 @@
+         std::uint32_t frames, Nanoseconds period) const noexcept {
+         return periods_for(frames) * period;
+     }
+-    void reset() noexcept { *this = CadenceTimeResync{}; }
++    // DCS Control (0062): keeps the hysteresis it was given.
++    void reset() noexcept {
++        const CadenceResyncHysteresis kept = hysteresis;
++        *this = CadenceTimeResync{};
++        hysteresis = kept;
++    }
+     // Frames told up to `last_told` are not judged (0061: of every level).
+     void settle(Nanoseconds last_told) noexcept {
+         for (std::size_t level = 0; level < kLevels; ++level) {
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -1277,8 +1277,21 @@
+     const std::int64_t periods = residual_periods(residual, period);
+     if (periods == 0) {
+         streak[level] = 0;
++        // DCS Control (0062): the level's offset confirmed (kConfirmCadence
++        // frames on time in a row, and every one after them): its hold
++        // counts from here, so a reversal has to persist the whole hold.
++        if (level != 0 && hysteresis.confirm_restarts_hold) {
++            if (on_time[level] < confirm_for(level) &&
++                ++on_time[level] == confirm_for(level)) {
++                ++hold_restarts;
++            }
++            if (on_time[level] >= confirm_for(level) && told > hold_from[level]) {
++                hold_from[level] = told;
++            }
++        }
+         return 0;
+     }
++    on_time[level] = 0; // DCS Control (0062)
+     if (streak[level] != 0 && candidate[level] == periods) {
+         ++streak[level];
+     } else {
+@@ -1294,7 +1307,9 @@
+     // confirm again after it.
+     const std::int64_t sign = periods > 0 ? 1 : -1;
+     const bool reverses = level != 0 && last_move_sign[level] == -sign;
+-    if (reverses && told - last_move_at[level] < reverse_hold(level, told)) {
++    // DCS Control (0062): the hold counts from hold_from (the last move, or
++    // the level's last frame on time in a confirmed run, if later).
++    if (reverses && told - hold_from[level] < reverse_hold(level, told)) {
+         ++held;
+         streak[level] = 0;
+         // DCS Control (0061): recorded (adaptive_switch result=15), at most
+@@ -1317,25 +1332,31 @@
+     offset[level] += moved;
+     if (moved != 0) {
+         ++moves;
++        ++level_moves[level]; // DCS Control (0062)
+         // DCS Control (0060): the back-off decays (whole kBackoffDecay steps,
+         // the running one carried over), then a reversal within
+         // kReversalWindow raises it, as 0047's does for 3X.
++        // DCS Control (0062): the instance's hysteresis (30 s doubled up to
++        // 120 s: level 2 at most; 0061's 2 s up to 16 s, level 3).
+         if (level != 0) {
+             const std::uint32_t decayed = backoff_level(level, told);
+             if (decayed != backoff[level]) {
+-                backoff_at[level] +=
+-                    static_cast<Nanoseconds>(backoff[level] - decayed) * kBackoffDecay;
++                backoff_at[level] += static_cast<Nanoseconds>(backoff[level] - decayed) *
++                    hysteresis.backoff_decay;
+                 backoff[level] = decayed;
+             }
+-            if (reverses && told - last_move_at[level] < kReversalWindow) {
+-                // 2 s doubled up to 16 s: level 3 at most.
+-                backoff[level] = std::min<std::uint32_t>(backoff[level] + 1, 3U);
++            if (reverses && told - last_move_at[level] < hysteresis.reversal_window) {
++                backoff[level] =
++                    std::min<std::uint32_t>(backoff[level] + 1, hysteresis.max_backoff);
+                 backoff_at[level] = told;
+             } else if (backoff[level] == 0) {
+                 backoff_at[level] = told;
+             }
+             last_move_at[level] = told;
+             last_move_sign[level] = moved > 0 ? 1 : -1;
++            // DCS Control (0062): a new hold from this move.
++            hold_from[level] = told;
++            on_time[level] = 0;
+         }
+     }
+     // DCS Control (0061): only this level's frames told so far land off by
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -10986,7 +10986,9 @@
+                                 resync_level = static_cast<std::uint32_t>(resync_index + 1);
+                                 resync_offset =
+                                     state->cadence_resync.periods_for(frames);
+-                                resync_moves = state->cadence_resync.moves;
++                                // DCS Control (0062): the level's own moves.
++                                resync_moves =
++                                    state->cadence_resync.level_moves[resync_index];
+                                 resync_backoff = state->cadence_resync.backoff[resync_index]; // 0060
+                                 resync_held = state->cadence_resync.held;
+                             }
+@@ -11105,8 +11107,10 @@
+                         static_cast<std::int32_t>(resync_blocked.periods))),
+                     static_cast<std::uint64_t>(std::min<std::uint32_t>(resync_blocked.backoff, 0xFFU)) |
+                         (static_cast<std::uint64_t>(std::min<std::uint32_t>(resync_blocked.count, 0xFFFFU)) << 8) |
++                        // DCS Control (0062): the hold in ms, bits 24-47
++                        // (0061's 16 bits stopped at 65 s; it reaches 120).
+                         (static_cast<std::uint64_t>(std::min<xrfg::latency::Nanoseconds>(
+-                             resync_blocked.hold / xrfg::latency::kMillisecond, 0xFFFF)) << 24));
++                             resync_blocked.hold / xrfg::latency::kMillisecond, 0xFFFFFF)) << 24));
+             }
+             // DCS Control (0048): the frame_slot record; see
+             // BridgeFlightOperation::frame_slot.
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -3151,7 +3151,12 @@
+         // The hold and its back-off, frame by frame (the clock is the told
+         // time). Each run: `count` 2-frames, `off` periods off, last_told the
+         // frame's own (so the next frame is judged).
++        // DCS Control (0062): with 0060/0061's hysteresis (2 s doubled up to
++        // 16 s, no restart); 0062's own is cadence_resync_level_hold_tests'.
++        constexpr CadenceResyncHysteresis k61 = kCadenceResyncHysteresis0061;
++        constexpr Nanoseconds k61Hold = k61.reverse_hold;
+         CadenceTimeResync resync{};
++        resync.hysteresis = k61;
+         Nanoseconds told = 1'000'000'000;
+         // DCS Control (0061): and the blocked moves to record (result=15).
+         std::vector<CadenceTimeResync::BlockedMove> blocked;
+@@ -3181,17 +3186,17 @@
+         // DCS Control (0061): recorded once a second at most: the first.
+         require(blocked.size() == 1 && blocked[0].level == 1 && blocked[0].periods == -2 &&
+                     blocked[0].count == 1 && blocked[0].backoff == 0 &&
+-                    blocked[0].hold == CadenceTimeResync::kReverseHold,
++                    blocked[0].hold == k61Hold,
+             "hysteresis: the blocked move recorded, rate-limited (" +
+                 std::to_string(blocked.size()) + ")");
+         // 1X is not held, and confirms on three (0061: from 2's offset, 2).
+         require(feed(1, 3, -1) == -1 && resync.offset[0] == 1,
+             "hysteresis: 1X moves on three frames, unheld");
+         // Past the hold: it moves, and the reversal raises the back-off.
+-        told = std::max(told, first_move + CadenceTimeResync::kReverseHold);
++        told = std::max(told, first_move + k61Hold);
+         told += 2 * kSecond;
+         require(feed(2, n, -2) == -2 && resync.backoff[1] == 1 &&
+-                    resync.reverse_hold(1, told) == 2 * CadenceTimeResync::kReverseHold,
++                    resync.reverse_hold(1, told) == 2 * k61Hold,
+             "hysteresis: after the hold it moves, back-off 1 (4 s)");
+         const Nanoseconds second_move = told;
+         // Back again 3 s later: held (4 s now).
+@@ -3200,31 +3205,35 @@
+         // DCS Control (0061): recorded, with the two blocked unrecorded before.
+         require(blocked.size() == 2 && blocked[1].level == 1 && blocked[1].periods == 2 &&
+                     blocked[1].count == 3 && blocked[1].backoff == 1 &&
+-                    blocked[1].hold == 2 * CadenceTimeResync::kReverseHold,
++                    blocked[1].hold == 2 * k61Hold,
+             "hysteresis: the second record counts the blocks since the first");
+         told = second_move + 4 * kSecond;
+         require(feed(2, n, 2) == 2 && resync.backoff[1] == 2,
+             "hysteresis: past 4 s it moves, back-off 2 (8 s)");
+         // Capped at 16 s; one level off per minute without a reversal.
+-        require(resync.reverse_hold(1, told) == 4 * CadenceTimeResync::kReverseHold,
++        require(resync.reverse_hold(1, told) == 4 * k61Hold,
+             "hysteresis: 8 s at level 2");
+         require(resync.backoff_level(1, told + 61 * kSecond) == 1 &&
+                     resync.backoff_level(1, told + 121 * kSecond) == 0 &&
+-                    resync.reverse_hold(1, told + 121 * kSecond) == CadenceTimeResync::kReverseHold,
++                    resync.reverse_hold(1, told + 121 * kSecond) == k61Hold,
+             "hysteresis: the back-off decays a level a minute");
+         // DCS Control (0061): 3's back-off is its own.
+         require(resync.backoff[2] == 0 &&
+-                    resync.reverse_hold(2, told) == CadenceTimeResync::kReverseHold,
++                    resync.reverse_hold(2, told) == k61Hold,
+             "hysteresis: each level has its own back-off");
+         CadenceTimeResync capped{};
++        capped.hysteresis = k61; // DCS Control (0062)
+         capped.backoff[1] = 9;
+         capped.backoff_at[1] = told;
+-        require(capped.reverse_hold(1, told) == CadenceTimeResync::kMaxReverseHold,
++        require(capped.reverse_hold(1, told) == k61.max_reverse_hold,
+             "hysteresis: capped at 16 s");
++        // DCS Control (0062): no restart with 0061's hysteresis.
++        require(resync.hold_restarts == 0, "hysteresis: 0061's never restarts the hold");
+         resync.reset();
+         require(resync.backoff[1] == 0 && resync.last_move_sign[1] == 0 && resync.held == 0 &&
+-                    !resync.learnt[0] && !resync.learnt[1] && !resync.learnt[2],
+-            "hysteresis: reset");
++                    !resync.learnt[0] && !resync.learnt[1] && !resync.learnt[2] &&
++                    resync.level_moves[1] == 0 && resync.hysteresis.reverse_hold == k61Hold,
++            "hysteresis: reset (0062: keeps its hysteresis)");
+     }
+     {
+         // The 1X deadline's idle test.
+@@ -3271,6 +3280,11 @@
+     };
+     const auto run = [&](bool shared) {
+         CadenceTimeResync resync{};
++        // DCS Control (0062): the shared model with 0060's hysteresis, as
++        // 0061 compared it.
++        if (shared) {
++            resync.hysteresis = kCadenceResyncHysteresis0061;
++        }
+         Outcome outcome{};
+         struct Told { std::uint32_t frames; Nanoseconds told; std::int64_t periods; };
+         std::vector<Told> in_flight;
+@@ -3342,6 +3356,162 @@
+     }
+ }
+ 
++// DCS Control (0062): R114 - a load swapped every 20 s (a square wave), and
++// the level's landing with it: 3 between 4 and 5 periods after its told time
++// (2 between 3 and 5), a quarter period of jitter, each frame observed two
++// frames after it was told. 0061's hysteresis (2 s doubled up to 16 s) moved
++// the offset on every phase; 0062's (30 s up to 120 s, counted from the
++// level's last frame on time in a confirmed run) moves it in the first two
++// phases only (the first settle: from 0 to the one landing, then the other,
++// the same way), then never. A genuine persistent shift still moves.
++void cadence_resync_level_hold_tests() {
++    constexpr Nanoseconds kP = 11'111'111;
++    constexpr Nanoseconds kStart = 1'000'000'000;
++    constexpr Nanoseconds kPhase = 20 * kSecond;
++    constexpr int kPhases = 10;
++    struct Sim {
++        CadenceTimeResync resync{};
++        std::uint32_t frames{};
++        Nanoseconds told{kStart};
++        std::uint32_t lcg{0x5EED0062U};
++        std::vector<std::pair<Nanoseconds, std::int64_t>> in_flight;
++        std::vector<std::pair<Nanoseconds, std::int64_t>> moved_at;
++    };
++    // The level's frames up to `until`, each landing `lands(told)` periods
++    // after its told time before any resync.
++    const auto run = [&](Sim& sim, Nanoseconds until, const auto& lands) {
++        while (sim.told < until) {
++            sim.told += sim.frames * kP;
++            sim.in_flight.emplace_back(sim.told, sim.resync.periods_for(sim.frames));
++            if (sim.in_flight.size() <= 2) {
++                continue;
++            }
++            const auto shown = sim.in_flight.front();
++            sim.in_flight.erase(sim.in_flight.begin());
++            sim.lcg = sim.lcg * 1664525U + 1013904223U;
++            const Nanoseconds jitter =
++                (static_cast<Nanoseconds>((sim.lcg >> 8) % 3U) - 1) * kP / 4;
++            const Nanoseconds residual = (lands(shown.first) - shown.second) * kP + jitter;
++            const std::int64_t moved =
++                sim.resync.observe(sim.frames, shown.first, residual, kP, sim.told);
++            if (moved != 0) {
++                sim.moved_at.emplace_back(shown.first, moved);
++            }
++        }
++    };
++    const auto square = [&](Sim& sim, std::int64_t low, std::int64_t high) {
++        run(sim, kStart + kPhases * kPhase, [&](Nanoseconds at) {
++            return ((at - kStart) / kPhase) % 2 == 0 ? low : high;
++        });
++    };
++    const auto after = [](const Sim& sim, Nanoseconds from) {
++        int count = 0;
++        for (const auto& move : sim.moved_at) {
++            count += move.first >= from ? 1 : 0;
++        }
++        return count;
++    };
++    const auto describe = [](const Sim& sim) {
++        std::string text;
++        for (const auto& move : sim.moved_at) {
++            text += " " + std::to_string((move.first - kStart) / kMillisecond) + "ms:" +
++                std::to_string(move.second);
++        }
++        return text;
++    };
++    const Nanoseconds settled = kStart + 2 * kPhase;
++    for (const std::uint32_t frames : {3U, 2U}) {
++        const std::size_t level = CadenceTimeResync::level_index(frames);
++        const std::int64_t low = frames == 3 ? 4 : 3;
++        const std::int64_t high = 5;
++        const std::string name = "level " + std::to_string(frames) + ": ";
++        Sim old_hold{};
++        old_hold.frames = frames;
++        old_hold.resync.hysteresis = kCadenceResyncHysteresis0061;
++        square(old_hold, low, high);
++        Sim hold{};
++        hold.frames = frames;
++        square(hold, low, high);
++        std::cout << "cadence resync, " << name << "20 s square wave " << low << "/" << high
++                  << ": 0061 moves" << describe(old_hold) << "; 0062 moves" << describe(hold)
++                  << " (hold restarts " << hold.resync.hold_restarts << ")\n";
++        require(after(old_hold, settled) >= 4,
++            name + "0061's hysteresis follows the square wave (" + describe(old_hold) + ")");
++        require(hold.moved_at.size() == 2 && after(hold, settled) == 0 &&
++                    hold.resync.periods_for(frames) == high &&
++                    hold.resync.level_moves[level] == 2 && hold.resync.hold_restarts >= 3,
++            name + "0062: no move after the first settle (" + describe(hold) + ")");
++
++        // A genuine persistent shift against the last move (5 -> low for
++        // good): held the hold from its start (30 s), then one move, and
++        // none after.
++        Sim shift = hold;
++        const Nanoseconds shift_at = shift.told;
++        run(shift, shift_at + 90 * kSecond, [&](Nanoseconds) { return low; });
++        const int shift_moves = after(shift, shift_at);
++        const Nanoseconds delay =
++            shift_moves > 0 ? shift.moved_at.back().first - shift_at : -1;
++        std::cout << "cadence resync, " << name << "persistent shift to " << low
++                  << " moved after " << delay / kMillisecond << " ms\n";
++        require(shift_moves == 1 && shift.moved_at.back().second == low - high &&
++                    delay <= CadenceTimeResync::kReverseHold + kSecond &&
++                    shift.resync.periods_for(frames) == low &&
++                    shift.resync.level_moves[level] == 3,
++            name + "0062: a persistent shift moves once, within the hold (" +
++                describe(shift) + ")");
++        // The same way as the last move (5 -> 6): unheld, under a second.
++        Sim onward = hold;
++        const Nanoseconds onward_at = onward.told;
++        run(onward, onward_at + 10 * kSecond, [&](Nanoseconds) { return high + 1; });
++        require(after(onward, onward_at) == 1 && onward.moved_at.back().second == 1 &&
++                    onward.moved_at.back().first - onward_at < kSecond,
++            name + "0062: a shift the same way moves at once (" + describe(onward) + ")");
++    }
++    {
++        // 0062's hold shape: 30 s doubled per back-off level up to 120 s, a
++        // level off per 240 s.
++        CadenceTimeResync resync{};
++        const Nanoseconds at = 500 * kSecond;
++        resync.backoff[2] = 1;
++        resync.backoff_at[2] = at;
++        require(resync.reverse_hold(2, at) == 60 * kSecond &&
++                    resync.reverse_hold(1, at) == 30 * kSecond,
++            "level hold: 60 s at back-off 1, 30 s at 0");
++        resync.backoff[2] = 2;
++        require(resync.reverse_hold(2, at) == 120 * kSecond &&
++                    resync.backoff_level(2, at + 239 * kSecond) == 2 &&
++                    resync.backoff_level(2, at + 240 * kSecond) == 1 &&
++                    resync.backoff_level(2, at + 480 * kSecond) == 0,
++            "level hold: 120 s at back-off 2, a level off per 240 s");
++        resync.backoff[2] = 9;
++        require(resync.reverse_hold(2, at) == CadenceTimeResync::kMaxReverseHold &&
++                    CadenceTimeResync::kMaxReverseHold == 120 * kSecond,
++            "level hold: capped at 120 s");
++    }
++    {
++        // The moves per level (adaptive_switch result=14's c bits 32-47).
++        CadenceTimeResync resync{};
++        Nanoseconds told = kStart;
++        const auto feed = [&](std::uint32_t frames, std::uint32_t count, std::int64_t off) {
++            std::int64_t moved = 0;
++            for (std::uint32_t index = 0; index < count; ++index) {
++                told += frames * kP;
++                moved += resync.observe(frames, told, off * kP, kP, told);
++            }
++            return moved;
++        };
++        const std::uint32_t n = CadenceTimeResync::kConfirmCadence;
++        require(feed(2, n, 2) == 2 && feed(3, n, 1) == 1 && feed(3, n, 1) == 1 &&
++                    feed(1, CadenceTimeResync::kConfirm, -1) == -1,
++            "level moves: the moves");
++        require(resync.level_moves[0] == 1 && resync.level_moves[1] == 1 &&
++                    resync.level_moves[2] == 2 && resync.moves == 4,
++            "level moves: counted per level (" + std::to_string(resync.level_moves[0]) + "/" +
++                std::to_string(resync.level_moves[1]) + "/" +
++                std::to_string(resync.level_moves[2]) + ")");
++    }
++}
++
+ } // namespace
+ 
+ int main() {
+@@ -3350,6 +3520,7 @@
+         cadence_resync_tests(); // DCS Control (0059)
+         cadence_resync_hysteresis_tests(); // DCS Control (0060)
+         cadence_resync_per_level_tests(); // DCS Control (0061)
++        cadence_resync_level_hold_tests(); // DCS Control (0062)
+         triple_release_tests();
+         triple_slack_tests();
+         display_time_tests();
