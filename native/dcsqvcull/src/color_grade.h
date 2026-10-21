@@ -187,6 +187,10 @@ struct ModeParams {
   double glareRadiusDeg = 5.0;    // 1..20: radius (deg) of the wide halo (the PSF's widest Gaussian, sigma)
   double glareStreak = 0.3;       // 0..1 share of the glare drawn as a 6-spike radial streak (0 = halo only)
   int glareDebug = 0;             // dev only (not a GUI key): 1 = the image is the glare alone (live seam checks)
+  // R111 ([Color] PanelGamut, read for both modes): compensation of a wide-gamut panel shown sRGB content untagged.
+  // 0 = off; 1 = linear sRGB -> DCI-P3 (D65) matrix on the display-linear tone, before the encode (the panel taken
+  // as P3); 2 = half strength (a panel part-way to P3). See PanelGamutStrength / kSrgbToP3.
+  int panelGamut = 0;
 };
 
 inline ModeParams FixDefaults() { return ModeParams{}; }
@@ -245,6 +249,7 @@ inline ModeParams SanitizeMode(ModeParams p) {
   p.glareRadiusDeg = ClampD(p.glareRadiusDeg, 1, 20, 5.0);
   p.glareStreak = ClampD(p.glareStreak, 0, 1, 0.3);
   p.glareDebug = p.glareDebug == 1 ? 1 : 0;
+  p.panelGamut = p.panelGamut == 1 || p.panelGamut == 2 ? p.panelGamut : 0;  // R111
   return p;
 }
 inline bool SameMode(const ModeParams& a, const ModeParams& b) {
@@ -257,7 +262,8 @@ inline bool SameMode(const ModeParams& a, const ModeParams& b) {
          a.nightVision == b.nightVision && a.nvStrength == b.nvStrength && a.nvBlue == b.nvBlue && a.nvBlur == b.nvBlur &&
          a.nvScotopic == b.nvScotopic && a.nvPhotopic == b.nvPhotopic && a.glare == b.glare &&
          a.glareStrength == b.glareStrength && a.glareThresholdEv == b.glareThresholdEv &&
-         a.glareRadiusDeg == b.glareRadiusDeg && a.glareStreak == b.glareStreak && a.glareDebug == b.glareDebug;
+         a.glareRadiusDeg == b.glareRadiusDeg && a.glareStreak == b.glareStreak && a.glareDebug == b.glareDebug &&
+         a.panelGamut == b.panelGamut;
 }
 inline bool OwnCurve(const ModeParams& p) { return p.slope > 0; }
 inline bool UsesState(const ModeParams& p) { return p.adaptBright > 0 || p.adaptDark > 0 || p.meterFocus > 0; }
@@ -307,6 +313,8 @@ inline ModeParams ReadModeIni(const wchar_t* ini, int mode) {
     p.glareStreak = IniD(ini, s, L"GlareStreak", p.glareStreak);
     p.glareDebug = static_cast<int>(IniD(ini, s, L"GlareDebug", p.glareDebug));
   }
+  // R111: one key for both modes ([Color], next to Mode): it describes the headset's panel, not a look.
+  p.panelGamut = static_cast<int>(IniD(ini, L"Color", L"PanelGamut", p.panelGamut));
   return SanitizeMode(p);
 }
 
@@ -336,7 +344,8 @@ struct ColorCb {
   float glareStrength, glareT, glareCap, glareStreak;  // exposed threshold / cap (linear); streak share
   float sig0, sig1, sig2, streakLen;              // PSF sigmas and streak length (tangent units)
   float w0, w1, w2, quad;                         // PSF weights; 1 = four HMD views (focus views exist)
-  float debug, auxOn, pad2, pad3;                 // debug 1 = output the glare only; auxOn = the 1/4 pass runs
+  float debug, auxOn, pad2, panelGamut;           // debug 1 = output the glare only; auxOn = the 1/4 pass runs;
+                                                  // R111 panelGamut: sRGB -> P3 strength (0 off, 0.5, 1)
 };
 static_assert(sizeof(ColorCb) == 208, "ColorCb layout");
 
@@ -380,6 +389,23 @@ constexpr double kPsfF[3] = {0.12, 0.35, 1.0}, kPsfW[3] = {0.55, 0.30, 0.15};
 constexpr double kGlareCapEv = 8.0;  // per-pixel exposed level cap (fireflies, the sun's core): 2^8 x mid-grey
 
 constexpr double kRec709[3] = {0.2126, 0.7152, 0.0722};
+// R111: linear sRGB / Rec.709 -> linear DCI-P3 (D65 white, Display P3 primaries): inv(NPM_P3) x NPM_709, from the
+// primaries' xy (709: 0.64/0.33, 0.30/0.60, 0.15/0.06; P3: 0.680/0.320, 0.265/0.690, 0.150/0.060; D65 0.3127/0.3290).
+// Every coefficient >= 0 and every row sums to 1: an RGB in [0,1] stays in [0,1] (each output channel is a weighted
+// mean of the inputs), greys (r = g = b) are unchanged, and no gamut mapping is needed. The panel's own primaries are
+// not published (R109: Sony ECX344A class, "up to 96 % DCI-P3" coverage), hence the half-strength option.
+constexpr float kSrgbToP3[3][3] = {{0.8224621f, 0.1775380f, 0.0000000f},
+                                   {0.0331942f, 0.9668058f, 0.0000000f},
+                                   {0.0170826f, 0.0723974f, 0.9105199f}};
+inline float PanelGamutStrength(int panelGamut) { return panelGamut == 1 ? 1.0f : panelGamut == 2 ? 0.5f : 0.0f; }
+// tm (display-linear, 0..2 before the clamp of the encode) -> tm + s (M tm - tm). Applied after the tone curve and
+// the hue-keep / gamut stage, before the 2.2 / sRGB encode and the dithers.
+inline void ApplyPanelGamut(float tm[3], float s) {
+  if (!(s > 0)) return;
+  float o[3];
+  for (int r = 0; r < 3; ++r) o[r] = kSrgbToP3[r][0] * tm[0] + kSrgbToP3[r][1] * tm[1] + kSrgbToP3[r][2] * tm[2];
+  for (int i = 0; i < 3; ++i) tm[i] += (o[i] - tm[i]) * s;
+}
 // Luminance-neutral warm gain for w in 0..1 (+R, -B: about -800 K around 6500 K at w = 1).
 inline void WarmGain(double w, float out[3]) {
   const double g[3] = {1 + 0.10 * w, 1.0, 1 - 0.16 * w};
@@ -442,6 +468,7 @@ inline ColorCb BuildCb(const ModeParams& p, bool sunValid, double sunY, uint32_t
   c.quad = quad ? 1.0f : 0.0f;
   c.auxOn = (p.glare || c.nvBlur > 0) ? 1.0f : 0.0f;
   c.debug = p.glare && p.glareDebug ? 1.0f : 0.0f;
+  c.panelGamut = PanelGamutStrength(p.panelGamut);  // R111
   return c;
 }
 inline bool UsesAux(const ColorCb& c) { return c.auxOn > 0; }
@@ -627,6 +654,7 @@ inline void Shade(const DcsTone& t, const ColorCb* c, const ShadeIn& in, float o
     const float hk = c->hueShadow + (c->hueKeep - c->hueShadow) * (t2 * t2 * (3 - 2 * t2));
     for (int i = 0; i < 3; ++i) tm[i] += (hp[i] - tm[i]) * hk;
   }
+  if (c) ApplyPanelGamut(tm, c->panelGamut);  // R111 [Color] PanelGamut (0: nothing)
   float g[3];
   for (int i = 0; i < 3; ++i) g[i] = std::pow(std::fabs(std::clamp(tm[i], 0.0f, 2.0f)), t.outputGammaInv);
   const int dm = c ? static_cast<int>(c->ditherMode + 0.5f) : 0;
