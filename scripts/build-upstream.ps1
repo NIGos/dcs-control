@@ -1,5 +1,6 @@
 #Requires -Version 7
-param([ValidateSet('ofxr-core','cheeky')][string]$Component = 'ofxr-core')
+# -Force: patch-cheeky.py discards local edits in external/cheeky instead of refusing to reset them.
+param([ValidateSet('ofxr-core','cheeky')][string]$Component = 'ofxr-core', [switch]$Force)
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $nativeWrapper = Join-Path $PSScriptRoot 'msvc.cmd'
@@ -7,7 +8,8 @@ $nativeSource = Join-Path $workspaceRoot ('external/' + $(if ($Component -eq 'of
 $nativeBuild = Join-Path $workspaceRoot ('artifacts/native/' + $Component)
 $nativeOptions = @('-DCMAKE_BUILD_TYPE=Release')
 if ($Component -eq 'cheeky') {
-    & python (Join-Path $PSScriptRoot 'patch-cheeky.py')
+    $patchOptions = @(if ($Force) { '--force' })
+    & python (Join-Path $PSScriptRoot 'patch-cheeky.py') @patchOptions
     if ($LASTEXITCODE -ne 0) { throw 'Cheeky adaptation failed.' }
 }
 if ($Component -eq 'ofxr-core') { $nativeOptions += @('-DXRFG_BUILD_LAYER=OFF','-DXRFG_BUILD_STANDALONE=OFF') }

@@ -1,5 +1,12 @@
 using DcsVr.Core;
 
+// TEST ONLY: set by the test suite's CLI parity test for its child process alone, never by the app, the installer or a
+// user. The child then sees what the test runner sees: no DCS running and the fixture GPU (an RTX 4090), not the PC's.
+if (Environment.GetEnvironmentVariable("DCSVR_TEST_NO_DCS") == "1")
+{
+    DcsProcess.Provider = () => [];
+    GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 4090", "NVIDIA", "32.0.15.0")];
+}
 try
 {
     var command = args.FirstOrDefault() ?? "help";

@@ -9,6 +9,7 @@ param([switch]$All, [string[]]$Paths)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $patterns = [ordered]@{
+    # [\\/]+: also escaped paths (C:\\Users\\..., in JSON and C# strings).
 
 
     'email'          = '@gmail\.com\b'
@@ -16,7 +17,7 @@ $patterns = [ordered]@{
 
 
 
-    'steam-library'  = '\b[A-Z]:[\\/]SteamLibrary\b'
+    'steam-library'  = '\b[A-Z]:[\\/]+SteamLibrary\b'
 }
 $allow = @()
 $allowFile = Join-Path $PSScriptRoot 'personal-data-allow.txt'

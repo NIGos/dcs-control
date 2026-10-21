@@ -37,7 +37,9 @@ public sealed record OriginalsBaseline
     public DateTimeOffset? LastActionAt { get; set; }
     public string? LastAction { get; set; }
     /// <summary>What the last complete apply installed whole (path → hashes), kept while an apply or Back to stock DCS
-    /// runs: a resumed run still tells the pilot's newer files from DCS Control's own.</summary>
+    /// runs: a resumed run still tells the pilot's newer files from DCS Control's own. Not written while null: 0.5.10
+    /// refuses unknown members, and Back to stock DCS after a downgrade must still read baseline.json.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, HashSet<string>>? LastInstalled { get; set; }
 }
 

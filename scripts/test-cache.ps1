@@ -3,7 +3,8 @@
 # read (Test-NativeTestEnvironmentName), this script and its caller, and DCS's own files they read (a DCS update runs
 # them again). A failed run leaves no stamp, so it runs again; DCSC_FORCE_TESTS=1 always runs.
 #   . (Join-Path $PSScriptRoot 'test-cache.ps1')
-#   if (-not (Test-NativeTestsCurrent $build @($testSource))) { ...ctest...; Save-NativeTestsPassed $build @($testSource) }
+#   $fingerprint = Get-NativeTestFingerprint $build @($testSource)   # before the run: an edit made during it runs them again
+#   if (-not (Test-NativeTestsCurrent $build $fingerprint)) { ...ctest...; Save-NativeTestsPassed $build $fingerprint }
 function Get-NativeTestFingerprint([string]$Build, [string[]]$Sources) {
     $sha = [Security.Cryptography.SHA256]::Create()
     $files = @(Get-ChildItem -LiteralPath $Build -Recurse -File -Include '*.exe', '*.dll' -ErrorAction SilentlyContinue |
@@ -50,14 +51,15 @@ function Get-DcsBinsForTests {
     }
     return @($bins | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique)
 }
-function Test-NativeTestsCurrent([string]$Build, [string[]]$Sources) {
+function Test-NativeTestsCurrent([string]$Build, [string]$Fingerprint) {
     if ($env:DCSC_FORCE_TESTS -eq '1') { return $false }
     $stamp = Join-Path $Build 'tests-passed.stamp'
     if (-not (Test-Path -LiteralPath $stamp)) { return $false }
-    if ((Get-Content -LiteralPath $stamp -Raw).Trim() -ne (Get-NativeTestFingerprint $Build $Sources)) { return $false }
+    if ((Get-Content -LiteralPath $stamp -Raw).Trim() -ne $Fingerprint) { return $false }
     Write-Host "Tests unchanged since they last passed in $Build; skipped (DCSC_FORCE_TESTS=1 runs them)."
     return $true
 }
-function Save-NativeTestsPassed([string]$Build, [string[]]$Sources) {
-    Set-Content -LiteralPath (Join-Path $Build 'tests-passed.stamp') -Value (Get-NativeTestFingerprint $Build $Sources) -Encoding ascii
+# $Fingerprint is the one taken before the run (Get-NativeTestFingerprint): what the tests actually ran against.
+function Save-NativeTestsPassed([string]$Build, [string]$Fingerprint) {
+    Set-Content -LiteralPath (Join-Path $Build 'tests-passed.stamp') -Value $Fingerprint -Encoding ascii
 }

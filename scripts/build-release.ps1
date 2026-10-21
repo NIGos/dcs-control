@@ -8,7 +8,13 @@ $env:DOTNET_CLI_TELEMETRY_OPTOUT='1'
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'
 $env:DOTNET_GENERATE_ASPNET_CERTIFICATE='false'
 $env:NUGET_PACKAGES=Join-Path $workspaceRoot '.cache/nuget'
-$env:DCSC_FORCE_TESTS='1'  # a release never trusts the native test cache (scripts/test-cache.ps1)
+# A release never trusts the native test cache (scripts/test-cache.ps1): DCSC_FORCE_TESTS=1 for the native builds'
+# own runs only; the caller's session keeps its value.
+function Invoke-WithFreshTests([scriptblock]$Build) {
+    $previous = $env:DCSC_FORCE_TESTS
+    $env:DCSC_FORCE_TESTS = '1'
+    try { & $Build } finally { $env:DCSC_FORCE_TESTS = $previous }
+}
 # Every copy of the shared-memory contract headers, the OFXR tree's included, must match before anything is built.
 & (Join-Path $PSScriptRoot 'check-contracts.ps1')
 $dotnet = Join-Path $workspaceRoot '.tools/dotnet/dotnet.exe'
@@ -80,7 +86,7 @@ Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/ofxr-djules75
 (Get-FileHash -LiteralPath $deferredOfxr -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($deferredOfxr + '.sha256') -Encoding ascii
 # DCS engine optimizations (scripts/build-dcsqvcull.ps1), installed in Saved Games\DCS\Scripts when the profile enables
 # them (the terrain prefetch fix included). Rebuilt and tested on every release so a stale DLL can never ship.
-& (Join-Path $PSScriptRoot 'build-dcsqvcull.ps1')
+Invoke-WithFreshTests { & (Join-Path $PSScriptRoot 'build-dcsqvcull.ps1') }
 New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/dcsqvcull') -Force | Out-Null
 foreach ($source in @('artifacts/native/dcsqvcull/DcsQvCull.dll','artifacts/native/dcsqvcull/DcsQvCullPayload.dll','native/dcsqvcull/lua/DcsQvCull.lua')) {
     $target = Join-Path $payloadRoot ('components/dcsqvcull/' + (Split-Path -Leaf $source))
@@ -88,7 +94,7 @@ foreach ($source in @('artifacts/native/dcsqvcull/DcsQvCull.dll','artifacts/nati
     (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($target + '.sha256') -Encoding ascii
 }
 # Pupil shift OpenXR layer (scripts/build-pupil-shift.ps1), deployed in the profile folder when the profile enables it.
-& (Join-Path $PSScriptRoot 'build-pupil-shift.ps1')
+Invoke-WithFreshTests { & (Join-Path $PSScriptRoot 'build-pupil-shift.ps1') }
 New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/pupilshift') -Force | Out-Null
 $pupilShift = Join-Path $payloadRoot 'components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/pupil-shift/XR_APILAYER_DCSVR_pupil_shift.dll') -Destination $pupilShift -Force

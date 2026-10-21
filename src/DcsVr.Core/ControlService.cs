@@ -389,15 +389,20 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         // Every file involved: everything DCS Control wrote, the selected DCS install and options, the managed folder.
         EnsureDcsClosed(baseline.Files.Select(f => f.Path).Concat(new[] { inventory.DcsExecutable, inventory.OptionsPath, ManagedRoot }.OfType<string>()), ManagedRoot);
         string? reason = null;
+        ApplyPlan? planned = null;
         if (applied is not null && SameDraft(draft, applied.Profile) && SamePaths(inventory, applied))
         {
             if (!TryUpdatePimaxFovea(applied, out var fovea)) reason = "Pimax Play's focus values could not be updated in place";
             else if (SavedRuntimeReplaced(draft, applied.Journal)) reason = "the saved DLSS 5 runtime copy was replaced";
-            else if (FrameCapChanged(draft, applied.Journal, inventory)) reason = "the headset's refresh rate changed";
             // The layer applies DCS's custom IPD itself and the profile turns DCS's option off; DCS turns it on again when the
             // pilot sets another IPD in DCS, so the profile is written again with the new value (not just switched off).
+            // Before the writers' check: the new IPD also changes PupilShift.ini.
             else if (draft.ForLaunch() is { Desktop: false, EyeDistance: EyeDistanceSource.DcsCustom, UsesLayerEyeDistance: true }
                      && inventory.DcsSettings.GetValueOrDefault("VR.custom_IPD_enable")?.Trim() == "true") reason = "DCS's custom IPD was changed in DCS";
+            // Before the frame limit: a new default (Frame generation only when needed) also changes the Match refresh
+            // limit, and that is not the headset's doing. The component settings never depend on the refresh rate.
+            else if (WritersChanged(draft, inventory, applied.Journal, out planned)) reason = "this version of DCS Control writes updated settings";
+            else if (FrameCapChanged(draft, applied.Journal, inventory)) reason = "the headset's refresh rate changed";
             else
             {
                 var journal = originals.ReadCurrent() ?? applied.Journal;
@@ -425,7 +430,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 }
             }
         }
-        var plan = Preview(draft, inventory);
+        var plan = planned ?? Preview(draft, inventory);
         var result = Apply(plan);
         var replacedProfile = applied?.Journal.ProfileId ?? baseline.Current?.ProfileId;
         // Pilots read the profile's name; the id stays in LaunchSync for the report's "Written over" line and tests.
@@ -466,6 +471,42 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             ?? inventory.DcsSettings.GetValueOrDefault("graphics.maxFPS");
         if (wanted is null || installed is null) return false;
         return !double.TryParse(installed, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var had) || Math.Abs(had - wanted.Value) > 0.01;
+    }
+
+    /// <summary>The component settings DCS Control generates (not copied files): OFXR, the engine module, Cheeky and the
+    /// pupil shift layer.</summary>
+    private static readonly string[] GeneratedConfigs = ["ofxr_bridge.ini", "DcsQvCull.ini", "CheekyFoveatedDLSS.ini", "PupilShift.ini"];
+
+    /// <summary>
+    /// This version's writers would install other component settings for the applied draft than the applied record
+    /// holds: an earlier version wrote them, or a new setting's default (read into the older profile.json) reaches the
+    /// files. Compared with the hash each journal entry recorded of the bytes it installed, records of 0.5.10 included
+    /// (new journal fields would make 0.5.10 refuse baseline.json, and Back to stock DCS after a downgrade must work).
+    /// The writers hold no timestamps and their machine-specific content (the DCS folder, the CPU count) is the same at
+    /// every launch, so the re-apply happens once: it records the new hashes. <paramref name="plan"/> is the plan when
+    /// it differs, for that re-apply.
+    /// </summary>
+    private bool WritersChanged(VrProfile draft, InventorySnapshot inventory, TransactionJournal journal, out ApplyPlan? plan)
+    {
+        plan = null;
+        ApplyPlan next;
+        try { next = Preview(draft, inventory); }
+        // A plan that cannot be built now (a component missing) is not this check's to report: the intact applied profile
+        // still launches, as before.
+        catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException) { return false; }
+        foreach (var name in GeneratedConfigs)
+        {
+            var wanted = next.Files.FirstOrDefault(f => Path.GetFileName(f.Path).Equals(name, StringComparison.OrdinalIgnoreCase));
+            var installed = journal.Entries.FirstOrDefault(e => Path.GetFileName(e.Path).Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (wanted is null && installed is null) continue;
+            if (wanted is null || installed is null || Hashing.BytesSha256(wanted.Content) != installed.InstalledSha256
+                || !Path.GetFullPath(wanted.Path).Equals(Path.GetFullPath(installed.Path), StringComparison.OrdinalIgnoreCase))
+            {
+                plan = next;
+                return true;
+            }
+        }
+        return false;
     }
 
     private static bool LuaDriftOnly(TransactionJournal journal)

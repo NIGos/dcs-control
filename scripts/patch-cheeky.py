@@ -4,19 +4,40 @@ Reset-then-apply, like the OFXR fork's patches: the patches only ever see a pris
 marker in the checkout's git folder records the hash of this script and patches/cheeky; while it matches, the tree is
 already patched and nothing runs. Otherwise every tracked file is restored, untracked files are removed (ignored build
 output stays), and the whole adaptation is applied again. Nothing is ever fetched.
+
+The marker also records the tree the apply left (a hash of `git diff HEAD` and the untracked file list). The reset
+refuses a tree that differs from it (local edits since the last apply, which it would erase) unless --force is given;
+a pristine tree, or one exactly as the last apply left it, resets without asking.
 """
 from pathlib import Path
 import hashlib
 import re
 import shutil
 import subprocess
+import sys
 
 root = Path(__file__).resolve().parent.parent
 source = root / 'external/cheeky'
 pinned_revision = 'd6c18b2'
+force = '--force' in sys.argv[1:]
 
 def git(*arguments):
     return subprocess.run(['git', '-C', str(source), *arguments], check=True, capture_output=True, text=True).stdout.strip()
+
+def tree_state():
+    """Hash of the tree's changes against HEAD (tracked diff and untracked, not ignored, files); None when pristine."""
+    diff = subprocess.run(['git', '-C', str(source), 'diff', 'HEAD', '--binary'], check=True, capture_output=True).stdout
+    untracked = subprocess.run(['git', '-C', str(source), 'ls-files', '--others', '--exclude-standard', '-z'], check=True, capture_output=True).stdout
+    if not diff and not untracked:
+        return None
+    return hashlib.sha256(diff + b'\0untracked\0' + b'\0'.join(sorted(untracked.split(b'\0')))).hexdigest()
+
+def read_marker():
+    """(patches hash, tree hash) from the marker; tree is None in a marker of an earlier version (one line)."""
+    if not marker.is_file():
+        return None, None
+    lines = marker.read_text(encoding='ascii').split()
+    return (lines[0] if lines else None), (lines[1] if len(lines) > 1 else None)
 
 def patch_hash():
     digest = hashlib.sha256(Path(__file__).resolve().read_bytes())
@@ -29,11 +50,23 @@ if not git('rev-parse', 'HEAD').startswith(pinned_revision):
     raise RuntimeError(f'external/cheeky is not at the pinned revision {pinned_revision}; check it out first (never fetched here)')
 marker = source / git('rev-parse', '--git-dir') / 'dcs-control-patches'  # an absolute git dir replaces source
 wanted = patch_hash()
-if marker.is_file() and marker.read_text(encoding='ascii').strip() == wanted:
+applied_patches, applied_tree = read_marker()
+if applied_patches == wanted:
     print('Cheeky patches unchanged since they were applied; skipped.')
     raise SystemExit(0)
-# A failed apply leaves no marker, so the next run resets again.
-marker.unlink(missing_ok=True)
+# The reset below erases every change in the tree: only ever this script's own. "partial" is an apply that failed
+# half-way (its own changes, whatever they are); a one-line marker of an earlier version recorded no tree.
+current_tree = tree_state()
+legacy = applied_patches is not None and applied_tree is None
+if current_tree is not None and applied_tree != 'partial' and not legacy and current_tree != applied_tree and not force:
+    sys.stderr.write('external/cheeky has local edits since the Cheeky patches were last applied (see git -C external/cheeky '
+                     'diff HEAD and its untracked files); resetting it would erase them. Move them into scripts/patch-cheeky.py '
+                     'or patches/cheeky, or stash them, then run again; or run with --force to discard them.\n')
+    raise SystemExit(1)
+if legacy and current_tree is not None:
+    print('The marker of an earlier patch-cheeky.py recorded no tree; resetting external/cheeky as before.')
+# A failed apply leaves a "partial" marker, so the next run resets again.
+marker.write_text('pending partial\n', encoding='ascii')
 git('checkout', '--', '.')
 git('clean', '-fdq')
 
@@ -1790,5 +1823,5 @@ if subprocess.run(shader_generator + ['--check'], capture_output=True, text=True
         raise RuntimeError('Cheeky shader compilation failed:\n' + generated.stdout + generated.stderr)
     print('Regenerated src/d3d_shaders.hpp from the patched shader sources.')
 
-marker.write_text(wanted + '\n', encoding='ascii')
+marker.write_text(wanted + ' ' + (tree_state() or 'pristine') + '\n', encoding='ascii')
 print('Applied opt-in DCS quad focus adapter to the pinned Cheeky source.')

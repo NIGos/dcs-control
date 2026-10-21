@@ -43,8 +43,11 @@ public sealed class ApplicationInstaller(string destination)
         ValidateJournalScope(journals);
         // An update cut short (power loss, the setup ended) is rolled back first, so the next update can run.
         var interrupted = journals.Where(j => j.Status is "prepared" or "applying" or "restore-conflicts").ToArray();
+        // A reinstall takes this same path, so the message says what clears it instead (a file held open, most often).
         foreach (var journal in interrupted)
-            if (!Transactions.Restore(journal.Id).Complete) throw new InvalidOperationException("The interrupted application update could not be rolled back; reinstall DCS Control.");
+            if (Transactions.Restore(journal.Id) is { Complete: false } failed)
+                throw new InvalidOperationException("The interrupted application update could not be rolled back" + (failed.Conflicts.Count > 0 ? " (" + failed.Conflicts[0] + ")" : "")
+                    + ". Close DCS Control and anything using its folder, then run the setup again; if it keeps failing, report it with the logs.");
         if (interrupted.Length > 0) journals = Transactions.List();
         if (journals.Any(j => j.Status is not ("applied" or "restored"))) throw new InvalidOperationException("Restore the interrupted application installation before updating.");
         var owned = CurrentOwned(journals);
