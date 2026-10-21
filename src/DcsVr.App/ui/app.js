@@ -257,8 +257,8 @@ function featureSummary(key, p) {
   }
   if (key === 'framegen') {
     if (p.frameGen === 'Off') return 'Off · rendered frames only';
-    const factor = p.frameGenFactor === 0 ? 'Auto 2×/3×' : p.frameGenFactor+'×';
-    return `${p.frameGen === 'Nvidia' ? 'NVIDIA' : 'FidelityFX'} · ${factor} · renders ${Number((refreshHz(p)/(p.frameGenFactor === 3 ? 3 : 2)).toFixed(1))} FPS`;
+    const factor = usesAdaptiveCadence(p) ? 'only when needed' : p.frameGenFactor === 0 ? 'Auto 2×/3×' : p.frameGenFactor+'×';
+    return `${p.frameGen === 'Nvidia' ? 'NVIDIA' : 'FidelityFX'} · ${factor} · renders ${usesAdaptiveCadence(p) ? 'up to ' : ''}${Number((refreshHz(p)/capDivider(p)).toFixed(1))} FPS`;
   }
   // The flight helpers on the same page run with or without CPU Boost.
   const vr = !p.desktop;
@@ -469,6 +469,10 @@ function captureHotkey(f) {
 // <uses-rules>
 /** quad: the bundled Quad Views (VrProfile.UsesBundledQuadViews); a blank layer folder is no folder. */
 const nr = p => p.neuralRendering, flow = p => p.frameGen === 'Nvidia', quad = p => p.quadViews === 'QuadViewsFoveated' && !String(p.quadViewsLayerDirectory ?? '').trim();
+/** Frame generation only when needed (VrProfile.UsesAdaptiveCadence): Auto only; a pinned 2× or 3× always generates. */
+const usesAdaptiveCadence = p => Boolean(p.frameGen !== 'Off' && !p.desktop && p.frameGenAdaptiveCadence && p.frameGenFactor === 0);
+/** The refresh rate divided by this is what DCS should render (FramePacing.CapDivider). */
+const capDivider = p => usesAdaptiveCadence(p) ? 1 : p.frameGen === 'Off' ? 1 : p.frameGenFactor === 3 ? 3 : 2;
 // </uses-rules>
 const coverageOwned = p => quad(p) || stereoCheeky(p);
 const boost = p => p.cpuBoost;
@@ -552,9 +556,10 @@ function buildFields() {
   field(c,'neuralMotionScaleX','Motion scale X','Horizontal motion vector multiplier.','number',[-4,4,.01],nr,'×');
   field(c,'neuralMotionScaleY','Motion scale Y','Vertical motion vector multiplier.','number',[-4,4,.01],nr,'×');
   // Frame generation page.
-  c = card('framegenControls','Frame generation','Adds generated frames between the frames DCS renders: DCS renders half (or a third) of the refresh rate, and the headset still gets a frame at every refresh.');
+  c = card('framegenControls','Frame generation','Adds generated frames between the frames DCS renders, so the headset gets a frame at every refresh even when DCS renders fewer.');
   field(c,'frameGen','Frame generation','NVIDIA Optical Flow needs an NVIDIA RTX card. FidelityFX works on any graphics card.','select',[['Off','Off'],['Nvidia','NVIDIA Optical Flow (RTX cards)'],['FidelityFx','FidelityFX Optical Flow (any card)']]);
   field(c,'frameGenFactor','Generated frames','Auto: DCS renders half the refresh rate, and a second generated frame is added only while DCS cannot keep up. 3×: DCS always renders a third, with more latency and more artifacts in sideways motion.','select',[[0,'Auto · 2×, 3× when DCS falls behind'],[2,'2× · one generated frame'],[3,'3× · two generated frames']],p => p.frameGen !== 'Off');
+  field(c,'frameGenAdaptiveCadence','Only when needed','On: DCS renders at the headset\'s refresh rate and frames are generated only when it falls behind, so you get less latency whenever DCS keeps up. Needs the DCS frame limit at Match refresh.','toggle',null,p => p.frameGen !== 'Off' && p.frameGenFactor === 0);
   field(c,'frameGenDeepPipeline','Smoothness buffer','On: holds one extra frame, which smooths out uneven DCS frame times but adds about 11 ms of latency (one refresh at 90 Hz). In 3× it uses the extra frame only when needed. Off: lower latency, more stutter when frame times vary.','toggle',null,p => p.frameGen !== 'Off');
   field(c,'frameGenHudSymbology','<span class="tag">EXPERIMENTAL</span> Sharp HUD','Keeps HUD and helmet symbols sharp in generated frames: they move at DCS\'s own HUD rate instead of smearing. Needs Depth boost. Costs about 0.15 ms of GPU and 160 MB of video memory.','toggle',null,p => p.frameGen !== 'Off' && usesDepthBoost(p));
   field(c,'smoothCursor','Smooth mouse cursor','Draws the mouse cursor at its in-between position in generated frames, so it moves smoothly. Where you click doesn\'t change.','toggle',null,p => p.frameGen !== 'Off');
@@ -570,7 +575,7 @@ function buildFields() {
   field(more,'diagnosticRecorder','OFXR log','Writes OFXR\'s log while you fly, for troubleshooting.','toggle',null,p => p.frameGen !== 'Off');
   field(more,'diagnosticFrameRecords','Per-frame records','Adds a line for every frame to the OFXR log, to find stutters. The log grows to 1 GB before it starts over.','toggle',null,p => p.frameGen !== 'Off' && p.diagnosticRecorder);
   c = card('pacingControls','DCS frame limit','Set in DCS\'s own settings at launch. Back to stock DCS puts your values back.');
-  field(c,'fpsLimit','Frame limit','Match refresh: DCS renders exactly the frames the headset needs (half or a third with frame generation), so none are wasted.','select',[['Preserve','Keep the current DCS limit'],['MatchRefresh','Match refresh (recommended)'],['RuntimeHeadroom','Very high (300 FPS)'],['Custom','Custom limit']]);
+  field(c,'fpsLimit','Frame limit','Match refresh: DCS renders exactly the frames the headset needs, so none are wasted: the full refresh rate, or half (a third) with frame generation always on. Frame generation only when needed uses the full refresh rate.','select',[['Preserve','Keep the current DCS limit'],['MatchRefresh','Match refresh (recommended)'],['RuntimeHeadroom','Very high (300 FPS)'],['Custom','Custom limit']]);
   field(c,'refreshFromHeadset','Read the refresh rate from the headset','Pimax Play: the rate the headset runs at now, or ran at in its last session. Sboys: SteamVR\'s refresh rate. Off: set it below.','toggle');
   field(c,'headsetRefreshHz','Headset refresh rate','Used when the refresh rate is not read from the headset, or before the headset software has reported one.','number',[50,240,.5],p => !p.refreshFromHeadset || !state?.headsetRefresh,'Hz');
   field(c,'renderedFpsCap','Custom limit','The most frames DCS renders per second.','number',[30,300,.5],p => p.fpsLimit === 'Custom','FPS');
@@ -1081,18 +1086,21 @@ function updatePanelScroll() {
   document.querySelector('.workflow').classList.toggle('more-above', top.scrollHeight - top.clientHeight - top.scrollTop > 1);
 }
 function renderCadence() {
-  const fg = profile.frameGen !== 'Off', multiplier = fg ? (profile.frameGenFactor === 3 ? 3 : 2) : 1, hz = refreshHz(profile), target = hz / multiplier;
+  // multiplier: the most displayed frames per rendered frame; target: what DCS should render (FramePacing.CapDivider),
+  // the full refresh rate with frame generation only when needed.
+  const fg = profile.frameGen !== 'Off', adaptive = usesAdaptiveCadence(profile), multiplier = fg ? (profile.frameGenFactor === 3 ? 3 : 2) : 1, hz = refreshHz(profile), target = hz / capDivider(profile);
   const detected = Number(state?.inventory?.dcsSettings?.['graphics.maxFPS']);
   const cap = profile.fpsLimit === 'Preserve' ? (Number.isFinite(detected) && detected > 0 ? detected : null) : profile.fpsLimit === 'RuntimeHeadroom' ? 300 : profile.fpsLimit === 'MatchRefresh' ? Math.max(30, target) : profile.renderedFpsCap;
   const n = value => Number(value.toFixed(3)).toLocaleString('en-US');
   const metrics = [
-    ['DCS NEEDS TO RENDER',n(target)+' FPS',fg ? (profile.frameGenFactor === 0 ? 'Half the refresh rate; a third while DCS falls behind.' : multiplier === 3 ? 'A third of the refresh rate.' : 'Half the refresh rate.') : 'The full refresh rate; frame generation is off.'],
+    ['DCS NEEDS TO RENDER',n(target)+' FPS',adaptive ? 'The full refresh rate; generated frames only while DCS falls behind.' : fg ? (profile.frameGenFactor === 0 ? 'Half the refresh rate; a third while DCS falls behind.' : multiplier === 3 ? 'A third of the refresh rate.' : 'Half the refresh rate.') : 'The full refresh rate; frame generation is off.'],
     ['DCS FRAME LIMIT',cap === null ? 'Not set' : n(cap)+' FPS',profile.fpsLimit === 'Preserve' ? (cap === null ? 'DCS has no limit set; left as it is.' : 'DCS\'s own limit, left as it is.') : 'Set in DCS at launch.'],
     ['HEADSET',n(hz)+' Hz' + (profile.refreshFromHeadset && state?.headsetRefresh ? ' · '+escape(state.headsetRefresh.source) : ''),fg ? `Up to ${n(cap === null ? hz : Math.min(hz,cap*multiplier))} FPS with generated frames.` : 'Set this refresh rate in Pimax Play or SteamVR.']
   ];
   $('cadenceMetrics').innerHTML = metrics.map(b => `<div class="budget"><span>${b[0]}</span><strong>${b[1]}</strong><p>${b[2]}</p></div>`).join('');
   const warnings = [];
-  if (cap !== null && cap + .01 < target) warnings.push(`The frame limit (${n(cap)} FPS) is below what DCS needs to render (${n(target)} FPS). Raise the limit or choose a lower headset refresh rate.`);
+  if (cap !== null && cap + .01 < target && adaptive) warnings.push(`Frame generation only when needed works when DCS's frame limit is the refresh rate (${n(hz)} FPS). With ${n(cap)} FPS, frames are always generated. Choose Match refresh.`);
+  else if (cap !== null && cap + .01 < target) warnings.push(`The frame limit (${n(cap)} FPS) is below what DCS needs to render (${n(target)} FPS). Raise the limit or choose a lower headset refresh rate.`);
   if (state?.inventory?.autoexecPath && (state.inventory.autoexecMaxFps !== null || state.inventory.autoexecPacingUnknown)) warnings.push('DCS\'s autoexec.cfg sets its own frame limit'+(state.inventory.autoexecMaxFps ? ' (max_fps = '+state.inventory.autoexecMaxFps+')' : '')+'. DCS Control leaves it as it is; make sure it does not hold DCS back.');
   $('cadenceWarnings').innerHTML = warnings.map(w => `<div class="issue Warning">${escape(w)}</div>`).join('');
 }
@@ -1160,7 +1168,7 @@ const CHECK_INFO = {
   'boost-launcher':['CPU Boost app lists',{page:'boost',label:'Open'}], 'boost-app-name':['CPU Boost app lists',{page:'boost',label:'Open'}], 'boost-app-wildcard':['CPU Boost app lists',{page:'boost',label:'Open'}],
   'boost-choice':['CPU Boost',{page:'boost',label:'Open'}], 'engine-prefetch':['Terrain prefetch fix',{reveal:'boostPrefetch',label:'Open'}], 'monitor-mode':['Monitor mode in flight',{reveal:'flightDisplayMode',label:'Open'}], 'boost-high-priority':['DCS priority',{reveal:'boostDcsPriority',label:'Open'}],
   'framegen-factor':['Generated frames',{reveal:'frameGenFactor',label:'Open'}], 'flow-preset':['Optical flow',{reveal:'flowPreset',label:'Open'}], 'flow-scale':['Optical flow',{reveal:'nvidiaFlowScale',label:'Open'}],
-  'fps-mode':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}], 'fps-under-target':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}],
+  'fps-mode':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}], 'fps-under-target':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}], 'adaptive-cadence-cap':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}],
   'refresh-rate':['Refresh rate',{reveal:'refreshFromHeadset',label:'Open'}], 'external-limiters':['Other FPS limits',null], 'runtime-reprojection':['Motion smoothing',null],
   'route-mismatch':['Headset route',{page:'setup',label:'Open'}], 'steamvr-not-found':['SteamVR',{guide:'steamvr',label:'Guide'}],
   'gaze-bridge-missing':['Eye tracking on Sboys',{guide:'gaze',label:'Guide'}], 'runtime':['OpenXR runtime',{page:'setup',label:'Open'}],
@@ -1269,7 +1277,9 @@ function renderFlight() {
     // Seconds at each level; 1× is full rate with generation paused (adaptive cadence).
     const g = f.framegen, total = (g.seconds1x || 0) + g.seconds2x + g.seconds3x;
     const parts = [['1×',g.seconds1x || 0],['2×',g.seconds2x],['3×',g.seconds3x]].filter(([,v]) => v > 0);
-    rows.push(['Frame generation',parts.length > 1 ? parts.map(([k,v]) => `${k} ${share(v/total)}`).join(' · ') : parts.length ? `${parts[0][0]} all flight` : '—',(g.adaptive ? 'Auto' : 'Fixed')+(g.switches ? ` · ${g.switches} switches` : '')]);
+    // With frame generation only when needed, the 1× share is the time DCS kept up on its own (no generated frames).
+    const one = g.seconds1x || 0, mode = one ? `Only when needed · no generated frames ${one === total ? 'all flight' : share(one/total)+' of the time'}` : g.adaptive ? 'Auto' : 'Fixed';
+    rows.push(['Frame generation',parts.length > 1 ? parts.map(([k,v]) => `${k} ${share(v/total)}`).join(' · ') : parts.length ? `${parts[0][0]} all flight` : '—',mode+(g.switches ? ` · ${g.switches} switches` : '')]);
   }
   if (f.frameTime) rows.push(['DCS frame time',`${fmt(f.frameTime.p50Ms,1)} ms`,`median · ${fmt(f.frameTime.p90Ms,1)} ms p90 · the slower of CPU and GPU`]);
   if (f.dlss5) rows.push(['DLSS 5',f.dlss5.state === 'ran' ? 'Ran' : f.dlss5.state === 'failed' ? 'Failed' : 'Not started',f.dlss5.state === 'failed' ? f.dlss5.error : [f.dlss5.version ? 'runtime '+f.dlss5.version : 'no 3D scene reached', f.dlss5.toggles ? `toggled ${f.dlss5.toggles}×, ${f.dlss5.onAtExit ? 'on' : 'off'} at exit` : null].filter(Boolean).join(' · '),f.dlss5.state === 'failed']);
@@ -1374,9 +1384,9 @@ const FEATURE_GUIDE = [
    needs:'Eye tracking (Pimax Crystal) for a focus area that follows your eyes.'},
   {section:'vr', page:'framegen', name:'Frame generation', impact:'Smoother', on:p => p.frameGen !== 'Off',
    gives:'Generated frames between the ones DCS renders, so the headset gets a frame at every refresh.',
-   expect:'Smooth motion even when DCS can\'t keep up. Auto picks 2× or 3× by itself.',
-   cost:'A little latency (more in 3×); the mouse moves at DCS\'s own frame rate unless Smooth mouse cursor is on.',
-   needs:'An NVIDIA RTX card, or FidelityFX on any card. With Engine Optimizations on, generated frames also use DCS\'s cockpit outline, depth and motion.'},
+   expect:'Smooth motion even when DCS can\'t keep up. With Auto and Only when needed (the default), DCS renders at the refresh rate and frames are generated only while it falls behind, so you get less latency whenever DCS keeps up.',
+   cost:'A little latency while frames are generated (more in 3×); the mouse moves at DCS\'s own frame rate unless Smooth mouse cursor is on.',
+   needs:'An NVIDIA RTX card, or FidelityFX on any card. Only when needed needs the DCS frame limit at Match refresh. With Engine Optimizations on, generated frames also use DCS\'s cockpit outline, depth and motion.'},
   {section:'vr', page:'dlss', name:'DLSS 5', impact:'New look', on:p => p.neuralRendering,
    gives:'NVIDIA\'s neural rendering reworks the image; with Quad Views, only where you look.',
    expect:'A different, more natural look of light and materials. Pair it with frame generation to keep the motion smooth.',

@@ -179,13 +179,14 @@ Settings:
 
 ![Framegen page](screenshots/framegen-auto-2x-3x.png)
 
-OFXR generates frames between the frames DCS renders. The top of the page shows what DCS needs to render for your headset refresh rate (for example 45 FPS for 90 Hz).
+OFXR generates frames between the frames DCS renders. The top of the page shows what DCS needs to render for your headset refresh rate (90 FPS for 90 Hz with Only when needed, 45 FPS with 2×).
 
 - **Frame generation** — *OFXR · NVIDIA Optical Flow* (needs an RTX GPU) or *FidelityFX*.
 - **Generated frames**
   - **2×** — DCS renders half the refresh rate (45 FPS at 90 Hz).
   - **3×** — DCS renders a third (30 FPS at 90 Hz): more headroom, but **more latency and more artifacts in sideways motion**.
   - **Auto 2×/3×** (default) — runs 2× while DCS can hold half the refresh rate with margin, drops to 3× when DCS falls behind, and tries 2× again later. The diagnostic panel shows "2x auto" / "3x auto".
+- **Only when needed** (on by default, with Auto only) — DCS renders at the headset's refresh rate, and frames are generated only when it falls behind. While DCS keeps up, its frames go straight to the headset (1×, about 45 ms less latency); when it can't, Auto 2×/3× takes over, and it goes back to 1× once there is headroom. It needs the **DCS frame limit** at **Match refresh** (90 FPS at 90 Hz): with a lower limit, DCS never keeps up and frames are always generated, and Checks tells you. Off, or with 2× or 3× chosen, frames are always generated.
 - **Smoothness buffer** (on by default) — keeps one more frame in flight: smoother when DCS frame times vary, but adds about one refresh of latency (about 11 ms at 90 Hz). Off = lower latency, more stutter when frame times jump.
 - **Sharp HUD** (EXPERIMENTAL, off by default, needs Depth boost) — DCS draws the HUD and helmet symbols into the image, so generated frames blend two positions of them and they smear. On: the engine module hands the symbols over separately, frame generation makes the in-between frame from the world alone and puts the symbols of the nearest real frame back. DCS itself moves HUD symbols 20 times a second, so they keep that rhythm instead of smearing. Measured gain is small (by day the sharpest symbols lose about 2 % instead of 5–6 % in the worst moments); it costs about 0.15 ms of GPU time and 160 MB of video memory.
 - **Smooth mouse cursor** (off by default) — DCS's mouse cursor is a small picture that frame generation cannot follow, so in generated frames it fades between where it was and where it is. On: generated frames find the cursor in the two real frames and draw it at its in-between position, so it moves at the headset's rate. Only the generated frames change; where you click doesn't change. When anything else could be the cursor (a look-alike symbol right next to it, or too much moving to search), that frame is left exactly as without the option. It works only while the mouse has moved in the last few seconds and costs about 0.05 ms of GPU time per real frame then (RTX 5090), nothing otherwise. See [Frame pacing](FRAME_PACING.md#smooth-mouse-cursor) for how to check it in a flight.
@@ -193,7 +194,7 @@ OFXR generates frames between the frames DCS renders. The top of the page shows 
 - **With Engine Optimizations on**, generated frames also use DCS's own cockpit outline, depth and motion: the cockpit stays still and moving scenery shows fewer artifacts. This costs no FPS. Without them, frame generation works as before.
 - **VectorXR** (if installed) is turned off when DCS Control starts DCS for VR, so its frame generation and Quad Views don't stack on the profile's own. Your other games keep it.
 - **Optical flow resolution / quality** and **bidirectional flow** — higher costs more GPU.
-- **DCS frame limit** — keep your current DCS limit (default), match the refresh rate, 300 FPS, or a custom value. Written to `options.lua` and restored with the originals.
+- **DCS frame limit** — keep your current DCS limit (default), match the refresh rate, 300 FPS, or a custom value. Match refresh is the full refresh rate with Only when needed, half (or a third in 3×) with frame generation always on. Written to `options.lua` and restored with the originals. Keeping your own limit never changes it: if it is below the refresh rate with Only when needed, Checks says so.
 - **Desktop VSync off** — stops VSync of the desktop DCS window from holding the frame rate back. Headset sync is unaffected.
 - **Before you fly:** turn off other limiters and smoothing that fight frame generation — NVIDIA *Max Frame Rate* / *Background Application Max Frame Rate*, RTSS, Pimax Smart Smoothing, SteamVR motion smoothing. The app does not change these; Checks reminds you.
 
@@ -345,7 +346,7 @@ The **OFXR FPS counter** and **OFXR log** stay on the Framegen page (frame gener
 After DCS exits, the **Overview** shows a summary read from the logs of that session (see the screenshot at the top):
 
 - **Headset** — average FPS delivered, share of time at the refresh rate, missed and discarded frames (Pimax runtime log).
-- **Framegen** — share of time at 2× and 3×, number of Auto switches.
+- **Framegen** — share of time at 1×, 2× and 3×, number of switches. With Only when needed, 1× is the time DCS kept up on its own, with no generated frames.
 - **Frame rate held** — shown when the headset software (motion smoothing) held DCS at a fraction of the refresh rate for at least half the flight without frame generation, with CPU and GPU to spare: no optimization can raise it. Needs Engine Optimizations.
 - **DCS frame time** — median and 90th percentile of DCS's CPU/GPU time per frame (with Auto 2×/3×).
 - **DLSS 5** — whether it ran, runtime version, hotkey toggles.
@@ -425,7 +426,7 @@ DLSS 5 and Foveated SR need the file name `dxgi.dll` in DCS's `bin` folder. When
 
 3× renders only a third of the refresh rate (30 FPS at 90 Hz), so the latency is higher by design (about 88 ms vs about 55 ms in 2× measured on an earlier build) and fast sideways motion shows more artifacts. Options:
 
-- Use **Auto 2×/3×** (default) so 3× is used only while DCS can't hold half the refresh rate.
+- Use **Auto 2×/3×** with **Only when needed** (the default) so frames are generated only while DCS falls behind, and 3× only while it can't hold half the refresh rate.
 - Lower the load so DCS stays in 2×: smaller **DLSS 5 area**, lower **working scale**, smaller Quad Views focus or DCS graphics settings.
 - In 2×, turning the **Smoothness buffer** off saves about one refresh (about 11 ms at 90 Hz), at the cost of more stutter when frame times jump.
 - The Last flight card tells you how much time you spent in 2× and 3×.

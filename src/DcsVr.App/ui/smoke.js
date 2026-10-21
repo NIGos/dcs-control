@@ -10,7 +10,7 @@ window.runWebSmoke = async function() {
     'neuralRendering','neuralRuntimePath','foveatedDlss','neuralFocusArea','focusDlssPreset','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity',
     'neuralStyle','keepOtherDxgi','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
-    'frameGen','frameGenFactor','frameGenDeepPipeline','frameGenHudSymbology','smoothCursor','nvidiaFlowScale','flowPreset','bidirectionalFlow','frameGenAsyncArm',
+    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenDeepPipeline','frameGenHudSymbology','smoothCursor','nvidiaFlowScale','flowPreset','bidirectionalFlow','frameGenAsyncArm',
     'showOverlay','diagnosticRecorder','diagnosticFrameRecords','fpsLimit','refreshFromHeadset','headsetRefreshHz','renderedFpsCap','disableDcsVSync',
     'cpuBoost','boostDcsPriority','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVram','freeVramApps','freeVramReopen',
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
