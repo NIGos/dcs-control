@@ -664,6 +664,7 @@ function buildFields() {
   const vrOnly = p => !p.desktop;
   c = card('colorControls','Color','How DCS\'s image looks in the headset. Changes apply in flight within a second.');
   field(c,'colorMode','Color mode','Off: DCS\'s own image. Fix: corrects DCS\'s VR color faults (greyish blacks, a small brightness step in the left eye) and otherwise looks like DCS; 0.05 ms. Enhanced: Fix plus a filmic look, richer color, golden-hour warmth, eye-like adaptation, night vision and glare; about 0.1 to 0.2 ms.','select',[['Off','Off · DCS\'s own image'],['Fix','Fix'],['Enhanced','Enhanced']],vrOnly);
+  field(c,'panelGamut','Panel color correction','DCS outputs sRGB colors; the Crystal Super\'s micro-OLED panels have a wider gamut (about DCI-P3) and Pimax does not convert, so colors can look over-saturated. Full maps sRGB to the panel\'s gamut; Half applies half of it. HUD and MFD symbols are not affected. Don\'t combine it with Pimax\'s own display color correction. Works with Fix and Enhanced.','select',[[0,'Off · default'],[1,'Full'],[2,'Half']],colorOn);
   more = disclosure(c,'Fix: advanced','Fine-tuning for Fix. The defaults are the module\'s own.');
   field(more,'colorFixExposureEv','Brightness','Fix: overall brightness.','number',[-2,2,.1],fixOn,'EV');
   field(more,'colorFixNightEv','Night brightness','Fix: extra brightness at night only. Raise it if nights are too dark.','number',[-2,2,.1],fixOn,'EV');
