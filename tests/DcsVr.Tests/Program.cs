@@ -454,7 +454,8 @@ Test("Triple frame generation writes the fork's triple_frame_gen and paces DCS a
         && ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia, BidirectionalFlow = true }).Contains("nvidia_occlusion_aware=0"));
     Require(ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia }).Contains("cockpit_mask=1") && ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia }).Contains("cockpit_depth=1"), "The cockpit mask and depth consumers are on with Framegen");
     Require(ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia }).Contains("dcs_motion=1") && ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.FidelityFx }).Contains("dcs_motion=0"), "DCS motion vectors on the NVIDIA path only");
-    Require(FramePacing.Multiplier(auto) == 2 && FramePacing.RequestedCap(auto) == 45 && ProfileValidation.Validate(auto).All(i => i.Code != "framegen-factor"));
+    // Auto with frame generation only when needed (the default) asks DCS for the full refresh rate; without it, half.
+    Require(FramePacing.Multiplier(auto) == 2 && FramePacing.RequestedCap(auto) == 90 && FramePacing.RequestedCap(auto with { FrameGenAdaptiveCadence = false }) == 45 && ProfileValidation.Validate(auto).All(i => i.Code != "framegen-factor"));
     Require(ConfigurationWriters.QuadViews(new VrProfile { QuadTurbo = true }).Contains("turbo_mode=1") && ConfigurationWriters.QuadViews(new VrProfile()).Contains("turbo_mode=0"));
     {
         var tracked = ConfigurationWriters.QuadViews(new VrProfile { FrameGen = FrameGeneration.Nvidia });
@@ -2105,7 +2106,8 @@ foreach (var mode in Enum.GetValues<FpsLimitMode>())
         var changes = f.Plan.Files.Single(file => file.Path == f.Options).LuaChanges!;
         Require(changes.Any(c => c.Path == "graphics.maxFPS") == (mode != FpsLimitMode.Preserve));
         var journal = f.Service.Apply(f.Plan); var lua = new LuaOptions(File.ReadAllText(f.Options));
-        var expected = mode == FpsLimitMode.Preserve ? 89 : mode == FpsLimitMode.RuntimeHeadroom ? 300 : mode == FpsLimitMode.MatchRefresh ? 45 : 47.5;
+        // Match refresh with Auto and frame generation only when needed (the defaults) is the full refresh rate.
+        var expected = mode == FpsLimitMode.Preserve ? 89 : mode == FpsLimitMode.RuntimeHeadroom ? 300 : mode == FpsLimitMode.MatchRefresh ? 90 : 47.5;
         Require(FramePacing.PositiveNumber(lua.Get("graphics", "maxFPS")) == expected);
         Require(lua.Get("graphics", "sync") == (mode == FpsLimitMode.Preserve ? "true" : "false"));
         Require(f.Service.PrepareLaunchApplied().FileName.EndsWith("DCS.exe"));
@@ -2132,10 +2134,10 @@ Test("Legacy profiles default to preserving all FPS controls", () =>
 Test("Disabling framegen removes the half-refresh cap", () =>
 {
     var p = new VrProfile { FpsLimit = FpsLimitMode.MatchRefresh, HeadsetRefreshHz = 90 };
-    Require(FramePacing.RequestedCap(p) == 90 && FramePacing.RequestedCap(p with { FrameGen = FrameGeneration.FidelityFx }) == 45);
+    Require(FramePacing.RequestedCap(p) == 90 && FramePacing.RequestedCap(p with { FrameGen = FrameGeneration.FidelityFx, FrameGenFactor = 2 }) == 45);
     var f = PacingFixture("fg-off", p); var journal = f.Service.Apply(f.Plan); Require(new LuaOptions(File.ReadAllText(f.Options)).Get("graphics", "maxFPS") == "90"); Require(f.Service.RestoreOriginals().Complete);
 });
-Test("Fractional refresh preserves half-rate precision", () => Require(FramePacing.RequestedCap(new() { FpsLimit = FpsLimitMode.MatchRefresh, HeadsetRefreshHz = 89.5, FrameGen = FrameGeneration.Nvidia }) == 44.75));
+Test("Fractional refresh preserves half-rate precision", () => Require(FramePacing.RequestedCap(new() { FpsLimit = FpsLimitMode.MatchRefresh, HeadsetRefreshHz = 89.5, FrameGen = FrameGeneration.Nvidia, FrameGenFactor = 2 }) == 44.75));
 Test("FPS settings reject nonfinite rates and unrecognized modes", () =>
 {
     foreach (var p in new[] { new VrProfile { HeadsetRefreshHz = double.NaN }, new() { HeadsetRefreshHz = 49 }, new() { RenderedFpsCap = double.PositiveInfinity }, new() { RenderedFpsCap = 29 }, new() { FpsLimit = (FpsLimitMode)90 } })
@@ -2143,10 +2145,34 @@ Test("FPS settings reject nonfinite rates and unrecognized modes", () =>
 });
 Test("FPS ceiling distinguishes fresh frames from the selected refresh", () =>
 {
-    var p = new VrProfile { FrameGen = FrameGeneration.Nvidia, FpsLimit = FpsLimitMode.Custom, RenderedFpsCap = 30, HeadsetRefreshHz = 90 };
+    var p = new VrProfile { FrameGen = FrameGeneration.Nvidia, FrameGenFactor = 2, FpsLimit = FpsLimitMode.Custom, RenderedFpsCap = 30, HeadsetRefreshHz = 90 };
     var plan = FramePacing.Describe(p); Require(plan.RequiredRenderedFps == 45 && plan.ConfiguredOutputCeiling == 60);
     Require(FramePacing.Checks(p, new()).Any(c => c.Id == "fps-under-target" && c.State == CheckState.Warning));
     Require(FramePacing.Describe(p with { RenderedFpsCap = 300 }).ConfiguredOutputCeiling == 90);
+});
+Test("Frame generation only when needed: default with Auto, adaptive_cadence and a full-refresh Match refresh", () =>
+{
+    bool Cadence(VrProfile p, int on) => ConfigurationWriters.Ofxr(p).ReplaceLineEndings("\n").Split('\n').Contains("adaptive_cadence=" + on);
+    var fg = new VrProfile { FrameGen = FrameGeneration.Nvidia, HeadsetRefreshHz = 90 };
+    Require(fg.FrameGenAdaptiveCadence && fg.FrameGenFactor == VrProfile.FrameGenAuto && fg.UsesAdaptiveCadence && Cadence(fg, 1), "default FG Nvidia Auto writes adaptive_cadence=1");
+    Require(!(fg with { FrameGenFactor = 3 }).UsesAdaptiveCadence && Cadence(fg with { FrameGenFactor = 3 }, 0) && Cadence(fg with { FrameGenFactor = 2 }, 0), "a pinned 2× or 3× writes 0");
+    Require(Cadence(fg with { FrameGenAdaptiveCadence = false }, 0), "the toggle off writes 0");
+    Require(!(fg with { Desktop = true }).UsesAdaptiveCadence && Cadence(fg with { Desktop = true }, 0) && Cadence(new VrProfile(), 0), "Desktop and frame generation off write 0");
+    var match = fg with { FpsLimit = FpsLimitMode.MatchRefresh };
+    Require(FramePacing.CapDivider(match) == 1 && FramePacing.RequestedCap(match) == 90 && FramePacing.RequestedCap(match with { FrameGenAdaptiveCadence = false }) == 45, "Match refresh = refresh with cadence, refresh/2 without");
+    var plan = FramePacing.Describe(match);
+    Require(plan.RequiredRenderedFps == 90 && plan.ConfiguredOutputCeiling == 90 && plan.CapDescription.StartsWith("The full refresh rate; generated frames only", StringComparison.Ordinal) && plan.Note.StartsWith("Calculated, not measured", StringComparison.Ordinal));
+    Require(FramePacing.Checks(match, new()).All(c => c.Id is not ("adaptive-cadence-cap" or "fps-under-target")), "Match refresh needs no frame limit check");
+    // Preserve keeps DCS's own 45 FPS limit (never changed silently): a warning, not "too low" (generated frames still fill the refresh).
+    var preserve = fg with { FpsLimit = FpsLimitMode.Preserve };
+    var inventory = new InventorySnapshot { DcsSettings = new Dictionary<string, string> { ["graphics.maxFPS"] = "45" } };
+    var checks = FramePacing.Checks(preserve, inventory);
+    Require(FramePacing.RequestedCap(preserve) is null && checks.Any(c => c.Id == "adaptive-cadence-cap" && c.State == CheckState.Warning && c.Detail.Contains("refresh rate")) && checks.All(c => c.Id != "fps-under-target"), "Preserve at 45 with cadence gives the check");
+    Require(FramePacing.Checks(preserve with { FrameGenAdaptiveCadence = false }, inventory).All(c => c.Id != "adaptive-cadence-cap"), "no cadence check without cadence");
+    Require(FramePacing.Checks(fg with { FpsLimit = FpsLimitMode.Custom, RenderedFpsCap = 60 }, new()).Any(c => c.Id == "adaptive-cadence-cap"), "a custom limit below the refresh rate too");
+    // An old profile.json without the field loads with the new default; an explicit false stays false.
+    Require(JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"legacy\",\"name\":\"Legacy\"}").FrameGenAdaptiveCadence
+        && !JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"x\",\"name\":\"X\",\"frameGenAdaptiveCadence\":false}").FrameGenAdaptiveCadence);
 });
 Test("Other limiters and motion smoothing stay manual checks", () =>
 {
@@ -4021,6 +4047,8 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         new() { Desktop = true, ColorMode = ColorMode.Enhanced, GVision = true, ColorModeKey = "120:6" }, eye with { GVision = true, GVisionUseGaze = true },
         eye with { GVision = true, GVisionUseGaze = false }, eye with { GazeDof = true }, new() { GazeDof = true }, eye with { QuadViewsLayerDirectory = "   " },
         eye with { QuadViewsLayerDirectory = @"C:\qv" }, eye with { Desktop = true, DepthBoost = true, GazeDof = true },
+        new() { FrameGen = FrameGeneration.Nvidia }, new() { FrameGen = FrameGeneration.FidelityFx, FrameGenFactor = 3 }, new() { FrameGen = FrameGeneration.Nvidia, FrameGenFactor = 2 },
+        new() { FrameGen = FrameGeneration.Nvidia, FrameGenAdaptiveCadence = false }, new() { FrameGen = FrameGeneration.Nvidia, Desktop = true }, new() { FrameGenAdaptiveCadence = true },
     ];
     var dir = PathPolicy.UnderRoot(root, "uses-rules"); Directory.CreateDirectory(dir);
     var profiles = Path.Combine(dir, "profiles.json"); File.WriteAllText(profiles, "[" + string.Join(",", table.Select(JsonData.Serialize)) + "]");
@@ -4037,7 +4065,7 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
           return {eyeTrackedVr:eyeTrackedVr(p), usesPupilShift:usesPupilShift(p), usesDepthBoost:usesDepthBoost(p), usesPerceptionLayer:Boolean(usesPerceptionLayer(p)),
             usesColorKey:usesColorKey(p), colorOn:Boolean(colorOn(p)), usesGazeDof:usesGazeDof(p), gVisionOn:gVisionOn(p), usesVisualRealism:Boolean(usesVisualRealism(p)),
             usesGazePublish:Boolean(usesGazePublish(p)), foveatedSr:foveatedSr(p), dlss:featureState(p).dlss, stereoCheeky:stereoCheeky(p), quad:Boolean(quad(p)),
-            nativeAllowed:Boolean(nativeAllowed(p)), depthMax:depthMax(p), resolvedFoveatedDlss:Boolean(r.foveatedDlss), resolvedQuadViews:r.quadViews, resolvedQuadFocusAdapter:r.quadFocusAdapter};
+            nativeAllowed:Boolean(nativeAllowed(p)), depthMax:depthMax(p), usesAdaptiveCadence:usesAdaptiveCadence(p), capDivider:capDivider(p), resolvedFoveatedDlss:Boolean(r.foveatedDlss), resolvedQuadViews:r.quadViews, resolvedQuadFocusAdapter:r.quadFocusAdapter};
         })`, {profiles});
         process.stdout.write(JSON.stringify(result));
         """);
@@ -4066,7 +4094,7 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
             ["usesColorKey"] = p.UsesColorModeKey, ["colorOn"] = p.UsesColorMode, ["usesGazeDof"] = p.UsesGazeDof, ["gVisionOn"] = p.UsesGVision, ["usesVisualRealism"] = p.UsesVisualRealism,
             ["usesGazePublish"] = p.UsesGazePublish, ["foveatedSr"] = p.UsesFoveatedDlss, ["dlss"] = p.UsesCheeky, ["stereoCheeky"] = p.UsesCheeky && p.QuadViews == QuadProvider.None,
             ["quad"] = p.UsesBundledQuadViews, ["nativeAllowed"] = ProfileValidation.ResolveFeatures(p with { QuadViews = QuadProvider.PimaxNative }).QuadViews == QuadProvider.PimaxNative,
-            ["depthMax"] = p.DepthBoostActiveMax, ["resolvedFoveatedDlss"] = resolved.FoveatedDlss, ["resolvedQuadViews"] = resolved.QuadViews.ToString(), ["resolvedQuadFocusAdapter"] = resolved.QuadFocusAdapter,
+            ["depthMax"] = p.DepthBoostActiveMax, ["usesAdaptiveCadence"] = p.UsesAdaptiveCadence, ["capDivider"] = (double)FramePacing.CapDivider(p), ["resolvedFoveatedDlss"] = resolved.FoveatedDlss, ["resolvedQuadViews"] = resolved.QuadViews.ToString(), ["resolvedQuadFocusAdapter"] = resolved.QuadFocusAdapter,
         };
         foreach (var (key, value) in expected)
         {

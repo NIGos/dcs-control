@@ -71,9 +71,14 @@ public sealed record VrProfile
     /// <summary>OFXR async_arm (fork patch 0050): frame generation for a new swapchain (leaving the F10 map) is prepared on
     /// a worker thread; frames pass through meanwhile. Off until flown; "Prepare in the background" in the Framegen page's Advanced fold.</summary>
     public bool FrameGenAsyncArm { get; init; }
-    /// <summary>OFXR adaptive_cadence (fork patch 0032): frame generation only when DCS falls below the refresh rate (a
-    /// full-rate 1X otherwise); DCS's frame limit must then be the refresh rate. Profile file only, off until flown.</summary>
-    public bool FrameGenAdaptiveCadence { get; init; }
+    /// <summary>OFXR adaptive_cadence (fork patches 0032, 0059, 0060): frame generation only when needed. DCS renders at
+    /// the full refresh rate; frames pass through (1X, less latency) while it holds that, and 2X/3X Auto takes over while
+    /// it falls behind. Needs DCS's frame limit at the refresh rate. "Only when needed" on the Framegen page, on by
+    /// default; it applies to Auto only (<see cref="UsesAdaptiveCadence"/>).</summary>
+    public bool FrameGenAdaptiveCadence { get; init; } = true;
+    /// <summary>Frame generation only when needed is in use: frame generation on, a VR flight, Generated frames Auto. A
+    /// pinned 2× or 3× always generates.</summary>
+    public bool UsesAdaptiveCadence => FrameGen != FrameGeneration.Off && !Desktop && FrameGenAdaptiveCadence && FrameGenFactor == FrameGenAuto;
     /// <summary>HUD symbology for frame generation (engine module R95, OFXR fork patch 0049): the HUD and helmet symbols
     /// are taken out of the real frames, the generated frames are made from the world alone and the symbols put back, so
     /// they stop smearing. Needs Depth boost's dual camera (the overlay render point). "Sharp HUD" on the Framegen page, off by default.</summary>
