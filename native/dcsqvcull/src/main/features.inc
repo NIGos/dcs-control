@@ -29,6 +29,7 @@
 #include "cascade_cache.h"  // R33: far shadow cascade static depth cache ([Shadows] CascadeCache, prototype)
 #include "chain_fast.h"  // R34: shorter terrain/forest culling chains ([D3D] ChainFast, default 7)
 #include "shader_fast.h"  // R36: wider grids for two single-SM kernels ([D3D] ShaderFast, default 0)
+#include "dlss_views.h"  // R122: per-view DLSS preset ([DLSS] PeripheryPreset / FocusPreset / IgnoreDriverPreset, default 0)
 #include "night_tone.h"   // R37: opt-in night darkening through DCS's tone mapper ([Night] NightTone, default 0)
 #include "run_threads.h"
 #include "frame_start.h"

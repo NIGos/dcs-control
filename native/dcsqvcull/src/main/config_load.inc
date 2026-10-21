@@ -141,6 +141,14 @@ void LoadConfig(bool initial) {
   c.suitePeriphLodTiming = (std::max)(0, (std::min)(99, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"PeriphLodTiming", 0, ini.c_str()))));
   c.suitePeriphLodImage = (std::max)(0, (std::min)(120, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"PeriphLodImage", 0, ini.c_str()))));
   c.suiteBenchPeripheralLod = GetPrivateProfileIntW(L"Suite", L"BenchPeripheralLod", 0, ini.c_str()) != 0;
+  {  // R122 [DLSS]: parsed by dlss_views.h (dlssv::ParsePreset) at each worker tick
+    wchar_t v[32] = {};
+    GetPrivateProfileStringW(L"DLSS", L"PeripheryPreset", L"0", v, 32, ini.c_str());
+    c.dlssPeripheryPreset = v;
+    GetPrivateProfileStringW(L"DLSS", L"FocusPreset", L"0", v, 32, ini.c_str());
+    c.dlssFocusPreset = v;
+    c.dlssIgnoreDriverPreset = GetPrivateProfileIntW(L"DLSS", L"IgnoreDriverPreset", 0, ini.c_str()) != 0;
+  }
   c.cascadeCache = GetPrivateProfileIntW(L"Shadows", L"CascadeCache", 0, ini.c_str()) != 0;
   c.cascadeCacheMask = qvini::Mask(L"Shadows", L"CascadeCacheMask", 0xc, 0xf, ini.c_str());  // decimal or 0x hex
   c.cascadeCacheMaxAge = (std::max)(1, (std::min)(64, static_cast<int>(GetPrivateProfileIntW(L"Shadows", L"CascadeCacheMaxAge", 4, ini.c_str()))));
