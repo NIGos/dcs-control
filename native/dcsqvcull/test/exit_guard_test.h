@@ -34,7 +34,7 @@ void PinSurvivesFreeLibrary() {
           "loader under the payload)");
     return;
   }
-  printf("SKIP exit pin: every candidate DLL already loaded\n");
+  QvSkip("exit pin: every candidate DLL already loaded\n");
 }
 
 // ---- crash 2: the status-word race ----
@@ -175,7 +175,7 @@ void MissionRestart() {
   using namespace gbrec;
   Job* j = NewJob();
   if (!j) {
-    printf("SKIP exit mission restart: no job memory\n");
+    QvSkip("exit mission restart: no job memory\n");
     return;
   }
   // The job's renderable -> item (persistent mission object, not on the frame heap).

@@ -1162,7 +1162,7 @@ void TestPure() {
 void TestSignatures() {
   const std::wstring bin = dcsinstall::Bin();
   if (bin.empty()) {
-    printf("SKIP ovl cpu signatures: DCS install not found\n");
+    QvSkip("ovl cpu signatures: DCS install not found\n");
     return;
   }
   HMODULE h[oc::kModCount] = {};
@@ -1183,7 +1183,7 @@ void TestSignatures() {
     sizeOf[m] = nt->OptionalHeader.SizeOfImage;
   }
   if (!mapped) {
-    printf("SKIP ovl cpu signatures: a DLL could not be mapped\n");
+    QvSkip("ovl cpu signatures: a DLL could not be mapped\n");
   } else {
     const char* why = oc::VerifySites(img, pref);
     if (why) printf("     (signature: %s)\n", why);
@@ -1291,7 +1291,7 @@ void TestReplica() {
   const D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_1};
   if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, want, 1, D3D11_SDK_VERSION, &H.dev, nullptr,
                                &H.imm))) {
-    printf("SKIP ovl cpu replica: no WARP 11.1 device\n");
+    QvSkip("ovl cpu replica: no WARP 11.1 device\n");
     return;
   }
   H.imm->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&g_c));
@@ -1996,7 +1996,7 @@ void TestReplica() {
     // A jump scene cut between frames (an F1 / F2 switch, or a false positive from a frame hitch: live 2026-10-14,
     // F-14A / A-10C, one every ~2 s): nothing is freed, the table is kept, the next frames stay moved (the old
     // behaviour put the displays at DCS's eye for the relearn: a jump of h against the bezels at every cut).
-    const uint32_t used0 = oc::g_learn.used;
+    const int used0 = oc::g_learn.used;
     scenecut::g_cuts++;
     scenecut::g_cutsByReason[scenecut::kJump]++;
     Tally tjump;

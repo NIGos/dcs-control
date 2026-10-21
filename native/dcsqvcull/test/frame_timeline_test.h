@@ -391,7 +391,7 @@ void Creates() {
   D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
   if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, &fl, 1, D3D11_SDK_VERSION, &dev, nullptr,
                                nullptr))) {
-    printf("SKIP timeline: no WARP device\n");
+    QvSkip("timeline: no WARP device\n");
     return;
   }
   void** vt = *reinterpret_cast<void***>(dev);

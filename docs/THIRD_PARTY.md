@@ -8,7 +8,6 @@
 | Quad-Views-Foveated | 1.1.3 / `957ff0327185ea29acc41fc86c4cdc3caf428fb9` | Locally compiled provider; MIT |
 | Sboys CustomHeadsetOpenVR | 1.3.0 / `21185da63a9e4307ae876b3702a43a43044d451c` | Official download/import only; GPL-2.0 source plus separate private binary functionality |
 | FidelityFX SDK | 1.1.4 / `c6efa6bf7f2027b3ec94f28578bb5965eabb9e55` | OFXR source build dependency; MIT |
-| NVIDIA NVAPI (declarations only) | `70d337d` (https://github.com/NVIDIA/nvapi) | A few declarations transcribed into the engine module's `nvapi_fgs_min.h`, which keeps NVIDIA's MIT notice; nvapi64.dll comes with the NVIDIA driver and is not bundled or linked; MIT |
 | VectorXR (DienerTech) | not used | Not used or distributed. DCS Control only sets `DISABLE_XR_APILAYER_DIENERTECH_VECTORXR=1` for the DCS processes it starts; some frame-generation ideas were compared with it, no code was copied; MPL-2.0 |
 | .NET | SDK 10.0.401 | Self-contained application runtime; Microsoft notices included in publish output |
 | Microsoft WebView2 SDK | 1.0.4258.31 | Managed browser host and native loader; SDK LICENSE and NOTICE included |

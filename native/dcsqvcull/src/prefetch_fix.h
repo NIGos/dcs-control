@@ -67,7 +67,7 @@ enum Mode : int { kOff = 0, kObserve = 1, kSkip = 2 };
 
 constexpr unsigned kSpinSkips = 256;    // consecutive skips on one thread...
 constexpr uint64_t kSpinWindowMs = 10;  // ...within this time: yield one tick
-constexpr uint32_t kDefaultWindowMs = 1000;
+constexpr uint32_t kDefaultWindowMs = 5000;  // R107: as shipped ([Prefetch] WindowMs)
 
 // Function addresses kept in this module's own data are stored XOR-encoded:
 // a scan of a module that contains this code (the offline tests scan their

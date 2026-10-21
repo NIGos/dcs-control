@@ -83,10 +83,6 @@ inline void SuffixedRun() {
   fd::CloseMappings();
   ck::CloseBoost();
   ck::CloseAck(0);
-  if (void* v = pifilt::g_gazeView.exchange(nullptr)) UnmapViewOfFile(v);
-  if (pifilt::g_gazeMap) CloseHandle(pifilt::g_gazeMap);
-  pifilt::g_gazeMap = nullptr;
-  pifilt::g_gazeTry = 0;
 
   Check(fd::GazeName() == gazeN && fd::DepthName() == depthN && fd::GridName() == gridN && ck::BoostName() == boostN &&
             ck::AckName() == ackN,
@@ -105,7 +101,6 @@ inline void SuffixedRun() {
   fd::OpenMappings();
   ck::OpenBoost(true);
   ck::OpenAck(true);
-  pifilt::OpenGaze();
 
   // The layer's side opens the engine's DepthIn, DepthGrid and StereoAck under the suffixed names.
   HANDLE ld = nullptr, lgr = nullptr, la = nullptr;
@@ -119,22 +114,16 @@ inline void SuffixedRun() {
   const bool grid = SameBlock(fd::g_gridView.load(), lgrv, 0x7903);
   const bool boost = SameBlock(lbv, ck::g_boostView.load(), 0x7904);
   const bool ack = SameBlock(ck::g_ackView.load(), lav, 0x7905);
-  const bool pif = SameBlock(lgv, pifilt::g_gazeView.load(), 0x7906);
   Check(gaze, "R79 suffixed run: fixation depth reads the layer's GazeOut under the suffixed name (N1)");
   Check(depth, "R79 suffixed run: fixation depth writes DepthIn under the suffixed name (N1)");
   Check(grid, "R79 suffixed run: fixation depth writes DepthGrid under the suffixed name (N1)");
   Check(boost, "R79 suffixed run: the dual camera reads BoostOut under the suffixed name");
   Check(ack, "R79 suffixed run: the dual camera writes StereoAck under the suffixed name");
-  Check(pif, "R79 suffixed run: the periphery filter reads the same suffixed GazeOut as fixation depth");
 
   // Teardown: the engine's views first (CloseMappings / CloseAck write their stop records), then the layer's.
   fd::CloseMappings();
   ck::CloseBoost();
   ck::CloseAck(0);
-  if (void* v = pifilt::g_gazeView.exchange(nullptr)) UnmapViewOfFile(v);
-  if (pifilt::g_gazeMap) CloseHandle(pifilt::g_gazeMap);
-  pifilt::g_gazeMap = nullptr;
-  pifilt::g_gazeTry = 0;
   Unmap(ld, ldv), Unmap(lgr, lgrv), Unmap(la, lav), Unmap(lg, lgv), Unmap(lb, lbv);
   fd::g_gazeName = oG, fd::g_depthName = oD, fd::g_gridName = oGr;
   ck::g_boostNameOverride = oB, ck::g_ackNameOverride = oA;

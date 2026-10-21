@@ -402,7 +402,7 @@ void TestDebugLayer() {
   const D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_1};
   if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_DEBUG, want, 1,
                                D3D11_SDK_VERSION, &dev, nullptr, &c))) {
-    printf("SKIP far depth debug layer: D3D11 SDK layers not installed (Graphics Tools)\n");
+    QvSkip("far depth debug layer: D3D11 SDK layers not installed (Graphics Tools)\n");
     return;
   }
   ID3D11InfoQueue* q = nullptr;
@@ -442,7 +442,7 @@ void TestPipeline() {
   const D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_1};
   if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, want, 1, D3D11_SDK_VERSION, &dev, nullptr,
                                &imm))) {
-    printf("SKIP far depth pipeline: no WARP 11.1 device\n");
+    QvSkip("far depth pipeline: no WARP 11.1 device\n");
     return;
   }
   ID3D11DeviceContext1* c = nullptr;
@@ -1884,15 +1884,15 @@ void TestPipeline() {
 void TestRealLayer() {
   wchar_t src[MAX_PATH] = {};
   if (!GetEnvironmentVariableW(L"DCSVR_QV_DLL", src, MAX_PATH)) {
-    printf("SKIP far depth real layer: DCSVR_QV_DLL (path of a Quad Views build) is not set\n");
+    QvSkip("far depth real layer: DCSVR_QV_DLL (path of a Quad Views build) is not set\n");
     return;
   }
   if (GetFileAttributesW(src) == INVALID_FILE_ATTRIBUTES) {
-    printf("SKIP far depth real layer: Quad Views build not found\n");
+    QvSkip("far depth real layer: Quad Views build not found\n");
     return;
   }
   if (GetModuleHandleW(L"XR_APILAYER_MBUCCHIA_quad_views_foveated.dll")) {
-    printf("SKIP far depth real layer: a Quad Views layer is already loaded in this process\n");
+    QvSkip("far depth real layer: a Quad Views layer is already loaded in this process\n");
     return;
   }
   wchar_t tmp[MAX_PATH] = {}, dir[MAX_PATH] = {}, dst[MAX_PATH] = {};
@@ -1901,13 +1901,13 @@ void TestRealLayer() {
   CreateDirectoryW(dir, nullptr);
   swprintf_s(dst, L"%ls\\XR_APILAYER_MBUCCHIA_quad_views_foveated.dll", dir);
   if (!CopyFileW(src, dst, FALSE)) {
-    printf("SKIP far depth real layer: copy failed (%lu)\n", GetLastError());
+    QvSkip("far depth real layer: copy failed (%lu)\n", GetLastError());
     RemoveDirectoryW(dir);
     return;
   }
   HMODULE m = LoadLibraryW(dst);
   if (!m) {
-    printf("SKIP far depth real layer: LoadLibrary failed (%lu); it may need the OpenXR loader\n", GetLastError());
+    QvSkip("far depth real layer: LoadLibrary failed (%lu); it may need the OpenXR loader\n", GetLastError());
     DeleteFileW(dst);
     RemoveDirectoryW(dir);
     return;

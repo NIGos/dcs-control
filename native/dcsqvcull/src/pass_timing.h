@@ -53,10 +53,6 @@ std::atomic<BoundaryFn> g_viewBoundary{nullptr};
 // a view's G-buffer passes), called after every other one at a start and
 // after every other one at an end; nullptr unless [Perception] FixationDepth.
 std::atomic<BoundaryFn> g_depthBoundary{nullptr};
-// Optional fifth boundary callback (periph_inst_filter.h, R38 rank 1: the periphery G-buffer's filtered
-// instance lists), called after every other one at a start and before every other one at an end, so its
-// work falls inside the pass's own GPU timing; nullptr unless [D3D] PeriphInstFilter or one of its phases.
-std::atomic<BoundaryFn> g_pifBoundary{nullptr};
 // The frame argument of the last top-level execute (diagnostics).
 std::atomic<uint64_t> g_execFrame{0};
 
@@ -71,20 +67,17 @@ void __fastcall Hook(void* pass, uint64_t frame) {
   BoundaryFn fl = g_flushBoundary.load(std::memory_order_relaxed);
   BoundaryFn vb = g_viewBoundary.load(std::memory_order_relaxed);
   BoundaryFn db = g_depthBoundary.load(std::memory_order_relaxed);
-  BoundaryFn pf = g_pifBoundary.load(std::memory_order_relaxed);
   if (!g_recording.load(std::memory_order_relaxed)) {
     AfterTopFn after = g_afterTop.load(std::memory_order_relaxed);
-    if (!after && !each && !bnd && !fl && !vb && !db && !pf) return g_orig(pass, frame);
+    if (!after && !each && !bnd && !fl && !vb && !db) return g_orig(pass, frame);
     if (each) each();
     if (fl) fl(pass, true, t_depth);
     if (bnd) bnd(pass, true, t_depth);
     if (vb) vb(pass, true, t_depth);
     if (db) db(pass, true, t_depth);
-    if (pf) pf(pass, true, t_depth);
     ++t_depth;
     g_orig(pass, frame);
     const bool top = --t_depth == 0;
-    if (pf) pf(pass, false, t_depth);
     if (vb) vb(pass, false, t_depth);
     if (bnd) bnd(pass, false, t_depth);
     if (fl) fl(pass, false, t_depth);
@@ -98,7 +91,6 @@ void __fastcall Hook(void* pass, uint64_t frame) {
   if (bnd) bnd(pass, true, t_depth);
   if (vb) vb(pass, true, t_depth);
   if (db) db(pass, true, t_depth);
-  if (pf) pf(pass, true, t_depth);
   int d = t_depth++;
   if (d < 64) t_childUs[d] = 0;
   LARGE_INTEGER a, b;
@@ -117,7 +109,6 @@ void __fastcall Hook(void* pass, uint64_t frame) {
     s.exclUs += excl;
     if (d == 0) g_topLevelUs += us;
   }
-  if (pf) pf(pass, false, d);
   if (vb) vb(pass, false, d);
   if (bnd) bnd(pass, false, d);
   if (fl) fl(pass, false, d);

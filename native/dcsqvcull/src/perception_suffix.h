@@ -10,12 +10,11 @@
 // zero-extending of bytes), and a value set with SetEnvironmentVariable at run time is seen (no CRT copy involved).
 //
 // When it is read: on every call. The engine calls it at each open attempt of a block (fixation_depth.h OpenMappings,
-// cockpit_ipd.h BoostName / AckName, periph_inst_filter.h OpenGaze) and at each install of the cockpit mask export
+// cockpit_ipd.h BoostName / AckName) and at each install of the cockpit mask export
 // (cockpit_mask.h Configure, whose names stay fixed while it is installed). A block already open keeps the name it was
 // opened with. The layer reads the variable once per instance; neither side expects it to change during a flight.
 //
-// Included from fixation_depth.h (and periph_inst_filter.h, a no-op after it) inside main.cpp's anonymous namespace,
-// before their own namespaces: no standard headers here, main.cpp has <windows.h> and <string>.
+// Included from fixation_depth.h inside main.cpp's anonymous namespace, before its own namespace: no standard headers here, main.cpp has <windows.h> and <string>.
 #pragma once
 
 namespace perc_sfx {

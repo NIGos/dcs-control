@@ -220,7 +220,7 @@ void Run() {
   {
     const wchar_t* dir = _wgetenv(L"QV_R36_STOCK_DIR");
     if (!dir || !*dir) {
-      printf("SKIP shader fast: DCS's stock bytecode (set QV_R36_STOCK_DIR to a folder of extracted .dxbc)\n");
+      QvSkip("shader fast: DCS's stock bytecode (set QV_R36_STOCK_DIR to a folder of extracted .dxbc)\n");
     } else {
       const std::vector<uint8_t> g = cftest::ReadAll(std::wstring(dir) + L"\\e837e87ef7fd45cada7f58d459f1d775.dxbc");
       const std::vector<uint8_t> c = cftest::ReadAll(std::wstring(dir) + L"\\8d918e57ed41b3c3389fee74bb5de7ce.dxbc");

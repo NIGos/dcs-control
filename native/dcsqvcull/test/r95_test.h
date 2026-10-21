@@ -155,7 +155,7 @@ void TestPure() {
   double worst = 0;
   for (int i = 0; i < 50; ++i) {
     const double px = 3 + i * 19.7, py = 7 + (i * 37) % 900;
-    double d[3], x, y;
+    double d[3], x = 0, y = 0;
     const bool ok = PixelDir(p, 1040, 1028, px, py, d) && DirPixel(p, 1040, 1028, d, x, y);
     worst = std::max(worst, ok ? std::max(std::fabs(x - px), std::fabs(y - py)) : 1e9);
   }

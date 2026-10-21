@@ -35,7 +35,10 @@ set_target_properties(DcsQvCullTests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE
 add_dependencies(DcsQvCullTests DcsQvCullFakePayload)
 add_custom_command(TARGET DcsQvCullTests POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:DcsQvCullFakePayload> $<TARGET_FILE_DIR:DcsQvCullTests>/qv_fake_payload.dll
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/lua/DcsQvCull.lua ${CMAKE_CURRENT_BINARY_DIR}/lua/DcsQvCull.lua)
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/lua/DcsQvCull.lua ${CMAKE_CURRENT_BINARY_DIR}/lua/DcsQvCull.lua
+  # The log-phrase and ini-key checks (R107) read the sources at ..\src next to test_main, as in the module's tree.
+  COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_CURRENT_BINARY_DIR}/src
+  COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_BINARY_DIR}/src)
 set(DCSQV_TEST_DIR ${CMAKE_CURRENT_BINARY_DIR}/test-run)
 file(MAKE_DIRECTORY ${DCSQV_TEST_DIR})
 add_test(NAME DcsQvCullTests COMMAND DcsQvCullTests WORKING_DIRECTORY ${DCSQV_TEST_DIR})

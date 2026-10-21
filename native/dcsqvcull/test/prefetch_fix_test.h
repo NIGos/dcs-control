@@ -140,10 +140,14 @@ void Pure() {
         "prefetch: mode names");
 
   // Faults are contained: a bogus image header, a no-access slot.
-  void* page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  // R107: the bogus NT header lies in the reserved, uncommitted second page of our own 2-page reservation (a sure
+  // fault). It was page + 0x7FFFFF00 before, which faulted only when nothing else happened to be mapped there (one
+  // failure in R107's merged-tree run).
+  void* page = VirtualAlloc(nullptr, 8192, MEM_RESERVE, PAGE_NOACCESS);
+  VirtualAlloc(page, 4096, MEM_COMMIT, PAGE_READWRITE);
   auto* dos = static_cast<IMAGE_DOS_HEADER*>(page);
   dos->e_magic = IMAGE_DOS_SIGNATURE;
-  dos->e_lfanew = 0x7FFFFF00;
+  dos->e_lfanew = 4096;
   pffix::Hit hits[4];
   int n = 0;
   void* pf[1] = {page};

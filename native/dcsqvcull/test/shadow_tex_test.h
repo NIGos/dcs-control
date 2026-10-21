@@ -108,7 +108,7 @@ struct LiveShader {
 void Run() {
   Compiler cc;
   if (!cc.Load()) {
-    printf("SKIP shadow tex masks: System32 d3dcompiler_47.dll not available\n");
+    QvSkip("shadow tex masks: System32 d3dcompiler_47.dll not available\n");
     return;
   }
   // Bazar copies (shadow_inst_test.h's temp folder; copied again if absent).
@@ -119,7 +119,7 @@ void Run() {
     sitest::CopyTree(sitest::kShaderDir, shaders, {L".fx", L".hlsl", L".h"}, L"fxo");
   }
   if (GetFileAttributesW((shaders + L"model\\def_material.fx").c_str()) == INVALID_FILE_ATTRIBUTES) {
-    printf("SKIP shadow tex masks: shader sources not found\n");
+    QvSkip("shadow tex masks: shader sources not found\n");
     return;
   }
 

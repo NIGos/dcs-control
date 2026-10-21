@@ -53,7 +53,7 @@ void Run() {
   CreateDirectoryW(mod.c_str(), nullptr);
   const bool copied = CopyFileW((exe + L"qv_fake_payload.dll").c_str(), (mod + L"DcsQvCull.dll").c_str(), FALSE) != 0;
   if (!newState || !openLibs || !loadString || !loadFile || !pcall || !toLString || !setTop || !closeState || !copied) {
-    printf("SKIP R63 Lua hook: lua.dll exports or the stand-in module unavailable\n");
+    QvSkip("R63 Lua hook: lua.dll exports or the stand-in module unavailable\n");
   } else {
     State L = newState();
     openLibs(L);

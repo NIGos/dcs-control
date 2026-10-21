@@ -74,7 +74,7 @@ const char kEngineAndPerception[] =
     "[Timing]\nShaderTimeCache=1\nTaskQueueClock=1\n[D3D]\nSplitFilter=1\nFilter=1\nMeter=1\n"
     "[Shadow]\nTightCasters=1\n[Prefetch]\nMode=skip\n[Governor]\nEnabled=1\n"
     "[Hotkeys]\nToggle=122:6\nDeveloperKeys=1\n[Bench]\nAutoStartSec=5\n"
-    "[Suite]\nBenchEngine=1\nGBufferRecVerifyLive=1\nHoldYawDeg=90\nGpuPassTiming=1\nGpuDedup=4\nProfile=1\n"
+    "[Suite]\nBenchEngine=1\nGBufferRecVerifyLive=1\nHoldYawDeg=90\nGpuPassTiming=1\nProfile=1\n"
     "[Perception]\nFixationDepth=1\nDepthGrid=1\nFarDepthExport=1\nCockpitTrueIpd=1\nCockpitTrueIpdOwnship=2\n"
     "CockpitTrueIpdHelmet=1\nCockpitTrueIpdToggle=118:6\nSceneCutReset=1\n";
 
@@ -122,7 +122,7 @@ void Config_() {
             !c.d3dFilter && !c.d3dMeter && !c.shadowTight && c.prefetchMode == 0 && !c.pacerLowPower && !c.diagnostics,
         "perception only: every engine optimization and diagnostics hook of the ini is off in the applied config");
   Check(!c.govEnabled && c.toggleVk == 0 && !c.developerKeys && c.benchAutoStartSec == 0 && !c.suiteBenchEngine &&
-            !c.suiteGBufferRecVerifyLive && c.holdYawDeg == -1 && !c.suiteGpuPassTiming && c.suiteGpuDedup == 0 &&
+            !c.suiteGBufferRecVerifyLive && c.holdYawDeg == -1 && !c.suiteGpuPassTiming &&
             !c.suiteProfile,
         "perception only: governor, engine key, developer keys, benchmark auto start and suite keys off");
   Check(c.fixationDepth && c.depthGrid && c.farDepthExport && c.cockpitTrueIpd == 1 && c.cockpitTrueIpdOwnship == 2 &&
@@ -292,6 +292,42 @@ void Collect() {
   g_origCollect = orig0;
 }
 
+// R107 (R106 F08): the fixation depth tick check needs a process without GraphicsCore.dll, and the full run maps it
+// early (gb_batch_test's build checks), so Perception() always skipped it there. The full run calls this first,
+// before any test maps a DCS binary; Perception() then notes it instead of skipping. QV_PO_ONLY runs it in place.
+bool g_earlyTickDone = false;
+void EarlyFixationTick() {
+  namespace ck = fixdepth::ckipd;
+  if (GetModuleHandleW(L"GraphicsCore.dll") || fixdepth::g_installed.load()) return;  // Perception() then SKIPs
+  const Config saved = g_cfg;
+  const std::wstring dir0 = g_dir;
+  const bool po0 = g_perceptionOnly.load();
+  g_dir = L"./";
+  WriteIni((std::string("[General]\nPerceptionOnly=1\n") + kEngineAndPerception).c_str());
+  LoadConfig(true);
+  ConfigurePerception();
+  const auto ptOrig0 = ptiming::g_orig;
+  ptiming::g_orig = nullptr;
+  TickFixationDepth();
+  Check(fixdepth::g_coneOn.load() && fixdepth::g_gridOn.load() && fixdepth::fdexport::g_on.load() &&
+            !fixdepth::g_installed.load(),
+        "perception only: fixation depth, DepthGrid and the far depth export reach their module (install retried "
+        "until GraphicsCore loads)");
+  Config off;
+  g_cfg = off;
+  ConfigurePerception();
+  if (!fixdepth::g_installed.load()) TickFixationDepth();
+  ptiming::g_orig = ptOrig0;
+  Check(!ck::Wanted() && !fixdepth::g_coneOn.load() && !fixdepth::fdexport::g_on.load(),
+        "perception only (early tick): the perception modules back off with the config");
+  DeleteFileW(L"./DcsQvCull.ini");
+  g_cfg = saved;
+  g_dir = dir0;
+  g_perceptionOnly = po0;
+  g_engineOff = false;
+  g_earlyTickDone = true;
+}
+
 void Perception() {
   namespace ck = fixdepth::ckipd;
   const Snap before = Take();
@@ -312,8 +348,10 @@ void Perception() {
               !fixdepth::g_installed.load(),
           "perception only: fixation depth, DepthGrid and the far depth export reach their module (install retried "
           "until GraphicsCore loads)");
+  } else if (g_earlyTickDone) {
+    printf("     (perception only: fixation depth tick checked by EarlyFixationTick at the start of the run)\n");
   } else {
-    printf("SKIP perception only: fixation depth tick (GraphicsCore loaded or fixation depth installed)\n");
+    QvSkip("perception only: fixation depth tick (GraphicsCore loaded or fixation depth installed)\n");
   }
   // Dual camera status: reported (configured bit) and published.
   const uint64_t dc = ck::DualCameraStatusNow();
@@ -393,7 +431,7 @@ void Device() {
   D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
   if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, &fl, 1, D3D11_SDK_VERSION, &dev, nullptr,
                                &imm))) {
-    printf("SKIP perception device: no WARP device\n");
+    QvSkip("perception device: no WARP device\n");
     return;
   }
   ID3D11DeviceContext* def = nullptr;

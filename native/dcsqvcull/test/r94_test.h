@@ -127,7 +127,7 @@ inline void TestWarp() {
   const D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
   if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, &fl, 1, D3D11_SDK_VERSION, &dev, nullptr,
                                &c))) {
-    printf("SKIP R94 SymbologyTrace WARP: no device\n");
+    QvSkip("R94 SymbologyTrace WARP: no device\n");
     return;
   }
   fixdepth::State& s = fixdepth::g_s;
@@ -138,7 +138,7 @@ inline void TestWarp() {
   ID3D11DeviceContext1* c1 = nullptr;
   c->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&c1));
   if (!c1) {
-    printf("SKIP R94 SymbologyTrace WARP: no ID3D11DeviceContext1\n");
+    QvSkip("R94 SymbologyTrace WARP: no ID3D11DeviceContext1\n");
     c->Release();
     dev->Release();
     return;
@@ -262,7 +262,14 @@ inline void TestWarp() {
   runFrame();  // traced 2
   const bool roles = tracedFrames.size() == 2 && !symtr::g_on.load() && !symtr::g_learn &&
                      symtr::g_hdr[0].res == nullptr && symtr::g_ldr[3].res == nullptr;
-  for (int f = 0; f < 4; ++f) runFrame();  // the copies mapped >= 2 frames later
+  // The copies are mapped >= 2 frames later without waiting, waiting from 30 frames on (sym_trace.h). R107: frames
+  // until they are (was a fixed 4: under CPU load WARP had not finished them, one failure in a parallel run), at
+  // most 40 (by then the module waits for the copy itself).
+  int drainFrames = 0;
+  for (; drainFrames < 40 && !(symtr::g_caps.empty() && !symtr::Busy()); ++drainFrames) {
+    if (drainFrames >= 4) Sleep(2);
+    runFrame();
+  }
   const bool drained = symtr::g_caps.empty() && !symtr::Busy();
   symtr::WriteFiles();
   Check(idleOk && learnNext && learnt && roles && drained,
@@ -323,7 +330,11 @@ inline void TestWarp() {
               "copy lines");
   // A view mask: only view 1 copied.
   symtrcfg::Configure(1, 0x2, 0, 0, base);
-  for (int f = 0; f < 7; ++f) runFrame();
+  for (int f = 0; f < 3; ++f) runFrame();  // the request, the learn frame, the traced frame
+  for (int f = 0; f < 40 && symtr::Busy(); ++f) {  // R107: until its copies are mapped (was 4 more frames)
+    if (f >= 4) Sleep(2);
+    runFrame();
+  }
   symtr::WriteFiles();
   const std::vector<std::wstring> ses2 = Sessions(base);
   int cap2 = -1;

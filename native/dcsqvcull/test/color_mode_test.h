@@ -5,6 +5,12 @@
 
 namespace cmtest {
 
+// R107: stand-ins for gpu_dedup.h's Map / Unmap hooks (archived): functions of this payload, never called (distinct
+// bodies, so the linker cannot fold them into one address).
+int g_r107MapCalls = 0, g_r107UnmapCalls = 0;
+void R107PayloadMapHook() { ++g_r107MapCalls; }
+void R107PayloadUnmapHook() { g_r107UnmapCalls += 2; }
+
 inline uint16_t FloatToHalf(float f) {
   uint32_t x;
   memcpy(&x, &f, 4);
@@ -1015,10 +1021,13 @@ inline void R81LiveSequence(Rig& r) {
   struct Run {
     double f1 = 0, f2 = 0, worst = 0, f27 = 0;
   };
-  auto runFrames = [&](double settled) {
+  // R107: firstDt > 0 sets frame 1's interval explicitly (the no-gap runs: under CPU load the time "as it comes" since
+  // the previous frame grew to a large part of the adaptation's tau and the ramp check failed in a parallel run);
+  // 0 keeps the clock as it comes for the runs whose gap the test made itself (lastQpc moved back).
+  auto runFrames = [&](double settled, double firstDt = 0) {
     Run o;
     for (int k = 1; k <= 27; ++k) {
-      frame(k == 1 ? 0 : kFrame);  // frame 1: the clock as it comes (the gap, if any, is real)
+      frame(k == 1 ? firstDt : kFrame);  // frame 1: the clock as it comes unless firstDt (the gap, if any, is real)
       const double e = std::fabs(std::log(adapted() / settled));
       if (k == 1) o.f1 = e;
       if (k == 2) o.f2 = e;
@@ -1062,11 +1071,16 @@ inline void R81LiveSequence(Rig& r) {
   settle();
   cpass::g_mode = 0;
   cpass::g_modeGen += 1;
-  cpass::g_rt.lastQpc.QuadPart -= f.QuadPart / 2;
   scene(true);
   cpass::g_modeFrom = 0;  // as Tick at 0 -> 2
   cpass::g_modeGen += 1;
   cpass::g_mode = 2;
+  {  // R107: 0.5 s before now, taken right before the frame (was "-= 0.5 s" from the last frame: under CPU load the
+     // real time on top of it crossed the 1 s gap and the reset was logged as a gap instead of the mode switch)
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    cpass::g_rt.lastQpc.QuadPart = now.QuadPart - f.QuadPart / 2;
+  }
   DrawView(r, cpass::kViewUnknown);
   const uint32_t logged1 = cpass::g_resetLogged.load();
   const Run shortOff = runFrames(settledY);
@@ -1088,7 +1102,7 @@ inline void R81LiveSequence(Rig& r) {
   settle();
   const double stepLn = std::log(settledY / settledX);
   scene(true);
-  const Run normal = runFrames(settledY);
+  const Run normal = runFrames(settledY, kFrame);  // R107: an explicit first interval (no gap in this run)
   const double movedFrac = 1 - normal.f27 / stepLn;
   const bool snapOk = up.f2 < 0.01 && up.worst < 0.01 && down.f2 < 0.01 && down.worst < 0.01 && upCalls.worst < 0.01 &&
                       shortOff.worst < 0.01 && gap.worst < 0.01 && mission.worst < 0.01;
@@ -1546,6 +1560,8 @@ inline void GpuTests() {
     Check(ps >= 0 && srv >= 0 && fixdepth::InD3d11(real[srv]) && !fixdepth::InD3d11(foreign) && armed && back,
           "colour pass R47: tone-map toggle points only over d3d11's own entries (a foreign hook left alone), all back");
   }
+  // R107: gpu_dedup.h (archived) held the Map / Unmap hooks R48 met; any function of this payload stands in for them
+  // (the rule is d3ds::InPayload, not the census itself).
   // R48: one rule for every toggle-point arm, counted. The state-call points never go over the split filter's hook
   // (R47 / R49); the basic points (Flush, Map, GetData, Unmap) never over another hook of this payload (gpu_dedup.h's
   // Map hook re-arms after each call it forwards: the same cycle), while a third-party hook there is chained over.
@@ -1557,7 +1573,7 @@ inline void GpuTests() {
     const int ps = g_tpSlot[kTpPSSetShader], srv = g_tpSlot[kTpPSSetSRV], map = g_tpSlot[kTpMap],
               flush = g_tpSlot[kTpFlush];
     void* const sfHook = sfilt::kHooks[sfilt::kPS];      // the split filter's PSSetShader hook
-    void* const gddMap = gdd::kHooks[gdd::sMap];         // gpu_dedup.h's Map hook (re-arms itself)
+    void* const gddMap = reinterpret_cast<void*>(&R107PayloadMapHook);  // stand-in: a Map hook of this payload
     void* const third = reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "Sleep"));
     fake[ps] = sfHook;
     fake[map] = gddMap;
@@ -1583,9 +1599,9 @@ inline void GpuTests() {
     }
     for (auto& a : g_tpArmed) a = false;
     g_tpAddedUnmap = false;
-    fake[g_tpSlot[kTpUnmap]] = gdd::kHooks[gdd::sUnmap];
+    fake[g_tpSlot[kTpUnmap]] = reinterpret_cast<void*>(&R107PayloadUnmapHook);
     ArmTpUnmap(fake.data());  // R32's point in another feature's arm: not over gpu_dedup.h's Unmap hook either
-    const bool unmap = fake[g_tpSlot[kTpUnmap]] == gdd::kHooks[gdd::sUnmap] && !g_tpArmed[kTpUnmap];
+    const bool unmap = fake[g_tpSlot[kTpUnmap]] == reinterpret_cast<void*>(&R107PayloadUnmapHook) && !g_tpArmed[kTpUnmap];
     DisarmTpUnmap(fake.data());
 #ifndef R48_PREFIX
     const bool counted = g_tpSkipForeign.load() >= skip0 + 3;

@@ -20,7 +20,7 @@ void BuildChecks() {
   uint8_t* dx = LoadBin(L"dx11backend.dll");
   uint8_t* md = LoadBin(L"ModelDesc.dll");
   if (!gc || !ng || !dx || !md) {
-    printf("SKIP gbuffer batch: DCS binaries not found\n");
+    QvSkip("gbuffer batch: DCS binaries not found\n");
     return;
   }
   const char* a = gbpass::VerifyBuild(gc);
@@ -175,7 +175,7 @@ void Predictor() {
 void GetSrvDifferential() {
   uint8_t* dx = LoadBin(L"dx11backend.dll");
   if (!dx || !shadowtex::CodeIs(dx, shadowtex::kGetSrv, shadowtex::kGetSrvEnd, shadowtex::kGetSrvHash)) {
-    printf("SKIP gbuffer batch: dx11backend getSRV not available\n");
+    QvSkip("gbuffer batch: dx11backend getSRV not available\n");
     return;
   }
   using RealFn = void*(__fastcall*)(void* tex, int64_t aux, const uint64_t* size);
@@ -265,7 +265,7 @@ void Animated() {
   uint8_t* ng = LoadBin(L"NGModel.dll");
   uint8_t* md = LoadBin(L"ModelDesc.dll");
   if (!ng || !md || !shadowtex::CodeIs(ng, 0xeb60, 0xebb3, 0x913bcabc38ea3e7cull)) {
-    printf("SKIP gbuffer batch: NGModel / ModelDesc not available\n");
+    QvSkip("gbuffer batch: NGModel / ModelDesc not available\n");
     return;
   }
   AnimEnv env;
@@ -511,7 +511,7 @@ void Planner() {
   uint8_t* md = LoadBin(L"ModelDesc.dll");
   uint8_t* ng = LoadBin(L"NGModel.dll");
   if (!md || !ng) {
-    printf("SKIP gbuffer batch: ModelDesc / NGModel not available\n");
+    QvSkip("gbuffer batch: ModelDesc / NGModel not available\n");
     return;
   }
   // Saved globals (restored at the end).
@@ -879,13 +879,13 @@ void Compare() {
       Check(why && strncmp(why, "MSAA", 4) == 0,
             "gbuffer verify: an MSAA target without an exact per-sample compare (B8G8R8A8) is refused");
     else
-      printf("SKIP gbuffer verify: WARP has no 4x B8G8R8A8 target\n");
+      QvSkip("gbuffer verify: WARP has no 4x B8G8R8A8 target\n");
     for (IUnknown* u : {static_cast<IUnknown*>(mrtv), static_cast<IUnknown*>(mdsv), static_cast<IUnknown*>(mrt),
                         static_cast<IUnknown*>(mds), static_cast<IUnknown*>(probeSrv), static_cast<IUnknown*>(probe),
                         static_cast<IUnknown*>(brtv), static_cast<IUnknown*>(brt)})
       if (u) u->Release();
   } else {
-    printf("SKIP gbuffer verify: WARP without 4x MSAA for R16G16B16A16_FLOAT, or no compiler\n");
+    QvSkip("gbuffer verify: WARP without 4x MSAA for R16G16B16A16_FLOAT, or no compiler\n");
   }
   gbverify::Shutdown();
   g_ctx = ctx0;

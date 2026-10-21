@@ -1,0 +1,16 @@
+diff --git a/include/xrfg/dcsvr_symbology.h b/include/xrfg/dcsvr_symbology.h
+--- a/include/xrfg/dcsvr_symbology.h
++++ b/include/xrfg/dcsvr_symbology.h
+@@ -66,9 +66,9 @@
+ //    on they are the shifted ones and the composition is off by the shift). focus_rect() MUST be given the original
+ //    FOVs when available. Where E's texels came from (the image DCS rendered with the shifted FOV) does not matter:
+ //    Quad Views stretches that image over the original FOV, and E with it.
+-//    TODO(R89, Dev): read Local\DcsVrPupilFov_v1 (Dev owns its layout; keyed by display time: the substituted FOV pairs
+-//    per view) in the writer's xrEndFrame commit and use the originals for this frame's displayTime; until then the
+-//    writer publishes fov_source_dcs_submitted. Its layout is deliberately NOT defined here.
++//    The writer reads Local\DcsVrPupilFov_v1 (dcsvr_pupil_fov.h, Dev's layout; keyed by display time: the substituted
++//    FOV pairs per view) in its xrEndFrame commit and publishes the originals for that frame's displayTime with
++//    fov_source_pupil_original; without the block or a matching record it publishes fov_source_dcs_submitted (R95).
+ //  - The rect: slot.focus.eye[e].rectNorm = (u0, v0, u1, v1), NORMALISED [0, 1] coordinates of the stereo eye image, u
+ //    right, v down (multiply by the eye image's width / height). Derived per frame from the FOV of view e (the
+ //    periphery: the stereo view's FOV, Quad Views' m_cachedEyeFov) and of view 2 + e (the focus), by tangents:

@@ -1002,10 +1002,20 @@ void TestBoostOut() {
     const std::wstring ours = GetEnvironmentVariableW(L"DCSQV_MODULE_SHM_H", own, MAX_PATH)
                                   ? std::wstring(own)
                                   : ExeDir() + L"..\\src\\dcsvr_perception_shm.h";
-    Check(ReadAll(wp, a) && ReadAll(ours.c_str(), b) && a == b,
-          "cockpit ipd T3: src/dcsvr_perception_shm.h is a byte-for-byte copy of the peer perception_shm.h");
+    // R107: identity as in the contract manifest (Dev's scripts\contracts.json): the content without CR bytes and a
+    // leading UTF-8 BOM (each tree keeps its own line endings). A difference FAILS; unset, this is a listed SKIP.
+    auto norm = [](std::string s) {
+      if (s.size() >= 3 && static_cast<uint8_t>(s[0]) == 0xEF && static_cast<uint8_t>(s[1]) == 0xBB &&
+          static_cast<uint8_t>(s[2]) == 0xBF)
+        s.erase(0, 3);
+      s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
+      return s;
+    };
+    const bool readA = ReadAll(wp, a), readB = ReadAll(ours.c_str(), b);
+    Check(readA && readB && norm(a) == norm(b),
+          "cockpit ipd T3: src/dcsvr_perception_shm.h is the peer perception_shm.h (CR / BOM-normalised, as the manifest)");
   } else {
-    printf("SKIP cockpit ipd T3 byte compare: QV_PERCEPTION_SHM_H not set (path of the peer perception_shm.h)\n");
+    QvSkip("cockpit ipd T3 byte compare: QV_PERCEPTION_SHM_H not set (path of the peer perception_shm.h)\n");
   }
   // The suffix variable names our mapping; the reader opens it read-only.
   char suffix[48];
@@ -1665,7 +1675,7 @@ void TestPipeline() {
   const D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_1};
   if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, want, 1, D3D11_SDK_VERSION, &dev, nullptr,
                                &imm))) {
-    printf("SKIP cockpit ipd pipeline: no WARP 11.1 device\n");
+    QvSkip("cockpit ipd pipeline: no WARP 11.1 device\n");
     return;
   }
   imm->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&g_c));
@@ -4357,7 +4367,7 @@ void TestOff() {
   const D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_1};
   if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, want, 1, D3D11_SDK_VERSION, &dev, nullptr,
                                &imm))) {
-    printf("SKIP cockpit ipd T8 table: no WARP device\n");
+    QvSkip("cockpit ipd T8 table: no WARP device\n");
     return;
   }
   fdexport::g_on = false;
@@ -4411,7 +4421,7 @@ void TestSplit(DXGI_FORMAT texFmt, bool msaa, bool debug, bool b7True = false) {
   const D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_1};
   if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, debug ? D3D11_CREATE_DEVICE_DEBUG : 0, want, 1,
                                D3D11_SDK_VERSION, &dev, nullptr, &imm))) {
-    printf("SKIP cockpit ipd T9 %s%s: no WARP%s device\n", fmtName, msaa ? " MSAA" : "", debug ? " debug" : "");
+    QvSkip("cockpit ipd T9 %s%s: no WARP%s device\n", fmtName, msaa ? " MSAA" : "", debug ? " debug" : "");
     return;
   }
   ID3D11DeviceContext1* c = nullptr;
@@ -5052,7 +5062,9 @@ void TestStereoAck() {
     end2(true, true);
     push(1.4f, recFrame++);
     end2(false, true);  // the sampled frame was gated (camera cut, gPrev check)
-    Sleep(5);
+    // R107: 20 ms, not 5: the per-second rate divides by GetTickCount64's delta (15.6 ms steps), which a 5 ms sleep
+    // left at 0 now and then (rate 0: "not ON"; one failure in R107's step runs). Still well inside the 200 ms window.
+    Sleep(20);
     const uint64_t wGate = ck::DualCameraStatusNow();
     push(1.4f, recFrame++);
     end2(false, false);

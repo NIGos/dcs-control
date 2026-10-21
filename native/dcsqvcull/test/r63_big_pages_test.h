@@ -56,7 +56,7 @@ void Run() {
   const bool tc0 = timercache::g_on.load(), fh0 = g_frameHeapOn.load(), as0 = g_allocSlabsOn.load();
   SharedRetired* sh = SharedList();
   if (!sh || sh->count != 0) {
-    printf("SKIP R63 big pages: shared list unavailable or in use\n");
+    QvSkip("R63 big pages: shared list unavailable or in use\n");
     return;
   }
   alignas(16) static uint8_t insn[5] = {0xB8, 0x00, 0xFE, 0x00, 0x00};

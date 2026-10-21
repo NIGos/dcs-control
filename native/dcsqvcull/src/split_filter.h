@@ -182,12 +182,6 @@ std::atomic<void (*)(void* ctx)> g_afterEcl{nullptr};
 inline void NotifyEcl(void* ctx) {
   if (auto f = g_afterEcl.load(std::memory_order_acquire)) f(ctx);
 }
-// R53: called before every ExecuteCommandList on an immediate context (focus_bcast_run.h closes an open broadcast
-// block first: a command list binds its own targets). Set by focus_bcast_run.h; nullptr when unused.
-std::atomic<void (*)(void* ctx)> g_beforeEcl{nullptr};
-inline void NotifyBeforeEcl(void* ctx) {
-  if (auto f = g_beforeEcl.load(std::memory_order_acquire)) f(ctx);
-}
 // Called after d3d11 rewrote the context table (slots 7..147: CSSetShader too) and our hooks went back in, on the
 // thread that found it (the filtering thread). Set by chain_fast.h (its CSSetShader hook goes back in as well).
 std::atomic<void (*)()> g_afterRewrite{nullptr};
@@ -387,7 +381,6 @@ void STDMETHODCALLTYPE H_ClearState(Ctx* c) {
   if (Mine(c)) g_sh.ForgetAll();
 }
 void STDMETHODCALLTYPE H_ExecuteCommandList(Ctx* c, ID3D11CommandList* l, BOOL restore) {
-  NotifyBeforeEcl(c);  // R53
   Reset(c);
   Orig<decltype(&H_ExecuteCommandList)>(kHExecuteCommandList)(c, l, restore);
   if (Mine(c)) g_sh.ForgetAll();

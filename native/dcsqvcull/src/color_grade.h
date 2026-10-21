@@ -1,30 +1,7 @@
-// [Color] opt-in post-tonemap grading (R40, docs\research\R40_color_oled.md).
-// Every key defaults to 0 = off; with all keys 0 nothing is built and nothing changes.
-//
-// What DCS writes (R40 [V]): ToneMappingPass encodes with pow(x, 1/outputGamma)
-// (Tonemap.fx LinearToScreenSpaceCustom, outputGamma 2.2 by default) into an
-// R8G8B8A8_UNORM target per HMD view (live log: format 28, 1040x1028 periphery,
-// 2028x2004 focus). DCS assumes a pure 2.2 power display. A runtime that treats
-// these bytes as sRGB shows the bottom codes far brighter than intended (byte 5:
-// 8.7x, byte 16: 2.3x), the "grey blacks" on an OLED.
-//
-// This header holds the pure parts: the configuration, a 256-entry per-channel
-// curve (the exact byte -> byte map the grading pass would apply to the LDR
-// image of every view, the same for all four views so focus / periphery seams
-// cannot appear), the saturation reference and the pass's HLSL. The D3D pass
-// itself (copy of the view's LDR box + one full-screen draw at the view's
-// ToneMappingPass end, before OverlayLDRPass so the HUD / MFD symbology is not
-// graded) is the next step; see R40 section 6. Until it is wired the keys only
-// log what they would do.
-//
-//   [Color]
-//   SrgbMatch=0     1: re-encode DCS's 2.2-power bytes for an sRGB-decoding
-//                   runtime (true black stays 0, near-black no longer lifted).
-//   BlackFloor=0    display-linear black floor to remove, in 1/10000 (e.g. 5 =
-//                   0.0005): L' = max(0, L - f) / (1 - f).
-//   Contrast=0      percent, S-curve around display mid-grey (log2 domain),
-//                   endpoints fixed (e.g. 10 = +10 %).
-//   Saturation=0    percent, Rec.709-luma preserving (e.g. 10 = +10 %, -10 less).
+// [Color] pure parts: the sRGB transfer functions, the R41 live probes (copy classification, half floats, HDR
+// downsample, luminance statistics) and the R42 colour modes' parameters ([ColorFix] / [ColorEnhanced], IniD /
+// ReadModeIni). The R40 opt-in grading ([Color] SrgbMatch / BlackFloor / Contrast / Saturation / OutputGamma, never
+// wired, superseded by the R42 modes) was removed in R107 (research_archive\R40_color_grading).
 #pragma once
 
 #include <windows.h>
@@ -37,108 +14,12 @@
 #include <cstring>
 #include <vector>
 
+#include "ini_read.h"  // R107: qvini::Double
+
 namespace cgrade {
-
-struct Params {
-  int srgbMatch = 0;   // 0 / 1
-  int blackFloor = 0;  // 1/10000 display-linear
-  int contrast = 0;    // percent
-  int saturation = 0;  // percent
-  float outputGamma = 2.2f;  // DCS option outputGamma (what the bytes were encoded with)
-};
-
-inline bool Active(const Params& p) {
-  return p.srgbMatch != 0 || p.blackFloor != 0 || p.contrast != 0 || p.saturation != 0;
-}
-
-// Clamp the keys to safe ranges (a typo must not black out the headset).
-inline Params Sanitize(Params p) {
-  p.srgbMatch = p.srgbMatch ? 1 : 0;
-  p.blackFloor = std::clamp(p.blackFloor, 0, 200);  // at most 0.02 display-linear
-  p.contrast = std::clamp(p.contrast, -50, 50);
-  p.saturation = std::clamp(p.saturation, -50, 50);
-  if (!(p.outputGamma >= 1.0f && p.outputGamma <= 3.5f)) p.outputGamma = 2.2f;  // DCS slider range
-  return p;
-}
 
 inline double SrgbEotf(double v) { return v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); }
 inline double SrgbOetf(double l) { return l <= 0.0031308 ? 12.92 * l : 1.055 * std::pow(l, 1.0 / 2.4) - 0.055; }
-
-// The display-linear value DCS meant for a channel code (pure power, its own assumption).
-inline double Intended(int code, double gamma) { return std::pow(code / 255.0, gamma); }
-
-// Contrast S-curve on display-linear luminance in the log2 domain around 0.18,
-// with the ends pinned: y = mid * 2^((log2(x/mid)) * k) blended back to x at 0 and 1.
-inline double ContrastCurve(double x, int contrastPct) {
-  if (contrastPct == 0 || x <= 0.0 || x >= 1.0) return x;
-  const double k = 1.0 + contrastPct / 100.0, mid = 0.18;
-  double y = mid * std::pow(x / mid, k);
-  // Pin the ends: weight the change by a bump that is 0 at x = 0 and x = 1.
-  const double w = std::clamp(4.0 * x * (1.0 - x) * 1.6, 0.0, 1.0);
-  y = x + (y - x) * w;
-  return std::clamp(y, 0.0, 1.0);
-}
-
-// The per-channel byte map. lut[i] = output code for input code i.
-inline void BuildCurve(const Params& in, uint8_t lut[256]) {
-  const Params p = Sanitize(in);
-  const double f = p.blackFloor / 10000.0;
-  for (int i = 0; i < 256; ++i) {
-    double l = Intended(i, p.outputGamma);
-    if (f > 0) l = std::max(0.0, l - f) / (1.0 - f);
-    l = ContrastCurve(l, p.contrast);
-    const double v = p.srgbMatch ? SrgbOetf(l) : std::pow(l, 1.0 / p.outputGamma);
-    lut[i] = static_cast<uint8_t>(std::clamp(std::lround(v * 255.0), 0l, 255l));
-  }
-}
-
-// Reference for the shader's saturation step (display-linear, Rec.709 luma kept).
-inline void Saturate(double rgb[3], int saturationPct) {
-  if (saturationPct == 0) return;
-  const double s = 1.0 + saturationPct / 100.0;
-  const double y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
-  for (int c = 0; c < 3; ++c) rgb[c] = std::clamp(y + (rgb[c] - y) * s, 0.0, 1.0);
-}
-
-// Full-screen grading PS for the D3D step: t0 = copy of the view's LDR box
-// (R8G8B8A8_UNORM, read as UNORM), t1 = the 256 x 1 R8_UNORM curve, b0.x = saturation
-// factor, b0.y = outputGamma. Output is written to DCS's UNORM target unchanged in
-// encoding (the curve already did any re-encode). Saturation runs before the curve,
-// in DCS's display-linear space, so it uses the intended light, not the bytes.
-inline const char* kPsHlsl = R"(
-Texture2D<float4> src : register(t0);
-Texture1D<float> curve : register(t1);
-cbuffer cb : register(b0) { float sat; float gam; float2 pad; };
-float4 main(float4 pos : SV_Position) : SV_Target {
-  float4 c = src.Load(int3(pos.xy, 0));
-  float3 l = pow(c.rgb, gam);
-  float y = dot(l, float3(0.2126, 0.7152, 0.0722));
-  l = saturate(y + (l - y) * sat);
-  float3 v = pow(l, 1.0 / gam);
-  int3 i = int3(round(v * 255.0));
-  return float4(curve.Load(int2(i.r, 0)), curve.Load(int2(i.g, 0)), curve.Load(int2(i.b, 0)), c.a);
-}
-)";
-
-// [Color] keys (all default 0). OutputGamma: DCS's Gamma option x 100 when not 2.2
-// (e.g. 200 = 2.0); 0 = 2.2.
-inline Params ReadIni(const wchar_t* ini) {
-  Params p;
-  p.srgbMatch = static_cast<int>(GetPrivateProfileIntW(L"Color", L"SrgbMatch", 0, ini));
-  p.blackFloor = static_cast<int>(GetPrivateProfileIntW(L"Color", L"BlackFloor", 0, ini));
-  p.contrast = static_cast<int>(GetPrivateProfileIntW(L"Color", L"Contrast", 0, ini));
-  p.saturation = static_cast<int>(GetPrivateProfileIntW(L"Color", L"Saturation", 0, ini));
-  const int g = static_cast<int>(GetPrivateProfileIntW(L"Color", L"OutputGamma", 0, ini));
-  if (g > 0) p.outputGamma = g / 100.0f;
-  return Sanitize(p);
-}
-
-inline bool Same(const Params& a, const Params& b) {
-  return a.srgbMatch == b.srgbMatch && a.blackFloor == b.blackFloor && a.contrast == b.contrast &&
-         a.saturation == b.saturation && a.outputGamma == b.outputGamma;
-}
-
-inline Params g_params;  // render thread reads once the pass is wired; Configure writes
 
 // ---------------------------------------------------------------------------
 // R41 live probes (dev, measure only; every key defaults to 0 = nothing armed).
@@ -382,13 +263,9 @@ inline bool OwnCurve(const ModeParams& p) { return p.slope > 0; }
 inline bool UsesState(const ModeParams& p) { return p.adaptBright > 0 || p.adaptDark > 0 || p.meterFocus > 0; }
 
 // One mode's section ([ColorFix] / [ColorEnhanced]); a missing key keeps the mode's default.
+// R107: the shared reader (ini_read.h, the same rule as main.cpp's ReadDouble).
 inline double IniD(const wchar_t* ini, const wchar_t* sec, const wchar_t* key, double dflt) {
-  wchar_t b[64] = {};
-  GetPrivateProfileStringW(sec, key, L"", b, 64, ini);
-  if (!b[0]) return dflt;
-  wchar_t* end = nullptr;
-  const double v = wcstod(b, &end);
-  return end != b ? v : dflt;
+  return qvini::Double(sec, key, dflt, ini);
 }
 inline ModeParams ReadModeIni(const wchar_t* ini, int mode) {
   ModeParams p = ModeDefaults(mode);

@@ -430,7 +430,7 @@ void CockpitDeviceTests(srtest::Compiler& comp) {
   pc.name = "gbuffer rec cockpit test";
   Job* j = NewJob();
   if (!pool.Start(d.dev, pc) || pool.At(0).ring.Mode() != defrec::CbMode::kOffsets || !j) {
-    printf("SKIP gbuffer rec cockpit device: no worker with constant-buffer offsets on this device\n");
+    QvSkip("gbuffer rec cockpit device: no worker with constant-buffer offsets on this device\n");
   } else {
     grtest::InitJob(*j, *w, t, tt);
     j->cockpit = true;
@@ -541,7 +541,7 @@ void CrashRegressionTests(ID3D11Device* dev) {
   pc.cb.mode = defrec::CbMode::kOffsets;
   pc.name = "gbuffer rec crash test";
   if (!g_pool.Start(dev, pc)) {
-    printf("SKIP gbuffer rec crash: no worker pool on this device\n");
+    QvSkip("gbuffer rec crash: no worker pool on this device\n");
     return;
   }
   g_pool.Disable("test: nothing is submitted");

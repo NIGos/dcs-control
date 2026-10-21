@@ -116,15 +116,6 @@
 // D3DKMT process handle (perf_mon.h). The offline tests key on it.
 #define QV_LONG_SESSION_FIXES 1
 
-// gpu_split.h (measure only, [Suite] GpuSplit; also called from gb_rec.h):
-// GPU query brackets and a mesh census around the recorders' replays. g_on
-// stays 0 unless that suite phase runs.
-namespace gsplit {
-std::atomic<int> g_on{0};
-void Bracket(int site, int idx, bool begin);
-void MeshDraw(int site, int idx, ID3D11Buffer* ib, DXGI_FORMAT fmt, UINT count, UINT weight, bool textured,
-              ID3D11Buffer* vb, UINT stride);
-}  // namespace gsplit
 
 namespace shrec {
 
@@ -4088,23 +4079,11 @@ void FirstCaster(PassCtx& pc) {
     } else {
       g_rtReplays += rt;
       g_ctx->CopyResource(cs.b7, t.b7);
-      const bool gs = gsplit::g_on.load(std::memory_order_relaxed) != 0;  // [Suite] GpuSplit
-      if (gs) gsplit::Bracket(0, pc.slot, true);
       const int64_t e0 = defrec::Qpc();
       for (ID3D11CommandList* l : pc.cl)
         if (l) g_ctx->ExecuteCommandList(l, TRUE);
       sfilt::NotifyEcl(g_ctx);  // d3d11 toggled the context table's draw / update entries (in-pass hooks repair)
       pc.executeNs = NsSince(e0);
-      if (gs) {
-        gsplit::Bracket(0, pc.slot, false);
-        const Job& gj = *pc.job;
-        for (uint32_t gi = 0; gi < gj.groupCount; ++gi) {
-          const Group& g = gj.groups[gi];
-          if (g.mesh)
-            gsplit::MeshDraw(0, pc.slot, g.mesh->ib, g.mesh->ibFormat, g.mesh->indexCount, g.count, gi >= gj.groupsTex,
-                             g.mesh->vb, g.mesh->stride);
-        }
-      }
       pflush::AfterExecute();  // [Model] PassFlush 0x20 (one relaxed load when off)
       if (sfilt::Live()) sfilt::g_sh.ForgetAll();  // restored exactly, but the filter's shadow is cheap to rebuild
       pc.state = kPsExecuted;

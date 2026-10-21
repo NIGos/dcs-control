@@ -570,7 +570,7 @@ void KillSwitchReplay() {
   Job* j = NewJob();
   uint8_t* bad = static_cast<uint8_t*>(VirtualAlloc(nullptr, 1 << 16, MEM_RESERVE, PAGE_NOACCESS));
   if (!j || !bad) {
-    printf("SKIP kill switch replay: no job memory\n");
+    QvSkip("kill switch replay: no job memory\n");
   } else {
     // Engine ON: a frame the recorder sees from its render entry; a job of that frame (its pass queued re-records).
     g_on = true;
@@ -679,7 +679,7 @@ void RecycledHeap() {
   using namespace gbrec;
   Job* j = NewJob();
   if (!j) {
-    printf("SKIP gbuffer rec recycled heap: no job memory\n");
+    QvSkip("gbuffer rec recycled heap: no job memory\n");
     return;
   }
   // The job's renderables: unmapped memory, as recycled frame-heap bytes give a garbage item pointer.
@@ -712,7 +712,7 @@ void RecycledHeap() {
   {
     shrec::Job* sj = shrec::NewJob();
     if (!sj) {
-      printf("SKIP shadow rec recycled heap: no job memory\n");
+      QvSkip("shadow rec recycled heap: no job memory\n");
     } else {
       uint8_t* bad3 = static_cast<uint8_t*>(VirtualAlloc(nullptr, 1 << 16, MEM_RESERVE, PAGE_NOACCESS));
       sj->n = 100;
@@ -876,11 +876,11 @@ void KmtFake() {
 // ---- D3DKMT GPU busy on this machine's first adapter (read-only statistics) ----
 void GpuBusy() {
   if (!perfmon::OpenFirstAdapter() || !perfmon::g_ad.haveDesc) {
-    printf("SKIP gpu busy: no DXGI adapter\n");
+    QvSkip("gpu busy: no DXGI adapter\n");
     return;
   }
   if (!perfmon::KmtOpen(perfmon::g_ad.desc.AdapterLuid)) {
-    printf("SKIP gpu busy: D3DKMT statistics not available\n");
+    QvSkip("gpu busy: D3DKMT statistics not available\n");
     return;
   }
   double a = -1, p = -1;

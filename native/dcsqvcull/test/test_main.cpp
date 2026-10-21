@@ -26,6 +26,28 @@ void PrintFailedChecks() {
   for (const std::string& s : g_failed) fprintf(stderr, "  FAIL %s\n", s.c_str());
   fflush(stderr);
 }
+// R107 (R106 F08): every SKIP goes through QvSkip, so the summary lists them (a SKIP is neither a pass nor a
+// failure, and a vacuous one used to be visible only by reading the whole log).
+std::vector<std::string> g_skipped;
+void QvSkip(const char* fmt, ...) {
+  char buf[1024];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  printf("SKIP %s", buf);
+  std::string s(buf);
+  while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+  g_skipped.push_back(s);
+}
+// The last lines of every run: the skipped checks, then "N failure(s), M skipped".
+void PrintSummary() {
+  if (!g_skipped.empty()) {
+    printf("SKIPPED (%zu):\n", g_skipped.size());
+    for (const std::string& s : g_skipped) printf("  SKIP %s\n", s.c_str());
+  }
+  printf("%d failure(s), %zu skipped\n", g_fail, g_skipped.size());
+}
 void Check(bool ok, const char* what) {
   printf("%s %s\n", ok ? "PASS" : "FAIL", what);
   if (!ok) {
@@ -251,9 +273,6 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "srv_tail_trim_test.h"
 #include "status_word_test.h"
 #include "prefetch_fix_test.h"
-#include "gpu_split_test.h"
-#include "gap_attrib_test.h"
-#include "gpu_dedup_test.h"
 #include "periph_lod_test.h"
 #include "robustness_test.h"
 #include "long_session_test.h"
@@ -269,16 +288,12 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "perception_only_test.h"  // [General] PerceptionOnly: perception features only, no engine module
 #include "cascade_cache_test.h"  // R33: far shadow cascade cache (math on census matrices, decisions, WARP replica)
 #include "chain_fast_test.h"  // R34: shorter culling chains (variants, creation hook, substitution, live check)
-#include "periph_inst_filter_test.h"  // R38 rank 1: periphery instance filter (bound, kernels, raster, DCS chain, boundaries)
 #include "shader_fast_test.h"  // R36: wider grids for single-SM kernels (variants, identification, Dispatch hook, live check)
 #include "night_tone_test.h"  // R37: [Night] opt-in night darkening through DCS's tone mapper (pure parts, hook, build checks)
-#include "color_grade_test.h"  // R40: [Color] opt-in grading, pure parts (curve, saturation, ini defaults, PS compiles)
+#include "color_grade_test.h"  // [Color] pure parts: the R41 probes (R40 grading removed in R107)
 #include "color_mode_test.h"  // R42 [Color] Mode: Fix / Enhanced (pure parts and the pass on WARP)
 #include "vrfx_test.h"  // R51 [VrFx] GazeDof / GVision (keys, physiology, state machines, the pass on WARP)
 #include "thread_place_test.h"  // R39: [Threads] census and worker placement (mask rule, queries, round trip)
-#include "focus_bcast_test.h"  // R38 rank 2: broadcast building blocks, FocusGeomProbe arm, keys off by default
-#include "vs_sig_probe_test.h"  // R38 rank 2 G4: VS signature sources probe (key default 0)
-#include "focus_bcast_run_test.h"  // R53: FastGS focus broadcast (pure parts, archive, end-to-end on the NVIDIA GPU)
 #include "frame_timeline_test.h"  // R52: per-frame timeline, pose probe, event log (keys default 0); placement re-check
 #include "r59_stop_passthrough_test.h"  // R59 L1: old payload hooks pass through after Stop
 #include "r59_inst_map_test.h"  // R59: shadow_inst maps reuse destroyed shaders' slots
@@ -309,6 +324,8 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "r95_hw_test.h"    // R95: the GPU cost bench (QV_R95_HW=1) and r95test::Run
 #include "r99_test.h"       // R99: the pose hook by displayTime; the symbology replay stage's cost
 #include "r101_test.h"      // R101: the learnt HUD field recovers after a bank (aging, recent fallback)
+#include "log_phrases_test.h"  // R107: the log phrases DCS Control parses stay in the source byte-exact
+#include "ini_keys_test.h"  // R107: every key the app writes is still read (live or retired)
 
 // R60: QV_TEST_LOAD=<n> (off by default): n busy threads of normal priority inside this process for the whole run.
 // An in-process stand-in for a machine loaded by another program (as DCS loading a mission); never an external load
@@ -325,6 +342,40 @@ void StartTestLoad() {
     }).detach();
 }
 
+// R107 (R106 F28): the run's files (bench_*.csv, report_*.txt, profile_*.txt, the test inis) go to
+// %TEMP%\qv_test_<pid>\ instead of test\ (509 bench files had piled up there). Paths next to the binary
+// (..\src, ..\lua) are taken from the exe's path, not the current directory, so they are unaffected.
+// The folder is removed at exit when no check failed (kept for inspection otherwise).
+std::wstring g_testOutDir;
+void CleanTestOutDir() {
+  if (g_testOutDir.empty() || g_fail) return;
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW((g_testOutDir + L"\\*").c_str(), &fd);
+  if (h != INVALID_HANDLE_VALUE) {
+    do
+      if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) DeleteFileW((g_testOutDir + L"\\" + fd.cFileName).c_str());
+    while (FindNextFileW(h, &fd));
+    FindClose(h);
+  }
+  wchar_t tmp[MAX_PATH] = {};
+  GetTempPathW(MAX_PATH, tmp);
+  SetCurrentDirectoryW(tmp);
+  RemoveDirectoryW(g_testOutDir.c_str());
+}
+void UseTempOutputDir() {
+  wchar_t tmp[MAX_PATH] = {};
+  GetTempPathW(MAX_PATH, tmp);
+  g_testOutDir = std::wstring(tmp) + L"qv_test_" + std::to_wstring(GetCurrentProcessId());
+  CreateDirectoryW(g_testOutDir.c_str(), nullptr);
+  if (!SetCurrentDirectoryW(g_testOutDir.c_str())) {
+    printf("     (test output: %ls not usable; files go to the current folder)\n", g_testOutDir.c_str());
+    g_testOutDir.clear();
+    return;
+  }
+  printf("     (test output folder: %ls)\n", g_testOutDir.c_str());
+  atexit(&CleanTestOutDir);
+}
+
 #ifdef QV_TEST_NO_MAIN
 int TestMain() {
 #else
@@ -333,11 +384,12 @@ int main() {
   if (getenv("QV_UNBUFFERED")) setvbuf(stdout, nullptr, _IONBF, 0);  // R97: the order of lines around a crash
   g_log = stdout;
   g_mute = true;
+  UseTempOutputDir();
   StartTestLoad();
   // QV_SF_STRESS=<n>: only the split-filter tests, n times (race hunting).
   if (const char* n = getenv("QV_SF_STRESS")) {
     for (int i = 0, k = atoi(n); i < k; ++i) sftest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_DEFREC_ONLY=1: only the deferred-recording tests (R15 A1 infrastructure).
@@ -348,65 +400,39 @@ int main() {
   }
   if (getenv("QV_DEFREC_ONLY")) {
     drtest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
-  // QV_GAPAT_ONLY=1: only the gap_attrib.h tests (gap split, clock calibration).
   if (getenv("QV_R95_ONLY")) {  // R95: only the symbology export's tests
     r95test::Run();
     r97test::Run();  // R97
     r99test::Run();  // R99
     r101test::Run();  // R101
-    printf("%d failure(s)\n", g_fail);
-    return g_fail ? 1 : 0;
-  }
-  if (getenv("QV_GAPAT_ONLY")) {
-    gatest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_FTL_ONLY=1: only the frame_timeline.h tests (R52).
   if (getenv("QV_FTL_ONLY")) {
     ftltest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
-  // QV_FBC_ONLY=1: only the focus_bcast.h tests (R38 rank 2).
-  if (getenv("QV_FBC_ONLY")) {
-    fbctest::Run();
-    fbcrtest::Run();
-    vsigtest::Run();
-    printf("%d failure(s)\n", g_fail);
-    return g_fail ? 1 : 0;
-  }
-  // QV_PLOD_ONLY=1: only the periph_lod.h / uav_overlap.h tests (R26 13).
+  // QV_PLOD_ONLY=1: only the periph_lod.h tests (R26 13).
   if (getenv("QV_PLOD_ONLY")) {
     plodtest::Run();
-    printf("%d failure(s)\n", g_fail);
-    return g_fail ? 1 : 0;
-  }
-  // QV_GDD_ONLY=1: only the gpu_dedup.h tests (content ids, signatures, capture record).
-  if (getenv("QV_GDD_ONLY")) {
-    gddtest::Run();
-    printf("%d failure(s)\n", g_fail);
-    return g_fail ? 1 : 0;
-  }
-  // QV_GSPLIT_ONLY=1: only the gpu_split.h tests (vertex cache model, reorder, merge).
-  if (getenv("QV_GSPLIT_ONLY")) {
-    gstest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_COCKPITIPD_ONLY=1: only the cockpit-at-true-IPD tests (cockpit_ipd.h, R31 option 3).
   if (getenv("QV_COCKPITIPD_ONLY")) {
     cktest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // R69: QV_MASK_ONLY=1: only the cockpit mask / depth companion tests.
   if (getenv("QV_MASK_ONLY")) {
     mask65test::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_FIXDEPTH_ONLY=1: only the fixation depth tests (Depth boost).
@@ -416,125 +442,122 @@ int main() {
     fartest::Run();
     mask65test::Run();
     cktest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_GOV_ONLY=1: only the R30 tests (perf sampler, detector, governor, status bits, log lines).
   if (getenv("QV_GOV_ONLY")) {
     govtest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_SHREC_ONLY=1: only the shadow recorder tests (R17 S1-S3).
   if (getenv("QV_SHREC_ONLY")) {
     srtest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_GBREC_ONLY=1: only the G-buffer recorder tests (R18 S1-S3).
   if (getenv("QV_GBREC_ONLY")) {
     grtest::Run();
     gbcktest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_VPROF_ONLY=1: only the synthetic pose and view profile tests.
   if (getenv("QV_VPROF_ONLY")) {
     vptest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_FSTART_ONLY=1: only the frame-start and runnable-threads counter tests (R22 E1, E3).
   if (getenv("QV_FSTART_ONLY")) {
     fsttest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_PFLUSH_ONLY=1: only the pass flush tests.
   if (getenv("QV_PFLUSH_ONLY")) {
     pftest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_SRVTRIM_ONLY=1: only the setShaderResources tail trim tests (R15 F2).
   if (getenv("QV_SRVTRIM_ONLY")) {
     strtest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_PFFIX_ONLY=1: only the terrain prefetch fix tests (prefetch_fix.h).
   if (getenv("QV_PFFIX_ONLY")) {
     pfxtest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_FWDREC_ONLY=1: only the forward recorder S0 counter tests (R21).
   if (getenv("QV_FWDREC_ONLY")) {
     frctest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_EXIT_ONLY=1: only the field-report 0.5.5 tests (DCS exit race, mission restart).
   if (getenv("QV_EXIT_ONLY")) {
     extest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_ROBUST_ONLY=1: only the robustness-round regression tests.
   if (getenv("QV_ROBUST_ONLY")) {
     rbtest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_LONGSESS_ONLY=1: only the long-session round's tests (reused meshes, table bounds, weights, pages, GPU share).
   if (getenv("QV_LONGSESS_ONLY")) {
     lstest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_VRAM_ONLY=1: only the GPU pass timing and VRAM census tests.
   // QV_CC_ONLY=1: only the R33 cascade cache tests.
   if (getenv("QV_CC_ONLY")) {
     cctest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_NT_ONLY=1: only the R37 night tone tests.
   if (getenv("QV_NT_ONLY")) {
     nttest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_SHF_ONLY=1: only the R36 shader fast tests.
   if (getenv("QV_SHF_ONLY")) {
     shfasttest::Run();
-    printf("%d failure(s)\n", g_fail);
-    return g_fail ? 1 : 0;
-  }
-  // QV_PIF_ONLY=1: only the R38 rank 1 periphery instance filter tests (QV_PIF_HW=1: also on the GPU).
-  if (getenv("QV_PIF_ONLY")) {
-    piftest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_CF_ONLY=1: only the R34 chain fast tests.
   if (getenv("QV_CF_ONLY")) {
     cftest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   // QV_PO_ONLY=1: only the [General] PerceptionOnly tests.
   if (getenv("QV_PO_ONLY")) {
     potest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
   if (getenv("QV_VRAM_ONLY")) {
     gpttest::Run();
     vctest::Run();
-    printf("%d failure(s)\n", g_fail);
+    PrintSummary();
     return g_fail ? 1 : 0;
   }
+  potest::EarlyFixationTick();  // R107: before any test maps GraphicsCore.dll (perception_only_test.h)
+  lptest::Run();  // R107: app-parsed log phrases
+  iktest::Run();  // R107: the app's ini keys, retired keys
   alignas(64) static uint8_t periph[0x700], focus[0x700];
   Vec3 eye{1000.0, 50.0, -2000.0}, fwd{0, 0, 1}, up{0, 1, 0};
   MakeFrustum(periph, eye, fwd, up, -1.2, 1.0, -1.1, 1.0, 0.05, 20000);  // ~50 deg half
@@ -1128,7 +1151,7 @@ int main() {
       DeleteFileW((L"./" + mine).c_str());
     }
     if (found && noSamples)
-      printf("SKIP profiler sampled the busy thread: the profiler got no stack samples (machine under load)\n");
+      QvSkip("profiler sampled the busy thread: the profiler got no stack samples (machine under load)\n");
     else
       Check(found && hasExe, "profiler sampled the busy thread");
   }
@@ -1216,6 +1239,27 @@ int main() {
         writeIni("");
         LoadConfig(true);
         Check(g_cfg.farDepthCoverageMode == 1, "ini: FarDepthCoverageMode absent -> hdr (the default)");
+        // R107 (R106 F06): a key missing from the ini behaves as DCS Control ships it (the code default equals the
+        // template's value), and a fresh Config agrees with the parse.
+        {
+          const Config fresh;
+          Check(g_cfg.shadowRecorderScope == 0x30f && fresh.shadowRecorderScope == 0x30f,
+                "R107 default: [Model] ShadowRecorderScope missing -> 0x30f (shipped)");
+          Check(g_cfg.gbufferRecorderScope == 0x10055 && fresh.gbufferRecorderScope == 0x10055,
+                "R107 default: [Model] GBufferRecorderScope missing -> 0x10055 (shipped)");
+          Check(g_cfg.gbufferRecorderByOrdinal && fresh.gbufferRecorderByOrdinal,
+                "R107 default: [Model] GBufferRecorderByOrdinal missing -> 1 (shipped)");
+          Check(g_cfg.prefetchWindowMs == 5000 && fresh.prefetchWindowMs == 5000 && pffix::kDefaultWindowMs == 5000,
+                "R107 default: [Prefetch] WindowMs missing -> 5000 (shipped; the module's own default too)");
+          Check(g_cfg.cockpitTrueIpdLighting && fresh.cockpitTrueIpdLighting,
+                "R107 default: [Perception] CockpitTrueIpdLighting missing -> 1 (shipped)");
+          Check(g_cfg.cockpitTrueIpdToggleVk == 0 && g_cfg.cockpitTrueIpdToggleMods == 0 &&
+                    fresh.cockpitTrueIpdToggleVk == 0 && fresh.cockpitTrueIpdToggleMods == 0,
+                "R107 default: [Perception] CockpitTrueIpdToggle missing -> 0:0, no live hotkey (shipped)");
+          Check(g_cfg.suiteBenchEngine && fresh.suiteBenchEngine,
+                "R107 default: [Suite] BenchEngine missing -> 1 (shipped)");
+          Check(g_cfg.suiteQuick && fresh.suiteQuick, "R107 default: [Suite] Quick missing -> 1 (shipped)");
+        }
         writeIni("[Perception]\nFarDepthCoverageMode=overlay\n");
         LoadConfig(true);
         Check(g_cfg.farDepthCoverageMode == 0, "ini: FarDepthCoverageMode=overlay -> overlay");
@@ -1363,7 +1407,7 @@ int main() {
     auto compile = dc ? reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(dc, "D3DCompile")) : nullptr;
     auto reflect = dc ? reinterpret_cast<decltype(&D3DReflect)>(GetProcAddress(dc, "D3DReflect")) : nullptr;
     if (!compile || !reflect) {
-      printf("SKIP shadow tex: d3dcompiler_47.dll not available\n");
+      QvSkip("shadow tex: d3dcompiler_47.dll not available\n");
     } else {
       const char* src =
           "Texture2D Diffuse; Texture2D NormalMap; Texture2D Unused; Texture2D Arr[3]; Texture2D DamageMask;\n"
@@ -1489,7 +1533,7 @@ int main() {
     if (!dcsinstall::Found()) {
       dcsinstall::Skip("shadow tex");
     } else if (!ngm || !dxm) {
-      printf("SKIP shadow tex: DCS binaries not found\n");
+      QvSkip("shadow tex: DCS binaries not found\n");
     } else {
       auto* ng = reinterpret_cast<uint8_t*>(ngm);
       auto* dx = reinterpret_cast<uint8_t*>(dxm);
@@ -1750,9 +1794,6 @@ int main() {
   swtest::Run();
   // Terrain prefetch fix: modes, window, spin guard, unload/reload safety, old dxgi2 fix take-over, log line.
   pfxtest::Run();
-  gstest::Run();
-  gatest::Run();
-  gddtest::Run();
   plodtest::Run();
   // Robustness round (2026-10-11): payload stop ordering, UTF-8 log lines, recorder start race, ...
   rbtest::Run();
@@ -1777,8 +1818,6 @@ int main() {
   cctest::Run();
   // R34 shorter culling chains: variants vs CPU transcription and stock stand-ins, hook path, live check, shutdown.
   cftest::Run();
-  // R38 rank 1 periphery instance filter: bound proof model, kernels vs CPU, raster exactness, verify, boundaries.
-  piftest::Run();
   // R36 wider grids for single-SM kernels: variants vs stock stand-ins, identification by output, Dispatch hook.
   shfasttest::Run();
   // R37 [Night]: opt-in night darkening through DCS's tone mapper (pure parts, hook on a fake module, build checks).
@@ -1790,11 +1829,6 @@ int main() {
   vfxtest::Run();
   // R39 [Threads]: worker placement off DCS's exclusive render core (all keys default 0), census queries.
   tptest::Run();
-  // R38 rank 2: focus/periphery geometry broadcast building blocks and the geometry-only probe (keys default 0).
-  fbctest::Run();
-  fbcrtest::Run();  // R53: FastGS focus broadcast
-  // R38 rank 2 gate G4: VS output-signature sources probe (key default 0).
-  vsigtest::Run();
   // R52: per-frame timeline / pose probe / event log (measure only, keys default 0), placement re-check cadence.
   ftltest::Run();
   // R59 bug-fix sweep 2.
@@ -1857,6 +1891,6 @@ int main() {
     }
     Check(hasConfig && hasProfile, "suite writes report with configuration and profile");
   }
-  printf("%d failure(s)\n", g_fail);
+  PrintSummary();
   return g_fail;
 }

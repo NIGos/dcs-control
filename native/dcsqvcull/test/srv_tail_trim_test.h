@@ -184,13 +184,13 @@ void RealBytes() {
   const std::wstring path = dcsinstall::Bin() + L"dx11backend.dll";
   HMODULE m = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_AS_IMAGE_RESOURCE | LOAD_LIBRARY_AS_DATAFILE);
   if (!m) {
-    printf("SKIP srv trim: %ls not mapped\n", path.c_str());
+    QvSkip("srv trim: %ls not mapped\n", path.c_str());
     return;
   }
   const uint8_t* base = sigscan::ImageBase(m);
   const uint32_t len = srvspan::kFnEnd - srvspan::kFn;
   if (shadowtex::Fnv(base + srvspan::kFn, len) != srvspan::kFnHash) {
-    printf("SKIP srv trim: dx11backend.dll is not the analysed build\n");
+    QvSkip("srv trim: dx11backend.dll is not the analysed build\n");
     FreeLibrary(m);
     return;
   }
@@ -332,12 +332,12 @@ void Device() {
                                &ic)) &&
       FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, &fl, 1, D3D11_SDK_VERSION, &dev, nullptr,
                                &ic))) {
-    printf("SKIP srv trim: no D3D11 device\n");
+    QvSkip("srv trim: no D3D11 device\n");
     return;
   }
   uint8_t* m = MakeFake();
   if (!m) {
-    printf("SKIP srv trim: fake module not writable\n");
+    QvSkip("srv trim: fake module not writable\n");
     ic->Release();
     dev->Release();
     return;
@@ -362,7 +362,7 @@ void Device() {
   bool made = rtv != nullptr;
   for (auto* v : srv) made &= v != nullptr;
   if (!made) {
-    printf("SKIP srv trim: views not created\n");
+    QvSkip("srv trim: views not created\n");
   } else {
     void* const setters[2] = {m + kThunkVs, m + kThunkPs};  // stage 0 VS, stage 4 PS
     static uint8_t self[kSelfBytes];
