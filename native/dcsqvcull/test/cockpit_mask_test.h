@@ -3120,6 +3120,111 @@ void TestPipeline() {
         run(4);
         settle();
       }
+      // R115 (H1): a reader-idle stretch in flight, then the reader back in the F10 map. The flight samples from before
+      // the idle stretch (and the quad frames culled during it) must not open the gate: the set is held (no relayout,
+      // no texture made, the same generation and handles) and resumes in flight. With the render thread waiting for
+      // the builder (5000 ms, as the frame-exact checks above) and without (0).
+      {
+        LARGE_INTEGER qf;
+        QueryPerformanceFrequency(&qf);
+        const int64_t F = qf.QuadPart;
+        for (int pass = 0; pass < 2; ++pass) {
+          cmask::g_buildWaitMs = pass == 0 ? 5000 : 0;
+          flight = true;
+          vpCut = 0;
+          run(4);
+          settle();
+          const Rec a = rec();
+          beating = false;
+          cm::reader_heartbeat(blk, qpcNow() - F * 21 / 10);  // stale: idle from the next frame
+          run(1);
+          const bool wentIdle = cmask::g_idleA.load();
+          const uint64_t q0 = g_quadFrame.load(), k0 = cmask::g_commits.load();
+          run(4);  // idle frames in flight: quad frames culled, no commit
+          const bool idleFlight =
+              cmask::g_idleA.load() && g_quadFrame.load() >= q0 + 4 && cmask::g_commits.load() == k0;
+          const uint64_t rl0 = cmask::g_relayouts.load(), tc0 = cmask::g_texCreates.load(),
+                         mh0 = cmask::g_mapHolds.load(), bn0 = cmask::g_buildN.load(),
+                         bd0 = cmask::g_buildsDiscarded.load();
+          flight = false;  // the reader back while the F10 map is shown
+          vpCut = 6;
+          beating = true;
+          run(4);
+          const Rec m = rec();
+          const bool resumed = !cmask::g_idleA.load();
+          bool held = true;
+          for (int k = 0; k < 3; ++k) held = held && sameSet(a, m, k) && !act(m, k);
+          const bool counted = cmask::g_relayouts.load() == rl0 && cmask::g_texCreates.load() == tc0 &&
+                               cmask::g_mapHolds.load() == mh0 + 1 && cmask::g_buildN.load() == bn0 &&
+                               cmask::g_buildsDiscarded.load() == bd0;  // no set requested on the map
+          flight = true;  // F10 exit
+          vpCut = 0;
+          run(3);
+          const Rec b = rec();
+          bool back = cmask::g_texCreates.load() == tc0 && cmask::g_relayouts.load() == rl0;
+          for (int k = 0; k < 3; ++k) back = back && sameSet(a, b, k) && act(b, k);
+          const bool ok = wentIdle && idleFlight && resumed && held && counted && back;
+          if (!ok)
+            printf("     (R115 H1 pass %d: idle %d, idle flight %d, resumed %d, held %d (generation %u -> %u), counted %d "
+                   "(relayouts +%llu, textures +%llu, holds +%llu, builds +%llu, discarded +%llu), back %d)\n",
+                   pass, wentIdle, idleFlight, resumed, held, a.gen[0], m.gen[0], counted,
+                   static_cast<unsigned long long>(cmask::g_relayouts.load() - rl0),
+                   static_cast<unsigned long long>(cmask::g_texCreates.load() - tc0),
+                   static_cast<unsigned long long>(cmask::g_mapHolds.load() - mh0),
+                   static_cast<unsigned long long>(cmask::g_buildN.load() - bn0),
+                   static_cast<unsigned long long>(cmask::g_buildsDiscarded.load() - bd0), back);
+          Check(ok, pass == 0 ? "R115 H1: the reader idle in flight and back in the F10 map: the samples from before the "
+                                "idle stretch do not open the flight gate (the set held, no relayout; g_buildWaitMs 5000)"
+                              : "R115 H1: the reader idle in flight and back in the F10 map: the samples from before the "
+                                "idle stretch do not open the flight gate (the set held, no build; g_buildWaitMs 0)");
+        }
+        cmask::g_buildWaitMs = 5000;
+        settle();
+        // The backstop variant: a closed stretch begun on the map before the idle stretch, then idle flying longer
+        // than g_mapHoldMaxMs, the reader back on the map: the idle stretch is not a closed-gate hold.
+        flight = true;
+        vpCut = 0;
+        run(4);
+        settle();
+        const Rec a = rec();
+        const uint64_t to0 = cmask::g_mapTimeouts.load(), rl0 = cmask::g_relayouts.load(),
+                       tc0 = cmask::g_texCreates.load();
+        cmask::g_mapHoldMaxMs = 100;
+        flight = false;
+        vpCut = 6;
+        run(1);  // the gate closed: held, its closed stretch begins
+        const Rec heldRec = rec();
+        beating = false;
+        cm::reader_heartbeat(blk, qpcNow() - F * 21 / 10);
+        flight = true;
+        vpCut = 0;
+        run(2);
+        const bool wentIdle = cmask::g_idleA.load();
+        Sleep(300);
+        run(2);  // still idle, flying past the limit
+        flight = false;
+        vpCut = 6;
+        beating = true;
+        run(1);  // the reader back on the map
+        const Rec m = rec();
+        const bool resumed = !cmask::g_idleA.load();
+        cmask::g_mapHoldMaxMs = 15u * 60000u;
+        const bool heldOk = !act(heldRec, 0) && sameSet(a, heldRec, 0);
+        const bool ok = heldOk && wentIdle && resumed && sameSet(a, m, 0) && !act(m, 0) &&
+                        cmask::g_mapTimeouts.load() == to0 && cmask::g_relayouts.load() == rl0 &&
+                        cmask::g_texCreates.load() == tc0;
+        if (!ok)
+          printf("     (R115 H1 backstop: held %d, idle %d, resumed %d, generation %u -> %u, timeouts +%llu, "
+                 "relayouts +%llu)\n", heldOk, wentIdle, resumed, a.gen[0], m.gen[0],
+                 static_cast<unsigned long long>(cmask::g_mapTimeouts.load() - to0),
+                 static_cast<unsigned long long>(cmask::g_relayouts.load() - rl0));
+        Check(ok, "R115 H1 backstop: a closed stretch begun on the map, then a reader-idle stretch in flight longer than "
+                  "g_mapHoldMaxMs: back on the map the backstop does not open (the set held, no timeout counted)");
+        flight = true;
+        vpCut = 0;
+        run(4);
+        settle();
+      }
       // R91 async: a layout change's set is made by the builder thread and swapped in at a later commit.
       {
         run(2);
@@ -3160,6 +3265,46 @@ void TestPipeline() {
         Check(cmask::g_buildsDiscarded.load() == dsc0 + 1 && !cmask::g_bPending && sameSet(d, e, 0) && act(e, 0),
               "R91: a set requested and not wanted any more (the layout back to the set's own before it was made) is "
               "discarded; the set in use stays (the same generation and handles)");
+        // R115 (H2): a contained fault inside BuildSet on the builder thread: the set counts as failed (SwapIn's
+        // failure record: a new generation, flags 0, no handles in all three blocks; the fault latched) and the builder
+        // thread goes on (after a reinstall a set is made by it again).
+        {
+          const uint64_t bf0 = cmask::g_buildsFailed.load(), bx0 = cmask::g_buildFaults.load();
+          cmask::g_buildWaitMs = 5000;
+          cmask::g_testBuildFault = 1;
+          vpCut = 0;
+          run(1);  // the relayout: the builder faults, the render thread takes the failed set
+          cmask::g_testBuildFault = 0;
+          const Rec f = rec();
+          bool rec76 = f.ok && f.gen[0] != e.gen[0] && f.gen[0] != 0;
+          for (int k = 0; k < 3; ++k) rec76 = rec76 && f.gen[k] == f.gen[0] && !act(f, k) && f.h[k][0] == 0;
+          const bool failed = cmask::g_buildFaults.load() == bx0 + 1 && cmask::g_buildsFailed.load() == bf0 + 1 &&
+                              cmask::g_fault.load() && !cmask::g_bPending;
+          maskOn(false);
+          tick();
+          maskOn(true);
+          tick();  // the reinstall clears the latched fault
+          const uint64_t n1 = cmask::g_buildN.load();
+          cmask::g_buildTid = 0;
+          run(4);
+          const Rec g = rec();
+          const DWORD tid = cmask::g_buildTid.load();
+          bool again = g.ok && g.gen[0] != f.gen[0] && cmask::g_bRunning.load() && cmask::g_buildN.load() > n1 &&
+                       tid != 0 && tid != GetCurrentThreadId() && !cmask::g_fault.load();
+          for (int k = 0; k < 3; ++k) again = again && act(g, k) && g.gen[k] == g.gen[0];
+          if (!(rec76 && failed && again))
+            printf("     (R115 H2: record %d (generation %u -> %u), failed %d (faults +%llu, failed +%llu, latched %d), "
+                   "again %d (generation %u, builds +%llu, tid %lu))\n", rec76, e.gen[0], f.gen[0], failed,
+                   static_cast<unsigned long long>(cmask::g_buildFaults.load() - bx0),
+                   static_cast<unsigned long long>(cmask::g_buildsFailed.load() - bf0),
+                   static_cast<int>(cmask::g_fault.load()), again, g.gen[0],
+                   static_cast<unsigned long long>(cmask::g_buildN.load() - n1), static_cast<unsigned long>(tid));
+          Check(rec76 && failed, "R115 H2: a contained fault inside BuildSet on the builder thread is a failed set: "
+                                 "a new generation, flags 0 and no handles in all three blocks, the fault latched");
+          Check(again, "R115 H2: the builder thread survives a contained fault in BuildSet: after a reinstall it "
+                       "makes the next set (all three blocks active, a new generation)");
+          settle();
+        }
         cmask::g_buildWaitMs = 5000;
         vpCut = 0;
         run(4);

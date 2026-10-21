@@ -327,8 +327,10 @@ void HwTransitionCost() {
   ID3D11Device* dev = nullptr;
   ID3D11DeviceContext* c = nullptr;
   const D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_1};
-  if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, want, 1, D3D11_SDK_VERSION, &dev, nullptr, &c)))
+  if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, want, 1, D3D11_SDK_VERSION, &dev, nullptr, &c))) {
+    Check(false, "R99 HW: the hardware device (QV_R95_HW=1)");  // R115: not a silent pass
     return;
+  }
   ID3D11DeviceContext1* c1 = nullptr;
   c->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&c1));
   D3D11_TEXTURE2D_DESC td{};
@@ -348,6 +350,7 @@ void HwTransitionCost() {
   dev->CreateTexture2D(&td, nullptr, &acc);
   dev->CreateUnorderedAccessView(acc, nullptr, &accUav);
   const bool ok = hdr && rtv && srv && pre && accUav && cmask::Compile() && sy::MakeBase(dev);
+  Check(ok, "R99 HW: the hardware rig made (targets, the compute shaders, the symbology's base objects)");  // R115
   if (ok) {
     ID3D11DeviceContext* keepC = fixdepth::g_s.ctx;
     ID3D11DeviceContext1* keepC1 = fixdepth::g_s.ctx1;

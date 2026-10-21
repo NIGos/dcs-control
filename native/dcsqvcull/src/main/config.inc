@@ -555,12 +555,18 @@ void PerceptionOnlyFlags() {
 
 // R107: keys of research features removed from src (archived in DcsQvCull/research_archive, one folder each, with a
 // README on how to restore it). An ini may still carry them: DCS Control's template wrote several as constants (0),
-// and a dev ini may hold others. They do nothing now. A non-zero value is logged once per key and session, so a stale dev ini that still
-// expects the feature is visible in the log; 0 / empty stays silent. Nothing else reads these keys.
+// and a dev ini may hold others. They do nothing now. A switch key (kSwitch: non-zero turned the feature or probe on)
+// with a non-zero value is logged once per key and value in the session (a changed value logs again), so a stale dev
+// ini that still expects the feature is visible in the log; 0 / empty / non-numeric stays silent. A tuning key
+// (kTuning: a parameter of the feature, often with a non-zero old default such as GpuDedupWarm=30, or a path) is never
+// logged: it did nothing without its switch, and the dev ini still carries the old defaults (R115 I3). Nothing else
+// reads these keys.
+constexpr bool kSwitch = true, kTuning = false;
 struct RetiredKey {
   const wchar_t* sec;
   const wchar_t* key;
   const char* what;  // the removed feature and its archive folder
+  bool sw;           // kSwitch: logged when non-zero; kTuning: never logged
 };
 constexpr const char* kRetFbc = "R53 / R38 rank 2 focus broadcast, research_archive\\R53_R38_focus_broadcast";
 constexpr const char* kRetPif = "R38 rank 1 periph inst filter, research_archive\\R38_periph_inst_filter";
@@ -568,48 +574,50 @@ constexpr const char* kRetR40 = "R40 [Color] grading (superseded by R42 Mode), r
 constexpr const char* kRetGpu = "R26-R29 closed GPU probes, research_archive\\R26_R29_closed_gpu_probes";
 constexpr const char* kRetOvl = "R74b cockpit mask overlay (value 128, producer retired in R107; 128 stays reserved)";
 const RetiredKey kRetiredKeys[] = {
-    {L"D3D", L"FocusBroadcast", kRetFbc},
-    {L"D3D", L"FocusBroadcastArchive", kRetFbc},
-    {L"D3D", L"FocusBroadcastKinds", kRetFbc},
-    {L"D3D", L"FocusBroadcastRelearnFrames", kRetFbc},
-    {L"D3D", L"FocusBroadcastStartDelay", kRetFbc},
-    {L"D3D", L"FocusBroadcastTestsPerFrame", kRetFbc},
-    {L"Suite", L"FocusGeomProbe", kRetFbc},
-    {L"Suite", L"FocusBcastProbe", kRetFbc},
-    {L"Suite", L"FocusBcastTiming", kRetFbc},
-    {L"Suite", L"FocusBcastVerify", kRetFbc},
-    {L"Suite", L"FocusVsCensus", kRetFbc},
-    {L"Suite", L"FocusVsArchive", kRetFbc},
-    {L"D3D", L"PeriphInstFilter", kRetPif},
-    {L"D3D", L"PeriphInstCoreMargin", kRetPif},
-    {L"D3D", L"PeriphInstCoreEdge", kRetPif},
-    {L"D3D", L"PeriphInstCoreShape", kRetPif},
-    {L"Suite", L"PeriphCensus", kRetPif},
-    {L"Suite", L"PeriphInstTiming", kRetPif},
-    {L"Suite", L"PeriphInstVerify", kRetPif},
-    {L"Color", L"SrgbMatch", kRetR40},
-    {L"Color", L"BlackFloor", kRetR40},
-    {L"Color", L"Contrast", kRetR40},
-    {L"Color", L"Saturation", kRetR40},
-    {L"Color", L"OutputGamma", kRetR40},
-    {L"Suite", L"GpuSplit", kRetGpu},
-    {L"Suite", L"GpuSplitFrames", kRetGpu},
-    {L"Suite", L"GapAttrib", kRetGpu},
-    {L"Suite", L"GapAttribCalEvery", kRetGpu},
-    {L"Suite", L"GapAttribDump", kRetGpu},
-    {L"Suite", L"LodProbe", kRetGpu},
-    {L"Suite", L"GpuDedup", kRetGpu},
-    {L"Suite", L"GpuDedupWarm", kRetGpu},
-    {L"Suite", L"GpuDedupHashCap", kRetGpu},
-    {L"Suite", L"GpuDedupSnap", kRetGpu},
-    {L"Suite", L"UavOverlap", kRetGpu},
-    {L"Perception", L"CockpitMaskOverlay", kRetOvl},
+    {L"D3D", L"FocusBroadcast", kRetFbc, kSwitch},
+    {L"D3D", L"FocusBroadcastArchive", kRetFbc, kTuning},
+    {L"D3D", L"FocusBroadcastKinds", kRetFbc, kTuning},
+    {L"D3D", L"FocusBroadcastRelearnFrames", kRetFbc, kTuning},
+    {L"D3D", L"FocusBroadcastStartDelay", kRetFbc, kTuning},
+    {L"D3D", L"FocusBroadcastTestsPerFrame", kRetFbc, kTuning},
+    {L"Suite", L"FocusGeomProbe", kRetFbc, kSwitch},
+    {L"Suite", L"FocusBcastProbe", kRetFbc, kSwitch},
+    {L"Suite", L"FocusBcastTiming", kRetFbc, kSwitch},
+    {L"Suite", L"FocusBcastVerify", kRetFbc, kSwitch},
+    {L"Suite", L"FocusVsCensus", kRetFbc, kSwitch},
+    {L"Suite", L"FocusVsArchive", kRetFbc, kTuning},
+    {L"D3D", L"PeriphInstFilter", kRetPif, kSwitch},
+    {L"D3D", L"PeriphInstCoreMargin", kRetPif, kTuning},
+    {L"D3D", L"PeriphInstCoreEdge", kRetPif, kTuning},
+    {L"D3D", L"PeriphInstCoreShape", kRetPif, kTuning},
+    {L"Suite", L"PeriphCensus", kRetPif, kSwitch},
+    {L"Suite", L"PeriphInstTiming", kRetPif, kSwitch},
+    {L"Suite", L"PeriphInstVerify", kRetPif, kSwitch},
+    {L"Color", L"SrgbMatch", kRetR40, kSwitch},
+    {L"Color", L"BlackFloor", kRetR40, kSwitch},
+    {L"Color", L"Contrast", kRetR40, kSwitch},
+    {L"Color", L"Saturation", kRetR40, kSwitch},
+    {L"Color", L"OutputGamma", kRetR40, kSwitch},
+    {L"Suite", L"GpuSplit", kRetGpu, kSwitch},
+    {L"Suite", L"GpuSplitFrames", kRetGpu, kTuning},
+    {L"Suite", L"GapAttrib", kRetGpu, kSwitch},
+    {L"Suite", L"GapAttribCalEvery", kRetGpu, kTuning},
+    {L"Suite", L"GapAttribDump", kRetGpu, kSwitch},
+    {L"Suite", L"LodProbe", kRetGpu, kSwitch},
+    {L"Suite", L"GpuDedup", kRetGpu, kSwitch},
+    {L"Suite", L"GpuDedupWarm", kRetGpu, kTuning},
+    {L"Suite", L"GpuDedupHashCap", kRetGpu, kTuning},
+    {L"Suite", L"GpuDedupSnap", kRetGpu, kSwitch},
+    {L"Suite", L"UavOverlap", kRetGpu, kSwitch},
+    {L"Perception", L"CockpitMaskOverlay", kRetOvl, kSwitch},
 };
-// The retired keys of `ini` with a non-zero value not logged before in this session: logged now. Returns how many.
+// The retired switch keys of `ini` with a non-zero value not logged before (same key and value) in this session:
+// logged now. Returns how many.
 int NoteRetiredKeys(const std::wstring& ini) {
   static std::set<std::wstring> logged;
   int n = 0;
   for (const RetiredKey& r : kRetiredKeys) {
+    if (!r.sw) continue;  // R115 I3: tuning keys are never logged
     wchar_t v[64] = {};
     GetPrivateProfileStringW(r.sec, r.key, L"", v, 64, ini.c_str());
     if (!v[0] || (wcstol(v, nullptr, 0) == 0 && wcstod(v, nullptr) == 0.0)) continue;

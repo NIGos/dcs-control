@@ -1,3 +1,15 @@
+// Worker start, after LoadConfig(true): [D3D] ChainFast's creation hook and the self tests' private device.
+// R115 P6b: both only with the engine kill switch off (the device was created and held for the session
+// even with the engine off). Not released if the kill switch turns on later: TestPending / PrepareClear
+// re-acquire it lazily on the worker, so a release there would need their gating too.
+void ChainFastAtStart() {
+  if (g_perceptionOnly.load() || g_engineOff.load()) return;
+  // R34 [D3D] ChainFast: the creation hook goes in first, before DCS loads the mission's terrain kernels.
+  if (g_cfg.chainFast) chainfast::Apply(g_cfg.chainFast);
+  // R90 F4: the self tests' private device now, not when the first kernel turns up mid-flight.
+  if (g_cfg.chainFast || g_cfg.shaderFast) chainfast::AcquirePrivate();
+}
+
 DWORD WINAPI WorkerThread(void*) {
   reloc::g_log = [](const char* line) { Log("%s", line); };
   reloc::g_slotRead = [](void** slot) { return SlotOriginal(slot); };
@@ -18,10 +30,7 @@ DWORD WINAPI WorkerThread(void*) {
           prune::kKeepFiles, static_cast<unsigned>(prune::kQvcCapBytes >> 20), prune::kQvcCapFiles);
   }
   LoadConfig(true);
-  // R34 [D3D] ChainFast: the creation hook goes in first, before DCS loads the mission's terrain kernels.
-  if (!g_perceptionOnly.load() && g_cfg.chainFast && !g_engineOff.load()) chainfast::Apply(g_cfg.chainFast);
-  // R90 F4: the self tests' private device now, not when the first kernel turns up mid-flight.
-  if (!g_perceptionOnly.load() && (g_cfg.chainFast || g_cfg.shaderFast)) chainfast::AcquirePrivate();
+  ChainFastAtStart();
   perfmon::Start();  // R30 L3: the env line (DCS, CPU, OpenXR runtime and layers, streamers)
   g_dumpsLeft = g_cfg.dumpViews;
   {

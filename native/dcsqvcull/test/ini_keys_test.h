@@ -1,10 +1,10 @@
 // R107: the ini keys DCS Control writes (dlss5vrframegen src\DcsVr.Core\ConfigurationWriters.cs, DcsQvCull(),
-// ColorModeLine and VisualSections, as of 2026-10-20) are all still read by the payload: either live (the key's
+// ColorModeLine and VisualSections, as of 2026-10-21) are all still read by the payload: either live (the key's
 // literal is in the source) or retired (kRetiredKeys: ignored, a non-zero value logged once). An unknown key is
 // harmless by construction (GetPrivateProfile* reads only the keys asked for), so a removal can never break the
 // app's ini; this keeps a removal from silently dropping a key the app still sets with a meaning. `constant`: the
 // template writes a fixed value (a non-constant, profile-driven key must stay live, never retired).
-// Since Dev's F07 trim (2026-10-21) the template writes only the constant=false entries (75 keys); the constant
+// Since Dev's F07 trim (2026-10-21) the template writes only the constant=false entries (76 keys, PanelGamut only when not 0); the constant
 // ones stay listed so an older profile ini (full template) still reads the same values or the default.
 #pragma once
 
@@ -16,7 +16,7 @@ struct AppKey {
   bool constant;
 };
 const AppKey kAppKeys[] = {
-    {L"Color", L"Mode", false}, {L"ColorFix", L"ExposureEV", false}, {L"ColorFix", L"NightEV", false},
+    {L"Color", L"Mode", false}, {L"Color", L"PanelGamut", false}, {L"ColorFix", L"ExposureEV", false}, {L"ColorFix", L"NightEV", false},
     {L"ColorFix", L"Saturation", false}, {L"ColorFix", L"Warmth", false}, {L"ColorFix", L"AdaptBright", false},
     {L"ColorFix", L"AdaptDark", false}, {L"ColorEnhanced", L"ExposureEV", false},
     {L"ColorEnhanced", L"NightEV", false}, {L"ColorEnhanced", L"Saturation", false},
@@ -135,8 +135,23 @@ bool Retired(const wchar_t* sec, const wchar_t* key) {
   return false;
 }
 
+// R115 I1: the sources without the kRetiredKeys table: its literals ({L"Color", L"Saturation", ...}) would otherwise
+// count a key as read. *cut: the table was found (from "kRetiredKeys[] = {" to its "};") and cut out.
+std::string WithoutRetiredTable(const std::string& src, bool* cut) {
+  *cut = false;
+  const size_t a = src.find("kRetiredKeys[] = {");
+  if (a == std::string::npos) return src;
+  const size_t e = src.find("};", a);
+  if (e == std::string::npos) return src;
+  const std::string table = src.substr(a, e - a);
+  *cut = table.size() < 16384 && table.find("L\"FocusBroadcast\"") != std::string::npos &&
+         table.find("L\"CockpitMaskOverlay\"") != std::string::npos;
+  return src.substr(0, a) + src.substr(e + 2);
+}
+
 void AppKeysRead() {
-  const std::string src = lptest::ReadAllSources();
+  bool cut = false;
+  const std::string src = WithoutRetiredTable(lptest::ReadAllSources(), &cut);
   int live = 0, retired = 0, missing = 0, retiredNonConst = 0;
   for (const AppKey& k : kAppKeys) {
     if (Retired(k.sec, k.key)) {
@@ -157,25 +172,102 @@ void AppKeysRead() {
     }
   }
   printf("     app template keys: %zu (%d live, %d retired)\n", sizeof(kAppKeys) / sizeof(kAppKeys[0]), live, retired);
-  Check(missing == 0 && retiredNonConst == 0 && src.size() > 100000,
+  Check(missing == 0 && retiredNonConst == 0 && src.size() > 100000 && cut,
         "R107 ini keys: every key DCS Control's template writes is read by the payload, live or retired (and a "
-        "retired one is only ever written as a constant)");
+        "retired one is only ever written as a constant; the retired-key table's own literals do not count)");
+}
+
+// R115 I1: the colour keys the app writes ([ColorFix], [ColorEnhanced], [Color] PanelGamut) reach ModeParams: each
+// written with a distinct in-range value that is not the mode's default, read back by the payload's reader.
+void ColorKeysRead() {
+  using cgrade::ModeParams;
+#define IK_F(m) [](const ModeParams& q) -> double { return static_cast<double>(q.m); }
+  struct ColorKey {
+    const wchar_t* sec;
+    const wchar_t* key;
+    const wchar_t* text;
+    double want;
+    double (*get)(const ModeParams&);
+  };
+  const ColorKey keys[] = {
+      {L"ColorFix", L"ExposureEV", L"0.25", 0.25, IK_F(exposureEv)},
+      {L"ColorFix", L"NightEV", L"-0.5", -0.5, IK_F(nightEv)},
+      {L"ColorFix", L"Saturation", L"0.75", 0.75, IK_F(saturation)},
+      {L"ColorFix", L"Warmth", L"0.125", 0.125, IK_F(warmth)},
+      {L"ColorFix", L"AdaptBright", L"2.5", 2.5, IK_F(adaptBright)},
+      {L"ColorFix", L"AdaptDark", L"4.5", 4.5, IK_F(adaptDark)},
+      {L"ColorEnhanced", L"ExposureEV", L"-0.75", -0.75, IK_F(exposureEv)},
+      {L"ColorEnhanced", L"NightEV", L"1.25", 1.25, IK_F(nightEv)},
+      {L"ColorEnhanced", L"Saturation", L"1.375", 1.375, IK_F(saturation)},
+      {L"ColorEnhanced", L"Warmth", L"0.625", 0.625, IK_F(warmth)},
+      {L"ColorEnhanced", L"AdaptBright", L"3.5", 3.5, IK_F(adaptBright)},
+      {L"ColorEnhanced", L"AdaptDark", L"7.5", 7.5, IK_F(adaptDark)},
+      {L"ColorEnhanced", L"NightVision", L"0", 0, IK_F(nightVision)},
+      {L"ColorEnhanced", L"NightVisionStrength", L"0.55", 0.55, IK_F(nvStrength)},
+      {L"ColorEnhanced", L"NightVisionBlue", L"0.65", 0.65, IK_F(nvBlue)},
+      {L"ColorEnhanced", L"NightVisionBlur", L"0.15", 0.15, IK_F(nvBlur)},
+      {L"ColorEnhanced", L"NightVisionScotopic", L"0.02", 0.02, IK_F(nvScotopic)},
+      {L"ColorEnhanced", L"NightVisionPhotopic", L"12", 12, IK_F(nvPhotopic)},
+      {L"ColorEnhanced", L"Glare", L"0", 0, IK_F(glare)},
+      {L"ColorEnhanced", L"GlareStrength", L"0.45", 0.45, IK_F(glareStrength)},
+      {L"ColorEnhanced", L"GlareThresholdEV", L"5.5", 5.5, IK_F(glareThresholdEv)},
+      {L"ColorEnhanced", L"GlareRadius", L"9", 9, IK_F(glareRadiusDeg)},
+      {L"ColorEnhanced", L"GlareStreak", L"0.7", 0.7, IK_F(glareStreak)},
+      {L"Color", L"PanelGamut", L"2", 2, IK_F(panelGamut)},  // [Color]: read by both modes
+  };
+#undef IK_F
+  wchar_t tmp[MAX_PATH] = {};
+  GetTempPathW(MAX_PATH, tmp);
+  const std::wstring ini = std::wstring(tmp) + L"qv_colorkeys_" + std::to_wstring(GetCurrentProcessId()) + L".ini";
+  DeleteFileW(ini.c_str());
+  for (const ColorKey& k : keys) WritePrivateProfileStringW(k.sec, k.key, k.text, ini.c_str());
+  const ModeParams f = cgrade::ReadModeIni(ini.c_str(), 1), e = cgrade::ReadModeIni(ini.c_str(), 2);
+  const ModeParams fd = cgrade::ModeDefaults(1), ed = cgrade::ModeDefaults(2);
+  DeleteFileW(ini.c_str());
+  int bad = 0;
+  for (const ColorKey& k : keys) {
+    const bool fix = !_wcsicmp(k.sec, L"ColorFix"), enh = !_wcsicmp(k.sec, L"ColorEnhanced");
+    const bool ok = (enh || k.get(f) == k.want) && (fix || k.get(e) == k.want) && (enh || k.get(fd) != k.want) &&
+                    (fix || k.get(ed) != k.want);
+    if (!ok) {
+      ++bad;
+      printf("     [%ls] %ls=%ls: not read into ModeParams (fix %g, enhanced %g)\n", k.sec, k.key, k.text, k.get(f),
+             k.get(e));
+    }
+  }
+  // Every colour key in kAppKeys is in the table above (a new app key gets a functional check, not just a literal).
+  int uncovered = 0;
+  for (const AppKey& a : kAppKeys) {
+    const bool colour = !_wcsicmp(a.sec, L"ColorFix") || !_wcsicmp(a.sec, L"ColorEnhanced") ||
+                        (!_wcsicmp(a.sec, L"Color") && !_wcsicmp(a.key, L"PanelGamut"));
+    if (!colour) continue;
+    bool in = false;
+    for (const ColorKey& k : keys) in = in || (!_wcsicmp(k.sec, a.sec) && !_wcsicmp(k.key, a.key));
+    if (!in) {
+      ++uncovered;
+      printf("     app colour key [%ls] %ls has no functional read check\n", a.sec, a.key);
+    }
+  }
+  Check(bad == 0 && uncovered == 0,
+        "R115 ini keys: every [ColorFix] / [ColorEnhanced] / [Color] PanelGamut key DCS Control writes is read by "
+        "ReadModeIni into its own field (distinct non-default values round-trip)");
 }
 
 void RetiredKeysLogged() {
   wchar_t tmp[MAX_PATH] = {};
   GetTempPathW(MAX_PATH, tmp);
   const std::wstring ini = std::wstring(tmp) + L"qv_retired_" + std::to_wstring(GetCurrentProcessId()) + L".ini";
-  // The app's template: every retired key it writes is a constant 0 -> nothing logged.
-  {
-    FILE* f = nullptr;
-    _wfopen_s(&f, ini.c_str(), L"w");
-    if (f) {
-      for (const AppKey& k : kAppKeys)
-        if (Retired(k.sec, k.key)) fprintf(f, "[%ls]\n%ls=0\n", k.sec, k.key);
-      fclose(f);
+  // The app's template: every retired key it writes is a constant 0 -> nothing logged. R115 I2: written through
+  // WritePrivateProfileStringW, one section per name (GetPrivateProfile* reads only the first section of a name).
+  DeleteFileW(ini.c_str());
+  int written0 = 0, read0 = 0;
+  for (const AppKey& k : kAppKeys)
+    if (Retired(k.sec, k.key)) {
+      ++written0;
+      WritePrivateProfileStringW(k.sec, k.key, L"0", ini.c_str());
     }
-  }
+  for (const AppKey& k : kAppKeys)
+    if (Retired(k.sec, k.key)) read0 += GetPrivateProfileIntW(k.sec, k.key, -1, ini.c_str()) == 0 ? 1 : 0;
   const int none = NoteRetiredKeys(ini);
   // A dev ini that still turns a removed feature on: logged once; 0, empty and junk stay silent.
   {
@@ -187,10 +279,90 @@ void RetiredKeysLogged() {
     }
   }
   const int first = NoteRetiredKeys(ini), again = NoteRetiredKeys(ini);
+  // R115 I3: the dev ini's old tuning defaults (DcsQvCull\dev\DcsQvCull.dev.ini) are silent.
+  {
+    FILE* f = nullptr;
+    _wfopen_s(&f, ini.c_str(), L"w");
+    if (f) {
+      fputs("[Suite]\nGpuDedupWarm=30\nGpuDedupHashCap=16384\nGapAttribCalEvery=40\nGpuSplitFrames=60\n[D3D]\n"
+            "PeriphInstCoreMargin=16\nPeriphInstCoreEdge=200\nPeriphInstCoreShape=8\n",
+            f);
+      fclose(f);
+    }
+  }
+  const bool tuningRead = GetPrivateProfileIntW(L"Suite", L"GpuDedupWarm", 0, ini.c_str()) == 30 &&
+                          GetPrivateProfileIntW(L"Suite", L"GpuSplitFrames", 0, ini.c_str()) == 60 &&
+                          GetPrivateProfileIntW(L"D3D", L"PeriphInstCoreMargin", 0, ini.c_str()) == 16 &&
+                          GetPrivateProfileIntW(L"D3D", L"PeriphInstCoreShape", 0, ini.c_str()) == 8;
+  const int tuning = NoteRetiredKeys(ini);
+  // R115 I2/I3: every retired key switched on (7, a value not used above): each switch key logged once, the tuning
+  // keys never; a second call logs nothing. 23 switch + 13 tuning keys as of R115 (update with kRetiredKeys).
   DeleteFileW(ini.c_str());
-  Check(none == 0 && first == 1 && again == 0,
-        "R107 retired keys: the template's constant 0s are silent; a non-zero retired key is logged once per session "
-        "and ignored");
+  int nSwitch = 0, nTuning = 0, readAll = 0;
+  for (const RetiredKey& r : kRetiredKeys) {
+    (r.sw ? nSwitch : nTuning) += 1;
+    WritePrivateProfileStringW(r.sec, r.key, L"7", ini.c_str());
+  }
+  for (const RetiredKey& r : kRetiredKeys) readAll += GetPrivateProfileIntW(r.sec, r.key, 0, ini.c_str()) == 7 ? 1 : 0;
+  const int allOn = NoteRetiredKeys(ini), allAgain = NoteRetiredKeys(ini);
+  DeleteFileW(ini.c_str());
+  constexpr int kRetiredCount = static_cast<int>(sizeof(kRetiredKeys) / sizeof(kRetiredKeys[0]));
+  printf("     retired keys: %d (%d switch, %d tuning); all on -> %d logged, again %d; dev tuning defaults -> %d\n",
+         kRetiredCount, nSwitch, nTuning, allOn, allAgain, tuning);
+  Check(none == 0 && written0 > 0 && read0 == written0 && first == 1 && again == 0,
+        "R107 retired keys: the template's constant 0s are silent (each section once, every key read back); a "
+        "non-zero retired key is logged once per session and ignored");
+  Check(tuningRead && tuning == 0 && readAll == kRetiredCount && nSwitch == 23 && nTuning == 13 &&
+            allOn == nSwitch && allAgain == 0,
+        "R115 retired keys: the dev ini's old tuning defaults (GpuDedupWarm=30 ... PeriphInstCoreShape=8) log "
+        "nothing; every retired key switched on logs exactly the switch keys, once");
+}
+
+// R115 G4: int ini keys (qvini::ToInt, cgrade::IniI): nan / inf / out of int range -> the default instead of an
+// undefined cast (MSVC: INT_MIN, which SanitizeMode then mapped to whatever a negative value maps to); in-range values
+// truncate as before.
+void IniInts() {
+  const double inf = HUGE_VAL, nan = std::nan("");
+  const bool conv = qvini::ToInt(nan, 5) == 5 && qvini::ToInt(inf, 5) == 5 && qvini::ToInt(-inf, 5) == 5 &&
+                    qvini::ToInt(1e10, 5) == 5 && qvini::ToInt(-1e10, 5) == 5 && qvini::ToInt(2147483648.0, 5) == 5 &&
+                    qvini::ToInt(2147483647.5, 5) == 2147483647 &&
+                    qvini::ToInt(-2147483648.5, 5) == -2147483647 - 1 && qvini::ToInt(1.9, 5) == 1 &&
+                    qvini::ToInt(-0.5, 5) == 0 && qvini::ToInt(2, 5) == 2;
+  wchar_t tmp[MAX_PATH] = {};
+  GetTempPathW(MAX_PATH, tmp);
+  const std::wstring ini = std::wstring(tmp) + L"qv_iniints_" + std::to_wstring(GetCurrentProcessId()) + L".ini";
+  const wchar_t* p = ini.c_str();
+  const cgrade::ModeParams fd = cgrade::ModeDefaults(1), ed = cgrade::ModeDefaults(2);
+  int bad = 0;
+  for (const wchar_t* v : {L"nan", L"inf", L"-inf", L"1e10", L"-1e10"}) {
+    DeleteFileW(p);
+    WritePrivateProfileStringW(L"Color", L"PanelGamut", v, p);
+    for (const wchar_t* s : {L"ColorFix", L"ColorEnhanced"})
+      for (const wchar_t* k : {L"Dither", L"EqualizeEc", L"NightGate", L"SrgbMatch", L"NightVision", L"Glare"})
+        WritePrivateProfileStringW(s, k, v, p);
+    const cgrade::ModeParams f = cgrade::ReadModeIni(p, 1), e = cgrade::ReadModeIni(p, 2);
+    const bool ok = f.panelGamut == 0 && e.panelGamut == 0 && f.dither == fd.dither && e.dither == ed.dither &&
+                    e.nightVision == ed.nightVision && e.glare == ed.glare && f.equalizeEc == fd.equalizeEc &&
+                    f.nightGate == fd.nightGate && f.srgbMatch == fd.srgbMatch;
+    if (!ok) {
+      ++bad;
+      printf("     int keys = %ls: panelGamut %d/%d, dither %d/%d (defaults %d/%d), nightVision %d, glare %d\n", v,
+             f.panelGamut, e.panelGamut, f.dither, e.dither, fd.dither, ed.dither, e.nightVision, e.glare);
+    }
+  }
+  // In range: as before (PanelGamut 1 and 2 read, 1.9 truncates to 1; Dither 0.5 -> 0).
+  DeleteFileW(p);
+  WritePrivateProfileStringW(L"Color", L"PanelGamut", L"1", p);
+  WritePrivateProfileStringW(L"ColorEnhanced", L"Dither", L"0.5", p);
+  const bool one = cgrade::ReadModeIni(p, 1).panelGamut == 1 && cgrade::ReadModeIni(p, 2).dither == 0;
+  WritePrivateProfileStringW(L"Color", L"PanelGamut", L"2", p);
+  const bool two = cgrade::ReadModeIni(p, 2).panelGamut == 2;
+  WritePrivateProfileStringW(L"Color", L"PanelGamut", L"1.9", p);
+  const bool frac = cgrade::ReadModeIni(p, 1).panelGamut == 1;
+  DeleteFileW(p);
+  Check(conv && bad == 0 && one && two && frac,
+        "R115 ini ints: PanelGamut / Dither / NightVision / Glare / EqualizeEc / NightGate / SrgbMatch = nan, inf, "
+        "1e10 or -1e10 read as the mode's default (no undefined cast); 1, 2, 1.9 -> 1 and 0.5 -> 0 as before");
 }
 
 // R107 (F12): the shared readers (ini_read.h): one rule for doubles (ReadDouble and IniD agree), masks as before.
@@ -226,8 +398,10 @@ void IniHelpers() {
 
 void Run() {
   AppKeysRead();
+  ColorKeysRead();
   RetiredKeysLogged();
   IniHelpers();
+  IniInts();
 }
 
 }  // namespace iktest

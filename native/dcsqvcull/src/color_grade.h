@@ -273,13 +273,17 @@ inline bool UsesState(const ModeParams& p) { return p.adaptBright > 0 || p.adapt
 inline double IniD(const wchar_t* ini, const wchar_t* sec, const wchar_t* key, double dflt) {
   return qvini::Double(sec, key, dflt, ini);
 }
+// R115 G4: an int key (IniD, then qvini::ToInt: nan / inf / out of int range -> the default, no undefined cast).
+inline int IniI(const wchar_t* ini, const wchar_t* sec, const wchar_t* key, int dflt) {
+  return qvini::ToInt(IniD(ini, sec, key, dflt), dflt);
+}
 inline ModeParams ReadModeIni(const wchar_t* ini, int mode) {
   ModeParams p = ModeDefaults(mode);
   const wchar_t* s = mode == 2 ? L"ColorEnhanced" : L"ColorFix";
-  p.srgbMatch = static_cast<int>(IniD(ini, s, L"SrgbMatch", p.srgbMatch));
-  p.equalizeEc = static_cast<int>(IniD(ini, s, L"EqualizeEc", p.equalizeEc));
+  p.srgbMatch = IniI(ini, s, L"SrgbMatch", p.srgbMatch);
+  p.equalizeEc = IniI(ini, s, L"EqualizeEc", p.equalizeEc);
   p.nightFloor = IniD(ini, s, L"NightFloor", p.nightFloor);
-  p.nightGate = static_cast<int>(IniD(ini, s, L"NightGate", p.nightGate));
+  p.nightGate = IniI(ini, s, L"NightGate", p.nightGate);
   p.exposureEv = IniD(ini, s, L"ExposureEV", p.exposureEv);
   p.nightEv = IniD(ini, s, L"NightEV", p.nightEv);
   p.slope = IniD(ini, s, L"Slope", p.slope);
@@ -295,26 +299,26 @@ inline ModeParams ReadModeIni(const wchar_t* ini, int mode) {
   p.warmth = IniD(ini, s, L"Warmth", p.warmth);
   p.darkDesat = IniD(ini, s, L"DarkDesat", p.darkDesat);
   p.darkDesatDay = IniD(ini, s, L"DarkDesatDay", p.darkDesatDay);
-  p.dither = static_cast<int>(IniD(ini, s, L"Dither", p.dither));
+  p.dither = IniI(ini, s, L"Dither", p.dither);
   p.adaptBright = IniD(ini, s, L"AdaptBright", p.adaptBright);
   p.adaptDark = IniD(ini, s, L"AdaptDark", p.adaptDark);
   p.meterFocus = IniD(ini, s, L"MeterFocus", p.meterFocus);
   if (mode == 2) {  // R50: night vision and glare are Enhanced features
-    p.nightVision = static_cast<int>(IniD(ini, s, L"NightVision", p.nightVision));
+    p.nightVision = IniI(ini, s, L"NightVision", p.nightVision);
     p.nvStrength = IniD(ini, s, L"NightVisionStrength", p.nvStrength);
     p.nvBlue = IniD(ini, s, L"NightVisionBlue", p.nvBlue);
     p.nvBlur = IniD(ini, s, L"NightVisionBlur", p.nvBlur);
     p.nvScotopic = IniD(ini, s, L"NightVisionScotopic", p.nvScotopic);
     p.nvPhotopic = IniD(ini, s, L"NightVisionPhotopic", p.nvPhotopic);
-    p.glare = static_cast<int>(IniD(ini, s, L"Glare", p.glare));
+    p.glare = IniI(ini, s, L"Glare", p.glare);
     p.glareStrength = IniD(ini, s, L"GlareStrength", p.glareStrength);
     p.glareThresholdEv = IniD(ini, s, L"GlareThresholdEV", p.glareThresholdEv);
     p.glareRadiusDeg = IniD(ini, s, L"GlareRadius", p.glareRadiusDeg);
     p.glareStreak = IniD(ini, s, L"GlareStreak", p.glareStreak);
-    p.glareDebug = static_cast<int>(IniD(ini, s, L"GlareDebug", p.glareDebug));
+    p.glareDebug = IniI(ini, s, L"GlareDebug", p.glareDebug);
   }
   // R111: one key for both modes ([Color], next to Mode): it describes the headset's panel, not a look.
-  p.panelGamut = static_cast<int>(IniD(ini, L"Color", L"PanelGamut", p.panelGamut));
+  p.panelGamut = IniI(ini, L"Color", L"PanelGamut", p.panelGamut);
   return SanitizeMode(p);
 }
 

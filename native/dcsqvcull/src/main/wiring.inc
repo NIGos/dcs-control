@@ -1,8 +1,7 @@
 // R90: the keys of the hitch fixes that are not read where they act (LoadConfig, every config read).
 void ApplyR90Config() {
   qvpatch::g_mode = g_cfg.patchMode;
-  qvalog::g_want = g_cfg.asyncLog;
-  qvalog::g_on = g_logWriter && g_cfg.asyncLog;
+  SetAsyncLogWanted(g_cfg.asyncLog);  // R115 (L3): g_on only while a writer runs (log_writer.inc)
   shadowbatch::g_planWaitCapUs = static_cast<uint32_t>(g_cfg.shadowPlanWaitUs);
 }
 

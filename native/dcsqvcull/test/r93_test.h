@@ -63,6 +63,7 @@ void AsyncLogStart() {
     std::lock_guard<std::mutex> d(qvalog::g_drainMutex);  // the reports count from here (an earlier test's left)
     qvalog::g_droppedLogged = 0;
     qvalog::g_waitedLogged = 0;
+    qvalog::g_frameDroppedLogged = 0;
   }
   StartAsyncLog();
   const bool on = qvalog::g_on.load();
@@ -132,16 +133,90 @@ void AsyncLogStart() {
     Check(dropAfterLoad == 1 && loadUs >= qvalog::kFullWaitMs * 1000 - 20000 && loadUs < 2000000,
           "R93 D1: a loading thread's wait for ring space is bounded (about 250 ms), then its line is dropped and "
           "counted");
+    // R115 (L1): the writer still stalled: the next loading lines (two threads) are dropped at once, not 250 ms each.
+    uint64_t stallMaxUs = 0;
+    const uint64_t s0 = qvalog::g_dropped.load();
+    for (int t = 0; t < 2; ++t)
+      std::thread([&stallMaxUs] {
+        for (int i = 0; i < 3; ++i) {
+          const uint64_t a = qvpatch::NowUs();
+          Log("r93 loading line while the writer is stalled n=%d", i);
+          stallMaxUs = std::max<uint64_t>(stallMaxUs, qvpatch::NowUs() - a);
+        }
+      }).join();
+    const uint64_t stallDropped = qvalog::g_dropped.load() - s0;
+    printf("     (R115 L1: 6 more loading lines with the writer still stalled: %llu dropped, max %.1f ms per line)\n",
+           static_cast<unsigned long long>(stallDropped), stallMaxUs / 1000.0);
+    Check(stallDropped == 6 && stallMaxUs < 50000,
+          "R115 L1: after one loading line timed out, later loading lines with the writer still stalled are dropped "
+          "at once (counted), not 250 ms each");
   }
   WaitWritten();
+  // R115 (L1): the writer moved since the stall: a full ring makes a loading line wait again (about 250 ms).
+  uint64_t reWaitUs = 0, reDropped = 0, refillQueued = 0;
+  {
+    std::unique_lock<std::mutex> drain(qvalog::g_drainMutex);
+    std::unique_lock<std::mutex> file(g_logMutex);
+    const uint64_t q0 = qvalog::g_queued.load();
+    std::thread([] {
+      qvalog::NoteFrameThread();
+      for (uint32_t i = 0; i < qvalog::kAsyncSlots; ++i) Log("r93 refill n=%u", i);
+    }).join();
+    refillQueued = qvalog::g_queued.load() - q0;
+    const uint64_t d0 = qvalog::g_dropped.load();
+    std::thread([&reWaitUs] {
+      const uint64_t a = qvpatch::NowUs();
+      Log("r93 loading line after the writer moved");
+      reWaitUs = qvpatch::NowUs() - a;
+    }).join();
+    reDropped = qvalog::g_dropped.load() - d0;
+  }
+  WaitWritten();
+  printf("     (R115 L1: ring refilled (%llu queued) after the writer moved: a loading line waited %.1f ms, %llu dropped)\n",
+         static_cast<unsigned long long>(refillQueued), reWaitUs / 1000.0, static_cast<unsigned long long>(reDropped));
+  Check(refillQueued == qvalog::kAsyncSlots && reDropped == 1 && reWaitUs >= qvalog::kFullWaitMs * 1000 - 20000 &&
+            reWaitUs < 2000000,
+        "R115 L1: once the writer moved, a loading line finding the ring full waits again (about 250 ms) before its "
+        "drop");
   qvalog::g_testHold = false;
   StopAsyncLog();
   const uint64_t queued = qvalog::g_queued.load(), dropped = qvalog::g_dropped.load(), written = qvalog::g_written.load();
+  const uint64_t waitMaxAfter = qvalog::g_waitMaxUs.load(), frameDropTotal = qvalog::g_frameDropped.load();
+  // R115 (L3): a config reload after Stop ([Log] Async=1) leaves the ring off: a DCS thread's line is synchronous.
+  const bool cfgAsync0 = g_cfg.asyncLog;
+  const int patchMode0 = qvpatch::g_mode.load();
+  const uint32_t planCap0 = shadowbatch::g_planWaitCapUs.load();
+  g_cfg.asyncLog = true;
+  ApplyR90Config();
+  const bool onAfterReload = qvalog::g_on.load();
+  const uint64_t qStop = qvalog::g_queued.load();
+  std::thread([] { Log("r93 line after stop and reload"); }).join();
+  const bool syncAfterStop = qvalog::g_queued.load() == qStop;
+  // Reloads racing Start / Stop (the worker reading the ini while the payload stops): never on after a Stop.
+  bool onAfterAnyStop = false;
+  {
+    std::atomic<bool> endReload{false};
+    std::thread reload([&endReload] {
+      while (!endReload.load()) ApplyR90Config();
+    });
+    for (int i = 0; i < 100; ++i) {
+      StartAsyncLog();
+      StopAsyncLog();
+      onAfterAnyStop |= qvalog::g_on.load();
+    }
+    endReload = true;
+    reload.join();
+    onAfterAnyStop |= qvalog::g_on.load();
+  }
+  g_cfg.asyncLog = cfgAsync0;
+  qvpatch::g_mode = patchMode0;
+  shadowbatch::g_planWaitCapUs = planCap0;
   const std::vector<std::string> lines = lf.Close();
   qvalog::g_want = want0;
 
-  int start = 0, big = 0, frame = 0, dropLines = 0, waitLines = 0;
+  int start = 0, big = 0, frame = 0, dropLines = 0, waitLines = 0, refill = 0, afterStop = 0;
   bool ordered = true;
+  uint64_t frameDropReported = 0;
   int lastS[kLt], lastB[kBt], lastF = -1;
   for (int& x : lastS) x = -1;
   for (int& x : lastB) x = -1;
@@ -158,6 +233,11 @@ void AsyncLogStart() {
       ordered &= n == lastB[t] + 1;
       lastB[t] = n;
       ++big;
+    } else if (sscanf_s(text, "r93 refill n=%d", &n) == 1) {
+      ordered &= n == refill;
+      ++refill;
+    } else if (!strcmp(text, "r93 line after stop and reload")) {
+      ++afterStop;
     } else if (sscanf_s(text, "r93 frame n=%d", &n) == 1) {
       ordered &= n == lastF + 1;
       lastF = n;
@@ -166,6 +246,9 @@ void AsyncLogStart() {
       ++dropLines;
       unsigned long long k = 0;
       if (sscanf_s(text, "log: %llu", &k) == 1) droppedReported += k;
+      const char* share = strstr(text, "full); ");  // R115 (L5): the frame threads' share, after the phrase
+      unsigned long long fk = 0;
+      if (share && sscanf_s(share, "full); %llu of them from frame threads", &fk) == 1) frameDropReported += fk;
     } else if (!strncmp(text, "log: ", 5) && strstr(text, "waited for ring space")) {
       ++waitLines;
     }
@@ -186,6 +269,18 @@ void AsyncLogStart() {
   Check(frame == static_cast<int>(qvalog::kAsyncSlots) && written == queued && droppedReported == dropped &&
             dropLines > 0,
         "R93 D1: the frame thread's queued lines are written by the writer in order; every drop is reported");
+  printf("     (R115: refill %d written; frame-thread drops %llu, reported %llu; longest-wait stat after the reports %llu "
+         "us; after Stop + reload: on %d, synchronous %d, written %d; on after a racing Stop %d)\n",
+         refill, static_cast<unsigned long long>(frameDropTotal), static_cast<unsigned long long>(frameDropReported),
+         static_cast<unsigned long long>(waitMaxAfter), onAfterReload ? 1 : 0, syncAfterStop ? 1 : 0, afterStop,
+         onAfterAnyStop ? 1 : 0);
+  Check(refill == static_cast<int>(qvalog::kAsyncSlots) && frameDropTotal > 0 && frameDropReported == frameDropTotal &&
+            waitMaxAfter == 0,
+        "R115 L5: the dropped report names the frame threads' share of the drops; the longest-wait statistic restarts "
+        "with each report");
+  Check(!onAfterReload && syncAfterStop && afterStop == 1 && !onAfterAnyStop,
+        "R115 L3: a config reload ([Log] Async=1) after or racing the log writer's stop never turns the ring back on; "
+        "a DCS thread's line after Stop is written synchronously");
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +312,21 @@ void TimelineBehindMask() {
     cmask::ctime::g_on = true;
     cmask::ctime::g_testRecordAlways = true;
   };
+  // R115 (T1): an original that is one of the timeline's own hooks (SlotOriginal without the loader returns the
+  // slot's value) is refused: chaining H_End / H_Locate to itself would recurse without end.
+  maskInstall();
+  cmask::g_xeOrig = reinterpret_cast<cmask::XrEndFn>(ftl::kHookFn[2]);
+  const bool refusedEnd = !ftl::InstallOn(disp) &&
+                          reinterpret_cast<void*>(cmask::g_xeNext.load()) != ftl::kHookFn[2] && !ftl::g_chained[2];
+  ftl::Stop(nullptr);
+  maskInstall();
+  cmask::ctime::g_orig = reinterpret_cast<cmask::ctime::LocateFn>(ftl::kHookFn[3]);
+  const bool refusedLoc = !ftl::InstallOn(disp) &&
+                          reinterpret_cast<void*>(cmask::ctime::g_next.load()) != ftl::kHookFn[3] && !ftl::g_chained[3];
+  ftl::Stop(nullptr);
+  Check(refusedEnd && refusedLoc && disp[ftl::kSlotWait] == reinterpret_cast<void*>(&F_Wait),
+        "R115 T1: the timeline refuses to chain behind the export when the original it would call is its own hook "
+        "(no self-recursion); nothing of it is left installed");
   maskInstall();
   const uint64_t xe0 = cmask::g_xeCalls.load(), lv0 = cmask::ctime::g_calls.load();
   const bool installed = ftl::InstallOn(disp);

@@ -1188,12 +1188,18 @@ struct Base {
   bool ok = false;
 };
 Base g_b;
+bool g_ringOpen = false;    // this frame's ring entry's disjoint query began
+int g_tsOps = 0;            // timestamped operations this frame
 
 void ReleaseQueriesB() {
   for (int r = 0; r < kRing; ++r) {
     RelP(g_b.dj[r]);
     for (auto& t : g_b.ts[r]) RelP(t[0]), RelP(t[1]);
   }
+  // R115: a disjoint query begun before an uninstall (TsBegin, no FrameEnd yet) is gone: the next timed frame begins
+  // a new one (not an End of a query never begun).
+  g_ringOpen = false;
+  g_tsOps = 0;
 }
 void MakeQueriesB(ID3D11Device* dev) {
   D3D11_QUERY_DESC qd{D3D11_QUERY_TIMESTAMP_DISJOINT, 0}, qt{D3D11_QUERY_TIMESTAMP, 0};
@@ -1289,8 +1295,12 @@ int64_t g_lastDt = 0;      // the last committed paired displayTime
 Pose g_lastPose[kViews];   // the last committed submitted pose per view
 uint32_t g_lastResetGen = 0;
 bool g_posed = false;      // this frame's commit read DCS's submitted poses (g_lastPose is this frame's)
+uint32_t g_posedN = 0;     // R115: the views of them (g_lastPose[v] is this frame's for v < g_posedN only)
 int g_watch = -1;          // the view whose OverlayHDRPass ended and whose ToneMappingPass has not begun
-std::atomic<bool> g_fault{false};
+// R115: the fault latch is ovl_cpu.h's (its SEH handlers set it; R95's was never set): the export stops until the
+// next install (NoteInstall clears it); logged once (TickRenderPoint).
+std::atomic<bool>& g_fault = ckipd::ocpu::g_symFault;
+bool g_faultLogged = false;  // (config thread)
 // R97: the cost breakdown. GPU operations by kind (timestamps on every kTimeEvery-th frame only: R96's render thread
 // paid two query Ends per operation and their GetData every frame); render-thread time by stage.
 enum GpuCat : int { kGCopy, kGAcc, kGScan, kGFinal, kGTone, kGCats };
@@ -1301,6 +1311,7 @@ bool g_timed = false;       // this frame is timed (render thread)
 struct RingMeta {
   bool pending = false, timed = false;
   uint64_t frame = 0;
+  uint32_t epoch = 0;       // R115: the learn epoch (g_learnEpoch) it was queued in
   int ops = 0;
   uint8_t cat[kTsOps] = {};
   bool armed[kViews] = {}, seen[kViews] = {};
@@ -1308,17 +1319,16 @@ struct RingMeta {
 };
 RingMeta g_ring[kRing];
 int g_ringCur = 0;          // this frame's ring entry
-bool g_ringOpen = false;    // its disjoint query began
-int g_tsOps = 0;            // timestamped operations this frame
 uint32_t g_voteWin[kViews][4] = {};  // R97: the windows of the last read-back (the alpha vote's "still")
 bool g_voteWinOk = false;
+uint32_t g_learnEpoch = 0;  // R115: ResetLearn's count: a read-back queued before the last reset is not learnt
 
 // Statistics (any thread).
 std::atomic<uint64_t> g_frames{0}, g_commits{0}, g_viewsPresent{0}, g_viewsWin{0}, g_overflows{0}, g_scans{0},
     g_runs{0}, g_noTarget{0}, g_tgtLearns{0}, g_preSame{0}, g_touched{0}, g_preDlss{0}, g_noTone{0}, g_edges{0},
     g_learnCol{0}, g_learnHel{0}, g_pupilFrames{0}, g_noRenderPoint{0}, g_predicted{0}, g_predictFallback{0},
     g_alphaValid{0}, g_alphaInvalid{0}, g_readbacks{0}, g_resets{0}, g_ringFull{0}, g_focusRepeats{0},
-    g_hudOnlyViews{0}, g_alphaVotes[3] = {}, g_cbWrites{0}, g_recentViews{0};
+    g_hudOnlyViews{0}, g_alphaVotes[3] = {}, g_cbWrites{0}, g_recentViews{0}, g_staleReadbacks{0}, g_noPoseViews{0};
 std::atomic<ULONGLONG> g_lastCommitMs{0};
 std::mutex g_statMu;
 // under g_statMu: GPU us per timed frame by kind, render-thread us per frame by stage
@@ -1385,6 +1395,7 @@ void ResetLearn() {
   for (Learn& l : g_l) static_cast<Field&>(l) = Field{};
   g_alphaHold.run = 0;
   g_voteWinOk = false;
+  ++g_learnEpoch;  // R115: the ring's pending read-backs (up to kRing - 1 frames of the previous aircraft) not learnt
   g_resets++;
 }
 
@@ -1877,6 +1888,10 @@ void ToneDone(int v, bool written) {
 // ---- Learning from a read-back frame ----
 void ProcessStats(const RingMeta& m, const uint32_t* w) {
   g_readbacks++;
+  if (m.epoch != g_learnEpoch) {  // R115: rendered before the last reset (a mission event): no learning, no vote
+    g_staleReadbacks++;
+    return;
+  }
   bool seen[kViews] = {}, win[kViews] = {}, same[kViews] = {};
   int verdict[kViews] = {};
   for (int v = 0; v < kViews; ++v) {
@@ -1923,6 +1938,7 @@ void FrameEnd(bool committed) {
       m.timed = g_ringOpen;
       m.ops = g_tsOps;
       m.frame = g_frameN;
+      m.epoch = g_learnEpoch;
       for (int v = 0; v < kViews; ++v) {
         const FrameView& f = g_fv[v];
         StatMeta& s = m.sm[v];
@@ -1937,7 +1953,7 @@ void FrameEnd(bool committed) {
         s.wx = f.win ? f.wx : 0, s.wy = f.win ? f.wy : 0, s.ww = f.win ? f.ww : 0, s.wh = f.win ? f.wh : 0;
         s.obsWinL = f.obsWinL, s.obsViewL = f.obsViewL, s.obsWinR = f.obsWinR, s.obsViewR = f.obsViewR;  // R101
         // The orientation the frame was rendered with: the submitted one (the commit's) when it was read
-        if (committed && g_posed && g_lastPose[v].ok && f.seen) {
+        if (committed && g_posed && static_cast<uint32_t>(v) < g_posedN && g_lastPose[v].ok && f.seen) {  // R115: < n
           memcpy(s.q, g_lastPose[v].q, sizeof(s.q));
           if (!s.angOk) s.pose = g_lastPose[v];
           else memcpy(s.pose.q, g_lastPose[v].q, sizeof(s.q));
@@ -1956,6 +1972,7 @@ void FrameEnd(bool committed) {
   g_ringOpen = false;
   g_tsOps = 0;
   g_posed = false;
+  g_posedN = 0;
   // Older frames, oldest first, never waiting: their statistics (learning) and timing. R97: the first one not ready
   // ends the poll (the later ones were submitted after it).
   if (c && g_b.ok)
@@ -2051,6 +2068,7 @@ bool Commit(const Frame& f, uint64_t seq, int64_t displayTime, bool paired, cons
     }
     for (uint32_t v = 0; v < nv; ++v) g_lastPose[v] = PoseOf(xr->q[v], xr->fov[v]);  // the image's pose and FOV
     g_posed = true;
+    g_posedN = nv;
   }
   float pubTan[4][4] = {};
   for (uint32_t v = 0; v < nv; ++v)
@@ -2065,11 +2083,14 @@ bool Commit(const Frame& f, uint64_t seq, int64_t displayTime, bool paired, cons
               (fv.preDlss ? csy::view_flags::pre_dlss_hud : 0u) | (fv.overflow ? csy::view_flags::overflow : 0u);
     m.x = pk.x[v], m.y = pk.y[v], m.capW = m.capH = pk.cap[v];
     m.outW = L.tgtOk ? L.bw : 0, m.outH = L.tgtOk ? L.bh : 0;
-    if (fv.written && fv.win) {
+    if (fv.written && fv.win && static_cast<uint32_t>(v) < nv) {
       m.flags |= csy::view_flags::present | csy::view_flags::own_tonemap;
       m.winX = fv.wx, m.winY = fv.wy, m.winW = fv.ww, m.winH = fv.wh;
       g_viewsPresent++;
       (L.alpha > 0 ? g_alphaValid : g_alphaInvalid)++;
+    } else if (fv.written && fv.win) {
+      partial = true;  // R115: E written but no submitted pose for the view: no fovTan, so not present
+      g_noPoseViews++;
     } else if (fv.win && fv.accInit) {
       partial = true;  // E was due and the tone map did not evaluate it
       g_noTone++;
@@ -2255,8 +2276,15 @@ ULONGLONG g_rpSince = 0;
 void NoteInstall() {
   g_rpLogged = -1;
   g_rpSince = GetTickCount64();
+  g_fault = false;  // R115: a latched fault lasts until the next install
+  g_faultLogged = false;
 }
 void TickRenderPoint() {
+  if (g_fault.load() && !g_faultLogged) {  // R115
+    g_faultLogged = true;
+    Log("symbology: a fault in the record render point (%llu so far): the export is off until its next install (R115)",
+        static_cast<unsigned long long>(ckipd::ocpu::g_symFaults.load()));
+  }
   const int now = RenderPoint() ? 1 : 0;
   const int last = g_rpLogged.load();
   if (now == last) return;
@@ -2315,7 +2343,7 @@ std::string StatsText(std::string* extra = nullptr) {
   const double gOps = g[kGCopy] + g[kGAcc] + g[kGScan] + g[kGFinal];
   double cTot = 0;
   for (double x : c) cTot += x;
-  char b[1100], x[900];
+  char b[1100], x[1100];
   sprintf_s(b,
             "symbology: %llu commits, views present %llu (window %llu, overflow %llu), alpha valid %llu / not %llu; "
             "type runs %llu, scans %llu, learnt rectangle %llu / helmet %llu, edge hits %llu, read-backs %llu; not "
@@ -2334,11 +2362,13 @@ std::string StatsText(std::string* extra = nullptr) {
             "tone-map draws with the second evaluation %.1f (whole draws; they replace DCS's own draw), export + draws "
             "%.1f us/frame; render thread by stage windows %.1f, records %.1f, tone %.1f, commit %.1f, frame end %.1f "
             "us/frame; constant writes %llu; HUD-only view-frames %llu; coverage alpha votes valid / neutral / invalid "
-            "%llu / %llu / %llu, flips %u%s; recent-field view-frames %llu (R101)",
+            "%llu / %llu / %llu, flips %u%s; recent-field view-frames %llu (R101); read-backs from before a reset %llu, "
+            "views without a submitted pose %llu, record render point faults %llu%s (R115)",
             g[kGCopy], g[kGAcc], g[kGScan], g[kGFinal], g[kGTone], gOps + g[kGTone], c[kCWin], c[kCRec], c[kCTone],
             c[kCCommit], c[kCEnd], u(g_cbWrites), u(g_hudOnlyViews), u(g_alphaVotes[2]), u(g_alphaVotes[1]),
             u(g_alphaVotes[0]), g_alphaHold.flips, g_alphaHold.latched ? ", latched off for this generation" : "",
-            u(g_recentViews));
+            u(g_recentViews), u(g_staleReadbacks), u(g_noPoseViews), u(ckipd::ocpu::g_symFaults),
+            g_fault.load() ? ", latched off until the next install" : "");
   if (extra) *extra = x;
   return b;
 }

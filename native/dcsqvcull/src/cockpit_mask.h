@@ -1272,6 +1272,8 @@ void PublishSet(bool depth, bool motion, bool sym = false);
 // depth / motion / class when wanted) are made by the builder thread (13. at the top), or inline with g_asyncBuild 0;
 // SwapIn (render thread) clears them and publishes them. Before R91 CreateAtlas made them on the render thread.
 std::atomic<bool> g_testFailAtlas{false};  // R86 (tests): the set's creation fails (SwapIn: after the old set's release)
+std::atomic<int> g_testBuildFault{0};  // R115 (tests): BuildSet raises an access violation on the builder thread
+std::atomic<DWORD> g_bLoopTid{0};      // R115: the builder thread's id (BuilderLoop)
 struct BuildKey {
   ID3D11Device* dev = nullptr;  // referenced by the Built that carries it
   Layout L;
@@ -1362,6 +1364,8 @@ bool BuildSet(Built& b) {
   const Layout& L = b.key.L;
   ID3D11Device* dev = b.key.dev;
   if (!dev || g_testFailAtlas.load()) return false;
+  if (g_testBuildFault.load(std::memory_order_relaxed) && GetCurrentThreadId() == g_bLoopTid.load())
+    RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);  // R115 (tests): a driver fault inside the creates
   D3D11_TEXTURE2D_DESC td{};
   td.Width = L.atlasW;
   td.Height = L.atlasH;
@@ -1501,6 +1505,7 @@ std::atomic<int> g_asyncBuild{1};   // 0: SwapIn's set made inline on the render
 std::atomic<int> g_buildWaitMs{0};  // tests: the render thread waits up to this for the builder in the same commit
 std::atomic<uint64_t> g_buildN{0}, g_buildUsSum{0}, g_buildUsMax{0}, g_buildsInline{0}, g_buildWaits{0},
     g_buildsDiscarded{0}, g_buildsFailed{0};
+std::atomic<uint64_t> g_buildFaults{0};  // R115: contained faults inside BuildSet on the builder thread
 std::atomic<DWORD> g_buildTid{0};          // the thread that made the last set (tests, diagnostics)
 std::atomic<int> g_testBuildDelayMs{0};    // tests: the builder waits this long before it makes a set
 
@@ -1515,7 +1520,21 @@ void NoteBuildTime(int64_t q0, int64_t q1) {
   }
 }
 
+// R115 (H2): BuildSet on the builder thread under its own SEH frame (no C++ objects with destructors here: C2712).
+// A contained fault (exit_guard.h's Filter: an access violation in the driver, ...) returns false instead of ending
+// the thread under qvexit::RunVoid with g_bState stuck at 2 (every later RequestBuild refused, the export silently
+// never relaid).
+bool BuildSetSeh(Built& b, qvexit::Fault* f) {
+  __try {
+    BuildSet(b);
+    return true;
+  } __except (qvexit::Filter(GetExceptionInformation(), f)) {
+    return false;
+  }
+}
+
 void BuilderLoop() {
+  g_bLoopTid = GetCurrentThreadId();
   std::unique_lock<std::mutex> lock(g_bMutex);
   for (;;) {
     g_bCv.wait(lock, [] { return g_bStop || g_bState == 1; });
@@ -1528,7 +1547,22 @@ void BuilderLoop() {
     if (const int ms = g_testBuildDelayMs.load()) Sleep(static_cast<DWORD>(ms));
     LARGE_INTEGER q0, q1;
     QueryPerformanceCounter(&q0);
-    BuildSet(b);
+    qvexit::Fault fault;
+    if (!BuildSetSeh(b, &fault)) {
+      // R115 (H2): the set is a failed one (b.ok false): SwapIn's failure path (R76's record under a new generation,
+      // flags 0, no handles; the fault latched) or a discard. What was made before the fault is leaked on purpose:
+      // the driver faulted inside a create, so those objects and handles are not trusted to release. The device
+      // reference (the request's) is kept in b.key and released with it as usual.
+      const BuildKey key = b.key;
+      b = Built{};
+      b.key = key;
+      if (g_buildFaults++ == 0) {
+        char at[160];
+        qvexit::Where(fault.at, at, sizeof(at));
+        Log("cockpit mask: exception 0x%08lx at %s while the builder thread made a set; the set counts as failed, the "
+            "builder thread goes on (R115; logged once)", fault.code, at);
+      }
+    }
     QueryPerformanceCounter(&q1);
     NoteBuildTime(q0.QuadPart, q1.QuadPart);
     g_buildTid = GetCurrentThreadId();
@@ -3768,6 +3802,19 @@ void SetIdle(bool idle) {
   PublishMotionHeader();  // R70
   PublishSymHeader();  // R95
   if (idle) g_mPrev.valid = false;
+  if (!idle) {
+    // R115 (H1): NoteFlightFrame samples only at commits, and an idle reader makes none: g_flightBits' bit 0 / 1 are the
+    // last samples before the idle stretch, and the first commit after it would count every quad frame culled meanwhile
+    // as this frame's (bit 0). Both stale bits said "flight" -> the gate opened at a resume in the F10 map (a map
+    // relayout). The signal starts again here: two fresh samples are needed (the first fresh one's bit 0 may still
+    // count the idle stretch's quad frames: g_quadSeen is not moved, because this frame's world, culled before its
+    // first pass, is already in g_quadFrame). The closed stretch restarts too: an idle stretch is not a closed-gate
+    // hold (it ran g_gateClosedMs past g_mapHoldMaxMs and opened the backstop at once). g_flightNoted is kept: it is a
+    // pre-idle engine frame (g_s.frame advances every frame, idle or not), so this frame's first commit samples.
+    g_flightBits = 0;
+    g_gateClosedMs = 0;
+    g_gateTimedOut = false;
+  }
   PublishHeader();
 }
 

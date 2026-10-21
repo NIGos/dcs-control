@@ -29,7 +29,9 @@ std::string g_reportBuf;
 //     load's burst were dropped at every DCS start), and only a frame thread drops: a DCS thread that never ran one
 //     of our per-frame hooks (the loading / Main threads; qvalog::t_frameThread false) waits for ring space instead
 //     (the writer is woken; at most kFullWaitMs per line, then the line is dropped and counted). It still never
-//     writes the file itself. A frame thread (the render thread: HookCollect, the pass hook, the xrEndFrame hooks)
+//     writes the file itself. R115 (L1): after such a timeout, while the writer has not moved (g_deq unchanged),
+//     the next non-frame lines that find the ring full are dropped at once (counted) instead of waiting again;
+//     once the writer moves, waiting resumes. A frame thread (the render thread: HookCollect, the pass hook, the xrEndFrame hooks)
 //     never waits and never writes: a full ring drops its line, as before;
 //   - the payload's own threads (worker, recorders, suite) write synchronously as before; a synchronous line
 //     first drains the ring (a fault line of ours comes after every queued line), and Stop / Quiesce drain it.
@@ -38,24 +40,32 @@ std::string g_reportBuf;
 thread_local bool g_tOurThread = false;  // set by qvexit::NoteStart: a payload thread (Run / RunVoid)
 
 namespace qvalog {
-constexpr uint32_t kAsyncSlots = 4096;  // power of two (R93: was 256); 8 MiB, committed as the ring is first used
+// Power of two (R93: was 256); 8 MiB of zero-initialised (demand-zero) memory: R115 (L2) nothing touches a page of
+// it before a line goes through it (no initialiser writes the slots; see Slot::seq).
+constexpr uint32_t kAsyncSlots = 4096;
 constexpr uint32_t kFullWaitMs = 250;   // R93: a non-frame DCS thread waits at most this long per line for ring space
 // R93: set on a DCS thread by our per-frame hooks (HookCollect, the top-level pass hook, the xrEndFrame hooks): the
 // render thread. Its lines never wait for ring space (a full ring drops them). Every other DCS thread may wait.
 thread_local bool t_frameThread = false;
 inline void NoteFrameThread() { t_frameThread = true; }
+// R115 (L2): a trivial type (no member initialiser, no std::atomic: MSVC runs a load-time constructor loop over an
+// array of such class objects, writing every slot), so the ring is plain zero-initialised (demand-zero) data. seq is
+// Vyukov's sequence minus the slot's index, read / written only through SeqOf / SetSeq (acquire / release): the
+// initial seq[i] = i is a stored 0, so the zero ring is the empty ring.
 struct Slot {
-  std::atomic<uint32_t> seq{0};
-  SYSTEMTIME st{};
+  LONG seq;
+  SYSTEMTIME st;
   char text[2048];
 };
 Slot g_ring[kAsyncSlots];
-const bool g_ringInit = [] {
-  for (uint32_t i = 0; i < kAsyncSlots; ++i) g_ring[i].seq.store(i, std::memory_order_relaxed);
-  return true;
-}();
+inline uint32_t SeqOf(const Slot& s, uint32_t idx) { return static_cast<uint32_t>(ReadAcquire(&s.seq)) + idx; }
+inline void SetSeq(Slot& s, uint32_t idx, uint32_t seq) { WriteRelease(&s.seq, static_cast<LONG>(seq - idx)); }
 std::atomic<uint32_t> g_enq{0};
-uint32_t g_deq = 0;                 // under g_drainMutex
+// Written only under g_drainMutex (the next line to write); R115 (L1): atomic so the stall latch can read it.
+std::atomic<uint32_t> g_deq{0};
+// R115 (L1): g_deq when a non-frame line last timed out waiting for ring space (-1: none). While g_deq is still this
+// value (the writer has not moved), a non-frame line finding the ring full is dropped at once instead of waiting.
+std::atomic<int64_t> g_stallDeq{-1};
 std::mutex g_drainMutex;            // one consumer at a time (the writer, or a synchronous line)
 std::atomic<bool> g_on{false};      // writer running and [Log] Async=1: DCS threads enqueue
 std::atomic<bool> g_want{true};     // [Log] Async
@@ -66,6 +76,7 @@ uint64_t g_droppedLogged = 0;       // under g_drainMutex
 // threads (never waited) and the writer's wake event (set by a waiting thread; null: the writer polls every 10 ms).
 std::atomic<uint64_t> g_waited{0}, g_waitMaxUs{0}, g_frameDropped{0};
 uint64_t g_waitedLogged = 0;        // under g_drainMutex
+uint64_t g_frameDroppedLogged = 0;  // under g_drainMutex (R115 L5: the frame-thread share of the dropped report)
 HANDLE g_wake = nullptr;
 using LogAtFn = void (*)(const char* line, const SYSTEMTIME* st);
 LogAtFn g_logAt = nullptr;          // the loader's DcsQvCull_LogAt (resolved at start; null: g_api->log)
@@ -74,9 +85,11 @@ LogAtFn g_logAt = nullptr;          // the loader's DcsQvCull_LogAt (resolved at
 bool Push(const char* line, const SYSTEMTIME& st) {
   uint32_t pos = g_enq.load(std::memory_order_relaxed);
   Slot* s;
+  uint32_t idx;
   for (;;) {
-    s = &g_ring[pos & (kAsyncSlots - 1)];
-    const uint32_t seq = s->seq.load(std::memory_order_acquire);
+    idx = pos & (kAsyncSlots - 1);
+    s = &g_ring[idx];
+    const uint32_t seq = SeqOf(*s, idx);
     const int32_t dif = static_cast<int32_t>(seq - pos);
     if (dif == 0) {
       if (g_enq.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) break;
@@ -88,7 +101,7 @@ bool Push(const char* line, const SYSTEMTIME& st) {
   }
   s->st = st;
   strncpy_s(s->text, sizeof(s->text), line, _TRUNCATE);
-  s->seq.store(pos + 1, std::memory_order_release);
+  SetSeq(*s, idx, pos + 1);
   g_queued.fetch_add(1, std::memory_order_relaxed);
   return true;
 }
@@ -115,8 +128,21 @@ int WaitPush(const char* line, const SYSTEMTIME& st) {
       }
       return 1;
     }
-    if (t1.QuadPart - t0.QuadPart >= limit) return 0;
+    if (t1.QuadPart - t0.QuadPart >= limit) {
+      g_stallDeq.store(g_deq.load(std::memory_order_acquire), std::memory_order_release);  // R115 (L1): latched
+      return 0;
+    }
   }
+}
+
+// R115 (L1): true while the writer has not moved since a non-frame line last timed out waiting for ring space (the
+// caller drops its line at once, counted). Clears the latch once the writer moved: the next full ring waits again.
+bool WriterStalled() {
+  int64_t at = g_stallDeq.load(std::memory_order_acquire);
+  if (at < 0) return false;
+  if (static_cast<uint32_t>(at) == g_deq.load(std::memory_order_acquire)) return true;
+  g_stallDeq.compare_exchange_strong(at, -1, std::memory_order_acq_rel);
+  return false;
 }
 
 // One line to the log file (caller holds g_logMutex). st: the time to stamp (nullptr = now).
@@ -145,8 +171,9 @@ thread_local bool t_inDrain = false;
 bool Pending() {
   if (t_inDrain) return false;
   std::lock_guard<std::mutex> d(g_drainMutex);
-  const Slot& s = g_ring[g_deq & (kAsyncSlots - 1)];
-  return s.seq.load(std::memory_order_acquire) == g_deq + 1;
+  const uint32_t deq = g_deq.load(std::memory_order_relaxed);
+  const uint32_t idx = deq & (kAsyncSlots - 1);
+  return SeqOf(g_ring[idx], idx) == deq + 1;
 }
 
 // Writes every queued line in ring order (writer thread, a synchronous line, Stop). Returns the lines written.
@@ -155,24 +182,34 @@ uint32_t Drain() {
   std::lock_guard<std::mutex> d(g_drainMutex);
   t_inDrain = true;
   uint32_t n = 0;
+  uint32_t deq = g_deq.load(std::memory_order_relaxed);
   for (;;) {
-    Slot& s = g_ring[g_deq & (kAsyncSlots - 1)];
-    if (s.seq.load(std::memory_order_acquire) != g_deq + 1) break;  // empty, or the next slot not written yet
+    const uint32_t idx = deq & (kAsyncSlots - 1);
+    Slot& s = g_ring[idx];
+    if (SeqOf(s, idx) != deq + 1) break;  // empty, or the next slot not written yet
     {
       std::lock_guard<std::mutex> lock(g_logMutex);
       Emit(s.text, &s.st);
     }
-    s.seq.store(g_deq + kAsyncSlots, std::memory_order_release);
-    ++g_deq;
+    SetSeq(s, idx, deq + kAsyncSlots);
+    ++deq;
+    g_deq.store(deq, std::memory_order_release);
     ++n;
   }
   g_written.fetch_add(n, std::memory_order_relaxed);
   const uint64_t dropped = g_dropped.load(std::memory_order_relaxed);
   if (dropped != g_droppedLogged) {
-    char line[160];
-    snprintf(line, sizeof(line), "log: %llu lines from DCS threads dropped (async log ring of %u lines full)",
-             static_cast<unsigned long long>(dropped - g_droppedLogged), kAsyncSlots);
+    // R115 (L5): the frame threads' share (dropped without waiting) appended after the unchanged phrase.
+    const uint64_t frameDropped = g_frameDropped.load(std::memory_order_relaxed);
+    const uint64_t frameNew = frameDropped >= g_frameDroppedLogged ? frameDropped - g_frameDroppedLogged : frameDropped;
+    char line[240];
+    snprintf(line, sizeof(line),
+             "log: %llu lines from DCS threads dropped (async log ring of %u lines full); %llu of them from frame "
+             "threads (the render thread)",
+             static_cast<unsigned long long>(dropped - g_droppedLogged), kAsyncSlots,
+             static_cast<unsigned long long>(frameNew));
     g_droppedLogged = dropped;
+    g_frameDroppedLogged = frameDropped;
     std::lock_guard<std::mutex> lock(g_logMutex);
     Emit(line, nullptr);
   }
@@ -183,7 +220,7 @@ uint32_t Drain() {
              "log: %llu lines from DCS non-frame threads waited for ring space (async log ring of %u lines full; "
              "longest wait %.1f ms); none of them dropped",
              static_cast<unsigned long long>(waited - g_waitedLogged), kAsyncSlots,
-             g_waitMaxUs.load(std::memory_order_relaxed) / 1000.0);
+             g_waitMaxUs.exchange(0, std::memory_order_relaxed) / 1000.0);  // R115 (L5): this report's waits
     g_waitedLogged = waited;
     std::lock_guard<std::mutex> lock(g_logMutex);
     Emit(line, nullptr);
@@ -209,7 +246,8 @@ void Log(const char* fmt, ...) {
       qvalog::g_dropped.fetch_add(1, std::memory_order_relaxed);
       return;
     }
-    const int w = qvalog::WaitPush(line, st);  // R93: a loading / Main thread waits for ring space (bounded)
+    // R93: a loading / Main thread waits for ring space (bounded). R115 (L1): not again while the writer is stalled.
+    const int w = qvalog::WriterStalled() ? 0 : qvalog::WaitPush(line, st);
     if (w > 0) return;
     if (w == 0) {
       qvalog::g_dropped.fetch_add(1, std::memory_order_relaxed);

@@ -41,6 +41,19 @@ DWORD WINAPI WaitOn(void* ev) {
   return 0;
 }
 
+// R115 P5: NtGetNextThread that fails with STATUS_ACCESS_DENIED after g_nextLeft threads.
+std::atomic<int> g_nextLeft{0};
+LONG NTAPI FailingNextThread(HANDLE p, HANDLE t, ACCESS_MASK a, ULONG at, ULONG fl, PHANDLE nx) {
+  if (g_nextLeft.fetch_sub(1) <= 0) return static_cast<LONG>(0xC0000022L);
+  return qvpatch::NextThreadFn()(p, t, a, at, fl, nx);
+}
+// Suspend count of a thread (0 = running), restored.
+DWORD SuspendCount(HANDLE t) {
+  const DWORD c = SuspendThread(t);
+  if (c != static_cast<DWORD>(-1)) ResumeThread(t);
+  return c;
+}
+
 int ToolhelpCount() {
   HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
   if (snap == INVALID_HANDLE_VALUE) return -1;
@@ -101,7 +114,44 @@ void Patch() {
     medWall[mode] = wall[wall.size() / 2];
     medHeld[mode] = held[held.size() / 2];
   }
+  // R115 P5: a walk that fails midway (access denied after 100 threads) is not the end of the list.
+  bool p5Bytes = true, p5Ok = true, p5Held = true;
+  int p5Visited = 0;
+  if (qvpatch::NextThreadFn()) {
+    qvpatch::g_testNextThread = &FailingNextThread;
+    g_nextLeft = 100;
+    p5Visited = qvpatch::ForEachProcessThread(THREAD_QUERY_LIMITED_INFORMATION, [](HANDLE) { return false; });
+    qvpatch::g_mode = 1;
+    for (int i = 0; i < 6; ++i) {
+      const uint8_t* want = (i & 1) ? kSiteA : kSiteB;
+      const qvpatch::Site s{page, want, 6};
+      g_nextLeft = 100;
+      p5Ok &= qvpatch::WriteSuspended(&s, 1);
+      p5Bytes &= memcmp(page, want, 6) == 0;
+      p5Held &= qvpatch::g_lastThreads.load() >= idle.size() + 4;  // the write held every thread (Toolhelp path)
+    }
+    qvpatch::g_testNextThread = nullptr;
+  } else {
+    printf("     (R115 P5: no NtGetNextThread: failing-walk checks skipped)\n");
+  }
   qvpatch::g_mode = mode0;
+  bool p5Running = true;
+  for (HANDLE t : idle) p5Running &= SuspendCount(t) == 0;
+  for (HANDLE t : spinners) p5Running &= SuspendCount(t) == 0;
+  {
+    const uint64_t c0 = spin.calls.load();
+    Sleep(20);
+    p5Running &= spin.calls.load() > c0;
+  }
+  if (qvpatch::NextThreadFn()) {
+    Check(p5Visited == -1, "R115 P5: NtGetNextThread failing mid-walk (access denied) makes ForEachProcessThread "
+                           "return -1, not a short list");
+    Check(p5Ok && p5Bytes && p5Held,
+          "R115 P5: with the walk failing mid-list, WriteSuspended falls back to the Toolhelp path: sites written, "
+          "every other thread held during the write");
+  }
+  Check(p5Running && spin.bad.load() == 0,
+        "R115 P5: after the failed walks no thread is left suspended (suspend counts 0, the site threads progress)");
   const uint64_t calls0 = spin.calls.load();
   Sleep(20);
   const bool stillRunning = spin.calls.load() > calls0;
@@ -244,6 +294,32 @@ bool Stamped(const std::string& l) {  // "HH:MM:SS.mmm text"
          l[12] == ' ';
 }
 
+// R115 (L2): the async log ring's state as the process starts (main() calls RingAtLoad before any test).
+struct RingAtLoad {
+  bool taken = false, queried = false;
+  uint32_t lastRaw = 0;
+  int pages = 0, resident = 0;  // whole pages inside the ring's second half, and how many were in the working set
+} g_ringAtLoad;
+void NoteRingAtLoad() {
+  RingAtLoad& r = g_ringAtLoad;
+  r.taken = true;
+  r.lastRaw = static_cast<uint32_t>(qvalog::g_ring[qvalog::kAsyncSlots - 1].seq);
+  const uintptr_t a = (reinterpret_cast<uintptr_t>(&qvalog::g_ring[qvalog::kAsyncSlots / 2]) + 4095) &
+                      ~static_cast<uintptr_t>(4095);
+  const uintptr_t e = reinterpret_cast<uintptr_t>(&qvalog::g_ring[qvalog::kAsyncSlots]) & ~static_cast<uintptr_t>(4095);
+  r.queried = true;
+  for (uintptr_t p = a; p < e; p += 4096) {
+    PSAPI_WORKING_SET_EX_INFORMATION wi{};
+    wi.VirtualAddress = reinterpret_cast<void*>(p);
+    if (!K32QueryWorkingSetEx(GetCurrentProcess(), &wi, sizeof(wi))) {
+      r.queried = false;
+      break;
+    }
+    ++r.pages;
+    r.resident += wi.VirtualAttributes.Valid ? 1 : 0;
+  }
+}
+
 void AsyncLog() {
   wchar_t tmp[MAX_PATH];
   GetTempPathW(MAX_PATH, tmp);
@@ -263,6 +339,20 @@ void AsyncLog() {
   qvalog::g_dropped = 0;
   qvalog::g_queued = 0;
   qvalog::g_written = 0;
+  // R115 (L2): no initialiser wrote the ring at load (RingAtLoad, taken first thing in main(): the pages of the
+  // ring's second half were not in the working set and the last slot's stored sequence was 0, zero-initialised =
+  // free); and before this test (the first to start the async log; a synchronous line reads slot 0 only) the last
+  // slot is still 0. (Residency is judged at main(): some earlier test reads the image's data pages wholesale.)
+  {
+    const uint32_t lastRaw = static_cast<uint32_t>(qvalog::g_ring[qvalog::kAsyncSlots - 1].seq);
+    printf("     (R115 L2: at load: last slot's stored sequence %u, ring pages resident %d of %d (query %d); before "
+           "first use: last slot %u)\n",
+           g_ringAtLoad.lastRaw, g_ringAtLoad.resident, g_ringAtLoad.pages, g_ringAtLoad.queried ? 1 : 0, lastRaw);
+    Check(g_ringAtLoad.taken && g_ringAtLoad.lastRaw == 0 && g_ringAtLoad.queried && g_ringAtLoad.pages > 0 &&
+              g_ringAtLoad.resident == 0 && lastRaw == 0,
+          "R115 L2: the async log ring is untouched at load and before its first use (zero-initialised slots are "
+          "free; no page of it committed by an initialiser)");
+  }
   StartAsyncLog();
   const bool on = qvalog::g_on.load();
 
@@ -408,6 +498,28 @@ void FastReadback() {
   if (wc) wc->Release();
   if (wd) wd->Release();
   chainfast::ReleasePrivate();
+  {  // R115 P6b: worker start creates the private device only with the engine kill switch off.
+    const uint32_t cf0 = g_cfg.chainFast, sf0 = g_cfg.shaderFast;
+    const bool off0 = g_engineOff.load(), po0 = g_perceptionOnly.load();
+    g_cfg.chainFast = 0;  // no creation hook from the test, only the device
+    g_cfg.shaderFast = 3;
+    g_perceptionOnly = false;
+    g_engineOff = true;
+    const uint32_t n0 = chainfast::g_privCreated.load();
+    ChainFastAtStart();
+    const bool noneOff = chainfast::g_privDev == nullptr && chainfast::g_privCreated.load() == n0;
+    g_engineOff = false;
+    ChainFastAtStart();
+    const bool madeOn = chainfast::g_privDev != nullptr;
+    chainfast::ReleasePrivate();
+    g_cfg.chainFast = cf0;
+    g_cfg.shaderFast = sf0;
+    g_engineOff = off0;
+    g_perceptionOnly = po0;
+    Check(noneOff, "R115 P6b: with the engine kill switch on, worker start creates no private D3D11 device");
+    if (got)
+      Check(madeOn, "R115 P6b: with the engine on and ShaderFast set, worker start creates the private device");
+  }
   Check(sfast::InThisModule(reinterpret_cast<void*>(&sfast::Rearm)) &&
             !sfast::InThisModule(reinterpret_cast<void*>(&GetTickCount64)) && !sfast::InThisModule(nullptr),
         "R90: shader_fast InThisModule from the cached image range (no GetModuleHandleExW on the render thread)");
@@ -595,6 +707,38 @@ void Prune() {
         "R90 s7: a cache hit stamps the entry's last use (last-write time)");
   printf("     (R90 s7: pruned %u files, %u folders, %.1f MB; %zu .qvc left)\n", st.files, st.dirs,
          st.bytes / 1048576.0, qvc);
+  {  // R115 P7: pruned dump folders count their files' bytes; a folder that stays still counts what went.
+    const std::wstring dd = root + L"p7_dumps\\";
+    CreateDirectoryW(dd.c_str(), nullptr);
+    const size_t sizes0[3] = {1000, 2000, 3000};
+    for (int i = 0; i < 5; ++i) {
+      const std::wstring d = dd + std::to_wstring(i);
+      CreateDirectoryW(d.c_str(), nullptr);
+      if (i == 0) {
+        for (int k = 0; k < 3; ++k) MakeFile(d + L"\\f" + std::to_wstring(k) + L".bin", sizes0[k], 0);
+      } else if (i == 1) {
+        MakeFile(d + L"\\a.bin", 500, 0);
+        MakeFile(d + L"\\held.bin", 700, 0);
+      } else {
+        MakeFile(d + L"\\keep.bin", 64, 0);
+      }
+      AgeDir(d, 100 - i);
+    }
+    // Held open without FILE_SHARE_DELETE: it cannot be deleted, so folder 1 cannot be removed.
+    HANDLE held = CreateFileW((dd + L"1\\held.bin").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                              0, nullptr);
+    prune::Stats s7;
+    prune::KeepNewest(dd, L"*", prune::kKeepDumpDirs, true, s7);
+    const bool heldStays = held != INVALID_HANDLE_VALUE && Exists(dd + L"1\\held.bin") && !Exists(dd + L"1\\a.bin");
+    if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
+    printf("     (R115 P7: old dump folders: %u folders, %u files, %llu bytes counted)\n", s7.dirs, s7.files,
+           static_cast<unsigned long long>(s7.bytes));
+    Check(s7.dirs == 1 && !Exists(dd + L"0") && Exists(dd + L"4") && s7.bytes == 1000 + 2000 + 3000 + 500,
+          "R115 P7: a pruned dump folder counts its files' bytes (not the folder entry's 0), so \"disk: pruned ... MB\" "
+          "is the real total");
+    Check(heldStays && s7.files == 1,
+          "R115 P7: a dump folder that cannot be removed (a file held open) still counts the files deleted in it");
+  }
   RemoveTree(root + L"cache\\");
   RemoveTree(root + L"tone_probe\\");
   RemoveTree(dev);
