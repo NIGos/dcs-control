@@ -1,0 +1,1632 @@
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -14,6 +14,10 @@
+     // (result 0) and a failed wrap's last line (result= the error, c=2):
+     // result 0, a= lines dropped because the writer thread's buffer was
+     // full (the disk held it up), b 0, c=3, written once it caught up.
++    // DCS Control (0063): c=3's b= lines too long for a buffer slot (none
++    // today; before 0063 they were counted in a). c=4: a= lines found
++    // claimed but never finished in the buffer at the DLL's unload or the
++    // process's exit (their thread was gone), skipped.
+     logger,
+     negotiation,
+     instance_create,
+@@ -101,6 +105,13 @@
+     // LOSS_PENDING, EXITING) came before that; c=2 only when the teardown
+     // wakes a 1X wait whose deadline was still armed (the application closed
+     // within the idle limit of its last frame).
++    // DCS Control (0063): 409, the display period the presenter paces on
++    // replaced by a longer one: the runtime reported it (and SteamVR's
++    // scanout measurement, where there is one, agreed) for 90 waits in a row,
++    // more than 5% above the old (the headset's refresh rate lowered
++    // mid-session; xrfg::latency::DisplayPeriodRise). Adaptive cadence's
++    // told time and resync start over on it. a the old period (us), b the
++    // new (us), c 1 when the scanout measurement was there, else 0.
+     // DCS Control (0042): 960, the presenter thread started: a its OS thread
+     // id (GetCurrentThreadId; its start address is in ucrtbase, so tooling
+     // finds the thread by this id).
+@@ -282,6 +293,12 @@
+     //      time in a run of ten, whichever is later: a reversal has to
+     //      persist the whole hold (R114: 3's offset moved +1, -1, +1, -2 with
+     //      a load swapped every 20 s).
++    //      DCS Control (0063): bits 32-47 stay at 65535 past it (they
++    //      wrapped). A shift every judged frame of the level since the
++    //      hold's start agrees on (the same whole periods off, none on time)
++    //      is held 30 s at most, whatever the back-off level. A level's first
++    //      judged frame learns, and every move is judged from, the offset
++    //      the frame was told with at its xrWaitFrame.
+     //   15 (DCS Control 0061) a resync move the level's hysteresis blocked
+     //      (CadenceTimeResync::observe: a run against the level's last move
+     //      inside its hold), at most one record per level per second of told
+@@ -712,6 +729,9 @@
+     //     2X hold was re-presenting from the private image it is about to
+     //     write (`[ofxr] pipelined_deep_hold`); c= 0 it went out, 1 the
+     //     50 ms bound ran out.
++    //     DCS Control (0063): c=2 instead of 1: the bound ran out and the
++    //     frame passed through, with no capture into the image the slot
++    //     re-presents (before 0063 the capture went ahead and wrote it).
+     //   result=7 (DCS Control 0059), an application frame's synthesis
+     //     submission (synthesis_pair or synthesis_prime) that took 20 ms or
+     //     more, split in whole ms, 16 bits each: c= waiting for the session's
+@@ -736,7 +756,21 @@
+     BridgeFlightLogger& operator=(const BridgeFlightLogger&) = delete;
+ 
+     void initialize(const std::filesystem::path& module_directory) noexcept;
++    // DCS Control (0063): the explicit end of the log, never under the
++    // loader lock: the writer thread joined, the file closed. The Impl
++    // stays allocated until the destructor, so a caller still logging is
++    // safe; nothing is written after the close.
+     void shutdown() noexcept;
++    // DCS Control (0063): the layer's last xrDestroyInstance: the writer
++    // thread stopped and joined (by its handle, at most 2 s) before the
++    // loader unloads the layer; logging goes on on the callers' threads,
++    // and the destructor closes the file without waiting on any thread.
++    void stop_writer() noexcept;
++    // DCS Control (0063): an xrCreateInstance after stop_writer, the layer
++    // still loaded: the writer thread again.
++    void resume_writer() noexcept;
++    // DCS Control (0063): tests only. The writer thread exists and runs.
++    [[nodiscard]] bool test_writer_running() const noexcept;
+ 
+     [[nodiscard]] bool enabled() const noexcept;
+     [[nodiscard]] std::filesystem::path log_path() const;
+@@ -750,8 +784,11 @@
+     // dropped by a full buffer, lines in the buffer, WriteFile calls, and
+     // those made on a thread other than the writer (all of them with
+     // flush_each_event=1, none otherwise).
++    // DCS Control (0063): `dropped` counts only the full buffer's drops;
++    // `oversized` the lines too long for a buffer slot (none today).
+     struct TestCounters {
+         std::uint64_t dropped{};
++        std::uint64_t oversized{};
+         std::uint64_t queued{};
+         std::uint64_t file_writes{};
+         std::uint64_t caller_file_writes{};
+diff --git a/include/xrfg/hud_symbology.hpp b/include/xrfg/hud_symbology.hpp
+--- a/include/xrfg/hud_symbology.hpp
++++ b/include/xrfg/hud_symbology.hpp
+@@ -354,6 +354,10 @@
+     not_recorded = 1,    // the pair's list holds no copy-back for a cleaned frame
+     list_missing = 2,    // NVIDIA: failed after the pack, its restore list gone
+     no_restore_list = 3, // failed after the pack, no restore list recorded
++    // DCS Control (0063): the pair's copy-back could not be recorded after
++    // its removal, so the pair was not submitted at all (a hard error, the
++    // frame passes through): the history kept its HUD. Not counted as lost.
++    pair_dropped = 4,
+ };
+ enum class HudCleanPath : std::uint32_t {
+     in_place = 1,
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -1948,12 +1948,99 @@
+     // A real frame of cadence `frames`, told `told`, shown `residual` after
+     // it; `last_told` the latest display time told so far. Returns the
+     // periods its level's offset moved (0: none).
++    // DCS Control (0063): `told_periods`, the offset the frame was told with
++    // (periods_for at its xrWaitFrame, carried to its xrEndFrame). A level
++    // not yet learnt learns that, and a move is judged from it: the frame
++    // shown `residual` off was told with it, not with whatever periods_for
++    // gives by the time it is shown (another level judged meanwhile changes
++    // what an unlearnt level would be told). Without it (tests before 0063),
++    // periods_for at the call, as before.
+     std::int64_t observe(
+         std::uint32_t frames,
+         Nanoseconds told,
+         Nanoseconds residual,
+         Nanoseconds period,
+-        Nanoseconds last_told) noexcept;
++        Nanoseconds last_told,
++        std::optional<std::int64_t> told_periods = std::nullopt) noexcept;
++    // DCS Control (0063): a level's hold, capped at kUnanimousHold when every
++    // judged frame of the level since hold_from was off by the same whole
++    // number of periods (unanimous_since[level] set): a persistent shift,
++    // not 0062's square wave, which puts frames on time between its phases.
++    static constexpr Nanoseconds kUnanimousHold = 30 * kSecond;
++    // DCS Control (0063): per level, the residual every judged frame since
++    // hold_from agreed on (0: none yet, or they disagreed, or one was on
++    // time), and whether that is still so.
++    PerLevel64 unanimous_periods{};
++    std::array<bool, kLevels> unanimous{};
++    [[nodiscard]] Nanoseconds effective_hold(
++        std::size_t level, Nanoseconds now) const noexcept {
++        const Nanoseconds hold = reverse_hold(level, now);
++        return level < kLevels && unanimous[level] && hold > kUnanimousHold
++            ? kUnanimousHold
++            : hold;
++    }
++};
++
++// DCS Control (0063): adaptive_switch result=14's fields. A signed value in
++// 32 bits, and c: the offset (bits 0-31, signed), the level's moves (32-47),
++// its back-off level (48-55) and the moves held (56-63), each saturating at
++// its field's largest value (the moves wrapped at 65,536 before 0063).
++[[nodiscard]] inline std::uint64_t resync_record_signed(std::int64_t value) noexcept {
++    return static_cast<std::uint64_t>(
++        static_cast<std::uint32_t>(static_cast<std::int32_t>(value)));
++}
++[[nodiscard]] inline std::uint64_t resync_record_c(
++    std::int64_t offset,
++    std::uint32_t moves,
++    std::uint32_t backoff,
++    std::uint32_t held) noexcept {
++    return resync_record_signed(offset) |
++        (static_cast<std::uint64_t>(std::min<std::uint32_t>(moves, 0xFFFFU)) << 32) |
++        (static_cast<std::uint64_t>(std::min<std::uint32_t>(backoff, 0xFFU)) << 48) |
++        (static_cast<std::uint64_t>(std::min<std::uint32_t>(held, 0xFFU)) << 56);
++}
++
++// DCS Control (0063): the display period the presenter paces on is the
++// smallest the runtime reports (a slow frame makes SteamVR report multiples),
++// which a drop of the headset's refresh rate mid-session (90 to 72 Hz) never
++// replaced: adaptive cadence's told times, 1X deadline, lost-slot counts and
++// resync then ran on the old period. This takes a longer one once it has
++// been reported for kWaits presenter waits in a row, each more than 5% above
++// the period in force and within 5% of the run's own (the throttle's
++// multiples jump about, a new refresh rate holds), and the headset's own
++// scanout measurement, where there is one, agrees. observe returns the period
++// to adopt (the smallest of the run), else nothing.
++struct DisplayPeriodRise {
++    static constexpr std::uint32_t kWaits = 90;
++    Nanoseconds candidate{};
++    std::uint32_t waits{};
++
++    [[nodiscard]] static constexpr bool above(Nanoseconds value, Nanoseconds base) noexcept {
++        return value * 100 > base * 105;
++    }
++    std::optional<Nanoseconds> observe(
++        Nanoseconds current,
++        Nanoseconds reported,
++        std::optional<Nanoseconds> scanout) noexcept {
++        if (current <= 0 || reported <= 0 || !above(reported, current) ||
++            (scanout && !above(*scanout, current))) {
++            waits = 0;
++            return std::nullopt;
++        }
++        const Nanoseconds seen = scanout && *scanout < reported ? *scanout : reported;
++        if (waits == 0 || above(seen, candidate) || above(candidate, seen)) {
++            candidate = seen;
++            waits = 1;
++        } else {
++            candidate = seen < candidate ? seen : candidate;
++            ++waits;
++        }
++        if (waits < kWaits) {
++            return std::nullopt;
++        }
++        waits = 0;
++        return candidate;
++    }
+ };
+ 
+ // DCS Control (0050): what the 2X deeper pipeline's hold re-presents for the
+@@ -2003,6 +2090,23 @@
+     return frame_epoch == 0 || capture_epoch >= frame_epoch + slots;
+ }
+ 
++// DCS Control (0063): an application frame's capture once its wait for a
++// re-presented slot is over (begin_capture_epoch). `still_blocked`: the slot
++// the hold re-presents is still in the runtime's xrEndFrame and this capture
++// would take its private image (the 50 ms bound ran out). Before 0063 the
++// capture went ahead regardless and wrote the image being re-presented; now
++// the frame passes through (no capture, epoch unchanged, so the next frame's
++// capture takes the same number and checks it again).
++struct CaptureEpochStep {
++    std::uint64_t epoch{};
++    bool capture{};
++};
++[[nodiscard]] constexpr CaptureEpochStep capture_epoch_step(
++    std::uint64_t capture_epoch, bool still_blocked) noexcept {
++    return still_blocked ? CaptureEpochStep{capture_epoch, false}
++                         : CaptureEpochStep{capture_epoch + 1, true};
++}
++
+ [[nodiscard]] constexpr DeepHoldRepeat deep_hold_repeat(
+     bool last_frame,
+     const RepeatCandidate& skip_repeat,
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -1257,7 +1257,8 @@
+     Nanoseconds told,
+     Nanoseconds residual,
+     Nanoseconds period,
+-    Nanoseconds last_told) noexcept {
++    Nanoseconds last_told,
++    std::optional<std::int64_t> told_periods) noexcept {
+     blocked = BlockedMove{}; // DCS Control (0061)
+     if (frames == 0 || period <= 0) {
+         return 0;
+@@ -1267,16 +1268,20 @@
+     if (told <= settle_until[level]) {
+         return 0;
+     }
++    // DCS Control (0063): the offset the frame was told with.
++    const std::int64_t told_with = told_periods ? *told_periods : periods_for(frames);
+     // DCS Control (0061): a level judged for the first time takes the offset
+     // it was told by (another level's, periods_for) as its own.
++    // DCS Control (0063): the one carried with the frame.
+     if (!learnt[level]) {
+-        offset[level] = periods_for(frames);
++        offset[level] = std::clamp<std::int64_t>(told_with, -kMaxPeriods, kMaxPeriods);
+         learnt[level] = true;
+     }
+     last_level = level;
+     const std::int64_t periods = residual_periods(residual, period);
+     if (periods == 0) {
+         streak[level] = 0;
++        unanimous[level] = false; // DCS Control (0063): a frame on time
+         // DCS Control (0062): the level's offset confirmed (kConfirmCadence
+         // frames on time in a row, and every one after them): its hold
+         // counts from here, so a reversal has to persist the whole hold.
+@@ -1287,11 +1292,22 @@
+             }
+             if (on_time[level] >= confirm_for(level) && told > hold_from[level]) {
+                 hold_from[level] = told;
++                // DCS Control (0063): unanimity counts from the new hold_from.
++                unanimous[level] = true;
++                unanimous_periods[level] = 0;
+             }
+         }
+         return 0;
+     }
+     on_time[level] = 0; // DCS Control (0062)
++    // DCS Control (0063): every judged frame since hold_from off by the same.
++    if (unanimous[level]) {
++        if (unanimous_periods[level] == 0) {
++            unanimous_periods[level] = periods;
++        } else if (unanimous_periods[level] != periods) {
++            unanimous[level] = false;
++        }
++    }
+     if (streak[level] != 0 && candidate[level] == periods) {
+         ++streak[level];
+     } else {
+@@ -1309,7 +1325,9 @@
+     const bool reverses = level != 0 && last_move_sign[level] == -sign;
+     // DCS Control (0062): the hold counts from hold_from (the last move, or
+     // the level's last frame on time in a confirmed run, if later).
+-    if (reverses && told - hold_from[level] < reverse_hold(level, told)) {
++    // DCS Control (0063): effective_hold, at most kUnanimousHold for a
++    // unanimous shift whatever the back-off level.
++    if (reverses && told - hold_from[level] < effective_hold(level, told)) {
+         ++held;
+         streak[level] = 0;
+         // DCS Control (0061): recorded (adaptive_switch result=15), at most
+@@ -1318,7 +1336,7 @@
+         if (blocked_recorded_at[level] == 0 ||
+             told - blocked_recorded_at[level] >= kBlockedRecordInterval) {
+             blocked = BlockedMove{level, periods, blocked_since[level],
+-                backoff_level(level, told), reverse_hold(level, told)};
++                backoff_level(level, told), effective_hold(level, told)};
+             blocked_since[level] = 0;
+             blocked_recorded_at[level] = told;
+         }
+@@ -1326,9 +1344,11 @@
+     }
+     // Shown later than told: told later from here (and the reverse). The
+     // level's offset stays within kMaxPeriods.
++    // DCS Control (0063): from the offset the frame was told with; the same
++    // as the level's own but for a level's first judged frame.
+     const std::int64_t whole = offset[level];
+     const std::int64_t moved = std::clamp<std::int64_t>(
+-        whole + periods, -kMaxPeriods, kMaxPeriods) - whole;
++        told_with + periods, -kMaxPeriods, kMaxPeriods) - whole;
+     offset[level] += moved;
+     if (moved != 0) {
+         ++moves;
+@@ -1357,6 +1377,9 @@
+             // DCS Control (0062): a new hold from this move.
+             hold_from[level] = told;
+             on_time[level] = 0;
++            // DCS Control (0063): unanimity counts from it again.
++            unanimous[level] = true;
++            unanimous_periods[level] = 0;
+         }
+     }
+     // DCS Control (0061): only this level's frames told so far land off by
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -4778,13 +4778,32 @@
+ 
+     // DCS Control (0056): the copy-back after the pair, into its own list
+     // (noted for result=24; the tests can leave it out, record 2's reason 1).
+-    void record_hud_restore_after_pair(ID3D12GraphicsCommandList* list, D3D12_RESOURCE_STATES previous_state,
+-        D3D12_RESOURCE_STATES current_state) noexcept {
+-        if (hud_restore_drop_for_tests()) {
+-            hud_track.restore_recorded = false;
+-            return;
+-        }
+-        hud_track.restore_recorded = record_hud_restore(list, previous_state, current_state);
++    // DCS Control (0063): false when the history was cleaned in place and
++    // the copy-back is not in the list: the caller must not submit the pair
++    // (record_pair fails with E_ABORT, a hard error: the frame passes
++    // through), so the history is never left without its HUD. The slot's
++    // NVIDIA restore list is no help here: it is made from the same frames
++    // and backups (a copy-back that cannot be recorded now could not be
++    // then; record_hud_removal_in_place now refuses a removal whose restore
++    // list is incomplete), and it puts both frames back from COMMON, where
++    // after the synthesis list the real frame rests in the shader-read state.
++    // Logged as record 2 with reason 4 (pair_dropped).
++    [[nodiscard]] bool record_hud_restore_after_pair(ID3D12GraphicsCommandList* list,
++        D3D12_RESOURCE_STATES previous_state, D3D12_RESOURCE_STATES current_state) noexcept {
++        hud_track.restore_recorded =
++            !hud_restore_drop_for_tests() && record_hud_restore(list, previous_state, current_state);
++        if (hud_track.restore_recorded || !hud_track.removed) {
++            return true;
++        }
++        HudRestoreRecord record{};
++        record.kind = HudRestoreRecordKind::lost;
++        record.loss = HudRestoreLoss::pair_dropped;
++        record.losses = hud_restore_losses;
++        record.previous_views = hud_track.views[0];
++        record.current_views = hud_track.views[1];
++        log_hud_restore(record);
++        hud_track = {};
++        return false;
+     }
+ 
+     // DCS Control (0055): the symbology taken out of the pair's two frames in
+@@ -4852,9 +4871,11 @@
+                 hud_pair.in_place = false;
+                 return false;
+             }
+-            record_hud_restore(slot.hud_restore_command_list.Get(), D3D12_RESOURCE_STATE_COMMON,
+-                D3D12_RESOURCE_STATE_COMMON);
+-            if (FAILED(slot.hud_restore_command_list->Close())) {
++            // DCS Control (0063): a restore list that could not put every
++            // cleaned frame back refuses the removal (0055 ignored it).
++            const bool complete = record_hud_restore(slot.hud_restore_command_list.Get(),
++                D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON);
++            if (FAILED(slot.hud_restore_command_list->Close()) || !complete) {
+                 hud_pair.in_place = false;
+                 return false;
+             }
+@@ -5528,7 +5549,11 @@
+                 D3D12_TEXTURE_COPY_LOCATION source{};
+                 source.pResource = plan.resources[role];
+                 source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+-                source.SubresourceIndex = plan.slices[role];
++                // DCS Control (0063): an array slice's mip 0 is subresource
++                // slice x MipLevels (the slice alone named a mip of slice 0
++                // on a swapchain with mips).
++                source.SubresourceIndex =
++                    plan.slices[role] * std::max<UINT>(plan.resources[role]->GetDesc().MipLevels, 1U);
+                 D3D12_TEXTURE_COPY_LOCATION destination{};
+                 destination.pResource = hud_capture_readback.Get();
+                 destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+@@ -7874,8 +7899,12 @@
+         // DCS Control (0055): the removal in place undone (every composition
+         // and re-add is above): the capture and the current copy below read
+         // the true originals.
+-        record_hud_restore_after_pair(synthesis, D3D12_RESOURCE_STATE_COMMON, // DCS Control (0056)
+-            current_cleaned ? D3D12_RESOURCE_STATE_COMMON : kShaderReadState);
++        // DCS Control (0063): no copy-back after a removal: the pair (its
++        // pack holds the removal) is not submitted.
++        if (!record_hud_restore_after_pair(synthesis, D3D12_RESOURCE_STATE_COMMON, // DCS Control (0056)
++                current_cleaned ? D3D12_RESOURCE_STATE_COMMON : kShaderReadState)) {
++            return E_ABORT;
++        }
+         // DCS Control (0053): the developer's HUD capture, now and then.
+         record_hud_capture(synthesis, previous_source, current_source, target_views,
+             synthetic_destination_index, current_cleaned);
+@@ -8227,8 +8256,12 @@
+             current_cleaned ? 2U : 1U,
+             before_current_copy.data());
+         // DCS Control (0055): the removal in place undone, as the NVIDIA path.
+-        record_hud_restore_after_pair(slot.command_list.Get(), D3D12_RESOURCE_STATE_COMMON, // DCS Control (0056)
+-            current_cleaned ? D3D12_RESOURCE_STATE_COMMON : kShaderReadState);
++        // DCS Control (0063): no copy-back after a removal: the list holding
++        // both is not submitted.
++        if (!record_hud_restore_after_pair(slot.command_list.Get(), D3D12_RESOURCE_STATE_COMMON, // DCS Control (0056)
++                current_cleaned ? D3D12_RESOURCE_STATE_COMMON : kShaderReadState)) {
++            return E_ABORT;
++        }
+         // DCS Control (0053): the developer's HUD capture, now and then.
+         record_hud_capture(slot.command_list.Get(), previous_source, current_source, target_views,
+             synthetic_destination_index, current_cleaned);
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -259,6 +259,13 @@
+ constexpr DWORD kPollMs = 10;
+ constexpr DWORD kShutdownWaitMs = 2000;
+ constexpr ULONGLONG kShutdownDrainMs = 1500;
++// DCS Control (0063): how a drain treats a slot claimed but not yet
++// published. `pass` ends the pass there (its caller is between two
++// instructions); `stopping` waits for it until the deadline (the callers
++// still run); `abandon` skips it at once and counts it: at unload or exit
++// no thread is left to publish it, so waiting would only spin under the
++// loader lock.
++enum class DrainMode { pass, stopping, abandon };
+ } // namespace
+ 
+ struct BridgeFlightLogger::Impl {
+@@ -295,11 +302,29 @@
+     char dequeue_padding[64]{};
+     std::atomic<std::uint64_t> dequeue_position{0};
+     char dropped_padding[64]{};
++    // DCS Control (0063): lines a full ring dropped, and apart from them
++    // lines too long for a slot (none today: the longest is 225 bytes of
++    // 244), so a count in the c=3 record says which it was.
+     std::atomic<std::uint64_t> dropped{0};
++    std::atomic<std::uint64_t> oversized{0};
++    // DCS Control (0063): slots an unload or exit drain found claimed and
++    // never published (their caller's thread was gone), skipped.
++    std::uint64_t abandoned{};
+     // The writer thread; null in the synchronous mode.
++    // DCS Control (0063): and null again once stop_writer has joined it.
++    // The thread holds a reference on this module (taken before it starts,
++    // given back by FreeLibraryAndExitThread), so a FreeLibrary that comes
++    // while it still runs leaves the code mapped until it has left it.
+     HANDLE thread{};
+     HANDLE wake{};
+-    HANDLE done{};
++    HMODULE writer_module{};
++    // DCS Control (0063): the writer thread takes the lines (the ring) or
++    // the callers write them (synchronous). Atomic: stop_writer and
++    // resume_writer switch it while the callers log.
++    std::atomic<bool> ring_mode{};
++    // DCS Control (0063): a stop_writer whose join timed out: the writer is
++    // left to finish on its own, and logging is off.
++    bool writer_abandoned{};
+     std::atomic<DWORD> writer_thread_id{0};
+     std::atomic<bool> stop{};
+     std::atomic<bool> flush_requested{};
+@@ -308,6 +333,9 @@
+     std::atomic<std::uint64_t> file_writes{0};
+     std::atomic<std::uint64_t> caller_file_writes{0};
+     // The synchronous mode's callers take turns on the file under this.
++    // DCS Control (0063): the writer thread drains under it too (alone on
++    // it in the ring mode, so it costs nothing), which lets the mode switch
++    // while lines are logged: whoever holds it is the file's side.
+     SRWLOCK file_lock = SRWLOCK_INIT;
+     // The file's side: the writer thread's alone (or, in the synchronous
+     // mode, the caller's holding file_lock). write_offset is where the next
+@@ -317,9 +345,10 @@
+     std::uint64_t write_offset{0};
+     bool stopped_at_cap{};
+     std::uint64_t dropped_reported{};
++    std::uint64_t oversized_reported{}; // DCS Control (0063)
+ 
+     [[nodiscard]] bool asynchronous() const noexcept {
+-        return thread != nullptr;
++        return ring_mode.load(std::memory_order_acquire);
+     }
+ 
+     [[nodiscard]] int format_line(
+@@ -412,9 +441,9 @@
+             }
+         }
+         append(data, length);
+-        if (!asynchronous()) {
+-            flush_staging();
+-        }
++        // DCS Control (0063): the synchronous caller flushes after it
++        // (write), not stage: the writer's last drain may run after the
++        // switch to the synchronous mode and still gathers its lines.
+     }
+ 
+     // DCS Control (0042): a logger record of the file's side (the header
+@@ -449,6 +478,13 @@
+     // cannot be made; the caller then cuts the file back as before 0046.
+     // DCS Control (0051): on the file's side, so no write is in flight on
+     // the old handle.
++    // DCS Control (0063): the fresh file is made first, under
++    // <name>.next<ext>, and only then is the log renamed over .prev and the
++    // fresh file renamed to the log's name. Before, the log replaced .prev
++    // first and a fresh file that could not be made then left the log moved
++    // back but the older .prev gone. A fresh file that cannot be made now
++    // changes nothing. Should the last rename fail (the name was freed a
++    // moment before), the fresh file is written under the .next name.
+     [[nodiscard]] bool rotate() noexcept {
+         try {
+             if (path.empty()) {
+@@ -457,12 +493,12 @@
+             std::filesystem::path previous = path;
+             previous.replace_filename(
+                 path.stem().native() + L".prev" + path.extension().native());
+-            if (!MoveFileExW(path.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+-                return false;
+-            }
++            std::filesystem::path next = path;
++            next.replace_filename(
++                path.stem().native() + L".next" + path.extension().native());
+             // The same flags as create_log_file.
+             HANDLE fresh = CreateFileW(
+-                path.c_str(),
++                next.c_str(),
+                 GENERIC_WRITE,
+                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                 nullptr,
+@@ -470,14 +506,16 @@
+                 FILE_ATTRIBUTE_NORMAL,
+                 nullptr);
+             if (fresh == INVALID_HANDLE_VALUE) {
++                return false;
++            }
++            if (!MoveFileExW(path.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+                 const DWORD error = GetLastError();
+-                // Back under its own name, so the fallback cuts the live
+-                // log rather than leaving it named .prev. Should that fail
+-                // too, the old handle still writes, into the .prev name.
+-                static_cast<void>(MoveFileExW(previous.c_str(), path.c_str(), 0));
++                CloseHandle(fresh);
++                static_cast<void>(DeleteFileW(next.c_str()));
+                 SetLastError(error);
+                 return false;
+             }
++            static_cast<void>(MoveFileExW(next.c_str(), path.c_str(), 0));
+             CloseHandle(file);
+             file = fresh;
+             return true;
+@@ -519,7 +557,7 @@
+     // full ring drops the line and counts it.
+     void enqueue(const char* data, int length) noexcept {
+         if (static_cast<std::uint32_t>(length) > kSlotBytes) {
+-            dropped.fetch_add(1, std::memory_order_relaxed);
++            oversized.fetch_add(1, std::memory_order_relaxed); // DCS Control (0063)
+             return;
+         }
+         std::uint64_t position = enqueue_position.load(std::memory_order_relaxed);
+@@ -550,27 +588,50 @@
+     // pass (its caller is between two instructions), except when stopping,
+     // which waits for it until `deadline`. Then, caught up, the count of
+     // lines a full ring dropped since the last one.
+-    void drain(bool stopping, ULONGLONG deadline) noexcept {
++    // DCS Control (0063): under file_lock (or at unload/exit, alone). Every
++    // pass is bounded by `deadline`, published slots included, and `mode`
++    // says what an unpublished slot does (DrainMode).
++    void drain(DrainMode mode, ULONGLONG deadline) noexcept {
++        if (!slots) {
++            return;
++        }
+         std::uint64_t position = dequeue_position.load(std::memory_order_relaxed);
++        std::uint64_t skipped = 0;
+         for (;;) {
++            if (position == enqueue_position.load(std::memory_order_acquire) ||
++                GetTickCount64() >= deadline) {
++                break;
++            }
+             Slot& slot = slots[position & (kSlotCount - 1)];
+             if (slot.sequence.load(std::memory_order_acquire) != position + 1) {
+-                if (stopping &&
+-                    position != enqueue_position.load(std::memory_order_acquire) &&
+-                    GetTickCount64() < deadline) {
++                if (mode == DrainMode::stopping) {
+                     SwitchToThread();
+                     continue;
+                 }
+-                break;
++                if (mode == DrainMode::pass) {
++                    break;
++                }
++                // abandon: its caller is gone; the slot is left as it is.
++                ++skipped;
++                dequeue_position.store(++position, std::memory_order_release);
++                continue;
+             }
+             stage(slot.data, slot.length);
+             slot.sequence.store(position + kSlotCount, std::memory_order_release);
+             dequeue_position.store(++position, std::memory_order_release);
+         }
++        // DCS Control (0063): c=3 a= ring-full drops, b= over-length lines.
+         const std::uint64_t lost = dropped.load(std::memory_order_relaxed);
+-        if (lost != dropped_reported) {
+-            logger_record(0, lost - dropped_reported, 0, 3, true);
++        const std::uint64_t long_lines = oversized.load(std::memory_order_relaxed);
++        if (lost != dropped_reported || long_lines != oversized_reported) {
++            logger_record(0, lost - dropped_reported, long_lines - oversized_reported, 3, true);
+             dropped_reported = lost;
++            oversized_reported = long_lines;
++        }
++        // DCS Control (0063): c=4 a= slots abandoned unpublished.
++        if (skipped != 0) {
++            abandoned += skipped;
++            logger_record(0, skipped, 0, 4, true);
+         }
+         flush_staging();
+     }
+@@ -590,7 +651,12 @@
+                 dequeue_position.load(std::memory_order_relaxed);
+             if (stopping || requested || pending >= kFlushSlots ||
+                 now - last_write >= kFlushIntervalMs) {
+-                drain(stopping, now + kShutdownDrainMs);
++                // DCS Control (0063): under file_lock, as the synchronous
++                // callers write after a switch.
++                AcquireSRWLockExclusive(&file_lock);
++                drain(stopping ? DrainMode::stopping : DrainMode::pass,
++                    now + kShutdownDrainMs);
++                ReleaseSRWLockExclusive(&file_lock);
+                 last_write = now;
+                 flushed_through.store(
+                     dequeue_position.load(std::memory_order_relaxed),
+@@ -607,38 +673,83 @@
+         self->writer_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);
+         static_cast<void>(SetThreadDescription(GetCurrentThread(), L"OFXR flight log writer"));
+         self->writer_loop();
+-        // Shutdown waits on this, not on the thread: a thread's exit needs
+-        // the loader lock, which a static destructor at unload holds.
+-        SetEvent(self->done);
+-        return 0;
++        // DCS Control (0063): the module reference start_writer took for
++        // this thread, given back from kernel32 so no code of this module
++        // runs after it. stop_writer waits on the thread handle, outside the
++        // loader lock (the last xrDestroyInstance); the static destructor
++        // never waits on this thread.
++        FreeLibraryAndExitThread(self->writer_module, 0);
+     }
+ 
+     // DCS Control (0051): the writer thread and its ring, or false (with
+     // nothing left over) for the synchronous mode.
++    // DCS Control (0063): again after stop_writer (resume_writer), with the
++    // ring kept: its positions go on where they were.
+     [[nodiscard]] bool start_writer() noexcept {
+-        try {
+-            slots = std::make_unique<Slot[]>(static_cast<std::size_t>(kSlotCount));
+-        } catch (...) {
+-            return false;
++        if (!slots) {
++            try {
++                slots = std::make_unique<Slot[]>(static_cast<std::size_t>(kSlotCount));
++            } catch (...) {
++                return false;
++            }
++            for (std::uint64_t index = 0; index < kSlotCount; ++index) {
++                slots[index].sequence.store(index, std::memory_order_relaxed);
++            }
+         }
+-        for (std::uint64_t index = 0; index < kSlotCount; ++index) {
+-            slots[index].sequence.store(index, std::memory_order_relaxed);
++        if (wake == nullptr) {
++            wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+         }
+-        wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+-        done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+-        if (wake != nullptr && done != nullptr) {
++        stop.store(false, std::memory_order_relaxed);
++        // DCS Control (0063): the module stays loaded while the thread
++        // runs; the thread gives this reference back as it ends.
++        HMODULE module = nullptr;
++        if (wake != nullptr &&
++            GetModuleHandleExW(
++                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
++                reinterpret_cast<LPCWSTR>(&Impl::writer_main),
++                &module)) {
++            writer_module = module;
+             thread = CreateThread(nullptr, 0, &Impl::writer_main, this, 0, nullptr);
++            if (thread == nullptr) {
++                FreeLibrary(module);
++                writer_module = nullptr;
++            }
+         }
+         if (thread == nullptr) {
+-            if (wake != nullptr) CloseHandle(wake);
+-            if (done != nullptr) CloseHandle(done);
+-            wake = done = nullptr;
+-            slots.reset();
+             return false;
+         }
++        ring_mode.store(true, std::memory_order_release);
+         return true;
+     }
+ 
++    // DCS Control (0063): the writer thread stopped and joined (its handle,
++    // at most kShutdownWaitMs): the explicit teardown, never the static
++    // destructor. New lines go to the file on the callers' threads from
++    // here; whatever the writer left in the ring is written first. A join
++    // that times out (a disk holding the writer) leaves the writer to
++    // finish on its own, keeping this module loaded, and turns logging off
++    // so no caller waits behind it.
++    void stop_writer() noexcept {
++        if (thread == nullptr) {
++            return;
++        }
++        ring_mode.store(false, std::memory_order_release);
++        stop.store(true, std::memory_order_release);
++        SetEvent(wake);
++        if (WaitForSingleObject(thread, kShutdownWaitMs) != WAIT_OBJECT_0) {
++            writer_abandoned = true;
++            active.store(false, std::memory_order_relaxed);
++            return;
++        }
++        CloseHandle(thread);
++        thread = nullptr;
++        writer_module = nullptr;
++        writer_thread_id.store(0, std::memory_order_relaxed);
++        AcquireSRWLockExclusive(&file_lock);
++        drain(DrainMode::stopping, GetTickCount64() + kShutdownDrainMs);
++        ReleaseSRWLockExclusive(&file_lock);
++    }
++
+     void write(
+         std::uint64_t sequence,
+         std::int64_t counter,
+@@ -668,16 +779,90 @@
+         // caller's thread, one caller at a time.
+         AcquireSRWLockExclusive(&file_lock);
+         if (active.load(std::memory_order_relaxed)) {
++            // DCS Control (0063): after stop_writer, a line a caller put in
++            // the ring as the mode switched goes first (no wait for one
++            // still being published: a later caller or the close takes it).
++            if (slots && dequeue_position.load(std::memory_order_relaxed) !=
++                    enqueue_position.load(std::memory_order_acquire)) {
++                drain(DrainMode::pass, GetTickCount64() + kShutdownDrainMs);
++            }
+             stage(line.data(), static_cast<std::size_t>(length));
++            flush_staging(); // DCS Control (0063): as stage did before
+         }
+         ReleaseSRWLockExclusive(&file_lock);
+     }
++
++    // DCS Control (0063): the file flushed and closed, with the close
++    // record, by whoever holds the file's side. Later lines find the file
++    // closed (stage) and are not written.
++    void close_file(DrainMode mode) noexcept {
++        drain(mode, GetTickCount64() + kShutdownDrainMs);
++        if (file == INVALID_HANDLE_VALUE) {
++            return;
++        }
++        logger_record(0, 0, 0, 0, true);
++        flush_staging();
++        static_cast<void>(FlushFileBuffers(file));
++        CloseHandle(file);
++        file = INVALID_HANDLE_VALUE;
++    }
+ };
+ 
+ BridgeFlightLogger::BridgeFlightLogger() noexcept = default;
+ 
++// DCS Control (0063): the static destructor of the layer's logger (at a
++// FreeLibrary unload or at process exit, under the loader lock) or a test's
++// logger going out of scope. It never waits on the writer thread:
++// - joined (stop_writer at the last xrDestroyInstance, or shutdown) or never
++//   started: the file is closed (if shutdown has not) and the Impl freed;
++// - ended without a join: at process exit Windows ends every other thread
++//   before the DLLs' detach, or the writer itself runs this (its
++//   FreeLibraryAndExitThread gave back the module's last reference). The
++//   ring is drained on this thread without waiting for a slot that will
++//   never be published (DrainMode::abandon), the file closed, and the Impl
++//   left allocated (its owner may have been ended inside it);
++// - still running (a timed-out stop_writer it is still finishing): left
++//   alone, file and Impl included.
++// The file's lock is only tried: a thread ended at exit may have held it.
+ BridgeFlightLogger::~BridgeFlightLogger() {
+-    shutdown();
++    try {
++        if (!impl_) {
++            return;
++        }
++        frame_records_.store(false, std::memory_order_relaxed);
++        hud_capture_.store(0, std::memory_order_relaxed);
++        g_frame_hold_timing.store(false, std::memory_order_relaxed);
++        Impl& impl = *impl_;
++        if (impl.thread == nullptr) {
++            impl.active.store(false, std::memory_order_relaxed);
++            if (impl.file != INVALID_HANDLE_VALUE &&
++                TryAcquireSRWLockExclusive(&impl.file_lock)) {
++                impl.close_file(DrainMode::abandon);
++                ReleaseSRWLockExclusive(&impl.file_lock);
++            }
++            if (impl.wake != nullptr) {
++                CloseHandle(impl.wake);
++                impl.wake = nullptr;
++            }
++            impl_.reset();
++            return;
++        }
++        const bool own_thread = impl.writer_thread_id.load(std::memory_order_relaxed) ==
++            GetCurrentThreadId();
++        if (!own_thread && WaitForSingleObject(impl.thread, 0) != WAIT_OBJECT_0) {
++            static_cast<void>(impl_.release());
++            return;
++        }
++        impl.active.store(false, std::memory_order_relaxed);
++        impl.ring_mode.store(false, std::memory_order_release);
++        if (impl.file != INVALID_HANDLE_VALUE &&
++            TryAcquireSRWLockExclusive(&impl.file_lock)) {
++            impl.close_file(DrainMode::abandon);
++            ReleaseSRWLockExclusive(&impl.file_lock);
++        }
++        static_cast<void>(impl_.release());
++    } catch (...) {
++    }
+ }
+ 
+ void BridgeFlightLogger::initialize(
+@@ -769,6 +954,14 @@
+     }
+ }
+ 
++// DCS Control (0063): the explicit end of the log, outside the loader lock:
++// the writer joined (stop_writer), the ring drained, the close record
++// written, the file flushed and closed. The Impl stays allocated: a caller
++// that passed enabled() just before may still be in write(); it fills a
++// ring slot (harmless) or finds the file closed under file_lock, and never
++// writes after the close. Before 0063 shutdown freed the Impl under such a
++// caller, and at a DLL unload waited, under the loader lock, for a writer
++// thread whose exit needed that lock.
+ void BridgeFlightLogger::shutdown() noexcept {
+     try {
+         if (!impl_) {
+@@ -777,47 +970,46 @@
+         frame_records_.store(false, std::memory_order_relaxed); // 0048
+         hud_capture_.store(0, std::memory_order_relaxed); // 0053
+         g_frame_hold_timing.store(false, std::memory_order_relaxed);
+-        event(BridgeFlightOperation::logger, 0);
+         Impl& impl = *impl_;
+-        impl.active = false;
+-        if (impl.asynchronous()) {
+-            // DCS Control (0051): the writer drains the ring and stops, in
+-            // at most kShutdownWaitMs. At process exit it is gone already
+-            // (every other thread ends before the static destructors run),
+-            // so this thread drains the ring itself; the writer's staged
+-            // lines are still in its buffer, at the offset they belong at.
+-            if (WaitForSingleObject(impl.thread, 0) == WAIT_OBJECT_0) {
+-                impl.drain(true, GetTickCount64() + kShutdownDrainMs);
+-            } else {
+-                impl.stop.store(true, std::memory_order_release);
+-                SetEvent(impl.wake);
+-                if (WaitForSingleObject(impl.done, kShutdownWaitMs) != WAIT_OBJECT_0) {
+-                    // The disk is holding the writer: it keeps the Impl
+-                    // (leaked) rather than have it freed under it.
+-                    static_cast<void>(impl_.release());
+-                    return;
+-                }
+-            }
+-            CloseHandle(impl.thread);
+-            CloseHandle(impl.wake);
+-            CloseHandle(impl.done);
+-            impl.thread = impl.wake = impl.done = nullptr;
+-        } else {
+-            // Waits out a write in progress on another thread.
+-            AcquireSRWLockExclusive(&impl.file_lock);
+-            ReleaseSRWLockExclusive(&impl.file_lock);
+-        }
+-        if (impl.file != INVALID_HANDLE_VALUE) {
+-            static_cast<void>(FlushFileBuffers(impl.file));
+-            CloseHandle(impl.file);
+-            impl.file = INVALID_HANDLE_VALUE;
++        impl.stop_writer();
++        if (impl.thread != nullptr) {
++            // The join timed out: the writer still owns the file.
++            return;
+         }
+-        impl_.reset();
++        AcquireSRWLockExclusive(&impl.file_lock);
++        impl.active.store(false, std::memory_order_relaxed);
++        impl.close_file(DrainMode::stopping);
++        ReleaseSRWLockExclusive(&impl.file_lock);
+     } catch (...) {
+-        impl_.reset();
+     }
+ }
+ 
++// DCS Control (0063): the layer's last xrDestroyInstance, outside the
++// loader lock, before the loader unloads the layer: the writer thread
++// stopped and joined, logging goes on synchronously (the file stays open
++// for the static destructor to close).
++void BridgeFlightLogger::stop_writer() noexcept {
++    if (impl_) {
++        impl_->stop_writer();
++    }
++}
++
++// DCS Control (0063): a later xrCreateInstance in a process that kept the
++// layer loaded: the writer thread again, unless flush_each_event asks for
++// synchronous writes or logging has stopped.
++void BridgeFlightLogger::resume_writer() noexcept {
++    if (!impl_ || impl_->flush_each_event || impl_->thread != nullptr ||
++        impl_->writer_abandoned || !impl_->active.load(std::memory_order_relaxed)) {
++        return;
++    }
++    static_cast<void>(impl_->start_writer());
++}
++
++bool BridgeFlightLogger::test_writer_running() const noexcept {
++    return impl_ && impl_->thread != nullptr &&
++        WaitForSingleObject(impl_->thread, 0) == WAIT_TIMEOUT;
++}
++
+ bool BridgeFlightLogger::enabled() const noexcept {
+     return impl_ && impl_->active.load(std::memory_order_relaxed);
+ }
+@@ -835,6 +1027,7 @@
+     }
+     TestCounters counters;
+     counters.dropped = impl_->dropped.load(std::memory_order_relaxed);
++    counters.oversized = impl_->oversized.load(std::memory_order_relaxed); // 0063
+     counters.queued = impl_->enqueue_position.load(std::memory_order_relaxed) -
+         impl_->dequeue_position.load(std::memory_order_relaxed);
+     counters.file_writes = impl_->file_writes.load(std::memory_order_relaxed);
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -639,6 +639,9 @@
+     std::uint32_t told_periods{};
+     bool cadence{};
+     // DCS Control (0057): 0037's wait_returned_ns is gone with its key.
++    // DCS Control (0063): the resync offset it was told with, in periods
++    // (CadenceTimeResync::periods_for at its xrWaitFrame), for observe.
++    std::int64_t resync_periods{};
+ };
+ 
+ enum class GenerationQuarantineReason : std::int64_t {
+@@ -2000,6 +2003,9 @@
+     // the next frame later still. That spiral throttled the presenter to
+     // 3.7 Hz and froze the session.
+     XrDuration presenter_display_period{};
++    // DCS Control (0063): a longer period that persists (the headset's
++    // refresh rate lowered mid-session) replaces it; presenter_mutex.
++    xrfg::latency::DisplayPeriodRise presenter_period_rise;
+     XrFrameState presenter_frame_state{XR_TYPE_FRAME_STATE};
+     XrTime last_virtual_display_time{};
+     XrResult presenter_failure{XR_SUCCESS};
+@@ -6686,6 +6692,7 @@
+     // PendingApplicationFrame::frames); 0 outside it.
+     std::uint32_t cadence_frames = 0;
+     std::uint32_t cadence_told_periods = 0;
++    std::int64_t cadence_resync_periods = 0; // DCS Control (0063)
+     if (!use_continuous_presenter && state->application_frame_in_progress) {
+         if (!state->application_frame_has_overlapping_wait) {
+             state->application_frame_has_overlapping_wait = true;
+@@ -6866,6 +6873,8 @@
+                 static_cast<XrDuration>(state->cadence_resync.offset_for(
+                     cadence_frames,
+                     static_cast<xrfg::latency::Nanoseconds>(cadence_period)));
++            // DCS Control (0063): carried with the frame to its observe.
++            cadence_resync_periods = state->cadence_resync.periods_for(cadence_frames);
+             virtual_time = told_offset >= 0
+                 ? add_display_duration(base, told_offset)
+                 : base > -told_offset ? base + told_offset : 1;
+@@ -7042,6 +7051,7 @@
+             cadence_frames, // DCS Control (0032)
+             cadence_told_periods,
+             cadence_frames != 0,
++            cadence_resync_periods, // DCS Control (0063)
+         });
+         constexpr std::size_t kMaximumPendingFrameRecords = 32;
+         while (state->pending_frames.size() > kMaximumPendingFrameRecords) {
+@@ -8979,6 +8989,9 @@
+     // DCS Control (0059): its application frame's own cadence under adaptive
+     // cadence (1X 1, 2 or 3), 0 outside it.
+     std::uint32_t cadence_frames{};
++    // DCS Control (0063): the resync offset its application frame was told
++    // with (PendingApplicationFrame::resync_periods).
++    std::int64_t cadence_resync_periods{};
+ };
+ 
+ // Whether every output a synthetic names has been written. A fence that
+@@ -10185,6 +10198,11 @@
+         // DCS Control (0032): scanouts the runtime skipped, under adaptive
+         // cadence; recorded after the lock.
+         std::uint32_t cadence_skipped = 0;
++        // DCS Control (0063): a display period replaced by a longer one,
++        // recorded after the lock (presenter_transition 409).
++        XrDuration period_rise_from = 0;
++        XrDuration period_rise_to = 0;
++        bool period_rise_measured = false;
+ 
+         {
+             std::scoped_lock lock(state->presenter_mutex);
+@@ -10299,17 +10317,52 @@
+             // reports a throttled period as if it were the display's. The
+             // grid paced to 27.8 ms on a 72 Hz headset that way, and the
+             // presenter, running at 36, kept the throttle going.
++            std::optional<xrfg::latency::Nanoseconds> credible_scanout; // 0063
+             if (state->steamvr_delivery) {
+                 if (const auto scanout = state->steamvr_delivery->display_period();
+                     scanout && scanout->count() >= kShortestCredibleDisplayPeriod &&
+-                    scanout->count() <= kLongestCredibleDisplayPeriod &&
+-                    (state->presenter_display_period == 0 ||
+-                     scanout->count() < state->presenter_display_period)) {
+-                    state->presenter_display_period = scanout->count();
++                    scanout->count() <= kLongestCredibleDisplayPeriod) {
++                    credible_scanout = scanout->count();
++                    if (state->presenter_display_period == 0 ||
++                        scanout->count() < state->presenter_display_period) {
++                        state->presenter_display_period = scanout->count();
++                    }
+                 }
+             }
++            // DCS Control (0063): a longer period reported for ~90 waits in a
++            // row (and measured, where SteamVR measures the scanout) is the
++            // headset's refresh rate lowered: taken, and adaptive cadence's
++            // told time and resync start over on it, as at a cadence start.
++            // Applies with adaptive cadence off too (the presenter's pace).
++            if (frame_state.predictedDisplayPeriod >= kShortestCredibleDisplayPeriod &&
++                frame_state.predictedDisplayPeriod <= kLongestCredibleDisplayPeriod) {
++                if (const auto risen = state->presenter_period_rise.observe(
++                        static_cast<xrfg::latency::Nanoseconds>(state->presenter_display_period),
++                        static_cast<xrfg::latency::Nanoseconds>(frame_state.predictedDisplayPeriod),
++                        credible_scanout)) {
++                    period_rise_from = state->presenter_display_period;
++                    period_rise_to = static_cast<XrDuration>(*risen);
++                    period_rise_measured = credible_scanout.has_value();
++                    state->presenter_display_period = period_rise_to;
++                    state->cadence_told_base = 0;
++                    state->cadence_resync.reset();
++                }
++            } else {
++                state->presenter_period_rise = {};
++            }
+         }
+         state->presenter_condition.notify_all();
++        // DCS Control (0063): presenter_transition 409, the display period
++        // replaced by a longer one (DisplayPeriodRise): a the old (us), b the
++        // new (us), c 1 when SteamVR's scanout measurement agreed, else 0.
++        if (period_rise_to != 0) {
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::presenter_transition,
++                409,
++                static_cast<std::uint64_t>(period_rise_from / 1000),
++                static_cast<std::uint64_t>(period_rise_to / 1000),
++                period_rise_measured ? 1U : 0U);
++        }
+         if (cadence_skipped != 0) {
+             state->cadence_slip.fetch_add(cadence_skipped);
+             if (state->adaptive_active.load() &&
+@@ -10976,7 +11029,9 @@
+                                 static_cast<xrfg::latency::Nanoseconds>(
+                                     state->presenter_display_period),
+                                 static_cast<xrfg::latency::Nanoseconds>(
+-                                    state->last_virtual_display_time));
++                                    state->last_virtual_display_time),
++                                // DCS Control (0063): the offset it was told with.
++                                request->owned_frame->cadence_resync_periods);
+                             // DCS Control (0061): the level is the frame's
+                             // cadence (1, 2 or 3), each with its own offset
+                             // and back-off.
+@@ -11080,20 +11135,15 @@
+             // DCS Control (0059): adaptive_switch result=14, adaptive
+             // cadence's told time resynchronised; see bridge_flight_logger.hpp.
+             if (resync_moved != 0) {
+-                const auto signed_field = [](std::int64_t value) {
+-                    return static_cast<std::uint64_t>(
+-                        static_cast<std::uint32_t>(static_cast<std::int32_t>(value)));
+-                };
+                 xrfg::bridge_flight_logger().event(
+                     xrfg::BridgeFlightOperation::adaptive_switch,
+                     14,
+                     resync_level,
+-                    signed_field(resync_moved),
+-                    signed_field(resync_offset) |
+-                        (static_cast<std::uint64_t>(resync_moves & 0xFFFFU) << 32) |
+-                        // DCS Control (0060): bits 48-55 and 56-63.
+-                        (static_cast<std::uint64_t>(std::min<std::uint32_t>(resync_backoff, 0xFFU)) << 48) |
+-                        (static_cast<std::uint64_t>(std::min<std::uint32_t>(resync_held, 0xFFU)) << 56));
++                    xrfg::latency::resync_record_signed(resync_moved),
++                    // DCS Control (0063): packed by resync_record_c, the
++                    // move count saturating at 0xFFFF (it wrapped before).
++                    xrfg::latency::resync_record_c(
++                        resync_offset, resync_moves, resync_backoff, resync_held));
+             }
+             // DCS Control (0061): adaptive_switch result=15, a move a level's
+             // hysteresis blocked (rate-limited in CadenceTimeResync::observe);
+@@ -12626,6 +12676,7 @@
+         state->presenter_last_predicted_valid = false;
+         state->presenter_schedule_valid = false;
+         state->presenter_display_period = 0;
++        state->presenter_period_rise = {}; // DCS Control (0063)
+         // DCS VR Control (0006): the late-frame skip starts over off.
+         // DCS Control (0016): and the rest of the 3X state with it, as at a
+         // scene change - the previous presenter's release delay, leader due
+@@ -13020,8 +13071,14 @@
+ // so a capture that began first is never re-presented over. presenter_mutex
+ // only, as wait_for_presenter_capacity just before it; the presenter takes
+ // no lock the application holds here.
++// DCS Control (0063): a wait that ran out sets `*pass_through` and returns 0
++// without taking an epoch: the caller passes the frame through instead of
++// capturing into the slot the presenter is re-presenting
++// (xrfg::latency::capture_epoch_step). slow_step result=6 c=2 then (c=1, a
++// capture after the bound ran out, no longer happens).
+ [[nodiscard]] std::uint64_t begin_capture_epoch(
+-    const std::shared_ptr<SessionState>& state) noexcept {
++    const std::shared_ptr<SessionState>& state,
++    bool* pass_through) noexcept {
+     try {
+         std::unique_lock lock(state->presenter_mutex);
+         const std::uint64_t next = state->capture_epoch + 1;
+@@ -13042,7 +13099,9 @@
+                 lock, std::chrono::milliseconds(50),
+                 [&] { return !blocked_by_repeat(); });
+         }
+-        state->capture_epoch = next;
++        // DCS Control (0063): no capture into the re-presented slot.
++        const auto step = xrfg::latency::capture_epoch_step(state->capture_epoch, ran_out);
++        state->capture_epoch = step.epoch;
+         lock.unlock();
+         if (waited) {
+             const auto took = std::chrono::duration_cast<std::chrono::microseconds>(
+@@ -13053,7 +13112,13 @@
+                 static_cast<std::uint64_t>(std::max<std::int64_t>(took, 0)),
+                 static_cast<std::uint64_t>(std::max<std::int64_t>(took, 0) / 1000),
+                 handle_value(state->handle),
+-                ran_out ? 1U : 0U);
++                step.capture ? 0U : 2U);
++        }
++        if (!step.capture) {
++            if (pass_through != nullptr) {
++                *pass_through = true;
++            }
++            return 0;
+         }
+         return next;
+     } catch (...) {
+@@ -17799,10 +17864,17 @@
+     // capture writes (begin_capture_epoch), under `[ofxr]
+     // pipelined_deep_hold` on the presenter path; 0 otherwise (its real frame
+     // is then never re-presented by the 2X hold).
++    // DCS Control (0063): a wait for the re-presented slot that ran out
++    // passes the frame through (nothing is prepared yet), as a capacity
++    // wait that ran out does.
++    bool capture_epoch_pass_through = false;
+     const std::uint64_t frame_capture_epoch =
+         use_continuous_presenter && state->pipelined_deep_hold
+-        ? begin_capture_epoch(state)
++        ? begin_capture_epoch(state, &capture_epoch_pass_through)
+         : 0;
++    if (capture_epoch_pass_through) {
++        return bypass_stalled(false);
++    }
+     PreparedProjectionFrame prepared = prepare_projection_frame(
+         current_snapshot,
+         std::span<const ProjectionResourceMapping>(
+@@ -17981,6 +18053,11 @@
+     // DCS Control (0059): and its own cadence, for the presenter.
+     first_generated.cadence_frames = cadence_hold_frames;
+     current_generated.cadence_frames = cadence_hold_frames;
++    // DCS Control (0063): and the resync offset it was told with.
++    first_generated.cadence_resync_periods =
++        cadence_frame ? cadence_record->resync_periods : 0;
++    current_generated.cadence_resync_periods =
++        first_generated.cadence_resync_periods;
+     std::shared_ptr<GeneratedFrameEndInfo> presenter_first_frame;
+     first_generated.synthetic = pair_ready;
+     first_generated.leads_frame = pair_ready;
+@@ -18501,6 +18578,9 @@
+     const XrInstanceCreateInfo* create_info,
+     const XrApiLayerCreateInfo* layer_info,
+     XrInstance* instance) {
++    // DCS Control (0063): the flight log's writer thread again if an earlier
++    // last xrDestroyInstance stopped it and the layer stayed loaded.
++    xrfg::bridge_flight_logger().resume_writer();
+     const auto token = xrfg::bridge_flight_logger().begin(
+         xrfg::BridgeFlightOperation::instance_create);
+     const XrResult result = guard_c_api_boundary([&] {
+@@ -18526,6 +18606,19 @@
+         xrfg::BridgeFlightOperation::instance_destroy,
+         result,
+         handle_value(instance));
++    // DCS Control (0063): the last instance gone, the loader unloads the
++    // layer next (under the loader lock). The flight log's writer thread is
++    // stopped and joined here, outside that lock, so no thread of the log
++    // runs in the module when it is unmapped; the log goes on synchronously
++    // and the static destructor only closes the file.
++    bool no_instance_left = false;
++    {
++        std::scoped_lock lock(g_state_mutex);
++        no_instance_left = g_instances.empty();
++    }
++    if (no_instance_left) {
++        xrfg::bridge_flight_logger().stop_writer();
++    }
+     return result;
+ }
+ 
+diff --git a/tests/bridge_flight_logger_tests.cpp b/tests/bridge_flight_logger_tests.cpp
+--- a/tests/bridge_flight_logger_tests.cpp
++++ b/tests/bridge_flight_logger_tests.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <atomic>
+ #include <filesystem>
+ #include <fstream>
+ #include <iostream>
+@@ -841,6 +842,129 @@
+                       << microseconds(percentile(sync_costs, 0.99)) << " us\n";
+         }
+ 
++        // DCS Control (0063): shutdown while 4 threads keep logging: no
++        // crash (the Impl is not freed under them), the close record is the
++        // file's last line, and nothing is written after it.
++        {
++            const fs::path directory = logger_directory("shutdown-race", "max_file_mb=256\r\n");
++            xrfg::BridgeFlightLogger closing;
++            closing.initialize(directory);
++            require(closing.enabled(), "shutdown race: logging did not start");
++            const fs::path closing_path = closing.log_path();
++            std::atomic<bool> running{true};
++            std::atomic<long long> logged_after{0};
++            std::vector<std::thread> writers;
++            for (int writer = 0; writer < 4; ++writer) {
++                writers.emplace_back([&, writer] {
++                    for (int index = 0; running.load(); ++index) {
++                        const bool was_on = closing.enabled();
++                        closing.event(xrfg::BridgeFlightOperation::synthesis_pair, index, writer, 7, 7);
++                        if (!was_on) {
++                            logged_after.fetch_add(1);
++                        }
++                    }
++                });
++            }
++            Sleep(100);
++            closing.shutdown();
++            require(!closing.enabled(), "shutdown race: still enabled after shutdown");
++            const std::string closed = read(closing_path);
++            while (logged_after.load() < 10000) {
++                Sleep(1);
++            }
++            running = false;
++            for (auto& writer : writers) {
++                writer.join();
++            }
++            require(read(closing_path) == closed, "shutdown race: a line was written after the close");
++            const std::string close_tail = " op=logger result=0 dur_us=0 a=0 b=0 c=0\r\n";
++            require(closed.find('\0') == std::string::npos &&
++                        closed.size() > close_tail.size() &&
++                        closed.compare(closed.size() - close_tail.size(), close_tail.size(), close_tail) == 0,
++                "shutdown race: the close record is not the file's last line");
++        }
++
++        // DCS Control (0063): the explicit teardown (the last
++        // xrDestroyInstance) joins the writer thread; logging goes on on the
++        // callers' threads, a resume starts the writer again, and the
++        // destructor closes the file with no thread to wait for.
++        {
++            const fs::path directory = logger_directory("teardown", "");
++            fs::path teardown_path;
++            {
++                xrfg::BridgeFlightLogger teardown;
++                teardown.initialize(directory);
++                teardown_path = teardown.log_path();
++                require(teardown.test_writer_running(), "teardown: no writer thread");
++                teardown.event(xrfg::BridgeFlightOperation::synthesis_pair, 1, 11, 0, 0);
++                teardown.stop_writer();
++                require(!teardown.test_writer_running(), "teardown: the writer thread was not joined");
++                require(read(teardown_path).find(" a=11 b=0 c=0\r\n") != std::string::npos,
++                    "teardown: a line in the ring was lost at the join");
++                const auto before = teardown.test_counters().caller_file_writes;
++                teardown.event(xrfg::BridgeFlightOperation::synthesis_pair, 2, 12, 0, 0);
++                require(teardown.enabled() &&
++                            teardown.test_counters().caller_file_writes > before &&
++                            read(teardown_path).find(" a=12 b=0 c=0\r\n") != std::string::npos,
++                    "teardown: logging did not go on on the caller's thread");
++                teardown.resume_writer();
++                require(teardown.test_writer_running(), "teardown: resume did not start the writer");
++                const auto synchronous_writes = teardown.test_counters().caller_file_writes;
++                teardown.event(xrfg::BridgeFlightOperation::synthesis_pair, 3, 13, 0, 0);
++                teardown.test_flush();
++                require(read(teardown_path).find(" a=13 b=0 c=0\r\n") != std::string::npos &&
++                            teardown.test_counters().caller_file_writes == synchronous_writes,
++                    "teardown: the resumed writer did not take the lines");
++                teardown.stop_writer();
++                require(!teardown.test_writer_running(), "teardown: the second join failed");
++            }
++            const std::string text = read(teardown_path);
++            const std::string close_tail = " op=logger result=0 dur_us=0 a=0 b=0 c=0\r\n";
++            require(text.size() > close_tail.size() &&
++                        text.compare(text.size() - close_tail.size(), close_tail.size(), close_tail) == 0,
++                "teardown: the destructor did not close the log");
++            const auto a11 = text.find(" a=11 b=0 c=0\r\n");
++            const auto a12 = text.find(" a=12 b=0 c=0\r\n");
++            const auto a13 = text.find(" a=13 b=0 c=0\r\n");
++            require(a11 < a12 && a12 < a13, "teardown: lines out of order across the switches");
++        }
++
++        // DCS Control (0063): a wrap whose fresh file cannot be made (here a
++        // directory holds its .next name) keeps the older .prev and cuts the
++        // log back instead.
++        {
++            const fs::path directory = logger_directory("rotate-next", "max_file_mb=1\r\n");
++            xrfg::BridgeFlightLogger rotating;
++            rotating.initialize(directory);
++            const fs::path rotate_path = rotating.log_path();
++            const fs::path previous_path = rotate_path.parent_path() /
++                (rotate_path.stem().wstring() + L".prev" + rotate_path.extension().wstring());
++            const fs::path next_path = rotate_path.parent_path() /
++                (rotate_path.stem().wstring() + L".next" + rotate_path.extension().wstring());
++            for (int written = 0; written < 40000 && !fs::exists(previous_path); ++written) {
++                rotating.event(xrfg::BridgeFlightOperation::synthesis_pair, written, 1, 2, 3);
++                if (written % 100 == 99) rotating.test_flush();
++            }
++            rotating.test_flush();
++            require(fs::exists(previous_path) && !fs::exists(next_path),
++                "rotate next: the first rotation did not happen or left a .next file");
++            const std::string kept = read(previous_path);
++            fs::create_directory(next_path);
++            for (int index = 0; index < 20000; ++index) {
++                rotating.event(xrfg::BridgeFlightOperation::synthesis_pair, index, 4, 5, 6);
++                if (index % 1000 == 999) rotating.test_flush();
++            }
++            rotating.test_flush();
++            require(rotating.enabled(), "rotate next: logging stopped");
++            rotating.shutdown();
++            require(read(previous_path) == kept, "rotate next: the older .prev was lost");
++            const std::string cut = read(rotate_path);
++            require(cut.find(" a=4 b=5 c=6\r\n") != std::string::npos &&
++                        cut.find(" a=1 b=2 c=3\r\n") == std::string::npos &&
++                        cut.size() <= 1024 * 1024 + 512,
++                "rotate next: the log was not cut back");
++        }
++
+         std::cout << "Bridge flight logger tests passed.\n";
+         return 0;
+     } catch (const std::exception& exception) {
+diff --git a/tests/hud_symbology_tests.inc b/tests/hud_symbology_tests.inc
+--- a/tests/hud_symbology_tests.inc
++++ b/tests/hud_symbology_tests.inc
+@@ -2270,6 +2270,7 @@
+     // logged when each pair's submission returned.
+     std::vector<xrfg::HudRestoreRecord> restores;
+     std::vector<std::size_t> restores_after_pair;
++    std::vector<HRESULT> pair_results; // DCS Control (0063)
+ };
+ 
+ // DCS Control (0056): `drop_restore`, the pairs' copy-back left out (the
+@@ -2332,9 +2333,16 @@
+             require_hresult(history->capture(static_cast<std::uint32_t>(number % 2U), &ticket), "hud run: capture");
+             require_hresult(history->commit(ticket), "hud run: commit");
+             synth.set_cockpit_mask(masks[number]);
+-            require_hresult(synth.submit_pair(ticket, views, views, 0, 0, &output, std::nullopt, {}, false,
+-                                triple ? 1.0F / 3.0F : 0.5F, extra_synthetic),
+-                "hud run: pair");
++            const HRESULT pair_result = synth.submit_pair(ticket, views, views, 0, 0, &output, std::nullopt, {},
++                false, triple ? 1.0F / 3.0F : 0.5F, extra_synthetic);
++            // DCS Control (0063): with the copy-back dropped the pair fails
++            // (E_ABORT) and the run ends there.
++            result.pair_results.push_back(pair_result);
++            if (drop_restore && FAILED(pair_result)) {
++                result.restores_after_pair.push_back(hud_observed_restores().size());
++                break;
++            }
++            require_hresult(pair_result, "hud run: pair");
+             result.restores_after_pair.push_back(hud_observed_restores().size()); // DCS Control (0056)
+             hud_run(gpu, [](ID3D12GraphicsCommandList*) {});
+             result.synthetic.push_back(
+@@ -2346,7 +2354,10 @@
+             result.current.push_back(
+                 hud_readback(gpu, current.Get(), kHudSynthWidth * 4U, D3D12_RESOURCE_STATE_RENDER_TARGET));
+         }
+-        require_hresult(synth.wait_for_idle(), "hud run: idle");
++        const HRESULT idle = synth.wait_for_idle();
++        if (!drop_restore) {
++            require_hresult(idle, "hud run: idle");
++        }
+     }
+     xrfg::set_hud_allocation_observer(nullptr);
+     xrfg::set_hud_restore_observer(nullptr); // DCS Control (0056)
+@@ -2539,36 +2550,44 @@
+             xrfg::HudCleanPathReason::none);
+     }
+     // DCS Control (0056): a pair whose copy-back is not in its list (the
+-    // tests' hook): each loss logged at once (record 2, with that pair's
+-    // submission), counted in the summary, and the history left without its
+-    // HUD (which is why it must be loud).
++    // tests' hook).
++    // DCS Control (0063): the restore invariant. Before 0063 each such pair
++    // was submitted and logged lost (record 2 reason 1), the history left
++    // without its HUD. Now the pair is not submitted at all: its submission
++    // fails (E_ABORT, a hard error: the frame passes through), record 2 with
++    // reason 4 (pair_dropped) says so at once, nothing is counted lost, and
++    // the history keeps its HUD (the sources are their originals).
+     {
+         const HudRunResult dropped = hud_synthesize_run(gpu, images, masks(false, false), false, true, false, true);
+         const std::string what = "hud in place (copy-back dropped): ";
+-        std::uint64_t lost = 0;
++        require(dropped.pair_results.size() == 1 && dropped.pair_results[0] == E_ABORT,
++            what + "the first pair was submitted without its copy-back");
++        std::uint64_t dropped_pairs = 0;
+         for (const xrfg::HudRestoreRecord& record : dropped.restores) {
+             if (record.kind != xrfg::HudRestoreRecordKind::lost) {
+                 continue;
+             }
+-            ++lost;
+-            require(record.loss == xrfg::HudRestoreLoss::not_recorded && record.losses == lost &&
++            ++dropped_pairs;
++            require(record.loss == xrfg::HudRestoreLoss::pair_dropped && record.losses == 0 &&
+                     record.previous_views == 2 && record.current_views == 2 && record.owner != 0,
+                 what + "record 2's fields (reason " + std::to_string(static_cast<std::uint32_t>(record.loss)) +
+                     ", loss " + std::to_string(record.losses) + ", views " + std::to_string(record.previous_views) +
+                     "/" + std::to_string(record.current_views) + ")");
+         }
+-        require(lost == 5, what + "a record 2 per pair (" + std::to_string(lost) + ")");
+-        // At once: the first pair's loss is in the log when its submission returns.
+-        require(!dropped.restores_after_pair.empty() && dropped.restores_after_pair[0] >= 2 &&
++        require(dropped_pairs == 1, what + "one record 2 (pair dropped) (" + std::to_string(dropped_pairs) + ")");
++        require(!dropped.restores_after_pair.empty() && dropped.restores_after_pair[0] >= 1 &&
+                 dropped.restores[dropped.restores_after_pair[0] - 1U].kind == xrfg::HudRestoreRecordKind::lost,
+-            what + "the loss logged with the pair, not only in the summary");
+-        hud_check_restore_records(dropped, what, 5, 0, 0, xrfg::HudCleanPathReason::none, 5);
+-        require(dropped.sources[0] != images[0] || dropped.sources[1] != images[1],
+-            what + "the history kept its HUD without the copy-back (the hook did nothing)");
++            what + "the dropped pair logged with its submission");
++        for (const xrfg::HudRestoreRecord& record : dropped.restores) {
++            require(record.kind != xrfg::HudRestoreRecordKind::summary || record.counts.lost == 0,
++                what + "a dropped pair counted as lost");
++        }
++        require(dropped.sources[0] == images[0] && dropped.sources[1] == images[1],
++            what + "the history lost its HUD (a pair went out without its copy-back)");
+     }
+     std::cout << "hud restore log (result=24): in place 5 pairs -> 5 restored, 0049's copies 5 full-copy pairs, "
+-                 "a path record each; copy-back dropped -> 5 losses logged at once, history left HUD-less; "
+-                 "NVIDIA failure restore untestable on WARP\n";
++                 "a path record each; copy-back dropped -> pair not submitted (E_ABORT, record 2 reason 4), "
++                 "history keeps its HUD; NVIDIA failure restore untestable on WARP\n";
+     std::cout << "hud in place: 2X additive, 2X coverage, 3X and a gap over 5 pairs each: synthetics, 3X second "
+                  "synthetics and the real frames' copies bit-identical to 0049's clean copies (private history and "
+                  "in place), the sources their originals afterwards; two "
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -3512,10 +3512,166 @@
+     }
+ }
+ 
++// DCS Control (0063): the adversarial review's fixes in the cadence model.
++void cadence_review_fixes_tests() {
++    constexpr Nanoseconds kP = 11'111'111;
++    constexpr Nanoseconds kStart = 1'000'000'000;
++    const std::uint32_t n = CadenceTimeResync::kConfirmCadence;
++    {
++        // A level's first judged frame learns the offset it was told with,
++        // not what periods_for gives when it is shown: 3 was told 2's 3, and
++        // 2 moved to 5 before the 3 frame was shown.
++        for (const bool carried : {true, false}) {
++            CadenceTimeResync resync{};
++            resync.offset[1] = 3;
++            resync.learnt[1] = true;
++            resync.last_level = 1;
++            const std::int64_t told_with = resync.periods_for(3);
++            resync.offset[1] = 5; // 2's move, between the 3 frame's wait and its showing
++            const std::optional<std::int64_t> passed =
++                carried ? std::optional<std::int64_t>(told_with) : std::nullopt;
++            require(resync.observe(3, kStart, 0, kP, kStart, passed) == 0 && resync.learnt[2],
++                "told with: the first 3 frame judged");
++            require(resync.offset[2] == (carried ? 3 : 5),
++                "told with: learnt " + std::to_string(resync.offset[2]) +
++                    (carried ? ", not the 3 it was told with" : ", 0062's periods_for at the call"));
++        }
++        // And a move judged from it: ten 3 frames told with 3, shown a
++        // period late, while 2 (the level judged last) is at 5: 3 goes to 4.
++        CadenceTimeResync resync{};
++        resync.offset[1] = 5;
++        resync.learnt[1] = true;
++        resync.last_level = 1;
++        std::int64_t moved = 0;
++        Nanoseconds told = kStart;
++        for (std::uint32_t index = 0; index < n; ++index) {
++            told += 3 * kP;
++            moved += resync.observe(3, told, kP, kP, told, 3);
++        }
++        require(moved == 1 && resync.offset[2] == 4,
++            "told with: a 3 frame told with 3 and shown a period late moves 3 to 4 (moved " +
++                std::to_string(moved) + ", offset " + std::to_string(resync.offset[2]) + ")");
++    }
++    {
++        // At back-off level 2 (hold 120 s), a shift against the last move that
++        // every judged frame since agrees on moves within ~30 s; one whose
++        // frames disagree now and then is held the whole 120 s.
++        const auto shift_delay = [&](bool unanimous_shift) {
++            CadenceTimeResync resync{};
++            Nanoseconds told = kStart;
++            std::int64_t moved = 0;
++            // A real move (+2) starts the hold.
++            for (std::uint32_t index = 0; index < n; ++index) {
++                told += 3 * kP;
++                moved += resync.observe(3, told, 2 * kP, kP, told, resync.periods_for(3));
++            }
++            require(moved == 2 && resync.last_move_sign[2] == 1, "unanimous: the first move");
++            const Nanoseconds hold_start = resync.hold_from[2];
++            resync.backoff[2] = 2;
++            resync.backoff_at[2] = hold_start;
++            require(resync.reverse_hold(2, hold_start) == 120 * kSecond, "unanimous: back-off 2 holds 120 s");
++            // Then every frame a period early (every 15th two, if not unanimous).
++            std::uint32_t count = 0;
++            while (told < hold_start + 200 * kSecond) {
++                told += 3 * kP;
++                ++count;
++                const std::int64_t off = !unanimous_shift && count % 15 == 0 ? -2 : -1;
++                if (resync.observe(3, told, off * kP, kP, told, resync.periods_for(3)) != 0) {
++                    return told - hold_start;
++                }
++            }
++            return Nanoseconds{-1};
++        };
++        const Nanoseconds unanimous = shift_delay(true);
++        const Nanoseconds mixed = shift_delay(false);
++        std::cout << "cadence resync (0063): at back-off 2 a unanimous shift moved after "
++                  << unanimous / kMillisecond << " ms, a mixed one after " << mixed / kMillisecond << " ms\n";
++        require(unanimous > 0 && unanimous <= CadenceTimeResync::kUnanimousHold + kSecond &&
++                    unanimous >= CadenceTimeResync::kUnanimousHold,
++            "unanimous: a unanimous shift at back-off 2 is held 30 s, not 120 s");
++        require(mixed >= 120 * kSecond && mixed <= 121 * kSecond,
++            "unanimous: a shift whose frames disagree keeps the 120 s hold");
++    }
++    {
++        // adaptive_switch result=14's c: the move count saturates (it wrapped).
++        const std::uint64_t c = xrfg::latency::resync_record_c(-2, 70000, 300, 300);
++        require((c & 0xFFFFFFFFULL) == 0xFFFFFFFEULL && ((c >> 32) & 0xFFFFULL) == 0xFFFFULL &&
++                    ((c >> 48) & 0xFFULL) == 0xFFULL && (c >> 56) == 0xFFULL,
++            "result=14: fields saturate");
++        require(((xrfg::latency::resync_record_c(3, 65536, 1, 2) >> 32) & 0xFFFFULL) == 0xFFFFULL &&
++                    ((xrfg::latency::resync_record_c(3, 65535, 1, 2) >> 32) & 0xFFFFULL) == 0xFFFFULL &&
++                    ((xrfg::latency::resync_record_c(3, 7, 1, 2) >> 32) & 0xFFFFULL) == 7ULL,
++            "result=14: 65,536 moves read 65,535, not 0");
++        require(xrfg::latency::resync_record_signed(-1) == 0xFFFFFFFFULL, "result=14: signed field");
++    }
++    {
++        // The display period: 90 Hz to 72 Hz mid-session is taken after 90
++        // waits (with the scanout agreeing, or none measured), the throttle's
++        // multiples never, a scanout that disagrees never.
++        constexpr Nanoseconds k90 = 11'111'111;
++        constexpr Nanoseconds k72 = 13'888'889;
++        for (const bool measured : {true, false}) {
++            xrfg::latency::DisplayPeriodRise rise{};
++            std::uint32_t adopted_at = 0;
++            Nanoseconds adopted{};
++            for (std::uint32_t wait = 1; wait <= 200 && adopted_at == 0; ++wait) {
++                const Nanoseconds jitter = (wait % 3) * 1000;
++                if (const auto taken = rise.observe(k90, k72 + jitter,
++                        measured ? std::optional<Nanoseconds>(k72) : std::nullopt)) {
++                    adopted_at = wait;
++                    adopted = *taken;
++                }
++            }
++            require(adopted_at == xrfg::latency::DisplayPeriodRise::kWaits &&
++                        adopted >= k72 && adopted <= k72 + 2000,
++                "display period: 90 -> 72 Hz taken after 90 waits (at " + std::to_string(adopted_at) + ")");
++            // The layer's glue on adoption: told time and resync start over.
++            CadenceTimeResync resync{};
++            resync.offset[1] = 4;
++            resync.learnt[1] = true;
++            resync.reset();
++            require(!resync.learnt[1] && resync.offset[1] == 0, "display period: the resync starts over");
++        }
++        xrfg::latency::DisplayPeriodRise throttled{};
++        bool taken = false;
++        const std::array<Nanoseconds, 3> multiples{5 * k90, 2 * k90, 3 * k90};
++        for (std::uint32_t wait = 0; wait < 1000; ++wait) {
++            taken = taken || throttled.observe(k90, multiples[wait % 3], std::nullopt).has_value();
++        }
++        require(!taken, "display period: SteamVR's jumping multiples are never taken");
++        xrfg::latency::DisplayPeriodRise disagreeing{};
++        for (std::uint32_t wait = 0; wait < 1000; ++wait) {
++            taken = taken || disagreeing.observe(k90, k72, k90).has_value();
++        }
++        require(!taken, "display period: a scanout still at 90 Hz keeps it");
++        xrfg::latency::DisplayPeriodRise broken{};
++        for (std::uint32_t wait = 0; wait < 1000; ++wait) {
++            // A normal report every 89 waits starts the run again.
++            taken = taken || broken.observe(k90, wait % 89 == 88 ? k90 : k72, std::nullopt).has_value();
++        }
++        require(!taken, "display period: a run broken before 90 waits is not taken");
++    }
++    {
++        // 0050's epoch: a capture whose wait for the re-presented slot ran
++        // out does not capture (nor take a number); the next frame tries the
++        // same number again.
++        using xrfg::latency::capture_epoch_step;
++        using xrfg::latency::capture_slot_reused;
++        const std::uint64_t in_flight = 5;
++        const std::uint64_t epoch = 6;
++        require(capture_slot_reused(in_flight, epoch + 1, 2), "epoch: the next capture would take the slot");
++        const auto ran_out = capture_epoch_step(epoch, true);
++        require(!ran_out.capture && ran_out.epoch == epoch, "epoch: ran out, no capture, no number taken");
++        const auto clear = capture_epoch_step(epoch, false);
++        require(clear.capture && clear.epoch == epoch + 1, "epoch: the slot went out, the capture goes ahead");
++    }
++}
++
+ } // namespace
+ 
+ int main() {
+     try {
++        cadence_review_fixes_tests(); // DCS Control (0063)
+         residual_period_tests(); // DCS Control (0059)
+         cadence_resync_tests(); // DCS Control (0059)
+         cadence_resync_hysteresis_tests(); // DCS Control (0060)
