@@ -4,6 +4,8 @@
 // harmless by construction (GetPrivateProfile* reads only the keys asked for), so a removal can never break the
 // app's ini; this keeps a removal from silently dropping a key the app still sets with a meaning. `constant`: the
 // template writes a fixed value (a non-constant, profile-driven key must stay live, never retired).
+// Since Dev's F07 trim (2026-10-21) the template writes only the constant=false entries (75 keys); the constant
+// ones stay listed so an older profile ini (full template) still reads the same values or the default.
 #pragma once
 
 namespace iktest {
@@ -61,7 +63,7 @@ const AppKey kAppKeys[] = {
     {L"Effects", L"SkipSameConstantBuffer", false}, {L"Effects", L"SkipSameConstantUpload", true},
     {L"Prefetch", L"Mode", false}, {L"Prefetch", L"WindowMs", true}, {L"Prefetch", L"TableBits", true},
     {L"Threads", L"Census", true}, {L"Threads", L"WorkerPlacement", true}, {L"Threads", L"PlaceRecheckSec", true},
-    {L"Color", L"ModeKey", false}, {L"Color", L"ToneProbe", true}, {L"Color", L"SwapProbe", false},
+    {L"Color", L"ModeKey", false}, {L"Color", L"ToneProbe", true}, {L"Color", L"SwapProbe", true},
     {L"Log", L"StatsIntervalSec", true}, {L"Log", L"DumpViews", true}, {L"Log", L"RecorderDetail", true},
     {L"Log", L"PerfIntervalSec", true}, {L"Log", L"VramIntervalSec", true}, {L"Governor", L"Enabled", true},
     {L"Governor", L"GpuBusyPct", true}, {L"Governor", L"RenderIdlePct", true}, {L"Governor", L"CpuBusyPct", true},
