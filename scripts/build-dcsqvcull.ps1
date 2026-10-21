@@ -31,12 +31,13 @@ foreach ($name in @($testEnvironment.Keys)) {
 try {
     $testSources = @((Join-Path $workspaceRoot 'native/dcsqvcull/test'), (Join-Path $workspaceRoot 'native/dcsqvcull/lua'), (Join-Path $workspaceRoot 'native/dcsqvcull/CMakeLists.txt'))
     foreach ($name in @($testEnvironment.Keys)) { if ([Environment]::GetEnvironmentVariable($name)) { $testSources += [Environment]::GetEnvironmentVariable($name) } }
-    if (-not (Test-NativeTestsCurrent $build $testSources)) {
+    $testFingerprint = Get-NativeTestFingerprint $build $testSources
+    if (-not (Test-NativeTestsCurrent $build $testFingerprint)) {
         $testRun = Join-Path $build 'test-run'
         if (Test-Path -LiteralPath $testRun) { Get-ChildItem -LiteralPath $testRun -Force | Remove-Item -Recurse -Force }
         & $wrapper ctest --test-dir $build --output-on-failure
         if ($LASTEXITCODE -ne 0) { throw 'DcsQvCull tests failed.' }
-        Save-NativeTestsPassed $build $testSources
+        Save-NativeTestsPassed $build $testFingerprint
     }
 } finally {
     foreach ($name in @($testEnvironment.Keys)) { [Environment]::SetEnvironmentVariable($name, $callerEnvironment[$name]) }

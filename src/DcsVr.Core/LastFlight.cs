@@ -29,7 +29,8 @@ public sealed record FlightSummary(DateTimeOffset Start, DateTimeOffset End, boo
 public sealed record HeadsetFrames(double AverageFps, double CompositorFps, double AtRefreshShare, long Missed, long Discarded, int Seconds);
 /// <summary>Seconds OFXR ran at each frame multiplier (from its once-a-second latency_status), and its switches.</summary>
 /// <param name="Seconds1x">Seconds at full rate with generation paused (adaptive cadence's 1X).</param>
-public sealed record FramegenShare(int Seconds2x, int Seconds3x, int Switches, bool Adaptive, int Seconds1x = 0)
+/// <param name="Cadence">Frame generation only when needed (adaptive cadence) ran, with or without time at 1X.</param>
+public sealed record FramegenShare(int Seconds2x, int Seconds3x, int Switches, bool Adaptive, int Seconds1x = 0, bool Cadence = false)
 {
     public double Share3x => Seconds2x + Seconds3x == 0 ? 0 : (double)Seconds3x / (Seconds2x + Seconds3x);
 }
@@ -305,7 +306,7 @@ public static partial class LastFlight
     public static OfxrResult? ParseOfxr(IEnumerable<string>? lines)
     {
         if (lines is null) return null;
-        int one = 0, two = 0, three = 0, switches = 0; var adaptive = false; var frames = new List<double>();
+        int one = 0, two = 0, three = 0, switches = 0; bool adaptive = false, cadence = false; var frames = new List<double>();
         foreach (var line in lines)
         {
             var m = OfxrLineRegex().Match(line);
@@ -321,14 +322,17 @@ public static partial class LastFlight
                 if (a > 0 && a < 1_000_000) frames.Add(a / 1000.0);
             }
             // Reason 5 is adaptive control turned on or off; the others change the multiplier between 2 and 3. Adaptive
-            // cadence: 8 enters 1X, 9-12 leave it; 13 turns cadence on or off.
-            else if (result is >= 8 and <= 12) switches++;
+            // cadence: 8 enters 1X, 9-12 leave it; 13 turns cadence on (a=0) or off (b=0). 14 and up are told-time offset
+            // moves and blocked moves (OFXR 0061), not switches; like 8-12, only cadence makes them.
+            else if (result >= 14) cadence = true;
+            else if (result is >= 8 and <= 12) { switches++; cadence = true; }
+            else if (result == 13 && a == 0 && b != 0) cadence = true;
             // 13 with a and b both 2 or 3 is cadence moving the session between 3X and 2X; with 0 it only turns cadence on or off.
             else if (result != 5 && a != b && a is 2 or 3 && b is 2 or 3) switches++;
         }
         if (one + two + three == 0 && frames.Count == 0) return null;
         frames.Sort();
-        return new(one + two + three == 0 ? null : new(two, three, switches, adaptive, one), frames.Count == 0 ? null : new(Percentile(frames, .5), Percentile(frames, .9), frames.Count));
+        return new(one + two + three == 0 ? null : new(two, three, switches, adaptive, one, cadence || one > 0),frames.Count == 0 ? null : new(Percentile(frames, .5), Percentile(frames, .9), frames.Count));
     }
     [GeneratedRegex(@"\bop=(latency_status|adaptive_switch) result=(-?\d+) dur_us=\d+ a=(\d+) b=(\d+)")] private static partial Regex OfxrLineRegex();
     private static double Percentile(List<double> sorted, double q) => Math.Round(sorted[Math.Clamp((int)Math.Ceiling(q * sorted.Count) - 1, 0, sorted.Count - 1)], 1);

@@ -7,18 +7,28 @@ if (args.FirstOrDefault() == "--environment-child") { Console.Write(Environment.
 var workspace = Path.GetFullPath(args.FirstOrDefault() ?? ".");
 if (!File.Exists(Path.Combine(workspace, "Directory.Build.props"))) { Console.Error.WriteLine("Run from the repository root, or pass it as the first argument: " + workspace); return 2; }
 // Each run gets its own folder (runs may overlap); a failed run's is kept to inspect, but only the newest few: every run
-// used to leave one behind (80 GB of them).
+// used to leave one behind (80 GB of them). A run holds run.lock in its folder open, unshared, while it lives: a folder
+// whose lock cannot be opened belongs to a run still going and is never pruned, nor is one touched in the last hour.
 var testsRoot = Path.Combine(workspace, "artifacts/tests");
-if (Directory.Exists(testsRoot))
-    foreach (var old in new DirectoryInfo(testsRoot).EnumerateDirectories().OrderByDescending(d => d.LastWriteTimeUtc).Skip(3))
+const string RunLock = "run.lock";
+PruneRuns(testsRoot, 3, DateTime.UtcNow.AddHours(-1));
+void PruneRuns(string folder, int keep, DateTime olderThan)
+{
+    if (!Directory.Exists(folder)) return;
+    foreach (var old in new DirectoryInfo(folder).EnumerateDirectories().OrderByDescending(d => d.LastWriteTimeUtc).Skip(keep).Where(d => d.LastWriteTimeUtc < olderThan))
         try
         {
+            var lockPath = Path.Combine(old.FullName, RunLock);
+            if (File.Exists(lockPath)) using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
             // Some fixtures are read-only files, which Delete(true) refuses.
             foreach (var file in old.EnumerateFiles("*", SearchOption.AllDirectories)) file.Attributes = FileAttributes.Normal;
             old.Delete(true);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+}
 var root = Path.Combine(testsRoot, Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+// Held until the process exits (rooted, never disposed or finalized): concurrent runs see this folder as in use.
+System.Runtime.InteropServices.GCHandle.Alloc(new FileStream(Path.Combine(root, RunLock), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None));
 var tests = new List<(string Name, Action Test)>();
 Readiness.ActiveRouteProvider = () => new(null, "Test fixture: no running headset route.", TrackingKind.Unknown);
 PimaxFovea.SettingsPath = Path.Combine(root, "no-pimax-play/global.json"); // never the build machine's Pimax Play settings
@@ -43,6 +53,22 @@ string Zip(string relative, params (string Name, string Content)[] entries)
     foreach (var e in entries) { var entry = zip.CreateEntry(e.Name); using var writer = new StreamWriter(entry.Open()); writer.Write(e.Content); }
     return path;
 }
+Test("Test-folder pruning skips a run still going (its lock held) and folders touched in the last hour", () =>
+{
+    var runs = Path.Combine(root, "prune-runs");
+    string Run(string name, bool withLock, DateTime touched)
+    {
+        var folder = Path.Combine(runs, name); Directory.CreateDirectory(folder); File.WriteAllText(Path.Combine(folder, "fixture.txt"), "x");
+        if (withLock) File.WriteAllText(Path.Combine(folder, RunLock), "");
+        Directory.SetLastWriteTimeUtc(folder, touched); return folder;
+    }
+    var held = Run("held", true, DateTime.UtcNow.AddDays(-2)); var finished = Run("finished", true, DateTime.UtcNow.AddDays(-2));
+    var noLock = Run("older-version", false, DateTime.UtcNow.AddDays(-3)); var recent = Run("recent", false, DateTime.UtcNow.AddMinutes(-5));
+    using (new FileStream(Path.Combine(held, RunLock), FileMode.Open, FileAccess.ReadWrite, FileShare.None)) PruneRuns(runs, 0, DateTime.UtcNow.AddHours(-1));
+    Require(Directory.Exists(held) && Directory.Exists(recent) && !Directory.Exists(finished) && !Directory.Exists(noLock), "Only finished runs older than an hour go");
+    Require(File.Exists(Path.Combine(root, RunLock)), "This run holds its own lock");
+    Throws<IOException>(() => new FileStream(Path.Combine(root, RunLock), FileMode.Open, FileAccess.ReadWrite, FileShare.None).Dispose());
+});
 const string Lua = "-- preserve comment\r\noptions = { VR = {enable=false, openxr_quadView = true}, graphics = { Upscaling = \"DLSS\", maxFPS=89, }, [\"other\"] = { [1]=\"a\", }, }";
 Test("Lua existing replacement preserves unrelated text", () => { var patched = new LuaOptions(Lua).Set(["VR", "openxr_quadView"], false); Require(patched == Lua.Replace("openxr_quadView = true", "openxr_quadView = false")); });
 Test("Lua missing field in table without trailing comma", () => { var p = new LuaOptions(Lua).Set(["VR", "openxr_eyeGaze"], true); Require(new LuaOptions(p).Get("VR", "openxr_eyeGaze") == "true"); Require(p.Contains("\r\n")); });
@@ -641,14 +667,20 @@ Test("Last flight: dcs.log session, Pimax frames, OFXR modes and frame time, DLS
         "seq=232126 ms=308905.616 tid=31660 phase=I op=latency_status result=12 dur_us=0 a=20000 b=30 c=44444",
         "seq=9345 ms=123974.375 tid=31660 phase=I op=adaptive_switch result=1 dur_us=0 a=3 b=2 c=6752",
         "seq=429 ms=112503.069 tid=26532 phase=I op=submission_timing result=1 dur_us=0 a=196610 b=131072 c=19036828363629029"])!;
-    Require(ofxr.Share is { Seconds2x: 2, Seconds3x: 2, Switches: 2, Adaptive: true } && ofxr.Times is { P50Ms: 27.4, P90Ms: 28.2, Seconds: 3 });
+    Require(ofxr.Share is { Seconds2x: 2, Seconds3x: 2, Switches: 2, Adaptive: true, Cadence: false } && ofxr.Times is { P50Ms: 27.4, P90Ms: 28.2, Seconds: 3 });
     Require(LastFlight.ParseOfxr(["seq=1 ms=0.000 tid=27164 phase=I op=logger result=401 dur_us=0 a=128 b=0 c=24208"]) is null);
     // Adaptive cadence: 11 is 1X (full rate, generation paused); 8 enters 1X and 9-12 leave it; 13 turns cadence on.
     var cadence = LastFlight.ParseOfxr(["seq=1 ms=0 tid=1 phase=I op=adaptive_switch result=13 dur_us=0 a=0 b=2 c=0",
         "seq=2 ms=1000 tid=1 phase=I op=latency_status result=12 dur_us=0 a=20000 b=0 c=0", "seq=3 ms=1500 tid=1 phase=I op=adaptive_switch result=8 dur_us=0 a=2 b=1 c=7000",
         "seq=4 ms=2000 tid=1 phase=I op=latency_status result=11 dur_us=0 a=8000 b=0 c=0", "seq=5 ms=3000 tid=1 phase=I op=latency_status result=11 dur_us=0 a=8100 b=0 c=0",
         "seq=6 ms=3500 tid=1 phase=I op=adaptive_switch result=11 dur_us=0 a=1 b=2 c=0"])!;
-    Require(cadence.Share is { Seconds1x: 2, Seconds2x: 1, Seconds3x: 0, Switches: 2, Adaptive: true }, "1X seconds and switches in and out of it");
+    Require(cadence.Share is { Seconds1x: 2, Seconds2x: 1, Seconds3x: 0, Switches: 2, Adaptive: true, Cadence: true }, "1X seconds and switches in and out of it");
+    // 14 and 15 (told-time offset moves, blocked moves) and anything newer are not frame-generation switches.
+    var moves = LastFlight.ParseOfxr(["seq=1 ms=0 tid=1 phase=I op=latency_status result=12 dur_us=0 a=20000 b=0 c=0",
+        "seq=2 ms=100 tid=1 phase=I op=adaptive_switch result=14 dur_us=0 a=2 b=3 c=0", "seq=3 ms=200 tid=1 phase=I op=adaptive_switch result=15 dur_us=0 a=3 b=2 c=0",
+        "seq=4 ms=300 tid=1 phase=I op=adaptive_switch result=16 dur_us=0 a=2 b=1 c=0", "seq=5 ms=400 tid=1 phase=I op=adaptive_switch result=2 dur_us=0 a=2 b=3 c=0"])!;
+    Require(moves.Share is { Switches: 1, Seconds1x: 0, Cadence: true }, "Offset and blocked moves are not counted as switches; they show cadence ran");
+    Require(LastFlight.ParseOfxr(["seq=1 ms=0 tid=1 phase=I op=adaptive_switch result=13 dur_us=0 a=0 b=2 c=0", "seq=2 ms=1000 tid=1 phase=I op=latency_status result=12 dur_us=0 a=20000 b=0 c=0"])!.Share is { Seconds1x: 0, Cadence: true }, "Cadence on without 1X time");
     // Cheeky: the runtime came up, the hotkey toggled it twice; a failure is reported as such.
     var nr = LastFlight.ParseCheeky(["19:41:40.836 [T31660] DLSS-NR runtime search path=E:\\DCS\\bin\\CheekyFoveatedDLSS\\nvngx_dlssnr.dll error=0", "19:41:40.836 [T31660] DLSS-NR 310.8 feature-18 runtime initialized"],
         ["19:42:56.971 DLSS-NR hotkey toggled enabled=no", "19:43:00.551 DLSS-NR hotkey toggled enabled=yes"]);
@@ -1362,37 +1394,9 @@ Test("Depth boost with the dual camera: always gradual, no transition switch; th
 Test("DcsQvCull.ini trim: the module reads the same values as from the old full template", () =>
 {
     // The keys the old template wrote as constants, dropped from the ini (R107 F07), with the default the payload uses for
-    // a missing key (native/dcsqvcull/src main/config_load.inc, gb_rec.h; each checked against its read). "retired": in
-    // kRetiredKeys (main/config.inc), not read at all; a missing one is the same as the old constant 0.
-    const string defaults = """
-        General: LowPowerPacer=0 LowPowerPacerTimeoutUs=10 SigScan=1
-        Hotkeys: DeveloperKeys=0
-        Scene: CostWeightsSanity=0 CollectThreadsMax=0 FineTimerResolution=0
-        Cull: Enabled=0 DebugHole=0 FocusKeepFraction=-1 SafetyNdc=0.05 NativeKeepFraction=0.35 SaccadeDeg=1.0 SaccadeHoldFrames=6 FocusRatio=0.80 ApexTolerance=0.02
-        D3D: Meter=0 Filter=0 SplitFilterOps=0x4ff ChainFast=7 ShaderFast=3 PeriphInstFilter=0:retired FocusBroadcast=0:retired
-        Shadow: TightCasters=0 DebugInvert=0
-        Model: SlabBytes=4096 BigPageBytes=4194304 GBufferBatching=0 ParallelUpload=0 DirectUpload=0 ShadowRecorderScope=0x30f ShadowRecorderWaitUs=200 ShadowRecorderPriority=0 ShadowRecorderSplit=0xf ShadowRecorderInstancing=1 GBufferRecorderScope=0x10055 GBufferRecorderMaxSegments=12 GBufferRecorderHelpers=2 GBufferRecorderWaitUs=300 GBufferRecorderIsland=30 GBufferRecorderRedo=1 GBufferRecorderSwapAhead=1 GBufferRecorderCockpit=0 GBufferRecorderByOrdinal=1 SrvTailTrim=0 PassFlush=0
-        Effects: SkipSameConstantUpload=0
-        Prefetch: WindowMs=5000 TableBits=20
-        Threads: Census=0 WorkerPlacement=2 PlaceRecheckSec=60
-        Color: ToneProbe=0 SwapProbe=0
-        Log: StatsIntervalSec=2 DumpViews=3 RecorderDetail=0 PerfIntervalSec=10 VramIntervalSec=60
-        Governor: Enabled=1 GpuBusyPct=92 RenderIdlePct=85 CpuBusyPct=92 GpuFreePct=80 GpuFullPct=98 WindowSec=8 NeedSec=6 MinDwellSec=10 MinGainPct=2.0 TrialSec=20 RecheckSec=10 RevertBackoffSec=300
-        Perception: DepthGrid=0 SceneCutReset=1 FixationDepthVerify=0 FixationDepthDump=0 FarDepthExportSlots=2 FarDepthPreOverlay=1 CockpitMaskViews=3 CockpitMaskDivisor=0 CockpitMaskNearM=1.0 CockpitMaskDilate=0 CockpitMaskDump=0 CockpitMaskLog=0 CockpitDepthDump=0 CockpitMotionClass=1 CockpitMotionDump=0 CockpitFgDump=0 CockpitMaskOverlay=0:retired SymbologyAlpha=1 FarDepthCoverageMode=hdr FarDepthLogProj=0 CockpitTrueIpdLighting=1 CockpitTrueIpdForward=1 CockpitTrueIpdHelmet=1 CockpitTrueIpdOverlays=1 CockpitTrueIpdOverlayPath=cpu CockpitTrueIpdToggle=0:0
-        Bench: Blocks=24 BlockSec=5 SettleSec=1.0 AutoStartSec=0 ThreadsB=12
-        Suite: SelfTest=0 Profile=0 BenchCull=0 BenchTimer=0 BenchPartition=0 BenchIsolation=0 BenchThreads=0 BenchTimerRes=0 BenchFilter=0 BenchShadow=0 BenchAllocSlabs=0 BenchCostWeights=0 BenchCbUpload=0 BenchPacer=0 MotionSweep=0 BenchFrameHeap=0 MotionProfile=0 MotionTaxi=0 MotionCounters=1 ShadowInstCompile=0 ShadowInstVerify=0 BenchShadowInst=0 BenchBigPages=0 BenchShadowTex=0 BenchTexTable=0 YawScan=0 HoldYawDeg=-1 GBufferInstCompile=0 GBufferInstVerify=0 BenchGBufferInst=0 BenchParallelUpload=0 BenchShadowPlanAsync=0 DirectUploadCount=0 DirectUploadVerify=0 BenchDirectUpload=0 SplitFilterVerify=0 ShadowRecVerify=0 ShadowRecVerifySec=5 BenchShadowRecorder=0 ShadowRecCount=0 GBufferRecVerify=0 GBufferRecVerifySec=6 GBufferRecVerifyStride=0 BenchGBufferRecorder=0 GBufferRecCount=0 GBufferRecStateDump=0 GpuPassTiming=0 YawProfile=0 YawProfileStep=30 RotationProfile=0 RotationDegPerSec=60 RotationSeconds=20 FrameStartGap=0 FrameStartGapSec=10 RunnableThreads=0 RunnableThreadsSec=10 RunnableThreadsEvery=16 VramCount=0 VramCountSec=20 VramCountCreates=1 GpuPassStats=0 ForwardRecCount=0 BenchPassFlush=0 BenchPassFlushMask=0 SrvTailTrimVerify=0 SrvTailTrimVerifySec=10 BenchSrvTailTrim=0 BenchSplitFilter=0 CascadeCacheTiming=0 ChainFastTiming=0 ChainFastVerify=0 ShaderFastTiming=0 ShaderFastVerify=0 GeoOnlyProbe=0 PeriphCensus=0:retired PeriphInstTiming=0:retired PeriphInstVerify=0:retired FocusGeomProbe=0:retired FocusVsCensus=0:retired FocusBcastProbe=0:retired FocusBcastTiming=0:retired FocusBcastVerify=0:retired JoinTailCount=0 SrvSpanCount=0 FxApplyCount=0 GBufferTexCount=0 Terrain=0 BenchTexDedupe=0 BenchCbSkip=0 BenchTriPlain=0 BenchEngine=1 BenchMicro=0 BenchPrefetch=0 Quick=1 MotionSeconds=60
-        """;
-    var dropped = new Dictionary<(string, string), string>();
-    foreach (var line in defaults.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-    {
-        var section = line[..line.IndexOf(':')];
-        foreach (var item in line[(line.IndexOf(':') + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var key = item[..item.IndexOf('=')]; var value = item[(item.IndexOf('=') + 1)..];
-            if (value.EndsWith(":retired", StringComparison.Ordinal)) value = value[..^":retired".Length];
-            dropped.Add((section, key), value);
-        }
-    }
+    // a missing key (ConfigurationWriters.DcsQvCullConstantTable; each checked against its read). Retired keys are not
+    // read at all; a missing one is the same as the old constant 0. Developer mode writes them all again.
+    var dropped = ConfigurationWriters.DcsQvCullConstants.ToDictionary(c => (c.Section, c.Key), c => c.Value);
     Require(dropped.Count == 198, "197 constant keys and SwapProbe: " + dropped.Count);
     // GetPrivateProfile* reads the first key of a name in the first section of a name; a repeat would be a bug in either.
     Dictionary<(string, string), string> Parse(string ini)
@@ -1419,6 +1423,8 @@ Test("DcsQvCull.ini trim: the module reads the same values as from the old full 
         ("Visual realism on", qv with { ColorMode = ColorMode.Enhanced, ColorModeKey = "120:6", NightVision = true, Glare = true, GazeDof = true, GVision = true, GVisionMode = GVisionMode.Full }),
         ("Sharp HUD", qv with { DepthBoost = true, FrameGen = FrameGeneration.Nvidia, FrameGenHudSymbology = true, FarDepth = true }),
         ("Developer mode", qv with { EngineDevMode = true, EngineDevPayloadPath = @"D:\dev\payload.dll", EngineDevIniPath = @"D:\dev\dev.ini" }),
+        ("Developer mode with Visual realism", qv with { EngineDevMode = true, EngineDevPayloadPath = @"D:\dev\payload.dll", ColorMode = ColorMode.Fix, GazeDof = true }),
+        ("Developer mode set, Engine Optimizations off", qv with { EngineOptimizations = false, DepthBoost = true, EngineDevMode = true }),
     };
     foreach (var (name, profile) in profiles)
     {
@@ -1431,6 +1437,13 @@ Test("DcsQvCull.ini trim: the module reads the same values as from the old full 
             Require(value == dflt, $"{name}: [{section}] {key} was {value}, the module's default is {dflt}");
         }
         Require(now.Keys.All(old.ContainsKey), name + ": a key the old template did not write: " + string.Join(", ", now.Keys.Where(k => !old.ContainsKey(k))));
+        if (profile is { EngineOptimizations: true, EngineDevMode: true })
+        {
+            // A payload built elsewhere may be older than the vendored defaults: every constant is written, as the defaults.
+            Require(dropped.All(d => now.TryGetValue(d.Key, out var written) && written == d.Value), name + ": constants missing or not the defaults: " + string.Join(", ", dropped.Where(d => now.GetValueOrDefault(d.Key) != d.Value).Select(d => d.Key)));
+            Require(old.Keys.All(now.ContainsKey), name + ": every key of the old full file");
+            continue;
+        }
         Require(dropped.Keys.All(k => !now.ContainsKey(k)), name + ": a constant key is still written: " + string.Join(", ", dropped.Keys.Where(now.ContainsKey)));
         Require(newText.Length < oldText.Length / 2, $"{name}: {newText.Length} of {oldText.Length} characters");
     }
@@ -1710,6 +1723,7 @@ Test("DCS engine optimizations install in Saved Games Scripts with the profile's
     var devPayload = Make("engine/dev/build/DcsQvCullPayload.dll", "dev"); var devIni = Make("engine/dev/DcsQvCull.dev.ini", "[Timing]");
     var dev = on with { EngineDevMode = true, EngineDevPayloadPath = devPayload, EngineDevIniPath = devIni };
     var devText = ConfigurationWriters.DcsQvCull(dev);
+    Require(devText.ReplaceLineEndings("\n").Contains("\n[Governor]\nEnabled=1\n") && devText.Contains("SigScan=1") && !ini.Contains("SigScan") && !ini.Contains("[Governor]"), "developer mode writes the constants explicitly, the normal ini does not");
     Require(devText.Contains("PayloadPath=" + devPayload) && devText.Contains("IniPath=" + devIni) && !ConfigurationWriters.DcsQvCull(dev with { EngineDevMode = false }).Contains(devPayload));
     Require(!ProfileValidation.Validate(dev).Any(i => i.Code.StartsWith("engine-dev")));
     Require(ProfileValidation.Validate(dev with { EngineDevIniPath = null }).Any(i => i.Code == "engine-dev" && i.Severity == IssueSeverity.Error));
@@ -1844,6 +1858,17 @@ Test("Application installer rejects out-of-scope journal paths", () =>
     var outside = Make("outside-ledger/file", "protected"); journal.Entries[0] = journal.Entries[0] with { Path = outside };
     AtomicFile.WriteText(Path.Combine(installer.Transactions.StateDirectory, journal.Id, "journal.json"), JsonData.Serialize(journal));
     Throws<InvalidDataException>(() => installer.Uninstall()); Require(File.ReadAllText(outside) == "protected");
+});
+Test("An interrupted update that cannot be rolled back says what to do (not \"reinstall\", which takes the same path)", () =>
+{
+    var source = ReleaseFixture("stuck-v1", "1", "first"); var next = ReleaseFixture("stuck-v2", "2", "second"); var target = Path.Combine(root, "app-install/stuck");
+    var installer = new ApplicationInstaller(target); var journal = installer.Install(source);
+    // Cut short as far as the journal knows, and its file changed since: the rollback keeps the change and stops.
+    AtomicFile.WriteText(Path.Combine(installer.Transactions.StateDirectory, journal.Id, "journal.json"), JsonData.Serialize(journal with { Status = "applying" }));
+    AtomicFile.WriteText(Path.Combine(target, "app.bin"), "held");
+    try { installer.Install(next); throw new Exception("No failure"); }
+    catch (InvalidOperationException e) { Require(e.Message.Contains("run the setup again") && e.Message.Contains("report it with the logs") && !e.Message.Contains("reinstall"), e.Message); }
+    Require(File.ReadAllText(Path.Combine(target, "app.bin")) == "held", "The changed file is kept");
 });
 Test("Application installer rejects reserved destination roots", () => Throws<InvalidDataException>(() => new ApplicationInstaller(Path.GetPathRoot(root)!)));
 Test("Application installation refuses unknown existing files", () =>
@@ -2958,6 +2983,20 @@ Test("Launch applies a draft when nothing is applied, then changes nothing while
     Require(f.Service.RestoreOriginals().Complete && File.ReadAllText(f.Options) == Lua);
     Throws<InvalidOperationException>(() => f.Service.SyncApplied(null, f.Inventory)); // the CLI has nothing to launch
 });
+Test("baseline.json after an apply and a restore holds only members 0.5.10 knows (it refuses unknown ones)", () =>
+{
+    var f = SyncFixture("baseline-0510");
+    string[] known = ["schemaVersion", "files", "current", "state", "lastActionAt", "lastAction"];
+    void Check(string step)
+    {
+        var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(f.Service.Originals.Directory, "baseline.json")))!.AsObject();
+        var unknown = json.Select(p => p.Key).Where(k => !known.Contains(k)).ToArray();
+        Require(unknown.Length == 0, step + ": members 0.5.10 refuses: " + string.Join(", ", unknown));
+    }
+    f.Service.SyncApplied(new VrProfile { FpsLimit = FpsLimitMode.Custom, RenderedFpsCap = 60 }, f.Inventory); Check("applied");
+    f.Service.SyncApplied(new VrProfile { FpsLimit = FpsLimitMode.Custom, RenderedFpsCap = 72 }, f.Inventory); Check("applied over");
+    Require(f.Service.RestoreOriginals().Complete); Check("restored");
+});
 Test("Launch after a change writes the draft over the applied profile and checks the launch contract", () =>
 {
     var f = SyncFixture("changed");
@@ -3992,6 +4031,44 @@ Test("E2E: state written by 0.5.10 (no lastInstalled, an older profile.json) kee
     var after = E2eTree(f, "game", "sg"); Require(after.SequenceEqual(baseTree), "DCS's folders differ: " + E2eDiff(baseTree, after));
     E2eCheckClean(f, "Back to stock DCS from 0.5.10 state");
 });
+Test("E2E: component settings this version writes differently are applied once at launch; a refresh change keeps its own reason", () =>
+{
+    var f = E2e("writers");
+    // One log folder per rate: the folder is part of HeadsetRefresh's 3 s answer cache.
+    void Refresh(int hz)
+    {
+        var logs = Path.Combine(f.Base, "pimax-logs-" + hz); Directory.CreateDirectory(logs);
+        File.WriteAllText(Path.Combine(logs, "PiService__2026-10-20-20.log"), "x Performance body to send: {\"fps_analysis\":{\"fps_target\":" + hz + "},\"refresh_rate\":120}\n");
+        HeadsetRefresh.PimaxLogFolder = logs;
+    }
+    var previous = HeadsetRefresh.PimaxLogFolder; Refresh(90);
+    try
+    {
+        var profile = E2eB(null) with { RefreshFromHeadset = true };
+        Require(f.Service.SyncApplied(profile, E2eInventory(f)).Kind == LaunchSyncKind.Applied);
+        Require(f.Service.SyncApplied(profile, E2eInventory(f)).Kind == LaunchSyncKind.Unchanged, "Unchanged right after the apply");
+        // As 0.5.10 left it: its OFXR ini had no adaptive_cadence, and its journal recorded the hash of that file.
+        var baselinePath = Path.Combine(f.Service.Originals.Directory, "baseline.json");
+        var baseline = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(baselinePath))!.AsObject();
+        var entry = baseline["current"]!["entries"]!.AsArray().Select(e => e!.AsObject()).Single(e => Path.GetFileName((string)e["path"]!) == "ofxr_bridge.ini");
+        var ini = (string)entry["path"]!;
+        var older = string.Join("\n", File.ReadAllText(ini).Split('\n').Where(l => !l.Contains("adaptive_cadence") && !l.Contains("only when needed")));
+        File.WriteAllBytes(ini, [.. Encoding.Unicode.GetPreamble(), .. Encoding.Unicode.GetBytes(older)]); entry["installedSha256"] = Hashing.FileSha256(ini);
+        AtomicFile.WriteText(baselinePath, baseline.ToJsonString(JsonData.Options));
+        f.Service.PrepareLaunchApplied(); // intact as recorded: only the writers differ
+        var updated = f.Service.SyncApplied(null, E2eInventory(f));
+        Require(updated.Kind == LaunchSyncKind.Applied && updated.Message.Contains("(this version of DCS Control writes updated settings)") && File.ReadAllText(ini).Contains("adaptive_cadence="), updated.Message);
+        Require(f.Service.SyncApplied(null, E2eInventory(f)).Kind == LaunchSyncKind.Unchanged, "A second launch writes nothing");
+        Require(f.Service.SyncApplied(profile, E2eInventory(f)).Kind == LaunchSyncKind.Unchanged, "Nor does the app's draft");
+        // The headset now runs at 120 Hz: the frame limit follows, with the refresh rate as the reason.
+        Refresh(120);
+        var refresh = f.Service.SyncApplied(profile, E2eInventory(f));
+        Require(refresh.Kind == LaunchSyncKind.Applied && refresh.Message.Contains("(the headset's refresh rate changed)") && new LuaOptions(File.ReadAllText(f.Options)).Get("graphics", "maxFPS") == "60", refresh.Message);
+        Require(f.Service.SyncApplied(profile, E2eInventory(f)).Kind == LaunchSyncKind.Unchanged, "Up to date at 120 Hz");
+        Require(f.Service.RestoreOriginals().Complete);
+    }
+    finally { HeadsetRefresh.PimaxLogFolder = previous; }
+});
 Test("E2E: the CLI's apply, launch-check and restore write exactly what the app writes", () =>
 {
     // The CLI built with this test run (DcsVr.Tests.csproj references it), never an older build lying around.
@@ -4004,6 +4081,8 @@ Test("E2E: the CLI's apply, launch-check and restore write exactly what the app 
     {
         var start = new ProcessStartInfo(cli) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
         foreach (var argument in arguments.Concat(["--state", f.Service.StateRoot, "--distribution", f.Service.DistributionRoot])) start.ArgumentList.Add(argument);
+        // The child sees what this runner sees (no DCS running, the fixture RTX 4090), even with DCS open on this PC.
+        start.Environment["DCSVR_TEST_NO_DCS"] = "1";
         using var process = Process.Start(start)!;
         var output = process.StandardOutput.ReadToEndAsync(); var error = process.StandardError.ReadToEndAsync();
         if (!process.WaitForExit(120000)) { process.Kill(true); throw new Exception("CLI timed out"); }

@@ -19,8 +19,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Pupil shift configuration failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Pupil shift build failed.' }
 . (Join-Path $PSScriptRoot 'test-cache.ps1')
 $testSources = @((Join-Path $workspaceRoot 'native/pupil_shift'))  # its CMakeLists.txt included
-if (-not (Test-NativeTestsCurrent $build $testSources)) {
+$testFingerprint = Get-NativeTestFingerprint $build $testSources
+if (-not (Test-NativeTestsCurrent $build $testFingerprint)) {
     & $wrapper ctest --test-dir $build --output-on-failure
     if ($LASTEXITCODE -ne 0) { throw 'Pupil shift tests failed.' }
-    Save-NativeTestsPassed $build $testSources
+    Save-NativeTestsPassed $build $testFingerprint
 }

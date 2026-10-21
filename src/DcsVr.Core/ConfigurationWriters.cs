@@ -128,12 +128,70 @@ public static class ConfigurationWriters
         GVisionMode={Int((int)p.GVisionMode)}
         """ : "");
 
+    /// <summary>
+    /// The keys the full DcsQvCull.ini wrote as constants until R107 F07, each with the value the vendored module uses
+    /// when it is missing (native/dcsqvcull/src main/config_load.inc, gb_rec.h); ":retired" keys are no longer read by it
+    /// (kRetiredKeys in main/config.inc) and were written as these values. Section: Key=Value per item.
+    /// </summary>
+    internal const string DcsQvCullConstantTable = """
+        General: LowPowerPacer=0 LowPowerPacerTimeoutUs=10 SigScan=1
+        Hotkeys: DeveloperKeys=0
+        Scene: CostWeightsSanity=0 CollectThreadsMax=0 FineTimerResolution=0
+        Cull: Enabled=0 DebugHole=0 FocusKeepFraction=-1 SafetyNdc=0.05 NativeKeepFraction=0.35 SaccadeDeg=1.0 SaccadeHoldFrames=6 FocusRatio=0.80 ApexTolerance=0.02
+        D3D: Meter=0 Filter=0 SplitFilterOps=0x4ff ChainFast=7 ShaderFast=3 PeriphInstFilter=0:retired FocusBroadcast=0:retired
+        Shadow: TightCasters=0 DebugInvert=0
+        Model: SlabBytes=4096 BigPageBytes=4194304 GBufferBatching=0 ParallelUpload=0 DirectUpload=0 ShadowRecorderScope=0x30f ShadowRecorderWaitUs=200 ShadowRecorderPriority=0 ShadowRecorderSplit=0xf ShadowRecorderInstancing=1 GBufferRecorderScope=0x10055 GBufferRecorderMaxSegments=12 GBufferRecorderHelpers=2 GBufferRecorderWaitUs=300 GBufferRecorderIsland=30 GBufferRecorderRedo=1 GBufferRecorderSwapAhead=1 GBufferRecorderCockpit=0 GBufferRecorderByOrdinal=1 SrvTailTrim=0 PassFlush=0
+        Effects: SkipSameConstantUpload=0
+        Prefetch: WindowMs=5000 TableBits=20
+        Threads: Census=0 WorkerPlacement=2 PlaceRecheckSec=60
+        Color: ToneProbe=0 SwapProbe=0
+        Log: StatsIntervalSec=2 DumpViews=3 RecorderDetail=0 PerfIntervalSec=10 VramIntervalSec=60
+        Governor: Enabled=1 GpuBusyPct=92 RenderIdlePct=85 CpuBusyPct=92 GpuFreePct=80 GpuFullPct=98 WindowSec=8 NeedSec=6 MinDwellSec=10 MinGainPct=2.0 TrialSec=20 RecheckSec=10 RevertBackoffSec=300
+        Perception: DepthGrid=0 SceneCutReset=1 FixationDepthVerify=0 FixationDepthDump=0 FarDepthExportSlots=2 FarDepthPreOverlay=1 CockpitMaskViews=3 CockpitMaskDivisor=0 CockpitMaskNearM=1.0 CockpitMaskDilate=0 CockpitMaskDump=0 CockpitMaskLog=0 CockpitDepthDump=0 CockpitMotionClass=1 CockpitMotionDump=0 CockpitFgDump=0 CockpitMaskOverlay=0:retired SymbologyAlpha=1 FarDepthCoverageMode=hdr FarDepthLogProj=0 CockpitTrueIpdLighting=1 CockpitTrueIpdForward=1 CockpitTrueIpdHelmet=1 CockpitTrueIpdOverlays=1 CockpitTrueIpdOverlayPath=cpu CockpitTrueIpdToggle=0:0
+        Bench: Blocks=24 BlockSec=5 SettleSec=1.0 AutoStartSec=0 ThreadsB=12
+        Suite: SelfTest=0 Profile=0 BenchCull=0 BenchTimer=0 BenchPartition=0 BenchIsolation=0 BenchThreads=0 BenchTimerRes=0 BenchFilter=0 BenchShadow=0 BenchAllocSlabs=0 BenchCostWeights=0 BenchCbUpload=0 BenchPacer=0 MotionSweep=0 BenchFrameHeap=0 MotionProfile=0 MotionTaxi=0 MotionCounters=1 ShadowInstCompile=0 ShadowInstVerify=0 BenchShadowInst=0 BenchBigPages=0 BenchShadowTex=0 BenchTexTable=0 YawScan=0 HoldYawDeg=-1 GBufferInstCompile=0 GBufferInstVerify=0 BenchGBufferInst=0 BenchParallelUpload=0 BenchShadowPlanAsync=0 DirectUploadCount=0 DirectUploadVerify=0 BenchDirectUpload=0 SplitFilterVerify=0 ShadowRecVerify=0 ShadowRecVerifySec=5 BenchShadowRecorder=0 ShadowRecCount=0 GBufferRecVerify=0 GBufferRecVerifySec=6 GBufferRecVerifyStride=0 BenchGBufferRecorder=0 GBufferRecCount=0 GBufferRecStateDump=0 GpuPassTiming=0 YawProfile=0 YawProfileStep=30 RotationProfile=0 RotationDegPerSec=60 RotationSeconds=20 FrameStartGap=0 FrameStartGapSec=10 RunnableThreads=0 RunnableThreadsSec=10 RunnableThreadsEvery=16 VramCount=0 VramCountSec=20 VramCountCreates=1 GpuPassStats=0 ForwardRecCount=0 BenchPassFlush=0 BenchPassFlushMask=0 SrvTailTrimVerify=0 SrvTailTrimVerifySec=10 BenchSrvTailTrim=0 BenchSplitFilter=0 CascadeCacheTiming=0 ChainFastTiming=0 ChainFastVerify=0 ShaderFastTiming=0 ShaderFastVerify=0 GeoOnlyProbe=0 PeriphCensus=0:retired PeriphInstTiming=0:retired PeriphInstVerify=0:retired FocusGeomProbe=0:retired FocusVsCensus=0:retired FocusBcastProbe=0:retired FocusBcastTiming=0:retired FocusBcastVerify=0:retired JoinTailCount=0 SrvSpanCount=0 FxApplyCount=0 GBufferTexCount=0 Terrain=0 BenchTexDedupe=0 BenchCbSkip=0 BenchTriPlain=0 BenchEngine=1 BenchMicro=0 BenchPrefetch=0 Quick=1 MotionSeconds=60
+        """;
+
+    /// <summary><see cref="DcsQvCullConstantTable"/> in order: section, key, the value written, and whether the vendored
+    /// module still reads it.</summary>
+    internal static readonly IReadOnlyList<(string Section, string Key, string Value, bool Retired)> DcsQvCullConstants =
+        [.. DcsQvCullConstantTable.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).SelectMany(line =>
+            line[(line.IndexOf(':') + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(item =>
+            {
+                var value = item[(item.IndexOf('=') + 1)..]; var retired = value.EndsWith(":retired", StringComparison.Ordinal);
+                return (line[..line.IndexOf(':')], item[..item.IndexOf('=')], retired ? value[..^":retired".Length] : value, retired);
+            }))];
+
     /// <summary>DcsQvCull.ini for the DCS engine optimizations: only the keys that follow the profile. Every other key is
     /// left out and takes the module's built-in default, which is the shipped value (R107 F06/F07: the payload's defaults
     /// equal what this template used to write as constants; the retired research keys are not read at all). The test
     /// "DcsQvCull.ini trim" proves the module reads the same values as from the old full file. The test suite
-    /// (run_suite.flag or Ctrl+Alt+F11) compares the optimizations off and on.</summary>
-    public static string DcsQvCull(VrProfile p) => $"""
+    /// (run_suite.flag or Ctrl+Alt+F11) compares the optimizations off and on. In developer mode the payload may be
+    /// older than the vendored one (with other defaults), so every constant is written explicitly, as before the trim.</summary>
+    public static string DcsQvCull(VrProfile p) => p.EngineOptimizations && p.EngineDevMode ? WithDcsQvCullConstants(DcsQvCullTrimmed(p)) : DcsQvCullTrimmed(p);
+
+    /// <summary>Adds every <see cref="DcsQvCullConstants"/> key: inside its section when the file has it (GetPrivateProfile*
+    /// reads only the first section of a name), otherwise in a new section at the end.</summary>
+    private static string WithDcsQvCullConstants(string ini)
+    {
+        var newline = ini.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var bySection = DcsQvCullConstants.GroupBy(c => c.Section).ToDictionary(g => g.Key, g => g.Select(c => c.Key + "=" + c.Value).ToArray());
+        var lines = ini.ReplaceLineEndings("\n").Split('\n').ToList();
+        var placed = new HashSet<string>();
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var line = lines[i].Trim();
+            if (line.Length < 3 || line[0] != '[' || line[^1] != ']' || !bySection.TryGetValue(line[1..^1], out var keys) || !placed.Add(line[1..^1])) continue;
+            lines.InsertRange(i + 1, keys);
+            i += keys.Length;
+        }
+        var text = string.Join("\n", lines).TrimEnd('\n') + "\n\n; Developer mode: the constants below are the module's defaults, written for a payload built elsewhere.";
+        foreach (var (section, keys) in bySection.Where(s => !placed.Contains(s.Key)))
+            text += "\n[" + section + "]\n" + string.Join("\n", keys) + "\n";
+        return text.ReplaceLineEndings(newline);
+    }
+
+    private static string DcsQvCullTrimmed(VrProfile p) => $"""
         ; Written by DCS Control for the applied profile; edits here are replaced the next time it is applied.
         ; DcsQvCull re-reads this file every second while DCS runs. Only the settings that follow the profile are
         ; written; every other key takes the module's built-in default.

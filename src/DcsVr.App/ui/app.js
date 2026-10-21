@@ -1278,8 +1278,9 @@ function renderFlight() {
     const g = f.framegen, total = (g.seconds1x || 0) + g.seconds2x + g.seconds3x;
     const parts = [['1×',g.seconds1x || 0],['2×',g.seconds2x],['3×',g.seconds3x]].filter(([,v]) => v > 0);
     // With frame generation only when needed, the 1× share is the time DCS kept up on its own (no generated frames).
-    const one = g.seconds1x || 0, mode = one ? `Only when needed · no generated frames ${one === total ? 'all flight' : share(one/total)+' of the time'}` : g.adaptive ? 'Auto' : 'Fixed';
-    rows.push(['Frame generation',parts.length > 1 ? parts.map(([k,v]) => `${k} ${share(v/total)}`).join(' · ') : parts.length ? `${parts[0][0]} all flight` : '—',mode+(g.switches ? ` · ${g.switches} switches` : '')]);
+    // Cadence on without any 1× time (DCS never kept up) is still "Only when needed", not Auto.
+    const one = g.seconds1x || 0, mode = one ? `Only when needed · no generated frames ${one === total ? 'all flight' : share(one/total)+' of the time'}` : g.cadence ? 'Only when needed' : g.adaptive ? 'Auto' : 'Fixed';
+    rows.push(['Frame generation',parts.length > 1 ? parts.map(([k,v]) => `${k} ${share(v/total)}`).join(' · ') : parts.length ? `${parts[0][0]} all flight` : '—',mode+(g.switches ? ` · ${g.switches} ${g.switches === 1 ? 'switch' : 'switches'}` : '')]);
   }
   if (f.frameTime) rows.push(['DCS frame time',`${fmt(f.frameTime.p50Ms,1)} ms`,`median · ${fmt(f.frameTime.p90Ms,1)} ms p90 · the slower of CPU and GPU`]);
   if (f.dlss5) rows.push(['DLSS 5',f.dlss5.state === 'ran' ? 'Ran' : f.dlss5.state === 'failed' ? 'Failed' : 'Not started',f.dlss5.state === 'failed' ? f.dlss5.error : [f.dlss5.version ? 'runtime '+f.dlss5.version : 'no 3D scene reached', f.dlss5.toggles ? `toggled ${f.dlss5.toggles}×, ${f.dlss5.onAtExit ? 'on' : 'off'} at exit` : null].filter(Boolean).join(' · '),f.dlss5.state === 'failed']);

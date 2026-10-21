@@ -1,4 +1,6 @@
 #!/bin/sh
 # Refuses a commit whose staged files hold personal data (scripts/check-personal-data.ps1).
 # Enable once per clone: git config core.hooksPath .githooks
+# Still a blocking check without PowerShell 7, but with a message saying why.
+command -v pwsh >/dev/null 2>&1 || { echo "pwsh 7 is needed for the personal-data check (or commit with --no-verify)" >&2; exit 1; }
 exec pwsh -NoProfile -ExecutionPolicy Bypass -File "$(git rev-parse --show-toplevel)/scripts/check-personal-data.ps1"
