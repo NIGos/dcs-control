@@ -88,7 +88,7 @@ cbuffer cbQvColor : register(b13) {
   float qGlareStrength, qGlareT, qGlareCap, qGlareStreak;
   float qSig0, qSig1, qSig2, qStreakLen;
   float qW0, qW1, qW2, qQuad;
-  float qDebug, qAuxOn, qPad2, qPad3;
+  float qDebug, qAuxOn, qPad2, qPanelGamut;  // R111 qPanelGamut: sRGB -> P3 strength
 };
 #if QV_STOCK
 // R57 psFxStock: vrfx::StockCb's values (the fields it leaves 0 and its 1s) as constants. qFrame stays the buffer's
@@ -110,6 +110,7 @@ cbuffer cbQvColor : register(b13) {
 #define qGlareOn 0.0
 #define qDebug 0.0
 #define qAuxOn 0.0
+#define qPanelGamut 0.0
 #endif
 // R50: this draw's HMD view (0..3; 4 = unknown: no glare / low-pass) and the eye's 1/4-resolution levels.
 cbuffer cbQvView : register(b12) { uint qView; uint3 qViewPad; };
@@ -121,6 +122,8 @@ Texture2D<float4> qvLow : register(t21);
 SamplerState qvLinear : register(s15);
 static const float3 LUMW = float3(0.2125, 0.7154, 0.0721);
 static const float3 REC = float3(0.2126, 0.7152, 0.0722);
+// R111 (color_grade.h kSrgbToP3, ApplyPanelGamut): linear sRGB -> linear DCI-P3 (D65); rows >= 0, summing to 1.
+static const float3x3 SRGB_TO_P3 = {0.8224621, 0.1775380, 0.0, 0.0331942, 0.9668058, 0.0, 0.0170826, 0.0723974, 0.9105199};
 float PRaw(uint v, uint i) { return asfloat(qvState.Load(256 + v * 64 + i * 4)); }
 // DCS's gProj (cPerView +256) as copied at the view's tone-map draw; default column-major packing: P[r][c] at raw
 // [c * 4 + r]. q = (P00, P11, ox, oy). A perspective projection without shear, or false.
@@ -268,6 +271,7 @@ float3 QvTone(uint2 px, float3 scene, float3 bloom, uint tw, uint th) {
     float hk = qHueShadow + (qHueKeep - qHueShadow) * (t2 * t2 * (3 - 2 * t2));
     tm += (hp - tm) * hk;
   }
+  if (qPanelGamut > 0) tm += (mul(SRGB_TO_P3, tm) - tm) * qPanelGamut;  // R111 [Color] PanelGamut
   float3 g = pow(abs(clamp(tm, 0, 2)), outputGammaInv);
   uint dm = (uint)(qDither + 0.5);
   if (dm != 1) {
@@ -2051,6 +2055,10 @@ inline void LogParams(int mode, const cgrade::ModeParams& p) {
         p.whiteStart, p.gamutKeepSat, p.saturation, p.warmth, p.darkDesat, p.darkDesatDay, p.dither, p.adaptBright,
         p.adaptDark, p.meterFocus, p.nightVision, p.nvStrength, p.nvBlue, p.nvBlur, p.nvScotopic, p.nvPhotopic, p.glare,
         p.glareStrength, p.glareThresholdEv, p.glareRadiusDeg, p.glareStreak);
+  if (p.panelGamut)  // R111 (its own line: the line above is parsed by DCS Control)
+    g_log("colour: mode %d %s: PanelGamut %d = sRGB -> DCI-P3 compensation at %.0f %% (HUD / MFD symbology drawn after "
+          "the pass stays uncorrected)",
+          mode, ModeName(mode), p.panelGamut, 100.0 * cgrade::PanelGamutStrength(p.panelGamut));
 }
 
 // Publishes the configuration and the sun, compiles and creates when wanted, logs every 10 s.
