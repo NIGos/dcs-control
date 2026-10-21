@@ -232,6 +232,10 @@ DWORD WINAPI WorkerThread(void*) {
           chainfast::Apply(g_engineOff.load() ? 0 : g_cfg.chainFast);  // R34 (default 7; off at 0)
         if (!g_benchRunningFlag.load() && (g_cfg.shaderFast || sfast::g_mask.load()))
           sfast::Apply(g_engineOff.load() ? 0 : g_cfg.shaderFast);  // R36 (default 3; off at 0)
+        // R122 per-view DLSS preset (opt-in, default 0: nothing installed). The kill switch makes its hook pass
+        // through; the features DCS creates at the next mission load get DCS's own hint again.
+        dlssv::Tick(dlssv::ParsePreset(g_cfg.dlssPeripheryPreset.c_str()), dlssv::ParsePreset(g_cfg.dlssFocusPreset.c_str()),
+                    g_cfg.dlssIgnoreDriverPreset, g_engineOff.load());
       }
       // Fixation depth (Depth boost): not an optimization, so neither the kill
       // switch nor a benchmark turns it off.
