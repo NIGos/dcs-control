@@ -1,0 +1,1206 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1201,7 +1201,10 @@
+         # names have "adaptive" in them (build-ofxr-djules75.ps1).
+         # DCS Control (0060): and an application gone idle at 1X (no slot
+         # re-presented after two periods).
+-        foreach(cadence_case IN ITEMS exit jitter stall idle)
++        # DCS Control (0061): an idle again after re-entering 1X (one 408
++        # each), a 95 ms stall at 1X (re-presented, no 408) and a close at 1X
++        # (the teardown's 408).
++        foreach(cadence_case IN ITEMS exit jitter stall idle reidle pause close)
+             add_test(
+                 NAME xrfg_layer_adaptive_cadence_${cadence_case}
+                 COMMAND "${CMAKE_COMMAND}"
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -87,6 +87,13 @@
+     // presenter's wait returns: a frame or the teardown): a how long since
+     // the application's last xrEndFrame activity (us), b the display period
+     // (us), c 1 the session was stopping, else 0.
++    // DCS Control (0061): idle is past max(two periods, 150 ms) (R113: a
++    // 95 ms stall outside xrEndFrame stood the deadline down at two periods
++    // and 1X was left); STOPPING, LOSS_PENDING and EXITING still at once. The
++    // record re-arms on every entry to 1X and whenever the deadline arms
++    // (0060's never re-armed: one 408 a session, none at its close). And 408
++    // with c=2 when the session's teardown comes at 1X before the
++    // application counted idle (it closed within the limit), once as well.
+     // DCS Control (0042): 960, the presenter thread started: a its OS thread
+     // id (GetCurrentThreadId; its start address is in ucrtbase, so tooling
+     // finds the thread by this id).
+@@ -228,7 +235,8 @@
+     // application frame, see adaptive_throughput; 0 when not measured).
+     // 6 (0007) a probe of 2X, 7 (0007) the probe failed.
+     // DCS Control (0032), adaptive cadence (`[ofxr] adaptive_cadence`), where
+-    // a and b are cadence levels (1 = 1X, 2 = the 2/3 cadence):
++    // a and b are cadence levels (1 = 1X, 2 = the 2/3 cadence; 0061: 14's
++    // and 15's a, 1, 2 or 3):
+     //   8  2 -> 1X: a=2 b=1, c= the p90 GPU time at 1X (GPU less synthesis)
+     //      that let it in, us
+     //   9  1X -> 2 on missed slots: a=1 b=2, c= the missed-slot episodes in
+@@ -252,6 +260,21 @@
+     //      doubled per back-off level up to 16 s; c's bits 48-55 are that
+     //      back-off level, bits 56-63 the 2/3 runs its hold has dropped this
+     //      session (both at most 255).
++    //      DCS Control (0061): one offset per cadence level, none on top of
++    //      another: a= the level the frame was told at, 1 1X, 2 or 3 (each
++    //      with its own offset, confirmation, hysteresis and back-off; 1X
++    //      has no hold), c's offset that level's own, bits 48-55 its own
++    //      back-off level. R113: 2 and 3 land a different number of periods
++    //      from their told time, and the offset 0059 shared between them
++    //      moved 3 <-> 6 periods on every change of cadence.
++    //   15 (DCS Control 0061) a resync move the level's hysteresis blocked
++    //      (CadenceTimeResync::observe: a run against the level's last move
++    //      inside its hold), at most one record per level per second of told
++    //      time: a= the level (2 or 3), b= the periods of the blocked move
++    //      (signed 32-bit, two's complement: later is positive - its
++    //      direction and size), c= the level's back-off level bits 0-7, the
++    //      moves its hold blocked since its last record (this one included)
++    //      bits 8-23, the hold in force in ms bits 24-39.
+     // DCS Control (0047): for results 1-7, c's p90 is bits 0-31; bits 32-39
+     // are the back-off level the switch left (3X holds 5 s doubled per
+     // level, at most 40 s, before it may leave; see AdaptiveConfig::
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -1699,14 +1699,32 @@
+ // teardown wakes it. A frame held inside xrEndFrame (a slow prime: R110's
+ // 210 ms) is not idle: the deadline keeps the slots then. `last_activity` 0:
+ // no frame yet, not idle.
++//
++// DCS Control (0061): idle past max(kCadenceIdlePeriods periods,
++// kCadenceIdleMinimum), not two periods alone. R113: a 95 ms DCS stall
++// outside xrEndFrame at 1X passed the two periods (22 ms at 90 Hz), the
++// deadline stood down (408), the presenter waited for the late frame and 1X
++// was left on the slots it missed. The deadline keeps re-presenting (407)
++// through such a stall now. `session_ending` (the runtime's STOPPING,
++// LOSS_PENDING or EXITING seen for the session) is idle at once, as before.
+ inline constexpr Nanoseconds kCadenceIdlePeriods = 2;
++inline constexpr Nanoseconds kCadenceIdleMinimum = 150 * kMillisecond; // 0061
++[[nodiscard]] constexpr Nanoseconds cadence_idle_limit(Nanoseconds period) noexcept {
++    return kCadenceIdlePeriods * period > kCadenceIdleMinimum
++        ? kCadenceIdlePeriods * period
++        : kCadenceIdleMinimum;
++}
+ [[nodiscard]] constexpr bool cadence_application_idle(
+     bool inside_end_frame,
+     Nanoseconds last_activity,
+     Nanoseconds now,
+-    Nanoseconds period) noexcept {
++    Nanoseconds period,
++    bool session_ending = false) noexcept {
++    if (session_ending) {
++        return true; // DCS Control (0061): moved here from the layer.
++    }
+     return !inside_end_frame && last_activity != 0 && period > 0 &&
+-        now - last_activity > kCadenceIdlePeriods * period;
++        now - last_activity > cadence_idle_limit(period);
+ }
+ 
+ // DCS Control (0059): adaptive cadence's told time, resynchronised on where
+@@ -1749,72 +1767,132 @@
+ // off. The clock is the told display time. 1X's part keeps kConfirm and no
+ // hold: its resync is what makes its entries and exits clean (R112: 43 late
+ // slots per exit down to 2).
++//
++// DCS Control (0061): one offset per cadence level - 1X, 2 and 3 - each
++// whole, none on top of another. R113 (DCS, mixed scene, cadence 2 and 3
++// alternating with each 20 s view change): the 2/3 offset went 3 <-> 6
++// periods every 20-40 s, each move up after 16-71 late slots. A 3 frame lands
++// a different number of periods from its told time than a 2 frame, so the
++// shared offset 0059 kept for them was right for one and three periods off
++// for the other, and every change of cadence moved it back (0060's
++// hysteresis only delayed that). Now each level confirms its own runs
++// (kConfirm at 1X, kConfirmCadence at 2 and 3; a frame of another level
++// between them breaks none), has its own hysteresis and back-off at 2 and 3
++// (as 0060's, none at 1X) and its own settling after its move; a level
++// entered again is told its own last offset at once, as 1X's was. A level
++// not yet learnt (no frame of it judged since the reset) is told the offset
++// of the level judged last, so a 1X or 3 never visited starts where 2 is, as
++// before; its first judged frame makes that its own.
+ struct CadenceTimeResync {
+     static constexpr std::uint32_t kConfirm = 3;
+     static constexpr std::uint32_t kConfirmCadence = 10; // 0060
+     static constexpr std::int64_t kMaxPeriods = 8;
+-    // DCS Control (0060): the common part's hysteresis.
++    // DCS Control (0060): the 2/3 cadence's hysteresis (0061: per level).
+     static constexpr Nanoseconds kReverseHold = 2 * kSecond;
+     static constexpr Nanoseconds kMaxReverseHold = 16 * kSecond;
+     static constexpr Nanoseconds kReversalWindow = 30 * kSecond;
+     static constexpr Nanoseconds kBackoffDecay = 60 * kSecond;
+-    std::array<std::int64_t, 2> offset{};
+-    std::int64_t candidate{};
+-    std::size_t candidate_level{};
+-    std::uint32_t streak{};
+-    Nanoseconds settle_until{};
++    // DCS Control (0061): the levels (1X, 2, 3), and at most one record of the
++    // moves a level's hold blocked (adaptive_switch result=15) per
++    // kBlockedRecordInterval of told time.
++    static constexpr std::size_t kLevels = 3;
++    static constexpr Nanoseconds kBlockedRecordInterval = kSecond;
++    using PerLevel64 = std::array<std::int64_t, kLevels>;
++    using PerLevel32 = std::array<std::uint32_t, kLevels>;
++    // DCS Control (0061): per level, indexed by level_index.
++    PerLevel64 offset{};
++    std::array<bool, kLevels> learnt{};
++    PerLevel64 candidate{};
++    PerLevel32 streak{};
++    std::array<Nanoseconds, kLevels> settle_until{};
++    // DCS Control (0061): the level judged last (kLevels: none yet).
++    std::size_t last_level{kLevels};
+     std::uint32_t moves{};
+-    // DCS Control (0060): the common part's last move (told time, sign; 0
+-    // none), its back-off level and when that level's decay counts from, and
+-    // the runs dropped by the hold.
+-    Nanoseconds last_move_at{};
+-    std::int64_t last_move_sign{};
+-    std::uint32_t backoff{};
+-    Nanoseconds backoff_at{};
++    // DCS Control (0060): a level's last move (told time, sign; 0 none), its
++    // back-off level and when that level's decay counts from (0061: per
++    // level), and the runs dropped by the holds.
++    std::array<Nanoseconds, kLevels> last_move_at{};
++    PerLevel64 last_move_sign{};
++    PerLevel32 backoff{};
++    std::array<Nanoseconds, kLevels> backoff_at{};
+     std::uint32_t held{};
++    // DCS Control (0061): a move the hold blocked, to be recorded
++    // (adaptive_switch result=15): set by observe() when one is due (periods
++    // 0: none this call). `count` the moves the level's hold blocked since its
++    // last record, this one included; `backoff` its back-off level; `hold`
++    // the hold in force.
++    struct BlockedMove {
++        std::size_t level{};
++        std::int64_t periods{};
++        std::uint32_t count{};
++        std::uint32_t backoff{};
++        Nanoseconds hold{};
++    };
++    BlockedMove blocked{};
++    PerLevel32 blocked_since{};
++    std::array<Nanoseconds, kLevels> blocked_recorded_at{};
+ 
+     // DCS Control (0060): the confirmation a level needs.
+     [[nodiscard]] static constexpr std::uint32_t confirm_for(
+         std::size_t level) noexcept {
+         return level == 0 ? kConfirm : kConfirmCadence;
+     }
+-    // DCS Control (0060): the common part's back-off level at `now` (decayed),
+-    // and the hold it puts on a move opposite to the last.
+-    [[nodiscard]] std::uint32_t backoff_level(Nanoseconds now) const noexcept {
+-        if (backoff == 0 || now <= backoff_at) {
+-            return backoff;
++    // DCS Control (0060): a level's back-off level at `now` (decayed), and the
++    // hold it puts on a move opposite to the last (0061: per level).
++    [[nodiscard]] std::uint32_t backoff_level(
++        std::size_t level, Nanoseconds now) const noexcept {
++        if (level >= kLevels) {
++            return 0;
+         }
+-        const Nanoseconds steps = (now - backoff_at) / kBackoffDecay;
+-        return steps >= static_cast<Nanoseconds>(backoff)
++        if (backoff[level] == 0 || now <= backoff_at[level]) {
++            return backoff[level];
++        }
++        const Nanoseconds steps = (now - backoff_at[level]) / kBackoffDecay;
++        return steps >= static_cast<Nanoseconds>(backoff[level])
+             ? 0U
+-            : backoff - static_cast<std::uint32_t>(steps);
++            : backoff[level] - static_cast<std::uint32_t>(steps);
+     }
+-    [[nodiscard]] Nanoseconds reverse_hold(Nanoseconds now) const noexcept {
++    [[nodiscard]] Nanoseconds reverse_hold(
++        std::size_t level, Nanoseconds now) const noexcept {
+         Nanoseconds hold = kReverseHold;
+-        const std::uint32_t level = backoff_level(now);
+-        for (std::uint32_t i = 0; i < level && hold < kMaxReverseHold; ++i) {
++        const std::uint32_t steps = backoff_level(level, now);
++        for (std::uint32_t i = 0; i < steps && hold < kMaxReverseHold; ++i) {
+             hold *= 2;
+         }
+         return hold < kMaxReverseHold ? hold : kMaxReverseHold;
+     }
+ 
++    // DCS Control (0061): 0 1X, 1 the 2 cadence, 2 the 3 cadence.
+     [[nodiscard]] static constexpr std::size_t level_index(
+         std::uint32_t frames) noexcept {
+-        return frames <= 1 ? 0U : 1U;
++        return frames <= 1 ? 0U : frames == 2 ? 1U : 2U;
+     }
+     // The whole offset a frame of cadence `frames` is told, in periods.
++    // DCS Control (0061): its level's own, or, not learnt yet, the offset of
++    // the level judged last.
+     [[nodiscard]] std::int64_t periods_for(std::uint32_t frames) const noexcept {
+-        return offset[1] + (level_index(frames) == 0 ? offset[0] : 0);
++        const std::size_t level = level_index(frames);
++        if (learnt[level]) {
++            return offset[level];
++        }
++        return last_level < kLevels && learnt[last_level] ? offset[last_level] : 0;
+     }
+     [[nodiscard]] Nanoseconds offset_for(
+         std::uint32_t frames, Nanoseconds period) const noexcept {
+         return periods_for(frames) * period;
+     }
+     void reset() noexcept { *this = CadenceTimeResync{}; }
+-    // Frames told up to `last_told` are not judged.
++    // Frames told up to `last_told` are not judged (0061: of every level).
+     void settle(Nanoseconds last_told) noexcept {
+-        settle_until = last_told > settle_until ? last_told : settle_until;
+-        streak = 0;
++        for (std::size_t level = 0; level < kLevels; ++level) {
++            settle_level(level, last_told);
++        }
++    }
++    // DCS Control (0061): one level's (its own move).
++    void settle_level(std::size_t level, Nanoseconds last_told) noexcept {
++        settle_until[level] =
++            last_told > settle_until[level] ? last_told : settle_until[level];
++        streak[level] = 0;
+     }
+     // A real frame of cadence `frames`, told `told`, shown `residual` after
+     // it; `last_told` the latest display time told so far. Returns the
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -1258,38 +1258,60 @@
+     Nanoseconds residual,
+     Nanoseconds period,
+     Nanoseconds last_told) noexcept {
+-    if (frames == 0 || period <= 0 || told <= settle_until) {
++    blocked = BlockedMove{}; // DCS Control (0061)
++    if (frames == 0 || period <= 0) {
+         return 0;
+     }
++    // DCS Control (0061): everything below is the frame's level's own.
+     const std::size_t level = level_index(frames);
++    if (told <= settle_until[level]) {
++        return 0;
++    }
++    // DCS Control (0061): a level judged for the first time takes the offset
++    // it was told by (another level's, periods_for) as its own.
++    if (!learnt[level]) {
++        offset[level] = periods_for(frames);
++        learnt[level] = true;
++    }
++    last_level = level;
+     const std::int64_t periods = residual_periods(residual, period);
+     if (periods == 0) {
+-        streak = 0;
++        streak[level] = 0;
+         return 0;
+     }
+-    if (streak != 0 && candidate == periods && candidate_level == level) {
+-        ++streak;
++    if (streak[level] != 0 && candidate[level] == periods) {
++        ++streak[level];
+     } else {
+-        candidate = periods;
+-        candidate_level = level;
+-        streak = 1;
++        candidate[level] = periods;
++        streak[level] = 1;
+     }
+-    // DCS Control (0060): 2/3's common part confirms over kConfirmCadence.
+-    if (streak < confirm_for(level)) {
++    // DCS Control (0060): 2 and 3 confirm over kConfirmCadence.
++    if (streak[level] < confirm_for(level)) {
+         return 0;
+     }
+-    // DCS Control (0060): the common part's hysteresis. A run against its
+-    // last move inside the hold is dropped and has to confirm again after it.
++    // DCS Control (0060): the hysteresis (2 and 3, 0061: each its own). A run
++    // against the level's last move inside the hold is dropped and has to
++    // confirm again after it.
+     const std::int64_t sign = periods > 0 ? 1 : -1;
+-    const bool reverses = level == 1 && last_move_sign == -sign;
+-    if (reverses && told - last_move_at < reverse_hold(told)) {
++    const bool reverses = level != 0 && last_move_sign[level] == -sign;
++    if (reverses && told - last_move_at[level] < reverse_hold(level, told)) {
+         ++held;
+-        streak = 0;
++        streak[level] = 0;
++        // DCS Control (0061): recorded (adaptive_switch result=15), at most
++        // one per level per kBlockedRecordInterval.
++        ++blocked_since[level];
++        if (blocked_recorded_at[level] == 0 ||
++            told - blocked_recorded_at[level] >= kBlockedRecordInterval) {
++            blocked = BlockedMove{level, periods, blocked_since[level],
++                backoff_level(level, told), reverse_hold(level, told)};
++            blocked_since[level] = 0;
++            blocked_recorded_at[level] = told;
++        }
+         return 0;
+     }
+     // Shown later than told: told later from here (and the reverse). The
+-    // level's own part moves; its whole offset stays within kMaxPeriods.
+-    const std::int64_t whole = periods_for(frames);
++    // level's offset stays within kMaxPeriods.
++    const std::int64_t whole = offset[level];
+     const std::int64_t moved = std::clamp<std::int64_t>(
+         whole + periods, -kMaxPeriods, kMaxPeriods) - whole;
+     offset[level] += moved;
+@@ -1298,24 +1320,27 @@
+         // DCS Control (0060): the back-off decays (whole kBackoffDecay steps,
+         // the running one carried over), then a reversal within
+         // kReversalWindow raises it, as 0047's does for 3X.
+-        if (level == 1) {
+-            const std::uint32_t decayed = backoff_level(told);
+-            if (decayed != backoff) {
+-                backoff_at += static_cast<Nanoseconds>(backoff - decayed) * kBackoffDecay;
+-                backoff = decayed;
++        if (level != 0) {
++            const std::uint32_t decayed = backoff_level(level, told);
++            if (decayed != backoff[level]) {
++                backoff_at[level] +=
++                    static_cast<Nanoseconds>(backoff[level] - decayed) * kBackoffDecay;
++                backoff[level] = decayed;
+             }
+-            if (reverses && told - last_move_at < kReversalWindow) {
++            if (reverses && told - last_move_at[level] < kReversalWindow) {
+                 // 2 s doubled up to 16 s: level 3 at most.
+-                backoff = std::min<std::uint32_t>(backoff + 1, 3U);
+-                backoff_at = told;
+-            } else if (backoff == 0) {
+-                backoff_at = told;
++                backoff[level] = std::min<std::uint32_t>(backoff[level] + 1, 3U);
++                backoff_at[level] = told;
++            } else if (backoff[level] == 0) {
++                backoff_at[level] = told;
+             }
+-            last_move_at = told;
+-            last_move_sign = moved > 0 ? 1 : -1;
++            last_move_at[level] = told;
++            last_move_sign[level] = moved > 0 ? 1 : -1;
+         }
+     }
+-    settle(last_told);
++    // DCS Control (0061): only this level's frames told so far land off by
++    // the move.
++    settle_level(level, last_told);
+     return moved;
+ }
+ 
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1950,6 +1950,9 @@
+     std::atomic<std::int64_t> application_end_activity_ns{0};
+     std::atomic<bool> application_session_ending{false};
+     bool cadence_one_idle_logged{};
++    // DCS Control (0061): the cadence level the presenter saw last, so the
++    // 408 record re-arms on every entry to 1X (presenter_mutex).
++    std::uint32_t cadence_one_idle_level{};
+     // The submissions the last application frame queued, for the admission
+     // bound (xrfg::latency::cadence_admission_bound). xrEndFrame thread.
+     std::uint32_t cadence_previous_frames{};
+@@ -9543,16 +9546,16 @@
+ // xrfg::latency::cadence_application_idle), or the runtime is stopping its
+ // session: the 1X deadline stands down and the presenter waits as it did
+ // before 0059, for a frame or the teardown. presenter_mutex held.
++// DCS Control (0061): idle past max(two periods, 150 ms); the session
++// stopping still at once (both in cadence_application_idle).
+ [[nodiscard]] bool cadence_application_idle_now(const SessionState& state) noexcept {
+-    if (state.application_session_ending.load(std::memory_order_relaxed)) {
+-        return true;
+-    }
+     return xrfg::latency::cadence_application_idle(
+         state.application_end_frames_inside.load(std::memory_order_acquire) != 0,
+         state.application_end_activity_ns.load(std::memory_order_acquire),
+         std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch()).count(),
+-        static_cast<xrfg::latency::Nanoseconds>(state.presenter_display_period));
++        static_cast<xrfg::latency::Nanoseconds>(state.presenter_display_period),
++        state.application_session_ending.load(std::memory_order_relaxed));
+ }
+ 
+ [[nodiscard]] bool cadence_one_deadline_armed_locked(const SessionState& state) noexcept {
+@@ -10091,12 +10094,42 @@
+         xrfg::BridgeFlightOperation::presenter_transition, 960,
+         GetCurrentThreadId(), 0, 0);
+     for (;;) {
++        // DCS Control (0061): a teardown that came while this thread was past
++        // its slot's wait, at 1X: 408 c=2 (as after the wait below), recorded
++        // after the lock.
++        bool stop_one_stood_down = false;
++        std::int64_t stop_activity_ns = 0;
+         {
+             std::scoped_lock lock(state->presenter_mutex);
+             if (state->presenter_stop_requested) {
+-                break;
++                if (!state->cadence_one_idle_logged &&
++                    state->cadence_running.load(std::memory_order_relaxed) &&
++                    state->cadence_hold.load(std::memory_order_relaxed) == 1 &&
++                    hold_repeat_locked(*state) != nullptr) {
++                    state->cadence_one_idle_logged = true;
++                    stop_one_stood_down = true;
++                    stop_activity_ns =
++                        state->application_end_activity_ns.load(std::memory_order_acquire);
++                }
++                if (!stop_one_stood_down) {
++                    break;
++                }
+             }
+         }
++        if (stop_one_stood_down) {
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::presenter_transition,
++                408,
++                stop_activity_ns != 0
++                    ? static_cast<std::uint64_t>(std::max<std::int64_t>(0,
++                          std::chrono::duration_cast<std::chrono::nanoseconds>(
++                              std::chrono::steady_clock::now().time_since_epoch())
++                                  .count() - stop_activity_ns) / 1000)
++                    : 0U,
++                static_cast<std::uint64_t>(state->presenter_display_period / 1000),
++                2);
++            break;
++        }
+ 
+ 
+         XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+@@ -10303,6 +10336,7 @@
+         bool one_idle_stood_down = false;
+         std::uint64_t one_idle_us = 0;
+         bool one_idle_ending = false;
++        bool one_idle_teardown = false; // DCS Control (0061)
+         {
+             std::unique_lock lock(state->presenter_mutex);
+             const auto composition_ready = [&] {
+@@ -10313,7 +10347,33 @@
+                        late_skip_slot_due_locked(*state) ||
+                        triple_depth_slot_due_locked(*state); // 0007
+             };
++            // DCS Control (0061): the 408 record re-arms on every entry to
++            // 1X, and whenever the deadline arms (below). 0060 re-armed it
++            // only on a deadline found armed after this wait, which a wait
++            // that ends with a frame or past its deadline never leaves: one
++            // 408 per session, none at its close (R113).
++            {
++                const std::uint32_t seen_level =
++                    state->cadence_running.load(std::memory_order_relaxed)
++                        ? state->cadence_hold.load(std::memory_order_relaxed)
++                        : 0U;
++                if (seen_level == 1 && state->cadence_one_idle_level != 1) {
++                    state->cadence_one_idle_logged = false;
++                }
++                state->cadence_one_idle_level = seen_level;
++            }
++            const auto idle_since_us = [&]() -> std::uint64_t {
++                const std::int64_t activity_ns =
++                    state->application_end_activity_ns.load(std::memory_order_acquire);
++                return activity_ns != 0
++                    ? static_cast<std::uint64_t>(std::max<std::int64_t>(0,
++                          std::chrono::duration_cast<std::chrono::nanoseconds>(
++                              std::chrono::steady_clock::now().time_since_epoch())
++                                  .count() - activity_ns) / 1000)
++                    : 0U;
++            };
+             if (!composition_ready() && cadence_one_deadline_armed_locked(*state)) {
++                state->cadence_one_idle_logged = false; // DCS Control (0061)
+                 const auto deadline = wait_returned + std::chrono::nanoseconds(
+                     xrfg::latency::cadence_one_deadline(
+                         static_cast<xrfg::latency::Nanoseconds>(
+@@ -10378,14 +10438,7 @@
+                            cadence_application_idle_now(*state)) {
+                     state->cadence_one_idle_logged = true;
+                     one_idle_stood_down = true;
+-                    const std::int64_t activity_ns =
+-                        state->application_end_activity_ns.load(std::memory_order_acquire);
+-                    one_idle_us = activity_ns != 0
+-                        ? static_cast<std::uint64_t>(std::max<std::int64_t>(0,
+-                              std::chrono::duration_cast<std::chrono::nanoseconds>(
+-                                  std::chrono::steady_clock::now().time_since_epoch())
+-                                      .count() - activity_ns) / 1000)
+-                        : 0U;
++                    one_idle_us = idle_since_us(); // DCS Control (0061): shared
+                     one_idle_ending =
+                         state->application_session_ending.load(std::memory_order_relaxed);
+                 }
+@@ -10393,6 +10446,22 @@
+             if (!one_deadline_passed) {
+                 state->presenter_condition.wait(lock, composition_ready);
+             }
++            // DCS Control (0061): the session's teardown ended this slot's
++            // wait at 1X before the application counted idle (it closed
++            // within the idle limit, the deadline still armed): the deadline
++            // stands down for it, recorded once as well (408, c=2).
++            if (!one_idle_stood_down && !state->cadence_one_idle_logged &&
++                state->presenter_stop_requested &&
++                state->cadence_running.load(std::memory_order_relaxed) &&
++                state->cadence_hold.load(std::memory_order_relaxed) == 1 &&
++                hold_repeat_locked(*state) != nullptr) {
++                state->cadence_one_idle_logged = true;
++                one_idle_stood_down = true;
++                one_idle_teardown = true;
++                one_idle_us = idle_since_us();
++                one_idle_ending =
++                    state->application_session_ending.load(std::memory_order_relaxed);
++            }
+         }
+         // DCS Control (0060): presenter_transition 408, recorded when the
+         // presenter's wait returns; see bridge_flight_logger.hpp.
+@@ -10402,7 +10471,8 @@
+                 408,
+                 one_idle_us,
+                 static_cast<std::uint64_t>(state->presenter_display_period / 1000),
+-                one_idle_ending ? 1U : 0U);
++                // DCS Control (0061): 2 the teardown.
++                one_idle_teardown ? 2U : one_idle_ending ? 1U : 0U);
+         }
+ 
+         XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+@@ -10560,6 +10630,9 @@
+             // runs its hold dropped so far.
+             std::uint32_t resync_backoff = 0;
+             std::uint32_t resync_held = 0;
++            // DCS Control (0061): a move a level's hold blocked (periods 0:
++            // none), for adaptive_switch result=15.
++            xrfg::latency::CadenceTimeResync::BlockedMove resync_blocked{};
+             // DCS VR Control (0006): how long after its slot's wait this goes
+             // out, less the pace's own hold; and the late-frame skip's part in
+             // this slot, all decided under the lock and acted on after it.
+@@ -10904,14 +10977,22 @@
+                                     state->presenter_display_period),
+                                 static_cast<xrfg::latency::Nanoseconds>(
+                                     state->last_virtual_display_time));
++                            // DCS Control (0061): the level is the frame's
++                            // cadence (1, 2 or 3), each with its own offset
++                            // and back-off.
++                            const std::size_t resync_index =
++                                xrfg::latency::CadenceTimeResync::level_index(frames);
+                             if (resync_moved != 0) {
+-                                resync_level = frames <= 1 ? 1U : 2U;
++                                resync_level = static_cast<std::uint32_t>(resync_index + 1);
+                                 resync_offset =
+                                     state->cadence_resync.periods_for(frames);
+                                 resync_moves = state->cadence_resync.moves;
+-                                resync_backoff = state->cadence_resync.backoff; // 0060
++                                resync_backoff = state->cadence_resync.backoff[resync_index]; // 0060
+                                 resync_held = state->cadence_resync.held;
+                             }
++                            // DCS Control (0061): a move the level's hold
++                            // blocked, recorded after the lock (result=15).
++                            resync_blocked = state->cadence_resync.blocked;
+                         }
+                         if (real_info != nullptr &&
+                             state->display_time_correction_enabled &&
+@@ -11012,6 +11093,21 @@
+                         (static_cast<std::uint64_t>(std::min<std::uint32_t>(resync_backoff, 0xFFU)) << 48) |
+                         (static_cast<std::uint64_t>(std::min<std::uint32_t>(resync_held, 0xFFU)) << 56));
+             }
++            // DCS Control (0061): adaptive_switch result=15, a move a level's
++            // hysteresis blocked (rate-limited in CadenceTimeResync::observe);
++            // see bridge_flight_logger.hpp.
++            if (resync_blocked.periods != 0) {
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::adaptive_switch,
++                    15,
++                    static_cast<std::uint64_t>(resync_blocked.level + 1),
++                    static_cast<std::uint64_t>(static_cast<std::uint32_t>(
++                        static_cast<std::int32_t>(resync_blocked.periods))),
++                    static_cast<std::uint64_t>(std::min<std::uint32_t>(resync_blocked.backoff, 0xFFU)) |
++                        (static_cast<std::uint64_t>(std::min<std::uint32_t>(resync_blocked.count, 0xFFFFU)) << 8) |
++                        (static_cast<std::uint64_t>(std::min<xrfg::latency::Nanoseconds>(
++                             resync_blocked.hold / xrfg::latency::kMillisecond, 0xFFFF)) << 24));
++            }
+             // DCS Control (0048): the frame_slot record; see
+             // BridgeFlightOperation::frame_slot.
+             if (frame_slot_record != 0) {
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -2958,18 +2958,19 @@
+                 "resync: nine frames do not move the 2/3 cadence");
+         }
+         // The tenth does; 1X follows the common part.
++        // DCS Control (0061): 1X and 3, not learnt yet, are told 2's.
+         const Nanoseconds last_told = told + 3 * kP;
+         require(resync.observe(2, told += kP, 2 * kP - 200'000, kP, last_told) == 2,
+             "resync: ten frames two periods late move it two later");
+         require(resync.periods_for(2) == 2 && resync.periods_for(3) == 2 &&
+                     resync.periods_for(1) == 2 && resync.moves == 1,
+-            "resync: the common part moves every level");
++            "resync: levels not learnt yet are told 2's");
+         // Frames told before the move are not judged.
+         for (int index = 0; index < 5; ++index) {
+             require(resync.observe(2, last_told - index, 2 * kP, kP, last_told + kP) == 0,
+                 "resync: frames told before the move are settled");
+         }
+-        require(resync.streak == 0, "resync: settled frames start no run");
++        require(resync.streak[1] == 0, "resync: settled frames start no run"); // 0061
+         // A frame on time breaks a run.
+         told = last_told;
+         require(resync.observe(1, told += kP, -kP, kP, told) == 0 &&
+@@ -2980,18 +2981,22 @@
+             "resync: a frame on time breaks the run");
+         require(resync.observe(1, told += kP, -kP, kP, told) == -1,
+             "resync: 1X one period early moves its own part");
++        // DCS Control (0061): 1X's own offset, learnt from 2's (2) and moved
++        // one earlier, whole.
+         require(resync.periods_for(1) == 1 && resync.periods_for(2) == 2 &&
+-                    resync.offset[0] == -1,
+-            "resync: 1X's part leaves 2's alone");
+-        // Levels do not mix in one run.
++                    resync.offset[0] == 1,
++            "resync: 1X's offset leaves 2's alone");
++        // Levels do not mix in one run (0061: each keeps its own, which a
++        // frame of another level does not break).
+         require(resync.observe(1, told += kP, kP, kP, told) == 0 &&
+                     resync.observe(2, told += kP, kP, kP, told) == 0 &&
+                     resync.observe(1, told += kP, kP, kP, told) == 0 &&
+-                    resync.streak == 1,
++                    resync.streak[0] == 2 && resync.streak[1] == 1,
+             "resync: a run is one level's");
+         // A lost slot settles what was told so far.
+         resync.settle(told);
+-        require(resync.observe(2, told, kP, kP, told) == 0 && resync.streak == 0,
++        require(resync.observe(2, told, kP, kP, told) == 0 && resync.streak[1] == 0 &&
++                    resync.streak[0] == 0,
+             "resync: settle");
+         // Outside adaptive cadence (frames 0) nothing.
+         require(resync.observe(0, told + kP, 5 * kP, kP, told + kP) == 0,
+@@ -3124,13 +3129,16 @@
+                 std::to_string(runs_of_three) + ")");
+         require(moved_at.empty() && resync.moves == 0,
+             "resync hunting: no move on bursts (" + std::to_string(resync.moves) + ")");
++        // DCS Control (0061): 2 and 3 each move once (0060: the shared
++        // offset once).
+         shift = 1;
+-        for (int count = 0; count < 40; ++count) {
++        for (int count = 0; count < 60; ++count) {
+             frame(0, index++);
+         }
+-        require(moved_at.size() == 1 && moved_at[0].second == 1 && resync.moves == 1 &&
+-                    resync.periods_for(2) == 1,
+-            "resync hunting: a real shift moves it once (" +
++        require(moved_at.size() == 2 && moved_at[0].second == 1 && moved_at[1].second == 1 &&
++                    resync.moves == 2 && resync.periods_for(2) == 1 &&
++                    resync.periods_for(3) == 1,
++            "resync hunting: a real shift moves each level once (" +
+                 std::to_string(resync.moves) + ")");
+         for (std::size_t at = 1; at < moved_at.size(); ++at) {
+             require(moved_at[at].second * moved_at[at - 1].second > 0 ||
+@@ -3145,71 +3153,195 @@
+         // frame's own (so the next frame is judged).
+         CadenceTimeResync resync{};
+         Nanoseconds told = 1'000'000'000;
++        // DCS Control (0061): and the blocked moves to record (result=15).
++        std::vector<CadenceTimeResync::BlockedMove> blocked;
+         const auto feed = [&](std::uint32_t frames, std::uint32_t count, std::int64_t off) {
+             std::int64_t moved = 0;
+             for (std::uint32_t index = 0; index < count; ++index) {
+                 told += frames * kP;
+                 moved += resync.observe(frames, told, off * kP, kP, told);
++                if (resync.blocked.periods != 0) {
++                    blocked.push_back(resync.blocked);
++                }
+             }
+             return moved;
+         };
+         const std::uint32_t n = CadenceTimeResync::kConfirmCadence;
+-        require(feed(2, n - 1, 2) == 0 && feed(2, 1, 2) == 2 && resync.backoff == 0,
+-            "hysteresis: ten frames move the 2/3 cadence");
++        require(feed(2, n - 1, 2) == 0 && feed(2, 1, 2) == 2 && resync.backoff[1] == 0,
++            "hysteresis: ten frames move the 2 cadence");
+         const Nanoseconds first_move = told;
+-        // Same direction: no hold.
+-        require(feed(3, n, 1) == 1 && resync.moves == 2, "hysteresis: the same way is not held");
+-        // Against it within 2 s: held, however long it lasts.
+-        require(feed(2, 3 * n, -2) == 0 && resync.held >= 3 && resync.periods_for(2) == 3,
++        // Same direction: no hold. DCS Control (0061): 3's own first move,
++        // from 2's offset it was told by; 2's stays.
++        require(feed(3, n, 1) == 1 && resync.moves == 2 && resync.periods_for(3) == 3 &&
++                    resync.periods_for(2) == 2,
++            "hysteresis: the same way is not held");
++        // Against 2's last move within 2 s: held, however long it lasts.
++        require(feed(2, 3 * n, -2) == 0 && resync.held >= 3 && resync.periods_for(2) == 2,
+             "hysteresis: an opposite move within 2 s is held");
+-        // 1X's part is not held, and confirms on three.
+-        require(feed(1, 3, -1) == -1 && resync.offset[0] == -1,
++        // DCS Control (0061): recorded once a second at most: the first.
++        require(blocked.size() == 1 && blocked[0].level == 1 && blocked[0].periods == -2 &&
++                    blocked[0].count == 1 && blocked[0].backoff == 0 &&
++                    blocked[0].hold == CadenceTimeResync::kReverseHold,
++            "hysteresis: the blocked move recorded, rate-limited (" +
++                std::to_string(blocked.size()) + ")");
++        // 1X is not held, and confirms on three (0061: from 2's offset, 2).
++        require(feed(1, 3, -1) == -1 && resync.offset[0] == 1,
+             "hysteresis: 1X moves on three frames, unheld");
+         // Past the hold: it moves, and the reversal raises the back-off.
+         told = std::max(told, first_move + CadenceTimeResync::kReverseHold);
+-        // (the last move was the same-way one, a little after first_move)
+         told += 2 * kSecond;
+-        require(feed(2, n, -2) == -2 && resync.backoff == 1 &&
+-                    resync.reverse_hold(told) == 2 * CadenceTimeResync::kReverseHold,
++        require(feed(2, n, -2) == -2 && resync.backoff[1] == 1 &&
++                    resync.reverse_hold(1, told) == 2 * CadenceTimeResync::kReverseHold,
+             "hysteresis: after the hold it moves, back-off 1 (4 s)");
+         const Nanoseconds second_move = told;
+         // Back again 3 s later: held (4 s now).
+         told += 3 * kSecond;
+         require(feed(2, n, 2) == 0, "hysteresis: the back-off lengthens the hold");
++        // DCS Control (0061): recorded, with the two blocked unrecorded before.
++        require(blocked.size() == 2 && blocked[1].level == 1 && blocked[1].periods == 2 &&
++                    blocked[1].count == 3 && blocked[1].backoff == 1 &&
++                    blocked[1].hold == 2 * CadenceTimeResync::kReverseHold,
++            "hysteresis: the second record counts the blocks since the first");
+         told = second_move + 4 * kSecond;
+-        require(feed(2, n, 2) == 2 && resync.backoff == 2,
++        require(feed(2, n, 2) == 2 && resync.backoff[1] == 2,
+             "hysteresis: past 4 s it moves, back-off 2 (8 s)");
+         // Capped at 16 s; one level off per minute without a reversal.
+-        require(resync.reverse_hold(told) == 4 * CadenceTimeResync::kReverseHold,
++        require(resync.reverse_hold(1, told) == 4 * CadenceTimeResync::kReverseHold,
+             "hysteresis: 8 s at level 2");
+-        require(resync.backoff_level(told + 61 * kSecond) == 1 &&
+-                    resync.backoff_level(told + 121 * kSecond) == 0 &&
+-                    resync.reverse_hold(told + 121 * kSecond) == CadenceTimeResync::kReverseHold,
++        require(resync.backoff_level(1, told + 61 * kSecond) == 1 &&
++                    resync.backoff_level(1, told + 121 * kSecond) == 0 &&
++                    resync.reverse_hold(1, told + 121 * kSecond) == CadenceTimeResync::kReverseHold,
+             "hysteresis: the back-off decays a level a minute");
++        // DCS Control (0061): 3's back-off is its own.
++        require(resync.backoff[2] == 0 &&
++                    resync.reverse_hold(2, told) == CadenceTimeResync::kReverseHold,
++            "hysteresis: each level has its own back-off");
+         CadenceTimeResync capped{};
+-        capped.backoff = 9;
+-        capped.backoff_at = told;
+-        require(capped.reverse_hold(told) == CadenceTimeResync::kMaxReverseHold,
++        capped.backoff[1] = 9;
++        capped.backoff_at[1] = told;
++        require(capped.reverse_hold(1, told) == CadenceTimeResync::kMaxReverseHold,
+             "hysteresis: capped at 16 s");
+         resync.reset();
+-        require(resync.backoff == 0 && resync.last_move_sign == 0 && resync.held == 0,
++        require(resync.backoff[1] == 0 && resync.last_move_sign[1] == 0 && resync.held == 0 &&
++                    !resync.learnt[0] && !resync.learnt[1] && !resync.learnt[2],
+             "hysteresis: reset");
+     }
+     {
+         // The 1X deadline's idle test.
++        // DCS Control (0061): past max(two periods, 150 ms).
+         constexpr Nanoseconds kPeriod = 11'111'111;
+         require(!cadence_application_idle(false, 0, 5 * kSecond, kPeriod),
+             "idle: no frame yet is not idle");
+-        require(!cadence_application_idle(false, kSecond, kSecond + 2 * kPeriod, kPeriod),
+-            "idle: two periods is not idle yet");
+-        require(cadence_application_idle(false, kSecond, kSecond + 2 * kPeriod + 1, kPeriod),
+-            "idle: past two periods");
++        require(!cadence_application_idle(false, kSecond, kSecond + 2 * kPeriod + 1, kPeriod),
++            "idle: past two periods is not idle yet (0061)");
++        require(!cadence_application_idle(false, kSecond, kSecond + 95 * kMillisecond, kPeriod),
++            "idle: R113's 95 ms stall is not idle (0061)");
++        require(!cadence_application_idle(false, kSecond, kSecond + 150 * kMillisecond, kPeriod),
++            "idle: 150 ms is not idle yet (0061)");
++        require(cadence_application_idle(false, kSecond, kSecond + 150 * kMillisecond + 1, kPeriod),
++            "idle: past 150 ms (0061)");
++        require(cadence_idle_limit(100 * kMillisecond) == 200 * kMillisecond &&
++                    cadence_idle_limit(kPeriod) == kCadenceIdleMinimum,
++            "idle: two periods where they are longer (0061)");
++        require(cadence_application_idle(false, kSecond, kSecond + 1, kPeriod, true) &&
++                    cadence_application_idle(true, kSecond, kSecond + 1, kPeriod, true),
++            "idle: the session stopping is idle at once (0061)");
+         require(!cadence_application_idle(true, kSecond, kSecond + 50 * kPeriod, kPeriod),
+             "idle: a frame held inside xrEndFrame is not idle");
+         require(!cadence_application_idle(false, kSecond, 2 * kSecond, 0), "idle: no period");
+     }
+ }
+ 
++// DCS Control (0061): R113's mixed scene - the cadence alternating 2 and 3
++// with each 20 s view change - with a 2 frame shown three periods after the
++// time it is told before any resync and a 3 frame six (its synthetics queued
++// in front of it), a quarter period of jitter, each frame observed two frames
++// after it was told. `shared` is 0059/0060's model, the one offset 2 and 3
++// shared (a 3 frame judged and told as a 2: the same confirmation, hysteresis
++// and back-off as 0060's common part). That moves it 3 <-> 6 on every change
++// of cadence, as R113's offset did; one offset per level moves each once and
++// never again.
++void cadence_resync_per_level_tests() {
++    constexpr Nanoseconds kP = 11'111'111;
++    constexpr int kPhases = 8;
++    struct Outcome {
++        std::array<int, kPhases> moves{};
++        std::array<int, kPhases> off{};
++        std::array<std::int64_t, kPhases> offset_at_end{};
++    };
++    const auto run = [&](bool shared) {
++        CadenceTimeResync resync{};
++        Outcome outcome{};
++        struct Told { std::uint32_t frames; Nanoseconds told; std::int64_t periods; };
++        std::vector<Told> in_flight;
++        std::uint32_t lcg = 0x5EED0061U;
++        const auto draw = [&](int low, int high) {
++            lcg = lcg * 1664525U + 1013904223U;
++            return low + static_cast<int>((lcg >> 8) % static_cast<std::uint32_t>(high - low + 1));
++        };
++        const auto as_told = [&](std::uint32_t frames) {
++            return shared && frames == 3 ? 2U : frames;
++        };
++        const auto lands = [](std::uint32_t frames) -> std::int64_t {
++            return frames == 3 ? 6 : 3;
++        };
++        Nanoseconds told = 1'000'000'000;
++        for (int phase = 0; phase < kPhases; ++phase) {
++            const std::uint32_t frames = phase % 2 == 0 ? 2U : 3U;
++            const Nanoseconds phase_end = told + 20 * kSecond;
++            while (told < phase_end) {
++                told += frames * kP;
++                in_flight.push_back({frames, told, resync.periods_for(as_told(frames))});
++                if (in_flight.size() <= 2) {
++                    continue;
++                }
++                const Told shown = in_flight.front();
++                in_flight.erase(in_flight.begin());
++                const Nanoseconds jitter = (draw(0, 2) - 1) * kP / 4;
++                const Nanoseconds residual = (lands(shown.frames) - shown.periods) * kP + jitter;
++                outcome.off[phase] += residual_periods(residual, kP) != 0 ? 1 : 0;
++                outcome.moves[phase] +=
++                    resync.observe(as_told(shown.frames), shown.told, residual, kP, told) != 0
++                        ? 1
++                        : 0;
++            }
++            outcome.offset_at_end[phase] = resync.periods_for(as_told(frames));
++        }
++        return outcome;
++    };
++    const auto describe = [](const Outcome& outcome) {
++        std::string text;
++        for (int phase = 0; phase < kPhases; ++phase) {
++            text += " [" + std::to_string(outcome.moves[phase]) + " moves, " +
++                std::to_string(outcome.off[phase]) + " off, offset " +
++                std::to_string(outcome.offset_at_end[phase]) + "]";
++        }
++        return text;
++    };
++    const Outcome shared = run(true);
++    const Outcome per_level = run(false);
++    std::cout << "cadence resync, 2/3 alternating every 20 s: shared offset (0060)"
++              << describe(shared) << "; per level (0061)" << describe(per_level) << '\n';
++    // The hypothesis: one shared offset moves on every change of cadence,
++    // 3 <-> 6, and frames are shown off before each move.
++    for (int phase = 1; phase < kPhases; ++phase) {
++        require(shared.moves[phase] >= 1 && shared.off[phase] >= CadenceTimeResync::kConfirmCadence &&
++                    shared.offset_at_end[phase] == (phase % 2 == 0 ? 3 : 6),
++            "per level: the shared offset moves on every switch (phase " +
++                std::to_string(phase) + ":" + describe(shared) + ")");
++    }
++    // One offset per level: 2 learnt in the first phase, 3 in the second,
++    // nothing after.
++    require(per_level.moves[0] == 1 && per_level.moves[1] == 1,
++        "per level: each level learns once (" + describe(per_level) + ")");
++    for (int phase = 2; phase < kPhases; ++phase) {
++        require(per_level.moves[phase] == 0 && per_level.off[phase] == 0 &&
++                    per_level.offset_at_end[phase] == (phase % 2 == 0 ? 3 : 6),
++            "per level: no move and no frame off once both have learnt (phase " +
++                std::to_string(phase) + ":" + describe(per_level) + ")");
++    }
++}
++
+ } // namespace
+ 
+ int main() {
+@@ -3217,6 +3349,7 @@
+         residual_period_tests(); // DCS Control (0059)
+         cadence_resync_tests(); // DCS Control (0059)
+         cadence_resync_hysteresis_tests(); // DCS Control (0060)
++        cadence_resync_per_level_tests(); // DCS Control (0061)
+         triple_release_tests();
+         triple_slack_tests();
+         display_time_tests();
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -340,9 +340,26 @@
+ // at 1X, then the application stops submitting for 400 ms (as DCS does while
+ // it closes, R112: ~240 slots re-presented, 407, in its last 3 s) and the
+ // session ends. The presenter must submit nothing to the runtime from two
+-// periods (plus 3 ms) after the application's last xrEndFrame returned;
++// periods (0061: max(two periods, 150 ms)) plus 3 ms after the application's
++// last xrEndFrame returned;
+ // layer_adaptive_cadence_59.cmake checks the deadline stood down (408).
+ bool g_cadence_idle_mode = false;
++// DCS Control (0061): the same shape, at 1X a second, then:
++//   dcs-cadence-reidle  idle 1.2 s (a scene change: 1X left), light frames
++//                       until 1X is entered again, a second there, idle
++//                       400 ms: layer_adaptive_cadence_59.cmake checks one
++//                       408 per idle (0060 re-armed it never: none the
++//                       second time, as at R113's session close).
++//   dcs-cadence-pause   R113's 95 ms stall outside xrEndFrame, then a
++//                       second more: the deadline re-presents every slot
++//                       (407, no gap over 25 ms), no 408 for it, 1X kept.
++//   dcs-cadence-close   the session ended right after a frame at 1X: 408
++//                       (the teardown's, c=2) within 150 ms of it.
++// The idle limit is max(two periods, 150 ms) (0061).
++bool g_cadence_reidle_mode = false;
++bool g_cadence_pause_mode = false;
++bool g_cadence_close_mode = false;
++bool g_cadence_61_mode = false; // any of the three
+ // 0060: when the application's xrEndFrame last returned (steady_clock, ns).
+ std::atomic<std::int64_t> g_last_end_returned_ns{0};
+ // dcs-throughput-down / dcs-throughput-gpu (DCS VR Control, 0004):
+@@ -2734,7 +2751,8 @@
+             "dcs-triple-deep-jitter|dcs-triple-deep-quad|dcs-triple-scenes|"
+             "dcs-adaptive-scenes|dcs-presenter-stall|dcs-triple-shrink|"
+             "dcs-cadence|dcs-deep-hold|dcs-async-arm|dcs-cadence-exit|"
+-            "dcs-cadence-jitter|dcs-cadence-stall|dcs-cadence-idle]\n";
++            "dcs-cadence-jitter|dcs-cadence-stall|dcs-cadence-idle|"
++            "dcs-cadence-reidle|dcs-cadence-pause|dcs-cadence-close]\n";
+         return EXIT_FAILURE;
+     }
+     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
+@@ -2777,16 +2795,22 @@
+             argc == 4 && std::strcmp(argv[3], "dcs-cadence-stall") == 0;
+         // DCS Control (0060).
+         g_cadence_idle_mode = argc == 4 && std::strcmp(argv[3], "dcs-cadence-idle") == 0;
+-        g_fixed_display_grid =
+-            g_cadence_jitter_mode || g_cadence_stall_mode || g_cadence_idle_mode;
++        // DCS Control (0061).
++        g_cadence_reidle_mode = argc == 4 && std::strcmp(argv[3], "dcs-cadence-reidle") == 0;
++        g_cadence_pause_mode = argc == 4 && std::strcmp(argv[3], "dcs-cadence-pause") == 0;
++        g_cadence_close_mode = argc == 4 && std::strcmp(argv[3], "dcs-cadence-close") == 0;
++        g_cadence_61_mode =
++            g_cadence_reidle_mode || g_cadence_pause_mode || g_cadence_close_mode;
++        g_fixed_display_grid = g_cadence_jitter_mode || g_cadence_stall_mode ||
++            g_cadence_idle_mode || g_cadence_61_mode;
+         if (g_cadence_stall_mode) {
+             SetEnvironmentVariableA("XRFG_TEST_SLOW_PRIME", "150");
+         } else if (g_cadence_exit_mode) {
+             SetEnvironmentVariableA("XRFG_TEST_SLOW_PRIME", "60");
+         }
+         // dcs-cadence-stall is dcs-cadence-jitter's shape from here on.
+-        g_cadence_jitter_shape =
+-            g_cadence_jitter_mode || g_cadence_stall_mode || g_cadence_idle_mode; // 0060
++        g_cadence_jitter_shape = g_cadence_jitter_mode || g_cadence_stall_mode ||
++            g_cadence_idle_mode || g_cadence_61_mode; // 0060, 0061
+         // DCS Control (0050).
+         g_deep_hold_mode = argc == 4 && std::strcmp(argv[3], "dcs-deep-hold") == 0;
+         g_async_arm_mode = argc == 4 && std::strcmp(argv[3], "dcs-async-arm") == 0;
+@@ -5016,8 +5040,10 @@
+             const std::int64_t last_return =
+                 g_last_end_returned_ns.load(std::memory_order_acquire);
+             precise_sleep(std::chrono::milliseconds(400));
++            // DCS Control (0061): idle past max(two periods, 150 ms).
+             const auto cutoff = std::chrono::steady_clock::time_point(
+-                std::chrono::nanoseconds(last_return + 2 * kFakeDisplayPeriod + 3'000'000));
++                std::chrono::nanoseconds(last_return +
++                    std::max<std::int64_t>(2 * kFakeDisplayPeriod, 150'000'000) + 3'000'000));
+             const auto from = std::chrono::steady_clock::time_point(
+                 std::chrono::nanoseconds(last_return));
+             std::scoped_lock lock(g_presenter_end_mutex);
+@@ -5030,6 +5056,74 @@
+                 }
+             }
+         }
++        // DCS Control (0061): see g_cadence_61_mode.
++        bool c61_at_one = false;
++        bool c61_left = false;
++        bool c61_reentered = false;
++        bool c61_one_kept = false;
++        double c61_pause_gap_ms = 0.0;
++        std::size_t c61_pause_slots = 0;
++        if (g_cadence_61_mode && c59_one_seen) {
++            const auto run_for = [&](std::chrono::milliseconds span) {
++                const auto until = std::chrono::steady_clock::now() + span;
++                while (sequence_succeeded && std::chrono::steady_clock::now() < until) {
++                    sequence_succeeded = run_frame(true);
++                }
++            };
++            // The pause two seconds in: past 1X's first second (nothing judged)
++            // with its half-second work window full, as a stall in flight is -
++            // the stalled frame alone is not its p90 then.
++            run_for(std::chrono::seconds(g_cadence_pause_mode ? 2 : 1));
++            c61_at_one = pending.predictedDisplayPeriod == kFakeDisplayPeriod;
++            if (g_cadence_reidle_mode) {
++                // Idle past the scene-change gap: 1X is left at the next frame.
++                precise_sleep(std::chrono::milliseconds(1200));
++                for (int index = 0; sequence_succeeded && index < 300 &&
++                     pending.predictedDisplayPeriod == kFakeDisplayPeriod;
++                     ++index) {
++                    sequence_succeeded = run_frame(true);
++                }
++                c61_left = pending.predictedDisplayPeriod == kFakeDisplayPeriod * 2;
++                // 1X again: one_spacing (15 s) after it was left, at most.
++                const auto one_until =
++                    std::chrono::steady_clock::now() + std::chrono::seconds(22);
++                while (sequence_succeeded &&
++                       pending.predictedDisplayPeriod != kFakeDisplayPeriod &&
++                       std::chrono::steady_clock::now() < one_until) {
++                    sequence_succeeded = run_frame(true);
++                }
++                c61_reentered =
++                    c61_left && pending.predictedDisplayPeriod == kFakeDisplayPeriod;
++                if (c61_reentered) {
++                    run_for(std::chrono::seconds(1));
++                    precise_sleep(std::chrono::milliseconds(400));
++                }
++            } else if (g_cadence_pause_mode) {
++                // R113's stall: 95 ms with no xrEndFrame in progress.
++                std::size_t presenter_from = 0;
++                {
++                    std::scoped_lock lock(g_presenter_end_mutex);
++                    presenter_from = g_presenter_end_times.size();
++                }
++                const auto pause_from = std::chrono::steady_clock::now();
++                precise_sleep(std::chrono::milliseconds(95));
++                const auto pause_to = std::chrono::steady_clock::now();
++                run_for(std::chrono::seconds(1));
++                c61_one_kept = pending.predictedDisplayPeriod == kFakeDisplayPeriod;
++                std::scoped_lock lock(g_presenter_end_mutex);
++                for (std::size_t index = presenter_from; index < g_presenter_end_times.size();
++                     ++index) {
++                    const auto at = g_presenter_end_times[index];
++                    c61_pause_slots += at > pause_from && at <= pause_to ? 1U : 0U;
++                    if (index > presenter_from) {
++                        c61_pause_gap_ms = std::max(c61_pause_gap_ms,
++                            std::chrono::duration<double, std::milli>(
++                                at - g_presenter_end_times[index - 1]).count());
++                    }
++                }
++            }
++            // dcs-cadence-close: the session ends from here (below).
++        }
+         const std::size_t c59_to_mark = scene_mark();
+         g_cadence_time_ends = false;
+         if (g_cadence_jitter_shape) {
+@@ -5363,10 +5457,30 @@
+                     c60_after_cutoff == 0 && g_cadence_longest_end_ms < 50.0;
+                 summary << "1X entered " << c59_one_seen << " held to the idle "
+                         << c60_idle_at_one << "; presenter submissions after the last "
+-                        << "xrEndFrame: " << c60_before_cutoff << " within two periods, "
++                        << "xrEndFrame: " << c60_before_cutoff << " within the idle limit, " // 0061
+                         << c60_after_cutoff << " after (last at " << c60_last_after_ms
+                         << " ms), empty " << empty << ", longest xrEndFrame "
+                         << g_cadence_longest_end_ms << " ms";
++            } else if (g_cadence_61_mode) {
++                // DCS Control (0061): see g_cadence_61_mode; the 408 records
++                // are checked in layer_adaptive_cadence_59.cmake.
++                valid = sequence_succeeded && teardown_succeeded && presenter_seen &&
++                    violations == 0 && empty == 0 && c59_one_seen && c61_at_one &&
++                    g_cadence_longest_end_ms < 50.0 &&
++                    (!g_cadence_reidle_mode || c61_reentered) &&
++                    (!g_cadence_pause_mode ||
++                        (c61_one_kept && c61_pause_gap_ms < 25.0 && c61_pause_slots >= 6));
++                summary << "1X entered " << c59_one_seen << " held a second " << c61_at_one;
++                if (g_cadence_reidle_mode) {
++                    summary << "; left on the long idle " << c61_left << ", entered again "
++                            << c61_reentered;
++                } else if (g_cadence_pause_mode) {
++                    summary << "; over the 95 ms stall " << c61_pause_slots
++                            << " slots submitted, longest gap " << c61_pause_gap_ms
++                            << " ms, 1X kept " << c61_one_kept;
++                }
++                summary << ", empty " << empty << ", longest xrEndFrame "
++                        << g_cadence_longest_end_ms << " ms";
+             } else {
+                 valid = sequence_succeeded && teardown_succeeded && presenter_seen &&
+                     violations == 0 && empty == 0 && c59_one_seen && c59_limited_held &&
+@@ -5389,6 +5503,9 @@
+             std::cout << (g_cadence_exit_mode     ? "OpenXR DCS cadence exit test passed: "
+                           : g_cadence_jitter_mode ? "OpenXR DCS cadence jitter test passed: "
+                           : g_cadence_idle_mode   ? "OpenXR DCS cadence idle test passed: " // 0060
++                          : g_cadence_reidle_mode ? "OpenXR DCS cadence re-idle test passed: " // 0061
++                          : g_cadence_pause_mode  ? "OpenXR DCS cadence pause test passed: "
++                          : g_cadence_close_mode  ? "OpenXR DCS cadence close test passed: "
+                                                   : "OpenXR DCS cadence stall test passed: ")
+                       << summary.str() << '\n';
+             return EXIT_SUCCESS;
+diff --git a/tests/layer_adaptive_cadence_59.cmake b/tests/layer_adaptive_cadence_59.cmake
+--- a/tests/layer_adaptive_cadence_59.cmake
++++ b/tests/layer_adaptive_cadence_59.cmake
+@@ -13,6 +13,12 @@
+ #   idle    (DCS Control 0060) the application idle at 1X: the deadline stood
+ #           down (408); the call chain checks no submission went out from two
+ #           periods after its last xrEndFrame.
++#   (DCS Control 0061: the idle limit is max(two periods, 150 ms); every 408
++#   checked, see the end of this file.)
++#   reidle  one 408 per idle stretch, the second after 1X was entered again.
++#   pause   a 95 ms stall outside xrEndFrame re-presented (407), no 408 for
++#           it, and 1X not left on missed slots.
++#   close   the session ended at 1X: the teardown's 408 (c=2) within 150 ms.
+ foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN CADENCE_INI WORK_DIR MODE)
+     if(NOT DEFINED ${required_variable})
+         message(FATAL_ERROR "${required_variable} was not provided")
+@@ -59,10 +65,15 @@
+     list(APPEND expected
+         "op=presenter_transition result=407 "
+         "op=slow_step result=7 ")
+-elseif(MODE STREQUAL "dcs-cadence-idle")
++elseif(MODE STREQUAL "dcs-cadence-idle" OR MODE STREQUAL "dcs-cadence-reidle" OR
++       MODE STREQUAL "dcs-cadence-close")
+     # DCS Control (0060): the 1X deadline stood down for the idle application.
+     list(APPEND expected
+         "op=presenter_transition result=408 ")
++elseif(MODE STREQUAL "dcs-cadence-pause")
++    # DCS Control (0061): R113's 95 ms stall re-presented at the deadline.
++    list(APPEND expected
++        "op=presenter_transition result=407 ")
+ endif()
+ foreach(item IN LISTS expected)
+     string(FIND "${contents}" "${item}" found)
+@@ -100,3 +111,62 @@
+     endif()
+     message(STATUS "1X: no slot missed over ${judged} records")
+ endif()
++
++# DCS Control (0061): the 408 records - a= us since the application's last
++# xrEndFrame activity, c= 0 idle, 1 the session stopping, 2 the teardown.
++if(MODE MATCHES "^dcs-cadence-(idle|reidle|pause|close)$")
++    file(STRINGS "${flight_log}" stood_down
++        REGEX "op=presenter_transition result=408 ")
++    set(idle_count 0)
++    set(teardown_count 0)
++    set(summary "")
++    foreach(record IN LISTS stood_down)
++        if(NOT record MATCHES " a=([0-9]+) b=[0-9]+ c=([0-9]+)")
++            message(FATAL_ERROR "Unreadable 408 record: ${record}")
++        endif()
++        set(since_us "${CMAKE_MATCH_1}")
++        set(cause "${CMAKE_MATCH_2}")
++        string(APPEND summary " a=${since_us} c=${cause}")
++        if(cause EQUAL 2)
++            math(EXPR teardown_count "${teardown_count} + 1")
++            # The teardown's: the session closed within the idle limit.
++            if(since_us GREATER 150000)
++                message(FATAL_ERROR "408 for the teardown ${since_us} us after the last frame")
++            endif()
++        else()
++            math(EXPR idle_count "${idle_count} + 1")
++            # Idle: past 150 ms (no sooner: R113's 95 ms stall), within a
++            # slot or two of it.
++            if(since_us LESS 150000 OR since_us GREATER 180000)
++                message(FATAL_ERROR "408 for an idle application ${since_us} us after its last frame (150-180 ms expected)")
++            endif()
++        endif()
++    endforeach()
++    if(MODE STREQUAL "dcs-cadence-idle")
++        set(expected_idle 1)
++        set(expected_teardown 0)
++    elseif(MODE STREQUAL "dcs-cadence-reidle")
++        # One per idle: the second after 1X was entered again.
++        set(expected_idle 2)
++        set(expected_teardown 0)
++    elseif(MODE STREQUAL "dcs-cadence-pause")
++        # None for the stall; the teardown's at the end (1X kept).
++        set(expected_idle 0)
++        set(expected_teardown 1)
++    else()
++        set(expected_idle 0)
++        set(expected_teardown 1)
++    endif()
++    if(NOT idle_count EQUAL expected_idle OR NOT teardown_count EQUAL expected_teardown)
++        message(FATAL_ERROR
++            "408 records: ${idle_count} idle (expected ${expected_idle}), ${teardown_count} "
++            "teardown (expected ${expected_teardown}):${summary}")
++    endif()
++    message(STATUS "408 records:${summary}")
++    if(MODE STREQUAL "dcs-cadence-pause")
++        string(FIND "${contents}" "op=adaptive_switch result=9 " left_late)
++        if(NOT left_late EQUAL -1)
++            message(FATAL_ERROR "1X was left on missed slots over the 95 ms stall")
++        endif()
++    endif()
++endif()
