@@ -114,10 +114,16 @@ window.runWebSmoke = async function() {
       check('Overview shows the last flight as one compact card',$('flightBody').querySelectorAll('.flight-item').length === 6 && $('flightTitle').textContent.includes('min') && $('flightBody').textContent.includes('3×') && $('flightBody').textContent.includes('310.8'));
       check('Overview opens with the launch status and the checks in one line, without a separate list of problems',!$('overviewNotes') && $('dashStatus').querySelector('.dash-main b') && $('dashStatus').querySelector('.dash-chip') && $('pipeline').querySelectorAll('.stage').length === 5); }
     edit('fpsLimit','MatchRefresh'); edit('headsetRefreshHz',90); edit('frameGen','Nvidia');
+    check('OFXR matching mode with frames only when needed lets DCS render up to 90 FPS at 90 Hz',$('cadenceMetrics').textContent.includes('90 FPS'));
+    edit('frameGenAdaptiveCadence',false);
     check('OFXR matching mode shows 45 rendered FPS for 90 Hz',$('cadenceMetrics').textContent.includes('45 FPS') && $('cadenceMetrics').textContent.includes('Up to 90 FPS'));
+    edit('frameGenAdaptiveCadence',true);
     edit('frameGen','Off'); check('Turning framegen off restores a 90 FPS cadence',$('cadenceMetrics').textContent.includes('90 FPS') && !$('cadenceMetrics').textContent.includes('45 FPS'));
-    edit('fpsLimit','Custom'); edit('renderedFpsCap',30); edit('frameGen','Nvidia'); check('Low cap exposes output shortfall',$('cadenceWarnings').textContent.includes('below'));
+    edit('fpsLimit','Custom'); edit('renderedFpsCap',30); edit('frameGen','Nvidia');
+    check('With frames only when needed, a low cap says it keeps frames always generated',$('cadenceWarnings').textContent.includes('only when needed') && $('cadenceWarnings').children.length === 1);
+    edit('frameGenAdaptiveCadence',false); check('Low cap exposes output shortfall',$('cadenceWarnings').textContent.includes('below'));
     check('Only the real cadence problem is warned about',$('cadenceWarnings').children.length === 1);
+    edit('frameGenAdaptiveCadence',true);
     edit('fpsLimit','Preserve');
     { const before = ui.profile.frameGenFactor; edit('frameGenFactor',2); const deep = ui.fields.find(f => f.path === 'frameGenDeepPipeline');
       check('Smoothness buffer sits under Frame generation, on by default and editable in 2x',deep.page === 'framegen' && ui.profile.frameGenDeepPipeline === true && !$('input-frameGenDeepPipeline').disabled);
