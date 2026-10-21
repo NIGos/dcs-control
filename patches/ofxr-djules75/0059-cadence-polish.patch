@@ -1,0 +1,1958 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1194,6 +1194,24 @@
+                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/adaptive-cadence"
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_adaptive_cadence.cmake")
+         set_tests_properties(xrfg_layer_adaptive_cadence PROPERTIES TIMEOUT 120)
++        # DCS Control (0059): adaptive cadence under pipelined_deep_hold - the
++        # exit from 1X (told time and synthetic), a light application handed
++        # over a few ms after its slot (no slot missed at 1X), and a prime
++        # held 150 ms (the presenter keeps its slots). Pacing tests: their
++        # names have "adaptive" in them (build-ofxr-djules75.ps1).
++        foreach(cadence_case IN ITEMS exit jitter stall)
++            add_test(
++                NAME xrfg_layer_adaptive_cadence_${cadence_case}
++                COMMAND "${CMAKE_COMMAND}"
++                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                    "-DCADENCE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_adaptive_cadence_deep_hold.ini"
++                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/adaptive-cadence-${cadence_case}"
++                    "-DMODE=dcs-cadence-${cadence_case}"
++                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_adaptive_cadence_59.cmake")
++            set_tests_properties(xrfg_layer_adaptive_cadence_${cadence_case}
++                PROPERTIES TIMEOUT 120)
++        endforeach()
+         # DCS VR Control (0004): adaptive control judges throughput, not
+         # pipeline latency. An application whose frames take far longer end to
+         # end than either its CPU or its GPU needs per frame goes to 2X; one
+@@ -1486,7 +1504,8 @@
+         # DCS Control (0057): the benches (GPU times printed, nothing
+         # required), labelled bench: `ctest -L bench` runs them, a build
+         # leaves them out (-LE bench). Skipped without NVIDIA hardware.
+-        foreach(XRFG_BENCH PARALLEL_EYES DCS_MOTION COCKPIT_DEPTH OCCLUSION TRIPLE CURSOR)
++        # DCS Control (0059): and WARM_ONE, adaptive cadence's 1X.
++        foreach(XRFG_BENCH PARALLEL_EYES DCS_MOTION COCKPIT_DEPTH OCCLUSION TRIPLE CURSOR WARM_ONE)
+             string(TOLOWER "${XRFG_BENCH}" XRFG_BENCH_NAME)
+             add_test(NAME xrfg_d3d12_bench_${XRFG_BENCH_NAME} COMMAND xrfg_d3d12_history_tests)
+             set_tests_properties(xrfg_d3d12_bench_${XRFG_BENCH_NAME} PROPERTIES
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -71,6 +71,13 @@
+     // display period in microseconds in bits 0-31 and, in bit 32, 1 when it
+     // was held because its output was not written yet (401's case), c its
+     // sequence.
++    // DCS Control (0059): 407, a slot of adaptive cadence's 1X whose
++    // application frame had not come by its deadline (half a period after
++    // the slot's wait; xrfg::latency::cadence_one_deadline), re-presenting
++    // the last real frame from the late-frame skip's copy (`[ofxr]
++    // pipelined_deep_hold`); the frame takes the next slot. A missed slot at
++    // 1X. a how long after the slot's wait it went (us), b the display
++    // period (us), c the capture epoch of the frame re-presented.
+     // DCS Control (0042): 960, the presenter thread started: a its OS thread
+     // id (GetCurrentThreadId; its start address is in ucrtbase, so tooling
+     // finds the thread by this id).
+@@ -224,6 +231,13 @@
+     //   13 adaptive cadence turned on (a=0, b= the multiplier, 2) or off
+     //      (a= the multiplier, b=0); or, a=3 b=2, the switch into its 2X
+     //      shape from 3X.
++    //   14 (DCS Control 0059) the told time of a level resynchronised on
++    //      where its real frames were shown (xrfg::latency::
++    //      CadenceTimeResync): a= the level (1 1X, 2 the 2/3 cadence), b= the
++    //      periods it moved, c= the whole offset the level's frames are told
++    //      now, in periods, bits 0-31, and the session's moves, bits 32-47
++    //      (1X's offset is 2's plus a part of its own); b and c's offset are
++    //      signed 32-bit (two's complement): later is positive.
+     // DCS Control (0047): for results 1-7, c's p90 is bits 0-31; bits 32-39
+     // are the back-off level the switch left (3X holds 5 s doubled per
+     // level, at most 40 s, before it may leave; see AdaptiveConfig::
+@@ -290,6 +304,9 @@
+     //     cadence (bits 0-15), the 1X backoff in force in seconds (16-31),
+     //     seconds until 1X may next be entered (32-47), and slots missed at
+     //     1X - scanouts the runtime skipped and late hand-overs (48-63).
++    //     DCS Control (0059): a 1X hand-over is late from half a period
++    //     after its slot's wait (it was 2 ms), and a 1X slot re-presented at
++    //     that deadline (presenter_transition 407) is one missed as well.
+     adaptive_throughput,
+     // DCS VR Control (0006). The presenter's submissions timed from the
+     // return of the runtime's xrWaitFrame for their slot to the call into the
+@@ -579,6 +596,11 @@
+     //     bits 40-47 the periods late, that residual in whole display
+     //     periods rounded (0 on time or early): 1 or more is a frame that
+     //     landed that many refreshes after the time it was rendered for.
++    //     DCS Control (0059): rounded half down from 0.75 of a period
++    //     (xrfg::latency::residual_periods): under 0.75 is 0, 0.75 to 1.5
++    //     is 1, and so on; 0048 rounded half up, so a residual of exactly
++    //     half a period (5.6 ms at 90 Hz: a frame in its own slot, the grid
++    //     half a period off) read 1.
+     //     b= the display period, us.
+     //     c= the QPC when it was taken.
+     //   frame_gpu, when the frame's pair is written on the GPU (the fence the
+@@ -612,7 +634,7 @@
+     // DCS Control (0050): a step of the layer's own that can hold a frame
+     // call for a long time, timed (the holds of 55-136 ms in xrEndFrame seen
+     // right after DCS leaves its F10 map). dur_us= the step's time, us; a=
+-    // the same in whole ms; b= the swapchain (results 1, 2, 5) or the
++    // the same in whole ms; b= the swapchain (results 1, 2, 5, 7) or the
+     // session (3, 4, 6); c= as below.
+     //   result=1, frame generation armed for a swapchain on the frame path
+     //     (ensure_frame_generation: private swapchains, synthesizer,
+@@ -637,6 +659,13 @@
+     //     2X hold was re-presenting from the private image it is about to
+     //     write (`[ofxr] pipelined_deep_hold`); c= 0 it went out, 1 the
+     //     50 ms bound ran out.
++    //   result=7 (DCS Control 0059), an application frame's synthesis
++    //     submission (synthesis_pair or synthesis_prime) that took 20 ms or
++    //     more, split in whole ms, 16 bits each: c= waiting for the session's
++    //     GPU lock (bits 0-15), the D3D11 interop's preparation (16-31), the
++    //     synthesizer's submission (32-47), the interop's publish (48-63).
++    //     R110 held one prime 210 ms at 1X with no layer wait in it (frame_hold
++    //     pacing 1 us, fence waits 0).
+     slow_step,
+ };
+ 
+diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
+--- a/include/xrfg/d3d12_frame_synthesizer.hpp
++++ b/include/xrfg/d3d12_frame_synthesizer.hpp
+@@ -521,6 +521,17 @@
+ 
+     mutable std::mutex mutex_;
+     std::unique_ptr<Impl> impl_;
++    // DCS Control (0059): what synchronize_consumer_queue needs - the Impl's
++    // completion fence and synthesis queue - under a lock of its own, taken
++    // after mutex_ wherever both are held (initialize, reconfigure: the Impl
++    // is replaced with it held) and alone by synchronize_consumer_queue. The
++    // presenter joins its queue there while the application thread may be
++    // inside a submission, which holds mutex_ for as long as the driver
++    // takes: R110 (DCS, 1X) held one 210 ms, and the presenter, behind it,
++    // missed every slot meanwhile.
++    mutable std::mutex consumer_mutex_;
++    ID3D12Fence* consumer_fence_{};
++    ID3D12CommandQueue* consumer_queue_{};
+ };
+ 
+ }  // namespace xrfg
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -1655,6 +1655,101 @@
+     return bound < 1 ? 1 : bound;
+ }
+ 
++// DCS Control (0059): a real frame's residual - the display time of the slot
++// it was shown in less the display time it was told - in whole display
++// periods, signed: 0 under kResidualThreshold of a period either way, past it
++// the nearest whole period with an exact half rounded down (1.5 periods is 1).
++// 0048's frame_slot record rounded half up from zero, so a residual of exactly
++// half a period - 5.6 ms at 90 Hz: a frame shown in the slot it was rendered
++// for, the presenter's grid half a period off its told time - read as one
++// period late. A non-positive period is 0.
++inline constexpr Nanoseconds kResidualThresholdQuarters = 3; // 0.75 period
++[[nodiscard]] constexpr std::int64_t residual_periods(
++    Nanoseconds residual, Nanoseconds period) noexcept {
++    if (period <= 0) {
++        return 0;
++    }
++    const Nanoseconds size = residual < 0 ? -residual : residual;
++    if (size * 4 < period * kResidualThresholdQuarters) {
++        return 0;
++    }
++    const std::int64_t periods = (size * 2 + period - 1) / (period * 2);
++    return residual < 0 ? -periods : periods;
++}
++
++// DCS Control (0059): how long after its slot's xrWaitFrame returned a frame
++// at adaptive cadence's 1X may still be handed over, as a fraction of the
++// period: half. R110 (DCS, Pimax 90 Hz): hand-overs 2-5.6 ms after the wait
++// were shown in their slot (residual 0.1 ms), one 6.1 ms after it was not.
++// Before it, a pipelined presenter waited for the frame without a bound, and
++// its 2 ms late-submission line counted every one of those shown frames as a
++// missed slot. Past it, under `[ofxr] pipelined_deep_hold`, the slot
++// re-presents the last real frame (presenter_transition 407) and the frame
++// takes the next one, with the period ahead of it.
++[[nodiscard]] constexpr Nanoseconds cadence_one_deadline(Nanoseconds period) noexcept {
++    return period > 0 ? period / 2 : 0;
++}
++
++// DCS Control (0059): adaptive cadence's told time, resynchronised on where
++// its real frames are shown. The told time follows the frames' own cadences
++// and the slots the presenter lost (cadence_told_time), and the display time
++// correction on top of it learns where real frames land - in two windows of
++// thirty real frames that agree, and keyed by the pipeline's shape, which
++// adaptive cadence does not change between 1X and 2. 1X's real frames land
++// sooner (no synthetic held in front of them), so every stretch at 1X was
++// first shown 2-3 periods before its told time (R110: 17 s at -22 ms), until
++// the correction learned it, and then every exit to 2 was shown 2 periods
++// late (late=2) until it learned 2 again: 43-44 late frames per exit.
++//
++// This keeps an offset in whole periods added to the told time: offset[1] for
++// every level (what 2 and 3 - one queue shape, mixed frame by frame - are
++// told), and offset[0] on top of it for 1X frames alone. A run of kConfirm
++// real frames of one level shown the same whole number of periods off
++// (residual_periods), all told after the last move, moves that level's own
++// part by it. A frame told at or before settle_until is not judged: it was
++// told before an offset moved or before the presenter lost or gained a slot,
++// and lands off by that as designed. 1X's part is kept while 2 is in force,
++// so 1X comes back where it was shown last time, and the common part moves
++// both, so a 1X never visited starts where 2 is. Under presenter_mutex.
++struct CadenceTimeResync {
++    static constexpr std::uint32_t kConfirm = 3;
++    static constexpr std::int64_t kMaxPeriods = 8;
++    std::array<std::int64_t, 2> offset{};
++    std::int64_t candidate{};
++    std::size_t candidate_level{};
++    std::uint32_t streak{};
++    Nanoseconds settle_until{};
++    std::uint32_t moves{};
++
++    [[nodiscard]] static constexpr std::size_t level_index(
++        std::uint32_t frames) noexcept {
++        return frames <= 1 ? 0U : 1U;
++    }
++    // The whole offset a frame of cadence `frames` is told, in periods.
++    [[nodiscard]] std::int64_t periods_for(std::uint32_t frames) const noexcept {
++        return offset[1] + (level_index(frames) == 0 ? offset[0] : 0);
++    }
++    [[nodiscard]] Nanoseconds offset_for(
++        std::uint32_t frames, Nanoseconds period) const noexcept {
++        return periods_for(frames) * period;
++    }
++    void reset() noexcept { *this = CadenceTimeResync{}; }
++    // Frames told up to `last_told` are not judged.
++    void settle(Nanoseconds last_told) noexcept {
++        settle_until = last_told > settle_until ? last_told : settle_until;
++        streak = 0;
++    }
++    // A real frame of cadence `frames`, told `told`, shown `residual` after
++    // it; `last_told` the latest display time told so far. Returns the
++    // periods its level's offset moved (0: none).
++    std::int64_t observe(
++        std::uint32_t frames,
++        Nanoseconds told,
++        Nanoseconds residual,
++        Nanoseconds period,
++        Nanoseconds last_told) noexcept;
++};
++
+ // DCS Control (0050): what the 2X deeper pipeline's hold re-presents for the
+ // slot it holds a synthetic back from. A presenter outside the pipelined mode
+ // keeps the frame it submitted last (`last_frame`); a pipelined one (DCS:
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -1251,6 +1251,45 @@
+     return step;
+ }
+ 
++// DCS Control (0059): see CadenceTimeResync.
++std::int64_t CadenceTimeResync::observe(
++    std::uint32_t frames,
++    Nanoseconds told,
++    Nanoseconds residual,
++    Nanoseconds period,
++    Nanoseconds last_told) noexcept {
++    if (frames == 0 || period <= 0 || told <= settle_until) {
++        return 0;
++    }
++    const std::size_t level = level_index(frames);
++    const std::int64_t periods = residual_periods(residual, period);
++    if (periods == 0) {
++        streak = 0;
++        return 0;
++    }
++    if (streak != 0 && candidate == periods && candidate_level == level) {
++        ++streak;
++    } else {
++        candidate = periods;
++        candidate_level = level;
++        streak = 1;
++    }
++    if (streak < kConfirm) {
++        return 0;
++    }
++    // Shown later than told: told later from here (and the reverse). The
++    // level's own part moves; its whole offset stays within kMaxPeriods.
++    const std::int64_t whole = periods_for(frames);
++    const std::int64_t moved = std::clamp<std::int64_t>(
++        whole + periods, -kMaxPeriods, kMaxPeriods) - whole;
++    offset[level] += moved;
++    if (moved != 0) {
++        ++moves;
++    }
++    settle(last_told);
++    return moved;
++}
++
+ CadenceStep CadenceController::stop(Nanoseconds now) noexcept {
+     CadenceStep step{};
+     step.previous = level_;
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -89,6 +89,7 @@
+ #include <atomic>
+ #include <cmath>
+ #include <cstddef>
++#include <cstdlib> // DCS Control (0059)
+ #include <cstring>
+ #include <limits>
+ #include <new>
+@@ -9446,7 +9447,11 @@
+         if (FAILED(result)) {
+             return result;
+         }
++        // DCS Control (0059): with what synchronize_consumer_queue uses.
++        std::scoped_lock consumer_lock(consumer_mutex_);
+         impl_ = std::move(candidate);
++        consumer_fence_ = impl_->fence.Get();
++        consumer_queue_ = impl_->queue.Get();
+         return S_OK;
+     } catch (const std::bad_alloc&) {
+         return E_OUTOFMEMORY;
+@@ -9483,7 +9488,12 @@
+             impl_->history, current, synthetic, impl_->view_format, impl_->release_state,
+             backend, options, impl_->nvidia_gpu_timing_enabled);
+         if (FAILED(result)) return result;
++        // DCS Control (0059): the old Impl goes with consumer_mutex_ held,
++        // so no join is still using its fence or queue.
++        std::scoped_lock consumer_lock(consumer_mutex_);
+         impl_ = std::move(candidate);
++        consumer_fence_ = impl_->fence.Get();
++        consumer_queue_ = impl_->queue.Get();
+         return S_OK;
+     } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+       catch (...) { return E_FAIL; }
+@@ -9497,6 +9507,28 @@
+     std::shared_ptr<const DlssMotionVectorSet> motion_vectors) noexcept {
+     try {
+         std::scoped_lock lock(mutex_);
++        // DCS Control (0059): tests only. XRFG_TEST_SLOW_PRIME=<ms>, read
++        // once: each time the test signals the auto-reset event
++        // XRFG_TEST_SLOW_PRIME_<pid>, the next prime holds this lock <ms>
++        // first, as a driver call held one 210 ms in R110 (DCS at 1X).
++        // layer_call_chain's dcs-cadence-jitter checks the presenter keeps
++        // its slots meanwhile. Unset: one comparison.
++        static const std::pair<DWORD, HANDLE> slow_prime = [] {
++            char text[32]{};
++            if (GetEnvironmentVariableA("XRFG_TEST_SLOW_PRIME", text, sizeof(text)) == 0) {
++                return std::pair<DWORD, HANDLE>{0, nullptr};
++            }
++            const DWORD milliseconds =
++                static_cast<DWORD>(std::strtoul(text, nullptr, 10));
++            const std::wstring name =
++                L"XRFG_TEST_SLOW_PRIME_" + std::to_wstring(GetCurrentProcessId());
++            return std::pair<DWORD, HANDLE>{
++                milliseconds, CreateEventW(nullptr, FALSE, FALSE, name.c_str())};
++        }();
++        if (slow_prime.first != 0 && slow_prime.second != nullptr &&
++            WaitForSingleObject(slow_prime.second, 0) == WAIT_OBJECT_0) {
++            Sleep(slow_prime.first);
++        }
+         if (impl_ == nullptr) {
+             if (ticket != nullptr) {
+                 *ticket = {};
+@@ -9771,8 +9803,11 @@
+     ID3D12CommandQueue* queue,
+     const D3D12FrameSynthesisTicket& ticket) noexcept {
+     try {
+-        std::scoped_lock lock(mutex_);
+-        if (impl_ == nullptr || queue == nullptr) {
++        // DCS Control (0059): consumer_mutex_ alone, never mutex_: a
++        // submission on the application thread holds that for as long as
++        // the driver takes, and this is the presenter's.
++        std::scoped_lock lock(consumer_mutex_);
++        if (consumer_queue_ == nullptr || queue == nullptr) {
+             return E_INVALIDARG;
+         }
+         // The synthetic's value, never the pair's, and it only matters while
+@@ -9792,15 +9827,15 @@
+         const std::uint64_t value = ticket.synthetic_fence_value != 0
+             ? ticket.synthetic_fence_value
+             : ticket.fence_value;
+-        if (value == 0 || impl_->fence == nullptr) {
++        if (value == 0 || consumer_fence_ == nullptr) {
+             return E_UNEXPECTED;
+         }
+         // Same queue on both sides means the submission is already ordered;
+         // the wait would be redundant rather than wrong.
+-        if (queue == impl_->queue.Get()) {
++        if (queue == consumer_queue_) {
+             return S_FALSE;
+         }
+-        return queue->Wait(impl_->fence.Get(), value);
++        return queue->Wait(consumer_fence_, value);
+     } catch (...) {
+         return E_FAIL;
+     }
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1171,6 +1171,13 @@
+         if (presenter_pace_timer != nullptr) {
+             CloseHandle(presenter_pace_timer);
+         }
++        // DCS Control (0059).
++        if (presenter_one_timer != nullptr) {
++            CloseHandle(presenter_one_timer);
++        }
++        if (presenter_frame_event != nullptr) {
++            CloseHandle(presenter_frame_event);
++        }
+         if (application_release_timer != nullptr) {
+             CloseHandle(application_release_timer);
+         }
+@@ -1927,6 +1934,10 @@
+     // told time carries (see xrfg::latency::cadence_told_time).
+     XrTime cadence_told_base{};
+     std::atomic<std::int64_t> cadence_slip{0};
++    // DCS Control (0059): the told time's offset per level, resynchronised
++    // on where real frames are shown (presenter_mutex; see
++    // xrfg::latency::CadenceTimeResync). Starts over with the told time.
++    xrfg::latency::CadenceTimeResync cadence_resync;
+     // The submissions the last application frame queued, for the admission
+     // bound (xrfg::latency::cadence_admission_bound). xrEndFrame thread.
+     std::uint32_t cadence_previous_frames{};
+@@ -1958,6 +1969,14 @@
+     // millisecond without changing the process-wide timer period, which a
+     // layer has no business doing to its host.
+     HANDLE presenter_pace_timer{};
++    // DCS Control (0059): the 1X deadline's wait (cadence_one_deadline_armed_
++    // locked), on the presenter thread: a high-resolution timer for the
++    // deadline and an auto-reset event every queued submission sets, waited
++    // for together - a condition variable's timeout is the 15.6 ms system
++    // tick, three times the 5.6 ms deadline at 90 Hz. Made the first time a
++    // deadline is armed, under presenter_mutex (the event is set under it).
++    HANDLE presenter_one_timer{};
++    HANDLE presenter_frame_event{};
+     // The smallest display period the runtime has reported, which is the one
+     // the hardware actually scans at. Not the latest reported value: SteamVR
+     // returns a multiple of the true period when it considers the caller
+@@ -6725,6 +6744,7 @@
+             : state->presenter_frame_state.predictedDisplayPeriod;
+         if (!cadence) {
+             state->cadence_told_base = 0;
++            state->cadence_resync.reset(); // DCS Control (0059)
+         }
+         const XrDuration virtual_period = generation_off
+             ? state->presenter_frame_state.predictedDisplayPeriod
+@@ -6807,14 +6827,33 @@
+             cadence_frames = cadence_level;
+             const XrTime estimate =
+                 add_display_duration(presenter_anchor, virtual_period);
++            const std::int64_t slip = state->cadence_slip.exchange(0);
++            // DCS Control (0059): the frames told before this one land off by
++            // what the presenter lost or gained since, as designed: the
++            // resync does not judge them.
++            if (slip != 0) {
++                state->cadence_resync.settle(static_cast<xrfg::latency::Nanoseconds>(
++                    state->last_virtual_display_time));
++            }
+             const XrTime base = static_cast<XrTime>(xrfg::latency::cadence_told_time(
+                 static_cast<xrfg::latency::Nanoseconds>(state->cadence_told_base),
+                 cadence_frames,
+-                state->cadence_slip.exchange(0),
++                slip,
+                 static_cast<xrfg::latency::Nanoseconds>(estimate),
+                 static_cast<xrfg::latency::Nanoseconds>(cadence_period)));
+             state->cadence_told_base = base;
+-            virtual_time = add_display_duration(base, display_time_correction);
++            // DCS Control (0059): plus this level's resynchronised offset
++            // (xrfg::latency::CadenceTimeResync), outside the base: the
++            // base's own drift bound is against the presenter's estimate.
++            // Signed: 1X's offset is negative (add_display_duration ignores
++            // one); the floor below keeps the told time advancing.
++            const XrDuration told_offset = display_time_correction +
++                static_cast<XrDuration>(state->cadence_resync.offset_for(
++                    cadence_frames,
++                    static_cast<xrfg::latency::Nanoseconds>(cadence_period)));
++            virtual_time = told_offset >= 0
++                ? add_display_duration(base, told_offset)
++                : base > -told_offset ? base + told_offset : 1;
+         }
+         if (!cadence && state->last_virtual_display_time != 0 &&
+             virtual_time <= state->last_virtual_display_time) {
+@@ -8922,6 +8961,9 @@
+     // private images this frame names (SessionState::capture_epoch), 0 not
+     // known.
+     std::uint64_t capture_epoch{};
++    // DCS Control (0059): its application frame's own cadence under adaptive
++    // cadence (1X 1, 2 or 3), 0 outside it.
++    std::uint32_t cadence_frames{};
+ };
+ 
+ // Whether every output a synthetic names has been written. A fence that
+@@ -9462,6 +9504,27 @@
+     }
+ }
+ 
++// DCS Control (0059): at adaptive cadence's 1X, a slot whose application
++// frame has not come is not waited for past its deadline
++// (xrfg::latency::cadence_one_deadline) when the 2X hold has a real frame to
++// re-present instead (hold_repeat_locked: `[ofxr] pipelined_deep_hold`, a
++// pipelined presenter with the late-frame skip's copy): the slot re-presents
++// it (407) and the frame takes the next one. Before, the presenter waited for
++// the frame however late it was: an application a few ms behind its slot
++// (DCS at its own 90 fps limiter after one long frame) stayed behind it for
++// good, every hand-over late, until the runtime dropped a slot. Nothing
++// queued, nothing the presenter keeps. presenter_mutex held.
++[[nodiscard]] bool cadence_one_deadline_armed_locked(const SessionState& state) noexcept {
++    return state.cadence_running.load(std::memory_order_relaxed) &&
++        state.cadence_hold.load(std::memory_order_relaxed) == 1 &&
++        state.presenter_last_frame == nullptr &&
++        state.presenter_submissions.empty() &&
++        state.presenter_display_period > 0 &&
++        !state.presenter_stop_requested &&
++        XR_SUCCEEDED(state.presenter_failure) &&
++        hold_repeat_locked(state) != nullptr;
++}
++
+ [[nodiscard]] bool triple_depth_slot_due_locked(const SessionState& state) noexcept {
+     if (!state.triple_depth.pending || !state.deep_pipeline ||
+         state.frames_per_application_frame <= 2 ||
+@@ -10077,6 +10140,13 @@
+                         ? static_cast<std::uint32_t>(slots - 1)
+                         : 0U;
+                 }
++                // DCS Control (0059): every frame told so far lands that
++                // much later, as designed: not judged by the resync.
++                if (cadence_skipped != 0) {
++                    state->cadence_resync.settle(
++                        static_cast<xrfg::latency::Nanoseconds>(
++                            state->last_virtual_display_time));
++                }
+             }
+             state->presenter_frame_state = frame_state;
+             state->presenter_frame_state.next = nullptr;
+@@ -10189,16 +10259,77 @@
+         //
+         // DCS VR Control (0006): nor a slot the late-frame skip re-presents,
+         // which is not to wait for the application at all.
++        // DCS Control (0059): at adaptive cadence's 1X, bounded where the
++        // slot can re-present the last real frame instead
++        // (cadence_one_deadline_armed_locked).
++        bool one_deadline_passed = false;
+         {
+             std::unique_lock lock(state->presenter_mutex);
+-            state->presenter_condition.wait(lock, [&] {
++            const auto composition_ready = [&] {
+                 return state->presenter_stop_requested ||
+                        XR_FAILED(state->presenter_failure) ||
+                        state->presenter_last_frame != nullptr ||
+                        !state->presenter_submissions.empty() ||
+                        late_skip_slot_due_locked(*state) ||
+                        triple_depth_slot_due_locked(*state); // 0007
+-            });
++            };
++            if (!composition_ready() && cadence_one_deadline_armed_locked(*state)) {
++                const auto deadline = wait_returned + std::chrono::nanoseconds(
++                    xrfg::latency::cadence_one_deadline(
++                        static_cast<xrfg::latency::Nanoseconds>(
++                            state->presenter_display_period)));
++                if (state->presenter_one_timer == nullptr) {
++                    state->presenter_one_timer = CreateWaitableTimerExW(
++                        nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
++                        TIMER_ALL_ACCESS);
++                }
++                if (state->presenter_frame_event == nullptr) {
++                    state->presenter_frame_event =
++                        CreateEventW(nullptr, FALSE, FALSE, nullptr);
++                }
++                LARGE_INTEGER due{};
++                due.QuadPart = -std::max<LONGLONG>(1,
++                    std::chrono::duration_cast<std::chrono::nanoseconds>(
++                        deadline - std::chrono::steady_clock::now()).count() / 100);
++                if (state->presenter_one_timer != nullptr &&
++                    state->presenter_frame_event != nullptr &&
++                    SetWaitableTimer(state->presenter_one_timer, &due, 0,
++                        nullptr, nullptr, FALSE)) {
++                    // Whichever comes first: a submission (the event, set
++                    // under this lock, so none is lost between the test and
++                    // the wait) or the deadline. Anything else the
++                    // condition says (a stop, a failure) waits at most until
++                    // the deadline.
++                    const HANDLE handles[2] = {
++                        state->presenter_frame_event, state->presenter_one_timer};
++                    // Bounded on its own as well, a little past the deadline.
++                    const DWORD bound_ms = static_cast<DWORD>(std::max<std::int64_t>(0,
++                        std::chrono::duration_cast<std::chrono::milliseconds>(
++                            deadline - std::chrono::steady_clock::now()).count()) + 2);
++                    while (!composition_ready()) {
++                        lock.unlock();
++                        const DWORD woke = WaitForMultipleObjects(
++                            2, handles, FALSE, bound_ms);
++                        lock.lock();
++                        // The event: a submission, or one set before this
++                        // wait (tested again). Anything else is the deadline.
++                        if (woke != WAIT_OBJECT_0) {
++                            break;
++                        }
++                    }
++                    static_cast<void>(CancelWaitableTimer(state->presenter_one_timer));
++                    one_deadline_passed = !composition_ready() &&
++                        cadence_one_deadline_armed_locked(*state);
++                } else {
++                    one_deadline_passed =
++                        !state->presenter_condition.wait_until(
++                            lock, deadline, composition_ready) &&
++                        cadence_one_deadline_armed_locked(*state);
++                }
++            }
++            if (!one_deadline_passed) {
++                state->presenter_condition.wait(lock, composition_ready);
++            }
+         }
+ 
+         XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+@@ -10343,6 +10474,15 @@
+             std::uint64_t frame_slot_record = 0;
+             std::int64_t frame_slot_residual_ns = 0;
+             std::int64_t frame_slot_period_ns = 0;
++            // DCS Control (0059): a 1X slot re-presented at its deadline
++            // (407), and a move of adaptive cadence's told-time offset, both
++            // recorded after the lock.
++            bool one_repeat = false;
++            std::uint64_t one_repeat_epoch = 0;
++            std::int64_t resync_moved = 0;
++            std::uint32_t resync_level = 0;
++            std::int64_t resync_offset = 0;
++            std::uint32_t resync_moves = 0;
+             // DCS VR Control (0006): how long after its slot's wait this goes
+             // out, less the pace's own hold; and the late-frame skip's part in
+             // this slot, all decided under the lock and acted on after it.
+@@ -10664,6 +10804,36 @@
+                             frame_slot_period_ns = static_cast<std::int64_t>(
+                                 state->presenter_display_period);
+                         }
++                        // DCS Control (0059): adaptive cadence's told time,
++                        // resynchronised on where its real frames land
++                        // (xrfg::latency::CadenceTimeResync).
++                        if (real_info != nullptr && request->owned_frame &&
++                            request->owned_frame->cadence_frames != 0 &&
++                            state->cadence_running.load(std::memory_order_relaxed) &&
++                            frame_state.shouldRender == XR_TRUE &&
++                            real_info->displayTime > 0 &&
++                            frame_state.predictedDisplayTime > 0 &&
++                            state->presenter_display_period > 0) {
++                            const std::uint32_t frames =
++                                request->owned_frame->cadence_frames;
++                            resync_moved = state->cadence_resync.observe(
++                                frames,
++                                static_cast<xrfg::latency::Nanoseconds>(
++                                    real_info->displayTime),
++                                static_cast<xrfg::latency::Nanoseconds>(
++                                    frame_state.predictedDisplayTime -
++                                    real_info->displayTime),
++                                static_cast<xrfg::latency::Nanoseconds>(
++                                    state->presenter_display_period),
++                                static_cast<xrfg::latency::Nanoseconds>(
++                                    state->last_virtual_display_time));
++                            if (resync_moved != 0) {
++                                resync_level = frames <= 1 ? 1U : 2U;
++                                resync_offset =
++                                    state->cadence_resync.periods_for(frames);
++                                resync_moves = state->cadence_resync.moves;
++                            }
++                        }
+                         if (real_info != nullptr &&
+                             state->display_time_correction_enabled &&
+                             frame_state.shouldRender == XR_TRUE &&
+@@ -10683,6 +10853,18 @@
+                     }
+                 } else if (!state->presenter_stop_requested) {
+                     repeated_frame = state->presenter_last_frame;
++                    // DCS Control (0059): adaptive cadence's 1X past its
++                    // deadline: the last real frame again (the 2X hold's
++                    // copy, marked in flight as 406 marks it), and the
++                    // application's frame takes the next slot.
++                    if (repeated_frame == nullptr && one_deadline_passed) {
++                        if (auto repeat = hold_repeat_locked(*state)) {
++                            one_repeat = true;
++                            one_repeat_epoch = repeat->capture_epoch;
++                            state->hold_repeat_in_flight = repeat->capture_epoch;
++                            repeated_frame = std::move(repeat);
++                        }
++                    }
+                     // The slot came with nothing queued: the application
+                     // missed it. In 3X off SteamVR, judged as the first
+                     // synthetic's when it was the one due.
+@@ -10715,6 +10897,39 @@
+                 state->frames_per_application_frame == 2) {
+                 state->adaptive_missed_slots.fetch_add(missed_slots);
+             }
++            // DCS Control (0059): a 1X slot re-presented at its deadline is
++            // one 1X missed (adaptive_throughput result=6), and recorded:
++            // presenter_transition 407, a= how long after the slot's wait it
++            // went (us), b= the display period (us), c= the capture epoch of
++            // the frame re-presented.
++            if (one_repeat) {
++                if (state->adaptive_active.load()) {
++                    state->cadence_missed_second.fetch_add(1);
++                }
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::presenter_transition,
++                    407,
++                    static_cast<std::uint64_t>(
++                        std::max<std::int64_t>(0, wait_to_pop.count()) / 1000),
++                    static_cast<std::uint64_t>(
++                        state->presenter_display_period / 1000),
++                    one_repeat_epoch);
++            }
++            // DCS Control (0059): adaptive_switch result=14, adaptive
++            // cadence's told time resynchronised; see bridge_flight_logger.hpp.
++            if (resync_moved != 0) {
++                const auto signed_field = [](std::int64_t value) {
++                    return static_cast<std::uint64_t>(
++                        static_cast<std::uint32_t>(static_cast<std::int32_t>(value)));
++                };
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::adaptive_switch,
++                    14,
++                    resync_level,
++                    signed_field(resync_moved),
++                    signed_field(resync_offset) |
++                        (static_cast<std::uint64_t>(resync_moves & 0xFFFFU) << 32));
++            }
+             // DCS Control (0048): the frame_slot record; see
+             // BridgeFlightOperation::frame_slot.
+             if (frame_slot_record != 0) {
+@@ -10723,11 +10938,14 @@
+                 const std::uint64_t size_us = std::min<std::uint64_t>(
+                     static_cast<std::uint64_t>(residual < 0 ? -residual : residual) / 1000,
+                     0xFFFFFFFFULL);
++                // DCS Control (0059): whole periods with a threshold of 0.75
++                // and a half rounded down (xrfg::latency::residual_periods),
++                // not rounded half up: half a period is not one late.
+                 std::uint64_t periods_late = 0;
+                 if (residual > 0 && frame_slot_period_ns > 0) {
+                     periods_late = std::min<std::uint64_t>(
+-                        static_cast<std::uint64_t>(
+-                            (residual + frame_slot_period_ns / 2) / frame_slot_period_ns),
++                        static_cast<std::uint64_t>(xrfg::latency::residual_periods(
++                            residual, frame_slot_period_ns)),
+                         255);
+                 }
+                 xrfg::bridge_flight_logger().timed_event(
+@@ -11841,6 +12059,14 @@
+             // DCS Control (0050): a slot re-presented from the late-frame
+             // skip's copy has gone out (notified below).
+             state->hold_repeat_in_flight = 0;
++            // DCS Control (0059): the slot lost above (cadence_slip): every
++            // frame told so far lands a slot later, as designed, and is not
++            // judged by the resync.
++            if (!request && XR_SUCCEEDED(end_result) &&
++                state->cadence_running.load(std::memory_order_relaxed)) {
++                state->cadence_resync.settle(static_cast<xrfg::latency::Nanoseconds>(
++                    state->last_virtual_display_time));
++            }
+             if (request) {
+                 request->result = end_result;
+                 request->completed = true;
+@@ -11940,7 +12166,26 @@
+             // a rate (see AdaptiveConfig::stall).
+             if (submitted_late && state->adaptive_active.load() &&
+                 wait_to_submit <= xrfg::latency::AdaptiveConfig{}.stall) {
+-                if (state->frames_per_application_frame == 2 && request) {
++                // DCS Control (0059): a frame of adaptive cadence's 1X (its
++                // own cadence; the controller's where it carries none) only
++                // past cadence_one_deadline: R110's hand-overs 2-5.6 ms late
++                // were shown in their slot, and counted missed they took 1X
++                // down at 6-8 ms of work.
++                const std::uint32_t request_cadence =
++                    request && request->owned_frame
++                    ? request->owned_frame->cadence_frames
++                    : 0U;
++                const bool cadence_one_frame =
++                    state->cadence_running.load(std::memory_order_relaxed) &&
++                    (request_cadence != 0
++                         ? request_cadence == 1
++                         : state->cadence_hold.load(std::memory_order_relaxed) == 1);
++                const bool one_within_deadline = cadence_one_frame &&
++                    wait_to_submit < xrfg::latency::cadence_one_deadline(
++                        static_cast<xrfg::latency::Nanoseconds>(
++                            state->presenter_display_period));
++                if (state->frames_per_application_frame == 2 && request &&
++                    !one_within_deadline) {
+                     // 2X: a slot that went out late is a slot missed.
+                     // DCS Control (0032): adaptive cadence's 1X as well.
+                     state->adaptive_missed_slots.fetch_add(1);
+@@ -11948,6 +12193,8 @@
+                         state->cadence_hold.load(std::memory_order_relaxed) == 1) {
+                         state->cadence_missed_second.fetch_add(1);
+                     }
++                } else if (one_within_deadline) {
++                    // DCS Control (0059): shown in its slot; not a miss.
+                 } else if (submission_kind == SubmissionKind::gen1) {
+                     state->adaptive_late_leaders.fetch_add(1);
+                 }
+@@ -12189,6 +12436,7 @@
+         // own prediction.
+         state->cadence_told_base = 0;
+         state->cadence_slip = 0;
++        state->cadence_resync.reset(); // DCS Control (0059)
+         // A schedule left over from a previous presenter would stall the first
+         // submission of this one.
+         // A display time from a previous presenter says nothing about this
+@@ -12733,6 +12981,10 @@
+         }
+         state->presenter_submissions.push_back(request);
+         ++state->outstanding_presenter_submissions;
++        // DCS Control (0059): a presenter waiting for a 1X deadline.
++        if (state->presenter_frame_event != nullptr) {
++            SetEvent(state->presenter_frame_event);
++        }
+     }
+     state->presenter_condition.notify_all();
+     return request;
+@@ -12863,6 +13115,10 @@
+         }
+         state->presenter_submissions.push_back(std::move(second));
+         ++state->outstanding_presenter_submissions;
++        // DCS Control (0059): a presenter waiting for a 1X deadline.
++        if (state->presenter_frame_event != nullptr) {
++            SetEvent(state->presenter_frame_event);
++        }
+         state->presenter_condition.notify_all();
+         return XR_SUCCESS;
+     } catch (...) {
+@@ -13839,8 +14095,16 @@
+             (static_cast<std::uint64_t>(
+                  synthetic_destination_index) << 32) |
+                 current_destination_index);
++        // DCS Control (0059): where a slow submission's time went (slow_step
++        // result=7): the GPU lock, the D3D11 interop's preparation, the
++        // synthesizer's submission, the interop's publish.
++        const auto synthesis_entered = std::chrono::steady_clock::now();
++        auto synthesis_locked = synthesis_entered;
++        auto synthesis_prepared = synthesis_entered;
++        auto synthesis_submitted = synthesis_entered;
+         {
+             std::scoped_lock gpu_lock(state->session->gpu_mutex);
++            synthesis_locked = std::chrono::steady_clock::now(); // 0059
+             log_completed_nvidia_gpu_timings(
+                 &state->session->layer_gpu_ns,
+                 &state->session->layer_optical_flow_ns,
+@@ -13850,6 +14114,7 @@
+                 submit_result =
+                     generation->interop->prepare_synthesis();
+             }
++            synthesis_prepared = std::chrono::steady_clock::now(); // 0059
+             // DCS VR Control (0008): the visibility masks, when they changed.
+             if (const std::uint32_t mask_version =
+                     refresh_visibility_masks(*state->session);
+@@ -13907,6 +14172,7 @@
+                                           &ticket,
+                                           motion_vectors);
+             }
++            synthesis_submitted = std::chrono::steady_clock::now(); // 0059
+             if (SUCCEEDED(submit_result) && generation->interop) {
+                 const auto publish_token = xrfg::bridge_flight_logger().begin(
+                     xrfg::BridgeFlightOperation::d3d11_publish,
+@@ -13946,6 +14212,27 @@
+             ticket.previous_serial,
+             ticket.current_serial,
+             ticket.fence_value);
++        // DCS Control (0059): slow_step result=7, from 20 ms; see
++        // bridge_flight_logger.hpp.
++        {
++            const auto synthesis_left = std::chrono::steady_clock::now();
++            const auto ms = [](std::chrono::steady_clock::duration span) {
++                return std::min<std::uint64_t>(
++                    static_cast<std::uint64_t>(std::max<std::int64_t>(0,
++                        std::chrono::duration_cast<std::chrono::milliseconds>(span).count())),
++                    0xFFFFU);
++            };
++            if (synthesis_left - synthesis_entered >= std::chrono::milliseconds(20)) {
++                log_slow_step(
++                    7,
++                    synthesis_entered,
++                    handle_value(application_swapchain),
++                    ms(synthesis_locked - synthesis_entered) |
++                        (ms(synthesis_prepared - synthesis_locked) << 16) |
++                        (ms(synthesis_submitted - synthesis_prepared) << 32) |
++                        (ms(synthesis_left - synthesis_submitted) << 48));
++            }
++        }
+ 
+         // The runtime orders its use of these swapchain images against the
+         // binding queue (runtime_queue): a release marks "complete as of
+@@ -15854,6 +16141,7 @@
+             // cadence's told time starts again from the presenter's estimate.
+             state->cadence_told_base = 0;
+             state->cadence_slip = 0;
++            state->cadence_resync.reset(); // DCS Control (0059)
+             // DCS Control (0029): and the stall latch is re-armed, the new
+             // scene's first frames in its quiet period.
+             stall_rearmed = rearm_generation_stall_locked(*state);
+@@ -16314,6 +16602,7 @@
+             // DCS Control (0032): and adaptive cadence's told time.
+             state->cadence_told_base = 0;
+             state->cadence_slip = 0;
++            state->cadence_resync.reset(); // DCS Control (0059)
+         }
+         clear_generation_continuity(state);
+         if (adaptive) {
+@@ -17487,6 +17776,9 @@
+     // DCS Control (0050): the frame whose capture wrote these images.
+     first_generated.capture_epoch = frame_capture_epoch;
+     current_generated.capture_epoch = frame_capture_epoch;
++    // DCS Control (0059): and its own cadence, for the presenter.
++    first_generated.cadence_frames = cadence_hold_frames;
++    current_generated.cadence_frames = cadence_hold_frames;
+     std::shared_ptr<GeneratedFrameEndInfo> presenter_first_frame;
+     first_generated.synthetic = pair_ready;
+     first_generated.leads_frame = pair_ready;
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -5147,6 +5147,168 @@
+               << median(pipelines[0].total) << " us, two passes " << median(pipelines[1].total) << " us" << std::endl;
+ }
+ 
++// DCS Control (0059): XRFG_TEST_WARM_ONE_BENCH=1 on NVIDIA hardware: what
++// adaptive cadence's 1X costs the GPU to keep synthesis warm. Every 1X frame
++// is captured into the history (what the first pair after an exit pairs
++// with) and primed - the copy into the private current image the presenter
++// shows, which re-primes the synthesizer with that frame - while the optical
++// flow and the synthesis do not run. Timed on the queue per frame, capture
++// and prime apart, against a 2X frame's capture and pair; both eyes in one
++// image.
++void bench_warm_one(D3D12WarpFixture& fixture, UINT width, UINT height) {
++    constexpr UINT kFrames = 3;
++    constexpr int kTimed = 200;
++    std::array<ComPtr<ID3D12Resource>, kFrames> sources{};
++    std::array<ComPtr<ID3D12Resource>, 2> currents{};
++    std::array<ComPtr<ID3D12Resource>, 2> synthetics{};
++    for (UINT frame = 0; frame < kFrames; ++frame) {
++        sources[frame] = create_source_texture(fixture, width, height);
++        StereoPattern image;
++        for (UINT eye = 0; eye < kEyeCount; ++eye) {
++            image[eye].resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
++            for (std::size_t index = 0; index < image[eye].size(); ++index) {
++                // A texture that moves a little every frame.
++                image[eye][index] = static_cast<std::uint8_t>(
++                    (index / kBytesPerPixel + frame * 9U + eye * 31U) * 2654435761U >> 24);
++            }
++        }
++        upload_pattern(fixture, sources[frame].Get(), image);
++    }
++    for (auto& current : currents) current = create_source_texture(fixture, width, height);
++    for (auto& synthetic : synthetics) synthetic = create_source_texture(fixture, width, height);
++    std::array<ID3D12Resource*, kFrames> source_pointers{};
++    for (UINT index = 0; index < kFrames; ++index) source_pointers[index] = sources[index].Get();
++    std::array<ID3D12Resource*, 2> current_pointers{currents[0].Get(), currents[1].Get()};
++    std::array<ID3D12Resource*, 2> synthetic_pointers{synthetics[0].Get(), synthetics[1].Get()};
++    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++    require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(),
++                std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
++                D3D12_RESOURCE_STATE_RENDER_TARGET)), "warm 1X bench: history");
++    xrfg::D3D12FrameSynthesizer synthesizer;
++    require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(), history,
++                std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
++                std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
++                kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
++                xrfg::D3D12OpticalFlowBackend::nvidia, {}, true)), "warm 1X bench: synthesizer");
++    // Three timestamps per frame - before the capture, between it and the
++    // prime or pair, after - each in a list of its own on the same queue,
++    // which waits on a gate until the whole frame is queued.
++    ID3D12Device* device = fixture.device();
++    ID3D12CommandQueue* queue = fixture.queue();
++    D3D12_QUERY_HEAP_DESC heap_description{};
++    heap_description.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
++    heap_description.Count = 3;
++    ComPtr<ID3D12QueryHeap> heap;
++    require_hresult(device->CreateQueryHeap(&heap_description, IID_PPV_ARGS(heap.GetAddressOf())),
++        "warm 1X bench: query heap");
++    D3D12_HEAP_PROPERTIES readback_heap = heap_properties(D3D12_HEAP_TYPE_READBACK);
++    D3D12_RESOURCE_DESC readback_description{};
++    readback_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++    readback_description.Width = 3 * sizeof(std::uint64_t);
++    readback_description.Height = 1;
++    readback_description.DepthOrArraySize = 1;
++    readback_description.MipLevels = 1;
++    readback_description.SampleDesc.Count = 1;
++    readback_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++    ComPtr<ID3D12Resource> readback;
++    require_hresult(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE,
++                        &readback_description, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
++                        IID_PPV_ARGS(readback.GetAddressOf())), "warm 1X bench: readback");
++    std::array<ComPtr<ID3D12CommandAllocator>, 3> allocators{};
++    std::array<ComPtr<ID3D12GraphicsCommandList>, 3> lists{};
++    for (UINT index = 0; index < 3; ++index) {
++        require_hresult(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
++                            IID_PPV_ARGS(allocators[index].GetAddressOf())), "warm 1X bench: allocator");
++        require_hresult(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
++                            allocators[index].Get(), nullptr, IID_PPV_ARGS(lists[index].GetAddressOf())),
++            "warm 1X bench: list");
++        require_hresult(lists[index]->Close(), "warm 1X bench: close");
++    }
++    ComPtr<ID3D12Fence> gate;
++    ComPtr<ID3D12Fence> done;
++    require_hresult(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(gate.GetAddressOf())),
++        "warm 1X bench: gate");
++    require_hresult(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(done.GetAddressOf())),
++        "warm 1X bench: done");
++    std::uint64_t fence_value = 0;
++    std::uint64_t frequency = 0;
++    require_hresult(queue->GetTimestampFrequency(&frequency), "warm 1X bench: frequency");
++    const auto stamp = [&](UINT index, bool resolve) {
++        require_hresult(allocators[index]->Reset(), "warm 1X bench: reset");
++        require_hresult(lists[index]->Reset(allocators[index].Get(), nullptr), "warm 1X bench: reset list");
++        lists[index]->EndQuery(heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index);
++        if (resolve) {
++            lists[index]->ResolveQueryData(heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 3,
++                readback.Get(), 0);
++        }
++        require_hresult(lists[index]->Close(), "warm 1X bench: close");
++        ID3D12CommandList* executed[] = {lists[index].Get()};
++        queue->ExecuteCommandLists(1, executed);
++    };
++    const ReprojectionViews views = make_reprojection_views();
++    std::vector<double> one_capture, one_prime, two_capture, two_pair;
++    for (int frame = 0; frame < 2 * kTimed + 1; ++frame) {
++        // The first kTimed frames at 1X: each primes (the continuity is
++        // cleared first, as the layer's 1X frames are); then one prime and
++        // kTimed pairs at 2X.
++        const bool one = frame < kTimed;
++        const bool pair = frame > kTimed;
++        const UINT slot = static_cast<UINT>(frame) % kFrames;
++        ++fence_value;
++        require_hresult(queue->Wait(gate.Get(), fence_value), "warm 1X bench: gate wait");
++        stamp(0, false);
++        xrfg::D3D12HistoryCaptureTicket capture{};
++        xrfg::D3D12FrameSynthesisTicket ticket{};
++        require(operation_succeeded(history->capture(slot, &capture)) &&
++                    operation_succeeded(history->commit(capture)), "warm 1X bench: capture");
++        stamp(1, false);
++        if (!pair) {
++            static_cast<void>(synthesizer.retire_previous());
++        }
++        const HRESULT submitted = pair
++            ? synthesizer.submit_pair(capture, views, views, 0, static_cast<UINT>(frame) % 2U,
++                  &ticket, std::nullopt, {}, false, 0.5F, std::nullopt)
++            : synthesizer.submit_prime(capture, views, static_cast<UINT>(frame) % 2U, &ticket);
++        require(operation_succeeded(submitted), "warm 1X bench: submission");
++        stamp(2, true);
++        require_hresult(queue->Signal(done.Get(), fence_value), "warm 1X bench: signal");
++        require_hresult(gate->Signal(fence_value), "warm 1X bench: open the gate");
++        fixture.wait_for_fence(done.Get(), fence_value);
++        require_frame_start_gate(synthesizer, "warm 1X bench: frame-start gate");
++        std::uint64_t* mapped = nullptr;
++        const D3D12_RANGE read{0, 3 * sizeof(std::uint64_t)};
++        require_hresult(readback->Map(0, &read, reinterpret_cast<void**>(&mapped)), "warm 1X bench: map");
++        const auto us = [&](std::uint64_t from, std::uint64_t to) {
++            return static_cast<double>(to - from) * 1e6 / static_cast<double>(frequency);
++        };
++        const double capture_us = us(mapped[0], mapped[1]);
++        const double submission_us = us(mapped[1], mapped[2]);
++        const D3D12_RANGE written{0, 0};
++        readback->Unmap(0, &written);
++        // The first frames of each warm up.
++        if (one && frame >= 8) {
++            one_capture.push_back(capture_us);
++            one_prime.push_back(submission_us);
++        } else if (pair && frame >= kTimed + 9) {
++            two_capture.push_back(capture_us);
++            two_pair.push_back(submission_us);
++        }
++        xrfg::D3D12NvidiaGpuTiming timing{};
++        while (synthesizer.consume_nvidia_gpu_timing(&timing) == S_OK) {
++        }
++    }
++    require(operation_succeeded(synthesizer.wait_for_idle()), "warm 1X bench: idle");
++    const auto median = [](std::vector<double> values) {
++        if (values.empty()) return 0.0;
++        std::sort(values.begin(), values.end());
++        return values[values.size() / 2];
++    };
++    std::cout << "warm 1X bench " << width << "x" << height << " x2 eyes, median per frame: 1X capture "
++              << median(one_capture) << " us + prime " << median(one_prime) << " us; 2X capture "
++              << median(two_capture) << " us + pair " << median(two_pair) << " us ("
++              << one_prime.size() << "/" << two_pair.size() << " frames)" << std::endl;
++}
++
+ // XRFG_TEST_CURSOR_BENCH=1 on NVIDIA hardware: the detection's and the
+ // composition's GPU time at a headset's resolution, the cursor moving every
+ // frame (one acquisition, then tracking), against the feature off.
+@@ -5650,7 +5812,7 @@
+         // The benches (ctest label bench) run on the optical-flow engine.
+         for (const char* bench : {"XRFG_TEST_PARALLEL_EYES_BENCH", "XRFG_TEST_DCS_MOTION_BENCH",
+                  "XRFG_TEST_COCKPIT_DEPTH_BENCH", "XRFG_TEST_OCCLUSION_BENCH", "XRFG_TEST_TRIPLE_BENCH",
+-                 "XRFG_TEST_CURSOR_BENCH"}) {
++                 "XRFG_TEST_CURSOR_BENCH", "XRFG_TEST_WARM_ONE_BENCH"}) { // 0059
+             if (GetEnvironmentVariableA(bench, nullptr, 0) && !nvidia_hardware_present()) {
+                 std::cout << bench << " skipped: no NVIDIA hardware adapter\n";
+                 return kSkipped;
+@@ -5744,6 +5906,14 @@
+             bench_fixture.require_no_debug_errors();
+             return 0;
+         }
++        // DCS Control (0059): adaptive cadence's warm 1X.
++        if (GetEnvironmentVariableA("XRFG_TEST_WARM_ONE_BENCH", nullptr, 0)) {
++            D3D12WarpFixture bench_fixture(true);
++            bench_warm_one(bench_fixture, 2712, 2678);
++            bench_warm_one(bench_fixture, 3200, 3200);
++            bench_fixture.require_no_debug_errors();
++            return 0;
++        }
+         if (GetEnvironmentVariableA("XRFG_TEST_CURSOR_BENCH", nullptr, 0)) {
+             D3D12WarpFixture bench_fixture(true);
+             bench_smooth_cursor(bench_fixture, 2560, 2560);
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -2921,10 +2921,144 @@
+         "deep hold: capture_slot_reused");
+ }
+ 
++// DCS Control (0059): a residual in whole periods, rounded half down from
++// 0.75 of a period (the frame_slot record's periods late, and the resync's
++// unit).
++void residual_period_tests() {
++    constexpr Nanoseconds kP = 11'111'111;
++    require(residual_periods(0, kP) == 0, "residual: on time");
++    require(residual_periods(kP / 2, kP) == 0,
++        "residual: exactly half a period (5.6 ms at 90 Hz) is not late");
++    require(residual_periods(-(kP / 2), kP) == 0, "residual: half a period early is 0");
++    require(residual_periods(kP * 3 / 4 - 1, kP) == 0, "residual: just under 0.75 is 0");
++    require(residual_periods(kP * 3 / 4 + 1, kP) == 1, "residual: 0.75 is one period");
++    require(residual_periods(kP, kP) == 1 && residual_periods(-kP, kP) == -1,
++        "residual: one period either way");
++    require(residual_periods(kP * 3 / 2, kP) == 1, "residual: 1.5 rounds down");
++    require(residual_periods(kP * 3 / 2 + 2, kP) == 2, "residual: past 1.5 is two");
++    require(residual_periods(22'207'000, kP) == 2, "residual: R110's late=2 frames");
++    require(residual_periods(-22'221'000, kP) == -2, "residual: R110's early 1X frames");
++    require(residual_periods(kP, 0) == 0, "residual: no period");
++    require(cadence_one_deadline(kP) == kP / 2 && cadence_one_deadline(0) == 0,
++        "1X deadline: half a period");
++}
++
++// DCS Control (0059): adaptive cadence's told time resynchronised per level.
++void cadence_resync_tests() {
++    constexpr Nanoseconds kP = 10'000'000;
++    {
++        CadenceTimeResync resync{};
++        Nanoseconds told = 1'000'000'000;
++        // Two frames off by two periods: not yet.
++        require(resync.observe(2, told += kP, 2 * kP, kP, told + 3 * kP) == 0 &&
++                    resync.observe(2, told += kP, 2 * kP + 300'000, kP, told + 3 * kP) == 0,
++            "resync: two frames do not move it");
++        // The third does; 1X follows the common part.
++        const Nanoseconds last_told = told + 3 * kP;
++        require(resync.observe(2, told += kP, 2 * kP - 200'000, kP, last_told) == 2,
++            "resync: three frames two periods late move it two later");
++        require(resync.periods_for(2) == 2 && resync.periods_for(3) == 2 &&
++                    resync.periods_for(1) == 2 && resync.moves == 1,
++            "resync: the common part moves every level");
++        // Frames told before the move are not judged.
++        for (int index = 0; index < 5; ++index) {
++            require(resync.observe(2, last_told - index, 2 * kP, kP, last_told + kP) == 0,
++                "resync: frames told before the move are settled");
++        }
++        require(resync.streak == 0, "resync: settled frames start no run");
++        // A frame on time breaks a run.
++        told = last_told;
++        require(resync.observe(1, told += kP, -kP, kP, told) == 0 &&
++                    resync.observe(1, told += kP, -kP, kP, told) == 0 &&
++                    resync.observe(1, told += kP, 0, kP, told) == 0 &&
++                    resync.observe(1, told += kP, -kP, kP, told) == 0 &&
++                    resync.observe(1, told += kP, -kP, kP, told) == 0,
++            "resync: a frame on time breaks the run");
++        require(resync.observe(1, told += kP, -kP, kP, told) == -1,
++            "resync: 1X one period early moves its own part");
++        require(resync.periods_for(1) == 1 && resync.periods_for(2) == 2 &&
++                    resync.offset[0] == -1,
++            "resync: 1X's part leaves 2's alone");
++        // Levels do not mix in one run.
++        require(resync.observe(1, told += kP, kP, kP, told) == 0 &&
++                    resync.observe(2, told += kP, kP, kP, told) == 0 &&
++                    resync.observe(1, told += kP, kP, kP, told) == 0 &&
++                    resync.streak == 1,
++            "resync: a run is one level's");
++        // A lost slot settles what was told so far.
++        resync.settle(told);
++        require(resync.observe(2, told, kP, kP, told) == 0 && resync.streak == 0,
++            "resync: settle");
++        // Outside adaptive cadence (frames 0) nothing.
++        require(resync.observe(0, told + kP, 5 * kP, kP, told + kP) == 0,
++            "resync: no cadence");
++    }
++    {
++        // Bounded either way.
++        CadenceTimeResync resync{};
++        Nanoseconds told = 1'000'000'000;
++        for (int run = 0; run < 3; ++run) {
++            for (int index = 0; index < 3; ++index) {
++                static_cast<void>(resync.observe(2, told += kP, 5 * kP, kP, told));
++            }
++            told += 10 * kP;
++        }
++        require(resync.periods_for(2) == CadenceTimeResync::kMaxPeriods,
++            "resync: bounded at kMaxPeriods");
++        resync.reset();
++        require(resync.periods_for(1) == 0 && resync.moves == 0, "resync: reset");
++    }
++    {
++        // R110's shape: 1X's frames land two periods sooner than 2's. Told
++        // with the resync's offset, shown at the level's own shape; each
++        // frame observed two frames after it was told (frames in flight).
++        // Before 0059 every entry was shown 2 periods early until the
++        // correction learned 1X, and every exit 2 periods late (43-44
++        // frames) until it learned 2 again.
++        CadenceTimeResync resync{};
++        struct Told { std::uint32_t frames; Nanoseconds told; std::int64_t periods; };
++        std::vector<Told> in_flight;
++        Nanoseconds told = 1'000'000'000;
++        const auto shape = [](std::uint32_t frames) -> std::int64_t {
++            return frames == 1 ? -2 : 0;
++        };
++        const auto run = [&](std::uint32_t frames, int count) {
++            int off = 0;
++            for (int index = 0; index < count; ++index) {
++                told += frames * kP;
++                in_flight.push_back({frames, told, resync.periods_for(frames)});
++                if (in_flight.size() > 2) {
++                    const Told shown = in_flight.front();
++                    in_flight.erase(in_flight.begin());
++                    // Jitter of a quarter period either way.
++                    const Nanoseconds jitter = (index % 3 - 1) * kP / 4;
++                    const Nanoseconds residual =
++                        (shape(shown.frames) - shown.periods) * kP + jitter;
++                    off += residual_periods(residual, kP) != 0 ? 1 : 0;
++                    static_cast<void>(resync.observe(
++                        shown.frames, shown.told, residual, kP, told));
++                }
++            }
++            return off;
++        };
++        require(run(2, 300) == 0, "resync shape: 2 on time from the start");
++        const int first_entry = run(1, 300);
++        require(first_entry > 0 && first_entry <= 6,
++            "resync shape: the first 1X is resynchronised within a few frames (" +
++                std::to_string(first_entry) + ")");
++        require(run(2, 300) == 0, "resync shape: the exit is on time");
++        require(run(1, 300) == 0, "resync shape: the next 1X comes back where it was");
++        require(run(2, 300) == 0 && resync.moves == 1,
++            "resync shape: one move in all (" + std::to_string(resync.moves) + ")");
++    }
++}
++
+ } // namespace
+ 
+ int main() {
+     try {
++        residual_period_tests(); // DCS Control (0059)
++        cadence_resync_tests(); // DCS Control (0059)
+         triple_release_tests();
+         triple_slack_tests();
+         display_time_tests();
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -292,6 +292,50 @@
+ // Then light long enough for 1X - its frames shown alone, no synthetic - and
+ // heavy until it leaves. layer_adaptive_cadence.cmake checks the flight log.
+ bool g_cadence_mode = false;
++// dcs-cadence-exit (DCS Control, 0059): dcs-cadence's shape under `[ofxr]
++// pipelined_deep_hold` as well (DCS's R110 run): light until 1X, two seconds
++// in it, then left on missed slots as R110's exits were - two primes held
++// 60 ms 150 ms apart (XRFG_TEST_SLOW_PRIME), the load unchanged - and a
++// second at 2. Every real frame told at 1X past its first ten (to the held
++// primes), and every one told after the exit, must be shown at its told time
++// (within 0.75 of a period: two at most are not, one period late each - the
++// slot the deeper pipeline takes, once or twice); a synthetic within the first two application frames of 2; at
++// most two slots re-presented; no other application xrEndFrame over 50 ms
++// from 1X on. Before 0059 the stretch at 1X was shown 3 periods early until
++// the display time correction learned it, and the exit 3 periods late until
++// it learned 2 again (R110: 43-44 frames).
++bool g_cadence_exit_mode = false;
++// dcs-cadence-jitter (DCS Control, 0059): the same ini, the fake display on a
++// fixed vsync grid (g_fixed_display_grid), and an application paced by its
++// own limiter at the display's rate, as R110's DCS at 90 fps: light until 1X,
++// then light frames that vary frame to frame, handed over 1.75-2.75 ms after
++// their slot's wait returned - past the 2 ms line the 1X miss count had, and
++// shown in their slots, as DCS's were. layer_adaptive_cadence_59.cmake reads
++// the flight log: no slot missed at 1X and 1X not left on missed slots.
++bool g_cadence_jitter_mode = false;
++// dcs-cadence-stall (DCS Control, 0059): the same, a second into 1X one prime
++// held 150 ms inside the synthesizer (XRFG_TEST_SLOW_PRIME, set below before
++// the layer loads; R110 held one 210 ms in the driver): the presenter must
++// keep a submission in every slot meanwhile (presenter_transition 407), no
++// other application xrEndFrame may take 50 ms.
++bool g_cadence_stall_mode = false;
++bool g_cadence_jitter_shape = false; // either of the two
++// 0059: the fake display's vsync on a fixed grid: a wait returns at the next
++// grid point after it is called, its predicted display time advanced by the
++// grid points passed since the last (a slot the runtime skipped).
++bool g_fixed_display_grid = false;
++std::atomic<std::int64_t> g_grid_origin_ns{0};
++// 0059: the application's own limiter: its xrBeginFrame not before this
++// (steady_clock, ns; 0 none).
++std::atomic<std::int64_t> g_begin_not_before_ns{0};
++// 0059: when the presenter's submissions reached the fake (steady_clock).
++std::mutex g_presenter_end_mutex;
++std::vector<std::chrono::steady_clock::time_point> g_presenter_end_times;
++// 0059: the application's longest xrEndFrame while g_cadence_time_ends.
++std::atomic<bool> g_cadence_time_ends{false};
++double g_cadence_longest_end_ms = 0.0;
++// 0059: when the application last entered xrEndFrame (steady_clock, ns).
++std::atomic<std::int64_t> g_last_end_entered_ns{0};
+ // dcs-throughput-down / dcs-throughput-gpu (DCS VR Control, 0004):
+ // dcs-adaptive's shape, starting in 3X, with the application's CPU and GPU
+ // time per frame set apart - CPU by a sleep from the frame's start, GPU by a
+@@ -748,12 +792,15 @@
+ // of a kFakeDisplayPeriod grid, so the wall clock and the display times the
+ // fake hands out advance together and a release delay means what it would on
+ // a headset. A high-resolution timer: a sleep rounds up to the system tick.
+-void pace_like_a_display() {
++// DCS Control (0059): returns the grid points passed since the last wait (1
++// but on g_fixed_display_grid, where a late call skips them).
++std::int64_t pace_like_a_display() {
+ #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+ #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+ #endif
+     static std::mutex pace_mutex;
+     static std::chrono::steady_clock::time_point next_tick{};
++    static std::int64_t last_tick_index = 0; // 0059
+     static HANDLE timer = [] {
+         HANDLE created = CreateWaitableTimerExW(
+             nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+@@ -763,14 +810,35 @@
+             : CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+     }();
+     std::chrono::steady_clock::time_point target{};
++    std::int64_t advanced = 1;
+     {
+         std::scoped_lock lock(pace_mutex);
+         const auto now = std::chrono::steady_clock::now();
+-        if (next_tick < now) {
+-            next_tick = now;
++        if (g_fixed_display_grid) {
++            // DCS Control (0059): the next grid point after now.
++            std::int64_t origin = g_grid_origin_ns.load(std::memory_order_acquire);
++            if (origin == 0) {
++                origin = std::chrono::duration_cast<std::chrono::nanoseconds>(
++                    now.time_since_epoch()).count();
++                g_grid_origin_ns.store(origin, std::memory_order_release);
++            }
++            const std::int64_t since =
++                std::chrono::duration_cast<std::chrono::nanoseconds>(
++                    now.time_since_epoch()).count() - origin;
++            const std::int64_t index = since / kFakeDisplayPeriod + 1;
++            advanced = last_tick_index != 0 && index > last_tick_index
++                ? index - last_tick_index
++                : 1;
++            last_tick_index = std::max(last_tick_index, index);
++            target = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(
++                origin + last_tick_index * kFakeDisplayPeriod));
++        } else {
++            if (next_tick < now) {
++                next_tick = now;
++            }
++            next_tick += std::chrono::nanoseconds(kFakeDisplayPeriod);
++            target = next_tick;
+         }
+-        next_tick += std::chrono::nanoseconds(kFakeDisplayPeriod);
+-        target = next_tick;
+     }
+     const auto remaining = target - std::chrono::steady_clock::now();
+     if (timer != nullptr && remaining > std::chrono::nanoseconds::zero()) {
+@@ -781,6 +849,7 @@
+             WaitForSingleObject(timer, INFINITE);
+         }
+     }
++    return advanced;
+ }
+ 
+ void precise_sleep(std::chrono::nanoseconds duration);
+@@ -993,9 +1062,10 @@
+             std::this_thread::sleep_for(std::chrono::milliseconds(stall));
+         }
+     }
++    std::int64_t grid_points = 1; // DCS Control (0059)
+     if (g_display_latency_mode &&
+         GetCurrentThreadId() != g_test_application_thread_id) {
+-        pace_like_a_display();
++        grid_points = pace_like_a_display();
+     }
+     if (g_flight_simulator_mode &&
+         GetCurrentThreadId() != g_test_application_thread_id) {
+@@ -1018,6 +1088,11 @@
+         }
+         return XR_ERROR_RUNTIME_FAILURE;
+     }
++    // DCS Control (0059): a skipped grid point is a slot the display went
++    // past (fixed grid only; 1 otherwise).
++    if (g_fixed_display_grid && grid_points > 1) {
++        g_next_display_time += kFakeDisplayPeriod * (grid_points - 1);
++    }
+     frame_state->predictedDisplayTime = g_next_display_time;
+     frame_state->predictedDisplayPeriod = kFakeDisplayPeriod;
+     frame_state->shouldRender =
+@@ -1250,6 +1325,11 @@
+         std::scoped_lock lock(g_end_records_mutex);
+         g_end_records.push_back(record);
+     }
++    // DCS Control (0059): the presenter's submissions, timed.
++    if (g_cadence_jitter_shape && GetCurrentThreadId() != g_test_application_thread_id) {
++        std::scoped_lock lock(g_presenter_end_mutex);
++        g_presenter_end_times.push_back(std::chrono::steady_clock::now());
++    }
+     if (end_info->displayTime == g_block_atomic_end_time.load(std::memory_order_acquire) &&
+         g_block_atomic_end.exchange(false, std::memory_order_acq_rel)) {
+         g_atomic_end_entered.store(true, std::memory_order_release);
+@@ -2644,7 +2724,8 @@
+             "d3d11-bridge-fallback|dcs-late-skip|dcs-triple-deep|"
+             "dcs-triple-deep-jitter|dcs-triple-deep-quad|dcs-triple-scenes|"
+             "dcs-adaptive-scenes|dcs-presenter-stall|dcs-triple-shrink|"
+-            "dcs-cadence|dcs-deep-hold|dcs-async-arm]\n";
++            "dcs-cadence|dcs-deep-hold|dcs-async-arm|dcs-cadence-exit|"
++            "dcs-cadence-jitter|dcs-cadence-stall]\n";
+         return EXIT_FAILURE;
+     }
+     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
+@@ -2679,6 +2760,20 @@
+             argc == 4 && std::strcmp(argv[3], "dcs-presenter-stall") == 0;
+         // DCS Control (0032).
+         g_cadence_mode = argc == 4 && std::strcmp(argv[3], "dcs-cadence") == 0;
++        // DCS Control (0059).
++        g_cadence_exit_mode = argc == 4 && std::strcmp(argv[3], "dcs-cadence-exit") == 0;
++        g_cadence_jitter_mode =
++            argc == 4 && std::strcmp(argv[3], "dcs-cadence-jitter") == 0;
++        g_cadence_stall_mode =
++            argc == 4 && std::strcmp(argv[3], "dcs-cadence-stall") == 0;
++        g_fixed_display_grid = g_cadence_jitter_mode || g_cadence_stall_mode;
++        if (g_cadence_stall_mode) {
++            SetEnvironmentVariableA("XRFG_TEST_SLOW_PRIME", "150");
++        } else if (g_cadence_exit_mode) {
++            SetEnvironmentVariableA("XRFG_TEST_SLOW_PRIME", "60");
++        }
++        // dcs-cadence-stall is dcs-cadence-jitter's shape from here on.
++        g_cadence_jitter_shape = g_cadence_jitter_mode || g_cadence_stall_mode;
+         // DCS Control (0050).
+         g_deep_hold_mode = argc == 4 && std::strcmp(argv[3], "dcs-deep-hold") == 0;
+         g_async_arm_mode = argc == 4 && std::strcmp(argv[3], "dcs-async-arm") == 0;
+@@ -2698,6 +2793,7 @@
+     g_display_latency_mode = g_adaptive_latency_mode || g_late_skip_mode ||
+         g_triple_deep_mode || g_scenes_mode || g_presenter_stall_mode ||
+         g_cadence_mode || g_deep_hold_mode || g_async_arm_mode || // 0050
++        g_cadence_exit_mode || g_cadence_jitter_shape || // 0059
+         (argc == 4 && std::strcmp(argv[3], "dcs-latency") == 0);
+     g_dcs_mode = g_dcs_d3d11_mode || g_display_latency_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs") == 0);
+@@ -3612,6 +3708,8 @@
+         // by a frame.
+         g_application_in_end_frame.store(true, std::memory_order_release);
+         const auto end_started = std::chrono::steady_clock::now(); // 0050
++        g_last_end_entered_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
++            end_started.time_since_epoch()).count(); // DCS Control (0059)
+         const bool ended = XR_SUCCEEDED(end_frame(session, &frame_end_info));
+         g_application_in_end_frame.store(false, std::memory_order_release);
+         // DCS Control (0050): dcs-async-arm's bound.
+@@ -3627,6 +3725,10 @@
+                 g_longest_end_frame_at = g_end_frames_timed;
+             }
+             ++g_end_frames_timed;
++            // DCS Control (0059): dcs-cadence-exit's and -jitter's bound.
++            if (g_cadence_time_ends.load(std::memory_order_relaxed)) {
++                g_cadence_longest_end_ms = std::max(g_cadence_longest_end_ms, end_ms);
++            }
+         }
+         return ended;
+     };
+@@ -4218,7 +4320,9 @@
+         // has to begin that frame instead of waiting for its own.
+         bool sequence_succeeded = true;
+         bool presenter_seen = false;
+-        if (g_throughput_mode) {
++        // DCS Control (0059): and dcs-cadence-jitter, whose frames at 1X
++        // have no room for a thread made per frame (5 ms of loader lock).
++        if (g_throughput_mode || g_cadence_jitter_shape) {
+             g_persistent_wait_thread = std::make_unique<PersistentWaitThread>();
+         }
+         XrFrameState pending{XR_TYPE_FRAME_STATE};
+@@ -4253,16 +4357,31 @@
+                 // of 20-100 ms a frame - the test application's own
+                 // throughput, which these scenarios set.
+                 PersistentWaitThread::Run wait_thread(
+-                    g_throughput_mode ? g_persistent_wait_thread.get() : nullptr,
++                    g_throughput_mode || g_cadence_jitter_shape // 0059
++                        ? g_persistent_wait_thread.get()
++                        : nullptr,
+                     wait_next);
+                 while (!wait_started.load(std::memory_order_acquire)) {
+                     std::this_thread::yield();
+                 }
+-                if (g_display_latency_mode) {
++                if (g_cadence_jitter_shape) {
++                    // DCS Control (0059): its limiter instead (below).
++                } else if (g_display_latency_mode) {
+                     precise_sleep(std::chrono::milliseconds(2));
+                 } else {
+                     std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                 }
++                // DCS Control (0059): the application's own limiter, here
++                // where DCS's wait thread is parked in the layer's xrWaitFrame
++                // (until this xrBeginFrame), so its time is not the frame's
++                // work.
++                if (const std::int64_t not_before =
++                        g_begin_not_before_ns.load(std::memory_order_acquire);
++                    not_before != 0) {
++                    precise_sleep(std::chrono::steady_clock::time_point(
++                                      std::chrono::nanoseconds(not_before)) -
++                        std::chrono::steady_clock::now());
++                }
+                 const auto ms_since = [](std::chrono::steady_clock::time_point& mark) {
+                     const auto now = std::chrono::steady_clock::now();
+                     const double value =
+@@ -4417,7 +4536,8 @@
+         const int kOverlappingFrames =
+             (g_adaptive_latency_mode || g_late_skip_mode || g_triple_deep_mode ||
+              g_scenes_mode || g_presenter_stall_mode || g_cadence_mode ||
+-             g_deep_hold_mode || g_async_arm_mode) ? 0 // 0050
++             g_deep_hold_mode || g_async_arm_mode || // 0050
++             g_cadence_exit_mode || g_cadence_jitter_shape) ? 0 // 0059
+             : g_display_latency_mode
+                 ? (g_frames_per_application_frame > 2 ? 300 : 160)
+                 : 8;
+@@ -4430,7 +4550,8 @@
+         if (g_display_latency_mode && !g_adaptive_latency_mode &&
+             !g_late_skip_mode && !g_triple_deep_mode && !g_scenes_mode &&
+             !g_presenter_stall_mode && !g_cadence_mode &&
+-            !g_deep_hold_mode && !g_async_arm_mode) { // 0050
++            !g_deep_hold_mode && !g_async_arm_mode && // 0050
++            !g_cadence_exit_mode && !g_cadence_jitter_shape) { // 0059
+             settle_frames = run_until_settled(kSettleBound);
+         }
+         // dcs-triple-deep (0007): 14 s of a steady application, the last 8
+@@ -4696,6 +4817,179 @@
+             cadence_settle_frames = run_until_settled(kSettleBound);
+             g_simulated_render_us = 0;
+         }
++        // dcs-cadence-exit / dcs-cadence-jitter (DCS Control, 0059): light
++        // until 1X (twelve seconds at most), then the mode's own stretch.
++        bool c59_one_seen = false;
++        bool c59_one_held = true;
++        bool c59_limited_held = false;
++        bool c59_left = false;
++        XrTime c59_one_told_from = 0;
++        XrTime c59_one_told_to = 0;
++        XrTime c59_exit_told = 0;
++        std::size_t c59_exit_mark = 0;
++        int c59_limited_frames = 0;
++        double c59_presenter_gap_ms = 0.0;
++        double c59_stall_end_ms = 0.0;
++        std::size_t c59_from_mark = 0;
++        if (g_cadence_exit_mode || g_cadence_jitter_shape) {
++            g_simulated_render_us = 0;
++            // In 2X's shape first (the session starts inline, at one period).
++            for (int index = 0; sequence_succeeded && index < 150; ++index) {
++                sequence_succeeded = run_frame(true);
++            }
++            const auto one_until =
++                std::chrono::steady_clock::now() + std::chrono::seconds(12);
++            while (sequence_succeeded &&
++                   pending.predictedDisplayPeriod != kFakeDisplayPeriod &&
++                   std::chrono::steady_clock::now() < one_until) {
++                sequence_succeeded = run_frame(true);
++            }
++            c59_one_seen = pending.predictedDisplayPeriod == kFakeDisplayPeriod;
++            c59_from_mark = scene_mark();
++            g_cadence_time_ends = true;
++        }
++        if (g_cadence_exit_mode && c59_one_seen) {
++            // Two seconds at 1X; real frames from its tenth are judged.
++            int one_frames = 0;
++            const auto one_held =
++                std::chrono::steady_clock::now() + std::chrono::seconds(2);
++            while (sequence_succeeded && std::chrono::steady_clock::now() < one_held) {
++                sequence_succeeded = run_frame(true);
++                if (++one_frames == 10) {
++                    c59_one_told_from = pending.predictedDisplayTime;
++                }
++                c59_one_held = c59_one_held &&
++                    pending.predictedDisplayPeriod == kFakeDisplayPeriod;
++            }
++            c59_one_told_to = pending.predictedDisplayTime;
++            // Left on missed slots, as R110's exits were, the application's
++            // load unchanged: two primes held 60 ms (XRFG_TEST_SLOW_PRIME),
++            // 150 ms apart - two episodes - until 1X is left; then a second
++            // at 2.
++            if (HANDLE event = CreateEventW(nullptr, FALSE, FALSE,
++                    (L"XRFG_TEST_SLOW_PRIME_" + std::to_wstring(GetCurrentProcessId())).c_str());
++                event != nullptr) {
++                g_cadence_time_ends = false; // the held primes' own
++                for (int index = 0; sequence_succeeded && index < 300 &&
++                     pending.predictedDisplayPeriod == kFakeDisplayPeriod;
++                     ++index) {
++                    if (index == 0 || index == 15) {
++                        SetEvent(event);
++                    }
++                    sequence_succeeded = run_frame(true);
++                }
++                g_cadence_time_ends = true;
++                CloseHandle(event);
++            }
++            c59_left = pending.predictedDisplayPeriod == kFakeDisplayPeriod * 2;
++            c59_exit_told = pending.predictedDisplayTime;
++            c59_exit_mark = scene_mark();
++            for (int index = 0; sequence_succeeded && index < 100; ++index) {
++                sequence_succeeded = run_frame(true);
++            }
++        }
++        if (g_cadence_jitter_mode && c59_one_seen) {
++            // The application's own limiter at the display's rate, from the
++            // moment 1X is entered: each frame's xrEndFrame entered 0.75-1.75
++            // ms after a grid point (its hand-over a millisecond later: the
++            // layer's capture on WARP), its render 0.5-2 ms, both varying
++            // frame to frame; the time it takes between xrBeginFrame and
++            // xrEndFrame beyond the render is learned as it goes. For a
++            // second and a half: the fake measures the application's GPU by
++            // its bracket alone, which runs from one release to the next
++            // xrEndFrame and so takes in the limiter's wait - work enough to
++            // leave 1X once its first second (nothing judged) is over, which
++            // is all this needs.
++            std::uint32_t lcg = 0x5EED0059U;
++            const auto draw = [&](int low, int high) {
++                lcg = lcg * 1664525U + 1013904223U;
++                return low + static_cast<int>((lcg >> 8) %
++                    static_cast<std::uint32_t>(high - low + 1));
++            };
++            std::int64_t overhead_ns = 1'000'000;
++            std::int64_t last_index = 0;
++            const auto limited_until =
++                std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
++            while (sequence_succeeded && std::chrono::steady_clock::now() < limited_until) {
++                const int render_us = draw(500, 2'000);
++                const std::int64_t offset_ns = draw(750, 1'750) * 1000LL;
++                const std::int64_t origin = g_grid_origin_ns.load(std::memory_order_acquire);
++                const std::int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
++                    std::chrono::steady_clock::now().time_since_epoch()).count();
++                // The grid point after the last one, as a limiter at the
++                // display's rate keeps it; a later one only where the frame
++                // cannot be there (a frame the application missed).
++                // The first frame comes a grid point later than the hold
++                // would have it: the presenter has a slot with nothing
++                // queued, as DCS's after a long frame, and from then on every
++                // frame reaches its slot after the slot's wait returned.
++                const std::int64_t earliest_end = now_ns + render_us * 1000LL - offset_ns;
++                const std::int64_t index = std::max(last_index + 1,
++                    (earliest_end - origin + kFakeDisplayPeriod - 1) / kFakeDisplayPeriod +
++                        (last_index == 0 ? 1 : 0));
++                last_index = index;
++                const std::int64_t end_target = origin + index * kFakeDisplayPeriod + offset_ns;
++                g_begin_not_before_ns = end_target - render_us * 1000LL - overhead_ns;
++                g_simulated_render_us = render_us;
++                sequence_succeeded = sequence_succeeded && run_frame(true);
++                const std::int64_t error =
++                    g_last_end_entered_ns.load(std::memory_order_acquire) - end_target;
++                overhead_ns = std::clamp<std::int64_t>(overhead_ns + error / 2, 0, 4'000'000);
++                ++c59_limited_frames;
++            }
++            g_begin_not_before_ns = 0;
++            g_simulated_render_us = 0;
++        }
++        if (g_cadence_stall_mode && c59_one_seen) {
++            // A second at 1X, then R110's 210 ms: one prime held 150 ms
++            // inside the synthesizer (XRFG_TEST_SLOW_PRIME), then a second
++            // more. The presenter's submissions are timed throughout.
++            const auto one_until =
++                std::chrono::steady_clock::now() + std::chrono::seconds(1);
++            while (sequence_succeeded && std::chrono::steady_clock::now() < one_until) {
++                sequence_succeeded = run_frame(true);
++            }
++            c59_limited_held = pending.predictedDisplayPeriod == kFakeDisplayPeriod;
++            std::size_t presenter_from = 0;
++            {
++                std::scoped_lock lock(g_presenter_end_mutex);
++                presenter_from = g_presenter_end_times.size();
++            }
++            if (HANDLE event = CreateEventW(nullptr, FALSE, FALSE,
++                    (L"XRFG_TEST_SLOW_PRIME_" + std::to_wstring(GetCurrentProcessId())).c_str());
++                event != nullptr) {
++                SetEvent(event);
++                const double longest_before = g_cadence_longest_end_ms;
++                g_cadence_longest_end_ms = 0.0;
++                for (int index = 0; sequence_succeeded && index < 2; ++index) {
++                    sequence_succeeded = run_frame(true);
++                }
++                c59_stall_end_ms = g_cadence_longest_end_ms;
++                g_cadence_longest_end_ms = longest_before;
++                CloseHandle(event);
++            }
++            const auto after_until =
++                std::chrono::steady_clock::now() + std::chrono::seconds(1);
++            while (sequence_succeeded && std::chrono::steady_clock::now() < after_until) {
++                sequence_succeeded = run_frame(true);
++            }
++            {
++                std::scoped_lock lock(g_presenter_end_mutex);
++                for (std::size_t index = presenter_from + 1;
++                     index < g_presenter_end_times.size(); ++index) {
++                    c59_presenter_gap_ms = std::max(c59_presenter_gap_ms,
++                        std::chrono::duration<double, std::milli>(
++                            g_presenter_end_times[index] -
++                            g_presenter_end_times[index - 1]).count());
++                }
++            }
++        }
++        const std::size_t c59_to_mark = scene_mark();
++        g_cadence_time_ends = false;
++        if (g_cadence_jitter_shape) {
++            sequence_succeeded = sequence_succeeded && wait_for_queue_idle();
++            g_persistent_wait_thread.reset();
++        }
+         // dcs-deep-hold (0050): steady, then 5 ms late every 50th frame,
+         // then the space and the swapchain destroyed right after a frame
+         // went in. The display times where the phases start go to stdout,
+@@ -4921,6 +5215,126 @@
+                       << summary.str() << '\n';
+             return EXIT_SUCCESS;
+         }
++        if (g_cadence_exit_mode || g_cadence_jitter_shape) {
++            // DCS Control (0059): see g_cadence_exit_mode,
++            // g_cadence_jitter_mode and g_cadence_stall_mode. The flight log
++            // is checked by layer_adaptive_cadence_59.cmake.
++            std::vector<EndFrameRecord> records;
++            {
++                std::scoped_lock lock(g_end_records_mutex);
++                records = g_end_records;
++            }
++            std::vector<std::pair<float, XrTime>> told;
++            {
++                std::scoped_lock lock(g_told_mutex);
++                told = g_told_by_pose;
++            }
++            const auto told_for = [&](float pose_x) -> XrTime {
++                for (const auto& [pose, time] : told) {
++                    if (pose == pose_x) {
++                        return time;
++                    }
++                }
++                return -1;
++            };
++            std::size_t one_judged = 0;
++            std::size_t one_off = 0;
++            std::size_t exit_judged = 0;
++            std::size_t exit_off = 0;
++            std::size_t exit_repeats = 0;
++            std::size_t exit_synthetics = 0;
++            std::size_t exit_reals = 0;
++            std::size_t empty = 0;
++            float previous_pose = std::numeric_limits<float>::quiet_NaN();
++            std::ostringstream exit_residuals;
++            for (std::size_t index = records_before_overlapping_frames;
++                 index < records.size(); ++index) {
++                const EndFrameRecord& record = records[index];
++                // From 1X on, in the stretches the mode runs.
++                empty += record.layer_count == 0 && index >= c59_from_mark &&
++                        index < c59_to_mark
++                    ? 1U
++                    : 0U;
++                const bool after_exit = c59_exit_mark != 0 && index >= c59_exit_mark;
++                if (record.target == SubmittedTarget::synthetic) {
++                    exit_synthetics += after_exit && exit_reals < 2 ? 1U : 0U;
++                    continue;
++                }
++                if (record.target != SubmittedTarget::current) {
++                    continue;
++                }
++                if (record.poses[0].position.x == previous_pose) {
++                    exit_repeats += after_exit && index < c59_exit_mark + 40 ? 1U : 0U;
++                    continue;
++                }
++                previous_pose = record.poses[0].position.x;
++                const XrTime time = told_for(record.poses[0].position.x);
++                if (time < 0) {
++                    continue;
++                }
++                const XrDuration residual = record.display_time - time;
++                const bool off = (residual < 0 ? -residual : residual) * 4 >=
++                    kFakeDisplayPeriod * 3;
++                if (c59_one_told_from != 0 && time >= c59_one_told_from &&
++                    time < c59_one_told_to) {
++                    ++one_judged;
++                    one_off += off ? 1U : 0U;
++                }
++                if (c59_exit_told != 0 && time >= c59_exit_told) {
++                    ++exit_judged;
++                    exit_off += off ? 1U : 0U;
++                    if (++exit_reals <= 12) {
++                        exit_residuals << ' ' << residual / 100'000;
++                    }
++                }
++            }
++            std::ostringstream summary;
++            if (g_cadence_exit_mode) {
++                valid = sequence_succeeded && teardown_succeeded && presenter_seen &&
++                    violations == 0 && empty == 0 && c59_one_seen && c59_one_held &&
++                    c59_left && one_judged >= 100 && one_off == 0 &&
++                    exit_judged >= 60 && exit_off <= 2 && exit_synthetics >= 1 &&
++                    exit_repeats <= 2 && g_cadence_longest_end_ms < 50.0;
++                summary << "1X entered " << c59_one_seen << " held " << c59_one_held
++                        << " left " << c59_left << "; at 1X " << one_off << " of "
++                        << one_judged << " real frames off their told time; after the exit "
++                        << exit_off << " of " << exit_judged << " (first residuals, 0.1 ms:"
++                        << exit_residuals.str() << "), synthetics before its second real frame "
++                        << exit_synthetics << ", re-presented " << exit_repeats
++                        << ", empty " << empty << ", longest xrEndFrame from 1X on "
++                        << g_cadence_longest_end_ms << " ms";
++            } else if (g_cadence_jitter_mode) {
++                valid = sequence_succeeded && teardown_succeeded && presenter_seen &&
++                    violations == 0 && empty == 0 && c59_one_seen &&
++                    c59_limited_frames >= 100 && g_cadence_longest_end_ms < 50.0;
++                summary << "1X entered " << c59_one_seen << ", " << c59_limited_frames
++                        << " frames at the limiter, empty " << empty
++                        << ", longest xrEndFrame from 1X on " << g_cadence_longest_end_ms << " ms";
++            } else {
++                valid = sequence_succeeded && teardown_succeeded && presenter_seen &&
++                    violations == 0 && empty == 0 && c59_one_seen && c59_limited_held &&
++                    c59_stall_end_ms >= 140.0 && c59_presenter_gap_ms < 25.0 &&
++                    g_cadence_longest_end_ms < 50.0;
++                summary << "1X entered " << c59_one_seen << " held to the stall "
++                        << c59_limited_held << ", the stalled prime's xrEndFrame "
++                        << c59_stall_end_ms << " ms, longest gap between the presenter's "
++                        << "submissions from it " << c59_presenter_gap_ms << " ms, empty "
++                        << empty << ", longest xrEndFrame otherwise "
++                        << g_cadence_longest_end_ms << " ms";
++            }
++            if (!valid) {
++                std::cerr << "DCS cadence (0059) validation failed: sequence="
++                          << sequence_succeeded << " teardown=" << teardown_succeeded
++                          << " promoted=" << presenter_seen << " violations=" << violations
++                          << "; " << summary.str() << '\n';
++                return EXIT_FAILURE;
++            }
++            std::cout << (g_cadence_exit_mode     ? "OpenXR DCS cadence exit test passed: "
++                          : g_cadence_jitter_mode ? "OpenXR DCS cadence jitter test passed: "
++                                                  : "OpenXR DCS cadence stall test passed: ")
++                      << summary.str() << '\n';
++            return EXIT_SUCCESS;
++        }
+         if (g_cadence_mode) {
+             // 0032: over the alternation, between every two real frames
+             // shown, as many synthetics as display periods less one between
+diff --git a/tests/layer_adaptive_cadence_59.cmake b/tests/layer_adaptive_cadence_59.cmake
+new file mode 100644
+--- /dev/null
++++ b/tests/layer_adaptive_cadence_59.cmake
+@@ -0,0 +1,95 @@
++# DCS Control (0059): runs one of the call chain's adaptive cadence scenarios
++# under `[ofxr] pipelined_deep_hold` (CADENCE_INI beside the layer DLL; MODE
++# dcs-cadence-exit, dcs-cadence-jitter or dcs-cadence-stall) and checks its
++# flight log. The call chain checks what was shown and when.
++#   exit    1X entered and left on missed slots (result=9), the slots its held
++#           primes left re-presented at their deadline (407).
++#   jitter  no slot missed at 1X (adaptive_throughput result=6's bits 48-63)
++#           from its entry until the first record after it is left, and not
++#           left on missed slots: every hand-over there came 1.5-3 ms after its
++#           slot's wait, which the 2 ms line before 0059 counted missed.
++#   stall   the held prime's slots re-presented at their deadline (407), and
++#           the held submission timed (slow_step result=7).
++foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN CADENCE_INI WORK_DIR MODE)
++    if(NOT DEFINED ${required_variable})
++        message(FATAL_ERROR "${required_variable} was not provided")
++    endif()
++endforeach()
++
++file(REMOVE_RECURSE "${WORK_DIR}")
++file(MAKE_DIRECTORY "${WORK_DIR}")
++file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
++file(COPY "${CADENCE_INI}" DESTINATION "${WORK_DIR}")
++get_filename_component(cadence_ini_name "${CADENCE_INI}" NAME)
++file(RENAME "${WORK_DIR}/${cadence_ini_name}" "${WORK_DIR}/ofxr_bridge.ini")
++
++get_filename_component(layer_name "${LAYER_DLL}" NAME)
++execute_process(
++    COMMAND "${CALL_CHAIN}"
++        "${WORK_DIR}/${layer_name}"
++        "${WORK_DIR}/fake-runtime.log"
++        "${MODE}"
++    RESULT_VARIABLE call_chain_result
++    OUTPUT_VARIABLE call_chain_output
++    ERROR_VARIABLE call_chain_error)
++message(STATUS "${call_chain_output}")
++if(NOT call_chain_result EQUAL 0)
++    message(FATAL_ERROR
++        "Call chain '${MODE}' failed (${call_chain_result}):\n"
++        "${call_chain_output}\n${call_chain_error}")
++endif()
++
++file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++list(LENGTH flight_logs flight_log_count)
++if(NOT flight_log_count EQUAL 1)
++    message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++endif()
++list(GET flight_logs 0 flight_log)
++file(READ "${flight_log}" contents)
++
++set(expected "op=adaptive_switch result=8 dur_us=0 a=2 b=1 c=")
++if(MODE STREQUAL "dcs-cadence-exit")
++    list(APPEND expected
++        "op=adaptive_switch result=9 dur_us=0 a=1 b=2 c="
++        "op=presenter_transition result=407 ")
++elseif(MODE STREQUAL "dcs-cadence-stall")
++    list(APPEND expected
++        "op=presenter_transition result=407 "
++        "op=slow_step result=7 ")
++endif()
++foreach(item IN LISTS expected)
++    string(FIND "${contents}" "${item}" found)
++    if(found EQUAL -1)
++        message(FATAL_ERROR "The flight log is missing: ${item}")
++    endif()
++endforeach()
++
++if(MODE STREQUAL "dcs-cadence-jitter")
++    file(STRINGS "${flight_log}" records
++        REGEX "op=adaptive_switch result=(8|9|10) |op=adaptive_throughput result=6 ")
++    set(in_one FALSE)
++    set(left FALSE)
++    set(judged 0)
++    set(missed 0)
++    foreach(record IN LISTS records)
++        if(record MATCHES "op=adaptive_switch result=8 ")
++            set(in_one TRUE)
++        elseif(in_one AND record MATCHES "op=adaptive_switch result=9 ")
++            message(FATAL_ERROR "1X was left on missed slots: ${record}")
++        elseif(in_one AND record MATCHES "op=adaptive_switch result=10 ")
++            set(left TRUE)
++        elseif(in_one AND record MATCHES "op=adaptive_throughput result=6 .* c=([0-9]+)$")
++            math(EXPR record_missed "${CMAKE_MATCH_1} >> 48")
++            math(EXPR missed "${missed} + ${record_missed}")
++            math(EXPR judged "${judged} + 1")
++            if(left)
++                break()
++            endif()
++        endif()
++    endforeach()
++    if(judged EQUAL 0 OR NOT missed EQUAL 0)
++        message(FATAL_ERROR
++            "Slots missed at 1X: ${missed} over ${judged} records (expected none)")
++    endif()
++    message(STATUS "1X: no slot missed over ${judged} records")
++endif()
+diff --git a/tests/ofxr_bridge_adaptive_cadence_deep_hold.ini b/tests/ofxr_bridge_adaptive_cadence_deep_hold.ini
+new file mode 100644
+--- /dev/null
++++ b/tests/ofxr_bridge_adaptive_cadence_deep_hold.ini
+@@ -0,0 +1,19 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=1
++triple_frame_gen=0
++adaptive_frame_gen=1
++adaptive_cadence=1
++pipelined_deep_hold=1
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right
