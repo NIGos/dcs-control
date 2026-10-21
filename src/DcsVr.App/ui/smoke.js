@@ -20,7 +20,7 @@ window.runWebSmoke = async function() {
     'dcs','options','keepDcsLauncher',
     'eyeDistance','eyeDistanceMm','pupilShift','pupilShiftEyeRadiusMm','pupilShiftVirtualImageM','peripheryStability','peripheryStabilityStrength','farDepth','farDepthPreset',
     'depthBoost','ownAircraftTrueDepth','depthBoostMode','depthBoostRealisticMax','depthBoostFarStartM','depthBoostFarFullM','depthBoostMax','depthBoostNearM',
-    'colorMode','colorFixExposureEv','colorFixNightEv','colorFixSaturation','colorFixWarmth','colorFixAdaptBright','colorFixAdaptDark','colorEnhancedExposureEv',
+    'colorMode','panelGamut','colorFixExposureEv','colorFixNightEv','colorFixSaturation','colorFixWarmth','colorFixAdaptBright','colorFixAdaptDark','colorEnhancedExposureEv',
     'colorEnhancedNightEv','colorEnhancedSaturation','colorEnhancedWarmth','colorEnhancedAdaptBright','colorEnhancedAdaptDark','nightVision','nightVisionStrength',
     'glare','glareStrength','nightVisionBlue','nightVisionBlur','nightVisionScotopic','nightVisionPhotopic','glareThresholdEv','glareRadius','glareStreak',
     'gazeDof','gazeDofStrength','gazeDofMaxArcmin','gazeDofSaccadeRelease','gazeDofSettleMs','gazeDofFadeInMs','gazeDofToleranceD','gazeDofFoveaGuardDeg','gazeDofPupilMm',

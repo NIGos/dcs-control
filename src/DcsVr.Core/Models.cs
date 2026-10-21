@@ -413,6 +413,9 @@ public sealed record VrProfile
     // second). Every default is the module's own, and everything is off: a profile without these properties loads as off.
     /// <summary>[Color] Mode. Off by default.</summary>
     public ColorMode ColorMode { get; init; }
+    /// <summary>[Color] PanelGamut (engine module R111): 0 off, 1 sRGB mapped to the Crystal Super's wider panel gamut
+    /// (about DCI-P3), 2 half of that. Works with Fix and Enhanced; HUD and MFD symbology are not affected. Off by default.</summary>
+    public int PanelGamut { get; init; }
     /// <summary>[Color] ModeKey: cycles Off, Fix and Enhanced in flight (1, 2 or 3 beeps). Off by default.</summary>
     public string ColorModeKey { get; init; } = NeuralHotkeys.ColorModeDefault;
     /// <summary>[ColorFix]: exposure offset (EV), extra exposure at night only (EV), scene-linear saturation, golden-hour

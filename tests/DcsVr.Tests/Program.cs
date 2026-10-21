@@ -120,6 +120,14 @@ Test("Neural ABI compatibility is explicit", () =>
 Test("Unknown JSON settings rejected", () => Throws<System.Text.Json.JsonException>(() => JsonData.Deserialize<VrProfile>("{\"fakeSetting\":1}")));
 Test("Cheeky uses real settings schema", () => { var schema = File.ReadAllText(Path.Combine(workspace, "external/cheeky/uevr/settings_fields.inc")); foreach (var key in ConfigurationWriters.Cheeky(new()).Split('\n').Where(l => l.Contains('=')).Select(l => l.Split('=')[0].Trim()).Where(k => k != "SchemaVersion")) Require(schema.Contains(key, StringComparison.Ordinal), key); });
 Test("OFXR toggle configuration", () => { var ini = ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.FidelityFx, ShowOverlay = false }); Require(ini.Contains("backend=fidelityfx")); Require(ini.Contains("position=off")); });
+Test("Panel color correction is written only with a color mode and only when set", () =>
+{
+    var fix = new VrProfile { ColorMode = ColorMode.Fix };
+    Require(!ConfigurationWriters.DcsQvCull(fix).Contains("PanelGamut"), "off: not written");
+    Require(ConfigurationWriters.DcsQvCull(fix with { PanelGamut = 2 }).Contains("\nMode=1\nPanelGamut=2\n"), "half with Fix");
+    Require(!ConfigurationWriters.DcsQvCull(new VrProfile { PanelGamut = 1 }).Contains("PanelGamut"), "no color mode: nothing to correct");
+    Require(ProfileValidation.Validate(fix with { PanelGamut = 3 }).Any(i => i.Severity == IssueSeverity.Error), "out of range");
+});
 Test("OFXR per-frame records only on request, with a larger log", () =>
 {
     var off = ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia });

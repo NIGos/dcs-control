@@ -161,6 +161,7 @@ public static class ProfileValidation
         Visual(nameof(VrProfile.ColorEnhancedExposureEv), profile.ColorEnhancedExposureEv, -2, 2, " EV");
         Visual(nameof(VrProfile.ColorEnhancedNightEv), profile.ColorEnhancedNightEv, -2, 2, " EV");
         Visual(nameof(VrProfile.ColorEnhancedSaturation), profile.ColorEnhancedSaturation, .5, 1.5);
+        Visual(nameof(VrProfile.PanelGamut), profile.PanelGamut, 0, 2);
         Visual(nameof(VrProfile.ColorEnhancedWarmth), profile.ColorEnhancedWarmth, 0, 1);
         Visual(nameof(VrProfile.ColorEnhancedAdaptBright), profile.ColorEnhancedAdaptBright, 0, 10, " s");
         Visual(nameof(VrProfile.ColorEnhancedAdaptDark), profile.ColorEnhancedAdaptDark, 0, 30, " s");

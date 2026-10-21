@@ -70,7 +70,7 @@ public static class ConfigurationWriters
     /// file stays as it was before Visual realism existed.</summary>
     private static string ColorModeLine(VrProfile p) => p.UsesColorMode ? $"""
 
-        Mode={Int((int)p.ColorMode)}
+        Mode={Int((int)p.ColorMode)}{(p.PanelGamut != 0 ? "\nPanelGamut=" + Int(p.PanelGamut) : "")}
         """ : "";
 
     /// <summary>Visual realism's sections after [Color]: each color mode's values while a color mode can run, [VrFx] while
