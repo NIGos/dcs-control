@@ -1256,7 +1256,7 @@ void DeviceTests(Compiler& comp) {
   pc.name = "shadow rec test";
   Job* j = NewJob();
   if (!pool.Start(d.dev, pc) || pool.At(0).ring.Mode() != defrec::CbMode::kOffsets || !j) {
-    printf("SKIP shadow rec device: no worker with constant-buffer offsets on this device\n");
+    QvSkip("shadow rec device: no worker with constant-buffer offsets on this device\n");
   } else {
     InitJob(*j, *w, t);
     g_instDev = &d;
@@ -1767,7 +1767,7 @@ void DeviceMultiTests(Compiler& comp) {
   SRWLOCK stabLock = SRWLOCK_INIT;
   AllocTex(stab, 64);
   if (!started) {
-    printf("SKIP shadow rec S5 device: no workers with constant-buffer offsets on this device\n");
+    QvSkip("shadow rec S5 device: no workers with constant-buffer offsets on this device\n");
   } else {
     bool sub = true;
     // The texture table as the render thread leaves it (production path: no snapshot).
@@ -2202,7 +2202,7 @@ void Run() {
   RestartF10Tests();
   Compiler c;
   if (!c.Load()) {
-    printf("SKIP shadow rec: d3dcompiler_47.dll not available\n");
+    QvSkip("shadow rec: d3dcompiler_47.dll not available\n");
     return;
   }
   AnalyseTests(c);

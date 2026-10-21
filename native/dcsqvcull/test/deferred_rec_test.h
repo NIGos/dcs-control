@@ -470,7 +470,7 @@ void CapsFailureText() {
   ID3D11Device* dev = nullptr;
   if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &dev,
                                nullptr, nullptr)) || !dev) {
-    printf("SKIP deferred rec caps text: no WARP device\n");
+    QvSkip("deferred rec caps text: no WARP device\n");
     return;
   }
   Caps c = QueryCaps(dev);
@@ -489,7 +489,7 @@ void Run() {
   Scene s;
   bool warp = false;
   if (!CreateDevice(s, &warp)) {
-    printf("SKIP deferred rec: no D3D11 device\n");
+    QvSkip("deferred rec: no D3D11 device\n");
     return;
   }
   constexpr int kDraws = 6000;

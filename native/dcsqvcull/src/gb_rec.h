@@ -4131,12 +4131,9 @@ int ExecSegment(PassCtx& pc, int k) {
     sl.st.rtReplays += rt;
   }
   if (!why) {
-    sfilt::NotifyBeforeEcl(g_ctx);  // R53: an open focus-broadcast block closes first (the lists bind DCS's targets)
     defrec::PassState before = {}, after = {};
     const bool t9 = pc.verify == 2;
     if (t9) defrec::Capture(g_ctx, &before);
-    const bool gs = gsplit::g_on.load(std::memory_order_relaxed) != 0;  // [Suite] GpuSplit
-    if (gs) gsplit::Bracket(1, pc.slot, true);
     const int64_t e0 = defrec::Qpc();
     if (redo) {
       g_ctx->ExecuteCommandList(j.redoCl[k], TRUE);
@@ -4147,14 +4144,6 @@ int ExecSegment(PassCtx& pc, int k) {
     sfilt::NotifyEcl(g_ctx);  // d3d11 toggled the context table's draw / update entries (in-pass hooks repair)
     t_segExecuted = true;
     pc.executeNs += NsSince(e0);
-    if (gs) {
-      gsplit::Bracket(1, pc.slot, false);
-      for (uint32_t c = j.segs[k].candFirst; c < j.segs[k].candEnd; ++c) {
-        const Cand& cd = j.cands[c];
-        if (cd.alive && cd.mesh)
-          gsplit::MeshDraw(1, pc.slot, cd.mesh->ib, cd.mesh->ibFormat, cd.mesh->indexCount, 1, false, nullptr, 0);
-      }
-    }
     pflush::AfterExecute();  // [Model] PassFlush 0x20 (one relaxed load when off)
     if (t9) {
       defrec::Capture(g_ctx, &after);

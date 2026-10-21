@@ -97,7 +97,7 @@ void RecorderStartRace() {
   const D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
   if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, &fl, 1, D3D11_SDK_VERSION, &dev, nullptr,
                                &imm))) {
-    printf("SKIP recorder start race: no WARP device\n");
+    QvSkip("recorder start race: no WARP device\n");
     return;
   }
   defrec::PoolConfig pc;

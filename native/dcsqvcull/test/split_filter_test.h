@@ -418,7 +418,7 @@ void Run() {
                                &ic)) &&
       FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, &fl, 1, D3D11_SDK_VERSION, &dev, nullptr,
                                &ic))) {
-    printf("SKIP split filter: no D3D11 device\n");
+    QvSkip("split filter: no D3D11 device\n");
     return;
   }
   Ctx* c = nullptr;

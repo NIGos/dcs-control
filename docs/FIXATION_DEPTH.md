@@ -259,9 +259,9 @@ struct DepthGrid {        // pack(8), 9264 bytes
 ```
 
 Published about 2 frames after the capture (GPU readback without a stall), each cell about 15 × 15 pixels of the
-periphery. `DepthGrid` is independent of `FixationDepth`; with both on they share the capture. Since 0.5.9 the app
-writes `DepthGrid=0`: only the predictive transition reads the grid, and with the dual camera the transition is always
-gradual. Measured live it costs
+periphery. `DepthGrid` is independent of `FixationDepth`; with both on they share the capture. Since 0.5.9 it is off
+(`DepthGrid=0`, the module's default; since 0.5.11 the app leaves the key out): only the predictive transition reads the
+grid, and with the dual camera the transition is always gradual. Measured live it costs
 about 14 µs of GPU and 5 µs of render thread per frame.
 
 ## Pimax PVR per-eye gaze

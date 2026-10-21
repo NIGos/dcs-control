@@ -181,7 +181,7 @@
 // verdict. CockpitTrueIpdTestShiftMm:
 // shift the cockpit passes by that many mm per eye without the layer
 // (ignored while BoostOut reports a real boost).
-// Phase 2 (CockpitTrueIpdLighting=1, default 0, R31 3.7): during a patched
+// Phase 2 (CockpitTrueIpdLighting=1, default 1 since R107 as shipped, R31 3.7): during a patched
 // HMD view's GBufferLightingPass (in-pass arm: OM / viewport / upload and the
 // draw entries) the pass's cPerView upload goes to the GPU at the true eye
 // (restored at the pass end), and a non-indexed full-screen Draw(3|4, 0)
@@ -1954,8 +1954,8 @@ void VerifyFrame() {
   if (f.cullSep > 0 && sep > 0) {
     const double dev = std::fabs(f.cullSep - sep);
     (dev <= 0.3e-3 ? g_cullAgree : g_cullDisagree)++;
-    const double a = 1.0 / static_cast<double>(std::min<uint64_t>(g_cullDevN + 1, 64));
-    g_cullDevEma = g_cullDevEma * (1 - a) + std::min(dev, 1e-3) * a;
+    const double w = 1.0 / static_cast<double>(std::min<uint64_t>(g_cullDevN + 1, 64));
+    g_cullDevEma = g_cullDevEma * (1 - w) + std::min(dev, 1e-3) * w;
     g_cullDevMax = std::max(g_cullDevMax, dev);
     ++g_cullDevN;
   }
@@ -2776,7 +2776,7 @@ const void* OnUploadImpl(ID3D11Resource* r, UINT sub, const D3D11_BOX* box, cons
     if (t == 0) {  // (the world trace: gOrigin of view 0's camera)
       float o[4];
       memcpy(o, s + kOffOrigin, sizeof(o));
-      for (int k = 0; k < 3; ++k) g_dcsOrigin[k] = o[k];
+      for (int c = 0; c < 3; ++c) g_dcsOrigin[c] = o[c];
     }
   }
   // A frame that is off: recorded for the gPrev check; when the previous frame

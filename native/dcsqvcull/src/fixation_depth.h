@@ -1647,10 +1647,6 @@ void InPassRearm();
 // Cockpit ipd's upload path: DCS's immediate context on the render thread
 // only (its per-pass state is the render thread's); another thread's upload
 // on the same context is forwarded untouched (counted).
-// R53: an observer of DCS's uploads while these entries are armed (focus_bcast_run.h reads the TerrainContext here
-// when this hook holds the upload slot); DCS's original bytes, before any patch. nullptr when unused.
-void (*g_uploadObserver)(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, const D3D11_BOX* box,
-                         const void* src) = nullptr;
 inline const void* CkUpload(ID3D11Resource* r, UINT sub, const D3D11_BOX* box, const void* src, bool us1) {
   if (!ckipd::g_on.load(std::memory_order_relaxed)) return src;
   ckipd::CostScope cost(ckipd::kCostUpload);
@@ -1665,7 +1661,6 @@ void STDMETHODCALLTYPE UsHook(ID3D11DeviceContext* c, ID3D11Resource* r, UINT su
   HookBusy busy;
   const bool ours = c == g_s.ctx && !g_ckRawUpload;
   if (ours) fdexport::NoteUpload(r, sub, box, src);  // DCS's original bytes, as before
-  if (ours && g_uploadObserver) g_uploadObserver(c, r, sub, box, src);  // R53
   // Cockpit ipd: a patched private copy for a cockpit pass's cPerView; else DCS's pointer.
   const void* fwd = ours ? CkUpload(r, sub, box, src, false) : src;
   g_usOrig(c, r, sub, box, fwd, rp, dp);
@@ -1684,7 +1679,6 @@ void STDMETHODCALLTYPE Us1Hook(ID3D11DeviceContext1* c, ID3D11Resource* r, UINT 
   // NO_OVERWRITE / DISCARD keep the bytes' meaning: the source is the new content of the box.
   const bool ours = static_cast<ID3D11DeviceContext*>(c) == g_s.ctx && !g_ckRawUpload;
   if (ours) fdexport::NoteUpload(r, sub, box, src);
-  if (ours && g_uploadObserver) g_uploadObserver(static_cast<ID3D11DeviceContext*>(c), r, sub, box, src);  // R53
   const void* fwd = ours ? CkUpload(r, sub, box, src, true) : src;
   g_us1Orig(c, r, sub, box, fwd, rp, dp, flags);
   if (ours) {
@@ -1709,14 +1703,12 @@ void ckipd::RawUpload(ID3D11Resource* r, const D3D11_BOX* box, const void* src, 
 }
 // Other modules that re-arm their own hooks in the same context table and
 // take whatever entry they find as d3d11's: gpu_pass_timing.h (copy / update /
-// clear / dispatch slots, incl. UpdateSubresource), gpu_dedup.h (draws,
-// UpdateSubresource1, OMSetRenderTargetsAndUnorderedAccessViews) and the D3D
+// clear / dispatch slots, incl. UpdateSubresource) and the D3D
 // meter (d3dstate.h: draws, OM). Two such re-arms on one slot adopt each
 // other's hook as the original: an endless call cycle (stack overflow). While
 // one of them holds the table, the upload and draw hooks stay out.
 bool ForeignTableHooks() {
-  return gpt::g_opsHooked.load(std::memory_order_relaxed) || gdd::g_hooked.load(std::memory_order_relaxed) ||
-         d3ds::g_vtblCount.load(std::memory_order_relaxed) > 0;
+  return gpt::g_opsHooked.load(std::memory_order_relaxed) || d3ds::g_vtblCount.load(std::memory_order_relaxed) > 0;
 }
 
 // Far depth 5b: the draw entries, redirected while a focus view's
@@ -2524,9 +2516,9 @@ bool DisarmOmEntries(void** vt) {
 bool ArmOm(bool overlay = false) {
   State& s = g_s;
   if (!s.ctx || g_armTable) return false;
-  // gpu_dedup.h and the D3D meter re-arm OMSetRenderTargets* themselves
-  // (ForeignTableHooks): no in-pass arm while they hold the table.
-  if (gdd::g_hooked.load(std::memory_order_relaxed) || d3ds::g_vtblCount.load(std::memory_order_relaxed) > 0) {
+  // The D3D meter re-arms OMSetRenderTargets* itself (ForeignTableHooks; gpu_dedup.h did too until R107):
+  // no in-pass arm while it holds the table.
+  if (d3ds::g_vtblCount.load(std::memory_order_relaxed) > 0) {
     g_omSkipForeign++;
     return false;
   }

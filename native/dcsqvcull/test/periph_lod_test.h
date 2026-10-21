@@ -1,9 +1,8 @@
-// Offline tests for periph_lod.h and uav_overlap.h (R26 §13): pass kinds from
-// the inline pass name (and the fault guard), the factor scaling (same as
-// lod_probe.h, +0x48 clamped), nothing installed with the key at 0, and on a
-// WARP device the table swap (scaled tables in DCS's buffers after SetState(1),
-// stock after SetState(0)) and the renamed duplicate's shadow view (same
-// description, a different buffer, cached).
+// Offline tests for periph_lod.h (R26 §13): pass kinds from the inline pass
+// name (and the fault guard), the factor scaling (+0x48 clamped), nothing
+// installed with the key at 0, and on a WARP device the table swap (scaled
+// tables in DCS's buffers after SetState(1), stock after SetState(0)).
+// R107: the uav_overlap.h checks went with it to research_archive.
 #pragma once
 
 namespace plodtest {
@@ -42,7 +41,7 @@ uint32_t FirstWord(ID3D11Buffer* b) {
 }
 
 void Run() {
-  printf("-- periph_lod.h / uav_overlap.h --\n");
+  printf("-- periph_lod.h --\n");
   // Pass kinds.
   {
     FakePass a = MakePass("LightsBuffersPass"), b = MakePass("HeightMapPass"), c = MakePass("CascadeShadowPass3"),
@@ -55,9 +54,6 @@ void Run() {
     Check(plod::KindRaw(&e) == plod::kGBuffer, "plod: GBufferPass kind");
     Check(plod::KindRaw(&f) == plod::kOther && plod::KindRaw(&g) == plod::kOther, "plod: near names are other");
     Check(plod::KindRaw(reinterpret_cast<void*>(0x10)) == plod::kOther, "plod: unreadable pass object is other");
-    Check(uovl::Wanted(&a, 1) && uovl::Wanted(&c, 1) && uovl::Wanted(&e, 3) && !uovl::Wanted(&d, 1) &&
-              uovl::Wanted(&d, 2),
-          "uovl: chain passes for modes 1/3/4, every pass for mode 2");
   }
   // Factor scaling.
   {
@@ -92,7 +88,6 @@ void Run() {
     Check(!plod::g_slot && !plod::g_swapOn.load() && plod::g_pct.load() == 0 &&
               ptiming::g_viewBoundary.load() == nullptr,
           "plod: PeripheralLodScale 0 installs nothing");
-    Check(uovl::g_dup.load() == 0 && uovl::g_mode.load() == 0, "uovl: off by default");
   }
   // Table swap on WARP.
   ID3D11Device* dev = nullptr;
@@ -144,33 +139,6 @@ void Run() {
     Check(dyn && FirstWord(dyn) == 200, "plod: dynamic buffer gets the scaled CPU copy");
     plod::SetState(0);
     Check(dyn && FirstWord(dyn) == 100, "plod: dynamic buffer gets the stock CPU copy");
-  }
-  // Renamed duplicate's shadow view.
-  {
-    ID3D11Buffer* b = Buf(dev, stock, 16);
-    D3D11_UNORDERED_ACCESS_VIEW_DESC u{};
-    u.Format = DXGI_FORMAT_UNKNOWN;
-    u.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-    u.Buffer.NumElements = 4;
-    u.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_APPEND;
-    ID3D11UnorderedAccessView* v = nullptr;
-    dev->CreateUnorderedAccessView(b, &u, &v);
-    ID3D11UnorderedAccessView* s0 = v ? uovl::ShadowOf(v, 0) : nullptr;
-    ID3D11UnorderedAccessView* s0b = v ? uovl::ShadowOf(v, 0) : nullptr;
-    ID3D11UnorderedAccessView* s1 = v ? uovl::ShadowOf(v, 1) : nullptr;
-    bool same = false;
-    if (s0) {
-      D3D11_UNORDERED_ACCESS_VIEW_DESC sd{};
-      s0->GetDesc(&sd);
-      ID3D11Resource* r = nullptr;
-      s0->GetResource(&r);
-      same = memcmp(&sd, &u, sizeof(u)) == 0 && r != b;
-      if (r) r->Release();
-    }
-    Check(s0 && same && s0 == s0b && s1 && s1 != s0, "uovl: shadow view has DCS's description, its own buffer, cached");
-    uovl::ReleaseShadows();
-    if (v) v->Release();
-    b->Release();
   }
   plod::ReleaseCopies();
   plod::g_ctx = nullptr;

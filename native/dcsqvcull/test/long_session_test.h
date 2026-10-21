@@ -660,7 +660,7 @@ void BigPagesReload() {
   g_applied = applied0;
   g_bigBytes = big0;
 #else
-  printf("SKIP long session (big pages): the retired list is the payload's own (no offline hook before the fix)\n");
+  QvSkip("long session (big pages): the retired list is the payload's own (no offline hook before the fix)\n");
 #endif
 }
 
@@ -719,7 +719,7 @@ NTSTATUS APIENTRY QsRealHandleFails(const D3DKMT_QUERYSTATISTICS* q) {
 void DcsGpuShare() {
   GpuWork g;
   if (!g.Init()) {
-    printf("SKIP long session (gpu share): no hardware D3D11 device\n");
+    QvSkip("long session (gpu share): no hardware D3D11 device\n");
     return;
   }
   IDXGIDevice* dx = nullptr;
@@ -729,13 +729,13 @@ void DcsGpuShare() {
     dx->Release();
   }
   if (!ad) {
-    printf("SKIP long session (gpu share): no adapter\n");
+    QvSkip("long session (gpu share): no adapter\n");
     return;
   }
   perfmon::SetAdapter(ad);
   ad->Release();
   if (!perfmon::g_ad.haveDesc || !perfmon::KmtOpen(perfmon::g_ad.desc.AdapterLuid)) {
-    printf("SKIP long session (gpu share): D3DKMT statistics not available\n");
+    QvSkip("long session (gpu share): D3DKMT statistics not available\n");
     perfmon::Shutdown();
     perfmon::g_kmt = perfmon::Kmt();
     perfmon::g_ad = perfmon::Adapter();
@@ -750,7 +750,7 @@ void DcsGpuShare() {
   if (ok && p < 0 && perfmon::g_kmt.procStatus != 0) {
     // The driver does not answer this process's query (STATUS_INVALID_PARAMETER: no device of this process on
     // the adapter it reports, or a sandboxed test host): nothing to verify here.
-    printf("SKIP long session (gpu share): the driver does not answer the per-process query (NTSTATUS 0x%08lx)\n",
+    QvSkip("long session (gpu share): the driver does not answer the per-process query (NTSTATUS 0x%08lx)\n",
            static_cast<unsigned long>(perfmon::g_kmt.procStatus));
     perfmon::Shutdown();
     perfmon::g_kmt = perfmon::Kmt();

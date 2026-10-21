@@ -67,53 +67,6 @@ namespace gpt {
 struct FrameSlot;
 struct Done;
 }  // namespace gpt
-// gap_attrib.h ([Suite] GapAttrib, default 0): between-pass gap attribution.
-// Every call below is behind gapat::g_on (relaxed load), false unless that
-// phase runs.
-namespace gapat {
-extern std::atomic<bool> g_on;
-bool OpBegin(int op);   // CountOp outside passes: true = bracket opened
-void OpEnd();           // after the forwarded op
-void OnTopBegin();      // top-level pass begin, before its stamp
-void OnTopEnd();        // top-level pass end, after its stamp
-void OnClose(gpt::FrameSlot& f);
-void OnOpen(gpt::FrameSlot& f);
-void OnRead(gpt::FrameSlot& f, gpt::Done& d);
-}  // namespace gapat
-
-// gpu_dedup.h ([Suite] GpuDedup, default 0): exact-redundancy census. Every
-// call below is behind gdd::g_on (relaxed load), false unless that phase runs.
-namespace gdd {
-extern std::atomic<bool> g_on;
-void OnPass(void* pass, bool begin, int depth);
-void OnFrameOpen(uint64_t gptSerial);
-void OnDeactivate();
-void Repatch();
-void Withdraw();
-void PreDispatch(ID3D11DeviceContext* c, UINT x, UINT y, UINT z);
-void PreDispatchIndirect(ID3D11DeviceContext* c, ID3D11Buffer* b, UINT o);
-void PostWork();
-void PreCopy(ID3D11DeviceContext* c, ID3D11Resource* d, ID3D11Resource* s);
-void PreCopySub(ID3D11DeviceContext* c, ID3D11Resource* d, UINT ds, UINT x, UINT y, UINT z, ID3D11Resource* s,
-                UINT ss, const D3D11_BOX* b);
-void PreResolve(ID3D11DeviceContext* c, ID3D11Resource* d, UINT ds, ID3D11Resource* s, UINT ss, DXGI_FORMAT f);
-void PreUpdate(ID3D11DeviceContext* c, ID3D11Resource* d, UINT sub, const D3D11_BOX* b, const void* p, UINT rp,
-               UINT dp);
-void PreClearRTV(ID3D11DeviceContext* c, ID3D11RenderTargetView* v, const FLOAT col[4]);
-void PreClearDSV(ID3D11DeviceContext* c, ID3D11DepthStencilView* v, UINT f, FLOAT d, UINT8 s);
-void PreClearUAV(ID3D11DeviceContext* c, ID3D11UnorderedAccessView* v, const void* vals);
-void PreMips(ID3D11DeviceContext* c, ID3D11ShaderResourceView* v);
-void PostWrite();
-}  // namespace gdd
-
-// uav_overlap.h ([Suite] UavOverlap 3/4, default 0): a renamed duplicate of
-// each culling-chain dispatch, issued right after it. Behind uovl::g_dup
-// (relaxed load), 0 unless that phase runs.
-namespace uovl {
-extern std::atomic<int> g_dup;
-void PostDispatch(ID3D11DeviceContext* c, UINT x, UINT y, UINT z);
-void PostDispatchIndirect(ID3D11DeviceContext* c, ID3D11Buffer* b, UINT o);
-}  // namespace uovl
 
 // chain_fast.h ([Suite] ChainFastVerify, default 0): same-frame check of the
 // culling-chain kernels against the stock ones. Behind chainfast::g_verify
@@ -274,7 +227,6 @@ inline void CountOp(Ctx* c, int op) {
     k->n[op]++;
   } else {
     g_outside[op].fetch_add(1, std::memory_order_relaxed);
-    if (gapat::g_on.load(std::memory_order_relaxed)) gapat::OpBegin(op);
   }
 }
 template <class F>
@@ -288,7 +240,6 @@ bool g_tableWritable = false;  // DCS's table is inside the context object (heap
 // the slot, offline on this PC), which would drop the hook for the rest of the
 // pass. Take the new entry as the original and hook again at once.
 inline void Rearm(Ctx* c, int op) {
-  if (gapat::g_on.load(std::memory_order_relaxed)) gapat::OpEnd();
   void** vt = g_table;
   if (*reinterpret_cast<void***>(c) != vt || !g_opsHooked.load(std::memory_order_relaxed)) return;
   void* cur = vt[g_slot[op]];
@@ -303,92 +254,68 @@ inline void Rearm(Ctx* c, int op) {
 
 void STDMETHODCALLTYPE H_CopyResource(Ctx* c, ID3D11Resource* d, ID3D11Resource* s) {
   CountOp(c, kCopyResource);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PreCopy(c, d, s);
   Orig<decltype(&H_CopyResource)>(kCopyResource)(c, d, s);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PostWrite();
   Rearm(c, kCopyResource);
 }
 void STDMETHODCALLTYPE H_CopySubresourceRegion(Ctx* c, ID3D11Resource* d, UINT ds, UINT x, UINT y, UINT z,
                                                ID3D11Resource* s, UINT ss, const D3D11_BOX* b) {
   CountOp(c, kCopySubresourceRegion);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PreCopySub(c, d, ds, x, y, z, s, ss, b);
   Orig<decltype(&H_CopySubresourceRegion)>(kCopySubresourceRegion)(c, d, ds, x, y, z, s, ss, b);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PostWrite();
   Rearm(c, kCopySubresourceRegion);
 }
 void STDMETHODCALLTYPE H_ResolveSubresource(Ctx* c, ID3D11Resource* d, UINT ds, ID3D11Resource* s, UINT ss,
                                             DXGI_FORMAT f) {
   CountOp(c, kResolveSubresource);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PreResolve(c, d, ds, s, ss, f);
   Orig<decltype(&H_ResolveSubresource)>(kResolveSubresource)(c, d, ds, s, ss, f);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PostWrite();
   Rearm(c, kResolveSubresource);
 }
 void STDMETHODCALLTYPE H_UpdateSubresource(Ctx* c, ID3D11Resource* d, UINT ds, const D3D11_BOX* b, const void* p,
                                            UINT rp, UINT dp) {
   CountOp(c, kUpdateSubresource);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PreUpdate(c, d, ds, b, p, rp, dp);
   Orig<decltype(&H_UpdateSubresource)>(kUpdateSubresource)(c, d, ds, b, p, rp, dp);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PostWrite();
   Rearm(c, kUpdateSubresource);
 }
 void STDMETHODCALLTYPE H_ClearRenderTargetView(Ctx* c, ID3D11RenderTargetView* v, const FLOAT col[4]) {
   CountOp(c, kClearRTV);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PreClearRTV(c, v, col);
   Orig<decltype(&H_ClearRenderTargetView)>(kClearRTV)(c, v, col);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PostWrite();
   Rearm(c, kClearRTV);
 }
 void STDMETHODCALLTYPE H_ClearDepthStencilView(Ctx* c, ID3D11DepthStencilView* v, UINT f, FLOAT d, UINT8 s) {
   CountOp(c, kClearDSV);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PreClearDSV(c, v, f, d, s);
   Orig<decltype(&H_ClearDepthStencilView)>(kClearDSV)(c, v, f, d, s);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PostWrite();
   Rearm(c, kClearDSV);
 }
 void STDMETHODCALLTYPE H_ClearUAVUint(Ctx* c, ID3D11UnorderedAccessView* v, const UINT val[4]) {
   CountOp(c, kClearUAVUint);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PreClearUAV(c, v, val);
   Orig<decltype(&H_ClearUAVUint)>(kClearUAVUint)(c, v, val);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PostWrite();
   Rearm(c, kClearUAVUint);
 }
 void STDMETHODCALLTYPE H_ClearUAVFloat(Ctx* c, ID3D11UnorderedAccessView* v, const FLOAT val[4]) {
   CountOp(c, kClearUAVFloat);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PreClearUAV(c, v, val);
   Orig<decltype(&H_ClearUAVFloat)>(kClearUAVFloat)(c, v, val);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PostWrite();
   Rearm(c, kClearUAVFloat);
 }
 void STDMETHODCALLTYPE H_GenerateMips(Ctx* c, ID3D11ShaderResourceView* v) {
   CountOp(c, kGenerateMips);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PreMips(c, v);
   Orig<decltype(&H_GenerateMips)>(kGenerateMips)(c, v);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PostWrite();
   Rearm(c, kGenerateMips);
 }
 void STDMETHODCALLTYPE H_Dispatch(Ctx* c, UINT x, UINT y, UINT z) {
   CountOp(c, kDispatch);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PreDispatch(c, x, y, z);
   const bool cfv = chainfast::g_verify.load(std::memory_order_relaxed);
   if (cfv) chainfast::PreDispatch(c);
   if (!sfast::g_live.load(std::memory_order_relaxed) ||
       !sfast::TryDispatch(c, x, y, z, reinterpret_cast<sfast::DispFn>(Orig<decltype(&H_Dispatch)>(kDispatch))))
     Orig<decltype(&H_Dispatch)>(kDispatch)(c, x, y, z);
   if (cfv) chainfast::PostDispatch(c, x, y, z);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PostWork();
-  if (uovl::g_dup.load(std::memory_order_relaxed)) uovl::PostDispatch(c, x, y, z);
   Rearm(c, kDispatch);
 }
 void STDMETHODCALLTYPE H_DispatchIndirect(Ctx* c, ID3D11Buffer* b, UINT o) {
   CountOp(c, kDispatchIndirect);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PreDispatchIndirect(c, b, o);
   const bool cfv = chainfast::g_verify.load(std::memory_order_relaxed);
   if (cfv) chainfast::PreDispatch(c);
   Orig<decltype(&H_DispatchIndirect)>(kDispatchIndirect)(c, b, o);
   if (cfv) chainfast::PostDispatchIndirect(c, b, o);
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::PostWork();
-  if (uovl::g_dup.load(std::memory_order_relaxed)) uovl::PostDispatchIndirect(c, b, o);
   Rearm(c, kDispatchIndirect);
 }
 
@@ -415,7 +342,6 @@ void RepatchOps() {
       d3ds::WriteTablePointer(&vt[g_slot[i]], kHooks[i]);
     ++g_s.rehooks;
   }
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::Repatch();
 }
 
 bool SafeRepatch() {
@@ -428,7 +354,6 @@ bool SafeRepatch() {
 }
 
 void WithdrawOps() {
-  gdd::Withdraw();  // no-op unless gpu_dedup.h hooked its slots
   if (!g_opsHooked.exchange(false)) return;
   __try {
     for (int i = 0; i < kOpCount; ++i)
@@ -561,7 +486,6 @@ bool TryRead(FrameSlot& f) {
     }
     if (!d.stats.empty()) ++g_s.statsRead;
   }
-  if (gapat::g_on.load(std::memory_order_relaxed)) gapat::OnRead(f, d);
   ++g_s.framesRead;
   std::lock_guard<std::mutex> lock(g_doneMutex);
   g_done.push_back(std::move(d));
@@ -582,11 +506,6 @@ void Stamp(EvType type, void* pass, int depth) {
   if (f.n >= kMaxEvents) {
     f.truncated = true;
     return;
-  }
-  if (gapat::g_on.load(std::memory_order_relaxed)) {
-    LARGE_INTEGER q;
-    QueryPerformanceCounter(&q);
-    f.cpu[f.n] = q.QuadPart;  // issue time: the stamp cannot run on the GPU before it
   }
   g_ctx->End(f.ts[f.n]);
   f.ev[f.n] = {pass, static_cast<uint8_t>(type), static_cast<uint8_t>(depth < 255 ? depth : 255)};
@@ -609,13 +528,11 @@ void OpenFrame() {
   LARGE_INTEGER q;
   QueryPerformanceCounter(&q);
   f.qpc = q.QuadPart;
-  if (gapat::g_on.load(std::memory_order_relaxed)) gapat::OnOpen(f);
   g_ctx->Begin(f.disjoint);
   g_rOpen = s;
   g_rXrSeen = false;
   g_rFrameAtOpen = g_frameCounter ? g_frameCounter->load(std::memory_order_relaxed) : 0;
   ++g_s.framesOpened;
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::OnFrameOpen(f.serial);
 }
 
 // GpuPassStats: the outermost pass's query pair (render thread, non-light).
@@ -649,7 +566,6 @@ void CloseFrame() {
     f.sOpen = -1;
     f.sBroken = true;
   }
-  if (gapat::g_on.load(std::memory_order_relaxed)) gapat::OnClose(f);
   g_ctx->End(f.disjoint);
   f.pending = true;
   g_rOpen = -1;
@@ -687,11 +603,9 @@ void Deactivate() {
       g_ctx->End(f.oq[f.sOpen]);
       f.sOpen = -1;
     }
-    if (gapat::g_on.load(std::memory_order_relaxed)) gapat::OnClose(f);
     g_ctx->End(g_ring[g_rOpen].disjoint);
     g_rOpen = -1;
   }
-  if (gdd::g_on.load(std::memory_order_relaxed)) gdd::OnDeactivate();
   Poll();
   WithdrawOps();
   t_cur = nullptr;
@@ -742,20 +656,16 @@ void OnBoundary(void* pass, bool begin, int depth) {
   } else if (g_active.load(std::memory_order_relaxed)) {
     if (g_opsHooked.load(std::memory_order_relaxed)) RepatchOps();
     if (begin) {
-      if (depth == 0 && gapat::g_on.load(std::memory_order_relaxed)) gapat::OnTopBegin();
       Stamp(kBegin, pass, depth);
       if (g_statsOn.load(std::memory_order_relaxed)) StatsBoundary(pass, true, depth);
       if (g_rSp < kMaxDepth) g_rStack[g_rSp] = t_cur;
       ++g_rSp;
       t_cur = &g_passCounts[pass];
-      if (gdd::g_on.load(std::memory_order_relaxed)) gdd::OnPass(pass, true, depth);
     } else {
-      if (gdd::g_on.load(std::memory_order_relaxed)) gdd::OnPass(pass, false, depth);
       if (g_rSp > 0 && --g_rSp < kMaxDepth) t_cur = g_rStack[g_rSp];
       if (g_rSp == 0) t_cur = nullptr;
       if (g_statsOn.load(std::memory_order_relaxed)) StatsBoundary(pass, false, depth);
       Stamp(kEnd, pass, depth);
-      if (depth == 0 && gapat::g_on.load(std::memory_order_relaxed)) gapat::OnTopEnd();
     }
   }
   QueryPerformanceCounter(&b);
@@ -1464,7 +1374,7 @@ bool FrameGpu(const Done& d, double* spanMs, double* busyMs, double* xrMs) {
 }
 
 // light: timestamps only (no context-op hooks, no pipeline statistics); for callers whose own table arms must
-// not meet the op hooks (periph_inst_filter.h's timing phase).
+// not meet the op hooks (R38's periph inst filter used it; the pass flush bench does).
 void Measure(int ms, std::atomic<uint64_t>& frameCounter, bool light = false) {
   if (!Begin(frameCounter, light) && !g_sessDev) return;
   // CPU per pass over the same window, for comparison.

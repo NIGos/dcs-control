@@ -1,3 +1,6 @@
+// R107: the producer is retired: [Perception] CockpitMaskOverlay is no longer read and g_on stays false, so no mask
+// gets 128 (the contract keeps 128 RESERVED; removing this code waits for the contract round with Dev). RunOv
+// below is shared with the symbology export (symbology.h) and stays.
 // R74b: cockpit mask v1.1, value 128 = overlay symbology over the world ([Perception] CockpitMaskOverlay, default 0;
 // contract: dcsvr_cockpit_mask.h "Overlay symbology"; design and live check: docs/research/R74_content_time_and_mask_v11.md).
 //
@@ -27,7 +30,7 @@
 
 namespace covl {
 
-std::atomic<bool> g_on{false};  // [Perception] CockpitMaskOverlay (opt-in until a lit-HUD live check)
+std::atomic<bool> g_on{false};  // R107: stays false (the [Perception] CockpitMaskOverlay key is retired; tests only)
 constexpr float kMaxFrac = 0.4f;
 constexpr int kTs = 4;  // timing / count frames in flight
 

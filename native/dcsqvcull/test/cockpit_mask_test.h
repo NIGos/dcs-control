@@ -2095,6 +2095,17 @@ void TestPipeline() {
       Sleep(5);
     }
     cmask::Tick();
+    // R107: the same fixed-count pattern as R91's dump folder: under CPU load WARP may not have finished the staging
+    // copies after 8 frames. More frames (each with its Tick, which writes the mapped copies) until every dump is
+    // out, at most 60.
+    for (int f = 8; f < 60 && (cmask::g_dumpLeft.load() > 0 || cmask::g_logLeft.load() > 0 ||
+                               cmask::g_ddumpLeft.load() > 0 || cmask::g_mdumpLeft.load() > 0);
+         ++f) {
+      frame(4000 + f, true);
+      c->Flush();
+      Sleep(5);
+      cmask::Tick();
+    }
     int pgms = 0;
     bool sizeOk = true;
     WIN32_FIND_DATAW fd{};
@@ -3208,10 +3219,25 @@ void TestPipeline() {
         cmask::ConfigureDepth(true, 2);
         cmask::ConfigureMotion(true, true, 2);
         cmask::Configure(true, 2, 15, 1.0, 0, 2, 0, base);
-        run(6);
-        tick();
         auto exists = [](const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; };
         auto count = [](const std::wstring& dir, const wchar_t* pat) { return prune::List(dir + L"\\", pat, false).size(); };
+        // R107 (R106 F09): the dumps land after WARP's read-back, which a fixed 6 frames did not always cover
+        // (one failure in R95). The 6 frames and the tick stay (the tick writes what the frames read back); then
+        // single frames, each with its tick, until all three kinds exist (cap 60 frames).
+        run(6);
+        tick();
+        int dumpFrames = 6;
+        auto allDumped = [&] {
+          return count(base + L"cockpit_mask", L"cockpit_mask_*.pgm") >= 1 &&
+                 count(base + L"cockpit_depth", L"cockpit_depth_*.r16g16f") >= 1 &&
+                 count(base + L"cockpit_motion", L"cockpit_motion_*.r16g16f") >= 1;
+        };
+        for (; dumpFrames < 60 && !allDumped(); ++dumpFrames) {
+          Sleep(5);
+          run(1);
+          tick();
+        }
+        printf("     R91 dumps: %d frame(s) until all three kinds were written\n", dumpFrames);
         bool cleared = true, kept = true;
         for (const wchar_t* k : kinds) {
           const std::wstring d = base + k;

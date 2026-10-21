@@ -1032,7 +1032,7 @@ Test("The prefetch fix is an engine optimization: nothing in DCS's bin without D
         Require(applied.PutBack.Count >= 3 && applied.ReplacedForeign.Count == 0, "Put back: " + string.Join(", ", applied.PutBack));
         var module = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(options)))!, "Scripts", "DcsQvCull");
         var ini = File.ReadAllText(Path.Combine(module, "DcsQvCull.ini")).ReplaceLineEndings("\n");
-        Require(ini.Contains("[Prefetch]\n") && ini.Contains("\nMode=skip\nWindowMs=5000\n"), ini);
+        Require(ini.Contains("[Prefetch]\n") && ini.Contains("\nMode=skip\n") && !ini.Contains("WindowMs="), ini); // the window: the module's 5000 ms default
         Require(store.Status().Files.All(f => !f.Path.StartsWith(bin + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)), "The DCS install is no longer recorded as changed");
         // Off writes Mode=off; CPU Boost without Engine Optimizations has no prefetch fix and writes nothing at all for it.
         Require(ConfigurationWriters.DcsQvCull(profile with { BoostPrefetch = PrefetchFix.Off }).Contains("\nMode=off"));
@@ -1326,7 +1326,7 @@ Test("Depth boost modes: Realistic by default (x1 to 150 m, x1.25 from 400 m), E
     Require(realistic.UsesDepthBoost && realistic.UsesFixationDepth && realistic.UsesEngineModule && !(realistic with { DepthBoost = false }).UsesEngineModule, "Depth boost installs the module");
     var perceptionOnly = ConfigurationWriters.DcsQvCull(realistic with { EngineOptimizations = false }).ReplaceLineEndings("\n");
     Require(perceptionOnly.Contains("PerceptionOnly=1\n") && perceptionOnly.Contains("FixationDepth=1\n") && perceptionOnly.Contains("CockpitTrueIpd=1\n")
-        && perceptionOnly.Contains("CockpitTrueIpdOverlayPath=cpu\n") && perceptionOnly.Contains("CockpitTrueIpdOwnship=2\n") && perceptionOnly.Contains("CockpitTrueIpdToggle=0:0\n"), "Perception-only with the dual camera");
+        && perceptionOnly.Contains("CockpitTrueIpdOwnship=2\n") && !perceptionOnly.Contains("CockpitTrueIpdOverlayPath") && !perceptionOnly.Contains("CockpitTrueIpdToggle"), "Perception-only with the dual camera (overlay path cpu and no pause key: the module's defaults)");
     var withEngine = ConfigurationWriters.DcsQvCull(realistic with { EngineOptimizations = true, OwnAircraftTrueDepth = false }).ReplaceLineEndings("\n");
     Require(withEngine.Contains("PerceptionOnly=0\n") && withEngine.Contains("CockpitTrueIpd=1\n") && withEngine.Contains("CockpitTrueIpdOwnship=0\n"), "with the engine; own aircraft off");
     Require(ConfigurationWriters.DcsQvCull(realistic with { EngineOptimizations = true, DepthBoost = false }).ReplaceLineEndings("\n").Contains("CockpitTrueIpd=0\n"), "no dual camera without Depth boost");
@@ -1347,8 +1347,84 @@ Test("Depth boost with the dual camera: always gradual, no transition switch; th
     Require(!ProfileValidation.Validate(predictive).Any(i => i.Code.StartsWith("depth-transition") || i.Code == "hotkey-conflict"), "the old key is not checked");
     // The grid served only the predictive transition: not captured any more; the scene depth at the gaze stays.
     var engineIni = ConfigurationWriters.DcsQvCull(on with { EngineOptimizations = false }).ReplaceLineEndings("\n");
-    Require(engineIni.Contains("DepthGrid=0\n") && engineIni.Contains("FixationDepth=1\n"), "no grid, the fixation depth");
+    Require(!engineIni.Contains("DepthGrid") && engineIni.Contains("FixationDepth=1\n"), "no grid (the module's default 0), the fixation depth");
     Require(!JsonData.Serialize(predictive).Contains("depthBoostTransition", StringComparison.OrdinalIgnoreCase), "and saves without them");
+});
+Test("DcsQvCull.ini trim: the module reads the same values as from the old full template", () =>
+{
+    // The keys the old template wrote as constants, dropped from the ini (R107 F07), with the default the payload uses for
+    // a missing key (native/dcsqvcull/src main/config_load.inc, gb_rec.h; each checked against its read). "retired": in
+    // kRetiredKeys (main/config.inc), not read at all; a missing one is the same as the old constant 0.
+    const string defaults = """
+        General: LowPowerPacer=0 LowPowerPacerTimeoutUs=10 SigScan=1
+        Hotkeys: DeveloperKeys=0
+        Scene: CostWeightsSanity=0 CollectThreadsMax=0 FineTimerResolution=0
+        Cull: Enabled=0 DebugHole=0 FocusKeepFraction=-1 SafetyNdc=0.05 NativeKeepFraction=0.35 SaccadeDeg=1.0 SaccadeHoldFrames=6 FocusRatio=0.80 ApexTolerance=0.02
+        D3D: Meter=0 Filter=0 SplitFilterOps=0x4ff ChainFast=7 ShaderFast=3 PeriphInstFilter=0:retired FocusBroadcast=0:retired
+        Shadow: TightCasters=0 DebugInvert=0
+        Model: SlabBytes=4096 BigPageBytes=4194304 GBufferBatching=0 ParallelUpload=0 DirectUpload=0 ShadowRecorderScope=0x30f ShadowRecorderWaitUs=200 ShadowRecorderPriority=0 ShadowRecorderSplit=0xf ShadowRecorderInstancing=1 GBufferRecorderScope=0x10055 GBufferRecorderMaxSegments=12 GBufferRecorderHelpers=2 GBufferRecorderWaitUs=300 GBufferRecorderIsland=30 GBufferRecorderRedo=1 GBufferRecorderSwapAhead=1 GBufferRecorderCockpit=0 GBufferRecorderByOrdinal=1 SrvTailTrim=0 PassFlush=0
+        Effects: SkipSameConstantUpload=0
+        Prefetch: WindowMs=5000 TableBits=20
+        Threads: Census=0 WorkerPlacement=2 PlaceRecheckSec=60
+        Color: ToneProbe=0 SwapProbe=0
+        Log: StatsIntervalSec=2 DumpViews=3 RecorderDetail=0 PerfIntervalSec=10 VramIntervalSec=60
+        Governor: Enabled=1 GpuBusyPct=92 RenderIdlePct=85 CpuBusyPct=92 GpuFreePct=80 GpuFullPct=98 WindowSec=8 NeedSec=6 MinDwellSec=10 MinGainPct=2.0 TrialSec=20 RecheckSec=10 RevertBackoffSec=300
+        Perception: DepthGrid=0 SceneCutReset=1 FixationDepthVerify=0 FixationDepthDump=0 FarDepthExportSlots=2 FarDepthPreOverlay=1 CockpitMaskViews=3 CockpitMaskDivisor=0 CockpitMaskNearM=1.0 CockpitMaskDilate=0 CockpitMaskDump=0 CockpitMaskLog=0 CockpitDepthDump=0 CockpitMotionClass=1 CockpitMotionDump=0 CockpitFgDump=0 CockpitMaskOverlay=0:retired SymbologyAlpha=1 FarDepthCoverageMode=hdr FarDepthLogProj=0 CockpitTrueIpdLighting=1 CockpitTrueIpdForward=1 CockpitTrueIpdHelmet=1 CockpitTrueIpdOverlays=1 CockpitTrueIpdOverlayPath=cpu CockpitTrueIpdToggle=0:0
+        Bench: Blocks=24 BlockSec=5 SettleSec=1.0 AutoStartSec=0 ThreadsB=12
+        Suite: SelfTest=0 Profile=0 BenchCull=0 BenchTimer=0 BenchPartition=0 BenchIsolation=0 BenchThreads=0 BenchTimerRes=0 BenchFilter=0 BenchShadow=0 BenchAllocSlabs=0 BenchCostWeights=0 BenchCbUpload=0 BenchPacer=0 MotionSweep=0 BenchFrameHeap=0 MotionProfile=0 MotionTaxi=0 MotionCounters=1 ShadowInstCompile=0 ShadowInstVerify=0 BenchShadowInst=0 BenchBigPages=0 BenchShadowTex=0 BenchTexTable=0 YawScan=0 HoldYawDeg=-1 GBufferInstCompile=0 GBufferInstVerify=0 BenchGBufferInst=0 BenchParallelUpload=0 BenchShadowPlanAsync=0 DirectUploadCount=0 DirectUploadVerify=0 BenchDirectUpload=0 SplitFilterVerify=0 ShadowRecVerify=0 ShadowRecVerifySec=5 BenchShadowRecorder=0 ShadowRecCount=0 GBufferRecVerify=0 GBufferRecVerifySec=6 GBufferRecVerifyStride=0 BenchGBufferRecorder=0 GBufferRecCount=0 GBufferRecStateDump=0 GpuPassTiming=0 YawProfile=0 YawProfileStep=30 RotationProfile=0 RotationDegPerSec=60 RotationSeconds=20 FrameStartGap=0 FrameStartGapSec=10 RunnableThreads=0 RunnableThreadsSec=10 RunnableThreadsEvery=16 VramCount=0 VramCountSec=20 VramCountCreates=1 GpuPassStats=0 ForwardRecCount=0 BenchPassFlush=0 BenchPassFlushMask=0 SrvTailTrimVerify=0 SrvTailTrimVerifySec=10 BenchSrvTailTrim=0 BenchSplitFilter=0 CascadeCacheTiming=0 ChainFastTiming=0 ChainFastVerify=0 ShaderFastTiming=0 ShaderFastVerify=0 GeoOnlyProbe=0 PeriphCensus=0:retired PeriphInstTiming=0:retired PeriphInstVerify=0:retired FocusGeomProbe=0:retired FocusVsCensus=0:retired FocusBcastProbe=0:retired FocusBcastTiming=0:retired FocusBcastVerify=0:retired JoinTailCount=0 SrvSpanCount=0 FxApplyCount=0 GBufferTexCount=0 Terrain=0 BenchTexDedupe=0 BenchCbSkip=0 BenchTriPlain=0 BenchEngine=1 BenchMicro=0 BenchPrefetch=0 Quick=1 MotionSeconds=60
+        """;
+    var dropped = new Dictionary<(string, string), string>();
+    foreach (var line in defaults.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    {
+        var section = line[..line.IndexOf(':')];
+        foreach (var item in line[(line.IndexOf(':') + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var key = item[..item.IndexOf('=')]; var value = item[(item.IndexOf('=') + 1)..];
+            if (value.EndsWith(":retired", StringComparison.Ordinal)) value = value[..^":retired".Length];
+            dropped.Add((section, key), value);
+        }
+    }
+    Require(dropped.Count == 198, "197 constant keys and SwapProbe: " + dropped.Count);
+    // GetPrivateProfile* reads the first key of a name in the first section of a name; a repeat would be a bug in either.
+    Dictionary<(string, string), string> Parse(string ini)
+    {
+        var keys = new Dictionary<(string, string), string>(); var section = ""; var sections = new HashSet<string>();
+        foreach (var raw in ini.ReplaceLineEndings("\n").Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line.StartsWith(';')) continue;
+            if (line.StartsWith('[')) { section = line[1..line.IndexOf(']')]; Require(sections.Add(section), "section twice: " + section); continue; }
+            var eq = line.IndexOf('='); Require(eq > 0, "not a key: " + line);
+            Require(keys.TryAdd((section, line[..eq]), line[(eq + 1)..]), "key twice: [" + section + "] " + line[..eq]);
+        }
+        return keys;
+    }
+    var qv = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, EngineOptimizations = true };
+    var profiles = new (string Name, VrProfile Profile)[]
+    {
+        ("Optimizations only", new VrProfile { EngineOptimizations = true }),
+        ("VR stereo, tuned", new VrProfile { EngineOptimizations = true, EngineDiagnosticHooks = true, EngineBeeps = false, EngineShaderTimeCache = false, EngineTimerRefreshUs = 500, EngineToggleKey = "Off", BoostPrefetch = PrefetchFix.Observe, EngineShadowInstancing = false, EngineGBufferRecorder = false }),
+        ("QV + FG + DLSS 5", qv with { FrameGen = FrameGeneration.Nvidia, NeuralRendering = true, FarDepth = true }),
+        ("Depth boost alone", qv with { EngineOptimizations = false, DepthBoost = true }),
+        ("Depth boost with the engine, own aircraft off", qv with { DepthBoost = true, OwnAircraftTrueDepth = false, FrameGen = FrameGeneration.FidelityFx }),
+        ("Visual realism on", qv with { ColorMode = ColorMode.Enhanced, ColorModeKey = "120:6", NightVision = true, Glare = true, GazeDof = true, GVision = true, GVisionMode = GVisionMode.Full }),
+        ("Sharp HUD", qv with { DepthBoost = true, FrameGen = FrameGeneration.Nvidia, FrameGenHudSymbology = true, FarDepth = true }),
+        ("Developer mode", qv with { EngineDevMode = true, EngineDevPayloadPath = @"D:\dev\payload.dll", EngineDevIniPath = @"D:\dev\dev.ini" }),
+    };
+    foreach (var (name, profile) in profiles)
+    {
+        var oldText = OldDcsQvCullTemplate.Ini(profile); var newText = ConfigurationWriters.DcsQvCull(profile);
+        var old = Parse(oldText); var now = Parse(newText);
+        foreach (var ((section, key), value) in old)
+        {
+            if (now.TryGetValue((section, key), out var kept)) { Require(kept == value, $"{name}: [{section}] {key}={kept}, was {value}"); continue; }
+            Require(dropped.TryGetValue((section, key), out var dflt), $"{name}: [{section}] {key} dropped but not a default-equal key");
+            Require(value == dflt, $"{name}: [{section}] {key} was {value}, the module's default is {dflt}");
+        }
+        Require(now.Keys.All(old.ContainsKey), name + ": a key the old template did not write: " + string.Join(", ", now.Keys.Where(k => !old.ContainsKey(k))));
+        Require(dropped.Keys.All(k => !now.ContainsKey(k)), name + ": a constant key is still written: " + string.Join(", ", dropped.Keys.Where(now.ContainsKey)));
+        Require(newText.Length < oldText.Length / 2, $"{name}: {newText.Length} of {oldText.Length} characters");
+    }
 });
 Test("Visual realism: all off writes the ini as before; each mode, the key and [VrFx] write their keys; the module for a visual feature alone", () =>
 {
@@ -1359,7 +1435,7 @@ Test("Visual realism: all off writes the ini as before; each mode, the key and [
         vr with { Desktop = true, EngineOptimizations = true, ColorMode = ColorMode.Enhanced, GVision = true, ColorModeKey = "120:6" } })
     {
         var ini = Ini(off);
-        Require(ini.Contains("\n\n[Color]\nModeKey=0:0\nToneProbe=0\nSwapProbe=0\n\n[Log]\n") && !ini.Contains("[ColorFix]") && !ini.Contains("[ColorEnhanced]") && !ini.Contains("[VrFx]"), "all off: [Color] as before");
+        Require(ini.Contains("\n\n[Color]\nModeKey=0:0\n\n[Perception]\n") &&!ini.Contains("[ColorFix]") && !ini.Contains("[ColorEnhanced]") && !ini.Contains("[VrFx]"), "all off: [Color] as before");
         Require(!off.UsesVisualRealism && ConfigurationWriters.DcsQvCull(off) == ConfigurationWriters.DcsQvCull(off with
         {
             ColorFixExposureEv = 1, ColorFixSaturation = 1.2, ColorEnhancedWarmth = 0.9,
@@ -1370,9 +1446,9 @@ Test("Visual realism: all off writes the ini as before; each mode, the key and [
     Require(!new VrProfile().UsesEngineModule && !(vr with { GazeDof = true, Gaze = GazeMode.Fixed }).UsesEngineModule, "nothing installed while everything is off");
     // Fix: Mode=1 and both modes' values (the module's defaults); the tuning curve, developer probes and [VrFx] are not written.
     var fix = Ini(vr with { ColorMode = ColorMode.Fix });
-    Require(fix.Contains("\n[Color]\nMode=1\nModeKey=0:0\nToneProbe=0\nSwapProbe=0\n\n; Color modes"), "Fix: [Color]");
+    Require(fix.Contains("\n[Color]\nMode=1\nModeKey=0:0\n\n; Color modes"), "Fix: [Color]");
     Require(fix.Contains("\n[ColorFix]\nExposureEV=0\nNightEV=0\nSaturation=1\nWarmth=0\nAdaptBright=0\nAdaptDark=0\n\n[ColorEnhanced]\nExposureEV=0\nNightEV=0\nSaturation=1.15\nWarmth=0.35\nAdaptBright=0.4\nAdaptDark=1.5\n"
-        + "NightVision=1\nNightVisionStrength=0.8\nNightVisionBlue=0.4\nNightVisionBlur=0.25\nNightVisionScotopic=0.005\nNightVisionPhotopic=5\nGlare=1\nGlareStrength=0.35\nGlareThresholdEV=3.5\nGlareRadius=5\nGlareStreak=0.3\n\n[Log]\n"), "Fix: each mode's defaults");
+        + "NightVision=1\nNightVisionStrength=0.8\nNightVisionBlue=0.4\nNightVisionBlur=0.25\nNightVisionScotopic=0.005\nNightVisionPhotopic=5\nGlare=1\nGlareStrength=0.35\nGlareThresholdEV=3.5\nGlareRadius=5\nGlareStreak=0.3\n\n[Perception]\n"), "Fix: each mode's defaults");
     foreach (var key in new[] { "Slope=", "Toe=", "Shoulder=", "WhiteClip=", "HueKeep=", "HueShadow=", "ChromaNorm=", "WhiteStart=", "GamutKeepSat=", "DarkDesat=", "Dither=", "MeterFocus=", "SrgbMatch=", "EqualizeEc=", "NightFloor=", "NightGate=", "GlareDebug=", "\nTiming=", "ToneProbeViews=", "ToneProbeHdr=" })
         Require(!fix.Contains(key), "never written: " + key);
     Require(!fix.Contains("[VrFx]") && fix.Contains("PerceptionOnly=1\n"), "Fix alone: Perception-only module, no [VrFx]");
@@ -1393,11 +1469,11 @@ Test("Visual realism: all off writes the ini as before; each mode, the key and [
     // [VrFx]: Gaze DoF only with Depth boost's gaze; G vision on its own; every key written.
     var dof = Ini(vr with { DepthBoost = true, GazeDof = true, GazeDofStrength = 0.7, GazeDofPupilMm = 4 });
     Require(dof.Contains("\n[VrFx]\nGazeDof=1\nGazeDofStrength=0.7\nGazeDofMaxArcmin=6\nGazeDofSaccadeRelease=1\nGazeDofSettleMs=120\nGazeDofFadeInMs=250\nGazeDofToleranceD=0.3\nGazeDofFoveaGuardDeg=2\nGazeDofPupilMm=4\n"
-        + "GVision=0\nGVisionStrength=1\nGVisionUseGaze=1\nGVisionRedout=1\nGVisionTolerance=7.5\nGVisionMode=0\n\n[Log]\n") && !dof.Contains("[ColorFix]") && !dof.Contains("\nMode=0\nModeKey"), "Gaze DoF");
+        + "GVision=0\nGVisionStrength=1\nGVisionUseGaze=1\nGVisionRedout=1\nGVisionTolerance=7.5\nGVisionMode=0\n\n[Perception]\n") && !dof.Contains("[ColorFix]") && !dof.Contains("\nMode=0\nModeKey"), "Gaze DoF");
     var g = vr with { GVision = true, GVisionMode = GVisionMode.Complement };
     var gIni = Ini(g);
     Require(g.UsesEngineModule && gIni.Contains("PerceptionOnly=1\n") && gIni.Contains("GazeDof=0\n") && gIni.Contains("GVision=1\n") && gIni.Contains("GVisionMode=1\n")
-        && gIni.Contains("\n[Color]\nModeKey=0:0\nToneProbe=0\nSwapProbe=0\n\n; Gaze DoF"), "G vision alone");
+        && gIni.Contains("\n[Color]\nModeKey=0:0\n\n; Gaze DoF"), "G vision alone");
     // The module (loader, payload, ini and Lua hook) is deployed for a visual feature alone, in its Perception-only mode.
     var exe = Make("visual/game/bin/DCS.exe", "fixture"); var runtime = Make("visual/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("visual/runtime.dll", "fixture");
     var engine = Path.GetDirectoryName(Make("visual/components/dcsqvcull/DcsQvCull.dll", "loader"))!;
@@ -1579,7 +1655,7 @@ Test("The Pupil shift page reads the layer's log: working, no gaze, switched off
     File.AppendAllText(log, "10:00:06.000 stats: frames=90 shifted=90 restored=360 gaze x[-1.0..1.0] y[0.0..0.0] deg, max shift 0.20 mm; runtime left eye vs head x[-33.00..-30.00] z[0.00..0.00] mm\n");
     Require(PupilShiftStatus.Read(folder, false).Warnings.Any(w => w.Contains("twice")));
 });
-Test("DCS engine optimizations install in Saved Games Scripts with every ini key explicit, and restore removes them and what they wrote", () =>
+Test("DCS engine optimizations install in Saved Games Scripts with the profile's ini keys, and restore removes them and what they wrote", () =>
 {
     var exe = Make("engine/game/bin/DCS.exe", "fixture"); var options = Make("engine/sg/DCS/Config/options.lua", Lua);
     var runtime = Make("engine/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("engine/runtime.dll", "fixture");
@@ -1598,24 +1674,27 @@ Test("DCS engine optimizations install in Saved Games Scripts with every ini key
     Require(engineFiles.SequenceEqual([@"DcsQvCull\DcsQvCull.dll", @"DcsQvCull\payload\DcsQvCullPayload.dll", @"DcsQvCull\DcsQvCull.ini", @"Hooks\DcsQvCull.lua"]));
     Require(plan.Files.All(f => !f.Path.StartsWith(Path.GetDirectoryName(exe)!, StringComparison.OrdinalIgnoreCase)));
     var ini = new StreamReader(new MemoryStream(plan.Files.Single(f => f.Path.EndsWith("DcsQvCull.ini")).Content), Encoding.UTF8, true).ReadToEnd();
-    foreach (var line in new[] { "[General]\n", "PerceptionOnly=0\nDiagnostics=0", "[Timing]\nShaderTimeCache=1\nTaskQueueClock=1\nCacheUs=1000", "[Scene]\nPartitionBoost=1\nCostWeights=1\nCostWeightsSanity=0\nCollectThreadsMax=0\nFineTimerResolution=0", "[Cull]\nEnabled=0\nDebugHole=0", "[D3D]\nMeter=0\nFilter=0", "BenchTimer=0\nBenchPartition=0\nBenchIsolation=0\nBenchThreads=0\nBenchTimerRes=0\nBenchFilter=0", "SelfTest=0\nProfile=0\nBenchCull=0" })
+    foreach (var line in new[] { "[General]\n", "PerceptionOnly=0\nDiagnostics=0", "[Timing]\nShaderTimeCache=1\nTaskQueueClock=1\nCacheUs=1000", "[Scene]\nPartitionBoost=1\nCostWeights=1\n", "[D3D]\nSplitFilter=1\n" })
         Require(ini.ReplaceLineEndings("\n").Contains(line), "DcsQvCull.ini lacks " + line);
+    // The constant keys are left to the module's defaults (equal to what was written; test "DcsQvCull.ini trim").
+    foreach (var section in new[] { "[Cull]", "[Shadow]", "[Threads]", "[Log]", "[Governor]", "[Bench]", "[Suite]" })
+        Require(!ini.Contains(section + "\r\n") && !ini.Contains(section + "\n"), "no constant-only section: " + section);
     var tuned = ConfigurationWriters.DcsQvCull(on with { EngineShaderTimeCache = false, EnginePartitionBoost = false, EngineTimerRefreshUs = 500, EngineDiagnosticHooks = true });
     Require(tuned.Contains("ShaderTimeCache=0") && tuned.Contains("PartitionBoost=0") && tuned.Contains("CacheUs=500") && tuned.Contains("Diagnostics=1"));
     Require(ProfileValidation.Validate(on with { EngineTimerRefreshUs = 100 }).Any(i => i.Code == "engine-timer") && !ProfileValidation.Validate(on).Any(i => i.Code == "engine-timer"));
     // The in-flight switch: Alt+Shift+F11 by default, Off writes 0:0; the module's own developer keys stay off.
-    Require(ini.Contains("Toggle=122:6") && ini.Contains("DeveloperKeys=0") && ConfigurationWriters.DcsQvCull(on with { EngineToggleKey = "Off" }).Contains("Toggle=0:0"));
+    Require(ini.Contains("Toggle=122:6") && !ini.Contains("DeveloperKeys") && ConfigurationWriters.DcsQvCull(on with { EngineToggleKey = "Off" }).Contains("Toggle=0:0"));
     Require(!ProfileValidation.Validate(on).Any(i => i.Code is "engine-hotkey" or "hotkey-conflict"));
     Require(ProfileValidation.Validate(on with { EngineToggleKey = "120:3" }).Any(i => i.Code == "engine-hotkey" && i.Severity == IssueSeverity.Error));
-    Require(ProfileValidation.Validate(on with { EngineToggleKey = "119:3" }).Any(i => i.Code == "engine-hotkey") && ini.Contains("TightCasters=0") && ini.Contains("BenchShadow=0"));
-    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "CostWeightsSanity=0", "Beeps=1", "BenchCostWeights=0", "Terrain=0", "SkipSameConstantUpload=0", "BenchCbUpload=0", "LowPowerPacer=0", "BenchPacer=0", "MotionSweep=0", "FrameHeapSlabs=1", "TaskQueueClock=1", "BenchFrameHeap=0", "MotionProfile=0", "MotionTaxi=0", "MotionCounters=1", "BigModelPages=1", "BigPageBytes=4194304", "ShadowInstancing=1", "ShadowBatching=1", "ShadowPlanAsync=1", "ShadowTextureSkip=1", "ShadowInstCompile=0", "ShadowInstVerify=0", "BenchShadowInst=0", "BenchBigPages=0", "BenchShadowTex=0", "BenchTexTable=0", "YawScan=0", "HoldYawDeg=-1", "GBufferBatching=0", "GBufferInstCompile=0", "GBufferInstVerify=0", "BenchGBufferInst=0", "ParallelUpload=0", "BenchParallelUpload=0", "BenchShadowPlanAsync=0", "DirectUploadCount=0", "FxApplyCount=0", "GBufferTexCount=0", "BenchAllocSlabs=0", "BenchTexDedupe=0", "BenchCbSkip=0", "BenchTriPlain=0", "BenchEngine=1", "BenchMicro=0", "Quick=1", "SigScan=1", "DirectUpload=0", "DirectUploadVerify=0", "BenchDirectUpload=0", "SplitFilter=1", "SplitFilterOps=0x4ff", "Meter=0", "SplitFilterVerify=0", "BenchSplitFilter=0", "JoinTailCount=0", "SrvSpanCount=0", "ShadowRecorder=1", "ShadowRecorderScope=0x30f", "ShadowRecorderWaitUs=200", "ShadowRecorderPriority=0", "ShadowRecorderSplit=0xf", "ShadowRecorderInstancing=1", "ShadowRecVerify=0", "ShadowRecVerifySec=5", "BenchShadowRecorder=0", "ShadowRecCount=0", "GBufferRecorder=1", "GBufferRecorderScope=0x10055", "GBufferRecorderMaxSegments=12", "GBufferRecorderHelpers=2", "GBufferRecorderWaitUs=300", "GBufferRecorderIsland=30", "GBufferRecorderRedo=1", "GBufferRecorderSwapAhead=1", "GBufferBatching=0", "GBufferRecVerify=0", "GBufferRecVerifySec=6", "GBufferRecVerifyStride=0", "BenchGBufferRecorder=0", "GBufferRecCount=0", "GBufferRecStateDump=0", "GpuPassTiming=0", "YawProfile=0", "RotationProfile=0", $"ShadowRecorderHelpers={(Environment.ProcessorCount <= 8 ? 1 : 3)}", "GBufferRecorderCockpit=0", "GBufferRecorderByOrdinal=1", "SrvTailTrim=0", "PassFlush=0", "FrameStartGap=0", "RunnableThreads=0", "VramCount=0", "GpuPassStats=0", "ForwardRecCount=0", "BenchPassFlush=0", "SrvTailTrimVerify=0", "BenchSrvTailTrim=0", "[Prefetch]", "Mode=skip", "WindowMs=5000", "BenchPrefetch=0", "[Governor]", "Enabled=1", "GpuBusyPct=92", "MinGainPct=2.0", "GpuFullPct=98", "TrialSec=20", "RecheckSec=10", "RevertBackoffSec=300", "[Perception]", "FixationDepth=0", "DepthGrid=0", "SceneCutReset=1", "FarDepthExport=0", "FarDepthExportSlots=2", "RecorderDetail=0", "PerfIntervalSec=10", "VramIntervalSec=60" })
+    Require(ProfileValidation.Validate(on with { EngineToggleKey = "119:3" }).Any(i => i.Code == "engine-hotkey"));
+    foreach (var key in new[] { "AllocSlabs=1", "PlainTriangleCounter=1", "[Texture]", "StreamDedupe=1", "[Effects]", "SkipSameConstantBuffer=1", "CostWeights=1", "Beeps=1", "FrameHeapSlabs=1", "TaskQueueClock=1", "BigModelPages=1", "ShadowInstancing=1", "ShadowBatching=1", "ShadowPlanAsync=1", "ShadowTextureSkip=1", "SplitFilter=1", "ShadowRecorder=1", "GBufferRecorder=1", $"ShadowRecorderHelpers={(Environment.ProcessorCount <= 8 ? 1 : 3)}", "[Prefetch]", "Mode=skip", "[Perception]", "FixationDepth=0", "FarDepthExport=0" })
         Require(ini.Contains(key), "DcsQvCull.ini lacks " + key);
     // The terrain prefetch fix is an engine optimization: the profile's mode, off when the option is off.
     Require(ConfigurationWriters.DcsQvCull(on with { BoostPrefetch = PrefetchFix.Observe }).Contains("\nMode=observe") && ConfigurationWriters.DcsQvCull(on with { BoostPrefetch = PrefetchFix.Off }).Contains("\nMode=off")
         && ConfigurationWriters.DcsQvCull(on with { EngineOptimizations = false }).Contains("\nMode=off") && on.UsesPrefetchFix && !(on with { EngineOptimizations = false, CpuBoost = true }).UsesPrefetchFix
         && (on with { Desktop = true }).ForLaunch().UsesPrefetchFix);
     var trimmed = ConfigurationWriters.DcsQvCull(on with { EngineModelAllocator = false, EngineTextureDedupe = false, EngineEffectBufferSkip = false, EnginePlainCounter = false, EngineCostWeights = false, EngineBeeps = false, EngineFrameHeap = false, EngineShadowInstancing = false, EngineStateFilter = false, EngineShadowRecorder = false, EngineGBufferRecorder = false });
-    Require(trimmed.Contains("SlabBytes=4096") && trimmed.Contains("SplitFilter=0") && trimmed.Contains("ShadowRecorder=0") && trimmed.Contains("GBufferRecorder=0") && !trimmed.Contains("\nAllocSlabs=1") && trimmed.Contains("PlainTriangleCounter=0") && trimmed.Contains("StreamDedupe=0") && trimmed.Contains("SkipSameConstantBuffer=0") && trimmed.Contains("CostWeights=0") && trimmed.Contains("Beeps=0") && trimmed.Contains("FrameHeapSlabs=0") && trimmed.Contains("BigModelPages=0") && trimmed.Contains("ShadowInstancing=0") && trimmed.Contains("ShadowBatching=0") && trimmed.Contains("ShadowPlanAsync=0") && trimmed.Contains("ShadowTextureSkip=0")
+    Require(trimmed.Contains("SplitFilter=0") && trimmed.Contains("ShadowRecorder=0") && trimmed.Contains("GBufferRecorder=0") && !trimmed.Contains("\nAllocSlabs=1") && trimmed.Contains("PlainTriangleCounter=0") && trimmed.Contains("StreamDedupe=0") && trimmed.Contains("SkipSameConstantBuffer=0") && trimmed.Contains("CostWeights=0") && trimmed.Contains("Beeps=0") && trimmed.Contains("FrameHeapSlabs=0") && trimmed.Contains("BigModelPages=0") && trimmed.Contains("ShadowInstancing=0") && trimmed.Contains("ShadowBatching=0") && trimmed.Contains("ShadowPlanAsync=0") && trimmed.Contains("ShadowTextureSkip=0")
         && ConfigurationWriters.DcsQvCull(on with { EngineShaderTimeCache = false }).Contains("TaskQueueClock=0"));
     // Developer mode: [Dev] paths only while it is on; full paths to existing files, otherwise refused or flagged.
     Require(ini.Contains("PayloadPath=\r\n") || ini.Contains("PayloadPath=\n"));
@@ -3364,8 +3443,9 @@ Test("Far depth is off by default and switches the engine's depth export and Qua
     Require(!off.FarDepth && !off.UsesFarDepth, "off by default");
     Require(ConfigurationWriters.DcsQvCull(off).ReplaceLineEndings("\n").Contains("FarDepthExport=0\n") && ConfigurationWriters.QuadViews(off).ReplaceLineEndings("\n").Contains("dcsvr_far_depth=0\n"), "both off");
     var on = off with { FarDepth = true, FarDepthPreset = FarDepthPreset.Strong };
-    Require(ConfigurationWriters.DcsQvCull(on).ReplaceLineEndings("\n").Contains("FarDepthCoverageMode=hdr\n"), "the HUD found in the HDR image (F-16: HUD after DLSS)");
-    Require(ConfigurationWriters.DcsQvCull(on).ReplaceLineEndings("\n").Contains("FarDepthExport=1\n") &&ConfigurationWriters.QuadViews(on).ReplaceLineEndings("\n").Contains("dcsvr_far_depth=1\ndcsvr_far_depth_preset=strong\n") && !ConfigurationWriters.QuadViews(on).Contains("allow_unmasked", StringComparison.Ordinal) && ConfigurationWriters.DcsQvCull(on).ReplaceLineEndings("\n").Contains("FarDepthPreOverlay=1\n"), "both on, with the preset and the HUD kept out");
+    // The HUD found in the HDR image (F-16: HUD after DLSS) and the image before the overlays: the module's defaults (hdr, 1).
+    Require(!ConfigurationWriters.DcsQvCull(on).Contains("FarDepthCoverageMode") && !ConfigurationWriters.DcsQvCull(on).Contains("FarDepthPreOverlay"), "the HUD found in the HDR image (F-16: HUD after DLSS)");
+    Require(ConfigurationWriters.DcsQvCull(on).ReplaceLineEndings("\n").Contains("FarDepthExport=1\n") &&ConfigurationWriters.QuadViews(on).ReplaceLineEndings("\n").Contains("dcsvr_far_depth=1\ndcsvr_far_depth_preset=strong\n") && !ConfigurationWriters.QuadViews(on).Contains("allow_unmasked", StringComparison.Ordinal), "both on, with the preset and the HUD kept out");
     Require(!(on with { EngineOptimizations = false }).UsesFarDepth && ProfileValidation.Validate(on with { EngineOptimizations = false }).Any(i => i.Code == "far-depth-needs"), "needs the engine module");
     Require(!(on with { QuadViews = QuadProvider.PimaxNative }).UsesFarDepth, "needs the bundled Quad Views");
     Require(ConfigurationWriters.QuadViews(on).ReplaceLineEndings("\n").Contains("dcsvr_far_depth_toggle=119:6\n") && ConfigurationWriters.QuadViews(off).ReplaceLineEndings("\n").Contains("dcsvr_far_depth_toggle=0:0\n"), "its in-flight switch, Alt+Shift+F8");
@@ -4098,4 +4178,382 @@ sealed class UrlFixtureHandler(Dictionary<string, byte[]> answers) : HttpMessage
         var url = request.RequestUri!.AbsoluteUri; Requests.Add(url); UserAgents.Add(request.Headers.UserAgent.ToString());
         return Task.FromResult(Answers.TryGetValue(url, out var bytes) ? new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) } : new HttpResponseMessage(System.Net.HttpStatusCode.NotFound));
     }
+}
+
+/// <summary>DcsQvCull.ini as DCS Control wrote it before the constant-key trim (2026-10-21; R107 F07): a frozen copy of
+/// ConfigurationWriters.DcsQvCull, ColorModeLine and VisualSections, kept only so the trim test can prove the module reads
+/// the same values from the trimmed file. Never update it.</summary>
+static class OldDcsQvCullTemplate
+{
+    private static string Number(double value) => value.ToString("G9", System.Globalization.CultureInfo.InvariantCulture);
+    private static string Int(int value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    private static string ColorModeLine(VrProfile p) => p.UsesColorMode ? $"""
+
+        Mode={Int((int)p.ColorMode)}
+        """ : "";
+
+    /// <summary>Visual realism's sections after [Color]: each color mode's values while a color mode can run, [VrFx] while
+    /// Gaze DoF or G vision runs. Every GUI key is written; the tone curve's tuning keys and the developer probes are not
+    /// (the module's defaults).</summary>
+    private static string VisualSections(VrProfile p) => (p.UsesColorMode ? $"""
+
+
+        ; Color modes: Fix and Enhanced each have their own values; Night vision and glare are Enhanced only.
+        [ColorFix]
+        ExposureEV={Number(p.ColorFixExposureEv)}
+        NightEV={Number(p.ColorFixNightEv)}
+        Saturation={Number(p.ColorFixSaturation)}
+        Warmth={Number(p.ColorFixWarmth)}
+        AdaptBright={Number(p.ColorFixAdaptBright)}
+        AdaptDark={Number(p.ColorFixAdaptDark)}
+
+        [ColorEnhanced]
+        ExposureEV={Number(p.ColorEnhancedExposureEv)}
+        NightEV={Number(p.ColorEnhancedNightEv)}
+        Saturation={Number(p.ColorEnhancedSaturation)}
+        Warmth={Number(p.ColorEnhancedWarmth)}
+        AdaptBright={Number(p.ColorEnhancedAdaptBright)}
+        AdaptDark={Number(p.ColorEnhancedAdaptDark)}
+        NightVision={(p.NightVision ? 1 : 0)}
+        NightVisionStrength={Number(p.NightVisionStrength)}
+        NightVisionBlue={Number(p.NightVisionBlue)}
+        NightVisionBlur={Number(p.NightVisionBlur)}
+        NightVisionScotopic={Number(p.NightVisionScotopic)}
+        NightVisionPhotopic={Number(p.NightVisionPhotopic)}
+        Glare={(p.Glare ? 1 : 0)}
+        GlareStrength={Number(p.GlareStrength)}
+        GlareThresholdEV={Number(p.GlareThresholdEv)}
+        GlareRadius={Number(p.GlareRadius)}
+        GlareStreak={Number(p.GlareStreak)}
+        """ : "") + (p.UsesGazeDof || p.UsesGVision ? $"""
+
+
+        ; Gaze DoF (needs the gaze, from the pupil shift layer) and G vision (G from DCS's export, through the module's Lua hook).
+        [VrFx]
+        GazeDof={(p.UsesGazeDof ? 1 : 0)}
+        GazeDofStrength={Number(p.GazeDofStrength)}
+        GazeDofMaxArcmin={Number(p.GazeDofMaxArcmin)}
+        GazeDofSaccadeRelease={(p.GazeDofSaccadeRelease ? 1 : 0)}
+        GazeDofSettleMs={p.GazeDofSettleMs.ToString(System.Globalization.CultureInfo.InvariantCulture)}
+        GazeDofFadeInMs={p.GazeDofFadeInMs.ToString(System.Globalization.CultureInfo.InvariantCulture)}
+        GazeDofToleranceD={Number(p.GazeDofToleranceD)}
+        GazeDofFoveaGuardDeg={Number(p.GazeDofFoveaGuardDeg)}
+        GazeDofPupilMm={Number(p.GazeDofPupilMm)}
+        GVision={(p.UsesGVision ? 1 : 0)}
+        GVisionStrength={Number(p.GVisionStrength)}
+        GVisionUseGaze={(p.GVisionUseGaze ? 1 : 0)}
+        GVisionRedout={(p.GVisionRedout ? 1 : 0)}
+        GVisionTolerance={Number(p.GVisionTolerance)}
+        GVisionMode={Int((int)p.GVisionMode)}
+        """ : "");
+
+    public static string Ini(VrProfile p) => $"""
+        ; Written by DCS Control for the applied profile; edits here are replaced the next time it is applied.
+        ; DcsQvCull re-reads this file every second while DCS runs.
+
+        [General]
+        ; Installed for Depth boost alone (Engine Optimizations off): only the perception features run, none of the
+        ; optimizations, the test suite or the engine keys.
+        PerceptionOnly={(p.EngineOptimizations ? 0 : 1)}
+        Diagnostics={(p.EngineDiagnosticHooks ? 1 : 0)}
+        Beeps={(p.EngineBeeps ? 1 : 0)}
+        LowPowerPacer=0
+        LowPowerPacerTimeoutUs=10
+        SigScan=1
+
+        [Timing]
+        ShaderTimeCache={(p.EngineShaderTimeCache ? 1 : 0)}
+        TaskQueueClock={(p.EngineTaskQueueClock && p.EngineShaderTimeCache ? 1 : 0)}
+        CacheUs={Int(Math.Clamp(p.EngineTimerRefreshUs, VrProfile.EngineTimerRefreshMin, VrProfile.EngineTimerRefreshMax))}
+
+        [Hotkeys]
+        ; Switches the optimizations above off and back on in flight ("virtual-key:modifiers", Ctrl 1, Alt 2, Shift 4; 0:0 off).
+        Toggle={NeuralHotkeys.Environment(p.EngineToggleKey, NeuralHotkeys.EngineDefault)}
+        ; The module's developer keys (peripheral exclusion, DebugHole, focus fraction) are off.
+        DeveloperKeys=0
+
+        [Scene]
+        PartitionBoost={(p.EnginePartitionBoost ? 1 : 0)}
+        CostWeights={(p.EngineCostWeights ? 1 : 0)}
+        CostWeightsSanity=0
+        CollectThreadsMax=0
+        FineTimerResolution=0
+
+        [Cull]
+        Enabled=0
+        DebugHole=0
+        FocusKeepFraction=-1
+        SafetyNdc=0.05
+        NativeKeepFraction=0.35
+        SaccadeDeg=1.0
+        SaccadeHoldFrames=6
+        FocusRatio=0.80
+        ApexTolerance=0.02
+
+        [D3D]
+        Meter=0
+        Filter=0
+        SplitFilter={(p.EngineStateFilter ? 1 : 0)}
+        SplitFilterOps=0x4ff
+        ChainFast=7
+        ShaderFast=3
+        PeriphInstFilter=0
+        FocusBroadcast=0
+
+        [Shadows]
+        CascadeCache={(p.EngineShadowCache ? 1 : 0)}
+
+        [Shadow]
+        TightCasters=0
+        DebugInvert=0
+
+        [Model]
+        AllocSlabs={(p.EngineModelAllocator ? 1 : 0)}
+        SlabBytes=4096
+        PlainTriangleCounter={(p.EnginePlainCounter ? 1 : 0)}
+        FrameHeapSlabs={(p.EngineFrameHeap ? 1 : 0)}
+        BigModelPages={(p.EngineShadowInstancing ? 1 : 0)}
+        BigPageBytes=4194304
+        ShadowInstancing={(p.EngineShadowInstancing ? 1 : 0)}
+        ShadowBatching={(p.EngineShadowInstancing ? 1 : 0)}
+        ShadowPlanAsync={(p.EngineShadowInstancing ? 1 : 0)}
+        ShadowTextureSkip={(p.EngineShadowInstancing ? 1 : 0)}
+        GBufferBatching=0
+        ParallelUpload=0
+        DirectUpload=0
+        ShadowRecorder={(p.EngineShadowRecorder ? 1 : 0)}
+        ShadowRecorderScope=0x30f
+        ShadowRecorderWaitUs=200
+        ShadowRecorderPriority=0
+        ShadowRecorderSplit=0xf
+        ShadowRecorderInstancing=1
+        ; Helper threads per shadow cascade: 1 on CPUs with 8 logical cores or fewer, so DCS keeps its own threads.
+        ShadowRecorderHelpers={(Environment.ProcessorCount <= 8 ? 1 : 3)}
+        GBufferRecorder={(p.EngineGBufferRecorder ? 1 : 0)}
+        GBufferRecorderScope=0x10055
+        GBufferRecorderMaxSegments=12
+        GBufferRecorderHelpers=2
+        GBufferRecorderWaitUs=300
+        GBufferRecorderIsland=30
+        GBufferRecorderRedo=1
+        GBufferRecorderSwapAhead=1
+        GBufferRecorderCockpit=0
+        GBufferRecorderByOrdinal=1
+        SrvTailTrim=0
+        PassFlush=0
+
+        [Texture]
+        StreamDedupe={(p.EngineTextureDedupe ? 1 : 0)}
+
+        [Effects]
+        SkipSameConstantBuffer={(p.EngineEffectBufferSkip ? 1 : 0)}
+        SkipSameConstantUpload=0
+
+        [Prefetch]
+        ; Terrain prefetch fix: skip (repeats of a range within WindowMs are skipped; a prefetch is only a hint), observe
+        ; (only counted) or off. Statistics every 10 s in DcsQvCullPrefetch.log next to this file.
+        Mode={(p.UsesPrefetchFix ? p.BoostPrefetch.ToString().ToLowerInvariant() : "off")}
+        WindowMs=5000
+        TableBits=20
+
+        [Threads]
+        Census=0
+        WorkerPlacement=2
+        PlaceRecheckSec=60
+
+        [Color]{ColorModeLine(p)}
+        ModeKey={(p.UsesColorModeKey ? NeuralHotkeys.Environment(p.ColorModeKey, NeuralHotkeys.ColorModeDefault) : "0:0")}
+        ToneProbe=0
+        SwapProbe=0{VisualSections(p)}
+
+        [Log]
+        StatsIntervalSec=2
+        DumpViews=3
+        ; A perf line every 10 s (fps, frame times, CPU- or GPU-bound), VRAM every 60 s; RecorderDetail=1 logs the
+        ; recorders' full 10-s blocks instead of one summary line.
+        RecorderDetail=0
+        PerfIntervalSec=10
+        VramIntervalSec=60
+
+        ; When the GPU is the limit, the recorders' extra GPU work is stepped down (and back up when the CPU is the
+        ; limit again); each step is kept only when it raises fps. The image never changes.
+        [Governor]
+        Enabled=1
+        GpuBusyPct=92
+        RenderIdlePct=85
+        CpuBusyPct=92
+        GpuFreePct=80
+        GpuFullPct=98
+        WindowSec=8
+        NeedSec=6
+        MinDwellSec=10
+        MinGainPct=2.0
+        TrialSec=20
+        RecheckSec=10
+        RevertBackoffSec=300
+
+        [Perception]
+        ; Depth boost's scene depth: DCS's depth buffer sampled around the gaze and published for the pupil shift layer
+        ; (docs/FIXATION_DEPTH.md). On only while the profile uses Depth boost.
+        FixationDepth={(p.UsesFixationDepth ? 1 : 0)}
+        ; The predictive transition's depth grid: unused with the dual camera (always gradual), so not captured.
+        DepthGrid=0
+        ; A camera cut (F1/F2/F10, respawn, mission load) resets the bundled Quad Views' periphery history.
+        SceneCutReset=1
+        FixationDepthVerify=0
+        FixationDepthDump=0
+        ; Far depth (docs/FAR_DEPTH.md): the engine's depth for the bundled Quad Views, on with the profile's Far depth.
+        FarDepthExport={(p.UsesFarDepth ? 1 : 0)}
+        FarDepthExportSlots=2
+        ; The image before DCS draws its HUD and symbology, so the bundled Quad Views keeps them out of Far depth.
+        FarDepthPreOverlay=1
+        ; Cockpit mask for Framegen (R65): the cockpit stays still in generated frames. The module computes it only while
+        ; the frame generation layer reads it (its heartbeat), so it costs nothing otherwise.
+        CockpitMaskExport={(p.FrameGen != FrameGeneration.Off && !p.Desktop ? 1 : 0)}
+        CockpitMaskViews=3
+        CockpitMaskDivisor=0
+        CockpitMaskNearM=1.0
+        CockpitMaskDilate=0
+        CockpitMaskDump=0
+        CockpitMaskLog=0
+        ; Cockpit depth and DCS's motion vectors for Framegen (R69/R70): computed only while the frame generation layer reads
+        ; them (its heartbeats), so they cost nothing otherwise.
+        CockpitDepthExport={(p.FrameGen != FrameGeneration.Off && !p.Desktop ? 1 : 0)}
+        CockpitDepthDump=0
+        CockpitMotionExport={(p.FrameGen != FrameGeneration.Off && !p.Desktop ? 1 : 0)}
+        CockpitMotionClass=1
+        CockpitMotionDump=0
+        CockpitFgDump=0
+        ; HUD symbology in the cockpit mask (value 128, R74): not yet verified on lit symbols, off.
+        CockpitMaskOverlay=0
+        ; The HUD and helmet symbols as their own layer for frame generation (R95); needs the dual camera.
+        SymbologyExport={(p.UsesHudSymbology ? 1 : 0)}
+        SymbologyAlpha=1
+        ; The HUD found as the change between copies before and after it in the HDR image (aircraft such as the F-16
+        ; draw it after DLSS, before the tonemap); the module falls back by itself when that image is not found.
+        FarDepthCoverageMode=hdr
+        FarDepthLogProj=0
+        ; Depth boost's dual camera: the cockpit, its lighting and its displays at the true eye distance while the world
+        ; is rendered boosted; the HUD stays at DCS's camera. Its in-flight pause key is a developer key (off).
+        CockpitTrueIpd={(p.UsesDepthBoost ? 1 : 0)}
+        CockpitTrueIpdLighting=1
+        CockpitTrueIpdForward=1
+        CockpitTrueIpdHelmet=1
+        CockpitTrueIpdOverlays=1
+        CockpitTrueIpdOverlayPath=cpu
+        CockpitTrueIpdOwnship={(p.UsesDepthBoost && p.OwnAircraftTrueDepth ? 2 : 0)}
+        CockpitTrueIpdToggle=0:0
+
+        [Bench]
+        Blocks=24
+        BlockSec=5
+        SettleSec=1.0
+        AutoStartSec=0
+        ThreadsB=12
+
+        ; Ctrl+Alt+F11 in the cockpit: about 3 minutes of A/B, all optimizations OFF (stock DCS) against ON, written to
+        ; report_*.txt and bench_*.csv next to this file. Nothing runs until the key is pressed.
+        [Suite]
+        SelfTest=0
+        Profile=0
+        BenchCull=0
+        BenchTimer=0
+        BenchPartition=0
+        BenchIsolation=0
+        BenchThreads=0
+        BenchTimerRes=0
+        BenchFilter=0
+        BenchShadow=0
+        BenchAllocSlabs=0
+        BenchCostWeights=0
+        BenchCbUpload=0
+        BenchPacer=0
+        MotionSweep=0
+        BenchFrameHeap=0
+        MotionProfile=0
+        MotionTaxi=0
+        MotionCounters=1
+        ShadowInstCompile=0
+        ShadowInstVerify=0
+        BenchShadowInst=0
+        BenchBigPages=0
+        BenchShadowTex=0
+        BenchTexTable=0
+        YawScan=0
+        HoldYawDeg=-1
+        GBufferInstCompile=0
+        GBufferInstVerify=0
+        BenchGBufferInst=0
+        BenchParallelUpload=0
+        BenchShadowPlanAsync=0
+        DirectUploadCount=0
+        DirectUploadVerify=0
+        BenchDirectUpload=0
+        SplitFilterVerify=0
+        ShadowRecVerify=0
+        ShadowRecVerifySec=5
+        BenchShadowRecorder=0
+        ShadowRecCount=0
+        GBufferRecVerify=0
+        GBufferRecVerifySec=6
+        GBufferRecVerifyStride=0
+        BenchGBufferRecorder=0
+        GBufferRecCount=0
+        GBufferRecStateDump=0
+        GpuPassTiming=0
+        YawProfile=0
+        YawProfileStep=30
+        RotationProfile=0
+        RotationDegPerSec=60
+        RotationSeconds=20
+        FrameStartGap=0
+        FrameStartGapSec=10
+        RunnableThreads=0
+        RunnableThreadsSec=10
+        RunnableThreadsEvery=16
+        VramCount=0
+        VramCountSec=20
+        VramCountCreates=1
+        GpuPassStats=0
+        ForwardRecCount=0
+        BenchPassFlush=0
+        BenchPassFlushMask=0
+        SrvTailTrimVerify=0
+        SrvTailTrimVerifySec=10
+        BenchSrvTailTrim=0
+        BenchSplitFilter=0
+        CascadeCacheTiming=0
+        ChainFastTiming=0
+        ChainFastVerify=0
+        ShaderFastTiming=0
+        ShaderFastVerify=0
+        GeoOnlyProbe=0
+        PeriphCensus=0
+        PeriphInstTiming=0
+        PeriphInstVerify=0
+        FocusGeomProbe=0
+        FocusVsCensus=0
+        FocusBcastProbe=0
+        FocusBcastTiming=0
+        FocusBcastVerify=0
+        JoinTailCount=0
+        SrvSpanCount=0
+        FxApplyCount=0
+        GBufferTexCount=0
+        Terrain=0
+        BenchTexDedupe=0
+        BenchCbSkip=0
+        BenchTriPlain=0
+        BenchEngine=1
+        BenchMicro=0
+        BenchPrefetch=0
+        Quick=1
+        MotionSeconds=60
+
+        [Dev]
+        ; Developer mode: a payload built elsewhere, hot-reloaded, and an ini that replaces this one. Empty: off.
+        PayloadPath={(p.EngineOptimizations && p.EngineDevMode ? p.EngineDevPayloadPath?.Trim() : null)}
+        IniPath={(p.EngineOptimizations && p.EngineDevMode ? p.EngineDevIniPath?.Trim() : null)}
+
+        """;
 }

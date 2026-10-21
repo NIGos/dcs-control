@@ -116,6 +116,6 @@ inline std::wstring Shaders() { return Found() ? Root() + L"Bazar\\shaders\\" : 
 inline HMODULE LoadBinary(const wchar_t* name) {
   return Found() ? LoadLibraryExW((Bin() + name).c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES) : nullptr;
 }
-inline void Skip(const char* name) { printf("SKIP %s: DCS install not found\n", name); }
+inline void Skip(const char* name) { QvSkip("%s: DCS install not found\n", name); }
 
 }  // namespace dcsinstall

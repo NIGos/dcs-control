@@ -615,7 +615,7 @@ void TestPipeline() {
   const D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_1};
   if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, want, 1, D3D11_SDK_VERSION, &dev, nullptr,
                                &imm))) {
-    printf("SKIP fixdepth pipeline: no WARP 11.1 device\n");
+    QvSkip("fixdepth pipeline: no WARP 11.1 device\n");
     return;
   }
   ID3D11DeviceContext1* c = nullptr;

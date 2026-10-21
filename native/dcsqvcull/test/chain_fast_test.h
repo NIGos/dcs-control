@@ -64,6 +64,13 @@ void Restore(void** slot) {
 }
 void LogLine(const char* line) { printf("%s\n", line); }
 }  // namespace R48Api
+// R107: [Suite] GpuDedup (gpu_dedup.h, archived) was the payload hook R48 met over CSSetShader. This stands in for it:
+// a hook of this payload (InPayload) that forwards to the entry it took as its original, as the census hook did.
+void* g_r48CensusOrig = nullptr;
+void STDMETHODCALLTYPE R48CensusCs(ID3D11DeviceContext* c, ID3D11ComputeShader* s, ID3D11ClassInstance* const* ci,
+                                   UINT n) {
+  reinterpret_cast<SetCsFn>(g_r48CensusOrig)(c, s, ci, n);
+}
 void R48BindCall(void* p) {
   R48Bind* b = static_cast<R48Bind*>(p);
   b->ctx->CSSetShader(b->s, nullptr, 0);
@@ -223,7 +230,7 @@ void Run() {
     const wchar_t* md5[kKinds] = {L"7fa44bc571591d74ca45a2e8eb14de88", L"e04d8a271d158223394c66f6bb4ad4f5",
                                   L"e492c7c173036520cf5b41c1021bd63d"};
     if (!dir || !*dir) {
-      printf("SKIP chain fast: DCS's stock bytecode (set QV_R34_STOCK_DIR to a folder of extracted .dxbc)\n");
+      QvSkip("chain fast: DCS's stock bytecode (set QV_R34_STOCK_DIR to a folder of extracted .dxbc)\n");
     } else {
       for (int k = 0; k < kKinds; ++k) {
         const std::vector<uint8_t> b = ReadAll(std::wstring(dir) + L"\\" + md5[k] + L".dxbc");
@@ -284,14 +291,13 @@ void Run() {
           "chain fast: after d3d11 rewrites the CSSetShader entry, the split filter's re-hook callback re-arms ours");
   }
   {
-    // R48: [Suite] GpuDedup's census hook went in over ours (taking ours as its original) and re-arms after every
+    // R48: [Suite] GpuDedup's census hook (R107: a stand-in, R48CensusCs) went in over ours (taking ours as its original) and re-arms after every
     // call it forwards. Ours must not go back on top of it taking it as the original: the two then forward to each
     // other (before R48 the split filter's re-hook callback and the 1 s loop did exactly that; the next CSSetShader
     // overflowed the stack). Ours stays under it: DCS's binds still reach ours through it.
-    void* const gddHook = gdd::kHooks[gdd::sCSSetShader];
-    void* const gddOrig0 = gdd::g_orig[gdd::sCSSetShader];
+    void* const gddHook = reinterpret_cast<void*>(&R48CensusCs);  // R107: the census hook's stand-in
     const SetCsFn real = g_setOrig;
-    gdd::g_orig[gdd::sCSSetShader] = reinterpret_cast<void*>(&H_CSSetShader);
+    g_r48CensusOrig = reinterpret_cast<void*>(&H_CSSetShader);
     d3ds::WriteTablePointer(g_setSlot, gddHook);
     if (auto cb = sfilt::g_afterRewrite.load()) cb();  // the split filter's re-hook callback
     InstallSet();                                      // the worker's 1 s loop
@@ -307,7 +313,7 @@ void Run() {
           "R48 chain fast: no re-arm over GpuDedup's CSSetShader hook (no call cycle; binds reach ours through it)");
     g_setOrig = real;
     d3ds::WriteTablePointer(g_setSlot, reinterpret_cast<void*>(&H_CSSetShader));
-    gdd::g_orig[gdd::sCSSetShader] = gddOrig0;
+    g_r48CensusOrig = nullptr;
   }
   Apply(0x1);
   Check(bound(stock[0]) == g_e[0].variant && bound(stock[1]) == stock[1] && bound(stock[2]) == stock[2],

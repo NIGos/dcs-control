@@ -1758,7 +1758,7 @@ void DeviceTests(srtest::Compiler& comp) {
   pc.name = "gbuffer rec test";
   Job* j = NewJob();
   if (!pool.Start(d.dev, pc) || pool.At(0).ring.Mode() != defrec::CbMode::kOffsets || !j) {
-    printf("SKIP gbuffer rec device: no worker with constant-buffer offsets on this device\n");
+    QvSkip("gbuffer rec device: no worker with constant-buffer offsets on this device\n");
   } else {
     auto setup = [&](uint32_t stride) {
       InitJob(*j, *w, t, tt);
@@ -1952,14 +1952,26 @@ void DeviceTests(srtest::Compiler& comp) {
     const std::vector<uint8_t> ref2 = ReadTargets(d);
     Stat rst;
     const bool planned = PlanSegsGuarded(*j, 0, j->segCount, false, rst);
-    uint32_t want = 0, done = 0;
+    uint32_t want = 0, done = 0, redoRefused = 0;
     for (uint32_t k = 0; k < j->segCount; ++k) {
       if (j->redoState[k].load() != kRedoWant) continue;
       ++want;
       j->redoArg[k] = {j, static_cast<uint8_t>(k), 0};
       j->redoState[k].store(kRedoRun);
-      if (pool.Submit(0, &RedoMain, &j->redoArg[k], nullptr)) pool.Wait(60000);
+      // R107 (R106 F10): Submit refuses while the worker still runs an earlier job (a timed-out one): the
+      // unchecked call left done < want (2 of 3, 1 in 108 runs). Retried for up to 2 s; refusals are counted.
+      bool submitted = false;
+      for (int tr = 0; tr < 200 && !(submitted = pool.Submit(0, &RedoMain, &j->redoArg[k], nullptr)); ++tr) {
+        ++redoRefused;
+        Sleep(10);
+      }
+      if (submitted) pool.Wait(60000);
       done += j->redoState[k].load() == kRedoOk && j->redoCl[k];
+    }
+    if (done != want || redoRefused) {
+      printf("     view changed: %u submit refusal(s); redoState per segment:", redoRefused);
+      for (uint32_t k = 0; k < j->segCount; ++k) printf(" %d", static_cast<int>(j->redoState[k].load()));
+      printf("\n");
     }
     bool ssR = false;
     ResetDcsState(*w);

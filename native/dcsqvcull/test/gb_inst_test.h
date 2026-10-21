@@ -536,7 +536,7 @@ bool MakeVs(const Compiler& cc, ID3D11Device* dev) {
 
 void RuntimePath(const Compiler& cc, const std::wstring& shaders, ID3D11Device* dev) {
   if (!dev || !MakeVs(cc, dev)) {
-    printf("SKIP gbuffer inst: no D3D11 device for the runtime path\n");
+    QvSkip("gbuffer inst: no D3D11 device for the runtime path\n");
     return;
   }
   Images im;
@@ -725,7 +725,7 @@ void RuntimePath(const Compiler& cc, const std::wstring& shaders, ID3D11Device* 
 // SceneRenderables during SuitePhaseGb, totals.
 void LifecycleGb(const Compiler& cc, const std::wstring& shaders, ID3D11Device* dev) {
   if (!dev || !MakeVs(cc, dev)) {
-    printf("SKIP gbuffer inst: lifecycle needs a D3D11 device\n");
+    QvSkip("gbuffer inst: lifecycle needs a D3D11 device\n");
     return;
   }
   const bool installed = InstallGb();
@@ -784,7 +784,7 @@ void LifecycleGb(const Compiler& cc, const std::wstring& shaders, ID3D11Device* 
 void Run() {
   Compiler cc;
   if (!cc.Load() || !cc.disassemble) {
-    printf("SKIP gbuffer inst: System32 d3dcompiler_47.dll (with D3DDisassemble) not available\n");
+    QvSkip("gbuffer inst: System32 d3dcompiler_47.dll (with D3DDisassemble) not available\n");
     return;
   }
   const std::wstring shaders = sitest::TempRoot() + L"shaders\\";
@@ -796,7 +796,7 @@ void Run() {
     if (!dcsinstall::Found()) {
       dcsinstall::Skip("gbuffer inst build checks");
     } else if (!ng) {
-      printf("SKIP gbuffer inst: NGModel.dll not found\n");
+      QvSkip("gbuffer inst: NGModel.dll not found\n");
     } else {
       auto** matVt = reinterpret_cast<void**>(ng + kModelMatVtbl);
       float thr = 0;
@@ -811,7 +811,7 @@ void Run() {
     }
   }
   if (GetFileAttributesW((shaders + L"model\\functions\\vertex_shader.hlsl").c_str()) == INVALID_FILE_ATTRIBUTES) {
-    printf("SKIP gbuffer inst: shader source copy not found\n");
+    QvSkip("gbuffer inst: shader source copy not found\n");
     return;
   }
   ID3D11Device* dev = nullptr;

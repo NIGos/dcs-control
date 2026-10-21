@@ -395,7 +395,7 @@ bool MakeStandInVs(const Compiler& cc, ID3D11Device* dev) {
 
 void RuntimePath(const Compiler& cc, const std::wstring& shaders, ID3D11Device* dev) {
   if (!dev || !MakeStandInVs(cc, dev)) {
-    printf("SKIP shadow inst: no D3D11 device / stand-in VS for the runtime path\n");
+    QvSkip("shadow inst: no D3D11 device / stand-in VS for the runtime path\n");
     return;
   }
   FakeImages im;
@@ -706,9 +706,9 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
   if (edited) CompileKeyCached(*s, r3);
   const std::string sum3 = CacheSummary();
   if (!entryStored)
-    printf("SKIP shadow inst cache: changed include: the cache entry could not be written\n");
+    QvSkip("shadow inst cache: changed include: the cache entry could not be written\n");
   else if (!edited)
-    printf("SKIP shadow inst cache: changed include: the include edit could not be written\n");
+    QvSkip("shadow inst cache: changed include: the include edit could not be written\n");
   else
     Check(!r3.cached && r3.ok && g_d3dCompiles.load() - c0 == 2 && sum3.find("source changed 1") != std::string::npos &&
               sum3.find("model/common/uniforms.hlsl") != std::string::npos,
@@ -721,7 +721,7 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
   c0 = g_d3dCompiles.load();
   CompileKeyCached(*s, r3c);
   if (!edited || !cacheWritable())
-    printf("SKIP shadow inst cache: rewritten entry: the include edit or the cache entry could not be written\n");
+    QvSkip("shadow inst cache: rewritten entry: the include edit or the cache entry could not be written\n");
   else
     Check(!r3b.cached && r3c.cached && g_d3dCompiles.load() == c0, "shadow inst cache: the rewritten entry hits again");
   // An include probe that found nothing must keep finding nothing: a file
@@ -751,7 +751,7 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
              probe.empty() ? "" : ", first ", probe.c_str());
     }
     if (probe.empty()) {
-      printf("SKIP shadow inst cache: no known missing include probe recorded\n");
+      QvSkip("shadow inst cache: no known missing include probe recorded\n");
     } else {
       std::wstring p = SourcePath(probe);
       const bool existed = GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES;
@@ -765,7 +765,7 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
         KeyResult r4b;
         CompileKeyCached(*s, r4b);  // restore the entry
       } else {
-        printf("SKIP shadow inst cache: could not create the probe %s\n", probe.c_str());
+        QvSkip("shadow inst cache: could not create the probe %s\n", probe.c_str());
       }
     }
   }
@@ -789,7 +789,7 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
     const DWORD a0 = ro.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(rp.c_str());
     if (!cacheWritable() || ro.size() != 1 || a0 == INVALID_FILE_ATTRIBUTES ||
         !SetFileAttributesW(rp.c_str(), a0 | FILE_ATTRIBUTE_READONLY)) {
-      printf("SKIP R63 shadow inst cache: read-only entry: no entry on disk or its attribute could not be set\n");
+      QvSkip("R63 shadow inst cache: read-only entry: no entry on disk or its attribute could not be set\n");
     } else {
       CacheInit(dir, cc, kCacheEditVersion + 2);  // the entry is now stale ("edit version")
       KeyResult r6;
@@ -841,7 +841,7 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
         skip = "the test could not truncate the entry";
     }
     if (skip) {
-      printf("SKIP shadow inst cache: corrupted/truncated file check: %s\n", skip);
+      QvSkip("shadow inst cache: corrupted/truncated file check: %s\n", skip);
     } else {
       KeyResult r7;
       CompileKeyCached(*s, r7);
@@ -869,7 +869,7 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
   // all (a folder of that name, as a deny ACL) is reported, the key still compiles and saving stays on for the
   // others (was: the read-only file failed the write and turned saving off for the session).
   if (files.empty()) {
-    printf("SKIP shadow inst cache: unwritable entry check: no cache entry was written earlier\n");
+    QvSkip("shadow inst cache: unwritable entry check: no cache entry was written earlier\n");
   } else {
     CacheInit(dir, cc);
     ClearDir(dir);
@@ -893,7 +893,7 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
     const std::string sum2 = CacheSummary();
     RemoveDirectoryW(p.c_str());
     if (!made)
-      printf("SKIP shadow inst cache: unreplaceable entry: the test folder could not be created\n");
+      QvSkip("shadow inst cache: unreplaceable entry: the test folder could not be created\n");
     else
       Check(r10.ok && !r10.cached && sum2.find("1 not written") != std::string::npos && cacheWritable() &&
                 ListFiles(dir, L"*.tmp").empty(),
@@ -915,7 +915,7 @@ void Lifecycle(const Compiler& cc, const std::wstring& shaders, ID3D11Device* de
   }
   if (!dev || !dcsinstall::LoadBinary(L"NGModel.dll") || !dcsinstall::LoadBinary(L"dx11backend.dll") ||
       !MakeStandInVs(cc, dev)) {
-    printf("SKIP shadow inst: lifecycle needs the DCS binaries and a D3D11 device\n");
+    QvSkip("shadow inst: lifecycle needs the DCS binaries and a D3D11 device\n");
     return;
   }
   g_deviceChecked = false;  // RuntimePath used the device check
@@ -986,7 +986,7 @@ void Run() {
   const std::wstring root = TempRoot();
   Compiler cc;
   if (!cc.Load()) {
-    printf("SKIP shadow inst: System32 d3dcompiler_47.dll not available\n");
+    QvSkip("shadow inst: System32 d3dcompiler_47.dll not available\n");
     return;
   }
   printf("     shadow inst: compiler %s, temp folder %ls\n", cc.path.c_str(), root.c_str());
@@ -999,7 +999,7 @@ void Run() {
 
   // ---- 1. FX11 parser on DCS's effect cache, against D3DReflect ----
   if (fxoCopied == 0) {
-    printf("SKIP shadow inst: no .fxo files in %ls\n", kFxoDir);
+    QvSkip("shadow inst: no .fxo files in %ls\n", kFxoDir);
   } else {
     int files = 0, parsed = 0, exact = 0, countsOk = 0, blobs = 0, reflOk = 0, stageOk = 0, bindOk = 0, isgnOk = 0;
     int keysOk = 0, techVs = 0, techVsOk = 0;
@@ -1144,7 +1144,7 @@ void Run() {
     if (!dcsinstall::Found())
       dcsinstall::Skip("shadow inst (sources, cache, runtime path, lifecycle)");
     else
-      printf("SKIP shadow inst: shader sources not found\n");
+      QvSkip("shadow inst: shader sources not found\n");
     return;
   }
   {
@@ -1252,7 +1252,7 @@ void Run() {
     HMODULE ngm = dcsinstall::LoadBinary(L"NGModel.dll");
     HMODULE dxm = dcsinstall::LoadBinary(L"dx11backend.dll");
     if (!ngm || !dxm) {
-      printf("SKIP shadow inst: DCS binaries not found\n");
+      QvSkip("shadow inst: DCS binaries not found\n");
     } else {
       const char* why = VerifyBuild(reinterpret_cast<uint8_t*>(ngm), reinterpret_cast<uint8_t*>(dxm));
       Check(!why, "shadow inst: build checks pass (RTTI, DX11Shader field stores, key/macro builders, GetDevice, "
