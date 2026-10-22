@@ -327,6 +327,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "r122_test.h"      // R122: the optional per-view DLSS preset (fake NGX / NvAPI)
 #include "focus_twin_test.h"  // R123: the focus twin (census TerrainContexts; WARP pipeline vs stock, byte-exact)
 #include "r126_test.h"       // R126: lossless overhead speed-ups (each against the code it replaced)
+#include "r130_test.h"       // R130: read-only DLSS feature lifetime instrumentation (fake NGX core)
 #include "r111_test.h"      // R111: [Color] PanelGamut (sRGB -> DCI-P3 compensation for a wide-gamut panel)
 #include "log_phrases_test.h"  // R107: the log phrases DCS Control parses stay in the source byte-exact
 #include "ini_keys_test.h"  // R107: every key the app writes is still read (live or retired)
@@ -418,8 +419,18 @@ int main() {
     PrintSummary();
     return g_fail ? 1 : 0;
   }
+  if (getenv("QV_R128_ONLY")) {  // R128: only the dormant-mode tests (QV_R128_HW=1: also the GPU; QV_R128_BENCH=1: cost)
+    cktest::r128t::Run(getenv("QV_R128_HW") != nullptr);
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
   if (getenv("QV_R126_ONLY")) {  // R126: only the overhead speed-up tests
     r126test::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
+  if (getenv("QV_R130_ONLY")) {  // R130: only the DLSS lifetime instrumentation tests
+    r130test::Run();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -433,6 +444,7 @@ int main() {
     r97test::Run();  // R97
     r99test::Run();  // R99
     r101test::Run();  // R101
+    if (const char* hw = getenv("QV_R95_HW"); hw && atoi(hw) != 0) cktest::r128t::Run(true);  // R128 (GPU too)
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -1837,6 +1849,7 @@ int main() {
   mask65test::Run();
   // Cockpit at the true eye distance (R31 option 3: patch math, matcher, upload filter, WARP pipeline, stencil split, off path).
   cktest::Run();
+  cktest::r128t::Run(false);  // R128: cockpit ipd's dormant mode (exactness against the full work, first boosted frame)
   // [General] PerceptionOnly: no engine module, the perception features, status 0, keys inert, dual camera status.
   potest::Run();
   // R33 far shadow cascade cache: census-matrix math, refresh/reuse decisions, caster lists, WARP replica of the pass.
@@ -1855,6 +1868,7 @@ int main() {
   r122test::Run();  // R122: per-view DLSS preset ([DLSS] keys; fake NGX core and NvAPI, no driver call)
   r123test::Run();  // R123: focus twin ([Model] FocusTwin; census TerrainContexts, WARP pipeline byte-exact vs stock)
   r126test::Run();  // R126: lossless overhead speed-ups (cost scopes on the TSC, MatchWorld)
+  r130test::Run();  // R130: DLSS feature lifetime instrumentation ([DLSS] Instrument; fake NGX core, read-only)
   vfxtest::Run();
   // R39 [Threads]: worker placement off DCS's exclusive render core (all keys default 0), census queries.
   tptest::Run();

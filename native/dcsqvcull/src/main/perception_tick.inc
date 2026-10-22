@@ -37,6 +37,7 @@ void ConfigurePerception() {
                              g_cfg.cockpitTrueIpdFrameDumpViews, g_cfg.cockpitTrueIpdOverlayPath);
   fixdepth::ckipd::g_cfgHelmet = g_cfg.cockpitTrueIpdHelmet;
   fixdepth::ckipd::SetOwnship(OwnshipMode(g_cfg.cockpitTrueIpdOwnship, g_perceptionOnly.load()));
+  fixdepth::ckipd::SetDormant(g_cfg.cockpitIpdDormant);  // R128: [Perception] CockpitIpdDormant
 }
 void TickFixationDepth() {
   // R65: the cockpit mask export rides on fixation depth's callback (fixdepth::Tick installs it).

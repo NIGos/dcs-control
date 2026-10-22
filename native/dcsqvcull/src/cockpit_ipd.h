@@ -224,6 +224,31 @@
 // cockpit right by itself, and the repairs are gone. Every view-frame whose
 // G-buffer moved with Dw != 0 but whose cockpit was lit from the boosted eye
 // is counted with its reason (lightMiss).
+// R128 dormant mode ([Perception] CockpitIpdDormant, default 1; 0 = the full
+// work in every frame, as before; design: docs/research R128_ipd_dormant.md).
+// A frame's h is fixed at its latch (view 0's first cockpit G-buffer upload,
+// before any of the frame's work that depends on it: the G-buffer passes of
+// views 1-3, lighting, forward, ownship, overlay passes and replays all come
+// later). A frame is dormant when, at its latch: CockpitTrueIpd=1, the frame
+// is not off, h is 0 and not ambiguous (VerifyFrame cannot change it), no view
+// was moved in the previous frame (no gPrev tail) and no trace or dump runs.
+// Such a frame patches nothing in today's code either; what it skips is only
+// work whose result nothing uses at h 0: the forward / ownship / lighting /
+// overlay pass-begin name checks (they cannot arm at h 0; the learner's
+// overlay arm, one frame in four, still runs), the stencil cross-check and
+// the depth-texture pick at a G-buffer end, the upload hook's body for an
+// upload outside any class of ours, and the cpu overlay path's sample setup
+// for a replay whose pass the learner did not arm (computed from the saved
+// bytes if a sample is taken). Everything that carries state into later
+// frames runs as before: BoostOut / GazeOut polls, the latch and view 1's
+// verification (lag, k, eye axis, measured separation), the gPrev captures and
+// store, LearnBound, the helmet sides, the ownship lock step, the overlay
+// learner (records seen, samples in its frames), the replay latch, the stereo
+// ack, the symbology export's record types through the render point. So the
+// first frame whose latch has h != 0 runs the full work with the same state
+// as without the mode: bit-identical output in every frame (r128_test.h).
+// One eligible frame in 32 (a frame-number hash) still runs the full work: the
+// cost line compares the two kinds for its saved-time estimate.
 // Included from fixation_depth.h inside namespace fixdepth (after State, the
 // shared-memory globals and far_depth.h).
 #pragma once
@@ -256,6 +281,9 @@ std::atomic<int> g_busy{0};
 // In-flight A/B ([Perception] CockpitTrueIpdToggle): true leaves the cockpit at
 // the layer's boosted eye (today's image) until pressed again.
 std::atomic<bool> g_userOff{false};
+// R128: [Perception] CockpitIpdDormant (default 1): frames at scale 1 skip the work nothing uses at h 0.
+std::atomic<bool> g_cfgDormant{true};
+inline void SetDormant(bool on) { g_cfgDormant.store(on, std::memory_order_relaxed); }
 // Seams and diagnostics (the off-path tests read them).
 std::atomic<uint64_t> g_gbInstallCalls{0}, g_boostOpens{0}, g_starts{0};
 std::wstring g_boostNameOverride;  // tests: their own mapping name
@@ -1305,8 +1333,13 @@ struct Frame {
   bool relRefSet = false, relFail = false;
   int relRefView = -1, relCmp = 0;
   double relRef[3] = {};
+  // R128 (DormantDecide, at the latch): the frame could be dormant (eligible); it is (dormant); an eligible frame
+  // picked to run the full work for the cost line's reference (dormRef).
+  bool dormEligible = false, dormant = false, dormRef = false;
 };
 Frame g_f;
+// R128: true from the latch of a dormant frame to its end (render thread).
+inline bool Dormant() { return g_f.dormant; }
 double g_prevDw[4][3] = {};
 // Per view, the previous frame's cockpit gViewProj: DCS's and the one we sent
 // (DCS's when not patched), DCS's camera (gViewInv row 3) and gOrigin. g_cur
@@ -1661,8 +1694,10 @@ void LearnBound() {
 }
 
 void ResetOwnship();  // (the ownship section)
+void DormReset();     // R128 (the dormant section)
 void ResetRender() {
   ResetOwnship();
+  DormReset();
   g_f = Frame{};
   memset(g_prevDw, 0, sizeof(g_prevDw));
   g_offNext = false;
@@ -1792,6 +1827,7 @@ uint64_t g_cullDevN = 0;
 std::atomic<uint64_t> g_pickMeas{0}, g_pickChanged{0}, g_pickNone{0};
 inline bool CullPrecise() { return g_cullDevN >= static_cast<uint64_t>(kCullPreciseN) && g_cullDevEma < kCullPreciseM; }  // at view 1: the sample vs |C1 - C0| within 0.3 mm
 int g_carriedUnboostedLogs = 0;
+void DormantDecide();  // R128 (below, after the frame dump's state it reads)
 
 // The frame's one latch (view 0's first cockpit upload, DCS's original bytes).
 void LatchFrame(const uint8_t* s0) {
@@ -1924,6 +1960,7 @@ void LatchFrame(const uint8_t* s0) {
   g_lastH = h;
   g_lastPath = f.path;
   g_lastScale = real ? f.lo.rec.scale : 1.0;
+  DormantDecide();  // R128: the frame's h is final here unless the latch is ambiguous (then not dormant)
 }
 
 // View t's Dw / Dp for this frame (at its first cockpit upload).
@@ -4331,9 +4368,10 @@ void GbEnd() {
     } else {
       vf.done = true;
     }
-    // Stencil cross-check (counted only: the state bound at the end need not be the last draw's).
+    // Stencil cross-check (counted only: the state bound at the end need not be the last draw's). R128: not in a
+    // dormant frame (a counter only); nor the depth texture below (read only by a moved view's lighting arm).
     State& s = g_s;
-    if (s.ctx) {
+    if (s.ctx && !f.dormant) {
       ID3D11DepthStencilState* dss = nullptr;
       UINT ref = 0;
       s.ctx->OMGetDepthStencilState(&dss, &ref);
@@ -4344,9 +4382,9 @@ void GbEnd() {
       }
       (dss && d.StencilEnable && ref == 40 ? g_st.stencilOk : g_st.stencilMismatch)++;
     }
-    vf.depthTex = PassDepthTexNow();
+    if (!f.dormant) vf.depthTex = PassDepthTexNow();
     if (g_itemView == t) ItemLog(vf);
-  } else if (t_sm != 0xffff && g_s.ctx) {
+  } else if (t_sm != 0xffff && g_s.ctx && !g_f.dormant) {
     ID3D11DepthStencilState* dss = nullptr;
     UINT ref = 0;
     g_s.ctx->OMGetDepthStencilState(&dss, &ref);
@@ -4412,6 +4450,9 @@ void ObserverBody(void* pass, void* ctx, bool begin) {
 // cockpit pass of a patched view, or a watched "Cockpit" pass while tracing).
 bool PassBegin(void* pass) {
   if (!WantUploads() || t_cls != kClsNone) return false;
+  // R128: a dormant frame arms none of these: the ownship and forward branches need a moved view (OwnShift,
+  // vf.patched: never at h 0 without a gPrev tail), the watched one a trace (never dormant).
+  if (g_f.dormant) return false;
   char n[48];
   PassName(pass, n, sizeof(n));
   if (strstr(n, "TransparentPass") && !strstr(n, "Cockpit")) {  // the world's transparent pass: the ownship
@@ -4467,6 +4508,9 @@ bool IsOverlayName(const char* n) {
 inline bool OvlLearnFrameH0(uint64_t frame) { return ((frame * 0x9e3779b97f4a7c15ull) >> 62) == 0; }
 bool OvlBegin(void* pass) {
   if (!WantUploads() || t_cls != kClsNone) return false;
+  // R128: a dormant frame moves no view (no move arm) and traces nothing (no watch): only the learner's frames
+  // can arm.
+  if (g_f.dormant && !OvlLearnFrameH0(g_frame)) return false;
   char n[48];
   PassName(pass, n, sizeof(n));
   if (!IsOverlayName(n)) return false;
@@ -4832,6 +4876,7 @@ void AckFrame(const Frame& f) {
     }
   }
 }
+void DormEndFrame(const Frame& f);  // R128 (below)
 // At fixation_depth.h's frame end.
 void EndFrame() {
   Frame& f = g_f;
@@ -4936,6 +4981,7 @@ void EndFrame() {
   OwnEndFrame();  // the ownship's moved views (the next frame's Dp), the recorder's job hint
   AckFrame(f);  // after this frame's refutation / inert verdicts
   DumpEndFrame();  // [Perception] CockpitTrueIpdFrameDump
+  DormEndFrame(f);  // R128: the frame's cost by kind (last: every scope of the frame has closed)
   g_f = Frame{};
   ++g_frame;
 }
@@ -5968,6 +6014,103 @@ void DumpEndFrame() {
 }
 
 // ---------------------------------------------------------------------------
+// R128: dormant mode (render thread; the counters are read by LogStats)
+// ---------------------------------------------------------------------------
+
+// One eligible frame in 32 runs the full work (the cost line's reference): a frame-number hash, independent of the
+// learner's (OvlLearnFrameH0), so both kinds hold the learner's frames alike.
+inline bool DormRefFrame(uint64_t frame) { return ((frame * 0xd6e8feb86659fd93ull) >> 59) == 0; }
+std::atomic<uint64_t> g_dormFrames{0}, g_dormEligible{0}, g_dormRefFrames{0};  // since the last cost line
+std::atomic<uint64_t> g_dormToDormant{0}, g_dormToActive{0}, g_dormLogSuppressed{0};  // session
+std::atomic<int> g_dormLogBudget{10};  // transition lines left in this cost-line window
+// The render-thread cost (TSC ticks, the cost line's parts summed) of eligible frames run dormant / in full, session.
+std::atomic<uint64_t> g_dormCostTicks{0}, g_dormCostN{0}, g_fullCostTicks{0}, g_fullCostN{0};
+// LogStats resets g_cost: odd while it does; a frame across a reset gives no sample.
+std::atomic<uint32_t> g_costEpoch{0};
+uint32_t g_costEpochSeen = 0;
+uint64_t g_costBase = 0;
+bool g_costBaseOk = false;
+bool g_dormKnown = false, g_dormWasEligible = false;
+
+void DormReset() {
+  g_dormKnown = g_dormWasEligible = false;
+  g_costBaseOk = false;
+  g_dormFrames = g_dormEligible = g_dormRefFrames = 0;
+  g_dormToDormant = g_dormToActive = g_dormLogSuppressed = 0;
+  g_dormLogBudget = 10;
+  g_dormCostTicks = g_dormCostN = g_fullCostTicks = g_fullCostN = 0;
+}
+
+// At the end of LatchFrame (the frame's h fixed).
+void DormantDecide() {
+  Frame& f = g_f;
+  bool quiet = true;  // no view moved in the previous frame: no gPrev tail in this one
+  for (int t = 0; t < 4 && quiet; ++t) quiet = !NonZero(g_prevDw[t]);
+  const bool diag = g_logLeft.load(std::memory_order_relaxed) > 0 || g_prevLogLeft.load(std::memory_order_relaxed) > 0 ||
+                    g_dumpActive || g_dumpReq.load(std::memory_order_relaxed) > 0;
+  const bool mode1 = g_cfgMode.load(std::memory_order_relaxed) == 1 && !f.observe;
+  f.dormEligible = mode1 && !f.off && f.h == 0 && !f.lo.ambiguous && quiet && !diag;
+  f.dormRef = f.dormEligible && DormRefFrame(g_frame);
+  const bool on = g_cfgDormant.load(std::memory_order_relaxed);
+  f.dormant = f.dormEligible && on && !f.dormRef;
+  if (f.dormEligible) g_dormEligible.fetch_add(1, std::memory_order_relaxed);
+  if (f.dormant) g_dormFrames.fetch_add(1, std::memory_order_relaxed);
+  if (f.dormRef && on) g_dormRefFrames.fetch_add(1, std::memory_order_relaxed);
+  // The transitions (eligible <-> not; a reference frame is no transition), logged within a budget per window.
+  if (g_dormKnown && f.dormEligible == g_dormWasEligible) return;
+  const bool first = !g_dormKnown;
+  g_dormKnown = true;
+  g_dormWasEligible = f.dormEligible;
+  if (first) return;
+  (f.dormEligible ? g_dormToDormant : g_dormToActive).fetch_add(1, std::memory_order_relaxed);
+  if (g_dormLogBudget.fetch_sub(1, std::memory_order_relaxed) <= 0) {
+    g_dormLogSuppressed.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  if (f.dormEligible) {
+    Log("cockpit ipd: frame %llu: %s (boost scale 1, h 0)", static_cast<unsigned long long>(g_frame),
+        on ? "dormant: dual-camera work skipped, overlay render point and learner kept"
+           : "unboosted (CockpitIpdDormant=0: full work)");
+  } else {
+    char why[96];
+    if (!mode1)
+      snprintf(why, sizeof(why), "observe");
+    else if (f.h != 0)
+      snprintf(why, sizeof(why), "boost h %.3f mm, scale %.4f", f.h * 1e3, g_lastScale);
+    else if (f.lo.ambiguous)
+      snprintf(why, sizeof(why), "ambiguous scale step");
+    else if (!quiet)
+      snprintf(why, sizeof(why), "gPrev tail of the previous frame's shift");
+    else
+      snprintf(why, sizeof(why), "trace or frame dump");
+    Log("cockpit ipd: frame %llu: active (%s)", static_cast<unsigned long long>(g_frame), why);
+  }
+}
+
+// At the end of EndFrame: the frame's render-thread cost (every part of the cost line) for an eligible frame, by
+// kind. The window from the previous frame end: this frame's work before its latch included.
+void DormEndFrame(const Frame& f) {
+  const uint32_t e1 = g_costEpoch.load(std::memory_order_acquire);
+  uint64_t sum = 0;
+  for (int i = 0; i < kCostParts; ++i) sum += g_cost[i].load(std::memory_order_relaxed);
+  const uint32_t e2 = g_costEpoch.load(std::memory_order_acquire);
+  const bool ok = g_costBaseOk && !(e1 & 1) && e1 == e2 && e1 == g_costEpochSeen && sum >= g_costBase;
+  if (ok && f.latched && f.dormEligible) {
+    const uint64_t d = sum - g_costBase;
+    if (f.dormant) {
+      g_dormCostTicks.fetch_add(d, std::memory_order_relaxed);
+      g_dormCostN.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      g_fullCostTicks.fetch_add(d, std::memory_order_relaxed);
+      g_fullCostN.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+  g_costBase = sum;
+  g_costEpochSeen = e2;
+  g_costBaseOk = e1 == e2 && !(e2 & 1);
+}
+
+// ---------------------------------------------------------------------------
 // Control (config thread)
 // ---------------------------------------------------------------------------
 
@@ -6094,15 +6237,30 @@ void LogStats() {
     const double tps = TscPerSec();  // R126: the scopes count TSC ticks
     const uint64_t fr = g_st.frames.load(), nf = fr > g_costFrames0 ? fr - g_costFrames0 : 1;
     double us[kCostParts];
+    g_costEpoch.fetch_add(1, std::memory_order_acq_rel);  // R128: odd while the parts are reset
     for (int i = 0; i < kCostParts; ++i) us[i] = g_cost[i].exchange(0) * 1e6 / tps / nf;
+    g_costEpoch.fetch_add(1, std::memory_order_acq_rel);
     g_costFrames0 = fr;
+    // R128: the window's dormant share; the session's eligible-frame cost run in full (key 0, or the 1-in-32
+    // reference frames) against dormant, and the difference per dormant frame and per frame of the window.
+    const uint64_t dn = g_dormFrames.exchange(0), en = g_dormEligible.exchange(0), rn = g_dormRefFrames.exchange(0);
+    const uint64_t cdN = g_dormCostN.load(), cfN = g_fullCostN.load();
+    const double dUs = cdN ? g_dormCostTicks.load() * 1e6 / tps / cdN : 0.0;
+    const double fUs = cfN ? g_fullCostTicks.load() * 1e6 / tps / cfN : 0.0;
+    const double saved = cdN && cfN ? fUs - dUs : 0.0;
+    g_dormLogBudget = 10;
     Log("cockpit ipd: render-thread cost per frame: uploads %.0f us, overlay draw hooks %.0f us, G-buffer observer "
         "%.0f us, pass boundaries %.0f us, cpu overlay path (replay / filter hooks, frame end) %.0f us (total %.0f "
-        "us); MVP scans full %llu cached %llu",
+        "us); MVP scans full %llu cached %llu; dormant %.1f %% of frames (CockpitIpdDormant=%d; scale 1 frames %llu, "
+        "full-work references %llu), saved %.1f us per dormant frame, %.1f us per frame (eligible frames in full "
+        "%.1f us n %llu, dormant %.1f us n %llu); transitions to dormant %llu, to active %llu (lines suppressed %llu)",
         us[kCostUpload], us[kCostDraw], us[kCostObserver], us[kCostBoundary], us[kCostOvlCpu],
         us[kCostUpload] + us[kCostDraw] + us[kCostObserver] + us[kCostBoundary] + us[kCostOvlCpu],
         static_cast<unsigned long long>(g_mvpFull.load()),
-        static_cast<unsigned long long>(g_mvpFast.load()));
+        static_cast<unsigned long long>(g_mvpFast.load()), 100.0 * static_cast<double>(dn) / static_cast<double>(nf),
+        g_cfgDormant.load() ? 1 : 0, static_cast<unsigned long long>(en), static_cast<unsigned long long>(rn), saved,
+        saved * static_cast<double>(dn) / static_cast<double>(nf), fUs, static_cast<unsigned long long>(cfN), dUs,
+        static_cast<unsigned long long>(cdN), u(g_dormToDormant), u(g_dormToActive), u(g_dormLogSuppressed));
   }
   const Matcher& m = g_match;
   Log("cockpit ipd: frames %llu patched %llu off(stale %llu scale1 %llu foreign %llu fault %llu inert %llu next %llu "

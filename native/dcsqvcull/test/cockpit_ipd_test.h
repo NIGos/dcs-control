@@ -5287,6 +5287,7 @@ void TestDualCameraStatus() {
 }
 
 #include "ovl_cpu_test.h"  // R32: the symbology camera set on the CPU (DCS replica on WARP)
+#include "r128_test.h"     // R128: the dormant mode, whole-path exactness on that replica (WARP; HW variant)
 
 void Run() {
   printf("-- cockpit_ipd.h --\n");

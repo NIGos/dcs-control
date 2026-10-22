@@ -235,7 +235,7 @@ DWORD WINAPI WorkerThread(void*) {
         // R122 per-view DLSS preset (opt-in, default 0: nothing installed). The kill switch makes its hook pass
         // through; the features DCS creates at the next mission load get DCS's own hint again.
         dlssv::Tick(dlssv::ParsePreset(g_cfg.dlssPeripheryPreset.c_str()), dlssv::ParsePreset(g_cfg.dlssFocusPreset.c_str()),
-                    g_cfg.dlssIgnoreDriverPreset, g_engineOff.load());
+                    g_cfg.dlssIgnoreDriverPreset, g_engineOff.load(), g_cfg.dlssInstrument);  // R130: + Instrument
         // R123 focus twin (opt-in, default 0: nothing installed). The kill switch / a benchmark / key 0 take it out.
         if (g_cfg.focusTwin || ftwin::g_state.load() == 1) {
           ftwin::g_shadowKey = g_cfg.suiteFocusTwinShadow;

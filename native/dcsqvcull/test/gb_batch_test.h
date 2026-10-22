@@ -833,6 +833,73 @@ void Compare() {
     if (mv) mv->Release();
     if (mt) mt->Release();
   }
+  // R129: the same-frame stock control's mask (gb_rec.h VerifyPass). A (first stock run) and the control (second
+  // stock run) differ in a 3x2 block: DCS's own variation. B (recorded) matches the control at 5 of those texels,
+  // neither run at 1, and differs from A at one texel outside: 6 inside the mask (1 of them matching neither stock
+  // run), 1 unexplained. R16G16_FLOAT (the motion-vector target R127 saw differ): the largest component difference
+  // is decoded (1.0). Without g_maskControl, the "neither" count stays 0.
+  {
+    using namespace gbverify;
+    ID3D11Texture2D* ct = MakeTarget(dev, DXGI_FORMAT_R16G16_FLOAT, W, H, 1, 1, D3D11_BIND_RENDER_TARGET);
+    ID3D11RenderTargetView* cv = nullptr;
+    if (ct) dev->CreateRenderTargetView(ct, nullptr, &cv);
+    bool cok = cv != nullptr;
+    int64_t total = -1, total2 = -1, neither2 = -1;
+    double md = -2.0;
+    size_t inMask = 0;
+    if (cok) {
+      ctx->OMSetRenderTargets(1, &cv, nullptr);
+      const float z[4] = {0, 0, 0, 0};
+      ctx->ClearRenderTargetView(cv, z);
+      cok = Capture() == nullptr;
+      // half bits: 1.0 0x3c00, 0.5 0x3800, 0.75 0x3a00, 2.0 0x4000, 0.25 0x3400
+      auto put = [&](UINT x0, UINT y0, UINT w, UINT h, uint16_t r, uint16_t g) {
+        std::vector<uint32_t> px(w * h, static_cast<uint32_t>(r) | (static_cast<uint32_t>(g) << 16));
+        D3D11_BOX bx = {x0, y0, 0, x0 + w, y0 + h, 1};
+        ctx->UpdateSubresource(ct, 0, &bx, px.data(), w * 4, 0);
+      };
+      if (cok) {
+        CopyAll(true, false);                 // init
+        put(2, 2, 3, 2, 0x3c00, 0x3800);      // A: (1.0, 0.5)
+        CopyAll(true, true);                  // A
+        CopyAll(false, false);
+        put(2, 2, 3, 2, 0x3c00, 0x3a00);      // the control: (1.0, 0.75) there
+        cok = CopyAllMask();
+        CopyAll(false, false);
+        cok = cok && BuildMask();
+        for (uint8_t v : g_mask) inMask += v;
+        put(2, 2, 3, 2, 0x3c00, 0x3a00);      // B: as the control at 5 texels ...
+        put(4, 3, 1, 1, 0x4000, 0x3800);      // ... neither stock run at 1: (2.0, 0.5)
+        put(20, 10, 1, 1, 0x3400, 0x0000);    // and one texel outside: (0.25, 0)
+        CopyAll(true, false);                 // B
+        int64_t bad[kMaxTargets];
+        uint64_t tx = 0;
+        g_maskOn = true;
+        g_maskControl = true;
+        total = CompareGuarded(bad, &tx);
+        md = g_maxDelta[0];
+        cok = cok && total == 7 && g_badIn == 6 && g_badOut == 1 && g_badNeither == 1 && inMask == 6 && md == 1.0;
+        g_maskControl = false;
+        total2 = CompareGuarded(bad, &tx);
+        neither2 = g_badNeither;
+        g_maskOn = false;
+        cok = cok && total2 == 7 && g_badIn == 6 && neither2 == 0;
+      }
+      ReleaseViews();
+      ID3D11RenderTargetView* none = nullptr;
+      ctx->OMSetRenderTargets(1, &none, nullptr);
+    }
+    Check(cok, "gbuffer verify, R129 stock control: texels where two stock runs differ form the mask; a recorded "
+               "difference there is stock's own variation (6, 1 matching neither run), outside it unexplained (1); "
+               "R16G16_FLOAT max difference decoded (1.0)");
+    if (!cok)
+      printf("     control: total %lld in %lld out %lld neither %lld, mask %zu, max %g; without control %lld / %lld\n",
+             static_cast<long long>(total), static_cast<long long>(g_badIn), static_cast<long long>(g_badOut),
+             static_cast<long long>(g_badNeither), inMask, md, static_cast<long long>(total2),
+             static_cast<long long>(neither2));
+    if (cv) cv->Release();
+    if (ct) ct->Release();
+  }
   // MSAA 4x: per-sample compare on the GPU, CS state restored.
   UINT q = 0;
   dev->CheckMultisampleQualityLevels(DXGI_FORMAT_R16G16B16A16_FLOAT, 4, &q);

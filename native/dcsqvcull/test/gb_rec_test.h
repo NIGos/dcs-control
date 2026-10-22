@@ -2555,8 +2555,47 @@ void RestartF10Tests() {
   delete w;
 }
 
+// R129: the verify's latch rule and its difference decode (pure).
+void R129VerifyTests() {
+  {
+    uint64_t run = 0;
+    bool l[6];
+    const int64_t seq[6] = {5, 0, 3, 4, 1, 0};
+    for (int i = 0; i < 6; ++i) l[i] = gbrec::VerifyLatchStep(run, seq[i]);
+    uint64_t run2 = 0;
+    bool any2 = false;
+    const int64_t seq2[7] = {1, 1, 0, 9, 9, 0, 1};
+    for (int64_t v : seq2) any2 |= gbrec::VerifyLatchStep(run2, v);
+    Check(!l[0] && !l[1] && !l[2] && !l[3] && l[4] && !l[5] && run == 0 && !any2 && run2 == 1 &&
+              gbrec::kLatchRun == 3,
+          "gbuffer rec verify (R129): unexplained differences latch only in 3 consecutive compares of an execution; "
+          "a clean compare resets the run (R127: one single-pixel compare latched the shipped recorder off)");
+  }
+  {
+    using gbverify::TexelMaxDelta;
+    const uint8_t a8[2] = {10, 200}, b8[2] = {13, 199};
+    const float fa = 0.5f, fb = 0.625f, fnan = std::nanf("");
+    uint8_t ra[4], rb[4], rn[4];
+    memcpy(ra, &fa, 4);
+    memcpy(rb, &fb, 4);
+    memcpy(rn, &fnan, 4);
+    const uint16_t h1[2] = {0x3c00, 0x0001}, h2[2] = {0xc000, 0x0001};  // (1, 2^-24) vs (-2, 2^-24)
+    const double dn = TexelMaxDelta(DXGI_FORMAT_R8G8_UNORM, a8, b8);
+    const double df = TexelMaxDelta(DXGI_FORMAT_D32_FLOAT, ra, rb);
+    const double dh = TexelMaxDelta(DXGI_FORMAT_R16G16_FLOAT, reinterpret_cast<const uint8_t*>(h1),
+                                    reinterpret_cast<const uint8_t*>(h2));
+    const double dx = TexelMaxDelta(DXGI_FORMAT_R32_FLOAT, ra, rn);
+    const double du = TexelMaxDelta(DXGI_FORMAT_R10G10B10A2_UNORM, ra, rb);
+    Check(std::fabs(dn - 3.0 / 255.0) < 1e-12 && df == 0.125 && dh == 3.0 && dx == 1e30 && du == -1.0 &&
+              gbverify::HalfToFloat(0x0001) == std::ldexp(1.0f, -24) && gbverify::HalfToFloat(0xc000) == -2.0f,
+          "gbuffer verify (R129): the largest component difference per format (UNORM8 /255, half, float; NaN on one "
+          "side = gross; R10G10B10A2 not decoded)");
+  }
+}
+
 void Run() {
   PureTests();
+  R129VerifyTests();
   TexTableTests();
   srtest::Compiler c;
   if (!c.Load()) {

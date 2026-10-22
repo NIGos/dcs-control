@@ -720,6 +720,10 @@ inline bool SymViewNow(const void* ra, bool recordLoop) {
 struct Replay {
   bool open = false, moved = false, wasMoved = false, perRecord = false, abort = false, sampleOk = false;
   bool viaRender = false;  // the per-record point is the render hook (no filter point in this replay)
+  // R128: a dormant frame's replay: rowMajor, vpDcs and the observer's sample inputs not read at its begin (Decide
+  // returns at h 0 before the camera identity); SampleNow reads them from `saved` (DCS's bytes at the begin) when
+  // the observer takes a sample.
+  bool sampleLazy = false;
   bool lost = false;  // no later filter call of this replay can be matched to DCS's record (alignment lost)
   DWORD tid = 0;
   int t = -1, depth = 0;
@@ -1382,6 +1386,21 @@ bool CtxRowMajor(int t, const uint8_t* vp) {
   return false;
 }
 
+// R128: DiagReplay would log its "early" lines for a replay begun now (the same test, without its side effects).
+inline bool DiagEarly() {
+  const int frames = g_diagFrames + (g_frame != g_diagFrame ? 1 : 0);
+  return frames <= 3 && g_diagReplays.load() < 48;
+}
+// R128: a lazy replay's camera and sample inputs, as ReplayBegin computes them, from DCS's bytes saved at its begin.
+void SampleNow(Replay& rp) {
+  rp.sampleLazy = false;
+  const uint8_t* vp = reinterpret_cast<const uint8_t*>(rp.saved);
+  rp.rowMajor = CtxRowMajor(rp.t, vp);
+  rp.vpDcs = LoadCtxVp(vp, rp.rowMajor);
+  rp.sampleOk = Inv4(rp.vpDcs, &rp.vpInv) && Centre(rp.vpDcs, rp.C);
+  if (rp.sampleOk) rp.vm = MaxAbs3(rp.vpInv);
+}
+
 // The replay begins: true when a replay record was opened (End must close it).
 bool ReplayBegin(void* self, int view, void* filter) {
   if (!g_on.load(std::memory_order_relaxed) || !Active() || !PathCpu() || t_rp.open) return false;
@@ -1463,8 +1482,13 @@ bool ReplayBegin(void* self, int view, void* filter) {
   rp.viaRender = !filterPoint && g_slotRender != nullptr && rp.recOk;
   if (rp.viaRender) g_os.viaRender++;
   rp.perRecord = filterPoint || rp.viaRender;
-  rp.rowMajor = CtxRowMajor(t, ctx + kCtxVP);
-  rp.vpDcs = LoadCtxVp(ctx + kCtxVP, rp.rowMajor);
+  // R128: in a dormant frame Decide returns at the frame's h 0 before it reads the camera, and DiagReplay logs it
+  // only in its first frames (DiagEarly) or for a camera failure (never at h 0): the camera is read lazily.
+  rp.sampleLazy = Dormant() && !DiagEarly();
+  if (!rp.sampleLazy) {
+    rp.rowMajor = CtxRowMajor(t, ctx + kCtxVP);
+    rp.vpDcs = LoadCtxVp(ctx + kCtxVP, rp.rowMajor);
+  }
   const bool allT = !rp.perRecord && rp.recOk && ScanFrame(h, recs, vb, static_cast<int>(ve - vb), view);
   const int why = Decide(t, rp.vpDcs, rp.perRecord, allT);
   DiagReplay(t, view, why, rp, filter, hasImpl, vt, composite);
@@ -1513,6 +1537,7 @@ bool ReplayBegin(void* self, int view, void* filter) {
     }
   }
   // The observer's samples need DCS's VP^-1 and its camera centre (the boosted eye).
+  if (rp.sampleLazy) return true;  // R128: SampleNow, at the replay's first sample (never moved at h 0)
   rp.sampleOk = Inv4(rp.vpDcs, &rp.vpInv) && Centre(rp.vpDcs, rp.C);
   if (rp.sampleOk) rp.vm = MaxAbs3(rp.vpInv);
   if (why != kMoved) return true;
@@ -1668,7 +1693,9 @@ void KeyFailure(Replay& rp, uint64_t key, bool wrongB) {
 }
 void ObserveUploadImpl(ID3D11Resource* r, const uint8_t* s, UINT len) {
   Replay& rp = t_rp;
-  if (!rp.open || !t_tagValid || !rp.sampleOk || rp.t < 0 || rp.t > 3 || len < 64) return;
+  if (!rp.open || !t_tagValid || rp.t < 0 || rp.t > 3 || len < 64) return;
+  if (rp.sampleLazy) SampleNow(rp);  // R128
+  if (!rp.sampleOk) return;
   g_os.obsUploads++;
   const MvpScan sc = ScanMvpsCached(r, s, std::min<UINT>(len, kMaxSrc), rp.vpInv, rp.vm, rp.C);
   int hi = -1;
