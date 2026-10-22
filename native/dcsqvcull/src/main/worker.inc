@@ -236,6 +236,19 @@ DWORD WINAPI WorkerThread(void*) {
         // through; the features DCS creates at the next mission load get DCS's own hint again.
         dlssv::Tick(dlssv::ParsePreset(g_cfg.dlssPeripheryPreset.c_str()), dlssv::ParsePreset(g_cfg.dlssFocusPreset.c_str()),
                     g_cfg.dlssIgnoreDriverPreset, g_engineOff.load());
+        // R123 focus twin (opt-in, default 0: nothing installed). The kill switch / a benchmark / key 0 take it out.
+        if (g_cfg.focusTwin || ftwin::g_state.load() == 1) {
+          ftwin::g_shadowKey = g_cfg.suiteFocusTwinShadow;
+          ftwin::g_auditEvery = g_cfg.suiteFocusTwinAuditEvery;
+          ftwin::g_trustNeeded = g_cfg.suiteFocusTwinTrust;
+          ftwin::g_island = g_cfg.suiteFocusTwinIsland;
+          ftwin::g_chunk = g_cfg.suiteFocusTwinChunk;
+          ftwin::g_predTol = g_cfg.suiteFocusTwinPredTol;
+          ftwin::g_verifyEvery = g_cfg.suiteFocusTwinVerify;
+          ftwin::g_instKey = g_cfg.focusTwinInstancer;    // R125
+          ftwin::g_patchesKey = g_cfg.suiteFocusTwinPatches;
+          ftwin::Tick(g_cfg.focusTwin, g_engineOff.load(), g_benchRunningFlag.load(), g_quadFrame.load());
+        }
       }
       // Fixation depth (Depth boost): not an optimization, so neither the kill
       // switch nor a benchmark turns it off.

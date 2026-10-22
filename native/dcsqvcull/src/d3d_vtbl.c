@@ -4,6 +4,7 @@
 #define COBJMACROS
 #include <stddef.h>
 #include <d3d11_1.h>
+#include <d3d11_4.h> /* R123: the whole ID3D11DeviceContext4 table (focus_twin.h copies it) */
 
 #define SLOT(name) (int)(offsetof(ID3D11DeviceContext1Vtbl, name) / sizeof(void*))
 
@@ -86,6 +87,16 @@ int DcsQv_ContextSlot(const char* name) {
       {"GSSetConstantBuffers", SLOT(GSSetConstantBuffers)},
       {"GSSetSamplers", SLOT(GSSetSamplers)},
       {"GSSetConstantBuffers1", SLOT(GSSetConstantBuffers1)},
+      /* focus_twin.h (R123): every other state setter it tracks or watches during its terrain windows */
+      {"HSSetShader", SLOT(HSSetShader)},
+      {"DSSetShader", SLOT(DSSetShader)},
+      {"HSSetConstantBuffers", SLOT(HSSetConstantBuffers)},
+      {"DSSetConstantBuffers", SLOT(DSSetConstantBuffers)},
+      {"CSSetConstantBuffers", SLOT(CSSetConstantBuffers)},
+      {"HSSetSamplers", SLOT(HSSetSamplers)},
+      {"DSSetSamplers", SLOT(DSSetSamplers)},
+      {"CSSetSamplers", SLOT(CSSetSamplers)},
+      {"SetPredication", SLOT(SetPredication)},
   };
   for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
     const char* a = table[i].n;
@@ -95,6 +106,9 @@ int DcsQv_ContextSlot(const char* name) {
   }
   return -1;
 }
+
+/* R123: the number of entries of an ID3D11DeviceContext4 table (focus_twin.h's copy of the immediate context's). */
+int DcsQv_ContextSlotCount(void) { return (int)(sizeof(ID3D11DeviceContext4Vtbl) / sizeof(void*)); }
 
 /* Vtable slot indices of ID3D11Device (chain_fast.h, R34: CreateComputeShader). */
 int DcsQv_DeviceSlot(const char* name) {

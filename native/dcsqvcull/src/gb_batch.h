@@ -100,8 +100,11 @@ int g_state = 0;  // 0 = not tried, 1 = hooked, -1 = build mismatch
 // nullptr unless that option is on: then Hook is exactly as before.
 using ObsFn = void (*)(void* pass, void* ctx, bool begin);
 std::atomic<ObsFn> g_obs{nullptr};
+// R123 (focus_twin.h, [Model] FocusTwin): a second observer around the whole execution, outermost; nullptr unless
+// the focus twin is installed (then Hook is exactly as before plus this call before and after).
+std::atomic<ObsFn> g_obs2{nullptr};
 
-void __fastcall Hook(void* pass, void* ctx) {
+void __fastcall HookBody(void* pass, void* ctx) {
   const ObsFn obs = g_obs.load(std::memory_order_acquire);
   if (!obs) {
     if (WrapFn w = g_wrap.load(std::memory_order_relaxed)) return w(pass, ctx, g_orig);
@@ -114,6 +117,13 @@ void __fastcall Hook(void* pass, void* ctx) {
   else
     g_orig(pass, ctx);
   obs(pass, ctx, false);
+}
+void __fastcall Hook(void* pass, void* ctx) {
+  const ObsFn obs2 = g_obs2.load(std::memory_order_acquire);
+  if (!obs2) return HookBody(pass, ctx);
+  obs2(pass, ctx, true);
+  HookBody(pass, ctx);
+  obs2(pass, ctx, false);
 }
 
 // The pass's item vector {begin, end, cap}, or nullptr (empty static vector).
