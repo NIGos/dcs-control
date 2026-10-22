@@ -1464,6 +1464,65 @@ UINT g_maskW = 0, g_maskH = 0, g_maskS = 0;
 bool g_maskOn = false;  // CompareStaging also counts the differing texels outside the mask (g_badOut)
 int64_t g_badOut = 0;   // the last CompareAll's differing texels outside the mask (staging targets)
 int64_t g_badIn = 0;    // ... inside it
+// R129: the mask can also come from a same-frame stock control run (gb_rec.h VerifyPass: a second stock run from
+// the same init, copied into .m): its texels are those where DCS's own output is not reproducible within the frame.
+// With g_maskControl, a difference inside it whose B also differs from the control run's value (B matches neither
+// stock run there) is counted in g_badNeither as well (diagnostic: it is still inside stock's own variation).
+bool g_maskControl = false;
+int64_t g_badNeither = 0;
+// R129: per target, the largest per-component difference of the last compare, in the format's value units
+// (UNORM: 0..1, float formats: absolute); -1 when the format is not decoded (nothing differed: 0).
+double g_maxDelta[kMaxTargets] = {};
+// IEEE half to float (exact; no denormal flush).
+inline float HalfToFloat(uint16_t h) {
+  const uint32_t sign = (h >> 15) & 1u, exp = (h >> 10) & 0x1fu, man = h & 0x3ffu;
+  float v;
+  if (exp == 0)
+    v = std::ldexp(static_cast<float>(man), -24);
+  else if (exp == 31)
+    v = man ? std::nanf("") : HUGE_VALF;
+  else
+    v = std::ldexp(static_cast<float>(man | 0x400u), static_cast<int>(exp) - 25);
+  return sign ? -v : v;
+}
+// The largest per-component difference between two texels of format f, in value units; -1: format not decoded.
+// A NaN or infinity on one side only counts as 1e30 (a gross difference).
+inline double TexelMaxDelta(DXGI_FORMAT f, const uint8_t* a, const uint8_t* b) {
+  auto fl = [](float x, float y) -> double {
+    if (!std::isfinite(x) || !std::isfinite(y)) return (x == y || (std::isnan(x) && std::isnan(y))) ? 0.0 : 1e30;
+    return std::fabs(static_cast<double>(x) - static_cast<double>(y));
+  };
+  int unorm8 = 0, half = 0, f32 = 0;
+  switch (static_cast<int>(f)) {
+    case 28: case 29: case 87: case 88: case 91: case 93: unorm8 = 4; break;  // R8G8B8A8 / B8G8R8A8(X8) UNORM(_SRGB)
+    case 49: unorm8 = 2; break;                                                 // R8G8_UNORM
+    case 61: case 65: unorm8 = 1; break;                                        // R8_UNORM, A8_UNORM
+    case 10: half = 4; break;                                                   // R16G16B16A16_FLOAT
+    case 34: half = 2; break;                                                   // R16G16_FLOAT
+    case 54: half = 1; break;                                                   // R16_FLOAT
+    case 2: f32 = 4; break;                                                     // R32G32B32A32_FLOAT
+    case 6: f32 = 3; break;                                                     // R32G32B32_FLOAT
+    case 16: f32 = 2; break;                                                    // R32G32_FLOAT
+    case 40: case 41: f32 = 1; break;                                           // D32_FLOAT, R32_FLOAT
+    case 19: case 20: case 21: f32 = 1; break;  // R32G8X24 family: the depth float only (stencil not decoded)
+    default: return -1.0;
+  }
+  double m = 0.0;
+  for (int i = 0; i < unorm8; ++i) m = (std::max)(m, std::abs(static_cast<int>(a[i]) - static_cast<int>(b[i])) / 255.0);
+  for (int i = 0; i < half; ++i) {
+    uint16_t x, y;
+    memcpy(&x, a + 2 * i, 2);
+    memcpy(&y, b + 2 * i, 2);
+    m = (std::max)(m, fl(HalfToFloat(x), HalfToFloat(y)));
+  }
+  for (int i = 0; i < f32; ++i) {
+    float x, y;
+    memcpy(&x, a + 4 * i, 4);
+    memcpy(&y, b + 4 * i, 4);
+    m = (std::max)(m, fl(x, y));
+  }
+  return m;
+}
 bool CopyAllMask() {  // the current targets into .m (created on demand); false: a target cannot take a mask
   for (Target& t : g_t) {
     if (!t.res) continue;
@@ -1562,21 +1621,27 @@ void OnFirstItem() {
 // ---- Compare ----
 // The bounding box (x0, y0, x1, y1) of the texels that differed in the last staging compares (diagnostics).
 int g_badBox[4] = {1 << 30, 1 << 30, -1, -1};
-int64_t CompareStaging(ID3D11Texture2D* a, ID3D11Texture2D* b, uint64_t* texels) {
+// m (optional, R129): the control run's copy of the same target; with g_maskControl, a difference inside the mask
+// whose B also differs from m is counted in g_badNeither. maxDelta (optional): the largest component difference.
+int64_t CompareStaging(ID3D11Texture2D* a, ID3D11Texture2D* b, uint64_t* texels, ID3D11Texture2D* m = nullptr,
+                       double* maxDelta = nullptr) {
   D3D11_TEXTURE2D_DESC d;
   a->GetDesc(&d);
   const UINT bpt = TexelBytes(d.Format);
   if (!bpt) return -1;
   const size_t rowBytes = static_cast<size_t>(d.Width) * bpt;
   int64_t bad = 0;
+  if (maxDelta) *maxDelta = 0.0;
   for (UINT s = 0; s < d.ArraySize; ++s) {
-    D3D11_MAPPED_SUBRESOURCE ma, mb;
+    D3D11_MAPPED_SUBRESOURCE ma, mb, mm = {};
     if (FAILED(g_ctx->Map(a, s, D3D11_MAP_READ, 0, &ma))) return -1;
     if (FAILED(g_ctx->Map(b, s, D3D11_MAP_READ, 0, &mb))) {
       g_ctx->Unmap(a, s);
       return -1;
     }
-    if (ma.RowPitch < rowBytes || mb.RowPitch < rowBytes) {
+    const bool haveM = m && SUCCEEDED(g_ctx->Map(m, s, D3D11_MAP_READ, 0, &mm));
+    if (ma.RowPitch < rowBytes || mb.RowPitch < rowBytes || (haveM && mm.RowPitch < rowBytes)) {
+      if (haveM) g_ctx->Unmap(m, s);
       g_ctx->Unmap(b, s);
       g_ctx->Unmap(a, s);
       return -1;
@@ -1585,12 +1650,19 @@ int64_t CompareStaging(ID3D11Texture2D* a, ID3D11Texture2D* b, uint64_t* texels)
       const auto* ra = static_cast<const uint8_t*>(ma.pData) + static_cast<size_t>(y) * ma.RowPitch;
       const auto* rb = static_cast<const uint8_t*>(mb.pData) + static_cast<size_t>(y) * mb.RowPitch;
       if (memcmp(ra, rb, rowBytes) == 0) continue;
+      const auto* rm = haveM ? static_cast<const uint8_t*>(mm.pData) + static_cast<size_t>(y) * mm.RowPitch : nullptr;
       const bool masked = g_maskOn && d.Width == g_maskW && d.Height == g_maskH && d.ArraySize == g_maskS;
       const uint8_t* mrow = masked ? g_mask.data() + (static_cast<size_t>(s) * d.Height + y) * d.Width : nullptr;
       for (UINT x = 0; x < d.Width; ++x) {
         if (memcmp(ra + x * bpt, rb + x * bpt, bpt) == 0) continue;
         ++bad;
+        if (maxDelta && *maxDelta >= 0.0) {
+          const double dd = TexelMaxDelta(d.Format, ra + x * bpt, rb + x * bpt);
+          *maxDelta = dd < 0.0 ? -1.0 : (std::max)(*maxDelta, dd);
+        }
         if (g_maskOn) (mrow && mrow[x] ? g_badIn : g_badOut)++;
+        if (g_maskOn && g_maskControl && mrow && mrow[x] && rm && memcmp(rm + x * bpt, rb + x * bpt, bpt) != 0)
+          ++g_badNeither;
         g_badBox[0] = (std::min)(g_badBox[0], static_cast<int>(x));
         g_badBox[1] = (std::min)(g_badBox[1], static_cast<int>(y));
         g_badBox[2] = (std::max)(g_badBox[2], static_cast<int>(x));
@@ -1598,6 +1670,7 @@ int64_t CompareStaging(ID3D11Texture2D* a, ID3D11Texture2D* b, uint64_t* texels)
       }
     }
     *texels += static_cast<uint64_t>(d.Width) * d.Height;
+    if (haveM) g_ctx->Unmap(m, s);
     g_ctx->Unmap(b, s);
     g_ctx->Unmap(a, s);
   }
@@ -1690,12 +1763,17 @@ int64_t CompareMs(Target& t, uint64_t* texels) {
 // counts in bad[]; returns the total, or -1 on an error.
 int64_t CompareAll(int64_t bad[kMaxTargets], uint64_t* texels) {
   int64_t total = 0;
-  g_badIn = g_badOut = 0;
+  g_badIn = g_badOut = g_badNeither = 0;
   for (int i = 0; i < kMaxTargets; ++i) {
     bad[i] = 0;
+    g_maxDelta[i] = 0.0;
     Target& t = g_t[i];
     if (!t.res) continue;
-    const int64_t b = t.ms ? CompareMs(t, texels) : CompareStaging(t.a, t.init, texels);
+    // MSAA: compared per sample on the GPU, no value decode (-1 when it differs).
+    const int64_t b = t.ms ? CompareMs(t, texels)
+                           : CompareStaging(t.a, t.init, texels, g_maskOn && g_maskControl ? t.m : nullptr,
+                                            &g_maxDelta[i]);
+    if (t.ms && b > 0) g_maxDelta[i] = -1.0;
     if (b < 0) return -1;
     bad[i] = b;
     total += b;

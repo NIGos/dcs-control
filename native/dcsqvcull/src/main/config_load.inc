@@ -148,6 +148,7 @@ void LoadConfig(bool initial) {
     GetPrivateProfileStringW(L"DLSS", L"FocusPreset", L"0", v, 32, ini.c_str());
     c.dlssFocusPreset = v;
     c.dlssIgnoreDriverPreset = GetPrivateProfileIntW(L"DLSS", L"IgnoreDriverPreset", 0, ini.c_str()) != 0;
+    c.dlssInstrument = GetPrivateProfileIntW(L"DLSS", L"Instrument", 0, ini.c_str()) != 0;  // R130 (dev, read-only)
   }
   c.cascadeCache = GetPrivateProfileIntW(L"Shadows", L"CascadeCache", 0, ini.c_str()) != 0;
   c.cascadeCacheMask = qvini::Mask(L"Shadows", L"CascadeCacheMask", 0xc, 0xf, ini.c_str());  // decimal or 0x hex
@@ -415,6 +416,7 @@ void LoadConfig(bool initial) {
   c.cockpitTrueIpdHelmet = GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdHelmet", 1, ini.c_str()) != 0;
   c.cockpitTrueIpdOwnship =
       std::clamp(static_cast<int>(GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdOwnship", 0, ini.c_str())), 0, 2);
+  c.cockpitIpdDormant = GetPrivateProfileIntW(L"Perception", L"CockpitIpdDormant", 1, ini.c_str()) != 0;  // R128
   c.cockpitTrueIpdOverlays = GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdOverlays", 1, ini.c_str()) != 0;
   c.cockpitTrueIpdOverlayMvp = GetPrivateProfileIntW(L"Perception", L"CockpitTrueIpdOverlayMvp", 1, ini.c_str()) != 0;
   c.cockpitTrueIpdLog =

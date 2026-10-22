@@ -1649,8 +1649,13 @@ void InPassRearm();
 // on the same context is forwarded untouched (counted).
 inline const void* CkUpload(ID3D11Resource* r, UINT sub, const D3D11_BOX* box, const void* src, bool us1) {
   if (!ckipd::g_on.load(std::memory_order_relaxed)) return src;
+  // R128: a dormant frame's upload on the render thread outside any class of ours with no restore entry open:
+  // OnUploadSeh would forward DCS's pointer (OnUploadImpl) and find nothing to merge (NoteForwarded). Not timed:
+  // nothing of ours runs for it.
+  const bool render = GetCurrentThreadId() == ptiming::g_topTid.load(std::memory_order_relaxed);
+  if (render && ckipd::Dormant() && ckipd::t_cls == ckipd::kClsNone && ckipd::g_restN == 0) return src;
   ckipd::CostScope cost(ckipd::kCostUpload);
-  if (GetCurrentThreadId() != ptiming::g_topTid.load(std::memory_order_relaxed)) {
+  if (!render) {
     ckipd::g_st.usOtherThread++;
     return src;
   }
@@ -5491,7 +5496,7 @@ void CockpitIpdBoundary(void* pass, bool begin, int k) {
   if (begin) {
     if (ckipd::PassBegin(pass)) {
       ckipd::PassArmed(ArmUsOnly(false));
-    } else if (PassIs(pass, "GBufferLightingPass") && ckipd::LightBegin(pass)) {
+    } else if (!ckipd::Dormant() && PassIs(pass, "GBufferLightingPass") && ckipd::LightBegin(pass)) {  // R128: no moved view
       bool ok = false;
       if (!g_armTable) {
         g_tpCk = true;  // cockpit ipd's lighting arm: R32's Unmap point too

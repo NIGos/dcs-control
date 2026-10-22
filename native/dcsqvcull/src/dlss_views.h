@@ -51,6 +51,9 @@
 //     "latest DLL" override (0x10E41E01, read by the NGX core) is not touched. When NGX is already up as the payload
 //     starts (today: always), nothing is installed and the reason is logged.
 //
+// R130: [DLSS] Instrument = 0 (default) | 1 (dev): READ-ONLY lifetime counters for DCS's DLSS features (creations
+// with their cost, evaluations, releases per handle; summaries in DcsQvCull.log). See the "R130" section below.
+//
 // Safety. Everything we do inside DCS's call runs under SEH; a fault leaves the feature as DCS asked. An unknown NGX
 // core / NvAPI build (a prologue our decoder does not accept, a foreign patch), a missing module or export: nothing
 // installed, logged once. Keys 0: nothing installed at all.
@@ -615,15 +618,658 @@ void CreateTail(void* ret, void** handle, char* out, size_t n) {
   snprintf(out, n, "; caller %s; handle %s", caller, hs);
 }
 
+// ---- R130: DLSS feature lifetime instrumentation (READ-ONLY; [DLSS] Instrument=1, dev key, default 0) -------------
+// R127 saw DCS create two full sets of four DLSS features (P, P, F, F) about 7 ms apart at every mission load, all from
+// the same dx11backend call site, and never release any (R119: +1.1 GB private memory per restart). Two facts before
+// any release can be considered: (1) is the first set ever evaluated once the second exists, (2) what one feature
+// costs. With the key on:
+//   - NVSDK_NGX_D3D11_EvaluateFeature (the core has no _C export: the static loader's EvaluateFeature_C lands here
+//     too) and NVSDK_NGX_D3D11_ReleaseFeature are detoured (the R122 scheme), pure pass-through: after the original
+//     returns, the evaluation is counted on the handle's entry (first / last time, count, count since the handle's set
+//     was superseded); a successful release marks the entry released (DCS is not expected to release any).
+//   - Each DLSS-SR creation (the R122 CreateFeature hook) gets an entry: handle, NGX id, class, its creation set and
+//     mission load. A load is a run of creations less than 1 s apart; inside a load a new set starts when an output
+//     size seen in the current set comes back after another size (P,P,F,F,P,... -> the second P starts set 2). A new
+//     set supersedes every earlier live entry.
+//   - Around each creation: DXGI local-segment CurrentUsage of DCS's adapter (from the context DCS passes), the
+//     process's private bytes, and DLSS's own VRAM figure (NGX_DLSS_GET_STATS: the snippet's DLSSGetStatsCallback,
+//     called on a capability parameter block of our own, never on DCS's) before and after; the deltas are appended
+//     to the create line, and the per-set totals are logged when the load closes (2 s after its last creation).
+//   - A summary every 10 s and at each mission load (before the new load's first creation): per set, the
+//     evaluations since the last summary and the time since the last evaluation of each live handle; older sets with
+//     no evaluation since they were superseded are flagged IDLE, any that are still evaluated are flagged STILL
+//     EVALUATED; plus what the later opt-in release rule would say (observation only, nothing is released). A summary
+//     with nothing new after an idle one is skipped.
+// Nothing is changed: no NGX call on DCS's handles or parameters, no ReleaseFeature, no reuse. The kill switch and
+// key 0 stop the counting (the detours stay, pass-through). The key works with or without the [DLSS] preset keys;
+// with Instrument=0 and PeripheryPreset=0 nothing is installed at all.
+using EvalFn = int(__cdecl*)(void* ctx, const void* handle, const NgxParam* params, void* callback);
+using ReleaseFn = int(__cdecl*)(void* handle);
+using CapParamsFn = int(__cdecl*)(NgxParam** out);
+using StatsCbFn = int(__cdecl*)(NgxParam* params);
+
+namespace life {
+constexpr uint32_t kMax = 256;            // entries (8 per mission load in DCS: 32 loads); more are counted, not kept
+constexpr double kLoadGapSec = 1.0;       // creations further apart start a new mission load
+constexpr double kLoadDoneSec = 2.0;      // a load's totals are logged this long after its last creation
+constexpr double kSummarySec = 10.0;
+constexpr uint64_t kRuleMinEvals = 300;   // the release rule's N (observation only): newest set's handles each >= N
+constexpr int kMaxCapTries = 8;
+
+struct Feat {
+  void* handle = nullptr;
+  uint32_t id = 0, seq = 0, set = 0, load = 0;
+  int cls = kUnknown;
+  uint32_t outW = 0, outH = 0;
+  int64_t createQpc = 0;
+  std::atomic<uint64_t> evals{0}, evalsAfterSuper{0};
+  std::atomic<int64_t> firstEval{0}, lastEval{0}, superQpc{0};
+  std::atomic<uint32_t> superBy{0};
+  std::atomic<bool> released{false};
+  uint64_t evalsAtSummary = 0;  // summaries only (under g_mx)
+  bool vramOk = false, privOk = false, statsOk = false;
+  int64_t vramDelta = 0, privDelta = 0, statsDelta = 0;
+};
+Feat g_f[kMax];
+std::atomic<uint32_t> g_n{0};  // published entries (written under g_mx, read lock-free by the evaluate hook)
+std::atomic<bool> g_on{false};  // counting: Instrument=1 and the kill switch off
+bool g_key = false;             // Instrument=1 (worker)
+std::atomic<uint64_t> g_evalTotal{0}, g_evalFail{0}, g_untracked{0}, g_evalFault{0}, g_releases{0}, g_dropped{0};
+std::atomic<int> g_evalState{0}, g_releaseState{0};  // 0 not installed, 1 installed, -1 failed (latched)
+Detour g_eval{"NVSDK_NGX_D3D11_EvaluateFeature"}, g_release{"NVSDK_NGX_D3D11_ReleaseFeature"};
+std::atomic<EvalFn> g_evalOrig{nullptr};
+std::atomic<ReleaseFn> g_releaseOrig{nullptr};
+std::mutex g_mx;
+uint32_t g_load = 0, g_set = 0, g_setFirst = 0, g_loadFirst = 0;
+uint32_t g_prevW = 0, g_prevH = 0;
+int64_t g_lastCreate = 0, g_loadStart = 0;
+bool g_loadOpen = false;
+int64_t g_lastSummary = 0;
+uint64_t g_evalAtSummary = 0, g_untrackedAtSummary = 0, g_failAtSummary = 0, g_releasesAtSummary = 0;
+uint32_t g_changes = 0;  // creations and releases since the last summary
+bool g_lastIdle = false, g_onLogged = false, g_pausedLogged = false, g_fullLogged = false;
+NgxParam* g_cap = nullptr;  // our own capability parameter block (kept for the process; never DCS's)
+StatsCbFn g_statsCb = nullptr;
+int g_capTries = 0;
+// Tests only: fake targets, a clock, the memory readings.
+uint8_t* g_testEvalTarget = nullptr;
+uint8_t* g_testReleaseTarget = nullptr;
+int64_t (*g_testClock)() = nullptr;
+bool (*g_testVram)(void* ctx, uint64_t* local) = nullptr;
+bool (*g_testPriv)(uint64_t* bytes) = nullptr;
+CapParamsFn g_testCapParams = nullptr;
+
+inline int64_t Now() {
+  if (g_testClock) return g_testClock();
+  LARGE_INTEGER t;
+  QueryPerformanceCounter(&t);
+  return t.QuadPart;
+}
+inline double Sec(int64_t d) {
+  static const int64_t f = [] {
+    LARGE_INTEGER x;
+    QueryPerformanceFrequency(&x);
+    return x.QuadPart;
+  }();
+  return static_cast<double>(d) / static_cast<double>(f);
+}
+inline int64_t Ticks(double s) { return static_cast<int64_t>(s / Sec(1)); }
+inline char ClassLetter(int c) { return c == kPeriph ? 'P' : c == kFocus ? 'F' : 'U'; }
+inline double MB(int64_t b) { return static_cast<double>(b) / (1024.0 * 1024.0); }
+
+void ResetEntry(Feat& f) {
+  f.handle = nullptr, f.id = f.seq = f.set = f.load = 0, f.cls = kUnknown, f.outW = f.outH = 0, f.createQpc = 0;
+  f.evals = 0, f.evalsAfterSuper = 0, f.firstEval = 0, f.lastEval = 0, f.superQpc = 0, f.superBy = 0;
+  f.released = false, f.evalsAtSummary = 0;
+  f.vramOk = f.privOk = f.statsOk = false, f.vramDelta = f.privDelta = f.statsDelta = 0;
+}
+
+// The newest live entry for a handle pointer (NGX may reuse a released handle's memory), -1 if none.
+inline int Find(const void* h) {
+  const uint32_t n = g_n.load(std::memory_order_acquire);
+  for (uint32_t i = n; i-- > 0;)
+    if (g_f[i].handle == h && !g_f[i].released.load(std::memory_order_relaxed)) return static_cast<int>(i);
+  return -1;
+}
+// No C++ objects with destructors (SEH).
+void CountEvalImpl(const void* h, int r) {
+  g_evalTotal.fetch_add(1, std::memory_order_relaxed);
+  if (r != kNgxSuccess) g_evalFail.fetch_add(1, std::memory_order_relaxed);
+  const int i = Find(h);
+  if (i < 0) {
+    g_untracked.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  Feat& f = g_f[i];
+  const int64_t t = Now();
+  f.evals.fetch_add(1, std::memory_order_relaxed);
+  int64_t zero = 0;
+  f.firstEval.compare_exchange_strong(zero, t, std::memory_order_relaxed);
+  f.lastEval.store(t, std::memory_order_relaxed);
+  if (f.superQpc.load(std::memory_order_relaxed)) f.evalsAfterSuper.fetch_add(1, std::memory_order_relaxed);
+}
+void CountEval(const void* h, int r) {
+  __try {
+    CountEvalImpl(h, r);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    g_evalFault.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+int FindGuarded(const void* h) {
+  __try {
+    return Find(h);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return -1;
+  }
+}
+
+// ---- cost readings ----
+// DXGI local-segment CurrentUsage of the adapter of DCS's context. Raw COM, no destructors (SEH).
+bool LocalUsageImpl(void* ctx, uint64_t* out) {
+  auto* c = static_cast<ID3D11DeviceContext*>(ctx);
+  ID3D11Device* dev = nullptr;
+  c->GetDevice(&dev);
+  if (!dev) return false;
+  IDXGIDevice* dx = nullptr;
+  IDXGIAdapter* a = nullptr;
+  if (SUCCEEDED(dev->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dx))) && dx) {
+    dx->GetAdapter(&a);
+    dx->Release();
+  }
+  dev->Release();
+  if (!a) return false;
+  IDXGIAdapter3* a3 = nullptr;
+  a->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&a3));
+  a->Release();
+  if (!a3) return false;
+  DXGI_QUERY_VIDEO_MEMORY_INFO i{};
+  const bool ok = SUCCEEDED(a3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &i));
+  a3->Release();
+  if (ok) *out = i.CurrentUsage;
+  return ok;
+}
+bool LocalUsage(void* ctx, uint64_t* out) {
+  if (g_testVram) return g_testVram(ctx, out);
+  if (!ctx) return false;
+  __try {
+    return LocalUsageImpl(ctx, out);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+bool PrivateBytes(uint64_t* out) {
+  if (g_testPriv) return g_testPriv(out);
+  PROCESS_MEMORY_COUNTERS_EX pmc{};
+  pmc.cb = sizeof(pmc);
+  if (!K32GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc)))
+    return false;
+  *out = pmc.PrivateUsage;
+  return true;
+}
+// NGX_DLSS_GET_STATS (nvsdk_ngx_helpers.h) on our own capability block: the snippet's callback writes SizeInBytes
+// (VRAM allocated by DLSS) into the block it is given. No destructors (SEH).
+int CallCap(CapParamsFn fn, NgxParam** p) {
+  __try {
+    return fn(p);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return 0;
+  }
+}
+bool StatsImpl(uint64_t* out) {
+  if (g_statsCb(g_cap) != kNgxSuccess) return false;
+  unsigned long long v = 0;
+  if (g_cap->Get("SizeInBytes", &v) != kNgxSuccess) return false;
+  *out = v;
+  return true;
+}
+bool GetCbImpl(void** cb) { return g_cap->Get("DLSSGetStatsCallback", cb) == kNgxSuccess; }
+bool GetCbGuarded(void** cb) {
+  __try {
+    return GetCbImpl(cb);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+void AcquireStats() {
+  if (g_statsCb || g_capTries >= kMaxCapTries) return;
+  ++g_capTries;
+  CapParamsFn get = g_testCapParams;
+  if (!get) {
+    HMODULE core = GetModuleHandleW(kNgxCore);
+    if (!core) return;
+    get = reinterpret_cast<CapParamsFn>(GetProcAddress(core, "NVSDK_NGX_D3D11_GetCapabilityParameters"));
+  }
+  if (!get) return;
+  if (!g_cap) {
+    NgxParam* p = nullptr;
+    if (CallCap(get, &p) != kNgxSuccess || !p) return;
+    g_cap = p;
+  }
+  void* cb = nullptr;
+  if (GetCbGuarded(&cb) && cb) {
+    g_statsCb = reinterpret_cast<StatsCbFn>(cb);
+    return;
+  }
+  // A block taken before the snippet was loaded has no callback: a fresh one next time (the old one is left; it is a
+  // few KB, at most kMaxCapTries per payload).
+  g_cap = nullptr;
+}
+bool DlssStats(uint64_t* out) {
+  AcquireStats();
+  if (!g_statsCb || !g_cap) return false;
+  __try {
+    return StatsImpl(out);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+struct Meas {
+  bool vram = false, priv = false, stats = false;
+  uint64_t local = 0, privBytes = 0, statsBytes = 0;
+};
+void Measure(void* ctx, Meas* m) {
+  m->vram = LocalUsage(ctx, &m->local);
+  m->priv = PrivateBytes(&m->privBytes);
+  m->stats = DlssStats(&m->statsBytes);
+}
+
+// ---- summaries (under g_mx) ----
+inline bool Live(const Feat& f) { return !f.released.load(std::memory_order_relaxed); }
+// The newest set with a live entry (0 = none).
+uint32_t NewestLiveSet(uint32_t n) {
+  for (uint32_t i = n; i-- > 0;)
+    if (Live(g_f[i])) return g_f[i].set;
+  return 0;
+}
+// The release rule's verdict for an older set (observation only): 1 eligible, 0 not yet (the newest set has not been
+// evaluated N times by each handle), -1 refused by the guard (evaluated after it was superseded), -2 not superseded.
+struct Rule {
+  uint64_t newestMin = 0;
+  bool newestKnown = false;
+};
+Rule NewestMin(uint32_t n, uint32_t newest) {
+  Rule r;
+  for (uint32_t i = 0; i < n; ++i) {
+    const Feat& f = g_f[i];
+    if (f.set != newest || !Live(f)) continue;
+    const uint64_t e = f.evals.load(std::memory_order_relaxed);
+    r.newestMin = r.newestKnown ? (std::min)(r.newestMin, e) : e;
+    r.newestKnown = true;
+  }
+  return r;
+}
+int SetVerdict(uint32_t n, uint32_t set, const Rule& nr, uint64_t minEvals) {
+  bool any = false;
+  for (uint32_t i = 0; i < n; ++i) {
+    const Feat& f = g_f[i];
+    if (f.set != set || !Live(f)) continue;
+    any = true;
+    if (!f.superQpc.load(std::memory_order_relaxed)) return -2;
+    if (f.evalsAfterSuper.load(std::memory_order_relaxed)) return -1;
+  }
+  if (!any) return -2;
+  return nr.newestKnown && nr.newestMin >= minEvals ? 1 : 0;
+}
+
+// Appends to a bounded line buffer.
+struct Line {
+  char b[1800];
+  size_t n = 0;
+  bool cut = false;
+  void Add(const char* fmt, ...) {
+    if (n >= sizeof(b) - 1) {
+      cut = true;
+      return;
+    }
+    va_list a;
+    va_start(a, fmt);
+    const int w = vsnprintf(b + n, sizeof(b) - n, fmt, a);
+    va_end(a);
+    if (w < 0 || static_cast<size_t>(w) >= sizeof(b) - n) {
+      n = sizeof(b) - 1;
+      cut = true;
+    } else {
+      n += static_cast<size_t>(w);
+    }
+  }
+};
+
+// One summary: a header, one line per set that is newest or still evaluated, one line for the idle older sets, one
+// rule line. why: "periodic" / "mission load".
+void SummaryLocked(const char* why, int64_t now) {
+  const uint32_t n = g_n.load(std::memory_order_acquire);
+  const uint64_t ev = g_evalTotal.load(), un = g_untracked.load(), fl = g_evalFail.load(), rl = g_releases.load();
+  uint32_t live = 0, minSet = 0, maxSet = 0;
+  for (uint32_t i = 0; i < n; ++i)
+    if (Live(g_f[i])) {
+      ++live;
+      if (!minSet || g_f[i].set < minSet) minSet = g_f[i].set;
+      maxSet = (std::max)(maxSet, g_f[i].set);
+    }
+  const uint32_t newest = NewestLiveSet(n);
+  Log("dlss life: summary (%s, %.1f s since the last): %u live DLSS handles in sets %u-%u (newest set %u, load %u); "
+      "%llu evaluations since the last summary (%llu of untracked handles, %llu failed); %llu releases seen%s",
+      why, g_lastSummary ? Sec(now - g_lastSummary) : 0.0, live, minSet, maxSet, newest, g_load,
+      static_cast<unsigned long long>(ev - g_evalAtSummary), static_cast<unsigned long long>(un - g_untrackedAtSummary),
+      static_cast<unsigned long long>(fl - g_failAtSummary), static_cast<unsigned long long>(rl),
+      g_dropped.load() ? " (entry table full: later creations not tracked)" : "");
+  // Sets, newest first.
+  Line idle;
+  idle.Add("dlss life:   IDLE older sets (no evaluation since superseded):");
+  uint32_t idleSets = 0, idleHandles = 0, idleListed = 0;
+  for (uint32_t s = maxSet; s >= minSet && s > 0; --s) {
+    uint32_t cnt = 0, firstId = 0, lastId = 0, load = 0, by = 0;
+    uint64_t after = 0, lifetime = 0;
+    int64_t sup = 0, last = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+      const Feat& f = g_f[i];
+      if (f.set != s || !Live(f)) continue;
+      if (!cnt) firstId = f.id, load = f.load, sup = f.superQpc.load(), by = f.superBy.load();
+      lastId = f.id;
+      ++cnt;
+      after += f.evalsAfterSuper.load();
+      lifetime += f.evals.load();
+      last = (std::max)(last, f.lastEval.load());
+    }
+    if (!cnt) continue;
+    if (s != newest && sup && !after) {  // idle older set
+      ++idleSets, idleHandles += cnt;
+      if (idleListed < 8) {
+        ++idleListed;
+        if (last)
+          idle.Add(" set %u (ids %u-%u, load %u, superseded by set %u %.1f s ago; %llu evals before, last %.1f s ago);", s,
+                   firstId, lastId, load, by, Sec(now - sup), static_cast<unsigned long long>(lifetime), Sec(now - last));
+        else
+          idle.Add(" set %u (ids %u-%u, load %u, superseded by set %u %.1f s ago; never evaluated);", s, firstId, lastId,
+                   load, by, Sec(now - sup));
+      }
+      continue;
+    }
+    Line l;
+    if (s == newest)
+      l.Add("dlss life:   set %u (newest, load %u):", s, load);
+    else
+      l.Add("dlss life:   set %u (load %u, superseded by set %u %.1f s ago): STILL EVALUATED (%llu since superseded):", s,
+            load, by, sup ? Sec(now - sup) : 0.0, static_cast<unsigned long long>(after));
+    for (uint32_t i = 0; i < n; ++i) {
+      Feat& f = g_f[i];
+      if (f.set != s || !Live(f)) continue;
+      const uint64_t e = f.evals.load(), le = f.lastEval.load();
+      if (le)
+        l.Add(" id %u %c +%llu (total %llu) last %.2f s ago;", f.id, ClassLetter(f.cls),
+              static_cast<unsigned long long>(e - f.evalsAtSummary), static_cast<unsigned long long>(e), Sec(now - le));
+      else
+        l.Add(" id %u %c never evaluated;", f.id, ClassLetter(f.cls));
+    }
+    Log("%s%s", l.b, l.cut ? " ..." : "");
+  }
+  if (idleSets) {
+    if (idleSets > idleListed) idle.Add(" and %u more set(s)", idleSets - idleListed);
+    idle.Add(" [%u handle(s)]", idleHandles);
+    Log("%s%s", idle.b, idle.cut ? " ..." : "");
+  }
+  // The later opt-in release rule, as it would decide now (nothing is released).
+  if (newest && minSet < newest) {
+    const Rule nr = NewestMin(n, newest);
+    Line r;
+    r.Add("dlss life:   release rule (observation only, N=%llu; newest set %u min %llu evals per handle):",
+          static_cast<unsigned long long>(kRuleMinEvals), newest, static_cast<unsigned long long>(nr.newestMin));
+    for (uint32_t s = minSet; s < newest; ++s) {
+      const int v = SetVerdict(n, s, nr, kRuleMinEvals);
+      if (v == -2) continue;
+      r.Add(" set %u %s;", s, v == 1 ? "eligible" : v == 0 ? "not yet (newest set below N)" : "REFUSED (guard: evaluated after superseded)");
+    }
+    Log("%s%s", r.b, r.cut ? " ..." : "");
+  }
+  for (uint32_t i = 0; i < n; ++i) g_f[i].evalsAtSummary = g_f[i].evals.load();
+  g_lastIdle = ev == g_evalAtSummary && !g_changes;
+  g_evalAtSummary = ev, g_untrackedAtSummary = un, g_failAtSummary = fl, g_releasesAtSummary = rl;
+  g_lastSummary = now;
+  g_changes = 0;
+}
+
+// Per-set totals of a load that has closed.
+void LoadTotalsLocked(int64_t now) {
+  const uint32_t n = g_n.load(std::memory_order_acquire);
+  Line l;
+  uint32_t creates = 0, sets = 0, lastSet = 0;
+  int64_t tv = 0, tp = 0, ts = 0;
+  bool okv = true, okp = true, oks = true;
+  for (uint32_t i = g_loadFirst; i < n; ++i) creates += g_f[i].load == g_load;
+  l.Add("dlss life: load %u done: %u DLSS creations over %.1f ms;", g_load, creates, Sec(g_lastCreate - g_loadStart) * 1000.0);
+  for (uint32_t i = g_loadFirst; i < n; ++i) {
+    const Feat& f = g_f[i];
+    if (f.load != g_load || f.set == lastSet) continue;
+    lastSet = f.set;
+    ++sets;
+    int64_t v = 0, p = 0, s = 0;
+    bool sv = true, sp = true, ss = true;
+    uint32_t firstId = 0, lastId = 0;
+    char pat[40] = {};
+    size_t pn = 0;
+    for (uint32_t j = i; j < n; ++j) {
+      const Feat& g = g_f[j];
+      if (g.set != f.set) continue;
+      if (!firstId) firstId = g.id;
+      lastId = g.id;
+      if (pn + 2 < sizeof(pat)) {
+        if (pn) pat[pn++] = ',';
+        pat[pn++] = ClassLetter(g.cls);
+      }
+      v += g.vramDelta, p += g.privDelta, s += g.statsDelta;
+      sv = sv && g.vramOk, sp = sp && g.privOk, ss = ss && g.statsOk;
+    }
+    tv += v, tp += p, ts += s;
+    okv = okv && sv, okp = okp && sp, oks = oks && ss;
+    l.Add(" set %u ids %u-%u (%s): VRAM %s%+.1f MB, private %s%+.1f MB, DLSS stats %s%+.1f MB;", f.set, firstId, lastId,
+          pat, sv ? "" : "~", MB(v), sp ? "" : "~", MB(p), ss ? "" : "~", MB(s));
+  }
+  l.Add(" load total VRAM %s%+.1f MB, private %s%+.1f MB, DLSS stats %s%+.1f MB (~ = some readings missing)",
+        okv ? "" : "~", MB(tv), okp ? "" : "~", MB(tp), oks ? "" : "~", MB(ts));
+  (void)sets;
+  (void)now;
+  Log("%s%s", l.b, l.cut ? " ..." : "");
+}
+
+// A DLSS-SR creation (from CreateHook, after the original). t0: just before the original. Returns the text appended to
+// the create line.
+void NoteCreate(int64_t t0, uint32_t seq, void** handle, int cls, uint32_t outW, uint32_t outH, int r, const Meas& m0,
+                const Meas& m1, char* tail, size_t tn) {
+  std::lock_guard<std::mutex> lock(g_mx);
+  const bool newLoad = !g_load || t0 - g_lastCreate > Ticks(kLoadGapSec);
+  if (newLoad) {
+    if (g_loadOpen) LoadTotalsLocked(t0);  // (a load closed by the next one before the worker saw it)
+    if (g_load) SummaryLocked("mission load", t0);
+    ++g_load;
+    g_loadOpen = true;
+    g_loadStart = t0;
+    g_loadFirst = g_n.load();
+  }
+  const uint32_t n = g_n.load();
+  bool seen = false;
+  for (uint32_t i = g_setFirst; i < n && !newLoad; ++i)
+    if (g_f[i].set == g_set && g_f[i].outW == outW && g_f[i].outH == outH) seen = true;
+  const bool newSet = newLoad || (seen && (g_prevW != outW || g_prevH != outH));
+  if (newSet) {
+    if (g_set)
+      for (uint32_t i = 0; i < n; ++i) {
+        int64_t z = 0;
+        if (Live(g_f[i]) && g_f[i].superQpc.compare_exchange_strong(z, t0)) g_f[i].superBy = g_set + 1;
+      }
+    ++g_set;
+    g_setFirst = n;
+  }
+  g_prevW = outW, g_prevH = outH;
+  g_lastCreate = t0;
+  ++g_changes;
+  void* h = nullptr;
+  uint32_t id = 0;
+  const bool haveH = handle && SafeRead(handle, &h, sizeof(h)) && h;
+  if (haveH) SafeRead(h, &id, sizeof(id));
+  const int64_t dv = static_cast<int64_t>(m1.local - m0.local), dp = static_cast<int64_t>(m1.privBytes - m0.privBytes),
+                ds = static_cast<int64_t>(m1.statsBytes - m0.statsBytes);
+  const bool okv = m0.vram && m1.vram, okp = m0.priv && m1.priv, oks = m0.stats && m1.stats;
+  char sv[32] = "n/a", sp[32] = "n/a", ss[32] = "n/a";
+  if (okv) snprintf(sv, sizeof(sv), "%+.1f MB", MB(dv));
+  if (okp) snprintf(sp, sizeof(sp), "%+.1f MB", MB(dp));
+  if (oks) snprintf(ss, sizeof(ss), "%+.1f MB", MB(ds));
+  snprintf(tail, tn, "; life: set %u, load %u; VRAM local %s, private %s, DLSS stats %s", g_set, g_load, sv, sp, ss);
+  if (r != kNgxSuccess || !haveH) return;  // nothing to track
+  if (n >= kMax) {
+    g_dropped.fetch_add(1);
+    if (!g_fullLogged) Log("dlss life: entry table full (%u); later DLSS creations are not tracked", kMax);
+    g_fullLogged = true;
+    return;
+  }
+  Feat& f = g_f[n];
+  ResetEntry(f);
+  f.handle = h, f.id = id, f.seq = seq, f.set = g_set, f.load = g_load, f.cls = cls, f.outW = outW, f.outH = outH;
+  f.createQpc = t0;
+  f.vramOk = okv, f.privOk = okp, f.statsOk = oks, f.vramDelta = dv, f.privDelta = dp, f.statsDelta = ds;
+  g_n.store(n + 1, std::memory_order_release);
+}
+
+void NoteRelease(int i, const void* h, int r) {
+  std::lock_guard<std::mutex> lock(g_mx);
+  ++g_changes;
+  if (r != kNgxSuccess) {
+    Log("dlss life: ReleaseFeature(0x%llx) by DCS failed 0x%x", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(h)),
+        static_cast<unsigned>(r));
+    return;
+  }
+  g_releases.fetch_add(1);
+  if (i < 0) {
+    Log("dlss life: DCS released an untracked DLSS handle 0x%llx", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(h)));
+    return;
+  }
+  Feat& f = g_f[i];
+  f.released = true;
+  const int64_t le = f.lastEval.load();
+  char last[48] = "never";
+  if (le) snprintf(last, sizeof(last), "last %.1f s ago", Sec(Now() - le));
+  Log("dlss life: DCS released id %u (set %u, load %u, %c): evaluated %llu times, %s", f.id, f.set, f.load,
+      ClassLetter(f.cls), static_cast<unsigned long long>(f.evals.load()), last);
+}
+
+// The trampoline: g_*Orig, or (in the instant between the detour's slot switch and the g_*Orig store, which DCS's
+// render thread can hit: it evaluates every frame) the detour's own trampoline, written before the switch.
+inline EvalFn EvalOrig() {
+  const EvalFn o = g_evalOrig.load(std::memory_order_acquire);
+  return o ? o : reinterpret_cast<EvalFn>(g_eval.tramp);
+}
+int __cdecl EvalHook(void* ctx, const void* h, const NgxParam* p, void* cb) {
+  const int r = EvalOrig()(ctx, h, p, cb);
+  if (g_on.load(std::memory_order_relaxed)) CountEval(h, r);
+  return r;
+}
+int __cdecl ReleaseHook(void* h) {
+  const bool on = g_on.load(std::memory_order_relaxed);
+  const int i = on ? FindGuarded(h) : -1;
+  const ReleaseFn o = g_releaseOrig.load(std::memory_order_acquire);
+  const int r = (o ? o : reinterpret_cast<ReleaseFn>(g_release.tramp))(h);
+  if (on) {
+    try {
+      NoteRelease(i, h, r);
+    } catch (...) {
+    }
+  }
+  return r;
+}
+
+// Worker: the two observation hooks (once the core is up; the CreateFeature hook is the R122 one).
+void Install() {
+  for (int k = 0; k < 2; ++k) {
+    std::atomic<int>& st = k ? g_releaseState : g_evalState;
+    if (st.load() != 0) continue;
+    Detour* d = k ? &g_release : &g_eval;
+    uint8_t* target = k ? g_testReleaseTarget : g_testEvalTarget;
+    if (!target) {
+      HMODULE core = GetModuleHandleW(kNgxCore);
+      if (!core) return;  // retried by the next tick
+      target = reinterpret_cast<uint8_t*>(GetProcAddress(core, d->name));
+      if (!target) {
+        st = -1;
+        Log("dlss life: the NGX core has no %s export; not instrumented", d->name);
+        continue;
+      }
+    }
+    const int r = InstallDetour(target, k ? reinterpret_cast<void*>(&ReleaseHook) : reinterpret_cast<void*>(&EvalHook), d);
+    if (r < 0) {
+      st = -1;
+      Log("dlss life: %s not hooked: %s; not instrumented", d->name, DetourError(r));
+      continue;
+    }
+    if (k)
+      g_releaseOrig.store(reinterpret_cast<ReleaseFn>(d->tramp), std::memory_order_release);
+    else
+      g_evalOrig.store(reinterpret_cast<EvalFn>(d->tramp), std::memory_order_release);
+    st = 1;
+    Log("dlss life: %s hooked (%s; observation only, pass-through)", d->name,
+        r == 2 ? "earlier payload's patch reused" : "patched");
+  }
+}
+
+// Worker tick: the key, the kill switch, a closed load's totals, the 10 s summary.
+void Tick(bool key, bool killed) {
+  g_key = key;
+  const bool on = key && !killed;
+  const bool was = g_on.exchange(on);
+  if (on && !g_onLogged) {
+    g_onLogged = true;
+    Log("dlss life: on ([DLSS] Instrument=1, dev): DLSS creations, evaluations and releases are counted (read-only); "
+        "a summary every %.0f s and at each mission load", kSummarySec);
+  }
+  if (!on) {
+    if (was) Log("dlss life: counting paused (%s)", killed ? "kill switch" : "[DLSS] Instrument=0");
+    return;
+  }
+  std::lock_guard<std::mutex> lock(g_mx);
+  const int64_t now = Now();
+  if (g_loadOpen && now - g_lastCreate > Ticks(kLoadDoneSec)) {
+    LoadTotalsLocked(now);
+    g_loadOpen = false;
+  }
+  if (!g_lastSummary) g_lastSummary = now;
+  if (now - g_lastSummary < Ticks(kSummarySec)) return;
+  const bool nothing = g_evalTotal.load() == g_evalAtSummary && !g_changes;
+  if (nothing && g_lastIdle) {
+    g_lastSummary = now;  // nothing new since an idle summary: skipped
+    return;
+  }
+  SummaryLocked("periodic", now);
+}
+
+// Tests: a fresh table and clock state (the detours stay, as in DCS).
+void ResetForTest() {
+  std::lock_guard<std::mutex> lock(g_mx);
+  for (auto& f : g_f) ResetEntry(f);
+  g_n = 0, g_on = false, g_key = false;
+  g_evalTotal = g_evalFail = g_untracked = g_evalFault = g_releases = g_dropped = 0;
+  g_evalState = 0, g_releaseState = 0;
+  g_eval = Detour{"NVSDK_NGX_D3D11_EvaluateFeature"};
+  g_release = Detour{"NVSDK_NGX_D3D11_ReleaseFeature"};
+  g_evalOrig = nullptr, g_releaseOrig = nullptr;
+  g_load = g_set = g_setFirst = g_loadFirst = 0, g_prevW = g_prevH = 0;
+  g_lastCreate = g_loadStart = 0, g_loadOpen = false, g_lastSummary = 0;
+  g_evalAtSummary = g_untrackedAtSummary = g_failAtSummary = g_releasesAtSummary = 0, g_changes = 0;
+  g_lastIdle = g_onLogged = g_pausedLogged = g_fullLogged = false;
+  g_cap = nullptr, g_statsCb = nullptr, g_capTries = 0;
+  g_testEvalTarget = g_testReleaseTarget = nullptr;
+  g_testClock = nullptr, g_testVram = nullptr, g_testPriv = nullptr, g_testCapParams = nullptr;
+}
+}  // namespace life
+
 int __cdecl CreateHook(void* ctx, int feature, NgxParam* params, void** handle) {
-  const CreateFn orig = g_createOrig.load(std::memory_order_acquire);
+  CreateFn orig = g_createOrig.load(std::memory_order_acquire);
+  if (!orig) orig = reinterpret_cast<CreateFn>(g_create.tramp);  // R130: the install instant (see life::EvalOrig)
   if (feature != kFeatureSuperSampling || !params) return orig(ctx, feature, params, handle);
   void* const ret = _ReturnAddress();  // R126: the caller, for the create line
   const uint32_t seq = g_creates.fetch_add(1) + 1;
   Decision d;
   const int periph = g_periph.load(), focus = g_focus.load();
   const bool killed = g_killed.load();
-  if (periph > 0 && !killed) {
+  const bool lifeOn = life::g_on.load();  // R130
+  if ((periph > 0 && !killed) || lifeOn) {
     try {
       if (!SizesUsable(CurrentSizes())) RefreshSizes();  // mission load: QVFR's log is small and read once
     } catch (...) {
@@ -632,10 +1278,22 @@ int __cdecl CreateHook(void* ctx, int feature, NgxParam* params, void** handle) 
   const int driverPreset = HiddenThisSession() ? NameableForced() : 0;
   Decide(params, periph, focus, killed, driverPreset, CurrentSizes(), &d);
   if (d.preset) g_applied.fetch_add(1);
+  life::Meas m0, m1;
+  int64_t t0 = 0;
+  if (lifeOn) {
+    t0 = life::Now();
+    life::Measure(ctx, &m0);
+  }
   const int r = orig(ctx, feature, params, handle);
   try {
     char tail[MAX_PATH + 160] = {};
     CreateTail(ret, handle, tail, sizeof(tail));
+    if (lifeOn) {
+      life::Measure(ctx, &m1);
+      char lt[200] = {};
+      life::NoteCreate(t0, seq, handle, d.fault ? kUnknown : d.cls, d.outW, d.outH, r, m0, m1, lt, sizeof(lt));
+      strncat_s(tail, sizeof(tail), lt, _TRUNCATE);
+    }
     Report(d, r, seq, tail);
   } catch (...) {
   }
@@ -883,9 +1541,9 @@ bool TryInstallGetSetting() {
   return true;
 }
 
-// Worker tick (about once per second). periph / focus: the parsed keys (-1 = a value we cannot use). Nothing is
-// installed while PeripheryPreset is 0.
-void Tick(int periph, int focus, bool ignore, bool engineOff) {
+// Worker tick (about once per second). periph / focus: the parsed keys (-1 = a value we cannot use). instrument: R130
+// [DLSS] Instrument (read-only lifetime counters). Nothing is installed while PeripheryPreset and Instrument are 0.
+void Tick(int periph, int focus, bool ignore, bool engineOff, bool instrument = false) {
   if ((periph < 0 || focus < 0) && !g_badKeyLogged) {
     g_badKeyLogged = true;
     Log("dlss views: [DLSS] %s is not a preset this build accepts (0, A-F, J-M or their NGX numbers); treated as 0",
@@ -895,6 +1553,12 @@ void Tick(int periph, int focus, bool ignore, bool engineOff) {
   focus = focus > 0 ? focus : 0;
   const bool was = g_periph.load() > 0;
   g_periph = periph, g_focus = focus, g_ignore = ignore && periph > 0, g_killed = engineOff;
+  // R130: the CreateFeature hook carries the creation side of the instrumentation, so it is installed for either key.
+  if (instrument || life::g_on.load() || life::g_key) {
+    life::Tick(instrument, engineOff);
+    if (instrument && g_createState.load() == 0) TryInstallCreate();
+    if (instrument && g_createState.load() == 1) life::Install();
+  }
   if (!periph) {
     if (was && !g_offLogged)
       Log("dlss views: off; %s again from the next mission load",
@@ -922,6 +1586,8 @@ void Tick(int periph, int focus, bool ignore, bool engineOff) {
 void Stop() {
   Release(&g_create);
   Release(&g_getSetting);
+  Release(&life::g_eval);  // R130
+  Release(&life::g_release);
 }
 
 }  // namespace dlssv

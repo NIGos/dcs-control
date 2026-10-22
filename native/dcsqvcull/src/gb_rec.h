@@ -125,8 +125,13 @@
 // the same frame from the same target contents (gb_batch.h's verifier:
 // targets captured at the front entry, restored between the runs, all 6 RTs
 // and the DSV compared bit for bit); the first 3 compares stock vs stock
-// (reproducibility), then stock vs recorded; any difference latches the
-// recorder off. While verifying, the immediate state is read before and after
+// (reproducibility), then stock vs recorded. R129: every stock vs recorded
+// compare also runs a same-frame stock control (a second stock run from the
+// same init, between the stock and the recorded run); texels where the two
+// stock runs differ are DCS's own variation (R127 germany: execution #0's
+// motion vectors) and do not count. A difference elsewhere is unexplained;
+// unexplained differences in 3 consecutive compares of one execution latch
+// the recorder off (GBufferRecVerifyNoLatch=1: never). While verifying, the immediate state is read before and after
 // each ExecuteCommandList and must be equal (R18 T9). [Suite]
 // GBufferRecVerifyStride=N forces every N-th recordable draw residual and the
 // island to N-1 (R18 T10).
@@ -3484,6 +3489,12 @@ struct Stat {
   std::atomic<uint64_t> idOtherVec{0}, idSameVec{0};
   std::atomic<uint64_t> verifyAa{0}, verifyAb{0}, verifyAaBad{0}, verifyAbBad{0}, verifyTexels{0}, verifyBadTexels{0},
       verifySkipped{0}, verifyErrors{0}, verifyStateBad{0}, verifyExecs{0};
+  // R129: the same-frame stock control (runs, runs that differed from the first stock run, their differing pixels),
+  // stock vs recorded before the control's mask (compares and texels that differ), the texels inside stock's own
+  // variation (and those where the recorded run matched neither stock run), unexplained compares in a row (now,
+  // highest).
+  std::atomic<uint64_t> verifyCtl{0}, verifyCtlBad{0}, verifyCtlPixels{0}, verifyAbRaw{0}, verifyRawTexels{0},
+      verifyInStock{0}, verifyNeither{0}, verifyRun{0}, verifyRunMax{0};
 };
 
 struct Slot {
@@ -4807,7 +4818,23 @@ void RunPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** vec
 // stock vs stock compares are equal), same frame, from the same target
 // contents; every target compared bit for bit. A stock vs stock difference
 // (a view or load transition) is logged and retried, never latched.
+// R129: between the stock and the recorded run, a stock control run from the
+// same init (not with the ownship mask, which takes that place); a texel where
+// the two stock runs differ (in any target) is DCS's own same-frame variation
+// and a recorded difference there does not count. The rest is unexplained;
+// kLatchRun consecutive compares of one execution with unexplained texels
+// latch the recorder off (never with GBufferRecVerifyNoLatch=1). R127's
+// germany gate: execution #0 differed stock vs stock as much as stock vs
+// recorded (RT5, the motion vectors), and one unexplained single-pixel compare
+// latched the shipped recorder off in an unpaused scene.
 constexpr uint64_t kAaPasses = 3;
+constexpr uint64_t kLatchRun = 3;
+// R129: one compare's unexplained texels into the execution's run of consecutive unexplained compares; true when
+// the run reaches kLatchRun (the caller latches unless GBufferRecVerifyNoLatch). A compare without any resets it.
+inline bool VerifyLatchStep(uint64_t& run, int64_t unexplained) {
+  run = unexplained > 0 ? run + 1 : 0;
+  return run >= kLatchRun;
+}
 const char* g_verifyWhy = nullptr;  // why the last capture failed
 std::atomic<bool> g_verifyNoLatch{false};  // [Suite] GBufferRecVerifyNoLatch (test only): log differences, stay on
 void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** vec) {
@@ -4853,6 +4880,34 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
     g_ownMaskRuns++;
     if (!masked) g_ownMaskFailed++;
   }
+  // R129: the same-frame stock control (stock vs recorded compares without the ownship mask). Its mask: the pixels
+  // where it differs from A. Unusable (no mask, every difference counts as before) with MSAA targets or when the
+  // control run did not draw into the same views.
+  bool control = false;
+  if (!aa && !own2) {
+    PassCtx c;
+    c.slot = pc.slot;
+    c.state = kPsStockRun;
+    c.verify = 2;
+    c.probesLeft = 0;
+    RunPass(c, pass, ctx, orig, vec);
+    if (c.sameViews && gbverify::CopyAllMask()) {
+      gbverify::CopyAll(false, false);  // init back again
+      control = gbverify::BuildMask();
+    } else {
+      gbverify::CopyAll(false, false);
+    }
+    if (control) {
+      uint64_t px = 0;
+      for (uint8_t v : gbverify::g_mask) px += v;
+      st.verifyCtl++;
+      if (px) {
+        st.verifyCtlBad++;
+        st.verifyCtlPixels += px;
+      }
+      masked = true;
+    }
+  }
   PassCtx b;
   if (aa) {
     b.slot = pc.slot;
@@ -4876,16 +4931,26 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
     gbverify::g_badBox[0] = gbverify::g_badBox[1] = 1 << 30;
     gbverify::g_badBox[2] = gbverify::g_badBox[3] = -1;
     gbverify::g_maskOn = masked;
+    gbverify::g_maskControl = control;
     const int64_t total = gbverify::CompareGuarded(bad, &texels);
     gbverify::g_maskOn = false;
+    gbverify::g_maskControl = false;
     // Non-ownship differences: all of them without a mask; with one, the staging texels outside it plus every
     // difference the mask cannot classify (MSAA samples).
     const int64_t inMask = masked ? gbverify::g_badIn : 0;
     const int64_t counted = total < 0 ? total : total - inMask;
-    if (masked && total >= 0) {
+    if (masked && !control && total >= 0) {
       g_ownMaskIn += static_cast<uint64_t>(inMask);
       g_ownMaskOut += static_cast<uint64_t>(counted);
       g_ownMaskCompares++;
+    }
+    if (!aa && total > 0) {
+      st.verifyAbRaw++;
+      st.verifyRawTexels += static_cast<uint64_t>(total);
+      if (control) {
+        st.verifyInStock += static_cast<uint64_t>(inMask);
+        st.verifyNeither += static_cast<uint64_t>(gbverify::g_badNeither);
+      }
     }
     if (total < 0) {
       st.verifyErrors++;
@@ -4895,19 +4960,35 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
       if (aa) st.aaClean = total > 0 ? 0 : st.aaClean.load() + 1;
       if (total > 0) {
         std::string per;
-        char buf[48];
+        char buf[64];
         for (int i = 0; i < gbverify::kMaxTargets; ++i) {
           if (!gbverify::g_t[i].res) continue;
           snprintf(buf, sizeof(buf), "%s%s%d %lld", per.empty() ? "" : ", ", i == 8 ? "DS" : "RT", i == 8 ? 0 : i,
                    static_cast<long long>(bad[i]));
           per += buf;
+          // R129: how large: the largest component difference (value units; "?" = format not decoded).
+          if (bad[i] > 0) {
+            if (gbverify::g_maxDelta[i] < 0.0)
+              snprintf(buf, sizeof(buf), " (max ?)");
+            else
+              snprintf(buf, sizeof(buf), " (max %.3g)", gbverify::g_maxDelta[i]);
+            per += buf;
+          }
         }
-        Log("gbuffer recorder verify: %s differs: %lld of %llu texels/samples (%s); box %d,%d..%d,%d%s",
+        char name[48];
+        SlotName(pc.slot, name, sizeof(name));
+        std::string cls;
+        if (control)
+          cls = "; inside stock's own variation " + std::to_string(inMask) + " (matching neither stock run " +
+                std::to_string(gbverify::g_badNeither) + "), unexplained " + std::to_string(counted);
+        else if (masked)
+          cls = "; ownship texels " + std::to_string(inMask) + ", other " + std::to_string(counted);
+        else if (!aa)
+          cls = "; no stock control (MSAA, ownship stage 2 or other views): all unexplained";
+        Log("gbuffer recorder verify: %s: %s differs: %lld of %llu texels/samples (%s); box %d,%d..%d,%d%s", name,
             aa ? "stock vs stock" : "stock vs recorded", static_cast<long long>(total),
             static_cast<unsigned long long>(texels), per.c_str(), gbverify::g_badBox[0], gbverify::g_badBox[1],
-            gbverify::g_badBox[2], gbverify::g_badBox[3],
-            masked ? ("; ownship texels " + std::to_string(inMask) + ", other " + std::to_string(counted)).c_str()
-                   : "");
+            gbverify::g_badBox[2], gbverify::g_badBox[3], cls.c_str());
       }
       if (counted > 0) {
         (aa ? st.verifyAaBad : st.verifyAbBad)++;
@@ -4916,8 +4997,15 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
           Log("gbuffer recorder verify: stock vs stock not reproducible in this frame (a transition?): retried, "
               "%llu consecutive equal compares needed before stock vs recorded",
               static_cast<unsigned long long>(kAaPasses));
-        else if (!g_verifyNoLatch.load(std::memory_order_relaxed))
-          Disable("G-buffer differs between the stock and the recorded execution");
+      }
+      if (!aa) {
+        uint64_t run = st.verifyRun.load();
+        const bool latch = VerifyLatchStep(run, counted);
+        st.verifyRun = run;
+        if (run > st.verifyRunMax.load()) st.verifyRunMax = run;
+        if (latch && !g_verifyNoLatch.load(std::memory_order_relaxed))
+          Disable("G-buffer differs between the stock and the recorded execution beyond stock's own variation, in "
+                  "3 consecutive compares");
       }
     }
   }
@@ -6034,6 +6122,8 @@ void ResetCounters() {
     s.idOtherVec = s.idSameVec = 0;
     s.verifyAa = s.verifyAb = s.verifyAaBad = s.verifyAbBad = s.verifyTexels = s.verifyBadTexels = 0;
     s.verifySkipped = s.verifyErrors = s.verifyStateBad = s.verifyExecs = 0;
+    s.verifyCtl = s.verifyCtlBad = s.verifyCtlPixels = s.verifyAbRaw = s.verifyRawTexels = 0;
+    s.verifyInStock = s.verifyNeither = s.verifyRun = s.verifyRunMax = 0;
   }
   g_probes = g_probeOdd = g_probePool = g_probeWants = 0;
   for (auto& a : g_probeSkip) a = 0;
@@ -6222,6 +6312,21 @@ void LogCounters(const char* label, double frames) {
           static_cast<unsigned long long>(st.verifyErrors.load()),
           static_cast<unsigned long long>(st.verifyStateBad.load()),
           static_cast<unsigned long long>(st.verifyExecs.load()));
+    // R129: "differ" and the texel count above are the differences that count (outside stock's own variation, or
+    // the ownship's texels); this line has the control and the raw numbers.
+    if (st.verifyAb.load() || st.verifyCtl.load())
+      Log("  gbuffer recorder %s %s verify control: same-frame stock control %llu (%llu differ, %llu pixels); stock "
+          "vs recorded before it %llu differ (%llu texels), inside stock's own variation %llu texels (matching "
+          "neither stock run %llu); unexplained compares in a row max %llu (latch at %llu%s)",
+          label, name, static_cast<unsigned long long>(st.verifyCtl.load()),
+          static_cast<unsigned long long>(st.verifyCtlBad.load()),
+          static_cast<unsigned long long>(st.verifyCtlPixels.load()),
+          static_cast<unsigned long long>(st.verifyAbRaw.load()),
+          static_cast<unsigned long long>(st.verifyRawTexels.load()),
+          static_cast<unsigned long long>(st.verifyInStock.load()),
+          static_cast<unsigned long long>(st.verifyNeither.load()),
+          static_cast<unsigned long long>(st.verifyRunMax.load()), static_cast<unsigned long long>(kLatchRun),
+          g_verifyNoLatch.load() ? ", off: GBufferRecVerifyNoLatch" : "");
   }
   if (!gbverify::g_lastFormats.empty() && (g_verify.load() || g_slot[0].st.verifyAb.load()))
     Log("  gbuffer recorder %s verify: last captured targets: %s", label, gbverify::g_lastFormats.c_str());

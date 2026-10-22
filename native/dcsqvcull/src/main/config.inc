@@ -97,6 +97,7 @@ struct Config {
   std::wstring dlssPeripheryPreset;      // [DLSS] PeripheryPreset (dlss_views.h, R122: LOSSY opt-in; "" / 0 = off, nothing installed; A-F, J-M or the NGX number)
   std::wstring dlssFocusPreset;          // [DLSS] FocusPreset (R122: 0 = the focus keeps DCS's / the driver's preset; only with PeripheryPreset)
   bool dlssIgnoreDriverPreset = false;   // [DLSS] IgnoreDriverPreset (R122: hide the driver profile's forced preset from DLSS; only before NGX starts)
+  bool dlssInstrument = false;           // [DLSS] Instrument (R130, dev: read-only DLSS feature lifetime counters and summaries; 0 = nothing installed)
   bool cascadeCache = false;             // [Shadows] CascadeCache (cascade_cache.h, R33: PROTOTYPE far-cascade static depth cache; 0 = off, nothing installed)
   uint32_t cascadeCacheMask = 0xc;       // [Shadows] CascadeCacheMask: cascades by CascadeShadowPass number (bit 2 = about 70-370 m, bit 3 = about 370-1500 m; bit 0 always refreshes: its unsnapped box is never seen)
   int cascadeCacheMaxAge = 4;            // [Shadows] CascadeCacheMaxAge: frames one capture may serve (1 = refresh every frame)
@@ -274,6 +275,7 @@ struct Config {
   bool cockpitTrueIpdForward = true;    // CockpitTrueIpdForward: also TransparentCockpitPass / ...DecalPass
   bool cockpitTrueIpdHelmet = true;     // CockpitTrueIpdHelmet: helmet models drawn with their eye's camera
   int cockpitTrueIpdOwnship = 0;        // CockpitTrueIpdOwnship: the own aircraft's exterior model at the true eye
+  bool cockpitIpdDormant = true;        // CockpitIpdDormant (R128): frames at boost scale 1 skip the work unused at h 0
   bool cockpitTrueIpdOverlays = true;   // CockpitTrueIpdOverlays: also the per-view overlay passes (HUD / MFD symbology)
   bool cockpitTrueIpdOverlayMvp = true; // CockpitTrueIpdOverlayMvp: in them, the effect buffers' CPU-built MVPs too
   int cockpitTrueIpdLog = 0;       // CockpitTrueIpdLog: per-upload trace for the next N frames
@@ -530,6 +532,7 @@ Config PerceptionOnlyConfig(const Config& c) {
   p.cockpitTrueIpdForward = c.cockpitTrueIpdForward;
   p.cockpitTrueIpdHelmet = c.cockpitTrueIpdHelmet;
   p.cockpitTrueIpdOwnship = c.cockpitTrueIpdOwnship;  // stage 2 runs as stage 1 (no G-buffer recorder)
+  p.cockpitIpdDormant = c.cockpitIpdDormant;  // R128
   p.cockpitTrueIpdOverlays = c.cockpitTrueIpdOverlays;
   p.cockpitTrueIpdOverlayMvp = c.cockpitTrueIpdOverlayMvp;
   p.cockpitTrueIpdLog = c.cockpitTrueIpdLog;
