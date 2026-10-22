@@ -325,6 +325,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "r99_test.h"       // R99: the pose hook by displayTime; the symbology replay stage's cost
 #include "r101_test.h"      // R101: the learnt HUD field recovers after a bank (aging, recent fallback)
 #include "r122_test.h"      // R122: the optional per-view DLSS preset (fake NGX / NvAPI)
+#include "focus_twin_test.h"  // R123: the focus twin (census TerrainContexts; WARP pipeline vs stock, byte-exact)
 #include "r111_test.h"      // R111: [Color] PanelGamut (sRGB -> DCI-P3 compensation for a wide-gamut panel)
 #include "log_phrases_test.h"  // R107: the log phrases DCS Control parses stay in the source byte-exact
 #include "ini_keys_test.h"  // R107: every key the app writes is still read (live or retired)
@@ -408,6 +409,11 @@ int main() {
   }
   if (getenv("QV_R122_ONLY")) {  // R122: only the per-view DLSS preset tests
     r122test::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
+  if (getenv("QV_R123_ONLY")) {  // R123: only the focus twin tests
+    r123test::Run();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -1841,6 +1847,7 @@ int main() {
   cmtest::Run();
   r111test::Run();  // R111: PanelGamut (after the R42 tests: same WARP rig helpers)
   r122test::Run();  // R122: per-view DLSS preset ([DLSS] keys; fake NGX core and NvAPI, no driver call)
+  r123test::Run();  // R123: focus twin ([Model] FocusTwin; census TerrainContexts, WARP pipeline byte-exact vs stock)
   vfxtest::Run();
   // R39 [Threads]: worker placement off DCS's exclusive render core (all keys default 0), census queries.
   tptest::Run();

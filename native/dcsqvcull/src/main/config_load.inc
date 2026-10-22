@@ -200,6 +200,31 @@ void LoadConfig(bool initial) {
   c.suiteGBufferInstVerify = GetPrivateProfileIntW(L"Suite", L"GBufferInstVerify", 0, ini.c_str()) != 0;
   c.suiteBenchGBufferInst = GetPrivateProfileIntW(L"Suite", L"BenchGBufferInst", 0, ini.c_str()) != 0;
   c.gbufferRecorder = GetPrivateProfileIntW(L"Model", L"GBufferRecorder", 0, ini.c_str()) != 0;
+  {  // R123 focus twin (focus_twin.h), opt-in
+    const int ft = static_cast<int>(GetPrivateProfileIntW(L"Model", L"FocusTwin", 0, ini.c_str()));
+    c.focusTwin = ft == 1 ? 1 : 0;
+    if (ft != 0 && ft != 1 && initial) Log("config: [Model] FocusTwin=%d is not 0 or 1; off", ft);
+    c.suiteFocusTwinShadow = GetPrivateProfileIntW(L"Suite", L"FocusTwinShadow", 0, ini.c_str()) != 0;
+    c.suiteFocusTwinAuditEvery =
+        (std::max)(0, (std::min)(100000, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"FocusTwinAuditEvery", 64, ini.c_str()))));
+    c.suiteFocusTwinTrust =
+        (std::max)(1, (std::min)(1000, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"FocusTwinTrust", 4, ini.c_str()))));
+    c.suiteFocusTwinIsland =
+        (std::max)(1, (std::min)(4096, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"FocusTwinIsland", 16, ini.c_str()))));
+    c.suiteFocusTwinChunk =
+        (std::max)(8, (std::min)(4096, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"FocusTwinChunk", 64, ini.c_str()))));
+    c.suiteFocusTwinPredTol = ReadDouble(L"Suite", L"FocusTwinPredTol", 5e-5, ini);
+    c.suiteFocusTwinVerify =
+        (std::max)(0, (std::min)(100000, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"FocusTwinVerify", 0, ini.c_str()))));
+    if (!(c.suiteFocusTwinPredTol > 0) || c.suiteFocusTwinPredTol > 1e-2) c.suiteFocusTwinPredTol = 5e-5;
+    // R125: the instancer part (MetaMaterial_Instancer2 items), opt-in on top of FocusTwin.
+    const int fti = static_cast<int>(GetPrivateProfileIntW(L"Model", L"FocusTwinInstancer", 0, ini.c_str()));
+    c.focusTwinInstancer = fti == 1 ? 1 : 0;
+    if (fti != 0 && fti != 1 && initial) Log("config: [Model] FocusTwinInstancer=%d is not 0 or 1; off", fti);
+    if (c.focusTwinInstancer && !c.focusTwin && initial)
+      Log("config: [Model] FocusTwinInstancer=1 needs FocusTwin=1; nothing installed");
+    c.suiteFocusTwinPatches = GetPrivateProfileIntW(L"Suite", L"FocusTwinPatches", 1, ini.c_str()) != 0;
+  }
   c.gbufferRecorderScope = qvini::Mask(L"Model", L"GBufferRecorderScope", 0x10055, 0x1ffff, ini.c_str());  // dec or 0x hex
   c.gbufferRecorderWaitUs = GetPrivateProfileIntW(L"Model", L"GBufferRecorderWaitUs", 300, ini.c_str());
   if (c.gbufferRecorderWaitUs < 0) c.gbufferRecorderWaitUs = 0;

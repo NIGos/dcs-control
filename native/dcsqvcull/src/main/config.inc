@@ -140,6 +140,17 @@ struct Config {
   bool suiteGBufferInstVerify = false;  // [Suite] GBufferInstVerify
   bool suiteBenchGBufferInst = false;   // [Suite] BenchGBufferInst
   bool gbufferRecorder = false;            // [Model] GBufferRecorder (gb_rec.h, R18 S1-S3)
+  // R123 focus twin (focus_twin.h; opt-in, default 0: nothing installed). The [Suite] keys tune / measure it.
+  int focusTwin = 0;                       // [Model] FocusTwin (0 / 1)
+  bool suiteFocusTwinShadow = false;       // [Suite] FocusTwinShadow: audits only, never skips (measure)
+  int suiteFocusTwinAuditEvery = 64;       // [Suite] FocusTwinAuditEvery: focus passes per eye between audits (0 = trust audits only)
+  int suiteFocusTwinTrust = 4;             // [Suite] FocusTwinTrust: passed audits per eye before the twin draws
+  int suiteFocusTwinIsland = 16;           // [Suite] FocusTwinIsland: shortest run of replaced items (last frame)
+  int suiteFocusTwinChunk = 64;            // [Suite] FocusTwinChunk: records per command list
+  double suiteFocusTwinPredTol = 5e-5;     // [Suite] FocusTwinPredTol: prediction tolerance (relative)
+  int focusTwinInstancer = 0;              // R125 [Model] FocusTwinInstancer (0 / 1; needs FocusTwin = 1): instanced trees and buildings too
+  bool suiteFocusTwinPatches = true;       // R125 [Suite] FocusTwinPatches: 0 = terrain patch items stay DCS's (instancer items only)
+  int suiteFocusTwinVerify = 0;            // [Suite] FocusTwinVerify: one same-frame stock-vs-twin compare per N focus passes per eye (0 = off)
   uint32_t gbufferRecorderScope = 0x10055; // R107: default as shipped; [Model] GBufferRecorderScope: bits 0-15 executions by ordinal, 16 A2C
   int gbufferRecorderWaitUs = 300;         // [Model] GBufferRecorderWaitUs: render-thread wait for a job at the pass
   int gbufferRecorderIsland = 30;          // [Model] GBufferRecorderIsland: shortest recorded run

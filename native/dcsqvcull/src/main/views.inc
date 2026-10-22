@@ -228,11 +228,17 @@ bool UpdateGazeAndCheckHold(const std::vector<ViewInfo>& views) {
   return frame <= g_holdUntil.load();
 }
 
+// R123 (focus_twin.h, [Model] FocusTwin): the classified views of each collect call (this frame's cameras, before
+// the render graph runs). nullptr unless the focus twin is installed.
+using CollectTapFn = void (*)(uint32_t count, const uint8_t* infos, const std::vector<ViewInfo>& views);
+std::atomic<CollectTapFn> g_collectTap{nullptr};
+
 // Swaps in replacement volumes. Returns the number of patched views.
 void Prepare(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, int* pairsOut,
              int* patchedOut, std::vector<ViewInfo>& views) {
   int pairs = Classify(count, infos, views);
   *pairsOut = pairs;
+  if (const CollectTapFn tap = g_collectTap.load(std::memory_order_acquire)) tap(count, infos, views);
   if (g_dumpsLeft.load() > 0 && views.size() >= 4) {
     if (g_dumpsLeft.fetch_sub(1) > 0) DumpViews(count, infos, views);
   }

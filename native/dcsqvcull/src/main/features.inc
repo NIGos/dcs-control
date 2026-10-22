@@ -48,3 +48,4 @@
 #include "perf_mon.h"  // R30: env/perf/features/warmup/toggle/vram lines and the governor's driver
 #include "thread_place.h"  // R39: [Threads] Census (default off) / WorkerPlacement (R44: default 2, selective)
 #include "frame_timeline.h"  // R52: [Perf] FrameTimeline / PoseProbe / EventLog (measure only, default 0)
+#include "focus_twin.h"  // R123: [Model] FocusTwin (opt-in, default 0): focus terrain patches replayed from the periphery
