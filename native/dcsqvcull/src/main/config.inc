@@ -98,6 +98,8 @@ struct Config {
   std::wstring dlssFocusPreset;          // [DLSS] FocusPreset (R122: 0 = the focus keeps DCS's / the driver's preset; only with PeripheryPreset)
   bool dlssIgnoreDriverPreset = false;   // [DLSS] IgnoreDriverPreset (R122: hide the driver profile's forced preset from DLSS; only before NGX starts)
   bool dlssInstrument = false;           // [DLSS] Instrument (R130, dev: read-only DLSS feature lifetime counters and summaries; 0 = nothing installed)
+  bool dlssReleaseIdleSets = false;      // [DLSS] ReleaseIdleSets (R132, opt-in: release DCS's never-again-evaluated DLSS sets; 0 = nothing installed)
+  int dlssReleaseAfterEvals = 300;       // [DLSS] ReleaseAfterEvals (R132: N evaluations of each newest-set handle before a release; 100..1000000)
   bool cascadeCache = false;             // [Shadows] CascadeCache (cascade_cache.h, R33: PROTOTYPE far-cascade static depth cache; 0 = off, nothing installed)
   uint32_t cascadeCacheMask = 0xc;       // [Shadows] CascadeCacheMask: cascades by CascadeShadowPass number (bit 2 = about 70-370 m, bit 3 = about 370-1500 m; bit 0 always refreshes: its unsnapped box is never seen)
   int cascadeCacheMaxAge = 4;            // [Shadows] CascadeCacheMaxAge: frames one capture may serve (1 = refresh every frame)
@@ -163,6 +165,8 @@ struct Config {
   int suiteGBufferRecVerifySec = 6;        // [Suite] GBufferRecVerifySec
   bool suiteGBufferRecVerifyLive = false;  // [Suite] GBufferRecVerifyLive: test only, the recorder's verify while flying
   bool suiteGBufferRecVerifyNoLatch = false;  // [Suite] GBufferRecVerifyNoLatch: test only, differences logged only
+  int suiteGBufferRecVerifyDump = 0;       // [Suite] GBufferRecVerifyDump: test only, R133 raw dumps of N compares
+  bool suiteGBufferRecVerifyDumpAll = false;  // [Suite] GBufferRecVerifyDumpAll: test only, dump any difference
   int suiteGBufferRecVerifyStride = 0;     // [Suite] GBufferRecVerifyStride: every N-th draw residual (R18 T10)
   bool suiteBenchGBufferRecorder = false;  // [Suite] BenchGBufferRecorder (bench mode 29)
   uint32_t passFlush = 0;                  // [Model] PassFlush: pass_flush.h mask (0 = off)

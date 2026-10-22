@@ -1297,6 +1297,10 @@ struct Target {
   ID3D11Texture2D* init = nullptr;     // init, then B
   ID3D11Texture2D* a = nullptr;
   ID3D11Texture2D* m = nullptr;        // the ownship mask's run (gb_rec.h stage 2; staging targets only, on demand)
+  // R133: the bracketed control (gb_rec.h VerifyPass): the recorded run B kept in .b so that init can be restored
+  // once more for a second stock control C2 after it (.c2). Staging targets only, created on demand.
+  ID3D11Texture2D* b = nullptr;
+  ID3D11Texture2D* c2 = nullptr;
   ID3D11ShaderResourceView* srvInit = nullptr;  // MS only
   ID3D11ShaderResourceView* srvA = nullptr;
 };
@@ -1331,6 +1335,8 @@ void ReleaseCopies(Target& t) {
   SafeRelease(t.init);
   SafeRelease(t.a);
   SafeRelease(t.m);
+  SafeRelease(t.b);
+  SafeRelease(t.c2);
   SafeRelease(t.srvInit);
   SafeRelease(t.srvA);
 }
@@ -1470,6 +1476,15 @@ int64_t g_badIn = 0;    // ... inside it
 // stock run there) is counted in g_badNeither as well (diagnostic: it is still inside stock's own variation).
 bool g_maskControl = false;
 int64_t g_badNeither = 0;
+// R133: the bracketed control. With g_bracket, B is read from .b (not .init) and the second stock control C2 (.c2,
+// run after B) is a stock run too: g_badNeither then means "matches none of A, C1, C2" inside the mask. Over every
+// differing texel (inside the mask or not) of a compare with g_maskControl:
+//  g_badNoStock: B matches no stock run (A, C1, and C2 when bracketed): the texels that cannot be DCS's own output at
+//                any of the sampled moments (gb_rec.h counts these as unexplained);
+//  g_badLater:   B differs from A and C1 but equals C2: B looks like a later stock run (R131's burst onset).
+bool g_bracket = false;
+bool g_c2Valid = false;  // .c2 holds this compare's C2 (the second control ran in the same views)
+int64_t g_badNoStock = 0, g_badLater = 0;
 // R129: per target, the largest per-component difference of the last compare, in the format's value units
 // (UNORM: 0..1, float formats: absolute); -1 when the format is not decoded (nothing differed: 0).
 double g_maxDelta[kMaxTargets] = {};
@@ -1533,7 +1548,22 @@ bool CopyAllMask() {  // the current targets into .m (created on demand); false:
   }
   return true;
 }
-bool BuildMask() {  // A (.a) vs the mask run (.m): the ownship's texels
+// R133: withC2 also marks the texels where A differs from the second stock control (.c2, after the recorded run):
+// the mask is then every texel where any of the three stock runs (A, C1, C2) disagree.
+// R133: the current targets into .b or .c2 (created on demand, staging); false: a target cannot take one (MSAA, or
+// the create failed).
+bool CopyAllTo(ID3D11Texture2D* Target::*which) {
+  for (Target& t : g_t) {
+    if (!t.res) continue;
+    if (t.ms) return false;
+    if (!(t.*which) && FAILED(g_dev->CreateTexture2D(&t.copyDesc, nullptr, &(t.*which)))) return false;
+    for (UINT s = 0; s < t.slices; ++s)
+      g_ctx->CopySubresourceRegion(t.*which, s, 0, 0, 0, t.res, D3D11CalcSubresource(t.mip, t.first + s, t.resMips),
+                                   nullptr);
+  }
+  return true;
+}
+bool BuildMask(bool withC2 = false) {  // A (.a) vs the mask run (.m): the ownship's texels
   g_mask.clear();
   g_maskW = g_maskH = g_maskS = 0;
   for (Target& t : g_t) {
@@ -1553,13 +1583,19 @@ bool BuildMask() {  // A (.a) vs the mask run (.m): the ownship's texels
         g_ctx->Unmap(t.a, s);
         return false;
       }
+      D3D11_MAPPED_SUBRESOURCE mc = {};
+      const bool haveC2 = withC2 && t.c2 && SUCCEEDED(g_ctx->Map(t.c2, s, D3D11_MAP_READ, 0, &mc));
       for (UINT y = 0; y < d.Height; ++y) {
         const auto* ra = static_cast<const uint8_t*>(ma.pData) + static_cast<size_t>(y) * ma.RowPitch;
         const auto* rm = static_cast<const uint8_t*>(mm.pData) + static_cast<size_t>(y) * mm.RowPitch;
-        if (memcmp(ra, rm, static_cast<size_t>(d.Width) * bpt) == 0) continue;
+        const auto* rc = haveC2 ? static_cast<const uint8_t*>(mc.pData) + static_cast<size_t>(y) * mc.RowPitch : nullptr;
+        const size_t rowBytes = static_cast<size_t>(d.Width) * bpt;
+        if (memcmp(ra, rm, rowBytes) == 0 && (!rc || memcmp(ra, rc, rowBytes) == 0)) continue;
         uint8_t* row = g_mask.data() + (static_cast<size_t>(s) * d.Height + y) * d.Width;
-        for (UINT x = 0; x < d.Width; ++x) row[x] |= memcmp(ra + x * bpt, rm + x * bpt, bpt) != 0;
+        for (UINT x = 0; x < d.Width; ++x)
+          row[x] |= memcmp(ra + x * bpt, rm + x * bpt, bpt) != 0 || (rc && memcmp(ra + x * bpt, rc + x * bpt, bpt) != 0);
       }
+      if (haveC2) g_ctx->Unmap(t.c2, s);
       g_ctx->Unmap(t.m, s);
       g_ctx->Unmap(t.a, s);
     }
@@ -1624,7 +1660,7 @@ int g_badBox[4] = {1 << 30, 1 << 30, -1, -1};
 // m (optional, R129): the control run's copy of the same target; with g_maskControl, a difference inside the mask
 // whose B also differs from m is counted in g_badNeither. maxDelta (optional): the largest component difference.
 int64_t CompareStaging(ID3D11Texture2D* a, ID3D11Texture2D* b, uint64_t* texels, ID3D11Texture2D* m = nullptr,
-                       double* maxDelta = nullptr) {
+                       double* maxDelta = nullptr, ID3D11Texture2D* c2 = nullptr) {
   D3D11_TEXTURE2D_DESC d;
   a->GetDesc(&d);
   const UINT bpt = TexelBytes(d.Format);
@@ -1640,7 +1676,11 @@ int64_t CompareStaging(ID3D11Texture2D* a, ID3D11Texture2D* b, uint64_t* texels,
       return -1;
     }
     const bool haveM = m && SUCCEEDED(g_ctx->Map(m, s, D3D11_MAP_READ, 0, &mm));
-    if (ma.RowPitch < rowBytes || mb.RowPitch < rowBytes || (haveM && mm.RowPitch < rowBytes)) {
+    D3D11_MAPPED_SUBRESOURCE mc = {};
+    const bool haveC = c2 && SUCCEEDED(g_ctx->Map(c2, s, D3D11_MAP_READ, 0, &mc));
+    if (ma.RowPitch < rowBytes || mb.RowPitch < rowBytes || (haveM && mm.RowPitch < rowBytes) ||
+        (haveC && mc.RowPitch < rowBytes)) {
+      if (haveC) g_ctx->Unmap(c2, s);
       if (haveM) g_ctx->Unmap(m, s);
       g_ctx->Unmap(b, s);
       g_ctx->Unmap(a, s);
@@ -1651,6 +1691,7 @@ int64_t CompareStaging(ID3D11Texture2D* a, ID3D11Texture2D* b, uint64_t* texels,
       const auto* rb = static_cast<const uint8_t*>(mb.pData) + static_cast<size_t>(y) * mb.RowPitch;
       if (memcmp(ra, rb, rowBytes) == 0) continue;
       const auto* rm = haveM ? static_cast<const uint8_t*>(mm.pData) + static_cast<size_t>(y) * mm.RowPitch : nullptr;
+      const auto* rc = haveC ? static_cast<const uint8_t*>(mc.pData) + static_cast<size_t>(y) * mc.RowPitch : nullptr;
       const bool masked = g_maskOn && d.Width == g_maskW && d.Height == g_maskH && d.ArraySize == g_maskS;
       const uint8_t* mrow = masked ? g_mask.data() + (static_cast<size_t>(s) * d.Height + y) * d.Width : nullptr;
       for (UINT x = 0; x < d.Width; ++x) {
@@ -1661,8 +1702,15 @@ int64_t CompareStaging(ID3D11Texture2D* a, ID3D11Texture2D* b, uint64_t* texels,
           *maxDelta = dd < 0.0 ? -1.0 : (std::max)(*maxDelta, dd);
         }
         if (g_maskOn) (mrow && mrow[x] ? g_badIn : g_badOut)++;
-        if (g_maskOn && g_maskControl && mrow && mrow[x] && rm && memcmp(rm + x * bpt, rb + x * bpt, bpt) != 0)
-          ++g_badNeither;
+        if (g_maskOn && g_maskControl && rm) {
+          const bool eqC1 = memcmp(rm + x * bpt, rb + x * bpt, bpt) == 0;
+          const bool eqC2 = rc && memcmp(rc + x * bpt, rb + x * bpt, bpt) == 0;
+          if (!eqC1 && !eqC2) {
+            ++g_badNoStock;
+            if (mrow && mrow[x]) ++g_badNeither;
+          }
+          if (!eqC1 && eqC2) ++g_badLater;
+        }
         g_badBox[0] = (std::min)(g_badBox[0], static_cast<int>(x));
         g_badBox[1] = (std::min)(g_badBox[1], static_cast<int>(y));
         g_badBox[2] = (std::max)(g_badBox[2], static_cast<int>(x));
@@ -1670,6 +1718,7 @@ int64_t CompareStaging(ID3D11Texture2D* a, ID3D11Texture2D* b, uint64_t* texels,
       }
     }
     *texels += static_cast<uint64_t>(d.Width) * d.Height;
+    if (haveC) g_ctx->Unmap(c2, s);
     if (haveM) g_ctx->Unmap(m, s);
     g_ctx->Unmap(b, s);
     g_ctx->Unmap(a, s);
@@ -1763,16 +1812,18 @@ int64_t CompareMs(Target& t, uint64_t* texels) {
 // counts in bad[]; returns the total, or -1 on an error.
 int64_t CompareAll(int64_t bad[kMaxTargets], uint64_t* texels) {
   int64_t total = 0;
-  g_badIn = g_badOut = g_badNeither = 0;
+  g_badIn = g_badOut = g_badNeither = g_badNoStock = g_badLater = 0;
   for (int i = 0; i < kMaxTargets; ++i) {
     bad[i] = 0;
     g_maxDelta[i] = 0.0;
     Target& t = g_t[i];
     if (!t.res) continue;
     // MSAA: compared per sample on the GPU, no value decode (-1 when it differs).
+    // R133: bracketed, B is in .b (init was restored once more for C2) and C2 in .c2.
+    const bool br = g_bracket && t.b;
     const int64_t b = t.ms ? CompareMs(t, texels)
-                           : CompareStaging(t.a, t.init, texels, g_maskOn && g_maskControl ? t.m : nullptr,
-                                            &g_maxDelta[i]);
+                           : CompareStaging(t.a, br ? t.b : t.init, texels, g_maskOn && g_maskControl ? t.m : nullptr,
+                                            &g_maxDelta[i], br && g_c2Valid && g_maskOn && g_maskControl ? t.c2 : nullptr);
     if (t.ms && b > 0) g_maxDelta[i] = -1.0;
     if (b < 0) return -1;
     bad[i] = b;
@@ -1787,6 +1838,81 @@ int64_t CompareGuarded(int64_t bad[kMaxTargets], uint64_t* texels) {
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     return -1;
   }
+}
+
+// R133 ([Suite] GBufferRecVerifyDump, test only): one compare's runs as raw files for offline analysis, written by
+// gb_rec.h VerifyPass after the compare. Into dir (created; ends with a backslash): per staging target i and run r
+// ("A" first stock run, "C1" stock control before the recorded run, "B" the recorded run, "C2" stock control after
+// it; a run without a copy is skipped), "<RTi|DS0>_<r>.raw": the texels of box (x0, y0, x1, y1, inclusive; clamped
+// to the target) row by row top-down, tightly packed (width * bytes per texel per row), slice after slice; and
+// "header.txt": the caller's lines, then one line per target (format number, full size, slices, bytes per texel,
+// the crop, the files). control: C1 / C2 exist (else only A and B). Not for MSAA targets (skipped). Returns the
+// files written (header included), or -1 when nothing could be.
+int DumpCompare(const std::wstring& dir, const std::string& head, const int box[4], bool control) {
+  if (dir.empty() || box[2] < box[0] || box[3] < box[1]) return -1;
+  for (size_t i = 1; i <= dir.size(); ++i)  // every level of the folder
+    if (i == dir.size() || dir[i] == L'\\') CreateDirectoryW(dir.substr(0, i).c_str(), nullptr);
+  std::string hdr = head;
+  int files = 0;
+  for (int i = 0; i < kMaxTargets; ++i) {
+    Target& t = g_t[i];
+    if (!t.res || t.ms) continue;
+    const D3D11_TEXTURE2D_DESC& d = t.copyDesc;
+    const UINT bpt = TexelBytes(d.Format);
+    if (!bpt || !d.Width || !d.Height) continue;
+    const UINT x0 = static_cast<UINT>((std::max)(0, box[0])), y0 = static_cast<UINT>((std::max)(0, box[1]));
+    const UINT x1 = (std::min)(d.Width - 1, static_cast<UINT>((std::max)(0, box[2])));
+    const UINT y1 = (std::min)(d.Height - 1, static_cast<UINT>((std::max)(0, box[3])));
+    if (x0 > x1 || y0 > y1) continue;
+    const UINT w = x1 - x0 + 1, h = y1 - y0 + 1;
+    char tn[8];
+    snprintf(tn, sizeof(tn), "%s%d", i == 8 ? "DS" : "RT", i == 8 ? 0 : i);
+    struct Run {
+      const char* name;
+      ID3D11Texture2D* tex;
+    } runs[4] = {{"A", t.a}, {"C1", control ? t.m : nullptr}, {"B", g_bracket && t.b ? t.b : t.init},
+                     {"C2", control && g_bracket && g_c2Valid ? t.c2 : nullptr}};
+    std::string names;
+    for (const Run& r : runs) {
+      if (!r.tex) continue;
+      std::vector<uint8_t> buf(static_cast<size_t>(w) * bpt * h * d.ArraySize);
+      bool ok = true;
+      for (UINT s = 0; s < d.ArraySize && ok; ++s) {
+        D3D11_MAPPED_SUBRESOURCE mp;
+        if (FAILED(g_ctx->Map(r.tex, s, D3D11_MAP_READ, 0, &mp))) {
+          ok = false;
+          break;
+        }
+        for (UINT y = 0; y < h; ++y)
+          memcpy(buf.data() + ((static_cast<size_t>(s) * h + y) * w) * bpt,
+                 static_cast<const uint8_t*>(mp.pData) + static_cast<size_t>(y0 + y) * mp.RowPitch +
+                     static_cast<size_t>(x0) * bpt,
+                 static_cast<size_t>(w) * bpt);
+        g_ctx->Unmap(r.tex, s);
+      }
+      if (!ok) continue;
+      const std::wstring file = std::wstring(tn, tn + strlen(tn)) + L"_" +
+                                std::wstring(r.name, r.name + strlen(r.name)) + L".raw";
+      FILE* f = nullptr;
+      if (_wfopen_s(&f, (dir + file).c_str(), L"wb") || !f) continue;
+      const bool wrote = fwrite(buf.data(), 1, buf.size(), f) == buf.size();
+      fclose(f);
+      if (!wrote) continue;
+      ++files;
+      names += names.empty() ? "" : " ";
+      names += std::string(tn) + "_" + r.name + ".raw";
+    }
+    char line[256];
+    snprintf(line, sizeof(line), "%s format %d size %ux%u slices %u bpt %u crop %u,%u %ux%u files %s\n", tn,
+             static_cast<int>(d.Format), d.Width, d.Height, d.ArraySize, bpt, x0, y0, w, h,
+             names.empty() ? "-" : names.c_str());
+    hdr += line;
+  }
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, (dir + L"header.txt").c_str(), L"wb") || !f) return files ? files : -1;
+  fwrite(hdr.data(), 1, hdr.size(), f);
+  fclose(f);
+  return files + 1;
 }
 
 void ReportMismatch(bool ab, int64_t total, uint64_t texels, const int64_t bad[kMaxTargets]) {
