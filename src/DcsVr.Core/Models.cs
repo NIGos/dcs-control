@@ -302,6 +302,14 @@ public sealed record VrProfile
     /// second, so their wind sway can look stepped. Off by default; forced off with the engine switched off or in the
     /// Perception-only mode.</summary>
     public bool EngineShadowCache { get; init; }
+    /// <summary>[DLSS] ReleaseIdleSets (engine module R132): DCS sets up DLSS twice per mission load and never releases the
+    /// first set, so each restart keeps about 0.7 to 1.4 GB more memory; on, the module releases a set DCS no longer
+    /// evaluates once the newest set has taken over (ReleaseAfterEvals, the module's default 300). The image does not
+    /// change. Monitor and VR alike; an engine feature, so not in the Perception-only mode. Off by default.</summary>
+    public bool EngineReleaseIdleDlss { get; init; }
+    /// <summary>It runs: <see cref="EngineReleaseIdleDlss"/> with Engine Optimizations (the module's worker ticks the
+    /// DLSS release only outside its Perception-only mode; the in-flight engine switch pauses it).</summary>
+    public bool UsesReleaseIdleDlss => EngineReleaseIdleDlss && EngineOptimizations;
     /// <summary>[Model] ShadowRecorder: the shadow cascades' draws are recorded on 8 worker threads (D3D11 deferred
     /// contexts) instead of DCS's render thread; cascade 1 stays as DCS draws it. Verified texel-identical live;
     /// measured +3 to +5 % FPS, p95 −4 to −7 %, at 4-7 % more total CPU and about 30 MB of memory.</summary>

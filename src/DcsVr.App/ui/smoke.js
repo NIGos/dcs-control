@@ -16,7 +16,7 @@ window.runWebSmoke = async function() {
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
     'engineOptimizations','engineGBufferRecorder','engineModelAllocator','engineShaderTimeCache','engineTaskQueueClock','boostPrefetch','engineShadowRecorder',
     'engineShadowInstancing','engineCostWeights','enginePartitionBoost','engineTextureDedupe','engineEffectBufferSkip','enginePlainCounter','engineFrameHeap',
-    'engineStateFilter','engineShadowCache','engineBeeps','engineDevMode','engineDevPayloadPath','engineDevIniPath','engineTimerRefreshUs','engineDiagnosticHooks',
+    'engineStateFilter','engineShadowCache','engineReleaseIdleDlss','engineBeeps','engineDevMode','engineDevPayloadPath','engineDevIniPath','engineTimerRefreshUs','engineDiagnosticHooks',
     'dcs','options','keepDcsLauncher',
     'eyeDistance','eyeDistanceMm','pupilShift','pupilShiftEyeRadiusMm','pupilShiftVirtualImageM','peripheryStability','peripheryStabilityStrength','farDepth','farDepthPreset',
     'depthBoost','ownAircraftTrueDepth','depthBoostMode','depthBoostRealisticMax','depthBoostFarStartM','depthBoostFarFullM','depthBoostMax','depthBoostNearM',

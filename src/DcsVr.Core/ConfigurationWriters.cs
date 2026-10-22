@@ -88,16 +88,29 @@ public static class ConfigurationWriters
 
     /// <summary>DcsQvCull.ini [DLSS] (engine module R122) with the Periphery DLSS preset: the periphery's preset, the
     /// focus's (FocusDlssPreset's letter, else M: with the driver's preset hidden the focus needs one of its own) and
-    /// IgnoreDriverPreset. Written only then: off, the file stays as it was.</summary>
-    private static string DlssSection(VrProfile p) => p.UsesPeripheryDlssPreset ? $"""
+    /// IgnoreDriverPreset; and/or R132 ReleaseIdleSets=1 (<see cref="VrProfile.UsesReleaseIdleDlss"/>). One section for
+    /// both. Written only then: with both off, the file stays as it was.</summary>
+    private static string DlssSection(VrProfile p) => p.UsesPeripheryDlssPreset || p.UsesReleaseIdleDlss ? $"""
 
 
+        {DlssPresetKeys(p)}{DlssReleaseKey(p)}
+        """ : "";
+
+    // The Periphery DLSS preset's lines exactly as before ReleaseIdleSets existed (comment, header, keys).
+    private static string DlssPresetKeys(VrProfile p) => p.UsesPeripheryDlssPreset ? $"""
         ; Periphery DLSS preset (applies at the next mission load): a lighter preset outside the Quad Views focus, the focus
         ; keeps its own. The pupil shift layer hides the driver profile's forced preset from DLSS (read-only).
         [DLSS]
         PeripheryPreset={p.PeripheryDlssPreset}
         FocusPreset={FocusPresetLetter(p)}
         IgnoreDriverPreset=1
+        """ : "[DLSS]";
+
+    private static string DlssReleaseKey(VrProfile p) => p.UsesReleaseIdleDlss ? """
+
+        ; Free unused DLSS memory: DCS sets up DLSS twice per mission load and never frees the first set; it is released
+        ; once DCS evaluates only the newest one. The image does not change.
+        ReleaseIdleSets=1
         """ : "";
 
     /// <summary>[DLSS] FocusPreset: <see cref="VrProfile.FocusDlssPreset"/>'s letter (5 = E, 11 = K, 12 = L, 13 = M), else M.</summary>

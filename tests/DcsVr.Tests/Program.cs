@@ -1544,6 +1544,35 @@ Test("Visual realism: the pupil shift layer publishes the gaze for eye-focus blu
     Require((withPupil.Files.Single(f => f.Path.EndsWith("options.lua")).LuaChanges ?? []).Any(c => c.Path == "VR.custom_IPD_enable" && c.InstalledRaw == "false"), "with Pupil shift the layer still takes over DCS's IPD");
     Require(!planner.Build(vr with { GVision = true, GVisionUseGaze = false }, inventory, Path.Combine(root, "publish/managed-g")).Files.Any(f => f.Path.Contains("pupilshift")), "G vision straight ahead needs no layer");
 });
+Test("Free unused DLSS memory: [DLSS] ReleaseIdleSets=1 only with Engine Optimizations, one [DLSS] with the periphery preset, off as before", () =>
+{
+    string Module(VrProfile p) => ConfigurationWriters.DcsQvCull(p).ReplaceLineEndings("\n");
+    // Off by default, also for an older profile without the field.
+    Require(!new VrProfile().EngineReleaseIdleDlss && !JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true}")!.EngineReleaseIdleDlss, "off by default, also for an older profile");
+    Require(JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true,\"engineReleaseIdleDlss\":true}")!.UsesReleaseIdleDlss, "loads from profile.json");
+    const string block = "\n; Free unused DLSS memory: DCS sets up DLSS twice per mission load and never frees the first set; it is released\n; once DCS evaluates only the newest one. The image does not change.\nReleaseIdleSets=1";
+    var engine = new VrProfile { EngineOptimizations = true };
+    var qv = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked, EngineOptimizations = true };
+    // On: [DLSS] ReleaseIdleSets=1 after [Perception], on a monitor and in VR; with it removed, the file as before.
+    foreach (var p in new[] { engine, engine with { Desktop = true }, qv, qv with { EngineDevMode = true } })
+    {
+        var on = Module(p with { EngineReleaseIdleDlss = true });
+        Require(on.Contains("\n\n[DLSS]" + block + "\n\n[Dev]\n") && on.Replace("\n\n[DLSS]" + block, "") == Module(p), "on: the key in its own [DLSS], nothing else changed");
+        Require(on.Split('\n').Count(l => l.Trim() == "[DLSS]") == 1 && !on.Contains("ReleaseAfterEvals"), "one [DLSS], ReleaseAfterEvals left to the module");
+    }
+    // Off, or set where it cannot run (Perception-only mode): byte-identical to a profile without it.
+    foreach (var p in new[] { engine, qv, qv with { EngineOptimizations = false, DepthBoost = true }, new VrProfile { ColorMode = ColorMode.Fix } })
+    {
+        Require(!Module(p).Contains("[DLSS]") && !Module(p).Contains("ReleaseIdleSets"), "off: no [DLSS]");
+        var set = p with { EngineReleaseIdleDlss = true };
+        Require(set.UsesReleaseIdleDlss == p.EngineOptimizations && (p.EngineOptimizations || Module(set) == Module(p)), "set without Engine Optimizations: byte-identical");
+    }
+    // With the Periphery DLSS preset: one [DLSS] with both, the preset's lines exactly as without this option.
+    var preset = qv with { PeripheryDlssPreset = PeripheryDlssPreset.E };
+    var both = Module(preset with { EngineReleaseIdleDlss = true });
+    Require(preset.UsesPeripheryDlssPreset && both.Split('\n').Count(l => l.Trim() == "[DLSS]") == 1, "a single [DLSS] section");
+    Require(both.Contains("IgnoreDriverPreset=1" + block + "\n\n[Dev]\n") && both.Replace(block, "") == Module(preset), "the preset's keys, then ReleaseIdleSets=1; without it, the file as before");
+});
 Test("Periphery DLSS preset: [DLSS] and the layer's [DlssPreset] only while it runs, the focus preset fallback, and off every file as before", () =>
 {
     var qv = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.Fixed, EngineOptimizations = true };
