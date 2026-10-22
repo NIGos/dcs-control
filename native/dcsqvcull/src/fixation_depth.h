@@ -1742,7 +1742,7 @@ void DrawRearm() {
 void OvlDrawSeh(ID3D11DeviceContext* c);  // below (cockpit ipd: an overlay pass's draw, probe)
 #define FD_DRAW_BODY(KIND, FN, COUNT, INST, ...)                      \
   HookBusy busy;                                                       \
-  ckipd::CostScope cost(ckipd::kCostDraw);                             \
+  ckipd::CostScopeIf cost(ckipd::kCostDraw, ckipd::g_on.load(std::memory_order_relaxed)); \
   const bool ours = c == g_s.ctx && !g_fault.load(std::memory_order_relaxed); \
   if (c == g_s.ctx) ckipd::LightDrawSeen();                           \
   if (c == g_s.ctx && ckipd::t_cls == ckipd::kClsOvl) OvlDrawSeh(c);  \

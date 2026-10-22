@@ -303,7 +303,9 @@ struct RingAtLoad {
 void NoteRingAtLoad() {
   RingAtLoad& r = g_ringAtLoad;
   r.taken = true;
-  r.lastRaw = static_cast<uint32_t>(qvalog::g_ring[qvalog::kAsyncSlots - 1].seq);
+  // R126: the residency is queried before the last slot is read: that read maps its (demand-zero) page, which lies
+  // inside the queried range whenever the ring's end is less than one slot (2068 bytes) past a page boundary (a
+  // layout shift of the test executable made it 1 of 1033 pages, a false failure).
   const uintptr_t a = (reinterpret_cast<uintptr_t>(&qvalog::g_ring[qvalog::kAsyncSlots / 2]) + 4095) &
                       ~static_cast<uintptr_t>(4095);
   const uintptr_t e = reinterpret_cast<uintptr_t>(&qvalog::g_ring[qvalog::kAsyncSlots]) & ~static_cast<uintptr_t>(4095);
@@ -318,6 +320,7 @@ void NoteRingAtLoad() {
     ++r.pages;
     r.resident += wi.VirtualAttributes.Valid ? 1 : 0;
   }
+  r.lastRaw = static_cast<uint32_t>(qvalog::g_ring[qvalog::kAsyncSlots - 1].seq);
 }
 
 void AsyncLog() {

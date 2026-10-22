@@ -1174,18 +1174,43 @@ Stats g_st;
 // G-buffer observer, the pass boundaries (arms / pass ends / restores), the cpu overlay path (ovl_cpu.h: our part
 // of the record replay and filter hooks, without DCS's own work inside them, and its frame end). Logged per frame
 // in microseconds.
+// R126: the scopes count TSC ticks (__rdtsc, about 7 ns here) instead of two QueryPerformanceCounter calls (16 ns
+// each): a scope costs about 15 ns instead of 36 (R126 doc, 9800X3D), and every hooked draw, armed upload
+// and overlay record takes one. LogStats converts with TscPerSec (invariant TSC: one rate for the session). Only the
+// logged cost numbers depend on it, nothing the hooks decide.
 enum CostPart { kCostUpload = 0, kCostDraw, kCostObserver, kCostBoundary, kCostOvlCpu, kCostParts };
 std::atomic<uint64_t> g_cost[kCostParts] = {};
 struct CostScope {
   int part;
-  LARGE_INTEGER t0;
-  explicit CostScope(int p) : part(p) { QueryPerformanceCounter(&t0); }
-  ~CostScope() {
-    LARGE_INTEGER t1;
-    QueryPerformanceCounter(&t1);
-    g_cost[part].fetch_add(static_cast<uint64_t>(t1.QuadPart - t0.QuadPart), std::memory_order_relaxed);
+  uint64_t t0;
+  explicit CostScope(int p) : part(p), t0(__rdtsc()) {}
+  ~CostScope() { g_cost[part].fetch_add(__rdtsc() - t0, std::memory_order_relaxed); }
+};
+// R126: a scope that times only when `on` (fixation_depth.h's draw hooks: far depth's own draw arms run with cockpit
+// ipd off too, and its cost line is logged only while it is on).
+struct CostScopeIf {
+  int part;
+  uint64_t t0;
+  CostScopeIf(int p, bool on) : part(on ? p : -1), t0(on ? __rdtsc() : 0) {}
+  ~CostScopeIf() {
+    if (part >= 0) g_cost[part].fetch_add(__rdtsc() - t0, std::memory_order_relaxed);
   }
 };
+// TSC ticks per second, measured once against QPC over 2 ms (LogStats' thread: the config thread, or a test's).
+double TscPerSec() {
+  static double rate = 0;
+  if (rate > 0) return rate;
+  LARGE_INTEGER f, a, b;
+  QueryPerformanceFrequency(&f);
+  QueryPerformanceCounter(&a);
+  const uint64_t t0 = __rdtsc();
+  do {
+    QueryPerformanceCounter(&b);
+  } while (b.QuadPart - a.QuadPart < f.QuadPart / 500);
+  const uint64_t t1 = __rdtsc();
+  rate = static_cast<double>(t1 - t0) * static_cast<double>(f.QuadPart) / static_cast<double>(b.QuadPart - a.QuadPart);
+  return rate;
+}
 std::mutex g_traceMutex;
 std::vector<std::string> g_trace;  // render thread fills (under g_traceMutex), Tick logs
 double g_lastH = 0, g_lastScale = 1;
@@ -6066,11 +6091,10 @@ uint64_t g_costFrames0 = 0;
 void LogStats() {
   auto u = [](const std::atomic<uint64_t>& a) { return static_cast<unsigned long long>(a.load()); };
   {
-    LARGE_INTEGER fq;
-    QueryPerformanceFrequency(&fq);
+    const double tps = TscPerSec();  // R126: the scopes count TSC ticks
     const uint64_t fr = g_st.frames.load(), nf = fr > g_costFrames0 ? fr - g_costFrames0 : 1;
     double us[kCostParts];
-    for (int i = 0; i < kCostParts; ++i) us[i] = g_cost[i].exchange(0) * 1e6 / fq.QuadPart / nf;
+    for (int i = 0; i < kCostParts; ++i) us[i] = g_cost[i].exchange(0) * 1e6 / tps / nf;
     g_costFrames0 = fr;
     Log("cockpit ipd: render-thread cost per frame: uploads %.0f us, overlay draw hooks %.0f us, G-buffer observer "
         "%.0f us, pass boundaries %.0f us, cpu overlay path (replay / filter hooks, frame end) %.0f us (total %.0f "

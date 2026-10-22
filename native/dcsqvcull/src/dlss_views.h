@@ -276,6 +276,9 @@ int InstallDetour(uint8_t* target, void* hook, Detour* d) {
   if (cur[0] == 0xFF && cur[1] == 0x25 && !cur[2] && !cur[3] && !cur[4] && !cur[5]) {
     uint8_t* page = nullptr;
     memcpy(&page, cur + 6, 8);
+    // R126 (DCS Control's review of the DRS filter): the slot is written with one atomic exchange; a page that is not
+    // page-aligned (every VirtualAlloc result is) is not ours.
+    if (reinterpret_cast<uintptr_t>(page) & (kPage - 1)) return -3;
     uint8_t stub[6] = {};
     uint32_t hdr[2] = {};
     uint8_t orig[kMaxCopy] = {}, tr[kMaxCopy + 14] = {};
@@ -556,26 +559,66 @@ std::string OverrideText() {
   return b;
 }
 
-void Report(const Decision& d, int result, uint32_t seq) {
+void Report(const Decision& d, int result, uint32_t seq, const char* tail = "") {
   const std::string ovr = OverrideText();
   char hint[24];
   snprintf(hint, sizeof(hint), "%s", d.dcsHintRead ? PresetName(d.dcsHint) : "?");
   if (d.fault)
-    Log("dlss views: create #%u: fault reading DCS's parameters; feature left as DCS asked; %s; result 0x%x", seq,
-        ovr.c_str(), static_cast<unsigned>(result));
+    Log("dlss views: create #%u: fault reading DCS's parameters; feature left as DCS asked; %s; result 0x%x%s", seq,
+        ovr.c_str(), static_cast<unsigned>(result), tail);
   else if (d.preset)
-    Log("dlss views: create #%u %s %ux%u->%ux%u: preset %s requested%s (DCS hint %s); %s; result 0x%x", seq,
+    Log("dlss views: create #%u %s %ux%u->%ux%u: preset %s requested%s (DCS hint %s); %s; result 0x%x%s", seq,
         ClassName(d.cls), d.inW, d.inH, d.outW, d.outH, PresetName(static_cast<uint32_t>(d.preset)),
         d.fromDriver ? " (the driver profile's preset, made explicit)" : "", hint, ovr.c_str(),
-        static_cast<unsigned>(result));
+        static_cast<unsigned>(result), tail);
   else
-    Log("dlss views: create #%u %s %ux%u->%ux%u: unchanged, %s (DCS hint %s); %s; result 0x%x", seq, ClassName(d.cls),
-        d.inW, d.inH, d.outW, d.outH, d.why, hint, ovr.c_str(), static_cast<unsigned>(result));
+    Log("dlss views: create #%u %s %ux%u->%ux%u: unchanged, %s (DCS hint %s); %s; result 0x%x%s", seq,
+        ClassName(d.cls), d.inW, d.inH, d.outW, d.outH, d.why, hint, ovr.c_str(), static_cast<unsigned>(result), tail);
+}
+
+// R126 (R124: DCS created the four DLSS features twice, about 1 s apart, at every mission restart): who called
+// CreateFeature (module file name + offset of the return address) and the handle it got. Log only.
+void CallerText(void* ret, char* out, size_t n) {
+  HMODULE m = nullptr;
+  wchar_t p[MAX_PATH * 2] = {};
+  DWORD len = 0;
+  if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         static_cast<LPCWSTR>(ret), &m) &&
+      m)
+    len = GetModuleFileNameW(m, p, MAX_PATH * 2);
+  if (!m || !len || len >= MAX_PATH * 2) {
+    snprintf(out, n, "0x%llx (no module)", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ret)));
+    return;
+  }
+  const wchar_t* base = p;
+  for (const wchar_t* c = p; *c; ++c)
+    if (*c == L'\\' || *c == L'/') base = c + 1;
+  char name[MAX_PATH] = {};
+  if (!WideCharToMultiByte(CP_UTF8, 0, base, -1, name, sizeof(name), nullptr, nullptr)) snprintf(name, sizeof(name), "?");
+  snprintf(out, n, "%s+0x%llx", name,
+           static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ret) - reinterpret_cast<uintptr_t>(m)));
+}
+void CreateTail(void* ret, void** handle, char* out, size_t n) {
+  char caller[MAX_PATH + 40];
+  CallerText(ret, caller, sizeof(caller));
+  void* h = nullptr;
+  uint32_t id = 0;
+  const bool haveH = handle && SafeRead(handle, &h, sizeof(h));
+  const bool haveId = haveH && h && SafeRead(h, &id, sizeof(id));
+  char hs[64];
+  if (!haveH)
+    snprintf(hs, sizeof(hs), "none");
+  else if (haveId)
+    snprintf(hs, sizeof(hs), "0x%llx (id %u)", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(h)), id);
+  else
+    snprintf(hs, sizeof(hs), "0x%llx", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(h)));
+  snprintf(out, n, "; caller %s; handle %s", caller, hs);
 }
 
 int __cdecl CreateHook(void* ctx, int feature, NgxParam* params, void** handle) {
   const CreateFn orig = g_createOrig.load(std::memory_order_acquire);
   if (feature != kFeatureSuperSampling || !params) return orig(ctx, feature, params, handle);
+  void* const ret = _ReturnAddress();  // R126: the caller, for the create line
   const uint32_t seq = g_creates.fetch_add(1) + 1;
   Decision d;
   const int periph = g_periph.load(), focus = g_focus.load();
@@ -591,7 +634,9 @@ int __cdecl CreateHook(void* ctx, int feature, NgxParam* params, void** handle) 
   if (d.preset) g_applied.fetch_add(1);
   const int r = orig(ctx, feature, params, handle);
   try {
-    Report(d, r, seq);
+    char tail[MAX_PATH + 160] = {};
+    CreateTail(ret, handle, tail, sizeof(tail));
+    Report(d, r, seq, tail);
   } catch (...) {
   }
   return r;
@@ -811,8 +856,15 @@ bool TryInstallGetSetting() {
   const bool ourPatchMaybe = SafeRead(target, first, 2) && first[0] == 0xFF && first[1] == 0x25;
   if (ngxUp && !ourPatchMaybe) {
     g_getSettingState = -2;
-    Log("dlss views: IgnoreDriverPreset: not possible in this DCS session: DCS initialised NGX (and DLSS read the "
-        "driver profile, once) before DcsQvCull started. Nothing installed; the driver's preset stays in force");
+    // R126: DCS Control's OpenXR layer hosts the same filter (it loads before NGX) and says so in the environment.
+    wchar_t hosted[4] = {};
+    if (GetEnvironmentVariableW(kHiddenEnv, hosted, 4) == 1 && hosted[0] == L'1')
+      Log("dlss views: IgnoreDriverPreset: driver preset filter hosted by the OpenXR layer (%ls=1); nothing installed "
+          "here",
+          kHiddenEnv);
+    else
+      Log("dlss views: IgnoreDriverPreset: not possible in this DCS session: DCS initialised NGX (and DLSS read the "
+          "driver profile, once) before DcsQvCull started. Nothing installed; the driver's preset stays in force");
     return false;
   }
   const int r = InstallDetour(target, reinterpret_cast<void*>(&GetSettingHook), &g_getSetting);
