@@ -7,7 +7,7 @@ window.runWebSmoke = async function() {
   const PROFILE_FIELDS = [
     'quadViews','gaze','quadTurbo','quadViewsLayerDirectory','foveaSource','quadFocusScale','pimaxPeripheral','pimaxHorizontalFov','pimaxVerticalFov',
     'foveaWidth','foveaHeight','peripheralScale','quadEdgeBlend','quadRoundFocus','quadSharpening','quadSharpenTaper','quadPeripheryContrast','quadSaccadeLead','quadGazeStabilize',
-    'neuralRendering','neuralRuntimePath','foveatedDlss','neuralFocusArea','focusDlssPreset','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity',
+    'neuralRendering','neuralRuntimePath','foveatedDlss','neuralFocusArea','focusDlssPreset','peripheryDlssPreset','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity',
     'neuralStyle','keepOtherDxgi','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
     'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenDeepPipeline','frameGenHudSymbology','smoothCursor','nvidiaFlowScale','flowPreset','bidirectionalFlow','frameGenAsyncArm',

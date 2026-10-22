@@ -26,7 +26,16 @@ add_library(fake_pvr SHARED fake_pvr.cpp)
 set_target_properties(fake_pvr PROPERTIES OUTPUT_NAME LibPVRClient64
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/fake_pvr)
 add_dependencies(pupil_shift_harness pupil_shift fake_quadviews fake_pvr)
+# The read-only DRS preset filter the layer installs for [DlssPreset] IgnoreDriverPreset (dcsvr_drs_preset_filter.h),
+# tested against this PC's real NvAPI DRS (read-only). The probe DLL is named like DLSS ("nvngx_dlss*") and sits next
+# to the test, which loads it by name. Without an NVIDIA driver the test exits 2: ctest reports it as skipped.
+add_executable(drs_filter_test drs_filter_test.cpp)
+add_library(drs_filter_probe SHARED drs_filter_probe.cpp)
+set_target_properties(drs_filter_probe PROPERTIES OUTPUT_NAME nvngx_dlss_r122b_probe)
+add_dependencies(drs_filter_test drs_filter_probe)
 enable_testing()
 add_test(NAME pupil_shift COMMAND pupil_shift_tests)
 add_test(NAME pupil_shift_harness COMMAND pupil_shift_harness $<TARGET_FILE:pupil_shift> ${CMAKE_CURRENT_BINARY_DIR}/harness_out
     $<TARGET_FILE:fake_quadviews> $<TARGET_FILE:fake_pvr>)
+add_test(NAME drs_filter COMMAND drs_filter_test WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(drs_filter PROPERTIES SKIP_RETURN_CODE 2)

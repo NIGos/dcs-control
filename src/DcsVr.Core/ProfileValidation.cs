@@ -131,6 +131,9 @@ public static class ProfileValidation
         if (profile.FarDepth && !profile.Desktop && !profile.UsesFarDepth)
             issues.Add(new("far-depth-needs", IssueSeverity.Warning, "Far depth needs the bundled Quad Views and Engine Optimizations (they measure the depth). With these settings it does not run."));
         if (profile.FarDepth && !Enum.IsDefined(profile.FarDepthPreset)) Error("far-depth-preset", "Select Subtle, Default or Strong for Far depth.");
+        if (!Enum.IsDefined(profile.PeripheryDlssPreset)) Error("periphery-preset", "Select Off, E, F, K or M for the periphery DLSS preset.");
+        else if (profile.PeripheryDlssPreset != PeripheryDlssPreset.Off && !profile.Desktop && !profile.UsesPeripheryDlssPreset)
+            issues.Add(new("periphery-preset-needs", IssueSeverity.Warning, "Periphery DLSS preset needs Quad Views (bundled, or your own Quad-Views-Foveated) and Engine Optimizations. With these settings it does not run."));
         if (profile.DepthBoost && !Enum.IsDefined(profile.DepthBoostMode)) Error("depth-mode", "Select Realistic or Enhanced for Depth boost.");
         if (profile.DepthBoost && profile.DepthBoostMode == DepthBoostMode.Enhanced && profile.DepthBoostMax is < VrProfile.DepthBoostMaxMin or > VrProfile.DepthBoostMaxMax)
             Error("depth-max", $"Depth boost's Enhanced strength must be ×{VrProfile.DepthBoostMaxMin}–×{VrProfile.DepthBoostMaxMax}.");
@@ -341,7 +344,35 @@ public static class ProfileValidation
                 issues.Add(new("options-location", IssueSeverity.Warning, @"The selected options.lua is not in a DCS Saved Games folder (Saved Games\DCS\Config\options.lua). DCS reads only that one, and the engine optimizations and logs are found next to it: select the options.lua DCS uses."));
             if (profile.Runtime == RuntimeKind.SboysSteamVr && !profile.Desktop && inventory.SteamVrRuntime is null && profile.RuntimeManifestPath is null)
                 Error("steamvr-not-found", "SteamVR was not found on this PC, and the Sboys route needs it. Install SteamVR and start it once.");
+            // The Periphery DLSS preset changes DCS's own DLSS: with another upscaler it does nothing (DCS Control does not
+            // change DCS's Upscaling for it).
+            var dlss = DcsUsesDlss(profile, inventory);
+            if (profile.UsesPeripheryDlssPreset && dlss == false)
+                issues.Add(new("periphery-preset-dlss", IssueSeverity.Warning, "Periphery DLSS preset works on DCS's DLSS, but DCS's Upscaling is not set to DLSS, so it does nothing. Set Upscaling to DLSS in DCS's graphics or VR settings."));
+            // Read only: the preset the NVIDIA App forces on DCS, worth knowing at Quad Views sizes. Shown only while DCS
+            // uses DLSS in VR and the driver forces a preset; the app never changes NVIDIA settings.
+            if (!profile.Desktop && dlss == true && NvidiaSettings.DlssPresetForDcs() is { Forced: true } forced)
+                issues.Add(new("nvidia-dlss-preset", IssueSeverity.Info, DlssPresetNote(profile, forced)));
         }
         return issues;
+    }
+
+    /// <summary>DCS upscales with DLSS: options.lua's graphics.Upscaling, or DLSS 5 / Foveated SR (Launch DCS sets it for
+    /// them); null when options.lua does not say.</summary>
+    public static bool? DcsUsesDlss(VrProfile profile, InventorySnapshot inventory) =>
+        profile.UsesCheeky ? true
+        : inventory.DcsSettings.TryGetValue("graphics.Upscaling", out var raw) ? raw.Trim().Trim('"').Equals("DLSS", StringComparison.OrdinalIgnoreCase)
+        : null;
+
+    /// <summary>The Checks note for a DLSS preset the NVIDIA App forces on DCS.</summary>
+    public static string DlssPresetNote(VrProfile profile, DlssPresetSetting forced)
+    {
+        var name = forced.Name == "latest" ? "the latest DLSS preset" : "DLSS preset " + forced.Name;
+        var option = profile.UsesPeripheryDlssPreset
+            ? "the Periphery DLSS preset you turned on lightens the periphery without changing NVIDIA settings."
+            : "the Periphery DLSS preset option (DLSS 5 page) can lighten the periphery without changing NVIDIA settings.";
+        return forced.Name == "M"
+            ? $"The NVIDIA App forces {name} for DCS. At Quad Views sizes, K costs about 0.6 ms less; {option}"
+            : $"The NVIDIA App forces {name} for DCS; {option}";
     }
 }

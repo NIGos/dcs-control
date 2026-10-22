@@ -87,7 +87,7 @@ try
             var inventory = new WindowsInventory().Capture(Option("--dcs"), Option("--options"));
             Console.WriteLine(service.ExportDiagnostic(inventory, new(), Option("--out") ?? "diagnostic.json")); break;
         }
-        case "nvidia": { var (threaded, mfaa) = NvidiaSettings.Fresh(); Console.WriteLine(JsonData.Serialize(new { threadedOptimization = threaded, mfaa })); break; }
+        case "nvidia": { var read = NvidiaSettings.Fresh(); Console.WriteLine(JsonData.Serialize(new { threadedOptimization = read.Threaded, mfaa = read.Mfaa, dlssPreset = read.DlssPreset })); break; }
         case "inspect-binary": Console.WriteLine(JsonData.Serialize(NativeBinary.Inspect(Option("--file") ?? throw new ArgumentException("--file required")))); break;
         case "launch":
         {

@@ -340,6 +340,7 @@ public static partial class Diagnostics
         catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or IOException) { builder.Append(e.Message).Append('\n'); }
         if (NvidiaSettings.ThreadedOptimizationForDcs() is { } threaded) builder.Append("NVIDIA Threaded optimization for DCS: ").Append(threaded.Value).Append(" (").Append(threaded.Where).Append(")\n");
         if (NvidiaSettings.MfaaForDcs() is { } mfaa) builder.Append("NVIDIA MFAA for DCS: ").Append(mfaa.On ? "On" : "Off").Append(" (").Append(mfaa.Where).Append(")\n");
+        if (NvidiaSettings.DlssPresetForDcs() is { } dlssPreset) builder.Append("NVIDIA DLSS-SR preset for DCS: ").Append(dlssPreset.Forced ? "forces " + dlssPreset.Name : "not forced").Append(dlssPreset.FromDcsProfile ? " (DCS program profile)" : " (base profile)").Append(dlssPreset.LatestDll is { } latest ? latest ? ", latest DLL on" : ", latest DLL off" : "").Append('\n');
         builder.Append(CultureInfo.InvariantCulture, $"Physical memory about {GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024 * 1024 * 1024.0):0} GB\n");
         return builder.ToString();
     }

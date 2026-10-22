@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "perception_shm.h"
+#include "dcsvr_drs_preset_filter.h"
 #include "dcsvr_pupil_fov.h"
 #include "pupil_math.hpp"
 #include "predictive_depth.hpp"
@@ -2119,6 +2120,31 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_GetInstanceProcAddr(XrInstance instance, con
     return result;
 }
 
+// [DlssPreset] IgnoreDriverPreset=1 (DCS Control's Periphery DLSS preset): the NVIDIA driver profile's forced DLSS-SR
+// preset (NVIDIA App > DLSS Override - Model presets) is hidden from DLSS inside this process only, so the engine
+// module's per-view presets ([DLSS] PeripheryPreset / FocusPreset in DcsQvCull.ini) apply. dcsvr_drs_preset_filter.h:
+// read-only, one setting id, DLSS callers only; nothing in the NVIDIA settings is written. DLSS reads the profile once,
+// at NGX init, long after the instance is created: installed here (never from DllMain), once per process, and only
+// when the key is set (the install pins this DLL for the rest of the process). The gate reads the key again at DLSS's
+// read, so a file changed before the renderer starts still counts.
+wchar_t drs_ini[1024]{};
+std::atomic<bool> drs_tried{};
+bool drs_gate(void*) { return GetPrivateProfileIntW(L"DlssPreset", L"IgnoreDriverPreset", 0, drs_ini) != 0; }
+void install_drs_filter() {
+    const std::wstring path = module_dir + L"PupilShift.ini";
+    if (GetPrivateProfileIntW(L"DlssPreset", L"IgnoreDriverPreset", 0, path.c_str()) == 0 || path.size() >= std::size(drs_ini)) return;
+    if (drs_tried.exchange(true)) return;
+    wcsncpy_s(drs_ini, path.c_str(), _TRUNCATE);
+    dcsvr_drs::Config cfg;
+    cfg.gate = &drs_gate;
+    const dcsvr_drs::InstallResult r = dcsvr_drs::Install(cfg);
+    log("dlss preset: driver preset filter %s (IgnoreDriverPreset=1)%s%s\n", dcsvr_drs::StatusText(r.status),
+        r.dlssLoadedAtInstall ? "; too late: DLSS is already loaded and has read the driver profile" :
+        r.ngxCoreLoadedAtInstall ? "; NGX is already loaded: possibly too late" : "",
+        r.status == dcsvr_drs::kInstalled ? "; DLSS gets no forced preset from the driver, nothing in the NVIDIA settings changes" :
+        r.status == dcsvr_drs::kOwnedByOtherModule ? "" : "; the driver's preset stays in force");
+}
+
 XRAPI_ATTR XrResult XRAPI_CALL hook_CreateApiLayerInstance(const XrInstanceCreateInfo* info, const XrApiLayerCreateInfo* layer_info,
     XrInstance* instance) {
     if (info == nullptr || layer_info == nullptr || layer_info->nextInfo == nullptr ||
@@ -2197,6 +2223,7 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_CreateApiLayerInstance(const XrInstanceCreat
         setup_eye_gaze(*instance, wanted, app_enabled || inject, !wanted ? (qv_export ? "the bundled Quad Views' export has the gaze" :
             "OpenXrEyeGaze=0 in PupilShift.ini") : refused ? "the runtime refused XR_EXT_eye_gaze_interaction" :
             !(app_enabled || inject) ? "the runtime does not offer XR_EXT_eye_gaze_interaction" : nullptr);
+        install_drs_filter();
     }
     return result;
 }

@@ -2509,6 +2509,41 @@ int main(int argc, char** argv) {
         CHECK(rs.jumps.size() >= rs1.jumps.size() && rs.jumps.size() >= 16, "sweep: lead 0.5 steps on most saccades of 20 deg and more", static_cast<double>(rs.jumps.size()), static_cast<double>(rs1.jumps.size()), -1);
     }
 
+    // [DlssPreset] IgnoreDriverPreset (Periphery DLSS preset): none of the scenarios above set the key, so nvapi64.dll's
+    // export is still NvAPI's own; with the key the layer installs the read-only DRS preset filter at xrCreateInstance
+    // and logs it. Last on purpose: the install is process-wide and pins that copy of the layer. Without an NVIDIA
+    // driver the layer logs that nvapi64.dll is not available and changes nothing.
+    {
+        const auto marked = [](FARPROC p) {
+            const auto* b = reinterpret_cast<const unsigned char*>(p);
+            return p && b[0] == 0xFF && b[1] == 0x25 && std::memcmp(b + 14, "DCSVRDRS", 8) == 0;
+        };
+        HMODULE nv = GetModuleHandleW(L"nvapi64.dll");
+        CHECK(!nv || !marked(GetProcAddress(nv, "nvapi_QueryInterface")), "DLSS preset: without the key the layer leaves nvapi64.dll alone", 0, 0, -1);
+        fake = Fake{};
+        const fs::path folder = out / "dlss_preset_filter";
+        fs::create_directories(folder);
+        const fs::path copy = folder / "XR_APILAYER_DCSVR_pupil_shift.dll";
+        fs::copy_file(dll, copy, fs::copy_options::overwrite_existing);
+        { std::ofstream f(folder / "PupilShift.ini", std::ios::binary); f << "[PupilShift]\r\nEnabled=0\r\nOpenXrEyeGaze=0\r\n[DepthBoost]\r\nEnabled=0\r\n[DlssPreset]\r\nIgnoreDriverPreset=1\r\n"; }
+        Layer layer;
+        if (!load_layer(copy, layer)) fail("DLSS preset: layer loads");
+        else {
+            CHECK(layer.destroy_instance(layer.instance) == XR_SUCCESS, "DLSS preset: xrDestroyInstance", 0, 0, -1);
+            std::ifstream log(folder / "PupilShift.log");
+            const std::string text((std::istreambuf_iterator<char>(log)), std::istreambuf_iterator<char>());
+            nv = GetModuleHandleW(L"nvapi64.dll");
+            if (nv) {
+                CHECK(text.find("dlss preset: driver preset filter installed (IgnoreDriverPreset=1); DLSS gets no forced preset") != std::string::npos, "DLSS preset: log says installed", 0, 0, -1);
+                CHECK(marked(GetProcAddress(nv, "nvapi_QueryInterface")), "DLSS preset: nvapi_QueryInterface now goes through the filter's thunk", 0, 0, -1);
+                std::printf("DLSS preset: the filter is installed in this process (nvapi64.dll present)\n");
+            } else {
+                CHECK(text.find("dlss preset: driver preset filter nvapi64.dll not available") != std::string::npos, "DLSS preset: log says no NVIDIA driver", 0, 0, -1);
+                std::printf("DLSS preset: no nvapi64.dll on this PC: the layer logged it and changed nothing\n");
+            }
+        }
+    }
+
     if (!failure_kinds.empty()) {
         std::printf("\nFailures by kind:\n");
         for (const auto& [kind, count] : failure_kinds) std::printf("%6d %s\n", count, kind.c_str());
