@@ -248,6 +248,7 @@ internal static class WebVerification
         GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 4090", "NVIDIA", "32.0.15.0")];
         NvidiaSettings.ThreadedOptimizationForDcs = () => new(ThreadedOptimization.Auto, false);
         NvidiaSettings.MfaaForDcs = () => new(false, false);
+        NvidiaSettings.DlssPresetForDcs = () => null;
         LaunchSafety.SteamRunning = () => true; // the fixture is the Steam edition; the build machine's Steam does not matter
         var update = UpdateFixture(Path.Combine(fixture, "updates"), service.StateRoot);
         var bridge = new WebBridge(service,capture: (_,_) => inventory,offline:true,flightSources:(_,_) => flight with { DcsLog = Path.Combine(logs, "dcs.log") },updates:update.Updates,releaseNotesPath:update.NotesPath);

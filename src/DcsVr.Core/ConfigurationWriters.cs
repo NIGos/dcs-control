@@ -66,6 +66,43 @@ public static class ConfigurationWriters
         PublishGaze=1
         """ : "";
 
+    /// <summary>PupilShift.ini with the Periphery DLSS preset (<see cref="VrProfile.UsesPeripheryDlssPreset"/>): the layer
+    /// hides the driver profile's forced DLSS preset from DLSS inside DCS. Written only then: off, the file stays as it was.</summary>
+    private static string DlssPresetLines(VrProfile p) => p.UsesPeripheryDlssPreset ? """
+
+
+        ; Periphery DLSS preset: the NVIDIA driver profile's forced DLSS preset is hidden from DLSS inside DCS only, so the
+        ; engine module's per-view presets apply (read-only: nothing in the NVIDIA settings changes). Needs a DCS restart.
+        [DlssPreset]
+        IgnoreDriverPreset=1
+        """ : "";
+
+    /// <summary>[PupilShift] OpenXrEyeGaze=0 when the layer runs only for the Periphery DLSS preset: it then needs no gaze,
+    /// so DCS's instance gets no eye gaze extension or action from it.</summary>
+    private static string LayerGazeOffLine(VrProfile p) => p.UsesPeripheryDlssPreset && !p.UsesPupilShift && !p.UsesDepthBoost && !p.UsesGazePublish ? """
+
+
+        ; The layer runs only for the Periphery DLSS preset: no eye gaze.
+        OpenXrEyeGaze=0
+        """ : "";
+
+    /// <summary>DcsQvCull.ini [DLSS] (engine module R122) with the Periphery DLSS preset: the periphery's preset, the
+    /// focus's (FocusDlssPreset's letter, else M: with the driver's preset hidden the focus needs one of its own) and
+    /// IgnoreDriverPreset. Written only then: off, the file stays as it was.</summary>
+    private static string DlssSection(VrProfile p) => p.UsesPeripheryDlssPreset ? $"""
+
+
+        ; Periphery DLSS preset (applies at the next mission load): a lighter preset outside the Quad Views focus, the focus
+        ; keeps its own. The pupil shift layer hides the driver profile's forced preset from DLSS (read-only).
+        [DLSS]
+        PeripheryPreset={p.PeripheryDlssPreset}
+        FocusPreset={FocusPresetLetter(p)}
+        IgnoreDriverPreset=1
+        """ : "";
+
+    /// <summary>[DLSS] FocusPreset: <see cref="VrProfile.FocusDlssPreset"/>'s letter (5 = E, 11 = K, 12 = L, 13 = M), else M.</summary>
+    public static string FocusPresetLetter(VrProfile p) => p.FocusDlssPreset is >= 1 and <= 26 ? ((char)('A' + p.FocusDlssPreset - 1)).ToString() : "M";
+
     /// <summary>[Color] Mode, written only while a color mode can run (a mode or its key is set): with everything off the
     /// file stays as it was before Visual realism existed.</summary>
     private static string ColorModeLine(VrProfile p) => p.UsesColorMode ? $"""
@@ -273,7 +310,7 @@ public static class ConfigurationWriters
         ; Depth boost's dual camera: the cockpit, its lighting and its displays at the true eye distance while the world
         ; is rendered boosted; the HUD stays at DCS's camera.
         CockpitTrueIpd={(p.UsesDepthBoost ? 1 : 0)}
-        CockpitTrueIpdOwnship={(p.UsesDepthBoost && p.OwnAircraftTrueDepth ? 2 : 0)}
+        CockpitTrueIpdOwnship={(p.UsesDepthBoost && p.OwnAircraftTrueDepth ? 2 : 0)}{DlssSection(p)}
 
         [Dev]
         ; Developer mode: a payload built elsewhere, hot-reloaded, and an ini that replaces this one. Empty: off.
@@ -351,7 +388,7 @@ public static class ConfigurationWriters
         ; Testing only: a fixed gaze instead of the eye tracker.
         SimulateGaze=0
         SimulateGazeXDeg=0
-        SimulateGazeYDeg=0{PublishGazeLines(p)}
+        SimulateGazeYDeg=0{PublishGazeLines(p)}{LayerGazeOffLine(p)}
 
         ; Depth boost: the eye distance above (Ipd, or the headset's) times a scale that rises while the eyes fixate far
         ; and returns to 1 when they fixate nearer than NearM (the cockpit). docs/PERCEPTION.md, docs/FIXATION_DEPTH.md.
@@ -385,7 +422,7 @@ public static class ConfigurationWriters
         PredictMaxStepMm=12
         PredictDisparityDeg=0.4
         PredictLeadFrames=0.5
-        PredictPollHz=500
+        PredictPollHz=500{DlssPresetLines(p)}
 
         """;
 

@@ -36,6 +36,7 @@ HeadsetRefresh.PimaxLogFolder = Path.Combine(root, "no-pimax-logs"); HeadsetRefr
 GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 4090", "NVIDIA", "32.0.15.0")]; // the verified pipeline's card, never the build machine's
 NvidiaSettings.ThreadedOptimizationForDcs = () => new(ThreadedOptimization.Auto, false); // nor its driver settings
 NvidiaSettings.MfaaForDcs = () => new(false, false);
+NvidiaSettings.DlssPresetForDcs = () => null; // no forced DLSS preset, whatever the build machine's NVIDIA App sets
 LaunchSafety.CurrentJob = () => default; // never the job object the test runner itself may run in
 DcsProcess.Provider = () => []; // never a DCS running on the build machine; the refusal tests set a fake one
 // A test that cannot run here calls Skip(reason) and returns: it is listed with its reason at the end of the run.
@@ -1542,6 +1543,82 @@ Test("Visual realism: the pupil shift layer publishes the gaze for eye-focus blu
     var withPupil = planner.Build(on with { PupilShift = true }, inventory, Path.Combine(root, "publish/managed-pupil"));
     Require((withPupil.Files.Single(f => f.Path.EndsWith("options.lua")).LuaChanges ?? []).Any(c => c.Path == "VR.custom_IPD_enable" && c.InstalledRaw == "false"), "with Pupil shift the layer still takes over DCS's IPD");
     Require(!planner.Build(vr with { GVision = true, GVisionUseGaze = false }, inventory, Path.Combine(root, "publish/managed-g")).Files.Any(f => f.Path.Contains("pupilshift")), "G vision straight ahead needs no layer");
+});
+Test("Periphery DLSS preset: [DLSS] and the layer's [DlssPreset] only while it runs, the focus preset fallback, and off every file as before", () =>
+{
+    var qv = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.Fixed, EngineOptimizations = true };
+    string Module(VrProfile p) => ConfigurationWriters.DcsQvCull(p).ReplaceLineEndings("\n");
+    string Layer(VrProfile p) => ConfigurationWriters.PupilShift(p).ReplaceLineEndings("\n");
+    // Off (the default), and set where it cannot run: the files exactly as without the setting.
+    Require(new VrProfile().PeripheryDlssPreset == PeripheryDlssPreset.Off && JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true}")!.PeripheryDlssPreset == PeripheryDlssPreset.Off, "off by default, also for an older profile");
+    var eyeQv = qv with { Gaze = GazeMode.EyeTracked };
+    foreach (var p in new[] { qv, eyeQv with { PupilShift = true }, eyeQv with { DepthBoost = true }, eyeQv with { GazeDof = true }, new VrProfile(), qv with { EngineDevMode = true }, qv with { FocusDlssPreset = 11 } })
+    {
+        Require(!p.UsesPeripheryDlssPreset && !Module(p).Contains("[DLSS]") && !Module(p).Contains("IgnoreDriverPreset") && !Layer(p).Contains("DlssPreset") && !Layer(p).Contains("OpenXrEyeGaze"), "off: no new keys");
+        foreach (var set in new[] { p with { PeripheryDlssPreset = PeripheryDlssPreset.E, EngineOptimizations = false }, p with { PeripheryDlssPreset = PeripheryDlssPreset.K, QuadViews = QuadProvider.PimaxNative }, p with { PeripheryDlssPreset = PeripheryDlssPreset.M, Desktop = true } })
+        {
+            var plain = set with { PeripheryDlssPreset = PeripheryDlssPreset.Off };
+            Require(!set.UsesPeripheryDlssPreset && Module(set) == Module(plain) && Layer(set) == Layer(plain) && set.UsesPerceptionLayer == plain.UsesPerceptionLayer && set.UsesEngineModule == plain.UsesEngineModule, "set but not running: byte-identical files, nothing more deployed");
+        }
+    }
+    // On: the module's three keys after [Perception]; with them removed, the file as before.
+    var on = qv with { PeripheryDlssPreset = PeripheryDlssPreset.E };
+    Require(on.UsesPeripheryDlssPreset && on.UsesPerceptionLayer && !on.UsesLayerEyeDistance && on.UsesEngineModule, "it runs, with the layer and the module");
+    const string intro = "\n\n; Periphery DLSS preset (applies at the next mission load): a lighter preset outside the Quad Views focus, the focus\n; keeps its own. The pupil shift layer hides the driver profile's forced preset from DLSS (read-only).\n[DLSS]\n";
+    string Block(string periphery, string focus) => intro + "PeripheryPreset=" + periphery + "\nFocusPreset=" + focus + "\nIgnoreDriverPreset=1";
+    Require(Module(on).Contains(Block("E", "M") + "\n\n[Dev]\n") && Module(on).Replace(Block("E", "M"), "") == Module(qv), "[DLSS] PeripheryPreset=E FocusPreset=M IgnoreDriverPreset=1, nothing else changed");
+    // FocusPreset: the Focus DLSS preset's letter, else M (always written: the driver's preset is hidden from DLSS).
+    foreach (var (focus, letter) in new[] { (0, "M"), (5, "E"), (11, "K"), (12, "L"), (13, "M") })
+        Require(Module(on with { FocusDlssPreset = focus }).Contains(Block("E", letter)) && ConfigurationWriters.FocusPresetLetter(on with { FocusDlssPreset = focus }) == letter, $"focus preset {focus}: {letter}");
+    foreach (var preset in new[] { PeripheryDlssPreset.F, PeripheryDlssPreset.K, PeripheryDlssPreset.M })
+        Require(Module(on with { PeripheryDlssPreset = preset }).Contains(Block(preset.ToString(), "M")), "periphery " + preset);
+    // The layer: [DlssPreset] IgnoreDriverPreset=1 at the end; alone it needs no eye gaze ([PupilShift] OpenXrEyeGaze=0).
+    const string layerBlock = "\n\n; Periphery DLSS preset: the NVIDIA driver profile's forced DLSS preset is hidden from DLSS inside DCS only, so the\n; engine module's per-view presets apply (read-only: nothing in the NVIDIA settings changes). Needs a DCS restart.\n[DlssPreset]\nIgnoreDriverPreset=1";
+    const string gazeOff = "\n\n; The layer runs only for the Periphery DLSS preset: no eye gaze.\nOpenXrEyeGaze=0";
+    var layerOn = Layer(on);
+    Require(layerOn.EndsWith(layerBlock + "\n", StringComparison.Ordinal) && layerOn.Contains("SimulateGazeYDeg=0" + gazeOff + "\n\n; Depth boost") && layerOn.Contains("[PupilShift]\nEnabled=0\n") && layerOn.Contains("[DepthBoost]\nEnabled=0\n"), "layer: [DlssPreset] and no gaze, Pupil shift and Depth boost off");
+    Require(layerOn.Replace(layerBlock, "").Replace(gazeOff, "") == Layer(qv), "layer: nothing else changed");
+    var withPupil = on with { Gaze = GazeMode.EyeTracked, PupilShift = true };
+    Require(Layer(withPupil).Contains(layerBlock) && !Layer(withPupil).Contains("OpenXrEyeGaze") && Layer(withPupil).Replace(layerBlock, "") == Layer(withPupil with { PeripheryDlssPreset = PeripheryDlssPreset.Off }), "with Pupil shift the layer keeps its gaze");
+    // Deployment: the layer first (even with Pupil shift and Depth boost off), the module with [DLSS]; off: no layer.
+    var exe = Make("periphery/game/bin/DCS.exe", "fixture"); var runtime = Make("periphery/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("periphery/runtime.dll", "fixture");
+    var engine = Path.GetDirectoryName(Make("periphery/components/dcsqvcull/DcsQvCull.dll", "loader"))!;
+    Make("periphery/components/dcsqvcull/DcsQvCullPayload.dll", "payload"); Make("periphery/components/dcsqvcull/DcsQvCull.lua", "-- hook");
+    var planner = new DeploymentPlanner(new(null, null, null, Path.Combine(workspace, "external/quadviews/bin/x64/Release"), PupilShiftDll: Make("periphery/components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll", "layer"), EngineDirectory: engine));
+    var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = Make("periphery/sg/DCS/Config/options.lua", "options = {\n\t[\"VR\"] = {\n\t\t[\"enable\"] = true,\n\t},\n}\n"), PimaxRuntime = runtime };
+    var plan = planner.Build(on, inventory, Path.Combine(root, "periphery/managed"));
+    var planIni = Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("PupilShift.ini")).Content).ReplaceLineEndings("\n");
+    var planModule = Encoding.Unicode.GetString(plan.Files.Single(f => f.Path.EndsWith("DcsQvCull.ini")).Content.AsSpan(2)).ReplaceLineEndings("\n");
+    Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"].Split(';')[0] == "XR_APILAYER_DCSVR_pupil_shift" && planIni.Contains("[DlssPreset]\nIgnoreDriverPreset=1\n") && planModule.Contains(Block("E", "M")), "layer deployed first with the key, module with [DLSS]");
+    Require(!(plan.Files.SingleOrDefault(f => f.Path.EndsWith("options.lua"))?.LuaChanges ?? []).Any(c => c.Path.StartsWith("graphics.") || c.Path.StartsWith("VR.custom_IPD")), "DCS's Upscaling and IPD left alone");
+    var offPlan = planner.Build(qv, inventory, Path.Combine(root, "periphery/managed-off"));
+    Require(!offPlan.Files.Any(f => f.Path.Contains("pupilshift")) && !offPlan.LaunchEnvironment["XR_ENABLE_API_LAYERS"].Contains("pupil_shift"), "off: no layer");
+    // Validation: what it needs, DCS's DLSS, and a value that is not a preset.
+    bool Has(VrProfile p, string code, InventorySnapshot? inv = null) => ProfileValidation.Validate(p, inv).Any(i => i.Code == code);
+    Require(Has(on with { EngineOptimizations = false }, "periphery-preset-needs") && Has(on with { QuadViews = QuadProvider.PimaxNative }, "periphery-preset-needs") && !Has(on, "periphery-preset-needs") && !Has(on with { Desktop = true }, "periphery-preset-needs"), "needs Quad Views-Foveated and Engine Optimizations");
+    Require(ProfileValidation.Validate(on with { PeripheryDlssPreset = (PeripheryDlssPreset)9 }).Any(i => i.Code == "periphery-preset" && i.Severity == IssueSeverity.Error) && !(on with { PeripheryDlssPreset = (PeripheryDlssPreset)9 }).UsesPeripheryDlssPreset, "not a preset: refused");
+    InventorySnapshot With(string? upscaling) => inventory with { DcsSettings = upscaling is null ? new Dictionary<string, string>() : new Dictionary<string, string> { ["graphics.Upscaling"] = upscaling } };
+    Require(Has(on, "periphery-preset-dlss", With("\"TAA\"")) && !Has(on, "periphery-preset-dlss", With("\"DLSS\"")) && !Has(on, "periphery-preset-dlss", With(null)), "warned only when DCS's Upscaling is known not to be DLSS");
+    // The Checks note through the seam: a forced preset, DLSS in use, VR.
+    var previous = NvidiaSettings.DlssPresetForDcs;
+    try
+    {
+        NvidiaSettings.DlssPresetForDcs = () => new(13, true, true);
+        var note = ProfileValidation.Validate(qv, With("\"DLSS\"")).SingleOrDefault(i => i.Code == "nvidia-dlss-preset");
+        Require(note is { Severity: IssueSeverity.Info } && note.Message == "The NVIDIA App forces DLSS preset M for DCS. At Quad Views sizes, K costs about 0.6 ms less; the Periphery DLSS preset option (DLSS 5 page) can lighten the periphery without changing NVIDIA settings.", note?.Message ?? "no note");
+        Require(ProfileValidation.Validate(on, With("\"DLSS\"")).Single(i => i.Code == "nvidia-dlss-preset").Message.EndsWith("the Periphery DLSS preset you turned on lightens the periphery without changing NVIDIA settings.", StringComparison.Ordinal), "with the option on");
+        Require(!Has(qv, "nvidia-dlss-preset", With("\"TAA\"")) && !Has(qv, "nvidia-dlss-preset", With(null)) && !Has(qv with { Desktop = true }, "nvidia-dlss-preset", With("\"DLSS\"")) && !Has(qv, "nvidia-dlss-preset"), "only while DCS uses DLSS in VR");
+        Require(Has(qv with { NeuralRendering = true }, "nvidia-dlss-preset", With(null)), "DLSS 5 sets DCS's DLSS itself");
+        foreach (var notForced in new DlssPresetSetting?[] { new(DlssPresetSetting.Off, true), new(DlssPresetSetting.Default, false), null })
+        {
+            NvidiaSettings.DlssPresetForDcs = () => notForced;
+            Require(!Has(qv, "nvidia-dlss-preset", With("\"DLSS\"")), "no note when nothing is forced: " + notForced);
+        }
+        NvidiaSettings.DlssPresetForDcs = () => new(11, false);
+        Require(ProfileValidation.Validate(qv, With("\"DLSS\"")).Single(i => i.Code == "nvidia-dlss-preset").Message == "The NVIDIA App forces DLSS preset K for DCS; the Periphery DLSS preset option (DLSS 5 page) can lighten the periphery without changing NVIDIA settings.", "K: no cost sentence");
+        Require(new DlssPresetSetting(5, true).Name == "E" && new DlssPresetSetting(DlssPresetSetting.Latest, true) is { Name: "latest", Forced: true } && !new DlssPresetSetting(DlssPresetSetting.Default, true).Forced, "names");
+    }
+    finally { NvidiaSettings.DlssPresetForDcs = previous; }
 });
 Test("Visual realism: an older profile loads unchanged, the settings round-trip, and out-of-range values are refused", () =>
 {
@@ -4128,6 +4205,9 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         eye with { QuadViewsLayerDirectory = @"C:\qv" }, eye with { Desktop = true, DepthBoost = true, GazeDof = true },
         new() { FrameGen = FrameGeneration.Nvidia }, new() { FrameGen = FrameGeneration.FidelityFx, FrameGenFactor = 3 }, new() { FrameGen = FrameGeneration.Nvidia, FrameGenFactor = 2 },
         new() { FrameGen = FrameGeneration.Nvidia, FrameGenAdaptiveCadence = false }, new() { FrameGen = FrameGeneration.Nvidia, Desktop = true }, new() { FrameGenAdaptiveCadence = true },
+        eye with { PeripheryDlssPreset = PeripheryDlssPreset.E, EngineOptimizations = true }, new() { QuadViews = QuadProvider.QuadViewsFoveated, PeripheryDlssPreset = PeripheryDlssPreset.K, EngineOptimizations = true },
+        new() { QuadViews = QuadProvider.PimaxNative, PeripheryDlssPreset = PeripheryDlssPreset.M, EngineOptimizations = true }, new() { QuadViews = QuadProvider.QuadViewsFoveated, PeripheryDlssPreset = PeripheryDlssPreset.E },
+        new() { Desktop = true, QuadViews = QuadProvider.QuadViewsFoveated, PeripheryDlssPreset = PeripheryDlssPreset.F, EngineOptimizations = true }, eye with { QuadViewsLayerDirectory = @"C:\qv", PeripheryDlssPreset = PeripheryDlssPreset.E, EngineOptimizations = true },
     ];
     var dir = PathPolicy.UnderRoot(root, "uses-rules"); Directory.CreateDirectory(dir);
     var profiles = Path.Combine(dir, "profiles.json"); File.WriteAllText(profiles, "[" + string.Join(",", table.Select(JsonData.Serialize)) + "]");
@@ -4143,7 +4223,7 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
           const p = JSON.parse(JSON.stringify(p0)), r = resolveFeatures(JSON.parse(JSON.stringify(p0)));
           return {eyeTrackedVr:eyeTrackedVr(p), usesPupilShift:usesPupilShift(p), usesDepthBoost:usesDepthBoost(p), usesPerceptionLayer:Boolean(usesPerceptionLayer(p)),
             usesColorKey:usesColorKey(p), colorOn:Boolean(colorOn(p)), usesGazeDof:usesGazeDof(p), gVisionOn:gVisionOn(p), usesVisualRealism:Boolean(usesVisualRealism(p)),
-            usesGazePublish:Boolean(usesGazePublish(p)), foveatedSr:foveatedSr(p), dlss:featureState(p).dlss, stereoCheeky:stereoCheeky(p), quad:Boolean(quad(p)),
+            usesGazePublish:Boolean(usesGazePublish(p)), usesPeripheryDlssPreset:usesPeripheryDlssPreset(p), foveatedSr:foveatedSr(p), dlss:featureState(p).dlss, stereoCheeky:stereoCheeky(p), quad:Boolean(quad(p)),
             nativeAllowed:Boolean(nativeAllowed(p)), depthMax:depthMax(p), usesAdaptiveCadence:usesAdaptiveCadence(p), capDivider:capDivider(p), resolvedFoveatedDlss:Boolean(r.foveatedDlss), resolvedQuadViews:r.quadViews, resolvedQuadFocusAdapter:r.quadFocusAdapter};
         })`, {profiles});
         process.stdout.write(JSON.stringify(result));
@@ -4171,7 +4251,7 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         {
             ["eyeTrackedVr"] = p.UsesEyeTrackedVr, ["usesPupilShift"] = p.UsesPupilShift, ["usesDepthBoost"] = p.UsesDepthBoost, ["usesPerceptionLayer"] = p.UsesPerceptionLayer,
             ["usesColorKey"] = p.UsesColorModeKey, ["colorOn"] = p.UsesColorMode, ["usesGazeDof"] = p.UsesGazeDof, ["gVisionOn"] = p.UsesGVision, ["usesVisualRealism"] = p.UsesVisualRealism,
-            ["usesGazePublish"] = p.UsesGazePublish, ["foveatedSr"] = p.UsesFoveatedDlss, ["dlss"] = p.UsesCheeky, ["stereoCheeky"] = p.UsesCheeky && p.QuadViews == QuadProvider.None,
+            ["usesGazePublish"] = p.UsesGazePublish, ["usesPeripheryDlssPreset"] = p.UsesPeripheryDlssPreset, ["foveatedSr"] = p.UsesFoveatedDlss, ["dlss"] = p.UsesCheeky, ["stereoCheeky"] = p.UsesCheeky && p.QuadViews == QuadProvider.None,
             ["quad"] = p.UsesBundledQuadViews, ["nativeAllowed"] = ProfileValidation.ResolveFeatures(p with { QuadViews = QuadProvider.PimaxNative }).QuadViews == QuadProvider.PimaxNative,
             ["depthMax"] = p.DepthBoostActiveMax, ["usesAdaptiveCadence"] = p.UsesAdaptiveCadence, ["capDivider"] = (double)FramePacing.CapDivider(p), ["resolvedFoveatedDlss"] = resolved.FoveatedDlss, ["resolvedQuadViews"] = resolved.QuadViews.ToString(), ["resolvedQuadFocusAdapter"] = resolved.QuadFocusAdapter,
         };

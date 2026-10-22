@@ -12,6 +12,8 @@ public enum NeuralDepthMode { Game, Normal, Reversed }
 /// <summary>DLSS-NR model style (DLSSNR.Style 0..2), the same three modes RenoDX's DLSS 5 add-on offers.</summary>
 public enum NeuralStyle { Standard, Natural, Cinematic }
 public enum NvidiaFlowPreset { Fast, Medium, Slow }
+/// <summary>The DLSS preset of the Quad Views periphery (<see cref="VrProfile.PeripheryDlssPreset"/>); Off keeps DCS's.</summary>
+public enum PeripheryDlssPreset { Off, E, F, K, M }
 public enum FpsLimitMode { Preserve, RuntimeHeadroom, MatchRefresh, Custom }
 public enum IssueSeverity { Info, Warning, Error }
 /// <summary>Depth boost's curve from the distance looked at to the eye-distance scale (docs/FIXATION_DEPTH.md, "Modes").
@@ -152,6 +154,15 @@ public sealed record VrProfile
     /// 12 = L, 13 = M. The periphery keeps DCS's preset either way.</summary>
     public int FocusDlssPreset { get; init; }
     public static IReadOnlyList<int> FocusDlssPresets { get; } = [0, 5, 11, 12, 13];
+    /// <summary>A lighter DLSS preset for the Quad Views periphery (the engine module's [DLSS] PeripheryPreset, R122):
+    /// the focus keeps M, or <see cref="FocusDlssPreset"/> when one is set ([DLSS] FocusPreset). With it the pupil shift
+    /// layer hides the NVIDIA driver profile's forced preset from DLSS inside DCS ([DlssPreset] IgnoreDriverPreset):
+    /// read-only, nothing in the NVIDIA settings changes. Applies at the next mission load. Off by default.</summary>
+    public PeripheryDlssPreset PeripheryDlssPreset { get; init; }
+    /// <summary>It runs: a VR flight with Quad Views-Foveated (the module tells periphery from focus by its view sizes)
+    /// and Engine Optimizations (the per-view preset is one of the module's engine features, not in its Perception-only
+    /// mode). It does something only while DCS upscales with DLSS (ProfileValidation says so otherwise).</summary>
+    public bool UsesPeripheryDlssPreset => PeripheryDlssPreset != PeripheryDlssPreset.Off && Enum.IsDefined(PeripheryDlssPreset) && !Desktop && QuadViews == QuadProvider.QuadViewsFoveated && EngineOptimizations;
     public static IReadOnlyList<int> NeuralAreas { get; } = [100, 90, 80, 70, 50];
     /// <summary>Cheeky NrTransitionWidth for a central DLSS 5 area: the fade from DLSS 5 to the plain DLSS image spans
     /// half of this fraction of the focus view on each side (6%), independent of the area size.</summary>
@@ -393,8 +404,9 @@ public sealed record VrProfile
     /// <summary>Depth boost runs: like Pupil shift, only for a VR flight with eye-tracked Quad Views.</summary>
     public bool UsesDepthBoost => DepthBoost && !Desktop && QuadViews != QuadProvider.None && Gaze == GazeMode.EyeTracked;
     /// <summary>The pupil shift layer (it carries Pupil shift and Depth boost, and publishes the gaze for Visual realism)
-    /// is deployed when any of them runs.</summary>
-    public bool UsesPerceptionLayer => UsesPupilShift || UsesDepthBoost || UsesGazePublish;
+    /// is deployed when any of them runs, and for the Periphery DLSS preset (it hides the driver's forced preset from
+    /// DLSS: it loads before DCS starts its renderer, the engine module only after).</summary>
+    public bool UsesPerceptionLayer => UsesPupilShift || UsesDepthBoost || UsesGazePublish || UsesPeripheryDlssPreset;
     /// <summary>The layer moves the eyes (Pupil shift or Depth boost), so it takes over DCS's custom IPD. Publishing the
     /// gaze alone moves nothing and leaves DCS's IPD as it is.</summary>
     public bool UsesLayerEyeDistance => UsesPupilShift || UsesDepthBoost;
