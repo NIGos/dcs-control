@@ -35,8 +35,14 @@ try {
     if (-not (Test-NativeTestsCurrent $build $testFingerprint)) {
         $testRun = Join-Path $build 'test-run'
         if (Test-Path -LiteralPath $testRun) { Get-ChildItem -LiteralPath $testRun -Force | Remove-Item -Recurse -Force }
-        & $wrapper ctest --test-dir $build --output-on-failure
-        if ($LASTEXITCODE -ne 0) { throw 'DcsQvCull tests failed.' }
+        # The whole run is kept next to the build, so an intermittent failure can be read afterwards.
+        $testLog = Join-Path $build 'ctest-last.log'
+        & $wrapper ctest --test-dir $build --output-on-failure 2>&1 | Tee-Object -FilePath $testLog
+        $testExit = $LASTEXITCODE
+        if ($testExit -ne 0) {
+            Copy-Item -LiteralPath $testLog -Destination (Join-Path $build ('ctest-failed-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log')) -Force
+            throw "DcsQvCull tests failed (full output: $testLog)."
+        }
         Save-NativeTestsPassed $build $testFingerprint
     }
 } finally {
