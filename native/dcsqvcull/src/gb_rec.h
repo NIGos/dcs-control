@@ -131,7 +131,13 @@
 // stock runs differ are DCS's own variation (R127 germany: execution #0's
 // motion vectors) and do not count. A difference elsewhere is unexplained;
 // unexplained differences in 3 consecutive compares of one execution latch
-// the recorder off (GBufferRecVerifyNoLatch=1: never). While verifying, the immediate state is read before and after
+// the recorder off (GBufferRecVerifyNoLatch=1: never). R133: a second stock
+// control C2 runs after the recorded run (A, C1, B, C2, the mask built after
+// all four, no readback between the runs); a texel counts as unexplained only
+// when B matches none of A, C1, C2 (R131's burst onset: B equal to the later
+// C2, a DCS input that changed between C1 and B, not a recorder difference).
+// [Suite] GBufferRecVerifyDump=N writes the runs of N failing compares (R133).
+// While verifying, the immediate state is read before and after
 // each ExecuteCommandList and must be equal (R18 T9). [Suite]
 // GBufferRecVerifyStride=N forces every N-th recordable draw residual and the
 // island to N-1 (R18 T10).
@@ -3495,6 +3501,10 @@ struct Stat {
   // highest).
   std::atomic<uint64_t> verifyCtl{0}, verifyCtlBad{0}, verifyCtlPixels{0}, verifyAbRaw{0}, verifyRawTexels{0},
       verifyInStock{0}, verifyNeither{0}, verifyRun{0}, verifyRunMax{0};
+  // R133: compares with the second stock control C2 after the recorded run (bracketed), C2 runs that could not be
+  // used (other views, a copy failed), texels where B equalled only C2 (a later DCS state), compares with R131's
+  // onset signature (C1 equal to A, B different, all of it equal to C2), dumps written.
+  std::atomic<uint64_t> verifyBracket{0}, verifyC2Failed{0}, verifyLater{0}, verifyOnset{0}, verifyDumps{0};
 };
 
 struct Slot {
@@ -4837,6 +4847,62 @@ inline bool VerifyLatchStep(uint64_t& run, int64_t unexplained) {
 }
 const char* g_verifyWhy = nullptr;  // why the last capture failed
 std::atomic<bool> g_verifyNoLatch{false};  // [Suite] GBufferRecVerifyNoLatch (test only): log differences, stay on
+// R133 ([Suite] GBufferRecVerifyDump=N, GBufferRecVerifyDumpAll, test only): the runs of the first N stock vs recorded
+// compares with unexplained texels (DumpAll=1: with any difference) as raw files (gbverify::DumpCompare) under
+// <log folder>\gbverify_dump\<date-time>_<sequence>_<execution>\, cropped to the differing box plus 16 texels. The
+// worker sets the folder and a new N (re)arms the count. Verify mode only; the render thread writes the files (a
+// few MB per compare, at most N compares).
+std::atomic<int> g_verifyDumpLeft{0};
+std::atomic<bool> g_verifyDumpAll{false};
+std::wstring g_verifyDumpDir;  // ends with a backslash; written by the worker before arming, read on the render thread
+std::mutex g_verifyDumpMutex;
+uint32_t g_verifyDumpSeq = 0;
+void ArmVerifyDump(int n, bool all, const std::wstring& logDir) {
+  static int last = 0;
+  g_verifyDumpAll = all;
+  if (n == last) return;
+  last = n;
+  {
+    std::lock_guard<std::mutex> lock(g_verifyDumpMutex);
+    g_verifyDumpDir = logDir.empty() ? std::wstring() : logDir + L"gbverify_dump\\";
+  }
+  g_verifyDumpLeft = (std::max)(0, (std::min)(n, 64));
+}
+bool VerifyDump(const char* name, int64_t total, int64_t counted, const std::string& per, const std::string& cls,
+                bool control) {
+  if (g_verifyDumpLeft.load(std::memory_order_relaxed) <= 0) return false;
+  if (total <= 0 || (counted <= 0 && !g_verifyDumpAll.load(std::memory_order_relaxed))) return false;
+  std::wstring base;
+  {
+    std::lock_guard<std::mutex> lock(g_verifyDumpMutex);
+    base = g_verifyDumpDir;
+  }
+  if (base.empty()) return false;
+  g_verifyDumpLeft--;
+  SYSTEMTIME t;
+  GetLocalTime(&t);
+  wchar_t sub[96];
+  std::wstring exec;
+  for (const char* q = name; *q; ++q) exec += (*q == '#' || *q == ' ' || *q == ':') ? L'_' : static_cast<wchar_t>(*q);
+  swprintf(sub, 96, L"%04u%02u%02u_%02u%02u%02u_%03u_%03u_", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond,
+           t.wMilliseconds, ++g_verifyDumpSeq);
+  const std::wstring dir = base + sub + exec + L"\\";
+  char head[1024];
+  snprintf(head, sizeof(head),
+           "gbuffer recorder verify dump (R133)\nexecution %s\ndiffering %lld, unexplained %lld\ntargets %s\nclass %s\n"
+           "box %d,%d..%d,%d (crop: plus 16 texels)\nruns: A = first stock run, C1 = stock control before the recorded "
+           "run, B = recorded run, C2 = stock control after it\n",
+           name, static_cast<long long>(total), static_cast<long long>(counted), per.c_str(),
+           cls.empty() ? "-" : cls.c_str() + 2, gbverify::g_badBox[0], gbverify::g_badBox[1], gbverify::g_badBox[2],
+           gbverify::g_badBox[3]);
+  const int box[4] = {gbverify::g_badBox[0] - 16, gbverify::g_badBox[1] - 16, gbverify::g_badBox[2] + 16,
+                      gbverify::g_badBox[3] + 16};
+  const int files = gbverify::DumpCompare(dir, head, box, control);
+  std::string d8;
+  for (wchar_t c : dir) d8 += c < 128 ? static_cast<char>(c) : '?';
+  Log("gbuffer recorder verify: dump %s: %d files in %s", files > 0 ? "written" : "FAILED", files, d8.c_str());
+  return files > 0;
+}
 void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** vec) {
   Stat& st = g_slot[pc.slot].st;
   const bool aa = st.aaClean.load() < kAaPasses;
@@ -4883,6 +4949,8 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
   // R129: the same-frame stock control (stock vs recorded compares without the ownship mask). Its mask: the pixels
   // where it differs from A. Unusable (no mask, every difference counts as before) with MSAA targets or when the
   // control run did not draw into the same views.
+  // R133: the mask is built after the recorded run and the second control (below), so that no readback stall sits
+  // between the runs (R131: B always ran last and after BuildMask's wait for the GPU).
   bool control = false;
   if (!aa && !own2) {
     PassCtx c;
@@ -4891,22 +4959,8 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
     c.verify = 2;
     c.probesLeft = 0;
     RunPass(c, pass, ctx, orig, vec);
-    if (c.sameViews && gbverify::CopyAllMask()) {
-      gbverify::CopyAll(false, false);  // init back again
-      control = gbverify::BuildMask();
-    } else {
-      gbverify::CopyAll(false, false);
-    }
-    if (control) {
-      uint64_t px = 0;
-      for (uint8_t v : gbverify::g_mask) px += v;
-      st.verifyCtl++;
-      if (px) {
-        st.verifyCtlBad++;
-        st.verifyCtlPixels += px;
-      }
-      masked = true;
-    }
+    control = c.sameViews && gbverify::CopyAllMask();
+    gbverify::CopyAll(false, false);  // init back again
   }
   PassCtx b;
   if (aa) {
@@ -4922,23 +4976,56 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
   bool executed = false;
   if (!aa && b.state == kPsLive)
     for (uint32_t k = 0; k < b.job->segCount; ++k) executed |= b.segDone[k] != 0;
+  // R133: the bracketed control. R131's burst onset: C1 equal to A, B different (RT5 only), and later B equal to C1
+  // where C1 differs from A, i.e. B behaved like a stock run made later than C1. A stock run after B (C2, from the
+  // same init) tells a later DCS state (B equals C2) from a recorder difference (B equals no stock run).
+  bool bracket = false;
+  if (b.sameViews && (aa || executed) && control) {
+    if (gbverify::CopyAllTo(&gbverify::Target::b)) {  // B
+      gbverify::CopyAll(false, false);                 // init back once more
+      PassCtx c2;
+      c2.slot = pc.slot;
+      c2.state = kPsStockRun;
+      c2.verify = 2;
+      c2.probesLeft = 0;
+      RunPass(c2, pass, ctx, orig, vec);  // the targets keep C2's output (a stock run of this execution)
+      bracket = c2.sameViews && gbverify::CopyAllTo(&gbverify::Target::c2);
+      gbverify::g_bracket = true;  // B is in .b now (C2 compared only when bracket)
+      if (!bracket) st.verifyC2Failed++;
+    }
+    control = gbverify::BuildMask(bracket);
+    if (control) {
+      uint64_t px = 0;
+      for (uint8_t v : gbverify::g_mask) px += v;
+      st.verifyCtl++;
+      if (px) {
+        st.verifyCtlBad++;
+        st.verifyCtlPixels += px;
+      }
+      if (bracket) st.verifyBracket++;
+      masked = true;
+    }
+  }
   if (!b.sameViews || (!aa && !executed)) {
     st.verifySkipped++;
   } else {
-    gbverify::CopyAll(true, false);  // B
+    if (!gbverify::g_bracket) gbverify::CopyAll(true, false);  // B (into .init)
     int64_t bad[gbverify::kMaxTargets];
     uint64_t texels = 0;
     gbverify::g_badBox[0] = gbverify::g_badBox[1] = 1 << 30;
     gbverify::g_badBox[2] = gbverify::g_badBox[3] = -1;
     gbverify::g_maskOn = masked;
     gbverify::g_maskControl = control;
+    gbverify::g_c2Valid = bracket;
     const int64_t total = gbverify::CompareGuarded(bad, &texels);
     gbverify::g_maskOn = false;
     gbverify::g_maskControl = false;
     // Non-ownship differences: all of them without a mask; with one, the staging texels outside it plus every
     // difference the mask cannot classify (MSAA samples).
     const int64_t inMask = masked ? gbverify::g_badIn : 0;
-    const int64_t counted = total < 0 ? total : total - inMask;
+    // R133: with the stock control, a texel counts when B matches no stock run (A, C1, and C2 when bracketed); the
+    // texels inside stock's own variation where B matched neither (R129: not counted) now count too.
+    const int64_t counted = total < 0 ? total : control ? gbverify::g_badNoStock : total - inMask;
     if (masked && !control && total >= 0) {
       g_ownMaskIn += static_cast<uint64_t>(inMask);
       g_ownMaskOut += static_cast<uint64_t>(counted);
@@ -4950,6 +5037,8 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
       if (control) {
         st.verifyInStock += static_cast<uint64_t>(inMask);
         st.verifyNeither += static_cast<uint64_t>(gbverify::g_badNeither);
+        st.verifyLater += static_cast<uint64_t>(gbverify::g_badLater);
+        if (gbverify::g_badLater == total) st.verifyOnset++;  // R131's onset signature: B equal to C2 alone, all of it
       }
     }
     if (total < 0) {
@@ -4980,7 +5069,9 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
         std::string cls;
         if (control)
           cls = "; inside stock's own variation " + std::to_string(inMask) + " (matching neither stock run " +
-                std::to_string(gbverify::g_badNeither) + "), unexplained " + std::to_string(counted);
+                std::to_string(gbverify::g_badNeither) + (bracket ? "; equal to the later stock control C2 only " +
+                std::to_string(gbverify::g_badLater) : std::string("; no second control")) + "), unexplained " +
+                std::to_string(counted);
         else if (masked)
           cls = "; ownship texels " + std::to_string(inMask) + ", other " + std::to_string(counted);
         else if (!aa)
@@ -4989,6 +5080,7 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
             aa ? "stock vs stock" : "stock vs recorded", static_cast<long long>(total),
             static_cast<unsigned long long>(texels), per.c_str(), gbverify::g_badBox[0], gbverify::g_badBox[1],
             gbverify::g_badBox[2], gbverify::g_badBox[3], cls.c_str());
+        if (!aa && VerifyDump(name, total, counted, per, cls, control)) st.verifyDumps++;
       }
       if (counted > 0) {
         (aa ? st.verifyAaBad : st.verifyAbBad)++;
@@ -5014,6 +5106,8 @@ void VerifyPass(PassCtx& pc, void* pass, void* ctx, gbpass::ExecFn orig, void** 
     Disable("the immediate context's state differs after ExecuteCommandList(TRUE)");
   }
   if (!aa) st.verifyExecs++;
+  gbverify::g_bracket = false;
+  gbverify::g_c2Valid = false;
   gbverify::ReleaseViews();
   if (aa) {
     pc.state = kPsStock;
@@ -6124,6 +6218,7 @@ void ResetCounters() {
     s.verifySkipped = s.verifyErrors = s.verifyStateBad = s.verifyExecs = 0;
     s.verifyCtl = s.verifyCtlBad = s.verifyCtlPixels = s.verifyAbRaw = s.verifyRawTexels = 0;
     s.verifyInStock = s.verifyNeither = s.verifyRun = s.verifyRunMax = 0;
+    s.verifyBracket = s.verifyC2Failed = s.verifyLater = s.verifyOnset = s.verifyDumps = 0;
   }
   g_probes = g_probeOdd = g_probePool = g_probeWants = 0;
   for (auto& a : g_probeSkip) a = 0;
@@ -6327,6 +6422,16 @@ void LogCounters(const char* label, double frames) {
           static_cast<unsigned long long>(st.verifyNeither.load()),
           static_cast<unsigned long long>(st.verifyRunMax.load()), static_cast<unsigned long long>(kLatchRun),
           g_verifyNoLatch.load() ? ", off: GBufferRecVerifyNoLatch" : "");
+    // R133: the second stock control after the recorded run.
+    if (st.verifyBracket.load() || st.verifyC2Failed.load())
+      Log("  gbuffer recorder %s %s verify bracket: second stock control after the recorded run %llu (%llu not "
+          "usable); texels equal to it only (a later DCS state) %llu; compares that were all of that kind %llu; "
+          "dumps %llu",
+          label, name, static_cast<unsigned long long>(st.verifyBracket.load()),
+          static_cast<unsigned long long>(st.verifyC2Failed.load()),
+          static_cast<unsigned long long>(st.verifyLater.load()),
+          static_cast<unsigned long long>(st.verifyOnset.load()),
+          static_cast<unsigned long long>(st.verifyDumps.load()));
   }
   if (!gbverify::g_lastFormats.empty() && (g_verify.load() || g_slot[0].st.verifyAb.load()))
     Log("  gbuffer recorder %s verify: last captured targets: %s", label, gbverify::g_lastFormats.c_str());

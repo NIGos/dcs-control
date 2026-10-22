@@ -235,7 +235,8 @@ DWORD WINAPI WorkerThread(void*) {
         // R122 per-view DLSS preset (opt-in, default 0: nothing installed). The kill switch makes its hook pass
         // through; the features DCS creates at the next mission load get DCS's own hint again.
         dlssv::Tick(dlssv::ParsePreset(g_cfg.dlssPeripheryPreset.c_str()), dlssv::ParsePreset(g_cfg.dlssFocusPreset.c_str()),
-                    g_cfg.dlssIgnoreDriverPreset, g_engineOff.load(), g_cfg.dlssInstrument);  // R130: + Instrument
+                    g_cfg.dlssIgnoreDriverPreset, g_engineOff.load(), g_cfg.dlssInstrument,  // R130: + Instrument
+                    g_cfg.dlssReleaseIdleSets, g_cfg.dlssReleaseAfterEvals);  // R132: + ReleaseIdleSets
         // R123 focus twin (opt-in, default 0: nothing installed). The kill switch / a benchmark / key 0 take it out.
         if (g_cfg.focusTwin || ftwin::g_state.load() == 1) {
           ftwin::g_shadowKey = g_cfg.suiteFocusTwinShadow;
@@ -257,6 +258,7 @@ DWORD WINAPI WorkerThread(void*) {
       ColorTick();  // R42 colour modes, opt-in ([Color] Mode, default 0)
       if (!po) {  // [Suite] GBufferRecVerifyLive (test only): the recorder's same-frame verify while flying, logged when off
         gbrec::g_verifyNoLatch = g_cfg.suiteGBufferRecVerifyNoLatch;
+        gbrec::ArmVerifyDump(g_cfg.suiteGBufferRecVerifyDump, g_cfg.suiteGBufferRecVerifyDumpAll, g_dir);  // R133
         static bool live = false;
         static uint64_t f0 = 0;
         if (g_cfg.suiteGBufferRecVerifyLive != live) {

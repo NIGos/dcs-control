@@ -149,6 +149,8 @@ void LoadConfig(bool initial) {
     c.dlssFocusPreset = v;
     c.dlssIgnoreDriverPreset = GetPrivateProfileIntW(L"DLSS", L"IgnoreDriverPreset", 0, ini.c_str()) != 0;
     c.dlssInstrument = GetPrivateProfileIntW(L"DLSS", L"Instrument", 0, ini.c_str()) != 0;  // R130 (dev, read-only)
+    c.dlssReleaseIdleSets = GetPrivateProfileIntW(L"DLSS", L"ReleaseIdleSets", 0, ini.c_str()) != 0;  // R132 (opt-in)
+    c.dlssReleaseAfterEvals = (std::max)(100, (std::min)(1000000, static_cast<int>(GetPrivateProfileIntW(L"DLSS", L"ReleaseAfterEvals", 300, ini.c_str()))));
   }
   c.cascadeCache = GetPrivateProfileIntW(L"Shadows", L"CascadeCache", 0, ini.c_str()) != 0;
   c.cascadeCacheMask = qvini::Mask(L"Shadows", L"CascadeCacheMask", 0xc, 0xf, ini.c_str());  // decimal or 0x hex
@@ -245,6 +247,9 @@ void LoadConfig(bool initial) {
   c.suiteGBufferRecVerifySec = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerifySec", 6, ini.c_str());
   c.suiteGBufferRecVerifyLive = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerifyLive", 0, ini.c_str()) != 0;
   c.suiteGBufferRecVerifyNoLatch = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerifyNoLatch", 0, ini.c_str()) != 0;
+  c.suiteGBufferRecVerifyDump = (std::max)(
+      0, (std::min)(64, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"GBufferRecVerifyDump", 0, ini.c_str()))));
+  c.suiteGBufferRecVerifyDumpAll = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerifyDumpAll", 0, ini.c_str()) != 0;
   if (c.suiteGBufferRecVerifySec < 1) c.suiteGBufferRecVerifySec = 1;
   if (c.suiteGBufferRecVerifySec > 120) c.suiteGBufferRecVerifySec = 120;
   c.suiteGBufferRecVerifyStride = GetPrivateProfileIntW(L"Suite", L"GBufferRecVerifyStride", 0, ini.c_str());

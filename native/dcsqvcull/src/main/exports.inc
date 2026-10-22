@@ -47,6 +47,7 @@ bool StopWorkerThreads(DWORD timeoutMs) {
 void OnMissionEvent(uint32_t event) {
   g_sceneChangeQpc.store(defrec::Qpc(), std::memory_order_release);
   g_frameHeapGen.fetch_add(1, std::memory_order_acq_rel);
+  dlssv::life::NoteMissionEvent();  // R132: a DLSS release waits for N new evaluations of the newest set
   // R32: the cockpit symbology's learned record classes name heap objects of this mission: cleared by the render
   // thread at its next frame end; that frame moves no symbology.
   fixdepth::ckipd::ocpu::OnMissionEvent();
@@ -81,6 +82,7 @@ void OnMissionEvent(uint32_t event) {
 bool QuiesceForExit(DWORD timeoutMs) {
   if (!qvexit::Begin()) return g_workerThread == nullptr;
   Log("payload: DCS is shutting down; stopping the payload's threads (hooks stay in place)");
+  dlssv::life::NoteNoMore("at DCS's shutdown");  // R132: no DLSS release from here on (the close set is never touched)
   g_frameHeapGen.fetch_add(1, std::memory_order_acq_rel);
   d3ds::g_stopRefresher = true;
   const bool idle = StopWorkerThreads(timeoutMs);

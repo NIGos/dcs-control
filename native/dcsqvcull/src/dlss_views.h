@@ -54,6 +54,12 @@
 // R130: [DLSS] Instrument = 0 (default) | 1 (dev): READ-ONLY lifetime counters for DCS's DLSS features (creations
 // with their cost, evaluations, releases per handle; summaries in DcsQvCull.log). See the "R130" section below.
 //
+// R132: [DLSS] ReleaseIdleSets = 0 (default) | 1 (opt-in): RELEASE DCS's DLSS feature sets that DCS never evaluates
+// again (R131: the first of the two sets DCS creates at every load, and the previous load's sets; about 0.66 GB of
+// private memory each, which NGX reuses for the next creations). [DLSS] ReleaseAfterEvals = N (default 300): every
+// handle of the newest set must have been evaluated N times since the last mission event before an older set goes.
+// It needs R130's lifetime tracking and turns it on (without the summaries). See the "R132" section below.
+//
 // Safety. Everything we do inside DCS's call runs under SEH; a fault leaves the feature as DCS asked. An unknown NGX
 // core / NvAPI build (a prologue our decoder does not accept, a foreign patch), a missing module or export: nothing
 // installed, logged once. Keys 0: nothing installed at all.
@@ -68,6 +74,7 @@ namespace dlssv {
 // ---- NGX / NvAPI constants (the DLSS SDK 310.9.16 headers and NvApiDriverSettings.h) ------------------------------
 constexpr int kFeatureSuperSampling = 1;       // NVSDK_NGX_Feature_SuperSampling
 constexpr int kNgxSuccess = 1;                 // NVSDK_NGX_Result_Success
+constexpr int kNgxFeatureNotFound = static_cast<int>(0xBAD00004);  // NVSDK_NGX_Result_FAIL_FeatureNotFound (R132)
 constexpr uint32_t kDrsSrPreset = 0x10E41DF3;  // NGX_DLSS_SR_OVERRIDE_RENDER_PRESET_SELECTION_ID (read by the snippet)
 constexpr uint32_t kDrsSrOverride = 0x10E41E01;  // NGX_DLSS_SR_OVERRIDE_ID (the "latest DLL" swap, read by the core)
 constexpr uint32_t kDrsPresetOff = 0, kDrsPresetDefault = 0x00fffffe, kDrsPresetLatest = 0x00ffffff;
@@ -669,6 +676,13 @@ struct Feat {
   uint64_t evalsAtSummary = 0;  // summaries only (under g_mx)
   bool vramOk = false, privOk = false, statsOk = false;
   int64_t vramDelta = 0, privDelta = 0, statsDelta = 0;
+  // R132: evaluations since the last mission event (gateGen = the event generation they count for; the evaluating
+  // thread resets them lazily), released by us (and NGX's answer), the set refused by the guard (under g_mx).
+  std::atomic<uint32_t> gateGen{0};
+  std::atomic<uint64_t> gateEvals{0};
+  std::atomic<bool> ours{false};
+  int relResult = 0;
+  bool refused = false;
 };
 Feat g_f[kMax];
 std::atomic<uint32_t> g_n{0};  // published entries (written under g_mx, read lock-free by the evaluate hook)
@@ -699,6 +713,27 @@ bool (*g_testVram)(void* ctx, uint64_t* local) = nullptr;
 bool (*g_testPriv)(uint64_t* bytes) = nullptr;
 CapParamsFn g_testCapParams = nullptr;
 
+// R132 ([DLSS] ReleaseIdleSets; the rule in the "R132" section below).
+bool g_verbose = false;                  // Instrument=1: summaries (the release key alone tracks without them)
+std::atomic<bool> g_relOn{false};        // ReleaseIdleSets=1, kill switch off, not latched, not stopping
+bool g_relKey = false;                   // ReleaseIdleSets=1 (worker)
+std::atomic<uint64_t> g_relN{kRuleMinEvals};
+std::atomic<bool> g_relLatched{false};   // a fault, a failed release, a refused evaluate or a full guard: off for the session
+std::atomic<bool> g_noMore{false};       // payload stop or DCS shutdown (quiesce): never another release
+std::atomic<uint32_t> g_gateGen{0};      // mission events (onMissionLoadBegin / onSimulationStop / slot change)
+std::atomic<uint32_t> g_changeGen{0};    // creations, events, releases: a "no candidate" verdict is redone after one
+std::atomic<uint32_t> g_checkedGen{~0u};
+std::atomic<uint32_t> g_newestSetA{0};   // the newest set (lock-free copy of g_set)
+std::atomic<int64_t> g_lastCreateA{0};   // the last tracked creation (lock-free copy of g_lastCreate)
+std::atomic<int> g_inFlight{0};          // EvaluateFeature calls inside NGX right now (any thread)
+std::atomic<int> g_creating{0};          // CreateFeature calls inside NGX right now (DCS's loading thread)
+std::atomic<int> g_releasing{0};         // our ReleaseFeature calls in progress (CreateHook waits for them)
+std::atomic<uint64_t> g_lastRelEval{0};  // g_evalTotal at the last release (one set per frame)
+std::atomic<uint64_t> g_ourSets{0}, g_ourFeats{0}, g_refusedEvals{0}, g_swallowed{0}, g_refusedSets{0}, g_relFaults{0},
+    g_relFailed{0}, g_relBusy{0};
+const char* g_latchWhy = "";
+bool g_relLogged = false;
+
 inline int64_t Now() {
   if (g_testClock) return g_testClock();
   LARGE_INTEGER t;
@@ -722,6 +757,7 @@ void ResetEntry(Feat& f) {
   f.evals = 0, f.evalsAfterSuper = 0, f.firstEval = 0, f.lastEval = 0, f.superQpc = 0, f.superBy = 0;
   f.released = false, f.evalsAtSummary = 0;
   f.vramOk = f.privOk = f.statsOk = false, f.vramDelta = f.privDelta = f.statsDelta = 0;
+  f.gateGen = 0, f.gateEvals = 0, f.ours = false, f.relResult = 0, f.refused = false;
 }
 
 // The newest live entry for a handle pointer (NGX may reuse a released handle's memory), -1 if none.
@@ -731,11 +767,12 @@ inline int Find(const void* h) {
     if (g_f[i].handle == h && !g_f[i].released.load(std::memory_order_relaxed)) return static_cast<int>(i);
   return -1;
 }
-// No C++ objects with destructors (SEH).
-void CountEvalImpl(const void* h, int r) {
+// No C++ objects with destructors (SEH). *idx: the entry counted (-1 untracked).
+void CountEvalImpl(const void* h, int r, int* idx) {
   g_evalTotal.fetch_add(1, std::memory_order_relaxed);
   if (r != kNgxSuccess) g_evalFail.fetch_add(1, std::memory_order_relaxed);
   const int i = Find(h);
+  *idx = i;
   if (i < 0) {
     g_untracked.fetch_add(1, std::memory_order_relaxed);
     return;
@@ -747,13 +784,23 @@ void CountEvalImpl(const void* h, int r) {
   f.firstEval.compare_exchange_strong(zero, t, std::memory_order_relaxed);
   f.lastEval.store(t, std::memory_order_relaxed);
   if (f.superQpc.load(std::memory_order_relaxed)) f.evalsAfterSuper.fetch_add(1, std::memory_order_relaxed);
+  // R132: evaluations since the last mission event (the release rule's proof counts only these).
+  const uint32_t gen = g_gateGen.load(std::memory_order_acquire);
+  if (f.gateGen.load(std::memory_order_relaxed) != gen) {
+    f.gateEvals.store(0, std::memory_order_relaxed);
+    f.gateGen.store(gen, std::memory_order_relaxed);
+  }
+  f.gateEvals.fetch_add(1, std::memory_order_relaxed);
 }
-void CountEval(const void* h, int r) {
+int CountEval(const void* h, int r) {
+  int idx = -1;
   __try {
-    CountEvalImpl(h, r);
+    CountEvalImpl(h, r, &idx);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     g_evalFault.fetch_add(1, std::memory_order_relaxed);
+    idx = -1;
   }
+  return idx;
 }
 int FindGuarded(const void* h) {
   __try {
@@ -953,6 +1000,11 @@ void SummaryLocked(const char* why, int64_t now) {
       static_cast<unsigned long long>(ev - g_evalAtSummary), static_cast<unsigned long long>(un - g_untrackedAtSummary),
       static_cast<unsigned long long>(fl - g_failAtSummary), static_cast<unsigned long long>(rl),
       g_dropped.load() ? " (entry table full: later creations not tracked)" : "");
+  if (g_ourSets.load() || g_refusedEvals.load() || g_swallowed.load())  // R132
+    Log("dlss life:   released by DcsQvCull: %llu set(s), %llu feature(s); %llu evaluation(s) of them refused, %llu DCS "
+        "release(s) of them swallowed",
+        static_cast<unsigned long long>(g_ourSets.load()), static_cast<unsigned long long>(g_ourFeats.load()),
+        static_cast<unsigned long long>(g_refusedEvals.load()), static_cast<unsigned long long>(g_swallowed.load()));
   // Sets, newest first.
   Line idle;
   idle.Add("dlss life:   IDLE older sets (no evaluation since superseded):");
@@ -1008,14 +1060,16 @@ void SummaryLocked(const char* why, int64_t now) {
     idle.Add(" [%u handle(s)]", idleHandles);
     Log("%s%s", idle.b, idle.cut ? " ..." : "");
   }
-  // The later opt-in release rule, as it would decide now (nothing is released).
+  // The release rule, as it would decide now (R130: observation only; R132: ReleaseIdleSets=1 acts on it).
   if (newest && minSet < newest) {
     const Rule nr = NewestMin(n, newest);
+    const uint64_t ruleN = g_relKey ? g_relN.load() : kRuleMinEvals;
     Line r;
-    r.Add("dlss life:   release rule (observation only, N=%llu; newest set %u min %llu evals per handle):",
-          static_cast<unsigned long long>(kRuleMinEvals), newest, static_cast<unsigned long long>(nr.newestMin));
+    r.Add("dlss life:   release rule (%s, N=%llu; newest set %u min %llu evals per handle):",
+          g_relKey ? "ReleaseIdleSets=1" : "observation only", static_cast<unsigned long long>(ruleN), newest,
+          static_cast<unsigned long long>(nr.newestMin));
     for (uint32_t s = minSet; s < newest; ++s) {
-      const int v = SetVerdict(n, s, nr, kRuleMinEvals);
+      const int v = SetVerdict(n, s, nr, ruleN);
       if (v == -2) continue;
       r.Add(" set %u %s;", s, v == 1 ? "eligible" : v == 0 ? "not yet (newest set below N)" : "REFUSED (guard: evaluated after superseded)");
     }
@@ -1071,6 +1125,19 @@ void LoadTotalsLocked(int64_t now) {
   Log("%s%s", l.b, l.cut ? " ..." : "");
 }
 
+// R132: one line with the release counters (at each mission load, at the shutdown signal, at a latch).
+void RelStatus(const char* why) {
+  Log("dlss release: status %s: %llu set(s) / %llu feature(s) released this session; %llu evaluation(s) of a released "
+      "handle refused; %llu DCS release(s) of one swallowed; %llu set(s) refused by the guard; %llu fault(s), %llu failed "
+      "release(s); %s%s",
+      why, static_cast<unsigned long long>(g_ourSets.load()), static_cast<unsigned long long>(g_ourFeats.load()),
+      static_cast<unsigned long long>(g_refusedEvals.load()), static_cast<unsigned long long>(g_swallowed.load()),
+      static_cast<unsigned long long>(g_refusedSets.load()), static_cast<unsigned long long>(g_relFaults.load()),
+      static_cast<unsigned long long>(g_relFailed.load()),
+      g_relLatched.load() ? "OFF for this session: " : g_noMore.load() ? "stopped" : g_relOn.load() ? "on" : "paused",
+      g_relLatched.load() ? g_latchWhy : "");
+}
+
 // A DLSS-SR creation (from CreateHook, after the original). t0: just before the original. Returns the text appended to
 // the create line.
 void NoteCreate(int64_t t0, uint32_t seq, void** handle, int cls, uint32_t outW, uint32_t outH, int r, const Meas& m0,
@@ -1079,7 +1146,8 @@ void NoteCreate(int64_t t0, uint32_t seq, void** handle, int cls, uint32_t outW,
   const bool newLoad = !g_load || t0 - g_lastCreate > Ticks(kLoadGapSec);
   if (newLoad) {
     if (g_loadOpen) LoadTotalsLocked(t0);  // (a load closed by the next one before the worker saw it)
-    if (g_load) SummaryLocked("mission load", t0);
+    if (g_load && g_verbose) SummaryLocked("mission load", t0);
+    if (g_load && g_relKey) RelStatus("at a mission load");  // R132
     ++g_load;
     g_loadOpen = true;
     g_loadStart = t0;
@@ -1102,6 +1170,9 @@ void NoteCreate(int64_t t0, uint32_t seq, void** handle, int cls, uint32_t outW,
   g_prevW = outW, g_prevH = outH;
   g_lastCreate = t0;
   ++g_changes;
+  g_newestSetA.store(g_set, std::memory_order_release);  // R132
+  g_lastCreateA.store(t0, std::memory_order_release);
+  g_changeGen.fetch_add(1, std::memory_order_acq_rel);
   void* h = nullptr;
   uint32_t id = 0;
   const bool haveH = handle && SafeRead(handle, &h, sizeof(h)) && h;
@@ -1157,12 +1228,435 @@ inline EvalFn EvalOrig() {
   const EvalFn o = g_evalOrig.load(std::memory_order_acquire);
   return o ? o : reinterpret_cast<EvalFn>(g_eval.tramp);
 }
+inline ReleaseFn ReleaseOrig() {
+  const ReleaseFn o = g_releaseOrig.load(std::memory_order_acquire);
+  return o ? o : reinterpret_cast<ReleaseFn>(g_release.tramp);
+}
+
+// ---- R132: release of idle DLSS sets ([DLSS] ReleaseIdleSets=1, opt-in, default 0) ---------------------------------
+// R131 (live): at every load DCS creates two sets of four features about 1 s apart and evaluates only the second; the
+// previous load's sets are never evaluated again; DCS never calls ReleaseFeature; it also creates a set of four while
+// it closes. Each idle set holds about 0.66-0.7 GB of private memory. R130's harness: a release returns nothing at
+// once (NGX keeps the memory) but the next creations reuse it, so releasing stops the growth per load.
+// The rule (agreed with Dev):
+//   - Candidates: an older set none of whose handles was evaluated after a newer set was created
+//     (evalsAfterSuper == 0 on every handle; a set evaluated BEFORE it was superseded qualifies).
+//   - Proof of replacement: every live handle of the newest set has >= N evaluations ([DLSS] ReleaseAfterEvals,
+//     default 300) since the last mission event (onMissionLoadBegin / onSimulationStop / slot change) and since its
+//     creation, and the load has closed (2 s without a creation).
+//   - Guard before: a candidate handle evaluated after it was superseded (even once) refuses its set (logged once;
+//     stricter than "for this load": the count never goes back to 0, so for the session).
+//   - Guard after: the released handles are kept in a persistent guard block (never freed; found again by a later
+//     payload through the process environment). An evaluate of one never reaches NGX: it returns
+//     NVSDK_NGX_Result_FAIL_FeatureNotFound and switches releasing off for the session. A ReleaseFeature by DCS on
+//     one is swallowed (success, no double free). After a payload stop the two hooks' slots point at small persistent
+//     filters in the guard block that do the same lookup in front of the trampolines. A new creation that gets a
+//     released handle's address back (NGX reuses memory) clears that address from the block first.
+//   - Where: on DCS's render thread, in the evaluate hook of a newest-set handle after NGX returned success; one set
+//     per frame (every newest handle evaluated once more in between); never while a load is open, never after the
+//     payload stop or DCS's shutdown signal. The set created while DCS closes is the newest set and never evaluated:
+//     the proof never holds after it, so it (and everything older) is left alone.
+//   - Safety: the release step runs under SEH (our bookkeeping and NGX's ReleaseFeature); a fault, a failed release
+//     or a full guard block latches releasing off; handles already in the block stay guarded.
+//   - Logging: one line per release (set, handles, why, private and DLSS-stats deltas), one line per refused set, a
+//     status line at each mission load and at shutdown.
+constexpr uint32_t kGuardMagic = 0x32333152;  // "R132"
+constexpr uint32_t kGuardCap = (kPage - 64) / 8;
+const wchar_t* const kGuardEnv = L"DCSQV_DLSS_RELEASE_GUARD";
+void* const kTomb = reinterpret_cast<void*>(static_cast<uintptr_t>(1));  // a cleared slot (never a handle)
+struct GuardData {  // the block's data page (read-write)
+  uint32_t magic;
+  std::atomic<uint32_t> count;  // slots in use (cleared ones included); the filters scan [0, count)
+  void* evalTramp;              // where the filters go on: the detours' trampolines
+  void* relTramp;
+  uint64_t reserved[5];
+  std::atomic<void*> h[kGuardCap];
+};
+static_assert(sizeof(GuardData) == kPage, "one page");
+constexpr size_t kEvalFilterOff = 0, kRelFilterOff = 64;
+uint8_t* g_guardBase = nullptr;  // code page (+kPage: GuardData)
+inline GuardData* Gd() { return g_guardBase ? reinterpret_cast<GuardData*>(g_guardBase + kPage) : nullptr; }
+
+// The persistent filter (x64, 45 bytes): the handle (rdx for EvaluateFeature, rcx for ReleaseFeature) against the
+// block's slots; a match returns `refuse` without calling NGX, anything else jumps to the trampoline untouched.
+//   mov r10d,[count]; lea rax,[h]; test r10,r10; jz pass; loop: cmp rdx|rcx,[rax]; je refuse; add rax,8; dec r10;
+//   jnz loop; pass: jmp [tramp]; refuse: mov eax,imm32; ret
+void WriteFilter(uint8_t* code, bool handleInRdx, int32_t refuse, size_t trampOff) {
+  uint8_t* data = g_guardBase + kPage;
+  const auto rel = [](const uint8_t* at, size_t len, const uint8_t* target) {
+    return static_cast<int32_t>(target - (at + len));
+  };
+  uint8_t c[45] = {0x44, 0x8B, 0x15, 0, 0, 0, 0, 0x48, 0x8D, 0x05, 0, 0, 0, 0, 0x4D, 0x85, 0xD2, 0x74, 0x0E,
+                   0x48, 0x3B, static_cast<uint8_t>(handleInRdx ? 0x10 : 0x08), 0x74, 0x0F, 0x48, 0x83, 0xC0, 0x08,
+                   0x49, 0xFF, 0xCA, 0x75, 0xF2, 0xFF, 0x25, 0, 0, 0, 0, 0xB8, 0, 0, 0, 0, 0xC3};
+  const int32_t dCount = rel(code + 0, 7, data + offsetof(GuardData, count));
+  const int32_t dH = rel(code + 7, 7, data + offsetof(GuardData, h));
+  const int32_t dT = rel(code + 33, 6, data + trampOff);
+  memcpy(c + 3, &dCount, 4);
+  memcpy(c + 10, &dH, 4);
+  memcpy(c + 35, &dT, 4);
+  memcpy(c + 40, &refuse, 4);
+  memcpy(code, c, sizeof(c));
+}
+// An earlier payload's guard block (named by the process environment), taken over so that its released handles stay
+// guarded through this payload's hooks. Any key that installs a DLSS hook adopts it (a payload with only Instrument or
+// PeripheryPreset must not lose the guard). True when this payload has a block.
+bool GuardAdopt() {
+  if (g_guardBase) return true;
+  wchar_t v[32] = {};
+  if (GetEnvironmentVariableW(kGuardEnv, v, 32) > 0) {
+    const unsigned long long a = wcstoull(v, nullptr, 16);
+    uint8_t* base = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(a));
+    uint32_t magic = 0;
+    uint8_t code[3] = {};
+    if (base && !(a & (kPage - 1)) && SafeRead(base + kPage, &magic, 4) && magic == kGuardMagic &&
+        SafeRead(base, code, 3) && code[0] == 0x44 && code[1] == 0x8B && code[2] == 0x15) {
+      g_guardBase = base;
+      GuardData* d = Gd();
+      if (g_eval.tramp) d->evalTramp = g_eval.tramp;
+      if (g_release.tramp) d->relTramp = g_release.tramp;
+      uint32_t live = 0;
+      for (uint32_t i = 0; i < d->count.load(); ++i) live += d->h[i].load() != kTomb;
+      Log("dlss release: guard block of an earlier payload adopted (%u released handle(s) still guarded)", live);
+      return true;
+    }
+  }
+  return false;
+}
+// The guard block: this payload's, an earlier payload's (adopted), or a new one. False: no memory.
+bool GuardEnsure() {
+  if (GuardAdopt()) return true;
+  auto* p = static_cast<uint8_t*>(VirtualAlloc(nullptr, 2 * kPage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+  if (!p) return false;
+  memset(p, 0xCC, kPage);
+  g_guardBase = p;
+  GuardData* d = Gd();
+  d->magic = kGuardMagic;
+  d->evalTramp = g_eval.tramp;
+  d->relTramp = g_release.tramp;
+  WriteFilter(p + kEvalFilterOff, true, kNgxFeatureNotFound, offsetof(GuardData, evalTramp));
+  WriteFilter(p + kRelFilterOff, false, kNgxSuccess, offsetof(GuardData, relTramp));
+  DWORD old;
+  if (!VirtualProtect(p, kPage, PAGE_EXECUTE_READ, &old)) {
+    g_guardBase = nullptr;
+    VirtualFree(p, 0, MEM_RELEASE);
+    return false;
+  }
+  FlushInstructionCache(GetCurrentProcess(), p, kPage);
+  wchar_t s[32];
+  swprintf_s(s, L"%llx", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(p)));
+  SetEnvironmentVariableW(kGuardEnv, s);
+  return true;
+}
+// Lock-free: is h a handle we released (or are releasing)? Any thread.
+inline bool GuardHas(const void* h) {
+  GuardData* d = Gd();
+  if (!d || !h) return false;
+  const uint32_t n = d->count.load(std::memory_order_acquire);
+  for (uint32_t i = 0; i < n; ++i)
+    if (d->h[i].load(std::memory_order_relaxed) == h) return true;
+  return false;
+}
+inline bool GuardAny() {
+  GuardData* d = Gd();
+  return d && d->count.load(std::memory_order_relaxed) != 0;
+}
+// Under g_mx. The slot used, -1 when full.
+int GuardAdd(void* h) {
+  GuardData* d = Gd();
+  if (!d) return -1;
+  const uint32_t n = d->count.load();
+  for (uint32_t i = 0; i < n; ++i)
+    if (d->h[i].load() == kTomb) {
+      d->h[i].store(h, std::memory_order_seq_cst);
+      return static_cast<int>(i);
+    }
+  if (n >= kGuardCap) return -1;
+  d->h[n].store(h, std::memory_order_seq_cst);
+  d->count.store(n + 1, std::memory_order_seq_cst);
+  return static_cast<int>(n);
+}
+void GuardClear(int slot) {
+  GuardData* d = Gd();
+  if (d && slot >= 0) d->h[slot].store(kTomb, std::memory_order_seq_cst);
+}
+// A new feature got the address of a handle we released: it is DCS's new feature now (CreateHook, after NGX returned).
+uint32_t GuardForget(const void* h) {
+  GuardData* d = Gd();
+  if (!d || !h) return 0;
+  uint32_t k = 0;
+  const uint32_t n = d->count.load();
+  for (uint32_t i = 0; i < n; ++i)
+    if (d->h[i].load() == h) d->h[i].store(kTomb), ++k;
+  return k;
+}
+
+void Latch(const char* why) {
+  if (g_relLatched.exchange(true)) return;
+  g_relOn = false;
+  g_latchWhy = why;
+  Log("dlss release: OFF for this session: %s; released handles stay guarded", why);
+}
+
+// The entry (newest first, released ones included) for a handle, -1 if none. Logging only.
+int FindAny(const void* h) {
+  const uint32_t n = g_n.load(std::memory_order_acquire);
+  for (uint32_t i = n; i-- > 0;)
+    if (g_f[i].handle == h) return static_cast<int>(i);
+  return -1;
+}
+// An evaluate of a handle we released: refused before NGX (the guard after).
+int RefuseEval(const void* h) {
+  const uint64_t k = g_refusedEvals.fetch_add(1) + 1;
+  try {
+    if (k <= 8) {
+      const int i = FindAny(h);
+      Log("dlss release: DCS evaluated handle 0x%llx (id %u, set %u) that DcsQvCull released: refused before NGX "
+          "(0x%x FeatureNotFound)%s",
+          static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(h)), i >= 0 ? g_f[i].id : 0u,
+          i >= 0 ? g_f[i].set : 0u, static_cast<unsigned>(kNgxFeatureNotFound), k == 8 ? "; further ones counted only" : "");
+    }
+    Latch("DCS evaluated a released handle (guard after)");
+  } catch (...) {
+  }
+  return kNgxFeatureNotFound;
+}
+
+// The release step (render thread, under g_mx). No C++ objects with destructors (SEH).
+struct RelOut {
+  int what = 0;  // 0 nothing to do, 1 released, 2 set refused (guard before), 3 busy (retry), 4 guard full, 5 release failed
+  uint32_t set = 0, by = 0, load = 0, count = 0, newest = 0, firstId = 0, lastId = 0;
+  int idx[16] = {};
+  uint64_t newestMin = 0, lifetime = 0, after = 0;
+  int64_t supQpc = 0, lastEval = 0;
+  bool privOk = false, statsOk = false;
+  int64_t privDelta = 0, statsDelta = 0;
+  int failResult = 0;
+  bool proof = false;  // the newest set's proof held (what 0: then no candidate)
+};
+// Tests: the release step faults on this handle (stands for a fault inside NGX's ReleaseFeature or our bookkeeping).
+const void* g_testFaultOn = nullptr;
+void ReleaseStepImpl(int64_t now, RelOut* o) {
+  const uint32_t n = g_n.load(std::memory_order_acquire);
+  const uint32_t newest = g_set;
+  const uint64_t need = g_relN.load();
+  const uint32_t gen = g_gateGen.load(std::memory_order_acquire);
+  // Proof: every live handle of the newest set evaluated >= N times since the last event.
+  uint64_t mn = 0;
+  uint32_t nh = 0;
+  for (uint32_t i = 0; i < n; ++i) {
+    const Feat& f = g_f[i];
+    if (f.set != newest || !Live(f)) continue;
+    const uint64_t e = f.gateGen.load() == gen ? f.gateEvals.load() : 0;
+    mn = nh ? (std::min)(mn, e) : e;
+    ++nh;
+  }
+  o->newest = newest, o->newestMin = mn;
+  if (!nh || mn < need || now - g_lastCreate <= Ticks(kLoadDoneSec)) return;  // (the load closes 2 s after its last creation)
+  o->proof = true;
+  // The oldest candidate set.
+  for (uint32_t s = 1; s < newest; ++s) {
+    uint32_t cnt = 0;
+    bool unsup = false, used = false, refused = false;
+    for (uint32_t i = 0; i < n; ++i) {
+      const Feat& f = g_f[i];
+      if (f.set != s || !Live(f)) continue;
+      ++cnt;
+      unsup = unsup || !f.superQpc.load();
+      used = used || f.evalsAfterSuper.load() != 0;
+      refused = refused || f.refused;
+    }
+    if (!cnt || unsup || refused || cnt > 16) continue;
+    o->set = s, o->count = 0, o->lifetime = 0, o->after = 0, o->lastEval = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+      Feat& f = g_f[i];
+      if (f.set != s || !Live(f)) continue;
+      if (!o->count) o->firstId = f.id, o->load = f.load, o->by = f.superBy.load(), o->supQpc = f.superQpc.load();
+      o->lastId = f.id;
+      o->idx[o->count++] = static_cast<int>(i);
+      o->lifetime += f.evals.load();
+      o->after += f.evalsAfterSuper.load();
+      o->lastEval = (std::max)(o->lastEval, f.lastEval.load());
+      if (used) f.refused = true;
+    }
+    if (used) {  // the guard before
+      o->what = 2;
+      return;
+    }
+    // Guard the handles first, then make sure no evaluate is inside NGX right now (another thread could hold one of
+    // them): any evaluate that starts from here on sees the guard.
+    int slots[16];
+    for (uint32_t k = 0; k < o->count; ++k) {
+      slots[k] = GuardAdd(g_f[o->idx[k]].handle);
+      if (slots[k] < 0) {
+        for (uint32_t j = 0; j < k; ++j) GuardClear(slots[j]);
+        o->what = 4;
+        return;
+      }
+    }
+    bool late = false;
+    for (uint32_t k = 0; k < o->count; ++k) late = late || g_f[o->idx[k]].evalsAfterSuper.load() != 0;
+    // No NGX creation may run beside our release (DCS creates on another thread, e.g. the set made while it closes):
+    // CreateHook counts itself in before calling NGX and waits while g_releasing is set.
+    g_releasing.store(1, std::memory_order_seq_cst);
+    if (g_inFlight.load(std::memory_order_seq_cst) != 0 || g_creating.load(std::memory_order_seq_cst) != 0 || late) {
+      g_releasing.store(0, std::memory_order_seq_cst);
+      for (uint32_t k = 0; k < o->count; ++k) GuardClear(slots[k]);
+      if (late) {
+        for (uint32_t k = 0; k < o->count; ++k) g_f[o->idx[k]].refused = true;
+        o->what = 2;
+      } else {
+        o->what = 3;
+      }
+      return;
+    }
+    uint64_t p0 = 0, p1 = 0, s0 = 0, s1 = 0;
+    const bool pa = PrivateBytes(&p0), sa = DlssStats(&s0);
+    const ReleaseFn rel = ReleaseOrig();
+    int bad = 0;
+    for (uint32_t k = 0; k < o->count; ++k) {
+      Feat& f = g_f[o->idx[k]];
+      if (g_testFaultOn && f.handle == g_testFaultOn) RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+      f.relResult = rel(f.handle);  // NGX frees the feature (the handle stays in the guard block)
+      f.ours = true;
+      f.released = true;
+      if (f.relResult != kNgxSuccess && !bad) bad = f.relResult;
+    }
+    g_releasing.store(0, std::memory_order_seq_cst);
+    o->privOk = pa && PrivateBytes(&p1);
+    o->statsOk = sa && DlssStats(&s1);
+    o->privDelta = static_cast<int64_t>(p1 - p0), o->statsDelta = static_cast<int64_t>(s1 - s0);
+    o->what = bad ? 5 : 1;
+    o->failResult = bad;
+    return;
+  }
+}
+bool ReleaseStep(int64_t now, RelOut* o) {
+  __try {
+    ReleaseStepImpl(now, o);
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    g_releasing.store(0, std::memory_order_seq_cst);
+    return false;
+  }
+}
+void ReportRelease(const RelOut& o, int64_t now) {
+  Line l;
+  l.Add("dlss release: released set %u (load %u; ids %u-%u;", o.set, o.load, o.firstId, o.lastId);
+  for (uint32_t k = 0; k < o.count; ++k) {
+    const Feat& f = g_f[o.idx[k]];
+    l.Add(" %c 0x%llx%s", ClassLetter(f.cls), static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(f.handle)),
+          f.relResult == kNgxSuccess ? "" : " (NGX FAILED)");
+  }
+  char last[64] = "never evaluated";
+  if (o.lastEval)
+    snprintf(last, sizeof(last), "%llu evaluations before (%u handles), last %.1f s ago",
+             static_cast<unsigned long long>(o.lifetime), o.count, Sec(now - o.lastEval));
+  char pv[32] = "n/a", sv[32] = "n/a";
+  if (o.privOk) snprintf(pv, sizeof(pv), "%+.1f MB", MB(o.privDelta));
+  if (o.statsOk) snprintf(sv, sizeof(sv), "%+.1f MB", MB(o.statsDelta));
+  l.Add("): idle since superseded by set %u %.1f s ago (0 evaluations since; %s); newest set %u has >= %llu evaluations "
+        "per handle since the last mission event (min %llu); private %s, DLSS stats %s; %llu set(s) / %llu feature(s) "
+        "released this session",
+        o.by, Sec(now - o.supQpc), last, o.newest, static_cast<unsigned long long>(g_relN.load()),
+        static_cast<unsigned long long>(o.newestMin), pv, sv, static_cast<unsigned long long>(g_ourSets.load()),
+        static_cast<unsigned long long>(g_ourFeats.load()));
+  Log("%s%s", l.b, l.cut ? " ..." : "");
+}
+
+// After a successful evaluate of handle entry i (render thread). Cheap checks first; the step itself under try_lock.
+void MaybeRelease(int i) {
+  if (i < 0 || g_relLatched.load(std::memory_order_relaxed) || g_noMore.load(std::memory_order_relaxed)) return;
+  const Feat& f = g_f[i];
+  if (f.set != g_newestSetA.load(std::memory_order_acquire)) return;
+  if (f.gateGen.load(std::memory_order_relaxed) != g_gateGen.load(std::memory_order_relaxed) ||
+      f.gateEvals.load(std::memory_order_relaxed) < g_relN.load(std::memory_order_relaxed))
+    return;
+  const int64_t now = Now();
+  if (now - g_lastCreateA.load(std::memory_order_acquire) <= Ticks(kLoadDoneSec)) return;
+  const uint32_t cg = g_changeGen.load(std::memory_order_acquire);
+  if (g_checkedGen.load(std::memory_order_relaxed) == cg) return;  // nothing to release since the last look
+  const uint64_t ev = g_evalTotal.load(std::memory_order_relaxed);
+  if (g_ourSets.load(std::memory_order_relaxed) && ev - g_lastRelEval.load(std::memory_order_relaxed) < 4) return;
+  if (!g_mx.try_lock()) return;  // a creation or a summary right now: next evaluate
+  RelOut o;
+  const bool ok = ReleaseStep(now, &o);
+  if (ok && o.what == 1) {
+    g_ourSets.fetch_add(1);
+    g_ourFeats.fetch_add(o.count);
+  }
+  if (ok && (o.what == 1 || o.what == 5)) {
+    g_lastRelEval.store(ev);
+    ++g_changes;
+    g_changeGen.fetch_add(1);
+  } else if (ok && o.what == 2) {
+    g_refusedSets.fetch_add(1);
+    ++g_changes;
+    g_changeGen.fetch_add(1);  // look again: an older or newer candidate may remain
+  } else if (ok && o.what == 0 && o.proof) {
+    g_checkedGen.store(cg);  // proof held, no candidate: wait for a creation, an event or a release
+  }
+  g_mx.unlock();
+  try {
+    if (!ok) {
+      g_relFaults.fetch_add(1);
+      Latch("a fault in the release step (SEH)");
+    } else if (o.what == 1) {
+      ReportRelease(o, now);
+    } else if (o.what == 5) {
+      g_relFailed.fetch_add(1);
+      ReportRelease(o, now);
+      Latch("NGX ReleaseFeature failed");
+    } else if (o.what == 2) {
+      Log("dlss release: set %u (load %u; ids %u-%u) REFUSED for this session (guard before): %llu evaluation(s) after "
+          "set %u was created; DCS still uses it",
+          o.set, o.load, o.firstId, o.lastId, static_cast<unsigned long long>(o.after), o.by);
+    } else if (o.what == 3) {
+      g_relBusy.fetch_add(1);
+    } else if (o.what == 4) {
+      Latch("the guard block is full");
+    }
+  } catch (...) {
+  }
+}
+
 int __cdecl EvalHook(void* ctx, const void* h, const NgxParam* p, void* cb) {
+  g_inFlight.fetch_add(1, std::memory_order_seq_cst);
+  if (GuardAny()) {  // R132 guard after: a handle we released never reaches NGX
+    bool hit = false;
+    __try {
+      hit = GuardHas(h);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      hit = false;
+    }
+    if (hit) {
+      g_inFlight.fetch_sub(1, std::memory_order_seq_cst);
+      return RefuseEval(h);
+    }
+  }
   const int r = EvalOrig()(ctx, h, p, cb);
-  if (g_on.load(std::memory_order_relaxed)) CountEval(h, r);
+  g_inFlight.fetch_sub(1, std::memory_order_seq_cst);
+  if (g_on.load(std::memory_order_relaxed)) {
+    const int i = CountEval(h, r);
+    if (r == kNgxSuccess && g_relOn.load(std::memory_order_relaxed)) MaybeRelease(i);
+  }
   return r;
 }
 int __cdecl ReleaseHook(void* h) {
+  if (GuardAny() && GuardHas(h)) {  // R132: DCS releasing a handle we released: no double free
+    const uint64_t k = g_swallowed.fetch_add(1) + 1;
+    if (k <= 8) {
+      try {
+        const int i = FindAny(h);
+        Log("dlss release: DCS released handle 0x%llx (id %u, set %u) that DcsQvCull had released: swallowed (success "
+            "returned, NGX not called)",
+            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(h)), i >= 0 ? g_f[i].id : 0u,
+            i >= 0 ? g_f[i].set : 0u);
+      } catch (...) {
+      }
+    }
+    return kNgxSuccess;
+  }
   const bool on = g_on.load(std::memory_order_relaxed);
   const int i = on ? FindGuarded(h) : -1;
   const ReleaseFn o = g_releaseOrig.load(std::memory_order_acquire);
@@ -1204,20 +1698,45 @@ void Install() {
     else
       g_evalOrig.store(reinterpret_cast<EvalFn>(d->tramp), std::memory_order_release);
     st = 1;
-    Log("dlss life: %s hooked (%s; observation only, pass-through)", d->name,
-        r == 2 ? "earlier payload's patch reused" : "patched");
+    Log("dlss life: %s hooked (%s; %s)", d->name, r == 2 ? "earlier payload's patch reused" : "patched",
+        g_verbose || !g_relKey ? "observation only, pass-through" : "lifetime tracking for [DLSS] ReleaseIdleSets");
   }
 }
 
-// Worker tick: the key, the kill switch, a closed load's totals, the 10 s summary.
-void Tick(bool key, bool killed) {
+// Worker tick: the keys, the kill switch, a closed load's totals, the 10 s summary (Instrument only). R132: release
+// (ReleaseIdleSets) turns the tracking on too; releasing needs both observation hooks and the guard block.
+void Tick(bool key, bool killed, bool release = false, int releaseAfter = static_cast<int>(kRuleMinEvals)) {
   g_key = key;
-  const bool on = key && !killed;
+  g_verbose = key;
+  g_relKey = release;
+  g_relN = static_cast<uint64_t>(releaseAfter > 0 ? releaseAfter : static_cast<int>(kRuleMinEvals));
+  const bool on = (key || release) && !killed;
   const bool was = g_on.exchange(on);
-  if (on && !g_onLogged) {
+  if (on && key && !g_onLogged) {
     g_onLogged = true;
     Log("dlss life: on ([DLSS] Instrument=1, dev): DLSS creations, evaluations and releases are counted (read-only); "
         "a summary every %.0f s and at each mission load", kSummarySec);
+  }
+  // R132: releasing.
+  const bool canRel = on && release && !g_relLatched.load() && !g_noMore.load() && g_evalState.load() == 1 &&
+                      g_releaseState.load() == 1;
+  bool relNow = false;
+  if (canRel) {
+    relNow = GuardEnsure();
+    if (!relNow) Latch("no memory for the guard block");
+  }
+  const bool relWas = g_relOn.exchange(relNow);
+  if (relNow && !relWas) {
+    if (!g_relLogged)
+      Log("dlss release: on ([DLSS] ReleaseIdleSets=1, ReleaseAfterEvals=%llu): DLSS feature sets DCS no longer "
+          "evaluates are released on DCS's render thread once each handle of the newest set has %llu evaluations since "
+          "the last mission event; one set per frame, never during a load; released handles are guarded",
+          static_cast<unsigned long long>(g_relN.load()), static_cast<unsigned long long>(g_relN.load()));
+    else
+      Log("dlss release: resumed");
+    g_relLogged = true;
+  } else if (!relNow && relWas && !g_relLatched.load()) {
+    Log("dlss release: paused (%s)", killed ? "kill switch" : !release ? "[DLSS] ReleaseIdleSets=0" : "stopping");
   }
   if (!on) {
     if (was) Log("dlss life: counting paused (%s)", killed ? "kill switch" : "[DLSS] Instrument=0");
@@ -1229,6 +1748,7 @@ void Tick(bool key, bool killed) {
     LoadTotalsLocked(now);
     g_loadOpen = false;
   }
+  if (!key) return;  // summaries: Instrument only
   if (!g_lastSummary) g_lastSummary = now;
   if (now - g_lastSummary < Ticks(kSummarySec)) return;
   const bool nothing = g_evalTotal.load() == g_evalAtSummary && !g_changes;
@@ -1237,6 +1757,38 @@ void Tick(bool key, bool killed) {
     return;
   }
   SummaryLocked("periodic", now);
+}
+
+// R132: a mission event (the Lua hook's onMissionLoadBegin / onSimulationStop / own slot change, through the loader):
+// the release proof starts again (N new evaluations of the newest set after this point).
+void NoteMissionEvent() {
+  g_gateGen.fetch_add(1, std::memory_order_acq_rel);
+  g_changeGen.fetch_add(1, std::memory_order_acq_rel);
+}
+// R132: DCS is shutting down (quiesce) or the payload stops: never another release.
+void NoteNoMore(const char* why) {
+  const bool was = g_noMore.exchange(true);
+  g_relOn = false;
+  if (!was && g_relKey) {
+    try {
+      RelStatus(why);
+    } catch (...) {
+    }
+  }
+}
+// R132, payload stop: the two observation hooks go to pass-through, or, when handles we released are still guarded,
+// to the guard block's persistent filters (which then go on to the trampolines).
+void StopHooks() {
+  GuardData* d = Gd();
+  if (d && d->count.load() && g_eval.slot && g_eval.tramp && g_release.slot && g_release.tramp) {
+    d->evalTramp = g_eval.tramp;
+    d->relTramp = g_release.tramp;
+    InterlockedExchangePointer(g_eval.slot, g_guardBase + kEvalFilterOff);
+    InterlockedExchangePointer(g_release.slot, g_guardBase + kRelFilterOff);
+    return;
+  }
+  Release(&g_eval);
+  Release(&g_release);
 }
 
 // Tests: a fresh table and clock state (the detours stay, as in DCS).
@@ -1256,6 +1808,15 @@ void ResetForTest() {
   g_cap = nullptr, g_statsCb = nullptr, g_capTries = 0;
   g_testEvalTarget = g_testReleaseTarget = nullptr;
   g_testClock = nullptr, g_testVram = nullptr, g_testPriv = nullptr, g_testCapParams = nullptr;
+  // R132 (the guard block is left allocated: a test may still call through its filters)
+  g_verbose = false, g_relOn = false, g_relKey = false, g_relN = kRuleMinEvals, g_relLatched = false, g_noMore = false;
+  g_gateGen = 0, g_changeGen = 0, g_checkedGen = ~0u, g_newestSetA = 0, g_lastCreateA = 0, g_inFlight = 0;
+  g_lastRelEval = 0, g_creating = 0, g_releasing = 0;
+  g_ourSets = g_ourFeats = g_refusedEvals = g_swallowed = g_refusedSets = g_relFaults = g_relFailed = g_relBusy = 0;
+  g_latchWhy = "", g_relLogged = false;
+  g_guardBase = nullptr;
+  g_testFaultOn = nullptr;
+  SetEnvironmentVariableW(kGuardEnv, nullptr);
 }
 }  // namespace life
 
@@ -1284,7 +1845,22 @@ int __cdecl CreateHook(void* ctx, int feature, NgxParam* params, void** handle) 
     t0 = life::Now();
     life::Measure(ctx, &m0);
   }
+  // R132: never beside one of our releases (the render thread's release step checks g_creating after setting
+  // g_releasing; a release is four NGX calls, well under a millisecond).
+  life::g_creating.fetch_add(1, std::memory_order_seq_cst);
+  while (life::g_releasing.load(std::memory_order_seq_cst)) SwitchToThread();
   const int r = orig(ctx, feature, params, handle);
+  life::g_creating.fetch_sub(1, std::memory_order_seq_cst);
+  if (r == kNgxSuccess && life::GuardAny()) {  // R132: NGX gave a released handle's address to this new feature
+    void* nh = nullptr;
+    if (handle && SafeRead(handle, &nh, sizeof(nh)) && nh && life::GuardForget(nh)) {
+      try {
+        Log("dlss release: NGX reused the address 0x%llx of a released handle for a new feature: no longer guarded",
+            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(nh)));
+      } catch (...) {
+      }
+    }
+  }
   try {
     char tail[MAX_PATH + 160] = {};
     CreateTail(ret, handle, tail, sizeof(tail));
@@ -1542,8 +2118,10 @@ bool TryInstallGetSetting() {
 }
 
 // Worker tick (about once per second). periph / focus: the parsed keys (-1 = a value we cannot use). instrument: R130
-// [DLSS] Instrument (read-only lifetime counters). Nothing is installed while PeripheryPreset and Instrument are 0.
-void Tick(int periph, int focus, bool ignore, bool engineOff, bool instrument = false) {
+// [DLSS] Instrument (read-only lifetime counters). release / releaseAfter: R132 [DLSS] ReleaseIdleSets /
+// ReleaseAfterEvals. Nothing is installed while PeripheryPreset, Instrument and ReleaseIdleSets are 0.
+void Tick(int periph, int focus, bool ignore, bool engineOff, bool instrument = false, bool release = false,
+          int releaseAfter = static_cast<int>(life::kRuleMinEvals)) {
   if ((periph < 0 || focus < 0) && !g_badKeyLogged) {
     g_badKeyLogged = true;
     Log("dlss views: [DLSS] %s is not a preset this build accepts (0, A-F, J-M or their NGX numbers); treated as 0",
@@ -1554,10 +2132,13 @@ void Tick(int periph, int focus, bool ignore, bool engineOff, bool instrument = 
   const bool was = g_periph.load() > 0;
   g_periph = periph, g_focus = focus, g_ignore = ignore && periph > 0, g_killed = engineOff;
   // R130: the CreateFeature hook carries the creation side of the instrumentation, so it is installed for either key.
-  if (instrument || life::g_on.load() || life::g_key) {
-    life::Tick(instrument, engineOff);
-    if (instrument && g_createState.load() == 0) TryInstallCreate();
-    if (instrument && g_createState.load() == 1) life::Install();
+  const bool track = instrument || release;  // R132: releasing needs the tracking
+  if ((track || periph > 0) && !life::g_guardBase) life::GuardAdopt();  // R132: an earlier payload's released handles
+  if (track || life::g_on.load() || life::g_key || life::g_relKey) {
+    if (track) life::g_verbose = instrument, life::g_relKey = release;  // (the install lines' wording)
+    if (track && g_createState.load() == 0) TryInstallCreate();
+    if (track && g_createState.load() == 1) life::Install();
+    life::Tick(instrument, engineOff, release, releaseAfter);
   }
   if (!periph) {
     if (was && !g_offLogged)
@@ -1586,8 +2167,8 @@ void Tick(int periph, int focus, bool ignore, bool engineOff, bool instrument = 
 void Stop() {
   Release(&g_create);
   Release(&g_getSetting);
-  Release(&life::g_eval);  // R130
-  Release(&life::g_release);
+  life::NoteNoMore("at the payload stop");  // R132: no release from here on
+  life::StopHooks();  // R130 pass-through; R132: the guard filters when released handles are guarded
 }
 
 }  // namespace dlssv

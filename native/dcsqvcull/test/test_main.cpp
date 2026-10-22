@@ -328,6 +328,8 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "focus_twin_test.h"  // R123: the focus twin (census TerrainContexts; WARP pipeline vs stock, byte-exact)
 #include "r126_test.h"       // R126: lossless overhead speed-ups (each against the code it replaced)
 #include "r130_test.h"       // R130: read-only DLSS feature lifetime instrumentation (fake NGX core)
+#include "r132_test.h"       // R132: opt-in release of idle DLSS sets (fake NGX core)
+#include "r133_test.h"       // R133: the recorder's motion vectors (exec-time freshness rig, the verify's bracket, dump)
 #include "r111_test.h"      // R111: [Color] PanelGamut (sRGB -> DCI-P3 compensation for a wide-gamut panel)
 #include "log_phrases_test.h"  // R107: the log phrases DCS Control parses stay in the source byte-exact
 #include "ini_keys_test.h"  // R107: every key the app writes is still read (live or retired)
@@ -429,8 +431,20 @@ int main() {
     PrintSummary();
     return g_fail ? 1 : 0;
   }
+  if (getenv("QV_R133_ONLY")) {  // R133: only the recorder motion-vector tests (QV_R95_HW=1: the GPU too)
+    r133test::Run();
+    if (const char* hw = getenv("QV_R95_HW"); hw && atoi(hw) != 0) r133test::Run(true);
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
   if (getenv("QV_R130_ONLY")) {  // R130: only the DLSS lifetime instrumentation tests
     r130test::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
+  if (getenv("QV_R132_ONLY")) {  // R132: only the DLSS idle-set release tests (with R130's, which share the fakes)
+    r130test::Run();
+    r132test::Run();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -445,6 +459,7 @@ int main() {
     r99test::Run();  // R99
     r101test::Run();  // R101
     if (const char* hw = getenv("QV_R95_HW"); hw && atoi(hw) != 0) cktest::r128t::Run(true);  // R128 (GPU too)
+    if (const char* hw = getenv("QV_R95_HW"); hw && atoi(hw) != 0) r133test::Run(true);  // R133 (driver command lists)
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -1869,6 +1884,8 @@ int main() {
   r123test::Run();  // R123: focus twin ([Model] FocusTwin; census TerrainContexts, WARP pipeline byte-exact vs stock)
   r126test::Run();  // R126: lossless overhead speed-ups (cost scopes on the TSC, MatchWorld)
   r130test::Run();  // R130: DLSS feature lifetime instrumentation ([DLSS] Instrument; fake NGX core, read-only)
+  r132test::Run();  // R132: opt-in release of idle DLSS sets ([DLSS] ReleaseIdleSets; fake NGX core)
+  r133test::Run();  // R133: the recorder's motion vectors (exec-time freshness on WARP, the verify's bracket, dump)
   vfxtest::Run();
   // R39 [Threads]: worker placement off DCS's exclusive render core (all keys default 0), census queries.
   tptest::Run();
