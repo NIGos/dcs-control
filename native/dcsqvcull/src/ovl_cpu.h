@@ -1604,8 +1604,21 @@ int MatchWorld(const uint8_t* data, UINT len, const M4& mvp, UINT mvpOff, const 
   for (int r = 0; r < 4; ++r)
     for (int c = 0; c < 4; ++c) sc = std::max(sc, std::fabs(mvp.a[r][c]));
   if (!(sc > 0)) return 0;
+  // R126: vpA and vpB are one object when the replay is not moved (rp.vpDcs twice): the second product is the
+  // first one again, so it is not computed (it cannot match where the first did not).
+  const int kn = &vpA == &vpB ? 1 : 2;
   auto test = [&](UINT o, int ord) -> int {
     if (o + 64 > len || (o < mvpOff + 64 && mvpOff < o + 64)) return 0;
+    // R126: the affine test first, on the four floats it reads (the same doubles, summed in the same order, as
+    // on the loaded and transposed matrix): most offsets fail it, and they no longer load all 16.
+    {
+      float c3[4];
+      for (int r = 0; r < 4; ++r) memcpy(&c3[r], data + o + 4 * (ord ? r * 4 + 3 : 12 + r), sizeof(float));
+      if (std::fabs(static_cast<double>(c3[0])) + std::fabs(static_cast<double>(c3[1])) +
+              std::fabs(static_cast<double>(c3[2])) + std::fabs(static_cast<double>(c3[3]) - 1) >
+          1e-4)
+        return 0;
+    }
     M4 w = LoadM(data, o);
     if (ord) {
       M4 tr;
@@ -1614,7 +1627,7 @@ int MatchWorld(const uint8_t* data, UINT len, const M4& mvp, UINT mvpOff, const 
       w = tr;
     }
     if (std::fabs(w.a[0][3]) + std::fabs(w.a[1][3]) + std::fabs(w.a[2][3]) + std::fabs(w.a[3][3] - 1) > 1e-4) return 0;
-    for (int k = 1; k <= 2; ++k) {
+    for (int k = 1; k <= kn; ++k) {
       const M4 p = MulM(w, k == 1 ? vpA : vpB);
       double dev = 0;
       for (int r = 0; r < 4; ++r)
