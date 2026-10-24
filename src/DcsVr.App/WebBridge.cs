@@ -836,7 +836,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             notes = PimaxFovea.Notes(s).Skip(1), explanation = PimaxFovea.Explanation, sameLabelNote = PimaxFovea.SameLabelNote,
             eyeResolution = eye is { } e ? new { width = e.Width, height = e.Height,
                 focusWidth = PimaxPlayUnits.FocusPixels(e.Width, c.Width, c.FocusScale), focusHeight = PimaxPlayUnits.FocusPixels(e.Height, c.Height, c.FocusScale),
-                pimaxFocusWidth = PimaxPlayUnits.FocusPixels(e.Width, c.RequestedWidth, 1 + s.GazeResolutionScale * .5), pimaxFocusHeight = PimaxPlayUnits.FocusPixels(e.Height, c.RequestedHeight, 1 + s.GazeResolutionScale * .5) } : null };
+                pimaxFocusWidth = PimaxPlayUnits.FocusPixels(e.Width, c.RequestedWidth, PimaxPlayUnits.FocusDensity(s.GazeResolutionScale)), pimaxFocusHeight = PimaxPlayUnits.FocusPixels(e.Height, c.RequestedHeight, PimaxPlayUnits.FocusDensity(s.GazeResolutionScale)) } : null };
     }
     /// <summary>The Pimax Play fact for checks and readiness, in Pimax Play's own units.</summary>
     private static ValidationIssue? FoveaFact(VrProfile profile)

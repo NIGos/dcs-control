@@ -4,11 +4,12 @@ using System.Text.RegularExpressions;
 
 namespace DcsVr.Core;
 
-/// <summary>Share of one eye's view Pimax leaves OUT of the focus area on each side (runtime_quadviews_fine_fov_*).</summary>
+/// <summary>Pimax Play's per-side focus values for one eye (runtime_quadviews_fine_fov_*). This app sizes the focus at the
+/// percentage Pimax Play shows: Quick 25% is a focus 25% of the view, Fine Left + Right → Center 33% + 10% is 43%.</summary>
 public sealed record PimaxEyeFov(double Left, double Right, double Up, double Down)
 {
-    public double Width => 1 - (Left + Right) / 2;
-    public double Height => 1 - (Up + Down) / 2;
+    public double Width => (Left + Right) / 2;
+    public double Height => (Up + Down) / 2;
 }
 
 /// <summary>Bundled Quad Views values converted from Pimax Play's settings.</summary>
@@ -22,8 +23,8 @@ public sealed record PimaxControl(string Label, string Value);
 
 /// <summary>
 /// Pimax Play's Quad View page as Pimax Play itself shows it. The rules are Pimax Play's own (pimaxui app.asar,
-/// quadviewFov store): Center Resolution = round(100 + gaze × 100); Peripheral Resolution = round(1 + periphery × 99)
-/// (0.1919 → 20); Quick FOV = round(stored × 100); Fine "→ Center" = floor(stored × 50) (0.66 → 33, 0.20 → 10; 0.99 → 50);
+/// quadviewFov store): Center Resolution = round(50 + gaze × 250) (0.28 → 120); Peripheral Resolution = round(1 + periphery × 99)
+/// (0.1414 → 15); Quick FOV = round(stored × 100); Fine "→ Center" = floor(stored × 50) (0.66 → 33, 0.20 → 10; 0.99 → 50);
 /// Vertical Offset = round(−100 + (stored + 0.5) × 200); Transition Range and Alpha = round(stored × 100);
 /// Transition Mode −1 Off, 1 Alpha, anything else Linear. Missing values show Pimax Play's defaults.
 /// </summary>
@@ -92,14 +93,14 @@ public sealed record AppliedFovea(string? Stamp, double FoveaWidth, double Fovea
 
 /// <summary>
 /// Pimax Play's units, with Pimax Play's own conversion and rounding, and the Quick-style units a profile's own focus
-/// values are edited in. Pimax's Quick and Fine modes use the same "%" for different sizes: Quick Horizontal FOV q leaves
-/// a focus of 100 − q % of the view; Fine "Left → Center" p and "Right → Center" p' leave 100 − p − p' %.
+/// values are edited in. The focus is the percentage Pimax Play shows: Quick Horizontal FOV q is a focus q % of the view
+/// wide; Fine "Left → Center" p and "Right → Center" p' add up to a focus p + p' % wide.
 /// </summary>
 public static class PimaxPlayUnits
 {
     /// <summary>JavaScript's Math.round (half up), which Pimax Play uses.</summary>
     public static double JsRound(double value) => Math.Floor(value + .5);
-    public static int CenterResolution(double gaze) => (int)JsRound(100 + Math.Clamp(gaze, 0, 1) * 100);
+    public static int CenterResolution(double gaze) => (int)JsRound(50 + Math.Clamp(gaze, 0, 1) * 250);
     public static int PeripheralResolution(double periphery) => (int)JsRound(1 + Math.Clamp(periphery, 0, 1) * 99);
     public static int QuickFov(double? stored) => (int)Math.Clamp(JsRound((stored is > 0 ? stored.Value : .33) * 100), 5, 90);
     /// <summary>Pimax Play floors stored × 50. The stored value is a float32 (0.58 is kept as 0.5799999833), so a 1e-4
@@ -119,13 +120,18 @@ public static class PimaxPlayUnits
     public static double FineStored(int value) => value >= 50 ? .99 : Math.Round(value / 50.0, 4);
 
     // A profile's own focus values in Pimax Play's Quick units, converted exactly like Pimax Quick (stored to 4 decimals as Pimax does).
-    public static double QuickFovFromShare(double share) => (1 - share) * 100;
-    public static double ShareFromQuickFov(double quickFov) => Math.Round(1 - Math.Round(quickFov * .01, 4), 10);
-    public static double CenterFromDensity(double density) => 100 + (density - 1) * 200;
-    public static double DensityFromCenter(double center) => Math.Round(1 + Math.Round((center - 100) / 100, 4) * .5, 10);
-    public static double PeripheralPercent(double periphery) => 1 + periphery * 99;
-    public static double PeripheryFromPercent(double percent) => Math.Round((percent - 1) / 99, 4);
-    /// <summary>A profile's own focus values in Pimax Play's Quick units, e.g. "43% × 66% · 125% · 20%" for 0.57 × 0.34, 1.125, 0.19.</summary>
+    public static double QuickFovFromShare(double share) => share * 100;
+    public static double ShareFromQuickFov(double quickFov) => Math.Round(quickFov * .01, 4);
+    // Pimax's runtime turns the stored gaze and periphery values into pixel densities (pvr_client log, Pimax Play 2026-10:
+    // gaze 0.28 → m_focusPixelDensity 1.2; periphery 0.1414 → m_peripheralPixelDensity 0.148572, 0.1919 → 0.198).
+    public static double FocusDensity(double gaze) => .5 + gaze * 2.5;
+    public static double PeripheryDensity(double periphery) => .01 + periphery * .98;
+    /// <summary>Center Resolution is the focus pixel density in %, so 120% is 1.2×.</summary>
+    public static double CenterFromDensity(double density) => density * 100;
+    public static double DensityFromCenter(double center) => Math.Round(center / 100, 4);
+    public static double PeripheralPercent(double density) => 1 + (density - .01) / .98 * 99;
+    public static double PeripheryFromPercent(double percent) => Math.Round(PeripheryDensity(Math.Round((percent - 1) / 99, 4)), 4);
+    /// <summary>A profile's own focus values in Pimax Play's Quick units, e.g. "57% × 34% · 113% · 19%" for 0.57 × 0.34, 1.125, 0.19.</summary>
     public static string ProfileShort(VrProfile p) =>
         FormattableString.Invariant($"{JsRound(QuickFovFromShare(p.FoveaWidth))}% × {JsRound(QuickFovFromShare(p.FoveaHeight))}% · {JsRound(CenterFromDensity(p.QuadFocusScale))}% · {JsRound(PeripheralPercent(p.PeripheralScale))}%");
     /// <summary>Focus pixels per eye along one axis, rounded to an even count as Pimax's runtime does (matches its logged
@@ -134,12 +140,12 @@ public static class PimaxPlayUnits
 }
 
 /// <summary>
-/// Converts Pimax Play's Quad View settings to bundled Quad-Views-Foveated values. Verified against Pimax's runtime log
-/// (pvr_client_DCS_log.txt) on a Crystal Super: runtime_quadviews_fine_fov_&lt;eye&gt;_&lt;side&gt; is the share EXCLUDED on that
-/// side ("fine fov left eye: L=0.34" for a stored 0.66), so the focus width is 1 − (left + right) / 2 and the height
-/// 1 − (up + down) / 2 (Quick 33 % → 0.67 × 0.67 → 4088×4038 at 5424×5356 × 1.125; Fine 0.66/0.20 → 0.57 × 0.34 → 3478×2048).
-/// The focus pixel density is 1 + gaze_resolution_scale × 0.5 (0.25 → logged m_focusPixelDensity 1.125); the periphery is
-/// periphery_resolution_scale (0.1919; Pimax logs m_peripheralPixelDensity 0.198 for it).
+/// Converts Pimax Play's Quad View settings to bundled Quad-Views-Foveated values. The focus is the percentage Pimax Play
+/// shows (product rule): width (left + right) / 2 and height (up + down) / 2 of the stored values, so Quick 25 % is 0.25 × 0.25
+/// and Fine 0.66/0.20 (33/10 → Center) is 0.43. Pimax's own runtime renders 1 − that instead ("fine fov left eye: L=0.75" for
+/// Quick 25 %, 4882×4820 at 5424×5356 × 1.2).
+/// The focus pixel density is 0.5 + gaze_resolution_scale × 2.5, i.e. Center Resolution / 100 (0.28 → logged
+/// m_focusPixelDensity 1.2 with Pimax Play 2026-10); the periphery is 0.01 + periphery_resolution_scale × 0.98 (0.1414 → 0.148572).
 /// </summary>
 public static class PimaxFovea
 {
@@ -147,8 +153,8 @@ public static class PimaxFovea
     public static string SettingsPath { get; set; } = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Pimax", "AppConfig", "global.json");
     /// <summary>Quad-Views-Foveated caps each focus axis at 90 %.</summary>
     public const double ProviderCap = .9;
-    public const string SameLabelNote = "Pimax Play's Quick and Fine modes use the same % for different sizes: Quick Horizontal FOV 33% leaves a focus of 67% of the view, while Fine Left → Center 33% and Right → Center 10% leave 57%.";
-    public const string Explanation = "Pimax Play's runtime renders the focus as the view minus what each slider leaves outside it: Quick, 100% − Horizontal or Vertical FOV per axis; Fine, 100% − Left → Center − Right → Center (and Top/Bottom). Center Resolution 125% is a 1.125× pixel density in Pimax's runtime log; the periphery factor is used as stored (Peripheral Resolution 20% is 0.1919). Verified against the focus resolutions Pimax logs (Quick 33% → 4088×4038, Fine 33/10 · 33/33 → 3478×2048 per eye at 5424×5356).";
+    public const string SameLabelNote = "The focus is the percentage shown in Pimax Play: Quick Horizontal FOV 25% is a focus 25% of the view wide; Fine Left → Center 33% and Right → Center 10% add up to 43%.";
+    public const string Explanation = "The focus is the percentage shown in Pimax Play: Quick, Horizontal and Vertical FOV per axis; Fine, Left → Center + Right → Center (and Top + Bottom). Center Resolution 120% is a 1.2× pixel density, as in Pimax's runtime log, and Peripheral Resolution 15% is 0.149.";
 
     public static bool UsesPimaxPlay(VrProfile profile) =>
         profile.FoveaSource == FoveaSource.PimaxPlay && profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory);
@@ -224,7 +230,7 @@ public static class PimaxFovea
         var width = (left.Width + right.Width) / 2; var height = (left.Height + right.Height) / 2;
         double Axis(double value) => Math.Clamp(value, .1, ProviderCap);
         var asymmetric = Math.Abs(left.Left - left.Right) > .005 || Math.Abs(right.Left - right.Right) > .005 || Math.Abs(left.Up - left.Down) > .005 || Math.Abs(right.Up - right.Down) > .005;
-        return new(Axis(width), Axis(height), Math.Clamp(1 + gazeScale * .5, .5, 2), Math.Clamp(peripheryScale, .15, 1), transition,
+        return new(Axis(width), Axis(height), Math.Clamp(PimaxPlayUnits.FocusDensity(gazeScale), .5, 2), Math.Clamp(PimaxPlayUnits.PeripheryDensity(peripheryScale), .15, 1), transition,
             width, height, width > ProviderCap || height > ProviderCap, asymmetric);
     }
 
@@ -243,16 +249,14 @@ public static class PimaxFovea
     public static string? CapNote(PimaxQuadViewsSettings pimax)
     {
         var c = pimax.Converted; if (!c.Clamped) return null;
-        // In Pimax Play's units the share outside the focus is Quick's FOV value, or Fine's Left + Right (Top + Bottom) → Center.
-        // It comes from the runtime values, which are what Pimax renders.
+        // In Pimax Play's units the focus is Quick's FOV value, or Fine's Left + Right (Top + Bottom) → Center.
         var p = pimax.Play; var parts = new List<string>();
-        int Outside(double share) => (int)PimaxPlayUnits.JsRound((1 - share) * 100);
+        int Shown(double share) => (int)PimaxPlayUnits.JsRound(share * 100);
         if (c.RequestedWidth > ProviderCap)
-            parts.Add(p.Fine ? FormattableString.Invariant($"Left + Right → Center add up to {Outside(c.RequestedWidth)}%") : FormattableString.Invariant($"Horizontal FOV is {Outside(c.RequestedWidth)}%"));
+            parts.Add(p.Fine ? FormattableString.Invariant($"Left + Right → Center add up to {Shown(c.RequestedWidth)}%") : FormattableString.Invariant($"Horizontal FOV is {Shown(c.RequestedWidth)}%"));
         if (c.RequestedHeight > ProviderCap)
-            parts.Add(p.Fine ? FormattableString.Invariant($"Top + Bottom → Center add up to {Outside(c.RequestedHeight)}%") : FormattableString.Invariant($"Vertical FOV is {Outside(c.RequestedHeight)}%"));
-        return $"In Pimax Play {string.Join(" and ", parts)}. Bundled Quad Views renders a focus of at most 90% of the view, which is "
-            + (p.Fine ? "Left + Right (or Top + Bottom) → Center adding up to 10%" : "Horizontal and Vertical FOV 10%") + ", so it renders that instead.";
+            parts.Add(p.Fine ? FormattableString.Invariant($"Top + Bottom → Center add up to {Shown(c.RequestedHeight)}%") : FormattableString.Invariant($"Vertical FOV is {Shown(c.RequestedHeight)}%"));
+        return $"In Pimax Play {string.Join(" and ", parts)}. Bundled Quad Views renders a focus of at most 90% of the view, so it renders 90%.";
     }
 
     /// <summary>Plain facts about the Pimax values, for the interface, Preview and readiness.</summary>
@@ -267,12 +271,12 @@ public static class PimaxFovea
                 : "Pimax's runtime values place the focus off-centre. Bundled Quad Views centres the focus on your gaze, with the same total size.");
         if (pimax.FromQuickSliders) notes.Add("Pimax Play has no per-side values saved yet, so the Quick sliders are used.");
         if (!c.Transition) notes.Add("Pimax Play's Transition Mode is Off, so edge blending is 0.");
-        var requestedFocus = 1 + pimax.GazeResolutionScale * .5;
+        var requestedFocus = PimaxPlayUnits.FocusDensity(pimax.GazeResolutionScale);
         if (Math.Abs(requestedFocus - c.FocusScale) > 1e-9)
             notes.Add(FormattableString.Invariant($"Pimax's stored Center Resolution (gaze scale {Number(pimax.GazeResolutionScale)}, a {Number(requestedFocus)}× pixel density) is outside what bundled Quad Views renders (0.5× to 2×), so it is clamped to {Number(c.FocusScale)}×."));
-        notes.Add(Math.Abs(pimax.PeripheryResolutionScale - c.PeripheralScale) > 1e-9
-            ? FormattableString.Invariant($"Peripheral Resolution {p.PeripheralResolution}% ({Number(pimax.PeripheryResolutionScale)}) is below what this app writes, so it is clamped to 0.15 (Peripheral Resolution 16%).")
-            : FormattableString.Invariant($"Peripheral Resolution {p.PeripheralResolution}% is used as stored ({Number(pimax.PeripheryResolutionScale)}; Pimax's runtime log reports a peripheral pixel density of about 0.198 for 0.1919)."));
+        var requestedPeriphery = PimaxPlayUnits.PeripheryDensity(pimax.PeripheryResolutionScale);
+        if (Math.Abs(requestedPeriphery - c.PeripheralScale) > 1e-9)
+            notes.Add(FormattableString.Invariant($"Peripheral Resolution {p.PeripheralResolution}% (a {Number(requestedPeriphery)}× pixel density) is below what bundled Quad Views renders, so it is clamped to 0.15× (Peripheral Resolution 16%)."));
         return notes;
     }
 
