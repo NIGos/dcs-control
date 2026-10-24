@@ -141,8 +141,8 @@ Test("Neural tuning validates all runtime ranges", () =>
 });
 Test("Neural ABI compatibility is explicit", () =>
 {
-    Require(NativeBinary.SupportsNeuralContract("310,8,0,0") && NativeBinary.SupportsNeuralContract("310.8.0.0"));
-    foreach (var version in new string?[] { null, "310.2.1.0", "310.9.1.0", "junk", "310.80.0.0" }) Require(!NativeBinary.SupportsNeuralContract(version));
+    Require(NativeBinary.SupportsNeuralContract("310,8,0,0") && NativeBinary.SupportsNeuralContract("310.8.0.0") && NativeBinary.SupportsNeuralContract("310,9,16,0"));
+    foreach (var version in new string?[] { null, "310.2.1.0", "310.10.0.0", "311.0.0.0", "junk", "310.80.0.0", "310.90.0.0" }) Require(!NativeBinary.SupportsNeuralContract(version));
 });
 Test("Unknown JSON settings rejected", () => Throws<System.Text.Json.JsonException>(() => JsonData.Deserialize<VrProfile>("{\"fakeSetting\":1}")));
 Test("Cheeky uses real settings schema", () => { var schema = File.ReadAllText(Path.Combine(workspace, "external/cheeky/uevr/settings_fields.inc")); foreach (var key in ConfigurationWriters.Cheeky(new()).Split('\n').Where(l => l.Contains('=')).Select(l => l.Split('=')[0].Trim()).Where(k => k != "SchemaVersion")) Require(schema.Contains(key, StringComparison.Ordinal), key); });
