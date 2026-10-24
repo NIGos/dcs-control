@@ -1,3 +1,41 @@
+# 0.6.0 preview
+
+**Frame generation only when needed** (on by default, with Generated frames on Auto). DCS now renders at your headset's full refresh rate, and frames are generated only while DCS falls behind. While DCS keeps up, its own frames go straight to the headset: no added latency and no generated-frame artifacts. When it can't keep up, Auto 2×/3× takes over, and it switches back once there is headroom again. It needs the DCS frame limit at **Match refresh** (90 FPS at 90 Hz); Checks tells you when your limit is lower. The Last flight summary shows how much of the flight needed no generated frames.
+
+**Steadier frame generation.** Auto no longer jumps back and forth between 2× and 3×. In 2×, the Smoothness buffer now really holds its extra frame in DCS (before, it didn't): far fewer late frames, for the one refresh of latency (about 11 ms at 90 Hz) the buffer always had. The frame-generation log no longer slows DCS's render thread. Leaving the F10 map and changes of refresh rate are handled more smoothly.
+
+**Visual realism** (new page, everything off by default):
+- **Color mode** (with an optional in-flight key; Alt+Shift+F9 is free): *Fix* corrects DCS's VR color faults (greyish blacks, a brightness step in the left eye); *Enhanced* adds richer, filmic color and eyes that adapt to light and dark.
+- **Panel color correction** for the Crystal Super's wide-gamut panels, which make DCS's colors look over-saturated.
+- **Night vision**: at night, dim areas lose color as your eyes do in moonlight; lights, instruments and the HUD keep theirs.
+- **Light glare**: a soft halo around the sun, landing lights, strobes, fires and afterburners.
+- **Eye-focus blur** (EXPERIMENTAL): what is nearer or farther than where you look goes slightly soft, and turns sharp the moment your eyes move. Needs Quad Views with eye tracking.
+- **Realistic G vision loss**: grey-out, tunnel vision and blackout under G, centered on your gaze, without doubling DCS's own G effect.
+
+Each costs about 0.04 to 0.18 ms of GPU time. They run for VR flights. They were built and tested offline and have not been flown much in a headset yet: try them one at a time and tell us what you see.
+
+**Sharp HUD** (EXPERIMENTAL, Framegen page, off by default): HUD and helmet symbols no longer smear in generated frames; they move at DCS's own HUD rate (about 20 times a second). Needs Depth boost; costs about 0.15 ms of GPU and 160 MB of video memory.
+
+**DLSS presets** (DLSS 5 page): **Focus DLSS preset** picks the DLSS model for the sharp focus area (K, L, M or E). **Periphery DLSS preset** (off by default) uses a lighter model outside the focus area: about 0.3 ms faster per frame, with a little more shimmer at the edge of view on head turns. If the NVIDIA App forces a DLSS preset for DCS, it is hidden from DCS for this option only, inside DCS; no NVIDIA setting is changed. Checks now shows which DLSS preset the NVIDIA driver forces for DCS.
+
+**Engine Optimizations: two new options, both off by default.** **Free unused DLSS memory**: every mission load leaves an unused copy of DLSS in video memory (about 0.7 to 1.4 GB each time); this frees it, which helps long sessions with many mission restarts. **Cache distant shadows** (EXPERIMENTAL): reuses the shadows between about 70 m and 1.5 km for a few frames, about 0.7 ms less GPU time; distant tree shadows then sway a little less smoothly.
+
+**Pimax Play's new version.** Pimax Play changed its Center Resolution scale (now 50 to 300%). DCS Control reads it the new way: Center Resolution 120% is 1.2× pixel density, as Pimax's runtime log confirms; Peripheral Resolution is converted the same way. The focus area of bundled Quad Views is now exactly the percentage Pimax Play shows: Horizontal FOV 25% gives a sharp area 25% of the view wide. **If you used Pimax Play's values before, your focus area may now be smaller than in 0.5.10**: raise Horizontal and Vertical FOV in Pimax Play if you want it bigger. Pimax's own (native) Quad Views sizes its focus differently from the same sliders.
+
+**Clearer pages.** Option texts were rewritten to say plainly what each one does and costs. The Framegen and DLSS 5 pages are grouped into Image quality and DLSS presets; developer options moved under Advanced; Ctrl+0 opens the OSD page. The Feature guide has cards for the new options.
+
+**Fixes**:
+- Updating DCS Control re-applies your profile when the new version writes different settings, so new defaults reach existing profiles.
+- Last flight counts frame-generation results correctly.
+- Frame-generation logs rotate instead of growing; a DCS shutdown no longer risks a crash while the log closes.
+- Old test and log folders are pruned safely.
+
+**Honest limits**:
+- Still an early beta, flown mostly on one PC (Pimax Crystal Super, RTX 5090, Windows 11, single player).
+- Visual realism, Sharp HUD, Eye-focus blur and Cache distant shadows are new and lightly flown.
+- Multiplayer and server integrity checks are still untested; use Back to stock DCS before joining a server or updating DCS.
+- Frame generation still adds latency whenever frames are generated, more in 3× than in 2×.
+
 # 0.5.10 preview
 
 **DLSS 5 on RTX 20, 30 and 40 cards (GitHub #4)**: NVIDIA's DLSS 5 runtime runs only on RTX 50 cards; on older cards DLSS 5 showed "ON but not applied". Community patches rewrite the runtime's GPU code for RTX 20, 30 and 40 cards, which breaks NVIDIA's signature, so DCS Control refused the patched file. Now a file you select with Browse is accepted when it is still NVIDIA's x64 nvngx_dlssnr.dll, version 310.8, with no signature or NVIDIA's own (now invalid) one; the saved copy says "NVIDIA's file changed by a compatibility patch". A file validly signed by anyone else is still refused, and Detect my setup only ever picks files with a valid NVIDIA signature. The patched file is not an NVIDIA release: use it at your own risk.
