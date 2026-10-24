@@ -40,13 +40,13 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g,c => ({'&':'&amp;
 const empty = value => value.trim() || null;
 const num = value => String(Number(Number(value).toFixed(4)));
 /** A profile's own focus values in Pimax Play's Quick units, converted exactly like Pimax Quick (Pimax stores 4 decimals):
- *  Horizontal/Vertical FOV q leaves a focus of 1 − q of the view; Center Resolution c is a pixel density of
- *  1 + (c − 100) / 200 (125% → 1.125); Peripheral Resolution r is a factor of (r − 1) / 99 (20% → 0.1919). */
+ *  Horizontal/Vertical FOV q is a focus q of the view (the percentage Pimax Play shows); Center Resolution c is a pixel density of c / 100
+ *  (120% → 1.2); Peripheral Resolution r is a density of 0.01 + 0.98 × (r − 1) / 99 (15% → 0.1486). */
 const fixed4 = v => Number(v.toFixed(4));
 const PIMAX = {
-  quickFromShare: s => (1 - s) * 100, shareFromQuick: q => Number((1 - fixed4(q * .01)).toFixed(10)),
-  centerFromDensity: d => 100 + (d - 1) * 200, densityFromCenter: c => Number((1 + fixed4((c - 100) / 100) * .5).toFixed(10)),
-  peripheralPercent: r => 1 + r * 99, peripheryFromPercent: v => fixed4((v - 1) / 99)
+  quickFromShare: s => s * 100, shareFromQuick: q => fixed4(q * .01),
+  centerFromDensity: d => d * 100, densityFromCenter: c => fixed4(c / 100),
+  peripheralPercent: d => 1 + (d - .01) / .98 * 99, peripheryFromPercent: v => fixed4(.01 + fixed4((v - 1) / 99) * .98)
 };
 /** Shown like Pimax Play shows its sliders: whole percent, rounded half up. Stored values change only when edited. */
 const whole = v => Math.round(v);
@@ -246,7 +246,7 @@ function featureSummary(key, p) {
     if (p.quadViews === 'PimaxNative') return 'Pimax native · ' + (state?.pimax?.found ? 'Pimax ' + state.pimax.short : 'uses Pimax Play settings');
     const e = effectiveFovea(p), gaze = p.gaze === 'EyeTracked' ? 'eye tracked' : 'fixed';
     if (p.quadViewsLayerDirectory) return 'Alternative provider · '+gaze;
-    // In Pimax Play's units: "Pimax Quick 33% × 33% · 125% · 20%", or this profile's values in the same Quick units.
+    // In Pimax Play's units: "Pimax Quick 33% × 33% · 113% · 20%", or this profile's values in the same Quick units.
     if (pimaxSource(p)) return `Bundled · ${gaze} · ` + (state?.pimax?.found ? 'from Pimax Play\'s settings: ' + state.pimax.short : 'Pimax Play not found, profile values');
     return `Bundled · ${gaze} · profile ${profileQuick(p)}`;
   }
@@ -503,10 +503,10 @@ function buildFields() {
   const pimaxBox = document.createElement('div'); pimaxBox.id = 'pimaxFovea'; pimaxBox.className = 'pimax-fovea'; pimaxBox.hidden = true; c.append(pimaxBox);
   // This profile's own focus with bundled Quad Views, edited like Pimax Play's Quick sliders and converted exactly as Pimax converts them.
   const ownFocusHidden = p => p.quadViews !== 'QuadViewsFoveated' || pimaxSource(p);
-  field(c,'quadFocusScale','Center resolution','Detail inside the focus area, as in Pimax Play. Above 100% is sharper and costs more GPU.','number',[100,200,1],quad,'%',ownFocusHidden,{prop:'quadFocusScale',get:p => whole(PIMAX.centerFromDensity(p.quadFocusScale)),set:(p,v) => p.quadFocusScale = PIMAX.densityFromCenter(v)});
+  field(c,'quadFocusScale','Center resolution','Detail inside the focus area, as in Pimax Play. Above 100% is sharper and costs more GPU.','number',[50,200,1],quad,'%',ownFocusHidden,{prop:'quadFocusScale',get:p => whole(PIMAX.centerFromDensity(p.quadFocusScale)),set:(p,v) => p.quadFocusScale = PIMAX.densityFromCenter(v)});
   field(c,'pimaxPeripheral','Peripheral resolution','Resolution around the focus area, as in Pimax Play. Lower saves GPU; bundled Quad Views needs at least 16%.','number',[16,100,1],quad,'%',ownFocusHidden,{prop:'peripheralScale',get:p => whole(PIMAX.peripheralPercent(p.peripheralScale)),set:(p,v) => p.peripheralScale = PIMAX.peripheryFromPercent(v)});
-  field(c,'pimaxHorizontalFov','Horizontal FOV','As in Pimax Play\'s Quick mode: the part of the view left outside the focus area. 33% gives a focus area 67% of the view wide.','number',[5,90,1],quad,'%',ownFocusHidden,{prop:'foveaWidth',get:p => whole(PIMAX.quickFromShare(p.foveaWidth)),set:(p,v) => p.foveaWidth = PIMAX.shareFromQuick(v)});
-  field(c,'pimaxVerticalFov','Vertical FOV','As in Pimax Play\'s Quick mode: 33% gives a focus area 67% of the view tall.','number',[5,90,1],quad,'%',ownFocusHidden,{prop:'foveaHeight',get:p => whole(PIMAX.quickFromShare(p.foveaHeight)),set:(p,v) => p.foveaHeight = PIMAX.shareFromQuick(v)});
+  field(c,'pimaxHorizontalFov','Horizontal FOV','As in Pimax Play\'s Quick mode: the focus area\'s share of the view. 25% is a focus area a quarter of the view wide.','number',[10,90,1],quad,'%',ownFocusHidden,{prop:'foveaWidth',get:p => whole(PIMAX.quickFromShare(p.foveaWidth)),set:(p,v) => p.foveaWidth = PIMAX.shareFromQuick(v)});
+  field(c,'pimaxVerticalFov','Vertical FOV','As in Pimax Play\'s Quick mode: the focus area\'s share of the view, top to bottom.','number',[10,90,1],quad,'%',ownFocusHidden,{prop:'foveaHeight',get:p => whole(PIMAX.quickFromShare(p.foveaHeight)),set:(p,v) => p.foveaHeight = PIMAX.shareFromQuick(v)});
   // Stereo Cheeky (DLSS 5 or Foveated Super Resolution without Quad Views) sizes its own focus as fractions of the view.
   const stereoHidden = p => p.quadViews !== 'None';
   field(c,'foveaWidth','Focus width','Without Quad Views: how much of the view\'s width is in full detail (1 = all of it).','number',[.1,1,.01],coverageOwned,'ratio',stereoHidden);
@@ -790,14 +790,14 @@ function renderPimax() {
   let how = `<p class="fine">Pimax native Quad Views applies these values itself. Nothing is written to Pimax.</p>`;
   if (mode === 'bundled') {
     const c = pimax.converted, e = effectiveFovea(profile), r = pimax.eyeResolution, share = v => num(v*100)+'%';
-    const pixels = r ? `<dt>Focus per eye at ${r.width} × ${r.height}</dt><dd>${r.focusWidth} × ${r.focusHeight} px</dd>` + (c.clamped ? `<dt>Pimax's own focus per eye</dt><dd>${r.pimaxFocusWidth} × ${r.pimaxFocusHeight} px</dd>` : '') : '';
+    const pixels = r ? `<dt>Focus per eye at ${r.width} × ${r.height}</dt><dd>${r.focusWidth} × ${r.focusHeight} px</dd>` + (c.clamped ? `<dt>Requested focus per eye</dt><dd>${r.pimaxFocusWidth} × ${r.pimaxFocusHeight} px</dd>` : '') : '';
     const notes = pimax.notes.filter(n => n !== pimax.mismatch && n !== pimax.capNote).map(n => `<p class="pimax-note">${escape(n)}</p>`).join('');
     how = `<details class="pimax-details"${open ? ' open' : ''}><summary>How bundled Quad Views reproduces this</summary><p class="fine">${escape(pimax.sameLabelNote)}</p>`
       + `<dl class="pimax-values"><dt>Focus share of the view</dt><dd>${share(c.width)} × ${share(c.height)}</dd><dt>Focus pixel density</dt><dd>${num(c.focusScale)}×</dd><dt>Peripheral factor</dt><dd>${num(c.peripheralScale)}</dd><dt>Edge blending</dt><dd>${num(e.blend)}</dd>${pixels}</dl>`
       + (r ? `<p class="fine">${r.width} × ${r.height} is the per-eye resolution the headset runtime recommended in DCS's last session; sizes are rounded to an even pixel count as Pimax's runtime does.</p>` : '')
       + `${notes}<p class="fine">${escape(pimax.explanation)}</p></details>`;
   }
-  box.innerHTML = `<div class="pimax-head"><div><b>Pimax Play · ${escape(pimax.mode)} mode</b><small>${escape(pimax.path)} · saved ${new Date(pimax.modified).toLocaleString('en-GB')}</small></div>${reread}</div>${controls}${warnings}${how}`;
+  box.innerHTML = `<div class="pimax-head"><div><b>Pimax Play · ${escape(pimax.mode)} mode</b><small>${escape(pimax.path)} · saved ${new Date(pimax.modified).toLocaleString('en-GB')}</small></div>${reread}</div>${controls}${mode === 'bundled' ? '<p class="fine">Focus area = the percentage shown in Pimax Play.</p>' : ''}${warnings}${how}`;
 }
 // ---- Saved DLSS 5 runtime -----------------------------------------------------------------------------------------
 /** Verifies the file and keeps it as the app's copy; the draft is not changed. */
@@ -1029,10 +1029,10 @@ function updateControls() {
     help.textContent = f.description + (clamped ? ` Without Quad Views the minimum is ${CHEEKY_MIN}, so ${CHEEKY_MIN} is written.` : '');
     f.element.classList.toggle('clamped', clamped);
   });
-  // Bundled Quad Views renders at most 90% of the view per axis: Horizontal or Vertical FOV 10% in Pimax Play's Quick units.
+  // Bundled Quad Views renders at most 90% of the view per axis: Horizontal or Vertical FOV 90% in Pimax Play's Quick units.
   fields.filter(f => ['pimaxHorizontalFov','pimaxVerticalFov'].includes(f.path)).forEach(f => {
-    const value = f.map.get(profile), capped = quad(profile) && !pimaxSource(profile) && PIMAX.quickFromShare(profile[f.path === 'pimaxHorizontalFov' ? 'foveaWidth' : 'foveaHeight']) < 10 - 1e-9;
-    $('help-'+f.path).textContent = f.description + (capped ? ` Bundled Quad Views renders a focus area of at most 90% of the view, so ${value}% renders as 10%.` : '');
+    const value = f.map.get(profile), capped = quad(profile) && !pimaxSource(profile) && PIMAX.quickFromShare(profile[f.path === 'pimaxHorizontalFov' ? 'foveaWidth' : 'foveaHeight']) > 90 + 1e-9;
+    $('help-'+f.path).textContent = f.description + (capped ? ` Bundled Quad Views renders a focus area of at most 90% of the view, so ${value}% renders as 90%.` : '');
     f.element.classList.toggle('clamped', capped);
   });
   const e = effectiveFovea(profile), owns = coverageOwned(profile);

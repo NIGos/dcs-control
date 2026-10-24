@@ -397,14 +397,14 @@ internal static class WebVerification
                 if (!shown.StartsWith("Ready to fly|", StringComparison.Ordinal) || !shown.Contains("Pimax Play changed: focus will be updated to", StringComparison.Ordinal)) throw new IOException("The Pimax change is not announced: " + shown);
                 await Capture("pimax-changed");
                 if (await Await("window.dcsUi.run('launch')") is var second && second != "done") throw new IOException("Launch after a Pimax change failed: " + second);
-                var expected = "Pimax Play changed: focus updated to " + (fine ? "Fine 33/10 · 33/33 · 150% · 20%" : "Quick 33% × 33% · 150% · 20%") + ".";
+                var expected = "Pimax Play changed: focus updated to " + (fine ? "Fine 33/10 · 33/33 · 175% · 20%" : "Quick 33% × 33% · 175% · 20%") + ".";
                 var status = await Text("window.dcsUi.state.status");
                 if (!status.StartsWith(expected, StringComparison.Ordinal) || !status.Contains("DCS was not started", StringComparison.Ordinal)) throw new IOException("Unexpected launch status: " + status);
                 var journal = service.Originals.ReadCurrent() ?? throw new IOException("The applied profile disappeared.");
                 if (journal.Id != appliedJournal.Id || service.Originals.Status().Count != originalCount) throw new IOException("The Pimax change was not applied in place.");
                 var settings = journal.Entries.Single(e => e.Path == settingsBefore.Path);
                 if (settings.InstalledSha256 == settingsBefore.InstalledSha256 || settings.InstalledSha256 != Hashing.FileSha256(settings.Path)
-                    || !File.ReadAllText(settings.Path).Contains("focus_multiplier=1.25", StringComparison.Ordinal)) throw new IOException("The applied profile does not record the updated settings.");
+                    || !File.ReadAllText(settings.Path).Contains("focus_multiplier=1.75", StringComparison.Ordinal)) throw new IOException("The applied profile does not record the updated settings.");
                 if (journal.Entries.Where(e => e.Path != settings.Path && !e.Path.EndsWith(AppliedFovea.FileName, StringComparison.OrdinalIgnoreCase)).Any(e => e.InstalledSha256 != appliedJournal.Entries.Single(x => x.Path == e.Path).InstalledSha256))
                     throw new IOException("Files other than the Pimax-derived settings changed.");
                 if (await Text("document.getElementById('statusTitle').textContent") != "Ready to fly") throw new IOException("Not Ready to fly after the update.");

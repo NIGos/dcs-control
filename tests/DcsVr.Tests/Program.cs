@@ -2519,28 +2519,31 @@ Test("Setup detection reads the Sboys route, tracking, gaze, refresh and Pimax Q
     var result = SetupDetection.Detect(ProfilePresets.All.Single(x => x.Id == "pimax-combined"), inventory, sources);
     var p = result.Profile;
     Require(result.Active.Route == RuntimeKind.SboysSteamVr && p.Runtime == RuntimeKind.SboysSteamVr && p.Tracking == TrackingKind.Slam && p.Gaze == GazeMode.EyeTracked);
-    // Fine mode 0.66 outward / 0.20 toward the nose / 0.66 up and down: Pimax logged a 3478×2048 focus, 0.57 × 0.34 of 5424×5356 at 1.125.
-    Require(p.HeadsetRefreshHz == 72 && Math.Abs(p.QuadFocusScale - 1.125) < 1e-9 && Math.Abs(p.PeripheralScale - .1919) < 1e-9 && Math.Abs(p.FoveaWidth - .57) < 1e-9 && Math.Abs(p.FoveaHeight - .34) < 1e-9 && p.QuadEdgeBlend == .2);
+    // Fine mode 33/10 → Center left and right, 33/33 top and bottom: a focus of the percentages Pimax Play shows, 0.43 × 0.66 at 1.125.
+    Require(p.HeadsetRefreshHz == 72 && Math.Abs(p.QuadFocusScale - 1.125) < 1e-9 && Math.Abs(p.PeripheralScale - .198062) < 1e-9 && Math.Abs(p.FoveaWidth - .43) < 1e-9 && Math.Abs(p.FoveaHeight - .66) < 1e-9 && p.QuadEdgeBlend == .2);
     Require(p.FoveaSource == FoveaSource.PimaxPlay && p.Id == "pimax-combined" && result.Detected.Count >= 8); // identity is left to the interface's naming
-    Require(result.Notes.Any(n => n.StartsWith("Pimax Play · Fine: Center Resolution 125%, Peripheral Resolution 20%, Top → Center 33%")) && result.Notes.Any(n => n.Contains("centres the focus on your gaze")));
+    Require(result.Notes.Any(n => n.StartsWith("Pimax Play · Fine: Center Resolution 113%, Peripheral Resolution 20%, Top → Center 33%")) && result.Notes.Any(n => n.Contains("centres the focus on your gaze")));
     // Detection shows Pimax Play's own labels and values, not converted fractions.
-    Require(result.Detected.Single(d => d.Label == "L-Eye Right → Center").Value == "10%" && result.Detected.Single(d => d.Label == "Center Resolution").Value == "125%" && result.Detected.All(d => d.Label != "Focus width"));
+    Require(result.Detected.Single(d => d.Label == "L-Eye Right → Center").Value == "10%" && result.Detected.Single(d => d.Label == "Center Resolution").Value == "113%" && result.Detected.All(d => d.Label != "Focus width"));
     Require(!ProfileValidation.Validate(p).Any(i => i.Code == "peripheral-scale"));
 });
-Test("Pimax Play's stored values are the share left out on each side, not the focus size", () =>
+Test("The focus is the percentage Pimax Play shows", () =>
 {
-    // Quick 33 %: the runtime stores 0.33 per side and logs a 4088×4038 focus at 5424×5356 × 1.125, i.e. 0.67 × 0.67.
+    // Quick 33 %: the runtime stores 0.33 per side; the focus is 0.33 × 0.33 of the view (Pimax's own runtime renders 0.67).
     var quick = PimaxFovea.Read(Make("pimax-quick/global.json", PimaxJson(0, .33, .33, .33, .33)))!;
-    Require(quick.Mode == "Quick" && Math.Abs(quick.Converted.Width - .67) < 1e-9 && Math.Abs(quick.Converted.Height - .67) < 1e-9 && quick.Converted.FocusScale == 1.125 && !quick.Converted.Asymmetric && !quick.Converted.Clamped);
-    Require(Math.Abs(5424 * 1.125 * quick.Converted.Width - 4088) < 5 && Math.Abs(5356 * 1.125 * quick.Converted.Height - 4038) < 5);
+    Require(quick.Mode == "Quick" && Math.Abs(quick.Converted.Width - .33) < 1e-9 && Math.Abs(quick.Converted.Height - .33) < 1e-9 && quick.Converted.FocusScale == 1.125 && !quick.Converted.Asymmetric && !quick.Converted.Clamped);
+    // The user's Pimax Play 2026-10 page: Quick 25 %, Center 120 %, Peripheral 15 % → 0.25 × 0.25 at 1.2, periphery 0.15 (0.1486 clamped).
+    var user = PimaxFovea.Read(Make("pimax-user/global.json", PimaxJson(0, .25, .25, .25, .25, gaze: .28, periphery: .1414)))!;
+    Require(user.Play.CenterResolution == 120 && user.Play.PeripheralResolution == 15 && user.Converted.Width == .25 && user.Converted.Height == .25 && Math.Abs(user.Converted.FocusScale - 1.2) < 1e-9 && user.Converted.PeripheralScale == .15, user.Play.Short);
+    Require(PimaxPlayUnits.FocusPixels(5424, .25, 1.2) == 1628 && PimaxPlayUnits.FocusPixels(5356, .25, 1.2) == 1606);
     // Without saved per-side values the Quick sliders are used; the stale runtime_*_fov_scale pair (0.26/0.37) never is.
     var sliders = PimaxFovea.Read(Make("pimax-sliders/global.json", "{\"runtime_quadviews_gaze_resolution_scale\":0.25,\"runtime_quadviews_periphery_resolution_scale\":0.1919,\"runtime_quadviews_horizontal_fov_scale\":0.26,\"runtime_quadviews_vertical_fov_scale\":0.37,\"piplay_quadviews_quick_horizontal_gaze_fov_scale\":0.33,\"piplay_quadviews_quick_vertical_gaze_fov_scale\":0.33}"))!;
     // Without a transition key Pimax Play shows Linear, so the transition is on.
-    Require(sliders.FromQuickSliders && Math.Abs(sliders.Converted.Width - .67) < 1e-9 && sliders.Converted.Transition && sliders.Play.TransitionMode == "Linear" && sliders.Mismatch is null);
+    Require(sliders.FromQuickSliders && Math.Abs(sliders.Converted.Width - .33) < 1e-9 && sliders.Converted.Transition && sliders.Play.TransitionMode == "Linear" && sliders.Mismatch is null);
     // A focus larger than the bundled provider's 90 % cap is capped and reported in Pimax Play's units.
-    var wide = PimaxFovea.Read(Make("pimax-wide/global.json", PimaxJson(0, .05, .05, .05, .05)))!;
+    var wide = PimaxFovea.Read(Make("pimax-wide/global.json", PimaxJson(0, .95, .95, .95, .95)))!;
     Require(wide.Converted.Clamped && wide.Converted.Width == .9 && Math.Abs(wide.Converted.Height - .9) < 1e-9 && Math.Abs(wide.Converted.RequestedWidth - .95) < 1e-9);
-    Require(PimaxFovea.CapNote(wide) is { } cap && cap.Contains("Horizontal FOV is 5% and Vertical FOV is 5%") && cap.Contains("Horizontal and Vertical FOV 10%") && PimaxFovea.Notes(wide).Contains(cap) && PimaxFovea.CapNote(quick) is null);
+    Require(PimaxFovea.CapNote(wide) is { } cap && cap.Contains("Horizontal FOV is 95% and Vertical FOV is 95%") && cap.Contains("so it renders 90%") && PimaxFovea.Notes(wide).Contains(cap) && PimaxFovea.CapNote(quick) is null);
     Require(PimaxFovea.Read(Path.Combine(root, "pimax-missing.json")) is null && PimaxFovea.Read(Make("pimax-bad/global.json", "{\"runtime_quadviews_gaze_resolution_scale\":\"x\"}")) is null);
 });
 Test("The focus area follows Pimax Play only for bundled Quad Views with Pimax Play as the source, and is never written to Pimax", () =>
@@ -2548,9 +2551,9 @@ Test("The focus area follows Pimax Play only for bundled Quad Views with Pimax P
     var path = Make("pimax-resolve/global.json", PimaxJson(1, .66, .20, .66, .66, transition: -1)); var before = File.ReadAllText(path);
     var p = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FoveaWidth = .5, FoveaHeight = .5, QuadEdgeBlend = .25 };
     var resolved = PimaxFovea.Resolve(p, path);
-    Require(resolved.Applies && Math.Abs(resolved.Profile.FoveaWidth - .57) < 1e-9 && Math.Abs(resolved.Profile.FoveaHeight - .34) < 1e-9 && resolved.Profile.QuadFocusScale == 1.125 && resolved.Profile.QuadEdgeBlend == 0, "Pimax transition off means no edge blending");
+    Require(resolved.Applies && Math.Abs(resolved.Profile.FoveaWidth - .43) < 1e-9 && Math.Abs(resolved.Profile.FoveaHeight - .66) < 1e-9 && resolved.Profile.QuadFocusScale == 1.125 && resolved.Profile.QuadEdgeBlend == 0, "Pimax transition off means no edge blending");
     var quad = ConfigurationWriters.QuadViews(resolved.Profile);
-    Require(quad.Contains("horizontal_focus_section=0.57") && quad.Contains("vertical_focus_section=0.34") && quad.Contains("focus_multiplier=1.125") && quad.Contains("peripheral_multiplier=0.1919"));
+    Require(quad.Contains("horizontal_focus_section=0.43") && quad.Contains("vertical_focus_section=0.66") && quad.Contains("focus_multiplier=1.125") && quad.Contains("peripheral_multiplier=0.198062"), quad);
     Require(PimaxFovea.Resolve(p with { FoveaSource = FoveaSource.Profile }, path).Profile == p with { FoveaSource = FoveaSource.Profile });
     Require(PimaxFovea.Resolve(p with { QuadViews = QuadProvider.PimaxNative }, path) is { Applies: false } native && native.Profile.FoveaWidth == .5);
     Require(PimaxFovea.Resolve(p with { QuadViewsLayerDirectory = "alternative" }, path).Profile.FoveaWidth == .5);
@@ -2562,14 +2565,16 @@ Test("The focus area follows Pimax Play only for bundled Quad Views with Pimax P
     var written = AppliedFovea.From(resolved.Profile, resolved.Pimax!.Stamp);
     Require(PimaxFovea.ChangedSinceApply(resolved.Profile, path: path) is null && PimaxFovea.ChangedSinceApply(p, written, path) is null);
     File.WriteAllText(path, PimaxJson(0, .33, .33, .33, .33, transition: -1));
-    Require(PimaxFovea.ChangedSinceApply(resolved.Profile, path: path) is { } changed && changed.Contains("Pimax Play now: Quick 33% × 33% · 125% · 20%"));
+    Require(PimaxFovea.ChangedSinceApply(resolved.Profile, path: path) is { } changed && changed.Contains("Pimax Play now: Quick 33% × 33% · 113% · 20%"));
     Require(PimaxFovea.ChangedSinceApply(p, written, path) is { } changedDraft && changedDraft.Contains("Pimax Play now: Quick 33% × 33%"));
     Require(PimaxFovea.ChangedSinceApply(p with { FoveaSource = FoveaSource.Profile }, path: path) is null);
 });
 Test("Pimax Play's values are shown with Pimax Play's own conversion and rounding", () =>
 {
     // The rules of Pimax Play's Quad View page (pimaxui quadviewFov store), on the float32 values Pimax stores.
-    Require(PimaxPlayUnits.CenterResolution(.25) == 125 && PimaxPlayUnits.CenterResolution(0) == 100 && PimaxPlayUnits.CenterResolution(1) == 200);
+    Require(PimaxPlayUnits.CenterResolution(.25) == 113 && PimaxPlayUnits.CenterResolution(.28) == 120 && PimaxPlayUnits.CenterResolution(0) == 50 && PimaxPlayUnits.CenterResolution(1) == 300);
+    // Pimax's runtime log with Pimax Play 2026-10: gaze 0.28 → m_focusPixelDensity 1.2, periphery 0.1414 → m_peripheralPixelDensity 0.148572.
+    Require(Math.Abs(PimaxPlayUnits.FocusDensity(.28) - 1.2) < 1e-9 && Math.Abs(PimaxPlayUnits.PeripheryDensity(.1414) - .148572) < 1e-9 && PimaxPlayUnits.PeripheralResolution(.1414) == 15);
     Require(PimaxPlayUnits.PeripheralResolution(.1918999999761581) == 20 && PimaxPlayUnits.PeripheralResolution(.1919) == 20 && PimaxPlayUnits.PeripheralResolution(0) == 1 && PimaxPlayUnits.PeripheralResolution(.0909) == 10);
     Require(PimaxPlayUnits.QuickFov(.3300000131130219) == 33 && PimaxPlayUnits.QuickFov(null) == 33 && PimaxPlayUnits.QuickFov(0) == 33 && PimaxPlayUnits.QuickFov(.01) == 5);
     Require(PimaxPlayUnits.FineFov(.6600000262260437) == 33 && PimaxPlayUnits.FineFov(.2000000029802322, inner: true) == 10 && PimaxPlayUnits.FineFov(.99) == 50 && PimaxPlayUnits.FineFov(.5799999833106995) == 29 && PimaxPlayUnits.FineFov(null, inner: true) == 10);
@@ -2589,16 +2594,16 @@ Test("Pimax Play's values are shown with Pimax Play's own conversion and roundin
         + "\"runtime_quadviews_focus_blend_area\":0.05000000074505806,\"runtime_quadviews_focus_transition_opacity_percent\":0.5" + (offset is { } o ? FormattableString.Invariant($",\"runtime_quadviews_vertical_focus_offset\":{o}") : "") + "}";
     string Shows(PimaxQuadViewsSettings s) => string.Join(", ", s.Play.Controls.Select(c => c.Label + " " + c.Value));
     var fine = PimaxFovea.Read(Make("pimax-play-fine/global.json", Saved(1, F33, F10, F10, F33, F33)))!;
-    Require(Shows(fine) == "Center Resolution 125%, Peripheral Resolution 20%, Top → Center 33%, Bottom → Center 33%, L-Eye Left → Center 33%, L-Eye Right → Center 10%, R-Eye Left → Center 10%, R-Eye Right → Center 33%, Transition Mode Alpha, Transition Range 5%, Alpha 50%", Shows(fine));
-    Require(fine.Play.Short == "Fine 33/10 · 33/33 · 125% · 20%" && fine.Mismatch is null && Math.Abs(fine.Converted.Width - .57) < 1e-6 && Math.Abs(fine.Converted.Height - .34) < 1e-6 && fine.Converted.Transition);
-    Require(PimaxFovea.Summary(fine).StartsWith("Pimax Play · Fine: Center Resolution 125%, Peripheral Resolution 20%, Top → Center 33%"));
+    Require(Shows(fine) == "Center Resolution 113%, Peripheral Resolution 20%, Top → Center 33%, Bottom → Center 33%, L-Eye Left → Center 33%, L-Eye Right → Center 10%, R-Eye Left → Center 10%, R-Eye Right → Center 33%, Transition Mode Alpha, Transition Range 5%, Alpha 50%", Shows(fine));
+    Require(fine.Play.Short == "Fine 33/10 · 33/33 · 113% · 20%" && fine.Mismatch is null && Math.Abs(fine.Converted.Width - .43) < 1e-6 && Math.Abs(fine.Converted.Height - .66) < 1e-6 && fine.Converted.Transition);
+    Require(PimaxFovea.Summary(fine).StartsWith("Pimax Play · Fine: Center Resolution 113%, Peripheral Resolution 20%, Top → Center 33%"));
     var quick = PimaxFovea.Read(Make("pimax-play-quick/global.json", Saved(0, Q33, Q33, Q33, Q33, Q33)))!;
-    Require(Shows(quick) == "Center Resolution 125%, Peripheral Resolution 20%, Horizontal FOV 33%, Vertical FOV 33%, Vertical Offset 0, Transition Mode Alpha", Shows(quick));
-    Require(quick.Play.Short == "Quick 33% × 33% · 125% · 20%" && quick.Mismatch is null && Math.Abs(quick.Converted.Width - .67) < 1e-6);
+    Require(Shows(quick) == "Center Resolution 113%, Peripheral Resolution 20%, Horizontal FOV 33%, Vertical FOV 33%, Vertical Offset 0, Transition Mode Alpha", Shows(quick));
+    Require(quick.Play.Short == "Quick 33% × 33% · 113% · 20%" && quick.Mismatch is null && Math.Abs(quick.Converted.Width - .33) < 1e-6);
     Require(PimaxFovea.Read(Make("pimax-play-offset/global.json", Saved(0, Q33, Q33, Q33, Q33, Q33, offset: null)))!.Play.VerticalOffset == -10, "A missing offset shows Pimax Play's default");
     // Fine mode selected while the runtime still holds the Quick values (or the reverse): both are shown, the runtime's are used.
     var stale = PimaxFovea.Read(Make("pimax-play-stale/global.json", Saved(1, Q33, Q33, Q33, Q33, Q33)))!;
-    Require(stale.Mismatch is { } m && m.Contains("L-Eye Right → Center shows 10% but the runtime uses 16%") && m.Contains("runtime renders with its own values") && Math.Abs(stale.Converted.Width - .67) < 1e-6, stale.Mismatch ?? "no mismatch");
+    Require(stale.Mismatch is { } m && m.Contains("L-Eye Right → Center shows 10% but the runtime uses 16%") && m.Contains("runtime renders with its own values") && Math.Abs(stale.Converted.Width - .33) < 1e-6, stale.Mismatch ?? "no mismatch");
     var quickStale = PimaxFovea.Read(Make("pimax-play-stale-quick/global.json", Saved(0, "0.3", "0.3", "0.3", "0.3", Q33)))!;
     Require(quickStale.Mismatch is { } q && q.Contains("Horizontal FOV shows 33% but the runtime uses 30%") && !q.Contains("Vertical FOV"), quickStale.Mismatch ?? "no mismatch");
     // The per-eye resolution comes from DCS's stereo views, not the Quad Views block logged before them.
@@ -2616,15 +2621,15 @@ Test("Pimax Play's values are shown with Pimax Play's own conversion and roundin
 });
 Test("This profile's focus is edited in Pimax Play's Quick units and maps exactly like Pimax Quick", () =>
 {
-    // Quick 33 % × 33 % · 125 % · 20 % is the focus Pimax renders for those sliders: 0.67 × 0.67 at 1.125, periphery 0.1919.
-    Require(PimaxPlayUnits.ShareFromQuickFov(33) == .67 && PimaxPlayUnits.DensityFromCenter(125) == 1.125 && PimaxPlayUnits.PeripheryFromPercent(20) == .1919);
-    // Default profiles keep their stored values (Pimax's Fine 33/10 · 33/33 converted) and show them in Quick units.
+    // Quick 25 % × 25 % · 120 % · 15 % is a focus of 0.25 × 0.25 at 1.2, periphery 0.1486.
+    Require(PimaxPlayUnits.ShareFromQuickFov(25) == .25 && PimaxPlayUnits.DensityFromCenter(120) == 1.2 && PimaxPlayUnits.PeripheryFromPercent(15) == .1486 && PimaxPlayUnits.PeripheryFromPercent(20) == .1981);
+    // Default profiles keep their stored values and show them in Quick units.
     var p = new VrProfile();
-    Require(p.FoveaWidth == .57 && p.FoveaHeight == .34 && PimaxPlayUnits.ProfileShort(p) == "43% × 66% · 125% · 20%", PimaxPlayUnits.ProfileShort(p));
-    Require(PimaxPlayUnits.ShareFromQuickFov(43) == .57 && PimaxPlayUnits.ShareFromQuickFov(66) == .34);
-    for (var q = 5; q <= 90; q++) Require(PimaxPlayUnits.JsRound(PimaxPlayUnits.QuickFovFromShare(PimaxPlayUnits.ShareFromQuickFov(q))) == q, "FOV " + q);
-    for (var c = 100; c <= 200; c++) Require(PimaxPlayUnits.JsRound(PimaxPlayUnits.CenterFromDensity(PimaxPlayUnits.DensityFromCenter(c))) == c && PimaxPlayUnits.CenterResolution((PimaxPlayUnits.DensityFromCenter(c) - 1) * 2) == c, "Center " + c);
-    for (var r = 16; r <= 100; r++) Require(PimaxPlayUnits.JsRound(PimaxPlayUnits.PeripheralPercent(PimaxPlayUnits.PeripheryFromPercent(r))) == r && PimaxPlayUnits.PeripheralResolution(PimaxPlayUnits.PeripheryFromPercent(r)) == r, "Peripheral " + r);
+    Require(p.FoveaWidth == .57 && p.FoveaHeight == .34 && PimaxPlayUnits.ProfileShort(p) == "57% × 34% · 113% · 19%", PimaxPlayUnits.ProfileShort(p));
+    Require(PimaxPlayUnits.ShareFromQuickFov(57) == .57 && PimaxPlayUnits.ShareFromQuickFov(34) == .34);
+    for (var q = 10; q <= 90; q++) Require(PimaxPlayUnits.JsRound(PimaxPlayUnits.QuickFovFromShare(PimaxPlayUnits.ShareFromQuickFov(q))) == q, "FOV " + q);
+    for (var c = 50; c <= 200; c++) Require(PimaxPlayUnits.JsRound(PimaxPlayUnits.CenterFromDensity(PimaxPlayUnits.DensityFromCenter(c))) == c && PimaxPlayUnits.CenterResolution((PimaxPlayUnits.DensityFromCenter(c) - .5) / 2.5) == c, "Center " + c);
+    for (var r = 16; r <= 100; r++) Require(PimaxPlayUnits.JsRound(PimaxPlayUnits.PeripheralPercent(PimaxPlayUnits.PeripheryFromPercent(r))) == r && PimaxPlayUnits.PeripheralResolution((PimaxPlayUnits.PeripheryFromPercent(r) - .01) / .98) == r, "Peripheral " + r);
     // What Pimax Play would store for the same slider gives the same focus through the converter.
     foreach (var q in new[] { 10, 33, 50, 90 })
     {
@@ -2633,7 +2638,7 @@ Test("This profile's focus is edited in Pimax Play's Quick units and maps exactl
         Require(Math.Abs(converted.RequestedWidth - PimaxPlayUnits.ShareFromQuickFov(q)) < 1e-9, "Quick " + q);
     }
     // Every bundled Quad Views value the editor can produce stays within the profile's validated ranges.
-    Require(!ProfileValidation.Validate(p with { QuadViews = QuadProvider.QuadViewsFoveated, FoveaWidth = PimaxPlayUnits.ShareFromQuickFov(90), FoveaHeight = PimaxPlayUnits.ShareFromQuickFov(5), QuadFocusScale = PimaxPlayUnits.DensityFromCenter(200), PeripheralScale = PimaxPlayUnits.PeripheryFromPercent(16) })
+    Require(!ProfileValidation.Validate(p with { QuadViews = QuadProvider.QuadViewsFoveated, FoveaWidth = PimaxPlayUnits.ShareFromQuickFov(90), FoveaHeight = PimaxPlayUnits.ShareFromQuickFov(10), QuadFocusScale = PimaxPlayUnits.DensityFromCenter(200), PeripheralScale = PimaxPlayUnits.PeripheryFromPercent(16) })
         .Any(i => i.Severity == IssueSeverity.Error));
 });
 Test("CPU Boost lists reject empty names and processes that start DCS", () =>
@@ -3004,12 +3009,12 @@ Test("Profiles saved without foveaSource keep their own focus values; new profil
     Require(JsonData.Deserialize<VrProfile>(File.ReadAllText(file)) is { FoveaSource: FoveaSource.Profile, FoveaWidth: .44 }, "Applied profile.json at startup");
     Throws<System.Text.Json.JsonException>(() => JsonData.Deserialize<VrProfile>("{\"foveaSource\":\"PimaxPlay\",\"fakeSetting\":1}"));
 });
-Test("Default focus values are Pimax Play's Fine values converted", () =>
+Test("Default focus values keep their stored fractions; Pimax's Center and Peripheral Resolution match them", () =>
 {
     var p = new VrProfile();
     Require(p.FoveaWidth == .57 && p.FoveaHeight == .34 && p.QuadFocusScale == 1.125 && p.PeripheralScale == .19);
     var converted = PimaxFovea.Convert(new(.66, .20, .66, .66), new(.20, .66, .66, .66), .25, .1919, true);
-    Require(Math.Abs(converted.Width - p.FoveaWidth) < 1e-9 && Math.Abs(converted.Height - p.FoveaHeight) < 1e-9 && converted.FocusScale == p.QuadFocusScale && Math.Abs(converted.PeripheralScale - p.PeripheralScale) < .01);
+    Require(Math.Abs(converted.Width - .43) < 1e-9 && Math.Abs(converted.Height - .66) < 1e-9 && converted.FocusScale == p.QuadFocusScale && Math.Abs(converted.PeripheralScale - p.PeripheralScale) < .01);
 });
 Test("Import settles feature combinations exactly like the interface checklist", () =>
 {
@@ -3034,9 +3039,9 @@ Test("Pimax notes say when the focus resolution or periphery is clamped", () =>
     var clamped = PimaxFovea.Read(Make("pimax-clamped/global.json", PimaxJson(1, .66, .20, .66, .66, gaze: 3, periphery: .1)))!;
     Require(clamped.Converted.FocusScale == 2 && clamped.Converted.PeripheralScale == .15);
     var notes = PimaxFovea.Notes(clamped);
-    Require(notes.Any(n => n.Contains("clamped to 2×")) && notes.Any(n => n.Contains("clamped to 0.15")) && !notes.Any(n => n.Contains("used as stored")), string.Join("\n", notes));
+    Require(notes.Any(n => n.Contains("clamped to 2×")) && notes.Any(n => n.Contains("clamped to 0.15×")), string.Join("\n", notes));
     var normal = PimaxFovea.Notes(PimaxFovea.Read(Make("pimax-normal/global.json", PimaxJson(1, .66, .20, .66, .66)))!);
-    Require(normal.Any(n => n.Contains("used as stored")) && !normal.Any(n => n.Contains("clamped")));
+    Require(!normal.Any(n => n.Contains("clamped")));
 });
 Test("Applied profile.json keeps the user's focus values; Pimax Play's converted values go to the provider and pimax-fovea.json", () =>
 {
@@ -3055,15 +3060,15 @@ Test("Applied profile.json keeps the user's focus values; Pimax Play's converted
         var plan = service.Preview(draft, new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime });
         string Text(string file) => Encoding.UTF8.GetString(plan.Files.Single(f => Path.GetFileName(f.Path) == file).Content);
         Require(JsonData.Deserialize<VrProfile>(Text("profile.json")) == draft, "profile.json holds the user's own draft");
-        Require(Text("settings.cfg").Contains("horizontal_focus_section=0.57") && Text("settings.cfg").Contains("peripheral_multiplier=0.1919") && Text("settings.cfg").Contains("focus_multiplier=1.125"), "The provider gets Pimax's values");
+        Require(Text("settings.cfg").Contains("horizontal_focus_section=0.43") && Text("settings.cfg").Contains("peripheral_multiplier=0.198062") && Text("settings.cfg").Contains("focus_multiplier=1.125"), "The provider gets Pimax's values");
         var written = JsonData.Deserialize<AppliedFovea>(Text(AppliedFovea.FileName));
-        Require(written.Stamp == PimaxFovea.Read(pimax)!.Stamp && Math.Abs(written.FoveaWidth - .57) < 1e-9 && Math.Abs(written.FoveaHeight - .34) < 1e-9);
+        Require(written.Stamp == PimaxFovea.Read(pimax)!.Stamp && Math.Abs(written.FoveaWidth - .43) < 1e-9 && Math.Abs(written.FoveaHeight - .66) < 1e-9);
         var journal = service.Apply(plan).Current;
         var saved = journal.Entries.Single(e => Path.GetFileName(e.Path) == "profile.json").Path;
         VrProfile Applied() => JsonData.Deserialize<VrProfile>(File.ReadAllText(saved));
         Require(Applied() == draft && PimaxFovea.ChangedSinceApply(Applied(), PimaxFovea.ReadApplied(saved)) is null, "Unchanged Pimax values are not reported");
         File.WriteAllText(pimax, PimaxJson(0, .33, .33, .33, .33));
-        Require(PimaxFovea.ChangedSinceApply(Applied(), PimaxFovea.ReadApplied(saved)) is { } changed && changed.Contains("Pimax Play now: Quick 33% × 33% · 125% · 20%"), "Launch warns after a Pimax change");
+        Require(PimaxFovea.ChangedSinceApply(Applied(), PimaxFovea.ReadApplied(saved)) is { } changed && changed.Contains("Pimax Play now: Quick 33% × 33% · 113% · 20%"), "Launch warns after a Pimax change");
         Require(service.RestoreOriginals().Complete && File.ReadAllText(options) == Lua && !File.Exists(saved) && !File.Exists(Path.Combine(Path.GetDirectoryName(saved)!, AppliedFovea.FileName)));
         // A profile that uses its own values writes no pimax-fovea.json.
         Require(service.Preview(draft with { FoveaSource = FoveaSource.Profile }, new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime }).Files.All(f => Path.GetFileName(f.Path) != AppliedFovea.FileName));
@@ -3187,21 +3192,21 @@ Test("Launch updates only Pimax Play's focus values in place, and Back to stock 
         var applied = service.SyncApplied(draft, inventory); var countBefore = service.Originals.Status().Count;
         string Entry(string file) => applied.Journal.Entries.Single(e => Path.GetFileName(e.Path) == file).Path;
         var settings = Entry("settings.cfg"); var fovea = Entry(AppliedFovea.FileName); var launchJson = File.ReadAllText(Entry("launch.json"));
-        Require(File.ReadAllText(settings).Contains("horizontal_focus_section=0.57"), "Applied with Pimax Fine 33/10");
+        Require(File.ReadAllText(settings).Contains("horizontal_focus_section=0.43"), "Applied with Pimax Fine 33/10");
         Require(service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Unchanged, "Unchanged Pimax values: nothing written");
         File.WriteAllText(pimax, PimaxJson(0, .33, .33, .33, .33));
         var (updated, start) = service.SyncAndPrepareLaunch(draft, inventory);
-        Require(updated.Kind == LaunchSyncKind.FoveaUpdated && updated.Message == "Pimax Play changed: focus updated to Quick 33% × 33% · 125% · 20%." && start.FileName == exe, updated.Message);
+        Require(updated.Kind == LaunchSyncKind.FoveaUpdated && updated.Message == "Pimax Play changed: focus updated to Quick 33% × 33% · 113% · 20%." && start.FileName == exe, updated.Message);
         Require(updated.Journal.Id == applied.Journal.Id && service.Originals.Status().Count == countBefore, "Same applied profile, no new backup");
-        Require(File.ReadAllText(settings).Contains("horizontal_focus_section=0.67") && File.ReadAllText(settings).Contains("vertical_focus_section=0.67"), "settings.cfg holds Quick 33%");
-        Require(PimaxFovea.ReadApplied(Entry("profile.json")) is { } written && Math.Abs(written.FoveaWidth - .67) < 1e-9 && written.Stamp == PimaxFovea.Read(pimax)!.Stamp, "pimax-fovea.json updated");
+        Require(File.ReadAllText(settings).Contains("horizontal_focus_section=0.33") && File.ReadAllText(settings).Contains("vertical_focus_section=0.33"), "settings.cfg holds Quick 33%");
+        Require(PimaxFovea.ReadApplied(Entry("profile.json")) is { } written && Math.Abs(written.FoveaWidth - .33) < 1e-9 && written.Stamp == PimaxFovea.Read(pimax)!.Stamp, "pimax-fovea.json updated");
         Require(File.ReadAllText(Entry("launch.json")) == launchJson && JsonData.Deserialize<VrProfile>(File.ReadAllText(Entry("profile.json"))) == draft, "Nothing else changed");
         var journal = service.Originals.ReadCurrent()!;
         Require(journal.Entries.Where(e => e.Path == settings || e.Path == fovea).All(e => e.InstalledSha256 == Hashing.FileSha256(e.Path)), "The applied profile records the new installed hashes");
         Require(PimaxFovea.ChangedSinceApply(draft, PimaxFovea.ReadApplied(Entry("profile.json"))) is null && service.SyncApplied(null, inventory).Kind == LaunchSyncKind.Unchanged, "Up to date afterwards");
         // An edited settings.cfg is not updated in place: the profile is written again in full, over the edit.
         File.WriteAllText(pimax, PimaxJson(1, .66, .20, .66, .66)); AtomicFile.WriteText(settings, File.ReadAllText(settings) + "# user\n");
-        Require(service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Applied && !File.ReadAllText(settings).EndsWith("# user\n") && File.ReadAllText(settings).Contains("horizontal_focus_section=0.57"), "Written again");
+        Require(service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Applied && !File.ReadAllText(settings).EndsWith("# user\n") && File.ReadAllText(settings).Contains("horizontal_focus_section=0.43"), "Written again");
         Require(service.RestoreOriginals().Complete && File.ReadAllText(options) == Lua && !File.Exists(settings) && !File.Exists(fovea), "Back to stock DCS after in-place updates completes");
     }
     finally { PimaxFovea.SettingsPath = previous; }
@@ -4084,7 +4089,7 @@ Test("E2E: the pilot's edits between launches (options.lua, another dxgi.dll, a 
         // Pimax Play's focus changed.
         File.WriteAllText(pimax, PimaxJson(0, .33, .33, .33, .33));
         var pimaxSync = f.Service.SyncApplied(profile, E2eInventory(f));
-        Require(pimaxSync.Kind is LaunchSyncKind.FoveaUpdated or LaunchSyncKind.Applied && File.ReadAllText(Installed("settings.cfg")).Contains("horizontal_focus_section=0.67"), pimaxSync.Message);
+        Require(pimaxSync.Kind is LaunchSyncKind.FoveaUpdated or LaunchSyncKind.Applied && File.ReadAllText(Installed("settings.cfg")).Contains("horizontal_focus_section=0.33"), pimaxSync.Message);
         f.Service.PrepareLaunchApplied();
         // Another profile, then Back to stock DCS: the pilot's edits and ReShade stay, owned settings go back.
         Require(f.Service.SyncApplied(E2eA(), E2eInventory(f)).Kind == LaunchSyncKind.Applied);
