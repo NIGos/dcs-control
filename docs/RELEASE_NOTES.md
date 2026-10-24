@@ -4,6 +4,8 @@
 
 **Steadier frame generation.** Auto no longer jumps back and forth between 2× and 3×. In 2×, the Smoothness buffer now really holds its extra frame in DCS (before, it didn't): far fewer late frames, for the one refresh of latency (about 11 ms at 90 Hz) the buffer always had. The frame-generation log no longer slows DCS's render thread. Leaving the F10 map and changes of refresh rate are handled more smoothly.
 
+**Cleaner nights in VR.** DCS's nights in the headset had greyish, raised blacks and visible banding in dark skies. With **Color mode** on *Fix* or *Enhanced* (Visual realism page), blacks are black again and a fine dither makes the banding much less visible. Color mode is off by default, so turn it on to get this.
+
 **Visual realism** (new page, everything off by default):
 - **Color mode** (with an optional in-flight key; Alt+Shift+F9 is free): *Fix* corrects DCS's VR color faults (greyish blacks, a brightness step in the left eye); *Enhanced* adds richer, filmic color and eyes that adapt to light and dark.
 - **Panel color correction** for the Crystal Super's wide-gamut panels, which make DCS's colors look over-saturated.
