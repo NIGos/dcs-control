@@ -25,7 +25,8 @@ public static class NativeBinary
     public static bool SupportsNeuralContract(string? version)
     {
         var parts = version?.Replace(',', '.').Replace(" ", "").Split('.');
-        return parts is { Length: >= 2 } && parts[0] == "310" && parts[1] == "8";
+        // 310.9 (NVIDIA's faster, smaller model) keeps 310.8's exports and feature contract.
+        return parts is { Length: >= 2 } && parts[0] == "310" && parts[1] is "8" or "9";
     }
     /// <summary>True only when the certificate organization is exactly NVIDIA Corporation, not any subject containing the word.</summary>
     public static bool IsNvidiaSigner(string? subject)
@@ -41,7 +42,7 @@ public static class NativeBinary
     }
     /// <summary>The DLSS 5 runtime checks used for deployment and for the saved copy: the bytes are written to a private
     /// file, so the checked file cannot be swapped between the checks and their use, then they must be an x64 PE with the
-    /// DLSS-NR 310.8 contract and a verifiable signature from organisation NVIDIA Corporation. With
+    /// DLSS-NR 310.8 contract (310.8 or 310.9) and a verifiable signature from organisation NVIDIA Corporation. With
     /// <paramref name="allowModified"/> (a file the user selected) NVIDIA's runtime changed by a compatibility patch is
     /// accepted too: the patches that run it on RTX 20, 30 and 40 cards rewrite its GPU code, which breaks NVIDIA's
     /// signature. Such a file must carry no signature or NVIDIA's (now invalid) one; a file validly signed by anyone, or
@@ -59,7 +60,7 @@ public static class NativeBinary
         if (verification.Sha256 != Hashing.BytesSha256(bytes)) throw new InvalidDataException("The DLSS 5 runtime changed during verification. Select it again.");
         if (!verification.IsX64) throw new InvalidDataException("The DLSS 5 runtime must be the x64 nvngx_dlssnr.dll.");
         if (!SupportsNeuralContract(verification.Version))
-            throw new InvalidDataException($"This renderer supports the DLSS-NR 310.8 contract; selected version is {verification.Version ?? "unknown"}.");
+            throw new InvalidDataException($"DLSS 5 supports nvngx_dlssnr.dll version 310.8 or 310.9; the selected file is version {verification.Version ?? "unknown"}.");
         if (IsModifiedRuntime(verification))
         {
             var foreign = verification.TrustedSignature || (verification.Signer is not null && !IsNvidiaSigner(verification.Signer));

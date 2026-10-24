@@ -524,7 +524,7 @@ function buildFields() {
   // DLSS 5 page: on/off and the runtime file first, Foveated Super Resolution (stereo only) on its own, then the image controls.
   c = card('dlssControls','DLSS 5','NVIDIA\'s neural rendering. It needs NVIDIA\'s runtime file, which you provide: it is not included with DCS Control.');
   field(c,'neuralRendering','DLSS 5','Runs DLSS 5 on the image. With Quad Views, only on the focus area.','toggle');
-  field(c,'neuralRuntimePath','Runtime file','NVIDIA\'s nvngx_dlssnr.dll (tested: version 310.8). On RTX 20, 30 and 40 cards, NVIDIA\'s file patched for them works too. Select it once: DCS Control keeps a verified copy and uses it while this field is empty.','path',null,nr);
+  field(c,'neuralRuntimePath','Runtime file','NVIDIA\'s nvngx_dlssnr.dll, version 310.8 or 310.9. 310.9 is NVIDIA\'s newer, faster model; 310.8 is the one tested most. On RTX 20, 30 and 40 cards, NVIDIA\'s file patched for them works too. Select it once: DCS Control keeps a verified copy and uses it while this field is empty.','path',null,nr);
   const savedBox = document.createElement('div'); savedBox.id = 'savedRuntime'; savedBox.className = 'saved-runtime'; savedBox.hidden = true; $('setting-neuralRuntimePath').append(savedBox);
   // Hidden with Quad Views (updateControls): there DLSS 5 builds on DCS's own DLSS of the focus views.
   c = card('foveatedDlssControls','Foveated Super Resolution','Without Quad Views only. Works with or without DLSS 5.');

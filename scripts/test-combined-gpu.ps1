@@ -6,7 +6,7 @@ if ([IO.Path]::GetFileName($neuralPath) -ne 'nvngx_dlssnr.dll') { throw 'Select 
 $signature=Get-AuthenticodeSignature -LiteralPath $neuralPath
 if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'NVIDIA') { throw 'The neural runtime must have a valid NVIDIA signature.' }
 $version=(Get-Item -LiteralPath $neuralPath).VersionInfo.FileVersion
-if ($version -notmatch '^310[.,]\s*8[.,]') { throw "The tested neural contract is 310.8; selected version: $version" }
+if ($version -notmatch '^310[.,]\s*[89][.,]') { throw "The neural contract is 310.8 or 310.9; selected version: $version" }
 if (!$NgxCore) {
     $NgxCore=Get-ChildItem -LiteralPath "$env:SystemRoot/System32/DriverStore/FileRepository" -Filter '_nvngx.dll' -File -Recurse | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1 -ExpandProperty FullName
 }

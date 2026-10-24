@@ -12,7 +12,7 @@ public sealed record SavedNeuralRuntime(string Path, string? Version, string Sha
 
 /// <summary>
 /// The app's own copy of the user-supplied DLSS 5 runtime (state root\runtimes\nvngx_dlssnr.dll), so the file is selected
-/// once. Only a file that passes the deployment checks (x64, DLSS-NR 310.8, NVIDIA Corporation signature or NVIDIA's file
+/// once. Only a file that passes the deployment checks (x64, DLSS-NR 310.8 or 310.9, NVIDIA Corporation signature or NVIDIA's file
 /// changed by a compatibility patch) is saved; only the latest is kept. A profile without a runtime path, or with a path that no longer exists, uses this copy.
 /// </summary>
 public sealed class NeuralRuntimeStore(string directory)

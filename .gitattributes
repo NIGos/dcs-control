@@ -5,3 +5,5 @@ scripts/*.py text eol=lf
 *.png binary
 *.ico binary
 .githooks/* text eol=lf
+# C# raw string literals become generated config files: keep LF so the output does not depend on the checkout.
+*.cs text eol=lf
