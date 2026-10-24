@@ -7,7 +7,7 @@ window.runWebSmoke = async function() {
   const PROFILE_FIELDS = [
     'quadViews','gaze','quadTurbo','quadViewsLayerDirectory','foveaSource','quadFocusScale','pimaxPeripheral','pimaxHorizontalFov','pimaxVerticalFov',
     'foveaWidth','foveaHeight','peripheralScale','quadEdgeBlend','quadRoundFocus','quadSharpening','quadSharpenTaper','quadPeripheryContrast','quadSaccadeLead','quadGazeStabilize',
-    'neuralRendering','neuralRuntimePath','foveatedDlss','neuralFocusArea','focusDlssPreset','peripheryDlssPreset','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity',
+    'neuralRendering','neuralRuntimePath','foveatedDlss','focusDlssPreset','peripheryDlssPreset','neuralFocusArea','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity',
     'neuralStyle','keepOtherDxgi','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
     'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenDeepPipeline','frameGenHudSymbology','smoothCursor','nvidiaFlowScale','flowPreset','bidirectionalFlow','frameGenAsyncArm',
@@ -16,7 +16,7 @@ window.runWebSmoke = async function() {
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
     'engineOptimizations','engineGBufferRecorder','engineModelAllocator','engineShaderTimeCache','engineTaskQueueClock','boostPrefetch','engineShadowRecorder',
     'engineShadowInstancing','engineCostWeights','enginePartitionBoost','engineTextureDedupe','engineEffectBufferSkip','enginePlainCounter','engineFrameHeap',
-    'engineStateFilter','engineShadowCache','engineReleaseIdleDlss','engineBeeps','engineDevMode','engineDevPayloadPath','engineDevIniPath','engineTimerRefreshUs','engineDiagnosticHooks',
+    'engineStateFilter','engineShadowCache','engineReleaseIdleDlss','engineTimerRefreshUs','engineBeeps','engineDevMode','engineDevPayloadPath','engineDevIniPath','engineDiagnosticHooks',
     'dcs','options','keepDcsLauncher',
     'eyeDistance','eyeDistanceMm','pupilShift','pupilShiftEyeRadiusMm','pupilShiftVirtualImageM','peripheryStability','peripheryStabilityStrength','farDepth','farDepthPreset',
     'depthBoost','ownAircraftTrueDepth','depthBoostMode','depthBoostRealisticMax','depthBoostFarStartM','depthBoostFarFullM','depthBoostMax','depthBoostNearM',
@@ -25,8 +25,8 @@ window.runWebSmoke = async function() {
     'glare','glareStrength','nightVisionBlue','nightVisionBlur','nightVisionScotopic','nightVisionPhotopic','glareThresholdEv','glareRadius','glareStreak',
     'gazeDof','gazeDofStrength','gazeDofMaxArcmin','gazeDofSaccadeRelease','gazeDofSettleMs','gazeDofFadeInMs','gazeDofToleranceD','gazeDofFoveaGuardDeg','gazeDofPupilMm',
     'gVision','gVisionStrength','gVisionUseGaze','gVisionRedout','gVisionTolerance','gVisionMode',
-    'headsetPanel','diagnosticOverlayAtStart','diagnosticVram','diagnosticOverlayKey','engineToggleKey','neuralToggleKey','pupilShiftToggleKey','depthBoostToggleKey',
-    'farDepthToggleKey','colorModeKey','runtimeManifestPath'];
+    'headsetPanel','diagnosticOverlayAtStart','diagnosticVram','diagnosticOverlayKey','engineToggleKey','neuralToggleKey','pupilShiftToggleKey','farDepthToggleKey',
+    'depthBoostToggleKey','colorModeKey','runtimeManifestPath'];
   // Every folded disclosure (details.advanced), named by its id or the first setting inside it.
   const ADVANCED_FOLDS = ['quadViewsLayerDirectory','neuralAdvanced','frameGenAsyncArm','showOverlay','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
     'nightVisionBlue','gazeDofMaxArcmin','gVisionUseGaze','runtimeManifestPath'];
@@ -101,7 +101,9 @@ window.runWebSmoke = async function() {
       document.querySelector(`#routeSwitch [data-route="${before.runtime}"]`).click();
       check('Pimax or Sboys after Optimizations only brings the VR features back',ui.profile.desktop === false && ui.profile.runtime === before.runtime && ui.profile.quadViews === before.quadViews && ui.profile.frameGen === before.frameGen && ui.profile.neuralRendering === before.neural && !$('feature-quad').hidden && !$('nav-foveation').hidden); }
     check('Legacy defaults preserve the DCS frame limit and VSync',ui.profile.fpsLimit === 'Preserve' && !ui.profile.disableDcsVSync);
-    for(const id of ['overview','guide','foveation','dlss','framegen','pupil','visual','boost','engine','setup','diagnostics','support','recovery']) { ui.navigate(id); check('Navigate '+id,!$('page-'+id).hidden && $('nav-'+id).getAttribute('aria-current') === 'page'); }
+    for(const id of ['overview','guide','foveation','dlss','framegen','pupil','visual','osd','boost','engine','setup','diagnostics','support','recovery']) { ui.navigate(id); check('Navigate '+id,!$('page-'+id).hidden && $('nav-'+id).getAttribute('aria-current') === 'page'); }
+    ui.navigate('overview'); document.dispatchEvent(new KeyboardEvent('keydown',{key:'0',code:'Digit0',ctrlKey:true,bubbles:true,cancelable:true}));
+    check('Ctrl+0 opens the tenth page, OSD, and its rail button says so',!$('page-osd').hidden && $('nav-osd').title === 'OSD (Ctrl 0)');
     check('The frame generation page is called Framegen',$('nav-framegen').textContent.startsWith('Framegen') && $('pageTitle').textContent !== 'Frame rate' && (ui.navigate('framegen'), $('pageTitle').textContent === 'Framegen'));
     { ui.navigate('guide'); const cards = [...document.querySelectorAll('#featureGuide .guide-card')];
       check('The Feature guide has a card per feature, each with its benefit and an Open button that leads to its page',cards.length >= 10 && cards.every(c => c.querySelector('.guide-impact') && c.querySelector('[data-guide-page]'))
@@ -128,7 +130,7 @@ window.runWebSmoke = async function() {
     { const before = ui.profile.frameGenFactor; edit('frameGenFactor',2); const deep = ui.fields.find(f => f.path === 'frameGenDeepPipeline');
       check('Smoothness buffer sits under Frame generation, on by default and editable in 2x',deep.page === 'framegen' && ui.profile.frameGenDeepPipeline === true && !$('input-frameGenDeepPipeline').disabled);
       edit('frameGenDeepPipeline',false); check('Smoothness buffer off is kept in the profile',ui.profile.frameGenDeepPipeline === false);
-      edit('frameGenDeepPipeline',true); edit('frameGenFactor',3); check('Smoothness buffer stays editable in 3x',!$('input-frameGenDeepPipeline').disabled && $('setting-frameGenDeepPipeline').textContent.includes('only when needed'));
+      edit('frameGenDeepPipeline',true); edit('frameGenFactor',3); check('Smoothness buffer stays editable in 3x',!$('input-frameGenDeepPipeline').disabled && $('setting-frameGenDeepPipeline').textContent.includes('arriving late'));
       edit('frameGenFactor',0); check('Smoothness buffer stays editable in Auto',!$('input-frameGenDeepPipeline').disabled);
       edit('frameGenFactor',before); }
     ui.navigate('dlss'); check('Inactive neural controls disabled', $('input-neuralIntensity').disabled);
@@ -168,7 +170,7 @@ window.runWebSmoke = async function() {
       nrKey.click(); press(121,'cas'); check('Recording the same combination keeps the saved spelling',ui.profile.neuralToggleKey === 'Ctrl+Alt+Shift+F10');
       ui.profile.neuralToggleKey = before; ui.invalidate(); ui.showProfile(); }
     { const engine = ['engineOptimizations','engineShaderTimeCache','enginePartitionBoost','engineTimerRefreshUs','engineDiagnosticHooks'].map(p => ui.fields.find(f => f.path === p));
-      check('DCS engine optimizations sit on their own page, off by default, both measured optimizations on, the rest under Advanced',engine.every(f => f && f.page === 'engine') && ui.profile.engineOptimizations === false && ui.profile.engineShaderTimeCache === true && ui.profile.enginePartitionBoost === true && ui.profile.engineShadowInstancing === true && ui.profile.engineFrameHeap === true && ui.profile.engineTaskQueueClock === true && ui.profile.engineCostWeights === true && ui.profile.engineBeeps === true && ui.profile.engineModelAllocator === true && ui.profile.engineTextureDedupe === true && ui.profile.engineEffectBufferSkip === true && ui.profile.engineStateFilter === true && ui.profile.engineShadowRecorder === true && ui.profile.engineGBufferRecorder === true && ui.profile.enginePlainCounter === true && ui.profile.engineTimerRefreshUs === 1000 && ui.profile.engineDiagnosticHooks === false && !$('setting-engineShaderTimeCache').closest('details') && $('setting-engineTimerRefreshUs').closest('details') && $('setting-engineDiagnosticHooks').closest('details') && !$('setting-engineDevMode').closest('details') && ui.profile.engineDevMode === false && $('engineSuite').disabled); }
+      check('DCS engine optimizations sit on their own page, off by default, both measured optimizations on, the rest under Advanced',engine.every(f => f && f.page === 'engine') && ui.profile.engineOptimizations === false && ui.profile.engineShaderTimeCache === true && ui.profile.enginePartitionBoost === true && ui.profile.engineShadowInstancing === true && ui.profile.engineFrameHeap === true && ui.profile.engineTaskQueueClock === true && ui.profile.engineCostWeights === true && ui.profile.engineBeeps === true && ui.profile.engineModelAllocator === true && ui.profile.engineTextureDedupe === true && ui.profile.engineEffectBufferSkip === true && ui.profile.engineStateFilter === true && ui.profile.engineShadowRecorder === true && ui.profile.engineGBufferRecorder === true && ui.profile.enginePlainCounter === true && ui.profile.engineTimerRefreshUs === 1000 && ui.profile.engineDiagnosticHooks === false && !$('setting-engineShaderTimeCache').closest('details') && $('setting-engineTimerRefreshUs').closest('details') && $('setting-engineDiagnosticHooks').closest('details') && $('setting-engineDevMode').closest('details') === $('setting-engineTimerRefreshUs').closest('details') && $('setting-engineBeeps').closest('details') && ui.profile.engineDevMode === false && $('engineSuite').disabled); }
     { const f = ui.fields.find(f => f.path === 'boostPrefetch');
       check('The terrain prefetch fix is an Engine Optimizations field, Skip by default and gone from CPU Boost',f && f.page === 'engine' && ui.profile.boostPrefetch === 'Skip' && !$('setting-boostPrefetch').closest('details') && !document.querySelector('#page-boost [id="setting-boostPrefetch"]')); }
     { const was = ui.profile.engineOptimizations; edit('engineOptimizations',true); ui.navigate('engine'); const k = $('input-engineToggleKey');

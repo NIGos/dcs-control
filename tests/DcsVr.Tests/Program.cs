@@ -165,6 +165,9 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
     Require(off.Contains("\nhud_symbology=0\n") && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenHudSymbology = true }).Contains("\nhud_symbology=0\n"), "HUD symbology needs Depth boost's dual camera");
     var hud = new VrProfile { FrameGen = FrameGeneration.Nvidia, FrameGenHudSymbology = true, DepthBoost = true, QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked };
     Require(hud.UsesHudSymbology && ConfigurationWriters.Ofxr(hud).Contains("\nhud_symbology=1\n"), "HUD symbology on with the dual camera");
+    bool HudNeeds(VrProfile p) => ProfileValidation.Validate(p).Any(i => i.Code == "hud-symbology-needs" && i.Severity == IssueSeverity.Warning);
+    Require(HudNeeds(hud with { DepthBoost = false }) && HudNeeds(hud with { Gaze = GazeMode.Fixed }) && !HudNeeds(hud), "Sharp HUD without a running Depth boost: warned");
+    Require(!HudNeeds(hud with { DepthBoost = false, FrameGen = FrameGeneration.Off }) && !HudNeeds(hud with { DepthBoost = false, FrameGenHudSymbology = false }) && !HudNeeds(hud with { DepthBoost = false, Desktop = true }), "no warning while frame generation or Sharp HUD is off");
     Require(ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenPipelinedDeepHold = true, FrameGenAsyncArm = true }).Contains("\npipelined_deep_hold=1\nasync_arm=1\n"));
 });
 Test("Explicit manifest keeps extension metadata", () =>

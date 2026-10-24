@@ -133,7 +133,7 @@ public static class ProfileValidation
         if (profile.FarDepth && !Enum.IsDefined(profile.FarDepthPreset)) Error("far-depth-preset", "Select Subtle, Default or Strong for Far depth.");
         if (!Enum.IsDefined(profile.PeripheryDlssPreset)) Error("periphery-preset", "Select Off, E, F, K or M for the periphery DLSS preset.");
         else if (profile.PeripheryDlssPreset != PeripheryDlssPreset.Off && !profile.Desktop && !profile.UsesPeripheryDlssPreset)
-            issues.Add(new("periphery-preset-needs", IssueSeverity.Warning, "Periphery DLSS preset needs Quad Views (bundled, or your own Quad-Views-Foveated) and Engine Optimizations. With these settings it does not run."));
+            issues.Add(new("periphery-preset-needs", IssueSeverity.Warning, "Periphery DLSS preset needs bundled Quad Views (not Pimax native) and Engine Optimizations. Until then it does not run."));
         if (profile.DepthBoost && !Enum.IsDefined(profile.DepthBoostMode)) Error("depth-mode", "Select Realistic or Enhanced for Depth boost.");
         if (profile.DepthBoost && profile.DepthBoostMode == DepthBoostMode.Enhanced && profile.DepthBoostMax is < VrProfile.DepthBoostMaxMin or > VrProfile.DepthBoostMaxMax)
             Error("depth-max", $"Depth boost's Enhanced strength must be ×{VrProfile.DepthBoostMaxMin}–×{VrProfile.DepthBoostMaxMax}.");
@@ -147,6 +147,8 @@ public static class ProfileValidation
             Error("depth-near", $"Depth boost's cockpit distance must be {VrProfile.DepthBoostNearMin}–{VrProfile.DepthBoostNearMax} m.");
         if (profile.DepthBoost && !profile.Desktop && !profile.UsesDepthBoost)
             issues.Add(new("depth-gaze", IssueSeverity.Warning, "Depth boost needs Quad Views with an eye-tracked focus area, because it reads where each eye looks from it. With these settings it does not run."));
+        if (profile.FrameGenHudSymbology && profile.FrameGen != FrameGeneration.Off && !profile.Desktop && !profile.UsesDepthBoost)
+            issues.Add(new("hud-symbology-needs", IssueSeverity.Warning, "Sharp HUD needs Depth boost (Perception page). Until then it does not run."));
         // Visual realism: the module clamps out-of-range values itself; the profile refuses them, like the other settings.
         // Codes are "visual-" + the profile property (camelCase), so the Checks page can open the field.
         void Visual(string property, double value, double min, double max, string unit = "")
@@ -348,7 +350,7 @@ public static class ProfileValidation
             // change DCS's Upscaling for it).
             var dlss = DcsUsesDlss(profile, inventory);
             if (profile.UsesPeripheryDlssPreset && dlss == false)
-                issues.Add(new("periphery-preset-dlss", IssueSeverity.Warning, "Periphery DLSS preset works on DCS's DLSS, but DCS's Upscaling is not set to DLSS, so it does nothing. Set Upscaling to DLSS in DCS's graphics or VR settings."));
+                issues.Add(new("periphery-preset-dlss", IssueSeverity.Warning, "Periphery DLSS preset only works when DCS upscales with DLSS. Set Upscaling to DLSS in DCS's settings."));
             // Read only: the preset the NVIDIA App forces on DCS, worth knowing at Quad Views sizes. Shown only while DCS
             // uses DLSS in VR and the driver forces a preset; the app never changes NVIDIA settings.
             if (!profile.Desktop && dlss == true && NvidiaSettings.DlssPresetForDcs() is { Forced: true } forced)
