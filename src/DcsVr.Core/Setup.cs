@@ -61,9 +61,9 @@ public static class Readiness
         if (profile.NeuralRendering && inventory.OptionsPath is not null)
             Add("hud-after-dlss", inventory.AutoexecHudAfterDlss == true ? CheckState.Pass : CheckState.Warning, "HUD after DLSS",
                 inventory.AutoexecHudAfterDlss == true ? "autoexec.cfg draws the HUD and MFDs after DLSS, so DLSS 5 leaves them sharp."
-                    : "Add the line HUD_MFD_after_DLSS = true to Saved Games\\DCS\\Config\\autoexec.cfg (create the file if it is missing). Without it DLSS 5 runs over the HUD and MFDs, which can blur or ghost them.");
+                    : "DLSS 5 can blur or ghost the HUD and MFDs. To keep them sharp, add HUD_MFD_after_DLSS = true to Saved Games\\DCS\\Config\\autoexec.cfg (create the file if needed).");
         if (!profile.Desktop && inventory.Layers.Any(l => l.Enabled && VectorXr.Is(l)))
-            Add("vectorxr", CheckState.Pass, "VectorXR", "VectorXR is installed. DCS Control keeps it off when it starts DCS for VR, so its frame generation, Quad Views and Depth do not stack on this profile's own. Started from Steam or a shortcut, DCS loads it as usual; your other games keep it.");
+            Add("vectorxr", CheckState.Pass, "VectorXR", "Installed. Launch DCS keeps it off in DCS so it doesn't stack with these settings. Started from Steam or a shortcut, DCS still loads it; other games keep it.");
         var foreign = inventory.Layers.Where(l => l.Enabled && !GazeBridge.IsManaged(l, profile) && !VectorXr.Is(l)).Select(l => l.Name ?? Path.GetFileName(l.ManifestPath)).ToArray();
         if (foreign.Length > 0 && !profile.Desktop)
             Add("implicit-layers", CheckState.Warning, "Other VR add-ons (OpenXR layers)", "Other OpenXR add-ons are installed: " + string.Join(", ", foreign) + ". They load before this profile's add-ons and can change the image, eye tracking or frame timing. If something looks wrong, turn them off (for example with OpenXR API Layers GUI).");
