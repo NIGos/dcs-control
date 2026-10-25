@@ -5,6 +5,8 @@ A free Windows app for DCS World that runs **DLSS 5, frame generation and Quad V
 - **Every pilot** (monitor, Quest, Varjo, Reverb, Pimax…): **Engine Optimizations** remove CPU work inside DCS without changing the image, about **+50-60 % FPS** at a busy airfield when DCS is CPU-bound. Once applied they stay on every time DCS starts, also from Steam or a desktop shortcut.
 - **Pimax pilots** get the full VR pipeline in one go: **Quad Views** (eye-tracked foveated rendering) + **DLSS 5** (NVIDIA neural rendering on the area you look at) + **frame generation** (OFXR, generated only when DCS falls behind), working together, plus an in-headset panel that shows what each one is doing.
 
+**New in 0.6.1:** a clearer, more compact interface (grouped menu, greyed-out settings say why, a to-scale coverage preview) and support for NVIDIA's newer DLSS 5 runtime 310.9.
+
 **New in 0.6.0:** frame generation only when needed (no added latency while DCS keeps up), cleaner VR nights (no more raised, greyish blacks, and much less banding, with Color mode Fix or Enhanced), a Visual realism page (night vision, glare, eye-focus blur, G vision loss), sharp HUD symbols in generated frames, DLSS presets for the focus area and the periphery, freeing the DLSS memory DCS leaks on every mission load, and support for the new Pimax Play scales. See the [release notes](docs/RELEASE_NOTES.md).
 
 Everything the app changes is backed up and comes back with **Back to stock DCS**.
@@ -49,8 +51,8 @@ After each flight the Overview shows a **Last flight** summary.
 
 ## Quick start
 
-1. **You need:** Windows 10 or 11 (64-bit; tested on 11) and DCS World 2.9. For the VR features: a Pimax headset with Pimax Play (or SteamVR with the Sboys driver) and an NVIDIA RTX GPU; for DLSS 5 your own `nvngx_dlssnr.dll` (tested with 310.8, not included).
-2. **Download** `DcsControl-0.6.0-preview-Setup.exe` from [Releases](https://github.com/NIGos/dcs-control/releases) and double-click it: it installs DCS Control for your Windows user (no administrator rights) in the folder you choose, with Start menu and desktop shortcuts, then opens it. Uninstall it from Settings → Apps. Or take `DcsControl-0.6.0-preview-win-x64.zip` for a portable copy: unzip it anywhere and double-click `DcsControl.exe` (keep the `files` folder next to it). The app tells you when a newer release is out and updates itself after checking the release signature.
+1. **You need:** Windows 10 or 11 (64-bit; tested on 11) and DCS World 2.9. For the VR features: a Pimax headset with Pimax Play (or SteamVR with the Sboys driver) and an NVIDIA RTX GPU; for DLSS 5 your own `nvngx_dlssnr.dll` (310.8, tested most, or the newer 310.9; not included).
+2. **Download** `DcsControl-0.6.1-preview-Setup.exe` from [Releases](https://github.com/NIGos/dcs-control/releases) and double-click it: it installs DCS Control for your Windows user (no administrator rights) in the folder you choose, with Start menu and desktop shortcuts, then opens it. Uninstall it from Settings → Apps. Or take `DcsControl-0.6.1-preview-win-x64.zip` for a portable copy: unzip it anywhere and double-click `DcsControl.exe` (keep the `files` folder next to it). The app tells you when a newer release is out and updates itself after checking the release signature.
 3. **Choose how you fly** in the right panel: **Pimax**, **Sboys**, or **Optimizations only** (monitor or another headset). **Guided setup** (on the Overview) or **Read settings from this PC** (on the DCS & headset page) can do it for you.
 4. **Tick the features** you want. Each one has its own page if you want to adjust it.
 5. **Press Launch DCS.** Engine Optimizations then stay on whenever DCS starts. The VR features and CPU Boost need DCS to be started from the app.
@@ -64,7 +66,7 @@ The **[User Guide](docs/USER_GUIDE.md)** explains every feature, what it costs, 
 - **New features are lightly flown.** Visual realism, Sharp HUD, the Perception features and Cache distant shadows are off by default and still being tuned: try them one at a time and tell us what you see.
 - **Pimax Play changed its scales in 2026-10.** DCS Control reads the new ones. If you came from 0.5.10, your bundled Quad Views focus may look smaller with the same Pimax Play sliders: raise Horizontal/Vertical FOV there. Pimax's own native Quad Views sizes its focus differently from the same sliders.
 - **Start the app from the Start menu or Explorer**, not as administrator.
-- **Updates**: the app asks GitHub for a newer release at most every 6 hours (turn it off on the Diagnostics page). Update installs only a setup signed with the release key built into the app.
+- **Updates**: the app asks GitHub for a newer release at most every 6 hours (turn it off on the Help & support page). Update installs only a setup signed with the release key built into the app.
 - **Formerly DCS VR Control.** The app was renamed in 0.5.0. Installing it replaces the old install; your backups and profiles are kept.
 - **Before updating or repairing DCS**, close it and use **Back to stock DCS**.
 

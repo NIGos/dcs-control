@@ -1,5 +1,7 @@
 # 0.6.1 preview
 
+**NVIDIA's newer DLSS 5 runtime (310.9).** DCS Control now also accepts `nvngx_dlssnr.dll` version 310.9, NVIDIA's newer and faster DLSS 5 model (it first shipped with NBA 2K27). It keeps 310.8's interface, so nothing else changes: select it with Browse on the DLSS page, and switch back the same way. 310.8 stays the version tested most; 310.9 has not been flown much with DCS yet, so compare the two in your own flights (the DLSS 5 key toggles it to check the image). As before, only NVIDIA-signed files, or NVIDIA's file patched for RTX 20, 30 and 40 cards, are accepted.
+
 **UI rework.** The same settings and the same behaviour, easier to find and to read:
 - **Clearer menu.** The left rail is grouped into *Every pilot*, *VR*, *Before you fly* and *If something goes wrong*. **Troubleshooting** is now **Help & support** (the diagnostic package, the text report, what the headset panel messages mean and app updates), **OSD** is now **In flight** (every in-flight key and the headset panel), and the **DLSS 5** page is now **DLSS** (the feature is still DLSS 5).
 - **Keyboard:** Ctrl+1 to Ctrl+0 open the pages, **Ctrl+Shift+C** opens Checks, Ctrl+K finds a setting.
@@ -7,6 +9,11 @@
 - **Getting started:** **Guided setup** is on the Overview (and on DCS & headset); **Detect my setup** is now **Read settings from this PC** on the DCS & headset page. Guided setup uses the same words as Checks: *Must fix* and *Check yourself*.
 - **Tidier pages:** the Overview says whether you are ready to fly and what the next launch runs; Framegen has the frame limit next to Image quality and one Diagnostics fold; Quad Views has its own Sharpness card; Perception and Visual realism show what each feature still needs, with a button to fix it; in-flight keys have a **Default** button; CPU Boost shows the flight helpers first; Checks has its own **Review files** button.
 - In the right panel, **Load…** and **Save as…** sit next to the profile name.
+- **More compact:** short choices are buttons instead of drop-down lists, runs of switches sit in one compact list, closed folds show their current value, long help texts keep one line with **More** for the details (warnings and requirements always stay visible), and program lists fold into one summary line.
+- **Coverage preview to scale:** one eye's view with the focus area at its real size and shape, and a grid that is finer where the image is sharper.
+- **Color fine-tuning** shows only for the color mode you chose, and brightness is in stops, explained in plain words (+1 is twice as bright).
+
+**Fix:** building DCS Control from its sources on Windows no longer depends on how Git checks out line endings.
 
 # 0.6.0 preview
 
