@@ -78,7 +78,7 @@ public static class LiveSettings
         "DLSS.ReleaseIdleSets", "Dev.PayloadPath", "Dev.IniPath",
     };
     /// <summary>Installed only when DCS starts (worker.inc:58-60): off works live, on only when DCS started with it on.</summary>
-    private static readonly HashSet<string> OneWayKeys = new(StringComparer.OrdinalIgnoreCase) { "Scene.CostWeights", "Model.AllocSlabs", "Texture.StreamDedupe" };
+    private static readonly HashSet<string> OneWayKeys = new(StringComparer.OrdinalIgnoreCase) { "Model.AllocSlabs" };
     // PupilShift.ini keys the layer re-reads (pupil_shift_layer.cpp:241-320). Not OpenXrEyeGaze or [DlssPreset] (instance creation).
     private static readonly HashSet<string> PupilKeys = new(StringComparer.OrdinalIgnoreCase)
     {

@@ -223,6 +223,7 @@ struct Config {
   // R30 field diagnostics (perf_mon.h) and the GPU-bound governor (gov.h).
   bool recorderDetail = false;   // [Log] RecorderDetail: the recorders' full 10-s blocks (else one line each)
   int perfIntervalSec = 10;      // [Log] PerfIntervalSec: perf/features lines (0 = off)
+  bool reloadFrameTimes = false;  // R142 [Log] ReloadFrameTimes: frame times around each ini reload (log line + CSV)
   int vramIntervalSec = 60;      // [Log] VramIntervalSec: vram line (0 = off)
   bool govEnabled = true;        // [Governor] Enabled
   int govGpuBusyPct = 92;        // [Governor] GpuBusyPct: GPU busy at or above = the GPU is full
@@ -311,6 +312,9 @@ void ApplyParUpload(bool on);
 void ApplyDirectUpload(bool on);
 void ApplySplitFilter(bool on);
 void ApplyTextureHook();
+void ApplyCostWeights();  // R142: a live enable of [Scene] CostWeights installs its hooks (wiring.inc)
+// R142: set by the worker after its start-time installs (worker.inc); before that a live-enable install waits for them.
+std::atomic<bool> g_startInstallsDone{false};
 void ApplyTriCounter();
 void ApplyCbSkip();
 void ApplyCbUpload();
@@ -336,8 +340,11 @@ FILETIME g_iniTime{};
 std::atomic<bool> g_benchRunningFlag{false};
 std::atomic<bool> g_partitionBoost{false};  // see HookCollect
 // In-flight kill switch ([Hotkeys] Toggle): true turns off, together, the
-// measured optimizations the ini enabled. Reset whenever the ini changes.
+// measured optimizations the ini enabled. R142: reset by an ini reload only
+// when an engine key changed value (inidiff::IsEngineKey, ini_diff.h); a Live
+// write of a visual key ([Color], [VrFx], ...) or a new mtime alone keeps it.
 std::atomic<bool> g_engineOff{false};
+void OnEngineSwitch();  // engine.inc: recorder jobs of the other state go stale
 // [General] PerceptionOnly=1 (default 0): the app installs DcsQvCull for Depth
 // boost alone (Engine Optimizations off). Latched by the initial config read
 // (a later ini change takes effect at the next DCS start). While set, only the
@@ -504,6 +511,7 @@ Config PerceptionOnlyConfig(const Config& c) {
   p.statsIntervalSec = c.statsIntervalSec;
   p.dumpViews = c.dumpViews;
   p.perfIntervalSec = c.perfIntervalSec;
+  p.reloadFrameTimes = c.reloadFrameTimes;
   p.vramIntervalSec = c.vramIntervalSec;
   // [Perception]
   p.fixationDepth = c.fixationDepth;
@@ -648,4 +656,6 @@ int NoteRetiredKeys(const std::wstring& ini) {
   }
   return n;
 }
+
+namespace vrsp { void ReadConfig(const wchar_t* ini); }  // R139: [Suite] VrsProbe* (vrs_probe.h, measure only)
 

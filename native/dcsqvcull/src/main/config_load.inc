@@ -1,3 +1,20 @@
+// R142 (docs/research/R142_live_reload.md): the ini's keys at the last reload (ini_diff.h), what the last reload
+// changed, and the frame-time captures armed by reloads ([Log] ReloadFrameTimes, default 0).
+inidiff::Snapshot g_iniSnap;
+int g_iniSnapFails = 0;  // consecutive unreadable snapshots (a forced re-read each, at most 3 in a row)
+std::vector<inidiff::Change> g_lastIniChanges;
+bool g_lastIniEngineChange = false;
+std::atomic<uint64_t> g_iniReloads{0};  // non-initial reloads (tests)
+void ArmReloadFrameTimes(const std::string& when, const std::vector<inidiff::Change>& changes);
+
+std::string LocalTimeText() {
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  char b[32];
+  snprintf(b, sizeof(b), "%02d:%02d:%02d.%03d", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+  return b;
+}
+
 void LoadConfig(bool initial) {
   std::wstring ini = g_dir + L"DcsQvCull.ini";
   const std::wstring deployedIni = ini;  // R97: [Dev] keys may live only in the deployed ini (dev mirrors drop [Dev])
@@ -39,6 +56,50 @@ void LoadConfig(bool initial) {
     g_devDir = devDir;
     if (dev) Log("config: dev mode, settings from %ls", ini.c_str());
     else if (!initial) Log("config: dev mode off, settings from the deployed ini");
+  }
+  // R142: what this reload changed, key by key (the effective ini; under dev mode plus the deployed ini's [Dev]
+  // keys the dev ini lacks). The kill switch below resets only on an engine key's change (ini_diff.h).
+  bool engineKeyChanged = false, reloadChanged = false;
+  const std::string reloadWhen = LocalTimeText();
+  {
+    inidiff::Snapshot snap = inidiff::ReadFile(ini.c_str());
+    if (snap.ok && dev) {
+      const inidiff::Snapshot dep = inidiff::ReadFile(deployedIni.c_str());
+      if (dep.ok) inidiff::MergeSection(snap, dep, L"Dev");
+    }
+    if (!snap.ok) {
+      // Unreadable now (a writer holds it): the keys below are read as before; no key is known to have changed, so
+      // the kill switch stays. The next tick reads again (at most 3 forced re-reads in a row).
+      g_lastIniChanges.clear();
+      g_lastIniEngineChange = false;
+      if (++g_iniSnapFails <= 3) {
+        g_iniTime = FILETIME{};
+        g_devIniTime = FILETIME{};
+      }
+      Log("config: ini reloaded at %s, keys changed: unknown (%ls could not be read; read again in 1 s)",
+          reloadWhen.c_str(), ini.c_str());
+    } else {
+      g_iniSnapFails = 0;
+      if (initial) {
+        g_lastIniChanges.clear();
+        g_lastIniEngineChange = false;
+        Log("config: ini loaded at %s, %zu keys", reloadWhen.c_str(), snap.keys.size());
+      } else {
+        g_iniReloads.fetch_add(1);
+        g_lastIniChanges = inidiff::Diff(g_iniSnap, snap);
+        g_lastIniEngineChange = inidiff::AnyEngine(g_lastIniChanges);
+        engineKeyChanged = g_lastIniEngineChange;
+        reloadChanged = !g_lastIniChanges.empty();
+        const std::vector<std::string> parts = inidiff::FormatChanges(g_lastIniChanges);
+        size_t nEngine = 0;
+        for (const inidiff::Change& ch : g_lastIniChanges) nEngine += ch.engine ? 1 : 0;
+        Log("config: ini reloaded at %s, keys changed: %s (%zu keys, %zu engine)", reloadWhen.c_str(),
+            parts[0].c_str(), g_lastIniChanges.size(), nEngine);
+        for (size_t i = 1; i < parts.size(); ++i)
+          Log("config: ini reloaded at %s, keys changed (cont.): %s", reloadWhen.c_str(), parts[i].c_str());
+      }
+      g_iniSnap = std::move(snap);
+    }
   }
 
   NoteRetiredKeys(ini);  // R107: keys of removed research features: ignored, a non-zero one logged once
@@ -228,6 +289,7 @@ void LoadConfig(bool initial) {
       Log("config: [Model] FocusTwinInstancer=1 needs FocusTwin=1; nothing installed");
     c.suiteFocusTwinPatches = GetPrivateProfileIntW(L"Suite", L"FocusTwinPatches", 1, ini.c_str()) != 0;
   }
+  vrsp::ReadConfig(ini.c_str());  // R139: [Suite] VrsProbe* (measure-only VRS probe, default 0: nothing installed)
   c.gbufferRecorderScope = qvini::Mask(L"Model", L"GBufferRecorderScope", 0x10055, 0x1ffff, ini.c_str());  // dec or 0x hex
   c.gbufferRecorderWaitUs = GetPrivateProfileIntW(L"Model", L"GBufferRecorderWaitUs", 300, ini.c_str());
   if (c.gbufferRecorderWaitUs < 0) c.gbufferRecorderWaitUs = 0;
@@ -346,6 +408,7 @@ void LoadConfig(bool initial) {
     c.recorderDetail = GetPrivateProfileIntW(L"Log", L"RecorderDetail", 0, ini.c_str()) != 0;
     c.perfIntervalSec = clampInt(L"Log", L"PerfIntervalSec", 10, 0, 3600);
     c.vramIntervalSec = clampInt(L"Log", L"VramIntervalSec", 60, 0, 3600);
+    c.reloadFrameTimes = GetPrivateProfileIntW(L"Log", L"ReloadFrameTimes", 0, ini.c_str()) != 0;  // R142
     c.govEnabled = GetPrivateProfileIntW(L"Governor", L"Enabled", 1, ini.c_str()) != 0;
     c.govGpuBusyPct = clampInt(L"Governor", L"GpuBusyPct", 92, 1, 100);
     c.govRenderIdlePct = clampInt(L"Governor", L"RenderIdlePct", 85, 1, 100);
@@ -549,11 +612,22 @@ void LoadConfig(bool initial) {
   }
   g_cfg = c;
   ApplyR90Config();
+  if (reloadChanged && c.reloadFrameTimes) ArmReloadFrameTimes(reloadWhen, g_lastIniChanges);  // R142
   if (g_perceptionOnly.load()) {
     PerceptionOnlyFlags();
     return;
   }
-  if (!initial && g_engineOff.exchange(false)) Log("hotkey: engine optimizations back ON (ini changed)");
+  // R142: only an engine key's new value turns the kill switch back ON (before: any new mtime did, so DCS Control's
+  // Live write of a colour key re-enabled the optimizations the pilot had switched off in flight).
+  if (!initial && engineKeyChanged && g_engineOff.exchange(false)) {
+    OnEngineSwitch();
+    std::string keys;
+    for (const inidiff::Change& ch : g_lastIniChanges)
+      if (ch.engine && keys.size() < 400) keys += (keys.empty() ? "" : ", ") + inidiff::Item(ch);
+    Log("hotkey: engine optimizations back ON (ini engine key changed: %s)", keys.c_str());
+  } else if (!initial && reloadChanged && g_engineOff.load()) {
+    Log("hotkey: engine optimizations stay OFF (the ini reload changed no engine key)");
+  }
   if (g_benchRunningFlag.load()) return;  // the benchmark owns the toggle while it runs
   g_enabled = c.enabled;
   g_debugHole = c.debugHole;
@@ -567,6 +641,7 @@ void LoadConfig(bool initial) {
   g_cbSkipOn = c.cbSkip && !g_engineOff.load();
   ApplyCbSkip();
   g_costWeightsOn = c.costWeights && !g_engineOff.load();
+  ApplyCostWeights();  // R142: install on a live enable
   g_cbUploadSkipOn = c.cbUploadSkip && !g_engineOff.load();
   ApplyCbUpload();
   g_pacerLowPowerOn = c.pacerLowPower && !g_engineOff.load();
@@ -602,3 +677,93 @@ void LoadConfig(bool initial) {
       c.focusRatio, c.apexTolerance, c.collectThreadsMax);
 }
 
+// R142 [Log] ReloadFrameTimes=1 (default 0, measure only): for each reload that changed a key, the frame intervals
+// of perfgov's ring (gov.h, about 45 s at 90 fps) from 12 s before to 2 s after the reload: one "reload frametimes:"
+// line (baseline 12..2 s before, the 2 s before, the 2 s after: p50 / p99 / max) and a CSV next to the log
+// (reload_frametimes_<date>_<time>.csv: frame offset, ms from the reload at the frame's end, interval ms). Written
+// by the worker 2.5 s after the reload; at most 4 pending, a fifth reload within that time is not captured.
+struct ReloadFtPending {
+  bool used = false;
+  uint64_t frame = 0;   // perfgov::g_frames at the reload
+  ULONGLONG tick = 0;   // GetTickCount64 at the reload
+  std::string when, keys;
+  SYSTEMTIME st{};
+};
+ReloadFtPending g_reloadFt[4];
+std::atomic<uint64_t> g_reloadFtWritten{0};  // lines written (tests)
+
+void ArmReloadFrameTimes(const std::string& when, const std::vector<inidiff::Change>& changes) {
+  for (ReloadFtPending& p : g_reloadFt) {
+    if (p.used) continue;
+    p.used = true;
+    p.frame = perfgov::g_frames.load(std::memory_order_acquire);
+    p.tick = GetTickCount64();
+    p.when = when;
+    p.keys.clear();
+    for (const inidiff::Change& ch : changes) {
+      if (p.keys.size() > 200) {
+        p.keys += ", ...";
+        break;
+      }
+      p.keys += (p.keys.empty() ? "" : ", ") + inidiff::Utf8(ch.sec) + "." + inidiff::Utf8(ch.key);
+    }
+    GetLocalTime(&p.st);
+    return;
+  }
+  Log("reload frametimes: at %s not captured (4 captures pending)", when.c_str());
+}
+
+// Worker, every loop (50 ms): writes the captures whose 2 s after the reload are over. force: now (tests).
+void TickReloadFrameTimes(bool force = false) {
+  const ULONGLONG now = GetTickCount64();
+  for (ReloadFtPending& p : g_reloadFt) {
+    if (!p.used || (!force && now - p.tick < 2500)) continue;
+    p.used = false;
+    const uint64_t to = perfgov::g_frames.load(std::memory_order_acquire);
+    const uint64_t keep = perfgov::kRing - 64;
+    uint64_t from = p.frame > keep ? p.frame - keep : 0;
+    if (to - from > keep) from = to - keep;  // the reload's own frame is always kept (2.5 s < the ring's span)
+    const uint64_t split = p.frame < from ? from : p.frame;
+    std::vector<float> before, after;
+    for (uint64_t k = from; k < to; ++k) (k < split ? before : after).push_back(perfgov::g_ring[k % perfgov::kRing]);
+    const reloadft::Result r = reloadft::Compute(before, after);
+    g_reloadFtWritten.fetch_add(1);
+    if (!r.base.n && !r.pre.n && !r.post.n) {
+      Log("reload frametimes: at %s no frames (menu, loading or paused); keys %s", p.when.c_str(), p.keys.c_str());
+      continue;
+    }
+    // The CSV: frames from 12 s before to 2 s after, the time of each frame's end relative to the reload.
+    std::wstring name;
+    {
+      wchar_t n[96];
+      swprintf_s(n, L"reload_frametimes_%04d%02d%02d_%02d%02d%02d_%03d.csv", p.st.wYear, p.st.wMonth, p.st.wDay,
+                 p.st.wHour, p.st.wMinute, p.st.wSecond, p.st.wMilliseconds);
+      name = (g_devDir.empty() ? g_dir : g_devDir) + n;
+    }
+    FILE* f = nullptr;
+    bool wrote = false;
+    if (_wfopen_s(&f, name.c_str(), L"wb") == 0 && f) {
+      wrote = true;
+      fprintf(f, "frame,t_ms,ft_ms\r\n");
+      double t = 0;
+      std::vector<std::pair<double, float>> rows;
+      for (size_t i = before.size(); i-- > 0;) {
+        if (t > 12000) break;
+        rows.push_back({-t, before[i]});
+        if (before[i] > 0) t += before[i];
+      }
+      for (size_t i = rows.size(); i-- > 0;)
+        fprintf(f, "%d,%.3f,%.3f\r\n", -static_cast<int>(i) - 1, rows[i].first, rows[i].second);
+      t = 0;
+      for (size_t i = 0; i < after.size() && t < 2000; ++i) {
+        if (after[i] > 0) t += after[i];
+        fprintf(f, "%d,%.3f,%.3f\r\n", static_cast<int>(i), t, after[i]);
+      }
+      fclose(f);
+    }
+    Log("reload frametimes: at %s baseline p50/p99/max=%.2f/%.2f/%.2f ms (%d frames, 12..2 s before), before "
+        "p99/max=%.2f/%.2f ms (%d), after p50/p99/max=%.2f/%.2f/%.2f ms (%d frames, 2 s); keys %s; csv %ls",
+        p.when.c_str(), r.base.p50, r.base.p99, r.base.max, r.base.n, r.pre.p99, r.pre.max, r.pre.n, r.post.p50,
+        r.post.p99, r.post.max, r.post.n, p.keys.c_str(), wrote ? name.c_str() : L"(not written)");
+  }
+}

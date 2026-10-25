@@ -427,6 +427,10 @@ DWORD WINAPI SuiteThread(void*) {
     gpt::g_statsWanted = false;
     Chime(1000, 60);
   }
+  if (ok && vrsp::g_keyBlock.load() > 0 && !g_benchAbort) {  // R139: measure-only VRS probe ([Suite] VrsProbe)
+    vrsp::SuitePhase(g_quadFrame);
+    Chime(1000, 60);
+  }
   if (ok && g_cfg.suitePeriphLodTiming > 0 && !g_benchAbort) {
     Log("-- LOSSY prototype: periphery-only instancer LOD tables x %.2f, GPU timing OFF/ON/OFF/ON/OFF (periph_lod.h, "
         "5 x 5 s) --",

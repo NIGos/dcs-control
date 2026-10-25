@@ -452,7 +452,28 @@ void ApplyTriCounter() {
   tricount::SetPlain(g_triPlainOn.load());
 }
 
-void ApplyTextureHook() { texbind::SetAttached(g_texDedupeOn.load() || g_hookMeasure.load()); }
+// R142: a live enable ([Texture] StreamDedupe 0 -> 1 in the ini, or the kill switch back ON) installs the hook when
+// the worker's start did not (off at start, or dx11backend.dll not loaded yet): the same vtable slot write as
+// SetAttached. A build mismatch (Install logs it) is not tried again this session.
+void ApplyTextureHook() {
+  static bool refused = false;
+  if (g_texDedupeOn.load() && !texbind::g_orig && !refused && g_startInstallsDone.load() &&
+      GetModuleHandleW(L"dx11backend.dll")) {
+    if (texbind::Install(g_tscHz)) Log("texture binds: installed on a live enable ([Texture] StreamDedupe)");
+    else refused = true;
+  }
+  texbind::SetAttached(g_texDedupeOn.load() || g_hookMeasure.load());
+}
+// R142: [Scene] CostWeights likewise (two vtable slots in Visualizer / animator; partw starts with an empty cost
+// table: entries keep DCS's weights until measured, as after the worker's start install).
+void ApplyCostWeights() {
+  static bool refused = false;
+  if (g_costWeightsOn.load() && !partw::g_orig && !refused && g_startInstallsDone.load() &&
+      GetModuleHandleW(L"Scene.dll") && GetModuleHandleW(L"Visualizer.dll")) {
+    if (partw::Install()) Log("partition weights: installed on a live enable ([Scene] CostWeights)");
+    else refused = true;
+  }
+}
 void BenchUseCompactTexTable(bool on) { texbind::UseCompactTable(on); }
 void ApplyParUpload(bool on) {
   if (on && !parupload::Install()) {

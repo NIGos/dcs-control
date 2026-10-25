@@ -45,6 +45,7 @@ void SetEngineOff(bool off) {
   g_cbSkipOn = g_cfg.cbSkip && !off;
   ApplyCbSkip();
   g_costWeightsOn = g_cfg.costWeights && !off;
+  ApplyCostWeights();  // R142
   g_cbUploadSkipOn = g_cfg.cbUploadSkip && !off;
   ApplyCbUpload();
   g_pacerLowPowerOn = g_cfg.pacerLowPower && !off;

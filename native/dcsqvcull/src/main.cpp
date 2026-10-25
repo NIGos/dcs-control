@@ -42,6 +42,7 @@
 #include "scene_layout.h"
 #include "scene_check.h"  // R63 U2: partition boost only on a Scene.dll whose collect code uses +0x40 as verified
 #include "gov.h"       // R30: frame sampler, CPU/GPU-bound detector, governor stages (pure)
+#include "ini_diff.h"  // R142: the keys an ini reload changed, the engine key set, frame times around a reload (pure)
 #include "env_info.h"  // R30 L3: DCS version, OpenXR runtime and layers, streamers
 #include "dcsvr_depth_export.h"  // Far depth export contract with Quad Views (verbatim copy; far_depth.h)
 #include "dcsvr_cockpit_mask.h"  // R65: cockpit mask export for a frame-generation layer (cockpit_mask.h writes it)
