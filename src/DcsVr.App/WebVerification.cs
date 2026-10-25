@@ -167,7 +167,7 @@ internal static class WebVerification
         await Step("window.dcsUi.run('checkReadiness')");
         await Shot("v-checks", "diagnostics");
         // The 0.6 update video (v06-*): the reworked pages, Visual realism off (reasons shown), then on; put back after.
-        await Step("(()=>{"+Edit+"edit('fpsLimit','MatchRefresh');})()");
+        // Frame limit left on Keep (the default): with Only when needed it is set to the refresh rate (0.6.2).
         await Shot("v06-framegen", "framegen");
         await Shot("v06-framegen-hud", "framegen", "(s=>{if(s)s.scrollIntoView({block:'center'});})(document.getElementById('setting-frameGenHudSymbology'));");
         await Shot("v06-engine", "engine");
@@ -175,6 +175,8 @@ internal static class WebVerification
         await Shot("v06-inflight", "osd");
         await Shot("v06-support", "support");
         await Shot("v06-visual-off", "visual");
+        await Step("(()=>{"+Edit+"edit('colorMode','Fix');})()");
+        await Shot("v06-visual-fix", "visual");
         await Step("(()=>{"+Edit+"edit('colorMode','Enhanced');edit('panelGamut',1);edit('gVision',true);edit('peripheryDlssPreset','E');})()");
         await Shot("v06-visual", "visual");
         await Shot("v06-dlss-periphery", "dlss", "(c=>{if(c)c.scrollIntoView({block:'start'});})(document.getElementById('dlssPresets'));");
