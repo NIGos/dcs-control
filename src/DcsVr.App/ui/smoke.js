@@ -448,6 +448,32 @@ window.runWebSmoke = async function() {
       $('openRecovery').click(); check('Back to stock DCS opens Recovery',!$('page-recovery').hidden);
       $('restoreOriginals').click(); await waitIdle(); check(route+' Back to stock DCS recovered every original file',!ui.state.launchReady && ui.state.originals.count === 0 && $('openRecovery').hidden && $('originals').textContent.includes('No changes to put back'));
     }
+    // Live mode: while DCS runs, a setting its component re-reads in flight is written at once; the rest waits for the next
+    // launch. The offline host has no DCS: the smoke says when one "runs" (dcsStatus simulate), so the 4 s poll agrees.
+    { const route = ui.profile.runtime, features = ui.featureState(ui.profile), title = path => ui.fields.find(f => f.path === path).title.replace(/<[^>]+>/g,'').trim();
+      const afterLabel = path => getComputedStyle($('setting-'+path).querySelector('.setting-label'),'::after').content;
+      select('Pimax',{engine:true}); $('launch').click(); await waitIdle();
+      check('Live: the applied profile lists its live settings, engine parts but not settings read at launch',ui.state.launchReady && ui.state.liveFields.includes('engineBeeps') && ui.state.liveFields.includes('engineShadowCache') && !ui.state.liveFields.includes('engineDiagnosticHooks') && !ui.state.liveFields.includes('quadSharpening'));
+      check('Live: nothing changes while DCS is not running (no switch, no tags)',$('liveSwitch').hidden && !document.body.classList.contains('live-mode') && afterLabel('engineBeeps') === 'none');
+      await ui.request('dcsStatus',{simulate:true}); ui.state.dcsRunning = true; ui.refreshWorkflow();
+      check('Live: while DCS runs the Live switch is on and only live settings are tagged',!$('liveSwitch').hidden && $('liveToggle').checked && document.body.classList.contains('live-mode')
+        && $('setting-engineBeeps').classList.contains('live-field') && afterLabel('engineBeeps').includes('LIVE') && !$('setting-engineDiagnosticHooks').classList.contains('live-field') && afterLabel('engineDiagnosticHooks') === 'none' && afterLabel('quadSharpening') === 'none');
+      const beeps = ui.profile.engineBeeps, hooks = ui.profile.engineDiagnosticHooks, appliedAt = ui.state.originals.lastActionAt;
+      edit('engineBeeps',!beeps); await ui.applyLive();
+      check('Live: a live setting edited while DCS runs is applied live at once',ui.liveStatus === 'Applied live: '+title('engineBeeps')+'.' && $('status').textContent === ui.liveStatus && $('statusTitle').textContent === 'DCS is running');
+      edit('engineDiagnosticHooks',!hooks); await ui.applyLive();
+      check('Live: a setting read at launch waits for the next launch',ui.liveStatus === 'Waits for the next launch: '+title('engineDiagnosticHooks')+'.' && $('status').textContent === ui.liveStatus);
+      const r = await ui.request('liveApply',ui.draft());
+      check('Live: the backend lists what is applied live and what waits, and keeps the applied profile for Launch DCS',r.applied.length === 0 && r.waiting.includes('engineDiagnosticHooks') && r.written.length === 0 && !ui.matchesApplied());
+      $('liveToggle').click(); edit('engineBeeps',beeps);
+      check('Live: switched off, edits wait for the next launch',ui.state.dcsRunning && !document.body.classList.contains('live-mode') && !$('liveSwitch').hidden && $('status').textContent.startsWith('Live is off'));
+      $('liveToggle').click();
+      await ui.request('dcsStatus',{simulate:false}); ui.state.dcsRunning = false; ui.refreshWorkflow();
+      check('Live: tags and switch go when DCS closes',$('liveSwitch').hidden && !document.body.classList.contains('live-mode'));
+      edit('engineDiagnosticHooks',hooks); $('launch').click(); await waitIdle();
+      check('Live: Launch DCS afterwards applies the draft again (the live edit set back)',ui.matchesApplied() && ui.state.originals.lastActionAt !== appliedAt);
+      await ui.run('restore'); check('Live: Back to stock DCS after a live apply restores every original',!ui.state.launchReady && ui.state.originals.count === 0);
+      select(route,features); }
     edit('neuralRendering',true); edit('neuralIntensity',.42); edit('neuralLocalTone',1.23456789123);
     check('Active neural controls enabled',!$('input-neuralLocalTone').disabled);
     check('The DLSS page is named for its content and holds the stereo focus area and the dxgi switch; Quad Views keeps size, movement and sharpness apart',(ui.navigate('dlss'), $('pageTitle').textContent === 'DLSS') && $('nav-dlss').textContent.startsWith('DLSS') && $('feature-dlss').textContent.includes('DLSS 5') && ['foveaWidth','foveaHeight','peripheralScale'].every(f => $('stereoFocusControls').contains($('setting-'+f))) && $('setting-keepOtherDxgi').closest('.card') === $('setting-neuralRuntimePath').closest('.card') && ['quadSaccadeLead','quadGazeStabilize'].every(f => $('foveationControls').contains($('setting-'+f))) && ['quadSharpening','quadSharpenTaper','quadPeripheryContrast'].every(f => $('sharpnessControls').contains($('setting-'+f))) && $('stereoFocusControls').hidden === (ui.profile.quadViews !== 'None'));

@@ -205,6 +205,11 @@ button:disabled{opacity:1;color:#8c8c8c!important;background:transparent!importa
 .workflow-links .link-button{font-size:11px;letter-spacing:.4px}
 .workflow-links .link-button[hidden]{display:none}
 .workflow-links .link-button:disabled{color:var(--faint);cursor:default}
+/* Live mode (while DCS runs): the switch next to the links, and a quiet tag on each setting that applies in flight. */
+.live-switch{display:inline-flex;align-items:center;gap:5px;font:700 11px "Segoe UI",Interface,sans-serif;letter-spacing:.4px;text-transform:uppercase;color:var(--green);cursor:pointer}
+.live-switch[hidden]{display:none}
+.live-switch input{margin:0;accent-color:var(--green)}
+body.live-mode .setting.live-field .setting-label::after{content:"LIVE";display:inline-block;margin-left:7px;padding:1px 4px;border:1px solid #2f5a44;border-radius:3px;color:var(--green);background:#16261e;font:700 8px Bahnschrift,sans-serif;letter-spacing:1px;vertical-align:2px}
 .button.launch{min-height:52px;font:800 17px "Segoe UI",sans-serif;letter-spacing:2px;color:#1b1b1b;background:var(--accent);border:0;box-shadow:0 6px 22px #f5a01a40;clip-path:none}
 .button.launch:hover:not(:disabled){background:var(--accent-hi)}
 .button.launch:disabled{border:1.5px solid #4a4a4a!important}

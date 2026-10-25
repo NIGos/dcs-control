@@ -19,7 +19,7 @@ try
     var service = new ControlService(Option("--distribution") ?? AppContext.BaseDirectory, Option("--state") ?? ControlService.DefaultStateRoot);
     // Commands that read or write the record of original files refuse to run from a sandbox that redirects
     // %LOCALAPPDATA% (a second, private record would diverge from the app's); an explicit --state is the caller's choice.
-    if (command is "readiness" or "preview" or "apply" or "status" or "restore" or "launch-check" or "launch" or "diagnostic"
+    if (command is "readiness" or "preview" or "apply" or "live-apply" or "status" or "restore" or "launch-check" or "launch" or "diagnostic"
         && Option("--state") is null && AppDataRedirection.Target() is { } redirected)
     { Console.Error.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture, AppDataRedirection.Message, redirected)); return 3; }
     switch (command)
@@ -74,6 +74,16 @@ try
             if (command == "apply") Console.WriteLine(JsonData.Serialize(service.Apply(plan)));
             break;
         }
+        // Live mode, for scripted live tests: writes now (also while DCS runs) only the settings its components re-read in
+        // flight; the rest waits for the next launch. JSON with the settings applied, those waiting and the files written.
+        case "live-apply":
+        {
+            var p = ProfileValidation.ResolveFeatures(JsonData.Deserialize<VrProfile>(File.ReadAllText(Option("--profile") ?? throw new ArgumentException("--profile required"))));
+            var applied = service.ReadAppliedProfile();
+            var inventory = new WindowsInventory().Capture(Option("--dcs") ?? applied?.Executable, Option("--options") ?? applied?.OptionsPath);
+            Console.WriteLine(JsonData.Serialize(service.ApplyLive(p, inventory)));
+            break;
+        }
         // The original files DCS Control changed and the applied profile ("current").
         case "status": Console.WriteLine(JsonData.Serialize(service.Originals.Status())); break;
         case "restore":
@@ -106,7 +116,7 @@ try
         default:
             // An unknown command is an error (a typo must not look like success to a script); "help" is not.
             if (command != "help") Console.Error.WriteLine("Unknown command: " + command);
-            Console.WriteLine("DCS Control " + ProductInfo.Version + "\nCommands: inventory, readiness, detect, presets, validate, preview, apply, status, restore, diagnostic, inspect-binary, launch-check, launch, boost, tobii-resume, nvidia, app-verify, app-install, app-uninstall\nOptions: --profile file.json --dcs DCS.exe --options options.lua --state folder --distribution folder --out report.json\npreview leaves DCS and registry unchanged. apply writes the profile over whatever is installed; the first time it writes a path it backs up the original. status lists the original files and the applied profile. restore puts every original back (owned options.lua settings only). launch first brings the applied profile up to date (Pimax Play focus values)."); if (command != "help") return 1; break;
+            Console.WriteLine("DCS Control " + ProductInfo.Version + "\nCommands: inventory, readiness, detect, presets, validate, preview, apply, live-apply, status, restore, diagnostic, inspect-binary, launch-check, launch, boost, tobii-resume, nvidia, app-verify, app-install, app-uninstall\nOptions: --profile file.json --dcs DCS.exe --options options.lua --state folder --distribution folder --out report.json\npreview leaves DCS and registry unchanged. apply writes the profile over whatever is installed; the first time it writes a path it backs up the original. live-apply writes now, also while DCS runs, only the settings DCS Control applies live (the engine module's and the pupil shift layer's files); the rest waits for the next launch. status lists the original files and the applied profile. restore puts every original back (owned options.lua settings only). launch first brings the applied profile up to date (Pimax Play focus values)."); if (command != "help") return 1; break;
     }
     return 0;
 }

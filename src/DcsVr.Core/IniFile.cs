@@ -25,6 +25,15 @@ public static class IniFile
         return values;
     }
 
+    /// <summary>An INI file's text as its reader takes it: UTF-16 with a BOM (DcsQvCull.ini, ofxr_bridge.ini), otherwise
+    /// UTF-8 with or without a BOM (PupilShift.ini, Cheeky's).</summary>
+    public static string Decode(byte[] bytes)
+    {
+        if (bytes is [0xFF, 0xFE, ..]) return System.Text.Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2);
+        if (bytes is [0xEF, 0xBB, 0xBF, ..]) return System.Text.Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
+        return System.Text.Encoding.UTF8.GetString(bytes);
+    }
+
     /// <summary>
     /// True when every owned key still has its value. Numbers compare with float32 tolerance because components
     /// such as Cheeky store settings as float and write 0.35 back as 0.349999994.
