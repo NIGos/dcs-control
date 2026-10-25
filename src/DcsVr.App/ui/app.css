@@ -36,7 +36,6 @@ nav{display:grid;gap:7px;flex:1;min-height:0;overflow-y:auto;align-content:start
 .nav-item.selected:before{content:"";position:absolute;left:-17px;height:27px;width:3px;background:var(--amber)}
 .nav-item.selected small{color:#b4ad9f}
 .rail-bottom{margin-top:auto;padding-top:24px}
-.device-dot{width:6px;height:6px;margin-top:5px;border:1px solid var(--blue);border-radius:50%;flex-shrink:0}
 .rail-version{display:flex;justify-content:space-between;font:8px/1.5 Consolas,monospace;letter-spacing:.5px;color:#637481;margin-top:18px;padding:0 3px}
 .workspace{display:flex;flex-direction:column;min-width:0}
 .search-button{display:flex;align-items:center;gap:11px;color:#a5b2b9;font-size:12px;padding:7px 10px;border:1px solid #293740;background:#131b21;border-radius:5px}

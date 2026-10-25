@@ -228,10 +228,10 @@ public static class ProfileValidation
                 issues.Add(new(code + "-dcs", IssueSeverity.Warning, $"{NeuralHotkeys.Label(key)} ({what}) is a DCS default key binding: DCS reacts to it too. Choose another combination unless you have unbound it in DCS."));
         }
         Key(profile.NeuralToggleKey, NeuralHotkeys.Default, profile.NeuralRendering, "neural-hotkey", "DLSS 5 toggle");
-        Key(profile.DiagnosticOverlayKey, NeuralHotkeys.DiagnosticDefault, profile.UsesHeadsetPanel, "diagnostic-hotkey", "in-headset panel");
+        Key(profile.DiagnosticOverlayKey, NeuralHotkeys.DiagnosticDefault, profile.UsesHeadsetPanel, "diagnostic-hotkey", "headset panel");
         if (profile.NeuralRendering && profile.UsesHeadsetPanel && NeuralHotkeys.TryParse(profile.NeuralToggleKey ?? NeuralHotkeys.Default, out var nrKey) && !nrKey.IsOff
             && NeuralHotkeys.Same(profile.NeuralToggleKey ?? NeuralHotkeys.Default, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
-            Error("hotkey-conflict", "The DLSS 5 toggle and the in-headset panel need different keys.");
+            Error("hotkey-conflict", "The DLSS 5 toggle and the headset panel need different keys.");
         // The module starts its 3-minute test suite on Ctrl+Alt+F11 with any other modifier too: no in-flight key may use
         // its keys while it runs.
         if (profile.EngineOptimizations && profile.NeuralRendering && NeuralHotkeys.TryParse(profile.NeuralToggleKey ?? NeuralHotkeys.Default, out var nrSuite) && !nrSuite.IsOff && NeuralHotkeys.EngineModuleKey(nrSuite))
@@ -246,7 +246,7 @@ public static class ProfileValidation
                 Error("engine-hotkey", $"{NeuralHotkeys.Label(engineKey)} is reserved by Engine Optimizations (Ctrl+Alt+F8 to F12, Page Up and Page Down). Choose another key.");
             if ((profile.NeuralRendering && NeuralHotkeys.Same(profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
                 || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault)))
-                Error("hotkey-conflict", "The Engine Optimizations switch needs a key of its own: the DLSS 5 toggle or the in-headset panel uses it.");
+                Error("hotkey-conflict", "The Engine Optimizations switch needs a key of its own: the DLSS 5 toggle or the headset panel uses it.");
         }
         // Pupil shift's switch must differ from every other in-flight key in use.
         Key(profile.PupilShiftToggleKey, NeuralHotkeys.PupilDefault, profile.UsesPupilShift, "pupil-hotkey", "Pupil shift switch");
@@ -258,7 +258,7 @@ public static class ProfileValidation
             if ((profile.NeuralRendering && NeuralHotkeys.Same(pupil, profile.NeuralToggleKey ?? NeuralHotkeys.Default))
                 || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(pupil, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
                 || (profile.EngineOptimizations && NeuralHotkeys.Same(pupil, profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault)))
-                Error("hotkey-conflict", "The Pupil shift switch needs a key of its own: DLSS 5, the in-headset panel or Engine Optimizations use it.");
+                Error("hotkey-conflict", "The Pupil shift switch needs a key of its own: DLSS 5, the headset panel or Engine Optimizations use it.");
         }
         // Depth boost's switch likewise, Pupil shift's included.
         Key(profile.DepthBoostToggleKey, NeuralHotkeys.DepthBoostDefault, profile.UsesDepthBoost, "depth-hotkey", "Depth boost switch");
@@ -271,7 +271,7 @@ public static class ProfileValidation
                 || (profile.UsesHeadsetPanel && NeuralHotkeys.Same(depth, profile.DiagnosticOverlayKey ?? NeuralHotkeys.DiagnosticDefault))
                 || (profile.EngineOptimizations && NeuralHotkeys.Same(depth, profile.EngineToggleKey ?? NeuralHotkeys.EngineDefault))
                 || (profile.UsesPupilShift && NeuralHotkeys.Same(depth, profile.PupilShiftToggleKey ?? NeuralHotkeys.PupilDefault)))
-                Error("hotkey-conflict", "The Depth boost switch needs a key of its own: DLSS 5, the in-headset panel, Engine Optimizations or Pupil shift use it.");
+                Error("hotkey-conflict", "The Depth boost switch needs a key of its own: DLSS 5, the headset panel, Engine Optimizations or Pupil shift use it.");
         }
         // Far depth's switch, read by the bundled Quad Views: a key of its own as well.
         Key(profile.FarDepthToggleKey, NeuralHotkeys.FarDepthDefault, profile.UsesFarDepth, "far-depth-hotkey", "Far depth switch");
@@ -306,7 +306,7 @@ public static class ProfileValidation
         if (!profile.Desktop && !GpuInfo.Unknown && !GpuInfo.HasNvidiaRtx)
         {
             if (profile.UsesCheeky)
-                Error("dlss-gpu", $"DLSS 5 and Foveated Super Resolution need an NVIDIA RTX graphics card; this PC has {GpuInfo.Names}. Turn them off on the DLSS 5 page.");
+                Error("dlss-gpu", $"DLSS 5 and Foveated Super Resolution need an NVIDIA RTX graphics card; this PC has {GpuInfo.Names}. Turn them off on the DLSS page.");
             if (profile.FrameGen == FrameGeneration.Nvidia)
                 Error("framegen-gpu", $"NVIDIA optical-flow frame generation needs an NVIDIA RTX graphics card; this PC has {GpuInfo.Names}. Choose FidelityFX on the Framegen page: it runs on any graphics card.");
         }
@@ -322,7 +322,7 @@ public static class ProfileValidation
         if (!profile.Desktop && profile.EyeDistance == EyeDistanceSource.Manual && !(profile.EyeDistanceMm is >= VrProfile.EyeDistanceMin and <= VrProfile.EyeDistanceMax))
             Error("eye-distance", $"Eye distance must be between {VrProfile.EyeDistanceMin:0} and {VrProfile.EyeDistanceMax:0} mm.");
         if (profile.NeuralRendering && string.IsNullOrWhiteSpace(profile.NeuralRuntimePath))
-            Error("neural-runtime", "DLSS 5 needs NVIDIA's runtime file, nvngx_dlssnr.dll. Select it on the DLSS 5 page: DCS Control keeps a verified copy, so you select it only once.");
+            Error("neural-runtime", "DLSS 5 needs NVIDIA's runtime file, nvngx_dlssnr.dll. Select it on the DLSS page: DCS Control keeps a verified copy, so you select it only once.");
         if (inventory is not null)
         {
             if (inventory.DcsRunning) Error("dcs-running", "Close DCS before applying or restoring a profile.");
@@ -339,7 +339,7 @@ public static class ProfileValidation
             else if (profile.SmoothCursor && profile.FrameGen != FrameGeneration.Off &&
                      !File.Exists(Path.Combine(Path.GetDirectoryName(inventory.DcsExecutable) ?? "", "Visualizer.dll")))
                 issues.Add(new("smooth-cursor-images", IssueSeverity.Info, "Smooth mouse cursor: DCS's cursor images (Visualizer.dll) were not found next to DCS.exe. Frame generation then takes them from the running game, or draws a plain arrow."));
-            if (inventory.OptionsPath is null) Error("options-not-found", @"DCS's settings file (Saved Games\DCS\Config\options.lua) was not found." + " If DCS was never started on this PC, start it once to the main menu and close it, then press Rescan this PC; otherwise select the options.lua DCS uses.");
+            if (inventory.OptionsPath is null) Error("options-not-found", @"DCS's settings file (Saved Games\DCS\Config\options.lua) was not found." + " If DCS was never started on this PC, start it once to the main menu and close it, then press Check this PC; otherwise select the options.lua DCS uses.");
             // The Saved Games folder (Scripts, Logs, the engine optimizations) is found from options.lua's place: one
             // picked elsewhere would put them in a folder DCS never reads.
             else if (!IsSavedGamesOptions(inventory.OptionsPath))
@@ -372,7 +372,7 @@ public static class ProfileValidation
         var name = forced.Name == "latest" ? "the latest DLSS preset" : "DLSS preset " + forced.Name;
         var option = profile.UsesPeripheryDlssPreset
             ? "the Periphery DLSS preset you turned on lightens the periphery without changing NVIDIA settings."
-            : "the Periphery DLSS preset option (DLSS 5 page) can lighten the periphery without changing NVIDIA settings.";
+            : "the Periphery DLSS preset option (DLSS page) can lighten the periphery without changing NVIDIA settings.";
         return forced.Name == "M"
             ? $"The NVIDIA App forces {name} for DCS. At Quad Views sizes, K costs about 0.6 ms less; {option}"
             : $"The NVIDIA App forces {name} for DCS; {option}";

@@ -99,24 +99,24 @@ Update refuses while DCS runs and while Launch DCS, Apply or Back to stock DCS i
 
 Releases before 0.5.6 cannot update themselves: install 0.5.6 once with the setup (or the ZIP); from then on updates arrive in the app. A dot next to the version number at the bottom of the left rail also means an update is available; × hides the banner until the next start.
 
-On the **Troubleshooting** page, **Check for updates when DCS Control starts** turns the automatic check off (it is on by default) and **Check now** asks GitHub at once. Without internet nothing happens: no update is shown.
+On the **Help & support** page, under **Updates**, **Check for updates when DCS Control starts** turns the automatic check off (it is on by default) and **Check now** asks GitHub at once. Without internet nothing happens: no update is shown.
 
-**What's new** after an update: the first start of a new version shows its release notes once. Click the version number at the bottom of the left rail (or **What's new in this version** on the Troubleshooting page) to see them again.
+**What's new** after an update: the first start of a new version shows its release notes once. Click the version number at the bottom of the left rail (or **What's new in this version** on the Help & support page) to see them again.
 
 ## First run
 
 Not sure what to turn on? The **Feature guide** page (right under Overview) explains every feature in a few lines: what you get, what to expect, what it costs, what it needs and its in-flight key, and whether it is on in your profile. Its **Open** button takes you to the feature's settings.
 
-### Detect my setup
+### Read settings from this PC
 
-Click **Detect my setup** in the right panel. The app looks at what runs on your PC and proposes a profile: the headset route (Pimax Play, or SteamVR with Sboys), eye tracking, the refresh rate SteamVR uses, your Pimax Play Quad View values and a valid DLSS 5 runtime file (it looks in Downloads, Documents and Desktop). Each value shows where it came from; nothing changes until you accept.
+Click **Read settings from this PC** at the top of the **DCS & headset** page. The app looks at what runs on your PC and proposes a profile: the headset route (Pimax Play, or SteamVR with Sboys), eye tracking, the refresh rate SteamVR uses, your Pimax Play Quad View values and a valid DLSS 5 runtime file (it looks in Downloads, Documents and Desktop). Each value shows where it came from; nothing changes until you accept.
 
 ### Guided setup
 
-Or click **Guided setup** for three short steps:
+Or click **Guided setup** for three short steps. It is on the Overview (a **First time? Guided setup** button until you first launch or apply a profile, a small link afterwards) and at the top of the **DCS & headset** page:
 
 1. **Choose** — how you fly (Pimax, Sboys, or Optimizations only for a monitor or another headset), the features you want and, with Quad Views, whether the focus follows your eyes or stays centred. Your quality settings are kept.
-2. **Check** — the app checks files, the VR runtime, package hashes, the DLSS runtime file and (on Sboys) the driver and gaze bridge. Problems are listed first; nothing is written in this step.
+2. **Check** — the app checks files, the VR runtime, package hashes, the DLSS runtime file and (on Sboys) the driver and gaze bridge. Problems are listed first, under **Must fix** and **Check yourself** as on the Checks page; **DCS files** lets you pick `DCS.exe` and the DCS settings file (`options.lua`). Nothing is written in this step.
 3. **Fly** — start your headset software, then press **Launch DCS**.
 
 ![Guided setup, step 1](screenshots/guided-setup-choose.png)
@@ -129,10 +129,16 @@ Closing the wizard before **Launch DCS** writes nothing.
 
 - **How you fly** — **Pimax** (Pimax Play), **Sboys** (SteamVR), or **Optimizations only** (a monitor, or any other headset with its own software). The line below shows which VR software is running; the app warns you if your profile uses the other one.
 - **Features** — one row per feature, the optimizations first: tick it on or off, read its current settings at a glance, click the row to open its page. With Optimizations only, the VR features are hidden.
-- **Import / Export** — load or save a profile file.
+- **Load… / Save as…** — next to the profile name: load or save a profile file.
 - **Launch DCS** — the one button you need. Under it: **Review files** (what Launch will write, read-only), **Apply without launching** and **Back to stock DCS**.
 
 Everything you change is kept as a draft across app restarts. **Undo changes** (shown when the draft differs) brings back what is currently installed.
+
+### Finding your way
+
+The left rail starts with **Overview** and the **Feature guide**, then four groups: **Every pilot** (Engine Optimizations, CPU Boost, In flight), **VR** (Quad Views, DLSS, Framegen, Perception, Visual realism; hidden with Optimizations only), **Before you fly** (DCS & headset, Checks) and **If something goes wrong** (Help & support, Stock DCS). A greyed-out setting says under its name what it is waiting for, often with a button that takes you there.
+
+Keyboard: **Ctrl+K** finds a setting. **Ctrl+1** Overview, **Ctrl+2** Feature guide, **Ctrl+3** Engine Optimizations, **Ctrl+4** CPU Boost, **Ctrl+5** Quad Views, **Ctrl+6** DLSS, **Ctrl+7** Framegen, **Ctrl+8** Perception, **Ctrl+9** Visual realism, **Ctrl+0** In flight, **Ctrl+Shift+C** Checks.
 
 ## The features
 
@@ -143,12 +149,12 @@ Everything you change is kept as a draft across app restarts. **Undo changes** (
 The app uses its **bundled Quad Views** (Quad-Views-Foveated). This is the one that works with DLSS 5 and frame generation. **Pimax native** Quad Views (Pimax route only) is also offered as the provider, but it cannot be combined with DLSS 5. Leave Quad Views **on** in Pimax Play (with eye tracking): that is the tested setup. The bundled Quad Views takes DCS's quad views over from Pimax's own, so DCS only ever sees the bundled one, and the app reads your Pimax Play Quad View values. Only the provider choice in the app matters: select Bundled, not Pimax native, for DLSS 5.
 
 - **Focus movement** — *Eye tracked* (needs working eye tracking in Pimax Play, or a gaze bridge on Sboys) or *Fixed (centred)*.
-- **Focus area source** — *From Pimax Play's settings* (default) or *This profile*.
-  - With **Pimax Play's settings**, the app reads your Quad View values from Pimax Play every time you launch (on both routes; it never writes to Pimax). The page shows them **exactly as Pimax Play shows them**: same labels, same order, same rounding — for **Quick** mode: Center Resolution, Peripheral Resolution, Horizontal FOV, Vertical FOV, Vertical Offset, Transition Mode; for **Fine** mode: the "→ Center" sliders, Transition Range and Alpha.
+- **Focus area values** — *From Pimax Play (recommended)* (default) or *Set here*.
+  - With **From Pimax Play**, the app reads your Quad View values from Pimax Play every time you launch (on both routes; it never writes to Pimax). The page shows them **exactly as Pimax Play shows them**: same labels, same order, same rounding — for **Quick** mode: Center Resolution, Peripheral Resolution, Horizontal FOV, Vertical FOV, Vertical Offset, Transition Mode; for **Fine** mode: the "→ Center" sliders, Transition Range and Alpha.
   - The app follows whichever tab is active in Pimax Play. **Note:** in Pimax Play, simply clicking the *Fine* tab switches Pimax to Fine mode, so the app will read the Fine values from then on. Go back to *Quick* in Pimax Play if that is the one you want.
   - If you change the values in Pimax Play, you don't need to do anything else: the next **Launch DCS** updates the focus area ("Pimax Play changed: focus updated to …").
   - The focus area is **exactly the percentage Pimax Play shows**: Horizontal FOV 25% gives a sharp area 25% of the view wide (in Fine mode, Left + Right → Center add up). Center Resolution is the pixel density: 120% is 1.2×. This follows Pimax Play's 2026-10 scales; Pimax's own native Quad Views sizes its focus differently from the same sliders.
-  - With **This profile**, you set the values in the app, in the same Quick units as Pimax Play.
+  - With **Set here**, you set the values in the app, in the same Quick units as Pimax Play.
 - **Focus sharpening**, **edge blending**, **turbo mode** — fine-tuning. The focus area is round; edge blending is how wide its edge fades into the periphery (wider is softer, a little less fully sharp area). Turbo is off by default: in flight it caused a visible "old frames" effect when turning the head.
 - **Focus ahead of fast eye movements** and **Steady focus while looking** (both on, eye tracked only). With frame generation the focus area follows your eyes only on the frames DCS renders and reaches the headset 55–88 ms later, so after a quick glance your eye can land outside the sharp area for a frame or two. The first option makes the focus area reach ahead along a fast eye movement while it lasts, by about that latency (25 ms without frame generation, 55 ms in 2×, 85 ms in Auto and 3×). The second keeps the focus still while your eyes rest (movements under half a degree), so eye-tracker noise does not make its edge shimmer. Neither costs GPU time: the focus keeps its pixel count and is only briefly less dense while the eyes move. The Quad Views log has a `DCSVR gaze` line every 30 s with the saccades seen and how often each option acted.
 - **How bundled Quad Views reproduces this** (folded) shows the conversion and, once DCS has run, the focus size in pixels per eye.
@@ -157,13 +163,13 @@ The app uses its **bundled Quad Views** (Quad-Views-Foveated). This is the one t
 
 ### DLSS 5
 
-![DLSS 5 page with the saved runtime copy](screenshots/dlss5-runtime-file.png)
+![DLSS page with the saved runtime copy](screenshots/dlss5-runtime-file.png)
 
 DLSS 5 runs NVIDIA's DLSS-NR neural model on the two Quad Views focus views. DCS's own DLSS keeps running as usual.
 
-**The runtime file — bring your own.** DLSS 5 needs NVIDIA's `nvngx_dlssnr.dll`, **version 310.8**, x64, signed by NVIDIA Corporation. It is not included in this app. Select it once with **Browse** (or let **Detect my setup** find it): the app checks it and keeps a **verified copy** in `%LOCALAPPDATA%\DcsControl\runtimes`, which every profile then uses. The page shows "Saved copy · version 310.8.0.0 · from …" with **Change…** and **Forget**. A file that fails the checks is refused and nothing is saved.
+**The runtime file — bring your own.** DLSS 5 needs NVIDIA's `nvngx_dlssnr.dll`, **version 310.8**, x64, signed by NVIDIA Corporation. It is not included in this app. Select it once with **Browse** (or let **Read settings from this PC** find it): the app checks it and keeps a **verified copy** in `%LOCALAPPDATA%\DcsControl\runtimes`, which every profile then uses. The page shows "Saved copy · version 310.8.0.0 · from …" with **Change…** and **Forget**. A file that fails the checks is refused and nothing is saved.
 
-**RTX 20, 30 and 40 cards.** NVIDIA's runtime runs only on RTX 50 cards: on older cards DLSS 5 shows "ON but not applied". Community patches (for example dlssnr-patcher) rewrite its GPU code for RTX 20, 30 and 40 cards, which breaks NVIDIA's signature. When you select such a file with **Browse**, DCS Control accepts it if it is still NVIDIA's x64 runtime, version 310.8, with no signature or NVIDIA's own (now invalid) one, and the saved copy says "NVIDIA's file changed by a compatibility patch". A file validly signed by anyone else is refused, and **Detect my setup** only ever picks files with a valid NVIDIA signature. The patched file is not NVIDIA's release: use it at your own risk, and expect a larger GPU cost than on RTX 50 cards.
+**RTX 20, 30 and 40 cards.** NVIDIA's runtime runs only on RTX 50 cards: on older cards DLSS 5 shows "ON but not applied". Community patches (for example dlssnr-patcher) rewrite its GPU code for RTX 20, 30 and 40 cards, which breaks NVIDIA's signature. When you select such a file with **Browse**, DCS Control accepts it if it is still NVIDIA's x64 runtime, version 310.8, with no signature or NVIDIA's own (now invalid) one, and the saved copy says "NVIDIA's file changed by a compatibility patch". A file validly signed by anyone else is refused, and **Read settings from this PC** only ever picks files with a valid NVIDIA signature. The patched file is not NVIDIA's release: use it at your own risk, and expect a larger GPU cost than on RTX 50 cards.
 
 Settings:
 
@@ -251,7 +257,7 @@ Four more options on the CPU Boost page, all off by default and usable without C
 - **Cache distant shadows** (EXPERIMENTAL, off) — reuses the distant shadows (about 70 m to 1.5 km) for a few frames: about 0.7 ms less GPU time per frame. Distant tree shadows then sway a little less smoothly (they update about 11 times a second).
 - **Free unused DLSS memory** (off) — each mission load leaves an unused copy of DLSS in memory, about 0.7–1.4 GB each time. On: that copy is freed once DCS has switched to the new one, which helps long sessions with many restarts. The image doesn't change.
 - All together about **+50-60 % FPS** depending on the scene (+46.0 % ±1.1 and +49.9 % ±3.7 in two runs, 42 → 63 FPS), p95 −34 %, with the image verified identical pixel by pixel; with everything on, the GPU becomes the limit (96-97 % busy), measured with the module's automatic A/B test (the in-flight switch off and on, 24 alternating blocks) at a busy VR airfield (Ryzen 7 9800X3D, RTX 5090, Pimax Crystal Super, Quad Views, no frame generation); the rendered objects were identical off and on. How much you gain depends on how CPU-bound you are; when the GPU is the limit, little or nothing. Each optimization checks the DCS build first; after a DCS update it looks for the code it patches by signature and checks the bytes it expects, and stays off, with a warning on the page, if it does not find them.
-- **In-flight switch** (Alt+Shift+F11 by default; click the field and press any other combination, Backspace for Off) turns all the optimizations off and back on during a flight so you can compare: one beep off, two beeps on (**Beeps** turns the sounds off). Applying a profile starts with them on again.
+- **In-flight switch** (Alt+Shift+F11 by default; click the field and press any other combination, Backspace for Off) turns all the optimizations off and back on during a flight so you can compare: one beep off, two beeps on (**Beeps for the in-flight switch** turns the sounds off). Applying a profile starts with them on again.
 - **GPU-bound guard** (always on) — when the graphics card, not the CPU, is the limit, the multi-threaded shadows and G-buffer cost a little GPU time for nothing. The module then steps them down (fewer shadow recorders, then no helper lists, then both paused) and back up when the CPU is the limit again. Each step is tried against the step before for 20 seconds each and kept only when it raises FPS by more than 2 %; a step that does not help is undone and not tried again for a while. It only switches between exact paths, so the image never changes. Every 10 seconds the module's log says whether the frame was CPU- or GPU-bound.
 - **Developer mode** (off; keep it off for normal flying and for testing a release) is for working on the module: when on, the page says so in Status in DCS, and DCS hot-reloads a payload DLL built elsewhere and takes every engine setting from a separate settings file (a `run_suite.flag` next to it starts the test suite). Logs and reports still go to `Saved Games\DCS\Scripts\DcsQvCull`.
 
@@ -281,18 +287,19 @@ On the **Quad Views** page, with the other periphery settings. Outside the sharp
 
 How the image looks in the headset, on its own page. Everything is **off by default**. Changes apply with Launch DCS; the **Color mode** key switches color modes in flight. VR flights only. The effects run inside the engine module: with Engine Optimizations off, turning one on installs the module in its Perception-only mode (none of the optimizations run). Times are GPU time per frame. None of these has been judged in the headset yet: try one at a time.
 
-- **Color mode** — *Off*: DCS's own image. *Fix* (0.05 ms): corrects DCS's VR color faults (greyish blacks, a brightness step in the left eye) and adds a fine dither, so nights have black blacks and much less banding in dark skies; otherwise it looks like DCS. *Enhanced* (about 0.1 ms, plus night vision and glare, both on by default): Fix plus richer, filmic color, golden-hour warmth and eyes that adapt to light and dark. Each mode has its own brightness, night brightness, saturation, warmth and adaptation under *Advanced · Fix* and *Advanced · Enhanced*. The **Color mode** key on the OSD page (off by default; Alt+Shift+F9 is a good choice) cycles Off, Fix and Enhanced in flight with 1, 2 or 3 beeps.
+- **Color mode** — *Off*: DCS's own image. *Fix* (0.05 ms): corrects DCS's VR color faults (greyish blacks, a brightness step in the left eye) and adds a fine dither, so nights have black blacks and much less banding in dark skies; otherwise it looks like DCS. *Enhanced* (about 0.1 ms, plus night vision and glare, both on by default): Fix plus richer, filmic color, golden-hour warmth and eyes that adapt to light and dark. Each mode has its own brightness, night brightness, saturation, warmth and adaptation under *Fine-tune Fix* and *Fine-tune Enhanced*. The **Color mode** key on the In flight page (off by default; Alt+Shift+F9 is a good choice) cycles Off, Fix and Enhanced in flight with 1, 2 or 3 beeps.
 - **Panel color correction** (off by default; needs Fix or Enhanced) — for the Crystal Super: its wide-gamut panels (about DCI-P3) make DCS's sRGB colors look over-saturated, and Pimax does not convert them. *Full* corrects this, *Half* corrects half. HUD and MFDs are not affected. Don't combine it with Pimax's own color correction.
 - **Night vision** (Enhanced only, about 0.08 ms at night, nothing by day) — at night dim areas lose color and turn slightly blue-grey, as your eyes do in moonlight; lights, lit instruments and the HUD keep their color.
 - **Light glare** (Enhanced only, about 0.1 ms) — a soft halo around very bright lights: the sun, landing lights, strobes, fires, afterburners. The HUD never glares.
 - **Eye-focus blur** (EXPERIMENTAL, about 0.18 ms) — things nearer or farther than where you look go slightly soft, like a real eye, and turn sharp the moment your eyes move. It needs Quad Views with eye tracking (the pupil shift layer passes your gaze to the engine module, also without Pupil shift or Depth boost); without it the switch is greyed out and Checks says why. Some people find it uncomfortable. With frame generation the blur's release can show as a brief soft cross-fade in a generated frame.
 - **G vision** (about 0.04 ms, only while G is high) — grey-out, tunnel vision and blackout under G, centered on where you look (straight ahead without eye tracking), and red-out below about −2 G when G vision does all of it (*Full*, or *Auto* with DCS's G effect off). It works with DCS's own G-EFFECT option without doubling it (*Mode* under Advanced). With frame generation the tunnel's edge can smear slightly during fast turns. In multiplayer the server must allow the aircraft data export it reads.
 
-### Troubleshooting
+### Help & support
 
-- **DLSS 5 on the focus area**: after a session, says whether DLSS 5 reached the Quad Views focus area and, when the panel said "DLSS 5: ON but not applied", why, in plain words, with what to check.
-- **Create diagnostic package…**: one ZIP to attach to a report (see [Reporting a problem](#reporting-a-problem)).
-- What the in-headset panel's messages mean.
+- **Diagnostic package**: **Create diagnostic package…** saves one ZIP to attach to a report (see [Reporting a problem](#reporting-a-problem)); *What's in the package* lists its contents. **Save a text report** saves the settings, the checks and what was detected on this PC as one file.
+- **Headset panel messages**: what the headset panel's messages mean.
+- **DLSS 5 on the focus area** (with DLSS 5 on): after a session, says whether DLSS 5 reached the Quad Views focus area and, when the panel said "DLSS 5: ON but not applied", why, in plain words, with what to check.
+- **Updates**: the automatic check, **Check now** and **What's new in this version**.
 
 ### Optimizations only (any other headset, or no VR)
 
@@ -318,7 +325,7 @@ Good to know:
 - **Always start DCS with Launch DCS.** A Steam or desktop shortcut does not pass the profile's VR settings to DCS.
 - **Steam edition: keep Steam running.** The app passes Steam's launch identifiers so DCS does not restart itself through Steam (which would lose the profile).
 - **Don't run DCS or the app as administrator.** The VR loader ignores private settings in elevated processes; the app refuses to launch in that case.
-- Only DLSS 5 and Foveated SR put files in DCS's `bin` folder. If another mod already has a `dxgi.dll` there (ReShade, an overlay), it keeps working: Launch DCS says so, asks once, backs it up and loads it after the DLSS 5 loader (as `dxgi2.dll`). If you prefer it off while flying with DLSS 5, choose **Set it aside** (or turn off *Keep another program's dxgi.dll working* on the DLSS 5 page). **Back to stock DCS** puts the original back either way.
+- Only DLSS 5 and Foveated SR put files in DCS's `bin` folder. If another mod already has a `dxgi.dll` there (ReShade, an overlay), it keeps working: Launch DCS says so, asks once, backs it up and loads it after the DLSS 5 loader (as `dxgi2.dll`). If you prefer it off while flying with DLSS 5, choose **Set it aside** (or turn off *Keep another program's dxgi.dll working* on the DLSS page). **Back to stock DCS** puts the original back either way.
 
 ### The DCS launcher option
 
@@ -328,11 +335,11 @@ Good to know:
 
 ![Recording a hotkey](screenshots/framegen-hotkey-capture.png)
 
-All in-flight keys are on the **OSD** page, under **In-flight keys**. A key whose feature is off in the profile is greyed out.
+All in-flight keys are on the **In flight** page, under **In-flight keys**. A key whose feature is off in the profile is greyed out.
 
 | Key (default) | What it does |
 | --- | --- |
-| **Alt+Shift+F12** | Show/hide the OSD (in-headset panel) |
+| **Alt+Shift+F12** | Show/hide the headset panel (OSD) |
 | **Alt+Shift+F11** | Engine Optimizations off/on (one beep off, two on) |
 | **Ctrl+Shift+F12** | DLSS 5 off/on, to compare |
 | **Ctrl+Shift+F10** | Pupil shift off/on (low beep off, high beep on) |
@@ -341,14 +348,14 @@ All in-flight keys are on the **OSD** page, under **In-flight keys**. A key whos
 | *(off)* | Color mode: Off, Fix, Enhanced in turn (1, 2 or 3 beeps); Alt+Shift+F9 is free |
 | **Ctrl+Alt+F11** | Start or stop the Engine Optimizations test suite (fixed) |
 
-To change a key, click the field and press the combination you want. Esc cancels, Backspace clears it. Keys need Ctrl, Alt or Shift unless they are F-keys, Pause, Insert, Home, End and similar. Windows' own shortcuts, the Windows key, another in-flight key's combination and the engine module's reserved keys (Ctrl+Alt+F8 to F12, Ctrl+Alt+Page Up/Down) are refused; a combination DCS binds by default is accepted with a note (and listed under Check yourself).
+To change a key, click the field and press the combination you want. Esc cancels, Backspace clears it. **Default** (shown when a key differs from its default) puts the default back. Keys need Ctrl, Alt or Shift unless they are F-keys, Pause, Insert, Home, End and similar. Windows' own shortcuts, the Windows key, another in-flight key's combination and the engine module's reserved keys (Ctrl+Alt+F8 to F12, Ctrl+Alt+Page Up/Down) are refused; a combination DCS binds by default is accepted with a note (and listed under Check yourself).
 
-The **diagnostic panel** is drawn in the headset. With frame generation it is always available; without it, turn on **In-headset panel** on the **OSD** page: OFXR is then loaded only to draw the panel and leaves your frames untouched. It and shows FPS, DLSS 5 state (on with GPU ms, off, or why it is not applied), the frame-generation backend and mode (2×, 3×, auto), and DCS (app) vs headset (output) FPS. With the engine optimizations on, an **Engine** line says whether all of them are working ("Engine Opt.: all 17 on", green), only some ("Engine Opt.: 12 of 17 on", amber; for a few seconds after a mission loads this is normal while the multi-threaded recorders learn the scene), none ("Engine Opt.: none on", red) or that you switched them off ("Engine Opt.: OFF (Alt+Shift+F11)"). With Pupil shift installed, a **Pupil shift** line shows "ON" with the largest pupil shift, "no gaze" or "OFF"; with Depth boost it adds the strength and the eye distance the world is rendered with ("Depth x1.18 far, IPD 77.4 mm"), followed by "(dual camera)" while the cockpit is drawn at your real eye distance, or an amber "no dual camera" when it is not. Depth boost alone has its own **Depth boost** line, and Far depth a **Far depth** line. With Periphery stability, a **Periphery** line shows "ON 0.50, 88 fps" (strength and frames steadied per second), "ON, not filtering" or "OFF". Options on the **OSD** page (which also lists every in-flight key):
+The **headset panel** is drawn in the headset. With frame generation it is always available; without it, turn on **Headset panel** on the **In flight** page: OFXR is then loaded only to draw the panel and leaves your frames untouched. It shows FPS, DLSS 5 state (on with GPU ms, off, or why it is not applied), the frame-generation backend and mode (2×, 3×, auto), and DCS (app) vs headset (output) FPS. With the engine optimizations on, an **Engine** line says whether all of them are working ("Engine Opt.: all 17 on", green), only some ("Engine Opt.: 12 of 17 on", amber; for a few seconds after a mission loads this is normal while the multi-threaded recorders learn the scene), none ("Engine Opt.: none on", red) or that you switched them off ("Engine Opt.: OFF (Alt+Shift+F11)"). With Pupil shift installed, a **Pupil shift** line shows "ON" with the largest pupil shift, "no gaze" or "OFF"; with Depth boost it adds the strength and the eye distance the world is rendered with ("Depth x1.18 far, IPD 77.4 mm"), followed by "(dual camera)" while the cockpit is drawn at your real eye distance, or an amber "no dual camera" when it is not. Depth boost alone has its own **Depth boost** line, and Far depth a **Far depth** line. With Periphery stability, a **Periphery** line shows "ON 0.50, 88 fps" (strength and frames steadied per second), "ON, not filtering" or "OFF". Options on the **In flight** page (which also lists every in-flight key):
 
 - **Visible at start**
 - **VRAM counter** — adds the video memory in use to the panel (off by default). Use it when you suspect VRAM is full.
 
-The **FPS counter** and the **Frame generation log** stay on the Framegen page, under *Frame generation diagnostics* (frame generation only).
+The **FPS counter** and the **Frame generation log** stay on the Framegen page, under *Diagnostics* in the Image quality card (frame generation only).
 
 ## After the flight: the Last flight card
 
@@ -374,7 +381,7 @@ The **Checks** page lists every finding once:
 - **Check yourself** — things only you can verify (refresh rate in Pimax Play/SteamVR, other FPS limiters, motion smoothing, eye calibration, image quality).
 - **OK** — folded.
 
-**Check this PC** adds the runtime, C++ runtime, drivers, write access and headset checks. **Export report** saves a JSON report; the **Troubleshooting** page's package holds it and the logs (see [Reporting a problem](#reporting-a-problem)). Below come the files Launch DCS will write and what was detected on this PC.
+**Check this PC** adds the runtime, C++ runtime, drivers, write access and headset checks. **Save a text report** on the **Help & support** page saves a report file; the diagnostic package there holds it and the logs (see [Reporting a problem](#reporting-a-problem)). Below come the files Launch DCS will write and what was detected on this PC.
 
 ## Back to stock DCS
 
@@ -411,7 +418,7 @@ DCS renders with the eye distance your headset measured or was set to (Pimax Pla
 
 ### Multi-threaded shadows and G-buffer are unavailable
 
-They need D3D11 command lists on DCS's graphics device. Every recent NVIDIA card has them, so on NVIDIA the cause is almost always one of these, and the DCS Engine page says which:
+They need D3D11 command lists on DCS's graphics device. Every recent NVIDIA card has them, so on NVIDIA the cause is almost always one of these, and the Engine Optimizations page says which:
 
 - **NVIDIA Control Panel → Manage 3D settings → Threaded optimization is Off**, in Global settings or in the DCS World program profile (often recommended in older DCS VR guides). Set it back to **Auto** (in the DCS profile: *Use global setting*). Checks warns about it before you launch; DCS Control reads this setting but never changes it.
 - **DCS runs on the processor's integrated graphics** instead of the NVIDIA card: Windows Settings → System → Display → Graphics → DCS → High performance, or disable the integrated graphics.
@@ -421,7 +428,7 @@ On AMD cards the driver usually does not offer them. Everything else in the engi
 
 ### ReShade (or another dxgi.dll mod) with DLSS 5
 
-DLSS 5 and Foveated SR need the file name `dxgi.dll` in DCS's `bin` folder. When another program already has one there (ReShade, an overlay), Checks says so and Launch DCS asks once: **Keep it working** loads it after the DLSS 5 loader (as `dxgi2.dll`), **Set it aside** keeps it off while the profile is applied. It is backed up either way, and **Back to stock DCS** puts it back. If DCS misbehaves with both, turn off *Keep another program's dxgi.dll working* on the DLSS 5 page.
+DLSS 5 and Foveated SR need the file name `dxgi.dll` in DCS's `bin` folder. When another program already has one there (ReShade, an overlay), Checks says so and Launch DCS asks once: **Keep it working** loads it after the DLSS 5 loader (as `dxgi2.dll`), **Set it aside** keeps it off while the profile is applied. It is backed up either way, and **Back to stock DCS** puts it back. If DCS misbehaves with both, turn off *Keep another program's dxgi.dll working* on the DLSS page.
 
 ### DCS doesn't start
 
@@ -442,7 +449,7 @@ DLSS 5 and Foveated SR need the file name `dxgi.dll` in DCS's `bin` folder. When
 
 ### VRAM is full (stutters, textures loading late)
 
-- Turn on the **VRAM counter** (OSD page) to see it in the headset.
+- Turn on the **VRAM counter** (In flight page) to see it in the headset.
 - On the CPU Boost page: **Free VRAM before flight**, **Small DCS window in VR**, **Lower the monitor while flying**. What Boost will do shows how much the listed programs hold now.
 - Frame generation reserves a fixed amount of memory, sized by the headset image it receives; it does not grow during a flight. DCS's own texture and terrain settings are the other big lever.
 
@@ -467,11 +474,11 @@ Only the `options.lua` values a feature needs — the frame limit, desktop VSync
 Please open an issue on [GitHub](https://github.com/NIGos/dcs-control/issues) with:
 
 1. **What you did and what happened** (route, features, 2×/3×/Auto, single-player or multiplayer).
-2. **The diagnostic package:** open the **Troubleshooting** page and press **Create diagnostic package…** right after the flight that went wrong, before starting DCS again (DCS starts its log anew). It saves one ZIP with everything needed to understand the problem: the app's report (profile, what was detected, the checks, the last flight), `dcs.log`, `options.lua`, the logs and settings of DLSS 5 (Cheeky), frame generation (OFXR), Quad Views, Pupil shift, the engine optimizations and CPU Boost, the DLSS and DirectX file versions in DCS's `bin` folder, Pimax Play's or SteamVR's logs and settings, the OpenXR runtime and layers registered on the PC, and the Windows, CPU and GPU driver versions. Attach the ZIP to the issue.
+2. **The diagnostic package:** open the **Help & support** page and press **Create diagnostic package…** right after the flight that went wrong, before starting DCS again (DCS starts its log anew). It saves one ZIP with everything needed to understand the problem: the app's report (profile, what was detected, the checks, the last flight), `dcs.log`, `options.lua`, the logs and settings of DLSS 5 (Cheeky), frame generation (OFXR), Quad Views, Pupil shift, the engine optimizations and CPU Boost, the DLSS and DirectX file versions in DCS's `bin` folder, Pimax Play's or SteamVR's logs and settings, the OpenXR runtime and layers registered on the PC, and the Windows, CPU and GPU driver versions. Attach the ZIP to the issue.
 
 > **Privacy:** the package holds only text files. Your Windows user name, PC name and e-mail addresses are replaced by `<user>`, `<pc>` and `<e-mail>`, and the account tokens, account ids and headset serial number in Pimax's logs are removed; nothing is sent anywhere. You can open the ZIP and look it over before posting.
 
-**"DLSS 5: ON but not applied" in the headset?** The **Troubleshooting** page reads the last DCS session and says whether DLSS 5 reached the Quad Views focus area, and if not, why (for example DCS running DLSS on images that are not the focus views, or another Quad Views layer in the way), with what to check.
+**"DLSS 5: ON but not applied" in the headset?** The **Help & support** page reads the last DCS session and says whether DLSS 5 reached the Quad Views focus area, and if not, why (for example DCS running DLSS on images that are not the focus views, or another Quad Views layer in the way), with what to check.
 
 ## Support
 

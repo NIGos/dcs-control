@@ -1,3 +1,13 @@
+# 0.6.1 preview
+
+**UI rework.** The same settings and the same behaviour, easier to find and to read:
+- **Clearer menu.** The left rail is grouped into *Every pilot*, *VR*, *Before you fly* and *If something goes wrong*. **Troubleshooting** is now **Help & support** (the diagnostic package, the text report, what the headset panel messages mean and app updates), **OSD** is now **In flight** (every in-flight key and the headset panel), and the **DLSS 5** page is now **DLSS** (the feature is still DLSS 5).
+- **Keyboard:** Ctrl+1 to Ctrl+0 open the pages, **Ctrl+Shift+C** opens Checks, Ctrl+K finds a setting.
+- **Greyed-out settings say why**, under their name, often with a button to the setting they wait for.
+- **Getting started:** **Guided setup** is on the Overview (and on DCS & headset); **Detect my setup** is now **Read settings from this PC** on the DCS & headset page. Guided setup uses the same words as Checks: *Must fix* and *Check yourself*.
+- **Tidier pages:** the Overview says whether you are ready to fly and what the next launch runs; Framegen has the frame limit next to Image quality and one Diagnostics fold; Quad Views has its own Sharpness card; Perception and Visual realism show what each feature still needs, with a button to fix it; in-flight keys have a **Default** button; CPU Boost shows the flight helpers first; Checks has its own **Review files** button.
+- In the right panel, **Load…** and **Save as…** sit next to the profile name.
+
 # 0.6.0 preview
 
 **Frame generation only when needed** (on by default, with Generated frames on Auto). DCS now renders at your headset's full refresh rate, and frames are generated only while DCS falls behind. While DCS keeps up, its own frames go straight to the headset: no added latency and no generated-frame artifacts. When it can't keep up, Auto 2×/3× takes over, and it switches back once there is headroom again. It needs the DCS frame limit at **Match refresh** (90 FPS at 90 Hz); Checks tells you when your limit is lower. The Last flight summary shows how much of the flight needed no generated frames.

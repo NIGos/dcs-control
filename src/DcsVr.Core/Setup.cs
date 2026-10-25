@@ -44,7 +44,7 @@ public static class Readiness
             writable.Count == 0 ? "DCS Control can write every file it needs." : "Not writable for your Windows user: " + string.Join(" ", writable.Select(f => f + ": " + LaunchSafety.WriteAdvice(f))));
         if (service.ForeignDxgi(profile, inventory) is { } dxgi)
             Add("foreign-dxgi", CheckState.Warning, "Another program's dxgi.dll", profile.KeepOtherDxgi
-                ? $"DCS's bin folder has a dxgi.dll from {dxgi.Name} ({dxgi.Path}). DLSS 5 needs that file name, so Launch DCS backs it up and loads it together with DLSS 5: {dxgi.Name} keeps working. If DCS misbehaves with both, turn off Keep another program's dxgi.dll working on the DLSS 5 page."
+                ? $"DCS's bin folder has a dxgi.dll from {dxgi.Name} ({dxgi.Path}). DLSS 5 needs that file name, so Launch DCS backs it up and loads it together with DLSS 5: {dxgi.Name} keeps working. If DCS misbehaves with both, turn off Keep another program's dxgi.dll working on the DLSS page."
                 : $"DCS's bin folder has a dxgi.dll from {dxgi.Name} ({dxgi.Path}). DLSS 5 needs that file name, so Launch DCS backs it up and sets it aside while this profile is applied: {dxgi.Name} is off in DCS until Back to stock DCS puts it back.");
         var running = profile.Desktop ? new ActiveRouteState(null, "", default) : ActiveRouteProvider();
         if (running.Route is { } activeRoute && activeRoute != profile.Runtime)
@@ -70,7 +70,7 @@ public static class Readiness
         var manifest = profile.RuntimeManifestPath ?? (profile.Runtime == RuntimeKind.Pimax ? inventory.PimaxRuntime : inventory.SteamVrRuntime);
         if (!profile.Desktop) try
         {
-            using var json = JsonDocument.Parse(File.ReadAllText(manifest ?? throw new InvalidDataException("The headset's OpenXR runtime was not found. Start Pimax Play (or SteamVR) once, then press Rescan this PC.")));
+            using var json = JsonDocument.Parse(File.ReadAllText(manifest ?? throw new InvalidDataException("The headset's OpenXR runtime was not found. Start Pimax Play (or SteamVR) once, then press Check this PC.")));
             var relative = json.RootElement.GetProperty("runtime").GetProperty("library_path").GetString();
             var dll = Path.GetFullPath(relative ?? throw new InvalidDataException("Runtime library path is empty."), Path.GetDirectoryName(manifest)!);
             if (!NativeBinary.IsX64(dll)) throw new InvalidDataException("The selected runtime library is missing or is not x64: " + dll);

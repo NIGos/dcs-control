@@ -186,7 +186,7 @@ public static class SetupDetection
                 }
                 else notes.Add("DLSS 5 uses the saved copy of nvngx_dlssnr.dll (version " + saved.Version + ", from " + saved.OriginalPath + ").");
             }
-            else notes.Add("No signed NVIDIA nvngx_dlssnr.dll 310.8 or 310.9 was found in Downloads, Documents or Desktop. Select it on the DLSS 5 page; the app keeps a verified copy.");
+            else notes.Add("No signed NVIDIA nvngx_dlssnr.dll 310.8 or 310.9 was found in Downloads, Documents or Desktop. Select it on the DLSS page; the app keeps a verified copy.");
         }
 
         return new(profile, detected, notes, active);

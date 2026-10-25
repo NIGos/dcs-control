@@ -5,7 +5,9 @@
   --bg:#262626;--rail:#1c1c1c;--panel:#202020;--s0:#2b2b2b;--s1:#303030;--s2:#383838;--field:#1b1b1b;
   --line:#3a3a3a;--line-strong:#4a4a4a;--text:#f2f2f2;--soft:#d6d6d6;--muted:#a8a8a8;--faint:#8a8a8a;
   --accent:#f5a01a;--accent-hi:#ffb94a;--accent-dim:#f5a01a24;--accent-dark:#7a5214;--cyan:#69c4e6;--green:#5bd68a;--red:#f49988;
-  --amber:var(--accent);--display:"Bahnschrift SemiCondensed","Bahnschrift",Interface,"Segoe UI",sans-serif;--radius:4px;--ease:cubic-bezier(.2,.8,.2,1)}
+  --amber:var(--accent);--display:"Bahnschrift SemiCondensed","Bahnschrift",Interface,"Segoe UI",sans-serif;--radius:4px;--ease:cubic-bezier(.2,.8,.2,1);
+  /* Density: settings rows, card gaps, control and help text sizes. */
+  --row-y:7px;--card-gap:12px;--control-h:32px;--help-size:11.5px}
 body{background:var(--bg);font-size:14px;color:var(--text)}
 #shell{grid-template-columns:64px minmax(0,1fr) 300px;grid-template-rows:minmax(0,1fr)}
 h1,h2,h3{font-family:var(--display)}
@@ -38,8 +40,8 @@ nav{gap:4px;width:100%}
 #scrollArea{padding:18px 28px 28px}
 .eyebrow{color:var(--accent)}
 /* Surfaces: flat groups separated by space and rules */
-.card{background:transparent;border:0;border-radius:0;box-shadow:none;padding:4px 0 18px}
-.card-heading{padding:0 0 8px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.card{background:transparent;border:0;border-radius:0;box-shadow:none;padding:4px 0 var(--card-gap)}
+.card-heading{padding:0 0 6px;margin-bottom:2px;border-bottom:1px solid var(--line)}
 .card .card-heading h2,.card>h2{font:600 13px "Segoe UI",Interface,sans-serif;letter-spacing:.6px;text-transform:uppercase;color:var(--soft)}
 .card .card-heading .fine{margin-top:2px}
 .two-column{gap:0 34px}
@@ -47,31 +49,49 @@ nav{gap:4px;width:100%}
 .tag{border-color:var(--accent-dark);color:var(--accent);background:transparent;border-radius:3px}
 .tag.soft{border-color:var(--line-strong);color:var(--muted)}
 /* Settings rows: label on the left, control on the right */
-.setting{display:grid;grid-template-columns:minmax(0,1fr) minmax(170px,56%);column-gap:16px;align-items:center;padding:10px 0;border-top:0}
+.setting{display:grid;grid-template-columns:minmax(0,1fr) minmax(170px,56%);column-gap:16px;align-items:center;padding:var(--row-y) 0;border-top:0}
 .setting>.setting-label{grid-column:1;font:600 14px "Segoe UI",Interface,sans-serif;color:var(--text);margin:0}
-.setting>p{grid-column:1;margin:2px 0 0;font-size:11.5px;line-height:1.45;color:var(--faint)}
+/* Help: a short lead, with the detail behind More (field() and card()). */
+.setting>.setting-help,.setting>.setting-more,.setting>.why{grid-column:1}
+.setting-help{margin-top:2px;font-size:var(--help-size);line-height:1.45;color:var(--muted)}
+.setting-help>p{display:inline;margin:0;font-size:inherit;line-height:inherit;color:inherit}
+.switch-text{flex:1;min-width:0}
+.more-toggle{margin-left:6px;padding:0;border:0;background:none;color:var(--accent);font:600 11px "Segoe UI",Interface,sans-serif;cursor:pointer;white-space:nowrap}
+.more-toggle:hover{color:var(--accent-hi)}
+/* More never sits alone on a line: a word joiner ends the lead; a card subtitle glues its last word to More. */
+.setting-help>p::after{content:"\2060"}
+.more-glue{white-space:nowrap}
+.more-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:2px}
+p.setting-more{margin:4px 0 0;padding-left:8px;border-left:2px solid var(--line-strong);font-size:var(--help-size);line-height:1.45;color:var(--muted)}
+.setting-more[hidden]{display:none}
+.card-heading .setting-more{margin-top:4px}
 .setting>select,.setting>.setting-number,.setting>.path-row{grid-column:2;grid-row:1 / span 2}
 .setting>.input-error{grid-column:1 / -1}
 .setting .switch-row{grid-column:1 / -1}
 .setting .switch-row .setting-label{font:600 14px "Segoe UI",Interface,sans-serif}
-.setting .switch-row p{font-size:11.5px;color:var(--faint);margin-top:2px}
 /* Narrow groups put the label above the control so long choices are never cut. */
 .two-column>div,#pacingControls,#neuralControls>div{container-type:inline-size}
-@container (max-width:470px){.setting{grid-template-columns:1fr}.setting>select,.setting>.setting-number,.setting>.path-row{grid-column:1;grid-row:auto;margin-top:6px}}
+@container (max-width:470px){.setting{grid-template-columns:1fr}.setting>select,.setting>.setting-number,.setting>.path-row{grid-column:1;grid-row:auto;margin-top:6px}
+  /* A key field keeps its own column beside the label down to 330 px (below). */
+  .setting:has(>.hotkey-row){grid-template-columns:minmax(0,1fr) minmax(150px,46%)}}
 /* Game & headset: the page uses the whole width when the Sboys card is hidden, and file paths run the full row under
    their title, so a long DCS or Saved Games path stays readable. */
-#page-setup .two-column:has(#sboysCard[hidden]){grid-template-columns:minmax(0,1fr)}
+/* A column whose only block is hidden (the headset panel with Optimizations only) gives its room to the other one. */
+.two-column>div:has(> [hidden]:only-child){display:none}
+.two-column:has(> div > [hidden]:only-child){grid-template-columns:minmax(0,1fr)}
 #gameControls .setting>.path-row,#headsetControls .setting>.path-row{grid-column:1 / -1;grid-row:auto;margin-top:6px}
-select,input[type=text],input[type=number],input.number-input{background:var(--field);border:0;border-radius:var(--radius);color:var(--accent);min-height:40px;font-size:14px;padding:8px 12px}
-select{appearance:none;padding-right:34px;background-image:linear-gradient(45deg,transparent 50%,var(--accent) 50%),linear-gradient(135deg,var(--accent) 50%,transparent 50%);background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px;background-repeat:no-repeat}
+select,input[type=text],input[type=number],input.number-input{background:var(--field);border:0;border-radius:var(--radius);color:var(--accent);min-height:var(--control-h);font-size:14px;padding:5px 10px}
+select{appearance:none;padding-right:30px;background-image:linear-gradient(45deg,transparent 50%,var(--accent) 50%),linear-gradient(135deg,var(--accent) 50%,transparent 50%);background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px;background-repeat:no-repeat}
 select:hover,input[type=text]:hover,input[type=number]:hover,input.number-input:hover{background-color:#151515}
 select:focus,input:focus{outline:none;box-shadow:0 0 0 2px var(--accent-dark)}
+select:focus-visible,input:focus-visible,.list-input:focus-visible{outline:none;box-shadow:0 0 0 2px var(--accent)}
 select:disabled,input:disabled{color:var(--faint)}
 option{background:#1b1b1b;color:var(--text)}
 .path-row input{color:var(--soft);font-size:12px}
+.path-row .button{min-height:var(--control-h);padding:4px 14px}
 .setting-number{gap:10px}
-.setting-number input[type=number],.setting-number input.number-input{width:74px;min-height:32px;text-align:right;color:var(--text);background:transparent;padding:4px 2px;font-size:13px}
-.number-unit{color:var(--faint)}
+.setting-number input[type=number],.setting-number input.number-input{width:68px;min-height:32px;text-align:right;color:var(--accent);background:var(--field);border-radius:var(--radius);padding:4px 8px;font-size:13px}
+.number-unit{color:var(--muted);font:11.5px "Segoe UI",Interface,sans-serif;margin-left:-4px}
 input[type=range]{appearance:none;-webkit-appearance:none;height:16px;background:transparent}
 input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:linear-gradient(var(--accent),var(--accent)) 0/var(--fill,50%) 100% no-repeat,#3c3c3c}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;margin-top:-5px;border-radius:50%;background:var(--accent);border:0}
@@ -80,7 +100,37 @@ input[type=range]:disabled::-webkit-slider-thumb{background:var(--faint)}
 .switch:before{width:12px;height:12px;left:3px;top:3px;background:#e8e8e8}
 .switch:checked{background:var(--accent);border-color:var(--accent)}
 .switch:checked:before{transform:translateX(22px);background:#1b1b1b}
-.setting.inactive{opacity:.42}
+/* Greyed out: the label and text stay readable, the control fades, and a line says what makes it editable. */
+.setting.inactive{opacity:1}
+.setting.inactive .setting-label{color:var(--muted)}
+.setting.inactive .setting-help,.setting.inactive .setting-more{color:var(--faint)}
+.setting.inactive select,.setting.inactive .switch,.setting.inactive .setting-number,.setting.inactive .path-row,.setting.inactive .list-input,.setting.inactive .hotkey-row{opacity:.45}
+.setting.inactive .switch:checked{background:#5a5a5a;border-color:#5a5a5a}
+.setting.inactive .switch:checked:before{background:#cfcfcf}
+.why{display:block;margin-top:3px;font-size:11.5px;line-height:1.45;color:var(--accent)}
+.why[hidden]{display:none}
+.setting>.why{grid-column:1}
+.why .link-button{margin-left:6px;font-size:11px}
+/* Segmented choice (segmented()): 2 to 4 short options under the help, across the row; the select stays underneath. */
+.setting>select.seg-native,.setting.inactive>select.seg-native{position:absolute;left:0;top:0;width:1px;height:1px;min-height:0;padding:0;opacity:0;overflow:hidden;clip-path:inset(50%);pointer-events:none}
+.setting.has-seg{position:relative;grid-template-columns:minmax(0,1fr)}
+.setting.has-seg>.segmented{grid-column:1 / -1;margin-top:6px}
+.segmented{display:flex;gap:2px;padding:2px;background:var(--field);border-radius:var(--radius)}
+.segmented button{flex:1 1 auto;min-width:0;min-height:28px;padding:0 8px;border:1px solid transparent;border-radius:3px;background:transparent;color:var(--soft);font:600 12px "Segoe UI",Interface,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.segmented button:hover:not(:disabled){background:#ffffff0d;color:var(--text)}
+.segmented button[aria-checked=true]{background:var(--accent-dim);border-color:var(--accent-dark);color:var(--accent-hi)}
+.segmented button:disabled{color:var(--faint)!important;border-color:transparent!important;cursor:default}
+.segmented button[aria-checked=true]:disabled{background:#ffffff14!important;border-color:var(--line-strong)!important;color:var(--soft)!important}
+.segmented button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.segmented button.is-default:after{content:"";display:inline-block;width:4px;height:4px;margin:0 0 2px 5px;border-radius:50%;background:currentColor;opacity:.6;vertical-align:middle}
+/* Greyed out by the faint button colour alone: no group opacity on top, so the choices stay readable. */
+/* Why a choice cannot be picked now (syncSegment). */
+.setting.has-seg>.seg-note{grid-column:1 / -1;margin-top:4px;font-size:var(--help-size);line-height:1.4;color:var(--muted)}
+.seg-note[hidden]{display:none}
+/* A run of simple switches (toggleList()). */
+.toggle-list>.setting{padding:5px 0;border-top:1px solid var(--line)}
+.toggle-list>.setting:first-child{border-top:0}
+.toggle-list .setting-label,.toggle-list .switch-row .setting-label{font-size:13px}
 /* Pipeline: three status tiles at the top of Flight setup */
 .pipeline{gap:10px;margin-bottom:20px}
 /* Overview tiles in two groups, one row each: the optimizations for every pilot (2), then the VR features (3). */
@@ -113,7 +163,8 @@ input[type=range]:disabled::-webkit-slider-thumb{background:var(--faint)}
 .button{border-radius:var(--radius);font:600 13px "Segoe UI",Interface,sans-serif;letter-spacing:.3px;text-transform:uppercase}
 .button.secondary,.button.quiet{background:transparent;border:1.5px solid #d8d8d8;color:var(--text);border-radius:999px;padding:8px 18px}
 .button.secondary:hover:not(:disabled),.button.quiet:hover:not(:disabled){background:#ffffff12}
-.button.primary{background:var(--accent);border-color:var(--accent);color:#1b1b1b;box-shadow:none}
+.button.primary{background:var(--accent);border-color:var(--accent);color:#1b1b1b;box-shadow:none;border-radius:999px}
+.button.quiet{min-height:30px;border:1px solid var(--line-strong);color:var(--soft);padding:5px 14px;font-size:12px}
 .button.primary:hover:not(:disabled){background:var(--accent-hi);border-color:var(--accent-hi)}
 button:disabled{opacity:1;color:#8c8c8c!important;background:transparent!important;border-color:#4a4a4a!important;box-shadow:none!important}
 /* Right control panel */
@@ -122,8 +173,6 @@ button:disabled{opacity:1;color:#8c8c8c!important;background:transparent!importa
 .wordmark{display:flex;align-items:baseline;gap:8px;font-family:var(--display);font-style:italic;line-height:1;margin-bottom:6px}
 .wordmark b{font-size:52px;font-weight:800;letter-spacing:-1px;color:#fff}
 .wordmark span{font-size:22px;font-weight:700;letter-spacing:2px;color:var(--accent)}
-.panel-device{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-bottom:18px}
-.device-dot{width:7px;height:7px;border-radius:50%;background:var(--green);border:0;box-shadow:0 0 6px var(--green)}
 .panel-section{margin-top:18px}
 .panel-label{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font:600 14px "Segoe UI",Interface,sans-serif;color:var(--text)}
 .panel-label label{font:inherit}
@@ -144,9 +193,6 @@ button:disabled{opacity:1;color:#8c8c8c!important;background:transparent!importa
 .route-live{min-height:16px;margin-top:8px;font-size:11.5px;line-height:1.45;color:var(--muted)}
 .route-live.mismatch{color:#ffd2c8}
 .route-live.mismatch:before{content:"Route mismatch · ";font-weight:700;color:var(--red)}
-.pill-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.pill{min-height:44px;border:1.5px solid #d8d8d8;border-radius:999px;background:transparent;color:var(--text);font:700 12px "Segoe UI",Interface,sans-serif;letter-spacing:.4px;text-transform:uppercase;cursor:pointer;padding:6px 10px}
-.pill:hover:not(:disabled){background:#ffffff12}
 /* Workflow in the panel: one large Launch DCS button, secondary actions as links below it */
 .workflow{display:flex;flex-direction:column;align-items:stretch;gap:12px;padding:14px 22px 16px;background:var(--panel);border-top:1px solid #141414;box-shadow:none}
 .workflow-status{align-items:flex-start}
@@ -203,6 +249,8 @@ dialog::backdrop{background:#000000b0}
 .setup-passed summary,.setup-files summary{cursor:pointer;font-size:12px;color:#c9c9c9;letter-spacing:.3px}
 .setup-passed summary:hover,.setup-files summary:hover{color:var(--accent)}
 .setup-passed .readiness-item{margin-top:8px}
+.setup-group{margin:14px 0 0;font:600 11px "Segoe UI",Interface,sans-serif;letter-spacing:.6px;text-transform:uppercase;color:var(--muted)}.setup-group.fix{color:#ffb4a6}.setup-group+.readiness-item{margin-top:6px}
+.readiness-item.Warning .check-mark{background:var(--accent-dark);color:#ffe3b5}
 .setup-grid label[hidden]{display:none}
 .needs{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 16px;margin:0 0 14px;border-left:3px solid var(--accent);background:var(--accent-dim,#f5a01a1a);font-size:13px;color:var(--text)}
 /* Labelled navigation on wide windows; icons only below 1180px. */
@@ -220,7 +268,7 @@ dialog::backdrop{background:#000000b0}
   .rail .search-button>span{font-size:20px;color:var(--accent)}
 }
 /* Frameless window: drag areas and title-bar buttons. Double-clicking a drag area maximizes. */
-.page-heading,.rail .brand,.panel-top .wordmark,.panel-device,.window-controls{app-region:drag;-webkit-app-region:drag}
+.page-heading,.rail .brand,.panel-top .wordmark,.window-controls{app-region:drag;-webkit-app-region:drag}
 .page-heading button,.window-controls button{app-region:no-drag;-webkit-app-region:no-drag}
 .control-panel{position:relative}
 .window-controls{position:absolute;top:0;right:0;left:0;height:34px;display:flex;justify-content:flex-end;z-index:5}
@@ -231,16 +279,15 @@ dialog::backdrop{background:#000000b0}
 .window-controls button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 /* Right panel: wider, with even spacing between groups. Top padding always clears the window buttons. */
 .control-panel .panel-top{padding-top:40px}
-.route-switch,.pill-grid,.workflow-actions{gap:10px}
-.pill-grid .pill{white-space:nowrap;padding-left:10px;padding-right:10px}
+.route-switch,.workflow-actions{gap:10px}
 @media(min-width:1181px){
   #shell{grid-template-columns:184px minmax(0,1fr) 360px}
   .panel-top,.workflow{padding-left:26px;padding-right:26px}
   .panel-section{margin-top:22px}
   .panel-label{margin-bottom:10px}
 }
-@media(max-width:1180px){#shell{grid-template-columns:58px minmax(0,1fr) 300px}.panel-top,.workflow{padding-left:18px;padding-right:18px}.pill-grid .pill{white-space:normal}}
-@media(max-height:760px){.control-panel .panel-top{padding-top:34px}.wordmark b{font-size:30px}.wordmark span{font-size:16px}.panel-section{margin-top:10px}.panel-device{margin-top:2px}}
+@media(max-width:1180px){#shell{grid-template-columns:58px minmax(0,1fr) 300px}.panel-top,.workflow{padding-left:18px;padding-right:18px}}
+@media(max-height:760px){.control-panel .panel-top{padding-top:34px}.wordmark b{font-size:30px}.wordmark span{font-size:16px}.panel-section{margin-top:10px}}
 /* Feature checklist in the right panel: one row per feature, with its live summary and a link to its page. */
 .feature-list{display:grid;gap:8px}
 .feature{display:grid;grid-template-columns:minmax(0,1fr) 28px;align-items:center;column-gap:4px;padding:7px 4px 7px 10px;border:1px solid var(--line);border-left:3px solid #555;border-radius:var(--radius);background:var(--s0)}
@@ -261,6 +308,17 @@ dialog::backdrop{background:#000000b0}
 .panel-profile{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:2px 10px}
 .panel-profile .link-button{font-size:10.5px;letter-spacing:.4px}
 .panel-profile .link-button[hidden]{display:none}
+.panel-profile .profile-prefix{font-weight:400;color:var(--muted)}
+.profile-links{gap:0}
+.profile-links .link-button:not([hidden])~.link-button:not([hidden])::before{content:'·';display:inline-block;margin:0 7px;color:var(--muted)}
+/* Perception, Visual realism and headset panel features that apply at launch, under the checklist. */
+.also-on{margin:6px 4px 0;font-size:11.5px;line-height:1.5;color:var(--muted)}
+.also-on[hidden]{display:none}
+.also-on .link-button{font-size:11.5px;letter-spacing:0;text-transform:none}
+/* Help & support and the Checks file list. */
+.heading-actions{display:flex;align-items:center;gap:10px}
+.package-contents{margin-top:10px}
+.package-contents .plain-list{margin:8px 0}
 /* Pimax Play focus values on the Quad Views page. */
 .pimax-fovea{margin:6px 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--s0)}
 .pimax-fovea[hidden]{display:none}
@@ -296,9 +354,18 @@ dialog::backdrop{background:#000000b0}
 .engine-state.failed{border-left-color:var(--accent)}
 .setting[hidden]{display:none}
 /* CPU Boost page. */
-.list-input{grid-column:2;grid-row:1 / span 2;min-height:96px;resize:vertical;background:var(--field);border:0;border-radius:var(--radius);color:var(--accent);font:13px Consolas,"Cascadia Mono",monospace;padding:8px 10px}
+.list-input{grid-column:2;grid-row:1 / span 2;min-height:84px;resize:vertical;background:var(--field);border:0;border-radius:var(--radius);color:var(--accent);font:13px Consolas,"Cascadia Mono",monospace;padding:8px 10px}
 .list-input:focus{outline:none;box-shadow:0 0 0 2px var(--accent-dark)}
 .list-input:disabled{color:var(--faint)}
+/* A list folds into a one-line summary; Edit opens the textarea under it, across the row. */
+.setting.has-list{grid-template-columns:minmax(0,1fr)}
+.setting>.list-summary{grid-column:1 / -1;display:flex;gap:10px;align-items:center;justify-content:space-between;min-height:var(--control-h);margin-top:6px;padding:4px 10px;border:0;border-radius:var(--radius);background:var(--field);color:var(--accent);font:12.5px Consolas,"Cascadia Mono",monospace;text-align:left;cursor:pointer}
+.setting>.list-summary:hover:not(:disabled){background-color:#151515}
+.list-summary-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.list-summary-action{flex-shrink:0;font:700 11px "Segoe UI",Interface,sans-serif;letter-spacing:.6px;text-transform:uppercase}
+.setting>.list-input{grid-column:1 / -1;grid-row:auto;margin-top:6px}
+.list-input[hidden]{display:none}
+.setting.inactive .list-summary{opacity:.45}
 @container (max-width:470px){.setting>.list-input{grid-column:1;grid-row:auto;margin-top:6px}}
 .boost-cores{display:grid;grid-template-columns:minmax(0,42%) minmax(0,1fr);gap:4px 14px;margin:8px 0 12px;font-size:12.5px}
 .boost-cores dt{color:var(--muted)}
@@ -336,7 +403,6 @@ dialog::backdrop{background:#000000b0}
 @media(max-height:1000px){
   .control-panel .panel-top{padding-top:34px;padding-bottom:8px}
   .wordmark{margin-bottom:2px}.wordmark b{font-size:36px}.wordmark span{font-size:16px}
-  .panel-device{margin-bottom:4px}
   .panel-section{margin-top:12px}
   .panel-label{margin-bottom:6px}
   .route-switch button{min-height:34px}
@@ -346,7 +412,6 @@ dialog::backdrop{background:#000000b0}
   .feature{padding:5px 4px 5px 10px}
   .feature-note{margin-top:4px;padding:3px 8px}
   .panel-profile{margin-top:6px}
-  .pill{min-height:34px}
   .workflow{gap:8px;padding-top:9px;padding-bottom:12px}
   .workflow-status p{line-height:1.4}
   .workflow-actions .button.launch{min-height:46px;font-size:16px;letter-spacing:1.8px}
@@ -360,6 +425,9 @@ details.advanced>summary::-webkit-details-marker{display:none}
 details.advanced>summary:before{content:"\203A";color:var(--accent);display:inline-block;width:10px;font-size:16px;line-height:1;transition:transform .15s var(--ease)}
 details.advanced[open]>summary:before{transform:rotate(90deg)}
 details.advanced>summary small{font-weight:400;font-size:11.5px;color:var(--faint)}
+details.advanced>summary:has(.fold-value) small{order:2;flex-basis:100%}
+details.advanced>summary .fold-value{margin-left:auto;font:600 11.5px "Segoe UI",Interface,sans-serif;color:var(--accent);font-variant-numeric:tabular-nums;white-space:nowrap}
+details.advanced.idle>summary .fold-value{color:var(--faint)}
 details.advanced>summary:hover{color:var(--accent-hi)}
 .advanced-block{margin:0 0 18px}
 .advanced-block>.inline-actions{margin-top:2px}
@@ -419,28 +487,31 @@ details.advanced>summary:hover{color:var(--accent-hi)}
 details.detected-card>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;list-style:none;font:600 15px var(--display);letter-spacing:.4px;text-transform:uppercase;color:var(--soft)}
 details.detected-card>summary::-webkit-details-marker{display:none}
 details.detected-card[open]>summary{margin-bottom:10px}
-.detected-actions{margin:0 0 8px}
 /* Key capture: click, press the combination; Esc cancels, Backspace clears. */
 .setting>.hotkey-row{grid-column:2;grid-row:1 / span 2;display:flex;flex-direction:column;align-items:stretch;gap:4px;min-width:0}
-.hotkey-capture{min-height:36px;padding:5px 10px;border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--field);color:var(--text);text-align:left;cursor:pointer}
+.hotkey-capture{min-height:var(--control-h);padding:5px 10px;border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--field);color:var(--text);text-align:left;cursor:pointer}
 .hotkey-capture kbd{font:600 13px Consolas,"Cascadia Mono",monospace;letter-spacing:.3px}
 .hotkey-capture:hover:not(:disabled){border-color:var(--accent-dark)}
 .hotkey-capture.capturing{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
 .hotkey-capture.capturing kbd{color:var(--accent-hi)}
 .hotkey-capture:disabled{cursor:default;color:var(--faint)}
+.hotkey-line{display:flex;gap:6px;align-items:stretch;min-width:0}
+.hotkey-line>.hotkey-capture{flex:1;min-width:0}
+.hotkey-default{flex-shrink:0;min-height:var(--control-h);padding:5px 10px;font-size:11px}
+.hotkey-default[hidden]{display:none}
 .hotkey-note{min-height:0;font-size:11.5px;line-height:1.35;color:var(--faint)}
 .hotkey-note:empty{display:none}
 .hotkey-note.warn{color:#ffd28a}
 .hotkey-note.error{color:var(--red)}
-@container (max-width:470px){.setting>.hotkey-row{grid-column:1;grid-row:auto;margin-top:6px}}
-@media(max-width:900px){.setting>.hotkey-row{grid-column:1;grid-row:auto;margin-top:6px}}
+@container (max-width:330px){.setting:has(>.hotkey-row){grid-template-columns:1fr}.setting>.hotkey-row{grid-column:1;grid-row:auto;margin-top:6px}}
+@media(max-width:900px){.setting:has(>.hotkey-row){grid-template-columns:1fr}.setting>.hotkey-row{grid-column:1;grid-row:auto;margin-top:6px}}
 /* Diagnostics page: the package contents, Cheeky log lines and the panel messages (term above its meaning). */
 .plain-list{margin:4px 0 8px;padding-left:18px;font-size:12.5px;color:var(--text)}
 .plain-list li{margin:3px 0}
 .log-lines{margin:6px 0 0;padding:8px;max-height:220px;overflow:auto;background:#00000040;font:11px Consolas,monospace;white-space:pre-wrap;word-break:break-all;color:var(--muted)}
 .help-list{grid-template-columns:1fr}
 .help-list dt{color:var(--text);font-weight:600;margin-top:6px}
-.help-list dd{text-align:left;color:var(--muted)}
+.help-list dd{text-align:left;color:var(--muted);font-size:12px;margin-bottom:6px}
 @media(max-width:900px){#shell{grid-template-columns:52px minmax(0,1fr) 240px}.setting{grid-template-columns:1fr}.setting>select,.setting>.setting-number,.setting>.path-row{grid-column:1;grid-row:auto;margin-top:6px}.pipeline{grid-template-columns:1fr}.wordmark b{font-size:34px}.wordmark span{font-size:16px}.page-heading,#scrollArea{padding-left:18px;padding-right:18px}}
 /* Windows high contrast: switches show on/off and the selected route stays marked without background colours. */
 @media (forced-colors: active){.switch{border:1px solid ButtonText}.switch:before{background:ButtonText}.switch:checked{background:Highlight}.switch:checked:before{background:HighlightText}.route-switch button.selected{outline:3px solid Highlight;outline-offset:-3px}.status-dot{forced-color-adjust:none}}
@@ -474,7 +545,15 @@ button.rail-version:hover{color:var(--soft)}
 .boost-table th:nth-child(3),.boost-table td:nth-child(3){width:1%;white-space:nowrap}
 .boost-table td:first-child{overflow-wrap:anywhere}
 /* Perception: the notes above a card keep the same gap as the cards themselves. */
-#pupilNeeds,#pupilIpd,#stabilityNeeds{margin:0 0 16px}
+#stabilityNeeds{margin:0 0 16px}
+/* What a card's feature still needs, under its heading; the eye distance note at the end of its card. */
+.card-note{margin:0 0 12px}
+.card-note .inline-actions{margin-top:6px}
+.card-note .button{min-height:30px;padding:5px 14px;font-size:12px}
+#pupilIpd{margin:10px 0 0}
+.report-details{margin-top:6px;font-size:12px;color:var(--soft)}
+.report-details>summary{cursor:pointer;color:var(--faint);font-size:11.5px}
+.report-details>summary:hover{color:var(--accent-hi)}
 /* First-start tour: a non-modal card at the bottom centre, clear of the rail and the right panel it points at, and an outline on its target. */
 .tour-dialog { position: fixed; left: 50%; transform: translateX(-50%); bottom: 24px; top: auto; right: auto; margin: 0; max-width: 380px; width: calc(100% - 32px); z-index: 50; border-radius: 12px; padding: 18px 20px; box-shadow: 0 12px 40px rgba(0,0,0,.35); }
 .tour-dialog h2 { margin: 4px 0 8px; }
@@ -512,3 +591,53 @@ button.rail-version:hover{color:var(--soft)}
 .guide-key kbd { font: 600 11.5px Consolas, "Cascadia Mono", monospace; color: var(--text); background: var(--s2); border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 4px; padding: 2px 6px; }
 .guide-card footer .link-button { margin-left: auto; }
 @media (max-width: 1100px) { .guide-start { grid-template-columns: 1fr; } }
+/* One palette: the last blue-grey colours of app.css give way to the theme's tokens. */
+.fine{color:var(--muted)}
+.tag.soft{background:transparent;font-size:9px}
+summary{color:var(--soft)}
+.icon-button{color:var(--muted)}
+dt{color:var(--muted)}
+.cadence-card{background:transparent}
+.cadence-card .budget{background:var(--s0);border-color:var(--line)}
+.setup-steps{border-bottom-color:var(--line)}
+.setup-steps li{color:var(--muted)}
+.setup-steps span{border-color:var(--line-strong)}
+.setup-footer{border-top-color:var(--line);background:var(--panel)}
+.setup-footer>span{color:var(--muted)}
+.setup-body>p{color:var(--soft)}
+.setup-grid select,.setup-path input{background:var(--field);border-color:var(--line-strong);color:var(--text)}
+.setup-path small{color:var(--muted)}
+.readiness-item p{color:var(--soft)}
+.check-mark{background:var(--s2);color:var(--soft)}
+.flight-checklist p{color:var(--soft)}
+/* One fold style: an orange › before the label, turned down when open. */
+details>summary{list-style:none;cursor:pointer}
+details>summary::-webkit-details-marker{display:none}
+details>summary:before{content:"\203A";display:inline-block;width:10px;margin-right:6px;color:var(--accent);font-size:16px;line-height:1;text-align:center;transition:transform .15s var(--ease)}
+details[open]>summary:before{transform:rotate(90deg)}
+details.advanced>summary:before,.check-ok>summary:before,details.detected-card>summary:before{margin-right:0}
+.check-ok>summary:after{content:none}
+details.detected-card>summary{justify-content:flex-start}
+details.detected-card>summary>.tag{margin-left:auto}
+/* Five rail groups: the labelled rail fits at 920 px high without scrolling. */
+@media(min-width:1181px) and (max-height:1000px){.rail-group{margin-top:10px;line-height:1.25;letter-spacing:1px}.rail-group:first-child{margin-top:4px}.nav-item{padding-top:8px;padding-bottom:8px}}
+/* Overview: the third tile group, and the guided setup button under the checks. */
+.stage-group.extra .stage b{font-size:14px}
+.dash-setup{min-height:30px;padding:5px 14px;font-size:12px;white-space:nowrap}
+@media(min-width:1101px){.guide-start.two{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* CPU Boost plan: one summary line per section, the details folded. */
+.boost-summary{margin:0 0 4px;font-size:12.5px;line-height:1.45;color:var(--soft)}
+details.boost-details{margin:2px 0 4px;border-top:0;padding-top:0}
+details.boost-details>summary{padding:4px 0;font:600 12px "Segoe UI",Interface,sans-serif;color:var(--muted)}
+details.boost-details>summary:hover{color:var(--accent-hi)}
+details.boost-details[open]>summary{margin-bottom:6px}
+/* DCS & headset: Read settings and Guided setup above the cards; the headset software line and the Sboys driver. */
+.setup-actions .fine{margin:0;max-width:60ch}
+.setup-actions .inline-actions{flex-shrink:0}
+.headset-active{margin:10px 0 4px;font-size:12.5px;line-height:1.45;color:var(--soft)}
+.headset-active b{display:block;color:var(--text);font-weight:600}
+.sboys-block{margin:12px 0 4px;padding-top:12px;border-top:1px solid var(--line)}
+.sboys-block h3{margin:0 0 3px;font:600 13px "Segoe UI",Interface,sans-serif;color:var(--text)}
+.sboys-block .inline-actions{margin-top:10px}
+.sboys-block[hidden]{display:none}
+@media(max-width:900px){.setup-actions{flex-wrap:wrap}}
