@@ -322,7 +322,7 @@ function change() {
   plan = null; $('statusDot').classList.remove('error');
   if (state) { state.readiness = null; renderEdits(); }
   $('status').textContent = 'Settings changed. Launch DCS applies them; Review files lists what it will write.';
-  sendChangedSoon(); updateControls(); saveDraftSoon(); renderPage();
+  sendChangedSoon(); updateControls(); saveDraftSoon(); renderPage(); liveSoon();
 }
 /** "What happens at launch" depends only on the Boost settings and the route: refreshed for those edits, not every edit. */
 function boostChanged() { if (page === 'boost') refreshBoostPlan(); }
@@ -1447,16 +1447,73 @@ function updateWorkflow() {
   const error = $('statusDot').classList.contains('error');
   $('statusTitle').textContent = busy ? 'Working' : hasInvalid ? STATE_WORDS.invalid : error ? 'Needs attention' : STATE_WORDS[mode];
   if (hasInvalid) $('status').textContent = 'Correct the marked values before launching or saving.';
-  else if (!busy && !error && mode === 'running') $('status').textContent = 'Close DCS to apply changes or go back to stock DCS.';
+  else if (!busy && !error && mode === 'running') $('status').textContent = liveMode() ? liveStatus || 'Settings tagged Live apply now. The rest wait for the next launch.'
+    : (state?.launchReady && !liveOn ? 'Live is off. ' : '')+'Close DCS to apply changes or go back to stock DCS.';
+  renderLive();
   $('statusDot').classList.toggle('ready', !busy && !error && mode === 'ready');
   $('launch').title = mode === 'running' ? 'DCS is already running'
     : mode === 'ready' ? 'Launch DCS with '+profile.name+(state.foveaChanged ? ' (Pimax Play\'s new focus values are written first)' : '')
     : applied ? 'Apply '+(profile?.name || 'this profile')+' over '+applied+', then launch DCS' : 'Back up the original files, apply '+(profile?.name || 'this profile')+', then launch DCS';
 }
+// ---- Live mode: while DCS runs, settings its components re-read in flight are written at once -------------------------
+// The backend sends the live settings of the applied profile (state.liveFields, from LiveSettings in C#); the page only
+// tags those fields and sends the draft a moment after the last edit. Everything else waits for the next launch.
+let liveOn = true, liveTimer = null, liveBase = null, liveBusy = null, liveAgain = false, liveStatus = '';
+const liveMode = () => Boolean(state?.dcsRunning && state.launchReady && liveOn);
+const liveSet = () => new Set(state?.liveFields || []);
+function renderLive() {
+  const on = liveMode(), set = liveSet();
+  document.body.classList.toggle('live-mode', on);
+  fields.forEach(f => f.element.classList.toggle('live-field', set.has(f.prop)));
+  const sw = $('liveSwitch'); if (sw) { sw.hidden = !(state?.dcsRunning && state.launchReady); $('liveToggle').checked = liveOn; }
+}
+/** The settings (profile properties) that differ between two profiles, as the backend's ChangedSettings names them. */
+function changedProps(a, b) {
+  if (!a || !b) return [];
+  const x = canonical(a), y = canonical(b);
+  return [...new Set([...Object.keys(x), ...Object.keys(y)])].filter(k => JSON.stringify(x[k]) !== JSON.stringify(y[k]));
+}
+/** A setting's name as its field shows it (the visible one first). */
+function liveLabel(prop) {
+  const list = fields.filter(f => f.prop === prop), f = list.find(x => !x.element.hidden && !x.element.closest('[hidden]')) || list[0];
+  return f ? plainTitle(f.title) : prop;
+}
+const liveNames = props => [...new Set(props.map(liveLabel))].join(', ');
+function liveSoon() {
+  if (!liveMode()) return;
+  liveStatus = 'Applying live…'; if (!busy && !$('statusDot').classList.contains('error')) $('status').textContent = liveStatus;
+  clearTimeout(liveTimer); liveTimer = setTimeout(() => { liveTimer = null; applyLive(); }, 400);
+}
+/** Sends the draft to the live path now (a pending debounce is flushed); one request at a time, the last edit wins. */
+async function applyLive() {
+  if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
+  if (!liveMode() || invalid.size || busy) { if (liveStatus === 'Applying live…') liveStatus = ''; return; }
+  if (liveBusy) { liveAgain = true; return liveBusy; }
+  const sent = clone(profile), edited = changedProps(liveBase || state.appliedDraft, sent);
+  liveBusy = (async () => {
+    try {
+      const r = await request('liveApply', draft());
+      liveBase = sent;
+      const applied = r.applied.filter(p => edited.includes(p)), waiting = r.waiting.filter(p => edited.includes(p));
+      const parts = [applied.length ? 'Applied live: '+liveNames(applied)+'.' : '', waiting.length ? 'Waits for the next launch: '+liveNames(waiting)+'.' : ''].filter(Boolean);
+      liveStatus = parts.join(' ') || (r.written.length ? 'Applied live.' : '');
+    } catch (error) {
+      liveStatus = (edited.length ? 'Waits for the next launch: '+liveNames(edited)+'. ' : '')+error.message;
+    } finally { liveBusy = null; }
+    if (state?.dcsRunning && !busy) updateWorkflow();
+    if (liveAgain) { liveAgain = false; await applyLive(); }
+  })();
+  return liveBusy;
+}
+document.addEventListener('change', e => {
+  if (e.target.id !== 'liveToggle') return;
+  liveOn = e.target.checked; liveStatus = '';
+  if (liveOn) liveSoon(); updateWorkflow();
+});
 // DCS can start or close outside the app: Launch and Restore lock while it runs.
 setInterval(async () => {
   if (!state || busy || document.hidden) return;
-  try { const {dcsRunning} = await request('dcsStatus'); if (state && dcsRunning !== Boolean(state.dcsRunning)) { state.dcsRunning = dcsRunning; sendChangedSoon(true); renderOriginals(); updateWorkflow(); renderDashboard(); loadFlight(dcsRunning ? 0 : 3000); } } catch { }
+  try { const {dcsRunning} = await request('dcsStatus'); if (state && dcsRunning !== Boolean(state.dcsRunning)) { state.dcsRunning = dcsRunning; liveOn = true; liveBase = null; liveStatus = ''; sendChangedSoon(true); renderOriginals(); updateWorkflow(); renderDashboard(); loadFlight(dcsRunning ? 0 : 3000); } } catch { }
 }, 4000);
 // ---- Checks: one list, grouped Must fix / Check yourself / OK, each line with its way to the fix ---------------------
 // Titles and links for check ids (ProfileValidation codes, Readiness ids). [title, {reveal|page|guide, label, browse}]
@@ -2043,7 +2100,7 @@ function adoptDraft(next) {
   showProfile(); change(); boostChanged();
 }
 // Test hooks exercise the same controls and command bridge; the fixture host never starts DCS or opens dialogs.
-window.dcsUi = {request,run,setBusy,askDxgiFirst,askDxgiFresh,checkUpdates,installUpdate,setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); renderDashboard(); },runsWith,navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,ENGINE_PARTS,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,revealSetting,get boostRequests(){return boostSequence;},get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
+window.dcsUi = {request,run,setBusy,askDxgiFirst,askDxgiFresh,checkUpdates,installUpdate,setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); renderDashboard(); },applyLive,get liveStatus(){return liveStatus;},runsWith,navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,ENGINE_PARTS,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,revealSetting,get boostRequests(){return boostSequence;},get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
 // More / Less: shows or hides a setting's (or a card's) detail text; every page load starts with it folded.
 document.addEventListener('click', e => {
   const b = e.target.closest('.more-toggle'); if (!b) return; const detail = $(b.getAttribute('aria-controls')); if (!detail) return;

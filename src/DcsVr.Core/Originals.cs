@@ -312,6 +312,42 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
     }
 
     /// <summary>
+    /// Live mode (DCS may be running): overwrites component settings files of the applied profile and records the new
+    /// bytes, also for files tracked by their INI values (the pupil shift layer's: the new values are recorded). Nothing
+    /// is written unless the applied profile is still <paramref name="journalId"/> and every file still holds exactly
+    /// <c>ExpectedSha256</c> (what it installed): an apply, a restore or an edit since the caller read them wins. Never
+    /// options.lua (its settings are DCS's while it runs) and never a deleted entry.
+    /// </summary>
+    public void UpdateInstalledLive(string journalId, IReadOnlyList<(string Path, byte[] Content, string ExpectedSha256)> files)
+    {
+        using var exclusive = Lock();
+        var baseline = LoadCore();
+        if (baseline is not { State: "applied", Current: { } current } || current.Id != journalId)
+            throw new InvalidOperationException("The applied profile changed meanwhile; nothing was written live.");
+        if (files.Select(f => System.IO.Path.GetFullPath(f.Path)).Distinct(StringComparer.OrdinalIgnoreCase).Count() != files.Count)
+            throw new InvalidDataException("The update contains duplicate destinations.");
+        var targets = files.Select(f =>
+        {
+            var full = System.IO.Path.GetFullPath(f.Path);
+            var entry = current.Entries.SingleOrDefault(e => e.Path.Equals(full, StringComparison.OrdinalIgnoreCase)) ?? throw new InvalidOperationException("The applied profile does not own " + full + ".");
+            if (entry.LuaChanges is not null || entry.Deleted) throw new InvalidOperationException("This file cannot be updated live: " + full);
+            if (!string.Equals(entry.InstalledSha256, f.ExpectedSha256, StringComparison.OrdinalIgnoreCase) || !File.Exists(full) || Hashing.FileSha256(full) != entry.InstalledSha256)
+                throw new IOException(full + " changed since it was read; nothing was written live.");
+            return (Entry: entry, f.Content);
+        }).ToArray();
+        foreach (var (entry, content) in targets)
+        {
+            PathPolicy.RejectReparsePoints(entry.Path, entry.Root);
+            AtomicFile.Write(entry.Path, content);
+            entry.InstalledSha256 = Hashing.BytesSha256(content);
+            if (entry.IniValues is not null) entry.IniValues = IniFile.Parse(IniFile.Decode(content));
+            // Recorded after each file: a stop in between leaves every record matching its file.
+            Save(baseline);
+        }
+        if (targets.Length > 0) Log("Live update of " + current.ProfileId + ": " + string.Join(", ", targets.Select(t => t.Entry.Path)) + ".");
+    }
+
+    /// <summary>
     /// Sets the applied profile's own settings in options.lua back to the installed values when they differ (DCS
     /// rewrote Max FPS, for example); every other key and the file's formatting stay. Returns the "file: key" pairs
     /// written. A file that cannot be parsed is left alone.

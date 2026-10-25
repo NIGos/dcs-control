@@ -458,6 +458,114 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         return (sync, Start(start));
     }
 
+    /// <summary>
+    /// Live mode: writes now, also while DCS runs, the settings its components re-read in flight (<see cref="LiveSettings"/>).
+    /// The draft is planned exactly as Launch DCS plans it; of the planned files only DcsQvCull.ini and PupilShift.ini are
+    /// written, and each only when every key that changes in it is applied live by its component. Everything else waits
+    /// for the next launch: the applied profile.json stays as it is, so Launch DCS still applies the remaining changes
+    /// (and sees a draft set back to the applied values, since the generated files then differ from the recorded hashes).
+    /// Refused without an applied profile of the same id and DCS files.
+    /// </summary>
+    public LiveApplyResult ApplyLive(VrProfile draft, InventorySnapshot inventory)
+    {
+        var applied = ReadAppliedProfile();
+        if (applied is null || applied.Journal.ProfileId != draft.Id || !SamePaths(inventory, applied))
+            throw new InvalidOperationException("Launch DCS once to apply this profile; its changes wait for the next launch.");
+        var journal = applied.Journal;
+        // DCS may run: the plan is built as for Launch, without the "close DCS" check (nothing outside the two files is written).
+        var live = inventory with { DcsRunning = false };
+        var plan = Preview(draft, live);
+        var atStart = IniFile.Parse(ConfigurationWriters.DcsQvCull(applied.Profile.ForLaunch()));
+        var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var updates = new List<(string Path, byte[] Content, string ExpectedSha256)>();
+        foreach (var name in LiveSettings.Files)
+        {
+            var wanted = plan.Files.FirstOrDefault(f => Path.GetFileName(f.Path).Equals(name, StringComparison.OrdinalIgnoreCase));
+            var entry = journal.Entries.FirstOrDefault(e => Path.GetFileName(e.Path).Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (wanted is null && entry is null) continue;
+            // The component is turned on or off, or moved: only a launch can do that.
+            if (wanted is null || entry is null || !Path.GetFullPath(wanted.Path).Equals(Path.GetFullPath(entry.Path), StringComparison.OrdinalIgnoreCase)) { blocked.Add(name); continue; }
+            byte[] current;
+            try { current = File.ReadAllBytes(entry.Path); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { blocked.Add(name); continue; }
+            // Changed outside DCS Control: left to Launch DCS, which writes it again.
+            if (Hashing.BytesSha256(current) != entry.InstalledSha256) { blocked.Add(name); continue; }
+            if (current.AsSpan().SequenceEqual(wanted.Content)) continue;
+            var before = IniFile.Parse(IniFile.Decode(current)); var after = IniFile.Parse(IniFile.Decode(wanted.Content));
+            var changed = before.Keys.Union(after.Keys, StringComparer.OrdinalIgnoreCase).Where(k => before.GetValueOrDefault(k) != after.GetValueOrDefault(k)).ToArray();
+            // Only comments differ: the values are the same, the text is Launch DCS's to rewrite.
+            if (changed.Length == 0) continue;
+            if (changed.Any(k => !LiveSettings.IsLiveKey(name, k, after.GetValueOrDefault(k), name == LiveSettings.EngineFile ? atStart.GetValueOrDefault(k) : null))) { blocked.Add(name); continue; }
+            updates.Add((entry.Path, wanted.Content, entry.InstalledSha256));
+        }
+        if (updates.Count > 0) Originals.UpdateInstalledLive(journal.Id, updates);
+
+        // Which changed settings are in effect now: live ones whose files are in line with the draft, unless they also
+        // change a file that is not live (then they wait, at least in part).
+        var changedSettings = ChangedSettings(draft, applied.Profile);
+        var available = LiveSettings.AvailableFields(applied.Profile, journal).ToHashSet(StringComparer.Ordinal);
+        var inEffect = changedSettings.Where(p => available.Contains(p) && LiveSettings.Find(p)!.In.All(f => !blocked.Contains(f))).ToList();
+        var planned = NonLiveSignature(plan);
+        if (inEffect.Count > 0 && !SameSignature(planned, InstalledSignature(journal)))
+        {
+            var without = TryNonLiveSignature(Revert(draft, applied.Profile, inEffect), live);
+            if (without is null) inEffect.Clear();
+            else if (!SameSignature(without, planned))
+                inEffect = [.. inEffect.Where(p => TryNonLiveSignature(Revert(draft, applied.Profile, inEffect.Where(o => o != p)), live) is { } one && SameSignature(one, without))];
+        }
+        var waiting = changedSettings.Where(p => !inEffect.Contains(p)).ToArray();
+        var written = updates.Select(u => u.Path).ToArray();
+        var message = (written.Length > 0 ? "Applied live: " + string.Join(" and ", written.Select(Path.GetFileName)) + " updated." : inEffect.Count > 0 ? "Already in effect." : "Nothing applied live.")
+            + (waiting.Length > 0 ? $" {waiting.Length} {(waiting.Length == 1 ? "setting waits" : "settings wait")} for the next launch." : "");
+        return new(inEffect, waiting, written, message);
+    }
+
+    /// <summary>The profile properties (camelCase) in which <paramref name="draft"/> differs from <paramref name="applied"/>;
+    /// id, name and the values derived from others are left out, as in <see cref="SameDraft"/> and the interface.</summary>
+    public static IReadOnlyList<string> ChangedSettings(VrProfile draft, VrProfile applied)
+    {
+        var a = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(draft))!.AsObject();
+        var b = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(applied))!.AsObject();
+        string[] derived = ["id", "name", "quadSaccadeLeadMs", "depthBoostActiveMax", "neuralEdgeFeather", "boostHelperElevated"];
+        return [.. a.Select(p => p.Key).Union(b.Select(p => p.Key))
+            .Where(k => !derived.Contains(k) && !(k.StartsWith("uses", StringComparison.Ordinal) && k.Length > 4 && char.IsUpper(k[4])))
+            .Where(k => !System.Text.Json.Nodes.JsonNode.DeepEquals(a[k], b[k]))];
+    }
+
+    /// <summary><paramref name="draft"/> with <paramref name="settings"/> set back to the applied profile's values.</summary>
+    private static VrProfile Revert(VrProfile draft, VrProfile applied, IEnumerable<string> settings)
+    {
+        var a = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(draft))!.AsObject();
+        var b = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(applied))!.AsObject();
+        foreach (var name in settings) a[name] = b[name]?.DeepClone();
+        return JsonData.Deserialize<VrProfile>(a.ToJsonString());
+    }
+
+    /// <summary>The planned files Live mode never writes, each with what decides it (the owned options.lua settings, a
+    /// component's owned INI values, otherwise the bytes): profile.json and pimax-fovea.json are left out (Launch DCS
+    /// writes them anyway), as are the live files.</summary>
+    private static Dictionary<string, string> NonLiveSignature(ApplyPlan plan) => Signature(plan.Files.Select(f => (f.Path, f.LuaChanges, f.IniValues, Hashing.BytesSha256(f.Content))));
+    private static Dictionary<string, string> InstalledSignature(TransactionJournal journal) => Signature(journal.Entries.Select(e => (e.Path, e.LuaChanges, e.IniValues, e.InstalledSha256)));
+    private static Dictionary<string, string> Signature(IEnumerable<(string Path, IReadOnlyList<LuaValueChange>? Lua, IReadOnlyDictionary<string, string>? Ini, string Sha)> files)
+    {
+        var skip = new HashSet<string>(LiveSettings.Files.Append("profile.json").Append(AppliedFovea.FileName), StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (path, lua, ini, sha) in files)
+        {
+            if (skip.Contains(Path.GetFileName(path))) continue;
+            result[Path.GetFullPath(path)] = lua is not null ? string.Join("\n", lua.Select(c => c.Path + "=" + Literal(c.InstalledRaw)).Order(StringComparer.Ordinal))
+                : ini is not null ? string.Join("\n", ini.Select(p => p.Key.ToLowerInvariant() + "=" + p.Value).Order(StringComparer.Ordinal)) : sha;
+        }
+        return result;
+        static string? Literal(string raw) { try { return LuaOptions.NormalizeLiteral(raw); } catch (InvalidDataException) { return raw; } }
+    }
+    private static bool SameSignature(Dictionary<string, string> a, Dictionary<string, string> b) => a.Count == b.Count && a.All(p => b.TryGetValue(p.Key, out var v) && v == p.Value);
+    private Dictionary<string, string>? TryNonLiveSignature(VrProfile profile, InventorySnapshot inventory)
+    {
+        try { return NonLiveSignature(Preview(profile, inventory)); }
+        catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or System.Text.Json.JsonException) { return null; }
+    }
+
     /// <summary>The installed profile differs only in owned DCS settings of options.lua: every other check of
     /// <see cref="VerifyInstalled"/> passes.</summary>
     /// <summary>DCS's frame limit follows the headset's refresh rate (Match refresh, read from the headset): the pilot

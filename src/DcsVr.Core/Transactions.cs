@@ -20,7 +20,8 @@ public sealed record JournalEntry
     public string? PreviousSha256 { get; init; }
     public string? BackupFile { get; init; }
     public IReadOnlyList<LuaValueChange>? LuaChanges { get; init; }
-    public IReadOnlyDictionary<string, string>? IniValues { get; init; }
+    /// <summary>The owned component INI values (Cheeky, pupil shift); a live update records the new ones.</summary>
+    public IReadOnlyDictionary<string, string>? IniValues { get; set; }
     /// <summary>Log files the installed component writes at runtime. Restore removes them with the component.</summary>
     public IReadOnlyList<string>? RuntimeLogs { get; init; }
     /// <summary>Folder the user authorized (bin, Config, managed state). Links below it are rejected at every write.</summary>

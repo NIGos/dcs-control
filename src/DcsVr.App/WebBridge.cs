@@ -291,7 +291,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             && !PimaxFovea.SameFovea(resolved.Profile, applied.Fovea ?? AppliedFovea.From(applied.Profile, null))
             ? $"Pimax Play changed: focus will be updated to {pimax.Play.Short} at launch." : null;
     /// <summary>A running DCS.exe; the offline verification host reports none.</summary>
-    private bool DcsRunning() => !offline && DcsProcess.AnyRunning();
+    private bool DcsRunning() => offline ? _offlineDcs : DcsProcess.AnyRunning();
+    /// <summary>A DCS the offline verification's smoke test says is running (never set outside that host).</summary>
+    private volatile bool _offlineDcs;
     private readonly Lock _boostCacheLock = new();
     private (DateTime At, string Key, object Reply)? _boostCache;
     /// <summary>"What Boost will do" is read-only and slow (it inspects running processes and the DCS log), so it is
@@ -362,6 +364,42 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         }
         catch (Exception e) { return Task.FromResult(JsonData.Serialize(new { id, ok = false, error = e.Message })); }
     }
+    /// <summary>
+    /// Live mode: while DCS runs, an edit of a setting its components re-read in flight is written at once
+    /// (<see cref="ControlService.ApplyLive"/>); the rest waits for the next launch. Refused while Launch, Apply or Back to
+    /// stock DCS runs; otherwise it waits briefly for the command lock (the checks after each edit hold it for a moment).
+    /// Replies with what was applied and what waits, not the whole state.
+    /// </summary>
+    private Task<string>? LiveApplyRequest(string json)
+    {
+        if (json.Length > 128 * 1024 || !json.Contains("\"liveApply\"", StringComparison.Ordinal)) return null;
+        string? id = null; JsonElement data;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.GetProperty("action").GetString() != "liveApply") return null;
+            id = doc.RootElement.GetProperty("id").GetString();
+            data = doc.RootElement.GetProperty("data").Clone();
+        }
+        catch (Exception e) when (e is JsonException or KeyNotFoundException or InvalidOperationException) { return Task.FromResult(JsonData.Serialize(new { id, ok = false, error = e.Message })); }
+        return Answer();
+        async Task<string> Answer()
+        {
+            if (_writing is not null || !await _commands.WaitAsync(TimeSpan.FromSeconds(3)))
+                return JsonData.Serialize(new { id, ok = false, error = "Another operation is running. Try again when it is done." });
+            try
+            {
+                if (_writing is not null) throw new InvalidOperationException("Another operation is running. Try again when it is done.");
+                ReadDraft(data);
+                var draftNow = _profile; var inventory = CurrentInventory;
+                var result = await Task.Run(() => service.ApplyLive(draftNow, inventory));
+                if (result.Written.Count > 0) AppLog.Info("Live: " + string.Join(", ", result.Written) + " (" + string.Join(", ", result.Applied) + ")");
+                return Reply(id, result);
+            }
+            catch (Exception e) { return JsonData.Serialize(new { id, ok = false, error = e.Message }); }
+            finally { _commands.Release(); }
+        }
+    }
     private string? _previewFoveaStamp;
     private string? _dcs, _options, _sboys;
     private ApplyPlan? _plan;
@@ -380,6 +418,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             if (LastFlightRequest(json) is { } lastFlight) return await lastFlight;
             if (UpdateRequest(json) is { } update) return await update;
             if (StatusRequest(json) is { } status) return await status;
+            if (LiveApplyRequest(json) is { } live) return await live;
         }
         catch (Exception e) { AppLog.Error("Request", e); return JsonData.Serialize(new { id = RequestId(json), ok = false, error = e.Message }); }
         // Read-only and cheap: polled by the page so Launch and Restore lock while DCS runs.
@@ -390,7 +429,13 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             {
                 using var doc = JsonDocument.Parse(json);
                 if (doc.RootElement.GetProperty("action").GetString() == "dcsStatus")
-                { statusId = doc.RootElement.GetProperty("id").GetString(); return Reply(statusId, new { dcsRunning = DcsRunning() }); }
+                {
+                    statusId = doc.RootElement.GetProperty("id").GetString();
+                    // The offline verification host has no DCS: its smoke test says when one "runs" (Live mode's checks).
+                    if (offline && doc.RootElement.TryGetProperty("data", out var simulate) && simulate.ValueKind == JsonValueKind.Object
+                        && simulate.TryGetProperty("simulate", out var running) && running.ValueKind is JsonValueKind.True or JsonValueKind.False) _offlineDcs = running.GetBoolean();
+                    return Reply(statusId, new { dcsRunning = DcsRunning() });
+                }
             }
             catch (Exception e) { return JsonData.Serialize(new { id = statusId, ok = false, error = e.Message }); }
         }
@@ -815,6 +860,8 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             launchReady = applied is not null, appliedProfile = applied?.Journal.ProfileId, appliedName = applied?.Profile?.Name ?? applied?.Journal.ProfileId,
             // The applied profile.json content, so the page labels a draft "Applied" only when it matches it.
             appliedDraft = applied?.Profile, appliedDcs = applied?.Executable, appliedOptions = applied?.OptionsPath, foveaChanged = FoveaChanged(applied), dcsRunning = DcsRunning(),
+            // The settings Live mode writes while DCS runs (LiveSettings): the page tags them.
+            liveFields = LiveSettings.AvailableFields(applied?.Profile, applied?.Journal),
             savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), sboysReady = _sboys is not null, launcherBlocked, launcherUnknown = LaunchSafety.LauncherRestartUnknown, dcsDefaultKeys, readiness = _readiness };
     }
     /// <summary>The app's saved DLSS 5 runtime copy, shown on the DLSS 5 page; null when there is none (or it was forgotten).</summary>

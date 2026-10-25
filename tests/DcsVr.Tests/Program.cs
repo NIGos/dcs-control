@@ -4357,6 +4357,124 @@ Test("E2E: a DCS install removed from its folder drops its entries at Back to st
     Require(!Directory.Exists(top), "Nothing created at the drive's root");
     Require(!result.Complete && result.Conflicts.Single().StartsWith(Path.Combine(missingBin, "dxgi.dll")) && other.Status() is { Count: 1, State: "restoring" } && File.ReadAllText(local) == "A", "Kept and reported: " + string.Join("; ", result.Conflicts));
 });
+// ---- Live mode: settings the engine module and the pupil shift layer re-read in flight, written while DCS runs ----------
+VrProfile LiveDraft() => ProfileValidation.ResolveFeatures(new VrProfile
+{
+    Id = "e2e-live", Name = "Live", QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked, EngineOptimizations = true, DepthBoost = true,
+    ColorMode = ColorMode.Fix, FoveaSource = FoveaSource.Profile, RefreshFromHeadset = false, FpsLimit = FpsLimitMode.Custom, RenderedFpsCap = 45
+});
+// Runs with a DCS "running" from the fixture's install: Live mode never needs DCS closed.
+T WhileDcsRuns<T>(E2eFixture f, Func<T> step)
+{
+    var previous = DcsProcess.Provider; DcsProcess.Provider = () => [new(4242, f.Exe)];
+    try { return step(); } finally { DcsProcess.Provider = previous; }
+}
+JournalEntry LiveEntry(E2eFixture f, string name) => f.Service.Originals.ReadCurrent()!.Entries.Single(e => Path.GetFileName(e.Path).Equals(name, StringComparison.OrdinalIgnoreCase));
+Test("Live: the live table names real profile settings, each a field of the interface", () =>
+{
+    var json = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(new VrProfile()))!.AsObject();
+    var app = File.ReadAllText(Path.Combine(workspace, "src/DcsVr.App/ui/app.js"));
+    foreach (var field in LiveSettings.Fields)
+    {
+        Require(json.ContainsKey(field.Name), "not a profile setting: " + field.Name);
+        Require(System.Text.RegularExpressions.Regex.IsMatch(app, @"field\([^,()]+,'" + field.Name + "'"), "no interface field: " + field.Name);
+        Require(field.In.Length > 0 && field.In.All(LiveSettings.Files.Contains), field.Name);
+    }
+    Require(LiveSettings.Fields.Select(f => f.Name).Distinct().Count() == LiveSettings.Fields.Count, "listed twice");
+    // Read only at start, or carried by Quad Views, OFXR, Cheeky or options.lua: never live.
+    foreach (var name in new[] { "engineDiagnosticHooks", "engineOptimizations", "engineDevMode", "quadSharpening", "foveaWidth", "frameGenFactor", "showOverlay", "neuralIntensity", "farDepth", "frameGenHudSymbology", "peripheryDlssPreset", "fpsLimit", "eyeDistance" })
+        Require(LiveSettings.Find(name) is null, "must wait for the next launch: " + name);
+    // Installed only at DCS start: off is live, on only when DCS started with it on.
+    Require(LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Scene.CostWeights", "0", "1") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Scene.CostWeights", "1", "1")
+        && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Scene.CostWeights", "1", "0") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.AllocSlabs", "1", null));
+    Require(LiveSettings.IsLiveKey(LiveSettings.EngineFile, "ColorFix.Saturation", "1.2", null) && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "VrFx.GazeDof", "1", null)
+        && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "General.PerceptionOnly", "0", "1") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "General.Diagnostics", "1", "0")
+        && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Perception.FarDepthExport", "1", "0") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "DLSS.PeripheryPreset", "K", null));
+    Require(LiveSettings.IsLiveKey(LiveSettings.PupilFile, "DepthBoost.NearM", "1.2", null) && !LiveSettings.IsLiveKey(LiveSettings.PupilFile, "PupilShift.OpenXrEyeGaze", "0", null)
+        && !LiveSettings.IsLiveKey(LiveSettings.PupilFile, "DlssPreset.IgnoreDriverPreset", "1", null) && !LiveSettings.IsLiveKey("ofxr_bridge.ini", "overlay.position", "off", null));
+    // The applied profile's live settings: engine parts only with Engine Optimizations, and only the installed components.
+    var journal = new TransactionJournal { Id = "j", ProfileId = "p", Entries = [new() { Path = Path.Combine(root, "x", "DcsQvCull.ini"), InstalledSha256 = "0" }] };
+    var visualOnly = LiveSettings.AvailableFields(new VrProfile { ColorMode = ColorMode.Fix }, journal);
+    Require(visualOnly.Contains("colorFixSaturation") && !visualOnly.Contains("engineBeeps") && !visualOnly.Contains("depthBoostNearM") && !visualOnly.Contains("gazeDof"));
+    Require(LiveSettings.AvailableFields(new VrProfile { EngineOptimizations = true }, journal).Contains("engineBeeps") && LiveSettings.AvailableFields(null, null).Count == 0);
+});
+Test("Live: a live change is written at once while DCS runs, only to its files, and Launch DCS applies the rest later", () =>
+{
+    var f = E2e("live-write"); var draft = LiveDraft();
+    Require(f.Service.SyncApplied(draft, E2eInventory(f)).Kind == LaunchSyncKind.Applied);
+    var before = E2eTree(f, "game", "sg", "state/managed");
+    var engine = LiveEntry(f, LiveSettings.EngineFile).Path; var pupil = LiveEntry(f, LiveSettings.PupilFile).Path;
+    var edited = draft with { ColorFixSaturation = 1.2, DepthBoostNearM = 1.2, EngineShadowCache = !draft.EngineShadowCache };
+    // Launch, Apply and Back to stock DCS are refused while DCS runs; Live mode is not.
+    WhileDcsRuns(f, () => { Throws<InvalidOperationException>(() => f.Service.SyncApplied(edited, E2eInventory(f))); return 0; });
+    var result = WhileDcsRuns(f, () => f.Service.ApplyLive(edited, E2eInventory(f)));
+    Require(result.Written.Order().SequenceEqual(new[] { engine, pupil }.Order(), StringComparer.OrdinalIgnoreCase), "written: " + string.Join(", ", result.Written));
+    Require(result.Applied.Order().SequenceEqual(new[] { "colorFixSaturation", "depthBoostNearM", "engineShadowCache" }.Order()) && result.Waiting.Count == 0, result.Message);
+    var after = E2eTree(f, "game", "sg", "state/managed");
+    var changed = before.Keys.Union(after.Keys).Where(k => before.GetValueOrDefault(k) != after.GetValueOrDefault(k)).Select(k => Path.GetFileName(k)).Order().ToArray();
+    Require(changed.SequenceEqual(new[] { LiveSettings.EngineFile, LiveSettings.PupilFile }.Order()), "Only the two live files change: " + E2eDiff(before, after));
+    var engineBytes = File.ReadAllBytes(engine);
+    Require(engineBytes is [0xFF, 0xFE, ..] && IniFile.Parse(IniFile.Decode(engineBytes))["ColorFix.Saturation"] == "1.2" && IniFile.Parse(File.ReadAllText(pupil))["DepthBoost.NearM"] == "1.2", "New values, the UTF-16 BOM kept");
+    Require(LiveEntry(f, LiveSettings.EngineFile).InstalledSha256 == Hashing.FileSha256(engine) && LiveEntry(f, LiveSettings.PupilFile).InstalledSha256 == Hashing.FileSha256(pupil)
+        && LiveEntry(f, LiveSettings.PupilFile).IniValues!["DepthBoost.NearM"] == "1.2", "The record holds the new bytes and values");
+    Require(ControlService.SameDraft(f.Service.ReadAppliedProfile()!.Profile, draft), "profile.json stays the launched profile");
+    f.Service.PrepareLaunchApplied(); // the launch contract still holds
+    // The same draft again: already in effect, nothing written.
+    var again = WhileDcsRuns(f, () => f.Service.ApplyLive(edited, E2eInventory(f)));
+    Require(again.Written.Count == 0 && again.Applied.Count == 3 && again.Waiting.Count == 0, again.Message);
+    // DCS closed: Launch DCS applies the draft (profile.json, and anything that waited); a second launch writes nothing.
+    var sync = f.Service.SyncApplied(edited, E2eInventory(f));
+    Require(sync.Kind == LaunchSyncKind.Applied && ControlService.SameDraft(f.Service.ReadAppliedProfile()!.Profile, edited), sync.Message);
+    Require(f.Service.SyncApplied(edited, E2eInventory(f)).Kind == LaunchSyncKind.Unchanged, "Up to date afterwards");
+});
+Test("Live: a setting read at launch writes nothing and waits; a live one in the same edit still applies", () =>
+{
+    var f = E2e("live-wait"); var draft = LiveDraft(); var inventory = E2eInventory(f);
+    f.Service.SyncApplied(draft, inventory);
+    var before = E2eTree(f, "game", "sg", "state/managed"); var journal = f.Service.Originals.ReadCurrent()!;
+    // Diagnostics is installed only at DCS start: the engine file waits whole, with the live edit in it.
+    var start = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { EngineDiagnosticHooks = true, ColorFixSaturation = 1.3 }, inventory));
+    Require(start.Written.Count == 0 && start.Applied.Count == 0 && start.Waiting.Order().SequenceEqual(new[] { "colorFixSaturation", "engineDiagnosticHooks" }), start.Message);
+    Require(E2eDiff(before, E2eTree(f, "game", "sg", "state/managed")) == "" && f.Service.Originals.ReadCurrent()!.Entries.Select(e => e.InstalledSha256).SequenceEqual(journal.Entries.Select(e => e.InstalledSha256)), "Nothing written");
+    // Quad Views' settings are read at start (and never written while DCS runs); the engine's live change applies.
+    var quad = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { QuadSharpening = 0.6, ColorFixSaturation = 1.3 }, inventory));
+    Require(quad.Applied.SequenceEqual(["colorFixSaturation"]) && quad.Waiting.SequenceEqual(["quadSharpening"]) && quad.Written.Single().EndsWith(LiveSettings.EngineFile), quad.Message);
+    var settings = journal.Entries.Single(e => Path.GetFileName(e.Path) == "settings.cfg");
+    Require(Hashing.FileSha256(settings.Path) == settings.InstalledSha256, "settings.cfg untouched");
+    // A live setting whose change also reaches a file read at launch waits: the eye distance set here also turns DCS's
+    // custom IPD off in options.lua. The eye distance source itself is never live.
+    var source = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { EyeDistance = EyeDistanceSource.Manual, EyeDistanceMm = 66 }, inventory));
+    Require(source.Waiting.Contains("eyeDistance") && !source.Applied.Contains("eyeDistance"), source.Message);
+    // A live file changed outside DCS Control is not written over: Launch DCS writes it again.
+    var engine = LiveEntry(f, LiveSettings.EngineFile).Path; File.AppendAllText(engine, "\n; edited\n", Encoding.Unicode);
+    var edited = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { ColorFixSaturation = 1.4 }, inventory));
+    Require(!edited.Written.Any(w => w.EndsWith(LiveSettings.EngineFile)) && edited.Waiting.Contains("colorFixSaturation") && File.ReadAllText(engine).EndsWith("; edited\n"), edited.Message);
+    // The record refuses a stale caller: another apply in between, or a file that changed since it was read.
+    Throws<InvalidOperationException>(() => f.Service.Originals.UpdateInstalledLive("another-apply", [(engine, [1], LiveEntry(f, LiveSettings.EngineFile).InstalledSha256)]));
+    Throws<IOException>(() => f.Service.Originals.UpdateInstalledLive(f.Service.Originals.ReadCurrent()!.Id, [(engine, [1], LiveEntry(f, LiveSettings.EngineFile).InstalledSha256)]));
+});
+Test("Live: refused without the applied profile; a draft set back is applied again at launch; Back to stock DCS restores everything", () =>
+{
+    var f = E2e("live-restore"); var draft = LiveDraft(); var inventory = E2eInventory(f);
+    var pristine = E2eTree(f, "game", "sg");
+    Throws<InvalidOperationException>(() => f.Service.ApplyLive(draft, inventory)); // nothing applied yet
+    f.Service.SyncApplied(draft, inventory);
+    // Another profile (its features, so its id), or other DCS files: Launch DCS applies it first.
+    Throws<InvalidOperationException>(() => WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { Id = "e2e-other" }, inventory)));
+    Throws<InvalidOperationException>(() => WhileDcsRuns(f, () => f.Service.ApplyLive(draft, inventory with { OptionsPath = Make("e2e/live-restore/other/options.lua", E2eLua) })));
+    var engine = LiveEntry(f, LiveSettings.EngineFile).Path; var launched = File.ReadAllBytes(engine);
+    WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { ColorFixSaturation = 0.8 }, inventory));
+    Require(!File.ReadAllBytes(engine).AsSpan().SequenceEqual(launched), "written live");
+    // Set back to the applied values: the draft is the applied profile again, but its file is not; Launch DCS sees it.
+    var back = f.Service.SyncApplied(draft, inventory);
+    Require(back.Kind == LaunchSyncKind.Applied && File.ReadAllBytes(engine).AsSpan().SequenceEqual(launched), back.Message);
+    Require(f.Service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Unchanged);
+    // Back to stock DCS after a live apply: complete, nothing left.
+    WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { ColorFixSaturation = 0.9, DepthBoostNearM = 1.3 }, inventory));
+    var restored = f.Service.RestoreOriginals();
+    Require(restored.Complete && f.Service.Originals.Status() is { Count: 0, State: "clean" }, string.Join("; ", restored.Conflicts));
+    Require(E2eDiff(pristine, E2eTree(f, "game", "sg")) == "" && !Directory.Exists(Path.Combine(f.Base, "state/managed/profiles", draft.Id)), "Stock DCS again: " + E2eDiff(pristine, E2eTree(f, "game", "sg")));
+});
 foreach (var (name, action) in tests)
 {
     currentTest = name; var skips = skipped.Count;
