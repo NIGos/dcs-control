@@ -157,8 +157,6 @@ input[type=range]:disabled::-webkit-slider-thumb{background:var(--faint)}
 .budget{background:var(--s0);border:1px solid var(--line);border-radius:var(--radius)}
 .budget span{color:var(--muted)}
 .budget strong{font-family:var(--display);color:#fff}
-.coverage{border-color:var(--line);border-radius:var(--radius)}
-.focus-box{border-color:var(--accent)}
 /* Buttons */
 .button{border-radius:var(--radius);font:600 13px "Segoe UI",Interface,sans-serif;letter-spacing:.3px;text-transform:uppercase}
 .button.secondary,.button.quiet{background:transparent;border:1.5px solid #d8d8d8;color:var(--text);border-radius:999px;padding:8px 18px}
@@ -495,9 +493,11 @@ details.detected-card[open]>summary{margin-bottom:10px}
 .hotkey-capture.capturing{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
 .hotkey-capture.capturing kbd{color:var(--accent-hi)}
 .hotkey-capture:disabled{cursor:default;color:var(--faint)}
-.hotkey-line{display:flex;gap:6px;align-items:stretch;min-width:0}
-.hotkey-line>.hotkey-capture{flex:1;min-width:0}
-.hotkey-default{flex-shrink:0;min-height:var(--control-h);padding:5px 10px;font-size:11px}
+.hotkey-line{display:flex;flex-wrap:wrap;gap:2px 6px;align-items:stretch;min-width:0}
+.hotkey-line>.hotkey-capture{flex:1 1 100%;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Default: a small text link under the key, so it never crowds the key itself. */
+.button.quiet.hotkey-default{margin-left:auto;min-height:0;padding:1px 2px;border:0;border-radius:var(--radius);background:none;color:var(--accent);font-size:10.5px;letter-spacing:.4px}
+.button.quiet.hotkey-default:hover:not(:disabled){background:none;color:var(--accent-hi,#ffc25a);text-decoration:underline}
 .hotkey-default[hidden]{display:none}
 .hotkey-note{min-height:0;font-size:11.5px;line-height:1.35;color:var(--faint)}
 .hotkey-note:empty{display:none}
