@@ -874,8 +874,9 @@ function buildFields() {
   field(c,'pupilShiftToggleKey','Pupil shift','Off and on, to compare. Beeps: low = off, high = on.','hotkey',null,HOTKEYS.pupilShiftToggleKey.used,'',vrKey);
   field(c,'depthBoostToggleKey','Depth boost','Off and on, to compare. Beeps: low = off, high = on.','hotkey',null,HOTKEYS.depthBoostToggleKey.used,'',vrKey);
   field(c,'farDepthToggleKey','Far depth','Off and on, to compare. Beeps: one = off, two = on.','hotkey',null,HOTKEYS.farDepthToggleKey.used,'',vrKey);
-  field(c,'colorModeKey','Color mode','Cycles Off, Fix and Enhanced (Visual realism page). Beeps: 1, 2 or 3. Alt+Shift+F9 is free.','hotkey',null,HOTKEYS.colorModeKey.used,'',vrKey);
-  { const fixed = document.createElement('p'); fixed.className = 'fine'; fixed.textContent = 'Taken by Engine Optimizations: Ctrl+Alt with F8 to F12, Page Up or Page Down.'; c.append(fixed); }
+  field(c,'colorModeKey','Color mode','Cycles Off, Fix and Enhanced (Visual realism page). Beeps: 1, 2 or 3.','hotkey',null,HOTKEYS.colorModeKey.used,'',vrKey);
+  // The module's own keys apply to every key above, so the note sits under the card heading, not under the last key.
+  { const fixed = document.createElement('p'); fixed.className = 'fine keys-reserved'; fixed.textContent = 'Not available: Ctrl+Alt with F8 to F12, Page Up or Page Down (used by Engine Optimizations).'; c.querySelector('.card-heading').after(fixed); }
   // The headset software this profile uses and what runs now; the Sboys driver (Sboys route only), then the override.
   c = card('headsetControls','Headset software','Follows How you fly in the right panel: Pimax Play, or SteamVR for Sboys.');
   { const line = document.createElement('p'); line.className = 'headset-active'; line.id = 'headsetActive'; c.append(line, $('sboysCard')); }
@@ -1295,6 +1296,15 @@ function updateControls() {
   });
   const e = effectiveFovea(profile), owns = coverageOwned(profile);
   $('focusBox').style.width = e.w*100+'%'; $('focusBox').style.height = e.h*100+'%'; $('focusBox').hidden = profile.quadViews === 'None' && !owns;
+  // To scale: the view takes the headset's per-eye aspect when DCS's log has it, and each area's grid is as fine as its pixel density.
+  { const r = state?.pimax?.eyeResolution, view = $('coverageView'), cell = d => Math.max(4, Math.min(28, 6 / Math.max(d, .05)))+'px'; const x = v => String(Number(v.toFixed(2)));
+    view.style.aspectRatio = r?.width && r?.height ? `${r.width} / ${r.height}` : '1 / 1';
+    view.style.setProperty('--cell', cell(e.periphery)); $('focusBox').style.setProperty('--cell', cell(e.focus));
+    $('focusBox').classList.toggle('round', Boolean(profile.quadRoundFocus));
+    $('coverageFocus').textContent = `Focus ${Math.round(e.w*100)}% × ${Math.round(e.h*100)}% · ${x(e.focus)}×`;
+    $('coveragePeriphery').textContent = `Periphery · ${x(e.periphery)}×`;
+    $('coverageGaze').textContent = quad(profile) || owns ? (profile.gaze === 'EyeTracked' ? 'Follows your eyes' : 'Fixed in the center') : '';
+    $('coveragePeriphery').hidden = $('focusBox').hidden; }
   // Pimax Play's units for Quad Views; fractions of the view for stereo Cheeky without Quad Views.
   const pimaxFound = state?.pimax?.found;
   $('coverageDetail').textContent = quad(profile) ? (e.pimax ? `Pimax Play ${state.pimax.short}` : `Horizontal FOV ${whole(PIMAX.quickFromShare(profile.foveaWidth))}% · Vertical FOV ${whole(PIMAX.quickFromShare(profile.foveaHeight))}% · Center ${whole(PIMAX.centerFromDensity(profile.quadFocusScale))}% · Peripheral ${whole(PIMAX.peripheralPercent(profile.peripheralScale))}% (Pimax Quick units)`)
