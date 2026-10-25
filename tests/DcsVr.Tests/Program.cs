@@ -2238,10 +2238,11 @@ foreach (var mode in Enum.GetValues<FpsLimitMode>())
             FpsLimit = mode, HeadsetRefreshHz = 90, RenderedFpsCap = 47.5, DisableDcsVSync = mode != FpsLimitMode.Preserve, NeuralIntensity = .423456789 };
         var f = PacingFixture(route + "-" + mode, p); var original = File.ReadAllText(f.Options);
         var changes = f.Plan.Files.Single(file => file.Path == f.Options).LuaChanges!;
-        Require(changes.Any(c => c.Path == "graphics.maxFPS") == (mode != FpsLimitMode.Preserve));
+        // The profile uses frame generation only when needed (the default), so Keep writes the refresh rate too.
+        Require(changes.Any(c => c.Path == "graphics.maxFPS"));
         var journal = f.Service.Apply(f.Plan); var lua = new LuaOptions(File.ReadAllText(f.Options));
         // Match refresh with Auto and frame generation only when needed (the defaults) is the full refresh rate.
-        var expected = mode == FpsLimitMode.Preserve ? 89 : mode == FpsLimitMode.RuntimeHeadroom ? 300 : mode == FpsLimitMode.MatchRefresh ? 90 : 47.5;
+        var expected = mode == FpsLimitMode.Preserve ? 90 : mode == FpsLimitMode.RuntimeHeadroom ? 300 : mode == FpsLimitMode.MatchRefresh ? 90 : 47.5;
         Require(FramePacing.PositiveNumber(lua.Get("graphics", "maxFPS")) == expected);
         Require(lua.Get("graphics", "sync") == (mode == FpsLimitMode.Preserve ? "true" : "false"));
         Require(f.Service.PrepareLaunchApplied().FileName.EndsWith("DCS.exe"));
@@ -2297,12 +2298,16 @@ Test("Frame generation only when needed: default with Auto, adaptive_cadence and
     var plan = FramePacing.Describe(match);
     Require(plan.RequiredRenderedFps == 90 && plan.ConfiguredOutputCeiling == 90 && plan.CapDescription.StartsWith("The full refresh rate; generated frames only", StringComparison.Ordinal) && plan.Note.StartsWith("Calculated, not measured", StringComparison.Ordinal));
     Require(FramePacing.Checks(match, new()).All(c => c.Id is not ("adaptive-cadence-cap" or "fps-under-target")), "Match refresh needs no frame limit check");
-    // Preserve keeps DCS's own 45 FPS limit (never changed silently): a warning, not "too low" (generated frames still fill the refresh).
+    // Keep with frame generation only when needed sets the refresh rate (DCS's own 45 would keep frames always generated);
+    // without it, Keep leaves DCS's own limit.
     var preserve = fg with { FpsLimit = FpsLimitMode.Preserve };
     var inventory = new InventorySnapshot { DcsSettings = new Dictionary<string, string> { ["graphics.maxFPS"] = "45" } };
     var checks = FramePacing.Checks(preserve, inventory);
-    Require(FramePacing.RequestedCap(preserve) is null && checks.Any(c => c.Id == "adaptive-cadence-cap" && c.State == CheckState.Warning && c.Detail.Contains("refresh rate")) && checks.All(c => c.Id != "fps-under-target"), "Preserve at 45 with cadence gives the check");
-    Require(FramePacing.Checks(preserve with { FrameGenAdaptiveCadence = false }, inventory).All(c => c.Id != "adaptive-cadence-cap"), "no cadence check without cadence");
+    Require(FramePacing.EffectiveLimit(preserve) == FpsLimitMode.MatchRefresh && FramePacing.RequestedCap(preserve) == 90 && FramePacing.Describe(preserve, inventory).DcsCap == 90
+        && checks.All(c => c.Id is not ("adaptive-cadence-cap" or "fps-under-target")), "Keep with cadence writes the refresh rate, no check");
+    var keepNoCadence = preserve with { FrameGenAdaptiveCadence = false };
+    Require(FramePacing.RequestedCap(keepNoCadence) is null && FramePacing.Describe(keepNoCadence, inventory).DcsCap == 45, "Keep without cadence keeps DCS's own limit");
+    Require(FramePacing.Checks(keepNoCadence, inventory).All(c => c.Id != "adaptive-cadence-cap"), "no cadence check without cadence");
     Require(FramePacing.Checks(fg with { FpsLimit = FpsLimitMode.Custom, RenderedFpsCap = 60 }, new()).Any(c => c.Id == "adaptive-cadence-cap"), "a custom limit below the refresh rate too");
     // An old profile.json without the field loads with the new default; an explicit false stays false.
     Require(JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"legacy\",\"name\":\"Legacy\"}").FrameGenAdaptiveCadence

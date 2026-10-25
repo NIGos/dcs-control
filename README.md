@@ -62,7 +62,7 @@ The **[User Guide](docs/USER_GUIDE.md)** explains every feature, what it costs, 
 ## Good to know
 
 - **Single player only so far.** With DLSS 5 or Foveated SR the app places a `dxgi.dll` loader and Cheeky's files in DCS's `bin` folder; with Engine Optimizations (terrain prefetch fix included) it adds a hook and a module in `Saved Games\DCS\Scripts`. Without DLSS 5 nothing in the DCS install changes. Multiplayer and server integrity checks haven't been tested.
-- **Frame generation adds latency while it generates frames**, more in 3× than in 2×. With *Only when needed* (the default) that happens only while DCS can't keep up; it needs the DCS frame limit at *Match refresh*. Head movement stays smooth; the mouse cursor moves at DCS's own frame rate unless **Smooth mouse cursor** is on (Framegen page).
+- **Frame generation adds latency while it generates frames**, more in 3× than in 2×. With *Only when needed* (the default) that happens only while DCS can't keep up; DCS Control sets DCS's frame limit to the refresh rate for it. Head movement stays smooth; the mouse cursor moves at DCS's own frame rate unless **Smooth mouse cursor** is on (Framegen page).
 - **New features are lightly flown.** Visual realism, Sharp HUD, the Perception features and Cache distant shadows are off by default and still being tuned: try them one at a time and tell us what you see.
 - **Pimax Play changed its scales in 2026-10.** DCS Control reads the new ones. If you came from 0.5.10, your bundled Quad Views focus may look smaller with the same Pimax Play sliders: raise Horizontal/Vertical FOV there. Pimax's own native Quad Views sizes its focus differently from the same sliders.
 - **Start the app from the Start menu or Explorer**, not as administrator.

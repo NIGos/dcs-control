@@ -681,13 +681,13 @@ function buildFields() {
   c = card('framegenControls','Frame generation','Frames added between the ones DCS renders, so the headset gets one at every refresh.');
   segmented(field(c,'frameGen','Method','NVIDIA Optical Flow needs an RTX card; FidelityFX works on any card.','select',[['Off','Off'],['Nvidia','NVIDIA Optical Flow · RTX cards'],['FidelityFx','FidelityFX Optical Flow · any card']]),{Off:'Off',Nvidia:'NVIDIA',FidelityFx:'FidelityFX'});
   segmented(field(c,'frameGenFactor','Generated frames',['Auto: frames are generated only as much as DCS needs.','Without Only when needed, DCS renders half the refresh rate, a third while it falls behind. 2× or 3×: fixed, DCS renders half or a third. 3× adds latency and smearing in sideways motion.'],'select',[[0,'Auto · default'],[2,'2× · one generated frame'],[3,'3× · two generated frames']],p => p.frameGen !== 'Off'),{0:'Auto',2:'2×',3:'3×'});
-  field(c,'frameGenAdaptiveCadence','Only when needed',['Frames are generated only while DCS falls behind: lower latency. Needs Generated frames on Auto and Frame limit on Match refresh.','DCS renders the full refresh rate, so latency is lower whenever DCS keeps up.'],'toggle',null,p => p.frameGen !== 'Off' && p.frameGenFactor === 0);
+  field(c,'frameGenAdaptiveCadence','Only when needed',['Frames are generated only while DCS falls behind: lower latency. Needs Generated frames on Auto; with Keep, the frame limit is set to the refresh rate for you.','DCS renders the full refresh rate, so latency is lower whenever DCS keeps up.'],'toggle',null,p => p.frameGen !== 'Off' && p.frameGenFactor === 0);
   field(c,'frameGenDeepPipeline','Smoothness buffer',['Smoother with uneven DCS frame times, with a little more latency.','Holds one extra frame: about 11 ms more latency at 90 Hz while frames are generated. In 3× it holds it only while frames keep arriving late.'],'toggle',null,p => p.frameGen !== 'Off');
   // frameGenPipelinedDeepHold has no control: it follows the Smoothness buffer (on with it, off without it) and stays in
   // the profile file only (ConfigurationWriters.Ofxr writes pipelined_deep_hold only with frameGenDeepPipeline).
   // The custom limit right under the select that enables it; the refresh rate source before the value it replaces.
   c = card('pacingControls','DCS frame limit','Set in DCS at launch. Back to stock DCS puts your values back.');
-  segmented(field(c,'fpsLimit','Frame limit',['Match refresh renders only the frames the headset needs.','The full refresh rate, or half or a third with 2× or 3×. Keep leaves the current DCS limit; 300 FPS is a very high limit.'],'select',[['Preserve','Keep the current DCS limit'],['MatchRefresh','Match refresh (recommended)'],['RuntimeHeadroom','Very high (300 FPS)'],['Custom','Custom limit']]),{Preserve:'Keep',MatchRefresh:'Match refresh',RuntimeHeadroom:'300 FPS',Custom:'Custom'});
+  segmented(field(c,'fpsLimit','Frame limit',['Match refresh renders only the frames the headset needs.','The full refresh rate, or half or a third with 2× or 3×. Keep leaves the current DCS limit, except with Only when needed, which sets the refresh rate; 300 FPS is a very high limit.'],'select',[['Preserve','Keep the current DCS limit'],['MatchRefresh','Match refresh (recommended)'],['RuntimeHeadroom','Very high (300 FPS)'],['Custom','Custom limit']]),{Preserve:'Keep',MatchRefresh:'Match refresh',RuntimeHeadroom:'300 FPS',Custom:'Custom'});
   field(c,'renderedFpsCap','Custom limit','The most frames DCS renders per second.','number',[30,300,.5],p => p.fpsLimit === 'Custom','FPS');
   field(c,'refreshFromHeadset','Read the refresh rate from the headset','Pimax Play: the rate the headset runs at, or ran at last. Sboys: SteamVR\'s rate.','toggle');
   // Its help says which value is used while the rate is read from the headset (updateControls).
@@ -1399,11 +1399,13 @@ function renderCadence() {
   // the full refresh rate with frame generation only when needed.
   const fg = profile.frameGen !== 'Off', adaptive = usesAdaptiveCadence(profile), multiplier = fg ? (profile.frameGenFactor === 3 ? 3 : 2) : 1, hz = refreshHz(profile), target = hz / capDivider(profile);
   const detected = Number(state?.inventory?.dcsSettings?.['graphics.maxFPS']);
-  const cap = profile.fpsLimit === 'Preserve' ? (Number.isFinite(detected) && detected > 0 ? detected : null) : profile.fpsLimit === 'RuntimeHeadroom' ? 300 : profile.fpsLimit === 'MatchRefresh' ? Math.max(30, target) : profile.renderedFpsCap;
+  // With frame generation only when needed, Keep is written as Match refresh (FramePacing.EffectiveLimit).
+  const limit = profile.fpsLimit === 'Preserve' && adaptive ? 'MatchRefresh' : profile.fpsLimit;
+  const cap = limit === 'Preserve' ? (Number.isFinite(detected) && detected > 0 ? detected : null) : limit === 'RuntimeHeadroom' ? 300 : limit === 'MatchRefresh' ? Math.max(30, target) : profile.renderedFpsCap;
   const n = value => Number(value.toFixed(3)).toLocaleString('en-US');
   const metrics = [
     ['DCS NEEDS TO RENDER',n(target)+' FPS',adaptive ? 'The full refresh rate; generated frames only while DCS falls behind.' : fg ? (profile.frameGenFactor === 0 ? 'Half the refresh rate; a third while DCS falls behind.' : multiplier === 3 ? 'A third of the refresh rate.' : 'Half the refresh rate.') : 'The full refresh rate; frame generation is off.'],
-    ['DCS FRAME LIMIT',cap === null ? 'Not set' : n(cap)+' FPS',profile.fpsLimit === 'Preserve' ? (cap === null ? 'DCS has no limit set; left as it is.' : 'DCS\'s own limit, left as it is.') : 'Set in DCS at launch.'],
+    ['DCS FRAME LIMIT',cap === null ? 'Not set' : n(cap)+' FPS',limit === 'Preserve' ? (cap === null ? 'DCS has no limit set; left as it is.' : 'DCS\'s own limit, left as it is.') : profile.fpsLimit === 'Preserve' ? 'Set to the refresh rate for Only when needed.' : 'Set in DCS at launch.'],
     ['HEADSET',n(hz)+' Hz' + (profile.refreshFromHeadset && state?.headsetRefresh ? ' · '+escape(state.headsetRefresh.source) : ''),fg ? `Up to ${n(cap === null ? hz : Math.min(hz,cap*multiplier))} FPS with generated frames.` : 'Set this refresh rate in Pimax Play or SteamVR.']
   ];
   $('cadenceMetrics').innerHTML = metrics.map(b => `<div class="budget"><span>${b[0]}</span><strong>${b[1]}</strong><p>${b[2]}</p></div>`).join('');
@@ -1727,7 +1729,7 @@ const FEATURE_GUIDE = [
    gives:'Generated frames between the ones DCS renders, so the headset gets a frame at every refresh.',
    expect:'Smooth motion even when DCS can\'t keep up. With Auto and Only when needed (the default), DCS renders at the refresh rate and frames are generated only while it falls behind, so you get less latency whenever DCS keeps up.',
    cost:'A little latency while frames are generated (more in 3×); the mouse moves at DCS\'s own frame rate unless Smooth mouse cursor is on.',
-   needs:'An NVIDIA RTX card, or FidelityFX on any card. Only when needed needs the DCS frame limit at Match refresh. With Engine Optimizations on, generated frames also use DCS\'s cockpit outline, depth and motion.'},
+   needs:'An NVIDIA RTX card, or FidelityFX on any card. Only when needed sets the DCS frame limit to the refresh rate unless you chose Custom or 300 FPS. With Engine Optimizations on, generated frames also use DCS\'s cockpit outline, depth and motion.'},
   {section:'vr', page:'framegen', name:'Sharp HUD', impact:'Sharper HUD', on:p => p.frameGen !== 'Off' && p.frameGenHudSymbology && usesDepthBoost(p),
    gives:'HUD and helmet symbols stay sharp in generated frames instead of smearing.',
    expect:'A clean HUD while you turn. The symbols update at DCS\'s own HUD rate, about 20 times a second.',

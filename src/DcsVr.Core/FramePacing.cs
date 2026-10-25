@@ -9,7 +9,7 @@ public static class FramePacing
 {
     // DCS's installed optionsDb.lua exposes graphics.maxFPS as 30..300.
     // OFXR (the djules75 fork, 0.2.9.1) paces at run time but has no FPS limiter INI key.
-    public static double? RequestedCap(VrProfile profile) => profile.FpsLimit switch
+    public static double? RequestedCap(VrProfile profile) => EffectiveLimit(profile) switch
     {
         FpsLimitMode.Preserve => null,
         FpsLimitMode.RuntimeHeadroom => 300,
@@ -19,17 +19,22 @@ public static class FramePacing
         _ => throw new InvalidDataException("Unknown FPS limit mode.")
     };
 
+    /// <summary>The frame limit that is written. Frame generation only when needed works only when DCS may render the
+    /// full refresh rate, so with it Keep becomes Match refresh; an explicit Custom or 300 FPS limit stays as chosen.</summary>
+    public static FpsLimitMode EffectiveLimit(VrProfile profile) =>
+        profile.FpsLimit == FpsLimitMode.Preserve && profile.UsesAdaptiveCadence ? FpsLimitMode.MatchRefresh : profile.FpsLimit;
+
     public static CadencePlan Describe(VrProfile profile, InventorySnapshot? inventory = null)
     {
         var fg = profile.FrameGen != FrameGeneration.Off;
         var cap = RequestedCap(profile);
-        if (profile.FpsLimit == FpsLimitMode.Preserve && inventory?.DcsSettings.TryGetValue("graphics.maxFPS", out var raw) == true)
+        if (EffectiveLimit(profile) == FpsLimitMode.Preserve && inventory?.DcsSettings.TryGetValue("graphics.maxFPS", out var raw) == true)
             cap = PositiveNumber(raw);
-        var label = profile.FpsLimit switch
+        var label = EffectiveLimit(profile) switch
         {
             FpsLimitMode.Preserve => cap is null ? "Keeps DCS's own limit (none set)" : "Keeps DCS's own limit",
             FpsLimitMode.RuntimeHeadroom => "Very high (300 FPS); the headset still sets the pace",
-            FpsLimitMode.MatchRefresh => profile.UsesAdaptiveCadence ? "The full refresh rate; generated frames only while DCS falls behind" : fg ? (profile.FrameGenFactor == VrProfile.FrameGenAuto ? "Half the refresh rate; a second generated frame while DCS falls behind" : Multiplier(profile) == 3 ? "A third of the refresh rate, for two generated frames" : "Half the refresh rate, for one generated frame") : "The full refresh rate; frame generation is off",
+            FpsLimitMode.MatchRefresh => profile.UsesAdaptiveCadence ? (profile.FpsLimit == FpsLimitMode.Preserve ? "Set to the refresh rate for Only when needed (instead of keeping DCS's own limit)" : "The full refresh rate; generated frames only while DCS falls behind") : fg ? (profile.FrameGenFactor == VrProfile.FrameGenAuto ? "Half the refresh rate; a second generated frame while DCS falls behind" : Multiplier(profile) == 3 ? "A third of the refresh rate, for two generated frames" : "Half the refresh rate, for one generated frame") : "The full refresh rate; frame generation is off",
             _ => "Custom limit"
         };
         // The output ceiling stays cap × Multiplier: with frame generation only when needed, a lower cap still gets

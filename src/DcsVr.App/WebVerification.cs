@@ -112,6 +112,8 @@ internal static class WebVerification
     private static async Task VideoViews(CoreWebView2 core, CoreWebView2Controller controller, ControlService service, string output, string? neural, Action<string> log)
     {
         var folder = Path.GetDirectoryName(output)!;
+        // The runtime file for the views alone (DCSVR_VIDEO_NEURAL_PATH), when the smoke itself runs without one.
+        neural ??= Environment.GetEnvironmentVariable("DCSVR_VIDEO_NEURAL_PATH");
         async Task Step(string script)
         {
             await core.ExecuteScriptAsync("window.docStep='pending';Promise.resolve().then(()=>"+script+").then(()=>window.docStep='done',e=>window.docStep='error:'+e.message)");
@@ -124,8 +126,11 @@ internal static class WebVerification
             if (page is not null) await core.ExecuteScriptAsync("window.dcsUi.navigate("+JsonSerializer.Serialize(page)+");");
             await core.ExecuteScriptAsync("document.getElementById('toast').hidden=true;document.getElementById('pages')?.scrollTo(0,0);" + prepare);
             await Task.Delay(300);
-            var path = Path.Combine(folder, name + ".png"); await using (var stream = File.Create(path)) await core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, stream);
-            log("Video view: " + path);
+            // Always 1920 pixels wide, whatever the desktop's display scaling does to the window's own capture.
+            var view = JsonSerializer.Deserialize<double[]>(await core.ExecuteScriptAsync("[innerWidth,innerHeight,devicePixelRatio]"))!;
+            var shot = await core.CallDevToolsProtocolMethodAsync("Page.captureScreenshot", JsonSerializer.Serialize(new { format = "png", clip = new { x = 0, y = 0, width = view[0], height = view[0] * 9 / 16, scale = 1920 / (view[0] * view[2]) } }));
+            var path = Path.Combine(folder, name + ".png"); await File.WriteAllBytesAsync(path, Convert.FromBase64String(JsonDocument.Parse(shot).RootElement.GetProperty("data").GetString()!));
+            log($"Video view: {path} ({view[0]} × {view[1]} CSS px)");
         }
         const string Edit = "const edit=(path,value)=>{const f=window.dcsUi.fields.find(x=>x.path===path);if(f.type==='toggle')f.input.checked=value;else f.input.value=value;f.input.dispatchEvent(new Event(f.type==='toggle'||f.type==='select'?'change':'input',{bubbles:true}));};";
         controller.Bounds = new System.Drawing.Rectangle(0, 0, 1600, 900);
@@ -161,6 +166,19 @@ internal static class WebVerification
         await Shot("v-osd", "osd");
         await Step("window.dcsUi.run('checkReadiness')");
         await Shot("v-checks", "diagnostics");
+        // The 0.6 update video (v06-*): the reworked pages, Visual realism off (reasons shown), then on; put back after.
+        await Step("(()=>{"+Edit+"edit('fpsLimit','MatchRefresh');})()");
+        await Shot("v06-framegen", "framegen");
+        await Shot("v06-framegen-hud", "framegen", "(s=>{if(s)s.scrollIntoView({block:'center'});})(document.getElementById('setting-frameGenHudSymbology'));");
+        await Shot("v06-engine", "engine");
+        await Shot("v06-quad", "foveation");
+        await Shot("v06-inflight", "osd");
+        await Shot("v06-support", "support");
+        await Shot("v06-visual-off", "visual");
+        await Step("(()=>{"+Edit+"edit('colorMode','Enhanced');edit('panelGamut',1);edit('gVision',true);edit('peripheryDlssPreset','E');})()");
+        await Shot("v06-visual", "visual");
+        await Shot("v06-dlss-periphery", "dlss", "(c=>{if(c)c.scrollIntoView({block:'start'});})(document.getElementById('dlssPresets'));");
+        await Step("(()=>{"+Edit+"edit('colorMode','Off');edit('panelGamut',0);edit('gVision',false);edit('peripheryDlssPreset','Off');edit('fpsLimit','Preserve');})()");
         await Step("window.dcsUi.run('launch')");
         await Step("window.dcsUi.run('refresh',window.dcsUi.draft())");
         await Shot("v-overview-applied", "overview");
