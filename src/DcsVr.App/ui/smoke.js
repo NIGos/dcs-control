@@ -329,6 +329,9 @@ window.runWebSmoke = async function() {
       const fold = path => $('setting-'+path).closest('details');
       check('Visual realism shows only the chosen color mode\'s fine-tuning, and Night vision says what it needs',!fold('colorFixSaturation').hidden && fold('colorEnhancedSaturation').hidden && !$('enhancedNeeds').hidden && $('enhancedNeeds').textContent.includes('Enhanced color mode') && $('enhancedNeeds').querySelector('[data-reveal=colorMode]'));
       edit('colorMode','Enhanced'); check('With Enhanced: its own fine-tuning and no note on Night vision',fold('colorFixSaturation').hidden && !fold('colorEnhancedSaturation').hidden && $('enhancedNeeds').hidden);
+      edit('colorModeKey','118:6'); check('With a color mode key, still only the chosen mode\'s fine-tuning shows',fold('colorFixSaturation').hidden && !fold('colorEnhancedSaturation').hidden && $('colorTuneTip').hidden);
+      edit('colorMode','Off'); check('With Off, no fine-tuning, and a line says how to get it',fold('colorFixSaturation').hidden && fold('colorEnhancedSaturation').hidden && !$('colorTuneTip').hidden);
+      check('Brightness is in stops, explained in plain words',$('help-colorEnhancedExposureEv').textContent.includes('twice as bright') && !$('setting-colorEnhancedExposureEv').textContent.includes('EV'));
       edit('colorMode',was.mode); edit('colorModeKey',was.key ?? 'Off'); }
     const nrWas = ui.profile.neuralRendering; edit('neuralRendering',true);
     ui.navigate('support'); await new Promise(r => setTimeout(r,300));

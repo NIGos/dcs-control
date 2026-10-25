@@ -377,6 +377,9 @@ function disclosure(panel,title,subtitle,value) {
   if (value) foldValues.push({box,value}); return box;
 }
 /** A field's value as its control shows it, for fold summaries. */
+/** A Fine-tune fold's closed value: "Defaults", or brightness in stops and saturation in percent. */
+const tuneSummary = (ev,sat) => { const b = Number(profile[ev] ?? 0), c = Number(profile[sat] ?? 1);
+  return `Brightness ${b > 0 ? '+' : b < 0 ? '−' : '±'}${num(Math.abs(b))} · Saturation ${Math.round(c*100)}%`; };
 const shown = path => { const f = fields.find(x => x.path === path), v = f.map ? f.map.get(profile) : profile[path];
   return f.type === 'number' ? num(v)+(f.unit === 'ratio' ? '×' : f.unit === '°' ? '°' : f.unit ? ' '+f.unit : '') : f.type === 'select' ? f.input.selectedOptions[0]?.textContent.split(' · ')[0] : v ? 'on' : 'off'; };
 /** A select with 2 to 4 short choices drawn as a segmented radio group. The select stays the field's input and its
@@ -803,26 +806,27 @@ function buildFields() {
   // Visual realism page: the engine module's color modes and [VrFx] effects (installed for them alone too, in its
   // Perception-only mode). Main controls in the cards, the rest in Advanced folds.
   const vrOnly = p => !p.desktop;
-  c = card('colorControls','Color','How DCS looks in the headset. Its key (In flight page) switches modes.');
-  segmented(field(c,'colorMode','Color mode','Off is DCS\'s own image. Fix: true blacks, even eyes (0.05 ms). Enhanced adds filmic color, night vision and glare (0.1 ms).','select',[['Off','Off · DCS\'s own image'],['Fix','Fix · true blacks, even eyes'],['Enhanced','Enhanced · Fix plus filmic color, night vision, glare']],vrOnly),{Off:'Off',Fix:'Fix',Enhanced:'Enhanced'});
+  c = card('colorControls','Color','How DCS looks in the headset. Its key (In flight page) switches modes in flight.');
+  segmented(field(c,'colorMode','Color mode','Off is DCS\'s own image. Fix: true blacks and both eyes equally bright (0.05 ms). Enhanced: Fix plus richer color and eyes that adapt to light (0.1 ms); it also turns on Night vision and Light glare below.','select',[['Off','Off · DCS\'s own image'],['Fix','Fix · true blacks, even eyes'],['Enhanced','Enhanced · Fix plus filmic color, night vision, glare']],vrOnly),{Off:'Off',Fix:'Fix',Enhanced:'Enhanced'});
   segmented(field(c,'panelGamut','Panel color correction',['For the Crystal Super\'s over-saturated wide-gamut panels.','Needs Fix or Enhanced. Full corrects this, Half corrects half. HUD and MFDs are not affected. Don\'t combine with Pimax\'s own color correction.'],'select',[[0,'Off · default'],[1,'Full'],[2,'Half']],colorOn),{0:'Off',1:'Full',2:'Half'});
-  // Only the chosen mode's fine-tuning shows; both while the color mode key can switch modes in flight.
-  const fixHidden = p => p.colorMode !== 'Fix' && !usesColorKey(p), enhancedHidden = p => p.colorMode !== 'Enhanced' && !usesColorKey(p);
-  more = disclosure(c,'Fine-tune Fix','The defaults are the module\'s own.',() => `${shown('colorFixExposureEv')} · ${shown('colorFixSaturation')}`); more.dataset.hide = 'fix';
-  field(more,'colorFixExposureEv','Brightness','Overall brightness.','number',[-2,2,.1],fixOn,'EV',fixHidden);
-  field(more,'colorFixNightEv','Night brightness','Extra brightness at night only. Raise it if nights are too dark.','number',[-2,2,.1],fixOn,'EV',fixHidden);
-  field(more,'colorFixSaturation','Saturation','Color intensity. Brightness stays the same.','number',[.5,1.5,.05],fixOn,'×',fixHidden);
+  // Only the chosen mode's fine-tuning shows. With the color mode key, the other mode keeps the values set while it was chosen.
+  const fixHidden = p => p.colorMode !== 'Fix', enhancedHidden = p => p.colorMode !== 'Enhanced';
+  { const tip = document.createElement('p'); tip.className = 'fine'; tip.id = 'colorTuneTip'; tip.textContent = 'Choose Fix or Enhanced to fine-tune it.'; c.append(tip); }
+  more = disclosure(c,'Fine-tune Fix','Brightness, color and how your eyes adapt. The defaults look right for most pilots.',() => tuneSummary('colorFixExposureEv','colorFixSaturation')); more.dataset.hide = 'fix';
+  field(more,'colorFixExposureEv','Brightness','0 = unchanged. +1 is twice as bright, −1 half as bright.','number',[-2,2,.1],fixOn,'stops',fixHidden);
+  field(more,'colorFixNightEv','Night brightness','At night only. Raise it if nights are too dark: +1 is twice as bright.','number',[-2,2,.1],fixOn,'stops',fixHidden);
+  field(more,'colorFixSaturation','Saturation','Color intensity: 1 = as DCS, 1.2 = 20% more. Brightness stays the same.','number',[.5,1.5,.05],fixOn,'×',fixHidden);
   field(more,'colorFixWarmth','Golden-hour warmth','Warmer light near sunrise and sunset only.','number',[0,1,.05],fixOn,'ratio',fixHidden);
   field(more,'colorFixAdaptBright','Eye adaptation to bright','How slowly your eyes adjust to brighter light, on top of DCS. 0 = DCS only.','number',[0,10,.1],fixOn,'s',fixHidden);
   field(more,'colorFixAdaptDark','Eye adaptation to dark','How slowly your eyes adjust to the dark, on top of DCS. 0 = DCS only.','number',[0,30,.5],fixOn,'s',fixHidden);
-  more = disclosure(c,'Fine-tune Enhanced','The defaults are the module\'s own.',() => `${shown('colorEnhancedExposureEv')} · ${shown('colorEnhancedSaturation')}`); more.dataset.hide = 'enhanced';
-  field(more,'colorEnhancedExposureEv','Brightness','Overall brightness.','number',[-2,2,.1],enhancedOn,'EV',enhancedHidden);
-  field(more,'colorEnhancedNightEv','Night brightness','Extra brightness at night only. Raise it if nights are too dark.','number',[-2,2,.1],enhancedOn,'EV',enhancedHidden);
-  field(more,'colorEnhancedSaturation','Saturation','Color intensity. Brightness stays the same.','number',[.5,1.5,.05],enhancedOn,'×',enhancedHidden);
+  more = disclosure(c,'Fine-tune Enhanced','Brightness, color and how your eyes adapt. The defaults look right for most pilots.',() => tuneSummary('colorEnhancedExposureEv','colorEnhancedSaturation')); more.dataset.hide = 'enhanced';
+  field(more,'colorEnhancedExposureEv','Brightness','0 = unchanged. +1 is twice as bright, −1 half as bright.','number',[-2,2,.1],enhancedOn,'stops',enhancedHidden);
+  field(more,'colorEnhancedNightEv','Night brightness','At night only. Raise it if nights are too dark: +1 is twice as bright.','number',[-2,2,.1],enhancedOn,'stops',enhancedHidden);
+  field(more,'colorEnhancedSaturation','Saturation','Color intensity: 1 = as DCS, 1.2 = 20% more. Brightness stays the same.','number',[.5,1.5,.05],enhancedOn,'×',enhancedHidden);
   field(more,'colorEnhancedWarmth','Golden-hour warmth','Warmer light near sunrise and sunset only.','number',[0,1,.05],enhancedOn,'ratio',enhancedHidden);
   field(more,'colorEnhancedAdaptBright','Eye adaptation to bright','How slowly your eyes adjust to brighter light, on top of DCS. 0 = DCS only.','number',[0,10,.1],enhancedOn,'s',enhancedHidden);
   field(more,'colorEnhancedAdaptDark','Eye adaptation to dark','How slowly your eyes adjust to the dark, on top of DCS. 0 = DCS only.','number',[0,30,.5],enhancedOn,'s',enhancedHidden);
-  c = card('enhancedControls','Night vision and glare','Seeing in the dark, and halos around bright lights.');
+  c = card('enhancedControls','Night vision and glare','Part of Enhanced color: turn each on or off and set how strong it is.');
   needsNote(c,'enhancedNeeds');
   field(c,'nightVision','Night vision',['At night, dim areas lose color, as in moonlight. About 0.08 ms.','They turn slightly blue-grey. Lights, lit instruments and the HUD keep their color. No effect by day.'],'toggle',null,enhancedOn);
   field(c,'nightVisionStrength','Night vision strength','0 looks like DCS; 1 is full moonlight vision.','number',[0,1,.05],p => enhancedOn(p) && p.nightVision,'ratio');
@@ -833,7 +837,7 @@ function buildFields() {
   field(more,'nightVisionBlur','Night softness','Slight loss of fine detail in the dark, as your eyes have at night. 0 = sharp.','number',[0,1,.05],p => enhancedOn(p) && p.nightVision,'ratio');
   field(more,'nightVisionScotopic','Full-night level','Light level at and below which you see in full night vision. Higher starts it earlier at dusk.','number',[.0005,.5,.0005],p => enhancedOn(p) && p.nightVision,'cd/m²');
   field(more,'nightVisionPhotopic','Daylight level','Light level at and above which you see in full daylight vision. At least 4 times the full-night level.','number',[.05,100,.05],p => enhancedOn(p) && p.nightVision,'cd/m²');
-  field(more,'glareThresholdEv','Glare threshold','How much brighter than the scene a light must be to glare. Lower: more lights glare.','number',[0,8,.5],p => enhancedOn(p) && p.glare,'EV');
+  field(more,'glareThresholdEv','Glare threshold','How much brighter than the scene a light must be to glare, in stops (each stop is twice as bright). Lower: more lights glare.','number',[0,8,.5],p => enhancedOn(p) && p.glare,'stops');
   field(more,'glareRadius','Halo size','Size of the halo, in degrees of view.','number',[1,20,1],p => enhancedOn(p) && p.glare,'°');
   field(more,'glareStreak','Star streaks','Share of the glare drawn as thin six-pointed rays. 0 = round halo only.','number',[0,1,.05],p => enhancedOn(p) && p.glare,'ratio');
   // G vision first: every VR pilot can use it; Eye-focus blur needs eye tracking.
@@ -1270,6 +1274,7 @@ function updateControls() {
   fields.forEach(f => { const inactive = Boolean(f.condition && !f.condition(profile)); f.element.classList.toggle('inactive',inactive); f.input.disabled = busy || inactive; if (f.range) f.range.disabled = busy || inactive; f.element.hidden = Boolean(f.hide && f.hide(profile)); });
   // A fold that follows a choice (the color mode's fine-tuning) is gone while all its settings are.
   document.querySelectorAll('details[data-hide]').forEach(d => { d.hidden = [...d.querySelectorAll('.setting')].every(e => e.hidden); });
+  if ($('colorTuneTip')) $('colorTuneTip').hidden = !profile || profile.desktop || profile.colorMode !== 'Off';
   // With Optimizations only there is no headset panel; the In flight page keeps the keys that work on a monitor.
   $('panelControls').hidden = Boolean(profile.desktop);
   // Pimax native exists only on the Pimax route and cannot host the focus adapter DLSS needs.
