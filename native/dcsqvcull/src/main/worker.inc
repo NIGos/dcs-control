@@ -63,6 +63,7 @@ DWORD WINAPI WorkerThread(void*) {
     ApplyTaskClock();
     if (g_cfg.d3dMeter && !d3ds::Install()) Log("d3d meter: not installed");
   }
+  g_startInstallsDone = true;  // R142: from now on a live enable installs CostWeights / StreamDedupe (wiring.inc)
 
   bool f9 = false, f10 = false, f11 = false, f12 = false;
   ULONGLONG lastCensus = GetTickCount64();
@@ -181,6 +182,7 @@ DWORD WINAPI WorkerThread(void*) {
       ftl::TaskScope ts(ftl::kTPerf);
       perfmon::Tick();  // once per second: samples, governor; perf/features/vram/env lines on their own cadence
     }
+    TickReloadFrameTimes();  // R142 [Log] ReloadFrameTimes (default 0): frame times around each ini reload
     {
       ftl::TaskScope ts(ftl::kTPlace);
       tplace::Tick(g_cfg.threadCensus, g_cfg.threadCensusSec, g_engineOff.load() ? 0 : g_cfg.workerPlacement,
@@ -251,6 +253,9 @@ DWORD WINAPI WorkerThread(void*) {
           ftwin::Tick(g_cfg.focusTwin, g_engineOff.load(), g_benchRunningFlag.load(), g_quadFrame.load());
         }
       }
+      // R139 VRS probe ([Suite] VrsProbe, default 0): only its start gate here (steady frames); the probe itself is
+      // a suite phase.
+      if (vrsp::g_keyBlock.load(std::memory_order_relaxed) > 0) vrsp::NoteFrames(g_quadFrame.load());
       // Fixation depth (Depth boost): not an optimization, so neither the kill
       // switch nor a benchmark turns it off.
       ConfigurePerception();  // scene cut, cockpit ipd, helmet, ownship (PerceptionOnly too)

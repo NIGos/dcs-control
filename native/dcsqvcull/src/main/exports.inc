@@ -175,6 +175,7 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   posesweep::Release();  // hold and sweep off, xrLocateViews back to pass-through
   dlssv::Stop();         // R122: CreateFeature (and GetSetting) hooks back to pass-through (no-op unless used)
   ftwin::Shutdown();     // R123: focus twin hooks out, its workers joined (no-op unless used)
+  vrsp::Shutdown();      // R139: VRS probe state cleared, callbacks and hooks out, surfaces released (no-op unless used)
   d3ds::Uninstall();
   pdev::Uninstall();    // [General] PerceptionOnly: DX11Renderer::draw back to DCS's if the first draw never came
   srvspan::Shutdown();  // restores the ApplyShaderBlock call sites if a count was running

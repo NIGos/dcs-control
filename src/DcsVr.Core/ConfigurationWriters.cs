@@ -323,7 +323,7 @@ public static class ConfigurationWriters
         ; Depth boost's dual camera: the cockpit, its lighting and its displays at the true eye distance while the world
         ; is rendered boosted; the HUD stays at DCS's camera.
         CockpitTrueIpd={(p.UsesDepthBoost ? 1 : 0)}
-        CockpitTrueIpdOwnship={(p.UsesDepthBoost && p.OwnAircraftTrueDepth ? 2 : 0)}{DlssSection(p)}
+        CockpitTrueIpdOwnship={(p.UsesDepthBoost && p.OwnAircraftTrueDepth ? 2 : 0)}{DlssSection(p)}{(p.DiagnosticReloadFrameTimes ? "\n\n[Log]\nReloadFrameTimes=1" : "")}
 
         [Dev]
         ; Developer mode: a payload built elsewhere, hot-reloaded, and an ini that replaces this one. Empty: off.

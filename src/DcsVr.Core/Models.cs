@@ -190,6 +190,8 @@ public sealed record VrProfile
     /// <summary>OFXR's per-frame records (frame_records, fork patch 0048) for hitch analysis; "Per-frame records" in Frame generation diagnostics (Framegen page), off by
     /// default. On, the flight log holds 1 GB before it rotates.</summary>
     public bool DiagnosticFrameRecords { get; init; }
+    /// <summary>The engine module's frame ring around each ini reload ([Log] ReloadFrameTimes, R142), for live-reload hitch checks. Profile only, off.</summary>
+    public bool DiagnosticReloadFrameTimes { get; init; }
     /// <summary>OFXR's always-on FPS counter; the diagnostic panel (its own key) shows FPS on demand.</summary>
     public bool ShowOverlay { get; init; }
     public FpsLimitMode FpsLimit { get; init; }

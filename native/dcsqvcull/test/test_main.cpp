@@ -330,9 +330,11 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "r130_test.h"       // R130: read-only DLSS feature lifetime instrumentation (fake NGX core)
 #include "r132_test.h"       // R132: opt-in release of idle DLSS sets (fake NGX core)
 #include "r133_test.h"       // R133: the recorder's motion vectors (exec-time freshness rig, the verify's bracket, dump)
+#include "vrs_probe_test.h"  // R139: the measure-only VRS probe (keys, schedule, ring map, NvAPI binding, WARP + fake NvAPI)
 #include "r111_test.h"      // R111: [Color] PanelGamut (sRGB -> DCI-P3 compensation for a wide-gamut panel)
 #include "log_phrases_test.h"  // R107: the log phrases DCS Control parses stay in the source byte-exact
 #include "ini_keys_test.h"  // R107: every key the app writes is still read (live or retired)
+#include "r142_test.h"  // R142: the ini reload diff, the engine key set, frame times around a reload
 
 // R60: QV_TEST_LOAD=<n> (off by default): n busy threads of normal priority inside this process for the whole run.
 // An in-process stand-in for a machine loaded by another program (as DCS loading a mission); never an external load
@@ -434,6 +436,11 @@ int main() {
   if (getenv("QV_R133_ONLY")) {  // R133: only the recorder motion-vector tests (QV_R95_HW=1: the GPU too)
     r133test::Run();
     if (const char* hw = getenv("QV_R95_HW"); hw && atoi(hw) != 0) r133test::Run(true);
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
+  if (getenv("QV_VRS_ONLY")) {  // R139: only the VRS probe tests
+    vrstest::Run();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -610,6 +617,7 @@ int main() {
   potest::EarlyFixationTick();  // R107: before any test maps GraphicsCore.dll (perception_only_test.h)
   lptest::Run();  // R107: app-parsed log phrases
   iktest::Run();  // R107: the app's ini keys, retired keys
+  r142test::Run();  // R142: ini reload diff and engine key set (the LoadConfig kill-switch checks: "R142 reload")
   alignas(64) static uint8_t periph[0x700], focus[0x700];
   Vec3 eye{1000.0, 50.0, -2000.0}, fwd{0, 0, 1}, up{0, 1, 0};
   MakeFrustum(periph, eye, fwd, up, -1.2, 1.0, -1.1, 1.0, 0.05, 20000);  // ~50 deg half
@@ -1350,14 +1358,83 @@ int main() {
       Check(!ToggleEngine() && g_engineOff.load(), "toggle refused while a suite runs");
       g_benchRunningFlag = false;
       Sleep(20);
-      writeIni("; profile applied\n");
-      HANDLE h = CreateFileW(iniPath, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
-      FILETIME bumped = g_iniTime;
-      reinterpret_cast<ULARGE_INTEGER*>(&bumped)->QuadPart += 10000000;  // +1 s, never equal to the old time
-      SetFileTime(h, nullptr, nullptr, &bumped);
-      CloseHandle(h);
-      LoadConfig(false);
-      Check(!g_engineOff.load() && timercache::g_on.load() && g_partitionBoost.load(), "ini change resets the switch to ON");
+      // R142: a reload resets the kill switch only when an engine key changed value (ini_diff.h). The ini's mtime
+      // is moved forward by hand each time (+1 s, never equal to the old time).
+      auto bumpIni = [&]() {
+        HANDLE h = CreateFileW(iniPath, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                               0, nullptr);
+        FILETIME bumped = g_iniTime;
+        reinterpret_cast<ULARGE_INTEGER*>(&bumped)->QuadPart += 10000000;
+        SetFileTime(h, nullptr, nullptr, &bumped);
+        CloseHandle(h);
+      };
+      {
+        // 1. A comment-only rewrite (a new mtime, the same keys): nothing changed, the switch stays OFF.
+        const uint64_t r0 = g_iniReloads.load();
+        writeIni("; profile applied\n");
+        bumpIni();
+        LoadConfig(false);
+        Check(g_iniReloads.load() == r0 + 1 && g_lastIniChanges.empty() && g_engineOff.load() &&
+                  !timercache::g_on.load() && !g_partitionBoost.load(),
+              "R142 reload: a new mtime with identical keys (a comment-only rewrite) changes no key and keeps the "
+              "kill switch OFF (cache and boost stay off)");
+        // 2. The same content again, only the mtime moved: still nothing.
+        bumpIni();
+        LoadConfig(false);
+        Check(g_iniReloads.load() == r0 + 2 && g_lastIniChanges.empty() && g_engineOff.load(),
+              "R142 reload: an mtime change with identical content resets nothing");
+        // 3. A Live write of visual-only keys (DCS Control's Visual realism / perception pages): stays OFF.
+        const char* visual =
+            "[Color]\nMode=%d\nPanelGamut=1\n[ColorFix]\nExposureEV=0.5\n[ColorEnhanced]\nGlare=1\nGlareStrength=0.7\n"
+            "[Night]\nNightTone=1\n[VrFx]\nGVisionStrength=0.6\n[DLSS]\nFocusPreset=K\n[Perception]\n"
+            "CockpitTrueIpdOwnship=2\n[General]\nBeeps=0\n";
+        char text[512];
+        snprintf(text, sizeof(text), visual, 2);
+        writeIni(text);
+        bumpIni();
+        LoadConfig(false);
+        bool allVisual = g_lastIniChanges.size() == 10;
+        for (const inidiff::Change& ch : g_lastIniChanges) allVisual = allVisual && !ch.engine && !ch.hadOld && ch.hasNew;
+        Check(allVisual && !g_lastIniEngineChange && g_engineOff.load() && !timercache::g_on.load() &&
+                  !g_partitionBoost.load() && g_colorCfg.mode == 2,
+              "R142 reload: a visual-only change ([Color] [ColorFix] [ColorEnhanced] [Night] [VrFx] [DLSS] [Perception] "
+              "[General] Beeps; 10 keys) is applied (colour mode 2) and keeps the kill switch OFF");
+        // 4. A value change of a visual key the ini already had: still OFF.
+        snprintf(text, sizeof(text), visual, 1);
+        writeIni(text);
+        bumpIni();
+        LoadConfig(false);
+        Check(g_lastIniChanges.size() == 1 && g_lastIniChanges[0].hadOld && g_lastIniChanges[0].oldVal == L"2" &&
+                  g_lastIniChanges[0].newVal == L"1" && g_engineOff.load() && g_colorCfg.mode == 1,
+              "R142 reload: [Color] Mode 2->1 is the only change, applied, and the kill switch stays OFF");
+        // 5. An engine key's value changes ([Timing] CacheUs 1000 -> 900): the switch is reset to ON.
+        {
+          FILE* f = nullptr;
+          _wfopen_s(&f, iniPath, L"w");
+          fprintf(f, "[Timing]\nShaderTimeCache=1\nCacheUs=900\n[Scene]\nPartitionBoost=1\n[Hotkeys]\nToggle=122:6\n");
+          fclose(f);
+        }
+        bumpIni();
+        LoadConfig(false);
+        int nEngine = 0;
+        for (const inidiff::Change& ch : g_lastIniChanges) nEngine += ch.engine ? 1 : 0;
+        const bool engineReset = g_lastIniEngineChange && nEngine == 1 && !g_engineOff.load() &&
+                                 timercache::g_on.load() && g_partitionBoost.load();
+        writeIni("");
+        bumpIni();
+        LoadConfig(false);
+        Check(engineReset && !g_engineOff.load(),
+              "R142 reload: an engine key's value change ([Timing] CacheUs 1000->900) resets the kill switch to ON");
+        // 6. Switched OFF again, an engine key added ([Prefetch] Mode=off, absent before) also resets it.
+        ToggleEngine();
+        const bool offAgain = g_engineOff.load();
+        writeIni("[Prefetch]\nMode=off\n");
+        bumpIni();
+        LoadConfig(false);
+        Check(offAgain && g_lastIniEngineChange && !g_engineOff.load() && timercache::g_on.load() &&
+                  g_partitionBoost.load(),
+              "ini change resets the switch to ON (R142: only when an engine key changed: [Prefetch] Mode added)");
+      }
       // Dev mode: [Dev] IniPath replaces the deployed ini, and is watched too.
       {
         FILE* f = nullptr;
@@ -1886,6 +1963,7 @@ int main() {
   r130test::Run();  // R130: DLSS feature lifetime instrumentation ([DLSS] Instrument; fake NGX core, read-only)
   r132test::Run();  // R132: opt-in release of idle DLSS sets ([DLSS] ReleaseIdleSets; fake NGX core)
   r133test::Run();  // R133: the recorder's motion vectors (exec-time freshness on WARP, the verify's bracket, dump)
+  vrstest::Run();   // R139: the measure-only VRS probe ([Suite] VrsProbe; pure parts, WARP with a fake NvAPI)
   vfxtest::Run();
   // R39 [Threads]: worker placement off DCS's exclusive render core (all keys default 0), census queries.
   tptest::Run();

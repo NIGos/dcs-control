@@ -1666,6 +1666,8 @@ void STDMETHODCALLTYPE UsHook(ID3D11DeviceContext* c, ID3D11Resource* r, UINT su
   HookBusy busy;
   const bool ours = c == g_s.ctx && !g_ckRawUpload;
   if (ours) fdexport::NoteUpload(r, sub, box, src);  // DCS's original bytes, as before
+  if (ours)
+    if (auto o = ptiming::g_uploadObserver.load(std::memory_order_relaxed)) o(c, r, sub, box, src);  // R139
   // Cockpit ipd: a patched private copy for a cockpit pass's cPerView; else DCS's pointer.
   const void* fwd = ours ? CkUpload(r, sub, box, src, false) : src;
   g_usOrig(c, r, sub, box, fwd, rp, dp);
@@ -1684,6 +1686,8 @@ void STDMETHODCALLTYPE Us1Hook(ID3D11DeviceContext1* c, ID3D11Resource* r, UINT 
   // NO_OVERWRITE / DISCARD keep the bytes' meaning: the source is the new content of the box.
   const bool ours = static_cast<ID3D11DeviceContext*>(c) == g_s.ctx && !g_ckRawUpload;
   if (ours) fdexport::NoteUpload(r, sub, box, src);
+  if (ours)  // R139 (VRS probe)
+    if (auto o = ptiming::g_uploadObserver.load(std::memory_order_relaxed)) o(static_cast<ID3D11DeviceContext*>(c), r, sub, box, src);
   const void* fwd = ours ? CkUpload(r, sub, box, src, true) : src;
   g_us1Orig(c, r, sub, box, fwd, rp, dp, flags);
   if (ours) {
@@ -2258,6 +2262,7 @@ void STDMETHODCALLTYPE VpHook(ID3D11DeviceContext* c, UINT n, const D3D11_VIEWPO
     g_vpOrig(c, n, v);
   }
   if (c == g_s.ctx) InPassRearm(), g_lastCall = 5;
+  if (auto o = ptiming::g_vpObserver.load(std::memory_order_relaxed)) o(c, n, v);  // R140 (DCS's viewports)
 }
 D3D11_VIEWPORT g_passVp{};  // the viewport that goes with g_passDsv (Width 0 = unknown)
 // The DSV bound when the GBufferPass began: DCS's default frame buffer
@@ -2316,6 +2321,7 @@ ID3D11Resource* PassDepthTexNow() {
 void STDMETHODCALLTYPE OmHook(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* r,
                               ID3D11DepthStencilView* d) {
   HookBusy busy;
+  void* const ret = _ReturnAddress();  // R140: for the VRS probe's observer
   if (g_dumpPass && c == g_s.ctx) ckipd::DumpOmBind(n && r ? r[0] : nullptr);
   if (g_omCapture) {
     KeepDsv(c, d);
@@ -2325,11 +2331,13 @@ void STDMETHODCALLTYPE OmHook(ID3D11DeviceContext* c, UINT n, ID3D11RenderTarget
   }
   g_omOrig(c, n, r, d);
   if (c == g_s.ctx) InPassRearm(), g_lastCall = 4;
+  if (auto o = ptiming::g_omObserver.load(std::memory_order_relaxed)) o(c, n, r, d, false, ret);  // R140
 }
 void STDMETHODCALLTYPE OmUavHook(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* r,
                                  ID3D11DepthStencilView* d, UINT us, UINT un, ID3D11UnorderedAccessView* const* u,
                                  const UINT* ic) {
   HookBusy busy;
+  void* const ret = _ReturnAddress();  // R140: for the VRS probe's observer
   if (g_dumpPass && c == g_s.ctx && n != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
     ckipd::DumpOmBind(n && r ? r[0] : nullptr);
   if (g_omCapture && n != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) {
@@ -2340,6 +2348,7 @@ void STDMETHODCALLTYPE OmUavHook(ID3D11DeviceContext* c, UINT n, ID3D11RenderTar
   }
   g_omUavOrig(c, n, r, d, us, un, u, ic);
   if (c == g_s.ctx) InPassRearm();
+  if (auto o = ptiming::g_omObserver.load(std::memory_order_relaxed)) o(c, n, r, d, true, ret);  // R140
 }
 
 // overlay: an overlay-class pass (pre-overlay copy; no upload hook).

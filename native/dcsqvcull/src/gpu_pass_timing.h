@@ -272,6 +272,7 @@ void STDMETHODCALLTYPE H_ResolveSubresource(Ctx* c, ID3D11Resource* d, UINT ds, 
 void STDMETHODCALLTYPE H_UpdateSubresource(Ctx* c, ID3D11Resource* d, UINT ds, const D3D11_BOX* b, const void* p,
                                            UINT rp, UINT dp) {
   CountOp(c, kUpdateSubresource);
+  if (auto o = ptiming::g_uploadObserver.load(std::memory_order_relaxed)) o(c, d, ds, b, p);  // R139 (VRS probe)
   Orig<decltype(&H_UpdateSubresource)>(kUpdateSubresource)(c, d, ds, b, p, rp, dp);
   Rearm(c, kUpdateSubresource);
 }

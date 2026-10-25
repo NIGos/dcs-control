@@ -90,6 +90,14 @@ void Run() {
       {"governor: capped at", "\"governor: capped at %.1f fps (%d Hz / %d)"},
       {"prefetch log: calls/s=<n> skipped=<x>%", "\"calls/s=%llu skipped=%.1f%% pointers="},
       {"prefetch log: local date and time first", "\"%04u-%02u-%02u %02u:%02u:%02u %s\\r\\n\""},
+      // R142: the reload lines tools\live\live_reload_report.ps1 (and DCS Control's Live mode test) parse.
+      {"config: ini reloaded at <t>, keys changed: <Section.Key old->new, ...>",
+       "\"config: ini reloaded at %s, keys changed: %s (%zu keys, %zu engine)\""},
+      {"config: ini reloaded at <t>, keys changed (cont.): ", "\"config: ini reloaded at %s, keys changed (cont.): %s\""},
+      {"hotkey: engine optimizations back ON (ini engine key changed: ",
+       "\"hotkey: engine optimizations back ON (ini engine key changed: %s)\""},
+      {"hotkey: engine optimizations stay OFF", "\"hotkey: engine optimizations stay OFF (the ini reload changed no engine key)\""},
+      {"reload frametimes: at <t> baseline p50/p99/max=", "\"reload frametimes: at %s baseline p50/p99/max="},
   };
   int missing = 0;
   for (const Phrase& p : phrases)

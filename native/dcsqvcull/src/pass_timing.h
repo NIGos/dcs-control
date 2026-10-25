@@ -53,6 +53,26 @@ std::atomic<BoundaryFn> g_viewBoundary{nullptr};
 // a view's G-buffer passes), called after every other one at a start and
 // after every other one at an end; nullptr unless [Perception] FixationDepth.
 std::atomic<BoundaryFn> g_depthBoundary{nullptr};
+// R139: vrs_probe.h's two callbacks, only while its suite phase runs (nullptr otherwise): g_vrsPre before every other
+// callback at a pass start; g_vrsBoundary after every other one at a start and before every other one at an end. So
+// no other feature's boundary work runs under the probe's shading-rate state. g_vrsPre is set only with g_vrsBoundary.
+std::atomic<BoundaryFn> g_vrsPre{nullptr};
+std::atomic<BoundaryFn> g_vrsBoundary{nullptr};
+// R139: observer of the UpdateSubresource(1) calls on a context, called (before forwarding, with DCS's own bytes) by
+// whichever hook of ours holds the slot: gpu_pass_timing.h's while it measures, fixation_depth.h's in its in-pass
+// arms, vrs_probe.h's one-shot arm. nullptr unless the VRS probe runs.
+using UploadObserverFn = void (*)(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, const D3D11_BOX* box,
+                                  const void* src);
+std::atomic<UploadObserverFn> g_uploadObserver{nullptr};
+// R140: observers of the OMSetRenderTargets(AndUnorderedAccessViews) and RSSetViewports calls, called (after
+// forwarding, with DCS's arguments and its return address) by fixation_depth.h's in-pass OM / viewport hooks. Those
+// hold the slots inside every G-buffer pass, where vrs_probe.h's own hooks (d3d11's entries only) are refused: live
+// R139 the probe never saw a G-buffer bind (no size, no learnt depth, A1 never applied). nullptr unless the probe runs.
+using OmObserverFn = void (*)(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* r,
+                              ID3D11DepthStencilView* d, bool uav, void* ret);
+using VpObserverFn = void (*)(ID3D11DeviceContext* c, UINT n, const D3D11_VIEWPORT* v);
+std::atomic<OmObserverFn> g_omObserver{nullptr};
+std::atomic<VpObserverFn> g_vpObserver{nullptr};
 // The frame argument of the last top-level execute (diagnostics).
 std::atomic<uint64_t> g_execFrame{0};
 
@@ -67,17 +87,22 @@ void __fastcall Hook(void* pass, uint64_t frame) {
   BoundaryFn fl = g_flushBoundary.load(std::memory_order_relaxed);
   BoundaryFn vb = g_viewBoundary.load(std::memory_order_relaxed);
   BoundaryFn db = g_depthBoundary.load(std::memory_order_relaxed);
+  BoundaryFn vr = g_vrsBoundary.load(std::memory_order_relaxed);  // R139
   if (!g_recording.load(std::memory_order_relaxed)) {
     AfterTopFn after = g_afterTop.load(std::memory_order_relaxed);
-    if (!after && !each && !bnd && !fl && !vb && !db) return g_orig(pass, frame);
+    if (!after && !each && !bnd && !fl && !vb && !db && !vr) return g_orig(pass, frame);
+    BoundaryFn vp = vr ? g_vrsPre.load(std::memory_order_relaxed) : nullptr;
+    if (vp) vp(pass, true, t_depth);
     if (each) each();
     if (fl) fl(pass, true, t_depth);
     if (bnd) bnd(pass, true, t_depth);
     if (vb) vb(pass, true, t_depth);
     if (db) db(pass, true, t_depth);
+    if (vr) vr(pass, true, t_depth);
     ++t_depth;
     g_orig(pass, frame);
     const bool top = --t_depth == 0;
+    if (vr) vr(pass, false, t_depth);
     if (vb) vb(pass, false, t_depth);
     if (bnd) bnd(pass, false, t_depth);
     if (fl) fl(pass, false, t_depth);
@@ -86,11 +111,14 @@ void __fastcall Hook(void* pass, uint64_t frame) {
     if (top && after) after();
     return;
   }
+  BoundaryFn vp = vr ? g_vrsPre.load(std::memory_order_relaxed) : nullptr;
+  if (vp) vp(pass, true, t_depth);
   if (each) each();
   if (fl) fl(pass, true, t_depth);
   if (bnd) bnd(pass, true, t_depth);
   if (vb) vb(pass, true, t_depth);
   if (db) db(pass, true, t_depth);
+  if (vr) vr(pass, true, t_depth);
   int d = t_depth++;
   if (d < 64) t_childUs[d] = 0;
   LARGE_INTEGER a, b;
@@ -109,6 +137,7 @@ void __fastcall Hook(void* pass, uint64_t frame) {
     s.exclUs += excl;
     if (d == 0) g_topLevelUs += us;
   }
+  if (vr) vr(pass, false, d);
   if (vb) vb(pass, false, d);
   if (bnd) bnd(pass, false, d);
   if (fl) fl(pass, false, d);

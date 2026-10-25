@@ -179,8 +179,11 @@ std::atomic<Ctx*> g_ctx{nullptr};    // DCS's immediate context once captured
 // Called after every ExecuteCommandList on an immediate context (d3d11 toggles the table's draw / copy / update
 // entries there; fixation_depth.h repairs its in-pass hooks at once). Set by fixation_depth.h's Install.
 std::atomic<void (*)(void* ctx)> g_afterEcl{nullptr};
+// R139: a second listener (vrs_probe.h binds its shading-rate state again); nullptr unless its suite phase runs.
+std::atomic<void (*)(void* ctx)> g_afterEclProbe{nullptr};
 inline void NotifyEcl(void* ctx) {
   if (auto f = g_afterEcl.load(std::memory_order_acquire)) f(ctx);
+  if (auto f = g_afterEclProbe.load(std::memory_order_acquire)) f(ctx);
 }
 // Called after d3d11 rewrote the context table (slots 7..147: CSSetShader too) and our hooks went back in, on the
 // thread that found it (the filtering thread). Set by chain_fast.h (its CSSetShader hook goes back in as well).

@@ -49,3 +49,4 @@
 #include "thread_place.h"  // R39: [Threads] Census (default off) / WorkerPlacement (R44: default 2, selective)
 #include "frame_timeline.h"  // R52: [Perf] FrameTimeline / PoseProbe / EventLog (measure only, default 0)
 #include "focus_twin.h"  // R123: [Model] FocusTwin (opt-in, default 0): focus terrain patches replayed from the periphery
+#include "vrs_probe.h"  // R139: [Suite] VrsProbe (measure only, default 0): NvAPI variable rate shading A/B probe

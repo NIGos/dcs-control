@@ -4385,8 +4385,10 @@ Test("Live: the live table names real profile settings, each a field of the inte
     foreach (var name in new[] { "engineDiagnosticHooks", "engineOptimizations", "engineDevMode", "quadSharpening", "foveaWidth", "frameGenFactor", "showOverlay", "neuralIntensity", "farDepth", "frameGenHudSymbology", "peripheryDlssPreset", "fpsLimit", "eyeDistance" })
         Require(LiveSettings.Find(name) is null, "must wait for the next launch: " + name);
     // Installed only at DCS start: off is live, on only when DCS started with it on.
-    Require(LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Scene.CostWeights", "0", "1") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Scene.CostWeights", "1", "1")
-        && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Scene.CostWeights", "1", "0") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.AllocSlabs", "1", null));
+    // R142: CostWeights and StreamDedupe also turn on live; AllocSlabs still only off.
+    Require(LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Scene.CostWeights", "1", "0") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Texture.StreamDedupe", "1", "0")
+        && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.AllocSlabs", "0", "1") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.AllocSlabs", "1", "1")
+        && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.AllocSlabs", "1", "0") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.AllocSlabs", "1", null));
     Require(LiveSettings.IsLiveKey(LiveSettings.EngineFile, "ColorFix.Saturation", "1.2", null) && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "VrFx.GazeDof", "1", null)
         && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "General.PerceptionOnly", "0", "1") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "General.Diagnostics", "1", "0")
         && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Perception.FarDepthExport", "1", "0") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "DLSS.PeripheryPreset", "K", null));
