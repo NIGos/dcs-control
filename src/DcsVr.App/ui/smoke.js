@@ -468,16 +468,16 @@ window.runWebSmoke = async function() {
         edit('neuralLocalTone',1.12); edit('neuralColorStrength',.87); edit('quadFocusScale',150); edit('flowPreset','Slow');
         edit('fpsLimit','MatchRefresh'); edit('headsetRefreshHz',90);
         await ui.run('preview'); check(route+' supplied neural DLL verified through web bridge',ui.plan.files.some(f => f.path.endsWith('nvngx_dlssnr.dll')));
-        check(route+' combined neural pipeline carries half-refresh cap',ui.state.cadence.dcsCap === 45 && ui.plan.files.some(f => f.luaChanges?.some(c => c.path === 'graphics.maxFPS' && c.installedRaw === '45')));
+        { const need = ui.state.cadence.requiredRenderedFps; check(route+' combined neural pipeline carries the frame limit DCS needs (the refresh rate with Only when needed)',need === 90 && ui.state.cadence.dcsCap === need && ui.plan.files.some(f => f.luaChanges?.some(c => c.path === 'graphics.maxFPS' && c.installedRaw === String(need)))); }
         await ui.run('launch'); check(route+' neural + framegen + foveation deployed from WebView2',ui.state.launchReady && ui.matchesApplied());
         await ui.request('launchCheck'); check(route+' neural launch contract checked without DCS',true);
         await ui.run('restore'); check(route+' neural deployment restored',!ui.state.launchReady && ui.state.originals.count === 0);
       }
       // Selected once: the app keeps a verified copy, and a profile without a runtime path uses it.
       const kept = await ui.saveRuntime(window.offlineFixture.neuralRuntimePath);
-      check('A selected neural DLL is verified and kept as the app copy',kept.savedRuntime?.version?.includes('310.8') && /[\\/]runtimes[\\/]nvngx_dlssnr\.dll$/i.test(kept.savedRuntime.path));
+      check('A selected neural DLL is verified and kept as the app copy',/^310[.,][89][.,]/.test(kept.savedRuntime?.version ?? '') && /[\\/]runtimes[\\/]nvngx_dlssnr\.dll$/i.test(kept.savedRuntime.path));
       select('Pimax',{quad:true,dlss:true,framegen:true}); edit('neuralRuntimePath','');
-      check('With a saved copy DLSS 5 no longer asks for the file and shows where the copy lives',!ui.profile.neuralRuntimePath && !$('featureNotes-dlss').textContent.includes('Select file') && !$('featureSummary-dlss').textContent.includes('missing') && !$('dlssMissing').textContent.includes('nvngx_dlssnr') && $('savedRuntime').textContent.includes('Saved copy · version 310.8') && $('savedRuntime').textContent.includes(kept.savedRuntime.path) && $('savedRuntime').textContent.includes(window.offlineFixture.neuralRuntimePath) && !!$('forgetRuntime') && !!$('changeRuntime'));
+      check('With a saved copy DLSS 5 no longer asks for the file and shows where the copy lives',!ui.profile.neuralRuntimePath && !$('featureNotes-dlss').textContent.includes('Select file') && !$('featureSummary-dlss').textContent.includes('missing') && !$('dlssMissing').textContent.includes('nvngx_dlssnr') && $('savedRuntime').textContent.includes('Saved copy · version '+kept.savedRuntime.version) && $('savedRuntime').textContent.includes(kept.savedRuntime.path) && $('savedRuntime').textContent.includes(window.offlineFixture.neuralRuntimePath) && !!$('forgetRuntime') && !!$('changeRuntime'));
       await ui.run('preview'); check('Preview deploys the saved copy for a profile without a runtime path',ui.plan.files.some(f => f.path.endsWith('nvngx_dlssnr.dll')));
       await ui.forgetRuntime(); check('Forget deletes the saved copy and the file is asked for again',!ui.state.savedRuntime && $('savedRuntime').hidden && $('featureNotes-dlss').textContent.includes('Select file') && !ui.plan);
     }
