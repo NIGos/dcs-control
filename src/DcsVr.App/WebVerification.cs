@@ -198,6 +198,17 @@ internal static class WebVerification
         return (new Updates(stateRoot, handler, publicKeyPem: key.ExportSubjectPublicKeyInfoPem(), downloadRoot: Path.Combine(root, "update-downloads")), notesPath, next, handler);
     }
 
+    /// <summary>screenshots.json: for each screenshot file its index, page, window size, scale and whether the page was scrolled to its end.</summary>
+    private static List<object> ShotList(string rendersJson)
+    {
+        using var renders = JsonDocument.Parse(rendersJson);
+        return [.. renders.RootElement.EnumerateArray().Select(x => (object)new
+        {
+            index = x.GetProperty("index").GetInt32(), page = x.GetProperty("page").GetString(),
+            width = x.GetProperty("width").GetInt32(), height = x.GetProperty("height").GetInt32(), scale = x.GetProperty("scale").GetDouble(),
+            scrolled = x.GetProperty("scrolled").GetBoolean(), file = Path.GetFileName(x.GetProperty("path").GetString())
+        })];
+    }
     public static async Task Run(string output)
     {
         output = Path.GetFullPath(output); Directory.CreateDirectory(Path.GetDirectoryName(output)!);
@@ -304,6 +315,11 @@ internal static class WebVerification
             // DCSVR_SMOKE_VIDEO_VIEWS=1: full-HD stills of the real interface for the feature video (artifacts/video).
             if (demoRoot is not null && Environment.GetEnvironmentVariable("DCSVR_SMOKE_VIDEO_VIEWS") == "1") { await VideoViews(core, controller, service, output, neural, Log); return; }
             var screenshots = new List<object>(); var index = 0;
+            // Every page of the rail, in a fixed order (the first ten as before); a page added to app.js without being
+            // listed here fails the run, so no page goes without screenshots.
+            string[] shotPages = ["overview","guide","foveation","dlss","framegen","boost","engine","setup","diagnostics","recovery","pupil","visual","osd","support"];
+            var railPages = JsonSerializer.Deserialize<string[]>(JsonSerializer.Deserialize<string>(await core.ExecuteScriptAsync("JSON.stringify([...document.querySelectorAll('#pages > section.page')].map(s => s.id.slice(5)))"))!)!;
+            if (railPages.Except(shotPages).ToArray() is { Length: > 0 } unlisted) throw new IOException("Pages without screenshots: " + string.Join(", ", unlisted));
             await core.ExecuteScriptAsync("window.screenshotDraft=window.dcsUi.draft();");
             foreach (var (width,height,scale) in new[] { (1320,920,1d),(940,660,1d),(1320,920,1.5),(1700,1240,2d) })
             {
@@ -312,26 +328,32 @@ internal static class WebVerification
                 if (await core.ExecuteScriptAsync("window.renderRefreshPending") == "true") throw new IOException("Screenshot draft refresh timed out.");
                 controller.Bounds = new System.Drawing.Rectangle(0,0,width,height);
                 var controller3 = controller as CoreWebView2Controller; controller3.RasterizationScale = scale; controller3.ShouldDetectMonitorScaleChanges = false;
-                foreach (var page in new[] { "overview","guide","foveation","dlss","framegen","boost","engine","setup","diagnostics","recovery" })
+                // At the default size each page also once scrolled to the bottom of its content, so long pages are seen whole.
+                var scrolledToo = (width,height,scale) == (1320,920,1d);
+                foreach (var (page,scrolled) in shotPages.SelectMany(p => scrolledToo ? new[] { (p,false),(p,true) } : new[] { (p,false) }))
                 {
-                    if (page == "diagnostics")
+                    if (page == "diagnostics" && !scrolled)
                     {
                         // Checks as after Check this PC: Must fix, Check yourself and the folded OK group.
                         await core.ExecuteScriptAsync("window.renderRefreshPending=true;window.dcsUi.run('checkReadiness').finally(()=>window.renderRefreshPending=false)");
                         for (var wait = 0; wait < 300 && await core.ExecuteScriptAsync("window.renderRefreshPending") == "true"; wait++) await Task.Delay(20);
                     }
-                    await core.ExecuteScriptAsync("window.dcsUi.navigate("+JsonSerializer.Serialize(page)+");");
+                    // The scrolled view stays on the page just shown (its content already loaded) and scrolls the content area to its end.
+                    await core.ExecuteScriptAsync(scrolled ? "(s=>{s.scrollTop=s.scrollHeight;})(document.getElementById('scrollArea'));" : "window.dcsUi.navigate("+JsonSerializer.Serialize(page)+");");
                     await Task.Delay(80);
-                    var layout = await core.ExecuteScriptAsync("JSON.stringify({overflow:document.documentElement.scrollWidth>innerWidth,footerVisible:document.getElementById('launch').getBoundingClientRect().bottom<=innerHeight,headerVisible:document.getElementById('pageTitle').getBoundingClientRect().top>=0,panelFits:(t=>t.scrollHeight<=t.clientHeight)(document.querySelector('.panel-top')),viewport:[innerWidth,innerHeight],page:"+JsonSerializer.Serialize(page)+"})");
+                    var layout = await core.ExecuteScriptAsync("JSON.stringify({overflow:document.documentElement.scrollWidth>innerWidth,footerVisible:document.getElementById('launch').getBoundingClientRect().bottom<=innerHeight,headerVisible:document.getElementById('pageTitle').getBoundingClientRect().top>=0,panelFits:(t=>t.scrollHeight<=t.clientHeight)(document.querySelector('.panel-top')),viewport:[innerWidth,innerHeight],page:"+JsonSerializer.Serialize(page)+",shown:!document.getElementById('page-'+"+JsonSerializer.Serialize(page)+").hidden,scrollable:(s=>s.scrollHeight>s.clientHeight+1)(document.getElementById('scrollArea')),atBottom:(s=>s.scrollTop+s.clientHeight>=s.scrollHeight-1)(document.getElementById('scrollArea'))})");
                     var parsed = JsonDocument.Parse(JsonSerializer.Deserialize<string>(layout)!);
-                    if (parsed.RootElement.GetProperty("overflow").GetBoolean()) throw new IOException("Web page overflows: "+page);
-                    if (!parsed.RootElement.GetProperty("footerVisible").GetBoolean() || !parsed.RootElement.GetProperty("headerVisible").GetBoolean()) throw new IOException("Web workflow leaves the viewport: "+page);
+                    if (!parsed.RootElement.GetProperty("shown").GetBoolean()) throw new IOException("Web page not shown: "+page);
+                    if (scrolled && !parsed.RootElement.GetProperty("atBottom").GetBoolean()) throw new IOException("Web page did not scroll to its end: "+page);
+                    if (parsed.RootElement.GetProperty("overflow").GetBoolean()) throw new IOException("Web page overflows: "+page+(scrolled ? " (scrolled)" : ""));
+                    if (!parsed.RootElement.GetProperty("footerVisible").GetBoolean() || !parsed.RootElement.GetProperty("headerVisible").GetBoolean()) throw new IOException("Web workflow leaves the viewport: "+page+(scrolled ? " (scrolled)" : ""));
                     // At the default window size the whole right panel (checklist, profile name, setup buttons) fits without scrolling.
                     if ((width,height,scale) == (1320,920,1d) && !parsed.RootElement.GetProperty("panelFits").GetBoolean()) throw new IOException("The right panel scrolls at 1320 × 920: "+page);
-                    var path = output+$"-{index++}.png"; await using var stream = File.Create(path);
+                    var shot = index++; var path = output+$"-{shot}.png"; await using var stream = File.Create(path);
                     await core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png,stream);
-                    screenshots.Add(new { page,width,height,scale,path,layout=parsed.RootElement.Clone() });
+                    screenshots.Add(new { index=shot,page,width,height,scale,scrolled,path,layout=parsed.RootElement.Clone() });
                 }
+                await core.ExecuteScriptAsync("document.getElementById('scrollArea').scrollTop=0;");
                 {
                     // The diagnostic panel key recording, with Ctrl+Shift held.
                     await core.ExecuteScriptAsync("(()=>{const ui=window.dcsUi;ui.navigate('osd');const key=document.getElementById('input-diagnosticOverlayKey');key.click();window.dispatchEvent(new KeyboardEvent('keydown',{keyCode:17,ctrlKey:true,shiftKey:true,bubbles:true,cancelable:true}));document.getElementById('setting-diagnosticOverlayKey').scrollIntoView({block:'center'});})()");
@@ -339,8 +361,8 @@ internal static class WebVerification
                     var raw = await core.ExecuteScriptAsync("JSON.stringify({overflow:document.documentElement.scrollWidth>innerWidth,footerVisible:document.getElementById('launch').getBoundingClientRect().bottom<=innerHeight,headerVisible:document.getElementById('pageTitle').getBoundingClientRect().top>=0,capturing:document.getElementById('input-diagnosticOverlayKey').classList.contains('capturing'),viewport:[innerWidth,innerHeight]})");
                     using var parsed = JsonDocument.Parse(JsonSerializer.Deserialize<string>(raw)!);
                     if (parsed.RootElement.GetProperty("overflow").GetBoolean() || !parsed.RootElement.GetProperty("capturing").GetBoolean() || !parsed.RootElement.GetProperty("footerVisible").GetBoolean()) throw new IOException("Key capture layout failed.");
-                    var path = output+$"-{index++}.png"; await using (var stream = File.Create(path)) await core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png,stream);
-                    screenshots.Add(new { page="framegen-key-capture",width,height,scale,path,layout=parsed.RootElement.Clone() });
+                    var shot = index++; var path = output+$"-{shot}.png"; await using (var stream = File.Create(path)) await core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png,stream);
+                    screenshots.Add(new { index=shot,page="osd-key-capture",width,height,scale,scrolled=false,path,layout=parsed.RootElement.Clone() });
                     await core.ExecuteScriptAsync("window.dispatchEvent(new KeyboardEvent('keydown',{keyCode:27,bubbles:true,cancelable:true}));");
                 }
                 await core.ExecuteScriptAsync("window.setupWizard.open(); window.setupWizard.choose({route:'Pimax',features:{quad:false,dlss:false,framegen:false,boost:false}});");
@@ -355,8 +377,8 @@ internal static class WebVerification
                     using var parsed = JsonDocument.Parse(JsonSerializer.Deserialize<string>(raw)!);
                     var layout = parsed.RootElement;
                     if (layout.GetProperty("step").GetInt32() != stage || layout.GetProperty("overflow").GetBoolean() || !layout.GetProperty("footerVisible").GetBoolean() || !layout.GetProperty("headerVisible").GetBoolean()) throw new IOException("Wizard layout or step failed: " + stage);
-                    var path = output+$"-{index++}.png"; await using var stream = File.Create(path); await core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png,stream);
-                    screenshots.Add(new { page="setup-"+stage,width,height,scale,path,layout=layout.Clone() });
+                    var shot = index++; var path = output+$"-{shot}.png"; await using var stream = File.Create(path); await core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png,stream);
+                    screenshots.Add(new { index=shot,page="guided-setup-"+stage,width,height,scale,scrolled=false,path,layout=layout.Clone() });
                 }
                 await core.ExecuteScriptAsync("document.getElementById('setupClose').click()");
             }
@@ -376,8 +398,8 @@ internal static class WebVerification
                 var layout = await core.ExecuteScriptAsync("JSON.stringify({overflow:document.documentElement.scrollWidth>innerWidth,footerVisible:document.getElementById('launch').getBoundingClientRect().bottom<=innerHeight,headerVisible:document.getElementById('pageTitle').getBoundingClientRect().top>=0,panelFits:(t=>t.scrollHeight<=t.clientHeight)(document.querySelector('.panel-top')),viewport:[innerWidth,innerHeight],page:"+JsonSerializer.Serialize(name)+"})");
                 var parsed = JsonDocument.Parse(JsonSerializer.Deserialize<string>(layout)!).RootElement.Clone();
                 if (parsed.GetProperty("overflow").GetBoolean() || !parsed.GetProperty("footerVisible").GetBoolean() || !parsed.GetProperty("panelFits").GetBoolean()) throw new IOException("Right panel layout failed: " + name);
-                var path = output+$"-{index++}.png"; await using (var stream = File.Create(path)) await core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png,stream);
-                screenshots.Add(new { page=name,width=1320,height=920,scale=1d,path,layout=parsed });
+                var shot = index++; var path = output+$"-{shot}.png"; await using (var stream = File.Create(path)) await core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png,stream);
+                screenshots.Add(new { index=shot,page=name,width=1320,height=920,scale=1d,scrolled=false,path,layout=parsed });
             }
             var pimaxBefore = File.ReadAllText(pimax);
             await core.ExecuteScriptAsync("(()=>{const p=window.dcsUi.profile;p.quadViews='QuadViewsFoveated';p.foveaSource='PimaxPlay';p.neuralRendering=false;p.foveatedDlss=false;p.quadViewsLayerDirectory=null;window.dcsUi.invalidate();})()");
@@ -420,6 +442,8 @@ internal static class WebVerification
             await Capture("update-dialog");
             await core.ExecuteScriptAsync("document.getElementById('updateLater').click();document.getElementById('updateBanner').hidden=true;");
             File.WriteAllText(output+"-renders.json",JsonData.Serialize(screenshots));
+            // The same list, short, next to the checks: which screenshot file shows which page, at which size, scrolled or not.
+            File.WriteAllText(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output))!,"screenshots.json"),JsonData.Serialize(ShotList(JsonData.Serialize(screenshots))));
             var after = File.ReadAllText(options);
             if (after != "options={graphics={Upscaling=\"DLSS\"},VR={enable=false}}") throw new IOException("Fixture restoration was incomplete.");
         }

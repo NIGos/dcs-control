@@ -1637,7 +1637,7 @@ Test("Periphery DLSS preset: [DLSS] and the layer's [DlssPreset] only while it r
     {
         NvidiaSettings.DlssPresetForDcs = () => new(13, true, true);
         var note = ProfileValidation.Validate(qv, With("\"DLSS\"")).SingleOrDefault(i => i.Code == "nvidia-dlss-preset");
-        Require(note is { Severity: IssueSeverity.Info } && note.Message == "The NVIDIA App forces DLSS preset M for DCS. At Quad Views sizes, K costs about 0.6 ms less; the Periphery DLSS preset option (DLSS 5 page) can lighten the periphery without changing NVIDIA settings.", note?.Message ?? "no note");
+        Require(note is { Severity: IssueSeverity.Info } && note.Message == "The NVIDIA App forces DLSS preset M for DCS. At Quad Views sizes, K costs about 0.6 ms less; the Periphery DLSS preset option (DLSS page) can lighten the periphery without changing NVIDIA settings.", note?.Message ?? "no note");
         Require(ProfileValidation.Validate(on, With("\"DLSS\"")).Single(i => i.Code == "nvidia-dlss-preset").Message.EndsWith("the Periphery DLSS preset you turned on lightens the periphery without changing NVIDIA settings.", StringComparison.Ordinal), "with the option on");
         Require(!Has(qv, "nvidia-dlss-preset", With("\"TAA\"")) && !Has(qv, "nvidia-dlss-preset", With(null)) && !Has(qv with { Desktop = true }, "nvidia-dlss-preset", With("\"DLSS\"")) && !Has(qv, "nvidia-dlss-preset"), "only while DCS uses DLSS in VR");
         Require(Has(qv with { NeuralRendering = true }, "nvidia-dlss-preset", With(null)), "DLSS 5 sets DCS's DLSS itself");
@@ -1647,7 +1647,7 @@ Test("Periphery DLSS preset: [DLSS] and the layer's [DlssPreset] only while it r
             Require(!Has(qv, "nvidia-dlss-preset", With("\"DLSS\"")), "no note when nothing is forced: " + notForced);
         }
         NvidiaSettings.DlssPresetForDcs = () => new(11, false);
-        Require(ProfileValidation.Validate(qv, With("\"DLSS\"")).Single(i => i.Code == "nvidia-dlss-preset").Message == "The NVIDIA App forces DLSS preset K for DCS; the Periphery DLSS preset option (DLSS 5 page) can lighten the periphery without changing NVIDIA settings.", "K: no cost sentence");
+        Require(ProfileValidation.Validate(qv, With("\"DLSS\"")).Single(i => i.Code == "nvidia-dlss-preset").Message == "The NVIDIA App forces DLSS preset K for DCS; the Periphery DLSS preset option (DLSS page) can lighten the periphery without changing NVIDIA settings.", "K: no cost sentence");
         Require(new DlssPresetSetting(5, true).Name == "E" && new DlssPresetSetting(DlssPresetSetting.Latest, true) is { Name: "latest", Forced: true } && !new DlssPresetSetting(DlssPresetSetting.Default, true).Forced, "names");
     }
     finally { NvidiaSettings.DlssPresetForDcs = previous; }

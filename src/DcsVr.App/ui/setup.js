@@ -34,7 +34,7 @@
     for (const [key] of ui().FEATURES) if (!['engine','boost'].includes(key)) el('setupFeature-'+key).closest('.setup-feature').hidden = choices.route === 'Desktop';
   }
   function checkItem(c) {
-    return `<article class="readiness-item ${text(c.state)}"><span class="check-mark">${c.state === 'Pass' ? '✓' : c.state === 'Error' ? '!' : 'i'}</span><div><b>${text(c.title)}</b><p>${text(c.detail)}</p>${c.guide && !['paths','recovery'].includes(c.guide) ? `<button class="guide-link" data-guide="${text(c.guide)}">Official setup guide ↗</button>` : ''}</div></article>`;
+    return `<article class="readiness-item ${text(c.state)}"><span class="check-mark">${c.state === 'Pass' ? '✓' : c.state === 'Error' ? '!' : '?'}</span><div><b>${text(c.title)}</b><p>${text(c.detail)}</p>${c.guide && !['paths','recovery'].includes(c.guide) ? `<button class="guide-link" data-guide="${text(c.guide)}">Official setup guide ↗</button>` : ''}</div></article>`;
   }
   function render() {
     el('setupSteps').innerHTML = labels.map((label,i) => `<li class="${i === step ? 'current' : i < step ? 'complete' : ''}" ${i === step ? 'aria-current="step"' : ''}><span>${i < step ? '✓' : '0'+(i+1)}</span><b>${label}</b></li>`).join('');
@@ -55,12 +55,12 @@
       const pathTrouble = errors.some(c => ['game','deployment','neural-runtime'].includes(c.id));
       const sboysTrouble = choices.route === 'SboysSteamVr' && errors.some(c => /sboys/.test(c.id));
       const current = activeProfile(), saved = ui().state?.savedRuntime;
-      body.innerHTML = `<h3>${checking ? 'Checking…' : !report ? 'Ready to check' : report.canPrepare ? 'All set' : 'Fix these first'}</h3>`
+      body.innerHTML = `<h3>${checking ? 'Checking…' : !report ? 'Ready to check' : report.canPrepare ? 'All set' : 'Must fix first'}</h3>`
         + (current && report?.canPrepare ? `<p>Profile <b>${text(current)}</b> is applied now. Launch DCS writes the new one over it; the original files stay backed up.</p>` : '')
-        + `<div id="setupChecks">${errors.map(checkItem).join('')}${warnings.map(checkItem).join('')}</div>`
+        + `<div id="setupChecks">${errors.length ? '<h4 class="setup-group fix">Must fix</h4>'+errors.map(checkItem).join('') : ''}${warnings.length ? '<h4 class="setup-group check">Check yourself</h4>'+warnings.map(checkItem).join('') : ''}</div>`
         + (passed.length ? `<details class="setup-passed"><summary>${passed.length} checks passed</summary>${passed.map(checkItem).join('')}</details>` : '')
         + (sboysTrouble ? `<div class="inline-actions"><button id="setupSboys" class="button secondary">Download / verify Sboys</button><button id="setupImportSboys" class="button quiet">Import official ZIP</button></div>` : '')
-        + `<details class="setup-files" ${pathTrouble ? 'open' : ''}><summary>Files</summary>` + [['dcs','DCS executable','DCS.exe'],['options','Saved Games settings','options.lua'],...(candidate?.neuralRendering ? [['neuralRuntimePath','NVIDIA DLSS 5 runtime',saved ? `Saved copy · version ${saved.version || 'unknown'} · from ${saved.originalPath}` : 'nvngx_dlssnr.dll']] : [])].map(([key,label,hint]) => `<label class="setup-path">${label}<div><input id="setupPath-${key}" value="${text(paths[key])}" placeholder="${text(hint)}"><button class="button secondary" data-browse="${key}">Browse…</button></div></label>`).join('') + `</details>`
+        + `<details class="setup-files" ${pathTrouble ? 'open' : ''}><summary>DCS files</summary>` + [['dcs','DCS executable','DCS.exe'],['options','DCS settings file','options.lua in Saved Games\\DCS\\Config'],...(candidate?.neuralRendering ? [['neuralRuntimePath','NVIDIA DLSS 5 runtime',saved ? `Saved copy · version ${saved.version || 'unknown'} · from ${saved.originalPath}` : 'nvngx_dlssnr.dll']] : [])].map(([key,label,hint]) => `<label class="setup-path">${label}<div><input id="setupPath-${key}" value="${text(paths[key])}" placeholder="${text(hint)}"><button class="button secondary" data-browse="${key}">Browse…</button></div></label>`).join('') + `</details>`
         + `<div class="inline-actions"><button id="setupCheck" class="button quiet" ${checking ? 'disabled' : ''}>Check again</button></div>`;
       el('setupCheck').addEventListener('click',check);
       for (const [id,action] of [['setupSboys','prepareSboys'],['setupImportSboys','importSboys']]) el(id)?.addEventListener('click',async () => {
@@ -119,7 +119,8 @@
       }
     } catch(e) { message(e.message); } finally { checking = false; if (el('setupDialog').open) render(); }
   }
-  el('guidedSetup').addEventListener('click',open); el('setupClose').addEventListener('click',() => { if (!checking) el('setupDialog').close(); });
+  // Overview's button is drawn again with the status card, so clicks are taken at the document.
+  document.addEventListener('click',e => { if (e.target.closest('#guidedSetup, #guidedSetupHere')) open(); }); el('setupClose').addEventListener('click',() => { if (!checking) el('setupDialog').close(); });
   el('setupDialog').addEventListener('cancel',e => { if (checking) e.preventDefault(); });
   el('setupBack').addEventListener('click',() => { if (checking || step === 0) return; step--; if (step === 0) report = null; message(''); render(); });
   el('setupNext').addEventListener('click',next);
