@@ -36,6 +36,9 @@ public sealed record TransactionJournal
     public required string Id { get; init; }
     public required string ProfileId { get; init; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+    /// <summary>The DCS Control version that applied it (null before 0.6.2): Live mode writes the Quad Views, OFXR and
+    /// Cheeky files only when their bundled builds reload them (<see cref="LiveSettings.Current"/>).</summary>
+    public string? AppVersion { get; init; }
     public string Status { get; set; } = "prepared";
     public List<JournalEntry> Entries { get; init; } = [];
 }

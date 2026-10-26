@@ -2346,6 +2346,130 @@ extern "C" __declspec(dllexport) uint64_t DcsVr_QuadViewsDisparityStatus2() noex
     $layerText = $layerText.TrimEnd() + $nl + (& $fix $export) + $nl
     [IO.File]::WriteAllText($layerSource, $layerText)
 }
+# Live post-process settings (native/quadviews/dcsvr_live.h, which explains it; tested by tests/quadviews-live): upstream
+# reads settings.cfg once per process. The layer now re-reads its files when their write time or size changes (checked
+# at most once a second on the thread pool, never on the render thread) and applies only the keys that feed the
+# per-frame post-process passes: sharpen_focus_view, smoothen_focus_view_edges, dcsvr_sharpen_taper,
+# dcsvr_periphery_sharpen, dcsvr_temporal, dcsvr_temporal_tau_ms, dcsvr_temporal_ramp_deg, dcsvr_temporal_clip. Every
+# other key keeps its start value (the log names the changed ones). One line in the Quad Views log per reload.
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'native/quadviews/dcsvr_live.h') -Destination (Join-Path $quadRoot 'openxr-api-layer/dcsvr_live.h') -Force
+$layerText = [IO.File]::ReadAllText($layerSource)
+if (-not $layerText.Contains('DCSVR live settings')) {
+    $nl = if ($layerText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $fix = { param($text) ($text -replace "`r`n", "`n").TrimEnd("`n") -replace "`n", $nl }
+    $load = @'
+                    // DCSVR live settings: the files LoadConfiguration reads below, in its order, stamped and parsed
+                    // first (a write in between is read at the first poll), from Quad Views' own defaults (the
+                    // members before any file).
+                    if (!m_dcsvrLiveDefaultsTaken) {
+                        m_dcsvrLiveDefaults = dcsvrLiveCurrent();
+                        m_dcsvrLiveDefaultsTaken = true;
+                    }
+                    {
+                        std::vector<std::wstring> liveFiles{(dllHome / "settings.cfg").wstring()};
+                        const DWORD liveLength = GetEnvironmentVariableW(L"DCSVR_QUAD_SETTINGS", nullptr, 0);
+                        if (liveLength > 0 && liveLength < 32768) {
+                            std::vector<wchar_t> livePath(liveLength);
+                            if (GetEnvironmentVariableW(L"DCSVR_QUAD_SETTINGS", livePath.data(), liveLength)) {
+                                liveFiles.push_back(livePath.data());
+                            }
+                        } else {
+                            liveFiles.push_back((localAppData / "settings.cfg").wstring());
+                        }
+                        m_dcsvrLive = std::make_shared<dcsvr::live::Reloader>(
+                            std::move(liveFiles),
+                            dcsvr::live::Context{GetApplicationName(), GetApplicationExecutableName(), m_runtimeName, m_systemName},
+                            m_dcsvrLiveDefaults);
+                        m_dcsvrLive->Prime();
+                    }
+                    LoadConfiguration(dllHome / "settings.cfg");
+'@
+    $tick = @'
+                handleDebugKeys();
+                dcsvrLiveTick();
+'@
+    $functions = @'
+        // DCSVR live settings (dcsvr_live.h): the live keys as the layer holds them now.
+        dcsvr::live::Values dcsvrLiveCurrent() const {
+            dcsvr::live::Values values;
+            values.sharpen = m_sharpenFocusView;
+            values.smoothing = m_smoothenFocusViewEdges;
+            values.taper = m_dcsvrSharpenTaper;
+            values.peripherySharpen = m_dcsvrPeripherySharpen;
+            values.temporal = m_dcsvrTemporal.enabled;
+            values.tauMs = m_dcsvrTemporal.tauMs;
+            values.rampDeg = m_dcsvrTemporal.rampDeg;
+            values.clip = m_dcsvrTemporal.clip;
+            return values;
+        }
+
+        // DCSVR live settings: once per frame in xrEndFrame, where the debug keys change the same values and before
+        // anything of the frame reads them. Hands the file check to the thread pool at most once a second and applies
+        // a finished reload, all live keys at once (a try-lock: never waits). A reload sets every live key to its file
+        // value, also one the debug keys changed since.
+        void dcsvrLiveTick() {
+            if (!m_dcsvrLive) {
+                return;
+            }
+            m_dcsvrLive->Tick(std::chrono::steady_clock::now());
+            dcsvr::live::Result reload;
+            if (!m_dcsvrLive->Take(reload)) {
+                return;
+            }
+            const dcsvr::live::Values before = dcsvrLiveCurrent();
+            const dcsvr::live::Values& values = reload.values;
+            m_sharpenFocusView = values.sharpen;
+            m_smoothenFocusViewEdges = values.smoothing;
+            m_dcsvrSharpenTaper = values.taper;
+            m_dcsvrPeripherySharpen = values.peripherySharpen;
+            m_dcsvrTemporal.enabled = values.temporal;
+            m_dcsvrTemporal.tauMs = values.tauMs;
+            m_dcsvrTemporal.rampDeg = values.rampDeg;
+            m_dcsvrTemporal.clip = values.clip;
+            if (before.temporal && !values.temporal) {
+                // Periphery stability off: its history's memory goes back now; on again, it starts over.
+                for (auto& history : m_dcsvrHistory) {
+                    history = {};
+                }
+                m_dcsvrTemporalControl.Invalidate();
+            }
+            if (before.temporal != values.temporal || before.tauMs != values.tauMs || before.rampDeg != values.rampDeg ||
+                before.clip != values.clip) {
+                m_dcsvrTemporalLogged = false;  // its "on" line again, with the new values
+            }
+            const std::string changed = dcsvr::live::Changes(before, values);
+            std::string ignored;
+            for (const auto& name : reload.ignored) {
+                ignored += (ignored.empty() ? "" : ", ") + name;
+            }
+            Log("DCSVR live settings: settings.cfg reloaded: %s%s%s\n",
+                changed.empty() ? "no live key changed" : changed.c_str(),
+                ignored.empty() ? "" : "; kept until the next start: ",
+                ignored.c_str());
+        }
+
+        void handleDebugKeys() {
+'@
+    $members = @'
+        bool m_debugKeys{false};
+        // DCSVR live settings: the reloader of settings.cfg's post-process keys, and Quad Views' defaults for them.
+        std::shared_ptr<dcsvr::live::Reloader> m_dcsvrLive;
+        dcsvr::live::Values m_dcsvrLiveDefaults{};
+        bool m_dcsvrLiveDefaultsTaken{false};
+'@
+    $edits = @(
+        @((& $fix '#include "dcsvr_depth_import.h"'), (& $fix "#include `"dcsvr_depth_import.h`"`n#include `"dcsvr_live.h`"")),
+        @((& $fix '                    LoadConfiguration(dllHome / "settings.cfg");'), (& $fix $load)),
+        @((& $fix '                handleDebugKeys();'), (& $fix $tick)),
+        @((& $fix '        void handleDebugKeys() {'), (& $fix $functions)),
+        @((& $fix '        bool m_debugKeys{false};'), (& $fix $members))
+    )
+    foreach ($edit in $edits) {
+        if (([regex]::Matches($layerText, [regex]::Escape($edit[0]))).Count -ne 1) { throw "Quad Views source changed: $(($edit[0] -split "`n")[0])" }
+        $layerText = $layerText.Replace($edit[0], $edit[1])
+    }
+    [IO.File]::WriteAllText($layerSource, $layerText)
+}
 # Log(std::string) passes the text to vsnprintf as the format: a lone '%' there ends DCS without a trace.
 $unescapedPercent = [IO.File]::ReadAllLines($layerSource) | Where-Object { $_ -match 'Log\(fmt::format\(' -and ($_ -replace '%%', '') -match '%' }
 if ($unescapedPercent) { throw "Quad Views Log text with an unescaped '%' (write '%%'): $($unescapedPercent -join ' | ')" }
@@ -2377,6 +2501,13 @@ $gazeTest = Join-Path $workspaceRoot 'artifacts/native/qv-test/qv_gaze_test.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Quad Views gaze test build failed.' }
 & $gazeTest
 if ($LASTEXITCODE -ne 0) { throw 'Quad Views gaze test failed.' }
+# Live settings: the parser against Quad Views' section rules and file order, non-live keys never applied, no parse
+# while the files' stamps stay, the non-blocking hand-over and the thread-pool poll (C++17, as the layer).
+$liveTest = Join-Path $workspaceRoot 'artifacts/native/qv-test/qv_live_test.exe'
+& (Join-Path $PSScriptRoot 'msvc.cmd') cl /nologo /std:c++17 /EHsc /O2 /W4 /WX "/Fe:$liveTest" "/Fo:$(Split-Path -Parent $liveTest)/" (Join-Path $workspaceRoot 'tests/quadviews-live/qv_live_test.cpp') "/I$(Join-Path $workspaceRoot 'native/quadviews')"
+if ($LASTEXITCODE -ne 0) { throw 'Quad Views live settings test build failed.' }
+& $liveTest
+if ($LASTEXITCODE -ne 0) { throw 'Quad Views live settings test failed.' }
 # Periphery stability: the shared maths, and the real shader on a D3D11 device (the GPU, else WARP) over synthetic
 # periphery sequences (shimmer, head turn, unexplained motion, resets, 2X/3X/Auto timing) with a timing at 814x804.
 $perceptionTest = Join-Path $workspaceRoot 'artifacts/native/qv-test/perception_test.exe'

@@ -629,11 +629,13 @@ void LoadConfig(bool initial) {
     Log("hotkey: engine optimizations stay OFF (the ini reload changed no engine key)");
   }
   if (g_benchRunningFlag.load()) return;  // the benchmark owns the toggle while it runs
+  ApplyDiagnostics(c.diagnostics);  // R144: a live 0 -> 1 installs the measurement hooks (not an engine key)
   g_enabled = c.enabled;
   g_debugHole = c.debugHole;
   g_partitionBoost = c.partitionBoost && !g_engineOff.load();
   g_allocSlabBytes = static_cast<uint32_t>(c.slabBytes);
   g_allocSlabsOn = c.allocSlabs && !g_engineOff.load();
+  ApplyAllocSlabs();  // R144: install on a live enable
   g_texDedupeOn = c.texDedupe && !g_engineOff.load();
   ApplyTextureHook();
   g_triPlainOn = c.triPlain && !g_engineOff.load();

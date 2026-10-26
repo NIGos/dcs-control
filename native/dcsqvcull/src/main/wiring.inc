@@ -474,6 +474,17 @@ void ApplyCostWeights() {
     else refused = true;
   }
 }
+// R144: [Model] AllocSlabs likewise. g_allocSlabsOn alone already switched slabs on live when the detour was there
+// (Diagnostics, DirectUpload or a suite had prepared it); now a live enable also prepares it when nothing did. The
+// patch is written at the next collect (alloc_slab.h OnCollect). Off stays a flag (pass-through to DCS's allocator;
+// slabs handed out this frame stay reserved until the per-frame reset). A refusal (build mismatch) latches -1.
+void ApplyAllocSlabs() {
+  if (!allocslab::LiveInstallWanted(g_allocSlabsOn.load(), allocslab::g_state.load(), g_startInstallsDone.load(),
+                                    GetModuleHandleW(L"NGModel.dll") != nullptr))
+    return;
+  if (allocslab::Prepare())
+    Log("model allocator: prepared on a live enable ([Model] AllocSlabs); the detour is written at the next collect");
+}
 void BenchUseCompactTexTable(bool on) { texbind::UseCompactTable(on); }
 void ApplyParUpload(bool on) {
   if (on && !parupload::Install()) {

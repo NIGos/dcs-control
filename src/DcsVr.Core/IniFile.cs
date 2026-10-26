@@ -34,6 +34,53 @@ public static class IniFile
         return System.Text.Encoding.UTF8.GetString(bytes);
     }
 
+    /// <summary>Text in the encoding <paramref name="like"/> uses (the bytes of the file it replaces): UTF-16 or UTF-8 with
+    /// their BOM, otherwise UTF-8 without one.</summary>
+    public static byte[] Encode(string text, byte[] like)
+    {
+        if (like is [0xFF, 0xFE, ..]) return [0xFF, 0xFE, .. System.Text.Encoding.Unicode.GetBytes(text)];
+        if (like is [0xEF, 0xBB, 0xBF, ..]) return [0xEF, 0xBB, 0xBF, .. System.Text.Encoding.UTF8.GetBytes(text)];
+        return System.Text.Encoding.UTF8.GetBytes(text);
+    }
+
+    /// <summary>
+    /// <paramref name="text"/> with the section-qualified keys of <paramref name="values"/> set (every occurrence), each
+    /// other line, comment and the line endings kept. A key the text lacks is added at the end of its section (the section
+    /// is added when missing).
+    /// </summary>
+    public static string SetValues(string text, IReadOnlyDictionary<string, string> values)
+    {
+        var newline = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n').ToList();
+        var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var sectionEnd = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var section = "";
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var line = lines[i].Trim();
+            if (line.Length == 0 || line[0] is ';' or '#') continue;
+            if (line[0] == '[') { section = line.Trim('[', ']').Trim(); sectionEnd[section] = i + 1; continue; }
+            var separator = lines[i].IndexOf('=');
+            if (separator <= 0) continue;
+            var key = section + "." + lines[i][..separator].Trim();
+            sectionEnd[section] = i + 1;
+            if (!values.TryGetValue(key, out var value)) continue;
+            lines[i] = lines[i][..(separator + 1)] + value;
+            found.Add(key);
+        }
+        foreach (var group in values.Where(p => !found.Contains(p.Key)).GroupBy(p => p.Key.Contains('.') ? p.Key[..p.Key.LastIndexOf('.')] : "", StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(g => sectionEnd.GetValueOrDefault(g.Key, int.MaxValue)))
+        {
+            var added = group.Select(p => p.Key[(p.Key.LastIndexOf('.') + 1)..] + "=" + p.Value).ToList();
+            if (sectionEnd.TryGetValue(group.Key, out var at)) { lines.InsertRange(at, added); continue; }
+            if (lines.Count > 0 && lines[^1].Length == 0) lines.RemoveAt(lines.Count - 1);
+            if (group.Key.Length > 0) lines.Add("[" + group.Key + "]");
+            lines.AddRange(added);
+            lines.Add("");
+        }
+        return string.Join(newline, lines);
+    }
+
     /// <summary>
     /// True when every owned key still has its value. Numbers compare with float32 tolerance because components
     /// such as Cheeky store settings as float and write 0.35 back as 0.349999994.

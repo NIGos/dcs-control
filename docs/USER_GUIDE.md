@@ -327,6 +327,23 @@ Good to know:
 - **Don't run DCS or the app as administrator.** The VR loader ignores private settings in elevated processes; the app refuses to launch in that case.
 - Only DLSS 5 and Foveated SR put files in DCS's `bin` folder. If another mod already has a `dxgi.dll` there (ReShade, an overlay), it keeps working: Launch DCS says so, asks once, backs it up and loads it after the DLSS 5 loader (as `dxgi2.dll`). If you prefer it off while flying with DLSS 5, choose **Set it aside** (or turn off *Keep another program's dxgi.dll working* on the DLSS page). **Back to stock DCS** puts the original back either way.
 
+### Live changes while DCS runs
+
+While DCS runs, settings tagged **LIVE** apply within about a second; you don't need to restart DCS. The **Live** switch next to the links at the bottom of the right panel turns this off. The status line says what was applied and what waits for the next launch.
+
+What applies live:
+
+- **Engine Optimizations:** most engine parts, including the Model allocator. Diagnostic hooks turn on live; turning them off waits for the next launch.
+- **Visual realism:** color mode, night vision, glare, G vision and eye-focus blur.
+- **Perception:** Pupil shift and Depth boost.
+- **Quad Views:** sharpening, focus edge blending, sharpening fade at the edge, periphery contrast and periphery stability.
+- **Frame generation:** optical flow quality, optical flow resolution and bidirectional flow, only when DCS was started with NVIDIA frame generation.
+- **DLSS 5:** the tuning settings (intensity, style, local tone and structure, skin, UI correction, automatic mask, color, transfer strength, paper white scale, depth convention, motion scale).
+
+A change to DLSS 5 intensity, style, local tone or structure, skin, UI correction or automatic mask, or to the optical flow settings, gives a short hitch in the headset. This is normal.
+
+Everything else waits for the next launch: focus size and shape, Quad Views turbo, eye tracking, frame generation mode and factor, the DLSS 5 area and working scale, CPU Boost, and the DCS settings. If one change in a file needs a restart, every change in that file waits with it. Quad Views, frame generation and DLSS 5 apply live only after this version has launched the profile once.
+
 ### The DCS launcher option
 
 **Show the DCS launcher** (DCS & headset page, off by default) keeps DCS's own launcher window; press Play there. When you press Play, the DCS launcher restarts DCS and asks Windows to take it out of the "job" its parent runs in. If DCS Control itself was started by a program that puts its children in a restricted job (a script runner, an automation tool, some sandboxes), Windows refuses: DCS never opens and `dcs.log` ends with "… failed with error code 5". The app detects this, disables the option and explains why. **Opened from the Start menu or Explorer, the app is not in such a job and the launcher works.**

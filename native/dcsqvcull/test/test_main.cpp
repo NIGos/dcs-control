@@ -335,6 +335,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "log_phrases_test.h"  // R107: the log phrases DCS Control parses stay in the source byte-exact
 #include "ini_keys_test.h"  // R107: every key the app writes is still read (live or retired)
 #include "r142_test.h"  // R142: the ini reload diff, the engine key set, frame times around a reload
+#include "r144_test.h"  // R144: Live mode phase 2 (AllocSlabs / Diagnostics live, settings.cfg followed live)
 
 // R60: QV_TEST_LOAD=<n> (off by default): n busy threads of normal priority inside this process for the whole run.
 // An in-process stand-in for a machine loaded by another program (as DCS loading a mission); never an external load
@@ -1998,6 +1999,7 @@ int main() {
   r97test::Run();  // R97: its fixes after the first live run
   r99test::Run();  // R99: the pose hook by displayTime; the symbology replay stage's cost
   r101test::Run();  // R101: the learnt HUD field recovers after a bank
+  r144test::Run();  // R144: after the allocator test (it reads the global allocate counters)
 
   // Suite: configuration check + short profile, report file written.
   {

@@ -1804,6 +1804,88 @@ replace('cmake/Standalone.cmake', '''    add_test(NAME CheekyRuntimeStandalone-T
     add_test(NAME CheekyRuntimeStandalone-TransportDcsDeferredTransportFail COMMAND CheekyRuntimeHostTests --transport-dcs-deferred-transport-fail)
 ''')
 
+# Live INI reload (2026-10-26, DCS Control Live mode). Cheeky read CheekyFoveatedDLSS.ini once at start and wrote it back
+# itself, so a DLSS 5 tuning change from DCS Control needed a DCS restart and Cheeky's next save erased it. The
+# persistence worker now also wakes once a second, re-reads the INI when its stamp changes and applies the changed live
+# keys (dcs_live_keys: DLSS 5 tuning) through update_settings like the overlay's "set"; changed start-only keys are
+# staged and every later save writes them as DCS Control left them. Only keys changed against the previous file
+# content count, Cheeky's own saves are recognised by their content hash (no reload loop), and a save first takes a
+# pending INI change so it never overwrites it. One log line per reload (dcs_live_reload_runtime.inc).
+shutil.copyfile(root / 'patches/cheeky/dcs_live_reload.hpp', source / 'uevr/dcs_live_reload.hpp')
+shutil.copyfile(root / 'patches/cheeky/dcs_live_reload_runtime.inc', source / 'uevr/dcs_live_reload_runtime.inc')
+replace('uevr/runtime.cpp', '#include "dcs_session_settings.hpp"\n', '#include "dcs_session_settings.hpp"\n#include "dcs_live_reload.hpp"\n')
+replace('uevr/runtime.cpp', """DWORD WINAPI persistence_worker(void*) {
+    auto& s = state();
+    for (;;) {
+        WaitForSingleObject(s.save_event, INFINITE);
+        try {
+            if (s.save_requested.exchange(false)) {
+                Settings settings; std::uint64_t revision;
+                { std::lock_guard lock(s.mutex); settings = configured_settings(); revision = s.revision;
+                    // DCS VR Control: fields changed only for this session are saved with their persisted values.
+                    cheeky::dcsvr::dcs_session_overrides().apply([&](const std::string& key, const std::string& value) {
+                        static_cast<void>(set_named_setting(settings, key, value)); });
+                }
+                std::string error;
+                const auto success = write_settings_file(s.config, settings, error);
+                std::lock_guard lock(s.mutex);""", """#include "dcs_live_reload_runtime.inc"
+DWORD WINAPI persistence_worker(void*) {
+    auto& s = state();
+    for (;;) {
+        // DCS Control: wakes at least once a second for the live INI reload (dcs_live_reload_runtime.inc).
+        WaitForSingleObject(s.save_event, 1000);
+        try {
+            dcs_live_reload_check(s);
+            if (s.save_requested.exchange(false)) {
+                Settings settings; std::uint64_t revision{};
+                // DCS VR Control: fields changed only for this session are saved with their persisted values, start-only
+                // keys DCS Control changed with their staged values; an INI change that arrived meanwhile is taken first.
+                for (unsigned attempt = 0;; ++attempt) {
+                    dcs_live_reload_check(s);
+                    { std::lock_guard lock(s.mutex); settings = dcs_persisted_settings_locked(); revision = s.revision; }
+                    if (attempt == 2 || !cheeky::dcsvr::dcs_live_reload().stamp_changed(dcs_ini_stamp(s.config))) break;
+                }
+                std::string error;
+                const auto success = write_settings_file(s.config, settings, error);
+                if (success) { const auto saved = serialize_settings(settings); cheeky::dcsvr::dcs_live_reload().note_content(saved, saved); }
+                std::lock_guard lock(s.mutex);""")
+replace('uevr/runtime.cpp', '            update_settings(settings); s.revision = 1;\n',
+    '            update_settings(settings); s.revision = 1;\n            dcs_live_reload_start(s.config, settings); // DCS Control: the INI read at start is no reload.\n')
+replace('uevr/runtime.cpp', """            else if (action.starts_with("defaults")) cheeky::dcsvr::dcs_session_overrides().clear();
+            else cheeky::dcsvr::dcs_session_overrides().persistent(before, after, dcs_keys);""",
+    """            else if (action.starts_with("defaults")) {
+                cheeky::dcsvr::dcs_session_overrides().clear();
+                cheeky::dcsvr::dcs_live_reload().clear(); // DCS Control: staged INI values end with the defaults.
+            } else {
+                cheeky::dcsvr::dcs_session_overrides().persistent(before, after, dcs_keys);
+                cheeky::dcsvr::dcs_live_reload().forget(dcs_keys); // DCS Control: the overlay's own value replaces a staged one.
+            }""")
+# Tests: the reload logic in CheekyUEVRTests (links settings_io.cpp), the resident runtime end to end in
+# CheekyRuntimeHostTests --dcs-live-reload.
+shutil.copyfile(root / 'patches/cheeky/dcs_live_reload_tests.inc', source / 'tests/dcs_live_reload_tests.inc')
+shutil.copyfile(root / 'patches/cheeky/dcs_live_reload_host_tests.inc', source / 'tests/dcs_live_reload_host_tests.inc')
+replace('tests/uevr_tests.cpp', '#include "support_bundle.hpp"\n', '#include "support_bundle.hpp"\n#include "dcs_live_reload.hpp"\n')
+replace('tests/uevr_tests.cpp', 'void settings_tests(const std::filesystem::path& root) {\n',
+    '#include "dcs_live_reload_tests.inc"\nvoid settings_tests(const std::filesystem::path& root) {\n    dcs_live_reload_tests();\n')
+replace('tests/runtime_host_tests.cpp', '#include "dcs_deferred_tests.inc"\n', '#include "dcs_deferred_tests.inc"\n#include "dcs_live_reload_host_tests.inc"\n')
+replace('tests/runtime_host_tests.cpp',
+    '            else if (arg == "--transport-dcs-deferred-transport-fail") { transport = dx11 = dcs_deferred_mode = true; dcs_deferred_scenario = 4; }\n',
+    '            else if (arg == "--transport-dcs-deferred-transport-fail") { transport = dx11 = dcs_deferred_mode = true; dcs_deferred_scenario = 4; }\n'
+    '            else if (arg == "--dcs-live-reload") dcs_live_reload_mode = true;\n')
+replace('tests/runtime_host_tests.cpp', '        require(start(&input) && attachment != 0, "Start before graphics discovery");\n',
+    '        if (dcs_live_reload_mode) { std::ofstream saved(directory / "CheekyFoveatedDLSS.ini"); saved << dcs_writer_ini("1", "0.6", "1"); }\n'
+    '        require(start(&input) && attachment != 0, "Start before graphics discovery");\n'
+    '        if (dcs_live_reload_mode) {\n'
+    '            verify_dcs_live_reload(command, get, attachment, directory);\n'
+    '            detach(attachment);\n'
+    '            puts("PASS: DCS Control live INI reload: live keys applied, start-only keys staged, no reload of Cheeky\'s own saves");\n'
+    '            return 0;\n'
+    '        }\n')
+replace('cmake/Standalone.cmake',
+    '    add_test(NAME CheekyRuntimeStandalone-TransportDcsDeferredTransportFail COMMAND CheekyRuntimeHostTests --transport-dcs-deferred-transport-fail)\n',
+    '    add_test(NAME CheekyRuntimeStandalone-TransportDcsDeferredTransportFail COMMAND CheekyRuntimeHostTests --transport-dcs-deferred-transport-fail)\n'
+    '    add_test(NAME CheekyRuntimeStandalone-DcsLiveReload COMMAND CheekyRuntimeHostTests --dcs-live-reload)\n')
+
 # The D3D shaders are embedded as bytecode (src/d3d_shaders.hpp, generated by Cheeky's scripts/build-d3d-shaders.py
 # with the Windows SDK fxc); the build never compiles HLSL. Regenerate it whenever the patched shader sources no
 # longer match it, so the shader patches above reach the GPU. (Until 2026-10-18 nothing did this: the 2026-10-07

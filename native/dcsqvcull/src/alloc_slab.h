@@ -258,6 +258,10 @@ bool RttiIs(uint8_t* base, void** vtbl, const char* name) {
 // written at a quiet moment (the next collect call, on the render thread,
 // before any culling task of that frame runs).
 bool Prepare() {
+  // R144: callers on different threads (the worker's live enable / DirectUpload, the suite thread's
+  // InstallDiagnostics) are serialised: two concurrent first calls would both build a detour page.
+  static std::mutex s_prepareMu;
+  std::lock_guard<std::mutex> prepareLock(s_prepareMu);
   if (g_state.load() != 0) return g_state.load() > 0;
   auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"NGModel.dll"));
   if (!base) {
@@ -287,6 +291,12 @@ bool Prepare() {
   g_lock = *reinterpret_cast<MutexFn*>(base + lockIat);
   g_unlock = *reinterpret_cast<MutexFn*>(base + unlockIat);
 
+  // R144: the state (1 = patch pending, 2 = active) is published only after the reset and target hooks are
+  // registered, so the render thread's OnCollect never writes the detour (and a failed registration below can never
+  // be overwritten by OnCollect's "2") while the hooks are half set up. That matters for a live enable, which runs
+  // this on the worker while the render thread is collecting; at the start it was benign (the stub's slot points at
+  // the trampoline until HookAlloc is registered: pass-through).
+  int next = 0;
   if (memcmp(cur, kPrologue, 14) == 0) {
     auto* pg = static_cast<DetourPage*>(VirtualAlloc(nullptr, 2 * kPage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     if (!pg) {
@@ -314,7 +324,7 @@ bool Prepare() {
     }
     FlushInstructionCache(GetCurrentProcess(), pg, kPage);
     g_page = pg;
-    g_state = 1;  // patch on the next collect
+    next = 1;  // patch on the next collect
   } else if (cur[0] == 0xFF && cur[1] == 0x25 && cur[2] == 0 && cur[3] == 0 && cur[4] == 0 && cur[5] == 0) {
     // Already patched by an earlier payload: reuse its page.
     DetourPage* pg = nullptr;
@@ -326,7 +336,7 @@ bool Prepare() {
       return false;
     }
     g_page = pg;
-    g_state = 2;
+    next = 2;
   } else {
     Log("model allocator: NGModel+0x%x has unexpected bytes; not installed", allocRva);
     g_state = -1;
@@ -341,8 +351,22 @@ bool Prepare() {
     g_state = -1;
     return false;
   }
-  if (g_state.load() == 2) Log("model allocator: hooked (existing detour reused)");
+  g_state.store(next, std::memory_order_release);
+  if (next == 2) Log("model allocator: hooked (existing detour reused)");
   return true;
+}
+
+// R144: a live enable of [Model] AllocSlabs (ini 0 -> 1, or the kill switch back ON) prepares the detour when nothing
+// did yet (AllocSlabs off at the start, no Diagnostics, no DirectUpload, no suite): after the worker's start installs,
+// with NGModel.dll loaded (Prepare latches a missing module as a failure), never in PerceptionOnly (LoadConfig returns
+// before). The 14-byte patch itself is then written by the next collect call exactly as after a start Prepare:
+// every other thread suspended and none inside the 14 bytes (PatchAllSuspended), before that frame's culling tasks.
+// Why the swap is safe mid-session (docs/research/R144_live_phase2.md): StructBufferManager has no per-object free
+// (the per-frame reset, slot 7, rewinds every page's used count, the only release), a slab is carved under DCS's
+// own lock by advancing the same page's used count (so DCS's path never hands out a byte of it), thread state is
+// created lazily on a thread's first call (generation 0 never matches), and g_on is read per call.
+inline bool LiveInstallWanted(bool on, int state, bool startInstallsDone, bool ngModelLoaded) {
+  return on && state == 0 && startInstallsDone && ngModelLoaded;
 }
 
 // Called by the collect hook before the original runs: writes the pending
