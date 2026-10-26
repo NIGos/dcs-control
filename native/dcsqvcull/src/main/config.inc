@@ -315,6 +315,21 @@ void ApplyTextureHook();
 void ApplyCostWeights();  // R142: a live enable of [Scene] CostWeights installs its hooks (wiring.inc)
 // R142: set by the worker after its start-time installs (worker.inc); before that a live-enable install waits for them.
 std::atomic<bool> g_startInstallsDone{false};
+void ApplyAllocSlabs();  // R144: a live enable of [Model] AllocSlabs prepares the allocator detour (wiring.inc)
+void ApplyDiagnostics(bool want);  // R144: a live [General] Diagnostics 0 -> 1 installs the measurement hooks (suite.inc)
+std::atomic<bool> g_diagInstalled{false};  // R144: InstallDiagnostics ran (start key, live key, suite or motion flag)
+// R144: what an ini reload does with [General] Diagnostics (pure). 1 = install the measurement hooks now (the same
+// InstallDiagnostics the suite and run_motion.flag run mid-session); 2 = the key went 1 -> 0 while they are installed:
+// they stay until the next DCS start (pass-through outside a measurement; no uninstall: ptiming, shadowpass, the
+// allocator detour and the texture hook are shared with engine and perception features, R144 section 2); 0 = nothing.
+// Before the worker's start installs (it installs them itself) and in PerceptionOnly: nothing.
+constexpr int kDiagNothing = 0, kDiagInstall = 1, kDiagStaysUntilRestart = 2;
+inline int DiagnosticsLiveAction(bool want, bool prevWant, bool installed, bool startInstallsDone, bool perceptionOnly) {
+  if (perceptionOnly || !startInstallsDone) return kDiagNothing;
+  if (want && !installed) return kDiagInstall;
+  if (!want && prevWant && installed) return kDiagStaysUntilRestart;
+  return kDiagNothing;
+}
 void ApplyTriCounter();
 void ApplyCbSkip();
 void ApplyCbUpload();

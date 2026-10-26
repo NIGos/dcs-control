@@ -394,6 +394,17 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                 var draftNow = _profile; var inventory = CurrentInventory;
                 var result = await Task.Run(() => service.ApplyLive(draftNow, inventory));
                 if (result.Written.Count > 0) AppLog.Info("Live: " + string.Join(", ", result.Written) + " (" + string.Join(", ", result.Applied) + ")");
+                // Cheeky saves its INI itself: read again in a moment, written once more if its save dropped a value.
+                if (result.Rechecks is { Count: > 0 } rechecks)
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            var outcomes = await service.RecheckLiveAsync(rechecks);
+                            if (outcomes.Any(o => o != LiveRecheckOutcome.Kept)) AppLog.Info("Live recheck: " + string.Join(", ", outcomes));
+                        }
+                        catch (Exception e) { AppLog.Error("Live recheck", e); }
+                    });
                 return Reply(id, result);
             }
             catch (Exception e) { return JsonData.Serialize(new { id, ok = false, error = e.Message }); }

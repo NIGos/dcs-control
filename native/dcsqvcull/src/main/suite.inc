@@ -80,6 +80,8 @@ void ExclusionSelfTest() {
 // Measurement hooks (timelines, culling tasks, per-model cost, shadow and
 // render passes). Not needed for the optimisations themselves: installed at
 // start only with [General] Diagnostics=1, otherwise when a suite starts.
+// R144: also on a live [General] Diagnostics 0 -> 1 (ApplyDiagnostics). Every hook here is a vtable / IAT slot write
+// (the allocator's 14-byte patch waits for the next collect, alloc_slab.h), pass-through outside a measurement.
 void InstallDiagnostics() {
   static std::atomic<bool> done{false};
   if (done.exchange(true)) return;
@@ -90,6 +92,23 @@ void InstallDiagnostics() {
   ptiming::Install();
   allocslab::Prepare();
   texbind::Install(g_tscHz);
+  g_diagInstalled = true;
+}
+
+// R144: [General] Diagnostics on an ini reload (LoadConfig, worker). On: installed now if not yet. Off: logged once
+// per 1 -> 0; the hooks stay until the next DCS start (DiagnosticsLiveAction, config.inc).
+void ApplyDiagnostics(bool want) {
+  static bool prevWant = false;
+  const int a = DiagnosticsLiveAction(want, prevWant, g_diagInstalled.load(), g_startInstallsDone.load(),
+                                      g_perceptionOnly.load());
+  prevWant = want;
+  if (a == kDiagInstall) {
+    InstallDiagnostics();
+    Log("diagnostics: measurement hooks installed on a live enable ([General] Diagnostics)");
+  } else if (a == kDiagStaysUntilRestart) {
+    Log("diagnostics: [General] Diagnostics=0: the measurement hooks stay installed (pass-through) until the next DCS "
+        "start");
+  }
 }
 
 // Suite: the recorder installed and warmed up (2 s on: the probes learn the

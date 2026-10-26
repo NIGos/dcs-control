@@ -63,11 +63,16 @@ Each eye uses two RGBA16F textures at periphery size, written in turn. At 814×8
 
 The advanced keys are written at their defaults and are meant for testing only. A lower `dcsvr_temporal_clip` trails less on scenery that moves on its own but steadies less. Offline, 0.75 with a tighter confidence cut the remaining roll lag over the horizon by about a fifth. It also left more of the shimmer at 28–35°: 63 % instead of 53 %, both measured in the harness's smaller `--quick` run.
 
+### Live changes
+
+The bundled Quad Views re-reads its `settings.cfg` files while DCS runs (`native/quadviews/dcsvr_live.h`, tested by `tests/quadviews-live`). At most once a second a thread-pool poll compares each file's write time and size, and parses only when one changed. It uses the same files, order and section rules as at start. The next frame applies these keys together, between two frames: `sharpen_focus_view`, `smoothen_focus_view_edges`, `dcsvr_sharpen_taper`, `dcsvr_periphery_sharpen`, `dcsvr_temporal`, `dcsvr_temporal_tau_ms`, `dcsvr_temporal_ramp_deg` and `dcsvr_temporal_clip`. A change shows within about one second. Every other key keeps its start value until DCS restarts: sizes, multipliers, sections, `focus_view_shape`, turbo, eye tracking and Far depth. A reload sets each live key to its file value, even one that Quad Views' debug keys changed since. Turning periphery stability off frees its history; turning it on again starts it over.
+
 ### In the log
 
-`%LOCALAPPDATA%\Quad-Views-Foveated\Quad-Views-Foveated.log` (or the profile's own log) shows two kinds of line:
+`%LOCALAPPDATA%\Quad-Views-Foveated\Quad-Views-Foveated.log` (or the profile's own log) shows these lines:
 
-- At the first frame: `DCSVR periphery stability: on, 40 ms, ramp 8 deg, clip 1.00`.
+- On each reload of `settings.cfg`: `DCSVR live settings: settings.cfg reloaded: sharpen_focus_view 0.70 -> 0.50; kept until the next start: focus_multiplier`.
+- At the first frame (and again after a live change to its keys): `DCSVR periphery stability: on, 40 ms, ramp 8 deg, clip 1.00`.
 - Every 30 s: `DCSVR periphery stability: N frames, M filtered at 45.0 FPS, R resets (saccade a, gap b, turn c, size d, other e), fades out 40-48 deg`.
 
 Many resets from turns or gaps mean the filter is idle much of the time.

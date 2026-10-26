@@ -1,0 +1,797 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -864,6 +864,16 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> d3d11 ${marker})
+             set_tests_properties(xrfg_layer_marker_d3d11_${marker} PROPERTIES TIMEOUT 30)
+         endforeach()
++        # DCS Control (0066): ofxr_bridge.ini's optical flow keys rewritten
++        # while generation runs (D3D12 on WARP, the D3D11 bridge, DCS's
++        # flight-simulator frame overlap): taken in on the watcher's thread,
++        # rebuilt by the frame thread, backend left for the next launch, the
++        # ini never written by the layer, one live_settings record each.
++        foreach(mode inline d3d11 flight)
++            add_test(NAME xrfg_live_flow_ini_${mode} COMMAND xrfg_layer_manual_disarm_tests
++                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> ${mode} live-ini)
++            set_tests_properties(xrfg_live_flow_ini_${mode} PROPERTIES TIMEOUT 30)
++        endforeach()
+         add_test(
+             NAME xrfg_layer_call_chain
+             COMMAND xrfg_layer_call_chain
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -753,6 +753,28 @@ enum class BridgeFlightOperation : std::uint32_t {
+     //     R110 held one prime 210 ms at 1X with no layer wait in it (frame_hold
+     //     pacing 1 us, fence waits 0).
+     slow_step,
++    // DCS Control (0066): ofxr_bridge.ini changed while a session runs
++    // (embedded::LiveIniWatcher, its own thread, every 250 ms by the file's
++    // time and size). One record per change:
++    //   result=1, optical flow keys taken in live: a= the new values, b= the
++    //     old (embedded::live_flow_code: preset 0 slow, 1 medium, 2 fast in
++    //     bits 0-7; nvidia_input_scale in percent, 100, 75 or 50, in bits
++    //     8-15; nvidia_bidirectional bit 16; nvidia_occlusion_aware bits
++    //     24-31); c= the keys that changed in bits 0-7 (1 nvidia_preset, 2
++    //     nvidia_input_scale, 4 nvidia_bidirectional, 8
++    //     nvidia_occlusion_aware) and the control revision from bit 32. Each
++    //     session then rebuilds its synthesis on its next xrEndFrame
++    //     (apply_embedded_control): an embedded_configuration record with
++    //     a= that revision follows, its result the rebuild's.
++    //   result=2, start-only keys differ from what the session started with
++    //     (or are back to it, c=0): c= implicit_layer::kOfxrStartOnlyKeys,
++    //     bit i (1 enabled, 2 backend, 4 motion_vectors, 8 d3d11_bridge, 16
++    //     deep_pipeline, 32 pipelined_deep_hold, 64 async_arm, 128
++    //     adaptive_cadence, 256 hud_symbology, 512 cockpit_mask, 1024
++    //     cockpit_depth, 2048 dcs_motion, 4096 smooth_cursor, 8192
++    //     cursor_templates, 16384 diag_vram, 32768 visibility_mask, 65536
++    //     parallel_eye_synthesis). Not applied: they wait for the next launch.
++    live_settings,
+ };
+ 
+ struct BridgeFlightToken {
+diff --git a/include/xrfg/embedded_control.hpp b/include/xrfg/embedded_control.hpp
+--- a/include/xrfg/embedded_control.hpp
++++ b/include/xrfg/embedded_control.hpp
+@@ -1,5 +1,7 @@
+ #pragma once
+ #include <cstdint>
++#include <filesystem>
++#include <memory>
+ 
+ namespace xrfg::embedded {
+ // CPU-only interface: no NGX/FFX structures cross the host/backend ABI boundary.
+@@ -18,6 +20,11 @@ struct Snapshot {
+     std::uint64_t revision{1};
+     unsigned sessions{}, pending{}, bypass{}, ready{}, errors{};
+     long last_error{};
++    // DCS Control (0066): `[ofxr] nvidia_occlusion_aware` as last taken in
++    // live (0 or 1); -1 while nothing has been, when each session keeps the
++    // value it read at its start. Not in Settings: the provider ABI's
++    // requests carry no such field, and one must not reset it.
++    std::int32_t occlusion_aware{-1};
+ };
+ Snapshot snapshot();
+ bool request(Settings settings); // persists only owned keys; false means INI write failed
+@@ -28,4 +35,54 @@ bool logging_setting();
+ bool set_logging_setting(bool enabled); // next process: logger is initialized once
+ int overlay_setting();
+ bool set_overlay_setting(int position); // existing overlay polls its INI live
++
++// DCS Control (0066): the optical flow keys of ofxr_bridge.ini a running
++// session follows. DCS Control writes them while DCS runs (temporary file and
++// rename); adopt_live takes them in without writing the ini, bumps the
++// revision when one differs, and every session's apply_embedded_control then
++// rebuilds its synthesis on its own frame thread, as for a menu request.
++// Backend, enabled and motion_vectors are left as they are: start-only.
++struct LiveFlow {
++    int preset{1}; // as Settings::preset
++    int scale{2}; // as Settings::scale
++    bool backward{};
++    std::uint32_t occlusion_aware{}; // 0 or 1
++    bool operator==(const LiveFlow&) const = default;
++};
++// Bits of LiveAdoption::keys (and of the live_settings record's c).
++inline constexpr std::uint32_t kLivePreset = 1U;
++inline constexpr std::uint32_t kLiveScale = 2U;
++inline constexpr std::uint32_t kLiveBidirectional = 4U;
++inline constexpr std::uint32_t kLiveOcclusion = 8U;
++struct LiveAdoption {
++    std::uint32_t keys{}; // what differed; 0: nothing taken in
++    LiveFlow before{}, after{};
++    std::uint64_t revision{};
++};
++// `first`: the occlusion value only sets the baseline, no change (each session
++// already read the same file at its start).
++LiveAdoption adopt_live(const LiveFlow& flow, bool first = false);
++// The live_settings record's a and b: preset (Settings::preset) in bits 0-7,
++// the input scale in percent (100, 75, 50) in bits 8-15, bidirectional in bit
++// 16, occlusion_aware in bits 24-31.
++[[nodiscard]] std::uint64_t live_flow_code(const LiveFlow& flow) noexcept;
++
++// DCS Control (0066): one per session. It reads ofxr_bridge.ini once when made
++// (on the xrCreateSession thread), then every 250 ms on a thread of its own:
++// only when the file's time or size changed, and then the [ofxr] section in
++// one read. Live keys go to adopt_live; a start-only key that differs from
++// what the session started with is logged (live_settings result=2) and left
++// for the next launch. No file IO on a frame or presenter thread. Destroyed
++// (thread stopped and joined, at most one poll) with the session, before the
++// layer can be unloaded, as GpuStatsSampler.
++class LiveIniWatcher final {
++public:
++    explicit LiveIniWatcher(std::filesystem::path module_directory);
++    ~LiveIniWatcher();
++    LiveIniWatcher(const LiveIniWatcher&) = delete;
++    LiveIniWatcher& operator=(const LiveIniWatcher&) = delete;
++private:
++    struct Impl;
++    std::unique_ptr<Impl> impl_;
++};
+ }
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <array>
+ #include <cstdint>
+ #include <filesystem>
+ #include <string>
+@@ -322,6 +323,36 @@ private:
+ [[nodiscard]] ConfiguredNvidiaOptions read_nvidia_options(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS Control (0066): the [ofxr] keys a running session follows (the optical
++// flow: nvidia_preset, nvidia_input_scale, nvidia_bidirectional,
++// nvidia_occlusion_aware) and the ones it reads only at its start, from one
++// read of the section: a writer that replaces the file (DCS Control's
++// temporary-and-rename) is seen whole, never half old, half new. The values
++// mean what read_nvidia_options and read_nvidia_occlusion_aware make of the
++// same text. `found`: the file has an [ofxr] section; without one nothing
++// here is taken (a missing file is not a request for the defaults).
++// `start_only` holds the raw text of kOfxrStartOnlyKeys, in order (empty:
++// the key is missing), so a change of one can be logged and left for the
++// next launch.
++inline constexpr std::array<const wchar_t*, 17> kOfxrStartOnlyKeys{
++    L"enabled", L"backend", L"motion_vectors", L"d3d11_bridge",
++    L"deep_pipeline", L"pipelined_deep_hold", L"async_arm",
++    L"adaptive_cadence", L"hud_symbology", L"cockpit_mask", L"cockpit_depth",
++    L"dcs_motion", L"smooth_cursor", L"cursor_templates", L"diag_vram",
++    L"visibility_mask", L"parallel_eye_synthesis"};
++struct OfxrSectionValues {
++    bool found{};
++    ConfiguredNvidiaOptions nvidia{};
++    std::uint32_t occlusion_aware{};
++    std::array<std::wstring, kOfxrStartOnlyKeys.size()> start_only{};
++};
++// `section`: GetPrivateProfileSectionW's buffer (key=value lines, each ended
++// by a NUL). Comment lines (';', '#') are skipped; the first of a repeated
++// key counts, as GetPrivateProfileStringW takes it.
++[[nodiscard]] OfxrSectionValues parse_ofxr_section(std::wstring_view section);
++[[nodiscard]] OfxrSectionValues read_ofxr_section(
++    const std::filesystem::path& module_directory) noexcept;
++
+ [[nodiscard]] bool register_manifest(
+     const std::filesystem::path& manifest,
+     RegistryScope scope,
+diff --git a/src/common/embedded_control.cpp b/src/common/embedded_control.cpp
+--- a/src/common/embedded_control.cpp
++++ b/src/common/embedded_control.cpp
+@@ -1,9 +1,13 @@
+ #include "xrfg/embedded_control.hpp"
++#include "xrfg/bridge_flight_logger.hpp"
+ #include "xrfg/implicit_layer.hpp"
+ #include <windows.h>
+ #include <map>
+ #include <mutex>
+ #include <algorithm>
++#include <chrono>
++#include <condition_variable>
++#include <thread>
+ 
+ namespace xrfg::embedded {
+ namespace {
+@@ -19,8 +23,13 @@ const std::filesystem::path& ini() { static auto path = directory() / L"ofxr_bri
+ struct Receipt { std::uint64_t revision{}; bool enabled{}; long error{}; };
+ struct Control {
+     std::mutex mutex;
++    // DCS Control (0066): held around a request's ini writes and a live read
++    // with its adoption, never by a frame thread (snapshot takes only mutex),
++    // so a live read never sees a request's writes half done.
++    std::mutex io_mutex;
+     Settings settings;
+     std::uint64_t revision{1}, next_id{1};
++    std::int32_t occlusion_aware{-1}; // DCS Control (0066): Snapshot::occlusion_aware
+     std::map<std::uint64_t, Receipt> sessions;
+     Control() {
+         const auto options = implicit_layer::read_nvidia_options(directory());
+@@ -43,6 +52,7 @@ constexpr const wchar_t* positions[]{L"off", L"upper_left", L"upper_right", L"lo
+ Snapshot snapshot() {
+     auto& c = control(); std::scoped_lock lock(c.mutex);
+     Snapshot s; s.desired = c.settings; s.revision = c.revision;
++    s.occlusion_aware = c.occlusion_aware; // DCS Control (0066)
+     s.sessions = static_cast<unsigned>(c.sessions.size());
+     for (auto& [id, r] : c.sessions) {
+         if (r.revision != c.revision) ++s.pending;
+@@ -56,7 +66,9 @@ bool request(Settings s) {
+     if (s.backend < 0 || s.backend > 1 || s.preset < 0 || s.preset > 2 ||
+         s.scale < 0 || s.scale > 2 || s.motion_vectors < 0 || s.motion_vectors > 1 ||
+         s.frame_generation != 0) return false;
+-    auto& c = control(); std::scoped_lock lock(c.mutex);
++    auto& c = control();
++    std::scoped_lock io_lock(c.io_mutex); // DCS Control (0066)
++    std::scoped_lock lock(c.mutex);
+     const auto old = c.settings;
+     bool ok = true;
+     // Do not rewrite diagnostics, comments, or unrelated configuration.
+@@ -85,6 +97,140 @@ int overlay_setting() {
+     return 2;
+ }
+ bool set_overlay_setting(int position) { return position >= 0 && position < 5 && write(L"overlay", L"position", positions[position]); }
++
++// DCS Control (0066).
++LiveAdoption adopt_live(const LiveFlow& flow, bool first) {
++    LiveAdoption result;
++    if (flow.preset < 0 || flow.preset > 2 || flow.scale < 0 || flow.scale > 2 || flow.occlusion_aware > 1U)
++        return result;
++    auto& c = control(); std::scoped_lock lock(c.mutex);
++    result.before = {c.settings.preset, c.settings.scale, c.settings.backward,
++        c.occlusion_aware >= 0 || !first ? static_cast<std::uint32_t>(std::max(c.occlusion_aware, 0))
++                                         : flow.occlusion_aware};
++    result.after = flow;
++    if (result.before.preset != flow.preset) result.keys |= kLivePreset;
++    if (result.before.scale != flow.scale) result.keys |= kLiveScale;
++    if (result.before.backward != flow.backward) result.keys |= kLiveBidirectional;
++    if (result.before.occlusion_aware != flow.occlusion_aware) result.keys |= kLiveOcclusion;
++    c.occlusion_aware = static_cast<std::int32_t>(flow.occlusion_aware);
++    if (result.keys != 0) {
++        c.settings.preset = flow.preset;
++        c.settings.scale = flow.scale;
++        c.settings.backward = flow.backward;
++        ++c.revision;
++    }
++    result.revision = c.revision;
++    return result;
++}
++
++std::uint64_t live_flow_code(const LiveFlow& flow) noexcept {
++    constexpr std::uint64_t percent[]{100, 75, 50};
++    return static_cast<std::uint64_t>(flow.preset & 0xFF) |
++        (flow.scale >= 0 && flow.scale <= 2 ? percent[flow.scale] << 8 : 0ULL) |
++        (flow.backward ? 1ULL << 16 : 0ULL) |
++        (static_cast<std::uint64_t>(flow.occlusion_aware & 0xFFU) << 24);
++}
++
++namespace {
++LiveFlow live_flow_of(const implicit_layer::OfxrSectionValues& values) noexcept {
++    return {static_cast<int>(values.nvidia.preset), static_cast<int>(values.nvidia.input_scale),
++        values.nvidia.bidirectional, values.occlusion_aware};
++}
++}
++
++struct LiveIniWatcher::Impl {
++    std::filesystem::path directory, ini;
++    std::mutex mutex;
++    std::condition_variable wake;
++    bool stop{};
++    std::thread thread;
++    // The poll thread's own, after the constructor.
++    bool stamped{};
++    FILETIME last_write{};
++    std::uint64_t last_size{};
++    bool baseline_known{};
++    std::array<std::wstring, implicit_layer::kOfxrStartOnlyKeys.size()> baseline{};
++    std::uint32_t start_only_logged{};
++
++    void poll(bool first) noexcept {
++        try {
++            WIN32_FILE_ATTRIBUTE_DATA data{};
++            if (!GetFileAttributesExW(ini.c_str(), GetFileExInfoStandard, &data)) return;
++            const std::uint64_t size =
++                (static_cast<std::uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
++            if (stamped && CompareFileTime(&data.ftLastWriteTime, &last_write) == 0 && size == last_size) return;
++            auto& c = control();
++            implicit_layer::OfxrSectionValues values;
++            LiveAdoption adoption;
++            {
++                std::scoped_lock io_lock(c.io_mutex);
++                values = implicit_layer::read_ofxr_section(directory);
++                // No section (a file being written in place): read again next time.
++                if (!values.found) return;
++                adoption = adopt_live(live_flow_of(values), first);
++            }
++            stamped = true;
++            last_write = data.ftLastWriteTime;
++            last_size = size;
++            if (adoption.keys != 0) {
++                // live_settings result=1 (bridge_flight_logger.hpp).
++                bridge_flight_logger().event(BridgeFlightOperation::live_settings, 1,
++                    live_flow_code(adoption.after), live_flow_code(adoption.before),
++                    static_cast<std::uint64_t>(adoption.keys) | (adoption.revision << 32));
++            }
++            if (!baseline_known) {
++                baseline = values.start_only;
++                baseline_known = true;
++                return;
++            }
++            std::uint32_t differing = 0;
++            for (std::size_t i = 0; i < baseline.size(); ++i) {
++                if (_wcsicmp(baseline[i].c_str(), values.start_only[i].c_str()) != 0) differing |= 1U << i;
++            }
++            if (differing != start_only_logged) {
++                // live_settings result=2 (bridge_flight_logger.hpp).
++                start_only_logged = differing;
++                bridge_flight_logger().event(BridgeFlightOperation::live_settings, 2, 0, 0, differing);
++            }
++        } catch (...) {
++        }
++    }
++
++    void run() noexcept {
++        std::unique_lock lock(mutex);
++        while (!wake.wait_for(lock, std::chrono::milliseconds(250), [this] { return stop; })) {
++            lock.unlock();
++            poll(false);
++            lock.lock();
++        }
++    }
++};
++
++LiveIniWatcher::LiveIniWatcher(std::filesystem::path module_directory) {
++    try {
++        if (module_directory.empty()) return;
++        auto impl = std::make_unique<Impl>();
++        impl->directory = std::move(module_directory);
++        impl->ini = impl->directory / L"ofxr_bridge.ini";
++        // The values as the session starts (and, in a later session of the
++        // same process, what changed since the first one).
++        impl->poll(true);
++        impl->thread = std::thread([raw = impl.get()] { raw->run(); });
++        impl_ = std::move(impl);
++    } catch (...) {
++        impl_.reset(); // no thread: the session keeps its start values
++    }
++}
++
++LiveIniWatcher::~LiveIniWatcher() {
++    if (!impl_) return;
++    {
++        std::scoped_lock lock(impl_->mutex);
++        impl_->stop = true;
++    }
++    impl_->wake.notify_all();
++    if (impl_->thread.joinable()) impl_->thread.join();
++}
+ }
+ 
+ // Private, versioned POD ABI for the combined-module host regression harness.
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -580,6 +580,91 @@ ConfiguredNvidiaOptions read_nvidia_options(
+     return options;
+ }
+ 
++// DCS Control (0066).
++namespace {
++
++[[nodiscard]] std::wstring_view trim_profile_text(std::wstring_view text) noexcept {
++    while (!text.empty() && (text.front() == L' ' || text.front() == L'\t')) text.remove_prefix(1);
++    while (!text.empty() && (text.back() == L' ' || text.back() == L'\t' || text.back() == L'\r'))
++        text.remove_suffix(1);
++    return text;
++}
++
++// As GetPrivateProfileIntW: the leading decimal number, 0 without one or below
++// zero, the fallback for a missing key.
++[[nodiscard]] UINT profile_int(const std::wstring* value, UINT fallback) noexcept {
++    if (value == nullptr) return fallback;
++    const wchar_t* text = value->c_str();
++    wchar_t* end = nullptr;
++    const long parsed = std::wcstol(text, &end, 10);
++    return end == text || parsed < 0 ? 0U : static_cast<UINT>(parsed);
++}
++
++} // namespace
++
++OfxrSectionValues parse_ofxr_section(std::wstring_view section) {
++    OfxrSectionValues values;
++    std::vector<std::pair<std::wstring, std::wstring>> pairs;
++    while (!section.empty()) {
++        const std::size_t nul = section.find(L'\0');
++        const std::wstring_view line = trim_profile_text(section.substr(0, nul));
++        section.remove_prefix(nul == std::wstring_view::npos ? section.size() : nul + 1);
++        if (line.empty() || line.front() == L';' || line.front() == L'#') continue;
++        const std::size_t equals = line.find(L'=');
++        if (equals == std::wstring_view::npos) continue;
++        const std::wstring_view key = trim_profile_text(line.substr(0, equals));
++        std::wstring_view value = trim_profile_text(line.substr(equals + 1));
++        if (value.size() >= 2 && (value.front() == L'"' || value.front() == L'\'') &&
++            value.back() == value.front()) {
++            value = value.substr(1, value.size() - 2);
++        }
++        if (key.empty()) continue;
++        values.found = true;
++        pairs.emplace_back(std::wstring(key), std::wstring(value));
++    }
++    const auto find = [&](const wchar_t* name) -> const std::wstring* {
++        for (const auto& [key, value] : pairs) {
++            if (_wcsicmp(key.c_str(), name) == 0) return &value; // the first, as the API
++        }
++        return nullptr;
++    };
++    if (const auto* preset = find(L"nvidia_preset")) {
++        if (_wcsicmp(preset->c_str(), L"slow") == 0) {
++            values.nvidia.preset = ConfiguredNvidiaPerformancePreset::slow;
++        } else if (_wcsicmp(preset->c_str(), L"fast") == 0) {
++            values.nvidia.preset = ConfiguredNvidiaPerformancePreset::fast;
++        }
++    }
++    const UINT input_scale = profile_int(find(L"nvidia_input_scale"), 50);
++    values.nvidia.input_scale = input_scale == 75
++        ? ConfiguredNvidiaInputScale::three_quarter
++        : input_scale == 50 ? ConfiguredNvidiaInputScale::half : ConfiguredNvidiaInputScale::full;
++    values.nvidia.bidirectional = profile_int(find(L"nvidia_bidirectional"), 0) != 0;
++    const UINT occlusion = profile_int(find(L"nvidia_occlusion_aware"), 0);
++    values.occlusion_aware = occlusion <= 1U ? occlusion : 0U; // as read_nvidia_occlusion_aware
++    for (std::size_t i = 0; i < kOfxrStartOnlyKeys.size(); ++i) {
++        if (const auto* value = find(kOfxrStartOnlyKeys[i])) values.start_only[i] = *value;
++    }
++    return values;
++}
++
++OfxrSectionValues read_ofxr_section(const std::filesystem::path& module_directory) noexcept {
++    try {
++        if (module_directory.empty()) return {};
++        const auto ini_path = module_directory / L"ofxr_bridge.ini";
++        // The API's limit for a section is 32767 characters; DCS Control's is
++        // under 4 KB. A buffer it filled (size - 2) may have lost lines: then
++        // nothing is taken.
++        std::vector<wchar_t> buffer(32767);
++        const DWORD length = GetPrivateProfileSectionW(
++            L"ofxr", buffer.data(), static_cast<DWORD>(buffer.size()), ini_path.c_str());
++        if (length == 0 || length >= buffer.size() - 2) return {};
++        return parse_ofxr_section(std::wstring_view(buffer.data(), length));
++    } catch (...) {
++        return {};
++    }
++}
++
+ bool register_manifest(
+     const std::filesystem::path& manifest,
+     RegistryScope scope,
+diff --git a/src/layer/bridge_flight_logger.cpp b/src/layer/bridge_flight_logger.cpp
+--- a/src/layer/bridge_flight_logger.cpp
++++ b/src/layer/bridge_flight_logger.cpp
+@@ -130,6 +130,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
+         return "frame_hold";
+     case BridgeFlightOperation::slow_step: // DCS Control (0050)
+         return "slow_step";
++    case BridgeFlightOperation::live_settings: // DCS Control (0066)
++        return "live_settings";
+     case BridgeFlightOperation::synthesis_frame_start_wait:
+         return "synthesis_frame_start_wait";
+     case BridgeFlightOperation::embedded_configuration: return "embedded_configuration";
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1170,6 +1170,7 @@ struct SessionState {
+         // Its thread reports into adaptive_controller; stop it first.
+         readiness_probe.reset();
+         gpu_stats.reset(); // DCS VR Control (0007)
++        live_ini.reset(); // DCS Control (0066): its thread stopped and joined
+         xrfg::embedded::detach(control_id);
+         if (presenter_pace_timer != nullptr) {
+             CloseHandle(presenter_pace_timer);
+@@ -1192,6 +1193,9 @@ struct SessionState {
+     std::shared_ptr<Dispatch> dispatch;
+     xrfg::implicit_layer::ManualArmControl manual_control;
+     std::uint64_t control_id{xrfg::embedded::attach()};
++    // DCS Control (0066): follows ofxr_bridge.ini's optical flow keys while
++    // the session runs (made at xrCreateSession, before the first snapshot).
++    std::unique_ptr<xrfg::embedded::LiveIniWatcher> live_ini;
+     std::uint64_t control_revision{}; // frame_call_mutex
+     bool control_reconfigure_required{};
+     std::atomic<bool> menu_enabled{true};
+@@ -4820,7 +4824,10 @@ void retire_async_arm(const std::shared_ptr<SwapchainState>& state) noexcept {
+                 inputs.nvidia_options.preset != session->nvidia_options.preset ||
+                 inputs.nvidia_options.input_scale != session->nvidia_options.input_scale ||
+                 inputs.nvidia_options.bidirectional !=
+-                    session->nvidia_options.bidirectional) {
++                    session->nvidia_options.bidirectional ||
++                // DCS Control (0066): and the live one.
++                inputs.nvidia_options.occlusion_aware !=
++                    session->nvidia_options.occlusion_aware) {
+                 taken = SUCCEEDED(generation->synthesizer->reconfigure(
+                     wanted, session->nvidia_options));
+             }
+@@ -5911,6 +5918,15 @@ XrResult layer_create_session_impl(
+     }
+ 
+     auto state = std::make_shared<SessionState>(dispatch);
++    // DCS Control (0066): the ini's optical flow keys as they are now (a
++    // later session in the same process included: the control's settings
++    // were read once, at the first), then followed on the watcher's thread.
++    // Made before the session reads the rest of the ini below, so a
++    // start-only key's baseline is the one this session starts with.
++    try {
++        state->live_ini = std::make_unique<xrfg::embedded::LiveIniWatcher>(current_layer_directory());
++    } catch (...) {
++    }
+     const auto initial_control = xrfg::embedded::snapshot();
+     state->optical_flow_backend = static_cast<xrfg::D3D12OpticalFlowBackend>(initial_control.desired.backend);
+     state->nvidia_options = {
+@@ -15285,7 +15301,10 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
+     const xrfg::D3D12NvidiaOpticalFlowOptions options{
+         static_cast<xrfg::D3D12NvidiaPerformancePreset>(control.desired.preset),
+         static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward,
+-        state->nvidia_options.occlusion_aware, // DCS Control (0030): the session's
++        // DCS Control (0030): the session's; DCS Control (0066): or the ini's,
++        // once taken in live (a shader flag only: the rebuild below takes it).
++        control.occlusion_aware >= 0 ? static_cast<std::uint32_t>(control.occlusion_aware)
++                                     : state->nvidia_options.occlusion_aware,
+         state->nvidia_options.cockpit_mask, // DCS Control (0031): the session's
+         state->nvidia_options.cockpit_parallax_limit_pixels, // DCS Control (0034): the session's
+         state->nvidia_options.cockpit_depth, // DCS Control (0035): the session's
+@@ -15294,7 +15313,8 @@ void apply_embedded_control(const std::shared_ptr<SessionState>& state) {
+     const bool changed = state->control_reconfigure_required || backend != state->optical_flow_backend ||
+         options.preset != state->nvidia_options.preset ||
+         options.input_scale != state->nvidia_options.input_scale ||
+-        options.bidirectional != state->nvidia_options.bidirectional;
++        options.bidirectional != state->nvidia_options.bidirectional ||
++        options.occlusion_aware != state->nvidia_options.occlusion_aware; // DCS Control (0066)
+     // Enumeration is excluded by frame_call_mutex, so newly created contexts
+     // also see this tuple. A partial failure remains bypass, never mixed flow.
+     state->optical_flow_backend = backend;
+diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
+--- a/tests/cockpit_mask_tests.cpp
++++ b/tests/cockpit_mask_tests.cpp
+@@ -1863,6 +1863,89 @@ void test_ini() {
+     std::cout << "cockpit mask: [ofxr] cockpit_mask and nvidia_occlusion_aware=1 read\n";
+ }
+ 
++// DCS Control (0066): the [ofxr] section in one read (the live watcher's)
++// gives what the per-key readers give for the same file, ANSI or UTF-16 with
++// a BOM (DCS Control's), comments and spacing included; a missing file or
++// section gives nothing to take in; start-only keys come back as their text.
++void test_live_ini_section() {
++    using xrfg::implicit_layer::ConfiguredNvidiaInputScale;
++    using xrfg::implicit_layer::ConfiguredNvidiaPerformancePreset;
++    const auto directory = std::filesystem::temp_directory_path() /
++        (L"ofxr-live-ini-" + std::to_wstring(GetCurrentProcessId()));
++    std::filesystem::create_directories(directory);
++    const auto path = directory / L"ofxr_bridge.ini";
++    const auto write = [&](const char* text) { std::ofstream(path, std::ios::trunc) << text; };
++    const auto write_utf16 = [&](const wchar_t* text) {
++        std::ofstream stream(path, std::ios::binary | std::ios::trunc);
++        stream.write("\xFF\xFE", 2);
++        stream.write(reinterpret_cast<const char*>(text),
++            static_cast<std::streamsize>(std::wcslen(text) * sizeof(wchar_t)));
++    };
++    const auto same_as_readers = [&](const char* what) {
++        const auto section = xrfg::implicit_layer::read_ofxr_section(directory);
++        const auto options = xrfg::implicit_layer::read_nvidia_options(directory);
++        require(section.found, what);
++        require(section.nvidia.preset == options.preset && section.nvidia.input_scale == options.input_scale &&
++                section.nvidia.bidirectional == options.bidirectional &&
++                section.occlusion_aware == xrfg::implicit_layer::read_nvidia_occlusion_aware(directory),
++            what);
++        return section;
++    };
++    std::error_code ignored;
++    std::filesystem::remove(path, ignored);
++    require(!xrfg::implicit_layer::read_ofxr_section(directory).found, "live ini: a missing file gives nothing");
++    require(!xrfg::implicit_layer::read_ofxr_section({}).found, "live ini: no directory gives nothing");
++    write("[overlay]\nposition=off\n");
++    require(!xrfg::implicit_layer::read_ofxr_section(directory).found, "live ini: no [ofxr] section gives nothing");
++    // DCS Control's layout: comments between the keys, one naming another value.
++    write("[ofxr]\nenabled=1\n; nvidia_preset=slow nvidia_input_scale=100\nbackend=nvidia\nnvidia_preset=fast\n"
++          "nvidia_input_scale=75\nnvidia_bidirectional=1\nnvidia_occlusion_aware=0\nhud_symbology=1\n"
++          "[diagnostics]\nlogging_enabled=1\n");
++    auto section = same_as_readers("live ini: as the readers (fast, 75, bidirectional)");
++    require(section.nvidia.preset == ConfiguredNvidiaPerformancePreset::fast &&
++            section.nvidia.input_scale == ConfiguredNvidiaInputScale::three_quarter && section.nvidia.bidirectional &&
++            section.occlusion_aware == 0,
++        "live ini: fast, 75, bidirectional, occlusion 0");
++    require(section.start_only[0] == L"1" && section.start_only[1] == L"nvidia" && section.start_only[8] == L"1" &&
++            section.start_only[2].empty(),
++        "live ini: start-only keys as text, missing ones empty");
++    // Spacing, case, an unusable scale (full, as the reader), occlusion 1.
++    write("[OFXR]\n  NVIDIA_PRESET = Slow \nnvidia_input_scale = 60\nnvidia_bidirectional=0\nnvidia_occlusion_aware=1\n");
++    section = same_as_readers("live ini: as the readers (spacing, 60)");
++    require(section.nvidia.preset == ConfiguredNvidiaPerformancePreset::slow &&
++            section.nvidia.input_scale == ConfiguredNvidiaInputScale::full && section.occlusion_aware == 1,
++        "live ini: slow, an unusable scale is full, occlusion 1");
++    // Missing keys: the readers' defaults (medium, 50, one-way, 0); occlusion 2 is 0.
++    write("[ofxr]\nnvidia_occlusion_aware=2\nnvidia_input_scale=x\n");
++    section = same_as_readers("live ini: as the readers (defaults)");
++    require(section.nvidia.preset == ConfiguredNvidiaPerformancePreset::medium &&
++            section.nvidia.input_scale == ConfiguredNvidiaInputScale::full && !section.nvidia.bidirectional &&
++            section.occlusion_aware == 0,
++        "live ini: defaults; a text scale reads 0 (full), occlusion 2 reads 0");
++    write("[ofxr]\nenabled=1\n");
++    section = same_as_readers("live ini: as the readers (no flow keys)");
++    require(section.nvidia.input_scale == ConfiguredNvidiaInputScale::half, "live ini: a missing scale is 50");
++    // UTF-16 LE with a BOM, as DCS Control writes it.
++    write_utf16(L"[ofxr]\r\nbackend=fidelityfx\r\nnvidia_preset=medium\r\nnvidia_input_scale=50\r\n"
++                L"nvidia_bidirectional=1\r\nnvidia_occlusion_aware=1\r\ncursor_templates=C:\\DCS W\u00e9rld\\bin\r\n");
++    section = same_as_readers("live ini: as the readers (UTF-16)");
++    require(section.nvidia.input_scale == ConfiguredNvidiaInputScale::half && section.nvidia.bidirectional &&
++            section.occlusion_aware == 1 && section.start_only[1] == L"fidelityfx" &&
++            section.start_only[13] == L"C:\\DCS W\u00e9rld\\bin",
++        "live ini: UTF-16 values, a non-ASCII path kept");
++    // The parser alone: the first of a repeated key, quotes, '#' comments.
++    static constexpr wchar_t buffer[] = L"nvidia_preset=fast\0nvidia_preset=slow\0# nvidia_input_scale=75\0"
++                                        L"nvidia_input_scale=\"75\"\0backend='nvidia'\0=x\0novalue\0";
++    section = xrfg::implicit_layer::parse_ofxr_section(std::wstring_view(buffer, std::size(buffer) - 1));
++    require(section.found && section.nvidia.preset == ConfiguredNvidiaPerformancePreset::fast &&
++            section.start_only[1] == L"nvidia",
++        "live ini: the first repeated key, quotes stripped");
++    require(xrfg::implicit_layer::parse_ofxr_section(std::wstring_view(L"; x=1\0", 6)).found == false,
++        "live ini: comments alone are no section");
++    std::filesystem::remove_all(directory, ignored);
++    std::cout << "cockpit mask: [ofxr] read whole for the live keys, as the readers\n";
++}
++
+ // DCS Control (0043): a mask header no longer usable retires the depth and
+ // motion sets with the mask's (not kept until the next pairing, none while
+ // the export is off), each kept while a copy may still read it, and dropped
+@@ -2000,6 +2083,7 @@ void test_inactive_header_keeps_sets(Gpu& gpu) {
+ int main() {
+     try {
+         test_ini();
++        test_live_ini_section(); // DCS Control (0066)
+         test_parallax_and_focus_math(); // DCS Control (0034)
+         test_rects_and_motion_backoff(); // DCS Control (0040)
+         Gpu gpu;
+diff --git a/tests/layer_manual_disarm_tests.cpp b/tests/layer_manual_disarm_tests.cpp
+--- a/tests/layer_manual_disarm_tests.cpp
++++ b/tests/layer_manual_disarm_tests.cpp
+@@ -2,6 +2,7 @@
+ #include "layer_call_chain.cpp"
+ #undef main
+ #include "xrfg/implicit_layer.hpp"
++#include "xrfg/provider_api.hpp" // DCS Control (0066): the control snapshot
+ #include <filesystem>
+ 
+ // Read the runtime-facing D3D11 textures, after publication/retirement, not the
+@@ -38,7 +39,11 @@ std::array<std::size_t, 2> marker_pixels(
+ int main(int argc, char** argv) {
+     if (argc != 3 && argc != 4) return 1;
+     const std::string mode = argv[2];
+-    const std::string marker_mode = argc == 4 ? argv[3] : "";
++    // DCS Control (0066): "live-ini" rewrites ofxr_bridge.ini's optical flow
++    // keys (and the start-only backend) while generation runs, then disarms
++    // as the other modes do.
++    const bool live_ini = argc == 4 && std::string(argv[3]) == "live-ini";
++    const std::string marker_mode = argc == 4 && !live_ini ? argv[3] : "";
+     if (!marker_mode.empty() && (mode != "d3d11" ||
+         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
+     g_flight_simulator_mode = mode == "flight";
+@@ -73,7 +78,7 @@ int main(int argc, char** argv) {
+         {
+             std::ofstream ini(root / L"ofxr_bridge.ini");
+             ini << "[ofxr]\nbackend=fidelityfx\ncontrol_event=" << ascii_control
+-                << "\n[diagnostics]\nlogging_enabled=" << (marker_mode == "on" || marker_mode == "hidden" ? 1 : 0)
++                << "\n[diagnostics]\nlogging_enabled=" << (marker_mode == "on" || marker_mode == "hidden" || live_ini ? 1 : 0)
+                 << "\n[overlay]\nposition=" << (!marker_mode.empty() && marker_mode != "hidden" ? "upper_right" : "off") << '\n';
+         }
+         require(g_d3d11_interop_mode ? initialize_d3d11() : initialize_d3d12(), "initialize GPU fixture");
+@@ -217,6 +222,80 @@ int main(int argc, char** argv) {
+         require(g_synthetic_release_calls.load() > 0, "generation active before Disarm");
+         if (g_steamvr_presenter_mode || g_flight_simulator_mode)
+             require(current.predictedDisplayPeriod == kFakeDisplayPeriod * 2, "presenter active before Disarm");
++        std::string live_ini_written; // DCS Control (0066)
++        if (live_ini) {
++            // As DCS Control writes it while DCS runs: a whole new file renamed
++            // over the old. The flow keys change, and backend (start-only),
++            // which must stay FidelityFX (WARP has no NVIDIA flow anyway).
++            using SnapshotFunction = int (*)(OFXR_ControlSnapshotV1*);
++            const auto control_snapshot =
++                reinterpret_cast<SnapshotFunction>(GetProcAddress(module, "OFXR_GetControlSnapshotV1"));
++            require(control_snapshot != nullptr, "control snapshot export");
++            OFXR_ControlSnapshotV1 before{};
++            require(control_snapshot(&before) != 0, "control snapshot before");
++            require(before.desired.preset == 1 && before.desired.scale == 2 && before.desired.backward == 0 &&
++                    before.desired.backend == 0 && before.revision == 1,
++                "live ini: the start values (medium, 50, one-way, FidelityFX)");
++            {
++                std::ostringstream text;
++                text << "[ofxr]\nbackend=nvidia\ncontrol_event=" << ascii_control
++                     << "\nnvidia_preset=fast\nnvidia_input_scale=75\nnvidia_bidirectional=1\n"
++                        "nvidia_occlusion_aware=1\n[diagnostics]\nlogging_enabled=1\n[overlay]\nposition=off\n";
++                live_ini_written = text.str();
++                const auto temporary = root / L"ofxr_bridge.ini.tmp";
++                { std::ofstream(temporary, std::ios::binary | std::ios::trunc) << live_ini_written; }
++                require(MoveFileExW(temporary.c_str(), (root / L"ofxr_bridge.ini").c_str(),
++                            MOVEFILE_REPLACE_EXISTING) != FALSE,
++                    "live ini: replace the ini");
++            }
++            const auto synthetic_before_live = g_synthetic_release_calls.load();
++            OFXR_ControlSnapshotV1 after{};
++            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
++            bool taken = false;
++            while (!taken && std::chrono::steady_clock::now() < deadline) {
++                XrFrameState frame{XR_TYPE_FRAME_STATE};
++                if (g_flight_simulator_mode) {
++                    require(XR_SUCCEEDED(begin(session, nullptr)), "live begin");
++                    capture();
++                    require(XR_SUCCEEDED(wait(session, nullptr, &frame)), "live overlapping wait");
++                    submit(current.predictedDisplayTime + kFakeDisplayPeriod);
++                    current = frame;
++                } else {
++                    require(XR_SUCCEEDED(begin(session, nullptr)), "live begin");
++                    capture(); submit(current.predictedDisplayTime);
++                    require(XR_SUCCEEDED(wait(session, nullptr, &current)), "live wait");
++                }
++                require(wait_for_queue_idle(), "live GPU retirement");
++                require(control_snapshot(&after) != 0, "control snapshot after");
++                // Taken in, and every session applied that revision.
++                taken = after.revision > before.revision && after.pending == 0;
++            }
++            require(taken, "live ini: the flow keys were taken in and applied within 5 s");
++            require(after.desired.preset == 2 && after.desired.scale == 1 && after.desired.backward == 1,
++                "live ini: fast, 75, bidirectional");
++            require(after.desired.backend == 0 && after.desired.enabled == 1, "live ini: backend is start-only");
++            require(after.errors == 0 && after.ready == 1, "live ini: the rebuild succeeded, generation on");
++            require(after.revision == before.revision + 1, "live ini: one revision for one change");
++            for (int i = 0; i < 6; ++i) {
++                if (g_flight_simulator_mode) {
++                    XrFrameState frame{XR_TYPE_FRAME_STATE};
++                    require(XR_SUCCEEDED(begin(session, nullptr)), "rebuilt begin");
++                    capture();
++                    require(XR_SUCCEEDED(wait(session, nullptr, &frame)), "rebuilt overlapping wait");
++                    submit(current.predictedDisplayTime + kFakeDisplayPeriod);
++                    current = frame;
++                } else {
++                    require(XR_SUCCEEDED(begin(session, nullptr)), "rebuilt begin");
++                    capture(); submit(current.predictedDisplayTime);
++                    require(XR_SUCCEEDED(wait(session, nullptr, &current)), "rebuilt wait");
++                }
++                require(wait_for_queue_idle(), "rebuilt GPU retirement");
++            }
++            require(g_synthetic_release_calls.load() > synthetic_before_live, "live ini: synthesis goes on after the rebuild");
++            std::ifstream read_back(root / L"ofxr_bridge.ini", std::ios::binary);
++            const std::string now((std::istreambuf_iterator<char>(read_back)), std::istreambuf_iterator<char>());
++            require(now == live_ini_written, "live ini: the layer did not write the ini");
++        }
+ #ifdef XRFG_EMBEDDED_MENU_TEST
+         using Request = int (*)(int, int, int, int, int);
+         auto menu_request = reinterpret_cast<Request>(GetProcAddress(module, "OFXR_EmbeddedRequestV1"));
+@@ -299,6 +378,35 @@ int main(int argc, char** argv) {
+     if (instance && destroy_instance) destroy_instance(instance);
+     if (module) FreeLibrary(module);
+     if (signal) CloseHandle(signal);
++    if (live_ini && result == 0) {
++        // DCS Control (0066): one live_settings record per change (the flow
++        // keys: a= new, b= old, c= keys 15 and revision 2; then the
++        // start-only backend, c=2), and the rebuild's embedded_configuration
++        // for revision 2, in the log the teardown closed.
++        std::string log;
++        std::error_code listing;
++        for (const auto& entry : std::filesystem::directory_iterator(root, listing)) {
++            if (entry.path().filename().wstring().starts_with(L"ofxr-bridge-flight-")) {
++                std::ifstream stream(entry.path(), std::ios::binary);
++                log.append(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
++            }
++        }
++        const auto count = [&](const std::string& needle) {
++            std::size_t found = 0;
++            for (auto at = log.find(needle); at != std::string::npos; at = log.find(needle, at + 1)) ++found;
++            return found;
++        };
++        const std::string flow = " op=live_settings result=1 dur_us=0 a=" +
++            std::to_string(2ULL | (75ULL << 8) | (1ULL << 16) | (1ULL << 24)) +
++            " b=" + std::to_string(1ULL | (50ULL << 8)) + " c=" + std::to_string(15ULL | (2ULL << 32)) + "\r\n";
++        if (count(flow) != 1 || count(" op=live_settings result=1 ") != 1 ||
++            count(" op=live_settings result=2 dur_us=0 a=0 b=0 c=2\r\n") != 1 ||
++            count(" op=live_settings result=2 ") != 1 ||
++            count(" op=embedded_configuration result=0 dur_us=0 a=2 ") != 1) {
++            std::cerr << mode << ": live ini: the flight log lacks the live_settings records\n" << log << '\n';
++            result = 1;
++        }
++    }
+     std::error_code ignored;
+     if (root.is_absolute() && root.filename().wstring().starts_with(L"ofxr-disarm-")) std::filesystem::remove_all(root, ignored);
+     if (!result) std::cout << "Live Disarm: " << mode << " passed\n";

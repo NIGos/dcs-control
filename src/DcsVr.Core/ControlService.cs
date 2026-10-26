@@ -460,10 +460,13 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
 
     /// <summary>
     /// Live mode: writes now, also while DCS runs, the settings its components re-read in flight (<see cref="LiveSettings"/>).
-    /// The draft is planned exactly as Launch DCS plans it; of the planned files only DcsQvCull.ini and PupilShift.ini are
-    /// written, and each only when every key that changes in it is applied live by its component. Everything else waits
-    /// for the next launch: the applied profile.json stays as it is, so Launch DCS still applies the remaining changes
-    /// (and sees a draft set back to the applied values, since the generated files then differ from the recorded hashes).
+    /// The draft is planned exactly as Launch DCS plans it; of the planned files only the live files are written
+    /// (DcsQvCull.ini, PupilShift.ini and, for a profile applied by a current app, Quad Views' settings.cfg, OFXR's
+    /// ofxr_bridge.ini and Cheeky's INI), each only when every key that changes in it is applied live by its component.
+    /// Everything else waits for the next launch: the applied profile.json stays as it is, so Launch DCS still applies the
+    /// remaining changes (and sees a draft set back to the applied values, since the generated files then differ from the
+    /// recorded hashes). Cheeky writes its INI itself: there only the owned values count, only the changed keys are set in
+    /// the file as it is, and the result lists the write for <see cref="RecheckLive"/>.
     /// Refused without an applied profile of the same id and DCS files.
     /// </summary>
     public LiveApplyResult ApplyLive(VrProfile draft, InventorySnapshot inventory)
@@ -472,12 +475,14 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         if (applied is null || applied.Journal.ProfileId != draft.Id || !SamePaths(inventory, applied))
             throw new InvalidOperationException("Launch DCS once to apply this profile; its changes wait for the next launch.");
         var journal = applied.Journal;
-        // DCS may run: the plan is built as for Launch, without the "close DCS" check (nothing outside the two files is written).
+        var current = LiveSettings.Current(journal);
+        // DCS may run: the plan is built as for Launch, without the "close DCS" check (nothing outside the live files is written).
         var live = inventory with { DcsRunning = false };
         var plan = Preview(draft, live);
         var atStart = IniFile.Parse(ConfigurationWriters.DcsQvCull(applied.Profile.ForLaunch()));
         var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var updates = new List<(string Path, byte[] Content, string ExpectedSha256)>();
+        var updates = new List<LiveFileUpdate>();
+        var rechecks = new List<LiveRecheck>();
         foreach (var name in LiveSettings.Files)
         {
             var wanted = plan.Files.FirstOrDefault(f => Path.GetFileName(f.Path).Equals(name, StringComparison.OrdinalIgnoreCase));
@@ -485,39 +490,84 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             if (wanted is null && entry is null) continue;
             // The component is turned on or off, or moved: only a launch can do that.
             if (wanted is null || entry is null || !Path.GetFullPath(wanted.Path).Equals(Path.GetFullPath(entry.Path), StringComparison.OrdinalIgnoreCase)) { blocked.Add(name); continue; }
-            byte[] current;
-            try { current = File.ReadAllBytes(entry.Path); }
+            byte[] bytes;
+            try { bytes = File.ReadAllBytes(entry.Path); }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { blocked.Add(name); continue; }
-            // Changed outside DCS Control: left to Launch DCS, which writes it again.
-            if (Hashing.BytesSha256(current) != entry.InstalledSha256) { blocked.Add(name); continue; }
-            if (current.AsSpan().SequenceEqual(wanted.Content)) continue;
-            var before = IniFile.Parse(IniFile.Decode(current)); var after = IniFile.Parse(IniFile.Decode(wanted.Content));
+            var selfWritten = LiveSettings.SelfWritten(name) && entry.IniValues is not null && wanted.IniValues is not null;
+            Dictionary<string, string> before, after;
+            if (selfWritten)
+            {
+                // Cheeky rewrites its INI (its own keys, float formatting): it is still ours while the owned values hold.
+                if (!IniFile.Matches(IniFile.Decode(bytes), entry.IniValues!)) { blocked.Add(name); continue; }
+                before = new(entry.IniValues!, StringComparer.OrdinalIgnoreCase); after = new(wanted.IniValues!, StringComparer.OrdinalIgnoreCase);
+            }
+            else
+            {
+                // Changed outside DCS Control: left to Launch DCS, which writes it again.
+                if (Hashing.BytesSha256(bytes) != entry.InstalledSha256) { blocked.Add(name); continue; }
+                if (bytes.AsSpan().SequenceEqual(wanted.Content)) continue;
+                before = IniFile.Parse(IniFile.Decode(bytes)); after = IniFile.Parse(IniFile.Decode(wanted.Content));
+            }
             var changed = before.Keys.Union(after.Keys, StringComparer.OrdinalIgnoreCase).Where(k => before.GetValueOrDefault(k) != after.GetValueOrDefault(k)).ToArray();
             // Only comments differ: the values are the same, the text is Launch DCS's to rewrite.
             if (changed.Length == 0) continue;
-            if (changed.Any(k => !LiveSettings.IsLiveKey(name, k, after.GetValueOrDefault(k), name == LiveSettings.EngineFile ? atStart.GetValueOrDefault(k) : null))) { blocked.Add(name); continue; }
-            updates.Add((entry.Path, wanted.Content, entry.InstalledSha256));
+            if (!LiveSettings.Reloads(name, applied.Profile, journal)
+                || changed.Any(k => !LiveSettings.IsLiveKey(name, k, after.GetValueOrDefault(k), name == LiveSettings.EngineFile ? atStart.GetValueOrDefault(k) : null, current))) { blocked.Add(name); continue; }
+            if (!selfWritten) { updates.Add(new(entry.Path, wanted.Content, entry.InstalledSha256)); continue; }
+            // Only the changed keys, in the file as it is now (Cheeky's learned calibration and formatting stay).
+            var values = changed.Where(after.ContainsKey).ToDictionary(k => k, k => after[k], StringComparer.OrdinalIgnoreCase);
+            updates.Add(new(entry.Path, IniFile.Encode(IniFile.SetValues(IniFile.Decode(bytes), values), bytes), Hashing.BytesSha256(bytes), after));
+            rechecks.Add(new(journal.Id, entry.Path, values));
         }
         if (updates.Count > 0) Originals.UpdateInstalledLive(journal.Id, updates);
 
         // Which changed settings are in effect now: live ones whose files are in line with the draft, unless they also
-        // change a file that is not live (then they wait, at least in part).
+        // change a file that is not written live (then they wait, at least in part).
         var changedSettings = ChangedSettings(draft, applied.Profile);
         var available = LiveSettings.AvailableFields(applied.Profile, journal).ToHashSet(StringComparer.Ordinal);
         var inEffect = changedSettings.Where(p => available.Contains(p) && LiveSettings.Find(p)!.In.All(f => !blocked.Contains(f))).ToList();
-        var planned = NonLiveSignature(plan);
-        if (inEffect.Count > 0 && !SameSignature(planned, InstalledSignature(journal)))
+        var planned = NonLiveSignature(plan, blocked);
+        if (inEffect.Count > 0 && !SameSignature(planned, InstalledSignature(journal, blocked)))
         {
-            var without = TryNonLiveSignature(Revert(draft, applied.Profile, inEffect), live);
+            var without = TryNonLiveSignature(Revert(draft, applied.Profile, inEffect), live, blocked);
             if (without is null) inEffect.Clear();
             else if (!SameSignature(without, planned))
-                inEffect = [.. inEffect.Where(p => TryNonLiveSignature(Revert(draft, applied.Profile, inEffect.Where(o => o != p)), live) is { } one && SameSignature(one, without))];
+                inEffect = [.. inEffect.Where(p => TryNonLiveSignature(Revert(draft, applied.Profile, inEffect.Where(o => o != p)), live, blocked) is { } one && SameSignature(one, without))];
         }
         var waiting = changedSettings.Where(p => !inEffect.Contains(p)).ToArray();
         var written = updates.Select(u => u.Path).ToArray();
         var message = (written.Length > 0 ? "Applied live: " + string.Join(" and ", written.Select(Path.GetFileName)) + " updated." : inEffect.Count > 0 ? "Already in effect." : "Nothing applied live.")
             + (waiting.Length > 0 ? $" {waiting.Length} {(waiting.Length == 1 ? "setting waits" : "settings wait")} for the next launch." : "");
-        return new(inEffect, waiting, written, message);
+        return new(inEffect, waiting, written, message, rechecks);
+    }
+
+    /// <summary>
+    /// Live mode, <see cref="LiveSettings.RecheckDelay"/> after a write to Cheeky's INI (<see cref="LiveApplyResult.Rechecks"/>):
+    /// Cheeky saves its INI itself, and a save that raced the write drops a value. Kept: the values are there, the record
+    /// follows the file. Otherwise they are written once more (<paramref name="rewrite"/>) and the caller checks once
+    /// again without rewriting; a value lost twice is left to the next launch. Never a loop against Cheeky.
+    /// </summary>
+    public LiveRecheckOutcome RecheckLive(LiveRecheck check, bool rewrite = true) => Originals.RecheckInstalledLive(check, rewrite);
+
+    /// <summary>Runs <see cref="RecheckLive"/> for each write after <see cref="LiveSettings.RecheckDelay"/>, and once more
+    /// without rewriting after a rewrite. <paramref name="delay"/> waits (tests pass one that does not).</summary>
+    public async Task<IReadOnlyList<LiveRecheckOutcome>> RecheckLiveAsync(IReadOnlyList<LiveRecheck>? checks, Func<TimeSpan, Task>? delay = null)
+    {
+        var outcomes = new List<LiveRecheckOutcome>();
+        if (checks is not { Count: > 0 }) return outcomes;
+        delay ??= Task.Delay;
+        await delay(LiveSettings.RecheckDelay).ConfigureAwait(false);
+        foreach (var check in checks)
+        {
+            var outcome = RecheckLive(check);
+            if (outcome == LiveRecheckOutcome.Rewritten)
+            {
+                await delay(LiveSettings.RecheckDelay).ConfigureAwait(false);
+                if (RecheckLive(check, rewrite: false) == LiveRecheckOutcome.Lost) outcome = LiveRecheckOutcome.Lost;
+            }
+            outcomes.Add(outcome);
+        }
+        return outcomes;
     }
 
     /// <summary>The profile properties (camelCase) in which <paramref name="draft"/> differs from <paramref name="applied"/>;
@@ -544,11 +594,13 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     /// <summary>The planned files Live mode never writes, each with what decides it (the owned options.lua settings, a
     /// component's owned INI values, otherwise the bytes): profile.json and pimax-fovea.json are left out (Launch DCS
     /// writes them anyway), as are the live files.</summary>
-    private static Dictionary<string, string> NonLiveSignature(ApplyPlan plan) => Signature(plan.Files.Select(f => (f.Path, f.LuaChanges, f.IniValues, Hashing.BytesSha256(f.Content))));
-    private static Dictionary<string, string> InstalledSignature(TransactionJournal journal) => Signature(journal.Entries.Select(e => (e.Path, e.LuaChanges, e.IniValues, e.InstalledSha256)));
-    private static Dictionary<string, string> Signature(IEnumerable<(string Path, IReadOnlyList<LuaValueChange>? Lua, IReadOnlyDictionary<string, string>? Ini, string Sha)> files)
+    private static Dictionary<string, string> NonLiveSignature(ApplyPlan plan, IReadOnlySet<string> blocked) => Signature(plan.Files.Select(f => (f.Path, f.LuaChanges, f.IniValues, Hashing.BytesSha256(f.Content))), blocked);
+    private static Dictionary<string, string> InstalledSignature(TransactionJournal journal, IReadOnlySet<string> blocked) => Signature(journal.Entries.Select(e => (e.Path, e.LuaChanges, e.IniValues, e.InstalledSha256)), blocked);
+    /// <summary>A live file that could not be written live (<paramref name="blocked"/>) counts like any other file: a
+    /// setting that changes it waits (Quad Views' edge blend that also turns Cheeky's edge fade on, for example).</summary>
+    private static Dictionary<string, string> Signature(IEnumerable<(string Path, IReadOnlyList<LuaValueChange>? Lua, IReadOnlyDictionary<string, string>? Ini, string Sha)> files, IReadOnlySet<string> blocked)
     {
-        var skip = new HashSet<string>(LiveSettings.Files.Append("profile.json").Append(AppliedFovea.FileName), StringComparer.OrdinalIgnoreCase);
+        var skip = new HashSet<string>(LiveSettings.Files.Where(f => !blocked.Contains(f)).Append("profile.json").Append(AppliedFovea.FileName), StringComparer.OrdinalIgnoreCase);
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (path, lua, ini, sha) in files)
         {
@@ -560,9 +612,9 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         static string? Literal(string raw) { try { return LuaOptions.NormalizeLiteral(raw); } catch (InvalidDataException) { return raw; } }
     }
     private static bool SameSignature(Dictionary<string, string> a, Dictionary<string, string> b) => a.Count == b.Count && a.All(p => b.TryGetValue(p.Key, out var v) && v == p.Value);
-    private Dictionary<string, string>? TryNonLiveSignature(VrProfile profile, InventorySnapshot inventory)
+    private Dictionary<string, string>? TryNonLiveSignature(VrProfile profile, InventorySnapshot inventory, IReadOnlySet<string> blocked)
     {
-        try { return NonLiveSignature(Preview(profile, inventory)); }
+        try { return NonLiveSignature(Preview(profile, inventory), blocked); }
         catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or System.Text.Json.JsonException) { return null; }
     }
 

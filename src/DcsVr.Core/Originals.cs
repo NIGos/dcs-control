@@ -206,7 +206,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                 foreach (var key in released) original.Settings!.Remove(key);
                 entries.Add(new() { Path = full, InstalledSha256 = Hashing.BytesSha256(bytes), PreviousSha256 = original.OriginalSha256, LuaChanges = file.LuaChanges, IniValues = file.IniValues, RuntimeLogs = file.RuntimeLogs, Root = file.Root is null ? null : System.IO.Path.GetFullPath(file.Root), Applied = true });
             }
-            baseline.Current = new() { Id = Guid.NewGuid().ToString("N"), ProfileId = plan.ProfileId, Status = "applied", Entries = entries };
+            baseline.Current = new() { Id = Guid.NewGuid().ToString("N"), ProfileId = plan.ProfileId, AppVersion = ProductInfo.Version, Status = "applied", Entries = entries };
             baseline.LastInstalled = null;
             baseline.State = "applied"; baseline.LastAction = "Applied " + plan.Description; baseline.LastActionAt = DateTimeOffset.UtcNow;
             Save(baseline);
@@ -318,7 +318,16 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
     /// <c>ExpectedSha256</c> (what it installed): an apply, a restore or an edit since the caller read them wins. Never
     /// options.lua (its settings are DCS's while it runs) and never a deleted entry.
     /// </summary>
-    public void UpdateInstalledLive(string journalId, IReadOnlyList<(string Path, byte[] Content, string ExpectedSha256)> files)
+    public void UpdateInstalledLive(string journalId, IReadOnlyList<(string Path, byte[] Content, string ExpectedSha256)> files) =>
+        UpdateInstalledLive(journalId, [.. files.Select(f => new LiveFileUpdate(f.Path, f.Content, f.ExpectedSha256))]);
+
+    /// <summary>
+    /// As above; an update with <see cref="LiveFileUpdate.OwnedValues"/> is a file its component also writes (Cheeky's
+    /// INI): <c>ExpectedSha256</c> is what the file held when the caller read it (not necessarily what was installed),
+    /// it must still hold the owned values recorded at apply time, and the record keeps exactly the given owned values
+    /// (never the component's own keys, such as its learned calibration).
+    /// </summary>
+    public void UpdateInstalledLive(string journalId, IReadOnlyList<LiveFileUpdate> files)
     {
         using var exclusive = Lock();
         var baseline = LoadCore();
@@ -331,20 +340,69 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             var full = System.IO.Path.GetFullPath(f.Path);
             var entry = current.Entries.SingleOrDefault(e => e.Path.Equals(full, StringComparison.OrdinalIgnoreCase)) ?? throw new InvalidOperationException("The applied profile does not own " + full + ".");
             if (entry.LuaChanges is not null || entry.Deleted) throw new InvalidOperationException("This file cannot be updated live: " + full);
-            if (!string.Equals(entry.InstalledSha256, f.ExpectedSha256, StringComparison.OrdinalIgnoreCase) || !File.Exists(full) || Hashing.FileSha256(full) != entry.InstalledSha256)
+            if (f.OwnedValues is not null)
+            {
+                if (entry.IniValues is null) throw new InvalidOperationException("This file has no owned values: " + full);
+                if (!File.Exists(full)) throw new IOException(full + " is missing; nothing was written live.");
+                var bytes = File.ReadAllBytes(full);
+                if (Hashing.BytesSha256(bytes) != f.ExpectedSha256 || !IniFile.Matches(IniFile.Decode(bytes), entry.IniValues))
+                    throw new IOException(full + " changed since it was read; nothing was written live.");
+            }
+            else if (!string.Equals(entry.InstalledSha256, f.ExpectedSha256, StringComparison.OrdinalIgnoreCase) || !File.Exists(full) || Hashing.FileSha256(full) != entry.InstalledSha256)
                 throw new IOException(full + " changed since it was read; nothing was written live.");
-            return (Entry: entry, f.Content);
+            return (Entry: entry, f.Content, f.OwnedValues);
         }).ToArray();
-        foreach (var (entry, content) in targets)
+        foreach (var (entry, content, owned) in targets)
         {
             PathPolicy.RejectReparsePoints(entry.Path, entry.Root);
             AtomicFile.Write(entry.Path, content);
             entry.InstalledSha256 = Hashing.BytesSha256(content);
-            if (entry.IniValues is not null) entry.IniValues = IniFile.Parse(IniFile.Decode(content));
+            if (owned is not null) entry.IniValues = new Dictionary<string, string>(owned, StringComparer.OrdinalIgnoreCase);
+            else if (entry.IniValues is not null) entry.IniValues = IniFile.Parse(IniFile.Decode(content));
             // Recorded after each file: a stop in between leaves every record matching its file.
             Save(baseline);
         }
         if (targets.Length > 0) Log("Live update of " + current.ProfileId + ": " + string.Join(", ", targets.Select(t => t.Entry.Path)) + ".");
+    }
+
+    /// <summary>
+    /// Live mode, a moment after a write to a file its component also writes (Cheeky): when the values written are still
+    /// there, the record takes the file's bytes as they are now (Kept). When the component's own save dropped one, the
+    /// values are written once more into the file as it is now, if <paramref name="rewrite"/> (Rewritten), else left to
+    /// the next launch (Lost). Nothing happens when the applied profile changed or a newer live write recorded other
+    /// values for those keys (Superseded): a recheck never fights a later change or the component in a loop.
+    /// </summary>
+    public LiveRecheckOutcome RecheckInstalledLive(LiveRecheck check, bool rewrite)
+    {
+        using var exclusive = Lock();
+        var baseline = LoadCore();
+        var full = System.IO.Path.GetFullPath(check.Path);
+        var entry = baseline is { State: "applied", Current: { } current } && current.Id == check.JournalId
+            ? current.Entries.SingleOrDefault(e => e.Path.Equals(full, StringComparison.OrdinalIgnoreCase)) : null;
+        if (entry?.IniValues is not { } owned || !File.Exists(full)
+            || check.Values.Any(p => !owned.TryGetValue(p.Key, out var recorded) || recorded != p.Value)) return LiveRecheckOutcome.Superseded;
+        var bytes = File.ReadAllBytes(full);
+        var text = IniFile.Decode(bytes);
+        if (IniFile.Matches(text, check.Values))
+        {
+            entry.InstalledSha256 = Hashing.BytesSha256(bytes);
+            Save(baseline);
+            return LiveRecheckOutcome.Kept;
+        }
+        if (!rewrite)
+        {
+            entry.InstalledSha256 = Hashing.BytesSha256(bytes);
+            Save(baseline);
+            Log("Live update of " + full + " was undone by its component again; the next launch writes it.");
+            return LiveRecheckOutcome.Lost;
+        }
+        var content = IniFile.Encode(IniFile.SetValues(text, check.Values), bytes);
+        PathPolicy.RejectReparsePoints(entry.Path, entry.Root);
+        AtomicFile.Write(entry.Path, content);
+        entry.InstalledSha256 = Hashing.BytesSha256(content);
+        Save(baseline);
+        Log("Live update of " + full + " written again: its component's own save had dropped " + string.Join(", ", check.Values.Keys.Where(k => !IniFile.Matches(text, new Dictionary<string, string> { [k] = check.Values[k] }))) + ".");
+        return LiveRecheckOutcome.Rewritten;
     }
 
     /// <summary>

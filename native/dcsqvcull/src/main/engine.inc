@@ -39,6 +39,7 @@ void SetEngineOff(bool off) {
   }
   g_partitionBoost = g_cfg.partitionBoost && !off;
   g_allocSlabsOn = g_cfg.allocSlabs && !off;
+  ApplyAllocSlabs();  // R144
   g_texDedupeOn = g_cfg.texDedupe && !off;
   g_triPlainOn = g_cfg.triPlain && !off;
   ApplyTriCounter();

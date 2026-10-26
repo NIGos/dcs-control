@@ -1,5 +1,7 @@
 # 0.6.2 preview
 
+**Live changes while DCS runs.** Settings tagged **LIVE** now apply in about a second while you fly, without restarting DCS: Engine Optimizations (now also the Model allocator, and Diagnostic hooks when turned on), Visual realism, Pupil shift and Depth boost, Quad Views sharpening, edge blending and periphery stability, the optical flow settings of NVIDIA frame generation, and the DLSS 5 tuning. DLSS 5 style and intensity changes and optical flow changes give a short hitch. Everything else waits for the next launch, and the status line says which. The **Live** switch in the right panel turns it off. Quad Views, frame generation and DLSS 5 apply live once this version has launched the profile.
+
 **Only when needed sets the frame limit for you.** Frame generation only when needed works only when DCS may render the full refresh rate. With the DCS frame limit on *Keep*, DCS Control now sets it to the refresh rate while Only when needed is on, so frames are no longer generated all the time because of a lower limit left in DCS. A *Custom* or *300 FPS* limit stays as you chose it; DCS's own value is backed up and comes back with Back to stock DCS.
 
 # 0.6.1 preview

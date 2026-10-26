@@ -4382,15 +4382,19 @@ Test("Live: the live table names real profile settings, each a field of the inte
     }
     Require(LiveSettings.Fields.Select(f => f.Name).Distinct().Count() == LiveSettings.Fields.Count, "listed twice");
     // Read only at start, or carried by Quad Views, OFXR, Cheeky or options.lua: never live.
-    foreach (var name in new[] { "engineDiagnosticHooks", "engineOptimizations", "engineDevMode", "quadSharpening", "foveaWidth", "frameGenFactor", "showOverlay", "neuralIntensity", "farDepth", "frameGenHudSymbology", "peripheryDlssPreset", "fpsLimit", "eyeDistance" })
+    foreach (var name in new[] { "engineOptimizations", "engineDevMode", "foveaWidth", "frameGenFactor", "frameGen", "showOverlay", "farDepth", "frameGenHudSymbology", "peripheryDlssPreset", "fpsLimit", "eyeDistance",
+        "quadRoundFocus", "quadTurbo", "quadFocusScale", "peripheralScale", "neuralFocusArea", "neuralWorkingScale", "neuralBeforeUpscaling", "focusDlssPreset", "quadNeuralEdgeFade" })
         Require(LiveSettings.Find(name) is null, "must wait for the next launch: " + name);
-    // Installed only at DCS start: off is live, on only when DCS started with it on.
-    // R142: CostWeights and StreamDedupe also turn on live; AllocSlabs still only off.
+    // R142: CostWeights and StreamDedupe turn on live. R144 (a current install): AllocSlabs too; before, off only.
     Require(LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Scene.CostWeights", "1", "0") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Texture.StreamDedupe", "1", "0")
         && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.AllocSlabs", "0", "1") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.AllocSlabs", "1", "1")
-        && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.AllocSlabs", "1", "0") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.AllocSlabs", "1", null));
+        && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.AllocSlabs", "1", "0") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.AllocSlabs", "1", null)
+        && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.AllocSlabs", "0", "1", current: false) && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.AllocSlabs", "1", "0", current: false));
+    // R144: Diagnostics one way: on live, off waits for the next start; never on an older install.
+    Require(LiveSettings.IsLiveKey(LiveSettings.EngineFile, "General.Diagnostics", "1", "0") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "General.Diagnostics", "0", "1")
+        && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "General.Diagnostics", "1", "0", current: false));
     Require(LiveSettings.IsLiveKey(LiveSettings.EngineFile, "ColorFix.Saturation", "1.2", null) && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "VrFx.GazeDof", "1", null)
-        && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "General.PerceptionOnly", "0", "1") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "General.Diagnostics", "1", "0")
+        && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "General.PerceptionOnly", "0", "1")
         && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Perception.FarDepthExport", "1", "0") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "DLSS.PeripheryPreset", "K", null));
     Require(LiveSettings.IsLiveKey(LiveSettings.PupilFile, "DepthBoost.NearM", "1.2", null) && !LiveSettings.IsLiveKey(LiveSettings.PupilFile, "PupilShift.OpenXrEyeGaze", "0", null)
         && !LiveSettings.IsLiveKey(LiveSettings.PupilFile, "DlssPreset.IgnoreDriverPreset", "1", null) && !LiveSettings.IsLiveKey("ofxr_bridge.ini", "overlay.position", "off", null));
@@ -4431,16 +4435,17 @@ Test("Live: a live change is written at once while DCS runs, only to its files, 
 });
 Test("Live: a setting read at launch writes nothing and waits; a live one in the same edit still applies", () =>
 {
-    var f = E2e("live-wait"); var draft = LiveDraft(); var inventory = E2eInventory(f);
+    var f = E2e("live-wait"); var draft = LiveDraft() with { EngineDiagnosticHooks = true }; var inventory = E2eInventory(f);
     f.Service.SyncApplied(draft, inventory);
     var before = E2eTree(f, "game", "sg", "state/managed"); var journal = f.Service.Originals.ReadCurrent()!;
-    // Diagnostics is installed only at DCS start: the engine file waits whole, with the live edit in it.
-    var start = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { EngineDiagnosticHooks = true, ColorFixSaturation = 1.3 }, inventory));
+    // Diagnostic hooks stay installed until DCS restarts: turning them off waits, and the engine file waits whole, with
+    // the live edit in it.
+    var start = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { EngineDiagnosticHooks = false, ColorFixSaturation = 1.3 }, inventory));
     Require(start.Written.Count == 0 && start.Applied.Count == 0 && start.Waiting.Order().SequenceEqual(new[] { "colorFixSaturation", "engineDiagnosticHooks" }), start.Message);
     Require(E2eDiff(before, E2eTree(f, "game", "sg", "state/managed")) == "" && f.Service.Originals.ReadCurrent()!.Entries.Select(e => e.InstalledSha256).SequenceEqual(journal.Entries.Select(e => e.InstalledSha256)), "Nothing written");
-    // Quad Views' settings are read at start (and never written while DCS runs); the engine's live change applies.
-    var quad = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { QuadSharpening = 0.6, ColorFixSaturation = 1.3 }, inventory));
-    Require(quad.Applied.SequenceEqual(["colorFixSaturation"]) && quad.Waiting.SequenceEqual(["quadSharpening"]) && quad.Written.Single().EndsWith(LiveSettings.EngineFile), quad.Message);
+    // Quad Views' turbo is read at start: settings.cfg waits whole (its live sharpening with it); the engine's change applies.
+    var quad = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { QuadTurbo = !draft.QuadTurbo, QuadSharpening = 0.6, ColorFixSaturation = 1.3 }, inventory));
+    Require(quad.Applied.SequenceEqual(["colorFixSaturation"]) && quad.Waiting.Order().SequenceEqual(new[] { "quadSharpening", "quadTurbo" }) && quad.Written.Single().EndsWith(LiveSettings.EngineFile), quad.Message);
     var settings = journal.Entries.Single(e => Path.GetFileName(e.Path) == "settings.cfg");
     Require(Hashing.FileSha256(settings.Path) == settings.InstalledSha256, "settings.cfg untouched");
     // A live setting whose change also reaches a file read at launch waits: the eye distance set here also turns DCS's
@@ -4476,6 +4481,177 @@ Test("Live: refused without the applied profile; a draft set back is applied aga
     var restored = f.Service.RestoreOriginals();
     Require(restored.Complete && f.Service.Originals.Status() is { Count: 0, State: "clean" }, string.Join("; ", restored.Conflicts));
     Require(E2eDiff(pristine, E2eTree(f, "game", "sg")) == "" && !Directory.Exists(Path.Combine(f.Base, "state/managed/profiles", draft.Id)), "Stock DCS again: " + E2eDiff(pristine, E2eTree(f, "game", "sg")));
+});
+// ---- Live mode phase 2: Quad Views' settings.cfg, OFXR's flow keys, Cheeky's DLSS 5 tuning; engine R144 ----------------
+// The applied profile as if an app before 0.6.2 (no app version in its record) had installed it.
+void LiveAsOldInstall(E2eFixture f)
+{
+    var path = Path.Combine(f.Service.Originals.Directory, "baseline.json");
+    var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
+    Require(node["current"]?["appVersion"]?.GetValue<string>() == ProductInfo.Version, "the record names the app version that applied it");
+    node["current"]!.AsObject().Remove("appVersion");
+    AtomicFile.WriteText(path, node.ToJsonString(JsonData.Options));
+}
+VrProfile LiveCheekyDraft() => ProfileValidation.ResolveFeatures(new VrProfile
+{
+    Id = "e2e-live-cheeky", Name = "Live Cheeky", QuadViews = QuadProvider.None, FoveatedDlss = true, FrameGen = FrameGeneration.Nvidia,
+    FoveaSource = FoveaSource.Profile, RefreshFromHeadset = false, FpsLimit = FpsLimitMode.Custom, RenderedFpsCap = 45
+});
+Test("Live phase 2: the key lists match the components, and the tags follow the install", () =>
+{
+    // Quad Views: exactly the eight keys of dcsvr_live.h, in any section; never its sizes, shape, turbo, gaze or debug keys.
+    foreach (var key in new[] { "sharpen_focus_view", "smoothen_focus_view_edges", "dcsvr_sharpen_taper", "dcsvr_periphery_sharpen", "dcsvr_temporal", "dcsvr_temporal_tau_ms", "dcsvr_temporal_ramp_deg", "dcsvr_temporal_clip" })
+        Require(LiveSettings.IsLiveKey(LiveSettings.QuadFile, "exe:DCS." + key, "1", null) && LiveSettings.IsLiveKey(LiveSettings.QuadFile, "." + key, "1", null) && !LiveSettings.IsLiveKey(LiveSettings.QuadFile, "exe:DCS." + key, "1", null, current: false), key);
+    foreach (var key in new[] { "focus_view_shape", "turbo_mode", "focus_multiplier", "peripheral_multiplier", "horizontal_focus_section", "force_no_eye_tracking", "dcsvr_saccade_widening", "dcsvr_gaze_deadzone", "dcsvr_far_depth", "dcsvr_temporal_debug" })
+        Require(!LiveSettings.IsLiveKey(LiveSettings.QuadFile, "exe:DCS." + key, "1", null), key);
+    // The text Quad Views gets has every live key the profile writes.
+    var quadKeys = IniFile.Parse(ConfigurationWriters.QuadViews(new VrProfile())).Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.QuadFile, k, "1", null)).Count();
+    Require(quadKeys == 8, "Quad Views writes " + quadKeys + " live keys");
+    // OFXR: the NVIDIA flow keys only.
+    var ofxr = IniFile.Parse(ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia }));
+    Require(ofxr.Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.FlowFile, k, "1", null)).Order().SequenceEqual(new[] { "ofxr.nvidia_bidirectional", "ofxr.nvidia_input_scale", "ofxr.nvidia_occlusion_aware", "ofxr.nvidia_preset" }));
+    Require(!LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.backend", "nvidia", null) && !LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.triple_frame_gen", "1", null) && !LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.nvidia_preset", "fast", null, current: false));
+    // Cheeky: the fifteen keys of dcs_live_keys, each one Cheeky's writer emits; its start-only keys never.
+    var cheeky = IniFile.Parse(ConfigurationWriters.Cheeky(new VrProfile { FoveatedDlss = true }));
+    var hpp = File.ReadAllText(Path.Combine(workspace, "patches/cheeky/dcs_live_reload.hpp"));
+    var liveKeys = cheeky.Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.NeuralFile, k, "1", null)).ToArray();
+    Require(liveKeys.Length == 15 && liveKeys.All(k => hpp.Contains('"' + k[(k.IndexOf('.') + 1)..] + '"')), "Cheeky live keys: " + string.Join(", ", liveKeys));
+    foreach (var key in new[] { "Enabled", "D3D11D3D12Transport", "NrEnabled", "NrFoveated", "NrUseSrFoveation", "NrProcessingOrder", "PeripheralDlaa", "CenterPreset", "D3D12LowerHook", "NrWidth", "NrHeight", "NrWorkingScale", "Width", "Height", "PeripheralDlaaScale", "CenterMode", "AutoStereoAlignment", "EyeCalibrationContinuous" })
+        Require(!LiveSettings.IsLiveKey(LiveSettings.NeuralFile, "CheekyFoveatedDLSS." + key, "1", null), key);
+    // Tags: Quad Views, OFXR and Cheeky only for a profile a current app applied; OFXR only with NVIDIA frame generation;
+    // Diagnostic hooks only while off; an older install keeps phase 1.
+    TransactionJournal Journal(string? version, params string[] files) => new() { Id = "j", ProfileId = "p", AppVersion = version, Entries = [.. files.Select(n => new JournalEntry { Path = Path.Combine(root, "x", n), InstalledSha256 = "0" })] };
+    string[] all = [LiveSettings.EngineFile, LiveSettings.QuadFile, LiveSettings.FlowFile, LiveSettings.NeuralFile];
+    var nvidia = new VrProfile { EngineOptimizations = true, FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.QuadViewsFoveated };
+    var tags = LiveSettings.AvailableFields(nvidia, Journal(ProductInfo.Version, all));
+    Require(new[] { "quadSharpening", "quadEdgeBlend", "peripheryStabilityStrength", "flowPreset", "nvidiaFlowScale", "bidirectionalFlow", "neuralIntensity", "neuralStyle", "neuralMotionScaleX", "engineDiagnosticHooks", "engineModelAllocator" }.All(tags.Contains), string.Join(", ", tags));
+    var old = LiveSettings.AvailableFields(nvidia, Journal(null, all));
+    Require(old.Contains("engineBeeps") && old.Contains("engineModelAllocator") && !old.Contains("quadSharpening") && !old.Contains("flowPreset") && !old.Contains("neuralIntensity") && !old.Contains("engineDiagnosticHooks"), string.Join(", ", old));
+    Require(!LiveSettings.AvailableFields(nvidia with { FrameGen = FrameGeneration.FidelityFx }, Journal(ProductInfo.Version, all)).Contains("flowPreset"), "FidelityFX: the flow keys mean nothing");
+    Require(!LiveSettings.AvailableFields(nvidia with { EngineDiagnosticHooks = true }, Journal(ProductInfo.Version, all)).Contains("engineDiagnosticHooks"), "on at start: off waits");
+    Require(!LiveSettings.Current(Journal("0.6.1")) && LiveSettings.Current(Journal("0.6.2-preview")) && LiveSettings.Current(Journal("0.6.2")) && !LiveSettings.Current(Journal("garbage")));
+    // Setting values in an INI keeps everything else (Cheeky's own keys, comments, line endings) and adds a missing key.
+    var text = "; c\r\n[CheekyFoveatedDLSS]\r\nNrIntensity=0.5 ; x\r\nEyeCalibrationLearnedYaw=0.1\r\n";
+    var set = IniFile.SetValues(text, new Dictionary<string, string> { ["CheekyFoveatedDLSS.NrIntensity"] = "0.42", ["CheekyFoveatedDLSS.NrStyle"] = "2" });
+    Require(set == "; c\r\n[CheekyFoveatedDLSS]\r\nNrIntensity=0.42\r\nEyeCalibrationLearnedYaw=0.1\r\nNrStyle=2\r\n", set);
+    Require(IniFile.Encode("a", [0xFF, 0xFE]) is [0xFF, 0xFE, (byte)'a', 0] && IniFile.Encode("a", [(byte)'x']) is [(byte)'a']);
+});
+Test("Live phase 2: Quad Views' sharpening and periphery stability are written live; its sizes and shape wait", () =>
+{
+    var f = E2e("live-quad"); var draft = LiveDraft(); var inventory = E2eInventory(f);
+    f.Service.SyncApplied(draft, inventory);
+    var settings = LiveEntry(f, LiveSettings.QuadFile).Path; var before = E2eTree(f, "game", "sg", "state/managed");
+    var edited = draft with { QuadSharpening = 0.45, QuadPeripheryContrast = 0.1, QuadSharpenTaper = !draft.QuadSharpenTaper, PeripheryStability = true, PeripheryStabilityStrength = 0.75, QuadEdgeBlend = 0.15 };
+    var result = WhileDcsRuns(f, () => f.Service.ApplyLive(edited, inventory));
+    Require(result.Written.SequenceEqual([settings]) && result.Waiting.Count == 0
+        && result.Applied.Order(StringComparer.Ordinal).SequenceEqual(new[] { "peripheryStability", "peripheryStabilityStrength", "quadEdgeBlend", "quadPeripheryContrast", "quadSharpenTaper", "quadSharpening" }), result.Message);
+    var after = E2eTree(f, "game", "sg", "state/managed");
+    Require(before.Keys.Union(after.Keys).Where(k => before.GetValueOrDefault(k) != after.GetValueOrDefault(k)).Select(Path.GetFileName).SequenceEqual([LiveSettings.QuadFile]), E2eDiff(before, after));
+    var values = IniFile.Parse(File.ReadAllText(settings));
+    Require(values["exe:DCS.sharpen_focus_view"] == "0.45" && values["exe:DCS.dcsvr_temporal"] == "1" && values["exe:DCS.dcsvr_temporal_tau_ms"] == "60" && values["exe:DCS.smoothen_focus_view_edges"] == "0.15", "new values");
+    Require(LiveEntry(f, LiveSettings.QuadFile).InstalledSha256 == Hashing.FileSha256(settings), "recorded");
+    // Sizes, the round shape and turbo are read at start: the whole file waits.
+    foreach (var wait in new[] { edited with { FoveaWidth = draft.FoveaWidth - 0.05 }, edited with { QuadRoundFocus = !draft.QuadRoundFocus }, edited with { QuadTurbo = !draft.QuadTurbo } })
+    {
+        var r = WhileDcsRuns(f, () => f.Service.ApplyLive(wait with { QuadSharpening = 0.4 }, inventory));
+        Require(r.Written.Count == 0 && r.Waiting.Contains("quadSharpening") && IniFile.Parse(File.ReadAllText(settings))["exe:DCS.sharpen_focus_view"] == "0.45", r.Message);
+    }
+    // Launch DCS afterwards applies the draft; then nothing is left to do.
+    Require(f.Service.SyncApplied(edited, inventory).Kind == LaunchSyncKind.Applied && f.Service.SyncApplied(edited, inventory).Kind == LaunchSyncKind.Unchanged);
+});
+Test("Live phase 2: an install by an app before 0.6.2 keeps Quad Views, OFXR and Cheeky for the next launch", () =>
+{
+    var f = E2e("live-old"); var draft = LiveDraft() with { EngineModelAllocator = false }; var inventory = E2eInventory(f);
+    f.Service.SyncApplied(draft, inventory);
+    LiveAsOldInstall(f);
+    var settings = LiveEntry(f, LiveSettings.QuadFile); var engine = LiveEntry(f, LiveSettings.EngineFile);
+    var quad = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { QuadSharpening = 0.45, ColorFixSaturation = 1.3 }, inventory));
+    Require(quad.Applied.SequenceEqual(["colorFixSaturation"]) && quad.Waiting.SequenceEqual(["quadSharpening"]) && quad.Written.SequenceEqual([engine.Path]) && Hashing.FileSha256(settings.Path) == settings.InstalledSha256, quad.Message);
+    // The older engine module: the allocator does not switch on live, Diagnostics waits.
+    var model = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { EngineModelAllocator = true, ColorFixSaturation = 1.3 }, inventory));
+    Require(model.Waiting.Contains("engineModelAllocator") && model.Written.Count == 0, model.Message);
+    var hooks = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { EngineDiagnosticHooks = true, ColorFixSaturation = 1.3 }, inventory));
+    Require(hooks.Waiting.Contains("engineDiagnosticHooks") && hooks.Written.Count == 0, hooks.Message);
+    Require(!LiveSettings.AvailableFields(f.Service.ReadAppliedProfile()!.Profile, f.Service.ReadAppliedProfile()!.Journal).Contains("quadSharpening"), "no tag");
+});
+Test("Live phase 2: engine R144 switches the Model allocator on live and Diagnostic hooks on (not off)", () =>
+{
+    var f = E2e("live-r144"); var draft = LiveDraft() with { EngineModelAllocator = false }; var inventory = E2eInventory(f);
+    f.Service.SyncApplied(draft, inventory);
+    var engine = LiveEntry(f, LiveSettings.EngineFile).Path;
+    var on = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { EngineModelAllocator = true, EngineDiagnosticHooks = true }, inventory));
+    Require(on.Written.SequenceEqual([engine]) && on.Applied.Order().SequenceEqual(new[] { "engineDiagnosticHooks", "engineModelAllocator" }), on.Message);
+    var ini = IniFile.Parse(IniFile.Decode(File.ReadAllBytes(engine)));
+    Require(ini["Model.AllocSlabs"] == "1" && ini["General.Diagnostics"] == "1", "written");
+    // Hooks once in stay until DCS restarts: back off, the engine file waits whole (the allocator with it).
+    var off = WhileDcsRuns(f, () => f.Service.ApplyLive(draft, inventory));
+    Require(off.Written.Count == 0 && IniFile.Parse(IniFile.Decode(File.ReadAllBytes(engine))) is { } kept && kept["General.Diagnostics"] == "1" && kept["Model.AllocSlabs"] == "1", off.Message);
+    var allocatorOff = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { EngineDiagnosticHooks = true }, inventory));
+    Require(allocatorOff.Written.SequenceEqual([engine]) && allocatorOff.Applied.SequenceEqual(["engineDiagnosticHooks"]) && IniFile.Parse(IniFile.Decode(File.ReadAllBytes(engine)))["Model.AllocSlabs"] == "0", allocatorOff.Message);
+});
+Test("Live phase 2: OFXR's NVIDIA flow is written live only when DCS started with NVIDIA frame generation", () =>
+{
+    var f = E2e("live-ofxr"); var draft = LiveCheekyDraft(); var inventory = E2eInventory(f);
+    Require(f.Service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Applied);
+    var ofxr = LiveEntry(f, LiveSettings.FlowFile).Path;
+    var flow = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { FlowPreset = NvidiaFlowPreset.Fast, NvidiaFlowScale = 75, BidirectionalFlow = true }, inventory));
+    Require(flow.Written.SequenceEqual([ofxr]) && flow.Applied.Order().SequenceEqual(new[] { "bidirectionalFlow", "flowPreset", "nvidiaFlowScale" }) && flow.Waiting.Count == 0, flow.Message);
+    var ini = IniFile.Parse(IniFile.Decode(File.ReadAllBytes(ofxr)));
+    Require(File.ReadAllBytes(ofxr) is [0xFF, 0xFE, ..] && ini["ofxr.nvidia_preset"] == "fast" && ini["ofxr.nvidia_input_scale"] == "75" && ini["ofxr.nvidia_bidirectional"] == "1" && ini["ofxr.nvidia_occlusion_aware"] == "0", "new flow, UTF-16 kept");
+    // Anything else in OFXR's file is read at start.
+    var factor = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { FlowPreset = NvidiaFlowPreset.Slow, FrameGenFactor = draft.FrameGenFactor == 3 ? 2 : 3 }, inventory));
+    Require(factor.Written.Count == 0 && factor.Waiting.Contains("flowPreset") && IniFile.Parse(IniFile.Decode(File.ReadAllBytes(ofxr)))["ofxr.nvidia_preset"] == "fast", factor.Message);
+    // DCS started with FidelityFX: the flow keys wait (OFXR has no NVIDIA flow to rebuild).
+    var g = E2e("live-ofxr-ffx"); var ffx = draft with { FrameGen = FrameGeneration.FidelityFx }; g.Service.SyncApplied(ffx, E2eInventory(g));
+    var none = WhileDcsRuns(g, () => g.Service.ApplyLive(ffx with { FlowPreset = NvidiaFlowPreset.Fast }, E2eInventory(g)));
+    Require(none.Written.Count == 0 && none.Waiting.SequenceEqual(["flowPreset"]), none.Message);
+});
+Test("Live phase 2: Cheeky's DLSS 5 tuning is written live into its own INI, its saves tolerated, a dropped value written once more", () =>
+{
+    var f = E2e("live-cheeky"); var draft = LiveCheekyDraft(); var inventory = E2eInventory(f);
+    f.Service.SyncApplied(draft, inventory);
+    var ini = LiveEntry(f, LiveSettings.NeuralFile).Path;
+    // Cheeky saves its INI itself: its own learned calibration, float formatting. The file is still the profile's.
+    void CheekySaves(Func<string, string> change) => File.WriteAllText(ini, change(File.ReadAllText(ini)), new UTF8Encoding(false));
+    CheekySaves(t => t.Replace("NrColorStrength=" + IniFile.Parse(t)["CheekyFoveatedDLSS.NrColorStrength"], "NrColorStrength=" + (draft.NeuralColorStrength + 1e-9).ToString("R", System.Globalization.CultureInfo.InvariantCulture)) + "EyeCalibrationLearnedYaw=0.0123\n");
+    Require(Hashing.FileSha256(ini) != LiveEntry(f, LiveSettings.NeuralFile).InstalledSha256, "Cheeky's save changed the bytes");
+    var first = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { NeuralIntensity = 0.42, NeuralStyle = NeuralStyle.Cinematic, NeuralPaperWhiteScale = 1.1 }, inventory));
+    Require(first.Written.SequenceEqual([ini]) && first.Applied.Order().SequenceEqual(new[] { "neuralIntensity", "neuralPaperWhiteScale", "neuralStyle" }) && first.Rechecks is { Count: 1 }, first.Message);
+    var check = first.Rechecks![0];
+    var values = IniFile.Parse(File.ReadAllText(ini));
+    Require(values["CheekyFoveatedDLSS.NrIntensity"] == "0.42" && values["CheekyFoveatedDLSS.NrStyle"] == "2" && values["CheekyFoveatedDLSS.EyeCalibrationLearnedYaw"] == "0.0123", "only the changed keys, Cheeky's own kept");
+    Require(check.Values.Keys.Order(StringComparer.OrdinalIgnoreCase).SequenceEqual(new[] { "CheekyFoveatedDLSS.NrIntensity", "CheekyFoveatedDLSS.NrPaperWhiteScale", "CheekyFoveatedDLSS.NrStyle" }), string.Join(",", check.Values.Keys));
+    Require(LiveEntry(f, LiveSettings.NeuralFile).IniValues!["CheekyFoveatedDLSS.NrIntensity"] == "0.42" && !LiveEntry(f, LiveSettings.NeuralFile).IniValues!.ContainsKey("CheekyFoveatedDLSS.EyeCalibrationLearnedYaw"), "the record owns only DCS Control's values");
+    // 1.5 s later (no real wait here): the values are there; Cheeky's later save is taken as the file's new bytes.
+    CheekySaves(t => t.Replace("\n", "\r\n"));
+    Require(f.Service.RecheckLiveAsync(first.Rechecks, _ => Task.CompletedTask).GetAwaiter().GetResult().SequenceEqual([LiveRecheckOutcome.Kept]) && LiveEntry(f, LiveSettings.NeuralFile).InstalledSha256 == Hashing.FileSha256(ini), "kept, record follows the file");
+    // A save of Cheeky's that raced the write drops a value: written once more, then kept.
+    var second = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { NeuralIntensity = 0.5, NeuralStyle = NeuralStyle.Cinematic, NeuralPaperWhiteScale = 1.1 }, inventory));
+    CheekySaves(t => t.Replace("NrIntensity=0.5", "NrIntensity=0.42"));
+    var delays = 0;
+    Require(f.Service.RecheckLiveAsync(second.Rechecks, _ => { delays++; return Task.CompletedTask; }).GetAwaiter().GetResult().SequenceEqual([LiveRecheckOutcome.Rewritten]) && delays == 2
+        && IniFile.Parse(File.ReadAllText(ini))["CheekyFoveatedDLSS.NrIntensity"] == "0.5" && IniFile.Parse(File.ReadAllText(ini))["CheekyFoveatedDLSS.EyeCalibrationLearnedYaw"] == "0.0123", "written once more");
+    // Dropped again after the rewrite: left to the next launch, never a loop; the record follows the file.
+    var third = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { NeuralIntensity = 0.6, NeuralStyle = NeuralStyle.Cinematic, NeuralPaperWhiteScale = 1.1 }, inventory));
+    var rounds = 0;
+    var lost = f.Service.RecheckLiveAsync(third.Rechecks, _ => { if (rounds++ < 2) CheekySaves(t => t.Replace("NrIntensity=0.6", "NrIntensity=0.5")); return Task.CompletedTask; }).GetAwaiter().GetResult();
+    Require(lost.SequenceEqual([LiveRecheckOutcome.Lost]) && IniFile.Parse(File.ReadAllText(ini))["CheekyFoveatedDLSS.NrIntensity"] == "0.5" && LiveEntry(f, LiveSettings.NeuralFile).InstalledSha256 == Hashing.FileSha256(ini), string.Join(",", lost));
+    // An older check after a newer write never puts its values back.
+    Require(f.Service.RecheckLive(first.Rechecks![0]) == LiveRecheckOutcome.Superseded && IniFile.Parse(File.ReadAllText(ini))["CheekyFoveatedDLSS.NrIntensity"] == "0.5", "superseded");
+    // A value changed in Cheeky's own overlay (an owned value that is not DCS Control's any more): the file waits.
+    CheekySaves(t => t.Replace("NrIntensity=0.5", "NrIntensity=0.9"));
+    var overlay = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { NeuralIntensity = 0.7 }, inventory));
+    Require(overlay.Written.Count == 0 && overlay.Waiting.Contains("neuralIntensity") && IniFile.Parse(File.ReadAllText(ini))["CheekyFoveatedDLSS.NrIntensity"] == "0.9", overlay.Message);
+    CheekySaves(t => t.Replace("NrIntensity=0.9", "NrIntensity=0.6"));
+    // Start-only keys (the focus size here) wait, with the whole file.
+    var size = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { NeuralIntensity = 0.7, FoveaWidth = draft.FoveaWidth - 0.05 }, inventory));
+    Require(!size.Written.Contains(ini) && size.Waiting.Contains("neuralIntensity") && size.Waiting.Contains("foveaWidth"), size.Message);
+    // Launch DCS afterwards applies the draft over Cheeky's saves; then nothing is left; Back to stock DCS is complete.
+    var edited = draft with { NeuralIntensity = 0.7 };
+    Require(f.Service.SyncApplied(edited, inventory).Kind == LaunchSyncKind.Applied && f.Service.SyncApplied(edited, inventory).Kind == LaunchSyncKind.Unchanged);
+    CheekySaves(t => t + "EyeCalibrationLearnedPitch=0.2\n");
+    Require(f.Service.SyncApplied(edited, inventory).Kind == LaunchSyncKind.Unchanged, "Cheeky's own save is not an edit");
+    Require(f.Service.RestoreOriginals().Complete && f.Service.Originals.Status() is { Count: 0, State: "clean" });
 });
 foreach (var (name, action) in tests)
 {

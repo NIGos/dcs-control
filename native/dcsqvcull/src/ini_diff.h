@@ -23,7 +23,7 @@
 //   - [General] LowPowerPacer and LowPowerPacerTimeoutUs (the pacer is gated by the kill switch).
 // Not engine keys (a change keeps the kill switch as it is): [Color] [ColorFix] [ColorEnhanced] [Night] [VrFx]
 // [DLSS] [Perception] [DepthBoost] [Log] [Perf] [Profile] [Hotkeys] [Dev], and [General] PerceptionOnly (latched
-// at start), Diagnostics (installed at start), Beeps, SigScan, PatchMode. [DLSS]: the per-view preset passes
+// at start), Diagnostics (measurement hooks; R144: a live 0 -> 1 installs them), Beeps, SigScan, PatchMode. [DLSS]: the per-view preset passes
 // through while the kill switch is off and acts only at the next mission load; a Live write of it must not turn the
 // engine back on. Unknown sections (not read by the payload) are not engine keys.
 #pragma once
