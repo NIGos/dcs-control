@@ -122,6 +122,8 @@ struct Config {
   // filter's hooks). Before R49 the code default was 0, so an ini without the key ran without them.
   bool splitFilter = true;               // [D3D] SplitFilter (split_filter.h, R15 F5)
   uint32_t splitFilterOps = 0x4ff;       // [D3D] SplitFilterOps (sfilt::kDefaultOps: no blend, no depth)
+  // R146: a device proxy (ReShade, ...) wraps DCS's D3D11 context: the split filter is left stock (d3d_proxy.h).
+  bool proxyGuard = true;                // [D3D] ProxyGuard (1 default; 0 = hook the wrapper's table as before R146)
   bool suiteSplitFilterVerify = false;   // [Suite] SplitFilterVerify
   bool suiteBenchSplitFilter = false;    // [Suite] BenchSplitFilter (bench mode 27)
   bool shadowBatch = true;           // [Model] ShadowBatching (shadow_batch.h; needs ShadowInstancing)

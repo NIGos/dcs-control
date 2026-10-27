@@ -2245,6 +2245,7 @@ void CheckDevice(const Snapshot& s) {
       dev, static_cast<unsigned>(fl), flags, (flags & D3D11_CREATE_DEVICE_SINGLETHREADED) ? " SINGLETHREADED" : "",
       !dcsVs ? "(no global VS variable to check)" : match ? "the same device" : "ANOTHER device");
   if (vsDev) vsDev->Release();
+  if (!match) d3dproxy::NoteDevice(dev);  // R146: a device proxy (ReShade) hands DCS a wrapper device
   if (!match || fl < D3D_FEATURE_LEVEL_11_0) {
     dev->Release();
     Log("shadow inst: device rejected; no VS objects will be created");

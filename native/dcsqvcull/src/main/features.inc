@@ -1,3 +1,4 @@
+#include "d3d_proxy.h"  // R146: DCS's D3D11 objects behind a device proxy (ReShade): detection, one log line
 #include "shadow_tight.h"
 #include "alloc_slab.h"
 #include "tex_bind.h"

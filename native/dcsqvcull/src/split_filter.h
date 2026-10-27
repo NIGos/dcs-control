@@ -978,6 +978,14 @@ bool Attach() {
   g_attached = true;
   if (!g_ctx.load()) return false;  // waiting for the first draw
   if (!g_hooked.load()) {
+    // R146: DCS's context is a device proxy's wrapper (ReShade): its own calls on the real context never reach the
+    // shadow, so nothing is skipped. Sites back to stock (they only forwarded and captured so far), latched.
+    if (d3dproxy::RefuseSplitFilter(g_ctx.load())) {
+      if (g_sitesPatched.load()) PatchSites(false);
+      g_attached = false;
+      g_state = -1;
+      return false;
+    }
     if (!HookTable()) {
       Log("split filter: could not hook the context table; off");
       return false;
