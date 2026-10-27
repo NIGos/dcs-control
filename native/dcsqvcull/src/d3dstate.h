@@ -565,19 +565,43 @@ inline bool InPayload(const void* p) {
   return a >= lo && a < hi;
 }
 
+// One pointer write; false when the page refused it (made read-only again by another writer meanwhile).
+bool WritePointerSeh(void** slot, void* value) {
+  __try {
+    InterlockedExchangePointer(slot, value);
+    return true;
+  } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+    return false;
+  }
+}
+
+// R146: the protect / write / restore path, one writer of this payload at a time. Under a device proxy
+// (ReShade: d3d_proxy.h) DCS's context table is the wrapper's class vtable in the proxy's read-only image data,
+// and two writers on one page (the split filter's re-hook on the render thread, chain fast's 1 s re-arm on the
+// worker) could restore the protection between the other's protect and its write: an access violation.
+SRWLOCK g_protectLock = SRWLOCK_INIT;
+std::atomic<uint64_t> g_protectWrites{0}, g_protectRetries{0};
+
 // Writes one vtable entry. DCS's immediate context keeps its table on the
-// heap (writable), other contexts may point into d3d11.dll's read-only data.
+// heap (writable), other contexts may point into d3d11.dll's read-only data
+// (or a device proxy's: d3d_proxy.h).
 void WriteTablePointer(void** slot, void* value) {
   MEMORY_BASIC_INFORMATION mbi{};
   if (VirtualQuery(slot, &mbi, sizeof(mbi)) &&
-      (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY))) {
-    InterlockedExchangePointer(slot, value);
+      (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) &&
+      WritePointerSeh(slot, value))
     return;
+  AcquireSRWLockExclusive(&g_protectLock);
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    DWORD old;
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) break;
+    const bool ok = WritePointerSeh(slot, value);
+    VirtualProtect(slot, sizeof(void*), old, &old);
+    g_protectWrites.fetch_add(1, std::memory_order_relaxed);
+    if (ok) break;
+    g_protectRetries.fetch_add(1, std::memory_order_relaxed);  // another module restored it under us: again
   }
-  DWORD old;
-  if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return;
-  InterlockedExchangePointer(slot, value);
-  VirtualProtect(slot, sizeof(void*), old, &old);
+  ReleaseSRWLockExclusive(&g_protectLock);
 }
 
 void Repatch(int v);

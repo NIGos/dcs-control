@@ -336,6 +336,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "ini_keys_test.h"  // R107: every key the app writes is still read (live or retired)
 #include "r142_test.h"  // R142: the ini reload diff, the engine key set, frame times around a reload
 #include "r144_test.h"  // R144: Live mode phase 2 (AllocSlabs / Diagnostics live, settings.cfg followed live)
+#include "r146_test.h"  // R146: DCS's D3D11 context behind a device proxy (ReShade): detection, split filter guard
 
 // R60: QV_TEST_LOAD=<n> (off by default): n busy threads of normal priority inside this process for the whole run.
 // An in-process stand-in for a machine loaded by another program (as DCS loading a mission); never an external load
@@ -397,6 +398,13 @@ int main() {
   UseTempOutputDir();
   r90::NoteRingAtLoad();  // R115 (L2): the async log ring before any test (checked in r90::AsyncLog)
   StartTestLoad();
+  // QV_R146_ONLY=1: only the R146 proxy tests (after the split filter's, which they build on).
+  if (getenv("QV_R146_ONLY")) {
+    sftest::Run();
+    r146test::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
   // QV_SF_STRESS=<n>: only the split-filter tests, n times (race hunting).
   if (const char* n = getenv("QV_SF_STRESS")) {
     for (int i = 0, k = atoi(n); i < k; ++i) sftest::Run();
@@ -1897,6 +1905,8 @@ int main() {
   gbbtest::Run();
   // Split-path redundant-state filter (R15 F5) on a real device through fake dx11backend sites.
   sftest::Run();
+  // R146: the split filter and table writes under a device proxy (ReShade, GitHub dcs-control#8).
+  r146test::Run();
   // Deferred-context recording infrastructure (R15 A1): bit-exact cascade, state restore, pool.
   drtest::Run();
   // Shadow recorder (R17 S1-S3): mesh fields, tables, reflection, probe checks, jobs, device record vs stock.

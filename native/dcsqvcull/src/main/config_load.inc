@@ -235,6 +235,7 @@ void LoadConfig(bool initial) {
   c.suiteVramCountCreates = GetPrivateProfileIntW(L"Suite", L"VramCountCreates", 1, ini.c_str()) != 0;
   c.splitFilter = GetPrivateProfileIntW(L"D3D", L"SplitFilter", 1, ini.c_str()) != 0;  // R49: default 1 (shipped)
   c.splitFilterOps = qvini::Mask(L"D3D", L"SplitFilterOps", 0x4ff, 0x7ff, ini.c_str());  // decimal or 0x hex
+  c.proxyGuard = GetPrivateProfileIntW(L"D3D", L"ProxyGuard", 1, ini.c_str()) != 0;  // R146: d3d_proxy.h
   c.suiteSplitFilterVerify = GetPrivateProfileIntW(L"Suite", L"SplitFilterVerify", 0, ini.c_str()) != 0;
   c.suiteBenchSplitFilter = GetPrivateProfileIntW(L"Suite", L"BenchSplitFilter", 0, ini.c_str()) != 0;
   c.shadowBatch = GetPrivateProfileIntW(L"Model", L"ShadowBatching", 1, ini.c_str()) != 0;
