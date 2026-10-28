@@ -5,6 +5,8 @@ A free Windows app for DCS World that runs **DLSS 5, frame generation and Quad V
 - **Every pilot** (monitor, Quest, Varjo, Reverb, Pimax…): **Engine Optimizations** remove CPU work inside DCS without changing the image, about **+50-60 % FPS** at a busy airfield when DCS is CPU-bound. Once applied they stay on every time DCS starts, also from Steam or a desktop shortcut.
 - **Pimax pilots** get the full VR pipeline in one go: **Quad Views** (eye-tracked foveated rendering) + **DLSS 5** (NVIDIA neural rendering on the area you look at) + **frame generation** (OFXR, generated only when DCS falls behind), working together, plus an in-headset panel that shows what each one is doing.
 
+**New in 0.6.2:** live changes while you fly (settings tagged LIVE apply in about a second, without restarting DCS), the frame limit set for you with frame generation only when needed, and DCS 2.9.31 support.
+
 **New in 0.6.1:** a clearer, more compact interface (grouped menu, greyed-out settings say why, a to-scale coverage preview) and support for NVIDIA's newer DLSS 5 runtime 310.9.
 
 **New in 0.6.0:** frame generation only when needed (no added latency while DCS keeps up), cleaner VR nights (no more raised, greyish blacks, and much less banding, with Color mode Fix or Enhanced), a Visual realism page (night vision, glare, eye-focus blur, G vision loss), sharp HUD symbols in generated frames, DLSS presets for the focus area and the periphery, freeing the DLSS memory DCS leaks on every mission load, and support for the new Pimax Play scales. See the [release notes](docs/RELEASE_NOTES.md).

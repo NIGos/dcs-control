@@ -4,6 +4,12 @@
 
 **Only when needed sets the frame limit for you.** Frame generation only when needed works only when DCS may render the full refresh rate. With the DCS frame limit on *Keep*, DCS Control now sets it to the refresh rate while Only when needed is on, so frames are no longer generated all the time because of a lower limit left in DCS. A *Custom* or *300 FPS* limit stays as you chose it; DCS's own value is backed up and comes back with Back to stock DCS.
 
+**DCS 2.9.31 ready.** Engine Optimizations and the Depth boost cockpit symbols were checked against DCS 2.9.31.29434 and updated where DCS moved code; 2.9.30 keeps working. On a DCS version it does not know, a part that depends on exact DCS code switches itself off instead of risking a crash. After a DCS update, the first launch rebuilds DCS's shader cache and takes longer.
+
+**ReShade.** Engine Optimizations recognise ReShade's graphics wrapper: they log it, keep one optimization off that could disturb ReShade's own drawing, and no longer risk a rare crash when two threads update ReShade's tables at once. If ReShade does not load with DLSS 5 on, choose *Keep it working* when Launch DCS asks about another program's dxgi.dll.
+
+**Fixes:** Last flight no longer reports DCS as still open after a normal exit on DCS 2.9.30 and later; the Live status line names exactly the settings that wait.
+
 # 0.6.1 preview
 
 **NVIDIA's newer DLSS 5 runtime (310.9).** DCS Control now also accepts `nvngx_dlssnr.dll` version 310.9, NVIDIA's newer and faster DLSS 5 model (it first shipped with NBA 2K27). It keeps 310.8's interface, so nothing else changes: select it with Browse on the DLSS page, and switch back the same way. 310.8 stays the version tested most; 310.9 has not been flown much with DCS yet, so compare the two in your own flights (the DLSS 5 key toggles it to check the image). As before, only NVIDIA-signed files, or NVIDIA's file patched for RTX 20, 30 and 40 cards, are accepted.
