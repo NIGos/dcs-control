@@ -78,16 +78,17 @@ internal static class WebVerification
             log("Documentation view: " + path);
         }
         controller.Bounds = new System.Drawing.Rectangle(0, 0, 1320, 920); controller.RasterizationScale = 1;
-        // Pimax Play running; a new profile's default values with every feature checked on the Pimax route.
+        // Pimax Play running; a new profile's default values with every feature checked on the Pimax route (Engine Optimizations too).
         Readiness.ActiveRouteProvider = () => new(null, "Pimax Play is running and SteamVR is not. Use the Pimax route, or start SteamVR first for Sboys.", TrackingKind.Unknown);
         if (neural is not null) await Step("window.dcsUi.saveRuntime("+JsonSerializer.Serialize(neural)+")");
-        await Step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.Serialize(new VrProfile())+",{route:'Pimax',features:{quad:true,dlss:true,framegen:true,boost:true}})});"
+        await Step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.Serialize(new VrProfile())+",{route:'Pimax',features:{engine:true,quad:true,dlss:true,framegen:true,boost:true}})});"
             + "return ui.run('refresh',ui.draft());})()");
         await Step("window.dcsUi.refreshBoostPlan ? window.dcsUi.refreshBoostPlan() : null");
         await Shot("overview-changes-apply", "overview");
         await Shot("quad-views-pimax-play", "foveation", "(b=>{if(b)b.scrollIntoView({block:'center'});})(document.getElementById('pimaxFovea'));");
         await Shot("dlss5-runtime-file", "dlss");
         await Shot("framegen-auto-2x-3x", "framegen");
+        await Shot("engine-optimizations", "engine");
         await Shot("cpu-boost-plan", "boost");
         await Step("window.dcsUi.run('checkReadiness')");
         await Shot("checks", "diagnostics");
