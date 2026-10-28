@@ -21,8 +21,8 @@ Everything the app changes is backed up and comes back with **Back to stock DCS*
 </p>
 
 <p align="center">
-  <a href="https://github.com/NIGos/dcs-control/releases/download/v0.6.2-preview/dcs-control-0.6.mp4"><img src="docs/screenshots/video-whats-new-06.jpg" alt="What's new in DCS Control 0.6: a 4-minute video" width="800"></a><br>
-  <sub>What's new in 0.6 (4 minutes): frame generation only when needed, cleaner VR nights, live changes</sub>
+  <a href="https://youtu.be/m8BVXMIsXN8"><img src="docs/screenshots/video-whats-new-06.jpg" alt="What's new in DCS Control 0.6: a 4-minute video" width="800"></a><br>
+  <sub>What's new in 0.6 on YouTube (4 minutes)</sub>
 </p>
 
 <p align="center">
