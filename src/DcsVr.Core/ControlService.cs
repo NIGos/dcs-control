@@ -519,26 +519,96 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             updates.Add(new(entry.Path, IniFile.Encode(IniFile.SetValues(IniFile.Decode(bytes), values), bytes), Hashing.BytesSha256(bytes), after));
             rechecks.Add(new(journal.Id, entry.Path, values));
         }
+        // What is in effect now (before this write): the applied profile with the settings written live since (R148: not
+        // profile.json alone, which keeps the launched values, so a setting written live earlier is not "waiting" when
+        // another change in its file waits, and one held back is "waiting" even when the draft is profile.json again).
+        var effective = InEffect(applied);
         if (updates.Count > 0) Originals.UpdateInstalledLive(journal.Id, updates);
 
-        // Which changed settings are in effect now: live ones whose files are in line with the draft, unless they also
-        // change a file that is not written live (then they wait, at least in part).
-        var changedSettings = ChangedSettings(draft, applied.Profile);
+        // The draft's settings that differ from profile.json and are already in effect stay so (their files are either
+        // written with the draft or untouched). Of those that differ from what is in effect, the live ones whose files
+        // are in line with the draft are in effect now, unless they also change a file that is not written live (then
+        // they wait, at least in part). Every other one waits: a file or key that waits, a one-way key held back
+        // (Diagnostic hooks off), a setting read at launch.
+        var fromApplied = ChangedSettings(draft, applied.Profile);
+        var fromEffect = ChangedSettings(draft, JsonData.Deserialize<VrProfile>(effective.ToJsonString()));
+        var already = fromApplied.Where(p => !fromEffect.Contains(p)).ToList();
         var available = LiveSettings.AvailableFields(applied.Profile, journal).ToHashSet(StringComparer.Ordinal);
-        var inEffect = changedSettings.Where(p => available.Contains(p) && LiveSettings.Find(p)!.In.All(f => !blocked.Contains(f))).ToList();
+        var fresh = fromEffect.Where(p => available.Contains(p) && LiveSettings.Find(p)!.In.All(f => !blocked.Contains(f))).ToList();
         var planned = NonLiveSignature(plan, blocked);
-        if (inEffect.Count > 0 && !SameSignature(planned, InstalledSignature(journal, blocked)))
+        if (fresh.Count > 0 && !SameSignature(planned, InstalledSignature(journal, blocked)))
         {
-            var without = TryNonLiveSignature(Revert(draft, applied.Profile, inEffect), live, blocked);
-            if (without is null) inEffect.Clear();
+            var all = already.Concat(fresh).ToList();
+            var without = TryNonLiveSignature(Revert(draft, applied.Profile, all), live, blocked);
+            if (without is null) fresh.Clear();
             else if (!SameSignature(without, planned))
-                inEffect = [.. inEffect.Where(p => TryNonLiveSignature(Revert(draft, applied.Profile, inEffect.Where(o => o != p)), live, blocked) is { } one && SameSignature(one, without))];
+                fresh = [.. fresh.Where(p => TryNonLiveSignature(Revert(draft, applied.Profile, all.Where(o => o != p)), live, blocked) is { } one && SameSignature(one, without))];
         }
-        var waiting = changedSettings.Where(p => !inEffect.Contains(p)).ToArray();
+        var inEffect = fromApplied.Union(fromEffect).Where(p => already.Contains(p) || fresh.Contains(p)).ToArray();
+        var waiting = fromEffect.Where(p => !fresh.Contains(p)).ToArray();
+        if (fresh.Count > 0 || updates.Count > 0)
+        {
+            var draftNode = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(draft))!.AsObject();
+            foreach (var name in fresh) effective[name] = draftNode[name]?.DeepClone();
+            SaveInEffect(applied.Profile, Originals.ReadCurrent() ?? journal, effective);
+        }
         var written = updates.Select(u => u.Path).ToArray();
-        var message = (written.Length > 0 ? "Applied live: " + string.Join(" and ", written.Select(Path.GetFileName)) + " updated." : inEffect.Count > 0 ? "Already in effect." : "Nothing applied live.")
+        var message = (written.Length > 0 ? "Applied live: " + string.Join(" and ", written.Select(Path.GetFileName)) + " updated." : inEffect.Length > 0 ? "Already in effect." : "Nothing applied live.")
             + (waiting.Length > 0 ? $" {waiting.Length} {(waiting.Length == 1 ? "setting waits" : "settings wait")} for the next launch." : "");
         return new(inEffect, waiting, written, message, rechecks);
+    }
+
+    /// <summary>Live mode's record of what it wrote (live.json in the state folder): the live settings whose values in
+    /// effect differ from the applied profile.json, for that apply's journal, with each live file's record as it was then
+    /// (<see cref="LiveStamps"/>). Launch DCS (a new journal) or anything else that rewrites a live file makes its
+    /// values void for that file: then profile.json's values count, as before the record existed.</summary>
+    public sealed record LiveRecord(string JournalId, Dictionary<string, string> Values, Dictionary<string, string> Stamps);
+    private string LiveRecordPath => Path.Combine(StateRoot, "live.json");
+
+    /// <summary>A live file's record in the journal: its installed hash, or for a file its component also writes
+    /// (Cheeky), its owned values (Cheeky's own saves change the hash, not those).</summary>
+    private static Dictionary<string, string> LiveStamps(TransactionJournal journal)
+    {
+        var stamps = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in LiveSettings.Files)
+            if (journal.Entries.FirstOrDefault(e => Path.GetFileName(e.Path).Equals(name, StringComparison.OrdinalIgnoreCase)) is { } entry)
+                stamps[name] = LiveSettings.SelfWritten(name) && entry.IniValues is { } owned
+                    ? "ini:" + string.Join("\n", owned.Select(p => p.Key.ToLowerInvariant() + "=" + p.Value).Order(StringComparer.Ordinal)) : entry.InstalledSha256;
+        return stamps;
+    }
+
+    /// <summary>The settings in effect in the running DCS (as profile JSON): the applied profile.json with the live
+    /// settings written since (<see cref="LiveRecord"/>), each only while its files' records are still those it was
+    /// written with.</summary>
+    private System.Text.Json.Nodes.JsonObject InEffect(AppliedProfile applied)
+    {
+        var effective = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(applied.Profile))!.AsObject();
+        LiveRecord? record;
+        try { record = File.Exists(LiveRecordPath) ? JsonData.Deserialize<LiveRecord>(File.ReadAllText(LiveRecordPath)) : null; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidDataException or NotSupportedException) { record = null; }
+        if (record?.Values is null || record.Stamps is null || record.JournalId != applied.Journal.Id) return effective;
+        var stamps = LiveStamps(applied.Journal);
+        foreach (var (name, raw) in record.Values)
+        {
+            if (LiveSettings.Find(name) is not { } field || !effective.ContainsKey(name)) continue;
+            if (!field.In.All(f => record.Stamps.TryGetValue(f, out var then) && stamps.TryGetValue(f, out var now) && then == now)) continue;
+            try { effective[name] = System.Text.Json.Nodes.JsonNode.Parse(raw); }
+            catch (System.Text.Json.JsonException) { }
+        }
+        // A record that does not make a valid profile (a setting's type changed in an update) counts for nothing.
+        try { JsonData.Deserialize<VrProfile>(effective.ToJsonString()); }
+        catch (Exception e) when (e is System.Text.Json.JsonException or InvalidDataException or NotSupportedException) { return System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(applied.Profile))!.AsObject(); }
+        return effective;
+    }
+
+    private void SaveInEffect(VrProfile applied, TransactionJournal journal, System.Text.Json.Nodes.JsonObject effective)
+    {
+        var profile = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(applied))!.AsObject();
+        var values = LiveSettings.Fields.Select(f => f.Name).Where(n => effective.ContainsKey(n) && !System.Text.Json.Nodes.JsonNode.DeepEquals(effective[n], profile[n]))
+            .ToDictionary(n => n, n => effective[n]?.ToJsonString() ?? "null", StringComparer.Ordinal);
+        try { AtomicFile.WriteText(LiveRecordPath, JsonData.Serialize(new LiveRecord(journal.Id, values, LiveStamps(journal)))); }
+        // The record only sharpens what the result lists; without it they are counted against profile.json, as before.
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 
     /// <summary>

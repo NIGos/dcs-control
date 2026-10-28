@@ -465,8 +465,8 @@ window.runWebSmoke = async function() {
       check('Live: a live setting edited while DCS runs is applied live at once',ui.liveStatus === 'Applied live: '+title('engineBeeps')+'.' && $('status').textContent === ui.liveStatus && $('statusTitle').textContent === 'DCS is running');
       edit('quadSharpening',sharpening === .5 ? .4 : .5); await ui.applyLive();
       check('Live: Quad Views sharpening is applied live',ui.liveStatus === 'Applied live: '+title('quadSharpening')+'.');
-      edit('quadSharpening',sharpening); edit('quadTurbo',!turbo); await ui.applyLive();
-      check('Live: a setting read at launch waits for the next launch',ui.liveStatus === 'Waits for the next launch: '+title('quadTurbo')+'.' && $('status').textContent === ui.liveStatus);
+      edit('quadTurbo',!turbo); await ui.applyLive();
+      check('Live: a setting read at launch waits for the next launch (the sharpening applied before is not listed again)',ui.liveStatus === 'Waits for the next launch: '+title('quadTurbo')+'.' && $('status').textContent === ui.liveStatus);
       const r = await ui.request('liveApply',ui.draft());
       check('Live: the backend lists what is applied live and what waits, and keeps the applied profile for Launch DCS',r.applied.includes('engineBeeps') && r.waiting.includes('quadTurbo') && !r.waiting.includes('engineBeeps') && r.written.length === 0 && !ui.matchesApplied());
       $('liveToggle').click(); edit('engineBeeps',beeps);

@@ -60,7 +60,9 @@ public static class LiveSettings
         new("depthBoost", Kind.Pupil, PupilFile, EngineFile), P("depthBoostMode"), P("depthBoostRealisticMax"), P("depthBoostMax"),
         P("depthBoostFarStartM"), P("depthBoostFarFullM"), P("depthBoostNearM"), P("depthBoostToggleKey"),
         Q("quadSharpening"), Q("quadEdgeBlend"), Q("quadSharpenTaper"), Q("quadPeripheryContrast"), Q("peripheryStability"), Q("peripheryStabilityStrength"),
-        F("flowPreset"), F("nvidiaFlowScale"), F("bidirectionalFlow"),
+        // R148: the flow quality preset is not here: OFXR re-initialises its NVIDIA flow for it (5.5 s), and DCS froze for
+        // 6.8 s. Resolution and bidirectional flow cost a single frame of about 0.5 s.
+        F("nvidiaFlowScale"), F("bidirectionalFlow"),
         N("neuralIntensity"), N("neuralLocalTone"), N("neuralLocalStructure"), N("neuralSkinStructure"), N("neuralStyle"), N("neuralAutomaticMask"),
         N("neuralUiCorrection"), N("neuralColorStrength"), N("neuralTransferStrength"), N("neuralPaperWhiteScale"), N("neuralDepth"),
         N("neuralMotionScaleX"), N("neuralMotionScaleY"),
@@ -125,10 +127,13 @@ public static class LiveSettings
         "sharpen_focus_view", "smoothen_focus_view_edges", "dcsvr_sharpen_taper", "dcsvr_periphery_sharpen",
         "dcsvr_temporal", "dcsvr_temporal_tau_ms", "dcsvr_temporal_ramp_deg", "dcsvr_temporal_clip",
     };
-    // ofxr_bridge.ini keys OFXR polls (patch 0066): the NVIDIA flow, rebuilt with a short hitch.
+    // ofxr_bridge.ini keys OFXR polls (patch 0066): the NVIDIA flow, rebuilt with a short hitch. Not nvidia_preset, which
+    // OFXR also polls: a preset change re-initialises the flow (R148: 5.5 s, a 6.8 s freeze of DCS), so it waits for the
+    // next launch. The occlusion choice follows the preset and bidirectional flow: live with a bidirectional change, and
+    // waiting with the preset that changes it (the whole file waits then).
     private static readonly HashSet<string> FlowKeys = new(StringComparer.OrdinalIgnoreCase)
     {
-        "ofxr.nvidia_preset", "ofxr.nvidia_input_scale", "ofxr.nvidia_bidirectional", "ofxr.nvidia_occlusion_aware",
+        "ofxr.nvidia_input_scale", "ofxr.nvidia_bidirectional", "ofxr.nvidia_occlusion_aware",
     };
     // CheekyFoveatedDLSS.ini keys Cheeky applies while it runs (patches/cheeky/dcs_live_reload.hpp, dcs_live_keys). The first
     // eight without a hitch; the rest recreate the DLSS-NR feature (a short hitch).
@@ -182,8 +187,10 @@ public sealed record LiveFileUpdate(string Path, byte[] Content, string Expected
 /// was written once more. Lost: lost again, left to the next launch. Superseded: a newer write or apply since.</summary>
 public enum LiveRecheckOutcome { Kept, Rewritten, Lost, Superseded }
 
-/// <summary>What a live apply did. <paramref name="Applied"/> and <paramref name="Waiting"/> are profile properties
-/// (camelCase) that differ from the applied profile: in effect now, or waiting for the next launch.
+/// <summary>What a live apply did. <paramref name="Applied"/>: profile properties (camelCase) whose draft value is in effect
+/// in the running DCS and differs from the applied profile.json or from what was in effect before (a live setting set
+/// back). <paramref name="Waiting"/>: those whose draft value is not in effect now (its file or key waits, a one-way key
+/// held back, a setting read at launch), counted against what is installed, not against profile.json.
 /// <paramref name="Written"/> the files written now; <paramref name="Rechecks"/> the writes to self-written files to read
 /// again shortly (<see cref="ControlService.RecheckLive"/>).</summary>
 public sealed record LiveApplyResult(IReadOnlyList<string> Applied, IReadOnlyList<string> Waiting, IReadOnlyList<string> Written, string Message, IReadOnlyList<LiveRecheck>? Rechecks = null);

@@ -337,12 +337,12 @@ What applies live:
 - **Visual realism:** color mode, night vision, glare, G vision and eye-focus blur.
 - **Perception:** Pupil shift and Depth boost.
 - **Quad Views:** sharpening, focus edge blending, sharpening fade at the edge, periphery contrast and periphery stability.
-- **Frame generation:** optical flow quality, optical flow resolution and bidirectional flow, only when DCS was started with NVIDIA frame generation.
+- **Frame generation:** optical flow resolution and bidirectional flow, only when DCS was started with NVIDIA frame generation. Optical flow quality waits for the next launch: changing it makes frame generation start its optical flow again, which froze DCS for several seconds.
 - **DLSS 5:** the tuning settings (intensity, style, local tone and structure, skin, UI correction, automatic mask, color, transfer strength, paper white scale, depth convention, motion scale).
 
-A change to DLSS 5 intensity, style, local tone or structure, skin, UI correction or automatic mask, or to the optical flow settings, gives a short hitch in the headset. This is normal.
+A change to DLSS 5 intensity, style, local tone or structure, skin, UI correction or automatic mask, or to optical flow resolution or bidirectional flow, gives a short hitch in the headset (about half a second). This is normal.
 
-Everything else waits for the next launch: focus size and shape, Quad Views turbo, eye tracking, frame generation mode and factor, the DLSS 5 area and working scale, CPU Boost, and the DCS settings. If one change in a file needs a restart, every change in that file waits with it. Quad Views, frame generation and DLSS 5 apply live only after this version has launched the profile once.
+Everything else waits for the next launch: focus size and shape, Quad Views turbo, eye tracking, frame generation mode and factor, optical flow quality, the DLSS 5 area and working scale, CPU Boost, and the DCS settings. If one change in a file needs a restart, every change in that file waits with it. Quad Views, frame generation and DLSS 5 apply live only after this version has launched the profile once.
 
 ### The DCS launcher option
 
