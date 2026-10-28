@@ -296,11 +296,14 @@ void OnBoundary(void* pass, bool begin, int depth) {
 
 // ---------------------------------------------------------------------------
 // xrBeginFrame wrapper: Visualizer OpenXR vt[9] (two register arguments,
-// this and the frame state; [V Visualizer.dll RVA 0x1244c0, offline]).
+// this and the frame state; [V Visualizer.dll RVA 0x1244c0, offline]; R147:
+// DCS 2.9.31's Visualizer 0x6ad87745 has it at 0x150c50, the same prologue).
 // ---------------------------------------------------------------------------
 
 constexpr int kXrBeginSlot = 9;
-constexpr uint32_t kXrBeginRva = 0x1244c0;
+// Per analysed Visualizer build (PE timestamp): DCS 2.9.30, 2.9.31.
+constexpr uint32_t kXrBeginStamps[] = {0x6ac12454u, 0x6ad87745u};
+constexpr uint32_t kXrBeginRvas[] = {0x1244c0, 0x150c50};
 const uint8_t kXrBeginPrologue[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x57, 0x48, 0x83,
                                     0xec, 0x50, 0x48, 0x8b, 0xda, 0x48, 0x8b, 0xf9};
 using XrFn = uint64_t(__fastcall*)(void*, void*, void*, void*);
@@ -351,9 +354,15 @@ bool InstallXr() {
   }
   auto* fn = static_cast<uint8_t*>(SlotOriginal(&vt[kXrBeginSlot]));
   const uintptr_t rva = reinterpret_cast<uintptr_t>(fn) - reinterpret_cast<uintptr_t>(vis);
-  if (rva != kXrBeginRva || !CodeMatches(fn, kXrBeginPrologue, sizeof(kXrBeginPrologue))) {
-    Log("  pass flush: OpenXR vt[%d] is Visualizer+0x%llx, not the analysed 0x%x; xrBeginFrame not hooked",
-        kXrBeginSlot, static_cast<unsigned long long>(rva), kXrBeginRva);
+  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(reinterpret_cast<const uint8_t*>(vis) +
+                                                               reinterpret_cast<const IMAGE_DOS_HEADER*>(vis)->e_lfanew);
+  bool known = false;
+  for (size_t i = 0; i < sizeof(kXrBeginRvas) / sizeof(kXrBeginRvas[0]); ++i)
+    known |= nt->FileHeader.TimeDateStamp == kXrBeginStamps[i] && rva == kXrBeginRvas[i];
+  if (!known || !CodeMatches(fn, kXrBeginPrologue, sizeof(kXrBeginPrologue))) {
+    Log("  pass flush: OpenXR vt[%d] is Visualizer+0x%llx, not this build's analysed RVA (0x%x, 0x%x); xrBeginFrame "
+        "not hooked",
+        kXrBeginSlot, static_cast<unsigned long long>(rva), kXrBeginRvas[0], kXrBeginRvas[1]);
     return false;
   }
   g_xrOrig = reinterpret_cast<XrFn>(fn);  // before the slot points at the hook

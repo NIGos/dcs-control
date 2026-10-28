@@ -1848,7 +1848,8 @@ void BuildCheck() {
                                  : "not loaded";
   if (why) printf("     (R123 build check: %s)\n", why);
   Check(!why && ms && ts,
-        "R123 build: MetaMaterial vt[8] (0xb99e0) and TerrainObject vt[1] (0x103cf0) match the installed DCS (RTTI, "
+        "R123 build: MetaMaterial vt[8] (0xb99e0) and TerrainObject vt[1] (2.9.30 0x103cf0 / 2.9.31 0x130480) match the "
+        "installed DCS (RTTI, "
         "slot entries, code hashes of the render functions and of the slot-5 item call)");
   bool neg = true;
   if (etg) neg &= !shadowtex::CodeIs(reinterpret_cast<uint8_t*>(etg), kEtgCode[0].begin, kEtgCode[0].end, kEtgCode[0].hash ^ 1);

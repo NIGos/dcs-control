@@ -95,7 +95,7 @@
 // records moved): (1) every HMD overlay replay of DCS 2.9.30 comes from Visualizer 0x15d640 with mask -1, which
 // passes an empty std::function, and the handler's extra filter (+0x4b0) is null: no filter point at all. The
 // per-record point is now CockpitBase's import slot of RenderObject::render (the record loop's only call, its
-// RenderObject naming the record: kRenderIat); without it the whole-frame scan still decides. (2) The context's VP
+// RenderObject naming the record: Build::renderIat); without it the whole-frame scan still decides. (2) The context's VP
 // at +0x1b4 is row-major (LoadCtxVp): read in cPerView's layout it was no camera, so the camera identity failed in
 // every frame, and VP_true would have been built on the transpose.
 // Not done here (R32 phase 2 / open): the cursor after the records (vt[10])
@@ -105,8 +105,15 @@
 namespace ocpu {
 
 // ---------------------------------------------------------------------------
-// DCS 2.9.30 sites (R32 4.1); checked at install, byte for byte
+// DCS sites (R32 4.1); checked at install, byte for byte, one table per DCS build
 // ---------------------------------------------------------------------------
+// R147: DCS 2.9.31 rebuilt CockpitBase.dll (PE 0x6adbad09) and Visualizer.dll (0x6ad87745). The analysed code is
+// the same; only the layout moved: CockpitBase .text +0xeea90, .rdata +0xf1730, .data +0xf3000, the GraphicsVista
+// IAT +0xef000; Visualizer .text +0x2c790, .rdata +0x2e710. Ranges holding a RIP-relative displacement (the stack
+// cookie, the composite lambda's vtable, the IAT calls, the recorder's c8 / c9 globals) were proven identical by
+// rewriting each displacement back to its 2.9.30 target: the 2.9.30 hash then matches. GraphicsCore and
+// GraphicsVista ranges are at the same RVAs with the same bytes. The first build whose every code range and vtable
+// target matches is used; no match: not installed (the overlays stay at DCS's camera).
 
 enum Mod : int { kModCockpit = 0, kModVis, kModGc, kModGv, kModCount };
 const wchar_t* const kModNames[kModCount] = {L"CockpitBase.dll", L"Visualizer.dll", L"GraphicsCore.dll",
@@ -116,7 +123,8 @@ struct CodeSig {
   uint32_t begin, end;
   uint64_t hash;  // FNV-1a 64 of the bytes (no relocation inside any range)
 };
-constexpr CodeSig kCode[] = {
+// DCS 2.9.30 (the build R32 was analysed and flown on).
+constexpr CodeSig kCode2930[] = {
     {kModCockpit, 0x3c6570, 0x3c65e0, 0xab8a9abfaab9598aull},  // the replay: view -> range, composite filter, call
     {kModCockpit, 0x3c5c50, 0x3c5c87, 0x6e64c89a3b51438bull},  // per record: _Impl+0x38, vt[+0x10](&c8, &c9)
     {kModCockpit, 0x3c3de0, 0x3c3e1f, 0x92531274d9d9e4d5ull},  // composite filter: the inner filter first
@@ -138,14 +146,36 @@ constexpr CodeSig kCode[] = {
     {kModCockpit, 0x3c5cef, 0x3c5cff, 0x9cf3b0309218fc41ull},  // per record: RenderObject at rsp+0x70 constructed
     {kModCockpit, 0x3c6016, 0x3c6051, 0x40c037b526c9d93dull},  // RenderObject +0x78 = record+0x40, +0x60/+0x68 ptrs
 };
+// DCS 2.9.31 (R147): the same ranges in the same order, moved (see above).
+constexpr CodeSig kCode2931[] = {
+    {kModCockpit, 0x4b5000, 0x4b5070, 0x3529e375b10d4df1ull},  // the replay (cookie, composite vtable displaced)
+    {kModCockpit, 0x4b46e0, 0x4b4717, 0x6e64c89a3b51438bull},  // per record: _Impl+0x38, vt[+0x10](&c8, &c9)
+    {kModCockpit, 0x4b2870, 0x4b28af, 0x92531274d9d9e4d5ull},  // composite filter: the inner filter first
+    {kModCockpit, 0x4b4ae1, 0x4b4b07, 0xb654cb1d67029c92ull},  // per record: getCurrentContext, render (IAT displaced)
+    {kModCockpit, 0x4b50f7, 0x4b5140, 0xf507ecc6487779c5ull},  // range: lo16 / hi16 records of handler+0x20
+    {kModCockpit, 0x4b521f, 0x4b522e, 0xf56241eb839403f5ull},  // {first record, count} handed to 0x4b4660
+    {kModCockpit, 0x4b46b1, 0x4b46c8, 0x683c382924a86118ull},  // 0x4b4660: rbx = first, end = first + n * 0xd0
+    {kModCockpit, 0x4b4717, 0x4b4724, 0x932b794bdb3beed1ull},  // a record with +8 and +0 null: a state record
+    {kModCockpit, 0x4b4b07, 0x4b4b17, 0x48f99d266883161eull},  // every record in order, 0xd0 apart
+    {kModCockpit, 0x4b5800, 0x4b582e, 0xce07fc09d7207213ull},  // the recorder (c8 / c9 globals displaced)
+    {kModVis, 0x18cea0, 0x18ceae, 0x5120b1051f19c035ull},      // overlay lambda: bt mask, c9
+    {kModGc, 0x1d70, 0x1d78, 0x1866e6365dc61adbull},           // GraphicsCore, GraphicsVista: unchanged
+    {kModGc, 0x18ce6, 0x18cf4, 0x0b499d763064535cull},
+    {kModGv, 0x1f700, 0x1f70b, 0x531431716b974be7ull},
+    {kModGv, 0x18906, 0x18953, 0xe8bae405aa31f6c1ull},
+    {kModGv, 0x13e92, 0x13e99, 0x0c04099b488b96adull},
+    {kModGv, 0x18d6a, 0x18d71, 0x0c04099b488b96adull},
+    {kModGv, 0x1a85a, 0x1a861, 0x0c04099b488b96adull},
+    {kModCockpit, 0x4b477f, 0x4b478f, 0x8c05c1b4c9fee402ull},  // RenderObject at rsp+0x70 constructed (IAT displaced)
+    {kModCockpit, 0x4b4aa6, 0x4b4ae1, 0x40c037b526c9d93dull},  // RenderObject +0x78 = record+0x40, +0x60/+0x68 ptrs
+};
 // The render point (R32 r4): CockpitBase's only record-loop call of Graphics::RenderObject::render goes through its
 // import slot (0x3c6065, returning to 0x3c606b) with rcx = the record's RenderObject, which carries the record
 // (+0x78 = record + 0x40, +0x60 / +0x68 = the record's +8 / +0 object pointers). Every drawing record reaches it,
 // with or without a filter, so it is a per-record point for replays whose filter is empty (Visualizer 0x15d6ca:
 // mask -1 passes an empty std::function, the case of every HMD overlay replay in DCS 2.9.30 with
 // HUD_MFD_after_DLSS off). The MVP is built inside render (GraphicsVista indicator materials): the bytes at
-// +0x1b4 when it is called are the camera of that record.
-constexpr uint32_t kRenderIat = 0x448530, kRenderRet = 0x3c606b;
+// +0x1b4 when it is called are the camera of that record. The slot and the return address are per build (Build).
 const char kRenderImport[] = "?render@RenderObject@Graphics@@UEAAXW4Pass@2@@Z";
 constexpr uint32_t kRoObj8 = 0x60, kRoObj0 = 0x68, kRoRec = 0x78, kRecFromRo = 0x40;
 struct VtSig {
@@ -155,11 +185,37 @@ struct VtSig {
   uint32_t target;
 };
 enum : int { kVtReplay = 0, kVtComp, kVtVis, kVtCount };
-constexpr VtSig kVt[kVtCount] = {
-    {kModCockpit, 0x46d1d8, 3, 0x3c6570},  // ccMTHandlerImpl: replay a view's records
-    {kModCockpit, 0x46d260, 2, 0x3c3de0},  // the composite filter lambda's _Do_call
-    {kModVis, 0x215778, 2, 0x160710},      // Visualizer's overlay filter lambda's _Do_call
+struct Build {
+  const char* name;
+  const CodeSig* code;
+  size_t codeCount;
+  VtSig vt[kVtCount];
+  uint32_t renderIat, renderRet;  // CockpitBase's import slot of RenderObject::render; the record loop's return
 };
+constexpr Build kBuilds[] = {
+    {"2.9.30",
+     kCode2930,
+     sizeof(kCode2930) / sizeof(kCode2930[0]),
+     {
+         {kModCockpit, 0x46d1d8, 3, 0x3c6570},  // ccMTHandlerImpl: replay a view's records
+         {kModCockpit, 0x46d260, 2, 0x3c3de0},  // the composite filter lambda's _Do_call
+         {kModVis, 0x215778, 2, 0x160710},      // Visualizer's overlay filter lambda's _Do_call
+     },
+     0x448530,
+     0x3c606b},
+    {"2.9.31",  // R147: same RTTI classes (ccMTHandlerImpl, the two _Func_impl_no_alloc lambdas), same slots
+     kCode2931,
+     sizeof(kCode2931) / sizeof(kCode2931[0]),
+     {
+         {kModCockpit, 0x55e908, 3, 0x4b5000},
+         {kModCockpit, 0x55e990, 2, 0x4b2870},
+         {kModVis, 0x243e88, 2, 0x18cea0},
+     },
+     0x537530,
+     0x4b4afb},
+};
+constexpr int kBuildCount = static_cast<int>(sizeof(kBuilds) / sizeof(kBuilds[0]));
+static_assert(sizeof(kCode2930) == sizeof(kCode2931), "one range per site in every build");
 constexpr uint32_t kCurCtxRva = 0x11d510;  // GraphicsCore ContextBase::currentContext (exported)
 const char kCurCtxExport[] = "?currentContext@ContextBase@GraphicsCore@@1PEAV12@EA";
 constexpr uint32_t kCtxVP = 0x1b4, kCtxProj = 0x134;  // ContextBase: viewProj, proj (row vectors; see LoadCtxVp)
@@ -192,23 +248,41 @@ inline bool ReadSlot(void** slot, SlotReadFn slotValue, void** out) {
   *out = slotValue(slot);
   return true;
 }
-const char* VerifySites(uint8_t* const image[kModCount], const uintptr_t valueBase[kModCount],
-                        SlotReadFn slotValue = &PlainSlot) {
-  for (int m = 0; m < kModCount; ++m)
-    if (!image[m]) return "a module is not loaded";
-  for (const CodeSig& c : kCode) {
+// One build: every code range, then every vtable target. Null: it is this build.
+inline const char* VerifyBuild(const Build& b, uint8_t* const image[kModCount], const uintptr_t valueBase[kModCount],
+                               SlotReadFn slotValue) {
+  for (size_t i = 0; i < b.codeCount; ++i) {
+    const CodeSig& c = b.code[i];
     uint8_t buf[256];
     const size_t n = c.end - c.begin;
     if (n > sizeof(buf) || !allocslab::ReadBytes(image[c.mod] + c.begin, buf, n) || Fnv(buf, n) != c.hash)
       return "code does not match this build";
   }
-  for (const VtSig& v : kVt) {
+  for (const VtSig& v : b.vt) {
     void* cur = nullptr;
     void** slot = reinterpret_cast<void**>(image[v.mod] + v.vt) + v.slot;
     if (!ReadSlot(slot, slotValue, &cur)) return "a vtable is not readable";
     if (reinterpret_cast<uintptr_t>(cur) != valueBase[v.mod] + v.target) return "a vtable does not match this build";
   }
   return nullptr;
+}
+// Every known build in turn (R147); *build: the index into kBuilds of the one that matched (-1: none). The reason
+// returned is the one of the build that got furthest (its code matched, a vtable did not), else the code's.
+const char* VerifySites(uint8_t* const image[kModCount], const uintptr_t valueBase[kModCount],
+                        SlotReadFn slotValue = &PlainSlot, int* build = nullptr) {
+  if (build) *build = -1;
+  for (int m = 0; m < kModCount; ++m)
+    if (!image[m]) return "a module is not loaded";
+  const char* why = "code does not match this build";
+  for (int b = 0; b < kBuildCount; ++b) {
+    const char* w = VerifyBuild(kBuilds[b], image, valueBase, slotValue);
+    if (!w) {
+      if (build) *build = b;
+      return nullptr;
+    }
+    if (strcmp(w, "code does not match this build") != 0) why = w;
+  }
+  return why;
 }
 
 // ---------------------------------------------------------------------------
@@ -1938,9 +2012,11 @@ bool Install() {
       return false;
     }
   }
-  const char* why = VerifySites(img, vb, &SlotOriginal);
+  int bi = -1;
+  const char* why = VerifySites(img, vb, &SlotOriginal, &bi);
   uint8_t** cc = reinterpret_cast<uint8_t**>(GetProcAddress(reinterpret_cast<HMODULE>(img[kModGc]), kCurCtxExport));
   if (!why && cc != reinterpret_cast<uint8_t**>(img[kModGc] + kCurCtxRva)) why = "currentContext export moved";
+  if (!why && (bi < 0 || bi >= kBuildCount)) why = "no known build";
   if (why) {
     g_state = -1;
     g_os.sigFail++;
@@ -1951,11 +2027,12 @@ bool Install() {
   }
   // The render point: CockpitBase's import slot of RenderObject::render, holding GraphicsVista's export. Without it
   // the replays without a filter point are decided by the whole-frame scan (as before R32 r4).
+  const Build& build = kBuilds[bi];
   void** renderSlot = nullptr;
   {
     const uint32_t iat = sigscan::ImportSlotRva(img[kModCockpit], "GraphicsVista.dll", kRenderImport);
     void* exp = reinterpret_cast<void*>(GetProcAddress(reinterpret_cast<HMODULE>(img[kModGv]), kRenderImport));
-    void** s = iat == kRenderIat ? reinterpret_cast<void**>(img[kModCockpit] + iat) : nullptr;
+    void** s = iat == build.renderIat ? reinterpret_cast<void**>(img[kModCockpit] + iat) : nullptr;
     void* cur = nullptr;
     if (s && exp && ReadSlot(s, &SlotOriginal, &cur) && cur == exp)
       renderSlot = s;
@@ -1965,17 +2042,20 @@ bool Install() {
           iat);
   }
   void** slot[kVtCount];
-  for (int i = 0; i < kVtCount; ++i) slot[i] = reinterpret_cast<void**>(img[kVt[i].mod] + kVt[i].vt) + kVt[i].slot;
-  if (!InstallAt(slot[kVtReplay], slot[kVtVis], slot[kVtComp], cc, img[kModVis] + kVt[kVtVis].vt, true, renderSlot,
-                 renderSlot ? img[kModCockpit] + kRenderRet : nullptr)) {
+  for (int i = 0; i < kVtCount; ++i) {
+    const VtSig& v = build.vt[i];
+    slot[i] = reinterpret_cast<void**>(img[v.mod] + v.vt) + v.slot;
+  }
+  if (!InstallAt(slot[kVtReplay], slot[kVtVis], slot[kVtComp], cc, img[kModVis] + build.vt[kVtVis].vt, true,
+                 renderSlot, renderSlot ? img[kModCockpit] + build.renderRet : nullptr)) {
     g_state = -1;
     Log("cockpit ipd overlays (cpu): a vtable slot could not be hooked (the others put back); overlays at DCS's "
         "camera");
     return false;
   }
   Log("cockpit ipd overlays (cpu): hooked the record replay, the two record filters%s (DCS's MVP camera set per "
-      "record: HUD at DCS's camera, cockpit displays at the true eye once learned)",
-      renderSlot ? " and the record render point" : "");
+      "record: HUD at DCS's camera, cockpit displays at the true eye once learned; DCS %s sites)",
+      renderSlot ? " and the record render point" : "", build.name);
   return true;
 }
 // TickCfg: Install wanted (not installed yet, or hooks kept in pass-through by an uninstall).

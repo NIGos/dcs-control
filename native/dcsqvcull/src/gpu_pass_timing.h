@@ -677,11 +677,15 @@ void OnBoundary(void* pass, bool begin, int depth) {
 // xrEndFrame wrapper: DCS's OpenXR vt[10] (4 x xrReleaseSwapchainImage +
 // xrEndFrame; QVFR composes and the runtime submits inside it).
 // [V Visualizer.dll RVA 0x124630, vtable RTTI .?AVOpenXR@@, R11/R15 notes;
-// two register arguments (this, frame info), checked offline.]
+// two register arguments (this, frame info), checked offline. R147: DCS
+// 2.9.31's Visualizer (0x6ad87745) has it at 0x150dc0 (.text +0x2c790, the
+// same prologue); either analysed RVA is accepted.]
 // ---------------------------------------------------------------------------
 
 constexpr int kXrEndSlot = 10;
-constexpr uint32_t kXrEndRva = 0x124630;
+// Per analysed Visualizer build (PE timestamp): DCS 2.9.30, 2.9.31 (the same list as frame_start.h's kVisBuilds).
+constexpr uint32_t kXrEndStamps[] = {0x6ac12454u, 0x6ad87745u};
+constexpr uint32_t kXrEndRvas[] = {0x124630, 0x150dc0};
 const uint8_t kXrEndPrologue[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57};
 using XrEndFn = uint64_t(__fastcall*)(void*, void*, void*, void*);
 XrEndFn g_xrOrig = nullptr;
@@ -757,9 +761,14 @@ bool InstallXr() {
   }
   auto* fn = static_cast<uint8_t*>(SlotOriginal(&vt[kXrEndSlot]));
   const uintptr_t rva = reinterpret_cast<uintptr_t>(fn) - reinterpret_cast<uintptr_t>(vis);
-  if (rva != kXrEndRva || !CodeMatches(fn, kXrEndPrologue, sizeof(kXrEndPrologue))) {
-    Log("  gpu pass timing: OpenXR vt[%d] is Visualizer+0x%llx, not the analysed 0x%x; xrEndFrame not timed",
-        kXrEndSlot, static_cast<unsigned long long>(rva), kXrEndRva);
+  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(reinterpret_cast<const uint8_t*>(vis) +
+                                                               reinterpret_cast<const IMAGE_DOS_HEADER*>(vis)->e_lfanew);
+  bool known = false;
+  for (size_t i = 0; i < sizeof(kXrEndRvas) / sizeof(kXrEndRvas[0]); ++i)
+    known |= nt->FileHeader.TimeDateStamp == kXrEndStamps[i] && rva == kXrEndRvas[i];
+  if (!known || !CodeMatches(fn, kXrEndPrologue, sizeof(kXrEndPrologue))) {
+    Log("  gpu pass timing: OpenXR vt[%d] is Visualizer+0x%llx, not this build's analysed RVA (0x%x, 0x%x); xrEndFrame not timed",
+        kXrEndSlot, static_cast<unsigned long long>(rva), kXrEndRvas[0], kXrEndRvas[1]);
     return false;
   }
   g_xrOrig = reinterpret_cast<XrEndFn>(fn);  // before the slot points at the hook

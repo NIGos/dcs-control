@@ -3885,7 +3885,8 @@ void OnEndFrame() {
 
 using XrEndFn = int32_t(__stdcall*)(void*, const void*);
 constexpr int kXeSlot = 35;  // XrGeneratedDispatchTable: ... xrWaitFrame 33, xrBeginFrame 34, xrEndFrame 35
-constexpr uint32_t kXeTrampRva = 0x1b6abf;  // Visualizer: mov r8, [rax+48h]; mov rax, [r8+118h]
+// Visualizer: mov r8, [rax+48h]; mov rax, [r8+118h], per fstart::kVisBuilds build (2.9.30, 2.9.31: R147, .text +0x2c790)
+constexpr uint32_t kXeTrampRva[fstart::kVisBuildCount] = {0x1b6abf, 0x1e324f};
 const uint8_t kXeTramp[] = {0x4c, 0x8b, 0x40, 0x48, 0x49, 0x8b, 0x80, 0x18, 0x01, 0x00, 0x00};
 XrEndFn g_xeOrig = nullptr;  // kept after the unhook (a call in flight still forwards through it)
 void** g_xeSlot = nullptr;
@@ -3981,14 +3982,12 @@ bool InstallXr() {
     Log("cockpit mask: Visualizer.dll not loaded; frames committed late (no displayTime pairing)");
     return false;
   }
-  auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(vis + reinterpret_cast<IMAGE_DOS_HEADER*>(vis)->e_lfanew);
-  if (nt->FileHeader.TimeDateStamp != fstart::kVisStamp ||
-      !gpt::CodeMatches(vis + fstart::kInstLeaRva, fstart::kInstLea, sizeof(fstart::kInstLea)) ||
-      !gpt::CodeMatches(vis + kXeTrampRva, kXeTramp, sizeof(kXeTramp))) {
-    Log("cockpit mask: Visualizer.dll is not the analysed build; frames committed late (no displayTime pairing)");
+  const int build = fstart::VisBuildOf(vis);
+  if (build < 0 || !gpt::CodeMatches(vis + kXeTrampRva[build], kXeTramp, sizeof(kXeTramp))) {
+    Log("cockpit mask: Visualizer.dll is not an analysed build; frames committed late (no displayTime pairing)");
     return false;
   }
-  void** disp = fstart::DispatchGuarded(vis);
+  void** disp = fstart::DispatchGuarded(vis, build);
   if (!disp || !gpt::Readable(disp) || !gpt::Readable(&disp[kXeSlot])) {
     Log("cockpit mask: OpenXR dispatch table not found (no session yet?); retried");
     return false;

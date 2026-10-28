@@ -17,7 +17,9 @@
 
 namespace partw {
 
-constexpr uint32_t kVtableRva = 0x20d7e8;  // Visualizer .?AVGraphSceneObject@Graphics@@
+// Visualizer .?AVGraphSceneObject@Graphics@@ (COL offset 0x48). The recorded RVA of hook_sigs.h's analysed build
+// (DCS 2.9.31 since R147; 2.9.30 had 0x20d7e8, found there by reloc.h's RTTI scan).
+constexpr uint32_t kVtableRva = 0x23bef8;
 constexpr int kSlot = 1;
 constexpr size_t kCollections = 0x190;
 constexpr size_t kEntryStride = 0x48;
@@ -34,7 +36,7 @@ struct Target {
   GetterFn getter = nullptr;
 };
 Target g_targets[] = {
-    {L"Visualizer.dll", 0x20d7e8, ".?AVGraphSceneObject@Graphics@@"},
+    {L"Visualizer.dll", 0x23bef8, ".?AVGraphSceneObject@Graphics@@"},
     {L"animator.dll", 0x93650, ".?AVCharacterInstanceGraphicsReflection@Animator@@"},
 };
 constexpr int kTargets = sizeof(g_targets) / sizeof(g_targets[0]);
@@ -152,7 +154,7 @@ void __fastcall Hook(void* self, uint32_t count, void* infos, void* flags, void*
   }
 }
 
-// Weight getter: GraphSceneObject vtable slot 2 (Visualizer 0x63110:
+// Weight getter: GraphSceneObject vtable slot 2 (Visualizer 0x63110, 2.9.31 0x8f8a0:
 // movss xmm0,[rcx+0x30]; ret). Scene.dll calls it when it inserts the object
 // entries, every frame, and copies the result to entry+0x10, so weights
 // written into the entries are overwritten. With cost weights on, calls coming

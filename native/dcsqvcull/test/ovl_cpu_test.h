@@ -1185,34 +1185,48 @@ void TestSignatures() {
   if (!mapped) {
     QvSkip("ovl cpu signatures: a DLL could not be mapped\n");
   } else {
-    const char* why = oc::VerifySites(img, pref);
+    // R147: one table per DCS build (2.9.30, 2.9.31); the installed DLLs must be exactly one of them.
+    int bi = -1;
+    const char* why = oc::VerifySites(img, pref, &oc::PlainSlot, &bi);
     if (why) printf("     (signature: %s)\n", why);
-    Check(!why, "ovl cpu signatures: every code range (with the record array walk and layout) and vtable target "
-                "matches DCS 2.9.30's DLLs (as installed)");
-    Check(sigscan::ImportSlotRva(img[oc::kModCockpit], "GraphicsVista.dll", oc::kRenderImport) == oc::kRenderIat &&
+    if (!why && bi >= 0) printf("     (signature: DCS %s sites)\n", oc::kBuilds[bi].name);
+    Check(!why && bi >= 0 && bi < oc::kBuildCount,
+          "ovl cpu signatures: every code range (with the record array walk and layout) and vtable target "
+          "matches one known DCS build's DLLs (2.9.30 or 2.9.31, as installed)");
+    const oc::Build& b = oc::kBuilds[bi >= 0 ? bi : oc::kBuildCount - 1];
+    Check(bi >= 0 &&
+              sigscan::ImportSlotRva(img[oc::kModCockpit], "GraphicsVista.dll", oc::kRenderImport) == b.renderIat &&
               sigscan::ExportRva(img[oc::kModGv], oc::kRenderImport) != 0,
           "ovl cpu signatures (R32 r4): CockpitBase imports RenderObject::render at the render point's slot, "
           "GraphicsVista exports it");
+    // The other builds' tables refuse these DLLs (a build is never mistaken for another).
+    bool othersRefused = true;
+    for (int o = 0; o < oc::kBuildCount; ++o)
+      if (o != bi && oc::VerifyBuild(oc::kBuilds[o], img, pref, &oc::PlainSlot) == nullptr) othersRefused = false;
+    Check(bi >= 0 && othersRefused, "ovl cpu signatures (R147): the other known builds' sites refuse the installed DLLs");
     // A copy of CockpitBase's image with one flipped byte (the filter call; the record stride), then a moved
-    // vtable target.
+    // vtable target. The bytes: the call in the per-record range (code[1] + 0x2c), the 0xd0 of add rbx, 0xd0 (code[8]
+    // + 3), in the build that matched.
     std::vector<uint8_t> copy(sizeOf[oc::kModCockpit], 0);
     for (uint32_t o = 0; o < sizeOf[oc::kModCockpit]; o += 4096)
       allocslab::ReadBytes(img[oc::kModCockpit] + o, copy.data() + o, std::min<uint32_t>(4096, sizeOf[oc::kModCockpit] - o));
     uint8_t* keep = img[oc::kModCockpit];
     img[oc::kModCockpit] = copy.data();
-    const bool copyOk = oc::VerifySites(img, pref) == nullptr;
-    copy[0x3c5c7c] ^= 0x01;
+    const bool copyOk = bi >= 0 && oc::VerifySites(img, pref) == nullptr;
+    const uint32_t filterCall = b.code[1].begin + 0x2c, stride = b.code[8].begin + 3;
+    const bool strideIsD0 = copy[stride] == 0xd0;
+    copy[filterCall] ^= 0x01;
     const bool flipRefused = oc::VerifySites(img, pref) != nullptr;
-    copy[0x3c5c7c] ^= 0x01;
-    copy[0x3c607a] ^= 0x01;  // add rbx, 0xd0
+    copy[filterCall] ^= 0x01;
+    copy[stride] ^= 0x01;  // add rbx, 0xd0
     const bool strideRefused = oc::VerifySites(img, pref) != nullptr;
-    copy[0x3c607a] ^= 0x01;
-    uint64_t* slot = reinterpret_cast<uint64_t*>(copy.data() + oc::kVt[oc::kVtReplay].vt + 8 * oc::kVt[oc::kVtReplay].slot);
+    copy[stride] ^= 0x01;
+    uint64_t* slot = reinterpret_cast<uint64_t*>(copy.data() + b.vt[oc::kVtReplay].vt + 8 * b.vt[oc::kVtReplay].slot);
     *slot += 16;
     const bool vtRefused = oc::VerifySites(img, pref) != nullptr;
     *slot -= 16;
     img[oc::kModCockpit] = keep;
-    Check(copyOk && flipRefused && strideRefused && vtRefused,
+    Check(copyOk && strideIsD0 && flipRefused && strideRefused && vtRefused,
           "ovl cpu signatures: one flipped code byte (filter call, record stride), one moved vtable target: install "
           "refused");
   }

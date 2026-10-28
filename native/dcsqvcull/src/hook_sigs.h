@@ -110,12 +110,12 @@ enum Id : uint16_t {
 };
 
 inline constexpr Module kModules[] = {
-    {L"NGModel.dll", 0x6aae1e68u, 0x7b000u},
-    {L"edCore.dll", 0x6aae1d76u, 0xaad000u},
-    {L"dx11backend.dll", 0x6aae1d9du, 0x199000u},
-    {L"Visualizer.dll", 0x6ac12454u, 0x312000u},
-    {L"animator.dll", 0x6aae1e0fu, 0xda000u},
-    {L"GraphicsCore.dll", 0x6aae1dbfu, 0x12a000u},
+    {L"NGModel.dll", 0x6acb85e4u, 0x7b000u},
+    {L"edCore.dll", 0x6acb8049u, 0xaad000u},
+    {L"dx11backend.dll", 0x6acb8051u, 0x199000u},
+    {L"Visualizer.dll", 0x6ad87745u, 0x340000u},
+    {L"animator.dll", 0x6acb8085u, 0xda000u},
+    {L"GraphicsCore.dll", 0x6acb805cu, 0x12a000u},
 };
 
 inline constexpr Mask kMasks[] = {
@@ -242,19 +242,19 @@ inline constexpr Loc kLocs[kCount] = {
      nullptr, nullptr,
      0, 123u, 0x1c1601e728aabd00ull, 50u, 1u},
     // VIS.GraphSceneObject.vtbl
-    {"VIS.GraphSceneObject.vtbl", 3, kVtable, 0x20d7e8u,
+    {"VIS.GraphSceneObject.vtbl", 3, kVtable, 0x23bef8u,
      ".?AVGraphSceneObject@Graphics@@", 72u, false, 0,
      kPattern, nullptr, 0, 0, 0,
      nullptr, nullptr,
      0, 0u, 0x0000000000000000ull, 51u, 0u},
     // VIS.GraphSceneObject.collectRenderables
-    {"VIS.GraphSceneObject.collectRenderables", 3, kCode, 0x1a8723u,
+    {"VIS.GraphSceneObject.collectRenderables", 3, kCode, 0x1d4eb3u,
      nullptr, 0u, false, 0,
      kImportThunk, nullptr, 0, 0, 0,
      "graphicsvista.dll", "?collectRenderables@GraphSceneObject@Graphics@@UEAAXIPEAPEBUCollectionInfo@render@@QEB_NPEAPEAV?$vector@PEAUISceneRenderable@render@@V?$allocator@PEAUISceneRenderable@render@@@ed@@@ed@@AEAUILightProbeSampler@4@@Z",
      0, 0u, 0x0000000000000000ull, 51u, 0u},
     // VIS.GraphSceneObject.partitionWeight
-    {"VIS.GraphSceneObject.partitionWeight", 3, kCode, 0x63110u,
+    {"VIS.GraphSceneObject.partitionWeight", 3, kCode, 0x8f8a0u,
      nullptr, 0u, false, 0,
      kViaVtable, "F3 0F 10 41 30 C3 CC CC CC CC CC CC CC CC CC CC", 0, 17, 2,
      nullptr, nullptr,

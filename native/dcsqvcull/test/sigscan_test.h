@@ -242,8 +242,10 @@ void TestDcs() {
     return;
   }
   const uint8_t* base = sigscan::ImageBase(m);
-  // Expectations of the analysed build (tools/hooks_manifest.json).
-  if (sigscan::NtHeaders(base)->FileHeader.TimeDateStamp != 0x6aae1e68) {
+  // Expectations of the analysed builds (tools/hooks_manifest.json): 0x6aae1e68 and 0x6acb85e4 (DCS 2.9.30 hotfix and
+  // 2.9.31, R147) have every RVA below in the same place.
+  const uint32_t stamp = sigscan::NtHeaders(base)->FileHeader.TimeDateStamp;
+  if (stamp != 0x6aae1e68 && stamp != 0x6acb85e4) {
     printf("SKIP dcs: NGModel.dll is not the analysed build (run tools/dcs_patch_check.py instead)\n");
     FreeLibrary(m);
     return;
