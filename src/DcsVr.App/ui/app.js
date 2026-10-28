@@ -1461,7 +1461,7 @@ function updateWorkflow() {
 let liveOn = true, liveTimer = null, liveBase = null, liveBusy = null, liveAgain = false, liveStatus = '';
 const liveMode = () => Boolean(state?.dcsRunning && state.launchReady && liveOn);
 const liveSet = () => new Set(state?.liveFields || []);
-const LIVE_HITCH = new Set(['neuralIntensity','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralStyle','neuralAutomaticMask','neuralUiCorrection','flowPreset','nvidiaFlowScale','bidirectionalFlow']);
+const LIVE_HITCH = new Set(['neuralIntensity','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralStyle','neuralAutomaticMask','neuralUiCorrection','nvidiaFlowScale','bidirectionalFlow']);
 function renderLive() {
   const on = liveMode(), set = liveSet();
   document.body.classList.toggle('live-mode', on);
@@ -1497,7 +1497,8 @@ async function applyLive() {
       liveBase = sent;
       const applied = r.applied.filter(p => edited.includes(p)), waiting = r.waiting.filter(p => edited.includes(p));
       const parts = [applied.length ? 'Applied live: '+liveNames(applied)+'.' : '', waiting.length ? 'Waits for the next launch: '+liveNames(waiting)+'.' : ''].filter(Boolean);
-      // DLSS 5 style and strength, and the NVIDIA flow, rebuild their GPU work: a short hitch in the headset is normal.
+      // DLSS 5 style and strength, and the NVIDIA flow's resolution and direction, rebuild their GPU work: a short hitch in
+      // the headset is normal. The flow quality preset is not live (R148: OFXR's re-initialisation froze DCS for 6.8 s).
       if (applied.some(p => LIVE_HITCH.has(p))) parts.push('Expect a short hitch.');
       liveStatus = parts.join(' ') || (r.written.length ? 'Applied live.' : '');
     } catch (error) {

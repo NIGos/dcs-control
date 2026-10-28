@@ -653,6 +653,22 @@ Test("Last flight: dcs.log session, Pimax frames, OFXR modes and frame time, DLS
     Require(LastFlight.ParseDcsSession("no header", "", start) is null);
     var crashed = LastFlight.ParseDcsSession("=== Log opened UTC 2026-10-05 17:37:28\n", "2026-10-05 17:40:00.000 INFO x\n", start.AddHours(1));
     Require(crashed is { Closed: false } c1 && c1.End == start.AddSeconds(152));
+    // R148 (DCS 2.9.31, as 2.9.30): a clean exit no longer writes "=== Log closed."; its last line is the render thread
+    // stopping (trimmed from the flight's dcs.log). Lines after it are something else (still running, or a crash).
+    const string r148Head = "=== Log opened UTC 2026-10-28 17:44:41\n2026-10-28 17:44:41.459 WARNING EDCORE (Main): hypervisor is active\n";
+    const string r148Tail = "2026-10-28 17:55:36.269 WARNING SCENE (25812): Scene was removed with 405 alive lights\n2026-10-28 17:55:37.472 INFO    DX11BACKEND (25812): DX11Renderer::shutdown()\n"
+        + "2026-10-28 17:55:38.942 INFO    DX11BACKEND (25812): total_size: 0\n2026-10-28 17:55:38.957 INFO    VISUALIZER (25812): render thread has stopped\n";
+    Require(LastFlight.ParseDcsSession(r148Head, r148Tail, start.AddDays(30)) is { Closed: true } r148 && r148.End == new DateTimeOffset(2026, 10, 28, 17, 55, 38, 957, TimeSpan.Zero), "R148 clean exit");
+    Require(LastFlight.ParseDcsSession(r148Head, r148Tail.Replace("\n", "\r\n"), start.AddDays(30)) is { Closed: true }, "CRLF");
+    Require(LastFlight.ParseDcsSession(r148Head, r148Tail + "2026-10-28 17:55:39.100 ERROR   EDCORE (Main): something after the render thread\n", start.AddDays(30)) is { Closed: false }, "not the last line");
+    // OFXR's close record (patch 0065), trimmed from R148's flight log: the first instance (a probe) closes and a reopen
+    // marker follows; the log is closed only when a close record is the last logger record.
+    string[] ofxrHead = ["seq=1 ms=0.758 tid=37692 phase=I op=logger result=401 dur_us=0 a=256 b=0 c=34896", "seq=9 ms=6.566 tid=37692 phase=I op=logger result=0 dur_us=0 a=0 b=0 c=0",
+        "seq=10 ms=7.798 tid=37692 phase=I op=logger result=0 dur_us=0 a=2 b=34896 c=5", "seq=561071 ms=314356.829 tid=25812 phase=I op=latency_status result=12 dur_us=0 a=13624 b=45 c=0"];
+    Require(!LastFlight.OfxrClosed(ofxrHead) && !LastFlight.OfxrClosed(null) && !LastFlight.OfxrClosed([]), "reopened, still running");
+    Require(LastFlight.OfxrClosed([.. ofxrHead, "seq=1426297 ms=633504.271 tid=25812 phase=I op=logger result=0 dur_us=0 a=0 b=0 c=0\r"]), "closed at exit");
+    Require(LastFlight.OfxrClosed([.. ofxrHead, "seq=1426297 ms=633504.271 tid=25812 phase=I op=logger result=0 dur_us=0 a=0 b=0 c=0", "seq=1426298 ms=633504.3 tid=1 phase=I op=latency_status result=12 dur_us=0 a=1 b=0 c=0"]), "lines after the close record");
+    Require(!LastFlight.OfxrClosed([.. ofxrHead, "seq=1426297 ms=633504.271 tid=25812 phase=I op=logger result=0 dur_us=0 a=0 b=0 c=4"]), "a count record is not the close record");
     // Pimax: the DCS process's lines inside the session; loading seconds (under 1 FPS) and other processes are skipped.
     string P(DateTimeOffset t, int pid, double a, double c, int missed, int discard) =>
         $"[{L(t, "yy-MM-dd HH:mm:ss.fff")}][26424][info][PSRV] {pid} Warning rendering fps:(a:{a.ToString(invariant)},c:{c.ToString(invariant)}) Missed:(a:{missed},c:0,bl:0) Stale:(a:0) Discard:(a:{discard}) GPU: 65% CPU: 97%";
@@ -4383,7 +4399,7 @@ Test("Live: the live table names real profile settings, each a field of the inte
     Require(LiveSettings.Fields.Select(f => f.Name).Distinct().Count() == LiveSettings.Fields.Count, "listed twice");
     // Read only at start, or carried by Quad Views, OFXR, Cheeky or options.lua: never live.
     foreach (var name in new[] { "engineOptimizations", "engineDevMode", "foveaWidth", "frameGenFactor", "frameGen", "showOverlay", "farDepth", "frameGenHudSymbology", "peripheryDlssPreset", "fpsLimit", "eyeDistance",
-        "quadRoundFocus", "quadTurbo", "quadFocusScale", "peripheralScale", "neuralFocusArea", "neuralWorkingScale", "neuralBeforeUpscaling", "focusDlssPreset", "quadNeuralEdgeFade" })
+        "quadRoundFocus", "quadTurbo", "quadFocusScale", "peripheralScale", "neuralFocusArea", "neuralWorkingScale", "neuralBeforeUpscaling", "focusDlssPreset", "quadNeuralEdgeFade", "flowPreset" })
         Require(LiveSettings.Find(name) is null, "must wait for the next launch: " + name);
     // R142: CostWeights and StreamDedupe turn on live. R144 (a current install): AllocSlabs too; before, off only.
     Require(LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Scene.CostWeights", "1", "0") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Texture.StreamDedupe", "1", "0")
@@ -4507,9 +4523,10 @@ Test("Live phase 2: the key lists match the components, and the tags follow the 
     // The text Quad Views gets has every live key the profile writes.
     var quadKeys = IniFile.Parse(ConfigurationWriters.QuadViews(new VrProfile())).Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.QuadFile, k, "1", null)).Count();
     Require(quadKeys == 8, "Quad Views writes " + quadKeys + " live keys");
-    // OFXR: the NVIDIA flow keys only.
+    // OFXR: the NVIDIA flow keys only, not the preset (R148: OFXR re-initialises the flow for it, DCS froze for 6.8 s).
     var ofxr = IniFile.Parse(ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia }));
-    Require(ofxr.Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.FlowFile, k, "1", null)).Order().SequenceEqual(new[] { "ofxr.nvidia_bidirectional", "ofxr.nvidia_input_scale", "ofxr.nvidia_occlusion_aware", "ofxr.nvidia_preset" }));
+    Require(ofxr.Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.FlowFile, k, "1", null)).Order().SequenceEqual(new[] { "ofxr.nvidia_bidirectional", "ofxr.nvidia_input_scale", "ofxr.nvidia_occlusion_aware" }));
+    Require(!LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.nvidia_preset", "fast", null), "the preset waits");
     Require(!LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.backend", "nvidia", null) && !LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.triple_frame_gen", "1", null) && !LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.nvidia_preset", "fast", null, current: false));
     // Cheeky: the fifteen keys of dcs_live_keys, each one Cheeky's writer emits; its start-only keys never.
     var cheeky = IniFile.Parse(ConfigurationWriters.Cheeky(new VrProfile { FoveatedDlss = true }));
@@ -4524,10 +4541,10 @@ Test("Live phase 2: the key lists match the components, and the tags follow the 
     string[] all = [LiveSettings.EngineFile, LiveSettings.QuadFile, LiveSettings.FlowFile, LiveSettings.NeuralFile];
     var nvidia = new VrProfile { EngineOptimizations = true, FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.QuadViewsFoveated };
     var tags = LiveSettings.AvailableFields(nvidia, Journal(ProductInfo.Version, all));
-    Require(new[] { "quadSharpening", "quadEdgeBlend", "peripheryStabilityStrength", "flowPreset", "nvidiaFlowScale", "bidirectionalFlow", "neuralIntensity", "neuralStyle", "neuralMotionScaleX", "engineDiagnosticHooks", "engineModelAllocator" }.All(tags.Contains), string.Join(", ", tags));
+    Require(new[] { "quadSharpening", "quadEdgeBlend", "peripheryStabilityStrength", "nvidiaFlowScale", "bidirectionalFlow", "neuralIntensity", "neuralStyle", "neuralMotionScaleX", "engineDiagnosticHooks", "engineModelAllocator" }.All(tags.Contains) && !tags.Contains("flowPreset"), string.Join(", ", tags));
     var old = LiveSettings.AvailableFields(nvidia, Journal(null, all));
     Require(old.Contains("engineBeeps") && old.Contains("engineModelAllocator") && !old.Contains("quadSharpening") && !old.Contains("flowPreset") && !old.Contains("neuralIntensity") && !old.Contains("engineDiagnosticHooks"), string.Join(", ", old));
-    Require(!LiveSettings.AvailableFields(nvidia with { FrameGen = FrameGeneration.FidelityFx }, Journal(ProductInfo.Version, all)).Contains("flowPreset"), "FidelityFX: the flow keys mean nothing");
+    Require(!LiveSettings.AvailableFields(nvidia with { FrameGen = FrameGeneration.FidelityFx }, Journal(ProductInfo.Version, all)).Contains("nvidiaFlowScale"), "FidelityFX: the flow keys mean nothing");
     Require(!LiveSettings.AvailableFields(nvidia with { EngineDiagnosticHooks = true }, Journal(ProductInfo.Version, all)).Contains("engineDiagnosticHooks"), "on at start: off waits");
     Require(!LiveSettings.Current(Journal("0.6.1")) && LiveSettings.Current(Journal("0.6.2-preview")) && LiveSettings.Current(Journal("0.6.2")) && !LiveSettings.Current(Journal("garbage")));
     // Setting values in an INI keeps everything else (Cheeky's own keys, comments, line endings) and adds a missing key.
@@ -4586,21 +4603,69 @@ Test("Live phase 2: engine R144 switches the Model allocator on live and Diagnos
     // Hooks once in stay until DCS restarts: back off, the engine file waits whole (the allocator with it).
     var off = WhileDcsRuns(f, () => f.Service.ApplyLive(draft, inventory));
     Require(off.Written.Count == 0 && IniFile.Parse(IniFile.Decode(File.ReadAllBytes(engine))) is { } kept && kept["General.Diagnostics"] == "1" && kept["Model.AllocSlabs"] == "1", off.Message);
+    // The draft is profile.json again, but neither is in effect: both wait (R148 step 16 listed none).
+    Require(off.Applied.Count == 0 && off.Waiting.Order().SequenceEqual(new[] { "engineDiagnosticHooks", "engineModelAllocator" }), off.Message);
     var allocatorOff = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { EngineDiagnosticHooks = true }, inventory));
-    Require(allocatorOff.Written.SequenceEqual([engine]) && allocatorOff.Applied.SequenceEqual(["engineDiagnosticHooks"]) && IniFile.Parse(IniFile.Decode(File.ReadAllBytes(engine)))["Model.AllocSlabs"] == "0", allocatorOff.Message);
+    Require(allocatorOff.Written.SequenceEqual([engine]) && allocatorOff.Applied.Order().SequenceEqual(new[] { "engineDiagnosticHooks", "engineModelAllocator" }) && allocatorOff.Waiting.Count == 0
+        && IniFile.Parse(IniFile.Decode(File.ReadAllBytes(engine)))["Model.AllocSlabs"] == "0", allocatorOff.Message);
+});
+Test("Live: applied and waiting are counted against what is installed now, not profile.json (R148 steps 15 and 16)", () =>
+{
+    var f = E2e("live-installed"); var draft = LiveDraft(); var inventory = E2eInventory(f);
+    Require(f.Service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Applied && !draft.EngineDiagnosticHooks);
+    var engine = LiveEntry(f, LiveSettings.EngineFile).Path; var settings = LiveEntry(f, LiveSettings.QuadFile).Path;
+    // Steps 1-2 and 14: Quad Views' sharpening and periphery contrast live, then Diagnostic hooks on.
+    var sharp = draft with { QuadSharpening = 0.3, QuadPeripheryContrast = 0.6 };
+    var first = WhileDcsRuns(f, () => f.Service.ApplyLive(sharp, inventory));
+    Require(first.Written.SequenceEqual([settings]) && first.Applied.Order().SequenceEqual(new[] { "quadPeripheryContrast", "quadSharpening" }) && first.Waiting.Count == 0, first.Message);
+    var hooks = sharp with { EngineDiagnosticHooks = true };
+    var on = WhileDcsRuns(f, () => f.Service.ApplyLive(hooks, inventory));
+    Require(on.Written.SequenceEqual([engine]) && on.Applied.Order().SequenceEqual(new[] { "engineDiagnosticHooks", "quadPeripheryContrast", "quadSharpening" }) && on.Waiting.Count == 0, on.Message);
+    // Step 15: Quad Views turbo waits, and settings.cfg with it; the sharpening and contrast written before are in effect
+    // (R148 listed them as waiting too).
+    var turbo = WhileDcsRuns(f, () => f.Service.ApplyLive(hooks with { QuadTurbo = !draft.QuadTurbo }, inventory));
+    Require(turbo.Written.Count == 0 && turbo.Waiting.SequenceEqual(["quadTurbo"]) && turbo.Applied.Order().SequenceEqual(new[] { "engineDiagnosticHooks", "quadPeripheryContrast", "quadSharpening" }), turbo.Message);
+    Require(turbo.Message == "Already in effect. 1 setting waits for the next launch.", turbo.Message);
+    // Step 16, back to the launched profile: Quad Views goes back live; Diagnostic hooks stay in until DCS restarts, so
+    // the engine file waits and the hooks are listed as waiting (R148: waiting []).
+    var back = WhileDcsRuns(f, () => f.Service.ApplyLive(draft, inventory));
+    Require(back.Written.SequenceEqual([settings]) && back.Applied.Order().SequenceEqual(new[] { "quadPeripheryContrast", "quadSharpening" }) && back.Waiting.SequenceEqual(["engineDiagnosticHooks"]), back.Message);
+    Require(IniFile.Parse(IniFile.Decode(File.ReadAllBytes(engine)))["General.Diagnostics"] == "1" && IniFile.Parse(File.ReadAllText(settings))["exe:DCS.sharpen_focus_view"] == IniFile.Parse(ConfigurationWriters.QuadViews(draft))["exe:DCS.sharpen_focus_view"], "hooks kept, sharpening back");
+    var still = WhileDcsRuns(f, () => f.Service.ApplyLive(draft, inventory));
+    Require(still.Written.Count == 0 && still.Applied.Count == 0 && still.Waiting.SequenceEqual(["engineDiagnosticHooks"]), still.Message);
+    var record = Path.Combine(f.Service.StateRoot, "live.json");
+    Require(File.Exists(record) && File.ReadAllText(record).Contains("engineDiagnosticHooks"), "recorded");
+    // Launch DCS (a new apply) makes profile.json what is in effect again.
+    Require(f.Service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Applied, "the engine file differs from the launched one");
+    var fresh = WhileDcsRuns(f, () => f.Service.ApplyLive(draft, inventory));
+    Require(fresh.Written.Count == 0 && fresh.Applied.Count == 0 && fresh.Waiting.Count == 0, fresh.Message);
+    // A record that cannot be read counts for nothing.
+    File.WriteAllText(record, "{ not json");
+    Require(WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { QuadSharpening = 0.4 }, inventory)).Applied.SequenceEqual(["quadSharpening"]), "unreadable record");
 });
 Test("Live phase 2: OFXR's NVIDIA flow is written live only when DCS started with NVIDIA frame generation", () =>
 {
     var f = E2e("live-ofxr"); var draft = LiveCheekyDraft(); var inventory = E2eInventory(f);
     Require(f.Service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Applied);
     var ofxr = LiveEntry(f, LiveSettings.FlowFile).Path;
-    var flow = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { FlowPreset = NvidiaFlowPreset.Fast, NvidiaFlowScale = 75, BidirectionalFlow = true }, inventory));
-    Require(flow.Written.SequenceEqual([ofxr]) && flow.Applied.Order().SequenceEqual(new[] { "bidirectionalFlow", "flowPreset", "nvidiaFlowScale" }) && flow.Waiting.Count == 0, flow.Message);
+    var preset = draft.FlowPreset.ToString().ToLowerInvariant();
+    Require(draft.FlowPreset == NvidiaFlowPreset.Medium && !draft.BidirectionalFlow && IniFile.Parse(IniFile.Decode(File.ReadAllBytes(ofxr)))["ofxr.nvidia_occlusion_aware"] == "1", "the default flow: occlusion on");
+    // R148: a preset change re-initialised OFXR's flow (5.5 s) and froze DCS for 6.8 s: it waits for the next launch,
+    // and the whole file with it.
+    var fast = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { FlowPreset = NvidiaFlowPreset.Fast, NvidiaFlowScale = 75, BidirectionalFlow = true }, inventory));
+    Require(fast.Written.Count == 0 && fast.Applied.Count == 0 && fast.Waiting.Order().SequenceEqual(new[] { "bidirectionalFlow", "flowPreset", "nvidiaFlowScale" })
+        && IniFile.Parse(IniFile.Decode(File.ReadAllBytes(ofxr)))["ofxr.nvidia_preset"] == preset, fast.Message);
+    // Resolution and bidirectional flow apply live (one short hitch); the occlusion choice follows bidirectional flow.
+    var flow = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { NvidiaFlowScale = 75, BidirectionalFlow = true }, inventory));
+    Require(flow.Written.SequenceEqual([ofxr]) && flow.Applied.Order().SequenceEqual(new[] { "bidirectionalFlow", "nvidiaFlowScale" }) && flow.Waiting.Count == 0, flow.Message);
     var ini = IniFile.Parse(IniFile.Decode(File.ReadAllBytes(ofxr)));
-    Require(File.ReadAllBytes(ofxr) is [0xFF, 0xFE, ..] && ini["ofxr.nvidia_preset"] == "fast" && ini["ofxr.nvidia_input_scale"] == "75" && ini["ofxr.nvidia_bidirectional"] == "1" && ini["ofxr.nvidia_occlusion_aware"] == "0", "new flow, UTF-16 kept");
+    Require(File.ReadAllBytes(ofxr) is [0xFF, 0xFE, ..] && ini["ofxr.nvidia_preset"] == preset && ini["ofxr.nvidia_input_scale"] == "75" && ini["ofxr.nvidia_bidirectional"] == "1" && ini["ofxr.nvidia_occlusion_aware"] == "0", "new flow, UTF-16 kept");
+    // The preset on top of the live flow: only the preset waits; the live ones stay in effect.
+    var slow = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { FlowPreset = NvidiaFlowPreset.Slow, NvidiaFlowScale = 75, BidirectionalFlow = true }, inventory));
+    Require(slow.Written.Count == 0 && slow.Waiting.SequenceEqual(["flowPreset"]) && slow.Applied.Order().SequenceEqual(new[] { "bidirectionalFlow", "nvidiaFlowScale" }), slow.Message);
     // Anything else in OFXR's file is read at start.
-    var factor = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { FlowPreset = NvidiaFlowPreset.Slow, FrameGenFactor = draft.FrameGenFactor == 3 ? 2 : 3 }, inventory));
-    Require(factor.Written.Count == 0 && factor.Waiting.Contains("flowPreset") && IniFile.Parse(IniFile.Decode(File.ReadAllBytes(ofxr)))["ofxr.nvidia_preset"] == "fast", factor.Message);
+    var factor = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { NvidiaFlowScale = 75, BidirectionalFlow = true, FrameGenFactor = draft.FrameGenFactor == 3 ? 2 : 3 }, inventory));
+    Require(factor.Written.Count == 0 && factor.Waiting.SequenceEqual(["frameGenFactor"]) && IniFile.Parse(IniFile.Decode(File.ReadAllBytes(ofxr)))["ofxr.nvidia_preset"] == preset, factor.Message);
     // DCS started with FidelityFX: the flow keys wait (OFXR has no NVIDIA flow to rebuild).
     var g = E2e("live-ofxr-ffx"); var ffx = draft with { FrameGen = FrameGeneration.FidelityFx }; g.Service.SyncApplied(ffx, E2eInventory(g));
     var none = WhileDcsRuns(g, () => g.Service.ApplyLive(ffx with { FlowPreset = NvidiaFlowPreset.Fast }, E2eInventory(g)));

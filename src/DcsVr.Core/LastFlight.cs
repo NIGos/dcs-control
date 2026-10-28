@@ -72,7 +72,10 @@ public static partial class LastFlight
         var (start, end, closed) = session;
         var (ofxrPath, ofxrPid) = FindOfxrLog(sources.ManagedProfiles, start, end);
         // A log still being written or replaced by its program is skipped, never the whole summary.
-        var ofxr = Safe(() => ofxrPath is null ? null : ParseOfxr(OfxrLines(ofxrPath, ofxrPid)));
+        var ofxrLines = Safe(() => ofxrPath is null ? null : OfxrLines(ofxrPath, ofxrPid));
+        var ofxr = ParseOfxr(ofxrLines);
+        // OFXR's close record ends its log when DCS destroys its OpenXR instance on the way out (fork patch 0065).
+        closed |= OfxrClosed(ofxrLines);
         var boost = Safe(() => sources.BoostStatus is { } status && File.Exists(status) ? Cached(status, () => ParseBoostStatus(File.ReadAllText(status))) : null);
         if (boost is not null && !(boost.UpdatedAt >= start.AddMinutes(-1) && boost.UpdatedAt <= end.AddMinutes(10))) boost = null;
         var pid = ofxrPid ?? boost?.DcsPid;
@@ -135,17 +138,22 @@ public static partial class LastFlight
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
     }
 
-    /// <summary>Start from the "Log opened UTC" header, end from the last timestamped line (or the file time).</summary>
+    /// <summary>Start from the "Log opened UTC" header, end from the last timestamped line (or the file time). Closed: the
+    /// log says "=== Log closed." (older DCS builds, and the crash handler), or its last timestamped line is the render
+    /// thread stopping, which is how DCS 2.9.30 and 2.9.31 end a normal exit (R148: no "Log closed" line any more).</summary>
     public static (DateTimeOffset Start, DateTimeOffset End, bool Closed)? ParseDcsSession(string head, string tail, DateTimeOffset written)
     {
         var opened = OpenedRegex().Match(head);
         if (!opened.Success || !DateTime.TryParseExact(opened.Groups[1].Value, "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var startUtc)) return null;
         var start = new DateTimeOffset(startUtc, TimeSpan.Zero);
         var end = written;
+        Match? last = null;
         foreach (Match m in StampRegex().Matches(tail))
-            if (DateTime.TryParseExact(m.Groups[1].Value, "yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var t)) end = new DateTimeOffset(t, TimeSpan.Zero);
+            if (DateTime.TryParseExact(m.Groups[1].Value, "yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var t)) { end = new DateTimeOffset(t, TimeSpan.Zero); last = m; }
         if (end < start) end = start;
-        return (start, end, tail.Contains("=== Log closed.", StringComparison.Ordinal));
+        var stopped = last is not null && tail.IndexOf('\n', last.Index) is var eol
+            && tail[last.Index..(eol < 0 ? tail.Length : eol)].Contains("): render thread has stopped", StringComparison.Ordinal);
+        return (start, end, stopped || tail.Contains("=== Log closed.", StringComparison.Ordinal));
     }
     [GeneratedRegex(@"=== Log opened UTC (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")] private static partial Regex OpenedRegex();
     [GeneratedRegex(@"(?m)^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}) ")] private static partial Regex StampRegex();
@@ -277,7 +285,7 @@ public static partial class LastFlight
     /// flight is in both. The segment counts only when its header record names the same process.</summary>
     private static List<string>? OfxrLines(string path, int? pid)
     {
-        static bool Keep(string l) => l.Contains("op=latency_status ", StringComparison.Ordinal) || l.Contains("op=adaptive_switch ", StringComparison.Ordinal);
+        static bool Keep(string l) => l.Contains("op=latency_status ", StringComparison.Ordinal) || l.Contains("op=adaptive_switch ", StringComparison.Ordinal) || l.Contains("op=logger ", StringComparison.Ordinal);
         var current = Cached(path, () => ReadLines(path, MaxTail, Keep));
         var previous = OfxrPreviousSegment(path);
         // The earlier segment is optional: unreadable or another process's, the summary covers the current one.
@@ -300,6 +308,21 @@ public static partial class LastFlight
     [GeneratedRegex(@"\bphase=I op=logger result=-?\d+ dur_us=\d+ a=\d+ b=\d+ c=(\d+)\r?$")] private static partial Regex OfxrHeaderRegex();
 
     public sealed record OfxrResult(FramegenShare? Share, FrameTimes? Times);
+
+    /// <summary>The flight log ends closed: its last logger record is the close record (op=logger result=0 a=0 b=0 c=0),
+    /// which OFXR writes when DCS destroys its last OpenXR instance (fork patch 0065), not followed by a reopen marker
+    /// (c=5, a new instance) or a header (a log rotated or started again). A log of a DCS that was killed or hung has
+    /// none after its last instance. Lines logged after the close record (DCS logging on) do not reopen it.</summary>
+    public static bool OfxrClosed(IEnumerable<string>? lines)
+    {
+        if (lines is null) return false;
+        var closed = false;
+        foreach (var line in lines)
+            if (OfxrLoggerRegex().Match(line) is { Success: true } m)
+                closed = m.Groups[1].Value == "0" && m.Groups[2].Value == "0" && m.Groups[3].Value == "0" && m.Groups[4].Value == "0";
+        return closed;
+    }
+    [GeneratedRegex(@"\bphase=I op=logger result=(-?\d+) dur_us=\d+ a=(\d+) b=(\d+) c=(\d+)\r?$")] private static partial Regex OfxrLoggerRegex();
 
     /// <summary>latency_status (once a second: result = multiplier, +10 under adaptive control; a = that second's p90 of
     /// max(CPU, GPU) per DCS frame in microseconds) and adaptive_switch (a multiplier change, or adaptive turned on/off).</summary>
