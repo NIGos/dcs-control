@@ -23,7 +23,8 @@
 // trampolines verified byte for byte [V Visualizer.dll 0x6ac12454]:
 //   xrWaitFrame 0x1b7840 (+0x108), xrBeginFrame 0x1b648f (+0x110),
 //   xrEndFrame 0x1b6abf (+0x118), xrLocateViews 0x1b7409 (+0x120),
-//   xrLocateSpace 0x1b7365 (+0x90), xrCreateReferenceSpace 0x1b6710 (+0x78)).
+//   xrLocateSpace 0x1b7365 (+0x90), xrCreateReferenceSpace 0x1b6710 (+0x78);
+//   R147: DCS 2.9.31's Visualizer 0x6ad87745, the same bytes at .text +0x2c790, kTramp).
 // Every hook calls the original first or last and only reads its arguments;
 // a failed or unexpected call is forwarded untouched. frame_start.h hooks
 // slots 33/34 during its suite phase: the timeline then pauses and re-arms
@@ -1006,18 +1007,19 @@ int BrokenBy() {
   return 0;
 }
 
-// The analysed Visualizer.dll's dispatch table, its trampolines checked.
+// The analysed Visualizer.dll's dispatch table, its trampolines checked (per build: fstart::kVisBuilds; R147 2.9.31
+// re-derived offline, the same bytes at .text +0x2c790).
 struct Tramp {
-  uint32_t rva;
+  uint32_t rva[fstart::kVisBuildCount];
   uint8_t code[11];
 };
 const Tramp kTramp[] = {
-    {0x1b7840, {0x4c, 0x8b, 0x48, 0x48, 0x49, 0x8b, 0x81, 0x08, 0x01, 0x00, 0x00}},  // xrWaitFrame
-    {0x1b648f, {0x4c, 0x8b, 0x40, 0x48, 0x49, 0x8b, 0x80, 0x10, 0x01, 0x00, 0x00}},  // xrBeginFrame
-    {0x1b6abf, {0x4c, 0x8b, 0x40, 0x48, 0x49, 0x8b, 0x80, 0x18, 0x01, 0x00, 0x00}},  // xrEndFrame
-    {0x1b7409, {0x4c, 0x8b, 0x50, 0x48, 0x49, 0x8b, 0x82, 0x20, 0x01, 0x00, 0x00}},  // xrLocateViews
-    {0x1b7365, {0x4c, 0x8b, 0x50, 0x48, 0x49, 0x8b, 0x82, 0x90, 0x00, 0x00, 0x00}},  // xrLocateSpace
-    {0x1b6710, {0x4c, 0x8b, 0x48, 0x48, 0x49, 0x8b, 0x41, 0x78, 0x4c, 0x8b, 0xc6}},  // xrCreateReferenceSpace
+    {{0x1b7840, 0x1e3fd0}, {0x4c, 0x8b, 0x48, 0x48, 0x49, 0x8b, 0x81, 0x08, 0x01, 0x00, 0x00}},  // xrWaitFrame
+    {{0x1b648f, 0x1e2c1f}, {0x4c, 0x8b, 0x40, 0x48, 0x49, 0x8b, 0x80, 0x10, 0x01, 0x00, 0x00}},  // xrBeginFrame
+    {{0x1b6abf, 0x1e324f}, {0x4c, 0x8b, 0x40, 0x48, 0x49, 0x8b, 0x80, 0x18, 0x01, 0x00, 0x00}},  // xrEndFrame
+    {{0x1b7409, 0x1e3b99}, {0x4c, 0x8b, 0x50, 0x48, 0x49, 0x8b, 0x82, 0x20, 0x01, 0x00, 0x00}},  // xrLocateViews
+    {{0x1b7365, 0x1e3af5}, {0x4c, 0x8b, 0x50, 0x48, 0x49, 0x8b, 0x82, 0x90, 0x00, 0x00, 0x00}},  // xrLocateSpace
+    {{0x1b6710, 0x1e2ea0}, {0x4c, 0x8b, 0x48, 0x48, 0x49, 0x8b, 0x41, 0x78, 0x4c, 0x8b, 0xc6}},  // xrCreateReferenceSpace
 };
 
 void** FindDispatch(std::string* why) {
@@ -1026,20 +1028,19 @@ void** FindDispatch(std::string* why) {
     *why = "Visualizer.dll not loaded";
     return nullptr;
   }
-  auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(vis + reinterpret_cast<IMAGE_DOS_HEADER*>(vis)->e_lfanew);
-  if (nt->FileHeader.TimeDateStamp != fstart::kVisStamp ||
-      !gpt::CodeMatches(vis + fstart::kInstLeaRva, fstart::kInstLea, sizeof(fstart::kInstLea))) {
-    *why = "Visualizer.dll is not the analysed build";
+  const int build = fstart::VisBuildOf(vis);
+  if (build < 0) {
+    *why = "Visualizer.dll is not an analysed build";
     return nullptr;
   }
   for (const Tramp& t : kTramp)
-    if (!gpt::CodeMatches(vis + t.rva, t.code, sizeof(t.code))) {
+    if (!gpt::CodeMatches(vis + t.rva[build], t.code, sizeof(t.code))) {
       char b[96];
-      snprintf(b, sizeof(b), "OpenXR trampoline at Visualizer+0x%x differs", t.rva);
+      snprintf(b, sizeof(b), "OpenXR trampoline at Visualizer+0x%x differs", t.rva[build]);
       *why = b;
       return nullptr;
     }
-  void** disp = fstart::DispatchGuarded(vis);
+  void** disp = fstart::DispatchGuarded(vis, build);
   if (!disp || !gpt::Readable(disp) || !gpt::Readable(&disp[40])) {
     *why = "OpenXR dispatch table not found (no VR session yet)";
     return nullptr;

@@ -198,23 +198,28 @@ void UninstallTexCreate() {
 // ---------------------------------------------------------------------------
 // Visualizer's frame pacer object (R2 §4): the render side records its last
 // wait for Main in S+0x118 (double, ms [I]); S = *(Visualizer+0x2c1538) on the
-// analysed build (PE timestamp 0x6ac12454) only.
+// analysed build (PE timestamp 0x6ac12454, DCS 2.9.30) and *(Visualizer+0x2ef548)
+// on DCS 2.9.31 (0x6ad87745; R147: the static the render-side wait 0xba850 is
+// called with, which stores the wait at +0x118), only.
 // ---------------------------------------------------------------------------
 
 void* const* g_pacerObj = nullptr;
-constexpr uint32_t kPacerObjRva = 0x2c1538;
-constexpr uint32_t kVisStamp = 0x6ac12454u;
+struct PacerBuild {
+  uint32_t stamp, objRva;
+};
+constexpr PacerBuild kPacerBuilds[] = {{0x6ac12454u, 0x2c1538}, {0x6ad87745u, 0x2ef548}};
 
 void InitPacer() {
   if (g_pacerObj) return;
   auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"Visualizer.dll"));
   if (!base) return;
   auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + reinterpret_cast<IMAGE_DOS_HEADER*>(base)->e_lfanew);
-  if (nt->FileHeader.TimeDateStamp != kVisStamp) {
-    Log("  view profile: Visualizer.dll is not the analysed build; pacer wait not read");
-    return;
-  }
-  g_pacerObj = reinterpret_cast<void* const*>(base + kPacerObjRva);
+  for (const PacerBuild& b : kPacerBuilds)
+    if (nt->FileHeader.TimeDateStamp == b.stamp) {
+      g_pacerObj = reinterpret_cast<void* const*>(base + b.objRva);
+      return;
+    }
+  Log("  view profile: Visualizer.dll is not an analysed build; pacer wait not read");
 }
 
 double ReadPacerMs() {

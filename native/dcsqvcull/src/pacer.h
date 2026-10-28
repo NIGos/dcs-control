@@ -1,9 +1,9 @@
 // Low-power pacer wait. Visualizer's frame pacer (Main thread, loop at RVA
-// 0x8de50..0x8de86) spins until the next frame deadline, exiting early when
+// 0x8de50..0x8de86 in DCS 2.9.30, 0xba5e0..0xba616 in 2.9.31) spins until the next frame deadline, exiting early when
 // another thread clears [rsi] or sets [rsi+0xC]; each iteration runs four
 // PAUSE instructions and reads the clock. That burns a whole core.
 //
-// The four PAUSEs (8 bytes at 0x8de5e) are replaced by "call [slot]; nop".
+// The four PAUSEs (8 bytes at 0x8de5e; 2.9.31: 0xba5ee, R147) are replaced by "call [slot]; nop".
 // The slot points either to a stub that does exactly the four PAUSEs (off),
 // or to one that arms MONITORX on [rsi]'s cache line, re-checks both exit
 // flags and then MWAITX-sleeps for at most TimeoutUs (on). A write to the
@@ -19,11 +19,13 @@
 
 namespace pacer {
 
-constexpr uint32_t kSiteRva = 0x8de5e;
+// The site per analysed Visualizer.dll build (DCS 2.9.30, 2.9.31: R147, the same loop bytes at .text +0x2c790); the
+// first one whose surrounding bytes match is used.
+constexpr uint32_t kSiteRvas[] = {0x8de5e, 0xba5ee};
 const uint8_t kPauses[8] = {0xF3, 0x90, 0xF3, 0x90, 0xF3, 0x90, 0xF3, 0x90};
 // Bytes around the site that must match this Visualizer.dll build.
-const uint8_t kBefore[8] = {0x0F, 0xB6, 0x46, 0x0C, 0x90, 0x84, 0xC0, 0x75};  // at 0x8de55
-const uint8_t kAfter[5] = {0x48, 0x8D, 0x4C, 0x24, 0x70};                     // at 0x8de66
+const uint8_t kBefore[8] = {0x0F, 0xB6, 0x46, 0x0C, 0x90, 0x84, 0xC0, 0x75};  // at site - 9
+const uint8_t kAfter[5] = {0x48, 0x8D, 0x4C, 0x24, 0x70};                     // at site + 8
 
 struct CodePage {
   uint8_t pauseStub[16];
@@ -155,10 +157,20 @@ bool Install(double tscHz, int timeoutUs) {
   }
   auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(L"Visualizer.dll"));
   if (!base) return false;
-  uint8_t* site = base + kSiteRva;
-  uint8_t cur[8], before[8], after[5];
-  if (!allocslab::ReadBytes(site, cur, 8) || !allocslab::ReadBytes(site - 9, before, 8) ||
-      !allocslab::ReadBytes(site + 8, after, 5) || memcmp(before, kBefore, 8) != 0 || memcmp(after, kAfter, 5) != 0) {
+  uint8_t* site = nullptr;
+  uint32_t siteRva = 0;
+  uint8_t cur[8];
+  for (uint32_t rva : kSiteRvas) {
+    uint8_t* s = base + rva;
+    uint8_t before[8], after[5];
+    if (allocslab::ReadBytes(s, cur, 8) && allocslab::ReadBytes(s - 9, before, 8) && allocslab::ReadBytes(s + 8, after, 5) &&
+        memcmp(before, kBefore, 8) == 0 && memcmp(after, kAfter, 5) == 0) {
+      site = s;
+      siteRva = rva;
+      break;
+    }
+  }
+  if (!site) {
     Log("pacer: Visualizer.dll does not match this build; skipped");
     return false;
   }
@@ -170,7 +182,7 @@ bool Install(double tscHz, int timeoutUs) {
     g_slot = reinterpret_cast<void**>(site + 6 + rel);
     g_code = reinterpret_cast<CodePage*>(reinterpret_cast<uint8_t*>(g_slot) - kPage);
     if (g_code->magic != kMagic || g_code->site != site) {
-      Log("pacer: unknown patch at Visualizer+0x%x; skipped", kSiteRva);
+      Log("pacer: unknown patch at Visualizer+0x%x; skipped", siteRva);
       return false;
     }
     // Keep its stubs as they are: rewriting the code page now could change
@@ -192,7 +204,7 @@ bool Install(double tscHz, int timeoutUs) {
     g_code->magic = kMagic;
     g_code->site = site;
   } else {
-    Log("pacer: Visualizer+0x%x has unexpected bytes; skipped", kSiteRva);
+    Log("pacer: Visualizer+0x%x has unexpected bytes; skipped", siteRva);
     return false;
   }
   // Write the MWAITX stub (fresh pages: nothing executes them yet).

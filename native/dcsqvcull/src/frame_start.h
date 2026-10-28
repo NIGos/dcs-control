@@ -12,8 +12,9 @@
 //    (getter 0x1c75c0), table at instance+0x48; trampolines 0x1b7800
 //    (+0x108), 0x1b6450 (+0x110), 0x1b62d0 (+0xd8), 0x1b7880 (+0xe0); the
 //    xrBeginFrame wrapper vt[9] 0x1244c0 calls xrBeginFrame, then per
-//    swapchain 0x1a2ff0 = acquire + wait]). xrWaitFrame's thread is recorded
-//    (R15: Main);
+//    swapchain 0x1a2ff0 = acquire + wait]; R147: DCS 2.9.31's Visualizer
+//    0x6ad87745 has the same code, .text +0x2c790, the static +0x2e010:
+//    kVisBuilds). xrWaitFrame's thread is recorded (R15: Main);
 //  - culling start/end (collectRenderablesAggregated, the timeline's IAT
 //    hook on the render thread: ctiming::g_aggObserver) and the first top-level pass
 //    (gpu_pass_timing.h's boundary callback; the same point that opens a GPU
@@ -524,23 +525,45 @@ int32_t __stdcall H_WaitImage(void* sc, const void* info) {
 void* const kXrHook[kXrSlots] = {reinterpret_cast<void*>(&H_WaitFrame), reinterpret_cast<void*>(&H_BeginFrame),
                                   reinterpret_cast<void*>(&H_Acquire), reinterpret_cast<void*>(&H_WaitImage)};
 
-constexpr uint32_t kVisStamp = 0x6ac12454u;
-constexpr uint32_t kInstStaticRva = 0x2c8068;
-const uint8_t kInstLea[] = {0x48, 0x8d, 0x05, 0x7a, 0x0a, 0x10, 0x00};  // 0x1c75e7: lea rax, [0x2c8068]
-constexpr uint32_t kInstLeaRva = 0x1c75e7;
+// The analysed Visualizer.dll builds (R147: DCS 2.9.30 and 2.9.31). 2.9.31 (PE 0x6ad87745) has the same OpenXR
+// trampolines, getter and instance layout; its .text moved +0x2c790 and the instance static +0x2e010 (re-derived
+// offline from the 2.9.31 binary: unique byte matches, the getter's lea). Index = the column of the per-build RVAs
+// in kTramp and in frame_timeline.h / cockpit_mask.h / cockpit_time.h / view_profile.h.
+constexpr int kVisBuildCount = 2;
+struct VisBuild {
+  uint32_t stamp;
+  const char* dcs;
+  uint32_t instStaticRva, instLeaRva;
+  uint8_t instLea[7];  // the getter's lea rax, [instance static]
+};
+const VisBuild kVisBuilds[kVisBuildCount] = {
+    {0x6ac12454u, "2.9.30", 0x2c8068, 0x1c75e7, {0x48, 0x8d, 0x05, 0x7a, 0x0a, 0x10, 0x00}},
+    {0x6ad87745u, "2.9.31", 0x2f6078, 0x1f3d77, {0x48, 0x8d, 0x05, 0xfa, 0x22, 0x10, 0x00}},
+};
+// Which analysed build vis is (PE timestamp and the getter's lea, byte for byte); -1: none (hooks stay off).
+int VisBuildOf(uint8_t* vis) {
+  if (!vis) return -1;
+  auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(vis + reinterpret_cast<IMAGE_DOS_HEADER*>(vis)->e_lfanew);
+  for (int b = 0; b < kVisBuildCount; ++b)
+    if (nt->FileHeader.TimeDateStamp == kVisBuilds[b].stamp &&
+        gpt::CodeMatches(vis + kVisBuilds[b].instLeaRva, kVisBuilds[b].instLea, sizeof(kVisBuilds[b].instLea)))
+      return b;
+  return -1;
+}
 struct Tramp {
-  uint32_t rva;
+  uint32_t rva[kVisBuildCount];
   uint8_t code[11];  // mov rX, [rax+48h]; mov rax, [rX+slot*8]
 };
 const Tramp kTramp[kXrSlots] = {
-    {0x1b7840, {0x4c, 0x8b, 0x48, 0x48, 0x49, 0x8b, 0x81, 0x08, 0x01, 0x00, 0x00}},
-    {0x1b648f, {0x4c, 0x8b, 0x40, 0x48, 0x49, 0x8b, 0x80, 0x10, 0x01, 0x00, 0x00}},
-    {0x1b6310, {0x4c, 0x8b, 0x48, 0x48, 0x49, 0x8b, 0x81, 0xd8, 0x00, 0x00, 0x00}},
-    {0x1b78bf, {0x4c, 0x8b, 0x40, 0x48, 0x49, 0x8b, 0x80, 0xe0, 0x00, 0x00, 0x00}}};
+    {{0x1b7840, 0x1e3fd0}, {0x4c, 0x8b, 0x48, 0x48, 0x49, 0x8b, 0x81, 0x08, 0x01, 0x00, 0x00}},
+    {{0x1b648f, 0x1e2c1f}, {0x4c, 0x8b, 0x40, 0x48, 0x49, 0x8b, 0x80, 0x10, 0x01, 0x00, 0x00}},
+    {{0x1b6310, 0x1e2aa0}, {0x4c, 0x8b, 0x48, 0x48, 0x49, 0x8b, 0x81, 0xd8, 0x00, 0x00, 0x00}},
+    {{0x1b78bf, 0x1e404f}, {0x4c, 0x8b, 0x40, 0x48, 0x49, 0x8b, 0x80, 0xe0, 0x00, 0x00, 0x00}}};
 
-void** DispatchGuarded(uint8_t* vis) {
+// build: VisBuildOf(vis), checked by the caller (>= 0).
+void** DispatchGuarded(uint8_t* vis, int build) {
   __try {
-    uint8_t* inst = *reinterpret_cast<uint8_t**>(vis + kInstStaticRva);
+    uint8_t* inst = *reinterpret_cast<uint8_t**>(vis + kVisBuilds[build].instStaticRva);
     if (!inst) return nullptr;
     return *reinterpret_cast<void***>(inst + 0x48);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -554,17 +577,17 @@ bool InstallXr() {
     Log("  frame start: Visualizer.dll not loaded; OpenXR calls not timed");
     return false;
   }
-  auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(vis + reinterpret_cast<IMAGE_DOS_HEADER*>(vis)->e_lfanew);
-  if (nt->FileHeader.TimeDateStamp != kVisStamp || !gpt::CodeMatches(vis + kInstLeaRva, kInstLea, sizeof(kInstLea))) {
-    Log("  frame start: Visualizer.dll is not the analysed build; OpenXR calls not timed");
+  const int build = VisBuildOf(vis);
+  if (build < 0) {
+    Log("  frame start: Visualizer.dll is not an analysed build; OpenXR calls not timed");
     return false;
   }
   for (const Tramp& t : kTramp)
-    if (!gpt::CodeMatches(vis + t.rva, t.code, sizeof(t.code))) {
-      Log("  frame start: OpenXR trampoline at Visualizer+0x%x differs; OpenXR calls not timed", t.rva);
+    if (!gpt::CodeMatches(vis + t.rva[build], t.code, sizeof(t.code))) {
+      Log("  frame start: OpenXR trampoline at Visualizer+0x%x differs; OpenXR calls not timed", t.rva[build]);
       return false;
     }
-  void** disp = DispatchGuarded(vis);
+  void** disp = DispatchGuarded(vis, build);
   if (!disp || !gpt::Readable(disp) || !gpt::Readable(&disp[40])) {
     Log("  frame start: OpenXR dispatch table not found; OpenXR calls not timed");
     return false;

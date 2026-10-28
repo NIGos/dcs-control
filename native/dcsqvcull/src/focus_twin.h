@@ -85,8 +85,8 @@ const char* g_faultWhere = "";
 DWORD g_faultCode = 0;
 
 // Production RVAs (DCS 2.9.30; edterrainGraphics41 0x6aae1e36, Visualizer 0x6ac12454), RTTI- and hash-checked.
+// R147: edterrainGraphics41 is byte-identical in DCS 2.9.31 (every check below passes); Visualizer has a 2.9.31 entry.
 constexpr uint32_t kMetaMatVtbl = 0x151850, kMetaMatRender = 0xb99e0;  // MetaMaterial vt[8]
-constexpr uint32_t kTerrObjVtbl = 0x20ec08, kTerrObjRender = 0x103cf0;  // TerrainObject vt[1]
 constexpr int kMatSlot = 8, kTerrSlot = 1;
 struct CodeRange {
   uint32_t begin, end;
@@ -98,8 +98,15 @@ constexpr CodeRange kEtgCode[] = {
     {0x12cd7e, 0x12cd8a, 0xc1c9fbcd909d824eull},  // TerrainRenderable slot 5: item = [entry + 0x58]
     {0x12cf15, 0x12cf3f, 0x1117740ad883386cull},  // ... mat = [item + 8]; vt[6](mat, item, ctx, x), vt[8](same)
 };
-constexpr CodeRange kVisCode[] = {
-    {0x103cf0, 0x103d39, 0x0163045434e4ef39ull},  // TerrainObject::render prologue (self, ctx)
+// TerrainObject vt[1] per analysed Visualizer build: vtable, render, render's prologue (self, ctx). DCS 2.9.31
+// (R147): the same prologue at .text +0x2c790; only its security-cookie displacement differs (hence the hash).
+struct VisTerr {
+  uint32_t vtbl, render;
+  CodeRange code;
+};
+constexpr VisTerr kVisTerr[] = {
+    {0x20ec08, 0x103cf0, {0x103cf0, 0x103d39, 0x0163045434e4ef39ull}},  // DCS 2.9.30 (0x6ac12454)
+    {0x23d318, 0x130480, {0x130480, 0x1304c9, 0xae688f8a3a9ab874ull}},  // DCS 2.9.31 (0x6ad87745)
 };
 
 // R125: MetaMaterial_Instancer2 (RTTI `.?AVMetaMaterial_Instancer2@edtg41@@`) vt[8] and what it reads.
@@ -601,7 +608,7 @@ struct Win {
   bool haveTc = false;
   int tcUploads = 0;
   ID3D11Buffer* tcBuf = nullptr;
-  ID3D11Buffer* b10Buf = nullptr;  // the window's b10 upload (Visualizer 0x102ae0)
+  ID3D11Buffer* b10Buf = nullptr;  // the window's b10 upload (Visualizer 0x102ae0; 2.9.31: 0x12f270)
   bool inItem = false;
   int item = -1;
   int itemWhy = kPOk;
@@ -3382,15 +3389,20 @@ const char* CheckInstBuild(uint8_t* etg, void*** instSlot, void*** global, void*
 const char* CheckBuild(uint8_t* etg, uint8_t* vis, void*** matSlot, void*** terrSlot) {
   if (!etg || !vis) return "edterrainGraphics41.dll / Visualizer.dll not loaded";
   void** mv = reinterpret_cast<void**>(etg + kMetaMatVtbl);
-  void** tv = reinterpret_cast<void**>(vis + kTerrObjVtbl);
   if (!allocslab::RttiIs(etg, mv, ".?AVMetaMaterial@edtg41@@")) return "MetaMaterial vtable not where this build has it";
-  if (!allocslab::RttiIs(vis, tv, ".?AVTerrainObject@TerrainParser@@")) return "TerrainObject vtable not where this build has it";
+  const VisTerr* vt = nullptr;
+  for (const VisTerr& b : kVisTerr)
+    if (allocslab::RttiIs(vis, reinterpret_cast<void**>(vis + b.vtbl), ".?AVTerrainObject@TerrainParser@@")) {
+      vt = &b;
+      break;
+    }
+  if (!vt) return "TerrainObject vtable not where this build has it";
+  void** tv = reinterpret_cast<void**>(vis + vt->vtbl);
   if (reinterpret_cast<uint8_t*>(SlotOriginal(&mv[kMatSlot])) != etg + kMetaMatRender) return "MetaMaterial::render moved";
-  if (reinterpret_cast<uint8_t*>(SlotOriginal(&tv[kTerrSlot])) != vis + kTerrObjRender) return "TerrainObject::render moved";
+  if (reinterpret_cast<uint8_t*>(SlotOriginal(&tv[kTerrSlot])) != vis + vt->render) return "TerrainObject::render moved";
   for (const CodeRange& c : kEtgCode)
     if (!shadowtex::CodeIs(etg, c.begin, c.end, c.hash)) return "edterrainGraphics41 code differs from this build";
-  for (const CodeRange& c : kVisCode)
-    if (!shadowtex::CodeIs(vis, c.begin, c.end, c.hash)) return "Visualizer code differs from this build";
+  if (!shadowtex::CodeIs(vis, vt->code.begin, vt->code.end, vt->code.hash)) return "Visualizer code differs from this build";
   *matSlot = &mv[kMatSlot];
   *terrSlot = &tv[kTerrSlot];
   return nullptr;
