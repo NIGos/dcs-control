@@ -14,7 +14,12 @@ public static class IniFile
         {
             var line = raw.Trim();
             if (line.Length == 0 || line[0] is ';' or '#') continue;
-            if (line[0] == '[') { section = line.Trim('[', ']').Trim(); continue; }
+            if (line[0] == '[')
+            {
+                var close = line.IndexOf(']');
+                section = (close > 0 ? line[1..close] : line.Trim('[', ']')).Trim();
+                continue;
+            }
             var separator = line.IndexOf('=');
             if (separator <= 0) continue;
             var value = line[(separator + 1)..];

@@ -2511,6 +2511,7 @@ Test("INI comparison is section-aware and ignores trailing comments", () =>
     var owned = IniFile.Parse("[A]\nX=1\n");
     Require(IniFile.Matches("[A]\nX=1 ; added by the component\n[B]\nX=2\n", owned));
     Require(!IniFile.Matches("[B]\nX=1\n[A]\nX=2\n", owned));
+    Require(IniFile.Matches("[A] ; owned by the component\nX=1\n", owned));
 });
 Test("Sboys 1.3 provides eye gaze through SteamVR without a bridge", () =>
 {
