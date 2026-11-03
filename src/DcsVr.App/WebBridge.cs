@@ -106,6 +106,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     // ---- Updates and What's new: answered outside the command lock (a check waits up to 10 s, a download longer) ----
     private readonly Updates _updates = updates ?? new Updates(service.StateRoot);
     private AppSettingsStore Settings => new(service.StateRoot);
+    private const string SupportPage = "https://ko-fi.com/nigos";
     private readonly Lock _updateLock = new();
     private Task<UpdateCheck>? _checking;
     private UpdateCheck? _lastCheck;
@@ -131,13 +132,13 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     }
     private Task<string>? UpdateRequest(string json)
     {
-        if (json.Length > 1024 || !(json.Contains("\"update", StringComparison.Ordinal) || json.Contains("\"whatsNew\"", StringComparison.Ordinal))) return null;
+        if (json.Length > 1024 || !(json.Contains("\"update", StringComparison.Ordinal) || json.Contains("\"whatsNew\"", StringComparison.Ordinal) || json.Contains("\"support", StringComparison.Ordinal))) return null;
         string? id = null, action; JsonElement data;
         try
         {
             using var doc = JsonDocument.Parse(json);
             action = doc.RootElement.GetProperty("action").GetString();
-            if (action is not ("updateStatus" or "updateCheck" or "updateSettings" or "updateInstall" or "updateCancel" or "updatePage" or "whatsNew")) return null;
+            if (action is not ("updateStatus" or "updateCheck" or "updateSettings" or "updateInstall" or "updateCancel" or "updatePage" or "whatsNew" or "support" or "supportOpen" or "supportOff")) return null;
             id = doc.RootElement.GetProperty("id").GetString();
             data = doc.RootElement.TryGetProperty("data", out var d) ? d.Clone() : default;
         }
@@ -184,6 +185,16 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         var notes = ReleaseNotes();
                         var show = !Flag("startup") || (notes is not null && Settings.TakeWhatsNew(ProductInfo.Version, UsedBefore()));
                         return Reply(id, new { show, version = ProductInfo.Version, @short = ReleaseVersion.Parse(ProductInfo.Version)?.Short ?? ProductInfo.Version, notes });
+                    case "support":
+                        // The Ko-fi note on the Overview: asked once per start, when neither What's new nor the tour opened.
+                        return Reply(id, new { show = Settings.TakeSupport(DateTimeOffset.Now) });
+                    case "supportOpen":
+                        EnsureInteractive();
+                        using (Process.Start(new ProcessStartInfo(SupportPage) { UseShellExecute = true })) { }
+                        return Reply(id, new { });
+                    case "supportOff":
+                        Settings.Save((Settings.Read() ?? throw new IOException("DCS Control's settings file could not be read just now. Try again.")) with { SupportOff = true });
+                        return Reply(id, new { });
                 }
                 return Reply(id, UpdateView());
             }

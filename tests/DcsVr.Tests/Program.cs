@@ -3836,6 +3836,15 @@ Test("App settings: update checks on by default, saved, unknown keys tolerated; 
     var updated = new AppSettingsStore(Path.Combine(root, "app-settings-updated"));
     Require(updated.TakeWhatsNew("0.5.6-preview", usedBefore: true) && !updated.TakeWhatsNew("0.5.6-preview", usedBefore: true));
     Require(updated.TakeWhatsNew("0.5.7-preview", usedBefore: false) && updated.Load() is { LastSeenVersion: "0.5.7-preview", CheckForUpdates: true }, "a later version shows again; the check setting is kept");
+
+    // The Ko-fi note: not at the first start, then after a week, then at most once a month; turned off, never again.
+    var support = new AppSettingsStore(Path.Combine(root, "app-settings-support")); var start = new DateTimeOffset(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);
+    Require(!support.TakeSupport(start) && support.Load().SupportDue == start.AddDays(AppSettingsStore.SupportFirstDays), "the first start only records the date");
+    Require(!support.TakeSupport(start.AddDays(6)) && support.TakeSupport(start.AddDays(7)) && !support.TakeSupport(start.AddDays(7)), "after a week, once");
+    Require(!support.TakeSupport(start.AddDays(36)) && support.TakeSupport(start.AddDays(37)), "then once a month");
+    support.Save(support.Load() with { SupportOff = true });
+    Require(!support.TakeSupport(start.AddDays(400)) && new AppSettingsStore(Path.Combine(root, "app-settings-support")).Load() is { SupportOff: true, LastSeenVersion: null }, "turned off stays off");
+    Require(!store.TakeSupport(start), "a damaged file shows nothing and is left alone");
 });
 Test("Pimax eye tracking is found by its service's prefix (the name carries the headset model)", () =>
 {

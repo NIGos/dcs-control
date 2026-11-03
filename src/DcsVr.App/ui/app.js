@@ -2041,6 +2041,10 @@ async function showWhatsNew(startup) {
     return true;
   } catch (error) { if (!startup) showError(error); return false; }
 }
+/** The Ko-fi note: a quiet banner on the Overview, at most once a month (the app decides when), closed with one click. */
+async function showSupport() {
+  try { if ((await request('support',{startup:true})).show) $('supportBanner').hidden = false; } catch {}
+}
 function initializeUpdates() {
   $('appVersionButton').addEventListener('click',() => showWhatsNew(false));
   $('whatsNewOpen').addEventListener('click',() => showWhatsNew(false));
@@ -2049,6 +2053,9 @@ function initializeUpdates() {
   // From an installation Update starts at once; an unzipped copy first says where the update goes.
   $('updateOpen').addEventListener('click',() => openUpdateDialog(!updates?.portable));
   $('updateHide').addEventListener('click',() => { updateBannerHidden = true; renderUpdates(); });
+  $('supportOpen').addEventListener('click',() => { $('supportBanner').hidden = true; request('supportOpen').catch(showError); });
+  $('supportOff').addEventListener('click',() => { $('supportBanner').hidden = true; request('supportOff').catch(showError); });
+  $('supportHide').addEventListener('click',() => $('supportBanner').hidden = true);
   const leaveUpdate = () => { if (updates?.installing && !updates.handedOff) request('updateCancel').catch(()=>{}); };
   $('updateLater').addEventListener('click',() => { leaveUpdate(); $('updateDialog').close(); });
   $('updateDialog').addEventListener('cancel',leaveUpdate);
@@ -2093,7 +2100,7 @@ async function initialize() {
   $('refreshFlight').addEventListener('click',() => loadFlight(0)); $('resetApplied').addEventListener('click',resetToApplied);
   initializeUpdates(); initializeTour();
   document.addEventListener('keydown',e => { if (e.ctrlKey && (e.code === 'KeyK' || e.key.toLowerCase() === 'k')) { e.preventDefault(); if (!$('searchDialog').open) openSearch(); } if (!e.ctrlKey || e.altKey) return; const digit = /^Digit([0-9])$/.exec(e.code)?.[1] ?? (/^[0-9]$/.test(e.key) ? e.key : null); const key = e.shiftKey ? (e.code === 'KeyC' || e.key.toLowerCase() === 'c' ? 'C' : null) : digit; const target = key === null ? null : Object.keys(PAGE_KEYS).find(id => PAGE_KEYS[id].at(-1) === key && PAGE_KEYS[id].includes('Shift') === e.shiftKey); if (!target) return; e.preventDefault(); if (!$('nav-'+target).hidden) navigate(target); });
-  try { sync(await request('ready')); loadFlight(); window.uiReady = true; showWhatsNew(true).then(shown => { if (!shown && !window.offlineFixture && !tourSeen(false)) openTour(); }); checkUpdates(false); }
+  try { sync(await request('ready')); loadFlight(); window.uiReady = true; showWhatsNew(true).then(shown => { if (shown) return; if (!window.offlineFixture && !tourSeen(false)) openTour(); else if (!window.offlineFixture) showSupport(); }); checkUpdates(false); }
   catch(e) { showError(e); }
 }
 initialize();
