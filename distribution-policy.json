@@ -3,7 +3,7 @@
   "version": "set-by-build-release",
   "correspondingSource": "set-by-build-release",
   "components": [
-    { "id": "manager", "delivery": "Bundled", "license": "MIT", "notice": "licenses/Manager-MIT.txt" },
+    { "id": "manager", "delivery": "Bundled", "license": "GPL-3.0-or-later", "notice": "licenses/Manager-GPL-3.0.txt" },
     { "id": "ofxr", "delivery": "Bundled", "license": "LGPL-3.0-or-later", "notice": "licenses/OFXR-LGPL-3.0.txt", "additionalNotices": "Inside original OFXR ZIP" },
     { "id": "cheeky", "delivery": "Bundled", "license": "GPL-3.0", "notice": "licenses/Cheeky-GPL-3.0.txt", "additionalNotices": "licenses/Cheeky-dependencies" },
     { "id": "quadviews", "delivery": "Bundled", "license": "MIT", "notice": "licenses/QuadViews-MIT.txt", "additionalNotices": "licenses/QuadViews-THIRD-PARTY.txt" },

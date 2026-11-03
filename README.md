@@ -79,7 +79,7 @@ The **[User Guide](docs/USER_GUIDE.md)** explains every feature, what it costs, 
 
 ## Credits and licences
 
-DCS Control's own code is MIT-licensed ([LICENSE](LICENSE)). It builds on other people's work, each under its own licence:
+DCS Control's own code is licensed under the GNU General Public License v3.0 or later ([LICENSE](LICENSE)). It builds on other people's work, each under its own licence:
 
 - **Quad-Views-Foveated** by mbucchia (MIT)
 - **CheekyFoveatedDLSS** (GPL-3.0), with local changes for the Quad Views focus views

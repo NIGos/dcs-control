@@ -14,7 +14,7 @@
 
 The WebView2 Evergreen Runtime is installed separately and governed by Microsoft's runtime terms. The development machine has runtime 154.0.4258.48. All web assets, navigation icons and aircraft artwork are original project code. No DCS game images, fonts or launcher files are redistributed.
 
-Package SHA-256 values and source URLs are embedded in `PackageCatalog` and the diagnostic report. Original ZIPs retain their upstream notices and third-party license files. The manager's source code is MIT-licensed; third-party modules retain their own licenses.
+Package SHA-256 values and source URLs are embedded in `PackageCatalog` and the diagnostic report. Original ZIPs retain their upstream notices and third-party license files. The manager's source code (the app, the native modules and the patches) is licensed under GPL-3.0-or-later; third-party modules retain their own licenses.
 
 The NVIDIA DLSS 5 runtime is user-supplied and is not redistributed here. The source-built Quad Views provider has a small documented change: `DCSVR_QUAD_SETTINGS` selects a private settings file for the launched process, preserving default global behavior when absent. Its build script applies that patch reproducibly.
 
