@@ -411,6 +411,7 @@ void BenchA1(Gpu& g, int rounds) {
     std::atomic<int> ready{0};
     std::atomic<bool> go{false};
     int64_t tEnd[kThreads] = {}, tRecEnd[kThreads] = {};
+    HRESULT finishHr[kThreads] = {};  // CHECK exits, so the workers only store the result
     std::vector<std::thread> pool;
     for (int t = 0; t < kThreads; ++t)
       pool.emplace_back([&, t] {
@@ -418,13 +419,14 @@ void BenchA1(Gpu& g, int rounds) {
         while (!go.load()) _mm_pause();
         Record(g, def[t], defCb[t], kDraws);
         tRecEnd[t] = Now();
-        def[t]->FinishCommandList(FALSE, &cls[t]);
+        finishHr[t] = def[t]->FinishCommandList(FALSE, &cls[t]);
         tEnd[t] = Now();
       });
     while (ready.load() < kThreads) _mm_pause();
     t0 = Now();
     go = true;
     for (auto& th_ : pool) th_.join();
+    for (int t = 0; t < kThreads; ++t) CHECK(finishHr[t]);
     const int64_t recEnd = *std::max_element(tRecEnd, tRecEnd + kThreads);
     const int64_t finEnd = *std::max_element(tEnd, tEnd + kThreads);
     t2 = Now();
