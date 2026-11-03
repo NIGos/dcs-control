@@ -346,7 +346,9 @@ public sealed partial class Updates
 
 /// <param name="CheckForUpdates">Look for a newer release when DCS Control starts (Diagnostics page); on by default.</param>
 /// <param name="LastSeenVersion">The version whose "What's new" was last shown at start.</param>
-public sealed record AppSettings(bool CheckForUpdates = true, string? LastSeenVersion = null);
+/// <param name="SupportDue">When the Ko-fi note may show again at start; null until the first start that records it.</param>
+/// <param name="SupportOff">The pilot chose never to see the Ko-fi note again.</param>
+public sealed record AppSettings(bool CheckForUpdates = true, string? LastSeenVersion = null, DateTimeOffset? SupportDue = null, bool SupportOff = false);
 
 /// <summary>The app's own settings (state root\settings.json), apart from profiles. Read leniently: a missing or unreadable
 /// file, or keys a later version added, give the defaults for what is missing.</summary>
@@ -367,7 +369,9 @@ public sealed class AppSettingsStore(string stateRoot)
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object) return new();
             return new(!root.TryGetProperty("checkForUpdates", out var check) || check.ValueKind != JsonValueKind.False,
-                root.TryGetProperty("lastSeenVersion", out var seen) && seen.ValueKind == JsonValueKind.String ? seen.GetString() : null);
+                root.TryGetProperty("lastSeenVersion", out var seen) && seen.ValueKind == JsonValueKind.String ? seen.GetString() : null,
+                root.TryGetProperty("supportDue", out var due) && due.ValueKind == JsonValueKind.String && due.TryGetDateTimeOffset(out var when) ? when : null,
+                root.TryGetProperty("supportOff", out var off) && off.ValueKind == JsonValueKind.True);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException) { return null; }
     }
@@ -382,5 +386,19 @@ public sealed class AppSettingsStore(string stateRoot)
         if (Read() is not { } settings || settings.LastSeenVersion == version) return false;
         Save(settings with { LastSeenVersion = version });
         return settings.LastSeenVersion is not null || usedBefore;
+    }
+
+    /// <summary>Days from the first start to the first Ko-fi note, and between two notes.</summary>
+    public const int SupportFirstDays = 7, SupportEveryDays = 30;
+
+    /// <summary>Whether this start shows the Ko-fi note, and records when it may show next. The first start only sets the
+    /// date (a week on, so a new pilot first gets to fly); then the note shows at most once a month, and never again once
+    /// the pilot turns it off.</summary>
+    public bool TakeSupport(DateTimeOffset now)
+    {
+        if (Read() is not { } settings || settings.SupportOff) return false;
+        var show = settings.SupportDue is { } due && now >= due;
+        if (settings.SupportDue is null || show) Save(settings with { SupportDue = now.AddDays(show ? SupportEveryDays : SupportFirstDays) });
+        return show;
     }
 }
