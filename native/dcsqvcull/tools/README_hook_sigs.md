@@ -57,4 +57,4 @@ The DLLs are only read: nothing in the DCS install is written.
 
 ## License
 
-MIT, like the rest of DcsQvCull.
+GPL-3.0-or-later, like the rest of DcsQvCull.
