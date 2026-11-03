@@ -232,7 +232,14 @@ void MathChecks() {
         saccade.SetEyes(eyeInView);
         h.Record(saccade);
         h.Record({122 * Ms, false, false, {0.f, 0.f, -1.f}});  // no gaze: Quad Views shows its fixed focus
+        // A runtime that delivers the gaze reversed (+Z, issue #10): the same 10 degrees right, turned forward.
+        GazeSample reversed{133 * Ms, true, false, {-std::sin(10.f * Rad), 0.f, std::cos(10.f * Rad)}};
+        reversed.SetEyes(eyeInView);
+        h.Record(reversed);
         float l[3], r[3];
+        Check(dcsvr::ExportGaze(h.At(133 * Ms), l, r) == (dcsvr::GazeExportSample | dcsvr::GazeExportValid) && l[2] < 0.f &&
+                  Near(std::atan2(l[0], -l[2]) / Rad, 13.f, 0.01f) && Near(std::atan2(r[0], -r[2]) / Rad, 7.f, 0.01f),
+              "gaze export: a reversed gaze (+Z) is turned forward, the same direction as the valid one");
         const uint32_t fv = dcsvr::ExportGaze(h.At(100 * Ms), l, r);
         Check(fv == (dcsvr::GazeExportSample | dcsvr::GazeExportValid) && Near(std::atan2(l[0], -l[2]) / Rad, 13.f, 0.01f) &&
                   Near(std::atan2(r[0], -r[2]) / Rad, 7.f, 0.01f) && Near(l[0] * l[0] + l[1] * l[1] + l[2] * l[2], 1.f, 1e-5f),

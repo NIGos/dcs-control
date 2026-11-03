@@ -199,7 +199,12 @@ struct GazeSample {
     float eye[2][3]{{0.f, 0.f, -1.f}, {0.f, 0.f, -1.f}};
 
     // Fills eye[] from dir and each eye's orientation in view space (canted displays turn each eye's frame).
+    // Some Pimax setups (a Crystal Super micro-OLED, GitHub issue #10) deliver the gaze pose turned so that the
+    // direction comes out reversed, +Z: Quad Views' own projection divides by z and places the focus right anyway,
+    // but every reader of the direction saw a gaze behind the head. No eye looks backwards, so dir is turned forward.
     void SetEyes(const Quat eyeInView[2]) {
+        if (dir[2] > 0.f)
+            for (float& c : dir) c = -c;
         for (int e = 0; e < 2; ++e) {
             float v[3];
             Rotate(Conjugate(eyeInView[e]), dir, v);
