@@ -779,6 +779,17 @@ if (-not $projectText.Contains('dcsvr_temporal_cs.hlsl')) {
               $anchor) -join $nl)
     [IO.File]::WriteAllText($projectSource, $projectText.Replace($anchor, $item))
 }
+# Upstream's pre- and post-build steps run python, sed.exe and copy on unquoted $(SolutionDir)/$(ProjectDir)/$(OutDir)
+# paths, so they fail ("exited with code 9009" or 1) when the workspace path has a space, such as "D:\My Projects".
+# Quote every such path inside the <Command> blocks; a quoted path is left alone, so this is a no-op once done.
+$projectText = [IO.File]::ReadAllText($projectSource)
+$quotedProject = [regex]::Replace($projectText, '(?s)<Command>.*?</Command>', {
+    param($block)
+    $text = [regex]::Replace($block.Value, '(?<!")\$\((SolutionDir|ProjectDir|OutDir|IntDir|TargetPath|TargetDir)\)[^\s"&<>()]*', { param($m) '"' + $m.Value + '"' })
+    # A quoted file in "for /f ... in (...)" is a string unless usebackq is set.
+    $text.Replace('for /f "delims== tokens=1,2" %%G in ("', 'for /f "usebackq delims== tokens=1,2" %%G in ("')
+})
+if ($quotedProject -ne $projectText) { [IO.File]::WriteAllText($projectSource, $quotedProject) }
 $layerText = [IO.File]::ReadAllText($layerSource)
 if (-not $layerText.Contains('DCSVR periphery stability')) {
     $nl = if ($layerText.Contains("`r`n")) { "`r`n" } else { "`n" }
