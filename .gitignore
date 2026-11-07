@@ -10,3 +10,5 @@ external/
 .vs/
 __pycache__/
 *.pyc
+# Offline copy of the release signing key: never commit or package it.
+/.signing-backup/
