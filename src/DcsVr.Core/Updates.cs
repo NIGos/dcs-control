@@ -80,8 +80,8 @@ public sealed partial class Updates
     /// the private half, which never leaves the release machine; scripts/verify-web-release.py reads this constant.</summary>
     public const string PublicKeyPem = """
         -----BEGIN PUBLIC KEY-----
-        MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/4DiOD0+w2x0KP7/AbUoQkQyJyHD
-        DcE8ZmbDQ1WbKHq7iSScQ/IMj1uyElcchVCv9IK4PWfxwtndZJ1uSKpm3A==
+        MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0Q3e8ZCEM8wmZQ0j37ewqUQu+bJY
+        G13jufU3cUMj1Oclab/Yq/0r6EtVXeFjd3juV0Ktsh53vWr+TK/04gw2Tg==
         -----END PUBLIC KEY-----
         """;
     public static readonly TimeSpan Interval = TimeSpan.FromHours(6);
