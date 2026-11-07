@@ -667,7 +667,9 @@ int main() {
   // QVFR log on this machine (may be held open for writing by a running DCS).
   double sm = ReadQvfrSmoothing();
   printf("     qvfr smoothing read: %.2f\n", sm);
-  Check(sm >= 0.0 && sm < 0.5, "QVFR smoothing parsed");
+  // -1 = no QVFR log with a quad views session yet (a fresh machine before the first VR run): nothing to parse.
+  if (sm < 0.0) QvSkip("QVFR smoothing parsed: no Quad-Views-Foveated.log session on this machine\n");
+  else Check(sm < 0.5, "QVFR smoothing parsed");
   sm = 0.30;
   g_qvSmoothing = sm;
   Check(std::fabs(EffectiveKeep() - 0.35) < 1e-9, "auto keep = 1 - 2*0.30 - 0.05");
