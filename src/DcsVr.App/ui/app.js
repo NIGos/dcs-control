@@ -1435,6 +1435,8 @@ function launchState() {
   if (state?.dcsRunning) return 'running';
   return matchesApplied() ? 'ready' : 'changes';
 }
+/** True while the status line shows a line updateWorkflow wrote for the mode (DCS running, invalid values). */
+let statusByMode = false;
 function updateWorkflow() {
   const hasInvalid = invalid.size > 0, mode = launchState(), applied = state?.appliedName || state?.appliedProfile;
   const blocked = busy || !profile || !state || ['invalid','running'].includes(mode);
@@ -1446,9 +1448,11 @@ function updateWorkflow() {
   $('saveProfile').disabled = busy || hasInvalid;
   const error = $('statusDot').classList.contains('error');
   $('statusTitle').textContent = busy ? 'Working' : hasInvalid ? STATE_WORDS.invalid : error ? 'Needs attention' : STATE_WORDS[mode];
-  if (hasInvalid) $('status').textContent = 'Correct the marked values before launching or saving.';
-  else if (!busy && !error && mode === 'running') $('status').textContent = liveMode() ? liveStatus || 'Settings tagged Live apply now. The rest wait for the next launch.'
-    : (state?.launchReady && !liveOn ? 'Live is off. ' : '')+'Close DCS to apply changes or go back to stock DCS.';
+  if (hasInvalid) { $('status').textContent = 'Correct the marked values before launching or saving.'; statusByMode = true; }
+  else if (!busy && !error && mode === 'running') { statusByMode = true; $('status').textContent = liveMode() ? liveStatus || 'Settings tagged Live apply now. The rest wait for the next launch.'
+    : (state?.launchReady && !liveOn ? 'Live is off. ' : '')+'Close DCS to apply changes or go back to stock DCS.'; }
+  // The running or invalid line written above goes once DCS closes or the values are fixed: the backend's last status again.
+  else if (!busy && !error && statusByMode) { statusByMode = false; $('status').textContent = (state?.status || '') + (state?.foveaChanged ? ' ' + state.foveaChanged : ''); }
   renderLive();
   $('statusDot').classList.toggle('ready', !busy && !error && mode === 'ready');
   $('launch').title = mode === 'running' ? 'DCS is already running'
@@ -1504,7 +1508,8 @@ async function applyLive() {
     } catch (error) {
       liveStatus = (edited.length ? 'Waits for the next launch: '+liveNames(edited)+'. ' : '')+error.message;
     } finally { liveBusy = null; }
-    if (state?.dcsRunning && !busy) updateWorkflow();
+    // The live result is newer than an error from before the flight (a missing log, say): it replaces it.
+    if (state?.dcsRunning && !busy) { $('statusDot').classList.remove('error'); updateWorkflow(); }
     if (liveAgain) { liveAgain = false; await applyLive(); }
   })();
   return liveBusy;
@@ -1517,7 +1522,13 @@ document.addEventListener('change', e => {
 // DCS can start or close outside the app: Launch and Restore lock while it runs.
 setInterval(async () => {
   if (!state || busy || document.hidden) return;
-  try { const {dcsRunning} = await request('dcsStatus'); if (state && dcsRunning !== Boolean(state.dcsRunning)) { state.dcsRunning = dcsRunning; liveOn = true; liveBase = null; liveStatus = ''; sendChangedSoon(true); renderOriginals(); updateWorkflow(); renderDashboard(); loadFlight(dcsRunning ? 0 : 3000); } } catch { }
+  try { const {dcsRunning} = await request('dcsStatus'); if (state && dcsRunning !== Boolean(state.dcsRunning)) {
+    state.dcsRunning = dcsRunning; liveOn = true; liveBase = null; liveStatus = '';
+    // DCS starting or closing makes an older error stale, and the scan's DCS row and "DCS is closed" check too.
+    $('statusDot').classList.remove('error'); statusByMode = true;
+    if (state.inventory) state.inventory.dcsRunning = dcsRunning;
+    if (state.readiness?.checks) state.readiness.checks = state.readiness.checks.filter(c => c.id !== 'closed');
+    sendChangedSoon(true); renderOriginals(); updateWorkflow(); renderDashboard(); renderInventory(); renderChecks(); loadFlight(dcsRunning ? 0 : 3000); } } catch { }
 }, 4000);
 // ---- Checks: one list, grouped Must fix / Check yourself / OK, each line with its way to the fix ---------------------
 // Titles and links for check ids (ProfileValidation codes, Readiness ids). [title, {reveal|page|guide, label, browse}]

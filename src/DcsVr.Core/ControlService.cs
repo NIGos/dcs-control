@@ -65,7 +65,32 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
         if (SavedRuntime.Read()?.Sha256 is { } saved) hashes.Add(saved);
+        // Every component an earlier version shipped: its files are ours too, whichever version left them.
+        hashes.UnionWith(Leftovers.KnownComponentHashes);
         return hashes;
+    }
+
+    /// <summary>DCS Control's files in DCS's bin folders and in Saved Games that the record of originals does not list (the
+    /// record was lost: a reinstalled Windows, a cleaned %LOCALAPPDATA%). Looks only in the DCS of
+    /// <paramref name="dcsExecutable"/> (bin and bin-mt) and the Saved Games DCS folder of <paramref name="optionsPath"/>
+    /// (…\Config\options.lua), and in those of the applied profile; never in folders found otherwise, so a service on
+    /// another state folder (tests, the interface check) cannot touch the pilot's real install. Back to stock DCS removes
+    /// them.</summary>
+    public IReadOnlyList<LeftoverFile> LeftoverFiles(string? dcsExecutable, string? optionsPath)
+    {
+        var baseline = Originals.Read();
+        var applied = baseline.Current is null ? null : ReadAppliedProfile();
+        static string? Up(string? path, int levels)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return null;
+            var result = Path.GetFullPath(path);
+            for (var i = 0; i < levels && result is not null; i++) result = Path.GetDirectoryName(result);
+            return result;
+        }
+        var bins = new[] { dcsExecutable, applied?.Executable }.Select(e => Up(e, 2)).OfType<string>()
+            .SelectMany(root => new[] { Path.Combine(root, "bin"), Path.Combine(root, "bin-mt") });
+        var savedGames = new[] { optionsPath, applied?.OptionsPath }.Select(o => Up(o, 2)).OfType<string>();
+        return Leftovers.Find(bins, savedGames, OwnHashes(), baseline.Files.Select(f => f.Path));
     }
 
     /// <summary>True when DLSS 5 is on and the profile names no runtime file that exists, so the saved copy is used.</summary>
@@ -277,11 +302,20 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     }
     /// <summary>Back to stock DCS: every path DCS Control changed goes back to what was there before it first wrote
     /// it, whatever it holds now (owned options.lua settings only, other edits kept). Refused only while DCS runs.</summary>
-    public RestoreResult RestoreOriginals()
+    /// <param name="dcsExecutable">The DCS the app shows (detected or chosen) and <paramref name="optionsPath"/> its
+    /// options.lua: that install and Saved Games folder are also searched for DCS Control's files the record does not
+    /// list (<see cref="LeftoverFiles"/>), which are removed once every recorded path is back.</param>
+    public RestoreResult RestoreOriginals(string? dcsExecutable = null, string? optionsPath = null)
     {
         var originals = Originals;
-        EnsureDcsClosed(originals.Read().Files.Select(f => f.Path).Append(ManagedRoot), ManagedRoot);
+        EnsureDcsClosed(originals.Read().Files.Select(f => f.Path).Concat(LeftoverFiles(dcsExecutable, optionsPath).Select(f => f.Path)).Append(ManagedRoot), ManagedRoot);
         var result = originals.RestoreOriginals();
+        if (result.Complete && LeftoverFiles(dcsExecutable, optionsPath) is { Count: > 0 } leftovers)
+        {
+            var problems = Leftovers.Remove(leftovers, originals.AppendLog);
+            originals.AppendLog($"Removed {leftovers.Count - problems.Count} of {leftovers.Count} DCS Control files the record did not list.");
+            if (problems.Count > 0) result = new(false, [.. result.Conflicts, .. problems]);
+        }
         // A saved runtime copy forgotten while this profile was applied is deleted once nothing installed uses it.
         if (result.Complete && !AppliedUsesSavedRuntime())
             try { SavedRuntime.RemoveForgotten(); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
@@ -387,7 +421,16 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var applied = baseline.State == "applied" ? ReadAppliedProfile() : null;
         draft ??= applied?.Profile ?? throw new InvalidOperationException("No profile is applied yet. Open DCS Control and launch from there once.");
         // Every file involved: everything DCS Control wrote, the selected DCS install and options, the managed folder.
-        EnsureDcsClosed(baseline.Files.Select(f => f.Path).Concat(new[] { inventory.DcsExecutable, inventory.OptionsPath, ManagedRoot }.OfType<string>()), ManagedRoot);
+        var leftovers = LeftoverFiles(inventory.DcsExecutable, inventory.OptionsPath);
+        EnsureDcsClosed(baseline.Files.Select(f => f.Path).Concat(leftovers.Select(f => f.Path)).Concat(new[] { inventory.DcsExecutable, inventory.OptionsPath, ManagedRoot }.OfType<string>()), ManagedRoot);
+        // A lost record of originals: DCS Control's own unrecorded files go first (the pilot's dxgi.dll back from
+        // dxgi2.dll), so this apply backs up what is really the pilot's instead of taking leftovers for originals.
+        if (leftovers.Count > 0)
+        {
+            var problems = Leftovers.Remove(leftovers, originals.AppendLog);
+            if (problems.Count > 0) throw new IOException("DCS Control's files from before could not be removed first: " + string.Join("; ", problems));
+            originals.AppendLog($"Before applying: removed {leftovers.Count} DCS Control files the record did not list.");
+        }
         string? reason = null;
         ApplyPlan? planned = null;
         if (applied is not null && SameDraft(draft, applied.Profile) && SamePaths(inventory, applied))

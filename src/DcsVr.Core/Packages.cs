@@ -18,10 +18,14 @@ public sealed class ComponentCache(string directory)
 
     public string Import(ComponentPackage package, string archivePath)
     {
-        if (Hashing.FileSha256(archivePath) != package.Sha256) throw new InvalidDataException($"Invalid digest for package {package.Id}.");
+        // The bytes checked are the bytes cached: read once (a file replaced between a check and a second read would pass).
+        var bytes = File.ReadAllBytes(archivePath);
+        if (Hashing.BytesSha256(bytes) != package.Sha256) throw new InvalidDataException($"Invalid digest for package {package.Id}.");
         var cachedArchive = PathPolicy.UnderRoot(DirectoryPath, package.ArchiveName);
         if (!Path.GetFullPath(archivePath).Equals(cachedArchive, StringComparison.OrdinalIgnoreCase))
-            AtomicFile.Write(cachedArchive, File.ReadAllBytes(archivePath));
+            AtomicFile.Write(cachedArchive, bytes);
+        // And the cached copy, right before it is unpacked.
+        if (Hashing.FileSha256(cachedArchive) != package.Sha256) throw new InvalidDataException($"The cached package {package.Id} changed; import it again.");
         // Each plan gets a fresh verified extraction, so edited cache files cannot enter a deployment.
         var staging = PathPolicy.UnderRoot(DirectoryPath, "staging/" + package.Id + "-" + Guid.NewGuid().ToString("N"));
         ExtractZip(cachedArchive, staging, package.ExcludedEntries);

@@ -36,6 +36,15 @@ public static class ProfileValidation
     }
     public static IReadOnlyList<ValidationIssue> Validate(VrProfile profile, InventorySnapshot? inventory = null)
     {
+        // The messages are English with numbers like the fields show them ("0.1", not an Italian Windows' "0,1").
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+        System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+        try { return ValidateInvariant(profile, inventory); }
+        finally { System.Globalization.CultureInfo.CurrentCulture = culture; }
+    }
+
+    private static IReadOnlyList<ValidationIssue> ValidateInvariant(VrProfile profile, InventorySnapshot? inventory)
+    {
         // What will run: Optimizations only is never held back by the VR settings it keeps for later.
         profile = profile.ForLaunch();
         var issues = new List<ValidationIssue>();

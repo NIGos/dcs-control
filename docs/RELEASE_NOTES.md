@@ -1,3 +1,17 @@
+# Next release (unreleased)
+
+**Back to stock DCS also after a lost record.** The record of what DCS Control changed lives in `%LOCALAPPDATA%\DcsControl`. When it was lost (Windows reinstalled, a cleaning tool), the DLSS 5 loader stayed in DCS's `bin` and kept running even from Steam, and Back to stock DCS found nothing to undo. DCS Control now recognises its own files in DCS by their exact bytes (every version it ever shipped), lists them on the Stock DCS page, warns on Checks, includes them in the diagnostic package, and Back to stock DCS (also from the uninstaller) removes them; a `dxgi.dll` of your own that was chained as `dxgi2.dll` gets its name back. Files you installed yourself (Cheeky, ReShade, other mods) are never touched: Cheeky's loader and stereo runtime are byte-identical to its public release, so they count as DCS Control's only next to a runtime it built or the small `DcsControl.txt` mark it now writes beside them. A Cheeky you installed by hand under a DCS Control profile is backed up and comes back with Back to stock DCS.
+
+**Fixes:**
+- The status line no longer stays on "Close DCS to apply changes…" after DCS closes, and an error from before the flight no longer hides Live mode's messages while you fly. The DCS row and the "DCS is closed" check follow DCS starting and closing without a new scan.
+- The setup, update and uninstall no longer stop on PCs with an older Microsoft C++ runtime (version text like "14.29.30139.0 built by: …").
+- Launching again within 30 seconds of closing DCS starts that flight's own CPU Boost with the new profile, instead of the last flight's helper carrying on with the old settings.
+- Programs an earlier flight closed for Free VRAM are reopened after the next flight, not while DCS is loading.
+- Choosing another DCS.exe (a release and an open beta) also picks that install's own Saved Games folder.
+- The Engine page's status refresh no longer freezes the window while Launch, Apply or Back to stock DCS is working.
+- Range messages show "0.1", not "0,1", on Windows set to a language with a decimal comma.
+- The setup and package import install exactly the bytes they verified.
+
 # 0.6.2 preview
 
 **Live changes while DCS runs.** Settings tagged **LIVE** now apply in about a second while you fly, without restarting DCS: Engine Optimizations (now also the Model allocator, and Diagnostic hooks when turned on), Visual realism, Pupil shift and Depth boost, Quad Views sharpening, edge blending and periphery stability, optical flow resolution and bidirectional flow of NVIDIA frame generation, and the DLSS 5 tuning. DLSS 5 style and intensity changes and optical flow changes give a short hitch. Optical flow quality waits for the next launch: changing it in flight froze DCS for several seconds. Everything else waits for the next launch, and the status line says which. The **Live** switch in the right panel turns it off. Quad Views, frame generation and DLSS 5 apply live once this version has launched the profile.

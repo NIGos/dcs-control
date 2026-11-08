@@ -58,7 +58,10 @@ public sealed class ApplicationInstaller(string destination)
             var path = PathPolicy.UnderRoot(Root, file.Path);
             var old = owned.GetValueOrDefault(path);
             if (File.Exists(path) && old is null) throw new IOException("Existing unowned file retained: " + path);
-            changes.Add(new(path, old is null || old.Deleted || !File.Exists(path) ? null : old.InstalledSha256, File.ReadAllBytes(PathPolicy.UnderRoot(sourceRoot, file.Path)), "Application payload", Root: Root));
+            // The bytes installed are checked again: VerifySource read the files earlier, by path.
+            var bytes = File.ReadAllBytes(PathPolicy.UnderRoot(sourceRoot, file.Path));
+            if (bytes.LongLength != file.Bytes || Hashing.BytesSha256(bytes) != file.Sha256) throw new InvalidDataException("Release integrity failed: " + file.Path);
+            changes.Add(new(path, old is null || old.Deleted || !File.Exists(path) ? null : old.InstalledSha256, bytes, "Application payload", Root: Root));
         }
         var ledger = PathPolicy.UnderRoot(Root, "installation.json");
         var retainedPaths = changes.Select(c => c.Path).Append(ledger).ToHashSet(StringComparer.OrdinalIgnoreCase);

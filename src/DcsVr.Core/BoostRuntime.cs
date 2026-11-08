@@ -16,6 +16,12 @@ public sealed class BoostRuntime
 {
     // Per session: a boost for one signed-in user never blocks another user's.
     private const string MutexName = @"Local\DcsVrControl.CpuBoost";
+    /// <summary>Set by a helper that finds <see cref="MutexName"/> held: the running one restores and exits if it is only
+    /// waiting for DCS to restart itself.</summary>
+    private const string HandoverName = @"Local\DcsVrControl.CpuBoost.Handover";
+    /// <summary>How long a new helper waits for the one of the flight before: its restart wait plus the restore (the
+    /// Tobii services can take a while to start again).</summary>
+    private static readonly TimeSpan HandoverWait = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan MinDcsLifetime = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan RescanInterval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan AttachTimeout = TimeSpan.FromMinutes(5);
@@ -41,6 +47,8 @@ public sealed class BoostRuntime
     private ulong _vrMask, _bgMask, _allCpus;
 
     private readonly List<ClosedProcess> _closedForVram = [];
+    /// <summary>An earlier flight's Free VRAM record waits for this flight to end (this flight does not reopen its own).</summary>
+    private bool _earlierClosedWaiting;
     private readonly List<string> _reopened = [];
     private string? _displayStatus;
     private IReadOnlyList<string> _tobiiPaused = [];
@@ -292,7 +300,20 @@ public sealed class BoostRuntime
         using var _mutex = mutex;
         var held = false;
         try { held = mutex.WaitOne(TimeSpan.Zero); } catch (AbandonedMutexException) { held = true; }
-        if (!held) { error.WriteLine("CPU Boost is already running."); return 0; }
+        if (!held)
+        {
+            // The helper of the flight before may still be waiting for DCS to restart itself (RestartGrace): a new launch
+            // asks it to restore and stand down, so this flight runs with its own profile instead of the last one's.
+            using var handover = new EventWaitHandle(false, EventResetMode.AutoReset, HandoverName);
+            handover.Set();
+            try { held = mutex.WaitOne(HandoverWait); } catch (AbandonedMutexException) { held = true; }
+            if (!held)
+            {
+                // That helper is attached to a DCS that still runs: the request must not linger for its next exit.
+                handover.Reset();
+                error.WriteLine("CPU Boost is already running."); return 0;
+            }
+        }
         try { return new BoostRuntime(profile, stateRoot, dcsExecutable, parsed.DcsPid, dcsLog).Execute(output); }
         finally { try { mutex.ReleaseMutex(); } catch (ApplicationException) { } }
     }
@@ -320,7 +341,8 @@ public sealed class BoostRuntime
         // Those this helper may not change (an elevated helper moved them) stay recorded alongside its own changes.
         _leftover = ReadLedger(LedgerPath(Path.GetDirectoryName(_boostDir)!));
         // Programs an earlier helper closed for Free VRAM and was ended before reopening. With Free VRAM and Reopen on
-        // for this flight they stay closed and are reopened with this flight's own; otherwise they are reopened now.
+        // for this flight they stay closed and are reopened with this flight's own; otherwise they wait too, and are
+        // reopened from their record once DCS exits: never while DCS loads, where they would take its video memory.
         if (_profile.FreeVram && _profile.FreeVramReopen)
         {
             if (TakeClosedFile(ClosedPath(Path.GetDirectoryName(_boostDir)!)) is { Length: > 0 } earlierClosed)
@@ -330,7 +352,11 @@ public sealed class BoostRuntime
                 Log($"Free VRAM (earlier flight): {earlierClosed.Length} closed programs are reopened after this flight.");
             }
         }
-        else if (ReopenClosedFile(ClosedPath(Path.GetDirectoryName(_boostDir)!)) is { } reopened) foreach (var line in reopened) Log("Free VRAM (earlier flight): " + line);
+        else if (File.Exists(ClosedPath(Path.GetDirectoryName(_boostDir)!)))
+        {
+            _earlierClosedWaiting = true;
+            Log("Free VRAM (earlier flight): its closed programs are reopened after this flight.");
+        }
         // Not disposed: a signal handler thread may still be waiting on them when Execute returns.
         var stopping = new ManualResetEventSlim(false);
         var finished = new ManualResetEventSlim(false);
@@ -397,6 +423,8 @@ public sealed class BoostRuntime
             // DCS's own launcher (and the Steam edition) exits and starts DCS again as DCS.exe --restarted: the attached
             // process ending is only DCS's exit when no DCS from the same executable follows within RestartGrace.
             var first = true;
+            // A helper started for a new launch asks this one to stand down (see Run).
+            using var handover = new EventWaitHandle(false, EventResetMode.AutoReset, HandoverName);
             while (dcs is not null)
             {
                 Process? next = null;
@@ -420,18 +448,21 @@ public sealed class BoostRuntime
 
                     // One handle, opened at attach, tells when this DCS exits; no PID lookups that a recycled PID could fool.
                     using var exited = new ProcessExitWaitHandle(dcs.SafeHandle);
-                    var handles = new[] { stopping.WaitHandle, exited };
+                    var handles = new WaitHandle[] { stopping.WaitHandle, exited, handover };
                     var dcsExited = false;
                     while (true)
                     {
                         var signaled = WaitHandle.WaitAny(handles, RescanInterval);
                         if (signaled == 0) break;
                         if (signaled == 1) { dcsExited = true; break; }
+                        // A DCS followed as a restart that is really a new launch: its own helper takes over.
+                        if (signaled == 2 && !first) { Log("A new launch started its own CPU Boost for this DCS; this flight's changes are restored."); break; }
+                        if (signaled == 2) continue;
                         if (_profile.CpuBoost) ApplyToOthers(dcs.Id);
                         WriteStatus("active");
                     }
                     if (!dcsExited) break;
-                    next = WaitForRestart(dcs.Id, stopping);
+                    next = WaitForRestart(dcs.Id, stopping, handover);
                     if (next is null) { Log("DCS exited; restoring."); break; }
                     Log($"DCS PID {dcs.Id} ended and DCS started again (PID {next.Id}), as DCS's launcher does: CPU Boost moves to it; nothing is restored.");
                 }
@@ -450,6 +481,10 @@ public sealed class BoostRuntime
             RestoreDisplay("Restore");
             ResumeTobii();
             if (_profile.FreeVram && _profile.FreeVramReopen && !_sessionEnding) ReopenClosed();
+            else if (_earlierClosedWaiting && !_sessionEnding)
+            {
+                if (ReopenClosedFile(ClosedPath(Path.GetDirectoryName(_boostDir)!)) is { } reopened) foreach (var line in reopened) Log("Free VRAM (earlier flight): " + line);
+            }
             // Nothing is reopened at logoff or shutdown, then or at the next start.
             else DeleteClosedRecord();
             if (_attachedPid is not null)
@@ -509,11 +544,14 @@ public sealed class BoostRuntime
 
     /// <summary>A DCS from the same executable (any one when the launch named none) that runs within
     /// <see cref="RestartGrace"/> after <paramref name="endedPid"/> ended, opened for the session; null when none does.</summary>
-    private Process? WaitForRestart(int endedPid, ManualResetEventSlim stopping)
+    private Process? WaitForRestart(int endedPid, ManualResetEventSlim stopping, WaitHandle handover)
     {
         var deadline = DateTime.UtcNow + RestartGrace;
+        // A helper started for a new launch asks this one to stand down (see Run): the new DCS is that launch's, with its
+        // own profile, not DCS's launcher restarting this one.
         while (!stopping.IsSet && DateTime.UtcNow < deadline)
         {
+            if (handover.WaitOne(0)) { Log("A new launch started its own CPU Boost; this flight's changes are restored."); return null; }
             foreach (var candidate in DcsCandidates())
             {
                 if (candidate.Pid == endedPid) continue;

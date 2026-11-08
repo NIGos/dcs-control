@@ -188,6 +188,22 @@ $files = Get-ChildItem -LiteralPath $releaseRoot -Recurse -File | Where-Object {
 @{ schemaVersion=1; product='DcsControl'; version=$version; files=@($files) } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $releaseRoot 'release-manifest.json') -Encoding utf8
 & (Join-Path $payloadRoot 'scripts/installer.ps1') -Action Verify -Destination (Join-Path $workspaceRoot 'artifacts/installer-verify') -NoShortcut
 if ($LASTEXITCODE -ne 0) { throw 'Release integrity check failed.' }
+# Every component this release ships joins src/DcsVr.Core/KnownComponents.txt, so later versions recognize its files in
+# DCS even when the record of originals that listed them is gone (Leftovers.cs). New lines are for the next build and
+# go into the release commit.
+$knownList = Join-Path $workspaceRoot 'src/DcsVr.Core/KnownComponents.txt'
+$knownText = [IO.File]::ReadAllText($knownList)
+$known = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($line in $knownText -split "`n") { $token = ($line -split ' ', 2)[0].Trim(); if ($token -match '^[0-9a-fA-F]{64}$') { [void]$known.Add($token) } }
+$componentsRoot = Join-Path $payloadRoot 'components'
+$added = foreach ($sha in Get-ChildItem -LiteralPath $componentsRoot -Recurse -File -Filter '*.sha256' | Sort-Object FullName) {
+    $hash = (Get-Content -LiteralPath $sha.FullName -Raw).Trim().Split(' ')[0].ToLowerInvariant()
+    if ($hash -match '^[0-9a-f]{64}$' -and $known.Add($hash)) { "$hash $([IO.Path]::GetRelativePath($componentsRoot, $sha.FullName).Replace('\', '/') -replace '\.sha256$', '') ($version)" }
+}
+if ($added) {
+    [IO.File]::WriteAllText($knownList, $knownText.TrimEnd("`r", "`n") + "`n" + (($added) -join "`n") + "`n")
+    Write-Warning "$(@($added).Count) new component hash(es) added to src/DcsVr.Core/KnownComponents.txt: commit them with this release."
+}
 $releaseZip = $releaseRoot + '.zip'
 if (Test-Path -LiteralPath $releaseZip) { Remove-Item -LiteralPath $releaseZip }
 [IO.Compression.ZipFile]::CreateFromDirectory($releaseRoot, $releaseZip, [IO.Compression.CompressionLevel]::Optimal, $true)
