@@ -58,7 +58,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
   - **SteamVR with the Sboys driver** (CustomHeadsetOpenVR 1.3.0; for SLAM tracking it needs Pimax EVO).
 - **DCS World 2.9**, Steam edition or standalone.
 - **Microsoft Edge WebView2 Runtime** (already on most Windows 10 and 11 PCs) and the **Microsoft Visual C++ x64 runtime 14.50 or newer**. The setup (and `Install DCS Control.cmd`) checks both and installs them from Microsoft if they are missing.
-- For DLSS 5: your own signed NVIDIA **`nvngx_dlssnr.dll`, version 310.8** (see [DLSS 5](#dlss-5)). It is not included and the app does not download it. NVIDIA's runtime officially runs on RTX 50 cards; on RTX 20, 30 and 40 cards, NVIDIA's file changed by a community compatibility patch is accepted too.
+- For DLSS 5: your own signed NVIDIA **`nvngx_dlssnr.dll`, version 310.8 or 310.9** (see [DLSS 5](#dlss-5)). It is not included and the app does not download it. NVIDIA's runtime officially runs on RTX 50 cards; on RTX 20, 30 and 40 cards, NVIDIA's file changed by a community compatibility patch is accepted too.
 
 ## Install
 
@@ -90,14 +90,14 @@ The preview is not code-signed, so Windows SmartScreen may warn you the first ti
 
 ## Updates
 
-When DCS Control starts it asks GitHub whether a newer release is out (at most every 6 hours, or 30 minutes after a check that failed; only the list of releases is fetched, nothing about your PC is sent). When there is one, the **Overview** shows **DCS Control 0.5.x is available** with:
+When DCS Control starts it asks GitHub whether a newer release is out (at most every 6 hours, or 30 minutes after a check that failed; only the list of releases is fetched, nothing about your PC is sent). When there is one, the **Overview** shows **DCS Control *version* is available** with:
 
 - **What's new**: that release's notes;
 - **Update**: downloads the release's setup, checks its **signature** against the release key built into the app and that it is the version announced (a download that does not match is deleted and nothing is installed), closes DCS Control, installs the new version in the same folder and starts it again. Your profiles, backups and the applied profile stay as they are. **Cancel download** (or closing the dialog) stops the download; a download that receives nothing for a minute stops by itself.
 
 Update refuses while DCS runs and while Launch DCS, Apply or Back to stock DCS is still working. If the update fails, the installation rolls back and the DCS Control you had opens again. A copy started from an unzipped folder is updated by installing DCS Control where the setup installed it before (Settings → Apps knows), otherwise in the standard folder (`%LOCALAPPDATA%\Programs\DcsControl`, with Start menu and desktop shortcuts); the dialog names the folder, and afterwards you can delete the unzipped one.
 
-Releases before 0.5.6 cannot update themselves: install 0.5.6 once with the setup (or the ZIP); from then on updates arrive in the app. A dot next to the version number at the bottom of the left rail also means an update is available; × hides the banner until the next start.
+Releases before 0.5.6 cannot update themselves: install 0.5.6 once with the setup (or the ZIP); from then on updates arrive in the app. **0.6.3 has a new release signing key**: from 0.6.2 or earlier, **Update** refuses it ("the signature does not match DCS Control's release key") and installs nothing, so install 0.6.3 once with its setup; your settings and profiles are kept, and later updates install from the app again. A dot next to the version number at the bottom of the left rail also means an update is available; × hides the banner until the next start.
 
 On the **Help & support** page, under **Updates**, **Check for updates when DCS Control starts** turns the automatic check off (it is on by default) and **Check now** asks GitHub at once. Without internet nothing happens: no update is shown.
 
@@ -167,9 +167,9 @@ The app uses its **bundled Quad Views** (Quad-Views-Foveated). This is the one t
 
 DLSS 5 runs NVIDIA's DLSS-NR neural model on the two Quad Views focus views. DCS's own DLSS keeps running as usual.
 
-**The runtime file — bring your own.** DLSS 5 needs NVIDIA's `nvngx_dlssnr.dll`, **version 310.8**, x64, signed by NVIDIA Corporation. It is not included in this app. Select it once with **Browse** (or let **Read settings from this PC** find it): the app checks it and keeps a **verified copy** in `%LOCALAPPDATA%\DcsControl\runtimes`, which every profile then uses. The page shows "Saved copy · version 310.8.0.0 · from …" with **Change…** and **Forget**. A file that fails the checks is refused and nothing is saved.
+**The runtime file — bring your own.** DLSS 5 needs NVIDIA's `nvngx_dlssnr.dll`, **version 310.8 or 310.9**, x64, signed by NVIDIA Corporation (310.9 is NVIDIA's newer, faster model; 310.8 is the one tested most). It is not included in this app. Select it once with **Browse** (or let **Read settings from this PC** find it): the app checks it and keeps a **verified copy** in `%LOCALAPPDATA%\DcsControl\runtimes`, which every profile then uses. The page shows "Saved copy · version 310.8.0.0 · from …" with **Change…** and **Forget**. A file that fails the checks is refused and nothing is saved.
 
-**RTX 20, 30 and 40 cards.** NVIDIA's runtime runs only on RTX 50 cards: on older cards DLSS 5 shows "ON but not applied". Community patches (for example dlssnr-patcher) rewrite its GPU code for RTX 20, 30 and 40 cards, which breaks NVIDIA's signature. When you select such a file with **Browse**, DCS Control accepts it if it is still NVIDIA's x64 runtime, version 310.8, with no signature or NVIDIA's own (now invalid) one, and the saved copy says "NVIDIA's file changed by a compatibility patch". A file validly signed by anyone else is refused, and **Read settings from this PC** only ever picks files with a valid NVIDIA signature. The patched file is not NVIDIA's release: use it at your own risk, and expect a larger GPU cost than on RTX 50 cards.
+**RTX 20, 30 and 40 cards.** NVIDIA's runtime runs only on RTX 50 cards: on older cards DLSS 5 shows "ON but not applied". Community patches (for example dlssnr-patcher) rewrite its GPU code for RTX 20, 30 and 40 cards, which breaks NVIDIA's signature. When you select such a file with **Browse**, DCS Control accepts it if it is still NVIDIA's x64 runtime, version 310.8 or 310.9, with no signature or NVIDIA's own (now invalid) one, and the saved copy says "NVIDIA's file changed by a compatibility patch". A file validly signed by anyone else is refused, and **Read settings from this PC** only ever picks files with a valid NVIDIA signature. The patched file is not NVIDIA's release: use it at your own risk, and expect a larger GPU cost than on RTX 50 cards.
 
 Settings:
 
@@ -265,7 +265,7 @@ Four more options on the CPU Boost page, all off by default and usable without C
 
 **Test suite:** in flight, with the headset on and awake (or on the monitor), press **Run test suite** (or Ctrl+Alt+F11 in DCS). It compares all the optimizations off (stock DCS) against on, in alternating 5-second blocks for about 3 minutes, and writes a report (**Open last report**): two beeps when it starts, three high beeps when it is done, one long low beep when it stops. Keep your head still in a busy scene; blocks while the headset sleeps are thrown away. If it stops at once saying no frames were counted, the module did not recognise the headset's views: please report it with a diagnostic package. The module's developer keys are off; Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down stay reserved for it.
 
-Tested on DCS 2.9.30 in single player. Back to stock DCS (or turning the option off and launching) removes the hook, the module and everything it wrote.
+Tested on DCS 2.9.30 and 2.9.31 in single player. Back to stock DCS (or turning the option off and launching) removes the hook, the module and everything it wrote.
 
 ### Pupil shift (experimental)
 
@@ -367,7 +367,7 @@ All in-flight keys are on the **In flight** page, under **In-flight keys**. A ke
 
 To change a key, click the field and press the combination you want. Esc cancels, Backspace clears it. **Default** (shown when a key differs from its default) puts the default back. Keys need Ctrl, Alt or Shift unless they are F-keys, Pause, Insert, Home, End and similar. Windows' own shortcuts, the Windows key, another in-flight key's combination and the engine module's reserved keys (Ctrl+Alt+F8 to F12, Ctrl+Alt+Page Up/Down) are refused; a combination DCS binds by default is accepted with a note (and listed under Check yourself).
 
-The **headset panel** is drawn in the headset. With frame generation it is always available; without it, turn on **Headset panel** on the **In flight** page: OFXR is then loaded only to draw the panel and leaves your frames untouched. It shows FPS, DLSS 5 state (on with GPU ms, off, or why it is not applied), the frame-generation backend and mode (2×, 3×, auto), and DCS (app) vs headset (output) FPS. With the engine optimizations on, an **Engine** line says whether all of them are working ("Engine Opt.: all 17 on", green), only some ("Engine Opt.: 12 of 17 on", amber; for a few seconds after a mission loads this is normal while the multi-threaded recorders learn the scene), none ("Engine Opt.: none on", red) or that you switched them off ("Engine Opt.: OFF (Alt+Shift+F11)"). With Pupil shift installed, a **Pupil shift** line shows "ON" with the largest pupil shift, "no gaze" or "OFF"; with Depth boost it adds the strength and the eye distance the world is rendered with ("Depth x1.18 far, IPD 77.4 mm"), followed by "(dual camera)" while the cockpit is drawn at your real eye distance, or an amber "no dual camera" when it is not. Depth boost alone has its own **Depth boost** line, and Far depth a **Far depth** line. With Periphery stability, a **Periphery** line shows "ON 0.50, 88 fps" (strength and frames steadied per second), "ON, not filtering" or "OFF". Options on the **In flight** page (which also lists every in-flight key):
+The **headset panel** is drawn in the headset. With frame generation it is always available; without it, turn on **Headset panel** on the **In flight** page: OFXR is then loaded only to draw the panel and leaves your frames untouched. It shows FPS, DLSS 5 state (on with GPU ms, off, or why it is not applied), the frame-generation backend and mode (2×, 3×, auto), and DCS (app) vs headset (output) FPS. With the engine optimizations on, an **Engine** line says whether all of them are working ("Engine Opt.: all 18 on", green), only some ("Engine Opt.: 12 of 18 on", amber; for a few seconds after a mission loads this is normal while the multi-threaded recorders learn the scene), none ("Engine Opt.: none on", red), that they are still warming up ("Engine Opt.: warming up", grey; see [the FAQ](#engine-opt-warming-up)) or that you switched them off ("Engine Opt.: OFF (Alt+Shift+F11)"). With Pupil shift installed, a **Pupil shift** line shows "ON" with the largest pupil shift, "no gaze" or "OFF"; with Depth boost it adds the strength and the eye distance the world is rendered with ("Depth x1.18 far, IPD 77.4 mm"), followed by "(dual camera)" while the cockpit is drawn at your real eye distance, or an amber "no dual camera" when it is not. Depth boost alone has its own **Depth boost** line, and Far depth a **Far depth** line. With Periphery stability, a **Periphery** line shows "ON 0.50, 88 fps" (strength and frames steadied per second), "ON, not filtering" or "OFF". Options on the **In flight** page (which also lists every in-flight key):
 
 - **Visible at start**
 - **VRAM counter** — adds the video memory in use to the panel (off by default). Use it when you suspect VRAM is full.
@@ -466,6 +466,10 @@ DLSS 5 and Foveated SR need the file name `dxgi.dll` in DCS's `bin` folder. When
 - In 2×, turning the **Smoothness buffer** off saves about one refresh (about 11 ms at 90 Hz), at the cost of more stutter when frame times jump.
 - The Last flight card tells you how much time you spent in 2× and 3×.
 
+### Engine Opt.: warming up
+
+The headset panel shows "Engine Opt.: warming up" while the engine module compiles the shader variants it needs for what is on screen (shadow instancing). Until that is done, shadow instancing, batching, the texture skip and the recorders are only partly active, so the gain is smaller. The variants are kept in a cache on disk, so the first flights on a PC take longest (a few minutes on the test PC with an empty cache); later flights reuse them, and a new map or aircraft can warm up again briefly. Nothing is wrong, and the image is the same meanwhile. The module's log (`Saved Games\DCS\Scripts\DcsQvCull\DcsQvCull.log`) has a `warmup: done after … s` line with the cache hits.
+
 ### VRAM is full (stutters, textures loading late)
 
 - Turn on the **VRAM counter** (In flight page) to see it in the headset.
@@ -475,6 +479,10 @@ DLSS 5 and Foveated SR need the file name `dxgi.dll` in DCS's `bin` folder. When
 ### Multiplayer and Integrity Check
 
 **Not tested yet.** The DCS engine optimizations (terrain prefetch fix included) have only been tested in single-player. With DLSS 5 or Foveated SR the app adds files to DCS's `bin` folder (`dxgi.dll`, Cheeky's files) and, with Engine Optimizations on, a hook and a module in `Saved Games\DCS\Scripts`. Whether a server with Integrity Check accepts them has not been verified. If a server refuses you, **Back to stock DCS** before joining it, and please [report](#reporting-a-problem) what happened.
+
+### DCS Control isn't in my list of OpenXR layers
+
+That's expected. DCS Control doesn't register its layers (frame generation, Quad Views, Pupil shift / Depth boost) in Windows: it switches them on only for the DCS that **Launch DCS** starts. So tools that list the OpenXR layers registered on the PC don't show them, your other games aren't affected, and DCS started from Steam or a shortcut runs without them. In flight, the headset panel (Alt+Shift+F12) shows what is running.
 
 ### How do I uninstall?
 
