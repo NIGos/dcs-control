@@ -1,4 +1,6 @@
-# Next release (unreleased)
+# 0.6.3 preview
+
+**Install this version by hand, just this once.** DCS Control has a new release signing key. From 0.6.2 or earlier, the in-app **Install** button refuses this update ("the signature does not match DCS Control's release key") and installs nothing; that's expected. Download `DcsControl-0.6.3-preview-Setup.exe` from the Releases page and run it: your settings and profiles are kept. From 0.6.3 on, updates install from the app again.
 
 **Back to stock DCS also after a lost record.** The record of what DCS Control changed lives in `%LOCALAPPDATA%\DcsControl`. When it was lost (Windows reinstalled, a cleaning tool), the DLSS 5 loader stayed in DCS's `bin` and kept running even from Steam, and Back to stock DCS found nothing to undo. DCS Control now recognises its own files in DCS by their exact bytes (every version it ever shipped), lists them on the Stock DCS page, warns on Checks, includes them in the diagnostic package, and Back to stock DCS (also from the uninstaller) removes them; a `dxgi.dll` of your own that was chained as `dxgi2.dll` gets its name back. Files you installed yourself (Cheeky, ReShade, other mods) are never touched: Cheeky's loader and stereo runtime are byte-identical to its public release, so they count as DCS Control's only next to a runtime it built or the small `DcsControl.txt` mark it now writes beside them. A Cheeky you installed by hand under a DCS Control profile is backed up and comes back with Back to stock DCS.
 
@@ -9,6 +11,7 @@
 - Programs an earlier flight closed for Free VRAM are reopened after the next flight, not while DCS is loading.
 - Choosing another DCS.exe (a release and an open beta) also picks that install's own Saved Games folder.
 - The Engine page's status refresh no longer freezes the window while Launch, Apply or Back to stock DCS is working.
+- The headset panel shows the frame generation multiplier frames really use with Only when needed (1x, 2x or 3x, over the last second): it said "2x" while frames went out at 3x.
 - Range messages show "0.1", not "0,1", on Windows set to a language with a decimal comma.
 - The setup and package import install exactly the bytes they verified, and the setup keeps its own file locked while it runs.
 - **Updates no longer pile up copies of older versions.** Each update kept a full copy of the version before it (about 180 MB) in the install's `.installer` folder, forever. Now an update keeps one record of the installed files and no copies, leaves files that did not change as they are, and the first update to this version clears the copies earlier ones left. Uninstalling still removes everything the app installed.
