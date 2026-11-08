@@ -2103,6 +2103,52 @@ Test("An interrupted update that cannot be rolled back says what to do (not \"re
     catch (InvalidOperationException e) { Require(e.Message.Contains("run the setup again") && e.Message.Contains("report it with the logs") && !e.Message.Contains("reinstall"), e.Message); }
     Require(File.ReadAllText(Path.Combine(target, "app.bin")) == "held", "The changed file is kept");
 });
+int Journals(ApplicationInstaller installer) => Directory.GetDirectories(installer.Transactions.StateDirectory).Length;
+int Backups(ApplicationInstaller installer) => Directory.GetFiles(installer.Transactions.StateDirectory, "*.backup", SearchOption.AllDirectories).Length;
+Test("Updates keep one journal and no copy of the version before; uninstall still leaves nothing of ours", () =>
+{
+    var target = Path.Combine(root, "app-install/consolidate"); var installer = new ApplicationInstaller(target);
+    foreach (var (version, content) in new[] { ("1", "first"), ("2", "second"), ("3", "third"), ("4", "fourth") })
+    {
+        installer.Install(ReleaseFixture("consolidate-v" + version, version, content));
+        Require(File.ReadAllText(Path.Combine(target, "app.bin")) == content && Journals(installer) == 1 && Backups(installer) == 0, $"After {version}: {Journals(installer)} journals, {Backups(installer)} backups");
+    }
+    var journal = installer.Transactions.List().Single();
+    Require(journal.Consolidated && journal.Entries.All(e => e.PreviousSha256 is null && e.BackupFile is null) && journal.Entries.Count == 3, "One baseline: app.bin, readme.txt and the ledger, as created");
+    AtomicFile.WriteText(Path.Combine(target, "user-notes.txt"), "user");
+    Require(installer.Uninstall().Complete && !new[] { "app.bin", "readme.txt", "installation.json" }.Any(f => File.Exists(Path.Combine(target, f))) && File.ReadAllText(Path.Combine(target, "user-notes.txt")) == "user", "Uninstall removes every owned file, keeps the pilot's");
+});
+Test("An update leaves files whose bytes did not change as they are, and still owns them", () =>
+{
+    var target = Path.Combine(root, "app-install/unchanged"); var installer = new ApplicationInstaller(target);
+    installer.Install(ReleaseFixture("unchanged-v1", "1", "first"));
+    var readme = Path.Combine(target, "readme.txt"); var stamp = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc); File.SetLastWriteTimeUtc(readme, stamp);
+    installer.Install(ReleaseFixture("unchanged-v2", "2", "second"));
+    Require(File.GetLastWriteTimeUtc(readme) == stamp && File.ReadAllText(Path.Combine(target, "app.bin")) == "second", "readme.txt (same bytes) is not rewritten");
+    Require(installer.Transactions.List().Single().Entries.Any(e => e.Path.Equals(Path.GetFullPath(readme), StringComparison.OrdinalIgnoreCase)), "but stays owned");
+    AtomicFile.WriteText(readme, "edited"); Throws<IOException>(() => installer.Uninstall()); Require(File.ReadAllText(readme) == "edited", "An edit to it is still refused before anything is removed");
+});
+Test("Journals older than the consolidated baseline (pruning cut short, or an install from before consolidation) never count", () =>
+{
+    var target = Path.Combine(root, "app-install/superseded"); var installer = new ApplicationInstaller(target);
+    var first = installer.Install(ReleaseFixture("superseded-v1", "1", "first"));
+    // An install from before consolidation: a plain journal. The next update converts it.
+    var store = installer.Transactions; store.Replace(first with { Consolidated = false });
+    var second = installer.Install(ReleaseFixture("superseded-v2", "2", "second"));
+    Require(Journals(installer) == 1 && second.Consolidated && Backups(installer) == 0, "The plain journal is pruned once the update applied");
+    // Pruning cut short: a stale journal from before the baseline, whose backup would put old bytes back.
+    var stale = second with { Id = Guid.NewGuid().ToString("N"), CreatedAt = second.CreatedAt.AddDays(-1), Consolidated = false,
+        Entries = [.. second.Entries.Select(e => e with { PreviousSha256 = new string('0', 64), BackupFile = "0000.backup" })] };
+    Directory.CreateDirectory(Path.Combine(store.StateDirectory, stale.Id)); AtomicFile.WriteText(Path.Combine(store.StateDirectory, stale.Id, "journal.json"), JsonData.Serialize(stale));
+    Require(installer.Uninstall().Complete && !File.Exists(Path.Combine(target, "app.bin")) && !File.Exists(Path.Combine(target, "readme.txt")), "Uninstall ignores it and removes every file");
+});
+Test("An update cut short after a consolidated baseline rolls back to that version", () =>
+{
+    var target = Path.Combine(root, "app-install/consolidated-failure"); var installer = new ApplicationInstaller(target);
+    installer.Install(ReleaseFixture("consolidated-failure-v1", "1", "first")); installer.Install(ReleaseFixture("consolidated-failure-v2", "2", "second"));
+    Throws<IOException>(() => installer.Install(ReleaseFixture("consolidated-failure-v3", "3", "third"), i => { if (i == 0) throw new IOException("Injected failure"); }));
+    Require(File.ReadAllText(Path.Combine(target, "app.bin")) == "second" && installer.Uninstall().Complete && !File.Exists(Path.Combine(target, "app.bin")), "Back to 2, then a clean uninstall");
+});
 Test("Application installer rejects reserved destination roots", () => Throws<InvalidDataException>(() => new ApplicationInstaller(Path.GetPathRoot(root)!)));
 Test("Application installation refuses unknown existing files", () =>
 {
