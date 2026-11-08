@@ -49,7 +49,8 @@ $webViewVersion = Get-WebViewVersion
 $cppLibraries = @('vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll')
 $missingCpp = @($cppLibraries | Where-Object { -not (Test-Path -LiteralPath (Join-Path $env:SystemRoot "System32/$_")) })
 $vcFile = Join-Path $env:SystemRoot 'System32/vcruntime140.dll'
-$vcVersion = if (Test-Path -LiteralPath $vcFile) { [Version](Get-Item -LiteralPath $vcFile).VersionInfo.FileVersion } else { [Version]'0.0' }
+# The numeric parts, not FileVersion: older runtimes report "14.29.30139.0 built by: vcwrkspc", which [Version] rejects.
+$vcVersion = if (Test-Path -LiteralPath $vcFile) { $vcInfo = (Get-Item -LiteralPath $vcFile).VersionInfo; [Version]::new($vcInfo.FileMajorPart, $vcInfo.FileMinorPart, $vcInfo.FileBuildPart, $vcInfo.FilePrivatePart) } else { [Version]'0.0' }
 $needsCpp = $missingCpp.Count -gt 0 -or $vcVersion -lt [Version]'14.50'
 if ($Action -eq 'Install') {
     # DCS keeps the CPU Boost helper and the engine optimizations of the installed version in use while it runs.

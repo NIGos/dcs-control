@@ -362,7 +362,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     if (engine)
                     {
                         // The DCS engine optimizations' own log, the newest test report and DCS's log.
-                        var engineOptions = EngineOptionsPath();
+                        var engineOptions = await Task.Run(EngineOptionsPath); // off the UI thread: it may wait for the originals lock
                         return Reply(id, new { status = engineOptions is null ? null : await Task.Run(() => EngineOptimizations.Read(engineOptions, DcsLogPath(engineOptions), DcsRunning())) });
                     }
                     // The pupil shift layer's log in the applied profile's folder.
@@ -569,14 +569,17 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                 case "restore":
                     // Back to stock DCS: every path DCS Control changed goes back to what was there before.
                     Invalidate();
-                    var restored = await Task.Run(service.RestoreOriginals);
+                    // The DCS shown is also searched for DCS Control's files the record does not list (a lost record).
+                    var (restoreDcs, restoreOptions) = (CurrentInventory.DcsExecutable, CurrentInventory.OptionsPath);
+                    var restored = await Task.Run(() => service.RestoreOriginals(restoreDcs, restoreOptions));
                     // A file left behind in a protected folder (DCS under Program Files): one Windows prompt, then the rest.
                     if (!restored.Complete && !offline)
                     {
-                        var restoreFolders = await Task.Run(() => service.Originals.Read().Files.Select(f => Path.GetDirectoryName(f.Path)).OfType<string>().ToList());
+                        var restoreFolders = await Task.Run(() => service.Originals.Read().Files.Select(f => f.Path)
+                            .Concat(service.LeftoverFiles(restoreDcs, restoreOptions).Select(f => f.Path)).Select(Path.GetDirectoryName).OfType<string>().ToList());
                         if (await Task.Run(() => { LaunchSafety.ForgetWriteProbes(); return LaunchSafety.UnwritableFolders(restoreFolders); }) is { Count: > 0 }
                             && await EnsureWritable(restoreFolders, askedByPilot: false, throwWhenBlocked: false))
-                            restored = await Task.Run(service.RestoreOriginals);
+                            restored = await Task.Run(() => service.RestoreOriginals(restoreDcs, restoreOptions));
                     }
                     _status = restored.Complete ? "Back to stock DCS: every file and setting DCS Control changed is back to its original. DCS runs as if the app had never been used." : "Some original files could not be restored; they are still listed on the Stock DCS page.";
                     _report = restored.Complete ? "Every file DCS Control changed is back to its original; owned DCS settings in options.lua were set back, your other edits kept." : string.Join("\n", restored.Conflicts); break;
@@ -603,7 +606,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     var packageReport = JsonData.Serialize(new { schemaVersion = 1, version = ProductInfo.Version, created = DateTimeOffset.Now, dcsRunning = DcsRunning(),
                         draft = _profile, applied = packageApplied?.Profile, inventory = CurrentInventory, issues = ProfileValidation.Validate(_profile, CurrentInventory), readiness = _readiness,
                         lastFlight = await Task.Run(() => { try { return LastFlight.Read(FlightSourcesNow()); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; } }),
-                        dlssFocus = packageFocus, headsetRefresh = packageRefresh, originals = service.Originals.Status(), packages = PackageCatalog.All });
+                        dlssFocus = packageFocus, headsetRefresh = packageRefresh, originals = service.Originals.Status(), leftovers = Leftovers(), packages = PackageCatalog.All });
                     var packaged = await Task.Run(() => Diagnostics.CreatePackage(packageSources, packageReport, packageDialog.FileName));
                     _status = $"Diagnostic package saved: {Path.GetFileName(packageDialog.FileName)} ({packaged.Count} files). Attach it to your report.";
                     using (var process = Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { "/select,", packageDialog.FileName }, UseShellExecute = false })) { }
@@ -696,7 +699,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     EnsureInteractive(); var export = new SaveFileDialog { Filter = "Diagnostic report|*.json", FileName = "dcs-control-report.json" };
                     if (export.ShowDialog(owner) == true) { await Capture(); _readiness = await Task.Run(() => Readiness.Check(_profile, CurrentInventory, service));
                         AtomicFile.WriteText(export.FileName, JsonData.Serialize(new { schemaVersion = 1, version = ProductInfo.Version, inventory = CurrentInventory, profile = _profile, readiness = _readiness,
-                            packages = PackageCatalog.All, originals = service.Originals.Status() })); _status = "Fresh diagnostic and readiness report exported."; } break;
+                            packages = PackageCatalog.All, originals = service.Originals.Status(), leftovers = Leftovers() })); _status = "Fresh diagnostic and readiness report exported."; } break;
                 case "importSboys":
                     EnsureInteractive(); var sboysImport = new OpenFileDialog { Title = "Import official Sboys 1.3.0 ZIP", Filter = "Official Sboys archive|*.zip" };
                     if (sboysImport.ShowDialog(owner) != true) break;
@@ -768,8 +771,15 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     private void ReadDraft(JsonElement data)
     {
         _profile = JsonData.Deserialize<VrProfile>(data.GetProperty("profile").GetRawText());
-        _dcs = Empty(data.GetProperty("dcs").GetString()); _options = Empty(data.GetProperty("options").GetString());
+        var dcs = Empty(data.GetProperty("dcs").GetString()); var options = Empty(data.GetProperty("options").GetString());
+        // Another DCS.exe chosen while options.lua is still the one the scan found for the old one (a release and an open
+        // beta): the next scan finds the new install's own Saved Games folder (dcs_variant.txt) instead of keeping the old.
+        if (!string.Equals(dcs, _dcs, StringComparison.OrdinalIgnoreCase) && options is not null && string.Equals(options, _autoOptions, StringComparison.OrdinalIgnoreCase))
+            options = null;
+        _dcs = dcs; _options = options;
     }
+    /// <summary>The options.lua the last scan found by itself (not one the pilot chose).</summary>
+    private string? _autoOptions;
     private static string? Empty(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private void Invalidate() { _plan = null; _readiness = null; }
     private string LaunchStatus(LaunchSync sync, string launched) => sync.Kind == LaunchSyncKind.Unchanged ? launched + " " + _profile.Name + "." : sync.Message + " " + launched;
@@ -827,7 +837,8 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     private async Task Capture()
     {
         _inventory = await Task.Run(() => capture is null ? new WindowsInventory().Capture(_dcs, _options) : capture(_dcs, _options));
-        _dcs ??= _inventory.DcsExecutable; _options ??= _inventory.OptionsPath;
+        if (_options is null && _inventory.OptionsPath is { } found) { _options = found; _autoOptions = found; }
+        _dcs ??= _inventory.DcsExecutable;
         await RefreshEyeResolution();
     }
     private (int Width, int Height)? _eyeResolution;
@@ -849,6 +860,13 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     }
     /// <summary>The draft's checks as the page lists them: validation, the running headset route, the Pimax focus
     /// values and the DCS launcher.</summary>
+    /// <summary>DCS Control's files in the DCS shown that the record of originals does not list (see
+    /// ControlService.LeftoverFiles); empty when they cannot be read.</summary>
+    private IReadOnlyList<LeftoverFile> Leftovers()
+    {
+        try { return service.LeftoverFiles(CurrentInventory.DcsExecutable, CurrentInventory.OptionsPath); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { return []; }
+    }
     private List<ValidationIssue> Issues(ActiveRouteState? route = null)
     {
         var activeRoute = route ?? ActiveRoute();
@@ -857,6 +875,8 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         if (!_profile.Desktop && activeRoute.Route is { } running && running != _profile.Runtime)
             issues.Insert(0, new("route-mismatch", IssueSeverity.Warning, activeRoute.Summary + " This profile uses " + (_profile.Runtime == RuntimeKind.Pimax ? "the Pimax runtime" : "Sboys through SteamVR") + ". Switch the route or use Read settings from this PC before applying."));
         if (FoveaFact(_profile) is { } fact) issues.Add(fact);
+        if (Leftovers() is { Count: > 0 } leftovers)
+            issues.Insert(0, new("leftovers", IssueSeverity.Warning, $"DCS Control's files are in DCS without a record of what was there before ({string.Join(", ", leftovers.Take(3).Select(l => Path.GetFileName(l.Path)))}{(leftovers.Count > 3 ? $" and {leftovers.Count - 3} more" : "")}), for example after Windows was reinstalled. They stay active even when DCS starts from Steam. Back to stock DCS removes them."));
         // A helper ended mid-flight (Task Manager, a crash) left the desktop Tobii services stopped; starting them needs
         // administrator rights, so the pilot is asked.
         if (!offline && BoostRuntime.TobiiLeftPaused(service.StateRoot))
@@ -869,22 +889,28 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     private object State(IReadOnlySet<string> dcsDefaultKeys)
     {
         var originals = service.Originals.Status();
+        // DCS Control's files the record does not list (the record was lost): listed and removed like the others.
+        var leftovers = Leftovers();
         var applied = originals.State == "applied" ? service.ReadAppliedProfile() : null;
         var activeRoute = ActiveRoute();
         var issues = Issues(activeRoute);
         var launcherBlocked = LaunchSafety.LauncherRestartBlocked;
-        return new { version = ProductInfo.Version, profile = _profile, dcs = _dcs, options = _options, inventory = CurrentInventory, pimax = PimaxView(),
+        // DCS started or closed since the last scan or Check this PC: its row and the "DCS is closed" check follow now.
+        var dcsNow = DcsRunning();
+        var readiness = _readiness is { } r && r.Checks.Any(c => c.Id == "closed" && (c.State == CheckState.Error) != dcsNow)
+            ? r with { Checks = [.. r.Checks.Where(c => c.Id != "closed")] } : _readiness;
+        return new { version = ProductInfo.Version, profile = _profile, dcs = _dcs, options = _options, inventory = CurrentInventory with { DcsRunning = dcsNow }, pimax = PimaxView(),
             activeRoute = new { route = activeRoute.Route?.ToString(), summary = activeRoute.Summary },
             issues, cadence = Enum.IsDefined(_profile.FpsLimit) ? FramePacing.Describe(HeadsetRefresh.Resolve(_profile), CurrentInventory) : null, headsetRefresh = HeadsetRefresh.Detect(_profile.Runtime), foreignDxgi = service.ForeignDxgi(_profile, CurrentInventory), dcsCustomIpd = CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD_enable") == "true" ? CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD")?.Trim('"') : null, gpu = new { nvidiaRtx = GpuInfo.Unknown || GpuInfo.HasNvidiaRtx, names = GpuInfo.Names }, status = _status, report = _report,
             plan = _plan is null ? null : new { foveaStamp = _previewFoveaStamp, files = _plan.Files.Select(f => new { f.Path, f.Purpose, bytes = f.Content.Length, replaces = f.ExpectedSha256 is not null, f.LuaChanges }), environment = _plan.LaunchEnvironment },
             // Recovery: one record of original files, restored with one action.
-            originals = new { count = originals.Count, files = originals.Files, state = originals.State, lastAction = originals.LastAction, lastActionAt = originals.LastActionAt, folder = originals.Folder },
+            originals = new { count = originals.Count + leftovers.Count, files = originals.Files.Concat(leftovers.Select(l => new OriginalItem(l.Path, l.RenameTo is null ? "remove" : "restore", false, l.Detail + "; not in the record of originals"))).ToArray(), state = originals.State, lastAction = originals.LastAction, lastActionAt = originals.LastActionAt, folder = originals.Folder },
             launchReady = applied is not null, appliedProfile = applied?.Journal.ProfileId, appliedName = applied?.Profile?.Name ?? applied?.Journal.ProfileId,
             // The applied profile.json content, so the page labels a draft "Applied" only when it matches it.
             appliedDraft = applied?.Profile, appliedDcs = applied?.Executable, appliedOptions = applied?.OptionsPath, foveaChanged = FoveaChanged(applied), dcsRunning = DcsRunning(),
             // The settings Live mode writes while DCS runs (LiveSettings): the page tags them.
             liveFields = LiveSettings.AvailableFields(applied?.Profile, applied?.Journal),
-            savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), sboysReady = _sboys is not null, launcherBlocked, launcherUnknown = LaunchSafety.LauncherRestartUnknown, dcsDefaultKeys, readiness = _readiness };
+            savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), sboysReady = _sboys is not null, launcherBlocked, launcherUnknown = LaunchSafety.LauncherRestartUnknown, dcsDefaultKeys, readiness };
     }
     /// <summary>The app's saved DLSS 5 runtime copy, shown on the DLSS 5 page; null when there is none (or it was forgotten).</summary>
     private object? SavedRuntimeView() => service.SavedRuntime.Current() is { } s

@@ -183,6 +183,9 @@ public sealed class DeploymentPlanner(ComponentLocations components)
                 Add(PathPolicy.UnderRoot(bin, "CheekyFoveatedDLSS/" + file), File.ReadAllBytes(PathPolicy.UnderRoot(cheeky, "CheekyFoveatedDLSS/" + file)), "Cheeky runtime", ownHashes: Variants("CheekyFoveatedDLSS/" + file));
             var cheekyIni = ConfigurationWriters.Cheeky(profile);
             Add(PathPolicy.UnderRoot(bin, "CheekyFoveatedDLSS/CheekyFoveatedDLSS.ini"), new UTF8Encoding(false).GetBytes(cheekyIni), "DLSS and gaze settings", iniValues: IniFile.Parse(cheekyIni));
+            // Cheeky's loader and stereo runtime are byte-identical to its public release: this mark says DCS Control put
+            // them here, so they can be told from a Cheeky the pilot installed if the record of originals is ever lost.
+            AddText(PathPolicy.UnderRoot(bin, "CheekyFoveatedDLSS/" + Leftovers.OwnerMark), Leftovers.OwnerMarkText, "DCS Control's mark on its DLSS 5 files");
             var layerDll = components.CheekyLayerDll ?? throw new InvalidDataException("Cheeky OpenXR layer unavailable.");
             var deployedDll = PathPolicy.UnderRoot(profileRoot, "cheeky/CheekyOpenXRLayer.dll");
             Add(deployedDll, File.ReadAllBytes(layerDll), "Cheeky OpenXR layer");

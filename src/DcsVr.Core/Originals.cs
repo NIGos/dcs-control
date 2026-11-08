@@ -448,8 +448,12 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         if (!File.Exists(full)) return new() { Path = full, Root = root, Settings = settings };
         var bytes = File.ReadAllBytes(full);
         var hash = Hashing.BytesSha256(bytes);
-        // Bytes DCS Control installs (this plan's or any of its components) are ours, whoever left them: absent.
-        if (settings is null && (file.OwnedLocation || hash == Hashing.BytesSha256(file.Content) || own.Contains(hash) || file.OwnHashes?.Contains(hash) == true))
+        // Bytes DCS Control installs (this plan's or any of its components) are ours, whoever left them: absent. Not bytes
+        // that are also Cheeky's public release (its loader, the stereo route's runtime): there they may be a Cheeky the
+        // pilot installed by hand, so they are backed up and come back. DCS Control's own unrecorded copies of those are
+        // removed before an apply (ControlService.SyncApplied sweeps Leftovers first).
+        if (settings is null && (file.OwnedLocation || !Leftovers.UpstreamHashes.Contains(hash)
+            && (hash == Hashing.BytesSha256(file.Content) || own.Contains(hash) || file.OwnHashes?.Contains(hash) == true)))
             return new() { Path = full, Root = root, Leftover = true };
         var backup = NextBackupName();
         AtomicFile.Write(System.IO.Path.Combine(Directory, backup), bytes);
@@ -823,6 +827,9 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         System.IO.Directory.CreateDirectory(Directory);
         AtomicFile.WriteText(BaselinePath, JsonData.Serialize(baseline));
     }
+
+    /// <summary>Appends a line to <see cref="LogPath"/> (Back to stock DCS's leftover sweep).</summary>
+    public void AppendLog(string line) => Log(line);
 
     private void Log(string line)
     {

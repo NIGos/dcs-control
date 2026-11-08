@@ -1,4 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><TargetFramework>net10.0-windows</TargetFramework></PropertyGroup>
   <ItemGroup><InternalsVisibleTo Include="DcsVr.Tests" /></ItemGroup>
+  <ItemGroup><EmbeddedResource Include="KnownComponents.txt" LogicalName="DcsVr.Core.KnownComponents.txt" /></ItemGroup>
 </Project>

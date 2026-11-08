@@ -234,6 +234,111 @@ Test("Originals: another program's file is backed up once, replaced, reported an
     Require(store.Apply(Plan("cheeky", Write(dxgi, "cheeky loader v2", bin))).ReplacedForeign.Count == 0, "Reported once");
     Require(store.RestoreOriginals().Complete && File.ReadAllText(dxgi) == "ReShade");
 });
+// A lost record of originals (a reinstalled Windows, a cleaned %LOCALAPPDATA%): DCS Control's own files are still in DCS.
+(string Bin, string SavedGames, HashSet<string> Own) LeftoverFixture(string name)
+{
+    var prefix = "leftovers/" + name;
+    var own = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    string Ours(string relative, string text) { var path = Make(prefix + "/" + relative, text); own.Add(Hashing.FileSha256(path)); return path; }
+    Ours("dcs/bin/dxgi.dll", "MZ DCS Control's Cheeky loader " + name);
+    Make(prefix + "/dcs/bin/dxgi2.dll", "MZ ReShade " + name);
+    Ours("dcs/bin/CheekyFoveatedDLSS/CheekyFoveatedDLSSHost.dll", "host " + name);
+    Ours("dcs/bin/CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll", "runtime " + name);
+    Make(prefix + "/dcs/bin/CheekyFoveatedDLSS/CheekyFoveatedDLSS.ini", "[CheekyFoveatedDLSS]\nEnabled=1\n");
+    Make(prefix + "/dcs/bin/CheekyFoveatedDLSS/nvngx_dlssnr.dll", "the pilot's DLSS 5 runtime copy");
+    Make(prefix + "/dcs/bin/CheekyFoveatedDLSS/CheekyFoveatedDLSS-Host.log", "log");
+    Make(prefix + "/dcs/bin/CheekyFoveatedDLSS-Loader.log", "log");
+    Make(prefix + "/dcs/bin/DCS.exe", "Never execute this fixture");
+    Ours("sg/DCS/Scripts/Hooks/DcsQvCull.lua", "hook " + name);
+    Make(prefix + "/sg/DCS/Scripts/Hooks/SHTelemetry.lua", "another program's hook");
+    Ours("sg/DCS/Scripts/DcsQvCull/DcsQvCull.dll", "module " + name);
+    Ours("sg/DCS/Scripts/DcsQvCull/payload/DcsQvCullPayload.dll", "payload " + name);
+    Make(prefix + "/sg/DCS/Scripts/DcsQvCull/DcsQvCull.ini", "; Written by DCS Control");
+    Make(prefix + "/sg/DCS/Scripts/DcsQvCull/report_1.txt", "a bench report");
+    Make(prefix + "/sg/DCS/Config/options.lua", Lua);
+    return (Path.GetFullPath(Path.Combine(root, prefix, "dcs/bin")), Path.GetFullPath(Path.Combine(root, prefix, "sg/DCS")), own);
+}
+Test("Leftovers: DCS Control's files without a record go, the pilot's chained dxgi.dll comes back, other files stay", () =>
+{
+    var f = LeftoverFixture("sweep");
+    var found = Leftovers.Find([f.Bin], [f.SavedGames], f.Own, []).ToList();
+    Require(found.Count == 12, "Loader, Cheeky runtime and companions, loader log, chained dxgi2.dll, hook, module, payload and INI: " + found.Count);
+    Require(found.Single(l => l.RenameTo is not null) is { } chained && chained.Path.EndsWith("dxgi2.dll") && chained.RenameTo!.EndsWith("dxgi.dll"), "dxgi2.dll is put back, not removed");
+    Require(found.FindIndex(l => l.RenameTo is not null) > found.FindIndex(l => l.Path.EndsWith(@"bin\dxgi.dll")), "The loader goes before dxgi2.dll takes its name");
+    Require(Leftovers.Remove(found, _ => { }).Count == 0, "Nothing refused");
+    Require(File.ReadAllText(Path.Combine(f.Bin, "dxgi.dll")).StartsWith("MZ ReShade") && !File.Exists(Path.Combine(f.Bin, "dxgi2.dll")), "The pilot's own dxgi.dll is back under its name");
+    Require(!Directory.Exists(Path.Combine(f.Bin, "CheekyFoveatedDLSS")) && !File.Exists(Path.Combine(f.Bin, "CheekyFoveatedDLSS-Loader.log")) && File.Exists(Path.Combine(f.Bin, "DCS.exe")), "Cheeky's folder goes, DCS stays");
+    Require(File.Exists(Path.Combine(f.SavedGames, "Scripts/Hooks/SHTelemetry.lua")) && !File.Exists(Path.Combine(f.SavedGames, "Scripts/Hooks/DcsQvCull.lua")), "Only DCS Control's hook goes");
+    var module = Path.Combine(f.SavedGames, "Scripts/DcsQvCull");
+    Require(File.Exists(Path.Combine(module, "report_1.txt")) && !Directory.Exists(Path.Combine(module, "payload")) && !File.Exists(Path.Combine(module, "DcsQvCull.ini")), "An unknown file keeps its folder; the emptied payload folder goes");
+    Require(Leftovers.Find([f.Bin], [f.SavedGames], f.Own, []).Count == 0, "A second pass finds nothing");
+});
+Test("Leftovers: a Cheeky, ReShade or file the pilot installed, and anything the record lists, is never a leftover", () =>
+{
+    var f = LeftoverFixture("foreign");
+    var dxgi = Path.Combine(f.Bin, "dxgi.dll"); var host = Path.Combine(f.Bin, "CheekyFoveatedDLSS/CheekyFoveatedDLSSHost.dll");
+    // Upstream Cheeky (another build) and ReShade: bytes DCS Control never shipped.
+    AtomicFile.WriteText(dxgi, "MZ upstream Cheeky loader"); AtomicFile.WriteText(host, "upstream host");
+    var found = Leftovers.Find([f.Bin], [f.SavedGames], f.Own, []).ToList();
+    Require(!found.Any(l => l.Path.Equals(dxgi, StringComparison.OrdinalIgnoreCase) || l.Path.EndsWith("dxgi2.dll")), "Another loader, and the dxgi2.dll it chains, stay");
+    Require(found.Any(l => l.Path.EndsWith("CheekyFoveatedDLSSRuntime.dll")) && !found.Any(l => l.Path.Equals(host, StringComparison.OrdinalIgnoreCase)), "Only the file with DCS Control's bytes is ours");
+    var hook = Path.Combine(f.SavedGames, "Scripts/Hooks/DcsQvCull.lua");
+    var recorded = Leftovers.Find([f.Bin], [f.SavedGames], f.Own, [hook, Path.Combine(f.SavedGames, "Scripts/DcsQvCull/DcsQvCull.dll"), Path.Combine(f.SavedGames, "Scripts/DcsQvCull/payload/DcsQvCullPayload.dll")]);
+    Require(!recorded.Any(l => l.Path.Contains(@"Scripts\")), "Files the record lists are Back to stock DCS's normal work, and the INI only goes with a leftover module");
+    Require(Leftovers.Find([], [], f.Own, []).Count == 0, "No folders, nothing found");
+});
+Test("Leftovers: files identical to Cheeky's public release are ours only with proof (a runtime DCS Control built, or its mark)", () =>
+{
+    var f = LeftoverFixture("upstream");
+    var dxgi = Path.Combine(f.Bin, "dxgi.dll"); var cheeky = Path.Combine(f.Bin, "CheekyFoveatedDLSS");
+    var host = Path.Combine(cheeky, "CheekyFoveatedDLSSHost.dll"); var runtime = Path.Combine(cheeky, "CheekyFoveatedDLSSRuntime.dll");
+    // The stereo route: loader, Host and Runtime all byte-identical to Cheeky's release, as a pilot's own install would be.
+    var upstream = new HashSet<string>(new[] { dxgi, host, runtime }.Select(Hashing.FileSha256), StringComparer.OrdinalIgnoreCase);
+    var bare = Leftovers.Find([f.Bin], [], f.Own, [], upstream);
+    Require(bare.Count == 0, "Without proof nothing in bin is a leftover (a Cheeky the pilot installed): " + string.Join(", ", bare.Select(l => Path.GetFileName(l.Path))));
+    Make("leftovers/upstream/dcs/bin/CheekyFoveatedDLSS/" + Leftovers.OwnerMark, Leftovers.OwnerMarkText);
+    var marked = Leftovers.Find([f.Bin], [], f.Own, [], upstream);
+    Require(marked.Any(l => l.Path == dxgi) && marked.Any(l => l.Path == host) && marked.Any(l => l.Path.EndsWith(Leftovers.OwnerMark)) && marked.Any(l => l.RenameTo is not null), "With DCS Control's mark they are ours, the mark too");
+    // The focus route: the runtime DCS Control built is proof for the upstream loader beside it.
+    File.Delete(Path.Combine(cheeky, Leftovers.OwnerMark));
+    var focus = Leftovers.Find([f.Bin], [], f.Own, [], new HashSet<string>([Hashing.FileSha256(dxgi)], StringComparer.OrdinalIgnoreCase));
+    Require(focus.Any(l => l.Path == dxgi) && focus.Any(l => l.Path == host), "A DCS Control-built runtime proves the loader is ours");
+    Require(Leftovers.UpstreamHashes.Contains("d9401877c6609106bd0d121eed5c29ecc5261e2c99378b1321ee16ad19ad3b0c") && !Leftovers.UpstreamHashes.Contains(Leftovers.KnownComponentHashes.First(h => !Leftovers.UpstreamHashes.Contains(h))),
+        "The pinned loader is upstream-identical; DCS Control's own builds are not");
+});
+string MarkRuntime() { Make("mark/runtime.dll", "Never load this fixture"); return Make("mark/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); }
+Test("A Cheeky profile writes DCS Control's mark next to Cheeky's runtime, and Back to stock DCS removes it", () =>
+{
+    var plan = new DeploymentPlanner(new(null, new ComponentCache(Path.Combine(root, "mark/cache")).Import(PackageCatalog.Get("cheeky"), Path.Combine(workspace, ".cache/packages", PackageCatalog.Get("cheeky").ArchiveName)), Path.Combine(workspace, "artifacts/native/cheeky/bin/Release/CheekyOpenXRLayer.dll")))
+        .Build(new VrProfile { QuadViews = QuadProvider.None, FoveatedDlss = true }, new() { DcsExecutable = Make("mark/bin/DCS.exe", "fixture"), OptionsPath = Make("mark/options.lua", Lua), PimaxRuntime = MarkRuntime() }, Path.Combine(root, "mark/managed"));
+    var mark = plan.Files.Single(p => p.Path.EndsWith(@"CheekyFoveatedDLSS\" + Leftovers.OwnerMark, StringComparison.OrdinalIgnoreCase));
+    Require(mark.ExpectedSha256 is null && Encoding.UTF8.GetString(mark.Content) == Leftovers.OwnerMarkText, "Created by the plan");
+    var store = new OriginalsStore(Path.Combine(root, "mark/state")); store.Apply(plan);
+    Require(File.Exists(mark.Path) && store.RestoreOriginals().Complete && !File.Exists(mark.Path), "Recorded like the other files, so Back to stock DCS removes it");
+});
+Test("Leftovers: every component DCS Control shipped is known, so any version's leftover is recognized", () =>
+{
+    var known = Leftovers.KnownComponentHashes;
+    Require(known.Count >= 60 && known.All(h => h.Length == 64 && h.All(Uri.IsHexDigit)), "The embedded list loads: " + known.Count);
+    Require(known.Contains("d9401877c6609106bd0d121eed5c29ecc5261e2c99378b1321ee16ad19ad3b0c"), "The Cheeky loader of 0.2.3-0.6.2");
+    var components = Path.Combine(workspace, "artifacts/release");
+    var built = Directory.Exists(components) ? Directory.EnumerateFiles(components, "*.sha256", SearchOption.AllDirectories).Where(p => p.Replace('\\', '/').Contains("/components/")).ToArray() : [];
+    var missing = built.Where(p => File.ReadAllText(p).Trim().Split(' ')[0] is { Length: 64 } h && !known.Contains(h)).ToArray();
+    Require(missing.Length == 0, "Components built here but not in src/DcsVr.Core/KnownComponents.txt (scripts/build-release.ps1 adds them): " + string.Join(", ", missing.Take(5)));
+});
+Test("Back to stock DCS with a lost record removes DCS Control's files in the DCS shown, and only there", () =>
+{
+    var f = LeftoverFixture("service");
+    var distribution = Path.Combine(root, "leftovers/service-distribution");
+    foreach (var (hash, i) in f.Own.Select((h, i) => (h, i))) Make($"leftovers/service-distribution/components/c{i}.dll.sha256", hash);
+    var service = new ControlService(distribution, Path.Combine(root, "leftovers/service-state"));
+    var exe = Path.Combine(f.Bin, "DCS.exe"); var options = Path.Combine(f.SavedGames, "Config/options.lua");
+    Require(service.LeftoverFiles(null, null).Count == 0, "Without a DCS given, nothing is searched (never the pilot's real Saved Games)");
+    Require(service.LeftoverFiles(exe, options).Count == 12 && service.Originals.Status().Count == 0, "Found, though the record is empty");
+    Require(service.RestoreOriginals(exe, options).Complete, "Back to stock DCS completes");
+    Require(service.LeftoverFiles(exe, options).Count == 0 && File.ReadAllText(Path.Combine(f.Bin, "dxgi.dll")).StartsWith("MZ ReShade"), "Removed, and the pilot's dxgi.dll is back");
+    Require(File.ReadAllText(service.Originals.LogPath).Contains("Leftover without a record: removed"), "Each one is logged");
+});
 Test("Originals: another program's file updated after DCS Control replaced it is backed up again and never downgraded", () =>
 {
     var bin = Path.Combine(root, "originals/foreign-update/bin"); var dxgi = Make("originals/foreign-update/bin/dxgi.dll", "ReShade 6.0");
@@ -919,7 +1024,7 @@ Test("Applying a profile over the applied one overwrites its files, Cheeky's dxg
     Require(store.Apply(again).ReplacedForeign.Count == 0 && store.Status().Count == count && store.Status().Files.Single(f => f.Path.Equals(dxgi, StringComparison.OrdinalIgnoreCase)).Action == "remove", "Same originals: dxgi.dll was absent");
     Require(store.RestoreOriginals().Complete && !File.Exists(dxgi) && File.ReadAllText(options) == Lua);
 });
-Test("A leftover Cheeky loader identical to ours is not treated as another overlay", () =>
+Test("A Cheeky loader identical to the public release, with no record and no mark of ours, is the pilot's: backed up and put back", () =>
 {
     var exe = Make("leftover/bin/DCS.exe", "fixture"); var options = Make("leftover/options.lua", Lua);
     var runtime = Make("leftover/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("leftover/runtime.dll", "fixture");
@@ -929,8 +1034,11 @@ Test("A leftover Cheeky loader identical to ours is not treated as another overl
         .Build(new VrProfile { QuadViews = QuadProvider.None, FoveatedDlss = true }, new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime }, Path.Combine(root, "leftover/managed"));
     Require(plan.Files.Single(f => f.Path.EndsWith("dxgi.dll", StringComparison.OrdinalIgnoreCase)).ExpectedSha256 is not null);
     var store = new OriginalsStore(Path.Combine(root, "originals/leftover"));
-    Require(store.Apply(plan).ReplacedForeign.Count == 0 && store.Status().Files.Single(f => f.Path.EndsWith("dxgi.dll", StringComparison.OrdinalIgnoreCase)).Action == "remove", "Our own loader counts as absent");
-    Require(store.RestoreOriginals().Complete && !File.Exists(Path.Combine(Path.GetDirectoryName(exe)!, "dxgi.dll")));
+    // Cheeky's loader is byte-identical to the one DCS Control ships: it may be a Cheeky the pilot installed by hand.
+    var loader = Path.Combine(Path.GetDirectoryName(exe)!, "dxgi.dll"); var bytes = File.ReadAllBytes(loader);
+    Require(Leftovers.UpstreamHashes.Contains(Hashing.BytesSha256(bytes)), "The pinned loader is one of the upstream-identical components");
+    Require(store.Apply(plan).ReplacedForeign.Contains(loader) && store.Status().Files.Single(f => f.Path.EndsWith("dxgi.dll", StringComparison.OrdinalIgnoreCase)).Action == "restore", "Backed up as another program's file");
+    Require(store.RestoreOriginals().Complete && File.ReadAllBytes(loader).AsSpan().SequenceEqual(bytes), "Back to stock DCS puts the pilot's Cheeky loader back");
 });
 Test("options.lua is changed only where the pipeline needs a different value", () =>
 {

@@ -80,7 +80,9 @@ public static class Readiness
         { Add("runtime", CheckState.Error, "Selected OpenXR runtime", e.Message, profile.Runtime == RuntimeKind.Pimax ? "pimax" : "steamvr"); }
         var missingVc = new[] { "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll" }.Where(n => !NativeBinary.IsX64(Path.Combine(Environment.SystemDirectory, n))).ToArray();
         var vcFile = Path.Combine(Environment.SystemDirectory, "vcruntime140.dll");
-        var vcVersion = File.Exists(vcFile) ? System.Diagnostics.FileVersionInfo.GetVersionInfo(vcFile).FileVersion : null;
+        // The numeric parts: older runtimes report "14.29.30139.0 built by: vcwrkspc" as FileVersion.
+        var vcInfo = File.Exists(vcFile) ? System.Diagnostics.FileVersionInfo.GetVersionInfo(vcFile) : null;
+        var vcVersion = vcInfo is null ? null : $"{vcInfo.FileMajorPart}.{vcInfo.FileMinorPart}.{vcInfo.FileBuildPart}.{vcInfo.FilePrivatePart}";
         var currentVc = Version.TryParse(vcVersion, out var parsedVc) && parsedVc >= new Version(14, 50);
         Add("vc-runtime", missingVc.Length == 0 && currentVc ? CheckState.Pass : CheckState.Error, "Microsoft C++ x64 runtime",
             missingVc.Length == 0 && currentVc ? "Required x64 C++ runtime libraries are present. Version: " + vcVersion : "Install Microsoft C++ x64 runtime 14.50 or newer. Missing libraries: " + string.Join(", ", missingVc), "vcredist");

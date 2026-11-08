@@ -91,7 +91,14 @@ try
         case "status": Console.WriteLine(JsonData.Serialize(service.Originals.Status())); break;
         case "restore":
         {
-            var result = service.RestoreOriginals(); Console.WriteLine(JsonData.Serialize(result));
+            // The uninstaller's Back to stock DCS also removes DCS Control's files the record does not list: in the DCS
+            // given with --dcs/--options or, on the app's own state folder only, the DCS found on this PC. A test's
+            // --state never reaches the pilot's real install.
+            string? dcs = Option("--dcs"), options = Option("--options");
+            if (dcs is null && options is null && Option("--state") is null)
+                try { var found = new WindowsInventory().Capture(); (dcs, options) = (found.DcsExecutable, found.OptionsPath); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { }
+            var result = service.RestoreOriginals(dcs, options); Console.WriteLine(JsonData.Serialize(result));
             return result.Complete ? 0 : 2;
         }
         case "launch-check": Console.WriteLine("Verified installed launch contract: " + service.PrepareLaunchApplied().FileName); break;

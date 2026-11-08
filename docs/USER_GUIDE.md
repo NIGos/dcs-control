@@ -412,6 +412,8 @@ The **Stock DCS** page (last in the menu) has one card, *Original files*, with o
 
 Only a running DCS stops it. The folded list shows what will happen to each file. Use it **before repairing or updating DCS**, before uninstalling the app, or whenever you want plain DCS back. Backups live in `%LOCALAPPDATA%\DcsControl\originals` — keep that folder until you have restored.
 
+**If that folder was lost** (Windows reinstalled, a cleaning tool, another user account), DCS Control's own files can still be in DCS: the DLSS 5 loader in `bin` keeps running even when DCS starts from Steam, and the Engine Optimizations hook keeps loading. The app recognises them by their exact bytes (every version it ever shipped), lists them on the Stock DCS page as *not in the record of originals*, warns on Checks, and Back to stock DCS removes them. A `dxgi.dll` of your own that DCS Control had chained as `dxgi2.dll` (ReShade, an overlay) gets its name back. A Cheeky, ReShade or other mod you installed yourself is never touched. What the lost backups held (a setting's old value in `options.lua`, another program's file that was set aside) cannot come back: set those by hand, or repair DCS.
+
 ## Troubleshooting and FAQ
 
 ### Black screen in the headset / DCS hangs at the start of VR
