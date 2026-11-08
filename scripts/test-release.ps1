@@ -102,7 +102,11 @@ foreach($case in $cases){
     if($status.state -ne 'applied' -or $status.count -lt 5 -or -not ($status.files | Where-Object { $_.path -eq $options -and $_.action -eq 'settings' })){throw 'Packaged apply did not record the original files.'}
     $journal=$status.current
     $luaEntry=$journal.entries | Where-Object { $_.path -eq $options }
-    if(-not ($luaEntry.luaChanges | Where-Object { $_.path -eq 'graphics.maxFPS' -and $_.installedRaw -eq '45' })){throw 'Combined pipeline did not apply the matched rendered cap.'}
+    # Match refresh at 90 Hz: the full 90 with frame generation only when needed (0.6.2's default, FramePacing.CapDivider),
+    # 45 with a pinned 2x (90 / 3 = 30 with 3x).
+    $adaptive=$profile.frameGen -ne 'Off' -and -not $profile.desktop -and $profile.frameGenAdaptiveCadence -and $profile.frameGenFactor -eq 0
+    $expectedCap=[string][Math]::Max(30, [int](90 / $(if($adaptive -or $profile.frameGen -eq 'Off'){1}elseif($profile.frameGenFactor -eq 3){3}else{2})))
+    if(-not ($luaEntry.luaChanges | Where-Object { $_.path -eq 'graphics.maxFPS' -and $_.installedRaw -eq $expectedCap })){throw "Combined pipeline did not apply the matched rendered cap ($expectedCap)."}
     if(-not ($luaEntry.luaChanges | Where-Object { $_.path -eq 'graphics.sync' -and $_.installedRaw -eq 'false' })){throw 'Combined pipeline did not apply the explicit desktop VSync setting.'}
     $quadEntry=$journal.entries | Where-Object { $_.path.EndsWith([IO.Path]::Combine('quadviews','settings.cfg')) }
     if(-not $quadEntry){throw 'Managed Quad Views settings not found.'}
