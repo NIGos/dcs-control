@@ -1,0 +1,82 @@
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+index d3e9eaa..43721eb 100644
+--- a/src/core/diagnostic_overlay_model.cpp
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -114,7 +114,8 @@ std::string format_generation_line(const DiagnosticInputs& in, DiagnosticColor&
+     if (!g.enabled) { color = DiagnosticColor::grey; return "Framegen: off"; }
+     if (g.budget_exhausted) { color = DiagnosticColor::red; return "Framegen: fallback (swapchain limit)"; }
+     std::string text = std::string("Framegen: OFXR ") + (g.nvidia && !g.nvidia_unavailable ? "NVIDIA" : "FidelityFX") +
+-        " " + std::to_string(std::clamp<std::uint32_t>(g.multiplier, 2U, 3U)) + "x";
++        // DCS Control (0067): 1x under adaptive cadence (DCS at the full rate, nothing generated).
++        " " + std::to_string(std::clamp<std::uint32_t>(g.multiplier, g.adaptive ? 1U : 2U, 3U)) + "x";
+     if (g.adaptive) text += " auto";
+     if (g.nvidia_unavailable) text += " (NVIDIA failed)";
+     if (!in.generating) {
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 80f22d3..5438152 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1971,6 +1971,11 @@ struct SessionState {
+     std::array<std::uint32_t, 4> cadence_frames_second{};
+     std::uint32_t cadence_changes_second{};
+     std::atomic<std::uint32_t> cadence_missed_second{0};
++    // DCS Control (0067): the cadence most frames of the last second ended
++    // with (1-3; 0 none yet), for the in-headset panel: under adaptive
++    // cadence frames_per_application_frame stays the 2X shape, so the panel
++    // showed "2x" while frames went out at 3X.
++    std::atomic<std::uint32_t> cadence_shown{0};
+     std::chrono::steady_clock::time_point cadence_status_at{};
+     // DCS Control (0032): synthesis's own GPU time, which layer_gpu_ns adds
+     // to the D3D11 bridge's copies: what 1X frees. Taken by the xrEndFrame
+@@ -16624,6 +16629,18 @@ void apply_live_frame_multiplier(
+                 } else {
+                     state->cadence_missed_second = 0;
+                 }
++                // DCS Control (0067): the second's prevailing cadence, for
++                // the panel (ties to the higher; none when no frame ended).
++                {
++                    std::uint32_t shown = 0, most = 0;
++                    for (std::uint32_t level = 1; level <= 3; ++level) {
++                        if (frames[level] != 0 && frames[level] >= most) {
++                            most = frames[level];
++                            shown = level;
++                        }
++                    }
++                    if (shown != 0) state->cadence_shown = shown;
++                }
+                 state->cadence_frames_second = {};
+                 state->cadence_changes_second = 0;
+             }
+@@ -17380,8 +17397,13 @@ XrResult layer_end_frame_impl(
+         generation.nvidia_unavailable = state->nvidia_backend_unavailable;
+         generation.budget_exhausted =
+             state->generation_budget_exhausted.load(std::memory_order_acquire);
+-        generation.multiplier = state->frames_per_application_frame.load();
+-        generation.adaptive = state->adaptive_active.load();
++        // DCS Control (0067): under adaptive cadence, what the frames
++        // actually used over the last second (1X, 2 or 3).
++        const std::uint32_t cadence_shown = state->cadence_running.load()
++            ? state->cadence_shown.load() : 0U;
++        generation.multiplier = cadence_shown != 0
++            ? cadence_shown : state->frames_per_application_frame.load();
++        generation.adaptive = state->adaptive_active.load() || state->cadence_running.load();
+         generation.restart_needed = state->generation_restart_needed.load();
+         // DCS VR Control (0007): `[ofxr] diag_vram`.
+         std::optional<xrfg::VramStatus> vram;
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+index 4364105..b29fcc3 100644
+--- a/tests/diagnostic_overlay_tests.cpp
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -279,6 +279,12 @@ int main() {
+         require(generation(in, C::green) == "Framegen: OFXR NVIDIA 3x auto", "3x auto");
+         in.generation.multiplier = 2;
+         require(generation(in, C::green) == "Framegen: OFXR NVIDIA 2x auto", "2x auto");
++        // DCS Control (0067): adaptive cadence's 1X shows as such; a fixed 2X/3X never reads below 2x.
++        in.generation.multiplier = 1;
++        require(generation(in, C::green) == "Framegen: OFXR NVIDIA 1x auto", "1x auto");
++        in.generation.adaptive = false;
++        require(generation(in, C::green) == "Framegen: OFXR NVIDIA 2x", "fixed never 1x");
++        in.generation.adaptive = true; in.generation.multiplier = 2;
+         in.generating = false;
+         require(generation(in, C::amber) == "Framegen: OFXR NVIDIA 2x auto - not generating", "auto not generating");
+         in.generating = true; in.generation.adaptive = false;

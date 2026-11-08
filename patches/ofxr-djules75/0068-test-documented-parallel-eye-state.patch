@@ -1,0 +1,71 @@
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+index 2eaa1bd..4fcc405 100644
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -276,6 +276,14 @@ public:
+ 
+         const std::uint64_t message_count =
+             info_queue_->GetNumStoredMessagesAllowedByRetrievalFilter();
++        // DCS Control (0068): the resources the documented draw reported (their
++        // "of resource (0x...:" text); see below.
++        std::vector<std::string> documented_resources;
++        const auto resource_of = [](std::string_view text) {
++            const std::size_t at = text.find("of resource (");
++            const std::size_t end = at == std::string_view::npos ? at : text.find(':', at);
++            return end == std::string_view::npos ? std::string() : std::string(text.substr(at, end - at));
++        };
+         for (std::uint64_t index = 0; index < message_count; ++index) {
+             SIZE_T message_size = 0;
+             require_hresult(
+@@ -286,9 +294,39 @@ public:
+             require_hresult(
+                 info_queue_->GetMessage(index, message, &message_size),
+                 "ID3D12InfoQueue::GetMessage");
+-            if (message->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
+-                message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION) {
+-                fail(std::string("D3D12 debug-layer error: ") +
++            // DCS Control (0068): under XRFG_TEST_PARALLEL_EYES the private
++            // queue draws into the synthetic destinations while they rest in
++            // COMMON, the undefined behaviour d3d12_frame_synthesizer.cpp
++            // documents (an explicit COMMON -> RENDER_TARGET pair cost a third
++            // of the frame rate; NVIDIA tolerates it; the path is NVIDIA-only
++            // and off unless [ofxr] parallel_eye_synthesis). The debug layer
++            // reports exactly that as INVALID_SUBRESOURCE_STATE for a render
++            // target; it only shows on a PC with Windows' Graphics Tools
++            // installed. That message is expected there, and with it the one
++            // its consequence raises: the layer then tracks that resource as
++            // RENDER_TARGET, so the next barrier from COMMON (the state the
++            // destination really rests in) reads as BEFORE_AFTER_MISMATCH -
++            // for those same resources only. Every other error still fails.
++            const std::string_view description =
++                message->pDescription == nullptr ? std::string_view() : std::string_view(message->pDescription);
++            const bool documented_parallel_rt =
++                parallel_eyes_expected_ &&
++                message->ID == D3D12_MESSAGE_ID_INVALID_SUBRESOURCE_STATE &&
++                description.find("render target") != std::string_view::npos;
++            if (documented_parallel_rt && !resource_of(description).empty()) {
++                documented_resources.push_back(resource_of(description));
++            }
++            const bool documented_consequence =
++                parallel_eyes_expected_ &&
++                message->ID == D3D12_MESSAGE_ID_RESOURCE_BARRIER_BEFORE_AFTER_MISMATCH &&
++                description.find("Before state (0x0: D3D12_RESOURCE_STATE_[COMMON|PRESENT])") != std::string_view::npos &&
++                description.find("(0x4: D3D12_RESOURCE_STATE_RENDER_TARGET)") != std::string_view::npos &&
++                std::find(documented_resources.begin(), documented_resources.end(), resource_of(description)) !=
++                    documented_resources.end();
++            if ((message->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
++                 message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION) &&
++                !documented_parallel_rt && !documented_consequence) {
++                fail(std::string("D3D12 debug-layer error (id ") + std::to_string(static_cast<int>(message->ID)) + "): " +
+                      (message->pDescription == nullptr ? "<no description>"
+                                                        : message->pDescription));
+             }
+@@ -306,6 +344,8 @@ private:
+     HANDLE fence_event_{};
+     std::uint64_t next_fence_value_{1};
+     bool debug_enabled_{};
++    // DCS Control (0068): see require_no_debug_errors.
++    bool parallel_eyes_expected_{GetEnvironmentVariableA("XRFG_TEST_PARALLEL_EYES", nullptr, 0) != 0};
+ };
+ 
+ [[nodiscard]] D3D12_RESOURCE_DESC stereo_texture_description(
