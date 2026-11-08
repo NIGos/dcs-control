@@ -10,7 +10,8 @@
 - Choosing another DCS.exe (a release and an open beta) also picks that install's own Saved Games folder.
 - The Engine page's status refresh no longer freezes the window while Launch, Apply or Back to stock DCS is working.
 - Range messages show "0.1", not "0,1", on Windows set to a language with a decimal comma.
-- The setup and package import install exactly the bytes they verified.
+- The setup and package import install exactly the bytes they verified, and the setup keeps its own file locked while it runs.
+- **Updates no longer pile up copies of older versions.** Each update kept a full copy of the version before it (about 180 MB) in the install's `.installer` folder, forever. Now an update keeps one record of the installed files and no copies, leaves files that did not change as they are, and the first update to this version clears the copies earlier ones left. Uninstalling still removes everything the app installed.
 
 # 0.6.2 preview
 

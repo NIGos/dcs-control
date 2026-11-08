@@ -1124,6 +1124,11 @@ void RemoveSelfLater() {
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     // DLLs loaded later come from System32 only, never from the download folder this setup was started from.
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    // The app verified this file's signature before starting it; later reads of the package go by path (SelfPath). A
+    // running exe can still be renamed and another file put in its place, so this handle, held for the whole run and
+    // shared for reading only (no write, no delete), keeps the verified file where it is until the setup ends.
+    static const HANDLE selfLock = CreateFileW(SelfPath().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    (void)selfLock;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES};

@@ -40,6 +40,10 @@ public sealed record TransactionJournal
     /// Cheeky files only when their bundled builds reload them (<see cref="LiveSettings.Current"/>).</summary>
     public string? AppVersion { get; init; }
     public string Status { get; set; } = "prepared";
+    /// <summary>The application installer's baseline after an update (ApplicationInstaller.Consolidate): it lists every
+    /// owned file as created by it, with no backups, so the journals before it no longer count.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Consolidated { get; init; }
     public List<JournalEntry> Entries { get; init; } = [];
 }
 public sealed record RestoreResult(bool Complete, IReadOnlyList<string> Conflicts);
@@ -118,6 +122,35 @@ public sealed class TransactionStore(string stateDirectory)
         var journal = JsonData.Deserialize<TransactionJournal>(File.ReadAllText(PathPolicy.UnderRoot(root, "journal.json")));
         if (journal.Id != transactionId || journal.SchemaVersion != 1) throw new InvalidDataException("Invalid restore ledger.");
         return RestoreCore(root, journal);
+    }
+
+    /// <summary>Writes <paramref name="journal"/> over its own record (one atomic file write).</summary>
+    public void Replace(TransactionJournal journal)
+    {
+        ValidateId(journal.Id);
+        using var exclusive = new FileStream(Path.Combine(StateDirectory, "transaction.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var root = PathPolicy.UnderRoot(StateDirectory, journal.Id);
+        if (!File.Exists(PathPolicy.UnderRoot(root, "journal.json"))) throw new InvalidDataException("No such transaction: " + journal.Id);
+        Save(root, journal);
+    }
+
+    /// <summary>Deletes a transaction's folder: its record and backups.</summary>
+    public void Delete(string transactionId)
+    {
+        ValidateId(transactionId);
+        using var exclusive = new FileStream(Path.Combine(StateDirectory, "transaction.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var root = PathPolicy.UnderRoot(StateDirectory, transactionId);
+        PathPolicy.RejectReparsePoints(root, StateDirectory);
+        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+    }
+
+    /// <summary>Deletes a transaction's backup files, keeping its record (a journal that no longer needs them).</summary>
+    public void DeleteBackups(string transactionId)
+    {
+        ValidateId(transactionId);
+        using var exclusive = new FileStream(Path.Combine(StateDirectory, "transaction.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var root = PathPolicy.UnderRoot(StateDirectory, transactionId);
+        if (Directory.Exists(root)) foreach (var backup in Directory.EnumerateFiles(root, "*.backup")) File.Delete(backup);
     }
 
     public IReadOnlyList<TransactionJournal> List()

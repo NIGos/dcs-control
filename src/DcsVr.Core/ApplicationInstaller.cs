@@ -39,7 +39,9 @@ public sealed class ApplicationInstaller(string destination)
         if (Root.Equals(sourceRoot, StringComparison.OrdinalIgnoreCase) || Root.StartsWith(sourceRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || sourceRoot.StartsWith(Root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Source and destination must be separate application folders.");
         var manifest = VerifySource(sourceRoot);
-        var journals = Transactions.List();
+        // Journals an earlier update left before its consolidated baseline (cut short while pruning) go first.
+        PruneSuperseded();
+        var journals = Live(Transactions.List());
         ValidateJournalScope(journals);
         // An update cut short (power loss, the setup ended) is rolled back first, so the next update can run.
         var interrupted = journals.Where(j => j.Status is "prepared" or "applying" or "restore-conflicts").ToArray();
@@ -48,41 +50,88 @@ public sealed class ApplicationInstaller(string destination)
             if (Transactions.Restore(journal.Id) is { Complete: false } failed)
                 throw new InvalidOperationException("The interrupted application update could not be rolled back" + (failed.Conflicts.Count > 0 ? " (" + failed.Conflicts[0] + ")" : "")
                     + ". Close DCS Control and anything using its folder, then run the setup again; if it keeps failing, report it with the logs.");
-        if (interrupted.Length > 0) journals = Transactions.List();
+        if (interrupted.Length > 0) journals = Live(Transactions.List());
         if (journals.Any(j => j.Status is not ("applied" or "restored"))) throw new InvalidOperationException("Restore the interrupted application installation before updating.");
         var owned = CurrentOwned(journals);
         foreach (var entry in owned.Values) VerifyOwned(entry, Root);
         var changes = new List<FileMutation>();
-        foreach (var file in manifest.Files.Where(f => !f.Path.Equals(InstallCommand, StringComparison.OrdinalIgnoreCase)))
+        // Files this release has with the bytes already installed: neither rewritten nor backed up, only carried into the
+        // consolidated baseline.
+        var unchanged = new List<JournalEntry>();
+        var payload = manifest.Files.Where(f => !f.Path.Equals(InstallCommand, StringComparison.OrdinalIgnoreCase)).ToArray();
+        foreach (var file in payload)
         {
             var path = PathPolicy.UnderRoot(Root, file.Path);
             var old = owned.GetValueOrDefault(path);
             if (File.Exists(path) && old is null) throw new IOException("Existing unowned file retained: " + path);
+            // VerifyOwned above checked that the file holds old.InstalledSha256.
+            if (old is { Deleted: false } && File.Exists(path) && string.Equals(old.InstalledSha256, file.Sha256, StringComparison.OrdinalIgnoreCase))
+            { unchanged.Add(new() { Path = path, InstalledSha256 = old.InstalledSha256, Root = Root, Applied = true }); continue; }
             // The bytes installed are checked again: VerifySource read the files earlier, by path.
             var bytes = File.ReadAllBytes(PathPolicy.UnderRoot(sourceRoot, file.Path));
             if (bytes.LongLength != file.Bytes || Hashing.BytesSha256(bytes) != file.Sha256) throw new InvalidDataException("Release integrity failed: " + file.Path);
             changes.Add(new(path, old is null || old.Deleted || !File.Exists(path) ? null : old.InstalledSha256, bytes, "Application payload", Root: Root));
         }
         var ledger = PathPolicy.UnderRoot(Root, "installation.json");
-        var retainedPaths = changes.Select(c => c.Path).Append(ledger).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var retainedPaths = payload.Select(f => PathPolicy.UnderRoot(Root, f.Path)).Append(ledger).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var obsolete in owned.Values.Where(e => !e.Deleted && !retainedPaths.Contains(e.Path) && File.Exists(e.Path)))
             changes.Add(new(obsolete.Path, obsolete.InstalledSha256, [], "Remove obsolete owned application file", Delete: true, Root: Root));
         var previousLedger = owned.GetValueOrDefault(ledger);
         if (File.Exists(ledger) && previousLedger is null) throw new IOException("Unowned installation ledger retained.");
-        changes.Add(new(ledger, previousLedger?.InstalledSha256, Encoding.UTF8.GetBytes(JsonData.Serialize(manifest)), "Application installation ledger", Root: Root));
-        return Transactions.Apply(new("application", "DCS Control " + manifest.Version, changes, new Dictionary<string, string>(), ""), beforeWrite);
+        var ledgerBytes = Encoding.UTF8.GetBytes(JsonData.Serialize(manifest));
+        if (previousLedger is { Deleted: false } && File.Exists(ledger) && previousLedger.InstalledSha256 == Hashing.BytesSha256(ledgerBytes))
+            unchanged.Add(new() { Path = ledger, InstalledSha256 = previousLedger.InstalledSha256, Root = Root, Applied = true });
+        else changes.Add(new(ledger, previousLedger?.InstalledSha256, ledgerBytes, "Application installation ledger", Root: Root));
+        var applied = Transactions.Apply(new("application", "DCS Control " + manifest.Version, changes, new Dictionary<string, string>(), ""), beforeWrite);
+        return Consolidate(applied, unchanged);
+    }
+
+    /// <summary>
+    /// After an update has applied, its journal becomes the installation's only baseline: every owned file is listed once
+    /// as created by it, with no backup, and the earlier journals and this one's backups go. That is exact, because the
+    /// install folder is dedicated (Install refuses a file it does not own), so before the first install nothing of
+    /// DCS Control's was there: Uninstall restoring this journal removes every file. Without it each update kept a full
+    /// copy of the version before it in .installer, forever. The baseline is written first, in one atomic file write;
+    /// from then on the earlier journals no longer count (<see cref="Live"/>), so stopping before they are deleted is
+    /// harmless and the next install finishes the pruning.
+    /// </summary>
+    private TransactionJournal Consolidate(TransactionJournal applied, IReadOnlyList<JournalEntry> unchanged)
+    {
+        var entries = applied.Entries.Where(e => e.Applied && !e.Reverted && !e.Deleted)
+            .Select(e => e with { PreviousSha256 = null, BackupFile = null, LuaChanges = null, RuntimeLogs = null })
+            .Concat(unchanged).ToList();
+        var baseline = applied with { Consolidated = true, Entries = entries };
+        Transactions.Replace(baseline);
+        try { Transactions.DeleteBackups(baseline.Id); PruneSuperseded(); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* finished by the next install */ }
+        return baseline;
+    }
+
+    /// <summary>The journals that count: from the newest consolidated baseline on (all of them before the first one).</summary>
+    private static IReadOnlyList<TransactionJournal> Live(IReadOnlyList<TransactionJournal> journals)
+    {
+        var baseline = journals.Where(j => j.Consolidated && j.Status == "applied").OrderByDescending(j => j.CreatedAt).FirstOrDefault();
+        return baseline is null ? journals : journals.Where(j => j.Id == baseline.Id || j.CreatedAt > baseline.CreatedAt).ToArray();
+    }
+
+    /// <summary>Deletes the journals a consolidated baseline superseded.</summary>
+    private void PruneSuperseded()
+    {
+        var all = Transactions.List();
+        var live = Live(all).Select(j => j.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var journal in all.Where(j => !live.Contains(j.Id))) Transactions.Delete(journal.Id);
     }
     public RestoreResult Uninstall()
     {
         EnsureAppClosed();
-        var journals = Transactions.List();
+        var journals = Live(Transactions.List());
         ValidateJournalScope(journals);
         if (!journals.Any(j => j.Status != "restored")) throw new InvalidOperationException("No application installation to restore.");
         // An update cut short is rolled back first, as before an update, so its half-written files are not "modified".
         var interrupted = journals.Where(j => j.Status is "prepared" or "applying").ToArray();
         foreach (var journal in interrupted)
             if (Transactions.Restore(journal.Id) is { Complete: false } partial) return partial;
-        if (interrupted.Length > 0) journals = Transactions.List();
+        if (interrupted.Length > 0) journals = Live(Transactions.List());
         foreach (var entry in CurrentOwned(journals).Values) VerifyOwned(entry, Root);
         foreach (var journal in journals.Where(j => j.Status != "restored"))
         {
