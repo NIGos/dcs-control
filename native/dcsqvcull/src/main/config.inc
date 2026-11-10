@@ -82,6 +82,7 @@ struct Config {
   bool suiteGBufferInstCompile = false;  // [Suite] GBufferInstCompile (R13 stage 1: main-pass model_vs variants)
   bool suiteGBufferTexCount = false;     // [Suite] GBufferTexCount (R14 lead 3: unread G-buffer texture sets)
   bool suiteFxApplyCount = false;        // [Suite] FxApplyCount (R14 lead 4: same-pass FX Apply counter)
+  bool suitePerEyePassCensus = false;    // [Suite] PerEyePassCensus (per_eye_pass.h: shader-cache census, file reads only)
   bool suiteDirectUploadCount = false;   // [Suite] DirectUploadCount (R16 gates G1-G3 for direct page upload)
   bool suiteSrvSpanCount = false;        // [Suite] SrvSpanCount (R15 F2: setShaderResources identical-tail counter)
   bool suiteJoinTailCount = false;       // [Suite] JoinTailCount (R15 F3: render-thread chunk tail at the culling join)
