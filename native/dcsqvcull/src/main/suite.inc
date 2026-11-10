@@ -399,6 +399,10 @@ DWORD WINAPI SuiteThread(void*) {
     ducount::Measure(5000, g_quadFrame, g_tscHz, g_benchAbort);
     Chime(1000, 60);
   }
+  if (ok && g_cfg.suitePerEyePassCensus && !g_benchAbort) {  // per_eye_pass.h: file reads and CPU only, nothing installed
+    Log("-- per-eye pass: which vertex shaders of DCS's shader cache can carry a second (focus) position --");
+    pep::SuitePhase(g_benchAbort);
+  }
   if (ok && g_cfg.suiteFxApplyCount && !g_benchAbort) {
     Log("-- FX pass Apply: same pass again (R14 lead 4 counter, 5 s) --");
     srvtrim::Detach();  // its code check covers the trim's call sites: measured on stock
