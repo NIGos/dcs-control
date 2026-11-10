@@ -4,7 +4,7 @@ Design, first stage and live gates. Written 2026-11-10, offline: DCS, DCS Contro
 not started; nothing was written to Saved Games or the DCS install.
 
 **Tags.** [V] checked for this document (source, census bytes, or a test that runs in the build). [D] documented
-in the project's research notes (R-numbers; `docsesearch` of the engine's analysis tree), not re-measured. [H] hypothesis: needs
+in the project's research notes (R-numbers, kept in the engine's analysis tree outside this repository), not re-measured. [H] hypothesis: needs
 the named capture before anyone builds on it.
 
 ## 0. Verdict
