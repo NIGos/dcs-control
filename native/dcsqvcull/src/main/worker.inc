@@ -242,6 +242,8 @@ DWORD WINAPI WorkerThread(void*) {
         // R123 focus twin (opt-in, default 0: nothing installed). The kill switch / a benchmark / key 0 take it out.
         if (g_cfg.focusTwin || ftwin::g_state.load() == 1) {
           ftwin::g_shadowKey = g_cfg.suiteFocusTwinShadow;
+          ftwin::g_tapBaseline = g_cfg.suiteFocusTwinTapBaseline;
+          ftwin::g_earlyStop = g_cfg.suiteFocusTwinEarlyStop;
           ftwin::g_auditEvery = g_cfg.suiteFocusTwinAuditEvery;
           ftwin::g_trustNeeded = g_cfg.suiteFocusTwinTrust;
           ftwin::g_island = g_cfg.suiteFocusTwinIsland;
