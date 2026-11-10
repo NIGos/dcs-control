@@ -16,6 +16,11 @@ Everything the app changes is backed up and comes back with **Back to stock DCS*
 > **Early beta.** Flown mostly on one PC so far (Pimax Crystal Super, RTX 5090, Windows 11, DCS 2.9 Steam, single player), so expect rough edges. It was built with an AI coding assistant. Bug reports are very welcome: see [Reporting a problem](docs/USER_GUIDE.md#reporting-a-problem).
 
 <p align="center">
+  <a href="https://github.com/NIGos/dcs-control/releases/download/v0.6.3-preview/DcsControl-0.6.3-User-Manual.pdf"><img src="docs/screenshots/manual-cover.jpg" alt="DCS Control User Manual (PDF)" width="300"></a><br>
+  <sub><b>User Manual (PDF, 31 pages)</b>: Quick Start, every page of the app, the Engine Optimizations explained</sub>
+</p>
+
+<p align="center">
   <a href="https://youtu.be/hPQD7im2VKc"><img src="docs/screenshots/video-tour.jpg" alt="Watch the 5-minute video tour of DCS Control" width="800"></a><br>
   <sub>Video tour on YouTube</sub>
 </p>
@@ -64,7 +69,7 @@ After each flight the Overview shows a **Last flight** summary.
 4. **Tick the features** you want. Each one has its own page if you want to adjust it.
 5. **Press Launch DCS.** Engine Optimizations then stay on whenever DCS starts. The VR features and CPU Boost need DCS to be started from the app.
 
-The **[User Guide](docs/USER_GUIDE.md)** explains every feature, what it costs, the in-flight keys, and what to do when something goes wrong.
+The **[User Guide](docs/USER_GUIDE.md)** explains every feature, what it costs, the in-flight keys, and what to do when something goes wrong. Prefer to read it as a book? The **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.6.3-preview/DcsControl-0.6.3-User-Manual.pdf)** has a three-page Quick Start, every page of the app with numbered screenshots, and the Engine Optimizations explained one by one.
 
 ## Good to know
 

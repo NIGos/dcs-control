@@ -4,6 +4,8 @@
 
 **Back to stock DCS also after a lost record.** The record of what DCS Control changed lives in `%LOCALAPPDATA%\DcsControl`. When it was lost (Windows reinstalled, a cleaning tool), the DLSS 5 loader stayed in DCS's `bin` and kept running even from Steam, and Back to stock DCS found nothing to undo. DCS Control now recognises its own files in DCS by their exact bytes (every version it ever shipped), lists them on the Stock DCS page, warns on Checks, includes them in the diagnostic package, and Back to stock DCS (also from the uninstaller) removes them; a `dxgi.dll` of your own that was chained as `dxgi2.dll` gets its name back. Files you installed yourself (Cheeky, ReShade, other mods) are never touched: Cheeky's loader and stereo runtime are byte-identical to its public release, so they count as DCS Control's only next to a runtime it built or the small `DcsControl.txt` mark it now writes beside them. A Cheeky you installed by hand under a DCS Control profile is backed up and comes back with Back to stock DCS.
 
+**User Manual (PDF).** A printable manual is now attached to the release: a three-page Quick Start, every page of the app with numbered screenshots, the Engine Optimizations explained one by one, and troubleshooting.
+
 **Fixes:**
 - The status line no longer stays on "Close DCS to apply changes…" after DCS closes, and an error from before the flight no longer hides Live mode's messages while you fly. The DCS row and the "DCS is closed" check follow DCS starting and closing without a new scan.
 - The setup, update and uninstall no longer stop on PCs with an older Microsoft C++ runtime (version text like "14.29.30139.0 built by: …").

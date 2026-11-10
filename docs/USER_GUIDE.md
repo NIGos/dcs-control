@@ -1,6 +1,6 @@
 # DCS Control — User Guide
 
-**Version 0.6.3-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`.
+**Version 0.6.3-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`. The same content as a printable book, with a Quick Start and numbered screenshots: **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.6.3-preview/DcsControl-0.6.3-User-Manual.pdf)**.
 
 > **Early beta.** DCS Control has been flown mostly on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe — but please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
 
