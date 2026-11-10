@@ -148,6 +148,8 @@ struct Config {
   bool gbufferRecorder = false;            // [Model] GBufferRecorder (gb_rec.h, R18 S1-S3)
   // R123 focus twin (focus_twin.h; opt-in, default 0: nothing installed). The [Suite] keys tune / measure it.
   int focusTwin = 0;                       // [Model] FocusTwin (0 / 1)
+  bool suiteFocusTwinTapBaseline = false;  // [Suite] FocusTwinTapBaseline: every other periphery pass untapped (R151)
+  bool suiteFocusTwinEarlyStop = true;     // [Suite] FocusTwinEarlyStop: stop the tee once the periphery is unusable
   bool suiteFocusTwinShadow = false;       // [Suite] FocusTwinShadow: audits only, never skips (measure)
   int suiteFocusTwinAuditEvery = 64;       // [Suite] FocusTwinAuditEvery: focus passes per eye between audits (0 = trust audits only)
   int suiteFocusTwinTrust = 4;             // [Suite] FocusTwinTrust: passed audits per eye before the twin draws

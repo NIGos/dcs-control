@@ -270,6 +270,8 @@ void LoadConfig(bool initial) {
     const int ft = static_cast<int>(GetPrivateProfileIntW(L"Model", L"FocusTwin", 0, ini.c_str()));
     c.focusTwin = ft == 1 ? 1 : 0;
     if (ft != 0 && ft != 1 && initial) Log("config: [Model] FocusTwin=%d is not 0 or 1; off", ft);
+    c.suiteFocusTwinTapBaseline = GetPrivateProfileIntW(L"Suite", L"FocusTwinTapBaseline", 0, ini.c_str()) != 0;
+    c.suiteFocusTwinEarlyStop = GetPrivateProfileIntW(L"Suite", L"FocusTwinEarlyStop", 1, ini.c_str()) != 0;
     c.suiteFocusTwinShadow = GetPrivateProfileIntW(L"Suite", L"FocusTwinShadow", 0, ini.c_str()) != 0;
     c.suiteFocusTwinAuditEvery =
         (std::max)(0, (std::min)(100000, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"FocusTwinAuditEvery", 64, ini.c_str()))));

@@ -1,5 +1,8 @@
 // R123 (R120b H2): the "focus twin". [Model] FocusTwin = 0 (default: nothing installed, nothing changes) | 1.
 // Design, measurements, live plan: docs/research/R123_focus_twin.md.
+// SHELVED (R151, 2026-11-11, DCS 2.9.31): never engages live (every periphery "shared write"; every descriptor fails
+// its stream vector read: the geometry layout differs), and listening alone costs ~0.42 ms per periphery pass
+// (FocusTwinTapBaseline) against a ~0.9 ms/frame saving ceiling. Results: native/dcsqvcull/FOCUS_TWIN_RETEST.md.
 //
 // What it does, per frame and eye (HMD views render periphery L, periphery R, focus L, focus R; R120b 1.1):
 //  - Periphery main G-buffer pass of the eye: while DCS draws the view's terrain (TerrainObject vt[1], Visualizer
@@ -74,6 +77,8 @@ namespace ftwin {
 // ---------------------------------------------------------------------------
 std::atomic<int> g_key{0};                // [Model] FocusTwin
 std::atomic<bool> g_shadowKey{false};     // [Suite] FocusTwinShadow
+std::atomic<bool> g_tapBaseline{false};   // [Suite] FocusTwinTapBaseline (R151): every other periphery pass untapped, timed
+std::atomic<bool> g_earlyStop{true};      // [Suite] FocusTwinEarlyStop (R151): an unusable periphery stops its tee
 std::atomic<int> g_auditEvery{64};        // [Suite] FocusTwinAuditEvery (focus passes per eye between audits)
 std::atomic<int> g_trustNeeded{4};        // [Suite] FocusTwinTrust (passed audits per eye before the twin draws)
 std::atomic<int> g_island{16};            // [Suite] FocusTwinIsland
@@ -494,6 +499,7 @@ struct Eye {
   // window consumed the latch (further terrain windows of that same pass still pair).
   bool fresh = false;
   uint64_t consumedExec = 0;
+  bool baseFlip = false;  // R151: FocusTwinTapBaseline alternation
   ID3D11Buffer* pvCopy[kPerView] = {};
   UINT pvBytes[kPerView] = {};
   GoodSet* good = nullptr;
@@ -550,6 +556,18 @@ struct Stats {
   uint64_t workBy[kWorkSlots] = {};  // periphery items marked "other work", by the first such call (Sl)
   uint64_t noopPred = 0, noopVp = 0, noopSc = 0, noopOm = 0;  // state-identical calls seen inside items / focus passes
   uint64_t targetsAlt = 0;  // lists built for the focus targets of two frames ago (alternating sets)
+  // R151 (diagnosis of the R150 live run): which read made a periphery descriptor fail (kDf*), and which mark made
+  // the paired periphery stream unusable when a focus pass found it so (Stream::unusable, 0..6).
+  uint64_t descFail[32] = {};
+  uint64_t unusableBy[8] = {};
+  uint64_t mapClears = 0;
+  // R151 [Suite] FocusTwinTapBaseline: DCS's periphery items timed on its own table (1 in 8, scaled as the teed ones),
+  // and the terrain window wall time of teed / untapped periphery passes. earlyStops: tees stopped as unusable.
+  double baseItemUs = 0, baseInstUs = 0, winTeeUs = 0, winBaseUs = 0;
+  uint64_t baseItems = 0, baseInstItems = 0, winTee = 0, winBase = 0, earlyStops = 0;
+  uint64_t teeItemsWin = 0, baseItemsWin = 0;  // items in those windows  // item claims ended by a WRITE_DISCARD Map outside items
+  int64_t spanMin = 0, spanMax = 0, spanLast = 0;  // failed stream vectors: byte span [b, e)
+  uint64_t spanOdd = 0, spanBig = 0;  // ... not a multiple of 16 / over the limit
 };
 Stats g_st;
 std::mutex g_statsMutex;  // the tick copies / resets under it; the render thread updates plain fields (torn reads are ok)
@@ -616,7 +634,8 @@ inline F O(int s) {
 // ---------------------------------------------------------------------------
 // The window: one TerrainObject::render call inside a G-buffer pass
 // ---------------------------------------------------------------------------
-enum WMode : int { kWmNone = 0, kWmPending, kWmPeriph, kWmFocus, kWmAudit, kWmIgnore };
+// R151: kWmBase: a periphery pass of [Suite] FocusTwinTapBaseline drawn on DCS's own table, its items only timed.
+enum WMode : int { kWmNone = 0, kWmPending, kWmPeriph, kWmFocus, kWmAudit, kWmIgnore, kWmBase };
 struct Writer {  // constant buffer -> its last writer in this window
   ID3D11Buffer* buf;
   int item;       // -1: outside the patch items
@@ -653,6 +672,8 @@ struct Win {
   bool sfLive = false;
   Writer wr[64];
   int nwr = 0;
+  int16_t wrHash[128] = {};  // R151: buffer -> writer index + 1 (open addressing; cleared with nwr)
+  bool stopTee = false;      // R151: the periphery stream became unusable (FocusTwinEarlyStop)
   // focus
   bool decided = false, twin = false, stopTwin = false;
   int why = kWTwin;
@@ -815,16 +836,31 @@ void Resume() {
 // ---------------------------------------------------------------------------
 // Window state helpers (render thread)
 // ---------------------------------------------------------------------------
+// R151: a 128-slot open-addressing index over the (at most 64) writers: a draw looks up to 28 bound constant buffers.
+inline uint32_t WrSlot(const void* b) {
+  return static_cast<uint32_t>((reinterpret_cast<uintptr_t>(b) >> 4) * 0x9E3779B97F4A7C15ull >> 57);
+}
+inline void ClearWriters() {
+  g_win.nwr = 0;
+  memset(g_win.wrHash, 0, sizeof(g_win.wrHash));
+}
 inline Writer* FindWriter(ID3D11Buffer* b) {
-  for (int i = 0; i < g_win.nwr; ++i)
-    if (g_win.wr[i].buf == b) return &g_win.wr[i];
-  return nullptr;
+  if (!g_win.nwr || !b) return nullptr;
+  for (uint32_t h = WrSlot(b);; h = (h + 1) & 127u) {
+    const int k = g_win.wrHash[h];
+    if (!k) return nullptr;
+    if (g_win.wr[k - 1].buf == b) return &g_win.wr[k - 1];
+  }
 }
 inline Writer* AddWriter(ID3D11Buffer* b) {
   if (Writer* w = FindWriter(b)) return w;
-  if (g_win.nwr >= 64) return nullptr;
-  Writer& w = g_win.wr[g_win.nwr++];
+  if (g_win.nwr >= 64 || !b) return nullptr;
+  const int idx = g_win.nwr++;
+  Writer& w = g_win.wr[idx];
   w.buf = b, w.item = -1, w.upOff = w.upLen = 0, w.bytesHash = 0;
+  uint32_t h = WrSlot(b);
+  while (g_win.wrHash[h]) h = (h + 1) & 127u;
+  g_win.wrHash[h] = static_cast<int16_t>(idx + 1);
   return &w;
 }
 inline void MarkItem(int why) {
@@ -1213,6 +1249,7 @@ __declspec(noinline) void WorkBody(int sl) {
           if (w.sh.st.cb[st][k] == w.wr[i].buf && w.s && w.s->usable) {
             w.s->usable = false;
             w.s->unusable = 1;  // shared write
+            w.stopTee = true;
           }
     }
   }
@@ -1548,6 +1585,18 @@ void STDMETHODCALLTYPE T_Update1(ID3D11DeviceContext1* c, ID3D11Resource* r, UIN
 }
 HRESULT STDMETHODCALLTYPE T_Map(Ctx* c, ID3D11Resource* r, UINT s, D3D11_MAP t, UINT f, D3D11_MAPPED_SUBRESOURCE* m) {
   Work(sMap);
+  // R151: a whole-buffer rewrite outside items (WRITE_DISCARD of a constant buffer) ends an item's claim on it: the
+  // draws after it read the new contents, not the item's upload (before, only UpdateSubresource cleared the ledger,
+  // and every periphery stream of the R150 live run was "shared write").
+  if (t == D3D11_MAP_WRITE_DISCARD && r && !g_win.inItem && g_win.nwr) {
+    __try {
+      if (Writer* wr = FindWriter(static_cast<ID3D11Buffer*>(r))) {
+        if (wr->item >= 0) g_st.mapClears++;
+        wr->item = -1;
+      }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+  }
   return O<decltype(&T_Map)>(sMap)(c, r, s, t, f, m);
 }
 void STDMETHODCALLTYPE T_Unmap(Ctx* c, ID3D11Resource* r, UINT s) {
@@ -1676,7 +1725,7 @@ void STDMETHODCALLTYPE T_SetPredication(Ctx* c, ID3D11Predicate* p, BOOL v) {
   } else {
     OtherBind(sSetPredication);
     if (g_win.mode == kWmFocus) TargetsChangeGuarded(sSetPredication);  // predication applies to the draws after it
-    if (p && Teeing() && g_win.s) g_win.s->usable = false, g_win.s->unusable = 5;
+    if (p && Teeing() && g_win.s) g_win.s->usable = false, g_win.s->unusable = 5, g_win.stopTee = true;
   }
   g_win.pred = p;
   O<decltype(&T_SetPredication)>(sSetPredication)(c, p, v);
@@ -1753,6 +1802,38 @@ inline uint64_t QSpan(uint64_t h, const uint8_t* p, size_t qwords) {
 }
 // *out: the matching key (with the context block, per frame); *key: the item alone (stable across frames: the
 // island rule's key).
+// R151: the read that failed (render thread; read by TeeItem right after a failed read).
+enum DescFail : int {
+  kDfNone = 0,
+  kDfParams,     // patch: params vector not 16-byte entries / over 64
+  kDfStreams,    // patch: stream vector not 16-byte entries / over 32
+  kDfNoCtx,      // patch: no render context
+  kDfFault,      // patch: an access fault
+  kDfInstNoCtx,  // instancer: no terrain global hook or no render context
+  kDfInstIv,     // [ctx + 0x370] null
+  kDfInstView,   // view index out of 0..63
+  kDfInstType,   // item type < 0 for this view
+  kDfInstTech,   // material technique -1 for this view
+  kDfInstG,      // terrain global null
+  kDfInstIm2,    // IM2 null
+  kDfInstIm2Vt,  // IM2 vtable not InstanceManager2's
+  kDfInstTypes,  // IM2 type table or bit array null
+  kDfInstEntry,  // a sub-draw entry's bit index < 0
+  kDfInstParams,
+  kDfInstStreams,
+  kDfInstFault,
+  kDfCount
+};
+inline const char* DescFailName(int w) {
+  static const char* const n[kDfCount] = {
+      "none", "params", "streams", "no context", "fault", "inst: no context", "inst: view ctx", "inst: view index",
+      "inst: type < 0", "inst: technique -1", "inst: global", "inst: IM2", "inst: IM2 vtable", "inst: tables",
+      "inst: entry", "inst: params", "inst: streams", "inst: fault"};
+  return w >= 0 && w < kDfCount ? n[w] : "?";
+}
+int g_descFail = kDfNone;
+int64_t g_dfSpan = 0;  // the stream vector byte span of the last kDfStreams / kDfInstStreams
+#define FT_DF(code) return (g_descFail = (code)), false
 bool ReadDescRaw(void* mat, void* item, void* ctx, uint64_t* out, uint64_t* key) {
   const uint8_t* it = static_cast<const uint8_t*>(item);
   uint64_t h = Q(0xcbf29ce484222325ull, U(mat));
@@ -1767,7 +1848,7 @@ bool ReadDescRaw(void* mat, void* item, void* ctx, uint64_t* out, uint64_t* key)
   const uint8_t* pb = *reinterpret_cast<const uint8_t* const*>(msri + 0x18);
   const uint8_t* pe = *reinterpret_cast<const uint8_t* const*>(msri + 0x20);
   if (pb || pe) {
-    if (pe < pb || pe - pb > 64 * 16 || (pe - pb) % 16) return false;
+    if (pe < pb || pe - pb > 64 * 16 || (pe - pb) % 16) FT_DF(kDfParams);
     h = QSpan(h, pb, static_cast<size_t>(pe - pb) / 8);
   }
   const uint8_t* geo = *reinterpret_cast<const uint8_t* const*>(msri);
@@ -1776,7 +1857,10 @@ bool ReadDescRaw(void* mat, void* item, void* ctx, uint64_t* out, uint64_t* key)
     const uint8_t* b = *reinterpret_cast<const uint8_t* const*>(geo + 8);
     const uint8_t* e = *reinterpret_cast<const uint8_t* const*>(geo + 0x10);
     if (b || e) {
-      if (e < b || e - b > 32 * 16 || (e - b) % 16) return false;
+      if (e < b || e - b > 32 * 16 || (e - b) % 16) {
+        g_dfSpan = e - b;
+        FT_DF(kDfStreams);
+      }
       for (const uint8_t* p = b; p < e; p += 16) {
         const uint8_t* obj = *reinterpret_cast<const uint8_t* const*>(p);
         h = Q(Q(h, U(obj)), *reinterpret_cast<const uint64_t*>(p + 8));
@@ -1784,7 +1868,7 @@ bool ReadDescRaw(void* mat, void* item, void* ctx, uint64_t* out, uint64_t* key)
       }
     }
   }
-  if (!ctx) return false;
+  if (!ctx) FT_DF(kDfNoCtx);
   *key = h | 1;
   const uint8_t* c = static_cast<const uint8_t*>(ctx);
   h = QSpan(h, c + 0x98, 8);
@@ -1794,9 +1878,10 @@ bool ReadDescRaw(void* mat, void* item, void* ctx, uint64_t* out, uint64_t* key)
 }
 bool ReadDesc(void* mat, void* item, void* ctx, uint64_t* out, uint64_t* key) {
   __try {
+    g_descFail = kDfNone;
     return ReadDescRaw(mat, item, ctx, out, key);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
-    return false;
+    FT_DF(kDfFault);
   }
 }
 // Tests: another descriptor reader (nullptr = DCS's layout).
@@ -1818,30 +1903,32 @@ inline bool Desc(void* mat, void* item, void* ctx, uint64_t* out, uint64_t* key)
 using VFn0 = uint64_t(__fastcall*)(void*);
 inline uint64_t VCall(void* obj, int slot) { return reinterpret_cast<VFn0>((*static_cast<void***>(obj))[slot])(obj); }
 bool ReadInstDescRaw(void* mat, void* item, void* ctx, uint64_t* out, uint64_t* key, uint8_t* bits) {
-  if (!g_instGlobal || !ctx) return false;
+  if (!g_instGlobal || !ctx) FT_DF(kDfInstNoCtx);
   const uint8_t* it = static_cast<const uint8_t*>(item);
   const uint8_t* c = static_cast<const uint8_t*>(ctx);
   void* iv = *reinterpret_cast<void* const*>(c + 0x370);
-  if (!iv) return false;
+  if (!iv) FT_DF(kDfInstIv);
   const int v = static_cast<int>(static_cast<uint32_t>(VCall(iv, 0)));
-  if (v < 0 || v >= 64) return false;
+  if (v < 0 || v >= 64) FT_DF(kDfInstView);
   const uint64_t tech = VCall(iv, 8);
   const uint64_t matTech = *reinterpret_cast<const uint64_t*>(static_cast<const uint8_t*>(mat) + 8 + 8 * v);
   const int t = *reinterpret_cast<const int32_t*>(it + 0x108 + 4 * v);
-  if (t < 0 || matTech == ~0ull) return false;  // DCS draws nothing (vt[6] would not have called vt[8] either)
+  if (t < 0) FT_DF(kDfInstType);
+  if (matTech == ~0ull) FT_DF(kDfInstTech);  // DCS draws nothing (vt[6] would not have called vt[8] either)
   void* g = *g_instGlobal;
-  if (!g) return false;
+  if (!g) FT_DF(kDfInstG);
   const uint8_t* im2 = reinterpret_cast<const uint8_t*>(VCall(g, 11));
-  if (!im2 || (g_im2Vtbl && *reinterpret_cast<void* const*>(im2) != g_im2Vtbl)) return false;
+  if (!im2) FT_DF(kDfInstIm2);
+  if (g_im2Vtbl && *reinterpret_cast<void* const*>(im2) != g_im2Vtbl) FT_DF(kDfInstIm2Vt);
   const uint8_t* x = reinterpret_cast<const uint8_t*>(VCall(g, 13));
   const uint8_t* types = *reinterpret_cast<const uint8_t* const*>(im2 + 0xe0);
   const uint32_t* const* bitsPtr = *reinterpret_cast<const uint32_t* const* const*>(im2 + 0x210);
-  if (!types || !bitsPtr || !*bitsPtr) return false;
+  if (!types || !bitsPtr || !*bitsPtr) FT_DF(kDfInstTypes);
   const uint8_t* e0 = types + 16 * (3 * static_cast<size_t>(t));
   uint8_t b = 0;
   for (int s = 0; s < 2; ++s) {
     const int32_t i = *reinterpret_cast<const int32_t*>(e0 + 16 * s);
-    if (i < 0) return false;
+    if (i < 0) FT_DF(kDfInstEntry);
     if (((*bitsPtr)[static_cast<uint32_t>(i) >> 5] >> (static_cast<uint32_t>(i) & 31u)) & 1u) b |= static_cast<uint8_t>(1u << s);
   }
   uint64_t h = Q(0x84222325cbf29ce4ull, U(mat));
@@ -1854,7 +1941,7 @@ bool ReadInstDescRaw(void* mat, void* item, void* ctx, uint64_t* out, uint64_t* 
   const uint8_t* pb = *reinterpret_cast<const uint8_t* const*>(msri + 0x18);
   const uint8_t* pe = *reinterpret_cast<const uint8_t* const*>(msri + 0x20);
   if (pb || pe) {
-    if (pe < pb || pe - pb > 64 * 16 || (pe - pb) % 16) return false;
+    if (pe < pb || pe - pb > 64 * 16 || (pe - pb) % 16) FT_DF(kDfInstParams);
     h = QSpan(h, pb, static_cast<size_t>(pe - pb) / 8);
   }
   const uint8_t* geo = *reinterpret_cast<const uint8_t* const*>(msri);
@@ -1863,7 +1950,10 @@ bool ReadInstDescRaw(void* mat, void* item, void* ctx, uint64_t* out, uint64_t* 
     const uint8_t* gb = *reinterpret_cast<const uint8_t* const*>(geo + 8);
     const uint8_t* ge = *reinterpret_cast<const uint8_t* const*>(geo + 0x10);
     if (gb || ge) {
-      if (ge < gb || ge - gb > 32 * 16 || (ge - gb) % 16) return false;
+      if (ge < gb || ge - gb > 32 * 16 || (ge - gb) % 16) {
+        g_dfSpan = ge - gb;
+        FT_DF(kDfInstStreams);
+      }
       for (const uint8_t* p = gb; p < ge; p += 16) {
         const uint8_t* obj = *reinterpret_cast<const uint8_t* const*>(p);
         h = Q(Q(h, U(obj)), *reinterpret_cast<const uint64_t*>(p + 8));
@@ -1880,9 +1970,10 @@ bool ReadInstDescRaw(void* mat, void* item, void* ctx, uint64_t* out, uint64_t* 
 }
 bool ReadInstDesc(void* mat, void* item, void* ctx, uint64_t* out, uint64_t* key, uint8_t* bits) {
   __try {
+    g_descFail = kDfNone;
     return ReadInstDescRaw(mat, item, ctx, out, key, bits);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
-    return false;
+    FT_DF(kDfInstFault);
   }
 }
 
@@ -2348,7 +2439,7 @@ void OnTcUpload(ID3D11Resource* r, const D3D11_BOX* box, const void* src) {
   // A second TerrainContext in the same window: the periphery stream (its records saw two) is not usable; a focus
   // pass stops replacing items from here (our copy holds the first).
   if (memcmp(w.tc, src, kTcBytes) == 0) return;
-  if (Teeing() && w.s && w.mode == kWmPeriph) w.s->usable = false, w.s->unusable = 2;
+  if (Teeing() && w.s && w.mode == kWmPeriph) w.s->usable = false, w.s->unusable = 2, w.stopTee = true;
   if (w.mode == kWmFocus) {
     if (!w.pending.empty()) Flush();
     w.stopTwin = true;
@@ -2378,7 +2469,7 @@ void StartTee(Stream& s, int eye) {
   s.tcBuf = w.tcBuf;
   s.usable = true;
   w.s = &s;
-  w.nwr = 0;
+  ClearWriters();
   Eye& e = g_eye[eye];
   w.recAll = &s == &g_audit || AuditDue(e) || g_verifyEvery.load(std::memory_order_relaxed) > 0 || !e.good ||
              e.good->n == 0;
@@ -2434,6 +2525,14 @@ void Classify() {
     }
     e.lastPeriphCi = w.ci.seq;
     e.fresh = false, e.consumedExec = 0;  // a new periphery: last frame's focus pairing ends here
+    // R151 [Suite] FocusTwinTapBaseline: every other periphery pass of the eye runs on DCS's own table (no taps, no
+    // stream; its focus pass stays stock) and only its items are timed: the teed passes' item times minus these are
+    // what listening really costs (the R124 / R150 estimate compared periphery and focus items, cold vs warm caches).
+    if (g_tapBaseline.load(std::memory_order_relaxed) && (e.baseFlip = !e.baseFlip)) {
+      Pause();
+      w.mode = kWmBase;
+      return;
+    }
     // A stream not in use by a worker.
     int pick = -1;
     for (int i = 0; i < 2; ++i)
@@ -2501,7 +2600,10 @@ bool ValidateOrWhy(Eye& e, Stream*& out, int* why) {
   if (e.cur < 0) return *why = kWNoPeriph, false;
   Stream& s = e.s[e.cur];
   if (!PairedStream(e)) return *why = kWStale, false;
-  if (!s.usable) return *why = s.unusable == 6 ? kWStale : kWEyeBad, false;
+  if (!s.usable) {
+    if (!w.verifyRun2) g_st.unusableBy[s.unusable >= 0 && s.unusable < 8 ? s.unusable : 7]++;
+    return *why = s.unusable == 6 ? kWStale : kWEyeBad, false;
+  }
   if (!w.haveTc) return *why = kWNoTc, false;
   if (!SharedRowsEqual(s.tc, w.tc)) return *why = kWShared, false;
   if (!s.pred.ok) {
@@ -2738,7 +2840,19 @@ uint64_t TeeItem(void* mat, void* item, void* ctx, void* x, bool inst) {
   const int64_t tIn = timed ? defrec::Qpc() : 0;
   uint64_t desc = 0, key = 0;
   uint8_t bits = 0;
+  g_descFail = kDfNone;
   const bool dOk = inst ? ReadInstDesc(mat, item, ctx, &desc, &key, &bits) : Desc(mat, item, ctx, &desc, &key);
+  if (!dOk && w.mode == kWmPeriph) {
+    g_st.descFail[g_descFail >= 0 && g_descFail < kDfCount ? g_descFail : 0]++;
+    if (g_descFail == kDfStreams || g_descFail == kDfInstStreams) {
+      const int64_t sp = g_dfSpan;
+      if (!g_st.spanOdd && !g_st.spanBig) g_st.spanMin = g_st.spanMax = sp;
+      if (sp < g_st.spanMin) g_st.spanMin = sp;
+      if (sp > g_st.spanMax) g_st.spanMax = sp;
+      g_st.spanLast = sp;
+      (sp >= 0 && sp % 16 == 0 ? g_st.spanBig : g_st.spanOdd)++;
+    }
+  }
   const int idx = static_cast<int>(s.item.size());
   s.item.push_back(Item{dOk ? desc : 0, static_cast<int>(s.rec.size()), 0, kPOk, inst, 0});
   w.inItem = true, w.item = idx, w.itemWhy = dOk ? kPOk : kPDesc, w.itemWorkSl = -1;
@@ -2895,9 +3009,35 @@ void Obs(void*, void*, bool begin) {
   t_gbDepth = begin ? (t_gbDepth > 0 ? t_gbDepth : 0) + 1 : (t_gbDepth > 0 ? t_gbDepth - 1 : 0);
 }
 
+// R151: a teed periphery that became unusable stops listening (FocusTwinEarlyStop): DCS's own table for the rest of
+// the window, which is then ignored (the stream stays unusable; its focus pass is stock as before).
+void StopTee() {
+  Win& w = g_win;
+  w.stopTee = false;
+  if (w.mode != kWmPeriph || !g_earlyStop.load(std::memory_order_relaxed)) return;
+  Pause();
+  w.mode = kWmIgnore;
+  g_st.earlyStops++;
+}
+uint64_t BaseItem(void* mat, void* item, void* ctx, void* x, bool inst) {
+  const MatFn orig = inst ? g_instOrig : g_matOrig;
+  g_dcsCalled = true;
+  g_st.baseItemsWin++;
+  if (!SampleItem()) return orig(mat, item, ctx, x);
+  const int64_t t0 = defrec::Qpc();
+  const uint64_t r = orig(mat, item, ctx, x);
+  const double us = (defrec::Qpc() - t0) * QpcUs() * kSampleScale;
+  if (inst)
+    g_st.baseInstUs += us, g_st.baseInstItems += 8;
+  else
+    g_st.baseItemUs += us, g_st.baseItems += 8;
+  return r;
+}
 uint64_t MatHookBody(void* mat, void* item, void* ctx, void* x, bool inst) {
   Win& w = g_win;
-  if (w.mode == kWmPeriph) return TeeItem(mat, item, ctx, x, inst);
+  if (w.stopTee && !w.inItem) StopTee();
+  if (w.mode == kWmBase) return BaseItem(mat, item, ctx, x, inst);
+  if (w.mode == kWmPeriph) return g_st.teeItemsWin++, TeeItem(mat, item, ctx, x, inst);
   if (w.mode == kWmFocus || w.mode == kWmAudit) return FocusItem(mat, item, ctx, x, inst);
   return (inst ? g_instOrig : g_matOrig)(mat, item, ctx, x);
 }
@@ -2947,7 +3087,7 @@ void BeginWindow(void* ctx) {
   w.itemInst = false;
   w.item = -1;
   w.s = nullptr;
-  w.nwr = 0;
+  ClearWriters();
   w.decided = w.twin = w.stopTwin = false;
   w.verifyCap = w.verifyGo = w.verifyRun2 = false;
   w.why = kWTwin;
@@ -2956,6 +3096,7 @@ void BeginWindow(void* ctx) {
   for (auto*& b : w.pvSrc) b = nullptr;
   w.itemWorkSl = -1;
   w.focusEye = -1;
+  w.stopTee = false;
   w.exec = g_gbExec.load(std::memory_order_relaxed);
   w.pred = nullptr;
   if (g_tbl.ctx) {  // R150: the bound predicate (for the SetPredication no-op test)
@@ -3242,6 +3383,11 @@ void EndWindowBody() {
 }
 void EndWindow() {
   Win& w = g_win;
+  {  // R151: terrain window wall time of teed / untapped periphery passes
+    const double us = (defrec::Qpc() - w.t0) * QpcUs();
+    if (w.mode == kWmPeriph) g_st.winTeeUs += us, g_st.winTee++;
+    if (w.mode == kWmBase) g_st.winBaseUs += us, g_st.winBase++;
+  }
   __try {
     EndWindowBody();
   } __except (Filt(GetExceptionCode())) {
@@ -3810,7 +3956,54 @@ std::string StatsDiagText(const Stats& s) {
                 static_cast<unsigned long long>(s.noopPred), static_cast<unsigned long long>(s.noopVp),
                 static_cast<unsigned long long>(s.noopSc), static_cast<unsigned long long>(s.noopOm),
                 static_cast<unsigned long long>(s.targetsAlt));
-  return std::string(b, b + (n < static_cast<int>(sizeof(b)) ? n : static_cast<int>(sizeof(b)) - 1));
+  std::string out(b, b + (n < static_cast<int>(sizeof(b)) ? n : static_cast<int>(sizeof(b)) - 1));
+  return out;
+}
+// R151: why descriptors failed, why paired periphery streams were unusable, and what listening costs (its own line:
+// the diag line is near the log's 2048-byte limit).
+std::string StatsListenText(const Stats& s) {
+  // R151: why descriptors failed and why paired periphery streams were unusable.
+  char d[1280];
+  int m = snprintf(d, sizeof(d), "focus twin listen: descriptor failed by read:");
+  bool any = false;
+  for (int k = 0; k < kDfCount && m < static_cast<int>(sizeof(d)) - 48; ++k)
+    if (s.descFail[k])
+      m += snprintf(d + m, sizeof(d) - m, " %s %llu", DescFailName(k), static_cast<unsigned long long>(s.descFail[k])),
+          any = true;
+  if (!any) m += snprintf(d + m, sizeof(d) - m, " none");
+  if (s.spanOdd || s.spanBig)
+    m += snprintf(d + m, sizeof(d) - m, " (stream vector bytes: min %lld, max %lld, last %lld; not 16-byte %llu, over limit %llu)",
+                  static_cast<long long>(s.spanMin), static_cast<long long>(s.spanMax), static_cast<long long>(s.spanLast),
+                  static_cast<unsigned long long>(s.spanOdd), static_cast<unsigned long long>(s.spanBig));
+  static const char* const un[8] = {"not teed", "shared write", "second TerrainContext", "fault", "full",
+                                    "predication", "stale", "?"};
+  m += snprintf(d + m, sizeof(d) - m, "; periphery unusable by:");
+  any = false;
+  for (int k = 0; k < 8 && m < static_cast<int>(sizeof(d)) - 48; ++k)
+    if (s.unusableBy[k])
+      m += snprintf(d + m, sizeof(d) - m, " %s %llu", un[k], static_cast<unsigned long long>(s.unusableBy[k])),
+          any = true;
+  if (!any) m += snprintf(d + m, sizeof(d) - m, " none");
+  m += snprintf(d + m, sizeof(d) - m, "; item claims ended by a discard map %llu", static_cast<unsigned long long>(s.mapClears));
+  m += snprintf(d + m, sizeof(d) - m, "; tees stopped early %llu", static_cast<unsigned long long>(s.earlyStops));
+  if (s.winBase && s.winTee) {
+    // R151 FocusTwinTapBaseline: what listening costs, teed periphery passes against untapped ones of the same scene.
+    const uint64_t pp = s.periphItems - s.periphInstItems;
+    const double tP = pp ? s.periphDcsItemUs / static_cast<double>(pp) : 0.0;
+    const double tI = s.periphInstItems ? s.periphDcsInstUs / static_cast<double>(s.periphInstItems) : 0.0;
+    const double bP = s.baseItems ? s.baseItemUs / static_cast<double>(s.baseItems) : 0.0;
+    const double bI = s.baseInstItems ? s.baseInstUs / static_cast<double>(s.baseInstItems) : 0.0;
+    const double wT = s.winTeeUs / static_cast<double>(s.winTee), wB = s.winBaseUs / static_cast<double>(s.winBase);
+    m += snprintf(d + m, sizeof(d) - m,
+                  "; tap baseline: patch item %.2f us teed / %.2f untapped, instancer item %.2f / %.2f; periphery terrain "
+                  "window %.0f us teed (%llu, %.0f items) / %.0f untapped (%llu, %.0f items): listening costs %.0f us per "
+                  "periphery pass",
+                  tP, bP, tI, bI, wT, static_cast<unsigned long long>(s.winTee),
+                  static_cast<double>(s.teeItemsWin) / static_cast<double>(s.winTee), wB,
+                  static_cast<unsigned long long>(s.winBase), static_cast<double>(s.baseItemsWin) / static_cast<double>(s.winBase),
+                  wT - wB);
+  }
+  return std::string(d, d + (m < static_cast<int>(sizeof(d)) ? m : static_cast<int>(sizeof(d)) - 1));
 }
 // Worker builds are counted from the streams (render thread reads job state at the focus).
 void CountBuilds() {
@@ -3860,6 +4053,7 @@ void Tick(int key, bool engineOff, bool benchRunning, uint64_t frames) {
       const double fr = static_cast<double>(frames - g_lineFrames0);
       Log("%s", StatsText(copy, (now - g_lastLine) / 1000.0, fr).c_str());
       Log("%s", StatsSummaryText(copy, fr).c_str());  // R150
+      Log("%s", StatsListenText(copy).c_str());        // R151
       Log("%s", StatsDiagText(copy).c_str());          // R150
     }
     g_lastLine = now;
