@@ -339,6 +339,21 @@ void LoadConfig(bool initial) {
     c.prefetchTableBits = std::max(16, std::min(22, tb));
   }
   c.suiteBenchPrefetch = GetPrivateProfileIntW(L"Suite", L"BenchPrefetch", 0, ini.c_str()) != 0;
+  // Measurement kit (measure_kit.h, LIVE_MEASUREMENT_PLAN.md): measure-only, default off.
+  c.benchPassMs = GetPrivateProfileIntW(L"Bench", L"PassMs", 0, ini.c_str()) != 0;
+  c.suitePassTimelineSec = std::max(0, std::min(600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"PassTimelineSec", 0, ini.c_str()))));
+  c.suiteChainCensusSec = std::max(0, std::min(600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ChainCensusSec", 0, ini.c_str()))));
+  c.suiteGpuBundleTiming = qvini::Mask(L"Suite", L"GpuBundleTiming", 0, 0x1f, ini.c_str());
+  c.suiteGpuBundlePairs = std::max(1, std::min(16, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"GpuBundlePairs", 4, ini.c_str()))));
+  c.suiteBenchPrefetchTableBits = GetPrivateProfileIntW(L"Suite", L"BenchPrefetchTableBits", 0, ini.c_str()) != 0;
+  c.suiteBenchGBufferRecorderCockpit = GetPrivateProfileIntW(L"Suite", L"BenchGBufferRecorderCockpit", 0, ini.c_str()) != 0;
+  {
+    wchar_t label[96] = {};
+    GetPrivateProfileStringW(L"Suite", L"Label", L"", label, 96, ini.c_str());
+    char u8[300] = {};
+    WideCharToMultiByte(CP_UTF8, 0, label, -1, u8, sizeof(u8), nullptr, nullptr);
+    c.suiteLabel = u8;
+  }
   c.threadCensus = GetPrivateProfileIntW(L"Threads", L"Census", 0, ini.c_str()) != 0;
   c.threadCensusSec = std::max(10, std::min(3600, static_cast<int>(GetPrivateProfileIntW(L"Threads", L"CensusSec", 60, ini.c_str()))));
   {

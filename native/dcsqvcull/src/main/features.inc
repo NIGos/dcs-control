@@ -51,3 +51,4 @@
 #include "frame_timeline.h"  // R52: [Perf] FrameTimeline / PoseProbe / EventLog (measure only, default 0)
 #include "focus_twin.h"  // R123: [Model] FocusTwin (opt-in, default 0): focus terrain patches replayed from the periphery
 #include "vrs_probe.h"  // R139: [Suite] VrsProbe (measure only, default 0): NvAPI variable rate shading A/B probe
+#include "measure_kit.h"  // Perf audit 2026-11-10: pass timeline, chain census, GPU bundle (measure only, default 0)

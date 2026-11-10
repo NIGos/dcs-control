@@ -337,6 +337,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "r142_test.h"  // R142: the ini reload diff, the engine key set, frame times around a reload
 #include "r144_test.h"  // R144: Live mode phase 2 (AllocSlabs / Diagnostics live, settings.cfg followed live)
 #include "r146_test.h"  // R146: DCS's D3D11 context behind a device proxy (ReShade): detection, split filter guard
+#include "measure_kit_test.h"  // Perf audit 2026-11-10: the measurement kit's pure parts (measure_kit.h, bench.h)
 
 // R60: QV_TEST_LOAD=<n> (off by default): n busy threads of normal priority inside this process for the whole run.
 // An in-process stand-in for a machine loaded by another program (as DCS loading a mission); never an external load
@@ -2012,6 +2013,7 @@ int main() {
   r99test::Run();  // R99: the pose hook by displayTime; the symbology replay stage's cost
   r101test::Run();  // R101: the learnt HUD field recovers after a bank
   r144test::Run();  // R144: after the allocator test (it reads the global allocate counters)
+  mktest::Run();  // the measurement kit's pure parts (perf audit 2026-11-10)
 
   // Suite: configuration check + short profile, report file written.
   {
