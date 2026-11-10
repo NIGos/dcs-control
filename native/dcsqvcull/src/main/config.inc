@@ -182,6 +182,15 @@ struct Config {
   uint32_t prefetchWindowMs = 5000;        // [Prefetch] WindowMs: repeat window (1-60000; R107: default as shipped)
   bool suiteBenchPrefetch = false;         // [Suite] BenchPrefetch (bench mode 33: observe vs skip)
   int prefetchTableBits = 20;              // [Prefetch] TableBits: repeat table 2^n entries (16-22, default 20; R39)
+  // Measurement kit (measure_kit.h, LIVE_MEASUREMENT_PLAN.md; all measure-only, default off):
+  bool benchPassMs = false;                // [Bench] PassMs: render-thread pass ms and G-buffer pass ms per A/B block
+  int suitePassTimelineSec = 0;            // [Suite] PassTimelineSec: per-frame per-pass CPU timeline + collect timeline
+  int suiteChainCensusSec = 0;             // [Suite] ChainCensusSec: culling-chain counts census (R38 rank 3)
+  uint32_t suiteGpuBundleTiming = 0;       // [Suite] GpuBundleTiming: mask of the small exact GPU items, ABBA GPU timing
+  int suiteGpuBundlePairs = 4;             // [Suite] GpuBundlePairs: ABBA pairs of 5 s blocks (1-16)
+  bool suiteBenchPrefetchTableBits = false;  // [Suite] BenchPrefetchTableBits (bench mode 34: 2^16 vs TableBits)
+  bool suiteBenchGBufferRecorderCockpit = false;  // [Suite] BenchGBufferRecorderCockpit (bench mode 35)
+  std::string suiteLabel;                  // [Suite] Label: logged as "suite label: <text>" under the suite header
   bool threadCensus = false;               // [Threads] Census: per-thread CPU/affinity lines (thread_place.h, R39)
   int threadCensusSec = 60;                // [Threads] CensusSec (10-3600)
   int placeRecheckSec = 60;                // [Threads] PlaceRecheckSec: placement re-check once nothing moved (R52; R44 used 10 s)
