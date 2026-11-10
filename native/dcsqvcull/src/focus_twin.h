@@ -47,6 +47,12 @@
 // IM2's buffer members and the sub-draw-1 buffer.
 // [Suite] FocusTwinPatches = 0: only the instancer items are teed / replaced (patches stay DCS's).
 //
+// R150 (retest after R124's 0 % twin rate; native/dcsqvcull/FOCUS_TWIN_RETEST.md): without a camera prediction (live
+// the collect-time cameras never related to the uploads: 100 % "no history") the decision is made on DCS's own focus
+// upload (RelateFocusTc); a focus pairs with its eye's periphery by a per-frame latch, not the collect sequence;
+// state-identical viewport / scissor / target / predicate calls are let through; "other work" names its call; two
+// extra 30 s lines (summary, diag).
+//
 // Safety: every hook body runs under SEH; a fault latches the feature off for the session (pass-through). The kill
 // switch / key 0 / payload stop / device loss: hooks out, workers stopped. F10 / map / loading: no fresh
 // collect-time camera (no culling ran) or gb_rec's graph-wide sort guard (R73): nothing is teed or skipped. MFD
@@ -449,6 +455,7 @@ struct Stream {
   bool usable = false;
   int unusable = 0;  // 0 ok, 1 shared write, 2 second TerrainContext, 3 fault, 4 full, 5 predication, 6 stale
   Pred pred;
+  CiFrame ci;  // R150: the collect-time cameras the periphery pass saw (latched there; the focus pass learns from them)
   DescMap* map = nullptr;
   std::vector<uint64_t> dupDesc;  // descriptors two items shared
   // Constant buffers patch items wrote (item, buffer), and those a later item read without writing (inherited): every
@@ -480,6 +487,13 @@ struct Eye {
   int cur = -1;  // this frame's stream (index), -1 none
   EyeHist hist;
   Targets targets{};  // last focus pass's
+  Targets targetsPrev{};  // R150: the focus pass's before that (render-graph pools may alternate two target sets)
+  // R150: this eye's periphery stream (cur) was teed in this frame and its focus pass has not run yet. The focus pass
+  // pairs with it by this latch, not by the collect sequence (R124 / audit B1: a collect published between the
+  // periphery and the focus pass would make them never match). consumedExec: the G-buffer pass execution whose focus
+  // window consumed the latch (further terrain windows of that same pass still pair).
+  bool fresh = false;
+  uint64_t consumedExec = 0;
   ID3D11Buffer* pvCopy[kPerView] = {};
   UINT pvBytes[kPerView] = {};
   GoodSet* good = nullptr;
@@ -495,6 +509,7 @@ Eye g_eye[2];
 // ---------------------------------------------------------------------------
 // Statistics (render thread, read by the worker tick)
 // ---------------------------------------------------------------------------
+constexpr int kWorkSlots = 80;  // >= sCount (checked below)
 struct Stats {
   uint64_t focusPasses = 0, why[kWCount] = {}, predWhy[kPwCount] = {};
   uint64_t periphPasses = 0, periphItems = 0, perWhy[kPCount] = {}, records = 0;
@@ -525,6 +540,16 @@ struct Stats {
   uint64_t periphInstItems = 0, instRecords = 0, focusInstItems = 0, twinInstItems = 0, twinInstDraws = 0;
   uint64_t focusStockInstItems = 0, gateLists = 0, instNoDraw = 0, instMasked = 0;
   double focusStockInstUs = 0, periphDcsInstUs = 0;
+  // R150 (the FocusTwin retest): how each focus pass was decided, why the history did not learn, which context call
+  // made a periphery item "other work", the no-op calls that no longer do, and whether the collect sequence moved
+  // between a periphery and its focus pass (audit B1's hypothesis).
+  uint64_t decPred = 0, decRel = 0, relMiss = 0;  // twin-capable decisions by the camera prediction / by the relation
+  double relDevMax = 0;
+  uint64_t learnWhy[kLwCount] = {};
+  uint64_t seqMoved = 0;  // focus passes paired with a periphery stream teed under another collect publication
+  uint64_t workBy[kWorkSlots] = {};  // periphery items marked "other work", by the first such call (Sl)
+  uint64_t noopPred = 0, noopVp = 0, noopSc = 0, noopOm = 0;  // state-identical calls seen inside items / focus passes
+  uint64_t targetsAlt = 0;  // lists built for the focus targets of two frames ago (alternating sets)
 };
 Stats g_st;
 std::mutex g_statsMutex;  // the tick copies / resets under it; the render thread updates plain fields (torn reads are ok)
@@ -564,6 +589,7 @@ const char* const kSlName[sCount] = {
     "GSSetShaderResources", "GSSetSamplers", "HSSetConstantBuffers", "HSSetShaderResources", "HSSetSamplers",
     "DSSetConstantBuffers", "DSSetShaderResources", "DSSetSamplers", "CSSetShader", "CSSetConstantBuffers",
     "CSSetShaderResources", "CSSetSamplers", "CSSetUnorderedAccessViews", "SOSetTargets", "SetPredication"};
+static_assert(sCount <= kWorkSlots, "Stats::workBy holds one counter per tapped slot");
 
 struct Tbl {
   ID3D11DeviceContext* ctx = nullptr;  // DCS's immediate context (AddRef'd)
@@ -612,6 +638,10 @@ struct Win {
   bool inItem = false;
   int item = -1;
   int itemWhy = kPOk;
+  int itemWorkSl = -1;      // R150: the call that made the current item "other work"
+  int focusEye = -1;        // R150: a focus window resolved to this eye (its latch is consumed at the window end)
+  uint64_t exec = 0;        // R150: the G-buffer pass execution this window is in
+  void* pred = nullptr;     // R150: the bound predicate (pointer only, for the no-op test)
   bool itemInst = false;  // R125: the current item is an instancer item (its draws: DrawIndexedInstancedIndirect)
   int itemSub[2] = {};    // ... the sub-draws its view's bits announce, in order
   int itemSubN = 0, itemSubNext = 0;
@@ -639,6 +669,14 @@ struct Win {
 };
 Win g_win;
 Stream g_audit;  // the focus stream an audit records
+
+// R150: G-buffer pass executions (gbpass observer, render thread): a focus window pairs with its eye's periphery
+// stream while that stream is fresh (teed this frame, its focus not yet drawn), or inside the same G-buffer pass
+// execution that consumed it (a second terrain window of that focus pass).
+std::atomic<uint64_t> g_gbExec{0};
+inline bool PairedStream(const Eye& e) {
+  return e.cur >= 0 && (e.fresh || (e.consumedExec != 0 && e.consumedExec == g_win.exec));
+}
 
 // GPU timing ring (focus windows)
 struct GpuQ {
@@ -791,6 +829,11 @@ inline Writer* AddWriter(ID3D11Buffer* b) {
 }
 inline void MarkItem(int why) {
   if (g_win.inItem && g_win.itemWhy == kPOk) g_win.itemWhy = why;
+}
+// R150: "other work" with the call that caused it (the 30 s line lists the calls; R124 saw 100 % of the periphery
+// items as other work and could not say which call).
+inline void MarkWork(int sl) {
+  if (g_win.inItem && g_win.itemWhy == kPOk) g_win.itemWhy = kPWork, g_win.itemWorkSl = sl;
 }
 
 // Full state snapshot from the device (the window's baseline). References are taken into the stream.
@@ -1091,14 +1134,14 @@ void TeeUpload(ID3D11Resource* r, const D3D11_BOX* box, const void* src) {
   D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
   r->GetType(&dim);
   if (dim != D3D11_RESOURCE_DIMENSION_BUFFER) {
-    MarkItem(kPWork);
+    MarkWork(sUpdate);  // a texture update inside an item
     return;
   }
   ID3D11Buffer* b = static_cast<ID3D11Buffer*>(r);
   D3D11_BUFFER_DESC bd{};
   b->GetDesc(&bd);
   if (!(bd.BindFlags & D3D11_BIND_CONSTANT_BUFFER)) {
-    MarkItem(kPWork);
+    MarkWork(sUpdate);  // another buffer's update inside an item
     return;
   }
   Writer* wr = AddWriter(b);
@@ -1157,7 +1200,7 @@ __declspec(noinline) void WorkBody(int sl) {
   if (!Teeing()) return;
   if (w.inItem) {  // the item's own draw and constant-buffer uploads are recorded; anything else is not replayable
     const int draw = w.itemInst ? sDrawIndexedInstancedIndirect : sDrawIndexed;
-    if (sl != draw && sl != sUpdate && sl != sUpdate1) MarkItem(kPWork);
+    if (sl != draw && sl != sUpdate && sl != sUpdate1) MarkWork(sl);
     return;
   }
   w.sawWork = true;
@@ -1183,9 +1226,9 @@ inline void Work(int sl) {
   }
 }
 // Binds outside the tracked state: inside a teed item they make it not twinnable.
-inline void OtherBind() {
+inline void OtherBind(int sl) {
   g_st.tapped++;
-  if (g_win.inItem && Teeing()) MarkItem(kPWork);
+  if (g_win.inItem && Teeing()) MarkWork(sl);
 }
 #define FT_GUARD(body)                          \
   g_st.tapped++;                                \
@@ -1295,21 +1338,73 @@ void STDMETHODCALLTYPE T_RSSetState(Ctx* c, ID3D11RasterizerState* r) {
 // Viewports, scissors, targets: never changed by a twinnable item. In a focus window the pending twin draws go first
 // and nothing more is replaced (the lists draw into the pass's targets). Outside items in a tee window the SRV
 // shadow is read back (d3d11 unbinds inputs that become outputs).
-__declspec(noinline) void TargetsChange() {
+__declspec(noinline) void TargetsChange(int sl) {
   Win& w = g_win;
   if (w.mode == kWmFocus) {
     if (!w.pending.empty()) Flush();
     w.stopTwin = true;
     return;
   }
-  MarkItem(kPWork);
+  MarkWork(sl);
 }
-inline void TargetsChangeGuarded() {
+inline void TargetsChangeGuarded(int sl) {
   g_st.tapped++;
   __try {
-    TargetsChange();
+    TargetsChange(sl);
   } __except (Filt(GetExceptionCode())) {
     Latch("a focus twin tap", g_faultCode);
+  }
+}
+// R150: a viewport, scissor, target or predicate call that sets the state already bound changes nothing a draw reads
+// (D3D11 applies the same state again), so it neither makes a teed item "other work" nor stops a focus pass's twin.
+// Checked only where it matters (inside a teed item, or in a focus window), against the device's current state. Any
+// difference, or a call the check cannot read, counts as a change (the R123 behaviour).
+inline bool NoopCheckWanted() {
+  const Win& w = g_win;
+  return (w.inItem && Teeing()) || w.mode == kWmFocus;
+}
+__declspec(noinline) bool SameViewports(Ctx* c, UINT n, const D3D11_VIEWPORT* v) {
+  UINT m = 0;
+  c->RSGetViewports(&m, nullptr);
+  if (m != n || n > D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE || (n && !v)) return false;
+  D3D11_VIEWPORT cur[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+  c->RSGetViewports(&m, cur);
+  return m == n && memcmp(cur, v, sizeof(D3D11_VIEWPORT) * n) == 0;
+}
+__declspec(noinline) bool SameScissors(Ctx* c, UINT n, const D3D11_RECT* r) {
+  UINT m = 0;
+  c->RSGetScissorRects(&m, nullptr);
+  if (m != n || n > D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE || (n && !r)) return false;
+  D3D11_RECT cur[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+  c->RSGetScissorRects(&m, cur);
+  return m == n && memcmp(cur, r, sizeof(D3D11_RECT) * n) == 0;
+}
+// The same render targets and depth view, and no UAV bound (OMSetRenderTargets may unbind UAVs): a no-op. An input
+// bound on one of these targets cannot exist (d3d11 refuses an SRV of a bound output), so nothing is unbound either.
+__declspec(noinline) bool SameTargetsBound(Ctx* c, UINT n, ID3D11RenderTargetView* const* r, ID3D11DepthStencilView* d) {
+  if (n > D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT || (n && !r)) return false;
+  ID3D11RenderTargetView* cr[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+  ID3D11DepthStencilView* cd = nullptr;
+  ID3D11UnorderedAccessView* cu[D3D11_PS_CS_UAV_REGISTER_COUNT] = {};
+  c->OMGetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, cr, &cd, 0,
+                                               D3D11_PS_CS_UAV_REGISTER_COUNT, cu);
+  bool same = cd == d;
+  for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
+    if (cr[i] != (i < n ? r[i] : nullptr)) same = false;
+    if (cr[i]) cr[i]->Release();
+  }
+  for (auto* u : cu)
+    if (u) same = false, u->Release();
+  if (cd) cd->Release();
+  return same;
+}
+template <class F>
+inline bool NoopGuarded(F f) {
+  if (!NoopCheckWanted()) return false;
+  __try {
+    return f();
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
   }
 }
 void ResyncSrv(Ctx* c);
@@ -1322,21 +1417,30 @@ inline void ResyncSrvGuarded(Ctx* c) {
   }
 }
 void STDMETHODCALLTYPE T_RSSetViewports(Ctx* c, UINT n, const D3D11_VIEWPORT* v) {
-  TargetsChangeGuarded();
+  if (NoopGuarded([&] { return SameViewports(c, n, v); }))
+    g_st.tapped++, g_st.noopVp++;
+  else
+    TargetsChangeGuarded(sRSSetViewports);
   O<decltype(&T_RSSetViewports)>(sRSSetViewports)(c, n, v);
 }
 void STDMETHODCALLTYPE T_RSSetScissor(Ctx* c, UINT n, const D3D11_RECT* r) {
-  TargetsChangeGuarded();
+  if (NoopGuarded([&] { return SameScissors(c, n, r); }))
+    g_st.tapped++, g_st.noopSc++;
+  else
+    TargetsChangeGuarded(sRSSetScissor);
   O<decltype(&T_RSSetScissor)>(sRSSetScissor)(c, n, r);
 }
 void STDMETHODCALLTYPE T_OMSetRT(Ctx* c, UINT n, ID3D11RenderTargetView* const* r, ID3D11DepthStencilView* d) {
-  TargetsChangeGuarded();
+  if (NoopGuarded([&] { return SameTargetsBound(c, n, r, d); }))
+    g_st.tapped++, g_st.noopOm++;
+  else
+    TargetsChangeGuarded(sOMSetRT);
   O<decltype(&T_OMSetRT)>(sOMSetRT)(c, n, r, d);
   ResyncSrvGuarded(c);
 }
 void STDMETHODCALLTYPE T_OMSetRTUAV(Ctx* c, UINT n, ID3D11RenderTargetView* const* r, ID3D11DepthStencilView* d,
                                     UINT us, UINT un, ID3D11UnorderedAccessView* const* u, const UINT* ic) {
-  TargetsChangeGuarded();
+  TargetsChangeGuarded(sOMSetRTUAV);
   O<decltype(&T_OMSetRTUAV)>(sOMSetRTUAV)(c, n, r, d, us, un, u, ic);
   ResyncSrvGuarded(c);
 }
@@ -1394,7 +1498,7 @@ void STDMETHODCALLTYPE T_DrawIndexedInstancedIndirect(Ctx* c, ID3D11Buffer* b, U
       if (b)
         TeeDraw(0, 0, 0, b, o);
       else
-        MarkItem(kPWork);
+        MarkWork(sDrawIndexedInstancedIndirect);
     } __except (Filt(GetExceptionCode())) {
       Latch("the focus twin tee", g_faultCode);
     }
@@ -1534,7 +1638,7 @@ void STDMETHODCALLTYPE T_DiscardView1(ID3D11DeviceContext1* c, ID3D11View* v, co
 }
 #define FT_OTHER_RANGE(NAME, SL, T)                                    \
   void STDMETHODCALLTYPE NAME(Ctx* c, UINT a, UINT n, T* const* v) {   \
-    OtherBind();                                                       \
+    OtherBind(SL);                                                     \
     O<decltype(&NAME)>(SL)(c, a, n, v);                                \
   }
 FT_OTHER_RANGE(T_GSSetCB, sGSSetCB, ID3D11Buffer)
@@ -1551,23 +1655,30 @@ FT_OTHER_RANGE(T_CSSetSRV, sCSSetSRV, ID3D11ShaderResourceView)
 FT_OTHER_RANGE(T_CSSetSmp, sCSSetSmp, ID3D11SamplerState)
 #undef FT_OTHER_RANGE
 void STDMETHODCALLTYPE T_CSSetShader(Ctx* c, ID3D11ComputeShader* s, ID3D11ClassInstance* const* ci, UINT n) {
-  OtherBind();
+  OtherBind(sCSSetShader);
   O<decltype(&T_CSSetShader)>(sCSSetShader)(c, s, ci, n);
 }
 void STDMETHODCALLTYPE T_CSSetUAV(Ctx* c, UINT a, UINT n, ID3D11UnorderedAccessView* const* u, const UINT* ic) {
   O<decltype(&T_CSSetUAV)>(sCSSetUAV)(c, a, n, u, ic);
-  OtherBind();
+  OtherBind(sCSSetUAV);
   FT_GUARD(ResyncSrv(c));  // UAVs unbind conflicting inputs
 }
 void STDMETHODCALLTYPE T_SOSetTargets(Ctx* c, UINT n, ID3D11Buffer* const* b, const UINT* o) {
   O<decltype(&T_SOSetTargets)>(sSOSetTargets)(c, n, b, o);
-  OtherBind();
+  OtherBind(sSOSetTargets);
   FT_GUARD(Resync(c));  // may unbind vertex / index buffers
 }
 void STDMETHODCALLTYPE T_SetPredication(Ctx* c, ID3D11Predicate* p, BOOL v) {
-  OtherBind();
-  if (g_win.mode == kWmFocus) TargetsChangeGuarded();  // predication applies to the draws after it
-  if (p && Teeing() && g_win.s) g_win.s->usable = false, g_win.s->unusable = 5;
+  // R150: no predicate set while none is bound: nothing changes (the value only matters with a predicate).
+  if (!p && !g_win.pred) {
+    g_st.tapped++;
+    if (NoopCheckWanted()) g_st.noopPred++;
+  } else {
+    OtherBind(sSetPredication);
+    if (g_win.mode == kWmFocus) TargetsChangeGuarded(sSetPredication);  // predication applies to the draws after it
+    if (p && Teeing() && g_win.s) g_win.s->usable = false, g_win.s->unusable = 5;
+  }
+  g_win.pred = p;
   O<decltype(&T_SetPredication)>(sSetPredication)(c, p, v);
 }
 #undef FT_GUARD
@@ -1793,6 +1904,7 @@ void ResetStream(Stream& s) {
   s.map->Clear();
   ReleaseTargets(s.targets);
   s.eye = -1, s.ciSeq = 0, s.frame = 0;
+  s.ci = CiFrame();
 }
 void ReleaseChunks(Stream& s, bool keepArgs) {
   if (!keepArgs) {
@@ -2281,13 +2393,15 @@ void Classify() {
   }
   if (v.kind == kFocus) {
     // The eye whose periphery pass of this frame has the same shared rows (camera, z / w, terrain parameters).
+    // R150: the eye's periphery stream of THIS frame is the latched one (PairedStream), whatever the collect
+    // sequence did between the two passes (R123 compared the sequences; audit B1).
     int stale = 0;
     for (int i = 0; i < 2; ++i) {
       Eye& ei = g_eye[i];
       if (ei.cur < 0) continue;
       const Stream& si = ei.s[ei.cur];
-      if (si.ciSeq != w.ci.seq) continue;
       if (si.unusable == 6) ++stale;
+      if (!PairedStream(ei)) continue;
       if (SharedRowsEqual(si.tc, w.tc)) v.eye = i;
     }
     if (v.eye < 0) {  // no quad periphery twin this frame: an MFD zoom, a skipped periphery, a stale frame
@@ -2296,6 +2410,8 @@ void Classify() {
       w.mode = kWmIgnore;
       return;
     }
+    w.focusEye = v.eye;
+    if (g_eye[v.eye].s[g_eye[v.eye].cur].ciSeq != w.ci.seq && !w.verifyRun2) g_st.seqMoved++;
   }
   w.eye = v.eye;
   Eye& e = g_eye[v.eye];
@@ -2312,10 +2428,12 @@ void Classify() {
       // again), or a second periphery pass in one frame: neither is used.
       g_st.staleSkips++;
       if (e.cur >= 0) e.s[e.cur].usable = false, e.s[e.cur].unusable = 6;
+      e.fresh = false, e.consumedExec = 0;
       w.mode = kWmIgnore;
       return;
     }
     e.lastPeriphCi = w.ci.seq;
+    e.fresh = false, e.consumedExec = 0;  // a new periphery: last frame's focus pairing ends here
     // A stream not in use by a worker.
     int pick = -1;
     for (int i = 0; i < 2; ++i)
@@ -2329,6 +2447,8 @@ void Classify() {
     e.cur = pick;
     const int64_t tp = defrec::Qpc();
     StartTee(e.s[pick], v.eye);
+    e.s[pick].ci = w.ci;  // R150: latched for this eye's focus pass
+    e.fresh = true;
     g_st.periphOwnUs += (defrec::Qpc() - tp) * QpcUs();
     g_st.periphPasses++;
     w.mode = kWmPeriph;
@@ -2380,19 +2500,32 @@ bool ValidateOrWhy(Eye& e, Stream*& out, int* why) {
   out = nullptr;
   if (e.cur < 0) return *why = kWNoPeriph, false;
   Stream& s = e.s[e.cur];
-  if (s.ciSeq != w.ci.seq) return *why = kWStale, false;
+  if (!PairedStream(e)) return *why = kWStale, false;
   if (!s.usable) return *why = s.unusable == 6 ? kWStale : kWEyeBad, false;
   if (!w.haveTc) return *why = kWNoTc, false;
   if (!SharedRowsEqual(s.tc, w.tc)) return *why = kWShared, false;
   if (!s.pred.ok) {
-    g_st.predWhy[s.pred.why]++;
-    return *why = kWPred, false;
+    // R150: no camera prediction (R124: "no history" on 100 % of the focus passes, the collect-time cameras never
+    // related to the uploads live). DCS's own focus upload is in hand: it must be this eye's quad focus by its own
+    // rows (RelateFocusTc). The twin's draws read GPU copies of DCS's focus buffers either way.
+    if (!w.verifyRun2) g_st.predWhy[s.pred.why]++;
+    double rdev = 0;
+    const bool rel = RelateFocusTc(s.tc, w.tc, &rdev);
+    if (rdev > g_st.relDevMax && rdev < 1e29) g_st.relDevMax = rdev;
+    if (!rel) {
+      g_st.relMiss++;
+      return *why = kWPred, false;
+    }
+    if (!w.verifyRun2) g_st.decRel++;
+    out = &s;
+    return true;
   }
   double dev = 0;
   const int miss = ValidateFocus(s.pred, w.tc, g_predTol.load(std::memory_order_relaxed), &dev);
   g_st.predChecks++;
   if (dev > g_st.predDevMax && dev < 1e29) g_st.predDevMax = dev;
   if (miss) return *why = kWMismatch, false;
+  if (!w.verifyRun2) g_st.decPred++;
   out = &s;
   return true;
 }
@@ -2608,7 +2741,7 @@ uint64_t TeeItem(void* mat, void* item, void* ctx, void* x, bool inst) {
   const bool dOk = inst ? ReadInstDesc(mat, item, ctx, &desc, &key, &bits) : Desc(mat, item, ctx, &desc, &key);
   const int idx = static_cast<int>(s.item.size());
   s.item.push_back(Item{dOk ? desc : 0, static_cast<int>(s.rec.size()), 0, kPOk, inst, 0});
-  w.inItem = true, w.item = idx, w.itemWhy = dOk ? kPOk : kPWork;
+  w.inItem = true, w.item = idx, w.itemWhy = dOk ? kPOk : kPDesc, w.itemWorkSl = -1;
   w.itemInst = inst;
   w.itemSubN = w.itemSubNext = 0;
   for (int k = 0; k < 2; ++k)
@@ -2633,9 +2766,21 @@ uint64_t TeeItem(void* mat, void* item, void* ctx, void* x, bool inst) {
   if (it.why == kPOk && !w.itemRec) it.why = kPNotCand;
   if (it.why == kPOk && it.count == 0) it.why = kPNoDraw;
   w.itemRec = true;
+  if (dOk) {
+    int32_t dup = -1;
+    if (!s.map->Put(desc, idx, &dup) && dup >= 0) {
+      // Two items, one descriptor: neither is replaced.
+      Item& first = s.item[static_cast<size_t>(dup)];
+      if (w.mode == kWmPeriph && first.why != kPDup) g_st.perWhy[first.why]--, g_st.perWhy[kPDup]++;
+      first.why = kPDup;
+      it.why = kPDup;
+      s.dupDesc.push_back(desc);
+    }
+  }
   if (w.mode == kWmPeriph) {
     g_st.periphItems++;
     g_st.perWhy[it.why]++;
+    if (it.why == kPWork && w.itemWorkSl >= 0 && w.itemWorkSl < kWorkSlots) g_st.workBy[w.itemWorkSl]++;
     if (inst) g_st.periphInstItems++;
     if (timed) (inst ? g_st.periphDcsInstUs : g_st.periphDcsItemUs) += (t1 - t0) * QpcUs() * kSampleScale;
   } else if (inst) {
@@ -2644,14 +2789,6 @@ uint64_t TeeItem(void* mat, void* item, void* ctx, void* x, bool inst) {
   } else {
     if (timed) g_st.focusStockItemUs += (t1 - t0) * QpcUs() * kSampleScale;
     g_st.focusStockItems++;
-  }
-  if (dOk) {
-    int32_t dup = -1;
-    if (!s.map->Put(desc, idx, &dup) && dup >= 0) {
-      s.item[static_cast<size_t>(dup)].why = kPWork;  // two items, one descriptor: neither is replaced
-      it.why = kPWork;
-      s.dupDesc.push_back(desc);
-    }
   }
   if (w.mode == kWmAudit) {
     // The audit tracks runs as a stock focus pass does.
@@ -2690,11 +2827,13 @@ uint64_t FocusItem(void* mat, void* item, void* ctx, void* x, bool inst) {
   int pi = -1;
   if (!(inst ? ReadInstDesc(mat, item, ctx, &desc, &key, &bits) : Desc(mat, item, ctx, &desc, &key))) {
     why = kIDescFault;
-  } else if (e.cur >= 0 && e.s[e.cur].ciSeq == w.ci.seq) {
+  } else if (e.cur >= 0 && PairedStream(e)) {
     Stream& s = e.s[e.cur];
     pi = s.map->Get(desc);
     if (pi < 0 || s.item[static_cast<size_t>(pi)].inst != inst) {
       why = kIUnmatched;
+    } else if (s.item[static_cast<size_t>(pi)].why == kPDup) {
+      why = kIAmbiguous;
     } else if (s.item[static_cast<size_t>(pi)].why != kPOk) {
       why = kINotTwinnable;
     } else if (inst && (bits & ~s.item[static_cast<size_t>(pi)].subMask)) {
@@ -2752,6 +2891,7 @@ uint64_t FocusItem(void* mat, void* item, void* ctx, void* x, bool inst) {
 
 // gbpass::g_obs2: inside a GBufferPass execution.
 void Obs(void*, void*, bool begin) {
+  if (begin && t_gbDepth <= 0) g_gbExec.fetch_add(1, std::memory_order_relaxed);  // R150: a new execution
   t_gbDepth = begin ? (t_gbDepth > 0 ? t_gbDepth : 0) + 1 : (t_gbDepth > 0 ? t_gbDepth - 1 : 0);
 }
 
@@ -2814,6 +2954,17 @@ void BeginWindow(void* ctx) {
   w.lastIdx = -1;
   w.pending.clear();
   for (auto*& b : w.pvSrc) b = nullptr;
+  w.itemWorkSl = -1;
+  w.focusEye = -1;
+  w.exec = g_gbExec.load(std::memory_order_relaxed);
+  w.pred = nullptr;
+  if (g_tbl.ctx) {  // R150: the bound predicate (for the SetPredication no-op test)
+    ID3D11Predicate* p = nullptr;
+    BOOL v = FALSE;
+    g_tbl.ctx->GetPredication(&p, &v);
+    w.pred = p;
+    if (p) p->Release();
+  }
   g_st.windows++;
 }
 // ---------------------------------------------------------------------------
@@ -3030,7 +3181,11 @@ void FinishWriters(Stream& s) {
 }
 void Submit(Eye& e, int eyeIdx) {
   Stream& s = e.s[e.cur];
-  CopyTargets(s.targets, e.targets);
+  // R150: when the last two focus passes drew into different targets (a render-graph pool alternating two sets), this
+  // frame's focus is expected on the set of two frames back. Checked at use either way (kWTargets: stock).
+  const bool alt = e.targetsPrev.valid && e.targets.valid && !SameTargets(e.targets, e.targetsPrev);
+  CopyTargets(s.targets, alt ? e.targetsPrev : e.targets);
+  if (alt) g_st.targetsAlt++;
   s.job.store(kJIdle, std::memory_order_release);
   if (!s.usable || !s.targets.valid || !g_poolOk) {
     if (!s.targets.valid) s.job.store(kJFailed);
@@ -3067,12 +3222,19 @@ void EndWindowBody() {
     }
     // The next frame's prediction learns from this pass, unless its prediction missed (a camera that did not match
     // the upload must not teach the next frame): then the next frame has none (stock) and learns again.
-    if (w.why == kWMismatch)
+    // R150: from the cameras the paired periphery latched (not the focus window's: a collect may have published in
+    // between), and the reason counted when nothing is learned.
+    if (w.why == kWMismatch) {
       e.hist.have = false;
-    else if (w.haveTc && e.cur >= 0 && e.s[e.cur].ciSeq == w.ci.seq)
-      LearnFocus(e.hist, e.s[e.cur].tc, w.tc, w.ci);
-    else
+    } else if (w.haveTc && PairedStream(e)) {
+      int lw = kLwOk;
+      LearnFocus(e.hist, e.s[e.cur].tc, w.tc, e.s[e.cur].ci, &lw);
+      g_st.learnWhy[lw]++;
+    } else {
       e.hist.have = false;
+    }
+    // R150: the last two focus target sets (Submit builds for the one two frames back when they alternate).
+    CopyTargets(e.targetsPrev, e.targets);
     CopyTargets(e.targets, w.tg);
     if (w.mode == kWmAudit) ResetStream(g_audit);
     g_st.focusOwnUs += (defrec::Qpc() - t0) * QpcUs();
@@ -3088,6 +3250,12 @@ void EndWindow() {
   ReleaseTargets(w.tg);
   for (auto*& b : w.pvSrc)
     if (b) b->Release(), b = nullptr;
+  if (w.focusEye >= 0) {  // R150: this eye's periphery stream is consumed by its focus pass (this execution keeps it)
+    Eye& e = g_eye[w.focusEye];
+    e.fresh = false;
+    e.consumedExec = w.exec;
+    w.focusEye = -1;
+  }
   w.open = false;
   w.mode = kWmNone;
   w.s = nullptr;
@@ -3252,6 +3420,8 @@ void ReleaseAll() {
     }
     e.cur = -1;
     ReleaseTargets(e.targets);
+    ReleaseTargets(e.targetsPrev);
+    e.fresh = false, e.consumedExec = 0;
     for (int k = 0; k < kPerView; ++k)
       if (e.pvCopy[k]) e.pvCopy[k]->Release(), e.pvCopy[k] = nullptr, e.pvBytes[k] = 0;
     e.hist = EyeHist();
@@ -3477,28 +3647,41 @@ bool Uninstall(const char* why) {
 // ---------------------------------------------------------------------------
 // Statistics line
 // ---------------------------------------------------------------------------
-std::string StatsText(const Stats& s, double secs, double frames) {
-  char b[3200];
-  const double fp = s.focusPasses ? static_cast<double>(s.focusPasses) : 1.0;
-  const double fr = frames > 0 ? frames : 1.0;
+// Render-thread accounting per frame (us), shared by the statistics line and the R150 summary line.
+struct Costs {
+  double dcsItem = 0, dcsInst = 0, saved = 0, savedInst = 0, taps = 0, periph = 0, focus = 0;
+  uint64_t twinPatch = 0;
+};
+inline Costs CostsOf(const Stats& s, double fr) {
+  Costs c;
   // DCS's own patch item, measured on the focus items DCS drew (unmatched, island, audits); the same on the
   // periphery items, which ran under the tee taps: the difference is the taps' cost per teed item (an estimate).
-  const double dcsItem = s.focusStockItems ? s.focusStockItemUs / static_cast<double>(s.focusStockItems) : 0.0;
+  c.dcsItem = s.focusStockItems ? s.focusStockItemUs / static_cast<double>(s.focusStockItems) : 0.0;
   const uint64_t periphPatch = s.periphItems - s.periphInstItems;
   const double periphItem = periphPatch ? s.periphDcsItemUs / static_cast<double>(periphPatch) : 0.0;
   // R125: instancer items per kind (DCS's own time measured on the focus instancer items DCS drew: audits, islands,
   // unmatched; the periphery's under the tee for the taps' estimate).
-  const double dcsInst = s.focusStockInstItems ? s.focusStockInstUs / static_cast<double>(s.focusStockInstItems) : 0.0;
+  c.dcsInst = s.focusStockInstItems ? s.focusStockInstUs / static_cast<double>(s.focusStockInstItems) : 0.0;
   const double periphInst = s.periphInstItems ? s.periphDcsInstUs / static_cast<double>(s.periphInstItems) : 0.0;
-  const uint64_t twinPatch = s.twinItems - s.twinInstItems;
-  const double savedPatch = dcsItem * static_cast<double>(twinPatch) / fr;
-  const double savedInst = dcsInst * static_cast<double>(s.twinInstItems) / fr;
-  const double saved = savedPatch + savedInst;
-  const double taps = ((periphItem > dcsItem ? periphItem - dcsItem : 0.0) * static_cast<double>(periphPatch) +
-                       (periphInst > dcsInst ? periphInst - dcsInst : 0.0) * static_cast<double>(s.periphInstItems)) /
-                      fr;
-  const double periph = s.periphOwnUs / fr + taps;
-  const double focus = s.focusOwnUs / fr;
+  c.twinPatch = s.twinItems - s.twinInstItems;
+  const double savedPatch = c.dcsItem * static_cast<double>(c.twinPatch) / fr;
+  c.savedInst = c.dcsInst * static_cast<double>(s.twinInstItems) / fr;
+  c.saved = savedPatch + c.savedInst;
+  c.taps = ((periphItem > c.dcsItem ? periphItem - c.dcsItem : 0.0) * static_cast<double>(periphPatch) +
+            (periphInst > c.dcsInst ? periphInst - c.dcsInst : 0.0) * static_cast<double>(s.periphInstItems)) /
+           fr;
+  c.periph = s.periphOwnUs / fr + c.taps;
+  c.focus = s.focusOwnUs / fr;
+  return c;
+}
+std::string StatsText(const Stats& s, double secs, double frames) {
+  char b[3200];
+  const double fp = s.focusPasses ? static_cast<double>(s.focusPasses) : 1.0;
+  const double fr = frames > 0 ? frames : 1.0;
+  const Costs cs = CostsOf(s, fr);
+  const double dcsItem = cs.dcsItem, dcsInst = cs.dcsInst, saved = cs.saved, savedInst = cs.savedInst, taps = cs.taps;
+  const double periph = cs.periph, focus = cs.focus;
+  const uint64_t twinPatch = cs.twinPatch;
   const double gpuT = s.gpuTwinN ? s.gpuTwinUs / static_cast<double>(s.gpuTwinN) : 0.0;
   const double gpuS = s.gpuStockN ? s.gpuStockUs / static_cast<double>(s.gpuStockN) : 0.0;
   int n = snprintf(b, sizeof(b),
@@ -3556,6 +3739,79 @@ std::string StatsText(const Stats& s, double secs, double frames) {
                 static_cast<unsigned long long>(s.swapRefused), g_faulted.load() ? 1 : 0);
   return std::string(b, b + (n < static_cast<int>(sizeof(b)) ? n : static_cast<int>(sizeof(b)) - 1));
 }
+// R150: the retest's two extra lines (native/dcsqvcull/FOCUS_TWIN_RETEST.md reads them).
+//  "focus twin summary: ..." the verdict numbers: twin rate, items twinned per focus pass, the render thread's
+//   saved / added / net us per frame, and the top fallback reasons.
+//  "focus twin diag: ..." why: how the twin-capable passes were decided (camera prediction / own-row relation),
+//   why the camera history did not learn, whether the collect sequence moved between a periphery and its focus,
+//   the context calls that made periphery items "other work", the no-op calls let through, alternating targets.
+std::string StatsSummaryText(const Stats& s, double frames) {
+  char b[1024];
+  const double fp = s.focusPasses ? static_cast<double>(s.focusPasses) : 1.0;
+  const double fr = frames > 0 ? frames : 1.0;
+  const Costs c = CostsOf(s, fr);
+  const double added = c.periph + c.focus;
+  int n = snprintf(b, sizeof(b),
+                   "focus twin summary: twin rate %.1f %% of %llu focus passes, %.1f items twinned per focus pass "
+                   "(%.0f %% of the focus items); render thread per frame: saved %.0f us, added %.0f us (tee %.0f, "
+                   "focus %.0f), net %+.0f us; fallbacks:",
+                   100.0 * static_cast<double>(s.why[kWTwin]) / fp, static_cast<unsigned long long>(s.focusPasses),
+                   static_cast<double>(s.twinItems) / fp,
+                   s.focusItems ? 100.0 * static_cast<double>(s.twinItems) / static_cast<double>(s.focusItems) : 0.0,
+                   c.saved, added, c.periph, c.focus, c.saved - added);
+  // The three most frequent non-twin outcomes of the focus passes.
+  bool used[kWCount] = {};
+  used[kWTwin] = true;
+  int shown = 0;
+  for (int k = 0; k < 3; ++k) {
+    int best = -1;
+    for (int w = 0; w < kWCount; ++w)
+      if (!used[w] && s.why[w] && (best < 0 || s.why[w] > s.why[best])) best = w;
+    if (best < 0) break;
+    used[best] = true;
+    n += snprintf(b + n, sizeof(b) - n, "%s %s %.1f %%", shown++ ? "," : "", WhyName(best),
+                  100.0 * static_cast<double>(s.why[best]) / fp);
+  }
+  if (!shown) n += snprintf(b + n, sizeof(b) - n, " none");
+  return std::string(b, b + (n < static_cast<int>(sizeof(b)) ? n : static_cast<int>(sizeof(b)) - 1));
+}
+std::string StatsDiagText(const Stats& s) {
+  char b[2048];
+  int n = snprintf(b, sizeof(b),
+                   "focus twin diag: decided by camera prediction %llu, by own-row relation %llu (relation failed "
+                   "%llu, max deviation %.2g); prediction unavailable:",
+                   static_cast<unsigned long long>(s.decPred), static_cast<unsigned long long>(s.decRel),
+                   static_cast<unsigned long long>(s.relMiss), s.relDevMax);
+  bool any = false;
+  for (int w = 1; w < kPwCount; ++w)
+    if (s.predWhy[w])
+      n += snprintf(b + n, sizeof(b) - n, " %s %llu", PredWhyName(w), static_cast<unsigned long long>(s.predWhy[w])),
+          any = true;
+  if (!any) n += snprintf(b + n, sizeof(b) - n, " none");
+  n += snprintf(b + n, sizeof(b) - n, "; camera history learned %llu, not:",
+                static_cast<unsigned long long>(s.learnWhy[kLwOk]));
+  any = false;
+  for (int w = 1; w < kLwCount; ++w)
+    if (s.learnWhy[w])
+      n += snprintf(b + n, sizeof(b) - n, " %s %llu", LearnWhyName(w), static_cast<unsigned long long>(s.learnWhy[w])),
+          any = true;
+  if (!any) n += snprintf(b + n, sizeof(b) - n, " none");
+  n += snprintf(b + n, sizeof(b) - n, "; collect sequence moved between periphery and focus %llu; other work by call:",
+                static_cast<unsigned long long>(s.seqMoved));
+  any = false;
+  for (int sl = 0; sl < sCount && n < static_cast<int>(sizeof(b)) - 160; ++sl)
+    if (s.workBy[sl])
+      n += snprintf(b + n, sizeof(b) - n, " %s %llu", kSlName[sl], static_cast<unsigned long long>(s.workBy[sl])),
+          any = true;
+  if (!any) n += snprintf(b + n, sizeof(b) - n, " none");
+  n += snprintf(b + n, sizeof(b) - n,
+                "; no-op calls let through: predicate %llu, viewports %llu, scissors %llu, targets %llu; lists for "
+                "alternating targets %llu",
+                static_cast<unsigned long long>(s.noopPred), static_cast<unsigned long long>(s.noopVp),
+                static_cast<unsigned long long>(s.noopSc), static_cast<unsigned long long>(s.noopOm),
+                static_cast<unsigned long long>(s.targetsAlt));
+  return std::string(b, b + (n < static_cast<int>(sizeof(b)) ? n : static_cast<int>(sizeof(b)) - 1));
+}
 // Worker builds are counted from the streams (render thread reads job state at the focus).
 void CountBuilds() {
   for (Eye& e : g_eye)
@@ -3601,7 +3857,10 @@ void Tick(int key, bool engineOff, bool benchRunning, uint64_t frames) {
       CountBuilds();
       Stats copy = g_st;
       g_st = Stats();
-      Log("%s", StatsText(copy, (now - g_lastLine) / 1000.0, static_cast<double>(frames - g_lineFrames0)).c_str());
+      const double fr = static_cast<double>(frames - g_lineFrames0);
+      Log("%s", StatsText(copy, (now - g_lastLine) / 1000.0, fr).c_str());
+      Log("%s", StatsSummaryText(copy, fr).c_str());  // R150
+      Log("%s", StatsDiagText(copy).c_str());          // R150
     }
     g_lastLine = now;
     g_lineFrames0 = frames;
