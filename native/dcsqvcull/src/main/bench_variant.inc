@@ -57,6 +57,14 @@ void SetBenchVariant(bool on) {
     plod::g_swapOn = on;
     return;
   }
+  if (g_benchActiveMode.load() == 34) {  // measurement kit: the repeat table size alone (Mode as configured)
+    pffix::SetTableBits(on ? static_cast<unsigned>(g_cfg.prefetchTableBits > 16 ? g_cfg.prefetchTableBits : 20) : 16u);
+    return;
+  }
+  if (g_benchActiveMode.load() == 35) {  // measurement kit: the cockpit part of the G-buffer recorder alone
+    gbrec::g_cockpit = on;
+    return;
+  }
   if (g_benchActiveMode.load() == 33) {
     pffix::g_mode = on ? pffix::kSkip : pffix::kObserve;
     return;
