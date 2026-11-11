@@ -288,6 +288,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "perception_only_test.h"  // [General] PerceptionOnly: perception features only, no engine module
 #include "cascade_cache_test.h"  // R33: far shadow cascade cache (math on census matrices, decisions, WARP replica)
 #include "chain_fast_test.h"  // R34: shorter culling chains (variants, creation hook, substitution, live check)
+#include "chain_derive_test.h"  // audit A2/B4: focus chain = filtered periphery chain census (pure compare logic)
 #include "shader_fast_test.h"  // R36: wider grids for single-SM kernels (variants, identification, Dispatch hook, live check)
 #include "night_tone_test.h"  // R37: [Night] opt-in night darkening through DCS's tone mapper (pure parts, hook, build checks)
 #include "color_grade_test.h"  // [Color] pure parts: the R41 probes (R40 grading removed in R107)
@@ -608,6 +609,7 @@ int main() {
   // QV_CF_ONLY=1: only the R34 chain fast tests.
   if (getenv("QV_CF_ONLY")) {
     cftest::Run();
+    cdtest::Run();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -1961,6 +1963,8 @@ int main() {
   cctest::Run();
   // R34 shorter culling chains: variants vs CPU transcription and stock stand-ins, hook path, live check, shutdown.
   cftest::Run();
+  // Audit A2/B4: the focus-chain census's compare logic (focus list = filtered periphery list).
+  cdtest::Run();
   // R36 wider grids for single-SM kernels: variants vs stock stand-ins, identification by output, Dispatch hook.
   shfasttest::Run();
   // R37 [Night]: opt-in night darkening through DCS's tone mapper (pure parts, hook on a fake module, build checks).

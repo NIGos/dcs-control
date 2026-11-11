@@ -109,6 +109,8 @@ struct Config {
   uint32_t chainFast = 7;                // [D3D] ChainFast (chain_fast.h, R34: shorter culling chains; bit 0 calcoffsets, bit 1 calccounters, bit 2 airflow offsets; default 7; 0 = off, nothing installed)
   bool suiteChainFastTiming = false;     // [Suite] ChainFastTiming (chain_fast.h: GPU timing OFF/ON/OFF/ON/OFF, 5 s each)
   int suiteChainFastVerify = 0;          // [Suite] ChainFastVerify: seconds of same-frame checks against the stock kernels (0 = off)
+  int suiteChainDeriveCensus = 0;        // [Suite] ChainDeriveCensus (chain_derive.h, audit A2/B4: focus chain = filtered periphery chain? measure only; seconds per log line, 0 = off)
+  int suiteChainDeriveCensusMB = 24;     // [Suite] ChainDeriveCensusMB: mainBuffer bytes read back per view (1-256 MB)
   uint32_t shaderFast = 3;               // [D3D] ShaderFast (shader_fast.h, R36: wider grids for single-SM kernels; bit 0 grass cull, bit 1 IM2 counts clear; default 3; 0 = off)
   bool suiteShaderFastTiming = false;    // [Suite] ShaderFastTiming (shader_fast.h: GPU timing OFF/ON/OFF/ON/OFF, 5 s each)
   int suiteShaderFastVerify = 0;         // [Suite] ShaderFastVerify: seconds of same-frame checks against the stock kernels (0 = off)
