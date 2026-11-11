@@ -443,7 +443,9 @@ void CensusReport(const CensusAcc& acc, const std::function<std::string(void*)>&
   }
 }
 
-void ChainCensusPhase(int seconds, std::atomic<uint64_t>& frameCounter) {
+// `extra` (per_eye_live.h's C7 line): called with the accumulated census after the report.
+void ChainCensusPhase(int seconds, std::atomic<uint64_t>& frameCounter,
+                      const std::function<void(const CensusAcc&)>& extra = nullptr) {
   g_cDispatches = g_cSampled = g_cSkippedBusy = g_cRead = g_cFail = 0;
   {
     std::lock_guard<std::mutex> lock(g_cfMu);
@@ -484,6 +486,7 @@ void ChainCensusPhase(int seconds, std::atomic<uint64_t>& frameCounter) {
     Log("  chain census: the render thread did not release the staging buffers (no DispatchIndirect since); kept");
   const std::map<std::string, ptiming::Stat> cpu = ptiming::TakeByName(nullptr, nullptr);
   CensusReport(acc, [](void* p) { return ptiming::RttiName(p); });
+  if (extra) extra(acc);
   Log("  chain census: GPU pass timing over the same window (the view chains are the TerrainModule calls):");
   gpt::Report(frames, cpu);
 }
