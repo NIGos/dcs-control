@@ -576,3 +576,26 @@ GPU-bound (84 fps, 98 % GPU). The GPU half of this route is what counts in fligh
 - Germany F2 (same build, later run): terrain item stock 0.888 ms, geometry only **0.558 ms**; models 0.374 / 0.333.
   **Gate PASS in Germany** (expected saving about 0.45 ms after the copies). So the gain is scene-dependent: forest
   and terrain-heavy views pass, the model-heavy airfield does not. The flight number is still missing.
+
+### 12.7 Flight, and the stage 3 decision (2026-11-11, overnight round)
+
+`pep C2 terrain:` (focus main passes' terrain item, both eyes, GPU ms per frame; the gate is a terrain front end of at
+least 0.41 ms, i.e. 0.30 ms plus about 0.11 ms of copies):
+
+| Scene | Terrain item, stock | Front end (what a merged pass saves) | Gate |
+|---|---|---|---|
+| qvbench_airfield F2, paused | 0.498 | 0.194 | FAIL |
+| qvbench_f4_germany F2, parked | 0.888 | 0.558 | PASS |
+| qvbench_r96_f16_day F2, in flight (FLY=0) | 0.594 | 0.292 | FAIL |
+
+- In flight C2 paired every focus by view rows 0-2 (35 of 35 frames). C5 still passes (100 % exact, hit 100 %). It
+  also shows a row outside the per-view list that differs between the views in motion: row 128 in every pair. The
+  clone's row lists must take it in.
+- Stage 2 is complete: C2, C4, C5 and C7 all pass.
+- **Decision: stage 3 is parked.** The saving is scene-dependent. It clears the gate only on a dense map seen from the
+  ground (net about 0.45 ms). In flight, the common case, the net is about 0.18 ms (0.29 − 0.11). The build is 6-10
+  weeks at high risk (render-graph targets, the eye-tracked focus, F1, consumers of the per-view targets).
+- Everything built stays as measure-only code with its keys at 0: the census, the captures, and the VS/PS clone
+  patchers, which are bit-exact on the RTX 5090.
+- **Reopen if** one of these holds: a way is found to drop the ~0.11 ms of copies; the model items ahead of the terrain
+  can be merged too; or a slower GPU shows a front end over 0.41 ms in flight.
