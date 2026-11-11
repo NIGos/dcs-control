@@ -687,4 +687,5 @@ int NoteRetiredKeys(const std::wstring& ini) {
 }
 
 namespace vrsp { void ReadConfig(const wchar_t* ini); }  // R139: [Suite] VrsProbe* (vrs_probe.h, measure only)
+namespace pepl { void ReadConfig(const wchar_t* ini); }  // [Suite] PerEyeC2 / C4 / C5 / C7 (per_eye_live.h, measure only)
 
