@@ -806,6 +806,15 @@ Test("Last flight: dcs.log session, Pimax frames, OFXR modes and frame time, DLS
         "seq=4 ms=300 tid=1 phase=I op=adaptive_switch result=16 dur_us=0 a=2 b=1 c=0", "seq=5 ms=400 tid=1 phase=I op=adaptive_switch result=2 dur_us=0 a=2 b=3 c=0"])!;
     Require(moves.Share is { Switches: 1, Seconds1x: 0, Cadence: true }, "Offset and blocked moves are not counted as switches; they show cadence ran");
     Require(LastFlight.ParseOfxr(["seq=1 ms=0 tid=1 phase=I op=adaptive_switch result=13 dur_us=0 a=0 b=2 c=0", "seq=2 ms=1000 tid=1 phase=I op=latency_status result=12 dur_us=0 a=20000 b=0 c=0"])!.Share is { Seconds1x: 0, Cadence: true }, "Cadence on without 1X time");
+    // Issue #17: why Only when needed kept generating. adaptive_throughput 6 carries the GPU time per frame at 1X (b's
+    // high 32 bits, us) for each second; the seconds at 2 or 3 give the median, a second at 1X and other results do not count.
+    var held = LastFlight.ParseOfxr(["seq=1 ms=0 tid=1 phase=I op=adaptive_switch result=13 dur_us=0 a=0 b=2 c=0",
+        "seq=2 ms=1000 tid=1 phase=I op=latency_status result=12 dur_us=0 a=12000 b=0 c=0", "seq=3 ms=1000 tid=1 phase=I op=adaptive_throughput result=6 dur_us=0 a=2949120 b=44667659890400 c=0",
+        "seq=4 ms=2000 tid=1 phase=I op=latency_status result=12 dur_us=0 a=12100 b=0 c=0", "seq=5 ms=2000 tid=1 phase=I op=adaptive_throughput result=6 dur_us=0 a=2949120 b=45526653349700 c=0",
+        "seq=6 ms=2500 tid=1 phase=I op=adaptive_throughput result=6 dur_us=0 a=90 b=8589934595000 c=0", "seq=7 ms=2600 tid=1 phase=I op=adaptive_throughput result=4 dur_us=0 a=2 b=3 c=0"])!;
+    Require(held.Share is { Seconds2x: 2, Seconds1x: 0, Switches: 0, Cadence: true, GpuAt1xMs: 10.4 }, "GPU time at 1X while frames were generated");
+    Require(FramegenShare.PassThroughLimitMs(90) == 8.9 && FramegenShare.PassThroughLimitMs(72) == 11.1 && FramegenShare.PassThroughLimitMs(0) == 0 && held.Share!.GpuAt1xMs > FramegenShare.PassThroughLimitMs(90), "1X needs CPU and GPU under 80% of a refresh period");
+    Require(LastFlight.ParseOfxr(["seq=1 ms=1000 tid=1 phase=I op=latency_status result=2 dur_us=0 a=20000 b=0 c=0"])!.Share is { GpuAt1xMs: null, Cadence: false }, "No estimate without cadence");
     // Cheeky: the runtime came up, the hotkey toggled it twice; a failure is reported as such.
     var nr = LastFlight.ParseCheeky(["19:41:40.836 [T31660] DLSS-NR runtime search path=E:\\DCS\\bin\\CheekyFoveatedDLSS\\nvngx_dlssnr.dll error=0", "19:41:40.836 [T31660] DLSS-NR 310.8 feature-18 runtime initialized"],
         ["19:42:56.971 DLSS-NR hotkey toggled enabled=no", "19:43:00.551 DLSS-NR hotkey toggled enabled=yes"]);

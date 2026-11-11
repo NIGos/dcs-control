@@ -75,7 +75,11 @@ public sealed record VrProfile
     public bool FrameGenAsyncArm { get; init; }
     /// <summary>OFXR adaptive_cadence (fork patches 0032, 0059, 0060): frame generation only when needed. DCS renders at
     /// the full refresh rate; frames pass through (1X, less latency) while it holds that, and 2X/3X Auto takes over while
-    /// it falls behind. Needs DCS's frame limit at the refresh rate. "Only when needed" on the Framegen page, on by
+    /// it falls behind. Every session and scene starts at 2X (DCS paced at half the refresh rate by OFXR, which the
+    /// engine module logs as "capped at 45 fps (90 Hz / 2)"); 1X is entered once the p90 CPU and GPU time per frame have
+    /// both stayed at most 80% of the refresh period for 5 s without a missed slot (CadenceConfig, issue #17), and left
+    /// above 95% or on missed slots. <see cref="RenderedFpsCap"/> plays no part unless the frame limit is Custom.
+    /// Needs DCS's frame limit at the refresh rate. "Only when needed" on the Framegen page, on by
     /// default; it applies to Auto only (<see cref="UsesAdaptiveCadence"/>).</summary>
     public bool FrameGenAdaptiveCadence { get; init; } = true;
     /// <summary>Frame generation only when needed is in use: frame generation on, a VR flight, Generated frames Auto. A

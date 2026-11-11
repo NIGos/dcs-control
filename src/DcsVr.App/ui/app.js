@@ -1693,7 +1693,14 @@ function renderFlight() {
     const parts = [['None',g.seconds1x || 0],['2×',g.seconds2x],['3×',g.seconds3x]].filter(([,v]) => v > 0);
     // Cadence on without any 1× time (DCS never kept up) is still "Only when needed", not Auto.
     const one = g.seconds1x || 0, mode = g.cadence || one ? 'Only when needed' : g.adaptive ? 'Auto' : 'Fixed';
-    rows.push(['Frame generation',parts.length > 1 ? parts.map(([k,v]) => `${k} ${share(v/total)}`).join(' · ') : parts.length ? `${parts[0][0]} all flight` : '—',mode+(g.switches ? ` · level changed ${g.switches} ${g.switches === 1 ? 'time' : 'times'}` : '')]);
+    // Only when needed that generated most of the flight: why. Frames pass through only while DCS's CPU and GPU time per
+    // frame stay under 80% of one refresh period (FramegenShare.PassThroughShare); holding the refresh rate with frame
+    // generation off, or a GPU at 50% while DCS is held at half the rate, is not that much room.
+    const flightHz = Math.round(f.headset?.compositorFps || f.cap?.refreshHz || refreshHz(profile) || 0), limitMs = flightHz ? 800 / flightHz : 0;
+    const why = g.cadence && total && one / total < 0.5 && g.gpuAt1xMs && limitMs
+      ? (g.gpuAt1xMs > limitMs ? ` · DCS's GPU needed ${fmt(g.gpuAt1xMs,1)} ms per frame; frames pass through only under ${fmt(limitMs,1)} ms (80% of a ${flightHz} Hz frame)`
+        : ` · GPU ${fmt(g.gpuAt1xMs,1)} ms per frame is under the ${fmt(limitMs,1)} ms needed (80% of a ${flightHz} Hz frame), so CPU time or late frames kept it generating`) : '';
+    rows.push(['Frame generation',parts.length > 1 ? parts.map(([k,v]) => `${k} ${share(v/total)}`).join(' · ') : parts.length ? `${parts[0][0]} all flight` : '—',mode+(g.switches ? ` · level changed ${g.switches} ${g.switches === 1 ? 'time' : 'times'}` : '')+why]);
   }
   if (f.frameTime) rows.push(['DCS frame time',`${fmt(f.frameTime.p50Ms,1)} ms`,`median · ${fmt(f.frameTime.p90Ms,1)} ms p90 · the slower of CPU and GPU`]);
   if (f.dlss5) rows.push(['DLSS 5',f.dlss5.state === 'ran' ? 'Ran' : f.dlss5.state === 'failed' ? 'Failed' : 'Not started',f.dlss5.state === 'failed' ? f.dlss5.error : [f.dlss5.version ? 'runtime '+f.dlss5.version : 'no 3D scene reached', f.dlss5.toggles ? `toggled ${f.dlss5.toggles}×, ${f.dlss5.onAtExit ? 'on' : 'off'} at exit` : null].filter(Boolean).join(' · '),f.dlss5.state === 'failed']);
