@@ -404,6 +404,8 @@ DWORD WINAPI WorkerThread(void*) {
         Log("xr: session %s", focused ? "FOCUSED" : "left FOCUSED (headset asleep or not worn)");
       }
     }
+    // A5: forward pass split, one "fwd split:" line every [Suite] ForwardSplit s (0 = never installed).
+    if (!po && g_cfg.suiteForwardSplit > 0) fwdsplit::Tick(now, g_cfg.suiteForwardSplit, g_quadFrame.load(), g_tscHz);
     if (now - lastCensus >= 10000) {
       lastCensus = now;
       ftl::TaskScope ts(ftl::kTCensus);
