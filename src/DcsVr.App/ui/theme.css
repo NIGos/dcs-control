@@ -355,6 +355,11 @@ dialog::backdrop{background:#000000b0}
 .engine-state b{font-size:13px}
 .engine-state.loaded{border-left-color:var(--cyan)}
 .engine-state.failed{border-left-color:var(--accent)}
+.engine-row{display:flex;align-items:center;gap:10px;margin-top:8px;font-size:12.5px;color:var(--soft)}
+.engine-row span{flex:1}
+.engine-row progress{flex:1;height:4px;accent-color:var(--cyan)}
+.engine-warmup{flex-wrap:wrap}
+.engine-warmup progress{flex-basis:100%}
 .setting[hidden]{display:none}
 /* CPU Boost page. */
 .list-input{grid-column:2;grid-row:1 / span 2;min-height:84px;resize:vertical;background:var(--field);border:0;border-radius:var(--radius);color:var(--accent);font:13px Consolas,"Cascadia Mono",monospace;padding:8px 10px}

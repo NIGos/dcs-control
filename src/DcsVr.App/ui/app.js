@@ -681,13 +681,14 @@ function buildFields() {
   c = card('framegenControls','Frame generation','Frames added between the ones DCS renders, so the headset gets one at every refresh.');
   segmented(field(c,'frameGen','Method','NVIDIA Optical Flow needs an RTX card; FidelityFX works on any card.','select',[['Off','Off'],['Nvidia','NVIDIA Optical Flow · RTX cards'],['FidelityFx','FidelityFX Optical Flow · any card']]),{Off:'Off',Nvidia:'NVIDIA',FidelityFx:'FidelityFX'});
   segmented(field(c,'frameGenFactor','Generated frames',['Auto: frames are generated only as much as DCS needs.','Without Only when needed, DCS renders half the refresh rate, a third while it falls behind. 2× or 3×: fixed, DCS renders half or a third. 3× adds latency and smearing in sideways motion.'],'select',[[0,'Auto · default'],[2,'2× · one generated frame'],[3,'3× · two generated frames']],p => p.frameGen !== 'Off'),{0:'Auto',2:'2×',3:'3×'});
-  field(c,'frameGenAdaptiveCadence','Only when needed',['Frames are generated only while DCS falls behind: lower latency. Needs Generated frames on Auto; with Keep, the frame limit is set to the refresh rate for you.','DCS renders the full refresh rate, so latency is lower whenever DCS keeps up.'],'toggle',null,p => p.frameGen !== 'Off' && p.frameGenFactor === 0);
+  field(c,'frameGenAdaptiveCadence','Only when needed',['Frames are generated only while DCS falls behind: lower latency. Needs Generated frames on Auto; with Keep, the frame limit is set for you (a third above the refresh rate).','DCS renders the full refresh rate, so latency is lower whenever DCS keeps up.'],'toggle',null,p => p.frameGen !== 'Off' && p.frameGenFactor === 0);
+  segmented(field(c,'frameGenPassThrough','Stop generating',['When DCS\'s own frames go straight to the headset. Applies at the next DCS start.','Steady: only with plenty of room, rarely on a PC that just holds the refresh rate. Balanced: when DCS looks able to hold the refresh rate, as long as frames arrive on time. Prefer refresh rate: tries whenever it might hold, and generates again only when frames come late. A try that fails is not repeated for a while, and after a few failed tries not until the next mission.'],'select',[['Steady','Steady · default'],['Balanced','Balanced'],['PreferRefresh','Prefer refresh rate']],p => usesAdaptiveCadence(p)),{Steady:'Steady',Balanced:'Balanced',PreferRefresh:'Prefer refresh rate'});
   field(c,'frameGenDeepPipeline','Smoothness buffer',['Smoother with uneven DCS frame times, with a little more latency.','Holds one extra frame: about 11 ms more latency at 90 Hz while frames are generated. In 3× it holds it only while frames keep arriving late.'],'toggle',null,p => p.frameGen !== 'Off');
   // frameGenPipelinedDeepHold has no control: it follows the Smoothness buffer (on with it, off without it) and stays in
   // the profile file only (ConfigurationWriters.Ofxr writes pipelined_deep_hold only with frameGenDeepPipeline).
   // The custom limit right under the select that enables it; the refresh rate source before the value it replaces.
   c = card('pacingControls','DCS frame limit','Set in DCS at launch. Back to stock DCS puts your values back.');
-  segmented(field(c,'fpsLimit','Frame limit',['Match refresh renders only the frames the headset needs.','The full refresh rate, or half or a third with 2× or 3×. Keep leaves the current DCS limit, except with Only when needed, which sets the refresh rate; 300 FPS is a very high limit.'],'select',[['Preserve','Keep the current DCS limit'],['MatchRefresh','Match refresh (recommended)'],['RuntimeHeadroom','Very high (300 FPS)'],['Custom','Custom limit']]),{Preserve:'Keep',MatchRefresh:'Match refresh',RuntimeHeadroom:'300 FPS',Custom:'Custom'});
+  segmented(field(c,'fpsLimit','Frame limit',['Match refresh renders only the frames the headset needs.','The full refresh rate, or half or a third with 2× or 3×. Keep leaves the current DCS limit, except with Only when needed, which sets a third above the refresh rate (frame generation then sets the pace); 300 FPS is a very high limit.'],'select',[['Preserve','Keep the current DCS limit'],['MatchRefresh','Match refresh (recommended)'],['RuntimeHeadroom','Very high (300 FPS)'],['Custom','Custom limit']]),{Preserve:'Keep',MatchRefresh:'Match refresh',RuntimeHeadroom:'300 FPS',Custom:'Custom'});
   field(c,'renderedFpsCap','Custom limit','The most frames DCS renders per second.','number',[30,300,.5],p => p.fpsLimit === 'Custom','FPS');
   field(c,'refreshFromHeadset','Read the refresh rate from the headset','Pimax Play: the rate the headset runs at, or ran at last. Sboys: SteamVR\'s rate.','toggle');
   // Its help says which value is used while the rate is read from the headset (updateControls).
@@ -754,6 +755,10 @@ function buildFields() {
   field(more,'engineFrameHeap','Frame memory per thread','Gives each thread its own short-lived memory. About 1.5% more FPS.','toggle',null,engine);
   field(more,'engineStateFilter','Redundant state filter','Skips graphics state that is already set. Same image. About 1% more FPS. Turns itself off after a DCS update.','toggle',null,engine);
   field(more,'engineBeeps','Beeps for the in-flight switch','One beep off, two beeps on.','toggle',null,engine);
+  // Shader preparation ([Model] ShaderCachePrewarm / ShaderCompileWorkers): read when DCS starts, so not live.
+  more = disclosure(c,'Advanced','How shaders are prepared. The defaults suit most PCs.',p => `${p.engineShaderCachePrewarm ? 'Menu prep on' : 'Menu prep off'} · ${p.engineShaderCompileWorkers ? p.engineShaderCompileWorkers + ' threads' : 'Auto threads'}`);
+  field(more,'engineShaderCachePrewarm','Prepare shaders in the main menu',['After a DCS or app update, gets shaders ready while you are still in the menu.','Off: they are prepared during the first minutes of the flight instead.'],'toggle',null,engine);
+  segmented(field(more,'engineShaderCompileWorkers','Compile threads',['CPU threads that prepare shaders. Auto suits most PCs.','More finishes sooner but leaves DCS less CPU meanwhile.'],'select',[[0,'Auto · recommended'],[2,'2'],[4,'4'],[6,'6']],engine),{0:'Auto',2:'2',4:'4',6:'6'});
   more = disclosure(c,'Developer options','For working on the module. Leave as they are for flying.',p => p.engineDevMode ? 'Developer mode on' : 'Off');
   field(more,'engineTimerRefreshUs','Streaming timer refresh','How often the cached time is refreshed. 1000 µs (1 ms) is far below one frame.','number',[250,2000,50],p => engine(p) && p.engineShaderTimeCache,'µs');
   field(more,'engineDevMode','Developer mode',['For working on the module; off for flying.','On: DCS hot-reloads the payload below whenever it changes and takes every engine setting from the settings file below instead of this page. Off for normal flying and for testing a release.'],'toggle',null,engine);
@@ -902,6 +907,7 @@ function buildFields() {
   because(at('peripheralScale'),p => stereoCheeky(p) ? 'Turn on Foveated Super Resolution to change this.' : stereoWhy);
   because(f => f.condition === coverageOwned,stereoWhy);
   because(at('frameGenAdaptiveCadence'),p => fgOff(p) ? fgWhy : 'Set Generated frames to Auto to use this.');
+  because(at('frameGenPassThrough'),p => fgOff(p) ? fgWhy : p.frameGenFactor !== 0 ? 'Set Generated frames to Auto to use this.' : 'Turn on Only when needed to use this.');
   because(at('frameGenHudSymbology'),p => fgOff(p) ? fgWhy : ['Needs Depth boost (Perception page).','depthBoost']);
   because(at('diagnosticFrameRecords'),p => fgOff(p) ? fgWhy : 'Turn on Frame generation log to use this.');
   because(f => f.condition === flow,p => fgOff(p) ? fgWhy : 'NVIDIA Optical Flow only.');
@@ -1017,14 +1023,15 @@ document.addEventListener('click', e => {
   if (busy) return;
   if (e.target.closest('#changeRuntime')) $('browse-neuralRuntimePath').click();
   else if (e.target.closest('#forgetRuntime')) forgetRuntime();
+  else if (e.target.closest('#engineClearCache')) engineAction('engineClearShaderCache');
 });
 // ---- DCS engine optimizations ----------------------------------------------------------------------------------
-let engineTimer, engineSequence = 0, engineStatus = null;
+let engineTimer, engineSequence = 0, engineStatus = null, engineWarmup = null, engineCache = null;
 /** The module's own log, read again every 5 s while the page is open (a test suite reports its end there). */
 async function refreshEngine() {
   clearTimeout(engineTimer);
   const mine = ++engineSequence;
-  try { const result = await request('engineStatus'); if (mine === engineSequence) { engineStatus = result.status; renderEngine(); } }
+  try { const result = await request('engineStatus'); if (mine === engineSequence) { engineStatus = result.status; engineWarmup = result.warmup || null; engineCache = result.shaderCache || null; renderEngine(); } }
   catch (error) { if (mine === engineSequence) $('engineStatus').innerHTML = `<p class="fine">${escape(error.message)}</p>`; }
   if (page === 'engine' && mine === engineSequence) engineTimer = setTimeout(refreshEngine, 5000);
 }
@@ -1042,11 +1049,19 @@ function renderEngine() {
   box.innerHTML = devNote + `<div class="engine-state ${escape(s.state)}"><b>${escape(ENGINE_STATE[s.state] || s.state)}</b><span>${escape(s.summary)}</span></div>${pending}${perceptionOnly}`
     + s.warnings.map(w => `<p class="pimax-note warn">${escape(w)}</p>`).join('')
     + (s.suiteRunning ? '<p class="pimax-note">The test suite is running in DCS. Keep the view still (in VR, keep the headset on); it takes about 7 minutes.</p>' : '')
-    + `<dl class="pimax-values">${report}</dl>`;
+    + `<dl class="pimax-values">${report}</dl>` + shaderRows();
   $('engineSuite').disabled = busy || s.state !== 'loaded' || s.suiteRunning || !profile?.engineOptimizations;
   $('engineReport').disabled = busy || !s.lastReport;
   $('engineLog').disabled = busy || !s.logPath;
   renderSuiteNote();
+}
+/** Shader warm-up (only while DCS runs and it is not done) and the shader cache with its Clear button. */
+function shaderRows() {
+  const w = engineWarmup, c = engineCache;
+  const warm = w && w.total > 0 ? `<div class="engine-row engine-warmup" id="engineWarmup"><span>Shader warm-up: ${w.done} of ${w.total} ready</span><progress max="${w.total}" value="${w.done}"></progress></div>` : '';
+  const size = c ? (c.bytes / 1048576).toFixed(c.bytes < 10485760 ? 1 : 0) : '0';
+  const cache = c ? `<div class="engine-row" id="engineCacheRow"><span>Shader cache: ${c.files ? `${c.files} variants, ${size} MB` : 'empty'}</span><button type="button" id="engineClearCache" class="button quiet"${busy || c.dcsRunning || !c.files ? ' disabled' : ''}${c.dcsRunning ? ' title="Close DCS first"' : ''}>Clear cache</button></div>` : '';
+  return warm + cache;
 }
 /** Above the test suite's buttons: what makes Run test suite available. */
 function renderSuiteNote() {
@@ -1401,11 +1416,11 @@ function renderCadence() {
   const detected = Number(state?.inventory?.dcsSettings?.['graphics.maxFPS']);
   // With frame generation only when needed, Keep is written as Match refresh (FramePacing.EffectiveLimit).
   const limit = profile.fpsLimit === 'Preserve' && adaptive ? 'MatchRefresh' : profile.fpsLimit;
-  const cap = limit === 'Preserve' ? (Number.isFinite(detected) && detected > 0 ? detected : null) : limit === 'RuntimeHeadroom' ? 300 : limit === 'MatchRefresh' ? Math.max(30, target) : profile.renderedFpsCap;
+  const cap = limit === 'Preserve' ? (Number.isFinite(detected) && detected > 0 ? detected : null) : limit === 'RuntimeHeadroom' ? 300 : limit === 'MatchRefresh' ? (adaptive ? Math.min(300, Math.max(30, Math.round(hz * 4 / 3))) : Math.max(30, target)) : profile.renderedFpsCap;
   const n = value => Number(value.toFixed(3)).toLocaleString('en-US');
   const metrics = [
     ['DCS NEEDS TO RENDER',n(target)+' FPS',adaptive ? 'The full refresh rate; generated frames only while DCS falls behind.' : fg ? (profile.frameGenFactor === 0 ? 'Half the refresh rate; a third while DCS falls behind.' : multiplier === 3 ? 'A third of the refresh rate.' : 'Half the refresh rate.') : 'The full refresh rate; frame generation is off.'],
-    ['DCS FRAME LIMIT',cap === null ? 'Not set' : n(cap)+' FPS',limit === 'Preserve' ? (cap === null ? 'DCS has no limit set; left as it is.' : 'DCS\'s own limit, left as it is.') : profile.fpsLimit === 'Preserve' ? 'Set to the refresh rate for Only when needed.' : 'Set in DCS at launch.'],
+    ['DCS FRAME LIMIT',cap === null ? 'Not set' : n(cap)+' FPS',limit === 'Preserve' ? (cap === null ? 'DCS has no limit set; left as it is.' : 'DCS\'s own limit, left as it is.') : profile.fpsLimit === 'Preserve' ? 'Set a third above the refresh rate for Only when needed.' : adaptive && limit === 'MatchRefresh' ? 'A third above the refresh rate, so DCS can catch up after a slow frame.' : 'Set in DCS at launch.'],
     ['HEADSET',n(hz)+' Hz' + (profile.refreshFromHeadset && state?.headsetRefresh ? ' · '+escape(state.headsetRefresh.source) : ''),fg ? `Up to ${n(cap === null ? hz : Math.min(hz,cap*multiplier))} FPS with generated frames.` : 'Set this refresh rate in Pimax Play or SteamVR.']
   ];
   $('cadenceMetrics').innerHTML = metrics.map(b => `<div class="budget"><span>${b[0]}</span><strong>${b[1]}</strong><p>${b[2]}</p></div>`).join('');
@@ -1540,7 +1555,7 @@ const CHECK_INFO = {
   'neural-hotkey':['DLSS 5 toggle key',{reveal:'neuralToggleKey',label:'Change'}], 'neural-hotkey-dcs':['DLSS 5 toggle key',{reveal:'neuralToggleKey',label:'Change'}],
   'diagnostic-hotkey':['Headset panel key',{reveal:'diagnosticOverlayKey',label:'Change'}], 'diagnostic-hotkey-dcs':['Headset panel key',{reveal:'diagnosticOverlayKey',label:'Change'}],
   'engine-hotkey':['Engine Optimizations switch',{reveal:'engineToggleKey',label:'Change'}], 'engine-hotkey-dcs':['Engine Optimizations switch',{reveal:'engineToggleKey',label:'Change'}],
-  'engine-timer':['Streaming timer refresh',{reveal:'engineTimerRefreshUs',label:'Open'}], 'engine-dev':['Developer mode',{reveal:'engineDevMode',label:'Open'}], 'engine-dev-missing':['Developer mode',{reveal:'engineDevMode',label:'Open'}],
+  'engine-timer':['Streaming timer refresh',{reveal:'engineTimerRefreshUs',label:'Open'}], 'engine-compile-threads':['Compile threads',{reveal:'engineShaderCompileWorkers',label:'Open'}], 'engine-dev':['Developer mode',{reveal:'engineDevMode',label:'Open'}], 'engine-dev-missing':['Developer mode',{reveal:'engineDevMode',label:'Open'}],
   'nvidia-threaded-optimization':['NVIDIA Threaded optimization',null], 'nvidia-mfaa':['NVIDIA MFAA',null], 'eye-distance':['Eye distance',{reveal:'eyeDistanceMm',label:'Open'}],
   'smooth-cursor-images':['Smooth mouse cursor',{reveal:'smoothCursor',label:'Open'}], 'fps-cap':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}], 'dcs-vsync':['Desktop VSync',{reveal:'disableDcsVSync',label:'Open'}],
   'hotkey-conflict':['In-flight keys',{reveal:'diagnosticOverlayKey',label:'Change'}],
@@ -1680,7 +1695,15 @@ function renderFlight() {
     const parts = [['None',g.seconds1x || 0],['2×',g.seconds2x],['3×',g.seconds3x]].filter(([,v]) => v > 0);
     // Cadence on without any 1× time (DCS never kept up) is still "Only when needed", not Auto.
     const one = g.seconds1x || 0, mode = g.cadence || one ? 'Only when needed' : g.adaptive ? 'Auto' : 'Fixed';
-    rows.push(['Frame generation',parts.length > 1 ? parts.map(([k,v]) => `${k} ${share(v/total)}`).join(' · ') : parts.length ? `${parts[0][0]} all flight` : '—',mode+(g.switches ? ` · level changed ${g.switches} ${g.switches === 1 ? 'time' : 'times'}` : '')]);
+    // Only when needed that generated most of the flight: why. Frames pass through only while OFXR's estimate of DCS's
+    // CPU and GPU time per frame stays under a share of one refresh period, set by Stop generating
+    // (FramegenShare.PassThroughShare: Steady 80%, Balanced 110%, Prefer refresh rate 125%; the estimate reads high).
+    const flightHz = Math.round(f.headset?.compositorFps || f.cap?.refreshHz || refreshHz(profile) || 0), passShare = g.passThroughShare || 0.8, limitMs = flightHz ? 1000 * passShare / flightHz : 0;
+    const passWord = {Steady:'Steady',Balanced:'Balanced',PreferRefresh:'Prefer refresh rate'}[g.preference] || 'Steady';
+    const why = g.cadence && total && one / total < 0.5 && g.gpuAt1xMs && limitMs
+      ? (g.gpuAt1xMs > limitMs ? ` · DCS's GPU time read ${fmt(g.gpuAt1xMs,1)} ms per frame; with Stop generating on ${passWord}, frames pass through under ${fmt(limitMs,1)} ms`
+        : ` · GPU time ${fmt(g.gpuAt1xMs,1)} ms per frame is under the ${fmt(limitMs,1)} ms of ${passWord}, so CPU time or late frames kept it generating`) : '';
+    rows.push(['Frame generation',parts.length > 1 ? parts.map(([k,v]) => `${k} ${share(v/total)}`).join(' · ') : parts.length ? `${parts[0][0]} all flight` : '—',mode+(g.switches ? ` · level changed ${g.switches} ${g.switches === 1 ? 'time' : 'times'}` : '')+why]);
   }
   if (f.frameTime) rows.push(['DCS frame time',`${fmt(f.frameTime.p50Ms,1)} ms`,`median · ${fmt(f.frameTime.p90Ms,1)} ms p90 · the slower of CPU and GPU`]);
   if (f.dlss5) rows.push(['DLSS 5',f.dlss5.state === 'ran' ? 'Ran' : f.dlss5.state === 'failed' ? 'Failed' : 'Not started',f.dlss5.state === 'failed' ? f.dlss5.error : [f.dlss5.version ? 'runtime '+f.dlss5.version : 'no 3D scene reached', f.dlss5.toggles ? `toggled ${f.dlss5.toggles}×, ${f.dlss5.onAtExit ? 'on' : 'off'} at exit` : null].filter(Boolean).join(' · '),f.dlss5.state === 'failed']);
@@ -2122,7 +2145,7 @@ function adoptDraft(next) {
   showProfile(); change(); boostChanged();
 }
 // Test hooks exercise the same controls and command bridge; the fixture host never starts DCS or opens dialogs.
-window.dcsUi = {request,run,setBusy,askDxgiFirst,askDxgiFresh,checkUpdates,installUpdate,setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); renderDashboard(); },applyLive,get liveStatus(){return liveStatus;},runsWith,navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,ENGINE_PARTS,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,revealSetting,get boostRequests(){return boostSequence;},get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
+window.dcsUi = {request,run,setBusy,askDxgiFirst,askDxgiFresh,checkUpdates,installUpdate,setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); renderDashboard(); },applyLive,get liveStatus(){return liveStatus;},runsWith,navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,ENGINE_PARTS,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,revealSetting,get boostRequests(){return boostSequence;},engineShaderRows:(w,c) => { engineWarmup = w; engineCache = c; return shaderRows(); },get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
 // More / Less: shows or hides a setting's (or a card's) detail text; every page load starts with it folded.
 document.addEventListener('click', e => {
   const b = e.target.closest('.more-toggle'); if (!b) return; const detail = $(b.getAttribute('aria-controls')); if (!detail) return;

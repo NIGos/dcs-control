@@ -218,7 +218,20 @@ public static class ConfigurationWriters
     /// "DcsQvCull.ini trim" proves the module reads the same values as from the old full file. The test suite
     /// (run_suite.flag or Ctrl+Alt+F11) compares the optimizations off and on. In developer mode the payload may be
     /// older than the vendored one (with other defaults), so every constant is written explicitly, as before the trim.</summary>
-    public static string DcsQvCull(VrProfile p) => p.EngineOptimizations && p.EngineDevMode ? WithDcsQvCullConstants(DcsQvCullTrimmed(p)) : DcsQvCullTrimmed(p);
+    /// <param name="shaderCacheDirectory">Where the module keeps its compiled shader variants ([Model] ShaderCacheDir):
+    /// DCS Control's own state folder (<see cref="EngineShaderCache"/>), so Back to stock DCS does not delete them.
+    /// Null, or a folder the module could not use: the key is left out and the module uses its own folder.</param>
+    public static string DcsQvCull(VrProfile p, string? shaderCacheDirectory = null)
+    {
+        var cache = p.EngineOptimizations ? EngineShaderCache.ForIni(shaderCacheDirectory) : null;
+        return p.EngineOptimizations && p.EngineDevMode ? WithDcsQvCullConstants(DcsQvCullTrimmed(p, cache)) : DcsQvCullTrimmed(p, cache);
+    }
+
+    /// <summary>[Model] ShaderCachePrewarm and ShaderCompileWorkers, only when they differ from the module's defaults (1
+    /// and 0 = automatic), like the rest of the trimmed file. Read once when the module starts.</summary>
+    private static string ShaderCacheKeys(VrProfile p) =>
+        (p.EngineShaderCachePrewarm ? "" : "\n; Stale shader variants are compiled when a mission first draws them, not already in the main menu.\nShaderCachePrewarm=0")
+        + (p.EngineShaderCompileWorkers is > 0 and <= 8 ? $"\nShaderCompileWorkers={Int(p.EngineShaderCompileWorkers)}" : "");
 
     /// <summary>Adds every <see cref="DcsQvCullConstants"/> key: inside its section when the file has it (GetPrivateProfile*
     /// reads only the first section of a name), otherwise in a new section at the end.</summary>
@@ -241,7 +254,7 @@ public static class ConfigurationWriters
         return text.ReplaceLineEndings(newline);
     }
 
-    private static string DcsQvCullTrimmed(VrProfile p) => $"""
+    private static string DcsQvCullTrimmed(VrProfile p, string? shaderCache = null) => $"""
         ; Written by DCS Control for the applied profile; edits here are replaced the next time it is applied.
         ; DcsQvCull re-reads this file every second while DCS runs. Only the settings that follow the profile are
         ; written; every other key takes the module's built-in default.
@@ -289,7 +302,7 @@ public static class ConfigurationWriters
         ShadowRecorder={(p.EngineShadowRecorder ? 1 : 0)}
         ; Helper threads per shadow cascade: 1 on CPUs with 8 logical cores or fewer, so DCS keeps its own threads.
         ShadowRecorderHelpers={(Environment.ProcessorCount <= 8 ? 1 : 3)}
-        GBufferRecorder={(p.EngineGBufferRecorder ? 1 : 0)}
+        GBufferRecorder={(p.EngineGBufferRecorder ? 1 : 0)}{(shaderCache is null ? "" : "\n; The compiled shader variants, kept in DCS Control's own folder: Back to stock DCS does not delete them, so the\n; first minutes of a mission are not slower again after it. DcsVr.Cli clear-shader-cache deletes them.\nShaderCacheDir=" + shaderCache)}{(p.EngineOptimizations ? ShaderCacheKeys(p) : "")}
 
         [Texture]
         StreamDedupe={(p.EngineTextureDedupe ? 1 : 0)}
@@ -345,6 +358,8 @@ public static class ConfigurationWriters
         adaptive_frame_gen={(p.FrameGenFactor == VrProfile.FrameGenAuto ? 1 : 0)}
         ; Frame generation only when needed (patches 0032, 0059, 0060): a full-rate 1X while DCS holds the refresh rate, 2X/3X Auto when it falls behind.
         adaptive_cadence={(p.UsesAdaptiveCadence ? 1 : 0)}
+        ; When it stops generating (patch 0070): 0 only with room to spare (under 80% of a refresh), 1 when the estimate is within reach and frames arrive on time, 2 whenever it may hold.
+        cadence_preference={(p.UsesAdaptiveCadence && Enum.IsDefined(p.FrameGenPassThrough) ? (int)p.FrameGenPassThrough : 0)}
         ; Both eyes synthesized on their own queues, about 1 ms sooner with identical output (patch 0038): off until flown.
         parallel_eye_synthesis=0
         d3d11_bridge={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}

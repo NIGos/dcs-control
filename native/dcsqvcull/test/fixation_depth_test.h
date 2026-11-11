@@ -706,7 +706,7 @@ void TestPipeline() {
   g_fault = false;
   g_workerStop = false;
   g_targetK = 0;
-  g_worker = std::thread(WorkerLoop);
+  g_worker = new std::thread(WorkerLoop);
   OpenMappings();
   g_installed = true;
   Check(gview && g_gazeView.load() && g_depthView.load() && g_gridView.load() && !g_gazeOwned,
@@ -1073,7 +1073,7 @@ void TestPipeline() {
   Check(drawViewKept && g_cpDrawView == -1,
         "R58 fixdepth: an in-flight tone-map draw keeps its view for the restore until the uninstall drained the hooks");
   Check(!g_installed.load() && !g_depthView.load() && !g_gazeView.load() && !g_gridView.load() && !g_s.dev &&
-            !g_worker.joinable() &&
+            !g_worker &&
             !ptiming::g_depthBoundary.load(),
         "fixdepth: uninstall releases D3D objects, joins the worker, closes the mappings");
   const ULONG refs = (dev->AddRef(), dev->Release());

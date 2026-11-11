@@ -802,11 +802,15 @@ void IdentOnSet(ID3D11DeviceContext* c);
 void FpOnSet(ID3D11DeviceContext* c);
 // shader_fast.h (R36, [D3D] ShaderFast): called for DCS's context before each bind (its Dispatch hook re-arm).
 std::atomic<void (*)(ID3D11DeviceContext*, ID3D11ComputeShader*)> g_onSet{nullptr};
+// chain_derive.h ([Suite] ChainDeriveCensus, measure only): called for DCS's context before each bind, while g_curCs
+// still names the shader DCS bound before (DCS's own pointer, before substitution); nullptr unless the census runs.
+std::atomic<void (*)(ID3D11DeviceContext*, ID3D11ComputeShader*)> g_onSetCensus{nullptr};
 
 void STDMETHODCALLTYPE H_CSSetShader(ID3D11DeviceContext* c, ID3D11ComputeShader* s, ID3D11ClassInstance* const* ci,
                                      UINT nci) {
   const uint32_t mask = g_mask.load(std::memory_order_relaxed);
   if (c == g_ctx) {
+    if (auto f = g_onSetCensus.load(std::memory_order_relaxed)) f(c, s);
     g_curCs = s;
     if (g_identOn.load(std::memory_order_relaxed)) IdentOnSet(c);
     if (g_fpLive.load(std::memory_order_relaxed)) FpOnSet(c);

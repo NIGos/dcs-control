@@ -992,7 +992,7 @@ void TestPipeline() {
   g_workerStop = false;
   fdexport::g_stopping = false;
   fdexport::ResetFrameState();
-  g_worker = std::thread(WorkerLoop);
+  g_worker = new std::thread(WorkerLoop);
   OpenMappings();
   UnsyncViewCount();
   g_maskWith = true;
