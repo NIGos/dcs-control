@@ -1,0 +1,78 @@
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -154,6 +154,14 @@ struct ConfiguredNvidiaOptions {
+ [[nodiscard]] std::uint32_t read_cadence_preference(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS Control (0074). `[ofxr] cadence_one_wait`: at adaptive cadence's 1X the
++// application's xrEndFrame waits until the presenter has submitted its frame
++// (bounded, as the shallow pipeline's does) instead of queueing it and
++// returning. Off unless set to 1; a trial switch, see the layer. Read once
++// per session.
++[[nodiscard]] bool read_cadence_one_wait(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // DCS VR Control (0007). `[ofxr] own_binding_queue`: a D3D11 session the
+ // bridge took over hands every runtime a queue of the layer's own, as it
+ // always did on SteamVR, so a submission waits on the GPU only for what it
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -319,6 +319,11 @@ std::uint32_t read_cadence_preference(
+     }
+ }
+ 
++// DCS Control (0074): off unless set to 1.
++bool read_cadence_one_wait(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"cadence_one_wait", false);
++}
++
+ bool read_own_binding_queue(const std::filesystem::path& module_directory) noexcept {
+     return read_ofxr_switch(module_directory, L"own_binding_queue", true);
+ }
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1926,6 +1926,8 @@ struct SessionState {
+     // DCS Control (0070): `[ofxr] cadence_preference` (0 steady, 1 balanced,
+     // 2 rate), logged as c of adaptive_switch result=13 when cadence starts.
+     std::uint32_t cadence_preference{};
++    // DCS Control (0074): `[ofxr] cadence_one_wait`, see end_frame's 1X hand-over.
++    bool cadence_one_wait{};
+     // DCS Control (0057): 0037's content_time_fraction and 0039's
+     // slot_content_time (and their latency windows, backoff and record) are
+     // gone with their keys: synthetics are placed by the display times.
+@@ -6181,6 +6183,8 @@ XrResult layer_create_session_impl(
+     // controller keeps the configuration through every start().
+     state->cadence_preference =
+         xrfg::implicit_layer::read_cadence_preference(current_layer_directory());
++    state->cadence_one_wait =
++        xrfg::implicit_layer::read_cadence_one_wait(current_layer_directory()); // 0074
+     state->cadence_controller = xrfg::latency::CadenceController(
+         xrfg::latency::cadence_config_for(
+             xrfg::latency::cadence_preference_from(state->cadence_preference)));
+@@ -18312,7 +18316,22 @@ XrResult layer_end_frame_impl(
+             }
+             // DCS Control (0032): and at adaptive cadence's 1X, whose hold
+             // (below) paces the application instead.
+-            if (state->deep_pipeline || cadence_one) {
++            // DCS Control (0074): `[ofxr] cadence_one_wait`, a trial. Flown
++            // (issue #17, static sea view, GPU 89-94% at 90 with the layer
++            // off): 1X holds a clean 90 for 3-41 s while the application is a
++            // slot ahead and held below (xrEndFrame 6.5 ms, its begin to end
++            // 4.4 ms), then one or two 13 ms frames lose the lead; from there
++            // nothing holds it (xrEndFrame 0.4 ms), its GPU queue stays
++            // backed up (begin to end 8.7 ms, the same GPU time per frame),
++            // its frames reach the runtime unfinished and the runtime's
++            // xrWaitFrame takes two periods every ~165 ms until 1X is left.
++            // Without the layer the runtime's own wait holds the application
++            // to the display every frame and the queue drains. With the
++            // switch on, a 1X frame is waited for until the presenter has
++            // submitted it - the shallow pipeline's bounded wait - so the
++            // application is held to the presenter every frame, ahead or not.
++            const bool wait_for_one = cadence_one && state->cadence_one_wait;
++            if ((state->deep_pipeline || cadence_one) && !wait_for_one) {
+                 // Enqueue and return, exactly as a pair does. Waiting here
+                 // blocks the application until the presenter has submitted
+                 // this frame, which behind a deeper queue is most of the
