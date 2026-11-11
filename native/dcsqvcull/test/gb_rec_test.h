@@ -695,6 +695,14 @@ PSOut psA2c(VOut v) {
 }
 float4 psDecal(VOut v) : SV_Target0 { return float4(frac(v.col.rgb * 1.7), 0.5); }
 float4 vsOther(float3 p : POSITION) : SV_Position { return float4(p.xy * 2.5, 0.45, 1); }
+// The decals' VS writes every input psDecal reads (vsOther left COLOR0 undefined: WARP read leftovers there).
+VOut vsDecal(float3 p : POSITION) {
+  VOut v;
+  v.pos = float4(p.xy * 2.5, 0.45, 1);
+  v.col = float4(p * 0.37 + 0.2, 1);
+  v.uv = p.xy;
+  return v;
+}
 PSOut psOther(float4 pos : SV_Position) {
   PSOut o;
   o.t0 = o.t1 = o.t2 = o.t3 = o.t4 = float4(0.2, 0.3, 0.4, 1);
@@ -1203,6 +1211,7 @@ struct Dev {
   ID3D11DeviceContext* imm = nullptr;
   ID3D11VertexShader* vs = nullptr;
   ID3D11VertexShader* vsOther = nullptr;
+  ID3D11VertexShader* vsDecal = nullptr;
   ID3D11PixelShader* ps = nullptr;
   ID3D11PixelShader* psA2c = nullptr;
   ID3D11PixelShader* psDecal = nullptr;
@@ -1243,7 +1252,7 @@ void Rel(T*& p) {
 }
 
 void Destroy(Dev& d) {
-  Rel(d.vs), Rel(d.vsOther), Rel(d.ps), Rel(d.psA2c), Rel(d.psDecal), Rel(d.psOther), Rel(d.il);
+  Rel(d.vs), Rel(d.vsOther), Rel(d.vsDecal), Rel(d.ps), Rel(d.psA2c), Rel(d.psDecal), Rel(d.psOther), Rel(d.il);
   for (auto*& p : d.dss) Rel(p);
   Rel(d.dssDecal), Rel(d.bsNone), Rel(d.bsA2c), Rel(d.bsDecal), Rel(d.rs), Rel(d.samp), Rel(d.pool), Rel(d.b6), Rel(d.b7);
   for (auto& row : d.ours)
@@ -1270,8 +1279,8 @@ ID3D11Buffer* MakeBuffer(ID3D11Device* dev, UINT bytes, UINT bind, D3D11_USAGE u
 bool CreateDev(Dev& d, srtest::Compiler& c, World& w, bool* warp) {
   const D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
   *warp = false;
-  if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, want, 2, D3D11_SDK_VERSION, &d.dev,
-                               nullptr, &d.imm))) {
+  if (srtest::g_forceWarp || FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, want, 2,
+                                                      D3D11_SDK_VERSION, &d.dev, nullptr, &d.imm))) {
     *warp = true;
     if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, want, 2, D3D11_SDK_VERSION, &d.dev, nullptr,
                                  &d.imm)))
@@ -1297,6 +1306,9 @@ bool CreateDev(Dev& d, srtest::Compiler& c, World& w, bool* warp) {
   }
   if (!(b = build("vsOther", "vs_5_0"))) return false;
   d.dev->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &d.vsOther);
+  b->Release();
+  if (!(b = build("vsDecal", "vs_5_0"))) return false;
+  d.dev->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &d.vsDecal);
   b->Release();
   D3D11_DEPTH_STENCIL_DESC dd = {};
   dd.DepthEnable = TRUE;
@@ -1434,7 +1446,7 @@ bool CreateDev(Dev& d, srtest::Compiler& c, World& w, bool* warp) {
   dsd.BindFlags = 0;
   dsd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
   d.dev->CreateTexture2D(&dsd, nullptr, &d.dsStage);
-  bool ok = d.vs && d.vsOther && d.ps && d.psA2c && d.psDecal && d.psOther && d.il && d.dssDecal && d.bsNone &&
+  bool ok = d.vs && d.vsOther && d.vsDecal && d.ps && d.psA2c && d.psDecal && d.psOther && d.il && d.dssDecal && d.bsNone &&
             d.bsA2c && d.bsDecal && d.rs && d.samp && d.b6 && d.b7 && d.otherVb && d.rt && d.dsv && d.rtStage &&
             d.dsStage;
   for (auto* p : d.dss) ok = ok && p;
@@ -1503,7 +1515,7 @@ void DrawDcs(Dev& d, World& w, int i, const TexTable& tt) {
 // Other renderables (terrain-like, opaque) and decals (blended over what is there).
 void DrawOtherKind(Dev& d, int kind) {
   ID3D11DeviceContext* c = d.imm;
-  c->VSSetShader(d.vsOther, nullptr, 0);
+  c->VSSetShader(kind == 1 ? d.vsOther : d.vsDecal, nullptr, 0);
   c->PSSetShader(kind == 1 ? d.psOther : d.psDecal, nullptr, 0);
   c->OMSetDepthStencilState(kind == 1 ? d.dss[2] : d.dssDecal, 9);
   c->OMSetBlendState(kind == 1 ? d.bsNone : d.bsDecal, nullptr, 0xffffffff);
@@ -1754,10 +1766,10 @@ void DeviceTests(srtest::Compiler& comp) {
   defrec::Pool pool;
   defrec::PoolConfig pc;
   pc.workers = kThreads;
-  pc.cb.mode = defrec::CbMode::kOffsets;
+  pc.cb.mode = srtest::TestCbMode(d.dev);
   pc.name = "gbuffer rec test";
   Job* j = NewJob();
-  if (!pool.Start(d.dev, pc) || pool.At(0).ring.Mode() != defrec::CbMode::kOffsets || !j) {
+  if (!pool.Start(d.dev, pc) || pool.At(0).ring.Mode() != pc.cb.mode || !j) {
     QvSkip("gbuffer rec device: no worker with constant-buffer offsets on this device\n");
   } else {
     auto setup = [&](uint32_t stride) {
@@ -1790,6 +1802,15 @@ void DeviceTests(srtest::Compiler& comp) {
       size_t diff = ref.size() == got.size() ? 0 : SIZE_MAX;
       for (size_t k = 0; diff != SIZE_MAX && k < ref.size(); ++k) diff += ref[k] != got[k];
       printf("     6 targets + depth-stencil: %zu bytes, %zu differ\n", ref.size(), diff);
+      if (diff && diff != SIZE_MAX) {  // which target (6 RTs of 8 bytes per texel, then depth-stencil)
+        const size_t per = static_cast<size_t>(kSize) * kSize * 8;
+        for (int t2 = 0; t2 <= kTargets; ++t2) {
+          size_t n = 0;
+          const size_t b0 = t2 * per, b1 = t2 < kTargets ? b0 + per : ref.size();
+          for (size_t k = b0; k < b1; ++k) n += ref[k] != got[k];
+          if (n) printf("       target %d: %zu bytes differ\n", t2, n);
+        }
+      }
       return ok && diff == 0;
     };
     // 1. The production path: JobMain with two helpers (split by arrival).
@@ -2608,7 +2629,11 @@ void Run() {
   PoolAndDumpTests();
   JobTests();
   RestartF10Tests();
-  if (c.compile) grtest::DeviceTests(c);
+  if (c.compile) {
+    grtest::DeviceTests(c);
+    srtest::EmulatedRun emu("gbuffer rec device tests");
+    grtest::DeviceTests(c);
+  }
   printf("     sizeof(gbrec::Job) = %.1f MB\n", sizeof(Job) / 1048576.0);
 }
 

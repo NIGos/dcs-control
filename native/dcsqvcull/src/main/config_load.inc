@@ -269,6 +269,12 @@ void LoadConfig(bool initial) {
   c.shadowRecorderInstancing = GetPrivateProfileIntW(L"Model", L"ShadowRecorderInstancing", 1, ini.c_str()) != 0;
   c.shadowRecorderNest = GetPrivateProfileIntW(L"Model", L"ShadowRecorderNest", 0, ini.c_str()) != 0;
   c.smallGpuBundle = GetPrivateProfileIntW(L"Model", L"SmallGpuBundle", 0, ini.c_str()) != 0;
+  // Opt-in, default 0: the recorders on the runtime's emulated command lists (deferred_rec.h kUpdatePlain); read when
+  // a recorder installs. DCS Control rewrites DcsQvCull.ini at every Launch, so an empty recorders_emulated_lists.flag
+  // next to the DLL turns it on as well (it stays across launches).
+  c.recordersEmulatedLists =
+      GetPrivateProfileIntW(L"Model", L"RecordersEmulatedLists", 0, ini.c_str()) != 0 ||
+      GetFileAttributesW((g_dir + L"recorders_emulated_lists.flag").c_str()) != INVALID_FILE_ATTRIBUTES;
   c.suiteShadowRecVerify = GetPrivateProfileIntW(L"Suite", L"ShadowRecVerify", 0, ini.c_str()) != 0;
   c.suiteShadowRecVerifySec = GetPrivateProfileIntW(L"Suite", L"ShadowRecVerifySec", 5, ini.c_str());
   if (c.suiteShadowRecVerifySec < 1) c.suiteShadowRecVerifySec = 1;

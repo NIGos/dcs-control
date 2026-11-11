@@ -14,7 +14,9 @@
 //                       allocator (deferred contexts only allow WRITE_DISCARD,
 //                       or NO_OVERWRITE after a DISCARD of the same resource
 //                       in the same command list, on 11.1 runtimes that
-//                       report MapNoOverwriteOnDynamicConstantBuffer).
+//                       report MapNoOverwriteOnDynamicConstantBuffer);
+//                       kUpdatePlain for runtime-emulated command lists
+//                       (no Map, no offsets: see CbMode).
 //   defrec::Pool        N persistent worker threads, each owning one deferred
 //                       context and one CbRing. One job per worker per frame;
 //                       the job runs under SEH; a fault latches the pool off
@@ -50,10 +52,12 @@
 #include <windows.h>
 #include <d3d11_1.h>
 #include <intrin.h>
+#include <malloc.h>
 
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace defrec {
@@ -68,6 +72,12 @@ struct Caps {
   bool noOverwriteCb = false;      // D3D11_OPTIONS.MapNoOverwriteOnDynamicConstantBuffer
   bool device1 = false;            // ID3D11Device1 / ID3D11DeviceContext1 available
 };
+
+// [Model] RecordersEmulatedLists (default 0): the shadow and G-buffer recorders
+// may run on a device without driver command lists (the D3D11 runtime then
+// emulates them: AMD Radeon, NVIDIA with Threaded optimization Off). Their
+// rings then use RecorderMode's copy-based uploads. Read at Install.
+inline std::atomic<bool> g_allowEmulatedLists{false};
 
 inline Caps QueryCaps(ID3D11Device* dev) {
   Caps c;
@@ -97,7 +107,7 @@ inline Caps QueryCaps(ID3D11Device* dev) {
 // driver then reports no command-list support to the app. The text lives in a
 // static buffer (install runs once at a time).
 inline const char* DescribeCapsFailure(ID3D11Device* dev, const Caps& c) {
-  static char buf[512];
+  static char buf[768];
   char adapter[200] = "unknown adapter";
   UINT vendor = 0;
   IDXGIDevice* xd = nullptr;
@@ -125,10 +135,14 @@ inline const char* DescribeCapsFailure(ID3D11Device* dev, const Caps& c) {
            "turns the driver's command lists off)";
   else if (!c.commandLists && vendor != 0 && vendor != 0x10de)
     hint = " -- this GPU's driver does not report native command lists";
+  const char* optIn = !c.commandLists && !g_allowEmulatedLists.load(std::memory_order_relaxed)
+                          ? "; opt-in: RecordersEmulatedLists ([Model] key or recorders_emulated_lists.flag) runs the "
+                            "recorders on the runtime's emulated lists (untested on real GPUs)"
+                          : "";
   snprintf(buf, sizeof(buf),
            "the D3D11 device lacks what the recorder needs: DriverCommandLists=%d ConstantBufferOffsetting=%d "
-           "ID3D11DeviceContext1=%d creation flags 0x%x on %s%s",
-           c.commandLists ? 1 : 0, c.cbOffsetting ? 1 : 0, c.device1 ? 1 : 0, flags, adapter, hint);
+           "ID3D11DeviceContext1=%d creation flags 0x%x on %s%s%s",
+           c.commandLists ? 1 : 0, c.cbOffsetting ? 1 : 0, c.device1 ? 1 : 0, flags, adapter, hint, optIn);
   return buf;
 }
 
@@ -417,6 +431,19 @@ enum class CbMode : int {
   kDiscard = 2,  // small dynamic buffers in power-of-two buckets, each allocation
                  // one Map(DISCARD) (legal any number of times on a deferred context);
                  // at most perBucket allocations per bucket between two Close() calls
+  // For runtimes that emulate command lists (THREADING.DriverCommandLists = 0,
+  // [Model] RecordersEmulatedLists): one small DEFAULT buffer per allocation
+  // (reused by index in later lists), bound plain with *SetConstantBuffers.
+  // Allocations are written to CPU memory; Close() records one
+  // UpdateSubresource per buffer allocated since the last Close() (whole
+  // buffer, no box: emulated deferred UpdateSubresource misreads boxed
+  // sources). Same batched pattern as kOffsets (any number of allocations
+  // between two Close() calls). No offsets anywhere: on WARP (emulated lists,
+  // test/deferred_rec_test.h RunEmulated, 2026-11-11) windows recorded with
+  // *SetConstantBuffers1 were misplaced for dynamic (Map) and DEFAULT
+  // (UpdateSubresource; a variant since removed) chunks alike, about 2.08 M of
+  // 7.3 M compared texels wrong, while this mode and kDiscard were bit-exact.
+  kUpdatePlain = 4,
 };
 
 // Picked by test/deferred_rec_test.h QV_DEFREC_BENCH on the dev PC (NVIDIA,
@@ -431,7 +458,21 @@ enum class CbMode : int {
 constexpr CbMode kDefaultMode = CbMode::kOffsets;
 
 inline const char* ModeName(CbMode m) {
-  return m == CbMode::kOffsets ? "offsets" : m == CbMode::kDiscard ? "discard" : "auto";
+  return m == CbMode::kOffsets       ? "offsets"
+         : m == CbMode::kDiscard     ? "discard"
+         : m == CbMode::kUpdatePlain ? "update-plain"
+                                     : "auto";
+}
+
+// The batched pattern the recorders use (allocate every window, Close, then
+// the draws): kOffsets and kUpdatePlain.
+inline bool Batched(CbMode m) { return m == CbMode::kOffsets || m == CbMode::kUpdatePlain; }
+
+// The recorders' ring mode for a device: kOffsets with driver command lists,
+// else (opt-in) kUpdatePlain; kAuto = the recorders cannot run (logged by them).
+inline CbMode RecorderMode(const Caps& c) {
+  if (c.commandLists) return CbMode::kOffsets;
+  return g_allowEmulatedLists.load(std::memory_order_relaxed) ? CbMode::kUpdatePlain : CbMode::kAuto;
 }
 
 struct CbConfig {
@@ -447,7 +488,7 @@ struct CbConfig {
 // means the whole (small) buffer is bound with the plain *SetConstantBuffers.
 struct CbSlice {
   ID3D11Buffer* buf = nullptr;
-  uint8_t* ptr = nullptr;  // write here until Close()
+  uint8_t* ptr = nullptr;  // write here before the next Alloc (kUpdatePlain's CPU copies may move) or Close()
   UINT first = 0;          // in 16-byte constants (multiple of 16)
   UINT num = 0;            // in 16-byte constants (multiple of 16)
   explicit operator bool() const { return buf != nullptr; }
@@ -484,6 +525,12 @@ class CbRing {
     for (auto*& c : chunks_) SafeRelease(c);
     for (auto& bk : bufs_)
       for (auto*& b : bk) SafeRelease(b);
+    for (UINT i = 0; i < plainCap_; ++i) SafeRelease(plain_[i]);
+    free(plain_);
+    plain_ = nullptr;
+    if (plainMem_) _aligned_free(plainMem_);
+    plainMem_ = nullptr;
+    plainCap_ = plainUsed_ = plainDirtyFrom_ = 0;
     SafeRelease(dc1_);
     dc_ = nullptr;
     dev_ = nullptr;
@@ -497,6 +544,7 @@ class CbRing {
     off_ = 0;
     chunkOpen_ = false;
     chunkMappedInList_ = false;
+    plainUsed_ = plainDirtyFrom_ = 0;
     memset(rr_, 0, sizeof(rr_));
     memset(open_, 0, sizeof(open_));
   }
@@ -504,7 +552,14 @@ class CbRing {
   // `bytes` must cover the shader's whole cbuffer (the bound window/buffer is
   // at least that large; bytes past `bytes` are unspecified).
   CbSlice Alloc(UINT bytes) {
-    return mode_ == CbMode::kOffsets ? AllocOffsets(bytes) : AllocDiscard(bytes);
+    switch (mode_) {
+      case CbMode::kOffsets:
+        return AllocOffsets(bytes);
+      case CbMode::kUpdatePlain:
+        return AllocPlain(bytes);
+      default:
+        return AllocDiscard(bytes);
+    }
   }
   CbSlice Upload(const void* data, UINT bytes) {
     CbSlice s = Alloc(bytes);
@@ -514,6 +569,14 @@ class CbRing {
 
   // Unmaps everything Alloc mapped. Required before a draw reads any of it.
   void Close() {
+    if (mode_ == CbMode::kUpdatePlain) {
+      for (UINT i = plainDirtyFrom_; i < plainUsed_; ++i) {
+        dc_->UpdateSubresource(plain_[i], 0, nullptr, plainMem_ + static_cast<size_t>(i) * kPlainBytes, 0, 0);
+        ++maps;
+      }
+      plainDirtyFrom_ = plainUsed_;
+      return;
+    }
     if (chunkOpen_) {
       dc_->Unmap(chunks_[cur_], 0);
       chunkOpen_ = false;
@@ -548,6 +611,40 @@ class CbRing {
 
  private:
   static constexpr int kMaxChunks = 256;
+  static constexpr UINT kPlainBytes = 512;  // kUpdatePlain: per buffer (the recorders' 304-byte window)
+  static constexpr UINT kMaxPlain = 32768;  // kUpdatePlain: per list (16 MB, as kOffsets' 64 x 256 KB)
+
+  CbSlice AllocPlain(UINT bytes) {
+    if (!bytes || bytes > kPlainBytes || plainUsed_ >= kMaxPlain) return Overflow();
+    if (plainUsed_ >= plainCap_) {  // grow (doubling) the CPU copies and the buffer table
+      const UINT cap = plainCap_ ? plainCap_ * 2 : 1024;
+      auto* mem = static_cast<uint8_t*>(_aligned_malloc(static_cast<size_t>(cap) * kPlainBytes, 64));
+      auto** tab = static_cast<ID3D11Buffer**>(calloc(cap, sizeof(ID3D11Buffer*)));
+      if (!mem || !tab) {
+        if (mem) _aligned_free(mem);
+        free(tab);
+        return Overflow();
+      }
+      memset(mem, 0, static_cast<size_t>(cap) * kPlainBytes);
+      if (plainMem_) {
+        memcpy(mem, plainMem_, static_cast<size_t>(plainCap_) * kPlainBytes);
+        _aligned_free(plainMem_);
+      }
+      for (UINT i = 0; i < plainCap_; ++i) tab[i] = plain_[i];
+      free(plain_);
+      plainMem_ = mem;
+      plain_ = tab;
+      plainCap_ = cap;
+    }
+    const UINT i = plainUsed_;
+    if (!plain_[i] && !Create(kPlainBytes, &plain_[i], D3D11_USAGE_DEFAULT)) return Overflow();
+    ++plainUsed_;
+    CbSlice s;
+    s.buf = plain_[i];
+    s.ptr = plainMem_ + static_cast<size_t>(i) * kPlainBytes;
+    bytesUsed += kPlainBytes;
+    return s;  // num 0: bound plain
+  }
 
   CbSlice AllocOffsets(UINT bytes) {
     const UINT size = (bytes + 255u) & ~255u;
@@ -607,12 +704,12 @@ class CbRing {
     return s;
   }
 
-  bool Create(UINT size, ID3D11Buffer** out) {
+  bool Create(UINT size, ID3D11Buffer** out, D3D11_USAGE usage = D3D11_USAGE_DYNAMIC) {
     D3D11_BUFFER_DESC d{};
     d.ByteWidth = size;
-    d.Usage = D3D11_USAGE_DYNAMIC;
+    d.Usage = usage;
     d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    d.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    d.CPUAccessFlags = usage == D3D11_USAGE_DYNAMIC ? D3D11_CPU_ACCESS_WRITE : 0;
     const bool ok = SUCCEEDED(dev_->CreateBuffer(&d, nullptr, out)) && *out;  // free-threaded
     if (ok) {
       ++created;
@@ -639,6 +736,10 @@ class CbRing {
   bool chunkOpen_ = false;
   bool chunkMappedInList_ = false;
   uint8_t* chunkBase_ = nullptr;
+  // kUpdatePlain: CPU copies (kPlainBytes each), buffers, used in this list, first not yet uploaded
+  uint8_t* plainMem_ = nullptr;
+  ID3D11Buffer** plain_ = nullptr;
+  UINT plainCap_ = 0, plainUsed_ = 0, plainDirtyFrom_ = 0;
   // kDiscard
   int buckets_ = 0;
   UINT bucketSize_[kMaxBuckets] = {};

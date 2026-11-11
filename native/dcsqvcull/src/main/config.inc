@@ -145,6 +145,7 @@ struct Config {
   bool shadowRecorderInstancing = true;  // [Model] ShadowRecorderInstancing
   bool shadowRecorderNest = false;      // [Model] ShadowRecorderNest: one nested command list per cascade (perf audit A6 b)
   bool smallGpuBundle = false;          // [Model] SmallGpuBundle: every built small exact GPU item of A6 (measure_kit.h kBundle)
+  bool recordersEmulatedLists = false;  // [Model] RecordersEmulatedLists: shadow / G-buffer recorders without driver command lists
   bool suiteShadowRecVerify = false;    // [Suite] ShadowRecVerify
   int suiteShadowRecVerifySec = 5;      // [Suite] ShadowRecVerifySec
   bool suiteBenchShadowRecorder = false;  // [Suite] BenchShadowRecorder (bench mode 28)

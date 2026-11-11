@@ -453,6 +453,8 @@ They need D3D11 command lists on DCS's graphics device. Every recent NVIDIA card
 
 On AMD cards the driver usually does not offer them. Everything else in the engine optimizations still runs.
 
+**Opt-in, untested on real AMD hardware:** without driver command lists, Windows can stand in for them (it records the calls and replays them on DCS's render thread). To let both recorders run that way, create an empty file named `recorders_emulated_lists.flag` in `Saved Games\DCS\Scripts\DcsQvCull` and start DCS (delete it to go back; `[Model] RecordersEmulatedLists=1` in `DcsQvCull.ini` does the same, but the app rewrites that file at every Launch). The recorders then upload their constants without buffer offsets, which was bit-exact against stock drawing in offline tests on Microsoft's software renderer (WARP); the recorders' same-frame verification (`[Suite] ShadowRecVerify`, `GBufferRecVerify`) works there too and turns a recorder off when it finds a difference. Expect a smaller gain than with driver command lists: the replay still costs the render thread about what DCS's own draw calls cost.
+
 ### ReShade (or another dxgi.dll mod) with DLSS 5
 
 DLSS 5 and Foveated SR need the file name `dxgi.dll` in DCS's `bin` folder. When another program already has one there (ReShade, an overlay), Checks says so and Launch DCS asks once: **Keep it working** loads it after the DLSS 5 loader (as `dxgi2.dll`), **Set it aside** keeps it off while the profile is applied. It is backed up either way, and **Back to stock DCS** puts it back. If DCS misbehaves with both, turn off *Keep another program's dxgi.dll working* on the DLSS page.
