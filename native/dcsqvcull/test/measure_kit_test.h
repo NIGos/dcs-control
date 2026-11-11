@@ -13,6 +13,8 @@ void Run() {
     Check(!d.benchPassMs && d.suitePassTimelineSec == 0 && d.suiteChainCensusSec == 0 && d.suiteGpuBundleTiming == 0 &&
               !d.suiteBenchPrefetchTableBits && !d.suiteBenchGBufferRecorderCockpit,
           "measure kit: every new key off by default");
+    Check(!d.shadowRecorderNest && !d.smallGpuBundle && !shrec::g_nest.load() && shrec::g_nestForce.load() == -1,
+          "A6: [Model] ShadowRecorderNest and SmallGpuBundle off by default (the lists run one by one, as before)");
     Check(!ptiming::g_timeline.load() && !mkit::g_census.load(), "measure kit: timeline and census flags off at load");
   }
   {  // (a) per-frame aggregation: first and last frame dropped, absent kinds count 0 in a frame
@@ -72,8 +74,39 @@ void Run() {
     bool ok = true;
     for (int b = 0; b < 8; ++b) ok = ok && mkit::BundleBlockOn(b) == want[b];
     Check(ok, "measure kit: gpu bundle blocks run OFF ON ON OFF OFF ON ON OFF");
-    Check(mkit::BundleBuiltMask(0x1f) == 0 && mkit::kBundleItems == 5,
-          "measure kit: gpu bundle has the five audit items, none built yet (the run is an A/A)");
+    bool named = true;  // every item not built says why
+    for (int i = 0; i < mkit::kBundleItems; ++i)
+      named = named && (mkit::kBundle[i].apply != nullptr) == (mkit::kBundle[i].dropped == nullptr);
+    Check(mkit::BundleBuiltMask(0x1f) == 0x2 && mkit::BundleBuiltMask(0x1d) == 0 && mkit::kBundleItems == 5 && named,
+          "measure kit: gpu bundle has the five audit items, only bit 1 (nested shadow lists) built, the others name "
+          "why (a mask without bit 1 is an A/A)");
+  }
+  {  // (e) bit 1: the ABBA arm overrides [Model] ShadowRecorderNest, the end restores it; the pass's decision
+    const int force0 = shrec::g_nestForce.load();
+    const bool nest0 = shrec::g_nest.load();
+    shrec::g_nest = false;
+    mkit::ApplyBundle(0x2, 1);
+    const bool on = shrec::NestWanted(shrec::g_nest.load(), shrec::g_nestForce.load());
+    shrec::g_nest = true;
+    mkit::ApplyBundle(0x2, 0);
+    const bool off = !shrec::NestWanted(shrec::g_nest.load(), shrec::g_nestForce.load());
+    mkit::ApplyBundle(0x2, -1);
+    const bool back = shrec::g_nestForce.load() == -1 && shrec::NestWanted(true, -1) && !shrec::NestWanted(false, -1);
+    mkit::ApplyBundle(0x1d, 1);  // not built: no effect
+    const bool untouched = shrec::g_nestForce.load() == -1;
+    shrec::g_nestForce = force0;
+    shrec::g_nest = nest0;
+    ID3D11CommandList* const fake = reinterpret_cast<ID3D11CommandList*>(uintptr_t{0x10});
+    ID3D11CommandList* const none[4] = {};
+    ID3D11CommandList* const one[4] = {fake, nullptr, nullptr, nullptr};
+    ID3D11CommandList* const gap[4] = {fake, nullptr, fake, nullptr};  // helper 1 took no chunk, helper 2 did
+    const bool counts = shrec::ListCount(none, 4) == 0 && shrec::ListCount(one, 4) == 1 && shrec::ListCount(gap, 4) == 2;
+    const bool decide = !shrec::ShouldNest(true, 1, false) && shrec::ShouldNest(true, 2, false) &&
+                        shrec::ShouldNest(true, 4, false) && !shrec::ShouldNest(false, 4, false) &&
+                        !shrec::ShouldNest(true, 4, true) && !shrec::ShouldNest(true, 0, false);
+    Check(on && off && back && untouched && counts && decide,
+          "measure kit: nested shadow lists follow the ABBA arm (1 on, 0 off, -1 the ini key), nest only 2+ lists, "
+          "never after a failure");
   }
   {  // (b, f) A/B render-thread metrics: taken when the thread was read, -1 otherwise
     BenchBlock blk;
