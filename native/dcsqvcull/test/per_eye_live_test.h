@@ -160,6 +160,22 @@ void Run() {
           "per-eye live: the diagnostic line names the cause (no frame start, no G-buffer pass, nothing read back, no "
           "views) and shows the first unpaired TerrainContext");
   }
+  {  // the pixel stage's per-view rows (for the pixel-shader clone's lists)
+    uint8_t p[64] = {}, f[64] = {};
+    for (int i = 0; i < 64; ++i) p[i] = f[i] = static_cast<uint8_t>(i * 7);
+    f[16 * 1 + 4] ^= 1;   // row 1, y
+    f[16 * 3 + 12] ^= 1;  // row 3, w
+    pepl::PsRowsAcc a;
+    pepl::PsRowsAdd(a, 0, p, 64, f, 64);
+    pepl::PsRowsAdd(a, 0, p, 64, p, 64);
+    pepl::PsRowsAdd(a, 1, p, 64, f, 48);  // sizes differ: not compared
+    pepl::PsRowsAdd(a, 5, p, 64, f, 64);  // no such slot
+    const std::string l0 = pepl::PsRowsLine(a, 0), l1 = pepl::PsRowsLine(a, 1);
+    Check(a.pairs[0] == 2 && a.comps[0][1] == 2 && a.comps[0][3] == 8 && a.comps[0][0] == 0 && a.sizeMismatch[1] == 1 &&
+              l0.find("b7, first 64 B, 2 periphery/focus pairs") != std::string::npos && l0.find(" 1:2 3:8 (row:component mask)") != std::string::npos &&
+              l1.find("b10") != std::string::npos && l1.find("not captured") != std::string::npos,
+          "per-eye live C5: rows of the pixel stage's b7 / b10 that differ between periphery and focus, per component");
+  }
   {  // C4
     auto run = [&](int first, int mixed) {
       pepl::C4Acc a;
@@ -188,48 +204,54 @@ void Run() {
                       d = pepl::C2Share({0.0}, {0.5});
     Check(std::fabs(a.share - 0.7) < 1e-9 && a.verdict == 1 && b.verdict == 0 && c.verdict == -1 && d.verdict == -1,
           "per-eye live C2: front-end share = geometry-only / stock of the focus main passes (pass >= 0.6)");
+    const pepl::C2TerrainOut t = pepl::C2Terrain({0.9, 1.1}, {0.6, 0.5}), u = pepl::C2Terrain({0.5}, {0.3}),
+                             w = pepl::C2Terrain({}, {0.3});
+    Check(std::fabs(t.stock - 1.0) < 1e-9 && std::fabs(t.frontEnd - 0.55) < 1e-9 && t.verdict == 1 && u.verdict == 0 &&
+              w.verdict == -1 && !pepl::g_tiOn.load(),
+          "per-eye live C2: the terrain item's front end against stage 3's gate (0.30 ms saved + 0.11 ms of copies)");
   }
-  {  // C7: nine chains (4 cascades, height map, 4 views); focus counts inside the periphery's
-    auto frame = [](uint32_t id, uint32_t focusL) {
+  {  // C7: per frame, the four chains of one pass; peripheries by size, whatever the frame's layout
+    int module = 0, casc = 0, height = 0;
+    const auto kindOf = [&](void* p) -> char { return p == &casc ? 'C' : p == &height ? 'H' : '?'; };
+    // order: the view chains' sizes in frame order (P = periphery, F = focus); pre: chains before them
+    auto frame = [&](const char* order, int pre, uint32_t firstFocusCount) {
       mkit::CensusFrame f;
-      f.frame = id;
-      for (int c = 0; c < 9; ++c) {
-        f.pass.push_back(nullptr);
-        f.counts.push_back(c == 7 ? std::vector<uint32_t>{3, focusL, 0} : c == 8 ? std::vector<uint32_t>{1, 1, 0}
-                                                                                 : std::vector<uint32_t>{5, 4, 2});
+      for (int c = 0; c < pre; ++c) {
+        f.pass.push_back(c + 1 == pre ? static_cast<void*>(&height) : static_cast<void*>(&casc));
+        f.counts.push_back({0, 9, 9});
+      }
+      int nf = 0;
+      for (int k = 0; k < 4; ++k) {
+        f.pass.push_back(&module);
+        if (order[k] == 'P')
+          f.counts.push_back({5, 4, 2});
+        else
+          f.counts.push_back(nf++ == 0 ? std::vector<uint32_t>{3, firstFocusCount, 0} : std::vector<uint32_t>{1, 1, 0});
       }
       return f;
     };
-    mkit::CensusAcc acc;
-    for (uint32_t i = 0; i < 30; ++i) mkit::CensusAdd(acc, frame(i, 4));
-    const pepl::C7Out ok = pepl::C7FromCensus(acc);
-    mkit::CensusAdd(acc, frame(30, 6));
-    const pepl::C7Out bad = pepl::C7FromCensus(acc);
-    mkit::CensusAcc fewFrames;
-    for (uint32_t i = 0; i < 5; ++i) mkit::CensusAdd(fewFrames, frame(i, 4));
-    {  // the view chains are the four of one pass object, wherever the frame boundary puts them
-      int module = 0, other[5] = {};
-      mkit::CensusAcc rot;
-      for (uint32_t i = 0; i < 30; ++i) {
-        mkit::CensusFrame f;
-        f.frame = i;
-        for (int c = 0; c < 9; ++c) {
-          const bool view = c >= 2 && c < 6;
-          f.pass.push_back(view ? static_cast<void*>(&module) : static_cast<void*>(&other[c < 2 ? c : c - 4]));
-          f.counts.push_back(c == 4 ? std::vector<uint32_t>{3, 4, 0} : c == 5 ? std::vector<uint32_t>{1, 1, 0}
-                             : view ? std::vector<uint32_t>{5, 4, 2} : std::vector<uint32_t>{0, 9, 9});
-        }
-        mkit::CensusAdd(rot, f);
-      }
-      const pepl::C7Out r = pepl::C7FromCensus(rot);
-      Check(r.verdict == 1 && r.frames[0] == 30 && r.subset[0] == 30 && r.subset[1] == 30,
-            "per-eye live C7: the view chains are found by their shared pass object, not by their place in the frame");
-    }
-    Check(ok.verdict == 1 && ok.chains == 9 && ok.subset[0] == 30 && ok.subset[1] == 30 && bad.verdict == 0 &&
-              bad.subset[0] == 30 && bad.frames[0] == 31 && bad.maxOver[0] == 1 && bad.subset[1] == 31 &&
-              pepl::C7FromCensus(fewFrames).verdict == -1 && pepl::C7FromCensus(mkit::CensusAcc()).verdict == -1 &&
-              pepl::C7Line(bad).compare(0, 7, "pep C7:") == 0,
-          "per-eye live C7: the focus chains' counts inside their periphery's (last four chains), one frame over: FAIL");
+    pepl::C7Acc a;
+    for (int i = 0; i < 20; ++i) pepl::C7Add(a, frame("PPFF", 3, 4), kindOf);
+    for (int i = 0; i < 10; ++i) pepl::C7Add(a, frame("PFPF", 2, 4), kindOf);   // another layout, another chain count
+    const int ok = pepl::C7Verdict(a);
+    const std::vector<std::string> lay = pepl::C7Layouts(a);
+    mkit::CensusFrame three = frame("PPFF", 3, 4);
+    three.pass.pop_back();
+    three.counts.pop_back();
+    pepl::C7Acc b = a;
+    pepl::C7Add(b, three, kindOf);                    // a frame with three view chains: counted, never compared
+    pepl::C7Add(b, frame("PPFF", 3, 6), kindOf);      // a focus with more instances of one object than its periphery
+    pepl::C7Acc few;
+    for (int i = 0; i < 5; ++i) pepl::C7Add(few, frame("PPFF", 3, 4), kindOf);
+    Check(ok == 1 && a.frames == 30 && a.n[0] == 30 && a.subset[0] == 30 && a.subset[1] == 30 && lay.size() == 2 &&
+              lay[0] == "pep C7 layout: 20 frames CCH|PPFF" && lay[1] == "pep C7 layout: 10 frames CH|PFPF",
+          "per-eye live C7: the view chains are the four of one pass, peripheries by size: contained in every frame "
+          "over two layouts");
+    Check(b.noFour == 1 && b.n[0] == 31 && b.subset[0] == 30 && b.maxOver[0] == 1 && b.subset[1] == 31 &&
+              pepl::C7Verdict(b) == 0 && pepl::C7Verdict(few) == -1 && pepl::C7Verdict(pepl::C7Acc()) == -1 &&
+              pepl::C7Line(b).compare(0, 7, "pep C7:") == 0 && pepl::C7Line(b).find(": FAIL") != std::string::npos,
+          "per-eye live C7: one frame over: FAIL; a frame without four view chains is not compared; too few: not "
+          "measured");
   }
 }
 
