@@ -2658,7 +2658,7 @@ Test("Frame generation only when needed: default with Auto, adaptive_cadence and
     // Stop generating (issue #17, OFXR 0070): cadence_preference 0 steady (the default), 1 balanced, 2 prefer refresh rate;
     // 0 whenever Only when needed is not in use, so the layer keeps its old rule there.
     bool Preference(VrProfile p, int value) => ConfigurationWriters.Ofxr(p).ReplaceLineEndings("\n").Split('\n').Contains("cadence_preference=" + value);
-    Require(fg.FrameGenPassThrough == PassThroughPreference.Steady && Preference(fg, 0) && Preference(fg with { FrameGenPassThrough = PassThroughPreference.Balanced }, 1)
+    Require(fg.FrameGenPassThrough == PassThroughPreference.Balanced && Preference(fg with { FrameGenPassThrough = PassThroughPreference.Steady }, 0) && Preference(fg with { FrameGenPassThrough = PassThroughPreference.Balanced }, 1)
         && Preference(fg with { FrameGenPassThrough = PassThroughPreference.PreferRefresh }, 2), "Stop generating writes cadence_preference");
     Require(Preference(fg with { FrameGenAdaptiveCadence = false }, 0) && Preference(fg with { FrameGenFactor = 2, FrameGenPassThrough = PassThroughPreference.PreferRefresh }, 0)
         && Preference(new VrProfile(), 0) && Preference(fg with { FrameGenPassThrough = (PassThroughPreference)9 }, 0), "cadence_preference is 0 without Only when needed or with an unknown value");
@@ -2666,7 +2666,7 @@ Test("Frame generation only when needed: default with Auto, adaptive_cadence and
     Require(!ConfigurationWriters.Ofxr(fg).Contains("cadence_one_wait", StringComparison.Ordinal), "The removed trial key is not written");
     Require(ProfileValidation.Validate(fg with { FrameGenPassThrough = (PassThroughPreference)9 }).Any(i => i.Code == "framegen-pass-through" && i.Severity == IssueSeverity.Error)
         && ProfileValidation.Validate(fg).All(i => i.Code != "framegen-pass-through"), "An unknown Stop generating value is an error");
-    Require(JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"legacy\",\"name\":\"Legacy\"}").FrameGenPassThrough == PassThroughPreference.Steady
+    Require(JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"legacy\",\"name\":\"Legacy\"}").FrameGenPassThrough == PassThroughPreference.Balanced
         && JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"x\",\"name\":\"X\",\"frameGenPassThrough\":\"Balanced\"}").FrameGenPassThrough == PassThroughPreference.Balanced, "A profile saved before the option gets Steady; Balanced is kept");
     Require(VrProfile.PassThroughShare(PassThroughPreference.Steady) == 0.80 && VrProfile.PassThroughShare(PassThroughPreference.Balanced) == 1.10 && VrProfile.PassThroughShare(PassThroughPreference.PreferRefresh) == 1.25
         && FramegenShare.PassThroughLimitMs(90, PassThroughPreference.Balanced) == 12.2 && FramegenShare.PassThroughLimitMs(90, PassThroughPreference.PreferRefresh) == 13.9, "The estimate's limit per preference");
