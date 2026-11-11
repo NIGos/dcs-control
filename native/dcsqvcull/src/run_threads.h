@@ -508,7 +508,7 @@ std::unordered_map<uint32_t, std::string> Roles(const CpuSnap& snap) {
   for (int i = 0; i < n; ++i) r[ids[i]] = "shadow rec worker " + std::to_string(i);
   n = gbrec::g_pool.ThreadIds(ids, 32);
   for (int i = 0; i < n; ++i) r[ids[i]] = "gbuffer rec worker " + std::to_string(i);
-  for (int i = 0; i < shadowinst::kWorkers; ++i)
+  for (int i = 0; i < shadowinst::kMaxWorkers; ++i)
     if (shadowinst::g_workers[i]) r[GetThreadId(shadowinst::g_workers[i])] = "shadow planner " + std::to_string(i);
   uint32_t mainTid = 0;
   int64_t first = INT64_MAX;

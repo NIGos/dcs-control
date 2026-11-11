@@ -26,9 +26,11 @@ public sealed class DeploymentPlanner(ComponentLocations components)
     /// user's value and the recorded "before" values are the user's own.</param>
     /// <param name="neuralSha256">The hash recorded for the app's saved DLSS 5 runtime copy when the profile uses it; the
     /// deployed bytes must match it.</param>
+    /// <param name="shaderCacheDirectory">The engine module's shader cache folder (<see cref="EngineShaderCache"/>), written
+    /// to DcsQvCull.ini; null leaves the cache in the module's own folder.</param>
     /// <remarks>Existing files are never a conflict: Apply backs up an original the first time it writes a path and
     /// overwrites afterwards (see <see cref="OriginalsStore"/>).</remarks>
-    public ApplyPlan Build(VrProfile profile, InventorySnapshot inventory, string managedRoot, VrProfile? savedProfile = null, AppliedFovea? appliedFovea = null, IReadOnlyDictionary<string, string?>? ownedSettings = null, string? neuralSha256 = null, byte[]? chainedDxgi = null)
+    public ApplyPlan Build(VrProfile profile, InventorySnapshot inventory, string managedRoot, VrProfile? savedProfile = null, AppliedFovea? appliedFovea = null, IReadOnlyDictionary<string, string?>? ownedSettings = null, string? neuralSha256 = null, byte[]? chainedDxgi = null, string? shaderCacheDirectory = null)
     {
         // Optimizations only: none of the VR settings the profile keeps for later is deployed.
         profile = profile.ForLaunch();
@@ -217,10 +219,12 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             var engine = RequireDirectory(components.EngineDirectory, profile.EngineOptimizations ? "The DCS engine optimizations are unavailable." : profile.UsesDepthBoost ? "Depth boost's engine module is unavailable." : "Visual realism's engine module is unavailable.");
             var module = Path.Combine(scripts, "DcsQvCull");
             Add(Path.Combine(module, "DcsQvCull.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.dll")), "DCS engine optimizations loader",
-                // What the module writes while DCS runs; all of it goes with the module on restore.
+                // What the module writes while DCS runs; all of it goes with the module on restore. Its shader cache is
+                // no longer among it: that lives in the app's state folder (EngineShaderCache) and survives a restore;
+                // cache\*.qvc here covers what an earlier version, or a module without the key, left in this folder.
                 runtimeLogs: [.. new[] { "DcsQvCull.log", "DcsQvCull.prev.log", "DcsQvCull.*.log", "DcsQvCullPrefetch.log", "DcsQvCullPrefetch.prev.log", "motion_*.csv", "rotation_*.csv", "timeline_*.csv", "events_*.csv", "fbc_*.csv", "run_profile.flag", "report_*.txt", "profile_*.txt", "bench_*.csv", "run_suite.flag", "run_motion.flag", "toggle_engine.flag", Path.Combine("payload", "active_*.dll"), Path.Combine("cache", "*.qvc"), Path.Combine("cache", "*.qvc.*.tmp"), "gbrec_states*.jsonl", Path.Combine("tone_probe", "*.f32") }.Select(name => Path.Combine(module, name))]);
             Add(Path.Combine(module, "payload", "DcsQvCullPayload.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCullPayload.dll")), "DCS engine optimizations");
-            AddIni(Path.Combine(module, "DcsQvCull.ini"), ConfigurationWriters.DcsQvCull(profile), "DCS engine optimization settings");
+            AddIni(Path.Combine(module, "DcsQvCull.ini"), ConfigurationWriters.DcsQvCull(profile, shaderCacheDirectory), "DCS engine optimization settings");
             // Written last, removed first on restore: the hook never points at a module that is gone.
             Add(Path.Combine(scripts, "Hooks", "DcsQvCull.lua"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.lua")), "DCS engine optimizations hook");
         }

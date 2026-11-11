@@ -339,6 +339,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "r111_test.h"      // R111: [Color] PanelGamut (sRGB -> DCI-P3 compensation for a wide-gamut panel)
 #include "log_phrases_test.h"  // R107: the log phrases DCS Control parses stay in the source byte-exact
 #include "ini_keys_test.h"  // R107: every key the app writes is still read (live or retired)
+#include "shader_cache_dir_test.h"  // [Model] ShaderCacheDir / ShaderCompileWorkers: the cache folder outside the module
 #include "r142_test.h"  // R142: the ini reload diff, the engine key set, frame times around a reload
 #include "r144_test.h"  // R144: Live mode phase 2 (AllocSlabs / Diagnostics live, settings.cfg followed live)
 #include "r146_test.h"  // R146: DCS's D3D11 context behind a device proxy (ReShade): detection, split filter guard
@@ -658,6 +659,10 @@ int main() {
   potest::EarlyFixationTick();  // R107: before any test maps GraphicsCore.dll (perception_only_test.h)
   lptest::Run();  // R107: app-parsed log phrases
   iktest::Run();  // R107: the app's ini keys, retired keys
+  // The cache prewarm compiles on the workers whenever they idle: off for the suite (counts of D3DCompile calls
+  // would depend on timing); "shadow inst prewarm" turns it on for its own worker.
+  shadowinst::g_prewarmOn = false;
+  scdtest::Run();  // the shader cache's folder, worker count and disk caps
   r142test::Run();  // R142: ini reload diff and engine key set (the LoadConfig kill-switch checks: "R142 reload")
   alignas(64) static uint8_t periph[0x700], focus[0x700];
   Vec3 eye{1000.0, 50.0, -2000.0}, fwd{0, 0, 1}, up{0, 1, 0};

@@ -21,8 +21,16 @@ DWORD WINAPI WorkerThread(void*) {
     const qvdev::DevPath dp = qvdev::ReadDevPath(L"IniPath", g_dir + L"DcsQvCull.ini");
     std::wstring devDir;
     if (dp.state == qvdev::kDevOk) devDir = dp.path.substr(0, dp.path.find_last_of(L"\\/") + 1);
+    // The shader cache's folder, compile workers and prewarm (shader_cache_dir.h): from the deployed ini, like
+    // [Dev], once per payload start and before shadow instancing installs.
+    const std::wstring deployedIni = g_dir + L"DcsQvCull.ini";
+    shadowinst::g_cacheChoiceRaw = qvcachedir::ReadConfigured(deployedIni);
+    shadowinst::g_cacheChoice = qvcachedir::Resolve(g_dir, shadowinst::g_cacheChoiceRaw);
+    shadowinst::g_workersWanted = qvcachedir::ReadWorkers(deployedIni);
+    shadowinst::g_prewarmOn = qvcachedir::ReadPrewarm(deployedIni);
     const ULONGLONG t0 = GetTickCount64();
-    const prune::Stats ps = prune::RunAtStart(g_dir, devDir.empty() ? g_dir : devDir);
+    const prune::Stats ps = prune::RunAtStart(g_dir, devDir.empty() ? g_dir : devDir,
+                                              shadowinst::g_cacheChoice.configured ? shadowinst::g_cacheChoice.dir : std::wstring());
     if (ps.files || ps.dirs)
       Log("disk: pruned %u files and %u folders (%.1f MB) in %llu ms (newest %u per output family, cache\\*.qvc "
           "least recently used past %u MB or %u files, orphaned cache temp files)",

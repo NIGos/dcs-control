@@ -2016,6 +2016,89 @@ Test("DCS engine optimizations install in Saved Games Scripts with the profile's
     Require(!Directory.Exists(module) && !File.Exists(Path.Combine(scripts, "Hooks", "DcsQvCull.lua")) && File.ReadAllText(otherHook) == "-- user's own hook");
     Require(EngineOptimizations.Read(options, dcsLog, false) is { State: "not-installed" });
 });
+Test("Engine shader cache: kept in the state folder across Back to stock DCS, adopted from the module's folder, cleared on request", () =>
+{
+    var exe = Make("shader-cache/game/bin/DCS.exe", "fixture"); var options = Make("shader-cache/sg/DCS/Config/options.lua", Lua);
+    var runtime = Make("shader-cache/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("shader-cache/runtime.dll", "fixture");
+    var components = Path.GetDirectoryName(Make("shader-cache/components/dcsqvcull/DcsQvCull.dll", "loader"))!;
+    Make("shader-cache/components/dcsqvcull/DcsQvCullPayload.dll", "payload"); Make("shader-cache/components/dcsqvcull/DcsQvCull.lua", "-- hook");
+    var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime };
+    var planner = new DeploymentPlanner(new(null, null, null, EngineDirectory: components));
+    var state = Path.GetFullPath(Path.Combine(root, "shader-cache/state")); var cache = EngineShaderCache.DirectoryIn(state);
+    var module = Path.GetFullPath(Path.Combine(root, "shader-cache/sg/DCS/Scripts/DcsQvCull"));
+    var on = new VrProfile { QuadViews = QuadProvider.None, EngineOptimizations = true };
+    string Ini(ApplyPlan plan) => new StreamReader(new MemoryStream(plan.Files.Single(f => f.Path.EndsWith("DcsQvCull.ini")).Content), Encoding.UTF8, true).ReadToEnd().ReplaceLineEndings("\n");
+
+    // The key: under [Model], the state folder; left out without a folder, for a folder the module would refuse, and
+    // when only the perception features run (no shader variants are compiled then).
+    Require(cache == Path.Combine(state, "engine-shader-cache") && EngineShaderCache.ForIni(cache) == cache && EngineShaderCache.ForIni(cache + @"\") == cache);
+    var withKey = ConfigurationWriters.DcsQvCull(on, cache).ReplaceLineEndings("\n");
+    Require(IniFile.Parse(withKey).GetValueOrDefault("Model.ShaderCacheDir") == cache && withKey.IndexOf("\nShaderCacheDir=", StringComparison.Ordinal) is var at && at > withKey.IndexOf("[Model]", StringComparison.Ordinal)
+        && at < withKey.IndexOf("[Texture]", StringComparison.Ordinal), "[Model] ShaderCacheDir names the state folder");
+    Require(!ConfigurationWriters.DcsQvCull(on).Contains("ShaderCacheDir") && !ConfigurationWriters.DcsQvCull(on, " ").Contains("ShaderCacheDir"), "No folder: the key is left out (module's own folder)");
+    Require(!ConfigurationWriters.DcsQvCull(on with { EngineOptimizations = false, DepthBoost = true }, cache).Contains("ShaderCacheDir"), "Perception only: no shader cache");
+    var longFolder = Path.Combine(state, new string('x', 260));
+    Require(EngineShaderCache.ForIni(longFolder) is null && EngineShaderCache.ForIni(@"C:\" + new string('y', EngineShaderCache.MaxDirectoryLength - 3)) is not null
+        && EngineShaderCache.ForIni(@"C:\" + new string('y', EngineShaderCache.MaxDirectoryLength - 2)) is null && !ConfigurationWriters.DcsQvCull(on, longFolder).Contains("ShaderCacheDir"), "A folder too long for DCS.exe is not written");
+    Require(EngineShaderCache.ForIni("relative") is not null && Path.IsPathFullyQualified(EngineShaderCache.ForIni("relative")!) && EngineShaderCache.ForIni(null) is null && EngineShaderCache.ForIni("C:\\a\nb") is null);
+    // Developer mode writes the module's constants too; the key stays, once.
+    var devIni = ConfigurationWriters.DcsQvCull(on with { EngineDevMode = true, EngineDevPayloadPath = @"D:\dev\payload.dll", EngineDevIniPath = @"D:\dev\dev.ini" }, cache);
+    Require(devIni.Split("ShaderCacheDir=").Length == 2 && IniFile.Parse(devIni).GetValueOrDefault("Model.ShaderCacheDir") == cache);
+
+    // The planner writes it only when told the folder; ControlService tells it its state folder.
+    Require(!Ini(planner.Build(on, inventory, Path.Combine(state, "managed"))).Contains("ShaderCacheDir"));
+    var plan = planner.Build(on, inventory, Path.Combine(state, "managed"), shaderCacheDirectory: cache);
+    Require(Ini(plan).Contains("\nShaderCacheDir=" + cache + "\n") && new ControlService(root, state).ShaderCacheDirectory == cache);
+
+    // An earlier version's entries in the module's folder are adopted: moved, an entry the state folder already has
+    // stays (the leftover goes), unfinished writes are deleted, other files and the folder holding them are kept.
+    var store = new OriginalsStore(Path.Combine(state, "originals"));
+    store.Apply(plan);
+    Make("shader-cache/sg/DCS/Scripts/DcsQvCull/cache/s_0000000000000001.qvc", "one"); Make("shader-cache/sg/DCS/Scripts/DcsQvCull/cache/g_0000000000000002.qvc", "two-old");
+    Make("shader-cache/sg/DCS/Scripts/DcsQvCull/cache/g_0000000000000003.qvc.4242.tmp", "partial"); Make("shader-cache/sg/DCS/Scripts/DcsQvCull/cache/notes.txt", "user");
+    File.SetAttributes(Path.Combine(module, "cache", "s_0000000000000001.qvc"), FileAttributes.ReadOnly);
+    Make("shader-cache/state/engine-shader-cache/g_0000000000000002.qvc", "two-new");
+    Require(EngineShaderCache.Adopt(Path.Combine(module, "cache"), cache) == 1, "One entry moved");
+    Require(File.ReadAllText(Path.Combine(cache, "s_0000000000000001.qvc")) == "one" && File.ReadAllText(Path.Combine(cache, "g_0000000000000002.qvc")) == "two-new"
+        && Directory.GetFiles(Path.Combine(module, "cache")).Select(Path.GetFileName).SequenceEqual(["notes.txt"]) && Directory.GetFiles(cache).Length == 2, "Adopted without replacing a newer entry");
+    File.Delete(Path.Combine(module, "cache", "notes.txt"));
+    Make("shader-cache/sg/DCS/Scripts/DcsQvCull/cache/s_0000000000000004.qvc", "four");
+    Require(EngineShaderCache.Adopt(Path.Combine(module, "cache"), cache) == 1 && !Directory.Exists(Path.Combine(module, "cache")) && EngineShaderCache.Adopt(Path.Combine(module, "cache"), cache) == 0, "The emptied folder goes; nothing to adopt is fine");
+    Require(EngineShaderCache.Adopt(cache, cache) == 0 && Directory.GetFiles(cache).Length == 3, "The same folder is never emptied into itself");
+
+    // Back to stock DCS: the module folder and everything in it goes (also entries a module without the key wrote
+    // there); the state folder's cache stays.
+    Make("shader-cache/sg/DCS/Scripts/DcsQvCull/cache/s_0000000000000005.qvc", "left by an old module"); Make("shader-cache/sg/DCS/Scripts/DcsQvCull/DcsQvCull.log", "log");
+    Require(store.RestoreOriginals().Complete && !Directory.Exists(module), "Restore removes the module folder with its own cache");
+    Require(Directory.GetFiles(cache).Length == 3 && File.ReadAllText(Path.Combine(cache, "s_0000000000000004.qvc")) == "four", "Restore keeps the state folder's cache");
+
+    // Applying again finds it; clearing deletes the entries and unfinished writes, nothing else.
+    store.Apply(planner.Build(on, inventory, Path.Combine(state, "managed"), shaderCacheDirectory: cache));
+    Require(Directory.GetFiles(cache).Length == 3 && store.RestoreOriginals().Complete);
+    Make("shader-cache/state/engine-shader-cache/s_0000000000000006.qvc.77.tmp", "partial"); var kept = Make("shader-cache/state/engine-shader-cache/readme.txt", "user");
+    var cleared = EngineShaderCache.Clear(state);
+    Require(cleared.Files == 4 && cleared.Bytes == "one".Length + "two-new".Length + "four".Length + "partial".Length && Directory.GetFiles(cache).SequenceEqual([kept]), "Clear deletes entries and unfinished writes only");
+    File.Delete(kept);
+    Require(EngineShaderCache.Clear(state) == (0, 0L) && !Directory.Exists(cache) && EngineShaderCache.Clear(state) == (0, 0L), "An empty cache folder is removed; clearing nothing is fine");
+});
+Test("Engine shader cache: applying through ControlService adopts the module folder's entries", () =>
+{
+    var exe = Make("shader-cache-service/game/bin/DCS.exe", "fixture"); var options = Make("shader-cache-service/sg/DCS/Config/options.lua", Lua);
+    var runtime = Make("shader-cache-service/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("shader-cache-service/runtime.dll", "fixture");
+    var components = Path.GetDirectoryName(Make("shader-cache-service/components/dcsqvcull/DcsQvCull.dll", "loader"))!;
+    Make("shader-cache-service/components/dcsqvcull/DcsQvCullPayload.dll", "payload"); Make("shader-cache-service/components/dcsqvcull/DcsQvCull.lua", "-- hook");
+    var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime };
+    var state = Path.GetFullPath(Path.Combine(root, "shader-cache-service/state")); var service = new ControlService(root, state);
+    var on = new VrProfile { QuadViews = QuadProvider.None, EngineOptimizations = true };
+    var planner = new DeploymentPlanner(new(null, null, null, EngineDirectory: components));
+    var legacy = Make("shader-cache-service/sg/DCS/Scripts/DcsQvCull/cache/s_00000000000000aa.qvc", "entry");
+    // A plan without the key (the module keeps its own folder): nothing is moved.
+    service.Apply(planner.Build(on, inventory, service.ManagedRoot));
+    Require(File.Exists(legacy) && !Directory.Exists(service.ShaderCacheDirectory), "Without the key the module's folder is left alone");
+    service.Apply(planner.Build(on, inventory, service.ManagedRoot, shaderCacheDirectory: service.ShaderCacheDirectory));
+    Require(!File.Exists(legacy) && File.ReadAllText(Path.Combine(service.ShaderCacheDirectory, "s_00000000000000aa.qvc")) == "entry", "With the key the entries follow the cache");
+    Require(service.RestoreOriginals(exe, options).Complete && File.Exists(Path.Combine(service.ShaderCacheDirectory, "s_00000000000000aa.qvc")), "Back to stock DCS keeps them");
+});
 Test("Runtime files removed on restore are only declared logs, outputs and module copies inside the component's folder", () =>
 {
     var owner = Path.GetFullPath(Path.Combine(root, "runtime-files/module"));
