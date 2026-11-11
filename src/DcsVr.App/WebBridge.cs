@@ -363,7 +363,15 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     {
                         // The DCS engine optimizations' own log, the newest test report and DCS's log.
                         var engineOptions = await Task.Run(EngineOptionsPath); // off the UI thread: it may wait for the originals lock
-                        return Reply(id, new { status = engineOptions is null ? null : await Task.Run(() => EngineOptimizations.Read(engineOptions, DcsLogPath(engineOptions), DcsRunning())) });
+                        // Plus the shader warm-up while DCS runs (warmup.json) and the shader cache's size.
+                        var running = DcsRunning();
+                        var (cacheFiles, cacheBytes) = await Task.Run(() => EngineShaderCache.Stats(service.StateRoot));
+                        return Reply(id, new
+                        {
+                            status = engineOptions is null ? null : await Task.Run(() => EngineOptimizations.Read(engineOptions, DcsLogPath(engineOptions), running)),
+                            warmup = engineOptions is null ? null : await Task.Run(() => EngineOptimizations.ReadWarmup(EngineOptimizations.ModuleDirectory(engineOptions), running)),
+                            shaderCache = new { files = cacheFiles, bytes = cacheBytes, dcsRunning = running }
+                        });
                     }
                     // The pupil shift layer's log in the applied profile's folder.
                     var pupilApplied = await Task.Run(service.ReadAppliedProfile);
@@ -624,6 +632,13 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     if (service.ReadAppliedProfile() is { } suiteApplied && !suiteApplied.Profile.EngineOptimizations)
                         throw new InvalidOperationException("The test suite compares Engine Optimizations off and on: turn them on and start DCS with Launch DCS first.");
                     return Reply(id, new { message = EngineOptimizations.StartSuite(suiteOptions, DcsRunning()) });
+                case "engineClearShaderCache":
+                    // The same as DcsVr.Cli clear-shader-cache; never while DCS runs (the module reads and writes it).
+                    EnsureInteractive();
+                    if (DcsRunning()) throw new InvalidOperationException("Close DCS first: it uses the shader cache while it runs.");
+                    var (clearedFiles, clearedBytes) = await Task.Run(() => EngineShaderCache.Clear(service.StateRoot));
+                    return Reply(id, new { message = clearedFiles == 0 ? "The shader cache was already empty."
+                        : string.Format(System.Globalization.CultureInfo.InvariantCulture, "Cleared {0} shader variants ({1:0.0} MB). DCS prepares them again in the first minutes of the next flight.", clearedFiles, clearedBytes / 1048576.0) });
                 case "engineOpen":
                     EnsureInteractive();
                     var openOptions = EngineOptionsPath() ?? throw new InvalidOperationException("Select DCS's options.lua first.");

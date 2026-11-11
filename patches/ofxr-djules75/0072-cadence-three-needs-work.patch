@@ -1,0 +1,90 @@
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -1504,6 +1504,17 @@ struct CadenceConfig {
+     // limit). See CadencePreference.
+     Nanoseconds one_late_episode_gap{100 * kMillisecond};
+     std::uint32_t one_max_failed{0};
++    // DCS Control (0072): missed slots at 2 send it to 3 only while the p90
++    // work is over this fraction of two periods (0: always, as 0032).
++    // Flown with 0071 (static sea view, 12.7 ms of work, Smoothness buffer
++    // off): after a failed 1X the application's frames reached the presenter
++    // 3-5 ms after each slot's wait - its queue one slot short, the release
++    // on starvation - which the 2 ms line counts missed, 8-9 a second; that
++    // sent a view with 57% of two periods of work to 3, where the misses went
++    // on and 30 frames a second were rendered for the rest of the flight
++    // (2 held with none before the attempt). 3 gives time, which was not
++    // short: there it stays at 2. See CadencePreference.
++    double up_late_min_fraction{0.0};
+ };
+ 
+ // DCS Control (0070): how readily adaptive cadence passes frames through
+@@ -1567,6 +1578,7 @@ enum class CadencePreference : std::uint32_t { steady = 0, balanced = 1, rate =
+         config.one_exit_sparse_episodes = 5; // 0071: was 3
+         config.one_late_episode_gap = 250 * kMillisecond;
+         config.one_max_failed = 3;
++        config.up_late_min_fraction = 0.70; // 0072
+     } else if (preference == CadencePreference::rate) {
+         config.one_enter_fraction = 1.25;
+         config.one_exit_slow = false;
+@@ -1574,6 +1586,7 @@ enum class CadencePreference : std::uint32_t { steady = 0, balanced = 1, rate =
+         config.one_exit_sparse_episodes = 10; // 0071
+         config.one_late_episode_gap = 250 * kMillisecond;
+         config.one_max_failed = 6;
++        config.up_late_min_fraction = 0.70; // 0072
+     }
+     return config;
+ }
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -1180,7 +1180,12 @@ CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexc
+         std::max(now - config_.late_window, level_since_), now);
+     const bool enough = stats.judged_samples >= config_.min_samples;
+     if (level_ == 2) {
+-        const bool missed = step.late_episodes >= config_.up_late_episodes;
++        // DCS Control (0072): and, where the preference asks for it, only
++        // with the work to show for it (CadenceConfig::up_late_min_fraction).
++        const bool missed = step.late_episodes >= config_.up_late_episodes &&
++            (config_.up_late_min_fraction <= 0.0 ||
++             (enough &&
++              stats.judged > fraction_of(config_.up_late_min_fraction, two_periods)));
+         if ((missed ||
+                 (enough &&
+                     stats.judged > fraction_of(config_.up_fraction, two_periods))) &&
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -2899,6 +2899,32 @@ void cadence_preference_tests() {
+         }
+         require(fail(rate) && rate.controller.one_given_up(), "rate: the sixth gives up");
+     }
++    {
++        // DCS Control (0072): the flown 2 after a failed 1X - 12.7 ms of
++        // work, a slot counted missed every 110 ms. Balanced and rate stay at
++        // 2 (3 has nothing to give 57% of two periods); steady goes to 3, as
++        // 0032 does; and with the work for it (17 ms, 77%) so do the others.
++        const auto missing = [](CadenceSim& sim, Nanoseconds cpu, Nanoseconds gpu) {
++            std::uint32_t threes = 0;
++            for (int index = 0; index < 450; ++index) {
++                if (index % 5 == 0) {
++                    sim.controller.add_late(sim.now, 1);
++                }
++                threes += sim.frame(cpu, gpu, kMillisecond).level == 3 ? 1U : 0U;
++            }
++            return threes;
++        };
++        CadenceSim steady(cadence_config_for(CadencePreference::steady));
++        CadenceSim balanced(cadence_config_for(CadencePreference::balanced));
++        CadenceSim rate(cadence_config_for(CadencePreference::rate));
++        require(missing(steady, 12'700'000, 12'000'000) > 0, "steady: misses at 2 go to 3");
++        require(missing(balanced, 12'700'000, 12'000'000) == 0 && balanced.changes == 0 &&
++                missing(rate, 12'700'000, 12'000'000) == 0 && rate.changes == 0,
++            "balanced and rate: misses at 2 with light work stay at 2");
++        require(missing(balanced, 17 * kMillisecond, 16 * kMillisecond) > 0 &&
++                missing(rate, 17 * kMillisecond, 16 * kMillisecond) > 0,
++            "balanced and rate: misses at 2 with the work for it go to 3");
++    }
+ }
+ 
+ void cadence_backoff_tests() {

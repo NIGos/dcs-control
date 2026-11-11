@@ -20,16 +20,19 @@
 #include "shadow_rec_count.h"
 #include "split_filter.h"
 #include "srv_tail_trim.h"
+#include "fx_skip.h"  // A3: FX pass Apply repeat counter and lean Apply ([D3D] FxApplySkip, default 0)
 #include "pass_flush.h"
 #include "shadow_rec.h"
 #include "gb_rec_count.h"
 #include "gb_rec.h"
 #include "fwd_rec_count.h"
+#include "fwd_split.h"  // A5: forward pass split glass/terrain/flat/models/other per view ([Suite] ForwardSplit, default 0)
 #include "gpu_pass_timing.h"
 #include "periph_lod.h"
 #include "cascade_cache.h"  // R33: far shadow cascade static depth cache ([Shadows] CascadeCache, prototype)
 #include "chain_fast.h"  // R34: shorter terrain/forest culling chains ([D3D] ChainFast, default 7)
 #include "shader_fast.h"  // R36: wider grids for two single-SM kernels ([D3D] ShaderFast, default 0)
+#include "chain_derive.h"  // audit A2/B4: focus chain = filtered periphery chain? ([Suite] ChainDeriveCensus, measure only, default 0)
 #include "dlss_views.h"  // R122: per-view DLSS preset ([DLSS] PeripheryPreset / FocusPreset / IgnoreDriverPreset, default 0)
 #include "night_tone.h"   // R37: opt-in night darkening through DCS's tone mapper ([Night] NightTone, default 0)
 #include "run_threads.h"
@@ -51,3 +54,7 @@
 #include "frame_timeline.h"  // R52: [Perf] FrameTimeline / PoseProbe / EventLog (measure only, default 0)
 #include "focus_twin.h"  // R123: [Model] FocusTwin (opt-in, default 0): focus terrain patches replayed from the periphery
 #include "vrs_probe.h"  // R139: [Suite] VrsProbe (measure only, default 0): NvAPI variable rate shading A/B probe
+#include "measure_kit.h"  // Perf audit 2026-11-10: pass timeline, chain census, GPU bundle (measure only, default 0)
+#include "periph_census.h"  // Perf audit B6: periphery instance census ([Suite] PeriphCensus, measure only, default 0)
+#include "per_eye_pass.h"  // One geometry pass per eye, stage 0 (PER_EYE_PASS_DESIGN.md): pure parts, [Suite] PerEyePassCensus (default 0)
+#include "per_eye_live.h"  // ... stage 2: live captures C2 / C4 / C5 / C7 ([Suite] PerEyeC2 / C4 / C5 / C7 seconds, measure only, default 0)

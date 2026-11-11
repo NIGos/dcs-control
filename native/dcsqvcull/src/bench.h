@@ -18,7 +18,19 @@ struct BenchBlock {
   uint64_t rtFrames = 0;
   double gpuSum = 0;  // NVML utilisation samples
   int gpuSamples = 0;
+  // Measurement kit: the render thread's own CPU cycles over the block (pass_timing.h's top-level pass thread,
+  // QueryThreadCycleTime from the suite thread: two calls per block), and with [Bench] PassMs=1 the render-thread
+  // pass execution and the G-buffer passes' exclusive time (pass_timing.h recording on in both arms); -1 = not taken.
+  uint64_t rtThreadCycles = 0;
+  bool rtThreadOk = false;
+  double passTopUs = -1, passGbUs = -1;
 };
+
+// Measurement kit (defined at the end of pass_timing.h): the render thread's id (0 = not known yet), and
+// the per-block pass recording of [Bench] PassMs.
+DWORD BenchRenderTid();
+void BenchPassBegin();
+void BenchPassEnd(double* topUs, double* gbUs);
 
 struct BenchState {
   std::mutex mutex;
@@ -66,6 +78,7 @@ uint64_t ProcessCycles() {
 
 struct BlockMetrics {
   double fps, frameMs, p95Ms, procCpuMs, rtCpuMs, periph, focus, collectMs, gpuUtil, shadow;
+  double renderCpuMs, renderBusyPct, passMs, gbPassMs;  // measurement kit; -1 = not measured
 };
 
 BlockMetrics Metrics(const BenchBlock& b, double tscHz) {
@@ -90,6 +103,10 @@ BlockMetrics Metrics(const BenchBlock& b, double tscHz) {
   m.shadow = b.shadowRend / f;
   m.collectMs = b.collectMs / f;
   m.gpuUtil = b.gpuSamples ? b.gpuSum / b.gpuSamples : -1;
+  m.renderCpuMs = b.rtThreadOk ? b.rtThreadCycles / tscHz * 1000.0 / f : -1;
+  m.renderBusyPct = b.rtThreadOk && b.seconds > 0 ? b.rtThreadCycles / tscHz / b.seconds * 100.0 : -1;
+  m.passMs = b.passTopUs >= 0 ? b.passTopUs / 1000.0 / f : -1;
+  m.gbPassMs = b.passGbUs >= 0 ? b.passGbUs / 1000.0 / f : -1;
   return m;
 }
 
@@ -107,13 +124,15 @@ void Summarize(const std::vector<BenchBlock>& blocks, double tscHz, bool restore
   if (csv) {
     fprintf(csv,
             "block,on,seconds,frames,fps,frame_ms,p95_ms,process_cpu_ms_per_frame,"
-            "collect_thread_cpu_ms_per_frame,collect_ms,periph_renderables,focus_renderables,gpu_util\n");
+            "collect_thread_cpu_ms_per_frame,collect_ms,periph_renderables,focus_renderables,gpu_util,"
+            "render_thread_cpu_ms_per_frame,render_thread_busy_pct,pass_ms_per_frame,gbuffer_pass_ms_per_frame\n");
     for (size_t i = 0; i < blocks.size(); ++i) {
       const BlockMetrics& m = ms[i];
-      fprintf(csv, "%zu,%d,%.2f,%llu,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f,%.0f,%.0f,%.1f\n", i,
+      fprintf(csv, "%zu,%d,%.2f,%llu,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f,%.0f,%.0f,%.1f,%.3f,%.1f,%.3f,%.3f\n", i,
               blocks[i].on ? 1 : 0, blocks[i].seconds,
               static_cast<unsigned long long>(blocks[i].frames), m.fps, m.frameMs, m.p95Ms,
-              m.procCpuMs, m.rtCpuMs, m.collectMs, m.periph, m.focus, m.gpuUtil);
+              m.procCpuMs, m.rtCpuMs, m.collectMs, m.periph, m.focus, m.gpuUtil, m.renderCpuMs, m.renderBusyPct,
+              m.passMs, m.gbPassMs);
     }
     fclose(csv);
   }
@@ -123,17 +142,22 @@ void Summarize(const std::vector<BenchBlock>& blocks, double tscHz, bool restore
   struct Field {
     const char* name;
     double BlockMetrics::*ptr;
+    bool optional;  // measurement kit: left out when no block measured it (-1)
   };
-  const Field fields[] = {{"fps", &BlockMetrics::fps},
-                          {"frame_ms", &BlockMetrics::frameMs},
-                          {"p95_frame_ms", &BlockMetrics::p95Ms},
-                          {"process_cpu_ms/frame", &BlockMetrics::procCpuMs},
-                          {"collect_thread_cpu_ms/frame", &BlockMetrics::rtCpuMs},
-                          {"collect_ms/frame", &BlockMetrics::collectMs},
-                          {"periph_renderables", &BlockMetrics::periph},
-                          {"focus_renderables", &BlockMetrics::focus},
-                          {"shadow_renderables", &BlockMetrics::shadow},
-                          {"gpu_util_%", &BlockMetrics::gpuUtil}};
+  const Field fields[] = {{"fps", &BlockMetrics::fps, false},
+                          {"frame_ms", &BlockMetrics::frameMs, false},
+                          {"p95_frame_ms", &BlockMetrics::p95Ms, false},
+                          {"process_cpu_ms/frame", &BlockMetrics::procCpuMs, false},
+                          {"collect_thread_cpu_ms/frame", &BlockMetrics::rtCpuMs, false},
+                          {"collect_ms/frame", &BlockMetrics::collectMs, false},
+                          {"periph_renderables", &BlockMetrics::periph, false},
+                          {"focus_renderables", &BlockMetrics::focus, false},
+                          {"shadow_renderables", &BlockMetrics::shadow, false},
+                          {"gpu_util_%", &BlockMetrics::gpuUtil, false},
+                          {"render_thread_cpu_ms/frame", &BlockMetrics::renderCpuMs, true},
+                          {"render_thread_busy_%", &BlockMetrics::renderBusyPct, true},
+                          {"pass_ms/frame", &BlockMetrics::passMs, true},
+                          {"gbuffer_pass_ms/frame", &BlockMetrics::gbPassMs, true}};
   Log("==== BENCH RESULT: %s (%zu blocks, file %ls) ====", what, blocks.size(), name);
   // R30: a frame-rate cap in both states (VD/SteamVR at refresh/N with SSW or a cap) pins fps: say so first.
   {
@@ -158,6 +182,11 @@ void Summarize(const std::vector<BenchBlock>& blocks, double tscHz, bool restore
     }
   }
   for (const Field& fd : fields) {
+    if (fd.optional) {
+      bool any = false;
+      for (size_t i = 0; i < blocks.size(); ++i) any = any || (blocks[i].frames && ms[i].*fd.ptr >= 0);
+      if (!any) continue;
+    }
     std::vector<double> diffsPct;
     double sumOn = 0, sumOff = 0;
     int nOn = 0, nOff = 0;
@@ -256,6 +285,9 @@ bool RunBenchmark(int mode, bool beeps) {
         : mode == 31 ? "bench: mode setShaderResources tail trim, OFF = stock call sites, ON = identical tail not rebound"
         : mode == 32 ? "bench: mode periphery-only instancer LOD (LOSSY), OFF = stock tables, ON = scaled tables in the peripheral views"
         : mode == 33 ? "bench: mode terrain prefetch fix, OFF = observe (every call to the kernel), ON = repeats within WindowMs skipped"
+        : mode == 34 ? "bench: mode prefetch repeat table, OFF = 2^16 entries, ON = [Prefetch] TableBits (measurement kit, R41 p95 check)"
+        : mode == 35 ? "bench: mode g-buffer recorder cockpit part, OFF = recorder without cockpit items, ON = with them (measurement kit, R24 re-test)"
+        : mode == 36 ? "bench: mode FX Apply repeat skip, OFF = stock Apply (hook out), ON = lean Apply on identical repeats"
                     : "bench: mode shadow instancing, OFF = one draw per caster, ON = one instanced draw per group");
   }
   if (mode == 1) {
@@ -275,6 +307,9 @@ bool RunBenchmark(int mode, bool beeps) {
   std::vector<BenchBlock> done;
   int zeroQuad = 0;  // consecutive focused blocks without a quad-view frame
   const uint64_t frames0 = perfgov::g_frames.load();
+  // Measurement kit: the render thread's handle for its cycle count (0 / nullptr: not known, column left out).
+  const DWORD rtTid = BenchRenderTid();
+  HANDLE rtThread = rtTid ? OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, rtTid) : nullptr;
   for (int i = 0; i < blocks && !g_benchAbort; ++i) {
     bool on = (i % 2) == 1;
     SetBenchVariant(on);
@@ -284,6 +319,9 @@ bool RunBenchmark(int mode, bool beeps) {
     bool focusedAtStart = g_xrFocused.load();
     LARGE_INTEGER a, b;
     uint64_t pc0;
+    ULONG64 rt0 = 0;
+    const bool rtOk0 = rtThread && QueryThreadCycleTime(rtThread, &rt0);
+    if (g_cfg.benchPassMs) BenchPassBegin();
     {
       std::lock_guard<std::mutex> lock(g_bench.mutex);
       g_bench.cur = BenchBlock{};
@@ -313,6 +351,14 @@ bool RunBenchmark(int mode, bool beeps) {
       g_bench.cur.seconds = (b.QuadPart - a.QuadPart) * g_qpcToUs / 1e6;
       blk = std::move(g_bench.cur);
     }
+    {
+      ULONG64 rt1 = 0;
+      if (rtOk0 && QueryThreadCycleTime(rtThread, &rt1) && rt1 >= rt0) {
+        blk.rtThreadCycles = rt1 - rt0;
+        blk.rtThreadOk = true;
+      }
+      if (g_cfg.benchPassMs) BenchPassEnd(&blk.passTopUs, &blk.passGbUs);
+    }
     if (!focusedAtStart || g_focusLosses.load() != losses0 || !g_xrFocused.load()) {
       Log("bench: block %d/%d discarded (OpenXR session not FOCUSED)", i + 1, blocks);
       blk.frames = 0;
@@ -335,6 +381,7 @@ bool RunBenchmark(int mode, bool beeps) {
         static_cast<unsigned long long>(blk.frames));
     done.push_back(std::move(blk));
   }
+  if (rtThread) CloseHandle(rtThread);
   LARGE_INTEGER q1;
   QueryPerformanceCounter(&q1);
   double tscHz = (__rdtsc() - tsc0) / ((q1.QuadPart - q0.QuadPart) * g_qpcToUs / 1e6);
@@ -364,7 +411,9 @@ bool RunBenchmark(int mode, bool beeps) {
   if (mode == 29) ApplyGBufferRecorder();
   if (mode == 30) ApplyPassFlush();
   if (mode == 31) ApplySrvTailTrim(g_cfg.srvTailTrim && !g_engineOff.load());
-  if (mode == 33) ApplyPrefetch();
+  if (mode == 33 || mode == 34) ApplyPrefetch();
+  if (mode == 35) ApplyGBufferRecorder();
+  if (mode == 36) FxApplySkipBenchEnd();  // A3: the configured state back
   if (mode == 23) ApplyGBufferBatch();
   if (mode == 19) {
     g_shadowTexSkipOn = g_cfg.shadowTexSkip && !g_engineOff.load();
@@ -432,6 +481,9 @@ bool RunBenchmark(int mode, bool beeps) {
             : mode == 31 ? "setShaderResources identical-tail trim (R15 F2)"
             : mode == 32 ? "periphery-only instancer LOD (R26 13, LOSSY)"
             : mode == 33 ? "terrain prefetch fix (observe vs skip)"
+            : mode == 34 ? "prefetch repeat table 2^16 vs TableBits (R41 p95)"
+            : mode == 35 ? "g-buffer recorder cockpit part (R24)"
+            : mode == 36 ? "FX Apply repeat skip (A3, lean Apply)"
                         : "peripheral exclusion OFF/ON");
   if (beeps)
     for (int k = 0; k < 3; ++k) Chime(1500, 90);

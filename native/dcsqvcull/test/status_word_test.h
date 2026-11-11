@@ -119,7 +119,59 @@ void Handover() {
   Check(true, "status handover: no write after detach under concurrent publishing (50 rounds)");
 }
 
+// Warm-up progress: bits 44-52 and warmup.json (warmup_status.h).
+void WarmProgress() {
+  const uint64_t base = Pack(true, true, 12, 0, 17) | kWarming;
+  const uint64_t w = WithWarmProgress(base, 60, false);
+  Check(WarmValid(w) && WarmPercent(w) == 60 && !Prewarming(w) && (w & ~(kWarmValid | (0x7full << kWarmPercentShift))) == base,
+        "warm progress: 60% valid in bits 44-51, the rest of the word unchanged");
+  Check(WithWarmProgress(base, -1, false) == base, "warm progress: none adds nothing (an old panel sees the same word)");
+  Check(WarmPercent(WithWarmProgress(base, 250, true)) == 100 && Prewarming(WithWarmProgress(base, 250, true)),
+        "warm progress: clamped to 100, prewarm bit 52");
+  Check(WithWarmProgress(0, 50, true) == 0, "warm progress: not running stays 0");
+  Check((WithWarmProgress(base, 100, true) >> 53) == 0 && kWarmPercentShift == 44 && kWarmValid == (1ull << 51) &&
+            kPrewarm == (1ull << 52) && kCockpitSymbology == (1ull << 43),
+        "warm progress: bits 44-52 only, above bit 43 (R95)");
+  Check(ProgressPercent(120, 80) == 60 && ProgressPercent(0, 5) == 0 && ProgressPercent(0, 0) == 100 &&
+            ProgressPercent(999, 1) == 99 && ProgressPercent(7, 0) == 100,
+        "warm progress: done over done + pending, 99 at most while pending");
+  qvwarm::State s;
+  s.state = "warming";
+  s.done = 120;
+  s.total = 200;
+  s.hits = 80;
+  s.compiled = 40;
+  s.seconds = 34.6;
+  Check(qvwarm::Json(s) ==
+            "{\"version\":1,\"state\":\"warming\",\"done\":120,\"total\":200,\"hits\":80,\"compiled\":40,\"seconds\":35}\n",
+        "warmup.json: the documented layout");
+  s.total = 3;
+  s.seconds = -1;
+  Check(qvwarm::Json(s).find("\"total\":120,") != std::string::npos && qvwarm::Json(s).find("\"seconds\":0}") != std::string::npos,
+        "warmup.json: total never below done, no negative seconds");
+  wchar_t tmp[MAX_PATH];
+  GetTempPathW(MAX_PATH, tmp);
+  const std::wstring dir = std::wstring(tmp) + L"qv_warmup_test_" + std::to_wstring(GetCurrentProcessId()) + L"\\";
+  CreateDirectoryW(dir.c_str(), nullptr);
+  const bool w1 = qvwarm::Write(dir, qvwarm::Json(s));
+  s.state = "done";
+  const bool w2 = qvwarm::Write(dir, qvwarm::Json(s));
+  std::string read;
+  if (FILE* f = _wfopen((dir + L"warmup.json").c_str(), L"rb")) {
+    char b[512];
+    const size_t n = fread(b, 1, sizeof(b), f);
+    read.assign(b, n);
+    fclose(f);
+  }
+  Check(w1 && w2 && read == qvwarm::Json(s) && GetFileAttributesW((dir + L"warmup.json.tmp").c_str()) == INVALID_FILE_ATTRIBUTES,
+        "warmup.json: replaced atomically, no temp file left");
+  Check(!qvwarm::Write(L"", "{}"), "warmup.json: no folder, nothing written");
+  DeleteFileW((dir + L"warmup.json").c_str());
+  RemoveDirectoryW(dir.c_str());
+}
+
 void Run() {
+  WarmProgress();
   Layout();
   Counting();
   Handover();
