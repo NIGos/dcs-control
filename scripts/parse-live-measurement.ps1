@@ -26,11 +26,17 @@ function Get-Label([string[]]$lines) {
 }
 
 function Get-Timeline([string[]]$lines) {
-    $t = [ordered]@{ Frames = $null; Mean = $null; P50 = $null; P95 = $null; RtCpu = $null; RtBusy = $null; Kinds = @(); Culling = @() }
+    $t = [ordered]@{ Frames = $null; QuadFrames = $null; NoBoundary = $false; Mean = $null; P50 = $null; P95 = $null; RtCpu = $null; RtBusy = $null; Kinds = @(); Culling = @() }
     $inCull = $false
     foreach ($l in $lines) {
-        if ($l -match 'pass timeline: (\d+) frames .*pass execution mean ([\d.]+) ms, p50 ([\d.]+), p95 ([\d.]+)') {
-            $t.Frames = [int]$Matches[1]; $t.Mean = Num $Matches[2]; $t.P50 = Num $Matches[3]; $t.P95 = Num $Matches[4]
+        if ($l -match 'pass timeline: (\d+) frames \((\d+) quad-view frames.*pass execution mean ([\d.]+) ms, p50 ([\d.]+), p95 ([\d.]+)') {
+            $t.Frames = [int]$Matches[1]; $t.QuadFrames = [int64]$Matches[2]
+            $t.Mean = Num $Matches[3]; $t.P50 = Num $Matches[4]; $t.P95 = Num $Matches[5]
+            # Before the 2026-11-11 fix the frame boundary never fired live (1 timeline frame for thousands of
+            # quad-view frames), so the per-frame figures were window totals: reported as n/a, never as ms/frame.
+            $t.NoBoundary = ($t.Frames * 2 -lt $t.QuadFrames)
+        } elseif ($l -match 'pass timeline: WARNING frame boundary not detected') {
+            $t.NoBoundary = $true
         } elseif ($l -match 'pass timeline: render thread CPU ([\d.]+) ms/frame \(busy ([\d.]+)%') {
             $t.RtCpu = Num $Matches[1]; $t.RtBusy = Num $Matches[2]
         } elseif ($l -match '^\s*pass timeline (.+?)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$') {
@@ -42,6 +48,7 @@ function Get-Timeline([string[]]$lines) {
         } elseif ($inCull -and $l -match '^--') { $inCull = $false }
     }
     if ($null -eq $t.Frames) { return $null }
+    if ($t.NoBoundary) { $t.Mean = $null; $t.P50 = $null; $t.P95 = $null; $t.Kinds = @() }  # window totals, not per frame
     return [pscustomobject]$t
 }
 
@@ -222,6 +229,9 @@ if ($SelfTest) {
     T ((Get-Label $r) -eq 'A5 cockpit recorder') 'label'
     $tl = Get-Timeline $r
     T ($tl.Frames -eq 2700 -and $tl.P95 -eq 21.3 -and $tl.RtBusy -eq 96.5 -and $tl.Kinds[0].Kind -eq 'GBufferPass' -and $tl.Culling.Count -eq 1) 'timeline'
+    $old = Get-Timeline @('  pass timeline: 1 frames (3712 quad-view frames, 66.0 s, 519694 events); render-thread pass execution mean 50318.275 ms, p50 50318.275, p95 50318.275, max 50318.275 ms/frame', '  pass timeline: render thread CPU 16.716 ms/frame (busy 94.0% of wall time)', '    pass timeline GBufferPassData                    20893.810 20893.810 20893.810  29640.0')
+    T ($old.NoBoundary -and $null -eq $old.Mean -and $old.Kinds.Count -eq 0 -and $old.RtCpu -eq 16.716) 'timeline without frame boundary (pre-fix live report): per-frame figures n/a, render thread CPU kept'
+    T (-not $tl.NoBoundary -and $tl.QuadFrames -eq 2702) 'timeline quad-view frames'
     $b = Get-Benches $r
     T ($b.Count -eq 1 -and $b[0].Fields['render_thread_cpu_ms/frame'].Significant) 'bench rows'
     T ((Judge-Cockpit $b[0] @()) -like 'GO:*') 'cockpit GO'
@@ -275,7 +285,9 @@ foreach ($s in $sources) {
     if (-not $t) { continue }
     $timelines += [pscustomobject]@{ Label = (Get-Label $s.Lines); T = $t }
     $agg = ($t.Culling | Where-Object Phase -like 'aggregated*' | Select-Object -First 1).Ms
-    Out ('| {0} | {1} | {2:N3} | {3:N3} | {4:N3} | {5} | {6} | {7} |' -f (Get-Label $s.Lines), $t.Frames, $t.Mean, $t.P50, $t.P95,
+    $na = 'n/a (no frame boundary)'
+    Out ('| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} |' -f (Get-Label $s.Lines), $t.Frames,
+        $(if ($t.NoBoundary) { $na } else { '{0:N3}' -f $t.Mean }), $(if ($t.NoBoundary) { $na } else { '{0:N3}' -f $t.P50 }), $(if ($t.NoBoundary) { $na } else { '{0:N3}' -f $t.P95 }),
         $(if ($null -ne $t.RtCpu) { '{0:N3}' -f $t.RtCpu } else { 'n/a' }), $(if ($null -ne $t.RtBusy) { '{0:N1}' -f $t.RtBusy } else { 'n/a' }),
         $(if ($null -ne $agg) { '{0:N2}' -f $agg } else { 'n/a' }))
 }
@@ -294,7 +306,7 @@ if ($paused -and $unpaused -and $null -ne $unpaused.T.RtBusy) {
     Out ('Main-thread check: render thread busy {0:N1}% paused, {1:N1}% unpaused -> {2}' -f $paused.T.RtBusy, $unpaused.T.RtBusy,
         $(if ($unpaused.T.RtBusy -lt 85) { 'unpaused is limited elsewhere (check GPU % and the cap before calling it Main-bound)' } else { 'still render-thread bound' }))
 }
-if ($unpaused) {
+if ($unpaused -and $unpaused.T.Kinds.Count) {
     $terr = ($unpaused.T.Kinds | Where-Object Kind -match 'Terrain' | Measure-Object Mean -Sum).Sum
     Out ('B5 terrain: terrain pass kinds {0:N3} ms/frame unpaused -> {1}' -f $terr, $(if ($terr -ge 1.5) { 'reopen the terrain study' } else { 'stays closed' }))
 }

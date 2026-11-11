@@ -238,6 +238,9 @@ DWORD WINAPI WorkerThread(void*) {
         // Audit A2/B4 census (measure only, default 0: nothing installed); needs chain fast's CSSetShader hook.
         if (g_cfg.suiteChainDeriveCensus || chainderive::g_state.load())
           chainderive::Tick(g_cfg.suiteChainDeriveCensus, g_cfg.suiteChainDeriveCensusMB);
+        // Audit B6 periphery instance census (measure only, default 0: nothing installed).
+        if (g_cfg.suitePeriphCensus || pcensus::g_installed.load())
+          pcensus::Tick(g_cfg.suitePeriphCensus, g_benchRunningFlag.load());
         // R122 per-view DLSS preset (opt-in, default 0: nothing installed). The kill switch makes its hook pass
         // through; the features DCS creates at the next mission load get DCS's own hint again.
         dlssv::Tick(dlssv::ParsePreset(g_cfg.dlssPeripheryPreset.c_str()), dlssv::ParsePreset(g_cfg.dlssFocusPreset.c_str()),

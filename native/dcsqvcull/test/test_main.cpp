@@ -343,6 +343,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "r144_test.h"  // R144: Live mode phase 2 (AllocSlabs / Diagnostics live, settings.cfg followed live)
 #include "r146_test.h"  // R146: DCS's D3D11 context behind a device proxy (ReShade): detection, split filter guard
 #include "measure_kit_test.h"  // Perf audit 2026-11-10: the measurement kit's pure parts (measure_kit.h, bench.h)
+#include "periph_census_test.h"  // Perf audit B6: periphery instance census (pure parts, kernels, one WARP run)
 
 // R60: QV_TEST_LOAD=<n> (off by default): n busy threads of normal priority inside this process for the whole run.
 // An in-process stand-in for a machine loaded by another program (as DCS loading a mission); never an external load
@@ -457,6 +458,12 @@ int main() {
   if (getenv("QV_PEP_ONLY")) {  // only the per-eye pass tests (QV_PEP_ARCHIVE=<folder>: also the census of that folder)
     peptest::Run();
     pepltest::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
+  if (getenv("QV_PC_ONLY")) {  // audit B6: only the periphery census and measurement kit tests
+    mktest::Run();
+    pctest::Run();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -2046,6 +2053,7 @@ int main() {
   r101test::Run();  // R101: the learnt HUD field recovers after a bank
   r144test::Run();  // R144: after the allocator test (it reads the global allocate counters)
   mktest::Run();  // the measurement kit's pure parts (perf audit 2026-11-10)
+  pctest::Run();  // audit B6 periphery instance census
 
   // Suite: configuration check + short profile, report file written.
   {

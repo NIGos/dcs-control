@@ -229,6 +229,10 @@ void LoadConfig(bool initial) {
     c.suiteChainDeriveCensus = s <= 0 ? 0 : (std::max)(5, (std::min)(3600, s));
     c.suiteChainDeriveCensusMB = (std::max)(1, (std::min)(256, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ChainDeriveCensusMB", 24, ini.c_str()))));
   }
+  {  // periph_census.h (audit B6): seconds per census line, 0 = off (values 1..4 are taken as 5)
+    const int s = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"PeriphCensus", 0, ini.c_str()));
+    c.suitePeriphCensus = s <= 0 ? 0 : (std::max)(5, (std::min)(3600, s));
+  }
   c.shaderFast = qvini::Mask(L"D3D", L"ShaderFast", 3, 0x3, ini.c_str());  // R36, decimal or 0x hex
   c.suiteShaderFastTiming = GetPrivateProfileIntW(L"Suite", L"ShaderFastTiming", 0, ini.c_str()) != 0;
   c.suiteShaderFastVerify = (std::max)(0, (std::min)(600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ShaderFastVerify", 0, ini.c_str()))));
