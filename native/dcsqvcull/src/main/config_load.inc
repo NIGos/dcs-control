@@ -223,6 +223,11 @@ void LoadConfig(bool initial) {
   c.chainFast = qvini::Mask(L"D3D", L"ChainFast", 7, 0x7, ini.c_str());  // decimal or 0x hex
   c.suiteChainFastTiming = GetPrivateProfileIntW(L"Suite", L"ChainFastTiming", 0, ini.c_str()) != 0;
   c.suiteChainFastVerify = (std::max)(0, (std::min)(600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ChainFastVerify", 0, ini.c_str()))));
+  {  // chain_derive.h (audit A2/B4): seconds per census line, 0 = off (values 1..4 are taken as 5)
+    const int s = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ChainDeriveCensus", 0, ini.c_str()));
+    c.suiteChainDeriveCensus = s <= 0 ? 0 : (std::max)(5, (std::min)(3600, s));
+    c.suiteChainDeriveCensusMB = (std::max)(1, (std::min)(256, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ChainDeriveCensusMB", 24, ini.c_str()))));
+  }
   c.shaderFast = qvini::Mask(L"D3D", L"ShaderFast", 3, 0x3, ini.c_str());  // R36, decimal or 0x hex
   c.suiteShaderFastTiming = GetPrivateProfileIntW(L"Suite", L"ShaderFastTiming", 0, ini.c_str()) != 0;
   c.suiteShaderFastVerify = (std::max)(0, (std::min)(600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ShaderFastVerify", 0, ini.c_str()))));
