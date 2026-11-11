@@ -12,6 +12,9 @@ public enum NeuralDepthMode { Game, Normal, Reversed }
 /// <summary>DLSS-NR model style (DLSSNR.Style 0..2), the same three modes RenoDX's DLSS 5 add-on offers.</summary>
 public enum NeuralStyle { Standard, Natural, Cinematic }
 public enum NvidiaFlowPreset { Fast, Medium, Slow }
+/// <summary>How readily frame generation only when needed passes DCS's frames through ungenerated
+/// (<see cref="VrProfile.FrameGenPassThrough"/>; OFXR <c>cadence_preference</c> 0, 1, 2, fork patch 0070).</summary>
+public enum PassThroughPreference { Steady, Balanced, PreferRefresh }
 /// <summary>The DLSS preset of the Quad Views periphery (<see cref="VrProfile.PeripheryDlssPreset"/>); Off keeps DCS's.</summary>
 public enum PeripheryDlssPreset { Off, E, F, K, M }
 public enum FpsLimitMode { Preserve, RuntimeHeadroom, MatchRefresh, Custom }
@@ -78,10 +81,22 @@ public sealed record VrProfile
     /// it falls behind. Every session and scene starts at 2X (DCS paced at half the refresh rate by OFXR, which the
     /// engine module logs as "capped at 45 fps (90 Hz / 2)"); 1X is entered once the p90 CPU and GPU time per frame have
     /// both stayed at most 80% of the refresh period for 5 s without a missed slot (CadenceConfig, issue #17), and left
-    /// above 95% or on missed slots. <see cref="RenderedFpsCap"/> plays no part unless the frame limit is Custom.
+    /// above 95% or on missed slots; that is Steady, and <see cref="FrameGenPassThrough"/> widens it. <see cref="RenderedFpsCap"/> plays no part unless the frame limit is Custom.
     /// Needs DCS's frame limit at the refresh rate. "Only when needed" on the Framegen page, on by
     /// default; it applies to Auto only (<see cref="UsesAdaptiveCadence"/>).</summary>
     public bool FrameGenAdaptiveCadence { get; init; } = true;
+    /// <summary>When Only when needed stops generating (OFXR cadence_preference, fork patch 0070, issue #17). OFXR
+    /// estimates DCS's frame time at the full rate while it runs at half of it, and that estimate reads a fifth to a
+    /// quarter high. Steady is the rule of 0.6.0 to 0.6.3: pass through under 80% of a refresh, generate again over 95%
+    /// (a PC that just holds the refresh rate never passes through). Balanced, the default, tries passing through when
+    /// the estimate is within 110% of a refresh and keeps it while frames arrive on time (generating again after 2 late
+    /// frames in a second or 3 in ten). PreferRefresh tries up to 125% and generates again only after 2 late frames in a
+    /// second. A try that fails is not repeated for 30 s, doubling up to 4 minutes. "Stop generating" on the Framegen
+    /// page; applies at the next DCS start.</summary>
+    public PassThroughPreference FrameGenPassThrough { get; init; } = PassThroughPreference.Balanced;
+    /// <summary>The share of one refresh period OFXR's frame-time estimate has to stay under before frames pass through
+    /// (CadenceConfig::one_enter_fraction per preference).</summary>
+    public static double PassThroughShare(PassThroughPreference preference) => preference switch { PassThroughPreference.Balanced => 1.10, PassThroughPreference.PreferRefresh => 1.25, _ => 0.80 };
     /// <summary>Frame generation only when needed is in use: frame generation on, a VR flight, Generated frames Auto. A
     /// pinned 2× or 3× always generates.</summary>
     public bool UsesAdaptiveCadence => FrameGen != FrameGeneration.Off && !Desktop && FrameGenAdaptiveCadence && FrameGenFactor == FrameGenAuto;

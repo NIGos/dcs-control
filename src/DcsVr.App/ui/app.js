@@ -682,6 +682,7 @@ function buildFields() {
   segmented(field(c,'frameGen','Method','NVIDIA Optical Flow needs an RTX card; FidelityFX works on any card.','select',[['Off','Off'],['Nvidia','NVIDIA Optical Flow · RTX cards'],['FidelityFx','FidelityFX Optical Flow · any card']]),{Off:'Off',Nvidia:'NVIDIA',FidelityFx:'FidelityFX'});
   segmented(field(c,'frameGenFactor','Generated frames',['Auto: frames are generated only as much as DCS needs.','Without Only when needed, DCS renders half the refresh rate, a third while it falls behind. 2× or 3×: fixed, DCS renders half or a third. 3× adds latency and smearing in sideways motion.'],'select',[[0,'Auto · default'],[2,'2× · one generated frame'],[3,'3× · two generated frames']],p => p.frameGen !== 'Off'),{0:'Auto',2:'2×',3:'3×'});
   field(c,'frameGenAdaptiveCadence','Only when needed',['Frames are generated only while DCS falls behind: lower latency. Needs Generated frames on Auto; with Keep, the frame limit is set to the refresh rate for you.','DCS renders the full refresh rate, so latency is lower whenever DCS keeps up.'],'toggle',null,p => p.frameGen !== 'Off' && p.frameGenFactor === 0);
+  segmented(field(c,'frameGenPassThrough','Stop generating',['When DCS\'s own frames go straight to the headset. Applies at the next DCS start.','Steady: only with plenty of room, rarely on a PC that just holds the refresh rate. Balanced: when DCS looks able to hold the refresh rate, as long as frames arrive on time. Prefer refresh rate: tries whenever it might hold, and generates again only when frames come late. A try that fails is not repeated for a while.'],'select',[['Steady','Steady · only with room to spare'],['Balanced','Balanced · default'],['PreferRefresh','Prefer refresh rate']],p => usesAdaptiveCadence(p)),{Steady:'Steady',Balanced:'Balanced',PreferRefresh:'Prefer refresh rate'});
   field(c,'frameGenDeepPipeline','Smoothness buffer',['Smoother with uneven DCS frame times, with a little more latency.','Holds one extra frame: about 11 ms more latency at 90 Hz while frames are generated. In 3× it holds it only while frames keep arriving late.'],'toggle',null,p => p.frameGen !== 'Off');
   // frameGenPipelinedDeepHold has no control: it follows the Smoothness buffer (on with it, off without it) and stays in
   // the profile file only (ConfigurationWriters.Ofxr writes pipelined_deep_hold only with frameGenDeepPipeline).
@@ -906,6 +907,7 @@ function buildFields() {
   because(at('peripheralScale'),p => stereoCheeky(p) ? 'Turn on Foveated Super Resolution to change this.' : stereoWhy);
   because(f => f.condition === coverageOwned,stereoWhy);
   because(at('frameGenAdaptiveCadence'),p => fgOff(p) ? fgWhy : 'Set Generated frames to Auto to use this.');
+  because(at('frameGenPassThrough'),p => fgOff(p) ? fgWhy : p.frameGenFactor !== 0 ? 'Set Generated frames to Auto to use this.' : 'Turn on Only when needed to use this.');
   because(at('frameGenHudSymbology'),p => fgOff(p) ? fgWhy : ['Needs Depth boost (Perception page).','depthBoost']);
   because(at('diagnosticFrameRecords'),p => fgOff(p) ? fgWhy : 'Turn on Frame generation log to use this.');
   because(f => f.condition === flow,p => fgOff(p) ? fgWhy : 'NVIDIA Optical Flow only.');
@@ -1693,13 +1695,14 @@ function renderFlight() {
     const parts = [['None',g.seconds1x || 0],['2×',g.seconds2x],['3×',g.seconds3x]].filter(([,v]) => v > 0);
     // Cadence on without any 1× time (DCS never kept up) is still "Only when needed", not Auto.
     const one = g.seconds1x || 0, mode = g.cadence || one ? 'Only when needed' : g.adaptive ? 'Auto' : 'Fixed';
-    // Only when needed that generated most of the flight: why. Frames pass through only while DCS's CPU and GPU time per
-    // frame stay under 80% of one refresh period (FramegenShare.PassThroughShare); holding the refresh rate with frame
-    // generation off, or a GPU at 50% while DCS is held at half the rate, is not that much room.
-    const flightHz = Math.round(f.headset?.compositorFps || f.cap?.refreshHz || refreshHz(profile) || 0), limitMs = flightHz ? 800 / flightHz : 0;
+    // Only when needed that generated most of the flight: why. Frames pass through only while OFXR's estimate of DCS's
+    // CPU and GPU time per frame stays under a share of one refresh period, set by Stop generating
+    // (FramegenShare.PassThroughShare: Steady 80%, Balanced 110%, Prefer refresh rate 125%; the estimate reads high).
+    const flightHz = Math.round(f.headset?.compositorFps || f.cap?.refreshHz || refreshHz(profile) || 0), passShare = g.passThroughShare || 0.8, limitMs = flightHz ? 1000 * passShare / flightHz : 0;
+    const passWord = {Steady:'Steady',Balanced:'Balanced',PreferRefresh:'Prefer refresh rate'}[g.preference] || 'Steady';
     const why = g.cadence && total && one / total < 0.5 && g.gpuAt1xMs && limitMs
-      ? (g.gpuAt1xMs > limitMs ? ` · DCS's GPU needed ${fmt(g.gpuAt1xMs,1)} ms per frame; frames pass through only under ${fmt(limitMs,1)} ms (80% of a ${flightHz} Hz frame)`
-        : ` · GPU ${fmt(g.gpuAt1xMs,1)} ms per frame is under the ${fmt(limitMs,1)} ms needed (80% of a ${flightHz} Hz frame), so CPU time or late frames kept it generating`) : '';
+      ? (g.gpuAt1xMs > limitMs ? ` · DCS's GPU time read ${fmt(g.gpuAt1xMs,1)} ms per frame; with Stop generating on ${passWord}, frames pass through under ${fmt(limitMs,1)} ms`
+        : ` · GPU time ${fmt(g.gpuAt1xMs,1)} ms per frame is under the ${fmt(limitMs,1)} ms of ${passWord}, so CPU time or late frames kept it generating`) : '';
     rows.push(['Frame generation',parts.length > 1 ? parts.map(([k,v]) => `${k} ${share(v/total)}`).join(' · ') : parts.length ? `${parts[0][0]} all flight` : '—',mode+(g.switches ? ` · level changed ${g.switches} ${g.switches === 1 ? 'time' : 'times'}` : '')+why]);
   }
   if (f.frameTime) rows.push(['DCS frame time',`${fmt(f.frameTime.p50Ms,1)} ms`,`median · ${fmt(f.frameTime.p90Ms,1)} ms p90 · the slower of CPU and GPU`]);

@@ -2587,6 +2587,21 @@ Test("Frame generation only when needed: default with Auto, adaptive_cadence and
     Require(fg.FrameGenAdaptiveCadence && fg.FrameGenFactor == VrProfile.FrameGenAuto && fg.UsesAdaptiveCadence && Cadence(fg, 1), "default FG Nvidia Auto writes adaptive_cadence=1");
     Require(!(fg with { FrameGenFactor = 3 }).UsesAdaptiveCadence && Cadence(fg with { FrameGenFactor = 3 }, 0) && Cadence(fg with { FrameGenFactor = 2 }, 0), "a pinned 2× or 3× writes 0");
     Require(Cadence(fg with { FrameGenAdaptiveCadence = false }, 0), "the toggle off writes 0");
+    // Stop generating (issue #17, OFXR 0070): cadence_preference 0 steady, 1 balanced (the default), 2 prefer refresh rate;
+    // 0 whenever Only when needed is not in use, so the layer keeps its old rule there.
+    bool Preference(VrProfile p, int value) => ConfigurationWriters.Ofxr(p).ReplaceLineEndings("\n").Split('\n').Contains("cadence_preference=" + value);
+    Require(fg.FrameGenPassThrough == PassThroughPreference.Balanced && Preference(fg, 1) && Preference(fg with { FrameGenPassThrough = PassThroughPreference.Steady }, 0)
+        && Preference(fg with { FrameGenPassThrough = PassThroughPreference.PreferRefresh }, 2), "Stop generating writes cadence_preference");
+    Require(Preference(fg with { FrameGenAdaptiveCadence = false }, 0) && Preference(fg with { FrameGenFactor = 2, FrameGenPassThrough = PassThroughPreference.PreferRefresh }, 0)
+        && Preference(new VrProfile(), 0) && Preference(fg with { FrameGenPassThrough = (PassThroughPreference)9 }, 0), "cadence_preference is 0 without Only when needed or with an unknown value");
+    Require(ProfileValidation.Validate(fg with { FrameGenPassThrough = (PassThroughPreference)9 }).Any(i => i.Code == "framegen-pass-through" && i.Severity == IssueSeverity.Error)
+        && ProfileValidation.Validate(fg).All(i => i.Code != "framegen-pass-through"), "An unknown Stop generating value is an error");
+    Require(JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"legacy\",\"name\":\"Legacy\"}").FrameGenPassThrough == PassThroughPreference.Balanced
+        && JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"x\",\"name\":\"X\",\"frameGenPassThrough\":\"Steady\"}").FrameGenPassThrough == PassThroughPreference.Steady, "A profile saved before the option gets Balanced; Steady is kept");
+    Require(VrProfile.PassThroughShare(PassThroughPreference.Steady) == 0.80 && VrProfile.PassThroughShare(PassThroughPreference.Balanced) == 1.10 && VrProfile.PassThroughShare(PassThroughPreference.PreferRefresh) == 1.25
+        && FramegenShare.PassThroughLimitMs(90, PassThroughPreference.Balanced) == 12.2 && FramegenShare.PassThroughLimitMs(90, PassThroughPreference.PreferRefresh) == 13.9, "The estimate's limit per preference");
+    Require(LastFlight.ParseOfxr(["seq=1 ms=0 tid=1 phase=I op=adaptive_switch result=13 dur_us=0 a=0 b=2 c=2", "seq=2 ms=1000 tid=1 phase=I op=latency_status result=12 dur_us=0 a=20000 b=0 c=0"])!.Share is { Preference: PassThroughPreference.PreferRefresh, PassThroughShare: 1.25, Cadence: true }
+        && LastFlight.ParseOfxr(["seq=1 ms=0 tid=1 phase=I op=adaptive_switch result=13 dur_us=0 a=0 b=2 c=0", "seq=2 ms=1000 tid=1 phase=I op=latency_status result=12 dur_us=0 a=20000 b=0 c=0"])!.Share is { Preference: PassThroughPreference.Steady, PassThroughShare: 0.80 }, "The flight's preference comes from OFXR's cadence record");
     Require(!(fg with { Desktop = true }).UsesAdaptiveCadence && Cadence(fg with { Desktop = true }, 0) && Cadence(new VrProfile(), 0), "Desktop and frame generation off write 0");
     var match = fg with { FpsLimit = FpsLimitMode.MatchRefresh };
     Require(FramePacing.CapDivider(match) == 1 && FramePacing.RequestedCap(match) == 90 && FramePacing.RequestedCap(match with { FrameGenAdaptiveCadence = false }) == 45, "Match refresh = refresh with cadence, refresh/2 without");

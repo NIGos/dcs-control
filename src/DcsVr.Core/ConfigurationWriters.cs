@@ -358,6 +358,8 @@ public static class ConfigurationWriters
         adaptive_frame_gen={(p.FrameGenFactor == VrProfile.FrameGenAuto ? 1 : 0)}
         ; Frame generation only when needed (patches 0032, 0059, 0060): a full-rate 1X while DCS holds the refresh rate, 2X/3X Auto when it falls behind.
         adaptive_cadence={(p.UsesAdaptiveCadence ? 1 : 0)}
+        ; When it stops generating (patch 0070): 0 only with room to spare (under 80% of a refresh), 1 when the estimate is within reach and frames arrive on time, 2 whenever it may hold.
+        cadence_preference={(p.UsesAdaptiveCadence && Enum.IsDefined(p.FrameGenPassThrough) ? (int)p.FrameGenPassThrough : 0)}
         ; Both eyes synthesized on their own queues, about 1 ms sooner with identical output (patch 0038): off until flown.
         parallel_eye_synthesis=0
         d3d11_bridge={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}
