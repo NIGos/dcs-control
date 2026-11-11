@@ -287,6 +287,7 @@ bool RunBenchmark(int mode, bool beeps) {
         : mode == 33 ? "bench: mode terrain prefetch fix, OFF = observe (every call to the kernel), ON = repeats within WindowMs skipped"
         : mode == 34 ? "bench: mode prefetch repeat table, OFF = 2^16 entries, ON = [Prefetch] TableBits (measurement kit, R41 p95 check)"
         : mode == 35 ? "bench: mode g-buffer recorder cockpit part, OFF = recorder without cockpit items, ON = with them (measurement kit, R24 re-test)"
+        : mode == 36 ? "bench: mode FX Apply repeat skip, OFF = stock Apply (hook out), ON = lean Apply on identical repeats"
                     : "bench: mode shadow instancing, OFF = one draw per caster, ON = one instanced draw per group");
   }
   if (mode == 1) {
@@ -412,6 +413,7 @@ bool RunBenchmark(int mode, bool beeps) {
   if (mode == 31) ApplySrvTailTrim(g_cfg.srvTailTrim && !g_engineOff.load());
   if (mode == 33 || mode == 34) ApplyPrefetch();
   if (mode == 35) ApplyGBufferRecorder();
+  if (mode == 36) FxApplySkipBenchEnd();  // A3: the configured state back
   if (mode == 23) ApplyGBufferBatch();
   if (mode == 19) {
     g_shadowTexSkipOn = g_cfg.shadowTexSkip && !g_engineOff.load();
@@ -481,6 +483,7 @@ bool RunBenchmark(int mode, bool beeps) {
             : mode == 33 ? "terrain prefetch fix (observe vs skip)"
             : mode == 34 ? "prefetch repeat table 2^16 vs TableBits (R41 p95)"
             : mode == 35 ? "g-buffer recorder cockpit part (R24)"
+            : mode == 36 ? "FX Apply repeat skip (A3, lean Apply)"
                         : "peripheral exclusion OFF/ON");
   if (beeps)
     for (int k = 0; k < 3; ++k) Chime(1500, 90);

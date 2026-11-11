@@ -339,6 +339,16 @@ void LoadConfig(bool initial) {
   if (c.suiteSrvTailTrimVerifySec < 1) c.suiteSrvTailTrimVerifySec = 1;
   if (c.suiteSrvTailTrimVerifySec > 120) c.suiteSrvTailTrimVerifySec = 120;
   c.suiteBenchSrvTailTrim = GetPrivateProfileIntW(L"Suite", L"BenchSrvTailTrim", 0, ini.c_str()) != 0;
+  c.fxApplySkip = GetPrivateProfileIntW(L"D3D", L"FxApplySkip", 0, ini.c_str());
+  if (c.fxApplySkip < 0 || c.fxApplySkip > 3) c.fxApplySkip = 0;
+  c.fxApplySkipVerify = GetPrivateProfileIntW(L"D3D", L"FxApplySkipVerify", 0, ini.c_str()) != 0;
+  c.fxApplySkipVerifyEvery = GetPrivateProfileIntW(L"D3D", L"FxApplySkipVerifyEvery", 64, ini.c_str());
+  if (c.fxApplySkipVerifyEvery < 1) c.fxApplySkipVerifyEvery = 1;
+  if (c.fxApplySkipVerifyEvery > 100000) c.fxApplySkipVerifyEvery = 100000;
+  c.fxApplySkipLogSec = GetPrivateProfileIntW(L"D3D", L"FxApplySkipLogSec", 10, ini.c_str());
+  if (c.fxApplySkipLogSec < 1) c.fxApplySkipLogSec = 1;
+  if (c.fxApplySkipLogSec > 600) c.fxApplySkipLogSec = 600;
+  c.suiteBenchFxApplySkip = GetPrivateProfileIntW(L"Suite", L"BenchFxApplySkip", 0, ini.c_str()) != 0;
   {
     wchar_t mode[32] = {};
     GetPrivateProfileStringW(L"Prefetch", L"Mode", L"off", mode, 32, ini.c_str());
@@ -693,6 +703,7 @@ void LoadConfig(bool initial) {
   ApplyGBufferRecorder();
   ApplyPassFlush();
   ApplySrvTailTrim(c.srvTailTrim && !g_engineOff.load());
+  ApplyFxApplySkip(g_engineOff.load() ? 0 : c.fxApplySkip, c.fxApplySkipVerify, c.fxApplySkipVerifyEvery);
   ApplyPrefetch();
   ApplyHoldYaw(c.holdYawDeg);
   ApplyPoseTest(c.holdPitchDeg, c.poseRotateDps, c.holdPose, c.poseWallClock);

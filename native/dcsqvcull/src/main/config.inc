@@ -186,6 +186,11 @@ struct Config {
   bool suiteSrvTailTrimVerify = false;     // [Suite] SrvTailTrimVerify
   int suiteSrvTailTrimVerifySec = 10;      // [Suite] SrvTailTrimVerifySec
   bool suiteBenchSrvTailTrim = false;      // [Suite] BenchSrvTailTrim (bench mode 31)
+  int fxApplySkip = 0;                     // [D3D] FxApplySkip (fx_skip.h, A3): 0 off, 1 count, 2 lean on identical repeats, 3 lean on all eligible
+  bool fxApplySkipVerify = false;          // [D3D] FxApplySkipVerify: stock Apply on every N-th lean decision, compared
+  int fxApplySkipVerifyEvery = 64;         // [D3D] FxApplySkipVerifyEvery (1-100000)
+  int fxApplySkipLogSec = 10;              // [D3D] FxApplySkipLogSec: the "fx repeat:" line period (1-600)
+  bool suiteBenchFxApplySkip = false;      // [Suite] BenchFxApplySkip (bench mode 36)
   int prefetchMode = 0;                    // [Prefetch] Mode: off (0) | observe (1) | skip (2), prefetch_fix.h
   uint32_t prefetchWindowMs = 5000;        // [Prefetch] WindowMs: repeat window (1-60000; R107: default as shipped)
   bool suiteBenchPrefetch = false;         // [Suite] BenchPrefetch (bench mode 33: observe vs skip)
@@ -363,6 +368,8 @@ void ApplyShadowRecorder();
 void ApplyGBufferRecorder();
 void ApplyPassFlush();
 void ApplySrvTailTrim(bool on);
+void ApplyFxApplySkip(int mode, bool verify, int verifyEvery);
+void FxApplySkipBenchEnd();
 void ApplyPrefetch();
 void ApplyHoldYaw(int deg);
 void ApplyPoseTest(double pitchDeg, double rateDps, bool holdPose, bool wallClock);
