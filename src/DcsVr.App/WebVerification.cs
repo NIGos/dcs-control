@@ -39,6 +39,15 @@ internal static class WebVerification
         var module = Directory.CreateDirectory(Path.Combine(savedGames, "Scripts", "DcsQvCull")).FullName;
         File.WriteAllLines(Path.Combine(module, "DcsQvCullPrefetch.log"), [Local(start.AddSeconds(4), "yyyy-MM-dd HH:mm:ss") + " prefetch fix started mode=skip window_ms=1000",
             .. Enumerable.Range(1, 250).Select(i => Local(start.AddSeconds(4 + i * 10), "yyyy-MM-dd HH:mm:ss") + $" calls/s={(i < 20 ? 0 : 150000 + i % 13 * 9000)} skipped={(i < 20 ? "0.0" : "99.4")}% pointers=1 imports=41 lookups=0 faults=0")]);
+        // Its log (time of day only): all 18 optimizations on after a 95 s shader warm-up.
+        const string all = " AllocSlabs=on BigPages=on FrameHeap=on TriCounter=on TaskClock=on TimerCache=on TexDedupe=on CbSkip=on CostWeights=on PartitionBoost=on ShadowInst=on ShadowBatch=on PlanAsync=on ShadowTexSkip=on ShadowRec=on GBufferRec=on SplitFilter=on Prefetch=on";
+        var moduleLog = Path.Combine(module, "DcsQvCull.log");
+        File.WriteAllLines(moduleLog, [Local(start.AddSeconds(2), "HH:mm:ss.fff") + " DcsQvCull loader started from DcsQvCull.dll",
+            Local(start.AddSeconds(20), "HH:mm:ss.fff") + " features: 16 of 18 configured on;" + all.Replace("BigPages=on", "BigPages=idle(waiting)").Replace("ShadowRec=on", "ShadowRec=idle(starting)"),
+            Local(start.AddSeconds(30), "HH:mm:ss.fff") + " warmup: shader variants compiling (40 keys queued, 4 in progress); shadow instancing, batching, the texture skip and the recorders are only partly active until done",
+            Local(start.AddSeconds(125), "HH:mm:ss.fff") + " warmup: done after 95 s (cache: 30 hits, 14 compiled in this batch; 30 hits, 14 compiled since start)",
+            .. Enumerable.Range(0, 40).Select(i => Local(start.AddSeconds(130 + i * 60), "HH:mm:ss.fff") + " features: 18 of 18 configured on;" + all)]);
+        File.SetLastWriteTimeUtc(moduleLog, end.AddSeconds(-30).UtcDateTime);
         var cheeky = Directory.CreateDirectory(Path.Combine(bin, "CheekyFoveatedDLSS")).FullName;
         var standalone = Path.Combine(cheeky, "CheekyFoveatedDLSS-Standalone.log"); var host = Path.Combine(cheeky, "CheekyFoveatedDLSS-Host.log");
         // Cheeky appends every session to the same logs, with the time of day only: an earlier session that failed and

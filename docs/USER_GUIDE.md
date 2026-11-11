@@ -391,6 +391,7 @@ After DCS exits, the **Overview** shows a summary read from the logs of that ses
 - **DCS frame time** — median and 90th percentile of DCS's CPU/GPU time per frame (with Auto 2×/3×).
 - **DLSS 5** — whether it ran, runtime version, hotkey toggles.
 - **CPU Boost** — apps moved and restored, anything that needed administrator rights.
+- **Engine Optimizations** — whether they really ran: how many were on ("18 of 18 on"), any that turned themselves off for safety (amber), how long the in-flight key had them off ("Off in flight", grey, when that was most of the flight) and how long the shader warm-up took. On a GPU whose driver has no command lists (AMD, for example) it says the multi-threaded G-buffer and shadows could not run.
 - **Terrain prefetch fix** (Engine Optimizations) — share of prefetch calls skipped.
 
 Parts without a log are left out. VRAM is not logged; use the in-headset VRAM counter for that.
