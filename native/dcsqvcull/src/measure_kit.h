@@ -148,6 +148,9 @@ void PassTimelinePhase(int seconds, std::atomic<uint64_t>& frameCounter, double 
       "%.3f ms, p50 %.3f, p95 %.3f, max %.3f ms/frame",
       tot.size(), static_cast<unsigned long long>(frames), sec, ev.size(), ev.size() >= cap ? ", CAP REACHED" : "",
       mean, Quantile(tot, 0.5), Quantile(tot, 0.95), *std::max_element(tot.begin(), tot.end()));
+  if (tot.size() * 2 < frames)
+    Log("  pass timeline: WARNING frame boundary not detected (%zu timeline frames for %llu quad-view frames); "
+        "the per-frame figures above are window totals", tot.size(), static_cast<unsigned long long>(frames));
   if (cyc1 && c1 >= c0 && sec > 0)
     Log("  pass timeline: render thread CPU %.3f ms/frame (busy %.1f%% of wall time)",
         (c1 - c0) / tscHz * 1000.0 / static_cast<double>(frames), (c1 - c0) / tscHz / sec * 100.0);

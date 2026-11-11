@@ -296,7 +296,7 @@ void RetiredKeysLogged() {
                           GetPrivateProfileIntW(L"D3D", L"PeriphInstCoreShape", 0, ini.c_str()) == 8;
   const int tuning = NoteRetiredKeys(ini);
   // R115 I2/I3: every retired key switched on (7, a value not used above): each switch key logged once, the tuning
-  // keys never; a second call logs nothing. 23 switch + 13 tuning keys as of R115 (update with kRetiredKeys).
+  // keys never; a second call logs nothing. 22 switch + 13 tuning keys (R115; [Suite] PeriphCensus live again for audit B6, 2026-11-11).
   DeleteFileW(ini.c_str());
   int nSwitch = 0, nTuning = 0, readAll = 0;
   for (const RetiredKey& r : kRetiredKeys) {
@@ -312,7 +312,7 @@ void RetiredKeysLogged() {
   Check(none == 0 && written0 > 0 && read0 == written0 && first == 1 && again == 0,
         "R107 retired keys: the template's constant 0s are silent (each section once, every key read back); a "
         "non-zero retired key is logged once per session and ignored");
-  Check(tuningRead && tuning == 0 && readAll == kRetiredCount && nSwitch == 23 && nTuning == 13 &&
+  Check(tuningRead && tuning == 0 && readAll == kRetiredCount && nSwitch == 22 && nTuning == 13 &&
             allOn == nSwitch && allAgain == 0,
         "R115 retired keys: the dev ini's old tuning defaults (GpuDedupWarm=30 ... PeriphInstCoreShape=8) log "
         "nothing; every retired key switched on logs exactly the switch keys, once");

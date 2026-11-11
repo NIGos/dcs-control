@@ -41,6 +41,60 @@ void Run() {
     Check(frames.size() == 3 && frames[0].first == 11 && frames[2].first == 13, "measure kit: timeline CSV frames");
     Check(rows.size() == 2 && std::fabs(rows[0].callsPerFrame - 4.0 / 3.0) < 1e-9, "measure kit: timeline calls per frame");
   }
+  {  // (a) live condition (2026-11-11 s1_airfield): DCS passes 0 as execute's frame argument; the frame boundary comes
+     // from the quad-view collect counter, latched per top-level execute (nested passes keep their tree's id)
+    Check(ptiming::TopFrameId(0, 0) == 0 && ptiming::TopFrameId(7, 0) == 7 && ptiming::TopFrameId(0, 42) == 42 &&
+              ptiming::TopFrameId(7, 42) == 42,
+          "measure kit: top-level frame id = quad-view frame counter, the execute argument only before it starts");
+    static int top = 0, child = 0;
+    struct Fake {
+      static void __fastcall Exec(void* pass, uint64_t) {
+        if (pass == &top) {
+          ptiming::Hook(&child, 0);
+          ptiming::Hook(&child, 0);
+        }
+      }
+    };
+    const ptiming::ExecFn origSave = ptiming::g_orig;
+    const uint64_t quadSave = g_quadFrame.load();
+    const uint64_t execSave = ptiming::g_execFrame.load();
+    ptiming::g_orig = &Fake::Exec;
+    {
+      std::lock_guard<std::mutex> lock(ptiming::g_mutex);
+      ptiming::g_tl.clear();
+      ptiming::g_tlCap = 10000;
+    }
+    ptiming::Reset();
+    g_quadFrame = 1000;
+    ptiming::g_timeline = true;
+    ptiming::g_recording = true;
+    for (int f = 0; f < 6; ++f) {
+      ++g_quadFrame;  // HookCollect -> UpdateGazeAndCheckHold, once per quad-view frame, before the first pass
+      ptiming::Hook(&top, 0);
+      ptiming::Hook(&top, 0);  // a second top-level tree in the same frame
+    }
+    ptiming::g_recording = false;
+    ptiming::g_timeline = false;
+    std::vector<ptiming::TlEvent> ev;
+    {
+      std::lock_guard<std::mutex> lock(ptiming::g_mutex);
+      ev.swap(ptiming::g_tl);
+      ptiming::g_tlCap = 0;
+    }
+    ptiming::TakeByName(nullptr, nullptr);
+    ptiming::g_orig = origSave;
+    g_quadFrame = quadSave;
+    ptiming::g_execFrame = execSave;
+    std::vector<double> tot;
+    std::vector<std::pair<uint32_t, std::map<std::string, double>>> frames;
+    const auto rows =
+        mkit::TimelineRows(ev, [&](void* p) { return std::string(p == &top ? "top" : "child"); }, &tot, &frames);
+    Check(ev.size() == 36, "measure kit: live condition, every pass recorded (6 frames x 2 trees x 3 passes)");
+    Check(tot.size() == 4 && frames.size() == 4 && frames.front().first == 1002 && frames.back().first == 1005,
+          "measure kit: live condition (frame argument 0) gives one timeline frame per quad-view frame, not one");
+    Check(rows.size() == 2 && std::fabs(rows[0].callsPerFrame + rows[1].callsPerFrame - 6.0) < 1e-9,
+          "measure kit: live condition, a frame holds both of its trees, nested passes included");
+  }
   {  // (d) census: containment per ordered pair, modal chain count, overflow frames left out
     int p0 = 0, p1 = 0;
     mkit::CensusAcc acc;
