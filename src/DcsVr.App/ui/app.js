@@ -231,7 +231,8 @@ function withFeatures(source, {route, features, gaze}) {
 const pimaxSource = p => quad(p) && p.foveaSource === 'PimaxPlay';
 /** The focus values that reach the provider: converted from Pimax Play when the profile follows it. */
 function effectiveFovea(p) {
-  const c = state?.pimax?.found ? state.pimax.converted : null;
+  // A Pimax preset's values cannot be read: the profile's own values are written then.
+  const c = state?.pimax?.found && !state.pimax.preset ? state.pimax.converted : null;
   if (pimaxSource(p) && c) return {w:c.width,h:c.height,focus:c.focusScale,periphery:c.peripheralScale,blend:c.transition ? p.quadEdgeBlend : 0,pimax:true};
   // What is written: bundled Quad Views caps each axis at 0.9; stereo Cheeky uses at least 0.2.
   const cap = quad(p) ? .9 : 1, low = stereoCheeky(p) ? CHEEKY_MIN : 0, fit = v => Math.max(low, Math.min(cap, v));
@@ -253,7 +254,7 @@ function featureSummary(key, p) {
     const e = effectiveFovea(p), gaze = p.gaze === 'EyeTracked' ? 'eye tracked' : 'fixed';
     if (p.quadViewsLayerDirectory) return 'Alternative provider · '+gaze;
     // In Pimax Play's units: "Pimax Quick 33% × 33% · 113% · 20%", or this profile's values in the same Quick units.
-    if (pimaxSource(p)) return `Bundled · ${gaze} · ` + (state?.pimax?.found ? 'from Pimax Play\'s settings: ' + state.pimax.short : 'Pimax Play not found, values set here');
+    if (pimaxSource(p)) return `Bundled · ${gaze} · ` + (state?.pimax?.found ? (state.pimax.preset ? `Pimax ${state.pimax.short} can't be read, values set here · ${profileQuick(p)}` : 'from Pimax Play\'s settings: ' + state.pimax.short) : 'Pimax Play not found, values set here');
     return `Bundled · ${gaze} · set here · ${profileQuick(p)}`;
   }
   if (key === 'dlss') {
@@ -980,6 +981,8 @@ function renderPimax() {
   box.hidden = !mode; if (!mode || !pimax) return;
   const reread = '<button type="button" class="button quiet" id="rereadPimax">Re-read</button>';
   if (!pimax.found) { box.innerHTML = `<div class="pimax-head"><div><b>Pimax Play settings not found</b><small>${escape(pimax.path)}</small></div>${reread}</div><p class="fine">${mode === 'bundled' ? "This profile's own focus values are used until Pimax Play's settings can be read. Choose Set here to edit them." : 'Pimax applies its own values.'}</p>`; return; }
+  // A preset (Performance, Balanced, Quality, Extreme): its values are built into Pimax and not saved, so none are shown.
+  if (pimax.preset) { box.innerHTML = `<div class="pimax-head"><div><b>Pimax · Quad View preset ${escape(pimax.presetName)}</b><small title="${escape(pimax.path)}">Saved ${new Date(pimax.modified).toLocaleString('en-GB')}</small></div>${reread}</div><p class="${mode === 'bundled' ? 'pimax-note warn' : 'fine'}">${mode === 'bundled' ? escape(pimax.presetNote) : 'Pimax native Quad Views applies its preset itself. Nothing is written to Pimax.'}</p>`; return; }
   // Exactly what Pimax Play's Quad View page shows for the selected mode: its labels, its order, its rounding.
   const open = Boolean(box.querySelector('details.pimax-details')?.open);
   const controls = `<dl class="pimax-controls" aria-label="Pimax Play Quad View settings">${pimax.controls.map(x => `<dt>${escape(x.label)}</dt><dd>${escape(x.value)}</dd>`).join('')}</dl>`;

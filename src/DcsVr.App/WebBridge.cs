@@ -300,7 +300,8 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     private static string? FoveaChanged(AppliedProfile? applied) =>
         applied is not null && PimaxFovea.UsesPimaxPlay(applied.Profile) && PimaxFovea.Resolve(applied.Profile) is { Pimax: { } pimax } resolved
             && !PimaxFovea.SameFovea(resolved.Profile, applied.Fovea ?? AppliedFovea.From(applied.Profile, null))
-            ? $"Pimax Play changed: focus will be updated to {pimax.Play.Short} at launch." : null;
+            ? (pimax.Preset ? $"Pimax uses its Quad View {pimax.Short}, which cannot be read: focus will be updated to this profile's own values at launch."
+                : $"Pimax Play changed: focus will be updated to {pimax.Play.Short} at launch.") : null;
     /// <summary>A running DCS.exe; the offline verification host reports none.</summary>
     private bool DcsRunning() => offline ? _offlineDcs : DcsProcess.AnyRunning();
     /// <summary>A DCS the offline verification's smoke test says is running (never set outside that host).</summary>
@@ -940,7 +941,8 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         // The per-eye resolution the headset runtime recommended in DCS's last session, for the focus size in pixels.
         var eye = _eyeResolution;
         var c = s.Converted;
-        return new { found = true, path = s.Path, modified = s.Modified, mode = s.Play.Mode, controls = s.Play.Controls, @short = s.Play.Short, mismatch = s.Mismatch,
+        return new { found = true, path = s.Path, modified = s.Modified, mode = s.Play.Mode, controls = s.Play.Controls, @short = s.Short, mismatch = s.Mismatch,
+            preset = s.Preset, presetName = s.PresetName, level = s.Level, presetNote = s.Preset ? PimaxFovea.PresetNote(s) : null,
             capNote = PimaxFovea.CapNote(s), leftEye = s.LeftEye, rightEye = s.RightEye, fromQuickSliders = s.FromQuickSliders, gazeScale = s.GazeResolutionScale,
             peripheryScale = s.PeripheryResolutionScale, transitionMode = s.Play.TransitionMode, converted = c, stamp = s.Stamp, summary = PimaxFovea.Summary(s),
             notes = PimaxFovea.Notes(s).Skip(1), explanation = PimaxFovea.Explanation, sameLabelNote = PimaxFovea.SameLabelNote,
@@ -954,6 +956,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         if (PimaxFovea.UsesPimaxPlay(profile))
         {
             var resolved = PimaxFovea.Resolve(profile);
+            if (resolved.Pimax is { Preset: true } preset) return new("pimax-fovea", IssueSeverity.Warning, PimaxFovea.PresetNote(preset));
             return resolved.Pimax is { } pimax ? new("pimax-fovea", pimax.Mismatch is null ? IssueSeverity.Info : IssueSeverity.Warning, PimaxFovea.Summary(pimax) + " Bundled Quad Views renders the same focus size."
                     + (PimaxFovea.CapNote(pimax) is { } cap ? " " + cap : "") + (pimax.Mismatch is { } m ? " " + m : ""))
                 : new("pimax-fovea", IssueSeverity.Warning, resolved.Notes[0]);

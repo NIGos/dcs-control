@@ -852,7 +852,8 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 (foveaFile, utf8.GetBytes(JsonData.Serialize(AppliedFovea.From(now, pimax.Stamp))))]);
         }
         catch (Exception e) when (e is IOException or InvalidOperationException or InvalidDataException or UnauthorizedAccessException) { return false; }
-        message = $"Pimax Play changed: focus updated to {pimax.Play.Short}.";
+        message = pimax.Preset ? $"Pimax uses its Quad View {pimax.Short}, which cannot be read: focus updated to this profile's own values."
+            : $"Pimax Play changed: focus updated to {pimax.Play.Short}.";
         return true;
     }
 
