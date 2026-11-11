@@ -178,6 +178,32 @@ void PassTimelinePhase(int seconds, std::atomic<uint64_t>& frameCounter, double 
 // ---------------------------------------------------------------------------
 // (d) Culling-chain counts census
 // ---------------------------------------------------------------------------
+// Frames by pass structure. pass_timing.h's g_execFrame (the pass execute's second argument) does not change from
+// frame to frame live (2026-11-11: "pass timeline: 1 frames" over 3,712 rendered ones; the census never rotated its
+// set: "sampled 1, read back 0"). A frame starts at the first top-level HeightMapPass or shadow cascade after a
+// view was rendered (a G-buffer pass or a CopyToHMDPass): R53's FocusGeomProbe rule. Pure; offline tested.
+struct FrameTrack {
+  bool sawView = false;
+  uint64_t serial = 0;
+  // A top-level pass boundary. True when this begin opens a new frame.
+  bool OnTop(int kind, bool begin) {
+    if (kind == plod::kGBuffer || kind == plod::kHmd) {
+      sawView = true;
+    } else if (begin && (kind == plod::kHeight || kind == plod::kCascade) && sawView) {
+      sawView = false;
+      ++serial;
+      return true;
+    }
+    return false;
+  }
+};
+FrameTrack g_censusTrack;                    // render thread
+std::atomic<uint64_t> g_censusSerial{0};
+// plod's boundary chain while the census runs (render thread).
+void CensusBoundary(void* pass, bool begin, int depth) {
+  if (depth != 0) return;
+  if (g_censusTrack.OnTop(plod::KindOf(pass), begin)) g_censusSerial.store(g_censusTrack.serial, std::memory_order_relaxed);
+}
 std::atomic<bool> g_census{false};
 std::atomic<bool> g_censusStop{false};     // suite: release the staging buffers on the render thread, then stop
 std::atomic<bool> g_censusReleased{false};
@@ -266,12 +292,13 @@ void CensusAfterIndirect(ID3D11DeviceContext* c) {
     return;
   }
   PollCensus(c);
-  const uint64_t frame = ptiming::g_execFrame.load(std::memory_order_relaxed);
+  const uint64_t frame = g_censusSerial.load(std::memory_order_relaxed);
   if (frame != g_csFrame) {
     if (g_csCur >= 0 && g_cs[g_csCur].n > 0) g_cs[g_csCur].pending = true;
     g_csCur = -1;
+    const bool whole = g_csFrame != ~0ull;  // the frame the census starts in may be a partial one: never sampled
     g_csFrame = frame;
-    if (frame % kCensusEvery == 0) {
+    if (whole && frame % kCensusEvery == 0) {
       size_t queued = 0;
       {
         std::lock_guard<std::mutex> lock(g_cfMu);
@@ -460,6 +487,10 @@ void ChainCensusPhase(int seconds, std::atomic<uint64_t>& frameCounter,
     Log("  chain census: GPU pass timing could not start; skipped");
     return;
   }
+  plod::BFn noProbe = nullptr;
+  const bool tracked = plod::InstallCallback() && plod::g_probe.compare_exchange_strong(noProbe, &CensusBoundary);
+  if (!tracked) Log("  chain census: the pass boundary probe is not available; frames cannot be told apart, nothing will be compared");
+  const uint64_t serial0 = g_censusSerial.load();
   ptiming::Reset();
   ptiming::g_recording = true;
   const uint64_t f0 = frameCounter.load();
@@ -481,7 +512,12 @@ void ChainCensusPhase(int seconds, std::atomic<uint64_t>& frameCounter,
   for (int i = 0; i < 100 && !g_censusReleased.load(); ++i) Sleep(10);
   g_census = false;
   ptiming::g_recording = false;
+  plod::BFn me = &CensusBoundary;
+  plod::g_probe.compare_exchange_strong(me, nullptr);
   const uint64_t frames = frameCounter.load() - f0;
+  Log("  chain census: %llu frame starts by pass structure (first HeightMapPass / cascade after a view) over %llu "
+      "quad-view frames",
+      static_cast<unsigned long long>(g_censusSerial.load() - serial0), static_cast<unsigned long long>(frames));
   gpt::End();
   drain();
   if (!g_censusReleased.load())

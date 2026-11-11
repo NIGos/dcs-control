@@ -475,3 +475,15 @@ Common ini as in `LIVE_MEASUREMENT_PLAN.md` (`[Suite] Quick=1`, `BenchEngine=0`,
 `pep live:` lines carry the capture's own counters (snapshots, passes without a TerrainContext at b11, frames
 dropped). A `NOT MEASURED` verdict means too few frames or an unusable block, not a failure of the route.
 
+
+### 11.8 First live run (2026-11-11) and its fix
+
+- Airfield F2, paused: census 67 of 67 again. C5, C4, C2 and C7 measured nothing ("frames 0", "-1 culling chains").
+- **Cause:** frames were told apart by `ptiming::g_execFrame`, the second argument of the pass execute. Live it never
+  changes (the same run's pass timeline says "1 frames" over 3,712 rendered ones), so the capture filled one set of
+  24 snapshots and never read anything back; the chain census never rotated its set either ("sampled 1, read back 0").
+- **Fix:** `mkit::FrameTrack`: a frame starts at the first top-level HeightMapPass or shadow cascade after a view
+  was rendered (R53's rule). Used by the captures and by the chain census. C7 picks the view chains by their shared
+  pass object. A `pep live diag:` line, once per capture, gives frame starts, G-buffer passes, snapshots, frames read
+  back and paired, and names the cause when nothing pairs.
+- Still open: `[Suite] PassTimelineSec` groups its events by the same constant value (one "frame"); not changed here.

@@ -115,6 +115,51 @@ void Run() {
     Check(pepl::C5Verdict(few) == -1 && pepl::C5Line(few).find("NOT MEASURED") != std::string::npos,
           "per-eye live C5: too few frames: not measured");
   }
+  {  // frames by pass structure (the pass execute's frame argument is constant live)
+    mkit::FrameTrack t;
+    const int H = plod::kHeight, C = plod::kCascade, G = plod::kGBuffer, M = plod::kHmd, L = plod::kLights, O = plod::kOther;
+    const int frame[] = {H, C, C, C, C, L, G, G, G, M, L, G, G, G, M, O, L, G, M, L, G, M, O};
+    int starts = 0;
+    bool early = false;
+    for (int rep = 0; rep < 3; ++rep)
+      for (int k : frame) {
+        const bool s1 = t.OnTop(k, true), s2 = t.OnTop(k, false);
+        starts += s1;
+        early |= s2 || (s1 && k != H);
+      }
+    mkit::FrameTrack none;  // no shadow or height pass at all: no frame start, the diagnostic names it
+    bool any = false;
+    for (int i = 0; i < 50; ++i) any |= none.OnTop(G, true) || none.OnTop(G, false) || none.OnTop(M, true) || none.OnTop(M, false);
+    Check(starts == 2 && t.serial == 2 && !early && !any && none.serial == 0,
+          "per-eye live: a frame starts at the first HeightMapPass / cascade after a view, once per frame; never "
+          "without such a pass");
+  }
+  {  // the diagnostic: what a capture saw, and the cause when nothing pairs
+    pepl::Diag d;
+    pepl::DiagAdd(d, fa, pepl::Resolve(fa));
+    pepl::FrameRec noFocus = fa;
+    noFocus.n = 6;
+    pepl::FrameRec noTc = fa;
+    for (int i = 0; i < noTc.n; ++i) noTc.gb[i].tcOk = false;
+    pepl::FrameRec flat = fa;  // row 19 is not (0, 0, 1, 0): no view is recognised
+    for (int i = 0; i < flat.n; ++i) flat.gb[i].tc[16 * ftwin::kRowPw + 3] ^= 0x40;
+    pepl::FrameRec empty;
+    Check(pepl::WhyNoPair(fa, pepl::Resolve(fa)) == pepl::kNpOk && pepl::WhyNoPair(noFocus, pepl::Resolve(noFocus)) == pepl::kNpNoFocus &&
+              pepl::WhyNoPair(noTc, pepl::Resolve(noTc)) == pepl::kNpNoTc && pepl::WhyNoPair(flat, pepl::Resolve(flat)) == pepl::kNpNoPeriph &&
+              pepl::WhyNoPair(empty, pepl::Resolve(empty)) == pepl::kNpNoPass,
+          "per-eye live: why a frame has no periphery + focus pair (no pass, no TerrainContext, no periphery, no focus)");
+    const std::string ok = pepl::DiagLine(d, 180, 2160, 2160);
+    pepl::Diag bad;
+    pepl::DiagAdd(bad, flat, pepl::Resolve(flat));
+    const std::string l0 = pepl::DiagLine(pepl::Diag(), 0, 24, 24), l1 = pepl::DiagLine(pepl::Diag(), 180, 0, 0),
+                      l2 = pepl::DiagLine(pepl::Diag(), 180, 2160, 2160), l3 = pepl::DiagLine(bad, 180, 2160, 2160);
+    Check(ok.compare(0, 14, "pep live diag:") == 0 && ok.find("CAUSE") == std::string::npos && ok.find("paired 1") != std::string::npos &&
+              l0.find("CAUSE: no frame start") != std::string::npos && l1.find("CAUSE: no top-level pass named GBufferPass") != std::string::npos &&
+              l2.find("CAUSE: no frame was read back") != std::string::npos &&
+              l3.find("CAUSE: no frame had both eyes") != std::string::npos && l3.find("first unpaired: pass 0 row16") != std::string::npos,
+          "per-eye live: the diagnostic line names the cause (no frame start, no G-buffer pass, nothing read back, no "
+          "views) and shows the first unpaired TerrainContext");
+  }
   {  // C4
     auto run = [&](int first, int mixed) {
       pepl::C4Acc a;
@@ -162,6 +207,24 @@ void Run() {
     const pepl::C7Out bad = pepl::C7FromCensus(acc);
     mkit::CensusAcc fewFrames;
     for (uint32_t i = 0; i < 5; ++i) mkit::CensusAdd(fewFrames, frame(i, 4));
+    {  // the view chains are the four of one pass object, wherever the frame boundary puts them
+      int module = 0, other[5] = {};
+      mkit::CensusAcc rot;
+      for (uint32_t i = 0; i < 30; ++i) {
+        mkit::CensusFrame f;
+        f.frame = i;
+        for (int c = 0; c < 9; ++c) {
+          const bool view = c >= 2 && c < 6;
+          f.pass.push_back(view ? static_cast<void*>(&module) : static_cast<void*>(&other[c < 2 ? c : c - 4]));
+          f.counts.push_back(c == 4 ? std::vector<uint32_t>{3, 4, 0} : c == 5 ? std::vector<uint32_t>{1, 1, 0}
+                             : view ? std::vector<uint32_t>{5, 4, 2} : std::vector<uint32_t>{0, 9, 9});
+        }
+        mkit::CensusAdd(rot, f);
+      }
+      const pepl::C7Out r = pepl::C7FromCensus(rot);
+      Check(r.verdict == 1 && r.frames[0] == 30 && r.subset[0] == 30 && r.subset[1] == 30,
+            "per-eye live C7: the view chains are found by their shared pass object, not by their place in the frame");
+    }
     Check(ok.verdict == 1 && ok.chains == 9 && ok.subset[0] == 30 && ok.subset[1] == 30 && bad.verdict == 0 &&
               bad.subset[0] == 30 && bad.frames[0] == 31 && bad.maxOver[0] == 1 && bad.subset[1] == 31 &&
               pepl::C7FromCensus(fewFrames).verdict == -1 && pepl::C7FromCensus(mkit::CensusAcc()).verdict == -1 &&
