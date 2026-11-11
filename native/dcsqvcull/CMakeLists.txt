@@ -72,3 +72,12 @@ set_target_properties(DcsQvCullLoaderTests PROPERTIES RUNTIME_OUTPUT_DIRECTORY $
 add_dependencies(DcsQvCullLoaderTests DcsQvCullFakePayload)
 add_test(NAME DcsQvCullLoaderTests COMMAND DcsQvCullLoaderTests WORKING_DIRECTORY ${DCSQV_LOADER_TEST_DIR})
 set_tests_properties(DcsQvCullLoaderTests PROPERTIES PASS_REGULAR_EXPRESSION "(^|\n)0 failure\\(s\\)" TIMEOUT 300)
+
+# Probe P1 of PER_EYE_PASS_DESIGN.md: a toy app for an NVIDIA GPU (single-pass stereo with a second position: the
+# pixel shader's view index, a patched clone against two stock passes). Built, never run by ctest (it needs the GPU);
+# run <build>/test/pep_p1_probe.exe by hand (QV_PEP_ARCHIVE=<copy of metashaders2> also offers the cache's clones
+# to NvAPI).
+add_executable(DcsQvCullPepP1Probe test/pep_p1_probe.cpp)
+target_compile_options(DcsQvCullPepP1Probe PRIVATE /W4 /O2 /EHsc)
+target_compile_definitions(DcsQvCullPepP1Probe PRIVATE NOMINMAX)
+set_target_properties(DcsQvCullPepP1Probe PROPERTIES OUTPUT_NAME pep_p1_probe RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test)

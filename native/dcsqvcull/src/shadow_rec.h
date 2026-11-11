@@ -3,6 +3,7 @@
 // the render thread executes inside DCS's own cascade passes. [Model]
 // ShadowRecorder (default 0), ShadowRecorderScope, ShadowRecorderWaitUs,
 // ShadowRecorderPriority, ShadowRecorderSplit, ShadowRecorderHelpers, ShadowRecorderInstancing,
+// ShadowRecorderNest (default 0; [Model] SmallGpuBundle turns it on too; perf audit A6 b),
 // [Suite] ShadowRecVerify, [Suite] BenchShadowRecorder (bench mode 28).
 //
 // Tags: [V] verified in the binary (DCS 2.9.30: NGModel, dx11backend,
@@ -3760,6 +3761,29 @@ std::atomic<uint32_t> g_split{0xf};
 std::atomic<uint32_t> g_helpers{kThreads - 1};
 std::atomic<bool> g_instancing{true};
 int g_priorityApplied = 0x7fff;
+// Nested lists (perf audit A6 b, R26 9.2b; [Model] ShadowRecorderNest, default 0, or [Model] SmallGpuBundle): a
+// pass with two or more lists (the primary's and its helpers') first executes them, in the same order, into one
+// render-thread deferred context and hands the immediate context that single list, so DCS's context runs one
+// ExecuteCommandList(TRUE) per cascade instead of one per list (R26 9.2: about 12-15 us of GPU front end per extra
+// list [I]). Exact: every list starts from the default state and sets all of its own state (each was recorded on its
+// own deferred context, finished with FALSE), and a cascade's casters are depth GREATER with writes and no blending,
+// so the order of lists is free anyway (R17 4). [Suite] ShadowRecVerify compares the depth texel for texel in the
+// same frame, stock against the nested list. A failed CreateDeferredContext or FinishCommandList executes the lists
+// one by one, as without the key, and stops nesting for the session. g_nestForce: the measurement kit's ABBA arm
+// (measure_kit.h, [Suite] GpuBundleTiming; -1 = the configured value).
+std::atomic<bool> g_nest{false};
+std::atomic<int> g_nestForce{-1};
+ID3D11DeviceContext* g_nestCtx = nullptr;  // render thread
+bool g_nestBroken = false;                 // render thread
+std::atomic<uint64_t> g_nestPasses{0}, g_nestLists{0}, g_nestNs{0}, g_nestFails{0};
+// Pure: the arm in force, the lists a pass holds, and whether it nests them.
+inline bool NestWanted(bool configured, int force) { return force < 0 ? configured : force != 0; }
+inline int ListCount(ID3D11CommandList* const* cl, int n) {
+  int c = 0;
+  for (int i = 0; i < n; ++i) c += cl[i] != nullptr;
+  return c;
+}
+inline bool ShouldNest(bool wanted, int lists, bool broken) { return wanted && !broken && lists >= 2; }
 // Timeline (render thread): this render entry, and top-level passes since.
 int64_t g_entryQpc = 0;
 uint32_t g_topCount = 0;
@@ -4047,6 +4071,39 @@ struct PassCtx {
 };
 PassCtx* g_pass = nullptr;  // the recorded cascade's pass being drawn (render thread)
 
+// [Model] ShadowRecorderNest: the pass's lists, in order, as one list (render
+// thread); nullptr = execute them one by one (the deferred context failed:
+// nesting stops for the session).
+ID3D11CommandList* NestLists(ID3D11CommandList* const* cl, int n) {
+  if (!g_nestCtx) {
+    ID3D11Device* dev = nullptr;
+    g_ctx->GetDevice(&dev);
+    const HRESULT hr = dev ? dev->CreateDeferredContext(0, &g_nestCtx) : E_FAIL;
+    SafeRel(dev);
+    if (FAILED(hr) || !g_nestCtx) {
+      g_nestCtx = nullptr;
+      g_nestBroken = true;
+      g_nestFails.fetch_add(1, std::memory_order_relaxed);
+      Log("shadow recorder: nested lists off for this session (CreateDeferredContext 0x%08lx)",
+          static_cast<unsigned long>(hr));
+      return nullptr;
+    }
+  }
+  for (int i = 0; i < n; ++i)
+    if (cl[i]) g_nestCtx->ExecuteCommandList(cl[i], FALSE);
+  ID3D11CommandList* out = nullptr;
+  const HRESULT hr = g_nestCtx->FinishCommandList(FALSE, &out);
+  if (FAILED(hr) || !out) {
+    SafeRel(out);
+    g_nestBroken = true;  // its context is not used again
+    g_nestFails.fetch_add(1, std::memory_order_relaxed);
+    Log("shadow recorder: nested lists off for this session (FinishCommandList 0x%08lx); lists run one by one",
+        static_cast<unsigned long>(hr));
+    return nullptr;
+  }
+  return out;
+}
+
 // At the first entry of the loop (the exec entry when armed, else the first
 // ShadowMapRenderable caster): DCS's frame buffer, clear and binder have run.
 void FirstCaster(PassCtx& pc) {
@@ -4080,8 +4137,22 @@ void FirstCaster(PassCtx& pc) {
       g_rtReplays += rt;
       g_ctx->CopyResource(cs.b7, t.b7);
       const int64_t e0 = defrec::Qpc();
-      for (ID3D11CommandList* l : pc.cl)
-        if (l) g_ctx->ExecuteCommandList(l, TRUE);
+      const int lists = ListCount(pc.cl, kThreads);
+      ID3D11CommandList* nested =
+          ShouldNest(NestWanted(g_nest.load(std::memory_order_relaxed), g_nestForce.load(std::memory_order_relaxed)),
+                     lists, g_nestBroken)
+              ? NestLists(pc.cl, kThreads)
+              : nullptr;
+      if (nested) {
+        g_nestNs.fetch_add(NsSince(e0), std::memory_order_relaxed);
+        g_ctx->ExecuteCommandList(nested, TRUE);
+        nested->Release();
+        g_nestPasses.fetch_add(1, std::memory_order_relaxed);
+        g_nestLists.fetch_add(static_cast<uint64_t>(lists), std::memory_order_relaxed);
+      } else {
+        for (ID3D11CommandList* l : pc.cl)
+          if (l) g_ctx->ExecuteCommandList(l, TRUE);
+      }
       sfilt::NotifyEcl(g_ctx);  // d3d11 toggled the context table's draw / update entries (in-pass hooks repair)
       pc.executeNs = NsSince(e0);
       pflush::AfterExecute();  // [Model] PassFlush 0x20 (one relaxed load when off)
@@ -5464,6 +5535,7 @@ bool Shutdown() {
   g_pendEvict = false;
   for (auto*& p : g_offSrv) SafeRel(p);
   for (auto*& p : g_offBuf) SafeRel(p);
+  SafeRel(g_nestCtx);
   SafeRel(g_ctx);
   g_state = -1;
   return true;
@@ -5490,6 +5562,7 @@ void ResetCounters() {
   }
   g_probes = g_probeOdd = g_probeLeaders = g_probePool = 0;
   g_texBuilt = g_texRefreshed = g_texDeferred = g_texFull = g_rtReplays = 0;
+  g_nestPasses = g_nestLists = g_nestNs = 0;
   memset(g_texWhy, 0, sizeof(g_texWhy));
   g_sortCalls = g_sortStarts = 0;
 }
@@ -5541,6 +5614,19 @@ void LogSummary(const char* label, double frames) {
       static_cast<unsigned long long>(g_meshRelearnt.load()), static_cast<unsigned long long>(g_compactions.load()),
       static_cast<unsigned long long>(g_unsortedStarts.exchange(0)),
       static_cast<unsigned long long>(g_implausible.exchange(0)));
+}
+
+// [Model] ShadowRecorderNest counters since the last reset.
+void LogNest(const char* label, double frames) {
+  const bool wanted = NestWanted(g_nest.load(), g_nestForce.load());
+  if (!wanted && !g_nestPasses.load() && !g_nestFails.load()) return;
+  const double f = frames > 0 ? frames : 1.0;
+  const uint64_t p = g_nestPasses.load();
+  Log("  shadow recorder %s nested lists (ShadowRecorderNest %s): %llu passes ran one nested list (%.2f/frame, %.2f "
+      "lists each), nesting %.4f ms/frame render thread; failures %llu (session)%s",
+      label, wanted ? "on" : "off", static_cast<unsigned long long>(p), p / f,
+      p ? static_cast<double>(g_nestLists.load()) / static_cast<double>(p) : 0.0, g_nestNs.load() / 1e6 / f,
+      static_cast<unsigned long long>(g_nestFails.load()), g_nestBroken ? ", OFF for this session" : "");
 }
 
 void LogCounters(const char* label, double frames) {
@@ -5649,6 +5735,7 @@ void LogCounters(const char* label, double frames) {
       static_cast<unsigned long long>(g_texWhy[kTwClass]), static_cast<unsigned long long>(g_texWhy[kTw678]),
       static_cast<unsigned long long>(g_texWhy[kTwMipSet]), static_cast<unsigned long long>(g_texWhy[kTwSwap]),
       static_cast<unsigned long long>(g_texWhy[kTwFault]));
+  LogNest(label, f);
   Log("  shadow recorder %s: texture class residuals (since start): no set array %llu, record out of range %llu; "
       "classes not replicated: %s",
       label, static_cast<unsigned long long>(g_classNoSets.load()), static_cast<unsigned long long>(g_classRange.load()),

@@ -14,10 +14,19 @@ public static class FramePacing
         FpsLimitMode.Preserve => null,
         FpsLimitMode.RuntimeHeadroom => 300,
         // Never below DCS's own minimum (30): 3× at 72 or 75 Hz would ask for 24-25 FPS.
-        FpsLimitMode.MatchRefresh => Math.Max(30, profile.HeadsetRefreshHz / CapDivider(profile)),
+        FpsLimitMode.MatchRefresh => profile.UsesAdaptiveCadence ? CadenceCap(profile.HeadsetRefreshHz) : Math.Max(30, profile.HeadsetRefreshHz / CapDivider(profile)),
         FpsLimitMode.Custom => profile.RenderedFpsCap,
         _ => throw new InvalidDataException("Unknown FPS limit mode.")
     };
+
+    /// <summary>DCS's frame limit with frame generation only when needed: a third above the refresh rate (120 at 90 Hz),
+    /// whole frames, within DCS's 30..300. OFXR paces DCS (it holds each frame in xrEndFrame until its slot), and DCS's
+    /// own limiter must not: at exactly the refresh rate DCS cannot make up a slow frame, so while frames pass through
+    /// (1X) it stays behind its slots until the runtime drops them, and OFXR goes back to generating (issue #17, flown
+    /// 2026-11-11: 16 s of clean 90 FPS ended by one 17 ms frame, DCS then at 11.1 ms unheld; the fork's patch 0059
+    /// notes the same of R110). Nothing changes while frames are generated: DCS is held to half or a third of the rate.</summary>
+    public static double CadenceCap(double refreshHz) => Math.Clamp(Math.Round(refreshHz * CadenceCapFactor), 30, 300);
+    public const double CadenceCapFactor = 4.0 / 3;
 
     /// <summary>The frame limit that is written. Frame generation only when needed works only when DCS may render the
     /// full refresh rate, so with it Keep becomes Match refresh; an explicit Custom or 300 FPS limit stays as chosen.</summary>
@@ -34,7 +43,7 @@ public static class FramePacing
         {
             FpsLimitMode.Preserve => cap is null ? "Keeps DCS's own limit (none set)" : "Keeps DCS's own limit",
             FpsLimitMode.RuntimeHeadroom => "Very high (300 FPS); the headset still sets the pace",
-            FpsLimitMode.MatchRefresh => profile.UsesAdaptiveCadence ? (profile.FpsLimit == FpsLimitMode.Preserve ? "Set to the refresh rate for Only when needed (instead of keeping DCS's own limit)" : "The full refresh rate; generated frames only while DCS falls behind") : fg ? (profile.FrameGenFactor == VrProfile.FrameGenAuto ? "Half the refresh rate; a second generated frame while DCS falls behind" : Multiplier(profile) == 3 ? "A third of the refresh rate, for two generated frames" : "Half the refresh rate, for one generated frame") : "The full refresh rate; frame generation is off",
+            FpsLimitMode.MatchRefresh => profile.UsesAdaptiveCadence ? (profile.FpsLimit == FpsLimitMode.Preserve ? "Set a third above the refresh rate for Only when needed (instead of keeping DCS's own limit)" : "A third above the refresh rate, so DCS can catch up after a slow frame; frame generation sets the pace") : fg ? (profile.FrameGenFactor == VrProfile.FrameGenAuto ? "Half the refresh rate; a second generated frame while DCS falls behind" : Multiplier(profile) == 3 ? "A third of the refresh rate, for two generated frames" : "Half the refresh rate, for one generated frame") : "The full refresh rate; frame generation is off",
             _ => "Custom limit"
         };
         // The output ceiling stays cap × Multiplier: with frame generation only when needed, a lower cap still gets
@@ -66,7 +75,7 @@ public static class FramePacing
         // With frame generation only when needed, a lower limit still reaches the refresh rate (frames are then always
         // generated), so the check says what it costs instead of "too low".
         if (plan.DcsCap is { } capped && capped + .01 < plan.RequiredRenderedFps && profile.UsesAdaptiveCadence)
-            checks.Add(new("adaptive-cadence-cap", CheckState.Warning, "Frame limit below the refresh rate", string.Create(CultureInfo.InvariantCulture, $"Frame generation only when needed works when DCS's frame limit is the refresh rate ({profile.HeadsetRefreshHz:0.###} FPS). With {capped:0.###} FPS, frames are always generated. Choose Match refresh.")));
+            checks.Add(new("adaptive-cadence-cap", CheckState.Warning, "Frame limit below the refresh rate", string.Create(CultureInfo.InvariantCulture, $"Frame generation only when needed works when DCS's frame limit is at or above the refresh rate ({profile.HeadsetRefreshHz:0.###} FPS). With {capped:0.###} FPS, frames are always generated. Choose Match refresh.")));
         else if (plan.DcsCap is { } cap && cap + .01 < plan.RequiredRenderedFps)
             checks.Add(new("fps-under-target", CheckState.Warning, "Frame limit too low", string.Create(CultureInfo.InvariantCulture, $"A limit of {cap:0.###} FPS is below what DCS needs to render for {profile.HeadsetRefreshHz:0.###} Hz: at most {plan.ConfiguredOutputCeiling:0.###} frames per second reach the headset. Raise the limit or lower the refresh rate.")));
         if (inventory.AutoexecPath is not null)

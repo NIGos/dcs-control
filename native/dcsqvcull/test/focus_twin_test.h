@@ -72,6 +72,108 @@ void ShiftFocus(uint8_t* tc, double dx, double dy) {
   }
 }
 
+// R150 (the FocusTwin retest): the decision on DCS's own focus upload, and why the camera history does not learn.
+// On DCS's census uploads (2.9.30, both frames, both eyes).
+void PureR150(const uint8_t (*tc)[kTcBytes]) {
+  // 1. Every census focus relates to its own eye's periphery by its own rows; nothing else does.
+  bool ok = true;
+  double worst = 0;
+  for (int f = 0; f < 2; ++f)
+    for (int e = 0; e < 2; ++e) {
+      double dev = 1;
+      ok &= RelateFocusTc(tc[f * 4 + e], tc[f * 4 + 2 + e], &dev);
+      worst = std::max(worst, dev);
+      // the other eye's focus is never this eye's: shared rows (camera row 38) differ
+      ok &= !(SharedRowsEqual(tc[f * 4 + e], tc[f * 4 + 2 + (1 - e)]) && RelateFocusTc(tc[f * 4 + e], tc[f * 4 + 2 + (1 - e)]));
+      // the roles are not interchangeable
+      ok &= !RelateFocusTc(tc[f * 4 + 2 + e], tc[f * 4 + e]) && !RelateFocusTc(tc[f * 4 + e], tc[f * 4 + (1 - e)]);
+    }
+  char what[220];
+  snprintf(what, sizeof(what), "R150: each census focus TerrainContext relates to its eye's periphery by its own rows "
+                               "(VP = a * VP_p + b * w, inverse P, side planes; largest deviation %.2g), nothing else does", worst);
+  Check(ok && worst < kRelTol, what);
+  // 2. An eye-tracked gaze step moves the focus consistently (P, VP, inverse, planes): still related, no history needed.
+  {
+    bool g = true;
+    for (int e = 0; e < 2; ++e) {
+      uint8_t f1[kTcBytes];
+      memcpy(f1, tc[6 + e], kTcBytes);
+      ShiftFocus(f1, 0.031, -0.017);
+      g &= RelateFocusTc(tc[4 + e], f1);
+    }
+    Check(g, "R150: a gaze step of the focus (consistent rows) relates without any history or collect-time camera");
+  }
+  // 3. Inconsistent uploads are refused: one plane row off, the P centre moved without the VP rows, a stale VP row.
+  {
+    bool r = true;
+    uint8_t t[kTcBytes];
+    memcpy(t, tc[2], kTcBytes);
+    reinterpret_cast<float*>(t + 16 * (kRowPlane0 + 1))[3] += 1e-3f;
+    r &= !RelateFocusTc(tc[0], t);
+    memcpy(t, tc[2], kTcBytes);
+    reinterpret_cast<float*>(t + 16 * kRowPx)[2] += 0.01f;
+    r &= !RelateFocusTc(tc[0], t);
+    memcpy(t, tc[2], kTcBytes);
+    memcpy(t + 16 * kRowVx, tc[6] + 16 * kRowVx, 16);  // next frame's VP x row in this frame's upload
+    r &= !RelateFocusTc(tc[0], t);
+    memcpy(t, tc[2], kTcBytes);
+    reinterpret_cast<float*>(t + 16 * kRowVw)[0] *= 1.001f;  // another w row (another rotation)
+    r &= !RelateFocusTc(tc[0], t);
+    Check(r, "R150: a focus upload whose rows are not one consistent quad focus of the periphery's camera is refused "
+             "(plane, P centre, stale VP row, other w row)");
+  }
+  // 4. LearnFocus says why it did not learn. Collect-time cameras as R123 assumed (from the uploads): learned. The
+  // focus pair's camera equal to the periphery's (a LOD / culling camera, not the focus projection): "focus camera".
+  // A camera of another rotation (the next frame's, or a pipelined collect): "periphery camera". None: "no cameras".
+  {
+    bool l = true;
+    for (int e = 0; e < 2; ++e) {
+      CiFrame good, lod, other, none;
+      good.seq = lod.seq = other.seq = 5;
+      good.pairs = lod.pairs = other.pairs = 1;
+      CiFromTc(tc[e], 0, 0, good.p[0]);
+      CiFromTc(tc[2 + e], 0, 0, good.f[0]);
+      lod = good;
+      memcpy(lod.f[0], lod.p[0], 64);
+      other = good;
+      CiFromTc(tc[e], 0, 0, other.p[0]);
+      // rotate the published periphery camera by ~1 degree about y (x and z columns mixed)
+      for (int r = 0; r < 4; ++r) {
+        float* m = other.p[0];
+        const float x = m[0 * 4 + r], z = m[2 * 4 + r];
+        m[0 * 4 + r] = 0.99985f * x + 0.017452f * z;
+        m[2 * 4 + r] = -0.017452f * x + 0.99985f * z;
+      }
+      EyeHist h;
+      int w = -1;
+      l &= LearnFocus(h, tc[e], tc[2 + e], good, &w) && w == kLwOk && h.have;
+      l &= !LearnFocus(h, tc[e], tc[2 + e], lod, &w) && w == kLwFocusRel && !h.have;
+      l &= !LearnFocus(h, tc[e], tc[2 + e], other, &w) && w == kLwNoPair;
+      l &= !LearnFocus(h, tc[e], tc[2 + e], none, &w) && w == kLwNoCi;
+    }
+    Check(l, "R150: LearnFocus reports why the camera history is not learned (no cameras, periphery camera, focus "
+             "camera); R123 counted all of them as 'no history'");
+  }
+  // 5. The diagnostic and summary lines name what decides a live run.
+  {
+    ftwin::Stats s;
+    s.focusPasses = 100, s.why[kWTwin] = 92, s.why[kWTargets] = 5, s.why[kWAudit] = 3;
+    s.decRel = 95, s.predWhy[kPwNoHist] = 95, s.learnWhy[kLwFocusRel] = 100, s.seqMoved = 7;
+    s.workBy[ftwin::sSetPredication] = 11, s.workBy[ftwin::sMap] = 4, s.noopVp = 9;
+    s.twinItems = 9000, s.focusItems = 10000;
+    const std::string sum = ftwin::StatsSummaryText(s, 50);
+    const std::string dg = ftwin::StatsDiagText(s);
+    Check(sum.find("twin rate 92.0 %") != std::string::npos && sum.find("targets 5.0 %") != std::string::npos &&
+              sum.find("net ") != std::string::npos && dg.find("by own-row relation 95") != std::string::npos &&
+              dg.find("focus camera 100") != std::string::npos && dg.find("moved between periphery and focus 7") != std::string::npos &&
+              dg.find("SetPredication 11") != std::string::npos && dg.find("Map 4") != std::string::npos &&
+              dg.find("viewports 9") != std::string::npos,
+          "R150: the summary line (twin rate, net us per frame, top fallbacks) and the diag line (decision basis, "
+          "learn reasons, sequence moves, other work by call, no-op calls)");
+    printf("     %s\n     %s\n", sum.c_str(), dg.c_str());
+  }
+}
+
 void PureCensus() {
   uint8_t tc[8][kTcBytes];
   for (int i = 0; i < 8; ++i) Tc(i, tc[i]);
@@ -199,6 +301,7 @@ void PureCensus() {
     Check(!a.ok && a.why == kPwNoCi && !b.ok && b.why == kPwNoHist,
           "R123: no collect-time camera this frame (F10, map) -> no prediction; no previous focus -> no prediction");
   }
+  PureR150(tc);
 }
 
 void PureMisc() {
@@ -923,6 +1026,7 @@ struct Frame {
   bool swapFocusOrder = false;  // eye 0's focus list: two items swapped
   float ciNudge = 0;            // the published focus camera off by this (prediction mismatch)
   bool argsSwap = false;        // R125: the instancer argument buffer recreated before focus L
+  bool ciBetween = false;       // R150: another collect publication between the periphery and the focus passes
   std::vector<Entry> list[5];
 };
 // Culling: a patch is in a view when its corners project inside (or straddle) the frustum.
@@ -1003,6 +1107,8 @@ void MakeFrame(int f, Frame& fr) {
 
 // ---- the fake renderer ------------------------------------------------------
 int g_curView = 0;
+bool g_noops = false;     // R150: state-identical viewport / scissor / predicate calls inside every patch item
+bool g_workCall = false;  // R150: a compute-shader bind inside every patch item
 uint64_t __fastcall FakeMatRender(void* mat, void* item, void* ctx, void*) {
   RCtx& r = *static_cast<RCtx*>(ctx);
   const PatchData& pd = PD(item);
@@ -1036,6 +1142,19 @@ uint64_t __fastcall FakeMatRender(void* mat, void* item, void* ctx, void*) {
   cb[4] = 0.5f + 0.003f * static_cast<float>(p % 50), cb[5] = 0.7f, cb[6] = 0.4f + 0.002f * static_cast<float>(p % 70), cb[7] = 1;
   c->UpdateSubresource(g_rig.cbDraw[sh], 0, nullptr, cb, 0, 0);
   SetCb(r, 0, g_rig.cbDraw[sh]);
+  if (g_noops) {  // R150: a renderer that re-applies the bound viewport / scissors and "no predicate" per item
+    c->SetPredication(nullptr, FALSE);
+    UINT nv = 0, ns = 0;
+    c->RSGetViewports(&nv, nullptr);
+    D3D11_VIEWPORT vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    c->RSGetViewports(&nv, vp);
+    c->RSSetViewports(nv, vp);
+    c->RSGetScissorRects(&ns, nullptr);
+    D3D11_RECT sr[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    c->RSGetScissorRects(&ns, sr);
+    c->RSSetScissorRects(ns, sr);
+  }
+  if (g_workCall) c->CSSetShader(nullptr, nullptr, 0);  // R150: other work inside the item
   if (pd.extra == 1) {
     const float e[16] = {0.01f * static_cast<float>(p % 9), 0.02f, 0.0f, 0.0f};
     c->UpdateSubresource(g_rig.cbExtra, 0, nullptr, e, 0, 0);
@@ -1300,6 +1419,7 @@ void RunFrame(Frame& fr) {
   if (fr.mfd) RunChain(fr, 4), Pass(fr, 4);
   for (int v = 0; v < 4; ++v) {
     if (v == 2) WaitJobs();
+    if (v == 2 && fr.ciBetween && fr.publishCi) PublishCi(fr.ci);  // R150: the next collect, before the focus passes
     if (v == 2 && fr.argsSwap) {  // R125: IM2 recreated its argument buffer between the periphery and the focus
       g_i2ArgsSel = 1 - g_i2ArgsSel;
       *reinterpret_cast<void**>(g_im2.raw + 0x370) = g_i2Members[g_i2ArgsSel ? 6 : 5];
@@ -1354,6 +1474,11 @@ struct Script {
   bool pvInt = false;       // one type's per-draw int differs per view
   int argsSwapFrame = -1;   // the argument buffer recreated before focus L of this frame
   int i2AuditBad = -1;      // this instancer item draws another texture in the focus views
+  // R150
+  bool ciForeign = false;   // the collect-time focus cameras never relate to the focus uploads (no camera history)
+  bool ciBetween = false;   // a collect publishes between the periphery and the focus passes of every frame
+  bool noops = false;       // every patch item re-sets the bound viewport, scissors and no predicate
+  bool workCall = false;    // every patch item binds a compute shader (other work: not twinnable)
 };
 struct Result {
   std::vector<std::vector<uint8_t>> img;  // per frame: 4 views
@@ -1410,6 +1535,7 @@ Result Run(const Script& sc) {
   g_focusCopies = sc.focusCopies;
   // R125: the instancer scene (fresh IM2 objects and shared buffers: both runs of a scenario start alike)
   g_withI2 = sc.i2, g_i2PvInt = sc.pvInt, g_i2AuditBad = sc.i2AuditBad;
+  g_noops = sc.noops, g_workCall = sc.workCall;  // R150
   if (sc.i2) {
     BuildI2();
     std::vector<uint8_t> zero(4096 * 16, 0);
@@ -1442,6 +1568,9 @@ Result Run(const Script& sc) {
     fr.ciNudge = f == sc.nudgeFrame ? 0.02f : 0.0f;
     fr.swapFocusOrder = f == sc.orderFrame;
     fr.argsSwap = f == sc.argsSwapFrame;
+    fr.ciBetween = sc.ciBetween;  // R150
+    if (sc.ciForeign)  // R150: the published focus camera is the periphery's (it never relates to the focus upload)
+      for (int e = 0; e < 2; ++e) memcpy(fr.ci.f[e], fr.ci.p[e], 64);
     g_secondTcViews = (f == sc.secondTcFrame ? (1u << 0) | (1u << 2) : 0u) | (f == sc.secondTcFocusFrame ? (1u << 3) : 0u);
     const uint64_t t0 = ftwin::g_st.why[kWTwin];
     const ftwin::Stats before = ftwin::g_st;
@@ -1468,6 +1597,7 @@ Result Run(const Script& sc) {
   res.st = ftwin::g_st;
   res.instInstalled = ftwin::g_instInstalled;
   g_withI2 = false, g_i2PvInt = false, g_i2AuditBad = -1;
+  g_noops = false, g_workCall = false;  // R150
   ftwin::g_descFn = nullptr;
   ftwin::g_verifyEvery = 0;
   g_secondTcViews = 0;
@@ -1589,9 +1719,70 @@ void Pipeline() {
     PrintStats("mismatch", mmTw);
     for (const std::string& s : mmTw.log) printf("     %s\n", s.c_str());
   }
-  Check(FirstDiff(mmRef, mmTw) < 0 && mmTw.st.why[kWMismatch] == 2 && mmTw.st.why[kWPred] == 4,
+  // R150: the frame after a miss has no camera history; it decides on DCS's own focus upload (relation) instead of
+  // drawing stock (R123: kWPred 4).
+  Check(FirstDiff(mmRef, mmTw) < 0 && mmTw.st.why[kWMismatch] == 2 && mmTw.st.why[kWPred] == 0 &&
+            mmTw.st.decRel >= 2,
         "R123 pipeline: a focus camera that does not match DCS's focus upload -> both focus passes of that frame stock, "
-        "the next frame relearns (no prediction), exact");
+        "the next frame decides on the upload's own rows (R150), exact");
+  // R150 1. The collect-time focus cameras never relate to the uploads (R124 live: "no history" on 100 % of the focus
+  // passes): the twin still engages, decided on DCS's own focus upload, exact.
+  {
+    Script cf = base;
+    cf.ciForeign = true;
+    Script cfS = cf;
+    cfS.twin = false;
+    const Result cfRef = Run(cfS);
+    const Result cfTw = Run(cf);
+    PrintStats("R150 foreign cameras", cfTw);
+    Check(FirstDiff(cfRef, cfTw) < 0 && cfTw.twinPasses >= 10 && cfTw.st.twinItems > 200 && cfTw.st.decPred == 0 &&
+              cfTw.st.decRel >= 10 && cfTw.st.learnWhy[kLwOk] == 0 && cfTw.st.learnWhy[kLwFocusRel] > 0 &&
+              cfTw.st.why[kWPred] == 0,
+          "R150 pipeline: collect-time focus cameras that never relate (no camera history, R124's 100 % 'no history') "
+          "-> the twin decides on DCS's own focus upload and engages, exact");
+  }
+  // R150 2. A collect publishes between the periphery and the focus passes of every frame (audit B1's hypothesis):
+  // the focus still pairs with its eye's periphery of this frame (the latch), exact.
+  {
+    Script sb = base;
+    sb.ciBetween = true;
+    Script sbS = sb;
+    sbS.twin = false;
+    const Result sbRef = Run(sbS);
+    const Result sbTw = Run(sb);
+    Check(FirstDiff(sbRef, sbTw) < 0 && sbTw.twinPasses >= 10 && sbTw.st.seqMoved >= 20 && sbTw.st.why[kWStale] == 0,
+          "R150 pipeline: a collect published between the periphery and the focus passes -> the focus still pairs with "
+          "this frame's periphery (counted as a sequence move), the twin engages, exact");
+  }
+  // R150 3. Every patch item re-applies the bound viewport, scissors and "no predicate" (state-identical calls):
+  // they no longer make the items "other work" nor stop the focus twin, exact.
+  {
+    Script no = base;
+    no.noops = true;
+    Script noS = no;
+    noS.twin = false;
+    const Result noRef = Run(noS);
+    const Result noTw = Run(no);
+    PrintStats("R150 no-op calls", noTw);
+    Check(FirstDiff(noRef, noTw) < 0 && noTw.twinPasses >= 10 && noTw.st.twinItems > 200 &&
+              noTw.st.perWhy[kPWork] == 0 && noTw.st.noopVp > 0 && noTw.st.noopSc > 0 && noTw.st.noopPred > 0,
+          "R150 pipeline: state-identical viewport / scissor / predicate calls inside the items are let through (the "
+          "twin engages), exact");
+  }
+  // R150 4. A real other-work call inside every patch item: none of them is twinned, the call is named, exact.
+  {
+    Script wc = base;
+    wc.workCall = true;
+    Script wcS = wc;
+    wcS.twin = false;
+    const Result wcRef = Run(wcS);
+    const Result wcTw = Run(wc);
+    const std::string dg = ftwin::StatsDiagText(wcTw.st);
+    Check(FirstDiff(wcRef, wcTw) < 0 && wcTw.st.twinItems == 0 && wcTw.st.workBy[ftwin::sCSSetShader] > 0 &&
+              dg.find("CSSetShader") != std::string::npos,
+          "R150 pipeline: a compute-shader bind inside every patch item -> none twinned, 'other work by call: "
+          "CSSetShader' in the diag line, exact");
+  }
   // 3. F10: no culling (no collect-time camera) in one frame.
   Script f10 = base;
   f10.noCiFrame = 6;

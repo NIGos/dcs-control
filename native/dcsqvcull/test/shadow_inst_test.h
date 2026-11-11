@@ -899,6 +899,129 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
                 ListFiles(dir, L"*.tmp").empty(),
             "shadow inst cache: an entry that cannot be replaced is reported, the key still compiles, saving stays on");
   }
+  // Prewarm: the cache's own entries name the keys; stale ones are recompiled before a mission draws them.
+  {
+    TestSpin spinPre("shadow inst prewarm");
+    CacheInit(dir, cc);
+    ClearDir(dir);
+    KeyResult p1, p2;
+    CompileKeyCached(*s, p1);
+    CompileKeyCached(*g, p2);
+    auto written = [](const std::wstring& p) {
+      WIN32_FILE_ATTRIBUTE_DATA a = {};
+      GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &a);
+      return prune::Ticks(a.ftLastWriteTime);
+    };
+    auto freeItems = [](std::vector<PrewarmItem>& v) {
+      for (PrewarmItem& it : v) delete it.s;
+      v.clear();
+    };
+    if (!cacheWritable() || ListFiles(dir, L"*.qvc").size() != 2) {
+      QvSkip("shadow inst prewarm: the two cache entries could not be written\n");
+    } else {
+      // Files the scan must ignore: junk, a valid entry under another name, a truncated one, an identity stored
+      // without a technique's name (it cannot be rebuilt exactly).
+      const std::wstring sFile = dir + ListFiles(dir, L"s_*.qvc")[0];
+      writeFile(dir + L"s_0000000000000001.qvc", "junk");
+      CopyFileW(sFile.c_str(), (dir + L"s_0000000000000002.qvc").c_str(), FALSE);
+      {
+        std::string whole;
+        ReadWholeFile(sFile, whole);
+        writeFile(dir + L"s_0000000000000003.qvc", whole.substr(0, whole.size() / 2));
+      }
+      Snapshot* lossy = MakeSnapshot(ModelKeys()[0], kKindGb);
+      lossy->passes[1] = 0;
+      KeyResult pl;
+      CompileKeyCached(*lossy, pl);
+      delete lossy;
+      std::vector<PrewarmItem> items = PrewarmScan();
+      bool same = items.size() == 2;
+      for (const PrewarmItem& it : items) {
+        const Snapshot* ref = it.s->kind == kKindGb ? g : s;
+        CacheWriter a, b;
+        WriteIdentity(a, *it.s);
+        WriteIdentity(b, *ref);
+        same = same && a.b == b.b && it.s->shader == nullptr && !it.s->dead && written(it.path) == prune::Ticks(it.written);
+      }
+      Check(same, "shadow inst prewarm: the scan rebuilds each entry's key exactly from its file (junk, renamed, "
+                  "truncated and name-less entries are left alone)");
+      // The 14 days: seen from 15 days ahead nothing was used recently; the order is least recently used first.
+      std::vector<PrewarmItem> later = PrewarmScan(prune::NowTicks() + (kPrewarmDays + 1) * 864000000000ull);
+      Check(later.empty() && (items.size() < 2 || prune::Ticks(items[0].written) <= prune::Ticks(items[1].written)),
+            "shadow inst prewarm: only entries used in the last 14 days, most recently used taken first");
+      freeItems(later);
+      // Current entries: no compile, the files and their last-use times stay.
+      c0 = g_d3dCompiles.load();
+      bool current = true;
+      for (const PrewarmItem& it : items) current = current && PrewarmOne(it) == 0 && written(it.path) == prune::Ticks(it.written);
+      Check(current && g_d3dCompiles.load() == c0, "shadow inst prewarm: a current entry costs no compile and is not touched");
+      // Stale entries (another edit version, as after a module update): recompiled and stored; the live key then
+      // hits, with the same result as its own compile, and the hit counters are the live ones only.
+      CacheInit(dir, cc, kCacheEditVersion + 1);
+      c0 = g_d3dCompiles.load();
+      bool redone = true;
+      for (const PrewarmItem& it : items) redone = redone && PrewarmOne(it) == 1 && written(it.path) == prune::Ticks(it.written);
+      const uint32_t preCompiles = g_d3dCompiles.load() - c0;
+      KeyResult h1, h2;
+      c0 = g_d3dCompiles.load();
+      CompileKeyCached(*s, h1);
+      CompileKeyCached(*g, h2);
+      Check(redone && preCompiles == 4 && h1.cached && h2.cached && g_d3dCompiles.load() == c0 &&
+                Serialized(h1) == Serialized(p1) && Serialized(h2) == Serialized(p2) &&
+                CacheSummary().find("2 hits, 0 compiled, 0 rejected") != std::string::npos,
+            "shadow inst prewarm: a stale entry is recompiled under its old last-use time; the live key then hits "
+            "with the result of its own compile");
+      // A file that vanished meanwhile is skipped, not recreated.
+      if (!items.empty()) {
+        DeleteFileW(items[0].path.c_str());
+        Check(PrewarmOne(items[0]) == 2 && GetFileAttributesW(items[0].path.c_str()) == INVALID_FILE_ATTRIBUTES,
+              "shadow inst prewarm: an entry removed meanwhile is skipped");
+      }
+      freeItems(items);
+      // A worker does all of it by itself while no live key waits: scan, recompile, one summary, then idle.
+      CacheInit(dir, cc);
+      ClearDir(dir);
+      CompileKeyCached(*s, p1);
+      CompileKeyCached(*g, p2);
+      CacheInit(dir, cc, kCacheEditVersion + 2);
+      const bool onBefore = g_prewarmOn.load(), collect0 = g_collect.load(), collectGb0 = g_collectGb.load();
+      {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_prewarmState = 0;
+        g_prewarmBusy = 0;
+        g_prewarmAt = 0;
+      }
+      g_prewarmFound = g_prewarmCurrent = g_prewarmCompiled = g_prewarmSkipped = 0;
+      g_collect = true;      // the shadow keys are collected,
+      g_collectGb = false;   // the G-buffer keys are not: their entry is dropped
+      g_prewarmOn = true;
+      c0 = g_d3dCompiles.load();
+      HANDLE th = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
+      int state = 0;
+      for (int i = 0; i < 1200 && state != 3; ++i) {
+        Sleep(100);
+        std::lock_guard<std::mutex> lock(g_mutex);
+        state = g_prewarmState;
+      }
+      shadowinst::g_stop = true;
+      g_cv.notify_all();
+      const bool joined = th && WaitForSingleObject(th, 120000) == WAIT_OBJECT_0;
+      if (th) CloseHandle(th);
+      shadowinst::g_stop = false;
+      g_prewarmOn = onBefore;
+      g_collect = collect0;
+      g_collectGb = collectGb0;
+      KeyResult w1, w2;
+      const uint32_t workerCompiles = g_d3dCompiles.load() - c0;
+      CompileKeyCached(*s, w1);
+      CompileKeyCached(*g, w2);
+      Check(joined && state == 3 && g_prewarmFound.load() == 2 && g_prewarmCompiled.load() == 1 &&
+                g_prewarmSkipped.load() == 1 && g_prewarmCurrent.load() == 0 && workerCompiles == 2 && w1.cached &&
+                !w2.cached,
+            "shadow inst prewarm: an idle worker scans once and recompiles the stale entries of the kinds collected");
+      CacheInit(dir, cc);
+    }
+  }
   ClearDir(dir);
   delete s;
   delete g;
