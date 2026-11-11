@@ -69,6 +69,15 @@ struct Resolved {
   int kind[kMaxGb];  // ftwin::Kind
   int eye[kMaxGb];   // 0 / 1, -1 unknown
   int mainP[2], mainF[2];  // index into FrameRec::gb of each eye's periphery / focus main pass, -1 none
+  int tier = 0;            // how the focus views found their eye this frame (kTier*), 0 none
+};
+// A focus view's eye, strictest rule first. Live in flight (2026-11-11, moving camera) no focus shared every
+// non-per-view row with a periphery, so nothing paired and C2 had no passes to probe. The weaker rules keep the
+// pairing; C5 then reports which rows differ ("rows differing outside the per-view list").
+enum : int {
+  kTierShared = 1,  // every row outside the per-view list byte-equal (ftwin::SharedRowsEqual)
+  kTierView = 2,    // the view matrix rows 0-2 byte-equal (what the exact focus rows are built from)
+  kTierOrder = 3,   // by frame order: the first focus view belongs to the first periphery's eye
 };
 // The view's main G-buffer pass among its n passes in frame order (R44 live: a small first pass, the main pass, a
 // tiny last one; two per view in the R38 census: main, last).
@@ -87,10 +96,30 @@ inline Resolved Resolve(const FrameRec& f) {
       if (periph[v.eye] < 0) periph[v.eye] = i;
     }
   }
-  for (int i = 0; i < f.n; ++i) {
-    if (r.kind[i] != ftwin::kFocus) continue;
-    for (int e = 0; e < 2; ++e)
-      if (periph[e] >= 0 && ftwin::SharedRowsEqual(f.gb[periph[e]].tc, f.gb[i].tc)) r.eye[i] = e;
+  for (int tier = kTierShared; tier <= kTierView; ++tier)
+    for (int i = 0; i < f.n; ++i) {
+      if (r.kind[i] != ftwin::kFocus || r.eye[i] >= 0) continue;
+      for (int e = 0; e < 2; ++e) {
+        if (periph[e] < 0) continue;
+        const uint8_t* p = f.gb[periph[e]].tc;
+        if (tier == kTierShared ? ftwin::SharedRowsEqual(p, f.gb[i].tc) : memcmp(p, f.gb[i].tc, 48) == 0) r.eye[i] = e, r.tier = tier;
+      }
+    }
+  if (!r.tier && periph[0] >= 0 && periph[1] >= 0) {
+    // Frame order: the focus records fall into runs of one TerrainContext each; exactly two runs, as two peripheries.
+    int run[kMaxGb], runs = 0, last = -1;
+    for (int i = 0; i < f.n; ++i) {
+      if (r.kind[i] != ftwin::kFocus) continue;
+      if (last < 0 || memcmp(f.gb[last].tc, f.gb[i].tc, pep::kTcBytes) != 0) ++runs;
+      run[i] = runs - 1;
+      last = i;
+    }
+    if (runs == 2) {
+      const int firstEye = periph[0] < periph[1] ? 0 : 1;
+      for (int i = 0; i < f.n; ++i)
+        if (r.kind[i] == ftwin::kFocus) r.eye[i] = run[i] == 0 ? firstEye : 1 - firstEye;
+      r.tier = kTierOrder;
+    }
   }
   for (int e = 0; e < 2; ++e)
     for (int k : {static_cast<int>(ftwin::kPeriph), static_cast<int>(ftwin::kFocus)}) {
@@ -254,7 +283,7 @@ inline int WhyNoPair(const FrameRec& f, const Resolved& r) {
   return kNpFocusNoEye;
 }
 struct Diag {
-  uint64_t frames = 0, passes = 0, why[kNpCount] = {};
+  uint64_t frames = 0, passes = 0, why[kNpCount] = {}, tier[4] = {};
   std::string sample;  // the P rows of the first TerrainContext of the first frame without a pair
 };
 inline void DiagAdd(Diag& d, const FrameRec& f, const Resolved& r) {
@@ -262,6 +291,7 @@ inline void DiagAdd(Diag& d, const FrameRec& f, const Resolved& r) {
   ++d.frames;
   d.passes += static_cast<uint64_t>(f.n);
   ++d.why[w];
+  ++d.tier[r.tier & 3];
   if (w == kNpOk || !d.sample.empty()) return;
   for (int i = 0; i < f.n; ++i) {
     if (!f.gb[i].tcOk) continue;
@@ -287,6 +317,10 @@ inline std::string DiagLine(const Diag& d, uint64_t frameStarts, uint64_t gbPass
            d.frames ? static_cast<double>(d.passes) / static_cast<double>(d.frames) : 0.0,
            static_cast<unsigned long long>(d.why[kNpOk]));
   std::string s = b;
+  snprintf(b, sizeof(b), " (focus to eye by: every shared row %llu, view rows 0-2 only %llu, frame order %llu)",
+           static_cast<unsigned long long>(d.tier[kTierShared]), static_cast<unsigned long long>(d.tier[kTierView]),
+           static_cast<unsigned long long>(d.tier[kTierOrder]));
+  s += b;
   for (int w = kNpNoPass; w < kNpCount; ++w)
     if (d.why[w]) {
       snprintf(b, sizeof(b), ", %s %llu", NoPairName(w), static_cast<unsigned long long>(d.why[w]));
@@ -448,11 +482,13 @@ struct C7Acc {
 inline void C7Add(C7Acc& a, const mkit::CensusFrame& f, const std::function<char(void*)>& kindOf) {
   ++a.frames;
   const size_t n = f.counts.size();
+  // The view chains: the chains run inside a TerrainModule pass (kind 'T'). Each view has its own pass object
+  // (live 2026-11-11: four distinct objects, so "four chains of one object" never matched).
   int v[4] = {-1, -1, -1, -1};
-  for (size_t i = 0; i < n && v[0] < 0; ++i) {
+  {
     int g[4], m = 0;
     for (size_t j = 0; j < n; ++j)
-      if (f.pass[i] && f.pass[j] == f.pass[i]) {
+      if (kindOf && kindOf(f.pass[j]) == 'T') {
         if (m < 4) g[m] = static_cast<int>(j);
         ++m;
       }
@@ -464,7 +500,7 @@ inline void C7Add(C7Acc& a, const mkit::CensusFrame& f, const std::function<char
       sig += kindOf ? kindOf(f.pass[i]) : '?';
   if (v[0] < 0) {
     ++a.noFour;
-    ++a.layouts[sig + "|no four chains of one pass"];
+    ++a.layouts[sig + "|not four view chains"];
     return;
   }
   uint64_t tot[4] = {};
@@ -502,7 +538,7 @@ inline int C7Verdict(const C7Acc& a) {
 inline std::string C7Line(const C7Acc& a) {
   char b[768];
   snprintf(b, sizeof(b),
-           "pep C7: %llu frames, %llu without four chains of one pass; focus instance counts <= its periphery's for "
+           "pep C7: %llu frames, %llu without exactly four view chains; focus instance counts <= its periphery's for "
            "every object: first eye %llu of %llu frames (worst %llu objects over, %.1f extra instances/frame), second "
            "%llu of %llu (worst %llu, %.1f) | counts contained in every frame: %s | instance order: not comparable "
            "(stock orders an object's instances by racing atomics, R34 4.1), so merged instancer draws are exact only "
@@ -1313,7 +1349,7 @@ void SuitePhase(std::atomic<uint64_t>& frames) {
         k.c7, frames,
         [&](const mkit::CensusAcc&) {
           Log("%s", C7Line(a7).c_str());
-          for (const std::string& l : C7Layouts(a7)) Log("%s (C cascade, H height map, ? other; view chains by size: P periphery, F focus)", l.c_str());
+          for (const std::string& l : C7Layouts(a7)) Log("%s (C cascade, H height map, T view chain, ? other; four view chains by size: P periphery, F focus)", l.c_str());
         },
         [&](const mkit::CensusFrame& f) { C7Add(a7, f, kindOf); });
   }
