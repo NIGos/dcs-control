@@ -862,6 +862,38 @@ Test("Last flight: dcs.log session, Pimax frames, OFXR modes and frame time, DLS
     Require(LastFlight.ParseFrameCap(["08:13:01.357 governor: capped at 36,0 fps (72 Hz / 2): holding", "08:13:10.807 perf: fps=35,4 ft p50/p95=27,9/28,5 ms verdict=capped 36,0 fps = 72/2 (0 s GPU)"]) is { Fps: 36, RefreshHz: 72, Divider: 2, CappedReports: 1 }, "comma decimals of older payloads");
     Require(LastFlight.ParseFrameCap(["08:13:01.357 governor: capped at 1e999 fps (72 Hz / 2)", "08:13:10.807 perf: fps=35.4 ft p50/p95=27.9/28.5 ms verdict=capped (0 s GPU)"]) is { Fps: null, CappedReports: 1, Reports: 1 }, "no named rate");
     Require(LastFlight.ParseFrameCap(["garbage", "08:00:00.000 DcsQvCull loader started from x"]) is null, "no reports");
+    // The engine optimizations row: the features line (perf_mon.h FeatureText), the in-flight key (engine.inc ToggleEngine,
+    // config_load.inc), the shader warm-up (perf_mon.h WarmTick) and the GPU line (LogGpuEnv). Lines of a real flight (s11).
+    string Features(int on, string states) => $"features: {on} of 18 configured on; AllocSlabs=on BigPages=on FrameHeap=on TriCounter=on TaskClock=on TimerCache=on TexDedupe=on CbSkip=on CostWeights=on PartitionBoost=on ShadowInst=on ShadowBatch=on PlanAsync=on ShadowTexSkip=on {states} SplitFilter=on Prefetch=on";
+    string[] engineFlight = ["09:08:30.100 DcsQvCull loader started from C:\\x\\DcsQvCull.dll",
+        "09:08:32.220 features: 10 of 18 configured on; AllocSlabs=idle(waiting) BigPages=idle(waiting) FrameHeap=on TriCounter=on TaskClock=on TimerCache=on TexDedupe=on CbSkip=on CostWeights=on PartitionBoost=idle(waiting) ShadowInst=on ShadowBatch=idle(waiting) PlanAsync=idle(waiting) ShadowTexSkip=on ShadowRec=idle(starting) GBufferRec=idle(starting) SplitFilter=idle(waiting) Prefetch=on",
+        "09:08:42.087 env: GPU NVIDIA GeForce RTX 5090 (DCS's device, vendor 0x10de), driver 32.0.16.2114, dedicated 32187 MB, VRAM budget 31419 MB, DCS uses 9972 MB; DriverCommandLists=1; feature level b100; GPU busy from D3DKMT",
+        "09:08:51.000 warmup: shader variants compiling (31 keys queued, 4 in progress); shadow instancing, batching, the texture skip and the recorders are only partly active until done",
+        "09:09:09.110 warmup: done after 18 s (cache: 0 hits, 9 compiled in this batch; 200 hits, 9 compiled since start)",
+        "09:09:12.000 " + Features(18, "ShadowRec=on GBufferRec=on"), "09:10:12.000 " + Features(18, "ShadowRec=on GBufferRec=on")];
+    Require(LastFlight.ParseEngine(engineFlight) is { On: 18, Configured: 18, TurnedOff.Count: 0, NotStarted.Count: 0, RecordersUnavailable: false, OffSeconds: 0, Toggles: 0, OffAtExit: false, WarmupSeconds: 18, WarmupUnfinished: false, Seconds: 100 }, "all on after an 18 s warm-up");
+    // Two turned themselves off for safety (latched) after running; one never left idle; a second warm-up still running at exit.
+    var latchedFlight = LastFlight.ParseEngine([.. engineFlight, "09:11:00.000 warmup: shader variants compiling (5 keys queued, 1 in progress); …",
+        "09:12:12.000 shadow recorder: off for this session", "09:12:22.000 " + Features(16, "ShadowRec=latched GBufferRec=latched")])!;
+    Require(latchedFlight is { On: 16, Configured: 18, WarmupSeconds: 18, WarmupUnfinished: true } && latchedFlight.TurnedOff.SequenceEqual(["multi-threaded shadows", "multi-threaded G-buffer"]) && latchedFlight.NotStarted.Count == 0, "turned off for safety");
+    var waiting = LastFlight.ParseEngine(["10:00:00.000 " + Features(17, "ShadowRec=on GBufferRec=on").Replace("PartitionBoost=on", "PartitionBoost=idle(waiting)").Replace("BigPages=on", "BigPages=off(ini)").Replace(" of 18 ", " of 17 ")])!;
+    Require(waiting is { On: 16, Configured: 17 } && waiting.NotStarted.SequenceEqual(["culling partition boost"]), "not started, and one off in the settings");
+    // The in-flight key: 4 min off, back on, then off again until the log ends; "stay OFF" (an ini reload) changes nothing.
+    var killed = LastFlight.ParseEngine([.. engineFlight, "09:11:00.000 hotkey: engine optimizations OFF", "09:11:00.020 hotkey: switch took 0.4 ms on the worker; 112 code-site writes, other threads held 0.10 ms in total (0.05 ms max, 3 threads, PatchMode 2)",
+        "09:11:10.000 " + Features(0, "ShadowRec=off(killswitch) GBufferRec=off(killswitch)").Replace("=on", "=off(killswitch)"), "09:13:00.000 hotkey: engine optimizations stay OFF (the ini reload changed no engine key)",
+        "09:15:00.000 hotkey: engine optimizations back ON (ini engine key changed: Model.ShadowInstancing)", "09:20:00.000 hotkey: engine optimizations OFF", "09:22:00.000 " + Features(0, "ShadowRec=off(killswitch) GBufferRec=off(killswitch)").Replace("=on", "=off(killswitch)")])!;
+    Require(killed is { On: 18, OffSeconds: 360, OffAtExit: true, Toggles: 2, Seconds: 808 }, "off with the in-flight key");
+    // Started off (no hotkey line read), turned on: off from the first features line that says so. Across midnight.
+    Require(LastFlight.ParseEngine(["23:59:00.000 " + Features(0, "ShadowRec=off(killswitch) GBufferRec=off(killswitch)").Replace("=on", "=off(killswitch)"), "00:01:00.000 hotkey: engine optimizations ON",
+        "00:02:00.000 " + Features(18, "ShadowRec=on GBufferRec=on")]) is { On: 18, OffSeconds: 120, OffAtExit: false, Toggles: 0, Seconds: 180 }, "off from the start, across midnight");
+    // No driver command lists (an AMD GPU): the recorders are said once, never as turned off or not started.
+    var amd = LastFlight.ParseEngine(["08:00:00.000 env: GPU AMD Radeon RX 7900 XTX (DCS's device, vendor 0x1002), driver 32.0.12011.1036, dedicated 24560 MB, VRAM budget 24000 MB, DCS uses 9000 MB; DriverCommandLists=0 (the recorders do not run); feature level b100; GPU busy from D3DKMT",
+        "08:01:00.000 " + Features(16, "ShadowRec=latched GBufferRec=idle(starting)")])!;
+    Require(amd is { On: 16, Configured: 18, RecordersUnavailable: true, TurnedOff.Count: 0, NotStarted.Count: 0, WarmupSeconds: null }, "recorders unavailable");
+    // Older logs and broken lines: no features line, no row; only the last DCS start counts.
+    Require(LastFlight.ParseEngine(["08:00:00.000 DcsQvCull loader started from x", "08:00:10.000 perf: fps=80.0 verdict=CPU", "garbage", "features: 18 of 18 configured on; AllocSlabs=on"]) is null, "no features line");
+    Require(LastFlight.ParseEngine(["08:00:00.000 " + Features(18, "ShadowRec=latched GBufferRec=on"), "09:00:00.000 DcsQvCull loader started from x", "09:00:10.000 features: 1 of 99999999999 configured on; AllocSlabs=on GBufferRec=latched",
+        "09:00:20.000 features: 1 of 1 configured on; AllocSlabs=on BigPages=off(ini)"]) is { On: 1, Configured: 1, TurnedOff.Count: 0 }, "the last DCS start only; malformed counts skipped");
     // Quad Views' eye tracking line: the last DCS start in the session counts; one before it or outside it does not.
     string Q(DateTimeOffset t, string text) => t.ToString("yyyy-MM-dd HH:mm:ss zzz", System.Globalization.CultureInfo.InvariantCulture).Remove(t.ToString("yyyy-MM-dd HH:mm:ss zzz", System.Globalization.CultureInfo.InvariantCulture).Length - 3, 1) + ": " + text;
     Require(LastFlight.ParseEyeTracking([Q(start.AddSeconds(5), "Quad-Views-Foveated layer (v1.1.3) is active"), Q(start.AddSeconds(6), "Eye tracking is not supported")], start, start.AddMinutes(6)) is { Supported: false }, "not supported");

@@ -1712,6 +1712,20 @@ function renderFlight() {
   if (f.dlss5) rows.push(['DLSS 5',f.dlss5.state === 'ran' ? 'Ran' : f.dlss5.state === 'failed' ? 'Failed' : 'Not started',f.dlss5.state === 'failed' ? f.dlss5.error : [f.dlss5.version ? 'runtime '+f.dlss5.version : 'no 3D scene reached', f.dlss5.toggles ? `toggled ${f.dlss5.toggles}×, ${f.dlss5.onAtExit ? 'on' : 'off'} at exit` : null].filter(Boolean).join(' · '),f.dlss5.state === 'failed']);
   if (f.boost) rows.push(['CPU Boost',f.boost.state === 'restored' ? 'Restored' : f.boost.state === 'running' ? 'Running' : f.boost.state,`${f.boost.moved} apps moved, ${f.boost.restored} restored`+(f.boost.errors.length ? ` · ${f.boost.errors.length} need admin rights` : ''),f.boost.errors.length > 0]);
   if (f.prefetch) rows.push(['Terrain prefetch fix',f.prefetch.averageCallsPerSecond ? `${fmt(f.prefetch.skippedPercent,1)}% skipped` : 'No calls',f.prefetch.averageCallsPerSecond ? `${fmt(f.prefetch.averageCallsPerSecond/1000,0)}k calls/s average · ${fmt(f.prefetch.peakCallsPerSecond/1000,0)}k peak` : 'Loaded; DCS made no repeated prefetch calls']);
+  // Engine Optimizations: whether they really ran, from the module's log (LastFlight.ParseEngine): how many were on, any
+  // that turned themselves off for safety, time off with the in-flight key, the shader warm-up. Green, amber when one
+  // turned itself off, grey when the in-flight key had them off for most of the flight.
+  if (f.engine && f.engine.configured) {
+    const e = f.engine, span = s => s < 60 ? `${s} s` : `${Math.round(s/60)} min`, key = keyLabel(parseKey(profile?.engineToggleKey) || parseKey(HOTKEYS.engineToggleKey.fallback));
+    const mostlyOff = e.offSeconds > 0 && e.offSeconds >= e.seconds / 2, count = `${e.on} of ${e.configured} on`;
+    const notes = [
+      mostlyOff ? `with ${key} for ${span(e.offSeconds)}${e.seconds ? ` of ${span(e.seconds)}` : ''} · otherwise ${count}` : e.offSeconds ? `off ${span(e.offSeconds)} with ${key}` : null,
+      e.turnedOff.length ? `${e.turnedOff.length} turned off for safety (${e.turnedOff.join(', ')})` : null,
+      e.recordersUnavailable ? 'no multi-threaded G-buffer or shadows: this GPU driver has no command lists' : null,
+      e.notStarted.length ? `not started: ${e.notStarted.join(', ')}` : null,
+      e.warmupSeconds != null ? `warm-up ${span(e.warmupSeconds)}${e.warmupUnfinished ? ', another still running at exit' : ''}` : e.warmupUnfinished ? 'warm-up not finished' : null].filter(Boolean);
+    rows.push(['Engine Optimizations',mostlyOff ? 'Off in flight' : count,notes.join(' · ') || 'All flight',mostlyOff ? 'off' : e.turnedOff.length ? true : 'ok']);
+  }
   // A frame rate held by the headset software (motion smoothing at half the refresh rate, for example): CPU and GPU
   // have headroom, so no setting here can raise it. Not with frame generation (DCS runs at a fraction of the refresh
   // rate on purpose) and not at the full refresh rate (divider 1).
@@ -1723,7 +1737,7 @@ function renderFlight() {
   if (f.eyeTracking && eyeTrackedVr(profile) && profile.quadViews === 'QuadViewsFoveated')
     rows.push(['Eye tracking',f.eyeTracking.supported ? 'Reached Quad Views' : 'Did not reach Quad Views',f.eyeTracking.supported ? 'The focus area followed your eyes.'
       : 'The focus area stayed in the center. Restart the headset in Pimax Play (desktop Tobii software can hold its eye tracker), then start DCS again.',!f.eyeTracking.supported]);
-  body.innerHTML = rows.length ? `<dl class="flight-grid">${rows.map(([k,v,d,warn]) => `<div class="flight-item${warn ? ' warn' : ''}"><dt>${k}</dt><dd><b>${escape(v)}</b><small title="${escape(d)}">${escape(d)}</small></dd></div>`).join('')}</dl>` : '<p class="fine">DCS ran, but no headset, frame generation or CPU Boost log covers this session.</p>';
+  body.innerHTML = rows.length ? `<dl class="flight-grid">${rows.map(([k,v,d,warn]) => `<div class="flight-item${warn === true ? ' warn' : warn ? ' '+warn : ''}"><dt>${k}</dt><dd><b>${escape(v)}</b><small title="${escape(d)}">${escape(d)}</small></dd></div>`).join('')}</dl>` : '<p class="fine">DCS ran, but no headset, frame generation or CPU Boost log covers this session.</p>';
 }
 function renderDiagnostics() { renderInventory(); renderEdits(); }
 /** What an edit changes: the checks, the files Launch will write and the overview. */
@@ -1784,7 +1798,7 @@ function renderSearch() {
     ['osd','Headset panel (OSD)','The status panel in the headset: FPS and what is on. Show or hide it in flight with its key.','panelControls'],
     ['diagnostics','Files Launch DCS writes','Review files: every file and DCS setting Launch DCS writes for these settings.','planCard'],
     ['diagnostics','Checks','Must fix, check yourself and OK: what stands between these settings and a flight.','checkGroups'],
-    ['overview','Last flight','Headset FPS, how often frames were generated, DCS frame time, DLSS 5, CPU Boost and the terrain prefetch fix (Engine Optimizations) from the last flight.','flightCard'],
+    ['overview','Last flight','Headset FPS, how often frames were generated, DCS frame time, DLSS 5, CPU Boost, whether Engine Optimizations really ran and the terrain prefetch fix from the last flight.','flightCard'],
     ['support','Diagnostic report','Save a text report: settings, checks and what was detected on this PC, as a file.','export'],
     ['support','Diagnostic package','One ZIP with the logs and settings needed to understand a problem, for a report.','diagnosticPackage'],
     ['support','DLSS 5 not applied','Why DLSS 5 did not reach the focus area in the last session.','dlssFocus'],
