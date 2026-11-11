@@ -257,6 +257,8 @@ void LoadConfig(bool initial) {
   if (c.shadowRecorderHelpers < 0) c.shadowRecorderHelpers = 0;
   if (c.shadowRecorderHelpers > 3) c.shadowRecorderHelpers = 3;
   c.shadowRecorderInstancing = GetPrivateProfileIntW(L"Model", L"ShadowRecorderInstancing", 1, ini.c_str()) != 0;
+  c.shadowRecorderNest = GetPrivateProfileIntW(L"Model", L"ShadowRecorderNest", 0, ini.c_str()) != 0;
+  c.smallGpuBundle = GetPrivateProfileIntW(L"Model", L"SmallGpuBundle", 0, ini.c_str()) != 0;
   c.suiteShadowRecVerify = GetPrivateProfileIntW(L"Suite", L"ShadowRecVerify", 0, ini.c_str()) != 0;
   c.suiteShadowRecVerifySec = GetPrivateProfileIntW(L"Suite", L"ShadowRecVerifySec", 5, ini.c_str());
   if (c.suiteShadowRecVerifySec < 1) c.suiteShadowRecVerifySec = 1;
