@@ -195,6 +195,7 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   sfilt::Shutdown();    // call sites, FX call-table entries and context table back to stock
   jointail::Shutdown();
   shadowrec::Shutdown();  // chained pointers and class slots back before batching's own shutdown
+  fwdsplit::Shutdown();  // A5 forward split: slot 19, override, render observer, TerrainObject slots out (no-op unless on)
   fwdreccount::Shutdown();  // forward S0: SimplePassData slot 19, chain, class slots, sort observer out
   gbreccount::Shutdown();  // G-buffer S0 chain, class slots, sort observer (and its own sort patch) out
   // Each Shutdown below reports whether it drained its passes; if one did

@@ -197,6 +197,7 @@ void LoadConfig(bool initial) {
   c.suiteShadowRecCount = GetPrivateProfileIntW(L"Suite", L"ShadowRecCount", 0, ini.c_str()) != 0;
   c.suiteGBufferRecCount = GetPrivateProfileIntW(L"Suite", L"GBufferRecCount", 0, ini.c_str()) != 0;
   c.suiteForwardRecCount = GetPrivateProfileIntW(L"Suite", L"ForwardRecCount", 0, ini.c_str()) != 0;
+  c.suiteForwardSplit = std::max(0, std::min(3600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ForwardSplit", 0, ini.c_str()))));
   c.suiteGpuPassTiming = GetPrivateProfileIntW(L"Suite", L"GpuPassTiming", 0, ini.c_str()) != 0;
   c.suiteGpuPassStats = GetPrivateProfileIntW(L"Suite", L"GpuPassStats", 0, ini.c_str()) != 0;
   c.peripheralLodScale = (std::max)(0, (std::min)(99, static_cast<int>(GetPrivateProfileIntW(L"Model", L"PeripheralLodScale", 0, ini.c_str()))));

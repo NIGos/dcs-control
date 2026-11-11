@@ -25,6 +25,7 @@
 #include "gb_rec_count.h"
 #include "gb_rec.h"
 #include "fwd_rec_count.h"
+#include "fwd_split.h"  // A5: forward pass split glass/terrain/flat/models/other per view ([Suite] ForwardSplit, default 0)
 #include "gpu_pass_timing.h"
 #include "periph_lod.h"
 #include "cascade_cache.h"  // R33: far shadow cascade static depth cache ([Shadows] CascadeCache, prototype)
