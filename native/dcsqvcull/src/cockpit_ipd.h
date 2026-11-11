@@ -5467,7 +5467,10 @@ std::mutex g_dumpQMutex;
 std::condition_variable g_dumpQCv;
 std::condition_variable g_dumpQSpace;  // the worker took a job (a full queue has room again)
 std::deque<DumpJob> g_dumpQ;
-std::thread g_dumpWorker;
+// A pointer (never destroyed at process exit): a joinable std::thread static destructed by the CRT at ExitProcess
+// calls std::terminate, which left DCS.exe lingering at quit (user report, Werewolf_fs). Joined in DumpWorkerStop.
+std::thread* g_dumpWorker = nullptr;
+inline bool DumpWorkerRunning() { return g_dumpWorker && g_dumpWorker->joinable(); }
 std::atomic<bool> g_dumpStop{false};
 std::wstring g_dumpDir;  // render thread: this dump's folder (copied into each job)
 constexpr size_t kDumpQMax = 64;  // ~16 MB per focus frame (2028 x 2004): at most ~1 GB queued
@@ -5660,7 +5663,11 @@ void DumpWorkerStop() {
     g_dumpStop = true;
   }
   g_dumpQCv.notify_all();
-  if (g_dumpWorker.joinable()) g_dumpWorker.join();
+  if (g_dumpWorker) {
+    if (g_dumpWorker->joinable()) g_dumpWorker->join();
+    delete g_dumpWorker;
+    g_dumpWorker = nullptr;
+  }
   g_dumpStop = false;
 }
 // Render thread: slots copied at least 2 frames ago are read back (never waiting on the GPU).
@@ -5688,7 +5695,7 @@ void DumpPoll(bool force) {
     j.dir = g_dumpDir;
     {
       std::unique_lock<std::mutex> lock(g_dumpQMutex);
-      if (g_dumpQ.size() >= kDumpQMax && g_dumpWorker.joinable())
+      if (g_dumpQ.size() >= kDumpQMax && DumpWorkerRunning())
         g_dumpQSpace.wait_for(lock, std::chrono::milliseconds(kDumpQWaitMs),
                               [] { return g_dumpQ.size() < kDumpQMax || g_dumpStop.load(); });
       if (g_dumpQ.size() >= kDumpQMax) {
@@ -5827,7 +5834,10 @@ bool DumpStart() {
     g_dumpViews = g_cfgDumpViews.load() & 0x1F;
     if (!g_dumpViews) g_dumpViews = 0x0C;
     g_dumpBindLogs = 0;
-    if (!g_dumpWorker.joinable()) g_dumpWorker = std::thread([] { qvexit::RunVoid(&DumpWorker); });
+    if (!DumpWorkerRunning()) {
+      delete g_dumpWorker;
+      g_dumpWorker = new std::thread([] { qvexit::RunVoid(&DumpWorker); });
+    }
     char vs[16] = {};
     int n = 0;
     for (int v = 0; v < 5; ++v)

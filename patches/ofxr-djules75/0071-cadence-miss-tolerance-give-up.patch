@@ -1,0 +1,312 @@
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -1498,6 +1498,12 @@ struct CadenceConfig {
+     bool one_exit_slow{true};
+     std::uint32_t one_exit_sparse_episodes{0};
+     Nanoseconds one_exit_sparse_window{10 * kSecond};
++    // DCS Control (0071): the gap that makes two misses at 1X two episodes
++    // (late_episode_gap at 2 and 3), and how many attempts at 1X may fail in
++    // a row before it is not tried again until the scene changes (0: no
++    // limit). See CadencePreference.
++    Nanoseconds one_late_episode_gap{100 * kMillisecond};
++    std::uint32_t one_max_failed{0};
+ };
+ 
+ // DCS Control (0070): how readily adaptive cadence passes frames through
+@@ -1520,9 +1526,28 @@ struct CadenceConfig {
+ //   steady    0032 as it was: enter at 0.80 of the period, leave over 0.95
+ //             or on 2 missed-slot episodes within a second.
+ //   balanced  enter at 1.10 (the estimate's excess over a real 0.9 or so);
+-//             leave on 2 episodes within a second or 3 within 10 s.
+-//   rate      enter at 1.25 (what may hold at all); leave on 2 episodes
+-//             within a second only.
++//             leave on 3 episodes within a second or 5 within 10 s.
++//   rate      enter at 1.25 (what may hold at all); leave on 3 episodes
++//             within a second or 10 within 10 s.
++//
++// DCS Control (0071), from the first flights of 0070 (same view, 150 s each):
++//   - Smoothness buffer off, balanced: 1X held 28 s, 4 s and 17 s at a clean
++//     90 (no application frame over 16 ms, 4.5 ms of each period spent
++//     waiting in xrEndFrame) and was left each time on one hiccup of the
++//     runtime's own - its xrWaitFrame taking two periods twice, 165-210 ms
++//     apart - which 0070 read as two episodes within a second. Each exit
++//     then cost 30 s and more of 2 (the failed attempt's backoff). The
++//     application without the layer has the same hiccups and nobody counts
++//     them. So at 1X under these two preferences misses within 250 ms are one
++//     episode (one_late_episode_gap), and the counts are the ones above: a
++//     hiccup or two stay, a run of misses leaves within a second.
++//   - Smoothness buffer on (`pipelined_deep_hold`): the application ran at
++//     87 a second at 1X, unheld (xrEndFrame 0.5 ms), drifted past the 1X
++//     deadline and had a slot re-presented (407) every 100-270 ms: 1X does
++//     not hold there, and it was tried again at 30, 60, 120 s for a second
++//     or two of repeats each. An attempt that fails is now final sooner:
++//     balanced gives up after 3 failed in a row, rate after 6, until the
++//     scene changes (one_max_failed); steady retries as before.
+ enum class CadencePreference : std::uint32_t { steady = 0, balanced = 1, rate = 2 };
+ 
+ [[nodiscard]] constexpr CadencePreference cadence_preference_from(
+@@ -1538,10 +1563,17 @@ enum class CadencePreference : std::uint32_t { steady = 0, balanced = 1, rate =
+     if (preference == CadencePreference::balanced) {
+         config.one_enter_fraction = 1.10;
+         config.one_exit_slow = false;
+-        config.one_exit_sparse_episodes = 3;
++        config.one_exit_episodes = 3;        // 0071
++        config.one_exit_sparse_episodes = 5; // 0071: was 3
++        config.one_late_episode_gap = 250 * kMillisecond;
++        config.one_max_failed = 3;
+     } else if (preference == CadencePreference::rate) {
+         config.one_enter_fraction = 1.25;
+         config.one_exit_slow = false;
++        config.one_exit_episodes = 3;         // 0071
++        config.one_exit_sparse_episodes = 10; // 0071
++        config.one_late_episode_gap = 250 * kMillisecond;
++        config.one_max_failed = 6;
+     }
+     return config;
+ }
+@@ -1612,6 +1644,12 @@ public:
+ 
+     [[nodiscard]] std::uint32_t level() const noexcept { return level_; }
+     [[nodiscard]] Nanoseconds backoff() const noexcept { return backoff_; }
++    // DCS Control (0071): 1X failed one_max_failed times in a row and is
++    // not tried again until the scene changes.
++    [[nodiscard]] bool one_given_up() const noexcept {
++        return config_.one_max_failed != 0 &&
++            failed_in_row_ >= config_.one_max_failed;
++    }
+     [[nodiscard]] Nanoseconds one_allowed_at() const noexcept {
+         return one_allowed_at_;
+     }
+@@ -1656,6 +1694,8 @@ private:
+     Nanoseconds one_entered_at_{-1};
+     Nanoseconds one_allowed_at_{};
+     Nanoseconds backoff_{};
++    // DCS Control (0071): attempts at 1X failed in a row (one_max_failed).
++    std::uint32_t failed_in_row_{};
+     bool three_allowed_{true}; // DCS Control (0034)
+ };
+ 
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -1009,6 +1009,7 @@ void CadenceController::start(Nanoseconds now) noexcept {
+     // Nothing into or out of 1X yet: the spacing does not apply.
+     one_allowed_at_ = now;
+     backoff_ = 0;
++    failed_in_row_ = 0; // DCS Control (0071)
+ }
+ 
+ void CadenceController::add_frame(
+@@ -1034,7 +1035,10 @@ void CadenceController::add_late(Nanoseconds at, std::uint32_t count) noexcept {
+     if (late_count_ != 0) {
+         const Nanoseconds episode =
+             late_at_[(late_next_ + kLateEvents - 1) % kLateEvents];
+-        if (at >= episode && at - episode < config_.late_episode_gap) {
++        // DCS Control (0071): 1X's own gap (CadencePreference).
++        const Nanoseconds gap = level_ == 1 ? config_.one_late_episode_gap
++                                            : config_.late_episode_gap;
++        if (at >= episode && at - episode < gap) {
+             return;
+         }
+     }
+@@ -1100,10 +1104,17 @@ void CadenceController::leave_one(
+         backoff_ = backoff_ <= 0
+             ? config_.one_backoff_first
+             : std::min(backoff_ * 2, config_.one_backoff_max);
++        ++failed_in_row_; // DCS Control (0071)
+     } else if (held >= config_.one_reset_after) {
+         backoff_ = 0;
++        failed_in_row_ = 0;
+     }
+     one_allowed_at_ = now + std::max(config_.one_spacing, failed ? backoff_ : 0);
++    // DCS Control (0071): failed too often in a row: not again in this scene
++    // (scene_changed and start allow it again).
++    if (one_given_up()) {
++        one_allowed_at_ = now + 86'400 * kSecond;
++    }
+     // Slots missed at 1X say nothing about 2: they would send it on to 3.
+     late_count_ = 0;
+     late_next_ = 0;
+@@ -1138,6 +1149,7 @@ CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexc
+             now);
+         if (now - one_entered_at_ >= config_.one_reset_after) {
+             backoff_ = 0;
++            failed_in_row_ = 0; // DCS Control (0071)
+         }
+         if (now >= one_entered_at_ + config_.one_grace) {
+             // DCS Control (0070): the slower miss rule, and the p90 only
+@@ -1244,6 +1256,12 @@ CadenceStep CadenceController::scene_changed(Nanoseconds now) noexcept {
+     if (level_ == 1) {
+         leave_one(now, CadenceEvent::one_left_scene, step);
+     }
++    // DCS Control (0071): a new scene may hold 1X where the last did not:
++    // it is tried again (after the spacing, and what is left of the backoff).
++    if (one_given_up()) {
++        one_allowed_at_ = now + std::max(config_.one_spacing, backoff_);
++    }
++    failed_in_row_ = 0;
+     level_ = 2;
+     level_since_ = now;
+     run_three_ = 0;
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -2777,45 +2777,127 @@ void cadence_preference_tests() {
+             "rate: 1.2 periods is tried");
+     }
+     {
+-        // Sparse misses at 1X - one every three seconds, never two within a
+-        // second: balanced leaves at the third within ten seconds (a failed
+-        // attempt: the backoff), rate stays.
++        // DCS Control (0071). At 1X: frames of 97% of the period until `at`,
++        // then a miss; and misses every `step` for `span`.
++        const auto run_to = [](CadenceSim& sim, Nanoseconds at) {
++            while (sim.now < at) {
++                sim.frame(10'800'000, 9'500'000, 0);
++            }
++        };
++        const auto miss_at = [&](CadenceSim& sim, Nanoseconds at) {
++            run_to(sim, at);
++            sim.controller.add_late(sim.now, 1);
++            sim.frame(10'800'000, 9'500'000, 0);
++        };
++        const auto enter = [](CadenceSim& sim) {
++            const Nanoseconds entered = sim.until(
++                CadenceEvent::one_entered, 30'000, kHoldCpu, kHoldGpu, kHoldSynthesis);
++            require(entered >= 0, "preference: entered");
++            return entered;
++        };
++        // The flown hiccup (Smoothness buffer off, 0070): the runtime's wait
++        // two periods long twice, 180 ms apart, and again five seconds on.
++        // One episode each under balanced and rate: 1X stays. Under steady
++        // (light frames: its own entry) they are two within a second: left.
+         CadenceSim balanced(cadence_config_for(CadencePreference::balanced));
+         CadenceSim rate(cadence_config_for(CadencePreference::rate));
+         for (CadenceSim* sim : {&balanced, &rate}) {
+-            const Nanoseconds entered = sim->until(
+-                CadenceEvent::one_entered, 1000, kHoldCpu, kHoldGpu, kHoldSynthesis);
+-            require(entered >= 0, "sparse: entered");
+-            for (int miss = 0; miss < 3; ++miss) {
+-                const Nanoseconds at = entered + (2 + 3 * miss) * kSecond;
+-                while (sim->now < at) {
+-                    sim->frame(10'800'000, 9'500'000, 0);
+-                }
+-                sim->controller.add_late(sim->now, 1);
+-                sim->frame(10'800'000, 9'500'000, 0);
++            const Nanoseconds entered = enter(*sim);
++            for (int hiccup = 0; hiccup < 2; ++hiccup) {
++                miss_at(*sim, entered + (5 + 5 * hiccup) * kSecond);
++                miss_at(*sim, entered + (5 + 5 * hiccup) * kSecond + 180 * kMillisecond);
++            }
++            run_to(*sim, entered + 14 * kSecond);
++            require(sim->controller.level() == 1 && sim->events.size() == 1,
++                "balanced and rate: a hiccup of two misses 180 ms apart stays");
++        }
++        {
++            CadenceSim steady;
++            const Nanoseconds entered = enter_one(steady);
++            while (steady.now < entered + 5 * kSecond) {
++                steady.frame(kOneCpu, kOneGpu - kOneSynthesis, 0);
++            }
++            steady.controller.add_late(steady.now, 1);
++            steady.frame(kOneCpu, kOneGpu - kOneSynthesis, 0);
++            steady.controller.add_late(steady.now + 180 * kMillisecond, 1);
++            for (int index = 0; index < 60; ++index) {
++                steady.frame(kOneCpu, kOneGpu - kOneSynthesis, 0);
++            }
++            require(steady.controller.level() == 2 &&
++                    steady.events.back().event == CadenceEvent::one_left_late,
++                "steady: the same hiccup leaves, as before");
++        }
++        // One miss every 1.5 s from here: balanced leaves at the fifth within
++        // ten seconds; rate (ten) stays.
++        const Nanoseconds sparse_from = balanced.now + 12 * kSecond;
++        for (CadenceSim* sim : {&balanced, &rate}) {
++            for (int miss = 0; miss < 6 && sim->controller.level() == 1; ++miss) {
++                miss_at(*sim, sparse_from + miss * 1500 * kMillisecond);
+             }
+         }
+         require(balanced.controller.level() == 2 &&
+                 balanced.events.back().event == CadenceEvent::one_left_late &&
+-                balanced.controller.backoff() == 30 * kSecond,
+-            "balanced: three episodes in ten seconds leave, and back off");
++                balanced.now >= sparse_from + 6 * kSecond,
++            "balanced: five episodes in ten seconds leave, not four");
+         require(rate.controller.level() == 1 && rate.events.size() == 1,
+-            "rate: sparse misses stay");
+-        // Two episodes within a second leave under rate as well.
+-        rate.controller.add_late(rate.now, 1);
+-        rate.frame(10'800'000, 9'500'000, 0);
+-        rate.controller.add_late(rate.now + 300 * kMillisecond, 1);
+-        for (int index = 0; index < 60; ++index) {
+-            rate.frame(10'800'000, 9'500'000, 0);
++            "rate: a miss every 1.5 s stays");
++        // The flown run of misses (Smoothness buffer on, 0070): a slot
++        // re-presented every 120 ms. Both leave within a second.
++        for (CadenceSim* sim : {&balanced, &rate}) {
++            if (sim->controller.level() != 1) {
++                enter(*sim);
++            }
++            run_to(*sim, sim->now + 20 * kSecond);
++            const Nanoseconds from = sim->now;
++            for (int miss = 0; miss < 12 && sim->controller.level() == 1; ++miss) {
++                miss_at(*sim, from + miss * 120 * kMillisecond);
++            }
++            require(sim->controller.level() == 2 &&
++                    sim->events.back().event == CadenceEvent::one_left_late &&
++                    sim->now <= from + 1 * kSecond,
++                "balanced and rate: a run of misses leaves within a second");
++        }
++    }
++    {
++        // DCS Control (0071): an attempt that fails at once, three times in a
++        // row under balanced: 1X is not tried again in this scene, however
++        // light it stays; a scene change allows it again. Steady never gives up.
++        const auto fail = [](CadenceSim& sim) {
++            const Nanoseconds entered = sim.until(
++                CadenceEvent::one_entered, 40'000, kHoldCpu, kHoldGpu, kHoldSynthesis);
++            if (entered < 0) {
++                return false;
++            }
++            for (int miss = 0; miss < 30 && sim.controller.level() == 1; ++miss) {
++                const Nanoseconds at = entered + 1200 * kMillisecond + miss * 120 * kMillisecond;
++                while (sim.now < at) {
++                    sim.frame(10'800'000, 9'500'000, 0);
++                }
++                sim.controller.add_late(sim.now, 1);
++                sim.frame(10'800'000, 9'500'000, 0);
++            }
++            return sim.controller.level() == 2;
++        };
++        CadenceSim balanced(cadence_config_for(CadencePreference::balanced));
++        require(fail(balanced) && !balanced.controller.one_given_up() &&
++                balanced.controller.backoff() == 30 * kSecond,
++            "balanced: the first failed attempt backs off");
++        require(fail(balanced) && !balanced.controller.one_given_up() && fail(balanced) &&
++                balanced.controller.one_given_up(),
++            "balanced: three failed in a row give up");
++        require(balanced.until(CadenceEvent::one_entered, 40'000, kHoldCpu, kHoldGpu,
++                    kHoldSynthesis) < 0 && balanced.controller.level() == 2,
++            "balanced: given up, 1X is not tried again (fifteen minutes of 2)");
++        static_cast<void>(balanced.controller.scene_changed(balanced.now));
++        require(!balanced.controller.one_given_up() &&
++                balanced.until(CadenceEvent::one_entered, 40'000, kHoldCpu, kHoldGpu,
++                    kHoldSynthesis) >= 0,
++            "balanced: a new scene is tried again");
++        CadenceSim rate(cadence_config_for(CadencePreference::rate));
++        for (int attempt = 0; attempt < 5; ++attempt) {
++            require(fail(rate) && !rate.controller.one_given_up(), "rate: five failures retry");
+         }
+-        require(rate.controller.level() == 2 &&
+-                rate.events.back().event == CadenceEvent::one_left_late,
+-            "rate: two episodes in a second leave");
+-        // Back at 2, as heavy as before: not tried again inside the backoff.
+-        const Nanoseconds left = rate.events.back().one_allowed_at;
+-        const Nanoseconds again = rate.until(
+-            CadenceEvent::one_entered, 4000, kHoldCpu, kHoldGpu, kHoldSynthesis);
+-        require(again >= left, "rate: the next attempt waits for the backoff");
++        require(fail(rate) && rate.controller.one_given_up(), "rate: the sixth gives up");
+     }
+ }
+ 

@@ -419,7 +419,12 @@ std::string g_lastFeatures;
 // Warm-up.
 bool g_warm = false;
 double g_warmT0 = 0;
-uint32_t g_warmHits0 = 0, g_warmCompiled0 = 0;
+uint32_t g_warmHits0 = 0, g_warmCompiled0 = 0, g_warmKeys0 = 0;
+// warmup.json (warmup_status.h): the last state written ("" = none yet), the last ended warm-up, the prewarm's start.
+std::string g_warmFileState;
+qvwarm::State g_warmLast;
+bool g_warmEnded = false;
+double g_prewarmSeenT = -1;
 // Toggle quantification.
 double g_toggleT = -1;
 bool g_toggleOff = false;
@@ -550,18 +555,22 @@ std::string FeatureText() {
 void WarmTick(double t) {
   if (shadowinst::g_state.load() != 1) return;
   const shadowinst::Totals tot = shadowinst::Snap();
-  const bool busy = tot.queued + tot.busy > 0;
+  const uint32_t pending = tot.queued + tot.busy;
+  const bool busy = pending > 0;
   uint32_t hits = 0, compiled = 0;
   {
     std::lock_guard<std::mutex> lock(shadowinst::g_cacheMutex);
     hits = shadowinst::g_cacheHits;
     compiled = shadowinst::g_cacheCompiled;
   }
+  // Keys finished (compiled or read from the cache), both kinds: the warm-up's progress counts from its start.
+  const uint32_t keys = shadowinst::g_keysDone.load() + shadowinst::g_keysDoneGb.load();
   if (busy && !g_warm) {
     g_warm = true;
     g_warmT0 = t;
     g_warmHits0 = hits;
     g_warmCompiled0 = compiled;
+    g_warmKeys0 = keys;
     g_warming = true;
     Log("warmup: shader variants compiling (%u keys queued, %u in progress); shadow instancing, batching, the texture "
         "skip and the recorders are only partly active until done",
@@ -571,6 +580,36 @@ void WarmTick(double t) {
     g_warming = false;
     Log("warmup: done after %.0f s (cache: %u hits, %u compiled in this batch; %u hits, %u compiled since start)",
         t - g_warmT0, hits - g_warmHits0, compiled - g_warmCompiled0, hits, compiled);
+    g_warmLast.state = "done";
+    g_warmLast.done = g_warmLast.total = keys - g_warmKeys0;
+    g_warmLast.hits = hits - g_warmHits0;
+    g_warmLast.compiled = compiled - g_warmCompiled0;
+    g_warmLast.seconds = t - g_warmT0;
+    g_warmEnded = true;
+  }
+  // Progress: the status word's bits 44-52 and warmup.json. The live warm-up first, else the menu prewarm.
+  const shadowinst::PrewarmProgress pw = shadowinst::PrewarmSnap();
+  if (pw.running && g_prewarmSeenT < 0) g_prewarmSeenT = t;
+  if (!pw.running) g_prewarmSeenT = -1;
+  qvwarm::State s;
+  int percent = -1;
+  if (g_warm) {
+    const uint32_t done = keys - g_warmKeys0;
+    percent = qvstatus::ProgressPercent(done, pending);
+    s = {"warming", done, done + pending, hits - g_warmHits0, compiled - g_warmCompiled0, t - g_warmT0};
+  } else if (pw.running) {
+    percent = pw.scanning ? 0 : qvstatus::ProgressPercent(pw.processed, pw.found - pw.processed);
+    s = {"prewarm", pw.processed, pw.found, pw.current, pw.compiled, t - g_prewarmSeenT};
+  } else if (g_warmEnded) {
+    s = g_warmLast;
+  }
+  g_warmPercent = percent;
+  g_prewarmNow = pw.running;
+  // Every second while something runs; once for idle and done.
+  const bool moving = g_warm || pw.running;
+  if (moving || g_warmFileState != s.state) {
+    g_warmFileState = s.state;
+    qvwarm::Write(g_dir, qvwarm::Json(s));
   }
 }
 

@@ -77,6 +77,12 @@ void PreDispatch(ID3D11DeviceContext* c);
 void PostDispatch(ID3D11DeviceContext* c, UINT x, UINT y, UINT z);
 void PostDispatchIndirect(ID3D11DeviceContext* c, ID3D11Buffer* b, UINT o);
 }  // namespace chainfast
+// measure_kit.h ([Suite] ChainCensusSec, default 0): culling-chain counts census after DCS's DispatchIndirect.
+// Behind mkit::g_census (relaxed load), false unless that phase runs.
+namespace mkit {
+extern std::atomic<bool> g_census;
+void CensusAfterIndirect(ID3D11DeviceContext* c);
+}  // namespace mkit
 
 // shader_fast.h ([D3D] ShaderFast, default 0; R36): while this hook sits on DCS's Dispatch entry, it hands each
 // dispatch to TryDispatch, which issues the wider variant grid for an identified kernel (false: not handled).
@@ -317,6 +323,7 @@ void STDMETHODCALLTYPE H_DispatchIndirect(Ctx* c, ID3D11Buffer* b, UINT o) {
   if (cfv) chainfast::PreDispatch(c);
   Orig<decltype(&H_DispatchIndirect)>(kDispatchIndirect)(c, b, o);
   if (cfv) chainfast::PostDispatchIndirect(c, b, o);
+  if (mkit::g_census.load(std::memory_order_relaxed)) mkit::CensusAfterIndirect(c);
   Rearm(c, kDispatchIndirect);
 }
 

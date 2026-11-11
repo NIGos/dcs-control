@@ -101,6 +101,15 @@ try
             var result = service.RestoreOriginals(dcs, options); Console.WriteLine(JsonData.Serialize(result));
             return result.Complete ? 0 : 2;
         }
+        case "clear-shader-cache":
+        {
+            // The engine module's compiled shader variants (state folder\engine-shader-cache), which Back to stock DCS
+            // keeps on purpose. Refused while DCS runs: the module is reading and writing them.
+            ControlService.EnsureDcsClosed();
+            var (files, bytes) = EngineShaderCache.Clear(service.StateRoot);
+            Console.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture, "Deleted {0} compiled shader variants ({1:0.0} MB) in {2}. The engine module compiles them again in the first minutes of the next mission.", files, bytes / 1048576.0, service.ShaderCacheDirectory));
+            break;
+        }
         case "launch-check": Console.WriteLine("Verified installed launch contract: " + service.PrepareLaunchApplied().FileName); break;
         case "diagnostic":
         {
@@ -126,7 +135,7 @@ try
         default:
             // An unknown command is an error (a typo must not look like success to a script); "help" is not.
             if (command != "help") Console.Error.WriteLine("Unknown command: " + command);
-            Console.WriteLine("DCS Control " + ProductInfo.Version + "\nCommands: inventory, readiness, detect, presets, validate, preview, apply, live-apply, status, restore, diagnostic, inspect-binary, launch-check, launch, boost, tobii-resume, nvidia, app-verify, app-install, app-uninstall\nOptions: --profile file.json --dcs DCS.exe --options options.lua --state folder --distribution folder --out report.json\npreview leaves DCS and registry unchanged. apply writes the profile over whatever is installed; the first time it writes a path it backs up the original. live-apply writes now, also while DCS runs, only the settings DCS Control applies live (the engine module's, pupil shift layer's, Quad Views', OFXR's and Cheeky's files); the rest waits for the next launch. status lists the original files and the applied profile. restore puts every original back (owned options.lua settings only). launch first brings the applied profile up to date (Pimax Play focus values)."); if (command != "help") return 1; break;
+            Console.WriteLine("DCS Control " + ProductInfo.Version + "\nCommands: inventory, readiness, detect, presets, validate, preview, apply, live-apply, status, restore, diagnostic, inspect-binary, launch-check, launch, boost, tobii-resume, nvidia, clear-shader-cache, app-verify, app-install, app-uninstall\nOptions: --profile file.json --dcs DCS.exe --options options.lua --state folder --distribution folder --out report.json\npreview leaves DCS and registry unchanged. apply writes the profile over whatever is installed; the first time it writes a path it backs up the original. live-apply writes now, also while DCS runs, only the settings DCS Control applies live (the engine module's, pupil shift layer's, Quad Views', OFXR's and Cheeky's files); the rest waits for the next launch. status lists the original files and the applied profile. restore puts every original back (owned options.lua settings only). launch first brings the applied profile up to date (Pimax Play focus values)."); if (command != "help") return 1; break;
     }
     return 0;
 }

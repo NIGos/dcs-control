@@ -21,8 +21,21 @@ DWORD WINAPI WorkerThread(void*) {
     const qvdev::DevPath dp = qvdev::ReadDevPath(L"IniPath", g_dir + L"DcsQvCull.ini");
     std::wstring devDir;
     if (dp.state == qvdev::kDevOk) devDir = dp.path.substr(0, dp.path.find_last_of(L"\\/") + 1);
+    // The shader cache's folder, compile workers and prewarm (shader_cache_dir.h): from the deployed ini, like
+    // [Dev], once per payload start and before shadow instancing installs.
+    const std::wstring deployedIni = g_dir + L"DcsQvCull.ini";
+    shadowinst::g_cacheChoiceRaw = qvcachedir::ReadConfigured(deployedIni);
+    // Dev mode: a [Model] ShaderCacheDir in the dev ini wins (live checks of a cache folder before an app build writes it).
+    if (dp.state == qvdev::kDevOk) {
+      const std::wstring devChoice = qvcachedir::ReadConfigured(dp.path);
+      if (!devChoice.empty()) shadowinst::g_cacheChoiceRaw = devChoice;
+    }
+    shadowinst::g_cacheChoice = qvcachedir::Resolve(g_dir, shadowinst::g_cacheChoiceRaw);
+    shadowinst::g_workersWanted = qvcachedir::ReadWorkers(deployedIni);
+    shadowinst::g_prewarmOn = qvcachedir::ReadPrewarm(deployedIni);
     const ULONGLONG t0 = GetTickCount64();
-    const prune::Stats ps = prune::RunAtStart(g_dir, devDir.empty() ? g_dir : devDir);
+    const prune::Stats ps = prune::RunAtStart(g_dir, devDir.empty() ? g_dir : devDir,
+                                              shadowinst::g_cacheChoice.configured ? shadowinst::g_cacheChoice.dir : std::wstring());
     if (ps.files || ps.dirs)
       Log("disk: pruned %u files and %u folders (%.1f MB) in %llu ms (newest %u per output family, cache\\*.qvc "
           "least recently used past %u MB or %u files, orphaned cache temp files)",
@@ -182,6 +195,7 @@ DWORD WINAPI WorkerThread(void*) {
       ftl::TaskScope ts(ftl::kTPerf);
       perfmon::Tick();  // once per second: samples, governor; perf/features/vram/env lines on their own cadence
     }
+    fxskip::Tick(now, g_quadFrame.load(), g_tscHz, g_cfg.fxApplySkipLogSec);  // A3: the "fx repeat:" line while hooked
     TickReloadFrameTimes();  // R142 [Log] ReloadFrameTimes (default 0): frame times around each ini reload
     {
       ftl::TaskScope ts(ftl::kTPlace);
@@ -234,6 +248,12 @@ DWORD WINAPI WorkerThread(void*) {
           chainfast::Apply(g_engineOff.load() ? 0 : g_cfg.chainFast);  // R34 (default 7; off at 0)
         if (!g_benchRunningFlag.load() && (g_cfg.shaderFast || sfast::g_mask.load()))
           sfast::Apply(g_engineOff.load() ? 0 : g_cfg.shaderFast);  // R36 (default 3; off at 0)
+        // Audit A2/B4 census (measure only, default 0: nothing installed); needs chain fast's CSSetShader hook.
+        if (g_cfg.suiteChainDeriveCensus || chainderive::g_state.load())
+          chainderive::Tick(g_cfg.suiteChainDeriveCensus, g_cfg.suiteChainDeriveCensusMB);
+        // Audit B6 periphery instance census (measure only, default 0: nothing installed).
+        if (g_cfg.suitePeriphCensus || pcensus::g_installed.load())
+          pcensus::Tick(g_cfg.suitePeriphCensus, g_benchRunningFlag.load());
         // R122 per-view DLSS preset (opt-in, default 0: nothing installed). The kill switch makes its hook pass
         // through; the features DCS creates at the next mission load get DCS's own hint again.
         dlssv::Tick(dlssv::ParsePreset(g_cfg.dlssPeripheryPreset.c_str()), dlssv::ParsePreset(g_cfg.dlssFocusPreset.c_str()),
@@ -242,6 +262,8 @@ DWORD WINAPI WorkerThread(void*) {
         // R123 focus twin (opt-in, default 0: nothing installed). The kill switch / a benchmark / key 0 take it out.
         if (g_cfg.focusTwin || ftwin::g_state.load() == 1) {
           ftwin::g_shadowKey = g_cfg.suiteFocusTwinShadow;
+          ftwin::g_tapBaseline = g_cfg.suiteFocusTwinTapBaseline;
+          ftwin::g_earlyStop = g_cfg.suiteFocusTwinEarlyStop;
           ftwin::g_auditEvery = g_cfg.suiteFocusTwinAuditEvery;
           ftwin::g_trustNeeded = g_cfg.suiteFocusTwinTrust;
           ftwin::g_island = g_cfg.suiteFocusTwinIsland;
@@ -289,6 +311,10 @@ DWORD WINAPI WorkerThread(void*) {
           ((g_cfg.srvTailTrim && !g_engineOff.load() && srvtrim::g_state.load() == 0) ||
            (srvtrim::g_disabled.load() && srvtrim::g_patched.load())))
         ApplySrvTailTrim(g_cfg.srvTailTrim && !g_engineOff.load());
+      // FX Apply repeat counter / lean Apply ([D3D] FxApplySkip): waits for dx11backend.
+      if (!po && !g_benchRunningFlag.load() && g_cfg.fxApplySkip && !g_engineOff.load() && !fxskip::Hooked() &&
+          fxskip::g_state.load() == 0)
+        ApplyFxApplySkip(g_cfg.fxApplySkip, g_cfg.fxApplySkipVerify, g_cfg.fxApplySkipVerifyEvery);
     }
     // Re-read the Quad-Views-Foveated edge smoothing every 10 s once quad views run.
     static ULONGLONG lastQv = 0;
@@ -404,6 +430,8 @@ DWORD WINAPI WorkerThread(void*) {
         Log("xr: session %s", focused ? "FOCUSED" : "left FOCUSED (headset asleep or not worn)");
       }
     }
+    // A5: forward pass split, one "fwd split:" line every [Suite] ForwardSplit s (0 = never installed).
+    if (!po && g_cfg.suiteForwardSplit > 0) fwdsplit::Tick(now, g_cfg.suiteForwardSplit, g_quadFrame.load(), g_tscHz);
     if (now - lastCensus >= 10000) {
       lastCensus = now;
       ftl::TaskScope ts(ftl::kTCensus);

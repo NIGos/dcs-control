@@ -1067,7 +1067,9 @@ std::vector<Job> g_jobs;
 // R60: jobs queued and jobs finished (processed, or dropped from a full queue): equal once the worker is idle (tests
 // wait for that instead of a fixed time after the queue emptied).
 std::atomic<uint64_t> g_jobsQueued{0}, g_jobsDone{0};
-std::thread g_worker;
+// A pointer (never destroyed at process exit): a joinable std::thread static destructed by the CRT at ExitProcess
+// calls std::terminate, which left DCS.exe lingering at quit (user report). Joined at the stop below.
+std::thread* g_worker = nullptr;
 std::atomic<bool> g_workerStop{false};
 int g_mismatchStreak = 0;  // worker only
 // R91 (R90 phase 2, M4): the per-frame readback copies (Poll, PollGrid) reuse their buffers: the render thread takes
@@ -5950,7 +5952,11 @@ bool Install() {
   fdexport::g_releaseReq = false;
   fdexport::SeedGeneration();
   fdexport::ResetFrameState();
-  g_worker = std::thread([] { qvexit::RunVoid(&WorkerLoop); });
+  if (g_worker) {  // a stop always joins first; a leftover object here is finished
+    if (g_worker->joinable()) g_worker->join();
+    delete g_worker;
+  }
+  g_worker = new std::thread([] { qvexit::RunVoid(&WorkerLoop); });
   OpenMappings();
   // D3D objects created here when DCS's device is known (CreateComputeShader
   // can take milliseconds in the driver: not on the render thread); else the
@@ -6035,7 +6041,11 @@ void Uninstall(bool keepExports = true) {
     g_workerStop = true;
   }
   g_jobCv.notify_all();
-  if (g_worker.joinable()) g_worker.join();
+  if (g_worker) {
+    if (g_worker->joinable()) g_worker->join();
+    delete g_worker;
+    g_worker = nullptr;
+  }
   {
     std::lock_guard<std::mutex> lock(g_jobMutex);
     g_jobs.clear();

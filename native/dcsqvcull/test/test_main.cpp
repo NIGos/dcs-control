@@ -270,7 +270,9 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "vram_count_test.h"
 #include "pass_flush_test.h"
 #include "fwd_rec_count_test.h"
+#include "fwd_split_test.h"
 #include "srv_tail_trim_test.h"
+#include "fx_skip_test.h"  // A3: FX pass Apply repeat counter and lean Apply (pure parts; real dx11backend Apply vs lean)
 #include "status_word_test.h"
 #include "prefetch_fix_test.h"
 #include "periph_lod_test.h"
@@ -288,6 +290,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "perception_only_test.h"  // [General] PerceptionOnly: perception features only, no engine module
 #include "cascade_cache_test.h"  // R33: far shadow cascade cache (math on census matrices, decisions, WARP replica)
 #include "chain_fast_test.h"  // R34: shorter culling chains (variants, creation hook, substitution, live check)
+#include "chain_derive_test.h"  // audit A2/B4: focus chain = filtered periphery chain census (pure compare logic)
 #include "shader_fast_test.h"  // R36: wider grids for single-SM kernels (variants, identification, Dispatch hook, live check)
 #include "night_tone_test.h"  // R37: [Night] opt-in night darkening through DCS's tone mapper (pure parts, hook, build checks)
 #include "color_grade_test.h"  // [Color] pure parts: the R41 probes (R40 grading removed in R107)
@@ -330,13 +333,18 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "r130_test.h"       // R130: read-only DLSS feature lifetime instrumentation (fake NGX core)
 #include "r132_test.h"       // R132: opt-in release of idle DLSS sets (fake NGX core)
 #include "r133_test.h"       // R133: the recorder's motion vectors (exec-time freshness rig, the verify's bracket, dump)
+#include "per_eye_pass_test.h"  // per-eye pass stage 0 (exact focus rows, the vertex-shader clone on WARP, the census)
+#include "per_eye_live_test.h"  // per-eye pass stage 2: the live captures' pure parts (per_eye_live.h)
 #include "vrs_probe_test.h"  // R139: the measure-only VRS probe (keys, schedule, ring map, NvAPI binding, WARP + fake NvAPI)
 #include "r111_test.h"      // R111: [Color] PanelGamut (sRGB -> DCI-P3 compensation for a wide-gamut panel)
 #include "log_phrases_test.h"  // R107: the log phrases DCS Control parses stay in the source byte-exact
 #include "ini_keys_test.h"  // R107: every key the app writes is still read (live or retired)
+#include "shader_cache_dir_test.h"  // [Model] ShaderCacheDir / ShaderCompileWorkers: the cache folder outside the module
 #include "r142_test.h"  // R142: the ini reload diff, the engine key set, frame times around a reload
 #include "r144_test.h"  // R144: Live mode phase 2 (AllocSlabs / Diagnostics live, settings.cfg followed live)
 #include "r146_test.h"  // R146: DCS's D3D11 context behind a device proxy (ReShade): detection, split filter guard
+#include "measure_kit_test.h"  // Perf audit 2026-11-10: the measurement kit's pure parts (measure_kit.h, bench.h)
+#include "periph_census_test.h"  // Perf audit B6: periphery instance census (pure parts, kernels, one WARP run)
 
 // R60: QV_TEST_LOAD=<n> (off by default): n busy threads of normal priority inside this process for the whole run.
 // An in-process stand-in for a machine loaded by another program (as DCS loading a mission); never an external load
@@ -448,6 +456,18 @@ int main() {
     PrintSummary();
     return g_fail ? 1 : 0;
   }
+  if (getenv("QV_PEP_ONLY")) {  // only the per-eye pass tests (QV_PEP_ARCHIVE=<folder>: also the census of that folder)
+    peptest::Run();
+    pepltest::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
+  if (getenv("QV_PC_ONLY")) {  // audit B6: only the periphery census and measurement kit tests
+    mktest::Run();
+    pctest::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
   if (getenv("QV_VRS_ONLY")) {  // R139: only the VRS probe tests
     vrstest::Run();
     PrintSummary();
@@ -550,6 +570,12 @@ int main() {
     PrintSummary();
     return g_fail ? 1 : 0;
   }
+  // QV_FXSKIP_ONLY=1: only the FX Apply repeat / lean Apply tests (A3).
+  if (getenv("QV_FXSKIP_ONLY")) {
+    fxstest::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
   // QV_SRVTRIM_ONLY=1: only the setShaderResources tail trim tests (R15 F2).
   if (getenv("QV_SRVTRIM_ONLY")) {
     strtest::Run();
@@ -565,6 +591,12 @@ int main() {
   // QV_FWDREC_ONLY=1: only the forward recorder S0 counter tests (R21).
   if (getenv("QV_FWDREC_ONLY")) {
     frctest::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
+  // QV_FWDSPLIT_ONLY=1: only the forward pass split tests (A5).
+  if (getenv("QV_FWDSPLIT_ONLY")) {
+    fstest::Run();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -608,6 +640,7 @@ int main() {
   // QV_CF_ONLY=1: only the R34 chain fast tests.
   if (getenv("QV_CF_ONLY")) {
     cftest::Run();
+    cdtest::Run();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -626,6 +659,10 @@ int main() {
   potest::EarlyFixationTick();  // R107: before any test maps GraphicsCore.dll (perception_only_test.h)
   lptest::Run();  // R107: app-parsed log phrases
   iktest::Run();  // R107: the app's ini keys, retired keys
+  // The cache prewarm compiles on the workers whenever they idle: off for the suite (counts of D3DCompile calls
+  // would depend on timing); "shadow inst prewarm" turns it on for its own worker.
+  shadowinst::g_prewarmOn = false;
+  scdtest::Run();  // the shader cache's folder, worker count and disk caps
   r142test::Run();  // R142: ini reload diff and engine key set (the LoadConfig kill-switch checks: "R142 reload")
   alignas(64) static uint8_t periph[0x700], focus[0x700];
   Vec3 eye{1000.0, 50.0, -2000.0}, fwd{0, 0, 1}, up{0, 1, 0};
@@ -1930,8 +1967,12 @@ int main() {
   pftest::Run();
   // Forward recorder S0 counters (R21): pass kinds, FX pass index, rule flags, segments, gates, item walk.
   frctest::Run();
+  // A5 forward split ([Suite] ForwardSplit): categories, views, window difference, line, fake items.
+  fstest::Run();
   // setShaderResources identical-tail trim (R15 F2): fake caches vs the 0x1ac20 transcription, real device via fake sites.
   strtest::Run();
+  // FX pass Apply repeat counter and lean Apply (A3): refusal reasons, compares, real dx11backend Apply vs lean.
+  fxstest::Run();
   // DcsQvCull_Status word (status_word.h): bit layout, feature counting, loader/payload handover.
   swtest::Run();
   // Terrain prefetch fix: modes, window, spin guard, unload/reload safety, old dxgi2 fix take-over, log line.
@@ -1961,6 +2002,8 @@ int main() {
   cctest::Run();
   // R34 shorter culling chains: variants vs CPU transcription and stock stand-ins, hook path, live check, shutdown.
   cftest::Run();
+  // Audit A2/B4: the focus-chain census's compare logic (focus list = filtered periphery list).
+  cdtest::Run();
   // R36 wider grids for single-SM kernels: variants vs stock stand-ins, identification by output, Dispatch hook.
   shfasttest::Run();
   // R37 [Night]: opt-in night darkening through DCS's tone mapper (pure parts, hook on a fake module, build checks).
@@ -1977,6 +2020,8 @@ int main() {
   r132test::Run();  // R132: opt-in release of idle DLSS sets ([DLSS] ReleaseIdleSets; fake NGX core)
   r133test::Run();  // R133: the recorder's motion vectors (exec-time freshness on WARP, the verify's bracket, dump)
   vrstest::Run();   // R139: the measure-only VRS probe ([Suite] VrsProbe; pure parts, WARP with a fake NvAPI)
+  peptest::Run();   // per-eye pass stage 0: exact focus rows, the vertex-shader clone against stock on WARP, the census
+  pepltest::Run();  // per-eye pass stage 2: the live captures' pure parts (views from TerrainContexts, C2 / C4 / C5 / C7 verdicts)
   vfxtest::Run();
   // R39 [Threads]: worker placement off DCS's exclusive render core (all keys default 0), census queries.
   tptest::Run();
@@ -2012,6 +2057,8 @@ int main() {
   r99test::Run();  // R99: the pose hook by displayTime; the symbology replay stage's cost
   r101test::Run();  // R101: the learnt HUD field recovers after a bank
   r144test::Run();  // R144: after the allocator test (it reads the global allocate counters)
+  mktest::Run();  // the measurement kit's pure parts (perf audit 2026-11-10)
+  pctest::Run();  // audit B6 periphery instance census
 
   // Suite: configuration check + short profile, report file written.
   {

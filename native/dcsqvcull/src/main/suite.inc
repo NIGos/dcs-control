@@ -121,6 +121,7 @@ bool ShadowRecPhase(bool verify) {
   shrec::g_split = g_cfg.shadowRecorderSplit;
   shrec::g_helpers = static_cast<uint32_t>(g_cfg.shadowRecorderHelpers);
   shrec::g_instancing = g_cfg.shadowRecorderInstancing;
+  shrec::g_nest = g_cfg.shadowRecorderNest || g_cfg.smallGpuBundle;  // perf audit A6 b (the bundle: every built A6 item)
   if (g_cfg.gbufferBatch && g_cfg.shadowInst) {
     Log("  shadow recorder: off while [Model] GBufferBatching=1");
     return false;
@@ -227,6 +228,7 @@ DWORD WINAPI SuiteThread(void*) {
   GetLocalTime(&st);
   Log("==== DcsQvCull test suite %04d-%02d-%02d %02d:%02d ====", st.wYear, st.wMonth, st.wDay, st.wHour,
       st.wMinute);
+  if (!g_cfg.suiteLabel.empty()) Log("suite label: %s", g_cfg.suiteLabel.c_str());  // measurement kit: step name
   Chime(800, 100);
   Chime(1200, 100);
   CheckConfiguration();
@@ -257,6 +259,13 @@ DWORD WINAPI SuiteThread(void*) {
   Chime(1000, 60);
   }  // !suiteQuick
   bool ok = true;
+  if (g_cfg.suitePassTimelineSec > 0 && !g_benchAbort) {  // measurement kit (a)
+    Log("-- pass timeline: render-thread CPU per pass and per frame, mean/p50/p95, render thread CPU, culling timeline "
+        "(measure_kit.h, %d s) --",
+        g_cfg.suitePassTimelineSec);
+    mkit::PassTimelinePhase(g_cfg.suitePassTimelineSec, g_quadFrame, g_tscHz);
+    Chime(1000, 60);
+  }
   if (g_cfg.suiteProfile) {
     Log("-- CPU profile --");
     char label[64];
@@ -399,7 +408,15 @@ DWORD WINAPI SuiteThread(void*) {
     ducount::Measure(5000, g_quadFrame, g_tscHz, g_benchAbort);
     Chime(1000, 60);
   }
-  if (ok && g_cfg.suiteFxApplyCount && !g_benchAbort) {
+  if (ok && g_cfg.suitePerEyePassCensus && !g_benchAbort) {  // per_eye_pass.h: file reads and CPU only, nothing installed
+    Log("-- per-eye pass: which vertex shaders of DCS's shader cache can carry a second (focus) position --");
+    pep::SuitePhase(g_benchAbort);
+  }
+  if (ok && !g_benchAbort) pepl::SuitePhase(g_quadFrame);  // per_eye_live.h: returns at once unless a PerEyeC* key is set
+  if (ok && g_cfg.suiteFxApplyCount && !g_benchAbort && fxskip::Hooked()) {
+    Log("-- FX pass Apply counter skipped: [D3D] FxApplySkip holds the same vtable slot (its \"fx repeat:\" line "
+        "reports the repeats every FxApplySkipLogSec) --");
+  } else if (ok && g_cfg.suiteFxApplyCount && !g_benchAbort) {
     Log("-- FX pass Apply: same pass again (R14 lead 4 counter, 5 s) --");
     srvtrim::Detach();  // its code check covers the trim's call sites: measured on stock
     fxapply::Measure(5000, g_quadFrame, g_tscHz);
@@ -499,6 +516,22 @@ DWORD WINAPI SuiteThread(void*) {
         "mask 0x%x, %d s) --",
         g_cfg.shaderFast ? g_cfg.shaderFast : 3u, g_cfg.suiteShaderFastVerify);
     sfast::VerifyPhase(g_cfg.suiteShaderFastVerify, g_engineOff.load() ? 0 : g_cfg.shaderFast, g_quadFrame);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteChainCensusSec > 0 && !g_benchAbort) {  // measurement kit (d)
+    Log("-- chain census: per-object counts of every IM2 culling chain, pairwise containment, with GPU pass timing "
+        "(R38 rank 3, measure_kit.h, %d s, 1 frame in %d) --",
+        g_cfg.suiteChainCensusSec, mkit::kCensusEvery);
+    mkit::ChainCensusPhase(g_cfg.suiteChainCensusSec, g_quadFrame);
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteGpuBundleTiming && !g_benchAbort) {  // measurement kit (e)
+    Log("-- gpu bundle: small exact GPU items as one set, GPU timing ABBA, %d pairs of 5 s (measure_kit.h, mask 0x%x) "
+        "--",
+        g_cfg.suiteGpuBundlePairs, g_cfg.suiteGpuBundleTiming);
+    gpt::g_statsWanted = g_cfg.suiteGpuPassStats;
+    mkit::GpuBundlePhase(g_cfg.suiteGpuBundleTiming, g_cfg.suiteGpuBundlePairs, g_quadFrame);
+    gpt::g_statsWanted = false;
     Chime(1000, 60);
   }
   if (ok && g_cfg.suitePeriphLodImage > 0 && !g_benchAbort && !g_devDir.empty()) {
@@ -742,10 +775,33 @@ DWORD WINAPI SuiteThread(void*) {
       Log("  prefetch fix unavailable this session: bench skipped");
     }
   }
+  if (ok && g_cfg.suiteBenchPrefetchTableBits && !g_benchAbort) {  // measurement kit (f), R41's open p95 check
+    if (pffix::g_state.load() == 1 && g_cfg.prefetchMode == 2) {
+      Log("-- A/B: prefetch repeat table (OFF = 2^16 entries, ON = 2^%d; [Prefetch] Mode=skip in both) --",
+          g_cfg.prefetchTableBits > 16 ? g_cfg.prefetchTableBits : 20);
+      const uint64_t c0 = pffix::SumCalls(), s0 = pffix::SumSkipped();
+      ok = RunBenchmark(34, false);  // ends with ApplyPrefetch (the configured table back)
+      const uint64_t c = pffix::SumCalls() - c0, sk = pffix::SumSkipped() - s0;
+      Log("  prefetch calls during the bench: %llu, skipped %.1f%% (both arms)", static_cast<unsigned long long>(c),
+          c ? 100.0 * static_cast<double>(sk) / static_cast<double>(c) : 0.0);
+    } else {
+      Log("  prefetch table A/B needs [Prefetch] Mode=skip with the fix installed; skipped");
+    }
+    Chime(1000, 60);
+  }
   if (ok && g_cfg.suiteBenchSrvTailTrim && !g_benchAbort && SrvTailTrimReady()) {
     Log("-- A/B: setShaderResources identical-tail trim (OFF = stock call sites, ON = trim, no counting) --");
     ok = RunBenchmark(31, false);  // ends with ApplySrvTailTrim (the configured state back)
     Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchFxApplySkip && !g_benchAbort) {
+    if (fxskip::Install()) {
+      Log("-- A/B: FX Apply repeat skip (OFF = stock Apply, hook out; ON = lean Apply on identical repeats, no timing) --");
+      ok = RunBenchmark(36, false);  // ends with FxApplySkipBenchEnd (the configured state back)
+      Chime(1000, 60);
+    } else {
+      Log("  fx repeat: not available (install state %d, see the log above): bench skipped", fxskip::g_state.load());
+    }
   }
   if (ok && g_cfg.suiteBenchShadowInst && shadowbatch::Install() && !g_benchAbort) {
     Log("-- A/B: shadow caster instancing --");
@@ -781,6 +837,22 @@ DWORD WINAPI SuiteThread(void*) {
       const uint64_t f0 = g_quadFrame.load();
       ok = RunBenchmark(29, false);
       gbrec::LogCounters("A/B, whole run (recorder in ON blocks only)", static_cast<double>(g_quadFrame.load() - f0));
+    }
+    Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchGBufferRecorderCockpit && !g_benchAbort) {  // measurement kit (b)
+    Log("-- A/B: g-buffer recorder cockpit part (recorder on in both arms; OFF = cockpit items drawn by DCS, ON = "
+        "recorded; scope 0x%x) --",
+        g_cfg.gbufferRecorderScope);
+    if (!g_cfg.gbufferRecorder || !g_cfg.gbufferRecorderCockpit) {
+      Log("  needs [Model] GBufferRecorder=1 and GBufferRecorderCockpit=1 at DCS start (the pool is shaped at install); "
+          "A/B skipped");
+    } else if (GBufferRecPhase(false)) {
+      gbrec::ResetCounters();
+      const uint64_t f0 = g_quadFrame.load();
+      ok = RunBenchmark(35, false);
+      gbrec::LogCounters("A/B, whole run (cockpit items recorded in ON blocks only)",
+                         static_cast<double>(g_quadFrame.load() - f0));
     }
     Chime(1000, 60);
   }
