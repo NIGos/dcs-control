@@ -590,7 +590,7 @@ Test("Triple frame generation writes the fork's triple_frame_gen and paces DCS a
     Require(ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia }).Contains("cockpit_mask=1") && ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia }).Contains("cockpit_depth=1"), "The cockpit mask and depth consumers are on with Framegen");
     Require(ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia }).Contains("dcs_motion=1") && ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.FidelityFx }).Contains("dcs_motion=0"), "DCS motion vectors on the NVIDIA path only");
     // Auto with frame generation only when needed (the default) asks DCS for the full refresh rate; without it, half.
-    Require(FramePacing.Multiplier(auto) == 2 && FramePacing.RequestedCap(auto) == 120 && FramePacing.RequestedCap(auto with { FrameGenAdaptiveCadence = false }) == 45 && ProfileValidation.Validate(auto).All(i => i.Code != "framegen-factor"));
+    Require(FramePacing.Multiplier(auto) == 2 && FramePacing.RequestedCap(auto) == 90 && FramePacing.RequestedCap(auto with { FrameGenAdaptiveCadence = false }) == 45 && ProfileValidation.Validate(auto).All(i => i.Code != "framegen-factor"));
     Require(ConfigurationWriters.QuadViews(new VrProfile { QuadTurbo = true }).Contains("turbo_mode=1") && ConfigurationWriters.QuadViews(new VrProfile()).Contains("turbo_mode=0"));
     {
         var tracked = ConfigurationWriters.QuadViews(new VrProfile { FrameGen = FrameGeneration.Nvidia });
@@ -2565,11 +2565,11 @@ foreach (var mode in Enum.GetValues<FpsLimitMode>())
             FpsLimit = mode, HeadsetRefreshHz = 90, RenderedFpsCap = 47.5, DisableDcsVSync = mode != FpsLimitMode.Preserve, NeuralIntensity = .423456789 };
         var f = PacingFixture(route + "-" + mode, p); var original = File.ReadAllText(f.Options);
         var changes = f.Plan.Files.Single(file => file.Path == f.Options).LuaChanges!;
-        // The profile uses frame generation only when needed (the default), so Keep writes a limit too (a third above the refresh rate).
+        // The profile uses frame generation only when needed (the default), so Keep writes the refresh rate too.
         Require(changes.Any(c => c.Path == "graphics.maxFPS"));
         var journal = f.Service.Apply(f.Plan); var lua = new LuaOptions(File.ReadAllText(f.Options));
-        // Match refresh with Auto and frame generation only when needed (the defaults) is a third above the refresh rate (120 at 90 Hz): OFXR paces DCS, its own limiter must not (issue #17).
-        var expected = mode == FpsLimitMode.Preserve ? 120 : mode == FpsLimitMode.RuntimeHeadroom ? 300 : mode == FpsLimitMode.MatchRefresh ? 120 : 47.5;
+        // Match refresh with Auto and frame generation only when needed (the defaults) is the full refresh rate.
+        var expected = mode == FpsLimitMode.Preserve ? 90 : mode == FpsLimitMode.RuntimeHeadroom ? 300 : mode == FpsLimitMode.MatchRefresh ? 90 : 47.5;
         Require(FramePacing.PositiveNumber(lua.Get("graphics", "maxFPS")) == expected);
         Require(lua.Get("graphics", "sync") == (mode == FpsLimitMode.Preserve ? "true" : "false"));
         Require(f.Service.PrepareLaunchApplied().FileName.EndsWith("DCS.exe"));
@@ -2596,7 +2596,7 @@ Test("Legacy profiles default to preserving all FPS controls", () =>
 Test("Disabling framegen removes the half-refresh cap", () =>
 {
     var p = new VrProfile { FpsLimit = FpsLimitMode.MatchRefresh, HeadsetRefreshHz = 90 };
-    Require(FramePacing.RequestedCap(p) == (p.UsesAdaptiveCadence ? 120 : 90) && FramePacing.RequestedCap(p with { FrameGen = FrameGeneration.FidelityFx, FrameGenFactor = 2 }) == 45);
+    Require(FramePacing.RequestedCap(p) == 90 && FramePacing.RequestedCap(p with { FrameGen = FrameGeneration.FidelityFx, FrameGenFactor = 2 }) == 45);
     var f = PacingFixture("fg-off", p); var journal = f.Service.Apply(f.Plan); Require(new LuaOptions(File.ReadAllText(f.Options)).Get("graphics", "maxFPS") == "90"); Require(f.Service.RestoreOriginals().Complete);
 });
 Test("Fractional refresh preserves half-rate precision", () => Require(FramePacing.RequestedCap(new() { FpsLimit = FpsLimitMode.MatchRefresh, HeadsetRefreshHz = 89.5, FrameGen = FrameGeneration.Nvidia, FrameGenFactor = 2 }) == 44.75));
@@ -2626,6 +2626,9 @@ Test("Frame generation only when needed: default with Auto, adaptive_cadence and
         && Preference(fg with { FrameGenPassThrough = PassThroughPreference.PreferRefresh }, 2), "Stop generating writes cadence_preference");
     Require(Preference(fg with { FrameGenAdaptiveCadence = false }, 0) && Preference(fg with { FrameGenFactor = 2, FrameGenPassThrough = PassThroughPreference.PreferRefresh }, 0)
         && Preference(new VrProfile(), 0) && Preference(fg with { FrameGenPassThrough = (PassThroughPreference)9 }, 0), "cadence_preference is 0 without Only when needed or with an unknown value");
+    bool OneWait(VrProfile p, int value) => ConfigurationWriters.Ofxr(p).ReplaceLineEndings("\n").Split('\n').Contains("cadence_one_wait=" + value);
+    Require(OneWait(fg, 0) && OneWait(fg with { FrameGenPassThroughWait = true }, 1) && OneWait(fg with { FrameGenPassThroughWait = true, FrameGenFactor = 2 }, 0)
+        && !JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"legacy\",\"name\":\"Legacy\"}").FrameGenPassThroughWait, "cadence_one_wait: off by default, only with Only when needed");
     Require(ProfileValidation.Validate(fg with { FrameGenPassThrough = (PassThroughPreference)9 }).Any(i => i.Code == "framegen-pass-through" && i.Severity == IssueSeverity.Error)
         && ProfileValidation.Validate(fg).All(i => i.Code != "framegen-pass-through"), "An unknown Stop generating value is an error");
     Require(JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"legacy\",\"name\":\"Legacy\"}").FrameGenPassThrough == PassThroughPreference.Steady
@@ -2636,16 +2639,16 @@ Test("Frame generation only when needed: default with Auto, adaptive_cadence and
         && LastFlight.ParseOfxr(["seq=1 ms=0 tid=1 phase=I op=adaptive_switch result=13 dur_us=0 a=0 b=2 c=0", "seq=2 ms=1000 tid=1 phase=I op=latency_status result=12 dur_us=0 a=20000 b=0 c=0"])!.Share is { Preference: PassThroughPreference.Steady, PassThroughShare: 0.80 }, "The flight's preference comes from OFXR's cadence record");
     Require(!(fg with { Desktop = true }).UsesAdaptiveCadence && Cadence(fg with { Desktop = true }, 0) && Cadence(new VrProfile(), 0), "Desktop and frame generation off write 0");
     var match = fg with { FpsLimit = FpsLimitMode.MatchRefresh };
-    Require(FramePacing.CapDivider(match) == 1 && FramePacing.RequestedCap(match) == 120 && FramePacing.CadenceCap(72) == 96 && FramePacing.CadenceCap(240) == 300 && FramePacing.CadenceCap(89.5) == 119 && FramePacing.RequestedCap(match with { FrameGenAdaptiveCadence = false }) == 45, "Match refresh = refresh with cadence, refresh/2 without");
+    Require(FramePacing.CapDivider(match) == 1 && FramePacing.RequestedCap(match) == 90 && FramePacing.RequestedCap(match with { FrameGenAdaptiveCadence = false }) == 45, "Match refresh = refresh with cadence, refresh/2 without");
     var plan = FramePacing.Describe(match);
-    Require(plan.RequiredRenderedFps == 90 && plan.ConfiguredOutputCeiling == 90 && plan.DcsCap == 120 && plan.CapDescription.StartsWith("A third above the refresh rate", StringComparison.Ordinal) && plan.Note.StartsWith("Calculated, not measured", StringComparison.Ordinal));
+    Require(plan.RequiredRenderedFps == 90 && plan.ConfiguredOutputCeiling == 90 && plan.CapDescription.StartsWith("The full refresh rate; generated frames only", StringComparison.Ordinal) && plan.Note.StartsWith("Calculated, not measured", StringComparison.Ordinal));
     Require(FramePacing.Checks(match, new()).All(c => c.Id is not ("adaptive-cadence-cap" or "fps-under-target")), "Match refresh needs no frame limit check");
     // Keep with frame generation only when needed sets the refresh rate (DCS's own 45 would keep frames always generated);
     // without it, Keep leaves DCS's own limit.
     var preserve = fg with { FpsLimit = FpsLimitMode.Preserve };
     var inventory = new InventorySnapshot { DcsSettings = new Dictionary<string, string> { ["graphics.maxFPS"] = "45" } };
     var checks = FramePacing.Checks(preserve, inventory);
-    Require(FramePacing.EffectiveLimit(preserve) == FpsLimitMode.MatchRefresh && FramePacing.RequestedCap(preserve) == 120 && FramePacing.Describe(preserve, inventory).DcsCap == 120
+    Require(FramePacing.EffectiveLimit(preserve) == FpsLimitMode.MatchRefresh && FramePacing.RequestedCap(preserve) == 90 && FramePacing.Describe(preserve, inventory).DcsCap == 90
         && checks.All(c => c.Id is not ("adaptive-cadence-cap" or "fps-under-target")), "Keep with cadence writes the refresh rate, no check");
     var keepNoCadence = preserve with { FrameGenAdaptiveCadence = false };
     Require(FramePacing.RequestedCap(keepNoCadence) is null && FramePacing.Describe(keepNoCadence, inventory).DcsCap == 45, "Keep without cadence keeps DCS's own limit");
