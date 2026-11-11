@@ -139,6 +139,8 @@ struct Config {
   uint32_t shadowRecorderSplit = 0xf;   // [Model] ShadowRecorderSplit: cascades with helper workers (bits 0-3)
   int shadowRecorderHelpers = 3;        // [Model] ShadowRecorderHelpers: at most this many helpers per job (0-3)
   bool shadowRecorderInstancing = true;  // [Model] ShadowRecorderInstancing
+  bool shadowRecorderNest = false;      // [Model] ShadowRecorderNest: one nested command list per cascade (perf audit A6 b)
+  bool smallGpuBundle = false;          // [Model] SmallGpuBundle: every built small exact GPU item of A6 (measure_kit.h kBundle)
   bool suiteShadowRecVerify = false;    // [Suite] ShadowRecVerify
   int suiteShadowRecVerifySec = 5;      // [Suite] ShadowRecVerifySec
   bool suiteBenchShadowRecorder = false;  // [Suite] BenchShadowRecorder (bench mode 28)
