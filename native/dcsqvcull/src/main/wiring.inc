@@ -705,6 +705,7 @@ void ApplyShadowRecorder() {
   shrec::g_helpers = static_cast<uint32_t>(g_cfg.shadowRecorderHelpers);
   shrec::g_instancing = g_cfg.shadowRecorderInstancing;
   shrec::g_nest = g_cfg.shadowRecorderNest || g_cfg.smallGpuBundle;  // perf audit A6 b (the bundle: every built A6 item)
+  defrec::g_allowEmulatedLists = g_cfg.recordersEmulatedLists;       // read by Install
   const bool on = g_cfg.shadowRecorder && !g_engineOff.load() && !gs.pause && !(g_cfg.gbufferBatch && g_cfg.shadowInst);
   if (on && frameheap::g_state.load() == 0) frameheap::Install();  // the workers' recycled-heap check needs the generation
   if (on && !RecycleGuardReady("shadow recorder")) {
@@ -732,6 +733,7 @@ void ApplyGBufferRecorder() {
   gbrec::g_helpers = gs.gbHelpers;
   gbrec::g_cockpit = g_cfg.gbufferRecorderCockpit;
   gbrec::g_byOrdinal = g_cfg.gbufferRecorderByOrdinal;
+  defrec::g_allowEmulatedLists = g_cfg.recordersEmulatedLists;  // read by Install
   const bool on = g_cfg.gbufferRecorder && g_cfg.shadowInst && !g_engineOff.load() && !gs.pause && !g_cfg.gbufferBatch;
   // The frame-heap reset hooks (pass-through unless [Model] FrameHeapSlabs): the
   // workers' recycled-memory check needs the generation (retried every second).

@@ -454,11 +454,11 @@ bool FaultJob(Worker& w, void* u) {
   return *static_cast<volatile int*>(u) == 1;  // u is null
 }
 
-bool CreateDevice(Scene& s, bool* warp) {
+bool CreateDevice(Scene& s, bool* warp, bool forceWarp = false) {
   const D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
   *warp = false;
-  if (SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, want, 2, D3D11_SDK_VERSION, &s.dev,
-                                  nullptr, &s.imm)))
+  if (!forceWarp && SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, want, 2,
+                                                D3D11_SDK_VERSION, &s.dev, nullptr, &s.imm)))
     return true;
   *warp = true;
   return SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, want, 2, D3D11_SDK_VERSION, &s.dev,
@@ -781,6 +781,230 @@ void Run() {
 }
 
 // ---------------------------------------------------------------------------
+// Emulated command lists (WARP: DriverCommandLists = 0, the runtime records and
+// replays the calls) -- [Model] RecordersEmulatedLists
+// ---------------------------------------------------------------------------
+// One depth draw with b0 = a window of `cb` at `first` (in constants), b1 = cascade 0.
+void DrawWindowed(Scene& s, ID3D11DeviceContext1* c1, ID3D11Buffer* cb, UINT first, int target) {
+  SetPass(s, c1, target, 0);
+  const UINT num = 16;
+  c1->VSSetConstantBuffers1(0, 1, &cb, &first, &num);
+}
+
+struct EmuResult {
+  const char* name;
+  CbMode mode;
+  bool batched;
+  size_t bad = SIZE_MAX;  // texels differing from stock over the three layouts (SIZE_MAX: not run)
+  bool ok = false;        // every list recorded and executed
+};
+
+// The three layouts of Run() (4 cascades on 4 workers, the whole cascade as one list, 4 quarter lists into one
+// target) for one ring mode; the texels differing from the immediate reference summed.
+EmuResult RunLayouts(Scene& s, CbMode mode, bool batched, const char* name, const std::vector<uint32_t>* refQ,
+                     const std::vector<uint32_t>& refFull, int draws) {
+  EmuResult r;
+  r.name = name;
+  r.mode = mode;
+  r.batched = batched;
+  Pool pool;
+  PoolConfig pc;
+  pc.cb.mode = mode;
+  pc.name = "defrec emulated test";
+  if (!pool.Start(s.dev, pc) || pool.At(0).ring.Mode() != mode) return r;
+  bool ok = true;
+  size_t bad = 0;
+  PassState ps[4] = {};
+  JobArgs args[4];
+  for (int k = 0; k < 4; ++k) {
+    SetPass(s, s.imm, k, k);
+    Capture(s.imm, &ps[k]);
+    args[k] = {&s, k * draws / 4, (k + 1) * draws / 4, batched};
+    ok = pool.Submit(k, &RecordJob, &args[k], &ps[k]) && ok;
+  }
+  ok = ok && pool.Wait(kLongWaitMs);
+  for (int k = 0; k < 4; ++k) Clear(s, k);
+  ok = ok && pool.ExecuteAll(s.imm, TRUE) == 4;
+  for (int k = 0; k < 4; ++k) bad += Diff(Read(s, k), refQ[k]);
+  for (auto& p : ps) Release(p);
+  PassState full{};
+  SetPass(s, s.imm, 0, 0);
+  Capture(s.imm, &full);
+  JobArgs all{&s, 0, draws, batched};
+  ok = ok && pool.Submit(1, &RecordJob, &all, &full) && pool.Wait(kLongWaitMs);
+  Clear(s, 0);
+  ok = ok && pool.ExecuteAll(s.imm) == 1;
+  bad += Diff(Read(s, 0), refFull);
+  for (int k = 0; k < 4; ++k) {
+    args[k] = {&s, k * draws / 4, (k + 1) * draws / 4, batched};
+    ok = pool.Submit(k, &RecordJob, &args[k], &full) && ok;
+  }
+  ok = ok && pool.Wait(kLongWaitMs);
+  Clear(s, 0);
+  ok = ok && pool.ExecuteAll(s.imm) == 4;
+  bad += Diff(Read(s, 0), refFull);
+  // A second frame on the same rings (buffers reused by index / chunk; the earlier contents must not leak).
+  for (int k = 0; k < 4; ++k) {
+    args[k] = {&s, (3 - k) * draws / 4, (4 - k) * draws / 4, batched};  // other draws in each worker's buffers
+    ok = pool.Submit(k, &RecordJob, &args[k], &full) && ok;
+  }
+  ok = ok && pool.Wait(kLongWaitMs);
+  Clear(s, 0);
+  {  // executed in draw order: worker 3 holds the first quarter
+    for (int k = 3; k >= 0; --k) {
+      ID3D11CommandList* l = pool.TakeList(k);
+      ok = ok && l;
+      if (l) s.imm->ExecuteCommandList(l, TRUE);
+      Rel(l);
+    }
+  }
+  bad += Diff(Read(s, 0), refFull);
+  Release(full);
+  ok = pool.Stop() && ok;
+  r.bad = bad;
+  r.ok = ok;
+  return r;
+}
+
+void RunEmulated() {
+  Scene s;
+  bool warp = false;
+  if (!CreateDevice(s, &warp, true)) {
+    QvSkip("deferred rec emulated: no WARP device\n");
+    return;
+  }
+  constexpr int kDraws = 2000;
+  if (!Create(s, kDraws)) {
+    Check(false, "deferred rec emulated: WARP test objects");
+    Destroy(s);
+    Rel(s.imm), Rel(s.dev);
+    return;
+  }
+  ID3D11DeviceContext1* imm1 = nullptr;
+  s.imm->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&imm1));
+  const Caps caps = QueryCaps(s.dev);
+  printf("     WARP: DriverCommandLists=%d ConstantBufferOffsetting=%d MapNoOverwriteOnDynamicConstantBuffer=%d\n",
+         caps.commandLists, caps.cbOffsetting, caps.noOverwriteCb);
+  Check(!caps.commandLists && caps.cbOffsetting && caps.device1 && imm1,
+        "deferred rec emulated: WARP emulates command lists (DriverCommandLists=0) and has CB offsets (the case "
+        "RecordersEmulatedLists is for)");
+  // RecorderMode: unchanged with driver lists, refused on emulated lists unless opted in.
+  {
+    Caps drv = caps;
+    drv.commandLists = true;
+    const bool was = g_allowEmulatedLists.load();
+    g_allowEmulatedLists = false;
+    const bool off = RecorderMode(drv) == CbMode::kOffsets && RecorderMode(caps) == CbMode::kAuto;
+    g_allowEmulatedLists = true;
+    const bool on = RecorderMode(drv) == CbMode::kOffsets && RecorderMode(caps) == CbMode::kUpdatePlain;
+    g_allowEmulatedLists = was;
+    Check(off && on,
+          "deferred rec emulated: recorder ring mode offsets with driver lists; emulated lists refused by default, "
+          "update-plain with RecordersEmulatedLists=1");
+  }
+  std::vector<uint32_t> refQ[4], refFull;
+  for (int k = 0; k < 4; ++k) {
+    SetPass(s, s.imm, k, k);
+    Clear(s, k);
+    RecordRange(s, s.imm, nullptr, false, k * kDraws / 4, (k + 1) * kDraws / 4);
+  }
+  for (int k = 0; k < 4; ++k) refQ[k] = Read(s, k);
+  SetPass(s, s.imm, 0, 0);
+  Clear(s, 0);
+  RecordRange(s, s.imm, nullptr, false, 0, kDraws);
+  refFull = Read(s, 0);
+  Check(Written(refFull) > kSize * kSize / 20, "deferred rec emulated: the WARP reference draws something");
+
+  EmuResult res[] = {
+      RunLayouts(s, CbMode::kDiscard, false, "discard per draw (Map DISCARD)", refQ, refFull, kDraws),
+      RunLayouts(s, CbMode::kOffsets, false, "offsets per draw (dynamic, NO_OVERWRITE)", refQ, refFull, kDraws),
+      RunLayouts(s, CbMode::kOffsets, true, "offsets batched (dynamic; the recorders' driver-list mode)", refQ,
+                 refFull, kDraws),
+      RunLayouts(s, CbMode::kUpdatePlain, true, "update-plain batched (the recorders' emulated-list mode)", refQ,
+                 refFull, kDraws),
+      RunLayouts(s, CbMode::kUpdatePlain, false, "update-plain per draw", refQ, refFull, kDraws),
+  };
+  // The offsets rows are the hazard (informational: 2026-11-11 WARP misplaced about 2.08 M of the 7.3 M compared
+  // texels with them, and also with DEFAULT chunks filled by UpdateSubresource and bound with offsets).
+  for (const EmuResult& r : res)
+    printf("     emulated [%-58s] %s, %s\n", r.name, r.ok ? "recorded" : "NOT recorded",
+           r.bad == SIZE_MAX ? "not compared" : (std::to_string(r.bad) + " texels differ").c_str());
+  Check(res[3].ok && res[3].bad == 0 && res[4].ok && res[4].bad == 0,
+        "deferred rec emulated: update-plain lists on WARP match the immediate depth bit for bit (4 layouts x 2 "
+        "patterns, rings reused across frames)");
+
+  // ExecuteCommandList(TRUE) on emulated lists restores DCS's offset windows for what the GPU reads, not just for
+  // Get*: a draw through a window of a dynamic and of a default buffer before and after an Execute.
+  {
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = 4096;
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Buffer* dyn = nullptr;
+    s.dev->CreateBuffer(&bd, nullptr, &dyn);
+    std::vector<uint8_t> init(4096, 0);
+    for (int k = 0; k < 16; ++k) memcpy(&init[k * 256], s.draws[k * 37].m, 80);  // a matrix per 256-byte window
+    bd.Usage = D3D11_USAGE_DEFAULT;
+    bd.CPUAccessFlags = 0;
+    D3D11_SUBRESOURCE_DATA sd{init.data(), 0, 0};
+    ID3D11Buffer* def = nullptr;
+    s.dev->CreateBuffer(&bd, &sd, &def);
+    D3D11_MAPPED_SUBRESOURCE m;
+    bool ok = dyn && def && imm1 && SUCCEEDED(s.imm->Map(dyn, 0, D3D11_MAP_WRITE_DISCARD, 0, &m));
+    if (ok) {
+      memcpy(m.pData, init.data(), 4096);
+      s.imm->Unmap(dyn, 0);
+    }
+    Pool pool;
+    PoolConfig pc;
+    pc.workers = 1;
+    pc.cb.mode = CbMode::kUpdatePlain;
+    pc.name = "defrec emulated restore";
+    ok = ok && pool.Start(s.dev, pc);
+    size_t bad = 0;
+    int cases = 0;
+    for (ID3D11Buffer* b : {dyn, def})
+      for (UINT first : {16u, 112u, 224u}) {
+        if (!ok) break;
+        DrawWindowed(s, imm1, b, first, 3);
+        Clear(s, 3);
+        s.imm->DrawIndexed(36, 0, 0);
+        const std::vector<uint32_t> before = Read(s, 3);
+        PassState p{};
+        SetPass(s, s.imm, 2, 2);  // the list's own pass (another target)
+        Capture(s.imm, &p);
+        JobArgs a{&s, 0, 64, true};
+        ok = pool.Submit(0, &RecordJob, &a, &p) && pool.Wait(kLongWaitMs);
+        DrawWindowed(s, imm1, b, first, 3);
+        Clear(s, 3);
+        ID3D11CommandList* l = pool.TakeList(0);
+        ok = ok && l;
+        if (l) s.imm->ExecuteCommandList(l, TRUE);
+        Rel(l);
+        s.imm->DrawIndexed(36, 0, 0);  // DCS's next draw: no rebinding
+        const size_t d = Diff(Read(s, 3), before);
+        bad += d;
+        ok = ok && Written(before) > 0;
+        Release(p);
+        ++cases;
+      }
+    ok = pool.Stop() && ok;
+    Check(ok && cases == 6 && bad == 0,
+          "deferred rec emulated: after ExecuteCommandList(TRUE) of an emulated list, DCS's next draw reads the same "
+          "offset window (dynamic and default buffers, 3 offsets; rendered, not only Get*)");
+    if (bad) printf("     %zu texels differ after the restore\n", bad);
+    Rel(dyn);
+    Rel(def);
+  }
+  s.imm->ClearState();
+  Rel(imm1);
+  Destroy(s);
+  Rel(s.imm);
+  Rel(s.dev);
+}
+
+// ---------------------------------------------------------------------------
 // QV_DEFREC_BENCH: render-thread timing
 // ---------------------------------------------------------------------------
 double Ms(int64_t a, int64_t b) { return (b - a) * QpcToUs() / 1000.0; }
@@ -797,11 +1021,15 @@ void Drain(Scene& s, ID3D11Query* q) {
   while (s.imm->GetData(q, nullptr, 0, 0) == S_FALSE) Sleep(0);
 }
 
+// QV_DEFREC_BENCH_WARP=1: on WARP (emulated command lists: "4x Execute" is the runtime's replay of every recorded
+// call on the render thread) with fewer draws per cascade (QV_DEFREC_BENCH_DRAWS, default 5000).
 void Bench(int rounds) {
   Scene s;
   bool warp = false;
-  constexpr int kPer = 5000, kDraws = 4 * kPer;
-  if (!CreateDevice(s, &warp) || !Create(s, kDraws)) {
+  const bool forceWarp = getenv("QV_DEFREC_BENCH_WARP") != nullptr;
+  const char* per = getenv("QV_DEFREC_BENCH_DRAWS");
+  const int kPer = per && atoi(per) >= 100 ? atoi(per) : 5000, kDraws = 4 * kPer;
+  if (!CreateDevice(s, &warp, forceWarp) || !Create(s, kDraws)) {
     printf("bench: no device\n");
     return;
   }
@@ -819,9 +1047,10 @@ void Bench(int rounds) {
   };
   const Variant variants[] = {{CbMode::kDiscard, false, "discard/draw"},
                               {CbMode::kOffsets, false, "offsets/draw"},
-                              {CbMode::kOffsets, true, "offsets batched"}};
-  constexpr int kV = 3, kRuns = 3;
-  double med[16][kRuns] = {};
+                              {CbMode::kOffsets, true, "offsets batched"},
+                              {CbMode::kUpdatePlain, true, "update-plain"}};
+  constexpr int kV = 4, kRuns = 3;
+  double med[2 + kV * 4][kRuns] = {};
 
   Pool pools[kV];
   for (int v = 0; v < kV; ++v) {

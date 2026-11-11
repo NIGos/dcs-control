@@ -470,7 +470,10 @@ void LogGpuEnv() {
            g_ad.haveDesc ? g_ad.desc.VendorId : 0, g_ad.driver.empty() ? "?" : g_ad.driver.c_str(),
            g_ad.haveDesc ? g_ad.desc.DedicatedVideoMemory / 1048576.0 : 0.0, v.ok ? v.budget / 1048576.0 : 0.0,
            v.ok ? v.usage / 1048576.0 : 0.0,
-           g_ad.commandLists < 0 ? "?" : g_ad.commandLists ? "1" : "0 (the recorders do not run)",
+           g_ad.commandLists < 0                                         ? "?"
+           : g_ad.commandLists                                            ? "1"
+           : defrec::g_allowEmulatedLists.load(std::memory_order_relaxed) ? "0 (recorders on emulated lists)"
+                                                                          : "0 (the recorders do not run)",
            static_cast<unsigned>(g_ad.featureLevel),
            g_gpuSource == 1 ? "D3DKMT 3D engine running time" : g_gpuSource == 2 ? "NVML" : "nothing (no GPU verdict)");
   g_gpuLine = b;
