@@ -1,0 +1,130 @@
+diff --git a/tests/layer_adaptive_cadence_59.cmake b/tests/layer_adaptive_cadence_59.cmake
+--- a/tests/layer_adaptive_cadence_59.cmake
++++ b/tests/layer_adaptive_cadence_59.cmake
+@@ -58,9 +58,23 @@ file(READ "${flight_log}" contents)
+ 
+ set(expected "op=adaptive_switch result=8 dur_us=0 a=2 b=1 c=")
+ if(MODE STREQUAL "dcs-cadence-exit")
++    # DCS Control (0073): left on missed slots (result=9) or on the work
++    # (result=10), whichever the controller reaches first. The first held
++    # prime gives one 60 ms frame and three or four 16 ms ones behind it (the
++    # slots re-presented, 407): where the test application's own frames are
++    # already close to the 10 ms period - WARP's queue wait is 5.8-6.5 ms of
++    # it on this machine since 2026-11-08 - those are the five samples that
++    # put the half-second p90 over 95% of the period (seen: 9922 us, 90 ms
++    # after the first prime) before the second prime, 150 ms on, makes the
++    # second episode. Both are 0032's exits from 1X, unchanged; what this
++    # scenario checks is the exit itself - the told times through it, in the
++    # call chain, and the slots re-presented meanwhile.
+     list(APPEND expected
+-        "op=adaptive_switch result=9 dur_us=0 a=1 b=2 c="
+         "op=presenter_transition result=407 ")
++    if(NOT contents MATCHES "op=adaptive_switch result=(9|10) dur_us=0 a=1 b=2 c=")
++        message(FATAL_ERROR
++            "The flight log is missing: op=adaptive_switch result=9 or 10 dur_us=0 a=1 b=2 c=")
++    endif()
+ elseif(MODE STREQUAL "dcs-cadence-stall")
+     list(APPEND expected
+         "op=presenter_transition result=407 "
+@@ -105,11 +119,22 @@ if(MODE STREQUAL "dcs-cadence-jitter")
+             endif()
+         endif()
+     endforeach()
+-    if(judged EQUAL 0 OR NOT missed EQUAL 0)
++    # DCS Control (0073): less the grid points the test application itself
++    # skipped (the call chain reports them: its own frame ran over the 10 ms
++    # period - WARP's queue wait is 5.8-6.5 ms of it on this machine since
++    # 2026-11-08 - and it took the next point). Such a slot has no frame to
++    # show and the layer counts it missed, rightly. What 0059 fixed, and
++    # this checks, is a frame handed over 1.75-2.75 ms after its slot's wait
++    # counted missed: every hand-over would be, a hundred and more a run.
++    set(app_skipped 0)
++    if(call_chain_output MATCHES "application skipped ([0-9]+)")
++        set(app_skipped "${CMAKE_MATCH_1}")
++    endif()
++    if(judged EQUAL 0 OR missed GREATER app_skipped)
+         message(FATAL_ERROR
+-            "Slots missed at 1X: ${missed} over ${judged} records (expected none)")
++            "Slots missed at 1X: ${missed} over ${judged} records (expected none beyond the ${app_skipped} the test application skipped)")
+     endif()
+-    message(STATUS "1X: no slot missed over ${judged} records")
++    message(STATUS "1X: ${missed} slot(s) missed over ${judged} records, ${app_skipped} skipped by the test application")
+ endif()
+ 
+ # DCS Control (0061): the 408 records - a= us since the application's last
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -320,6 +320,14 @@ bool g_cadence_jitter_mode = false;
+ // other application xrEndFrame may take 50 ms.
+ bool g_cadence_stall_mode = false;
+ bool g_cadence_jitter_shape = false; // either of the two
++// DCS Control (0073): while these scenarios are at 1X the test application does
++// not wait for its queue after each frame, as DCS does not: on WARP that wait
++// is 5.8-6.5 ms of the 10 ms period on this machine (since 2026-11-08), which
++// put its "light" frames at the period - 1X left on the work before the
++// scenario's own exit (dcs-cadence-exit: "held 0"), or a grid point skipped
++// by the application itself (dcs-cadence-jitter). The queue is waited for
++// again once 1X is left.
++bool g_cadence_one_light = false;
+ // 0059: the fake display's vsync on a fixed grid: a wait returns at the next
+ // grid point after it is called, its predicted display time advanced by the
+ // grid points passed since the last (a slot the runtime skipped).
+@@ -4475,7 +4483,7 @@ int main(int argc, char** argv) {
+                     ok = ok && XR_SUCCEEDED(next_wait_result) &&
+                         capture_fresh_application_image() &&
+                         submit_frame(pending.predictedDisplayTime) &&
+-                        wait_for_queue_idle();
++                        (g_cadence_one_light || wait_for_queue_idle()); // 0073
+                 }
+             } else {
+                 ok = XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
+@@ -4867,6 +4875,7 @@ int main(int argc, char** argv) {
+         XrTime c59_exit_told = 0;
+         std::size_t c59_exit_mark = 0;
+         int c59_limited_frames = 0;
++        int c59_app_skipped = 0; // DCS Control (0073)
+         double c59_presenter_gap_ms = 0.0;
+         double c59_stall_end_ms = 0.0;
+         std::size_t c59_from_mark = 0;
+@@ -4884,6 +4893,7 @@ int main(int argc, char** argv) {
+                 sequence_succeeded = run_frame(true);
+             }
+             c59_one_seen = pending.predictedDisplayPeriod == kFakeDisplayPeriod;
++            g_cadence_one_light = c59_one_seen; // DCS Control (0073)
+             c59_from_mark = scene_mark();
+             g_cadence_time_ends = true;
+         }
+@@ -4921,6 +4931,7 @@ int main(int argc, char** argv) {
+                 CloseHandle(event);
+             }
+             c59_left = pending.predictedDisplayPeriod == kFakeDisplayPeriod * 2;
++            g_cadence_one_light = false; // 0073: 2 again, as before
+             c59_exit_told = pending.predictedDisplayTime;
+             c59_exit_mark = scene_mark();
+             for (int index = 0; sequence_succeeded && index < 100; ++index) {
+@@ -4966,6 +4977,14 @@ int main(int argc, char** argv) {
+                 const std::int64_t index = std::max(last_index + 1,
+                     (earliest_end - origin + kFakeDisplayPeriod - 1) / kFakeDisplayPeriod +
+                         (last_index == 0 ? 1 : 0));
++                // DCS Control (0073): a grid point the test application
++                // itself could not make (its own frame over the period: on
++                // WARP its queue wait alone is 5.8-6.5 ms of the 10): the
++                // slot is the application's miss, reported so the flight
++                // log's count is judged against it.
++                if (last_index != 0 && index > last_index + 1) {
++                    c59_app_skipped += static_cast<int>(index - last_index - 1);
++                }
+                 last_index = index;
+                 const std::int64_t end_target = origin + index * kFakeDisplayPeriod + offset_ns;
+                 g_begin_not_before_ns = end_target - render_us * 1000LL - overhead_ns;
+@@ -5448,7 +5467,8 @@ int main(int argc, char** argv) {
+                     violations == 0 && empty == 0 && c59_one_seen &&
+                     c59_limited_frames >= 100 && g_cadence_longest_end_ms < 50.0;
+                 summary << "1X entered " << c59_one_seen << ", " << c59_limited_frames
+-                        << " frames at the limiter, empty " << empty
++                        << " frames at the limiter (application skipped " // 0073
++                        << c59_app_skipped << "), empty " << empty
+                         << ", longest xrEndFrame from 1X on " << g_cadence_longest_end_ms << " ms";
+             } else if (g_cadence_idle_mode) {
+                 // DCS Control (0060): see g_cadence_idle_mode.

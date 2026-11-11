@@ -58,6 +58,12 @@ std::atomic<BoundaryFn> g_depthBoundary{nullptr};
 // no other feature's boundary work runs under the probe's shading-rate state. g_vrsPre is set only with g_vrsBoundary.
 std::atomic<BoundaryFn> g_vrsPre{nullptr};
 std::atomic<BoundaryFn> g_vrsBoundary{nullptr};
+// chain_derive.h ([Suite] ChainDeriveCensus, measure only): called after every other one but g_vrsBoundary at a pass
+// start and right after g_vrsBoundary at an end; nullptr unless the census key is non-zero.
+std::atomic<BoundaryFn> g_censusBoundary{nullptr};
+// periph_census.h ([Suite] PeriphCensus, audit B6, measure only): called after g_censusBoundary at a pass start and
+// right before it at an end; nullptr unless the census key is non-zero.
+std::atomic<BoundaryFn> g_pcBoundary{nullptr};
 // R139: observer of the UpdateSubresource(1) calls on a context, called (before forwarding, with DCS's own bytes) by
 // whichever hook of ours holds the slot: gpu_pass_timing.h's while it measures, fixation_depth.h's in its in-pass
 // arms, vrs_probe.h's one-shot arm. nullptr unless the VRS probe runs.
@@ -73,14 +79,30 @@ using OmObserverFn = void (*)(ID3D11DeviceContext* c, UINT n, ID3D11RenderTarget
 using VpObserverFn = void (*)(ID3D11DeviceContext* c, UINT n, const D3D11_VIEWPORT* v);
 std::atomic<OmObserverFn> g_omObserver{nullptr};
 std::atomic<VpObserverFn> g_vpObserver{nullptr};
-// The frame argument of the last top-level execute (diagnostics).
+// Frame id of the last top-level execute: the per-frame boundary of the pass timeline, the chain census and the
+// per-eye live capture. Live DCS passes 0 as execute's frame argument (2026-11-11 s1_airfield: one frame id over
+// 66 s, so every per-frame figure was the window total), so the id is the quad-view frame counter (views.inc
+// g_quadFrame, incremented once per quad-view collect on the render thread, before the frame's first pass); the
+// argument only until that counter starts. Latched at each top-level execute, so a pass tree never spans two ids.
 std::atomic<uint64_t> g_execFrame{0};
+inline uint64_t TopFrameId(uint64_t arg, uint64_t quadFrame) { return quadFrame ? quadFrame : arg; }
+// Measurement kit ([Suite] PassTimelineSec, measure_kit.h): while recording with g_timeline set, every pass's
+// exclusive time is also kept per frame (guarded by g_mutex, at most g_tlCap events). Off: one relaxed load in the
+// recording path only.
+struct TlEvent {
+  void* pass;
+  uint32_t frame;
+  float exclUs;
+};
+std::atomic<bool> g_timeline{false};
+std::vector<TlEvent> g_tl;
+size_t g_tlCap = 0;
 
 void __fastcall Hook(void* pass, uint64_t frame) {
   if (t_depth == 0) {
     qvalog::NoteFrameThread();  // R93: the render thread (main.cpp's async log: its lines never wait)
     g_topTid.store(GetCurrentThreadId(), std::memory_order_relaxed);
-    g_execFrame.store(frame, std::memory_order_relaxed);
+    g_execFrame.store(TopFrameId(frame, g_quadFrame.load(std::memory_order_relaxed)), std::memory_order_relaxed);
   }
   EachFn each = g_eachPass.load(std::memory_order_relaxed);
   BoundaryFn bnd = g_boundary.load(std::memory_order_relaxed);
@@ -88,9 +110,11 @@ void __fastcall Hook(void* pass, uint64_t frame) {
   BoundaryFn vb = g_viewBoundary.load(std::memory_order_relaxed);
   BoundaryFn db = g_depthBoundary.load(std::memory_order_relaxed);
   BoundaryFn vr = g_vrsBoundary.load(std::memory_order_relaxed);  // R139
+  BoundaryFn cs = g_censusBoundary.load(std::memory_order_relaxed);  // chain_derive.h
+  BoundaryFn pc = g_pcBoundary.load(std::memory_order_relaxed);      // periph_census.h
   if (!g_recording.load(std::memory_order_relaxed)) {
     AfterTopFn after = g_afterTop.load(std::memory_order_relaxed);
-    if (!after && !each && !bnd && !fl && !vb && !db && !vr) return g_orig(pass, frame);
+    if (!after && !each && !bnd && !fl && !vb && !db && !vr && !cs && !pc) return g_orig(pass, frame);
     BoundaryFn vp = vr ? g_vrsPre.load(std::memory_order_relaxed) : nullptr;
     if (vp) vp(pass, true, t_depth);
     if (each) each();
@@ -98,11 +122,15 @@ void __fastcall Hook(void* pass, uint64_t frame) {
     if (bnd) bnd(pass, true, t_depth);
     if (vb) vb(pass, true, t_depth);
     if (db) db(pass, true, t_depth);
+    if (cs) cs(pass, true, t_depth);
+    if (pc) pc(pass, true, t_depth);
     if (vr) vr(pass, true, t_depth);
     ++t_depth;
     g_orig(pass, frame);
     const bool top = --t_depth == 0;
     if (vr) vr(pass, false, t_depth);
+    if (pc) pc(pass, false, t_depth);
+    if (cs) cs(pass, false, t_depth);
     if (vb) vb(pass, false, t_depth);
     if (bnd) bnd(pass, false, t_depth);
     if (fl) fl(pass, false, t_depth);
@@ -118,6 +146,8 @@ void __fastcall Hook(void* pass, uint64_t frame) {
   if (bnd) bnd(pass, true, t_depth);
   if (vb) vb(pass, true, t_depth);
   if (db) db(pass, true, t_depth);
+  if (cs) cs(pass, true, t_depth);
+  if (pc) pc(pass, true, t_depth);
   if (vr) vr(pass, true, t_depth);
   int d = t_depth++;
   if (d < 64) t_childUs[d] = 0;
@@ -136,8 +166,12 @@ void __fastcall Hook(void* pass, uint64_t frame) {
     s.inclUs += us;
     s.exclUs += excl;
     if (d == 0) g_topLevelUs += us;
+    if (g_timeline.load(std::memory_order_relaxed) && g_tl.size() < g_tlCap)
+      g_tl.push_back({pass, static_cast<uint32_t>(g_execFrame.load(std::memory_order_relaxed)), static_cast<float>(excl)});
   }
   if (vr) vr(pass, false, d);
+  if (pc) pc(pass, false, d);
+  if (cs) cs(pass, false, d);
   if (vb) vb(pass, false, d);
   if (bnd) bnd(pass, false, d);
   if (fl) fl(pass, false, d);
@@ -269,3 +303,33 @@ void Measure(int ms, std::atomic<uint64_t>& frameCounter) {
 }
 
 }  // namespace ptiming
+
+// Measurement kit (declared in bench.h): the render thread for the A/B's per-block cycle count, and [Bench] PassMs's
+// per-block render-thread pass ms and G-buffer pass ms (pass kinds whose name contains "GBuffer" but not "Lighting",
+// exclusive).
+DWORD BenchRenderTid() { return ptiming::g_topTid.load(); }
+
+void BenchPassBegin() {
+  if (!ptiming::g_orig) return;
+  ptiming::Reset();
+  ptiming::g_recording = true;
+}
+
+inline bool PassNameHasGBuffer(const std::string& n) {
+  std::string l = n;
+  for (char& ch : l) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+  return l.find("gbuffer") != std::string::npos && l.find("lighting") == std::string::npos;  // geometry, not lighting
+}
+
+void BenchPassEnd(double* topUs, double* gbUs) {
+  *topUs = *gbUs = -1;
+  if (!ptiming::g_orig || !ptiming::g_recording.load()) return;
+  ptiming::g_recording = false;
+  double top = 0;
+  const std::map<std::string, ptiming::Stat> by = ptiming::TakeByName(&top, nullptr);
+  double gb = 0;
+  for (const auto& kv : by)
+    if (PassNameHasGBuffer(kv.first)) gb += kv.second.exclUs;
+  *topUs = top;
+  *gbUs = gb;
+}

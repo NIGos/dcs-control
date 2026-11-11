@@ -1,0 +1,306 @@
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -147,6 +147,13 @@ struct ConfiguredNvidiaOptions {
+ [[nodiscard]] bool read_adaptive_cadence(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS Control (0070). `[ofxr] cadence_preference`: how readily adaptive
++// cadence passes frames through - 0 steady (0032's rule), 1 balanced, 2 rate;
++// see xrfg::latency::CadencePreference. 0 where absent or anything else. Read
++// once per session.
++[[nodiscard]] std::uint32_t read_cadence_preference(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // DCS VR Control (0007). `[ofxr] own_binding_queue`: a D3D11 session the
+ // bridge took over hands every runtime a queue of the layer's own, as it
+ // always did on SteamVR, so a submission waits on the GPU only for what it
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -1491,8 +1491,61 @@ struct CadenceConfig {
+     Nanoseconds one_backoff_first{30 * kSecond};
+     Nanoseconds one_backoff_max{240 * kSecond};
+     Nanoseconds one_reset_after{60 * kSecond};
++    // DCS Control (0070): see CadencePreference. Whether 1X is left on the
++    // p90 over one_exit_fraction of the period, and a second, slower miss
++    // rule: one_exit_sparse_episodes missed-slot episodes within
++    // one_exit_sparse_window (0: none), counted from the grace's end.
++    bool one_exit_slow{true};
++    std::uint32_t one_exit_sparse_episodes{0};
++    Nanoseconds one_exit_sparse_window{10 * kSecond};
+ };
+ 
++// DCS Control (0070): how readily adaptive cadence passes frames through
++// (`[ofxr] cadence_preference`, 0 steady, 1 balanced, 2 rate; steady where
++// the key is absent or anything else).
++//
++// Issue #17, measured on DCS (Pimax, 90 Hz): a cockpit view that holds 90 with
++// the layer off (11.1 ms frames, GPU 8.6 ms, render thread 10.2 ms) reads
++// 10.2-11.6 ms of GPU at 1X while it runs at 2 - the busy time per frame at
++// half the rate is a fifth to a quarter more than the frame costs at the full
++// rate - so one_enter_fraction 0.80 (8.9 ms) was never met and 1X never
++// entered. The estimate cannot say whether 1X holds there; 1X itself can.
++// So the other two preferences enter 1X on a wider estimate - a trial, with
++// everything 0032 has for one (the grace, the failed attempt's backoff from
++// 30 s doubling to 240 s, the spacing) - and keep it by what 1X shows: slots
++// missed, not the p90 against the period (at the full rate the work is the
++// interval less the wait, within a few percent of the period whenever the
++// application just holds it).
++//
++//   steady    0032 as it was: enter at 0.80 of the period, leave over 0.95
++//             or on 2 missed-slot episodes within a second.
++//   balanced  enter at 1.10 (the estimate's excess over a real 0.9 or so);
++//             leave on 2 episodes within a second or 3 within 10 s.
++//   rate      enter at 1.25 (what may hold at all); leave on 2 episodes
++//             within a second only.
++enum class CadencePreference : std::uint32_t { steady = 0, balanced = 1, rate = 2 };
++
++[[nodiscard]] constexpr CadencePreference cadence_preference_from(
++    std::uint32_t value) noexcept {
++    return value == 1 ? CadencePreference::balanced
++        : value == 2 ? CadencePreference::rate
++        : CadencePreference::steady;
++}
++
++[[nodiscard]] constexpr CadenceConfig cadence_config_for(
++    CadencePreference preference) noexcept {
++    CadenceConfig config{};
++    if (preference == CadencePreference::balanced) {
++        config.one_enter_fraction = 1.10;
++        config.one_exit_slow = false;
++        config.one_exit_sparse_episodes = 3;
++    } else if (preference == CadencePreference::rate) {
++        config.one_enter_fraction = 1.25;
++        config.one_exit_slow = false;
++    }
++    return config;
++}
++
+ enum class CadenceEvent : std::uint32_t {
+     none = 0,
+     one_entered = 1,
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -303,6 +303,22 @@ bool read_adaptive_cadence(const std::filesystem::path& module_directory) noexce
+     return read_ofxr_switch(module_directory, L"adaptive_cadence", false);
+ }
+ 
++// DCS Control (0070): 0 unless set to 1 or 2.
++std::uint32_t read_cadence_preference(
++    const std::filesystem::path& module_directory) noexcept {
++    try {
++        if (module_directory.empty()) {
++            return 0;
++        }
++        const auto ini_path = module_directory / L"ofxr_bridge.ini";
++        const UINT value = GetPrivateProfileIntW(
++            L"ofxr", L"cadence_preference", 0, ini_path.c_str());
++        return value <= 2U ? value : 0U;
++    } catch (...) {
++        return 0;
++    }
++}
++
+ bool read_own_binding_queue(const std::filesystem::path& module_directory) noexcept {
+     return read_ofxr_switch(module_directory, L"own_binding_queue", true);
+ }
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -1140,9 +1140,17 @@ CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexc
+             backoff_ = 0;
+         }
+         if (now >= one_entered_at_ + config_.one_grace) {
+-            if (step.late_episodes >= config_.one_exit_episodes) {
++            // DCS Control (0070): the slower miss rule, and the p90 only
++            // where the preference judges by it (CadencePreference).
++            const bool sparse = config_.one_exit_sparse_episodes != 0 &&
++                late_episodes_between(
++                    std::max(now - config_.one_exit_sparse_window,
++                             one_entered_at_ + config_.one_grace),
++                    now) >= config_.one_exit_sparse_episodes;
++            if (step.late_episodes >= config_.one_exit_episodes || sparse) {
+                 leave_one(now, CadenceEvent::one_left_late, step);
+-            } else if (stats.judged_samples >= config_.min_samples &&
++            } else if (config_.one_exit_slow &&
++                       stats.judged_samples >= config_.min_samples &&
+                        stats.judged > fraction_of(config_.one_exit_fraction, period)) {
+                 leave_one(now, CadenceEvent::one_left_slow, step);
+             }
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1923,6 +1923,9 @@ struct SessionState {
+     // synthetics plus one, the periods it is handed and told, and the
+     // presenter frames the once-per-frame hold keeps it.
+     bool cadence_configured{};
++    // DCS Control (0070): `[ofxr] cadence_preference` (0 steady, 1 balanced,
++    // 2 rate), logged as c of adaptive_switch result=13 when cadence starts.
++    std::uint32_t cadence_preference{};
+     // DCS Control (0057): 0037's content_time_fraction and 0039's
+     // slot_content_time (and their latency windows, backoff and record) are
+     // gone with their keys: synthetics are placed by the display times.
+@@ -6174,6 +6177,13 @@ XrResult layer_create_session_impl(
+     // triple_frame_gen says: each frame gets its own synthetics instead.
+     state->cadence_configured =
+         xrfg::implicit_layer::read_adaptive_cadence(current_layer_directory());
++    // DCS Control (0070): how readily it passes frames through; the
++    // controller keeps the configuration through every start().
++    state->cadence_preference =
++        xrfg::implicit_layer::read_cadence_preference(current_layer_directory());
++    state->cadence_controller = xrfg::latency::CadenceController(
++        xrfg::latency::cadence_config_for(
++            xrfg::latency::cadence_preference_from(state->cadence_preference)));
+     // DCS Control (0038): taken up with the synthesis queue below.
+     const std::uint32_t parallel_eye_synthesis =
+         xrfg::implicit_layer::read_parallel_eye_synthesis(current_layer_directory());
+@@ -6228,7 +6238,7 @@ XrResult layer_create_session_impl(
+                 static_cast<std::int64_t>(xrfg::latency::AdaptiveReason::cadence),
+                 0,
+                 state->frames_per_application_frame,
+-                0);
++                state->cadence_preference); // DCS Control (0070)
+         }
+     }
+     state->display_time_corrector.mode = xrfg::latency::display_time_mode(
+@@ -16551,7 +16561,7 @@ void apply_live_frame_multiplier(
+                     static_cast<std::int64_t>(AdaptiveReason::cadence),
+                     0,
+                     current,
+-                    0);
++                    state->cadence_preference); // DCS Control (0070)
+             } else {
+                 target = 2;
+                 reason = AdaptiveReason::cadence;
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -2707,6 +2707,118 @@ void cadence_one_exit_tests() {
+     }
+ }
+ 
++// DCS Control (0070): the pass-through preference (issue #17).
++void cadence_preference_tests() {
++    using xrfg::latency::cadence_config_for;
++    using xrfg::latency::cadence_preference_from;
++    using xrfg::latency::CadencePreference;
++    require(cadence_preference_from(0) == CadencePreference::steady &&
++            cadence_preference_from(1) == CadencePreference::balanced &&
++            cadence_preference_from(2) == CadencePreference::rate &&
++            cadence_preference_from(3) == CadencePreference::steady,
++        "preference: 0, 1, 2; steady otherwise");
++    {
++        const CadenceConfig steady = cadence_config_for(CadencePreference::steady);
++        const CadenceConfig base{};
++        require(steady.one_enter_fraction == base.one_enter_fraction &&
++                steady.one_exit_fraction == base.one_exit_fraction &&
++                steady.one_exit_slow && steady.one_exit_sparse_episodes == 0,
++            "steady is 0032's rule");
++    }
++    // Issue #17's cockpit view as 2 measures it: CPU 10.5 ms, GPU 12.2 ms of
++    // which 1.2 are synthesis - 11 ms at 1X, 99% of the period.
++    constexpr Nanoseconds kHoldCpu = 10'500'000;
++    constexpr Nanoseconds kHoldGpu = 12'200'000;
++    constexpr Nanoseconds kHoldSynthesis = 1'200'000;
++    // 13.5 ms at 1X, 1.215 periods: only the rate preference tries it.
++    constexpr Nanoseconds kEdgeGpu = 14'700'000;
++    // 14.5 ms at 1X, 1.3 periods: nobody does.
++    constexpr Nanoseconds kFarGpu = 15'700'000;
++    {
++        CadenceSim steady(cadence_config_for(CadencePreference::steady));
++        CadenceSim balanced(cadence_config_for(CadencePreference::balanced));
++        CadenceSim rate(cadence_config_for(CadencePreference::rate));
++        for (int index = 0; index < 600; ++index) {
++            steady.frame(kHoldCpu, kHoldGpu, kHoldSynthesis);
++        }
++        require(steady.events.empty() && steady.controller.level() == 2,
++            "steady: 99% of the period never enters 1X");
++        const Nanoseconds entered = balanced.until(
++            CadenceEvent::one_entered, 1000, kHoldCpu, kHoldGpu, kHoldSynthesis);
++        require(entered >= balanced.started + 5 * kSecond &&
++                entered <= balanced.started + 5 * kSecond + 500 * kMillisecond,
++            "balanced: 99% of the period enters after the five seconds");
++        require(rate.until(CadenceEvent::one_entered, 1000, kHoldCpu, kHoldGpu,
++                    kHoldSynthesis) >= 0,
++            "rate: enters too");
++        // At 1X the work is the period less a short wait, 97% of it: kept
++        // (steady would leave over 95%), ten seconds of it.
++        for (int index = 0; index < 900; ++index) {
++            balanced.frame(10'800'000, 9'500'000, 0);
++            rate.frame(10'800'000, 9'500'000, 0);
++        }
++        require(balanced.controller.level() == 1 && balanced.events.size() == 1 &&
++                rate.controller.level() == 1 && rate.events.size() == 1,
++            "balanced and rate: 1X is not left on the p90");
++    }
++    {
++        CadenceSim balanced(cadence_config_for(CadencePreference::balanced));
++        CadenceSim rate(cadence_config_for(CadencePreference::rate));
++        CadenceSim far(cadence_config_for(CadencePreference::rate));
++        for (int index = 0; index < 600; ++index) {
++            balanced.frame(kHoldCpu, kEdgeGpu, kHoldSynthesis);
++            far.frame(kHoldCpu, kFarGpu, kHoldSynthesis);
++        }
++        require(balanced.events.empty(), "balanced: 1.2 periods is out of reach");
++        require(far.events.empty() && far.controller.level() == 2,
++            "rate: 1.3 periods is out of reach");
++        require(rate.until(CadenceEvent::one_entered, 1000, kHoldCpu, kEdgeGpu,
++                    kHoldSynthesis) >= 0,
++            "rate: 1.2 periods is tried");
++    }
++    {
++        // Sparse misses at 1X - one every three seconds, never two within a
++        // second: balanced leaves at the third within ten seconds (a failed
++        // attempt: the backoff), rate stays.
++        CadenceSim balanced(cadence_config_for(CadencePreference::balanced));
++        CadenceSim rate(cadence_config_for(CadencePreference::rate));
++        for (CadenceSim* sim : {&balanced, &rate}) {
++            const Nanoseconds entered = sim->until(
++                CadenceEvent::one_entered, 1000, kHoldCpu, kHoldGpu, kHoldSynthesis);
++            require(entered >= 0, "sparse: entered");
++            for (int miss = 0; miss < 3; ++miss) {
++                const Nanoseconds at = entered + (2 + 3 * miss) * kSecond;
++                while (sim->now < at) {
++                    sim->frame(10'800'000, 9'500'000, 0);
++                }
++                sim->controller.add_late(sim->now, 1);
++                sim->frame(10'800'000, 9'500'000, 0);
++            }
++        }
++        require(balanced.controller.level() == 2 &&
++                balanced.events.back().event == CadenceEvent::one_left_late &&
++                balanced.controller.backoff() == 30 * kSecond,
++            "balanced: three episodes in ten seconds leave, and back off");
++        require(rate.controller.level() == 1 && rate.events.size() == 1,
++            "rate: sparse misses stay");
++        // Two episodes within a second leave under rate as well.
++        rate.controller.add_late(rate.now, 1);
++        rate.frame(10'800'000, 9'500'000, 0);
++        rate.controller.add_late(rate.now + 300 * kMillisecond, 1);
++        for (int index = 0; index < 60; ++index) {
++            rate.frame(10'800'000, 9'500'000, 0);
++        }
++        require(rate.controller.level() == 2 &&
++                rate.events.back().event == CadenceEvent::one_left_late,
++            "rate: two episodes in a second leave");
++        // Back at 2, as heavy as before: not tried again inside the backoff.
++        const Nanoseconds left = rate.events.back().one_allowed_at;
++        const Nanoseconds again = rate.until(
++            CadenceEvent::one_entered, 4000, kHoldCpu, kHoldGpu, kHoldSynthesis);
++        require(again >= left, "rate: the next attempt waits for the backoff");
++    }
++}
++
+ void cadence_backoff_tests() {
+     {
+         // Failed attempts (left within 30 s): 30, 60, 120, 240, 240 s.
+@@ -3697,6 +3809,7 @@ int main() {
+         cadence_three_allowed_tests(); // DCS Control (0034)
+         cadence_one_tests();
+         cadence_one_exit_tests();
++        cadence_preference_tests(); // DCS Control (0070)
+         cadence_backoff_tests();
+         cadence_frame_tests();
+         deep_hold_repeat_tests(); // DCS Control (0050)

@@ -331,20 +331,43 @@ inline int ValidateFocus(const Pred& pr, const uint8_t* actual, double tol, doub
   return miss;
 }
 
+// R150: why LearnFocus did not learn (the 30 s line counts them: R124 saw 100 % "no history" and could not say why).
+enum LearnWhy : int {
+  kLwOk = 0,
+  kLwNoCi,       // no collect-time cameras published
+  kLwNoPair,     // no published periphery camera relates to the periphery upload (another frame, another layout)
+  kLwFocusRel,   // the published focus camera does not relate to the focus upload within kCiScaleTol
+  kLwViews,      // the uploads are not a periphery / focus pair of one eye
+  kLwCount
+};
+inline const char* LearnWhyName(int w) {
+  static const char* const n[kLwCount] = {"ok", "no cameras", "periphery camera", "focus camera", "views"};
+  return w >= 0 && w < kLwCount ? n[w] : "?";
+}
+
 // After the focus pass of an eye: what the next frame's prediction needs. False when the focus upload does not
 // relate to this frame's cameras (then the history is dropped: the next frame of this eye is stock).
-inline bool LearnFocus(EyeHist& h, const uint8_t* tcP, const uint8_t* tcF, const CiFrame& ci) {
+inline bool LearnFocus(EyeHist& h, const uint8_t* tcP, const uint8_t* tcF, const CiFrame& ci, int* whyOut = nullptr) {
   h.have = false;
+  int why = kLwNoCi;
+  if (whyOut) *whyOut = why;
   if (!ci.seq || ci.pairs < 1) return false;
+  why = kLwNoPair;
   for (int lay = 0; lay < 2; ++lay) {
     const bool rows = lay == 1;
     Rel tp;
     const int pi = FindPair(ci, tcP, rows, &tp);
     if (pi < 0) continue;
     const Rel tf = Relate(CiClip(ci.f[pi], rows), TcClip(tcF));
-    if (!tf.ok || std::fabs(tf.x.a - 1) > kCiScaleTol || std::fabs(tf.y.a - 1) > kCiScaleTol) continue;
+    if (!tf.ok || std::fabs(tf.x.a - 1) > kCiScaleTol || std::fabs(tf.y.a - 1) > kCiScaleTol) {
+      why = kLwFocusRel;
+      continue;
+    }
     const ViewId vp = ClassifyTc(tcP), vf = ClassifyTc(tcF);
-    if (vp.kind != kPeriph || vf.kind != kFocus || !SharedRowsEqual(tcP, tcF)) return false;
+    if (vp.kind != kPeriph || vf.kind != kFocus || !SharedRowsEqual(tcP, tcF)) {
+      if (whyOut) *whyOut = kLwViews;
+      return false;
+    }
     h.rows = rows;
     h.fa[0] = tf.x.a, h.fb[0] = tf.x.b, h.fa[1] = tf.y.a, h.fb[1] = tf.y.b;
     h.pa[0] = tp.x.a, h.pb[0] = tp.x.b, h.pa[1] = tp.y.a, h.pb[1] = tp.y.b;
@@ -353,9 +376,73 @@ inline bool LearnFocus(EyeHist& h, const uint8_t* tcP, const uint8_t* tcF, const
     memcpy(h.row132, tcF + 16 * kRow132, 16);
     h.ciSeq = ci.seq;
     h.have = true;
+    if (whyOut) *whyOut = kLwOk;
     return true;
   }
+  if (whyOut) *whyOut = why;
   return false;
+}
+
+// R150: the focus decision without a camera prediction. DCS's own focus TerrainContext is already uploaded when the
+// twin decides (the first event of the terrain pass, before the first item), and the twin's draws read GPU copies of
+// DCS's own focus buffers, so the prediction is not what makes the output exact (the descriptors, the audits and the
+// verify are). What the decision must still prove is that this upload is the quad focus of the SAME eye camera as
+// the periphery stream: the shared rows byte-equal (the caller checks), a periphery / focus classification, and the
+// per-view rows of the R38 shape: VP x / y = a * (periphery VP x / y) + b * w with a > 1 (a magnified, re-centred
+// projection of the same rotation), the P rows (sx, cx) the same affine of the periphery's, the inverse P rows
+// their exact inverse, the side planes the normalised (w +- x), (w +- y) of the VP rows. Tolerances are float
+// round-off (the uploads are float).
+constexpr double kRelTol = 2e-5;
+inline bool RelateFocusTc(const uint8_t* tcP, const uint8_t* tcF, double* devOut = nullptr) {
+  if (devOut) *devOut = 1e30;
+  const ViewId vp = ClassifyTc(tcP), vf = ClassifyTc(tcF);
+  if (vp.kind != kPeriph || vf.kind != kFocus) return false;
+  if (!(vf.sx > vp.sx && vf.sy > vp.sy)) return false;
+  // The w rows of one eye are byte-equal (shared row 23 is a per-view row only by its neighbours: check it here).
+  if (memcmp(TcRow(tcP, kRowVw), TcRow(tcF, kRowVw), 16) != 0) return false;
+  const double ax = vf.sx / vp.sx, ay = vf.sy / vp.sy;
+  const double bx = vf.cx - ax * vp.cx, by = vf.cy - ay * vp.cy;
+  if (!(ax > 1 && ay > 1 && std::isfinite(bx) && std::isfinite(by))) return false;
+  double worst = 0;
+  auto relNear = [&](double a, double b, double scale) {
+    const double d = std::fabs(a - b) / std::max(1e-6, scale);
+    if (!(d <= 1e30)) worst = 1e30;
+    worst = std::max(worst, d);
+  };
+  // VP x / y rows (all four components, the fourth against the row's scale as the predictor does).
+  const float* px = TcRow(tcP, kRowVx);
+  const float* py = TcRow(tcP, kRowVy);
+  const float* pw = TcRow(tcP, kRowVw);
+  const float* fx = TcRow(tcF, kRowVx);
+  const float* fy = TcRow(tcF, kRowVy);
+  double sxr = 1e-6, syr = 1e-6;
+  for (int k = 0; k < 3; ++k) sxr = std::max(sxr, std::fabs(static_cast<double>(fx[k]))), syr = std::max(syr, std::fabs(static_cast<double>(fy[k])));
+  for (int k = 0; k < 4; ++k) {
+    relNear(ax * px[k] + bx * pw[k], fx[k], k < 3 ? sxr : std::max(sxr, std::fabs(static_cast<double>(fx[k]))));
+    relNear(ay * py[k] + by * pw[k], fy[k], k < 3 ? syr : std::max(syr, std::fabs(static_cast<double>(fy[k]))));
+  }
+  // P rows: the off-diagonal zeros (ClassifyTc checked them), the inverse rows.
+  const float* ix = TcRow(tcF, kRowIx);
+  const float* iy = TcRow(tcF, kRowIy);
+  relNear(1.0 / vf.sx, ix[0], 1.0 / vf.sx);
+  relNear(-vf.cx / vf.sx, ix[3], std::max(1.0 / vf.sx, std::fabs(vf.cx / vf.sx)));
+  relNear(1.0 / vf.sy, iy[1], 1.0 / vf.sy);
+  relNear(-vf.cy / vf.sy, iy[3], std::max(1.0 / vf.sy, std::fabs(vf.cy / vf.sy)));
+  // Side planes of the focus VP rows.
+  double X[4], Y[4], W[4];
+  for (int k = 0; k < 4; ++k) X[k] = fx[k], Y[k] = fy[k], W[k] = pw[k];
+  const double* sides[4][2] = {{W, X}, {W, X}, {W, Y}, {W, Y}};
+  for (int i = 0; i < 4; ++i) {
+    const double sgn = (i & 1) ? -1.0 : 1.0;
+    double p[4];
+    for (int k = 0; k < 4; ++k) p[k] = sides[i][0][k] + sgn * sides[i][1][k];
+    const double n = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+    if (!(n > 0)) return false;
+    const float* pl = TcRow(tcF, kRowPlane0 + i);
+    for (int k = 0; k < 4; ++k) relNear(p[k] / n, pl[k], k < 3 ? 1.0 : std::max(1.0, std::fabs(p[3] / n)));
+  }
+  if (devOut) *devOut = worst;
+  return worst <= kRelTol;
 }
 
 // ---------------------------------------------------------------------------
@@ -512,12 +599,15 @@ enum PerWhy : int {
   kPNotCand,    // not recorded: not in the eye's last-frame runs (the island rule would not replace it anyway)
   kPSubs,       // R125: an instancer item whose indirect draws are not one per sub-draw with instances
   kPArgs,       // R125: an instancer item drawing from another argument buffer than the stream's first
+  kPDesc,       // R150: its descriptor could not be read (was counted as "other work" before)
+  kPDup,        // R150: two items of the pass share its descriptor (was counted as "other work" before)
   kPCount
 };
 inline const char* PerWhyName(int w) {
   static const char* const n[kPCount] = {"ok",      "other work", "inherited upload", "per-view slot",
                                          "stages",  "partial upload", "no draw",       "stream full",
-                                         "not a candidate", "sub-draws", "argument buffer"};
+                                         "not a candidate", "sub-draws", "argument buffer", "descriptor",
+                                         "duplicate descriptor"};
   return w >= 0 && w < kPCount ? n[w] : "?";
 }
 

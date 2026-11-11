@@ -175,11 +175,13 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   posesweep::Release();  // hold and sweep off, xrLocateViews back to pass-through
   dlssv::Stop();         // R122: CreateFeature (and GetSetting) hooks back to pass-through (no-op unless used)
   ftwin::Shutdown();     // R123: focus twin hooks out, its workers joined (no-op unless used)
+  pepl::Shutdown();      // per-eye pass live captures: callbacks out (no-op unless a capture ran)
   vrsp::Shutdown();      // R139: VRS probe state cleared, callbacks and hooks out, surfaces released (no-op unless used)
   d3ds::Uninstall();
   pdev::Uninstall();    // [General] PerceptionOnly: DX11Renderer::draw back to DCS's if the first draw never came
   srvspan::Shutdown();  // restores the ApplyShaderBlock call sites if a count was running
   srvtrim::Shutdown();  // the same two call sites back to stock if the trim was on
+  fxskip::Shutdown();   // A3: SPassBlock Apply slot back to stock (no-op unless [D3D] FxApplySkip was on)
   plod::Shutdown();     // stock LOD tables back, view callback and vt[24] hook out (no-op unless used)
   cascache::Shutdown(); // R33 cascade cache: SceneRender slot and the innermost execute out, textures released (no-op unless used)
   fixdepth::Shutdown(); // depth callback out and drained, worker joined, D3D objects and file mappings released
@@ -187,12 +189,15 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   gpt::Shutdown();      // GPU pass timing's context-table hooks and xrEndFrame hook, if a phase was running
   sfast::Shutdown();     // R36: Dispatch hook out, identified kernels and variants released (no-op unless used)
   nighttone::Shutdown(); // R37: tone mapper fields and exposure bias back, addToneMappingPass import back (no-op unless used)
+  chainderive::Shutdown(); // audit A2/B4 census: callbacks out, analysis thread stopped (no-op unless used)
+  pcensus::Shutdown();     // audit B6 periphery census: boundary callback and table arms out (no-op unless used)
   chainfast::Shutdown(); // R34: CSSetShader and CreateComputeShader hooks out, kernel pairs released (no-op unless used)
   pflush::Shutdown();   // pass flush callback and xrBeginFrame hook out, our context reference released
   vramc::Shutdown();    // the VRAM count's device create hooks, if a phase was running
   sfilt::Shutdown();    // call sites, FX call-table entries and context table back to stock
   jointail::Shutdown();
   shadowrec::Shutdown();  // chained pointers and class slots back before batching's own shutdown
+  fwdsplit::Shutdown();  // A5 forward split: slot 19, override, render observer, TerrainObject slots out (no-op unless on)
   fwdreccount::Shutdown();  // forward S0: SimplePassData slot 19, chain, class slots, sort observer out
   gbreccount::Shutdown();  // G-buffer S0 chain, class slots, sort observer (and its own sort patch) out
   // Each Shutdown below reports whether it drained its passes; if one did

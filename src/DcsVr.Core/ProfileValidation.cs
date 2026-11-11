@@ -82,6 +82,7 @@ public static class ProfileValidation
         if (!VrProfile.NeuralAreas.Contains(profile.NeuralFocusArea)) Error("neural-area", "DLSS 5 area must be the whole focus area or its central 90%, 80%, 70% or 50%.");
         if (profile.NvidiaFlowScale is not (50 or 75 or 100)) Error("flow-scale", "Optical flow resolution must be 50%, 75%, or 100%.");
         if (!Enum.IsDefined(profile.FlowPreset)) Error("flow-preset", "Select fast, medium, or slow optical flow.");
+        if (!Enum.IsDefined(profile.FrameGenPassThrough)) Error("framegen-pass-through", "Select Steady, Balanced or Prefer refresh rate for Stop generating.");
         if (!Enum.IsDefined(profile.FpsLimit)) Error("fps-mode", "Select a recognized DCS frame limit.");
         Range("refresh-rate", profile.HeadsetRefreshHz, 50, 240);
         Range("rendered-fps-cap", profile.RenderedFpsCap, 30, 300);
@@ -205,6 +206,8 @@ public static class ProfileValidation
         if (profile.EngineOptimizations && !Enum.IsDefined(profile.BoostPrefetch)) Error("engine-prefetch", "Select a recognized terrain prefetch fix mode.");
         if (profile.EngineOptimizations && profile.EngineTimerRefreshUs is < VrProfile.EngineTimerRefreshMin or > VrProfile.EngineTimerRefreshMax)
             Error("engine-timer", $"Streaming timer refresh must be {VrProfile.EngineTimerRefreshMin}–{VrProfile.EngineTimerRefreshMax} µs.");
+        if (profile.EngineOptimizations && !VrProfile.EngineShaderCompileWorkerChoices.Contains(profile.EngineShaderCompileWorkers))
+            Error("engine-compile-threads", "Compile threads must be Auto, 2, 4 or 6.");
         if (profile.EngineOptimizations && profile.EngineDevMode)
         {
             void DevPath(string? path, string extension, string what)

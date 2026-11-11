@@ -190,12 +190,14 @@ void LoadConfig(bool initial) {
   c.suiteGBufferInstCompile = GetPrivateProfileIntW(L"Suite", L"GBufferInstCompile", 0, ini.c_str()) != 0;
   c.suiteGBufferTexCount = GetPrivateProfileIntW(L"Suite", L"GBufferTexCount", 0, ini.c_str()) != 0;
   c.suiteFxApplyCount = GetPrivateProfileIntW(L"Suite", L"FxApplyCount", 0, ini.c_str()) != 0;
+  c.suitePerEyePassCensus = GetPrivateProfileIntW(L"Suite", L"PerEyePassCensus", 0, ini.c_str()) != 0;
   c.suiteDirectUploadCount = GetPrivateProfileIntW(L"Suite", L"DirectUploadCount", 0, ini.c_str()) != 0;
   c.suiteSrvSpanCount = GetPrivateProfileIntW(L"Suite", L"SrvSpanCount", 0, ini.c_str()) != 0;
   c.suiteJoinTailCount = GetPrivateProfileIntW(L"Suite", L"JoinTailCount", 0, ini.c_str()) != 0;
   c.suiteShadowRecCount = GetPrivateProfileIntW(L"Suite", L"ShadowRecCount", 0, ini.c_str()) != 0;
   c.suiteGBufferRecCount = GetPrivateProfileIntW(L"Suite", L"GBufferRecCount", 0, ini.c_str()) != 0;
   c.suiteForwardRecCount = GetPrivateProfileIntW(L"Suite", L"ForwardRecCount", 0, ini.c_str()) != 0;
+  c.suiteForwardSplit = std::max(0, std::min(3600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ForwardSplit", 0, ini.c_str()))));
   c.suiteGpuPassTiming = GetPrivateProfileIntW(L"Suite", L"GpuPassTiming", 0, ini.c_str()) != 0;
   c.suiteGpuPassStats = GetPrivateProfileIntW(L"Suite", L"GpuPassStats", 0, ini.c_str()) != 0;
   c.peripheralLodScale = (std::max)(0, (std::min)(99, static_cast<int>(GetPrivateProfileIntW(L"Model", L"PeripheralLodScale", 0, ini.c_str()))));
@@ -222,6 +224,15 @@ void LoadConfig(bool initial) {
   c.chainFast = qvini::Mask(L"D3D", L"ChainFast", 7, 0x7, ini.c_str());  // decimal or 0x hex
   c.suiteChainFastTiming = GetPrivateProfileIntW(L"Suite", L"ChainFastTiming", 0, ini.c_str()) != 0;
   c.suiteChainFastVerify = (std::max)(0, (std::min)(600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ChainFastVerify", 0, ini.c_str()))));
+  {  // chain_derive.h (audit A2/B4): seconds per census line, 0 = off (values 1..4 are taken as 5)
+    const int s = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ChainDeriveCensus", 0, ini.c_str()));
+    c.suiteChainDeriveCensus = s <= 0 ? 0 : (std::max)(5, (std::min)(3600, s));
+    c.suiteChainDeriveCensusMB = (std::max)(1, (std::min)(256, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ChainDeriveCensusMB", 24, ini.c_str()))));
+  }
+  {  // periph_census.h (audit B6): seconds per census line, 0 = off (values 1..4 are taken as 5)
+    const int s = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"PeriphCensus", 0, ini.c_str()));
+    c.suitePeriphCensus = s <= 0 ? 0 : (std::max)(5, (std::min)(3600, s));
+  }
   c.shaderFast = qvini::Mask(L"D3D", L"ShaderFast", 3, 0x3, ini.c_str());  // R36, decimal or 0x hex
   c.suiteShaderFastTiming = GetPrivateProfileIntW(L"Suite", L"ShaderFastTiming", 0, ini.c_str()) != 0;
   c.suiteShaderFastVerify = (std::max)(0, (std::min)(600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ShaderFastVerify", 0, ini.c_str()))));
@@ -256,6 +267,8 @@ void LoadConfig(bool initial) {
   if (c.shadowRecorderHelpers < 0) c.shadowRecorderHelpers = 0;
   if (c.shadowRecorderHelpers > 3) c.shadowRecorderHelpers = 3;
   c.shadowRecorderInstancing = GetPrivateProfileIntW(L"Model", L"ShadowRecorderInstancing", 1, ini.c_str()) != 0;
+  c.shadowRecorderNest = GetPrivateProfileIntW(L"Model", L"ShadowRecorderNest", 0, ini.c_str()) != 0;
+  c.smallGpuBundle = GetPrivateProfileIntW(L"Model", L"SmallGpuBundle", 0, ini.c_str()) != 0;
   c.suiteShadowRecVerify = GetPrivateProfileIntW(L"Suite", L"ShadowRecVerify", 0, ini.c_str()) != 0;
   c.suiteShadowRecVerifySec = GetPrivateProfileIntW(L"Suite", L"ShadowRecVerifySec", 5, ini.c_str());
   if (c.suiteShadowRecVerifySec < 1) c.suiteShadowRecVerifySec = 1;
@@ -269,6 +282,8 @@ void LoadConfig(bool initial) {
     const int ft = static_cast<int>(GetPrivateProfileIntW(L"Model", L"FocusTwin", 0, ini.c_str()));
     c.focusTwin = ft == 1 ? 1 : 0;
     if (ft != 0 && ft != 1 && initial) Log("config: [Model] FocusTwin=%d is not 0 or 1; off", ft);
+    c.suiteFocusTwinTapBaseline = GetPrivateProfileIntW(L"Suite", L"FocusTwinTapBaseline", 0, ini.c_str()) != 0;
+    c.suiteFocusTwinEarlyStop = GetPrivateProfileIntW(L"Suite", L"FocusTwinEarlyStop", 1, ini.c_str()) != 0;
     c.suiteFocusTwinShadow = GetPrivateProfileIntW(L"Suite", L"FocusTwinShadow", 0, ini.c_str()) != 0;
     c.suiteFocusTwinAuditEvery =
         (std::max)(0, (std::min)(100000, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"FocusTwinAuditEvery", 64, ini.c_str()))));
@@ -290,6 +305,7 @@ void LoadConfig(bool initial) {
       Log("config: [Model] FocusTwinInstancer=1 needs FocusTwin=1; nothing installed");
     c.suiteFocusTwinPatches = GetPrivateProfileIntW(L"Suite", L"FocusTwinPatches", 1, ini.c_str()) != 0;
   }
+  pepl::ReadConfig(ini.c_str());  // [Suite] PerEyeC2 / C4 / C5 / C7 / PerEyeLogSec (measure only, default 0)
   vrsp::ReadConfig(ini.c_str());  // R139: [Suite] VrsProbe* (measure-only VRS probe, default 0: nothing installed)
   c.gbufferRecorderScope = qvini::Mask(L"Model", L"GBufferRecorderScope", 0x10055, 0x1ffff, ini.c_str());  // dec or 0x hex
   c.gbufferRecorderWaitUs = GetPrivateProfileIntW(L"Model", L"GBufferRecorderWaitUs", 300, ini.c_str());
@@ -327,6 +343,16 @@ void LoadConfig(bool initial) {
   if (c.suiteSrvTailTrimVerifySec < 1) c.suiteSrvTailTrimVerifySec = 1;
   if (c.suiteSrvTailTrimVerifySec > 120) c.suiteSrvTailTrimVerifySec = 120;
   c.suiteBenchSrvTailTrim = GetPrivateProfileIntW(L"Suite", L"BenchSrvTailTrim", 0, ini.c_str()) != 0;
+  c.fxApplySkip = GetPrivateProfileIntW(L"D3D", L"FxApplySkip", 0, ini.c_str());
+  if (c.fxApplySkip < 0 || c.fxApplySkip > 3) c.fxApplySkip = 0;
+  c.fxApplySkipVerify = GetPrivateProfileIntW(L"D3D", L"FxApplySkipVerify", 0, ini.c_str()) != 0;
+  c.fxApplySkipVerifyEvery = GetPrivateProfileIntW(L"D3D", L"FxApplySkipVerifyEvery", 64, ini.c_str());
+  if (c.fxApplySkipVerifyEvery < 1) c.fxApplySkipVerifyEvery = 1;
+  if (c.fxApplySkipVerifyEvery > 100000) c.fxApplySkipVerifyEvery = 100000;
+  c.fxApplySkipLogSec = GetPrivateProfileIntW(L"D3D", L"FxApplySkipLogSec", 10, ini.c_str());
+  if (c.fxApplySkipLogSec < 1) c.fxApplySkipLogSec = 1;
+  if (c.fxApplySkipLogSec > 600) c.fxApplySkipLogSec = 600;
+  c.suiteBenchFxApplySkip = GetPrivateProfileIntW(L"Suite", L"BenchFxApplySkip", 0, ini.c_str()) != 0;
   {
     wchar_t mode[32] = {};
     GetPrivateProfileStringW(L"Prefetch", L"Mode", L"off", mode, 32, ini.c_str());
@@ -339,6 +365,21 @@ void LoadConfig(bool initial) {
     c.prefetchTableBits = std::max(16, std::min(22, tb));
   }
   c.suiteBenchPrefetch = GetPrivateProfileIntW(L"Suite", L"BenchPrefetch", 0, ini.c_str()) != 0;
+  // Measurement kit (measure_kit.h, LIVE_MEASUREMENT_PLAN.md): measure-only, default off.
+  c.benchPassMs = GetPrivateProfileIntW(L"Bench", L"PassMs", 0, ini.c_str()) != 0;
+  c.suitePassTimelineSec = std::max(0, std::min(600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"PassTimelineSec", 0, ini.c_str()))));
+  c.suiteChainCensusSec = std::max(0, std::min(600, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ChainCensusSec", 0, ini.c_str()))));
+  c.suiteGpuBundleTiming = qvini::Mask(L"Suite", L"GpuBundleTiming", 0, 0x1f, ini.c_str());
+  c.suiteGpuBundlePairs = std::max(1, std::min(16, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"GpuBundlePairs", 4, ini.c_str()))));
+  c.suiteBenchPrefetchTableBits = GetPrivateProfileIntW(L"Suite", L"BenchPrefetchTableBits", 0, ini.c_str()) != 0;
+  c.suiteBenchGBufferRecorderCockpit = GetPrivateProfileIntW(L"Suite", L"BenchGBufferRecorderCockpit", 0, ini.c_str()) != 0;
+  {
+    wchar_t label[96] = {};
+    GetPrivateProfileStringW(L"Suite", L"Label", L"", label, 96, ini.c_str());
+    char u8[300] = {};
+    WideCharToMultiByte(CP_UTF8, 0, label, -1, u8, sizeof(u8), nullptr, nullptr);
+    c.suiteLabel = u8;
+  }
   c.threadCensus = GetPrivateProfileIntW(L"Threads", L"Census", 0, ini.c_str()) != 0;
   c.threadCensusSec = std::max(10, std::min(3600, static_cast<int>(GetPrivateProfileIntW(L"Threads", L"CensusSec", 60, ini.c_str()))));
   {
@@ -666,6 +707,7 @@ void LoadConfig(bool initial) {
   ApplyGBufferRecorder();
   ApplyPassFlush();
   ApplySrvTailTrim(c.srvTailTrim && !g_engineOff.load());
+  ApplyFxApplySkip(g_engineOff.load() ? 0 : c.fxApplySkip, c.fxApplySkipVerify, c.fxApplySkipVerifyEvery);
   ApplyPrefetch();
   ApplyHoldYaw(c.holdYawDeg);
   ApplyPoseTest(c.holdPitchDeg, c.poseRotateDps, c.holdPose, c.poseWallClock);
