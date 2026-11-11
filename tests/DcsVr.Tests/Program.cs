@@ -2662,9 +2662,8 @@ Test("Frame generation only when needed: default with Auto, adaptive_cadence and
         && Preference(fg with { FrameGenPassThrough = PassThroughPreference.PreferRefresh }, 2), "Stop generating writes cadence_preference");
     Require(Preference(fg with { FrameGenAdaptiveCadence = false }, 0) && Preference(fg with { FrameGenFactor = 2, FrameGenPassThrough = PassThroughPreference.PreferRefresh }, 0)
         && Preference(new VrProfile(), 0) && Preference(fg with { FrameGenPassThrough = (PassThroughPreference)9 }, 0), "cadence_preference is 0 without Only when needed or with an unknown value");
-    bool OneWait(VrProfile p, int value) => ConfigurationWriters.Ofxr(p).ReplaceLineEndings("\n").Split('\n').Contains("cadence_one_wait=" + value);
-    Require(OneWait(fg, 0) && OneWait(fg with { FrameGenPassThroughWait = true }, 1) && OneWait(fg with { FrameGenPassThroughWait = true, FrameGenFactor = 2 }, 0)
-        && !JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"legacy\",\"name\":\"Legacy\"}").FrameGenPassThroughWait, "cadence_one_wait: off by default, only with Only when needed");
+    // No cadence_one_wait key: the trial (fork patch 0074, flown 2026-11-11) put DCS behind the presenter and was removed.
+    Require(!ConfigurationWriters.Ofxr(fg).Contains("cadence_one_wait", StringComparison.Ordinal), "The removed trial key is not written");
     Require(ProfileValidation.Validate(fg with { FrameGenPassThrough = (PassThroughPreference)9 }).Any(i => i.Code == "framegen-pass-through" && i.Severity == IssueSeverity.Error)
         && ProfileValidation.Validate(fg).All(i => i.Code != "framegen-pass-through"), "An unknown Stop generating value is an error");
     Require(JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"legacy\",\"name\":\"Legacy\"}").FrameGenPassThrough == PassThroughPreference.Steady

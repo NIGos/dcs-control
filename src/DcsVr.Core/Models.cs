@@ -95,11 +95,6 @@ public sealed record VrProfile
     /// up to 4 minutes, and after 3 failed in a row (PreferRefresh: 6) not until the scene changes. "Stop generating" on the Framegen
     /// page; applies at the next DCS start.</summary>
     public PassThroughPreference FrameGenPassThrough { get; init; } = PassThroughPreference.Steady;
-    /// <summary>OFXR cadence_one_wait (fork patch 0074), a trial for issue #17: while frames pass through, DCS's
-    /// xrEndFrame waits until its frame has been handed to the headset, so DCS is held to the display every frame, as it
-    /// is without frame generation. Flown without it, passing through held 90 FPS for 3 to 41 s and then lost its lead
-    /// for good. Off until flown; profile file only (no control).</summary>
-    public bool FrameGenPassThroughWait { get; init; }
     /// <summary>The share of one refresh period OFXR's frame-time estimate has to stay under before frames pass through
     /// (CadenceConfig::one_enter_fraction per preference).</summary>
     public static double PassThroughShare(PassThroughPreference preference) => preference switch { PassThroughPreference.Balanced => 1.10, PassThroughPreference.PreferRefresh => 1.25, _ => 0.80 };
