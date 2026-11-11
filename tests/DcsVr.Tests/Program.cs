@@ -2862,6 +2862,40 @@ Test("The focus is the percentage Pimax Play shows", () =>
     Require(PimaxFovea.CapNote(wide) is { } cap && cap.Contains("Horizontal FOV is 95% and Vertical FOV is 95%") && cap.Contains("so it renders 90%") && PimaxFovea.Notes(wide).Contains(cap) && PimaxFovea.CapNote(quick) is null);
     Require(PimaxFovea.Read(Path.Combine(root, "pimax-missing.json")) is null && PimaxFovea.Read(Make("pimax-bad/global.json", "{\"runtime_quadviews_gaze_resolution_scale\":\"x\"}")) is null);
 });
+Test("A Pimax Quad View preset is not read as Custom values (issue 19, Pimax EVO 2.0)", () =>
+{
+    // Pimax EVO 2.0 on a preset (Quality, level 2) rewrites the Custom page's runtime_* values at start-up (Fine 33/10 · 33/33,
+    // Center 175%): read as Custom they gave a 0.43 × 0.67 focus at 1.75× (5166×7586 per eye at 6812×6502), ~90% of stereo.
+    string Evo(int? level) => PimaxJson(0, .6666667, .2, .6666667, .6666667, gaze: .5, periphery: .09, transition: 0).TrimEnd('}')
+        + (level is { } l ? ",\"runtime_quadviews_rendering_level\":" + l : "") + "}";
+    var quality = PimaxFovea.Read(Make("pimax-preset/global.json", Evo(2)))!;
+    Require(quality.Preset && quality.PresetName == "Quality" && quality.Short == "preset Quality" && quality.Mismatch is null);
+    Require(PimaxFovea.Summary(quality).Contains("preset Quality") && PimaxFovea.Notes(quality).Count == 2 && PimaxFovea.Notes(quality)[1].Contains("choose Custom"));
+    var p = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FoveaWidth = .57, FoveaHeight = .34, QuadFocusScale = 1, PeripheralScale = .19 };
+    var path = Make("pimax-preset/global.json", Evo(2));
+    var resolved = PimaxFovea.Resolve(p, path);
+    Require(resolved.Applies && resolved.Pimax is { Preset: true } && resolved.Profile == p, "a preset keeps the profile's own values");
+    var quad = ConfigurationWriters.QuadViews(resolved.Profile);
+    Require(quad.Contains("horizontal_focus_section=0.57") && quad.Contains("vertical_focus_section=0.34") && quad.Split('\n').Any(l => l.Trim() == "focus_multiplier=1") &&quad.Contains("peripheral_multiplier=0.19"), quad);
+    // Values written from the old reading are reported as changed, with a message that names the preset.
+    var stale = new AppliedFovea(null, .4333333, .6666667, 1.75, .15, .2);
+    Require(!PimaxFovea.SameFovea(resolved.Profile, stale) && PimaxFovea.ChangedSinceApply(p, stale, path) is { } changed && changed.Contains("preset Quality") && changed.Contains("own values"));
+    // Custom (5), the older Custom (4) and files without the key (older Pimax Play) still follow the saved values.
+    foreach (var level in new int?[] { 5, 4, null })
+    {
+        var custom = PimaxFovea.Read(Make("pimax-custom/global.json", Evo(level)))!;
+        Require(!custom.Preset && Math.Abs(custom.Converted.Width - .4333333) < 1e-6 && Math.Abs(custom.Converted.Height - .6666667) < 1e-6 && custom.Converted.FocusScale == 1.75);
+        // So large a focus at 1.75× is about as heavy as stereo; the notes say so.
+        Require(PimaxFovea.Notes(custom).Any(n => n.Contains("% of the pixels of normal stereo rendering")), string.Join(" / ", PimaxFovea.Notes(custom)));
+    }
+    Require(PimaxFovea.Read(Make("pimax-off/global.json", Evo(-1)))!.PresetName == "Off" && PimaxFovea.Read(Make("pimax-perf/global.json", Evo(0)))!.PresetName == "Performance");
+    // The preset is part of the stamp, so switching presets is seen as a change.
+    Require(quality.Stamp != PimaxFovea.Read(Make("pimax-extreme/global.json", Evo(3)))!.Stamp);
+    // Setup detection keeps the profile's own focus values and says why.
+    var sources = new DetectionSources { PimaxPlaySettings = path, SteamVrServerLog = Path.Combine(root, "none/vrserver.txt"), SteamVrSettings = Path.Combine(root, "none/steamvr.vrsettings"), NeuralRuntimeFolders = [], ProcessRunning = _ => false };
+    var detected = SetupDetection.Detect(p, new InventorySnapshot(), sources);
+    Require(detected.Profile.FoveaWidth == .57 && detected.Profile.QuadFocusScale == 1 && detected.Notes.Any(n => n.Contains("preset is Quality")));
+});
 Test("The focus area follows Pimax Play only for bundled Quad Views with Pimax Play as the source, and is never written to Pimax", () =>
 {
     var path = Make("pimax-resolve/global.json", PimaxJson(1, .66, .20, .66, .66, transition: -1)); var before = File.ReadAllText(path);

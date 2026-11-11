@@ -67,15 +67,26 @@ public sealed record PimaxPlayView(string Mode, int CenterResolution, int Periph
 /// <param name="FineType">piplay_quadviews_fine_type: 0 Quick, 1 Fine (the tab selected in Pimax Play).</param>
 /// <param name="Play">The page as Pimax Play shows it: sliders from the piplay_* keys, shared values from runtime_*.</param>
 /// <param name="Mismatch">Set when Pimax Play's sliders and the runtime_* values its runtime uses disagree.</param>
+/// <param name="Level">runtime_quadviews_rendering_level: Pimax's Quad View preset (see <see cref="PimaxQuadViewsSettings.Preset"/>); null when not saved.</param>
 public sealed record PimaxQuadViewsSettings(
     string Path, DateTimeOffset Modified, int? FineType, double? QuickHorizontal, double? QuickVertical,
     PimaxEyeFov LeftEye, PimaxEyeFov RightEye, bool FromQuickSliders, double GazeResolutionScale, double PeripheryResolutionScale,
-    int TransitionType, double? BlendArea, PimaxConversion Converted, PimaxPlayView Play, string? Mismatch)
+    int TransitionType, double? BlendArea, PimaxConversion Converted, PimaxPlayView Play, string? Mismatch, int? Level = null)
 {
+    /// <summary>Pimax's own preset levels (Pimax Play and Pimax EVO, pimaxui QV_PRESET_OPTIONS): −1 Off, 0 Performance,
+    /// 1 Balanced, 2 Quality, 3 Extreme, 5 Custom (4 is the older Custom).</summary>
+    public const int CustomLevel = 5, LegacyCustomLevel = 4;
+    /// <summary>A preset other than Custom is selected. Pimax's runtime then renders the preset's built-in focus size and
+    /// resolution; the saved runtime_quadviews_* values are only the Custom page's and are not used (Pimax EVO 2.0 also
+    /// rewrites them at start-up while a preset is on). Without the key (older Pimax Play) the saved values are used.</summary>
+    public bool Preset => Level is { } level && level != CustomLevel && level != LegacyCustomLevel;
+    public string PresetName => Level switch { -1 => "Off", 0 => "Performance", 1 => "Balanced", 2 => "Quality", 3 => "Extreme", { } l => "level " + l.ToString(CultureInfo.InvariantCulture), null => "Custom" };
     public string Mode => FineType == 1 ? "Fine" : "Quick";
-    /// <summary>Changes whenever a value that reaches the bundled provider changes.</summary>
+    /// <summary>The values in Pimax's units for messages: "Quick 33% × 33% · 113% · 20%", or the preset's name.</summary>
+    public string Short => Preset ? $"preset {PresetName}" : Play.Short;
+    /// <summary>Changes whenever a value that reaches the bundled provider changes (or the preset changes).</summary>
     public string Stamp => string.Join('|', new[] { Converted.Width, Converted.Height, Converted.FocusScale, Converted.PeripheralScale, Converted.Transition ? 1 : 0 }
-        .Select(v => v.ToString("G9", CultureInfo.InvariantCulture)));
+        .Select(v => v.ToString("G9", CultureInfo.InvariantCulture))) + (Preset ? "|preset " + Level!.Value.ToString(CultureInfo.InvariantCulture) : "");
 }
 
 /// <summary>The profile that will be written, after taking the focus area from Pimax Play when the profile asks for it.</summary>
@@ -189,9 +200,10 @@ public static class PimaxFovea
                 PimaxPlayUnits.FineFov(Read("piplay_quadviews_fine_fov_right_left_to_center"), inner: true), PimaxPlayUnits.FineFov(Read("piplay_quadviews_fine_fov_right_right_to_center")),
                 PimaxPlayUnits.TransitionMode(transitionType), PimaxPlayUnits.TransitionRange(Read("runtime_quadviews_focus_blend_area")),
                 PimaxPlayUnits.TransitionCurve(Read("runtime_quadviews_focus_blend_mode") is { } m ? (int)m : null), PimaxPlayUnits.Alpha(Read("runtime_quadviews_focus_transition_opacity_percent")));
+            int? level = Read("runtime_quadviews_rendering_level") is { } lv ? (int)lv : null;
             return new(Path.GetFullPath(path), File.GetLastWriteTimeUtc(path), type, quickH, quickV, left, right, fromQuick, gaze, periphery,
                 transitionType ?? 0, Read("runtime_quadviews_focus_blend_area"), Convert(left, right, gaze, periphery, play.TransitionMode != "Off"), play,
-                fromQuick ? null : Mismatch(play, left, right));
+                fromQuick || level is { } l && l != PimaxQuadViewsSettings.CustomLevel && l != PimaxQuadViewsSettings.LegacyCustomLevel ? null : Mismatch(play, left, right), level);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or ArgumentException) { return null; }
     }
@@ -240,10 +252,23 @@ public static class PimaxFovea
         if (!UsesPimaxPlay(profile)) return new(profile, false, null, []);
         if (Read(path) is not { } pimax)
             return new(profile, true, null, ["Pimax Play's Quad View settings were not found or could not be read (" + (path ?? SettingsPath) + "). This profile's own focus values are used."]);
+        // A Pimax preset's values are built into Pimax's runtime and saved nowhere: the profile's own values are used.
+        if (pimax.Preset) return new(profile, true, pimax, Notes(pimax));
         var c = pimax.Converted;
         var effective = profile with { FoveaWidth = c.Width, FoveaHeight = c.Height, QuadFocusScale = c.FocusScale, PeripheralScale = c.PeripheralScale, QuadEdgeBlend = c.Transition ? profile.QuadEdgeBlend : 0 };
         return new(effective, true, pimax, Notes(pimax));
     }
+
+    /// <summary>Why a preset's values cannot be used, and what is used instead.</summary>
+    public static string PresetNote(PimaxQuadViewsSettings pimax) =>
+        $"Pimax's Quad View preset is {pimax.PresetName}. A preset's focus size and resolution are built into Pimax and saved nowhere DCS Control can read, so bundled Quad Views uses this profile's own focus values (Set here). To follow Pimax, choose Custom in Pimax's Quad View settings (Pimax Play or Pimax EVO), then Re-read.";
+
+    /// <summary>Share of the pixels of normal stereo rendering that bundled Quad Views renders with these values
+    /// (periphery² + focus area × focus density², before DLSS; the overlap counts twice).</summary>
+    public static double PixelShare(double width, double height, double focusScale, double peripheralScale) =>
+        peripheralScale * peripheralScale + Math.Min(width, ProviderCap) * Math.Min(height, ProviderCap) * focusScale * focusScale;
+    /// <summary>Above this share Quad Views saves little over normal stereo rendering.</summary>
+    public const double HeavyPixelShare = .6;
 
     /// <summary>The 90 % cap in Pimax Play's units, or null when Pimax's focus fits.</summary>
     public static string? CapNote(PimaxQuadViewsSettings pimax)
@@ -262,8 +287,12 @@ public static class PimaxFovea
     /// <summary>Plain facts about the Pimax values, for the interface, Preview and readiness.</summary>
     public static IReadOnlyList<string> Notes(PimaxQuadViewsSettings pimax)
     {
+        if (pimax.Preset) return [Summary(pimax), PresetNote(pimax)];
         var c = pimax.Converted; var p = pimax.Play; var notes = new List<string> { Summary(pimax) };
         if (pimax.Mismatch is { } mismatch) notes.Add(mismatch);
+        var share = PixelShare(c.Width, c.Height, c.FocusScale, c.PeripheralScale);
+        if (share >= HeavyPixelShare)
+            notes.Add(FormattableString.Invariant($"With these values bundled Quad Views renders about {Math.Round(share * 100)}% of the pixels of normal stereo rendering, so it saves little. Lower Center Resolution or the focus size in Pimax, or choose Set here."));
         if (CapNote(pimax) is { } cap) notes.Add(cap);
         if (c.Asymmetric)
             notes.Add(p.Fine
@@ -281,8 +310,9 @@ public static class PimaxFovea
     }
 
     /// <summary>Pimax Play's page in its own words, e.g. "Pimax Play · Quick: Center Resolution 125%, Peripheral Resolution 20%, …".</summary>
-    public static string Summary(PimaxQuadViewsSettings pimax) =>
-        $"Pimax Play · {pimax.Play.Mode}: {string.Join(", ", pimax.Play.Controls.Select(x => x.Label + " " + x.Value))}.";
+    public static string Summary(PimaxQuadViewsSettings pimax) => pimax.Preset
+        ? $"Pimax · Quad View preset {pimax.PresetName} (its values are built into Pimax and cannot be read)."
+        : $"Pimax Play · {pimax.Play.Mode}: {string.Join(", ", pimax.Play.Controls.Select(x => x.Label + " " + x.Value))}.";
 
     /// <summary>Message when Pimax Play's values now differ from those written at Apply; null when unchanged or not used.</summary>
     /// <param name="applied">The applied profile.json: the user's own draft (or, for profiles applied by earlier
@@ -294,7 +324,9 @@ public static class PimaxFovea
         var resolved = Resolve(applied, path);
         if (resolved.Pimax is null) return null;
         if (SameFovea(resolved.Profile, written ?? AppliedFovea.From(applied, null))) return null;
-        return $"Pimax Play's Quad View settings changed since Apply (Pimax Play now: {resolved.Pimax.Play.Short}). Launch DCS updates the focus area to these values.";
+        return resolved.Pimax.Preset
+            ? $"Pimax now uses its Quad View {resolved.Pimax.Short}, which cannot be read. Launch DCS updates the focus area to this profile's own values."
+            : $"Pimax Play's Quad View settings changed since Apply (Pimax Play now: {resolved.Pimax.Play.Short}). Launch DCS updates the focus area to these values.";
     }
 
     /// <summary>The focus values of <paramref name="now"/> are those written at Apply (within float noise).</summary>
