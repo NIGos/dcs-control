@@ -2068,18 +2068,51 @@ Test("Engine shader cache: kept in the state folder across Back to stock DCS, ad
 
     // Back to stock DCS: the module folder and everything in it goes (also entries a module without the key wrote
     // there); the state folder's cache stays.
-    Make("shader-cache/sg/DCS/Scripts/DcsQvCull/cache/s_0000000000000005.qvc", "left by an old module"); Make("shader-cache/sg/DCS/Scripts/DcsQvCull/DcsQvCull.log", "log");
-    Require(store.RestoreOriginals().Complete && !Directory.Exists(module), "Restore removes the module folder with its own cache");
+    Make("shader-cache/sg/DCS/Scripts/DcsQvCull/cache/s_0000000000000005.qvc", "left by an old module"); Make("shader-cache/sg/DCS/Scripts/DcsQvCull/DcsQvCull.log", "log"); Make("shader-cache/sg/DCS/Scripts/DcsQvCull/warmup.json", "{}"); Make("shader-cache/sg/DCS/Scripts/DcsQvCull/warmup.json.tmp", "{");
+    Require(store.RestoreOriginals().Complete && !Directory.Exists(module), "Restore removes the module folder with its own cache and warmup.json");
     Require(Directory.GetFiles(cache).Length == 3 && File.ReadAllText(Path.Combine(cache, "s_0000000000000004.qvc")) == "four", "Restore keeps the state folder's cache");
 
     // Applying again finds it; clearing deletes the entries and unfinished writes, nothing else.
     store.Apply(planner.Build(on, inventory, Path.Combine(state, "managed"), shaderCacheDirectory: cache));
     Require(Directory.GetFiles(cache).Length == 3 && store.RestoreOriginals().Complete);
     Make("shader-cache/state/engine-shader-cache/s_0000000000000006.qvc.77.tmp", "partial"); var kept = Make("shader-cache/state/engine-shader-cache/readme.txt", "user");
+    Require(EngineShaderCache.Stats(state) == (3, (long)("one".Length + "two-new".Length + "four".Length)), "Stats counts finished entries only (Engine page)");
     var cleared = EngineShaderCache.Clear(state);
     Require(cleared.Files == 4 && cleared.Bytes == "one".Length + "two-new".Length + "four".Length + "partial".Length && Directory.GetFiles(cache).SequenceEqual([kept]), "Clear deletes entries and unfinished writes only");
     File.Delete(kept);
     Require(EngineShaderCache.Clear(state) == (0, 0L) && !Directory.Exists(cache) && EngineShaderCache.Clear(state) == (0, 0L), "An empty cache folder is removed; clearing nothing is fine");
+    Require(EngineShaderCache.Stats(state) == (0, 0L), "No cache folder: 0 variants");
+});
+Test("Engine shader warm-up: settings in DcsQvCull.ini and warmup.json for the Engine page", () =>
+{
+    var on = new VrProfile { QuadViews = QuadProvider.None, EngineOptimizations = true };
+    var defaults = IniFile.Parse(ConfigurationWriters.DcsQvCull(on));
+    Require(on.EngineShaderCachePrewarm && on.EngineShaderCompileWorkers == 0 && !defaults.ContainsKey("Model.ShaderCachePrewarm") && !defaults.ContainsKey("Model.ShaderCompileWorkers"),
+        "Defaults (menu prep on, Auto threads) leave the keys out: the module's own defaults");
+    var tuned = ConfigurationWriters.DcsQvCull(on with { EngineShaderCachePrewarm = false, EngineShaderCompileWorkers = 4 });
+    var parsed = IniFile.Parse(tuned);
+    Require(parsed.GetValueOrDefault("Model.ShaderCachePrewarm") == "0" && parsed.GetValueOrDefault("Model.ShaderCompileWorkers") == "4"
+        && tuned.IndexOf("ShaderCompileWorkers=", StringComparison.Ordinal) > tuned.IndexOf("[Model]", StringComparison.Ordinal)
+        && tuned.IndexOf("ShaderCompileWorkers=", StringComparison.Ordinal) < tuned.IndexOf("[Texture]", StringComparison.Ordinal), "Changed values go under [Model]");
+    Require(!ConfigurationWriters.DcsQvCull(on with { EngineOptimizations = false, DepthBoost = true, EngineShaderCachePrewarm = false, EngineShaderCompileWorkers = 2 }).Contains("ShaderC"), "Perception only: no shader keys");
+    Require(ProfileValidation.Validate(on with { EngineShaderCompileWorkers = 3 }).Any(i => i.Code == "engine-compile-threads")
+        && VrProfile.EngineShaderCompileWorkerChoices.All(n => !ProfileValidation.Validate(on with { EngineShaderCompileWorkers = n }).Any(i => i.Code == "engine-compile-threads")), "Compile threads: Auto, 2, 4 or 6");
+    Require(LiveSettings.Find("engineShaderCachePrewarm") is null && LiveSettings.Find("engineShaderCompileWorkers") is null, "Read at payload start: they wait for the next launch");
+
+    var module = Path.GetFullPath(Path.Combine(root, "warmup/DcsQvCull")); Directory.CreateDirectory(module);
+    var file = Path.Combine(module, EngineOptimizations.WarmupFile);
+    Require(EngineOptimizations.ReadWarmup(module, true) is null, "No file: no warm-up row");
+    File.WriteAllText(file, "{\"version\":1,\"state\":\"warming\",\"done\":120,\"total\":200,\"hits\":80,\"compiled\":40,\"seconds\":35}\n");
+    Require(EngineOptimizations.ReadWarmup(module, true) == new EngineWarmup("warming", 120, 200, 80, 40, 35), "Warming: the module's numbers");
+    Require(EngineOptimizations.ReadWarmup(module, false) is null, "DCS not running: no row");
+    Require(EngineOptimizations.ReadWarmup(module, true, DateTime.UtcNow + EngineOptimizations.WarmupFresh + TimeSpan.FromSeconds(5)) is null, "A file the module stopped updating is stale");
+    File.WriteAllText(file, "{\"state\":\"prewarm\",\"done\":9,\"total\":3}");
+    Require(EngineOptimizations.ReadWarmup(module, true) == new EngineWarmup("prewarm", 9, 9, 0, 0, 0), "Prewarm; total never below done; missing numbers are 0");
+    foreach (var other in new[] { "{\"state\":\"done\",\"done\":5,\"total\":5}", "{\"state\":\"idle\"}", "not json", "" })
+    {
+        File.WriteAllText(file, other);
+        Require(EngineOptimizations.ReadWarmup(module, true) is null, "Done, idle or unreadable: no row (" + other + ")");
+    }
 });
 Test("Engine shader cache: applying through ControlService adopts the module folder's entries", () =>
 {

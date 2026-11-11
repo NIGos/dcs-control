@@ -205,6 +205,8 @@ public static class ProfileValidation
         if (profile.EngineOptimizations && !Enum.IsDefined(profile.BoostPrefetch)) Error("engine-prefetch", "Select a recognized terrain prefetch fix mode.");
         if (profile.EngineOptimizations && profile.EngineTimerRefreshUs is < VrProfile.EngineTimerRefreshMin or > VrProfile.EngineTimerRefreshMax)
             Error("engine-timer", $"Streaming timer refresh must be {VrProfile.EngineTimerRefreshMin}–{VrProfile.EngineTimerRefreshMax} µs.");
+        if (profile.EngineOptimizations && !VrProfile.EngineShaderCompileWorkerChoices.Contains(profile.EngineShaderCompileWorkers))
+            Error("engine-compile-threads", "Compile threads must be Auto, 2, 4 or 6.");
         if (profile.EngineOptimizations && profile.EngineDevMode)
         {
             void DevPath(string? path, string extension, string what)

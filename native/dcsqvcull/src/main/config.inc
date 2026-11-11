@@ -418,6 +418,8 @@ std::atomic<bool> g_perceptionOnly{false};
 std::atomic<int> g_govStage{0};
 std::atomic<int> g_verdictNow{0};
 std::atomic<bool> g_warming{false};
+std::atomic<int> g_warmPercent{-1};     // status word bits 44-51: warm-up or prewarm percent, -1 none (perf_mon.h)
+std::atomic<bool> g_prewarmNow{false};  // status word bit 52: the cache prewarm runs
 qvstatus::Feature g_featLast[18] = {};  // ComputeStatus's last states (the features line)
 void PerfOnToggle(bool off);
 

@@ -325,6 +325,13 @@ public sealed record VrProfile
     /// <summary>[Timing] CacheUs: how often the cached time is refreshed, in microseconds.</summary>
     public int EngineTimerRefreshUs { get; init; } = 1000;
     public const int EngineTimerRefreshMin = 250, EngineTimerRefreshMax = 2000;
+    /// <summary>[Model] ShaderCachePrewarm: shader variants a DCS or app update made stale are compiled again from DCS's
+    /// start on (usually still in the main menu), not only when a mission first draws them. Read once at payload start.</summary>
+    public bool EngineShaderCachePrewarm { get; init; } = true;
+    /// <summary>[Model] ShaderCompileWorkers: threads compiling shader variants; 0 = automatic (a quarter of the logical
+    /// processors, 2 to 6). The page offers Auto, 2, 4 and 6. Read once at payload start.</summary>
+    public int EngineShaderCompileWorkers { get; init; }
+    public static readonly int[] EngineShaderCompileWorkerChoices = [0, 2, 4, 6];
     /// <summary>[Hotkeys] Toggle: switches the enabled engine optimizations off and back on in flight, to compare
     /// (one beep off, two beeps on). "virtual-key:modifiers" like the other in-flight keys; "Off" disables it.</summary>
     public string EngineToggleKey { get; init; } = NeuralHotkeys.EngineDefault;

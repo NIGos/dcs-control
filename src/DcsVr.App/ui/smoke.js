@@ -16,7 +16,7 @@ window.runWebSmoke = async function() {
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
     'engineOptimizations','engineReleaseIdleDlss','engineShadowCache','engineGBufferRecorder','engineModelAllocator','engineShaderTimeCache','engineTaskQueueClock','boostPrefetch','engineShadowRecorder',
     'engineShadowInstancing','engineCostWeights','enginePartitionBoost','engineTextureDedupe','engineEffectBufferSkip','enginePlainCounter','engineFrameHeap',
-    'engineStateFilter','engineBeeps','engineTimerRefreshUs','engineDevMode','engineDevPayloadPath','engineDevIniPath','engineDiagnosticHooks',
+    'engineStateFilter','engineBeeps','engineShaderCachePrewarm','engineShaderCompileWorkers','engineTimerRefreshUs','engineDevMode','engineDevPayloadPath','engineDevIniPath','engineDiagnosticHooks',
     'dcs','options','keepDcsLauncher',
     'eyeDistance','eyeDistanceMm','pupilShift','pupilShiftEyeRadiusMm','pupilShiftVirtualImageM','peripheryStability','peripheryStabilityStrength','farDepth','farDepthPreset',
     'depthBoost','ownAircraftTrueDepth','depthBoostMode','depthBoostRealisticMax','depthBoostFarStartM','depthBoostFarFullM','depthBoostMax','depthBoostNearM',
@@ -28,7 +28,7 @@ window.runWebSmoke = async function() {
     'headsetPanel','diagnosticOverlayAtStart','diagnosticVram','diagnosticOverlayKey','engineToggleKey','neuralToggleKey','pupilShiftToggleKey','farDepthToggleKey',
     'depthBoostToggleKey','colorModeKey','runtimeManifestPath'];
   // Every folded disclosure (details.advanced), named by its id or the first setting inside it.
-  const ADVANCED_FOLDS = ['quadViewsLayerDirectory','neuralAdvanced','showOverlay','engineGBufferRecorder','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
+  const ADVANCED_FOLDS = ['quadViewsLayerDirectory','neuralAdvanced','showOverlay','engineGBufferRecorder','engineShaderCachePrewarm','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
     'nightVisionBlue','gazeDofMaxArcmin','gVisionMode','pupilShiftVirtualImageM','depthBoostFarStartM','runtimeManifestPath'];
   /** " (missing: …; extra: …)" between an expected list and the actual one; '' when they hold the same names once each. */
   const listDiff = (expected,actual) => { const missing = expected.filter(x => !actual.includes(x)), extra = actual.filter(x => !expected.includes(x)), twice = actual.filter((x,i) => actual.indexOf(x) !== i);
@@ -169,7 +169,7 @@ window.runWebSmoke = async function() {
     check('Dependency notes are short and only where they apply',[...document.querySelectorAll('#featureList .feature-note span')].every(n => n.textContent.length <= 40) && $('featureNotes-framegen').textContent === '' && $('featureNotes-boost').textContent === '');
     // Compact settings: segmented choices, short help with More, fold values, folded program lists, toggle lists, density.
     { const SEGMENTED_S1 = ['quadViews','gaze','foveaSource','frameGen','frameGenFactor','fpsLimit','nvidiaFlowScale','flowPreset','boostDcsPriority'];
-      const SEGMENTED = [...SEGMENTED_S1,'neuralStyle','neuralDepth','boostPrefetch','eyeDistance','depthBoostMode','farDepthPreset','colorMode','panelGamut','gVisionMode'];
+      const SEGMENTED = [...SEGMENTED_S1,'neuralStyle','neuralDepth','boostPrefetch','eyeDistance','depthBoostMode','farDepthPreset','colorMode','panelGamut','gVisionMode','engineShaderCompileWorkers'];
       const radios = p => [...$('seg-'+p).querySelectorAll('[role=radio]')], segDiff = listDiff(SEGMENTED,ui.fields.filter(f => f.segments).map(f => f.path));
       check('Short choices are segmented buttons over their select, one per option in the same order'+segDiff,!segDiff && SEGMENTED.every(p => { const f = ui.fields.find(x => x.path === p), g = $('seg-'+p);
         return f.type === 'select' && f.input.tagName === 'SELECT' && g?.getAttribute('role') === 'radiogroup' && radios(p).map(b => b.dataset.value).join('|') === [...f.input.options].map(o => o.value).join('|'); })
@@ -288,6 +288,17 @@ window.runWebSmoke = async function() {
       ui.profile.neuralToggleKey = before; ui.invalidate(); ui.showProfile(); }
     { const engine = ['engineOptimizations','engineShaderTimeCache','enginePartitionBoost','engineTimerRefreshUs','engineDiagnosticHooks'].map(p => ui.fields.find(f => f.path === p));
       check('DCS engine optimizations sit on their own page, off by default, both measured optimizations on, the parts in the Individual optimizations fold, the rest under Developer options',engine.every(f => f && f.page === 'engine') && ui.profile.engineOptimizations === false && ui.profile.engineShaderTimeCache === true && ui.profile.enginePartitionBoost === true && ui.profile.engineShadowInstancing === true && ui.profile.engineFrameHeap === true && ui.profile.engineTaskQueueClock === true && ui.profile.engineCostWeights === true && ui.profile.engineBeeps === true && ui.profile.engineModelAllocator === true && ui.profile.engineTextureDedupe === true && ui.profile.engineEffectBufferSkip === true && ui.profile.engineStateFilter === true && ui.profile.engineShadowRecorder === true && ui.profile.engineGBufferRecorder === true && ui.profile.enginePlainCounter === true && ui.profile.engineTimerRefreshUs === 1000 && ui.profile.engineDiagnosticHooks === false && $('setting-engineShaderTimeCache').closest('details') === $('setting-engineGBufferRecorder').closest('details') && !$('setting-engineOptimizations').closest('details') && $('setting-engineTimerRefreshUs').closest('details') && $('setting-engineDiagnosticHooks').closest('details') && $('setting-engineDevMode').closest('details') === $('setting-engineTimerRefreshUs').closest('details') && $('setting-engineBeeps').closest('details') && ui.profile.engineDevMode === false && $('engineSuite').disabled); }
+    { const prewarm = $('setting-engineShaderCachePrewarm'), threads = $('setting-engineShaderCompileWorkers');
+      check('Shader preparation sits in the Engine page\'s Advanced fold: menu prep on, Auto threads by default, not live',prewarm && threads && prewarm.closest('details') && prewarm.closest('details') === threads.closest('details') && prewarm.closest('details') !== $('setting-engineDevMode').closest('details') && ui.profile.engineShaderCachePrewarm === true && ui.profile.engineShaderCompileWorkers === 0 && !(ui.state?.liveFields || []).some(p => p.startsWith('engineShader')));
+      const box = document.createElement('div');
+      box.innerHTML = ui.engineShaderRows({state:'warming',done:120,total:200},{files:200,bytes:31457280,dcsRunning:true});
+      const warm = box.querySelector('#engineWarmup'), clear = box.querySelector('#engineClearCache');
+      check('While DCS warms up: one line and a thin bar; the cache row cannot be cleared while DCS runs',warm?.textContent === 'Shader warm-up: 120 of 200 ready' && warm.querySelector('progress')?.value === 120 && box.querySelector('#engineCacheRow span').textContent === 'Shader cache: 200 variants, 30 MB' && clear?.disabled);
+      box.innerHTML = ui.engineShaderRows(null,{files:0,bytes:0,dcsRunning:false});
+      check('Warm-up done or idle: no warm-up row; an empty cache says so',!box.querySelector('#engineWarmup') && box.querySelector('#engineCacheRow span').textContent === 'Shader cache: empty' && box.querySelector('#engineClearCache').disabled);
+      box.innerHTML = ui.engineShaderRows(null,{files:3,bytes:1048576,dcsRunning:false});
+      check('With DCS closed the cache can be cleared',!box.querySelector('#engineClearCache').disabled && box.querySelector('#engineCacheRow span').textContent === 'Shader cache: 3 variants, 1.0 MB');
+      ui.engineShaderRows(null,null); }
     { const f = ui.fields.find(f => f.path === 'boostPrefetch');
       check('The terrain prefetch fix is an Engine Optimizations field, Skip by default and gone from CPU Boost',f && f.page === 'engine' && ui.profile.boostPrefetch === 'Skip' && $('setting-boostPrefetch').closest('details') === $('setting-engineGBufferRecorder').closest('details') && !document.querySelector('#page-boost [id="setting-boostPrefetch"]')); }
     { const was = ui.profile.engineOptimizations; edit('engineOptimizations',true); ui.navigate('engine'); const k = $('input-engineToggleKey');

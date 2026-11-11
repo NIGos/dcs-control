@@ -280,7 +280,8 @@ public sealed class TransactionStore(string stateDirectory)
 /// declared them. A declared name may hold a * in its file name; it then stands for the matching files of that folder.</summary>
 internal static class RuntimeFiles
 {
-    private static readonly string[] Named = [".log", ".flag"], Patterns = [".log", ".txt", ".csv", ".dll", ".qvc", ".tmp", ".jsonl", ".f32"];
+    // Named: exact names only (a pattern never reaches a .json). warmup.json: the engine module's warm-up state.
+    private static readonly string[] Named = [".log", ".flag", ".json", ".tmp"], Patterns = [".log", ".txt", ".csv", ".dll", ".qvc", ".tmp", ".jsonl", ".f32"];
 
     /// <summary>Declared inside the owner's folder tree. A single named file only as a log or a trigger flag; reports
     /// and the component's copies of its own module (e.g. payload\active_*.dll) only as a pattern, so a named library
