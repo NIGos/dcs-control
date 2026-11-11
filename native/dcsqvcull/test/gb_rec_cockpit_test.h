@@ -426,10 +426,10 @@ void CockpitDeviceTests(srtest::Compiler& comp) {
   defrec::Pool pool;
   defrec::PoolConfig pc;
   pc.workers = kThreads;
-  pc.cb.mode = defrec::CbMode::kOffsets;
+  pc.cb.mode = srtest::TestCbMode(d.dev);
   pc.name = "gbuffer rec cockpit test";
   Job* j = NewJob();
-  if (!pool.Start(d.dev, pc) || pool.At(0).ring.Mode() != defrec::CbMode::kOffsets || !j) {
+  if (!pool.Start(d.dev, pc) || pool.At(0).ring.Mode() != pc.cb.mode || !j) {
     QvSkip("gbuffer rec cockpit device: no worker with constant-buffer offsets on this device\n");
   } else {
     grtest::InitJob(*j, *w, t, tt);
@@ -538,7 +538,7 @@ void CrashRegressionTests(ID3D11Device* dev) {
   const uint32_t scopeWas = g_scope.load();
   defrec::PoolConfig pc;
   pc.workers = 24;  // what the crashed build asked for
-  pc.cb.mode = defrec::CbMode::kOffsets;
+  pc.cb.mode = srtest::TestCbMode(dev);
   pc.name = "gbuffer rec crash test";
   if (!g_pool.Start(dev, pc)) {
     QvSkip("gbuffer rec crash: no worker pool on this device\n");
@@ -918,7 +918,11 @@ void Run() {
   GraphAndFallbackTests();
   CockpitJobTests();
   srtest::Compiler c;
-  if (c.Load() && c.compile) CockpitDeviceTests(c);
+  if (c.Load() && c.compile) {
+    CockpitDeviceTests(c);
+    srtest::EmulatedRun emu("gbuffer rec cockpit device tests");
+    CockpitDeviceTests(c);
+  }
 }
 
 }  // namespace gbcktest

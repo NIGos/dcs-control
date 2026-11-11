@@ -2703,7 +2703,7 @@ void FinishJob(Job& j, bool snapshot) {
 bool RecordGroups(defrec::Worker& w, Job& j, uint32_t from, uint32_t to, int list, uint32_t* draws, uint64_t* cbBytes) {
   LoadScope load(g_load);
   ID3D11DeviceContext* dc = w.dc;
-  if (!w.dc1 || w.ring.Mode() != defrec::CbMode::kOffsets || !j.dsv || !j.b7) return false;
+  if (!w.dc1 || !defrec::Batched(w.ring.Mode()) || !j.dsv || !j.b7) return false;
   if (from >= to) return true;
   if (HeapRecycled(j)) {  // the groups' casters are read while recording: not after the heap reset
     j.recycled.store(1, std::memory_order_relaxed);
@@ -5410,7 +5410,9 @@ bool Install() {
   if (!dev) return false;
   if (shadowinst::g_deviceSingleThreaded) return fail("the D3D11 device is single-threaded");
   const defrec::Caps caps = defrec::QueryCaps(dev);
-  if (!caps.commandLists || !caps.cbOffsetting || !caps.device1)
+  // Driver command lists: offset windows; else, with [Model] RecordersEmulatedLists=1, plain buffers by UpdateSubresource.
+  const defrec::CbMode cbMode = defrec::RecorderMode(caps);
+  if (cbMode == defrec::CbMode::kAuto || !caps.device1 || (cbMode == defrec::CbMode::kOffsets && !caps.cbOffsetting))
     return fail(defrec::DescribeCapsFailure(dev, caps));
   if (!AllocTables(g_tab)) return fail("no memory for the tables");
   if (!g_tex.e && !AllocTex(g_tex, 1u << 13)) return fail("no memory for the texture table");
@@ -5438,15 +5440,18 @@ bool Install() {
     if (!g_offBuf[w] && !CreateOffsets(dev, &g_offBuf[w], &g_offSrv[w])) return fail("no t127 offset buffers");
   defrec::PoolConfig pc;
   pc.workers = kThreads * kSlots;
-  pc.cb.mode = defrec::CbMode::kOffsets;
+  pc.cb.mode = cbMode;
   pc.priority = g_priority.load();
   pc.name = "shadow recorder";
   if (!g_pool.Start(dev, pc)) return fail("its workers did not start");
   g_priorityApplied = pc.priority;
-  if (g_pool.At(0).ring.Mode() != defrec::CbMode::kOffsets) {
+  if (g_pool.At(0).ring.Mode() != cbMode) {
     g_pool.Stop();
     return fail("constant-buffer offsets unavailable on the worker contexts");
   }
+  if (!caps.commandLists)
+    Log("shadow recorder: no driver command lists; RecordersEmulatedLists on (ini key or flag file): recording on the runtime's "
+        "emulated lists (constant buffers by UpdateSubresource, no offsets; checked on WARP, untested on real GPUs)");
   dev->GetImmediateContext(&g_ctx);
   // Jobs start when their vector is final (Scene's sort), else at render entry.
   const bool early = EnsureSortHook();

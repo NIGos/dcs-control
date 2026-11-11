@@ -877,11 +877,51 @@ ID3D11Buffer* MakeBuffer(ID3D11Device* dev, UINT bytes, UINT bind, D3D11_USAGE u
   return b;
 }
 
+// [Model] RecordersEmulatedLists: the recorder device tests run a second time on WARP (runtime-emulated command
+// lists) with the recorders' emulated-list ring mode (EmulatedRun).
+bool g_forceWarp = false;
+
+// The recorders' ring mode on `dev`, as Install picks it (driver lists: offsets; emulated lists with the opt-in:
+// update-plain); offsets when neither applies (the hardware run's former fixed mode). QV_REC_TEST_PLAIN=1:
+// update-plain on every device (the mode on driver command lists too; passed on the RTX 5090, 2026-11-11).
+defrec::CbMode TestCbMode(ID3D11Device* dev) {
+  if (getenv("QV_REC_TEST_PLAIN")) return defrec::CbMode::kUpdatePlain;
+  const defrec::CbMode m = defrec::RecorderMode(defrec::QueryCaps(dev));
+  return m == defrec::CbMode::kAuto ? defrec::CbMode::kOffsets : m;
+}
+
+// Sets up the WARP rerun: WARP devices, the opt-in on; restored at scope end.
+struct EmulatedRun {
+  bool was;
+  explicit EmulatedRun(const char* what) : was(defrec::g_allowEmulatedLists.load()) {
+    g_forceWarp = true;
+    defrec::g_allowEmulatedLists = true;
+    ID3D11Device* dev = nullptr;
+    const D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_1;
+    bool emulated = false;
+    if (SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, &fl, 1, D3D11_SDK_VERSION, &dev,
+                                    nullptr, nullptr)) && dev) {
+      const defrec::Caps caps = defrec::QueryCaps(dev);
+      emulated = !caps.commandLists && TestCbMode(dev) == defrec::CbMode::kUpdatePlain;
+      dev->Release();
+    }
+    printf("     --- %s again on WARP: runtime-emulated command lists, [Model] RecordersEmulatedLists=1 ---\n", what);
+    char msg[200];
+    snprintf(msg, sizeof(msg), "%s on WARP: DriverCommandLists=0 and the recorders' emulated-list ring (update-plain)",
+             what);
+    Check(emulated, msg);
+  }
+  ~EmulatedRun() {
+    g_forceWarp = false;
+    defrec::g_allowEmulatedLists = was;
+  }
+};
+
 bool CreateDev(Dev& d, Compiler& c, World& w, bool* warp) {
   const D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
   *warp = false;
-  if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, want, 2, D3D11_SDK_VERSION, &d.dev,
-                               nullptr, &d.imm))) {
+  if (g_forceWarp || FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, want, 2,
+                                              D3D11_SDK_VERSION, &d.dev, nullptr, &d.imm))) {
     *warp = true;
     if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, want, 2, D3D11_SDK_VERSION, &d.dev, nullptr,
                                  &d.imm)))
@@ -1252,10 +1292,10 @@ void DeviceTests(Compiler& comp) {
   defrec::Pool pool;
   defrec::PoolConfig pc;
   pc.workers = 1;
-  pc.cb.mode = defrec::CbMode::kOffsets;
+  pc.cb.mode = srtest::TestCbMode(d.dev);
   pc.name = "shadow rec test";
   Job* j = NewJob();
-  if (!pool.Start(d.dev, pc) || pool.At(0).ring.Mode() != defrec::CbMode::kOffsets || !j) {
+  if (!pool.Start(d.dev, pc) || pool.At(0).ring.Mode() != pc.cb.mode || !j) {
     QvSkip("shadow rec device: no worker with constant-buffer offsets on this device\n");
   } else {
     InitJob(*j, *w, t);
@@ -1755,13 +1795,13 @@ void DeviceMultiTests(Compiler& comp) {
   defrec::Pool pool;
   defrec::PoolConfig pc;
   pc.workers = kThreads * kSlots;  // Wk(c, t): cascade c's primary (t 0) and helpers
-  pc.cb.mode = defrec::CbMode::kOffsets;
+  pc.cb.mode = srtest::TestCbMode(d.dev);
   pc.name = "shadow rec test (4 cascades)";
   g_instDev = &d;
   w->env.instVs = &FakeInstVs;
   Job* jobs[4] = {};
   ExecObj exec[4] = {};
-  bool started = pool.Start(d.dev, pc) && pool.At(0).ring.Mode() == defrec::CbMode::kOffsets;
+  bool started = pool.Start(d.dev, pc) && pool.At(0).ring.Mode() == pc.cb.mode;
   for (int c = 0; c < 4 && started; ++c) started = (jobs[c] = NewJob()) != nullptr;
   TexTable stab;
   SRWLOCK stabLock = SRWLOCK_INIT;
@@ -2251,6 +2291,11 @@ void Run() {
   AnalyseTests(c);
   DeviceTests(c);
   DeviceMultiTests(c);
+  {
+    EmulatedRun emu("shadow rec device tests");
+    DeviceTests(c);
+    DeviceMultiTests(c);
+  }
 }
 
 }  // namespace srtest

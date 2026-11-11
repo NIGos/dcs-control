@@ -427,6 +427,7 @@ int main() {
   }
   if (getenv("QV_DEFREC_ONLY")) {
     drtest::Run();
+    drtest::RunEmulated();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -1948,6 +1949,7 @@ int main() {
   r146test::Run();
   // Deferred-context recording infrastructure (R15 A1): bit-exact cascade, state restore, pool.
   drtest::Run();
+  drtest::RunEmulated();  // [Model] RecordersEmulatedLists: the CB ring on WARP's emulated command lists
   // Shadow recorder (R17 S1-S3): mesh fields, tables, reflection, probe checks, jobs, device record vs stock.
   srtest::Run();
   // GPU pass timing: analysis on synthetic ticks, then ring readback and op counts on a real device.

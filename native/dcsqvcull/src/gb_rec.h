@@ -2471,7 +2471,7 @@ void PlanPieces(Job& j, uint32_t workers) {
 // Worker `role`'s pieces, each finished into its own list. False: a piece
 // could not be recorded (the job is not used).
 bool RecordRole(defrec::Worker& w, Job& j, int role) {
-  if (!w.dc1 || w.ring.Mode() != defrec::CbMode::kOffsets) return false;
+  if (!w.dc1 || !defrec::Batched(w.ring.Mode())) return false;
   for (uint32_t k = 0; k < j.pieceCount; ++k) {
     Piece& p = j.pieces[k];
     if (p.role != role) continue;
@@ -2488,7 +2488,7 @@ bool RecordRole(defrec::Worker& w, Job& j, int role) {
 // entries (RedoArg; one list, finished here). The texture table's lock is
 // held shared, as for any recording (the unchanged entries' views stay alive).
 bool RedoRecord(defrec::Worker& w, Job& j, uint32_t k, int role) {
-  if (!w.dc1 || w.ring.Mode() != defrec::CbMode::kOffsets) return false;
+  if (!w.dc1 || !defrec::Batched(w.ring.Mode())) return false;
   const Seg& sg = j.segs[k];
   Piece p = Piece();
   p.candFirst = sg.candFirst;
@@ -6022,7 +6022,9 @@ bool Install() {
   ID3D11Device* dev = shadowinst::g_device;
   if (shadowinst::g_deviceSingleThreaded) return fail("the D3D11 device is single-threaded");
   const defrec::Caps caps = defrec::QueryCaps(dev);
-  if (!caps.commandLists || !caps.cbOffsetting || !caps.device1)
+  // Driver command lists: offset windows; else, with [Model] RecordersEmulatedLists=1, plain buffers by UpdateSubresource.
+  const defrec::CbMode cbMode = defrec::RecorderMode(caps);
+  if (cbMode == defrec::CbMode::kAuto || !caps.device1 || (cbMode == defrec::CbMode::kOffsets && !caps.cbOffsetting))
     return fail(defrec::DescribeCapsFailure(dev, caps));
   if (!gbverify::Install()) return fail("the G-buffer verifier could not start");
   if (!gbbatch::g_ctx) dev->GetImmediateContext(&gbbatch::g_ctx);  // the verifier's context (released by gb_batch)
@@ -6068,7 +6070,7 @@ bool Install() {
   }
   defrec::PoolConfig pc;
   pc.workers = g_poolSlots * g_threads;
-  pc.cb.mode = defrec::CbMode::kOffsets;
+  pc.cb.mode = cbMode;
   pc.priority = THREAD_PRIORITY_NORMAL;
   pc.name = "gbuffer recorder";
   if (!g_pool.Start(dev, pc)) return fail("its workers did not start");
@@ -6076,10 +6078,13 @@ bool Install() {
     g_pool.Stop();
     return fail("fewer workers than slots x threads");
   }
-  if (g_pool.At(0).ring.Mode() != defrec::CbMode::kOffsets) {
+  if (g_pool.At(0).ring.Mode() != cbMode) {
     g_pool.Stop();
     return fail("constant-buffer offsets unavailable on the worker contexts");
   }
+  if (!caps.commandLists)
+    Log("gbuffer recorder: no driver command lists; RecordersEmulatedLists on (ini key or flag file): recording on the runtime's "
+        "emulated lists (constant buffers by UpdateSubresource, no offsets; checked on WARP, untested on real GPUs)");
   dev->GetImmediateContext(&g_ctx);
   g_dev = dev;
   g_dev->AddRef();
