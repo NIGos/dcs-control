@@ -51,7 +51,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 ## Requirements
 
 - **Windows 10 or 11, 64-bit** (tested on Windows 11; Windows 10 is supported by everything the app uses but has not been flown yet). Run as a normal user — not as administrator.
-- **For Engine Optimizations and CPU Boost:** any GPU and headset, or none. The items below are for the VR features.
+- **For Engine Optimizations and CPU Boost:** any GPU and headset, or none. On **AMD Radeon** cards the multi-threaded shadows and G-buffer usually stay off, because the driver does not offer D3D11 command lists ([details](#multi-threaded-shadows-and-g-buffer-are-unavailable)); everything else runs, so the gain is smaller. Radeon cards have not been tested yet. The items below are for the VR features.
 - **NVIDIA RTX graphics card** for DLSS 5 and for NVIDIA optical-flow frame generation. (The Framegen page also offers FidelityFX, which works on any GPU, but the tested setup is NVIDIA.) Development and testing: RTX 5090.
 - **Pimax headset** (tested: Crystal Super Micro OLED) with either
   - **Pimax Play** (the original Pimax OpenXR runtime), or
