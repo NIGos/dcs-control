@@ -73,6 +73,21 @@ public static class EngineShaderCache
         return moved;
     }
 
+    /// <summary>How many compiled variants the cache in <paramref name="stateRoot"/> holds, and their size (0, 0 when
+    /// there is none). For the DCS Engine page.</summary>
+    public static (int Files, long Bytes) Stats(string stateRoot)
+    {
+        var directory = DirectoryIn(stateRoot);
+        var files = 0; var bytes = 0L;
+        try
+        {
+            if (!Directory.Exists(directory) || new DirectoryInfo(directory).Attributes.HasFlag(FileAttributes.ReparsePoint)) return (0, 0);
+            foreach (var file in new DirectoryInfo(directory).EnumerateFiles("*.qvc")) { files++; bytes += file.Length; }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+        return (files, bytes);
+    }
+
     /// <summary>Deletes the cache in <paramref name="stateRoot"/>: its entries and unfinished writes, then the folder if
     /// nothing else is in it. Returns the files deleted and their size. The module compiles the variants again.</summary>
     public static (int Files, long Bytes) Clear(string stateRoot)

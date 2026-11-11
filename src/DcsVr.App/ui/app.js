@@ -754,6 +754,10 @@ function buildFields() {
   field(more,'engineFrameHeap','Frame memory per thread','Gives each thread its own short-lived memory. About 1.5% more FPS.','toggle',null,engine);
   field(more,'engineStateFilter','Redundant state filter','Skips graphics state that is already set. Same image. About 1% more FPS. Turns itself off after a DCS update.','toggle',null,engine);
   field(more,'engineBeeps','Beeps for the in-flight switch','One beep off, two beeps on.','toggle',null,engine);
+  // Shader preparation ([Model] ShaderCachePrewarm / ShaderCompileWorkers): read when DCS starts, so not live.
+  more = disclosure(c,'Advanced','How shaders are prepared. The defaults suit most PCs.',p => `${p.engineShaderCachePrewarm ? 'Menu prep on' : 'Menu prep off'} · ${p.engineShaderCompileWorkers ? p.engineShaderCompileWorkers + ' threads' : 'Auto threads'}`);
+  field(more,'engineShaderCachePrewarm','Prepare shaders in the main menu',['After a DCS or app update, gets shaders ready while you are still in the menu.','Off: they are prepared during the first minutes of the flight instead.'],'toggle',null,engine);
+  segmented(field(more,'engineShaderCompileWorkers','Compile threads',['CPU threads that prepare shaders. Auto suits most PCs.','More finishes sooner but leaves DCS less CPU meanwhile.'],'select',[[0,'Auto · recommended'],[2,'2'],[4,'4'],[6,'6']],engine),{0:'Auto',2:'2',4:'4',6:'6'});
   more = disclosure(c,'Developer options','For working on the module. Leave as they are for flying.',p => p.engineDevMode ? 'Developer mode on' : 'Off');
   field(more,'engineTimerRefreshUs','Streaming timer refresh','How often the cached time is refreshed. 1000 µs (1 ms) is far below one frame.','number',[250,2000,50],p => engine(p) && p.engineShaderTimeCache,'µs');
   field(more,'engineDevMode','Developer mode',['For working on the module; off for flying.','On: DCS hot-reloads the payload below whenever it changes and takes every engine setting from the settings file below instead of this page. Off for normal flying and for testing a release.'],'toggle',null,engine);
@@ -1017,14 +1021,15 @@ document.addEventListener('click', e => {
   if (busy) return;
   if (e.target.closest('#changeRuntime')) $('browse-neuralRuntimePath').click();
   else if (e.target.closest('#forgetRuntime')) forgetRuntime();
+  else if (e.target.closest('#engineClearCache')) engineAction('engineClearShaderCache');
 });
 // ---- DCS engine optimizations ----------------------------------------------------------------------------------
-let engineTimer, engineSequence = 0, engineStatus = null;
+let engineTimer, engineSequence = 0, engineStatus = null, engineWarmup = null, engineCache = null;
 /** The module's own log, read again every 5 s while the page is open (a test suite reports its end there). */
 async function refreshEngine() {
   clearTimeout(engineTimer);
   const mine = ++engineSequence;
-  try { const result = await request('engineStatus'); if (mine === engineSequence) { engineStatus = result.status; renderEngine(); } }
+  try { const result = await request('engineStatus'); if (mine === engineSequence) { engineStatus = result.status; engineWarmup = result.warmup || null; engineCache = result.shaderCache || null; renderEngine(); } }
   catch (error) { if (mine === engineSequence) $('engineStatus').innerHTML = `<p class="fine">${escape(error.message)}</p>`; }
   if (page === 'engine' && mine === engineSequence) engineTimer = setTimeout(refreshEngine, 5000);
 }
@@ -1042,11 +1047,19 @@ function renderEngine() {
   box.innerHTML = devNote + `<div class="engine-state ${escape(s.state)}"><b>${escape(ENGINE_STATE[s.state] || s.state)}</b><span>${escape(s.summary)}</span></div>${pending}${perceptionOnly}`
     + s.warnings.map(w => `<p class="pimax-note warn">${escape(w)}</p>`).join('')
     + (s.suiteRunning ? '<p class="pimax-note">The test suite is running in DCS. Keep the view still (in VR, keep the headset on); it takes about 7 minutes.</p>' : '')
-    + `<dl class="pimax-values">${report}</dl>`;
+    + `<dl class="pimax-values">${report}</dl>` + shaderRows();
   $('engineSuite').disabled = busy || s.state !== 'loaded' || s.suiteRunning || !profile?.engineOptimizations;
   $('engineReport').disabled = busy || !s.lastReport;
   $('engineLog').disabled = busy || !s.logPath;
   renderSuiteNote();
+}
+/** Shader warm-up (only while DCS runs and it is not done) and the shader cache with its Clear button. */
+function shaderRows() {
+  const w = engineWarmup, c = engineCache;
+  const warm = w && w.total > 0 ? `<div class="engine-row engine-warmup" id="engineWarmup"><span>Shader warm-up: ${w.done} of ${w.total} ready</span><progress max="${w.total}" value="${w.done}"></progress></div>` : '';
+  const size = c ? (c.bytes / 1048576).toFixed(c.bytes < 10485760 ? 1 : 0) : '0';
+  const cache = c ? `<div class="engine-row" id="engineCacheRow"><span>Shader cache: ${c.files ? `${c.files} variants, ${size} MB` : 'empty'}</span><button type="button" id="engineClearCache" class="button quiet"${busy || c.dcsRunning || !c.files ? ' disabled' : ''}${c.dcsRunning ? ' title="Close DCS first"' : ''}>Clear cache</button></div>` : '';
+  return warm + cache;
 }
 /** Above the test suite's buttons: what makes Run test suite available. */
 function renderSuiteNote() {
@@ -1540,7 +1553,7 @@ const CHECK_INFO = {
   'neural-hotkey':['DLSS 5 toggle key',{reveal:'neuralToggleKey',label:'Change'}], 'neural-hotkey-dcs':['DLSS 5 toggle key',{reveal:'neuralToggleKey',label:'Change'}],
   'diagnostic-hotkey':['Headset panel key',{reveal:'diagnosticOverlayKey',label:'Change'}], 'diagnostic-hotkey-dcs':['Headset panel key',{reveal:'diagnosticOverlayKey',label:'Change'}],
   'engine-hotkey':['Engine Optimizations switch',{reveal:'engineToggleKey',label:'Change'}], 'engine-hotkey-dcs':['Engine Optimizations switch',{reveal:'engineToggleKey',label:'Change'}],
-  'engine-timer':['Streaming timer refresh',{reveal:'engineTimerRefreshUs',label:'Open'}], 'engine-dev':['Developer mode',{reveal:'engineDevMode',label:'Open'}], 'engine-dev-missing':['Developer mode',{reveal:'engineDevMode',label:'Open'}],
+  'engine-timer':['Streaming timer refresh',{reveal:'engineTimerRefreshUs',label:'Open'}], 'engine-compile-threads':['Compile threads',{reveal:'engineShaderCompileWorkers',label:'Open'}], 'engine-dev':['Developer mode',{reveal:'engineDevMode',label:'Open'}], 'engine-dev-missing':['Developer mode',{reveal:'engineDevMode',label:'Open'}],
   'nvidia-threaded-optimization':['NVIDIA Threaded optimization',null], 'nvidia-mfaa':['NVIDIA MFAA',null], 'eye-distance':['Eye distance',{reveal:'eyeDistanceMm',label:'Open'}],
   'smooth-cursor-images':['Smooth mouse cursor',{reveal:'smoothCursor',label:'Open'}], 'fps-cap':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}], 'dcs-vsync':['Desktop VSync',{reveal:'disableDcsVSync',label:'Open'}],
   'hotkey-conflict':['In-flight keys',{reveal:'diagnosticOverlayKey',label:'Change'}],
@@ -2122,7 +2135,7 @@ function adoptDraft(next) {
   showProfile(); change(); boostChanged();
 }
 // Test hooks exercise the same controls and command bridge; the fixture host never starts DCS or opens dialogs.
-window.dcsUi = {request,run,setBusy,askDxgiFirst,askDxgiFresh,checkUpdates,installUpdate,setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); renderDashboard(); },applyLive,get liveStatus(){return liveStatus;},runsWith,navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,ENGINE_PARTS,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,revealSetting,get boostRequests(){return boostSequence;},get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
+window.dcsUi = {request,run,setBusy,askDxgiFirst,askDxgiFresh,checkUpdates,installUpdate,setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); renderDashboard(); },applyLive,get liveStatus(){return liveStatus;},runsWith,navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,ENGINE_PARTS,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,revealSetting,get boostRequests(){return boostSequence;},engineShaderRows:(w,c) => { engineWarmup = w; engineCache = c; return shaderRows(); },get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
 // More / Less: shows or hides a setting's (or a card's) detail text; every page load starts with it folded.
 document.addEventListener('click', e => {
   const b = e.target.closest('.more-toggle'); if (!b) return; const detail = $(b.getAttribute('aria-controls')); if (!detail) return;

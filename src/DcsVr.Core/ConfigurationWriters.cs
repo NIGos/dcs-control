@@ -227,6 +227,12 @@ public static class ConfigurationWriters
         return p.EngineOptimizations && p.EngineDevMode ? WithDcsQvCullConstants(DcsQvCullTrimmed(p, cache)) : DcsQvCullTrimmed(p, cache);
     }
 
+    /// <summary>[Model] ShaderCachePrewarm and ShaderCompileWorkers, only when they differ from the module's defaults (1
+    /// and 0 = automatic), like the rest of the trimmed file. Read once when the module starts.</summary>
+    private static string ShaderCacheKeys(VrProfile p) =>
+        (p.EngineShaderCachePrewarm ? "" : "\n; Stale shader variants are compiled when a mission first draws them, not already in the main menu.\nShaderCachePrewarm=0")
+        + (p.EngineShaderCompileWorkers is > 0 and <= 8 ? $"\nShaderCompileWorkers={Int(p.EngineShaderCompileWorkers)}" : "");
+
     /// <summary>Adds every <see cref="DcsQvCullConstants"/> key: inside its section when the file has it (GetPrivateProfile*
     /// reads only the first section of a name), otherwise in a new section at the end.</summary>
     private static string WithDcsQvCullConstants(string ini)
@@ -296,7 +302,7 @@ public static class ConfigurationWriters
         ShadowRecorder={(p.EngineShadowRecorder ? 1 : 0)}
         ; Helper threads per shadow cascade: 1 on CPUs with 8 logical cores or fewer, so DCS keeps its own threads.
         ShadowRecorderHelpers={(Environment.ProcessorCount <= 8 ? 1 : 3)}
-        GBufferRecorder={(p.EngineGBufferRecorder ? 1 : 0)}{(shaderCache is null ? "" : "\n; The compiled shader variants, kept in DCS Control's own folder: Back to stock DCS does not delete them, so the\n; first minutes of a mission are not slower again after it. DcsVr.Cli clear-shader-cache deletes them.\nShaderCacheDir=" + shaderCache)}
+        GBufferRecorder={(p.EngineGBufferRecorder ? 1 : 0)}{(shaderCache is null ? "" : "\n; The compiled shader variants, kept in DCS Control's own folder: Back to stock DCS does not delete them, so the\n; first minutes of a mission are not slower again after it. DcsVr.Cli clear-shader-cache deletes them.\nShaderCacheDir=" + shaderCache)}{(p.EngineOptimizations ? ShaderCacheKeys(p) : "")}
 
         [Texture]
         StreamDedupe={(p.EngineTextureDedupe ? 1 : 0)}

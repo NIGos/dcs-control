@@ -8,10 +8,42 @@ namespace DcsVr.Core;
 public sealed record EngineStatus(string State, string Summary, IReadOnlyList<string> Warnings, bool TimerCacheAvailable, bool TimerCacheActive,
     bool SceneHooked, bool SuiteRunning, string ModuleDirectory, string? LogPath, string? LastReport, DateTime? LastReportAt, string? LastStats);
 
+/// <summary>The module's shader warm-up (warmup.json next to its log, native/dcsqvcull/src/warmup_status.h).</summary>
+/// <param name="State">"prewarm" (stale variants rechecked, usually in the main menu) or "warming" (the scene's variants
+/// compiling).</param>
+/// <param name="Done">Variants ready.</param>
+/// <param name="Total">Ready plus still to do; it may grow while DCS finds more.</param>
+public sealed record EngineWarmup(string State, int Done, int Total, int Hits, int Compiled, int Seconds);
+
 public static class EngineOptimizations
 {
     public const string ModuleFolder = "DcsQvCull";
     public const string SuiteFlag = "run_suite.flag";
+    public const string WarmupFile = "warmup.json";
+    /// <summary>The module rewrites the file every second while it warms up: an older one is from a DCS that has ended.</summary>
+    public static readonly TimeSpan WarmupFresh = TimeSpan.FromSeconds(15);
+
+    /// <summary>The warm-up in progress while DCS runs, or null: DCS not running, no file, idle, done, or a file the
+    /// module has stopped updating.</summary>
+    public static EngineWarmup? ReadWarmup(string module, bool dcsRunning, DateTime? utcNow = null)
+    {
+        if (!dcsRunning) return null;
+        var path = Path.Combine(module, WarmupFile);
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length > 4096 || (utcNow ?? DateTime.UtcNow) - info.LastWriteTimeUtc > WarmupFresh) return null;
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var doc = System.Text.Json.JsonDocument.Parse(stream);
+            var root = doc.RootElement;
+            var state = root.TryGetProperty("state", out var s) && s.ValueKind == System.Text.Json.JsonValueKind.String ? s.GetString() : null;
+            if (state is not ("prewarm" or "warming")) return null;
+            int Number(string name) => root.TryGetProperty(name, out var v) && v.TryGetInt32(out var n) && n >= 0 ? n : 0;
+            var done = Number("done");
+            return new(state, done, Math.Max(done, Number("total")), Number("hits"), Number("compiled"), Number("seconds"));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidOperationException) { return null; }
+    }
 
     /// <summary>Saved Games\DCS*\Scripts\DcsQvCull for the options.lua in Saved Games\DCS*\Config.</summary>
     public static string ModuleDirectory(string optionsPath) =>

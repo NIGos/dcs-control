@@ -1,0 +1,56 @@
+diff --git a/include/xrfg/diagnostic_overlay_model.hpp b/include/xrfg/diagnostic_overlay_model.hpp
+index 8a42d1a..702042a 100644
+--- a/include/xrfg/diagnostic_overlay_model.hpp
++++ b/include/xrfg/diagnostic_overlay_model.hpp
+@@ -141,6 +141,12 @@ inline constexpr std::uint64_t kEngineOn = 1ULL << 1;
+ inline constexpr std::uint64_t kEnginePerceptionOnly = 1ULL << 38;
+ inline constexpr std::uint64_t kEngineLatched = 1ULL << 2;
+ inline constexpr std::uint64_t kEngineWarming = 1ULL << 3; // DCS Control (0042)
++// DCS Control (0069): warm-up progress. Bits 44-50 percent done (0-100), bit
++// 51 valid (the percent is meaningful), bit 52 cache prewarm running (main
++// menu). 0 from modules older than these fields: the line has no percent.
++inline constexpr int kEngineWarmPercentShift = 44;
++inline constexpr std::uint64_t kEngineWarmValid = 1ULL << 51;
++inline constexpr std::uint64_t kEnginePrewarm = 1ULL << 52;
+ // DCS Control (0025): DcsQvCull.dll's DcsQvCull_DualCameraStatus() (cockpit true
+ // IPD, the dual camera): bit 0 configured, bit 1 patched in the last frame, bit
+ // 2 paused by its key, bit 3 waiting for Depth boost, bit 4 observe only, bits
+diff --git a/src/core/diagnostic_overlay_model.cpp b/src/core/diagnostic_overlay_model.cpp
+index 43721eb..a344cde 100644
+--- a/src/core/diagnostic_overlay_model.cpp
++++ b/src/core/diagnostic_overlay_model.cpp
+@@ -159,7 +159,13 @@ std::string format_engine_line(const DiagnosticInputs& in, DiagnosticColor& colo
+         return key.empty() ? std::string("Engine Opt.: OFF") : "Engine Opt.: OFF (" + key + ")";
+     }
+     // DCS Control (0042): during warm-up the counts are not final yet.
+-    if (e.bits & kEngineWarming) { color = DiagnosticColor::grey; return "Engine Opt.: warming up"; }
++    if (e.bits & kEngineWarming) {
++        color = DiagnosticColor::grey;
++        // DCS Control (0069): how far, when the module reports it.
++        const auto percent = static_cast<unsigned>((e.bits >> kEngineWarmPercentShift) & 0x7FU);
++        if ((e.bits & kEngineWarmValid) && percent <= 100U) return "Engine Opt.: warming up " + std::to_string(percent) + "%";
++        return "Engine Opt.: warming up";
++    }
+     const auto active = static_cast<unsigned>((e.bits >> 8) & 0xFFU);
+     const auto latched = static_cast<unsigned>((e.bits >> 16) & 0xFFU);
+     // 0014: optimizations switched on in the ini; 0 from a module that does
+diff --git a/tests/diagnostic_overlay_tests.cpp b/tests/diagnostic_overlay_tests.cpp
+index b29fcc3..7a28268 100644
+--- a/tests/diagnostic_overlay_tests.cpp
++++ b/tests/diagnostic_overlay_tests.cpp
+@@ -77,6 +77,15 @@ int main() {
+                 "Engine Opt.: warming up", "engine warming up");
+             require(engine(kEngineRunning | kEngineWarming | (12ULL << 8), C::grey) ==
+                 "Engine Opt.: OFF (Alt+Shift+F11)", "off in flight wins over warming up");
++            // 0069: the warm-up percent (bits 44-50) when bit 51 says it is valid; an older module sends neither.
++            require(engine(kEngineRunning | kEngineOn | kEngineWarming | kEngineWarmValid | (60ULL << kEngineWarmPercentShift), C::grey) ==
++                "Engine Opt.: warming up 60%", "warming up with a percent");
++            require(engine(kEngineRunning | kEngineOn | kEngineWarming | (60ULL << kEngineWarmPercentShift), C::grey) ==
++                "Engine Opt.: warming up", "a percent without the valid bit is ignored");
++            require(engine(kEngineRunning | kEngineOn | kEngineWarming | kEngineWarmValid, C::grey) ==
++                "Engine Opt.: warming up 0%", "warming up at 0%");
++            require(engine(kEngineRunning | kEngineOn | kEngineWarmValid | kEnginePrewarm | (40ULL << kEngineWarmPercentShift) | (17ULL << 8) | (17ULL << 24), C::green) ==
++                "Engine Opt.: all 17 on", "a menu prewarm alone keeps the counts line");
+             // 0028: Perception only (bit 38): the engine optimizations are off by design, so no line.
+             require(engine(kEngineRunning | kEnginePerceptionOnly, C{}).empty(), "perception only: no engine line");
+             // 0014: all, some or none of the optimizations switched on in the ini.

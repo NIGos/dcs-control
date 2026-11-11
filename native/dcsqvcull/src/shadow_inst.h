@@ -3774,6 +3774,26 @@ inline bool PrewarmFinishedLocked() {
   return g_prewarmFound.load() != 0;
 }
 
+// The prewarm's progress for the warm-up status (perf_mon.h WarmTick; worker thread, about once per second).
+struct PrewarmProgress {
+  bool running = false, scanning = false;
+  uint32_t found = 0, processed = 0, current = 0, compiled = 0;
+};
+inline PrewarmProgress PrewarmSnap() {
+  PrewarmProgress p;
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    p.scanning = g_prewarmState == 1;
+    p.running = g_prewarmOn.load(std::memory_order_relaxed) && (g_prewarmState == 1 || g_prewarmState == 2);
+  }
+  p.found = g_prewarmFound.load();
+  p.current = g_prewarmCurrent.load();
+  p.compiled = g_prewarmCompiled.load();
+  p.processed = p.current + p.compiled + g_prewarmSkipped.load();
+  if (p.processed > p.found) p.processed = p.found;
+  return p;
+}
+
 inline void LogPrewarm() {
   Log("shadow inst: cache prewarm: %u entries used in the last %u days checked in %.0f s: %u current, %u stale "
       "recompiled, %u skipped",
