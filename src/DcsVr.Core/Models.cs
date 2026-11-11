@@ -89,9 +89,10 @@ public sealed record VrProfile
     /// estimates DCS's frame time at the full rate while it runs at half of it, and that estimate reads a fifth to a
     /// quarter high. Steady is the rule of 0.6.0 to 0.6.3: pass through under 80% of a refresh, generate again over 95%
     /// (a PC that just holds the refresh rate never passes through). Balanced, the default, tries passing through when
-    /// the estimate is within 110% of a refresh and keeps it while frames arrive on time (generating again after 2 late
-    /// frames in a second or 3 in ten). PreferRefresh tries up to 125% and generates again only after 2 late frames in a
-    /// second. A try that fails is not repeated for 30 s, doubling up to 4 minutes. "Stop generating" on the Framegen
+    /// the estimate is within 110% of a refresh and keeps it while frames arrive on time (generating again after 3 late
+    /// episodes in a second or 5 in ten; misses within 250 ms are one episode, fork patch 0071). PreferRefresh tries up
+    /// to 125% and generates again after 3 in a second or 10 in ten. A try that fails is not repeated for 30 s, doubling
+    /// up to 4 minutes, and after 3 failed in a row (PreferRefresh: 6) not until the scene changes. "Stop generating" on the Framegen
     /// page; applies at the next DCS start.</summary>
     public PassThroughPreference FrameGenPassThrough { get; init; } = PassThroughPreference.Balanced;
     /// <summary>The share of one refresh period OFXR's frame-time estimate has to stay under before frames pass through
