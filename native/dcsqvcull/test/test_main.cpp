@@ -270,6 +270,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "vram_count_test.h"
 #include "pass_flush_test.h"
 #include "fwd_rec_count_test.h"
+#include "fwd_split_test.h"
 #include "srv_tail_trim_test.h"
 #include "status_word_test.h"
 #include "prefetch_fix_test.h"
@@ -565,6 +566,12 @@ int main() {
   // QV_FWDREC_ONLY=1: only the forward recorder S0 counter tests (R21).
   if (getenv("QV_FWDREC_ONLY")) {
     frctest::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
+  // QV_FWDSPLIT_ONLY=1: only the forward pass split tests (A5).
+  if (getenv("QV_FWDSPLIT_ONLY")) {
+    fstest::Run();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -1930,6 +1937,8 @@ int main() {
   pftest::Run();
   // Forward recorder S0 counters (R21): pass kinds, FX pass index, rule flags, segments, gates, item walk.
   frctest::Run();
+  // A5 forward split ([Suite] ForwardSplit): categories, views, window difference, line, fake items.
+  fstest::Run();
   // setShaderResources identical-tail trim (R15 F2): fake caches vs the 0x1ac20 transcription, real device via fake sites.
   strtest::Run();
   // DcsQvCull_Status word (status_word.h): bit layout, feature counting, loader/payload handover.
