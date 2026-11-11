@@ -37,6 +37,7 @@
 #include "loader_api.h"
 #include "log_utf8.h"
 #include "dev_path.h"  // R62: [Dev] IniPath read whole, an unusable one logged
+#include "shader_cache_dir.h"  // [Model] ShaderCacheDir / ShaderCompileWorkers / ShaderCachePrewarm (pure)
 #include "reloc.h"
 #include "status_word.h"
 #include "scene_layout.h"

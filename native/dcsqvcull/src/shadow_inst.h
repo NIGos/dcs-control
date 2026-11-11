@@ -76,8 +76,9 @@
 // by [Suite] GBufferInstCompile only. Each G-buffer pass also keeps the
 // resources its stages bind in (a) (PassGate::reads, GbPassReadTextures),
 // for the R14 lead 3 counter [Suite] GBufferTexCount (measurement only).
-// Compile results persist in <module dir>\cache\ (see "Disk cache" below):
-// later starts load them without D3DCompile.
+// Compile results persist on disk (see "Disk cache" below): later starts load
+// them without D3DCompile, and entries a DCS or module update made stale are
+// recompiled from the main menu on ("Prewarm").
 // Included once from main.cpp inside its anonymous namespace, after
 // inst_count.h, gb_count.h and shadow_tex.h.
 #pragma once
@@ -1843,7 +1844,11 @@ Addrs g_at;
 
 constexpr int kMaxPasses = 16;  // normal_cockpit*: 9 passes
 constexpr int kMaxDefines = 128;
-constexpr int kWorkers = 2;
+// Compile workers: [Model] ShaderCompileWorkers, by default a quarter of the logical processors, 2 to 6
+// (shader_cache_dir.h). They were 2: ~200 keys of two ~1.4 s compiles each took 4.5 to 5 minutes after a start
+// without a cache, and that long the instanced / batched / recorded paths were only partly active.
+constexpr int kMaxWorkers = qvcachedir::kMaxWorkers;
+int g_workerCount = 2;  // threads started by Install
 
 // What a snapshot / key / map entry is for: the shadow casters (R12, techniques
 // mat+0x210/0x218) or the main passes (R13, techniques mat+0x1d8 normal* and
@@ -2054,7 +2059,7 @@ std::vector<std::pair<Snapshot*, KeyResult*>> g_pendingCreate;  // single-thread
 std::atomic<Snapshot*> g_inbox{nullptr};
 std::atomic<uint32_t> g_inboxCount{0};
 std::atomic<uint32_t> g_pendingCount{0};
-HANDLE g_workers[kWorkers] = {};
+HANDLE g_workers[kMaxWorkers] = {};
 int g_busy = 0;  // workers inside a compile
 ID3D11Device* g_device = nullptr;
 bool g_deviceSingleThreaded = false;
@@ -2405,7 +2410,7 @@ TexEntry* g_texMap = nullptr;
 std::atomic<uint32_t> g_texMapUsed{0}, g_texForgotten{0};  // used: slots not empty (live and tombstones)
 std::atomic<bool> g_texMapCapLogged{false};
 std::atomic<bool> g_onTex{false};  // [Model] ShadowTextureSkip wants the shadow keys collected
-Snapshot* g_compiling[kWorkers] = {};  // under g_mutex: snapshots a worker is compiling
+Snapshot* g_compiling[kMaxWorkers] = {};  // under g_mutex: snapshots a worker is compiling
 
 inline size_t TexHash(const void* s, uint64_t tech) {
   uint64_t h = (reinterpret_cast<uintptr_t>(s) >> 4) * 0x9E3779B97F4A7C15ull ^ tech * 0xC2B2AE3D27D4EB4Full;
@@ -2995,9 +3000,10 @@ void LogResult(KeyResult& r, uint32_t index) {
 }
 
 // ---------------------------------------------------------------------------
-// Disk cache of compiled keys: <module dir>\cache\ (Saved Games\DCS\Scripts\
-// DcsQvCull\cache), one file per (kind, key, defines, techniques, live pass
-// counts). A hit fills the KeyResult without D3DCompile; the VS objects are
+// Disk cache of compiled keys: [Model] ShaderCacheDir (DCS Control's state
+// folder, which Back to stock DCS keeps), else <module dir>\cache\ (Saved
+// Games\DCS\Scripts\DcsQvCull\cache; shader_cache_dir.h), one file per (kind,
+// key, defines, techniques, live pass counts). A hit fills the KeyResult without D3DCompile; the VS objects are
 // still created on DCS's device as after a compile. Read and written by the
 // compile workers only (never the render thread); a missing or read-only
 // folder just means no cache.
@@ -3045,6 +3051,11 @@ struct SrcMemo {
   FILETIME written;
 };
 std::unordered_map<std::wstring, SrcMemo> g_cacheSrcMemo;  // full path -> content hash (this start)
+
+// Set by the payload before Install (main/worker.inc), from the deployed ini.
+qvcachedir::Choice g_cacheChoice;  // [Model] ShaderCacheDir, resolved
+std::wstring g_cacheChoiceRaw;     // as written, for the log
+int g_workersWanted = 0;           // [Model] ShaderCompileWorkers (0 = by CPU)
 
 // dir: the cache folder (trailing backslash), empty for none. Hashes the
 // compiler DLL and creates the folder. nullptr when usable, else why not.
@@ -3344,7 +3355,7 @@ inline std::wstring SourcePath(const std::string& rel) {
 // Loads the snapshot's cached result into out. nullptr on a hit; else the
 // reject reason ("missing" when there is no file; detail: the first source
 // that changed).
-const char* CacheLoad(const Snapshot& s, KeyResult& out, std::string& detail) {
+const char* CacheLoad(const Snapshot& s, KeyResult& out, std::string& detail, bool touch = true) {
   std::wstring path;
   std::string id, env;
   {
@@ -3416,7 +3427,8 @@ const char* CacheLoad(const Snapshot& s, KeyResult& out, std::string& detail) {
   out.fxVars = std::move(r.fxVars);
   out.msA = out.msB = 0;
   out.cached = true;
-  prune::TouchOnHit(path);  // R90: last use for the cache's LRU cap (disk_prune.h)
+  // R90: last use for the cache's LRU cap (disk_prune.h). Not for the prewarm's check: that is not a use.
+  if (touch) prune::TouchOnHit(path);
   return nullptr;
 }
 
@@ -3579,6 +3591,196 @@ void LogCacheSummaryIfChanged() {
   if (!s.empty()) Log("%s", s.c_str());
 }
 
+// ---------------------------------------------------------------------------
+// Prewarm: the cache's own entries name the keys of earlier sessions. After a
+// DCS update (a source changed), a compiler update or a new edit version every
+// one of them is rejected, and the whole compile used to start only when the
+// mission's shaders were first drawn. The workers now check the recently used
+// entries from payload start on (the main menu) and recompile the stale ones,
+// most recently used first, whenever no live key is waiting. The result goes
+// to the cache file only; a live key then hits it like any other entry.
+// Entries whose identity cannot be rebuilt exactly (an absent technique: its
+// name is not stored) are left to the live path.
+// ---------------------------------------------------------------------------
+
+constexpr uint32_t kPrewarmDays = 14;  // entries used (hit or written) in the last 14 days
+constexpr size_t kPrewarmMax = 600;    // the most recently used ones
+constexpr uint32_t kPrewarmDelayMs = 5000;  // after Install: the config has applied which kinds are collected
+
+struct PrewarmItem {
+  Snapshot* s = nullptr;
+  FILETIME written = {};  // kept across a rewrite: the prewarm is not a use (LRU, the 14 days above)
+  std::wstring path;
+};
+std::vector<PrewarmItem> g_prewarm;  // under g_mutex; most recently used last
+int g_prewarmState = 0;              // under g_mutex: 0 not scanned, 1 scanning, 2 scanned, 3 finished (logged)
+int g_prewarmBusy = 0;               // under g_mutex: workers inside PrewarmOne
+ULONGLONG g_prewarmAt = 0, g_prewarmT0 = 0;  // GetTickCount64: scan not before / scan start
+uint32_t g_prewarmDelayMs = kPrewarmDelayMs;
+std::atomic<bool> g_prewarmOn{true};  // [Model] ShaderCachePrewarm
+std::atomic<uint32_t> g_prewarmFound{0}, g_prewarmCurrent{0}, g_prewarmCompiled{0}, g_prewarmSkipped{0};
+
+// The inverse of WriteIdentity. false: malformed, or a field longer than a
+// Snapshot holds. s is zeroed first (shader pointers stay null).
+inline bool ReadIdentity(CacheReader& rd, Snapshot& s) {
+  memset(&s, 0, sizeof(s));
+  auto take = [&](char* out, size_t cap) {
+    const std::string v = rd.Str();
+    if (!rd.ok || v.size() >= cap || v.find('\0') != std::string::npos) return rd.ok = false;
+    memcpy(out, v.data(), v.size());
+    return true;
+  };
+  const uint32_t kind = rd.U32();
+  if (!rd.ok || (kind != kKindShadow && kind != kKindGb)) return false;
+  s.kind = static_cast<int>(kind);
+  if (!take(s.key, sizeof(s.key)) || !take(s.path, sizeof(s.path))) return false;
+  s.defineCount = rd.Count(kMaxDefines);
+  for (uint32_t i = 0; i < s.defineCount && rd.ok; ++i) {
+    if (!take(s.defines[i].name, sizeof(s.defines[i].name)) || !take(s.defines[i].value, sizeof(s.defines[i].value)))
+      return false;
+    s.defines[i].keyValue = rd.U8() ? 1 : 0;
+  }
+  for (int t = 0; t < 2 && rd.ok; ++t) {
+    if (!take(s.techName[t], sizeof(s.techName[t]))) return false;
+    s.passes[t] = rd.Count(kMaxPasses);
+  }
+  return rd.ok;
+}
+
+// One cache file -> the snapshot of its key, or nullptr: not a file of this
+// format, damaged, an identity that does not rebuild the file's own name, or
+// one stored without a technique's name.
+inline Snapshot* PrewarmSnapshot(const std::wstring& path) {
+  std::string file;
+  if (!ReadWholeFile(path, file) || file.size() < kCacheHeader || memcmp(file.data(), kCacheMagic, 8) != 0) return nullptr;
+  const auto* b = reinterpret_cast<const uint8_t*>(file.data());
+  uint32_t format = 0;
+  uint64_t size = 0, sum = 0;
+  memcpy(&format, b + 8, 4);
+  memcpy(&size, b + 16, 8);
+  memcpy(&sum, b + 24, 8);
+  if (format != kCacheFormat || size != file.size() - kCacheHeader) return nullptr;
+  if (Fnv64(b + kCacheHeader, static_cast<size_t>(size)) != sum) return nullptr;
+  CacheReader rd(b + kCacheHeader, static_cast<size_t>(size));
+  Snapshot* s = new Snapshot;
+  bool ok = ReadIdentity(rd, *s) && s->passes[0] && s->passes[1];
+  if (ok) {
+    CacheWriter w;
+    WriteIdentity(w, *s);
+    ok = w.b.size() == rd.pos && memcmp(w.b.data(), b + kCacheHeader, rd.pos) == 0;
+  }
+  if (ok) {
+    std::wstring own;
+    {
+      std::lock_guard<std::mutex> lock(g_cacheMutex);
+      own = CachePathLocked(*s);
+    }
+    ok = _wcsicmp(own.c_str(), path.c_str()) == 0;
+  }
+  if (!ok) {
+    delete s;
+    return nullptr;
+  }
+  return s;
+}
+
+// The cache folder's entries used in the last kPrewarmDays, at most
+// kPrewarmMax, most recently used last. Worker thread, outside g_mutex.
+std::vector<PrewarmItem> PrewarmScan(uint64_t nowTicks = prune::NowTicks()) {
+  std::vector<PrewarmItem> out;
+  std::wstring dir;
+  {
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    if (!g_cacheWritable) return out;
+    dir = g_cacheDir;
+  }
+  if (dir.empty()) return out;
+  std::vector<prune::Entry> v = prune::List(dir, L"*.qvc", false);
+  const uint64_t window = kPrewarmDays * 864000000000ull;
+  v.erase(std::remove_if(v.begin(), v.end(),
+                         [&](const prune::Entry& e) { return nowTicks > e.written && nowTicks - e.written > window; }),
+          v.end());
+  std::sort(v.begin(), v.end(), [](const prune::Entry& a, const prune::Entry& b) { return a.written < b.written; });
+  if (v.size() > kPrewarmMax) v.erase(v.begin(), v.end() - kPrewarmMax);
+  for (const prune::Entry& e : v) {
+    if (g_stop.load()) break;
+    Snapshot* s = PrewarmSnapshot(e.path);
+    if (!s) continue;
+    PrewarmItem it;
+    it.s = s;
+    it.path = e.path;
+    it.written.dwLowDateTime = static_cast<DWORD>(e.written);
+    it.written.dwHighDateTime = static_cast<DWORD>(e.written >> 32);
+    out.push_back(std::move(it));
+  }
+  return out;
+}
+
+// Worker: one entry. Current -> nothing. Stale -> compiled (at idle priority)
+// and stored under its old last-use time. 0 current, 1 recompiled, 2 skipped
+// (gone meanwhile, or the compile is not storable).
+int PrewarmOne(const PrewarmItem& it) {
+  KeyResult cur;
+  std::string detail;
+  const char* why = CacheLoad(*it.s, cur, detail, false);
+  if (!why) return 0;
+  if (strcmp(why, "missing") == 0 || strcmp(why, "unreadable") == 0) return 2;
+  KeyResult r;
+  SourceLog log;
+  t_sourceLog = &log;
+  const int prio = GetThreadPriority(GetCurrentThread());
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
+  CompileKey(*it.s, r);
+  SetThreadPriority(GetCurrentThread(), prio == THREAD_PRIORITY_ERROR_RETURN ? THREAD_PRIORITY_NORMAL : prio);
+  t_sourceLog = nullptr;
+  if (!Cacheable(r, log)) return 2;
+  CacheSave(*it.s, r, log);
+  HANDLE h = CreateFileW(it.path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h != INVALID_HANDLE_VALUE) {
+    SetFileTime(h, nullptr, nullptr, &it.written);
+    CloseHandle(h);
+  }
+  return 1;
+}
+
+// Caller holds g_mutex. Whether the scan is due: once per Install, after the
+// delay, with the prewarm on.
+inline bool PrewarmScanDueLocked() {
+  return g_prewarmState == 0 && g_prewarmOn.load(std::memory_order_relaxed) && GetTickCount64() >= g_prewarmAt;
+}
+
+// Caller holds g_mutex. The next entry of a kind that is collected (the
+// others are dropped: nothing would use their result this session).
+inline bool PrewarmTakeLocked(PrewarmItem& out) {
+  while (g_prewarmState == 2 && !g_prewarm.empty()) {
+    PrewarmItem it = std::move(g_prewarm.back());
+    g_prewarm.pop_back();
+    if (g_prewarmOn.load(std::memory_order_relaxed) && (it.s->kind == kKindGb ? g_collectGb.load() : g_collect.load())) {
+      out = std::move(it);
+      ++g_prewarmBusy;
+      return true;
+    }
+    delete it.s;
+    g_prewarmSkipped.fetch_add(1);
+  }
+  return false;
+}
+
+// Caller holds g_mutex. The summary line, once, when the last entry is done.
+inline bool PrewarmFinishedLocked() {
+  if (g_prewarmState != 2 || !g_prewarm.empty() || g_prewarmBusy) return false;
+  g_prewarmState = 3;
+  return g_prewarmFound.load() != 0;
+}
+
+inline void LogPrewarm() {
+  Log("shadow inst: cache prewarm: %u entries used in the last %u days checked in %.0f s: %u current, %u stale "
+      "recompiled, %u skipped",
+      g_prewarmFound.load(), kPrewarmDays, (GetTickCount64() - g_prewarmT0) / 1000.0, g_prewarmCurrent.load(),
+      g_prewarmCompiled.load(), g_prewarmSkipped.load());
+}
+
 // Publishes one snapshot of a finished key (caller holds g_mutex). With a
 // single-threaded device the render thread creates and publishes instead.
 void FinishLocked(Snapshot* s, KeyResult* r) {
@@ -3599,14 +3801,62 @@ DWORD WINAPI Worker(void*) {
   for (;;) {
     Snapshot* s = nullptr;
     KeyResult* r = nullptr;
+    PrewarmItem pre;
+    bool scan = false, preDone = false;
     {
       std::unique_lock<std::mutex> lock(g_mutex);
       for (;;) {  // R90 H2: the render thread's pushes may arrive without a notify (its try_lock failed)
         DrainInboxLocked();
         if (g_stop.load() || !g_queue.empty()) break;
+        // Nothing live is waiting: the prewarm (live keys always go first).
+        if (PrewarmScanDueLocked()) {
+          g_prewarmState = 1;
+          scan = true;
+          break;
+        }
+        if (PrewarmTakeLocked(pre)) break;
+        if (PrewarmFinishedLocked()) {
+          preDone = true;
+          break;
+        }
         g_cv.wait_for(lock, std::chrono::milliseconds(100));
       }
+      if (g_stop.load()) {
+        if (pre.s) {
+          delete pre.s;
+          --g_prewarmBusy;
+        }
+        return 0;
+      }
+    }
+    if (preDone) {
+      LogPrewarm();
+      continue;
+    }
+    if (scan) {
+      g_prewarmT0 = GetTickCount64();
+      std::vector<PrewarmItem> found = PrewarmScan();
+      std::lock_guard<std::mutex> lock(g_mutex);
+      g_prewarmFound = static_cast<uint32_t>(found.size());
+      g_prewarm = std::move(found);
+      g_prewarmState = 2;
+      g_cv.notify_all();
+      continue;
+    }
+    if (pre.s) {
+      const int what = PrewarmOne(pre);
+      (what == 0 ? g_prewarmCurrent : what == 1 ? g_prewarmCompiled : g_prewarmSkipped).fetch_add(1);
+      delete pre.s;
+      std::lock_guard<std::mutex> lock(g_mutex);
+      --g_prewarmBusy;
+      continue;
+    }
+    {
+      std::unique_lock<std::mutex> lock(g_mutex);
+      // Another worker may have taken the key between the two locks.
+      DrainInboxLocked();
       if (g_stop.load()) return 0;
+      if (g_queue.empty()) continue;
       s = g_queue.front();
       g_queue.erase(g_queue.begin());
       const std::string rk = ResultKey(s->kind, s->key);
@@ -4214,19 +4464,45 @@ bool Install() {
     std::lock_guard<std::mutex> lock(g_cacheMutex);
     configured = g_cacheConfigured;
   }
-  const char* cacheWhy = configured ? nullptr : CacheInit(g_dir.empty() ? std::wstring() : g_dir + L"cache\\", g_compiler);
+  // [Model] ShaderCacheDir when it is usable, else the module's own folder as before.
+  const char* cacheWhy = nullptr;
+  const char* wantedWhy = g_cacheChoice.why;
+  if (!configured) {
+    bool wanted = g_cacheChoice.configured;
+    if (wanted && !qvcachedir::CreateTree(g_cacheChoice.dir)) {
+      wanted = false;
+      wantedWhy = "folder missing and not creatable";
+    }
+    if (wanted && (wantedWhy = CacheInit(g_cacheChoice.dir, g_compiler)) != nullptr) wanted = false;
+    if (!wanted) cacheWhy = CacheInit(g_dir.empty() ? std::wstring() : g_dir + L"cache\\", g_compiler);
+  }
   std::wstring cacheDir;
   {
     std::lock_guard<std::mutex> lock(g_cacheMutex);
     cacheDir = g_cacheDir;
   }
-  for (int i = 0; i < kWorkers; ++i) g_workers[i] = CreateThread(nullptr, 0, qvexit::Thread<Worker>, nullptr, 0, nullptr);
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (PrewarmItem& it : g_prewarm) delete it.s;
+    g_prewarm.clear();
+    g_prewarmState = 0;
+    g_prewarmBusy = 0;
+    g_prewarmAt = GetTickCount64() + g_prewarmDelayMs;
+  }
+  g_prewarmFound = g_prewarmCurrent = g_prewarmCompiled = g_prewarmSkipped = 0;
+  g_workerCount = qvcachedir::Workers(g_workersWanted, qvcachedir::LogicalProcessors());
+  for (int i = 0; i < g_workerCount; ++i)
+    g_workers[i] = CreateThread(nullptr, 0, qvexit::Thread<Worker>, nullptr, 0, nullptr);
   instcount::g_observer.store(&Observer);
   g_state = 1;
   Log("shadow inst: ready (compiler %s; DCS process had %s; sources %ls; %d compile workers)",
-      g_compiler.path.c_str(), already, g_root.c_str(), kWorkers);
+      g_compiler.path.c_str(), already, g_root.c_str(), g_workerCount);
+  if (wantedWhy && !g_cacheChoiceRaw.empty())
+    Log("shadow inst: cache: [Model] ShaderCacheDir=%ls not used (%s); the module's own folder instead",
+        g_cacheChoiceRaw.c_str(), wantedWhy);
   if (!cacheDir.empty())
-    Log("shadow inst: cache: %ls (format %u, edit version %u)", cacheDir.c_str(), kCacheFormat, kCacheEditVersion);
+    Log("shadow inst: cache: %ls (format %u, edit version %u%s)", cacheDir.c_str(), kCacheFormat, kCacheEditVersion,
+        g_prewarmOn.load() ? "; prewarm on" : "; prewarm off");
   else
     Log("shadow inst: cache: off (%s); every key is compiled", cacheWhy ? cacheWhy : "not configured");
   return true;
@@ -4337,7 +4613,7 @@ void LogKeysLocked(int kind, const char* tag) {
   std::sort(ms.begin(), ms.end());
   if (!ms.empty())
     Log("  %s: compile time per key (a+b): min %.0f ms, median %.0f ms, max %.0f ms, total %.1f s on %d workers", tag,
-        ms.front(), ms[ms.size() / 2], ms.back(), total / 1000.0, kWorkers);
+        ms.front(), ms[ms.size() / 2], ms.back(), total / 1000.0, g_workerCount);
   for (auto& kv : failed) {
     std::string paths;
     for (size_t i = 0; i < kv.second.size() && i < 6; ++i) paths += (i ? ", " : "") + kv.second[i];
@@ -4594,6 +4870,8 @@ void Shutdown(bool release = true) {
   g_queue.clear();
   for (auto& pc : g_pendingCreate) delete pc.first;
   g_pendingCreate.clear();
+  for (PrewarmItem& it : g_prewarm) delete it.s;
+  g_prewarm.clear();
   if (g_device) g_device->Release();
   g_device = nullptr;
   g_gbInstalled = false;
