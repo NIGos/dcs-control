@@ -20,6 +20,7 @@
 #include "shadow_rec_count.h"
 #include "split_filter.h"
 #include "srv_tail_trim.h"
+#include "fx_skip.h"  // A3: FX pass Apply repeat counter and lean Apply ([D3D] FxApplySkip, default 0)
 #include "pass_flush.h"
 #include "shadow_rec.h"
 #include "gb_rec_count.h"

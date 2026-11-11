@@ -180,6 +180,7 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   pdev::Uninstall();    // [General] PerceptionOnly: DX11Renderer::draw back to DCS's if the first draw never came
   srvspan::Shutdown();  // restores the ApplyShaderBlock call sites if a count was running
   srvtrim::Shutdown();  // the same two call sites back to stock if the trim was on
+  fxskip::Shutdown();   // A3: SPassBlock Apply slot back to stock (no-op unless [D3D] FxApplySkip was on)
   plod::Shutdown();     // stock LOD tables back, view callback and vt[24] hook out (no-op unless used)
   cascache::Shutdown(); // R33 cascade cache: SceneRender slot and the innermost execute out, textures released (no-op unless used)
   fixdepth::Shutdown(); // depth callback out and drained, worker joined, D3D objects and file mappings released
