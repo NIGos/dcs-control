@@ -89,6 +89,7 @@ struct Config {
   bool suiteShadowRecCount = false;      // [Suite] ShadowRecCount (R17 S0: shadow recorder counters)
   bool suiteGBufferRecCount = false;     // [Suite] GBufferRecCount (R18 S0: G-buffer recorder counters and gates)
   bool suiteForwardRecCount = false;     // [Suite] ForwardRecCount (R21 S0: SimplePassData recorder counters and gates)
+  int suiteForwardSplit = 0;             // [Suite] ForwardSplit: seconds between "fwd split:" lines while flying (fwd_split.h; 0 = off)
   bool suiteGpuPassTiming = false;       // [Suite] GpuPassTiming (gpu_pass_timing.h: GPU ms and context ops per pass)
   bool suiteGpuPassStats = false;        // [Suite] GpuPassStats (with GpuPassTiming: pipeline statistics and samples passed per pass)
   int peripheralLodScale = 0;            // [Model] PeripheralLodScale (periph_lod.h: LOSSY prototype, periphery instancer LOD factors x percent/100; 0 = off)
