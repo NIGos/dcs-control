@@ -16,6 +16,9 @@
 //    [Suite] PerEyePassCensus=1 (default 0: nothing runs, nothing changes) logs it from the suite thread: file reads
 //    and CPU work only.
 //  - Small pure rules the later stages need: the viewport-mask packing, the two-slice target plan, the merge order.
+//  - Stage 1 addition: a computed row of the per-view buffer is accepted when its index is the result of imin / imax
+//    with literals in the same straight-line run and the whole range holds no per-view row (DCS: every terrain-family
+//    shader reads TerrainContext_surfaceLod[clamp(i, 0, 3)], rows 45-48). Anything else computed stays refused.
 //
 // Included once from main.cpp (features.inc), last; uses Log and g_dir only (SuitePhase). Header-only, C++17.
 #pragma once
@@ -266,7 +269,7 @@ inline std::vector<uint8_t> BuildContainer(const std::vector<ChunkData>& chunks)
 enum Op : uint32_t {
   kOpBreak = 2, kOpBreakc = 3, kOpCall = 4, kOpCallc = 5, kOpCase = 6, kOpContinue = 7, kOpContinuec = 8, kOpCut = 9,
   kOpDefault = 10, kOpDiscard = 13, kOpElse = 18, kOpEmit = 19, kOpEmitThenCut = 20, kOpEndif = 21, kOpEndloop = 22,
-  kOpEndswitch = 23, kOpIf = 31, kOpImul = 38, kOpLabel = 44, kOpLoop = 48, kOpCustomData = 53, kOpMov = 54,
+  kOpEndswitch = 23, kOpIf = 31, kOpImax = 36, kOpImin = 37, kOpImul = 38, kOpLabel = 44, kOpLoop = 48, kOpCustomData = 53, kOpMov = 54,
   kOpNop = 58, kOpRet = 62, kOpRetc = 63, kOpSwitch = 76, kOpSincos = 77, kOpUdiv = 78, kOpUmul = 81,
   kOpDclResource = 88, kOpDclConstantBuffer = 89, kOpDclOutput = 101, kOpDclOutputSgv = 102, kOpDclOutputSiv = 103,
   kOpDclTemps = 104, kOpDclIndexableTemp = 105, kOpDclGlobalFlags = 106, kOpLod = 108, kOpReserved1 = 112,
@@ -426,6 +429,7 @@ struct PatchResult {
   uint32_t posReg = 0, pos2Reg = 0, maskReg = 0, slot = 0;
   std::vector<uint32_t> rows;        // injected buffer: row i = the focus view's row rows[i]; row rows.size() = the mask (x)
   uint32_t ins = 0, twinned = 0, twinTemps = 0;
+  uint32_t boundedRows = 0;          // computed row reads proven to stay on rows both views share
 };
 
 struct Sig {
@@ -492,6 +496,15 @@ struct Scan {
   uint32_t outTaint = 0;
   int fail = kPwOk;
   uint32_t badOp = 0;
+  // Per temp component (register * 4 + component): a proven range of its signed integer value. Set only by imin /
+  // imax with a literal and forgotten at every other write and at every flow-control instruction, so a range holds
+  // exactly between the instruction that made it and the next branch: no path analysis is needed for it to be true.
+  std::vector<int32_t> lo, hi;
+  uint32_t boundedRows = 0;      // computed row reads accepted because their range holds no per-view row
+  void ForgetRanges() {
+    lo.assign(state.size() * 4, INT32_MIN);
+    hi.assign(state.size() * 4, INT32_MAX);
+  }
   uint32_t RowComps(uint32_t row) const {
     for (uint32_t i = 0; i < o->nRows; ++i)
       if (o->rows[i].row == row) return o->rows[i].comps;
@@ -515,7 +528,25 @@ inline bool ReadsView(Scan& s, const uint32_t* t, const Opnd& o, bool asSource) 
   if (o.type == kOtTemp && o.dim == 1 && o.rep[0] == 0) return v || (s.Temp(t[o.imm[0]]) & SrcComps(o)) != 0;
   if (o.type == kOtConstantBuffer && o.dim == 2 && o.rep[0] == 0 && t[o.imm[0]] == s.o->cb) {
     if (o.rep[1] != 0) {
-      s.fail = kPwDynamicRow;
+      // A computed row. Exact only when the index provably stays on rows both views share (DCS: the four
+      // TerrainContext_surfaceLod rows, indexed by a value clamped to 0..3) and is not itself a per-view value.
+      bool shared = false;
+      Opnd sub;
+      if ((o.rep[1] == 2 || o.rep[1] == 3) && !v && o.sub[1] && DecodeOperand(t + o.sub[1], 64, sub) &&
+          sub.type == kOtTemp && sub.dim == 1 && sub.rep[0] == 0 && sub.ncomp == 2 && sub.selMode == 2 &&
+          !(t[o.sub[1]] >> 31)) {
+        const size_t at = static_cast<size_t>(t[o.sub[1] + sub.imm[0]]) * 4 + (sub.sel & 3);
+        const uint32_t base = o.rep[1] == 3 ? t[o.imm[1]] : 0u;
+        if (at < s.lo.size() && s.lo[at] >= 0 && s.hi[at] >= s.lo[at] && s.hi[at] <= 4096 && base <= 4096) {
+          shared = true;
+          for (int32_t r = s.lo[at]; r <= s.hi[at]; ++r)
+            if (s.RowComps(base + static_cast<uint32_t>(r))) shared = false;
+        }
+      }
+      if (shared)
+        ++s.boundedRows;
+      else
+        s.fail = kPwDynamicRow;
       return v;
     }
     return v || (s.RowComps(t[o.imm[1]]) & SrcComps(o)) != 0;
@@ -587,6 +618,20 @@ inline void Analyze(const Code& c, Scan& s) {
   std::vector<Frame> stack;
   int weak = 0;
   uint32_t steps = 0;
+  s.ForgetRanges();
+  // The range of one component of a source operand of imin / imax: a literal, or a temp whose range is known.
+  const auto srcRange = [&s](const uint32_t* t, const Opnd& o, uint32_t comp, int32_t* lo, int32_t* hi) {
+    *lo = INT32_MIN, *hi = INT32_MAX;
+    if (t[0] >> 31) return;  // a modifier (negate, absolute value)
+    if (o.type == kOtImm32) {
+      const uint32_t n = o.ncomp == 1 ? 1u : 4u;
+      *lo = *hi = static_cast<int32_t>(t[o.len - n + (n == 1 ? 0 : comp)]);
+    } else if (o.type == kOtTemp && o.dim == 1 && o.rep[0] == 0 && o.ncomp == 2) {
+      const uint32_t c2 = o.selMode == 1 ? (o.sel >> (2 * comp)) & 3 : o.selMode == 2 ? o.sel & 3 : comp;
+      const size_t at = static_cast<size_t>(t[o.imm[0]]) * 4 + c2;
+      if (at < s.lo.size()) *lo = s.lo[at], *hi = s.hi[at];
+    }
+  };
   for (size_t k = c.firstCode; k < c.ins.size() && s.fail == kPwOk; ++k) {
     if (++steps > 4000000) {
       s.fail = kPwTokens;
@@ -615,6 +660,7 @@ inline void Analyze(const Code& c, Scan& s) {
         s.fail = kPwFlow;
         return;
       }
+      s.ForgetRanges();
       const bool top = !stack.empty();
       switch (i.op) {
         case kOpIf:
@@ -675,6 +721,23 @@ inline void Analyze(const Code& c, Scan& s) {
       }
       continue;
     }
+    // imin / imax: the result's range per component, from the sources as they are before this instruction writes.
+    int32_t nlo[4], nhi[4];
+    for (int q = 0; q < 4; ++q) nlo[q] = INT32_MIN, nhi[q] = INT32_MAX;
+    if ((i.op == kOpImin || i.op == kOpImax) && !(c.tok[i.pos] >> 31)) {
+      Opnd od, oa, ob;
+      const uint32_t pa = i.first + (DecodeOperand(t + i.first, i.len - i.first, od) ? od.len : i.len);
+      if (pa < i.len && DecodeOperand(t + pa, i.len - pa, oa) && pa + oa.len < i.len &&
+          DecodeOperand(t + pa + oa.len, i.len - pa - oa.len, ob))
+        for (uint32_t q = 0; q < 4; ++q) {
+          int32_t al, ah, bl, bh;
+          srcRange(t + pa, oa, q, &al, &ah);
+          srcRange(t + pa + oa.len, ob, q, &bl, &bh);
+          const bool mn = i.op == kOpImin;
+          nlo[q] = mn ? (al < bl ? al : bl) : (al > bl ? al : bl);
+          nhi[q] = mn ? (ah < bh ? ah : bh) : (ah > bh ? ah : bh);
+        }
+    }
     idx = 0;
     for (uint32_t p = i.first; p < i.len && idx < dests; p += o.len, ++idx) {
       DecodeOperand(t + p, i.len - p, o);
@@ -687,6 +750,8 @@ inline void Analyze(const Code& c, Scan& s) {
         }
         const bool masked = o.ncomp == 2 && o.selMode == 0;
         const uint8_t m = static_cast<uint8_t>(masked ? o.sel & 0xf : 0xf);
+        for (uint32_t q = 0; q < 4; ++q)
+          if (m >> q & 1) s.lo[r * 4 + q] = masked ? nlo[q] : INT32_MIN, s.hi[r * 4 + q] = masked ? nhi[q] : INT32_MAX;
         if (reads)
           s.state[r] |= m, s.tainted[r] = 1;
         else if (!weak && masked)
@@ -774,6 +839,7 @@ inline PatchResult PatchVsDualPosition(const uint8_t* blob, size_t size, const P
   s.state.assign(c.temps, 0);
   Analyze(c, s);
   r.ins = static_cast<uint32_t>(c.ins.size() - c.firstCode);
+  r.boundedRows = s.boundedRows;
   if (s.fail != kPwOk) return r.why = s.fail, r.badOp = s.badOp, r;
   r.posReg = sig.posReg;
   if (!(s.outTaint >> sig.posReg & 1)) return r.why = kPwNoViewRows, r;
@@ -881,6 +947,7 @@ struct Census {
   uint32_t exact = 0;          // cloned, position only
   uint32_t varyings = 0;       // cloned, but a view-dependent value goes to the pixel shader
   uint64_t ins = 0, twinned = 0;  // over the cloned shaders
+  uint32_t bounded = 0;        // clones that read a computed row proven to stay on rows both views share
   uint32_t badOps[256] = {};
 };
 inline bool DeclaresCb(const uint8_t* blob, const std::vector<Chunk>& chunks, uint32_t slot, bool* vs) {
@@ -934,6 +1001,7 @@ inline void CensusBytes(const uint8_t* f, size_t n, const PatchOpts& o, Census& 
     if (r.why == kPwOpcode) ++c.badOps[r.badOp & 255];
     if (r.why != kPwOk) continue;
     r.viewVaryings ? ++c.varyings : ++c.exact;
+    if (r.boundedRows) ++c.bounded;
     c.ins += r.ins, c.twinned += r.twinned;
   }
 }
@@ -1004,6 +1072,13 @@ inline std::string CensusText(const Census& c) {
   for (int op = 0; op < 256; ++op) {
     if (!c.badOps[op]) continue;
     snprintf(b, sizeof(b), "per-eye pass census: unhandled instruction opcode %d in %u shaders\n", op, c.badOps[op]);
+    s += b;
+  }
+  if (c.bounded) {
+    snprintf(b, sizeof(b),
+             "per-eye pass census: %u clones read a computed row of the per-view buffer; its index is clamped to rows "
+             "both views share\n",
+             c.bounded);
     s += b;
   }
   if (c.exact + c.varyings) {

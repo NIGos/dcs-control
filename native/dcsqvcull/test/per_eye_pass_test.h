@@ -204,6 +204,34 @@ VSOut vs_dyn(VSIn i) {
   o.uv = i.uv;
   return o;
 }
+VSOut vs_lod(VSIn i) {
+  VSOut o;
+  int l = max(min((int)gFrame[3].z, 3), 0);     // DCS's surfaceLod pattern: rows 45..48, shared by both views
+  float4 lod = tc[45 + l];
+  float4 w = float4(i.pos * (1 + lod.x * 0.125) + lod.yzw * 0.01, 1);
+  o.pos = Project(w);
+  o.wpos = w.xyz;
+  o.uv = i.uv;
+  return o;
+}
+VSOut vs_lod_view(VSIn i) {
+  VSOut o;
+  int l = max(min((int)gFrame[3].z, 3), 0);     // rows 41..44: row 44 holds the render size (per view)
+  float4 w = float4(i.pos + tc[41 + l].xyz * 0.01, 1);
+  o.pos = Project(w);
+  o.wpos = w.xyz;
+  o.uv = i.uv;
+  return o;
+}
+VSOut vs_lod_open(VSIn i) {
+  VSOut o;
+  int l = min((int)gFrame[3].z, 3);             // no lower bound
+  float4 w = float4(i.pos + tc[45 + l].xyz * 0.01, 1);
+  o.pos = Project(w);
+  o.wpos = w.xyz;
+  o.uv = i.uv;
+  return o;
+}
 VSOut vs_noview(VSIn i) {
   VSOut o;
   float4 w = float4(i.pos, 1);
@@ -417,8 +445,9 @@ void Clone() {
                              vary = Compile("vs_vary", "vs_5_0"), size = Compile("vs_size", "vs_5_0"),
                              flow = Compile("vs_flow", "vs_5_0"), dyn = Compile("vs_dyn", "vs_5_0"),
                              noview = Compile("vs_noview", "vs_5_0"), ps = Compile("ps_main", "ps_5_0"),
-                             plain4 = Compile("vs_plain", "vs_4_0");
-  if (plain.empty() || inst.empty() || vary.empty() || size.empty() || flow.empty() || dyn.empty() || noview.empty() ||
+                             plain4 = Compile("vs_plain", "vs_4_0"), lod = Compile("vs_lod", "vs_5_0"),
+                             lodView = Compile("vs_lod_view", "vs_5_0"), lodOpen = Compile("vs_lod_open", "vs_5_0");
+  if (lod.empty() || lodView.empty() || lodOpen.empty() || plain.empty() || inst.empty() || vary.empty() || size.empty() || flow.empty() || dyn.empty() || noview.empty() ||
       ps.empty() || plain4.empty()) {
     Check(false, "per-eye pass: test shaders compile");
     return;
@@ -437,7 +466,7 @@ void Clone() {
     bool varyings;
   } cases[] = {{"plain", &plain, false}, {"instanced (buffer load, shared-flag branch, sincos, loop)", &inst, false},
                {"view-dependent varying", &vary, true}, {"render size in the position", &size, false},
-               {"vs_4_0", &plain4, false}};
+               {"vs_4_0", &plain4, false}, {"surface-LOD row picked by a clamped index", &lod, false}};
   for (const Case& cs : cases) {
     const pep::PatchResult r = pep::PatchVsDualPosition(cs.blob->data(), cs.blob->size());
     int step = r.why == pep::kPwOk ? 0 : 100 + r.why;
@@ -475,6 +504,17 @@ void Clone() {
         "rows, a pixel shader, a cut container");
   if (rf.why != pep::kPwFlow || rd.why != pep::kPwDynamicRow || rn.why != pep::kPwNoViewRows)
     printf("     flow %d, dyn %d, noview %d, ps %d, cut %d\n", rf.why, rd.why, rn.why, rp.why, rb.why);
+  // A computed row: cloned only when its index is clamped onto rows both views share.
+  const pep::PatchResult rl = pep::PatchVsDualPosition(lod.data(), lod.size());
+  const pep::PatchResult rlv = pep::PatchVsDualPosition(lodView.data(), lodView.size());
+  const pep::PatchResult rlo = pep::PatchVsDualPosition(lodOpen.data(), lodOpen.size());
+  Check(rl.why == pep::kPwOk && rl.boundedRows >= 1 && rlv.why == pep::kPwDynamicRow && rlv.blob.empty() &&
+            rlo.why == pep::kPwDynamicRow && rlo.blob.empty() && rd.boundedRows == 0,
+        "per-eye pass: a computed row is cloned when imin / imax clamp it onto shared rows (45..48), refused when "
+        "the range reaches a per-view row (41..44) or has no lower bound");
+  if (rl.why != pep::kPwOk || rlv.why != pep::kPwDynamicRow || rlo.why != pep::kPwDynamicRow)
+    printf("     lod %d (bounded %u), lod on a view row %d, lod without a lower bound %d\n", rl.why, rl.boundedRows, rlv.why,
+           rlo.why);
   // A slot the shader already declares is never used for the injected rows.
   pep::PatchOpts o6;
   o6.preferSlot = 6;

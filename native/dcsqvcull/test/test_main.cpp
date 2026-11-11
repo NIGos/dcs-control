@@ -331,6 +331,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "r132_test.h"       // R132: opt-in release of idle DLSS sets (fake NGX core)
 #include "r133_test.h"       // R133: the recorder's motion vectors (exec-time freshness rig, the verify's bracket, dump)
 #include "per_eye_pass_test.h"  // per-eye pass stage 0 (exact focus rows, the vertex-shader clone on WARP, the census)
+#include "per_eye_live_test.h"  // per-eye pass stage 2: the live captures' pure parts (per_eye_live.h)
 #include "vrs_probe_test.h"  // R139: the measure-only VRS probe (keys, schedule, ring map, NvAPI binding, WARP + fake NvAPI)
 #include "r111_test.h"      // R111: [Color] PanelGamut (sRGB -> DCI-P3 compensation for a wide-gamut panel)
 #include "log_phrases_test.h"  // R107: the log phrases DCS Control parses stay in the source byte-exact
@@ -452,6 +453,7 @@ int main() {
   }
   if (getenv("QV_PEP_ONLY")) {  // only the per-eye pass tests (QV_PEP_ARCHIVE=<folder>: also the census of that folder)
     peptest::Run();
+    pepltest::Run();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -1985,6 +1987,7 @@ int main() {
   r133test::Run();  // R133: the recorder's motion vectors (exec-time freshness on WARP, the verify's bracket, dump)
   vrstest::Run();   // R139: the measure-only VRS probe ([Suite] VrsProbe; pure parts, WARP with a fake NvAPI)
   peptest::Run();   // per-eye pass stage 0: exact focus rows, the vertex-shader clone against stock on WARP, the census
+  pepltest::Run();  // per-eye pass stage 2: the live captures' pure parts (views from TerrainContexts, C2 / C4 / C5 / C7 verdicts)
   vfxtest::Run();
   // R39 [Threads]: worker placement off DCS's exclusive render core (all keys default 0), census queries.
   tptest::Run();
