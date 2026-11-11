@@ -25,6 +25,10 @@
 //   [Suite] PerEyeLogSec=N  a line every N s while C4 / C5 run (default 10).
 // Every line starts with "pep C2:", "pep C4:", "pep C5:" or "pep C7:". With every key at 0 nothing here runs.
 //
+// Frames: by pass structure (mkit::FrameTrack: the first top-level HeightMapPass / shadow cascade after a view).
+// The first live run (2026-11-11) used pass_timing.h's g_execFrame, which never changes live: one set filled once
+// ("snapshots 24"), nothing was ever read back, every line said 0 frames. A "pep live diag:" line now says once per
+// capture what was seen and names the cause when nothing pairs.
 // How views are told apart: by the TerrainContext, as R53 / focus_twin_math.h (ftwin::ClassifyTc; a focus view's eye
 // is the periphery of the same frame whose shared rows it has). The G-buffer passes of a view are counted in frame
 // order; its main pass is the second to last of three or more, else the first (R44 live). Never by fixed ordinals.
@@ -224,6 +228,79 @@ inline std::string C5Line(const C5Acc& a) {
   return b;
 }
 
+// Why a captured frame gave no periphery + focus pair (the first cause that applies), for the diagnostic line.
+enum NoPair : int { kNpOk = 0, kNpNoPass, kNpNoTc, kNpNoPeriph, kNpNoFocus, kNpFocusNoEye, kNpCount };
+inline const char* NoPairName(int w) {
+  static const char* const n[kNpCount] = {"paired", "no G-buffer pass in the frame", "no TerrainContext at b11",
+                                          "no periphery view (sx < 1.5, off-centre)", "no focus view (sx >= 1.5)",
+                                          "a focus view shares no periphery's rows"};
+  return w >= 0 && w < kNpCount ? n[w] : "?";
+}
+inline int WhyNoPair(const FrameRec& f, const Resolved& r) {
+  if (r.mainP[0] >= 0 && r.mainF[0] >= 0 && r.mainP[1] >= 0 && r.mainF[1] >= 0) return kNpOk;
+  if (!f.n) return kNpNoPass;
+  int tc = 0, periph = 0, focus = 0;
+  for (int i = 0; i < f.n; ++i) {
+    tc += f.gb[i].tcOk;
+    periph += r.kind[i] == ftwin::kPeriph;
+    focus += r.kind[i] == ftwin::kFocus;
+  }
+  if (!tc) return kNpNoTc;
+  if (!periph) return kNpNoPeriph;
+  if (!focus) return kNpNoFocus;
+  return kNpFocusNoEye;
+}
+struct Diag {
+  uint64_t frames = 0, passes = 0, why[kNpCount] = {};
+  std::string sample;  // the P rows of the first TerrainContext of the first frame without a pair
+};
+inline void DiagAdd(Diag& d, const FrameRec& f, const Resolved& r) {
+  const int w = WhyNoPair(f, r);
+  ++d.frames;
+  d.passes += static_cast<uint64_t>(f.n);
+  ++d.why[w];
+  if (w == kNpOk || !d.sample.empty()) return;
+  for (int i = 0; i < f.n; ++i) {
+    if (!f.gb[i].tcOk) continue;
+    uint32_t x[4], y[4], pw[4];
+    memcpy(x, f.gb[i].tc + 16 * ftwin::kRowPx, 16);
+    memcpy(y, f.gb[i].tc + 16 * ftwin::kRowPy, 16);
+    memcpy(pw, f.gb[i].tc + 16 * ftwin::kRowPw, 16);
+    const float* s = ftwin::TcRow(f.gb[i].tc, ftwin::kRowSize);
+    char b[256];
+    snprintf(b, sizeof(b), "pass %d row16 %08x %08x %08x %08x row17 %08x %08x %08x %08x row19 %08x %08x %08x %08x size %.0fx%.0f",
+             f.gb[i].ord, x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3], pw[0], pw[1], pw[2], pw[3], s[2], s[3]);
+    d.sample = b;
+    return;
+  }
+}
+inline std::string DiagLine(const Diag& d, uint64_t frameStarts, uint64_t gbPasses, uint64_t snaps) {
+  char b[640];
+  snprintf(b, sizeof(b),
+           "pep live diag: %llu frame starts seen by pass structure, %llu top-level G-buffer passes, %llu "
+           "TerrainContext snapshots; %llu frames read back with %.1f passes each: paired %llu",
+           static_cast<unsigned long long>(frameStarts), static_cast<unsigned long long>(gbPasses),
+           static_cast<unsigned long long>(snaps), static_cast<unsigned long long>(d.frames),
+           d.frames ? static_cast<double>(d.passes) / static_cast<double>(d.frames) : 0.0,
+           static_cast<unsigned long long>(d.why[kNpOk]));
+  std::string s = b;
+  for (int w = kNpNoPass; w < kNpCount; ++w)
+    if (d.why[w]) {
+      snprintf(b, sizeof(b), ", %s %llu", NoPairName(w), static_cast<unsigned long long>(d.why[w]));
+      s += b;
+    }
+  if (!frameStarts)
+    s += " | CAUSE: no frame start (no top-level HeightMapPass / shadow cascade after a view): frames cannot be told apart";
+  else if (!gbPasses)
+    s += " | CAUSE: no top-level pass named GBufferPass";
+  else if (!d.frames)
+    s += " | CAUSE: no frame was read back (copies not ready, or no free set)";
+  else if (!d.why[kNpOk])
+    s += " | CAUSE: no frame had both eyes' periphery and focus views";
+  if (!d.sample.empty()) s += " | first unpaired: " + d.sample;
+  return s;
+}
+
 struct C4Acc {
   struct View {
     uint64_t passes = 0, order[4] = {};  // pep::MergeOrder
@@ -300,9 +377,24 @@ inline C7Out C7FromCensus(const mkit::CensusAcc& acc) {
   C7Out o;
   o.chains = acc.chains;
   if (acc.chains < 4) return o;
+  // The view chains: the four chains run by one pass object (TerrainModule calls #1-#4, R34 live), in frame
+  // order; without such a group, the last four.
+  int v[4] = {acc.chains - 4, acc.chains - 3, acc.chains - 2, acc.chains - 1};
+  for (size_t i = 0; i < acc.chain.size(); ++i) {
+    int g[4], n = 0;
+    for (size_t j = 0; j < acc.chain.size(); ++j)
+      if (acc.chain[i].pass && acc.chain[j].pass == acc.chain[i].pass) {
+        if (n < 4) g[n] = static_cast<int>(j);
+        ++n;
+      }
+    if (n == 4) {
+      memcpy(v, g, sizeof(v));
+      break;
+    }
+  }
   bool all = true, any = false;
   for (int e = 0; e < 2; ++e) {
-    const auto it = acc.pair.find({acc.chains - 4 + e, acc.chains - 2 + e});
+    const auto it = acc.pair.find({v[e], v[2 + e]});
     if (it == acc.pair.end()) continue;
     o.frames[e] = it->second.frames, o.subset[e] = it->second.subset, o.maxOver[e] = it->second.maxObjectsOver;
     o.excess[e] = it->second.frames ? it->second.excessSum / static_cast<double>(it->second.frames) : 0;
@@ -335,7 +427,7 @@ std::atomic<bool> g_capture{false};   // TC snapshots (C4 / C5 / C2's learning)
 std::atomic<bool> g_walk{false};      // C4 item walk
 std::atomic<bool> g_release{false}, g_released{false};
 std::atomic<bool> g_fault{false};
-std::atomic<uint64_t> g_noTc{0}, g_noSet{0}, g_copyFail{0}, g_ringFull{0}, g_snaps{0};
+std::atomic<uint64_t> g_noTc{0}, g_noSet{0}, g_copyFail{0}, g_ringFull{0}, g_snaps{0}, g_frameStarts{0}, g_gbPasses{0};
 // C2: the frame-order numbers (among top-level G-buffer passes) of the two focus main passes, -1 unknown.
 std::atomic<int> g_c2Ord[2]{{-1}, {-1}};
 std::atomic<bool> g_c2On{false};
@@ -350,7 +442,7 @@ struct Set {
 };
 Set g_sets[kSets];
 int g_cur = -1;
-uint64_t g_frame = ~0ull;
+mkit::FrameTrack g_track;  // frames by pass structure (ptiming::g_execFrame is constant live)
 int g_gbOrd = 0;
 bool g_inGb = false;
 GbRec g_meta;
@@ -632,11 +724,13 @@ void BoundaryBody(void* pass, bool begin) {
     return;
   }
   const bool cap = g_capture.load(std::memory_order_relaxed);
-  const uint64_t frame = ptiming::g_execFrame.load(std::memory_order_relaxed);
-  if (frame != g_frame) {
+  const int kind = plod::KindOf(pass);
+  // A capture starts with a whole frame: nothing is kept before the first frame start it sees.
+  if (g_track.OnTop(kind, begin)) {
+    g_frameStarts.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t frame = g_track.serial;
     if (g_cur >= 0) g_sets[g_cur].pending = g_sets[g_cur].n > 0;
     g_cur = -1;
-    g_frame = frame;
     g_gbOrd = 0;
     g_inGb = false;
     Poll(c);
@@ -651,8 +745,9 @@ void BoundaryBody(void* pass, bool begin) {
       }
     }
   }
-  if (plod::KindOf(pass) != plod::kGBuffer) return;
+  if (kind != plod::kGBuffer) return;
   if (begin) {
+    g_gbPasses.fetch_add(1, std::memory_order_relaxed);
     g_meta = GbRec();
     g_meta.ord = static_cast<uint8_t>(std::min(g_gbOrd, 255));
     g_inGb = true;
@@ -734,6 +829,7 @@ bool StartCapture(bool walk) {
           "measured");
   }
   g_release = false, g_released = false;
+  g_frameStarts = g_gbPasses = g_snaps = g_noTc = g_noSet = g_copyFail = g_ringFull = 0;
   plod::BFn none = nullptr;
   if (!plod::g_probe.compare_exchange_strong(none, &OnBoundary)) {
     Log("pep live: the boundary probe slot is taken; skipped");
@@ -773,6 +869,8 @@ void CapturePhase(const Keys& k) {
   const int seconds = std::max(k.c4, k.c5);
   C5Acc a5;
   C4Acc a4;
+  Diag dg;
+  bool diagDone = false;
   if (!StartCapture(k.c4 > 0)) {
     StopCapture();
     return;
@@ -787,8 +885,13 @@ void CapturePhase(const Keys& k) {
     Sleep(100);
     for (const FrameRec& f : Drain()) {
       const Resolved r = Resolve(f);
+      DiagAdd(dg, f, r);
       if (k.c5 > 0) C5Add(a5, f, r);
       if (k.c4 > 0) C4Add(a4, f, r);
+    }
+    if (!diagDone && GetTickCount64() - t0 >= 3000) {  // once: what the capture sees, and the cause when it sees nothing
+      diagDone = true;
+      Log("%s", DiagLine(dg, g_frameStarts.load(), g_gbPasses.load(), g_snaps.load()).c_str());
     }
     if (GetTickCount64() >= next) {
       lines();
@@ -838,10 +941,12 @@ void C2Phase(const Keys& k, std::atomic<uint64_t>& frames) {
   }
   // Learn which G-buffer executions are the focus views' main passes (2 s of TerrainContext snapshots).
   int ord[2] = {-1, -1}, ordP[2] = {-1, -1}, gbCalls = 0, agree = 0, seen = 0;
+  Diag dg;
   for (int t = 0; t < 30 && seen < 30 && !g_benchAbort; ++t) {
     Sleep(100);
     for (const FrameRec& f : Drain()) {
       const Resolved r = Resolve(f);
+      DiagAdd(dg, f, r);
       if (r.mainF[0] < 0 || r.mainF[1] < 0 || r.mainP[0] < 0 || r.mainP[1] < 0) continue;
       const int o[2] = {f.gb[r.mainF[0]].ord, f.gb[r.mainF[1]].ord};
       ++seen;
@@ -851,6 +956,7 @@ void C2Phase(const Keys& k, std::atomic<uint64_t>& frames) {
     }
   }
   g_capture = false;
+  Log("%s", DiagLine(dg, g_frameStarts.load(), g_gbPasses.load(), g_snaps.load()).c_str());
   if (seen < 10 || agree * 10 < seen * 9) {
     Log("pep C2: the focus main passes were not found at a stable place in the frame (%d frames, %d agreeing); NOT "
         "MEASURED", seen, agree);
