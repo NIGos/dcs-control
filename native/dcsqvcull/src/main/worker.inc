@@ -182,6 +182,7 @@ DWORD WINAPI WorkerThread(void*) {
       ftl::TaskScope ts(ftl::kTPerf);
       perfmon::Tick();  // once per second: samples, governor; perf/features/vram/env lines on their own cadence
     }
+    fxskip::Tick(now, g_quadFrame.load(), g_tscHz, g_cfg.fxApplySkipLogSec);  // A3: the "fx repeat:" line while hooked
     TickReloadFrameTimes();  // R142 [Log] ReloadFrameTimes (default 0): frame times around each ini reload
     {
       ftl::TaskScope ts(ftl::kTPlace);
@@ -289,6 +290,10 @@ DWORD WINAPI WorkerThread(void*) {
           ((g_cfg.srvTailTrim && !g_engineOff.load() && srvtrim::g_state.load() == 0) ||
            (srvtrim::g_disabled.load() && srvtrim::g_patched.load())))
         ApplySrvTailTrim(g_cfg.srvTailTrim && !g_engineOff.load());
+      // FX Apply repeat counter / lean Apply ([D3D] FxApplySkip): waits for dx11backend.
+      if (!po && !g_benchRunningFlag.load() && g_cfg.fxApplySkip && !g_engineOff.load() && !fxskip::Hooked() &&
+          fxskip::g_state.load() == 0)
+        ApplyFxApplySkip(g_cfg.fxApplySkip, g_cfg.fxApplySkipVerify, g_cfg.fxApplySkipVerifyEvery);
     }
     // Re-read the Quad-Views-Foveated edge smoothing every 10 s once quad views run.
     static ULONGLONG lastQv = 0;

@@ -399,7 +399,10 @@ DWORD WINAPI SuiteThread(void*) {
     ducount::Measure(5000, g_quadFrame, g_tscHz, g_benchAbort);
     Chime(1000, 60);
   }
-  if (ok && g_cfg.suiteFxApplyCount && !g_benchAbort) {
+  if (ok && g_cfg.suiteFxApplyCount && !g_benchAbort && fxskip::Hooked()) {
+    Log("-- FX pass Apply counter skipped: [D3D] FxApplySkip holds the same vtable slot (its \"fx repeat:\" line "
+        "reports the repeats every FxApplySkipLogSec) --");
+  } else if (ok && g_cfg.suiteFxApplyCount && !g_benchAbort) {
     Log("-- FX pass Apply: same pass again (R14 lead 4 counter, 5 s) --");
     srvtrim::Detach();  // its code check covers the trim's call sites: measured on stock
     fxapply::Measure(5000, g_quadFrame, g_tscHz);
@@ -746,6 +749,15 @@ DWORD WINAPI SuiteThread(void*) {
     Log("-- A/B: setShaderResources identical-tail trim (OFF = stock call sites, ON = trim, no counting) --");
     ok = RunBenchmark(31, false);  // ends with ApplySrvTailTrim (the configured state back)
     Chime(1000, 60);
+  }
+  if (ok && g_cfg.suiteBenchFxApplySkip && !g_benchAbort) {
+    if (fxskip::Install()) {
+      Log("-- A/B: FX Apply repeat skip (OFF = stock Apply, hook out; ON = lean Apply on identical repeats, no timing) --");
+      ok = RunBenchmark(34, false);  // ends with FxApplySkipBenchEnd (the configured state back)
+      Chime(1000, 60);
+    } else {
+      Log("  fx repeat: not available (install state %d, see the log above): bench skipped", fxskip::g_state.load());
+    }
   }
   if (ok && g_cfg.suiteBenchShadowInst && shadowbatch::Install() && !g_benchAbort) {
     Log("-- A/B: shadow caster instancing --");

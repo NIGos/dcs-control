@@ -271,6 +271,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "pass_flush_test.h"
 #include "fwd_rec_count_test.h"
 #include "srv_tail_trim_test.h"
+#include "fx_skip_test.h"  // A3: FX pass Apply repeat counter and lean Apply (pure parts; real dx11backend Apply vs lean)
 #include "status_word_test.h"
 #include "prefetch_fix_test.h"
 #include "periph_lod_test.h"
@@ -547,6 +548,12 @@ int main() {
   // QV_PFLUSH_ONLY=1: only the pass flush tests.
   if (getenv("QV_PFLUSH_ONLY")) {
     pftest::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
+  // QV_FXSKIP_ONLY=1: only the FX Apply repeat / lean Apply tests (A3).
+  if (getenv("QV_FXSKIP_ONLY")) {
+    fxstest::Run();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -1932,6 +1939,8 @@ int main() {
   frctest::Run();
   // setShaderResources identical-tail trim (R15 F2): fake caches vs the 0x1ac20 transcription, real device via fake sites.
   strtest::Run();
+  // FX pass Apply repeat counter and lean Apply (A3): refusal reasons, compares, real dx11backend Apply vs lean.
+  fxstest::Run();
   // DcsQvCull_Status word (status_word.h): bit layout, feature counting, loader/payload handover.
   swtest::Run();
   // Terrain prefetch fix: modes, window, spin guard, unload/reload safety, old dxgi2 fix take-over, log line.

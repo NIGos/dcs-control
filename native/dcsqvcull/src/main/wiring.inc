@@ -539,6 +539,26 @@ void ApplySrvTailTrim(bool on) {
   if (srvtrim::g_patched.load() != 1 && srvtrim::Attach(false)) Log("srv tail trim: on");
 }
 
+// A3 [D3D] FxApplySkip: 0 = SPassBlock Apply slot back to stock; 1 count; 2 / 3 lean Apply (fx_skip.h). Installed on
+// first use (dx11backend checks; retried every second until dx11backend is loaded). A verify mismatch latches the lean
+// path off (the counter keeps running).
+void ApplyFxApplySkip(int mode, bool verify, int verifyEvery) {
+  fxskip::g_verify = verify;
+  fxskip::g_verifyEvery = static_cast<uint32_t>(verifyEvery < 1 ? 1 : verifyEvery);
+  if (fxskip::g_bench.load()) return;  // bench mode 34 owns it until it ends
+  const bool was = fxskip::Hooked();
+  if (!fxskip::SetMode(mode)) return;
+  if (mode && !was) Log("fx repeat: on, mode %d%s", mode, fxskip::g_verify.load() ? ", verify" : "");
+  if (!mode && was) Log("fx repeat: off");
+}
+
+// Bench mode 34 ended: sampled timing back on, the configured mode back.
+void FxApplySkipBenchEnd() {
+  fxskip::g_timing = true;
+  fxskip::g_bench = false;
+  fxskip::SetMode(g_engineOff.load() ? 0 : g_cfg.fxApplySkip);
+}
+
 // Suite: installs (whatever [Model] SrvTailTrim says); false (logged) when it cannot run.
 bool SrvTailTrimReady() {
   if (srvtrim::g_disabled.load()) {

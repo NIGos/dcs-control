@@ -67,6 +67,7 @@ void SetEngineOff(bool off) {
   ApplyGBufferRecorder();
   ApplyPassFlush();
   ApplySrvTailTrim(g_cfg.srvTailTrim && !off);
+  ApplyFxApplySkip(off ? 0 : g_cfg.fxApplySkip, g_cfg.fxApplySkipVerify, g_cfg.fxApplySkipVerifyEvery);
   ApplyPrefetch();
   // The texture hook only does work when dedupe is on: otherwise remove it.
   ApplyTextureHook();
