@@ -560,3 +560,19 @@ GPU-bound (84 fps, 98 % GPU). The GPU half of this route is what counts in fligh
    the G-buffer pixel shaders clone or need none); motion vectors need the previous frame's rows per view as well,
    which the capture will show as per-view rows of b7 / b10.
 3. Then 11.3 a, c, d, e, f as written. Step b is done.
+
+### 12.6 Third live run (2026-11-11): the terrain split at the airfield, and two capture fixes
+
+- Airfield F2 paused, focus main passes, both eyes: terrain item stock 0.498 ms, geometry only **0.194 ms**; the 639
+  model items before it 0.796 / 0.760 ms. The front end of the pass is the models (which stay per view); the terrain
+  item is mostly raster and pixel work. **Gate (>= 0.41 ms): FAIL at the airfield.** A merged pass would save at most
+  0.19 ms there, less than its own copies leave over. The flight scene decides; if it fails too, the route is closed.
+- C2 in flight found no passes: with a moving camera no focus TerrainContext shares every non-per-view row with a
+  periphery, so no focus got an eye. Fixed: a focus finds its eye by every shared row, else by the view rows 0-2,
+  else by frame order (two runs of focus records after two peripheries); the diagnostic line counts each rule, and
+  C5 names the first row that differs (an unknown per-view row in motion would matter for the clone's lists).
+- C7 compared nothing: each view's chain runs in its own TerrainModule pass object, so "four chains of one
+  object" never matched. The view chains are now the chains run inside a TerrainModule pass, by kind.
+- Germany F2 (same build, later run): terrain item stock 0.888 ms, geometry only **0.558 ms**; models 0.374 / 0.333.
+  **Gate PASS in Germany** (expected saving about 0.45 ms after the copies). So the gain is scene-dependent: forest
+  and terrain-heavy views pass, the model-heavy airfield does not. The flight number is still missing.

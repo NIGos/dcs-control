@@ -61,9 +61,9 @@ void Run() {
     two.gb[two.n] = fa.gb[0];
     two.gb[two.n++].tcOk = false;
     pepl::FrameRec lone = fa;  // a narrow camera that shares no periphery's rows (an MFD zoom): no eye, never a main
-    lone.gb[9].tc[16 * 3] ^= 1;
-    lone.gb[10].tc[16 * 3] ^= 1;
-    lone.gb[11].tc[16 * 3] ^= 1;
+    lone.gb[9].tc[16 * 1] ^= 1;
+    lone.gb[10].tc[16 * 1] ^= 1;
+    lone.gb[11].tc[16 * 1] ^= 1;
     const pepl::Resolved r2 = pepl::Resolve(two), r3 = pepl::Resolve(lone);
     Check(r2.mainP[0] == 0 && r2.mainP[1] == 2 && r2.mainF[0] == 4 && r2.mainF[1] == 6 && r2.kind[8] == ftwin::kOther &&
               r3.mainF[1] == -1 && r3.mainF[0] == 7 && r3.eye[10] == -1 && pepl::MainOrdinal(1) == 0 &&
@@ -114,6 +114,26 @@ void Run() {
     for (int i = 0; i < 20; ++i) pepl::C5Add(few, fa, pepl::Resolve(fa));
     Check(pepl::C5Verdict(few) == -1 && pepl::C5Line(few).find("NOT MEASURED") != std::string::npos,
           "per-eye live C5: too few frames: not measured");
+  }
+  {  // a moving camera: a focus that does not share every row with its periphery still finds its eye
+    pepl::FrameRec moving = fa;  // a row outside the per-view list differs in every focus record
+    for (int i = 6; i < 12; ++i) moving.gb[i].tc[16 * 50 + 2] ^= 1;
+    pepl::FrameRec loose = fa;   // even the view rows differ: frame order
+    for (int i = 6; i < 12; ++i) loose.gb[i].tc[16 * 1 + 2] ^= 1;
+    pepl::FrameRec three = loose;  // three different focus contexts: no order rule
+    three.gb[11].tc[16 * 60] ^= 1;
+    const pepl::Resolved r0 = pepl::Resolve(fa), r1 = pepl::Resolve(moving), r2 = pepl::Resolve(loose), r3 = pepl::Resolve(three);
+    pepl::C5Acc a;
+    pepl::C5Add(a, moving, r1);
+    pepl::Diag d;
+    pepl::DiagAdd(d, moving, r1);
+    pepl::DiagAdd(d, loose, r2);
+    Check(r0.tier == pepl::kTierShared && r1.tier == pepl::kTierView && r1.mainF[0] == 7 && r1.mainF[1] == 10 &&
+              r2.tier == pepl::kTierOrder && r2.mainF[0] == 7 && r2.mainF[1] == 10 && r2.eye[6] == 0 && r2.eye[9] == 1 &&
+              r3.tier == 0 && r3.mainF[0] == -1 && a.pairs == 2 && a.unknownPairs == 2 && a.firstUnknownRow == 50 &&
+              pepl::DiagLine(d, 2, 24, 24).find("view rows 0-2 only 1, frame order 1") != std::string::npos,
+          "per-eye live: a focus finds its eye by every shared row, else by the view rows, else by frame order; C5 "
+          "then names the row that differs");
   }
   {  // frames by pass structure (the pass execute's frame argument is constant live)
     mkit::FrameTrack t;
@@ -212,7 +232,8 @@ void Run() {
   }
   {  // C7: per frame, the four chains of one pass; peripheries by size, whatever the frame's layout
     int module = 0, casc = 0, height = 0;
-    const auto kindOf = [&](void* p) -> char { return p == &casc ? 'C' : p == &height ? 'H' : '?'; };
+    int module2 = 0;  // each view's chain runs in its own TerrainModule pass object
+    const auto kindOf = [&](void* p) -> char { return p == &casc ? 'C' : p == &height ? 'H' : p == &module || p == &module2 ? 'T' : '?'; };
     // order: the view chains' sizes in frame order (P = periphery, F = focus); pre: chains before them
     auto frame = [&](const char* order, int pre, uint32_t firstFocusCount) {
       mkit::CensusFrame f;
@@ -222,7 +243,7 @@ void Run() {
       }
       int nf = 0;
       for (int k = 0; k < 4; ++k) {
-        f.pass.push_back(&module);
+        f.pass.push_back(k & 1 ? static_cast<void*>(&module2) : static_cast<void*>(&module));
         if (order[k] == 'P')
           f.counts.push_back({5, 4, 2});
         else
@@ -245,8 +266,8 @@ void Run() {
     for (int i = 0; i < 5; ++i) pepl::C7Add(few, frame("PPFF", 3, 4), kindOf);
     Check(ok == 1 && a.frames == 30 && a.n[0] == 30 && a.subset[0] == 30 && a.subset[1] == 30 && lay.size() == 2 &&
               lay[0] == "pep C7 layout: 20 frames CCH|PPFF" && lay[1] == "pep C7 layout: 10 frames CH|PFPF",
-          "per-eye live C7: the view chains are the four of one pass, peripheries by size: contained in every frame "
-          "over two layouts");
+          "per-eye live C7: the view chains are the TerrainModule ones (distinct pass objects), peripheries by "
+          "size: contained in every frame over two layouts");
     Check(b.noFour == 1 && b.n[0] == 31 && b.subset[0] == 30 && b.maxOver[0] == 1 && b.subset[1] == 31 &&
               pepl::C7Verdict(b) == 0 && pepl::C7Verdict(few) == -1 && pepl::C7Verdict(pepl::C7Acc()) == -1 &&
               pepl::C7Line(b).compare(0, 7, "pep C7:") == 0 && pepl::C7Line(b).find(": FAIL") != std::string::npos,
