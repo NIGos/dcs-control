@@ -69,6 +69,12 @@ void SetBenchVariant(bool on) {
     pffix::g_mode = on ? pffix::kSkip : pffix::kObserve;
     return;
   }
+  if (g_benchActiveMode.load() == 36) {  // A3: OFF = SPassBlock Apply slot stock (hook out), ON = lean Apply on identical repeats
+    fxskip::g_bench = true;
+    fxskip::g_timing = false;
+    fxskip::SetMode(on ? 2 : 0);
+    return;
+  }
   if (g_benchActiveMode.load() == 31) {
     if (on)
       srvtrim::Attach(false);
