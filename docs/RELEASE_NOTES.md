@@ -1,3 +1,18 @@
+# 0.6.4 preview
+
+**Engine Optimizations warm up faster and keep their shader cache.** The shader variants the engine prepares after a load are now compiled on up to 4 background threads (about half the time on the test PC). They are kept in DCS Control's own folder, so **Back to stock DCS** and updates no longer throw them away. From the main menu on, variants made stale by a DCS update are prepared again before you fly.
+
+**See the warm-up.** The headset panel shows "Engine Opt.: warming up 60%". While DCS runs, the DCS Engine page shows the progress and the size of the shader cache, with a **Clear cache** button. Two new options: *Prepare shaders in the main menu* and *Compile threads*.
+
+**Last flight says what the engine did.** The Overview's Last flight card has an **Engine Optimizations** row: how many were on, any that turned themselves off for safety, the time they were off from the in-flight key, and the warm-up time.
+
+**Only when needed: Stop generating.** A new choice under Only when needed decides how readily frame generation steps back to plain frames when DCS keeps up: Steady (the default, as before), Balanced or Prefer refresh rate. The Last flight card says why frames stayed generated (DCS's frame time against the limit). After a failed attempt at plain frames it no longer drops to 3×.
+
+**Fixes:**
+- Pimax Quad View presets (Performance, Balanced, Quality, Extreme) are now recognised. Pimax does not save their values, and DCS Control read the leftover Custom values instead: a far too large focus area and about half the FPS. It now uses the profile's own focus values and says so.
+- DCS no longer risks staying open after you quit because of two engine threads.
+- The requirements now say what changes on AMD Radeon cards: the multi-threaded shadows and G-buffer usually stay off there. An opt-in for emulated command lists exists; it is untested on Radeon.
+
 # 0.6.3 preview
 
 **Install this version by hand, just this once.** DCS Control has a new release signing key. From 0.6.2 or earlier, the in-app **Install** button refuses this update ("the signature does not match DCS Control's release key") and installs nothing; that's expected. Download `DcsControl-0.6.3-preview-Setup.exe` from the Releases page and run it: your settings and profiles are kept. From 0.6.3 on, updates install from the app again.
