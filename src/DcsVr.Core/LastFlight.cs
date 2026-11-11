@@ -19,7 +19,8 @@ public sealed record FlightSources(string? DcsLog, string? PimaxLogDirectory = n
 
 /// <summary>A summary of the last DCS session, read from logs after DCS exits. Parts without a source are null.</summary>
 public sealed record FlightSummary(DateTimeOffset Start, DateTimeOffset End, bool Closed, int? DcsPid, HeadsetFrames? Headset, FramegenShare? Framegen,
-    FrameTimes? FrameTime, NeuralState? Dlss5, BoostResult? Boost, PrefetchResult? Prefetch, EyeTrackingState? EyeTracking = null, FrameCap? Cap = null)
+    FrameTimes? FrameTime, NeuralState? Dlss5, BoostResult? Boost, PrefetchResult? Prefetch, EyeTrackingState? EyeTracking = null, FrameCap? Cap = null,
+    EngineFlight? Engine = null)
 {
     public TimeSpan Duration => End - Start;
 }
@@ -71,6 +72,23 @@ public sealed record FrameCap(double? Fps, double? RefreshHz, int CappedReports,
     public double Share => Reports == 0 ? 0 : (double)CappedReports / Reports;
 }
 
+/// <summary>Whether the engine optimizations really ran in the flight, from the module's DcsQvCull.log: its features
+/// line (on change, at most every 10 s, and every 60 s), the in-flight switch, the shader warm-up and the GPU line.</summary>
+/// <param name="On">Optimizations that ran at some point and were not turned off for safety later.</param>
+/// <param name="Configured">Optimizations the module's settings turned on (the features line's "of M").</param>
+/// <param name="TurnedOff">Optimizations that turned themselves off for safety ("latched"), by their app names.</param>
+/// <param name="NotStarted">Turned on in the settings but never active in the flight (waiting for a scene, for example).</param>
+/// <param name="RecordersUnavailable">The GPU driver has no D3D11 command lists (DriverCommandLists=0, AMD for
+/// example): the multi-threaded G-buffer and shadows cannot run. They are then in neither list above.</param>
+/// <param name="OffSeconds">Time with the engine optimizations off with the in-flight key (the kill switch).</param>
+/// <param name="Seconds">Time the module's log covers (its first to its last timestamped line read).</param>
+/// <param name="OffAtExit">Still off with the in-flight key when the log ends.</param>
+/// <param name="Toggles">Times they were turned off with the in-flight key.</param>
+/// <param name="WarmupSeconds">The shader warm-ups' total time ("warmup: done after N s"); null when none finished.</param>
+/// <param name="WarmupUnfinished">A warm-up was still compiling when the log ends.</param>
+public sealed record EngineFlight(int On, int Configured, IReadOnlyList<string> TurnedOff, IReadOnlyList<string> NotStarted, bool RecordersUnavailable,
+    int OffSeconds, int Seconds, bool OffAtExit, int Toggles, int? WarmupSeconds, bool WarmupUnfinished);
+
 /// <summary>Reads <see cref="FlightSummary"/> defensively and cheaply: only the start and tail of dcs.log, only the
 /// lines that matter in the other logs, and each parsed file is cached by size and timestamp.</summary>
 public static partial class LastFlight
@@ -92,6 +110,7 @@ public static partial class LastFlight
         var boost = Safe(() => sources.BoostStatus is { } status && File.Exists(status) ? Cached(status, () => ParseBoostStatus(File.ReadAllText(status))) : null);
         if (boost is not null && !(boost.UpdatedAt >= start.AddMinutes(-1) && boost.UpdatedAt <= end.AddMinutes(10))) boost = null;
         var pid = ofxrPid ?? boost?.DcsPid;
+        var moduleLines = Safe(() => ReadModuleLog(ModuleLog(log), start, end));
         return new(start, end, closed, pid,
             ReadPimax(sources.PimaxLogDirectory, start, end, pid),
             ofxr?.Share, ofxr?.Times,
@@ -99,7 +118,8 @@ public static partial class LastFlight
             boost?.Result,
             ReadPrefetch(PrefetchLog(log), start, end),
             ReadEyeTracking(sources.QuadViewsLog, start, end),
-            ReadFrameCap(ModuleLog(log), start, end));
+            moduleLines is null ? null : ParseFrameCap(moduleLines),
+            moduleLines is null ? null : ParseEngine(moduleLines));
     }
 
     // ---- Quad Views --------------------------------------------------------------------------------------------------
@@ -504,19 +524,21 @@ public static partial class LastFlight
     public static string? ModuleLog(string dcsLog) =>
         Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(dcsLog))) is { } savedGames ? EngineOptimizations.ModuleLog(Path.Combine(savedGames, "Scripts", "DcsQvCull")) : null;
 
-    private static FrameCap? ReadFrameCap(string? path, DateTimeOffset start, DateTimeOffset end)
+    /// <summary>The module log's lines read by the frame-rate hold and the engine row, or null when the log is missing
+    /// or belongs to another session.</summary>
+    private static List<string>? ReadModuleLog(string? path, DateTimeOffset start, DateTimeOffset end)
     {
-        try
-        {
-            if (path is null || !File.Exists(path)) return null;
-            // The module starts its log afresh with each DCS start and stamps lines with the time of day only, so the
-            // log belongs to this session when it was last written during it.
-            var written = new DateTimeOffset(File.GetLastWriteTimeUtc(path), TimeSpan.Zero);
-            if (written < start.AddMinutes(-1) || written > end.AddMinutes(10)) return null;
-            return ParseFrameCap(Cached(path, () => ReadLines(path, 8L * 1024 * 1024, l => l.Contains(" perf: fps=", StringComparison.Ordinal) || l.Contains("governor: capped at", StringComparison.Ordinal) || l.Contains("loader started", StringComparison.Ordinal))) ?? []);
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+        if (path is null || !File.Exists(path)) return null;
+        // The module starts its log afresh with each DCS start and stamps lines with the time of day only, so the
+        // log belongs to this session when it was last written during it.
+        var written = new DateTimeOffset(File.GetLastWriteTimeUtc(path), TimeSpan.Zero);
+        if (written < start.AddMinutes(-1) || written > end.AddMinutes(10)) return null;
+        return Cached(path, () => ReadLines(path, 8L * 1024 * 1024, IsModuleLine));
     }
+    private static bool IsModuleLine(string l) => l.Contains(" perf: fps=", StringComparison.Ordinal) || l.Contains("governor: capped at", StringComparison.Ordinal)
+        || l.Contains("loader started", StringComparison.Ordinal) || l.Contains(" features: ", StringComparison.Ordinal)
+        || l.Contains(" hotkey: engine optimizations ", StringComparison.Ordinal) || l.Contains(" warmup: ", StringComparison.Ordinal)
+        || l.Contains("DriverCommandLists=0", StringComparison.Ordinal);
 
     /// <summary>"perf: fps=35.4 … verdict=capped 36.0 fps = 72/2 (…)" every 10 s, and "governor: capped at 36.0 fps
     /// (72 Hz / 2)"; only the lines after the last loader start count (one DCS session). Null without reports.</summary>
@@ -545,6 +567,98 @@ public static partial class LastFlight
     }
     [GeneratedRegex(@" perf: fps=\S+ .* verdict=([A-Za-z]+)(?: (\d+(?:[.,]\d+)?) fps = (\d+(?:[.,]\d+)?)/(\d+))?")] private static partial Regex PerfRegex();
     [GeneratedRegex(@"governor: capped at (\d+(?:[.,]\d+)?) fps \((\d+(?:[.,]\d+)?) Hz / (\d+)\)")] private static partial Regex GovernorCapRegex();
+
+    // ---- Engine optimizations in the flight -----------------------------------------------------------------------
+
+    /// <summary>The app's names for the features line's keys (perf_mon.h kFeatName), lower case for a sentence.</summary>
+    private static readonly Dictionary<string, string> FeatureNames = new(StringComparer.Ordinal)
+    {
+        ["AllocSlabs"] = "model data allocator", ["BigPages"] = "large memory pages", ["FrameHeap"] = "frame memory per thread",
+        ["TriCounter"] = "statistics counter without lock", ["TaskClock"] = "task queue clock cache", ["TimerCache"] = "streaming timer cache",
+        ["TexDedupe"] = "texture streaming dedupe", ["CbSkip"] = "effect constant-buffer skip", ["CostWeights"] = "culling partition by real cost",
+        ["PartitionBoost"] = "culling partition boost", ["ShadowInst"] = "shadow caster instancing", ["ShadowBatch"] = "shadow batching",
+        ["PlanAsync"] = "shadow planning in parallel", ["ShadowTexSkip"] = "shadow texture skip", ["ShadowRec"] = "multi-threaded shadows",
+        ["GBufferRec"] = "multi-threaded G-buffer", ["SplitFilter"] = "redundant state filter", ["Prefetch"] = "terrain prefetch fix",
+    };
+    private static readonly string[] Recorders = ["ShadowRec", "GBufferRec"];
+
+    /// <summary>The engine optimizations of one DCS start (the lines after the last "loader started"), from "HH:mm:ss.fff
+    /// features: N of M configured on; AllocSlabs=on BigPages=idle(waiting) ShadowRec=latched … Prefetch=off(ini)",
+    /// "hotkey: engine optimizations OFF | ON | back ON (…)" (the in-flight key, or an ini reload), "warmup: shader variants
+    /// compiling …" / "warmup: done after N s (…)" and the GPU line's "DriverCommandLists=0". Null without a features line
+    /// (an older module, or a DCS closed before the module reported).</summary>
+    public static EngineFlight? ParseEngine(IEnumerable<string> lines)
+    {
+        var everOn = new HashSet<string>(StringComparer.Ordinal); var latched = new HashSet<string>(StringComparer.Ordinal);
+        var configured = new HashSet<string>(StringComparer.Ordinal); var order = new List<string>();
+        int conf = -1, toggles = 0, warm = 0; bool warming = false, warmed = false, noLists = false, off = false;
+        double offSeconds = 0; TimeSpan? first = null, last = null, offSince = null, previous = null; var day = TimeSpan.Zero;
+        foreach (var line in lines)
+        {
+            if (line.Contains("loader started", StringComparison.Ordinal))
+            {
+                everOn.Clear(); latched.Clear(); configured.Clear(); order.Clear();
+                conf = -1; toggles = warm = 0; warming = warmed = noLists = off = false; offSeconds = 0; first = last = offSince = previous = null; day = TimeSpan.Zero;
+                continue;
+            }
+            var m = ModuleStampRegex().Match(line);
+            if (!m.Success || !TimeSpan.TryParseExact(m.Groups[1].Value, @"hh\:mm\:ss\.fff", CultureInfo.InvariantCulture, out var clock)) continue;
+            // Time of day only: a flight across midnight goes on from 23:59 to 00:00.
+            if (previous is { } before && clock < before - TimeSpan.FromHours(12)) day += TimeSpan.FromDays(1);
+            previous = clock;
+            var at = clock + day; first ??= at; last = at;
+            var text = m.Groups[2].Value;
+            if (FeaturesRegex().Match(text) is { Success: true } f)
+            {
+                if (!int.TryParse(f.Groups[2].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var count) || count > 64) continue;
+                conf = count; configured.Clear();
+                var killed = false;
+                foreach (Match feature in FeatureStateRegex().Matches(f.Groups[3].Value))
+                {
+                    var name = feature.Groups[1].Value; var state = feature.Groups[2].Value; var why = feature.Groups[3].Value;
+                    if (!order.Contains(name)) order.Add(name);
+                    if (state == "off" && why == "ini") continue;
+                    configured.Add(name);
+                    if (state == "on") everOn.Add(name);
+                    else if (state == "latched") latched.Add(name);
+                    else if (state == "off" && why == "killswitch") killed = true;
+                }
+                // Off with the switch before any hotkey line was read (a line beyond the read limit, for example).
+                if (killed && !off) { off = true; offSince = at; }
+                continue;
+            }
+            if (EngineHotkeyRegex().Match(text) is { Success: true } h)
+            {
+                if (h.Groups[1].Value == "OFF") { if (!off) { off = true; offSince = at; } toggles++; }
+                else if (off) { off = false; if (offSince is { } since) offSeconds += (at - since).TotalSeconds; offSince = null; }
+                continue;
+            }
+            if (text.StartsWith("warmup: shader variants compiling", StringComparison.Ordinal)) { warming = true; continue; }
+            if (WarmupDoneRegex().Match(text) is { Success: true } w)
+            {
+                warming = false;
+                if (Number(w.Groups[1].Value) is { } seconds && seconds is >= 0 and < 86400) { warm += (int)Math.Round(seconds); warmed = true; }
+                continue;
+            }
+            if (text.Contains("DriverCommandLists=0", StringComparison.Ordinal)) noLists = true;
+        }
+        if (conf < 0 || first is not { } from || last is not { } to) return null;
+        if (off && offSince is { } still) offSeconds += (to - still).TotalSeconds;
+        // Without the driver's command lists the recorders never run: said once, not as turned off or not started.
+        var unavailable = noLists && configured.Any(Recorders.Contains);
+        bool Counted(string name) => !(unavailable && Recorders.Contains(name));
+        static string Name(string key) => FeatureNames.TryGetValue(key, out var n) ? n : key;
+        var turnedOff = order.Where(n => latched.Contains(n) && Counted(n)).Select(Name).ToArray();
+        var notStarted = order.Where(n => configured.Contains(n) && !everOn.Contains(n) && !latched.Contains(n) && Counted(n)).Select(Name).ToArray();
+        var on = Math.Min(conf, everOn.Count(n => !latched.Contains(n) && Counted(n)));
+        return new(on, conf, turnedOff, notStarted, unavailable, (int)Math.Round(offSeconds), (int)Math.Round((to - from).TotalSeconds), off, toggles,
+            warmed ? warm : null, warming);
+    }
+    [GeneratedRegex(@"^(\d\d:\d\d:\d\d\.\d{3}) (.*)$")] private static partial Regex ModuleStampRegex();
+    [GeneratedRegex(@"^features: (\d+) of (\d+) configured on;(.*)$")] private static partial Regex FeaturesRegex();
+    [GeneratedRegex(@"(\w+)=(on|off|latched|idle)(?:\(([^)]*)\))?")] private static partial Regex FeatureStateRegex();
+    [GeneratedRegex(@"^hotkey: engine optimizations (?:back )?(ON|OFF)\b")] private static partial Regex EngineHotkeyRegex();
+    [GeneratedRegex(@"^warmup: done after (\d+(?:\.\d+)?) s\b")] private static partial Regex WarmupDoneRegex();
 
     // ---- Reading ---------------------------------------------------------------------------------------------------
 
