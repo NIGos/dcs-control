@@ -360,6 +360,8 @@ public static class ConfigurationWriters
         adaptive_cadence={(p.UsesAdaptiveCadence ? 1 : 0)}
         ; When it stops generating (patch 0070): 0 only with room to spare (under 80% of a refresh), 1 when the estimate is within reach and frames arrive on time, 2 whenever it may hold.
         cadence_preference={(p.UsesAdaptiveCadence && Enum.IsDefined(p.FrameGenPassThrough) ? (int)p.FrameGenPassThrough : 0)}
+        ; While frames pass through, DCS waits for each frame's hand-over (patch 0074): a trial, off until flown.
+        cadence_one_wait={(p.UsesAdaptiveCadence && p.FrameGenPassThroughWait ? 1 : 0)}
         ; Both eyes synthesized on their own queues, about 1 ms sooner with identical output (patch 0038): off until flown.
         parallel_eye_synthesis=0
         d3d11_bridge={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}
