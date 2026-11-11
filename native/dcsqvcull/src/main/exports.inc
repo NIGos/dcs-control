@@ -187,6 +187,7 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   gpt::Shutdown();      // GPU pass timing's context-table hooks and xrEndFrame hook, if a phase was running
   sfast::Shutdown();     // R36: Dispatch hook out, identified kernels and variants released (no-op unless used)
   nighttone::Shutdown(); // R37: tone mapper fields and exposure bias back, addToneMappingPass import back (no-op unless used)
+  chainderive::Shutdown(); // audit A2/B4 census: callbacks out, analysis thread stopped (no-op unless used)
   chainfast::Shutdown(); // R34: CSSetShader and CreateComputeShader hooks out, kernel pairs released (no-op unless used)
   pflush::Shutdown();   // pass flush callback and xrBeginFrame hook out, our context reference released
   vramc::Shutdown();    // the VRAM count's device create hooks, if a phase was running

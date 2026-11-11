@@ -58,6 +58,9 @@ std::atomic<BoundaryFn> g_depthBoundary{nullptr};
 // no other feature's boundary work runs under the probe's shading-rate state. g_vrsPre is set only with g_vrsBoundary.
 std::atomic<BoundaryFn> g_vrsPre{nullptr};
 std::atomic<BoundaryFn> g_vrsBoundary{nullptr};
+// chain_derive.h ([Suite] ChainDeriveCensus, measure only): called after every other one but g_vrsBoundary at a pass
+// start and right after g_vrsBoundary at an end; nullptr unless the census key is non-zero.
+std::atomic<BoundaryFn> g_censusBoundary{nullptr};
 // R139: observer of the UpdateSubresource(1) calls on a context, called (before forwarding, with DCS's own bytes) by
 // whichever hook of ours holds the slot: gpu_pass_timing.h's while it measures, fixation_depth.h's in its in-pass
 // arms, vrs_probe.h's one-shot arm. nullptr unless the VRS probe runs.
@@ -88,9 +91,10 @@ void __fastcall Hook(void* pass, uint64_t frame) {
   BoundaryFn vb = g_viewBoundary.load(std::memory_order_relaxed);
   BoundaryFn db = g_depthBoundary.load(std::memory_order_relaxed);
   BoundaryFn vr = g_vrsBoundary.load(std::memory_order_relaxed);  // R139
+  BoundaryFn cs = g_censusBoundary.load(std::memory_order_relaxed);  // chain_derive.h
   if (!g_recording.load(std::memory_order_relaxed)) {
     AfterTopFn after = g_afterTop.load(std::memory_order_relaxed);
-    if (!after && !each && !bnd && !fl && !vb && !db && !vr) return g_orig(pass, frame);
+    if (!after && !each && !bnd && !fl && !vb && !db && !vr && !cs) return g_orig(pass, frame);
     BoundaryFn vp = vr ? g_vrsPre.load(std::memory_order_relaxed) : nullptr;
     if (vp) vp(pass, true, t_depth);
     if (each) each();
@@ -98,11 +102,13 @@ void __fastcall Hook(void* pass, uint64_t frame) {
     if (bnd) bnd(pass, true, t_depth);
     if (vb) vb(pass, true, t_depth);
     if (db) db(pass, true, t_depth);
+    if (cs) cs(pass, true, t_depth);
     if (vr) vr(pass, true, t_depth);
     ++t_depth;
     g_orig(pass, frame);
     const bool top = --t_depth == 0;
     if (vr) vr(pass, false, t_depth);
+    if (cs) cs(pass, false, t_depth);
     if (vb) vb(pass, false, t_depth);
     if (bnd) bnd(pass, false, t_depth);
     if (fl) fl(pass, false, t_depth);
@@ -118,6 +124,7 @@ void __fastcall Hook(void* pass, uint64_t frame) {
   if (bnd) bnd(pass, true, t_depth);
   if (vb) vb(pass, true, t_depth);
   if (db) db(pass, true, t_depth);
+  if (cs) cs(pass, true, t_depth);
   if (vr) vr(pass, true, t_depth);
   int d = t_depth++;
   if (d < 64) t_childUs[d] = 0;
@@ -138,6 +145,7 @@ void __fastcall Hook(void* pass, uint64_t frame) {
     if (d == 0) g_topLevelUs += us;
   }
   if (vr) vr(pass, false, d);
+  if (cs) cs(pass, false, d);
   if (vb) vb(pass, false, d);
   if (bnd) bnd(pass, false, d);
   if (fl) fl(pass, false, d);
