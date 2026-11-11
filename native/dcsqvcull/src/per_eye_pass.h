@@ -496,9 +496,13 @@ struct Scan {
   uint32_t outTaint = 0;
   int fail = kPwOk;
   uint32_t badOp = 0;
+  // The pixel-shader clone selects per-view rows instead of repeating instructions: a branch on a per-view value or
+  // a per-view write anywhere is fine there. Only the computed-row proof and the instruction walk are wanted.
+  bool select = false;
   // Per temp component (register * 4 + component): a proven range of its signed integer value. Set only by imin /
-  // imax with a literal and forgotten at every other write and at every flow-control instruction, so a range holds
-  // exactly between the instruction that made it and the next branch: no path analysis is needed for it to be true.
+  // imax with a literal and forgotten at every other write and at every flow-control instruction except the entry
+  // of an `if` arm (an `if` writes nothing: what holds before it holds at the start of both arms). So a range is
+  // only ever used on a straight run from the instruction that made it, possibly into nested `if` arms.
   std::vector<int32_t> lo, hi;
   uint32_t boundedRows = 0;      // computed row reads accepted because their range holds no per-view row
   void ForgetRanges() {
@@ -563,11 +567,11 @@ struct Code {
   uint32_t cbSlots = 0;        // declared constant-buffer slots (bits)
   uint32_t maxOut = 0;
 };
-inline int ReadCode(const uint8_t* d, uint32_t size, Code& c) {
+inline int ReadCode(const uint8_t* d, uint32_t size, Code& c, uint32_t program = 1) {
   if (size < 8 || size % 4) return kPwTokens;
   c.tok.resize(size / 4);
   memcpy(c.tok.data(), d, size);
-  if ((c.tok[0] >> 16) != 1) return kPwNotVs;  // program type: vertex shader
+  if ((c.tok[0] >> 16) != program) return kPwNotVs;  // program type: 1 vertex shader, 0 pixel shader
   const uint32_t n = c.tok[1];
   if (n < 2 || n > c.tok.size()) return kPwTokens;
   c.tok.resize(n);
@@ -614,6 +618,7 @@ inline void Analyze(const Code& c, Scan& s) {
     size_t start = 0;
     bool hasElse = false;
     std::vector<uint8_t> saved, thenEnd;
+    std::vector<int32_t> loAtIf, hiAtIf;  // the proven ranges at the `if` (they hold at the start of both arms)
   };
   std::vector<Frame> stack;
   int weak = 0;
@@ -656,16 +661,21 @@ inline void Analyze(const Code& c, Scan& s) {
     }
     if (s.fail != kPwOk) return;
     if (dests == 0) {
-      if (reads) {
+      if (reads && !s.select) {
         s.fail = kPwFlow;
         return;
       }
-      s.ForgetRanges();
+      // Ranges: an `if` does not write, so what is proven before it holds at the start of its `then` arm and of
+      // its `else` arm. Every other flow instruction forgets them (after `endif`, in and after loops, switches).
+      const std::vector<int32_t> loBefore = i.op == kOpIf ? s.lo : std::vector<int32_t>();
+      const std::vector<int32_t> hiBefore = i.op == kOpIf ? s.hi : std::vector<int32_t>();
+      if (i.op != kOpIf) s.ForgetRanges();
       const bool top = !stack.empty();
       switch (i.op) {
         case kOpIf:
           stack.emplace_back();
           stack.back().kind = kIf, stack.back().saved = s.state;
+          stack.back().loAtIf = loBefore, stack.back().hiAtIf = hiBefore;
           break;
         case kOpElse:
           if (!top || stack.back().kind != kIf || stack.back().hasElse) {
@@ -674,6 +684,7 @@ inline void Analyze(const Code& c, Scan& s) {
           }
           stack.back().hasElse = true, stack.back().thenEnd = s.state;
           s.state = stack.back().saved;
+          s.lo = stack.back().loAtIf, s.hi = stack.back().hiAtIf;
           break;
         case kOpEndif: {
           if (!top || stack.back().kind != kIf) {
@@ -758,7 +769,7 @@ inline void Analyze(const Code& c, Scan& s) {
           s.state[r] &= static_cast<uint8_t>(~m);
       } else if (o.type == kOtOutput && o.dim == 1 && o.rep[0] == 0 && t[p + o.imm[0]] < 32) {
         if (reads) s.outTaint |= 1u << t[p + o.imm[0]];
-      } else if (reads) {
+      } else if (reads && !s.select) {
         s.fail = kPwDest;
         return;
       }
@@ -937,6 +948,221 @@ inline PatchResult PatchVsDualPosition(const uint8_t* blob, size_t size, const P
 }
 
 // ---------------------------------------------------------------------------
+// The pixel-shader clone (design 4.3; probe P1: the pixel shader of a stereo draw reads its view as
+// SV_RenderTargetArrayIndex, also when no earlier stage writes it)
+// ---------------------------------------------------------------------------
+// A merged draw runs ONE pixel shader for both views, with the periphery's constant buffers bound. The clone reads
+// every per-view row from an injected buffer instead, picked by the view index: injected row 2 * i + view = that
+// view's bytes of rows[i]. Nothing else changes: the same instructions on the same values a separate pass would
+// read, so the clone's output for view v equals the stock shader's with view v's buffers, by construction (and
+// checked: WARP in the tests, the GPU under stereo in test/pep_p1_probe.cpp).
+// What it adds: one input (uint SV_RenderTargetArrayIndex, constant interpolation, the next free register), one
+// constant buffer (dynamically indexed), one temp holding the index.
+// Refused, with the vertex patcher's reasons: a computed row of a per-view buffer that is not proven to stay on
+// shared rows (the same imin / imax rule), an instruction the walker does not know, a shader that already reads the
+// index, no free slot. kPwNoViewRows: the shader reads no per-view row and can be used as it is in a merged draw.
+struct PsViewBuffer {
+  uint32_t cb = 0;
+  const ViewRow* rows = nullptr;
+  uint32_t nRows = 0;
+};
+constexpr PsViewBuffer kPsTerrainContext[] = {{11, kTcViewRows, sizeof(kTcViewRows) / sizeof(kTcViewRows[0])}};
+struct PsPatchOpts {
+  // The per-view rows of every buffer the G-buffer pixel shaders read. Default: the TerrainContext only; the lists
+  // of cPerView (b7) and b10 come from a live capture (design 12.3) before a clone is trusted.
+  const PsViewBuffer* bufs = kPsTerrainContext;
+  uint32_t nBufs = 1;
+  uint32_t preferSlot = 13;
+  const char* indexName = "SV_RenderTargetArrayIndex";
+};
+struct PsPatchResult {
+  int why = kPwContainer;
+  uint32_t badOp = 0;
+  std::vector<uint8_t> blob;
+  uint32_t slot = 0, indexReg = 0, indexTemp = 0;
+  std::vector<std::pair<uint32_t, uint32_t>> rows;  // (buffer slot, row): injected rows 2 * i (view 0) and 2 * i + 1 (view 1)
+  uint32_t ins = 0, rewritten = 0, boundedRows = 0;
+};
+inline PsPatchResult PatchPsViewSelect(const uint8_t* blob, size_t size, const PsPatchOpts& opts = PsPatchOpts()) {
+  PsPatchResult r;
+  std::vector<Chunk> chunks;
+  if (!ParseContainer(blob, size, chunks)) return r;
+  int shex = -1, isgn = -1;
+  for (size_t i = 0; i < chunks.size(); ++i) {
+    if (chunks[i].fourcc == FourCc('S', 'H', 'D', 'R') || chunks[i].fourcc == FourCc('S', 'H', 'E', 'X')) shex = static_cast<int>(i);
+    if (chunks[i].fourcc == FourCc('I', 'S', 'G', 'N')) isgn = static_cast<int>(i);
+  }
+  if (shex < 0) return r.why = kPwNotVs, r;
+  Code c;
+  r.why = ReadCode(blob + chunks[shex].off, chunks[shex].size, c, 0);
+  if (r.why != kPwOk) return r;
+  r.ins = static_cast<uint32_t>(c.ins.size() - c.firstCode);
+  if (isgn < 0) return r.why = kPwSignature, r;
+  // The input signature: the next free register; a shader that already takes the index is not touched.
+  const uint8_t* sg = blob + chunks[isgn].off;
+  const uint32_t sgSize = chunks[isgn].size;
+  if (sgSize < 8) return r.why = kPwSignature, r;
+  const uint32_t sgCount = Rd32(sg);
+  if (sgCount > 64 || 8 + 24ull * sgCount > sgSize) return r.why = kPwSignature, r;
+  uint32_t maxIn = 0;
+  bool anyIn = false;
+  for (uint32_t i = 0; i < sgCount; ++i) {
+    const uint8_t* e = sg + 8 + 24 * i;
+    if (Rd32(e) >= sgSize || !memchr(sg + Rd32(e), 0, sgSize - Rd32(e))) return r.why = kPwSignature, r;
+    if (Rd32(e + 8) == 4) return r.why = kPwSignature, r;  // D3D_NAME_RENDER_TARGET_ARRAY_INDEX
+    const uint32_t reg = Rd32(e + 16);
+    if (reg != 0xffffffff && (!anyIn || reg > maxIn)) maxIn = reg, anyIn = true;
+  }
+  for (size_t k = 0; k < c.firstCode; ++k) {  // registers the code declares beyond the signature (never seen; safe)
+    const Ins& i = c.ins[k];
+    if (i.op < 95 || i.op > 100) continue;  // dcl_input .. dcl_input_ps_siv
+    Opnd o;
+    const uint32_t* t = c.tok.data() + i.pos;
+    if (!DecodeOperand(t + i.first, i.len - i.first, o)) return r.why = kPwTokens, r;
+    if (o.type == kOtInput && o.dim == 1 && o.rep[0] == 0 && (!anyIn || t[i.first + o.imm[0]] > maxIn))
+      maxIn = t[i.first + o.imm[0]], anyIn = true;
+  }
+  r.indexReg = anyIn ? maxIn + 1 : 0;
+  if (r.indexReg > 31) return r.why = kPwNoSlot, r;
+
+  // Computed rows of each per-view buffer: proven shared, or no clone.
+  for (uint32_t b = 0; b < opts.nBufs; ++b) {
+    PatchOpts po;
+    po.cb = opts.bufs[b].cb, po.rows = opts.bufs[b].rows, po.nRows = opts.bufs[b].nRows;
+    Scan s;
+    s.o = &po, s.select = true;
+    s.tainted.assign(c.temps, 0);
+    s.state.assign(c.temps, 0);
+    Analyze(c, s);
+    if (s.fail != kPwOk) return r.why = s.fail, r.badOp = s.badOp, r;
+    r.boundedRows += s.boundedRows;
+  }
+  auto comps = [&](uint32_t cb, uint32_t row) -> uint32_t {
+    for (uint32_t b = 0; b < opts.nBufs; ++b)
+      if (opts.bufs[b].cb == cb)
+        for (uint32_t i = 0; i < opts.bufs[b].nRows; ++i)
+          if (opts.bufs[b].rows[i].row == row) return opts.bufs[b].rows[i].comps;
+    return 0;
+  };
+  r.slot = opts.preferSlot;
+  if (r.slot > 13 || (c.cbSlots >> r.slot & 1)) {
+    for (r.slot = 13; r.slot < 14 && (c.cbSlots >> r.slot & 1); --r.slot) {
+    }
+    if (r.slot > 13) return r.why = kPwNoSlot, r;
+  }
+  r.indexTemp = c.temps;
+  if (r.indexTemp + 1 > 4096) return r.why = kPwNoSlot, r;
+
+  // Every immediate read of a per-view row becomes cb<slot>[r<indexTemp>.x + 2 * i].
+  std::vector<std::vector<uint32_t>> code(c.ins.size());
+  for (size_t k = c.firstCode; k < c.ins.size(); ++k) {
+    const Ins& i = c.ins[k];
+    const uint32_t* t = c.tok.data() + i.pos;
+    std::vector<uint32_t>& out = code[k];
+    out.assign(t, t + i.first);
+    Opnd o;
+    for (uint32_t p = i.first; p < i.len; p += o.len) {
+      if (!DecodeOperand(t + p, i.len - p, o)) return r.why = kPwTokens, r;
+      const bool view = o.type == kOtConstantBuffer && o.dim == 2 && o.rep[0] == 0 && o.rep[1] == 0 &&
+                        (comps(t[p + o.imm[0]], t[p + o.imm[1]]) & SrcComps(o)) != 0;
+      if (!view) {
+        out.insert(out.end(), t + p, t + p + o.len);
+        continue;
+      }
+      const std::pair<uint32_t, uint32_t> key(t[p + o.imm[0]], t[p + o.imm[1]]);
+      uint32_t idx = 0;
+      while (idx < r.rows.size() && r.rows[idx] != key) ++idx;
+      if (idx == r.rows.size()) r.rows.push_back(key);
+      const size_t at = out.size();
+      out.insert(out.end(), t + p, t + p + o.len);
+      out[at] = (out[at] & ~(7u << 25)) | (3u << 25);  // second index: immediate + relative
+      out[at + o.imm[0]] = r.slot;
+      out[at + o.imm[1]] = 2 * idx;
+      out.push_back(0x0010000a);  // r<indexTemp>.x
+      out.push_back(r.indexTemp);
+      ++r.rewritten;
+    }
+    if (out.size() > 127) return r.why = kPwTokens, r;
+    if (i.op != kOpCustomData) out[0] = (out[0] & ~(0x7fu << 24)) | (static_cast<uint32_t>(out.size()) << 24);
+  }
+  if (!r.rewritten) return r.rows.clear(), r.why = kPwNoViewRows, r;
+
+  std::vector<uint32_t> out;
+  out.reserve(c.tok.size() + 4 * r.rewritten + 32);
+  out.push_back(c.tok[0]);
+  out.push_back(0);
+  const uint32_t nRows = static_cast<uint32_t>(r.rows.size());
+  for (size_t k = 0; k < c.ins.size(); ++k) {
+    const Ins& i = c.ins[k];
+    if (k == c.firstCode) {
+      const uint32_t dcl[] = {
+          0x04000859, 0x00208e46, r.slot, 2 * nRows,  // dcl_constantbuffer cb<slot>[2 n], dynamicIndexed
+          0x04000864, 0x00101012, r.indexReg, 4,      // dcl_input_ps_siv constant v<reg>.x, rendertarget_array_index
+      };
+      out.insert(out.end(), dcl, dcl + sizeof(dcl) / sizeof(dcl[0]));
+      if (c.dclTemps < 0) out.push_back(0x02000068), out.push_back(r.indexTemp + 1);  // dcl_temps
+      const uint32_t mov[] = {0x05000036, 0x00100012, r.indexTemp, 0x0010100a, r.indexReg};  // mov r<t>.x, v<reg>.x
+      out.insert(out.end(), mov, mov + sizeof(mov) / sizeof(mov[0]));
+    }
+    const size_t at = out.size();
+    if (!code[k].empty())
+      out.insert(out.end(), code[k].begin(), code[k].end());
+    else
+      out.insert(out.end(), c.tok.begin() + i.pos, c.tok.begin() + i.pos + i.len);
+    if (static_cast<int>(k) == c.dclTemps) out[at + 1] = r.indexTemp + 1;
+  }
+  out[1] = static_cast<uint32_t>(out.size());
+
+  // The input signature with the index appended.
+  const uint32_t oldTable = 8 + 24 * sgCount, shift = 24;
+  uint32_t strEnd = sgSize;
+  while (strEnd > oldTable && sg[strEnd - 1] != 0) --strEnd;
+  const size_t nName = strlen(opts.indexName) + 1;
+  std::vector<uint8_t> nsg(oldTable + shift + (strEnd - oldTable) + nName, 0);
+  Wr32(nsg.data(), sgCount + 1);
+  Wr32(nsg.data() + 4, 8);
+  for (uint32_t i = 0; i < sgCount; ++i) {
+    memcpy(nsg.data() + 8 + 24 * i, sg + 8 + 24 * i, 24);
+    Wr32(nsg.data() + 8 + 24 * i, Rd32(sg + 8 + 24 * i) + shift);
+  }
+  memcpy(nsg.data() + oldTable + shift, sg + oldTable, strEnd - oldTable);
+  const uint32_t name = oldTable + shift + (strEnd - oldTable);
+  memcpy(nsg.data() + name, opts.indexName, nName);
+  uint8_t* e = nsg.data() + oldTable;
+  Wr32(e, name), Wr32(e + 4, 0), Wr32(e + 8, 4 /*render target array index*/), Wr32(e + 12, 1 /*uint32*/), Wr32(e + 16, r.indexReg);
+  e[20] = 0x1, e[21] = 0x1;  // mask x, read
+
+  std::vector<ChunkData> cd(chunks.size());
+  for (size_t i = 0; i < chunks.size(); ++i) {
+    cd[i].fourcc = chunks[i].fourcc;
+    if (static_cast<int>(i) == shex) {
+      cd[i].data.resize(out.size() * 4);
+      memcpy(cd[i].data.data(), out.data(), cd[i].data.size());
+    } else if (static_cast<int>(i) == isgn) {
+      cd[i].data = nsg;
+    } else {
+      cd[i].data.assign(blob + chunks[i].off, blob + chunks[i].off + chunks[i].size);
+    }
+  }
+  r.blob = BuildContainer(cd);
+  r.why = kPwOk;
+  return r;
+}
+// The injected buffer of a pixel-shader clone: row 2 * i + view = `tcs[view]`'s bytes of the clone's row i. `read`
+// returns the 16 bytes of (buffer slot, row) of a view, or nullptr.
+template <class Read>
+inline bool BuildPsInject(const PsPatchResult& r, Read read, std::vector<uint8_t>& out) {
+  out.assign(r.rows.size() * 32, 0);
+  for (size_t i = 0; i < r.rows.size(); ++i)
+    for (int v = 0; v < 2; ++v) {
+      const uint8_t* p = read(v, r.rows[i].first, r.rows[i].second);
+      if (!p) return false;
+      memcpy(&out[i * 32 + static_cast<size_t>(v) * 16], p, 16);
+    }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Census of a shader cache
 // ---------------------------------------------------------------------------
 struct Census {
@@ -949,6 +1175,10 @@ struct Census {
   uint64_t ins = 0, twinned = 0;  // over the cloned shaders
   uint32_t bounded = 0;        // clones that read a computed row proven to stay on rows both views share
   uint32_t badOps[256] = {};
+  // Pixel shaders, against the TerrainContext's per-view rows only (PsPatchOpts' default).
+  uint32_t ps = 0;               // distinct pixel shaders
+  uint32_t psWhy[kPwCount] = {};  // kPwOk: view-select clone made; kPwNoViewRows: usable as it is
+  uint64_t psIns = 0, psRewritten = 0;
 };
 inline bool DeclaresCb(const uint8_t* blob, const std::vector<Chunk>& chunks, uint32_t slot, bool* vs) {
   *vs = false;
@@ -992,7 +1222,15 @@ inline void CensusBytes(const uint8_t* f, size_t n, const PatchOpts& o, Census& 
     bool vs = false;
     if (!ParseContainer(b, size, chunks)) continue;
     const bool declares = DeclaresCb(b, chunks, o.cb, &vs);
-    if (!vs) continue;
+    if (!vs) {
+      const PsPatchResult pr = PatchPsViewSelect(b, size);
+      if (pr.why != kPwNotVs) {  // a pixel shader
+        ++c.ps;
+        ++c.psWhy[pr.why];
+        if (pr.why == kPwOk) c.psIns += pr.ins, c.psRewritten += pr.rewritten;
+      }
+      continue;
+    }
     ++c.vs;
     if (!declares) continue;
     ++c.declares;
@@ -1080,6 +1318,19 @@ inline std::string CensusText(const Census& c) {
              "both views share\n",
              c.bounded);
     s += b;
+  }
+  if (c.ps) {
+    snprintf(b, sizeof(b),
+             "per-eye pass census: %u distinct pixel shaders: %u read no per-view TerrainContext row (usable as they "
+             "are), %u get a view-select clone (%llu operands rewritten), %u refused\n",
+             c.ps, c.psWhy[kPwNoViewRows], c.psWhy[kPwOk], static_cast<unsigned long long>(c.psRewritten),
+             c.ps - c.psWhy[kPwNoViewRows] - c.psWhy[kPwOk]);
+    s += b;
+    for (int w = kPwContainer; w < kPwCount; ++w) {
+      if (!c.psWhy[w] || w == kPwNoViewRows) continue;
+      snprintf(b, sizeof(b), "per-eye pass census: pixel shaders refused, %s: %u\n", PatchWhyName(w), c.psWhy[w]);
+      s += b;
+    }
   }
   if (c.exact + c.varyings) {
     snprintf(b, sizeof(b), "per-eye pass census: clones repeat %.1f %% of their instructions (%llu of %llu)\n",

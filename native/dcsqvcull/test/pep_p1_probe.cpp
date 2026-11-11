@@ -451,8 +451,8 @@ int RunVariant(int index) {
 // rows 20-23, a surfaceLod row picked by a clamped index, an instance id) is cloned by pep::PatchVsDualPosition and
 // created through NvAPI; one stereo draw with the periphery's TerrainContext bound and the focus rows injected is
 // compared with two stock draws (stock shader, periphery / focus TerrainContext). The pixel shader of the merged
-// draw picks its view's constants by SV_RenderTargetArrayIndex (the remedy of design 4.3); the stock one reads
-// constant 0. TerrainContext rows: census pair 1 of per_eye_pass_test.h (R26, F-4E Germany F2, left eye).
+// draw is the stock one's clone by pep::PatchPsViewSelect: it picks its view's constants by
+// SV_RenderTargetArrayIndex from injected rows (the remedy of design 4.3). TerrainContext rows: census pair 1 of per_eye_pass_test.h (R26, F-4E Germany F2, left eye).
 // With QV_PEP_ARCHIVE=<copy of metashaders2>: every clone of that cache is also offered to
 // NvAPI_D3D11_CreateVertexShaderEx (created and released; nothing drawn).
 // ---------------------------------------------------------------------------
@@ -473,18 +473,11 @@ VSOut vs(VSIn i) {
   return o;
 }
 struct PO { uint4 o0 : SV_Target0; float4 o1 : SV_Target1; float4 o2 : SV_Target2; };
-PO ps(VSOut i
-#if MERGED
-  , nointerpolation uint rt : SV_RenderTargetArrayIndex
-#endif
-) {
-#if !MERGED
-  uint rt = 0;
-#endif
+PO ps(VSOut i) {
   PO o;
-  o.o0 = uint4(rt, 0, 0, 0xC0DE);
+  o.o0 = uint4(viewConst[0].z, 0, 0, 0xC0DE);   // z: the view's number, as a per-view constant
   o.o1 = float4(i.wpos, i.pos.w);
-  o.o2 = float4(i.pos.xyz, viewConst[rt].x * i.uv.x + viewConst[rt].y);
+  o.o2 = float4(i.pos.xyz, viewConst[0].x * i.uv.x + viewConst[0].y);
   return o;
 }
 )";
@@ -514,10 +507,9 @@ void MakeTc(bool focus, uint8_t* tc) {
   }
 }
 
-ID3DBlob* CompileClone(const char* entry, const char* target, bool merged) {
-  const D3D_SHADER_MACRO m[] = {{"MERGED", merged ? "1" : "0"}, {nullptr, nullptr}};
+ID3DBlob* CompileClone(const char* entry, const char* target) {
   ID3DBlob *code = nullptr, *err = nullptr;
-  if (FAILED(D3DCompile(kCloneHlsl, sizeof(kCloneHlsl) - 1, "p1clone", m, nullptr, entry, target, 0, 0, &code, &err)))
+  if (FAILED(D3DCompile(kCloneHlsl, sizeof(kCloneHlsl) - 1, "p1clone", nullptr, nullptr, entry, target, 0, 0, &code, &err)))
     printf("P1 patched_clone: compile %s failed: %s\n", entry, err ? static_cast<const char*>(err->GetBufferPointer()) : "");
   if (err) err->Release();
   return code;
@@ -592,10 +584,19 @@ int RunClone() {
     printf("P1 %s: SKIP no NVIDIA device or NVAPI\n", name);
     return 3;
   }
-  ID3DBlob* vsB = CompileClone("vs", "vs_5_0", false);
-  ID3DBlob* psStockB = CompileClone("ps", "ps_5_0", false);
-  ID3DBlob* psMergedB = CompileClone("ps", "ps_5_0", true);
-  if (!vsB || !psStockB || !psMergedB) return 0;
+  ID3DBlob* vsB = CompileClone("vs", "vs_5_0");
+  ID3DBlob* psStockB = CompileClone("ps", "ps_5_0");
+  if (!vsB || !psStockB) return 0;
+  // The pixel shader's clone: its per-view row (cb0 row 0) read from the injected rows, by the view index.
+  static const pep::ViewRow kViewConstRows[] = {{0, 0xf}};
+  static const pep::PsViewBuffer kViewConst[] = {{0, kViewConstRows, 1}};
+  pep::PsPatchOpts pso;
+  pso.bufs = kViewConst, pso.nBufs = 1;
+  const pep::PsPatchResult pr = pep::PatchPsViewSelect(static_cast<const uint8_t*>(psStockB->GetBufferPointer()), psStockB->GetBufferSize(), pso);
+  if (pr.why != pep::kPwOk) {
+    printf("P1 %s: FAIL the patcher refused the pixel shader: %s\n", name, pep::PatchWhyName(pr.why));
+    return 0;
+  }
   const pep::PatchResult r = pep::PatchVsDualPosition(static_cast<const uint8_t*>(vsB->GetBufferPointer()), vsB->GetBufferSize());
   if (r.why != pep::kPwOk) {
     printf("P1 %s: FAIL the patcher refused the shader: %s\n", name, pep::PatchWhyName(r.why));
@@ -613,7 +614,7 @@ int RunClone() {
   }
   dev->CreateVertexShader(vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &vsStock);
   dev->CreatePixelShader(psStockB->GetBufferPointer(), psStockB->GetBufferSize(), nullptr, &psStock);
-  dev->CreatePixelShader(psMergedB->GetBufferPointer(), psMergedB->GetBufferSize(), nullptr, &psMerged);
+  dev->CreatePixelShader(pr.blob.data(), pr.blob.size(), nullptr, &psMerged);
   const D3D11_INPUT_ELEMENT_DESC il[] = {{"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
                                          {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0}};
   ID3D11InputLayout* layout = nullptr;
@@ -647,7 +648,7 @@ int RunClone() {
   const uint32_t mask = pep::PackViewportMasks(1, 2);
   memcpy(&inject[r.rows.size() * 4], &mask, 4);
   const float frame[16] = {0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2.0f, 0};
-  const float kP[2] = {0.25f, 1.5f}, kF[2] = {0.75f, -2.0f};
+  const float kP[4] = {0.25f, 1.5f, 0.0f, 0.0f}, kF[4] = {0.75f, -2.0f, 1.0f, 0.0f};
 
   auto buffer = [&](UINT bytes, UINT bind, const void* data) {
     D3D11_BUFFER_DESC bd = {bytes, D3D11_USAGE_DEFAULT, bind, 0, 0, 0};
@@ -699,7 +700,8 @@ int RunClone() {
   ctx->RSSetState(rs2);
   const UINT nIdx = static_cast<UINT>(ib.size());
   for (int view = 0; view < 2; ++view) {  // stock: one view at a time
-    const float vc[8] = {(view ? kF : kP)[0], (view ? kF : kP)[1], 0, 0, 0, 0, 0, 0};
+    float vc[8] = {};
+    memcpy(vc, view ? kF : kP, 16);
     ctx->UpdateSubresource(cbView, 0, nullptr, vc, 0, 0);
     ctx->VSSetConstantBuffers(11, 1, view ? &cbF : &cbP);
     ctx->OMSetRenderTargets(3, tR.rtvSlice[view], tR.dsvSlice[view]);
@@ -710,8 +712,12 @@ int RunClone() {
     ctx->DrawIndexedInstanced(nIdx, 2, 0, 0, 0);
   }
   {  // merged: the clone, the periphery's TerrainContext, the focus rows injected
-    const float vc[8] = {kP[0], kP[1], 0, 0, kF[0], kF[1], 0, 0};
+    float vc[8] = {};
+    memcpy(vc, kP, 16);  // the periphery's constants stay bound; the clone reads the injected rows: view 0, view 1
     ctx->UpdateSubresource(cbView, 0, nullptr, vc, 0, 0);
+    const float both[8] = {kP[0], kP[1], kP[2], kP[3], kF[0], kF[1], kF[2], kF[3]};
+    ID3D11Buffer* cbPsInject = buffer(32, D3D11_BIND_CONSTANT_BUFFER, both);
+    ctx->PSSetConstantBuffers(pr.slot, 1, &cbPsInject);
     ctx->VSSetConstantBuffers(11, 1, &cbP);
     ctx->VSSetConstantBuffers(r.slot, 1, &cbInject);
     ctx->OMSetRenderTargets(3, tS.rtvAll, tS.dsvAll);
@@ -759,9 +765,10 @@ int RunClone() {
     line += buf;
   }
   printf("P1 %s: clone repeats %u of %u instructions, %u computed-row reads proven shared, %zu focus rows at b%u, "
-         "CreateVertexShaderEx=%d | merged = two stock passes: %s, view index: %s%s\n",
-         name, r.twinned, r.ins, r.boundedRows, r.rows.size(), r.slot, cs, exact ? "EXACT" : "DIFFERENT", views ? "right" : "WRONG",
-         line.c_str());
+         "CreateVertexShaderEx=%d; pixel-shader clone: %u operands rewritten, index at v%u, rows at b%u | merged = two "
+         "stock passes: %s, view constants: %s%s\n",
+         name, r.twinned, r.ins, r.boundedRows, r.rows.size(), r.slot, cs, pr.rewritten, pr.indexReg, pr.slot,
+         exact ? "EXACT" : "DIFFERENT", views ? "right" : "WRONG", line.c_str());
   wchar_t arc[MAX_PATH] = {};
   const DWORD n = GetEnvironmentVariableW(L"QV_PEP_ARCHIVE", arc, MAX_PATH);
   if (n > 0 && n < MAX_PATH) OfferCacheClones(dev, api, arc);

@@ -477,7 +477,8 @@ void CensusReport(const CensusAcc& acc, const std::function<std::string(void*)>&
 
 // `extra` (per_eye_live.h's C7 line): called with the accumulated census after the report.
 void ChainCensusPhase(int seconds, std::atomic<uint64_t>& frameCounter,
-                      const std::function<void(const CensusAcc&)>& extra = nullptr) {
+                      const std::function<void(const CensusAcc&)>& extra = nullptr,
+                      const std::function<void(const CensusFrame&)>& eachFrame = nullptr) {
   g_cDispatches = g_cSampled = g_cSkippedBusy = g_cRead = g_cFail = 0;
   {
     std::lock_guard<std::mutex> lock(g_cfMu);
@@ -505,7 +506,10 @@ void ChainCensusPhase(int seconds, std::atomic<uint64_t>& frameCounter,
       std::lock_guard<std::mutex> lock(g_cfMu);
       q.swap(g_cfQueue);
     }
-    for (const CensusFrame& f : q) CensusAdd(acc, f);
+    for (const CensusFrame& f : q) {
+      CensusAdd(acc, f);
+      if (eachFrame) eachFrame(f);
+    }
   };
   for (int t = 0; t < seconds * 10 && !g_benchAbort; ++t) {
     Sleep(100);

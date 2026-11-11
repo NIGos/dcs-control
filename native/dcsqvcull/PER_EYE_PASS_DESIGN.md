@@ -487,3 +487,76 @@ dropped). A `NOT MEASURED` verdict means too few frames or an unusable block, no
   pass object. A `pep live diag:` line, once per capture, gives frame starts, G-buffer passes, snapshots, frames read
   back and paired, and names the cause when nothing pairs.
 - Still open: `[Suite] PassTimelineSec` groups its events by the same constant value (one "frame"); not changed here.
+
+## 12. Second live run, the stage 3 decision, and what was built for it (2026-11-11)
+
+### 12.1 Results (airfield F2, yaw 285, paused, about 58 fps, Quad Views with 4 views)
+
+| Capture | Result | Verdict |
+|---|---|---|
+| Census | 67 of 67 vertex shaders cloned (16 cache files: still partial) | GO |
+| C5 | focus VP rows exact 100 %; early source (periphery centre -> focus scalars) hit 100 %; jitter step equal in both views | PASS, fixed gaze |
+| C4 | the terrain is **one item**, the last one: item 640 of 640 in the focus main pass, 2,397 of 2,397 in the periphery's, in 100 % of the passes | PASS ("merged run last") |
+| C2 | focus main G-buffer passes, both eyes: stock 1.283 ms GPU, geometry only 0.933 ms: front-end share 0.73. Periphery main 2.41 ms, unchanged between the arms | PASS |
+| C7 | first eye 203 of 271 frames, second 271 of 271 | capture bug, 12.2 |
+
+Context from the same night: the paused airfield is CPU-bound (render thread 17.3 ms per frame); in flight DCS is
+GPU-bound (84 fps, 98 % GPU). The GPU half of this route is what counts in flight.
+
+### 12.2 C7's failure was the pairing, not the chains
+
+- The census compared chains **by index** over the frames with the modal chain count (7). The scene was paused, so
+  every chain is the same in every frame; yet the per-index means are mixtures: #3 74,635 and #4 88,825 instances
+  where a periphery chain has about 93,300, #5 9,385 where a focus has about 4,200. So the layout of a 7-chain frame
+  is not fixed (which cascades update varies; 221 of 492 sampled frames had another chain count altogether), and
+  index 3 is not always the left periphery.
+- An independent full-record capture of the same night (the chain derive census) found 0 focus records outside the
+  periphery's in every pair, both eyes.
+- **Fix:** C7 now works per frame: the view chains are the four chains of one pass object (TerrainModule), the
+  peripheries are the two with the most instances, each focus is paired with the periphery of the same rank in frame
+  order. Every sampled frame counts, whatever its cascade count. `pep C7 layout:` lines list the layouts seen
+  (for example `CCH|PPFF`), so a wrong assumption shows instead of failing one eye.
+
+### 12.3 Stage 3: GO for the offline building blocks, one number still missing
+
+- Gate: >= 0.30 ms GPU saved per frame. The focus main passes spend 0.93 ms in the front end (both eyes), the most
+  a merged pass could save there.
+- **But that front end is not all terrain.** C4 shows 639 model items before the terrain item in the focus pass.
+  Models stay per view (4.6). Only the terrain item's front end is saved, minus the merge's copies (about 0.11 ms,
+  R53 live). The split was not measured.
+- **Decision:** GO on building the exact offline parts (cheap, each proven on its own). The live skeleton (11.3
+  steps d-f) waits for `pep C2 terrain:`: the terrain item's own front end must be >= 0.41 ms per frame (0.30 +
+  0.11). Below that the route is closed: there is no other GPU work it could save.
+- C4's result fixes the composite: **merged run last**. DCS draws the focus models, then the slice is composited
+  with the pass's depth test (4.4). The slice is rendered without the models' depth, so terrain pixels behind
+  models are shaded in the slice and thrown away at the composite; in F2 that is a small area.
+
+### 12.4 Built in this round (all offline, nothing bound in DCS)
+
+- **Pixel-shader clone patcher** (`pep::PatchPsViewSelect`, `per_eye_pass.h`). The clone reads every per-view row
+  from an injected buffer, row `2 i + view`, with `view` = `SV_RenderTargetArrayIndex` (one more input at the next
+  free register, one dynamically indexed constant buffer, one temp). Same instructions on the same values: exact by
+  construction. Refusals as the vertex patcher's; a shader that reads no per-view row needs no clone.
+  - WARP test: the clone with the periphery's buffers and the injected rows equals the stock shader with each view's
+    own buffers, byte for byte, in both views (rows of two buffers, a clamped `surfaceLod` read inside a branch, a
+    branch on a per-view value).
+  - GPU, under single-pass stereo (`pep_p1_probe`, `patched_clone`): the probe's merged draw now uses both patchers'
+    clones (vertex: second position; pixel: view select) against two stock passes.
+  - The range rule now holds into `if` arms (an `if` writes nothing). DCS's pixel shaders clamp the `surfaceLod`
+    index, then branch, then read.
+- **Census of the cache's pixel shaders** (TerrainContext rows only): 118 distinct, 74 read no per-view row, 40 get
+  a clone (80 operands), 4 refused (`TerrainContext_flirFactor[i]`, row 77, unclamped: FLIR shaders, not the
+  G-buffer's). Vertex shaders unchanged: 67 of 67.
+- **Capture of the pixel stage's per-view rows** (`pep C5 ps rows:`): which rows of b7 (cPerView) and b10 differ
+  between a periphery and its focus. The patcher's lists for those two buffers come from this line; until then the
+  clone knows the TerrainContext only and must not be trusted for a real G-buffer shader.
+- **C2 terrain split** (`pep C2 terrain:`): the terrain item timed as a nested pass in both arms.
+
+### 12.5 What remains before a live skeleton, in order
+
+1. Live: `pep C2 terrain:` >= 0.41 ms (else stop), `pep C5 ps rows:`, `pep C7:` with its layouts, the census on a
+   fuller cache (fly two maps first).
+2. Offline: the per-view row lists of b7 / b10 into `PsPatchOpts`; the pixel census again with them (gate >= 90 % of
+   the G-buffer pixel shaders clone or need none); motion vectors need the previous frame's rows per view as well,
+   which the capture will show as per-view rows of b7 / b10.
+3. Then 11.3 a, c, d, e, f as written. Step b is done.

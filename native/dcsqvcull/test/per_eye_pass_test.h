@@ -559,7 +559,8 @@ void Clone() {
   const std::string text = pep::CensusText(c);
   Check(found && c.files == 2 && c.blobs == 9 && c.badSum == 1 && c.duplicates == 1 && c.vs == 6 && c.declares == 6 &&
             c.exact == 2 && c.varyings == 1 && c.why[pep::kPwFlow] == 1 && c.why[pep::kPwDynamicRow] == 1 &&
-            c.why[pep::kPwNoViewRows] == 1 && text.find("cloned exactly 2 (40.0 %)") != std::string::npos,
+            c.why[pep::kPwNoViewRows] == 1 && text.find("cloned exactly 2 (40.0 %)") != std::string::npos &&
+            c.ps == 1 && c.psWhy[pep::kPwOk] == 1 && text.find("1 distinct pixel shaders") != std::string::npos,
         "per-eye pass: cache census (blobs between junk, a duplicate, a wrong checksum, a pixel shader; exact / "
         "varying / refused counts)");
   if (!(found && c.blobs == 9 && c.exact == 2)) printf("%s", text.c_str());
@@ -580,10 +581,201 @@ void Clone() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The pixel-shader clone (pep::PatchPsViewSelect): for each view, the clone with the PERIPHERY's buffers bound, the
+// injected rows and the view index equals the stock shader with that view's buffers, byte for byte. The index comes
+// from a geometry shader here (WARP has no stereo); test/pep_p1_probe.cpp repeats it under single-pass stereo.
+// ---------------------------------------------------------------------------
+const char kPsHlsl[] = R"(
+cbuffer cG : register(b0) { uint4 gsView; };
+cbuffer cPerView : register(b7) { float4 pv[8]; };
+cbuffer TerrainContext : register(b11) { float4 tc[136]; };
+struct V2G { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+struct G2P { float4 pos : SV_Position; float2 uv : TEXCOORD0; uint rt : SV_RenderTargetArrayIndex; };
+V2G vsq(uint id : SV_VertexID) {
+  V2G o;
+  o.uv = float2((id << 1) & 2, id & 2);
+  o.pos = float4(o.uv * float2(2, -2) + float2(-1, 1), 0.5, 1);
+  return o;
+}
+[maxvertexcount(3)] void gsq(triangle V2G i[3], inout TriangleStream<G2P> s) {
+  for (int k = 0; k < 3; ++k) {
+    G2P o;
+    o.pos = i[k].pos;
+    o.uv = i[k].uv;
+    o.rt = gsView.x;
+    s.Append(o);
+  }
+}
+struct PIn { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+float4 ps_view(PIn i) : SV_Target {
+  float4 clip = float4(i.uv, 0.5, 1);
+  float mv = dot(clip, tc[20]) - dot(clip, pv[3]);      // per-view rows of two buffers (a motion vector's shape)
+  int l = max(min((int)(i.uv.x * 5), 3), 0);
+  float lod = 0;
+  if (i.uv.y > 0.25) lod = tc[45 + l].x;                // DCS's surfaceLod read: clamped, then used inside a branch
+  float2 px = i.pos.xy / tc[44].zw;                     // the render size (z, w per view)
+  if (tc[21].x > 0.5) px = px.yx;                       // a branch on a per-view value
+  return float4(mv, lod + tc[44].x, px);
+}
+float4 ps_plain(PIn i) : SV_Target { return float4(i.uv, tc[22].x, tc[44].x); }
+float4 ps_dyn(PIn i) : SV_Target { int l = (int)(i.uv.x * 30); return tc[15 + l]; }
+float4 ps_has(PIn i, nointerpolation uint rt : SV_RenderTargetArrayIndex) : SV_Target { return tc[20] * rt; }
+)";
+std::vector<uint8_t> CompilePs(const char* entry, const char* target) {
+  std::vector<uint8_t> out;
+  ID3DBlob* code = nullptr;
+  ID3DBlob* err = nullptr;
+  if (SUCCEEDED(g_rig.compile(kPsHlsl, sizeof(kPsHlsl) - 1, "pepps", nullptr, nullptr, entry, target, 0, 0, &code, &err)) && code)
+    out.assign(static_cast<const uint8_t*>(code->GetBufferPointer()),
+               static_cast<const uint8_t*>(code->GetBufferPointer()) + code->GetBufferSize());
+  else if (err)
+    printf("     compile %s: %s\n", entry, static_cast<const char*>(err->GetBufferPointer()));
+  if (code) code->Release();
+  if (err) err->Release();
+  return out;
+}
+void PsClone() {
+  if (!MakeRig()) return;
+  const std::vector<uint8_t> vs = CompilePs("vsq", "vs_5_0"), gs = CompilePs("gsq", "gs_5_0"), view = CompilePs("ps_view", "ps_5_0"),
+                             plain = CompilePs("ps_plain", "ps_5_0"), dyn = CompilePs("ps_dyn", "ps_5_0"),
+                             has = CompilePs("ps_has", "ps_5_0");
+  if (vs.empty() || gs.empty() || view.empty() || plain.empty() || dyn.empty() || has.empty()) {
+    Check(false, "per-eye pass: pixel-shader test shaders compile");
+    return;
+  }
+  static const pep::ViewRow kPvRows[] = {{3, 0xf}};
+  static const pep::PsViewBuffer kBufs[] = {{7, kPvRows, 1}, {11, pep::kTcViewRows, sizeof(pep::kTcViewRows) / sizeof(pep::kTcViewRows[0])}};
+  pep::PsPatchOpts o;
+  o.bufs = kBufs, o.nBufs = 2;
+  const pep::PsPatchResult r = pep::PatchPsViewSelect(view.data(), view.size(), o);
+  const pep::PsPatchResult rp = pep::PatchPsViewSelect(plain.data(), plain.size(), o), rd = pep::PatchPsViewSelect(dyn.data(), dyn.size(), o),
+                           rh = pep::PatchPsViewSelect(has.data(), has.size(), o), rv = pep::PatchPsViewSelect(vs.data(), vs.size(), o);
+  Check(r.why == pep::kPwOk && pep::ChecksumOk(r.blob.data(), r.blob.size()) && r.rewritten == 4 && r.rows.size() == 4 &&
+            r.boundedRows >= 1 && r.slot == 13 && r.indexReg == 2,
+        "per-eye pass: pixel-shader clone: four per-view reads of two buffers rewritten, the clamped surfaceLod read "
+        "inside a branch proven shared, the index at the next free input register");
+  if (r.why != pep::kPwOk) printf("     why %d (%s), opcode %u\n", r.why, pep::PatchWhyName(r.why), r.badOp);
+  Check(rp.why == pep::kPwNoViewRows && rp.blob.empty() && rd.why == pep::kPwDynamicRow && rh.why == pep::kPwSignature &&
+            rv.why == pep::kPwNotVs,
+        "per-eye pass: pixel-shader clone: none needed without a per-view read; refused for an unproven computed row, "
+        "a shader that already reads the index, a vertex shader");
+  if (r.why != pep::kPwOk) return;
+
+  // Two views' buffers: the census pair's TerrainContexts, a cPerView whose row 3 differs.
+  uint8_t tc[2][pep::kTcBytes];
+  MakeTc(kPairs[0], false, tc[0]);
+  MakeTc(kPairs[0], true, tc[1]);
+  float pv[2][32];
+  for (int i = 0; i < 32; ++i) pv[0][i] = pv[1][i] = 0.125f * static_cast<float>(i % 7) - 0.3f;
+  for (int i = 12; i < 16; ++i) pv[1][i] += 0.61f;
+  std::vector<uint8_t> inject;
+  const bool built = pep::BuildPsInject(r, [&](int v, uint32_t cb, uint32_t row) -> const uint8_t* {
+    if (cb == 11 && row < 136) return tc[v] + 16 * row;
+    if (cb == 7 && row < 8) return reinterpret_cast<const uint8_t*>(pv[v]) + 16 * row;
+    return nullptr;
+  }, inject);
+  ID3D11Device* dev = g_rig.dev;
+  ID3D11DeviceContext* ctx = g_rig.ctx;
+  auto cbuf = [&](const void* data, UINT bytes) {
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = (bytes + 15) & ~15u, bd.Usage = D3D11_USAGE_DEFAULT, bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    std::vector<uint8_t> padded(bd.ByteWidth, 0);
+    memcpy(padded.data(), data, bytes);
+    D3D11_SUBRESOURCE_DATA sd{padded.data(), 0, 0};
+    ID3D11Buffer* b = nullptr;
+    dev->CreateBuffer(&bd, &sd, &b);
+    return b;
+  };
+  constexpr UINT kW = 64, kH = 48;
+  ID3D11Texture2D* tex[2] = {};
+  ID3D11RenderTargetView* rtv[2] = {};
+  D3D11_TEXTURE2D_DESC td{kW, kH, 1, 2, DXGI_FORMAT_R32G32B32A32_FLOAT, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET, 0, 0};
+  for (int k = 0; k < 2; ++k)
+    if (SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &tex[k]))) dev->CreateRenderTargetView(tex[k], nullptr, &rtv[k]);
+  ID3D11VertexShader* vso = nullptr;
+  ID3D11GeometryShader* gso = nullptr;
+  ID3D11PixelShader *stock = nullptr, *clone = nullptr;
+  dev->CreateVertexShader(vs.data(), vs.size(), nullptr, &vso);
+  dev->CreateGeometryShader(gs.data(), gs.size(), nullptr, &gso);
+  dev->CreatePixelShader(view.data(), view.size(), nullptr, &stock);
+  const HRESULT hc = dev->CreatePixelShader(r.blob.data(), r.blob.size(), nullptr, &clone);
+  ID3D11Buffer* cTc[2] = {cbuf(tc[0], pep::kTcBytes), cbuf(tc[1], pep::kTcBytes)};
+  ID3D11Buffer* cPv[2] = {cbuf(pv[0], sizeof(pv[0])), cbuf(pv[1], sizeof(pv[1]))};
+  const uint32_t gv[2][4] = {{0, 0, 0, 0}, {1, 0, 0, 0}};
+  ID3D11Buffer* cGs[2] = {cbuf(gv[0], 16), cbuf(gv[1], 16)};
+  ID3D11Buffer* cInj = built ? cbuf(inject.data(), static_cast<UINT>(inject.size())) : nullptr;
+  int step = 0;
+  if (!built || FAILED(hc) || !clone || !stock || !vso || !gso || !rtv[0] || !rtv[1] || !cTc[0] || !cTc[1] || !cPv[0] || !cPv[1] ||
+      !cGs[0] || !cGs[1] || !cInj)
+    step = 1;
+  std::vector<uint8_t> bytes[2][2];
+  if (!step) {
+    const float zero[4] = {0, 0, 0, 0};
+    const D3D11_VIEWPORT vp{0, 0, static_cast<float>(kW), static_cast<float>(kH), 0, 1};
+    ctx->ClearState();
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(vso, nullptr, 0);
+    ctx->GSSetShader(gso, nullptr, 0);
+    ctx->RSSetViewports(1, &vp);
+    for (int k = 0; k < 2; ++k) {  // 0: stock with each view's buffers; 1: the clone with the periphery's and the injected rows
+      ctx->ClearRenderTargetView(rtv[k], zero);
+      ctx->OMSetRenderTargets(1, &rtv[k], nullptr);
+      ctx->PSSetShader(k ? clone : stock, nullptr, 0);
+      if (k) ctx->PSSetConstantBuffers(r.slot, 1, &cInj);
+      for (int v = 0; v < 2; ++v) {
+        ctx->GSSetConstantBuffers(0, 1, &cGs[v]);
+        ctx->PSSetConstantBuffers(7, 1, &cPv[k ? 0 : v]);
+        ctx->PSSetConstantBuffers(11, 1, &cTc[k ? 0 : v]);
+        ctx->Draw(3, 0);
+      }
+    }
+    ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    td.ArraySize = 1, td.Usage = D3D11_USAGE_STAGING, td.BindFlags = 0, td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* st = nullptr;
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, &st))) step = 2;
+    for (int k = 0; k < 2 && !step; ++k)
+      for (UINT v = 0; v < 2 && !step; ++v) {
+        ctx->CopySubresourceRegion(st, 0, 0, 0, 0, tex[k], v, nullptr);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(ctx->Map(st, 0, D3D11_MAP_READ, 0, &m))) {
+          step = 3;
+          break;
+        }
+        bytes[k][v].resize(kW * kH * 16);
+        for (UINT y = 0; y < kH; ++y) memcpy(&bytes[k][v][y * kW * 16], static_cast<const uint8_t*>(m.pData) + y * m.RowPitch, kW * 16);
+        ctx->Unmap(st, 0);
+      }
+    if (st) st->Release();
+    ctx->ClearState();
+  }
+  if (!step && (bytes[0][0] != bytes[1][0] || bytes[0][1] != bytes[1][1])) step = 4;
+  if (!step && bytes[0][0] == bytes[0][1]) step = 5;  // the two views must differ, or the test proves nothing
+  bool drawn = false;
+  if (!step)
+    for (uint8_t b : bytes[0][1]) drawn |= b != 0;
+  if (!step && !drawn) step = 6;
+  if (step) printf("     pixel-shader clone: step %d (create 0x%08lx)\n", step, static_cast<unsigned long>(hc));
+  Check(step == 0,
+        "per-eye pass: pixel-shader clone = stock shader with each view's own buffers, byte for byte, in both views "
+        "(64 x 48 texels; the views differ, also in the branch taken)");
+  for (ID3D11Buffer* b : {cTc[0], cTc[1], cPv[0], cPv[1], cGs[0], cGs[1], cInj})
+    if (b) b->Release();
+  for (int k = 0; k < 2; ++k) {
+    if (rtv[k]) rtv[k]->Release();
+    if (tex[k]) tex[k]->Release();
+  }
+  if (vso) vso->Release();
+  if (gso) gso->Release();
+  if (stock) stock->Release();
+  if (clone) clone->Release();
+}
+
 void Run() {
   FocusRows();
   Rules();
   Clone();
+  PsClone();
 }
 
 }  // namespace peptest

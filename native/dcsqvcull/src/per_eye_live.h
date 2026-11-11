@@ -8,6 +8,8 @@
 //                        early source for the four scalars with a fixed gaze: a table from the periphery's jittered
 //                        centre (known at the periphery pass) to the focus scalars last seen with it; (4) the
 //                        jitter step in pixels, periphery against focus. Pass: table hits >= 99 % and (1) = 100 %.
+//                        Also (5), for the pixel-shader clone's lists: which rows of the pixel stage's b7 / b10
+//                        (first 4096 B, as bound at the pass end) differ between the two views ("pep C5 ps rows:").
 //   [Suite] PerEyeC4=N   N s. The item vector of every G-buffer pass execution (gb_batch.h's gbpass) is classed by
 //                        the items' vtables before the pass runs: terrain family (the merged families' carrier) or
 //                        not. Per focus main pass: pep::ClassifyOrder. Pass: first or last in >= 95 % of the passes.
@@ -16,7 +18,8 @@
 //                        G-buffer pass becomes a 16 x 16 viewport off target, so the pass still fetches, shades,
 //                        clips and sets up every triangle but writes no pixel. ON / OFF of that pass's GPU time is
 //                        the front-end share a merged pass can save. Pass: >= 0.6. Nothing else in this file
-//                        changes what DCS draws; C2 does only inside its ON blocks.
+//                        changes what DCS draws; C2 does only inside its ON blocks. Also "pep C2 terrain:": the
+//                        terrain item alone (the only mergeable part), timed as a nested pass in both arms.
 //   [Suite] PerEyeC7=N   N s of measure_kit.h's chain census, plus one line for the view chains: are the focus
 //                        chain's per-object instance counts <= the periphery's of the same eye in every frame (the
 //                        "focus list = periphery list cut by the focus planes, same LOD" half). The ORDER half of C7
@@ -301,6 +304,50 @@ inline std::string DiagLine(const Diag& d, uint64_t frameStarts, uint64_t gbPass
   return s;
 }
 
+// The per-view rows of the pixel stage's b7 (cPerView) and b10, for pep::PatchPsViewSelect's lists: the first
+// kCbMax bytes of both, as bound at the end of each G-buffer pass, periphery against focus of the same eye.
+constexpr int kCbSlots = 2, kCbMax = 4096;
+constexpr uint32_t kCbSlot[kCbSlots] = {7, 10};
+struct CbSnap {
+  uint32_t frame = 0;
+  uint8_t ord = 0, slot = 0;  // slot: index into kCbSlot
+  uint16_t bytes = 0;
+  uint8_t data[kCbMax];
+};
+struct PsRowsAcc {
+  uint64_t pairs[kCbSlots] = {}, sizeMismatch[kCbSlots] = {};
+  uint32_t bytes[kCbSlots] = {};
+  uint8_t comps[kCbSlots][kCbMax / 16] = {};  // per row: the components that differed in any pair
+};
+inline void PsRowsAdd(PsRowsAcc& a, int slot, const uint8_t* p, uint32_t pBytes, const uint8_t* f, uint32_t fBytes) {
+  if (slot < 0 || slot >= kCbSlots || !pBytes) return;
+  if (pBytes != fBytes) {
+    ++a.sizeMismatch[slot];
+    return;
+  }
+  ++a.pairs[slot];
+  a.bytes[slot] = pBytes;
+  for (uint32_t r = 0; r * 16 + 16 <= pBytes && r < kCbMax / 16; ++r)
+    for (int k = 0; k < 4; ++k)
+      if (memcmp(p + 16 * r + 4 * k, f + 16 * r + 4 * k, 4) != 0) a.comps[slot][r] |= static_cast<uint8_t>(1u << k);
+}
+inline std::string PsRowsLine(const PsRowsAcc& a, int slot) {
+  char b[160];
+  snprintf(b, sizeof(b), "pep C5 ps rows: b%u, first %u B, %llu periphery/focus pairs (%llu of different sizes): per-view rows",
+           kCbSlot[slot], a.bytes[slot], static_cast<unsigned long long>(a.pairs[slot]),
+           static_cast<unsigned long long>(a.sizeMismatch[slot]));
+  std::string s = b;
+  int n = 0;
+  for (int r = 0; r < kCbMax / 16; ++r)
+    if (a.comps[slot][r]) {
+      snprintf(b, sizeof(b), " %d:%x", r, a.comps[slot][r]);
+      s += b;
+      ++n;
+    }
+  if (!a.pairs[slot]) return s + " not captured (no buffer at the slot, or no pair)";
+  return n ? s + " (row:component mask)" : s + " none";
+}
+
 struct C4Acc {
   struct View {
     uint64_t passes = 0, order[4] = {};  // pep::MergeOrder
@@ -365,57 +412,118 @@ inline C2Out C2Share(const std::vector<double>& offMs, const std::vector<double>
   return o;
 }
 
-// C7, counts half, from measure_kit.h's census: the view chains are the last four calccounters chains of a frame
-// (periphery L, periphery R, focus L, focus R: R120b 1.1); is each focus chain contained in its eye's periphery?
-struct C7Out {
+// C2's terrain split. The terrain is one item of the pass (C4 live: Visualizer's TerrainObject, last of 640 in the
+// focus main pass), and only its geometry can be merged; the models before it stay per view. Its GPU ms are timed
+// as a nested "pass" in both arms: stock = the whole item, geometry only = its front end, the part a merged pass
+// saves. Stage 3's gate is >= 0.30 ms GPU saved; the merge's copies cost about 0.11 ms (R53 live), so the terrain
+// item's front end has to be >= 0.41 ms per frame (both eyes).
+constexpr double kC2TerrainGateMs = 0.41;
+struct C2TerrainOut {
+  double stock = 0, frontEnd = 0;
   int verdict = -1;
-  uint64_t frames[2] = {}, subset[2] = {}, maxOver[2] = {};
-  double excess[2] = {};
-  int chains = 0;
 };
-inline C7Out C7FromCensus(const mkit::CensusAcc& acc) {
-  C7Out o;
-  o.chains = acc.chains;
-  if (acc.chains < 4) return o;
-  // The view chains: the four chains run by one pass object (TerrainModule calls #1-#4, R34 live), in frame
-  // order; without such a group, the last four.
-  int v[4] = {acc.chains - 4, acc.chains - 3, acc.chains - 2, acc.chains - 1};
-  for (size_t i = 0; i < acc.chain.size(); ++i) {
-    int g[4], n = 0;
-    for (size_t j = 0; j < acc.chain.size(); ++j)
-      if (acc.chain[i].pass && acc.chain[j].pass == acc.chain[i].pass) {
-        if (n < 4) g[n] = static_cast<int>(j);
-        ++n;
-      }
-    if (n == 4) {
-      memcpy(v, g, sizeof(v));
-      break;
-    }
-  }
-  bool all = true, any = false;
-  for (int e = 0; e < 2; ++e) {
-    const auto it = acc.pair.find({v[e], v[2 + e]});
-    if (it == acc.pair.end()) continue;
-    o.frames[e] = it->second.frames, o.subset[e] = it->second.subset, o.maxOver[e] = it->second.maxObjectsOver;
-    o.excess[e] = it->second.frames ? it->second.excessSum / static_cast<double>(it->second.frames) : 0;
-    any |= o.frames[e] >= 25;
-    all &= o.subset[e] == o.frames[e];
-  }
-  if (any && o.frames[0] >= 25 && o.frames[1] >= 25) o.verdict = all ? 1 : 0;
+inline C2TerrainOut C2Terrain(const std::vector<double>& offMs, const std::vector<double>& onMs) {
+  C2TerrainOut o;
+  if (offMs.empty() || onMs.empty()) return o;
+  for (double v : offMs) o.stock += v / static_cast<double>(offMs.size());
+  for (double v : onMs) o.frontEnd += v / static_cast<double>(onMs.size());
+  if (!(o.stock > 0)) return o;
+  o.verdict = o.frontEnd >= kC2TerrainGateMs ? 1 : 0;
   return o;
 }
-inline std::string C7Line(const C7Out& o) {
-  char b[640];
+
+// C7, counts half, per frame of measure_kit.h's census. The view chains are the four chains of the frame that one
+// pass object runs (TerrainModule). Which of the four are peripheries is read from their sizes (the two with the most
+// instances), never from their place: the second live run (2026-11-11) paired by chain index over the frames with
+// the modal chain count and failed for one eye only, with a paused scene whose per-chain means were mixtures (#3
+// 74,635 against #4 88,825 instances): the layout of a frame with a given chain count is not fixed. Each focus is
+// paired with the periphery of the same rank in frame order (first focus with first periphery). The layouts seen
+// are counted and logged, so a wrong assumption shows.
+struct C7Acc {
+  uint64_t frames = 0, noFour = 0;
+  uint64_t n[2] = {}, subset[2] = {}, maxOver[2] = {};
+  double excess[2] = {};
+  std::map<std::string, uint64_t> layouts;  // e.g. "CCH|PPFF": the other chains' passes, then the view chains by size
+};
+inline void C7Add(C7Acc& a, const mkit::CensusFrame& f, const std::function<char(void*)>& kindOf) {
+  ++a.frames;
+  const size_t n = f.counts.size();
+  int v[4] = {-1, -1, -1, -1};
+  for (size_t i = 0; i < n && v[0] < 0; ++i) {
+    int g[4], m = 0;
+    for (size_t j = 0; j < n; ++j)
+      if (f.pass[i] && f.pass[j] == f.pass[i]) {
+        if (m < 4) g[m] = static_cast<int>(j);
+        ++m;
+      }
+    if (m == 4) memcpy(v, g, sizeof(v));
+  }
+  std::string sig;
+  for (size_t i = 0; i < n; ++i)
+    if (v[0] < 0 || (static_cast<int>(i) != v[0] && static_cast<int>(i) != v[1] && static_cast<int>(i) != v[2] && static_cast<int>(i) != v[3]))
+      sig += kindOf ? kindOf(f.pass[i]) : '?';
+  if (v[0] < 0) {
+    ++a.noFour;
+    ++a.layouts[sig + "|no four chains of one pass"];
+    return;
+  }
+  uint64_t tot[4] = {};
+  for (int k = 0; k < 4; ++k)
+    for (uint32_t x : f.counts[static_cast<size_t>(v[k])]) tot[k] += x;
+  int big[4] = {0, 1, 2, 3};
+  std::stable_sort(big, big + 4, [&](int x, int y) { return tot[x] > tot[y]; });
+  bool isP[4] = {};
+  isP[big[0]] = isP[big[1]] = true;
+  int pi[2], fi[2], np = 0, nf = 0;
+  sig += '|';
+  for (int k = 0; k < 4; ++k) {
+    sig += isP[k] ? 'P' : 'F';
+    (isP[k] ? pi[np++] : fi[nf++]) = v[k];
+  }
+  ++a.layouts[sig];
+  for (int e = 0; e < 2; ++e) {
+    const std::vector<uint32_t>& cp = f.counts[static_cast<size_t>(pi[e])];
+    const std::vector<uint32_t>& cf = f.counts[static_cast<size_t>(fi[e])];
+    if (cp.size() != cf.size()) continue;
+    uint64_t over = 0;
+    double ex = 0;
+    for (size_t k = 0; k < cp.size(); ++k)
+      if (cf[k] > cp[k]) ++over, ex += cf[k] - cp[k];
+    ++a.n[e];
+    if (!over) ++a.subset[e];
+    a.maxOver[e] = std::max(a.maxOver[e], over);
+    a.excess[e] += ex;
+  }
+}
+inline int C7Verdict(const C7Acc& a) {
+  if (a.n[0] < 25 || a.n[1] < 25) return -1;
+  return a.subset[0] == a.n[0] && a.subset[1] == a.n[1] ? 1 : 0;
+}
+inline std::string C7Line(const C7Acc& a) {
+  char b[768];
   snprintf(b, sizeof(b),
-           "pep C7: %d culling chains per frame; focus instance counts <= periphery's for every object: left %llu of "
-           "%llu frames (worst %llu objects over, %.1f extra instances/frame), right %llu of %llu (worst %llu, %.1f) | "
-           "counts contained in every frame: %s | instance order: not comparable (stock orders an object's instances "
-           "by racing atomics, R34 4.1), so merged instancer draws are exact only up to that order",
-           o.chains, static_cast<unsigned long long>(o.subset[0]), static_cast<unsigned long long>(o.frames[0]),
-           static_cast<unsigned long long>(o.maxOver[0]), o.excess[0], static_cast<unsigned long long>(o.subset[1]),
-           static_cast<unsigned long long>(o.frames[1]), static_cast<unsigned long long>(o.maxOver[1]), o.excess[1],
-           Word(o.verdict));
+           "pep C7: %llu frames, %llu without four chains of one pass; focus instance counts <= its periphery's for "
+           "every object: first eye %llu of %llu frames (worst %llu objects over, %.1f extra instances/frame), second "
+           "%llu of %llu (worst %llu, %.1f) | counts contained in every frame: %s | instance order: not comparable "
+           "(stock orders an object's instances by racing atomics, R34 4.1), so merged instancer draws are exact only "
+           "up to that order",
+           static_cast<unsigned long long>(a.frames), static_cast<unsigned long long>(a.noFour),
+           static_cast<unsigned long long>(a.subset[0]), static_cast<unsigned long long>(a.n[0]),
+           static_cast<unsigned long long>(a.maxOver[0]), a.n[0] ? a.excess[0] / static_cast<double>(a.n[0]) : 0.0,
+           static_cast<unsigned long long>(a.subset[1]), static_cast<unsigned long long>(a.n[1]),
+           static_cast<unsigned long long>(a.maxOver[1]), a.n[1] ? a.excess[1] / static_cast<double>(a.n[1]) : 0.0,
+           Word(C7Verdict(a)));
   return b;
+}
+// The layouts, most frequent first (at most `most` lines).
+inline std::vector<std::string> C7Layouts(const C7Acc& a, size_t most = 6) {
+  std::vector<std::pair<uint64_t, std::string>> v;
+  for (const auto& kv : a.layouts) v.emplace_back(kv.second, kv.first);
+  std::sort(v.begin(), v.end(), [](const auto& x, const auto& y) { return x.first != y.first ? x.first > y.first : x.second < y.second; });
+  std::vector<std::string> out;
+  for (size_t i = 0; i < v.size() && i < most; ++i)
+    out.push_back("pep C7 layout: " + std::to_string(v[i].first) + " frames " + v[i].second);
+  return out;
 }
 
 #ifndef DCSQV_PEP_NO_RUNTIME
@@ -439,7 +547,13 @@ struct Set {
   bool pending = false;
   ID3D11Buffer* st[kMaxGb] = {};
   GbRec meta[kMaxGb];  // tc filled at the read
+  ID3D11Buffer* stc[kMaxGb][kCbSlots] = {};  // pixel-stage b7 / b10 (C5's per-view row list)
+  uint16_t cbBytes[kMaxGb][kCbSlots] = {};
+  std::vector<uint8_t> cb;                   // kMaxGb * kCbSlots * kCbMax, sized by the phase
 };
+std::vector<CbSnap> g_cbRing;  // with g_ring, under g_ringMu
+size_t g_cbN = 0;
+std::atomic<bool> g_psRows{false};
 Set g_sets[kSets];
 int g_cur = -1;
 mkit::FrameTrack g_track;  // frames by pass structure (ptiming::g_execFrame is constant live)
@@ -539,6 +653,9 @@ void ReleaseSets() {
   for (Set& s : g_sets) {
     for (ID3D11Buffer*& b : s.st)
       if (b) b->Release(), b = nullptr;
+    for (auto& row : s.stc)
+      for (ID3D11Buffer*& b : row)
+        if (b) b->Release(), b = nullptr;
     s.n = 0, s.pending = false;
   }
   g_cur = -1;
@@ -553,6 +670,13 @@ void Publish(const Set& s) {
   f.frame = s.frame;
   f.n = s.n;
   for (int i = 0; i < s.n; ++i) f.gb[i] = s.meta[i];
+  for (int i = 0; i < s.n; ++i)
+    for (int j = 0; j < kCbSlots; ++j) {
+      if (!s.cbBytes[i][j] || g_cbN >= g_cbRing.size() || s.cb.empty()) continue;
+      CbSnap& cs = g_cbRing[g_cbN++];
+      cs.frame = s.frame, cs.ord = s.meta[i].ord, cs.slot = static_cast<uint8_t>(j), cs.bytes = s.cbBytes[i][j];
+      memcpy(cs.data, &s.cb[(static_cast<size_t>(i) * kCbSlots + static_cast<size_t>(j)) * kCbMax], cs.bytes);
+    }
 }
 // Reads the finished sets whose copies are ready (never waits).
 void Poll(ID3D11DeviceContext* c) {
@@ -569,6 +693,17 @@ void Poll(ID3D11DeviceContext* c) {
       memcpy(s.meta[i].tc, m.pData, pep::kTcBytes);
       c->Unmap(s.st[i], 0);
     }
+    for (int i = 0; i < s.n && ready; ++i)
+      for (int j = 0; j < kCbSlots && ready; ++j) {
+        if (!s.cbBytes[i][j] || !s.stc[i][j] || s.cb.empty()) continue;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(c->Map(s.stc[i][j], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m))) {
+          ready = false;
+          break;
+        }
+        memcpy(&s.cb[(static_cast<size_t>(i) * kCbSlots + static_cast<size_t>(j)) * kCbMax], m.pData, s.cbBytes[i][j]);
+        c->Unmap(s.stc[i][j], 0);
+      }
     if (!ready) continue;
     s.pending = false;
     Publish(s);
@@ -614,6 +749,35 @@ void Snapshot(ID3D11DeviceContext* c) {
     b->Release();
   } else {
     g_noTc.fetch_add(1, std::memory_order_relaxed);
+  }
+  // The pixel stage's b7 / b10 (their first kCbMax bytes), for the per-view row list of the pixel-shader clone.
+  for (int j = 0; j < kCbSlots; ++j) {
+    s.cbBytes[s.n][j] = 0;
+    if (!g_psRows.load(std::memory_order_relaxed) || s.cb.empty()) continue;
+    ID3D11Buffer* pb = nullptr;
+    c->PSGetConstantBuffers(kCbSlot[j], 1, &pb);
+    if (!pb) continue;
+    D3D11_BUFFER_DESC d{};
+    pb->GetDesc(&d);
+    const UINT take = std::min<UINT>(d.ByteWidth, kCbMax) & ~15u;
+    if (take && !s.stc[s.n][j]) {
+      ID3D11Device* dev = nullptr;
+      c->GetDevice(&dev);
+      D3D11_BUFFER_DESC sd{};
+      sd.ByteWidth = kCbMax;
+      sd.Usage = D3D11_USAGE_STAGING;
+      sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      if (dev) {
+        if (FAILED(dev->CreateBuffer(&sd, nullptr, &s.stc[s.n][j]))) s.stc[s.n][j] = nullptr;
+        dev->Release();
+      }
+    }
+    if (take && s.stc[s.n][j]) {
+      const D3D11_BOX box{0, 0, 0, take, 1, 1};
+      c->CopySubresourceRegion(s.stc[s.n][j], 0, 0, 0, 0, pb, 0, &box);
+      s.cbBytes[s.n][j] = static_cast<uint16_t>(take);
+    }
+    pb->Release();
   }
   ++s.n;
 }
@@ -713,6 +877,56 @@ void VpUnwrap() {
   g_vpTable = nullptr;
 }
 
+// --- C2: the terrain item of the main passes as a nested "pass" of the GPU timing ---
+// gb_rec_count.h's pattern: a forwarding thunk on the item class's vt[1] (render), only while C2 runs and only
+// when the slot holds DCS's own function. Inside a focus / periphery main G-buffer pass the item is bracketed by
+// the GPU pass timing's boundary callback with a stand-in pass object (never dereferenced: it is a map key and a
+// name through PassName).
+using ItemFn = uint64_t(__fastcall*)(void*, void*, void*, void*);
+void** g_tiSlot = nullptr;
+void* volatile g_tiOrig = nullptr;
+std::atomic<bool> g_tiOn{false};
+std::atomic<int> g_tiOrdP[2]{{-1}, {-1}};
+std::atomic<uint64_t> g_tiCalls{0};
+uint8_t g_tiPassF[64] = {}, g_tiPassP[64] = {};  // the stand-in pass objects
+uint64_t __fastcall TerrainItemHook(void* a, void* b, void* c, void* d) {
+  const ItemFn orig = reinterpret_cast<ItemFn>(g_tiOrig);
+  void* tag = nullptr;
+  if (g_tiOn.load(std::memory_order_relaxed) && g_inGb &&
+      GetCurrentThreadId() == ptiming::g_topTid.load(std::memory_order_relaxed)) {
+    if (g_gbOrd == g_c2Ord[0].load(std::memory_order_relaxed) || g_gbOrd == g_c2Ord[1].load(std::memory_order_relaxed))
+      tag = g_tiPassF;
+    else if (g_gbOrd == g_tiOrdP[0].load(std::memory_order_relaxed) || g_gbOrd == g_tiOrdP[1].load(std::memory_order_relaxed))
+      tag = g_tiPassP;
+  }
+  const ptiming::BoundaryFn bf = tag ? ptiming::g_boundary.load(std::memory_order_relaxed) : nullptr;
+  if (!bf) return orig(a, b, c, d);
+  g_tiCalls.fetch_add(1, std::memory_order_relaxed);
+  bf(tag, true, 1);
+  const uint64_t r = orig(a, b, c, d);
+  bf(tag, false, 1);
+  return r;
+}
+// Suite thread. The terrain item's class from the walk (the terrain-family class with the most items).
+bool HookTerrainItem() {
+  int best = -1;
+  for (int i = 0; i < g_clsN; ++i)
+    if (g_cls[i].merged && (best < 0 || g_cls[i].count > g_cls[best].count)) best = i;
+  if (best < 0 || !g_cls[best].vt) return false;
+  void** slot = &static_cast<void**>(g_cls[best].vt)[1];
+  if (*slot != SlotOriginal(slot)) return false;  // another module's hook: never touched
+  g_tiOrig = *slot;
+  if (!HookSlot(slot, reinterpret_cast<void*>(&TerrainItemHook), nullptr)) return false;
+  g_tiSlot = slot;
+  return true;
+}
+void UnhookTerrainItem() {
+  g_tiOn = false;
+  if (!g_tiSlot) return;
+  UnhookSlot(g_tiSlot, g_tiOrig);  // g_tiOrig stays for calls in flight
+  g_tiSlot = nullptr;
+}
+
 void BoundaryBody(void* pass, bool begin) {
   ID3D11DeviceContext* c = plod::g_ctx;
   if (g_release.load(std::memory_order_relaxed)) {
@@ -791,12 +1005,30 @@ Keys g_keys;
 void ReadConfig(const wchar_t* ini) { g_keys = ReadKeys(ini); }  // LoadConfig, every second
 bool g_ownGbHook = false, g_haveWalk = false;
 
-std::vector<FrameRec> Drain() {
+std::vector<FrameRec> Drain(std::vector<CbSnap>* cbs = nullptr) {
   std::vector<FrameRec> out;
   std::lock_guard<std::mutex> lock(g_ringMu);
   out.assign(g_ring.begin(), g_ring.begin() + static_cast<std::ptrdiff_t>(g_ringN));
   g_ringN = 0;
+  if (cbs) cbs->assign(g_cbRing.begin(), g_cbRing.begin() + static_cast<std::ptrdiff_t>(g_cbN));
+  g_cbN = 0;
   return out;
+}
+// The pixel-stage buffers of a frame's main passes, periphery against focus.
+void PsRowsOfFrame(PsRowsAcc& a, const FrameRec& f, const Resolved& r, const std::vector<CbSnap>& cbs) {
+  for (int e = 0; e < 2; ++e) {
+    if (r.mainP[e] < 0 || r.mainF[e] < 0) continue;
+    for (int j = 0; j < kCbSlots; ++j) {
+      const CbSnap* p = nullptr;
+      const CbSnap* q = nullptr;
+      for (const CbSnap& c : cbs) {
+        if (c.frame != f.frame || c.slot != j) continue;
+        if (c.ord == f.gb[r.mainP[e]].ord) p = &c;
+        if (c.ord == f.gb[r.mainF[e]].ord) q = &c;
+      }
+      if (p && q) PsRowsAdd(a, j, p->data, p->bytes, q->data, q->bytes);
+    }
+  }
 }
 bool Steady(std::atomic<uint64_t>& frames) {
   int run = 0;
@@ -816,6 +1048,9 @@ bool StartCapture(bool walk) {
     std::lock_guard<std::mutex> lock(g_ringMu);
     g_ring.assign(kRing, FrameRec());
     g_ringN = 0;
+    g_cbRing.assign(g_psRows.load() ? 1024 : 0, CbSnap());
+    g_cbN = 0;
+    for (Set& s : g_sets) s.cb.assign(g_psRows.load() ? static_cast<size_t>(kMaxGb) * kCbSlots * kCbMax : 0, 0);
   }
   g_haveWalk = false;
   if (walk) {
@@ -871,7 +1106,11 @@ void CapturePhase(const Keys& k) {
   C4Acc a4;
   Diag dg;
   bool diagDone = false;
+  PsRowsAcc pr;
+  std::vector<CbSnap> cbs;
+  g_psRows = k.c5 > 0;
   if (!StartCapture(k.c4 > 0)) {
+    g_psRows = false;
     StopCapture();
     return;
   }
@@ -883,10 +1122,11 @@ void CapturePhase(const Keys& k) {
   };
   while (GetTickCount64() - t0 < static_cast<ULONGLONG>(seconds) * 1000 && !g_benchAbort && !g_fault.load()) {
     Sleep(100);
-    for (const FrameRec& f : Drain()) {
+    for (const FrameRec& f : Drain(&cbs)) {
       const Resolved r = Resolve(f);
       DiagAdd(dg, f, r);
       if (k.c5 > 0) C5Add(a5, f, r);
+      if (k.c5 > 0) PsRowsOfFrame(pr, f, r, cbs);
       if (k.c4 > 0) C4Add(a4, f, r);
     }
     if (!diagDone && GetTickCount64() - t0 >= 3000) {  // once: what the capture sees, and the cause when it sees nothing
@@ -899,9 +1139,12 @@ void CapturePhase(const Keys& k) {
     }
   }
   StopCapture();
+  g_psRows = false;
   lines();
-  if (k.c5 > 0)
+  if (k.c5 > 0) {
     for (const std::string& s : a5.samples) Log("pep C5 sample: %s", s.c_str());
+    for (int j = 0; j < kCbSlots; ++j) Log("%s", PsRowsLine(pr, j).c_str());
+  }
   if (k.c4 > 0 && g_haveWalk) {
     std::vector<int> order;
     for (int i = 0; i < g_clsN; ++i) order.push_back(i);
@@ -913,7 +1156,15 @@ void CapturePhase(const Keys& k) {
   LogCounters();
 }
 
-std::string PassName(void* p) { return ptiming::RttiName(p); }
+std::string PassName(void* p) {
+  if (p == g_tiPassF) return "pepTerrainItemFocus";
+  if (p == g_tiPassP) return "pepTerrainItemPeriphery";
+  return ptiming::RttiName(p);
+}
+double KindMs(gpt::Result& r, const char* name) {
+  const auto it = r.kinds.find(name);
+  return it == r.kinds.end() ? -1.0 : gpt::Mean(it->second.perFrame);
+}
 // The mean exclusive GPU ms per frame of the G-buffer kind's calls `ord[0..1]` (frame order), or -1.
 double GbCallsMs(gpt::Result& r, const int ord[2], int expectCalls, int* calls) {
   for (auto& kv : r.kinds) {
@@ -935,7 +1186,7 @@ void C2Phase(const Keys& k, std::atomic<uint64_t>& frames) {
     Log("pep C2: RSSetViewports slot unknown; NOT MEASURED");
     return;
   }
-  if (!StartCapture(false)) {
+  if (!StartCapture(true)) {  // with the item walk: it finds the terrain item's class
     StopCapture();
     return;
   }
@@ -965,6 +1216,13 @@ void C2Phase(const Keys& k, std::atomic<uint64_t>& frames) {
     return;
   }
   g_c2Ord[0] = ord[0], g_c2Ord[1] = ord[1];
+  g_tiOrdP[0] = ordP[0], g_tiOrdP[1] = ordP[1];
+  g_walk = false;
+  g_tiCalls = 0;
+  const bool item = g_haveWalk && HookTerrainItem();
+  if (!item) Log("pep C2: the terrain item cannot be timed on its own (no item walk, or its render slot is hooked by another feature)");
+  g_tiOn = item;
+  std::vector<double> offT, onT, offTp, onTp;
   g_c2Passes = g_c2Vps = g_c2Missed = 0;
   const int blockMs = std::max(2000, k.c2 * 1000 / 5);
   std::vector<double> offF, onF, offP, onP;
@@ -979,7 +1237,13 @@ void C2Phase(const Keys& k, std::atomic<uint64_t>& frames) {
     std::vector<gpt::Done> done = gpt::TakeDone();
     gpt::Result r = gpt::Analyze(done, &PassName);
     int calls = 0;
-    const double f = GbCallsMs(r, ord, gbCalls, &calls), p = GbCallsMs(r, ordP, gbCalls, &calls);
+    // With the terrain item timed as a nested pass, the G-buffer pass's own (exclusive) time lacks it: added back.
+    const double tf = item ? KindMs(r, "pepTerrainItemFocus") : -1, tp = item ? KindMs(r, "pepTerrainItemPeriphery") : -1;
+    double f = GbCallsMs(r, ord, gbCalls, &calls), p = GbCallsMs(r, ordP, gbCalls, &calls);
+    if (f >= 0 && tf > 0) f += tf;
+    if (p >= 0 && tp > 0) p += tp;
+    if (began && tf >= 0) (on ? onT : offT).push_back(tf);
+    if (began && tp >= 0) (on ? onTp : offTp).push_back(tp);
     if (!began || f < 0 || p < 0) {
       ++badBlocks;
       Log("pep C2 block %d (%s): not usable (GPU timing %s, %d G-buffer calls per frame, expected %d)", i + 1,
@@ -988,10 +1252,12 @@ void C2Phase(const Keys& k, std::atomic<uint64_t>& frames) {
     }
     (on ? onF : offF).push_back(f);
     (on ? onP : offP).push_back(p);
-    Log("pep C2 block %d (%s): focus main G-buffer passes %.3f ms GPU per frame, periphery main %.3f ms, %d frames", i + 1,
-        on ? "ON: geometry only" : "OFF: stock", f, p, r.frames);
+    Log("pep C2 block %d (%s): focus main G-buffer passes %.3f ms GPU per frame (terrain item %.3f), periphery main "
+        "%.3f ms (terrain item %.3f), %d frames",
+        i + 1, on ? "ON: geometry only" : "OFF: stock", f, tf, p, tp, r.frames);
   }
   g_c2On = false;
+  UnhookTerrainItem();
   StopCapture();
   const C2Out o = C2Share(offF, onF);
   const C2Out op = C2Share(offP, onP);
@@ -1003,6 +1269,16 @@ void C2Phase(const Keys& k, std::atomic<uint64_t>& frames) {
       static_cast<unsigned long long>(g_c2Passes.load()), static_cast<unsigned long long>(g_c2Vps.load()),
       static_cast<unsigned long long>(g_c2Missed.load()), static_cast<unsigned long long>(g_c2Buried.load()), badBlocks,
       ord[0], ord[1], gbCalls);
+  if (item) {
+    const C2TerrainOut t = C2Terrain(offT, onT);
+    const C2TerrainOut tp = C2Terrain(offTp, onTp);
+    Log("pep C2 terrain: the focus main passes' terrain item, GPU ms per frame (both eyes): stock %.3f, geometry only "
+        "(the front end a merged pass saves) %.3f; the models before it: stock %.3f, geometry only %.3f | stage 3 "
+        "gate, terrain front end >= %.2f ms: %s | periphery terrain item, untouched: %.3f / %.3f | item calls timed "
+        "%llu",
+        t.stock, t.frontEnd, o.off - t.stock, o.on - t.frontEnd, kC2TerrainGateMs, Word(badBlocks ? -1 : t.verdict), tp.stock,
+        tp.frontEnd, static_cast<unsigned long long>(g_tiCalls.load()));
+  }
   LogCounters();
 }
 
@@ -1021,12 +1297,32 @@ void SuitePhase(std::atomic<uint64_t>& frames) {
   }
   if ((k.c4 || k.c5) && !g_benchAbort) CapturePhase(k);
   if (k.c7 && !g_benchAbort)
-    mkit::ChainCensusPhase(k.c7, frames, [](const mkit::CensusAcc& acc) { Log("%s", C7Line(C7FromCensus(acc)).c_str()); });
+  {
+    C7Acc a7;
+    std::unordered_map<void*, char> kinds;  // suite thread
+    const auto kindOf = [&](void* p) -> char {
+      auto it = kinds.find(p);
+      if (it != kinds.end()) return it->second;
+      const std::string nm = p ? ptiming::RttiName(p) : std::string();
+      const char c = nm.find("Cascade") != std::string::npos ? 'C' : nm.find("HeightMap") != std::string::npos ? 'H'
+                     : nm.find("TerrainModule") != std::string::npos ? 'T' : '?';
+      kinds.emplace(p, c);
+      return c;
+    };
+    mkit::ChainCensusPhase(
+        k.c7, frames,
+        [&](const mkit::CensusAcc&) {
+          Log("%s", C7Line(a7).c_str());
+          for (const std::string& l : C7Layouts(a7)) Log("%s (C cascade, H height map, ? other; view chains by size: P periphery, F focus)", l.c_str());
+        },
+        [&](const mkit::CensusFrame& f) { C7Add(a7, f, kindOf); });
+  }
   if (k.c2 && !g_benchAbort) C2Phase(k, frames);
 }
 
 // Payload stop.
 void Shutdown() {
+  UnhookTerrainItem();
   if (g_capture.exchange(false) || g_c2On.exchange(false)) Sleep(100);
   plod::BFn me = &OnBoundary;
   if (plod::g_probe.compare_exchange_strong(me, nullptr)) {
