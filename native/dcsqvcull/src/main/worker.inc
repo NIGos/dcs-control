@@ -25,6 +25,11 @@ DWORD WINAPI WorkerThread(void*) {
     // [Dev], once per payload start and before shadow instancing installs.
     const std::wstring deployedIni = g_dir + L"DcsQvCull.ini";
     shadowinst::g_cacheChoiceRaw = qvcachedir::ReadConfigured(deployedIni);
+    // Dev mode: a [Model] ShaderCacheDir in the dev ini wins (live checks of a cache folder before an app build writes it).
+    if (dp.state == qvdev::kDevOk) {
+      const std::wstring devChoice = qvcachedir::ReadConfigured(dp.path);
+      if (!devChoice.empty()) shadowinst::g_cacheChoiceRaw = devChoice;
+    }
     shadowinst::g_cacheChoice = qvcachedir::Resolve(g_dir, shadowinst::g_cacheChoiceRaw);
     shadowinst::g_workersWanted = qvcachedir::ReadWorkers(deployedIni);
     shadowinst::g_prewarmOn = qvcachedir::ReadPrewarm(deployedIni);
