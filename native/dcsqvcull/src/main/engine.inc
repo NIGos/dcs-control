@@ -67,6 +67,7 @@ void SetEngineOff(bool off) {
   ApplyGBufferRecorder();
   ApplyPassFlush();
   ApplySrvTailTrim(g_cfg.srvTailTrim && !off);
+  ApplyFxApplySkip(off ? 0 : g_cfg.fxApplySkip, g_cfg.fxApplySkipVerify, g_cfg.fxApplySkipVerifyEvery);
   ApplyPrefetch();
   // The texture hook only does work when dedupe is on: otherwise remove it.
   ApplyTextureHook();
@@ -137,8 +138,10 @@ uint64_t ComputeStatus() {
   static_assert(sizeof(f) / sizeof(f[0]) == sizeof(g_featLast) / sizeof(g_featLast[0]), "features line: 18 entries");
   memcpy(g_featLast, f, sizeof(f));
   const uint64_t w = qvstatus::Compose(f, sizeof(f) / sizeof(f[0]), true, g_engineOff.load());
-  return qvstatus::WithExtras(w, g_warming.load(), static_cast<uint32_t>(g_govStage.load()),
-                              static_cast<uint32_t>(g_verdictNow.load()), g_cfg.govEnabled);
+  return qvstatus::WithWarmProgress(
+      qvstatus::WithExtras(w, g_warming.load(), static_cast<uint32_t>(g_govStage.load()),
+                           static_cast<uint32_t>(g_verdictNow.load()), g_cfg.govEnabled),
+      g_warmPercent.load(), g_prewarmNow.load());
 }
 
 // DcsQvCull_Status's word. R62: in PerceptionOnly kRunning | kPerceptionOnly (was 0, which the in-headset panel

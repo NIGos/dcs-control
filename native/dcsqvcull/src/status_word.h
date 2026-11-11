@@ -44,6 +44,16 @@
 //               CockpitMotionExport=1): a motion slot was committed to
 //               Local\DcsVrMotion_v1 in the last second, with bit 39
 //               (dcsvr_motion.h; its reader heartbeat fresh)
+//   bit 43      R95: a symbology slot committed in the last second
+//   Warm-up progress (0 from payloads older than these fields; a panel that
+//   does not know them keeps showing "warming up" from bit 3 alone):
+//   bits 44-50  percent done, 0-100: with bit 3 the live warm-up (keys
+//               compiled or read from the cache since it began over those
+//               plus the ones queued or compiling; 99 at most until it
+//               ends), else with bit 52 the main-menu cache prewarm
+//   bit 51      the percent is valid
+//   bit 52      cache prewarm running ([Model] ShaderCachePrewarm: stale
+//               entries rechecked from payload start, usually in the menu)
 //   0           not running / not ready (no payload, payload swap, after stop)
 //
 // Production optimizations counted: 18 (ComputeStatus in main.cpp; the 18th
@@ -83,6 +93,9 @@ constexpr uint64_t kCockpitMaskPaired = 1ull << 40;  // R65
 constexpr uint64_t kCockpitDepth = 1ull << 41;       // R69
 constexpr uint64_t kCockpitMotion = 1ull << 42;      // R70
 constexpr uint64_t kCockpitSymbology = 1ull << 43;   // R95: a symbology slot committed in the last second
+constexpr int kWarmPercentShift = 44;                // 7 bits, 0-100
+constexpr uint64_t kWarmValid = 1ull << 51;
+constexpr uint64_t kPrewarm = 1ull << 52;
 
 // One production optimization: active = doing its work right now (a
 // recorder counts only when it drew passes from command lists since the last
@@ -127,7 +140,26 @@ inline uint64_t WithExtras(uint64_t w, bool warming, uint32_t stage, uint32_t ve
          (static_cast<uint64_t>(verdict) << kVerdictShift) | (governorOn ? kGovernorOn : 0);
 }
 
+// The warm-up progress fields on top of a word (nothing when not running). percent < 0: not valid.
+inline uint64_t WithWarmProgress(uint64_t w, int percent, bool prewarm) {
+  if (!w) return 0;
+  if (percent > 100) percent = 100;
+  return w | (percent >= 0 ? kWarmValid | (static_cast<uint64_t>(percent) << kWarmPercentShift) : 0) |
+         (prewarm ? kPrewarm : 0);
+}
+
+// Percent done of done out of done + pending, capped at 99 while anything is pending (100 only when nothing is).
+inline int ProgressPercent(uint32_t done, uint32_t pending) {
+  const uint64_t total = static_cast<uint64_t>(done) + pending;
+  if (!total) return 100;
+  const int p = static_cast<int>(static_cast<uint64_t>(done) * 100 / total);
+  return pending && p > 99 ? 99 : p;
+}
+
 inline bool Running(uint64_t w) { return (w & kRunning) != 0; }
+inline bool WarmValid(uint64_t w) { return (w & kWarmValid) != 0; }
+inline uint32_t WarmPercent(uint64_t w) { return static_cast<uint32_t>(w >> kWarmPercentShift) & 0x7f; }
+inline bool Prewarming(uint64_t w) { return (w & kPrewarm) != 0; }
 inline bool Optimizing(uint64_t w) { return (w & kOptimizing) != 0; }
 inline bool AnyLatched(uint64_t w) { return (w & kLatched) != 0; }
 inline uint32_t ActiveCount(uint64_t w) { return static_cast<uint32_t>(w >> kActiveShift) & 0xff; }

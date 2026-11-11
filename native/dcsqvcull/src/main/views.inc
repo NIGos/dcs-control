@@ -8,6 +8,8 @@
 #include "task_timing.h"
 #include "model_timing.h"
 #include "shadow_pass.h"
+// Quad-view frames (UpdateGazeAndCheckHold below), declared ahead of pass_timing.h: its top-level frame id.
+std::atomic<uint64_t> g_quadFrame{0};
 #include "pass_timing.h"
 #include "thread_tuning.h"
 #include <condition_variable>
@@ -197,7 +199,6 @@ double EffectiveKeep() {
 std::mutex g_gazeMutex;
 double g_prevGaze[2][4] = {};
 bool g_havePrevGaze[2] = {};
-std::atomic<uint64_t> g_quadFrame{0};
 std::atomic<uint64_t> g_holdUntil{0};
 std::atomic<uint64_t> g_saccades{0};
 

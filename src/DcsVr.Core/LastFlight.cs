@@ -30,8 +30,21 @@ public sealed record HeadsetFrames(double AverageFps, double CompositorFps, doub
 /// <summary>Seconds OFXR ran at each frame multiplier (from its once-a-second latency_status), and its switches.</summary>
 /// <param name="Seconds1x">Seconds at full rate with generation paused (adaptive cadence's 1X).</param>
 /// <param name="Cadence">Frame generation only when needed (adaptive cadence) ran, with or without time at 1X.</param>
-public sealed record FramegenShare(int Seconds2x, int Seconds3x, int Switches, bool Adaptive, int Seconds1x = 0, bool Cadence = false)
+/// <param name="GpuAt1xMs">Only when needed, while frames were generated: the median of OFXR's once-a-second estimate of
+/// DCS's GPU time per frame without generation (adaptive_throughput 6: the p90 GPU less the layer's synthesis), in
+/// milliseconds. OFXR passes frames through (1X) only once this and the CPU time have stayed under
+/// <see cref="PassThroughShare"/> of one refresh period for 5 s; null when it never reported one.</param>
+/// <param name="Preference">The flight's Stop generating preference as OFXR logged it (adaptive_switch 13's c, fork
+/// patch 0070); Steady for a log of an older layer.</param>
+public sealed record FramegenShare(int Seconds2x, int Seconds3x, int Switches, bool Adaptive, int Seconds1x = 0, bool Cadence = false, double? GpuAt1xMs = null,
+    PassThroughPreference Preference = PassThroughPreference.Steady)
 {
+    /// <summary>OFXR's 1X entry limit for the flight's preference (<see cref="VrProfile.PassThroughShare"/>): its
+    /// estimate of CPU and GPU time per frame at most this share of the refresh period (Steady: 0.80, 8.9 ms at 90 Hz).</summary>
+    public double PassThroughShare => VrProfile.PassThroughShare(Preference);
+    /// <summary>The estimated frame time DCS has to stay under for its frames to pass through ungenerated, in milliseconds.</summary>
+    public static double PassThroughLimitMs(double refreshHz, PassThroughPreference preference = PassThroughPreference.Steady) =>
+        refreshHz > 0 ? Math.Round(1000 * VrProfile.PassThroughShare(preference) / refreshHz, 1) : 0;
     public double Share3x => Seconds2x + Seconds3x == 0 ? 0 : (double)Seconds3x / (Seconds2x + Seconds3x);
 }
 /// <summary>DCS frame time from OFXR's adaptive control: each second's p90 of max(CPU, GPU) per DCS frame; the median
@@ -285,7 +298,7 @@ public static partial class LastFlight
     /// flight is in both. The segment counts only when its header record names the same process.</summary>
     private static List<string>? OfxrLines(string path, int? pid)
     {
-        static bool Keep(string l) => l.Contains("op=latency_status ", StringComparison.Ordinal) || l.Contains("op=adaptive_switch ", StringComparison.Ordinal) || l.Contains("op=logger ", StringComparison.Ordinal);
+        static bool Keep(string l) => l.Contains("op=latency_status ", StringComparison.Ordinal) || l.Contains("op=adaptive_switch ", StringComparison.Ordinal) || l.Contains("op=adaptive_throughput result=6 ", StringComparison.Ordinal) || l.Contains("op=logger ", StringComparison.Ordinal);
         var current = Cached(path, () => ReadLines(path, MaxTail, Keep));
         var previous = OfxrPreviousSegment(path);
         // The earlier segment is optional: unreadable or another process's, the summary covers the current one.
@@ -329,7 +342,7 @@ public static partial class LastFlight
     public static OfxrResult? ParseOfxr(IEnumerable<string>? lines)
     {
         if (lines is null) return null;
-        int one = 0, two = 0, three = 0, switches = 0; bool adaptive = false, cadence = false; var frames = new List<double>();
+        int one = 0, two = 0, three = 0, switches = 0; bool adaptive = false, cadence = false; var frames = new List<double>(); var gpuAtOne = new List<double>(); var preference = PassThroughPreference.Steady;
         foreach (var line in lines)
         {
             var m = OfxrLineRegex().Match(line);
@@ -344,20 +357,35 @@ public static partial class LastFlight
                 if (result == 11) one++; else if (result % 10 == 2) two++; else if (result % 10 == 3) three++;
                 if (a > 0 && a < 1_000_000) frames.Add(a / 1000.0);
             }
+            // adaptive_throughput 6, adaptive cadence's once-a-second record: a = that second's frames at 1X, 2 and 3
+            // (16 bits each), b = the p90 of max(CPU, GPU) (low 32 bits) and of the GPU at 1X (high 32 bits), in
+            // microseconds. Kept for the seconds that were not at 1X: what held generation on. Other results are not read.
+            else if (m.Groups[1].Value == "adaptive_throughput")
+            {
+                if (result != 6) continue;
+                cadence = true;
+                ulong atOne = a & 0xFFFF, generated = ((a >> 16) & 0xFFFF) + ((a >> 32) & 0xFFFF), gpu = b >> 32;
+                if (generated > atOne && gpu > 0 && gpu < 1_000_000) gpuAtOne.Add(gpu / 1000.0);
+            }
             // Reason 5 is adaptive control turned on or off; the others change the multiplier between 2 and 3. Adaptive
             // cadence: 8 enters 1X, 9-12 leave it; 13 turns cadence on (a=0) or off (b=0). 14 and up are told-time offset
             // moves and blocked moves (OFXR 0061), not switches; like 8-12, only cadence makes them.
             else if (result >= 14) cadence = true;
             else if (result is >= 8 and <= 12) { switches++; cadence = true; }
-            else if (result == 13 && a == 0 && b != 0) cadence = true;
+            else if (result == 13 && a == 0 && b != 0)
+            {
+                cadence = true;
+                // c: the Stop generating preference (0 steady, 1 balanced, 2 prefer refresh; fork patch 0070).
+                if (ulong.TryParse(m.Groups[5].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var c) && c <= 2) preference = (PassThroughPreference)(int)c;
+            }
             // 13 with a and b both 2 or 3 is cadence moving the session between 3X and 2X; with 0 it only turns cadence on or off.
             else if (result != 5 && a != b && a is 2 or 3 && b is 2 or 3) switches++;
         }
         if (one + two + three == 0 && frames.Count == 0) return null;
-        frames.Sort();
-        return new(one + two + three == 0 ? null : new(two, three, switches, adaptive, one, cadence || one > 0),frames.Count == 0 ? null : new(Percentile(frames, .5), Percentile(frames, .9), frames.Count));
+        frames.Sort(); gpuAtOne.Sort();
+        return new(one + two + three == 0 ? null : new(two, three, switches, adaptive, one, cadence || one > 0, gpuAtOne.Count == 0 ? null : Percentile(gpuAtOne, .5), preference),frames.Count == 0 ? null : new(Percentile(frames, .5), Percentile(frames, .9), frames.Count));
     }
-    [GeneratedRegex(@"\bop=(latency_status|adaptive_switch) result=(-?\d+) dur_us=\d+ a=(\d+) b=(\d+)")] private static partial Regex OfxrLineRegex();
+    [GeneratedRegex(@"\bop=(latency_status|adaptive_switch|adaptive_throughput) result=(-?\d+) dur_us=\d+ a=(\d+) b=(\d+)(?: c=(\d+))?")] private static partial Regex OfxrLineRegex();
     private static double Percentile(List<double> sorted, double q) => Math.Round(sorted[Math.Clamp((int)Math.Ceiling(q * sorted.Count) - 1, 0, sorted.Count - 1)], 1);
 
     // ---- Cheeky (DLSS 5) -------------------------------------------------------------------------------------------

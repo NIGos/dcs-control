@@ -174,7 +174,9 @@ inline void TouchOnHit(const std::wstring& path) {
 }
 
 // Payload worker, once at start. mod / devOr: folders with trailing backslash (devOr may equal mod).
-inline Stats RunAtStart(const std::wstring& mod, const std::wstring& devOr) {
+// cacheDir: the shader cache folder in use when it is not <mod>\cache\ ([Model] ShaderCacheDir, shader_cache_dir.h);
+// the module's own cache\ is still pruned (entries from before the cache moved).
+inline Stats RunAtStart(const std::wstring& mod, const std::wstring& devOr, const std::wstring& cacheDir = std::wstring()) {
   Stats st;
   const uint64_t now = NowTicks();
   for (const wchar_t* p : {L"report_*.txt", L"bench_*.csv", L"profile_*.txt", L"motion_*.csv", L"rotation_*.csv",
@@ -193,6 +195,7 @@ inline Stats RunAtStart(const std::wstring& mod, const std::wstring& devOr) {
     if (d == mod && devOr == mod) break;
   }
   PruneQvc(mod + L"cache\\", now, st);
+  if (!cacheDir.empty() && _wcsicmp(cacheDir.c_str(), (mod + L"cache\\").c_str()) != 0) PruneQvc(cacheDir, now, st);
   return st;
 }
 

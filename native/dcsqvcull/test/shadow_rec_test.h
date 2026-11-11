@@ -1850,8 +1850,9 @@ void DeviceMultiTests(Compiler& comp) {
     ID3D11CommandList* cl[4][kThreads] = {};
     for (int c = 0; c < 4; ++c)
       for (int th = 0; th < kThreads; ++th) cl[c][th] = pool.TakeList(Wk(c, th));
-    bool allOk = waited, replayOk = true, restored = true;
-    size_t diffs = 0, written = 0;
+    bool allOk = waited, replayOk = true, restored = true, nestOk = true, nestRestored = true;
+    size_t diffs = 0, written = 0, nestDiffs = 0;
+    uint32_t nestedPasses = 0;
     uint32_t recorded = 0, texRecorded = 0, draws = 0, split = 0, lists = 0;
     std::vector<uint32_t> refs[4];
     for (int c = 0; c < 4 && waited; ++c) {
@@ -1907,6 +1908,42 @@ void DeviceMultiTests(Compiler& comp) {
       const std::vector<uint32_t> got = ReadDepth(d, d.depthC[c]);
       if (ref.size() != got.size() || ref.empty()) diffs = SIZE_MAX;
       for (size_t k = 0; diffs != SIZE_MAX && k < ref.size(); ++k) diffs += ref[k] != got[k];
+      // Nested ([Model] ShadowRecorderNest, perf audit A6 b): the same lists, in order, as one list built on a
+      // deferred context (NestLists), executed once by the immediate context.
+      if (ListCount(cl[c], kThreads) >= 2) {
+        PassSetup(d, d.dsvC[c]);
+        ID3D11DeviceContext* ctx0 = g_ctx;
+        g_ctx = d.imm;
+        for (uint32_t e = 0; e < j.swapCount && cl[c][0]; ++e) {
+          void* entry = j.swapList[e];
+          if (entry == j.execObj) {
+            defrec::PassState before = {}, after = {};
+            defrec::Capture(d.imm, &before);
+            d.imm->CopyResource(d.ourB7C[c], d.dcsB7);
+            ID3D11CommandList* nl = NestLists(cl[c], kThreads);
+            nestOk &= nl != nullptr && !g_nestBroken;
+            if (nl) {
+              d.imm->ExecuteCommandList(nl, TRUE);
+              nl->Release();
+              ++nestedPasses;
+            }
+            defrec::Capture(d.imm, &after);
+            nestRestored &= defrec::Equal(before, after);
+            defrec::Release(before);
+            defrec::Release(after);
+            continue;
+          }
+          const int i = indexOf(entry);
+          if (w->Smr(i))
+            DrawDcs(d, *w, i);
+          else
+            DrawOther(d);
+        }
+        g_ctx = ctx0;
+        const std::vector<uint32_t> gotN = ReadDepth(d, d.depthC[c]);
+        if (ref.size() != gotN.size() || ref.empty()) nestDiffs = SIZE_MAX;
+        for (size_t k = 0; nestDiffs != SIZE_MAX && k < ref.size(); ++k) nestDiffs += ref[k] != gotN[k];
+      }
       // The same textures requested; each recorded one at least once.
       replayOk &= g_vt23.size() == stockVt23.size();
       for (const auto& kv : stockVt23) replayOk &= g_vt23.count(kv.first) && g_vt23.at(kv.first) >= 1;
@@ -1941,6 +1978,12 @@ void DeviceMultiTests(Compiler& comp) {
           "shared in chunks, one list per helper that took a chunk), DCS's loop over the exec list: depth equals "
           "stock bit for bit; state restored");
     Check(replayOk, "shadow rec S4 device: streaming requests reach the same textures as stock");
+    printf("     nested lists: %u split passes ran one nested list, %zu texels differ\n", nestedPasses, nestDiffs);
+    Check(nestOk && nestRestored && nestDiffs == 0 && nestedPasses == split && split >= 1,
+          "shadow rec nested lists (A6 b, ShadowRecorderNest): every split cascade's lists as one list from a "
+          "deferred context: depth equals stock bit for bit; state restored");
+    SafeRel(g_nestCtx);  // the test device's
+    g_nestBroken = false;
     for (auto& row : cl)
       for (auto*& l : row) SafeRel(l);
     // Free-running rounds (no test wait): the helpers race the primary for

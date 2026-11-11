@@ -82,12 +82,14 @@ struct Config {
   bool suiteGBufferInstCompile = false;  // [Suite] GBufferInstCompile (R13 stage 1: main-pass model_vs variants)
   bool suiteGBufferTexCount = false;     // [Suite] GBufferTexCount (R14 lead 3: unread G-buffer texture sets)
   bool suiteFxApplyCount = false;        // [Suite] FxApplyCount (R14 lead 4: same-pass FX Apply counter)
+  bool suitePerEyePassCensus = false;    // [Suite] PerEyePassCensus (per_eye_pass.h: shader-cache census, file reads only)
   bool suiteDirectUploadCount = false;   // [Suite] DirectUploadCount (R16 gates G1-G3 for direct page upload)
   bool suiteSrvSpanCount = false;        // [Suite] SrvSpanCount (R15 F2: setShaderResources identical-tail counter)
   bool suiteJoinTailCount = false;       // [Suite] JoinTailCount (R15 F3: render-thread chunk tail at the culling join)
   bool suiteShadowRecCount = false;      // [Suite] ShadowRecCount (R17 S0: shadow recorder counters)
   bool suiteGBufferRecCount = false;     // [Suite] GBufferRecCount (R18 S0: G-buffer recorder counters and gates)
   bool suiteForwardRecCount = false;     // [Suite] ForwardRecCount (R21 S0: SimplePassData recorder counters and gates)
+  int suiteForwardSplit = 0;             // [Suite] ForwardSplit: seconds between "fwd split:" lines while flying (fwd_split.h; 0 = off)
   bool suiteGpuPassTiming = false;       // [Suite] GpuPassTiming (gpu_pass_timing.h: GPU ms and context ops per pass)
   bool suiteGpuPassStats = false;        // [Suite] GpuPassStats (with GpuPassTiming: pipeline statistics and samples passed per pass)
   int peripheralLodScale = 0;            // [Model] PeripheralLodScale (periph_lod.h: LOSSY prototype, periphery instancer LOD factors x percent/100; 0 = off)
@@ -109,6 +111,9 @@ struct Config {
   uint32_t chainFast = 7;                // [D3D] ChainFast (chain_fast.h, R34: shorter culling chains; bit 0 calcoffsets, bit 1 calccounters, bit 2 airflow offsets; default 7; 0 = off, nothing installed)
   bool suiteChainFastTiming = false;     // [Suite] ChainFastTiming (chain_fast.h: GPU timing OFF/ON/OFF/ON/OFF, 5 s each)
   int suiteChainFastVerify = 0;          // [Suite] ChainFastVerify: seconds of same-frame checks against the stock kernels (0 = off)
+  int suiteChainDeriveCensus = 0;        // [Suite] ChainDeriveCensus (chain_derive.h, audit A2/B4: focus chain = filtered periphery chain? measure only; seconds per log line, 0 = off)
+  int suiteChainDeriveCensusMB = 24;     // [Suite] ChainDeriveCensusMB: mainBuffer bytes read back per view (1-256 MB)
+  int suitePeriphCensus = 0;             // [Suite] PeriphCensus (periph_census.h, audit B6: zero-coverage periphery instances, instance and triangle share; measure only; seconds per log line, 0 = off)
   uint32_t shaderFast = 3;               // [D3D] ShaderFast (shader_fast.h, R36: wider grids for single-SM kernels; bit 0 grass cull, bit 1 IM2 counts clear; default 3; 0 = off)
   bool suiteShaderFastTiming = false;    // [Suite] ShaderFastTiming (shader_fast.h: GPU timing OFF/ON/OFF/ON/OFF, 5 s each)
   int suiteShaderFastVerify = 0;         // [Suite] ShaderFastVerify: seconds of same-frame checks against the stock kernels (0 = off)
@@ -138,6 +143,8 @@ struct Config {
   uint32_t shadowRecorderSplit = 0xf;   // [Model] ShadowRecorderSplit: cascades with helper workers (bits 0-3)
   int shadowRecorderHelpers = 3;        // [Model] ShadowRecorderHelpers: at most this many helpers per job (0-3)
   bool shadowRecorderInstancing = true;  // [Model] ShadowRecorderInstancing
+  bool shadowRecorderNest = false;      // [Model] ShadowRecorderNest: one nested command list per cascade (perf audit A6 b)
+  bool smallGpuBundle = false;          // [Model] SmallGpuBundle: every built small exact GPU item of A6 (measure_kit.h kBundle)
   bool suiteShadowRecVerify = false;    // [Suite] ShadowRecVerify
   int suiteShadowRecVerifySec = 5;      // [Suite] ShadowRecVerifySec
   bool suiteBenchShadowRecorder = false;  // [Suite] BenchShadowRecorder (bench mode 28)
@@ -147,6 +154,8 @@ struct Config {
   bool gbufferRecorder = false;            // [Model] GBufferRecorder (gb_rec.h, R18 S1-S3)
   // R123 focus twin (focus_twin.h; opt-in, default 0: nothing installed). The [Suite] keys tune / measure it.
   int focusTwin = 0;                       // [Model] FocusTwin (0 / 1)
+  bool suiteFocusTwinTapBaseline = false;  // [Suite] FocusTwinTapBaseline: every other periphery pass untapped (R151)
+  bool suiteFocusTwinEarlyStop = true;     // [Suite] FocusTwinEarlyStop: stop the tee once the periphery is unusable
   bool suiteFocusTwinShadow = false;       // [Suite] FocusTwinShadow: audits only, never skips (measure)
   int suiteFocusTwinAuditEvery = 64;       // [Suite] FocusTwinAuditEvery: focus passes per eye between audits (0 = trust audits only)
   int suiteFocusTwinTrust = 4;             // [Suite] FocusTwinTrust: passed audits per eye before the twin draws
@@ -178,10 +187,24 @@ struct Config {
   bool suiteSrvTailTrimVerify = false;     // [Suite] SrvTailTrimVerify
   int suiteSrvTailTrimVerifySec = 10;      // [Suite] SrvTailTrimVerifySec
   bool suiteBenchSrvTailTrim = false;      // [Suite] BenchSrvTailTrim (bench mode 31)
+  int fxApplySkip = 0;                     // [D3D] FxApplySkip (fx_skip.h, A3): 0 off, 1 count, 2 lean on identical repeats, 3 lean on all eligible
+  bool fxApplySkipVerify = false;          // [D3D] FxApplySkipVerify: stock Apply on every N-th lean decision, compared
+  int fxApplySkipVerifyEvery = 64;         // [D3D] FxApplySkipVerifyEvery (1-100000)
+  int fxApplySkipLogSec = 10;              // [D3D] FxApplySkipLogSec: the "fx repeat:" line period (1-600)
+  bool suiteBenchFxApplySkip = false;      // [Suite] BenchFxApplySkip (bench mode 36)
   int prefetchMode = 0;                    // [Prefetch] Mode: off (0) | observe (1) | skip (2), prefetch_fix.h
   uint32_t prefetchWindowMs = 5000;        // [Prefetch] WindowMs: repeat window (1-60000; R107: default as shipped)
   bool suiteBenchPrefetch = false;         // [Suite] BenchPrefetch (bench mode 33: observe vs skip)
   int prefetchTableBits = 20;              // [Prefetch] TableBits: repeat table 2^n entries (16-22, default 20; R39)
+  // Measurement kit (measure_kit.h, LIVE_MEASUREMENT_PLAN.md; all measure-only, default off):
+  bool benchPassMs = false;                // [Bench] PassMs: render-thread pass ms and G-buffer pass ms per A/B block
+  int suitePassTimelineSec = 0;            // [Suite] PassTimelineSec: per-frame per-pass CPU timeline + collect timeline
+  int suiteChainCensusSec = 0;             // [Suite] ChainCensusSec: culling-chain counts census (R38 rank 3)
+  uint32_t suiteGpuBundleTiming = 0;       // [Suite] GpuBundleTiming: mask of the small exact GPU items, ABBA GPU timing
+  int suiteGpuBundlePairs = 4;             // [Suite] GpuBundlePairs: ABBA pairs of 5 s blocks (1-16)
+  bool suiteBenchPrefetchTableBits = false;  // [Suite] BenchPrefetchTableBits (bench mode 34: 2^16 vs TableBits)
+  bool suiteBenchGBufferRecorderCockpit = false;  // [Suite] BenchGBufferRecorderCockpit (bench mode 35)
+  std::string suiteLabel;                  // [Suite] Label: logged as "suite label: <text>" under the suite header
   bool threadCensus = false;               // [Threads] Census: per-thread CPU/affinity lines (thread_place.h, R39)
   int threadCensusSec = 60;                // [Threads] CensusSec (10-3600)
   int placeRecheckSec = 60;                // [Threads] PlaceRecheckSec: placement re-check once nothing moved (R52; R44 used 10 s)
@@ -346,6 +369,8 @@ void ApplyShadowRecorder();
 void ApplyGBufferRecorder();
 void ApplyPassFlush();
 void ApplySrvTailTrim(bool on);
+void ApplyFxApplySkip(int mode, bool verify, int verifyEvery);
+void FxApplySkipBenchEnd();
 void ApplyPrefetch();
 void ApplyHoldYaw(int deg);
 void ApplyPoseTest(double pitchDeg, double rateDps, bool holdPose, bool wallClock);
@@ -393,6 +418,8 @@ std::atomic<bool> g_perceptionOnly{false};
 std::atomic<int> g_govStage{0};
 std::atomic<int> g_verdictNow{0};
 std::atomic<bool> g_warming{false};
+std::atomic<int> g_warmPercent{-1};     // status word bits 44-51: warm-up or prewarm percent, -1 none (perf_mon.h)
+std::atomic<bool> g_prewarmNow{false};  // status word bit 52: the cache prewarm runs
 qvstatus::Feature g_featLast[18] = {};  // ComputeStatus's last states (the features line)
 void PerfOnToggle(bool off);
 
@@ -636,7 +663,6 @@ const RetiredKey kRetiredKeys[] = {
     {L"D3D", L"PeriphInstCoreMargin", kRetPif, kTuning},
     {L"D3D", L"PeriphInstCoreEdge", kRetPif, kTuning},
     {L"D3D", L"PeriphInstCoreShape", kRetPif, kTuning},
-    {L"Suite", L"PeriphCensus", kRetPif, kSwitch},
     {L"Suite", L"PeriphInstTiming", kRetPif, kSwitch},
     {L"Suite", L"PeriphInstVerify", kRetPif, kSwitch},
     {L"Color", L"SrgbMatch", kRetR40, kSwitch},
@@ -675,4 +701,5 @@ int NoteRetiredKeys(const std::wstring& ini) {
 }
 
 namespace vrsp { void ReadConfig(const wchar_t* ini); }  // R139: [Suite] VrsProbe* (vrs_probe.h, measure only)
+namespace pepl { void ReadConfig(const wchar_t* ini); }  // [Suite] PerEyeC2 / C4 / C5 / C7 (per_eye_live.h, measure only)
 
