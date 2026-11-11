@@ -82,19 +82,19 @@ public sealed record VrProfile
     /// engine module logs as "capped at 45 fps (90 Hz / 2)"); 1X is entered once the p90 CPU and GPU time per frame have
     /// both stayed at most 80% of the refresh period for 5 s without a missed slot (CadenceConfig, issue #17), and left
     /// above 95% or on missed slots; that is Steady, and <see cref="FrameGenPassThrough"/> widens it. <see cref="RenderedFpsCap"/> plays no part unless the frame limit is Custom.
-    /// Needs DCS's frame limit at the refresh rate. "Only when needed" on the Framegen page, on by
+    /// Needs DCS's frame limit above the refresh rate (FramePacing.CadenceCap). "Only when needed" on the Framegen page, on by
     /// default; it applies to Auto only (<see cref="UsesAdaptiveCadence"/>).</summary>
     public bool FrameGenAdaptiveCadence { get; init; } = true;
     /// <summary>When Only when needed stops generating (OFXR cadence_preference, fork patch 0070, issue #17). OFXR
     /// estimates DCS's frame time at the full rate while it runs at half of it, and that estimate reads a fifth to a
     /// quarter high. Steady is the rule of 0.6.0 to 0.6.3: pass through under 80% of a refresh, generate again over 95%
-    /// (a PC that just holds the refresh rate never passes through). Balanced, the default, tries passing through when
+    /// (a PC that just holds the refresh rate never passes through). The default. Balanced tries passing through when
     /// the estimate is within 110% of a refresh and keeps it while frames arrive on time (generating again after 3 late
     /// episodes in a second or 5 in ten; misses within 250 ms are one episode, fork patch 0071). PreferRefresh tries up
     /// to 125% and generates again after 3 in a second or 10 in ten. A try that fails is not repeated for 30 s, doubling
     /// up to 4 minutes, and after 3 failed in a row (PreferRefresh: 6) not until the scene changes. "Stop generating" on the Framegen
     /// page; applies at the next DCS start.</summary>
-    public PassThroughPreference FrameGenPassThrough { get; init; } = PassThroughPreference.Balanced;
+    public PassThroughPreference FrameGenPassThrough { get; init; } = PassThroughPreference.Steady;
     /// <summary>The share of one refresh period OFXR's frame-time estimate has to stay under before frames pass through
     /// (CadenceConfig::one_enter_fraction per preference).</summary>
     public static double PassThroughShare(PassThroughPreference preference) => preference switch { PassThroughPreference.Balanced => 1.10, PassThroughPreference.PreferRefresh => 1.25, _ => 0.80 };
