@@ -5,8 +5,11 @@ namespace DcsVr.Core;
 /// <param name="State">"not-installed", "installed" (DCS has not loaded it since it was written), "loaded" or "failed".</param>
 /// <param name="Summary">One line for the page.</param>
 /// <param name="Warnings">Conditions the user should act on (a DCS update the module does not recognise).</param>
+/// <param name="NoDriverCommandLists">The latest module log says DCS's device has no driver D3D11 command lists
+/// (DriverCommandLists=0): the option to run the recorders on emulated lists can matter.</param>
 public sealed record EngineStatus(string State, string Summary, IReadOnlyList<string> Warnings, bool TimerCacheAvailable, bool TimerCacheActive,
-    bool SceneHooked, bool SuiteRunning, string ModuleDirectory, string? LogPath, string? LastReport, DateTime? LastReportAt, string? LastStats);
+    bool SceneHooked, bool SuiteRunning, string ModuleDirectory, string? LogPath, string? LastReport, DateTime? LastReportAt, string? LastStats,
+    bool NoDriverCommandLists = false);
 
 /// <summary>The module's shader warm-up (warmup.json next to its log, native/dcsqvcull/src/warmup_status.h).</summary>
 /// <param name="State">"prewarm" (stale variants rechecked, usually in the main menu) or "warming" (the scene's variants
@@ -78,12 +81,13 @@ public static class EngineOptimizations
             return new("not-installed", "Launch DCS (or Apply without launching) installs it when Engine Optimizations is on.", [], false, false, false, false, module, null, report, reportAt, null);
         var warnings = new List<string>();
         var lines = ReadShared(log);
+        var noLists = lines is not null && HasNoDriverCommandLists(lines);
         // The log is written when DCS starts the module; one older than the loader belongs to an earlier install.
         if (lines is null || File.GetLastWriteTimeUtc(log) < File.GetLastWriteTimeUtc(loader))
         {
             var failed = LoadFailure(dcsLog, File.GetLastWriteTimeUtc(loader));
-            if (failed is not null) return new("failed", "DCS could not load the module: " + failed, [failed], false, false, false, false, module, null, report, reportAt, null);
-            return new("installed", dcsRunning ? "Installed. DCS loads it when its interface starts." : "Installed. DCS loads it at its next start.", [], false, false, false, false, module, null, report, reportAt, null);
+            if (failed is not null) return new("failed", "DCS could not load the module: " + failed, [failed], false, false, false, false, module, null, report, reportAt, null, noLists);
+            return new("installed", dcsRunning ? "Installed. DCS loads it when its interface starts." : "Installed. DCS loads it at its next start.", [], false, false, false, false, module, null, report, reportAt, null, noLists);
         }
         bool Has(string text) => lines.Any(l => l.Contains(text, StringComparison.Ordinal));
         // The loader's last outcome counts: a payload that failed to start after an earlier one ran is a failure now.
@@ -92,7 +96,7 @@ public static class EngineOptimizations
         if (startFailed > payloadStart)
         {
             var why = lines[startFailed][(lines[startFailed].IndexOf("loader: ", StringComparison.Ordinal) + 8)..].Trim();
-            return new("failed", "The module could not start: " + why + ". See DcsQvCull.log.", [why], false, false, false, false, module, log, report, reportAt, null);
+            return new("failed", "The module could not start: " + why + ". See DcsQvCull.log.", [why], false, false, false, false, module, log, report, reportAt, null, noLists);
         }
         var loaded = payloadStart >= 0;
         var timerAvailable = Has("timer cache: dx11backend!ED_get_time redirected");
@@ -131,14 +135,14 @@ public static class EngineOptimizations
         var started = lines.FindLastIndex(l => l.Contains("==== DcsQvCull test suite", StringComparison.Ordinal));
         var written = lines.FindLastIndex(l => l.Contains("report written to report_", StringComparison.Ordinal) || l.Contains("==== suite aborted", StringComparison.Ordinal));
         var running = dcsRunning && (File.Exists(Path.Combine(module, SuiteFlag)) || (started >= 0 && started > written));
-        if (!loaded) return new("installed", "Installed, but DCS has not started it yet.", warnings, false, false, false, running, module, log, report, reportAt, lastStats);
+        if (!loaded) return new("installed", "Installed, but DCS has not started it yet.", warnings, false, false, false, running, module, log, report, reportAt, lastStats, noLists);
         var parts = new List<string> { dcsRunning ? "Loaded in the running DCS" : "Loaded at the last DCS start" };
         if (devPayload is not null) parts.Add("developer payload " + devPayload);
         if (devIni is not null) parts.Add("developer settings " + devIni);
         if (dcsRunning && switchedOff) parts.Add("switched off in flight (press the in-flight switch again)");
         parts.Add(timerAvailable ? (timerActive || lastStats is null ? "streaming timer cache on" : "streaming timer cache off") : "streaming timer cache not available");
         parts.Add(scene ? "culling hook on" : "culling hook not seen yet");
-        return new("loaded", string.Join(" · ", parts) + ".", warnings, timerAvailable, timerActive, scene, running, module, log, report, reportAt, lastStats);
+        return new("loaded", string.Join(" · ", parts) + ".", warnings, timerAvailable, timerActive, scene, running, module, log, report, reportAt, lastStats, noLists);
     }
 
     /// <summary>Starts the in-game test suite: DcsQvCull checks for run_suite.flag next to its DLL every second.</summary>
@@ -151,7 +155,24 @@ public static class EngineOptimizations
         return "Test suite requested. It takes about 7 minutes; keep the headset on and still, in a busy scene. The report appears here when it is done.";
     }
 
-    /// <summary>Why DCS's device has no D3D11 command lists, and what to do: on NVIDIA almost always Threaded optimization Off.</summary>
+    /// <summary>The module's log says DCS's device has no driver command lists: its GPU line or a recorder's line with
+    /// DriverCommandLists=0, or the line of a module before 0.5.7.</summary>
+    public static bool HasNoDriverCommandLists(IEnumerable<string> lines) =>
+        lines.Any(l => l.Contains("DriverCommandLists=0", StringComparison.Ordinal) || l.Contains("the driver lacks command lists", StringComparison.Ordinal));
+
+    /// <summary>The PC's graphics are AMD only (no NVIDIA adapter), so DCS runs on an AMD driver, which has no D3D11 command
+    /// lists. An AMD integrated GPU next to an NVIDIA card does not count: DCS runs on the NVIDIA card.</summary>
+    public static bool AmdOnly(IReadOnlyList<GpuAdapter> adapters) =>
+        adapters.Any(a => a.Vendor == "AMD") && !adapters.Any(a => a.Vendor == "NVIDIA");
+
+    /// <summary>The Engine page shows "Multi-threaded shadows and G-buffer without driver support" only where it can matter:
+    /// the GPU is AMD, or the latest module log says DriverCommandLists=0, or it is already on (so it can be turned off).
+    /// Hidden on NVIDIA with command lists. The interface applies the same rule (app.js, engineRecordersEmulatedLists).</summary>
+    public static bool ShowsEmulatedListsOption(IReadOnlyList<GpuAdapter> adapters, bool logNoDriverCommandLists, bool on) =>
+        on || logNoDriverCommandLists || AmdOnly(adapters);
+
+    /// <summary>Why DCS's device has no D3D11 command lists, and what to do. NVIDIA's Threaded optimization is not named:
+    /// Off did not remove them in a live test (RTX 5090, driver 32.0.16.2114, the module logged DriverCommandLists=1).</summary>
     public static string NoCommandListsAdvice(string? line = null)
     {
         const string start = "Multi-threaded shadows and G-buffer cannot run: DCS's graphics device has no D3D11 command lists. DCS draws them as usual and the other optimizations still run. ";
@@ -164,11 +185,9 @@ public static class EngineOptimizations
             return start + "DCS runs on " + Adapter(line) + ", not on the NVIDIA card. Make DCS use the NVIDIA card (Windows Settings → System → Display → Graphics → DCS: High performance), or disable the integrated graphics, then start DCS again.";
         if (NvidiaSettings.MfaaForDcs() is { On: true } mfaa)
             return start + $"The cause: NVIDIA's Antialiasing - MFAA is On in {mfaa.Where}. {mfaa.Fix}, then start DCS again.";
-        if (NvidiaSettings.ThreadedOptimizationForDcs() is { Value: ThreadedOptimization.Off } threaded)
-            return start + $"The cause: NVIDIA's Threaded optimization is Off in {threaded.Where}. {threaded.Fix}, then start DCS again.";
         if (GpuInfo.Adapters().Any(a => a.Vendor == "NVIDIA"))
-            return start + "NVIDIA cards have them, so check in NVIDIA Control Panel (Global settings and the DCS World program) that Threaded optimization is not Off and Antialiasing - MFAA is Off, that DCS runs on the NVIDIA card and not on integrated graphics, and that no other program wraps DCS's graphics (ReShade, Special K, overlays).";
-        return start + "This graphics driver does not offer them (common on AMD cards).";
+            return start + "NVIDIA cards have them, so check in NVIDIA Control Panel (Global settings and the DCS World program) that Antialiasing - MFAA is Off, that DCS runs on the NVIDIA card and not on integrated graphics, and that no other program wraps DCS's graphics (ReShade, Special K, overlays).";
+        return start + "This graphics driver does not offer them (common on AMD cards). Multi-threaded shadows and G-buffer without driver support, on this page, runs them anyway, with a smaller gain.";
     }
     private static string Capabilities(string line) =>
         string.Join(", ", System.Text.RegularExpressions.Regex.Matches(line, @"(DriverCommandLists|ConstantBufferOffsetting|ID3D11DeviceContext1)=0").Select(m => m.Groups[1].Value + " missing")) is { Length: > 0 } list ? list : "see DcsQvCull.log";

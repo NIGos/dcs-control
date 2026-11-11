@@ -737,6 +737,9 @@ function buildFields() {
   field(c,'engineOptimizations','Turn on',['Stays on whenever DCS starts, until you turn it off here.','Also from Steam or a shortcut; Back to stock DCS turns it off too. Nothing in the DCS folder changes. Tested on DCS 2.9.30, single player.'],'toggle');
   field(c,'engineReleaseIdleDlss','Free unused DLSS memory',['Frees the unused DLSS copy each mission load leaves (0.7–1.4 GB).','Helps long sessions with many restarts. The image doesn\'t change. Off by default.'],'toggle',null,engine);
   field(c,'engineShadowCache','<span class="tag">EXPERIMENTAL</span> Cache distant shadows',['About 0.7 ms less GPU time; distant tree shadows sway less smoothly.','Reuses the distant shadows (about 70 m to 1.5 km) for a few frames. Off by default.'],'toggle',null,engine);
+  // [Model] RecordersEmulatedLists: only where it can matter (EngineOptimizations.ShowsEmulatedListsOption): an AMD-only
+  // PC, a module log with DriverCommandLists=0, or already on. Read when DCS starts, so not live.
+  field(c,'engineRecordersEmulatedLists','<span class="tag">EXPERIMENTAL</span> Multi-threaded shadows and G-buffer without driver support',['For AMD Radeon and other cards without D3D11 command lists. Smaller gain than on NVIDIA; not yet tested on Radeon.','Runs them on the command lists Windows emulates. Applies at the next DCS start. Off by default.'],'toggle',null,p => engine(p) && (p.engineShadowRecorder || p.engineGBufferRecorder),'',emulatedListsHidden);
   // The parts, biggest measured gain first, folded: all on is the tested set.
   // The fold counts like the Engine row of the right panel: the terrain prefetch fix is one more part when it skips repeats.
   more = disclosure(c,'Individual optimizations','All on is best. Turn one off only if a problem points to it.',p => `${ENGINE_PARTS.filter(k => p[k]).length + (p.boostPrefetch === 'Skip' ? 1 : 0)} of ${ENGINE_PARTS.length + 1} on`);
@@ -1034,11 +1037,15 @@ let engineTimer, engineSequence = 0, engineStatus = null, engineWarmup = null, e
 async function refreshEngine() {
   clearTimeout(engineTimer);
   const mine = ++engineSequence;
-  try { const result = await request('engineStatus'); if (mine === engineSequence) { engineStatus = result.status; engineWarmup = result.warmup || null; engineCache = result.shaderCache || null; renderEngine(); } }
+  try { const result = await request('engineStatus'); if (mine === engineSequence) { engineStatus = result.status; engineWarmup = result.warmup || null; engineCache = result.shaderCache || null; renderEngine();
+    const lists = fields.find(f => f.path === 'engineRecordersEmulatedLists'); if (lists && profile) lists.element.hidden = emulatedListsHidden(profile); } }
   catch (error) { if (mine === engineSequence) $('engineStatus').innerHTML = `<p class="fine">${escape(error.message)}</p>`; }
   if (page === 'engine' && mine === engineSequence) engineTimer = setTimeout(refreshEngine, 5000);
 }
 const ENGINE_STATE = {'not-installed':'Not installed', installed:'Installed', loaded:'Loaded', failed:'Load failed'};
+/** Multi-threaded shadows and G-buffer without driver support: hidden unless it can matter (as
+ *  EngineOptimizations.ShowsEmulatedListsOption): AMD-only graphics, the module's last log with DriverCommandLists=0, or on. */
+function emulatedListsHidden(p) { return !(p.engineRecordersEmulatedLists || state?.gpu?.amdOnly || engineStatus?.noDriverCommandLists); }
 function renderEngine() {
   const s = engineStatus, box = $('engineStatus'); if (!box) return;
   if (!s) { box.innerHTML = '<p class="fine">Select the DCS settings file on the DCS &amp; headset page first.</p>'; return; }
@@ -1559,7 +1566,7 @@ const CHECK_INFO = {
   'diagnostic-hotkey':['Headset panel key',{reveal:'diagnosticOverlayKey',label:'Change'}], 'diagnostic-hotkey-dcs':['Headset panel key',{reveal:'diagnosticOverlayKey',label:'Change'}],
   'engine-hotkey':['Engine Optimizations switch',{reveal:'engineToggleKey',label:'Change'}], 'engine-hotkey-dcs':['Engine Optimizations switch',{reveal:'engineToggleKey',label:'Change'}],
   'engine-timer':['Streaming timer refresh',{reveal:'engineTimerRefreshUs',label:'Open'}], 'engine-compile-threads':['Compile threads',{reveal:'engineShaderCompileWorkers',label:'Open'}], 'engine-dev':['Developer mode',{reveal:'engineDevMode',label:'Open'}], 'engine-dev-missing':['Developer mode',{reveal:'engineDevMode',label:'Open'}],
-  'nvidia-threaded-optimization':['NVIDIA Threaded optimization',null], 'nvidia-mfaa':['NVIDIA MFAA',null], 'eye-distance':['Eye distance',{reveal:'eyeDistanceMm',label:'Open'}],
+  'nvidia-mfaa':['NVIDIA MFAA',null], 'eye-distance':['Eye distance',{reveal:'eyeDistanceMm',label:'Open'}],
   'smooth-cursor-images':['Smooth mouse cursor',{reveal:'smoothCursor',label:'Open'}], 'fps-cap':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}], 'dcs-vsync':['Desktop VSync',{reveal:'disableDcsVSync',label:'Open'}],
   'hotkey-conflict':['In-flight keys',{reveal:'diagnosticOverlayKey',label:'Change'}],
   'pimax-fovea':['Focus area from Pimax Play',{page:'foveation',label:'Open'}], 'quad-coverage-cap':['Focus area size',{page:'foveation',label:'Open'}],
@@ -1826,7 +1833,7 @@ const FEATURE_GUIDE = [
    gives:'DCS needs less CPU time for every frame. The image stays exactly the same.',
    expect:'The busier the scene, the bigger the gain: airfields, carriers and large missions run noticeably smoother. Little or no change when the graphics card is the limit.',
    cost:'Nothing visible. The first start prepares some data for a few minutes.',
-   needs:'NVIDIA Threaded optimization not Off and MFAA off for DCS. Checks tells you.',
+   needs:'On NVIDIA, MFAA off for DCS (Checks tells you). On AMD Radeon, the multi-threaded parts need their own switch on the page.',
    keyPath:'engineToggleKey', keyText:'off and on, to compare'},
   {section:'every', page:'boost', name:'CPU Boost', impact:'Steadier', on:p => p.cpuBoost,
    gives:'DCS gets priority and its best CPU cores; other programs step out of its way while you fly.',

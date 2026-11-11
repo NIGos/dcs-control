@@ -11,7 +11,8 @@
 **Fixes:**
 - Pimax Quad View presets (Performance, Balanced, Quality, Extreme) are now recognised. Pimax does not save their values, and DCS Control read the leftover Custom values instead: a far too large focus area and about half the FPS. It now uses the profile's own focus values and says so.
 - DCS no longer risks staying open after you quit because of two engine threads.
-- The requirements now say what changes on AMD Radeon cards: the multi-threaded shadows and G-buffer usually stay off there. An opt-in for emulated command lists exists; it is untested on Radeon.
+- The requirements now say what changes on AMD Radeon cards: the multi-threaded shadows and G-buffer usually stay off there. On AMD (or when the module finds no driver command lists) the DCS Engine page offers **Multi-threaded shadows and G-buffer without driver support**, off by default: it runs them on lists Windows emulates, with a smaller gain than on NVIDIA. Not yet tested on Radeon.
+- Checks no longer warns about NVIDIA's *Threaded optimization* Off: a live test (RTX 5090) showed it does not take the driver's command lists away. MFAA On still does, and Checks still warns about it.
 
 # 0.6.3 preview
 
