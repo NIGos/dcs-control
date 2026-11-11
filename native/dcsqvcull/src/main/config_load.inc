@@ -293,6 +293,7 @@ void LoadConfig(bool initial) {
       Log("config: [Model] FocusTwinInstancer=1 needs FocusTwin=1; nothing installed");
     c.suiteFocusTwinPatches = GetPrivateProfileIntW(L"Suite", L"FocusTwinPatches", 1, ini.c_str()) != 0;
   }
+  pepl::ReadConfig(ini.c_str());  // [Suite] PerEyeC2 / C4 / C5 / C7 / PerEyeLogSec (measure only, default 0)
   vrsp::ReadConfig(ini.c_str());  // R139: [Suite] VrsProbe* (measure-only VRS probe, default 0: nothing installed)
   c.gbufferRecorderScope = qvini::Mask(L"Model", L"GBufferRecorderScope", 0x10055, 0x1ffff, ini.c_str());  // dec or 0x hex
   c.gbufferRecorderWaitUs = GetPrivateProfileIntW(L"Model", L"GBufferRecorderWaitUs", 300, ini.c_str());
