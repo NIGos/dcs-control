@@ -6,7 +6,7 @@
 
 **Last flight says what the engine did.** The Overview's Last flight card has an **Engine Optimizations** row: how many were on, any that turned themselves off for safety, the time they were off from the in-flight key, and the warm-up time.
 
-**Only when needed: Stop generating.** A new choice under Only when needed decides how readily frame generation steps back to plain frames when DCS keeps up: Steady (the default, as before), Balanced or Prefer refresh rate. The Last flight card says why frames stayed generated (DCS's frame time against the limit). After a failed attempt at plain frames it no longer drops to 3×.
+**Only when needed: Stop generating.** A new choice under Only when needed decides how readily frame generation steps back to plain frames when DCS keeps up: Steady (the rule of 0.6.3), Balanced (the new default) or Prefer refresh rate. On a scene that just holds 90 FPS with frame generation off, Balanced and Prefer refresh rate showed DCS's own 90 FPS most of the time in every test flight, where Steady stayed at 45. The Last flight card says why frames stayed generated (DCS's frame time against the limit). After a failed attempt at plain frames it no longer drops to 3×.
 
 **Fixes:**
 - Pimax Quad View presets (Performance, Balanced, Quality, Extreme) are now recognised. Pimax does not save their values, and DCS Control read the leftover Custom values instead: a far too large focus area and about half the FPS. It now uses the profile's own focus values and says so.

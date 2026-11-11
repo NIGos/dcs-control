@@ -94,7 +94,7 @@ public sealed record VrProfile
     /// to 125% and generates again after 3 in a second or 10 in ten. A try that fails is not repeated for 30 s, doubling
     /// up to 4 minutes, and after 3 failed in a row (PreferRefresh: 6) not until the scene changes. "Stop generating" on the Framegen
     /// page; applies at the next DCS start.</summary>
-    public PassThroughPreference FrameGenPassThrough { get; init; } = PassThroughPreference.Steady;
+    public PassThroughPreference FrameGenPassThrough { get; init; } = PassThroughPreference.Balanced;
     /// <summary>The share of one refresh period OFXR's frame-time estimate has to stay under before frames pass through
     /// (CadenceConfig::one_enter_fraction per preference).</summary>
     public static double PassThroughShare(PassThroughPreference preference) => preference switch { PassThroughPreference.Balanced => 1.10, PassThroughPreference.PreferRefresh => 1.25, _ => 0.80 };
