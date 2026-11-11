@@ -384,7 +384,7 @@ void FakeInstall() {
   fdexport::g_releaseReq = false;
   fdexport::SeedGeneration();
   fdexport::ResetFrameState();
-  g_worker = std::thread(WorkerLoop);
+  g_worker = new std::thread(WorkerLoop);
   OpenMappings();
   g_installed = true;
 }
@@ -1839,7 +1839,7 @@ void TestPipeline() {
               !fdexport::HaveTextures() && !g_held[2] && !g_held[3],
           "far depth: render thread idle at uninstall -> released from the uninstall, before our textures");
   }
-  Check(!g_s.dev && !g_worker.joinable() && !g_installed.load(), "far depth: uninstalled (worker joined, device released)");
+  Check(!g_s.dev && !g_worker && !g_installed.load(), "far depth: uninstalled (worker joined, device released)");
 
   // Teardown.
   g_coneOn = false;
