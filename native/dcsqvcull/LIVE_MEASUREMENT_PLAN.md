@@ -52,9 +52,16 @@ Added by this kit (all default off; `src/measure_kit.h` unless noted):
   chain's counts are <= the other's for every object. Runs inside a GPU pass timing session, so the same report has
   the chains' GPU ms. Staging buffers are created and released on the render thread.
 - `[Suite] GpuBundleTiming=<mask>`, `GpuBundlePairs=N` (e): ABBA GPU pass timing (OFF ON ON OFF ...), 5 s blocks.
-  ON switches the requested bundle items that are built. **None of the five is built yet** (R26 11.7a, R26 9.2b,
-  R27 R4, R28, R36 4b), so today both arms are stock: the run measures the A/A noise floor that the bundle's later
-  GO rule needs. A built item registers its switch in `mkit::kBundle`.
+  ON switches the requested bundle items that are built. **Only bit 1 is built** (R26 9.2b: the shadow recorder's
+  lists of a split cascade run as one nested list, `[Model] ShadowRecorderNest` / `SmallGpuBundle`, default 0; needs
+  `[Model] ShadowRecorder=1`, as the app writes). Bits 0, 2, 3, 4 (R26 11.7a, R27 R4, R28, R36 4b) were dropped
+  (2026-11-11; the log line of each names why) and stay stock in both arms; a mask without bit 1 is the A/A noise
+  floor. A built item registers its switch in `mkit::kBundle`; the ON/OFF arms override its ini key, the end of the
+  phase restores it. Per block the item logs `shadow recorder gpu bundle block k ON nested lists ...` (passes nested
+  per frame, render-thread cost).
+- Exactness of bit 1: `[Suite] ShadowRecVerify=1` with `[Model] ShadowRecorderNest=1` compares every recorded cascade
+  stock against the nested list in the same frame (`shadow recorder verify cascade c verify: ... 0 with differences`,
+  plus `shadow recorder verify nested lists ...: N passes ran one nested list`).
 - `[Suite] Label=<text>`: logged as `suite label: <text>` under the suite header, so the parser can name each step.
 
 Not covered by this kit (out of scope or needs code that does not exist): building the five GPU items, the full
@@ -217,6 +224,10 @@ has `GpuPassStats` rows (the cascade, terrain and animator passes the items touc
   95 % interval). That interval is the floor for the later rule.
 - **Later GO** (once items are built and registered in `mkit::kBundle`): the bundle's ON - OFF <= -0.3 ms and
   outside 2x the A/A interval measured here, with each item's own same-frame compare at 0 differences.
+- **Bit 1 alone (2026-11-11, the only built item; bound 0.15 ms):** GO for `ShadowRecorderNest` as a default when
+  `GpuBundleTiming=0x2` gives ON - OFF of the exclusive GPU ms <= -0.1 ms with the whole 95 % interval below 0, the
+  ON blocks show nested passes (about 4 per frame minus unsplit cascades), and `ShadowRecVerify` with the key on has
+  0 differences. ON - OFF inside the interval: NO-GO (keep 0).
 
 ### (f) TableBits=20 p95 in a CPU-bound scene (A2)
 

@@ -16,9 +16,11 @@
 //                               periphery list filtered by the focus planes")? Runs inside a GPU pass timing session,
 //                               so the same log has the chains' GPU ms (TerrainModule calls #1-#4).
 //   [Suite] GpuBundleTiming=M   (e) ABBA GPU pass timing, GpuBundlePairs pairs of 5 s blocks, ON = the bundle items of
-//                               mask M that are built. None of the five audit items (R26 11.7a, R26 9.2b, R27 R4,
-//                               R28, R36 4b) is built yet: then both arms are stock and the run is the A/A noise floor
-//                               the bundle's decision rule needs. A built item registers its switch in kBundle.
+//                               mask M that are built. Of the five audit items (R26 11.7a, R26 9.2b, R27 R4, R28,
+//                               R36 4b) only bit 1 is built (R26 9.2b, shadow_rec.h's nested lists; the others log
+//                               why not); with no built bit requested both arms are stock and the run is the A/A
+//                               noise floor. A built item registers its switch in kBundle. The ON arm overrides the
+//                               item's ini key ([Model] ShadowRecorderNest / SmallGpuBundle), the end restores it.
 // Bench modes 34 (prefetch table 2^16 vs [Prefetch] TableBits) and 35 (G-buffer recorder cockpit part) are in bench.h
 // and main\bench_variant.inc; their suite keys in main\suite.inc.
 //
@@ -494,17 +496,32 @@ void ChainCensusPhase(int seconds, std::atomic<uint64_t>& frameCounter,
 // ---------------------------------------------------------------------------
 // (e) Small exact GPU items, one ABBA bundle
 // ---------------------------------------------------------------------------
+// apply(mode): 1 = the ON arm, 0 = the OFF arm, -1 = the configured value back (after the phase). begin / report:
+// the item's own counters per block (optional). An item that is not built names why (perf audit A6, 2026-11-11).
 struct BundleItem {
   const char* name;
   const char* source;
-  void (*apply)(bool on);  // nullptr: not built yet
+  void (*apply)(int mode);  // nullptr: not built
+  void (*begin)();
+  void (*report)(const char* label, double frames);
+  const char* dropped;  // not built: why
 };
+void NestApply(int mode) { shrec::g_nestForce = mode; }
+void NestBegin() { shrec::g_nestPasses = shrec::g_nestLists = shrec::g_nestNs = 0; }
 const BundleItem kBundle[] = {
-    {"recorder caster lists issued ahead of the cascade culling chain", "R26 11.7a", nullptr},
-    {"nested ExecuteCommandList for the shadow helper lists", "R26 9.2b", nullptr},
-    {"forest before terrain in the cascades", "R27 R4", nullptr},
-    {"terrain surface VS without its 44 dead instructions", "R28", nullptr},
-    {"animator dispatch repeat skip", "R36 4b", nullptr},
+    {"recorder caster lists issued ahead of the cascade culling chain", "R26 11.7a", nullptr, nullptr, nullptr,
+     "already the order: the exec entry is the first item of the cascade loop, before TerrainObject (whose vt[1] "
+     "issues the chain); interleaving them needs hooks inside edterrainGraphics41's chain"},
+    {"nested ExecuteCommandList for the shadow helper lists", "R26 9.2b", &NestApply, &NestBegin, &shrec::LogNest,
+     nullptr},
+    {"forest before terrain in the cascades", "R27 R4", nullptr, nullptr, nullptr,
+     "terrain, buildings and forest are one caster (TerrainObject's GPU-driven indirect draws): a reorder means "
+     "capturing and re-issuing DCS's indirect draws with their full state (per-call hooks, about a week, R27 4)"},
+    {"terrain surface VS without its 44 dead instructions", "R28", nullptr, nullptr, nullptr,
+     "out of scope (a recompiled metashader variant, not trivially exact)"},
+    {"animator dispatch repeat skip", "R36 4b", nullptr, nullptr, nullptr,
+     "exactness needs the cb0 and instance-list contents and the per-instance output slots proven unchanged "
+     "between cameras (Map / Update / UAV write hooks), for 0.045 ms"},
 };
 constexpr int kBundleItems = static_cast<int>(sizeof(kBundle) / sizeof(kBundle[0]));
 
@@ -515,9 +532,9 @@ uint32_t BundleBuiltMask(uint32_t want) {
   return m;
 }
 
-void ApplyBundle(uint32_t mask, bool on) {
+void ApplyBundle(uint32_t mask, int mode) {
   for (int i = 0; i < kBundleItems; ++i)
-    if (((mask >> i) & 1) && kBundle[i].apply) kBundle[i].apply(on);
+    if (((mask >> i) & 1) && kBundle[i].apply) kBundle[i].apply(mode);
 }
 
 // ABBA order: pair p is OFF,ON for even p and ON,OFF for odd p (pure; offline tested).
@@ -526,21 +543,33 @@ inline bool BundleBlockOn(int block) { return ((block / 2) & 1) ? (block & 1) ==
 void GpuBundlePhase(uint32_t want, int pairs, std::atomic<uint64_t>& frameCounter) {
   const uint32_t active = BundleBuiltMask(want);
   for (int i = 0; i < kBundleItems; ++i)
-    if ((want >> i) & 1)
-      Log("  gpu bundle item %d: %s (%s): %s", i, kBundle[i].name, kBundle[i].source,
-          kBundle[i].apply ? "built, in the ON arm" : "NOT BUILT, stock in both arms");
+    if ((want >> i) & 1) {
+      if (kBundle[i].apply)
+        Log("  gpu bundle item %d: %s (%s): built, in the ON arm", i, kBundle[i].name, kBundle[i].source);
+      else
+        Log("  gpu bundle item %d: %s (%s): NOT BUILT, stock in both arms (%s)", i, kBundle[i].name,
+            kBundle[i].source, kBundle[i].dropped ? kBundle[i].dropped : "-");
+    }
   if (!active)
     Log("  gpu bundle: no requested item is built: this run is an A/A (both arms stock), the noise floor of the "
         "per-block GPU numbers");
   const int blocks = pairs * 2;
   for (int b = 0; b < blocks && !g_benchAbort; ++b) {
     const bool on = BundleBlockOn(b);
-    ApplyBundle(active, on);
+    ApplyBundle(active, on ? 1 : 0);
     Sleep(1500);
     Log("  gpu bundle block %d/%d: %s (items 0x%x)", b + 1, blocks, on ? "ON" : "OFF", on ? active : 0u);
+    for (int i = 0; i < kBundleItems; ++i)
+      if (((active >> i) & 1) && kBundle[i].begin) kBundle[i].begin();
+    const uint64_t f0 = frameCounter.load();
     gpt::Measure(5000, frameCounter);
+    const double frames = static_cast<double>(frameCounter.load() - f0);
+    char label[48];
+    snprintf(label, sizeof(label), "gpu bundle block %d %s", b + 1, on ? "ON" : "OFF");
+    for (int i = 0; i < kBundleItems; ++i)
+      if (((active >> i) & 1) && kBundle[i].report) kBundle[i].report(label, frames);
   }
-  ApplyBundle(active, false);
+  ApplyBundle(active, -1);
 }
 
 }  // namespace mkit

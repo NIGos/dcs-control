@@ -121,6 +121,7 @@ bool ShadowRecPhase(bool verify) {
   shrec::g_split = g_cfg.shadowRecorderSplit;
   shrec::g_helpers = static_cast<uint32_t>(g_cfg.shadowRecorderHelpers);
   shrec::g_instancing = g_cfg.shadowRecorderInstancing;
+  shrec::g_nest = g_cfg.shadowRecorderNest || g_cfg.smallGpuBundle;  // perf audit A6 b (the bundle: every built A6 item)
   if (g_cfg.gbufferBatch && g_cfg.shadowInst) {
     Log("  shadow recorder: off while [Model] GBufferBatching=1");
     return false;

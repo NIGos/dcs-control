@@ -684,6 +684,7 @@ void ApplyShadowRecorder() {
   shrec::g_split = gs.shadowSplit;
   shrec::g_helpers = static_cast<uint32_t>(g_cfg.shadowRecorderHelpers);
   shrec::g_instancing = g_cfg.shadowRecorderInstancing;
+  shrec::g_nest = g_cfg.shadowRecorderNest || g_cfg.smallGpuBundle;  // perf audit A6 b (the bundle: every built A6 item)
   const bool on = g_cfg.shadowRecorder && !g_engineOff.load() && !gs.pause && !(g_cfg.gbufferBatch && g_cfg.shadowInst);
   if (on && frameheap::g_state.load() == 0) frameheap::Install();  // the workers' recycled-heap check needs the generation
   if (on && !RecycleGuardReady("shadow recorder")) {
