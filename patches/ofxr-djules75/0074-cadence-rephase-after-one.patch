@@ -1,0 +1,194 @@
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -2051,6 +2051,29 @@ struct CadenceTimeResync {
+             last_told > settle_until[level] ? last_told : settle_until[level];
+         streak[level] = 0;
+     }
++    // DCS Control (0074): 1X was left (`last_told` the latest display time
++    // told so far). Flown (issue #17, 0070-0073): the frames of 2 that follow
++    // a 1X land one or two periods before the time the level's offset tells
++    // them - the queue 1X leaves is a slot or two shorter than the one the
++    // offset was learnt on - and that offset's last move was the other way
++    // (+2 at the session's start), so the hold refused the correction for
++    // 30 s and more (adaptive_switch result=15 a=2 b=-1 or -2, one a second)
++    // while the application predicted its poses a refresh or two off. For
++    // kRephaseWindow of told time after the exit, the first confirmed move
++    // of 2 and of 3 (kConfirmCadence frames agreeing, as ever) is taken
++    // whatever its direction and is not counted a reversal: it is the
++    // transition's, not the load's square wave 0060-0062 hold against. One
++    // move per level per exit; a level found on time (a confirmed run) ends
++    // its window. Everything else of the hysteresis is as it was.
++    static constexpr Nanoseconds kRephaseWindow = 10 * kSecond;
++    std::array<Nanoseconds, kLevels> rephase_until{};
++    void left_one(Nanoseconds last_told) noexcept {
++        for (std::size_t level = 1; level < kLevels; ++level) {
++            rephase_until[level] = last_told + kRephaseWindow;
++            streak[level] = 0;
++            on_time[level] = 0; // a confirmed run on time from here ends it
++        }
++    }
+     // A real frame of cadence `frames`, told `told`, shown `residual` after
+     // it; `last_told` the latest display time told so far. Returns the
+     // periods its level's offset moved (0: none).
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -1320,6 +1320,7 @@ std::int64_t CadenceTimeResync::observe(
+             if (on_time[level] < confirm_for(level) &&
+                 ++on_time[level] == confirm_for(level)) {
+                 ++hold_restarts;
++                rephase_until[level] = 0; // DCS Control (0074): in phase
+             }
+             if (on_time[level] >= confirm_for(level) && told > hold_from[level]) {
+                 hold_from[level] = told;
+@@ -1358,7 +1359,11 @@ std::int64_t CadenceTimeResync::observe(
+     // the level's last frame on time in a confirmed run, if later).
+     // DCS Control (0063): effective_hold, at most kUnanimousHold for a
+     // unanimous shift whatever the back-off level.
+-    if (reverses && told - hold_from[level] < effective_hold(level, told)) {
++    // DCS Control (0074): not the first confirmed move after a 1X was left
++    // (CadenceTimeResync::left_one).
++    const bool rephasing = level != 0 && told <= rephase_until[level];
++    if (reverses && !rephasing &&
++        told - hold_from[level] < effective_hold(level, told)) {
+         ++held;
+         streak[level] = 0;
+         // DCS Control (0061): recorded (adaptive_switch result=15), at most
+@@ -1396,7 +1401,13 @@ std::int64_t CadenceTimeResync::observe(
+                     hysteresis.backoff_decay;
+                 backoff[level] = decayed;
+             }
+-            if (reverses && told - last_move_at[level] < hysteresis.reversal_window) {
++            // DCS Control (0074): the transition's move is no reversal, and
++            // the one move its window allows.
++            if (rephasing) {
++                rephase_until[level] = 0;
++            }
++            if (reverses && !rephasing &&
++                told - last_move_at[level] < hysteresis.reversal_window) {
+                 backoff[level] =
+                     std::min<std::uint32_t>(backoff[level] + 1, hysteresis.max_backoff);
+                 backoff_at[level] = told;
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -16251,6 +16251,18 @@ void apply_cadence_step(
+     if (step.level != step.previous) {
+         ++state.cadence_changes_second;
+     }
++    // DCS Control (0074): 1X left: the frames of 2 (and 3) that follow may
++    // take the told-time move the transition needs past their level's hold
++    // (xrfg::latency::CadenceTimeResync::left_one). A scene change resets
++    // the resync itself.
++    if (step.previous == 1 && step.level != 1) {
++        try {
++            std::scoped_lock lock(state.presenter_mutex);
++            state.cadence_resync.left_one(
++                static_cast<xrfg::latency::Nanoseconds>(state.last_virtual_display_time));
++        } catch (...) {
++        }
++    }
+     log_cadence_event(step);
+ }
+ 
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -3576,6 +3576,88 @@ void cadence_resync_per_level_tests() {
+     }
+ }
+ 
++// DCS Control (0074): the told-time move a 1X exit needs (issue #17). Frames
++// of 2 land two periods late and the level learns +2; after a 1X they land
++// where they were told without it - two periods before the offset's time.
++void cadence_resync_rephase_tests() {
++    constexpr Nanoseconds kP = 11'111'111;
++    struct Sim {
++        CadenceTimeResync resync{};
++        Nanoseconds told{kSecond};
++        std::vector<std::pair<Nanoseconds, std::int64_t>> moved;
++        std::uint32_t blocked{};
++    };
++    // Frames of 2 for `duration`, each shown `lands` periods after the time
++    // it would be told with no offset.
++    const auto run = [&](Sim& sim, Nanoseconds duration, std::int64_t lands) {
++        const Nanoseconds until = sim.told + duration;
++        while (sim.told < until) {
++            sim.told += 2 * kP;
++            const std::int64_t with = sim.resync.periods_for(2);
++            const std::int64_t moved = sim.resync.observe(
++                2, sim.told, (lands - with) * kP, kP, sim.told, with);
++            if (moved != 0) {
++                sim.moved.emplace_back(sim.told, moved);
++            }
++            sim.blocked += sim.resync.blocked.periods != 0 ? 1U : 0U;
++        }
++    };
++    const auto learnt = [&](Sim& sim) {
++        run(sim, 20 * kSecond, 2);
++        require(sim.moved.size() == 1 && sim.moved[0].second == 2 &&
++                sim.resync.periods_for(2) == 2 && sim.blocked == 0,
++            "rephase: 2 learns its +2");
++    };
++    {
++        // Without the exit's word (0062 as it was): the move against the
++        // last one is held, and said so about once a second.
++        Sim held;
++        learnt(held);
++        run(held, 12 * kSecond, 0);
++        require(held.moved.size() == 1 && held.resync.periods_for(2) == 2 &&
++                held.blocked >= 8,
++            "rephase: without left_one the hold refuses the move (result=15)");
++    }
++    Sim sim;
++    learnt(sim);
++    const Nanoseconds left = sim.told;
++    sim.resync.left_one(sim.told);
++    run(sim, 12 * kSecond, 0);
++    require(sim.moved.size() == 2 && sim.moved[1].second == -2 &&
++            sim.moved[1].first <= left + 1 * kSecond &&
++            sim.resync.periods_for(2) == 0 && sim.blocked == 0,
++        "rephase: after a 1X the first confirmed move is taken, within a second");
++    require(sim.resync.backoff[1] == 0 && sim.resync.rephase_until[1] == 0,
++        "rephase: not a reversal, and the one move of its window");
++    // The protections stand: the load's swing back within the hold is held,
++    // inside what was the exit's window as well.
++    Sim swing;
++    learnt(swing);
++    swing.resync.left_one(swing.told);
++    run(swing, 2 * kSecond, 0);
++    require(swing.moved.size() == 2, "rephase: moved");
++    run(swing, 6 * kSecond, 2);
++    require(swing.moved.size() == 2 && swing.blocked > 0,
++        "rephase: one move per exit; the swing back is held as before");
++    // A level found on time after the exit ends its window: a shift a few
++    // seconds later is the hold's to judge.
++    Sim on_time;
++    learnt(on_time);
++    on_time.resync.left_one(on_time.told);
++    run(on_time, 2 * kSecond, 2);
++    require(on_time.resync.rephase_until[1] == 0, "rephase: on time ends the window");
++    run(on_time, 6 * kSecond, 0);
++    require(on_time.moved.size() == 1 && on_time.blocked > 0,
++        "rephase: a later shift inside the hold is held");
++    // 3 has its own window from the same exit; 1X has no hold to pass.
++    CadenceTimeResync levels{};
++    levels.left_one(5 * kSecond);
++    require(levels.rephase_until[0] == 0 &&
++            levels.rephase_until[1] == 5 * kSecond + CadenceTimeResync::kRephaseWindow &&
++            levels.rephase_until[2] == levels.rephase_until[1],
++        "rephase: 2 and 3, not 1X");
++}
++
+ // DCS Control (0062): R114 - a load swapped every 20 s (a square wave), and
+ // the level's landing with it: 3 between 4 and 5 periods after its told time
+ // (2 between 3 and 5), a quarter period of jitter, each frame observed two
+@@ -3897,6 +3979,7 @@ int main() {
+         cadence_resync_hysteresis_tests(); // DCS Control (0060)
+         cadence_resync_per_level_tests(); // DCS Control (0061)
+         cadence_resync_level_hold_tests(); // DCS Control (0062)
++        cadence_resync_rephase_tests(); // DCS Control (0074)
+         triple_release_tests();
+         triple_slack_tests();
+         display_time_tests();
