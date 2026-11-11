@@ -345,6 +345,13 @@ public sealed record VrProfile
     /// contexts) in DCS's exact order and replayed by DCS; segments whose textures changed are recorded again. Verified
     /// pixel-identical live; measured +22 to +24 % FPS on its own, at about 12 more worker threads.</summary>
     public bool EngineGBufferRecorder { get; init; } = true;
+    /// <summary>[Model] RecordersEmulatedLists: the shadow and G-buffer recorders also run when the graphics driver has no
+    /// D3D11 command lists (typically AMD Radeon), on the lists the D3D11 runtime emulates, with copy-based constant
+    /// uploads. A smaller gain than with driver lists; not yet tested on a Radeon. Read when a recorder installs (DCS
+    /// start), so it waits for the next launch. Off by default; written only when on.</summary>
+    public bool EngineRecordersEmulatedLists { get; init; }
+    /// <summary>It matters: <see cref="EngineRecordersEmulatedLists"/> with Engine Optimizations and a recorder on.</summary>
+    public bool UsesRecordersEmulatedLists => EngineRecordersEmulatedLists && EngineOptimizations && (EngineShadowRecorder || EngineGBufferRecorder);
     /// <summary>[Model] PlainTriangleCounter: a statistics-only triangle counter updated without a locked instruction.</summary>
     public bool EnginePlainCounter { get; init; } = true;
     /// <summary>[Timing] CacheUs: how often the cached time is refreshed, in microseconds.</summary>

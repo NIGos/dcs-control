@@ -302,7 +302,7 @@ public static class ConfigurationWriters
         ShadowRecorder={(p.EngineShadowRecorder ? 1 : 0)}
         ; Helper threads per shadow cascade: 1 on CPUs with 8 logical cores or fewer, so DCS keeps its own threads.
         ShadowRecorderHelpers={(Environment.ProcessorCount <= 8 ? 1 : 3)}
-        GBufferRecorder={(p.EngineGBufferRecorder ? 1 : 0)}{(shaderCache is null ? "" : "\n; The compiled shader variants, kept in DCS Control's own folder: Back to stock DCS does not delete them, so the\n; first minutes of a mission are not slower again after it. DcsVr.Cli clear-shader-cache deletes them.\nShaderCacheDir=" + shaderCache)}{(p.EngineOptimizations ? ShaderCacheKeys(p) : "")}
+        GBufferRecorder={(p.EngineGBufferRecorder ? 1 : 0)}{(p.UsesRecordersEmulatedLists ?"\n; Without driver command lists (AMD Radeon, for example): the recorders on the lists the D3D11 runtime emulates.\nRecordersEmulatedLists=1" : "")}{(shaderCache is null ? "" : "\n; The compiled shader variants, kept in DCS Control's own folder: Back to stock DCS does not delete them, so the\n; first minutes of a mission are not slower again after it. DcsVr.Cli clear-shader-cache deletes them.\nShaderCacheDir=" + shaderCache)}{(p.EngineOptimizations ? ShaderCacheKeys(p) : "")}
 
         [Texture]
         StreamDedupe={(p.EngineTextureDedupe ? 1 : 0)}

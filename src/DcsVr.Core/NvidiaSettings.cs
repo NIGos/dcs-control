@@ -17,7 +17,7 @@ public sealed record ThreadedOptimizationSetting(ThreadedOptimization Value, boo
 }
 
 /// <summary>NVIDIA Control Panel's "Antialiasing - MFAA" (sample interleaving) as DCS gets it. On, the driver reports no
-/// D3D11 command lists to DCS, like Threaded optimization Off (found by a pilot, GitHub issue #1).</summary>
+/// D3D11 command lists to DCS (found by a pilot, GitHub issue #1).</summary>
 public sealed record MfaaSetting(bool On, bool FromDcsProfile)
 {
     public string Where => FromDcsProfile ? "the DCS program profile" : "Global settings";
@@ -43,9 +43,10 @@ public sealed record DlssPresetSetting(uint Value, bool FromDcsProfile, bool? La
 
 /// <summary>
 /// Reads (never writes) NVIDIA driver settings through NVAPI's driver settings (DRS) interface in nvapi64.dll, which
-/// every NVIDIA driver installs. "Threaded optimization" Off makes the driver report no D3D11 command lists to DCS, so
-/// the engine optimizations' multi-threaded shadows and G-buffer cannot run; the app says so before the flight. The
-/// DLSS-SR preset the NVIDIA App forces on DCS is read for a Checks note (the Periphery DLSS preset).
+/// every NVIDIA driver installs. MFAA On makes the driver report no D3D11 command lists to DCS, so the engine
+/// optimizations' multi-threaded shadows and G-buffer cannot run; the app says so before the flight. "Threaded
+/// optimization" is read for the diagnostic package only: Off did not remove the command lists in a live test (RTX 5090,
+/// driver 32.0.16.2114, the module logged DriverCommandLists=1). The DLSS-SR preset the NVIDIA App forces on DCS is read for a Checks note (the Periphery DLSS preset).
 /// Without an NVIDIA driver, or when NVAPI answers anything unexpected, the result is null.
 /// </summary>
 public static class NvidiaSettings

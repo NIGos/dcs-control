@@ -2124,6 +2124,42 @@ Test("Engine shader cache: kept in the state folder across Back to stock DCS, ad
     Require(EngineShaderCache.Clear(state) == (0, 0L) && !Directory.Exists(cache) && EngineShaderCache.Clear(state) == (0, 0L), "An empty cache folder is removed; clearing nothing is fine");
     Require(EngineShaderCache.Stats(state) == (0, 0L), "No cache folder: 0 variants");
 });
+Test("Recorders on emulated command lists: [Model] RecordersEmulatedLists only when on, not live, shown only where it can matter", () =>
+{
+    var on = new VrProfile { QuadViews = QuadProvider.None, EngineOptimizations = true };
+    Require(!on.EngineRecordersEmulatedLists && !JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true}")!.EngineRecordersEmulatedLists, "off by default, also for an older profile");
+    Require(JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true,\"engineRecordersEmulatedLists\":true}")!.UsesRecordersEmulatedLists, "loads from profile.json");
+    Require(!IniFile.Parse(ConfigurationWriters.DcsQvCull(on)).ContainsKey("Model.RecordersEmulatedLists") && !ConfigurationWriters.DcsQvCull(on).Contains("RecordersEmulatedLists", StringComparison.Ordinal), "off: the key is not written");
+    var text = ConfigurationWriters.DcsQvCull(on with { EngineRecordersEmulatedLists = true });
+    Require(IniFile.Parse(text).GetValueOrDefault("Model.RecordersEmulatedLists") == "1"
+        && text.IndexOf("RecordersEmulatedLists=1", StringComparison.Ordinal) > text.IndexOf("[Model]", StringComparison.Ordinal)
+        && text.IndexOf("RecordersEmulatedLists=1", StringComparison.Ordinal) < text.IndexOf("[Texture]", StringComparison.Ordinal), "on: RecordersEmulatedLists=1 under [Model]");
+    Require(!ConfigurationWriters.DcsQvCull(on with { EngineRecordersEmulatedLists = true, EngineShadowRecorder = false, EngineGBufferRecorder = false }).Contains("RecordersEmulatedLists", StringComparison.Ordinal), "both recorders off: nothing to write");
+    Require(!ConfigurationWriters.DcsQvCull(on with { EngineOptimizations = false, DepthBoost = true, EngineRecordersEmulatedLists = true }).Contains("RecordersEmulatedLists", StringComparison.Ordinal), "Perception only: not written");
+    Require(LiveSettings.Find("engineRecordersEmulatedLists") is null && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Model.RecordersEmulatedLists", "1", "0"), "read when a recorder installs: waits for the next launch");
+    Require(!ProfileValidation.Validate(on with { EngineRecordersEmulatedLists = true }).Any(i => i.Message.Contains("emulated", StringComparison.OrdinalIgnoreCase) || i.Message.Contains("EXPERIMENTAL", StringComparison.Ordinal)), "no warning for the opt-in");
+
+    GpuAdapter nvidia = new("NVIDIA GeForce RTX 5090", "NVIDIA", "32.0.16.2114"), radeon = new("AMD Radeon RX 7900 XTX", "AMD", "32.0.12011.1036"), apu = new("AMD Radeon(TM) Graphics", "AMD", "31.0"), intel = new("Intel(R) UHD Graphics", "Intel", "31.0");
+    Require(!EngineOptimizations.ShowsEmulatedListsOption([nvidia], false, false) && !EngineOptimizations.ShowsEmulatedListsOption([apu, nvidia], false, false), "hidden on NVIDIA with command lists, also next to an AMD integrated GPU");
+    Require(EngineOptimizations.ShowsEmulatedListsOption([radeon], false, false) && EngineOptimizations.ShowsEmulatedListsOption([apu, radeon], false, false), "shown on an AMD-only PC");
+    Require(EngineOptimizations.ShowsEmulatedListsOption([nvidia], true, false) && EngineOptimizations.ShowsEmulatedListsOption([intel], true, false) && !EngineOptimizations.ShowsEmulatedListsOption([intel], false, false), "shown when the module's log says DriverCommandLists=0");
+    Require(EngineOptimizations.ShowsEmulatedListsOption([nvidia], false, true) && !EngineOptimizations.ShowsEmulatedListsOption([], false, false), "shown while on (to turn it off); unknown adapters: hidden");
+    Require(EngineOptimizations.HasNoDriverCommandLists(["08:00:00.000 env: GPU AMD Radeon RX 7900 XTX (DCS's device, vendor 0x1002), driver 32.0.12011.1036; DriverCommandLists=0 (the recorders do not run); feature level b100"])
+        && EngineOptimizations.HasNoDriverCommandLists(["shadow recorder: the driver lacks command lists; unavailable"])
+        && !EngineOptimizations.HasNoDriverCommandLists(["09:08:42.087 env: GPU NVIDIA GeForce RTX 5090 (DCS's device, vendor 0x10de); DriverCommandLists=1; feature level b100"]), "the module log's DriverCommandLists");
+
+    // The Engine page's status carries the log's answer.
+    var options = Path.GetFullPath(Path.Combine(root, "emulated-lists/Saved Games/DCS/Config/options.lua")); Directory.CreateDirectory(Path.GetDirectoryName(options)!);
+    var module = EngineOptimizations.ModuleDirectory(options); Directory.CreateDirectory(module); Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(module)!, "Hooks"));
+    File.WriteAllBytes(Path.Combine(module, "DcsQvCull.dll"), []); File.WriteAllText(Path.Combine(Path.GetDirectoryName(module)!, "Hooks", "DcsQvCull.lua"), "");
+    var log = Path.Combine(module, "DcsQvCull.log");
+    File.WriteAllText(log, "loader: starting payload\nenv: GPU AMD Radeon RX 7900 XTX (DCS's device, vendor 0x1002); DriverCommandLists=0 (the recorders do not run)\n");
+    File.SetLastWriteTimeUtc(log, DateTime.UtcNow.AddMinutes(1));
+    Require(EngineOptimizations.Read(options, null, false).NoDriverCommandLists, "status: no driver command lists");
+    File.WriteAllText(log, "loader: starting payload\nenv: GPU NVIDIA GeForce RTX 5090 (DCS's device, vendor 0x10de); DriverCommandLists=1\n");
+    File.SetLastWriteTimeUtc(log, DateTime.UtcNow.AddMinutes(1));
+    Require(!EngineOptimizations.Read(options, null, false).NoDriverCommandLists, "status: driver command lists");
+});
 Test("Engine shader warm-up: settings in DcsQvCull.ini and warmup.json for the Engine page", () =>
 {
     var on = new VrProfile { QuadViews = QuadProvider.None, EngineOptimizations = true };
@@ -3944,26 +3980,22 @@ Test("The diagnostic package keeps a long log's start and end", () =>
     Require(cut.Split('\n').All(l => l.Length == 0 || l.StartsWith("block ", StringComparison.Ordinal) || l.StartsWith("startup", StringComparison.Ordinal) || l.StartsWith("last", StringComparison.Ordinal) || l.StartsWith("[...", StringComparison.Ordinal)), "only whole lines");
     Require(Diagnostics.HeadAndTail(path, 1 << 20, 1 << 20) == File.ReadAllText(path), "a short file is whole");
 });
-Test("NVIDIA Threaded optimization Off is named before the flight and in the engine status, with where to change it", () =>
+Test("NVIDIA MFAA On is named before the flight and in the engine status; Threaded optimization Off is not blamed", () =>
 {
     var previous = NvidiaSettings.ThreadedOptimizationForDcs;
     try
     {
         var profile = new VrProfile { EngineOptimizations = true };
-        NvidiaSettings.ThreadedOptimizationForDcs = () => new(ThreadedOptimization.Off, true);
-        var warning = ProfileValidation.Validate(profile).SingleOrDefault(i => i.Code == "nvidia-threaded-optimization");
-        Require(warning is { Severity: IssueSeverity.Warning } && warning.Message.Contains("DCS program profile", StringComparison.Ordinal) && warning.Message.Contains("Use global setting", StringComparison.Ordinal), warning?.Message ?? "no warning");
-        Require(EngineOptimizations.NoCommandListsAdvice().Contains("Threaded optimization is Off in the DCS program profile", StringComparison.Ordinal));
-        Require(!ProfileValidation.Validate(profile with { EngineShadowRecorder = false, EngineGBufferRecorder = false }).Any(i => i.Code == "nvidia-threaded-optimization"), "nothing to say when the recorders are off");
-        NvidiaSettings.ThreadedOptimizationForDcs = () => new(ThreadedOptimization.Off, false);
-        Require(ProfileValidation.Validate(profile).Single(i => i.Code == "nvidia-threaded-optimization").Message.Contains("Global settings: set Threaded optimization to Auto", StringComparison.Ordinal));
-        foreach (var fine in new ThreadedOptimizationSetting?[] { new(ThreadedOptimization.Auto, false), new(ThreadedOptimization.On, true), null })
+        // Threaded optimization Off kept the driver's command lists in a live test (RTX 5090, driver 32.0.16.2114,
+        // DriverCommandLists=1): no warning, and the advice does not name it. The diagnostic package still records it.
+        foreach (var any in new ThreadedOptimizationSetting?[] { new(ThreadedOptimization.Off, true), new(ThreadedOptimization.Off, false), new(ThreadedOptimization.Auto, false), null })
         {
-            NvidiaSettings.ThreadedOptimizationForDcs = () => fine;
-            Require(!ProfileValidation.Validate(profile).Any(i => i.Code == "nvidia-threaded-optimization"), "no warning for " + fine);
+            NvidiaSettings.ThreadedOptimizationForDcs = () => any;
+            Require(!ProfileValidation.Validate(profile).Any(i => i.Code == "nvidia-threaded-optimization" || i.Message.Contains("Threaded optimization", StringComparison.Ordinal)), "no Threaded optimization warning for " + any);
+            Require(!EngineOptimizations.NoCommandListsAdvice().Contains("Threaded optimization", StringComparison.Ordinal), "advice does not blame Threaded optimization for " + any);
         }
-        // MFAA on: the same effect, named with where to turn it off (GitHub issue #1).
-        NvidiaSettings.ThreadedOptimizationForDcs = () => new(ThreadedOptimization.Auto, false);
+        // MFAA on: named with where to turn it off (GitHub issue #1).
+        NvidiaSettings.ThreadedOptimizationForDcs = () => new(ThreadedOptimization.Off, true);
         var previousMfaa = NvidiaSettings.MfaaForDcs;
         try
         {
@@ -3977,7 +4009,7 @@ Test("NVIDIA Threaded optimization Off is named before the flight and in the eng
         // NVIDIA card, setting fine or unreadable: the other causes; no NVIDIA card: the driver itself.
         Require(EngineOptimizations.NoCommandListsAdvice().Contains("integrated graphics", StringComparison.Ordinal));
         var adapters = GpuInfo.Adapters;
-        try { GpuInfo.Adapters = () => [new("AMD Radeon RX 7900 XTX", "AMD", "31.0")]; Require(EngineOptimizations.NoCommandListsAdvice().Contains("common on AMD", StringComparison.Ordinal)); }
+        try { GpuInfo.Adapters = () => [new("AMD Radeon RX 7900 XTX", "AMD", "31.0")]; Require(EngineOptimizations.NoCommandListsAdvice().Contains("common on AMD", StringComparison.Ordinal) && EngineOptimizations.NoCommandListsAdvice().Contains("without driver support", StringComparison.Ordinal), "AMD: names the opt-in"); }
         finally { GpuInfo.Adapters = adapters; }
         // The module's own line (0.5.7) says which capability, the creation flags and DCS's adapter.
         const string line = "shadow recorder: the D3D11 device lacks what the recorder needs: DriverCommandLists=0 ConstantBufferOffsetting=1 ID3D11DeviceContext1=1 creation flags 0x0 on {0} (vendor {1}, LUID 0:1) -- hint; unavailable";

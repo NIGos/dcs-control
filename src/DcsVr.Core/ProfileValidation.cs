@@ -322,12 +322,9 @@ public static class ProfileValidation
             if (profile.FrameGen == FrameGeneration.Nvidia)
                 Error("framegen-gpu", $"NVIDIA optical-flow frame generation needs an NVIDIA RTX graphics card; this PC has {GpuInfo.Names}. Choose FidelityFX on the Framegen page: it runs on any graphics card.");
         }
-        // NVIDIA's Threaded optimization Off (a common DCS VR tweak) makes the driver report no D3D11 command lists to
-        // DCS, so the multi-threaded shadows and G-buffer cannot run. Said before the flight; the app never changes it.
-        if (profile.EngineOptimizations && (profile.EngineShadowRecorder || profile.EngineGBufferRecorder)
-            && NvidiaSettings.ThreadedOptimizationForDcs() is { Value: ThreadedOptimization.Off } threaded)
-            issues.Add(new("nvidia-threaded-optimization", IssueSeverity.Warning, $"NVIDIA's Threaded optimization is Off in {threaded.Where}. With it off the driver gives DCS no D3D11 command lists, so Multi-threaded shadows and G-buffer (the biggest engine gains) cannot run; everything else still does. {threaded.Fix}, then launch DCS again."));
-        // MFAA on has the same effect (found by a pilot, GitHub issue #1).
+        // NVIDIA's Threaded optimization is not checked here: Off did not remove the driver's command lists in a live test
+        // (RTX 5090, driver 32.0.16.2114: the module logged DriverCommandLists=1). The diagnostic package still records it.
+        // MFAA On makes the driver give DCS no D3D11 command lists (found by a pilot, GitHub issue #1).
         if (profile.EngineOptimizations && (profile.EngineShadowRecorder || profile.EngineGBufferRecorder)
             && NvidiaSettings.MfaaForDcs() is { On: true } mfaa)
             issues.Add(new("nvidia-mfaa", IssueSeverity.Warning, $"NVIDIA's Antialiasing - MFAA is On in {mfaa.Where}. With it on the driver gives DCS no D3D11 command lists, so Multi-threaded shadows and G-buffer (the biggest engine gains) cannot run; everything else still does. {mfaa.Fix}, then launch DCS again."));
