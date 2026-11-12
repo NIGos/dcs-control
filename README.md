@@ -5,7 +5,7 @@ A free Windows app for DCS World that runs **DLSS 5, frame generation and Quad V
 - **Every pilot** (monitor, Quest, Varjo, Reverb, Pimax…): **Engine Optimizations** remove CPU work inside DCS without changing the image, about **+50-60 % FPS** at a busy airfield when DCS is CPU-bound. Once applied they stay on every time DCS starts, also from Steam or a desktop shortcut.
 - **Pimax pilots** get the full VR pipeline in one go: **Quad Views** (eye-tracked foveated rendering) + **DLSS 5** (NVIDIA neural rendering on the area you look at) + **frame generation** (OFXR, generated only when DCS falls behind), working together, plus an in-headset panel that shows what each one is doing.
 
-**New in 0.6.3:** Back to stock DCS also cleans up after a lost record (a reinstalled Windows), a new release signing key (install 0.6.3 by hand once), updates no longer pile up copies of older versions, and a bug-fix round (eye tracking on setups that report the gaze reversed, the headset panel's frame generation multiplier). 0.6.2 brought live changes while you fly and DCS 2.9.31 support.
+**New in 0.6.4:** Engine Optimizations warm up faster and keep their shader cache across Back to stock DCS (with the progress shown in the app and the headset panel), the Last flight card says whether they really ran, and frame generation's Only when needed gets **Stop generating** (Balanced by default), so a PC that just holds the refresh rate flies at its full rate instead of being held at half. Fixes: Pimax Quad View presets (a far too large focus area), DCS staying open after quitting, and an AMD Radeon note with an opt-in. 0.6.3 brought a new release signing key and Back to stock after a lost record.
 
 **New in 0.6.1:** a clearer, more compact interface (grouped menu, greyed-out settings say why, a to-scale coverage preview) and support for NVIDIA's newer DLSS 5 runtime 310.9.
 
@@ -16,7 +16,7 @@ Everything the app changes is backed up and comes back with **Back to stock DCS*
 > **Early beta.** Flown mostly on one PC so far (Pimax Crystal Super, RTX 5090, Windows 11, DCS 2.9 Steam, single player), so expect rough edges. It was built with an AI coding assistant. Bug reports are very welcome: see [Reporting a problem](docs/USER_GUIDE.md#reporting-a-problem).
 
 <p align="center">
-  <a href="https://github.com/NIGos/dcs-control/releases/download/v0.6.3-preview/DcsControl-0.6.3-User-Manual.pdf"><img src="docs/screenshots/manual-cover.jpg" alt="DCS Control User Manual (PDF)" width="300"></a><br>
+  <a href="https://github.com/NIGos/dcs-control/releases/download/v0.6.4-preview/DcsControl-0.6.4-User-Manual.pdf"><img src="docs/screenshots/manual-cover.jpg" alt="DCS Control User Manual (PDF)" width="300"></a><br>
   <sub><b>User Manual (PDF, 31 pages)</b>: Quick Start, every page of the app, the Engine Optimizations explained</sub>
 </p>
 
@@ -64,12 +64,12 @@ After each flight the Overview shows a **Last flight** summary.
 ## Quick start
 
 1. **You need:** Windows 10 or 11 (64-bit; tested on 11) and DCS World 2.9. Engine Optimizations and CPU Boost run with any graphics card; on AMD Radeon cards the multi-threaded shadows and G-buffer stay off by default (the driver lacks D3D11 command lists), so the gain is smaller. An opt-in on the Engine Optimizations page runs them on lists Windows emulates, with a smaller gain than on NVIDIA; Radeon cards have not been tested yet. For the VR features: a Pimax headset with Pimax Play (or SteamVR with the Sboys driver) and an NVIDIA RTX GPU; for DLSS 5 your own `nvngx_dlssnr.dll` (310.8, tested most, or the newer 310.9; not included).
-2. **Download** `DcsControl-0.6.3-preview-Setup.exe` from [Releases](https://github.com/NIGos/dcs-control/releases) and double-click it: it installs DCS Control for your Windows user (no administrator rights) in the folder you choose, with Start menu and desktop shortcuts, then opens it. Uninstall it from Settings → Apps. Or take `DcsControl-0.6.3-preview-win-x64.zip` for a portable copy: unzip it anywhere and double-click `DcsControl.exe` (keep the `files` folder next to it). The app tells you when a newer release is out and updates itself after checking the release signature.
+2. **Download** `DcsControl-0.6.4-preview-Setup.exe` from [Releases](https://github.com/NIGos/dcs-control/releases) and double-click it: it installs DCS Control for your Windows user (no administrator rights) in the folder you choose, with Start menu and desktop shortcuts, then opens it. Uninstall it from Settings → Apps. Or take `DcsControl-0.6.3-preview-win-x64.zip` for a portable copy: unzip it anywhere and double-click `DcsControl.exe` (keep the `files` folder next to it). The app tells you when a newer release is out and updates itself after checking the release signature.
 3. **Choose how you fly** in the right panel: **Pimax**, **Sboys**, or **Optimizations only** (monitor or another headset). **Guided setup** (on the Overview) or **Read settings from this PC** (on the DCS & headset page) can do it for you.
 4. **Tick the features** you want. Each one has its own page if you want to adjust it.
 5. **Press Launch DCS.** Engine Optimizations then stay on whenever DCS starts. The VR features and CPU Boost need DCS to be started from the app.
 
-The **[User Guide](docs/USER_GUIDE.md)** explains every feature, what it costs, the in-flight keys, and what to do when something goes wrong. Prefer to read it as a book? The **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.6.3-preview/DcsControl-0.6.3-User-Manual.pdf)** has a three-page Quick Start, every page of the app with numbered screenshots, and the Engine Optimizations explained one by one.
+The **[User Guide](docs/USER_GUIDE.md)** explains every feature, what it costs, the in-flight keys, and what to do when something goes wrong. Prefer to read it as a book? The **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.6.4-preview/DcsControl-0.6.4-User-Manual.pdf)** has a three-page Quick Start, every page of the app with numbered screenshots, and the Engine Optimizations explained one by one.
 
 ## Good to know
 
