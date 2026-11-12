@@ -53,4 +53,13 @@ inline bool Write(const std::wstring& dir, const std::string& json) {
   return false;
 }
 
+// Writes s every call while something moves, else once per new state. `written` is the state last written ("" =
+// none yet) and changes only when the write succeeded, so a failed final "done" or "idle" is tried again next tick.
+inline bool Publish(std::string& written, const std::wstring& dir, const State& s, bool moving) {
+  if (!moving && written == s.state) return false;
+  if (!Write(dir, Json(s))) return false;
+  written = s.state;
+  return true;
+}
+
 }  // namespace qvwarm

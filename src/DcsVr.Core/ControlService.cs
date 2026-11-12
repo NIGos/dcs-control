@@ -280,7 +280,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 if (!File.Exists(pupilShift) || !File.Exists(pupilShift + ".sha256") || Hashing.FileSha256(pupilShift) != File.ReadAllText(pupilShift + ".sha256").Trim())
                     throw new InvalidDataException("The pupil shift layer is modified or incomplete.");
             }
-            return new DeploymentPlanner(new(ofxr, cheeky, layer, quad, focus, ofxrLayer, engine, pupilShift)).Build(profile, inventory, ManagedRoot, draft, appliedFovea, ownedSettings, savedNeuralSha, ChainedDxgi(profile, inventory), ShaderCacheDirectory);
+            return new DeploymentPlanner(new(ofxr, cheeky, layer, quad, focus, ofxrLayer, engine, pupilShift)).Build(profile, inventory, ManagedRoot, draft, appliedFovea, ownedSettings, savedNeuralSha, ChainedDxgi(profile, inventory), ShaderCacheDirectoryFor(inventory.OptionsPath));
         }
         string Import(string id)
         {
@@ -301,15 +301,31 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         var applied = originals.Apply(plan);
         // The engine module's shader cache moved to the state folder: entries an earlier version left in the module's
         // folder follow it, so this update does not start with an empty cache (DCS is closed here).
+        // The folder is the one the ini names (this Saved Games variant's own). Not while the module's latest start
+        // refused that folder: it then keeps the cache in its own folder, and moving the entries away would lose them.
         if (plan.Files.FirstOrDefault(f => Path.GetFileName(f.Path).Equals(LiveSettings.EngineFile, StringComparison.OrdinalIgnoreCase)) is { } engineIni
-            && IniFile.Parse(IniFile.Decode(engineIni.Content)).ContainsKey("Model.ShaderCacheDir")
-            && EngineShaderCache.Adopt(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(engineIni.Path))!, "cache"), ShaderCacheDirectory) is > 0 and var moved)
-            originals.AppendLog($"Moved {moved} compiled shader variants of the engine module to {ShaderCacheDirectory}.");
+            && IniFile.Parse(IniFile.Decode(engineIni.Content)).GetValueOrDefault("Model.ShaderCacheDir") is { Length: > 0 } cacheDirectory)
+        {
+            var moduleDirectory = Path.GetDirectoryName(Path.GetFullPath(engineIni.Path))!;
+            if (EngineShaderCache.ModuleRefusedIn(moduleDirectory, cacheDirectory) is { } refused)
+                originals.AppendLog($"The engine module did not use {cacheDirectory} at its last start ({refused}); its shader variants stay in {EngineShaderCache.ModuleCache(moduleDirectory)}.");
+            else
+            {
+                // Entries of the module's folder, and those a pre-release build kept directly in the shared root (each
+                // variant's folder takes them once; the module rechecks every entry's sources before use).
+                var moved = EngineShaderCache.Adopt(EngineShaderCache.ModuleCache(moduleDirectory), cacheDirectory)
+                    + EngineShaderCache.Adopt(ShaderCacheRoot, cacheDirectory);
+                if (moved > 0) originals.AppendLog($"Moved {moved} compiled shader variants of the engine module to {cacheDirectory}.");
+            }
+        }
         return applied;
     }
-    /// <summary>The engine module's shader cache (<see cref="EngineShaderCache"/>): in the state folder, kept by Back to
-    /// stock DCS.</summary>
-    public string ShaderCacheDirectory => EngineShaderCache.DirectoryIn(StateRoot);
+    /// <summary>The folder that holds the engine module's shader caches (<see cref="EngineShaderCache"/>): in the state
+    /// folder, kept by Back to stock DCS.</summary>
+    public string ShaderCacheRoot => EngineShaderCache.RootIn(StateRoot);
+    /// <summary>The shader cache of the DCS whose options.lua is <paramref name="optionsPath"/>: one folder per Saved
+    /// Games variant (DCS, DCS.openbeta), null without one.</summary>
+    public string? ShaderCacheDirectoryFor(string? optionsPath) => EngineShaderCache.DirectoryIn(StateRoot, optionsPath);
     /// <summary>Back to stock DCS: every path DCS Control changed goes back to what was there before it first wrote
     /// it, whatever it holds now (owned options.lua settings only, other edits kept). Refused only while DCS runs.</summary>
     /// <param name="dcsExecutable">The DCS the app shows (detected or chosen) and <paramref name="optionsPath"/> its
@@ -532,7 +548,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         // DCS may run: the plan is built as for Launch, without the "close DCS" check (nothing outside the live files is written).
         var live = inventory with { DcsRunning = false };
         var plan = Preview(draft, live);
-        var atStart = IniFile.Parse(ConfigurationWriters.DcsQvCull(applied.Profile.ForLaunch(), ShaderCacheDirectory));
+        var atStart = IniFile.Parse(ConfigurationWriters.DcsQvCull(applied.Profile.ForLaunch(), ShaderCacheDirectoryFor(inventory.OptionsPath)));
         var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var updates = new List<LiveFileUpdate>();
         var rechecks = new List<LiveRecheck>();

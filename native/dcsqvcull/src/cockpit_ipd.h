@@ -5470,6 +5470,7 @@ std::deque<DumpJob> g_dumpQ;
 // A pointer (never destroyed at process exit): a joinable std::thread static destructed by the CRT at ExitProcess
 // calls std::terminate, which left DCS.exe lingering at quit (user report, Werewolf_fs). Joined in DumpWorkerStop.
 std::thread* g_dumpWorker = nullptr;
+// Caller holds g_dumpQMutex (DumpWorkerStop takes the pointer out under it).
 inline bool DumpWorkerRunning() { return g_dumpWorker && g_dumpWorker->joinable(); }
 std::atomic<bool> g_dumpStop{false};
 std::wstring g_dumpDir;  // render thread: this dump's folder (copied into each job)
@@ -5657,17 +5658,24 @@ void DumpWorker() {
       g_dumpDropped++;
   }
 }
+// g_dumpWorker is read and replaced only under g_dumpQMutex: the render thread reads it in DumpPoll and replaces it in
+// DumpStart, and a stop whose render thread did not leave our hooks (Stop's "lighting objects kept" path) runs while
+// it may still be in either. The thread is taken out under the lock and joined and deleted outside it.
 void DumpWorkerStop() {
+  std::thread* worker = nullptr;
   {
     std::lock_guard<std::mutex> lock(g_dumpQMutex);
     g_dumpStop = true;
-  }
-  g_dumpQCv.notify_all();
-  if (g_dumpWorker) {
-    if (g_dumpWorker->joinable()) g_dumpWorker->join();
-    delete g_dumpWorker;
+    worker = g_dumpWorker;
     g_dumpWorker = nullptr;
   }
+  g_dumpQCv.notify_all();
+  g_dumpQSpace.notify_all();
+  if (worker) {
+    if (worker->joinable()) worker->join();
+    delete worker;
+  }
+  std::lock_guard<std::mutex> lock(g_dumpQMutex);
   g_dumpStop = false;
 }
 // Render thread: slots copied at least 2 frames ago are read back (never waiting on the GPU).
@@ -5834,9 +5842,12 @@ bool DumpStart() {
     g_dumpViews = g_cfgDumpViews.load() & 0x1F;
     if (!g_dumpViews) g_dumpViews = 0x0C;
     g_dumpBindLogs = 0;
-    if (!DumpWorkerRunning()) {
-      delete g_dumpWorker;
-      g_dumpWorker = new std::thread([] { qvexit::RunVoid(&DumpWorker); });
+    {
+      std::lock_guard<std::mutex> lock(g_dumpQMutex);  // DumpWorkerStop may run on another thread
+      if (!DumpWorkerRunning()) {
+        delete g_dumpWorker;
+        g_dumpWorker = new std::thread([] { qvexit::RunVoid(&DumpWorker); });
+      }
     }
     char vs[16] = {};
     int n = 0;

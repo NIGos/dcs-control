@@ -5286,6 +5286,25 @@ void TestDualCameraStatus() {
         "dual status: loader word 0 with no payload, the payload's value while attached, 0 after its Stop");
 }
 
+// The frame-dump worker's stop: the thread is taken out under the queue lock (the render thread may still read or
+// replace it), joined after the queue drained, and a running worker is never left half-deleted.
+void TestDumpWorkerStop() {
+  using namespace ckipd;
+  {
+    std::lock_guard<std::mutex> lock(g_dumpQMutex);
+    g_dumpWorker = new std::thread([] { DumpWorker(); });
+  }
+  ckipd::DumpWorkerStop();
+  bool cleared;
+  {
+    std::lock_guard<std::mutex> lock(g_dumpQMutex);
+    cleared = g_dumpWorker == nullptr && !g_dumpStop.load() && g_dumpQ.empty() && !DumpWorkerRunning();
+  }
+  ckipd::DumpWorkerStop();  // nothing running: fine
+  Check(cleared && g_dumpWorker == nullptr && !g_dumpStop.load(),
+        "frame dump: the worker stop takes the thread out under the queue lock and joins it");
+}
+
 #include "ovl_cpu_test.h"  // R32: the symbology camera set on the CPU (DCS replica on WARP)
 #include "r128_test.h"     // R128: the dormant mode, whole-path exactness on that replica (WARP; HW variant)
 
@@ -5293,6 +5312,7 @@ void Run() {
   printf("-- cockpit_ipd.h --\n");
   TestStereoAck();
   TestDualCameraStatus();
+  TestDumpWorkerStop();
   TestPatchMath();
   TestOverlayMath();
   TestOverlayMvp();

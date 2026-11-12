@@ -254,7 +254,7 @@ function featureSummary(key, p) {
     const e = effectiveFovea(p), gaze = p.gaze === 'EyeTracked' ? 'eye tracked' : 'fixed';
     if (p.quadViewsLayerDirectory) return 'Alternative provider · '+gaze;
     // In Pimax Play's units: "Pimax Quick 33% × 33% · 113% · 20%", or this profile's values in the same Quick units.
-    if (pimaxSource(p)) return `Bundled · ${gaze} · ` + (state?.pimax?.found ? (state.pimax.preset ? `Pimax ${state.pimax.short} can't be read, values set here · ${profileQuick(p)}` : 'from Pimax Play\'s settings: ' + state.pimax.short) : 'Pimax Play not found, values set here');
+    if (pimaxSource(p)) return `Bundled · ${gaze} · ` + (state?.pimax?.found ? (state.pimax.preset ? `Pimax ${state.pimax.short}${state.pimax.quadViewsOff ? '' : " can't be read"}, values set here · ${profileQuick(p)}` : 'from Pimax Play\'s settings: ' + state.pimax.short) : 'Pimax Play not found, values set here');
     return `Bundled · ${gaze} · set here · ${profileQuick(p)}`;
   }
   if (key === 'dlss') {
@@ -985,7 +985,13 @@ function renderPimax() {
   const reread = '<button type="button" class="button quiet" id="rereadPimax">Re-read</button>';
   if (!pimax.found) { box.innerHTML = `<div class="pimax-head"><div><b>Pimax Play settings not found</b><small>${escape(pimax.path)}</small></div>${reread}</div><p class="fine">${mode === 'bundled' ? "This profile's own focus values are used until Pimax Play's settings can be read. Choose Set here to edit them." : 'Pimax applies its own values.'}</p>`; return; }
   // A preset (Performance, Balanced, Quality, Extreme): its values are built into Pimax and not saved, so none are shown.
-  if (pimax.preset) { box.innerHTML = `<div class="pimax-head"><div><b>Pimax · Quad View preset ${escape(pimax.presetName)}</b><small title="${escape(pimax.path)}">Saved ${new Date(pimax.modified).toLocaleString('en-GB')}</small></div>${reread}</div><p class="${mode === 'bundled' ? 'pimax-note warn' : 'fine'}">${mode === 'bundled' ? escape(pimax.presetNote) : 'Pimax native Quad Views applies its preset itself. Nothing is written to Pimax.'}</p>`; return; }
+  // Quad View Off in Pimax (level -1) is not a preset: a warning for Pimax native Quad Views (no focus area), a plain
+  // note for bundled (it renders this profile's own values).
+  if (pimax.preset) {
+    const off = !!pimax.quadViewsOff, head = off ? 'Pimax · Quad View Off' : `Pimax · Quad View preset ${escape(pimax.presetName)}`;
+    const note = mode === 'bundled' ? escape(pimax.presetNote) : off ? escape(pimax.nativeOffWarning) : 'Pimax native Quad Views applies its preset itself. Nothing is written to Pimax.';
+    const warn = mode === 'bundled' ? !off : off;
+    box.innerHTML = `<div class="pimax-head"><div><b>${head}</b><small title="${escape(pimax.path)}">Saved ${new Date(pimax.modified).toLocaleString('en-GB')}</small></div>${reread}</div><p class="${warn ? 'pimax-note warn' : mode === 'bundled' ? 'pimax-note' : 'fine'}">${note}</p>`; return; }
   // Exactly what Pimax Play's Quad View page shows for the selected mode: its labels, its order, its rounding.
   const open = Boolean(box.querySelector('details.pimax-details')?.open);
   const controls = `<dl class="pimax-controls" aria-label="Pimax Play Quad View settings">${pimax.controls.map(x => `<dt>${escape(x.label)}</dt><dd>${escape(x.value)}</dd>`).join('')}</dl>`;
@@ -1070,7 +1076,10 @@ function shaderRows() {
   const w = engineWarmup, c = engineCache;
   const warm = w && w.total > 0 ? `<div class="engine-row engine-warmup" id="engineWarmup"><span>Shader warm-up: ${w.done} of ${w.total} ready</span><progress max="${w.total}" value="${w.done}"></progress></div>` : '';
   const size = c ? (c.bytes / 1048576).toFixed(c.bytes < 10485760 ? 1 : 0) : '0';
-  const cache = c ? `<div class="engine-row" id="engineCacheRow"><span>Shader cache: ${c.files ? `${c.files} variants, ${size} MB` : 'empty'}</span><button type="button" id="engineClearCache" class="button quiet"${busy || c.dcsRunning || !c.files ? ' disabled' : ''}${c.dcsRunning ? ' title="Close DCS first"' : ''}>Clear cache</button></div>` : '';
+  // The module could not use the app's cache folder at its last start: it keeps the cache in its own folder, which
+  // Back to stock DCS removes. Shown so the row's numbers and Clear are understood as that folder's.
+  const refused = c && c.refused ? ` <span id="engineCacheRefused">· kept in the engine module's folder (${escape(c.refused)}), so Back to stock DCS removes it</span>` : '';
+  const cache = c ? `<div class="engine-row" id="engineCacheRow"><span>Shader cache: ${c.files ? `${c.files} variants, ${size} MB` : 'empty'}${refused}</span><button type="button" id="engineClearCache" class="button quiet"${busy || c.dcsRunning || !c.files ? ' disabled' : ''}${c.dcsRunning ? ' title="Close DCS first"' : ''}>Clear cache</button></div>` : '';
   return warm + cache;
 }
 /** Above the test suite's buttons: what makes Run test suite available. */
@@ -1728,7 +1737,7 @@ function renderFlight() {
     const notes = [
       mostlyOff ? `with ${key} for ${span(e.offSeconds)}${e.seconds ? ` of ${span(e.seconds)}` : ''} · otherwise ${count}` : e.offSeconds ? `off ${span(e.offSeconds)} with ${key}` : null,
       e.turnedOff.length ? `${e.turnedOff.length} turned off for safety (${e.turnedOff.join(', ')})` : null,
-      e.recordersUnavailable ? 'no multi-threaded G-buffer or shadows: this GPU driver has no command lists' : null,
+      e.recordersUnavailable ? 'no multi-threaded G-buffer or shadows: this GPU driver has no command lists' : e.recordersEmulated ? 'multi-threaded G-buffer and shadows ran on emulated command lists' : null,
       e.notStarted.length ? `not started: ${e.notStarted.join(', ')}` : null,
       e.warmupSeconds != null ? `warm-up ${span(e.warmupSeconds)}${e.warmupUnfinished ? ', another still running at exit' : ''}` : e.warmupUnfinished ? 'warm-up not finished' : null].filter(Boolean);
     rows.push(['Engine Optimizations',mostlyOff ? 'Off in flight' : count,notes.join(' · ') || 'All flight',mostlyOff ? 'off' : e.turnedOff.length ? true : 'ok']);
