@@ -933,6 +933,39 @@ void RunEmulated() {
         "deferred rec emulated: update-plain lists on WARP match the immediate depth bit for bit (4 layouts x 2 "
         "patterns, rings reused across frames)");
 
+  // update-plain's buffers are created at Init (off the frame): a list within the reserve creates none, a longer one
+  // creates only the extra ones, and they are kept for the next list.
+  {
+    ID3D11DeviceContext* dc = nullptr;
+    bool ok = SUCCEEDED(s.dev->CreateDeferredContext(0, &dc)) && dc;
+    CbRing ring;
+    CbConfig cc;
+    cc.mode = CbMode::kUpdatePlain;
+    cc.plainReserve = 64;
+    if (ok) ring.Init(s.dev, dc, caps, cc);
+    const bool reserved = ok && ring.Mode() == CbMode::kUpdatePlain && ring.PlainReady() == 64 && ring.created == 64;
+    bool within = ok, beyond = ok, reused = ok;
+    if (ok) {
+      ring.Reset();
+      for (int i = 0; i < 64; ++i) within = within && ring.Alloc(304);
+      ring.Close();
+      within = within && ring.created == 64;
+      ring.Reset();
+      for (int i = 0; i < 70; ++i) beyond = beyond && ring.Alloc(304);
+      ring.Close();
+      beyond = beyond && ring.created == 70 && ring.PlainReady() == 70;
+      ring.Reset();
+      for (int i = 0; i < 70; ++i) reused = reused && ring.Alloc(304);
+      ring.Close();
+      reused = reused && ring.created == 70;
+    }
+    ring.Release();
+    if (dc) dc->Release();
+    Check(reserved && within && beyond && reused,
+          "deferred rec emulated: update-plain buffers created at Init; lists within the reserve create none, more are "
+          "created once and kept");
+  }
+
   // ExecuteCommandList(TRUE) on emulated lists restores DCS's offset windows for what the GPU reads, not just for
   // Get*: a draw through a window of a dynamic and of a default buffer before and after an Execute.
   {
