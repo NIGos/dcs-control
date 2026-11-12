@@ -1,6 +1,6 @@
 # DCS Control — User Guide
 
-**Version 0.6.3-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`. The same content as a printable book, with a Quick Start and numbered screenshots: **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.6.3-preview/DcsControl-0.6.3-User-Manual.pdf)**.
+**Version 0.6.4-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`. The same content as a printable book, with a Quick Start and numbered screenshots: **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.6.3-preview/DcsControl-0.6.3-User-Manual.pdf)**.
 
 > **Early beta.** DCS Control has been flown mostly on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe — but please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
 
@@ -62,7 +62,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 ## Install
 
-**With the setup (recommended):** download `DcsControl-0.6.3-preview-Setup.exe` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and double-click it. Its first page lets you choose:
+**With the setup (recommended):** download `DcsControl-0.6.4-preview-Setup.exe` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and double-click it. Its first page lets you choose:
 
 - the **install folder**: `%LOCALAPPDATA%\Programs\DcsControl` unless you pick another one with **Browse...** (it shows the space needed and free). Any folder your Windows user can write to works, for example `D:\Games\DcsControl`; `Program Files` needs administrator rights, so it is refused. A folder that already holds other files gets a `DcsControl` folder inside it;
 - whether DCS Control goes in the **Start menu** and on the **desktop**.
@@ -71,7 +71,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 It waits until DCS and DCS Control are closed (the page says which one is still open). Running it again over an installed copy updates it in place; if anything goes wrong the installation is rolled back to the version you had. Its log is `%TEMP%\DcsControl-Setup.log`.
 
-**Portable, from the ZIP:** download `DcsControl-0.6.3-preview-win-x64.zip` and extract it to a folder of your choice. Then either:
+**Portable, from the ZIP:** download `DcsControl-0.6.4-preview-win-x64.zip` and extract it to a folder of your choice. Then either:
 
 - **Run it directly:** double-click `DcsControl.exe` in the extracted folder (.NET is included), or
 - **Install it:** double-click `Install DCS Control.cmd`. It does what the setup does, in a console window, with the Start menu entry but no desktop shortcut.
@@ -97,7 +97,7 @@ When DCS Control starts it asks GitHub whether a newer release is out (at most e
 
 Update refuses while DCS runs and while Launch DCS, Apply or Back to stock DCS is still working. If the update fails, the installation rolls back and the DCS Control you had opens again. A copy started from an unzipped folder is updated by installing DCS Control where the setup installed it before (Settings → Apps knows), otherwise in the standard folder (`%LOCALAPPDATA%\Programs\DcsControl`, with Start menu and desktop shortcuts); the dialog names the folder, and afterwards you can delete the unzipped one.
 
-Releases before 0.5.6 cannot update themselves: install 0.5.6 once with the setup (or the ZIP); from then on updates arrive in the app. **0.6.3 has a new release signing key**: from 0.6.2 or earlier, **Update** refuses it ("the signature does not match DCS Control's release key") and installs nothing, so install 0.6.3 once with its setup; your settings and profiles are kept, and later updates install from the app again. A dot next to the version number at the bottom of the left rail also means an update is available; × hides the banner until the next start.
+Releases before 0.5.6 cannot update themselves: install 0.5.6 once with the setup (or the ZIP); from then on updates arrive in the app. **0.6.3 has a new release signing key**: from 0.6.2 or earlier, **Update** refuses it ("the signature does not match DCS Control's release key") and installs nothing, so install 0.6.3 or later (for example 0.6.4) once with its setup; your settings and profiles are kept, and later updates install from the app again. A dot next to the version number at the bottom of the left rail also means an update is available; × hides the banner until the next start.
 
 On the **Help & support** page, under **Updates**, **Check for updates when DCS Control starts** turns the automatic check off (it is on by default) and **Check now** asks GitHub at once. Without internet nothing happens: no update is shown.
 
