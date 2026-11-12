@@ -482,6 +482,10 @@ struct CbConfig {
   UINT minBucket = 16;           // kDiscard: smallest bucket (multiple of 16)
   UINT maxBucket = 4096;         // kDiscard: largest bucket
   UINT perBucket = 8;            // kDiscard: buffers per bucket (<= 32)
+  // kUpdatePlain: 512-byte DEFAULT buffers created at Init (the pool's Start, off the frame), so the first frames'
+  // lists do not create one per draw on the workers (a CreateBuffer storm on a real driver). More are created on
+  // demand, kept for later lists. 2048 = 1 MB per worker.
+  UINT plainReserve = 2048;
 };
 
 // A constant-buffer allocation. Bind with CbRing::BindVS/BindPS. `num` == 0
@@ -517,7 +521,15 @@ class CbRing {
          b *= 2)
       bucketSize_[buckets_++] = b;
     Reset();
+    if (mode_ == CbMode::kUpdatePlain) ReservePlain(cfg_.plainReserve < kMaxPlain ? cfg_.plainReserve : kMaxPlain);
     return true;
+  }
+
+  // kUpdatePlain: buffers ready without a CreateBuffer in a list (created at Init, or by an earlier list).
+  UINT PlainReady() const {
+    UINT n = 0;
+    while (n < plainCap_ && plain_[n]) ++n;
+    return n;
   }
 
   void Release() {
@@ -614,28 +626,43 @@ class CbRing {
   static constexpr UINT kPlainBytes = 512;  // kUpdatePlain: per buffer (the recorders' 304-byte window)
   static constexpr UINT kMaxPlain = 32768;  // kUpdatePlain: per list (16 MB, as kOffsets' 64 x 256 KB)
 
+  // Grows (doubling) the CPU copies and the buffer table to at least `need` entries. False when out of memory.
+  bool GrowPlain(UINT need) {
+    if (need <= plainCap_) return true;
+    UINT cap = plainCap_ ? plainCap_ : 1024;
+    while (cap < need) cap *= 2;
+    if (cap > kMaxPlain) cap = kMaxPlain;
+    if (cap < need) return false;
+    auto* mem = static_cast<uint8_t*>(_aligned_malloc(static_cast<size_t>(cap) * kPlainBytes, 64));
+    auto** tab = static_cast<ID3D11Buffer**>(calloc(cap, sizeof(ID3D11Buffer*)));
+    if (!mem || !tab) {
+      if (mem) _aligned_free(mem);
+      free(tab);
+      return false;
+    }
+    memset(mem, 0, static_cast<size_t>(cap) * kPlainBytes);
+    if (plainMem_) {
+      memcpy(mem, plainMem_, static_cast<size_t>(plainCap_) * kPlainBytes);
+      _aligned_free(plainMem_);
+    }
+    for (UINT i = 0; i < plainCap_; ++i) tab[i] = plain_[i];
+    free(plain_);
+    plainMem_ = mem;
+    plain_ = tab;
+    plainCap_ = cap;
+    return true;
+  }
+
+  // Creates the first `n` buffers (Init, before any list). A failed create stops there: the rest come on demand.
+  void ReservePlain(UINT n) {
+    if (!n || !GrowPlain(n)) return;
+    for (UINT i = 0; i < n; ++i)
+      if (!plain_[i] && !Create(kPlainBytes, &plain_[i], D3D11_USAGE_DEFAULT)) break;
+  }
+
   CbSlice AllocPlain(UINT bytes) {
     if (!bytes || bytes > kPlainBytes || plainUsed_ >= kMaxPlain) return Overflow();
-    if (plainUsed_ >= plainCap_) {  // grow (doubling) the CPU copies and the buffer table
-      const UINT cap = plainCap_ ? plainCap_ * 2 : 1024;
-      auto* mem = static_cast<uint8_t*>(_aligned_malloc(static_cast<size_t>(cap) * kPlainBytes, 64));
-      auto** tab = static_cast<ID3D11Buffer**>(calloc(cap, sizeof(ID3D11Buffer*)));
-      if (!mem || !tab) {
-        if (mem) _aligned_free(mem);
-        free(tab);
-        return Overflow();
-      }
-      memset(mem, 0, static_cast<size_t>(cap) * kPlainBytes);
-      if (plainMem_) {
-        memcpy(mem, plainMem_, static_cast<size_t>(plainCap_) * kPlainBytes);
-        _aligned_free(plainMem_);
-      }
-      for (UINT i = 0; i < plainCap_; ++i) tab[i] = plain_[i];
-      free(plain_);
-      plainMem_ = mem;
-      plain_ = tab;
-      plainCap_ = cap;
-    }
+    if (plainUsed_ >= plainCap_ && !GrowPlain(plainUsed_ + 1)) return Overflow();
     const UINT i = plainUsed_;
     if (!plain_[i] && !Create(kPlainBytes, &plain_[i], D3D11_USAGE_DEFAULT)) return Overflow();
     ++plainUsed_;

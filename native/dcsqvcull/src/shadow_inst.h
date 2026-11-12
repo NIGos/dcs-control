@@ -3716,6 +3716,38 @@ std::vector<PrewarmItem> PrewarmScan(uint64_t nowTicks = prune::NowTicks()) {
   return out;
 }
 
+// The file's last-write time in FILETIME ticks, 0 when it cannot be read.
+inline uint64_t PrewarmWriteTicks(const std::wstring& path) {
+  WIN32_FILE_ATTRIBUTE_DATA a;
+  return GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a) ? prune::Ticks(a.ftLastWriteTime) : 0;
+}
+
+// Sets the file's last-write time to `ticks` only when it is still the write made between `from` and `to`: a file
+// written later (a live key's own write) or touched later (a live hit, disk_prune.h Touch) keeps its newer time.
+// Through one handle, so the check and the set see the same file.
+inline bool PrewarmRestoreTime(const std::wstring& path, uint64_t from, uint64_t to, uint64_t ticks) {
+  HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return false;
+  bool set = false;
+  FILETIME w;
+  if (GetFileTime(h, nullptr, nullptr, &w) && prune::Ticks(w) >= from && prune::Ticks(w) <= to && ticks) {
+    FILETIME t;
+    t.dwLowDateTime = static_cast<DWORD>(ticks);
+    t.dwHighDateTime = static_cast<DWORD>(ticks >> 32);
+    set = SetFileTime(h, nullptr, nullptr, &t) != 0;
+  }
+  CloseHandle(h);
+  return set;
+}
+
+inline uint64_t PrewarmPreciseTicks() {
+  FILETIME f;
+  GetSystemTimePreciseAsFileTime(&f);
+  return prune::Ticks(f);
+}
+
 // Worker: one entry. Current -> nothing. Stale -> compiled (at idle priority)
 // and stored under its old last-use time. 0 current, 1 recompiled, 2 skipped
 // (gone meanwhile, or the compile is not storable).
@@ -3734,13 +3766,14 @@ int PrewarmOne(const PrewarmItem& it) {
   SetThreadPriority(GetCurrentThread(), prio == THREAD_PRIORITY_ERROR_RETURN ? THREAD_PRIORITY_NORMAL : prio);
   t_sourceLog = nullptr;
   if (!Cacheable(r, log)) return 2;
+  // A live key of the same identity may write or hit the file meanwhile: its last-use time is a real use and must
+  // stay. The old time goes back only on the prewarm's own write (written between saveFrom and saveTo), never over
+  // an older one than a live use seen before the save.
+  const uint64_t seen = PrewarmWriteTicks(it.path);
+  const uint64_t saveFrom = prune::NowTicks();
   CacheSave(*it.s, r, log);
-  HANDLE h = CreateFileW(it.path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (h != INVALID_HANDLE_VALUE) {
-    SetFileTime(h, nullptr, nullptr, &it.written);
-    CloseHandle(h);
-  }
+  const uint64_t saveTo = PrewarmPreciseTicks();
+  PrewarmRestoreTime(it.path, saveFrom, saveTo, std::max(prune::Ticks(it.written), seen));
   return 1;
 }
 
@@ -3750,21 +3783,45 @@ inline bool PrewarmScanDueLocked() {
   return g_prewarmState == 0 && g_prewarmOn.load(std::memory_order_relaxed) && GetTickCount64() >= g_prewarmAt;
 }
 
-// Caller holds g_mutex. The next entry of a kind that is collected (the
-// others are dropped: nothing would use their result this session).
+// What the config wants collected, per kind, apart from the in-flight kill
+// switch and the hooks' readiness (main/config_load.inc): 1 wanted, 0 off,
+// -1 not applied yet. g_collect / g_collectGb only turn on once the kind's
+// hooks are installed (InstallGb, gbcount::Install: possibly after the 5 s
+// prewarm delay) and stay off while the kill switch is on, so a kind that is
+// wanted but not collected yet keeps its entries queued.
+std::atomic<int> g_prewarmWantShadow{-1}, g_prewarmWantGb{-1};
+
+inline bool PrewarmCollectedNow(int kind) { return kind == kKindGb ? g_collectGb.load() : g_collect.load(); }
+inline bool PrewarmKindOff(int kind) { return (kind == kKindGb ? g_prewarmWantGb.load() : g_prewarmWantShadow.load()) == 0; }
+
+// Caller holds g_mutex. The most recently used entry of a kind that is
+// collected now. Entries of a kind the config has off are dropped (nothing
+// would use their result this session); entries of a kind that is wanted but
+// not collected yet stay queued for a later call.
 inline bool PrewarmTakeLocked(PrewarmItem& out) {
-  while (g_prewarmState == 2 && !g_prewarm.empty()) {
-    PrewarmItem it = std::move(g_prewarm.back());
-    g_prewarm.pop_back();
-    if (g_prewarmOn.load(std::memory_order_relaxed) && (it.s->kind == kKindGb ? g_collectGb.load() : g_collect.load())) {
-      out = std::move(it);
+  if (g_prewarmState != 2 || !g_prewarmOn.load(std::memory_order_relaxed)) return false;
+  for (size_t i = g_prewarm.size(); i-- > 0;) {
+    const int kind = g_prewarm[i].s->kind;
+    if (PrewarmCollectedNow(kind)) {
+      out = std::move(g_prewarm[i]);
+      g_prewarm.erase(g_prewarm.begin() + static_cast<std::ptrdiff_t>(i));
       ++g_prewarmBusy;
       return true;
     }
-    delete it.s;
-    g_prewarmSkipped.fetch_add(1);
+    if (PrewarmKindOff(kind)) {
+      delete g_prewarm[i].s;
+      g_prewarm.erase(g_prewarm.begin() + static_cast<std::ptrdiff_t>(i));
+      g_prewarmSkipped.fetch_add(1);
+    }
   }
   return false;
+}
+
+// Caller holds g_mutex. Entries waiting for their kind to be collected.
+inline size_t PrewarmParkedLocked() {
+  size_t n = 0;
+  for (const PrewarmItem& it : g_prewarm) n += !PrewarmCollectedNow(it.s->kind);
+  return n;
 }
 
 // Caller holds g_mutex. The summary line, once, when the last entry is done.
@@ -3784,7 +3841,10 @@ inline PrewarmProgress PrewarmSnap() {
   {
     std::lock_guard<std::mutex> lock(g_mutex);
     p.scanning = g_prewarmState == 1;
-    p.running = g_prewarmOn.load(std::memory_order_relaxed) && (g_prewarmState == 1 || g_prewarmState == 2);
+    // Entries that only wait for their kind to be collected (kill switch on, hooks not ready) are not a warm-up in
+    // progress: the panel would otherwise stay on "prewarm" for the whole session.
+    p.running = g_prewarmOn.load(std::memory_order_relaxed) &&
+                (g_prewarmState == 1 || (g_prewarmState == 2 && (g_prewarmBusy || g_prewarm.size() > PrewarmParkedLocked())));
   }
   p.found = g_prewarmFound.load();
   p.current = g_prewarmCurrent.load();

@@ -985,6 +985,9 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
       CompileKeyCached(*g, p2);
       CacheInit(dir, cc, kCacheEditVersion + 2);
       const bool onBefore = g_prewarmOn.load(), collect0 = g_collect.load(), collectGb0 = g_collectGb.load();
+      const int wantShadow0 = g_prewarmWantShadow.load(), wantGb0 = g_prewarmWantGb.load();
+      g_prewarmWantShadow = 1;
+      g_prewarmWantGb = 0;   // the config has the G-buffer kind off
       {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_prewarmState = 0;
@@ -1019,6 +1022,69 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
                 g_prewarmSkipped.load() == 1 && g_prewarmCurrent.load() == 0 && workerCompiles == 2 && w1.cached &&
                 !w2.cached,
             "shadow inst prewarm: an idle worker scans once and recompiles the stale entries of the kinds collected");
+      // A kind the config wants but that is not collected yet (InstallGb after the delay, or the kill switch on):
+      // its entries stay queued, other kinds go first, and they are taken once the kind is collected. Dropped only
+      // when the config has the kind off.
+      {
+        auto item = [&](int kind) {
+          PrewarmItem it;
+          it.s = new Snapshot;
+          memset(it.s, 0, sizeof(*it.s));
+          it.s->kind = kind;
+          return it;
+        };
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const int state0 = g_prewarmState, busy0 = g_prewarmBusy;
+        const bool on0 = g_prewarmOn.load(), c0s = g_collect.load(), c0g = g_collectGb.load();
+        const uint32_t skipped0 = g_prewarmSkipped.load();
+        g_prewarmState = 2;
+        g_prewarmBusy = 0;
+        g_prewarmOn = true;
+        g_prewarm.clear();
+        g_prewarm.push_back(item(kKindShadow));
+        g_prewarm.push_back(item(kKindGb));  // most recently used
+        g_collect = true;
+        g_collectGb = false;
+        g_prewarmWantGb = 1;
+        PrewarmItem a, b, c;
+        const bool shadowFirst = PrewarmTakeLocked(a) && a.s->kind == kKindShadow && g_prewarm.size() == 1;
+        const bool gbWaits = !PrewarmTakeLocked(b) && g_prewarm.size() == 1 && PrewarmParkedLocked() == 1 &&
+                             g_prewarmSkipped.load() == skipped0;
+        g_collectGb = true;
+        const bool gbTaken = PrewarmTakeLocked(b) && b.s->kind == kKindGb && g_prewarm.empty();
+        g_prewarm.push_back(item(kKindGb));
+        g_collectGb = false;
+        g_prewarmWantGb = 0;
+        const bool gbDropped = !PrewarmTakeLocked(c) && g_prewarm.empty() && g_prewarmSkipped.load() == skipped0 + 1;
+        Check(shadowFirst && gbWaits && gbTaken && gbDropped,
+              "shadow inst prewarm: a kind wanted but not collected yet stays queued until it is; a kind the config "
+              "has off is dropped");
+        delete a.s;
+        delete b.s;
+        g_prewarmState = state0;
+        g_prewarmBusy = busy0;
+        g_prewarmOn = on0;
+        g_collect = c0s;
+        g_collectGb = c0g;
+        g_prewarmSkipped = skipped0;
+      }
+      g_prewarmWantShadow = wantShadow0;
+      g_prewarmWantGb = wantGb0;
+      // The old last-use time goes back only on the prewarm's own write: a live write or hit after it keeps its time.
+      {
+        const std::wstring f = dir + L"s_00000000000000ff.qvc";
+        writeFile(f, "x");
+        const uint64_t from = prune::NowTicks() - 1;
+        writeFile(f, "y");
+        const uint64_t to = PrewarmPreciseTicks();
+        const uint64_t old = from - 10 * 864000000000ull;
+        const bool own = PrewarmRestoreTime(f, from, to, old) && written(f) == old;
+        writeFile(f, "z");  // a live write after the window
+        const uint64_t live = written(f);
+        const bool liveKept = !PrewarmRestoreTime(f, prune::NowTicks() + 864000000000ull, ~0ull, old) && written(f) == live;
+        Check(own && liveKept, "shadow inst prewarm: the old time is restored only on its own write, never over a newer one");
+        DeleteFileW(f.c_str());
+      }
       CacheInit(dir, cc);
     }
   }
