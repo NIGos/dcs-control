@@ -889,7 +889,12 @@ Test("Last flight: dcs.log session, Pimax frames, OFXR modes and frame time, DLS
     // No driver command lists (an AMD GPU): the recorders are said once, never as turned off or not started.
     var amd = LastFlight.ParseEngine(["08:00:00.000 env: GPU AMD Radeon RX 7900 XTX (DCS's device, vendor 0x1002), driver 32.0.12011.1036, dedicated 24560 MB, VRAM budget 24000 MB, DCS uses 9000 MB; DriverCommandLists=0 (the recorders do not run); feature level b100; GPU busy from D3DKMT",
         "08:01:00.000 " + Features(16, "ShadowRec=latched GBufferRec=idle(starting)")])!;
-    Require(amd is { On: 16, Configured: 18, RecordersUnavailable: true, TurnedOff.Count: 0, NotStarted.Count: 0, WarmupSeconds: null }, "recorders unavailable");
+    Require(amd is { On: 16, Configured: 18, RecordersUnavailable: true, RecordersEmulated: false, TurnedOff.Count: 0, NotStarted.Count: 0, WarmupSeconds: null }, "recorders unavailable");
+    // The opt-in (RecordersEmulatedLists) on: the recorders ran on emulated lists and count as usual.
+    const string emulatedGpu = "08:00:00.000 env: GPU AMD Radeon RX 7900 XTX (DCS's device, vendor 0x1002), driver 32.0.12011.1036, dedicated 24560 MB, VRAM budget 24000 MB, DCS uses 9000 MB; DriverCommandLists=0 (recorders on emulated lists); feature level b100; GPU busy from D3DKMT";
+    Require(LastFlight.ParseEngine([emulatedGpu, "08:01:00.000 " + Features(18, "ShadowRec=on GBufferRec=on")]) is { On: 18, Configured: 18, RecordersUnavailable: false, RecordersEmulated: true, NotStarted.Count: 0 }, "recorders on emulated lists: they ran");
+    Require(LastFlight.ParseEngine([emulatedGpu, "08:00:01.000 shadow recorder: the D3D11 device lacks what the recorder needs: DriverCommandLists=0 ConstantBufferOffsetting=0 ID3D11DeviceContext1=1 creation flags 0x0 on AMD; unavailable",
+        "08:01:00.000 " + Features(16, "ShadowRec=idle(starting) GBufferRec=idle(starting)")]) is { On: 16, RecordersUnavailable: true, RecordersEmulated: false, NotStarted.Count: 0 }, "opt-in on but the device still lacks a capability: unavailable");
     // Older logs and broken lines: no features line, no row; only the last DCS start counts.
     Require(LastFlight.ParseEngine(["08:00:00.000 DcsQvCull loader started from x", "08:00:10.000 perf: fps=80.0 verdict=CPU", "garbage", "features: 18 of 18 configured on; AllocSlabs=on"]) is null, "no features line");
     Require(LastFlight.ParseEngine(["08:00:00.000 " + Features(18, "ShadowRec=latched GBufferRec=on"), "09:00:00.000 DcsQvCull loader started from x", "09:00:10.000 features: 1 of 99999999999 configured on; AllocSlabs=on GBufferRec=latched",
@@ -2065,14 +2070,22 @@ Test("Engine shader cache: kept in the state folder across Back to stock DCS, ad
     Make("shader-cache/components/dcsqvcull/DcsQvCullPayload.dll", "payload"); Make("shader-cache/components/dcsqvcull/DcsQvCull.lua", "-- hook");
     var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime };
     var planner = new DeploymentPlanner(new(null, null, null, EngineDirectory: components));
-    var state = Path.GetFullPath(Path.Combine(root, "shader-cache/state")); var cache = EngineShaderCache.DirectoryIn(state);
+    var state = Path.GetFullPath(Path.Combine(root, "shader-cache/state")); var cache = EngineShaderCache.DirectoryIn(state, options)!;
     var module = Path.GetFullPath(Path.Combine(root, "shader-cache/sg/DCS/Scripts/DcsQvCull"));
     var on = new VrProfile { QuadViews = QuadProvider.None, EngineOptimizations = true };
     string Ini(ApplyPlan plan) => new StreamReader(new MemoryStream(plan.Files.Single(f => f.Path.EndsWith("DcsQvCull.ini")).Content), Encoding.UTF8, true).ReadToEnd().ReplaceLineEndings("\n");
 
+    // One folder per Saved Games variant: DCS stable and Open Beta would otherwise recompile and overwrite each other's
+    // entries (names come from the variant's identity only).
+    Require(cache == Path.Combine(state, "engine-shader-cache", "DCS") && EngineShaderCache.RootIn(state) == Path.Combine(state, "engine-shader-cache"), "The variant's own folder");
+    Require(EngineShaderCache.DirectoryIn(state, @"C:\Users\x\Saved Games\DCS.openbeta\Config\options.lua") == Path.Combine(state, "engine-shader-cache", "DCS.openbeta")
+        && EngineShaderCache.Variant(@"C:\Users\x\Saved Games\DCS.openbeta\Config\options.lua") != EngineShaderCache.Variant(options), "Open Beta has its own folder");
+    Require(EngineShaderCache.Variant(@"C:\sg\DCS beta (2)\Config\options.lua") == "DCS_beta__2" && EngineShaderCache.Variant(@"C:\sg\..\Config\options.lua") is not ".." and not "."
+        && EngineShaderCache.Variant(null) is null && EngineShaderCache.DirectoryIn(state, null) is null && EngineShaderCache.Variant(@"C:\sg\" + new string('v', 80) + @"\Config\options.lua")!.Length == 40, "Folder names are made safe and short");
+
     // The key: under [Model], the state folder; left out without a folder, for a folder the module would refuse, and
     // when only the perception features run (no shader variants are compiled then).
-    Require(cache == Path.Combine(state, "engine-shader-cache") && EngineShaderCache.ForIni(cache) == cache && EngineShaderCache.ForIni(cache + @"\") == cache);
+    Require(EngineShaderCache.ForIni(cache) == cache && EngineShaderCache.ForIni(cache + @"\") == cache);
     var withKey = ConfigurationWriters.DcsQvCull(on, cache).ReplaceLineEndings("\n");
     Require(IniFile.Parse(withKey).GetValueOrDefault("Model.ShaderCacheDir") == cache && withKey.IndexOf("\nShaderCacheDir=", StringComparison.Ordinal) is var at && at > withKey.IndexOf("[Model]", StringComparison.Ordinal)
         && at < withKey.IndexOf("[Texture]", StringComparison.Ordinal), "[Model] ShaderCacheDir names the state folder");
@@ -2089,7 +2102,9 @@ Test("Engine shader cache: kept in the state folder across Back to stock DCS, ad
     // The planner writes it only when told the folder; ControlService tells it its state folder.
     Require(!Ini(planner.Build(on, inventory, Path.Combine(state, "managed"))).Contains("ShaderCacheDir"));
     var plan = planner.Build(on, inventory, Path.Combine(state, "managed"), shaderCacheDirectory: cache);
-    Require(Ini(plan).Contains("\nShaderCacheDir=" + cache + "\n") && new ControlService(root, state).ShaderCacheDirectory == cache);
+    Require(Ini(plan).Contains("\nShaderCacheDir=" + cache + "\n") && new ControlService(root, state).ShaderCacheDirectoryFor(options) == cache);
+    // The manual opt-in flag goes with the module on Back to stock DCS (it would otherwise override the app's off).
+    Require(plan.Files.Single(f => f.Path.EndsWith("DcsQvCull.dll")).RuntimeLogs!.Contains(Path.Combine(module, "recorders_emulated_lists.flag")), "recorders_emulated_lists.flag is a module runtime file");
 
     // An earlier version's entries in the module's folder are adopted: moved, an entry the state folder already has
     // stays (the leftover goes), unfinished writes are deleted, other files and the folder holding them are kept.
@@ -2098,7 +2113,7 @@ Test("Engine shader cache: kept in the state folder across Back to stock DCS, ad
     Make("shader-cache/sg/DCS/Scripts/DcsQvCull/cache/s_0000000000000001.qvc", "one"); Make("shader-cache/sg/DCS/Scripts/DcsQvCull/cache/g_0000000000000002.qvc", "two-old");
     Make("shader-cache/sg/DCS/Scripts/DcsQvCull/cache/g_0000000000000003.qvc.4242.tmp", "partial"); Make("shader-cache/sg/DCS/Scripts/DcsQvCull/cache/notes.txt", "user");
     File.SetAttributes(Path.Combine(module, "cache", "s_0000000000000001.qvc"), FileAttributes.ReadOnly);
-    Make("shader-cache/state/engine-shader-cache/g_0000000000000002.qvc", "two-new");
+    Make("shader-cache/state/engine-shader-cache/DCS/g_0000000000000002.qvc", "two-new");
     Require(EngineShaderCache.Adopt(Path.Combine(module, "cache"), cache) == 1, "One entry moved");
     Require(File.ReadAllText(Path.Combine(cache, "s_0000000000000001.qvc")) == "one" && File.ReadAllText(Path.Combine(cache, "g_0000000000000002.qvc")) == "two-new"
         && Directory.GetFiles(Path.Combine(module, "cache")).Select(Path.GetFileName).SequenceEqual(["notes.txt"]) && Directory.GetFiles(cache).Length == 2, "Adopted without replacing a newer entry");
@@ -2110,19 +2125,36 @@ Test("Engine shader cache: kept in the state folder across Back to stock DCS, ad
     // Back to stock DCS: the module folder and everything in it goes (also entries a module without the key wrote
     // there); the state folder's cache stays.
     Make("shader-cache/sg/DCS/Scripts/DcsQvCull/cache/s_0000000000000005.qvc", "left by an old module"); Make("shader-cache/sg/DCS/Scripts/DcsQvCull/DcsQvCull.log", "log"); Make("shader-cache/sg/DCS/Scripts/DcsQvCull/warmup.json", "{}"); Make("shader-cache/sg/DCS/Scripts/DcsQvCull/warmup.json.tmp", "{");
-    Require(store.RestoreOriginals().Complete && !Directory.Exists(module), "Restore removes the module folder with its own cache and warmup.json");
+    Make("shader-cache/sg/DCS/Scripts/DcsQvCull/recorders_emulated_lists.flag", "");
+    Require(store.RestoreOriginals().Complete && !Directory.Exists(module), "Restore removes the module folder with its own cache, warmup.json and the emulated-lists flag");
     Require(Directory.GetFiles(cache).Length == 3 && File.ReadAllText(Path.Combine(cache, "s_0000000000000004.qvc")) == "four", "Restore keeps the state folder's cache");
 
     // Applying again finds it; clearing deletes the entries and unfinished writes, nothing else.
     store.Apply(planner.Build(on, inventory, Path.Combine(state, "managed"), shaderCacheDirectory: cache));
     Require(Directory.GetFiles(cache).Length == 3 && store.RestoreOriginals().Complete);
-    Make("shader-cache/state/engine-shader-cache/s_0000000000000006.qvc.77.tmp", "partial"); var kept = Make("shader-cache/state/engine-shader-cache/readme.txt", "user");
-    Require(EngineShaderCache.Stats(state) == (3, (long)("one".Length + "two-new".Length + "four".Length)), "Stats counts finished entries only (Engine page)");
-    var cleared = EngineShaderCache.Clear(state);
+    Make("shader-cache/state/engine-shader-cache/DCS/s_0000000000000006.qvc.77.tmp", "partial"); var kept = Make("shader-cache/state/engine-shader-cache/DCS/readme.txt", "user");
+    var beta = Make("shader-cache/state/engine-shader-cache/DCS.openbeta/s_0000000000000007.qvc", "beta");
+    Require(EngineShaderCache.Stats(cache) == (3, (long)("one".Length + "two-new".Length + "four".Length)), "Stats counts finished entries only (Engine page), this variant's");
+    var cleared = EngineShaderCache.Clear(cache);
     Require(cleared.Files == 4 && cleared.Bytes == "one".Length + "two-new".Length + "four".Length + "partial".Length && Directory.GetFiles(cache).SequenceEqual([kept]), "Clear deletes entries and unfinished writes only");
+    Require(File.Exists(beta), "Clearing one variant leaves the other's");
     File.Delete(kept);
-    Require(EngineShaderCache.Clear(state) == (0, 0L) && !Directory.Exists(cache) && EngineShaderCache.Clear(state) == (0, 0L), "An empty cache folder is removed; clearing nothing is fine");
-    Require(EngineShaderCache.Stats(state) == (0, 0L), "No cache folder: 0 variants");
+    Require(EngineShaderCache.Clear(cache) == (0, 0L) && !Directory.Exists(cache) && EngineShaderCache.Clear(cache) == (0, 0L), "An empty cache folder is removed; clearing nothing is fine");
+    Require(EngineShaderCache.Stats(cache) == (0, 0L) && EngineShaderCache.Stats(null) == (0, 0L), "No cache folder: 0 variants");
+    Make("shader-cache/state/engine-shader-cache/s_0000000000000008.qvc", "root");
+    Require(EngineShaderCache.ClearAll(state) == (2, (long)("beta".Length + "root".Length)) && !Directory.Exists(EngineShaderCache.RootIn(state)), "clear-shader-cache: every variant's");
+
+    // The module refused the folder at its last start: its log line names the folder and why. The Engine page then shows
+    // (and clears) the module's own folder and says why.
+    string[] refusedLog = ["08:00:00.000 shadow inst: ready (compiler x; DCS process had y; sources z; 2 compile workers)",
+        $"08:00:00.001 shadow inst: cache: [Model] ShaderCacheDir={cache} not used (folder missing and not creatable); the module's own folder instead"];
+    Require(EngineShaderCache.ModuleRefused(refusedLog) == "folder missing and not creatable" && EngineShaderCache.ModuleRefused(refusedLog, cache + @"\") == "folder missing and not creatable"
+        && EngineShaderCache.ModuleRefused(refusedLog, Path.Combine(state, "other")) is null && EngineShaderCache.ModuleRefused(["shadow inst: cache: C:\\x (format 3)"]) is null && EngineShaderCache.ModuleRefused(null) is null, "The module's refusal line");
+    Directory.CreateDirectory(module); File.WriteAllLines(Path.Combine(module, "DcsQvCull.log"), refusedLog);
+    Require(EngineShaderCache.InUse(state, options) == (Path.Combine(module, "cache"), "folder missing and not creatable"), "Refused: the module's own folder, with the reason");
+    File.WriteAllLines(Path.Combine(module, "DcsQvCull.log"), [$"08:00:00.001 shadow inst: cache: {cache}\\ (format 3, edit version 1; prewarm on)"]);
+    Require(EngineShaderCache.InUse(state, options) == (cache, null) && EngineShaderCache.InUse(state, null) == (null, null), "Used: the state folder");
+    Directory.Delete(module, true);
 });
 Test("Recorders on emulated command lists: [Model] RecordersEmulatedLists only when on, not live, shown only where it can matter", () =>
 {
@@ -2202,12 +2234,21 @@ Test("Engine shader cache: applying through ControlService adopts the module fol
     var on = new VrProfile { QuadViews = QuadProvider.None, EngineOptimizations = true };
     var planner = new DeploymentPlanner(new(null, null, null, EngineDirectory: components));
     var legacy = Make("shader-cache-service/sg/DCS/Scripts/DcsQvCull/cache/s_00000000000000aa.qvc", "entry");
+    var cache = service.ShaderCacheDirectoryFor(options)!;
     // A plan without the key (the module keeps its own folder): nothing is moved.
     service.Apply(planner.Build(on, inventory, service.ManagedRoot));
-    Require(File.Exists(legacy) && !Directory.Exists(service.ShaderCacheDirectory), "Without the key the module's folder is left alone");
-    service.Apply(planner.Build(on, inventory, service.ManagedRoot, shaderCacheDirectory: service.ShaderCacheDirectory));
-    Require(!File.Exists(legacy) && File.ReadAllText(Path.Combine(service.ShaderCacheDirectory, "s_00000000000000aa.qvc")) == "entry", "With the key the entries follow the cache");
-    Require(service.RestoreOriginals(exe, options).Complete && File.Exists(Path.Combine(service.ShaderCacheDirectory, "s_00000000000000aa.qvc")), "Back to stock DCS keeps them");
+    Require(File.Exists(legacy) && !Directory.Exists(cache), "Without the key the module's folder is left alone");
+    // The module refused the folder at its last start: the entries stay where it keeps them.
+    var moduleLog = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(legacy)!)!, "DcsQvCull.log");
+    File.WriteAllText(moduleLog, $"08:00:00.001 shadow inst: cache: [Model] ShaderCacheDir={cache} not used (folder missing and not creatable); the module's own folder instead\n");
+    service.Apply(planner.Build(on, inventory, service.ManagedRoot, shaderCacheDirectory: cache));
+    Require(File.Exists(legacy) && !File.Exists(Path.Combine(cache, "s_00000000000000aa.qvc")), "Refused by the module: its entries are not moved away");
+    File.Delete(moduleLog);
+    // A pre-release build's entries directly in the shared root follow too.
+    var root0 = Make("shader-cache-service/state/engine-shader-cache/g_00000000000000bb.qvc", "shared");
+    service.Apply(planner.Build(on, inventory, service.ManagedRoot, shaderCacheDirectory: cache));
+    Require(!File.Exists(legacy) && File.ReadAllText(Path.Combine(cache, "s_00000000000000aa.qvc")) == "entry" && !File.Exists(root0) && File.ReadAllText(Path.Combine(cache, "g_00000000000000bb.qvc")) == "shared", "With the key the entries follow the cache");
+    Require(service.RestoreOriginals(exe, options).Complete && File.Exists(Path.Combine(cache, "s_00000000000000aa.qvc")), "Back to stock DCS keeps them");
 });
 Test("Runtime files removed on restore are only declared logs, outputs and module copies inside the component's folder", () =>
 {
@@ -2961,6 +3002,15 @@ Test("A Pimax Quad View preset is not read as Custom values (issue 19, Pimax EVO
     Require(PimaxFovea.Read(Make("pimax-off/global.json", Evo(-1)))!.PresetName == "Off" && PimaxFovea.Read(Make("pimax-perf/global.json", Evo(0)))!.PresetName == "Performance");
     // The preset is part of the stamp, so switching presets is seen as a change.
     Require(quality.Stamp != PimaxFovea.Read(Make("pimax-extreme/global.json", Evo(3)))!.Stamp);
+    // With a preset the stamp is the level alone: EVO rewriting the Custom values at start-up is no change.
+    var rewritten = PimaxFovea.Read(Make("pimax-preset-rewritten/global.json", PimaxJson(0, .25, .25, .25, .25, gaze: .28, periphery: .1414).TrimEnd('}') + ",\"runtime_quadviews_rendering_level\":2}"))!;
+    Require(rewritten.Preset && rewritten.Stamp == quality.Stamp && quality.Stamp == "preset 2", "preset stamp ignores the Custom values");
+    Require(PimaxFovea.Read(Make("pimax-custom-a/global.json", Evo(5)))!.Stamp != PimaxFovea.Read(Make("pimax-custom-b/global.json", PimaxJson(0, .25, .25, .25, .25).TrimEnd('}') + ",\"runtime_quadviews_rendering_level\":5}"))!.Stamp, "Custom: the values count");
+    // Quad View Off (level -1) is not a preset: a plain note for bundled Quad Views, a warning for Pimax native.
+    var off = PimaxFovea.Read(Make("pimax-off/global.json", Evo(-1)))!;
+    Require(off.QuadViewsOff && off.Short == "Quad View Off" && PimaxFovea.Summary(off) == "Pimax · Quad View is Off." && !PimaxFovea.PresetNote(off).Contains("preset", StringComparison.OrdinalIgnoreCase)
+        && PimaxFovea.PresetNote(off).Contains("own focus values") && !quality.QuadViewsOff && PimaxFovea.NativeOffWarning.Contains("no focus area"), "Quad View Off");
+    Require(PimaxFovea.ChangedSinceApply(p, stale, Make("pimax-off/global.json", Evo(-1))) is { } offChanged && offChanged.Contains("Off in Pimax") && !offChanged.Contains("preset"), "Off: its own message");
     // Setup detection keeps the profile's own focus values and says why.
     var sources = new DetectionSources { PimaxPlaySettings = path, SteamVrServerLog = Path.Combine(root, "none/vrserver.txt"), SteamVrSettings = Path.Combine(root, "none/steamvr.vrsettings"), NeuralRuntimeFolders = [], ProcessRunning = _ => false };
     var detected = SetupDetection.Detect(p, new InventorySnapshot(), sources);

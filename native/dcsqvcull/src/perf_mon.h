@@ -556,7 +556,19 @@ std::string FeatureText() {
 // Warm-up (shader variants)
 // ---------------------------------------------------------------------------
 void WarmTick(double t) {
-  if (shadowinst::g_state.load() != 1) return;
+  if (shadowinst::g_state.load() != 1) {
+    // No compile pipeline (not installed yet, failed, or shut down): nothing warms up. A warm-up or prewarm shown
+    // before must not stay on the panel ("warming up NN%") or in warmup.json: idle, written once.
+    if (g_warm) Log("warmup: ended without finishing (shader instancing is not running)");
+    g_warm = false;
+    g_warming = false;
+    g_warmPercent = -1;
+    g_prewarmNow = false;
+    g_prewarmSeenT = -1;
+    g_warmEnded = false;
+    qvwarm::Publish(g_warmFileState, g_dir, qvwarm::State{}, false);
+    return;
+  }
   const shadowinst::Totals tot = shadowinst::Snap();
   const uint32_t pending = tot.queued + tot.busy;
   const bool busy = pending > 0;
@@ -609,11 +621,8 @@ void WarmTick(double t) {
   g_warmPercent = percent;
   g_prewarmNow = pw.running;
   // Every second while something runs; once for idle and done.
-  const bool moving = g_warm || pw.running;
-  if (moving || g_warmFileState != s.state) {
-    g_warmFileState = s.state;
-    qvwarm::Write(g_dir, qvwarm::Json(s));
-  }
+  // The state counts as written only once the write succeeded, so a final done or idle is retried.
+  qvwarm::Publish(g_warmFileState, g_dir, s, g_warm || pw.running);
 }
 
 // ---------------------------------------------------------------------------

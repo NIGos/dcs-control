@@ -611,6 +611,10 @@ void ApplyBigPages(bool on) {
 
 // Stage 1 (compile + log only); installed on first use, retried every second.
 void ApplyShadowInst() {
+  // The cache prewarm keeps a kind's stale entries queued while the config wants that kind (its hooks may install
+  // later, the kill switch may be on) and drops them only when the config has it off (shadow_inst.h PrewarmTakeLocked).
+  shadowinst::g_prewarmWantShadow = g_cfg.shadowInst || g_cfg.shadowTexSkip ? 1 : 0;
+  shadowinst::g_prewarmWantGb = g_cfg.shadowInst && (g_cfg.gbufferBatch || g_cfg.gbufferRecorder) ? 1 : 0;
   const bool on = g_cfg.shadowInst && !g_engineOff.load();
   if (on != shadowinst::g_on.load() || (on && shadowinst::g_state.load() == 0)) shadowinst::SetOn(on);
 }

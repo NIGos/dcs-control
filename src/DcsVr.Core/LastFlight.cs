@@ -86,8 +86,10 @@ public sealed record FrameCap(double? Fps, double? RefreshHz, int CappedReports,
 /// <param name="Toggles">Times they were turned off with the in-flight key.</param>
 /// <param name="WarmupSeconds">The shader warm-ups' total time ("warmup: done after N s"); null when none finished.</param>
 /// <param name="WarmupUnfinished">A warm-up was still compiling when the log ends.</param>
+/// <param name="RecordersEmulated">No driver command lists, but the opt-in (RecordersEmulatedLists) ran the recorders on
+/// the lists Windows emulates (the module's "DriverCommandLists=0 (recorders on emulated lists)"): they count as usual.</param>
 public sealed record EngineFlight(int On, int Configured, IReadOnlyList<string> TurnedOff, IReadOnlyList<string> NotStarted, bool RecordersUnavailable,
-    int OffSeconds, int Seconds, bool OffAtExit, int Toggles, int? WarmupSeconds, bool WarmupUnfinished);
+    int OffSeconds, int Seconds, bool OffAtExit, int Toggles, int? WarmupSeconds, bool WarmupUnfinished, bool RecordersEmulated = false);
 
 /// <summary>Reads <see cref="FlightSummary"/> defensively and cheaply: only the start and tail of dcs.log, only the
 /// lines that matter in the other logs, and each parsed file is cached by size and timestamp.</summary>
@@ -591,14 +593,14 @@ public static partial class LastFlight
     {
         var everOn = new HashSet<string>(StringComparer.Ordinal); var latched = new HashSet<string>(StringComparer.Ordinal);
         var configured = new HashSet<string>(StringComparer.Ordinal); var order = new List<string>();
-        int conf = -1, toggles = 0, warm = 0; bool warming = false, warmed = false, noLists = false, off = false;
+        int conf = -1, toggles = 0, warm = 0; bool warming = false, warmed = false, noLists = false, emulated = false, off = false;
         double offSeconds = 0; TimeSpan? first = null, last = null, offSince = null, previous = null; var day = TimeSpan.Zero;
         foreach (var line in lines)
         {
             if (line.Contains("loader started", StringComparison.Ordinal))
             {
                 everOn.Clear(); latched.Clear(); configured.Clear(); order.Clear();
-                conf = -1; toggles = warm = 0; warming = warmed = noLists = off = false; offSeconds = 0; first = last = offSince = previous = null; day = TimeSpan.Zero;
+                conf = -1; toggles = warm = 0; warming = warmed = noLists = emulated = off = false; offSeconds = 0; first = last = offSince = previous = null; day = TimeSpan.Zero;
                 continue;
             }
             var m = ModuleStampRegex().Match(line);
@@ -640,7 +642,10 @@ public static partial class LastFlight
                 if (Number(w.Groups[1].Value) is { } seconds && seconds is >= 0 and < 86400) { warm += (int)Math.Round(seconds); warmed = true; }
                 continue;
             }
-            if (text.Contains("DriverCommandLists=0", StringComparison.Ordinal)) noLists = true;
+            // The GPU line with the opt-in on (RecordersEmulatedLists): the device has no driver lists, but the recorders
+            // run on the ones Windows emulates. A recorder's own "lacks what the recorder needs" line still means they could not.
+            if (text.Contains("DriverCommandLists=0 (recorders on emulated lists)", StringComparison.Ordinal)) emulated = true;
+            else if (text.Contains("DriverCommandLists=0", StringComparison.Ordinal)) noLists = true;
         }
         if (conf < 0 || first is not { } from || last is not { } to) return null;
         if (off && offSince is { } still) offSeconds += (to - still).TotalSeconds;
@@ -652,7 +657,7 @@ public static partial class LastFlight
         var notStarted = order.Where(n => configured.Contains(n) && !everOn.Contains(n) && !latched.Contains(n) && Counted(n)).Select(Name).ToArray();
         var on = Math.Min(conf, everOn.Count(n => !latched.Contains(n) && Counted(n)));
         return new(on, conf, turnedOff, notStarted, unavailable, (int)Math.Round(offSeconds), (int)Math.Round((to - from).TotalSeconds), off, toggles,
-            warmed ? warm : null, warming);
+            warmed ? warm : null, warming, emulated && !unavailable && configured.Any(Recorders.Contains));
     }
     [GeneratedRegex(@"^(\d\d:\d\d:\d\d\.\d{3}) (.*)$")] private static partial Regex ModuleStampRegex();
     [GeneratedRegex(@"^features: (\d+) of (\d+) configured on;(.*)$")] private static partial Regex FeaturesRegex();

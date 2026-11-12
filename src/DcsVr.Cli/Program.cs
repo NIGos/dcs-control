@@ -103,11 +103,11 @@ try
         }
         case "clear-shader-cache":
         {
-            // The engine module's compiled shader variants (state folder\engine-shader-cache), which Back to stock DCS
-            // keeps on purpose. Refused while DCS runs: the module is reading and writing them.
+            // The engine module's compiled shader variants (state folder\engine-shader-cache\<Saved Games variant>), which
+            // Back to stock DCS keeps on purpose; every variant's. Refused while DCS runs: the module is reading and writing them.
             ControlService.EnsureDcsClosed();
-            var (files, bytes) = EngineShaderCache.Clear(service.StateRoot);
-            Console.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture, "Deleted {0} compiled shader variants ({1:0.0} MB) in {2}. The engine module compiles them again in the first minutes of the next mission.", files, bytes / 1048576.0, service.ShaderCacheDirectory));
+            var (files, bytes) = EngineShaderCache.ClearAll(service.StateRoot);
+            Console.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture, "Deleted {0} compiled shader variants ({1:0.0} MB) in {2}. The engine module compiles them again in the first minutes of the next mission.", files, bytes / 1048576.0, service.ShaderCacheRoot));
             break;
         }
         case "launch-check": Console.WriteLine("Verified installed launch contract: " + service.PrepareLaunchApplied().FileName); break;

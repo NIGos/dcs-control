@@ -166,6 +166,20 @@ void WarmProgress() {
   Check(w1 && w2 && read == qvwarm::Json(s) && GetFileAttributesW((dir + L"warmup.json.tmp").c_str()) == INVALID_FILE_ATTRIBUTES,
         "warmup.json: replaced atomically, no temp file left");
   Check(!qvwarm::Write(L"", "{}"), "warmup.json: no folder, nothing written");
+  // Publish: a failed final write is not remembered as written, so the next tick tries it again.
+  {
+    std::string written = "warming";
+    qvwarm::State idle;
+    const bool failed = !qvwarm::Publish(written, L"", idle, false) && written == "warming";
+    const bool retried = qvwarm::Publish(written, dir, idle, false) && written == "idle";
+    const bool once = !qvwarm::Publish(written, dir, idle, false);
+    qvwarm::State moving;
+    moving.state = "prewarm";
+    const bool every = qvwarm::Publish(written, dir, moving, true) && qvwarm::Publish(written, dir, moving, true) &&
+                       written == "prewarm";
+    Check(failed && retried && once && every,
+          "warmup.json: a final state is written once, retried after a failed write; a moving one every tick");
+  }
   DeleteFileW((dir + L"warmup.json").c_str());
   RemoveDirectoryW(dir.c_str());
 }

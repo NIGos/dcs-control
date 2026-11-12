@@ -366,12 +366,14 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         var engineOptions = await Task.Run(EngineOptionsPath); // off the UI thread: it may wait for the originals lock
                         // Plus the shader warm-up while DCS runs (warmup.json) and the shader cache's size.
                         var running = DcsRunning();
-                        var (cacheFiles, cacheBytes) = await Task.Run(() => EngineShaderCache.Stats(service.StateRoot));
+                        // This DCS's own cache (one per Saved Games variant), or the module's folder when it refused that one.
+                        var (cacheDirectory, cacheRefused) = await Task.Run(() => EngineShaderCache.InUse(service.StateRoot, engineOptions));
+                        var (cacheFiles, cacheBytes) = await Task.Run(() => EngineShaderCache.Stats(cacheDirectory));
                         return Reply(id, new
                         {
                             status = engineOptions is null ? null : await Task.Run(() => EngineOptimizations.Read(engineOptions, DcsLogPath(engineOptions), running)),
                             warmup = engineOptions is null ? null : await Task.Run(() => EngineOptimizations.ReadWarmup(EngineOptimizations.ModuleDirectory(engineOptions), running)),
-                            shaderCache = new { files = cacheFiles, bytes = cacheBytes, dcsRunning = running }
+                            shaderCache = new { files = cacheFiles, bytes = cacheBytes, dcsRunning = running, refused = cacheRefused }
                         });
                     }
                     // The pupil shift layer's log in the applied profile's folder.
@@ -637,7 +639,8 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     // The same as DcsVr.Cli clear-shader-cache; never while DCS runs (the module reads and writes it).
                     EnsureInteractive();
                     if (DcsRunning()) throw new InvalidOperationException("Close DCS first: it uses the shader cache while it runs.");
-                    var (clearedFiles, clearedBytes) = await Task.Run(() => EngineShaderCache.Clear(service.StateRoot));
+                    // This DCS's cache: the one the Engine page shows (see engineStatus).
+                    var (clearedFiles, clearedBytes) = await Task.Run(() => EngineShaderCache.Clear(EngineShaderCache.InUse(service.StateRoot, EngineOptionsPath()).Directory));
                     return Reply(id, new { message = clearedFiles == 0 ? "The shader cache was already empty."
                         : string.Format(System.Globalization.CultureInfo.InvariantCulture, "Cleared {0} shader variants ({1:0.0} MB). DCS prepares them again in the first minutes of the next flight.", clearedFiles, clearedBytes / 1048576.0) });
                 case "engineOpen":
@@ -942,7 +945,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         var eye = _eyeResolution;
         var c = s.Converted;
         return new { found = true, path = s.Path, modified = s.Modified, mode = s.Play.Mode, controls = s.Play.Controls, @short = s.Short, mismatch = s.Mismatch,
-            preset = s.Preset, presetName = s.PresetName, level = s.Level, presetNote = s.Preset ? PimaxFovea.PresetNote(s) : null,
+            preset = s.Preset, presetName = s.PresetName, level = s.Level, quadViewsOff = s.QuadViewsOff, nativeOffWarning = s.QuadViewsOff ? PimaxFovea.NativeOffWarning : null, presetNote = s.Preset ? PimaxFovea.PresetNote(s) : null,
             capNote = PimaxFovea.CapNote(s), leftEye = s.LeftEye, rightEye = s.RightEye, fromQuickSliders = s.FromQuickSliders, gazeScale = s.GazeResolutionScale,
             peripheryScale = s.PeripheryResolutionScale, transitionMode = s.Play.TransitionMode, converted = c, stamp = s.Stamp, summary = PimaxFovea.Summary(s),
             notes = PimaxFovea.Notes(s).Skip(1), explanation = PimaxFovea.Explanation, sameLabelNote = PimaxFovea.SameLabelNote,
@@ -956,13 +959,14 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         if (PimaxFovea.UsesPimaxPlay(profile))
         {
             var resolved = PimaxFovea.Resolve(profile);
-            if (resolved.Pimax is { Preset: true } preset) return new("pimax-fovea", IssueSeverity.Warning, PimaxFovea.PresetNote(preset));
+            // Quad View Off in Pimax: a plain note (bundled Quad Views renders the profile's own focus either way).
+            if (resolved.Pimax is { Preset: true } preset) return new("pimax-fovea", preset.QuadViewsOff ? IssueSeverity.Info : IssueSeverity.Warning, PimaxFovea.PresetNote(preset));
             return resolved.Pimax is { } pimax ? new("pimax-fovea", pimax.Mismatch is null ? IssueSeverity.Info : IssueSeverity.Warning, PimaxFovea.Summary(pimax) + " Bundled Quad Views renders the same focus size."
                     + (PimaxFovea.CapNote(pimax) is { } cap ? " " + cap : "") + (pimax.Mismatch is { } m ? " " + m : ""))
                 : new("pimax-fovea", IssueSeverity.Warning, resolved.Notes[0]);
         }
         if (profile.QuadViews == QuadProvider.PimaxNative && PimaxFovea.Read() is { } native)
-            return new("pimax-fovea", native.Mismatch is null ? IssueSeverity.Info : IssueSeverity.Warning, "Pimax native Quad Views applies Pimax Play's settings itself. " + PimaxFovea.Summary(native) + (native.Mismatch is { } m2 ? " " + m2 : ""));
+            return native.QuadViewsOff ? new("pimax-fovea", IssueSeverity.Warning, PimaxFovea.NativeOffWarning) : new("pimax-fovea", native.Mismatch is null ? IssueSeverity.Info : IssueSeverity.Warning, "Pimax native Quad Views applies Pimax Play's settings itself. " + PimaxFovea.Summary(native) + (native.Mismatch is { } m2 ? " " + m2 : ""));
         return null;
     }
     /// <summary>The options.lua the engine optimizations belong to: the applied profile's when one is applied (its files
