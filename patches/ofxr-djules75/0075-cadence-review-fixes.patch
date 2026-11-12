@@ -1,0 +1,337 @@
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -1515,6 +1515,28 @@ struct CadenceConfig {
+     // (2 held with none before the attempt). 3 gives time, which was not
+     // short: there it stays at 2. See CadencePreference.
+     double up_late_min_fraction{0.0};
++    // DCS Control (0075), from the review of 0070-0074:
++    //  - up_late_gate_clean: 0072's rule above holds only for the misses a
++    //    failed 1X leaves behind - from a 1X left on misses or on the work
++    //    until 2 has gone this long without a missed slot (or 1X is entered
++    //    again, or the scene changes). After that, and in a session that
++    //    never tried 1X, missed slots at 2 go to 3 as in 0032, whatever the
++    //    work: judder that is not the application's own reaches 3 again.
++    //  - one_enter_cpu_fraction: the CPU's own entry limit (0: the same as
++    //    one_enter_fraction). The estimate that reads high at 2 is the
++    //    GPU's - busy time per frame at half the rate; the CPU's is the
++    //    frame's interval less its holds and reads the same at either rate -
++    //    so 1.10 or 1.25 of the period there only lets in attempts that
++    //    cannot hold.
++    //  - one_give_up_clean: given up (one_max_failed), 1X is tried once more
++    //    when 2 has passed the entry test this long without a missed slot,
++    //    or for one_enter_hold with CPU and GPU at 0032's own 0.80 (the work
++    //    dropped); 0: only a scene change lifts it. A mission restarted
++    //    without the one-second gap a scene change needs no longer leaves
++    //    1X off for the session. That attempt failing gives up again.
++    Nanoseconds up_late_gate_clean{5 * kSecond};
++    double one_enter_cpu_fraction{0.0};
++    Nanoseconds one_give_up_clean{0};
+ };
+ 
+ // DCS Control (0070): how readily adaptive cadence passes frames through
+@@ -1536,9 +1558,11 @@ struct CadenceConfig {
+ //
+ //   steady    0032 as it was: enter at 0.80 of the period, leave over 0.95
+ //             or on 2 missed-slot episodes within a second.
+-//   balanced  enter at 1.10 (the estimate's excess over a real 0.9 or so);
++//   balanced  enter at 1.10 of the period for the GPU (the estimate's excess
++//             over a real 0.9 or so) and 0.95 for the CPU (0075);
+ //             leave on 3 episodes within a second or 5 within 10 s.
+-//   rate      enter at 1.25 (what may hold at all); leave on 3 episodes
++//   rate      enter at 1.25 for the GPU (what may hold at all), 0.95 for the
++//             CPU (0075); leave on 3 episodes
+ //             within a second or 10 within 10 s.
+ //
+ // DCS Control (0071), from the first flights of 0070 (same view, 150 s each):
+@@ -1579,6 +1603,8 @@ enum class CadencePreference : std::uint32_t { steady = 0, balanced = 1, rate =
+         config.one_late_episode_gap = 250 * kMillisecond;
+         config.one_max_failed = 3;
+         config.up_late_min_fraction = 0.70; // 0072
++        config.one_enter_cpu_fraction = 0.95; // 0075
++        config.one_give_up_clean = 180 * kSecond; // 0075
+     } else if (preference == CadencePreference::rate) {
+         config.one_enter_fraction = 1.25;
+         config.one_exit_slow = false;
+@@ -1587,6 +1613,8 @@ enum class CadencePreference : std::uint32_t { steady = 0, balanced = 1, rate =
+         config.one_late_episode_gap = 250 * kMillisecond;
+         config.one_max_failed = 6;
+         config.up_late_min_fraction = 0.70; // 0072
++        config.one_enter_cpu_fraction = 0.95; // 0075
++        config.one_give_up_clean = 180 * kSecond; // 0075
+     }
+     return config;
+ }
+@@ -1709,6 +1737,10 @@ private:
+     Nanoseconds backoff_{};
+     // DCS Control (0071): attempts at 1X failed in a row (one_max_failed).
+     std::uint32_t failed_in_row_{};
++    // DCS Control (0075): 0072's rule in force (a 1X failed and 2 has not
++    // been clean since), and the last missed slot fed (-1: none).
++    bool late_gate_{};
++    Nanoseconds last_late_at_{-1};
+     bool three_allowed_{true}; // DCS Control (0034)
+ };
+ 
+@@ -2062,7 +2094,8 @@ struct CadenceTimeResync {
+     // kRephaseWindow of told time after the exit, the first confirmed move
+     // of 2 and of 3 (kConfirmCadence frames agreeing, as ever) is taken
+     // whatever its direction and is not counted a reversal: it is the
+-    // transition's, not the load's square wave 0060-0062 hold against. One
++    // transition's, not the load's square wave 0060-0062 hold against. Under
++    // every preference, steady included: the exit is the same there. One
+     // move per level per exit; a level found on time (a confirmed run) ends
+     // its window. Everything else of the hysteresis is as it was.
+     static constexpr Nanoseconds kRephaseWindow = 10 * kSecond;
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -1010,6 +1010,8 @@ void CadenceController::start(Nanoseconds now) noexcept {
+     one_allowed_at_ = now;
+     backoff_ = 0;
+     failed_in_row_ = 0; // DCS Control (0071)
++    late_gate_ = false; // DCS Control (0075)
++    last_late_at_ = -1;
+ }
+ 
+ void CadenceController::add_frame(
+@@ -1032,6 +1034,7 @@ void CadenceController::add_late(Nanoseconds at, std::uint32_t count) noexcept {
+     }
+     // A miss ends the 1X entry test's clean stretch, episode or not.
+     one_fit_since_ = -1;
++    last_late_at_ = at; // DCS Control (0075)
+     if (late_count_ != 0) {
+         const Nanoseconds episode =
+             late_at_[(late_next_ + kLateEvents - 1) % kLateEvents];
+@@ -1123,6 +1126,11 @@ void CadenceController::leave_one(
+     run_three_ = 0;
+     one_fit_since_ = -1;
+     one_entered_at_ = -1;
++    // DCS Control (0075): what this 1X leaves behind at 2 is judged by
++    // 0072's rule until 2 has been clean for up_late_gate_clean.
++    late_gate_ = event == CadenceEvent::one_left_late ||
++        event == CadenceEvent::one_left_slow;
++    last_late_at_ = now;
+     step.event = event;
+ }
+ 
+@@ -1182,8 +1190,15 @@ CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexc
+     if (level_ == 2) {
+         // DCS Control (0072): and, where the preference asks for it, only
+         // with the work to show for it (CadenceConfig::up_late_min_fraction).
++        // DCS Control (0075): and only for what a failed 1X left behind:
++        // once 2 has gone up_late_gate_clean without a missed slot the rule
++        // is 0032's again.
++        if (late_gate_ && now - last_late_at_ >= config_.up_late_gate_clean) {
++            late_gate_ = false;
++        }
++        const bool gated = late_gate_ && config_.up_late_min_fraction > 0.0;
+         const bool missed = step.late_episodes >= config_.up_late_episodes &&
+-            (config_.up_late_min_fraction <= 0.0 ||
++            (!gated ||
+              (enough &&
+               stats.judged > fraction_of(config_.up_late_min_fraction, two_periods)));
+         if ((missed ||
+@@ -1218,9 +1233,14 @@ CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexc
+         // 1X: from 2 only, on a clean stretch of one_enter_hold.
+         const Nanoseconds one_limit =
+             fraction_of(config_.one_enter_fraction, period);
++        // DCS Control (0075): the CPU's own limit where the preference
++        // gives one (CadenceConfig::one_enter_cpu_fraction).
++        const Nanoseconds cpu_limit = config_.one_enter_cpu_fraction > 0.0
++            ? fraction_of(config_.one_enter_cpu_fraction, period)
++            : one_limit;
+         const bool fits = config_.one_enabled && enough &&
+             stats.gpu_samples >= config_.min_samples &&
+-            stats.cpu >= 0 && stats.cpu <= one_limit &&
++            stats.cpu >= 0 && stats.cpu <= cpu_limit &&
+             stats.gpu_one >= 0 && stats.gpu_one <= one_limit &&
+             late_episodes_between(now - config_.late_window, now) == 0;
+         if (!fits) {
+@@ -1228,8 +1248,24 @@ CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexc
+         } else if (one_fit_since_ < 0) {
+             one_fit_since_ = now;
+         }
++        // DCS Control (0075): given up, and 2 has passed the entry test
++        // one_give_up_clean without a missed slot, or one_enter_hold with
++        // CPU and GPU at 0032's own entry fraction (the work dropped): one
++        // more attempt, now.
++        if (fits && one_given_up() && config_.one_give_up_clean > 0) {
++            const Nanoseconds plain =
++                fraction_of(CadenceConfig{}.one_enter_fraction, period);
++            const Nanoseconds clean = now - one_fit_since_;
++            if (clean >= config_.one_give_up_clean ||
++                (clean >= config_.one_enter_hold && stats.cpu <= plain &&
++                 stats.gpu_one <= plain)) {
++                failed_in_row_ = config_.one_max_failed - 1;
++                one_allowed_at_ = now;
++            }
++        }
+         if (fits && now - one_fit_since_ >= config_.one_enter_hold &&
+             now >= one_allowed_at_) {
++            late_gate_ = false; // DCS Control (0075)
+             level_ = 1;
+             level_since_ = now;
+             one_entered_at_ = now;
+@@ -1267,6 +1303,8 @@ CadenceStep CadenceController::scene_changed(Nanoseconds now) noexcept {
+         one_allowed_at_ = now + std::max(config_.one_spacing, backoff_);
+     }
+     failed_in_row_ = 0;
++    late_gate_ = false; // DCS Control (0075)
++    last_late_at_ = -1;
+     level_ = 2;
+     level_since_ = now;
+     run_three_ = 0;
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -16253,7 +16253,9 @@ void apply_cadence_step(
+     }
+     // DCS Control (0074): 1X left: the frames of 2 (and 3) that follow may
+     // take the told-time move the transition needs past their level's hold
+-    // (xrfg::latency::CadenceTimeResync::left_one). A scene change resets
++    // (xrfg::latency::CadenceTimeResync::left_one) - whatever the cadence
++    // preference, steady included, on purpose: a 1X exit leaves the same
++    // offset behind under each. A scene change resets
+     // the resync itself.
+     if (step.previous == 1 && step.level != 1) {
+         try {
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -2885,9 +2885,54 @@ void cadence_preference_tests() {
+         require(fail(balanced) && !balanced.controller.one_given_up() && fail(balanced) &&
+                 balanced.controller.one_given_up(),
+             "balanced: three failed in a row give up");
+-        require(balanced.until(CadenceEvent::one_entered, 40'000, kHoldCpu, kHoldGpu,
+-                    kHoldSynthesis) < 0 && balanced.controller.level() == 2,
+-            "balanced: given up, 1X is not tried again (fifteen minutes of 2)");
++        // DCS Control (0075): given up, 2 not clean (a missed slot every two
++        // seconds): not tried, ten minutes of it.
++        bool entered_unclean = false;
++        for (int index = 0; index < 27'000; ++index) {
++            if (index % 90 == 0) {
++                balanced.controller.add_late(balanced.now, 1);
++            }
++            entered_unclean = entered_unclean ||
++                balanced.frame(kHoldCpu, kHoldGpu, kHoldSynthesis).event ==
++                    CadenceEvent::one_entered;
++        }
++        require(!entered_unclean && balanced.controller.one_given_up() &&
++                balanced.controller.level() == 2,
++            "balanced: given up, 1X is not tried again while 2 misses slots");
++        // Clean from here: one more attempt after three minutes of it.
++        const Nanoseconds clean_from = balanced.now;
++        const Nanoseconds retried = balanced.until(
++            CadenceEvent::one_entered, 40'000, kHoldCpu, kHoldGpu, kHoldSynthesis);
++        require(retried >= clean_from + 175 * kSecond && // its clean second began before
++                retried <= clean_from + 190 * kSecond && !balanced.controller.one_given_up(),
++            "balanced: three clean minutes at 2 lift the give-up for one attempt");
++        // That attempt failing gives up again; the work dropping to 0032's
++        // own entry (80% of the period) lifts it within seconds.
++        for (int miss = 0; miss < 30 && balanced.controller.level() == 1; ++miss) {
++            const Nanoseconds at = retried + 1200 * kMillisecond + miss * 120 * kMillisecond;
++            while (balanced.now < at) {
++                balanced.frame(10'800'000, 9'500'000, 0);
++            }
++            balanced.controller.add_late(balanced.now, 1);
++            balanced.frame(10'800'000, 9'500'000, 0);
++        }
++        require(balanced.controller.level() == 2 && balanced.controller.one_given_up(),
++            "balanced: the lifted attempt failing gives up again");
++        const Nanoseconds dropped_from = balanced.now;
++        const Nanoseconds light = balanced.until(
++            CadenceEvent::one_entered, 4'000, kOneCpu, kOneGpu, kOneSynthesis);
++        require(light >= 0 && light <= dropped_from + 12 * kSecond,
++            "balanced: the work dropped to 80%: tried again within seconds");
++        // Given up once more (a third failed run), a scene change lifts it too.
++        for (int miss = 0; miss < 30 && balanced.controller.level() == 1; ++miss) {
++            const Nanoseconds at = light + 1200 * kMillisecond + miss * 120 * kMillisecond;
++            while (balanced.now < at) {
++                balanced.frame(10'800'000, 9'500'000, 0);
++            }
++            balanced.controller.add_late(balanced.now, 1);
++            balanced.frame(10'800'000, 9'500'000, 0);
++        }
++        require(balanced.controller.one_given_up(), "balanced: given up again");
+         static_cast<void>(balanced.controller.scene_changed(balanced.now));
+         require(!balanced.controller.one_given_up() &&
+                 balanced.until(CadenceEvent::one_entered, 40'000, kHoldCpu, kHoldGpu,
+@@ -2914,16 +2959,69 @@ void cadence_preference_tests() {
+             }
+             return threes;
+         };
++        // DCS Control (0075): only what a failed 1X left behind is judged
++        // so. A session that never tried 1X goes to 3 on misses under every
++        // preference; after a failed 1X the misses that go on stay at 2 until
++        // 2 has been clean five seconds, and misses after that go to 3.
++        const auto fail_one = [](CadenceSim& sim) {
++            const Nanoseconds entered = sim.until(
++                CadenceEvent::one_entered, 40'000, kHoldCpu, kHoldGpu, kHoldSynthesis);
++            require(entered >= 0, "gate: entered");
++            for (int miss = 0; miss < 30 && sim.controller.level() == 1; ++miss) {
++                const Nanoseconds at = entered + 1200 * kMillisecond + miss * 120 * kMillisecond;
++                while (sim.now < at) {
++                    sim.frame(10'800'000, 9'500'000, 0);
++                }
++                sim.controller.add_late(sim.now, 1);
++                sim.frame(10'800'000, 9'500'000, 0);
++            }
++            require(sim.controller.level() == 2, "gate: 1X failed");
++        };
+         CadenceSim steady(cadence_config_for(CadencePreference::steady));
+-        CadenceSim balanced(cadence_config_for(CadencePreference::balanced));
+-        CadenceSim rate(cadence_config_for(CadencePreference::rate));
+         require(missing(steady, 12'700'000, 12'000'000) > 0, "steady: misses at 2 go to 3");
+-        require(missing(balanced, 12'700'000, 12'000'000) == 0 && balanced.changes == 0 &&
+-                missing(rate, 12'700'000, 12'000'000) == 0 && rate.changes == 0,
+-            "balanced and rate: misses at 2 with light work stay at 2");
+-        require(missing(balanced, 17 * kMillisecond, 16 * kMillisecond) > 0 &&
+-                missing(rate, 17 * kMillisecond, 16 * kMillisecond) > 0,
+-            "balanced and rate: misses at 2 with the work for it go to 3");
++        for (const CadencePreference preference :
++            {CadencePreference::balanced, CadencePreference::rate}) {
++            CadenceSim fresh(cadence_config_for(preference));
++            require(missing(fresh, 12'700'000, 12'000'000) > 0,
++                "balanced and rate: without a failed 1X, misses at 2 go to 3");
++            CadenceSim after(cadence_config_for(preference));
++            fail_one(after);
++            const std::uint32_t changes = after.changes;
++            require(missing(after, 12'700'000, 12'000'000) == 0 && after.changes == changes,
++                "balanced and rate: the misses a failed 1X leaves stay at 2");
++            for (int index = 0; index < 280; ++index) { // six seconds clean
++                after.frame(12'700'000, 12'000'000, kMillisecond);
++            }
++            require(after.controller.level() == 2 &&
++                    missing(after, 12'700'000, 12'000'000) > 0,
++                "balanced and rate: once 2 has been clean, misses go to 3 again");
++            CadenceSim heavy(cadence_config_for(preference));
++            fail_one(heavy);
++            require(missing(heavy, 17 * kMillisecond, 16 * kMillisecond) > 0,
++                "balanced and rate: after a failed 1X, misses with the work for it go to 3");
++        }
++    }
++    {
++        // DCS Control (0075): the CPU's own entry limit, 95% of the period:
++        // 11.5 ms of CPU with a GPU that fits is not tried (it could not
++        // hold), 10.4 ms is. Steady keeps its one limit for both.
++        for (const CadencePreference preference :
++            {CadencePreference::balanced, CadencePreference::rate}) {
++            CadenceSim over(cadence_config_for(preference));
++            for (int index = 0; index < 600; ++index) {
++                over.frame(11'500'000, 11 * kMillisecond, kMillisecond);
++            }
++            require(over.events.empty() && over.controller.level() == 2,
++                "balanced and rate: CPU over 95% of the period is not tried");
++            CadenceSim under(cadence_config_for(preference));
++            require(under.until(CadenceEvent::one_entered, 1000, 10'400'000,
++                        11 * kMillisecond, kMillisecond) >= 0,
++                "balanced and rate: CPU under 95% with the GPU in reach is tried");
++        }
++        const CadenceConfig steady = cadence_config_for(CadencePreference::steady);
++        require(steady.one_enter_cpu_fraction == 0.0 && steady.one_give_up_clean == 0 &&
++                steady.up_late_min_fraction == 0.0,
++            "steady: no CPU limit of its own, no give-up, no gate");
+     }
+ }
+ 
