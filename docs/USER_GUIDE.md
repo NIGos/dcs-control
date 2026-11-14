@@ -503,7 +503,7 @@ The headset panel shows "Engine Opt.: warming up 60%" (how far it is; the DCS En
 
 ### Multiplayer and Integrity Check
 
-**Not tested yet.** The DCS engine optimizations (terrain prefetch fix included) have only been tested in single-player. With DLSS 5 or Foveated SR the app adds files to DCS's `bin` folder (`dxgi.dll`, Cheeky's files) and, with Engine Optimizations on, a hook and a module in `Saved Games\DCS\Scripts`. Whether a server with Integrity Check accepts them has not been verified. If a server refuses you, **Back to stock DCS** before joining it, and please [report](#reporting-a-problem) what happened.
+**At your own risk.** DCS Control is only tested in single player. With DLSS 5 or Foveated SR the app adds files to DCS's `bin` folder (`dxgi.dll`, Cheeky's files) and, with Engine Optimizations on, a hook and a module in `Saved Games\DCS\Scripts`. Pilots report that Integrity Check is not affected, but this has not been verified here. If a server refuses you, **Back to stock DCS** before joining it, and please [report](#reporting-a-problem) what happened.
 
 ### DCS Control isn't in my list of OpenXR layers
 
