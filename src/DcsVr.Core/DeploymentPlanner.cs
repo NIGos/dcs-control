@@ -297,6 +297,28 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             environment[disable] = "1";
             layerNames.Add(gaze.Name!);
         }
+        // Ultraleap's hand tracking is a registered (implicit) layer, and the loader puts every registered layer above the
+        // ones enabled here: above Quad Views, DCS asks for quad views and gets only the stereo configuration (GitHub
+        // #20). It works below Quad Views, as with a registered Quad Views install, so for this DCS it is turned off as a
+        // registered layer and loaded again below everything else, closest to the runtime. Other games keep it as it is.
+        if (profile.QuadViews == QuadProvider.QuadViewsFoveated && HandTrackingLayer.Find(inventory) is { } hands)
+        {
+            var handsText = File.ReadAllText(hands.ManifestPath);
+            // Without a disable_environment it cannot be turned off for one process: it stays where it is.
+            if (GazeBridge.DisableVariable(handsText) is { } handsOff)
+            {
+                var handsManifest = ConfigurationWriters.ExplicitManifest(handsText, hands.ManifestPath);
+                AddText(PathPolicy.UnderRoot(layersRoot, "hand-tracking.json"), handsManifest, "Profile hand tracking manifest (below Quad Views)");
+                using (var parsed = JsonDocument.Parse(handsManifest))
+                {
+                    var handsDll = parsed.RootElement.GetProperty("api_layer").GetProperty("library_path").GetString()!;
+                    dependencies[handsDll] = Hashing.FileSha256(handsDll);
+                }
+                dependencies[Path.GetFullPath(hands.ManifestPath)] = Hashing.FileSha256(hands.ManifestPath);
+                environment[handsOff] = "1";
+                layerNames.Add(hands.Name!);
+            }
+        }
         // Pupil shift sits first, next to DCS: it changes only what DCS renders and puts the runtime's own poses and
         // FOVs back on the submitted views, so every layer below sees the frame as if it were not there. The same layer
         // carries Depth boost and publishes the gaze for Visual realism, so it is deployed for any of them.
@@ -410,6 +432,14 @@ public static class GazeBridge
     public static bool IsManaged(LayerFact layer, VrProfile profile) =>
         layer.Name is "XR_APILAYER_MBUCCHIA_quad_views_foveated" or "XR_APILAYER_CHEEKY_foveated_dlss" or "XR_APILAYER_XRFrameBridge_diagnostic"
         || (Required(profile) && IsGazeLayer(layer));
+}
+
+/// <summary>Ultraleap's hand tracking layer, registered in Windows: with the bundled Quad Views it is loaded below it.</summary>
+public static class HandTrackingLayer
+{
+    public const string LayerName = "XR_APILAYER_ULTRALEAP_hand_tracking";
+    public static LayerFact? Find(InventorySnapshot inventory) =>
+        inventory.Layers.FirstOrDefault(l => l.Enabled && l.LibraryExists && string.Equals(l.Name, LayerName, StringComparison.OrdinalIgnoreCase));
 }
 
 /// <summary>VectorXR (DienerTech), an implicit OpenXR layer with its own frame generation, Quadviews and Depth: turned

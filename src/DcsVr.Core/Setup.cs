@@ -88,7 +88,7 @@ public static class Readiness
             missingVc.Length == 0 && currentVc ? "Required x64 C++ runtime libraries are present. Version: " + vcVersion : "Install Microsoft C++ x64 runtime 14.50 or newer. Missing libraries: " + string.Join(", ", missingVc), "vcredist");
         if (profile.FrameGen == FrameGeneration.Nvidia)
             Add("optical-flow-driver", NativeBinary.IsX64(Path.Combine(Environment.SystemDirectory, "nvofapi64.dll")) ? CheckState.Pass : CheckState.Error,
-                "NVIDIA optical-flow driver", "NVIDIA Optical Flow frame generation needs NVIDIA's optical-flow driver, part of the NVIDIA graphics driver for RTX cards. Update the NVIDIA driver, or choose FidelityFX on the Framegen page: it runs on any graphics card.", "nvidia");
+                "NVIDIA optical-flow driver", "NVIDIA Optical Flow frame generation needs NVIDIA's optical-flow driver, part of the NVIDIA graphics driver for RTX cards. Update the NVIDIA driver, or choose FidelityFX on the Frame generation page: it runs on any graphics card.", "nvidia");
         if (profile.Runtime == RuntimeKind.SboysSteamVr && !profile.Desktop)
         {
             var driver = inventory.Drivers.FirstOrDefault(d => d.Name.Contains("customheadset", StringComparison.OrdinalIgnoreCase));

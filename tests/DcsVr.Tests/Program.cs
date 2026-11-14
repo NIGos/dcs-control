@@ -146,6 +146,18 @@ Test("Neural ABI compatibility is explicit", () =>
 });
 Test("Unknown JSON settings rejected", () => Throws<System.Text.Json.JsonException>(() => JsonData.Deserialize<VrProfile>("{\"fakeSetting\":1}")));
 Test("Cheeky uses real settings schema", () => { var schema = File.ReadAllText(Path.Combine(workspace, "external/cheeky/uevr/settings_fields.inc")); foreach (var key in ConfigurationWriters.Cheeky(new()).Split('\n').Where(l => l.Contains('=')).Select(l => l.Split('=')[0].Trim()).Where(k => k != "SchemaVersion")) Require(schema.Contains(key, StringComparison.Ordinal), key); });
+Test("The headset panel's corner is written for OFXR, upper right unless chosen (also for a profile saved without it)", () =>
+{
+    Require(ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia }).Contains("panel_position=upper_right"), "the default is where the panel always was");
+    foreach (var (corner, name) in new[] { (PanelPosition.UpperLeft, "upper_left"), (PanelPosition.LowerRight, "lower_right"), (PanelPosition.LowerLeft, "lower_left") })
+        Require(ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, HeadsetPanelPosition = corner }).Contains("panel_position=" + name), corner.ToString());
+    // The FPS counter keeps its own key: off does not move or hide the panel.
+    var counterOff = ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, ShowOverlay = false, HeadsetPanelPosition = PanelPosition.LowerLeft });
+    Require(counterOff.Contains("\nposition=off") && counterOff.Contains("panel_position=lower_left"));
+    var saved = JsonData.Serialize(new VrProfile { HeadsetPanelPosition = PanelPosition.LowerRight });
+    Require(saved.Contains("\"headsetPanelPosition\": \"LowerRight\"") || saved.Contains("\"headsetPanelPosition\":\"LowerRight\""), "saved by name");
+    Require(JsonData.Deserialize<VrProfile>(saved).HeadsetPanelPosition == PanelPosition.LowerRight && JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1}").HeadsetPanelPosition == PanelPosition.UpperRight);
+});
 Test("OFXR toggle configuration", () => { var ini = ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.FidelityFx, ShowOverlay = false }); Require(ini.Contains("backend=fidelityfx")); Require(ini.Contains("position=off")); });
 Test("Panel color correction is written only with a color mode and only when set", () =>
 {
@@ -592,6 +604,9 @@ Test("Triple frame generation writes the fork's triple_frame_gen and paces DCS a
     // Auto with frame generation only when needed (the default) asks DCS for the full refresh rate; without it, half.
     Require(FramePacing.Multiplier(auto) == 2 && FramePacing.RequestedCap(auto) == 90 && FramePacing.RequestedCap(auto with { FrameGenAdaptiveCadence = false }) == 45 && ProfileValidation.Validate(auto).All(i => i.Code != "framegen-factor"));
     Require(ConfigurationWriters.QuadViews(new VrProfile { QuadTurbo = true }).Contains("turbo_mode=1") && ConfigurationWriters.QuadViews(new VrProfile()).Contains("turbo_mode=0"));
+    // Turbo and frame generation both pace the frames: with frame generation on, Turbo is written off and the choice is kept.
+    foreach (var generator in new[] { FrameGeneration.Nvidia, FrameGeneration.FidelityFx })
+    { var both = new VrProfile { QuadTurbo = true, FrameGen = generator }; Require(ConfigurationWriters.QuadViews(both).Contains("turbo_mode=0") && both.QuadTurbo && !both.UsesQuadTurbo, "Turbo is off with " + generator); }
     {
         var tracked = ConfigurationWriters.QuadViews(new VrProfile { FrameGen = FrameGeneration.Nvidia });
         Require(tracked.Contains("dcsvr_saccade_widening=1") && tracked.Contains("dcsvr_saccade_lead_ms=85") && tracked.Contains("dcsvr_gaze_deadzone=0.5") && tracked.Contains("dcsvr_saccade_max_extend=0.35"));
@@ -735,6 +750,30 @@ Test("The DCS launcher is refused only inside a job that forbids breakaway, befo
         try { service.SyncAndPrepareLaunch(new VrProfile { KeepDcsLauncher = true }, new()); } catch (Exception e) when (e is InvalidOperationException or InvalidDataException or IOException) { Require(e.Message != LaunchSafety.LauncherBlockedMessage, e.Message); }
     }
     finally { LaunchSafety.CurrentJob = previous; }
+});
+Test("Presets are named files: clean names, one active, rename and delete follow it", () =>
+{
+    var store = new PresetStore(Path.Combine(root, "preset-store"));
+    Require(store.List().Count == 0 && store.Active is null, "an empty store has no presets");
+    Require(PresetStore.Clean("  Day:  flying? ") == "Day flying" && PresetStore.Clean("Night.") == "Night", "names are trimmed and lose what Windows refuses");
+    foreach (var bad in new[] { "", " : ", "CON", "nul.txt", "active", new string('x', PresetStore.MaxNameLength + 1) })
+    { var refused = false; try { PresetStore.Clean(bad); } catch (InvalidDataException) { refused = true; } Require(refused, "refused name: " + bad); }
+    Directory.CreateDirectory(store.Root);
+    File.WriteAllText(store.PathOf("Night"), "{}"); File.WriteAllText(store.PathOf("day flying"), "{}");
+    Require(string.Join("|", store.List()) == "day flying|Night", "listed by name, whatever the case");
+    store.SetActive("NIGHT"); Require(store.Active == "Night", "the active preset is found whatever its case");
+    var clash = false; try { store.Rename("Night", "Day Flying"); } catch (InvalidDataException) { clash = true; }
+    Require(clash && store.Exists("Night"), "a name in use is refused");
+    store.Rename("Night", "Night ops"); Require(store.Active == "Night ops" && !File.Exists(Path.Combine(store.Root, "Night.json")), "rename keeps it active");
+    store.Rename("day flying", "Day flying"); Require(store.List().Contains("Day flying"), "a rename can change only the case");
+    store.Delete("Night ops"); Require(store.Active is null && string.Join("|", store.List()) == "Day flying", "deleting the active preset leaves none active");
+    store.SetActive("Gone"); Require(store.Active is null, "an active name without a file counts as none");
+    File.WriteAllText(store.PathOf("Day flying"), "{\"name\":\"Pimax · Quad Views\"}");
+    store.Duplicate("Day flying", "Heavy mission"); Require(string.Join("|", store.List()) == "Day flying|Heavy mission" && store.Active is null, "a copy under a new name, nothing made active");
+    var copyClash = false; try { store.Duplicate("Day flying", "heavy mission"); } catch (InvalidDataException) { copyClash = true; } Require(copyClash, "a copy never replaces a preset");
+    File.WriteAllText(store.PathOf("Broken"), "not json");
+    var details = store.Details();
+    Require(details.Count == 3 && details.Single(d => d.Name == "Heavy mission").Summary == "Pimax · Quad Views" && details.Single(d => d.Name == "Broken").Summary is null, "details say what each preset runs; an unreadable file is still listed");
 });
 Test("The draft is kept across restarts and a damaged file is ignored", () =>
 {
@@ -1568,6 +1607,7 @@ Test("Depth boost with the dual camera: always gradual, no transition switch; th
 Test("DcsQvCull.ini trim: the module reads the same values as from the old full template", () =>
 {
     // The keys the old template wrote as constants, dropped from the ini (R107 F07), with the default the payload uses for
+    // The old template predates Free unused DLSS memory (on by default since 0.6.5): these profiles keep it off.
     // a missing key (ConfigurationWriters.DcsQvCullConstantTable; each checked against its read). Retired keys are not
     // read at all; a missing one is the same as the old constant 0. Developer mode writes them all again.
     var dropped = ConfigurationWriters.DcsQvCullConstants.ToDictionary(c => (c.Section, c.Key), c => c.Value);
@@ -1586,11 +1626,11 @@ Test("DcsQvCull.ini trim: the module reads the same values as from the old full 
         }
         return keys;
     }
-    var qv = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, EngineOptimizations = true };
+    var qv = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, EngineOptimizations = true, EngineReleaseIdleDlss = false };
     var profiles = new (string Name, VrProfile Profile)[]
     {
-        ("Optimizations only", new VrProfile { EngineOptimizations = true }),
-        ("VR stereo, tuned", new VrProfile { EngineOptimizations = true, EngineDiagnosticHooks = true, EngineBeeps = false, EngineShaderTimeCache = false, EngineTimerRefreshUs = 500, EngineToggleKey = "Off", BoostPrefetch = PrefetchFix.Observe, EngineShadowInstancing = false, EngineGBufferRecorder = false }),
+        ("Optimizations only", new VrProfile { EngineOptimizations = true, EngineReleaseIdleDlss = false }),
+        ("VR stereo, tuned", new VrProfile { EngineOptimizations = true, EngineReleaseIdleDlss = false, EngineDiagnosticHooks = true, EngineBeeps = false, EngineShaderTimeCache = false, EngineTimerRefreshUs = 500, EngineToggleKey = "Off", BoostPrefetch = PrefetchFix.Observe, EngineShadowInstancing = false, EngineGBufferRecorder = false }),
         ("QV + FG + DLSS 5", qv with { FrameGen = FrameGeneration.Nvidia, NeuralRendering = true, FarDepth = true }),
         ("Depth boost alone", qv with { EngineOptimizations = false, DepthBoost = true }),
         ("Depth boost with the engine, own aircraft off", qv with { DepthBoost = true, OwnAircraftTrueDepth = false, FrameGen = FrameGeneration.FidelityFx }),
@@ -1717,15 +1757,16 @@ Test("Visual realism: the pupil shift layer publishes the gaze for eye-focus blu
     Require((withPupil.Files.Single(f => f.Path.EndsWith("options.lua")).LuaChanges ?? []).Any(c => c.Path == "VR.custom_IPD_enable" && c.InstalledRaw == "false"), "with Pupil shift the layer still takes over DCS's IPD");
     Require(!planner.Build(vr with { GVision = true, GVisionUseGaze = false }, inventory, Path.Combine(root, "publish/managed-g")).Files.Any(f => f.Path.Contains("pupilshift")), "G vision straight ahead needs no layer");
 });
-Test("Free unused DLSS memory: [DLSS] ReleaseIdleSets=1 only with Engine Optimizations, one [DLSS] with the periphery preset, off as before", () =>
+Test("Free unused DLSS memory: on by default, [DLSS] ReleaseIdleSets=1 only with Engine Optimizations, one [DLSS] with the periphery preset, off as before", () =>
 {
     string Module(VrProfile p) => ConfigurationWriters.DcsQvCull(p).ReplaceLineEndings("\n");
-    // Off by default, also for an older profile without the field.
-    Require(!new VrProfile().EngineReleaseIdleDlss && !JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true}")!.EngineReleaseIdleDlss, "off by default, also for an older profile");
+    // On by default (0.6.5), also for an older profile without the field; a profile that says off stays off.
+    Require(new VrProfile().EngineReleaseIdleDlss && JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true}")!.EngineReleaseIdleDlss, "on by default, also for an older profile");
+    Require(!JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true,\"engineReleaseIdleDlss\":false}")!.UsesReleaseIdleDlss, "a saved off stays off");
     Require(JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true,\"engineReleaseIdleDlss\":true}")!.UsesReleaseIdleDlss, "loads from profile.json");
     const string block = "\n; Free unused DLSS memory: DCS sets up DLSS twice per mission load and never frees the first set; it is released\n; once DCS evaluates only the newest one. The image does not change.\nReleaseIdleSets=1";
-    var engine = new VrProfile { EngineOptimizations = true };
-    var qv = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked, EngineOptimizations = true };
+    var engine = new VrProfile { EngineOptimizations = true, EngineReleaseIdleDlss = false };
+    var qv = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked, EngineOptimizations = true, EngineReleaseIdleDlss = false };
     // On: [DLSS] ReleaseIdleSets=1 after [Perception], on a monitor and in VR; with it removed, the file as before.
     foreach (var p in new[] { engine, engine with { Desktop = true }, qv, qv with { EngineDevMode = true } })
     {
@@ -1734,7 +1775,7 @@ Test("Free unused DLSS memory: [DLSS] ReleaseIdleSets=1 only with Engine Optimiz
         Require(on.Split('\n').Count(l => l.Trim() == "[DLSS]") == 1 && !on.Contains("ReleaseAfterEvals"), "one [DLSS], ReleaseAfterEvals left to the module");
     }
     // Off, or set where it cannot run (Perception-only mode): byte-identical to a profile without it.
-    foreach (var p in new[] { engine, qv, qv with { EngineOptimizations = false, DepthBoost = true }, new VrProfile { ColorMode = ColorMode.Fix } })
+    foreach (var p in new[] { engine, qv, qv with { EngineOptimizations = false, DepthBoost = true }, new VrProfile { ColorMode = ColorMode.Fix, EngineReleaseIdleDlss = false } })
     {
         Require(!Module(p).Contains("[DLSS]") && !Module(p).Contains("ReleaseIdleSets"), "off: no [DLSS]");
         var set = p with { EngineReleaseIdleDlss = true };
@@ -1748,7 +1789,7 @@ Test("Free unused DLSS memory: [DLSS] ReleaseIdleSets=1 only with Engine Optimiz
 });
 Test("Periphery DLSS preset: [DLSS] and the layer's [DlssPreset] only while it runs, the focus preset fallback, and off every file as before", () =>
 {
-    var qv = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.Fixed, EngineOptimizations = true };
+    var qv = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.Fixed, EngineOptimizations = true, EngineReleaseIdleDlss = false };
     string Module(VrProfile p) => ConfigurationWriters.DcsQvCull(p).ReplaceLineEndings("\n");
     string Layer(VrProfile p) => ConfigurationWriters.PupilShift(p).ReplaceLineEndings("\n");
     // Off (the default), and set where it cannot run: the files exactly as without the setting.
@@ -2779,6 +2820,28 @@ foreach (var exists in new[] { false, true })
         AtomicFile.WriteText(f.Autoexec, "max_fps=20;"); Throws<IOException>(() => f.Service.PrepareLaunchApplied());
         Require(f.Service.RestoreOriginals().Complete && File.ReadAllText(f.Autoexec) == "max_fps=20;");
     });
+Test("Ultraleap hand tracking loads below the bundled Quad Views, only for this DCS (GitHub #20)", () =>
+{
+    var exe = Make("hands-order/bin/DCS.exe", "fixture"); var options = Make("hands-order/options.lua", Lua); var runtime = Make("hands-order/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("hands-order/runtime.dll", "fixture");
+    var dll = Make("hands-order/ultraleap/UltraleapHandTracking.dll", "fixture");
+    string Manifest(bool canDisable) => "{\"file_format_version\":\"1.0.0\",\"api_layer\":{\"name\":\"XR_APILAYER_ULTRALEAP_hand_tracking\",\"library_path\":\"UltraleapHandTracking.dll\",\"api_version\":\"1.0\",\"implementation_version\":\"1\",\"description\":\"fixture\",\"instance_extensions\":[{\"name\":\"XR_EXT_hand_tracking\",\"extension_version\":\"4\"}]" + (canDisable ? ",\"disable_environment\":\"DISABLE_XR_APILAYER_ULTRALEAP_hand_tracking\"" : "") + "}}";
+    var manifest = Make("hands-order/ultraleap/UltraleapHandTracking.json", Manifest(true));
+    InventorySnapshot Inventory(string path, bool enabled) => new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime, Layers = [new("LocalMachine", path, enabled, "XR_APILAYER_ULTRALEAP_hand_tracking", dll, true)] };
+    DeploymentPlanner Planner() => new(new(null, null, null, Path.Combine(workspace, "external/quadviews/bin/x64/Release")));
+    var p = new VrProfile { Runtime = RuntimeKind.Pimax, QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Off };
+    var plan = Planner().Build(p, Inventory(manifest, true), Path.Combine(root, "hands-order/managed"));
+    Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_ULTRALEAP_hand_tracking", "last in the list: closest to the runtime");
+    Require(plan.LaunchEnvironment["DISABLE_XR_APILAYER_ULTRALEAP_hand_tracking"] == "1", "the registered copy is off for this DCS");
+    var written = Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("hand-tracking.json")).Content);
+    Require(written.Contains("UltraleapHandTracking.dll") && written.Contains("XR_EXT_hand_tracking"), "its own manifest, with the extensions it offers");
+    var off = Planner().Build(p, Inventory(manifest, false), Path.Combine(root, "hands-order/managed-off"));
+    Require(!off.LaunchEnvironment["XR_ENABLE_API_LAYERS"].Contains("ULTRALEAP") && !off.LaunchEnvironment.ContainsKey("DISABLE_XR_APILAYER_ULTRALEAP_hand_tracking"), "a layer the user turned off stays off");
+    var native = Planner().Build(p with { QuadViews = QuadProvider.PimaxNative }, Inventory(manifest, true), Path.Combine(root, "hands-order/managed-native"));
+    Require(!native.LaunchEnvironment.ContainsKey("DISABLE_XR_APILAYER_ULTRALEAP_hand_tracking"), "without the bundled Quad Views it is left as it is");
+    var fixedManifest = Make("hands-order/ultraleap-fixed/UltraleapHandTracking.json", Manifest(false)); Make("hands-order/ultraleap-fixed/UltraleapHandTracking.dll", "fixture");
+    var kept = Planner().Build(p, Inventory(fixedManifest, true), Path.Combine(root, "hands-order/managed-kept"));
+    Require(kept.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_MBUCCHIA_quad_views_foveated", "a manifest that cannot be turned off for one process is left as it is");
+});
 Test("Sboys gaze bridge loads explicitly below Quad Views", () =>
 {
     var exe = Make("gaze-order/bin/DCS.exe", "fixture"); var options = Make("gaze-order/options.lua", Lua); var runtime = Make("gaze-order/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("gaze-order/runtime.dll", "fixture");

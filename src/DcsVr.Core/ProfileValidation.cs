@@ -320,7 +320,7 @@ public static class ProfileValidation
             if (profile.UsesCheeky)
                 Error("dlss-gpu", $"DLSS 5 and Foveated Super Resolution need an NVIDIA RTX graphics card; this PC has {GpuInfo.Names}. Turn them off on the DLSS page.");
             if (profile.FrameGen == FrameGeneration.Nvidia)
-                Error("framegen-gpu", $"NVIDIA optical-flow frame generation needs an NVIDIA RTX graphics card; this PC has {GpuInfo.Names}. Choose FidelityFX on the Framegen page: it runs on any graphics card.");
+                Error("framegen-gpu", $"NVIDIA optical-flow frame generation needs an NVIDIA RTX graphics card; this PC has {GpuInfo.Names}. Choose FidelityFX on the Frame generation page: it runs on any graphics card.");
         }
         // NVIDIA's Threaded optimization is not checked here: Off did not remove the driver's command lists in a live test
         // (RTX 5090, driver 32.0.16.2114: the module logged DriverCommandLists=1). The diagnostic package still records it.

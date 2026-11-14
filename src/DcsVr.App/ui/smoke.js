@@ -25,7 +25,7 @@ window.runWebSmoke = async function() {
     'glare','glareStrength','nightVisionBlue','nightVisionBlur','nightVisionScotopic','nightVisionPhotopic','glareThresholdEv','glareRadius','glareStreak',
     'gazeDof','gazeDofStrength','gazeDofMaxArcmin','gazeDofSaccadeRelease','gazeDofSettleMs','gazeDofFadeInMs','gazeDofToleranceD','gazeDofFoveaGuardDeg','gazeDofPupilMm',
     'gVision','gVisionStrength','gVisionUseGaze','gVisionRedout','gVisionTolerance','gVisionMode',
-    'headsetPanel','diagnosticOverlayAtStart','diagnosticVram','diagnosticOverlayKey','engineToggleKey','neuralToggleKey','pupilShiftToggleKey','farDepthToggleKey',
+    'headsetPanel','diagnosticOverlayAtStart','headsetPanelPosition','diagnosticVram','diagnosticOverlayKey','engineToggleKey','neuralToggleKey','pupilShiftToggleKey','farDepthToggleKey',
     'depthBoostToggleKey','colorModeKey','runtimeManifestPath'];
   // Every folded disclosure (details.advanced), named by its id or the first setting inside it.
   const ADVANCED_FOLDS = ['quadViewsLayerDirectory','neuralAdvanced','showOverlay','engineGBufferRecorder','engineShaderCachePrewarm','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
@@ -38,7 +38,7 @@ window.runWebSmoke = async function() {
   const press = (keyCode,mods = '') => window.dispatchEvent(new KeyboardEvent('keydown',{keyCode,ctrlKey:mods.includes('c'),altKey:mods.includes('a'),shiftKey:mods.includes('s'),metaKey:mods.includes('w'),bubbles:true,cancelable:true}));
   const sleep = ms => new Promise(r => setTimeout(r,ms));
   // The right panel's checklist, profile name and setup buttons fit without scrolling at the 1320 × 920 verification size.
-  const panelFits = () => { const t = document.querySelector('.panel-top'); return innerWidth !== 1320 || innerHeight !== 920 || t.scrollHeight <= t.clientHeight; };
+  const panelFits = () => { const t = document.querySelector('.topbar'); return t.scrollWidth <= t.clientWidth && $('launch').getBoundingClientRect().right <= document.querySelector('.window-controls').getBoundingClientRect().left; };
   const waitIdle = async () => { for(let i=0;i<500 && document.body.classList.contains('busy');i++) await new Promise(r => setTimeout(r,20)); };
   // The right-panel checklist, used exactly as a user would: route switch, then one checkbox per feature.
   function select(route,features) {
@@ -106,17 +106,17 @@ window.runWebSmoke = async function() {
         $('searchDialog').close();
         check('With Optimizations only search leaves out hidden settings and cards: the headset panel, its key, DLSS 5 on the focus area and the VR helpers',!panel.includes('Headset panel (OSD)') && !panel.includes('Headset panel') && keys.includes('In-flight keys') && !focus.includes('DLSS 5 not applied') && !helpers.length); }
       ui.navigate('osd');
-      check('With Optimizations only the In flight page shows the keys in one column, without an empty one beside them',$('panelControls').hidden && getComputedStyle($('panelControls').parentElement).display === 'none' && Math.abs($('keysControls').getBoundingClientRect().width - $('page-osd').querySelector('.two-column').getBoundingClientRect().width) < 2);
+      check('With Optimizations only the Keys & headset panel page shows the keys in one column, without an empty one beside them',$('panelControls').hidden && getComputedStyle($('panelControls').parentElement).display === 'none' && Math.abs($('keysControls').getBoundingClientRect().width - $('page-osd').querySelector('.two-column').getBoundingClientRect().width) < 2);
       ui.navigate('overview');
       document.querySelector(`#routeSwitch [data-route="${before.runtime}"]`).click();
       check('Pimax or Sboys after Optimizations only brings the VR features back',ui.profile.desktop === false && ui.profile.runtime === before.runtime && ui.profile.quadViews === before.quadViews && ui.profile.frameGen === before.frameGen && ui.profile.neuralRendering === before.neural && !$('feature-quad').hidden && !$('nav-foveation').hidden); }
     check('Legacy defaults preserve the DCS frame limit and VSync',ui.profile.fpsLimit === 'Preserve' && !ui.profile.disableDcsVSync);
-    for(const id of ['overview','guide','foveation','dlss','framegen','pupil','visual','osd','boost','engine','setup','diagnostics','support','recovery']) { ui.navigate(id); check('Navigate '+id,!$('page-'+id).hidden && $('nav-'+id).getAttribute('aria-current') === 'page'); }
+    for(const id of ['overview','presets','guide','foveation','dlss','framegen','pupil','visual','osd','boost','engine','setup','diagnostics','support','recovery']) { ui.navigate(id); check('Navigate '+id,!$('page-'+id).hidden && $('nav-'+id).getAttribute('aria-current') === 'page'); }
     ui.navigate('overview'); document.dispatchEvent(new KeyboardEvent('keydown',{key:'0',code:'Digit0',ctrlKey:true,bubbles:true,cancelable:true}));
-    check('Ctrl+0 opens In flight, and its rail button says so',!$('page-osd').hidden && $('nav-osd').title === 'In flight (Ctrl 0)');
+    check('Ctrl+0 opens Keys & headset panel, and its rail button says so',!$('page-osd').hidden && $('nav-osd').title === 'Keys & headset panel (Ctrl 0)');
     document.dispatchEvent(new KeyboardEvent('keydown',{key:'C',code:'KeyC',ctrlKey:true,shiftKey:true,bubbles:true,cancelable:true}));
     check('Ctrl+Shift+C opens Checks, and its rail button says so',!$('page-diagnostics').hidden && $('nav-diagnostics').title === 'Checks (Ctrl Shift C)');
-    check('The frame generation page is called Framegen',$('nav-framegen').textContent.startsWith('Framegen') && $('pageTitle').textContent !== 'Frame rate' && (ui.navigate('framegen'), $('pageTitle').textContent === 'Framegen'));
+    check('The frame generation page is called Frame generation',$('nav-framegen').textContent.startsWith('Frame generation') && $('pageTitle').textContent !== 'Frame rate' && (ui.navigate('framegen'), $('pageTitle').textContent === 'Frame generation'));
     { ui.navigate('guide'); const cards = [...document.querySelectorAll('#featureGuide .guide-card')];
       check('The Feature guide has a card per feature, each with its benefit and an Open button that leads to its page',cards.length >= 10 && cards.every(c => c.querySelector('.guide-impact') && c.querySelector('[data-guide-page]'))
         && (cards[0].querySelector('[data-guide-page]').click(), page === 'engine' || $('nav-engine').classList.contains('selected'))); ui.navigate('overview'); }
@@ -127,7 +127,7 @@ window.runWebSmoke = async function() {
       check('Last flight reads the engine optimizations from the module log: all on after the warm-up, none turned off',f.engine && f.engine.on === 18 && f.engine.configured === 18 && !f.engine.turnedOff.length && !f.engine.offSeconds && f.engine.warmupSeconds === 95);
       ui.loadFlight(0); await sleep(150);
       check('Overview shows the last flight as one compact card',$('flightBody').querySelectorAll('.flight-item').length === 7 && $('flightBody').textContent.includes('18 of 18 on') && $('flightBody').textContent.includes('warm-up 2 min') &&$('flightTitle').textContent.includes('min') && $('flightBody').textContent.includes('3×') && $('flightBody').textContent.includes('310.8'));
-      check('Overview opens with the launch status and the checks in one line, without a separate list of problems',!$('overviewNotes') && $('dashStatus').querySelector('.dash-main b') && $('dashStatus').querySelector('.dash-chip') && $('pipeline').querySelectorAll('.stage-group:not(.extra) .stage').length === 5); }
+      check('Overview opens with the launch status and the checks in one line, without a separate list of problems',!$('overviewNotes') && $('dashStatus').querySelector('.dash-main b') && $('dashStatus').querySelector('.dash-chip') && $('featureList').querySelectorAll('.feature').length >= 5 && $('featureList').closest('#page-overview')); }
     edit('fpsLimit','MatchRefresh'); edit('headsetRefreshHz',90); edit('frameGen','Nvidia');
     check('OFXR matching mode with frames only when needed lets DCS render up to 90 FPS at 90 Hz',$('cadenceMetrics').textContent.includes('90 FPS'));
     edit('frameGenAdaptiveCadence',false);
@@ -164,9 +164,9 @@ window.runWebSmoke = async function() {
     let preferencesRefused = false; try { await ui.request('preferences',{reducedMotion:true}); } catch(e) { preferencesRefused = /Unknown interface command/.test(e.message); } check('The motion preference command is gone',preferencesRefused);
     select('Pimax',{quad:true,dlss:true,framegen:true,boost:true});
     check('Smoke runs at the 1320 x 920 verification size',innerWidth === 1320 && innerHeight === 920);
-    const panelSizes = () => { const t = document.querySelector('.panel-top'); return ` (content ${t.scrollHeight} px in ${t.clientHeight} px; ` + [...t.children].map(c => (c.className || c.tagName)+' '+Math.round(c.getBoundingClientRect().height)).join(', ') + `; footer ${Math.round(document.querySelector('.workflow').getBoundingClientRect().height)})`; };
-    check('Right panel fits at 1320 x 920 with every feature on and its notes, without a scroll cue'+(panelFits() ? '' : panelSizes()),panelFits() && !document.querySelector('.workflow').classList.contains('more-above') && document.querySelector('.panel-profile').getBoundingClientRect().bottom <= document.querySelector('.workflow').getBoundingClientRect().top);
-    check('Each feature is one row: checkbox, name, one-line state and a chevron',ui.FEATURES.every(([key]) => { const row = $('feature-'+key), summary = $('featureSummary-'+key); return row.querySelector('input[type=checkbox]') && row.querySelector('.feature-open') && summary.closest('label') && getComputedStyle(summary).whiteSpace === 'nowrap' && summary.title === summary.textContent; }));
+    const panelSizes = () => { const t = document.querySelector('.topbar'); return ` (content ${t.scrollWidth} px in ${t.clientWidth} px; ` + [...t.children].map(c => (c.className || c.tagName)+' '+Math.round(c.getBoundingClientRect().width)).join(', ') + ')'; };
+    check('Top bar fits with every feature on: route, status and Launch DCS in one line, nothing under the window buttons'+(panelFits() ? '' : panelSizes()),panelFits() && $('statusTitle').getBoundingClientRect().width > 0 && $('featureList').querySelectorAll('.feature').length >= 5);
+    check('Each feature is one card: switch, name, a short state that wraps and a chevron',ui.FEATURES.every(([key]) => { const row = $('feature-'+key), summary = $('featureSummary-'+key); return row.querySelector('input[type=checkbox]') && row.querySelector('.feature-open') && summary.closest('label') && getComputedStyle(summary).whiteSpace === 'normal' && getComputedStyle(row.querySelector('input')).appearance === 'none' && summary.title === summary.textContent; }));
     check('Dependency notes are short and only where they apply',[...document.querySelectorAll('#featureList .feature-note span')].every(n => n.textContent.length <= 40) && $('featureNotes-framegen').textContent === '' && $('featureNotes-boost').textContent === '');
     // Compact settings: segmented choices, short help with More, fold values, folded program lists, toggle lists, density.
     { const SEGMENTED_S1 = ['quadViews','gaze','foveaSource','frameGen','frameGenFactor','frameGenPassThrough','fpsLimit','nvidiaFlowScale','flowPreset','boostDcsPriority'];
@@ -261,7 +261,7 @@ window.runWebSmoke = async function() {
         check('EXPERIMENTAL stays on exactly its eight settings and cards',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
       ui.navigate('framegen'); const refreshInput = getComputedStyle($('input-headsetRefreshHz')).minHeight, row = getComputedStyle($('setting-headsetRefreshHz'));
       ui.navigate('boost'); const monitorSelect = getComputedStyle($('input-flightDisplayMode')).minHeight;
-      check('Compact density: 32 px controls and 7 px setting rows at 1320 x 920',innerWidth === 1320 && refreshInput === '32px' && monitorSelect === '32px' && row.paddingTop === '7px' && row.paddingBottom === '7px'); }
+      check('Density: 34 px controls and 11 px setting rows at 1320 x 920',innerWidth === 1320 && refreshInput === '34px' && monitorSelect === '34px' && row.paddingTop === '11px' && row.paddingBottom === '11px'); }
     // In-flight keys: click the field, press the combination.
     ui.navigate('dlss'); { const nrKey = $('input-neuralToggleKey'), diagKey = $('input-diagnosticOverlayKey'), before = ui.profile.neuralToggleKey;
       check('The DLSS 5 key is a capture field showing the key as it reads',ui.fields.find(f => f.path === 'neuralToggleKey').type === 'hotkey' && nrKey.tagName === 'BUTTON' && nrKey.textContent === ui.keyLabel(ui.parseKey(before)));
@@ -361,13 +361,13 @@ window.runWebSmoke = async function() {
     { const cursor = ui.fields.find(f => f.path === 'smoothCursor');
       check('Smooth mouse cursor sits under Frame generation, off by default, and says the click does not move',cursor.page === 'framegen' && cursor.type === 'toggle' && ui.profile.smoothCursor === false && !$('setting-smoothCursor').closest('details') && $('setting-smoothCursor').textContent.includes("Where you click doesn't change")); }
     { const vram = ui.fields.find(f => f.path === 'diagnosticVram');
-      check('The VRAM counter sits with the headset panel settings on the In flight page, off by default',vram.page === 'osd' && vram.type === 'toggle' && $('setting-diagnosticVram').closest('.card') === $('setting-headsetPanel').closest('.card') && ui.profile.diagnosticVram === false);
+      check('The VRAM counter sits with the headset panel settings on the Keys & headset panel page, off by default',vram.page === 'osd' && vram.type === 'toggle' && $('setting-diagnosticVram').closest('.card') === $('setting-headsetPanel').closest('.card') && ui.profile.diagnosticVram === false);
       check('With Frame generation the headset panel switch gives way to a line saying the panel is always on',ui.profile.desktop || (ui.profile.frameGen !== 'Off' ? $('setting-headsetPanel').hidden && !$('headsetPanelAlways').hidden : !$('setting-headsetPanel').hidden && $('headsetPanelAlways').hidden)); }
     // The draft on screen is saved a moment after an edit, so it survives an app restart.
     edit('quadSharpening',.62); await sleep(900); check('The draft is saved after an edit',ui.savedDraft === JSON.stringify(ui.draft()));
     check('Profile name follows the route and the checked features',ui.profile.name === 'Pimax · Quad Views + DLSS 5 + Frame generation + CPU Boost' && ui.profile.id === 'pimax-qv-dlss5-fg-boost' && $('profileName').textContent === ui.profile.name);
-    check('Overview shows a CPU Boost tile next to the other features',$('pipeline').querySelectorAll('.stage-group:not(.extra) .stage').length === 5 && $('pipeline').querySelector('[data-page=boost]').classList.contains('on'));
-    check('Overview shows Perception, Visual realism and In flight as a third tile group in VR',$('pipeline').querySelectorAll('.stage-group.extra .stage').length === 3 && $('pipeline').querySelector('.stage-group.extra [data-page=osd]').classList.contains('on') === (ui.profile.frameGen !== 'Off' || Boolean(ui.profile.headsetPanel)));
+    check('Overview shows a CPU Boost card next to the other features',$('feature-boost').closest('#page-overview') && $('feature-boost').classList.contains('on'));
+    check('Overview shows Perception, Visual realism and Keys & headset panel as a third tile group in VR',$('pipeline').querySelectorAll('.stage-group.extra .stage').length === 3 && $('pipeline').querySelector('.stage-group.extra [data-page=osd]').classList.contains('on') === (ui.profile.frameGen !== 'Off' || Boolean(ui.profile.headsetPanel)));
     edit('quadViews','PimaxNative');
     check('DLSS 5 with Quad Views keeps the bundled provider and the focus adapter, explained in one short note',ui.profile.quadViews === 'QuadViewsFoveated' && ui.profile.quadFocusAdapter && $('featureNotes-quad').textContent.includes("can't host") && $('featureNotes-quad').textContent.length < 60 && $('input-quadViews').querySelector('[value=PimaxNative]').disabled);
     check('DLSS 5 without its runtime file asks for it inline',ui.profile.neuralRuntimePath || $('featureNotes-dlss').textContent.includes('Select file'));
@@ -547,7 +547,7 @@ window.runWebSmoke = async function() {
     $('featureCheck-quad').click(); $('featureCheck-quad').click(); check('Quad Views turned back on uses the provider last selected',ui.profile.quadViews === 'PimaxNative');
     // Stereo Foveated Super Resolution: shown for stereo, and Cheeky writes ratios of at least 0.2, and the page says so.
     $('featureCheck-quad').click(); edit('foveatedDlss',true);
-    check('Stereo Foveated Super Resolution alone checks the DLSS row and lights the DLSS tile',!$('foveatedDlssControls').hidden && $('setting-foveatedDlss').textContent.includes('For stereo without Quad Views') && $('featureCheck-dlss').checked && $('featureSummary-dlss').textContent.startsWith('Foveated Super Resolution on') && $('pipeline').querySelector('[data-page=dlss]').classList.contains('on') && !$('input-quadViews').querySelector('[value=PimaxNative]').disabled);
+    check('Stereo Foveated Super Resolution alone checks the DLSS row and lights the DLSS card',!$('foveatedDlssControls').hidden && $('setting-foveatedDlss').textContent.includes('For stereo without Quad Views') && $('featureCheck-dlss').checked && $('featureSummary-dlss').textContent.startsWith('Foveated Super Resolution on') && $('feature-dlss').classList.contains('on') && !$('input-quadViews').querySelector('[value=PimaxNative]').disabled);
     $('featureCheck-dlss').click(); check('Unchecking the DLSS row turns DLSS 5 and Foveated Super Resolution off',!ui.profile.foveatedDlss && !ui.profile.neuralRendering && ui.profile.quadViews === 'None');
     edit('foveatedDlss',true); edit('peripheralScale',.15);
     check('Stereo Foveated Super Resolution shows the 0.2 Cheeky writes',$('help-peripheralScale').textContent.includes('0.2 is written') && ui.effectiveFovea(ui.profile).periphery === .2 && !$('help-foveaWidth').textContent.includes('is written'));
@@ -595,6 +595,38 @@ window.runWebSmoke = async function() {
     edit('quadViews','QuadViewsFoveated'); edit('foveatedDlss',true);
     check('With Quad Views Foveated Super Resolution never turns on, and the focus adapter follows DLSS 5',!ui.profile.foveatedDlss && ui.profile.quadFocusAdapter === Boolean(ui.profile.neuralRendering) && !$('featureSummary-dlss').textContent.includes('Foveated'));
     await ui.run('refresh'); $('toast').hidden = true;
+    // Presets: named copies kept by the app; every edit goes into the active one. The Overview button switches and saves
+    // a new one; the Presets page manages them.
+    { ui.navigate('overview'); const until = async test => { for (let i = 0; i < 250 && !test(); i++) await sleep(20); return test(); };
+      const act = async fn => { fn(); await sleep(40); await waitIdle(); }, saved = async () => { await sleep(900); return until(() => $('presetSaved').textContent === 'Saved'); };
+      const names = () => ui.state.presets.items.join('|'), before = ui.profile.quadSharpening, card = name => $('presetCards').querySelector(`[data-name="${name}"]`), press = (name,what) => card(name).querySelector(`[data-act=${what}]`).click();
+      const typeIn = (name,value) => act(() => { const form = card(name).querySelector('form'); form.querySelector('input').value = value; form.requestSubmit(); });
+      check('Presets start empty: the Overview button says None, and the Presets page explains what a preset is',$('presetName').textContent === 'None' && $('presetList').textContent.includes('No presets yet') && $('profileName').hidden && $('presetCards').textContent.includes('No presets yet') && $('navState-presets').hidden);
+      $('presetMenu').open = true; $('presetNew').click(); const formOpen = !$('presetForm').hidden; await act(() => { $('presetInput').value = 'Day: flying?'; $('presetForm').requestSubmit(); });
+      check('Save as a new preset (Overview) keeps the settings under a clean name and makes it the active one',formOpen && ui.state.presets.active === 'Day flying' && names() === 'Day flying' && $('presetName').textContent === 'Day flying' && $('presetForm').hidden);
+      edit('quadSharpening',.21); const savedDay = await saved();
+      ui.navigate('presets'); $('presetPageNew').click(); const pageForm = !$('presetPageForm').hidden; await act(() => { $('presetPageInput').value = 'Night'; $('presetPageForm').requestSubmit(); });
+      edit('quadSharpening',.44); const savedNight = await saved();
+      check('The Presets page lists each preset with what it runs and when it changed, the active one marked',pageForm && $('presetCards').querySelectorAll('.preset-card').length === 2 && card('Night').classList.contains('active') && card('Night').querySelector('.preset-chip') && !card('Night').querySelector('[data-act=use]') && card('Day flying').querySelector('.preset-card-summary').textContent === ui.profile.name
+        && card('Day flying').textContent.includes('Changed ') && $('presetCurrentTitle').textContent === 'Night' && $('navState-presets').textContent === '2' && $('presetCount').textContent.startsWith('2 presets'));
+      await act(() => press('Day flying','use')); const day = ui.profile.quadSharpening, dayActive = ui.state.presets.active;
+      ui.navigate('overview'); $('presetMenu').open = true; await act(() => $('presetList').querySelector('[data-preset="Night"]').click());
+      check('Every edit is saved into the active preset, and Use brings back each preset with its own values',savedDay && savedNight && day === .21 && dayActive === 'Day flying' && ui.profile.quadSharpening === .44 && ui.state.presets.active === 'Night' && $('input-quadSharpening').value === '0.44' && !$('presetMenu').open);
+      ui.navigate('presets'); press('Night','rename'); const prefilled = card('Night').querySelector('form input').value === 'Night'; await typeIn('Night','day flying');
+      check('A name already in use is refused on the preset\'s own card, and nothing changes',prefilled && card('Night').querySelector('.preset-error').textContent.includes('already exists') && names() === 'Day flying|Night' && card('Night').querySelector('form'));
+      await typeIn('Night','Night ops');
+      check('Rename keeps the preset active under its new name',ui.state.presets.active === 'Night ops' && names() === 'Day flying|Night ops' && $('presetName').textContent === 'Night ops' && !$('presetCards').querySelector('form'));
+      press('Day flying','duplicate'); const suggested = card('Day flying').querySelector('form input').value === 'Day flying copy'; await typeIn('Day flying','Heavy mission');
+      check('Duplicate makes a copy under a new name and leaves the active preset alone',suggested && names() === 'Day flying|Heavy mission|Night ops' && ui.state.presets.active === 'Night ops' && ui.profile.quadSharpening === .44);
+      press('Night ops','delete'); const asked = card('Night ops').querySelector('[data-act=delete]').textContent.includes('Click again') && names().includes('Night ops'); await act(() => press('Night ops','delete'));
+      check('Delete asks once in place; the settings on screen stay and no preset is active',asked && names() === 'Day flying|Heavy mission' && ui.state.presets.active === null && $('presetCurrentTitle').textContent === 'Not in a preset' && ui.profile.quadSharpening === .44);
+      press('Day flying','use'); await sleep(60);
+      check('Using a preset while the settings on screen are in none warns first',ui.matchesApplied() || (card('Day flying').querySelector('.preset-error').textContent.includes('will be replaced') && card('Day flying').querySelector('[data-act=use]').textContent === 'Use anyway' && ui.profile.quadSharpening === .44 && ui.state.presets.active === null));
+      document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'})); edit('quadSharpening',before); await saved(); }
+    // The page area never scrolls sideways (the document itself cannot: the area clips it, so it is measured here).
+    { const wide = []; for (const id of ['overview','presets','guide','foveation','dlss','framegen','pupil','visual','osd','boost','engine','setup','diagnostics','support','recovery']) { ui.navigate(id); await sleep(40); const area = $('scrollArea'), limit = area.getBoundingClientRect().right;
+        if (area.scrollWidth > area.clientWidth) wide.push(id+' +'+(area.scrollWidth - area.clientWidth)+' '+[...area.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > limit + 1).slice(0,2).map(e => e.tagName+'#'+e.id).join(',')); }
+      check('No page scrolls sideways'+(wide.length ? ' ('+wide.join('; ')+')' : ''),!wide.length); }
     ui.navigate('overview'); check('No fixture change remains',ui.state.originals.count === 0 && !ui.state.launchReady);
     window.chrome.webview.postMessage({smokeResult:{passed:true,count:checks.length,checks,mode:'Hidden HWND; real WebView2 + real .NET bridge; isolated deployment fixtures; no DCS launch'}});
   } catch(error) { window.chrome.webview.postMessage({smokeResult:{passed:false,count:checks.length,checks,error:error.stack}}); }
