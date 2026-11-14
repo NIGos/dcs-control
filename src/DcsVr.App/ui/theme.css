@@ -1029,3 +1029,19 @@ nav::-webkit-scrollbar{width:0;height:0}
 .release-notes li li:before{top:11px;background:var(--muted)}
 .release-notes b{color:var(--text);font-weight:600}
 .release-notes code{padding:1px 5px;border-radius:4px;background:var(--s2);font:12px Consolas,"Cascadia Mono",monospace;color:var(--text);overflow-wrap:anywhere}
+/* ---- Ko-fi: quiet, always in the same places ---------------------------------------------------------------------- */
+.rail-foot{display:flex;align-items:center;gap:6px}
+.rail-support{display:flex;align-items:center;justify-content:center;gap:6px;min-height:26px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:var(--muted);font:500 12px "Segoe UI",Interface,sans-serif;cursor:pointer}
+.rail-support svg,.support-link svg,.support-card .button svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linejoin:round;flex-shrink:0}
+.rail-support:hover{background:#ffffff0a;color:var(--text)}
+.rail-support:hover svg,.support-link:hover svg{stroke:#ff5e5b;fill:#ff5e5b33}
+.rail-support span{display:none}
+@media(min-width:1181px){.rail-foot{justify-content:space-between}.rail-support{padding:0 8px}.rail-support span{display:inline}}
+@media(max-width:1180px){.rail-foot{flex-direction:column;gap:2px}}
+.notes-actions{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.support-link{display:inline-flex;align-items:center;gap:7px;padding:4px 6px;border:0;border-radius:6px;background:transparent;color:var(--muted);font:13px "Segoe UI",Interface,sans-serif;cursor:pointer;text-align:left}
+.support-link:hover{color:var(--text)}
+.support-card .card-heading{display:flex;align-items:center;gap:16px}
+.support-card .card-heading>div{flex:1;min-width:0}
+.support-card .button{display:inline-flex;align-items:center;gap:7px;flex-shrink:0}
+.support-card .button:hover svg{stroke:#ff5e5b;fill:#ff5e5b33}

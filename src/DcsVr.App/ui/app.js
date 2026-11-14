@@ -2152,6 +2152,11 @@ function initializeUpdates() {
   $('updateOpen').addEventListener('click',() => openUpdateDialog(!updates?.portable));
   $('updateHide').addEventListener('click',() => { updateBannerHidden = true; renderUpdates(); });
   $('supportOpen').addEventListener('click',() => { $('supportBanner').hidden = true; request('supportOpen').catch(showError); });
+  // The same page from three quiet places that are always there: the rail's foot, Help & support and What's new.
+  { const card = document.createElement('div'); card.className = 'card support-card'; card.id = 'supportCard';
+    card.innerHTML = '<div class="card-heading"><div><h2>Support the project</h2><p class="fine">DCS Control is free and open source. If it makes your flights better, you can buy me a coffee.</p></div><button type="button" class="button secondary" id="supportCardOpen" data-support title="Opens ko-fi.com in your browser"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-7.5-4.6-7.5-10.2A4.3 4.3 0 0 1 12 7.6a4.3 4.3 0 0 1 7.5 2.7c0 5.6-7.5 10.2-7.5 10.2Z"/></svg>Ko-fi</button></div>';
+    $('updatesCard').after(card); }
+  document.addEventListener('click',e => { if (e.target.closest('[data-support]')) request('supportOpen').catch(showError); });
   $('supportOff').addEventListener('click',() => { $('supportBanner').hidden = true; request('supportOff').catch(showError); });
   $('supportHide').addEventListener('click',() => $('supportBanner').hidden = true);
   const leaveUpdate = () => { if (updates?.installing && !updates.handedOff) request('updateCancel').catch(()=>{}); };
