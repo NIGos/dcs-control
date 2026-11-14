@@ -55,6 +55,11 @@ window.runWebSmoke = async function() {
         && notes.textContent.includes('Fixture notes') && notes.textContent.includes('<b>not markup</b>') && !notes.querySelector('b b, script, img') && notes.querySelectorAll('li').length === 2 && !notes.textContent.includes('Older notes'));
       $('whatsNewClose').click();
       check("What's new shows once per version",!$('whatsNewDialog').open && !(await ui.request('whatsNew',{startup:true})).show);
+      { const box = document.createElement('div'); box.append(ui.notesFragment('**Presets.** A new **Presets** page, kept in `presets`.\n\n**Loose bold** stays in its sentence.\n\n**Fixes:**\n- One <b>fix</b>\n- Two'));
+        const item = box.querySelector('.note-item');
+        check("What's new lays the notes out: an entry with its title, a Fixes section, code as code, nothing as markup",box.querySelectorAll('.note-item').length === 1 && item.querySelector('.note-title').textContent === 'Presets'
+          && item.querySelector('p').textContent === 'A new Presets page, kept in presets.' && item.querySelector('p code').textContent === 'presets' && box.querySelector('h3.note-section').textContent === 'Fixes'
+          && box.querySelectorAll('li').length === 2 && box.querySelector('li').textContent === 'One <b>fix</b>' && !box.querySelector('li b') && [...box.children].some(e => e.tagName === 'P' && e.querySelector('b')?.textContent === 'Loose bold')); }
       $('appVersionButton').click(); check("The rail's version number opens What's new again",await until(() => $('whatsNewDialog').open) && $('whatsNewTitle').textContent.includes(ui.state.version.split('-')[0]));
       $('whatsNewClose').click();
       check('An available update shows a banner on the Overview and a dot on the version',await until(() => !$('updateBanner').hidden) && $('updateBannerText').textContent === `DCS Control ${short} is available`

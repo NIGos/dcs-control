@@ -2027,12 +2027,23 @@ const sizeText = bytes => bytes >= 1048576 ? (bytes/1048576).toFixed(1)+' MB' : 
 /** Release notes as plain text: paragraphs, headings and (nested) bullet lists built with text nodes, never innerHTML,
  *  because the notes are untrusted text from GitHub. **bold** shows bold; code marks and links show as their text. */
 function notesFragment(markdown) {
+  // Release notes as text, never as markup: every node is built here and filled with textContent. The notes' own shape
+  // gives the layout: a paragraph that opens with a bold sentence ("**Presets.** A new page…") is an entry with that
+  // sentence as its title, a bold line ending in a colon on its own ("**Fixes:**") is a section, the rest is plain
+  // paragraphs and bullets. `code` keeps its look; a link shows its text only.
   const out = document.createDocumentFragment(); let lists = [], para = null;
   const inline = (el, text) => {
-    const plain = text.replace(/`([^`]*)`/g,'$1').replace(/\[([^\]]+)\]\([^)\s]*\)/g,'$1');
-    plain.split(/\*\*(.+?)\*\*/).forEach((part,i) => { if (!part) return; if (i % 2) { const b = document.createElement('b'); b.textContent = part; el.append(b); } else el.append(document.createTextNode(part)); });
+    const plain = text.replace(/\[([^\]]+)\]\([^)\s]*\)/g,'$1');
+    plain.split(/(\*\*.+?\*\*|`[^`]*`)/).forEach(part => {
+      if (!part) return;
+      const bold = /^\*\*(.+)\*\*$/.exec(part), code = /^`([^`]*)`$/.exec(part);
+      if (bold) { const b = document.createElement('b'); b.textContent = bold[1]; el.append(b); }
+      else if (code) { const c = document.createElement('code'); c.textContent = code[1]; el.append(c); }
+      else el.append(document.createTextNode(part));
+    });
     return el;
   };
+  const element = (tag, className) => { const el = document.createElement(tag); if (className) el.className = className; return el; };
   for (const raw of String(markdown ?? '').replace(/\r/g,'').split('\n')) {
     const line = raw.replace(/\s+$/,'');
     if (!line.trim()) { lists = []; para = null; continue; }
@@ -2043,10 +2054,18 @@ function notesFragment(markdown) {
       if (!lists[depth]) { const ul = document.createElement('ul'); (depth ? lists[depth-1].lastElementChild : out).append(ul); lists[depth] = ul; }
       lists[depth].append(inline(document.createElement('li'), bullet[2]));
     }
-    else if (heading) { lists = []; para = null; out.append(inline(document.createElement('h3'), heading[1])); }
+    else if (heading) { lists = []; para = null; out.append(inline(element('h3','note-section'), heading[1])); }
     else if (lists.length && /^\s/.test(line)) inline(lists[lists.length-1].lastElementChild, ' ' + line.trim());
     else if (para) inline(para, ' ' + line.trim());
-    else { lists = []; para = inline(document.createElement('p'), line.trim()); out.append(para); }
+    else {
+      lists = []; const text = line.trim(), section = /^\*\*([^*]+):\*\*$/.exec(text), entry = /^\*\*([^*]+?)[.:]\*\*\s+(\S.*)$/.exec(text);
+      if (section) { const h = element('h3','note-section'); h.textContent = section[1]; out.append(h); para = null; }
+      else if (entry) {
+        const item = element('div','note-item'), title = element('b','note-title'); title.textContent = entry[1];
+        para = inline(document.createElement('p'), entry[2]); item.append(title, para); out.append(item);
+      }
+      else { para = inline(document.createElement('p'), text); out.append(para); }
+    }
   }
   return out;
 }
