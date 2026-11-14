@@ -157,6 +157,8 @@ public static partial class Diagnostics
                 File_("dcs-control/originals/originals.log", Path.Combine(state, "originals", "originals.log"));
             }
 
+            // The Quad Views layer's own log: whether it ran or stepped aside ("layer will be bypassed"), and why (GitHub #20).
+            File_("quad-views/Quad-Views-Foveated.log", Path.Combine(local, "Quad-Views-Foveated", "Quad-Views-Foveated.log"));
             // DCS: its log, settings, the engine optimizations' log and reports, the hooks it loads.
             if (sources.OptionsPath is { } options && Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(options))) is { } savedGames)
             {

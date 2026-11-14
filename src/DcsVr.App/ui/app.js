@@ -2,16 +2,17 @@
 const $ = id => document.getElementById(id);
 const pages = [
   ['overview','Overview','What runs when you press Launch DCS, and how your last flight went.','Status at a glance','M3.5 16.5a8.5 8.5 0 1 1 17 0 M12 16.5l4.2-5.8 M6.3 11.4l1.1.7 M12 8.2v1.3 M17.7 11.4l-1.1.7 M13.3 16.5a1.3 1.3 0 1 1-2.6 0 1.3 1.3 0 0 1 2.6 0Z M5 20h14'],
+  ['presets','Presets','Named copies of all your settings. Save a setup, switch to another in one click.','Your saved setups','M6 3.5h12a1 1 0 0 1 1 1V21l-7-4.2L5 21V4.5a1 1 0 0 1 1-1Z'],
   ['guide','Feature guide','What each feature does, what to expect from it and what it costs, at a glance.','What to expect','M5 4h10l4 4v12H5Z M15 4v4h4 M8 12h8 M8 15.5h8 M8 9h4'],
   ['engine','Engine Optimizations','Makes DCS itself lighter on the CPU, on a monitor or in VR: more FPS, the same image.','CPU work inside DCS','M12 8.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4Z M12 3v2.6 M12 18.4V21 M3 12h2.6 M18.4 12H21 M5.6 5.6l1.9 1.9 M16.5 16.5l1.9 1.9 M5.6 18.4l1.9-1.9 M16.5 7.5l1.9-1.9','Engine'],
   ['boost','CPU Boost','Gives DCS priority and the best CPU cores, and frees video memory and desktop resources while you fly.','CPU, VRAM & monitor','M6 6h12v12H6Z M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3 M12.8 8.5 10.2 12.3h3.6l-2.6 3.7'],
-  ['osd','In flight','Every in-flight key, and the status panel in the headset.','Keys & headset panel','M3 5h18v11H3Z M8 20h8 M12 16v4 M6 8.5h6 M6 11.5h9'],
   ['foveation','Quad Views','Full detail where you look, lower resolution around it: less work for the GPU. Periphery stability calms the periphery.','Foveated rendering','M3 8V5a2 2 0 0 1 2-2h3 M16 3h3a2 2 0 0 1 2 2v3 M21 16v3a2 2 0 0 1-2 2h-3 M8 21H5a2 2 0 0 1-2-2v-3 M6 12c1.6-2.7 3.6-4 6-4s4.4 1.3 6 4c-1.6 2.7-3.6 4-6 4s-4.4-1.3-6-4Z M14 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z'],
   ['dlss','DLSS','DLSS 5, the DLSS models DCS upscales with, and Foveated Super Resolution.','Neural rendering','M10 3c.6 3.8 2.2 5.4 6 6-3.8.6-5.4 2.2-6 6-.6-3.8-2.2-5.4-6-6 3.8-.6 5.4-2.2 6-6Z M18 14c.3 1.8 1.1 2.6 3 3-1.9.4-2.7 1.2-3 3-.3-1.8-1.1-2.6-3-3 1.9-.4 2.7-1.2 3-3Z'],
-  ['framegen','Framegen','Generated frames between the ones DCS renders, and the DCS frame limit that goes with them.','Generation & limit','M3 10h11v10H3Z M6.5 10V6.5h11v10H14 M10 6.5V3h11v10h-3.5'],
+  ['framegen','Frame generation','Generated frames between the ones DCS renders, and the DCS frame limit that goes with them.','Generation & limit','M3 10h11v10H3Z M6.5 10V6.5h11v10H14 M10 6.5V3h11v10h-3.5'],
   ['pupil','Perception','Eye distance, Pupil shift, Depth boost and Far depth.','Eyes & depth','M2.5 12c2.2-3.7 5.4-5.5 9.5-5.5s7.3 1.8 9.5 5.5c-2.2 3.7-5.4 5.5-9.5 5.5S4.7 15.7 2.5 12Z M14.5 12a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0Z M17 3.5l2.5 2.5L17 8.5 M19.5 6h-5'],
   ['visual','Visual realism','How the image looks in the headset: color, night vision, glare, eye-focus blur and G vision. Off by default.','Color, night & G','M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z M12 3v18 M12 7h5 M12 11h7 M12 15h6'],
   ['setup','DCS & headset','Where DCS is installed, the DCS launcher and, in VR, the headset software.','Paths & launcher','M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-4.2l-1.8-2.4h-2L9.2 17H5a2 2 0 0 1-2-2Z M9.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z M17.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z'],
+  ['osd','Keys & headset panel','Every in-flight key, and the status panel in the headset.','Keys & headset panel','M3 5h18v11H3Z M8 20h8 M12 16v4 M6 8.5h6 M6 11.5h9'],
   ['diagnostics','Checks','What to fix before launching, what to check yourself, and the files Launch DCS writes.','Checks & files','M9 3.5h6v3H9Z M9 5H6.5A1.5 1.5 0 0 0 5 6.5v13A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 17.5 5H15 M8.5 13.5l2.5 2.5 4.5-5'],
   ['support','Help & support','When something does not work: what the headset panel messages mean, a package for your report, and app updates.','Problems, reports, updates','M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17Z M9.6 9.4a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .8-1 1.5v.6 M12 16.4v.2'],
   ['recovery','Stock DCS','Undo everything DCS Control changed in DCS, in one step.','Undo every change','M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9 M4.5 4.5V9H9 M12 8.5v3.5l2.5 1.8']
@@ -20,7 +21,7 @@ const pages = [
 const VR_PAGES = ['foveation','dlss','framegen','pupil','visual'];
 /** Ctrl shortcuts by page, fixed so pilots keep them when the rail order changes. */
 const PAGE_KEYS = {overview:['Ctrl','1'],guide:['Ctrl','2'],engine:['Ctrl','3'],boost:['Ctrl','4'],foveation:['Ctrl','5'],dlss:['Ctrl','6'],framegen:['Ctrl','7'],pupil:['Ctrl','8'],visual:['Ctrl','9'],osd:['Ctrl','0'],diagnostics:['Ctrl','Shift','C']};
-// The feature checklist in the right panel; each feature has its own page. First what every pilot can use (monitor or any
+// The feature checklist on the Overview; each feature has its own page. First what every pilot can use (monitor or any
 // headset), then the VR features for Pimax (and Sboys).
 const FEATURES = [
   ['engine','Engine Optimizations','CPU work inside DCS','engine'],
@@ -97,8 +98,14 @@ function saveDraftSoon() {
   draftTimer = setTimeout(() => {
     if (!profile || invalid.size) return;
     const d = draft(), json = JSON.stringify(d); if (json === savedDraftJson) return;
-    savedDraftJson = json; request('saveDraft',d).catch(() => { savedDraftJson = null; });
+    savedDraftJson = json; presetSavedMark('Saving…'); request('saveDraft',d).then(() => presetSavedMark('Saved')).catch(() => { savedDraftJson = null; presetSavedMark('Not saved'); });
   }, 700);
+}
+/** Saves a pending edit now (before a preset is switched, renamed or created: the edit belongs to the preset it was made in). */
+async function flushDraft() {
+  clearTimeout(draftTimer); if (!profile || invalid.size) return;
+  const d = draft(), json = JSON.stringify(d); if (json === savedDraftJson) return;
+  savedDraftJson = json; try { await request('saveDraft',d); presetSavedMark('Saved'); } catch { savedDraftJson = null; }
 }
 function showError(error) { $('status').textContent = error.message; $('statusTitle').textContent = 'Needs attention'; $('statusDot').classList.add('error'); $('toast').textContent = error.message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true,9000); }
 function setBusy(value) {
@@ -299,7 +306,7 @@ function renderFeatures() {
     const summary = featureSummary(key,profile); $('featureSummary-'+key).textContent = summary; $('featureSummary-'+key).title = summary;
     $('featureNotes-'+key).innerHTML = notes[key].map(noteHtml).join('');
   });
-  $('profileName').textContent = profile.name;
+  $('profileName').textContent = profile.name; renderPresets();
   // Undo changes: the draft differs from the applied profile and nothing locks it.
   $('resetApplied').hidden = !state?.appliedDraft || matchesApplied() || launchState() === 'running'; $('resetApplied').disabled = busy;
 }
@@ -334,7 +341,15 @@ function showProfile(paths) {
   fields.forEach(f => { if (f.path === 'dcs' || f.path === 'options' || invalid.has(f.path) || (paths && !paths.includes(f.path))) return; setFieldValue(f, profile[f.path]); });
 }
 /** Help text as [lead, detail]: the lead shows, the detail waits behind a More button (a plain string is a lead alone). */
-const helpParts = text => Array.isArray(text) ? [text[0], text[1] || ''] : [text, ''];
+// One sentence stays on screen under a setting's name; the rest waits behind More. A long lead of several sentences is
+// split here, so every page reads the same way (a pair such as "On: … Off: …" stays together).
+const SENTENCE_BREAK = /(?<=[.!?])s+(?=[A-Z0-9(])/;
+const helpParts = text => {
+  let [lead, detail] = Array.isArray(text) ? [text[0], text[1] || ''] : [text, ''];
+  const parts = String(lead).split(SENTENCE_BREAK);
+  if (parts.length > 1 && lead.length > 70 && !lead.includes('<') && !/^w[w ]*:/.test(parts[1])) { lead = parts[0]; detail = parts.slice(1).join(' ')+(detail ? ' '+detail : ''); }
+  return [lead, detail];
+};
 // More always stays on the line of the lead's last word, never alone on a line: a setting's lead ends with a word joiner
 // (.setting-help>p::after), a card's last word and More share one nowrap span. nameMoreButtons() adds the title to its name.
 const moreButton = id => `<button type="button" class="more-toggle" aria-expanded="false" aria-controls="${id}">More</button>`;
@@ -610,7 +625,7 @@ function buildFields() {
   let toggles = toggleList(c);
   field(toggles,'quadSaccadeLead','Focus ahead of fast eye movements',['Lands you in full detail after a fast eye jump.','When your eyes jump, the focus area reaches ahead along the jump for a moment, instead of waiting a frame or two (most noticeable with frame generation). No GPU cost: for that moment the focus area is a little less sharp.'],'toggle',null,tracked);
   field(toggles,'quadGazeStabilize','Steady focus while looking',['Stops the focus edge shimmering while your eyes rest.','Movements under half a degree are ignored, so eye-tracker noise does not move the focus area. Real eye movements are followed at once.'],'toggle',null,tracked);
-  field(toggles,'quadTurbo','Turbo mode',['Can help when the CPU limits FPS.','DCS starts the next frame while the headset still shows the previous one.'],'toggle',null,quad);
+  field(toggles,'quadTurbo','Turbo mode',['Can help when the CPU limits FPS.','DCS starts the next frame while the headset still shows the previous one. Not with frame generation, which paces the frames itself.'],'toggle',null,p => quad(p) && p.frameGen === 'Off');
   let more = disclosure(c,'Alternative provider','Only to test another Quad Views build.',p => p.quadViews !== 'QuadViewsFoveated' ? 'Not used' : p.quadViewsLayerDirectory ? p.quadViewsLayerDirectory.split(/[\\/]/).filter(Boolean).pop() : 'Bundled');
   field(more,'quadViewsLayerDirectory','Alternative Quad Views provider','Folder of another Quad Views build. Leave empty for the bundled one, which DLSS 5 needs.','path',null,p => p.quadViews === 'QuadViewsFoveated');
   c = card('focusControls','Focus area','Size and detail of the sharp area, in Pimax Play\'s units.');
@@ -706,7 +721,7 @@ function buildFields() {
   field(c,'bidirectionalFlow','Bidirectional flow','Estimates motion forwards and backwards. Costs more GPU.','toggle',null,flow,'',fidelity);
   more = disclosure(c,'Diagnostics','Keep the defaults unless you are tracking down a problem.',p => `${['showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm'].filter(k => p[k]).length} of 4 on`);
   toggles = toggleList(more);
-  field(toggles,'showOverlay','FPS counter',['Frame generation\'s own FPS counter, always visible.','The headset panel (In flight page) also shows FPS and can be hidden in flight.'],'toggle',null,p => p.frameGen !== 'Off');
+  field(toggles,'showOverlay','FPS counter',['Frame generation\'s own FPS counter, always visible.','The headset panel (Keys & headset panel page) also shows FPS and can be hidden in flight.'],'toggle',null,p => p.frameGen !== 'Off');
   field(toggles,'diagnosticRecorder','Frame generation log','Writes the frame generation log while you fly, for troubleshooting.','toggle',null,p => p.frameGen !== 'Off');
   field(toggles,'diagnosticFrameRecords','Per-frame records','A line per frame in the log, to find stutters. The log can grow to 1 GB.','toggle',null,p => p.frameGen !== 'Off' && p.diagnosticRecorder);
   field(toggles,'frameGenAsyncArm','Prepare in the background',['Gets ready on another thread when a new view starts.','For example leaving the F10 map; frames pass through meanwhile.'],'toggle',null,p => p.frameGen !== 'Off');
@@ -735,13 +750,13 @@ function buildFields() {
   const engine = p => p.engineOptimizations;
   c = card('engineControls','Engine Optimizations',['More FPS from the same CPU; the image does not change.','About 50 to 60% more FPS on a busy airfield in VR, until the GPU is the limit.']);
   field(c,'engineOptimizations','Turn on',['Stays on whenever DCS starts, until you turn it off here.','Also from Steam or a shortcut; Back to stock DCS turns it off too. Nothing in the DCS folder changes. Tested on DCS 2.9.30, single player.'],'toggle');
-  field(c,'engineReleaseIdleDlss','Free unused DLSS memory',['Frees the unused DLSS copy each mission load leaves (0.7–1.4 GB).','Helps long sessions with many restarts. The image doesn\'t change. Off by default.'],'toggle',null,engine);
+  field(c,'engineReleaseIdleDlss','Free unused DLSS memory',['Frees the unused DLSS copy each mission load leaves (0.7–1.4 GB).','Helps long sessions with many restarts. The image doesn\'t change. On by default.'],'toggle',null,engine);
   field(c,'engineShadowCache','<span class="tag">EXPERIMENTAL</span> Cache distant shadows',['About 0.7 ms less GPU time; distant tree shadows sway less smoothly.','Reuses the distant shadows (about 70 m to 1.5 km) for a few frames. Off by default.'],'toggle',null,engine);
   // [Model] RecordersEmulatedLists: only where it can matter (EngineOptimizations.ShowsEmulatedListsOption): an AMD-only
   // PC, a module log with DriverCommandLists=0, or already on. Read when DCS starts, so not live.
   field(c,'engineRecordersEmulatedLists','<span class="tag">EXPERIMENTAL</span> Multi-threaded shadows and G-buffer without driver support',['For AMD Radeon and other cards without D3D11 command lists. Smaller gain than on NVIDIA; not yet tested on Radeon.','Runs them on the command lists Windows emulates. Applies at the next DCS start. Off by default.'],'toggle',null,p => engine(p) && (p.engineShadowRecorder || p.engineGBufferRecorder),'',emulatedListsHidden);
   // The parts, biggest measured gain first, folded: all on is the tested set.
-  // The fold counts like the Engine row of the right panel: the terrain prefetch fix is one more part when it skips repeats.
+  // The fold counts like the Engine row on the Overview: the terrain prefetch fix is one more part when it skips repeats.
   more = disclosure(c,'Individual optimizations','All on is best. Turn one off only if a problem points to it.',p => `${ENGINE_PARTS.filter(k => p[k]).length + (p.boostPrefetch === 'Skip' ? 1 : 0)} of ${ENGINE_PARTS.length + 1} on`);
   more = toggleList(more);
   field(more,'engineGBufferRecorder','Multi-threaded G-buffer','Prepares the scene on other CPU cores. Same image. About 22% more FPS on its own.','toggle',null,engine);
@@ -815,7 +830,7 @@ function buildFields() {
   // Visual realism page: the engine module's color modes and [VrFx] effects (installed for them alone too, in its
   // Perception-only mode). Main controls in the cards, the rest in Advanced folds.
   const vrOnly = p => !p.desktop;
-  c = card('colorControls','Color','How DCS looks in the headset. Its key (In flight page) switches modes in flight.');
+  c = card('colorControls','Color','How DCS looks in the headset. Its key (Keys & headset panel page) switches modes in flight.');
   segmented(field(c,'colorMode','Color mode','Off is DCS\'s own image. Fix: true blacks and both eyes equally bright (0.05 ms). Enhanced: Fix plus richer color and eyes that adapt to light (0.1 ms); it also turns on Night vision and Light glare below.','select',[['Off','Off · DCS\'s own image'],['Fix','Fix · true blacks, even eyes'],['Enhanced','Enhanced · Fix plus filmic color, night vision, glare']],vrOnly),{Off:'Off',Fix:'Fix',Enhanced:'Enhanced'});
   segmented(field(c,'panelGamut','Panel color correction',['For the Crystal Super\'s over-saturated wide-gamut panels.','Needs Fix or Enhanced. Full corrects this, Half corrects half. HUD and MFDs are not affected. Don\'t combine with Pimax\'s own color correction.'],'select',[[0,'Off · default'],[1,'Full'],[2,'Half']],colorOn),{0:'Off',1:'Full',2:'Half'});
   // Only the chosen mode's fine-tuning shows. With the color mode key, the other mode keeps the values set while it was chosen.
@@ -877,6 +892,7 @@ function buildFields() {
   { const always = document.createElement('p'); always.className = 'fine'; always.id = 'headsetPanelAlways'; always.textContent = 'The headset panel is always on with Frame generation.'; $('setting-headsetPanel').after(always); }
   field(c,'diagnosticOverlayAtStart','Visible at start','Each flight starts with the panel shown.','toggle',null,panelOn);
   field(c,'diagnosticVram','VRAM counter','Adds the video memory in use to the panel.','toggle',null,panelOn);
+  field(c,'headsetPanelPosition','Position','The corner of your view the panel sits in.','select',[['UpperRight','Upper right · default'],['UpperLeft','Upper left'],['LowerRight','Lower right'],['LowerLeft','Lower left']],panelOn);
   // Every in-flight key in one card, in the rail's order: capture fields, greyed out while their feature is off in this
   // profile. With Optimizations only, the VR keys are hidden: only the Engine Optimizations key works on a monitor.
   const vrKey = p => p.desktop;
@@ -891,7 +907,7 @@ function buildFields() {
   // The module's own keys apply to every key above, so the note sits under the card heading, not under the last key.
   { const fixed = document.createElement('p'); fixed.className = 'fine keys-reserved'; fixed.textContent = 'Not available: Ctrl+Alt with F8 to F12, Page Up or Page Down (used by Engine Optimizations).'; c.querySelector('.card-heading').after(fixed); }
   // The headset software this profile uses and what runs now; the Sboys driver (Sboys route only), then the override.
-  c = card('headsetControls','Headset software','Follows How you fly in the right panel: Pimax Play, or SteamVR for Sboys.');
+  c = card('headsetControls','Headset software','Follows how you fly, chosen at the top: Pimax Play, or SteamVR for Sboys.');
   { const line = document.createElement('p'); line.className = 'headset-active'; line.id = 'headsetActive'; c.append(line, $('sboysCard')); }
   more = disclosure(c,'Runtime override','Only for an OpenXR runtime that is not registered in Windows.',p => p.runtimeManifestPath ? p.runtimeManifestPath.split(/[\\/]/).pop() : 'Registered runtime');
   field(more,'runtimeManifestPath','OpenXR runtime file','The JSON file of an OpenXR runtime to use instead of the registered one. Normally leave it empty. Not used with Optimizations only.','path',null,p => !p.desktop);
@@ -900,6 +916,7 @@ function buildFields() {
   const qvWhy = p => p.quadViews !== 'QuadViewsFoveated' ? 'Choose Bundled Quad Views as the provider to change these.' : 'Not with an alternative Quad Views provider.', bundledWhy = 'Needs the bundled Quad Views (Quad Views page).';
   const dlssWhy = 'Turn on DLSS 5 above to change these.', fgWhy = 'Choose a Frame generation method to change these.', engineWhy = 'Turn on Engine Optimizations to change these.', boostWhy = 'Turn on CPU Boost to change these.';
   const enhancedWhy = 'Choose Enhanced in Color mode to change these.';
+  because(at('quadTurbo'),p => !quad(p) ? qvWhy(p) : 'Off while frame generation is on: the two fight over frame timing.');
   because(at('quadSaccadeLead','quadGazeStabilize'),p => !quad(p) ? qvWhy(p) : 'Needs Focus movement: Eye tracked.');
   because(f => f.condition === quad,qvWhy);
   because(at('neuralFocusArea'),p => !nr(p) ? dlssWhy : p.quadViews !== 'QuadViewsFoveated' ? bundledWhy : null);
@@ -1309,7 +1326,7 @@ function updateControls() {
   // A fold that follows a choice (the color mode's fine-tuning) is gone while all its settings are.
   document.querySelectorAll('details[data-hide]').forEach(d => { d.hidden = [...d.querySelectorAll('.setting')].every(e => e.hidden); });
   if ($('colorTuneTip')) $('colorTuneTip').hidden = !profile || profile.desktop || profile.colorMode !== 'Off';
-  // With Optimizations only there is no headset panel; the In flight page keeps the keys that work on a monitor.
+  // With Optimizations only there is no headset panel; the Keys & headset panel page keeps the keys that work on a monitor.
   $('panelControls').hidden = Boolean(profile.desktop);
   // Pimax native exists only on the Pimax route and cannot host the focus adapter DLSS needs.
   const native = $('input-quadViews').querySelector('[value=PimaxNative]'); native.disabled = !nativeAllowed(profile);
@@ -1352,28 +1369,17 @@ function updateControls() {
   const pixels = quad(profile) ? e.periphery**2 + e.w*e.h*e.focus**2 : null;
   $('coverageNote').textContent = pixels !== null ? `DCS renders about ${Math.round(pixels*100)}% of the pixels of normal stereo rendering (before DLSS upscaling).` : owns ? '' : 'Pimax native and alternative providers set their coverage in their own tools.';
   renderPimax(); renderFeatures(); renderSavedRuntime();
-  // One tile per feature, in pipeline order. Each opens the page that configures it.
-  const on = featureState(profile);
-  const tiles = [
-    ['engine','ENGINE',on.engine,on.engine ? 'Engine Optimizations' : 'Off',featureSummary('engine',profile)],
-    ['boost','CPU BOOST',on.boost,on.boost ? 'CPU Boost' : 'Off',featureSummary('boost',profile)],
-    ['foveation','QUAD VIEWS',on.quad,profile.quadViews === 'None' ? 'Off' : profile.quadViews === 'PimaxNative' ? 'Pimax native' : 'Bundled Quad Views',featureSummary('quad',profile)],
-    ['dlss','DLSS 5',on.dlss,profile.neuralRendering ? 'DLSS 5' : foveatedSr(profile) ? 'Foveated Super Resolution' : 'DLSS 5',featureSummary('dlss',profile)],
-    ['framegen','FRAME GENERATION',on.framegen,profile.frameGen === 'Off' ? 'Off' : profile.frameGen === 'Nvidia' ? 'NVIDIA Optical Flow' : 'FidelityFX Optical Flow',featureSummary('framegen',profile)]
-  ];
-  // Two groups: the optimizations every pilot can use, then the VR features (not with Optimizations only).
-  const names = {engine:'Engine Optimizations',boost:'CPU Boost',foveation:'Quad Views',dlss:'DLSS 5',framegen:'Frame generation'};
-  // An active tile's title already names the provider, so its detail does not repeat it.
+  // The feature cards above the tiles are the checklist (buildFeatureList). The tiles show what the cards do not, in VR:
+  // Perception, Visual realism and the headset panel. Each opens the page that configures it.
+  const names = {};
   const tile = ([target,label,active,title,detail]) => { if (!active) { title = names[target] || title; detail = String(detail).replace(/^Off · /,''); } else detail = String(detail).replace(/^(Bundled|Pimax native|NVIDIA|FidelityFX) · /,''); return `<button type="button" class="stage ${active ? 'on' : 'off'}" data-page="${target}" aria-label="${escape(title)}: ${active ? 'on' : 'off'}. Open settings"><span>${label}<em>${active ? 'ON' : 'OFF'}</em></span><b>${escape(title)}</b><small>${escape(detail)}</small></button>`; };
-  const group = (label, list) => `<div class="stage-group"><div class="stage-group-label">${label}</div><div class="stage-row${list.length === 2 ? ' two' : ''}">${list.map(tile).join('')}</div></div>`;
-  const everyone = tiles.filter(([target]) => !VR_PAGES.includes(target)), vr = tiles.filter(([target]) => VR_PAGES.includes(target));
   // Then, in VR, what the checklist does not show (as the "Also on" line under it): Perception, Visual realism, the headset panel.
-  const look = [['pupil','EYES &amp; DEPTH','Perception',g => g.section === 'perception','Depth boost, Far depth, Pupil shift'],['visual','COLOR, NIGHT &amp; G','Visual realism',g => g.section === 'visual','Color, night vision, G vision'],['osd','HEADSET PANEL','In flight',g => g.page === 'osd','Status panel in the headset']].map(([target,label,name,test,offer]) => {
+  const look = [['pupil','EYES &amp; DEPTH','Perception',g => g.section === 'perception','Depth boost, Far depth, Pupil shift'],['visual','COLOR, NIGHT &amp; G','Visual realism',g => g.section === 'visual','Color, night vision, G vision'],['osd','HEADSET PANEL','Keys & headset panel',g => g.page === 'osd','Status panel in the headset']].map(([target,label,name,test,offer]) => {
     const list = FEATURE_GUIDE.filter(g => test(g) && g.on(profile)).map(g => g.name === 'Color modes' ? 'Color: '+profile.colorMode : g.name);
     return [target,label,list.length > 0,name,list.length ? list.join(' · ') : offer];
   });
   const extra = `<div class="stage-group extra"><div class="stage-group-label">Perception &amp; look</div><div class="stage-row">${look.map(tile).join('')}</div></div>`;
-  $('pipeline').innerHTML = group('For every pilot · monitor or any headset', everyone) + (profile.desktop ? '' : group('VR · ' + (profile.runtime === 'SboysSteamVr' ? 'Sboys' : 'Pimax'), vr) + extra);
+  $('pipeline').innerHTML = profile.desktop ? '' : extra;
   // What DLSS 5 still needs, on its own page; everything else to fix is listed once, in Checks.
   const notes = featureNotes(profile);
   $('dlssMissing').innerHTML = notes.dlss.filter(n => n[0] === 'needs').map(() => `<div class="needs"><span>DLSS 5 needs your nvngx_dlssnr.dll runtime file.</span></div>`).join('');
@@ -1393,10 +1399,11 @@ function updateControls() {
     button.classList.toggle('live', live === button.dataset.route); button.disabled = busy;
   });
   $('routeLive').textContent = profile.desktop ? 'Another headset or a monitor: DCS runs as you set it up, with Engine Optimizations, CPU Boost and Free VRAM.' : state?.activeRoute?.summary || '';
+  $('routeSwitch').title = $('routeLive').textContent;
   $('routeLive').classList.toggle('mismatch', !profile.desktop && Boolean(live) && live !== profile.runtime);
   // The VR feature pages are hidden without a headset; an open one goes back to the overview.
   VR_PAGES.forEach(id => $('nav-'+id).hidden = Boolean(profile.desktop)); $('railGroup-foveation').hidden = Boolean(profile.desktop); $('headsetPanelAlways').hidden = Boolean(profile.desktop) || profile.frameGen === 'Off';
-  renderAlsoOn(); $('dlssFocusCard').hidden = Boolean(profile.desktop) || !profile.neuralRendering;
+  renderAlsoOn(); renderNavState(); $('dlssFocusCard').hidden = Boolean(profile.desktop) || !profile.neuralRendering;
   if (profile.desktop && VR_PAGES.includes(page)) navigate('overview');
   // The Sboys driver is only needed on the Sboys route.
   $('sboysCard').hidden = profile.runtime !== 'SboysSteamVr' || Boolean(profile.desktop);
@@ -1408,7 +1415,7 @@ function updateControls() {
     const shownSettings = [...box.querySelectorAll('.setting')].filter(e => !e.hidden); box.classList.toggle('idle', shownSettings.length > 0 && shownSettings.every(e => e.classList.contains('inactive'))); });
   // A folded program list can be opened and read while its setting is greyed out, but not while a command runs.
   fields.forEach(f => { if (f.listSummary) f.listSummary.disabled = busy; });
-  updateWorkflow(); updatePanelScroll();
+  updateWorkflow();
 }
 /** DCS & headset: the headset software of this profile (with Pimax Play's version) and what runs on this PC now. */
 function renderHeadsetSoftware() {
@@ -1416,17 +1423,19 @@ function renderHeadsetSoftware() {
   const software = profile.runtime === 'SboysSteamVr' ? 'SteamVR' : 'Pimax Play' + (version ? ' '+version : '');
   $('headsetActive').innerHTML = `<b>${escape(software)}</b>${summary ? `<span>${escape(summary)}</span>` : ''}`;
 }
+/** The rail says at a glance what is on: ON or OFF next to each feature page (Perception and Visual realism are on when
+ *  any of their features is). */
+function renderNavState() {
+  const on = featureState(profile), any = section => FEATURE_GUIDE.some(g => g.section === section && g.on(profile));
+  const states = {engine:on.engine, boost:on.boost, foveation:on.quad, dlss:on.dlss, framegen:on.framegen, pupil:any('perception'), visual:any('visual')};
+  Object.entries(states).forEach(([id,active]) => { const tag = $('navState-'+id); tag.hidden = false; tag.textContent = active ? 'ON' : 'OFF'; tag.classList.toggle('on',Boolean(active)); $('nav-'+id).setAttribute('aria-label', pages.find(p => p[0] === id)[1]+(active ? ', on' : ', off')); });
+}
 /** Under the checklist: the Perception, Visual realism and headset panel features that apply at launch, each opening its page. */
 function renderAlsoOn() {
   const on = FEATURE_GUIDE.filter(g => (['perception','visual'].includes(g.section) || g.page === 'osd') && g.on(profile));
   const name = g => g.name === 'Color modes' ? 'Color '+profile.colorMode : g.name;
   $('alsoOn').innerHTML = on.length ? 'Also on: '+on.map(g => `<button type="button" class="link-button" data-open-page="${g.page}" title="Open ${escape(g.name)} settings">${escape(name(g))}</button>`).join(', ') : '';
   $('alsoOn').hidden = !on.length;
-}
-/** Shadow above the workflow footer while part of the right panel is scrolled out of view below. */
-function updatePanelScroll() {
-  const top = document.querySelector('.panel-top');
-  document.querySelector('.workflow').classList.toggle('more-above', top.scrollHeight - top.clientHeight - top.scrollTop > 1);
 }
 function renderCadence() {
   // multiplier: the most displayed frames per rendered frame; target: what DCS should render (FramePacing.CapDivider),
@@ -1670,7 +1679,9 @@ function renderDashboard() {
   const mode = launchState(), items = checkItems(), fix = items.filter(c => c.group === 'fix').length, check = items.filter(c => c.group === 'check').length;
   // The title: the short state, then what runs, e.g. "Ready to fly · Next launch · Pimax · Quad Views + Frame generation".
   // While DCS runs it is what was applied ("In DCS now · …"), not the draft.
-  const title = mode === 'running' ? 'In DCS now · '+runsWith(state.appliedDraft) : STATE_WORDS[mode]+' · Next launch · '+runsWith(profile);
+  const title = mode === 'running' ? ['In DCS now',' · ',runsWith(state.appliedDraft)] : [STATE_WORDS[mode],' · Next launch · ',runsWith(profile)];
+  // The text is one sentence (for a screen reader and the tests); on screen the state is the headline and what runs sits under it.
+  const titleHtml = `<span class="dash-state">${escape(title[0])}</span><span class="dash-sep">${escape(title[1])}</span><span class="dash-runs">${escape(title[2])}</span>`;
   // Guided setup: the first step while nothing has ever been applied, a quiet link afterwards.
   const first = !state.appliedProfile && !state.originals?.count;
   // Under it the profile's own name only when the title does not already say it, and what is applied.
@@ -1682,7 +1693,7 @@ function renderDashboard() {
   const chips = [fix ? `<button class="dash-chip fix" data-open-page="diagnostics">${fix} must fix</button>` : '', check ? `<button class="dash-chip check" data-open-page="diagnostics">${check} to check yourself</button>` : '', !fix && !check ? '<button class="dash-chip ok" data-open-page="diagnostics">Nothing to fix</button>' : ''].join('');
   const reset = state.appliedDraft && mode === 'changes' ? '<button class="link-button" data-reset-applied="1">Undo changes</button>' : '';
   $('dashStatus').className = 'dash-status '+mode;
-  $('dashStatus').innerHTML = `<span class="dash-dot" aria-hidden="true"></span><div class="dash-main"><b>${escape(title)}</b><p>${escape(details[mode])}</p>${small ? `<small>${escape(small)}</small>` : ''}</div><div class="dash-side">${chips}${reset}${guided}</div>`;
+  $('dashStatus').innerHTML = `<span class="dash-dot" aria-hidden="true"></span><div class="dash-main"><b>${titleHtml}</b><p>${escape(details[mode])}</p>${small ? `<small>${escape(small)}</small>` : ''}</div><div class="dash-side">${chips}${reset}${guided}</div>`;
 }
 document.addEventListener('click', e => { if (e.target.closest('[data-reset-applied]')) resetToApplied(); });
 // ---- Last flight: read from the logs once DCS has exited --------------------------------------------------------------
@@ -1791,7 +1802,7 @@ function renderOriginals() {
   $('restoreOriginals')?.addEventListener('click',() => run('restore').catch(()=>{}));
   $('openBackups').addEventListener('click',() => request('openBackups').catch(showError));
 }
-/** A setting or block hidden on its page (or in the right panel): its own element, its card or a fold around it. Search
+/** A setting or block hidden on its page (or in the top bar): its own element, its card or a fold around it. Search
  *  leaves it out. Focus values that follow Pimax Play stay findable: revealSetting shows the Pimax block for them. */
 function hiddenOnPage(f) {
   if (!f.element) return true;
@@ -1806,7 +1817,8 @@ function renderSearch() {
   const normalize = text => text.toLowerCase().replace(/[^a-z0-9]/g,'');
   const query = normalize($('searchInput').value);
   const shortcuts = [
-    ['overview','Features','Turn Engine Optimizations, CPU Boost, Quad Views, DLSS 5 and frame generation on or off in the right panel.','featureList'],
+    ['presets','Presets','Named copies of your settings: save a setup, switch, rename, duplicate or delete.','presetCards'],
+    ['overview','Features','Turn Engine Optimizations, CPU Boost, Quad Views, DLSS 5 and frame generation on or off on the Overview.','featureList'],
     ['dlss','Advanced image controls','DLSS 5 model corrections: tone, structure, masks, color, depth and motion guides.','neuralAdvanced'],
     ['foveation','Pimax Play focus values','Pimax Play\'s Quad View settings as Pimax Play shows them, and how bundled Quad Views reproduces them. Re-read them.','pimaxFovea'],
     ['boost','What happens at launch','Cores, processes, VRAM to free, the monitor mode and the DCS window the CPU Boost page would change on this PC.','boostPlan'],
@@ -1971,7 +1983,7 @@ const TOUR = [
   {target:'#featureList', title:'What to turn on', text:'Tick the features you want. The arrow next to each one opens its settings.'},
   {target:'#nav-diagnostics', title:'Checks', text:'Before you fly, Checks lists anything to fix, with a button that takes you to the setting.'},
   {target:'#launch', title:'Launch DCS', text:'Always start DCS from here. It writes your profile into DCS first, then starts it.'},
-  {target:'#nav-osd', title:'In flight', text:'Every in-flight key and what it does, with the headset panel. In the app: Ctrl+1 to Ctrl+0 open the pages, Ctrl+Shift+C opens Checks, Ctrl+K finds a setting.'},
+  {target:'#nav-osd', title:'Keys & headset panel', text:'Every in-flight key and what it does, with the headset panel. In the app: Ctrl+1 to Ctrl+0 open the pages, Ctrl+Shift+C opens Checks, Ctrl+K finds a setting.'},
   {target:'#nav-recovery', title:'Back to stock DCS', text:'One step puts DCS back exactly as it was before DCS Control.'}
 ];
 let tourStep = 0;
@@ -2132,8 +2144,8 @@ function initializeUpdates() {
   $('updateAuto').addEventListener('change',e => setUpdateChecks(e.target.checked));
 }
 async function initialize() {
-  const groups = {engine:'Every pilot',foveation:'VR',setup:'Before you fly',support:'If something goes wrong'};
-  pages.forEach(p => { if (groups[p[0]]) { const g = document.createElement('div'); g.className = 'rail-group'; g.id = 'railGroup-'+p[0]; g.textContent = groups[p[0]]; $('navigation').append(g); } const b = document.createElement('button'); b.id = 'nav-'+p[0]; b.className = 'nav-item'; b.title = PAGE_KEYS[p[0]] ? p[1]+' ('+PAGE_KEYS[p[0]].join(' ')+')' : p[1]; if (PAGE_KEYS[p[0]]) b.setAttribute('aria-keyshortcuts',PAGE_KEYS[p[0]].join('+').replace('Ctrl','Control')); b.setAttribute('aria-label',p[1]); b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${p[4]}"/></svg><div><b>${p[5] || p[1]}</b><small>${p[3]}</small></div>`; b.addEventListener('click',() => navigate(p[0])); $('navigation').append(b); });
+  const groups = {engine:'Performance',foveation:'VR',setup:'Setup',support:'Help'};
+  pages.forEach(p => { if (groups[p[0]]) { const g = document.createElement('div'); g.className = 'rail-group'; g.id = 'railGroup-'+p[0]; g.textContent = groups[p[0]]; $('navigation').append(g); } const b = document.createElement('button'); b.id = 'nav-'+p[0]; b.className = 'nav-item'; b.title = PAGE_KEYS[p[0]] ? p[1]+' ('+PAGE_KEYS[p[0]].join(' ')+')' : p[1]; if (PAGE_KEYS[p[0]]) b.setAttribute('aria-keyshortcuts',PAGE_KEYS[p[0]].join('+').replace('Ctrl','Control')); b.setAttribute('aria-label',p[1]); b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${p[4]}"/></svg><div><b>${p[5] || p[1]}</b><small>${p[3]}</small></div><span class="nav-state" id="navState-${p[0]}" hidden></span>`; b.addEventListener('click',() => navigate(p[0])); $('navigation').append(b); });
   buildFields(); buildFeatureList(); nameMoreButtons(); navigate('overview');
   // Launch and Apply ask once before setting another program's dxgi.dll aside (ReShade, an overlay).
   // The page is busy from the click on, so a double click launches once and nothing waits on an idle page in between.
@@ -2245,7 +2257,87 @@ $('routeSwitch').addEventListener('keydown', e => {
 // Review files builds the read-only file list for the current draft; Back to stock DCS opens Recovery.
 ['reviewPlan','reviewPlanHere'].forEach(id => $(id).addEventListener('click', () => run('preview').catch(()=>{})));
 $('openRecovery').addEventListener('click', () => navigate('recovery'));
-document.querySelector('.panel-top').addEventListener('scroll', updatePanelScroll, {passive:true});
-window.addEventListener('resize', updatePanelScroll);
+// The top bar shows the status on one line; the whole sentence is its tooltip.
+new MutationObserver(() => { $('status').title = $('status').textContent; }).observe($('status'),{childList:true,characterData:true,subtree:true});
+// ---- Presets: named copies of the settings, kept by the app. Every edit is saved as it is made — into the draft, and
+// into the active preset when there is one — so nothing here has an "unsaved" state or a Save button. The Presets page
+// manages them; the button on the Overview switches and saves a new one.
+// presetEdit: the name being typed ({mode:'new'|'menu'} or {mode:'rename'|'duplicate',name}); presetArmed: a second click
+// that is being asked for ({kind:'delete'|'switch',name}); presetMessage: what went wrong, next to where it happened.
+let presetEdit = null, presetArmed = null, presetMessage = null, presetCardsKey = '';
+function presetSavedMark(text) { const mark = $('presetSaved'); mark.textContent = text; mark.classList.toggle('pending', text !== 'Saved'); }
+const presetWhen = iso => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? '' : d.toLocaleString(undefined,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}); };
+function renderPresets() {
+  const presets = state?.presets || {items:[],active:null,details:[]}, details = presets.details || [];
+  // The Overview button and its menu.
+  $('presetName').textContent = presets.active || 'None'; $('presetButton').classList.toggle('none',!presets.active);
+  if (!$('presetSaved').textContent) presetSavedMark('Saved');
+  $('presetList').innerHTML = presets.items.length
+    ? presets.items.map(name => `<button type="button" class="preset-item${name === presets.active ? ' active' : ''}" data-preset="${escape(name)}" aria-pressed="${name === presets.active}"><span class="preset-tick" aria-hidden="true">${name === presets.active ? '✓' : ''}</span><span class="preset-item-name">${escape(name)}</span></button>`).join('')
+    : '<p class="preset-empty">No presets yet. Save these settings under a name, then switch between setups in one click.</p>';
+  $('presetForm').hidden = presetEdit?.mode !== 'menu';
+  const menuNote = presetMessage?.where === 'menu' ? presetMessage.text : ''; $('presetError').textContent = menuNote; $('presetError').hidden = !menuNote;
+  // The Presets page.
+  $('navState-presets').hidden = !presets.items.length; $('navState-presets').textContent = String(presets.items.length);
+  $('presetCurrentTitle').textContent = presets.active ? presets.active : 'Not in a preset';
+  $('presetCurrentText').textContent = (presets.active ? 'Every change you make is saved into this preset. ' : 'Your changes are saved as you make them. Save them under a name to keep this setup and switch back to it later. ')+'Now: '+profile.name+'.';
+  $('presetPageForm').hidden = presetEdit?.mode !== 'new';
+  const pageNote = presetMessage?.where === 'page' ? presetMessage.text : ''; $('presetPageNote').textContent = pageNote; $('presetPageNote').hidden = !pageNote;
+  $('presetCount').textContent = details.length ? (details.length === 1 ? '1 preset' : details.length+' presets')+' · kept by DCS Control on this PC' : '';
+  const key = JSON.stringify([details,presets.active,presetEdit,presetArmed,presetMessage,busy]); if (key === presetCardsKey) return;
+  const typing = $('presetCards').querySelector('.preset-card-form input'), typed = typing && presetCardsKey.includes(JSON.stringify(presetEdit)) ? typing.value : null; presetCardsKey = key;
+  $('presetCards').innerHTML = details.length ? details.map(d => {
+    const active = d.name === presets.active, editing = presetEdit?.name === d.name ? presetEdit.mode : null, armed = presetArmed?.name === d.name ? presetArmed.kind : null, note = presetMessage?.where === d.name ? presetMessage.text : '';
+    const form = editing ? `<form class="preset-form preset-card-form" data-preset-form="${editing}"><input type="text" maxlength="40" spellcheck="false" autocomplete="off" aria-label="${editing === 'rename' ? 'New name' : 'Name of the copy'}" value="${escape(editing === 'rename' ? d.name : (d.name+' copy').slice(0,40))}"><button class="button primary" type="submit">${editing === 'rename' ? 'Rename' : 'Create copy'}</button><button class="button quiet" type="button" data-preset-cancel>Cancel</button></form>` : '';
+    return `<div class="preset-card${active ? ' active' : ''}" data-name="${escape(d.name)}"><div class="preset-card-row"><div class="preset-card-main"><div class="preset-card-title"><b>${escape(d.name)}</b>${active ? '<span class="preset-chip">Active</span>' : ''}</div><p class="preset-card-summary">${escape(d.summary || 'This preset\'s file cannot be read. Delete it, or replace it with a good copy.')}</p><small>Changed ${escape(presetWhen(d.modified))}${active ? ' · follows every change you make' : ''}</small></div>
+      <div class="preset-card-actions">${active || !d.summary ? '' : `<button type="button" class="button secondary" data-act="use">${armed === 'switch' ? 'Use anyway' : 'Use'}</button>`}<button type="button" class="button quiet" data-act="rename">Rename</button><button type="button" class="button quiet" data-act="duplicate">Duplicate</button><button type="button" class="button quiet${armed === 'delete' ? ' danger' : ''}" data-act="delete">${armed === 'delete' ? 'Delete? Click again' : 'Delete'}</button></div></div>${form}${note ? `<p class="preset-error" role="alert">${escape(note)}</p>` : ''}</div>`;
+  }).join('') : '<div class="preset-none"><b>No presets yet</b><p>A preset is a named copy of all your settings: one for day flying, one for night, one for a heavy mission. Set things up the way you like, then press <b>Save as a new preset</b>.</p></div>';
+  $('presetCards').querySelectorAll('button').forEach(b => b.disabled = busy);
+  const input = $('presetCards').querySelector('.preset-card-form input'); if (input) { input.focus(); if (typed === null) input.select(); else input.value = typed; }
+}
+function presetState(edit, armed = null, message = null) { presetEdit = edit; presetArmed = armed; presetMessage = message; renderPresets(); }
+async function presetCommand(action, extras, where) {
+  if (busy) return false;
+  if (invalid.size) { presetState(presetEdit,null,{where,text:'Correct the marked values first.'}); return false; }
+  setBusy(true); clearTimeout(changedTimer); changedTimer = null; changedGeneration++;
+  try { await flushDraft(); const result = await request(action,draft(extras)); presetEdit = presetArmed = presetMessage = null; sync(result); return true; }
+  catch (error) { presetArmed = null; presetMessage = {where,text:error.message}; return false; }
+  finally { setBusy(false); updateControls(); renderPresets(); }
+}
+/** Switching replaces the settings on screen: when they are in no preset (and are not the applied ones), ask once. */
+async function presetUse(name, where) {
+  const unsaved = !state.presets.active && !matchesApplied();
+  if (unsaved && !(presetArmed?.kind === 'switch' && presetArmed.name === name)) { presetState(null,{kind:'switch',name},{where,text:'The settings on screen are not in a preset and will be replaced. Click again to switch, or save them as a preset first.'}); return false; }
+  return presetCommand('presetLoad',{name},where);
+}
+// The Overview menu.
+$('presetNew').addEventListener('click',() => { presetState(presetEdit?.mode === 'menu' ? null : {mode:'menu'}); if (presetEdit) { $('presetInput').value = ''; $('presetInput').focus(); } });
+$('presetManage').addEventListener('click',() => { $('presetMenu').open = false; navigate('presets'); });
+$('presetForm').addEventListener('submit',async e => { e.preventDefault(); const name = $('presetInput').value.trim(); if (!name) { presetState(presetEdit,null,{where:'menu',text:'Give the preset a name.'}); return; } await presetCommand('presetSave',{name},'menu'); });
+$('presetList').addEventListener('click',async e => {
+  const item = e.target.closest('[data-preset]'); if (!item) return; const name = item.dataset.preset;
+  if (name === state.presets.active || await presetUse(name,'menu')) $('presetMenu').open = false;
+});
+$('presetMenu').addEventListener('toggle',() => { if (!$('presetMenu').open && (presetEdit?.mode === 'menu' || presetMessage?.where === 'menu')) presetState(null); });
+document.addEventListener('click', e => { const menu = $('presetMenu'); if (menu.open && !menu.contains(e.target)) menu.open = false; });
+document.addEventListener('keydown', e => { if (e.key !== 'Escape') return; if ($('presetMenu').open) { if (presetEdit) presetState(null); else { $('presetMenu').open = false; $('presetButton').focus(); } } else if (presetEdit || presetArmed) presetState(null); });
+// The Presets page.
+$('presetPageNew').addEventListener('click',() => { presetState(presetEdit?.mode === 'new' ? null : {mode:'new'}); if (presetEdit) { $('presetPageInput').value = ''; $('presetPageInput').focus(); } });
+$('presetPageForm').addEventListener('submit',async e => { e.preventDefault(); const name = $('presetPageInput').value.trim(); if (!name) { presetState(presetEdit,null,{where:'page',text:'Give the preset a name.'}); return; } await presetCommand('presetSave',{name},'page'); });
+$('page-presets').addEventListener('click',async e => {
+  if (e.target.closest('[data-preset-cancel]')) { presetState(null); return; }
+  const button = e.target.closest('[data-act]'); if (!button) return; const name = button.closest('[data-name]').dataset.name, act = button.dataset.act;
+  if (act === 'use') await presetUse(name,name);
+  else if (act === 'rename' || act === 'duplicate') presetState(presetEdit?.name === name && presetEdit.mode === act ? null : {mode:act,name});
+  // Deleting asks once, in place: the second click deletes.
+  else if (act === 'delete') { if (presetArmed?.kind === 'delete' && presetArmed.name === name) await presetCommand('presetDelete',{name},name); else presetState(null,{kind:'delete',name}); }
+});
+$('presetCards').addEventListener('submit',async e => {
+  const form = e.target.closest('[data-preset-form]'); if (!form) return; e.preventDefault();
+  const name = form.closest('[data-name]').dataset.name, to = form.querySelector('input').value.trim(); if (!to) { presetState(presetEdit,null,{where:name,text:'Give the preset a name.'}); return; }
+  await presetCommand(form.dataset.presetForm === 'rename' ? 'presetRename' : 'presetDuplicate',{name,to},name);
+});
+document.addEventListener('click', e => { const menu = $('launchMore'); if (menu.open && (!menu.contains(e.target) || e.target.closest('.workflow-links button'))) menu.open = false; });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('launchMore').open) { $('launchMore').open = false; $('launchMore').querySelector('summary').focus(); } });
 // Title-bar buttons: the window has no Windows frame, so the page provides them.
 document.querySelectorAll('[data-window]').forEach(button => button.addEventListener('click',() => request('window',{op:button.dataset.window}).then(r => { const max = document.querySelector('[data-window="maximize"]'); max.setAttribute('aria-label',r.maximized ? 'Restore' : 'Maximize'); max.title = r.maximized ? 'Restore' : 'Maximize'; }).catch(showError)));

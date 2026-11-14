@@ -93,6 +93,11 @@ internal static class WebVerification
         await Step("(()=>{const ui=window.dcsUi;ui.adoptDraft({profile:ui.withFeatures("+JsonData.Serialize(new VrProfile())+",{route:'Pimax',features:{engine:true,quad:true,dlss:true,framegen:true,boost:true}})});"
             + "return ui.run('refresh',ui.draft());})()");
         await Step("window.dcsUi.refreshBoostPlan ? window.dcsUi.refreshBoostPlan() : null");
+        // Two presets, the second one active: the Presets page, and the Preset button on the Overview.
+        await Step("window.dcsUi.run('presetDelete',{name:'Heavy mission'})");
+        await Step("window.dcsUi.run('presetSave',{name:'Day flying',replace:true})");
+        await Step("window.dcsUi.run('presetSave',{name:'Night flying',replace:true})");
+        await Shot("presets", "presets");
         await Shot("overview-changes-apply", "overview");
         await Shot("quad-views-pimax-play", "foveation", "(b=>{if(b)b.scrollIntoView({block:'center'});})(document.getElementById('pimaxFovea'));");
         await Shot("dlss5-runtime-file", "dlss");
@@ -347,7 +352,7 @@ internal static class WebVerification
             var screenshots = new List<object>(); var index = 0;
             // Every page of the rail, in a fixed order (the first ten as before); a page added to app.js without being
             // listed here fails the run, so no page goes without screenshots.
-            string[] shotPages = ["overview","guide","foveation","dlss","framegen","boost","engine","setup","diagnostics","recovery","pupil","visual","osd","support"];
+            string[] shotPages = ["overview","presets","guide","foveation","dlss","framegen","boost","engine","setup","diagnostics","recovery","pupil","visual","osd","support"];
             var railPages = JsonSerializer.Deserialize<string[]>(JsonSerializer.Deserialize<string>(await core.ExecuteScriptAsync("JSON.stringify([...document.querySelectorAll('#pages > section.page')].map(s => s.id.slice(5)))"))!)!;
             if (railPages.Except(shotPages).ToArray() is { Length: > 0 } unlisted) throw new IOException("Pages without screenshots: " + string.Join(", ", unlisted));
             await core.ExecuteScriptAsync("window.screenshotDraft=window.dcsUi.draft();");

@@ -77,7 +77,7 @@ public static class FramePacing
         var sync = inventory.DcsSettings.GetValueOrDefault("graphics.sync");
         checks.Add(new("dcs-vsync", !profile.DisableDcsVSync && sync == "true" ? CheckState.Warning : CheckState.Pass, "DCS desktop VSync",
             profile.DisableDcsVSync ? "Desktop VSync is turned off at launch; your original value is backed up. The headset keeps its own sync."
-            : "Left as it is: " + (sync == "true" ? "on" : sync == "false" ? "off" : "not found") + ". VSync of the DCS window on the monitor can hold back the frame rate; Desktop VSync off on the Framegen page turns it off."));
+            : "Left as it is: " + (sync == "true" ? "on" : sync == "false" ? "off" : "not found") + ". VSync of the DCS window on the monitor can hold back the frame rate; Desktop VSync off on the Frame generation page turns it off."));
         // Other limiters and runtime motion smoothing cannot be read or verified here, so they are always checks the
         // user does (an old profile's self-reported values are dropped when it loads).
         checks.Add(new("external-limiters", CheckState.Manual, "NVIDIA / RTSS / other FPS limits",

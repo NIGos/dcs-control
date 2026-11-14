@@ -656,3 +656,357 @@ details.boost-details[open]>summary{margin-bottom:6px}
 .sboys-block .inline-actions{margin-top:10px}
 .sboys-block[hidden]{display:none}
 @media(max-width:900px){.setup-actions{flex-wrap:wrap}}
+
+/* ==== 0.6.5 interface =================================================================================================
+   Two columns instead of three: a labelled rail that says what is on, and a top bar with the route, the status and
+   Launch DCS (the right panel is gone; its feature checklist is now "What runs" on the Overview). One meaning per
+   colour: orange = the main action and the current choice, green = working, yellow = a warning or experimental,
+   blue = an explanation. Everything here overrides the rules above; ids and class names are unchanged. */
+:root{
+  --bg:#131416;--rail:#17181b;--panel:#17181b;--s0:#1c1e22;--s1:#23262b;--s2:#2a2e34;--field:#131416;
+  --line:#2c3036;--line-strong:#3a3f47;--text:#eceef1;--soft:#b8bdc6;--muted:#8d939d;--faint:#747a84;
+  --accent:#f5a01a;--accent-hi:#ffb94a;--accent-dim:#f5a01a22;--accent-dark:#6b4a12;--cyan:#6bb8e6;--green:#4cc38a;--red:#f0857a;--warn:#f2c14e;
+  --radius:8px;--row-y:11px;--card-gap:14px;--control-h:34px;--help-size:13px}
+body{font-size:14px;line-height:1.45}
+/* Shell */
+#shell{grid-template-columns:58px minmax(0,1fr)}
+.rail{background:var(--rail);border-right:1px solid var(--line);padding:14px 8px 10px;gap:10px}
+.rail .brand{padding:0 0 6px}
+.rail .brand>div{font:700 19px/1 var(--display);letter-spacing:1.5px;color:var(--text)}
+.rail .brand b{display:inline;margin:0;font-size:inherit;letter-spacing:inherit;color:var(--accent)}
+.rail .brand small{display:none}
+.rail .search-button{order:0;height:34px;padding:0;border:1px solid var(--line);border-radius:8px;background:var(--s0);color:var(--muted)}
+.rail .search-button>span{font-size:18px;color:var(--muted)}
+nav{display:flex;flex-direction:column;gap:1px}
+.nav-item{height:34px;padding:0;border-radius:8px;color:var(--text);flex-shrink:0}
+.nav-item svg{width:18px;height:18px;stroke:var(--muted);stroke-width:1.7}
+.nav-item:hover{background:#ffffff0a}
+.nav-item.selected{background:#2a2418;color:var(--accent-hi)}
+.nav-item.selected svg{stroke:var(--accent)}
+.nav-item.selected:before{content:none}
+.nav-state{display:none}
+.rail-group{flex-shrink:0}
+#railGroup-support{margin-top:auto}
+.rail-bottom{margin:0;padding:0}
+.rail-foot{margin:0;padding-top:8px;border-top:1px solid var(--line)}
+.rail-foot .rail-version{font:12px "Segoe UI",Interface,sans-serif;color:var(--muted)}
+/* Top bar: how you fly, the status in one line, Launch DCS with its other actions behind the arrow, the window buttons. */
+.topbar{display:flex;align-items:center;gap:16px;height:56px;flex-shrink:0;padding-left:24px;background:var(--rail);border-bottom:1px solid var(--line);app-region:drag;-webkit-app-region:drag}
+.topbar button,.topbar input,.topbar label,.topbar summary{app-region:no-drag;-webkit-app-region:no-drag}
+.topbar .panel-top{display:flex;align-items:center;gap:12px;flex:0 1 auto;min-width:0;padding:0;overflow:visible}
+.route-switch{display:flex;gap:2px;padding:3px;background:var(--field);border:1px solid var(--line);border-radius:8px;flex-shrink:0}
+.route-switch button,.route-switch button[data-route="Desktop"]{min-height:28px;padding:0 12px;border:0;border-radius:6px;font:500 13px "Segoe UI",Interface,sans-serif;letter-spacing:0;text-transform:none;color:var(--soft);white-space:nowrap}
+.route-switch button.selected{background:var(--s2);color:var(--text);font-weight:600}
+.route-switch button.selected.live .live-dot{background:var(--green)}
+.route-live{display:none;margin:0;min-width:0;font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.route-live.mismatch{display:block}
+.topbar .workflow{flex:1 1 0;flex-direction:row;align-items:center;justify-content:flex-end;gap:14px;min-width:0;padding:0;border:0;background:transparent;box-shadow:none!important}
+.topbar .workflow-status{align-items:center;gap:9px;min-width:0}
+.topbar .workflow-status>div{min-width:0;text-align:right}
+.topbar .workflow-status strong{display:block;font-size:13px;line-height:1.25;white-space:nowrap}
+.topbar .workflow-status p{margin:0;font-size:12px;line-height:1.3;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.topbar .status-dot{order:2;margin:0;box-shadow:none;background:var(--warn)}
+.topbar .status-dot.ready{background:var(--green)}
+.topbar .status-dot.error{background:var(--red)}
+.topbar .workflow-actions{display:flex;gap:0;flex-shrink:0}
+.topbar .workflow-actions .button.launch{min-height:36px;padding:0 18px;border-radius:8px 0 0 8px;font:700 15px var(--display);letter-spacing:1.4px;box-shadow:none;gap:6px}
+details.launch-more{position:relative;margin:0;padding:0;border:0}
+details.launch-more>summary{display:grid;place-items:center;width:30px;height:36px;border-radius:0 8px 8px 0;background:var(--accent);border-left:1px solid #00000033;color:#131416}
+details.launch-more>summary:before{content:none}
+details.launch-more>summary:hover{background:var(--accent-hi)}
+details.launch-more>summary svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round}
+details.launch-more .workflow-links{position:absolute;right:0;top:calc(100% + 6px);z-index:20;display:flex;flex-direction:column;align-items:stretch;gap:0;min-width:230px;padding:6px;background:var(--s1);border:1px solid var(--line-strong);border-radius:10px;box-shadow:0 18px 50px #000000a0}
+details.launch-more .workflow-links .link-button{padding:8px 10px;border-radius:6px;text-align:left;font:500 13px "Segoe UI",Interface,sans-serif;color:var(--text);text-decoration:none}
+details.launch-more .workflow-links .link-button:hover:not(:disabled){background:#ffffff0f;color:var(--text);text-decoration:none}
+.topbar .window-controls{position:static;align-self:flex-start;flex-shrink:0;height:34px}
+.live-switch{text-transform:none;letter-spacing:0;font:600 12px "Segoe UI",Interface,sans-serif;flex-shrink:0}
+/* Page heading and content */
+.page-heading{padding:22px 32px 0}
+.page-heading>div{border-bottom:0;padding-bottom:0}
+.page-heading h1{font:600 28px/1.1 var(--display);letter-spacing:.2px;text-transform:none}
+.page-heading p{margin-top:6px;font-size:14.5px;color:var(--soft)}
+#scrollArea{padding:18px 32px 32px}
+#pages{max-width:1280px}
+/* Cards: a surface with a title and one row per setting */
+.card{background:var(--s0);border:1px solid var(--line);border-radius:12px;padding:4px 20px 8px;margin-bottom:16px}
+.card-heading{padding:12px 0 8px;margin-bottom:0;border-bottom:0}
+.card .card-heading h2,.card>h2{font:600 18px var(--display);letter-spacing:.2px;text-transform:none;color:var(--text)}
+.card .card-heading .fine,.fine{font-size:13px;color:var(--muted)}
+.two-column{gap:0 20px}
+.setting{border-top:1px solid var(--line)}
+.setting>.setting-label,.setting .switch-row .setting-label{font:500 14px "Segoe UI",Interface,sans-serif}
+.toggle-list>.setting{padding:9px 0}
+.more-toggle{color:var(--soft);font:500 12.5px "Segoe UI",Interface,sans-serif;text-decoration:underline;text-underline-offset:2px}
+.why{color:var(--soft);font-size:12.5px}
+.tag{color:var(--warn);border-color:#6b5a2a}
+select,input[type=text],input[type=number],input.number-input{border:1px solid var(--line);border-radius:8px;color:var(--text)}
+select{background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%)}
+select:hover,input[type=text]:hover,input[type=number]:hover,input.number-input:hover{background-color:var(--field);border-color:var(--line-strong)}
+.setting-number input[type=number],.setting-number input.number-input{color:var(--text);border-radius:8px}
+input[type=range]::-webkit-slider-runnable-track{background:linear-gradient(var(--accent),var(--accent)) 0/var(--fill,50%) 100% no-repeat,var(--line-strong)}
+input[type=range]::-webkit-slider-thumb{width:16px;height:16px;margin-top:-6px}
+.switch{width:36px;height:20px;background:transparent;border:1px solid #5a606a}
+.switch:before{width:14px;height:14px;left:2px;top:2px;background:var(--muted)}
+.switch:checked{background:var(--accent);border-color:var(--accent)}
+.switch:checked:before{transform:translateX(16px);background:#131416}
+.segmented{gap:2px;padding:3px;border:1px solid var(--line);border-radius:8px}
+.segmented button{min-height:26px;border:0;border-radius:6px;font:500 13px "Segoe UI",Interface,sans-serif}
+.segmented button[aria-checked=true]{background:var(--accent);color:#131416;font-weight:600}
+.button{border-radius:8px;font:500 13.5px "Segoe UI",Interface,sans-serif;letter-spacing:0;text-transform:none}
+.button.secondary,.button.quiet{border:1px solid #5a606a;border-radius:8px;padding:7px 16px}
+.button.quiet{min-height:32px;border-color:var(--line-strong);font-size:13px;padding:5px 14px}
+.button.primary{border-radius:8px;font-weight:600}
+.link-button{font:500 13px "Segoe UI",Interface,sans-serif;letter-spacing:0;text-transform:none;color:var(--text);text-decoration:underline;text-underline-offset:3px}
+.link-button:hover:not(:disabled){color:var(--accent-hi)}
+details.advanced>summary{color:var(--text);font-weight:500;font-size:14px}
+details.advanced>summary .fold-value{color:var(--soft);font-weight:400;font-size:13px}
+details>summary:before{color:var(--muted)}
+.list-summary-action{text-transform:none;letter-spacing:0;font:500 13px "Segoe UI",Interface,sans-serif;color:var(--soft)}
+.hotkey-capture,.setting>.list-summary{border-radius:8px}
+.pimax-fovea,.saved-runtime,.engine-state,.pimax-note,.inline-note,.issue,.readiness-item,.detect-row{border-radius:8px}
+.engine-state{background:var(--s1);border-left-width:3px}
+.engine-state.loaded{border-left-color:var(--green)}
+.engine-state.failed{border-left-color:var(--warn)}
+.engine-row progress{accent-color:var(--accent)}
+.pimax-values dd,.pimax-controls dd,.detect-row span{color:var(--text)}
+.budget{border-radius:12px}
+dialog{border-radius:12px;background:var(--s0)}
+.needs{border-radius:8px;border-left:0;background:#2a2415;border:1px solid #6b5a2a}
+/* Overview: status, what runs (the feature checklist as cards), the rest in VR, the last flight */
+.dash-status{padding:20px 24px;margin-bottom:18px;border:1px solid var(--line);border-left-width:1px;border-radius:12px;gap:18px}
+.dash-status.ready,.dash-status.running,.dash-status.invalid{border-left-color:var(--line)}
+.dash-dot{width:14px;height:14px;box-shadow:0 0 0 6px var(--accent-dim)}
+.dash-main b{font:600 26px/1.15 var(--display)}
+.dash-main p{font-size:14.5px;margin-top:5px}
+.dash-main small{font-size:12.5px;color:var(--muted)}
+.dash-side{flex-direction:row;align-items:center;gap:10px}
+.dash-chip{border-radius:8px;padding:8px 14px;font-size:13px}
+.dash-chip.check{color:var(--text);border-color:#5a606a;background:transparent}
+.dash-chip.ok{color:var(--green);border-color:#2f6b4f;background:transparent}
+.runs-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin:0 0 10px}
+.runs-head h2,.stage-group-label,.flight-card .card-heading h2{font:600 19px var(--display);letter-spacing:.2px;text-transform:none;color:var(--text)}
+.runs-head .panel-profile{margin:0;font:400 13px "Segoe UI",Interface,sans-serif;color:var(--muted);justify-content:flex-end;gap:2px 12px}
+.runs-head .panel-profile .link-button{font-size:13px}
+.feature-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(196px,1fr));gap:12px}
+.feature-group{display:none}
+.feature{position:relative;display:flex;flex-direction:column;gap:8px;min-height:124px;padding:14px 16px;border:1px solid var(--line);border-left-width:1px;border-radius:12px;background:var(--s0)}
+.feature.on{border-left-color:var(--line)}
+.feature:before{content:"VR";font:600 11px "Segoe UI",Interface,sans-serif;letter-spacing:1px;color:var(--muted)}
+#feature-engine:before,#feature-boost:before{content:"EVERY PILOT"}
+.feature-check{display:block;cursor:default}
+.feature-check input{appearance:none;-webkit-appearance:none;position:absolute;right:14px;top:13px;width:36px;height:20px;margin:0;border:1px solid #5a606a;border-radius:10px;background:transparent;cursor:pointer;transition:background .15s,border-color .15s}
+.feature-check input:before{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:var(--muted);transition:transform .15s,background .15s}
+.feature-check input:checked{background:var(--accent);border-color:var(--accent)}
+.feature-check input:checked:before{transform:translateX(16px);background:#131416}
+.feature-check input:disabled{opacity:.5;cursor:default}
+.feature-text{gap:6px}
+.feature-check b{font:600 16px/1.25 "Segoe UI",Interface,sans-serif}
+.feature-summary{margin:0;font-size:13px;color:var(--soft)}
+.feature-open{position:absolute;right:8px;bottom:8px;width:28px;height:28px;border-radius:6px;color:var(--muted)}
+.feature-open:hover:not(:disabled){color:var(--text)}
+.feature-notes{margin-right:30px}
+.feature-note{margin:0;border-radius:6px;font-size:12.5px;background:var(--s1)}
+.feature-note.needs{background:#2a2415}
+.also-on{margin:10px 2px 0;font-size:13px}
+.also-on .link-button{font-size:13px}
+.pipeline{margin:18px 0}
+.stage-group{gap:10px}
+.stage{padding:14px 16px;border-left-width:1px;border-radius:12px}
+.stage.off{border-left-color:var(--line)}
+.stage>span{font:600 11px "Segoe UI",Interface,sans-serif}
+.stage.on em{color:var(--green);background:#183326}
+.stage b{font:600 16px "Segoe UI",Interface,sans-serif}
+.stage small{font-size:13px;color:var(--soft)}
+.flight-card{padding:6px 24px 18px}
+.flight-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:18px 28px}
+.flight-item{padding:6px 0;background:transparent;border:0;border-radius:0}
+.flight-item dt{font:600 11px "Segoe UI",Interface,sans-serif;letter-spacing:1px}
+.flight-item dd b{font:600 24px/1.25 var(--display)}
+.flight-item.ok dd b{color:var(--green)}
+.flight-item.warn dd b{color:var(--warn)}
+.flight-item dd small{font-size:13px;color:var(--soft)}
+.update-banner{border-radius:10px}
+/* Checks and the feature guide */
+.check-row{border-left-width:1px;border-radius:8px;padding:8px 12px}
+.check-row.fix,.check-row.check,.check-row.ok{border-left-color:var(--line)}
+.check-line{font-size:13px}
+.check-group>h3,.check-ok>summary{font:600 12px "Segoe UI",Interface,sans-serif;letter-spacing:1px}
+.guide-start>div,.guide-card{border-radius:12px}
+.guide-card.on{border-color:var(--line);box-shadow:none}
+.guide-section-head{border-bottom:0}
+.guide-section-head h2{font:600 19px var(--display);letter-spacing:.2px;text-transform:none;color:var(--text)}
+.guide-state{color:var(--green);border-color:#2f6b4f}
+.guide-impact{color:var(--soft);background:var(--s2)}
+.guide-icon{background:var(--s2)}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--line-strong);border-color:var(--bg)}
+/* Wide windows: the rail carries its labels and what is on */
+@media(min-width:1181px){
+  #shell{grid-template-columns:236px minmax(0,1fr)}
+  .rail{padding:16px 12px 12px}
+  .rail .brand{padding:0 8px 6px;gap:10px}
+  .rail .brand img{width:28px;height:28px}
+  .rail .search-button{justify-content:space-between;padding:0 12px;font-size:13px;color:var(--muted)}
+  .rail .search-button>span{display:none}
+  .rail .search-button kbd{display:inline;font:11px "Segoe UI",Interface,sans-serif;background:transparent;border:1px solid var(--line);border-radius:4px;padding:1px 6px;color:var(--muted)}
+  .nav-item{justify-content:flex-start;gap:11px;padding:0 12px}
+  .nav-item b{font-size:14px;font-weight:400;color:inherit}
+  .nav-item.selected b{color:var(--accent-hi);font-weight:600}
+  .nav-state{display:block;margin-left:auto;font:600 11px "Segoe UI",Interface,sans-serif;color:var(--muted)}
+  .nav-state.on{color:var(--green)}
+  .nav-state[hidden]{display:none}
+  .rail-group{margin:12px 0 5px 12px;font:600 11px "Segoe UI",Interface,sans-serif;letter-spacing:1.2px;color:var(--muted)}
+  #railGroup-support{margin:auto 0 0;padding-top:8px;height:0;overflow:hidden;font-size:0;border-top:1px solid var(--line)}
+  .rail-foot{flex-direction:row;justify-content:flex-start;padding:8px 12px 0;border-top:0}
+}
+@media(min-width:1441px){.route-live{display:block;max-width:420px}}
+/* Narrow windows: icons only in the rail; the status keeps the room it can get */
+@media(max-width:1180px){
+  #shell{grid-template-columns:58px minmax(0,1fr)}
+  .rail .brand>div{display:none}
+  .rail .search-button{font-size:0;justify-content:center}
+  .rail .search-button kbd{display:none}
+  #railGroup-support{margin-top:auto}
+  .topbar{padding-left:14px;gap:10px}
+  .route-switch button,.route-switch button[data-route="Desktop"]{padding:0 9px}
+}
+@media(min-width:1001px){.two-column{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:1000px){.two-column{grid-template-columns:1fr}.flight-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.topbar .workflow-status p{display:none}}
+@media(max-width:900px){#shell{grid-template-columns:52px minmax(0,1fr)}.page-heading{padding:16px 18px 0}#scrollArea{padding:14px 18px 22px}}
+@media(max-height:1000px){.feature{padding:14px 16px}.feature-list{gap:12px}}
+.setting>select.seg-native,.setting.inactive>select.seg-native{border:0}
+.setting-number input[type=number],.setting-number input.number-input{min-height:var(--control-h)}
+/* Overview status: the state is the headline, what runs sits under it (one sentence in the markup). */
+.dash-main b{display:flex;flex-direction:column;gap:3px}
+.dash-sep{display:none}
+.dash-runs{font:500 14.5px/1.35 "Segoe UI",Interface,sans-serif;color:var(--text)}
+.dash-runs:before{content:"Next launch: ";color:var(--muted);font-weight:400}
+.dash-status.running .dash-runs:before{content:"Running: "}
+.dash-main p{margin-top:6px}
+.dash-side .button.dash-setup{background:transparent;border:1px solid #5a606a;color:var(--text);font-weight:500;box-shadow:none}
+.dash-side .button.dash-setup:hover{background:#ffffff0d}
+/* Feature cards: left aligned, the summary wraps */
+.feature{align-items:stretch;grid-template-columns:none}
+.feature-check{display:block}
+.feature-text{align-items:flex-start;padding-right:0}
+.feature-check b{padding-right:44px}
+.feature-summary{white-space:normal;overflow:visible;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.feature:not(.on) .feature-summary{color:var(--muted)}
+.feature:before{display:block}
+.feature-open{font-size:16px}
+.feature-notes{grid-column:auto}
+.feature-note{margin:0}
+.feature-list{grid-template-columns:repeat(5,minmax(0,1fr))}
+@media(max-width:1500px){.feature-list{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}}
+/* The rail fits a 660 px window without scrolling */
+.rail{overflow:hidden}
+@media(max-height:760px){.nav-item{height:30px}.rail{gap:6px;padding-top:10px}.rail .brand{padding-bottom:2px}}
+@media(min-width:1181px){.rail .brand>div{display:block}}
+/* Segmented choices are as wide as their options, not the card */
+.setting.has-seg>.segmented{justify-self:start;max-width:100%;flex-wrap:wrap}
+.segmented button{flex:0 1 auto;padding:0 14px}
+.feature{padding-bottom:32px}
+/* ---- Lighter rows: the text gets the room, the control only what it needs ---------------------------------------- */
+.setting{grid-template-columns:minmax(0,1fr) auto;column-gap:24px}
+.setting>select{width:auto;min-width:150px;max-width:250px;justify-self:end}
+.setting>.setting-number{justify-self:end}
+.setting-number input[type=range]{width:132px;flex:0 0 132px}
+.setting>.path-row{grid-column:1 / -1;grid-row:auto;margin-top:8px}
+.setting>.hotkey-row{width:190px;justify-self:end}
+.setting:has(>.hotkey-row){grid-template-columns:minmax(0,1fr) auto}
+.setting-help{max-width:62ch;color:var(--soft)}
+.setting>.setting-label,.setting .switch-row .setting-label{font-weight:600}
+p.setting-more{max-width:66ch;border-left:0;padding:8px 12px;margin-top:8px;border-radius:8px;background:var(--s1);color:var(--soft)}
+.card-heading .fine{max-width:70ch}
+/* A setting that cannot be changed now says only why: its description comes back when it can. */
+.setting.inactive:has(.why:not([hidden])) .setting-help,.setting.inactive:has(.why:not([hidden]))>.setting-more{display:none}
+.setting.inactive .why{color:var(--muted);font-size:13px;margin-top:2px}
+.why{color:var(--soft);font-size:12.5px}
+/* The page's main column is wider than the one beside it */
+@media(min-width:1181px){
+  #page-foveation .two-column,#page-engine .two-column,#page-dlss .two-column,#page-osd .two-column,#page-boost .two-column{grid-template-columns:minmax(0,1.5fr) minmax(320px,1fr)}
+}
+/* Checks: the name on one line, what to do under it */
+.check-row{align-items:start;padding:10px 14px}
+.check-row .check-mark{margin-top:1px}
+.check-line{padding:0;font-size:13px;color:var(--soft)}
+.check-line b{display:block;margin:0 0 1px;font-size:14px}
+.check-row>.link-button{align-self:center}
+#pages .page .two-column:has(> div > [hidden]:only-child){grid-template-columns:minmax(0,1fr)}
+/* Narrow cards: the control goes under its text, as before */
+@container (max-width:470px){.setting{grid-template-columns:minmax(0,1fr)}.setting>select,.setting>.setting-number{grid-column:1;grid-row:auto;margin-top:8px;justify-self:start}.setting:has(>.hotkey-row){grid-template-columns:minmax(0,1fr) auto}}
+@container (max-width:360px){.setting:has(>.hotkey-row){grid-template-columns:minmax(0,1fr)}.setting>.hotkey-row{grid-column:1;grid-row:auto;margin-top:8px;justify-self:start}}
+@media(max-width:900px){.setting,.setting:has(>.hotkey-row){grid-template-columns:minmax(0,1fr)}.setting>select,.setting>.setting-number,.setting>.hotkey-row{grid-column:1;grid-row:auto;margin-top:8px;justify-self:start}}
+/* ---- Presets: the button next to "What runs" and its menu --------------------------------------------------------- */
+.runs-head .panel-profile{display:flex;align-items:center;gap:14px}
+details.preset{position:relative;margin:0;padding:0;border:0}
+details.preset>summary{display:flex;align-items:center;gap:8px;min-height:34px;padding:0 10px 0 12px;border:1px solid var(--line-strong);border-radius:8px;background:var(--s0);color:var(--text);font:13px "Segoe UI",Interface,sans-serif;cursor:pointer;list-style:none;white-space:nowrap}
+details.preset>summary:before{content:none}
+details.preset>summary::-webkit-details-marker{display:none}
+details.preset>summary:hover{border-color:#5a606a;background:var(--s1)}
+details.preset[open]>summary{border-color:var(--accent)}
+.preset-kicker{font:600 11px "Segoe UI",Interface,sans-serif;letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
+#presetName{max-width:230px;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+#presetButton.none #presetName{font-weight:400;color:var(--soft)}
+.preset-saved{font-size:12px;color:var(--green)}
+.preset-saved.pending{color:var(--muted)}
+details.preset>summary svg{width:12px;height:12px;fill:none;stroke:var(--muted);stroke-width:1.8;stroke-linecap:round}
+.preset-pop{position:absolute;right:0;top:calc(100% + 6px);z-index:20;width:320px;padding:6px;background:var(--s1);border:1px solid var(--line-strong);border-radius:10px;box-shadow:0 18px 50px #000000a0}
+.preset-list{display:flex;flex-direction:column;max-height:236px;overflow-y:auto}
+.preset-item{display:flex;align-items:center;gap:8px;min-height:34px;padding:0 10px;border:0;border-radius:6px;background:transparent;color:var(--text);font:14px "Segoe UI",Interface,sans-serif;text-align:left;cursor:pointer}
+.preset-item:hover:not(:disabled){background:#ffffff0f}
+.preset-item.active{color:var(--accent-hi);font-weight:600}
+.preset-tick{flex:0 0 14px;color:var(--accent)}
+.preset-item-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.preset-empty{margin:6px 10px 8px;font-size:13px;line-height:1.45;color:var(--soft)}
+.preset-form{display:flex;gap:6px;margin:6px 4px}
+.preset-form[hidden]{display:none}
+.preset-form input{flex:1;min-width:0}
+.preset-form .button{min-height:var(--control-h);padding:0 14px}
+.preset-error{margin:4px 10px 6px;font-size:12.5px;line-height:1.4;color:var(--warn)}
+.preset-actions{display:flex;flex-direction:column;margin-top:4px;padding-top:4px;border-top:1px solid var(--line)}
+.preset-actions .link-button{padding:8px 10px;border-radius:6px;text-align:left;font:500 13px "Segoe UI",Interface,sans-serif;color:var(--text);text-decoration:none}
+.preset-actions .link-button:hover:not(:disabled){background:#ffffff0f;color:var(--text);text-decoration:none}
+.preset-actions .link-button[hidden]{display:none}
+.preset-actions hr{width:100%;margin:4px 0;border:0;border-top:1px solid var(--line)}
+@media(max-width:1000px){#presetName{max-width:140px}}
+/* ---- The Presets page ------------------------------------------------------------------------------------------- */
+.nav-state:not(.on){font-weight:500}
+.preset-current{padding:18px 22px}
+.preset-current-row{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+.preset-current-main{flex:1 1 320px;min-width:0}
+.preset-current-main b{display:block;margin-top:2px;font:600 24px/1.2 var(--display);color:var(--text)}
+.preset-current-main p{margin:6px 0 0;max-width:70ch;font-size:13.5px;line-height:1.45;color:var(--soft)}
+.preset-current-actions{display:flex;flex-wrap:wrap;gap:8px}
+.preset-current-actions .button{min-height:36px;padding:0 16px}
+.preset-current .preset-form{margin:14px 0 0;max-width:520px}
+.preset-current .preset-error{margin:10px 0 0}
+#page-presets .runs-head{margin-top:22px}
+#page-presets .runs-head .fine{margin:0}
+.preset-cards{display:flex;flex-direction:column;gap:10px}
+.preset-card{padding:14px 18px;border:1px solid var(--line);border-radius:12px;background:var(--s0)}
+.preset-card.active{border-color:var(--accent-dark);background:linear-gradient(90deg,#2a2418,var(--s0) 55%)}
+.preset-card-row{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+.preset-card-main{flex:1 1 300px;min-width:0}
+.preset-card-title{display:flex;align-items:center;gap:10px}
+.preset-card-title b{font:600 16px/1.3 "Segoe UI",Interface,sans-serif;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.preset-chip{flex-shrink:0;padding:1px 8px;border:1px solid #2f6b4f;border-radius:999px;font:600 11px "Segoe UI",Interface,sans-serif;letter-spacing:.6px;text-transform:uppercase;color:var(--green)}
+.preset-card-summary{margin:3px 0 2px;font-size:13.5px;line-height:1.4;color:var(--soft)}
+.preset-card small{font-size:12px;color:var(--muted)}
+.preset-card-actions{display:flex;flex-wrap:wrap;gap:6px}
+.preset-card-actions .button{min-height:32px;padding:0 14px;font-size:13px}
+.preset-card-actions .button.secondary{border-color:var(--accent);color:var(--accent-hi)}
+.preset-card-actions .button.secondary:hover:not(:disabled){background:var(--accent-dim)}
+.preset-card-actions .button.danger{border-color:#94534a;color:var(--red)}
+.preset-card-form{margin:12px 0 0;max-width:520px}
+.preset-card .preset-error{margin:10px 0 0}
+.preset-none{padding:28px 24px;border:1px dashed var(--line-strong);border-radius:12px;text-align:center}
+.preset-none>b{display:block;font:600 18px var(--display);color:var(--text)}
+.preset-none p{margin:6px auto 0;max-width:60ch;font-size:13.5px;line-height:1.5;color:var(--soft)}
+/* Review fixes: the hidden native select of a segmented choice takes no room; the rail fits a 660 px window */
+.setting>select.seg-native,.setting.inactive>select.seg-native{min-width:0;max-width:1px;width:1px;justify-self:start;margin:0}
+nav::-webkit-scrollbar{width:0;height:0}
+@media(max-height:760px){.nav-item{height:28px}nav{gap:0}.rail .search-button{height:30px}.rail-group{margin-top:6px!important;margin-bottom:6px!important}}
+/* The page heading keeps a little air above the content that scrolls under it */
+.page-heading{padding-bottom:12px}
+#scrollArea{padding-top:6px}

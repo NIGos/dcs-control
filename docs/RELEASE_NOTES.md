@@ -1,3 +1,22 @@
+# 0.6.5 preview
+
+**A new interface.** The window has two columns instead of three. The left rail names every page and shows which features are on. The top bar holds how you fly (Pimax, Sboys, Optimizations only), the status in one line and **Launch DCS**; the arrow next to it opens **Review files**, **Apply without launching** and **Back to stock DCS**. The feature switches moved to the Overview, under **What runs**. Colors now mean one thing each: orange is the main action and the current choice, green is working, yellow is a warning or an experimental setting.
+
+**Presets.** A new **Presets** page keeps named copies of all your settings: one for day flying, one for night, one for a heavy mission. Save the current settings under a name, then **Use**, **Rename**, **Duplicate** or **Delete** each preset from its card, which also says what it runs and when it last changed. The **Preset** button on the Overview switches between them without leaving the page. Every change you make is saved as you make it, into the active preset too, so there is no Save button. **Import from a file** and **Export to a file** (before: Load and Save as) are on the Presets page.
+
+**Lighter pages.** Each setting shows one sentence; the rest is behind **More**. Controls take only the room they need, and a setting that cannot be changed now says only why.
+
+**Move the headset panel.** A new **Position** setting on the Keys & headset panel page puts the in-headset panel in any corner of your view (upper right, as before, by default).
+
+**Renamed pages.** *Framegen* is now **Frame generation** and *In flight* is **Keys & headset panel**. Nothing moved inside them.
+
+**Free unused DLSS memory is on by default.** DCS leaves an unused copy of DLSS in video memory after every mission load, about 0.7–1.4 GB each time; Engine Optimizations now free it unless you turned the setting off. Profiles saved with it off keep it off.
+
+**Fixes:**
+- With Ultraleap hand tracking installed, the bundled Quad Views rendered only two views (GitHub #20). For the DCS that Launch DCS starts, Ultraleap's layer is now loaded below Quad Views; other games and the Windows registration are not touched. Not tested with an Ultraleap here.
+- Quad Views **Turbo mode** is now off while frame generation is on: together, on the Pimax route, DCS could drop to a few FPS with an idle GPU. Your Turbo choice is kept and comes back when frame generation is off.
+- The diagnostic package now includes the Quad Views layer's own log.
+
 # 0.6.4 preview
 
 **Engine Optimizations warm up faster and keep their shader cache.** The shader variants the engine prepares after a load are now compiled on up to 4 background threads (about half the time on the test PC). They are kept in DCS Control's own folder, so **Back to stock DCS** and updates no longer throw them away. From the main menu on, variants made stale by a DCS update are prepared again before you fly.

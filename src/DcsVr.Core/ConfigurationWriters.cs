@@ -392,6 +392,7 @@ public static class ConfigurationWriters
 
         [overlay]
         position={(p.ShowOverlay && p.FrameGen != FrameGeneration.Off ? "upper_right" : "off")}
+        panel_position={p.HeadsetPanelPosition switch { PanelPosition.UpperLeft => "upper_left", PanelPosition.LowerRight => "lower_right", PanelPosition.LowerLeft => "lower_left", _ => "upper_right" }}
 
         """;
 
@@ -479,7 +480,7 @@ public static class ConfigurationWriters
         horizontal_focus_section={Number(Math.Min(p.FoveaWidth, .9))}
         vertical_focus_section={Number(Math.Min(p.FoveaHeight, .9))}
         force_no_eye_tracking={(p.Gaze == GazeMode.Fixed ? 1 : 0)}
-        turbo_mode={(p.QuadTurbo ? 1 : 0)}
+        turbo_mode={(p.UsesQuadTurbo ? 1 : 0)}
         dcsvr_saccade_widening={(p.QuadSaccadeLead && p.Gaze == GazeMode.EyeTracked ? 1 : 0)}
         dcsvr_saccade_speed=120
         dcsvr_saccade_lead_ms={Int(p.QuadSaccadeLeadMs)}

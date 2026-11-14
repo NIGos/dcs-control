@@ -5,6 +5,8 @@ namespace DcsVr.Core;
 
 public enum RuntimeKind { Pimax, SboysSteamVr }
 public enum QuadProvider { None, PimaxNative, QuadViewsFoveated }
+/// <summary>The corner of the view the in-headset panel is drawn in.</summary>
+public enum PanelPosition { UpperRight, UpperLeft, LowerRight, LowerLeft }
 public enum FrameGeneration { Off, Nvidia, FidelityFx }
 public enum GazeMode { Fixed, EyeTracked }
 public enum TrackingKind { Unknown, Slam, Lighthouse }
@@ -153,6 +155,10 @@ public sealed record VrProfile
     /// <summary>Quad Views turbo: DCS starts the next frame while the runtime still holds the previous one. Quad Views itself
     /// enables it on most runtimes and disables it on SteamVR; off by default until measured in the headset.</summary>
     public bool QuadTurbo { get; init; }
+    /// <summary>Turbo runs only without frame generation: Turbo starts DCS's next frame without waiting for the headset,
+    /// and frame generation paces those same waits. Together, on the Pimax runtime, frames stalled for up to seconds
+    /// (forum report, 2026-11-13; Quad Views' own settings already turn Turbo off on SteamVR). The saved choice is kept.</summary>
+    public bool UsesQuadTurbo => QuadTurbo && FrameGen == FrameGeneration.Off;
     public double NeuralWorkingScale { get; init; } = 0.75;
     public double NeuralIntensity { get; init; } = 1;
     public bool NeuralBeforeUpscaling { get; init; } = true;
@@ -193,6 +199,8 @@ public sealed record VrProfile
     /// <summary>Shows or hides the in-headset diagnostic panel (FPS, DLSS 5, framegen); drawn by OFXR, so framegen profiles only.</summary>
     public string DiagnosticOverlayKey { get; init; } = NeuralHotkeys.DiagnosticDefault;
     public bool DiagnosticOverlayAtStart { get; init; }
+    /// <summary>Where the in-headset panel sits (OFXR fork patch 0076, [overlay] panel_position). Upper right, as before, by default.</summary>
+    public PanelPosition HeadsetPanelPosition { get; init; }
     /// <summary>The in-headset panel without frame generation: OFXR is loaded only to draw it (no generation, no D3D11
     /// bridge, DCS's frames pass straight through). With frame generation the panel is always there.</summary>
     public bool HeadsetPanel { get; init; }
@@ -327,8 +335,9 @@ public sealed record VrProfile
     /// <summary>[DLSS] ReleaseIdleSets (engine module R132): DCS sets up DLSS twice per mission load and never releases the
     /// first set, so each restart keeps about 0.7 to 1.4 GB more memory; on, the module releases a set DCS no longer
     /// evaluates once the newest set has taken over (ReleaseAfterEvals, the module's default 300). The image does not
-    /// change. Monitor and VR alike; an engine feature, so not in the Perception-only mode. Off by default.</summary>
-    public bool EngineReleaseIdleDlss { get; init; }
+    /// change. Monitor and VR alike; an engine feature, so not in the Perception-only mode. On by default since 0.6.5
+    /// (off until 0.6.4), also for a profile saved without the field.</summary>
+    public bool EngineReleaseIdleDlss { get; init; } = true;
     /// <summary>It runs: <see cref="EngineReleaseIdleDlss"/> with Engine Optimizations (the module's worker ticks the
     /// DLSS release only outside its Perception-only mode; the in-flight engine switch pauses it).</summary>
     public bool UsesReleaseIdleDlss => EngineReleaseIdleDlss && EngineOptimizations;

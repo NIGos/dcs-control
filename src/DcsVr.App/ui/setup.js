@@ -14,7 +14,7 @@
     step = 0; source = structuredClone(ui().profile); candidate = null; report = null;
     const draft = ui().draft(); paths = {dcs:draft.dcs,options:draft.options,neuralRuntimePath:source.neuralRuntimePath || ''};
     const running = ui().state?.activeRoute?.route;
-    // The same features as the checklist in the right panel, starting from the current draft.
+    // The same features as the checklist on the Overview, starting from the current draft.
     choices = {route:source.desktop ? 'Desktop' : running || source.runtime,features:ui().featureState(source),gaze:source.gaze};
     message(''); render(); el('setupDialog').showModal();
   }

@@ -1,0 +1,38 @@
+diff --git a/src/layer/openxr_fps_overlay.cpp b/src/layer/openxr_fps_overlay.cpp
+--- a/src/layer/openxr_fps_overlay.cpp
++++ b/src/layer/openxr_fps_overlay.cpp
+@@ -64,6 +64,9 @@ struct OpenXrFpsOverlay::Impl {
+     // Application frames, for the panel's app -> out comparison.
+     FpsCounter application_counter;
+     FpsOverlayPosition position{FpsOverlayPosition::upper_right};
++    // DCS Control (0076): the diagnostic panel's own corner ([overlay]
++    // panel_position); off or absent: it follows the counter's, as before.
++    FpsOverlayPosition panel_position{FpsOverlayPosition::off};
+     std::int64_t next_refresh{};
+     bool attempted{}, initialized{}, disabled{};
+     // The number the overlay draws is what the headset received where that
+@@ -541,6 +544,14 @@ struct OpenXrFpsOverlay::Impl {
+         std::string value;
+         for (wchar_t c : setting) { if (!c) break; value += c < 128 ? static_cast<char>(c) : '?'; }
+         position = parse_overlay_position(value);
++        // DCS Control (0076): read with the counter's position, so a change
++        // in the file moves the panel within a refresh.
++        std::array<wchar_t, 32> panel_setting{};
++        GetPrivateProfileStringW(L"overlay", L"panel_position", L"off",
++            panel_setting.data(), static_cast<DWORD>(panel_setting.size()), ini.c_str());
++        std::string panel_value;
++        for (wchar_t c : panel_setting) { if (!c) break; panel_value += c < 128 ? static_cast<char>(c) : '?'; }
++        panel_position = parse_overlay_position(panel_value);
+         const bool counter_on = position != FpsOverlayPosition::off;
+         const bool panel_on = toggle.visible();
+         if ((!counter_on && !panel_on) || disabled || !info->layerCount || !info->layers) return;
+@@ -577,7 +588,8 @@ struct OpenXrFpsOverlay::Impl {
+             placement = overlay_placement(position, left, right, down, up);
+             placement_valid = true;
+         }
+-        panel_placement = diagnostic_panel_placement(position, left, right, down, up);
++        panel_placement = diagnostic_panel_placement(
++            panel_position != FpsOverlayPosition::off ? panel_position : position, left, right, down, up);
+         if (!initialize(eye_width)) return;
+         // A quad layer in front of the view, which the runtime composites in
+         // the order the layer list gives. An application that submits its own

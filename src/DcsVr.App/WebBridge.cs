@@ -45,6 +45,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         }
     }
     private DraftStore Drafts => new(service.StateRoot);
+    private PresetStore Presets => new(service.StateRoot);
+    /// <summary>The user's presets and the one edits are saved into (null: none).</summary>
+    private object PresetsView() { var presets = Presets; return new { items = presets.List(), active = presets.Active, details = presets.Details() }; }
     private readonly Lock _draftLock = new();
     /// <summary>The page saves the draft a moment after each edit, outside the command lock (a launch may hold it).</summary>
     private string? SaveDraftRequest(string json)
@@ -59,8 +62,10 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             id = root.GetProperty("id").GetString();
             var data = root.GetProperty("data");
             var draft = JsonData.Deserialize<VrProfile>(data.GetProperty("profile").GetRawText());
-            lock (_draftLock) Drafts.Save(draft, Empty(data.GetProperty("dcs").GetString()), Empty(data.GetProperty("options").GetString()));
-            return Reply(id, new { saved = true });
+            string? preset;
+            // The active preset follows every edit, so a preset is never "unsaved".
+            lock (_draftLock) { Drafts.Save(draft, Empty(data.GetProperty("dcs").GetString()), Empty(data.GetProperty("options").GetString())); var presets = Presets; preset = presets.Active; if (preset is not null) service.SaveProfile(draft, presets.PathOf(preset)); }
+            return Reply(id, new { saved = true, preset });
         }
         catch (Exception e) when (e is JsonException or KeyNotFoundException or InvalidOperationException or IOException or UnauthorizedAccessException or NotSupportedException)
         { return JsonData.Serialize(new { id, ok = false, error = e.Message }); }
@@ -500,7 +505,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                 wizardBefore = (_profile, _dcs, _options, _inventory, _eyeResolution, _status);
             if (action is "launch" or "apply" or "restore" or "grantWriteAccess") _writing = action;
             // import and restore reply with the profile too: without the page's draft they would bring back an older one.
-            if (action is "preview" or "apply" or "launch" or "resetNeural" or "save" or "export" or "refresh" or "checkReadiness" or "import" or "restore" or "prepareSboys" or "importSboys" or "openSboys" or "detect" or "diagnosticPackage" or "grantWriteAccess") ReadDraft(data);
+            if (action is "preview" or "apply" or "launch" or "resetNeural" or "save" or "export" or "refresh" or "checkReadiness" or "import" or "restore" or "prepareSboys" or "importSboys" or "openSboys" or "detect" or "diagnosticPackage" or "grantWriteAccess" or "presetSave" or "presetRename" or "presetDelete" or "presetDuplicate") ReadDraft(data);
             switch (action)
             {
                 case "ready":
@@ -708,12 +713,45 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     return Reply(id, new { savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), message = kept
                         ? "The saved runtime copy is no longer used for new drafts. The applied profile was installed from it, so the file stays until that profile is restored."
                         : "The saved runtime copy was deleted. Select nvngx_dlssnr.dll again to use DLSS 5." });
+                case "presetSave":
+                    {   // These settings under a new name (or over a preset, when the page asked first); edits follow it from now on.
+                        var presets = Presets; var name = PresetStore.Clean(data.GetProperty("name").GetString());
+                        var overwrite = data.TryGetProperty("replace", out var r) && r.ValueKind == JsonValueKind.True;
+                        if (presets.Exists(name) && !overwrite) throw new InvalidDataException($"A preset named {name} already exists.");
+                        lock (_draftLock) { Directory.CreateDirectory(presets.Root); service.SaveProfile(_profile, presets.PathOf(name)); presets.SetActive(name); }
+                        _status = $"Preset {name} saved. Your changes are saved into it as you make them."; break;
+                    }
+                case "presetLoad":
+                    {
+                        var presets = Presets; var name = PresetStore.Clean(data.GetProperty("name").GetString());
+                        if (!presets.Exists(name)) throw new InvalidDataException($"The preset {name} no longer exists.");
+                        lock (_draftLock) { _profile = service.LoadProfile(presets.PathOf(name)); presets.SetActive(name); Drafts.Save(_profile, _dcs, _options); }
+                        Invalidate(); _status = $"Preset {name} loaded. Launch DCS applies it."; break;
+                    }
+                case "presetRename":
+                    {
+                        var to = PresetStore.Clean(data.GetProperty("to").GetString());
+                        lock (_draftLock) Presets.Rename(data.GetProperty("name").GetString() ?? "", to);
+                        _status = $"Preset renamed to {to}."; break;
+                    }
+                case "presetDuplicate":
+                    {
+                        var to = PresetStore.Clean(data.GetProperty("to").GetString());
+                        lock (_draftLock) Presets.Duplicate(data.GetProperty("name").GetString() ?? "", to);
+                        _status = $"Preset {to} created as a copy."; break;
+                    }
+                case "presetDelete":
+                    {
+                        var name = PresetStore.Clean(data.GetProperty("name").GetString());
+                        lock (_draftLock) Presets.Delete(name);
+                        _status = $"Preset {name} deleted. Your settings on screen stay as they are."; break;
+                    }
                 case "save":
                     EnsureInteractive(); var save = new SaveFileDialog { Filter = "DCS Control profile|*.json", FileName = "dcs-control-profile.json" };
-                    if (save.ShowDialog(owner) == true) { service.SaveProfile(_profile, save.FileName); _status = "Profile saved."; } break;
+                    if (save.ShowDialog(owner) == true) { service.SaveProfile(_profile, save.FileName); _status = "Settings exported."; } break;
                 case "import":
                     EnsureInteractive(); var import = new OpenFileDialog { Filter = "DCS Control profile|*.json" };
-                    if (import.ShowDialog(owner) == true) { _profile = service.LoadProfile(import.FileName); Invalidate(); _status = "Profile imported."; } break;
+                    if (import.ShowDialog(owner) == true) { _profile = service.LoadProfile(import.FileName); lock (_draftLock) Presets.SetActive(null); Invalidate(); _status = "Settings imported. Save them as a preset to keep them by name."; } break;
                 case "export":
                     EnsureInteractive(); var export = new SaveFileDialog { Filter = "Diagnostic report|*.json", FileName = "dcs-control-report.json" };
                     if (export.ShowDialog(owner) == true) { await Capture(); _readiness = await Task.Run(() => Readiness.Check(_profile, CurrentInventory, service));
@@ -918,7 +956,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         var dcsNow = DcsRunning();
         var readiness = _readiness is { } r && r.Checks.Any(c => c.Id == "closed" && (c.State == CheckState.Error) != dcsNow)
             ? r with { Checks = [.. r.Checks.Where(c => c.Id != "closed")] } : _readiness;
-        return new { version = ProductInfo.Version, profile = _profile, dcs = _dcs, options = _options, inventory = CurrentInventory with { DcsRunning = dcsNow }, pimax = PimaxView(),
+        return new { version = ProductInfo.Version, profile = _profile, presets = PresetsView(), dcs = _dcs, options = _options, inventory = CurrentInventory with { DcsRunning = dcsNow }, pimax = PimaxView(),
             activeRoute = new { route = activeRoute.Route?.ToString(), summary = activeRoute.Summary },
             issues, cadence = Enum.IsDefined(_profile.FpsLimit) ? FramePacing.Describe(HeadsetRefresh.Resolve(_profile), CurrentInventory) : null, headsetRefresh = HeadsetRefresh.Detect(_profile.Runtime), foreignDxgi = service.ForeignDxgi(_profile, CurrentInventory), dcsCustomIpd = CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD_enable") == "true" ? CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD")?.Trim('"') : null, gpu = new { nvidiaRtx = GpuInfo.Unknown || GpuInfo.HasNvidiaRtx, names = GpuInfo.Names, amdOnly = EngineOptimizations.AmdOnly(GpuInfo.Adapters()) }, status = _status, report = _report,
             plan = _plan is null ? null : new { foveaStamp = _previewFoveaStamp, files = _plan.Files.Select(f => new { f.Path, f.Purpose, bytes = f.Content.Length, replaces = f.ExpectedSha256 is not null, f.LuaChanges }), environment = _plan.LaunchEnvironment },

@@ -1,6 +1,6 @@
 # DCS Control — User Guide
 
-**Version 0.6.4-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`. The same content as a printable book, with a Quick Start and numbered screenshots: **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.6.3-preview/DcsControl-0.6.3-User-Manual.pdf)**.
+**Version 0.6.5-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`. The same content as a printable book, with a Quick Start and numbered screenshots: **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.6.5-preview/DcsControl-0.6.5-User-Manual.pdf)**.
 
 > **Early beta.** DCS Control has been flown mostly on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe — but please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
 
@@ -34,7 +34,7 @@ DCS Control makes DCS World faster and, on Pimax headsets, runs **DLSS 5 + frame
 | **Engine Optimizations** | A small module DCS loads by itself from Saved Games takes CPU work off DCS's render and model threads, with exactly the same image: about +50-60 % FPS at a busy airfield when DCS is CPU-bound. It also fixes a DCS terrain loop that wastes CPU. Once applied it stays on every time DCS starts, also from Steam or a desktop shortcut. |
 | **CPU Boost** | Gives DCS priority and its best CPU cores while it runs, and keeps background apps off those cores. Plus Free VRAM before flight. |
 
-Not on a Pimax? Choose **Optimizations only** in the right panel: DCS runs exactly as you set it up and the app adds only these two (see [Optimizations only](#optimizations-only-any-other-headset-or-no-vr)).
+Not on a Pimax? Choose **Optimizations only** in the top bar: DCS runs exactly as you set it up and the app adds only these two (see [Optimizations only](#optimizations-only-any-other-headset-or-no-vr)).
 
 **For Pimax headsets (Pimax Play, or SteamVR with Sboys)**
 
@@ -44,7 +44,7 @@ Not on a Pimax? Choose **Optimizations only** in the right panel: DCS runs exact
 | **DLSS 5** | NVIDIA's DLSS-NR neural rendering, applied to the Quad Views focus area on DCS's own DLSS (you bring the NVIDIA runtime file). Without Quad Views, optional Foveated Super Resolution (Cheeky) saves GPU outside where you look. |
 | **Frame generation** | OFXR optical-flow frame generation: DCS renders half (or a third) of the headset refresh rate and generated frames fill the rest. |
 
-You tick the features you want in the right panel, adjust them on their pages if you like, and press **Launch DCS**. The app writes the needed files into DCS (backing up the originals the first time), starts DCS, and puts everything back when you press **Back to stock DCS**. What stays on without the app: Engine Optimizations, terrain prefetch fix included. What needs DCS started from the app: the VR features and CPU Boost's priority and cores.
+You switch on the features you want on the Overview, adjust them on their pages if you like, and press **Launch DCS**. The app writes the needed files into DCS (backing up the originals the first time), starts DCS, and puts everything back when you press **Back to stock DCS**. What stays on without the app: Engine Optimizations, terrain prefetch fix included. What needs DCS started from the app: the VR features and CPU Boost's priority and cores.
 
 What it does **not** do: it does not change Windows settings, your GPU driver settings, your global OpenXR runtime or your DCS graphics settings (apart from a few listed `options.lua` values such as the frame limit with the VR features, which it restores). It does not add NVIDIA DLSS Frame Generation to DCS; frame generation here is OFXR's optical flow.
 
@@ -52,7 +52,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 - **Windows 10 or 11, 64-bit** (tested on Windows 11; Windows 10 is supported by everything the app uses but has not been flown yet). Run as a normal user — not as administrator.
 - **For Engine Optimizations and CPU Boost:** any GPU and headset, or none. On **AMD Radeon** cards the multi-threaded shadows and G-buffer stay off by default, because the driver does not offer D3D11 command lists; everything else runs, so the gain is smaller. The Engine Optimizations page then offers **Multi-threaded shadows and G-buffer without driver support**, which runs them on lists Windows emulates, with a smaller gain than on NVIDIA ([details](#multi-threaded-shadows-and-g-buffer-are-unavailable)). Radeon cards have not been tested yet. The items below are for the VR features.
-- **NVIDIA RTX graphics card** for DLSS 5 and for NVIDIA optical-flow frame generation. (The Framegen page also offers FidelityFX, which works on any GPU, but the tested setup is NVIDIA.) Development and testing: RTX 5090.
+- **NVIDIA RTX graphics card** for DLSS 5 and for NVIDIA optical-flow frame generation. (The Frame generation page also offers FidelityFX, which works on any GPU, but the tested setup is NVIDIA.) Development and testing: RTX 5090.
 - **Pimax headset** (tested: Crystal Super Micro OLED) with either
   - **Pimax Play** (the original Pimax OpenXR runtime), or
   - **SteamVR with the Sboys driver** (CustomHeadsetOpenVR 1.3.0; for SLAM tracking it needs Pimax EVO).
@@ -62,7 +62,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 ## Install
 
-**With the setup (recommended):** download `DcsControl-0.6.4-preview-Setup.exe` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and double-click it. Its first page lets you choose:
+**With the setup (recommended):** download `DcsControl-0.6.5-preview-Setup.exe` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and double-click it. Its first page lets you choose:
 
 - the **install folder**: `%LOCALAPPDATA%\Programs\DcsControl` unless you pick another one with **Browse...** (it shows the space needed and free). Any folder your Windows user can write to works, for example `D:\Games\DcsControl`; `Program Files` needs administrator rights, so it is refused. A folder that already holds other files gets a `DcsControl` folder inside it;
 - whether DCS Control goes in the **Start menu** and on the **desktop**.
@@ -71,7 +71,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 It waits until DCS and DCS Control are closed (the page says which one is still open). Running it again over an installed copy updates it in place; if anything goes wrong the installation is rolled back to the version you had. Its log is `%TEMP%\DcsControl-Setup.log`.
 
-**Portable, from the ZIP:** download `DcsControl-0.6.4-preview-win-x64.zip` and extract it to a folder of your choice. Then either:
+**Portable, from the ZIP:** download `DcsControl-0.6.5-preview-win-x64.zip` and extract it to a folder of your choice. Then either:
 
 - **Run it directly:** double-click `DcsControl.exe` in the extracted folder (.NET is included), or
 - **Install it:** double-click `Install DCS Control.cmd`. It does what the setup does, in a console window, with the Start menu entry but no desktop shortcut.
@@ -97,7 +97,7 @@ When DCS Control starts it asks GitHub whether a newer release is out (at most e
 
 Update refuses while DCS runs and while Launch DCS, Apply or Back to stock DCS is still working. If the update fails, the installation rolls back and the DCS Control you had opens again. A copy started from an unzipped folder is updated by installing DCS Control where the setup installed it before (Settings → Apps knows), otherwise in the standard folder (`%LOCALAPPDATA%\Programs\DcsControl`, with Start menu and desktop shortcuts); the dialog names the folder, and afterwards you can delete the unzipped one.
 
-Releases before 0.5.6 cannot update themselves: install 0.5.6 once with the setup (or the ZIP); from then on updates arrive in the app. **0.6.3 has a new release signing key**: from 0.6.2 or earlier, **Update** refuses it ("the signature does not match DCS Control's release key") and installs nothing, so install 0.6.3 or later (for example 0.6.4) once with its setup; your settings and profiles are kept, and later updates install from the app again. A dot next to the version number at the bottom of the left rail also means an update is available; × hides the banner until the next start.
+Releases before 0.5.6 cannot update themselves: install 0.5.6 once with the setup (or the ZIP); from then on updates arrive in the app. **0.6.3 has a new release signing key**: from 0.6.2 or earlier, **Update** refuses it ("the signature does not match DCS Control's release key") and installs nothing, so install 0.6.3 or later (for example 0.6.5) once with its setup; your settings and profiles are kept, and later updates install from the app again. A dot next to the version number at the bottom of the left rail also means an update is available; × hides the banner until the next start.
 
 On the **Help & support** page, under **Updates**, **Check for updates when DCS Control starts** turns the automatic check off (it is on by default) and **Check now** asks GitHub at once. Without internet nothing happens: no update is shown.
 
@@ -105,7 +105,7 @@ On the **Help & support** page, under **Updates**, **Check for updates when DCS 
 
 ## First run
 
-Not sure what to turn on? The **Feature guide** page (right under Overview) explains every feature in a few lines: what you get, what to expect, what it costs, what it needs and its in-flight key, and whether it is on in your profile. Its **Open** button takes you to the feature's settings.
+Not sure what to turn on? The **Feature guide** page (near the top of the left rail) explains every feature in a few lines: what you get, what to expect, what it costs, what it needs and its in-flight key, and whether it is on in your profile. Its **Open** button takes you to the feature's settings.
 
 ### Read settings from this PC
 
@@ -123,22 +123,35 @@ Or click **Guided setup** for three short steps. It is on the Overview (a **Firs
 
 Closing the wizard before **Launch DCS** writes nothing.
 
-### The right panel
+### The window
 
-![The right panel](screenshots/right-panel-features.png)
+![The Overview: the top bar, the left rail and What runs](screenshots/overview-what-runs.png)
 
-- **How you fly** — **Pimax** (Pimax Play), **Sboys** (SteamVR), or **Optimizations only** (a monitor, or any other headset with its own software). The line below shows which VR software is running; the app warns you if your profile uses the other one.
-- **Features** — one row per feature, the optimizations first: tick it on or off, read its current settings at a glance, click the row to open its page. With Optimizations only, the VR features are hidden.
-- **Load… / Save as…** — next to the profile name: load or save a profile file.
-- **Launch DCS** — the one button you need. Under it: **Review files** (what Launch will write, read-only), **Apply without launching** and **Back to stock DCS**.
+- **Top bar** — **how you fly**: **Pimax** (Pimax Play), **Sboys** (SteamVR), or **Optimizations only** (a monitor, or any other headset with its own software). Next to it, the status in one line, and **Launch DCS**, the one button you need. The arrow beside it opens **Review files** (what Launch will write, read-only), **Apply without launching** and **Back to stock DCS**. Hover over the route switch to see which VR software is running; the app warns you if your settings use the other one.
+- **Left rail** — every page by name. Next to each feature it says **ON** or **OFF**.
+- **What runs** (Overview) — one card per feature, the optimizations first: switch it on or off, read its current settings at a glance, click the arrow to open its page. With Optimizations only, the VR features are hidden.
 
-Everything you change is kept as a draft across app restarts. **Undo changes** (shown when the draft differs) brings back what is currently installed.
+Everything you change is saved as you change it and kept across app restarts; there is no Save button. Nothing is written to DCS until you press **Launch DCS** (or **Apply without launching**). **Undo changes** (shown when your settings differ from what is installed) brings back what is currently installed.
+
+### Presets
+
+![The Presets page](screenshots/presets.png)
+
+A preset is a named copy of all your settings: one for day flying, one for night, one for a heavy mission. They live on the **Presets** page.
+
+- **Save as a new preset** — keeps the settings on screen under a name and makes that preset the active one.
+- **The active preset follows you** — every change you make is saved into it as you make it.
+- **Use** — switches to another preset. Launch DCS then applies it.
+- **Rename**, **Duplicate**, **Delete** — on each preset's card, which also says what the preset runs and when it last changed. Delete asks for a second click; the settings on screen stay.
+- **Import from a file… / Export to a file…** — to share settings or move them to another PC (before 0.6.5: Load… and Save as…).
+
+The **Preset** button on the Overview switches presets, or saves a new one, without leaving the page.
 
 ### Finding your way
 
-The left rail starts with **Overview** and the **Feature guide**, then four groups: **Every pilot** (Engine Optimizations, CPU Boost, In flight), **VR** (Quad Views, DLSS, Framegen, Perception, Visual realism; hidden with Optimizations only), **Before you fly** (DCS & headset, Checks) and **If something goes wrong** (Help & support, Stock DCS). A greyed-out setting says under its name what it is waiting for, often with a button that takes you there.
+The left rail starts with **Overview**, **Presets** and the **Feature guide**, then three groups: **Performance** (Engine Optimizations, CPU Boost), **VR** (Quad Views, DLSS, Frame generation, Perception, Visual realism; hidden with Optimizations only) and **Setup** (DCS & headset, Keys & headset panel, Checks). **Help & support** and **Stock DCS** sit at the bottom. In a narrow window the rail shows icons only. Each setting shows one sentence; **More** opens the rest. A greyed-out setting says under its name what it is waiting for, often with a button that takes you there.
 
-Keyboard: **Ctrl+K** finds a setting. **Ctrl+1** Overview, **Ctrl+2** Feature guide, **Ctrl+3** Engine Optimizations, **Ctrl+4** CPU Boost, **Ctrl+5** Quad Views, **Ctrl+6** DLSS, **Ctrl+7** Framegen, **Ctrl+8** Perception, **Ctrl+9** Visual realism, **Ctrl+0** In flight, **Ctrl+Shift+C** Checks.
+Keyboard: **Ctrl+K** finds a setting. **Ctrl+1** Overview, **Ctrl+2** Feature guide, **Ctrl+3** Engine Optimizations, **Ctrl+4** CPU Boost, **Ctrl+5** Quad Views, **Ctrl+6** DLSS, **Ctrl+7** Frame generation, **Ctrl+8** Perception, **Ctrl+9** Visual realism, **Ctrl+0** Keys & headset panel, **Ctrl+Shift+C** Checks.
 
 ## The features
 
@@ -155,7 +168,7 @@ The app uses its **bundled Quad Views** (Quad-Views-Foveated). This is the one t
   - If you change the values in Pimax Play, you don't need to do anything else: the next **Launch DCS** updates the focus area ("Pimax Play changed: focus updated to …").
   - The focus area is **exactly the percentage Pimax Play shows**: Horizontal FOV 25% gives a sharp area 25% of the view wide (in Fine mode, Left + Right → Center add up). Center Resolution is the pixel density: 120% is 1.2×. This follows Pimax Play's 2026-10 scales; Pimax's own native Quad Views sizes its focus differently from the same sliders.
   - With **Set here**, you set the values in the app, in the same Quick units as Pimax Play.
-- **Focus sharpening**, **edge blending**, **turbo mode** — fine-tuning. The focus area is round; edge blending is how wide its edge fades into the periphery (wider is softer, a little less fully sharp area). Turbo is off by default: in flight it caused a visible "old frames" effect when turning the head.
+- **Focus sharpening**, **edge blending**, **turbo mode** — fine-tuning. The focus area is round; edge blending is how wide its edge fades into the periphery (wider is softer, a little less fully sharp area). Turbo is off by default: in flight it caused a visible "old frames" effect when turning the head. It does not run together with frame generation (the switch is greyed out and says so).
 - **Focus ahead of fast eye movements** and **Steady focus while looking** (both on, eye tracked only). With frame generation the focus area follows your eyes only on the frames DCS renders and reaches the headset 55–88 ms later, so after a quick glance your eye can land outside the sharp area for a frame or two. The first option makes the focus area reach ahead along a fast eye movement while it lasts, by about that latency (25 ms without frame generation, 55 ms in 2×, 85 ms in Auto and 3×). The second keeps the focus still while your eyes rest (movements under half a degree), so eye-tracker noise does not make its edge shimmer. Neither costs GPU time: the focus keeps its pixel count and is only briefly less dense while the eyes move. The Quad Views log has a `DCSVR gaze` line every 30 s with the saccades seen and how often each option acted.
 - **How bundled Quad Views reproduces this** (folded) shows the conversion and, once DCS has run, the focus size in pixels per eye.
 
@@ -189,7 +202,7 @@ The **DLSS presets** card sets the DLSS model DCS upscales with, for the focus a
 
 ### Frame generation
 
-![Framegen page](screenshots/framegen-auto-2x-3x.png)
+![Frame generation page](screenshots/framegen-auto-2x-3x.png)
 
 OFXR generates frames between the frames DCS renders. The top of the page shows what DCS needs to render for your headset refresh rate (90 FPS for 90 Hz with Only when needed, 45 FPS with 2×).
 
@@ -261,7 +274,7 @@ Four more options on the CPU Boost page, all off by default and usable without C
 - **Multi-threaded shadows** (on) — DCS draws the shadow cascades on its render thread, one object at a time. The module records those draws on 8 worker threads and DCS replays them; the nearest cascade but one stays as DCS draws it. Verified texel-identical live. Measured: **+3 to +5 % FPS**, p95 −4 to −7 %; total CPU use rises 4 to 7 % because the work moves to other cores, and it uses about 30 MB more memory. It turns itself off, with a warning on the page, if DCS's code is not what it expects.
 - **Redundant state filter** (on) — DCS's renderer sets graphics state (shaders, buffers, textures, samplers) that is already set, about 228,000 times a frame on an airfield; the repeat is skipped where DCS makes the call. Verified identical live (362 frames, no mismatch). Measured: about **+0.5 to +1 % FPS** and **1.2 % less CPU**. It turns itself off after a DCS update until it is checked against the new build.
 - **Cache distant shadows** (EXPERIMENTAL, off) — reuses the distant shadows (about 70 m to 1.5 km) for a few frames: about 0.7 ms less GPU time per frame. Distant tree shadows then sway a little less smoothly (they update about 11 times a second).
-- **Free unused DLSS memory** (off) — each mission load leaves an unused copy of DLSS in memory, about 0.7–1.4 GB each time. On: that copy is freed once DCS has switched to the new one, which helps long sessions with many restarts. The image doesn't change.
+- **Free unused DLSS memory** (on) — each mission load leaves an unused copy of DLSS in memory, about 0.7–1.4 GB each time. That copy is freed once DCS has switched to the new one, which helps long sessions with many restarts. The image doesn't change.
 - All together about **+50-60 % FPS** depending on the scene (+46.0 % ±1.1 and +49.9 % ±3.7 in two runs, 42 → 63 FPS), p95 −34 %, with the image verified identical pixel by pixel; with everything on, the GPU becomes the limit (96-97 % busy), measured with the module's automatic A/B test (the in-flight switch off and on, 24 alternating blocks) at a busy VR airfield (Ryzen 7 9800X3D, RTX 5090, Pimax Crystal Super, Quad Views, no frame generation); the rendered objects were identical off and on. How much you gain depends on how CPU-bound you are; when the GPU is the limit, little or nothing. Each optimization checks the DCS build first; after a DCS update it looks for the code it patches by signature and checks the bytes it expects, and stays off, with a warning on the page, if it does not find them.
 - **In-flight switch** (Alt+Shift+F11 by default; click the field and press any other combination, Backspace for Off) turns all the optimizations off and back on during a flight so you can compare: one beep off, two beeps on (**Beeps for the in-flight switch** turns the sounds off). Applying a profile starts with them on again.
 - **GPU-bound guard** (always on) — when the graphics card, not the CPU, is the limit, the multi-threaded shadows and G-buffer cost a little GPU time for nothing. The module then steps them down (fewer shadow recorders, then no helper lists, then both paused) and back up when the CPU is the limit again. Each step is tried against the step before for 20 seconds each and kept only when it raises FPS by more than 2 %; a step that does not help is undone and not tried again for a while. It only switches between exact paths, so the image never changes. Every 10 seconds the module's log says whether the frame was CPU- or GPU-bound.
@@ -310,7 +323,7 @@ How the image looks in the headset, on its own page. Everything is **off by defa
 
 ### Optimizations only (any other headset, or no VR)
 
-Another headset (Quest, Varjo, Reverb, Bigscreen…) or no headset at all? Pick **Optimizations only** under Pimax and Sboys in the right panel (also in Guided setup). DCS then runs exactly as you set it up, in VR or on the monitor, with your own VR settings, OpenXR runtime and layers (for example your own Quad Views or OpenXR Toolkit). The app adds only what is not VR:
+Another headset (Quest, Varjo, Reverb, Bigscreen…) or no headset at all? Pick **Optimizations only** next to Pimax and Sboys in the top bar (also in Guided setup). DCS then runs exactly as you set it up, in VR or on the monitor, with your own VR settings, OpenXR runtime and layers (for example your own Quad Views or OpenXR Toolkit). The app adds only what is not VR:
 
 - **Engine Optimizations** (its own page, with the terrain prefetch fix) and **CPU Boost**;
 - **Free VRAM before flight**.
@@ -319,7 +332,7 @@ Quad Views, DLSS 5 and frame generation are hidden, and so are the helpers made 
 
 ## Launch DCS
 
-Press **Launch DCS** (right panel, Overview or the last step of Guided setup). With DCS closed, it:
+Press **Launch DCS** (top bar, or the last step of Guided setup). With DCS closed, it:
 
 1. **Checks** the profile (validation, file hashes, your Pimax Play values) — any error stops here, before anything is written.
 2. **Applies what changed**: if your draft differs from what is installed, it writes the profile. The first time a file is written, the original is **backed up** (or noted as absent). If nothing changed, nothing is written. If only Pimax Play's values changed, only the focus area is updated.
@@ -336,7 +349,7 @@ Good to know:
 
 ### Live changes while DCS runs
 
-While DCS runs, settings tagged **LIVE** apply within about a second; you don't need to restart DCS. The **Live** switch next to the links at the bottom of the right panel turns this off. The status line says what was applied and what waits for the next launch.
+While DCS runs, settings tagged **LIVE** apply within about a second; you don't need to restart DCS. The **Live** switch in the top bar turns this off. The status line says what was applied and what waits for the next launch.
 
 What applies live:
 
@@ -359,7 +372,7 @@ Everything else waits for the next launch: focus size and shape, Quad Views turb
 
 ![Recording a hotkey](screenshots/framegen-hotkey-capture.png)
 
-All in-flight keys are on the **In flight** page, under **In-flight keys**. A key whose feature is off in the profile is greyed out.
+All in-flight keys are on the **Keys & headset panel** page, under **In-flight keys**. A key whose feature is off in the profile is greyed out.
 
 | Key (default) | What it does |
 | --- | --- |
@@ -374,12 +387,12 @@ All in-flight keys are on the **In flight** page, under **In-flight keys**. A ke
 
 To change a key, click the field and press the combination you want. Esc cancels, Backspace clears it. **Default** (shown when a key differs from its default) puts the default back. Keys need Ctrl, Alt or Shift unless they are F-keys, Pause, Insert, Home, End and similar. Windows' own shortcuts, the Windows key, another in-flight key's combination and the engine module's reserved keys (Ctrl+Alt+F8 to F12, Ctrl+Alt+Page Up/Down) are refused; a combination DCS binds by default is accepted with a note (and listed under Check yourself).
 
-The **headset panel** is drawn in the headset. With frame generation it is always available; without it, turn on **Headset panel** on the **In flight** page: OFXR is then loaded only to draw the panel and leaves your frames untouched. It shows FPS, DLSS 5 state (on with GPU ms, off, or why it is not applied), the frame-generation backend and mode (2×, 3×, auto), and DCS (app) vs headset (output) FPS. With the engine optimizations on, an **Engine** line says whether all of them are working ("Engine Opt.: all 18 on", green), only some ("Engine Opt.: 12 of 18 on", amber; for a few seconds after a mission loads this is normal while the multi-threaded recorders learn the scene), none ("Engine Opt.: none on", red), that they are still warming up ("Engine Opt.: warming up 60%", grey; see [the FAQ](#engine-opt-warming-up)) or that you switched them off ("Engine Opt.: OFF (Alt+Shift+F11)"). With Pupil shift installed, a **Pupil shift** line shows "ON" with the largest pupil shift, "no gaze" or "OFF"; with Depth boost it adds the strength and the eye distance the world is rendered with ("Depth x1.18 far, IPD 77.4 mm"), followed by "(dual camera)" while the cockpit is drawn at your real eye distance, or an amber "no dual camera" when it is not. Depth boost alone has its own **Depth boost** line, and Far depth a **Far depth** line. With Periphery stability, a **Periphery** line shows "ON 0.50, 88 fps" (strength and frames steadied per second), "ON, not filtering" or "OFF". Options on the **In flight** page (which also lists every in-flight key):
+The **headset panel** is drawn in the headset. **Position** (Keys & headset panel page) chooses the corner of your view it sits in. With frame generation it is always available; without it, turn on **Headset panel** on the **Keys & headset panel** page: OFXR is then loaded only to draw the panel and leaves your frames untouched. It shows FPS, DLSS 5 state (on with GPU ms, off, or why it is not applied), the frame-generation backend and mode (2×, 3×, auto), and DCS (app) vs headset (output) FPS. With the engine optimizations on, an **Engine** line says whether all of them are working ("Engine Opt.: all 18 on", green), only some ("Engine Opt.: 12 of 18 on", amber; for a few seconds after a mission loads this is normal while the multi-threaded recorders learn the scene), none ("Engine Opt.: none on", red), that they are still warming up ("Engine Opt.: warming up 60%", grey; see [the FAQ](#engine-opt-warming-up)) or that you switched them off ("Engine Opt.: OFF (Alt+Shift+F11)"). With Pupil shift installed, a **Pupil shift** line shows "ON" with the largest pupil shift, "no gaze" or "OFF"; with Depth boost it adds the strength and the eye distance the world is rendered with ("Depth x1.18 far, IPD 77.4 mm"), followed by "(dual camera)" while the cockpit is drawn at your real eye distance, or an amber "no dual camera" when it is not. Depth boost alone has its own **Depth boost** line, and Far depth a **Far depth** line. With Periphery stability, a **Periphery** line shows "ON 0.50, 88 fps" (strength and frames steadied per second), "ON, not filtering" or "OFF". Options on the **In flight** page (which also lists every in-flight key):
 
 - **Visible at start**
 - **VRAM counter** — adds the video memory in use to the panel (off by default). Use it when you suspect VRAM is full.
 
-The **FPS counter** and the **Frame generation log** stay on the Framegen page, under *Diagnostics* in the Image quality card (frame generation only).
+The **FPS counter** and the **Frame generation log** stay on the Frame generation page, under *Diagnostics* in the Image quality card (frame generation only).
 
 ## After the flight: the Last flight card
 
@@ -428,7 +441,7 @@ Only a running DCS stops it. The folded list shows what will happen to each file
 
 1. Make sure you started DCS with **Launch DCS** from the app, not from Steam or a shortcut. Started any other way, DCS also loads other OpenXR layers such as VectorXR, which DCS Control turns off only for its own launches.
 2. Open **Checks → Check this PC** and fix anything under *Must fix*. Look for **Other OpenXR layers** under *Check yourself*: other OpenXR tools (overlays, older Quad Views or eye-tracking layers) load above the profile's layers and can break it. Disable them for the test.
-3. Narrow it down: untick **Frame generation**, launch; then add features back one at a time (Quad Views → Frame generation → DLSS 5).
+3. Narrow it down: switch off **Frame generation**, launch; then add features back one at a time (Quad Views → Frame generation → DLSS 5).
 4. If it still fails, **Back to stock DCS** and [report it](#reporting-a-problem) with the logs.
 
 ### "Access to the path … is denied" (DCS under Program Files)
@@ -484,7 +497,7 @@ The headset panel shows "Engine Opt.: warming up 60%" (how far it is; the DCS En
 
 ### VRAM is full (stutters, textures loading late)
 
-- Turn on the **VRAM counter** (In flight page) to see it in the headset.
+- Turn on the **VRAM counter** (Keys & headset panel page) to see it in the headset.
 - On the CPU Boost page: **Free VRAM before flight**, **Small DCS window in VR**, **Lower the monitor while flying**. What Boost will do shows how much the listed programs hold now.
 - Frame generation reserves a fixed amount of memory, sized by the headset image it receives; it does not grow during a flight. DCS's own texture and terrain settings are the other big lever.
 
