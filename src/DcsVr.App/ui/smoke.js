@@ -60,6 +60,8 @@ window.runWebSmoke = async function() {
         check("What's new lays the notes out: an entry with its title, a Fixes section, code as code, nothing as markup",box.querySelectorAll('.note-item').length === 1 && item.querySelector('.note-title').textContent === 'Presets'
           && item.querySelector('p').textContent === 'A new Presets page, kept in presets.' && item.querySelector('p code').textContent === 'presets' && box.querySelector('h3.note-section').textContent === 'Fixes'
           && box.querySelectorAll('li').length === 2 && box.querySelector('li').textContent === 'One <b>fix</b>' && !box.querySelector('li b') && [...box.children].some(e => e.tagName === 'P' && e.querySelector('b')?.textContent === 'Loose bold')); }
+      check('Ko-fi is one quiet click away in three places: the rail, Help & support and What\'s new',$('railSupport').getAttribute('aria-label').includes('Ko-fi') && $('supportCard').closest('#page-support') && $('supportCardOpen').textContent.trim() === 'Ko-fi'
+        && $('whatsNewDialog').querySelector('[data-support]').textContent.includes('Ko-fi') && document.querySelectorAll('[data-support]').length === 3);
       $('appVersionButton').click(); check("The rail's version number opens What's new again",await until(() => $('whatsNewDialog').open) && $('whatsNewTitle').textContent.includes(ui.state.version.split('-')[0]));
       $('whatsNewClose').click();
       check('An available update shows a banner on the Overview and a dot on the version',await until(() => !$('updateBanner').hidden) && $('updateBannerText').textContent === `DCS Control ${short} is available`
