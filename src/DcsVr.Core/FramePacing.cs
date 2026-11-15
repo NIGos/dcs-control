@@ -86,6 +86,12 @@ public static class FramePacing
         if (plan.FrameGeneration)
             checks.Add(new("runtime-reprojection", CheckState.Manual, "Runtime motion smoothing / Smart Smoothing",
                 "With frame generation, turn off Smart Smoothing in Pimax Play (or Motion Smoothing in SteamVR): two kinds of generated frames on top of each other add latency and stutter. DCS Control does not change this setting."));
+        // Pimax's own Quad Views returns from xrEndFrame only when the submitted image is written: without the buffer the
+        // first generated frame arrives late and a display period is lost (GitHub #23; measured 2026-11-15: buffer on
+        // 45 FPS for 73 % of a flight, buffer off 30 FPS with OFXR patch 0078 and down to 22.5 without it).
+        if (plan.FrameGeneration && profile.QuadViews == QuadProvider.PimaxNative && !profile.FrameGenDeepPipeline)
+            checks.Add(new("native-quad-buffer", CheckState.Warning, "Smoothness buffer with Pimax native Quad Views",
+                "With Pimax native Quad Views, frame generation holds a higher frame rate with Smoothness buffer on (Frame generation page). With it off, DCS renders 30 FPS or less in scenes where it could hold 45."));
         return checks;
     }
 

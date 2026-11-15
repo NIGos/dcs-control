@@ -2796,6 +2796,11 @@ Test("Other limiters and motion smoothing stay manual checks", () =>
     var checks = FramePacing.Checks(new() { FrameGen = FrameGeneration.Nvidia }, new());
     Require(checks.Single(c => c.Id == "external-limiters").State == CheckState.Manual && checks.Single(c => c.Id == "runtime-reprojection").State == CheckState.Manual);
     Require(FramePacing.Checks(new(), new()).All(c => c.Id != "runtime-reprojection"));
+    // Pimax native Quad Views with frame generation and the buffer off: said once, as a warning (GitHub #23).
+    var native = new VrProfile { FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.PimaxNative, FrameGenDeepPipeline = false };
+    Require(FramePacing.Checks(native, new()).Single(c => c.Id == "native-quad-buffer").State == CheckState.Warning, "native Quad Views without the buffer is warned about");
+    foreach (var fine in new[] { native with { FrameGenDeepPipeline = true }, native with { QuadViews = QuadProvider.QuadViewsFoveated }, native with { FrameGen = FrameGeneration.Off } })
+        Require(FramePacing.Checks(fine, new()).All(c => c.Id != "native-quad-buffer"), "no warning with the buffer on, with Bundled, or without frame generation");
 });
 Test("Preflight flags legacy caps and desktop VSync", () =>
 {

@@ -3,6 +3,7 @@
 **Fixes:**
 - With Pimax native Quad Views, the headset panel followed your gaze and was smaller (GitHub #22). It is back in its corner, the same size as with Bundled Quad Views.
 - A DCS that was ended from Task Manager but stayed in the background kept the app waiting, and only a restart of the PC helped (GitHub #21). When DCS has no window, or has not responded for several minutes, the Overview now says so and offers **End DCS**.
+- With Pimax native Quad Views and **Smoothness buffer** off, frame generation could drop DCS to a quarter of the refresh rate, 22.5 FPS at 90 Hz (GitHub #23). It now holds a steady third instead, and the Checks suggest turning Smoothness buffer on, which holds half the refresh rate in most scenes.
 
 # 0.6.5 preview
 
