@@ -37,7 +37,7 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
          "${XRFG_CURSOR_REGION_VERTEX_HEADER}"
          "${XRFG_CURSOR_COMPOSITE_PIXEL_HEADER}"
          "${XRFG_COCKPIT_MASK_RESAMPLE_HEADER}"
-@@ -1169,6 +1177,86 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+@@ -1169,6 +1177,106 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_pipelined_deep_hold.cmake")
              set_tests_properties(xrfg_layer_${deep_hold_case} PROPERTIES TIMEOUT 180)
          endforeach()
@@ -121,10 +121,30 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 +                set_tests_properties(${two_layer_test} PROPERTIES TIMEOUT 180)
 +            endforeach()
 +        endforeach()
++        # The 2X release offset's scenario (0081: an application whose frame
++        # is heavy, light, then heavy again; tests/layer_release_offset.cmake)
++        # in the two-layer shape, where the tree has that patch: the flight
++        # that showed the stale offset was a two-layer one.
++        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_release_offset.cmake")
++            add_test(
++                NAME xrfg_layer_two_layers_deep_hold_release_offset
++                COMMAND "${CMAKE_COMMAND}"
++                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                    "-DBASE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_pipelined_deep_hold.ini"
++                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/xrfg_layer_two_layers_deep_hold_release_offset"
++                    "-DSHAPE=12000:300/17000:20/3000:300/12000:600"
++                    "-DEXPECT=fixed"
++                    "-DTWO=1"
++                    "-DEXTRA_KEYS=adaptive_frame_gen=0"
++                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_release_offset.cmake")
++            set_tests_properties(xrfg_layer_two_layers_deep_hold_release_offset
++                PROPERTIES TIMEOUT 180)
++        endif()
          # DCS Control (0034): adaptive at the shallow depth, starting in 2X:
          # the synthetic ring's second slot is made only when 3X first needs
          # it, and 3X starts only once it is in (one synthetic slot while 2X
-@@ -1567,12 +1655,18 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+@@ -1567,12 +1675,18 @@ if(WIN32 AND XRFG_BUILD_LAYER)
          # required), labelled bench: `ctest -L bench` runs them, a build
          # leaves them out (-LE bench). Skipped without NVIDIA hardware.
          # DCS Control (0059): and WARM_ONE, adaptive cadence's 1X.
@@ -144,7 +164,7 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
  
          # DCS Control (0031): the cockpit mask consumer against a fake producer
          # (shared atlases and fences with NT handles, as DCS Control's engine
-@@ -1628,6 +1722,18 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+@@ -1628,6 +1742,18 @@ if(WIN32 AND XRFG_BUILD_LAYER)
              target_compile_definitions(xrfg_vertical_fov_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
          endif()
          add_test(NAME xrfg_vertical_fov_tests COMMAND xrfg_vertical_fov_tests)

@@ -1,0 +1,883 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1149,6 +1149,83 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+                 "-DFRAME_RECORDS=0"
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_frame_records.cmake")
+         set_tests_properties(xrfg_layer_frame_records_off PROPERTIES TIMEOUT 120)
++        # DCS Control (0081): the 2X release offset when the application's
++        # frame changes weight, and `[ofxr] release_offset_guard`
++        # (tests/layer_release_offset.cmake, the call chain's
++        # dcs-release-offset; phases as "render us:frames/..."). Fixed 2X.
++        #   return: 12 ms, a burst of 17 ms, 3 ms (the offset is stepped up
++        #   beside the light frame), 12 ms again: the tail of the return is
++        #   clean. return_off: the same with the guard off: it does not act
++        #   (the stuck regime it leaves is printed, not required).
++        #   light: the offset raised by steps on light frames alone, which
++        #   the guard lets through; it is dropped (804) at the return.
++        #   lasting: a burst that stays: nothing is dropped.
++        #   shallow: return with the Smoothness buffer off.
++        # And the guard dropping nothing where the offset works as it is, on
++        # the suite's own scenarios (tests/layer_release_offset_quiet.cmake):
++        # the 2X hold with its late frames, 3X, adaptive cadence at the
++        # shallow depth (0079), and a runtime that holds xrEndFrame with
++        # 0078's lead armed. Pacing tests ("deep_hold", "adaptive" in their
++        # names).
++        set(release_offset_return "12000:300/17000:20/3000:300/12000:600")
++        set(release_offset_cases
++            "return|${release_offset_return}|fixed|adaptive_frame_gen=0"
++            "return_off|${release_offset_return}|off|adaptive_frame_gen=0,release_offset_guard=0"
++            "light|12000:300/7000:100/3000:300/12000:600|dropped|adaptive_frame_gen=0"
++            "lasting|12000:300/17000:600|stays|adaptive_frame_gen=0"
++            "shallow|${release_offset_return}|fixed|adaptive_frame_gen=0,deep_pipeline=0,pipelined_deep_hold=0")
++        foreach(release_offset_case IN LISTS release_offset_cases)
++            string(REPLACE "|" ";" release_offset_fields "${release_offset_case}")
++            list(GET release_offset_fields 0 release_offset_name)
++            list(GET release_offset_fields 1 release_offset_shape)
++            list(GET release_offset_fields 2 release_offset_expect)
++            list(GET release_offset_fields 3 release_offset_keys)
++            add_test(
++                NAME xrfg_layer_release_offset_deep_hold_${release_offset_name}
++                COMMAND "${CMAKE_COMMAND}"
++                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                    "-DBASE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_pipelined_deep_hold.ini"
++                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/release-offset-${release_offset_name}"
++                    "-DSHAPE=${release_offset_shape}"
++                    "-DEXPECT=${release_offset_expect}"
++                    "-DEXTRA_KEYS=${release_offset_keys}"
++                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_release_offset.cmake")
++            set_tests_properties(xrfg_layer_release_offset_deep_hold_${release_offset_name}
++                PROPERTIES TIMEOUT 180)
++        endforeach()
++        set(release_offset_quiet_cases
++            "hold|dcs-deep-hold|ofxr_bridge_pipelined_deep_hold.ini|-|-"
++            "triple|dcs-triple-deep|ofxr_bridge_triple_deep.ini|pipelined_deep_hold=1|-"
++            "cadence|dcs-cadence|ofxr_bridge_adaptive_cadence_shallow.ini|-|-"
++            "held|dcs-cadence-held|ofxr_bridge_adaptive_cadence_shallow.ini|-|3")
++        foreach(release_offset_case IN LISTS release_offset_quiet_cases)
++            string(REPLACE "|" ";" release_offset_fields "${release_offset_case}")
++            list(GET release_offset_fields 0 release_offset_name)
++            list(GET release_offset_fields 1 release_offset_mode)
++            list(GET release_offset_fields 2 release_offset_ini)
++            list(GET release_offset_fields 3 release_offset_keys)
++            list(GET release_offset_fields 4 release_offset_c23)
++            set(release_offset_arguments "")
++            if(NOT release_offset_keys STREQUAL "-")
++                list(APPEND release_offset_arguments "-DEXTRA_KEYS=${release_offset_keys}")
++            endif()
++            if(NOT release_offset_c23 STREQUAL "-")
++                list(APPEND release_offset_arguments "-DC23_EXPECT=${release_offset_c23}")
++            endif()
++            add_test(
++                NAME xrfg_layer_release_offset_adaptive_quiet_${release_offset_name}
++                COMMAND "${CMAKE_COMMAND}"
++                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                    "-DBASE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/${release_offset_ini}"
++                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/release-offset-quiet-${release_offset_name}"
++                    "-DMODE=${release_offset_mode}"
++                    ${release_offset_arguments}
++                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_release_offset_quiet.cmake")
++            set_tests_properties(xrfg_layer_release_offset_adaptive_quiet_${release_offset_name}
++                PROPERTIES TIMEOUT 180)
++        endforeach()
+         # DCS Control (0050): the 2X deeper pipeline's hold on a pipelined
+         # presenter (pipelined_deep_hold on and off), and frame generation
+         # armed on a thread of its own while the runtime takes 80 ms per
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -146,6 +146,16 @@ enum class BridgeFlightOperation : std::uint32_t {
+     // slots as 2 had; c their episodes at 3) and 17 (2 left for 3 on the
+     // work, which ends 16's hold on missed slots; c the p90 work, us).
+     // `[ofxr] cadence_accountable=0` turns all three off.
++    // DCS Control (0081): 804, the 2X release offset dropped to zero: it
++    // kept a frame that fits the slots of its cadence behind its count
++    // (xrfg::latency::ReleaseOffsetGuard). a the offset it had, b the
++    // application's own time before this release (its work and its
++    // xrEndFrame), c the slots of its cadence, all in microseconds.
++    // 805, steps of the steering not taken since the last 805 because they
++    // would have put such a frame past its slots (at most one record a
++    // second): a their number, b the longest own time of the last eight
++    // frames, c the offset the last of them would have set, in
++    // microseconds. `[ofxr] release_offset_guard=0` turns both off.
+     // DCS Control (0042): 960, the presenter thread started: a its OS thread
+     // id (GetCurrentThreadId; its start address is in ucrtbase, so tooling
+     // finds the thread by this id).
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -183,6 +183,15 @@ struct ConfiguredNvidiaOptions {
+ [[nodiscard]] bool read_cadence_accountable(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS Control (0081). `[ofxr] release_offset_guard`: at 2X off SteamVR, the
++// release offset is not stepped to where a frame that fits the slots of its
++// cadence would no longer fit them, and is dropped when it is what keeps
++// such a frame behind its count (xrfg::latency::ReleaseOffsetGuard). On
++// unless set to 0; nothing changes while every hold waits, at 3X, at 1X or
++// under 0078's lead. Read once per session.
++[[nodiscard]] bool read_release_offset_guard(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // DCS VR Control (0007). `[ofxr] diag_vram`: the diagnostic panel shows the
+ // GPU's memory ("VRAM 28.4 / 32.0 GB"). Off unless set to 1. Read once per
+ // session.
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -2652,4 +2652,102 @@ struct ReleaseRephase {
+     }
+ };
+ 
++// DCS Control (0081): the 2X release offset against the frame it delays.
++//
++// The offset (SessionState::application_release_offset) is a sleep between
++// the hold's release and the application's start, steered so that the
++// application completes a quarter period after a pop instead of on it. It is
++// stepped only from eight completions that agree, always by adding modulo
++// one period, and it is slept on every release whatever the frame then
++// takes. Two things follow, both measured in flight (deeper pipeline, 90
++// Hz):
++//  - a step taken while the frame is light stays when it is heavy again: 10.5
++//    ms learnt on the F10 map (3 ms frames) beside a 12 ms frame is 24.4 ms a
++//    frame against 22.2 for its two slots. The application then runs at 41
++//    fps on the sleep alone, a slot is lost every 4-5 frames (406), and the
++//    steering cannot undo it: a frame that drifts 2.2 ms a frame through the
++//    cycle never gives eight phases that agree. 56 s of it, until chance.
++//  - a step taken from the band below the boundary (a frame that ends 2 ms
++//    before the pop) adds a quarter period and more, which puts a frame that
++//    fitted its slots past them: 8.1 ms beside a 14 ms frame, a second of 42
++//    fps.
++//
++// So the guard keeps the application's own time from each release to its
++// next hold (its work and its xrEndFrame, the sleep left out), and
++//  - `fits`: a step is not taken where it would put a frame that fits the
++//    slots of its cadence past them (the longest of the last eight);
++//  - `observe`: a release that found the application behind its count
++//    (presenter_pair_release's surplus) with a frame that fitted its slots
++//    alone and not with the offset is charged to the offset; kCharged of
++//    them within kWindow releases and the offset is dropped to zero (the
++//    steering then learns it again from frames released without it, as at a
++//    session's start).
++// Neither acts on a frame that does not fit its slots by itself: there the
++// offset and its steering are as they were. A hold that waited (no surplus)
++// charges nothing, so an offset that fits is never dropped.
++struct ReleaseOffsetGuard {
++    static constexpr std::uint32_t kCharged = 3;
++    static constexpr std::uint32_t kWindow = 64;
++    static constexpr std::size_t kOwn = 8;
++
++    Nanoseconds own[kOwn]{};
++    std::uint32_t owns{};
++    std::uint32_t judged{};
++    std::uint32_t charged{};
++    std::uint32_t drops{};
++    std::uint32_t steps_refused{};
++
++    // The application's own time before the release being judged.
++    constexpr void note(Nanoseconds own_time) noexcept {
++        own[owns % kOwn] = own_time;
++        ++owns;
++    }
++    [[nodiscard]] constexpr Nanoseconds longest() const noexcept {
++        Nanoseconds result = 0;
++        const std::size_t count = owns < kOwn ? owns : kOwn;
++        for (std::size_t index = 0; index < count; ++index) {
++            result = own[index] > result ? own[index] : result;
++        }
++        return result;
++    }
++    // Whether the steering may step to `offset`: `budget` the slots of the
++    // frame's cadence.
++    [[nodiscard]] constexpr bool fits(
++        Nanoseconds offset, Nanoseconds budget) const noexcept {
++        const Nanoseconds frame = longest();
++        return owns == 0 || frame > budget || frame + offset <= budget;
++    }
++    constexpr void refused() noexcept { ++steps_refused; }
++    // One release with `offset` in force: `behind`, the application was
++    // behind its count; `own_time`, as for note (0 when not known). True:
++    // drop the offset.
++    [[nodiscard]] constexpr bool observe(
++        bool behind,
++        Nanoseconds offset,
++        Nanoseconds own_time,
++        Nanoseconds budget) noexcept {
++        if (offset <= 0) {
++            judged = 0;
++            charged = 0;
++            return false;
++        }
++        ++judged;
++        if (behind && own_time > 0 && own_time <= budget &&
++            own_time + offset > budget) {
++            ++charged;
++        }
++        if (charged >= kCharged) {
++            judged = 0;
++            charged = 0;
++            ++drops;
++            return true;
++        }
++        if (judged >= kWindow) {
++            judged = 0;
++            charged = 0;
++        }
++        return false;
++    }
++};
++
+ } // namespace xrfg::latency
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -334,6 +334,12 @@ bool read_cadence_accountable(
+     return read_ofxr_switch(module_directory, L"cadence_accountable", true);
+ }
+ 
++// DCS Control (0081).
++bool read_release_offset_guard(
++    const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"release_offset_guard", true);
++}
++
+ bool read_diag_vram(const std::filesystem::path& module_directory) noexcept {
+     return read_ofxr_switch(module_directory, L"diag_vram", false);
+ }
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1800,6 +1800,14 @@ struct SessionState {
+     std::atomic<std::uint32_t> leader_late_streak{0};
+     xrfg::latency::ReleaseRephase release_rephase;
+     bool release_rephase_anchor{};
++    // DCS Control (0081): the 2X release offset judged against the frame it
++    // delays (xrfg::latency::ReleaseOffsetGuard). `[ofxr]
++    // release_offset_guard`, read at the session's creation. Guarded by
++    // presenter_mutex. `release_offset_refused_*`: for record 805.
++    bool release_offset_guard_enabled{};
++    xrfg::latency::ReleaseOffsetGuard release_offset_guard;
++    std::uint32_t release_offset_refused_logged{};
++    std::chrono::steady_clock::time_point release_offset_refused_at{};
+     struct LeaderHandOver {
+         std::shared_ptr<LeadReadiness> lead;
+         xrfg::latency::Nanoseconds handed_ns{};
+@@ -6651,6 +6659,9 @@ XrResult layer_create_session_impl(
+     // DCS Control (0078): see SessionState::leader_lead_enabled.
+     state->leader_lead_enabled = !dispatch->steamvr_runtime &&
+         xrfg::implicit_layer::read_leader_lead(current_layer_directory());
++    // DCS Control (0081): see SessionState::release_offset_guard_enabled.
++    state->release_offset_guard_enabled = !dispatch->steamvr_runtime &&
++        xrfg::implicit_layer::read_release_offset_guard(current_layer_directory());
+     // DCS Control (0079): see SessionState::cadence_accountable_enabled and
+     // test_leader_unwritten.
+     state->test_leader_unwritten =
+@@ -13691,6 +13702,13 @@ void stop_continuous_presenter(
+         std::chrono::nanoseconds release_offset{0};
+         std::int64_t steer_phase_us = -1;
+         std::int64_t steer_step_us = 0;
++        // DCS Control (0081): see xrfg::latency::ReleaseOffsetGuard.
++        std::int64_t guard_dropped_us = 0;
++        std::int64_t guard_own_us = 0;
++        std::int64_t guard_budget_us = 0;
++        std::uint32_t guard_refused = 0;
++        std::int64_t guard_refused_offset_us = 0;
++        std::int64_t guard_longest_us = 0;
+         if (kPresenterFramesPerPair == 1) {
+             // DCS Control (0032): adaptive cadence's 1X. The application
+             // has one period for its frame; any delay is taken from it.
+@@ -13704,6 +13722,34 @@ void stop_continuous_presenter(
+             const auto period = std::chrono::nanoseconds(
+                 static_cast<std::int64_t>(state->presenter_display_period));
+             auto& ring = state->application_completion_phase;
++            // DCS Control (0081): the application's own time since its last
++            // release, and the offset judged on it. Not under the lead (the
++            // offset is not what is slept then).
++            const bool guard = state->release_offset_guard_enabled && !lead_active;
++            const xrfg::latency::Nanoseconds guard_budget =
++                period.count() * static_cast<std::int64_t>(kPresenterFramesPerPair);
++            if (guard) {
++                const xrfg::latency::Nanoseconds own =
++                    state->application_released_at !=
++                            std::chrono::steady_clock::time_point{}
++                        ? std::chrono::duration_cast<std::chrono::nanoseconds>(
++                              entered - state->application_released_at).count()
++                        : 0;
++                if (own > 0) {
++                    state->release_offset_guard.note(own);
++                }
++                const auto offset_before = state->application_release_offset;
++                if (state->release_offset_guard.observe(
++                        surplus != 0, offset_before.count(), own, guard_budget)) {
++                    state->application_release_offset =
++                        std::chrono::nanoseconds::zero();
++                    // The steering judges frames released without it.
++                    state->application_completion_samples = 0;
++                    guard_dropped_us = offset_before.count() / 1000;
++                    guard_own_us = own / 1000;
++                    guard_budget_us = guard_budget / 1000;
++                }
++            }
+             // DCS Control (0078): not while the lead is in force. The
+             // application then completes with the real frame before its own
+             // still queued, so where that falls against the pop is no
+@@ -13743,12 +13789,34 @@ void stop_continuous_presenter(
+                     while (step < std::chrono::nanoseconds::zero()) {
+                         step += period;
+                     }
+-                    state->application_release_offset =
++                    // DCS Control (0081): not to where a frame that fits
++                    // its slots would be put past them; the samples stay,
++                    // and the step is taken when the frames allow it.
++                    const auto stepped =
+                         (state->application_release_offset + step) % period;
+-                    // Judge the next step on frames that felt this one.
+-                    state->application_completion_samples = 0;
+-                    steer_phase_us = median.count() / 1000;
+-                    steer_step_us = step.count() / 1000;
++                    if (guard && !state->release_offset_guard.fits(
++                            stepped.count(), guard_budget)) {
++                        state->release_offset_guard.refused();
++                        const auto refused_now = std::chrono::steady_clock::now();
++                        if (refused_now - state->release_offset_refused_at >=
++                            std::chrono::seconds(1)) {
++                            state->release_offset_refused_at = refused_now;
++                            guard_refused =
++                                state->release_offset_guard.steps_refused -
++                                state->release_offset_refused_logged;
++                            state->release_offset_refused_logged =
++                                state->release_offset_guard.steps_refused;
++                            guard_refused_offset_us = stepped.count() / 1000;
++                            guard_longest_us =
++                                state->release_offset_guard.longest() / 1000;
++                        }
++                    } else {
++                        state->application_release_offset = stepped;
++                        // Judge the next step on frames that felt this one.
++                        state->application_completion_samples = 0;
++                        steer_phase_us = median.count() / 1000;
++                        steer_step_us = step.count() / 1000;
++                    }
+                 }
+             }
+             release_offset = state->application_release_offset;
+@@ -13800,6 +13868,24 @@ void stop_continuous_presenter(
+                 static_cast<std::uint64_t>(release_offset.count() / 1000),
+                 static_cast<std::uint64_t>(steer_step_us));
+         }
++        // DCS Control (0081): result=804, the release offset dropped;
++        // result=805, steps not taken (see bridge_flight_logger.hpp).
++        if (guard_dropped_us > 0) {
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::presenter_transition,
++                804,
++                static_cast<std::uint64_t>(guard_dropped_us),
++                static_cast<std::uint64_t>(guard_own_us),
++                static_cast<std::uint64_t>(guard_budget_us));
++        }
++        if (guard_refused != 0) {
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::presenter_transition,
++                805,
++                guard_refused,
++                static_cast<std::uint64_t>(guard_longest_us),
++                static_cast<std::uint64_t>(guard_refused_offset_us));
++        }
+         // DCS Control (0079): result=802: this hold waited one presenter
+         // frame less (ReleaseRephase). a the first synthetics handed over
+         // late in a row before it, b the frame's cadence, c the release
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -4985,6 +4985,82 @@ RephaseModelResult run_rephase_model(
+     return result;
+ }
+ 
++// DCS Control (0081): ReleaseOffsetGuard.
++void release_offset_guard_tests() {
++    constexpr Nanoseconds kMs = 1'000'000;
++    constexpr Nanoseconds kPeriod = 11'111'111;
++    constexpr Nanoseconds kBudget = 2 * kPeriod;
++    // The flight: 10.5 ms of offset learnt on a 3 ms frame, then a 13.6 ms
++    // frame (work and xrEndFrame), one release in five behind.
++    {
++        ReleaseOffsetGuard guard;
++        const Nanoseconds offset = 10'500'000;
++        for (int index = 0; index < 300; ++index) {
++            guard.note(3 * kMs);
++            require(!guard.observe(false, offset, 3 * kMs, kBudget),
++                "guard: an offset that fits is kept (light frames, no surplus)");
++        }
++        int dropped_at = -1;
++        for (int index = 0; index < 64 && dropped_at < 0; ++index) {
++            guard.note(13'600'000);
++            if (guard.observe(index % 5 == 4, offset, 13'600'000, kBudget)) {
++                dropped_at = index;
++            }
++        }
++        require(dropped_at == 14 && guard.drops == 1,
++            "guard: dropped at the third release behind its count");
++        require(!guard.observe(true, 0, 13'600'000, kBudget) && guard.judged == 0,
++            "guard: nothing to judge without an offset");
++    }
++    // A frame that does not fit its slots by itself is not the offset's.
++    {
++        ReleaseOffsetGuard guard;
++        for (int index = 0; index < 500; ++index) {
++            guard.note(25 * kMs);
++            require(!guard.observe(true, 4 * kMs, 25 * kMs, kBudget),
++                "guard: a frame over its slots charges nothing");
++        }
++        require(guard.fits(8 * kMs, kBudget),
++            "guard: steps are as before for a frame over its slots");
++    }
++    // Stalls now and then (a long frame, then surplus while the offset
++    // fits) charge nothing; two charged in a window are forgotten.
++    {
++        ReleaseOffsetGuard guard;
++        for (int index = 0; index < 1000; ++index) {
++            const bool stall = index % 20 == 0;
++            require(!guard.observe(stall, 3 * kMs, stall ? 40 * kMs : 12 * kMs, kBudget),
++                "guard: a stall is not charged");
++        }
++        for (int window = 0; window < 10; ++window) {
++            for (std::uint32_t index = 0; index < ReleaseOffsetGuard::kWindow; ++index) {
++                require(!guard.observe(index < 2, 10 * kMs, 13 * kMs, kBudget),
++                    "guard: two in a window are not enough");
++            }
++        }
++        require(guard.drops == 0, "guard: no drop");
++    }
++    // The step's bound: the longest of the last eight frames.
++    {
++        ReleaseOffsetGuard guard;
++        require(guard.fits(10 * kMs, kBudget), "guard: no frame known, any step");
++        for (int index = 0; index < 8; ++index) {
++            guard.note(18 * kMs);
++        }
++        require(!guard.fits(5 * kMs, kBudget) && guard.fits(4 * kMs, kBudget),
++            "guard: a step may not put a frame that fits past its slots");
++        for (int index = 0; index < 7; ++index) {
++            guard.note(3 * kMs);
++        }
++        require(!guard.fits(5 * kMs, kBudget), "guard: the long frame is still among the eight");
++        guard.note(3 * kMs);
++        require(guard.fits(10 * kMs, kBudget) && guard.longest() == 3 * kMs,
++            "guard: eight light frames, the step is free");
++        require(guard.fits(10 * kMs, 3 * kPeriod) && !guard.fits(10 * kMs, kPeriod + 1 * kMs),
++            "guard: the budget is the cadence's");
++    }
++}
++
+ void release_rephase_tests() {
+     // The rule: eight late in a row, then not again for 5 s, and for twice
+     // the wait each time it is needed again within twice that wait.
+@@ -5133,6 +5209,7 @@ int main() {
+         leader_lead_model_tests(); // DCS Control (0078)
+         cadence_accountable_tests(); // DCS Control (0079)
+         release_rephase_tests(); // DCS Control (0079)
++        release_offset_guard_tests(); // DCS Control (0081)
+         std::cout << "Latency control tests passed\n";
+         return 0;
+     } catch (const std::exception& error) {
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -503,6 +503,12 @@ std::vector<std::pair<float, XrTime>> g_told_by_pose;
+ // The flight log is checked by layer_pipelined_deep_hold.cmake.
+ bool g_deep_hold_mode = false;
+ bool g_deep_hold_expected = false;
++// DCS Control (0081): "dcs-release-offset", dcs-deep-hold's session (fixed
++// 2X, the deeper pipeline) with an application whose frame changes weight:
++// the phases of XRFG_TEST_RELEASE_OFFSET_SHAPE ("render us:frames/..."),
++// each one's first display time printed for layer_release_offset.cmake,
++// which judges the flight log.
++bool g_release_offset_mode = false;
+ std::atomic<bool> g_deep_hold_destroy_check{false};
+ // dcs-async-arm (0050): dcs-latency's shape with every private swapchain's
+ // creation taking g_slow_private_create_ms; with `async_arm=1` in the ini no
+@@ -3334,6 +3340,9 @@ int call_chain_main(int argc, char** argv) {
+             g_cadence_idle_mode || g_cadence_61_mode; // 0060, 0061
+         // DCS Control (0050).
+         g_deep_hold_mode = argc == 4 && std::strcmp(argv[3], "dcs-deep-hold") == 0;
++        g_release_offset_mode = // 0081
++            argc == 4 && std::strcmp(argv[3], "dcs-release-offset") == 0;
++        g_deep_hold_mode = g_deep_hold_mode || g_release_offset_mode;
+         g_async_arm_mode = argc == 4 && std::strcmp(argv[3], "dcs-async-arm") == 0;
+         g_slow_private_create_ms = g_async_arm_mode ? 80 : 0;
+     }
+@@ -5856,7 +5865,42 @@ int call_chain_main(int argc, char** argv) {
+         // (projection_mapping's a).
+         std::size_t deep_hold_destroy_from = 0;
+         bool deep_hold_swapchain_destroyed = false;
+-        if (g_deep_hold_mode) {
++        // dcs-release-offset (0081): see g_release_offset_mode.
++        if (g_release_offset_mode) {
++            char shape[512]{};
++            const DWORD shape_length = GetEnvironmentVariableA(
++                "XRFG_TEST_RELEASE_OFFSET_SHAPE", shape, sizeof(shape));
++            sequence_succeeded = sequence_succeeded && shape_length > 0 &&
++                shape_length < sizeof(shape);
++            int phase_index = 0;
++            for (const char* cursor = shape; sequence_succeeded && *cursor != 0;) {
++                char* after = nullptr;
++                const long render_us = std::strtol(cursor, &after, 10);
++                if (after == cursor || *after != ':') {
++                    sequence_succeeded = false;
++                    break;
++                }
++                cursor = after + 1;
++                const long frames = std::strtol(cursor, &after, 10);
++                if (after == cursor || frames <= 0 || render_us < 0) {
++                    sequence_succeeded = false;
++                    break;
++                }
++                cursor = (*after == ';' || *after == '/') ? after + 1 : after;
++                std::cout << "RELEASE_OFFSET_PHASE" << phase_index++ << "_FROM="
++                          << pending.predictedDisplayTime << '\n';
++                g_simulated_render_us = static_cast<int>(render_us);
++                for (long index = 0; sequence_succeeded && index < frames; ++index) {
++                    sequence_succeeded = run_frame(true);
++                }
++            }
++            std::cout << "RELEASE_OFFSET_END=" << pending.predictedDisplayTime << '\n';
++            g_simulated_render_us = 0;
++            // The session's end submits no layers; checked up to here.
++            std::scoped_lock lock(g_end_records_mutex);
++            deep_hold_destroy_from = g_end_records.size();
++        }
++        if (g_deep_hold_mode && !g_release_offset_mode) {
+             // The late frames go past the slack the steady ones leave by a
+             // few ms, as DCS's +5 ms do past its ~2 ms at 90 Hz. Here the
+             // steady frame leaves ~6.5 ms (a steady frame heavy enough to
+@@ -6052,7 +6096,8 @@ int call_chain_main(int argc, char** argv) {
+                 violations == 0 && g_submission_after_destroy.load() == 0 &&
+                 empty == 0 && repeat_overwritten == 0 && synthetic_total > 0 &&
+                 arm_bound_kept &&
+-                (!g_deep_hold_mode || !g_deep_hold_expected || repeats > 0);
++                (!g_deep_hold_mode || !g_deep_hold_expected ||
++                 g_release_offset_mode || repeats > 0); // 0081
+             std::ostringstream summary;
+             summary << "sequence=" << sequence_succeeded << " teardown=" << teardown_succeeded
+                     << " promoted=" << presenter_seen << " violations=" << violations
+diff --git a/tests/layer_release_offset.cmake b/tests/layer_release_offset.cmake
+new file mode 100644
+--- /dev/null
++++ b/tests/layer_release_offset.cmake
+@@ -0,0 +1,243 @@
++# DCS Control (0081): the 2X release offset (presenter_transition 800) when
++# the application's frame changes weight, and `[ofxr] release_offset_guard`.
++# Runs the call chain's "dcs-release-offset" (dcs-deep-hold's session: fixed
++# 2X, the deeper pipeline) with SHAPE, the application's phases as
++# "render us:frames/render us:frames/...", and judges the flight log. The last
++# phase is the one judged ("the return"); its first third is left to settle
++# and the rest is "the tail".
++#   EXPECT=fixed (the guard on): in the tail at most one release in fifty is
++#     behind its count (presenter_pair_release result > 0) and at most one slot
++#     in fifty is held (presenter_transition 406), whether the guard had to
++#     refuse a step (805), drop the offset (804) or nothing.
++#   EXPECT=dropped: fixed, and the offset in force when the return starts is
++#     ARM_US or more (else "NOT ARMED": the machine did not reach the case)
++#     and an 804 follows in the return.
++#   EXPECT=off (`release_offset_guard=0`): no 804 and no 805. The stuck
++#     regime this leaves (the offset at the return ARM_US or more, one release
++#     in ten of the tail behind) is reported, not required: whether the
++#     steering takes the first step depends on where the machine puts the
++#     burst's completion.
++#   EXPECT=stuck: off, with that regime required (for runs by hand).
++#   EXPECT=stays: the guard does not act: no 804 anywhere.
++#   EXPECT=report: nothing required (the counts are printed).
++# TWO=1 (foveated frame generation's two-layer shape, where the tree has it):
++# the scenario as "two:dcs-release-offset" with `foveated_layers=1`.
++# EXTRA_KEYS ("key=value,key=value") go under [ofxr].
++foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN BASE_INI WORK_DIR SHAPE EXPECT)
++    if(NOT DEFINED ${required_variable})
++        message(FATAL_ERROR "${required_variable} was not provided")
++    endif()
++endforeach()
++if(NOT DEFINED ARM_US)
++    set(ARM_US 6000)
++endif()
++if(NOT DEFINED TWO)
++    set(TWO 0)
++endif()
++
++file(REMOVE_RECURSE "${WORK_DIR}")
++file(MAKE_DIRECTORY "${WORK_DIR}")
++file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
++file(READ "${BASE_INI}" ini_text)
++set(added "")
++if(TWO)
++    string(APPEND added "foveated_layers=1\n")
++endif()
++if(DEFINED EXTRA_KEYS)
++    string(REPLACE "," ";" EXTRA_KEYS "${EXTRA_KEYS}")
++    foreach(extra_key IN LISTS EXTRA_KEYS)
++        string(APPEND added "${extra_key}\n")
++    endforeach()
++endif()
++string(REPLACE "[ofxr]" "[ofxr]\n${added}" ini_text "${ini_text}")
++string(REPLACE "logging_enabled=0" "logging_enabled=1" ini_text "${ini_text}")
++file(WRITE "${WORK_DIR}/ofxr_bridge.ini" "${ini_text}")
++
++if(TWO)
++    set(scenario "two:dcs-release-offset")
++else()
++    set(scenario "dcs-release-offset")
++endif()
++# SHAPE has '/' between the phases (a ';' would split the argument).
++string(REPLACE "/" ";" shape_phases "${SHAPE}")
++list(LENGTH shape_phases phase_count)
++set(ENV{XRFG_TEST_RELEASE_OFFSET_SHAPE} "${SHAPE}")
++get_filename_component(layer_name "${LAYER_DLL}" NAME)
++execute_process(
++    COMMAND "${CALL_CHAIN}"
++        "${WORK_DIR}/${layer_name}"
++        "${WORK_DIR}/fake-runtime.log"
++        ${scenario}
++    RESULT_VARIABLE call_chain_result
++    OUTPUT_VARIABLE call_chain_output
++    ERROR_VARIABLE call_chain_error)
++if(NOT call_chain_result EQUAL 0)
++    message(FATAL_ERROR
++        "Call chain '${scenario}' failed (${call_chain_result}):\n"
++        "${call_chain_output}\n${call_chain_error}")
++endif()
++message(STATUS "${call_chain_output}")
++
++math(EXPR return_phase "${phase_count} - 1")
++if(NOT call_chain_output MATCHES "RELEASE_OFFSET_PHASE${return_phase}_FROM=([0-9]+)")
++    message(FATAL_ERROR "The scenario printed no RELEASE_OFFSET_PHASE${return_phase}_FROM")
++endif()
++set(mark_return "${CMAKE_MATCH_1}")
++if(NOT call_chain_output MATCHES "RELEASE_OFFSET_END=([0-9]+)")
++    message(FATAL_ERROR "The scenario printed no RELEASE_OFFSET_END")
++endif()
++set(mark_end "${CMAKE_MATCH_1}")
++list(GET shape_phases ${return_phase} return_shape)
++string(REGEX REPLACE "^[0-9]+:" "" return_frames "${return_shape}")
++math(EXPR settle_releases "${return_frames} / 3")
++
++file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++list(LENGTH flight_logs flight_log_count)
++if(NOT flight_log_count EQUAL 1)
++    message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++endif()
++list(GET flight_logs 0 flight_log)
++
++# In log order: the frames' display times (projection_mapping's a), the
++# steering's steps (800), the guard (804), the held slots (406) and the
++# application's releases.
++file(STRINGS "${flight_log}" lines
++    REGEX " op=(projection_mapping|presenter_transition|presenter_pair_release) result=")
++set(field_pattern "result=(-?[0-9]+) dur_us=([0-9]+) a=([0-9]+) b=([0-9]+) c=([0-9]+)")
++set(phase 0)            # 0 before the return, 1 in it, 2 after it
++set(offset_now 0)
++set(offset_at_return -1)
++set(offset_highest 0)
++set(steps_before 0)
++set(steps_return 0)
++set(drops_before 0)
++set(drops_return 0)
++set(drop_text "")
++set(step_text "")
++set(refused 0)
++set(releases 0)
++set(surplus 0)
++set(held 0)
++set(tail_releases 0)
++set(tail_surplus 0)
++set(tail_held 0)
++set(tail_first_ms -1)
++set(tail_last_ms -1)
++foreach(line IN LISTS lines)
++    if(NOT line MATCHES "ms=([0-9]+)[^ ]* .* op=([a-z_]+) ${field_pattern}")
++        continue()
++    endif()
++    set(ms "${CMAKE_MATCH_1}")
++    set(op "${CMAKE_MATCH_2}")
++    set(result "${CMAKE_MATCH_3}")
++    set(a "${CMAKE_MATCH_5}")
++    set(b "${CMAKE_MATCH_6}")
++    set(c "${CMAKE_MATCH_7}")
++    if(op STREQUAL "projection_mapping")
++        if(phase EQUAL 0 AND a STREQUAL mark_return)
++            set(phase 1)
++            set(offset_at_return ${offset_now})
++        elseif(phase EQUAL 1 AND a STREQUAL mark_end)
++            set(phase 2)
++        endif()
++    elseif(op STREQUAL "presenter_transition")
++        if(result EQUAL 800)
++            set(offset_now ${b})
++            string(APPEND step_text " ${a}>${b}")
++            if(offset_now GREATER offset_highest)
++                set(offset_highest ${offset_now})
++            endif()
++            if(phase EQUAL 0)
++                math(EXPR steps_before "${steps_before} + 1")
++            elseif(phase EQUAL 1)
++                math(EXPR steps_return "${steps_return} + 1")
++            endif()
++        elseif(result EQUAL 804)
++            set(offset_now 0)
++            if(phase EQUAL 0)
++                math(EXPR drops_before "${drops_before} + 1")
++            elseif(phase EQUAL 1)
++                math(EXPR drops_return "${drops_return} + 1")
++                string(APPEND drop_text " [release ${releases}: offset ${a} us, frame ${b} us of ${c}]")
++            endif()
++        elseif(result EQUAL 805)
++            math(EXPR refused "${refused} + ${a}")
++        elseif(result EQUAL 406 AND phase EQUAL 1)
++            math(EXPR held "${held} + 1")
++            if(releases GREATER_EQUAL settle_releases)
++                math(EXPR tail_held "${tail_held} + 1")
++            endif()
++        endif()
++    elseif(op STREQUAL "presenter_pair_release" AND phase EQUAL 1)
++        math(EXPR releases "${releases} + 1")
++        if(result GREATER 0)
++            math(EXPR surplus "${surplus} + 1")
++        endif()
++        if(releases GREATER settle_releases)
++            math(EXPR tail_releases "${tail_releases} + 1")
++            if(result GREATER 0)
++                math(EXPR tail_surplus "${tail_surplus} + 1")
++            endif()
++            if(tail_first_ms LESS 0)
++                set(tail_first_ms ${ms})
++            endif()
++            set(tail_last_ms ${ms})
++        endif()
++    endif()
++endforeach()
++set(rate "?")
++if(tail_releases GREATER 1 AND tail_last_ms GREATER tail_first_ms)
++    math(EXPR rate_x10 "(${tail_releases} - 1) * 10000 / (${tail_last_ms} - ${tail_first_ms})")
++    math(EXPR rate_whole "${rate_x10} / 10")
++    math(EXPR rate_tenth "${rate_x10} % 10")
++    set(rate "${rate_whole}.${rate_tenth}")
++endif()
++set(summary
++    "release offset '${scenario}' ${SHAPE} (${EXPECT}): offset at the return ${offset_at_return} us "
++    "(highest ${offset_highest}), 800 steps ${steps_before} before / ${steps_return} in the return, "
++    "800 as phase>offset us:${step_text}; 804 ${drops_before} before / ${drops_return} in the return${drop_text}, steps refused (805) ${refused}; return: ${releases} "
++    "releases, ${surplus} behind their count, ${held} x 406; tail: ${tail_releases} releases, "
++    "${tail_surplus} behind, ${tail_held} x 406, ${rate} application frames a second")
++string(CONCAT summary ${summary})
++message(STATUS "${summary}")
++if(phase EQUAL 0 OR releases EQUAL 0)
++    message(FATAL_ERROR "The return phase was not found in the flight log. ${summary}")
++endif()
++math(EXPR drops_total "${drops_before} + ${drops_return}")
++math(EXPR tenth "${tail_releases} / 10")
++math(EXPR fiftieth "${tail_releases} / 50")
++set(regime "clean")
++if(tail_surplus GREATER_EQUAL tenth AND tail_surplus GREATER 0)
++    set(regime "STUCK")
++endif()
++message(STATUS "release offset regime in the tail: ${regime}")
++if(EXPECT STREQUAL "stuck" OR EXPECT STREQUAL "dropped")
++    if(offset_at_return LESS ARM_US)
++        message(FATAL_ERROR
++            "NOT ARMED: the release offset was ${offset_at_return} us when the return "
++            "started, under the ${ARM_US} us the case needs; nothing is judged. ${summary}")
++    endif()
++endif()
++if(EXPECT STREQUAL "stuck" OR EXPECT STREQUAL "off")
++    if(NOT drops_total EQUAL 0 OR NOT refused EQUAL 0)
++        message(FATAL_ERROR "Expected no 804 and no 805 with the guard off. ${summary}")
++    endif()
++    if(EXPECT STREQUAL "stuck" AND NOT regime STREQUAL "STUCK")
++        message(FATAL_ERROR "Expected the stuck regime (one release in ten behind). ${summary}")
++    endif()
++elseif(EXPECT STREQUAL "fixed" OR EXPECT STREQUAL "dropped")
++    if(tail_surplus GREATER fiftieth OR tail_held GREATER fiftieth)
++        message(FATAL_ERROR
++            "Expected a clean tail (at most ${fiftieth} releases behind and "
++            "${fiftieth} x 406). ${summary}")
++    endif()
++    if(EXPECT STREQUAL "dropped" AND drops_return LESS 1)
++        message(FATAL_ERROR "Expected the offset dropped (804) in the return. ${summary}")
++    endif()
++elseif(EXPECT STREQUAL "stays")
++    if(NOT drops_total EQUAL 0)
++        message(FATAL_ERROR "Expected no 804. ${summary}")
++    endif()
++elseif(NOT EXPECT STREQUAL "report")
++    message(FATAL_ERROR "Unknown EXPECT=${EXPECT}")
++endif()
+diff --git a/tests/layer_release_offset_quiet.cmake b/tests/layer_release_offset_quiet.cmake
+new file mode 100644
+--- /dev/null
++++ b/tests/layer_release_offset_quiet.cmake
+@@ -0,0 +1,66 @@
++# DCS Control (0081): `[ofxr] release_offset_guard` (on by default) where the
++# release offset works as it is. Runs a call-chain scenario of the suite with
++# its own ini (BASE_INI, MODE; the scenario's own verdict stands) and requires
++# that the guard dropped nothing: no presenter_transition 804 in the flight
++# log. Steps it refused (805) are printed. C23_EXPECT: the scenario's
++# XRFG_TEST_C23_EXPECT, as layer_cadence_23.cmake sets it.
++foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN BASE_INI WORK_DIR MODE)
++    if(NOT DEFINED ${required_variable})
++        message(FATAL_ERROR "${required_variable} was not provided")
++    endif()
++endforeach()
++
++file(REMOVE_RECURSE "${WORK_DIR}")
++file(MAKE_DIRECTORY "${WORK_DIR}")
++file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
++file(READ "${BASE_INI}" ini_text)
++set(added "")
++if(DEFINED EXTRA_KEYS)
++    string(REPLACE "," ";" EXTRA_KEYS "${EXTRA_KEYS}")
++    foreach(extra_key IN LISTS EXTRA_KEYS)
++        string(APPEND added "${extra_key}\n")
++    endforeach()
++endif()
++string(REPLACE "[ofxr]" "[ofxr]\n${added}" ini_text "${ini_text}")
++string(REPLACE "logging_enabled=0" "logging_enabled=1" ini_text "${ini_text}")
++file(WRITE "${WORK_DIR}/ofxr_bridge.ini" "${ini_text}")
++
++if(DEFINED C23_EXPECT)
++    set(ENV{XRFG_TEST_C23_EXPECT} "${C23_EXPECT}")
++else()
++    unset(ENV{XRFG_TEST_C23_EXPECT})
++endif()
++get_filename_component(layer_name "${LAYER_DLL}" NAME)
++execute_process(
++    COMMAND "${CALL_CHAIN}"
++        "${WORK_DIR}/${layer_name}"
++        "${WORK_DIR}/fake-runtime.log"
++        ${MODE}
++    RESULT_VARIABLE call_chain_result
++    OUTPUT_VARIABLE call_chain_output
++    ERROR_VARIABLE call_chain_error)
++if(NOT call_chain_result EQUAL 0)
++    message(FATAL_ERROR
++        "Call chain '${MODE}' failed (${call_chain_result}):\n"
++        "${call_chain_output}\n${call_chain_error}")
++endif()
++message(STATUS "${call_chain_output}")
++
++file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++list(LENGTH flight_logs flight_log_count)
++if(NOT flight_log_count EQUAL 1)
++    message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++endif()
++list(GET flight_logs 0 flight_log)
++file(STRINGS "${flight_log}" step_lines REGEX " op=presenter_transition result=800 ")
++file(STRINGS "${flight_log}" drop_lines REGEX " op=presenter_transition result=804 ")
++file(STRINGS "${flight_log}" refused_lines REGEX " op=presenter_transition result=805 ")
++list(LENGTH step_lines steps)
++list(LENGTH drop_lines drops)
++list(LENGTH refused_lines refused)
++message(STATUS
++    "release offset guard on '${MODE}': ${steps} steps (800), ${drops} drops (804), "
++    "${refused} records of refused steps (805)")
++if(NOT drops EQUAL 0)
++    message(FATAL_ERROR "The guard dropped the release offset: ${drop_lines}")
++endif()
