@@ -1045,3 +1045,6 @@ nav::-webkit-scrollbar{width:0;height:0}
 .support-card .card-heading>div{flex:1;min-width:0}
 .support-card .button{display:inline-flex;align-items:center;gap:7px;flex-shrink:0}
 .support-card .button:hover svg{stroke:#ff5e5b;fill:#ff5e5b33}
+/* A DCS that looks stuck: said next to the offer to end it */
+.dash-stuck{font-size:13px;color:var(--warn);max-width:240px;text-align:right}
+.dash-side .button.dash-end{border-color:#6b5a2a;color:var(--text)}

@@ -1565,7 +1565,10 @@ document.addEventListener('change', e => {
 // DCS can start or close outside the app: Launch and Restore lock while it runs.
 setInterval(async () => {
   if (!state || busy || document.hidden) return;
-  try { const {dcsRunning} = await request('dcsStatus'); if (state && dcsRunning !== Boolean(state.dcsRunning)) {
+  try { const {dcsRunning, dcsStuck} = await request('dcsStatus');
+    // A DCS with no window, or one that stopped answering, is offered to be ended (GitHub #21).
+    if (state && (dcsStuck || null) !== (state.dcsStuck || null)) { state.dcsStuck = dcsStuck || null; endDcsArmed = false; renderDashboard(); }
+    if (state && dcsRunning !== Boolean(state.dcsRunning)) {
     state.dcsRunning = dcsRunning; liveOn = true; liveBase = null; liveStatus = '';
     // DCS starting or closing makes an older error stale, and the scan's DCS row and "DCS is closed" check too.
     $('statusDot').classList.remove('error'); statusByMode = true;
@@ -1691,11 +1694,20 @@ function renderDashboard() {
     ready:state.foveaChanged ? state.foveaChanged : 'These settings are applied. Launch DCS starts DCS with them.', changes:state.appliedDraft ? 'You changed settings since the last launch. Launch DCS applies them.' : 'Nothing is applied yet. Launch DCS backs up DCS\'s original files, then applies these settings.',
     invalid:'Correct the marked values before launching.'};
   const chips = [fix ? `<button class="dash-chip fix" data-open-page="diagnostics">${fix} must fix</button>` : '', check ? `<button class="dash-chip check" data-open-page="diagnostics">${check} to check yourself</button>` : '', !fix && !check ? '<button class="dash-chip ok" data-open-page="diagnostics">Nothing to fix</button>' : ''].join('');
+  const stuck = mode === 'running' && state.dcsStuck ? `<span class="dash-stuck" role="status">${state.dcsStuck === 'NoWindow' ? 'DCS is still running, but has no window.' : 'DCS has not responded for a while.'}</span><button class="button secondary dash-end" data-end-dcs>${endDcsArmed ? 'End DCS? Click again' : 'End DCS'}</button>` : '';
   const reset = state.appliedDraft && mode === 'changes' ? '<button class="link-button" data-reset-applied="1">Undo changes</button>' : '';
   $('dashStatus').className = 'dash-status '+mode;
-  $('dashStatus').innerHTML = `<span class="dash-dot" aria-hidden="true"></span><div class="dash-main"><b>${titleHtml}</b><p>${escape(details[mode])}</p>${small ? `<small>${escape(small)}</small>` : ''}</div><div class="dash-side">${chips}${reset}${guided}</div>`;
+  $('dashStatus').innerHTML = `<span class="dash-dot" aria-hidden="true"></span><div class="dash-main"><b>${titleHtml}</b><p>${escape(details[mode])}</p>${small ? `<small>${escape(small)}</small>` : ''}</div><div class="dash-side">${stuck}${chips}${reset}${guided}</div>`;
 }
 document.addEventListener('click', e => { if (e.target.closest('[data-reset-applied]')) resetToApplied(); });
+// Ending DCS asks once, in place: unsaved progress in a DCS that is only loading would be lost.
+let endDcsArmed = false;
+document.addEventListener('click', async e => {
+  if (!e.target.closest('[data-end-dcs]')) { if (endDcsArmed) { endDcsArmed = false; renderDashboard(); } return; }
+  if (!endDcsArmed) { endDcsArmed = true; renderDashboard(); return; }
+  endDcsArmed = false; state.dcsStuck = null;
+  try { await run('endDcs'); } catch { }
+});
 // ---- Last flight: read from the logs once DCS has exited --------------------------------------------------------------
 let flightTimer, flightSequence = 0;
 function loadFlight(delay = 0) {
@@ -2214,7 +2226,7 @@ function adoptDraft(next) {
   showProfile(); change(); boostChanged();
 }
 // Test hooks exercise the same controls and command bridge; the fixture host never starts DCS or opens dialogs.
-window.dcsUi = {request,run,setBusy,askDxgiFirst,askDxgiFresh,checkUpdates,installUpdate,setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); renderDashboard(); },applyLive,get liveStatus(){return liveStatus;},runsWith,navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,ENGINE_PARTS,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,revealSetting,get boostRequests(){return boostSequence;},engineShaderRows:(w,c) => { engineWarmup = w; engineCache = c; return shaderRows(); },get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
+window.dcsUi = {request,run,renderDashboard,setBusy,askDxgiFirst,askDxgiFresh,checkUpdates,installUpdate,setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); renderDashboard(); },applyLive,get liveStatus(){return liveStatus;},runsWith,navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,ENGINE_PARTS,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,revealSetting,get boostRequests(){return boostSequence;},engineShaderRows:(w,c) => { engineWarmup = w; engineCache = c; return shaderRows(); },get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
 // More / Less: shows or hides a setting's (or a card's) detail text; every page load starts with it folded.
 document.addEventListener('click', e => {
   const b = e.target.closest('.more-toggle'); if (!b) return; const detail = $(b.getAttribute('aria-controls')); if (!detail) return;

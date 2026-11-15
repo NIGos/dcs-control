@@ -1,3 +1,9 @@
+# 0.6.6 preview
+
+**Fixes:**
+- With Pimax native Quad Views, the headset panel followed your gaze and was smaller (GitHub #22). It is back in its corner, the same size as with Bundled Quad Views.
+- A DCS that was ended from Task Manager but stayed in the background kept the app waiting, and only a restart of the PC helped (GitHub #21). When DCS has no window, or has not responded for several minutes, the Overview now says so and offers **End DCS**.
+
 # 0.6.5 preview
 
 **A new interface.** The window has two columns instead of three. The left rail names every page and shows which features are on. The top bar holds how you fly (Pimax, Sboys, Optimizations only), the status in one line and **Launch DCS**; the arrow next to it opens **Review files**, **Apply without launching** and **Back to stock DCS**. The feature switches moved to the Overview, under **What runs**. Colors now mean one thing each: orange is the main action and the current choice, green is working, yellow is a warning or an experimental setting.

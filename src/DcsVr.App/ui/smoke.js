@@ -630,6 +630,14 @@ window.runWebSmoke = async function() {
       press('Day flying','use'); await sleep(60);
       check('Using a preset while the settings on screen are in none warns first',ui.matchesApplied() || (card('Day flying').querySelector('.preset-error').textContent.includes('will be replaced') && card('Day flying').querySelector('[data-act=use]').textContent === 'Use anyway' && ui.profile.quadSharpening === .44 && ui.state.presets.active === null));
       document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'})); edit('quadSharpening',before); await saved(); }
+    // A DCS that looks stuck: the Overview says so and offers to end it, with a second click (GitHub #21).
+    { ui.navigate('overview'); const poll = async data => { const r = await ui.request('dcsStatus',data); ui.state.dcsRunning = r.dcsRunning; ui.state.dcsStuck = r.dcsStuck || null; ui.renderDashboard(); return r; };
+      const fine = await poll({simulate:true}), noOffer = !$('dashStatus').querySelector('[data-end-dcs]');
+      const stuck = await poll({simulate:true, stuck:'NoWindow'}), button = () => $('dashStatus').querySelector('[data-end-dcs]');
+      const offered = fine.dcsStuck === null && noOffer && stuck.dcsStuck === 'NoWindow' && button()?.textContent === 'End DCS' && $('dashStatus').textContent.includes('has no window');
+      button().click(); const asked = button()?.textContent === 'End DCS? Click again' && ui.state.dcsRunning;
+      button().click(); await sleep(60); await waitIdle();
+      check('A DCS with no window is offered to be ended; the second click ends it and the app is free again',offered && asked && !ui.state.dcsRunning && !button() && !(await ui.request('dcsStatus',{})).dcsRunning); }
     // The page area never scrolls sideways (the document itself cannot: the area clips it, so it is measured here).
     { const wide = []; for (const id of ['overview','presets','guide','foveation','dlss','framegen','pupil','visual','osd','boost','engine','setup','diagnostics','support','recovery']) { ui.navigate(id); await sleep(40); const area = $('scrollArea'), limit = area.getBoundingClientRect().right;
         if (area.scrollWidth > area.clientWidth) wide.push(id+' +'+(area.scrollWidth - area.clientWidth)+' '+[...area.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > limit + 1).slice(0,2).map(e => e.tagName+'#'+e.id).join(',')); }

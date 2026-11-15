@@ -309,6 +309,10 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                 : $"Pimax Play changed: focus will be updated to {pimax.Play.Short} at launch.") : null;
     /// <summary>A running DCS.exe; the offline verification host reports none.</summary>
     private bool DcsRunning() => offline ? _offlineDcs : DcsProcess.AnyRunning();
+    private readonly DcsStuckTracker _stuck = new();
+    private string? _offlineStuck;
+    /// <summary>"NoWindow" or "NotResponding" once DCS has looked stuck for long enough to offer ending it; else null.</summary>
+    private string? DcsStuck() => offline ? _offlineStuck : _stuck.Update(DcsProcess.Health(), DateTimeOffset.UtcNow)?.ToString();
     /// <summary>A DCS the offline verification's smoke test says is running (never set outside that host).</summary>
     private volatile bool _offlineDcs;
     private readonly Lock _boostCacheLock = new();
@@ -472,7 +476,10 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     // The offline verification host has no DCS: its smoke test says when one "runs" (Live mode's checks).
                     if (offline && doc.RootElement.TryGetProperty("data", out var simulate) && simulate.ValueKind == JsonValueKind.Object
                         && simulate.TryGetProperty("simulate", out var running) && running.ValueKind is JsonValueKind.True or JsonValueKind.False) _offlineDcs = running.GetBoolean();
-                    return Reply(statusId, new { dcsRunning = DcsRunning() });
+                    if (offline && doc.RootElement.TryGetProperty("data", out var stuckData) && stuckData.ValueKind == JsonValueKind.Object
+                        && stuckData.TryGetProperty("stuck", out var stuckNow)) _offlineStuck = stuckNow.ValueKind == JsonValueKind.String ? stuckNow.GetString() : null;
+                    var runningNow = DcsRunning();
+                    return Reply(statusId, new { dcsRunning = runningNow, dcsStuck = runningNow ? DcsStuck() : null });
                 }
             }
             catch (Exception e) { return JsonData.Serialize(new { id = statusId, ok = false, error = e.Message }); }
@@ -713,6 +720,12 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     return Reply(id, new { savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), message = kept
                         ? "The saved runtime copy is no longer used for new drafts. The applied profile was installed from it, so the file stays until that profile is restored."
                         : "The saved runtime copy was deleted. Select nvngx_dlssnr.dll again to use DLSS 5." });
+                case "endDcs":
+                    // The pilot asked, twice, to end a DCS that has no window or does not answer: nothing else can be
+                    // launched or put back while it stays.
+                    if (offline) { _offlineDcs = false; _offlineStuck = null; }
+                    else if (DcsProcess.EndAll() == 0 && DcsProcess.AnyRunning()) throw new InvalidOperationException("Windows did not let DCS Control end DCS. End DCS.exe in Task Manager's Details tab.");
+                    Invalidate(); _status = "DCS ended."; break;
                 case "presetSave":
                     {   // These settings under a new name (or over a preset, when the page asked first); edits follow it from now on.
                         var presets = Presets; var name = PresetStore.Clean(data.GetProperty("name").GetString());
