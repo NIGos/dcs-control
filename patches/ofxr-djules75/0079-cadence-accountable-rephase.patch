@@ -1,0 +1,1645 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1227,6 +1227,53 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             set_tests_properties(xrfg_layer_adaptive_cadence_${cadence_case}
+                 PROPERTIES TIMEOUT 120)
+         endforeach()
++        # DCS Control (0079): adaptive cadence at the shallow depth, which no
++        # scenario above runs: dcs-cadence itself, and GitHub #23's flights
++        # of 2026-11-15 (layer_cadence_23.cmake) - a runtime that holds
++        # xrEndFrame for a first synthetic (held), missed slots a cadence of
++        # 3 does not cure (limit) and long frames at 1X (hitch) - each with
++        # `[ofxr] cadence_accountable` on (no key) and off. Pacing tests:
++        # their names have "adaptive" in them.
++        set(cadence_23_records
++            "op=presenter_transition result=80[23] @@op=adaptive_switch result=1[67] ")
++        set(cadence_23_armed "op=presenter_transition result=410 dur_us=0 a=[0-9]+ b=1")
++        set(cadence_23_cases
++            "shallow|dcs-cadence||-DREQUIRE=op=adaptive_switch result=8 "
++            "held|dcs-cadence-held|3|-DAFTER=${cadence_23_armed}|-DAFTER_FORBID=op=adaptive_switch result=16 "
++            "limit|dcs-cadence-limit|2|-DREQUIRE=op=adaptive_switch result=16 "
++            "hitch|dcs-cadence-hitch|1|-DFORBID=op=adaptive_switch result=9 @@${cadence_23_records}"
++            "shallow_off|dcs-cadence||-DFORBID=${cadence_23_records}"
++            "held_off|dcs-cadence-held|3|-DREQUIRE=${cadence_23_armed}|-DFORBID=${cadence_23_records}"
++            "limit_off|dcs-cadence-limit|3|-DFORBID=${cadence_23_records}"
++            "hitch_off|dcs-cadence-hitch|1|-DFORBID=op=adaptive_switch result=9 @@${cadence_23_records}")
++        foreach(cadence_23_case IN LISTS cadence_23_cases)
++            string(REPLACE "|" ";" cadence_23_fields "${cadence_23_case}")
++            list(GET cadence_23_fields 0 cadence_23_name)
++            list(GET cadence_23_fields 1 cadence_23_mode)
++            list(GET cadence_23_fields 2 cadence_23_expect)
++            list(SUBLIST cadence_23_fields 3 -1 cadence_23_checks)
++            list(REMOVE_ITEM cadence_23_checks "")
++            if(NOT cadence_23_expect STREQUAL "")
++                list(APPEND cadence_23_checks "-DEXPECT=${cadence_23_expect}")
++            endif()
++            if(cadence_23_name MATCHES "_off$")
++                set(cadence_23_ini "ofxr_bridge_adaptive_cadence_shallow_off.ini")
++            else()
++                set(cadence_23_ini "ofxr_bridge_adaptive_cadence_shallow.ini")
++            endif()
++            add_test(
++                NAME xrfg_layer_adaptive_cadence_${cadence_23_name}
++                COMMAND "${CMAKE_COMMAND}"
++                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                    "-DCADENCE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/${cadence_23_ini}"
++                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/adaptive-cadence-${cadence_23_name}"
++                    "-DMODE=${cadence_23_mode}"
++                    ${cadence_23_checks}
++                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_cadence_23.cmake")
++            set_tests_properties(xrfg_layer_adaptive_cadence_${cadence_23_name}
++                PROPERTIES TIMEOUT 120)
++        endforeach()
+         # DCS VR Control (0004): adaptive control judges throughput, not
+         # pipeline latency. An application whose frames take far longer end to
+         # end than either its CPU or its GPU needs per frame goes to 2X; one
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -135,6 +135,17 @@ enum class BridgeFlightOperation : std::uint32_t {
+     // second-highest lateness, written less handed over (us, signed: two's
+     // complement), c 0 held, 1 raised, 2 lowered, 3 a raise taken back, 4
+     // disarmed. `[ofxr] leader_lead=0` turns both off.
++    // DCS Control (0079): 802, the application's hold waited one presenter
++    // frame less than its frame's cadence, once, to put the release a slot
++    // earlier (xrfg::latency::ReleaseRephase; adaptive cadence at the
++    // shallow depth): a the first synthetics handed over late in a row
++    // before it, b the frame's cadence, c the release offset in force (us).
++    // 803, the same hold where it was not waiting for a presenter frame
++    // any more (the application was behind its count): nothing moved.
++    // With it, adaptive_switch 16 (cadence 3 left for 2: it missed as many
++    // slots as 2 had; c their episodes at 3) and 17 (2 left for 3 on the
++    // work, which ends 16's hold on missed slots; c the p90 work, us).
++    // `[ofxr] cadence_accountable=0` turns all three off.
+     // DCS Control (0042): 960, the presenter thread started: a its OS thread
+     // id (GetCurrentThreadId; its start address is in ucrtbase, so tooling
+     // finds the thread by this id).
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -169,6 +169,20 @@ struct ConfiguredNvidiaOptions {
+ [[nodiscard]] bool read_leader_lead(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS Control (0079). `[ofxr] cadence_accountable`: adaptive cadence at the
++// shallow depth, off SteamVR (GitHub #23). The application's release is
++// moved a slot earlier when first synthetics keep being handed over late
++// (xrfg::latency::ReleaseRephase); a first synthetic counts as a missed
++// slot only from half a period late (xrfg::latency::cadence_leader_missed);
++// and a cadence of 3 that misses as many slots as 2 did goes back to 2 and
++// is not taken on missed slots alone again
++// (xrfg::latency::CadenceConfig::three_accountable). On unless set to 0;
++// nothing changes at a fixed 2X or 3X or in the deeper pipeline, and none
++// of it acts while 0078's detector is armed (a runtime that holds
++// xrEndFrame: `leader_lead` is what answers there). Read once per session.
++[[nodiscard]] bool read_cadence_accountable(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // DCS VR Control (0007). `[ofxr] diag_vram`: the diagnostic panel shows the
+ // GPU's memory ("VRAM 28.4 / 32.0 GB"). Off unless set to 1. Read once per
+ // session.
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -582,6 +582,11 @@ enum class AdaptiveReason : std::uint32_t {
+     one_left_scene = 11,  // 1X -> 2, a scene change; c= 0
+     one_left_stopped = 12, // 1X -> 2, cadence or generation stopped; c= 0
+     cadence = 13,         // cadence on (a=0) or off (b=0), or its 2X shape
++    // DCS Control (0079): CadenceConfig::three_accountable, the caller's
++    // records as above. 14 and 15 are the told time's resync records
++    // (0059, 0061), written by number.
++    three_no_gain = 16,    // 3 -> 2, 3 missed as many slots; c= their episodes at 3
++    miss_hold_lifted = 17, // 2 -> 3 on the work, missed slots count again; c= the p90, us
+ };
+ 
+ // DCS VR Control (0007): what a probe did; see AdaptiveConfig::probe.
+@@ -1537,6 +1542,30 @@ struct CadenceConfig {
+     Nanoseconds up_late_gate_clean{5 * kSecond};
+     double one_enter_cpu_fraction{0.0};
+     Nanoseconds one_give_up_clean{0};
++    // DCS Control (0079), GitHub #23: 3 answers for the missed slots that
++    // sent 2 there. A reporter's flights (bundled Quad Views, Smoothness
++    // buffer off, 14-17.6 ms of work against the 18.9 ms a return to 2
++    // asks): every first synthetic was handed over 3-6 ms late at 3 as it
++    // had been at 2 - the application's release was a slot off, which no
++    // cadence changes - so each return to 2 lasted 6-9 frames and doubled
++    // the next stay at 3 to 640 decisions: 30 frames a second for 21 s at a
++    // time, where a fixed 2X held 45. With this on (off here: the layer
++    // turns it on, `[ofxr] cadence_accountable`):
++    //  - a 3 entered on missed slots alone (the work under up_fraction) is
++    //    judged from three_settle after the switch: once up_late_episodes
++    //    missed-slot episodes are there again within late_window - the very
++    //    evidence that sent 2 up - and the work is at most down_fraction of
++    //    two periods, it goes back to 2 at once, whatever the run, and the
++    //    run a return needs starts over at min_run_three;
++    //  - from then on missed slots alone do not send 2 to 3: 3 has shown it
++    //    does not cure them and costs a third of the real frames. The work
++    //    over up_fraction still does, and that ends the hold (missed slots
++    //    count again after it); a scene change, a start and a stop end it
++    //    too.
++    // A 3 that does cure them (fewer episodes than sent it up) is kept and
++    // left by the run as before, doubling included.
++    bool three_accountable{false};
++    Nanoseconds three_settle{300 * kMillisecond};
+ };
+ 
+ // DCS Control (0070): how readily adaptive cadence passes frames through
+@@ -1626,6 +1655,12 @@ enum class CadenceEvent : std::uint32_t {
+     one_left_slow = 3,
+     one_left_scene = 4,
+     one_left_stopped = 5,
++    // DCS Control (0079): CadenceConfig::three_accountable. 3 left for 2
++    // because it missed as many slots as 2 had (late_episodes: its own, from
++    // three_settle on); and 2 left for 3 on the work while missed slots
++    // alone were not counted, which counts them again.
++    three_left_no_gain = 6,
++    miss_hold_lifted = 7,
+ };
+ 
+ struct CadenceStep {
+@@ -1648,6 +1683,9 @@ struct CadenceStep {
+     // DCS Control (0034): 2 -> 3 was due but 3 is not allowed yet (see
+     // CadenceController::set_three_allowed): the level stays 2.
+     bool three_held{};
++    // DCS Control (0079): missed slots alone do not send 2 to 3 for now
++    // (CadenceConfig::three_accountable).
++    bool miss_hold{};
+ };
+ 
+ class CadenceController {
+@@ -1682,6 +1720,18 @@ public:
+     // nothing else of the decision changes; it is taken as soon as it is
+     // allowed and still due. Allowed by default.
+     void set_three_allowed(bool allowed) noexcept { three_allowed_ = allowed; }
++    // DCS Control (0079): CadenceConfig::three_accountable, for a caller
++    // that learns it after the configuration is made. Turned off, a hold
++    // on missed slots in force is dropped.
++    void set_three_accountable(bool accountable) noexcept {
++        config_.three_accountable = accountable;
++        if (!accountable) {
++            miss_hold_ = false;
++        }
++    }
++    [[nodiscard]] bool miss_hold() const noexcept {
++        return config_.three_accountable && miss_hold_;
++    }
+ 
+     [[nodiscard]] std::uint32_t level() const noexcept { return level_; }
+     [[nodiscard]] Nanoseconds backoff() const noexcept { return backoff_; }
+@@ -1742,6 +1792,10 @@ private:
+     bool late_gate_{};
+     Nanoseconds last_late_at_{-1};
+     bool three_allowed_{true}; // DCS Control (0034)
++    // DCS Control (0079): the 3 in force was entered on missed slots alone;
++    // and missed slots alone do not send 2 to 3 (three_accountable).
++    bool three_on_misses_{};
++    bool miss_hold_{};
+ };
+ 
+ // DCS Control (0032): the display time a frame of cadence `frames` is told,
+@@ -2516,4 +2570,86 @@ struct LeaderLeadRelease {
+     return LeaderLeadRelease{static_cast<std::uint32_t>(turns), turns * period - over};
+ }
+ 
++// DCS Control (0079), GitHub #23: adaptive cadence at the shallow depth, off
++// SteamVR (`[ofxr] cadence_accountable`, on unless set to 0). Three parts:
++// CadenceConfig::three_accountable above, and the two below.
++//
++// Whether a frame's first synthetic handed over `wait_to_submit` after its
++// slot's wait is a missed slot for adaptive cadence. With `deadline` (the
++// key on, a frame of cadence 2 or 3): only from cadence_one_deadline on,
++// half a period, as 0059 has it for 1X and for the same reason - the
++// runtime shows a hand-over 2-5.6 ms after the wait in its slot. The same
++// reporter at a fixed 2X in the good phase: 11% of first synthetics past
++// the 2 ms line (p99 4.8 ms), two or more of them in 33 seconds of 36 - the
++// rule that sends 2 to 3 - and two past half a period in none. Without
++// `deadline`, the 2 ms line as before.
++[[nodiscard]] constexpr bool cadence_leader_missed(
++    Nanoseconds wait_to_submit,
++    Nanoseconds period,
++    bool deadline) noexcept {
++    if (!deadline || period <= 0) {
++        return submission_late(wait_to_submit);
++    }
++    return submission_late(wait_to_submit) &&
++        wait_to_submit >= cadence_one_deadline(period);
++}
++
++// The once-per-frame hold releases the application when the presenter has
++// run the frame's cadence in frames since the last release, and which slot
++// that count started from is whatever it was left at: by the start, by a
++// slot with nothing fresh in it, by a visit to 1X. Counted from the slot of
++// the frame's last-but-one submission the application's next frame is
++// queued before its first synthetic is due, whatever the release offset;
++// counted from the slot of its real frame, it arrives the release offset
++// and its own time later, which past a period is after the first
++// synthetic's slot has opened - the presenter waits there with nothing
++// queued and hands every first synthetic over late - and nothing moves the
++// count back: the release offset is steered modulo one period, and a
++// change of cadence keeps the count where it is (measured: 98-99% of first
++// synthetics late at 3, and every one of the 6-9 frames of each return to
++// 2).
++//
++// So when kStreak first synthetics in a row were handed over late, one
++// hold waits for one presenter frame less than the frame's cadence (and
++// counts the next from where it then is): the release is a slot earlier
++// from then on and the frame is queued ahead of its first synthetic's
++// slot, at 2 and at 3, and through a change between them. The frame lands
++// in the slots it would have; what is paid is the period of queue every
++// on-time session has. The release is then a period further from where
++// its frame lands, so the caller counts the told time's estimate from a
++// period later from then on (an application that waits a frame ahead had
++// the estimate two periods from the told time already, and a third
++// restarted it: told times repeated, 42 frames shown off their time in
++// the call chain's cadence scenario at the shallow depth). Where the hold
++// was not waiting anyway (an application too slow for its cadence is late
++// as well) it changes nothing, so it is not used again for
++// kFirstInterval, and for twice the wait before each time it is needed
++// again within twice that wait.
++struct ReleaseRephase {
++    static constexpr std::uint32_t kStreak = 8;
++    static constexpr Nanoseconds kFirstInterval = 5 * kSecond;
++    static constexpr Nanoseconds kMaxInterval = 80 * kSecond;
++
++    Nanoseconds interval{kFirstInterval};
++    Nanoseconds last{-1};
++    std::uint32_t uses{};
++
++    // Whether the hold entered at `now` waits one presenter frame less,
++    // `streak` first synthetics in a row having been handed over late.
++    [[nodiscard]] constexpr bool due(
++        std::uint32_t streak, Nanoseconds now) const noexcept {
++        return streak >= kStreak && (last < 0 || now - last >= interval);
++    }
++    // That hold released the application.
++    constexpr void used(Nanoseconds now) noexcept {
++        if (last >= 0 && now - last < 2 * interval) {
++            interval = interval * 2 > kMaxInterval ? kMaxInterval : interval * 2;
++        } else {
++            interval = kFirstInterval;
++        }
++        last = now;
++        ++uses;
++    }
++};
++
+ } // namespace xrfg::latency
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -328,6 +328,12 @@ bool read_leader_lead(const std::filesystem::path& module_directory) noexcept {
+     return read_ofxr_switch(module_directory, L"leader_lead", true);
+ }
+ 
++// DCS Control (0079).
++bool read_cadence_accountable(
++    const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"cadence_accountable", true);
++}
++
+ bool read_diag_vram(const std::filesystem::path& module_directory) noexcept {
+     return read_ofxr_switch(module_directory, L"diag_vram", false);
+ }
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -1012,6 +1012,8 @@ void CadenceController::start(Nanoseconds now) noexcept {
+     failed_in_row_ = 0; // DCS Control (0071)
+     late_gate_ = false; // DCS Control (0075)
+     last_late_at_ = -1;
++    three_on_misses_ = false; // DCS Control (0079)
++    miss_hold_ = false;
+ }
+ 
+ void CadenceController::add_frame(
+@@ -1095,6 +1097,7 @@ void CadenceController::fill(CadenceStep& step) const noexcept {
+     step.run_required = run_required_;
+     step.backoff = backoff_;
+     step.one_allowed_at = one_allowed_at_;
++    step.miss_hold = config_.three_accountable && miss_hold_; // DCS Control (0079)
+ }
+ 
+ void CadenceController::leave_one(
+@@ -1197,7 +1200,12 @@ CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexc
+             late_gate_ = false;
+         }
+         const bool gated = late_gate_ && config_.up_late_min_fraction > 0.0;
+-        const bool missed = step.late_episodes >= config_.up_late_episodes &&
++        // DCS Control (0079): and not while 3 has shown that it does not
++        // cure them (CadenceConfig::three_accountable): only the work sends
++        // 2 to 3 then.
++        const bool miss_held = config_.three_accountable && miss_hold_;
++        const bool missed = !miss_held &&
++            step.late_episodes >= config_.up_late_episodes &&
+             (!gated ||
+              (enough &&
+               stats.judged > fraction_of(config_.up_late_min_fraction, two_periods)));
+@@ -1223,6 +1231,18 @@ CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexc
+                     now - last_down_at_ < config_.flap_window
+                 ? std::min(run_required_ * 2, config_.max_run_three)
+                 : config_.min_run_three;
++            // DCS Control (0079): taken on missed slots alone, 3 answers
++            // for them (below); taken on the work, the hold on missed slots
++            // ends.
++            const bool over = enough &&
++                stats.judged > fraction_of(config_.up_fraction, two_periods);
++            three_on_misses_ = missed && !over;
++            if (over && miss_hold_) {
++                miss_hold_ = false;
++                if (config_.three_accountable) {
++                    step.event = CadenceEvent::miss_hold_lifted;
++                }
++            }
+             level_ = 3;
+             level_since_ = now;
+             run_three_ = 0;
+@@ -1280,12 +1300,38 @@ CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexc
+     // 3.
+     ++run_three_;
+     one_fit_since_ = -1;
+-    if (run_three_ >= run_required_ && enough &&
+-        stats.judged <= fraction_of(config_.down_fraction, two_periods)) {
++    const bool light = enough &&
++        stats.judged <= fraction_of(config_.down_fraction, two_periods);
++    // DCS Control (0079): entered on missed slots alone, and the evidence
++    // that sent 2 here is there again at 3 (its own slots, from
++    // three_settle after the switch) while the work fits 2: 3 gives time,
++    // which was not short. Back to 2 now, whatever the run, with no longer
++    // run for the next time, and missed slots alone do not come back here
++    // (CadenceConfig::three_accountable).
++    if (config_.three_accountable && three_on_misses_ && light) {
++        const Nanoseconds judged_from = level_since_ + config_.three_settle;
++        const std::uint32_t at_three = late_episodes_between(
++            std::max(now - config_.late_window, judged_from), now);
++        if (at_three >= config_.up_late_episodes) {
++            level_ = 2;
++            level_since_ = now;
++            last_down_at_ = now;
++            run_three_ = 0;
++            run_required_ = config_.min_run_three;
++            three_on_misses_ = false;
++            miss_hold_ = true;
++            step.late_episodes = at_three;
++            step.event = CadenceEvent::three_left_no_gain;
++            fill(step);
++            return step;
++        }
++    }
++    if (run_three_ >= run_required_ && light) {
+         level_ = 2;
+         level_since_ = now;
+         last_down_at_ = now;
+         run_three_ = 0;
++        three_on_misses_ = false; // DCS Control (0079)
+     }
+     fill(step);
+     return step;
+@@ -1305,6 +1351,8 @@ CadenceStep CadenceController::scene_changed(Nanoseconds now) noexcept {
+     failed_in_row_ = 0;
+     late_gate_ = false; // DCS Control (0075)
+     last_late_at_ = -1;
++    three_on_misses_ = false; // DCS Control (0079)
++    miss_hold_ = false;
+     level_ = 2;
+     level_since_ = now;
+     run_three_ = 0;
+@@ -1478,6 +1526,8 @@ CadenceStep CadenceController::stop(Nanoseconds now) noexcept {
+     level_since_ = now;
+     run_three_ = 0;
+     one_fit_since_ = -1;
++    three_on_misses_ = false; // DCS Control (0079)
++    miss_hold_ = false;
+     fill(step);
+     return step;
+ }
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1778,6 +1778,28 @@ struct SessionState {
+     xrfg::latency::HandOverBlock hand_over_block;
+     xrfg::latency::LeaderLead leader_lead;
+     std::atomic<bool> leader_lead_armed{false};
++    // DCS Control (0079): adaptive cadence answering for its missed slots
++    // (GitHub #23). `cadence_accountable_enabled`: `[ofxr]
++    // cadence_accountable`, off SteamVR, read at the session's creation; it
++    // acts under adaptive cadence at the shallow depth only.
++    // `leader_late_streak`: first synthetics handed over late in a row
++    // (the presenter thread writes; the application's hold reads and
++    // clears). `release_rephase`: when that hold may wait a presenter frame
++    // less (xrfg::latency::ReleaseRephase); guarded by presenter_mutex.
++    // `release_rephase_anchor`: a hold was released a presenter frame
++    // short, so each release is a period further from where its frame
++    // lands and the told time's estimate is counted from a period later;
++    // until the count starts over. Guarded by presenter_mutex.
++    // `test_leader_unwritten`: tests only (XRFG_TEST_LEADER_UNWRITTEN set
++    // when the session is created): every first synthetic counts as handed
++    // over unwritten for 0078's detector, so a fake runtime that keeps
++    // xrEndFrame past the slot arms it without a GPU slow enough to leave
++    // the output unwritten (the call chain's dcs-cadence-held).
++    bool test_leader_unwritten{};
++    bool cadence_accountable_enabled{};
++    std::atomic<std::uint32_t> leader_late_streak{0};
++    xrfg::latency::ReleaseRephase release_rephase;
++    bool release_rephase_anchor{};
+     struct LeaderHandOver {
+         std::shared_ptr<LeadReadiness> lead;
+         xrfg::latency::Nanoseconds handed_ns{};
+@@ -6228,6 +6250,12 @@ XrResult layer_create_session_impl(
+     // DCS Control (0078): see SessionState::leader_lead_enabled.
+     state->leader_lead_enabled = !dispatch->steamvr_runtime &&
+         xrfg::implicit_layer::read_leader_lead(current_layer_directory());
++    // DCS Control (0079): see SessionState::cadence_accountable_enabled and
++    // test_leader_unwritten.
++    state->test_leader_unwritten =
++        GetEnvironmentVariableW(L"XRFG_TEST_LEADER_UNWRITTEN", nullptr, 0) != 0;
++    state->cadence_accountable_enabled = !dispatch->steamvr_runtime &&
++        xrfg::implicit_layer::read_cadence_accountable(current_layer_directory());
+     // DCS Control (0034): adaptive at the shallow depth, starting in 2X, on a
+     // D3D12 binding: the second slot waits for its first need.
+     state->lazy_second_synthetic = state->two_slot_synthetic_ring &&
+@@ -11053,7 +11081,9 @@ void continuous_presenter_main(
+                         if (leader && state->leader_lead_enabled &&
+                             !state->deep_pipeline &&
+                             state->frames_per_application_frame == 2) {
+-                            leader_handed_unwritten = !leader_written;
++                            // DCS Control (0079): or taken as such (tests).
++                            leader_handed_unwritten = !leader_written ||
++                                state->test_leader_unwritten;
+                             if (request->owned_frame->lead_readiness) {
+                                 state->leader_hand_overs.push_back(
+                                     SessionState::LeaderHandOver{
+@@ -12616,6 +12646,18 @@ void continuous_presenter_main(
+         // Recorded and passed on outside presenter_mutex.
+         if (slot_timed) {
+             state->submission_tally.add(submission_kind, wait_to_submit);
++            // DCS Control (0079): first synthetics handed over late in a
++            // row, for the application's hold (ReleaseRephase); one on time
++            // ends the run.
++            if (submission_kind == SubmissionKind::gen1) {
++                if (submitted_late) {
++                    state->leader_late_streak.fetch_add(
++                        1, std::memory_order_relaxed);
++                } else {
++                    state->leader_late_streak.store(
++                        0, std::memory_order_relaxed);
++                }
++            }
+             if (skip_slot) {
+                 ++state->skip_slots_second;
+                 state->skip_ready_second += skip_would_be_ready ? 1U : 0U;
+@@ -12642,8 +12684,25 @@ void continuous_presenter_main(
+                     wait_to_submit < xrfg::latency::cadence_one_deadline(
+                         static_cast<xrfg::latency::Nanoseconds>(
+                             state->presenter_display_period));
++                // DCS Control (0079): and the first synthetic of a frame of
++                // 2 or 3 under adaptive cadence at the shallow depth, only
++                // from the same deadline on
++                // (xrfg::latency::cadence_leader_missed).
++                // Not while 0078's detector is armed (a runtime holding
++                // xrEndFrame): there every count is 0078's own.
++                const bool leader_within_deadline =
++                    state->cadence_accountable_enabled &&
++                    !state->deep_pipeline && !cadence_one_frame &&
++                    !state->leader_lead_armed.load(std::memory_order_relaxed) &&
++                    state->cadence_running.load(std::memory_order_relaxed) &&
++                    submission_kind == SubmissionKind::gen1 &&
++                    !xrfg::latency::cadence_leader_missed(
++                        wait_to_submit,
++                        static_cast<xrfg::latency::Nanoseconds>(
++                            state->presenter_display_period),
++                        true);
+                 if (state->frames_per_application_frame == 2 && request &&
+-                    !one_within_deadline) {
++                    !one_within_deadline && !leader_within_deadline) {
+                     // 2X: a slot that went out late is a slot missed.
+                     // DCS Control (0032): adaptive cadence's 1X as well.
+                     state->adaptive_missed_slots.fetch_add(1);
+@@ -12651,8 +12710,9 @@ void continuous_presenter_main(
+                         state->cadence_hold.load(std::memory_order_relaxed) == 1) {
+                         state->cadence_missed_second.fetch_add(1);
+                     }
+-                } else if (one_within_deadline) {
++                } else if (one_within_deadline || leader_within_deadline) {
+                     // DCS Control (0059): shown in its slot; not a miss.
++                    // DCS Control (0079): a first synthetic as well.
+                 } else if (submission_kind == SubmissionKind::gen1) {
+                     state->adaptive_late_leaders.fetch_add(1);
+                 }
+@@ -12894,6 +12954,7 @@ void reset_triple_state_locked(SessionState& state) noexcept {
+         // wait of this one straight away or never.
+         state->presenter_frame_serial = 0;
+         state->application_served_serial = 0;
++        state->release_rephase_anchor = false; // DCS Control (0079)
+         state->application_release_display_time = 0;
+         state->application_release_serial = 0;
+         // DCS Control (0032): a new presenter's slots start again from its
+@@ -13094,6 +13155,32 @@ void stop_continuous_presenter(
+                 static_cast<std::uint32_t>(kPresenterFramesPerPair));
+             lead_active = true;
+         }
++        // DCS Control (0079): first synthetics have been handed over late
++        // in a row - the count below runs from the slot of the frame's real
++        // frame, and the application's next frame is queued after its first
++        // synthetic's slot has opened (xrfg::latency::ReleaseRephase). This
++        // hold waits for one presenter frame less, once: the count is not
++        // credited with it (as 0078's turns are), so every hold after it is
++        // the frame's own count again, from a slot earlier. Only under
++        // adaptive cadence (a frame of 2 or 3), at the shallow depth, off
++        // SteamVR, and not where 0078's detector has latched: there the
++        // lead is what moves the release. The told time is not touched:
++        // the frame lands in the slots it would have.
++        std::uint32_t rephase_streak = 0;
++        std::uint64_t rephase_turn = 0;
++        const bool rephase_scope = after_hand_over &&
++            state->cadence_accountable_enabled && frames >= 2 &&
++            !state->deep_pipeline &&
++            state->cadence_running.load(std::memory_order_relaxed) &&
++            state->frames_per_application_frame == 2;
++        if (rephase_scope && !lead_active && !state->hand_over_block.latched) {
++            rephase_streak =
++                state->leader_late_streak.load(std::memory_order_relaxed);
++            if (state->release_rephase.due(
++                    rephase_streak, steady_nanoseconds(entered))) {
++                rephase_turn = 1;
++            }
++        }
+         // DCS Control (0029): bounded; past the bound the application goes
+         // on (see xrfg::latency::GenerationStall).
+         bool stall_tripped = false;
+@@ -13117,7 +13204,8 @@ void stop_continuous_presenter(
+                 (after_hand_over ? hold_repeat_locked(*state)
+                                  : state->presenter_last_frame) == nullptr;
+             // DCS Control (0078): `lead.turns` of them not waited for.
+-            return state->presenter_frame_serial + lead.turns >=
++            // DCS Control (0079): nor `rephase_turn`, this once.
++            return state->presenter_frame_serial + lead.turns + rephase_turn >=
+                        state->application_served_serial +
+                            kPresenterFramesPerPair ||
+                    presenter_starved ||
+@@ -13136,6 +13224,21 @@ void stop_continuous_presenter(
+             state->presenter_stop_requested) {
+             return false;
+         }
++        // DCS Control (0079): the re-phase is used, and the run of late
++        // first synthetics starts over on the frames that feel it. It moved
++        // the release only where the hold ended exactly one presenter frame
++        // short of the frame's count: an application already behind its
++        // count was not waiting, and nothing changed for it.
++        bool rephase_moved = false;
++        if (rephase_turn != 0) {
++            state->release_rephase.used(steady_nanoseconds(entered));
++            state->leader_late_streak.store(0, std::memory_order_relaxed);
++            rephase_moved = state->presenter_frame_serial + rephase_turn ==
++                state->application_served_serial + kPresenterFramesPerPair;
++            if (rephase_moved) {
++                state->release_rephase_anchor = true;
++            }
++        }
+         // Diagnostic only, and the number this hold is judged by. Assigning
+         // the presenter's serial rather than advancing by the pair means an
+         // application that arrives late catches up in one step: the surplus
+@@ -13166,6 +13269,16 @@ void stop_continuous_presenter(
+                       state->presenter_frame_state.predictedDisplayTime,
+                       static_cast<XrDuration>(lead.turns) *
+                           state->presenter_display_period);
++            // DCS Control (0079): after a re-phase the release is a period
++            // further from where its frame lands (the queue is first in,
++            // first out: the frames land where they did), so the estimate
++            // is counted from a period later, as it was before it.
++            if (rephase_scope && lead.turns == 0 &&
++                state->release_rephase_anchor) {
++                state->application_release_display_time = add_display_duration(
++                    state->application_release_display_time,
++                    state->presenter_display_period);
++            }
+             state->application_release_serial = state->presenter_frame_serial;
+             // DCS Control (0032): and how long this hold lasts.
+             state->application_release_frames =
+@@ -13286,6 +13399,19 @@ void stop_continuous_presenter(
+                 static_cast<std::uint64_t>(release_offset.count() / 1000),
+                 static_cast<std::uint64_t>(steer_step_us));
+         }
++        // DCS Control (0079): result=802: this hold waited one presenter
++        // frame less (ReleaseRephase). a the first synthetics handed over
++        // late in a row before it, b the frame's cadence, c the release
++        // offset in force, in microseconds. result=803: it was not waiting
++        // for one any more, and nothing moved.
++        if (rephase_turn != 0) {
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::presenter_transition,
++                rephase_moved ? 802 : 803,
++                rephase_streak,
++                kPresenterFramesPerPair,
++                static_cast<std::uint64_t>(release_offset.count() / 1000));
++        }
+         xrfg::bridge_flight_logger().event(
+             xrfg::BridgeFlightOperation::presenter_pair_release,
+             static_cast<std::int64_t>(surplus),
+@@ -16295,6 +16421,15 @@ void log_cadence_event(const xrfg::latency::CadenceStep& step) noexcept {
+     case CadenceEvent::one_left_stopped:
+         reason = AdaptiveReason::one_left_stopped;
+         break;
++    // DCS Control (0079): CadenceConfig::three_accountable.
++    case CadenceEvent::three_left_no_gain:
++        reason = AdaptiveReason::three_no_gain;
++        figure = step.late_episodes;
++        break;
++    case CadenceEvent::miss_hold_lifted:
++        reason = AdaptiveReason::miss_hold_lifted;
++        figure = us(step.predicted);
++        break;
+     default:
+         return;
+     }
+@@ -16851,6 +16986,19 @@ void apply_live_frame_multiplier(
+                 state->adaptive_controller.add_late_leaders(
+                     now_ns, state->adaptive_late_leaders.exchange(0));
+                 state->cadence_controller.set_three_allowed(three_ready);
++                // DCS Control (0079): at the shallow depth only (the depth
++                // can change with the session's shape), and not while
++                // 0078's detector is armed: on a runtime that holds
++                // xrEndFrame the slots lost at 3 are the lead still finding
++                // its value, and 2 is where the lead cannot cure them. A
++                // live flight (Pimax native, 2026-11-15): 3 left for 2 four
++                // seconds after the detector armed, the lead's raises taken
++                // back five times at 2, 26.7 frames a second with a slot
++                // lost on every frame, where 0078 alone held a clean 30.
++                // Turned off, a hold on missed slots in force is dropped.
++                state->cadence_controller.set_three_accountable(
++                    state->cadence_accountable_enabled && !state->deep_pipeline &&
++                    !state->leader_lead_armed.load(std::memory_order_relaxed));
+                 step = state->cadence_controller.decide(
+                     now_ns, static_cast<xrfg::latency::Nanoseconds>(period));
+             }
+@@ -17156,6 +17304,7 @@ void apply_live_frame_multiplier(
+                 display_period);
+             // The once-per-frame hold counts from here in the new shape.
+             state->application_served_serial = state->presenter_frame_serial;
++            state->release_rephase_anchor = false; // DCS Control (0079)
+             state->application_release_display_time = 0;
+             // DCS Control (0032): and adaptive cadence's told time.
+             state->cadence_told_base = 0;
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -4583,6 +4583,517 @@ void leader_lead_model_tests() {
+     }
+ }
+ 
++// ---------------------------------------------------------------------------
++// DCS Control (0079): adaptive cadence answering for its missed slots
++// (GitHub #23): CadenceConfig::three_accountable, cadence_leader_missed and
++// ReleaseRephase.
++
++constexpr Nanoseconds kAccountLight = 12 * kMillisecond;   // 54% of two periods
++constexpr Nanoseconds kAccountBetween = 20 * kMillisecond; // over 85%, under 95%
++constexpr Nanoseconds kAccountHeavy = 25 * kMillisecond;   // over 95% of 22.2 ms
++
++struct AccountableRun {
++    std::uint32_t final_level{};
++    std::uint32_t changes{};
++    // The second half of the run: frames, those of cadence 3, changes.
++    std::uint32_t frames_last{};
++    std::uint32_t three_last{};
++    std::uint32_t changes_last{};
++    std::uint32_t no_gain{};
++    std::uint32_t lifted{};
++    std::uint32_t max_run_required{};
++    bool miss_hold{};
++    // Each decision: the level, the run a return needs, the event.
++    std::vector<std::uint32_t> trace;
++};
++
++// CadenceSim over `duration` with the application's work (CPU and GPU the
++// same, too much for 1X) from `work(index, since the start)` and the slots
++// each frame missed from `missed(level, index, since the start)`.
++template <typename Work, typename Missed>
++AccountableRun run_accountable(
++    CadenceConfig config, Nanoseconds duration, Work work, Missed missed) {
++    CadenceSim sim(config);
++    AccountableRun run{};
++    const Nanoseconds end = sim.now + duration;
++    const Nanoseconds half = sim.now + duration / 2;
++    std::uint64_t index = 0;
++    while (sim.now < end) {
++        const std::uint32_t level = sim.controller.level();
++        // When this frame ends (CadenceSim::frame advances by the same).
++        const Nanoseconds at = sim.now + kPeriod * level;
++        const std::uint32_t count = missed(level, index, at - sim.started);
++        if (count != 0) {
++            sim.controller.add_late(at, count);
++        }
++        const Nanoseconds cost = work(index, at - sim.started);
++        const CadenceStep step = sim.frame(cost, cost);
++        run.max_run_required = std::max(run.max_run_required, step.run_required);
++        run.no_gain += step.event == CadenceEvent::three_left_no_gain ? 1U : 0U;
++        run.lifted += step.event == CadenceEvent::miss_hold_lifted ? 1U : 0U;
++        if (sim.now > half) {
++            ++run.frames_last;
++            run.three_last += step.level == 3 ? 1U : 0U;
++            run.changes_last += step.level != step.previous ? 1U : 0U;
++        }
++        run.trace.push_back(step.level * 100'000U + step.run_required * 10U +
++            static_cast<std::uint32_t>(step.event));
++        ++index;
++    }
++    run.final_level = sim.controller.level();
++    run.changes = sim.changes;
++    run.miss_hold = sim.controller.miss_hold();
++    return run;
++}
++
++std::string describe_accountable(const AccountableRun& run) {
++    return " (level " + std::to_string(run.final_level) + ", changes " +
++        std::to_string(run.changes) + ", in the second half " +
++        std::to_string(run.changes_last) + ", frames of 3 there " +
++        std::to_string(run.three_last) + " of " + std::to_string(run.frames_last) +
++        ", no-gain returns " + std::to_string(run.no_gain) + ", holds lifted " +
++        std::to_string(run.lifted) + ", longest run required " +
++        std::to_string(run.max_run_required) + ", hold " +
++        std::to_string(run.miss_hold ? 1 : 0) + ")";
++}
++
++void cadence_accountable_tests() {
++    const auto light = [](std::uint64_t, Nanoseconds) { return kAccountLight; };
++    const auto between = [](std::uint64_t, Nanoseconds) { return kAccountBetween; };
++    const auto heavy = [](std::uint64_t, Nanoseconds) { return kAccountHeavy; };
++    const auto none = [](std::uint32_t, std::uint64_t, Nanoseconds) { return 0U; };
++    const auto every = [](std::uint32_t, std::uint64_t, Nanoseconds) { return 1U; };
++    const auto at_two = [](std::uint32_t level, std::uint64_t, Nanoseconds) {
++        return level == 2 ? 1U : 0U;
++    };
++    require(!CadenceConfig{}.three_accountable &&
++            !cadence_config_for(CadencePreference::balanced).three_accountable &&
++            !cadence_config_for(CadencePreference::rate).three_accountable,
++        "accountable: off in every configuration until the caller turns it on");
++
++    for (const CadencePreference preference :
++         {CadencePreference::steady, CadencePreference::balanced, CadencePreference::rate}) {
++        const CadenceConfig off = cadence_config_for(preference);
++        CadenceConfig on = off;
++        on.three_accountable = true;
++        const std::string name = " [preference " +
++            std::to_string(static_cast<std::uint32_t>(preference)) + "]";
++
++        // (a) Light frames whose first synthetic misses its slot on every
++        // frame, at 3 as at 2 (the release a slot off): 3 is tried, found no
++        // better, left for 2 and not taken again.
++        {
++            const auto r = run_accountable(on, 120 * kSecond, light, every);
++            std::cout << "accountable, light, a missed slot every frame, on" << name << ":"
++                      << describe_accountable(r) << '\n';
++            require(r.final_level == 2 && r.miss_hold,
++                "accountable: back at 2 with the hold" + name + describe_accountable(r));
++            require(r.no_gain == 1,
++                "accountable: one no-gain return" + name + describe_accountable(r));
++            require(r.changes <= 6 && r.changes_last == 0 && r.three_last == 0,
++                "accountable: and 2 stays" + name + describe_accountable(r));
++            require(r.max_run_required <= 40,
++                "accountable: the run never grows long" + name + describe_accountable(r));
++        }
++        // (d) The same with the key off: the old behaviour, 3 for 640
++        // decisions at a time.
++        {
++            const auto r = run_accountable(off, 120 * kSecond, light, every);
++            std::cout << "accountable, light, a missed slot every frame, off" << name << ":"
++                      << describe_accountable(r) << '\n';
++            require(r.no_gain == 0 && r.lifted == 0 && !r.miss_hold,
++                "accountable off: no new event" + name + describe_accountable(r));
++            require(r.max_run_required == 640,
++                "accountable off: the run doubles to 640" + name + describe_accountable(r));
++            require(r.three_last * 10 >= r.frames_last * 9,
++                "accountable off: 3 nearly all the time" + name + describe_accountable(r));
++        }
++        // (c) Work that needs 3: taken and kept, with missed slots or
++        // without; and work between the two thresholds entered on missed
++        // slots is kept too (it does not fit 2).
++        {
++            const auto quiet = run_accountable(on, 60 * kSecond, heavy, none);
++            const auto missing = run_accountable(on, 60 * kSecond, heavy, every);
++            const auto middle = run_accountable(on, 60 * kSecond, between, every);
++            for (const AccountableRun* r : {&quiet, &missing, &middle}) {
++                require(r->final_level == 3 && r->three_last == r->frames_last &&
++                        r->changes == 1 && r->no_gain == 0 && !r->miss_hold,
++                    "accountable: heavy work goes to 3 and stays" + name +
++                        describe_accountable(*r));
++            }
++            // And decision for decision what the key off decides.
++            require(quiet.trace == run_accountable(off, 60 * kSecond, heavy, none).trace &&
++                    missing.trace == run_accountable(off, 60 * kSecond, heavy, every).trace &&
++                    middle.trace == run_accountable(off, 60 * kSecond, between, every).trace,
++                "accountable: heavy work is decided as before" + name);
++        }
++        // A 3 that cures the missed slots (none at 3) is kept by the run and
++        // its doubling exactly as before; and without missed slots nothing
++        // differs either.
++        {
++            const auto cured_on = run_accountable(on, 120 * kSecond, light, at_two);
++            const auto cured_off = run_accountable(off, 120 * kSecond, light, at_two);
++            require(cured_on.trace == cured_off.trace && cured_on.no_gain == 0 &&
++                    !cured_on.miss_hold && cured_on.max_run_required == 640,
++                "accountable: a 3 that cures the misses is as before" + name +
++                    describe_accountable(cured_on));
++            const auto healthy_on = run_accountable(on, 60 * kSecond, light, none);
++            const auto healthy_off = run_accountable(off, 60 * kSecond, light, none);
++            require(healthy_on.trace == healthy_off.trace && healthy_on.changes == 0 &&
++                    healthy_on.final_level == 2,
++                "accountable: a healthy 2 is as before" + name +
++                    describe_accountable(healthy_on));
++        }
++        // Light enough for 1X, no missed slots: 1X is entered and kept,
++        // decision for decision as with the key off.
++        {
++            CadenceSim with(on);
++            CadenceSim without(off);
++            for (int index = 0; index < 3000; ++index) {
++                const CadenceStep a = with.frame(kOneCpu, kOneGpu, kOneSynthesis);
++                const CadenceStep b = without.frame(kOneCpu, kOneGpu, kOneSynthesis);
++                require(a.level == b.level && a.event == b.event &&
++                        a.run_required == b.run_required && !a.miss_hold,
++                    "accountable: 1X is decided as before" + name);
++            }
++            require(with.controller.level() == 1, "accountable: and 1X is reached" + name);
++        }
++        // The hold ends when the work itself asks for 3 (over up_fraction),
++        // and missed slots count again after it: light and missing (held at
++        // 2), heavy for ten seconds (3, the hold lifted), light and missing
++        // again (3 once more, found no better again, 2 with the hold).
++        {
++            const auto rising = [](std::uint64_t, Nanoseconds at) {
++                return at >= 20 * kSecond && at < 30 * kSecond ? kAccountHeavy
++                                                               : kAccountLight;
++            };
++            const auto r = run_accountable(on, 60 * kSecond, rising, every);
++            std::cout << "accountable, light / heavy / light, a missed slot every frame"
++                      << name << ":" << describe_accountable(r) << '\n';
++            require(r.lifted == 1 && r.no_gain == 2,
++                "accountable: the work lifts the hold, once" + name + describe_accountable(r));
++            require(r.final_level == 2 && r.miss_hold && r.changes_last <= 6,
++                "accountable: and 2 is held again after it" + name + describe_accountable(r));
++        }
++        // Turned off by the caller (0078's detector armed: a runtime that
++        // holds xrEndFrame), nothing is judged: decision for decision the
++        // key off, a slot missed on every frame at 3 as at 2.
++        {
++            CadenceSim armed(on);
++            CadenceSim without(off);
++            armed.controller.set_three_accountable(false);
++            for (int index = 0; index < 3000; ++index) {
++                armed.controller.add_late(
++                    armed.now + kPeriod * armed.controller.level(), 1);
++                without.controller.add_late(
++                    without.now + kPeriod * without.controller.level(), 1);
++                const CadenceStep a = armed.frame(kAccountLight, kAccountLight);
++                const CadenceStep b = without.frame(kAccountLight, kAccountLight);
++                require(a.level == b.level && a.event == b.event &&
++                        a.run_required == b.run_required && !a.miss_hold,
++                    "accountable: turned off by the caller it is the key off" + name);
++            }
++            require(armed.controller.level() == 3,
++                "accountable: and 3 is kept as before" + name);
++        }
++        // A scene change ends the hold, and so does turning the key off.
++        {
++            CadenceSim sim(on);
++            for (int index = 0; index < 2000 && !sim.controller.miss_hold(); ++index) {
++                sim.controller.add_late(
++                    sim.now + kPeriod * sim.controller.level(), 1);
++                static_cast<void>(sim.frame(kAccountLight, kAccountLight));
++            }
++            require(sim.controller.miss_hold() && sim.controller.level() == 2,
++                "accountable: held" + name);
++            CadenceSim other = sim;
++            const CadenceStep scene = sim.controller.scene_changed(sim.now);
++            require(!scene.miss_hold && !sim.controller.miss_hold(),
++                "accountable: a scene change ends the hold" + name);
++            other.controller.set_three_accountable(false);
++            require(!other.controller.miss_hold(),
++                "accountable: the key off ends the hold" + name);
++        }
++    }
++
++    // What counts as a missed slot for a frame's first synthetic.
++    require(!cadence_leader_missed(1'900'000, kPeriod, true) &&
++            !cadence_leader_missed(2'300'000, kPeriod, true) &&
++            !cadence_leader_missed(5'000'000, kPeriod, true) &&
++            cadence_leader_missed(kPeriod / 2, kPeriod, true) &&
++            cadence_leader_missed(8'000'000, kPeriod, true),
++        "leader missed: from half a period on with the deadline");
++    require(!cadence_leader_missed(1'900'000, kPeriod, false) &&
++            cadence_leader_missed(2'300'000, kPeriod, false) &&
++            cadence_leader_missed(2'300'000, 0, true),
++        "leader missed: the 2 ms line without the deadline, or without a period");
++
++    // (b) The reporter's bundled Quad Views at 2: work between 14 and
++    // 17.6 ms a frame (p90 under the 18.9 ms a return to 2 asks), and five
++    // first synthetics a second handed over 2.3-5 ms after their slot's wait
++    // (the fixed 2X flight: 11% past 2 ms, p99 4.8 ms), the rest on time.
++    {
++        const auto work = [](std::uint64_t index, Nanoseconds) {
++            return 14 * kMillisecond + static_cast<Nanoseconds>(index % 10) * 400'000;
++        };
++        const auto hand_over = [](std::uint64_t index) -> Nanoseconds {
++            return index % 9 == 0
++                ? 2'300'000 + static_cast<Nanoseconds>((index / 9) % 4) * 900'000
++                : 200'000;
++        };
++        const auto with_deadline = [&](std::uint32_t, std::uint64_t index, Nanoseconds) {
++            return cadence_leader_missed(hand_over(index), kPeriod, true) ? 1U : 0U;
++        };
++        const auto two_ms_line = [&](std::uint32_t, std::uint64_t index, Nanoseconds) {
++            return cadence_leader_missed(hand_over(index), kPeriod, false) ? 1U : 0U;
++        };
++        CadenceConfig off = cadence_config_for(CadencePreference::balanced);
++        CadenceConfig on = off;
++        on.three_accountable = true;
++        const auto fixed = run_accountable(on, 60 * kSecond, work, with_deadline);
++        std::cout << "accountable, the reporter's 2X, the key on:" << describe_accountable(fixed) << '\n';
++        require(fixed.final_level == 2 && fixed.changes == 0 && !fixed.miss_hold,
++            "accountable: slightly late first synthetics leave 2 alone" +
++                describe_accountable(fixed));
++        // (d) The key off: the 2 ms line counts them, and 2 is left for 3.
++        const auto old = run_accountable(off, 60 * kSecond, work, two_ms_line);
++        std::cout << "accountable, the reporter's 2X, the key off:" << describe_accountable(old) << '\n';
++        require(old.changes > 0 && old.three_last * 2 > old.frames_last &&
++                old.max_run_required == 640,
++            "accountable off: slightly late first synthetics send 2 to 3" +
++                describe_accountable(old));
++        // The controller's part alone (the 2 ms line still counting, at 3
++        // as at 2): 3 is found no better and 2 is held.
++        const auto judged = run_accountable(on, 60 * kSecond, work, two_ms_line);
++        require(judged.final_level == 2 && judged.miss_hold && judged.three_last == 0,
++            "accountable: the 2 ms line alone ends at 2 as well" +
++                describe_accountable(judged));
++    }
++}
++
++// The once-per-frame hold and the presenter, in 50 us steps, with nothing of
++// the layer but ReleaseRephase and submission_late: the presenter takes one
++// submission per display period, counts a frame at each slot's wait and,
++// with nothing queued, waits in the slot for the next submission; the
++// application queues a frame's submissions (its first synthetic first, its
++// real frame last), is held until the presenter has counted the frame's
++// cadence since the last release, sleeps `offset` and works `work`.
++// `late_start`: the count starts on the slot of the real frame (what a slot
++// with nothing fresh in it or a visit to 1X leave behind); otherwise on the
++// slot before it.
++struct RephaseModelResult {
++    int frames{};
++    int rephases{};
++    // First synthetics handed over, and those late: the first second, the
++    // last five, and the frames of the cadence switched to.
++    int leaders_first{};
++    int late_first{};
++    int leaders_last{};
++    int late_last{};
++    int leaders_after{};
++    int late_after{};
++};
++
++RephaseModelResult run_rephase_model(
++    bool enabled,
++    std::uint32_t cadence,
++    Nanoseconds offset,
++    Nanoseconds work,
++    bool late_start,
++    Nanoseconds switch_at = 0,
++    std::uint32_t switch_cadence = 0) {
++    constexpr Nanoseconds kTick = 50'000;
++    constexpr Nanoseconds kTotal = 20 * kSecond;
++    struct Item {
++        bool leader{};
++        std::uint32_t cadence{};
++    };
++    RephaseModelResult result{};
++    std::deque<Item> queue;
++    std::uint64_t serial = late_start ? 0U : 1U;
++    std::uint64_t served = 0;
++    // The presenter: its next slot's wait returns at `slot_at`; `slot_open`
++    // is the wait of a slot still without its submission (-1: none open).
++    Nanoseconds slot_at = kPeriod;
++    Nanoseconds slot_open = -1;
++    // The application: 0 working until `app_at`, 1 held, 2 sleeping the
++    // release offset until `app_at`.
++    int app = 0;
++    Nanoseconds app_at = kMillisecond;
++    std::uint32_t frame_cadence = cadence;
++    std::uint64_t hold_frames = 0;
++    std::uint64_t shift = 0;
++    std::uint32_t streak = 0;
++    ReleaseRephase rephase;
++    for (Nanoseconds now = 0; now < kTotal; now += kTick) {
++        if (slot_open < 0 && now >= slot_at) {
++            ++serial;
++            slot_open = slot_at;
++        }
++        if (slot_open >= 0 && !queue.empty()) {
++            const Item item = queue.front();
++            queue.pop_front();
++            if (item.leader) {
++                const bool late = submission_late(now - slot_open);
++                streak = late ? streak + 1 : 0;
++                if (now < kSecond) {
++                    ++result.leaders_first;
++                    result.late_first += late ? 1 : 0;
++                }
++                if (now >= kTotal - 5 * kSecond) {
++                    ++result.leaders_last;
++                    result.late_last += late ? 1 : 0;
++                }
++                if (switch_at > 0 && item.cadence == switch_cadence) {
++                    ++result.leaders_after;
++                    result.late_after += late ? 1 : 0;
++                }
++            }
++            // The runtime's next wait returns at the next slot.
++            slot_at = (now / kPeriod + 1) * kPeriod;
++            slot_open = -1;
++        }
++        if (app == 0 && now >= app_at) {
++            queue.push_back(Item{true, frame_cadence});
++            for (std::uint32_t rest = 1; rest < frame_cadence; ++rest) {
++                queue.push_back(Item{false, frame_cadence});
++            }
++            hold_frames = frame_cadence;
++            shift = 0;
++            if (enabled && rephase.due(streak, now)) {
++                shift = 1;
++                rephase.used(now);
++                streak = 0;
++                ++result.rephases;
++            }
++            app = 1;
++            ++result.frames;
++        }
++        if (app == 1 && serial + shift >= served + hold_frames) {
++            // Not credited with the shift: the next hold is the frame's own
++            // count again.
++            served = serial;
++            app = 2;
++            app_at = now + offset;
++        }
++        if (app == 2 && now >= app_at) {
++            app = 0;
++            app_at = now + work;
++            frame_cadence = switch_at > 0 && now >= switch_at ? switch_cadence : cadence;
++        }
++    }
++    return result;
++}
++
++void release_rephase_tests() {
++    // The rule: eight late in a row, then not again for 5 s, and for twice
++    // the wait each time it is needed again within twice that wait.
++    {
++        ReleaseRephase rephase;
++        require(!rephase.due(0, 0) && !rephase.due(7, 0) && rephase.due(8, 0),
++            "rephase: due on eight late first synthetics in a row");
++        rephase.used(1 * kSecond);
++        require(rephase.interval == ReleaseRephase::kFirstInterval &&
++                !rephase.due(100, 5 * kSecond) && rephase.due(8, 6 * kSecond) &&
++                !rephase.due(7, 60 * kSecond),
++            "rephase: not again within the first interval");
++        rephase.used(6 * kSecond);
++        require(rephase.interval == 10 * kSecond && !rephase.due(8, 15 * kSecond) &&
++                rephase.due(8, 16 * kSecond),
++            "rephase: needed again at once, the wait doubles");
++        Nanoseconds at = 6 * kSecond;
++        for (int index = 0; index < 6; ++index) {
++            at += rephase.interval;
++            rephase.used(at);
++        }
++        require(rephase.interval == ReleaseRephase::kMaxInterval,
++            "rephase: the wait stops at its ceiling");
++        rephase.used(at + 200 * kSecond);
++        require(rephase.interval == ReleaseRephase::kFirstInterval && rephase.uses == 9,
++            "rephase: after a long quiet stretch the first interval again");
++    }
++    const auto describe = [](const RephaseModelResult& r) {
++        return " (frames " + std::to_string(r.frames) + ", re-phased " +
++            std::to_string(r.rephases) + ", late first synthetics: first second " +
++            std::to_string(r.late_first) + " of " + std::to_string(r.leaders_first) +
++            ", last five " + std::to_string(r.late_last) + " of " +
++            std::to_string(r.leaders_last) + ", after the switch " +
++            std::to_string(r.late_after) + " of " + std::to_string(r.leaders_after) + ")";
++    };
++    // The reporter's 3 (GitHub #23): a release offset of 8.8 ms and 5.9 ms
++    // from the release to the application's xrEndFrame, the count on the
++    // real frame's slot: every first synthetic 3.6 ms late, for good - and
++    // every one of the frames of 2 after a change of cadence as well.
++    constexpr Nanoseconds kOffsetThree = 8'800'000;
++    constexpr Nanoseconds kWorkThree = 5'900'000;
++    {
++        const auto r = run_rephase_model(false, 3, kOffsetThree, kWorkThree, true,
++            10 * kSecond, 2);
++        std::cout << "rephase model, cadence 3 then 2, the count a slot off, the key off:"
++                  << describe(r) << '\n';
++        require(r.rephases == 0 && r.leaders_last > 200 && r.late_last == r.leaders_last,
++            "rephase model: without it every first synthetic stays late" + describe(r));
++        require(r.leaders_after > 300 && r.late_after == r.leaders_after,
++            "rephase model: and at 2 after the change as well" + describe(r));
++    }
++    // With it: one hold a presenter frame short within the first second,
++    // then on time at 3, and at 2 from the first frame after the change.
++    {
++        const auto r = run_rephase_model(true, 3, kOffsetThree, kWorkThree, true,
++            10 * kSecond, 2);
++        std::cout << "rephase model, cadence 3 then 2, the count a slot off, the key on:"
++                  << describe(r) << '\n';
++        require(r.rephases == 1,
++            "rephase model: one re-phase" + describe(r));
++        require(r.late_first >= 8 && r.late_first <= 10,
++            "rephase model: after eight late first synthetics" + describe(r));
++        require(r.leaders_last > 200 && r.late_last == 0,
++            "rephase model: then on time" + describe(r));
++        require(r.leaders_after > 300 && r.late_after == 0,
++            "rephase model: and at 2 from the first frame after the change" + describe(r));
++    }
++    // Our own flights after a visit to 1X at 2: offset 10.9 ms and 7 ms of
++    // the application, every first synthetic 6.8 ms late; with the
++    // re-phase, on time within a few frames.
++    {
++        const auto without = run_rephase_model(false, 2, 10'900'000, 7 * kMillisecond, true);
++        const auto with = run_rephase_model(true, 2, 10'900'000, 7 * kMillisecond, true);
++        std::cout << "rephase model, cadence 2, the count a slot off, the key off:"
++                  << describe(without) << '\n';
++        std::cout << "rephase model, cadence 2, the count a slot off, the key on:"
++                  << describe(with) << '\n';
++        require(without.late_last == without.leaders_last && without.leaders_last > 200,
++            "rephase model: 2 stays late without it" + describe(without));
++        require(with.rephases == 1 && with.late_last == 0 && with.leaders_last > 200 &&
++                with.late_first <= 12,
++            "rephase model: 2 is on time with it" + describe(with));
++        require(with.frames == without.frames || with.frames == without.frames + 1,
++            "rephase model: the frame rate is the cadence's either way" + describe(with));
++    }
++    // A session whose count is where it should be: never used, and nothing
++    // differs from the key off.
++    for (const std::uint32_t cadence : {2U, 3U}) {
++        const auto with = run_rephase_model(true, cadence, kOffsetThree, kWorkThree, false);
++        const auto without = run_rephase_model(false, cadence, kOffsetThree, kWorkThree, false);
++        require(with.rephases == 0 && with.late_first == 0 && with.late_last == 0 &&
++                with.frames == without.frames && with.leaders_last == without.leaders_last,
++            "rephase model: a healthy session is left alone" + describe(with));
++    }
++    // An application too slow for its cadence (30 ms of its own at 2) is
++    // late whatever the count: the re-phase is tried, backs off (5, 10,
++    // 20 s) and costs no frame.
++    {
++        const auto with = run_rephase_model(true, 2, kOffsetThree, 30 * kMillisecond, true);
++        const auto without = run_rephase_model(false, 2, kOffsetThree, 30 * kMillisecond, true);
++        std::cout << "rephase model, cadence 2, an application too slow for it, the key on:"
++                  << describe(with) << '\n';
++        require(with.rephases >= 2 && with.rephases <= 4,
++            "rephase model: tried a few times, backing off" + describe(with));
++        require(with.frames >= without.frames,
++            "rephase model: and no frame is lost to it" + describe(with));
++    }
++}
++
+ } // namespace
+ 
+ int main() {
+@@ -4620,6 +5131,8 @@ int main() {
+         deep_hold_repeat_tests(); // DCS Control (0050)
+         leader_lead_tests(); // DCS Control (0078)
+         leader_lead_model_tests(); // DCS Control (0078)
++        cadence_accountable_tests(); // DCS Control (0079)
++        release_rephase_tests(); // DCS Control (0079)
+         std::cout << "Latency control tests passed\n";
+         return 0;
+     } catch (const std::exception& error) {
+diff --git a/tests/layer_cadence_23.cmake b/tests/layer_cadence_23.cmake
+new file mode 100644
+--- /dev/null
++++ b/tests/layer_cadence_23.cmake
+@@ -0,0 +1,93 @@
++# DCS Control (0079): adaptive cadence at the shallow depth (`adaptive_cadence=1`,
++# `deep_pipeline=0`; CADENCE_INI beside the layer DLL) in a call-chain scenario
++# (MODE): dcs-cadence, or one of GitHub #23's flights - dcs-cadence-held (a
++# runtime that holds xrEndFrame for a first synthetic), dcs-cadence-limit
++# (missed slots that a cadence of 3 does not cure) and dcs-cadence-hitch (long
++# frames at 1X). The call chain checks what was shown and, where EXPECT is
++# given (1, 2 or 3), the cadence most of its judged stretch was handed. The
++# flight log must show adaptive cadence on in 2X's shape at the shallow depth,
++# every pattern of REQUIRE and none of FORBID (regular expressions, separated
++# by @@), and after the first record matching AFTER nothing matching
++# AFTER_FORBID.
++foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN CADENCE_INI WORK_DIR MODE)
++    if(NOT DEFINED ${required_variable})
++        message(FATAL_ERROR "${required_variable} was not provided")
++    endif()
++endforeach()
++
++file(REMOVE_RECURSE "${WORK_DIR}")
++file(MAKE_DIRECTORY "${WORK_DIR}")
++file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
++file(COPY "${CADENCE_INI}" DESTINATION "${WORK_DIR}")
++get_filename_component(cadence_ini_name "${CADENCE_INI}" NAME)
++file(RENAME "${WORK_DIR}/${cadence_ini_name}" "${WORK_DIR}/ofxr_bridge.ini")
++
++if(DEFINED EXPECT)
++    set(ENV{XRFG_TEST_C23_EXPECT} "${EXPECT}")
++else()
++    unset(ENV{XRFG_TEST_C23_EXPECT})
++endif()
++get_filename_component(layer_name "${LAYER_DLL}" NAME)
++execute_process(
++    COMMAND "${CALL_CHAIN}"
++        "${WORK_DIR}/${layer_name}"
++        "${WORK_DIR}/fake-runtime.log"
++        "${MODE}"
++    RESULT_VARIABLE call_chain_result
++    OUTPUT_VARIABLE call_chain_output
++    ERROR_VARIABLE call_chain_error)
++message(STATUS "${call_chain_output}")
++if(NOT call_chain_result EQUAL 0)
++    message(FATAL_ERROR
++        "Call chain '${MODE}' failed (${call_chain_result}):\n"
++        "${call_chain_output}\n${call_chain_error}")
++endif()
++
++file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
++list(LENGTH flight_logs flight_log_count)
++if(NOT flight_log_count EQUAL 1)
++    message(FATAL_ERROR "Expected one OFXR flight log, found ${flight_log_count}")
++endif()
++list(GET flight_logs 0 flight_log)
++file(READ "${flight_log}" contents)
++
++foreach(expected IN ITEMS
++        # Adaptive cadence on at creation, in 2X's shape at the shallow depth.
++        "op=adaptive_switch result=13 dur_us=0 a=0 b=2 c=0"
++        "op=presenter_transition result=700 dur_us=0 a=2 b=0 c=0"
++        "op=adaptive_throughput result=6 ")
++    string(FIND "${contents}" "${expected}" found)
++    if(found EQUAL -1)
++        message(FATAL_ERROR "The flight log is missing: ${expected}")
++    endif()
++endforeach()
++if(DEFINED REQUIRE)
++    string(REPLACE "@@" ";" required_patterns "${REQUIRE}")
++    foreach(pattern IN LISTS required_patterns)
++        string(REGEX MATCH "${pattern}" matched "${contents}")
++        if(matched STREQUAL "")
++            message(FATAL_ERROR "The flight log has nothing matching: ${pattern}")
++        endif()
++    endforeach()
++endif()
++if(DEFINED FORBID)
++    string(REPLACE "@@" ";" forbidden_patterns "${FORBID}")
++    foreach(pattern IN LISTS forbidden_patterns)
++        string(REGEX MATCH "${pattern}[^\n]*" matched "${contents}")
++        if(NOT matched STREQUAL "")
++            message(FATAL_ERROR "The flight log must not have: ${matched}")
++        endif()
++    endforeach()
++endif()
++if(DEFINED AFTER)
++    string(REGEX MATCH "${AFTER}" first "${contents}")
++    if(first STREQUAL "")
++        message(FATAL_ERROR "The flight log has nothing matching: ${AFTER}")
++    endif()
++    string(FIND "${contents}" "${first}" first_at)
++    string(SUBSTRING "${contents}" ${first_at} -1 tail)
++    string(REGEX MATCH "${AFTER_FORBID}[^\n]*" matched "${tail}")
++    if(NOT matched STREQUAL "")
++        message(FATAL_ERROR "After '${first}' the flight log must not have: ${matched}")
++    endif()
++endif()
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -328,6 +328,38 @@ bool g_cadence_jitter_shape = false; // either of the two
+ // by the application itself (dcs-cadence-jitter). The queue is waited for
+ // again once 1X is left.
+ bool g_cadence_one_light = false;
++// DCS Control (0079): GitHub #23's flights of 2026-11-15 as scenarios, with
++// adaptive cadence at the shallow depth (layer_cadence_23.cmake reads the
++// flight log; XRFG_TEST_C23_EXPECT is the cadence most of the judged stretch
++// must be handed).
++//  - dcs-cadence-held: a runtime that keeps xrEndFrame for a frame's first
++//    synthetic past its slot, as Pimax's with its own quad views does
++//    while it waits for the output: the fake's xrEndFrame for a first
++//    synthetic returns 30 ms after the application entered the xrEndFrame
++//    of its frame, on a fixed display grid, so the slot after it is lost,
++//    at 3 as at 2; the application's work is light (8 ms on the GPU
++//    simulator). The output itself is written long before (the layer takes
++//    it as handed over unwritten all the same: XRFG_TEST_LEADER_UNWRITTEN),
++//    so 0078's lead
++//    finds nothing to give and the slots stay lost, which is the state the
++//    flight was in when 0079 took the cadence back to 2 (the lead's raise
++//    just taken back): 0078's detector arms, and the cadence must be what
++//    0078 alone leaves it at - 3, for the run its missed slots double.
++//  - dcs-cadence-limit: light until 1X, then 11 ms of the application's own
++//    (about 16 ms of work as the layer counts it: 2 fits, 1X does not) and a
++//    runtime that is 6 ms late with every sixteenth slot, at 3 as at 2:
++//    missed slots that a cadence of 3 does not cure.
++//  - dcs-cadence-hitch: light until 1X, then six seconds there with one
++//    frame 25 ms long every two seconds.
++bool g_c23_held_mode = false;
++bool g_c23_limit_mode = false;
++bool g_c23_hitch_mode = false;
++bool g_c23_mode = false;
++std::atomic<std::int64_t> g_c23_hold_ns{0};
++std::atomic<int> g_c23_held_calls{0};
++std::atomic<int> g_c23_held_long{0}; // held 5 ms or more: the slot after it goes
++std::atomic<int> g_c23_skip_every{0};
++std::atomic<int> g_c23_skipped{0};
+ // 0059: the fake display's vsync on a fixed grid: a wait returns at the next
+ // grid point after it is called, its predicted display time advanced by the
+ // grid points passed since the last (a slot the runtime skipped).
+@@ -1180,6 +1212,20 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_begin_frame(XrSession, const XrFrameBeginInf
+     if (g_throw_from_begin_frame) {
+         throw std::runtime_error("intentional fake-runtime exception");
+     }
++    // DCS Control (0079): dcs-cadence-limit's slow slot: every so many of
++    // the presenter's frames the runtime takes 6 ms over xrBeginFrame, so
++    // what that slot shows is handed over 6 ms after its wait - a missed
++    // slot whatever the cadence and whichever frame it is.
++    if (const int every = g_c23_skip_every.load(std::memory_order_acquire);
++        every > 0 && GetCurrentThreadId() != g_test_application_thread_id &&
++        GetCurrentThreadId() !=
++            g_application_wait_thread_id.load(std::memory_order_acquire)) {
++        static std::atomic<int> c23_begins{0};
++        if (c23_begins.fetch_add(1, std::memory_order_relaxed) % every == every - 1) {
++            g_c23_skipped.fetch_add(1, std::memory_order_relaxed);
++            precise_sleep(std::chrono::milliseconds(6));
++        }
++    }
+     XrTime begun_time = 0;
+     {
+         std::scoped_lock lock(g_frame_loop_mutex);
+@@ -1355,6 +1401,32 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_frame(
+             g_valid_composition_space.load(std::memory_order_acquire)) {
+         return XR_ERROR_HANDLE_INVALID;
+     }
++    // DCS Control (0079): dcs-cadence-held: the presenter's xrEndFrame for
++    // a frame's first synthetic (a synthetic after a real frame) returns
++    // only once its output is written, taken as g_c23_hold_ns after the
++    // application entered the xrEndFrame of the frame it belongs to.
++    if (g_c23_held_mode && GetCurrentThreadId() != g_test_application_thread_id &&
++        (record.target == SubmittedTarget::synthetic ||
++         record.target == SubmittedTarget::current)) {
++        static bool last_was_real = true;
++        const bool first_synthetic =
++            record.target == SubmittedTarget::synthetic && last_was_real;
++        last_was_real = record.target == SubmittedTarget::current;
++        const std::int64_t hold = g_c23_hold_ns.load(std::memory_order_acquire);
++        if (first_synthetic && hold > 0) {
++            const std::int64_t until =
++                g_last_end_entered_ns.load(std::memory_order_acquire) + hold;
++            const std::int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
++                std::chrono::steady_clock::now().time_since_epoch()).count();
++            if (until > now && until - now < 100'000'000) {
++                g_c23_held_calls.fetch_add(1, std::memory_order_relaxed);
++                if (until - now >= 5'000'000) {
++                    g_c23_held_long.fetch_add(1, std::memory_order_relaxed);
++                }
++                precise_sleep(std::chrono::nanoseconds(until - now));
++            }
++        }
++    }
+     {
+         std::scoped_lock lock(g_end_records_mutex);
+         g_end_records.push_back(record);
+@@ -2809,8 +2881,18 @@ int main(int argc, char** argv) {
+         g_cadence_close_mode = argc == 4 && std::strcmp(argv[3], "dcs-cadence-close") == 0;
+         g_cadence_61_mode =
+             g_cadence_reidle_mode || g_cadence_pause_mode || g_cadence_close_mode;
++        // DCS Control (0079).
++        g_c23_held_mode = argc == 4 && std::strcmp(argv[3], "dcs-cadence-held") == 0;
++        g_c23_limit_mode = argc == 4 && std::strcmp(argv[3], "dcs-cadence-limit") == 0;
++        g_c23_hitch_mode = argc == 4 && std::strcmp(argv[3], "dcs-cadence-hitch") == 0;
++        g_c23_mode = g_c23_held_mode || g_c23_limit_mode || g_c23_hitch_mode;
++        if (g_c23_held_mode) {
++            // Every first synthetic is one handed over unwritten for 0078's
++            // detector (the layer's test switch), as on the headset.
++            SetEnvironmentVariableA("XRFG_TEST_LEADER_UNWRITTEN", "1");
++        }
+         g_fixed_display_grid = g_cadence_jitter_mode || g_cadence_stall_mode ||
+-            g_cadence_idle_mode || g_cadence_61_mode;
++            g_cadence_idle_mode || g_cadence_61_mode || g_c23_held_mode;
+         if (g_cadence_stall_mode) {
+             SetEnvironmentVariableA("XRFG_TEST_SLOW_PRIME", "150");
+         } else if (g_cadence_exit_mode) {
+@@ -2839,6 +2921,7 @@ int main(int argc, char** argv) {
+         g_triple_deep_mode || g_scenes_mode || g_presenter_stall_mode ||
+         g_cadence_mode || g_deep_hold_mode || g_async_arm_mode || // 0050
+         g_cadence_exit_mode || g_cadence_jitter_shape || // 0059
++        g_c23_mode || // 0079
+         (argc == 4 && std::strcmp(argv[3], "dcs-latency") == 0);
+     g_dcs_mode = g_dcs_d3d11_mode || g_display_latency_mode ||
+         (argc == 4 && std::strcmp(argv[3], "dcs") == 0);
+@@ -4584,7 +4667,8 @@ int main(int argc, char** argv) {
+             (g_adaptive_latency_mode || g_late_skip_mode || g_triple_deep_mode ||
+              g_scenes_mode || g_presenter_stall_mode || g_cadence_mode ||
+              g_deep_hold_mode || g_async_arm_mode || // 0050
+-             g_cadence_exit_mode || g_cadence_jitter_shape) ? 0 // 0059
++             g_cadence_exit_mode || g_cadence_jitter_shape || // 0059
++             g_c23_mode) ? 0 // 0079
+             : g_display_latency_mode
+                 ? (g_frames_per_application_frame > 2 ? 300 : 160)
+                 : 8;
+@@ -4598,7 +4682,8 @@ int main(int argc, char** argv) {
+             !g_late_skip_mode && !g_triple_deep_mode && !g_scenes_mode &&
+             !g_presenter_stall_mode && !g_cadence_mode &&
+             !g_deep_hold_mode && !g_async_arm_mode && // 0050
+-            !g_cadence_exit_mode && !g_cadence_jitter_shape) { // 0059
++            !g_cadence_exit_mode && !g_cadence_jitter_shape && // 0059
++            !g_c23_mode) { // 0079
+             settle_frames = run_until_settled(kSettleBound);
+         }
+         // dcs-triple-deep (0007): 14 s of a steady application, the last 8
+@@ -4864,6 +4949,95 @@ int main(int argc, char** argv) {
+             cadence_settle_frames = run_until_settled(kSettleBound);
+             g_simulated_render_us = 0;
+         }
++        // DCS Control (0079): dcs-cadence-held / -limit / -hitch (see
++        // g_c23_held_mode). The cadences handed over each one's judged
++        // stretch, and whether 1X was reached where the scenario has one.
++        std::array<std::uint32_t, 4> c23_handed{};
++        bool c23_one_seen = false;
++        int c23_frames = 0;
++        if (g_c23_mode) {
++            const auto c23_frame = [&](bool judged) {
++                sequence_succeeded = sequence_succeeded && run_frame(true);
++                const XrDuration handed =
++                    pending.predictedDisplayPeriod / kFakeDisplayPeriod;
++                if (judged && handed >= 1 && handed <= 3) {
++                    ++c23_handed[static_cast<std::size_t>(handed)];
++                }
++                ++c23_frames;
++            };
++            const auto c23_for = [&](int milliseconds, bool judged) {
++                const auto until = std::chrono::steady_clock::now() +
++                    std::chrono::milliseconds(milliseconds);
++                while (sequence_succeeded && std::chrono::steady_clock::now() < until) {
++                    c23_frame(judged);
++                }
++            };
++            // In 2X's shape first (the session starts inline, at one
++            // period), then light until 1X, twelve seconds at most.
++            const auto c23_until_one = [&] {
++                for (int index = 0; sequence_succeeded && index < 150; ++index) {
++                    c23_frame(false);
++                }
++                const auto until =
++                    std::chrono::steady_clock::now() + std::chrono::seconds(12);
++                while (sequence_succeeded &&
++                       pending.predictedDisplayPeriod != kFakeDisplayPeriod &&
++                       std::chrono::steady_clock::now() < until) {
++                    c23_frame(false);
++                }
++                return pending.predictedDisplayPeriod == kFakeDisplayPeriod;
++            };
++            g_simulated_render_us = 0;
++            if (g_c23_held_mode) {
++                for (int index = 0; sequence_succeeded && index < 150; ++index) {
++                    c23_frame(false);
++                }
++                g_gpu_simulator = std::make_unique<GpuWorkSimulator>();
++                sequence_succeeded = sequence_succeeded && g_gpu_simulator->initialize();
++                g_simulated_render_us = 2'000;
++                g_late_gpu_ms = 8;
++                g_c23_hold_ns.store(30'000'000, std::memory_order_release);
++                c23_for(10'000, false);
++                g_c23_held_long.store(0, std::memory_order_release);
++                c23_for(5'000, true);
++                g_c23_hold_ns.store(0, std::memory_order_release);
++                g_late_gpu_ms = 0;
++                g_simulated_render_us = 0;
++                c23_for(300, false);
++                g_gpu_simulator.reset();
++            } else if (g_c23_limit_mode) {
++                c23_one_seen = c23_until_one();
++                g_cadence_one_light = c23_one_seen;
++                c23_for(1'000, false);
++                g_cadence_one_light = false;
++                // Heavier: 1X is left on the work, three seconds at most.
++                g_simulated_render_us = 11'000;
++                const auto left_by =
++                    std::chrono::steady_clock::now() + std::chrono::seconds(3);
++                while (sequence_succeeded &&
++                       pending.predictedDisplayPeriod == kFakeDisplayPeriod &&
++                       std::chrono::steady_clock::now() < left_by) {
++                    c23_frame(false);
++                }
++                g_c23_skip_every.store(16, std::memory_order_release);
++                c23_for(7'000, false);
++                c23_for(6'000, true);
++                g_c23_skip_every.store(0, std::memory_order_release);
++                g_simulated_render_us = 0;
++                c23_for(500, false);
++            } else {
++                c23_one_seen = c23_until_one();
++                g_cadence_one_light = c23_one_seen;
++                for (int round = 0; sequence_succeeded && round < 3; ++round) {
++                    c23_for(1'900, true);
++                    g_simulated_render_us = 25'000;
++                    c23_frame(true);
++                    g_simulated_render_us = 0;
++                }
++                c23_for(1'000, true);
++                g_cadence_one_light = false;
++            }
++        }
+         // dcs-cadence-exit / dcs-cadence-jitter (DCS Control, 0059): light
+         // until 1X (twelve seconds at most), then the mode's own stretch.
+         bool c59_one_seen = false;
+@@ -5530,6 +5704,46 @@ int main(int argc, char** argv) {
+                       << summary.str() << '\n';
+             return EXIT_SUCCESS;
+         }
++        if (g_c23_mode) {
++            // DCS Control (0079): the sequence and the teardown, and the
++            // cadence handed over the judged stretch: four frames in five
++            // at the one XRFG_TEST_C23_EXPECT names (none named: any).
++            char expect_text[8] = {};
++            const DWORD expect_length = GetEnvironmentVariableA(
++                "XRFG_TEST_C23_EXPECT", expect_text, sizeof(expect_text));
++            const int expect = expect_length == 1 ? expect_text[0] - '0' : 0;
++            const std::uint32_t judged =
++                c23_handed[1] + c23_handed[2] + c23_handed[3];
++            const bool share = expect < 1 || expect > 3 ||
++                c23_handed[static_cast<std::size_t>(expect)] * 5 >= judged * 4;
++            const std::uint32_t held_long = static_cast<std::uint32_t>(
++                g_c23_held_long.load(std::memory_order_relaxed));
++            valid = sequence_succeeded && teardown_succeeded && presenter_seen &&
++                violations == 0 && judged >= 100 && share &&
++                (g_c23_held_mode || c23_one_seen) &&
++                g_waited_display_times.empty() && !g_begun_display_time;
++            std::ostringstream summary;
++            summary << "judged frames handed 1/2/3 " << c23_handed[1] << '/'
++                    << c23_handed[2] << '/' << c23_handed[3] << ", expected "
++                    << expect << ", 1X reached " << c23_one_seen
++                    << ", first synthetics held "
++                    << g_c23_held_calls.load(std::memory_order_relaxed)
++                    << " (past their slot in the judged stretch " << held_long
++                    << "), slots the runtime was late with "
++                    << g_c23_skipped.load(std::memory_order_relaxed)
++                    << ", frames " << c23_frames;
++            if (!valid) {
++                std::cerr << "DCS cadence issue-23 validation failed: sequence="
++                          << sequence_succeeded << " teardown=" << teardown_succeeded
++                          << " promoted=" << presenter_seen
++                          << " violations=" << violations << "; " << summary.str()
++                          << '\n';
++                return EXIT_FAILURE;
++            }
++            std::cout << "OpenXR DCS cadence issue-23 test passed: " << summary.str()
++                      << '\n';
++            return EXIT_SUCCESS;
++        }
+         if (g_cadence_mode) {
+             // 0032: over the alternation, between every two real frames
+             // shown, as many synthetics as display periods less one between
+diff --git a/tests/ofxr_bridge_adaptive_cadence_shallow.ini b/tests/ofxr_bridge_adaptive_cadence_shallow.ini
+new file mode 100644
+--- /dev/null
++++ b/tests/ofxr_bridge_adaptive_cadence_shallow.ini
+@@ -0,0 +1,18 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=0
++triple_frame_gen=0
++adaptive_frame_gen=1
++adaptive_cadence=1
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right
+diff --git a/tests/ofxr_bridge_adaptive_cadence_shallow_off.ini b/tests/ofxr_bridge_adaptive_cadence_shallow_off.ini
+new file mode 100644
+--- /dev/null
++++ b/tests/ofxr_bridge_adaptive_cadence_shallow_off.ini
+@@ -0,0 +1,19 @@
++[ofxr]
++enabled=1
++frame_generation=ofxr
++motion_vectors=off
++backend=fidelityfx
++nvidia_preset=medium
++nvidia_input_scale=50
++nvidia_bidirectional=0
++deep_pipeline=0
++triple_frame_gen=0
++adaptive_frame_gen=1
++adaptive_cadence=1
++cadence_accountable=0
++
++[diagnostics]
++logging_enabled=1
++
++[overlay]
++position=upper_right
