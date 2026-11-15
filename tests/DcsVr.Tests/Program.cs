@@ -777,19 +777,36 @@ Test("Presets are named files: clean names, one active, rename and delete follow
 });
 Test("A DCS that looks stuck is offered to be ended only after it stayed that way (GitHub #21)", () =>
 {
-    var tracker = new DcsStuckTracker(); var start = DateTimeOffset.UnixEpoch;
+    var tracker = new DcsStuckTracker(); var start = DateTimeOffset.UnixEpoch; var step = TimeSpan.FromSeconds(4);
+    // The page reads every few seconds: the same state from one moment to another, and what the last reading says.
+    DcsHealth? Steady(DcsHealth health, DateTimeOffset from, TimeSpan until)
+    {
+        for (var elapsed = TimeSpan.Zero; elapsed < until; elapsed += step) tracker.Update(health, from + elapsed);
+        return tracker.Update(health, from + until);
+    }
     Require(tracker.Update(DcsHealth.Healthy, start) is null && tracker.Update(DcsHealth.NotRunning, start) is null);
     // No window: DCS has none for a few seconds while it starts.
-    Require(tracker.Update(DcsHealth.NoWindow, start) is null && tracker.Update(DcsHealth.NoWindow, start + TimeSpan.FromSeconds(29)) is null, "not yet");
+    Require(Steady(DcsHealth.NoWindow, start, TimeSpan.FromSeconds(29)) is null, "not yet");
     Require(tracker.Update(DcsHealth.NoWindow, start + DcsStuckTracker.NoWindowPatience) == DcsHealth.NoWindow, "offered after the patience");
     // A healthy reading starts again.
     var later = start + TimeSpan.FromMinutes(10);
     Require(tracker.Update(DcsHealth.Healthy, later) is null && tracker.Update(DcsHealth.NoWindow, later + TimeSpan.FromSeconds(5)) is null, "the count starts again");
     // Not responding: a mission load takes minutes, so the patience is longer.
     var load = later + TimeSpan.FromMinutes(1);
-    Require(tracker.Update(DcsHealth.NotResponding, load) is null && tracker.Update(DcsHealth.NotResponding, load + TimeSpan.FromMinutes(3)) is null, "a long load is not stuck");
-    Require(tracker.Update(DcsHealth.NotResponding, load + DcsStuckTracker.NotRespondingPatience) == DcsHealth.NotResponding);
+    Require(Steady(DcsHealth.NotResponding, load, TimeSpan.FromMinutes(3)) is null, "a long load is not stuck");
+    Require(Steady(DcsHealth.NotResponding, load + TimeSpan.FromMinutes(3), TimeSpan.FromMinutes(1)) == DcsHealth.NotResponding && step < DcsStuckTracker.MaxGap);
     Require(tracker.Update(DcsHealth.NotRunning, load + TimeSpan.FromMinutes(9)) is null, "nothing to offer once DCS is gone");
+    // The readings stop while the page is hidden or busy, and none is taken of a DCS that is gone: the state last seen is
+    // not counted across the pause. A DCS seen without a window as it closed and the next one, seen without a window as
+    // it starts, are not one stuck DCS.
+    var closing = load + TimeSpan.FromMinutes(20);
+    Require(tracker.Update(DcsHealth.NoWindow, closing) is null && tracker.Update(DcsHealth.NoWindow, closing + TimeSpan.FromMinutes(2)) is null, "a DCS that starts is not offered at once");
+    var loading = closing + TimeSpan.FromMinutes(10);
+    Require(tracker.Update(DcsHealth.NotResponding, loading) is null && tracker.Update(DcsHealth.NotResponding, loading + TimeSpan.FromMinutes(30)) is null, "nor one seen loading before and after a pause");
+    // Offered while it looked stuck, confirmed after it came back: a DCS that answers again is not ended.
+    var health = DcsProcess.HealthProvider;
+    try { DcsProcess.HealthProvider = () => DcsHealth.Healthy; Require(DcsProcess.EndStuck() is null, "a healthy DCS is left running"); }
+    finally { DcsProcess.HealthProvider = health; }
 });
 Test("The draft is kept across restarts and a damaged file is ignored", () =>
 {
@@ -2440,6 +2457,22 @@ Test("An update cut short after a consolidated baseline rolls back to that versi
     Throws<IOException>(() => installer.Install(ReleaseFixture("consolidated-failure-v3", "3", "third"), i => { if (i == 0) throw new IOException("Injected failure"); }));
     Require(File.ReadAllText(Path.Combine(target, "app.bin")) == "second" && installer.Uninstall().Complete && !File.Exists(Path.Combine(target, "app.bin")), "Back to 2, then a clean uninstall");
 });
+Test("An update ended while it wrote files is seen at the next start, until a setup runs again", () =>
+{
+    var target = Path.Combine(root, "app-install/unfinished"); var installer = new ApplicationInstaller(target);
+    Require(!installer.Unfinished(), "nothing installed");
+    installer.Install(ReleaseFixture("unfinished-v1", "1", "first")); Require(!installer.Unfinished(), "a finished installation");
+    // What the disk says while the files are written: a setup ended here leaves exactly this.
+    var during = false;
+    var journal = installer.Install(ReleaseFixture("unfinished-v2", "2", "second"), i => { if (i == 0) during = new ApplicationInstaller(target).Unfinished(); });
+    Require(during && !installer.Unfinished(), "seen while it writes, not once it is done");
+    AtomicFile.WriteText(Path.Combine(installer.Transactions.StateDirectory, journal.Id, "journal.json"), JsonData.Serialize(journal with { Status = "applying" }));
+    Require(installer.Unfinished() && ApplicationInstaller.UnfinishedMessage.Contains("Run the setup again"), "cut short: the app says so at start");
+    installer.Install(ReleaseFixture("unfinished-v3", "3", "third"));
+    Require(!installer.Unfinished() && File.ReadAllText(Path.Combine(target, "app.bin")) == "third", "the setup run again clears it");
+    AtomicFile.WriteText(Path.Combine(Directory.CreateDirectory(Path.Combine(installer.Transactions.StateDirectory, "broken")).FullName, "journal.json"), "{ not json");
+    Require(!installer.Unfinished(), "an unreadable journal is not an unfinished update");
+});
 Test("Application installer rejects reserved destination roots", () => Throws<InvalidDataException>(() => new ApplicationInstaller(Path.GetPathRoot(root)!)));
 Test("Application installation refuses unknown existing files", () =>
 {
@@ -2799,6 +2832,9 @@ Test("Other limiters and motion smoothing stay manual checks", () =>
     // Pimax native Quad Views with frame generation and the buffer off: said once, as a warning (GitHub #23).
     var native = new VrProfile { FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.PimaxNative, FrameGenDeepPipeline = false };
     Require(FramePacing.Checks(native, new()).Single(c => c.Id == "native-quad-buffer").State == CheckState.Warning, "native Quad Views without the buffer is warned about");
+    // The frame rates it names are a third and half of this headset's refresh rate (90 Hz: 30 and 45), not always those of 90 Hz.
+    Require(FramePacing.Checks(native with { RefreshFromHeadset = false, HeadsetRefreshHz = 90 }, new()).Single(c => c.Id == "native-quad-buffer").Detail.Contains("renders 30 FPS or less in scenes where it could hold 45.")
+        && FramePacing.Checks(native with { RefreshFromHeadset = false, HeadsetRefreshHz = 72 }, new()).Single(c => c.Id == "native-quad-buffer").Detail.Contains("renders 24 FPS or less in scenes where it could hold 36."), "the rates follow the refresh rate");
     foreach (var fine in new[] { native with { FrameGenDeepPipeline = true }, native with { QuadViews = QuadProvider.QuadViewsFoveated }, native with { FrameGen = FrameGeneration.Off } })
         Require(FramePacing.Checks(fine, new()).All(c => c.Id != "native-quad-buffer"), "no warning with the buffer on, with Bundled, or without frame generation");
 });
@@ -4275,6 +4311,63 @@ Test("A downloaded setup is kept only when its signature verifies; otherwise it 
     Require(Failure(updates.Download(update with { SetupUrl = null })) is InvalidOperationException);
     handler.Answers[update.SetupUrl!] = setup; Require(Failure(updates.Download(update with { SetupBytes = 5 })) is IOException);
     updates.CleanDownloads(); Require(!Directory.EnumerateFileSystemEntries(downloads).Any());
+});
+Test("The installer script ends a failure with its cause as the last line, which the setup's failure page shows", () =>
+{
+    var cli = System.Reflection.Assembly.GetExecutingAssembly().GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+        .Cast<System.Reflection.AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "DcsVrCliPath")?.Value;
+    var powershell = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+    if (cli is null || !File.Exists(cli)) { Skip("the CLI built with the tests was not found (" + (cli ?? "no DcsVrCliPath") + ")"); return; }
+    if (!File.Exists(powershell)) { Skip("Windows PowerShell was not found"); return; }
+    // A release folder as the setup unpacks it, without its manifest: the program refuses it.
+    var release = Path.Combine(root, "installer-script", "release"); var files = Directory.CreateDirectory(Path.Combine(release, "files")).FullName;
+    foreach (var file in Directory.EnumerateFiles(Path.GetDirectoryName(cli)!)) File.Copy(file, Path.Combine(files, Path.GetFileName(file)));
+    var script = Path.Combine(Directory.CreateDirectory(Path.Combine(files, "scripts")).FullName, "installer.ps1");
+    File.Copy(Path.Combine(workspace, "scripts", "installer.ps1"), script);
+    // As the setup runs it: no window, output and errors appended to one log, whose last line is shown.
+    (int Code, string[] Lines) Run(string name, string destination)
+    {
+        var log = Path.Combine(root, "installer-script", name + ".log");
+        var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe")) { UseShellExecute = false, CreateNoWindow = true,
+            Arguments = $"/d /s /c \"\"{powershell}\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{script}\" -Action Verify -Destination \"{destination}\" -NoShortcut > \"{log}\" 2>&1\"" };
+        using var process = Process.Start(start)!;
+        if (!process.WaitForExit(120000)) { process.Kill(true); throw new Exception("the installer script timed out"); }
+        return (process.ExitCode, [.. File.ReadAllLines(log).Select(l => l.TrimEnd()).Where(l => l.Length > 0)]);
+    }
+    bool Plain(string[] lines) => lines.Length > 0 && !lines.Any(l => l.Contains("FullyQualifiedErrorId") || l.Contains("CategoryInfo") || l.TrimStart().StartsWith("+ ") || l.StartsWith("At "));
+    // The program fails: its own message stays last.
+    var direct = new ProcessStartInfo(Path.Combine(files, Path.GetFileName(cli))) { UseShellExecute = false, RedirectStandardError = true, RedirectStandardOutput = true, CreateNoWindow = true };
+    foreach (var argument in new[] { "app-verify", "--source", release, "--destination", Path.Combine(root, "installer-script", "installed") }) direct.ArgumentList.Add(argument);
+    string cause;
+    using (var process = Process.Start(direct)!) { var error = process.StandardError.ReadToEndAsync(); process.StandardOutput.ReadToEnd(); Require(process.WaitForExit(120000) && process.ExitCode != 0); cause = error.Result.Trim(); }
+    var refused = Run("refused", Path.Combine(root, "installer-script", "installed"));
+    Require(cause.Length > 0 && !cause.Contains('\n') && refused.Code == 1 && Plain(refused.Lines) && refused.Lines[^1] == cause, cause + " / " + string.Join(" | ", refused.Lines));
+    // The script itself fails (here a folder name Windows refuses): the cause, not PowerShell's error report.
+    var thrown = Run("thrown", @"C:\dcs<control");
+    Require(thrown.Code == 1 && Plain(thrown.Lines) && thrown.Lines[^1].Contains("path", StringComparison.OrdinalIgnoreCase), string.Join(" | ", thrown.Lines));
+    Require(!Directory.Exists(Path.Combine(root, "installer-script", "installed")), "nothing was installed");
+});
+Test("A setup that was ended leaves its unpacked package in the temporary folder: old ones are removed, nothing else", () =>
+{
+    var temp = Path.Combine(root, "updates/setup-leftovers"); var now = new DateTimeOffset(2026, 11, 16, 12, 0, 0, TimeSpan.Zero);
+    string Folder(string name, TimeSpan age)
+    {
+        var folder = Directory.CreateDirectory(Path.Combine(temp, name)).FullName;
+        File.WriteAllText(Path.Combine(Directory.CreateDirectory(Path.Combine(folder, "package", "files")).FullName, "DcsVr.Cli.exe"), "payload");
+        File.SetAttributes(Path.Combine(folder, "package", "files", "DcsVr.Cli.exe"), FileAttributes.ReadOnly);
+        var at = (now - age).UtcDateTime; Directory.SetCreationTimeUtc(folder, at); Directory.SetLastWriteTimeUtc(folder, at);
+        return folder;
+    }
+    var stale = Folder("DcsControl-Setup-4242-987654321", TimeSpan.FromDays(3));
+    var running = Folder("DcsControl-Setup-4243-987654999", TimeSpan.FromMinutes(5));
+    var almost = Folder("DcsControl-Setup-4244-1", Updates.SetupLeftoverAge - TimeSpan.FromMinutes(1));
+    var other = new[] { Folder("DcsControl-Setup-notes", TimeSpan.FromDays(30)), Folder("DcsControl-Setup-1-2-copy", TimeSpan.FromDays(30)), Folder("DcsControl-update", TimeSpan.FromDays(30)), Folder("DcsControl-Uninstall-1-2", TimeSpan.FromDays(30)) };
+    var log = Path.Combine(temp, "DcsControl-Setup.log"); File.WriteAllText(log, "log"); File.SetLastWriteTimeUtc(log, (now - TimeSpan.FromDays(30)).UtcDateTime);
+    var updates = new Updates(Path.Combine(root, "updates/setup-leftovers-state"), clock: () => now, downloadRoot: Path.Combine(temp, "DcsControl-update"));
+    Require(updates.CleanSetupLeftovers(temp) == 1 && !Directory.Exists(stale), "the old working folder goes, read-only files included");
+    Require(Directory.Exists(running) && Directory.Exists(almost), "a setup that may still be running is left alone");
+    Require(other.All(Directory.Exists) && File.Exists(log), "only folders with a setup's own name");
+    Require(updates.CleanSetupLeftovers(temp) == 0 && updates.CleanSetupLeftovers(Path.Combine(temp, "missing")) == 0);
 });
 Test("Release notes: the section of the running version, from its heading to the next", () =>
 {
