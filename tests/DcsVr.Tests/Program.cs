@@ -775,6 +775,22 @@ Test("Presets are named files: clean names, one active, rename and delete follow
     var details = store.Details();
     Require(details.Count == 3 && details.Single(d => d.Name == "Heavy mission").Summary == "Pimax · Quad Views" && details.Single(d => d.Name == "Broken").Summary is null, "details say what each preset runs; an unreadable file is still listed");
 });
+Test("A DCS that looks stuck is offered to be ended only after it stayed that way (GitHub #21)", () =>
+{
+    var tracker = new DcsStuckTracker(); var start = DateTimeOffset.UnixEpoch;
+    Require(tracker.Update(DcsHealth.Healthy, start) is null && tracker.Update(DcsHealth.NotRunning, start) is null);
+    // No window: DCS has none for a few seconds while it starts.
+    Require(tracker.Update(DcsHealth.NoWindow, start) is null && tracker.Update(DcsHealth.NoWindow, start + TimeSpan.FromSeconds(29)) is null, "not yet");
+    Require(tracker.Update(DcsHealth.NoWindow, start + DcsStuckTracker.NoWindowPatience) == DcsHealth.NoWindow, "offered after the patience");
+    // A healthy reading starts again.
+    var later = start + TimeSpan.FromMinutes(10);
+    Require(tracker.Update(DcsHealth.Healthy, later) is null && tracker.Update(DcsHealth.NoWindow, later + TimeSpan.FromSeconds(5)) is null, "the count starts again");
+    // Not responding: a mission load takes minutes, so the patience is longer.
+    var load = later + TimeSpan.FromMinutes(1);
+    Require(tracker.Update(DcsHealth.NotResponding, load) is null && tracker.Update(DcsHealth.NotResponding, load + TimeSpan.FromMinutes(3)) is null, "a long load is not stuck");
+    Require(tracker.Update(DcsHealth.NotResponding, load + DcsStuckTracker.NotRespondingPatience) == DcsHealth.NotResponding);
+    Require(tracker.Update(DcsHealth.NotRunning, load + TimeSpan.FromMinutes(9)) is null, "nothing to offer once DCS is gone");
+});
 Test("The draft is kept across restarts and a damaged file is ignored", () =>
 {
     var store = new DraftStore(Path.Combine(root, "draft-store"));

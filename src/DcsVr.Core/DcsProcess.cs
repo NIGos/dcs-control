@@ -5,6 +5,29 @@ namespace DcsVr.Core;
 /// <summary>One running DCS.exe: its process id and full image path (null when it cannot be read).</summary>
 public sealed record RunningDcs(int Pid, string? ImagePath);
 
+public enum DcsHealth { NotRunning, Healthy, NoWindow, NotResponding }
+
+/// <summary>Says when a running DCS has looked stuck for long enough to offer ending it. DCS has no window for a few
+/// seconds while it starts and stops answering Windows for minutes while a mission loads, so each state has its own
+/// patience; any healthy reading starts again.</summary>
+public sealed class DcsStuckTracker
+{
+    public static readonly TimeSpan NoWindowPatience = TimeSpan.FromSeconds(30), NotRespondingPatience = TimeSpan.FromMinutes(4);
+    private DcsHealth _state = DcsHealth.NotRunning; private DateTimeOffset _since;
+
+    /// <summary>Null while DCS is fine or not yet stuck for long enough; otherwise why it is offered.</summary>
+    public DcsHealth? Update(DcsHealth health, DateTimeOffset now)
+    {
+        if (health != _state) { _state = health; _since = now; }
+        return health switch
+        {
+            DcsHealth.NoWindow when now - _since >= NoWindowPatience => DcsHealth.NoWindow,
+            DcsHealth.NotResponding when now - _since >= NotRespondingPatience => DcsHealth.NotResponding,
+            _ => null
+        };
+    }
+}
+
 /// <summary>The running DCS processes, in one place: every "is DCS running" check asks here.</summary>
 public static class DcsProcess
 {
@@ -14,6 +37,47 @@ public static class DcsProcess
     public static IReadOnlyList<RunningDcs> Running() => Provider();
 
     public static bool AnyRunning() => Running().Count > 0;
+
+    /// <summary>How the running DCS looks from outside. Replaceable for tests, like <see cref="Provider"/>.</summary>
+    public static Func<DcsHealth> HealthProvider { get; set; } = ReadHealth;
+    public static DcsHealth Health() => HealthProvider();
+
+    /// <summary>Ends every DCS.exe (the user asked for it, for a DCS that is stuck) and waits a moment for them to go.
+    /// Returns how many were ended.</summary>
+    public static int EndAll()
+    {
+        var processes = Process.GetProcessesByName("DCS"); var ended = 0;
+        try
+        {
+            foreach (var process in processes)
+                try { process.Kill(); if (process.WaitForExit(5000)) ended++; }
+                catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or NotSupportedException) { }
+            return ended;
+        }
+        finally { foreach (var process in processes) process.Dispose(); }
+    }
+
+    /// <summary>A DCS with no window at all (what ending it from Task Manager's app list can leave behind, GitHub #21),
+    /// or whose window does not answer Windows. One healthy DCS among several counts as healthy.</summary>
+    private static DcsHealth ReadHealth()
+    {
+        var processes = Process.GetProcessesByName("DCS");
+        try
+        {
+            if (processes.Length == 0) return DcsHealth.NotRunning;
+            var worst = DcsHealth.NoWindow;
+            foreach (var process in processes)
+            {
+                DcsHealth one;
+                try { one = process.MainWindowHandle == IntPtr.Zero ? DcsHealth.NoWindow : process.Responding ? DcsHealth.Healthy : DcsHealth.NotResponding; }
+                catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or NotSupportedException) { one = DcsHealth.Healthy; }
+                if (one == DcsHealth.Healthy) return DcsHealth.Healthy;
+                if (one == DcsHealth.NotResponding) worst = DcsHealth.NotResponding;
+            }
+            return worst;
+        }
+        finally { foreach (var process in processes) process.Dispose(); }
+    }
 
     private static IReadOnlyList<RunningDcs> ReadRunning()
     {

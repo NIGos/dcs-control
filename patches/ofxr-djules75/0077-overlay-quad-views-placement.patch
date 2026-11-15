@@ -1,0 +1,63 @@
+diff --git a/src/layer/openxr_fps_overlay.cpp b/src/layer/openxr_fps_overlay.cpp
+--- a/src/layer/openxr_fps_overlay.cpp
++++ b/src/layer/openxr_fps_overlay.cpp
+@@ -562,11 +562,20 @@ struct OpenXrFpsOverlay::Impl {
+             if (!layer || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
+             const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+             if (!projection->views || projection->viewCount > 16) continue;
++            // DCS Control (0077): a quad-views layer that reaches this layer
++            // whole (the runtime's own quad views: no Quad Views layer above
++            // to compose it) has the eyes' full views first and the two
++            // focus views after them. Those are narrow and follow the gaze:
++            // bounding the placement by them put the counter and the panel
++            // inside the focus area, smaller and always just above where the
++            // pilot looked (GitHub #22). Only the eyes' views bound it.
++            const std::uint32_t placement_views = projection->viewCount == 4 ? 2 : projection->viewCount;
+             for (std::uint32_t v = 0; v < projection->viewCount; ++v) {
+                 const auto& view = projection->views[v];
+                 if (view.subImage.imageRect.extent.width <= 0) continue;
+                 const auto w = static_cast<std::uint32_t>(view.subImage.imageRect.extent.width);
+                 eye_width = eye_width ? std::min(eye_width, w) : w;
++                if (v >= placement_views) continue;
+                 // The quad uses physical visible bounds, not the source image's
+                 // vertical storage direction. Never reorder the submitted FOV.
+                 const float down_angle = std::min(view.fov.angleDown, view.fov.angleUp);
+diff --git a/tests/openxr_fps_overlay_tests.cpp b/tests/openxr_fps_overlay_tests.cpp
+--- a/tests/openxr_fps_overlay_tests.cpp
++++ b/tests/openxr_fps_overlay_tests.cpp
+@@ -321,6 +321,35 @@ int main(int argc, char** argv) {
+                 std::swap(view.fov.angleUp, view.fov.angleDown);
+             }
+             view.fov = saved_fov;
++            // DCS Control (0077): four views in one projection layer (the
++            // runtime's own quad views): the focus views, narrow and off
++            // centre, must not move or shrink the overlay.
++            {
++                write_position(ini, L"upper_right");
++                std::this_thread::sleep_for(std::chrono::milliseconds(260));
++                overlay.application_frame(&info);
++                check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == 2, "stereo placement before quad views");
++                const auto stereo_pose = last_pose;
++                std::array<XrCompositionLayerProjectionView, 4> quad_views{view, view, view, view};
++                quad_views[2].fov = {0.10f, 0.42f, 0.35f, 0.05f};
++                quad_views[3].fov = {0.08f, 0.40f, 0.35f, 0.05f};
++                quad_views[2].subImage.imageRect.extent = quad_views[3].subImage.imageRect.extent = {2440, 1716};
++                XrCompositionLayerProjection quad = projection; quad.viewCount = 4; quad.views = quad_views.data();
++                const auto* saved_layer = expected_layer;
++                expected_layer = reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad);
++                std::array<const XrCompositionLayerBaseHeader*, 2> quad_layers{expected_layer, expected_layer};
++                XrFrameEndInfo quad_info = info; quad_info.layers = quad_layers.data();
++                std::this_thread::sleep_for(std::chrono::milliseconds(260));
++                overlay.application_frame(&quad_info);
++                check(overlay.end_frame(&quad_info, false) == XR_SUCCESS && observed_count == 2, "quad views placement");
++                check(std::abs(last_pose.position.x - stereo_pose.position.x) < 1.0e-6f &&
++                      std::abs(last_pose.position.y - stereo_pose.position.y) < 1.0e-6f,
++                      "the focus views of a quad-views layer moved the overlay");
++                expected_layer = saved_layer;
++                std::this_thread::sleep_for(std::chrono::milliseconds(260));
++                overlay.application_frame(&info);
++                check(overlay.end_frame(&info, false) == XR_SUCCESS && observed_count == 2, "stereo placement after quad views");
++            }
+             // DCS Control (0045): a refresh due while the runtime's xrEndFrame
+             // runs makes no swapchain call; the next refresh uploads.
+             std::this_thread::sleep_for(std::chrono::milliseconds(260));
