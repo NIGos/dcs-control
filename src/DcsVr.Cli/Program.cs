@@ -28,7 +28,11 @@ try
             Console.WriteLine($"Verified {ApplicationInstaller.VerifySource(Option("--source") ?? ReleaseFolder()).Files.Count} release files."); break;
         case "app-install":
         {
-            var journal = new ApplicationInstaller(Option("--destination") ?? ApplicationInstaller.DefaultDestination).Install(Option("--source") ?? ReleaseFolder());
+            // The pilot's own installation (not a test one in a scratch folder, not from a sandbox with a private
+            // %LOCALAPPDATA%): its settings are copied as the replaced version left them, for Go back.
+            var installer = new ApplicationInstaller(Option("--destination") ?? ApplicationInstaller.DefaultDestination);
+            var installState = Option("--state") ?? (installer.IsRegistered() && AppDataRedirection.Target() is null ? ControlService.DefaultStateRoot : null);
+            var journal = installer.Install(Option("--source") ?? ReleaseFolder(), stateRoot: installState);
             Console.WriteLine($"Installed {journal.Entries.Count} application files. Recovery transaction: {journal.Id}"); break;
         }
         case "app-uninstall":

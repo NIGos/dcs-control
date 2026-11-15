@@ -168,8 +168,31 @@ public sealed partial class Updates
             if (installed is not null && version.CompareTo(installed) <= 0) continue;
             if (best is null || version.CompareTo(best.Value.Version) > 0) best = (version, release);
         }
-        if (best is not { } chosen) return null;
-        var r = chosen.Release;
+        return best is { } chosen ? Describe(chosen.Version, chosen.Release) : null;
+    }
+
+    /// <summary>The release to go back to in GitHub's release list: <paramref name="exact"/> when given, else the highest
+    /// release older than <paramref name="current"/> that this version can go back to (<see cref="Rollback.Oldest"/>).
+    /// Drafts and malformed tags are ignored; null when the list has none.</summary>
+    public static UpdateInfo? SelectOlder(string json, string current, string? exact = null)
+    {
+        var installed = ReleaseVersion.Parse(current); var wanted = ReleaseVersion.Parse(exact);
+        if (installed is null || (exact is not null && wanted is null)) return null;
+        using var document = JsonDocument.Parse(json);
+        if (document.RootElement.ValueKind != JsonValueKind.Array) throw new InvalidDataException("GitHub's release list is not a list.");
+        (ReleaseVersion Version, JsonElement Release)? best = null;
+        foreach (var release in document.RootElement.EnumerateArray())
+        {
+            if (release.ValueKind != JsonValueKind.Object || Bool(release, "draft") || Text(release, "tag_name") is not { } tag || ReleaseVersion.Parse(tag) is not { } version) continue;
+            if (version.CompareTo(installed) >= 0 || (version.Major, version.Minor, version.Patch).CompareTo(Rollback.Oldest) < 0) continue;
+            if (wanted is not null ? version.CompareTo(wanted) != 0 : best is not null && version.CompareTo(best.Value.Version) <= 0) continue;
+            best = (version, release);
+        }
+        return best is { } chosen ? Describe(chosen.Version, chosen.Release) : null;
+    }
+
+    private static UpdateInfo Describe(ReleaseVersion chosenVersion, JsonElement r)
+    {
         string? setupName = null, setupUrl = null, signatureUrl = null; long setupBytes = 0;
         if (r.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
         {
@@ -185,7 +208,7 @@ public sealed partial class Updates
         var notes = Text(r, "body") ?? "";
         if (notes.Length > 64 * 1024) notes = notes[..(64 * 1024)];
         var published = Text(r, "published_at") is { } at && DateTimeOffset.TryParse(at, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var p) ? p : (DateTimeOffset?)null;
-        return new(chosen.Version.ToString(), Text(r, "tag_name")!, page, notes, published, setupName, setupUrl, setupBytes, signatureUrl);
+        return new(chosenVersion.ToString(), Text(r, "tag_name")!, page, notes, published, setupName, setupUrl, setupBytes, signatureUrl);
     }
     [GeneratedRegex(@"^DcsControl-[0-9A-Za-z.-]+-Setup\.exe$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SetupName();
@@ -250,6 +273,90 @@ public sealed partial class Updates
             throw;
         }
     }
+
+    /// <summary>Asks GitHub for the release to go back to (<see cref="SelectOlder"/>). Throws with a sentence for the pilot
+    /// when GitHub cannot be reached or lists no such release with a signed setup.</summary>
+    public async Task<UpdateInfo> Earlier(string? exact, CancellationToken cancel = default)
+    {
+        string json;
+        try
+        {
+            using var client = Client(ApiTimeout);
+            using var whole = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+            whole.CancelAfter(ApiTimeout);
+            using var response = await Send(client, new Uri(ReleasesUrl), ["api.github.com"], whole.Token);
+            json = Encoding.UTF8.GetString(await ReadLimited(response, MaxListBytes, whole.Token));
+        }
+        catch (OperationCanceledException) when (cancel.IsCancellationRequested) { throw; }
+        catch (Exception e) when (e is HttpRequestException or IOException or InvalidDataException or OperationCanceledException)
+        { throw new InvalidOperationException("The earlier version is not on this PC and GitHub could not be reached. Try again when you are online."); }
+        UpdateInfo? found;
+        try { found = SelectOlder(json, CurrentVersion, exact); }
+        catch (Exception e) when (e is JsonException or InvalidDataException) { found = null; }
+        var name = ReleaseVersion.Parse(exact) is { } v ? "DCS Control " + v.Short : "An earlier version";
+        if (found is null) throw new InvalidOperationException(name + " is not among the latest releases on GitHub. Its setup may still be on the Releases page.");
+        return found.CanInstall ? found : throw new InvalidOperationException(name + " has no signed setup on GitHub, so it cannot be put back from here.");
+    }
+
+    /// <summary>Signed setups kept on this PC (state root\setups\&lt;version&gt;\): this version's, taken from the update
+    /// that installed it, becomes the way back after the next update.</summary>
+    public string SetupsRoot => Path.Combine(_stateRoot, "setups");
+
+    /// <summary>The kept setup of <paramref name="version"/> when its signature still verifies; a copy that does not is
+    /// deleted and null is returned (going back then downloads it again).</summary>
+    public string? KeptSetup(string? version)
+    {
+        if (ReleaseVersion.Parse(version) is not { } v) return null;
+        var folder = Path.Combine(SetupsRoot, v.ToString());
+        try
+        {
+            if (!Directory.Exists(folder)) return null;
+            var setup = Directory.EnumerateFiles(folder, "*.exe").FirstOrDefault(f => SetupName().IsMatch(Path.GetFileName(f)));
+            if (setup is not null && VerifyFile(setup)) return setup;
+            Directory.Delete(folder, true);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        return null;
+    }
+
+    /// <summary>Whether a setup of <paramref name="version"/> is kept (not verified: <see cref="KeptSetup"/> does that).</summary>
+    public bool HasKeptSetup(string? version) => ReleaseVersion.Parse(version) is { } v && Directory.Exists(Path.Combine(SetupsRoot, v.ToString()));
+
+    /// <summary>
+    /// Once per start, before <see cref="CleanDownloads"/>: the setup that installed this version (downloaded by the
+    /// version before, verified again here) moves from the download folder into <see cref="SetupsRoot"/>. Kept besides it:
+    /// only the setup of <paramref name="previous"/>, the version this installation replaced, while
+    /// <paramref name="keepPrevious"/>. Best effort.
+    /// </summary>
+    public void KeepSetups(string? previous, bool keepPrevious)
+    {
+        try
+        {
+            if (ReleaseVersion.Parse(CurrentVersion) is not { } current) return;
+            var mine = Path.Combine(SetupsRoot, current.ToString()); var downloaded = Path.Combine(DownloadRoot, current.ToString());
+            if (!Directory.Exists(mine) && Directory.Exists(downloaded)
+                && Directory.EnumerateFiles(downloaded, "*.exe").FirstOrDefault(f => SetupName().IsMatch(Path.GetFileName(f))) is { } setup && VerifyFile(setup))
+            {
+                var building = mine + ".new";
+                if (Directory.Exists(building)) Directory.Delete(building, true);
+                Directory.CreateDirectory(building);
+                File.Copy(setup, Path.Combine(building, Path.GetFileName(setup))); File.Copy(setup + ".sig", Path.Combine(building, Path.GetFileName(setup) + ".sig"));
+                Directory.Move(building, mine);
+            }
+            if (!Directory.Exists(SetupsRoot)) return;
+            var keep = new List<string> { current.ToString() };
+            if (keepPrevious && ReleaseVersion.Parse(previous) is { } p) keep.Add(p.ToString());
+            foreach (var folder in Directory.EnumerateDirectories(SetupsRoot))
+                if (!keep.Contains(Path.GetFileName(folder), StringComparer.OrdinalIgnoreCase))
+                    try { Directory.Delete(folder, true); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+    }
+
+    /// <summary>What a check announces: an update to the version the pilot went back from (<paramref name="skipped"/>) is
+    /// not offered by the check at start, only when the pilot asks (Check now); anything newer always is.</summary>
+    public static UpdateCheck Announced(UpdateCheck check, string? skipped, bool asked) =>
+        !asked && check.Update is { } update && ReleaseVersion.Parse(update.Version) is { } found && ReleaseVersion.Parse(skipped) is { } left && found.CompareTo(left) == 0 ? check with { Update = null } : check;
 
     /// <summary>Verifies a setup downloaded earlier against its .sig file again (just before it is started).</summary>
     public bool VerifyFile(string path)
@@ -348,7 +455,9 @@ public sealed partial class Updates
 /// <param name="LastSeenVersion">The version whose "What's new" was last shown at start.</param>
 /// <param name="SupportDue">When the Ko-fi note may show again at start; null until the first start that records it.</param>
 /// <param name="SupportOff">The pilot chose never to see the Ko-fi note again.</param>
-public sealed record AppSettings(bool CheckForUpdates = true, string? LastSeenVersion = null, DateTimeOffset? SupportDue = null, bool SupportOff = false);
+/// <param name="SkippedVersion">The version the pilot went back from (<see cref="Rollback"/>): the check at start does not
+/// offer it again; newer ones are offered, and Check now shows it.</param>
+public sealed record AppSettings(bool CheckForUpdates = true, string? LastSeenVersion = null, DateTimeOffset? SupportDue = null, bool SupportOff = false, string? SkippedVersion = null);
 
 /// <summary>The app's own settings (state root\settings.json), apart from profiles. Read leniently: a missing or unreadable
 /// file, or keys a later version added, give the defaults for what is missing.</summary>
@@ -371,7 +480,8 @@ public sealed class AppSettingsStore(string stateRoot)
             return new(!root.TryGetProperty("checkForUpdates", out var check) || check.ValueKind != JsonValueKind.False,
                 root.TryGetProperty("lastSeenVersion", out var seen) && seen.ValueKind == JsonValueKind.String ? seen.GetString() : null,
                 root.TryGetProperty("supportDue", out var due) && due.ValueKind == JsonValueKind.String && due.TryGetDateTimeOffset(out var when) ? when : null,
-                root.TryGetProperty("supportOff", out var off) && off.ValueKind == JsonValueKind.True);
+                root.TryGetProperty("supportOff", out var off) && off.ValueKind == JsonValueKind.True,
+                root.TryGetProperty("skippedVersion", out var skipped) && skipped.ValueKind == JsonValueKind.String ? skipped.GetString() : null);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException) { return null; }
     }

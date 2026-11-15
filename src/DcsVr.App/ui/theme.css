@@ -554,6 +554,10 @@ button.rail-version:hover{color:var(--soft)}
 .update-progress progress{flex:1;height:8px;accent-color:var(--accent)}
 #updatesCard .setting{margin-top:4px}
 #updateStatus.error{color:var(--red)}
+.rollback-row{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
+.rollback-row p{margin:0}
+.rollback-row p.error{color:var(--red)}
+.rollback-row .button{flex-shrink:0}
 /* Icon-only rail (narrow windows): the group labels do not fit 58 px, so they become thin separators. */
 @media(max-width:1180px){.rail-group{height:1px;margin:8px 8px;overflow:hidden;font-size:0;letter-spacing:0;background:#ffffff14}.rail-group:first-child{margin-top:4px}}
 /* What happens at launch: the short columns take only what they need, so Change does not wrap word by word. */

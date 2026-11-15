@@ -101,6 +101,8 @@ Releases before 0.5.6 cannot update themselves: install 0.5.6 once with the setu
 
 On the **Help & support** page, under **Updates**, **Check for updates when DCS Control starts** turns the automatic check off (it is on by default) and **Check now** asks GitHub at once. Without internet nothing happens: no update is shown.
 
+**Go back**, at the bottom of the same card, returns to the version you had before the last update, for when an update gives you trouble. Close DCS first. DCS is put back to stock, then the earlier version's own signed setup installs it again (it is kept on your PC for a month after an update, otherwise downloaded) and DCS Control restarts. Your settings return to how they were in that version; the ones you changed since stay in `%LOCALAPPDATA%\DcsControl\versions`, and presets you saved since come back when you update again. It goes one step back only, and not to versions before 0.6.3. The update you left is not offered again by itself; **Check now** shows it.
+
 **What's new** after an update: the first start of a new version shows its release notes once. Click the version number at the bottom of the left rail (or **What's new in this version** on the Help & support page) to see them again.
 
 ## First run
@@ -319,7 +321,7 @@ How the image looks in the headset, on its own page. Everything is **off by defa
 - **Diagnostic package**: **Create diagnostic package…** saves one ZIP to attach to a report (see [Reporting a problem](#reporting-a-problem)); *What's in the package* lists its contents. **Save a text report** saves the settings, the checks and what was detected on this PC as one file.
 - **Headset panel messages**: what the headset panel's messages mean.
 - **DLSS 5 on the focus area** (with DLSS 5 on): after a session, says whether DLSS 5 reached the Quad Views focus area and, when the panel said "DLSS 5: ON but not applied", why, in plain words, with what to check.
-- **Updates**: the automatic check, **Check now** and **What's new in this version**.
+- **Updates**: the automatic check, **Check now**, **What's new in this version** and **Go back** to the previous version.
 
 ### Optimizations only (any other headset, or no VR)
 

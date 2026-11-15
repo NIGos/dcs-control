@@ -2,6 +2,8 @@
 
 **Foveated frame generation (experimental).** A new switch on the Frame generation page. With it, frames are generated for the focus area and for the rest of the view separately, instead of for the whole image: about half the GPU time for generated frames and 4 GB less video memory on the test PC. It needs the bundled Quad Views, the Pimax route and NVIDIA frame generation. Off by default; a flight starts with a slightly longer hitch. Tell me how the edge of the focus area looks, and fast eye moves.
 
+**Go back to the previous version.** If an update gives you trouble, **Help & support** now has **Go back** under Updates: it puts DCS back to stock, then installs the version you had before from its own signed setup (kept on your PC for a month after an update, otherwise downloaded again) and restarts. Your settings return to how they were in that version; the ones you changed since are kept in `%LOCALAPPDATA%\DcsControl\versions`, and presets you saved since come back when you update again. One step back only, and not to versions before 0.6.3. The update you left is not offered again by itself; **Check now** still shows it. Coming from 0.6.6, the previous version is downloaded and its own update banner returns after a few hours.
+
 # 0.6.6 preview
 
 **Fixes:**

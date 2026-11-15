@@ -82,7 +82,31 @@ window.runWebSmoke = async function() {
       $('updateAuto').click(); await until(() => ui.updates.enabled);
       await ui.checkUpdates(true);
       check('Check now finds the update again with the check back on',ui.updates.enabled && !$('updateBanner').hidden && $('updateAuto').checked);
-      $('updateHide').click(); check('The banner can be hidden until the next start',$('updateBanner').hidden && !$('railUpdate').hidden); }
+      $('updateHide').click(); check('The banner can be hidden until the next start',$('updateBanner').hidden && !$('railUpdate').hidden);
+      // Go back, against the same fixtures. The host is not an installation: the test says which version it "replaced"
+      // (updateStatus simulatePrevious), and the fixture release list carries that version's signed setup.
+      { const button = $('rollbackButton'), text = $('rollbackText');
+        const replaced = async previous => { ui.updates = await ui.request('updateStatus',{simulatePrevious:previous}); ui.renderUpdates(); };
+        await replaced(ui.state.version);
+        check('Go back is off and says why when this already is the earlier version',$('updatesCard').contains(button) && button.disabled && !ui.updates.rollback.available && text.textContent.includes('already went back'));
+        await replaced('previous'); const back = ui.updates.rollback;
+        check('Go back names the version this installation replaced',back.available && !button.disabled && back.version !== ui.state.version && Boolean(back.short) && button.textContent === `Go back to ${back.short}` && text.textContent.includes('put back'));
+        button.click();
+        check('Go back asks once, in place, and says in a sentence what happens to DCS and to the settings',button.textContent === `Go back to ${back.short}? Click again` && text.textContent.includes('DCS goes back to stock') && text.textContent.includes('Settings changed since are kept'));
+        document.body.click();
+        check('A click anywhere else takes the question back',button.textContent === `Go back to ${back.short}` && !text.textContent.includes('kept'));
+        await ui.request('dcsStatus',{simulate:true}); button.click(); button.click();
+        check('Go back is refused while DCS runs',await until(() => text.classList.contains('error') && !ui.updates.rollingBack) && text.textContent.includes('Close DCS'));
+        await waitIdle(); await ui.request('dcsStatus',{simulate:false}); ui.state.dcsRunning = false; ui.refreshWorkflow();
+        const draftBefore = JSON.stringify(ui.draft().profile), seenBefore = (await ui.request('whatsNew',{startup:true})).show;
+        button.click(); button.click();
+        await until(() => (text.textContent.includes('was not started') || text.classList.contains('error')) && !ui.updates.rollingBack);
+        check("Go back verifies the earlier version's signed setup and switches the settings (offline: put back, setup not started)"+(text.classList.contains('error') ? ' ['+text.textContent+']' : ''),text.textContent.includes('was not started')
+          && text.textContent.includes(back.short) && !text.classList.contains('error') && !ui.updates.installing && !button.disabled);
+        check('After the offline run the draft and What\'s new are as before',JSON.stringify(ui.draft().profile) === draftBefore && !seenBefore && !(await ui.request('whatsNew',{startup:true})).show);
+        await replaced(''); button.click(); document.body.click();
+        check('With nothing on record, Go back looks the previous release up when asked',ui.updates.rollback.available && ui.updates.rollback.version === null && button.textContent === 'Go back to the previous version' && !button.disabled
+          && text.textContent.includes('put back')); } }
     check('One primary action: Launch DCS, with Review files, Apply without launching and Back to stock DCS as links',!$('preview') && !$('heroChips') && $('launch').classList.contains('launch') && $('reviewPlan').classList.contains('link-button') && $('apply').classList.contains('link-button') && $('apply').textContent === 'Apply without launching' && $('openRecovery').classList.contains('link-button') && !document.querySelector('.workflow').textContent.match(/Preview|Apply profile/));
     { const diff = listDiff(PROFILE_FIELDS,ui.fields.map(f => f.path));
       check('All editable profile controls available'+diff,!diff && document.querySelectorAll('#routeSwitch [data-route]').length === 3); }

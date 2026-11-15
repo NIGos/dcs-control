@@ -4355,6 +4355,193 @@ Test("Import: a JSON file that is not a DCS Control profile is refused with a pl
     try { service.LoadProfile(report); throw new Exception("A report was imported as a profile"); }
     catch (InvalidDataException e) { Require(e.Message.Contains("not a DCS Control profile"), e.Message); }
 });
+// --- Go back to the previous version: what was replaced, the settings copies, the earlier setup, no nag (no network) ---
+// A state folder as a version leaves it: the draft, presets and the active preset's name.
+string RollbackState(string name, string draft, params (string Preset, string Text)[] presets)
+{
+    var state = Path.Combine(root, "rollback", name, "state"); Directory.CreateDirectory(state);
+    File.WriteAllText(Path.Combine(state, "draft.json"), draft);
+    foreach (var (preset, text) in presets) { Directory.CreateDirectory(Path.Combine(state, "presets")); File.WriteAllText(Path.Combine(state, "presets", preset), text); }
+    return state;
+}
+string? StateText(string state, string relative) => File.Exists(Path.Combine(state, relative)) ? File.ReadAllText(Path.Combine(state, relative)) : null;
+Test("An installation records the version it replaced and copies that version's settings; a reinstall, a first install and a scratch install do not", () =>
+{
+    var six = ReleaseFixture("rollback-record-6", "0.6.6-preview", "six"); var seven = ReleaseFixture("rollback-record-7", "0.6.7-preview", "seven");
+    var target = Path.Combine(root, "rollback/record/app"); var installer = new ApplicationInstaller(target);
+    var state = RollbackState("record", "draft-6", ("Day.json", "day-6"), ("active.txt", "Day"));
+    installer.Install(six, stateRoot: state);
+    Require(new Rollback(state, target, "0.6.6-preview").Recorded is null && !Directory.Exists(Path.Combine(state, "versions")) && installer.InstalledVersion() == "0.6.6-preview", "a first install replaced nothing");
+    Require(new Rollback(state, target, "0.6.6-preview").Target() is { Version: null, Reason: null }, "nothing on record: the previous release is looked up when asked");
+    installer.Install(seven, stateRoot: state);
+    var record = new Rollback(state, target, "0.6.7-preview").Recorded;
+    Require(record is { Version: "0.6.6-preview", ReplacedBy: "0.6.7-preview" } && File.Exists(Path.Combine(target, ".installer", "previous.json")), "the update records what it replaced");
+    Require(StateText(state, "versions/0.6.6-preview/draft.json") == "draft-6" && StateText(state, "versions/0.6.6-preview/presets/Day.json") == "day-6" && StateText(state, "versions/0.6.6-preview/presets/active.txt") == "Day", "the settings as 0.6.6 left them");
+    Require(StateText(state, "draft.json") == "draft-6" && new Rollback(state, target, "0.6.7-preview").HasSnapshot("0.6.6-preview") && new Rollback(state, target, "0.6.7-preview").SetAside() is null, "the state itself is untouched; nothing is set aside");
+    File.WriteAllText(Path.Combine(state, "draft.json"), "draft-7");
+    installer.Install(seven, stateRoot: state);
+    Require(new Rollback(state, target, "0.6.7-preview").Recorded == record && StateText(state, "versions/0.6.6-preview/draft.json") == "draft-6", "a reinstall of the same version changes neither");
+    // A test installation (no state folder given) records the version, never copies settings.
+    var scratch = Path.Combine(root, "rollback/record/scratch"); var other = RollbackState("record-scratch", "mine");
+    new ApplicationInstaller(scratch).Install(six); new ApplicationInstaller(scratch).Install(seven);
+    Require(new Rollback(other, scratch, "0.6.7-preview").Target().Version == "0.6.6-preview" && !Directory.Exists(Path.Combine(other, "versions")) && !new ApplicationInstaller(scratch).IsRegistered(), "a scratch folder is not the pilot's installation");
+    Require(installer.Uninstall().Complete && !File.Exists(Rollback.RecordPath(target)), "uninstall removes the record");
+});
+Test("One step back: the earlier files and the settings copy return, newer settings are kept aside and presets come back with the next update", () =>
+{
+    var six = ReleaseFixture("rollback-back-6", "0.6.6-preview", "six"); var seven = ReleaseFixture("rollback-back-7", "0.6.7-preview", "seven");
+    var target = Path.Combine(root, "rollback/back/app"); var installer = new ApplicationInstaller(target);
+    var state = RollbackState("back", "draft-6", ("Day.json", "day-6"), ("active.txt", "Day"));
+    var settings = new AppSettingsStore(state); var now = new DateTimeOffset(2026, 11, 15, 12, 0, 0, TimeSpan.Zero);
+    installer.Install(six, stateRoot: state); installer.Install(seven, stateRoot: state);
+    // 0.6.7 in use: a draft with a setting 0.6.6 refuses, a changed preset, a new one, another active preset.
+    File.WriteAllText(Path.Combine(state, "draft.json"), "draft-7 headsetPanelPosition"); File.WriteAllText(Path.Combine(state, "presets", "Day.json"), "day-7");
+    File.WriteAllText(Path.Combine(state, "presets", "Night.json"), "night-7"); File.WriteAllText(Path.Combine(state, "presets", "active.txt"), "Night");
+    settings.Save(new(true, "0.6.7-preview"));
+    var rollback = new Rollback(state, target, "0.6.7-preview", () => now.AddDays(400));
+    Require(rollback.Target() is { Version: "0.6.6-preview", Reason: null }, "one step back is the recorded version");
+    var pending = rollback.Prepare("0.6.6-preview", settings);
+    Require(StateText(state, "draft.json") == "draft-6" && StateText(state, "presets/Day.json") == "day-6" && StateText(state, "presets/active.txt") == "Day" && StateText(state, "presets/Night.json") is null, "0.6.6 gets the state it can read");
+    var aside = Path.Combine(state, "versions", "0.6.7-preview");
+    Require(pending.SetAside == "0.6.7-preview" && StateText(aside, "draft.json") == "draft-7 headsetPanelPosition" && StateText(aside, "presets/Day.json") == "day-7" && StateText(aside, "presets/Night.json") == "night-7" && StateText(aside, "presets/active.txt") == "Night", "the newer settings are kept aside, whole");
+    Require(settings.Load() is { SkippedVersion: "0.6.7-preview", LastSeenVersion: "0.6.6-preview", CheckForUpdates: true }, "the version left is remembered; What's new of the earlier one stays closed");
+    Require(new Updates(state, currentVersion: "0.6.6-preview", clock: () => now.AddDays(400).AddHours(1)).Cached() is { Update: null, Error: null }, "the earlier build finds a fresh check: quiet for its 6 hours");
+    // The earlier version's setup runs its installer over this installation (the installer is unchanged since 0.6.3).
+    installer.Install(six);
+    Require(File.ReadAllText(Path.Combine(target, "app.bin")) == "six" && installer.InstalledVersion() == "0.6.6-preview" && Journals(installer) == 1 && Backups(installer) == 0, "the previous files are back");
+    var earlier = new Rollback(state, target, "0.6.6-preview", () => now.AddDays(401));
+    Require(earlier.Reconcile(settings) is { Undone: false, ReturnedPresets.Count: 0 } && StateText(state, "draft.json") == "draft-6" && StateText(state, "presets/Night.json") is null && settings.Load().SkippedVersion == "0.6.7-preview", "the earlier version keeps its state; newer presets stay aside");
+    Require(earlier.Target() is { Version: null, Reason: { } why } && why.Contains("already went back") && earlier.SetAside()?.Version == "0.6.7-preview" && earlier.SetAside()?.Folder == Path.GetFullPath(aside), "one step only, and the kept settings are findable");
+    // Flying on 0.6.6, then the update again: what was changed meanwhile wins, presets saved in 0.6.7 return.
+    File.WriteAllText(Path.Combine(state, "presets", "Day.json"), "day-6b");
+    installer.Install(seven, stateRoot: state);
+    var again = new Rollback(state, target, "0.6.7-preview", () => now.AddDays(402));
+    var reconciled = again.Reconcile(settings);
+    Require(!reconciled.Undone && reconciled.ReturnedPresets.SequenceEqual(["Night"]) && StateText(state, "presets/Night.json") == "night-7" && StateText(state, "presets/Day.json") == "day-6b" && StateText(state, "draft.json") == "draft-6", "presets saved since return; nothing is overwritten");
+    Require(settings.Load().SkippedVersion is null && again.Reconcile(settings).ReturnedPresets.Count == 0 && again.SetAside() is null && StateText(aside, "draft.json") == "draft-7 headsetPanelPosition", "returned once; the set-aside copy stays");
+    Require(StateText(state, "versions/0.6.6-preview/presets/Day.json") == "day-6b" && again.Target().Version == "0.6.6-preview", "the copy of 0.6.6's settings is the newest one");
+    // A later update copies 0.6.7's settings again: the copy set aside is renamed, never deleted.
+    Rollback.Snapshot(state, "0.6.7-preview", setAside: false, now.AddDays(403));
+    var keptFolders = Directory.GetDirectories(Path.Combine(state, "versions"), "0.6.7-preview kept *");
+    Require(keptFolders.Length == 1 && StateText(keptFolders[0], "draft.json") == "draft-7 headsetPanelPosition" && StateText(aside, "draft.json") == "draft-6", "set-aside settings survive later copies");
+});
+Test("A going back that did not happen is undone at the next start; without a settings copy the earlier version starts from its defaults", () =>
+{
+    var six = ReleaseFixture("rollback-undo-6", "0.6.6-preview", "six"); var seven = ReleaseFixture("rollback-undo-7", "0.6.7-preview", "seven");
+    var target = Path.Combine(root, "rollback/undo/app"); var installer = new ApplicationInstaller(target);
+    var state = RollbackState("undo", "draft-6", ("Day.json", "day-6"));
+    var settings = new AppSettingsStore(state);
+    installer.Install(six, stateRoot: state); installer.Install(seven, stateRoot: state);
+    File.WriteAllText(Path.Combine(state, "draft.json"), "draft-7"); File.WriteAllText(Path.Combine(state, "presets", "Night.json"), "night-7");
+    settings.Save(new(false, "0.6.7-preview")); File.WriteAllText(Path.Combine(state, "updates.json"), "{}");
+    // A settings file that cannot be read: nothing moves.
+    var content = File.ReadAllText(settings.Path); File.WriteAllText(settings.Path, "{ damaged");
+    Throws<IOException>(() => new Rollback(state, target, "0.6.7-preview").Prepare("0.6.6-preview", settings));
+    Require(StateText(state, "draft.json") == "draft-7" && !Directory.Exists(Path.Combine(state, "versions", "0.6.7-preview")), "refused before anything moved");
+    File.WriteAllText(settings.Path, content);
+    var rollback = new Rollback(state, target, "0.6.7-preview");
+    rollback.Prepare("0.6.6-preview", settings);
+    Require(StateText(state, "draft.json") == "draft-6" && StateText(state, "presets/Night.json") is null);
+    // The setup failed or was closed: 0.6.7 starts again, nothing was installed since.
+    Require(new Rollback(state, target, "0.6.7-preview").Reconcile(settings) is { Undone: true } && StateText(state, "draft.json") == "draft-7" && StateText(state, "presets/Night.json") == "night-7" && StateText(state, "presets/Day.json") == "day-6", "the settings are back as they were");
+    Require(settings.Load() == new AppSettings(false, "0.6.7-preview") && !Directory.Exists(Path.Combine(state, "versions", "0.6.7-preview")) && !File.Exists(Path.Combine(state, "versions", "going-back.json")) && !File.Exists(Path.Combine(state, "updates.json")), "no skipped version, nothing left aside");
+    Require(new Rollback(state, target, "0.6.7-preview").Reconcile(settings) is { Undone: false, ReturnedPresets.Count: 0 } && StateText(state, "versions/0.6.6-preview/draft.json") == "draft-6", "the next start changes nothing; the copy for going back is still there");
+    // No copy of the earlier version's settings (installed before this feature, or outside the pilot's installation).
+    Directory.Delete(Path.Combine(state, "versions", "0.6.6-preview"), true);
+    Require(!rollback.HasSnapshot("0.6.6-preview"));
+    var fresh = rollback.Prepare("0.6.6-preview", settings);
+    Require(StateText(state, "draft.json") is null && Directory.GetFiles(Path.Combine(state, "presets")).Length == 0 && StateText(state, "versions/0.6.7-preview/presets/Night.json") == "night-7", "defaults for the earlier version, everything kept aside");
+    rollback.Undo(fresh, settings);
+    Require(StateText(state, "draft.json") == "draft-7" && StateText(state, "presets/Night.json") == "night-7" && settings.Load().SkippedVersion is null, "undone right away when the setup cannot start");
+});
+Test("Go back is refused with the reason when there is nothing to go back to", () =>
+{
+    var state = RollbackState("nothing", "draft"); var install = Path.Combine(root, "rollback/nothing/app");
+    Require(new Rollback(state, null, "0.6.7-preview").Target() is { Version: null, Reason: { } portable } && portable.Contains("not installed"), "an unzipped copy replaced nothing");
+    Require(new Rollback(state, install, "0.6.7-preview").Target() is { Version: null, Reason: null }, "nothing on record");
+    Rollback.Record(install, "0.6.2-preview", "0.6.7-preview", DateTimeOffset.UtcNow);
+    Require(new Rollback(state, install, "0.6.7-preview").Target() is { Version: null, Reason: { } old } && old.Contains("too old") && old.Contains("0.6.2"), "an installer that cannot read this installation's journal");
+    Rollback.Record(install, "0.6.3-preview", "0.6.7-preview", DateTimeOffset.UtcNow);
+    Require(new Rollback(state, install, "0.6.7-preview").Target().Version == "0.6.3-preview", "0.6.3 is the oldest");
+    Rollback.Record(install, "0.6.8-preview", "0.6.7-preview", DateTimeOffset.UtcNow);
+    Require(new Rollback(state, install, "0.6.7-preview").Target() is { Version: null, Reason: { } newer } && newer.Contains("already went back"), "what was replaced is newer: this is the step back");
+    var recorded = File.ReadAllText(Rollback.RecordPath(install));
+    Rollback.Record(install, "0.6.7-preview", "0.6.7-preview", DateTimeOffset.UtcNow); Rollback.Record(install, "garbage", "0.6.7-preview", DateTimeOffset.UtcNow);
+    Require(File.ReadAllText(Rollback.RecordPath(install)) == recorded, "the same version and a malformed one are not recorded");
+    File.WriteAllText(Rollback.RecordPath(install), "{ damaged"); Require(new Rollback(state, install, "0.6.7-preview").Target() is { Version: null, Reason: null }, "a damaged record is no record");
+});
+Test("The earlier version's setup: kept from its update and verified again, or found on GitHub; a corrupt or unsigned one is refused", () =>
+{
+    using var key = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+    byte[] Sign(byte[] data) => Encoding.ASCII.GetBytes(Convert.ToBase64String(key.SignData(data, System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.DSASignatureFormat.IeeeP1363FixedFieldConcatenation)));
+    var state = Path.Combine(root, "rollback/setups/state"); var downloads = Path.Combine(root, "rollback/setups/downloads"); var pem = key.ExportSubjectPublicKeyInfoPem();
+    void Downloaded(string version, byte[] setup, byte[] signature)
+    {
+        var folder = Path.Combine(downloads, version); Directory.CreateDirectory(folder);
+        File.WriteAllBytes(Path.Combine(folder, $"DcsControl-{version}-Setup.exe"), setup); File.WriteAllBytes(Path.Combine(folder, $"DcsControl-{version}-Setup.exe.sig"), signature);
+    }
+    var seven = Encoding.UTF8.GetBytes("MZ setup 0.6.7"); var eight = Encoding.UTF8.GetBytes("MZ setup 0.6.8");
+    // 0.6.7's first start: the setup it was installed from is kept; a download that does not verify is not.
+    Downloaded("0.6.7-preview", seven, Sign(seven));
+    var onSeven = new Updates(state, currentVersion: "0.6.7-preview", publicKeyPem: pem, downloadRoot: downloads);
+    Require(onSeven.KeptSetup("0.6.7-preview") is null && !onSeven.HasKeptSetup("0.6.7-preview"));
+    onSeven.KeepSetups(null, false); onSeven.CleanDownloads();
+    var kept = onSeven.KeptSetup("0.6.7-preview");
+    Require(kept == Path.Combine(onSeven.SetupsRoot, "0.6.7-preview", "DcsControl-0.6.7-preview-Setup.exe") && File.ReadAllBytes(kept!).SequenceEqual(seven) && !Directory.Exists(Path.Combine(downloads, "0.6.7-preview")), "kept in the state folder, the download folder is cleaned as before");
+    Downloaded("0.6.8-preview", eight, Sign(seven));
+    var onEight = new Updates(state, currentVersion: "0.6.8-preview", publicKeyPem: pem, downloadRoot: downloads);
+    onEight.KeepSetups("0.6.7-preview", keepPrevious: true);
+    Require(!onEight.HasKeptSetup("0.6.8-preview") && onEight.KeptSetup("0.6.7-preview") == kept, "an unverified setup is never kept; the previous version's stays");
+    // The embedded release key refuses a setup signed with another key.
+    Require(new Updates(state, currentVersion: "0.6.8-preview", downloadRoot: downloads).KeptSetup("0.6.7-preview") is null && !Directory.Exists(Path.Combine(onEight.SetupsRoot, "0.6.7-preview")), "a kept setup that does not verify is deleted, not started");
+    Downloaded("0.6.7-preview", seven, Sign(seven)); onSeven.KeepSetups(null, false);
+    File.WriteAllBytes(kept!, [.. seven, 0]);
+    Require(onEight.KeptSetup("0.6.7-preview") is null && !onEight.HasKeptSetup("0.6.7-preview"), "a kept setup changed on disk is refused and removed");
+    Downloaded("0.6.7-preview", seven, Sign(seven)); onSeven.KeepSetups(null, false); Require(onEight.HasKeptSetup("0.6.7-preview"));
+    onEight.KeepSetups("0.6.7-preview", keepPrevious: false); Require(!onEight.HasKeptSetup("0.6.7-preview"), "after a month the previous setup goes; going back downloads it");
+    onEight.CleanDownloads();
+    // GitHub: the exact version on record, else the highest older release this version can go back to.
+    var list = ReleaseList(GitHubRelease("v0.6.9-preview"), GitHubRelease("v0.6.8-preview"), GitHubRelease("v0.6.7-preview"), GitHubRelease("v0.6.6-preview", draft: true), GitHubRelease("v0.6.5-preview"),
+        GitHubRelease("v0.6.4-preview", assets: false), GitHubRelease("v0.6.2-preview"), GitHubRelease("nightly"));
+    Require(Updates.SelectOlder(list, "0.6.8-preview")?.Version == "0.6.7-preview" && Updates.SelectOlder(list, "0.6.7-preview")?.Version == "0.6.5-preview", "the highest older release; never a draft, the same or a newer one");
+    Require(Updates.SelectOlder(list, "0.6.8-preview", "0.6.5-preview") is { Version: "0.6.5-preview", CanInstall: true } && Updates.SelectOlder(list, "0.6.8-preview", "0.6.6-preview") is null && Updates.SelectOlder(list, "0.6.8-preview", "0.6.9-preview") is null, "the exact version on record or nothing");
+    Require(Updates.SelectOlder(list, "0.6.8-preview", "0.6.2-preview") is null && Updates.SelectOlder(list, "0.6.3-preview") is null && Updates.SelectOlder(list, "0.6.8-preview", "garbage") is null, "nothing older than 0.6.3");
+    var release = Updates.SelectOlder(list, "0.6.8-preview")! with { SetupBytes = seven.Length };
+    var handler = new UrlFixtureHandler(new() { [Updates.ReleasesUrl] = Encoding.UTF8.GetBytes(list), [release.SetupUrl!] = seven, [release.SignatureUrl!] = Sign(seven) });
+    var online = new Updates(state, handler, currentVersion: "0.6.8-preview", publicKeyPem: pem, downloadRoot: downloads);
+    Require(online.Earlier("0.6.7-preview").Result.Version == "0.6.7-preview" && online.Earlier(null).Result.Version == "0.6.7-preview");
+    var path = online.Download(release).Result; Require(online.VerifyFile(path) && path.Contains("0.6.7-preview"), "the earlier setup comes through the same signed download");
+    var tampered = (byte[])seven.Clone(); tampered[3] ^= 1; handler.Answers[release.SetupUrl!] = tampered;
+    Require(Failure(online.Download(release)) is InvalidDataException && Directory.GetFiles(downloads, "*", SearchOption.AllDirectories).Length == 0, "a corrupt package is refused and deleted");
+    handler.Answers[release.SetupUrl!] = seven; handler.Answers[release.SignatureUrl!] = Sign(eight);
+    Require(Failure(online.Download(release)) is InvalidDataException, "a package with another file's signature is refused");
+    Require(Failure(online.Earlier("0.6.4-preview")) is InvalidOperationException { Message: var unsigned } && unsigned.Contains("no signed setup"), "a release without a signed setup cannot be put back");
+    Require(Failure(online.Earlier("0.6.6-preview")) is InvalidOperationException { Message: var missing } && missing.Contains("not among the latest releases"));
+    handler.Offline = true; Require(Failure(online.Earlier("0.6.7-preview")) is InvalidOperationException { Message: var unreachable } && unreachable.Contains("GitHub could not be reached"));
+});
+Test("After going back, the check at start does not offer the version just left; newer ones and Check now do", () =>
+{
+    var now = new DateTimeOffset(2026, 11, 15, 12, 0, 0, TimeSpan.Zero);
+    UpdateCheck Found(string tag) => new(now, "0.6.6-preview", Updates.Select(ReleaseList(GitHubRelease(tag)), "0.6.6-preview"), null);
+    Require(Updates.Announced(Found("v0.6.7-preview"), "0.6.7-preview", asked: false) is { Update: null, Error: null }, "no nag for the version just left");
+    Require(Updates.Announced(Found("v0.6.7-preview"), "0.6.7-preview", asked: true).Update?.Version == "0.6.7-preview", "Check now shows it");
+    Require(Updates.Announced(Found("v0.6.8-preview"), "0.6.7-preview", asked: false).Update?.Version == "0.6.8-preview" && Updates.Announced(Found("v0.6.7"), "0.6.7-preview", asked: false).Update?.Version == "0.6.7", "anything newer is offered");
+    Require(Updates.Announced(Found("v0.6.7-preview"), null, asked: false).Update is not null && Updates.Announced(Found("v0.6.7-preview"), "garbage", asked: false).Update is not null && Updates.Announced(new(now, "0.6.6-preview", null, "offline"), "0.6.7-preview", false).Error == "offline");
+    var store = new AppSettingsStore(Path.Combine(root, "rollback/skipped"));
+    store.Save(new(true, "0.6.6-preview", SkippedVersion: "0.6.7-preview")); Require(store.Load().SkippedVersion == "0.6.7-preview" && !store.TakeSupport(now) && store.Load().SkippedVersion == "0.6.7-preview", "saved and kept by the other settings");
+    AtomicFile.WriteText(store.Path, "{\"checkForUpdates\":true,\"skippedVersion\":7}"); Require(store.Load().SkippedVersion is null);
+});
+Test("The installer's journal keeps the format 0.6.3 reads: going back runs an earlier setup over this installation", () =>
+{
+    // An earlier build reads journals strictly (an unknown property is an error). A property added here breaks Go back
+    // for every version before the change: raise Rollback.Oldest with it.
+    var installer = new ApplicationInstaller(Path.Combine(root, "rollback/journal/app")); installer.Install(ReleaseFixture("rollback-journal", "0.6.7-preview", "seven"));
+    using var journal = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Directory.GetFiles(installer.Transactions.StateDirectory, "journal.json", SearchOption.AllDirectories).Single()));
+    string[] known = ["schemaVersion", "id", "profileId", "createdAt", "appVersion", "status", "consolidated", "entries"];
+    string[] knownEntry = ["path", "installedSha256", "pendingSha256", "previousSha256", "backupFile", "luaChanges", "iniValues", "runtimeLogs", "root", "applied", "reverted", "deleted"];
+    Require(journal.RootElement.EnumerateObject().All(p => known.Contains(p.Name)) && journal.RootElement.GetProperty("entries").EnumerateArray().All(e => e.EnumerateObject().All(p => knownEntry.Contains(p.Name))), "a new journal property: " + journal.RootElement.GetRawText()[..200]);
+    Require(Rollback.Oldest == (0, 6, 3));
+});
 Test("App settings: update checks on by default, saved, unknown keys tolerated; What's new once per version", () =>
 {
     var state = Path.Combine(root, "app-settings"); var store = new AppSettingsStore(state);

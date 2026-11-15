@@ -219,14 +219,20 @@ internal static class WebVerification
         var setup = System.Text.Encoding.UTF8.GetBytes("Offline update fixture. Never executed.");
         var signature = Convert.ToBase64String(key.SignData(setup, System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.DSASignatureFormat.IeeeP1363FixedFieldConcatenation));
         var name = $"DcsControl-{next}-Setup.exe"; var download = $"https://github.com/NIGos/dcs-control/releases/download/v{next}/";
+        // The version before this one, with its own signed setup: what Go back downloads when no setup is kept on this PC.
+        var previous = WebBridge.OfflinePrevious(); var previousName = $"DcsControl-{previous}-Setup.exe"; var previousDownload = $"https://github.com/NIGos/dcs-control/releases/download/v{previous}/";
+        var previousSetup = System.Text.Encoding.UTF8.GetBytes("Offline earlier-version fixture. Never executed.");
+        var previousSignature = Convert.ToBase64String(key.SignData(previousSetup, System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.DSASignatureFormat.IeeeP1363FixedFieldConcatenation));
         const string notes = "**Hostile notes check** <img src=x onerror=\"window.notesInjected=true\"> <script>window.notesInjected=true</script>\n\n- First bullet with `code`\n  - Nested bullet\n- Second bullet\n\nA [link](https://example.invalid/) in a paragraph.";
         object Release(string tag, bool draft, string body, object[] assets) => new { tag_name = tag, draft, prerelease = true, html_url = Updates.ReleasesPage + "/tag/" + tag, body, published_at = "2026-10-11T12:00:00Z", assets };
         var releases = JsonSerializer.Serialize(new[] {
             Release("v99.0.0", true, "A draft is never offered.", []), Release("nightly", false, "Not a version.", []),
             Release("v" + next, false, notes, [new { name, browser_download_url = download + name, size = setup.Length }, new { name = name + ".sig", browser_download_url = download + name + ".sig", size = signature.Length }]),
+            Release("v" + previous, false, "The version before.", [new { name = previousName, browser_download_url = previousDownload + previousName, size = previousSetup.Length }, new { name = previousName + ".sig", browser_download_url = previousDownload + previousName + ".sig", size = previousSignature.Length }]),
             Release("v0.4.0-preview", false, "Older.", []) });
         var handler = new UpdateFixtureHandler(new Dictionary<string, byte[]> { [Updates.ReleasesUrl] = System.Text.Encoding.UTF8.GetBytes(releases),
-            [download + name] = setup, [download + name + ".sig"] = System.Text.Encoding.ASCII.GetBytes(signature) }, download + name);
+            [download + name] = setup, [download + name + ".sig"] = System.Text.Encoding.ASCII.GetBytes(signature),
+            [previousDownload + previousName] = previousSetup, [previousDownload + previousName + ".sig"] = System.Text.Encoding.ASCII.GetBytes(previousSignature) }, download + name);
         var notesPath = Path.Combine(Directory.CreateDirectory(Path.Combine(root, "release-notes")).FullName, "RELEASE_NOTES.md");
         File.WriteAllText(notesPath, $"# {current.Short}{(current.Suffix.Length > 0 ? " " + current.Suffix : "")}\n\n**Fixture notes** for this version, <b>not markup</b>.\n- One\n- Two\n\n# 0.4.0 preview\n\nOlder notes that must not show.\n");
         new AppSettingsStore(stateRoot).Save(new(true, "0.4.0-preview"));

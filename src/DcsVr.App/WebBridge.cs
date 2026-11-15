@@ -64,7 +64,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             var draft = JsonData.Deserialize<VrProfile>(data.GetProperty("profile").GetRawText());
             string? preset;
             // The active preset follows every edit, so a preset is never "unsaved".
-            lock (_draftLock) { Drafts.Save(draft, Empty(data.GetProperty("dcs").GetString()), Empty(data.GetProperty("options").GetString())); var presets = Presets; preset = presets.Active; if (preset is not null) service.SaveProfile(draft, presets.PathOf(preset)); }
+            lock (_draftLock) { if (_stateFrozen) return JsonData.Serialize(new { id, ok = false, error = "DCS Control is going back to the earlier version." }); Drafts.Save(draft, Empty(data.GetProperty("dcs").GetString()), Empty(data.GetProperty("options").GetString())); var presets = Presets; preset = presets.Active; if (preset is not null) service.SaveProfile(draft, presets.PathOf(preset)); }
             return Reply(id, new { saved = true, preset });
         }
         catch (Exception e) when (e is JsonException or KeyNotFoundException or InvalidOperationException or IOException or UnauthorizedAccessException or NotSupportedException)
@@ -115,7 +115,29 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     private readonly Lock _updateLock = new();
     private Task<UpdateCheck>? _checking;
     private UpdateCheck? _lastCheck;
-    private bool _installing, _cleaned, _handedOff;
+    private bool _installing, _cleaned, _handedOff, _rollingBack;
+    /// <summary>Go back: one step, to the version this installation replaced. Created at start, where a going back that
+    /// did not happen is undone and presets set aside return, before the draft is read.</summary>
+    private readonly Rollback _rollback = StartRollback(service, offline);
+    /// <summary>Set (under the draft lock) once the earlier version's settings are in place: nothing saves over them.</summary>
+    private bool _stateFrozen;
+    /// <summary>The offline verification's stand-in for an installation: its smoke test writes what it "replaced" there.</summary>
+    private static string OfflineInstallRoot(ControlService service) => Path.Combine(service.StateRoot, "rollback-fixture");
+    private static Rollback StartRollback(ControlService service, bool offline)
+    {
+        var rollback = new Rollback(service.StateRoot, offline ? OfflineInstallRoot(service) : Installed ? AppRoot : null);
+        var found = rollback.Reconcile(new AppSettingsStore(service.StateRoot));
+        if (found.Undone) AppLog.Info("Going back to the earlier version did not happen: the settings set aside for it are back.");
+        if (found.ReturnedPresets.Count > 0) AppLog.Info("Presets set aside when going back are back: " + string.Join(", ", found.ReturnedPresets));
+        return rollback;
+    }
+    /// <summary>The version the offline verification goes back to: one patch (or minor, or major) before this one; its
+    /// fixture release list carries a signed setup for it.</summary>
+    internal static string OfflinePrevious()
+    {
+        var v = ReleaseVersion.Parse(ProductInfo.Version) ?? throw new InvalidOperationException("The product version is not a release version.");
+        return (v.Patch > 0 ? v with { Patch = v.Patch - 1 } : v.Minor > 0 ? v with { Minor = v.Minor - 1 } : v with { Major = Math.Max(0, v.Major - 1), Minor = 99 }).ToString();
+    }
     private CancellationTokenSource? _downloadCancel;
     private (long Done, long Total)? _downloaded;
     private string? _updateMessage;
@@ -143,7 +165,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         {
             using var doc = JsonDocument.Parse(json);
             action = doc.RootElement.GetProperty("action").GetString();
-            if (action is not ("updateStatus" or "updateCheck" or "updateSettings" or "updateInstall" or "updateCancel" or "updatePage" or "whatsNew" or "support" or "supportOpen" or "supportOff")) return null;
+            if (action is not ("updateStatus" or "updateCheck" or "updateSettings" or "updateInstall" or "updateRollback" or "updateCancel" or "updatePage" or "whatsNew" or "support" or "supportOpen" or "supportOff")) return null;
             id = doc.RootElement.GetProperty("id").GetString();
             data = doc.RootElement.TryGetProperty("data", out var d) ? d.Clone() : default;
         }
@@ -156,6 +178,17 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             {
                 switch (action)
                 {
+                    case "updateStatus":
+                        // The offline verification host is not an installation: its smoke test says what it "replaced"
+                        // ("previous": the fixture's earlier release; "" forgets it).
+                        if (offline && data.ValueKind == JsonValueKind.Object && data.TryGetProperty("simulatePrevious", out var simulated) && simulated.ValueKind == JsonValueKind.String)
+                        {
+                            var record = Rollback.RecordPath(OfflineInstallRoot(service));
+                            if (File.Exists(record)) File.Delete(record);
+                            if (simulated.GetString() is { Length: > 0 } replaced) Rollback.Record(OfflineInstallRoot(service), replaced == "previous" ? OfflinePrevious() : replaced, replaced == ProductInfo.Version ? OfflinePrevious() : ProductInfo.Version, DateTimeOffset.UtcNow);
+                        }
+                        break;
+                    case "updateRollback": await GoBack(); break;
                     case "updateCheck":
                         // At start only while the pilot leaves the check on (and at most every 6 hours); Check now always asks.
                         var force = Flag("force");
@@ -164,12 +197,23 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                             Task<UpdateCheck> running;
                             lock (_updateLock) running = _checking ??= _updates.Check(force);
                             // A check that was running when the pilot turned checks off does not announce its result.
-                            try { var result = await running; if (force || Settings.Load().CheckForUpdates) lock (_updateLock) _lastCheck = result; }
+                            // The version the pilot went back from is not offered again at start; Check now shows it.
+                            try { var result = await running; if (force || Settings.Load().CheckForUpdates) { var announced = Updates.Announced(result, Settings.Load().SkippedVersion, force); lock (_updateLock) _lastCheck = announced; } }
                             finally { lock (_updateLock) if (_checking == running) _checking = null; }
                         }
                         // Setups of earlier updates are not needed once this version runs: removed once per start, before
                         // the reply (an update can only start after it), whether or not automatic checks are on.
-                        if (!offline && !_cleaned) { _cleaned = true; await Task.Run(_updates.CleanDownloads); }
+                        // First, an installation keeps the signed setup it was installed from (and, for a month, the one
+                        // of the version it replaced): the way back without a download.
+                        if (!offline && !_cleaned)
+                        {
+                            _cleaned = true;
+                            await Task.Run(() =>
+                            {
+                                if (Installed) { var before = _rollback.Recorded; _updates.KeepSetups(before?.Version, before is not null && DateTimeOffset.UtcNow - before.At < Rollback.KeepSetupFor); }
+                                _updates.CleanDownloads();
+                            });
+                        }
                         break;
                     case "updateSettings":
                         var enabled = Flag("checkForUpdates");
@@ -230,8 +274,99 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         var u = check?.Update;
         return new { enabled = Settings.Load().CheckForUpdates, current = ProductInfo.Version, checking, checkedAt = check?.CheckedAt, error = check?.Error,
             update = u is null ? null : new { version = u.Version, @short = u.Short, pageUrl = u.PageUrl, notes = u.Notes, published = u.Published, canInstall = u.CanInstall, bytes = u.SetupBytes },
-            installing = _installing || _handedOff, handedOff = _handedOff, downloaded = _downloaded is { } d ? new { done = d.Done, total = d.Total } : null, message = _updateMessage,
+            installing = _installing || _handedOff, handedOff = _handedOff, rollingBack = _rollingBack, rollback = RollbackView(), downloaded = _downloaded is { } d ? new { done = d.Done, total = d.Total } : null, message = _updateMessage,
             portable = !Installed, appFolder = Shown(AppRoot), installFolder = Shown(UpdateFolder()) };
+    }
+    /// <summary>Go back, as Help &amp; support shows it: the version one step back (null: looked up on GitHub when asked),
+    /// or why there is none; whether it starts from its defaults (no copy of its settings); and where settings set
+    /// aside earlier are.</summary>
+    private object RollbackView()
+    {
+        var target = _rollback.Target(); var reason = target.Reason;
+        if (reason is not null && _rollback.SetAside() is { } kept)
+            reason += $" Your settings from {ReleaseVersion.Parse(kept.Version)?.Short ?? kept.Version} are kept in {Shown(kept.Folder)}.";
+        return new { available = reason is null, version = target.Version, @short = ReleaseVersion.Parse(target.Version)?.Short, reason, fresh = !_rollback.HasSnapshot(target.Version) };
+    }
+    /// <summary>
+    /// Go back to the earlier version: its signed setup (kept on this PC, else downloaded again) is verified like an
+    /// update, DCS is put back to stock with this version's own restore (the earlier one may not know every file this one
+    /// manages), the settings are switched (<see cref="Rollback.Prepare"/>), and the setup replaces this installation
+    /// once this process has exited. Refused while DCS runs. Anything that fails before the setup starts leaves this
+    /// version and its settings as they were.
+    /// </summary>
+    private async Task GoBack()
+    {
+        var target = _rollback.Target();
+        if (target.Reason is not null) throw new InvalidOperationException(target.Reason);
+        CancellationTokenSource cancel;
+        lock (_updateLock)
+        {
+            if (_handedOff) throw new InvalidOperationException("DCS Control is already being replaced.");
+            if (_installing) throw new InvalidOperationException("A download is already running.");
+            _installing = _rollingBack = true; _downloadCancel = cancel = new();
+        }
+        var locked = false;
+        try
+        {
+            if (DcsRunning()) throw new InvalidOperationException("Close DCS before going back to the earlier version.");
+            _downloaded = null; _updateMessage = "Looking for the earlier version…";
+            var version = target.Version;
+            var setup = version is null ? null : await Task.Run(() => _updates.KeptSetup(version));
+            if (setup is null)
+            {
+                try
+                {
+                    var release = await _updates.Earlier(version, cancel.Token);
+                    version = release.Version;
+                    _updateMessage = "Downloading DCS Control " + release.Short + "…";
+                    setup = await _updates.Download(release, new Progress<(long Done, long Total)>(p => _downloaded = p), cancel.Token);
+                }
+                catch (OperationCanceledException) when (cancel.IsCancellationRequested) { throw new InvalidOperationException("The download was cancelled. Nothing changed."); }
+            }
+            var name = "DCS Control " + (ReleaseVersion.Parse(version)?.Short ?? version);
+            _updateMessage = "Signature verified.";
+            if (DcsRunning()) throw new InvalidOperationException("Close DCS before going back to the earlier version.");
+            if (!await _commands.WaitAsync(TimeSpan.FromSeconds(5))) throw new InvalidOperationException("Finish the current operation (Launch, Apply, Back to stock DCS...), then go back.");
+            locked = true;
+            using var hold = new FileStream(setup, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (!_updates.VerifyFile(setup)) throw new InvalidDataException("The earlier version's setup changed after it was verified. Nothing changed.");
+            // The offline verification's fixture setup is not a program and carries no version.
+            if (!offline && (ReleaseVersion.Parse(FileVersionInfo.GetVersionInfo(setup).ProductVersion ?? "") is not { } carried || ReleaseVersion.Parse(version) is not { } wanted || carried.CompareTo(wanted) != 0))
+                throw new InvalidDataException("The setup is not " + name + ". Nothing changed.");
+            // DCS first: every file this version changed goes back to its original, with this version's own record.
+            var (dcs, options) = (CurrentInventory.DcsExecutable, CurrentInventory.OptionsPath);
+            Invalidate();
+            // Like Back to stock DCS, the window does not close in the middle.
+            RestoreResult restored;
+            _writing = "restore";
+            try { restored = await Task.Run(() => service.RestoreOriginals(dcs, options)); }
+            finally { _writing = null; }
+            if (!restored.Complete) throw new InvalidOperationException("DCS could not be put back to stock first" + (restored.Conflicts.Count > 0 ? " (" + restored.Conflicts[0] + ")" : "") + ". Use Back to stock DCS, then go back.");
+            PendingRollback pending;
+            lock (_draftLock) { pending = _rollback.Prepare(version!, Settings); _stateFrozen = true; }
+            try
+            {
+                if (offline)
+                {
+                    lock (_draftLock) { _rollback.Undo(pending, Settings); _stateFrozen = false; }
+                    _updateMessage = "Offline verification: the setup of " + name + " was verified and the settings were switched and put back; the setup was not started.";
+                    // The fixture download goes again: the verification ends with only the update's own download.
+                    hold.Dispose();
+                    try { Directory.Delete(Path.GetDirectoryName(setup)!, true); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+                    _commands.Release(); locked = false; return;
+                }
+                var start = new ProcessStartInfo(setup) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(setup)! };
+                foreach (var argument in new[] { "--update", "--wait-pid", Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture), "--relaunch", "--destination", AppRoot, "--relaunch-path", Path.Combine(AppRoot, "DcsControl.exe") }) start.ArgumentList.Add(argument);
+                using (Process.Start(start)) { }
+            }
+            catch { lock (_draftLock) { try { _rollback.Undo(pending, Settings); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { AppLog.Error("Go back", e); } _stateFrozen = false; } throw; }
+            lock (_updateLock) _handedOff = true;
+            _updateMessage = "Going back to " + name + ". DCS Control closes now and starts again when it is done.";
+            AppLog.Info("Going back to " + version + " started: " + setup);
+            if (owner is not null) _ = Task.Delay(1500).ContinueWith(_ => owner.Dispatcher.BeginInvoke(owner.Close), TaskScheduler.Default);
+        }
+        catch { _downloaded = null; _updateMessage = null; if (locked) _commands.Release(); throw; }
+        finally { lock (_updateLock) { _installing = false; if (!_handedOff) _rollingBack = false; _downloadCancel = null; } cancel.Dispose(); }
     }
     /// <summary>A folder as the update dialog names it; the offline verification's renders ship with the release, so there
     /// the Windows user's profile folder reads %USERPROFILE%.</summary>

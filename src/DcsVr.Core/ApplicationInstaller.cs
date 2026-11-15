@@ -32,13 +32,17 @@ public sealed class ApplicationInstaller(string destination)
         }
         return manifest;
     }
-    public TransactionJournal Install(string source, Action<int>? beforeWrite = null)
+    /// <param name="stateRoot">The app's state folder when this installation is the pilot's own (the CLI decides):
+    /// before a newer version's first start, the draft and presets are copied as the replaced version left them
+    /// (<see cref="Rollback.Snapshot"/>), so going back finds settings that version can read. Null: no copy.</param>
+    public TransactionJournal Install(string source, Action<int>? beforeWrite = null, string? stateRoot = null)
     {
         EnsureAppClosed();
         var sourceRoot = Path.GetFullPath(source).TrimEnd(Path.DirectorySeparatorChar);
         if (Root.Equals(sourceRoot, StringComparison.OrdinalIgnoreCase) || Root.StartsWith(sourceRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || sourceRoot.StartsWith(Root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Source and destination must be separate application folders.");
         var manifest = VerifySource(sourceRoot);
+        var replaced = InstalledVersion();
         // Journals an earlier update left before its consolidated baseline (cut short while pruning) go first.
         PruneSuperseded();
         var journals = Live(Transactions.List());
@@ -83,7 +87,46 @@ public sealed class ApplicationInstaller(string destination)
             unchanged.Add(new() { Path = ledger, InstalledSha256 = previousLedger.InstalledSha256, Root = Root, Applied = true });
         else changes.Add(new(ledger, previousLedger?.InstalledSha256, ledgerBytes, "Application installation ledger", Root: Root));
         var applied = Transactions.Apply(new("application", "DCS Control " + manifest.Version, changes, new Dictionary<string, string>(), ""), beforeWrite);
-        return Consolidate(applied, unchanged);
+        var baseline = Consolidate(applied, unchanged);
+        // What this version replaced, for Go back (one step). The state copy only on the way up: on the way down the
+        // app has already put the earlier version's settings in place. Neither can fail the installation.
+        if (replaced is not null && ReleaseVersion.Parse(manifest.Version) is { } installed && ReleaseVersion.Parse(replaced) is { } before && installed.CompareTo(before) != 0)
+        {
+            var now = DateTimeOffset.UtcNow;
+            Rollback.Record(Root, replaced, manifest.Version, now);
+            if (stateRoot is not null && installed.CompareTo(before) > 0)
+                try { Rollback.Snapshot(stateRoot, replaced, setAside: false, now); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        }
+        return baseline;
+    }
+
+    /// <summary>The version installed in <see cref="Root"/> (its ledger, installation.json); null when there is none.</summary>
+    public string? InstalledVersion()
+    {
+        try
+        {
+            var ledger = Path.Combine(Root, "installation.json");
+            if (!File.Exists(ledger)) return null;
+            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(ledger));
+            return document.RootElement.TryGetProperty("version", out var version) && version.ValueKind == System.Text.Json.JsonValueKind.String ? version.GetString() : null;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException) { return null; }
+    }
+
+    /// <summary>Whether <see cref="Root"/> is the pilot's own installation: the standard folder, or the one Settings >
+    /// Apps names. Only then does an update copy the app's settings (a test installation in a scratch folder never
+    /// touches them).</summary>
+    public bool IsRegistered()
+    {
+        if (Root.Equals(Path.GetFullPath(DefaultDestination).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase)) return true;
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\DcsControl");
+            return key?.GetValue("InstallLocation") is string location && Path.IsPathFullyQualified(location)
+                && Root.Equals(Path.GetFullPath(location).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception e) when (e is System.Security.SecurityException or IOException or UnauthorizedAccessException or ArgumentException) { return false; }
     }
 
     /// <summary>
@@ -138,6 +181,7 @@ public sealed class ApplicationInstaller(string destination)
             var result = Transactions.Restore(journal.Id);
             if (!result.Complete) return result;
         }
+        try { File.Delete(Rollback.RecordPath(Root)); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
         return new(true, []);
     }
     private static Dictionary<string, JournalEntry> CurrentOwned(IReadOnlyList<TransactionJournal> journals)

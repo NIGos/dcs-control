@@ -38,7 +38,7 @@ const pending = new Map(), fields = [], invalid = new Set();
 const clone = value => JSON.parse(JSON.stringify(value));
 let pendingDxgiAction = null;
 const dxgiAcknowledged = dxgi => { try { return localStorage.getItem('dxgiAck:'+dxgi.sha256) === '1'; } catch { return false; } };
-const NO_TIMEOUT = new Set(['browse','save','import','export','importSboys','prepareSboys','diagnosticPackage','launch','apply','restore','grantWriteAccess','resumeTobii','updateInstall']);
+const NO_TIMEOUT = new Set(['browse','save','import','export','importSboys','prepareSboys','diagnosticPackage','launch','apply','restore','grantWriteAccess','resumeTobii','updateInstall','updateRollback']);
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const empty = value => value.trim() || null;
 const num = value => String(Number(Number(value).toFixed(4)));
@@ -2104,6 +2104,7 @@ function renderUpdates() {
   $('updateCheckStatus').textContent = !u ? '' : u.checking ? 'Checking GitHub…' : next ? `DCS Control ${next.short} is available.${checked}` : u.error ? u.error + checked
     : u.checkedAt ? `You have the latest version (${shortVersion(u.current)}).${checked}` : u.enabled ? 'Not checked yet.' : 'Automatic checks are off. Check now still asks GitHub.';
   $('updateCheckNow').disabled = Boolean(u?.checking || u?.installing);
+  renderRollback();
   if ($('updateDialog').open) renderUpdateDialog();
 }
 function renderUpdateDialog() {
@@ -2151,6 +2152,38 @@ async function installUpdate() {
   catch (error) { updatePolling = false; updateError = error.message; try { updates = await request('updateStatus'); } catch { updates.installing = false; } }
   finally { updatePolling = false; clearInterval(poll); renderUpdates(); renderUpdateDialog(); }
 }
+// Go back: the version this installation replaced, one step, from the Updates card. Asked once, in place (like End DCS).
+let rollbackArmed = false, rollbackError = null, rollbackDone = null;
+function renderRollback() {
+  const u = updates, r = u?.rollback, button = $('rollbackButton'), text = $('rollbackText'); if (!button) return;
+  const going = Boolean(u?.rollingBack), name = r?.short || 'the previous version';
+  button.disabled = !r?.available || busy || Boolean(u?.handedOff) || (Boolean(u?.installing) && !going);
+  button.textContent = u?.handedOff && going ? 'Going back…' : going ? 'Cancel' : rollbackArmed ? `Go back to ${name}? Click again` : `Go back to ${name}`;
+  const sentence = `DCS goes back to stock and DCS Control restarts as ${r?.short || 'the version before'}, with ${r?.fresh ? 'its default settings' : 'the settings you had then'}. Settings changed since are kept, and your presets return when you update again.`;
+  text.textContent = rollbackError || (going && u.message) || rollbackDone || (!r ? '' : !r.available ? r.reason : rollbackArmed ? sentence : 'Trouble since the update? The version before it can be put back.');
+  text.classList.toggle('error', Boolean(rollbackError));
+}
+async function goBack() {
+  if (!updates?.rollback?.available || updates.installing) return;
+  if (busy) { rollbackError = 'Finish the current operation first, then go back.'; renderRollback(); return; }
+  rollbackError = rollbackDone = null; updates.installing = updates.rollingBack = true; updates.downloaded = null; updates.message = 'Looking for the earlier version…'; renderUpdates();
+  updatePolling = true;
+  const poll = setInterval(() => request('updateStatus').then(r => { if (updatePolling) { updates = r; renderUpdates(); } }).catch(()=>{}), 300);
+  try { const r = await request('updateRollback'); updatePolling = false; updates = r; rollbackDone = r.message; }
+  catch (error) {
+    updatePolling = false; rollbackError = error.message; updates.installing = updates.rollingBack = false;
+    try { updates = await request('updateStatus'); } catch { }
+    // DCS may be back to stock already: the page shows what is applied now.
+    if (!busy) run('refresh').catch(()=>{});
+  }
+  finally { updatePolling = false; clearInterval(poll); renderUpdates(); }
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest('[data-rollback]')) { if (rollbackArmed) { rollbackArmed = false; renderRollback(); } return; }
+  if (updates?.rollingBack) { if (!updates.handedOff) request('updateCancel').catch(()=>{}); return; }
+  if (!rollbackArmed) { rollbackArmed = true; rollbackError = rollbackDone = null; renderRollback(); return; }
+  rollbackArmed = false; goBack();
+});
 /** This version's section of the release notes: once at the first start after an update, and from the rail's version. */
 async function showWhatsNew(startup) {
   try {
@@ -2237,7 +2270,7 @@ function adoptDraft(next) {
   showProfile(); change(); boostChanged();
 }
 // Test hooks exercise the same controls and command bridge; the fixture host never starts DCS or opens dialogs.
-window.dcsUi = {request,run,renderDashboard,setBusy,askDxgiFirst,askDxgiFresh,checkUpdates,installUpdate,setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); renderDashboard(); },applyLive,get liveStatus(){return liveStatus;},runsWith,navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,ENGINE_PARTS,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,revealSetting,get boostRequests(){return boostSequence;},engineShaderRows:(w,c) => { engineWarmup = w; engineCache = c; return shaderRows(); },get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
+window.dcsUi = {request,run,renderDashboard,setBusy,askDxgiFirst,askDxgiFresh,checkUpdates,installUpdate,goBack,renderUpdates,set updates(v){updates = v;},setUpdateChecks,notesFragment,get updates(){return updates;},saveRuntime,forgetRuntime,adoptDraft,launchState,checkItems,loadFlight,resetToApplied,parseKey,keyLabel,get flight(){return flight;},get savedDraft(){return savedDraftJson;},refreshWorkflow:() => { renderOriginals(); updateWorkflow(); renderDashboard(); },applyLive,get liveStatus(){return liveStatus;},runsWith,navigate,draft,sync,showProfile,invalidate:change,fields,withFeatures,featureState,featureNotes,featureSummary,deriveIdentity,FEATURES,ENGINE_PARTS,rereadPimax,refreshBoostPlan,renderBoostPlan,matchesApplied,effectiveFovea,revealSetting,get boostRequests(){return boostSequence;},engineShaderRows:(w,c) => { engineWarmup = w; engineCache = c; return shaderRows(); },get profile(){return profile;},get plan(){return plan;},get invalid(){return invalid;},get state(){return state;}};
 // More / Less: shows or hides a setting's (or a card's) detail text; every page load starts with it folded.
 document.addEventListener('click', e => {
   const b = e.target.closest('.more-toggle'); if (!b) return; const detail = $(b.getAttribute('aria-controls')); if (!detail) return;
