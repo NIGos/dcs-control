@@ -14,6 +14,9 @@ param(
     [string]$UninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DcsControl'
 )
 $ErrorActionPreference = 'Stop'
+# A failure ends with its cause as one plain line. The setup shows the last line of this script's output on its failure
+# page, and Windows PowerShell's own error report ends with "+ FullyQualifiedErrorId ..." instead of the cause.
+trap { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
 # This script is files\scripts\installer.ps1; the release (with release-manifest.json) is the folder above files\.
 $filesRoot = Split-Path -Parent $PSScriptRoot
 $payloadRoot = Split-Path -Parent $filesRoot
@@ -56,7 +59,8 @@ if ($Action -eq 'Install') {
     # DCS keeps the CPU Boost helper and the engine optimizations of the installed version in use while it runs.
     if (Get-Process -Name DCS -ErrorAction SilentlyContinue) { throw 'Close DCS before installing or updating DCS Control.' }
     & (Join-Path $filesRoot 'DcsVr.Cli.exe') app-verify --source $payloadRoot
-    if ($LASTEXITCODE -ne 0) { throw 'Package integrity failed. Prerequisite installation was not attempted.' }
+    # The program has just said why, and that stays the last line. Nothing was installed, no prerequisite either.
+    if ($LASTEXITCODE -ne 0) { exit 1 }
 }
 if ($Action -eq 'Install' -and $InstallPrerequisites) {
     # A prerequisite that cannot be installed (a declined administrator prompt, no network) never stops the install or an
@@ -83,7 +87,8 @@ if ($Action -eq 'Uninstall' -and ([IO.Path]::GetFullPath($filesRoot).TrimEnd('\'
 }
 try {
     & (Join-Path $cliRoot 'DcsVr.Cli.exe') $command --source $payloadRoot --destination $installRoot
-    if ($LASTEXITCODE -ne 0) { throw 'Application deployment failed. Review the error above; recovery backups are retained.' }
+    # The program has just said why, and that stays the last line (it rolls back what it had started).
+    if ($LASTEXITCODE -ne 0) { exit 1 }
 } finally {
     if ($temporaryCli) { Remove-Item -LiteralPath $temporaryCli -Recurse -Force -ErrorAction SilentlyContinue }
 }

@@ -91,7 +91,7 @@ public static class FramePacing
         // 45 FPS for 73 % of a flight, buffer off 30 FPS with OFXR patch 0078 and down to 22.5 without it).
         if (plan.FrameGeneration && profile.QuadViews == QuadProvider.PimaxNative && !profile.FrameGenDeepPipeline)
             checks.Add(new("native-quad-buffer", CheckState.Warning, "Smoothness buffer with Pimax native Quad Views",
-                "With Pimax native Quad Views, frame generation holds a higher frame rate with Smoothness buffer on (Frame generation page). With it off, DCS renders 30 FPS or less in scenes where it could hold 45."));
+                string.Create(CultureInfo.InvariantCulture, $"With Pimax native Quad Views, frame generation holds a higher frame rate with Smoothness buffer on (Frame generation page). With it off, DCS renders {profile.HeadsetRefreshHz / 3:0.#} FPS or less in scenes where it could hold {profile.HeadsetRefreshHz / 2:0.#}.")));
         return checks;
     }
 

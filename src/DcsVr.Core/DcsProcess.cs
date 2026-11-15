@@ -9,16 +9,20 @@ public enum DcsHealth { NotRunning, Healthy, NoWindow, NotResponding }
 
 /// <summary>Says when a running DCS has looked stuck for long enough to offer ending it. DCS has no window for a few
 /// seconds while it starts and stops answering Windows for minutes while a mission loads, so each state has its own
-/// patience; any healthy reading starts again.</summary>
+/// patience; any healthy reading starts again. So does a pause in the readings: the page asks every few seconds, but not
+/// while it is hidden or busy, and DCS may have answered, closed or started again in between.</summary>
 public sealed class DcsStuckTracker
 {
     public static readonly TimeSpan NoWindowPatience = TimeSpan.FromSeconds(30), NotRespondingPatience = TimeSpan.FromMinutes(4);
-    private DcsHealth _state = DcsHealth.NotRunning; private DateTimeOffset _since;
+    /// <summary>Readings further apart than this are not one stretch of the same state.</summary>
+    public static readonly TimeSpan MaxGap = TimeSpan.FromSeconds(20);
+    private DcsHealth _state = DcsHealth.NotRunning; private DateTimeOffset _since, _last;
 
     /// <summary>Null while DCS is fine or not yet stuck for long enough; otherwise why it is offered.</summary>
     public DcsHealth? Update(DcsHealth health, DateTimeOffset now)
     {
-        if (health != _state) { _state = health; _since = now; }
+        if (health != _state || now - _last > MaxGap) { _state = health; _since = now; }
+        _last = now;
         return health switch
         {
             DcsHealth.NoWindow when now - _since >= NoWindowPatience => DcsHealth.NoWindow,
@@ -56,6 +60,10 @@ public static class DcsProcess
         }
         finally { foreach (var process in processes) process.Dispose(); }
     }
+
+    /// <summary>Ends DCS as <see cref="EndAll"/> does, unless it looks healthy now: it was offered because it looked stuck,
+    /// and a DCS that only took long to load a mission may answer again before the pilot confirms. Null: left running.</summary>
+    public static int? EndStuck() => Health() == DcsHealth.Healthy ? null : EndAll();
 
     /// <summary>A DCS with no window at all (what ending it from Task Manager's app list can leave behind, GitHub #21),
     /// or whose window does not answer Windows. One healthy DCS among several counts as healthy.</summary>

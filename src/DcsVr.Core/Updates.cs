@@ -289,6 +289,42 @@ public sealed partial class Updates
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 
+    /// <summary>A setup's working folder is this old only when the setup was ended before it could remove it.</summary>
+    public static readonly TimeSpan SetupLeftoverAge = TimeSpan.FromDays(1);
+    [GeneratedRegex(@"^DcsControl-Setup-[0-9]+-[0-9]+$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex SetupWorkFolder();
+
+    /// <summary>
+    /// A setup unpacks its package into %TEMP%\DcsControl-Setup-&lt;process&gt;-&lt;ticks&gt; (about 180 MB) and removes it when it
+    /// ends; one that was ended while it worked (Task Manager, a restart) leaves it. Once per start those older than
+    /// <see cref="SetupLeftoverAge"/> go: no setup works that long, so one that is running is never touched. Only folders
+    /// with exactly that name, never a link. Best effort; returns how many were removed.
+    /// </summary>
+    public int CleanSetupLeftovers(string? temp = null)
+    {
+        var removed = 0;
+        try
+        {
+            var root = temp ?? Path.GetTempPath(); var now = _clock();
+            if (!Directory.Exists(root)) return 0;
+            foreach (var folder in Directory.EnumerateDirectories(root, "DcsControl-Setup-*"))
+                try
+                {
+                    var info = new DirectoryInfo(folder);
+                    if (!SetupWorkFolder().IsMatch(info.Name) || info.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
+                    var touched = info.CreationTimeUtc > info.LastWriteTimeUtc ? info.CreationTimeUtc : info.LastWriteTimeUtc;
+                    if (now - new DateTimeOffset(touched, TimeSpan.Zero) < SetupLeftoverAge) continue;
+                    // Like the setup's own clean-up: a read-only file does not keep the folder.
+                    foreach (var file in info.EnumerateFiles("*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }))
+                        if (file.Attributes.HasFlag(FileAttributes.ReadOnly)) file.Attributes = FileAttributes.Normal;
+                    info.Delete(true); removed++;
+                }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) { }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        return removed;
+    }
+
     /// <summary>The section of RELEASE_NOTES.md for <paramref name="version"/>: from its "# 0.5.6 preview" heading to the
     /// next "# " heading, trimmed; null when there is none.</summary>
     public static string? ReleaseNotesSection(string markdown, string version)

@@ -53,6 +53,18 @@ public partial class App : Application
                 Shutdown(1); return;
             }
         }
+        // A setup ended while it wrote files leaves a mix of two versions, which nothing here can repair (these files
+        // are open): the pilot is told to run the setup again, and chooses whether this copy starts.
+        try
+        {
+            var installation = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory));
+            if (installation is not null && Directory.Exists(Path.Combine(installation, ".installer")) && new DcsVr.Core.ApplicationInstaller(installation).Unfinished())
+            {
+                AppLog.Info("An update of this installation did not finish (an installer journal is still open).");
+                if (MessageBox.Show(DcsVr.Core.ApplicationInstaller.UnfinishedMessage, "DCS Control", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes) { Shutdown(1); return; }
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException or NotSupportedException) { AppLog.Error("Unfinished update check", error); }
         // A monitor mode the boost helper changed for a flight and could not set back (it was ended) is set back now.
         try { if (DcsVr.Core.BoostRuntime.RestoreLeftoverDisplay(DcsVr.Core.ControlService.DefaultStateRoot) is { } restored) AppLog.Info("Monitor mode: " + restored); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception) { AppLog.Error("Monitor mode restore", error); }

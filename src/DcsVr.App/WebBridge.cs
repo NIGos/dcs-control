@@ -169,7 +169,16 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         }
                         // Setups of earlier updates are not needed once this version runs: removed once per start, before
                         // the reply (an update can only start after it), whether or not automatic checks are on.
-                        if (!offline && !_cleaned) { _cleaned = true; await Task.Run(_updates.CleanDownloads); }
+                        if (!offline && !_cleaned)
+                        {
+                            _cleaned = true;
+                            await Task.Run(() =>
+                            {
+                                _updates.CleanDownloads();
+                                // What a setup that was ended mid-way left in %TEMP% (its unpacked package).
+                                _updates.CleanSetupLeftovers();
+                            });
+                        }
                         break;
                     case "updateSettings":
                         var enabled = Flag("checkForUpdates");
@@ -312,7 +321,12 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     private readonly DcsStuckTracker _stuck = new();
     private string? _offlineStuck;
     /// <summary>"NoWindow" or "NotResponding" once DCS has looked stuck for long enough to offer ending it; else null.</summary>
-    private string? DcsStuck() => offline ? _offlineStuck : _stuck.Update(DcsProcess.Health(), DateTimeOffset.UtcNow)?.ToString();
+    private string? DcsStuck(bool running)
+    {
+        if (offline) return running ? _offlineStuck : null;
+        var health = running ? DcsProcess.Health() : DcsHealth.NotRunning;
+        lock (_stuck) return _stuck.Update(health, DateTimeOffset.UtcNow)?.ToString();
+    }
     /// <summary>A DCS the offline verification's smoke test says is running (never set outside that host).</summary>
     private volatile bool _offlineDcs;
     private readonly Lock _boostCacheLock = new();
@@ -479,7 +493,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     if (offline && doc.RootElement.TryGetProperty("data", out var stuckData) && stuckData.ValueKind == JsonValueKind.Object
                         && stuckData.TryGetProperty("stuck", out var stuckNow)) _offlineStuck = stuckNow.ValueKind == JsonValueKind.String ? stuckNow.GetString() : null;
                     var runningNow = DcsRunning();
-                    return Reply(statusId, new { dcsRunning = runningNow, dcsStuck = runningNow ? DcsStuck() : null });
+                    // Off the window's thread: asking a DCS that has just stopped answering waits up to 5 seconds.
+                    var stuckFor = offline || !runningNow ? DcsStuck(runningNow) : await Task.Run(() => DcsStuck(true));
+                    return Reply(statusId, new { dcsRunning = runningNow, dcsStuck = stuckFor });
                 }
             }
             catch (Exception e) { return JsonData.Serialize(new { id = statusId, ok = false, error = e.Message }); }
@@ -724,7 +740,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     // The pilot asked, twice, to end a DCS that has no window or does not answer: nothing else can be
                     // launched or put back while it stays.
                     if (offline) { _offlineDcs = false; _offlineStuck = null; }
-                    else if (DcsProcess.EndAll() == 0 && DcsProcess.AnyRunning()) throw new InvalidOperationException("Windows did not let DCS Control end DCS. End DCS.exe in Task Manager's Details tab.");
+                    // Between the offer and the second click DCS may have come back (a long mission load): then it stays.
+                    else if (DcsProcess.EndStuck() is not { } ended) throw new InvalidOperationException("DCS is responding again, so it was not ended.");
+                    else if (ended == 0 && DcsProcess.AnyRunning()) throw new InvalidOperationException("Windows did not let DCS Control end DCS. End DCS.exe in Task Manager's Details tab.");
                     Invalidate(); _status = "DCS ended."; break;
                 case "presetSave":
                     {   // These settings under a new name (or over a preset, when the page asked first); edits follow it from now on.
