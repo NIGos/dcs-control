@@ -101,6 +101,19 @@ public sealed class ApplicationInstaller(string destination)
         return baseline;
     }
 
+    /// <summary>What the app says at start when <see cref="Unfinished"/>.</summary>
+    public const string UnfinishedMessage = "A DCS Control update did not finish, so files of two versions may be mixed here.\n\nRun the setup again to complete it. If a setup is running right now, let it finish first.\n\nStart DCS Control anyway?";
+
+    /// <summary>Whether an installation or update of <see cref="Root"/> began and did not end: its setup was ended while
+    /// it wrote files (or is writing them now), or its rollback met files it could not put back. The files are then a
+    /// mix of two versions until a setup runs again (<see cref="Install"/> rolls the unfinished one back first). Read
+    /// only, never throws: the app asks at start.</summary>
+    public bool Unfinished()
+    {
+        try { return Live(Transactions.List()).Any(j => j.Status is "prepared" or "applying" or "restore-conflicts"); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException or System.Text.Json.JsonException or NotSupportedException) { return false; }
+    }
+
     /// <summary>The version installed in <see cref="Root"/> (its ledger, installation.json); null when there is none.</summary>
     public string? InstalledVersion()
     {

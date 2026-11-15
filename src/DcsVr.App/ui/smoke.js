@@ -289,7 +289,7 @@ window.runWebSmoke = async function() {
         check('More works on the static cards of the page too',opened && detail.hidden && b.textContent === 'More' && detail.textContent.includes('DCS starts its log anew')); }
       { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-engineRecordersEmulatedLists','setting-frameGenHudSymbology','setting-frameGenFoveated'];
         const tags = [...document.querySelectorAll('#pages .tag')].filter(t => t.textContent.trim() === 'EXPERIMENTAL' && !t.closest('#page-guide'));
-        check('EXPERIMENTAL stays on exactly its eight settings and cards',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
+        check('EXPERIMENTAL stays on exactly its nine settings and cards',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
       ui.navigate('framegen'); const refreshInput = getComputedStyle($('input-headsetRefreshHz')).minHeight, row = getComputedStyle($('setting-headsetRefreshHz'));
       ui.navigate('boost'); const monitorSelect = getComputedStyle($('input-flightDisplayMode')).minHeight;
       check('Density: 34 px controls and 11 px setting rows at 1320 x 920',innerWidth === 1320 && refreshInput === '34px' && monitorSelect === '34px' && row.paddingTop === '11px' && row.paddingBottom === '11px'); }
@@ -621,6 +621,21 @@ window.runWebSmoke = async function() {
     check('The launcher option reports whether the DCS launcher can start the game here',typeof ui.state.launcherBlocked === 'boolean' && typeof ui.state.launcherUnknown === 'boolean' && (!ui.state.launcherBlocked || ($('setting-keepDcsLauncher').textContent.includes('error 5') && (ui.profile.keepDcsLauncher || $('input-keepDcsLauncher').disabled))));
     if (ui.state.launcherBlocked) { ui.profile.keepDcsLauncher = true; ui.invalidate(); await ui.run('refresh'); check('With the launcher kept, Checks says why it cannot start the game',ui.checkItems().some(c => c.id === 'dcs-launcher' && c.group === 'fix')); ui.profile.keepDcsLauncher = false; ui.invalidate(); await ui.run('refresh'); }
     else { ui.profile.keepDcsLauncher = true; ui.invalidate(); await ui.run('refresh'); check('With the launcher kept and no job in the way, nothing blocks it',ui.profile.keepDcsLauncher && !ui.checkItems().some(c => c.id === 'dcs-launcher' && c.group === 'fix')); ui.profile.keepDcsLauncher = false; ui.invalidate(); await ui.run('refresh'); }
+    // Foveated frame generation: greyed out with its reason where it cannot run; left on there, the switch stays usable
+    // and Checks says that it does not run.
+    { const before = JSON.parse(JSON.stringify(ui.profile)), f = ui.fields.find(x => x.path === 'frameGenFoveated');
+      const set = async p => { Object.assign(ui.profile,p); ui.invalidate(); await ui.run('refresh'); };
+      const why = () => f.element.classList.contains('inactive') && f.input.disabled ? [].concat(typeof f.why === 'function' ? f.why(ui.profile) : f.why)[0] : null;
+      const needs = () => ui.checkItems().find(c => c.id === 'foveated-fg-needs');
+      await set({desktop:false,frameGen:'Nvidia',runtime:'Pimax',quadViews:'QuadViewsFoveated',quadViewsLayerDirectory:null,frameGenFoveated:false});
+      const can = why() === null && !needs();
+      await set({frameGen:'FidelityFx'}); const other = why() === 'NVIDIA frame generation only.' && !needs();
+      await set({frameGen:'Nvidia',quadViews:'PimaxNative'}); const native = String(why()).includes('bundled Quad Views');
+      await set({frameGenFoveated:true}); const idle = needs();
+      const said = why() === null && idle?.group === 'check' && idle.title === 'Foveated frame generation' && idle.action?.reveal === 'frameGenFoveated' && idle.text.includes('does not run');
+      await set({frameGen:'Off'}); const off = String(why()).includes('rame generation') && !needs();
+      await set(before);
+      check('Foveated frame generation says why it is greyed out, and Checks says when it is on but does not run',can && other && native && said && off && !needs()); }
     let offlineDownloadRejected = false; try { await ui.run('prepareSboys'); } catch(e) { offlineDownloadRejected = /Network downloads are disabled/.test(e.message); } check('Unbundled driver download is blocked in offline fixtures',offlineDownloadRejected);
     // Final screenshots show a complete configurable route, without an applied game modification.
     edit('quadViews','QuadViewsFoveated'); edit('foveatedDlss',true);

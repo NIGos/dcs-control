@@ -98,6 +98,9 @@ public static class LiveSettings
         {
             Kind.Engine => launch.EngineOptimizations && (f.Name != "engineDiagnosticHooks" || Current(journal) && !launch.EngineDiagnosticHooks),
             Kind.Visual => !launch.Desktop,
+            // With foveated frame generation, bidirectional flow also picks how the strip a fast eye move uncovers is
+            // filled (foveated_uncovered_fill), which OFXR reads at start: the whole file waits.
+            Kind.Flow => f.Name != "bidirectionalFlow" || !launch.UsesFoveatedFrameGen,
             _ => true
         }).Select(f => f.Name)];
     }

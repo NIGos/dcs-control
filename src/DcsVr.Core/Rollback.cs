@@ -174,10 +174,15 @@ public sealed class Rollback
     {
         try
         {
+            // Only the installation decides whether its going back happened: an unzipped copy of the version that was
+            // left, started while the earlier version is installed, shares this state folder and would undo it (and
+            // delete the draft and presets the earlier version has saved since). It changes nothing until the installation
+            // has looked.
             if (Read<PendingRollback>(PendingPath) is { From: not null, To: not null } pending)
             {
+                if (_install is null) return new(false, []);
                 var installedSince = Recorded is { } record && record.At > pending.At && Same(record.ReplacedBy, Current);
-                if (Same(pending.From, Current) && !installedSince) { Undo(pending, settings); return new(true, []); }
+                if (Same(pending.From, Current) && !installedSince) { KeepSince(pending); Undo(pending, settings); return new(true, []); }
                 File.Delete(PendingPath);
             }
             if (settings.Read() is { SkippedVersion: { } skipped } saved && !ReleaseVersion.IsNewer(skipped, Current)) settings.Save(saved with { SkippedVersion = null });
@@ -200,6 +205,30 @@ public sealed class Rollback
             return new(false, returned);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException or NotSupportedException) { return new(false, []); }
+    }
+
+    /// <summary>
+    /// Before a going back is undone at a later start. The earlier version may have run after all: it was uninstalled
+    /// and this version installed afresh, so no note says an installation happened. What it saved since (every draft
+    /// or preset file that is not the copy put in place for it) goes to state root\versions\&lt;earlier&gt; kept &lt;time&gt;,
+    /// set aside like any other: its presets return at the next start, nothing is deleted. Nothing to keep when the
+    /// setup never ran.
+    /// </summary>
+    private void KeepSince(PendingRollback pending)
+    {
+        if (ReleaseVersion.Parse(pending.To) is not { } to) return;
+        var placed = Path.Combine(VersionsRoot, to.ToString());
+        var changed = ProfileFiles(_state).Where(f => !File.Exists(Path.Combine(placed, f)) || !File.ReadAllBytes(Path.Combine(placed, f)).AsSpan().SequenceEqual(File.ReadAllBytes(Path.Combine(_state, f)))).ToList();
+        if (changed.Count == 0) return;
+        var now = _clock();
+        var folder = placed + " kept " + now.UtcDateTime.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture);
+        if (Directory.Exists(folder)) folder += "-" + Guid.NewGuid().ToString("N")[..6];
+        foreach (var file in changed)
+        {
+            var destination = Path.Combine(folder, file);
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!); File.Copy(Path.Combine(_state, file), destination);
+        }
+        AtomicFile.WriteText(Path.Combine(folder, "info.json"), JsonSerializer.Serialize(new StateCopy(to.ToString(), now, SetAside: true), Lenient));
     }
 
     /// <summary>The profile state an earlier build must be able to read: the draft and the files in presets\.</summary>
