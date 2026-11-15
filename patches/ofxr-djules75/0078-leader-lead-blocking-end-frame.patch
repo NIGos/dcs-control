@@ -1,0 +1,1255 @@
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -125,6 +125,16 @@ enum class BridgeFlightOperation : std::uint32_t {
+     // mid-session; xrfg::latency::DisplayPeriodRise). Adaptive cadence's
+     // told time and resync start over on it. a the old period (us), b the
+     // new (us), c 1 when the scanout measurement was there, else 0.
++    // DCS Control (0078): 410, the runtime's xrEndFrame found to wait for a
++    // first synthetic's output and lose the slot after it (b=1), or to
++    // return before the output is written after all (b=0): a the detector's
++    // score, c the call that decided it (us); xrfg::latency::HandOverBlock.
++    // 411, a window of thirty first synthetics judged for the lead of the
++    // application's release (xrfg::latency::LeaderLead), only while 410
++    // b=1 stands: a the lead now in force (us), b the window's
++    // second-highest lateness, written less handed over (us, signed: two's
++    // complement), c 0 held, 1 raised, 2 lowered, 3 a raise taken back, 4
++    // disarmed. `[ofxr] leader_lead=0` turns both off.
+     // DCS Control (0042): 960, the presenter thread started: a its OS thread
+     // id (GetCurrentThreadId; its start address is in ucrtbase, so tooling
+     // finds the thread by this id).
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -161,6 +161,14 @@ struct ConfiguredNvidiaOptions {
+ [[nodiscard]] bool read_own_binding_queue(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS Control (0078). `[ofxr] leader_lead`: at the shallow depth, off
++// SteamVR, on a runtime whose xrEndFrame is seen to wait for a first
++// synthetic's output and lose its slot, the application is released earlier
++// by what that output was late (xrfg::latency::LeaderLead). On unless set to
++// 0; nothing changes on a runtime that does not wait. Read once per session.
++[[nodiscard]] bool read_leader_lead(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // DCS VR Control (0007). `[ofxr] diag_vram`: the diagnostic panel shows the
+ // GPU's memory ("VRAM 28.4 / 32.0 GB"). Off unless set to 1. Read once per
+ // session.
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -2289,4 +2289,231 @@ struct CaptureEpochStep {
+     return DeepHoldRepeat::skip_repeat;
+ }
+ 
++// ---------------------------------------------------------------------------
++// DCS Control (0078): the first synthetic's hand-over on a runtime whose
++// xrEndFrame waits for it (GitHub #23).
++//
++// At the shallow depth (`deep_pipeline=0`) the application is released so
++// that its frame is queued just after the presenter took the real frame
++// before it, and that frame's first synthetic is handed to the runtime a
++// slot later, usually before its output is written: the runtime waits for it
++// on the layer's queue and shows it if it is written in time (0009). That
++// holds while the runtime's xrEndFrame returns at once. With the Pimax
++// runtime's own quad views (one projection layer of four views) it does not:
++// the call returns about 1.3 ms after the output is written. A live DCS
++// flight (2026-11-15, 90 Hz, RTX 5090) had the first synthetic written
++// 13.5-16.7 ms after its hand-over (the frame's D3D11 rendering, then
++// synthesis), the presenter held in xrEndFrame for that long, and the
++// runtime's next wait a display period later than its slot: 379 of 380
++// frames in a 17 s stretch, every frame at cadence 3 lasting four periods
++// (22.5 fps at 90 Hz), and at a fixed 2X about every other frame (36 fps).
++// The same runtime with two views (the bundled Quad Views layer composes
++// them) returned in 0.3 ms with the output written 2-12 ms later, and lost
++// no slot. A call that returned up to 10 ms after its slot's wait lost
++// almost none; one that returned 11 ms or more after it lost every one.
++//
++// HandOverBlock tells the two apart from what the presenter sees, one
++// observation per first synthetic handed over unwritten. LeaderLead then
++// moves the application's release earlier by what the first synthetic was
++// late, so that it is written at its hand-over: the queue is that much
++// deeper while the runtime waits, and no deeper once it stops.
++// leader_lead_release turns the lead into the presenter frames the release
++// no longer waits for and what is left of the release offset.
++//
++// A runtime that returns before the output is written never latches, and
++// nothing changes for it.
++struct HandOverBlock {
++    // Observations of a held call that lost its slot before the lead arms;
++    // one that returned unwritten takes kFreeStep back, so a runtime that
++    // does not wait disarms it at once.
++    static constexpr std::uint32_t kLatch = 8;
++    static constexpr std::uint32_t kCeiling = 16;
++    static constexpr std::uint32_t kFreeStep = 8;
++    // A call shorter than this was not held for the output, written or not.
++    static constexpr Nanoseconds kHeldCall = 2 * kMillisecond;
++
++    std::uint32_t score{};
++    bool latched{};
++
++    // `written_at_return`: the output was written when the runtime's
++    // xrEndFrame returned; `call`: how long that call took; `slot_lost`: the
++    // runtime's next wait skipped a display period. True when `latched`
++    // changed.
++    bool observe(bool written_at_return, Nanoseconds call, bool slot_lost) noexcept {
++        const bool before = latched;
++        if (!written_at_return) {
++            score = score > kFreeStep ? score - kFreeStep : 0;
++        } else if (call >= kHeldCall && slot_lost) {
++            score = score < kCeiling ? score + 1 : kCeiling;
++        }
++        if (score >= kLatch) {
++            latched = true;
++        } else if (score == 0) {
++            latched = false;
++        }
++        return latched != before;
++    }
++};
++
++struct LeaderLead {
++    static constexpr std::uint32_t kWindowFrames = 30;
++    // Judged on the window's second-highest lateness (written minus handed
++    // over; negative: written before). Above kRaiseAbove the lead grows by
++    // that lateness, so the next window's is about zero; below kLowerBelow
++    // it gives half of the room back. Between the two it holds: a first
++    // synthetic written up to 2.5 ms after its hand-over keeps the
++    // presenter about 4 ms, well inside its slot.
++    static constexpr Nanoseconds kRaiseAbove = 2'500'000;
++    static constexpr Nanoseconds kLowerBelow = -5 * kMillisecond;
++    // A raise that did not bring the lateness down by half of itself bought
++    // nothing (the frame is bound by something the release does not move):
++    // it is taken back and none is tried for `hold` windows, doubling up to
++    // kMaxHoldWindows while raises keep failing.
++    static constexpr std::uint32_t kBaseHoldWindows = 10;
++    static constexpr std::uint32_t kMaxHoldWindows = 80;
++    // Frames still released under the lead before a step are not judged.
++    static constexpr std::uint32_t kSettleFrames = 3;
++
++    enum class Reason : std::uint32_t {
++        hold = 0,
++        raised = 1,
++        lowered = 2,
++        taken_back = 3,
++        disarmed = 4,
++    };
++    struct Step {
++        bool closed{};
++        bool changed{};
++        Nanoseconds lead{};
++        Nanoseconds high{};
++        Reason reason{Reason::hold};
++    };
++
++    Nanoseconds lead{0};
++    std::array<Nanoseconds, kWindowFrames> window{};
++    std::uint32_t count{};
++    std::uint32_t settle{};
++    std::uint32_t hold{};
++    std::uint32_t backoff{kBaseHoldWindows};
++    // The last raise, until the window after it has judged it.
++    Nanoseconds raise_step{0};
++    Nanoseconds raise_from{0};
++
++    void reset() noexcept { *this = LeaderLead{}; }
++
++    // The most the release can lead by: every presenter frame of the
++    // application frame but one.
++    [[nodiscard]] static constexpr Nanoseconds ceiling(
++        Nanoseconds period, std::uint32_t frames) noexcept {
++        return period > 0 && frames >= 2
++            ? period * static_cast<Nanoseconds>(frames - 1)
++            : 0;
++    }
++
++    // One first synthetic: `lateness` is when it was written less when it
++    // was handed over. `frames`: the most presenter frames an application
++    // frame takes in this shape (2, or 3 under adaptive cadence). Not armed
++    // (HandOverBlock not latched), the lead goes back to zero.
++    Step observe(
++        Nanoseconds lateness,
++        Nanoseconds period,
++        std::uint32_t frames,
++        bool armed) noexcept {
++        Step step{};
++        if (!armed || period <= 0 || frames < 2) {
++            step.changed = lead != 0;
++            step.closed = step.changed;
++            step.reason = Reason::disarmed;
++            reset();
++            return step;
++        }
++        if (settle != 0) {
++            --settle;
++            return step;
++        }
++        window[count++] = lateness;
++        if (count < kWindowFrames) {
++            return step;
++        }
++        count = 0;
++        auto sorted = window;
++        std::sort(sorted.begin(), sorted.end());
++        const Nanoseconds high = sorted[kWindowFrames - 2];
++        const Nanoseconds limit = ceiling(period, frames);
++        const Nanoseconds before = lead;
++        step.closed = true;
++        step.high = high;
++        if (hold != 0) {
++            --hold;
++        }
++        if (raise_step > 0) {
++            // The window after a raise judges it.
++            const bool bought = high <= raise_from - raise_step / 2;
++            const Nanoseconds taken = raise_step;
++            raise_step = 0;
++            if (!bought) {
++                lead = lead > taken ? lead - taken : 0;
++                hold = backoff;
++                backoff = backoff * 2 > kMaxHoldWindows ? kMaxHoldWindows : backoff * 2;
++                step.reason = Reason::taken_back;
++            } else {
++                backoff = kBaseHoldWindows;
++            }
++        }
++        if (step.reason == Reason::hold) {
++            if (high > kRaiseAbove && hold == 0 && lead < limit) {
++                const Nanoseconds raised = lead + high > limit ? limit : lead + high;
++                raise_step = raised - lead;
++                raise_from = high;
++                lead = raised;
++                step.reason = Reason::raised;
++            } else if (high < kLowerBelow && lead > 0) {
++                const Nanoseconds give = -high / 2;
++                lead = lead > give ? lead - give : 0;
++                step.reason = Reason::lowered;
++            }
++        }
++        if (lead > limit) {
++            lead = limit;
++        }
++        step.lead = lead;
++        step.changed = lead != before;
++        if (step.changed) {
++            settle = kSettleFrames;
++        }
++        return step;
++    }
++};
++
++// What a lead does to the once-per-pair hold: `turns` presenter frames it no
++// longer waits for, and `delay` after the last one it does wait for (the
++// release offset in force less the lead, carried into those frames). No
++// lead, or a frame of one presenter frame: the offset, as before.
++struct LeaderLeadRelease {
++    std::uint32_t turns{};
++    Nanoseconds delay{};
++};
++[[nodiscard]] constexpr LeaderLeadRelease leader_lead_release(
++    Nanoseconds lead,
++    Nanoseconds offset,
++    Nanoseconds period,
++    std::uint32_t frames) noexcept {
++    if (offset < 0) {
++        offset = 0;
++    }
++    if (lead <= 0 || period <= 0 || frames < 2) {
++        return LeaderLeadRelease{0, offset};
++    }
++    if (lead <= offset) {
++        return LeaderLeadRelease{0, offset - lead};
++    }
++    const Nanoseconds over = lead - offset;
++    const Nanoseconds turns = (over + period - 1) / period;
++    const Nanoseconds most = static_cast<Nanoseconds>(frames - 1);
++    if (turns > most) {
++        return LeaderLeadRelease{static_cast<std::uint32_t>(most), 0};
++    }
++    return LeaderLeadRelease{static_cast<std::uint32_t>(turns), turns * period - over};
++}
++
+ } // namespace xrfg::latency
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -323,6 +323,11 @@ bool read_own_binding_queue(const std::filesystem::path& module_directory) noexc
+     return read_ofxr_switch(module_directory, L"own_binding_queue", true);
+ }
+ 
++// DCS Control (0078).
++bool read_leader_lead(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"leader_lead", true);
++}
++
+ bool read_diag_vram(const std::filesystem::path& module_directory) noexcept {
+     return read_ofxr_switch(module_directory, L"diag_vram", false);
+ }
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1763,6 +1763,29 @@ struct SessionState {
+     // Off SteamVR: a real frame has gone out in 3X, so the next slot is due
+     // a first synthetic and is judged.
+     bool triple_leader_due{};
++    // DCS Control (0078): the first synthetic on a runtime whose xrEndFrame
++    // waits for its output (xrfg::latency::HandOverBlock, LeaderLead; GitHub
++    // #23). `leader_lead_enabled`: `[ofxr] leader_lead`, off SteamVR, read
++    // at the session's creation; it acts at the shallow depth in 2X's shape
++    // only (adaptive cadence's 2 and 3 included). The detector, the lead
++    // and the hand-overs waiting for their output's time are guarded by
++    // presenter_mutex; `leader_lead_armed` mirrors the detector's latch for
++    // the application's thread, which then gives each frame's first
++    // synthetic a LeadReadiness for the readiness probe to stamp. The three
++    // `leader_block_*` are the presenter thread's own: the hand-over it just
++    // made, judged when the runtime's next wait returns.
++    bool leader_lead_enabled{};
++    xrfg::latency::HandOverBlock hand_over_block;
++    xrfg::latency::LeaderLead leader_lead;
++    std::atomic<bool> leader_lead_armed{false};
++    struct LeaderHandOver {
++        std::shared_ptr<LeadReadiness> lead;
++        xrfg::latency::Nanoseconds handed_ns{};
++    };
++    std::deque<LeaderHandOver> leader_hand_overs;
++    bool leader_block_pending{};
++    bool leader_block_written{};
++    xrfg::latency::Nanoseconds leader_block_call{};
+     // DCS VR Control: the display time the application is told under the
+     // presenter, moved to name the scanout its real frame lands on; see
+     // xrfg::latency::DisplayTimeCorrector. Fed by the presenter with every
+@@ -6202,6 +6225,9 @@ XrResult layer_create_session_impl(
+     state->two_slot_synthetic_ring =
+         state->deep_pipeline || state->frames_per_application_frame > 2 ||
+         (adaptive_requested && triple_binding);
++    // DCS Control (0078): see SessionState::leader_lead_enabled.
++    state->leader_lead_enabled = !dispatch->steamvr_runtime &&
++        xrfg::implicit_layer::read_leader_lead(current_layer_directory());
+     // DCS Control (0034): adaptive at the shallow depth, starting in 2X, on a
+     // D3D12 binding: the second slot waits for its first need.
+     state->lazy_second_synthetic = state->two_slot_synthetic_ring &&
+@@ -10234,9 +10260,62 @@ void continuous_presenter_main(
+         XrDuration period_rise_from = 0;
+         XrDuration period_rise_to = 0;
+         bool period_rise_measured = false;
++        // DCS Control (0078): the runtime's latch changed (HandOverBlock),
++        // recorded after the lock (presenter_transition 410).
++        bool block_latch_changed = false;
++        bool block_latched = false;
++        std::uint32_t block_score = 0;
++        xrfg::latency::Nanoseconds block_call = 0;
+ 
+         {
+             std::scoped_lock lock(state->presenter_mutex);
++            // DCS Control (0078): the first synthetic handed over unwritten
++            // in the cycle before this one, judged now that the runtime's
++            // next wait says whether its slot was lost: its predicted
++            // display time more than a period on, as cadence_skipped below,
++            // with or without adaptive cadence.
++            if (state->leader_block_pending) {
++                state->leader_block_pending = false;
++                bool slot_lost = false;
++                if (state->presenter_last_predicted_valid &&
++                    state->presenter_display_period > 0 &&
++                    frame_state.predictedDisplayTime >
++                        state->presenter_last_predicted_display) {
++                    const XrDuration period = state->presenter_display_period;
++                    const XrDuration advance = frame_state.predictedDisplayTime -
++                        state->presenter_last_predicted_display;
++                    slot_lost = advance < period * 8 &&
++                        (advance + period / 2) / period > 1;
++                }
++                block_latch_changed = state->hand_over_block.observe(
++                    state->leader_block_written,
++                    state->leader_block_call,
++                    slot_lost);
++                block_latched = state->hand_over_block.latched;
++                block_score = state->hand_over_block.score;
++                block_call = state->leader_block_call;
++                state->leader_lead_armed.store(
++                    block_latched, std::memory_order_relaxed);
++                // And, armed, a slot lost behind a held first synthetic is
++                // a slot its frame missed, for adaptive control - in 2X's
++                // shape only, as every other missed slot (below). The rule
++                // of 0009 cannot see it on this runtime: it asks at the
++                // next slot whether the output is written yet, and here the
++                // next slot only comes once it is. A live flight (run 2a,
++                // 2026-11-15, the lead in force): 30 fps at cadence 3 with
++                // no slot lost, but at cadence 2, where the frame took 30 ms
++                // from its release to its output and the most the lead can
++                // give is about that, a slot was lost on a quarter of the
++                // frames while 165 of 177 seconds counted none missed, and
++                // cadence 2 was kept a third of the flight at 33-39 fps.
++                if (block_latched && slot_lost && state->leader_block_written &&
++                    state->leader_block_call >=
++                        xrfg::latency::HandOverBlock::kHeldCall &&
++                    state->adaptive_active.load() &&
++                    state->frames_per_application_frame == 2) {
++                    state->adaptive_missed_slots.fetch_add(1);
++                }
++            }
+             // DCS Control (0032): a slot the runtime went past - its
+             // predicted display time advancing by more than a period, judged
+             // on the display's own - puts every frame still to go out a slot
+@@ -10394,6 +10473,21 @@ void continuous_presenter_main(
+                 static_cast<std::uint64_t>(period_rise_to / 1000),
+                 period_rise_measured ? 1U : 0U);
+         }
++        // DCS Control (0078): presenter_transition 410, the runtime's
++        // xrEndFrame found to wait for a first synthetic's output and lose
++        // its slot (b=1; the lead arms), or to return before it is written
++        // after all (b=0; the lead goes back to zero). a the detector's
++        // score, c the call that decided it (us). See
++        // xrfg::latency::HandOverBlock.
++        if (block_latch_changed) {
++            xrfg::bridge_flight_logger().event(
++                xrfg::BridgeFlightOperation::presenter_transition,
++                410,
++                block_score,
++                block_latched ? 1U : 0U,
++                static_cast<std::uint64_t>(
++                    std::max<xrfg::latency::Nanoseconds>(0, block_call) / 1000));
++        }
+         if (cadence_skipped != 0) {
+             state->cadence_slip.fetch_add(cadence_skipped);
+             if (state->adaptive_active.load() &&
+@@ -10610,6 +10704,12 @@ void continuous_presenter_main(
+         bool gen1_slot = false;
+         bool skip_slot = false;
+         bool skip_would_be_ready = false;
++        // DCS Control (0078): this cycle hands a first synthetic over
++        // unwritten where the lead may act (judged after the runtime's
++        // xrEndFrame and its next wait), and a window of the lead that
++        // closed, recorded after the lock (presenter_transition 411).
++        bool leader_handed_unwritten = false;
++        xrfg::latency::LeaderLead::Step lead_step{};
+         // DCS VR Control (0007): this slot is the 3X deeper pipeline's one
+         // re-presented slot.
+         bool depth_slot = false;
+@@ -10944,6 +11044,28 @@ void continuous_presenter_main(
+                             request->owned_frame->leads_frame;
+                         const bool leader_written = leader &&
+                             synthetic_output_ready(*request->owned_frame);
++                        // DCS Control (0078): at the shallow depth in 2X's
++                        // shape, off SteamVR. Unwritten, what the runtime's
++                        // xrEndFrame does with it is evidence
++                        // (HandOverBlock); and once the lead is armed the
++                        // frame carries a LeadReadiness, whose time against
++                        // this hand-over is the lead's sample.
++                        if (leader && state->leader_lead_enabled &&
++                            !state->deep_pipeline &&
++                            state->frames_per_application_frame == 2) {
++                            leader_handed_unwritten = !leader_written;
++                            if (request->owned_frame->lead_readiness) {
++                                state->leader_hand_overs.push_back(
++                                    SessionState::LeaderHandOver{
++                                        request->owned_frame->lead_readiness,
++                                        steady_nanoseconds(pop_now)});
++                                // Never more than a few: one a frame, taken
++                                // off as its output's time arrives.
++                                while (state->leader_hand_overs.size() > 8) {
++                                    state->leader_hand_overs.pop_front();
++                                }
++                            }
++                        }
+                         // A first synthetic handed over unwritten: the
+                         // runtime may still see it in time, but it is the
+                         // application's frame arriving late all the same.
+@@ -11136,6 +11258,51 @@ void continuous_presenter_main(
+                     !state->dispatch->steamvr_runtime) {
+                     drain_triple_slack(*state, &release_report);
+                 }
++                // DCS Control (0078): the first synthetics handed over whose
++                // output's time has arrived since (the readiness probe's
++                // thread stamps it), each one sample of the lead: written
++                // less handed over. One whose output never came (the probe
++                // gives a frame up after a second) is dropped.
++                if (state->leader_lead_enabled) {
++                    const bool armed = state->hand_over_block.latched &&
++                        !state->deep_pipeline &&
++                        state->frames_per_application_frame == 2;
++                    const auto period = static_cast<xrfg::latency::Nanoseconds>(
++                        state->presenter_display_period);
++                    const std::uint32_t most_frames =
++                        state->cadence_running.load(std::memory_order_relaxed)
++                            ? 3U
++                            : 2U;
++                    const xrfg::latency::Nanoseconds now_ns =
++                        steady_nanoseconds(pop_now);
++                    while (!state->leader_hand_overs.empty()) {
++                        const auto& handed = state->leader_hand_overs.front();
++                        const std::int64_t ready = handed.lead
++                            ? handed.lead->ready_ns.load()
++                            : -1;
++                        if (ready >= 0) {
++                            const auto step = state->leader_lead.observe(
++                                ready - handed.handed_ns,
++                                period,
++                                most_frames,
++                                armed);
++                            if (step.closed) {
++                                lead_step = step;
++                            }
++                        } else if (handed.lead &&
++                                   now_ns - handed.handed_ns <
++                                       xrfg::latency::kSecond) {
++                            break;
++                        }
++                        state->leader_hand_overs.pop_front();
++                    }
++                    // Disarmed (the runtime returned before the output was
++                    // written after all, or the shape changed) with a lead
++                    // still in force and no frame left to say so.
++                    if (!armed && state->leader_lead.lead != 0) {
++                        lead_step = state->leader_lead.observe(0, 0, 0, false);
++                    }
++                }
+             }
+             // Fed to adaptive control in 2X only. In 3X a missed slot is the
+             // release delay probing its ceiling (see triple_release) far more
+@@ -11242,6 +11409,20 @@ void continuous_presenter_main(
+             // second (a period old or more and still not written), handed
+             // over anyway. Same a, b, c.
+             log_triple_release(release_report);
++            // DCS Control (0078): result=411, a window of the lead closed
++            // (thirty first synthetics): a= the lead now in force (us), b=
++            // the window's second-highest lateness, written less handed
++            // over (us, signed: two's complement), c= what it did
++            // (xrfg::latency::LeaderLead::Reason: 0 held, 1 raised, 2
++            // lowered, 3 a raise taken back, 4 disarmed).
++            if (lead_step.closed) {
++                xrfg::bridge_flight_logger().event(
++                    xrfg::BridgeFlightOperation::presenter_transition,
++                    411,
++                    static_cast<std::uint64_t>(lead_step.lead / 1000),
++                    static_cast<std::uint64_t>(lead_step.high / 1000),
++                    static_cast<std::uint64_t>(lead_step.reason));
++            }
+             // DCS VR Control (0007): result=403, a slot the 3X deeper
+             // pipeline re-presented to deepen itself. a= the slots now in
+             // force in this shape (1, then 2 at most), b= the display period
+@@ -11583,6 +11764,20 @@ void continuous_presenter_main(
+             });
+             state->presenter_last_end_returned_at =
+                 std::chrono::steady_clock::now();
++            // DCS Control (0078): a first synthetic went down unwritten.
++            // Whether the runtime kept the call until its output was
++            // written, and for how long, is judged with the next wait
++            // (HandOverBlock): this thread's own state, no lock.
++            if (leader_handed_unwritten && request && request->owned_frame &&
++                XR_SUCCEEDED(end_result)) {
++                state->leader_block_pending = true;
++                state->leader_block_written =
++                    synthetic_output_ready(*request->owned_frame);
++                state->leader_block_call = std::chrono::duration_cast<
++                    std::chrono::nanoseconds>(
++                        state->presenter_last_end_returned_at -
++                        downstream_end_started).count();
++            }
+             // The synthetic has reached the runtime, so its current copy can
+             // go to the queue now rather than ahead of it. It has a display
+             // period before the current frame that reads it is submitted.
+@@ -12650,6 +12845,12 @@ void reset_triple_state_locked(SessionState& state) noexcept {
+     state.late_skip_active = false;
+     state.presenter_skip_slot_consumed = false;
+     state.unwritten_leader_ready.clear();
++    // DCS Control (0078): the hand-overs still waiting for their output's
++    // time and the window they were going into are the old scene's. The
++    // lead itself and the runtime's latch stay: the runtime is the same
++    // one, and the lead follows the new scene's lateness in a window.
++    state.leader_hand_overs.clear();
++    state.leader_lead.count = 0;
+ }
+ 
+ [[nodiscard]] bool start_continuous_presenter(
+@@ -12868,6 +13069,31 @@ void stop_continuous_presenter(
+             : state->frames_per_application_frame.load();
+         const auto entered = std::chrono::steady_clock::now();
+         std::unique_lock lock(state->presenter_mutex);
++        // DCS Control (0078): the lead (xrfg::latency::LeaderLead), where
++        // the runtime's xrEndFrame waits for a first synthetic's output: the
++        // release comes that much sooner - `lead.turns` presenter frames
++        // this hold does not wait for, then `lead.delay` instead of the
++        // release offset. Only the hold after the hand-over, at the shallow
++        // depth in 2X's shape (2X's own offset is what it is taken from),
++        // off SteamVR; zero everywhere else, and the hold is as it was.
++        // Taken once, here: the lead may step while this waits, and the
++        // next hold has it.
++        xrfg::latency::LeaderLeadRelease lead{};
++        bool lead_active = false;
++        if (after_hand_over && state->leader_lead_enabled &&
++            !state->deep_pipeline && kPresenterFramesPerPair >= 2 &&
++            state->frames_per_application_frame == 2 &&
++            !state->dispatch->steamvr_runtime &&
++            state->presenter_display_period > 0 &&
++            state->hand_over_block.latched && state->leader_lead.lead > 0) {
++            lead = xrfg::latency::leader_lead_release(
++                state->leader_lead.lead,
++                state->application_release_offset.count(),
++                static_cast<xrfg::latency::Nanoseconds>(
++                    state->presenter_display_period),
++                static_cast<std::uint32_t>(kPresenterFramesPerPair));
++            lead_active = true;
++        }
+         // DCS Control (0029): bounded; past the bound the application goes
+         // on (see xrfg::latency::GenerationStall).
+         bool stall_tripped = false;
+@@ -12890,7 +13116,8 @@ void stop_continuous_presenter(
+                 state->presenter_submissions.empty() &&
+                 (after_hand_over ? hold_repeat_locked(*state)
+                                  : state->presenter_last_frame) == nullptr;
+-            return state->presenter_frame_serial >=
++            // DCS Control (0078): `lead.turns` of them not waited for.
++            return state->presenter_frame_serial + lead.turns >=
+                        state->application_served_serial +
+                            kPresenterFramesPerPair ||
+                    presenter_starved ||
+@@ -12917,19 +13144,32 @@ void stop_continuous_presenter(
+         // whatever it blocks on next, which is the frame-start synthesis
+         // fence, and that one meters nothing.
+         const std::uint64_t served = state->application_served_serial;
+-        const std::uint64_t reached = state->presenter_frame_serial;
++        // DCS Control (0078): counted as if the presenter frames the lead
++        // did not wait for had gone by: the next hold then lasts the
++        // frame's own count again from this release, and a lead that
++        // steps moves one release by the difference, once.
++        const std::uint64_t reached = state->presenter_frame_serial + lead.turns;
+         const std::uint64_t surplus =
+             reached > served + kPresenterFramesPerPair
+             ? reached - served - kPresenterFramesPerPair
+             : 0;
+         state->application_served_serial = reached;
+         if (state->presenter_frame_state_valid) {
+-            state->application_release_display_time =
+-                state->presenter_frame_state.predictedDisplayTime;
+-            state->application_release_serial = reached;
++            // DCS Control (0078): the frame lands where it would have
++            // without the lead (the queue is first in, first out), which is
++            // `lead.turns` periods further from this release: the anchor
++            // the told time's estimate is counted from moves with it, and
++            // stays this release's for as many presenter frames more.
++            state->application_release_display_time = lead.turns == 0
++                ? state->presenter_frame_state.predictedDisplayTime
++                : add_display_duration(
++                      state->presenter_frame_state.predictedDisplayTime,
++                      static_cast<XrDuration>(lead.turns) *
++                          state->presenter_display_period);
++            state->application_release_serial = state->presenter_frame_serial;
+             // DCS Control (0032): and how long this hold lasts.
+             state->application_release_frames =
+-                static_cast<std::uint32_t>(kPresenterFramesPerPair);
++                static_cast<std::uint32_t>(kPresenterFramesPerPair) + lead.turns;
+         }
+         // Keep the application's completion off the pop boundary; see
+         // application_completion_phase. The step is decided here, under the
+@@ -12950,7 +13190,13 @@ void stop_continuous_presenter(
+             const auto period = std::chrono::nanoseconds(
+                 static_cast<std::int64_t>(state->presenter_display_period));
+             auto& ring = state->application_completion_phase;
+-            if (state->application_completion_samples >= ring.size()) {
++            // DCS Control (0078): not while the lead is in force. The
++            // application then completes with the real frame before its own
++            // still queued, so where that falls against the pop is no
++            // longer what decides its frame's slot, and a step here would
++            // move the very lateness the lead is steering on.
++            if (!lead_active &&
++                state->application_completion_samples >= ring.size()) {
+                 auto sorted = ring;
+                 std::sort(sorted.begin(), sorted.end());
+                 const auto median = sorted[sorted.size() / 2];
+@@ -12992,6 +13238,10 @@ void stop_continuous_presenter(
+                 }
+             }
+             release_offset = state->application_release_offset;
++            // DCS Control (0078): what is left of it under the lead.
++            if (lead_active) {
++                release_offset = std::chrono::nanoseconds(lead.delay);
++            }
+         }
+         // Never record under presenter_mutex: the presenter thread takes it
+         // every frame, and this path has deadlocked the layer twice.
+@@ -18210,7 +18460,17 @@ XrResult layer_end_frame_impl(
+             // the probe whether or not adaptive control is on.
+             const bool triple_slack = state->frames_per_application_frame > 2 &&
+                 !state->dispatch->steamvr_runtime;
+-            if (triple_slack && !state->readiness_probe) {
++            // DCS Control (0078): and at the shallow depth in 2X's shape,
++            // once the runtime is seen to wait for a first synthetic's
++            // output (HandOverBlock), the lead needs the same moment. Only
++            // ready_ns is used: the presenter keeps the hand-over's own time
++            // (SessionState::leader_hand_overs), so nothing reaches the 3X
++            // slack sink.
++            const bool leader_lead = !triple_slack &&
++                state->leader_lead_enabled && !state->deep_pipeline &&
++                state->frames_per_application_frame == 2 &&
++                state->leader_lead_armed.load(std::memory_order_relaxed);
++            if ((triple_slack || leader_lead) && !state->readiness_probe) {
+                 state->readiness_probe = std::make_unique<ReadinessProbe>(
+                     state->adaptive_mutex, state->adaptive_controller,
+                     state->triple_slack_sink);
+@@ -18228,7 +18488,7 @@ XrResult layer_end_frame_impl(
+                 readiness.released_at = state->application_released_at;
+                 // DCS VR Control (0006): not for a frame made under the
+                 // late-frame skip, whose synthetic is not the first.
+-                if (triple_slack && !readiness.fences.empty() &&
++                if ((triple_slack || leader_lead) && !readiness.fences.empty() &&
+                     !presenter_first_frame->skip_led) {
+                     auto lead = std::make_shared<LeadReadiness>();
+                     lead->epoch = state->triple_release_epoch.load();
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -4067,6 +4067,522 @@ void cadence_review_fixes_tests() {
+     }
+ }
+ 
++// DCS Control (0078): the first synthetic on a runtime whose xrEndFrame
++// waits for its output (GitHub #23). Numbers from the live flight of
++// 2026-11-15 at 90 Hz: cadence 3, the output written 13.5-16.7 ms after its
++// hand-over, the runtime's call returning 1.3 ms after that and its next
++// wait a period late; and the same runtime with two views, returning in
++// 0.3 ms before the output was written.
++void leader_lead_tests() {
++    using xrfg::latency::HandOverBlock;
++    using xrfg::latency::LeaderLead;
++    using xrfg::latency::leader_lead_release;
++    using xrfg::latency::kMillisecond;
++    using xrfg::latency::Nanoseconds;
++    const Nanoseconds period = 11'111'128;
++    {
++        // The runtime's own quad views: every hand-over held until written,
++        // every one a slot lost. Armed after kLatch of them, not before.
++        HandOverBlock block{};
++        for (std::uint32_t i = 0; i + 1 < HandOverBlock::kLatch; ++i) {
++            require(!block.observe(true, 16 * kMillisecond, true) && !block.latched,
++                "hand-over block: not armed before its count");
++        }
++        require(block.observe(true, 16 * kMillisecond, true) && block.latched,
++            "hand-over block: armed on held calls that lost their slots");
++        // A held call that kept its slot, or a short one, says nothing.
++        require(!block.observe(true, 5 * kMillisecond, false) && block.latched,
++            "hand-over block: a held call in its slot changes nothing");
++        // One hand-over returned unwritten takes kFreeStep back; the score
++        // is at kLatch + 0, so it disarms at once.
++        require(block.observe(false, 300'000, false) && !block.latched,
++            "hand-over block: a call returned before the output disarms it");
++    }
++    {
++        // The bundled Quad Views on the same runtime: 0.3 ms calls, the
++        // output written later, a slot lost now and then for other reasons.
++        HandOverBlock block{};
++        for (int i = 0; i < 10'000; ++i) {
++            const bool slot_lost = i % 400 == 0;
++            // One in fifty happens to be written by the time the call is back.
++            const bool written = i % 50 == 0;
++            require(!block.observe(written, 300'000, slot_lost) && !block.latched,
++                "hand-over block: a runtime that does not wait never arms");
++        }
++        // Nor a long call that lost its slot while the output was unwritten
++        // (a stall of the runtime's own).
++        for (int i = 0; i < 100; ++i) {
++            require(!block.observe(false, 20 * kMillisecond, true),
++                "hand-over block: a long call with the output unwritten is not a wait for it");
++        }
++        // Nor held calls that lose a slot now and then between free ones.
++        for (int i = 0; i < 1'000; ++i) {
++            block.observe(i % 4 == 0, 12 * kMillisecond, i % 4 == 0);
++            require(!block.latched, "hand-over block: mixed evidence does not arm");
++        }
++    }
++    {
++        // The release: no lead, the offset as it was.
++        auto release = leader_lead_release(0, 6'600'000, period, 3);
++        require(release.turns == 0 && release.delay == 6'600'000,
++            "lead release: no lead leaves the offset");
++        // A lead inside the offset shortens it.
++        release = leader_lead_release(4 * kMillisecond, 6'600'000, period, 3);
++        require(release.turns == 0 && release.delay == 2'600'000,
++            "lead release: a small lead is taken from the offset");
++        // The live case: 20 ms at cadence 3 with 6.6 ms of offset is two
++        // presenter frames less 8.8 ms.
++        release = leader_lead_release(20 * kMillisecond, 6'600'000, period, 3);
++        require(release.turns == 2 && release.delay == 2 * period - 13'400'000,
++            "lead release: carried into the presenter frames before");
++        // The same lead at cadence 2 has one presenter frame to take.
++        release = leader_lead_release(20 * kMillisecond, 6'600'000, period, 2);
++        require(release.turns == 1 && release.delay == 0,
++            "lead release: never the whole of the application frame");
++        // 1X has none, and a period not known yet changes nothing.
++        release = leader_lead_release(20 * kMillisecond, 6'600'000, period, 1);
++        require(release.turns == 0 && release.delay == 6'600'000,
++            "lead release: nothing at one presenter frame a frame");
++        release = leader_lead_release(20 * kMillisecond, 6'600'000, 0, 3);
++        require(release.turns == 0 && release.delay == 6'600'000,
++            "lead release: nothing without a period");
++        // The moment of the release moves by exactly the lead.
++        for (Nanoseconds lead = 0; lead <= 2 * period; lead += 137'000) {
++            const auto r = leader_lead_release(lead, 6'600'000, period, 3);
++            const Nanoseconds moved =
++                6'600'000 - (r.delay - static_cast<Nanoseconds>(r.turns) * period);
++            require(moved == lead && r.delay >= 0 && r.delay < period + 6'600'000,
++                "lead release: the release moves by the lead");
++        }
++    }
++    {
++        // Not armed: nothing, however late.
++        LeaderLead lead{};
++        for (int i = 0; i < 200; ++i) {
++            const auto step = lead.observe(15 * kMillisecond, period, 3, false);
++            require(!step.closed && lead.lead == 0, "lead: not armed, no lead");
++        }
++    }
++    {
++        // A simulated frame: its first synthetic is written `base` after its
++        // hand-over with no lead, less the lead (the release moves the whole
++        // frame), with the live flight's spread.
++        const auto run = [&](LeaderLead& lead, Nanoseconds base, int frames,
++                             std::uint32_t shape, Nanoseconds floor_lateness,
++                             int* raises, int* taken_back, Nanoseconds* worst_after) {
++            Nanoseconds applied = lead.lead;
++            int settle = 0;
++            for (int i = 0; i < frames; ++i) {
++                const Nanoseconds jitter = ((i * 7919) % 3200 - 1600) * 1000;
++                Nanoseconds lateness = base - applied + jitter;
++                if (lateness < floor_lateness) {
++                    lateness = floor_lateness + jitter;
++                }
++                const auto step = lead.observe(lateness, period, shape, true);
++                if (step.closed && step.reason == LeaderLead::Reason::raised && raises) {
++                    ++*raises;
++                }
++                if (step.closed && step.reason == LeaderLead::Reason::taken_back && taken_back) {
++                    ++*taken_back;
++                }
++                if (step.changed) {
++                    applied = lead.lead;
++                    settle = 2;
++                } else if (settle > 0) {
++                    --settle;
++                } else if (worst_after != nullptr && i > 120) {
++                    *worst_after = std::max(*worst_after, lateness);
++                }
++            }
++        };
++        // The live lock: 15 ms late at cadence 3. One window, one raise, and
++        // from then on written within 2.5 ms of its hand-over.
++        LeaderLead lead{};
++        int raises = 0;
++        int taken_back = 0;
++        Nanoseconds worst = -100 * kMillisecond;
++        run(lead, 15 * kMillisecond, 900, 3, -100 * kMillisecond, &raises, &taken_back, &worst);
++        require(raises == 1 && taken_back == 0, "lead: one raise settles the live case");
++        require(lead.lead >= 14 * kMillisecond && lead.lead <= 18 * kMillisecond,
++            "lead: about what the output was late");
++        require(worst <= LeaderLead::kRaiseAbove, "lead: written by its hand-over from then on");
++        // The scene gets lighter by 12 ms: the lead comes back down, in
++        // halves, and never below what keeps the output written in time.
++        const Nanoseconds before = lead.lead;
++        worst = -100 * kMillisecond;
++        run(lead, 3 * kMillisecond, 1'500, 3, -100 * kMillisecond, nullptr, nullptr, &worst);
++        require(lead.lead < before - 6 * kMillisecond && lead.lead >= 0,
++            "lead: given back when the scene is lighter");
++        require(worst <= LeaderLead::kRaiseAbove, "lead: never lowered into lateness");
++        // And all the way to zero when nothing is late any more.
++        run(lead, -20 * kMillisecond, 3'000, 3, -100 * kMillisecond, nullptr, nullptr, nullptr);
++        require(lead.lead == 0, "lead: back to zero with room to spare");
++    }
++    {
++        // Lateness the release does not move (the frame is bound by
++        // something else): the raise is taken back and not tried again for
++        // the hold, which doubles.
++        LeaderLead lead{};
++        int raises = 0;
++        int taken_back = 0;
++        for (int i = 0; i < 30 * 45; ++i) {
++            const auto step = lead.observe(9 * kMillisecond, period, 3, true);
++            if (step.closed && step.reason == LeaderLead::Reason::raised) {
++                ++raises;
++            }
++            if (step.closed && step.reason == LeaderLead::Reason::taken_back) {
++                ++taken_back;
++                require(lead.lead == 0, "lead: a raise that bought nothing is taken back");
++            }
++        }
++        // 45 windows less the settling frames: raise, take back, hold 10,
++        // raise, take back, hold 20: two raises, at most three.
++        require(raises >= 2 && raises <= 3 && taken_back >= 2 && taken_back == raises - (lead.raise_step > 0 ? 1 : 0),
++            "lead: raises that buy nothing back off");
++    }
++    {
++        // The ceiling: every presenter frame of the application frame but
++        // one. 30 ms late at cadence 2's shape cannot be led past a period.
++        LeaderLead lead{};
++        for (int i = 0; i < 300; ++i) {
++            lead.observe(30 * kMillisecond, period, 2, true);
++            require(lead.lead <= period, "lead: never past its ceiling");
++        }
++        require(LeaderLead::ceiling(period, 3) == 2 * period &&
++                LeaderLead::ceiling(period, 2) == period &&
++                LeaderLead::ceiling(period, 1) == 0,
++            "lead: the ceiling by shape");
++        // Disarmed: back to zero at once, reported once.
++        LeaderLead armed{};
++        for (int i = 0; i < 40; ++i) {
++            armed.observe(15 * kMillisecond, period, 3, true);
++        }
++        require(armed.lead > 0, "lead: raised before the disarm");
++        const auto off = armed.observe(0, 0, 0, false);
++        require(off.closed && off.changed && off.reason == LeaderLead::Reason::disarmed &&
++                armed.lead == 0,
++            "lead: disarmed, back to zero");
++        require(!armed.observe(0, 0, 0, false).closed, "lead: the disarm is reported once");
++    }
++    {
++        // One slow frame a window (a hitch) moves nothing: the judgment is
++        // on the second-highest.
++        LeaderLead lead{};
++        for (int i = 0; i < 600; ++i) {
++            lead.observe(i % 30 == 7 ? 25 * kMillisecond : -1 * kMillisecond, period, 3, true);
++        }
++        require(lead.lead == 0, "lead: one late frame a window raises nothing");
++    }
++}
++
++// DCS Control (0078): the loop closed, on a model of the layer's pacing in
++// 2X's shape at the shallow depth. Nothing here is the layer's code but the
++// three pieces under test (HandOverBlock, LeaderLead, leader_lead_release);
++// the rest restates, in steps of 50 us, what the live flight of 2026-11-15
++// measured and what openxr_layer.cpp does around them:
++//   the runtime    its wait returns on a grid of display periods, at the
++//                  next point after it is called; its xrEndFrame takes
++//                  0.3 ms, or - a runtime that waits - returns 1.3 ms after
++//                  the submission's output is written
++//   the presenter  one submission a wait, first in first out, 0.3 ms after
++//                  the wait returns, or when the application queues one
++//   the application  `cpu` from its release to its xrEndFrame; its rendering
++//                  is done on the GPU `gpu` later and synthesis `synth`
++//                  after that; admitted once only one submission is
++//                  outstanding; then held until the presenter has run its
++//                  frame's count since the last release, less the lead's
++//                  turns, plus the delay - or at once when the presenter has
++//                  nothing left queued (presenter_starved)
++// With the flight's numbers (90 Hz, cadence 3, 8 ms of CPU, 14.7 ms of
++// rendering, 7.2 ms of synthesis, a release offset of 6.6 ms) the model
++// without the lead reproduces the lock - four periods a frame, the first
++// synthetic written about 14 ms after its hand-over, a slot lost every
++// frame - which is what makes its answer with the lead worth having.
++struct LeadModelResult {
++    double early_periods{};   // mean periods per frame, 0.3-1.0 s
++    double late_periods{};    // mean periods per frame, the last 5 s
++    int late_lost{};          // slots lost in the last 5 s
++    double early_lateness_ms{}; // mean first-synthetic lateness, 0.3-1.0 s
++    double late_lateness_ms{};  // worst in the last 5 s
++    bool latched{};
++    bool ever_latched{};
++    xrfg::latency::Nanoseconds lead{};
++    int raises{};
++};
++
++LeadModelResult run_lead_model(
++    std::uint32_t frames,
++    xrfg::latency::Nanoseconds cpu,
++    xrfg::latency::Nanoseconds gpu,
++    xrfg::latency::Nanoseconds synth,
++    bool runtime_waits,
++    bool lead_enabled,
++    xrfg::latency::Nanoseconds lighter_after = 0,
++    xrfg::latency::Nanoseconds lighter_gpu = 0) {
++    using xrfg::latency::Nanoseconds;
++    using xrfg::latency::kMillisecond;
++    using xrfg::latency::kSecond;
++    const Nanoseconds period = 11'111'128;
++    const Nanoseconds offset = 6'600'000;
++    const Nanoseconds step_ns = 50'000;
++    const Nanoseconds total = 20 * kSecond;
++    struct Submission {
++        bool synthetic{};
++        bool leader{};
++        Nanoseconds written{};
++    };
++    std::deque<Submission> queue;
++    int in_flight = 0;
++    std::uint64_t serial = 0;
++    std::uint64_t served = 0;
++    xrfg::latency::HandOverBlock block{};
++    xrfg::latency::LeaderLead lead{};
++    LeadModelResult result{};
++
++    enum class Presenter { waiting, ready, ending } presenter = Presenter::ready;
++    Nanoseconds presenter_until = 0;
++    Nanoseconds ready_at = 0;
++    Nanoseconds wait_returned = 0;
++    Nanoseconds previous_wait_returned = -1;
++    Nanoseconds handed = 0;
++    Submission current{};
++    bool leader_unwritten = false;
++    bool evidence_pending = false;
++    bool evidence_written = false;
++    Nanoseconds evidence_call = 0;
++
++    enum class Application { cpu, admission, capacity, hold, delay } application = Application::cpu;
++    Nanoseconds application_until = cpu;
++    Nanoseconds gpu_free = 0;
++    Nanoseconds render_done = 0;
++    xrfg::latency::LeaderLeadRelease release{0, offset};
++    // The phase the flight ran in: the application is released while the
++    // real frame before its own is still queued (its xrEndFrame came 3.8 ms
++    // after that frame was taken, its first synthetic went out the slot
++    // after). The hold keeps whatever phase it is given - it counts
++    // presenter frames from the last release - so the model is put there
++    // once: a first real frame already queued (the prime), and one
++    // presenter frame the first hold does not wait for.
++    std::uint64_t phase_credit = 1;
++    queue.push_back(Submission{false, false, 0});
++
++    std::vector<Nanoseconds> real_pops;
++    std::vector<Nanoseconds> lost_at;
++    double early_lateness = 0.0;
++    int early_lateness_count = 0;
++    double late_lateness = -1.0e9;
++
++    for (Nanoseconds now = 0; now < total; now += step_ns) {
++        const Nanoseconds gpu_now = lighter_after != 0 && now >= lighter_after ? lighter_gpu : gpu;
++        // The presenter.
++        if (presenter == Presenter::waiting && now >= presenter_until) {
++            wait_returned = presenter_until;
++            ++serial;
++            const bool slot_lost = previous_wait_returned >= 0 &&
++                wait_returned - previous_wait_returned > period * 3 / 2;
++            if (slot_lost) {
++                lost_at.push_back(wait_returned);
++            }
++            if (evidence_pending) {
++                evidence_pending = false;
++                block.observe(evidence_written, evidence_call, slot_lost);
++                result.ever_latched = result.ever_latched || block.latched;
++            }
++            previous_wait_returned = wait_returned;
++            ready_at = wait_returned + 300'000;
++            presenter = Presenter::ready;
++        }
++        if (presenter == Presenter::ready && now >= ready_at && !queue.empty()) {
++            current = queue.front();
++            queue.pop_front();
++            in_flight = 1;
++            handed = now;
++            leader_unwritten = current.leader && current.written > now;
++            if (current.leader) {
++                const Nanoseconds lateness = current.written - handed;
++                if (now >= 300 * kMillisecond && now < kSecond) {
++                    early_lateness += static_cast<double>(lateness) / 1.0e6;
++                    ++early_lateness_count;
++                }
++                if (now >= total - 5 * kSecond) {
++                    late_lateness = std::max(late_lateness, static_cast<double>(lateness) / 1.0e6);
++                }
++                if (lead_enabled) {
++                    if (block.latched) {
++                        const auto step = lead.observe(lateness, period, frames, true);
++                        if (step.closed && step.reason == xrfg::latency::LeaderLead::Reason::raised) {
++                            ++result.raises;
++                        }
++                    } else if (lead.lead != 0) {
++                        static_cast<void>(lead.observe(0, 0, 0, false));
++                    }
++                }
++            }
++            if (!current.synthetic) {
++                real_pops.push_back(now);
++            }
++            presenter_until = runtime_waits
++                ? std::max(now, current.written) + 1'300'000
++                : now + 300'000;
++            presenter = Presenter::ending;
++        }
++        if (presenter == Presenter::ending && now >= presenter_until) {
++            in_flight = 0;
++            if (leader_unwritten) {
++                evidence_pending = true;
++                evidence_written = current.written <= now;
++                evidence_call = now - handed;
++            }
++            presenter_until = (now / period + 1) * period;
++            presenter = Presenter::waiting;
++        }
++        // The application.
++        const std::size_t outstanding = queue.size() + static_cast<std::size_t>(in_flight);
++        if (application == Application::cpu && now >= application_until) {
++            render_done = std::max(gpu_free, now) + gpu_now;
++            gpu_free = render_done;
++            application = Application::admission;
++        }
++        if (application == Application::admission && outstanding <= 1) {
++            const Nanoseconds written = std::max(render_done, now) + synth;
++            gpu_free = std::max(gpu_free, written);
++            queue.push_back(Submission{true, true, written});
++            if (frames >= 3) {
++                queue.push_back(Submission{true, false, written});
++            }
++            queue.push_back(Submission{false, false, 0});
++            application = Application::capacity;
++        } else if (application == Application::capacity &&
++                   queue.size() + static_cast<std::size_t>(in_flight) <= frames) {
++            release = lead_enabled && block.latched && lead.lead > 0
++                ? xrfg::latency::leader_lead_release(lead.lead, offset, period, frames)
++                : xrfg::latency::LeaderLeadRelease{0, offset};
++            application = Application::hold;
++        }
++        if (application == Application::hold &&
++            (serial + release.turns + phase_credit >= served + frames || queue.empty())) {
++            served = serial + release.turns;
++            phase_credit = 0;
++            application_until = now + release.delay;
++            application = Application::delay;
++        }
++        if (application == Application::delay && now >= application_until) {
++            application_until = now + cpu;
++            application = Application::cpu;
++        }
++    }
++    const auto mean_periods = [&](Nanoseconds from, Nanoseconds to) {
++        Nanoseconds first = -1;
++        Nanoseconds last = -1;
++        int count = 0;
++        for (const Nanoseconds at : real_pops) {
++            if (at < from || at >= to) {
++                continue;
++            }
++            if (first < 0) {
++                first = at;
++            }
++            last = at;
++            ++count;
++        }
++        return count > 1
++            ? static_cast<double>(last - first) / static_cast<double>(count - 1) /
++                  static_cast<double>(period)
++            : 0.0;
++    };
++    result.early_periods = mean_periods(300 * kMillisecond, kSecond);
++    result.late_periods = mean_periods(total - 5 * kSecond, total);
++    for (const Nanoseconds at : lost_at) {
++        result.late_lost += at >= total - 5 * kSecond ? 1 : 0;
++    }
++    result.early_lateness_ms = early_lateness_count != 0
++        ? early_lateness / early_lateness_count
++        : 0.0;
++    result.late_lateness_ms = late_lateness;
++    result.latched = block.latched;
++    result.lead = lead.lead;
++    return result;
++}
++
++void leader_lead_model_tests() {
++    using xrfg::latency::kMillisecond;
++    using xrfg::latency::kSecond;
++    const auto near = [](double value, double target, double tolerance) {
++        return std::abs(value - target) <= tolerance;
++    };
++    const auto describe = [](const LeadModelResult& r) {
++        return " (early " + std::to_string(r.early_periods) + " periods/frame, late " +
++            std::to_string(r.late_periods) + ", lost " + std::to_string(r.late_lost) +
++            ", early lateness " + std::to_string(r.early_lateness_ms) + " ms, late lateness " +
++            std::to_string(r.late_lateness_ms) + " ms, lead " +
++            std::to_string(static_cast<double>(r.lead) / 1.0e6) + " ms, raises " +
++            std::to_string(r.raises) + ")";
++    };
++    // The flight's lock, without the lead: four periods a frame for good,
++    // the first synthetic about 14 ms late, a slot lost every frame.
++    {
++        const auto r = run_lead_model(3, 8 * kMillisecond, 14'700'000, 7'200'000, true, false);
++        std::cout << "lead model, cadence 3, a runtime that waits, no lead:" << describe(r) << '\n';
++        require(near(r.early_periods, 4.0, 0.05) && near(r.late_periods, 4.0, 0.05),
++            "lead model: the lock is four periods a frame" + describe(r));
++        require(r.early_lateness_ms > 12.0 && r.early_lateness_ms < 17.0,
++            "lead model: the lock's lateness is the flight's" + describe(r));
++        require(r.late_lost > 100, "lead model: the lock loses a slot a frame" + describe(r));
++    }
++    // With it: the same first second, then three periods a frame, no slot
++    // lost, the first synthetic written by its hand-over.
++    {
++        const auto r = run_lead_model(3, 8 * kMillisecond, 14'700'000, 7'200'000, true, true);
++        std::cout << "lead model, cadence 3, a runtime that waits, with the lead:" << describe(r) << '\n';
++        require(near(r.early_periods, 4.0, 0.3),
++            "lead model: locked until the lead arms" + describe(r));
++        require(r.latched && r.lead > 10 * kMillisecond && r.lead <= 2 * 11'111'128,
++            "lead model: armed, a lead of about the lateness" + describe(r));
++        require(near(r.late_periods, 3.0, 0.02) && r.late_lost == 0,
++            "lead model: three periods a frame, no slot lost" + describe(r));
++        require(r.late_lateness_ms <= 2.6,
++            "lead model: written by its hand-over" + describe(r));
++        require(r.raises >= 1 && r.raises <= 3, "lead model: settles in a few steps" + describe(r));
++    }
++    // The same application on a runtime that does not wait (the bundled
++    // Quad Views): three periods a frame as it always was, never armed.
++    {
++        const auto with = run_lead_model(3, 8 * kMillisecond, 14'700'000, 7'200'000, false, true);
++        const auto without = run_lead_model(3, 8 * kMillisecond, 14'700'000, 7'200'000, false, false);
++        std::cout << "lead model, cadence 3, a runtime that does not wait:" << describe(with) << '\n';
++        require(!with.ever_latched && with.lead == 0,
++            "lead model: never armed on a runtime that does not wait" + describe(with));
++        require(with.late_periods == without.late_periods &&
++                with.early_periods == without.early_periods &&
++                with.late_lateness_ms == without.late_lateness_ms,
++            "lead model: nothing changes on a runtime that does not wait" + describe(with));
++        require(near(with.late_periods, 3.0, 0.02), "lead model: three periods there" + describe(with));
++    }
++    // Cadence 2 on the waiting runtime, a frame that fits two periods with
++    // room (12 ms of rendering): about every other slot lost without the
++    // lead - the fixed 2X flight's 36 fps was 2.5 periods a frame - and two
++    // periods a frame with it.
++    {
++        const auto without = run_lead_model(2, 7 * kMillisecond, 12 * kMillisecond, 7'200'000, true, false);
++        const auto with = run_lead_model(2, 7 * kMillisecond, 12 * kMillisecond, 7'200'000, true, true);
++        std::cout << "lead model, cadence 2, a runtime that waits, no lead:" << describe(without) << '\n';
++        std::cout << "lead model, cadence 2, a runtime that waits, with the lead:" << describe(with) << '\n';
++        require(without.late_periods > 2.4, "lead model: 2X loses slots without the lead" + describe(without));
++        require(near(with.late_periods, 2.0, 0.02) && with.late_lost == 0,
++            "lead model: 2X holds two periods a frame with it" + describe(with));
++    }
++    // The scene gets lighter (rendering 14.7 -> 3 ms after 8 s): the lead
++    // comes down and the frame stays at three periods with no slot lost.
++    {
++        const auto r = run_lead_model(3, 8 * kMillisecond, 14'700'000, 7'200'000, true, true,
++            8 * kSecond, 3 * kMillisecond);
++        std::cout << "lead model, cadence 3, lighter after 8 s:" << describe(r) << '\n';
++        require(r.lead < 9 * kMillisecond, "lead model: the lead comes down with the load" + describe(r));
++        require(near(r.late_periods, 3.0, 0.02) && r.late_lost == 0,
++            "lead model: and the cadence holds" + describe(r));
++    }
++}
++
+ } // namespace
+ 
+ int main() {
+@@ -4102,6 +4618,8 @@ int main() {
+         cadence_backoff_tests();
+         cadence_frame_tests();
+         deep_hold_repeat_tests(); // DCS Control (0050)
++        leader_lead_tests(); // DCS Control (0078)
++        leader_lead_model_tests(); // DCS Control (0078)
+         std::cout << "Latency control tests passed\n";
+         return 0;
+     } catch (const std::exception& error) {
+diff --git a/tests/layer_adaptive_lazy_slot.cmake b/tests/layer_adaptive_lazy_slot.cmake
+--- a/tests/layer_adaptive_lazy_slot.cmake
++++ b/tests/layer_adaptive_lazy_slot.cmake
+@@ -77,4 +77,17 @@ string(REGEX MATCH "op=adaptive_switch result=[23] dur_us=0 a=2 b=3 c=[0-9]+" up
+ if(upshift STREQUAL "")
+     message(FATAL_ERROR "No 2X -> 3X adaptive switch for a slow or late application")
+ endif()
++# DCS Control (0078): this is the shallow depth in 2X's shape with an
++# application that turns slow, on a runtime whose xrEndFrame returns at once
++# (the fake's): first synthetics go down unwritten, as designed, and the
++# lead for a runtime that waits for them must never arm (410) nor step (411).
++foreach(forbidden IN ITEMS
++        "op=presenter_transition result=410 "
++        "op=presenter_transition result=411 ")
++    string(FIND "${contents}" "${forbidden}" forbidden_at)
++    if(NOT forbidden_at EQUAL -1)
++        message(FATAL_ERROR
++            "The leader lead acted on a runtime that does not wait: ${forbidden}")
++    endif()
++endforeach()
+ message(STATUS "Lazy second synthetic slot: ${wanted} / ${ready}")
