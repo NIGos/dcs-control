@@ -2481,6 +2481,638 @@ if (-not $layerText.Contains('DCSVR live settings')) {
     }
     [IO.File]::WriteAllText($layerSource, $layerText)
 }
+# Two-layer submission (dcsvr_two_layers=1; native/quadviews/dcsvr_twolayer_ps.hlsl explains the output pass): instead
+# of composing the periphery and the focus into one image of the runtime's size per eye, each application projection
+# layer goes downstream as two projection layers of two views (left, right): the periphery, opaque, with the pose and
+# FOV of today's composed layer at the periphery's own size, and directly after it the focus, a layer-owned
+# R8G8B8A8_UNORM swapchain per eye at the focus view's size holding sRGB-encoded, not premultiplied colour and today's
+# fade as alpha (BLEND_TEXTURE_SOURCE_ALPHA | UNPREMULTIPLIED_ALPHA), with the periphery's pose and the focus FOV. The
+# periphery is the application's own swapchain image while nothing needs a periphery pass (periphery stability,
+# periphery contrast, Far depth, debug_focus_view), else one output pass per eye into a layer-owned swapchain; once
+# that swapchain exists the layer keeps using it for the session, so a live switch of those keys does not move the
+# periphery between swapchains again. Far depth displaces both output passes by the composition's own field and
+# constants; debug_focus_view blacks the periphery; debug_eye_gaze marks the focus (and the periphery when it has a
+# pass). dcsvr_two_layers=2: each layer's output is one swapchain of array size 2 (slice 0 left, slice 1 right,
+# imageArrayIndex in the views) instead of one swapchain per eye, so the runtime and the layers below see two
+# swapchains a frame, not four; an array the runtime refuses falls back to one swapchain per eye.
+# What the application sees does not change. Not a live key: it decides swapchains. Unset or 0: the composed
+# path, untouched.
+Copy-Item -LiteralPath (Join-Path $workspaceRoot 'native/quadviews/dcsvr_twolayer_ps.hlsl') -Destination (Join-Path $quadRoot 'openxr-api-layer/dcsvr_twolayer_ps.hlsl') -Force
+$projectSource = Join-Path $quadRoot 'openxr-api-layer/openxr-api-layer.vcxproj'
+$projectText = [IO.File]::ReadAllText($projectSource)
+if (-not $projectText.Contains('dcsvr_twolayer_ps.hlsl')) {
+    $nl = if ($projectText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $anchor = (('  <ItemGroup>', '    <ResourceCompile Include="resource.rc" />') -join $nl)
+    if (([regex]::Matches($projectText, [regex]::Escape($anchor))).Count -ne 1) { throw 'Quad Views project changed: resource item group' }
+    $item = (('  <ItemGroup>',
+              '    <FxCompile Include="dcsvr_twolayer_ps.hlsl">',
+              '      <ShaderType>Pixel</ShaderType>',
+              '      <ShaderModel>5.0</ShaderModel>',
+              '      <VariableName>g_%(Filename)</VariableName>',
+              '      <HeaderFileOutput>$(IntDir)%(Filename).h</HeaderFileOutput>',
+              '      <ObjectFileOutput>',
+              '      </ObjectFileOutput>',
+              '    </FxCompile>',
+              '  </ItemGroup>',
+              $anchor) -join $nl)
+    [IO.File]::WriteAllText($projectSource, $projectText.Replace($anchor, $item))
+}
+$layerText = [IO.File]::ReadAllText($layerSource)
+if (-not $layerText.Contains('DCSVR two layers')) {
+    $nl = if ($layerText.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $fix = { param($text) ($text -replace "`r`n", "`n").TrimEnd("`n") -replace "`n", $nl }
+    $constants = @'
+    // DCSVR two layers: the output pass's constants (dcsvr_twolayer_ps.hlsl).
+    struct DcsvrTwoLayerConstants {
+        alignas(4) float smoothingArea;
+        alignas(4) float focusViewShape;
+        alignas(4) float focusLayer;
+        alignas(4) float encodeSrgb;
+        // Far depth, as ProjectionPSConstants; all 0 without it.
+        alignas(4) float dcsvrWarp[4];
+        alignas(4) float dcsvrReuse[3][4];
+        // x 1: the periphery black (debug_focus_view), y 1: the focus colour outside the fade from the unsharpened image.
+        alignas(4) float dcsvrDebug[4];
+    };
+    static_assert(sizeof(DcsvrTwoLayerConstants) == 96, "DcsvrTwoLayerConstants must match dcsvr_twolayer_ps.hlsl's cbuffer");
+
+    struct SharpeningCSConstants {
+'@
+    $destroyOld = @'
+                        if (entry.fullFovSwapchain[i] != XR_NULL_HANDLE) {
+                            OpenXrApi::xrDestroySwapchain(entry.fullFovSwapchain[i]);
+                        }
+'@
+    $destroyNew = @'
+                        if (entry.fullFovSwapchain[i] != XR_NULL_HANDLE) {
+                            OpenXrApi::xrDestroySwapchain(entry.fullFovSwapchain[i]);
+                        }
+                        // DCSVR two layers: the output swapchains hung on this entry.
+                        if (entry.dcsvrPeripheryOut[i].handle != XR_NULL_HANDLE) {
+                            OpenXrApi::xrDestroySwapchain(entry.dcsvrPeripheryOut[i].handle);
+                        }
+                        if (entry.dcsvrFocusOut[i].handle != XR_NULL_HANDLE) {
+                            OpenXrApi::xrDestroySwapchain(entry.dcsvrFocusOut[i].handle);
+                        }
+'@
+    $reserveOld = @'
+            projectionAllocator.reserve(frameEndInfo->layerCount);
+            projectionViewAllocator.reserve(frameEndInfo->layerCount);
+'@
+    $reserveNew = @'
+            // DCSVR two layers: two output layers per projection layer.
+            projectionAllocator.reserve((size_t)frameEndInfo->layerCount * (m_dcsvrTwoLayers ? 2 : 1));
+            projectionViewAllocator.reserve((size_t)frameEndInfo->layerCount * (m_dcsvrTwoLayers ? 2 : 1));
+'@
+    $prepare = @'
+                            dcsvrFarDepthFrame(proj, frameEndInfo->displayTime);
+
+                            // DCSVR two layers: both eyes' output swapchains before either eye is drawn, so a runtime
+                            // that refuses one leaves the whole frame on the composed path.
+                            bool dcsvrPeripheryPass = false;
+                            const bool dcsvrTwoLayers = m_dcsvrTwoLayers && dcsvrTwoLayerPrepare(session, proj, dcsvrPeripheryPass);
+                            std::array<XrCompositionLayerProjectionView, xr::StereoView::Count> dcsvrFocusViews{};
+'@
+    $patchOld = @'
+                                patchedView.fov = m_cachedEyeFov[viewIndex];
+                                patchedView.subImage.swapchain = swapchainForStereoView.fullFovSwapchain[viewIndex];
+                                patchedView.subImage.imageArrayIndex = 0;
+                                patchedView.subImage.imageRect.offset = {0, 0};
+                                patchedView.subImage.imageRect.extent = m_fullFovResolution;
+'@
+    $patchNew = @'
+                                patchedView.fov = m_cachedEyeFov[viewIndex];
+                                if (dcsvrTwoLayers) {
+                                    // DCSVR two layers: the periphery at its own size, from our pass or, with no
+                                    // periphery pass (now or earlier in the session), the application's own image as
+                                    // it submitted it.
+                                    // dcsvr_two_layers=2: both eyes' views name one swapchain, the eye is the slice.
+                                    if (dcsvrPeripheryPass) {
+                                        patchedView.subImage.swapchain = m_dcsvrEyeOut[0]->handle;
+                                        patchedView.subImage.imageArrayIndex = m_dcsvrEyeOut[0]->arraySize > 1 ? viewIndex : 0;
+                                        patchedView.subImage.imageRect.offset = {0, 0};
+                                        patchedView.subImage.imageRect.extent = m_dcsvrEyeOut[0]->extent;
+                                    }
+                                    // The focus: the periphery's pose, the focus FOV (after the DCS quirk), the whole
+                                    // image. No depth chain.
+                                    XrCompositionLayerProjectionView& dcsvrFocusOutView = dcsvrFocusViews[viewIndex];
+                                    dcsvrFocusOutView = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+                                    dcsvrFocusOutView.pose = proj->views[viewIndex].pose;
+                                    dcsvrFocusOutView.fov = focusView.fov;
+                                    dcsvrFocusOutView.subImage.swapchain = m_dcsvrEyeOut[1]->handle;
+                                    dcsvrFocusOutView.subImage.imageArrayIndex = m_dcsvrEyeOut[1]->arraySize > 1 ? viewIndex : 0;
+                                    dcsvrFocusOutView.subImage.imageRect.offset = {0, 0};
+                                    dcsvrFocusOutView.subImage.imageRect.extent = m_dcsvrEyeOut[1]->extent;
+                                } else {
+                                patchedView.subImage.swapchain = swapchainForStereoView.fullFovSwapchain[viewIndex];
+                                patchedView.subImage.imageArrayIndex = 0;
+                                patchedView.subImage.imageRect.offset = {0, 0};
+                                patchedView.subImage.imageRect.extent = m_fullFovResolution;
+                                }
+'@
+    $submitOld = @'
+                            projectionAllocator.back().viewCount = xr::StereoView::Count;
+                            layers.push_back(
+                                reinterpret_cast<XrCompositionLayerBaseHeader*>(&projectionAllocator.back()));
+'@
+    $submitNew = @'
+                            projectionAllocator.back().viewCount = xr::StereoView::Count;
+                            if (dcsvrTwoLayers) {
+                                // DCSVR two layers: the periphery is opaque (the composition wrote alpha 1 too).
+                                projectionAllocator.back().layerFlags &= ~XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                            }
+                            layers.push_back(
+                                reinterpret_cast<XrCompositionLayerBaseHeader*>(&projectionAllocator.back()));
+                            if (dcsvrTwoLayers) {
+                                // The focus directly after its periphery and before the application's other layers:
+                                // blended by its alpha, colour not premultiplied.
+                                projectionViewAllocator.push_back(dcsvrFocusViews);
+                                projectionAllocator.push_back(*proj);
+                                projectionAllocator.back().layerFlags |= XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+                                                                         XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+                                projectionAllocator.back().views = projectionViewAllocator.back().data();
+                                projectionAllocator.back().viewCount = xr::StereoView::Count;
+                                layers.push_back(
+                                    reinterpret_cast<XrCompositionLayerBaseHeader*>(&projectionAllocator.back()));
+                            }
+'@
+    $structOut = @'
+        // DCSVR two layers: one output swapchain (hung on the application swapchain it is made from): one eye's, or
+        // with dcsvr_two_layers=2 both eyes' as an array of two (slice 0 left, slice 1 right) on the left eye's entry.
+        struct DcsvrOutSwapchain {
+            XrSwapchain handle{XR_NULL_HANDLE};
+            XrExtent2Di extent{};
+            int64_t format{0};
+            uint32_t arraySize{1};
+            // An array: acquired by the first pass of a frame, released after the pass of its last slice.
+            bool acquired{false};
+            uint32_t acquiredIndex{0};
+            std::vector<ID3D11Texture2D*> images;
+            std::map<std::pair<ID3D11Texture2D*, uint32_t>, ComPtr<ID3D11RenderTargetView>> rtv;
+        };
+
+        struct Swapchain {
+'@
+    $structMembers = @'
+            std::vector<ID3D11Texture2D*> fullFovSwapchainImages[xr::StereoView::Count];
+            // DCSVR two layers: the periphery's output (on the periphery swapchain's entry, only with a periphery pass)
+            // and the focus's (on the focus swapchain's entry), per eye. dcsvr_two_layers=2: only [0] of the left
+            // eye's entries, an array of two.
+            DcsvrOutSwapchain dcsvrPeripheryOut[xr::StereoView::Count];
+            DcsvrOutSwapchain dcsvrFocusOut[xr::StereoView::Count];
+'@
+    $gatherOld = @'
+                // Grab the output texture.
+                {
+'@
+    $gatherNew = @'
+                // Grab the output texture. DCSVR two layers: there is none, each output pass acquires its own.
+                if (!m_dcsvrTwoLayers) {
+'@
+    $branch = @'
+                // DCSVR two layers: no composition. The periphery (when it has a pass) and the focus go out each at its
+                // own size, with Far depth's displacement and the debug outputs of the composition.
+                if (m_dcsvrTwoLayers) {
+                    dcsvrTwoLayerOutput(viewIndex, focusView, swapchainForStereoView, swapchainForFocusView, srvForStereoView.Get(),
+                                        srvForFocusView.Get(), m_sharpenFocusView ? focusSourceSrv.Get() : nullptr);
+                    TraceLoggingWriteStop(local, "xrEndFrame_Composite");
+                    if (IsTraceEnabled()) {
+                        m_compositionTimer[m_compositionTimerIndex]->stop();
+                    }
+                    return;
+                }
+                ComPtr<ID3D11RenderTargetView>& rtv = swapchainForStereoView.dcsvrRtv[destinationImage];
+'@
+    $helpers = @'
+        // DCSVR two layers: whether the settings ask for our own periphery output pass: a pass that changes the
+        // periphery (stability, contrast, Far depth's displacement inside the focus rectangle) or the focus debug view
+        // (the periphery black). By settings only (never by what a frame's passes did), so the swapchain the periphery
+        // layer names does not change from frame to frame.
+        bool dcsvrTwoLayerPeripheryPass() const {
+            return m_dcsvrTemporal.enabled || m_dcsvrPeripherySharpen > 0.f || m_dcsvrFarDepth.enabled || m_debugFocusView;
+        }
+
+        // DCSVR two layers: the colour the passes read from this swapchain is linear (an sRGB or a float format).
+        static bool dcsvrTwoLayerLinearSource(int64_t format) {
+            switch ((DXGI_FORMAT)format) {
+            case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+            case DXGI_FORMAT_R16G16B16A16_FLOAT:
+            case DXGI_FORMAT_R32G32B32A32_FLOAT:
+            case DXGI_FORMAT_R11G11B10_FLOAT:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        // DCSVR two layers: one output swapchain, made at first use and again if the view's size changes.
+        bool dcsvrTwoLayerEnsure(XrSession session, DcsvrOutSwapchain& out, XrSwapchainCreateInfo createInfo, const char* what) {
+            if (out.handle != XR_NULL_HANDLE && out.extent.width == (int32_t)createInfo.width &&
+                out.extent.height == (int32_t)createInfo.height && out.format == createInfo.format &&
+                out.arraySize == createInfo.arraySize) {
+                return true;
+            }
+            if (out.handle != XR_NULL_HANDLE) {
+                OpenXrApi::xrDestroySwapchain(out.handle);
+                out = {};
+            }
+            if (!createInfo.width || !createInfo.height) {
+                return false;
+            }
+            XrSwapchain handle{XR_NULL_HANDLE};
+            const XrResult result = OpenXrApi::xrCreateSwapchain(session, &createInfo, &handle);
+            if (XR_FAILED(result)) {
+                Log(fmt::format("DCSVR two layers: no {} swapchain {}x{} x{} format {} ({})\n", what, createInfo.width,
+                                createInfo.height, createInfo.arraySize, createInfo.format, xr::ToCString(result)));
+                return false;
+            }
+            out.handle = handle;
+            out.extent = {(int32_t)createInfo.width, (int32_t)createInfo.height};
+            out.format = createInfo.format;
+            out.arraySize = createInfo.arraySize;
+            Log(fmt::format("DCSVR two layers: {} swapchain {}x{} x{} format {}\n", what, createInfo.width, createInfo.height,
+                            createInfo.arraySize, createInfo.format));
+            return true;
+        }
+
+        // DCSVR two layers: both eyes' output swapchains for this projection layer. False (and the mode off for the
+        // rest of the session, composing as before) when the runtime refuses one: never an error returned to DCS.
+        // peripheryPass: the periphery goes through our own pass and swapchain. Once that swapchain exists it stays in
+        // use although the keys that asked for it are switched off live (the pass is then a plain copy): the layer
+        // below, frame generation above all, keeps seeing the same swapchain instead of a hand-over back to the
+        // application's and, at the next switch, to ours again.
+        // dcsvr_two_layers=2: one swapchain per layer, an array of two on the left eye's entries (slice 0 left, slice 1
+        // right), so the runtime and the layers below are handed two swapchains a frame instead of four. Eyes of
+        // different sizes or an array the runtime refuses: one swapchain per eye for the session (as with 1).
+        bool dcsvrTwoLayerPrepare(XrSession session, const XrCompositionLayerProjection* proj, bool& peripheryPass) {
+            std::unique_lock lock(m_swapchainsMutex);
+            peripheryPass = false;
+            Swapchain* stereoEntry[xr::StereoView::Count]{};
+            Swapchain* focusEntry[xr::StereoView::Count]{};
+            bool wanted = dcsvrTwoLayerPeripheryPass();
+            for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
+                const auto it = m_swapchains.find(proj->views[eye].subImage.swapchain);
+                const auto it2 = m_swapchains.find(proj->views[xr::StereoView::Count + eye].subImage.swapchain);
+                if (it == m_swapchains.end() || it2 == m_swapchains.end()) {
+                    // The frame fails on this handle below, as it does without this mode.
+                    return false;
+                }
+                stereoEntry[eye] = &it->second;
+                focusEntry[eye] = &it2->second;
+                wanted = wanted || stereoEntry[eye]->dcsvrPeripheryOut[eye].handle != XR_NULL_HANDLE;
+            }
+            const auto sameExtent = [](const XrCompositionLayerProjectionView& a, const XrCompositionLayerProjectionView& b) {
+                return a.subImage.imageRect.extent.width == b.subImage.imageRect.extent.width &&
+                       a.subImage.imageRect.extent.height == b.subImage.imageRect.extent.height;
+            };
+            if (m_dcsvrTwoLayers == 2 && (!sameExtent(proj->views[0], proj->views[1]) || !sameExtent(proj->views[2], proj->views[3]))) {
+                m_dcsvrTwoLayers = 1;
+                Log("DCSVR two layers: the eyes differ in size, one swapchain per eye\n");
+            }
+            const auto outputs = [&](bool array) {
+            bool ready = true;
+            for (uint32_t eye = 0; eye < (array ? 1u : (uint32_t)xr::StereoView::Count) && ready; eye++) {
+                const XrCompositionLayerProjectionView& stereoView = proj->views[eye];
+                const XrCompositionLayerProjectionView& focusView = proj->views[xr::StereoView::Count + eye];
+                // The focus: R8G8B8A8_UNORM, not sRGB (dcsvr_twolayer_ps.hlsl), with our alpha.
+                XrSwapchainCreateInfo focusInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+                focusInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+                focusInfo.format = (int64_t)DXGI_FORMAT_R8G8B8A8_UNORM;
+                focusInfo.sampleCount = 1;
+                focusInfo.width = (uint32_t)std::max(focusView.subImage.imageRect.extent.width, 0);
+                focusInfo.height = (uint32_t)std::max(focusView.subImage.imageRect.extent.height, 0);
+                focusInfo.faceCount = 1;
+                focusInfo.arraySize = array ? 2 : 1;
+                focusInfo.mipCount = 1;
+                ready = dcsvrTwoLayerEnsure(session, focusEntry[eye]->dcsvrFocusOut[eye], focusInfo,
+                                            array ? "focus array" : eye ? "right focus" : "left focus");
+                if (ready && wanted) {
+                    // The periphery: the application's format and flags, as the composed image had.
+                    XrSwapchainCreateInfo peripheryInfo = stereoEntry[eye]->createInfo;
+                    peripheryInfo.arraySize = array ? 2 : 1;
+                    peripheryInfo.width = (uint32_t)std::max(stereoView.subImage.imageRect.extent.width, 0);
+                    peripheryInfo.height = (uint32_t)std::max(stereoView.subImage.imageRect.extent.height, 0);
+                    ready = dcsvrTwoLayerEnsure(session, stereoEntry[eye]->dcsvrPeripheryOut[eye], peripheryInfo,
+                                                array ? "periphery array" : eye ? "right periphery" : "left periphery");
+                }
+            }
+            return ready;
+            };
+            bool ready = outputs(m_dcsvrTwoLayers == 2);
+            if (!ready && m_dcsvrTwoLayers == 2) {
+                // Ensure replaces an array that was made by a swapchain of one eye.
+                m_dcsvrTwoLayers = 1;
+                Log("DCSVR two layers: no array swapchains, one swapchain per eye\n");
+                ready = outputs(false);
+            }
+            if (!ready) {
+                m_dcsvrTwoLayers = 0;
+                Log("DCSVR two layers: off for this session, composing as before\n");
+            }
+            peripheryPass = ready && wanted;
+            return ready;
+        }
+
+        // DCSVR two layers: one output pass, source to the next image of the swapchain (dcsvr_twolayer_ps.hlsl), then
+        // the debug gaze marker if any. slice: the eye in an array swapchain (0 otherwise): both eyes' passes write one
+        // acquired image, each through a view of its own slice.
+        void dcsvrTwoLayerDraw(DcsvrOutSwapchain& out,
+                               uint32_t slice,
+                               ID3D11ShaderResourceView* source,
+                               ID3D11ShaderResourceView* plainFocus,
+                               ID3D11ShaderResourceView* field,
+                               const DcsvrTwoLayerConstants& constants,
+                               const D3D11_RECT* marker,
+                               const float* markerColor) {
+            if (!out.acquired) {
+                CHECK_XRCMD(OpenXrApi::xrAcquireSwapchainImage(out.handle, nullptr, &out.acquiredIndex));
+                XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+                waitInfo.timeout = 10000000000;
+                CHECK_XRCMD(OpenXrApi::xrWaitSwapchainImage(out.handle, &waitInfo));
+                out.acquired = true;
+            }
+            if (out.images.empty()) {
+                uint32_t count;
+                CHECK_XRCMD(OpenXrApi::xrEnumerateSwapchainImages(out.handle, 0, &count, nullptr));
+                std::vector<XrSwapchainImageD3D11KHR> d3d11Images(count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+                CHECK_XRCMD(OpenXrApi::xrEnumerateSwapchainImages(
+                    out.handle, count, &count, reinterpret_cast<XrSwapchainImageBaseHeader*>(d3d11Images.data())));
+                for (uint32_t i = 0; i < count; i++) {
+                    out.images.push_back(d3d11Images[i].texture);
+                }
+            }
+            ID3D11Texture2D* const destinationImage = out.images[out.acquiredIndex];
+            ComPtr<ID3D11RenderTargetView>& rtv = out.rtv[{destinationImage, slice}];
+            if (!rtv) {
+                D3D11_RENDER_TARGET_VIEW_DESC desc{};
+                if (out.arraySize > 1) {
+                    desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+                    desc.Texture2DArray.FirstArraySlice = slice;
+                    desc.Texture2DArray.ArraySize = 1;
+                } else {
+                    desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+                }
+                desc.Format = (DXGI_FORMAT)out.format;
+                CHECK_HRCMD(m_applicationDevice->CreateRenderTargetView(destinationImage, &desc, rtv.ReleaseAndGetAddressOf()));
+            }
+            {
+                D3D11_MAPPED_SUBRESOURCE mappedResources;
+                CHECK_HRCMD(m_renderContext->Map(m_dcsvrTwoLayerConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResources));
+                memcpy(mappedResources.pData, &constants, sizeof(constants));
+                m_renderContext->Unmap(m_dcsvrTwoLayerConstants.Get(), 0);
+            }
+            m_renderContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            m_renderContext->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
+            m_renderContext->RSSetState(m_noDepthRasterizer.Get());
+            D3D11_VIEWPORT viewport{};
+            viewport.Width = (float)out.extent.width;
+            viewport.Height = (float)out.extent.height;
+            viewport.MaxDepth = 1.f;
+            m_renderContext->RSSetViewports(1, &viewport);
+            // ProjectionVS for its full-target triangle, its uv and (the periphery pass, with Far depth) the pixel's
+            // focus projection.
+            m_renderContext->VSSetConstantBuffers(0, 1, m_projectionVSConstants.GetAddressOf());
+            m_renderContext->VSSetShader(m_projectionVS.Get(), nullptr, 0);
+            m_renderContext->PSSetConstantBuffers(0, 1, m_dcsvrTwoLayerConstants.GetAddressOf());
+            m_renderContext->PSSetSamplers(0, 1, m_linearClampSampler.GetAddressOf());
+            ID3D11ShaderResourceView* srvs[] = {source, plainFocus, field};
+            m_renderContext->PSSetShaderResources(0, 3, srvs);
+            m_renderContext->PSSetShader(m_dcsvrTwoLayerPS.Get(), nullptr, 0);
+            m_renderContext->Draw(3, 0);
+            if (marker) {
+                m_renderContext->ClearView(rtv.Get(), markerColor, marker, 1);
+            }
+            // Neither the sources (the next eye's passes write some of them, the next frame's FieldMain the field) nor
+            // the target stay bound.
+            ID3D11ShaderResourceView* none[] = {nullptr, nullptr, nullptr};
+            m_renderContext->PSSetShaderResources(0, 3, none);
+            m_renderContext->OMSetRenderTargets(0, nullptr, nullptr);
+            if (slice + 1 >= out.arraySize) {
+                out.acquired = false;
+                CHECK_XRCMD(OpenXrApi::xrReleaseSwapchainImage(out.handle, nullptr));
+            }
+        }
+
+        // DCSVR two layers: a marker's rectangle around (x, y) in a target, clipped to it; false when nothing is left.
+        static bool dcsvrTwoLayerMarker(float x, float y, float halfWidth, float halfHeight, const XrExtent2Di& extent, D3D11_RECT& rect) {
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(halfWidth) || !std::isfinite(halfHeight)) {
+                return false;
+            }
+            const float left = std::clamp(x - std::max(halfWidth, 1.f), 0.f, (float)extent.width);
+            const float right = std::clamp(x + std::max(halfWidth, 1.f), 0.f, (float)extent.width);
+            const float top = std::clamp(y - std::max(halfHeight, 1.f), 0.f, (float)extent.height);
+            const float bottom = std::clamp(y + std::max(halfHeight, 1.f), 0.f, (float)extent.height);
+            rect.left = (LONG)std::lround(left);
+            rect.right = (LONG)std::lround(right);
+            rect.top = (LONG)std::lround(top);
+            rect.bottom = (LONG)std::lround(bottom);
+            return rect.left < rect.right && rect.top < rect.bottom;
+        }
+
+        // DCSVR two layers: this eye's outputs. The periphery when it has a pass (else the application's own image is
+        // submitted); the focus always, sharpened or not, with the composition's fade as its alpha.
+        //  - Far depth: the composition's constants (dcsvrWarp, dcsvrReuse) and field for both passes, so the focus and,
+        //    inside the focus rectangle, the periphery move by the same field.
+        //  - debug_focus_view: the periphery black (the passes that would change it are off already).
+        //  - debug_eye_gaze: the composition's square, at the same place and of the same angular size, in the focus
+        //    (opaque) and in the periphery when it has a pass.
+        void dcsvrTwoLayerOutput(uint32_t viewIndex,
+                                 const XrCompositionLayerProjectionView& focusView,
+                                 Swapchain& swapchainForStereoView,
+                                 Swapchain& swapchainForFocusView,
+                                 ID3D11ShaderResourceView* peripherySource,
+                                 ID3D11ShaderResourceView* focusSource,
+                                 ID3D11ShaderResourceView* plainFocusSource) {
+            const XrFovf& eyeFov = m_cachedEyeFov[viewIndex];
+            // The eye's own, or the layer's array (xrEndFrame set them for this eye).
+            if (!m_dcsvrEyeOut[0] || !m_dcsvrEyeOut[1]) {
+                return;
+            }
+            DcsvrOutSwapchain& peripheryOut = *m_dcsvrEyeOut[0];
+            DcsvrOutSwapchain& focusOut = *m_dcsvrEyeOut[1];
+            const bool linearSource = dcsvrTwoLayerLinearSource(swapchainForFocusView.createInfo.format);
+
+            // Far depth, exactly as the composition sets it up.
+            DcsvrTwoLayerConstants shared{};
+            ID3D11ShaderResourceView* field = nullptr;
+            if (m_dcsvrFarWarp && m_dcsvrField[viewIndex].srv) {
+                field = m_dcsvrField[viewIndex].srv.Get();
+                shared.dcsvrWarp[0] = 1.f;
+                shared.dcsvrWarp[1] = (std::tan(focusView.fov.angleRight) - std::tan(focusView.fov.angleLeft)) /
+                                      (std::tan(eyeFov.angleRight) - std::tan(eyeFov.angleLeft));
+                shared.dcsvrWarp[2] = (std::tan(focusView.fov.angleUp) - std::tan(focusView.fov.angleDown)) /
+                                      (std::tan(eyeFov.angleUp) - std::tan(eyeFov.angleDown));
+                if (m_dcsvrFarDecision.reuse) {
+                    shared.dcsvrWarp[3] = 1.f;
+                    memcpy(shared.dcsvrReuse, m_dcsvrField[viewIndex].reuse, sizeof(shared.dcsvrReuse));
+                }
+            }
+
+            // The debug gaze marker: the composition's 20 pixel square of the composed image, in each target's pixels.
+            D3D11_RECT peripheryMarker{}, focusMarker{};
+            bool markPeriphery = false, markFocus = false;
+            if (m_debugEyeGaze && m_fullFovResolution.width > 0 && m_fullFovResolution.height > 0) {
+                const float across = (m_eyeGaze[viewIndex].x + 1.f) / 2.f;  // 0 left .. 1 right of the eye's view
+                const float down = (1.f - m_eyeGaze[viewIndex].y) / 2.f;    // 0 top .. 1 bottom
+                const float halfAcross = 10.f / (float)m_fullFovResolution.width;
+                const float halfDown = 10.f / (float)m_fullFovResolution.height;
+                if (peripheryOut.handle != XR_NULL_HANDLE) {
+                    markPeriphery = dcsvrTwoLayerMarker(across * peripheryOut.extent.width, down * peripheryOut.extent.height,
+                                                        halfAcross * peripheryOut.extent.width, halfDown * peripheryOut.extent.height,
+                                                        peripheryOut.extent, peripheryMarker);
+                }
+                const float eyeLeft = std::tan(eyeFov.angleLeft), eyeRight = std::tan(eyeFov.angleRight);
+                const float eyeUp = std::tan(eyeFov.angleUp), eyeDown = std::tan(eyeFov.angleDown);
+                const float focusLeft = std::tan(focusView.fov.angleLeft), focusRight = std::tan(focusView.fov.angleRight);
+                const float focusUp = std::tan(focusView.fov.angleUp), focusDown = std::tan(focusView.fov.angleDown);
+                if (focusOut.handle != XR_NULL_HANDLE && focusRight > focusLeft && focusUp > focusDown) {
+                    const float u = (eyeLeft + across * (eyeRight - eyeLeft) - focusLeft) / (focusRight - focusLeft);
+                    const float v = (focusUp - (eyeUp + down * (eyeDown - eyeUp))) / (focusUp - focusDown);
+                    markFocus = dcsvrTwoLayerMarker(u * focusOut.extent.width, v * focusOut.extent.height,
+                                                    halfAcross * (eyeRight - eyeLeft) / (focusRight - focusLeft) * focusOut.extent.width,
+                                                    halfDown * (eyeUp - eyeDown) / (focusUp - focusDown) * focusOut.extent.height,
+                                                    focusOut.extent, focusMarker);
+                }
+            }
+            // The composition clears linear 0.5 into the application's format; the focus target takes encoded bytes.
+            const float peripheryMarkerColor[] = {0.5f, 0, 0.5f, 1};
+            const float focusEncoded = linearSource ? 0.7353569f : 0.5f;
+            const float focusMarkerColor[] = {focusEncoded, 0, focusEncoded, 1};
+
+            if (peripheryOut.handle != XR_NULL_HANDLE) {
+                // The pixel's focus projection, as the composition's vertex shader gets it.
+                ProjectionVSConstants projection;
+                {
+                    const DirectX::XMMATRIX baseLayerViewProjection =
+                        ComposeProjectionMatrix(m_cachedEyeFov[viewIndex], NearFar{0.1f, 20.f});
+                    const DirectX::XMMATRIX layerViewProjection =
+                        ComposeProjectionMatrix(focusView.fov, NearFar{0.1f, 20.f});
+
+                    DirectX::XMStoreFloat4x4(
+                        &projection.focusProjection,
+                        DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(nullptr, baseLayerViewProjection) *
+                                                   layerViewProjection));
+                }
+                {
+                    D3D11_MAPPED_SUBRESOURCE mappedResources;
+                    CHECK_HRCMD(m_renderContext->Map(
+                        m_projectionVSConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResources));
+                    memcpy(mappedResources.pData, &projection, sizeof(projection));
+                    m_renderContext->Unmap(m_projectionVSConstants.Get(), 0);
+                }
+                DcsvrTwoLayerConstants periphery = shared;
+                periphery.dcsvrDebug[0] = m_debugFocusView ? 1.f : 0.f;
+                dcsvrTwoLayerDraw(peripheryOut, peripheryOut.arraySize > 1 ? viewIndex : 0, peripherySource, nullptr, field, periphery,
+                                  markPeriphery ? &peripheryMarker : nullptr, peripheryMarkerColor);
+            }
+            if (focusOut.handle != XR_NULL_HANDLE) {
+                DcsvrTwoLayerConstants focus = shared;
+                focus.smoothingArea = m_smoothenFocusViewEdges;
+                focus.focusViewShape = m_focusViewShape;
+                focus.focusLayer = 1.f;
+                // The source views read linear from an sRGB (or float) swapchain; the UNORM target takes encoded bytes.
+                focus.encodeSrgb = linearSource ? 1.f : 0.f;
+                // Sharpened: outside the rounded shape the sharpening skips tiles, the plain image fills them.
+                const bool fill = plainFocusSource && m_focusViewShape >= 1.f && !m_debugFocusView;
+                focus.dcsvrDebug[1] = fill ? 1.f : 0.f;
+                dcsvrTwoLayerDraw(focusOut, focusOut.arraySize > 1 ? viewIndex : 0, focusSource, fill ? plainFocusSource : nullptr, field, focus,
+                                  markFocus ? &focusMarker : nullptr, focusMarkerColor);
+            }
+        }
+
+        void initializeDeviceContext(ID3D11Device* device) {
+'@
+    $resourcesOld = '                g_ProjectionPS, sizeof(g_ProjectionPS), nullptr, m_projectionPS.ReleaseAndGetAddressOf()));'
+    $resourcesNew = @'
+                g_ProjectionPS, sizeof(g_ProjectionPS), nullptr, m_projectionPS.ReleaseAndGetAddressOf()));
+
+            // DCSVR two layers: the output pass and its constants, only in that mode.
+            if (m_dcsvrTwoLayers) {
+                D3D11_BUFFER_DESC desc{};
+                desc.ByteWidth = (UINT)sizeof(DcsvrTwoLayerConstants);
+                desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+                desc.Usage = D3D11_USAGE_DYNAMIC;
+                desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+                CHECK_HRCMD(m_applicationDevice->CreateBuffer(&desc, nullptr, m_dcsvrTwoLayerConstants.ReleaseAndGetAddressOf()));
+                CHECK_HRCMD(m_applicationDevice->CreatePixelShader(
+                    g_dcsvr_twolayer_ps, sizeof(g_dcsvr_twolayer_ps), nullptr, m_dcsvrTwoLayerPS.ReleaseAndGetAddressOf()));
+            }
+'@
+    $parser = @'
+                    } else if (name == "dcsvr_two_layers") {
+                        const int dcsvrLayers = std::stoi(value);
+                        m_dcsvrTwoLayers = dcsvrLayers == 2 ? 2 : dcsvrLayers != 0 ? 1 : 0;
+                        parsed = true;
+                    } else if (name == "stereo_output_multiplier") {
+'@
+    $members = @'
+        float m_stereoOutputMultiplier{0.f};
+        // DCSVR two layers (dcsvr_two_layers): the periphery and the focus submitted as two projection layers instead
+        // of one composed image. 1: one output swapchain per eye and layer; 2: one per layer, an array of two (slice 0
+        // left, slice 1 right). Read at start only; 2 falls to 1 and 1 to 0 for the session if the runtime refuses a
+        // swapchain.
+        int m_dcsvrTwoLayers{0};
+        // The outputs of the eye being drawn ([0] periphery, [1] focus), set by xrEndFrame under the swapchains' lock.
+        DcsvrOutSwapchain* m_dcsvrEyeOut[2]{};
+        ComPtr<ID3D11Buffer> m_dcsvrTwoLayerConstants;
+        ComPtr<ID3D11PixelShader> m_dcsvrTwoLayerPS;
+'@
+    $eyeOut = @'
+                                // DCSVR two layers: the outputs of this eye, its own or (dcsvr_two_layers=2) the
+                                // arrays on the left eye's entries.
+                                m_dcsvrEyeOut[0] = m_dcsvrEyeOut[1] = nullptr;
+                                if (dcsvrTwoLayers) {
+                                    const uint32_t dcsvrOwner = m_dcsvrTwoLayers == 2 ? 0 : viewIndex;
+                                    const auto own = m_swapchains.find(proj->views[dcsvrOwner].subImage.swapchain);
+                                    const auto own2 =
+                                        m_swapchains.find(proj->views[xr::StereoView::Count + dcsvrOwner].subImage.swapchain);
+                                    if (own == m_swapchains.end() || own2 == m_swapchains.end()) {
+                                        return XR_ERROR_HANDLE_INVALID;
+                                    }
+                                    m_dcsvrEyeOut[0] = &own->second.dcsvrPeripheryOut[dcsvrOwner];
+                                    m_dcsvrEyeOut[1] = &own2->second.dcsvrFocusOut[dcsvrOwner];
+                                }
+
+                                // Composite the focus view and the stereo view together into a single stereo view.
+'@
+    $sessionLog = @'
+                        Log(fmt::format("Turbo: {}\n", m_useTurboMode ? "Enabled" : "Disabled"));
+                        if (m_dcsvrTwoLayers) {
+                            Log(fmt::format("DCSVR two layers: on ({}), focus as R8G8B8A8_UNORM with the fade in alpha, periphery {}{}\n",
+                                            m_dcsvrTwoLayers == 2 ? "one array swapchain per layer" : "one swapchain per eye and layer",
+                                            dcsvrTwoLayerPeripheryPass() ? "from its own pass" : "as the application submits it",
+                                            m_dcsvrFarDepth.enabled ? ", Far depth in both passes" : ""));
+                        }
+'@
+    $edits = @(
+        @((& $fix '#include <dcsvr_coverage_cs.h>'), (& $fix "#include <dcsvr_coverage_cs.h>`n#include <dcsvr_twolayer_ps.h>")),
+        @((& $fix '    struct SharpeningCSConstants {'), (& $fix $constants)),
+        @((& $fix $destroyOld), (& $fix $destroyNew)),
+        @((& $fix $reserveOld), (& $fix $reserveNew)),
+        @((& $fix '                            dcsvrFarDepthFrame(proj, frameEndInfo->displayTime);'), (& $fix $prepare)),
+        @((& $fix '                                if (swapchainForStereoView.fullFovSwapchain[viewIndex] == XR_NULL_HANDLE) {'), (& $fix '                                if (!dcsvrTwoLayers && swapchainForStereoView.fullFovSwapchain[viewIndex] == XR_NULL_HANDLE) {')),
+        @((& $fix '                                // Composite the focus view and the stereo view together into a single stereo view.'), (& $fix $eyeOut)),
+        @((& $fix $patchOld), (& $fix $patchNew)),
+        @((& $fix $submitOld), (& $fix $submitNew)),
+        @((& $fix '        struct Swapchain {'), (& $fix $structOut)),
+        @((& $fix '            std::vector<ID3D11Texture2D*> fullFovSwapchainImages[xr::StereoView::Count];'), (& $fix $structMembers)),
+        @((& $fix '            ID3D11Texture2D* destinationImage;'), (& $fix '            ID3D11Texture2D* destinationImage = nullptr;')),
+        @((& $fix $gatherOld), (& $fix $gatherNew)),
+        @((& $fix '                ComPtr<ID3D11RenderTargetView>& rtv = swapchainForStereoView.dcsvrRtv[destinationImage];'), (& $fix $branch)),
+        @((& $fix '        void initializeDeviceContext(ID3D11Device* device) {'), (& $fix $helpers)),
+        @((& $fix $resourcesOld), (& $fix $resourcesNew)),
+        @((& $fix '                    } else if (name == "stereo_output_multiplier") {'), (& $fix $parser)),
+        @((& $fix '        float m_stereoOutputMultiplier{0.f};'), (& $fix $members)),
+        @((& $fix '                        Log(fmt::format("Turbo: {}\n", m_useTurboMode ? "Enabled" : "Disabled"));'), (& $fix $sessionLog))
+    )
+    foreach ($edit in $edits) {
+        if (([regex]::Matches($layerText, [regex]::Escape($edit[0]))).Count -ne 1) { throw "Quad Views source changed: $(($edit[0] -split "`n")[0])" }
+        $layerText = $layerText.Replace($edit[0], $edit[1])
+    }
+    [IO.File]::WriteAllText($layerSource, $layerText)
+}
 # Log(std::string) passes the text to vsnprintf as the format: a lone '%' there ends DCS without a trace.
 $unescapedPercent = [IO.File]::ReadAllLines($layerSource) | Where-Object { $_ -match 'Log\(fmt::format\(' -and ($_ -replace '%%', '') -match '%' }
 if ($unescapedPercent) { throw "Quad Views Log text with an unescaped '%' (write '%%'): $($unescapedPercent -join ' | ')" }

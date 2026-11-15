@@ -362,6 +362,10 @@ public static class ConfigurationWriters
         cadence_preference={(p.UsesAdaptiveCadence && Enum.IsDefined(p.FrameGenPassThrough) ? (int)p.FrameGenPassThrough : 0)}
         ; Both eyes synthesized on their own queues, about 1 ms sooner with identical output (patch 0038): off until flown.
         parallel_eye_synthesis=0
+        ; Foveated frame generation (experimental, patch 0080): one generator per Quad Views layer; the periphery's flow at full scale. After a fast eye move the newly covered strip is filled from the new frame: 2 moves it with the periphery's flow (not with bidirectional flow), 1 leaves it in place.
+        foveated_layers={(p.UsesFoveatedFrameGen ? 1 : 0)}
+        foveated_periphery_flow_scale=100
+        foveated_uncovered_fill={(p.UsesFoveatedFrameGen ? p.BidirectionalFlow ? 1 : 2 : 0)}
         d3d11_bridge={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}
         backend={(p.FrameGen == FrameGeneration.FidelityFx ? "fidelityfx" : "nvidia")}
         nvidia_preset={p.FlowPreset.ToString().ToLowerInvariant()}
@@ -481,6 +485,7 @@ public static class ConfigurationWriters
         vertical_focus_section={Number(Math.Min(p.FoveaHeight, .9))}
         force_no_eye_tracking={(p.Gaze == GazeMode.Fixed ? 1 : 0)}
         turbo_mode={(p.UsesQuadTurbo ? 1 : 0)}
+        dcsvr_two_layers={(p.UsesFoveatedFrameGen ? 2 : 0)}
         dcsvr_saccade_widening={(p.QuadSaccadeLead && p.Gaze == GazeMode.EyeTracked ? 1 : 0)}
         dcsvr_saccade_speed=120
         dcsvr_saccade_lead_ms={Int(p.QuadSaccadeLeadMs)}

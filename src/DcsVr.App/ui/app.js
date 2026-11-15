@@ -700,6 +700,8 @@ function buildFields() {
   field(c,'frameGenAdaptiveCadence','Only when needed',['Frames are generated only while DCS falls behind: lower latency. Needs Generated frames on Auto; with Keep, the frame limit is set to the refresh rate for you.','DCS renders the full refresh rate, so latency is lower whenever DCS keeps up.'],'toggle',null,p => p.frameGen !== 'Off' && p.frameGenFactor === 0);
   segmented(field(c,'frameGenPassThrough','Stop generating',['When DCS\'s own frames go straight to the headset. Applies at the next DCS start.','Steady: only with plenty of room, rarely on a PC that just holds the refresh rate. Balanced: when DCS looks able to hold the refresh rate, as long as frames arrive on time. Prefer refresh rate: tries whenever it might hold, and generates again only when frames come late. A try that fails is not repeated for a while, and after a few failed tries not until the next mission or a few clean minutes.'],'select',[['Steady','Steady'],['Balanced','Balanced · default'],['PreferRefresh','Prefer refresh rate']],p => usesAdaptiveCadence(p)),{Steady:'Steady',Balanced:'Balanced',PreferRefresh:'Prefer refresh rate'});
   field(c,'frameGenDeepPipeline','Smoothness buffer',['Smoother with uneven DCS frame times, with a little more latency.','Holds one extra frame: about 11 ms more latency at 90 Hz while frames are generated. In 3× it holds it only while frames keep arriving late.'],'toggle',null,p => p.frameGen !== 'Off');
+  // Greyed out until it can run, but never while it is on, so it can be turned off.
+  field(c,'frameGenFoveated','<span class="tag">EXPERIMENTAL</span> Foveated frame generation',['Generates the focus area and the rest of the view separately: about half the GPU time for generated frames and less video memory.','Needs bundled Quad Views on the Pimax route and NVIDIA frame generation. A flight starts with a slightly longer hitch.'],'toggle',null,p => foveatedFgCan(p) || p.frameGenFoveated);
   // frameGenPipelinedDeepHold has no control: it follows the Smoothness buffer (on with it, off without it) and stays in
   // the profile file only (ConfigurationWriters.Ofxr writes pipelined_deep_hold only with frameGenDeepPipeline).
   // The custom limit right under the select that enables it; the refresh rate source before the value it replaces.
@@ -716,7 +718,7 @@ function buildFields() {
   field(c,'smoothCursor','Smooth mouse cursor',['The mouse cursor moves smoothly in generated frames.','It is drawn at its in-between position. Where you click doesn\'t change.'],'toggle',null,p => p.frameGen !== 'Off');
   // NVIDIA Optical Flow only: gone with FidelityFX, greyed out while frame generation is off.
   const fidelity = p => p.frameGen === 'FidelityFx';
-  segmented(field(c,'nvidiaFlowScale','Optical flow resolution','The resolution motion is estimated at (NVIDIA only). Higher costs more GPU.','select',[[50,'50% · default'],[75,'75%'],[100,'100% · full']],flow,'',fidelity),{50:'50%',75:'75%',100:'100%'});
+  segmented(field(c,'nvidiaFlowScale','Optical flow resolution',['The resolution motion is estimated at (NVIDIA only). Higher costs more GPU.','With Foveated frame generation this sets the focus area; the rest of the view always uses its own full resolution.'],'select',[[50,'50% · default'],[75,'75%'],[100,'100% · full']],flow,'',fidelity),{50:'50%',75:'75%',100:'100%'});
   segmented(field(c,'flowPreset','Optical flow quality','How carefully motion is estimated. Slower costs more GPU.','select',[['Fast','Fast'],['Medium','Medium · default'],['Slow','Slow · most analysis']],flow,'',fidelity),{Fast:'Fast',Medium:'Medium',Slow:'Slow'});
   field(c,'bidirectionalFlow','Bidirectional flow','Estimates motion forwards and backwards. Costs more GPU.','toggle',null,flow,'',fidelity);
   more = disclosure(c,'Diagnostics','Keep the defaults unless you are tracking down a problem.',p => `${['showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm'].filter(k => p[k]).length} of 4 on`);
@@ -932,6 +934,7 @@ function buildFields() {
   because(at('frameGenHudSymbology'),p => fgOff(p) ? fgWhy : ['Needs Depth boost (Perception page).','depthBoost']);
   because(at('diagnosticFrameRecords'),p => fgOff(p) ? fgWhy : 'Turn on Frame generation log to use this.');
   because(f => f.condition === flow,p => fgOff(p) ? fgWhy : 'NVIDIA Optical Flow only.');
+  because(at('frameGenFoveated'),p => fgOff(p) ? fgWhy : p.frameGen !== 'Nvidia' ? 'NVIDIA frame generation only.' : p.runtime !== 'Pimax' ? 'Pimax route only.' : ['Needs the bundled Quad Views (Quad Views page).','quadViews']);
   because(at('frameGenFactor','frameGenDeepPipeline','smoothCursor','frameGenAsyncArm','showOverlay','diagnosticRecorder'),fgWhy);
   because(at('renderedFpsCap'),'Choose Custom limit in Frame limit to use this.');
   because(at('engineTaskQueueClock','engineTimerRefreshUs'),p => !engine(p) ? engineWhy : 'Turn on Streaming timer cache to use this.');
@@ -1116,6 +1119,9 @@ async function engineAction(action, data) {
  *  UsesPerceptionLayer: it carries both). */
 const eyeTrackedVr = p => Boolean(!p.desktop && p.quadViews !== 'None' && p.gaze === 'EyeTracked');
 const usesPupilShift = p => Boolean(p.pupilShift && eyeTrackedVr(p));
+/** Foveated frame generation can run: NVIDIA frame generation, Pimax route, bundled Quad Views (VrProfile.UsesFoveatedFrameGen). */
+const foveatedFgCan = p => Boolean(!p.desktop && p.frameGen === 'Nvidia' && p.runtime === 'Pimax' && p.quadViews === 'QuadViewsFoveated' && !String(p.quadViewsLayerDirectory ?? '').trim());
+const usesFoveatedFg = p => Boolean(p.frameGenFoveated && foveatedFgCan(p));
 const usesDepthBoost = p => Boolean(p.depthBoost && eyeTrackedVr(p));
 /** The strength of the selected Depth boost mode (VrProfile.DepthBoostActiveMax). */
 const depthMax = p => p.depthBoostMode === 'Enhanced' ? p.depthBoostMax : p.depthBoostRealisticMax;
@@ -1887,6 +1893,11 @@ const FEATURE_GUIDE = [
    expect:'A clean HUD while you turn. The symbols update at DCS\'s own HUD rate, about 20 times a second.',
    cost:'About 0.15 ms of GPU and 160 MB of video memory.',
    needs:'Frame generation and Depth boost.'},
+  {section:'vr', page:'framegen', name:'Foveated frame generation', impact:'Less GPU and video memory', on:p => usesFoveatedFg(p),
+   gives:'Generated frames are made for the focus area and for the rest of the view separately, instead of for the whole image.',
+   expect:'The same image and frame rate, with more GPU time and video memory left. New: look at the edge of the focus area and at fast eye moves.',
+   cost:'A slightly longer hitch when a flight starts.',
+   needs:'NVIDIA frame generation, the Pimax route and bundled Quad Views.'},
   {section:'vr', page:'dlss', name:'DLSS 5', impact:'New look', on:p => p.neuralRendering,
    gives:'NVIDIA\'s neural rendering reworks the image; with Quad Views, only where you look.',
    expect:'A different, more natural look of light and materials. Pair it with frame generation to keep the motion smooth.',

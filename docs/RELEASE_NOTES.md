@@ -1,3 +1,7 @@
+# 0.6.7 preview
+
+**Foveated frame generation (experimental).** A new switch on the Frame generation page. With it, frames are generated for the focus area and for the rest of the view separately, instead of for the whole image: about half the GPU time for generated frames and 4 GB less video memory on the test PC. It needs the bundled Quad Views, the Pimax route and NVIDIA frame generation. Off by default; a flight starts with a slightly longer hitch. Tell me how the edge of the focus area looks, and fast eye moves.
+
 # 0.6.6 preview
 
 **Fixes:**

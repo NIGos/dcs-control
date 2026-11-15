@@ -2796,6 +2796,14 @@ Test("Other limiters and motion smoothing stay manual checks", () =>
     var checks = FramePacing.Checks(new() { FrameGen = FrameGeneration.Nvidia }, new());
     Require(checks.Single(c => c.Id == "external-limiters").State == CheckState.Manual && checks.Single(c => c.Id == "runtime-reprojection").State == CheckState.Manual);
     Require(FramePacing.Checks(new(), new()).All(c => c.Id != "runtime-reprojection"));
+    // Foveated frame generation: both halves are written together, only where it was flown; the buffer keeps the pilot's choice.
+    var fov = new VrProfile { FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.QuadViewsFoveated, FrameGenFoveated = true };
+    Require(fov.UsesFoveatedFrameGen && fov.FrameGenDeepPipeline);
+    var fovOfxr = ConfigurationWriters.Ofxr(fov);
+    Require(ConfigurationWriters.QuadViews(fov).Contains("dcsvr_two_layers=2") && fovOfxr.Contains("\nfoveated_layers=1\n") && fovOfxr.Contains("\nfoveated_uncovered_fill=2\n") && fovOfxr.Contains("\nfoveated_periphery_flow_scale=100\n") && fovOfxr.Contains("\ndeep_pipeline=1\n") && fovOfxr.Contains("\npipelined_deep_hold=1\n"), "two layers, per-layer generation, the buffer as chosen");
+    Require(ConfigurationWriters.Ofxr(fov with { BidirectionalFlow = true }).Contains("\nfoveated_uncovered_fill=1\n") && ConfigurationWriters.Ofxr(fov with { FrameGenDeepPipeline = false }).Contains("\ndeep_pipeline=0\n"), "the periphery-flow fill is not for bidirectional flow");
+    foreach (var no in new[] { fov with { FrameGenFoveated = false }, fov with { FrameGen = FrameGeneration.FidelityFx }, fov with { FrameGen = FrameGeneration.Off }, fov with { QuadViews = QuadProvider.PimaxNative }, fov with { QuadViews = QuadProvider.None }, fov with { Runtime = RuntimeKind.SboysSteamVr }, fov with { QuadViewsLayerDirectory = @"C:\other" }, fov with { Desktop = true } })
+        Require(!no.UsesFoveatedFrameGen && ConfigurationWriters.QuadViews(no).Contains("dcsvr_two_layers=0") && ConfigurationWriters.Ofxr(no).Contains("\nfoveated_layers=0\n") && ConfigurationWriters.Ofxr(no).Contains("\nfoveated_uncovered_fill=0\n"), "never one half without the other");
     // Pimax native Quad Views with frame generation and the buffer off: said once, as a warning (GitHub #23).
     var native = new VrProfile { FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.PimaxNative, FrameGenDeepPipeline = false };
     Require(FramePacing.Checks(native, new()).Single(c => c.Id == "native-quad-buffer").State == CheckState.Warning, "native Quad Views without the buffer is warned about");

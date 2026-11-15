@@ -108,6 +108,15 @@ public sealed record VrProfile
     /// they stop smearing. Needs Depth boost's dual camera (the overlay render point). "Sharp HUD" on the Framegen page, off by default.</summary>
     public bool FrameGenHudSymbology { get; init; }
     public bool UsesHudSymbology => FrameGenHudSymbology && FrameGen != FrameGeneration.Off && !Desktop && UsesDepthBoost;
+    /// <summary>Foveated frame generation: the bundled Quad Views submits the focus area and the rest of the view as two
+    /// projection layers (dcsvr_two_layers) and OFXR generates each on its own (foveated_layers), instead of generating
+    /// the composed full image. Measured 2026-11-15: about half the GPU time per generated pair and 4-5 GB less video
+    /// memory. Probed and flown on the Pimax runtime with NVIDIA Optical Flow only. The Smoothness buffer keeps the pilot's choice
+    /// (fork patch 0080 tests it with the buffer at fixed 2x, 3x and Auto between them). Experimental, off by default.</summary>
+    public bool FrameGenFoveated { get; init; }
+    /// <summary>The two halves (Quad Views and OFXR) are written together or not at all: two layers without OFXR's rule
+    /// give a wrong image on generated frames.</summary>
+    public bool UsesFoveatedFrameGen => FrameGenFoveated && FrameGen == FrameGeneration.Nvidia && !Desktop && Runtime == RuntimeKind.Pimax && UsesBundledQuadViews;
     /// <summary>OFXR smooth_cursor (fork patch 0010): generated frames find DCS's mouse cursor in the two real frames
     /// and draw it at its in-between position, so it moves at the headset's rate instead of fading between two places.
     /// Only the generated frames change; where a click lands does not. Off by default until flown.</summary>

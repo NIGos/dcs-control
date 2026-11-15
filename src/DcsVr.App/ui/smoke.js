@@ -10,7 +10,7 @@ window.runWebSmoke = async function() {
     'neuralRendering','neuralRuntimePath','keepOtherDxgi','neuralFocusArea','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity','neuralStyle',
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
-    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenDeepPipeline','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
+    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenDeepPipeline','frameGenFoveated','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
     'frameGenHudSymbology','smoothCursor','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
     'cpuBoost','boostDcsPriority','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVram','freeVramApps','freeVramReopen',
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
@@ -263,7 +263,7 @@ window.runWebSmoke = async function() {
         check('Card subtitles with more to say keep it behind More'+(bad.length ? ' ('+bad.join(', ')+')' : ''),!bad.length);
         const b = $('packageCard').querySelector('.card-heading .more-toggle'), detail = $(b.getAttribute('aria-controls')); b.click(); const opened = !detail.hidden && b.textContent === 'Less'; b.click();
         check('More works on the static cards of the page too',opened && detail.hidden && b.textContent === 'More' && detail.textContent.includes('DCS starts its log anew')); }
-      { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-engineRecordersEmulatedLists','setting-frameGenHudSymbology'];
+      { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-engineRecordersEmulatedLists','setting-frameGenHudSymbology','setting-frameGenFoveated'];
         const tags = [...document.querySelectorAll('#pages .tag')].filter(t => t.textContent.trim() === 'EXPERIMENTAL' && !t.closest('#page-guide'));
         check('EXPERIMENTAL stays on exactly its eight settings and cards',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
       ui.navigate('framegen'); const refreshInput = getComputedStyle($('input-headsetRefreshHz')).minHeight, row = getComputedStyle($('setting-headsetRefreshHz'));
