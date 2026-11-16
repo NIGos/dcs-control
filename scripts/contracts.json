@@ -48,6 +48,14 @@
         "native/dcsqvcull/src/dcsvr_pupil_fov.h"
       ],
       "sha256": "94C1E58CBA5ABE9D720A35A02BFC4B75BEAAD964BFC23CCA56A5A989625CCA3B"
+    },
+    {
+      "name": "dcsvr_depth_export.h",
+      "canonical": "native/quadviews/dcsvr_depth_export.h",
+      "copies": [
+        "native/dcsqvcull/src/dcsvr_depth_export.h"
+      ],
+      "sha256": "4C04BC3D3C7F796676F7651D9477EC597C895C564FB7B8D37FB25D1D5F6139B2"
     }
   ]
 }
