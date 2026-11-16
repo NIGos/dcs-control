@@ -2473,6 +2473,22 @@ Test("An update ended while it wrote files is seen at the next start, until a se
     AtomicFile.WriteText(Path.Combine(Directory.CreateDirectory(Path.Combine(installer.Transactions.StateDirectory, "broken")).FullName, "journal.json"), "{ not json");
     Require(!installer.Unfinished(), "an unreadable journal is not an unfinished update");
 });
+Test("Uninstall after a rollback that met a changed file: it is rolled back again first, like before an update", () =>
+{
+    var target = Path.Combine(root, "app-install/uninstall-conflicts"); var installer = new ApplicationInstaller(target);
+    installer.Install(ReleaseFixture("uninstall-conflicts-v1", "1", "first"));
+    // An install left open as far as its journal knows, and a file changed since: the rollback before the next update stops.
+    var journal = installer.Install(ReleaseFixture("uninstall-conflicts-v2", "2", "second"));
+    var store = installer.Transactions; store.Replace(journal with { Consolidated = false, Status = "applying" });
+    AtomicFile.WriteText(Path.Combine(target, "app.bin"), "held");
+    Throws<InvalidOperationException>(() => installer.Install(ReleaseFixture("uninstall-conflicts-v3", "3", "third")));
+    Require(store.List().Single().Status == "restore-conflicts" && installer.Unfinished());
+    var refused = installer.Uninstall();
+    Require(!refused.Complete && refused.Conflicts.Single().EndsWith("app.bin", StringComparison.Ordinal) && File.ReadAllText(Path.Combine(target, "app.bin")) == "held", "the changed file is named and kept");
+    // The file is as installed again (what held it let go): uninstall finishes the rollback and removes everything.
+    AtomicFile.WriteText(Path.Combine(target, "app.bin"), "second");
+    Require(installer.Uninstall().Complete && !File.Exists(Path.Combine(target, "app.bin")) && !File.Exists(Path.Combine(target, "readme.txt")) && !File.Exists(Path.Combine(target, "installation.json")), "nothing of the app is left");
+});
 Test("Application installer rejects reserved destination roots", () => Throws<InvalidDataException>(() => new ApplicationInstaller(Path.GetPathRoot(root)!)));
 Test("Application installation refuses unknown existing files", () =>
 {

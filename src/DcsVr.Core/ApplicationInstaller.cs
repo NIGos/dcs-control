@@ -48,7 +48,7 @@ public sealed class ApplicationInstaller(string destination)
         var journals = Live(Transactions.List());
         ValidateJournalScope(journals);
         // An update cut short (power loss, the setup ended) is rolled back first, so the next update can run.
-        var interrupted = journals.Where(j => j.Status is "prepared" or "applying" or "restore-conflicts").ToArray();
+        var interrupted = Interrupted(journals);
         // A reinstall takes this same path, so the message says what clears it instead (a file held open, most often).
         foreach (var journal in interrupted)
             if (Transactions.Restore(journal.Id) is { Complete: false } failed)
@@ -110,9 +110,14 @@ public sealed class ApplicationInstaller(string destination)
     /// only, never throws: the app asks at start.</summary>
     public bool Unfinished()
     {
-        try { return Live(Transactions.List()).Any(j => j.Status is "prepared" or "applying" or "restore-conflicts"); }
+        try { return Interrupted(Live(Transactions.List())).Length > 0; }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException or System.Text.Json.JsonException or NotSupportedException) { return false; }
     }
+
+    /// <summary>The journals of an install, update or rollback that began and did not end. Install and Uninstall roll
+    /// these back first; <see cref="Unfinished"/> reports them.</summary>
+    private static TransactionJournal[] Interrupted(IReadOnlyList<TransactionJournal> journals) =>
+        journals.Where(j => j.Status is "prepared" or "applying" or "restore-conflicts").ToArray();
 
     /// <summary>The version installed in <see cref="Root"/> (its ledger, installation.json); null when there is none.</summary>
     public string? InstalledVersion()
@@ -184,7 +189,7 @@ public sealed class ApplicationInstaller(string destination)
         ValidateJournalScope(journals);
         if (!journals.Any(j => j.Status != "restored")) throw new InvalidOperationException("No application installation to restore.");
         // An update cut short is rolled back first, as before an update, so its half-written files are not "modified".
-        var interrupted = journals.Where(j => j.Status is "prepared" or "applying").ToArray();
+        var interrupted = Interrupted(journals);
         foreach (var journal in interrupted)
             if (Transactions.Restore(journal.Id) is { Complete: false } partial) return partial;
         if (interrupted.Length > 0) journals = Live(Transactions.List());
