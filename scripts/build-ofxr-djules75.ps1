@@ -134,24 +134,100 @@ if ($LASTEXITCODE -ne 0) { throw 'OFXR fork configuration failed.' }
 & $wrapper cmake --build $forkBuild --parallel 4
 if ($LASTEXITCODE -ne 0) { throw 'OFXR fork build failed.' }
 # Tray lifecycle tests create a notification icon. Exclude them from offline verification.
-# Every test once, except the pacing tests (real frame timing), the tray tests (they create a notification icon) and
-# the benches (label bench: GPU times printed, nothing required; `ctest -L bench` runs them).
+# Every test once, except the timing group below (it runs alone in a second phase), the tray tests (they create a
+# notification icon) and the benches (label bench: GPU times printed, nothing required; `ctest -L bench` runs them).
 # The quotes keep the '|' from cmd: msvc.cmd passes its arguments on through %*.
+# $pacingTests only says which tests run alone, one at a time, in the second phase. It is a name match and it is wide
+# on purpose: correctness tests were named into it so they run without a neighbour (two_layers_deep_hold_*,
+# async_arm_warm_private_images*). Being in this group does NOT make a test retryable: see $retryablePacingTests.
 $pacingTests = 'triple_deep|scene_change|adaptive|deep_hold|async_arm|pipelined_wait'
 & $wrapper ctest --test-dir $forkBuild --output-on-failure --parallel 2 --timeout 300 -LE bench -E "`"tray_lifecycle|$pacingTests`""
 if ($LASTEXITCODE -ne 0) { throw 'OFXR fork tests failed.' }
 . (Join-Path $PSScriptRoot 'build-stamp.ps1')
 if ($env:DCSC_SKIP_TIMING_TESTS -eq '1') {
-    # An intermediate build while a game holds the GPU: no stamp, so build-release.ps1 refuses this DLL until a build
-    # with the pacing tests has passed.
+    # An intermediate build while a game is running (the pacing tests need a quiet CPU): no stamp, so
+    # build-release.ps1 refuses this DLL until a build with the pacing tests has passed.
     Write-Host 'Pacing tests skipped (DCSC_SKIP_TIMING_TESTS=1): this build is not stamped for a release.'
     Remove-Item -LiteralPath (Get-BuildStampPath 'ofxr') -Force -ErrorAction SilentlyContinue
     return
 }
-# The pacing tests: on a busy GPU one misses a deadline now and then, so a failing one runs again, up to 3 times in
-# all; a real regression fails every time. Each retry is logged (date, test, attempt, result) in
-# artifacts/native/ofxr-djules75-retries.log, so a test that keeps needing them shows up.
-& $wrapper ctest --test-dir $forkBuild --output-on-failure --parallel 1 --timeout 300 -LE bench -R "`"$pacingTests`""
+# The second phase. These tests run the layer on the WARP software device against a fake runtime with a 10 ms frame
+# period (tests/layer_call_chain.cpp), so what makes one miss a deadline is CPU contention on this machine (another
+# build, a game's own threads), not GPU load. A test of the retry set that fails runs again, up to 3 times in all; a
+# real regression fails every time.
+# The retry set is explicit and narrow: only tests whose verdict is a pacing measure (deadlines, missed slots, the
+# time of a 408) and that the retry log has shown to be load-sensitive. Whole names, anchored. Everything else that
+# runs in this phase fails the build at its first failure.
+$retryablePacingTests = @(
+    '^xrfg_layer_adaptive_cadence(_[a-z0-9_]+)?$'      # adaptive cadence: exit, jitter, stall, idle, reidle, pause, close, the #23 cases
+    '^xrfg_layer_pipelined_deep_hold(_off)?$'          # the 2X hold on a pipelined presenter
+    '^xrfg_layer_scene_change_(triple|adaptive)$'      # cadence across a scene change
+)
+# Never retried, whatever the list above becomes: the two-layer tests check which image, role and alpha a layer names
+# (two_layers_deep_hold_arming_single is the 0085 double arming, _roles is 0089, every two_layers_* run has the alpha
+# checks) and warm_private_images checks a start-up record. An intermittent failure there is a race in the product,
+# and a retry would pass it one run in three.
+$neverRetriedTests = 'two_layers|warm_private_images'
+function Test-PacingRetryAllowed([string]$Name) {
+    if ($Name -match $neverRetriedTests) { return $false }
+    foreach ($pattern in $retryablePacingTests) { if ($Name -match $pattern) { return $true } }
+    return $false
+}
+# The line that says why a test failed, from ctest's output (--output-on-failure): the message of the first
+# "CMake Error" after the test's result line, else the first line of its output, else the result line itself.
+function Get-CtestFailureLine([string[]]$Output, [string]$Name) {
+    $escaped = [regex]::Escape($Name)
+    $resultAt = -1
+    for ($i = 0; $i -lt $Output.Count; $i++) {
+        if ($Output[$i] -match "Test\s+#\d+:\s+$escaped\s" -and $Output[$i] -notmatch '\sPassed\s') { $resultAt = $i; break }
+    }
+    if ($resultAt -lt 0) { return 'no result line in the ctest output' }
+    $own = @(for ($i = $resultAt + 1; $i -lt $Output.Count; $i++) {
+        if ($Output[$i] -match '^\s*(Start\s+\d+:|\d+/\d+\s+Test\s+#\d+:|\d+% tests passed)') { break }
+        $Output[$i]
+    })
+    for ($i = 0; $i -lt $own.Count - 1; $i++) {
+        if ($own[$i] -match '^CMake Error') {
+            $message = @($own[($i + 1)..($own.Count - 1)] | Where-Object { $_ -and $_.Trim() }) | Select-Object -First 1
+            if ($message) { return $message.Trim() }
+        }
+    }
+    $first = @($own | Where-Object { $_ -and $_.Trim() }) | Select-Object -First 1
+    if ($first) { return $first.Trim() }
+    return ($Output[$resultAt] -replace '^\s*\d+/\d+\s+', '').Trim()
+}
+# Attempts 2 and 3 for the tests that failed attempt 1. Every attempt, the first included, is logged (date, test,
+# attempt, result, the failure line) in $LogPath. $RunOne runs one test by name and returns ExitCode and Output.
+# Returns one record per failed test: Name, Retryable, PassedAt (0 = never), Attempts.
+function Invoke-PacingRetries([string[]]$FailedTests, [string[]]$FirstOutput, [scriptblock]$RunOne, [string]$LogPath) {
+    $log = {
+        param([string]$Test, [string]$Text)
+        Add-Content -LiteralPath $LogPath -Encoding utf8 -Value ('{0} {1} {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Test, $Text)
+    }
+    foreach ($failedTest in $FailedTests) {
+        $reason = Get-CtestFailureLine $FirstOutput $failedTest
+        if (-not (Test-PacingRetryAllowed $failedTest)) {
+            & $log $failedTest "attempt 1 failed, not retried (outside the retry set): $reason"
+            [pscustomobject]@{ Name = $failedTest; Retryable = $false; PassedAt = 0; Attempts = 1 }
+            continue
+        }
+        & $log $failedTest "attempt 1 failed: $reason"
+        $passedAt = 0
+        $attempt = 1
+        while ($attempt -lt 3 -and -not $passedAt) {
+            $attempt++
+            $run = & $RunOne $failedTest
+            if ($run.ExitCode -eq 0) {
+                $passedAt = $attempt
+                & $log $failedTest "attempt $attempt passed"
+            } else {
+                & $log $failedTest "attempt $attempt failed: $(Get-CtestFailureLine @($run.Output) $failedTest)"
+            }
+        }
+        [pscustomobject]@{ Name = $failedTest; Retryable = $true; PassedAt = $passedAt; Attempts = $attempt }
+    }
+}
+$firstOutput = @(& $wrapper ctest --test-dir $forkBuild --output-on-failure --parallel 1 --timeout 300 -LE bench -R "`"$pacingTests`"" | ForEach-Object { Write-Host $_; $_ })
 if ($LASTEXITCODE -ne 0) {
     $failedList = Join-Path $forkBuild 'Testing/Temporary/LastTestsFailed.log'
     $failedTests = @(if (Test-Path -LiteralPath $failedList) {
@@ -159,16 +235,25 @@ if ($LASTEXITCODE -ne 0) {
     })
     if ($failedTests.Count -eq 0) { throw 'OFXR fork pacing tests failed (no failed test listed).' }
     $retryLog = Join-Path $workspaceRoot 'artifacts/native/ofxr-djules75-retries.log'
-    foreach ($failedTest in $failedTests) {
-        $passed = $false
-        for ($attempt = 2; $attempt -le 3 -and -not $passed; $attempt++) {
-            & $wrapper ctest --test-dir $forkBuild --output-on-failure --timeout 300 -R "`"^$failedTest$`""
-            $passed = $LASTEXITCODE -eq 0
-            Add-Content -LiteralPath $retryLog -Encoding utf8 -Value ('{0} {1} attempt {2} {3}' -f
-                (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $failedTest, $attempt, $(if ($passed) { 'passed' } else { 'failed' }))
-        }
-        if (-not $passed) { throw "OFXR fork pacing test $failedTest failed 3 times." }
+    # --no-tests=error: a name that matches no test is a failure, not an empty run that exits 0.
+    $runOne = {
+        param([string]$name)
+        $lines = @(& $wrapper ctest --test-dir $forkBuild --output-on-failure --timeout 300 --no-tests=error -R "`"^$name$`"" | ForEach-Object { Write-Host $_; $_ })
+        [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $lines }
     }
+    $retried = @(Invoke-PacingRetries $failedTests $firstOutput $runOne $retryLog)
+    Write-Host ''
+    Write-Host "OFXR fork pacing tests, second phase: $($retried.Count) failed their first attempt (log: artifacts/native/ofxr-djules75-retries.log)."
+    foreach ($entry in $retried) {
+        $outcome = if (-not $entry.Retryable) { 'NOT RETRIED (outside the retry set): failed' }
+            elseif ($entry.PassedAt) { "needed a retry: passed at attempt $($entry.PassedAt) of 3" }
+            else { 'FAILED 3 times' }
+        Write-Host "  $($entry.Name): $outcome"
+    }
+    $broken = @($retried | Where-Object { -not $_.PassedAt })
+    if ($broken.Count) { throw "OFXR fork tests failed in the second phase: $(($broken | ForEach-Object Name) -join ', ')." }
+} else {
+    Write-Host 'OFXR fork pacing tests, second phase: all passed at the first attempt, nothing retried.'
 }
 # Built and tested: build-release.ps1 ships this DLL only while its sources and patches match this stamp.
 Save-BuildStamp 'ofxr'
