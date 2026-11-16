@@ -4113,13 +4113,41 @@ Test("Launch updates only Pimax Play's focus values in place, and Back to stock 
 });
 // ---- Saved DLSS 5 runtime copy ------------------------------------------------------------------------------------
 // The user-supplied NVIDIA runtime is never in the repository: tests that need a genuinely signed file use
-// DCSVR_TEST_NEURAL_PATH (as the release and WebView checks do) or the usual download folder, and skip without it.
+// DCSVR_TEST_NEURAL_PATH (as the release and WebView checks do), then the copy kept in the neutral demo folder
+// (DcsVrDemo\Downloads at the root of the system drive or of this checkout's drive: scripts/build-release.ps1 makes its
+// demo folder at the root of the checkout's drive), then the usual download folder, and skip without one. The demo
+// folder is nobody's own, so its file counts only as NVIDIA's signed x64 runtime of a supported version.
 string? RealNeuralRuntime()
 {
-    foreach (var candidate in new[] { Environment.GetEnvironmentVariable("DCSVR_TEST_NEURAL_PATH"), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "DLSSNR Package", "nvngx_dlssnr.dll") })
-        if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate)) return Path.GetFullPath(candidate);
+    var demo = new[] { Path.GetPathRoot(Environment.SystemDirectory), Path.GetPathRoot(workspace) }.Where(r => !string.IsNullOrEmpty(r)).Distinct(StringComparer.OrdinalIgnoreCase)
+        .Select(r => ((string?)Path.Combine(r!, "DcsVrDemo", "Downloads", "nvngx_dlssnr.dll"), true));
+    return PickNeuralRuntime([(Environment.GetEnvironmentVariable("DCSVR_TEST_NEURAL_PATH"), false), .. demo,
+        (Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "DLSSNR Package", "nvngx_dlssnr.dll"), false)]);
+}
+/// <summary>The first candidate that exists; one marked Signed must also be NVIDIA's signed x64 runtime of a supported version.</summary>
+string? PickNeuralRuntime(IEnumerable<(string? Path, bool Signed)> candidates)
+{
+    foreach (var (candidate, signed) in candidates)
+    {
+        if (string.IsNullOrWhiteSpace(candidate) || !File.Exists(candidate)) continue;
+        if (signed && !(NativeBinary.Inspect(candidate) is { IsX64: true, TrustedSignature: true } found && NativeBinary.IsNvidiaSigner(found.Signer) && NativeBinary.SupportsNeuralContract(found.Version))) continue;
+        return Path.GetFullPath(candidate);
+    }
     return null;
 }
+Test("The tests' DLSS 5 runtime: the demo folder's file counts only when NVIDIA signed it", () =>
+{
+    var junk = Make("neural-candidates/DcsVrDemo/Downloads/nvngx_dlssnr.dll", "MZ not a real runtime"); var other = Make("neural-candidates/own/nvngx_dlssnr.dll", "the pilot's own choice");
+    var missing = Path.Combine(root, "neural-candidates/none/nvngx_dlssnr.dll");
+    Require(PickNeuralRuntime([(null, false), ("", false), (missing, false), (junk, true), (other, false)]) == other, "An unsigned file in the demo folder is passed over");
+    Require(PickNeuralRuntime([(missing, false), (junk, true)]) is null, "Nothing else: no runtime, the tests skip");
+    Require(PickNeuralRuntime([(other, false), (junk, true)]) == other && PickNeuralRuntime([(junk, false)]) == junk, "A named file is taken as it is, first come first");
+    // A signed x64 DLL that is not NVIDIA's (the .NET runtime's own) is not the runtime either.
+    var signedOther = Path.Combine(root, "neural-candidates/signed/nvngx_dlssnr.dll"); Directory.CreateDirectory(Path.GetDirectoryName(signedOther)!);
+    File.Copy(Path.Combine(System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory(), "coreclr.dll"), signedOther, true);
+    Require(NativeBinary.Inspect(signedOther) is { IsX64: true, TrustedSignature: true } && PickNeuralRuntime([(signedOther, true)]) is null, "Signed by someone else");
+    if (RealNeuralRuntime() is { } real && !NativeBinary.IsModifiedRuntime(NativeBinary.Inspect(real))) Require(PickNeuralRuntime([(real, true), (other, false)]) == real, "NVIDIA's signed runtime passes the check");
+});
 /// <summary>A stereo DLSS 5 distribution (Cheeky components with their hash files) and DCS fixture for ControlService.Preview.</summary>
 (ControlService Service, InventorySnapshot Inventory, string Options) NeuralFixture(string name)
 {
@@ -4236,7 +4264,8 @@ Test("Saved runtime: Detect saves a found runtime and uses the copy for a profil
     var sources = new DetectionSources { SteamVrServerLog = Path.Combine(root, "missing.txt"), PimaxPlaySettings = Path.Combine(root, "missing.json"), NeuralRuntimeFolders = [Path.GetDirectoryName(folder)!], ProcessRunning = _ => false, SavedRuntimes = store };
     var first = SetupDetection.Detect(stereoNeural, new(), sources);
     Require(store.Current() is { } copy && copy.OriginalPath == found && first.Profile.NeuralRuntimePath is null, "Found file saved, profile uses the copy");
-    Require(first.Detected.Single(d => d.Field == "neuralRuntimePath").Value.StartsWith("Saved copy · version 310.8"));
+    // Whichever supported version the runtime at hand is (310.8 or 310.9).
+    Require(first.Detected.Single(d => d.Field == "neuralRuntimePath").Value is var shown && shown.StartsWith("Saved copy · version 310", StringComparison.Ordinal) && NativeBinary.SupportsNeuralContract(shown["Saved copy · version ".Length..]), "The saved copy's version is shown");
     File.Delete(found);
     var moved = SetupDetection.Detect(stereoNeural with { NeuralRuntimePath = found }, new(), sources with { NeuralRuntimeFolders = [] });
     Require(moved.Profile.NeuralRuntimePath is null && moved.Detected.Any(d => d.Field == "neuralRuntimePath"), "A profile whose file is gone switches to the copy");
