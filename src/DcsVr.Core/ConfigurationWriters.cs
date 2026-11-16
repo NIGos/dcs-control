@@ -66,6 +66,14 @@ public static class ConfigurationWriters
         PublishGaze=1
         """ : "";
 
+    /// <summary>Quad Views' settings.cfg with a vertical offset (<see cref="VrProfile.QuadVerticalOffset"/>): the same value
+    /// for the fixed focus and the eye-tracked one, like the focus sizes, so the focus does not jump when the gaze is lost.
+    /// Written only when it is not 0: without it the file is byte for byte what it was, and the layer's own default applies.
+    /// Bundled Quad Views only: its gaze export gives the pupil shift layer the gaze before the offset, while with another
+    /// build without that export the layer reads the gaze from the focus views' centres, which the offset would move.</summary>
+    private static string QuadOffsetLines(VrProfile p) => p.QuadVerticalOffset == 0 || !double.IsFinite(p.QuadVerticalOffset) || !p.UsesBundledQuadViews ? "" :
+        $"\nvertical_fixed_offset={Number(Math.Clamp(p.QuadVerticalOffset, -.5, .5))}\nvertical_focus_offset={Number(Math.Clamp(p.QuadVerticalOffset, -.5, .5))}";
+
     /// <summary>PupilShift.ini with the Periphery DLSS preset (<see cref="VrProfile.UsesPeripheryDlssPreset"/>): the layer
     /// hides the driver profile's forced DLSS preset from DLSS inside DCS. Written only then: off, the file stays as it was.</summary>
     private static string DlssPresetLines(VrProfile p) => p.UsesPeripheryDlssPreset ? """
@@ -485,7 +493,7 @@ public static class ConfigurationWriters
         horizontal_fixed_section={Number(Math.Min(p.FoveaWidth, .9))}
         vertical_fixed_section={Number(Math.Min(p.FoveaHeight, .9))}
         horizontal_focus_section={Number(Math.Min(p.FoveaWidth, .9))}
-        vertical_focus_section={Number(Math.Min(p.FoveaHeight, .9))}
+        vertical_focus_section={Number(Math.Min(p.FoveaHeight, .9))}{QuadOffsetLines(p)}
         force_no_eye_tracking={(p.Gaze == GazeMode.Fixed ? 1 : 0)}
         turbo_mode={(p.UsesQuadTurbo ? 1 : 0)}
         dcsvr_two_layers={(p.UsesFoveatedFrameGen ? 2 : 0)}

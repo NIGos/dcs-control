@@ -133,6 +133,17 @@ public sealed record VrProfile
     // 0.1919) converted the same way PimaxFovea converts them: 0.57 x 0.34 focus at 1.125x, periphery 0.19.
     public double FoveaWidth { get; init; } = 0.57;
     public double FoveaHeight { get; init; } = 0.34;
+    /// <summary>Quad Views' vertical_focus_offset (eye-tracked) and vertical_fixed_offset (fixed focus), in the layer's own
+    /// units: added to the gaze point (or the resting point) in the eye view's normalised coordinates, where the whole
+    /// view is 2 high and up is positive. So a negative value moves the focus area down, and -0.1 is 5% of the view's
+    /// height. The layer takes -0.5 to 0.5 (a quarter of the view either way); Pimax Play shows the same value as its
+    /// Vertical Offset, -100 to 100 (<see cref="PimaxPlayUnits.OffsetFromStored"/>). One of the profile's own focus
+    /// values ("Set here"); 0, the default, writes nothing and is the layer as it was (GitHub #24).</summary>
+    public double QuadVerticalOffset { get; init; }
+    /// <summary>How far from the focus area's centre, up or down, the image is still fully the focus view's, in the units
+    /// of <see cref="QuadVerticalOffset"/>: the focus half-height (its share of the view, capped at 0.9 by the layer)
+    /// less the edge band, which Quad Views' composition fades over 2 × edge blending of the half-height (0.01 to 0.95).</summary>
+    public static double QuadSharpHalfHeight(VrProfile p) => Math.Min(p.FoveaHeight, .9) * (1 - Math.Clamp(2 * p.QuadEdgeBlend, .01, .95));
     public double PeripheralScale { get; init; } = 0.19;
     public double QuadFocusScale { get; init; } = 1.125;
     public double QuadSharpening { get; init; } = 0.7;

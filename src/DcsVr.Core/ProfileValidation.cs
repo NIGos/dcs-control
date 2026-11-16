@@ -61,6 +61,8 @@ public static class ProfileValidation
             Error("enum", "The profile contains an unrecognized choice.");
         Range("fovea-width", profile.FoveaWidth, .1, 1);
         Range("fovea-height", profile.FoveaHeight, .1, 1);
+        if (!double.IsFinite(profile.QuadVerticalOffset) || profile.QuadVerticalOffset is < -.5 or > .5)
+            Error("quad-vertical-offset", "Vertical offset: allowed range -100 to 100.");
         Range("peripheral-scale", profile.PeripheralScale, .15, 1);
         Range("quad-focus-scale", profile.QuadFocusScale, .5, 2);
         Range("quad-sharpening", profile.QuadSharpening, 0, 1);
@@ -230,6 +232,11 @@ public static class ProfileValidation
             Error("monitor-mode", "Select a monitor mode from the list for Lower the monitor while flying.");
         if (profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory) && (profile.FoveaWidth > .9 || profile.FoveaHeight > .9))
             issues.Add(new("quad-coverage-cap", IssueSeverity.Warning, "Bundled Quad Views renders a focus area of at most 90% of the view in each direction, which is Horizontal and Vertical FOV 10% in Pimax Play's Quick units. Lower values stay in the profile but are rendered as 10%."));
+        // The focus area is fully sharp up to 1 - 2 x edge blending of its half-height (Quad Views' composition), and the
+        // offset is in the same units as that half-height: beyond it the point looked at is in the fading edge or outside.
+        if (profile.UsesBundledQuadViews && !PimaxFovea.UsesPimaxPlay(profile) && double.IsFinite(profile.QuadVerticalOffset)
+            && Math.Abs(profile.QuadVerticalOffset) is > 0 and <= .5 && Math.Abs(profile.QuadVerticalOffset) >= VrProfile.QuadSharpHalfHeight(profile) - 1e-9)
+            issues.Add(new("quad-offset-gaze", IssueSeverity.Warning, FormattableString.Invariant($"Vertical offset {PimaxPlayUnits.JsRound(PimaxPlayUnits.OffsetFromStored(profile.QuadVerticalOffset))} moves the focus area so far that {(profile.Gaze == GazeMode.EyeTracked ? "the point you look at" : "the middle of the view")} is no longer in full detail. With this Vertical FOV and Focus edge blending, stay within ±{Math.Max(0, Math.Ceiling(PimaxPlayUnits.OffsetFromStored(VrProfile.QuadSharpHalfHeight(profile)) - 1e-6) - 1)}.")));
         if (profile.FrameGenFactor is not (VrProfile.FrameGenAuto or 2 or 3))
             Error("framegen-factor", "Select Auto, 2× or 3× for Generated frames.");
         // In-flight keys: any key with Ctrl/Alt/Shift (or an F-key, Pause, Scroll Lock … alone). A key DCS binds by

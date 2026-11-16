@@ -851,7 +851,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         if (applied.Fovea is not { } written) return PimaxFovea.ChangedSinceApply(profile) is null;
         var now = resolved.Profile;
         if (PimaxFovea.SameFovea(now, written)) return true;
-        var before = profile with { FoveaWidth = written.FoveaWidth, FoveaHeight = written.FoveaHeight, QuadFocusScale = written.QuadFocusScale, PeripheralScale = written.PeripheralScale, QuadEdgeBlend = written.QuadEdgeBlend };
+        var before = profile with { FoveaWidth = written.FoveaWidth, FoveaHeight = written.FoveaHeight, QuadFocusScale = written.QuadFocusScale, PeripheralScale = written.PeripheralScale, QuadEdgeBlend = written.QuadEdgeBlend, QuadVerticalOffset = written.QuadVerticalOffset };
         if (profile.UsesCheeky && ConfigurationWriters.Cheeky(before) != ConfigurationWriters.Cheeky(now)) return false;
         if (ProfileValidation.Validate(ResolveNeuralRuntime(now)).Any(i => i.Severity == IssueSeverity.Error)) return false;
         var source = Path.Combine(DistributionRoot, "components/quadviews/settings.cfg");
@@ -868,8 +868,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 (foveaFile, utf8.GetBytes(JsonData.Serialize(AppliedFovea.From(now, pimax.Stamp))))]);
         }
         catch (Exception e) when (e is IOException or InvalidOperationException or InvalidDataException or UnauthorizedAccessException) { return false; }
-        message = pimax.Preset ? $"Pimax uses its Quad View {pimax.Short}, which cannot be read: focus updated to this profile's own values."
-            : $"Pimax Play changed: focus updated to {pimax.Play.Short}.";
+        message = PimaxFovea.Updated(pimax, profile.Gaze);
         return true;
     }
 
