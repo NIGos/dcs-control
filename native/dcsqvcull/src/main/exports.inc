@@ -101,7 +101,7 @@ extern "C" __declspec(dllexport) int DcsQvPayload_Start(const DcsQvLoaderApi* ap
   g_api = api;
   g_dir = api->dir;
   StartAsyncLog();  // R90: DCS threads' lines through the ring from here
-  Log("payload: started (build %s %s)", __DATE__, __TIME__);
+  Log("payload: started");  // no build date or time here: they made every build of the same sources a different DLL
   HANDLE t = CreateThread(nullptr, 0, qvexit::Thread<WorkerThread>, nullptr, 0, nullptr);
   if (!t) return 2;
   g_workerThread = t;  // joined by DcsQvPayload_Stop
