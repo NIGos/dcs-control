@@ -8,6 +8,8 @@
 
 **Vertical offset for the focus area.** With **Focus area values** on *Set here*, the Quad Views page has a new **Vertical offset** next to Horizontal and Vertical FOV: negative moves the focus area below where you look, positive above it. In an aircraft, about -10 to -20 keeps the gauges sharp while you look outside. It uses Pimax Play's Vertical Offset scale (100 is a quarter of the view's height), works with an eye-tracked and a fixed focus area, and the Coverage preview shows the shift. At 0, the default, nothing changes (GitHub #24).
 
+**Pimax's Quad View presets with bundled Quad Views.** With **Focus area values** on *From Pimax Play* and Pimax on a preset (Performance, Balanced, Quality or Extreme), bundled Quad Views now renders that preset as Pimax's own Quad Views does: a focus area 46% × 45% of the view, at the preset's center and peripheral resolution. Before, a preset fell back to the profile's own values. The first Launch DCS after the update writes the new values and says so. The Quad Views page, the Coverage preview and the Overview now state the real focus size in percent of the view, and the preset's name. With Pimax on Custom nothing changes: the focus area is the number Pimax Play shows (30 is 30% of the view). Pimax's own Quad Views counts that number the other way (30 renders a focus 70% of the view), and the page says so.
+
 **Fixes:**
 - With **Smoothness buffer** on, a short run of heavy frames (opening the F10 map, for example) could leave DCS at about 41 FPS instead of 45 with repeated frames, for up to a minute. Frame generation now recovers at once.
 - With foveated frame generation, a loading screen at the wrong moment while a flight started could leave the whole flight without generated frames.
