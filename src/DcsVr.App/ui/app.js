@@ -701,7 +701,7 @@ function buildFields() {
   segmented(field(c,'frameGenPassThrough','Stop generating',['When DCS\'s own frames go straight to the headset. Applies at the next DCS start.','Steady: only with plenty of room, rarely on a PC that just holds the refresh rate. Balanced: when DCS looks able to hold the refresh rate, as long as frames arrive on time. Prefer refresh rate: tries whenever it might hold, and generates again only when frames come late. A try that fails is not repeated for a while, and after a few failed tries not until the next mission or a few clean minutes.'],'select',[['Steady','Steady'],['Balanced','Balanced · default'],['PreferRefresh','Prefer refresh rate']],p => usesAdaptiveCadence(p)),{Steady:'Steady',Balanced:'Balanced',PreferRefresh:'Prefer refresh rate'});
   field(c,'frameGenDeepPipeline','Smoothness buffer',['Smoother with uneven DCS frame times, with a little more latency.','Holds one extra frame: about 11 ms more latency at 90 Hz while frames are generated. In 3× it holds it only while frames keep arriving late.'],'toggle',null,p => p.frameGen !== 'Off');
   // Greyed out until it can run, but never while it is on (ProfileValidation's foveated-fg-needs says why), so it can be turned off.
-  field(c,'frameGenFoveated','<span class="tag">EXPERIMENTAL</span> Foveated frame generation',['Generates the focus area and the rest of the view separately: about half the GPU time for generated frames and less video memory.','Needs bundled Quad Views on the Pimax route and NVIDIA frame generation. Helps most with a small focus area; with a very large one it can cost more than it saves. A flight starts with a slightly longer hitch.'],'toggle',null,p => p.frameGen !== 'Off' && (foveatedFgCan(p) || p.frameGenFoveated));
+  field(c,'frameGenFoveated','<span class="tag">EXPERIMENTAL</span> Foveated frame generation',['Generates the focus area and the rest of the view separately: about half the GPU time for generated frames and less video memory.','Needs bundled Quad Views on the Pimax route and NVIDIA frame generation. Helps most with a small focus area; with a very large one it can cost more than it saves. The loading screen pauses once for half a second.'],'toggle',null,p => p.frameGen !== 'Off' && (foveatedFgCan(p) || p.frameGenFoveated));
   // frameGenPipelinedDeepHold has no control: it follows the Smoothness buffer (on with it, off without it) and stays in
   // the profile file only (ConfigurationWriters.Ofxr writes pipelined_deep_hold only with frameGenDeepPipeline).
   // The custom limit right under the select that enables it; the refresh rate source before the value it replaces.
@@ -1896,7 +1896,7 @@ const FEATURE_GUIDE = [
   {section:'vr', page:'framegen', name:'Foveated frame generation', impact:'Less GPU and video memory', on:p => usesFoveatedFg(p),
    gives:'Generated frames are made for the focus area and for the rest of the view separately, instead of for the whole image.',
    expect:'The same image and frame rate, with more GPU time and video memory left. New: look at the edge of the focus area and at fast eye moves.',
-   cost:'A slightly longer hitch when a flight starts. Little or no gain with a very large focus area.',
+   cost:'Little or no gain with a very large focus area. One half-second pause on the loading screen.',
    needs:'NVIDIA frame generation, the Pimax route and bundled Quad Views.'},
   {section:'vr', page:'dlss', name:'DLSS 5', impact:'New look', on:p => p.neuralRendering,
    gives:'NVIDIA\'s neural rendering reworks the image; with Quad Views, only where you look.',

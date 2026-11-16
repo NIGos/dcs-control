@@ -366,6 +366,8 @@ public static class ConfigurationWriters
         foveated_layers={(p.UsesFoveatedFrameGen ? 1 : 0)}
         foveated_periphery_flow_scale=100
         foveated_uncovered_fill={(p.UsesFoveatedFrameGen ? p.BidirectionalFlow ? 1 : 2 : 0)}
+        warm_private_images={(p.UsesFoveatedFrameGen ? 1 : 0)}
+        lazy_runtime_reclaim_ms={(p.UsesFoveatedFrameGen ? 60000 : 5000)}
         d3d11_bridge={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}
         backend={(p.FrameGen == FrameGeneration.FidelityFx ? "fidelityfx" : "nvidia")}
         nvidia_preset={p.FlowPreset.ToString().ToLowerInvariant()}

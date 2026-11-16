@@ -41,6 +41,9 @@ constexpr wchar_t kUninstallerName[] = L"Uninstall DCS Control.exe";
 constexpr wchar_t kDefaultUninstallKey[] = L"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\DcsControl";
 constexpr char kMarker[8] = {'D', 'C', 'S', 'C', 'S', 'F', 'X', '1'};
 constexpr size_t kTrailer = 32 + 8 + 8 + 8;  // SHA-256, offset, length, marker
+// Part of the line the program (DcsVr.Cli app-install) prints once the application files are in place; a test keeps
+// the two in step.
+constexpr char kPlacedLine[] = " application files. Recovery transaction: ";
 
 struct Options {
     bool update = false, quiet = false, relaunch = false, noLaunch = false, skipPrerequisites = false;
@@ -510,9 +513,12 @@ void Install(const Options& options, Progress& progress) {
         ok = code == 0;
         if (!ok) {
             const std::wstring last = LogTail(4096, true);
-            // The installer's last steps (shortcuts, the Settings > Apps entry) run after the files are in place.
+            // The installer's last steps (shortcuts, the Settings > Apps entry) run after the files are in place, and
+            // the program says so in this run's log (kPlacedLine). The ledger alone does not tell: a setup run over the
+            // same version finds that version there before anything was written.
             const std::string ledger = ReadBytes(options.destination + L"\\installation.json", 1 << 20);
-            const bool placed = ledger.find("\"" DCSC_VERSION_TEXT "\"") != std::string::npos || ledger.find("\"version\": \"" DCSC_VERSION_TEXT "\"") != std::string::npos;
+            const bool placed = ReadBytes(g_log, 1 << 16).find(kPlacedLine) != std::string::npos
+                && (ledger.find("\"" DCSC_VERSION_TEXT "\"") != std::string::npos || ledger.find("\"version\": \"" DCSC_VERSION_TEXT "\"") != std::string::npos);
             error = L"The installer stopped" + (last.empty() ? std::wstring(L".") : L": " + last) + (placed
                 ? L"\n\nDCS Control " DCSC_VERSION_TEXT L" is installed, but its shortcuts or its Settings \u2192 Apps entry may be missing. Run the setup again to complete them."
                 : L"\n\nThe installation was rolled back: the version you had, if any, is unchanged.");

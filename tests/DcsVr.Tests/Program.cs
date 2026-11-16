@@ -2835,6 +2835,9 @@ Test("Other limiters and motion smoothing stay manual checks", () =>
     var fovOfxr = ConfigurationWriters.Ofxr(fov);
     Require(ConfigurationWriters.QuadViews(fov).Contains("dcsvr_two_layers=2") && fovOfxr.Contains("\nfoveated_layers=1\n") && fovOfxr.Contains("\nfoveated_uncovered_fill=2\n") && fovOfxr.Contains("\nfoveated_periphery_flow_scale=100\n") && fovOfxr.Contains("\ndeep_pipeline=1\n") && fovOfxr.Contains("\npipelined_deep_hold=1\n"), "two layers, per-layer generation, the buffer as chosen");
     Require(ConfigurationWriters.Ofxr(fov with { BidirectionalFlow = true }).Contains("\nfoveated_uncovered_fill=1\n") && ConfigurationWriters.Ofxr(fov with { FrameGenDeepPipeline = false }).Contains("\ndeep_pipeline=0\n"), "the periphery-flow fill is not for bidirectional flow");
+    // A flight starts with a shorter hitch when the private images are named once during the loading screen and the
+    // runtime swapchains are kept through the load (measured 2026-11-16: 105 ms against 483-528).
+    Require(fovOfxr.Contains("\nwarm_private_images=1\n") && fovOfxr.Contains("\nlazy_runtime_reclaim_ms=60000\n") && ConfigurationWriters.Ofxr(fov with { FrameGenFoveated = false }).Contains("\nwarm_private_images=0\n") && ConfigurationWriters.Ofxr(fov with { FrameGenFoveated = false }).Contains("\nlazy_runtime_reclaim_ms=5000\n"), "the start-up keys go with foveated frame generation only");
     foreach (var no in new[] { fov with { FrameGenFoveated = false }, fov with { FrameGen = FrameGeneration.FidelityFx }, fov with { FrameGen = FrameGeneration.Off }, fov with { QuadViews = QuadProvider.PimaxNative }, fov with { QuadViews = QuadProvider.None }, fov with { Runtime = RuntimeKind.SboysSteamVr }, fov with { QuadViewsLayerDirectory = @"C:\other" }, fov with { Desktop = true } })
         Require(!no.UsesFoveatedFrameGen && ConfigurationWriters.QuadViews(no).Contains("dcsvr_two_layers=0") && ConfigurationWriters.Ofxr(no).Contains("\nfoveated_layers=0\n") && ConfigurationWriters.Ofxr(no).Contains("\nfoveated_uncovered_fill=0\n"), "never one half without the other");
     // On where it cannot run: the profile says so (the switch stays on, so it can be turned off); not while frame generation is off.
@@ -4359,6 +4362,35 @@ Test("The installer script ends a failure with its cause as the last line, which
     var thrown = Run("thrown", @"C:\dcs<control");
     Require(thrown.Code == 1 && Plain(thrown.Lines) && thrown.Lines[^1].Contains("path", StringComparison.OrdinalIgnoreCase), string.Join(" | ", thrown.Lines));
     Require(!Directory.Exists(Path.Combine(root, "installer-script", "installed")), "nothing was installed");
+});
+Test("The setup's failure page says this version is installed only after the program's own line", () =>
+{
+    var cli = System.Reflection.Assembly.GetExecutingAssembly().GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+        .Cast<System.Reflection.AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "DcsVrCliPath")?.Value;
+    if (cli is null || !File.Exists(cli)) { Skip("the CLI built with the tests was not found (" + (cli ?? "no DcsVrCliPath") + ")"); return; }
+    // What the setup looks for in its log before it says "installed, but its shortcuts ... may be missing".
+    var setup = File.ReadAllText(Path.Combine(workspace, "native", "setup", "setup.cpp"));
+    var declared = System.Text.RegularExpressions.Regex.Match(setup, "constexpr char kPlacedLine\\[\\] = \"([^\"]+)\";");
+    Require(declared.Success && setup.Contains("ReadBytes(g_log, 1 << 16).find(kPlacedLine)"), "the setup decides by the program's line in this run's log");
+    var line = declared.Groups[1].Value;
+    (int Code, string Output, string Error) Install(string release, string destination)
+    {
+        var start = new ProcessStartInfo(cli) { UseShellExecute = false, RedirectStandardError = true, RedirectStandardOutput = true, CreateNoWindow = true };
+        foreach (var argument in new[] { "app-install", "--source", release, "--destination", destination }) start.ArgumentList.Add(argument);
+        using var process = Process.Start(start)!;
+        var error = process.StandardError.ReadToEndAsync(); var output = process.StandardOutput.ReadToEnd();
+        if (!process.WaitForExit(120000)) { process.Kill(true); throw new Exception("app-install timed out"); }
+        return (process.ExitCode, output, error.Result);
+    }
+    var release = ReleaseFixture("placed-line", "9.9.9", "one"); var destination = Path.Combine(root, "placed-line-installed");
+    var first = Install(release, destination);
+    Require(first.Code == 0 && first.Output.Contains(line), "the program says when the files are in place: " + first.Output + first.Error);
+    // The same version again over a file changed since: refused before anything is written. The ledger already names
+    // this version, and the line is not there.
+    File.AppendAllText(Path.Combine(destination, "readme.txt"), "edited");
+    var refused = Install(release, destination);
+    Require(refused.Code == 1 && !refused.Output.Contains(line) && !refused.Error.Contains(line) && refused.Error.Contains("Modified or missing application file retained")
+        && File.ReadAllText(Path.Combine(destination, "installation.json")).Contains("9.9.9"), refused.Output + refused.Error);
 });
 Test("A setup that was ended leaves its unpacked package in the temporary folder: old ones are removed, nothing else", () =>
 {
