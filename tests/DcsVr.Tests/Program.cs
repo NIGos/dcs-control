@@ -2818,6 +2818,9 @@ Test("Profiles saved with settings that no longer exist still load", () =>
     var obsolete = "\"externalLimiter\": \"Active\", \"externalLimiterFps\": 30, \"runtimeReprojection\": \"Off\", \"experimentalAcknowledged\": true, \"sboysDriverDirectory\": \"C:\\\\Sboys\", \"ExperimentalAcknowledged\": false, \"tracking\": \"Slam\", ";
     var json = JsonData.Serialize(profile).Insert(1, obsolete);
     Require(JsonData.Deserialize<VrProfile>(json) == profile, "profile.json");
+    // The headset tracking every profile carried up to 0.6.6, whatever it said and however the key was cased.
+    foreach (var tracking in new[] { "\"tracking\": \"Unknown\", ", "\"tracking\": \"Lighthouse\", ", "\"Tracking\": \"Slam\", ", "\"tracking\": null, " })
+        Require(JsonData.Deserialize<VrProfile>(JsonData.Serialize(profile).Insert(1, tracking)) == profile, "a profile saved with " + tracking);
     var draft = new SavedDraft(profile, null, null, DateTimeOffset.UnixEpoch);
     var draftJson = JsonData.Serialize(draft).Replace("\"profile\": {", "\"profile\": {" + obsolete);
     Require(draftJson.Contains("sboysDriverDirectory") && JsonData.Deserialize<SavedDraft>(draftJson).Profile == profile, "draft.json");
