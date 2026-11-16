@@ -1,0 +1,71 @@
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+index eddb1d0..6190e04 100644
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -2455,6 +2455,17 @@ struct LeaderLead {
+ 
+     void reset() noexcept { *this = LeaderLead{}; }
+ 
++    // A scene change (the layer's reset_triple_state_locked): the window
++    // being filled is the old scene's, and so is the lateness a raise still
++    // to be judged was measured against (bugfix round: it was kept, and the
++    // new scene's first window could take the raise back and hold for ten
++    // windows on that comparison). The lead and its hold stay.
++    void scene_changed() noexcept {
++        count = 0;
++        raise_step = 0;
++        raise_from = 0;
++    }
++
+     // The most the release can lead by: every presenter frame of the
+     // application frame but one.
+     [[nodiscard]] static constexpr Nanoseconds ceiling(
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 4bc5737..1cffbee 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -12921,7 +12921,7 @@ void reset_triple_state_locked(SessionState& state) noexcept {
+     // lead itself and the runtime's latch stay: the runtime is the same
+     // one, and the lead follows the new scene's lateness in a window.
+     state.leader_hand_overs.clear();
+-    state.leader_lead.count = 0;
++    state.leader_lead.scene_changed();
+ }
+ 
+ [[nodiscard]] bool start_continuous_presenter(
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+index 988501d..b0150ce 100644
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -4218,6 +4218,31 @@ void leader_lead_tests() {
+         run(lead, -20 * kMillisecond, 3'000, 3, -100 * kMillisecond, nullptr, nullptr, nullptr);
+         require(lead.lead == 0, "lead: back to zero with room to spare");
+     }
++    {
++        // Bugfix round (review finding 6): a raise, then a scene change
++        // before the window that would judge it. The new scene is heavier:
++        // its first synthetic is 5 ms late with the 6 ms of lead in force.
++        // That is the new scene's lateness, not the raise having bought
++        // nothing: the lead grows by it, and is not taken back and held for
++        // ten windows on a comparison with the old scene.
++        constexpr Nanoseconds kPeriod = 11'111'111;
++        LeaderLead lead{};
++        LeaderLead::Step step{};
++        for (std::uint32_t index = 0; index < LeaderLead::kWindowFrames; ++index) {
++            step = lead.observe(6 * kMillisecond, kPeriod, 3, true);
++        }
++        require(step.reason == LeaderLead::Reason::raised && lead.lead == 6 * kMillisecond,
++            "lead: raised by the first window's lateness");
++        lead.scene_changed();
++        step = LeaderLead::Step{};
++        for (std::uint32_t index = 0;
++             index < LeaderLead::kSettleFrames + LeaderLead::kWindowFrames; ++index) {
++            step = lead.observe(5 * kMillisecond, kPeriod, 3, true);
++        }
++        require(step.closed && step.reason == LeaderLead::Reason::raised &&
++                lead.lead == 11 * kMillisecond && lead.hold == 0,
++            "lead: a scene change does not have the old scene's raise judged on the new one");
++    }
+     {
+         // Lateness the release does not move (the frame is bound by
+         // something else): the raise is taken back and not tried again for
