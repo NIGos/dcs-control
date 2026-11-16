@@ -31,7 +31,10 @@ public sealed class DraftStore(string stateRoot)
         }
         try
         {
-            var saved = JsonData.Deserialize<SavedDraft>(new System.Text.UTF8Encoding(false, true).GetString(bytes));
+            // A byte order mark is not part of the text (File.ReadAllText dropped it too): a draft saved by an editor
+            // or a script that writes one still loads.
+            ReadOnlySpan<byte> text = bytes.AsSpan().StartsWith(System.Text.Encoding.UTF8.Preamble) ? bytes.AsSpan(3) : bytes;
+            var saved = JsonData.Deserialize<SavedDraft>(new System.Text.UTF8Encoding(false, true).GetString(text));
             if (saved?.Profile is not null && saved.Profile.SchemaVersion == 1) return saved with { Profile = ProfileValidation.ResolveFeatures(saved.Profile) };
         }
         catch (Exception e) when (e is System.Text.Json.JsonException or InvalidDataException or NotSupportedException or ArgumentException) { }

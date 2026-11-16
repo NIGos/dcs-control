@@ -835,6 +835,10 @@ Test("The draft is kept across restarts and a damaged file is ignored", () =>
     store.Save(draft, null, null); var newer = File.ReadAllText(store.Path).Replace("\"profile\": {", "\"profile\": {\"settingFromLater\": 1,");
     File.WriteAllText(store.Path, newer); Require(newer.Contains("settingFromLater") && store.Load(notes.Add) is null && Directory.GetFiles(folder, "draft.unreadable-*.json").Length == 2 && notes.Count == 2);
     store.Save(draft, null, null); Require(store.Load(notes.Add) is not null && notes.Count == 2 && Directory.GetFiles(folder, "draft.unreadable-*.json").Length == 2, "a good draft copies nothing");
+    // Saved with a byte order mark (an editor, a script): it loads as before, and is not set aside as unusable.
+    File.WriteAllBytes(store.Path, [.. Encoding.UTF8.Preamble, .. File.ReadAllBytes(store.Path)]);
+    Require(store.Load(notes.Add) is { Profile.NeuralToggleKey: "75:7" } && notes.Count == 2 && Directory.GetFiles(folder, "draft.unreadable-*.json").Length == 2, "a draft with a byte order mark loads");
+    store.Save(draft, null, null);
     // Held by another program for a moment: read again, not treated as missing.
     using (var held = new FileStream(store.Path, FileMode.Open, FileAccess.Read, FileShare.None))
     {
