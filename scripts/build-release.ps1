@@ -1,8 +1,13 @@
 #Requires -Version 7
 # -Sign: a release for publishing; it fails when the release signing key is missing (without it, a developer build
 # warns and leaves the setup and ZIP unsigned).
-param([switch]$NoRestore, [switch]$Sign)
+# -LocalOnly: a package for this machine only. It accepts Quad Views and OFXR builds that carry a local-only build stamp
+# (scripts/build-stamp.ps1: built with -LocalOnly, a test failed or was skipped), which a build without it refuses. The
+# setup and the ZIP are then left unsigned, also when the signing key is here, so DCS Control's updater never installs
+# them and they cannot be published by mistake. It cannot be combined with -Sign.
+param([switch]$NoRestore, [switch]$Sign, [switch]$LocalOnly)
 $ErrorActionPreference = 'Stop'
+if ($LocalOnly -and $Sign) { throw '-LocalOnly and -Sign cannot be used together: a local-only package is never signed or published.' }
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $env:DOTNET_CLI_TELEMETRY_OPTOUT='1'
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'
@@ -56,7 +61,7 @@ foreach ($dir in @('packages','components/quadviews','components/cheeky-focus/Ch
 # (the source package carries those, so they must match what ships).
 . (Join-Path $PSScriptRoot 'build-stamp.ps1')
 if ($env:DCSC_SKIP_TIMING_TESTS -eq '1') { throw 'DCSC_SKIP_TIMING_TESTS=1 is set: a release runs every test. Remove it and build again.' }
-foreach ($component in @('quadviews','ofxr','cheeky')) { Assert-BuildStampCurrent $component }
+foreach ($component in @('quadviews','ofxr','cheeky')) { Assert-BuildStampCurrent $component -AllowLocalOnly:$LocalOnly }
 foreach ($filename in @('dxgi.dll','CheekyFoveatedDLSS/CheekyFoveatedDLSSHost.dll','CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll')) {
     $target = Join-Path $payloadRoot "components/cheeky-focus/$filename"
     $source = if ($filename -eq 'dxgi.dll') { Join-Path $workspaceRoot ".cache/packages/cheeky/$filename" } else { Join-Path $workspaceRoot "artifacts/native/cheeky/bin/Release/$filename" }
@@ -227,6 +232,11 @@ Write-Sha256Sidecar $releaseZip
 $setup = Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-Setup.exe"
 & (Join-Path $PSScriptRoot 'build-setup.ps1') -Package $releaseZip -Output $setup | Out-Null
 Write-Sha256Sidecar $setup
-& (Join-Path $PSScriptRoot 'sign-release.ps1') -Files $setup, $releaseZip -Required:$Sign
+if ($LocalOnly) {
+    # Signatures of an earlier build were removed at the start; none is made.
+    Write-Warning 'LOCAL-ONLY package: the setup and the ZIP are not signed. Not for publishing.'
+} else {
+    & (Join-Path $PSScriptRoot 'sign-release.ps1') -Files $setup, $releaseZip -Required:$Sign
+}
 Write-Output $setup
 Write-Output $releaseZip
