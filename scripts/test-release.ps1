@@ -11,6 +11,17 @@ $installRoot=Join-Path $fixtureRoot 'installed-app'
 New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
 # The pilot's own DCS settings on this PC: hashed now and compared at the end. Nothing in a release test may change them.
 $pilotSettings=@{}; foreach($name in 'options.lua','autoexec.cfg'){ $file=Join-Path $env:USERPROFILE "Saved Games/DCS/Config/$name"; if(Test-Path -LiteralPath $file){ $pilotSettings[$file]=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash } }
+# With the signed DLSS 5 runtime at hand this is the full release run: the C# suite runs first with --require-all, so
+# a test that cannot run here (the runtime, this PC's options.lua, a missing tool) fails instead of being skipped.
+# Without -NeuralRuntime nothing changes: the suite is run on its own, and its skips are listed, not failed.
+if($NeuralRuntime){
+    $previousNeural=$env:DCSVR_TEST_NEURAL_PATH; $previousOptions=$env:DCSVR_TEST_REAL_OPTIONS
+    $env:DCSVR_TEST_NEURAL_PATH=$NeuralRuntime; $env:DCSVR_TEST_REAL_OPTIONS='1'
+    try{
+        & (Join-Path $workspaceRoot '.tools/dotnet/dotnet.exe') run --project (Join-Path $workspaceRoot 'tests/DcsVr.Tests') -c Release -- $workspaceRoot --require-all
+        if($LASTEXITCODE -ne 0){throw 'The C# tests failed, or one of them could not run here (--require-all).'}
+    } finally { $env:DCSVR_TEST_NEURAL_PATH=$previousNeural; $env:DCSVR_TEST_REAL_OPTIONS=$previousOptions }
+}
 $cli=Join-Path $releaseRoot 'files/DcsVr.Cli.exe'
 & $cli app-verify --source $releaseRoot
 if($LASTEXITCODE -ne 0){throw 'Payload verification failed.'}

@@ -4,7 +4,10 @@ using System.Text;
 using DcsVr.Core;
 
 if (args.FirstOrDefault() == "--environment-child") { Console.Write(Environment.GetEnvironmentVariable("XR_RUNTIME_JSON") + "|" + Environment.GetEnvironmentVariable("XR_ENABLE_API_LAYERS")); return 0; }
-var workspace = Path.GetFullPath(args.FirstOrDefault() ?? ".");
+// --require-all: a release run, where a test that cannot run is a failure, not a pass (scripts/test-release.ps1 with
+// -NeuralRuntime). Any other argument is the repository root.
+var requireAll = args.Contains("--require-all");
+var workspace = Path.GetFullPath(args.FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal)) ?? ".");
 if (!File.Exists(Path.Combine(workspace, "Directory.Build.props"))) { Console.Error.WriteLine("Run from the repository root, or pass it as the first argument: " + workspace); return 2; }
 // Each run gets its own folder (runs may overlap); a failed run's is kept to inspect, but only the newest few: every run
 // used to leave one behind (80 GB of them). A run holds run.lock in its folder open, unshared, while it lives: a folder
@@ -5757,10 +5760,12 @@ foreach (var (name, action) in tests)
     try { action(); Console.WriteLine((skipped.Count > skips ? "SKIPPED " : "PASS ") + name); }
     catch (Exception e) { failed.Add(name); Console.WriteLine("FAIL " + name + "\n" + e); }
 }
-// Skipped tests count as passed (as before) and are listed here, each with why, so a skip is never silent.
-Console.WriteLine($"{skipped.Count} test(s) skipped" + (skipped.Count == 0 ? "." : ":"));
+// Skipped tests count as passed (as before) and are listed here, each with why, so a skip is never silent. With
+// --require-all each one fails the run instead.
+Console.WriteLine($"{skipped.Count} test(s) skipped" + (skipped.Count == 0 ? "." : requireAll ? " (--require-all: each one fails this run):" : ":"));
 foreach (var (test, reason) in skipped) Console.WriteLine("  SKIP " + test + ": " + reason);
-var report = new { total = tests.Count, passed = tests.Count - failed.Count, failed, durationSeconds = timer.Elapsed.TotalSeconds, fixtureDirectory = root, skipped = skipped.Select(s => new { test = s.Test, reason = s.Reason }).ToArray() };
+if (requireAll) failed.AddRange(skipped.Select(s => s.Test).Distinct().Where(test => !failed.Contains(test)));
+var report = new { total = tests.Count, passed = tests.Count - failed.Count, failed, requireAll, durationSeconds = timer.Elapsed.TotalSeconds, fixtureDirectory = root, skipped = skipped.Select(s => new { test = s.Test, reason = s.Reason }).ToArray() };
 Console.WriteLine(JsonData.Serialize(report));
 // A fully passing run leaves nothing behind (each run used to add a fixture folder); a failing one keeps it to look at.
 if (failed.Count == 0) try { Directory.Delete(root, true); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
