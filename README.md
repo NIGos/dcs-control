@@ -128,7 +128,7 @@ The first time the app writes a path it backs up the original (or notes that the
 ./scripts/test-release.ps1
 ```
 
-Build scripts pin upstream revisions. Tests use isolated DCS fixtures and never start DCS. `scripts/package-sources.py` builds the corresponding-source ZIP.
+Build scripts pin upstream revisions. Tests use isolated DCS fixtures and never start DCS. Python scripts run with the Python launcher (`py -3 scripts/<name>.py`; PowerShell scripts start them through `scripts/python.ps1`): on a PC without Python on PATH, plain `python` is only the Microsoft Store stub.
 
 `build-release.ps1` also makes `DcsControl-<version>-Setup.exe` (`native/setup`, built by `scripts/build-setup.ps1`, with the release ZIP appended) and signs the setup and the ZIP with `scripts/sign-release.ps1`: `<file>.sig` is the base64 of an ECDSA P-256 / SHA-256 signature in IEEE P1363 form, made with the private key in `%USERPROFILE%\.dcs-control-signing\release-signing-key.pem` (never in the repository or a release) and checked against the public key in `src/DcsVr.Core/Updates.cs`. Without the key a developer build warns and stays unsigned; `build-release.ps1 -Sign` fails instead. Publish the setup, the ZIP, the sources ZIP and their `.sha256` and `.sig` files with the release; the in-app updater needs `DcsControl-<version>-Setup.exe` and `DcsControl-<version>-Setup.exe.sig`. More: [validation](docs/VALIDATION.md), [adapter contracts](docs/QUAD_FOCUS_ADAPTER.md), [interface notes](docs/INTERFACE.md), [third-party components](docs/THIRD_PARTY.md).
 

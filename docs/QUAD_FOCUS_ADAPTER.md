@@ -35,8 +35,8 @@ Cheeky's optional pre-instance extension probing is suppressed in adapter mode b
 - Manager fixtures verify component hashes, ordered manifests, per-process configuration, and apply/restore through both runtime selections.
 
 ```powershell
-python scripts/patch-cheeky.py
-python scripts/test-adapter-patch.py
+py -3 scripts/patch-cheeky.py
+py -3 scripts/test-adapter-patch.py
 ./scripts/msvc.cmd cmake --build artifacts/native/cheeky --parallel 4
 ctest --test-dir artifacts/native/cheeky --output-on-failure -R DcsQuadFocusLayerTests
 ./scripts/test-loader.ps1

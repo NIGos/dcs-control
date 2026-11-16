@@ -9,7 +9,8 @@ $nativeBuild = Join-Path $workspaceRoot ('artifacts/native/' + $Component)
 $nativeOptions = @('-DCMAKE_BUILD_TYPE=Release')
 if ($Component -eq 'cheeky') {
     $patchOptions = @(if ($Force) { '--force' })
-    & python (Join-Path $PSScriptRoot 'patch-cheeky.py') @patchOptions
+    . (Join-Path $PSScriptRoot 'python.ps1')
+    Invoke-Python (Join-Path $PSScriptRoot 'patch-cheeky.py') @patchOptions
     if ($LASTEXITCODE -ne 0) { throw 'Cheeky adaptation failed.' }
 }
 if ($Component -eq 'ofxr-core') { $nativeOptions += @('-DXRFG_BUILD_LAYER=OFF','-DXRFG_BUILD_STANDALONE=OFF') }

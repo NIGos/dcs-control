@@ -12,6 +12,6 @@ Files:
 
 The executable embeds the ICO through ApplicationIcon. The native window loads an embedded copy for its taskbar/Alt+Tab icon. The installer assigns the executable's first icon to its Start menu shortcut. Assets are also copied into the application distribution.
 
-Rebuild the assets with `python scripts/build-app-icon.py` (requires Pillow). Both the SVG and raster exports use the same coordinate data and palette in that script. Edit that source for reproducible changes; the checked-in exports make Pillow unnecessary for a normal .NET build.
+Rebuild the assets with `py -3 scripts/build-app-icon.py` (requires Pillow). Both the SVG and raster exports use the same coordinate data and palette in that script. Edit that source for reproducible changes; the checked-in exports make Pillow unnecessary for a normal .NET build.
 
 This icon was authored directly from vector geometry to match the project's existing SVG graphics. No image-generation service was used.
