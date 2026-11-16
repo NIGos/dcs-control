@@ -884,6 +884,41 @@ Test("A DCS that looks stuck is offered to be ended only after it stayed that wa
     try { DcsProcess.HealthProvider = () => DcsHealth.Healthy; Require(DcsProcess.EndStuck() is null, "a healthy DCS is left running"); }
     finally { DcsProcess.HealthProvider = health; }
 });
+Test("A stuck DCS is counted on the app's own clock, not by how often the page asks (GitHub #21)", () =>
+{
+    var running = DcsProcess.Provider; var health = DcsProcess.HealthProvider;
+    try
+    {
+        DcsProcess.Provider = () => [new(4242, null)]; DcsProcess.HealthProvider = () => DcsHealth.NoWindow;
+        var now = DateTimeOffset.UnixEpoch;
+        // What the page alone gives: it asks, the window is minimised for minutes, it asks again. Every look starts the
+        // count again, so a pilot who looks now and then is never told.
+        var page = new DcsStuckTracker();
+        for (var look = 0; look < 5; look++) Require(page.Update(DcsHealth.NoWindow, now + TimeSpan.FromMinutes(3 * look)) is null, "the page's looks alone never add up");
+        // The watch reads in between, with nobody asking.
+        using var watch = new DcsStuckWatch(Timeout.InfiniteTimeSpan, () => now);
+        Require(watch.Read() is null && watch.Last is null, "not at the first reading");
+        for (var elapsed = TimeSpan.Zero; elapsed < DcsStuckTracker.NoWindowPatience; elapsed += DcsStuckWatch.Interval) { now += DcsStuckWatch.Interval; watch.Read(); }
+        Require(watch.Last == DcsHealth.NoWindow, "counted while the page was away");
+        // The window comes back minutes later (the watch kept reading): the page's first question is answered at once.
+        for (var away = 0; away < 30; away++) { now += DcsStuckWatch.Interval; watch.Read(); }
+        now += TimeSpan.FromSeconds(1); Require(watch.Read(true) == DcsHealth.NoWindow && watch.Last == DcsHealth.NoWindow, "told at the first look");
+        // A reading may wait 5 seconds for a DCS that does not answer: the readings still are one stretch.
+        Require(DcsStuckWatch.Interval + TimeSpan.FromSeconds(5) < DcsStuckTracker.MaxGap);
+        // Healthy, or gone, clears it at the next reading; a DCS known to be gone is not asked.
+        DcsProcess.HealthProvider = () => DcsHealth.Healthy; now += TimeSpan.FromSeconds(4);
+        Require(watch.Read(true) is null && watch.Last is null, "a DCS that answers again clears it");
+        DcsProcess.HealthProvider = () => throw new InvalidOperationException("not asked");
+        Require(watch.Read(false) is null, "no DCS, nothing read");
+        DcsProcess.Provider = () => []; Require(watch.Read() is null && watch.Last is null, "the watch finds no DCS itself");
+        // The timer: readings come without anyone calling, and a failed one does not stop the next.
+        var reads = 0; DcsProcess.Provider = () => [new(4242, null)];
+        DcsProcess.HealthProvider = () => Interlocked.Increment(ref reads) == 1 ? throw new InvalidOperationException("one bad reading") : DcsHealth.NoWindow;
+        using var timed = new DcsStuckWatch(TimeSpan.FromMilliseconds(20));
+        Require(SpinWait.SpinUntil(() => Volatile.Read(ref reads) >= 4, TimeSpan.FromSeconds(10)), "the watch reads on its own timer");
+    }
+    finally { DcsProcess.Provider = running; DcsProcess.HealthProvider = health; }
+});
 Test("The draft is kept across restarts and a damaged file is ignored", () =>
 {
     var store = new DraftStore(Path.Combine(root, "draft-store"));

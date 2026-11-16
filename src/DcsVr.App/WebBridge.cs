@@ -461,15 +461,15 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                 : $"Pimax Play changed: focus will be updated to {pimax.Play.Short} at launch.") : null;
     /// <summary>A running DCS.exe; the offline verification host reports none.</summary>
     private bool DcsRunning() => offline ? _offlineDcs : DcsProcess.AnyRunning();
-    private readonly DcsStuckTracker _stuck = new();
+    /// <summary>Counts how long DCS has looked stuck on its own timer, so a minimised window does not start the count
+    /// again. The offline verification host has no DCS: its smoke test says what is stuck.</summary>
+    private readonly DcsStuckWatch? _stuck = offline ? null : new DcsStuckWatch();
     private string? _offlineStuck;
     /// <summary>"NoWindow" or "NotResponding" once DCS has looked stuck for long enough to offer ending it; else null.</summary>
-    private string? DcsStuck(bool running)
-    {
-        if (offline) return running ? _offlineStuck : null;
-        var health = running ? DcsProcess.Health() : DcsHealth.NotRunning;
-        lock (_stuck) return _stuck.Update(health, DateTimeOffset.UtcNow)?.ToString();
-    }
+    private string? DcsStuck(bool running) => _stuck is null ? running ? _offlineStuck : null : _stuck.Read(running)?.ToString();
+    /// <summary>The same as last read, without asking DCS again: every reply with the state carries it, so the top bar
+    /// and the Overview still say it after a command.</summary>
+    private string? DcsStuckLast(bool running) => !running ? null : _stuck is null ? _offlineStuck : _stuck.Last?.ToString();
     /// <summary>A DCS the offline verification's smoke test says is running (never set outside that host).</summary>
     private volatile bool _offlineDcs;
     private readonly Lock _boostCacheLock = new();
@@ -1138,7 +1138,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             originals = new { count = originals.Count + leftovers.Count, files = originals.Files.Concat(leftovers.Select(l => new OriginalItem(l.Path, l.RenameTo is null ? "remove" : "restore", false, l.Detail + "; not in the record of originals"))).ToArray(), state = originals.State, lastAction = originals.LastAction, lastActionAt = originals.LastActionAt, folder = originals.Folder },
             launchReady = applied is not null, appliedProfile = applied?.Journal.ProfileId, appliedName = applied?.Profile?.Name ?? applied?.Journal.ProfileId,
             // The applied profile.json content, so the page labels a draft "Applied" only when it matches it.
-            appliedDraft = applied?.Profile, appliedDcs = applied?.Executable, appliedOptions = applied?.OptionsPath, foveaChanged = FoveaChanged(applied), dcsRunning = DcsRunning(),
+            appliedDraft = applied?.Profile, appliedDcs = applied?.Executable, appliedOptions = applied?.OptionsPath, foveaChanged = FoveaChanged(applied), dcsRunning = dcsNow, dcsStuck = DcsStuckLast(dcsNow),
             // The settings Live mode writes while DCS runs (LiveSettings): the page tags them.
             liveFields = LiveSettings.AvailableFields(applied?.Profile, applied?.Journal),
             savedRuntime = SavedRuntimeView(), retainedRuntime = RetainedRuntime(), sboysReady = _sboys is not null, launcherBlocked, launcherUnknown = LaunchSafety.LauncherRestartUnknown, dcsDefaultKeys, readiness };

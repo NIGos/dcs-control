@@ -9,8 +9,8 @@ public enum DcsHealth { NotRunning, Healthy, NoWindow, NotResponding }
 
 /// <summary>Says when a running DCS has looked stuck for long enough to offer ending it. DCS has no window for a few
 /// seconds while it starts and stops answering Windows for minutes while a mission loads, so each state has its own
-/// patience; any healthy reading starts again. So does a pause in the readings: the page asks every few seconds, but not
-/// while it is hidden or busy, and DCS may have answered, closed or started again in between.</summary>
+/// patience; any healthy reading starts again. So does a pause in the readings: DCS may have answered, closed or started
+/// again in between. <see cref="DcsStuckWatch"/> keeps the readings coming while the page is hidden or busy.</summary>
 public sealed class DcsStuckTracker
 {
     public static readonly TimeSpan NoWindowPatience = TimeSpan.FromSeconds(30), NotRespondingPatience = TimeSpan.FromMinutes(4);
@@ -30,6 +30,48 @@ public sealed class DcsStuckTracker
             _ => null
         };
     }
+}
+
+/// <summary>Reads how DCS looks on its own clock, for as long as the app runs. The page asks every few seconds, but not
+/// while the window is minimised (the page is suspended) or a command runs: left to the page alone, the patience would
+/// start again each time the window comes back, and a pilot who looks now and then would never be told (GitHub #21).</summary>
+public sealed class DcsStuckWatch : IDisposable
+{
+    /// <summary>Well inside <see cref="DcsStuckTracker.MaxGap"/>, also when one reading waits for a DCS that does not answer.</summary>
+    public static readonly TimeSpan Interval = TimeSpan.FromSeconds(8);
+    private readonly DcsStuckTracker _tracker = new(); private readonly Func<DateTimeOffset> _now; private readonly Timer? _timer;
+    private DcsHealth? _last; private int _reading;
+
+    /// <param name="interval">Between the watch's own readings; <see cref="Timeout.InfiniteTimeSpan"/> for none (a test calls <see cref="Read"/> itself).</param>
+    /// <param name="now">The clock, replaceable for tests.</param>
+    public DcsStuckWatch(TimeSpan? interval = null, Func<DateTimeOffset>? now = null)
+    {
+        _now = now ?? (() => DateTimeOffset.UtcNow);
+        var every = interval ?? Interval;
+        if (every != Timeout.InfiniteTimeSpan) _timer = new Timer(_ => Tick(), null, every, every);
+    }
+
+    /// <summary>What the last reading said: null while DCS is fine, gone or not yet stuck for long enough.</summary>
+    public DcsHealth? Last { get { lock (_tracker) return _last; } }
+
+    /// <summary>Reads DCS now. <paramref name="running"/>: what the caller already knows, so the processes are not listed twice.</summary>
+    public DcsHealth? Read(bool? running = null)
+    {
+        var health = (running ?? DcsProcess.AnyRunning()) ? DcsProcess.Health() : DcsHealth.NotRunning;
+        lock (_tracker) return _last = _tracker.Update(health, _now());
+    }
+
+    private void Tick()
+    {
+        // One reading at a time: asking a DCS that does not answer can take seconds.
+        if (Interlocked.Exchange(ref _reading, 1) != 0) return;
+        // A timer thread has nobody to report to: a reading that fails is missed, and the next one counts.
+        try { Read(); }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or NotSupportedException or UnauthorizedAccessException) { }
+        finally { Volatile.Write(ref _reading, 0); }
+    }
+
+    public void Dispose() => _timer?.Dispose();
 }
 
 /// <summary>The running DCS processes, in one place: every "is DCS running" check asks here.</summary>
