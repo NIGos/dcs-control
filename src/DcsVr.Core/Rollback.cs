@@ -176,12 +176,15 @@ public sealed class Rollback
     /// At every start, before the draft is read. A going back that did not happen (this is still the version that was
     /// being left, and nothing was installed since) is undone. Otherwise the skipped version is forgotten once this
     /// version is not older than it, and presets set aside by a version not newer than this one come back: only names
-    /// that do not exist now, nothing is overwritten. Never throws.
+    /// that do not exist now, nothing is overwritten. Nothing is decided while the installation is unfinished (a setup
+    /// ended while it wrote files): its code may be one version and its files another, so the going back stays pending
+    /// until a setup has run again. Never throws.
     /// </summary>
     public RollbackReconciled Reconcile(AppSettingsStore settings)
     {
         try
         {
+            if (_install is not null && Directory.Exists(Path.Combine(_install, ".installer")) && new ApplicationInstaller(_install).Unfinished()) return new(false, []);
             // Only the installation decides whether its going back happened: an unzipped copy of the version that was
             // left, started while the earlier version is installed, shares this state folder and would undo it (and
             // delete the draft and presets the earlier version has saved since). It changes nothing until the installation
@@ -212,7 +215,7 @@ public sealed class Rollback
                 }
             return new(false, returned);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException or NotSupportedException) { return new(false, []); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException or NotSupportedException or InvalidDataException) { return new(false, []); }
     }
 
     /// <summary>

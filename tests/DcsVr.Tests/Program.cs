@@ -4660,6 +4660,22 @@ Test("Updating again after going back never undoes it, even when the installer's
     installer.Install(seven, stateRoot: state);
     Require(File.Exists(Path.Combine(state, "versions", "going-back.json")), "same version: the going back is still to be decided at the next start");
 });
+Test("A going back is not decided while the installation is unfinished (the setup was ended while it wrote files)", () =>
+{
+    var six = ReleaseFixture("rollback-unfinished-6", "0.6.6-preview", "six"); var seven = ReleaseFixture("rollback-unfinished-7", "0.6.7-preview", "seven");
+    var target = Path.Combine(root, "rollback/unfinished/app"); var installer = new ApplicationInstaller(target);
+    var state = RollbackState("unfinished", "draft-6", ("Day.json", "day-6")); var settings = new AppSettingsStore(state);
+    installer.Install(six, stateRoot: state); var journal = installer.Install(seven, stateRoot: state);
+    File.WriteAllText(Path.Combine(state, "draft.json"), "draft-7"); File.WriteAllText(Path.Combine(state, "presets", "Night.json"), "night-7"); settings.Save(new(false, "0.6.7-preview"));
+    new Rollback(state, target, "0.6.7-preview").Prepare("0.6.6-preview", settings);
+    // The earlier setup was ended while writing: the managed code that starts is still 0.6.7, on a journal left open.
+    AtomicFile.WriteText(Path.Combine(installer.Transactions.StateDirectory, journal.Id, "journal.json"), JsonData.Serialize(journal with { Status = "applying" }));
+    Require(new Rollback(state, target, "0.6.7-preview").Reconcile(settings) is { Undone: false, ReturnedPresets.Count: 0 }, "Start anyway decides nothing");
+    Require(StateText(state, "draft.json") == "draft-6" && StateText(state, "versions/0.6.7-preview/presets/Night.json") == "night-7" && File.Exists(Path.Combine(state, "versions", "going-back.json")) && settings.Load().SkippedVersion == "0.6.7-preview", "the earlier version's settings stay in place, the copy set aside is kept");
+    // A setup ran again and finished (here: the journal is whole again): the next start decides as always.
+    AtomicFile.WriteText(Path.Combine(installer.Transactions.StateDirectory, journal.Id, "journal.json"), JsonData.Serialize(journal));
+    Require(new Rollback(state, target, "0.6.7-preview").Reconcile(settings) is { Undone: true } && StateText(state, "draft.json") == "draft-7" && StateText(state, "presets/Night.json") == "night-7", "still 0.6.7 and nothing installed since: undone");
+});
 Test("Go back is refused with the reason when there is nothing to go back to", () =>
 {
     var state = RollbackState("nothing", "draft"); var install = Path.Combine(root, "rollback/nothing/app");
