@@ -1,0 +1,91 @@
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+index cd7ae6d..03b69de 100644
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -1524,6 +1524,22 @@ bool cursor_soft(CursorComposite cursor) {
+     return cursor.reference.r + cursor.reference.g + cursor.reference.b > 0.0;
+ }
+ 
++// DCS Control (0090): known limits of the cursor's redraw as flown on
++// 2026-11-15 and 16. A comment only, nothing is changed.
++// - A cross arm lying on a bright green line of the HUD is drawn dark or
++//   washed out for one synthetic frame: 3 of 54 synthetic frames with two
++//   layers and 2 of 54 composed, per eye, with 37 to 53 % of the arm's
++//   yellow gone in that frame. The sprite is told from the scene by how
++//   close a pixel's colour is to its own (the test below), and yellow on
++//   bright green fails it. A second criterion would bring its own
++//   look-alikes; none was tried.
++// - Over bright cockpit areas the cursor is redrawn less often, and less
++//   with two layers than composed (237 of 450 pairs against 696 of 900 in
++//   one stretch low in the cockpit). The game draws it soft and fat there,
++//   its match with the template is weak and the pair is refused before
++//   this test is reached ("score too low"). A refused pair shows the
++//   interpolated cursor, a fainter smeared cross, never a cross in a wrong
++//   place.
+ float cursor_likeness(float3 colour, float3 reference) {
+     float3 chroma = colour / max(colour.r + colour.g + colour.b, 1.0e-4);
+     float3 wanted = reference / max(reference.r + reference.g + reference.b, 1.0e-4);
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 12239b4..950c1d8 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -2561,6 +2561,22 @@ void note_private_image(XrSwapchain handle, std::uint32_t index, bool fresh) noe
+     }
+ }
+ 
++// DCS Control (0090): a session was destroyed, and its private swapchains
++// with it. The table was never emptied: 128 entries for the whole process,
++// and after that many private swapchains (each session makes its own) new
++// ones were not entered and slow_step 10 and 11 under-reported. The table
++// is the process's, so another session alive at that moment (DCS has one
++// at a time) loses its entries as well: they come back at each swapchain's
++// next acquire, with the count of frames that named an image starting over.
++// Logging only, as everything here.
++void forget_private_images() noexcept {
++    try {
++        std::scoped_lock lock(g_private_image_log_mutex);
++        g_private_image_log.clear();
++    } catch (...) {
++    }
++}
++
+ // After a runtime xrEndFrame of `info` that took `took`. Every call counts
+ // the images it named; one that took 4 ms or more is recorded:
+ //   slow_step result=10: dur_us and a (ms) the call; b= the thread (0 the
+@@ -6969,6 +6985,9 @@ XrResult layer_destroy_session_impl(XrSession session) {
+         }
+         g_sessions.erase(session);
+     }
++    if (XR_SUCCEEDED(result)) {
++        forget_private_images(); // DCS Control (0090)
++    }
+     return result;
+ }
+ 
+@@ -13405,6 +13424,13 @@ void reset_triple_state_locked(SessionState& state) noexcept {
+         state->presenter_frame_serial = 0;
+         state->application_served_serial = 0;
+         state->release_rephase_anchor = false; // DCS Control (0079)
++        // DCS Control (0090): the run of first synthetics handed over late
++        // starts again too. It ended only on one handed over on time or on
++        // a re-phase that used it, so late ones of the presenter before
++        // this one (seven before a pause, say) and one of this one made a
++        // re-phase due on a count that everything around it had started
++        // over.
++        state->leader_late_streak.store(0, std::memory_order_relaxed);
+         state->application_release_display_time = 0;
+         state->application_release_serial = 0;
+         // DCS Control (0032): a new presenter's slots start again from its
+@@ -13417,6 +13443,12 @@ void reset_triple_state_locked(SessionState& state) noexcept {
+         // A display time from a previous presenter says nothing about this
+         // grid, and its schedule is about to be rebuilt.
+         state->presenter_last_predicted_valid = false;
++        // DCS Control (0090): nor is the old presenter's last hand-over
++        // judged by the new one's first wait (HandOverBlock: it was one
++        // observation of eight taken from a presenter that is gone).
++        state->leader_block_pending = false;
++        state->leader_block_written = false;
++        state->leader_block_call = 0;
+         state->presenter_schedule_valid = false;
+         state->presenter_display_period = 0;
+         state->presenter_period_rise = {}; // DCS Control (0063)

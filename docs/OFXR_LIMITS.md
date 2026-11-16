@@ -25,7 +25,8 @@ Evidence: `artifacts\foveated\notes-r4\cursor-flight-check.md`, second flight
 **1.2 A cross arm lying on a bright green line is drawn dark or washed out for one synthetic frame.**
 Seen in 3 of 54 synthetic frames with two layers and 2 of 54 composed, per eye; 37 to 53 % of the arm's yellow is
 gone in that frame. Both modes, so it is not a two-layer defect. The cursor is separated from the scene by how close
-a pixel's colour is to the cursor's (0087); yellow on bright green fails that test. It is not stated in any patch.
+a pixel's colour is to the cursor's (0087); yellow on bright green fails that test. 0090 states it, and 1.1, in a
+comment beside that test (`cursor_likeness`, `src/d3d12/frame_synthesis.hlsl`).
 Evidence: the same file, second flight, section 2 and "Verdicts, second flight", point 2.
 
 **1.3 Fast mouse motion was not flown.** The fastest stretch reached 10 to 11 focus pixels per frame (single steps
@@ -42,7 +43,7 @@ fixed 2X with adaptive control off and the buffer off a pair has no readiness fe
 410 is written and the release is not moved. 0083 states this in comments (`latency_control.hpp`, `read_leader_lead`).
 Under Auto the case is answered by cadence 3; with the bundled Quad Views it does not arise.
 
-A candidate fix (0090, a fence of its own for this case) was flown, one flight per arm, F-16C, 150 s:
+A candidate fix (a fence of its own for this case; it is not patch 0090 of the series) was flown, one flight per arm, F-16C, 150 s:
 
 | | DCS fps (mean) | first synthetic's xrEndFrame p50 / p90 | Pimax "Missed" per second | records 410 / 411 |
 |---|---|---|---|---|
@@ -53,7 +54,7 @@ A candidate fix (0090, a fence of its own for this case) was flown, one flight p
 A gain, not a cure: the lead goes at once to its ceiling (one display period, 11.1 ms) and the output is still
 written 6 to 10 ms after its hand-over, so about a third of the frames are lost instead of half. A real remedy needs
 more than one period of lead. The candidate is in neither version, and the whole test suite was never run with it.
-Evidence: `artifacts\foveated\port\final\candidate-0090-native-fixed-2x-own-fence\README.md`;
+Evidence: `artifacts\foveated\port\final\candidate-native-fixed-2x\README.md`;
 `artifacts\foveated\notes-r4\four-points-progress.md`, section A2; flights `verify067\a2_native_old`,
 `a2_native_new`, `a2_bundled_new`.
 
@@ -90,6 +91,12 @@ lapse would be a change of policy on the path flown for issue #23, which only a 
 would justify it has not been produced: `adaptive_switch result=16` followed by `presenter_transition result=802` and
 missed slots at 2.
 
+**Findings 6 and 8, what 0090 changed.** At a presenter start the run of late first synthetics (`leader_late_streak`)
+and the hand-over still to be judged (`leader_block_pending / written / call`) start over, beside the state that
+already did; the table of private swapchain images kept for the log (`g_private_image_log`, 128 entries for the
+process) is emptied when a session is destroyed. None of the three is shown by an offline test (state inside the
+layer; the fake runtime hands out the same handles again): the whole suite passes with them. Left as it was from
+finding 6: the application's completion samples keep filling while 0078's lead is in force.
 **Finding 5: `release_rephase_anchor` stays set across a surplus hold.** After a re-phase the estimate of the time
 told to the application can be one period off until the count starts over at a presenter start. By the review's own
 account this restarts nothing by itself; it was not reproduced, and no rig observes that estimate.
