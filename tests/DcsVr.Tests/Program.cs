@@ -1235,6 +1235,51 @@ Test("Last flight: dcs.log session, Pimax frames, OFXR modes and frame time, DLS
     File.WriteAllText(Path.Combine(flight, $"managed/profiles/pimax-qv/ofxr/ofxr-bridge-flight-{L(start.AddSeconds(29), "yyyyMMdd-HHmmss")}-pid24208.prev.log"),
         "seq=1 ms=0.000 tid=27164 phase=I op=logger result=401 dur_us=0 a=128 b=0 c=1\r\nseq=1200 ms=120000.000 tid=31660 phase=I op=latency_status result=13 dur_us=0 a=13000 b=31 c=44444\r\n");
     Require(LastFlight.Read(new(dcsLog, null, Path.Combine(flight, "managed/profiles"), status, bin))!.Framegen is { Seconds2x: 1, Seconds3x: 0 }, "another process's .prev segment");
+    // A long flight: the log is longer than the part that is read, and the cadence record with the Stop generating
+    // preference (adaptive_switch 13, written once when cadence turns on) is before it. The summary still names it.
+    var longLog = Path.Combine(flight, $"managed/profiles/pimax-qv/ofxr/ofxr-bridge-flight-{L(start.AddSeconds(29), "yyyyMMdd-HHmmss")}-pid24208.log");
+    using (var log = new FileStream(longLog, FileMode.Create, FileAccess.Write))
+    {
+        log.Write(Encoding.UTF8.GetBytes("seq=1 ms=0.000 tid=27164 phase=I op=logger result=401 dur_us=0 a=256 b=0 c=24208\r\nseq=2 ms=5.000 tid=31660 phase=I op=adaptive_switch result=13 dur_us=0 a=0 b=2 c=2\r\n"));
+        var filler = Encoding.UTF8.GetBytes(string.Concat(Enumerable.Range(0, 8192).Select(i => $"seq={i + 10} ms=6.000 tid=31660 phase=F op=frame_end result=0 dur_us=11 a=1 b=2 c=3\r\n")));
+        for (long written = 0; written < 65L * 1024 * 1024; written += filler.Length) log.Write(filler);
+        log.Write(Encoding.UTF8.GetBytes("seq=900000 ms=3600000.000 tid=31660 phase=I op=latency_status result=12 dur_us=0 a=13000 b=31 c=0\r\nseq=900001 ms=3601000.000 tid=31660 phase=I op=latency_status result=11 dur_us=0 a=9000 b=31 c=0\r\n"));
+    }
+    Require(new FileInfo(longLog).Length > 64L * 1024 * 1024 && LastFlight.Read(new(dcsLog, null, Path.Combine(flight, "managed/profiles"), status, bin))!.Framegen is { Preference: PassThroughPreference.PreferRefresh, Cadence: true, Seconds2x: 1, Seconds1x: 1 },
+        "the preference of a flight whose log is longer than the part read");
+    File.Delete(longLog);
+});
+Test("A flight log's earlier part gives only the records asked for, each once, around the start of the part read", () =>
+{
+    static bool Keep(string l) => l.Contains("op=adaptive_switch ", StringComparison.Ordinal) || l.Contains("op=latency_status ", StringComparison.Ordinal);
+    const string Needle = "op=adaptive_switch result=13 ";
+    string Line(int seq, string op, int result, string c = "0") => $"seq={seq} ms={seq}.000 tid=1 phase=I op={op} result={result} dur_us=0 a=0 b=2 c={c}";
+    var cadence = Line(2, "adaptive_switch", 13, "2"); var early = Line(3, "latency_status", 12); var other = Line(4, "adaptive_switch", 9);
+    var late = Line(900, "latency_status", 13); var again = Line(901, "adaptive_switch", 13, "1");
+    string Padding(int bytes) => string.Concat(Enumerable.Repeat("seq=5 ms=5.000 tid=1 phase=F op=frame_end result=0 dur_us=1 a=1 b=2 c=3\r\n", bytes / 70 + 1));
+    var tail = late + "\r\n" + again + "\r\n";
+    var path = Make("ofxr-earlier/long.log", Line(1, "logger", 401) + "\r\n" + cadence + "\r\n" + early + "\r\n" + other + "\r\n" + Padding(3 << 20) + tail);
+    // The whole file fits: every kept line, in order, as before.
+    Require(LastFlight.ReadLines(path, long.MaxValue, Keep, Needle).SequenceEqual([cadence, early, other, late, again]), "whole file");
+    // Only the end fits: the cadence record of the earlier part comes first, and nothing else of that part (its
+    // once-a-second lines are not what is missing, and reading them all is what the limit avoids).
+    Require(LastFlight.ReadLines(path, tail.Length + 30, Keep, Needle).SequenceEqual([cadence, late, again]), "the record before the part read");
+    Require(LastFlight.ReadLines(path, tail.Length + 30, Keep).SequenceEqual([late, again]), "without the text, the part read alone");
+    Require(LastFlight.ParseOfxr(LastFlight.ReadLines(path, tail.Length + 30, Keep, Needle)[..2])!.Share is { Preference: PassThroughPreference.PreferRefresh, Cadence: true }, "the earlier record names the preference");
+    // The part read begins inside the record, at its first byte, in its line end or right after it: it is given once, whole.
+    var straddle = Make("ofxr-earlier/straddle.log", Padding(2 << 20) + cadence + "\r\n" + tail);
+    foreach (var back in new[] { 1, 2, 3, 10, cadence.Length / 2, cadence.Length + 1, cadence.Length + 2, cadence.Length + 3, cadence.Length + 40 })
+        Require(LastFlight.ReadLines(straddle, tail.Length + back, Keep, Needle).SequenceEqual([cadence, late, again]), "cut " + back + " bytes before the tail");
+    // The line the part read begins in is read whole too, where the limit alone leaves it out.
+    Require(LastFlight.ReadLines(straddle, tail.Length, Keep, Needle).SequenceEqual([cadence, late, again]) && LastFlight.ReadLines(straddle, tail.Length - 5, Keep, Needle).SequenceEqual([cadence, late, again])
+        && LastFlight.ReadLines(straddle, tail.Length - 5, Keep).SequenceEqual([again]), "cut at and inside the tail's first line");
+    // The file's first line (no line end before it), LF line ends, and a later record of the same flight, which wins.
+    var first = Make("ofxr-earlier/first.log", cadence + "\n" + Padding(2 << 20).Replace("\r\n", "\n") + tail);
+    Require(LastFlight.ReadLines(first, tail.Length + 30, Keep, Needle).SequenceEqual([cadence, late, again]), "the file's first line, LF line ends");
+    Require(LastFlight.ParseOfxr(LastFlight.ReadLines(first, tail.Length + 30, Keep, Needle))!.Share is { Preference: PassThroughPreference.Balanced, Cadence: true }, "a later record of the flight wins");
+    // A line longer than any record (not a log line at all) is passed over, and the records after it are still found.
+    var garbage = Make("ofxr-earlier/garbage.log", new string('x', 3 << 20) + Needle + new string('y', 100) + "\r\n" + cadence + "\r\n" + Padding(1 << 20) + tail);
+    Require(LastFlight.ReadLines(garbage, tail.Length + 30, Keep, Needle).SequenceEqual([cadence, late, again]), "an overlong line");
 });
 Test("A restore resumed after a conflict removes the empty folder of a created file, never the root", () =>
 {

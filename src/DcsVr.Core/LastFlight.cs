@@ -321,14 +321,19 @@ public static partial class LastFlight
     private static List<string>? OfxrLines(string path, int? pid)
     {
         static bool Keep(string l) => l.Contains("op=latency_status ", StringComparison.Ordinal) || l.Contains("op=adaptive_switch ", StringComparison.Ordinal) || l.Contains("op=adaptive_throughput result=6 ", StringComparison.Ordinal) || l.Contains("op=logger ", StringComparison.Ordinal);
-        var current = Cached(path, () => ReadLines(path, MaxTail, Keep));
+        var current = Cached(path, () => ReadLines(path, MaxTail, Keep, CadenceRecord));
         var previous = OfxrPreviousSegment(path);
         // The earlier segment is optional: unreadable or another process's, the summary covers the current one.
         List<string>? earlier = null;
         if (pid is { } p && File.Exists(previous))
-            earlier = Safe(() => OfxrHeaderPid(ReadHead(previous, 512)) == p ? Cached(previous, () => ReadLines(previous, MaxTail, Keep)) : null);
+            earlier = Safe(() => OfxrHeaderPid(ReadHead(previous, 512)) == p ? Cached(previous, () => ReadLines(previous, MaxTail, Keep, CadenceRecord)) : null);
         return earlier is null ? current : current is null ? earlier : [.. earlier, .. current];
     }
+
+    /// <summary>The record OFXR writes once when adaptive cadence turns on, with the flight's Stop generating preference
+    /// (adaptive_switch 13): a log longer than <see cref="MaxTail"/> has it before the part that is read, so it is looked
+    /// for there too. Without it the summary would name the default preference, whatever the flight used.</summary>
+    private const string CadenceRecord = "op=adaptive_switch result=13 ";
 
     /// <summary>ofxr-bridge-flight-…-pidN.log → ofxr-bridge-flight-…-pidN.prev.log, the segment OFXR rotated out last.</summary>
     public static string OfxrPreviousSegment(string path) => Path.Combine(Path.GetDirectoryName(path) ?? "", Path.GetFileNameWithoutExtension(path) + ".prev" + Path.GetExtension(path));
@@ -688,17 +693,59 @@ public static partial class LastFlight
     }
 
     /// <summary>Lines of the last <paramref name="maxBytes"/> of a file that pass <paramref name="keep"/>; the file may
-    /// still be written by another process.</summary>
-    private static List<string> ReadLines(string path, long maxBytes, Func<string, bool> keep)
+    /// still be written by another process. With <paramref name="earlier"/>, the lines of the part before it that contain
+    /// that text (and pass <paramref name="keep"/>) come first: that part is searched as bytes, not read line by line.
+    /// The line the last part begins in is then read whole; without <paramref name="earlier"/> it is left out.</summary>
+    internal static List<string> ReadLines(string path, long maxBytes, Func<string, bool> keep, string? earlier = null)
     {
         var lines = new List<string>();
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16, FileOptions.SequentialScan);
         var skipFirst = stream.Length > maxBytes;
-        if (skipFirst) stream.Seek(-maxBytes, SeekOrigin.End);
+        string? begun = null;
+        if (skipFirst && !string.IsNullOrEmpty(earlier)) begun = EarlierLines(stream, stream.Length - maxBytes, earlier, keep, lines);
+        else if (skipFirst) stream.Seek(-maxBytes, SeekOrigin.End);
         using var reader = new StreamReader(stream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true, 1 << 16);
-        if (skipFirst) reader.ReadLine();
+        if (skipFirst && reader.ReadLine() is { } rest && begun is not null && (begun + rest).TrimEnd('\r') is var whole && keep(whole)) lines.Add(whole);
         while (reader.ReadLine() is { } line) if (keep(line)) lines.Add(line);
         return lines;
+    }
+    /// <summary>Reads <paramref name="stream"/> from its start to <paramref name="end"/> and adds the whole lines that
+    /// contain <paramref name="text"/>. Returns the start of the line that goes on past <paramref name="end"/> (empty when
+    /// a line begins there; null when it is too long to be a record), leaving the stream at <paramref name="end"/>.</summary>
+    private static string? EarlierLines(FileStream stream, long end, string text, Func<string, bool> keep, List<string> lines)
+    {
+        const int Block = 1 << 20, LongestLine = 1 << 16;
+        var needle = System.Text.Encoding.UTF8.GetBytes(text);
+        var buffer = new byte[Block + LongestLine]; var kept = 0; long position = 0;
+        // The open line lost its start: it was longer than any record, and what follows up to its end is not a line.
+        var broken = false;
+        stream.Seek(0, SeekOrigin.Begin);
+        while (position < end)
+        {
+            var read = stream.Read(buffer, kept, (int)Math.Min(Block, end - position));
+            if (read <= 0) break;
+            position += read;
+            var filled = buffer.AsSpan(0, kept + read);
+            var lastBreak = filled.LastIndexOf((byte)'\n');
+            var complete = filled[..(lastBreak + 1)];
+            var from = broken ? complete.IndexOf((byte)'\n') + 1 : 0;
+            while (from < complete.Length)
+            {
+                var hit = complete[from..].IndexOf(needle);
+                if (hit < 0) break;
+                hit += from;
+                var start = complete[..hit].LastIndexOf((byte)'\n') + 1; var stop = hit + complete[hit..].IndexOf((byte)'\n');
+                var line = System.Text.Encoding.UTF8.GetString(complete[start..stop]).TrimEnd('\r');
+                if (keep(line)) lines.Add(line);
+                from = stop + 1;
+            }
+            if (lastBreak >= 0) broken = false;
+            // The unfinished line goes on in the next block.
+            var open = filled[(lastBreak + 1)..];
+            if (open.Length > LongestLine) { broken = true; kept = 0; continue; }
+            open.CopyTo(buffer); kept = open.Length;
+        }
+        return broken ? null : System.Text.Encoding.UTF8.GetString(buffer, 0, kept);
     }
     private static string ReadHead(string path, int bytes)
     {
