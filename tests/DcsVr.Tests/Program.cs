@@ -414,6 +414,49 @@ Test("Published archives: a vendor runtime, the Sboys archive, a test fixture or
     // The same archives without the bad name get past the names (and stop later, at the fixture's setup, which is none).
     Require(Check("clean", null, null) is { } clean && clean.Exit != 0 && !clean.Output.Contains("must not be distributed", StringComparison.Ordinal) && clean.Output.Contains("setup", StringComparison.OrdinalIgnoreCase), "a clean ZIP is not refused for a name");
 });
+Test("The release test's check of the pilot's own DCS settings fails on a change, and only warns when DCS ran meanwhile", () =>
+{
+    var script = Path.Combine(workspace, "scripts/pilot-settings.ps1");
+    Require(File.ReadAllText(Path.Combine(workspace, "scripts/test-release.ps1")) is var release && release.Contains("pilot-settings.ps1') -Action Record", StringComparison.Ordinal)
+        && release.Contains("pilot-settings.ps1') -Action Compare", StringComparison.Ordinal), "The release test records and compares");
+    (int Exit, string Output)? Run(string name, string action, string process = "DcsControlTestNoSuchProcess")
+    {
+        ProcessStartInfo start = new("pwsh") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+        // The warnings and the returned object as one line of JSON each (the fixture's paths have no quote in them).
+        var command = $"& '{script}' -Action {action} -State '{Path.Combine(root, "pilot-settings", name, "state.json")}' -ConfigFolder '{Path.Combine(root, "pilot-settings", name, "DCS/Config")}' -ProcessName '{process}' 3>&1 | ForEach-Object {{ if ($_ -is [System.Management.Automation.WarningRecord]) {{ $_.Message }} else {{ $_ | ConvertTo-Json -Depth 4 -Compress }} }}";
+        foreach (var argument in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command }) start.ArgumentList.Add(argument);
+        try
+        {
+            using var run = Process.Start(start)!; var error = run.StandardError.ReadToEndAsync(); var output = run.StandardOutput.ReadToEnd();
+            run.WaitForExit(); return (run.ExitCode, output + error.Result);
+        }
+        catch (System.ComponentModel.Win32Exception) { return null; }
+    }
+    string Fixture(string name) { Make($"pilot-settings/{name}/DCS/Config/autoexec.cfg", "options.graphics.maxfps = 180"); return Make($"pilot-settings/{name}/DCS/Config/options.lua", Lua); }
+    // Nothing changed: both files are reported unchanged.
+    Fixture("same");
+    if (Run("same", "Record") is not { } recorded) { Skip("PowerShell 7 (pwsh) is not on PATH"); return; }
+    Require(recorded.Exit == 0 && File.ReadAllText(Path.Combine(root, "pilot-settings/same/state.json")).Contains("\"dcsRunning\": false", StringComparison.Ordinal), "Record: " + recorded.Output);
+    Require(Run("same", "Compare") is { Exit: 0 } same && same.Output.Contains("\"dcsRan\":false", StringComparison.Ordinal) && same.Output.Contains("options.lua", StringComparison.Ordinal) && same.Output.Contains("autoexec.cfg", StringComparison.Ordinal)
+        && same.Output.Contains("\"changed\":[]", StringComparison.Ordinal), "Unchanged passes");
+    // Changed with no DCS anywhere: the test changed the pilot's file, which fails. A removed file fails the same way.
+    var changed = Fixture("changed"); Run("changed", "Record"); File.AppendAllText(changed, "\n-- written by a test");
+    Require(Run("changed", "Compare") is { } failed && failed.Exit != 0 && failed.Output.Contains("changed during the release test", StringComparison.Ordinal) && failed.Output.Contains("options.lua", StringComparison.Ordinal), "A change without DCS fails");
+    var removed = Fixture("removed"); Run("removed", "Record"); File.Delete(removed);
+    Require(Run("removed", "Compare") is { } gone && gone.Exit != 0, "A removed file fails");
+    // Changed while DCS wrote its log since the run began: DCS rewrites options.lua, so a warning.
+    var flown = Fixture("flown"); Run("flown", "Record"); File.AppendAllText(flown, "\n-- written by DCS"); Make("pilot-settings/flown/DCS/Logs/dcs.log", "=== Log opened");
+    Require(Run("flown", "Compare") is { Exit: 0 } warned && warned.Output.Contains("DCS ran meanwhile", StringComparison.Ordinal) && warned.Output.Contains("\"dcsRan\":true", StringComparison.Ordinal), "A change with DCS's log written since only warns");
+    // A dcs.log from before the run is no DCS.
+    var old = Fixture("old-log"); File.SetLastWriteTimeUtc(Make("pilot-settings/old-log/DCS/Logs/dcs.log", "=== Log opened"), DateTime.UtcNow.AddHours(-1)); Run("old-log", "Record"); File.AppendAllText(old, "\n-- written by a test");
+    Require(Run("old-log", "Compare") is { } stale && stale.Exit != 0, "An older dcs.log does not excuse a change");
+    // A DCS running when the run began, or when it ends (this test's own process stands in for it).
+    var self = Process.GetCurrentProcess().ProcessName;
+    var running = Fixture("running"); Run("running", "Record", self); File.AppendAllText(running, "\n-- written by DCS");
+    Require(Run("running", "Compare") is { Exit: 0 } atStart && atStart.Output.Contains("DCS ran meanwhile", StringComparison.Ordinal), "A DCS running at the start only warns");
+    var later = Fixture("later"); Run("later", "Record"); File.AppendAllText(later, "\n-- written by DCS");
+    Require(Run("later", "Compare", self) is { Exit: 0 } atEnd && atEnd.Output.Contains("DCS ran meanwhile", StringComparison.Ordinal), "A DCS running at the end only warns");
+});
 Test("Back to stock DCS with a lost record removes DCS Control's files in the DCS shown, and only there", () =>
 {
     var f = LeftoverFixture("service");
