@@ -31,22 +31,20 @@ $publishedPrevious=Join-Path $workspaceRoot 'artifacts/release/DcsVrControl-0.3.
 # Earlier releases shipped Cheeky's version.dll fallback, which Microsoft Defender blocks. The upgrade fixture is a
 # copy of 0.3.0 without that file and with a consistent manifest, so upgrading still removes obsolete owned files.
 $previousRelease=Join-Path $fixtureRoot 'previous-0.3.0'
-if(Test-Path -LiteralPath (Join-Path $publishedPrevious 'release-manifest.json')){
-    $blocked=@('components/cheeky-focus/version.dll','components\cheeky-focus\version.dll')
-    $manifest=Get-Content -LiteralPath (Join-Path $publishedPrevious 'release-manifest.json') -Raw | ConvertFrom-Json
-    $manifest.files=@($manifest.files | Where-Object { $blocked -notcontains $_.path })
-    foreach($file in $manifest.files){
-        $target=Join-Path $previousRelease $file.path
-        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
-        Copy-Item -LiteralPath (Join-Path $publishedPrevious $file.path) -Destination $target
-    }
-    $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $previousRelease 'release-manifest.json') -Encoding utf8
+# Without the published 0.3.0 folder the upgrade would not be tested at all: that is a failure, not a quieter run.
+if(-not (Test-Path -LiteralPath (Join-Path $publishedPrevious 'release-manifest.json'))){throw "The upgrade fixture is missing: $publishedPrevious (unzip the published DcsVrControl-0.3.0-preview-win-x64.zip there)."}
+$blocked=@('components/cheeky-focus/version.dll','components\cheeky-focus\version.dll')
+$manifest=Get-Content -LiteralPath (Join-Path $publishedPrevious 'release-manifest.json') -Raw | ConvertFrom-Json
+$manifest.files=@($manifest.files | Where-Object { $blocked -notcontains $_.path })
+foreach($file in $manifest.files){
+    $target=Join-Path $previousRelease $file.path
+    New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $publishedPrevious $file.path) -Destination $target
 }
-$upgradeChecked=Test-Path -LiteralPath (Join-Path $previousRelease 'release-manifest.json')
-if($upgradeChecked){
-    & $cli app-install --source $previousRelease --destination $installRoot
-    if($LASTEXITCODE -ne 0){throw 'Previous release installation fixture failed.'}
-}
+$manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $previousRelease 'release-manifest.json') -Encoding utf8
+$upgradeChecked=$true
+& $cli app-install --source $previousRelease --destination $installRoot
+if($LASTEXITCODE -ne 0){throw 'Previous release installation fixture failed.'}
 foreach($attempt in 1..2){
     & $cli app-install --source $releaseRoot --destination $installRoot
     if($LASTEXITCODE -ne 0){throw 'Application install/update fixture failed.'}
