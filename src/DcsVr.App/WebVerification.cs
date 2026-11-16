@@ -488,6 +488,12 @@ internal static class WebVerification
             await core.ExecuteScriptAsync("document.getElementById('updateNotesOpen').click();");
             await Capture("update-dialog");
             await core.ExecuteScriptAsync("document.getElementById('updateLater').click();document.getElementById('updateBanner').hidden=true;");
+            // A DCS that looks stuck, as the top bar says it on a page other than the Overview (GitHub #21); then gone again.
+            async Task<string> DcsNow(string says) => await Await("window.dcsUi.request('dcsStatus',"+says+").then(()=>window.dcsUi.pollDcs())") is var polled && polled != "done" ? polled
+                : await Text("document.getElementById('statusTitle').textContent+'|'+document.getElementById('statusEndDcs').hidden");
+            if (await DcsNow("{simulate:true,stuck:'NoWindow'}") is var stuckBar && stuckBar != "DCS has no window|false") throw new IOException("The top bar does not offer to end a DCS with no window: " + stuckBar);
+            await Capture("dcs-stuck", "support");
+            if (await DcsNow("{simulate:false,stuck:null}") is var freeBar && (freeBar.StartsWith("DCS ", StringComparison.Ordinal) || !freeBar.EndsWith("|true", StringComparison.Ordinal))) throw new IOException("The top bar still shows a stuck DCS: " + freeBar);
             File.WriteAllText(output+"-renders.json",JsonData.Serialize(screenshots));
             // The same list, short, next to the checks: which screenshot file shows which page, at which size, scrolled or not.
             File.WriteAllText(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output))!,"screenshots.json"),JsonData.Serialize(ShotList(JsonData.Serialize(screenshots))));

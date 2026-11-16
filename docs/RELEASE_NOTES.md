@@ -9,6 +9,7 @@
 **Fixes:**
 - With **Smoothness buffer** on, a short run of heavy frames (opening the F10 map, for example) could leave DCS at about 41 FPS instead of 45 with repeated frames, for up to a minute. Frame generation now recovers at once.
 - With foveated frame generation, a loading screen at the wrong moment while a flight started could leave the whole flight without generated frames.
+- A DCS left in the background without a window was only pointed out on the Overview (GitHub #21). The status at the top of every page now says **DCS has no window** or **DCS is not responding**, with **End DCS** next to it, and the app keeps counting while its window is minimised, so you are told as soon as you open it.
 
 # 0.6.6 preview
 

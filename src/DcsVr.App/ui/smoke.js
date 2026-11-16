@@ -102,6 +102,8 @@ window.runWebSmoke = async function() {
         // Cancelled first: the full run after it ends with its fixture download removed, as the verification expects.
         button.click(); button.click(); await ui.request('updateCancel');
         await until(() => (text.textContent.includes('was not started') || text.classList.contains('error')) && !ui.updates.rollingBack);
+        // The page refreshes after a refusal and Go back is off while that runs: the refresh ends first.
+        await sleep(20); await waitIdle();
         { const cancelled = text.classList.contains('error') && text.textContent.includes('cancelled. Nothing changed.')
             && JSON.stringify(ui.draft().profile) === draftBefore && button.textContent === `Go back to ${back.short}` && !button.disabled;
           check('Cancel right after Go back stops it before anything changes'+(cancelled ? '' : ' ['+text.textContent+']'),cancelled); }
@@ -692,6 +694,33 @@ window.runWebSmoke = async function() {
       button().click(); const asked = button()?.textContent === 'End DCS? Click again' && ui.state.dcsRunning;
       button().click(); await sleep(60); await waitIdle();
       check('A DCS with no window is offered to be ended; the second click ends it and the app is free again',offered && asked && !ui.state.dcsRunning && !button() && !(await ui.request('dcsStatus',{})).dcsRunning); }
+    // The same on every other page, in the top bar: a pilot is rarely on the Overview when DCS hangs (GitHub #21). The
+    // page's own poll reads it here, as it does every 4 seconds.
+    { ui.navigate('support'); const end = $('statusEndDcs'), dot = $('statusDot'), bar = () => $('statusTitle').textContent+'|'+$('status').textContent;
+      const poll = async data => { await ui.request('dcsStatus',data); await ui.pollDcs(); };
+      const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.right <= $('launch').getBoundingClientRect().left; };
+      await poll({simulate:true});
+      check('A healthy running DCS reads in the top bar as before, with no End DCS',$('page-overview').hidden && bar() === 'DCS is running|Close DCS to apply changes or go back to stock DCS.' && end.hidden && !shown(end)
+        && dot.className === 'status-dot' && !dot.parentElement.classList.contains('stuck') && getComputedStyle(end.parentElement).display === 'block' && $('launch').disabled);
+      await poll({stuck:'NotResponding'});
+      check('A DCS that stopped answering is named in the top bar, with End DCS next to it',bar() === 'DCS is not responding|It may still be loading a mission.' && shown(end) && end.textContent === 'End DCS');
+      await poll({stuck:'NoWindow'});
+      check('On a page other than the Overview the top bar says DCS has no window, with its dot marked and End DCS on the line',$('page-overview').hidden && bar() === 'DCS has no window|It still runs in the background.'
+        && shown(end) && end.textContent === 'End DCS' && dot.classList.contains('stuck') && !dot.classList.contains('error') && $('launch').disabled && document.documentElement.scrollWidth <= innerWidth);
+      await ui.run('refresh');
+      check('It is still said after a command (the state carries it)',ui.state.dcsStuck === 'NoWindow' && bar().startsWith('DCS has no window|') && shown(end));
+      end.click(); const asked = end.textContent === 'End DCS? Click again' && ui.state.dcsRunning;
+      document.body.click(); const takenBack = end.textContent === 'End DCS' && ui.state.dcsRunning;
+      // One question for both places: asked in the top bar, the Overview's button shows it too.
+      end.click(); ui.navigate('overview'); const shared = $('dashStatus').querySelector('[data-end-dcs]')?.textContent === 'End DCS? Click again'; ui.navigate('support');
+      check('End DCS in the top bar asks once, a click elsewhere takes the question back, and the Overview shows the same question',asked && takenBack && shared && end.textContent === 'End DCS? Click again');
+      end.click(); await sleep(60); await waitIdle();
+      check('The second click in the top bar ends DCS and the top bar is free again',!ui.state.dcsRunning && end.hidden && !dot.classList.contains('stuck') && !bar().startsWith('DCS ') && !(await ui.request('dcsStatus',{})).dcsRunning);
+      await poll({simulate:true, stuck:'NoWindow'}); const again = bar().startsWith('DCS has no window|') && shown(end);
+      await poll({stuck:null}); const healthy = bar() === 'DCS is running|Close DCS to apply changes or go back to stock DCS.' && end.hidden && dot.className === 'status-dot';
+      await poll({stuck:'NoWindow'}); await poll({simulate:false}); await ui.request('dcsStatus',{stuck:null});
+      check('The top bar goes back as soon as DCS answers again or is gone',again && healthy && end.hidden && !dot.classList.contains('stuck') && !bar().startsWith('DCS ') && !ui.state.dcsRunning && !ui.state.dcsStuck);
+      await sleep(60); await waitIdle(); }
     // The page area never scrolls sideways (the document itself cannot: the area clips it, so it is measured here).
     { const wide = []; for (const id of ['overview','presets','guide','foveation','dlss','framegen','pupil','visual','osd','boost','engine','setup','diagnostics','support','recovery']) { ui.navigate(id); await sleep(40); const area = $('scrollArea'), limit = area.getBoundingClientRect().right;
         if (area.scrollWidth > area.clientWidth) wide.push(id+' +'+(area.scrollWidth - area.clientWidth)+' '+[...area.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > limit + 1).slice(0,2).map(e => e.tagName+'#'+e.id).join(',')); }
