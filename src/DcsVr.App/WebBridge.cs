@@ -116,6 +116,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     private Task<UpdateCheck>? _checking;
     private UpdateCheck? _lastCheck;
     private bool _installing, _cleaned, _handedOff, _rollingBack;
+    /// <summary>Set (under the update lock) once a going back is past the point where Cancel still stops it: DCS is
+    /// about to be put back to stock. The page then shows "Going back…" instead of Cancel.</summary>
+    private bool _committed;
     /// <summary>Go back: one step, to the version this installation replaced. Created at start, where a going back that
     /// did not happen is undone and presets set aside return, before the draft is read.</summary>
     private readonly Rollback _rollback = StartRollback(service, offline);
@@ -230,7 +233,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         using (Process.Start(new ProcessStartInfo(page) { UseShellExecute = true })) { }
                         break;
                     case "updateInstall": await InstallUpdate(); break;
-                    case "updateCancel": lock (_updateLock) if (!_handedOff) _downloadCancel?.Cancel(); break;
+                    case "updateCancel": lock (_updateLock) if (!_handedOff && !_committed) _downloadCancel?.Cancel(); break;
                     case "whatsNew":
                         // At start: this version's notes once, after an update. From the rail's version number: always.
                         var notes = ReleaseNotes();
@@ -276,7 +279,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         var u = check?.Update;
         return new { enabled = Settings.Load().CheckForUpdates, current = ProductInfo.Version, checking, checkedAt = check?.CheckedAt, error = check?.Error,
             update = u is null ? null : new { version = u.Version, @short = u.Short, pageUrl = u.PageUrl, notes = u.Notes, published = u.Published, canInstall = u.CanInstall, bytes = u.SetupBytes },
-            installing = _installing || _handedOff, handedOff = _handedOff, rollingBack = _rollingBack, rollback = RollbackView(), downloaded = _downloaded is { } d ? new { done = d.Done, total = d.Total } : null, message = _updateMessage,
+            installing = _installing || _handedOff, handedOff = _handedOff, rollingBack = _rollingBack, cancellable = _installing && !_handedOff && !_committed, rollback = RollbackView(), downloaded = _downloaded is { } d ? new { done = d.Done, total = d.Total } : null, message = _updateMessage,
             portable = !Installed, appFolder = Shown(AppRoot), installFolder = Shown(UpdateFolder()) };
     }
     /// <summary>Go back, as Help &amp; support shows it: the version one step back (null: looked up on GitHub when asked),
@@ -335,6 +338,13 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             // The offline verification's fixture setup is not a program and carries no version.
             if (!offline && (ReleaseVersion.Parse(FileVersionInfo.GetVersionInfo(setup).ProductVersion ?? "") is not { } carried || ReleaseVersion.Parse(version) is not { } wanted || carried.CompareTo(wanted) != 0))
                 throw new InvalidDataException("The setup is not " + name + ". Nothing changed.");
+            // Cancel is honoured up to here (a click while the kept setup was verified, or just after the download);
+            // from here DCS's files and the settings change, and the button no longer says Cancel.
+            lock (_updateLock)
+            {
+                if (cancel.IsCancellationRequested) throw new InvalidOperationException("Going back was cancelled. Nothing changed.");
+                _committed = true;
+            }
             // DCS first: every file this version changed goes back to its original, with this version's own record.
             var (dcs, options) = (CurrentInventory.DcsExecutable, CurrentInventory.OptionsPath);
             Invalidate();
@@ -368,7 +378,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             if (owner is not null) _ = Task.Delay(1500).ContinueWith(_ => owner.Dispatcher.BeginInvoke(owner.Close), TaskScheduler.Default);
         }
         catch { _downloaded = null; _updateMessage = null; if (locked) _commands.Release(); throw; }
-        finally { lock (_updateLock) { _installing = false; if (!_handedOff) _rollingBack = false; _downloadCancel = null; } cancel.Dispose(); }
+        finally { lock (_updateLock) { _installing = false; _committed = false; if (!_handedOff) _rollingBack = false; _downloadCancel = null; } cancel.Dispose(); }
     }
     /// <summary>A folder as the update dialog names it; the offline verification's renders ship with the release, so there
     /// the Windows user's profile folder reads %USERPROFILE%.</summary>

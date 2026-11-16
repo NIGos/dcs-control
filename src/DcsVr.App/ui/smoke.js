@@ -99,11 +99,26 @@ window.runWebSmoke = async function() {
         check('Go back is refused while DCS runs',await until(() => text.classList.contains('error') && !ui.updates.rollingBack) && text.textContent.includes('Close DCS'));
         await waitIdle(); await ui.request('dcsStatus',{simulate:false}); ui.state.dcsRunning = false; ui.refreshWorkflow();
         const draftBefore = JSON.stringify(ui.draft().profile), seenBefore = (await ui.request('whatsNew',{startup:true})).show;
+        // Cancelled first: the full run after it ends with its fixture download removed, as the verification expects.
+        button.click(); button.click(); await ui.request('updateCancel');
+        await until(() => (text.textContent.includes('was not started') || text.classList.contains('error')) && !ui.updates.rollingBack);
+        { const cancelled = text.classList.contains('error') && text.textContent.includes('cancelled. Nothing changed.')
+            && JSON.stringify(ui.draft().profile) === draftBefore && button.textContent === `Go back to ${back.short}` && !button.disabled;
+          check('Cancel right after Go back stops it before anything changes'+(cancelled ? '' : ' ['+text.textContent+']'),cancelled); }
+        await waitIdle();
         button.click(); button.click();
         await until(() => (text.textContent.includes('was not started') || text.classList.contains('error')) && !ui.updates.rollingBack);
         check("Go back verifies the earlier version's signed setup and switches the settings (offline: put back, setup not started)"+(text.classList.contains('error') ? ' ['+text.textContent+']' : ''),text.textContent.includes('was not started')
           && text.textContent.includes(back.short) && !text.classList.contains('error') && !ui.updates.installing && !button.disabled);
         check('After the offline run the draft and What\'s new are as before',JSON.stringify(ui.draft().profile) === draftBefore && !seenBefore && !(await ui.request('whatsNew',{startup:true})).show);
+        // Cancel: honoured until DCS is put back to stock, and the button says so from then on.
+        check('The update status says whether a run can still be cancelled',ui.updates.cancellable === false);
+        { const idle = ui.updates;
+          ui.updates = {...idle, installing:true, rollingBack:true, cancellable:true}; ui.renderUpdates();
+          const early = button.textContent === 'Cancel' && !button.disabled;
+          ui.updates = {...idle, installing:true, rollingBack:true, cancellable:false}; ui.renderUpdates();
+          check('Go back shows Cancel only while a click still stops it, then a disabled "Going back…"',early && button.textContent === 'Going back…' && button.disabled);
+          ui.updates = idle; ui.renderUpdates(); }
         await replaced(''); button.click(); document.body.click();
         check('With nothing on record, Go back looks the previous release up when asked',ui.updates.rollback.available && ui.updates.rollback.version === null && button.textContent === 'Go back to the previous version' && !button.disabled
           && text.textContent.includes('put back')); } }

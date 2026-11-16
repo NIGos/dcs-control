@@ -2157,8 +2157,10 @@ let rollbackArmed = false, rollbackError = null, rollbackDone = null;
 function renderRollback() {
   const u = updates, r = u?.rollback, button = $('rollbackButton'), text = $('rollbackText'); if (!button) return;
   const going = Boolean(u?.rollingBack), name = r?.short || 'the previous version';
-  button.disabled = !r?.available || busy || Boolean(u?.handedOff) || (Boolean(u?.installing) && !going);
-  button.textContent = u?.handedOff && going ? 'Going back…' : going ? 'Cancel' : rollbackArmed ? `Go back to ${name}? Click again` : `Go back to ${name}`;
+  // Cancel stops it only until DCS is put back to stock (the backend says when: cancellable).
+  const committed = going && (Boolean(u?.handedOff) || u?.cancellable === false);
+  button.disabled = !r?.available || busy || committed || (Boolean(u?.installing) && !going);
+  button.textContent = committed ? 'Going back…' : going ? 'Cancel' : rollbackArmed ? `Go back to ${name}? Click again` : `Go back to ${name}`;
   const sentence = `DCS goes back to stock and DCS Control restarts as ${r?.short || 'the version before'}, with ${r?.fresh ? 'its default settings' : 'the settings you had then'}. Settings changed since are kept, and your presets return when you update again.`;
   text.textContent = rollbackError || (going && u.message) || rollbackDone || (!r ? '' : !r.available ? r.reason : rollbackArmed ? sentence : 'Trouble since the update? The version before it can be put back.');
   text.classList.toggle('error', Boolean(rollbackError));
@@ -2180,7 +2182,7 @@ async function goBack() {
 }
 document.addEventListener('click', e => {
   if (!e.target.closest('[data-rollback]')) { if (rollbackArmed) { rollbackArmed = false; renderRollback(); } return; }
-  if (updates?.rollingBack) { if (!updates.handedOff) request('updateCancel').catch(()=>{}); return; }
+  if (updates?.rollingBack) { if (!updates.handedOff && updates.cancellable !== false) request('updateCancel').catch(()=>{}); return; }
   if (!rollbackArmed) { rollbackArmed = true; rollbackError = rollbackDone = null; renderRollback(); return; }
   rollbackArmed = false; goBack();
 });
