@@ -3,6 +3,7 @@
 #   . (Join-Path $PSScriptRoot 'build-stamp.ps1')
 #   Save-BuildStamp 'quadviews'                       # at the end of a successful build
 #   Assert-BuildStampCurrent 'quadviews'              # in build-release.ps1
+#   Save-BuildStamp 'ofxr' -LocalOnly 'why'           # a build for this machine only (see below)
 $BuildStampInputs = @{
     quadviews = @('scripts/build-quadviews.ps1', 'native/quadviews')
     ofxr      = @('scripts/build-ofxr-djules75.ps1', 'patches/ofxr-djules75')
@@ -26,15 +27,40 @@ function Get-BuildInputsFingerprint([string]$Name) {
     return [Convert]::ToHexString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))))
 }
 function Get-BuildStampPath([string]$Name) { Join-Path (Split-Path -Parent $PSScriptRoot) "artifacts/build-stamps/$Name.txt" }
-function Save-BuildStamp([string]$Name) {
+# A stamp is the inputs' fingerprint on its first line. A LOCAL-ONLY stamp has a second line, "local-only <date> <why>":
+# the component was built from these inputs but did not pass everything a release asks (a pacing test that failed, tests
+# skipped while a game was running). It is the marked form of what was otherwise done by editing the stamp by hand:
+# Assert-BuildStampCurrent refuses it unless the caller says -AllowLocalOnly, which a build to publish never does.
+function Save-BuildStamp([string]$Name, [string]$LocalOnly) {
     $stamp = Get-BuildStampPath $Name
     New-Item -ItemType Directory -Path (Split-Path -Parent $stamp) -Force | Out-Null
-    Set-Content -LiteralPath $stamp -Value (Get-BuildInputsFingerprint $Name) -Encoding ascii
+    $lines = @(Get-BuildInputsFingerprint $Name)
+    if ($LocalOnly) {
+        $why = ($LocalOnly -replace '\s+', ' ').Trim()
+        $lines += 'local-only {0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm'), $why
+        Write-Host "LOCAL-ONLY build stamp for ${Name}: $why. build-release.ps1 refuses it; not for publishing."
+    }
+    Set-Content -LiteralPath $stamp -Value $lines -Encoding ascii
 }
-function Assert-BuildStampCurrent([string]$Name) {
+# Fingerprint = the first line (null without a stamp); LocalOnly = the text after "local-only " (null for a full stamp).
+function Get-BuildStamp([string]$Name) {
     $stamp = Get-BuildStampPath $Name
-    $recorded = if (Test-Path -LiteralPath $stamp) { (Get-Content -LiteralPath $stamp -Raw).Trim() } else { $null }
-    if ($recorded -ne (Get-BuildInputsFingerprint $Name)) {
+    $lines = @(if (Test-Path -LiteralPath $stamp) { Get-Content -LiteralPath $stamp | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
+    $local = @($lines | Select-Object -Skip 1 | Where-Object { $_ -like 'local-only*' }) | Select-Object -First 1
+    [pscustomobject]@{
+        Fingerprint = if ($lines.Count) { $lines[0] } else { $null }
+        LocalOnly   = if ($local) { ($local -replace '^local-only\s*', '') } elseif ($lines.Count -gt 1) { 'unreadable second line' } else { $null }
+    }
+}
+function Assert-BuildStampCurrent([string]$Name, [switch]$AllowLocalOnly) {
+    $recorded = Get-BuildStamp $Name
+    if ($recorded.Fingerprint -ne (Get-BuildInputsFingerprint $Name)) {
         throw "The prebuilt $Name component is older than its sources or patches (or was built before build stamps existed). Run $($BuildStampScripts[$Name]), then build the release again."
+    }
+    if ($recorded.LocalOnly) {
+        if (-not $AllowLocalOnly) {
+            throw "The prebuilt $Name component has a local-only build stamp ($($recorded.LocalOnly)): it did not pass everything a release asks. Run $($BuildStampScripts[$Name]) without -LocalOnly, then build the release again."
+        }
+        Write-Warning "The prebuilt $Name component has a LOCAL-ONLY build stamp ($($recorded.LocalOnly)): this package is not for publishing."
     }
 }
