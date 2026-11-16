@@ -3385,6 +3385,65 @@ Test("This profile's focus is edited in Pimax Play's Quick units and maps exactl
     Require(!ProfileValidation.Validate(p with { QuadViews = QuadProvider.QuadViewsFoveated, FoveaWidth = PimaxPlayUnits.ShareFromQuickFov(90), FoveaHeight = PimaxPlayUnits.ShareFromQuickFov(10), QuadFocusScale = PimaxPlayUnits.DensityFromCenter(200), PeripheralScale = PimaxPlayUnits.PeripheryFromPercent(16) })
         .Any(i => i.Severity == IssueSeverity.Error));
 });
+Test("Vertical focus offset (GitHub #24): 0 as before, Pimax Play's -100 to 100, written for the fixed and the eye-tracked focus only when set, not live", () =>
+{
+    var own = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FoveaSource = FoveaSource.Profile };
+    Require(own.QuadVerticalOffset == 0 && JsonData.Deserialize<VrProfile>("{\"quadViews\":\"QuadViewsFoveated\",\"foveaSource\":\"Profile\",\"foveaHeight\":0.4}")!.QuadVerticalOffset == 0, "0 by default, also for a profile saved before the setting");
+    Require(ProfilePresets.All.All(p => p.QuadVerticalOffset == 0), "the built-in profiles have none");
+    // 0 writes nothing: settings.cfg is byte for byte what it was, and the layer's own default applies.
+    var plain = ConfigurationWriters.QuadViews(own);
+    Require(!plain.Contains("_offset", StringComparison.Ordinal), "0: no offset key\n" + plain);
+    // Pimax Play's Vertical Offset units: -100 to 100 is the layer's -0.5 to 0.5, and each value shows again as it was set.
+    Require(PimaxPlayUnits.StoredFromOffset(-20) == -.1 && PimaxPlayUnits.StoredFromOffset(100) == .5 && PimaxPlayUnits.StoredFromOffset(-100) == -.5 && PimaxPlayUnits.OffsetFromStored(-.05) == -10);
+    for (var v = -100; v <= 100; v++)
+        Require(PimaxPlayUnits.JsRound(PimaxPlayUnits.OffsetFromStored(PimaxPlayUnits.StoredFromOffset(v))) == v && PimaxPlayUnits.VerticalOffset(PimaxPlayUnits.StoredFromOffset(v)) == v, "Vertical offset " + v);
+    // Negative is down (Quad Views adds it to the gaze point's y, up positive): the same value for both focus kinds, like the sizes.
+    var down = own with { QuadVerticalOffset = PimaxPlayUnits.StoredFromOffset(-20) };
+    var text = ConfigurationWriters.QuadViews(down); var lines = text.Split('\n').Select(l => l.Trim()).ToArray();
+    Require(lines.Contains("vertical_focus_offset=-0.1") && lines.Contains("vertical_fixed_offset=-0.1") && !text.Contains("horizontal_focus_offset", StringComparison.Ordinal) && !text.Contains("horizontal_fixed_offset", StringComparison.Ordinal), text);
+    Require(Array.IndexOf(lines, "vertical_focus_offset=-0.1") > Array.IndexOf(lines, "[exe:DCS]") && Array.IndexOf(lines, "vertical_focus_offset=-0.1") == Array.IndexOf(lines, "vertical_focus_section=0.34") + 2, "in DCS's section, after the focus sizes");
+    Require(text.Replace("vertical_fixed_offset=-0.1\n", "").Replace("vertical_focus_offset=-0.1\n", "") == plain, "nothing else in settings.cfg changes");
+    var fixedText = ConfigurationWriters.QuadViews(down with { Gaze = GazeMode.Fixed, QuadVerticalOffset = .25 });
+    Require(fixedText.Contains("force_no_eye_tracking=1") && fixedText.Contains("vertical_fixed_offset=0.25\n") && fixedText.Contains("vertical_focus_offset=0.25\n"), "a fixed focus area takes it too\n" + fixedText);
+    Require(ConfigurationWriters.QuadViews(own with { QuadVerticalOffset = .8 }).Contains("vertical_focus_offset=0.5\n") && !ConfigurationWriters.QuadViews(own with { QuadVerticalOffset = double.NaN }).Contains("_offset", StringComparison.Ordinal), "never more than the layer takes");
+    Require(!ConfigurationWriters.QuadViews(down with { QuadViewsLayerDirectory = @"C:qv" }).Contains("_offset", StringComparison.Ordinal) && !ProfileValidation.Validate(own with { QuadVerticalOffset = -.3, QuadViewsLayerDirectory = @"C:qv" }).Any(i => i.Code == "quad-offset-gaze"),
+        "not with an alternative provider: without the bundled gaze export the pupil shift layer would take the moved focus centre for the gaze");
+    // Range: the layer's -0.5 to 0.5.
+    foreach (var ok in new[] { -.5, -.1, 0, .5 }) Require(!ProfileValidation.Validate(own with { QuadVerticalOffset = ok }).Any(i => i.Code == "quad-vertical-offset"), "allowed: " + ok);
+    foreach (var bad in new[] { -.505, .51, 3, double.NaN, double.PositiveInfinity })
+        Require(ProfileValidation.Validate(own with { QuadVerticalOffset = bad }).Any(i => i.Code == "quad-vertical-offset" && i.Severity == IssueSeverity.Error && i.Message == "Vertical offset: allowed range -100 to 100."), "refused: " + bad);
+    // Beyond the fully sharp part of the focus area (half-height 0.34 less the 2 x 0.2 edge band: 0.204, Vertical offset 40.8) the point looked at loses detail.
+    Require(Math.Abs(VrProfile.QuadSharpHalfHeight(own) - .204) < 1e-12 && Math.Abs(VrProfile.QuadSharpHalfHeight(own with { FoveaHeight = 1, QuadEdgeBlend = 0 }) - .891) < 1e-12);
+    Require(!ProfileValidation.Validate(own with { QuadVerticalOffset = PimaxPlayUnits.StoredFromOffset(-40) }).Any(i => i.Code == "quad-offset-gaze"), "-40 keeps the gaze in full detail");
+    var far = ProfileValidation.Validate(own with { QuadVerticalOffset = PimaxPlayUnits.StoredFromOffset(-41) }).Single(i => i.Code == "quad-offset-gaze");
+    Require(far.Severity == IssueSeverity.Warning && far.Message == "Vertical offset -41 moves the focus area so far that the point you look at is no longer in full detail. With this Vertical FOV and Focus edge blending, stay within ±40.", far.Message);
+    Require(ProfileValidation.Validate(own with { Gaze = GazeMode.Fixed, QuadVerticalOffset = .3 }).Single(i => i.Code == "quad-offset-gaze").Message.StartsWith("Vertical offset 60 moves the focus area so far that the middle of the view is no longer in full detail."), "a fixed focus area: the middle of the view");
+    Require(!ProfileValidation.Validate(own with { QuadVerticalOffset = -.3, FoveaSource = FoveaSource.PimaxPlay }).Any(i => i.Code == "quad-offset-gaze")
+        && !ProfileValidation.Validate(own with { QuadVerticalOffset = -.3, QuadViews = QuadProvider.PimaxNative }).Any(i => i.Code == "quad-offset-gaze"), "only where the offset is written");
+    Require(!ProfileValidation.Validate(down).Any(i => i.Message.Contains("experimental", StringComparison.OrdinalIgnoreCase)), "no warning for using it");
+    // One of the profile's own focus values: not written with Pimax Play's values, written when the profile's own are (a Pimax preset, or no Pimax Play settings).
+    var follows = down with { FoveaSource = FoveaSource.PimaxPlay };
+    var custom = PimaxFovea.Resolve(follows, Make("pimax-offset/custom.json", PimaxJson(0, .33, .33, .33, .33).TrimEnd('}') + ",\"runtime_quadviews_vertical_focus_offset\":-0.05}"));
+    Require(custom.Applies && custom.Pimax!.Play.VerticalOffset == -10 && custom.Profile.QuadVerticalOffset == 0 && !ConfigurationWriters.QuadViews(custom.Profile).Contains("_offset", StringComparison.Ordinal), "Pimax Play's values: no offset, Pimax Play's own is shown and not converted");
+    var preset = PimaxFovea.Resolve(follows, Make("pimax-offset/preset.json", PimaxJson(0, .33, .33, .33, .33).TrimEnd('}') + ",\"runtime_quadviews_rendering_level\":2}"));
+    Require(preset.Pimax is { Preset: true } && preset.Profile.QuadVerticalOffset == -.1 && PimaxFovea.Resolve(follows, Path.Combine(root, "pimax-offset/none.json")).Profile.QuadVerticalOffset == -.1, "the profile's own values: its offset too");
+    var writtenCustom = AppliedFovea.From(custom.Profile, "s");
+    Require(writtenCustom.QuadVerticalOffset == 0 && AppliedFovea.From(preset.Profile, "s").QuadVerticalOffset == -.1 && PimaxFovea.SameFovea(custom.Profile, writtenCustom) && !PimaxFovea.SameFovea(custom.Profile with { QuadVerticalOffset = -.1 }, writtenCustom), "pimax-fovea.json records the offset written");
+    Require(JsonData.Deserialize<AppliedFovea>("{\"stamp\":null,\"foveaWidth\":0.43,\"foveaHeight\":0.66,\"quadFocusScale\":1.125,\"peripheralScale\":0.198,\"quadEdgeBlend\":0.2}")!.QuadVerticalOffset == 0
+        && JsonData.Deserialize<AppliedFovea>(JsonData.Serialize(AppliedFovea.From(preset.Profile, "s"))) == AppliedFovea.From(preset.Profile, "s"), "a pimax-fovea.json from before the setting wrote none");
+    // profile.json and a preset file keep it.
+    var json = JsonData.Serialize(down);
+    Require(json.Contains("\"quadVerticalOffset\": -0.1") && JsonData.Deserialize<VrProfile>(json) == down, "profile.json round trip");
+    var store = new PresetStore(Path.Combine(root, "offset-presets")); Directory.CreateDirectory(store.Root);
+    File.WriteAllText(store.PathOf("Gauges"), json); File.WriteAllText(store.PathOf("Before"), "{\"quadViews\":\"QuadViewsFoveated\"}");
+    Require(JsonData.Deserialize<VrProfile>(File.ReadAllText(store.PathOf("Gauges")))!.QuadVerticalOffset == -.1 && JsonData.Deserialize<VrProfile>(File.ReadAllText(store.PathOf("Before")))!.QuadVerticalOffset == 0, "a preset keeps it; an older preset has none");
+    // Like the focus sizes it waits for the next launch: Quad Views reads these keys when DCS starts (dcsvr_live.h reloads the post-process keys only).
+    Require(LiveSettings.Find("quadVerticalOffset") is null && LiveSettings.Find("foveaWidth") is null && LiveSettings.Find("foveaHeight") is null, "not a live setting, like Horizontal and Vertical FOV");
+    Require(!LiveSettings.IsLiveKey(LiveSettings.QuadFile, "vertical_focus_offset", "-0.1", "0") && !LiveSettings.IsLiveKey(LiveSettings.QuadFile, "vertical_fixed_offset", "-0.1", "0") && !LiveSettings.IsLiveKey(LiveSettings.QuadFile, "vertical_focus_section", "0.4", "0.34"), "its keys are not written live");
+    // Foveated frame generation takes the focus area from the two layers' fields of view: the offset changes nothing it is told.
+    var fg = down with { FrameGen = FrameGeneration.Nvidia, FrameGenFoveated = true };
+    Require(fg.UsesFoveatedFrameGen && ConfigurationWriters.QuadViews(fg).Contains("dcsvr_two_layers=2") && ConfigurationWriters.QuadViews(fg).Contains("vertical_focus_offset=-0.1\n") && !ProfileValidation.Validate(fg).Any(i => i.Code is "quad-vertical-offset" or "quad-offset-gaze"), "with foveated frame generation too");
+});
 Test("CPU Boost lists reject empty names and processes that start DCS", () =>
 {
     var p = new VrProfile { CpuBoost = true };
@@ -5390,7 +5449,8 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         // The slider values of Pimax Play, 1 to 100, through each conversion.
         const pimax = vm.runInNewContext(regions.join('\n') + `
         ;Array.from({length:100}, (_, i) => i + 1).map(v => ({quickFromShare:PIMAX.quickFromShare(v / 100), shareFromQuick:PIMAX.shareFromQuick(v), centerFromDensity:PIMAX.centerFromDensity(v / 50),
-          densityFromCenter:PIMAX.densityFromCenter(v * 2), peripheralPercent:PIMAX.peripheralPercent(PIMAX.peripheryFromPercent(v)), peripheryFromPercent:PIMAX.peripheryFromPercent(v)}))`, {});
+          densityFromCenter:PIMAX.densityFromCenter(v * 2), peripheralPercent:PIMAX.peripheralPercent(PIMAX.peripheryFromPercent(v)), peripheryFromPercent:PIMAX.peripheryFromPercent(v),
+          offsetFromStored:PIMAX.offsetFromStored((v * 2 - 101) / 200), storedFromOffset:PIMAX.storedFromOffset(v * 2 - 101)}))`, {});
         process.stdout.write(JSON.stringify({result, pimax}));
         """);
     ProcessStartInfo start = new("node") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
@@ -5416,6 +5476,8 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         {
             ["quickFromShare"] = PimaxPlayUnits.QuickFovFromShare(v / 100.0), ["shareFromQuick"] = PimaxPlayUnits.ShareFromQuickFov(v), ["centerFromDensity"] = PimaxPlayUnits.CenterFromDensity(v / 50.0),
             ["densityFromCenter"] = PimaxPlayUnits.DensityFromCenter(v * 2), ["peripheralPercent"] = PimaxPlayUnits.PeripheralPercent(PimaxPlayUnits.PeripheryFromPercent(v)), ["peripheryFromPercent"] = PimaxPlayUnits.PeripheryFromPercent(v),
+            // Vertical Offset -99 to 99 in steps of 2 (the 100 values of this table).
+            ["offsetFromStored"] = PimaxPlayUnits.OffsetFromStored((v * 2 - 101) / 200.0), ["storedFromOffset"] = PimaxPlayUnits.StoredFromOffset(v * 2 - 101),
         };
         foreach (var (key, value) in conversions)
             if (!sliders[v - 1].TryGetProperty(key, out var actual) || Math.Abs(actual.GetDouble() - value) > 1e-12) mismatches.Add($"Pimax slider {v}: {key} UI={(actual.ValueKind == System.Text.Json.JsonValueKind.Number ? actual.GetRawText() : "missing")} C#={value:R}");

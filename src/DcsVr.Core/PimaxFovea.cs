@@ -101,11 +101,13 @@ public sealed record FoveaResolution(VrProfile Profile, bool Applies, PimaxQuadV
 
 /// <summary>The Pimax Play values converted and written to bundled Quad Views at Apply (pimax-fovea.json in the profile
 /// folder). profile.json keeps the user's own values; this keeps what DCS actually uses, for "changed since Apply".</summary>
-public sealed record AppliedFovea(string? Stamp, double FoveaWidth, double FoveaHeight, double QuadFocusScale, double PeripheralScale, double QuadEdgeBlend)
+/// <param name="QuadVerticalOffset">The vertical offset written: 0 with Pimax Play's values, the profile's own when its own
+/// values were written (a Pimax preset). A file saved before the setting existed has none, which is 0 as written then.</param>
+public sealed record AppliedFovea(string? Stamp, double FoveaWidth, double FoveaHeight, double QuadFocusScale, double PeripheralScale, double QuadEdgeBlend, double QuadVerticalOffset = 0)
 {
     public const string FileName = "pimax-fovea.json";
     public static AppliedFovea From(VrProfile written, string? stamp) =>
-        new(stamp, written.FoveaWidth, written.FoveaHeight, written.QuadFocusScale, written.PeripheralScale, written.QuadEdgeBlend);
+        new(stamp, written.FoveaWidth, written.FoveaHeight, written.QuadFocusScale, written.PeripheralScale, written.QuadEdgeBlend, written.QuadVerticalOffset);
 }
 
 /// <summary>
@@ -151,6 +153,10 @@ public static class PimaxPlayUnits
     public static double DensityFromCenter(double center) => Fixed4(center / 100);
     public static double PeripheralPercent(double density) => 1 + (density - .01) / .98 * 99;
     public static double PeripheryFromPercent(double percent) => Fixed4(PeripheryDensity(Fixed4((percent - 1) / 99)));
+    /// <summary>A profile's own vertical offset as Pimax Play shows its Vertical Offset (<see cref="VerticalOffset"/>
+    /// without the rounding): stored -0.5 to 0.5 is -100 to 100, so 100 is a quarter of the view's height.</summary>
+    public static double OffsetFromStored(double stored) => stored * 200;
+    public static double StoredFromOffset(double offset) => Fixed4(offset / 200);
     /// <summary>A profile's own focus values in Pimax Play's Quick units, e.g. "57% × 34% · 113% · 19%" for 0.57 × 0.34, 1.125, 0.19.</summary>
     public static string ProfileShort(VrProfile p) =>
         FormattableString.Invariant($"{JsRound(QuickFovFromShare(p.FoveaWidth))}% × {JsRound(QuickFovFromShare(p.FoveaHeight))}% · {JsRound(CenterFromDensity(p.QuadFocusScale))}% · {JsRound(PeripheralPercent(p.PeripheralScale))}%");
@@ -264,7 +270,9 @@ public static class PimaxFovea
         // A Pimax preset's values are built into Pimax's runtime and saved nowhere: the profile's own values are used.
         if (pimax.Preset) return new(profile, true, pimax, Notes(pimax));
         var c = pimax.Converted;
-        var effective = profile with { FoveaWidth = c.Width, FoveaHeight = c.Height, QuadFocusScale = c.FocusScale, PeripheralScale = c.PeripheralScale, QuadEdgeBlend = c.Transition ? profile.QuadEdgeBlend : 0 };
+        // The vertical offset is one of the profile's own focus values: with Pimax Play's it is not written (Pimax Play's
+        // own Vertical Offset is shown, not converted, as before).
+        var effective = profile with { FoveaWidth = c.Width, FoveaHeight = c.Height, QuadFocusScale = c.FocusScale, PeripheralScale = c.PeripheralScale, QuadEdgeBlend = c.Transition ? profile.QuadEdgeBlend : 0, QuadVerticalOffset = 0 };
         return new(effective, true, pimax, Notes(pimax));
     }
 
@@ -351,7 +359,7 @@ public static class PimaxFovea
     {
         static bool Same(double a, double b) => Math.Abs(a - b) < 1e-6;
         return Same(now.FoveaWidth, written.FoveaWidth) && Same(now.FoveaHeight, written.FoveaHeight) && Same(now.QuadFocusScale, written.QuadFocusScale)
-            && Same(now.PeripheralScale, written.PeripheralScale) && Same(now.QuadEdgeBlend, written.QuadEdgeBlend);
+            && Same(now.PeripheralScale, written.PeripheralScale) && Same(now.QuadEdgeBlend, written.QuadEdgeBlend) && Same(now.QuadVerticalOffset, written.QuadVerticalOffset);
     }
 
     /// <summary>Reads pimax-fovea.json saved next to an applied profile.json; null when absent or unreadable.</summary>

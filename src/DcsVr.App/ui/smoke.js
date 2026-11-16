@@ -5,7 +5,7 @@ window.runWebSmoke = async function() {
   // here; a failure names the paths that differ. frameGenPipelinedDeepHold is deliberately absent: it follows the
   // Smoothness buffer and stays in the profile file only.
   const PROFILE_FIELDS = [
-    'quadViews','gaze','quadSaccadeLead','quadGazeStabilize','quadTurbo','quadViewsLayerDirectory','foveaSource','quadFocusScale','pimaxPeripheral','pimaxHorizontalFov','pimaxVerticalFov',
+    'quadViews','gaze','quadSaccadeLead','quadGazeStabilize','quadTurbo','quadViewsLayerDirectory','foveaSource','quadFocusScale','pimaxPeripheral','pimaxHorizontalFov','pimaxVerticalFov','pimaxVerticalOffset',
     'quadEdgeBlend','quadRoundFocus','quadSharpening','quadSharpenTaper','quadPeripheryContrast',
     'neuralRendering','neuralRuntimePath','keepOtherDxgi','neuralFocusArea','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity','neuralStyle',
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
@@ -419,7 +419,7 @@ window.runWebSmoke = async function() {
     check('DLSS 5 without its runtime file asks for it inline',ui.profile.neuralRuntimePath || $('featureNotes-dlss').textContent.includes('Select file'));
     edit('foveaSource','PimaxPlay'); ui.navigate('foveation'); await waitIdle();
     { const box = $('pimaxFovea'), shown = [...box.querySelectorAll('.pimax-controls dt')].map((dt,i) => dt.textContent+' '+box.querySelectorAll('.pimax-controls dd')[i].textContent).join(', ');
-      check('Pimax Play values replace the focus fields, read-only, in Pimax Play units',['pimaxHorizontalFov','pimaxVerticalFov','quadFocusScale','pimaxPeripheral','foveaWidth','foveaHeight','peripheralScale'].every(f => $('setting-'+f).hidden) && !box.hidden && box.textContent.includes(window.offlineFixture.pimaxMode+' mode') && shown === expectedControls && $('featureSummary-quad').textContent.includes("from Pimax Play's settings: "+expectedShort));
+      check('Pimax Play values replace the focus fields, read-only, in Pimax Play units',['pimaxHorizontalFov','pimaxVerticalFov','pimaxVerticalOffset','quadFocusScale','pimaxPeripheral','foveaWidth','foveaHeight','peripheralScale'].every(f => $('setting-'+f).hidden) && !box.hidden && box.textContent.includes(window.offlineFixture.pimaxMode+' mode') && shown === expectedControls && $('featureSummary-quad').textContent.includes("from Pimax Play's settings: "+expectedShort));
       check('The conversion is folded away under its own heading',!box.textContent.includes('WRITES') && box.querySelector('details.pimax-details') && !box.querySelector('details.pimax-details').open && box.querySelector('details.pimax-details summary').textContent === 'How bundled Quad Views reproduces this' && box.querySelector('details.pimax-details').textContent.includes('percentage shown in Pimax Play') && box.querySelector('details.pimax-details').textContent.includes((fineFixture ? '2624 × 3976' : '2014 × 1988')+' px')); }
     // This profile: Pimax Quick units, converted exactly like Pimax Quick, without touching values the user does not edit.
     { const before = {w:ui.profile.foveaWidth,h:ui.profile.foveaHeight,c:ui.profile.quadFocusScale,p:ui.profile.peripheralScale};
@@ -429,6 +429,27 @@ window.runWebSmoke = async function() {
       check('Quick 33% × 33% · 120% · 20% maps exactly like Pimax Quick',ui.profile.foveaWidth === .33 && ui.profile.foveaHeight === .33 && ui.profile.quadFocusScale === 1.2 && ui.profile.peripheralScale === .1981 && $('featureSummary-quad').textContent.endsWith('33% × 33% · 120% · 20%'));
       edit('pimaxHorizontalFov',43); edit('pimaxVerticalFov',66); check('Fine 33/10 · 33/33 is Quick 43% × 66% here',ui.profile.foveaWidth === .43 && ui.profile.foveaHeight === .66);
       check('The focus fields reach no further than the 90% bundled Quad Views renders',ui.effectiveFovea(ui.profile).w <= .9);
+      // Vertical offset (GitHub #24): next to Vertical FOV under Set here, in Pimax Play's Vertical Offset units; the preview moves the focus area.
+      { const f = ui.fields.find(x => x.path === 'pimaxVerticalOffset'), box = $('focusBox'), order = [...$('focusControls').querySelectorAll('.setting')].map(x => x.id), top = v => Math.abs(parseFloat(box.style.top) - v) < 1e-6, gaze = ui.profile.gaze;
+        const show = values => { Object.assign(ui.profile,values); ui.invalidate(); ui.showProfile(); };
+        show({gaze:'EyeTracked'});
+        check('Vertical offset sits right after Vertical FOV under Set here, a slider from -100 to 100 at 0',!f.element.hidden && !f.input.disabled && order.indexOf('setting-pimaxVerticalOffset') === order.indexOf('setting-pimaxVerticalFov') + 1 && f.range.min === '-100' && f.range.max === '100' && f.input.value === '0' && ui.profile.quadVerticalOffset === 0 && f.whyElement.hidden);
+        check('Vertical offset says which way is down and what it is for',f.description === 'Moves the focus area down (negative) or up from where you look.' && f.detail.includes('gauges sharp while you look outside') && f.detail.includes('quarter of the view'));
+        check('Without an offset the preview keeps the focus area on the cross',top(50) && $('coverageGaze').textContent === 'Follows your eyes' && !$('coverageDetail').textContent.includes('Vertical offset'));
+        edit('pimaxVerticalOffset',-20);
+        check('Vertical offset -20 is stored as Quad Views takes it (-0.1) and the preview moves the focus area down',ui.profile.quadVerticalOffset === -.1 && ui.effectiveFovea(ui.profile).offset === -.1 && top(55) && $('coverageGaze').textContent === 'Follows your eyes, 5% below' && $('coverageDetail').textContent.includes(' · Vertical offset -20 (Pimax Quick units)'));
+        show({gaze:'Fixed'}); edit('pimaxVerticalOffset',40);
+        check('A positive offset moves it up, with a fixed focus area too',ui.profile.quadVerticalOffset === .2 && top(40) && $('coverageGaze').textContent === 'Fixed 10% above the center' && !f.element.hidden && !f.input.disabled);
+        f.input.value = '120'; f.input.dispatchEvent(new Event('input',{bubbles:true}));
+        check('Vertical offset refuses a value outside -100 to 100',f.element.classList.contains('invalid') && f.error.textContent === 'Enter a whole number from -100 to 100.' && ui.profile.quadVerticalOffset === .2);
+        edit('pimaxVerticalOffset',-20); show({gaze:'EyeTracked'}); edit('foveaSource','PimaxPlay');
+        check('With values from Pimax Play the offset is hidden, kept in the profile and not drawn',f.element.hidden && ui.profile.quadVerticalOffset === -.1 && ui.effectiveFovea(ui.profile).offset === 0 && top(50) && $('coverageGaze').textContent === 'Follows your eyes');
+        edit('foveaSource','Profile');
+        check('Set here again shows it with its value',!f.element.hidden && f.input.value === '-20' && top(55));
+        { const native = Object.assign(JSON.parse(JSON.stringify(ui.profile)),{quadViews:'PimaxNative'}), other = Object.assign(JSON.parse(JSON.stringify(ui.profile)),{quadViewsLayerDirectory:'C:\\qv'});
+          check('With Pimax native Quad Views the offset is hidden and not drawn: Pimax Play sets it',f.hide(native) && ui.effectiveFovea(native).offset === 0);
+          check('With an alternative provider it is off like Vertical FOV, with the same reason',!f.condition(other) && f.why(other) === 'Not with an alternative Quad Views provider.' && f.why === ui.fields.find(x => x.path === 'pimaxVerticalFov').why && ui.effectiveFovea(other).offset === 0); }
+        edit('pimaxVerticalOffset',0); show({gaze}); check('Vertical offset 0 puts the focus area back on the cross',ui.profile.quadVerticalOffset === 0 && top(50)); }
       Object.assign(ui.profile,{foveaWidth:before.w,foveaHeight:before.h,quadFocusScale:before.c,peripheralScale:before.p}); ui.invalidate(); ui.showProfile(); edit('foveaSource','PimaxPlay'); }
     const vramDefaults = ui.profile.freeVramApps.join('\n');
     check('Flight helpers start off, with a default list that leaves voice chat and recording alone',!ui.profile.freeVram && !ui.profile.smallDcsWindow && !ui.profile.lowerMonitor && !ui.profile.freeVramForce && ui.profile.freeVramApps.includes('NVIDIA Overlay') && !ui.profile.freeVramApps.some(n => /discord|obs/i.test(n)) && !ui.fields.some(f => f.path === 'boostCloseApps'));

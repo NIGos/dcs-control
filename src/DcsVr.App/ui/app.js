@@ -47,12 +47,13 @@ const num = value => String(Number(Number(value).toFixed(4)));
  *  (120% → 1.2); Peripheral Resolution r is a density of 0.01 + 0.98 × (r − 1) / 99 (15% → 0.1486). */
 // <uses-rules>
 const fixed4 = v => Number(v.toFixed(4));
-/** Twins of PimaxPlayUnits.QuickFovFromShare, ShareFromQuickFov, CenterFromDensity, DensityFromCenter, PeripheralPercent
- *  and PeripheryFromPercent. */
+/** Twins of PimaxPlayUnits.QuickFovFromShare, ShareFromQuickFov, CenterFromDensity, DensityFromCenter, PeripheralPercent,
+ *  PeripheryFromPercent, OffsetFromStored and StoredFromOffset (Vertical Offset: -100 to 100 is -0.5 to 0.5 for the layer). */
 const PIMAX = {
   quickFromShare: s => s * 100, shareFromQuick: q => fixed4(q * .01),
   centerFromDensity: d => d * 100, densityFromCenter: c => fixed4(c / 100),
-  peripheralPercent: d => 1 + (d - .01) / .98 * 99, peripheryFromPercent: v => fixed4(.01 + fixed4((v - 1) / 99) * .98)
+  peripheralPercent: d => 1 + (d - .01) / .98 * 99, peripheryFromPercent: v => fixed4(.01 + fixed4((v - 1) / 99) * .98),
+  offsetFromStored: s => s * 200, storedFromOffset: v => fixed4(v / 200)
 };
 // </uses-rules>
 /** Shown like Pimax Play shows its sliders: whole percent, rounded half up. Stored values change only when edited. */
@@ -244,10 +245,11 @@ const pimaxSource = p => quad(p) && p.foveaSource === 'PimaxPlay';
 function effectiveFovea(p) {
   // A Pimax preset's values cannot be read: the profile's own values are written then.
   const c = state?.pimax?.found && !state.pimax.preset ? state.pimax.converted : null;
-  if (pimaxSource(p) && c) return {w:c.width,h:c.height,focus:c.focusScale,periphery:c.peripheralScale,blend:c.transition ? p.quadEdgeBlend : 0,pimax:true};
-  // What is written: bundled Quad Views caps each axis at 0.9; stereo Cheeky uses at least 0.2.
+  if (pimaxSource(p) && c) return {w:c.width,h:c.height,focus:c.focusScale,periphery:c.peripheralScale,blend:c.transition ? p.quadEdgeBlend : 0,offset:0,pimax:true};
+  // What is written: bundled Quad Views caps each axis at 0.9; stereo Cheeky uses at least 0.2. The vertical offset is
+  // Quad Views' own (up is positive, the view is 2 high) and one of the profile's own values: none with Pimax Play's.
   const cap = quad(p) ? .9 : 1, low = stereoCheeky(p) ? CHEEKY_MIN : 0, fit = v => Math.max(low, Math.min(cap, v));
-  return {w:fit(p.foveaWidth),h:fit(p.foveaHeight),focus:p.quadFocusScale,periphery:Math.max(low,p.peripheralScale),blend:p.quadEdgeBlend,pimax:false};
+  return {w:fit(p.foveaWidth),h:fit(p.foveaHeight),focus:p.quadFocusScale,periphery:Math.max(low,p.peripheralScale),blend:p.quadEdgeBlend,offset:quad(p) ? Math.max(-.5, Math.min(.5, Number(p.quadVerticalOffset) || 0)) : 0,pimax:false};
 }
 /** The refresh rate in use: the headset's own when it follows the headset and one was read, otherwise the profile's. */
 const refreshHz = p => p.refreshFromHeadset && state?.headsetRefresh?.hz ? state.headsetRefresh.hz : p.headsetRefreshHz;
@@ -653,6 +655,7 @@ function buildFields() {
   field(c,'pimaxPeripheral','Peripheral resolution',['Resolution around the focus area. Lower saves GPU.','As in Pimax Play. Bundled Quad Views needs at least 16%.'],'number',[16,100,1],quad,'%',ownFocusHidden,{prop:'peripheralScale',get:p => whole(PIMAX.peripheralPercent(p.peripheralScale)),set:(p,v) => p.peripheralScale = PIMAX.peripheryFromPercent(v)});
   field(c,'pimaxHorizontalFov','Horizontal FOV',['The focus area\'s share of the view\'s width.','As in Pimax Play\'s Quick mode: 25% is a focus area a quarter of the view wide.'],'number',[10,90,1],quad,'%',ownFocusHidden,{prop:'foveaWidth',get:p => whole(PIMAX.quickFromShare(p.foveaWidth)),set:(p,v) => p.foveaWidth = PIMAX.shareFromQuick(v)});
   field(c,'pimaxVerticalFov','Vertical FOV',['The focus area\'s share of the view\'s height.','As in Pimax Play\'s Quick mode, top to bottom.'],'number',[10,90,1],quad,'%',ownFocusHidden,{prop:'foveaHeight',get:p => whole(PIMAX.quickFromShare(p.foveaHeight)),set:(p,v) => p.foveaHeight = PIMAX.shareFromQuick(v)});
+  field(c,'pimaxVerticalOffset','Vertical offset',['Moves the focus area down (negative) or up from where you look.','As Pimax Play\'s Vertical Offset: 100 is a quarter of the view\'s height. In an aircraft, about -10 to -20 keeps the gauges sharp while you look outside. With a fixed focus area it moves from the center of the view.'],'number',[-100,100,1],quad,'',ownFocusHidden,{prop:'quadVerticalOffset',get:p => whole(PIMAX.offsetFromStored(Number(p.quadVerticalOffset) || 0)),set:(p,v) => p.quadVerticalOffset = PIMAX.storedFromOffset(v)});
   field(c,'quadEdgeBlend','Focus edge blending',['How softly the focus area fades into the periphery.','Wider is softer but leaves a little less area in full detail. With values from Pimax Play and its Transition Mode Off, the edge is hard (0).'],'number',[0,.5,.01],quad,'ratio');
   field(c,'quadRoundFocus','Round focus area',['On: a circle. Off: a rounded rectangle, with more detail in the corners.','Either way its edge fades out over Focus edge blending. A central DLSS 5 area follows the same shape.'],'toggle',null,quad);
   c = card('sharpnessControls','Sharpness','Detail in and around the focus area. Almost no GPU cost.');
@@ -1375,7 +1378,7 @@ function updateControls() {
     f.element.classList.toggle('clamped', capped);
   });
   const e = effectiveFovea(profile), owns = coverageOwned(profile);
-  $('focusBox').style.width = e.w*100+'%'; $('focusBox').style.height = e.h*100+'%'; $('focusBox').hidden = profile.quadViews === 'None' && !owns;
+  $('focusBox').style.width = e.w*100+'%'; $('focusBox').style.height = e.h*100+'%'; $('focusBox').style.top = 50 - e.offset*50+'%'; $('focusBox').hidden = profile.quadViews === 'None' && !owns;
   // To scale: the view takes the headset's per-eye aspect when DCS's log has it, and each area's grid is as fine as its pixel density.
   { const r = state?.pimax?.eyeResolution, view = $('coverageView'), cell = d => Math.max(4, Math.min(28, 6 / Math.max(d, .05)))+'px'; const x = v => String(Number(v.toFixed(2)));
     view.style.aspectRatio = r?.width && r?.height ? `${r.width} / ${r.height}` : '1 / 1';
@@ -1383,11 +1386,13 @@ function updateControls() {
     $('focusBox').classList.toggle('round', Boolean(profile.quadRoundFocus));
     $('coverageFocus').textContent = `Focus ${Math.round(e.w*100)}% × ${Math.round(e.h*100)}% · ${x(e.focus)}×`;
     $('coveragePeriphery').textContent = `Periphery · ${x(e.periphery)}×`;
-    $('coverageGaze').textContent = quad(profile) || owns ? (profile.gaze === 'EyeTracked' ? 'Follows your eyes' : 'Fixed in the center') : '';
+    // The cross is where you look (or the center of the view); a vertical offset puts the focus area below or above it.
+    const shift = e.offset ? num(Math.abs(e.offset)*50)+'% '+(e.offset < 0 ? 'below' : 'above') : '';
+    $('coverageGaze').textContent = quad(profile) || owns ? (profile.gaze === 'EyeTracked' ? (shift ? 'Follows your eyes, '+shift : 'Follows your eyes') : shift ? 'Fixed '+shift+' the center' : 'Fixed in the center') : '';
     $('coveragePeriphery').hidden = $('focusBox').hidden; }
   // Pimax Play's units for Quad Views; fractions of the view for stereo Cheeky without Quad Views.
   const pimaxFound = state?.pimax?.found;
-  $('coverageDetail').textContent = quad(profile) ? (e.pimax ? `Pimax Play ${state.pimax.short}` : `Horizontal FOV ${whole(PIMAX.quickFromShare(profile.foveaWidth))}% · Vertical FOV ${whole(PIMAX.quickFromShare(profile.foveaHeight))}% · Center ${whole(PIMAX.centerFromDensity(profile.quadFocusScale))}% · Peripheral ${whole(PIMAX.peripheralPercent(profile.peripheralScale))}% (Pimax Quick units)`)
+  $('coverageDetail').textContent = quad(profile) ? (e.pimax ? `Pimax Play ${state.pimax.short}` : `Horizontal FOV ${whole(PIMAX.quickFromShare(profile.foveaWidth))}% · Vertical FOV ${whole(PIMAX.quickFromShare(profile.foveaHeight))}% · Center ${whole(PIMAX.centerFromDensity(profile.quadFocusScale))}% · Peripheral ${whole(PIMAX.peripheralPercent(profile.peripheralScale))}%${e.offset ? ' · Vertical offset '+whole(PIMAX.offsetFromStored(e.offset)) : ''} (Pimax Quick units)`)
     : owns ? `${Math.round(e.w*100)}% width · ${Math.round(e.h*100)}% height · ${Math.round(e.periphery*100)}% peripheral scale` : profile.quadViews === 'PimaxNative' && pimaxFound ? `Pimax native · Pimax Play ${state.pimax.short}` : 'Coverage is controlled by the selected provider.';
   // Pixels DCS renders for the four views, against normal stereo at the same resolution (before DLSS; overlap counts twice).
   const pixels = quad(profile) ? e.periphery**2 + e.w*e.h*e.focus**2 : null;
@@ -1614,7 +1619,7 @@ const CHECK_INFO = {
   'nvidia-mfaa':['NVIDIA MFAA',null], 'eye-distance':['Eye distance',{reveal:'eyeDistanceMm',label:'Open'}],
   'smooth-cursor-images':['Smooth mouse cursor',{reveal:'smoothCursor',label:'Open'}], 'fps-cap':['DCS frame limit',{reveal:'fpsLimit',label:'Open'}], 'dcs-vsync':['Desktop VSync',{reveal:'disableDcsVSync',label:'Open'}],
   'hotkey-conflict':['In-flight keys',{reveal:'diagnosticOverlayKey',label:'Change'}],
-  'pimax-fovea':['Focus area from Pimax Play',{page:'foveation',label:'Open'}], 'quad-coverage-cap':['Focus area size',{page:'foveation',label:'Open'}],
+  'pimax-fovea':['Focus area from Pimax Play',{page:'foveation',label:'Open'}], 'quad-coverage-cap':['Focus area size',{page:'foveation',label:'Open'}], 'quad-vertical-offset':['Vertical offset',{reveal:'pimaxVerticalOffset',label:'Open'}], 'quad-offset-gaze':['Vertical offset',{reveal:'pimaxVerticalOffset',label:'Open'}],
   'quad-cheeky':['Quad Views and DLSS',{page:'foveation',label:'Open'}], 'quad-runtime':['Quad Views provider',{reveal:'quadViews',label:'Open'}], 'quad-adapter-provider':['Quad Views provider',{reveal:'quadViewsLayerDirectory',label:'Open'}],
   'quad-focus':['Focus adapter',null], 'pimax-native-replaced':['Quad Views provider',null], 'fovea-source':['Focus area source',{reveal:'foveaSource',label:'Open'}],
   'boost-launcher':['CPU Boost app lists',{page:'boost',label:'Open'}], 'boost-app-name':['CPU Boost app lists',{page:'boost',label:'Open'}], 'boost-app-wildcard':['CPU Boost app lists',{page:'boost',label:'Open'}],
