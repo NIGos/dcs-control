@@ -1,0 +1,202 @@
+Upstream's pre- and post-build steps run python, sed.exe and copy on unquoted $(SolutionDir)/$(ProjectDir)/$(OutDir)
+paths, so they fail ("exited with code 9009" or 1) when the workspace path has a space, such as "D:\My Projects".
+Quote every such path inside the <Command> blocks; a quoted path is left alone, so this is a no-op once done.
+The step that reads version.info does it with "for /f ... in (file)": a quoted file there is a string unless usebackq
+is set, so that loop gets usebackq (without it the version variables would be empty).
+
+diff --git a/openxr-api-layer/openxr-api-layer.vcxproj b/openxr-api-layer/openxr-api-layer.vcxproj
+index f16a044..aa5d2fb 100644
+--- a/openxr-api-layer/openxr-api-layer.vcxproj
++++ b/openxr-api-layer/openxr-api-layer.vcxproj
+@@ -122,14 +122,14 @@
+       <Command>REM Sign the DLL.
+ if not defined PFX_PASSWORD goto skip_signing
+ if not defined PFX_NAME set PFX_NAME=selfsigncert
+-$(SolutionDir)\installer\signtool.exe sign /d "OpenXR Quad Views Foveated" /du "https://mbucchia.github.io/Quad-Views-Foveated/" /f $(SolutionDir)\installer\%PFX_NAME%.pfx /p "%PFX_PASSWORD%" /v $(TargetPath)
++"$(SolutionDir)\installer\signtool.exe" sign /d "OpenXR Quad Views Foveated" /du "https://mbucchia.github.io/Quad-Views-Foveated/" /f "$(SolutionDir)\installer\%PFX_NAME%.pfx" /p "%PFX_PASSWORD%" /v "$(TargetPath)"
+ :skip_signing
+ 
+ REM Copy dependencies.
+-$(SolutionDir)\scripts\sed.exe "s/XR_APILAYER_name/$(SolutionName)/g" $(ProjectDir)\openxr-api-layer.json &gt; $(OutDir)\openxr-api-layer.json
+-copy $(SolutionDir)\scripts\Install-Layer.ps1 $(OutDir)
+-copy $(SolutionDir)\scripts\Uninstall-Layer.ps1 $(OutDir)
+-copy $(SolutionDir)\settings.cfg $(OutDir)
++"$(SolutionDir)\scripts\sed.exe" "s/XR_APILAYER_name/$(SolutionName)/g" "$(ProjectDir)\openxr-api-layer.json" &gt; "$(OutDir)\openxr-api-layer.json"
++copy "$(SolutionDir)\scripts\Install-Layer.ps1" "$(OutDir)"
++copy "$(SolutionDir)\scripts\Uninstall-Layer.ps1" "$(OutDir)"
++copy "$(SolutionDir)\settings.cfg" "$(OutDir)"
+ </Command>
+     </PostBuildEvent>
+     <PostBuildEvent>
+@@ -144,17 +144,17 @@ copy $(SolutionDir)\settings.cfg $(OutDir)
+       </Message>
+     </PreLinkEvent>
+     <PreBuildEvent>
+-      <Command>python $(ProjectDir)\framework\dispatch_generator.py
++      <Command>python "$(ProjectDir)\framework\dispatch_generator.py"
+ 
+-if not exist $(SolutionDir)\version.info goto :skip_version
+-for /f "delims== tokens=1,2" %%G in ($(SolutionDir)\version.info) do set %%G=%%H
+-$(SolutionDir)\scripts\sed.exe -i "s/const unsigned int LayerVersionMajor = .*;$/const unsigned int LayerVersionMajor = %major%;/g" $(ProjectDir)\version.h
+-$(SolutionDir)\scripts\sed.exe -i "s/const unsigned int LayerVersionMinor = .*;$/const unsigned int LayerVersionMinor = %minor%;/g" $(ProjectDir)\version.h
+-$(SolutionDir)\scripts\sed.exe -i "s/const unsigned int LayerVersionPatch = .*;$/const unsigned int LayerVersionPatch = %patch%;/g" $(ProjectDir)\version.h
+-$(SolutionDir)\scripts\sed.exe -i "s/FILEVERSION .*$/FILEVERSION %major%,%minor%,%patch%,0/g" $(ProjectDir)\resource.rc
+-$(SolutionDir)\scripts\sed.exe -i "s/PRODUCTVERSION .*$/PRODUCTVERSION %major%,%minor%,%patch%,0/g" $(ProjectDir)\resource.rc
+-$(SolutionDir)\scripts\sed.exe -i "s/VALUE \"FileVersion\", \".*\"$/VALUE \"FileVersion\", \"%major%.%minor%.%patch%.0\"/g" $(ProjectDir)\resource.rc
+-$(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"ProductVersion\", \"%major%.%minor%.%patch%.0\"/g" $(ProjectDir)\resource.rc
++if not exist "$(SolutionDir)\version.info" goto :skip_version
++for /f "usebackq delims== tokens=1,2" %%G in ("$(SolutionDir)\version.info") do set %%G=%%H
++"$(SolutionDir)\scripts\sed.exe" -i "s/const unsigned int LayerVersionMajor = .*;$/const unsigned int LayerVersionMajor = %major%;/g" "$(ProjectDir)\version.h"
++"$(SolutionDir)\scripts\sed.exe" -i "s/const unsigned int LayerVersionMinor = .*;$/const unsigned int LayerVersionMinor = %minor%;/g" "$(ProjectDir)\version.h"
++"$(SolutionDir)\scripts\sed.exe" -i "s/const unsigned int LayerVersionPatch = .*;$/const unsigned int LayerVersionPatch = %patch%;/g" "$(ProjectDir)\version.h"
++"$(SolutionDir)\scripts\sed.exe" -i "s/FILEVERSION .*$/FILEVERSION %major%,%minor%,%patch%,0/g" "$(ProjectDir)\resource.rc"
++"$(SolutionDir)\scripts\sed.exe" -i "s/PRODUCTVERSION .*$/PRODUCTVERSION %major%,%minor%,%patch%,0/g" "$(ProjectDir)\resource.rc"
++"$(SolutionDir)\scripts\sed.exe" -i "s/VALUE \"FileVersion\", \".*\"$/VALUE \"FileVersion\", \"%major%.%minor%.%patch%.0\"/g" "$(ProjectDir)\resource.rc"
++"$(SolutionDir)\scripts\sed.exe" -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"ProductVersion\", \"%major%.%minor%.%patch%.0\"/g" "$(ProjectDir)\resource.rc"
+ :skip_version
+ </Command>
+     </PreBuildEvent>
+@@ -187,14 +187,14 @@ $(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"P
+       <Command>REM Sign the DLL.
+ if not defined PFX_PASSWORD goto skip_signing
+ if not defined PFX_NAME set PFX_NAME=selfsigncert
+-$(SolutionDir)\installer\signtool.exe sign /d "OpenXR Quad Views Foveated" /du "https://mbucchia.github.io/Quad-Views-Foveated/" /f $(SolutionDir)\installer\%PFX_NAME%.pfx /p "%PFX_PASSWORD%" /v $(TargetPath)
++"$(SolutionDir)\installer\signtool.exe" sign /d "OpenXR Quad Views Foveated" /du "https://mbucchia.github.io/Quad-Views-Foveated/" /f "$(SolutionDir)\installer\%PFX_NAME%.pfx" /p "%PFX_PASSWORD%" /v "$(TargetPath)"
+ :skip_signing
+ 
+ REM Copy dependencies.
+-$(SolutionDir)\scripts\sed.exe "s/XR_APILAYER_name/$(SolutionName)/g" $(ProjectDir)\openxr-api-layer-32.json &gt; $(OutDir)\openxr-api-layer-32.json
+-copy $(SolutionDir)\scripts\Install-Layer32.ps1 $(OutDir)
+-copy $(SolutionDir)\scripts\Uninstall-Layer32.ps1 $(OutDir)
+-copy $(SolutionDir)\settings.cfg $(OutDir)
++"$(SolutionDir)\scripts\sed.exe" "s/XR_APILAYER_name/$(SolutionName)/g" "$(ProjectDir)\openxr-api-layer-32.json" &gt; "$(OutDir)\openxr-api-layer-32.json"
++copy "$(SolutionDir)\scripts\Install-Layer32.ps1" "$(OutDir)"
++copy "$(SolutionDir)\scripts\Uninstall-Layer32.ps1" "$(OutDir)"
++copy "$(SolutionDir)\settings.cfg" "$(OutDir)"
+ </Command>
+     </PostBuildEvent>
+     <PostBuildEvent>
+@@ -209,17 +209,17 @@ copy $(SolutionDir)\settings.cfg $(OutDir)
+       </Message>
+     </PreLinkEvent>
+     <PreBuildEvent>
+-      <Command>python $(ProjectDir)\framework\dispatch_generator.py
++      <Command>python "$(ProjectDir)\framework\dispatch_generator.py"
+ 
+-if not exist $(SolutionDir)\version.info goto :skip_version
+-for /f "delims== tokens=1,2" %%G in ($(SolutionDir)\version.info) do set %%G=%%H
+-$(SolutionDir)\scripts\sed.exe -i "s/const unsigned int LayerVersionMajor = .*;$/const unsigned int LayerVersionMajor = %major%;/g" $(ProjectDir)\version.h
+-$(SolutionDir)\scripts\sed.exe -i "s/const unsigned int LayerVersionMinor = .*;$/const unsigned int LayerVersionMinor = %minor%;/g" $(ProjectDir)\version.h
+-$(SolutionDir)\scripts\sed.exe -i "s/const unsigned int LayerVersionPatch = .*;$/const unsigned int LayerVersionPatch = %patch%;/g" $(ProjectDir)\version.h
+-$(SolutionDir)\scripts\sed.exe -i "s/FILEVERSION .*$/FILEVERSION %major%,%minor%,%patch%,0/g" $(ProjectDir)\resource.rc
+-$(SolutionDir)\scripts\sed.exe -i "s/PRODUCTVERSION .*$/PRODUCTVERSION %major%,%minor%,%patch%,0/g" $(ProjectDir)\resource.rc
+-$(SolutionDir)\scripts\sed.exe -i "s/VALUE \"FileVersion\", \".*\"$/VALUE \"FileVersion\", \"%major%.%minor%.%patch%.0\"/g" $(ProjectDir)\resource.rc
+-$(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"ProductVersion\", \"%major%.%minor%.%patch%.0\"/g" $(ProjectDir)\resource.rc
++if not exist "$(SolutionDir)\version.info" goto :skip_version
++for /f "usebackq delims== tokens=1,2" %%G in ("$(SolutionDir)\version.info") do set %%G=%%H
++"$(SolutionDir)\scripts\sed.exe" -i "s/const unsigned int LayerVersionMajor = .*;$/const unsigned int LayerVersionMajor = %major%;/g" "$(ProjectDir)\version.h"
++"$(SolutionDir)\scripts\sed.exe" -i "s/const unsigned int LayerVersionMinor = .*;$/const unsigned int LayerVersionMinor = %minor%;/g" "$(ProjectDir)\version.h"
++"$(SolutionDir)\scripts\sed.exe" -i "s/const unsigned int LayerVersionPatch = .*;$/const unsigned int LayerVersionPatch = %patch%;/g" "$(ProjectDir)\version.h"
++"$(SolutionDir)\scripts\sed.exe" -i "s/FILEVERSION .*$/FILEVERSION %major%,%minor%,%patch%,0/g" "$(ProjectDir)\resource.rc"
++"$(SolutionDir)\scripts\sed.exe" -i "s/PRODUCTVERSION .*$/PRODUCTVERSION %major%,%minor%,%patch%,0/g" "$(ProjectDir)\resource.rc"
++"$(SolutionDir)\scripts\sed.exe" -i "s/VALUE \"FileVersion\", \".*\"$/VALUE \"FileVersion\", \"%major%.%minor%.%patch%.0\"/g" "$(ProjectDir)\resource.rc"
++"$(SolutionDir)\scripts\sed.exe" -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"ProductVersion\", \"%major%.%minor%.%patch%.0\"/g" "$(ProjectDir)\resource.rc"
+ :skip_version
+ </Command>
+     </PreBuildEvent>
+@@ -256,14 +256,14 @@ $(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"P
+       <Command>REM Sign the DLL.
+ if not defined PFX_PASSWORD goto skip_signing
+ if not defined PFX_NAME set PFX_NAME=selfsigncert
+-$(SolutionDir)\installer\signtool.exe sign /d "OpenXR Quad Views Foveated" /du "https://mbucchia.github.io/Quad-Views-Foveated/" /f $(SolutionDir)\installer\%PFX_NAME%.pfx /p "%PFX_PASSWORD%" /v $(TargetPath)
++"$(SolutionDir)\installer\signtool.exe" sign /d "OpenXR Quad Views Foveated" /du "https://mbucchia.github.io/Quad-Views-Foveated/" /f "$(SolutionDir)\installer\%PFX_NAME%.pfx" /p "%PFX_PASSWORD%" /v "$(TargetPath)"
+ :skip_signing
+ 
+ REM Copy dependencies.
+-$(SolutionDir)\scripts\sed.exe "s/XR_APILAYER_name/$(SolutionName)/g" $(ProjectDir)\openxr-api-layer.json &gt; $(OutDir)\openxr-api-layer.json
+-copy $(SolutionDir)\scripts\Install-Layer.ps1 $(OutDir)
+-copy $(SolutionDir)\scripts\Uninstall-Layer.ps1 $(OutDir)
+-copy $(SolutionDir)\settings.cfg $(OutDir)
++"$(SolutionDir)\scripts\sed.exe" "s/XR_APILAYER_name/$(SolutionName)/g" "$(ProjectDir)\openxr-api-layer.json" &gt; "$(OutDir)\openxr-api-layer.json"
++copy "$(SolutionDir)\scripts\Install-Layer.ps1" "$(OutDir)"
++copy "$(SolutionDir)\scripts\Uninstall-Layer.ps1" "$(OutDir)"
++copy "$(SolutionDir)\settings.cfg" "$(OutDir)"
+ </Command>
+     </PostBuildEvent>
+     <PostBuildEvent>
+@@ -278,17 +278,17 @@ copy $(SolutionDir)\settings.cfg $(OutDir)
+       </Message>
+     </PreLinkEvent>
+     <PreBuildEvent>
+-      <Command>python $(ProjectDir)\framework\dispatch_generator.py
++      <Command>python "$(ProjectDir)\framework\dispatch_generator.py"
+ 
+-if not exist $(SolutionDir)\version.info goto :skip_version
+-for /f "delims== tokens=1,2" %%G in ($(SolutionDir)\version.info) do set %%G=%%H
+-$(SolutionDir)\scripts\sed.exe -i "s/const unsigned int LayerVersionMajor = .*;$/const unsigned int LayerVersionMajor = %major%;/g" $(ProjectDir)\version.h
+-$(SolutionDir)\scripts\sed.exe -i "s/const unsigned int LayerVersionMinor = .*;$/const unsigned int LayerVersionMinor = %minor%;/g" $(ProjectDir)\version.h
+-$(SolutionDir)\scripts\sed.exe -i "s/const unsigned int LayerVersionPatch = .*;$/const unsigned int LayerVersionPatch = %patch%;/g" $(ProjectDir)\version.h
+-$(SolutionDir)\scripts\sed.exe -i "s/FILEVERSION .*$/FILEVERSION %major%,%minor%,%patch%,0/g" $(ProjectDir)\resource.rc
+-$(SolutionDir)\scripts\sed.exe -i "s/PRODUCTVERSION .*$/PRODUCTVERSION %major%,%minor%,%patch%,0/g" $(ProjectDir)\resource.rc
+-$(SolutionDir)\scripts\sed.exe -i "s/VALUE \"FileVersion\", \".*\"$/VALUE \"FileVersion\", \"%major%.%minor%.%patch%.0\"/g" $(ProjectDir)\resource.rc
+-$(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"ProductVersion\", \"%major%.%minor%.%patch%.0\"/g" $(ProjectDir)\resource.rc
++if not exist "$(SolutionDir)\version.info" goto :skip_version
++for /f "usebackq delims== tokens=1,2" %%G in ("$(SolutionDir)\version.info") do set %%G=%%H
++"$(SolutionDir)\scripts\sed.exe" -i "s/const unsigned int LayerVersionMajor = .*;$/const unsigned int LayerVersionMajor = %major%;/g" "$(ProjectDir)\version.h"
++"$(SolutionDir)\scripts\sed.exe" -i "s/const unsigned int LayerVersionMinor = .*;$/const unsigned int LayerVersionMinor = %minor%;/g" "$(ProjectDir)\version.h"
++"$(SolutionDir)\scripts\sed.exe" -i "s/const unsigned int LayerVersionPatch = .*;$/const unsigned int LayerVersionPatch = %patch%;/g" "$(ProjectDir)\version.h"
++"$(SolutionDir)\scripts\sed.exe" -i "s/FILEVERSION .*$/FILEVERSION %major%,%minor%,%patch%,0/g" "$(ProjectDir)\resource.rc"
++"$(SolutionDir)\scripts\sed.exe" -i "s/PRODUCTVERSION .*$/PRODUCTVERSION %major%,%minor%,%patch%,0/g" "$(ProjectDir)\resource.rc"
++"$(SolutionDir)\scripts\sed.exe" -i "s/VALUE \"FileVersion\", \".*\"$/VALUE \"FileVersion\", \"%major%.%minor%.%patch%.0\"/g" "$(ProjectDir)\resource.rc"
++"$(SolutionDir)\scripts\sed.exe" -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"ProductVersion\", \"%major%.%minor%.%patch%.0\"/g" "$(ProjectDir)\resource.rc"
+ :skip_version
+ </Command>
+     </PreBuildEvent>
+@@ -325,14 +325,14 @@ $(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"P
+       <Command>REM Sign the DLL.
+ if not defined PFX_PASSWORD goto skip_signing
+ if not defined PFX_NAME set PFX_NAME=selfsigncert
+-$(SolutionDir)\installer\signtool.exe sign /d "OpenXR Quad Views Foveated" /du "https://mbucchia.github.io/Quad-Views-Foveated/" /f $(SolutionDir)\installer\%PFX_NAME%.pfx /p "%PFX_PASSWORD%" /v $(TargetPath)
++"$(SolutionDir)\installer\signtool.exe" sign /d "OpenXR Quad Views Foveated" /du "https://mbucchia.github.io/Quad-Views-Foveated/" /f "$(SolutionDir)\installer\%PFX_NAME%.pfx" /p "%PFX_PASSWORD%" /v "$(TargetPath)"
+ :skip_signing
+ 
+ REM Copy dependencies.
+-$(SolutionDir)\scripts\sed.exe "s/XR_APILAYER_name/$(SolutionName)/g" $(ProjectDir)\openxr-api-layer-32.json &gt; $(OutDir)\openxr-api-layer-32.json
+-copy $(SolutionDir)\scripts\Install-Layer32.ps1 $(OutDir)
+-copy $(SolutionDir)\scripts\Uninstall-Layer32.ps1 $(OutDir)
+-copy $(SolutionDir)\settings.cfg $(OutDir)
++"$(SolutionDir)\scripts\sed.exe" "s/XR_APILAYER_name/$(SolutionName)/g" "$(ProjectDir)\openxr-api-layer-32.json" &gt; "$(OutDir)\openxr-api-layer-32.json"
++copy "$(SolutionDir)\scripts\Install-Layer32.ps1" "$(OutDir)"
++copy "$(SolutionDir)\scripts\Uninstall-Layer32.ps1" "$(OutDir)"
++copy "$(SolutionDir)\settings.cfg" "$(OutDir)"
+ </Command>
+     </PostBuildEvent>
+     <PostBuildEvent>
+@@ -347,17 +347,17 @@ copy $(SolutionDir)\settings.cfg $(OutDir)
+       </Message>
+     </PreLinkEvent>
+     <PreBuildEvent>
+-      <Command>python $(ProjectDir)\framework\dispatch_generator.py
++      <Command>python "$(ProjectDir)\framework\dispatch_generator.py"
+ 
+-if not exist $(SolutionDir)\version.info goto :skip_version
+-for /f "delims== tokens=1,2" %%G in ($(SolutionDir)\version.info) do set %%G=%%H
+-$(SolutionDir)\scripts\sed.exe -i "s/const unsigned int LayerVersionMajor = .*;$/const unsigned int LayerVersionMajor = %major%;/g" $(ProjectDir)\version.h
+-$(SolutionDir)\scripts\sed.exe -i "s/const unsigned int LayerVersionMinor = .*;$/const unsigned int LayerVersionMinor = %minor%;/g" $(ProjectDir)\version.h
+-$(SolutionDir)\scripts\sed.exe -i "s/const unsigned int LayerVersionPatch = .*;$/const unsigned int LayerVersionPatch = %patch%;/g" $(ProjectDir)\version.h
+-$(SolutionDir)\scripts\sed.exe -i "s/FILEVERSION .*$/FILEVERSION %major%,%minor%,%patch%,0/g" $(ProjectDir)\resource.rc
+-$(SolutionDir)\scripts\sed.exe -i "s/PRODUCTVERSION .*$/PRODUCTVERSION %major%,%minor%,%patch%,0/g" $(ProjectDir)\resource.rc
+-$(SolutionDir)\scripts\sed.exe -i "s/VALUE \"FileVersion\", \".*\"$/VALUE \"FileVersion\", \"%major%.%minor%.%patch%.0\"/g" $(ProjectDir)\resource.rc
+-$(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"ProductVersion\", \"%major%.%minor%.%patch%.0\"/g" $(ProjectDir)\resource.rc
++if not exist "$(SolutionDir)\version.info" goto :skip_version
++for /f "usebackq delims== tokens=1,2" %%G in ("$(SolutionDir)\version.info") do set %%G=%%H
++"$(SolutionDir)\scripts\sed.exe" -i "s/const unsigned int LayerVersionMajor = .*;$/const unsigned int LayerVersionMajor = %major%;/g" "$(ProjectDir)\version.h"
++"$(SolutionDir)\scripts\sed.exe" -i "s/const unsigned int LayerVersionMinor = .*;$/const unsigned int LayerVersionMinor = %minor%;/g" "$(ProjectDir)\version.h"
++"$(SolutionDir)\scripts\sed.exe" -i "s/const unsigned int LayerVersionPatch = .*;$/const unsigned int LayerVersionPatch = %patch%;/g" "$(ProjectDir)\version.h"
++"$(SolutionDir)\scripts\sed.exe" -i "s/FILEVERSION .*$/FILEVERSION %major%,%minor%,%patch%,0/g" "$(ProjectDir)\resource.rc"
++"$(SolutionDir)\scripts\sed.exe" -i "s/PRODUCTVERSION .*$/PRODUCTVERSION %major%,%minor%,%patch%,0/g" "$(ProjectDir)\resource.rc"
++"$(SolutionDir)\scripts\sed.exe" -i "s/VALUE \"FileVersion\", \".*\"$/VALUE \"FileVersion\", \"%major%.%minor%.%patch%.0\"/g" "$(ProjectDir)\resource.rc"
++"$(SolutionDir)\scripts\sed.exe" -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"ProductVersion\", \"%major%.%minor%.%patch%.0\"/g" "$(ProjectDir)\resource.rc"
+ :skip_version
+ </Command>
+     </PreBuildEvent>

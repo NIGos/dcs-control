@@ -1,0 +1,106 @@
+Sharpening taper (dcsvr_sharpen_taper=1): CAS sharpens the whole focus view at the same strength up to its edge,
+where the much softer periphery takes over, so the step in detail marks the focus edge. Inside the band where the
+composition fades the focus view out (2 x smoothen_focus_view_edges of the focus radius, for the round and the
+rounded-rectangle shape alike) the sharpened colour now fades back to the unsharpened one with the same smoothstep,
+so detail steps down gradually. One extra texel load per sharpened texel inside the band; off: identical output.
+
+diff --git a/openxr-api-layer/SharpeningCS.hlsl b/openxr-api-layer/SharpeningCS.hlsl
+index a1d565f..5448064 100644
+--- a/openxr-api-layer/SharpeningCS.hlsl
++++ b/openxr-api-layer/SharpeningCS.hlsl
+@@ -22,6 +22,8 @@ cbuffer cb : register(b0) {
+     uint4 const1;
+     // DCSVR: x the round shape exponent (0: off), y the margin in texels, zw the focus view size.
+     float4 dcsvrSkip;
++    // DCSVR sharpen taper: x the edge band width in focus radii (0: off), y the shape exponent (0: rectangle).
++    float4 dcsvrTaper;
+ };
+ 
+ Texture2D InputTexture : register(t0);
+@@ -65,6 +67,20 @@ void CasInput(inout AF1 r, inout AF1 g, inout AF1 b) {
+ 
+ #include "ffx_cas.h"
+ 
++// DCSVR sharpen taper: inside the edge band the sharpening fades out as the composition fades the focus view out.
++float3 DcsvrTaper(float3 c, uint2 gxy) {
++    if (dcsvrTaper.x <= 0) {
++        return c;
++    }
++    float2 e = abs((float2(gxy) + 0.5) / dcsvrSkip.zw * 2.0 - 1.0);
++    float r = dcsvrTaper.y >= 1 ? pow(pow(e.x, dcsvrTaper.y) + pow(e.y, dcsvrTaper.y), 1.0 / dcsvrTaper.y) : max(e.x, e.y);
++    float w = 1 - smoothstep(1 - dcsvrTaper.x, 1, r);
++    [branch] if (w >= 1) {
++        return c;
++    }
++    return lerp(InputTexture.Load(int3(gxy, 0)).rgb, c, w);
++}
++
+ [numthreads(WIDTH, HEIGHT, DEPTH)]
+ void main(uint3 LocalThreadId : SV_GroupThreadID, uint3 WorkGroupId : SV_GroupID) {
+     // Do remapping of local xy in workgroup for a more PS-like swizzle pattern.
+@@ -111,19 +127,19 @@ void main(uint3 LocalThreadId : SV_GroupThreadID, uint3 WorkGroupId : SV_GroupID
+     AF3 c;
+ 
+     CasFilter(c.r, c.g, c.b, gxy, const0, const1, sharpenOnly);
+-    OutputTexture[ASU2(gxy)] = AF4(c, 1);
++    OutputTexture[ASU2(gxy)] = AF4(DcsvrTaper(c, gxy), 1);
+     gxy.x += 8u;
+ 
+     CasFilter(c.r, c.g, c.b, gxy, const0, const1, sharpenOnly);
+-    OutputTexture[ASU2(gxy)] = AF4(c, 1);
++    OutputTexture[ASU2(gxy)] = AF4(DcsvrTaper(c, gxy), 1);
+     gxy.y += 8u;
+ 
+     CasFilter(c.r, c.g, c.b, gxy, const0, const1, sharpenOnly);
+-    OutputTexture[ASU2(gxy)] = AF4(c, 1);
++    OutputTexture[ASU2(gxy)] = AF4(DcsvrTaper(c, gxy), 1);
+     gxy.x -= 8u;
+ 
+     CasFilter(c.r, c.g, c.b, gxy, const0, const1, sharpenOnly);
+-    OutputTexture[ASU2(gxy)] = AF4(c, 1);
++    OutputTexture[ASU2(gxy)] = AF4(DcsvrTaper(c, gxy), 1);
+ 
+ #endif
+ }
+\ No newline at end of file
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 75d2cad..dd397e9 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -73,6 +73,7 @@ namespace openxr_api_layer {
+         alignas(4) uint32_t Const0[4];
+         alignas(4) uint32_t Const1[4];
+         alignas(4) float DcsvrSkip[4];
++        alignas(4) float DcsvrTaper[4];
+     };
+ 
+     // This class implements our API layer.
+@@ -2430,6 +2431,10 @@ namespace openxr_api_layer {
+                 sharpening.DcsvrSkip[1] = 2.f;
+                 sharpening.DcsvrSkip[2] = (float)focusView.subImage.imageRect.extent.width;
+                 sharpening.DcsvrSkip[3] = (float)focusView.subImage.imageRect.extent.height;
++                // DCSVR sharpen taper: the composition's fade band (ProjectionPS: 2 x the edge smoothing).
++                sharpening.DcsvrTaper[0] = m_dcsvrSharpenTaper && !m_debugFocusView && m_smoothenFocusViewEdges > 0.f
++                                               ? std::clamp(2.f * m_smoothenFocusViewEdges, 0.01f, 0.95f) : 0.f;
++                sharpening.DcsvrTaper[1] = m_focusViewShape;
+                 {
+                     D3D11_MAPPED_SUBRESOURCE mappedResources;
+                     CHECK_HRCMD(m_renderContext->Map(
+@@ -3004,6 +3009,9 @@ namespace openxr_api_layer {
+                     } else if (name == "dcsvr_gaze_deadzone") {
+                         m_dcsvrGaze.deadzoneDeg = std::clamp(std::stof(value), 0.f, 3.f);
+                         parsed = true;
++                    } else if (name == "dcsvr_sharpen_taper") {
++                        m_dcsvrSharpenTaper = std::stoi(value);
++                        parsed = true;
+                     } else if (name == "focus_view_shape") {
+                         m_focusViewShape = std::clamp(std::stof(value), 0.f, 16.f);
+                         parsed = true;
+@@ -3092,6 +3100,7 @@ namespace openxr_api_layer {
+         bool m_forceNoEyeTracking{false};
+         float m_smoothenFocusViewEdges{0.2f};
+         float m_focusViewShape{0.f};
++        bool m_dcsvrSharpenTaper{false};
+         float m_sharpenFocusView{0.7f};
+         bool m_useTurboMode{true};
+         bool m_unadvertiseQuadViews{false};

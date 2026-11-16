@@ -1,0 +1,23 @@
+Per-process settings preserve global configuration for other applications.
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 981704d..1fae298 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -212,7 +212,15 @@ namespace openxr_api_layer {
+                     // Parse the configuration. Load the file shipped with the layer first, followed by the file the
+                     // users may edit.
+                     LoadConfiguration(dllHome / "settings.cfg");
+-                    LoadConfiguration(localAppData / "settings.cfg");
++                    const DWORD profileLength = GetEnvironmentVariableW(L"DCSVR_QUAD_SETTINGS", nullptr, 0);
++                    if (profileLength > 0 && profileLength < 32768) {
++                        std::vector<wchar_t> profilePath(profileLength);
++                        if (GetEnvironmentVariableW(L"DCSVR_QUAD_SETTINGS", profilePath.data(), profileLength)) {
++                            LoadConfiguration(std::filesystem::path(profilePath.data()));
++                        }
++                    } else {
++                        LoadConfiguration(localAppData / "settings.cfg");
++                    }
+ 
+                     if (m_needDeferredSwapchainReleaseQuirk && m_useTurboMode) {
+                         Log("Denying Turbo Mode due to deferred swapchain release!\n");

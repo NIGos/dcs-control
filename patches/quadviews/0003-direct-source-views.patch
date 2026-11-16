@@ -1,0 +1,123 @@
+Direct source views: upstream copies the stereo and focus images into flat textures every frame (its own TODO)
+and samples the copies for composition and sharpening. When the view's rectangle is the whole of a single-slice,
+single-sample, shader-readable image, a view of that image in the same format reads the very texels the copy
+would hold, so the copies and the flat textures are skipped. Anything else (sub-rectangles, texture arrays, MSAA,
+a format the image cannot be viewed in) keeps the copy. Pixel-identical by construction.
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 949b2c0..1afdd86 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -2241,6 +2241,9 @@ namespace openxr_api_layer {
+                 m_compositionTimer[m_compositionTimerIndex]->start();
+             }
+ 
++            // DCSVR direct source view: what composition and sharpening sample, per source.
++            ComPtr<ID3D11ShaderResourceView> stereoSourceSrv;
++            ComPtr<ID3D11ShaderResourceView> focusSourceSrv;
+             // Copy to a flat texture for sampling.
+             {
+                 TraceLocalActivity(local);
+@@ -2249,7 +2252,27 @@ namespace openxr_api_layer {
+                 const auto flattenSourceImage = [&](ID3D11Texture2D* image,
+                                                     const XrCompositionLayerProjectionView& view,
+                                                     Swapchain& swapchain,
+-                                                    uint32_t startSlot) {
++                                                    uint32_t startSlot) -> ComPtr<ID3D11ShaderResourceView> {
++                    ComPtr<ID3D11ShaderResourceView> sourceSrv;
++                    {
++                        D3D11_TEXTURE2D_DESC sourceDesc{};
++                        image->GetDesc(&sourceDesc);
++                        if (sourceDesc.ArraySize == 1 && view.subImage.imageArrayIndex == 0 &&
++                            sourceDesc.SampleDesc.Count == 1 && (sourceDesc.BindFlags & D3D11_BIND_SHADER_RESOURCE) &&
++                            view.subImage.imageRect.offset.x == 0 && view.subImage.imageRect.offset.y == 0 &&
++                            view.subImage.imageRect.extent.width == (int32_t)sourceDesc.Width &&
++                            view.subImage.imageRect.extent.height == (int32_t)sourceDesc.Height) {
++                            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
++                            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
++                            srvDesc.Format = (DXGI_FORMAT)swapchain.createInfo.format;
++                            srvDesc.Texture2D.MipLevels = 1;
++                            if (SUCCEEDED(m_applicationDevice->CreateShaderResourceView(
++                                    image, &srvDesc, sourceSrv.ReleaseAndGetAddressOf()))) {
++                                swapchain.flatImage[startSlot + viewIndex].Reset();
++                                return sourceSrv;
++                            }
++                        }
++                    }
+                     D3D11_TEXTURE2D_DESC desc{};
+                     if (swapchain.flatImage[startSlot + viewIndex]) {
+                         swapchain.flatImage[startSlot + viewIndex]->GetDesc(&desc);
+@@ -2282,11 +2305,19 @@ namespace openxr_api_layer {
+                                                            image,
+                                                            view.subImage.imageArrayIndex,
+                                                            &box);
++                    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
++                    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
++                    srvDesc.Format = (DXGI_FORMAT)swapchain.createInfo.format;
++                    srvDesc.Texture2D.MipLevels = 1;
++                    CHECK_HRCMD(m_applicationDevice->CreateShaderResourceView(
++                        swapchain.flatImage[startSlot + viewIndex].Get(), &srvDesc, sourceSrv.ReleaseAndGetAddressOf()));
++                    return sourceSrv;
+                 };
+                 // TODO: We could reduce overhead by avoiding these 2 copies and modifying sampling in our shader to
+                 // consider the offset.
+-                flattenSourceImage(sourceImage, stereoView, swapchainForStereoView, 0);
+-                flattenSourceImage(sourceFocusImage, focusView, swapchainForFocusView, xr::StereoView::Count);
++                stereoSourceSrv = flattenSourceImage(sourceImage, stereoView, swapchainForStereoView, 0);
++                focusSourceSrv =
++                    flattenSourceImage(sourceFocusImage, focusView, swapchainForFocusView, xr::StereoView::Count);
+ 
+                 TraceLoggingWriteStop(local, "xrEndFrame_Flatten");
+             }
+@@ -2318,17 +2349,7 @@ namespace openxr_api_layer {
+                 }
+ 
+                 // Create ephemeral SRV/UAV.
+-                ComPtr<ID3D11ShaderResourceView> srv;
+-                {
+-                    D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+-                    desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+-                    desc.Format = (DXGI_FORMAT)swapchainForFocusView.createInfo.format;
+-                    desc.Texture2D.MipLevels = 1;
+-                    CHECK_HRCMD(m_applicationDevice->CreateShaderResourceView(
+-                        swapchainForFocusView.flatImage[xr::StereoView::Count + viewIndex].Get(),
+-                        &desc,
+-                        srv.ReleaseAndGetAddressOf()));
+-                }
++                ComPtr<ID3D11ShaderResourceView> srv = focusSourceSrv;
+                 ComPtr<ID3D11UnorderedAccessView> uav;
+                 {
+                     D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
+@@ -2380,27 +2401,15 @@ namespace openxr_api_layer {
+                 TraceLoggingWriteStart(local, "xrEndFrame_Composite");
+ 
+                 // Create ephemeral SRV/RTV.
+-                ComPtr<ID3D11ShaderResourceView> srvForStereoView;
+-                {
+-                    D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+-                    desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+-                    desc.Format = (DXGI_FORMAT)swapchainForStereoView.createInfo.format;
+-                    desc.Texture2D.MipLevels = 1;
+-                    CHECK_HRCMD(
+-                        m_applicationDevice->CreateShaderResourceView(swapchainForStereoView.flatImage[viewIndex].Get(),
+-                                                                      &desc,
+-                                                                      srvForStereoView.ReleaseAndGetAddressOf()));
+-                }
+-                ComPtr<ID3D11ShaderResourceView> srvForFocusView;
+-                {
++                ComPtr<ID3D11ShaderResourceView> srvForStereoView = stereoSourceSrv;
++                ComPtr<ID3D11ShaderResourceView> srvForFocusView = focusSourceSrv;
++                if (m_sharpenFocusView) {
+                     D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+                     desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+-                    desc.Format = m_sharpenFocusView ? DXGI_FORMAT_R16G16B16A16_FLOAT
+-                                                     : (DXGI_FORMAT)swapchainForFocusView.createInfo.format;
++                    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                     desc.Texture2D.MipLevels = 1;
+                     CHECK_HRCMD(m_applicationDevice->CreateShaderResourceView(
+-                        m_sharpenFocusView ? swapchainForFocusView.sharpenedImage[viewIndex].Get()
+-                                           : swapchainForFocusView.flatImage[xr::StereoView::Count + viewIndex].Get(),
++                        swapchainForFocusView.sharpenedImage[viewIndex].Get(),
+                         &desc,
+                         srvForFocusView.ReleaseAndGetAddressOf()));
+                 }

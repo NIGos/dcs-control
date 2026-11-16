@@ -1,0 +1,86 @@
+Cached views: upstream creates the composition's views every frame on the game's render thread (the direct source
+views, the sharpening UAV and SRV, the composition RTV: five per eye). A view of the same resource with the same
+description is the same view, so each is created once and kept with the swapchain whose images it views (they live
+exactly as long as it does) or with the sharpening texture it views (dropped when that is recreated).
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index a18ec71..2c52f4d 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -1985,6 +1985,11 @@ namespace openxr_api_layer {
+             XrSwapchain fullFovSwapchain[xr::StereoView::Count]{XR_NULL_HANDLE, XR_NULL_HANDLE};
+             ComPtr<ID3D11Texture2D> flatImage[xr::QuadView::Count];
+             ComPtr<ID3D11Texture2D> sharpenedImage[xr::StereoView::Count];
++            // DCSVR cached views of this swapchain's images and of the sharpened textures.
++            std::map<ID3D11Texture2D*, ComPtr<ID3D11ShaderResourceView>> dcsvrSourceSrv;
++            std::map<ID3D11Texture2D*, ComPtr<ID3D11RenderTargetView>> dcsvrRtv;
++            ComPtr<ID3D11UnorderedAccessView> dcsvrSharpenedUav[xr::StereoView::Count];
++            ComPtr<ID3D11ShaderResourceView> dcsvrSharpenedSrv[xr::StereoView::Count];
+ 
+             std::vector<ID3D11Texture2D*> images;
+             std::vector<ID3D11Texture2D*> fullFovSwapchainImages[xr::StereoView::Count];
+@@ -2271,10 +2276,11 @@ namespace openxr_api_layer {
+                             srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                             srvDesc.Format = (DXGI_FORMAT)swapchain.createInfo.format;
+                             srvDesc.Texture2D.MipLevels = 1;
+-                            if (SUCCEEDED(m_applicationDevice->CreateShaderResourceView(
+-                                    image, &srvDesc, sourceSrv.ReleaseAndGetAddressOf()))) {
++                            auto& cachedSrv = swapchain.dcsvrSourceSrv[image];
++                            if (cachedSrv || SUCCEEDED(m_applicationDevice->CreateShaderResourceView(
++                                    image, &srvDesc, cachedSrv.ReleaseAndGetAddressOf()))) {
+                                 swapchain.flatImage[startSlot + viewIndex].Reset();
+-                                return sourceSrv;
++                                return cachedSrv;
+                             }
+                         }
+                     }
+@@ -2350,13 +2356,15 @@ namespace openxr_api_layer {
+                         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+                         CHECK_HRCMD(m_applicationDevice->CreateTexture2D(
+                             &desc, nullptr, swapchainForFocusView.sharpenedImage[viewIndex].ReleaseAndGetAddressOf()));
++                        swapchainForFocusView.dcsvrSharpenedUav[viewIndex].Reset();
++                        swapchainForFocusView.dcsvrSharpenedSrv[viewIndex].Reset();
+                     }
+                 }
+ 
+                 // Create ephemeral SRV/UAV.
+                 ComPtr<ID3D11ShaderResourceView> srv = focusSourceSrv;
+-                ComPtr<ID3D11UnorderedAccessView> uav;
+-                {
++                ComPtr<ID3D11UnorderedAccessView>& uav = swapchainForFocusView.dcsvrSharpenedUav[viewIndex];
++                if (!uav) {
+                     D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
+                     desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+                     desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+@@ -2409,17 +2417,21 @@ namespace openxr_api_layer {
+                 ComPtr<ID3D11ShaderResourceView> srvForStereoView = stereoSourceSrv;
+                 ComPtr<ID3D11ShaderResourceView> srvForFocusView = focusSourceSrv;
+                 if (m_sharpenFocusView) {
+-                    D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+-                    desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+-                    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+-                    desc.Texture2D.MipLevels = 1;
+-                    CHECK_HRCMD(m_applicationDevice->CreateShaderResourceView(
+-                        swapchainForFocusView.sharpenedImage[viewIndex].Get(),
+-                        &desc,
+-                        srvForFocusView.ReleaseAndGetAddressOf()));
++                    ComPtr<ID3D11ShaderResourceView>& sharpenedSrv = swapchainForFocusView.dcsvrSharpenedSrv[viewIndex];
++                    if (!sharpenedSrv) {
++                        D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
++                        desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
++                        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
++                        desc.Texture2D.MipLevels = 1;
++                        CHECK_HRCMD(m_applicationDevice->CreateShaderResourceView(
++                            swapchainForFocusView.sharpenedImage[viewIndex].Get(),
++                            &desc,
++                            sharpenedSrv.ReleaseAndGetAddressOf()));
++                    }
++                    srvForFocusView = sharpenedSrv;
+                 }
+-                ComPtr<ID3D11RenderTargetView> rtv;
+-                {
++                ComPtr<ID3D11RenderTargetView>& rtv = swapchainForStereoView.dcsvrRtv[destinationImage];
++                if (!rtv) {
+                     D3D11_RENDER_TARGET_VIEW_DESC desc{};
+                     desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+                     desc.Format = (DXGI_FORMAT)swapchainForStereoView.createInfo.format;

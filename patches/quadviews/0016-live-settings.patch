@@ -1,0 +1,135 @@
+Live post-process settings (native/quadviews/dcsvr_live.h, which explains it; tested by tests/quadviews-live): upstream
+reads settings.cfg once per process. The layer now re-reads its files when their write time or size changes (checked
+at most once a second on the thread pool, never on the render thread) and applies only the keys that feed the
+per-frame post-process passes: sharpen_focus_view, smoothen_focus_view_edges, dcsvr_sharpen_taper,
+dcsvr_periphery_sharpen, dcsvr_temporal, dcsvr_temporal_tau_ms, dcsvr_temporal_ramp_deg, dcsvr_temporal_clip. Every
+other key keeps its start value (the log names the changed ones). One line in the Quad Views log per reload.
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 5bbc169..967f86f 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -38,6 +38,7 @@
+ #include "dcsvr_perception.h"
+ #include "dcsvr_depthwarp.h"
+ #include "dcsvr_depth_import.h"
++#include "dcsvr_live.h"
+ 
+ #include <ProjectionVS.h>
+ #include <ProjectionPS.h>
+@@ -227,6 +228,30 @@ namespace openxr_api_layer {
+ 
+                     // Parse the configuration. Load the file shipped with the layer first, followed by the file the
+                     // users may edit.
++                    // DCSVR live settings: the files LoadConfiguration reads below, in its order, stamped and parsed
++                    // first (a write in between is read at the first poll), from Quad Views' own defaults (the
++                    // members before any file).
++                    if (!m_dcsvrLiveDefaultsTaken) {
++                        m_dcsvrLiveDefaults = dcsvrLiveCurrent();
++                        m_dcsvrLiveDefaultsTaken = true;
++                    }
++                    {
++                        std::vector<std::wstring> liveFiles{(dllHome / "settings.cfg").wstring()};
++                        const DWORD liveLength = GetEnvironmentVariableW(L"DCSVR_QUAD_SETTINGS", nullptr, 0);
++                        if (liveLength > 0 && liveLength < 32768) {
++                            std::vector<wchar_t> livePath(liveLength);
++                            if (GetEnvironmentVariableW(L"DCSVR_QUAD_SETTINGS", livePath.data(), liveLength)) {
++                                liveFiles.push_back(livePath.data());
++                            }
++                        } else {
++                            liveFiles.push_back((localAppData / "settings.cfg").wstring());
++                        }
++                        m_dcsvrLive = std::make_shared<dcsvr::live::Reloader>(
++                            std::move(liveFiles),
++                            dcsvr::live::Context{GetApplicationName(), GetApplicationExecutableName(), m_runtimeName, m_systemName},
++                            m_dcsvrLiveDefaults);
++                        m_dcsvrLive->Prime();
++                    }
+                     LoadConfiguration(dllHome / "settings.cfg");
+                     const DWORD profileLength = GetEnvironmentVariableW(L"DCSVR_QUAD_SETTINGS", nullptr, 0);
+                     if (profileLength > 0 && profileLength < 32768) {
+@@ -1552,6 +1577,7 @@ namespace openxr_api_layer {
+                 }
+ 
+                 handleDebugKeys();
++                dcsvrLiveTick();
+             }
+ 
+             // We will allocate structures to pass to the real xrEndFrame().
+@@ -3909,6 +3935,65 @@ namespace openxr_api_layer {
+             return str;
+         }
+ 
++        // DCSVR live settings (dcsvr_live.h): the live keys as the layer holds them now.
++        dcsvr::live::Values dcsvrLiveCurrent() const {
++            dcsvr::live::Values values;
++            values.sharpen = m_sharpenFocusView;
++            values.smoothing = m_smoothenFocusViewEdges;
++            values.taper = m_dcsvrSharpenTaper;
++            values.peripherySharpen = m_dcsvrPeripherySharpen;
++            values.temporal = m_dcsvrTemporal.enabled;
++            values.tauMs = m_dcsvrTemporal.tauMs;
++            values.rampDeg = m_dcsvrTemporal.rampDeg;
++            values.clip = m_dcsvrTemporal.clip;
++            return values;
++        }
++
++        // DCSVR live settings: once per frame in xrEndFrame, where the debug keys change the same values and before
++        // anything of the frame reads them. Hands the file check to the thread pool at most once a second and applies
++        // a finished reload, all live keys at once (a try-lock: never waits). A reload sets every live key to its file
++        // value, also one the debug keys changed since.
++        void dcsvrLiveTick() {
++            if (!m_dcsvrLive) {
++                return;
++            }
++            m_dcsvrLive->Tick(std::chrono::steady_clock::now());
++            dcsvr::live::Result reload;
++            if (!m_dcsvrLive->Take(reload)) {
++                return;
++            }
++            const dcsvr::live::Values before = dcsvrLiveCurrent();
++            const dcsvr::live::Values& values = reload.values;
++            m_sharpenFocusView = values.sharpen;
++            m_smoothenFocusViewEdges = values.smoothing;
++            m_dcsvrSharpenTaper = values.taper;
++            m_dcsvrPeripherySharpen = values.peripherySharpen;
++            m_dcsvrTemporal.enabled = values.temporal;
++            m_dcsvrTemporal.tauMs = values.tauMs;
++            m_dcsvrTemporal.rampDeg = values.rampDeg;
++            m_dcsvrTemporal.clip = values.clip;
++            if (before.temporal && !values.temporal) {
++                // Periphery stability off: its history's memory goes back now; on again, it starts over.
++                for (auto& history : m_dcsvrHistory) {
++                    history = {};
++                }
++                m_dcsvrTemporalControl.Invalidate();
++            }
++            if (before.temporal != values.temporal || before.tauMs != values.tauMs || before.rampDeg != values.rampDeg ||
++                before.clip != values.clip) {
++                m_dcsvrTemporalLogged = false;  // its "on" line again, with the new values
++            }
++            const std::string changed = dcsvr::live::Changes(before, values);
++            std::string ignored;
++            for (const auto& name : reload.ignored) {
++                ignored += (ignored.empty() ? "" : ", ") + name;
++            }
++            Log("DCSVR live settings: settings.cfg reloaded: %s%s%s\n",
++                changed.empty() ? "no live key changed" : changed.c_str(),
++                ignored.empty() ? "" : "; kept until the next start: ",
++                ignored.c_str());
++        }
++
+         void handleDebugKeys() {
+             if (m_debugKeys) {
+                 bool log = false;
+@@ -4510,6 +4595,10 @@ namespace openxr_api_layer {
+         bool m_debugEyeGaze{false};
+         bool m_debugSimulateTracking{false};
+         bool m_debugKeys{false};
++        // DCSVR live settings: the reloader of settings.cfg's post-process keys, and Quad Views' defaults for them.
++        std::shared_ptr<dcsvr::live::Reloader> m_dcsvrLive;
++        dcsvr::live::Values m_dcsvrLiveDefaults{};
++        bool m_dcsvrLiveDefaultsTaken{false};
+ 
+         std::shared_ptr<general::ITimer> m_appFrameCpuTimer;
+         std::shared_ptr<general::ITimer> m_appRenderCpuTimer;

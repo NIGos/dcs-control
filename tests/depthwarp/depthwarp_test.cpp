@@ -606,7 +606,7 @@ void ReplaceOnce(std::string& text, const std::string& from, const std::string& 
     text.replace(at, from.size(), to);
 }
 
-// The composition with Far depth, as scripts/build-quadviews.ps1 injects it (same anchors, exact-match once; the test
+// The composition with Far depth, as patches/quadviews/0015-far-depth.patch has it (same anchors, exact-match once; the test
 // checks the built shader equals this).
 std::string InjectProjectionPS(std::string ps) {
     ReplaceOnce(ps, "    float focusViewShape;\n};",

@@ -1,0 +1,118 @@
+Eye-tracked focus with frame generation (native/quadviews/dcsvr_gaze.h, which explains it; tested by
+tests/quadviews-gaze): during a saccade the focus area reaches ahead along the eye's motion, at fixation a deadzone
+keeps it still. Both free on the GPU. A line every 30 s in the Quad Views log counts saccades, widened and held views.
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 8db2263..75d2cad 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -34,6 +34,7 @@
+ #include <ffx_cas.h>
+ 
+ #include "views.h"
++#include "dcsvr_gaze.h"
+ 
+ #include <ProjectionVS.h>
+ #include <ProjectionPS.h>
+@@ -929,6 +930,21 @@ namespace openxr_api_layer {
+                                         isGazeValid = getEyeGaze(
+                                             viewLocateInfo->displayTime, false /* getStateOnly */, gazeUnitVector);
+                                     }
++                                    // DCSVR saccade: gaze speed once per located frame, statistics every 30 s.
++                                    if (isGazeValid)
++                                        m_dcsvrFilter.UpdateSpeed(viewLocateInfo->displayTime, gazeUnitVector.x, gazeUnitVector.y, gazeUnitVector.z, m_dcsvrGaze);
++                                    if (m_dcsvrGaze.widening || m_dcsvrGaze.deadzoneDeg > 0.f) {
++                                        const auto statsNow = std::chrono::steady_clock::now();
++                                        if (m_dcsvrStatsAt.time_since_epoch().count() == 0) m_dcsvrStatsAt = statsNow;
++                                        const auto& stats = m_dcsvrFilter.Stats();
++                                        if (statsNow - m_dcsvrStatsAt >= std::chrono::seconds(30) && stats.eyeFrames > 0) {
++                                            Log(fmt::format("DCSVR gaze: {} eye-frames, {} saccades, widened {} ({:.1f}%%), held {} ({:.1f}%%), peak {:.0f} deg/s\n",
++                                                            stats.eyeFrames, stats.saccades, stats.widened, 100.0 * stats.widened / stats.eyeFrames,
++                                                            stats.held, 100.0 * stats.held / stats.eyeFrames, stats.peakSpeed));
++                                            m_dcsvrFilter.ResetStats();
++                                            m_dcsvrStatsAt = statsNow;
++                                        }
++                                    }
+ 
+                                     // Set up the focus view.
+                                     for (uint32_t i = xr::StereoView::Count; i < *viewCountOutput; i++) {
+@@ -955,6 +971,16 @@ namespace openxr_api_layer {
+                                                 "xrLocateViews",
+                                                 TLArg(i, "ViewIndex"),
+                                                 TLArg(xr::ToString(projectedGaze).c_str(), "ProjectedGaze"));
++                                            {
++                                                // DCSVR saccade: the eye's velocity in this view gives the lead; at
++                                                // fixation, movements inside the deadzone keep the focus where it is.
++                                                const XrFovf& eyeFov = m_cachedEyeFov[stereoViewIndex];
++                                                const dcsvr::GazeVec2 gazed = m_dcsvrFilter.Eye((int)stereoViewIndex, viewLocateInfo->displayTime,
++                                                    {projectedGaze.x, projectedGaze.y},
++                                                    dcsvr::GazeFilter::NdcPerDegree(std::tan(eyeFov.angleLeft), std::tan(eyeFov.angleRight)),
++                                                    dcsvr::GazeFilter::NdcPerDegree(std::tan(eyeFov.angleDown), std::tan(eyeFov.angleUp)), m_dcsvrGaze);
++                                                projectedGaze = {gazed.x, gazed.y};
++                                            }
+                                             m_eyeGaze[stereoViewIndex] = projectedGaze;
+                                             m_eyeGaze[stereoViewIndex] =
+                                                 m_eyeGaze[stereoViewIndex] +
+@@ -972,16 +998,24 @@ namespace openxr_api_layer {
+                                                 m_verticalFovSection[1] *
+                                                 (1.f + (std::clamp(abs(v.y) - m_focusWideningDeadzone, 0.f, 1.f) *
+                                                         m_verticalFocusWideningMultiplier));
+-                                            const XrVector2f min{
++                                            XrVector2f min{
+                                                 std::clamp(
+                                                     m_eyeGaze[stereoViewIndex].x - horizontalFovSection, -1.f, 1.f),
+                                                 std::clamp(
+                                                     m_eyeGaze[stereoViewIndex].y - verticalFovSection, -1.f, 1.f)};
+-                                            const XrVector2f max{
++                                            XrVector2f max{
+                                                 std::clamp(
+                                                     m_eyeGaze[stereoViewIndex].x + horizontalFovSection, -1.f, 1.f),
+                                                 std::clamp(
+                                                     m_eyeGaze[stereoViewIndex].y + verticalFovSection, -1.f, 1.f)};
++                                            {
++                                                // DCSVR saccade: reach ahead along the eye's motion (same focus pixels).
++                                                dcsvr::GazeVec2 lo{min.x, min.y}, hi{max.x, max.y};
++                                                if (m_dcsvrFilter.Extend((int)stereoViewIndex, viewLocateInfo->displayTime, lo, hi, m_dcsvrGaze)) {
++                                                    min = {lo.x, lo.y};
++                                                    max = {hi.x, hi.y};
++                                                }
++                                            }
+                                             TraceLoggingWrite(g_traceProvider,
+                                                               "xrLocateViews",
+                                                               TLArg(i, "ViewIndex"),
+@@ -2952,6 +2986,24 @@ namespace openxr_api_layer {
+                     } else if (name == "force_no_eye_tracking") {
+                         m_forceNoEyeTracking = std::stoi(value);
+                         parsed = true;
++                    } else if (name == "dcsvr_saccade_widening") {
++                        m_dcsvrGaze.widening = std::stoi(value);
++                        parsed = true;
++                    } else if (name == "dcsvr_saccade_speed") {
++                        m_dcsvrGaze.speed = std::clamp(std::stof(value), 30.f, 1000.f);
++                        parsed = true;
++                    } else if (name == "dcsvr_saccade_lead_ms") {
++                        m_dcsvrGaze.leadMs = std::clamp(std::stof(value), 0.f, 200.f);
++                        parsed = true;
++                    } else if (name == "dcsvr_saccade_max_extend") {
++                        m_dcsvrGaze.maxExtend = std::clamp(std::stof(value), 0.f, 1.f);
++                        parsed = true;
++                    } else if (name == "dcsvr_saccade_hold_ms") {
++                        m_dcsvrGaze.holdMs = std::clamp(std::stof(value), 0.f, 200.f);
++                        parsed = true;
++                    } else if (name == "dcsvr_gaze_deadzone") {
++                        m_dcsvrGaze.deadzoneDeg = std::clamp(std::stof(value), 0.f, 3.f);
++                        parsed = true;
+                     } else if (name == "focus_view_shape") {
+                         m_focusViewShape = std::clamp(std::stof(value), 0.f, 16.f);
+                         parsed = true;
+@@ -3049,6 +3101,10 @@ namespace openxr_api_layer {
+         XrPosef m_cachedEyePoses[xr::StereoView::Count]{};
+         XrVector2f m_centerOfFov[xr::StereoView::Count]{};
+         XrVector2f m_eyeGaze[xr::StereoView::Count]{};
++        // DCSVR saccade: settings and state (native/quadviews/dcsvr_gaze.h).
++        dcsvr::GazeSettings m_dcsvrGaze{};
++        dcsvr::GazeFilter m_dcsvrFilter;
++        std::chrono::steady_clock::time_point m_dcsvrStatsAt{};
+ 
+         XrExtent2Di m_fullFovResolution{};
+ 

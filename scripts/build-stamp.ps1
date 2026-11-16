@@ -5,7 +5,7 @@
 #   Assert-BuildStampCurrent 'quadviews'              # in build-release.ps1
 #   Save-BuildStamp 'ofxr' -LocalOnly 'why'           # a build for this machine only (see below)
 $BuildStampInputs = @{
-    quadviews = @('scripts/build-quadviews.ps1', 'native/quadviews')
+    quadviews = @('scripts/build-quadviews.ps1', 'native/quadviews', 'patches/quadviews')
     ofxr      = @('scripts/build-ofxr-djules75.ps1', 'patches/ofxr-djules75')
     cheeky    = @('scripts/build-upstream.ps1', 'scripts/patch-cheeky.py', 'patches/cheeky')
 }

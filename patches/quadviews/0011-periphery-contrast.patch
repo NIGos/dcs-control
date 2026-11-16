@@ -1,0 +1,116 @@
+Periphery contrast (dcsvr_periphery_sharpen=S, 0: off): the periphery reaches the headset enlarged about five times
+with a bilinear filter, which costs it local contrast, and that loss (more than the missing detail) is what makes
+the periphery read as "blurred" next to the focus area (Patney et al. 2016, contrast-preserving foveation). The same
+CAS pass the focus view uses now also runs on each eye's periphery at its own resolution, before the enlargement,
+at strength S: about a quarter of the focus view's texels, no tile skip, no taper.
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index dd397e9..8127d52 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -2033,6 +2033,10 @@ namespace openxr_api_layer {
+             std::map<ID3D11Texture2D*, ComPtr<ID3D11RenderTargetView>> dcsvrRtv;
+             ComPtr<ID3D11UnorderedAccessView> dcsvrSharpenedUav[xr::StereoView::Count];
+             ComPtr<ID3D11ShaderResourceView> dcsvrSharpenedSrv[xr::StereoView::Count];
++            // DCSVR periphery contrast: the sharpened periphery of each eye and its views.
++            ComPtr<ID3D11Texture2D> dcsvrPeripheryImage[xr::StereoView::Count];
++            ComPtr<ID3D11UnorderedAccessView> dcsvrPeripheryUav[xr::StereoView::Count];
++            ComPtr<ID3D11ShaderResourceView> dcsvrPeripherySrv[xr::StereoView::Count];
+ 
+             std::vector<ID3D11Texture2D*> images;
+             std::vector<ID3D11Texture2D*> fullFovSwapchainImages[xr::StereoView::Count];
+@@ -2463,12 +2467,75 @@ namespace openxr_api_layer {
+                 TraceLoggingWriteStop(local, "xrEndFrame_Sharpen");
+             }
+ 
++            // DCSVR periphery contrast: CAS on the periphery at its own resolution, before the enlargement.
++            ComPtr<ID3D11ShaderResourceView> dcsvrPeripherySource;
++            // Only for an opaque layer: the pass writes alpha 1.
++            if (m_dcsvrPeripherySharpen > 0.f && !m_debugFocusView && !(layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT)) {
++                const UINT width = (UINT)stereoView.subImage.imageRect.extent.width;
++                const UINT height = (UINT)stereoView.subImage.imageRect.extent.height;
++                ComPtr<ID3D11Texture2D>& image = swapchainForStereoView.dcsvrPeripheryImage[viewIndex];
++                D3D11_TEXTURE2D_DESC desc{};
++                if (image) {
++                    image->GetDesc(&desc);
++                }
++                if (!image || desc.Width != width || desc.Height != height) {
++                    desc = {};
++                    desc.ArraySize = 1;
++                    desc.Width = width;
++                    desc.Height = height;
++                    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
++                    desc.MipLevels = 1;
++                    desc.SampleDesc.Count = 1;
++                    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
++                    CHECK_HRCMD(m_applicationDevice->CreateTexture2D(&desc, nullptr, image.ReleaseAndGetAddressOf()));
++                    swapchainForStereoView.dcsvrPeripheryUav[viewIndex].Reset();
++                    swapchainForStereoView.dcsvrPeripherySrv[viewIndex].Reset();
++                }
++                ComPtr<ID3D11UnorderedAccessView>& uav = swapchainForStereoView.dcsvrPeripheryUav[viewIndex];
++                if (!uav) {
++                    D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
++                    uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
++                    uavDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
++                    CHECK_HRCMD(m_applicationDevice->CreateUnorderedAccessView(image.Get(), &uavDesc, uav.ReleaseAndGetAddressOf()));
++                }
++                ComPtr<ID3D11ShaderResourceView>& srv = swapchainForStereoView.dcsvrPeripherySrv[viewIndex];
++                if (!srv) {
++                    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
++                    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
++                    srvDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
++                    srvDesc.Texture2D.MipLevels = 1;
++                    CHECK_HRCMD(m_applicationDevice->CreateShaderResourceView(image.Get(), &srvDesc, srv.ReleaseAndGetAddressOf()));
++                }
++                SharpeningCSConstants periphery{};
++                CasSetup(periphery.Const0, periphery.Const1, std::clamp(m_dcsvrPeripherySharpen, 0.f, 1.f),
++                         (AF1)width, (AF1)height, (AF1)width, (AF1)height);
++                periphery.DcsvrSkip[2] = (float)width;
++                periphery.DcsvrSkip[3] = (float)height;
++                {
++                    D3D11_MAPPED_SUBRESOURCE mappedResources;
++                    CHECK_HRCMD(m_renderContext->Map(m_sharpeningCSConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResources));
++                    memcpy(mappedResources.pData, &periphery, sizeof(periphery));
++                    m_renderContext->Unmap(m_sharpeningCSConstants.Get(), 0);
++                }
++                ID3D11ShaderResourceView* nullSRV[] = {nullptr, nullptr};
++                m_renderContext->PSSetShaderResources(0, 2, nullSRV);
++                m_renderContext->CSSetConstantBuffers(0, 1, m_sharpeningCSConstants.GetAddressOf());
++                m_renderContext->CSSetShaderResources(0, 1, stereoSourceSrv.GetAddressOf());
++                m_renderContext->CSSetUnorderedAccessViews(0, 1, uav.GetAddressOf(), nullptr);
++                m_renderContext->CSSetShader(m_sharpeningCS.Get(), nullptr, 0);
++                m_renderContext->Dispatch((width + 15) / 16, (height + 15) / 16, 1);
++                ID3D11UnorderedAccessView* nullUAV[] = {nullptr};
++                m_renderContext->CSSetUnorderedAccessViews(0, 1, nullUAV, nullptr);
++                m_renderContext->CSSetShaderResources(0, 1, nullSRV);
++                dcsvrPeripherySource = srv;
++            }
++
+             {
+                 TraceLocalActivity(local);
+                 TraceLoggingWriteStart(local, "xrEndFrame_Composite");
+ 
+                 // Create ephemeral SRV/RTV.
+-                ComPtr<ID3D11ShaderResourceView> srvForStereoView = stereoSourceSrv;
++                ComPtr<ID3D11ShaderResourceView> srvForStereoView = dcsvrPeripherySource ? dcsvrPeripherySource : stereoSourceSrv;
+                 ComPtr<ID3D11ShaderResourceView> srvForFocusView = focusSourceSrv;
+                 if (m_sharpenFocusView) {
+                     ComPtr<ID3D11ShaderResourceView>& sharpenedSrv = swapchainForFocusView.dcsvrSharpenedSrv[viewIndex];
+@@ -3009,6 +3076,9 @@ namespace openxr_api_layer {
+                     } else if (name == "dcsvr_gaze_deadzone") {
+                         m_dcsvrGaze.deadzoneDeg = std::clamp(std::stof(value), 0.f, 3.f);
+                         parsed = true;
++                    } else if (name == "dcsvr_periphery_sharpen") {
++                        m_dcsvrPeripherySharpen = std::clamp(std::stof(value), 0.f, 1.f);
++                        parsed = true;
+                     } else if (name == "dcsvr_sharpen_taper") {
+                         m_dcsvrSharpenTaper = std::stoi(value);
+                         parsed = true;
+@@ -3101,6 +3171,7 @@ namespace openxr_api_layer {
+         float m_smoothenFocusViewEdges{0.2f};
+         float m_focusViewShape{0.f};
+         bool m_dcsvrSharpenTaper{false};
++        float m_dcsvrPeripherySharpen{0.f};
+         float m_sharpenFocusView{0.7f};
+         bool m_useTurboMode{true};
+         bool m_unadvertiseQuadViews{false};

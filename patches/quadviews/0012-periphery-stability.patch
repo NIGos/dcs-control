@@ -1,0 +1,280 @@
+Periphery stability (dcsvr_temporal=1; native/quadviews/dcsvr_perception.h and dcsvr_temporal_cs.hlsl, which explain
+it; tested by tests/perception; docs/PERCEPTION.md): a temporal low-pass on each eye's periphery at its own
+resolution, after the flatten and before the periphery contrast pass, against the shimmer the enlargement makes
+visible. The history is reprojected by the head's rotation and clipped to the current 3x3 neighbourhood; its weight
+is time-based (the same at 2X, 3X and Auto), zero inside the focus area and ramping up outside it; saccades, gaps,
+size changes and large head turns start it over, for both eyes at once. The gaze and saccade state of each located
+display time is kept for the submitted frame (one record for both eyes). Off: nothing runs, identical output.
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 8127d52..9140c34 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -35,10 +35,12 @@
+ 
+ #include "views.h"
+ #include "dcsvr_gaze.h"
++#include "dcsvr_perception.h"
+ 
+ #include <ProjectionVS.h>
+ #include <ProjectionPS.h>
+ #include <SharpeningCS.h>
++#include <dcsvr_temporal_cs.h>
+ 
+ namespace openxr_api_layer {
+ 
+@@ -714,6 +716,13 @@ namespace openxr_api_layer {
+                     m_projectionPS.Reset();
+                     m_sharpeningCSConstants.Reset();
+                     m_sharpeningCS.Reset();
++                    // DCSVR periphery stability: the next session starts over.
++                    m_dcsvrTemporalCS.Reset();
++                    m_dcsvrTemporalConstants.Reset();
++                    for (auto& history : m_dcsvrHistory) {
++                        history = {};
++                    }
++                    m_dcsvrTemporalControl.Invalidate();
+ 
+                     m_applicationDevice.Reset();
+                     m_renderContext.Reset();
+@@ -934,6 +943,20 @@ namespace openxr_api_layer {
+                                     // DCSVR saccade: gaze speed once per located frame, statistics every 30 s.
+                                     if (isGazeValid)
+                                         m_dcsvrFilter.UpdateSpeed(viewLocateInfo->displayTime, gazeUnitVector.x, gazeUnitVector.y, gazeUnitVector.z, m_dcsvrGaze);
++                                    // DCSVR periphery stability: this display time's gaze and saccade state, one record
++                                    // for both eyes, read when the frame is submitted.
++                                    if (m_dcsvrTemporal.enabled) {
++                                        dcsvr::GazeSample sample{viewLocateInfo->displayTime};
++                                        sample.valid = isGazeValid && std::isfinite(gazeUnitVector.x) &&
++                                                       std::isfinite(gazeUnitVector.y) && std::isfinite(gazeUnitVector.z);
++                                        sample.inSaccade = sample.valid && m_dcsvrFilter.InSaccade();
++                                        if (sample.valid) {
++                                            sample.dir[0] = gazeUnitVector.x;
++                                            sample.dir[1] = gazeUnitVector.y;
++                                            sample.dir[2] = gazeUnitVector.z;
++                                        }
++                                        m_dcsvrGazeHistory.Record(sample);
++                                    }
+                                     if (m_dcsvrGaze.widening || m_dcsvrGaze.deadzoneDeg > 0.f) {
+                                         const auto statsNow = std::chrono::steady_clock::now();
+                                         if (m_dcsvrStatsAt.time_since_epoch().count() == 0) m_dcsvrStatsAt = statsNow;
+@@ -1523,6 +1546,41 @@ namespace openxr_api_layer {
+                             projectionViewAllocator.push_back(
+                                 {proj->views[xr::StereoView::Left], proj->views[xr::StereoView::Right]});
+ 
++                            // DCSVR periphery stability: one decision per frame for both eyes (a reset in one eye
++                            // resets both), from the poses DCS rendered with and the gaze of this display time.
++                            if (m_dcsvrTemporal.enabled) {
++                                dcsvr::TemporalEye eyes[xr::StereoView::Count];
++                                for (uint32_t eye = 0; eye < xr::StereoView::Count; eye++) {
++                                    const XrQuaternionf& pose = proj->views[eye].pose.orientation;
++                                    const XrQuaternionf& inView = m_cachedEyePoses[eye].orientation;
++                                    const XrFovf& fov = m_cachedEyeFov[eye];
++                                    eyes[eye].pose = {pose.x, pose.y, pose.z, pose.w};
++                                    eyes[eye].eyeInView = {inView.x, inView.y, inView.z, inView.w};
++                                    eyes[eye].fov = {std::tan(fov.angleLeft), std::tan(fov.angleRight), std::tan(fov.angleUp), std::tan(fov.angleDown)};
++                                    eyes[eye].width = (uint32_t)proj->views[eye].subImage.imageRect.extent.width;
++                                    eyes[eye].height = (uint32_t)proj->views[eye].subImage.imageRect.extent.height;
++                                }
++                                // As the periphery contrast pass: only for an opaque layer, not with the focus debug view.
++                                m_dcsvrTemporalActive = !m_debugFocusView && !(proj->layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT);
++                                m_dcsvrTemporalControl.BeginFrame(frameEndInfo->displayTime, eyes, (uint64_t)proj->space,
++                                                                  m_dcsvrGazeHistory.At(frameEndInfo->displayTime), m_dcsvrTemporalActive, m_dcsvrTemporal);
++                                if (!m_dcsvrTemporalLogged) {
++                                    Log(fmt::format("DCSVR periphery stability: on, {:.0f} ms, ramp {:.0f} deg, clip {:.2f}{}\n", m_dcsvrTemporal.tauMs,
++                                                    m_dcsvrTemporal.rampDeg, m_dcsvrTemporal.clip, m_dcsvrTemporal.debug ? ", debug view" : ""));
++                                    m_dcsvrTemporalLogged = true;
++                                }
++                                const auto statsNow = std::chrono::steady_clock::now();
++                                if (m_dcsvrTemporalStatsAt.time_since_epoch().count() == 0) m_dcsvrTemporalStatsAt = statsNow;
++                                const auto& stats = m_dcsvrTemporalControl.Stats();
++                                if (statsNow - m_dcsvrTemporalStatsAt >= std::chrono::seconds(30) && stats.frames > 0) {
++                                    Log(fmt::format("DCSVR periphery stability: {} frames, {} filtered at {:.1f} FPS, {} resets (saccade {}, gap {}, turn {}, size {}, other {}), fades out {:.0f}-{:.0f} deg\n",
++                                                    stats.frames, stats.filtered, stats.dtSum > 0.0 ? stats.filtered / stats.dtSum : 0.0, stats.resets,
++                                                    stats.saccade, stats.gap, stats.turn, stats.size, stats.other, stats.falloff.startDeg, stats.falloff.endDeg));
++                                    m_dcsvrTemporalControl.ResetStats();
++                                    m_dcsvrTemporalStatsAt = statsNow;
++                                }
++                            }
++
+                             for (uint32_t viewIndex = 0; viewIndex < xr::StereoView::Count; viewIndex++) {
+                                 for (uint32_t i = viewIndex; i < xr::QuadView::Count; i += xr::StereoView::Count) {
+                                     TraceLoggingWrite(
+@@ -2467,6 +2525,87 @@ namespace openxr_api_layer {
+                 TraceLoggingWriteStop(local, "xrEndFrame_Sharpen");
+             }
+ 
++            // DCSVR periphery stability: the stabilised periphery replaces the source for what follows, so the periphery
++            // contrast pass reads it and writes its own texture (sharpening never enters the history).
++            // Only when the frame's decision runs the pass (strength 0 does not), and once per eye and frame: a second
++            // projection layer of the same frame keeps its own image rather than blending with the first one's.
++            if (m_dcsvrTemporal.enabled && m_dcsvrTemporalActive && m_dcsvrTemporalCS && m_dcsvrTemporalControl.Active() &&
++                m_dcsvrHistory[viewIndex].time != m_dcsvrTemporalControl.Time()) {
++                const UINT width = (UINT)stereoView.subImage.imageRect.extent.width;
++                const UINT height = (UINT)stereoView.subImage.imageRect.extent.height;
++                DcsvrHistory& history = m_dcsvrHistory[viewIndex];
++                D3D11_TEXTURE2D_DESC desc{};
++                if (history.image[0]) {
++                    history.image[0]->GetDesc(&desc);
++                }
++                if (!history.image[0] || desc.Width != width || desc.Height != height) {
++                    desc = {};
++                    desc.ArraySize = 1;
++                    desc.Width = width;
++                    desc.Height = height;
++                    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
++                    desc.MipLevels = 1;
++                    desc.SampleDesc.Count = 1;
++                    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
++                    // Without the memory for the history (VRAM at its limit) the frame goes on unfiltered: never an
++                    // error returned to DCS from xrEndFrame for an optional pass.
++                    bool created = true;
++                    for (int i = 0; i < 2 && created; i++) {
++                        created = SUCCEEDED(m_applicationDevice->CreateTexture2D(&desc, nullptr, history.image[i].ReleaseAndGetAddressOf())) &&
++                                  SUCCEEDED(m_applicationDevice->CreateShaderResourceView(history.image[i].Get(), nullptr, history.srv[i].ReleaseAndGetAddressOf())) &&
++                                  SUCCEEDED(m_applicationDevice->CreateUnorderedAccessView(history.image[i].Get(), nullptr, history.uav[i].ReleaseAndGetAddressOf()));
++                    }
++                    if (!created) {
++                        history = {};
++                        m_dcsvrTemporalControl.Invalidate();
++                        if (!m_dcsvrTemporalNoMemoryLogged) {
++                            Log(fmt::format("DCSVR periphery stability: no memory for the {}x{} history, this eye unfiltered\n", width, height));
++                            m_dcsvrTemporalNoMemoryLogged = true;
++                        }
++                    }
++                    history.next = 0;
++                    history.fresh = true;
++                }
++                if (history.image[0] && history.image[1]) {
++                // A frame decided for but not written (an early return in between) breaks the history's continuity.
++                if (history.time != m_dcsvrTemporalControl.PreviousTime()) {
++                    history.fresh = true;
++                }
++                history.time = m_dcsvrTemporalControl.Time();
++                m_dcsvrTemporal.focusShape = m_focusViewShape;
++                dcsvr::TemporalConstants temporal{};
++                m_dcsvrTemporalControl.Constants((int)viewIndex,
++                                                 {std::tan(focusView.fov.angleLeft), std::tan(focusView.fov.angleRight),
++                                                  std::tan(focusView.fov.angleUp), std::tan(focusView.fov.angleDown)},
++                                                 m_dcsvrTemporal, temporal);
++                if (history.fresh) {
++                    temporal.params[1] = 0.f;  // a new texture holds no history yet
++                    history.fresh = false;
++                }
++                {
++                    D3D11_MAPPED_SUBRESOURCE mappedResources;
++                    CHECK_HRCMD(m_renderContext->Map(m_dcsvrTemporalConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResources));
++                    memcpy(mappedResources.pData, &temporal, sizeof(temporal));
++                    m_renderContext->Unmap(m_dcsvrTemporalConstants.Get(), 0);
++                }
++                const int write = history.next, read = 1 - history.next;
++                ID3D11ShaderResourceView* nullSRV[] = {nullptr, nullptr};
++                m_renderContext->PSSetShaderResources(0, 2, nullSRV);
++                ID3D11ShaderResourceView* sources[] = {stereoSourceSrv.Get(), history.srv[read].Get()};
++                m_renderContext->CSSetConstantBuffers(0, 1, m_dcsvrTemporalConstants.GetAddressOf());
++                m_renderContext->CSSetShaderResources(0, 2, sources);
++                m_renderContext->CSSetUnorderedAccessViews(0, 1, history.uav[write].GetAddressOf(), nullptr);
++                m_renderContext->CSSetSamplers(0, 1, m_linearClampSampler.GetAddressOf());
++                m_renderContext->CSSetShader(m_dcsvrTemporalCS.Get(), nullptr, 0);
++                m_renderContext->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
++                ID3D11UnorderedAccessView* nullUAV[] = {nullptr};
++                m_renderContext->CSSetUnorderedAccessViews(0, 1, nullUAV, nullptr);
++                m_renderContext->CSSetShaderResources(0, 2, nullSRV);
++                history.next = read;
++                stereoSourceSrv = history.srv[write];
++                }
++            }
++
+             // DCSVR periphery contrast: CAS on the periphery at its own resolution, before the enlargement.
+             ComPtr<ID3D11ShaderResourceView> dcsvrPeripherySource;
+             // Only for an opaque layer: the pass writes alpha 1.
+@@ -2739,6 +2878,18 @@ namespace openxr_api_layer {
+             CHECK_HRCMD(m_applicationDevice->CreateComputeShader(
+                 g_SharpeningCS, sizeof(g_SharpeningCS), nullptr, m_sharpeningCS.ReleaseAndGetAddressOf()));
+ 
++            // DCSVR periphery stability.
++            {
++                D3D11_BUFFER_DESC desc{};
++                desc.ByteWidth = (UINT)sizeof(dcsvr::TemporalConstants);
++                desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
++                desc.Usage = D3D11_USAGE_DYNAMIC;
++                desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
++                CHECK_HRCMD(m_applicationDevice->CreateBuffer(&desc, nullptr, m_dcsvrTemporalConstants.ReleaseAndGetAddressOf()));
++            }
++            CHECK_HRCMD(m_applicationDevice->CreateComputeShader(
++                g_dcsvr_temporal_cs, sizeof(g_dcsvr_temporal_cs), nullptr, m_dcsvrTemporalCS.ReleaseAndGetAddressOf()));
++
+             // For statistics.
+             {
+                 XrGraphicsBindingD3D11KHR bindings{};
+@@ -3076,6 +3227,21 @@ namespace openxr_api_layer {
+                     } else if (name == "dcsvr_gaze_deadzone") {
+                         m_dcsvrGaze.deadzoneDeg = std::clamp(std::stof(value), 0.f, 3.f);
+                         parsed = true;
++                    } else if (name == "dcsvr_temporal") {
++                        m_dcsvrTemporal.enabled = std::stoi(value);
++                        parsed = true;
++                    } else if (name == "dcsvr_temporal_tau_ms") {
++                        m_dcsvrTemporal.tauMs = std::clamp(std::stof(value), 0.f, 200.f);
++                        parsed = true;
++                    } else if (name == "dcsvr_temporal_ramp_deg") {
++                        m_dcsvrTemporal.rampDeg = std::clamp(std::stof(value), 1.f, 30.f);
++                        parsed = true;
++                    } else if (name == "dcsvr_temporal_clip") {
++                        m_dcsvrTemporal.clip = std::clamp(std::stof(value), 0.25f, 4.f);
++                        parsed = true;
++                    } else if (name == "dcsvr_temporal_debug") {
++                        m_dcsvrTemporal.debug = std::stoi(value);
++                        parsed = true;
+                     } else if (name == "dcsvr_periphery_sharpen") {
+                         m_dcsvrPeripherySharpen = std::clamp(std::stof(value), 0.f, 1.f);
+                         parsed = true;
+@@ -3172,6 +3338,26 @@ namespace openxr_api_layer {
+         float m_focusViewShape{0.f};
+         bool m_dcsvrSharpenTaper{false};
+         float m_dcsvrPeripherySharpen{0.f};
++        // DCSVR periphery stability: settings, the gaze of each located display time, the per-frame decision, each
++        // eye's history (two textures written in turn) and the pass.
++        dcsvr::TemporalSettings m_dcsvrTemporal{};
++        dcsvr::GazeHistory m_dcsvrGazeHistory;
++        dcsvr::TemporalController m_dcsvrTemporalControl;
++        bool m_dcsvrTemporalActive{false};
++        bool m_dcsvrTemporalLogged{false};
++        bool m_dcsvrTemporalNoMemoryLogged{false};
++        std::chrono::steady_clock::time_point m_dcsvrTemporalStatsAt{};
++        struct DcsvrHistory {
++            ComPtr<ID3D11Texture2D> image[2];
++            ComPtr<ID3D11ShaderResourceView> srv[2];
++            ComPtr<ID3D11UnorderedAccessView> uav[2];
++            int next{0};
++            bool fresh{true};
++            int64_t time{0};  // display time of the frame this history was last written for
++        };
++        DcsvrHistory m_dcsvrHistory[xr::StereoView::Count];
++        ComPtr<ID3D11Buffer> m_dcsvrTemporalConstants;
++        ComPtr<ID3D11ComputeShader> m_dcsvrTemporalCS;
+         float m_sharpenFocusView{0.7f};
+         bool m_useTurboMode{true};
+         bool m_unadvertiseQuadViews{false};
+diff --git a/openxr-api-layer/openxr-api-layer.vcxproj b/openxr-api-layer/openxr-api-layer.vcxproj
+index c40ad4d..f16a044 100644
+--- a/openxr-api-layer/openxr-api-layer.vcxproj
++++ b/openxr-api-layer/openxr-api-layer.vcxproj
+@@ -513,6 +513,17 @@ $(SolutionDir)\scripts\sed.exe -i "s/VALUE \"ProductVersion\", \".*\"$/VALUE \"P
+       <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">CAS_SAMPLE_FP16=0;CAS_SAMPLE_SHARPEN_ONLY=1;WIDTH=64;HEIGHT=1;DEPTH=1</PreprocessorDefinitions>
+     </FxCompile>
+   </ItemGroup>
++  <ItemGroup>
++    <FxCompile Include="dcsvr_temporal_cs.hlsl">
++      <ShaderType>Compute</ShaderType>
++      <ShaderModel>5.0</ShaderModel>
++      <VariableName>g_%(Filename)</VariableName>
++      <HeaderFileOutput>$(IntDir)%(Filename).h</HeaderFileOutput>
++      <ObjectFileOutput>
++      </ObjectFileOutput>
++    </FxCompile>
++    <ClInclude Include="dcsvr_perception.h" />
++  </ItemGroup>
+   <ItemGroup>
+     <ResourceCompile Include="resource.rc" />
+   </ItemGroup>

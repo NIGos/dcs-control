@@ -1,0 +1,44 @@
+stereo_output_multiplier: resolution of the composited stereo image, as a multiple of the runtime's recommendation.
+Upstream composites at focus_multiplier, so focus 1.25 makes a 1.25x stereo image that the runtime then scales down;
+with framegen every frame-generation copy of that oversized image costs VRAM (about 10.7 GB at Crystal Super
+resolution). Unset keeps upstream behaviour.
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 1fae298..949b2c0 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -2643,7 +2643,7 @@ namespace openxr_api_layer {
+                                                                          &count,
+                                                                          stereoViews));
+                 const float newWidth =
+-                    m_focusPixelDensity * stereoViews[xr::StereoView::Left].recommendedImageRectWidth;
++                    (m_stereoOutputMultiplier > 0.f ? m_stereoOutputMultiplier : m_focusPixelDensity) * stereoViews[xr::StereoView::Left].recommendedImageRectWidth;
+                 const float ratio = (float)stereoViews[xr::StereoView::Left].recommendedImageRectHeight /
+                                     stereoViews[xr::StereoView::Left].recommendedImageRectWidth;
+                 const float newHeight = newWidth * ratio;
+@@ -2654,6 +2654,7 @@ namespace openxr_api_layer {
+                     std::min((uint32_t)newHeight, stereoViews[xr::StereoView::Left].maxImageRectHeight);
+             }
+ 
++            Log(fmt::format("Composited stereo resolution: {}x{}\n", m_fullFovResolution.width, m_fullFovResolution.height));
+             m_needComputeBaseFov = false;
+         }
+ 
+@@ -2864,6 +2865,9 @@ namespace openxr_api_layer {
+                     if (name == "peripheral_multiplier") {
+                         m_peripheralPixelDensity = std::max(0.1f, std::stof(value));
+                         parsed = true;
++                    } else if (name == "stereo_output_multiplier") {
++                        m_stereoOutputMultiplier = std::max(0.1f, std::stof(value));
++                        parsed = true;
+                     } else if (name == "focus_multiplier") {
+                         m_focusPixelDensity = std::max(0.1f, std::stof(value));
+                         parsed = true;
+@@ -2976,6 +2980,7 @@ namespace openxr_api_layer {
+ 
+         float m_peripheralPixelDensity{0.5f};
+         float m_focusPixelDensity{1.f};
++        float m_stereoOutputMultiplier{0.f};
+         // [0] = non-foveated, [1] = foveated
+         float m_horizontalFovSection[2]{0.5f, 0.35f};
+         float m_verticalFovSection[2]{0.45f, 0.35f};

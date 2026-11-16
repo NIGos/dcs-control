@@ -1,0 +1,70 @@
+Sharpening only what is shown: with the round focus area the composition never reads the focus view outside the
+circle (alpha exactly 0, early out above), so the sharpening pass skips its 16x16 tiles that lie wholly outside
+the circle widened by two texels (the composition's bilinear reach). About a fifth of the focus view. The sharpened
+texture is cleared once when it is created, so a skipped texel holds zero. Off for the rectangle and while the
+focus layer debug view (which shows the whole focus view) is on.
+
+diff --git a/openxr-api-layer/SharpeningCS.hlsl b/openxr-api-layer/SharpeningCS.hlsl
+index 861ee6a..a1d565f 100644
+--- a/openxr-api-layer/SharpeningCS.hlsl
++++ b/openxr-api-layer/SharpeningCS.hlsl
+@@ -20,6 +20,8 @@
+ cbuffer cb : register(b0) {
+     uint4 const0;
+     uint4 const1;
++    // DCSVR: x the round shape exponent (0: off), y the margin in texels, zw the focus view size.
++    float4 dcsvrSkip;
+ };
+ 
+ Texture2D InputTexture : register(t0);
+@@ -67,6 +69,17 @@ void CasInput(inout AF1 r, inout AF1 g, inout AF1 b) {
+ void main(uint3 LocalThreadId : SV_GroupThreadID, uint3 WorkGroupId : SV_GroupID) {
+     // Do remapping of local xy in workgroup for a more PS-like swizzle pattern.
+     AU2 gxy = ARmp8x8(LocalThreadId.x) + AU2(WorkGroupId.x << 4u, WorkGroupId.y << 4u);
++    if (dcsvrSkip.x >= 1) {
++        // The tile's texel nearest the centre, in the composition's normalized coordinates.
++        float2 size = dcsvrSkip.zw;
++        float2 tileMin = float2(WorkGroupId.xy) * 16.0;
++        float2 nearest = clamp(size * 0.5, tileMin, tileMin + 16.0);
++        float2 e = abs(nearest / size * 2.0 - 1.0);
++        float r = pow(pow(e.x, dcsvrSkip.x) + pow(e.y, dcsvrSkip.x), 1.0 / dcsvrSkip.x);
++        if (r >= 1.0 + 2.0 * dcsvrSkip.y / min(size.x, size.y)) {
++            return;
++        }
++    }
+ 
+     bool sharpenOnly;
+ #if CAS_SAMPLE_SHARPEN_ONLY
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 2c52f4d..efc4893 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -71,6 +71,7 @@ namespace openxr_api_layer {
+     struct SharpeningCSConstants {
+         alignas(4) uint32_t Const0[4];
+         alignas(4) uint32_t Const1[4];
++        alignas(4) float DcsvrSkip[4];
+     };
+ 
+     // This class implements our API layer.
+@@ -2370,6 +2371,9 @@ namespace openxr_api_layer {
+                     desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                     CHECK_HRCMD(m_applicationDevice->CreateUnorderedAccessView(
+                         swapchainForFocusView.sharpenedImage[viewIndex].Get(), &desc, uav.ReleaseAndGetAddressOf()));
++                    // A new sharpened texture: zero where the sharpening may skip.
++                    const float zero[4] = {0.f, 0.f, 0.f, 0.f};
++                    m_renderContext->ClearUnorderedAccessViewFloat(uav.Get(), zero);
+                 }
+ 
+                 // Set up the shader.
+@@ -2381,6 +2385,10 @@ namespace openxr_api_layer {
+                          (AF1)focusView.subImage.imageRect.extent.height,
+                          (AF1)focusView.subImage.imageRect.extent.width,
+                          (AF1)focusView.subImage.imageRect.extent.height);
++                sharpening.DcsvrSkip[0] = m_debugFocusView ? 0.f : m_focusViewShape;
++                sharpening.DcsvrSkip[1] = 2.f;
++                sharpening.DcsvrSkip[2] = (float)focusView.subImage.imageRect.extent.width;
++                sharpening.DcsvrSkip[3] = (float)focusView.subImage.imageRect.extent.height;
+                 {
+                     D3D11_MAPPED_SUBRESOURCE mappedResources;
+                     CHECK_HRCMD(m_renderContext->Map(

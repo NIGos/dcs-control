@@ -1,0 +1,37 @@
+A gaze sample that is not finite (seen once on a Pimax Crystal Super as DCS's session became ready, the eye tracker
+still starting) gave the focus view a NaN projection; DecomposeProjectionMatrix then threw "Invalid projection
+matrix" and xrLocateViews failed, which DCS treats as fatal (black window). Such a frame now uses the fixed focus
+area, exactly as when the gaze is reported invalid.
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index efc4893..8db2263 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -940,8 +940,10 @@ namespace openxr_api_layer {
+                                         viewForGazeProjection.pose = m_cachedEyePoses[stereoViewIndex];
+                                         viewForGazeProjection.fov = views[stereoViewIndex].fov;
+                                         XrVector2f projectedGaze;
++                                        // DCSVR invalid gaze: a gaze that is not finite counts as no gaze.
+                                         if (!isGazeValid ||
+-                                            !ProjectPoint(viewForGazeProjection, gazeUnitVector, projectedGaze)) {
++                                            !ProjectPoint(viewForGazeProjection, gazeUnitVector, projectedGaze) ||
++                                            !std::isfinite(projectedGaze.x) || !std::isfinite(projectedGaze.y)) {
+                                             views[i].fov = m_cachedEyeFov[i];
+ 
+                                         } else {
+@@ -985,8 +987,13 @@ namespace openxr_api_layer {
+                                                               TLArg(i, "ViewIndex"),
+                                                               TLArg(xr::ToString(min).c_str(), "FocusTopLeft"),
+                                                               TLArg(xr::ToString(max).c_str(), "FocusBottomRight"));
+-                                            views[i].fov =
+-                                                xr::math::ComputeBoundingFov(m_cachedEyeFov[stereoViewIndex], min, max);
++                                            try {
++                                                views[i].fov =
++                                                    xr::math::ComputeBoundingFov(m_cachedEyeFov[stereoViewIndex], min, max);
++                                            } catch (const std::exception&) {
++                                                // DCSVR invalid gaze: a degenerate focus area falls back to the fixed one.
++                                                views[i].fov = m_cachedEyeFov[i];
++                                            }
+                                         }
+                                     }
+ 

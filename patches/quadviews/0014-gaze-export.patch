@@ -1,0 +1,73 @@
+Gaze export for the pupil shift layer (DcsVr_QuadViewsGaze; native/quadviews/dcsvr_perception.h explains it; tested by
+tests/perception and native/pupil_shift's harness): without a gaze the focus views sit at a fixed spot (resting gaze
+plus a per-eye horizontal offset) that the pupil shift layer, reading the focus views, took for a real gaze of about
+2.4 degrees outwards per eye. Each located display time's gaze record (the periphery stability's) is now kept always,
+in one history the export reads: flags (sample, valid, saccade) and the gaze in each eye's frame. Nothing else changes.
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 9140c34..ac5ecc5 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -945,7 +945,9 @@ namespace openxr_api_layer {
+                                         m_dcsvrFilter.UpdateSpeed(viewLocateInfo->displayTime, gazeUnitVector.x, gazeUnitVector.y, gazeUnitVector.z, m_dcsvrGaze);
+                                     // DCSVR periphery stability: this display time's gaze and saccade state, one record
+                                     // for both eyes, read when the frame is submitted.
+-                                    if (m_dcsvrTemporal.enabled) {
++                                    // DCSVR gaze export: recorded whether the periphery stability is on or not, for the
++                                    // pupil shift layer (DcsVr_QuadViewsGaze).
++                                    {
+                                         dcsvr::GazeSample sample{viewLocateInfo->displayTime};
+                                         sample.valid = isGazeValid && std::isfinite(gazeUnitVector.x) &&
+                                                        std::isfinite(gazeUnitVector.y) && std::isfinite(gazeUnitVector.z);
+@@ -955,6 +957,14 @@ namespace openxr_api_layer {
+                                             sample.dir[1] = gazeUnitVector.y;
+                                             sample.dir[2] = gazeUnitVector.z;
+                                         }
++                                        if (sample.valid) {
++                                            const dcsvr::Quat eyeInView[xr::StereoView::Count] = {
++                                                {m_cachedEyePoses[0].orientation.x, m_cachedEyePoses[0].orientation.y,
++                                                 m_cachedEyePoses[0].orientation.z, m_cachedEyePoses[0].orientation.w},
++                                                {m_cachedEyePoses[1].orientation.x, m_cachedEyePoses[1].orientation.y,
++                                                 m_cachedEyePoses[1].orientation.z, m_cachedEyePoses[1].orientation.w}};
++                                            sample.SetEyes(eyeInView);
++                                        }
+                                         m_dcsvrGazeHistory.Record(sample);
+                                     }
+                                     if (m_dcsvrGaze.widening || m_dcsvrGaze.deadzoneDeg > 0.f) {
+@@ -3341,7 +3351,8 @@ namespace openxr_api_layer {
+         // DCSVR periphery stability: settings, the gaze of each located display time, the per-frame decision, each
+         // eye's history (two textures written in turn) and the pass.
+         dcsvr::TemporalSettings m_dcsvrTemporal{};
+-        dcsvr::GazeHistory m_dcsvrGazeHistory;
++        // DCSVR gaze export: the process's one gaze history, also read by DcsVr_QuadViewsGaze.
++        dcsvr::GazeHistory& m_dcsvrGazeHistory{dcsvr::SharedGazeHistory()};
+         dcsvr::TemporalController m_dcsvrTemporalControl;
+         bool m_dcsvrTemporalActive{false};
+         bool m_dcsvrTemporalLogged{false};
+@@ -3475,3 +3486,26 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
+     }
+     return TRUE;
+ }
++
++// DCSVR gaze export: the gaze Quad Views used for a display time, for DCS Control's pupil shift layer (found with
++// GetModuleHandle/GetProcAddress). Flags: 1 a sample, 2 a real gaze (not the fixed focus), 4 a saccade; left and right
++// receive the one combined gaze as a unit vector in each eye's view frame. See dcsvr_perception.h.
++// The periphery stability's state for DCS Control's in-headset panel (OFXR): see dcsvr::PeripheryStatus.
++extern "C" __declspec(dllexport) uint64_t DcsVr_QuadViewsPeripheryStatus() noexcept {
++    return dcsvr::PeripheryStatus().load(std::memory_order_relaxed);
++}
++
++// A scene cut the head pose does not show (another view or camera, a respawn): the periphery stability's next frame
++// starts over. Callable from any thread; does nothing with periphery stability off.
++extern "C" __declspec(dllexport) void DcsVr_QuadViewsTemporalReset() noexcept {
++    dcsvr::SceneCuts().fetch_add(1u, std::memory_order_relaxed);
++}
++
++// noexcept, with nothing thrown across the C boundary (the history's mutex can throw): 0, no sample, instead.
++extern "C" __declspec(dllexport) uint32_t DcsVr_QuadViewsGaze(int64_t displayTime, float left[3], float right[3]) noexcept {
++    try {
++        return dcsvr::ExportGaze(dcsvr::SharedGazeHistory().At(displayTime), left, right);
++    } catch (...) {
++        return 0u;
++    }
++}

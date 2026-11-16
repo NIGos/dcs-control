@@ -1,0 +1,84 @@
+focus_view_shape: upstream blends the focus view in over a rectangular band whose alpha never drops below 0.5
+(max(0.5, s.x * s.y)), so the focus area always ends in a 50 % step that stays visible against the much softer
+periphery. focus_view_shape=2 makes the focus area the ellipse inscribed in the focus view (a circle for a square
+focus view) and fades it out radially with smoothstep over the same width smoothen_focus_view_edges gives the
+rectangle (2 x its value in normalized view coordinates), down to exactly 0 at the edge. Other values (or none)
+keep upstream behaviour. Larger exponents round a square instead (4: a rounded square; DCS VR Control writes 8 when
+the round focus area is off: a rectangle with slightly rounded corners that fades out to 0 like the circle).
+
+diff --git a/openxr-api-layer/ProjectionPS.hlsl b/openxr-api-layer/ProjectionPS.hlsl
+index d3a1322..6d55ce2 100644
+--- a/openxr-api-layer/ProjectionPS.hlsl
++++ b/openxr-api-layer/ProjectionPS.hlsl
+@@ -27,6 +27,7 @@ cbuffer ConstantBuffer : register(b0) {
+     bool ignoreAlpha;
+     bool isUnpremultipliedAlpha;
+     bool debugFocusView;
++    float focusViewShape;
+ };
+ 
+ SamplerState sourceSampler : register(s0);
+@@ -65,7 +66,13 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0,
+ 
+     // Do a smooth transition with alpha-blending around the edges.
+     float isInside = all(abs(layer1ProjectedCoordNdc) < 1);
+-    if (smoothingArea) {
++    if (focusViewShape >= 1) {
++        // DCS VR Control: a rounded focus area fading out radially to exactly 0 at its edge.
++        float2 d = abs(layer1ProjectedCoordNdc);
++        float r = pow(pow(d.x, focusViewShape) + pow(d.y, focusViewShape), 1 / focusViewShape);
++        float width = clamp(2 * smoothingArea, 0.01, 0.95);
++        color1.a = isInside * (1 - smoothstep(1 - width, 1, r));
++    } else if (smoothingArea) {
+         float2 s = smoothstep(float2(0, 0), float2(smoothingArea, smoothingArea), layer1TexCoord) -
+                    smoothstep(float2(1, 1) - float2(smoothingArea, smoothingArea), float2(1, 1), layer1TexCoord);
+         color1.a = isInside * max(0.5, s.x * s.y);
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 1afdd86..a18ec71 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -64,6 +64,8 @@ namespace openxr_api_layer {
+         alignas(4) bool ignoreAlpha;
+         alignas(4) bool isUnpremultipliedAlpha;
+         alignas(4) bool debugFocusView;
++        alignas(4) float focusViewShape;
++        alignas(4) float padding[3];
+     };
+ 
+     struct SharpeningCSConstants {
+@@ -763,6 +765,9 @@ namespace openxr_api_layer {
+                     if (m_useQuadViews) {
+                         if (m_smoothenFocusViewEdges) {
+                             Log(fmt::format("Edge smoothing: {:.2f}\n", m_smoothenFocusViewEdges));
++                            if (m_focusViewShape >= 1.f) {
++                                Log(fmt::format("Focus view shape: rounded, exponent {:.1f}\n", m_focusViewShape));
++                            }
+                         } else {
+                             Log("Edge smoothing: Disabled\n");
+                         }
+@@ -2445,6 +2450,7 @@ namespace openxr_api_layer {
+ 
+                 ProjectionPSConstants drawing{};
+                 drawing.smoothingArea = m_smoothenFocusViewEdges;
++                drawing.focusViewShape = m_focusViewShape;
+                 drawing.ignoreAlpha = ~(layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT);
+                 drawing.isUnpremultipliedAlpha = layerFlags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+                 drawing.debugFocusView = m_debugFocusView;
+@@ -2919,6 +2925,9 @@ namespace openxr_api_layer {
+                     } else if (name == "force_no_eye_tracking") {
+                         m_forceNoEyeTracking = std::stoi(value);
+                         parsed = true;
++                    } else if (name == "focus_view_shape") {
++                        m_focusViewShape = std::clamp(std::stof(value), 0.f, 16.f);
++                        parsed = true;
+                     } else if (name == "smoothen_focus_view_edges") {
+                         m_smoothenFocusViewEdges = std::clamp(std::stof(value), 0.f, 0.5f);
+                         parsed = true;
+@@ -3003,6 +3012,7 @@ namespace openxr_api_layer {
+         bool m_preferFoveatedRendering{true};
+         bool m_forceNoEyeTracking{false};
+         float m_smoothenFocusViewEdges{0.2f};
++        float m_focusViewShape{0.f};
+         float m_sharpenFocusView{0.7f};
+         bool m_useTurboMode{true};
+         bool m_unadvertiseQuadViews{false};

@@ -1,0 +1,36 @@
+Early out: about nine pixels in ten of the composited image lie outside the focus area (a 0.34 x 0.34 focus section,
+smaller still inside the round shape). There the focus view's alpha is exactly 0 - outside the rectangle by
+isInside, outside the circle because smoothstep(1 - width, 1, r) is exactly 1 for r >= 1 - so the composition is
+the stereo colour through the same alpha handling. Those pixels now skip the focus sample and the mask maths. The
+debug view of the focus layer keeps the full path. The focus sample is taken at level 0 (the view has one mip
+level; the sampler is the same), as gradients are not available in the branch.
+
+diff --git a/openxr-api-layer/ProjectionPS.hlsl b/openxr-api-layer/ProjectionPS.hlsl
+index 6d55ce2..6368981 100644
+--- a/openxr-api-layer/ProjectionPS.hlsl
++++ b/openxr-api-layer/ProjectionPS.hlsl
+@@ -53,7 +53,23 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0,
+     float2 layer1ProjectedCoordNdc = projectedFocusCoord.xy / projectedFocusCoord.z;
+     float2 layer1TexCoord = layer1ProjectedCoordNdc * float2(0.5f, -0.5f) + 0.5f;
+     // For pixels outside of the focus view, the sampler will give us a fully transparent pixel.
+-    float4 color1 = sourceFocusTexture.Sample(sourceSampler, layer1TexCoord);
++    // DCSVR early out: no focus contribution here, the stereo colour as the full path would leave it.
++    bool focusVisible = all(abs(layer1ProjectedCoordNdc) < 1);
++    if (focusVisible && focusViewShape >= 1) {
++        float2 e = abs(layer1ProjectedCoordNdc);
++        focusVisible = pow(pow(e.x, focusViewShape) + pow(e.y, focusViewShape), 1 / focusViewShape) < 1;
++    }
++    [branch] if (!focusVisible && !debugFocusView) {
++        if (ignoreAlpha) {
++            color0.a = 1;
++        }
++        if (!isUnpremultipliedAlpha) {
++            color0 = unpremultiplyAlpha(color0);
++        }
++        color0 = premultiplyAlpha(color0);
++        return float4(color0.rgb, color0.a);
++    }
++    float4 color1 = sourceFocusTexture.SampleLevel(sourceSampler, layer1TexCoord, 0);
+ 
+     if (ignoreAlpha) {
+         color0.a = color1.a = 1;
