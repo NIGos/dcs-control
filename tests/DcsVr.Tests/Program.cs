@@ -2473,6 +2473,20 @@ Test("An update ended while it wrote files is seen at the next start, until a se
     AtomicFile.WriteText(Path.Combine(Directory.CreateDirectory(Path.Combine(installer.Transactions.StateDirectory, "broken")).FullName, "journal.json"), "{ not json");
     Require(!installer.Unfinished(), "an unreadable journal is not an unfinished update");
 });
+Test("The app's question at start: an unfinished installation above its files folder, never an unzipped copy", () =>
+{
+    var target = Path.Combine(root, "app-install/start-question"); var installer = new ApplicationInstaller(target); var files = Path.Combine(target, "files") + Path.DirectorySeparatorChar;
+    Directory.CreateDirectory(files);
+    Require(!ApplicationInstaller.UnfinishedAbove(files), "an unzipped copy has no installer folder");
+    var journal = installer.Install(ReleaseFixture("start-question-v1", "1", "first"));
+    Require(!ApplicationInstaller.UnfinishedAbove(files), "a finished installation starts without a question");
+    foreach (var status in new[] { "prepared", "applying", "restore-conflicts" })
+    {
+        AtomicFile.WriteText(Path.Combine(installer.Transactions.StateDirectory, journal.Id, "journal.json"), JsonData.Serialize(journal with { Status = status }));
+        Require(ApplicationInstaller.UnfinishedAbove(files) && ApplicationInstaller.UnfinishedAbove(files.TrimEnd(Path.DirectorySeparatorChar)), status);
+    }
+    Require(!ApplicationInstaller.UnfinishedAbove(Path.GetPathRoot(root)!) && !ApplicationInstaller.UnfinishedAbove(Path.Combine(root, "app-install/start-question-missing/files")), "a drive root and a missing folder are no installation");
+});
 Test("Uninstall after a rollback that met a changed file: it is rolled back again first, like before an update", () =>
 {
     var target = Path.Combine(root, "app-install/uninstall-conflicts"); var installer = new ApplicationInstaller(target);

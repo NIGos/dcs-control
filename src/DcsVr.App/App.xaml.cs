@@ -57,8 +57,7 @@ public partial class App : Application
         // are open): the pilot is told to run the setup again, and chooses whether this copy starts.
         try
         {
-            var installation = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory));
-            if (installation is not null && Directory.Exists(Path.Combine(installation, ".installer")) && new DcsVr.Core.ApplicationInstaller(installation).Unfinished())
+            if (DcsVr.Core.ApplicationInstaller.UnfinishedAbove(AppContext.BaseDirectory))
             {
                 AppLog.Info("An update of this installation did not finish (an installer journal is still open).");
                 if (MessageBox.Show(DcsVr.Core.ApplicationInstaller.UnfinishedMessage, "DCS Control", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes) { Shutdown(1); return; }

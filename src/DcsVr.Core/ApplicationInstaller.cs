@@ -114,6 +114,19 @@ public sealed class ApplicationInstaller(string destination)
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException or System.Text.Json.JsonException or NotSupportedException) { return false; }
     }
 
+    /// <summary>The app's question at start: whether the installation above <paramref name="appBaseDirectory"/> (the
+    /// files\ folder the app runs from) is <see cref="Unfinished"/>. False for a folder that was never installed into
+    /// (an unzipped copy has no .installer) and for one that cannot be read. Never throws.</summary>
+    public static bool UnfinishedAbove(string appBaseDirectory)
+    {
+        try
+        {
+            var installation = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(appBaseDirectory)));
+            return installation is not null && Directory.Exists(Path.Combine(installation, ".installer")) && new ApplicationInstaller(installation).Unfinished();
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException or NotSupportedException) { return false; }
+    }
+
     /// <summary>The journals of an install, update or rollback that began and did not end. Install and Uninstall roll
     /// these back first; <see cref="Unfinished"/> reports them.</summary>
     private static TransactionJournal[] Interrupted(IReadOnlyList<TransactionJournal> journals) =>
