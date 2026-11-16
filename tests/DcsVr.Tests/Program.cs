@@ -4347,6 +4347,35 @@ Test("The installer script ends a failure with its cause as the last line, which
     Require(thrown.Code == 1 && Plain(thrown.Lines) && thrown.Lines[^1].Contains("path", StringComparison.OrdinalIgnoreCase), string.Join(" | ", thrown.Lines));
     Require(!Directory.Exists(Path.Combine(root, "installer-script", "installed")), "nothing was installed");
 });
+Test("The setup's failure page says this version is installed only after the program's own line", () =>
+{
+    var cli = System.Reflection.Assembly.GetExecutingAssembly().GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+        .Cast<System.Reflection.AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "DcsVrCliPath")?.Value;
+    if (cli is null || !File.Exists(cli)) { Skip("the CLI built with the tests was not found (" + (cli ?? "no DcsVrCliPath") + ")"); return; }
+    // What the setup looks for in its log before it says "installed, but its shortcuts ... may be missing".
+    var setup = File.ReadAllText(Path.Combine(workspace, "native", "setup", "setup.cpp"));
+    var declared = System.Text.RegularExpressions.Regex.Match(setup, "constexpr char kPlacedLine\\[\\] = \"([^\"]+)\";");
+    Require(declared.Success && setup.Contains("ReadBytes(g_log, 1 << 16).find(kPlacedLine)"), "the setup decides by the program's line in this run's log");
+    var line = declared.Groups[1].Value;
+    (int Code, string Output, string Error) Install(string release, string destination)
+    {
+        var start = new ProcessStartInfo(cli) { UseShellExecute = false, RedirectStandardError = true, RedirectStandardOutput = true, CreateNoWindow = true };
+        foreach (var argument in new[] { "app-install", "--source", release, "--destination", destination }) start.ArgumentList.Add(argument);
+        using var process = Process.Start(start)!;
+        var error = process.StandardError.ReadToEndAsync(); var output = process.StandardOutput.ReadToEnd();
+        if (!process.WaitForExit(120000)) { process.Kill(true); throw new Exception("app-install timed out"); }
+        return (process.ExitCode, output, error.Result);
+    }
+    var release = ReleaseFixture("placed-line", "9.9.9", "one"); var destination = Path.Combine(root, "placed-line-installed");
+    var first = Install(release, destination);
+    Require(first.Code == 0 && first.Output.Contains(line), "the program says when the files are in place: " + first.Output + first.Error);
+    // The same version again over a file changed since: refused before anything is written. The ledger already names
+    // this version, and the line is not there.
+    File.AppendAllText(Path.Combine(destination, "readme.txt"), "edited");
+    var refused = Install(release, destination);
+    Require(refused.Code == 1 && !refused.Output.Contains(line) && !refused.Error.Contains(line) && refused.Error.Contains("Modified or missing application file retained")
+        && File.ReadAllText(Path.Combine(destination, "installation.json")).Contains("9.9.9"), refused.Output + refused.Error);
+});
 Test("A setup that was ended leaves its unpacked package in the temporary folder: old ones are removed, nothing else", () =>
 {
     var temp = Path.Combine(root, "updates/setup-leftovers"); var now = new DateTimeOffset(2026, 11, 16, 12, 0, 0, TimeSpan.Zero);
