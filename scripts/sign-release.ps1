@@ -1,6 +1,6 @@
 # Signs release files with the release key: <file>.sig next to each, the base64 of an ECDSA P-256 / SHA-256 signature of
 # the whole file in IEEE P1363 form (r and s, 32 bytes each). DCS Control's updater (src/DcsVr.Core/Updates.cs) and
-# scripts/verify-web-release.py check it with the public key embedded in the app. The private key stays in
+# scripts/verify-release-archives.ps1 check it with the public key embedded in the app. The private key stays in
 # %USERPROFILE%\.dcs-control-signing and is only read here; it is never copied anywhere.
 param([Parameter(Mandatory)][string[]]$Files, [switch]$Required, [string]$KeyFile = (Join-Path $env:USERPROFILE '.dcs-control-signing\release-signing-key.pem'))
 $ErrorActionPreference = 'Stop'

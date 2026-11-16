@@ -24,8 +24,8 @@ function Write-Sha256Sidecar([string]$Path) {
 $dotnet = Join-Path $workspaceRoot '.tools/dotnet/dotnet.exe'
 $version = & (Join-Path $PSScriptRoot 'version.ps1')
 $releaseRoot = Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-win-x64"
-# The user's real DCS settings are hashed before the pipeline; verify-web-release.py checks that nothing in
-# building, testing or verifying the release changed them. A profile the user applied earlier is fine.
+# The pilot's real DCS settings are hashed before the pipeline; test-release.ps1 reports a difference at its end (and
+# fails on a change during its own run). A profile applied since, or a flight, changes them too.
 $actualDcs = @{}; foreach ($name in 'options.lua','autoexec.cfg') { $file = Join-Path $env:USERPROFILE "Saved Games/DCS/Config/$name"; if (Test-Path -LiteralPath $file) { $actualDcs[$file] = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash } }
 New-Item -ItemType Directory -Path (Join-Path $workspaceRoot 'artifacts/release') -Force | Out-Null
 $actualDcs | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $workspaceRoot 'artifacts/fps-actual-before.json') -Encoding utf8

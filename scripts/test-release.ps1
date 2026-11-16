@@ -9,6 +9,8 @@ $fixtureRoot=Join-Path $workspaceRoot 'artifacts/release-tests/latest'
 if(Test-Path -LiteralPath $fixtureRoot){Remove-Item -LiteralPath $fixtureRoot -Recurse -Force}
 $installRoot=Join-Path $fixtureRoot 'installed-app'
 New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
+# The pilot's own DCS settings on this PC: hashed now and compared at the end. Nothing in a release test may change them.
+$pilotSettings=@{}; foreach($name in 'options.lua','autoexec.cfg'){ $file=Join-Path $env:USERPROFILE "Saved Games/DCS/Config/$name"; if(Test-Path -LiteralPath $file){ $pilotSettings[$file]=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash } }
 $cli=Join-Path $releaseRoot 'files/DcsVr.Cli.exe'
 & $cli app-verify --source $releaseRoot
 if($LASTEXITCODE -ne 0){throw 'Payload verification failed.'}
@@ -197,6 +199,20 @@ try{
     $uninstallProcess.Dispose(); Remove-Item -LiteralPath $uninstallCopy -Force
     if((Test-Path -LiteralPath $setupRoot) -or (Test-Path -LiteralPath (Join-Path $setupMenu 'DCS Control.lnk')) -or (Test-Path -LiteralPath (Join-Path $setupDesktop 'DCS Control.lnk')) -or (Test-Path -LiteralPath $setupKey)){throw 'Uninstall left the installation folder, a shortcut or the Apps & features entry.'}
 } finally { Remove-Item -LiteralPath $setupKeyRoot -Recurse -Force -ErrorAction SilentlyContinue }
-$result=@{passed=$true;fixtureRoot=$fixtureRoot;previousReleaseUpgradeChecked=$upgradeChecked;setupChecked=$true;webViewChecks=$guiChecks.count;webViewRenders=$guiRenders.Count;neuralDeploymentCases=@($cases | Where-Object neural).Count;checks=@('release hashes','Windows PowerShell frontend','self-contained install','repeat install/update','installed CLI','actual WebView2 interaction and native bridge checks','Pimax and Sboys combined apply, apply over, back to stock DCS','optional signed NR hash and tuning deployment','installed launch contract without executing DCS','changed external runtime rejection','tampered focus adapter rejection','owned-file uninstall','unowned-file retention')}
+# Last, the files that get published (scripts/verify-release-archives.ps1): no private key and no user profile path in
+# the release ZIP or the sources ZIP, the setup carries exactly this ZIP, both signatures verify, and the sources ZIP
+# (when there is one) is this checkout.
+$archives=& (Join-Path $PSScriptRoot 'verify-release-archives.ps1')
+# The pilot's own DCS settings are as they were when this run began (DCS itself rewrites options.lua when it runs:
+# a flight during the run also ends here).
+foreach($file in $pilotSettings.Keys){ if(-not (Test-Path -LiteralPath $file) -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $pilotSettings[$file]){throw "The pilot's own DCS settings changed during the release test: $file"} }
+# And against what build-release.ps1 recorded before it built: a difference is reported, not failed (a profile applied
+# or a flight since the build changes them too).
+$buildBaseline=Join-Path $workspaceRoot 'artifacts/fps-actual-before.json'
+if(Test-Path -LiteralPath $buildBaseline){
+    $recordedSettings=Get-Content -LiteralPath $buildBaseline -Raw | ConvertFrom-Json -AsHashtable
+    foreach($file in $recordedSettings.Keys){ if(-not (Test-Path -LiteralPath $file) -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $recordedSettings[$file]){Write-Warning "Changed since build-release.ps1 ran (by you, by DCS, or by the build): $file"} }
+}
+$result=@{passed=$true;fixtureRoot=$fixtureRoot;previousReleaseUpgradeChecked=$upgradeChecked;setupChecked=$true;archives=$archives;pilotSettingsUnchanged=@($pilotSettings.Keys);webViewChecks=$guiChecks.count;webViewRenders=$guiRenders.Count;neuralDeploymentCases=@($cases | Where-Object neural).Count;checks=@('release hashes','Windows PowerShell frontend','self-contained install','repeat install/update','installed CLI','actual WebView2 interaction and native bridge checks','Pimax and Sboys combined apply, apply over, back to stock DCS','optional signed NR hash and tuning deployment','installed launch contract without executing DCS','changed external runtime rejection','tampered focus adapter rejection','owned-file uninstall','unowned-file retention')}
 $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $fixtureRoot 'result.json') -Encoding utf8
 Write-Output "PASS release fixture: $fixtureRoot"

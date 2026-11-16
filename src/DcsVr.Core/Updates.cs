@@ -77,7 +77,7 @@ public sealed partial class Updates
     public const string ReleasesUrl = "https://api.github.com/repos/NIGos/dcs-control/releases?per_page=10";
     public const string ReleasesPage = "https://github.com/NIGos/dcs-control/releases";
     /// <summary>The public half of the release signing key. scripts/sign-release.ps1 signs each release's setup and ZIP with
-    /// the private half, which never leaves the release machine; scripts/verify-web-release.py reads this constant.</summary>
+    /// the private half, which never leaves the release machine; scripts/verify-release-archives.ps1 reads this constant.</summary>
     public const string PublicKeyPem = """
         -----BEGIN PUBLIC KEY-----
         MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0Q3e8ZCEM8wmZQ0j37ewqUQu+bJY

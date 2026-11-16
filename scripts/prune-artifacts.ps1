@@ -2,7 +2,7 @@
 # Frees space under artifacts/. Run by hand; by default it only lists what would go (and the size), -Apply does it.
 # - artifacts/release: keeps the newest 3 releases (each one's folder, ZIPs, setup, checksums and signatures) and the
 #   older releases the release checks read: 0.3.0 (test-release.ps1's upgrade fixture) and 0.2.3
-#   (verify-web-release.py's unchanged-components baseline).
+#   (the oldest published package, once the baseline of a check that no longer exists; kept as the record).
 # - artifacts/dcsqvcull-snap-r*: keeps the newest 5 vendoring snapshots.
 # - artifacts/web-ui: keeps the newest 5 interface render folders.
 # - loose *.log files in artifacts/ move to artifacts/logs/ (nothing deleted).

@@ -1,6 +1,6 @@
 # Offline validation evidence
 
-> **Historical record.** This page keeps the evidence of earlier releases (0.2-0.4), including screens and counts that have changed since. The current checks run in `scripts/test-release.ps1` and `scripts/verify-web-release.py`.
+> **Historical record.** This page keeps the evidence of earlier releases (0.2-0.4), including screens and counts that have changed since. The current checks run in `scripts/test-release.ps1`, which ends with `scripts/verify-release-archives.ps1`.
 
 ## Frame pacing and FPS limiter verification (0.4.1, 3 October 2026)
 
