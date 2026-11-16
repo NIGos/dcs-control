@@ -85,6 +85,12 @@ $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
 $trimProps = Join-Path $workspaceRoot 'artifacts/native/quadviews-trimfile.props'
 New-Item -ItemType Directory -Path (Split-Path -Parent $trimProps) -Force | Out-Null
 [IO.File]::WriteAllText($trimProps, "<Project><ItemDefinitionGroup><ClCompile><AdditionalOptions>%(AdditionalOptions) &quot;/d1trimfile:$([Security.SecurityElement]::Escape($repoRoot))&quot; /Brepro</AdditionalOptions></ClCompile><Link><AdditionalOptions>%(AdditionalOptions) /PDBALTPATH:%25_PDB%25 /Brepro</AdditionalOptions><LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration></Link></ItemDefinitionGroup></Project>")
+# The intermediate folder goes first, by this script and not by MSBuild. Rebuild starts with a Clean, and MSBuild's
+# Clean deletes the files its state in obj (the *.write.1.tlog lists) names by ABSOLUTE path. In a checkout that was
+# copied from another place with its obj folder, those are the other checkout's outputs: on 2026-11-16 a build in a
+# copy deleted the original's DLL and objects that way. With obj gone the Clean has no list and the build is a full one.
+$quadIntermediate = Join-Path $quadRoot 'obj'
+if (Test-Path -LiteralPath $quadIntermediate) { Remove-Item -LiteralPath $quadIntermediate -Recurse -Force }
 & (Join-Path $PSScriptRoot 'msvc.cmd') msbuild "$quadRoot/openxr-api-layer/openxr-api-layer.vcxproj" /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v145 /p:SolutionName=XR_APILAYER_MBUCCHIA_quad_views_foveated "/p:SolutionDir=$solutionDir" "/p:ForceImportBeforeCppTargets=$trimProps" /m:4 /verbosity:minimal
 if ($LASTEXITCODE -ne 0) { throw 'Quad Views build failed.' }
 $builtDll = Join-Path $quadRoot 'bin/x64/Release/XR_APILAYER_MBUCCHIA_quad_views_foveated.dll'
