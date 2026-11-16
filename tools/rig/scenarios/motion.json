@@ -1,0 +1,70 @@
+{
+  "name": "motion",
+  "status": "ready",
+  "neverRun": true,
+  "measures": "Scenario 5, content motion and cadence changes (terrain flow; the mission opens the F10 map at mission time 60-87 s, which forces 1X and back). Capture before the map, in it, and 20 s after it: the synthetic sits at the cadence fraction of the real-to-real motion (1/2; 1/3 and 2/3) within 0.15, in both layers; layer mismatch on synthetics <= 1.5 x real; at 1X every submission is a real one (no synthetic swapchain); duplicates. Flight log, outside the capture windows: repeats per second, presenter_transition 406, late first synthetics, against the twin (VERIFY-0.6.7's open defect: 39-41 fps for a minute after 1X -> 2X).",
+  "cannotJudge": "The true interpolation error (DCS gives no in-between frame: use the chain probe with the capture layer for that). Judder as seen. Inside a capture window the pacing is the capture's own: read cadence numbers only outside the windows.",
+  "mission": "qvbench_i23_f16_ap_map.miz",
+  "seconds": 150,
+  "arms": [
+    {
+      "name": "2x",
+      "profileOverrides": {
+        "frameGenFactor": 2
+      }
+    },
+    {
+      "name": "3x",
+      "profileOverrides": {
+        "frameGenFactor": 3
+      }
+    },
+    {
+      "name": "auto",
+      "profileOverrides": {
+        "frameGenFactor": 0
+      }
+    }
+  ],
+  "profileOverrides": {},
+  "ofxr": {},
+  "diagnostics": {},
+  "quadviews": {},
+  "windowAtOrigin": false,
+  "schedule": [
+    {
+      "at": 8,
+      "do": "recenter"
+    },
+    {
+      "at": 13,
+      "do": "shot",
+      "name": "cockpit"
+    },
+    {
+      "at": 30,
+      "do": "capture",
+      "frames": 40,
+      "tag": "flow"
+    },
+    {
+      "at": 70,
+      "do": "capture",
+      "frames": 20,
+      "scale": 2,
+      "tag": "map"
+    },
+    {
+      "at": 107,
+      "do": "capture",
+      "frames": 40,
+      "tag": "after-map"
+    }
+  ],
+  "verdict": {
+    "crops": []
+  },
+  "sideEffects": [
+    "three capture windows: 1.6 + 0.2 + 1.6 GB per flight at the flown sizes"
+  ]
+}

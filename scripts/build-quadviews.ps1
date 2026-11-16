@@ -1,4 +1,9 @@
 #Requires -Version 7
+# -LocalOnly '<why>': a build for this machine only. When one of the tests that follow the build fails, the build ends
+# with a local-only stamp carrying <why> and the failure, instead of stopping without one. build-release.ps1 refuses a
+# local-only stamp (scripts/build-stamp.ps1), so nothing built this way can be published. The build itself and the
+# check of the DLL's content must still pass. When everything passes the stamp is a full one, -LocalOnly or not.
+param([string]$LocalOnly)
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $quadRoot = Join-Path $workspaceRoot 'external/quadviews'
@@ -789,7 +794,15 @@ $quotedProject = [regex]::Replace($projectText, '(?s)<Command>.*?</Command>', {
     # A quoted file in "for /f ... in (...)" is a string unless usebackq is set.
     $text.Replace('for /f "delims== tokens=1,2" %%G in ("', 'for /f "usebackq delims== tokens=1,2" %%G in ("')
 })
-if ($quotedProject -ne $projectText) { [IO.File]::WriteAllText($projectSource, $quotedProject) }
+# The sources were reset to the pin above, so there is always something to quote here. Nothing quoted, or the
+# version loop not found in the form the replace expects, means upstream's steps changed: stop, rather than build with
+# a path quoted without usebackq (the loop would read the path as a string and leave the version variables empty).
+$commandsOf = { param($text) ([regex]::Matches($text, '(?s)<Command>.*?</Command>') | ForEach-Object Value) -join "`n" }
+if ($quotedProject -eq $projectText) { throw 'Quad Views project changed: no unquoted $(SolutionDir)/$(ProjectDir)/$(OutDir) path found in its <Command> blocks.' }
+$quotedCommands = & $commandsOf $quotedProject
+if (-not $quotedCommands.Contains('for /f "usebackq delims== tokens=1,2" %%G in ("')) { throw 'Quad Views project changed: the version.info "for /f" loop was not found, so usebackq was not set.' }
+if ([regex]::IsMatch($quotedCommands, 'for /f (?!"usebackq )[^\r\n]*? in \("')) { throw 'Quad Views project changed: a "for /f" loop reads a quoted file without usebackq.' }
+[IO.File]::WriteAllText($projectSource, $quotedProject)
 $layerText = [IO.File]::ReadAllText($layerSource)
 if (-not $layerText.Contains('DCSVR periphery stability')) {
     $nl = if ($layerText.Contains("`r`n")) { "`r`n" } else { "`n" }
@@ -3127,7 +3140,14 @@ New-Item -ItemType Directory -Path (Split-Path -Parent $trimProps) -Force | Out-
 & (Join-Path $PSScriptRoot 'msvc.cmd') msbuild "$quadRoot/openxr-api-layer/openxr-api-layer.vcxproj" /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v145 /p:SolutionName=XR_APILAYER_MBUCCHIA_quad_views_foveated "/p:SolutionDir=$solutionDir" "/p:ForceImportBeforeCppTargets=$trimProps" /m:4 /verbosity:minimal
 if ($LASTEXITCODE -ne 0) { throw 'Quad Views build failed.' }
 $builtDll = Join-Path $quadRoot 'bin/x64/Release/XR_APILAYER_MBUCCHIA_quad_views_foveated.dll'
-if ((Test-Path $builtDll) -and [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($builtDll)).IndexOf($repoRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0) { throw "The Quad Views DLL still contains $repoRoot." }
+if (-not (Test-Path -LiteralPath $builtDll)) { throw "The Quad Views build left no DLL at ${builtDll}: its content cannot be checked." }
+# As 8-bit text and as UTF-16 (at both byte alignments): a wide string would hold the folder as well.
+$builtBytes = [IO.File]::ReadAllBytes($builtDll)
+foreach ($builtText in @([Text.Encoding]::ASCII.GetString($builtBytes), [Text.Encoding]::Unicode.GetString($builtBytes), [Text.Encoding]::Unicode.GetString($builtBytes, 1, $builtBytes.Length - 1))) {
+    if ($builtText.IndexOf($repoRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0) { throw "The Quad Views DLL still contains $repoRoot." }
+}
+. (Join-Path $PSScriptRoot 'build-stamp.ps1')
+try {
 # The composition with our performance edits against the same shaders without them, on this machine's GPU (WARP
 # without one): every pixel identical for the round and rectangular focus area, with and without sharpening. With Far
 # depth built in, the composition with its constants at 0 (and a field bound that must not be read) against the shader
@@ -3163,5 +3183,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Perception test failed.' }
 # Half-size images and the GPU cost reported, not asserted: this build is also run with DCS flying, where timings say
 # nothing about the code (scripts/build-depthwarp-test.ps1 -Perf asserts them on an idle GPU).
 & (Join-Path $PSScriptRoot 'build-depthwarp-test.ps1') -Quick
+} catch {
+    # Without -LocalOnly a failed test stops the build as before. With it: the first failure ends the tests (the ones
+    # after it did not run) and the stamp says so.
+    if (-not $LocalOnly) { throw }
+    Write-Host "Quad Views test failed: $($_.Exception.Message)"
+    Save-BuildStamp 'quadviews' -LocalOnly "$LocalOnly (failed: $($_.Exception.Message))"
+    return
+}
 # Built and tested: build-release.ps1 ships this DLL only while its sources match this stamp.
-. (Join-Path $PSScriptRoot 'build-stamp.ps1'); Save-BuildStamp 'quadviews'
+Save-BuildStamp 'quadviews'

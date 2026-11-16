@@ -1,7 +1,7 @@
 """Generates src/hook_sigs.h: the runtime signatures of the DCS locations the
 production hooks use (src/reloc.h resolves them when DCS moved them).
 
-    python tools/gen_hook_sigs.py [--dcs-bin DIR] [--manifest FILE] [--out FILE] [--check]
+    python tools/gen_hook_sigs.py [--dcs-bin DIR] [--manifest FILE] [--out FILE] [--check] [--allow-older]
 
 Inputs: tools/hooks_manifest.json (patterns, RTTI names, import/export names,
 FNV checks) and the DCS binaries the manifest was derived from (read only;
@@ -32,6 +32,12 @@ targets up by name and need no entry.
 --check only verifies: src/hook_sigs.h is up to date, and every
 reloc::Rva / reloc::CodeIs use in src/ passes the value the table records.
 Exit code 1 on any difference.
+
+Guard: a manifest that records an OLDER DCS build than the existing
+src/hook_sigs.h (a module's timestamp in `dcs_build` below the one in the
+header's kModules) is refused, so the header is never regenerated backwards
+from a stale manifest. Run tools/extract_manifest.py first (it rewrites the
+manifest for the installed DCS); --allow-older is for going back on purpose.
 """
 from __future__ import annotations
 
@@ -501,6 +507,22 @@ def check_sources(src_dir, locs, hashes):
     return errors, uses
 
 
+def older_than_header(manifest: dict, header_text: str) -> list[str]:
+    """Modules whose DCS build in the manifest is older than the one the
+    existing header was generated for (PE timestamps, compared as numbers)."""
+    have = {m.group(1): int(m.group(2), 16)
+            for m in re.finditer(r'\{L"([^"]+)",\s*0x([0-9a-fA-F]+)u,\s*0x[0-9a-fA-F]+u\}', header_text)}
+    older = []
+    for module, rec in sorted(manifest.get("dcs_build", {}).items()):
+        try:
+            stamp = int(str(rec.get("timestamp", "")), 16)
+        except ValueError:
+            continue
+        if module in have and stamp < have[module]:
+            older.append(f"{module}: manifest 0x{stamp:08x} < header 0x{have[module]:08x}")
+    return older
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dcs-bin")
@@ -508,10 +530,23 @@ def main():
     ap.add_argument("--src", default=os.path.join(HERE, "..", "src"))
     ap.add_argument("--out", default=None, help="default: <src>/hook_sigs.h")
     ap.add_argument("--check", action="store_true", help="verify only; write nothing")
+    ap.add_argument("--allow-older", action="store_true",
+                    help="write the header even when the manifest records an older DCS build than the header has")
     a = ap.parse_args()
     out = a.out or os.path.join(a.src, "hook_sigs.h")
     with open(a.manifest, encoding="utf-8") as f:
         manifest = json.load(f)
+    # Before anything is read from DCS or written: never regenerate backwards.
+    if os.path.isfile(out) and not a.allow_older:
+        with open(out, encoding="utf-8") as f:
+            older = older_than_header(manifest, f.read())
+        if older:
+            for x in older:
+                print("ERROR " + x)
+            print(f"ERROR {os.path.relpath(a.manifest)} records an older DCS build than {os.path.relpath(out)}: "
+                  "the manifest is stale. Run tools/extract_manifest.py against the installed DCS first; "
+                  "nothing was written (--allow-older to go back on purpose).")
+            sys.exit(1)
     g = Gen(manifest, dcs_sig.dcs_bin_dir(a.dcs_bin))
     text, locs, hashes = g.render()
     errors = list(g.errors)
