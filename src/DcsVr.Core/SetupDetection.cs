@@ -157,7 +157,7 @@ public static class SetupDetection
             Set("quadEdgeBlend", "Edge blending", Format(profile.QuadEdgeBlend), c.Transition ? "Pimax Transition Mode is " + quad.Play.TransitionMode + "; this profile's blending is kept" : "Pimax Transition Mode is Off");
             notes.AddRange(PimaxFovea.Notes(quad));
             if (profile.Gaze == GazeMode.Fixed && (profile.FoveaWidth < .45 || profile.FoveaHeight < .55))
-                notes.Add("Pimax's focus region assumes eye tracking. With a fixed focus, about Horizontal FOV 45% and Vertical FOV 55% (Pimax Quick units, a focus of 0.45 × 0.55 of the view) keeps instruments sharp.");
+                notes.Add("Pimax's focus region assumes eye tracking. With a fixed focus, a focus area of about 45% × 55% of the view keeps instruments sharp (Horizontal FOV 55% and Vertical FOV 45% in Pimax Play's Quick mode, or 45% and 55% with Set here).");
         }
 
         if (ControlService.UsesSavedRuntime(profile))
