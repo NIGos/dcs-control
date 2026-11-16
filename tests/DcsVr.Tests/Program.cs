@@ -1101,7 +1101,7 @@ Test("Per-process OpenXR environment reaches child, parent unchanged", () =>
 Test("Unsigned malformed DLL rejected", () => { var path = Make("binary/fake.dll", "MZ"); var v = NativeBinary.Inspect(path); Require(!v.IsX64 && !v.TrustedSignature); });
 Test("Installed NVIDIA DLSS signature checked offline", () =>
 {
-    var inv = new WindowsInventory().Capture(); if (inv.DcsExecutable is null) return;
+    var inv = new WindowsInventory().Capture(); if (inv.DcsExecutable is null) { Skip("no DCS installed on this PC"); return; }
     var v = NativeBinary.Inspect(Path.Combine(Path.GetDirectoryName(inv.DcsExecutable)!, "nvngx_dlss.dll")); Require(v.IsX64); Require(v.TrustedSignature); Require(NativeBinary.IsNvidiaSigner(v.Signer));
 });
 Test("Baseline and framegen installation in isolated DCS fixture", () =>
