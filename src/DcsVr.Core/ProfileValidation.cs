@@ -57,7 +57,7 @@ public static class ProfileValidation
         if (string.IsNullOrWhiteSpace(profile.Id) || profile.Id.Length > 80 || profile.Id.Any(c => !char.IsAsciiLetterOrDigit(c) && c != '-'))
             Error("profile-id", "Profile ID must contain letters, numbers, or hyphens.");
         if (string.IsNullOrWhiteSpace(profile.Name) || profile.Name.Length > 120) Error("profile-name", "Enter a name of at most 120 characters.");
-        if (!Enum.IsDefined(profile.Runtime) || !Enum.IsDefined(profile.QuadViews) || !Enum.IsDefined(profile.FrameGen) || !Enum.IsDefined(profile.Gaze) || !Enum.IsDefined(profile.Tracking))
+        if (!Enum.IsDefined(profile.Runtime) || !Enum.IsDefined(profile.QuadViews) || !Enum.IsDefined(profile.FrameGen) || !Enum.IsDefined(profile.Gaze))
             Error("enum", "The profile contains an unrecognized choice.");
         Range("fovea-width", profile.FoveaWidth, .1, 1);
         Range("fovea-height", profile.FoveaHeight, .1, 1);

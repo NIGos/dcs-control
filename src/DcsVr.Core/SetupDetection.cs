@@ -96,7 +96,6 @@ public static class SetupDetection
         var tracking = active.Tracking != TrackingKind.Unknown ? active.Tracking : inventory.Tracking;
         if (tracking != TrackingKind.Unknown)
         {
-            profile = profile with { Tracking = tracking };
             Set("tracking", "Headset tracking", tracking == TrackingKind.Slam ? "SLAM (Pimax EVO)" : "Lighthouse",
                 active.Tracking != TrackingKind.Unknown ? "Sboys headset serial in the SteamVR log" : "Detected installation");
         }

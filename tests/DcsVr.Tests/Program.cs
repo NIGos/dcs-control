@@ -1119,7 +1119,7 @@ Test("Software Quad Views plus framegen deploys per-process configuration", () =
 {
     var exe = Make("software-quad/bin/DCS.exe", "fixture"); var options = Make("software-quad/options.lua", Lua); var runtime = Make("software-quad/runtime.json", "{\"runtime\":{\"library_path\":\"runtime.dll\"}}"); Make("software-quad/runtime.dll", "fixture");
     var ofxr = new ComponentCache(Path.Combine(root, "software-quad/cache")).Import(PackageCatalog.Get("ofxr"), Path.Combine(workspace, ".cache/packages", PackageCatalog.Get("ofxr").ArchiveName));
-    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Tracking = TrackingKind.Lighthouse, QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Nvidia, Gaze = GazeMode.Fixed };
+    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Nvidia, Gaze = GazeMode.Fixed };
     var inv = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, SteamVrRuntime = runtime };
     var quadPlanner = new DeploymentPlanner(new(ofxr, null, null, Path.Combine(workspace, "external/quadviews/bin/x64/Release"), OfxrLayerDll: DeferredOfxr));
     var plan = quadPlanner.Build(p, inv, Path.Combine(root, "software-quad/managed"));
@@ -2717,27 +2717,27 @@ Test("Driver checks distinguish registration, missing DLL and SteamVR blocking",
 });
 Test("Readiness rejects absent Sboys registration and gaze instead of claiming success", () =>
 {
-    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, Tracking = TrackingKind.Lighthouse };
+    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated };
     var report = Readiness.Check(p, new(), new ControlService(root, Path.Combine(root, "readiness-missing/state")));
     Require(!report.CanPrepare && report.Checks.Any(c => c.Id == "sboys-registration" && c.State == CheckState.Error) && report.Checks.Any(c => c.Id == "gaze-bridge" && c.State == CheckState.Error));
 });
 Test("Readiness accepts registered driver and enabled gaze DLL as file facts only", () =>
 {
     var dll = Path.Combine(workspace, "artifacts/native/cheeky/bin/Release/CheekyOpenXRLayer.dll");
-    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, Tracking = TrackingKind.Slam };
+    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated };
     var report = Readiness.Check(p, new() { Drivers = [new("CustomHeadsetOpenVR", root, true, false)], Layers = [new("Fixture", Make("readiness-present/gaze.json", "{\"file_format_version\":\"1.0.0\",\"api_layer\":{\"name\":\"XR_APILAYER_MBUCCHIA_eye_trackers\",\"library_path\":\"x.dll\",\"api_version\":\"1.0\",\"disable_environment\":\"DISABLE_XR_APILAYER_MBUCCHIA_eye_trackers\"}}"), true, "XR_APILAYER_MBUCCHIA_eye_trackers", dll, true)] }, new ControlService(root, Path.Combine(root, "readiness-present/state")));
     Require(report.Checks.Single(c => c.Id == "sboys-registration").State == CheckState.Pass && report.Checks.Single(c => c.Id == "gaze-bridge").State == CheckState.Pass);
     Require(report.Checks.All(c => c.Id != "sboys-tracking")); // tracking does not change deployment
 });
 Test("Readiness rejects a Sboys beta driver when preparing the pinned release", () =>
 {
-    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Gaze = GazeMode.Fixed, Tracking = TrackingKind.Lighthouse };
+    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Gaze = GazeMode.Fixed };
     var report = Readiness.Check(p, new() { Drivers = [new("CustomHeadsetOpenVR", root, true, false, "1.3.0-beta.2")] }, new ControlService(root, Path.Combine(root, "readiness-beta/state")));
     Require(report.Checks.Single(c => c.Id == "sboys-version").State == CheckState.Error && !report.CanPrepare);
 });
 Test("Fixed focus avoids a gaze dependency without silently switching mode", () =>
 {
-    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Gaze = GazeMode.Fixed, Tracking = TrackingKind.Lighthouse };
+    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Gaze = GazeMode.Fixed };
     var report = Readiness.Check(p, new(), new ControlService(root, Path.Combine(root, "readiness-fixed/state")));
     Require(report.Checks.All(c => c.Id != "gaze-bridge") && p.Gaze == GazeMode.Fixed);
 });
@@ -2802,7 +2802,7 @@ Test("Profiles saved with settings that no longer exist still load", () =>
 {
     // Earlier versions saved self-reported limiters, an experimental consent and a Sboys folder; scripts may still send them.
     var profile = ProfilePresets.All[1];
-    var obsolete = "\"externalLimiter\": \"Active\", \"externalLimiterFps\": 30, \"runtimeReprojection\": \"Off\", \"experimentalAcknowledged\": true, \"sboysDriverDirectory\": \"C:\\\\Sboys\", \"ExperimentalAcknowledged\": false, ";
+    var obsolete = "\"externalLimiter\": \"Active\", \"externalLimiterFps\": 30, \"runtimeReprojection\": \"Off\", \"experimentalAcknowledged\": true, \"sboysDriverDirectory\": \"C:\\\\Sboys\", \"ExperimentalAcknowledged\": false, \"tracking\": \"Slam\", ";
     var json = JsonData.Serialize(profile).Insert(1, obsolete);
     Require(JsonData.Deserialize<VrProfile>(json) == profile, "profile.json");
     var draft = new SavedDraft(profile, null, null, DateTimeOffset.UnixEpoch);
@@ -2976,7 +2976,7 @@ Test("Sboys gaze bridge loads explicitly below Quad Views", () =>
     Make("gaze-order/gaze/eye.dll", "fixture");
     var manifest = Make("gaze-order/gaze/eye.json", "{\"file_format_version\":\"1.0.0\",\"api_layer\":{\"name\":\"XR_APILAYER_MBUCCHIA_eye_trackers\",\"library_path\":\"eye.dll\",\"api_version\":\"1.0\",\"implementation_version\":\"1\",\"description\":\"fixture\",\"disable_environment\":\"DISABLE_XR_APILAYER_MBUCCHIA_eye_trackers\"}}");
     var ofxr = new ComponentCache(Path.Combine(root, "gaze-order/cache")).Import(PackageCatalog.Get("ofxr"), Path.Combine(workspace, ".cache/packages", PackageCatalog.Get("ofxr").ArchiveName));
-    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Tracking = TrackingKind.Lighthouse, QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Nvidia, Gaze = GazeMode.EyeTracked };
+    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Nvidia, Gaze = GazeMode.EyeTracked };
     var inv = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, SteamVrRuntime = runtime, Layers = [new("CurrentUser", manifest, true, "XR_APILAYER_MBUCCHIA_eye_trackers", Path.Combine(root, "gaze-order/gaze/eye.dll"), true)] };
     var plan = new DeploymentPlanner(new(ofxr, null, null, Path.Combine(workspace, "external/quadviews/bin/x64/Release"), OfxrLayerDll: DeferredOfxr)).Build(p, inv, Path.Combine(root, "gaze-order/managed"));
     Require(plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"] == "XR_APILAYER_MBUCCHIA_quad_views_foveated;XR_APILAYER_XRFrameBridge_diagnostic;XR_APILAYER_MBUCCHIA_eye_trackers");
@@ -2988,7 +2988,7 @@ Test("Sboys gaze bridge loads explicitly below Quad Views", () =>
 Test("Readiness rejects a gaze bridge that cannot be reordered", () =>
 {
     var manifest = Make("gaze-unorderable/eye.json", "{\"file_format_version\":\"1.0.0\",\"api_layer\":{\"name\":\"XR_APILAYER_MBUCCHIA_eye_trackers\",\"library_path\":\"eye.dll\",\"api_version\":\"1.0\"}}");
-    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, Tracking = TrackingKind.Slam };
+    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated };
     var dll = Path.Combine(workspace, "artifacts/native/cheeky/bin/Release/CheekyOpenXRLayer.dll");
     var report = Readiness.Check(p, new() { Layers = [new("Fixture", manifest, true, "XR_APILAYER_MBUCCHIA_eye_trackers", dll, true), new("Fixture", "toolkit.json", true, "XR_APILAYER_NOVENDOR_toolkit", dll, true)] }, new ControlService(root, Path.Combine(root, "gaze-unorderable/state")));
     Require(report.Checks.Single(c => c.Id == "gaze-bridge").State == CheckState.Error);
@@ -3097,7 +3097,7 @@ Test("Restore removes declared component logs only, never other files", () =>
 });
 Test("Eye-tracked Sboys profile without a gaze bridge is flagged, not blocked", () =>
 {
-    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Tracking = TrackingKind.Lighthouse, QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked };
+    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked };
     var issues = ProfileValidation.Validate(p, new InventorySnapshot { DcsExecutable = "x", OptionsPath = "y", SteamVrRuntime = "z" });
     Require(issues.Single(i => i.Code == "gaze-bridge-missing").Severity == IssueSeverity.Warning);
     Require(!ProfileValidation.Validate(p with { Gaze = GazeMode.Fixed }, new InventorySnapshot { DcsExecutable = "x", OptionsPath = "y", SteamVrRuntime = "z" }).Any(i => i.Code == "gaze-bridge-missing"));
@@ -3111,7 +3111,7 @@ Test("INI comparison is section-aware and ignores trailing comments", () =>
 });
 Test("Sboys 1.3 provides eye gaze through SteamVR without a bridge", () =>
 {
-    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, Tracking = TrackingKind.Slam, Gaze = GazeMode.EyeTracked };
+    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked };
     InventorySnapshot With(string version) => new() { DcsExecutable = "x", OptionsPath = "y", SteamVrRuntime = "z", Drivers = [new("CustomHeadsetOpenVR", root, true, false, version)] };
     Require(GazeBridge.RuntimeProvidesGaze(With("1.3.0")) && GazeBridge.RuntimeProvidesGaze(With("1.4.1")));
     Require(!GazeBridge.RuntimeProvidesGaze(With("1.3.0-beta.2")) && !GazeBridge.RuntimeProvidesGaze(With("1.2.9")));
@@ -3136,7 +3136,7 @@ Test("Setup detection reads the Sboys route, tracking, gaze, refresh and Pimax Q
     var inventory = new InventorySnapshot { Drivers = [new("CustomHeadsetOpenVR", root, true, false, "1.3.0")] };
     var result = SetupDetection.Detect(ProfilePresets.All.Single(x => x.Id == "pimax-combined"), inventory, sources);
     var p = result.Profile;
-    Require(result.Active.Route == RuntimeKind.SboysSteamVr && p.Runtime == RuntimeKind.SboysSteamVr && p.Tracking == TrackingKind.Slam && p.Gaze == GazeMode.EyeTracked);
+    Require(result.Active.Route == RuntimeKind.SboysSteamVr && p.Runtime == RuntimeKind.SboysSteamVr && result.Detected.Any(d => d.Field == "tracking" && d.Value.StartsWith("SLAM", StringComparison.Ordinal)) && p.Gaze == GazeMode.EyeTracked);
     // Fine mode 33/10 → Center left and right, 33/33 top and bottom: a focus of the percentages Pimax Play shows, 0.43 × 0.66 at 1.125.
     Require(p.HeadsetRefreshHz == 72 && Math.Abs(p.QuadFocusScale - 1.125) < 1e-9 && Math.Abs(p.PeripheralScale - .198062) < 1e-9 && Math.Abs(p.FoveaWidth - .43) < 1e-9 && Math.Abs(p.FoveaHeight - .66) < 1e-9 && p.QuadEdgeBlend == .2);
     Require(p.FoveaSource == FoveaSource.PimaxPlay && p.Id == "pimax-combined" && result.Detected.Count >= 8); // identity is left to the interface's naming
@@ -3357,7 +3357,7 @@ Test("Sboys versions newer than 1.3.0 pass, betas do not", () =>
 {
     InventorySnapshot With(string version) => new() { Drivers = [new("CustomHeadsetOpenVR", root, true, false, version)] };
     var service = new ControlService(root, Path.Combine(root, "sboys-versions/state"));
-    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr, Tracking = TrackingKind.Slam };
+    var p = new VrProfile { Runtime = RuntimeKind.SboysSteamVr };
     Require(Readiness.Check(p, With("1.4.0"), service).Checks.Single(c => c.Id == "sboys-version").State == CheckState.Pass);
     Require(Readiness.Check(p, With("1.3.0-beta.2"), service).Checks.Single(c => c.Id == "sboys-version").State == CheckState.Error);
 });
@@ -4998,7 +4998,7 @@ VrProfile E2eB(string? neural) => ProfileValidation.ResolveFeatures(new VrProfil
 VrProfile E2eC(string? neural) => ProfileValidation.ResolveFeatures(E2eB(neural) with { Id = "e2e-c", Name = "C · optimizations only", Desktop = true });
 VrProfile E2eD() => ProfileValidation.ResolveFeatures(new VrProfile
 {
-    Id = "e2e-d", Name = "D · Sboys", Runtime = RuntimeKind.SboysSteamVr, Tracking = TrackingKind.Lighthouse, QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.Fixed,
+    Id = "e2e-d", Name = "D · Sboys", Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.Fixed,
     FrameGen = FrameGeneration.FidelityFx, SmallDcsWindow = true, FpsLimit = FpsLimitMode.Custom, RenderedFpsCap = 40, FoveaSource = FoveaSource.Profile, RefreshFromHeadset = false
 });
 Test("E2E: switching A, B, C, D, B and Back to stock DCS installs each plan exactly and leaves no trace", () =>

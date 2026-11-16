@@ -244,7 +244,6 @@ public sealed record VrProfile
     public string? NeuralRuntimePath { get; init; }
     public string? RuntimeManifestPath { get; init; }
     public string? QuadViewsLayerDirectory { get; init; }
-    public TrackingKind Tracking { get; init; }
     /// <summary>New profiles (presets, the checklist, Detect my setup) follow Pimax Play. A saved profile without this
     /// property predates it and always used its own values, so <see cref="JsonData"/> loads it as <see cref="FoveaSource.Profile"/>.</summary>
     public FoveaSource FoveaSource { get; init; } = FoveaSource.PimaxPlay;
@@ -662,9 +661,10 @@ public static class JsonData
     /// <summary>Settings earlier versions saved and this one no longer has: the self-reported limiter, its FPS and the
     /// runtime motion smoothing (preflight lists them as checks you do yourself), the experimental consent and the Sboys
     /// driver folder (the registered driver is used), and Depth boost's transition choice and its key (the dual camera
-    /// only moves the depth gradually). Dropped when a profile loads, in any casing.</summary>
+    /// only moves the depth gradually), and the headset tracking (detected, never a setting: it lives on the inventory).
+    /// Dropped when a profile loads, in any casing.</summary>
     private static readonly HashSet<string> ObsoleteProfileKeys = new(["externalLimiter", "externalLimiterFps", "runtimeReprojection",
-        "experimentalAcknowledged", "sboysDriverDirectory", "depthBoostTransition", "depthBoostTransitionKey"], StringComparer.OrdinalIgnoreCase);
+        "experimentalAcknowledged", "sboysDriverDirectory", "depthBoostTransition", "depthBoostTransitionKey", "tracking"], StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Reads a profile with the plain options, without the <see cref="ObsoleteProfileKeys"/> (unknown keys are
     /// refused), then marks a profile saved without "foveaSource" (written before the setting existed) as using its own
