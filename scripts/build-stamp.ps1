@@ -64,3 +64,18 @@ function Assert-BuildStampCurrent([string]$Name, [switch]$AllowLocalOnly) {
         Write-Warning "The prebuilt $Name component has a LOCAL-ONLY build stamp ($($recorded.LocalOnly)): this package is not for publishing."
     }
 }
+# The OFXR fork's patch set as one hash: every patch in patches/ofxr-djules75 by name, with LF line endings (a checkout
+# with core.autocrlf gives the same hash). scripts/build-ofxr-djules75.ps1 records it in the fork's .git folder when it
+# has applied the patches (Get-OfxrPatchMarkerPath); scripts/assert-components-current.ps1 compares the two before the
+# sources are packed. One function, so the two can never disagree about what "this patch set" is.
+function Get-OfxrPatchSetHash {
+    $patches = @(Get-ChildItem -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'patches/ofxr-djules75') -Filter '*.patch' -File | Sort-Object Name)
+    $text = ($patches | ForEach-Object { $_.Name + "`n" + [IO.File]::ReadAllText($_.FullName).Replace("`r`n", "`n") }) -join "`n"
+    return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($text)))
+}
+# Where the applied patch set is recorded: a file in the fork checkout's .git folder (never in its work tree).
+function Get-OfxrPatchMarkerPath([string]$ForkRoot) {
+    $gitDir = & git -C $ForkRoot rev-parse --absolute-git-dir
+    if ($LASTEXITCODE -ne 0 -or -not $gitDir) { throw "$ForkRoot is not a git checkout." }
+    return Join-Path $gitDir 'dcs-control-patches'
+}

@@ -8,15 +8,10 @@ $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'build-stamp.ps1')
 foreach ($component in @('quadviews', 'ofxr', 'cheeky')) { Assert-BuildStampCurrent $component }
-# The patch set, computed as build-ofxr-djules75.ps1 computes it: every patch by name, LF line endings.
-$forkRoot = Join-Path $workspaceRoot 'external/ofxr-djules75'
-$patches = @(Get-ChildItem -LiteralPath (Join-Path $workspaceRoot 'patches/ofxr-djules75') -Filter '*.patch' -File | Sort-Object Name)
-$sha = [Security.Cryptography.SHA256]::Create()
-$text = ($patches | ForEach-Object { $_.Name + "`n" + [IO.File]::ReadAllText($_.FullName).Replace("`r`n", "`n") }) -join "`n"
-$patchSet = [Convert]::ToHexString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))
-$gitDir = & git -C $forkRoot rev-parse --absolute-git-dir
-if ($LASTEXITCODE -ne 0) { throw 'external/ofxr-djules75 is not a git checkout.' }
-$marker = Join-Path $gitDir 'dcs-control-patches'
+# The patch set and the marker, by the functions build-ofxr-djules75.ps1 uses itself (scripts/build-stamp.ps1).
+$patches = @(Get-ChildItem -LiteralPath (Join-Path $workspaceRoot 'patches/ofxr-djules75') -Filter '*.patch' -File)
+$patchSet = Get-OfxrPatchSetHash
+$marker = Get-OfxrPatchMarkerPath (Join-Path $workspaceRoot 'external/ofxr-djules75')
 $recorded = if (Test-Path -LiteralPath $marker) { (Get-Content -LiteralPath $marker -Raw).Trim() } else { $null }
 if ($recorded -ne $patchSet) {
     throw "external/ofxr-djules75 does not carry the patches checked out here ($($patches.Count) in patches/ofxr-djules75). Run scripts/build-ofxr-djules75.ps1, then try again."

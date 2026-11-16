@@ -103,9 +103,10 @@ $normalizedPatches = @($forkPatches | ForEach-Object {
 # The patch set applied last is recorded in the fork's .git folder. When any patch changed since (an earlier one edited,
 # for example), the checkout goes back to the pinned sources and every patch is applied again: finding only the newest
 # applied patch would take an edited earlier one as applied and build stale code. Ignored files (external/openvr) stay.
-$patchSha = [Security.Cryptography.SHA256]::Create()
-$patchSet = [Convert]::ToHexString($patchSha.ComputeHash([Text.Encoding]::UTF8.GetBytes((($normalizedPatches | ForEach-Object { $_.Name + "`n" + [IO.File]::ReadAllText($_.FullName) }) -join "`n"))))
-$patchMarker = Join-Path (& git -C $forkRoot rev-parse --absolute-git-dir) 'dcs-control-patches'
+# The hash and the marker's place are shared with scripts/assert-components-current.ps1 (scripts/build-stamp.ps1).
+. (Join-Path $PSScriptRoot 'build-stamp.ps1')
+$patchSet = Get-OfxrPatchSetHash
+$patchMarker = Get-OfxrPatchMarkerPath $forkRoot
 $recordedSet = if (Test-Path -LiteralPath $patchMarker) { (Get-Content -LiteralPath $patchMarker -Raw).Trim() } else { $null }
 if ($recordedSet -and $recordedSet -ne $patchSet) {
     Write-Host 'OFXR fork patches changed since they were applied: starting again from the pinned sources.'
