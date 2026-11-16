@@ -333,10 +333,16 @@ Test("Leftovers: every component DCS Control shipped is known, so any version's 
     var known = Leftovers.KnownComponentHashes;
     Require(known.Count >= 60 && known.All(h => h.Length == 64 && h.All(Uri.IsHexDigit)), "The embedded list loads: " + known.Count);
     Require(known.Contains("d9401877c6609106bd0d121eed5c29ecc5261e2c99378b1321ee16ad19ad3b0c"), "The Cheeky loader of 0.2.3-0.6.2");
-    var components = Path.Combine(workspace, "artifacts/release");
-    var built = Directory.Exists(components) ? Directory.EnumerateFiles(components, "*.sha256", SearchOption.AllDirectories).Where(p => p.Replace('\\', '/').Contains("/components/")).ToArray() : [];
+    // This version's release folder only, when it was built here: packages of other versions and branches on disk do
+    // not decide the result. And only the components that can land in DCS's folders (the list build-release.ps1 records).
+    var components = Path.Combine(workspace, "artifacts/release", $"DcsControl-{ProductInfo.Version}-win-x64", "files", "components");
+    var recorded = Leftovers.RecordedComponentFolders;
+    var built = Directory.Exists(components)
+        ? Directory.EnumerateFiles(components, "*.sha256", SearchOption.AllDirectories).Where(p => recorded.Any(folder => Path.GetRelativePath(components, p).Replace(Path.DirectorySeparatorChar, '/').StartsWith(folder, StringComparison.OrdinalIgnoreCase))).ToArray() : [];
     var missing = built.Where(p => File.ReadAllText(p).Trim().Split(' ')[0] is { Length: 64 } h && !known.Contains(h)).ToArray();
     Require(missing.Length == 0, "Components built here but not in src/DcsVr.Core/KnownComponents.txt (scripts/build-release.ps1 adds them): " + string.Join(", ", missing.Take(5)));
+    var script = File.ReadAllText(Path.Combine(workspace, "scripts/build-release.ps1"));
+    Require(script.Contains("$recordedComponents = @(" + string.Join(", ", recorded.Select(folder => "'" + folder + "'")) + ")"), "build-release.ps1 records the same component folders as Leftovers.RecordedComponentFolders");
 });
 Test("Back to stock DCS with a lost record removes DCS Control's files in the DCS shown, and only there", () =>
 {

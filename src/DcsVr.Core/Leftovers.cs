@@ -21,6 +21,10 @@ public static class Leftovers
 {
     /// <summary>Hashes of every component file DCS Control has shipped (lower case).</summary>
     public static IReadOnlySet<string> KnownComponentHashes => Known.All;
+    /// <summary>The components/ folders whose files are installed in DCS's own folders (bin, Saved Games): the only
+    /// ones a release adds to KnownComponents.txt (scripts/build-release.ps1 holds the same list). Everything else is
+    /// installed under DCS Control's profile folder, where this list is never consulted.</summary>
+    public static IReadOnlyList<string> RecordedComponentFolders { get; } = ["cheeky/", "cheeky-focus/", "dcsqvcull/"];
     /// <summary>The shipped hashes that are byte-identical to Cheeky's public release: the components/cheeky files and
     /// cheeky-focus's loaders (dxgi.dll, the old version.dll) come straight from the pinned archive.</summary>
     public static IReadOnlySet<string> UpstreamHashes => Known.Upstream;

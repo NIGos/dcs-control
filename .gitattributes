@@ -7,3 +7,5 @@ scripts/*.py text eol=lf
 .githooks/* text eol=lf
 # C# raw string literals become generated config files: keep LF so the output does not depend on the checkout.
 *.cs text eol=lf
+# The list of shipped component hashes only ever gets lines added, on every branch that builds a release: keep both sides.
+src/DcsVr.Core/KnownComponents.txt merge=union

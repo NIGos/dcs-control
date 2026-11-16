@@ -2,6 +2,9 @@
 # An existing file with one of these hashes in DCS's folders is DCS Control's own, also when the record of
 # originals that listed it is gone: Back to stock DCS removes it (Leftovers.cs). scripts/build-release.ps1 adds the
 # hashes of each new build. Format: <sha256> <component> (<versions>)
+# From 0.6.7 on only cheeky/, cheeky-focus/ and dcsqvcull/ are added: the files that are installed in DCS's folders.
+# OFXR, Quad Views, pupil shift and CheekyOpenXRLayer.dll live in DCS Control's own profile folder, where this list is
+# not consulted; their earlier lines stay. Lines only ever get added, so branches merge with merge=union (.gitattributes).
 018b33d007caf4652e323a0b8a59d36418ffc504daae7bf86c16cff9fecd415c CheekyOpenXRLayer.dll (v0.6.2-preview)
 322e5cdc21d822185188052e0d8dca4fa6d4984b5c2178b5e2e9dce969ddbaf1 CheekyOpenXRLayer.dll (v0.2.3-preview, v0.3.0-preview)
 8b4acae672c14d2d7fb5a9b91844592f891951b4aa514c42219bd4f4ffde616d CheekyOpenXRLayer.dll (v0.6.0-preview, v0.6.1-preview)
