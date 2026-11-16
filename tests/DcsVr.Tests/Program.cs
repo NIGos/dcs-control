@@ -4487,6 +4487,25 @@ Test("Release notes: the section of the running version, from its heading to the
     var shipped = File.ReadAllText(Path.Combine(workspace, "docs/RELEASE_NOTES.md"));
     Require(Updates.ReleaseNotesSection(shipped, ProductInfo.Version) is { Length: > 100 }, "docs/RELEASE_NOTES.md has a section for " + ProductInfo.Version);
 });
+Test("The User Guide and the README name this version: the guide's version line, the newest New in, the downloads", () =>
+{
+    var version = ProductInfo.Version; var brief = ReleaseVersion.Parse(version)!.Short;
+    var guide = File.ReadAllText(Path.Combine(workspace, "docs/USER_GUIDE.md")); var readme = File.ReadAllText(Path.Combine(workspace, "README.md"));
+    var line = System.Text.RegularExpressions.Regex.Match(guide, @"\*\*Version ([0-9][^ ]*)");
+    Require(line.Success && line.Groups[1].Value == version, "docs/USER_GUIDE.md says Version " + line.Groups[1].Value + ", the product is " + version);
+    var newest = System.Text.RegularExpressions.Regex.Match(readme, @"\*\*New in ([0-9.]+):\*\*");
+    Require(newest.Success && newest.Groups[1].Value == brief, "README.md's first New in is " + newest.Groups[1].Value + ", the product is " + brief);
+    // Every setup and ZIP a pilot is told to download is this version's.
+    foreach (var (name, text) in new[] { ("docs/USER_GUIDE.md", guide), ("README.md", readme) })
+    {
+        var downloads = System.Text.RegularExpressions.Regex.Matches(text, @"`DcsControl-([0-9][^`]*?)-(Setup\.exe|win-x64\.zip)`").Select(m => m.Groups[1].Value).Where(v => !v.Contains('<')).ToArray();
+        Require(downloads.Length >= 2 && downloads.All(v => v == version), name + " names downloads of " + string.Join(", ", downloads.Distinct()) + ", the product is " + version);
+    }
+    // Not checked: the User Manual (PDF) link. The manual is made by hand for some releases only, so both files still
+    // link the 0.6.5 PDF; the test only makes sure they link the same one.
+    var manuals = System.Text.RegularExpressions.Regex.Matches(guide + readme, @"releases/download/v[^/]+/DcsControl-[0-9.]+-User-Manual\.pdf").Select(m => m.Value).Distinct().ToArray();
+    Require(manuals.Length == 1, "One User Manual link in the guide and the README: " + string.Join(", ", manuals));
+});
 Test("DLSS 5 focus: a central area is round with a round focus, and the focus preset reaches Cheeky", () =>
 {
     var focus = new VrProfile { NeuralRendering = true, QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, NeuralFocusArea = 90, FocusDlssPreset = 11 };
