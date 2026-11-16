@@ -1,0 +1,44 @@
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+index 2c7bf39..11176d3 100644
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -192,6 +192,9 @@ struct ConfiguredNvidiaOptions {
+ // such a frame behind its count (xrfg::latency::ReleaseOffsetGuard). On
+ // unless set to 0; nothing changes while every hold waits, at 3X, at 1X or
+ // under 0078's lead. Read once per session.
++// With the Smoothness buffer on it also refuses every step that raises the
++// offset while the buffer paces the application (record 805 about once a
++// second): a known limit, see xrfg::latency::ReleaseOffsetGuard.
+ [[nodiscard]] bool read_release_offset_guard(
+     const std::filesystem::path& module_directory) noexcept;
+ 
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+index b480791..4786d71 100644
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -2705,6 +2705,25 @@ struct ReleaseRephase {
+ // Neither acts on a frame that does not fit its slots by itself: there the
+ // offset and its steering are as they were. A hold that waited (no surplus)
+ // charges nothing, so an offset that fits is never dropped.
++//
++// A known limit (review of 2026-11-15, flights of that day, not lifted):
++// the "own time" the layer gives `note` runs from the release to the next
++// hold, and with the Smoothness buffer on that stretch contains the wait
++// for the presenter's capacity (wait_for_presenter_capacity after the
++// hand-over: 7-9.5 ms of every frame in DCS at 90 Hz, where the hold itself
++// then waits about nothing). Own time plus offset is then the slots of the
++// cadence whatever the frame takes (19-21.5 ms noted beside 9-11 ms of
++// work), so `fits` refuses every step that raises the offset while the
++// buffer paces the application: 805 about once a second in steady 2X, and
++// the offset stays where its first steps put it (1.7-3.6 ms in three
++// flights; steps pass again on 3-4 ms frames, the map). No harm was seen
++// from it: the completion sat 1.8-2.4 ms after the pop, 0-1 held slots per
++// 10 s. Not changed, because the remedy is not plainly better: in the call
++// chain, with that wait reproduced, an offset step did not move the
++// completion at all (the offset is slept before the hand-over and only
++// shortens the wait that follows), so steps let through followed one
++// another (0 to 6.1 ms in four steps, the completion still 0.6-1.1 ms after
++// the pop).
+ struct ReleaseOffsetGuard {
+     static constexpr std::uint32_t kCharged = 3;
+     static constexpr std::uint32_t kWindow = 64;
