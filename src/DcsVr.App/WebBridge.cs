@@ -11,7 +11,7 @@ namespace DcsVr.App;
 /// <summary>One serialized command channel. Web content never owns an approved deployment plan.</summary>
 internal sealed class WebBridge(ControlService service, Window? owner = null,
     Func<string?, string?, InventorySnapshot>? capture = null, bool offline = false, Func<string?, string?, FlightSources>? flightSources = null,
-    Updates? updates = null, string? releaseNotesPath = null)
+    Updates? updates = null, string? releaseNotesPath = null, string? setupTemp = null)
 {
     private readonly SemaphoreSlim _commands = new(1);
     private volatile string? _writing;
@@ -208,15 +208,20 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         // the reply (an update can only start after it), whether or not automatic checks are on.
                         // First, an installation keeps the signed setup it was installed from (and, for a month, the one
                         // of the version it replaced): the way back without a download.
-                        if (!offline && !_cleaned)
+                        // The offline verification keeps its fixture downloads and never looks into the real %TEMP%: it
+                        // cleans the folder it was given (setupTemp), so the call below is one its run reaches.
+                        if (!_cleaned && (!offline || setupTemp is not null))
                         {
                             _cleaned = true;
                             await Task.Run(() =>
                             {
-                                if (Installed) { var before = _rollback.Recorded; _updates.KeepSetups(before?.Version, before is not null && DateTimeOffset.UtcNow - before.At < Rollback.KeepSetupFor); }
-                                _updates.CleanDownloads();
+                                if (!offline)
+                                {
+                                    if (Installed) { var before = _rollback.Recorded; _updates.KeepSetups(before?.Version, before is not null && DateTimeOffset.UtcNow - before.At < Rollback.KeepSetupFor); }
+                                    _updates.CleanDownloads();
+                                }
                                 // What a setup that was ended mid-way left in %TEMP% (its unpacked package).
-                                _updates.CleanSetupLeftovers();
+                                _updates.CleanSetupLeftovers(setupTemp);
                             });
                         }
                         break;

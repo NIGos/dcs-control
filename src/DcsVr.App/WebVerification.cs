@@ -303,7 +303,12 @@ internal static class WebVerification
         NvidiaSettings.DlssPresetForDcs = () => null;
         LaunchSafety.SteamRunning = () => true; // the fixture is the Steam edition; the build machine's Steam does not matter
         var update = UpdateFixture(Path.Combine(fixture, "updates"), service.StateRoot);
-        var bridge = new WebBridge(service,capture: (_,_) => inventory,offline:true,flightSources:(_,_) => flight with { DcsLog = Path.Combine(logs, "dcs.log") },updates:update.Updates,releaseNotesPath:update.NotesPath);
+        // What a setup ended mid-way leaves in %TEMP%, in a folder of this fixture: the first update check removes it.
+        var setupTemp = Path.Combine(fixture, "setup-temp"); var staleSetup = Path.Combine(setupTemp, "DcsControl-Setup-1-1");
+        Directory.CreateDirectory(staleSetup); File.WriteAllText(Path.Combine(staleSetup, "package.zip"), "left by a setup that was ended");
+        var longAgo = DateTime.UtcNow - Updates.SetupLeftoverAge - TimeSpan.FromDays(1);
+        Directory.SetCreationTimeUtc(staleSetup, longAgo); Directory.SetLastWriteTimeUtc(staleSetup, longAgo);
+        var bridge = new WebBridge(service,capture: (_,_) => inventory,offline:true,flightSources:(_,_) => flight with { DcsLog = Path.Combine(logs, "dcs.log") },updates:update.Updates,releaseNotesPath:update.NotesPath,setupTemp:setupTemp);
         using var source = new HwndSource(new HwndSourceParameters("DCS Control offline web verification") { Width = 1320, Height = 920, WindowStyle = unchecked((int)0x80000000), PositionX = -32000, PositionY = -32000 });
         var env = await CoreWebView2Environment.CreateAsync(null,Path.Combine(fixture,"browser"),new CoreWebView2EnvironmentOptions("--disable-background-networking --disable-component-update --no-first-run --disable-renderer-backgrounding --disable-background-timer-throttling --disable-features=CalculateNativeWinOcclusion"));
         Log("Environment ready");
@@ -342,6 +347,7 @@ internal static class WebVerification
             File.WriteAllText(output+"-checks.json",checks.GetRawText());
             if (!checks.GetProperty("passed").GetBoolean()) throw new IOException("Web interface verification failed: "+checks.GetRawText());
             if (new DraftStore(service.StateRoot).Load() is null) throw new IOException("The draft was not kept for the next start.");
+            if (Directory.Exists(staleSetup) || !Directory.Exists(setupTemp)) throw new IOException("The update check did not remove the folder a setup left behind: " + staleSetup);
             // The update: the altered first download was deleted, the second kept with its signature; nothing else was fetched.
             var downloads = Directory.Exists(update.Updates.DownloadRoot) ? Directory.GetFiles(update.Updates.DownloadRoot, "*", SearchOption.AllDirectories).Select(Path.GetFileName).Order(StringComparer.Ordinal).ToArray() : [];
             var setupName = $"DcsControl-{update.Version}-Setup.exe";
