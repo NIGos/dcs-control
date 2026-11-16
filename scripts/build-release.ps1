@@ -15,6 +15,10 @@ function Invoke-WithFreshTests([scriptblock]$Build) {
     $env:DCSC_FORCE_TESTS = '1'
     try { & $Build } finally { $env:DCSC_FORCE_TESTS = $previous }
 }
+# A file's SHA-256 next to it as <file>.sha256 (lower case, one line): the components' own hashes, the ZIP's and the setup's.
+function Write-Sha256Sidecar([string]$Path) {
+    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($Path + '.sha256') -Encoding ascii
+}
 # Every copy of the shared-memory contract headers, the OFXR tree's included, must match before anything is built.
 & (Join-Path $PSScriptRoot 'check-contracts.ps1')
 $dotnet = Join-Path $workspaceRoot '.tools/dotnet/dotnet.exe'
@@ -59,7 +63,7 @@ foreach ($filename in @('dxgi.dll','CheekyFoveatedDLSS/CheekyFoveatedDLSSHost.dl
     Copy-Item -LiteralPath $source -Destination $target -Force
     # The loader is the pinned Cheeky archive's own dxgi.dll (checked below against the archive's digest).
     if ($filename -eq 'dxgi.dll' -and (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne 'D9401877C6609106BD0D121EED5C29ECC5261E2C99378B1321EE16AD19AD3B0C') { throw 'Cheeky dxgi.dll is not the pinned one.' }
-    (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($target + '.sha256') -Encoding ascii
+    Write-Sha256Sidecar $target
 }
 # Cheeky stereo routes ship the three upstream binaries they use, taken from the pinned archive. The archive itself
 # and its version.dll fallback loader (flagged by Microsoft Defender) are not distributed.
@@ -73,7 +77,7 @@ try {
         $target = Join-Path $payloadRoot "components/cheeky/$entryName"
         New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
         [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
-        (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($target + '.sha256') -Encoding ascii
+        Write-Sha256Sidecar $target
     }
 } finally { $cheekyZip.Dispose() }
 foreach ($archive in @('OFXR-Bridge-v0.2.1-V116.zip')) {
@@ -83,7 +87,7 @@ foreach ($archive in @('OFXR-Bridge-v0.2.1-V116.zip')) {
 New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/ofxr') -Force | Out-Null
 $deferredOfxr = Join-Path $payloadRoot 'components/ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/ofxr-djules75/XR_APILAYER_XRFrameBridge_diagnostic.dll') -Destination $deferredOfxr -Force
-(Get-FileHash -LiteralPath $deferredOfxr -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($deferredOfxr + '.sha256') -Encoding ascii
+Write-Sha256Sidecar $deferredOfxr
 # DCS engine optimizations (scripts/build-dcsqvcull.ps1), installed in Saved Games\DCS\Scripts when the profile enables
 # them (the terrain prefetch fix included). Rebuilt and tested on every release so a stale DLL can never ship.
 Invoke-WithFreshTests { & (Join-Path $PSScriptRoot 'build-dcsqvcull.ps1') }
@@ -91,21 +95,21 @@ New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/dcsqvcull
 foreach ($source in @('artifacts/native/dcsqvcull/DcsQvCull.dll','artifacts/native/dcsqvcull/DcsQvCullPayload.dll','native/dcsqvcull/lua/DcsQvCull.lua')) {
     $target = Join-Path $payloadRoot ('components/dcsqvcull/' + (Split-Path -Leaf $source))
     Copy-Item -LiteralPath (Join-Path $workspaceRoot $source) -Destination $target -Force
-    (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($target + '.sha256') -Encoding ascii
+    Write-Sha256Sidecar $target
 }
 # Pupil shift OpenXR layer (scripts/build-pupil-shift.ps1), deployed in the profile folder when the profile enables it.
 Invoke-WithFreshTests { & (Join-Path $PSScriptRoot 'build-pupil-shift.ps1') }
 New-Item -ItemType Directory -Path (Join-Path $payloadRoot 'components/pupilshift') -Force | Out-Null
 $pupilShift = Join-Path $payloadRoot 'components/pupilshift/XR_APILAYER_DCSVR_pupil_shift.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/pupil-shift/XR_APILAYER_DCSVR_pupil_shift.dll') -Destination $pupilShift -Force
-(Get-FileHash -LiteralPath $pupilShift -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($pupilShift + '.sha256') -Encoding ascii
+Write-Sha256Sidecar $pupilShift
 $cheekyDll = Join-Path $payloadRoot 'components/CheekyOpenXRLayer.dll'
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'artifacts/native/cheeky/bin/Release/CheekyOpenXRLayer.dll') -Destination $cheekyDll -Force
-(Get-FileHash -LiteralPath $cheekyDll -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($cheekyDll + '.sha256') -Encoding ascii
+Write-Sha256Sidecar $cheekyDll
 foreach ($filename in @('XR_APILAYER_MBUCCHIA_quad_views_foveated.dll','openxr-api-layer.json','settings.cfg')) {
     $target = Join-Path $payloadRoot "components/quadviews/$filename"
     Copy-Item -LiteralPath (Join-Path $workspaceRoot "external/quadviews/bin/x64/Release/$filename") -Destination $target -Force
-    (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($target + '.sha256') -Encoding ascii
+    Write-Sha256Sidecar $target
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'installer.ps1') -Destination (Join-Path $payloadRoot 'scripts/installer.ps1') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'README.md') -Destination (Join-Path $payloadRoot 'README.md') -Force
@@ -142,8 +146,11 @@ foreach ($render in $renders) { if ($render.PSObject.Properties['path']) { $rend
 ConvertTo-Json -InputObject $renders -Depth 8 | Set-Content -LiteralPath $rendersFile -Encoding utf8
 if ($renders.Count -eq 0 -or @($renders | Where-Object { -not (Test-Path -LiteralPath (Join-Path $payloadRoot ('docs/' + $_.path))) }).Count) { throw 'Release interface preview is incomplete.' }
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'LICENSE') -Destination (Join-Path $payloadRoot 'licenses/Manager-GPL-3.0.txt') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/nuget/microsoft.web.webview2/1.0.4258.31/LICENSE.txt') -Destination (Join-Path $payloadRoot 'licenses/WebView2-SDK.txt') -Force
-Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/nuget/microsoft.web.webview2/1.0.4258.31/NOTICE.txt') -Destination (Join-Path $payloadRoot 'licenses/WebView2-NOTICE.txt') -Force
+# The WebView2 SDK's licence files come from the package version the app references (one place: DcsVr.App.csproj).
+$webView2 = ([xml](Get-Content -LiteralPath (Join-Path $workspaceRoot 'src/DcsVr.App/DcsVr.App.csproj') -Raw)).SelectSingleNode("//PackageReference[@Include='Microsoft.Web.WebView2']").Version
+if (-not $webView2) { throw 'DcsVr.App.csproj does not reference Microsoft.Web.WebView2.' }
+Copy-Item -LiteralPath (Join-Path $workspaceRoot ".cache/nuget/microsoft.web.webview2/$webView2/LICENSE.txt") -Destination (Join-Path $payloadRoot 'licenses/WebView2-SDK.txt') -Force
+Copy-Item -LiteralPath (Join-Path $workspaceRoot ".cache/nuget/microsoft.web.webview2/$webView2/NOTICE.txt") -Destination (Join-Path $payloadRoot 'licenses/WebView2-NOTICE.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/cheeky/LICENSE') -Destination (Join-Path $payloadRoot 'licenses/Cheeky-GPL-3.0.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot '.cache/packages/ofxr/LICENSE') -Destination (Join-Path $payloadRoot 'licenses/OFXR-LGPL-3.0.txt') -Force
 Copy-Item -LiteralPath (Join-Path $workspaceRoot 'external/ofxr-djules75/LICENSE') -Destination (Join-Path $payloadRoot 'licenses/OFXR-djules75-LGPL-3.0.txt') -Force
@@ -214,12 +221,12 @@ if ($added) {
 $releaseZip = $releaseRoot + '.zip'
 if (Test-Path -LiteralPath $releaseZip) { Remove-Item -LiteralPath $releaseZip }
 [IO.Compression.ZipFile]::CreateFromDirectory($releaseRoot, $releaseZip, [IO.Compression.CompressionLevel]::Optimal, $true)
-(Get-FileHash -LiteralPath $releaseZip -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($releaseZip + '.sha256') -Encoding ascii
+Write-Sha256Sidecar $releaseZip
 # The setup a pilot downloads: native/setup with this ZIP appended (scripts/build-setup.ps1). It and the ZIP are signed
 # with the release key (scripts/sign-release.ps1); DCS Control's updater installs only a setup whose signature verifies.
 $setup = Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-Setup.exe"
 & (Join-Path $PSScriptRoot 'build-setup.ps1') -Package $releaseZip -Output $setup | Out-Null
-(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -LiteralPath ($setup + '.sha256') -Encoding ascii
+Write-Sha256Sidecar $setup
 & (Join-Path $PSScriptRoot 'sign-release.ps1') -Files $setup, $releaseZip -Required:$Sign
 Write-Output $setup
 Write-Output $releaseZip
