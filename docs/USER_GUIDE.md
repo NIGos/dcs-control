@@ -485,6 +485,7 @@ DLSS 5 and Foveated SR need the file name `dxgi.dll` in DCS's `bin` folder. When
 - **With "Show the DCS launcher" on:** if pressing Play does nothing and `dcs.log` ends with "error code 5", the app was started from inside another program's job. Close it and start it from the Start menu or Explorer, or turn the option off.
 - **Write access:** if DCS is under `Program Files` and the profile uses DLSS 5 or Foveated SR, Launch DCS asks Windows once for permission to write to its `bin` folder (see [Access to the path … is denied](#access-to-the-path--is-denied-dcs-under-program-files)). Don't run the app as administrator instead.
 - Read the status line and Checks: any error during Launch stops before DCS starts and says why.
+- **A DCS still running in the background:** when DCS has had no window for half a minute, or has not responded for several minutes, the status at the top of every page says so and offers **End DCS**. A second click confirms; a DCS that is only loading a mission would lose its progress.
 
 ### Framegen 3× feels laggy
 
