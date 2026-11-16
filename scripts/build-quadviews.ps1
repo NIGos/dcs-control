@@ -3,10 +3,13 @@
 # with a local-only stamp carrying <why> and the failure, instead of stopping without one. build-release.ps1 refuses a
 # local-only stamp (scripts/build-stamp.ps1), so nothing built this way can be published. The build itself and the
 # check of the DLL's content must still pass. When everything passes the stamp is a full one, -LocalOnly or not.
-param([string]$LocalOnly)
+# -PatchOnly: the pinned sources reset and patched, then stop: nothing is built, tested or stamped. With -Checkout the
+# checkout patched is that folder instead of external/quadviews (a scratch copy, to compare two patched trees).
+param([string]$LocalOnly, [switch]$PatchOnly, [string]$Checkout)
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $quadRoot = Join-Path $workspaceRoot 'external/quadviews'
+if ($Checkout) { $quadRoot = [IO.Path]::GetFullPath($Checkout) }
 if (-not (Test-Path -LiteralPath $quadRoot)) {
     & git clone --depth 1 --branch 1.1.3 https://github.com/mbucchia/Quad-Views-Foveated.git $quadRoot
     if ($LASTEXITCODE -ne 0) { throw 'Quad Views download failed.' }
@@ -64,11 +67,13 @@ const DWORD profileLength = GetEnvironmentVariableW(L"DCSVR_QUAD_SETTINGS", null
 # resolution). Unset keeps upstream behaviour.
 $layerText = [IO.File]::ReadAllText($layerSource)
 if (-not $layerText.Contains('Composited stereo resolution')) {
+    # Inserted lines take the checkout's line endings (they were bare LF in a CRLF file before).
+    $nl = if ($layerText.Contains("`r`n")) { "`r`n" } else { "`n" }
     $edits = @(
-        @('        float m_focusPixelDensity{1.f};', "        float m_focusPixelDensity{1.f};`n        float m_stereoOutputMultiplier{0.f};"),
-        @('                    } else if (name == "focus_multiplier") {', "                    } else if (name == `"stereo_output_multiplier`") {`n                        m_stereoOutputMultiplier = std::max(0.1f, std::stof(value));`n                        parsed = true;`n                    } else if (name == `"focus_multiplier`") {"),
+        @('        float m_focusPixelDensity{1.f};', "        float m_focusPixelDensity{1.f};$nl        float m_stereoOutputMultiplier{0.f};"),
+        @('                    } else if (name == "focus_multiplier") {', "                    } else if (name == `"stereo_output_multiplier`") {$nl                        m_stereoOutputMultiplier = std::max(0.1f, std::stof(value));$nl                        parsed = true;$nl                    } else if (name == `"focus_multiplier`") {"),
         @('                    m_focusPixelDensity * stereoViews[xr::StereoView::Left].recommendedImageRectWidth;', '                    (m_stereoOutputMultiplier > 0.f ? m_stereoOutputMultiplier : m_focusPixelDensity) * stereoViews[xr::StereoView::Left].recommendedImageRectWidth;'),
-        @('            m_needComputeBaseFov = false;', "            Log(fmt::format(`"Composited stereo resolution: {}x{}\n`", m_fullFovResolution.width, m_fullFovResolution.height));`n            m_needComputeBaseFov = false;")
+        @('            m_needComputeBaseFov = false;', "            Log(fmt::format(`"Composited stereo resolution: {}x{}\n`", m_fullFovResolution.width, m_fullFovResolution.height));$nl            m_needComputeBaseFov = false;")
     )
     foreach ($edit in $edits) {
         if (([regex]::Matches($layerText, [regex]::Escape($edit[0]))).Count -ne 1) { throw "Quad Views source changed: $($edit[0])" }
@@ -3129,14 +3134,21 @@ if (-not $layerText.Contains('DCSVR two layers')) {
 # Log(std::string) passes the text to vsnprintf as the format: a lone '%' there ends DCS without a trace.
 $unescapedPercent = [IO.File]::ReadAllLines($layerSource) | Where-Object { $_ -match 'Log\(fmt::format\(' -and ($_ -replace '%%', '') -match '%' }
 if ($unescapedPercent) { throw "Quad Views Log text with an unescaped '%' (write '%%'): $($unescapedPercent -join ' | ')" }
+if ($PatchOnly) {
+    Write-Host "Quad Views sources patched in $quadRoot (-PatchOnly): nothing built."
+    return
+}
+if ($Checkout) { throw '-Checkout is for -PatchOnly: a build always uses external/quadviews.' }
 # The error-check macros compile __FILE__ in: /d1trimfile keeps the build machine's folder (a user name) out of the DLL.
 # The flag reaches every compile through a props file MSBuild imports (it ignores the CL/_CL_ variables' changes), and
 # Rebuild: MSBuild does not see a changed option in objects built before, which would keep the path.
 # /PDBALTPATH: the DLL names its symbols file without the folder.
+# /Brepro on compile and link, and whole-program code generation in full instead of upstream's incremental one (it keeps
+# state from the link before): two builds of the same sources give the same DLL, so a rebuild adds no known-component line.
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
 $trimProps = Join-Path $workspaceRoot 'artifacts/native/quadviews-trimfile.props'
 New-Item -ItemType Directory -Path (Split-Path -Parent $trimProps) -Force | Out-Null
-[IO.File]::WriteAllText($trimProps, "<Project><ItemDefinitionGroup><ClCompile><AdditionalOptions>%(AdditionalOptions) &quot;/d1trimfile:$([Security.SecurityElement]::Escape($repoRoot))&quot;</AdditionalOptions></ClCompile><Link><AdditionalOptions>%(AdditionalOptions) /PDBALTPATH:%25_PDB%25</AdditionalOptions></Link></ItemDefinitionGroup></Project>")
+[IO.File]::WriteAllText($trimProps, "<Project><ItemDefinitionGroup><ClCompile><AdditionalOptions>%(AdditionalOptions) &quot;/d1trimfile:$([Security.SecurityElement]::Escape($repoRoot))&quot; /Brepro</AdditionalOptions></ClCompile><Link><AdditionalOptions>%(AdditionalOptions) /PDBALTPATH:%25_PDB%25 /Brepro</AdditionalOptions><LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration></Link></ItemDefinitionGroup></Project>")
 & (Join-Path $PSScriptRoot 'msvc.cmd') msbuild "$quadRoot/openxr-api-layer/openxr-api-layer.vcxproj" /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v145 /p:SolutionName=XR_APILAYER_MBUCCHIA_quad_views_foveated "/p:SolutionDir=$solutionDir" "/p:ForceImportBeforeCppTargets=$trimProps" /m:4 /verbosity:minimal
 if ($LASTEXITCODE -ne 0) { throw 'Quad Views build failed.' }
 $builtDll = Join-Path $quadRoot 'bin/x64/Release/XR_APILAYER_MBUCCHIA_quad_views_foveated.dll'
