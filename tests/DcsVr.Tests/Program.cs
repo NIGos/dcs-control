@@ -372,6 +372,48 @@ Test("Release scripts: a local-only package is refused with -Sign and never sign
     // Cheeky's build stamp covers scripts/build-upstream.ps1: a line changed there asks for a Cheeky rebuild before a release.
     Require(stamp.Contains("cheeky    = @('scripts/build-upstream.ps1', 'scripts/patch-cheeky.py', 'patches/cheeky')"), "the inputs of Cheeky's stamp, as scripts/python.ps1 describes them");
 });
+Test("Published archives: a vendor runtime, the Sboys archive, a test fixture or an upstream binary in a ZIP stops the check", () =>
+{
+    // scripts/verify-release-archives.ps1 reads every entry's name before anything else: one bad name is enough.
+    var script = Path.Combine(workspace, "scripts", "verify-release-archives.ps1"); var version = ProductInfo.Version;
+    (int Exit, string Output)? Check(string name, string? releaseEntry, string? sourcesEntry)
+    {
+        var folder = Path.Combine(root, "archive-names", name); Directory.CreateDirectory(folder);
+        void Zip(string file, params string[] entries)
+        {
+            using (var zip = System.IO.Compression.ZipFile.Open(Path.Combine(folder, file), System.IO.Compression.ZipArchiveMode.Create))
+                foreach (var entry in entries) { using var stream = zip.CreateEntry(entry).Open(); stream.Write("fixture"u8); }
+            File.WriteAllText(Path.Combine(folder, file + ".sha256"), Hashing.FileSha256(Path.Combine(folder, file)).ToLowerInvariant() + "\n");
+        }
+        Zip($"DcsControl-{version}-win-x64.zip", releaseEntry ?? $"DcsControl-{version}-win-x64/files/readme.txt");
+        if (sourcesEntry is not null) Zip($"DcsControl-{version}-sources.zip", "manager/README.md", sourcesEntry);
+        File.WriteAllText(Path.Combine(folder, $"DcsControl-{version}-Setup.exe"), "not a setup");
+        ProcessStartInfo start = new("pwsh") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+        foreach (var argument in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-ReleaseFolder", folder }) start.ArgumentList.Add(argument);
+        try
+        {
+            using var process = Process.Start(start)!; var error = process.StandardError.ReadToEndAsync(); var output = process.StandardOutput.ReadToEnd();
+            process.WaitForExit(); return (process.ExitCode, output + error.Result);
+        }
+        catch (System.ComponentModel.Win32Exception) { return null; }
+    }
+    var cases = new (string Name, string? Release, string? Sources, string Says)[]
+    {
+        ("dlss5", $"DcsControl-{version}-win-x64/files/components/cheeky/CheekyFoveatedDLSS/nvngx_dlssnr.dll", null, "vendor runtime"),
+        ("optical-flow", $"DcsControl-{version}-win-x64/files/packages/nvofapi64.dll", null, "vendor runtime"),
+        ("sboys", $"DcsControl-{version}-win-x64/files/packages/CustomHeadset-1.3.0-Pimax-UI.zip", null, "Sboys driver archive"),
+        ("fixture", $"DcsControl-{version}-win-x64/files/docs/interface-fixture/state/draft.json", null, "test fixture"),
+        ("upstream-binary", null, "upstream/quadviews/bin/x64/Release/XR_APILAYER_MBUCCHIA_quad_views_foveated.dll", "built binary in an upstream tree"),
+        ("sources-dlss5", null, "manager/artifacts/nvngx_dlssnr.dll", "vendor runtime"),
+    };
+    foreach (var (name, release, sources, says) in cases)
+    {
+        if (Check(name, release, sources) is not { } run) { Skip("PowerShell 7 (pwsh) is not on PATH"); return; }
+        Require(run.Exit != 0 && run.Output.Contains(says, StringComparison.Ordinal), name + ": " + run.Output.Trim());
+    }
+    // The same archives without the bad name get past the names (and stop later, at the fixture's setup, which is none).
+    Require(Check("clean", null, null) is { } clean && clean.Exit != 0 && !clean.Output.Contains("must not be distributed", StringComparison.Ordinal) && clean.Output.Contains("setup", StringComparison.OrdinalIgnoreCase), "a clean ZIP is not refused for a name");
+});
 Test("Back to stock DCS with a lost record removes DCS Control's files in the DCS shown, and only there", () =>
 {
     var f = LeftoverFixture("service");

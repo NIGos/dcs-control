@@ -6,6 +6,9 @@
 #   - The setup's and the ZIP's signatures verify with the public key the app embeds (src/DcsVr.Core/Updates.cs), as
 #     the updater checks them. An unsigned developer build passes with a warning; -Signed makes it fail.
 #   - The sources ZIP, when there is one, holds every tracked file of this checkout byte for byte.
+#   - No archive holds, by name, what is not DCS Control's to distribute: NVIDIA's DLSS 5 runtime (the pilot brings
+#     it), the NVIDIA libraries an OFXR package could carry, the Sboys driver archive (downloaded from its author); the
+#     release ZIP has no test fixture, and the sources ZIP no built binary in an upstream tree.
 # -ReleaseFolder: where the archives are (default artifacts/release). Returns what it checked.
 param([string]$ReleaseFolder, [switch]$Signed)
 $ErrorActionPreference = 'Stop'
@@ -39,7 +42,17 @@ function Assert-Clean([string]$name, [byte[]]$bytes) {
         if ($text.IndexOf([string]$needle.Text, [StringComparison]$needle.Comparison) -ge 0) { throw "$name holds $($needle.What)." }
     }
 }
-function Test-Archive([string]$path) {
+# Names that must not be in a published archive, whatever the bytes. $kind: 'release' or 'sources'.
+$vendorRuntimes = 'nvngx_dlssnr.dll', 'nvofapi64.dll', '_nvngx.dll'
+function Assert-Distributable([string]$name, [string]$entry, [string]$kind) {
+    $lower = $entry.ToLowerInvariant()
+    foreach ($runtime in $vendorRuntimes) { if ($lower.EndsWith($runtime)) { throw "$name is a vendor runtime that must not be distributed." } }
+    if ($kind -eq 'release') {
+        if ($lower -like '*customheadset-*.zip') { throw "$name is the Sboys driver archive, which must not be distributed." }
+        if ($lower.Contains('interface-fixture/')) { throw "$name is a test fixture, not part of the release." }
+    } elseif ($lower.StartsWith('upstream/') -and $lower -match '\.(exe|dll|lib|pdb)$') { throw "$name is a built binary in an upstream tree: the sources ZIP carries sources only." }
+}
+function Test-Archive([string]$path, [string]$kind) {
     $entries = 0
     $zip = [IO.Compression.ZipFile]::OpenRead($path)
     try {
@@ -47,11 +60,12 @@ function Test-Archive([string]$path) {
             if ($entry.FullName.EndsWith('/')) { continue }
             $bytes = Read-Entry $entry
             $name = (Split-Path -Leaf $path) + ': ' + $entry.FullName
+            Assert-Distributable $name $entry.FullName $kind
             Assert-Clean $name $bytes
             $entries++
             if ($entry.FullName.EndsWith('.zip', [StringComparison]::OrdinalIgnoreCase)) {
                 $inner = [IO.Compression.ZipArchive]::new([IO.MemoryStream]::new($bytes, $false), [IO.Compression.ZipArchiveMode]::Read)
-                try { foreach ($nested in $inner.Entries) { if (-not $nested.FullName.EndsWith('/')) { Assert-Clean ($name + '/' + $nested.FullName) (Read-Entry $nested); $entries++ } } }
+                try { foreach ($nested in $inner.Entries) { if (-not $nested.FullName.EndsWith('/')) { Assert-Distributable ($name + '/' + $nested.FullName) $nested.FullName $kind; Assert-Clean ($name + '/' + $nested.FullName) (Read-Entry $nested); $entries++ } } }
                 finally { $inner.Dispose() }
             }
         }
@@ -65,13 +79,13 @@ function Assert-Sidecar([string]$path) {
 }
 
 $result = [ordered]@{ version = $version }
-$result.releaseEntries = Test-Archive $releaseZip
+$result.releaseEntries = Test-Archive $releaseZip 'release'
 Assert-Sidecar $releaseZip
 
 # The sources ZIP: clean like the release ZIP, and every tracked file of this checkout is in it with the bytes on disk.
 $result.sourcesChecked = Test-Path -LiteralPath $sourcesZip
 if ($result.sourcesChecked) {
-    $result.sourcesEntries = Test-Archive $sourcesZip
+    $result.sourcesEntries = Test-Archive $sourcesZip 'sources'
     Assert-Sidecar $sourcesZip
     $tracked = @((& git -C $workspaceRoot -c core.quotepath=false ls-files -z --cached) -join "`n" -split "`0" | Where-Object { $_ })
     if ($LASTEXITCODE -ne 0 -or $tracked.Count -eq 0) { throw 'git ls-files failed.' }
