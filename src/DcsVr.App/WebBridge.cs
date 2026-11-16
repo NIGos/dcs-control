@@ -457,8 +457,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     private static string? FoveaChanged(AppliedProfile? applied) =>
         applied is not null && PimaxFovea.UsesPimaxPlay(applied.Profile) && PimaxFovea.Resolve(applied.Profile) is { Pimax: { } pimax } resolved
             && !PimaxFovea.SameFovea(resolved.Profile, applied.Fovea ?? AppliedFovea.From(applied.Profile, null))
-            ? (pimax.Preset ? $"Pimax uses its Quad View {pimax.Short}, which cannot be read: focus will be updated to this profile's own values at launch."
-                : $"Pimax Play changed: focus will be updated to {pimax.Play.Short} at launch.") : null;
+            ? PimaxFovea.WillUpdate(pimax) : null;
     /// <summary>A running DCS.exe; the offline verification host reports none.</summary>
     private bool DcsRunning() => offline ? _offlineDcs : DcsProcess.AnyRunning();
     private readonly DcsStuckTracker _stuck = new();
@@ -1172,7 +1171,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         {
             var resolved = PimaxFovea.Resolve(profile);
             // Quad View Off in Pimax: a plain note (bundled Quad Views renders the profile's own focus either way).
-            if (resolved.Pimax is { Preset: true } preset) return new("pimax-fovea", preset.QuadViewsOff ? IssueSeverity.Info : IssueSeverity.Warning, PimaxFovea.PresetNote(preset));
+            if (resolved.Pimax is { Preset: true } preset) return new("pimax-fovea", preset.QuadViewsOff || preset.Measured is not null ? IssueSeverity.Info : IssueSeverity.Warning, PimaxFovea.PresetNote(preset));
             return resolved.Pimax is { } pimax ? new("pimax-fovea", pimax.Mismatch is null ? IssueSeverity.Info : IssueSeverity.Warning, PimaxFovea.Summary(pimax) + " Bundled Quad Views renders the same focus size."
                     + (PimaxFovea.CapNote(pimax) is { } cap ? " " + cap : "") + (pimax.Mismatch is { } m ? " " + m : ""))
                 : new("pimax-fovea", IssueSeverity.Warning, resolved.Notes[0]);

@@ -3254,17 +3254,22 @@ Test("A Pimax Quad View preset is not read as Custom values (issue 19, Pimax EVO
     string Evo(int? level) => PimaxJson(0, .6666667, .2, .6666667, .6666667, gaze: .5, periphery: .09, transition: 0).TrimEnd('}')
         + (level is { } l ? ",\"runtime_quadviews_rendering_level\":" + l : "") + "}";
     var quality = PimaxFovea.Read(Make("pimax-preset/global.json", Evo(2)))!;
-    Require(quality.Preset && quality.PresetName == "Quality" && quality.Short == "preset Quality" && quality.Mismatch is null);
-    Require(PimaxFovea.Summary(quality).Contains("preset Quality") && PimaxFovea.Notes(quality).Count == 2 && PimaxFovea.Notes(quality)[1].Contains("choose Custom"));
-    var p = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FoveaWidth = .57, FoveaHeight = .34, QuadFocusScale = 1, PeripheralScale = .19 };
+    Require(quality.Preset && !quality.Unreadable && quality.Measured == PimaxPresets.Quality && quality.PresetName == "Quality" && quality.Short == "preset Quality" && quality.Mismatch is null);
+    // A known preset is rendered as measured on Pimax's own Quad Views (PimaxPresets), not with the Custom page's saved values and
+    // no longer with the profile's own (until 0.6.6: "built into Pimax and saved nowhere").
+    Require(PimaxFovea.Summary(quality) == "Pimax · Quad View preset Quality: focus 46% × 45% of the view, center 1.225×, periphery 0.32×." && PimaxFovea.Notes(quality).Count == 2
+        && PimaxFovea.Notes(quality)[1] == "Pimax's Quad View preset is Quality. Bundled Quad Views renders it as Pimax's own Quad Views does: a focus 46% × 45% of the view at 1.225× and the periphery at 0.32×.", string.Join(" / ", PimaxFovea.Notes(quality)));
+    var p = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FoveaWidth = .57, FoveaHeight = .34, QuadFocusScale = 1, PeripheralScale = .19, QuadVerticalOffset = -.1 };
     var path = Make("pimax-preset/global.json", Evo(2));
     var resolved = PimaxFovea.Resolve(p, path);
-    Require(resolved.Applies && resolved.Pimax is { Preset: true } && resolved.Profile == p, "a preset keeps the profile's own values");
+    Require(resolved.Applies && resolved.Pimax is { Preset: true } && resolved.Profile == p with { FoveaWidth = PimaxPresets.FocusWidth, FoveaHeight = PimaxPresets.FocusHeight, QuadFocusScale = 1.225, PeripheralScale = .32, QuadVerticalOffset = 0 }, "a preset's measured values, the profile's edge blending, no offset");
     var quad = ConfigurationWriters.QuadViews(resolved.Profile);
-    Require(quad.Contains("horizontal_focus_section=0.57") && quad.Contains("vertical_focus_section=0.34") && quad.Split('\n').Any(l => l.Trim() == "focus_multiplier=1") &&quad.Contains("peripheral_multiplier=0.19"), quad);
-    // Values written from the old reading are reported as changed, with a message that names the preset.
-    var stale = new AppliedFovea(null, .4333333, .6666667, 1.75, .15, .2);
-    Require(!PimaxFovea.SameFovea(resolved.Profile, stale) && PimaxFovea.ChangedSinceApply(p, stale, path) is { } changed && changed.Contains("preset Quality") && changed.Contains("own values"));
+    Require(quad.Contains("horizontal_focus_section=0.457313503") && quad.Contains("vertical_focus_section=0.454617331") && quad.Contains("horizontal_fixed_section=0.457313503") && quad.Contains("focus_multiplier=1.225") && quad.Contains("peripheral_multiplier=0.32") && !quad.Contains("_offset"), quad);
+    // Values written before (the profile's own, by 0.6.6) are reported as changed, with a message that names the preset.
+    var stale = new AppliedFovea("preset 2", .57, .34, 1, .19, .2);
+    Require(!PimaxFovea.SameFovea(resolved.Profile, stale) && PimaxFovea.ChangedSinceApply(p, stale, path) == "Pimax uses its Quad View preset Quality. Launch DCS updates the focus area to it (46% × 45% of the view)."
+        && PimaxFovea.WillUpdate(quality) == "Pimax uses its Quad View preset Quality: focus will be updated to 46% × 45% of the view at launch." && PimaxFovea.Updated(quality) == "Pimax uses its Quad View preset Quality: focus updated to 46% × 45% of the view.");
+    Require(PimaxFovea.ChangedSinceApply(p, AppliedFovea.From(resolved.Profile, quality.Stamp), path) is null, "applied with the preset: nothing to update");
     // Custom (5), the older Custom (4) and files without the key (older Pimax Play) still follow the saved values.
     foreach (var level in new int?[] { 5, 4, null })
     {
@@ -3285,10 +3290,49 @@ Test("A Pimax Quad View preset is not read as Custom values (issue 19, Pimax EVO
     Require(off.QuadViewsOff && off.Short == "Quad View Off" && PimaxFovea.Summary(off) == "Pimax · Quad View is Off." && !PimaxFovea.PresetNote(off).Contains("preset", StringComparison.OrdinalIgnoreCase)
         && PimaxFovea.PresetNote(off).Contains("own focus values") && !quality.QuadViewsOff && PimaxFovea.NativeOffWarning.Contains("no focus area"), "Quad View Off");
     Require(PimaxFovea.ChangedSinceApply(p, stale, Make("pimax-off/global.json", Evo(-1))) is { } offChanged && offChanged.Contains("Off in Pimax") && !offChanged.Contains("preset"), "Off: its own message");
-    // Setup detection keeps the profile's own focus values and says why.
+    // Setup detection takes the preset's values and names it; Quad View Off and a level this version does not know keep the profile's own.
     var sources = new DetectionSources { PimaxPlaySettings = path, SteamVrServerLog = Path.Combine(root, "none/vrserver.txt"), SteamVrSettings = Path.Combine(root, "none/steamvr.vrsettings"), NeuralRuntimeFolders = [], ProcessRunning = _ => false };
     var detected = SetupDetection.Detect(p, new InventorySnapshot(), sources);
-    Require(detected.Profile.FoveaWidth == .57 && detected.Profile.QuadFocusScale == 1 && detected.Notes.Any(n => n.Contains("preset is Quality")));
+    Require(detected.Profile.FoveaSource == FoveaSource.PimaxPlay && detected.Profile.FoveaWidth == PimaxPresets.FocusWidth && detected.Profile.QuadFocusScale == 1.225 && detected.Notes.Any(n => n.Contains("preset is Quality")), string.Join(" / ", detected.Notes));
+    var unknown = PimaxFovea.Read(Make("pimax-level6/global.json", Evo(6)))!;
+    Require(unknown.Unreadable && unknown.Measured is null && PimaxFovea.Resolve(p, unknown.Path).Profile == p && PimaxFovea.PresetNote(unknown).Contains("has no values for") && off.Unreadable && PimaxFovea.Resolve(p, off.Path).Profile == p
+        && PimaxFovea.WillUpdate(off) == "Quad View is Off in Pimax: focus will be updated to this profile's own values at launch." && PimaxFovea.WillUpdate(unknown).Contains("which cannot be read"), "Off and unknown levels: the profile's own values");
+    var offDetected = SetupDetection.Detect(p, new InventorySnapshot(), new DetectionSources { PimaxPlaySettings = off.Path, SteamVrServerLog = sources.SteamVrServerLog, SteamVrSettings = sources.SteamVrSettings, NeuralRuntimeFolders = [], ProcessRunning = _ => false });
+    Require(offDetected.Profile.FoveaWidth == .57 && offDetected.Profile.QuadFocusScale == 1, "Off: detection keeps the profile's own focus values");
+});
+Test("Pimax's Quad View presets are rendered as measured on Pimax's own Quad Views (2026-11-17, Crystal Super, 5424 x 5356)", () =>
+{
+    // artifacts/issues/fovea-presets: per preset the runtime's densities and its recommended periphery and focus sizes; the
+    // focus view's tangents are the same for all four: 45.73 % x 45.47 % of the view.
+    Require(Math.Abs(PimaxPresets.FocusWidth - .4573) < 5e-5 && Math.Abs(PimaxPresets.FocusHeight - .4546) < 5e-5 && PimaxPresets.All.Count == 4);
+    (int Level, string Name, double Focus, double Periphery, int PeripheryW, int PeripheryH, int FocusW, int FocusH)[] measured =
+    [
+        (0, "Performance", 1.0, .30, 1628, 1606, 2480, 2436), (1, "Balanced", 1.1, .32, 1736, 1714, 2728, 2678),
+        (2, "Quality", 1.225, .32, 1736, 1714, 3038, 2984), (3, "Extreme", 1.35, .32, 1736, 1714, 3348, 3288),
+    ];
+    foreach (var m in measured)
+    {
+        // The Custom page's saved values (here Quick 30 at 120 %) are not in use with a preset.
+        var read = PimaxFovea.Read(Make("pimax-presets/" + m.Name + ".json", PimaxJson(0, .30, .30, .30, .30, gaze: .28, periphery: .1919).TrimEnd('}') + ",\"runtime_quadviews_rendering_level\":" + m.Level + "}"))!;
+        var c = read.Converted;
+        Require(read.Measured is { } preset && preset.Name == m.Name && c.Preset == m.Name && c.FocusScale == m.Focus && c.PeripheralScale == m.Periphery && c.Width == PimaxPresets.FocusWidth && c.Height == PimaxPresets.FocusHeight
+            && !c.Clamped && !c.Asymmetric && c.Transition && c.NativeWidth == c.Width && c.NativeHeight == c.Height && read.Mismatch is null, m.Name);
+        int fw = PimaxPlayUnits.FocusPixels(5424, c.Width, c.FocusScale), fh = PimaxPlayUnits.FocusPixels(5356, c.Height, c.FocusScale), pw = PimaxPlayUnits.FocusPixels(5424, 1, c.PeripheralScale), ph = PimaxPlayUnits.FocusPixels(5356, 1, c.PeripheralScale);
+        Require(Math.Abs(fw - m.FocusW) <= 2 && Math.Abs(fh - m.FocusH) <= 2 && Math.Abs(pw - m.PeripheryW) <= 2 && Math.Abs(ph - m.PeripheryH) <= 2, $"{m.Name}: focus {fw} x {fh}, periphery {pw} x {ph}");
+        var written = PimaxFovea.Resolve(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, QuadEdgeBlend = .15 }, read.Path).Profile;
+        Require(written.FoveaWidth == c.Width && written.FoveaHeight == c.Height && written.QuadFocusScale == m.Focus && written.PeripheralScale == m.Periphery && written.QuadEdgeBlend == .15 && !ProfileValidation.Validate(written).Any(i => i.Severity == IssueSeverity.Error), m.Name + " as written");
+        Require(PimaxFovea.FocusShort(c) == "46% × 45% of the view" && read.Stamp == "preset " + m.Level, m.Name);
+    }
+    // Custom keeps the number Pimax Play shows (30 is 30 % of the view, as up to 0.6.6); Pimax's own Quad Views renders 100 minus it
+    // (its log, same folder: "fine fov left eye: L=0.700000 ...", focus 4556 x 4500 at 1.2).
+    var custom = PimaxFovea.Read(Make("pimax-presets/custom30.json", PimaxJson(0, .30, .30, .30, .30, gaze: .28, periphery: .1919).TrimEnd('}') + ",\"runtime_quadviews_rendering_level\":5}"))!;
+    Require(custom.Measured is null && !custom.Unreadable && custom.Converted.Preset is null && Math.Abs(custom.Converted.Width - .30) < 1e-9 && Math.Abs(custom.Converted.Height - .30) < 1e-9 && Math.Abs(custom.Converted.NativeWidth - .70) < 1e-9 && Math.Abs(custom.Converted.NativeHeight - .70) < 1e-9);
+    Require(PimaxPlayUnits.FocusPixels(5424, custom.Converted.NativeWidth, custom.Converted.FocusScale) == 4556 && PimaxPlayUnits.FocusPixels(5356, custom.Converted.NativeHeight, custom.Converted.FocusScale) == 4500 && custom.Stamp.StartsWith("0.3|0.3|1.2|", StringComparison.Ordinal), custom.Stamp);
+    Require(PimaxFovea.WillUpdate(custom) == "Pimax Play changed: focus will be updated to " + custom.Play.Short + " at launch." && PimaxFovea.Updated(custom) == "Pimax Play changed: focus updated to " + custom.Play.Short + ".", PimaxFovea.WillUpdate(custom));
+    // The reporter's Fine values (GitHub #23): 40 + 15 and 34 + 34 as shown, 55 % x 68 %, unchanged; Pimax native renders 45 % x 32 % (its log: 2440 x 1714 at 1.0).
+    var fine = PimaxFovea.Convert(new(.80, .30, .68, .68), new(.30, .80, .68, .68), .2, .1515, true);
+    Require(Math.Abs(fine.Width - .55) < 1e-9 && Math.Abs(fine.Height - .68) < 1e-9 && Math.Abs(fine.NativeWidth - .45) < 1e-9 && Math.Abs(fine.NativeHeight - .32) < 1e-9 && fine.Asymmetric
+        && PimaxPlayUnits.FocusPixels(5424, fine.NativeWidth, fine.FocusScale) == 2440 && PimaxPlayUnits.FocusPixels(5356, fine.NativeHeight, fine.FocusScale) == 1714);
 });
 Test("The focus area follows Pimax Play only for bundled Quad Views with Pimax Play as the source, and is never written to Pimax", () =>
 {
@@ -3421,11 +3465,12 @@ Test("Vertical focus offset (GitHub #24): 0 as before, Pimax Play's -100 to 100,
     Require(!ProfileValidation.Validate(own with { QuadVerticalOffset = -.3, FoveaSource = FoveaSource.PimaxPlay }).Any(i => i.Code == "quad-offset-gaze")
         && !ProfileValidation.Validate(own with { QuadVerticalOffset = -.3, QuadViews = QuadProvider.PimaxNative }).Any(i => i.Code == "quad-offset-gaze"), "only where the offset is written");
     Require(!ProfileValidation.Validate(down).Any(i => i.Message.Contains("experimental", StringComparison.OrdinalIgnoreCase)), "no warning for using it");
-    // One of the profile's own focus values: not written with Pimax Play's values, written when the profile's own are (a Pimax preset, or no Pimax Play settings).
+    // One of the profile's own focus values: not written with Pimax Play's values, written when the profile's own are (Quad View Off in Pimax, or no Pimax Play settings). A Pimax preset has no offset either.
     var follows = down with { FoveaSource = FoveaSource.PimaxPlay };
     var custom = PimaxFovea.Resolve(follows, Make("pimax-offset/custom.json", PimaxJson(0, .33, .33, .33, .33).TrimEnd('}') + ",\"runtime_quadviews_vertical_focus_offset\":-0.05}"));
     Require(custom.Applies && custom.Pimax!.Play.VerticalOffset == -10 && custom.Profile.QuadVerticalOffset == 0 && !ConfigurationWriters.QuadViews(custom.Profile).Contains("_offset", StringComparison.Ordinal), "Pimax Play's values: no offset, Pimax Play's own is shown and not converted");
-    var preset = PimaxFovea.Resolve(follows, Make("pimax-offset/preset.json", PimaxJson(0, .33, .33, .33, .33).TrimEnd('}') + ",\"runtime_quadviews_rendering_level\":2}"));
+    var preset = PimaxFovea.Resolve(follows, Make("pimax-offset/preset.json", PimaxJson(0, .33, .33, .33, .33).TrimEnd('}') + ",\"runtime_quadviews_rendering_level\":-1}"));
+    Require(PimaxFovea.Resolve(follows, Make("pimax-offset/balanced.json", PimaxJson(0, .33, .33, .33, .33).TrimEnd('}') + ",\"runtime_quadviews_rendering_level\":1}")).Profile.QuadVerticalOffset == 0, "a Pimax preset: its measured focus has no vertical offset");
     Require(preset.Pimax is { Preset: true } && preset.Profile.QuadVerticalOffset == -.1 && PimaxFovea.Resolve(follows, Path.Combine(root, "pimax-offset/none.json")).Profile.QuadVerticalOffset == -.1, "the profile's own values: its offset too");
     var writtenCustom = AppliedFovea.From(custom.Profile, "s");
     Require(writtenCustom.QuadVerticalOffset == 0 && AppliedFovea.From(preset.Profile, "s").QuadVerticalOffset == -.1 && PimaxFovea.SameFovea(custom.Profile, writtenCustom) && !PimaxFovea.SameFovea(custom.Profile with { QuadVerticalOffset = -.1 }, writtenCustom), "pimax-fovea.json records the offset written");

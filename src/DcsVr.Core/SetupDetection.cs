@@ -133,10 +133,10 @@ public static class SetupDetection
             Set("headsetRefreshHz", "Headset refresh rate", refresh.ToString("0.#", CultureInfo.InvariantCulture) + " Hz", "SteamVR preferred refresh rate (confirm it matches the headset)");
         }
 
-        if (profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory) && PimaxFovea.Read(sources.PimaxPlaySettings) is { Preset: true } preset)
+        if (profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory) && PimaxFovea.Read(sources.PimaxPlaySettings) is { Unreadable: true } preset)
         {
-            // A Pimax preset's values cannot be read: the profile keeps its own focus values.
-            Set("foveaSource", "Focus area source", "Pimax preset " + preset.PresetName + ": this profile's own values", sources.PimaxPlaySettings);
+            // Quad View Off or an unknown level: no Pimax values to read, the profile keeps its own focus values.
+            Set("foveaSource", "Focus area source", "Pimax Quad View " + preset.PresetName + ": this profile's own values", sources.PimaxPlaySettings);
             notes.Add(PimaxFovea.PresetNote(preset));
         }
         else if (profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory) && PimaxFovea.Read(sources.PimaxPlaySettings) is { } quad)
@@ -152,7 +152,9 @@ public static class SetupDetection
             // Shown in Pimax Play's own units and labels; the converted values are in the Quad Views page's details.
             var source = "Pimax Play " + quad.Play.Mode + " mode (" + sources.PimaxPlaySettings + ")";
             Set("foveaSource", "Focus area source", "Pimax Play (read again at every launch)", sources.PimaxPlaySettings);
-            foreach (var control in quad.Play.Controls)
+            // A preset: its name and what it renders (the Custom page's saved sliders are not in use).
+            if (quad.Measured is { } known) Set("pimax:preset", "Pimax Quad View preset", known.Name + " · focus " + PimaxFovea.FocusShort(c), sources.PimaxPlaySettings);
+            else foreach (var control in quad.Play.Controls)
                 Set("pimax:" + control.Label, control.Label, control.Value, source);
             Set("quadEdgeBlend", "Edge blending", Format(profile.QuadEdgeBlend), c.Transition ? "Pimax Transition Mode is " + quad.Play.TransitionMode + "; this profile's blending is kept" : "Pimax Transition Mode is Off");
             notes.AddRange(PimaxFovea.Notes(quad));
