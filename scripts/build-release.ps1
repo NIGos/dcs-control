@@ -34,9 +34,13 @@ $releaseRoot = Join-Path $workspaceRoot "artifacts/release/DcsControl-$version-w
 $actualDcs = @{}; foreach ($name in 'options.lua','autoexec.cfg') { $file = Join-Path $env:USERPROFILE "Saved Games/DCS/Config/$name"; if (Test-Path -LiteralPath $file) { $actualDcs[$file] = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash } }
 New-Item -ItemType Directory -Path (Join-Path $workspaceRoot 'artifacts/release') -Force | Out-Null
 $actualDcs | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $workspaceRoot 'artifacts/fps-actual-before.json') -Encoding utf8
-# An earlier build's signatures go first: a build that stops half way never leaves one next to new files.
-foreach ($signed in "artifacts/release/DcsControl-$version-win-x64.zip.sig", "artifacts/release/DcsControl-$version-Setup.exe.sig") {
-    Remove-Item -LiteralPath (Join-Path $workspaceRoot $signed) -Force -ErrorAction SilentlyContinue
+# An earlier build's signatures go first: a build that stops half way never leaves one next to new files. So does the
+# sources ZIP of an earlier build of this version: it is made after the release (py -3 scripts/package-sources.py), and
+# an old one next to the new files would fail test-release.ps1 at its end (verify-release-archives.ps1 compares it with
+# this checkout) or, worse, be published with them.
+foreach ($stale in "artifacts/release/DcsControl-$version-win-x64.zip.sig", "artifacts/release/DcsControl-$version-Setup.exe.sig",
+    "artifacts/release/DcsControl-$version-sources.zip", "artifacts/release/DcsControl-$version-sources.zip.sha256") {
+    Remove-Item -LiteralPath (Join-Path $workspaceRoot $stale) -Force -ErrorAction SilentlyContinue
 }
 if (Test-Path -LiteralPath $releaseRoot) {
     $resolvedRelease = (Resolve-Path -LiteralPath $releaseRoot).Path

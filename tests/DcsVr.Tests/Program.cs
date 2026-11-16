@@ -347,6 +347,31 @@ Test("Leftovers: every component DCS Control shipped is known, so any version's 
     var script = File.ReadAllText(Path.Combine(workspace, "scripts/build-release.ps1"));
     Require(script.Contains("$recordedComponents = @(" + string.Join(", ", recorded.Select(folder => "'" + folder + "'")) + ")"), "build-release.ps1 records the same component folders as Leftovers.RecordedComponentFolders");
 });
+Test("Release scripts: a local-only package is refused with -Sign and never signed; the OFXR patch set is hashed in one place", () =>
+{
+    string Script(string name) => File.ReadAllText(Path.Combine(workspace, "scripts", name));
+    var release = Script("build-release.ps1");
+    // Refused before anything is checked, built or deleted.
+    var refusal = release.IndexOf("if ($LocalOnly -and $Sign) { throw ", StringComparison.Ordinal);
+    Require(refusal > 0 && refusal < release.IndexOf("check-contracts.ps1", StringComparison.Ordinal) && refusal < release.IndexOf("Remove-Item", StringComparison.Ordinal), "-LocalOnly with -Sign stops first");
+    Require(release.Contains("Assert-BuildStampCurrent $component -AllowLocalOnly:$LocalOnly") && !release.Contains("Assert-BuildStampCurrent $component }"), "local-only stamps pass only with -LocalOnly");
+    var signing = release.IndexOf("sign-release.ps1') -Files", StringComparison.Ordinal); var localBranch = release.IndexOf("if ($LocalOnly) {", StringComparison.Ordinal);
+    Require(signing > 0 && release.LastIndexOf("sign-release.ps1') -Files", StringComparison.Ordinal) == signing && localBranch > 0 && localBranch < signing
+        && release[localBranch..signing].Contains("} else {") && !release[localBranch..signing].Contains("sign-release"), "the only signing call is the branch a local-only build does not take");
+    // A sources ZIP of an earlier build of this version would be compared with this checkout by the release test.
+    Require(release.Contains("\"artifacts/release/DcsControl-$version-sources.zip\", \"artifacts/release/DcsControl-$version-sources.zip.sha256\")"), "an earlier build's sources ZIP goes with its signatures");
+    Require(Script("package-sources.py").Contains("verify-release-archives.ps1"), "the sources ZIP is checked when it is made");
+    // One definition of "this patch set": the build that records it and the check that compares it cannot drift apart.
+    var stamp = Script("build-stamp.ps1");
+    Require(stamp.Contains("function Get-OfxrPatchSetHash") && stamp.Contains("function Get-OfxrPatchMarkerPath"), "scripts/build-stamp.ps1 defines both");
+    foreach (var name in new[] { "build-ofxr-djules75.ps1", "assert-components-current.ps1" })
+    {
+        var text = Script(name);
+        Require(text.Contains("= Get-OfxrPatchSetHash") && text.Contains("= Get-OfxrPatchMarkerPath ") && !text.Contains("ComputeHash") && !text.Contains("dcs-control-patches"), name + " uses the shared functions and has no hash of its own");
+    }
+    // Cheeky's build stamp covers scripts/build-upstream.ps1: a line changed there asks for a Cheeky rebuild before a release.
+    Require(stamp.Contains("cheeky    = @('scripts/build-upstream.ps1', 'scripts/patch-cheeky.py', 'patches/cheeky')"), "the inputs of Cheeky's stamp, as scripts/python.ps1 describes them");
+});
 Test("Back to stock DCS with a lost record removes DCS Control's files in the DCS shown, and only there", () =>
 {
     var f = LeftoverFixture("service");

@@ -83,3 +83,13 @@ with zipfile.ZipFile(destination, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as
 digest = hashlib.sha256(destination.read_bytes()).hexdigest()
 destination.with_suffix('.zip.sha256').write_text(digest + '\n', encoding='ascii')
 print(f'{destination}: {len(added)} source files, {destination.stat().st_size:,} bytes')
+
+# The sources ZIP is made after the release test, so the check of the published files runs again here, now with this
+# archive in it: no private key and no user profile path in it, and every tracked file as it is in this checkout.
+version = product_version()
+if all((destination.parent / name).exists() for name in (f'DcsControl-{version}-win-x64.zip', f'DcsControl-{version}-Setup.exe')):
+    verified = subprocess.run(['pwsh', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(root / 'scripts/verify-release-archives.ps1')])
+    if verified.returncode != 0:
+        sys.exit(f'{destination.name} was written but did not pass scripts/verify-release-archives.ps1: do not publish it.')
+else:
+    print('Not checked: there is no release ZIP and setup of this version next to it (scripts/verify-release-archives.ps1 checks the three together).')
