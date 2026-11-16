@@ -457,7 +457,7 @@ function Move-MouseSlow([string]$RunDir, [string]$Label, [double]$Tx, [double]$T
 # artifacts\rig\cursor-calibration.json (made from a cursor-calib flight; it belongs to one headset and window size,
 # so it is not tracked): the left eye's tangent of DCS's cockpit cursor = a * (window fraction x, y) + b.
 function Get-CursorCalibration {
-  $f = Join-Path $RigData 'cursor-calibration.json'; if (-not (Test-Path -LiteralPath $f)) { throw "no ${f}: fly -Scenario cursor-calib and derive the calibration first" }
+  $f = Join-Path $RigData 'cursor-calibration.json'; if (-not (Test-Path -LiteralPath $f)) { throw "no ${f}: fly -Scenario cursor-calib, then py tools\rig\cursor_calib.py <its run folder> --write" }
   Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
 }
 function Arm-Capture([string]$Tap, $A, $Twin) {
@@ -683,7 +683,7 @@ function Flight([string]$RunName, $ScBase, $ArmDef, [bool]$Option) {
       if (-not $Option) { $ref = Get-ChildItem -LiteralPath $Runs -Directory -Filter "$($Sc.name)_*_on" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | ForEach-Object { Get-ChildItem (Join-Path $_.FullName 'tap') -Directory -Filter $cap.Name -ErrorAction SilentlyContinue } | Select-Object -First 1; if ($ref) { $args2 += @('--like', $ref.FullName) } }
       $o = & py @args2 2>&1 | Out-String; if ($LASTEXITCODE -ne 0) { Note "$RunName verdict.py on $($cap.Name) failed: $($o.Trim())" } elseif (Test-Path (Join-Path $cap.FullName 'verdict.txt')) { Get-Content (Join-Path $cap.FullName 'verdict.txt') | Write-Host }
     }
-    if ($Sc.verdict.cursorLog -and $flight -and -not (Test-Path -LiteralPath (Join-Path $Rig 'cursor_verdict.py'))) { Note "$RunName cursor counters of the flight log not judged: cursor_verdict.py is not in tools\rig yet (README.md)" }
+    if ($Sc.verdict.cursorLog -and $flight -and -not (Test-Path -LiteralPath (Join-Path $Rig 'cursor_verdict.py'))) { Note "$RunName cursor counters of the flight log not judged: cursor_verdict.py is missing from tools\rig" }
     elseif ($Sc.verdict.cursorLog -and $flight) {      # the smooth-cursor records of the flight log, per second and per mouse stretch
       $cv = @((Join-Path $Rig 'cursor_verdict.py'), $run); if (-not $Option) { $on = Get-ChildItem -LiteralPath $Runs -Directory -Filter "$($Sc.name)_$($ArmDef.name)_*_on" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($on) { $cv += @('--on', $on.FullName) } }
       & $save; $o = & py @cv 2>&1 | Out-String; Write-Host $o
@@ -716,7 +716,7 @@ foreach ($x in @($sc.sideEffects | Where-Object { $_ })) { Write-Host "  side ef
 # checks that need nothing running
 $problems = @()
 if (-not (Test-Path -LiteralPath $Cli)) { $problems += "installed CLI missing: $Cli" }
-if (-not (Test-Path -LiteralPath $TapDll) -or -not (Test-Path -LiteralPath (Join-Path $TapDir "$TapName.json"))) { $problems += "capture layer not found in $TapDir (-TapDir or DCSC_RIG_TAP_DIR; its sources are not in tools\rig yet, see README.md)" }
+if (-not (Test-Path -LiteralPath $TapDll) -or -not (Test-Path -LiteralPath (Join-Path $TapDir "$TapName.json"))) { $problems += "capture layer not found in $TapDir (-TapDir or DCSC_RIG_TAP_DIR; build it with tools\rig\build-capture-layer.ps1)" }
 elseif ([string]((Get-Content (Join-Path $TapDir "$TapName.json") -Raw | ConvertFrom-Json).api_layer.library_path) -ne $TapDll) { $problems += 'capture layer manifest points elsewhere: rebuild' }
 if (-not $Backup) { $problems += 'no user-state backup folder given (-StateBackup or DCSC_RIG_STATE_BACKUP)' }
 else { foreach ($n in $StateFiles) { if (-not (Test-Path -LiteralPath (Join-Path $Backup $n))) { $problems += "user-state backup file missing: $n" } } }

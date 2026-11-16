@@ -4,8 +4,9 @@ Tools that fly DCS unattended with a capture layer in the OpenXR chain and judge
 only proof of the foveated frame-generation patches (OFXR 0080..0089). Nothing here is shipped, installed or built
 into a component.
 
-This is the first step of moving the rig out of git-ignored scratch: the runner, five scenarios and the analysis
-scripts. `RIG.md` is the record written while the rig was built (dated, scratch paths); this file is the current one.
+The rig was moved here from git-ignored scratch in two steps: the runner, five scenarios and the analysis scripts,
+then the capture layer's sources with its build script and the two cursor scripts. `RIG.md` is the record written
+while the rig was built (dated, scratch paths); this file is the current one.
 
 ## What is here
 
@@ -21,6 +22,12 @@ scripts. `RIG.md` is the record written while the rig was built (dated, scratch 
 | `analyze.py` | Numbers of one flight in a time window, from its logs (the engine module's perf lines, the Pimax frame counters, the OFXR flight log) |
 | `startup_measure.py` | The start-of-flight stall from an OFXR flight log |
 | `late.py` | Per-submission reconstruction from an OFXR flight log, written as a pickle: `py late.py <log> <t0 s> <t1 s> <out.pickle>` |
+| `build-capture-layer.ps1` | Builds the capture layer, its harness and the chain shim into `artifacts\rig\capture-layer\bin` and writes the layer's manifest there; `-Test` runs the two offline tests (the harness on WARP with a byte check; OFXR's call-chain test with the layer below OFXR) |
+| `capture-layer\rigtap.cpp` | The capture layer: a pass-through OpenXR API layer that, when armed, records what reaches the runtime in `xrEndFrame` |
+| `capture-layer\rigtap_harness.cpp`, `check_harness.py` | A fake loader and runtime that drive the layer without a headset, and the byte check of what it captured |
+| `capture-layer\rig_chain_shim.cpp`, `check_chain.py` | Puts the capture layer below OFXR in OFXR's own call-chain test, and checks the capture taken there |
+| `cursor_calib.py` | From a `cursor-calib` flight: where DCS's cockpit cursor is for a place of the mouse in DCS's window; `--write` stores `artifacts\rig\cursor-calibration.json` |
+| `cursor_verdict.py` | The smooth-cursor counters of a run's OFXR flight log, per second and per mouse stretch; writes `cursor-verdict.txt` / `.json` in the run folder |
 | `bf.ps1`, `bfloop.ps1` | Build targets and run ctest tests of an OFXR build folder under the quiet lock; `bfloop.ps1` repeats one test until it fails and keeps the failing run's work folder |
 
 ## Nothing of one machine is in these files
@@ -38,6 +45,11 @@ standard Windows folder:
 | `-PimaxCtl` | `DCSC_PIMAX_CTL` | `tools\runtime-probe\bin\pimax_ctl.exe` |
 | `-PimaxClient` | `DCSC_PIMAX_CLIENT` | `%ProgramFiles%\Pimax\PimaxClient\pimaxui\PimaxClient.exe` |
 | `-PimaxReboot` | `DCSC_PIMAX_REBOOT` | none: `pimax_ctl reboot` is used |
+
+`build-capture-layer.ps1`: `-OutDir` (`DCSC_RIG_TAP_DIR`, default `artifacts\rig\capture-layer\bin`, the runner's default
+`-TapDir`), `-OpenXrInclude` (`DCSC_OPENXR_INCLUDE`, default the OFXR fork's `external\OpenXR-SDK\include`), `-OfxrBuild`
+(`DCSC_OFXR_BUILD`, default `artifacts\native\ofxr-djules75`, for `-Test`), `-TestOut` (`DCSC_RIG_TEST_OUT`). The two
+command files and the manifest it writes hold absolute paths: they are build output, under `artifacts\`.
 
 `bf.ps1` and `bfloop.ps1`: `-WorkRoot` (`DCSC_RIG_BUILDS`, default `artifacts\rig\builds`) and `-DcsBin` (DCS's `bin`
 folder for the tests that read it; without it `XRFG_TEST_DCS_BIN` is left as the caller has it).
@@ -63,17 +75,18 @@ cursor calibration. No capture, log or run folder belongs in `tools\rig`.
 - An installed DCS Control (its CLI applies and restores the profile), DCS, the Pimax runtime and client, a headset
   that is tracked, in a lit room.
 - `pimax_ctl.exe` (from `tools\runtime-probe`, not tracked yet).
-- **The capture layer is not promoted yet.** Its sources (`rigtap.cpp`, harness, chain shim, build script) are still
-  in scratch; build it there and pass its `bin` folder with `-TapDir`. Until it is here the runner cannot fly from a
-  fresh clone: `-DryRun` works and says what is missing.
+- The capture layer, built once on the machine that flies: `pwsh -File tools\rig\build-capture-layer.ps1 -Test`
+  (MSVC through `scripts\msvc.cmd`; the OpenXR headers of the OFXR fork's checkout; `-Test` also wants a built OFXR
+  fork). The runner finds it in `artifacts\rig\capture-layer\bin`; `-DryRun` says so when it is missing.
 - The scenarios' missions (`qvbench_i23_f16_ap.miz`, `qvbench_i23_f16_ap_map.miz`) are not in this repository.
-- The `cursor` scenario needs `artifacts\rig\cursor-calibration.json`, made from a `cursor-calib` flight by a script
-  that is not promoted yet (`cursor_calib.py`); `cursor_verdict.py` (the cursor counters of the flight log) is not
-  promoted either: a scenario with `verdict.cursorLog` skips that step and says so in `steps.log`.
-
+- The `cursor` scenario needs `artifacts\rig\cursor-calibration.json`: fly `-Scenario cursor-calib`, then
+  `py tools\rig\cursor_calib.py <its run folder> --write`. The calibration belongs to one headset and window size.
+  On the one calibration flight flown so far (2026-11-15) the script found fewer than three points for its own fit
+  (exit 1, nothing written): the calibration then in use was worked out by hand from that flight's captures.
 ## Checks that need no flight
 
 ```powershell
 py tools\rig\selftest.py                                             # 26 checks, 0 failed
+pwsh -File tools\rig\build-capture-layer.ps1 -Test                   # builds the capture layer; harness and call-chain checks
 pwsh -File tools\rig\run-scenario.ps1 -Scenario hud -Both -DryRun    # the plan and what is missing; starts nothing
 ```

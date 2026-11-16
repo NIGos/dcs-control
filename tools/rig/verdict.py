@@ -325,6 +325,8 @@ def region_shifts(a, b, grid, valid=None):
     """Per region of a grid x grid split: (dx, dy, quality) or None (flat, or less than 90 % of it inside `valid`)."""
     h, w = a.shape
     th, tw = h // grid, w // grid
+    if th == 0 or tw == 0:      # an image smaller than the grid (the 4 x 4 views of OFXR's call-chain test): no region to measure
+        return [None] * (grid * grid)
     out = []
     for gy in range(grid):
         for gx in range(grid):
