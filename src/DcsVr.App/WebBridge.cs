@@ -35,7 +35,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         }
         // The draft left on screen last time wins over the applied profile when it differs (settings, DCS install or
         // options.lua); Reset to applied is one click.
-        if (Drafts.Load() is { } draft && (applied is null || !ControlService.SameDraft(draft.Profile, applied.Profile)
+        if (Drafts.Load(AppLog.Info) is { } draft && (applied is null || !ControlService.SameDraft(draft.Profile, applied.Profile)
             || !ControlService.SamePath(draft.Dcs, applied.Executable) || !ControlService.SamePath(draft.Options, applied.OptionsPath)))
         {
             _profile = draft.Profile;

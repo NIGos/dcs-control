@@ -817,7 +817,21 @@ Test("The draft is kept across restarts and a damaged file is ignored", () =>
     var loaded = store.Load()!;
     Require(loaded.Dcs == @"D:\DCS\bin\DCS.exe" && loaded.Options is null && loaded.Profile.QuadSharpening == .456789123456 && loaded.Profile.NeuralToggleKey == "75:7");
     Require(loaded.Profile.QuadViews == QuadProvider.QuadViewsFoveated && loaded.Profile.QuadFocusAdapter, "settled like the checklist");
-    File.WriteAllText(store.Path, "{ not json"); Require(store.Load() is null);
+    // A draft that cannot be used is never lost to the next edit: a copy stays next to it, once, and the log says where.
+    var notes = new List<string>(); var folder = Path.GetDirectoryName(store.Path)!;
+    File.WriteAllText(store.Path, "{ not json"); Require(store.Load(notes.Add) is null && store.Load(notes.Add) is null);
+    var kept = Directory.GetFiles(folder, "draft.unreadable-*.json");
+    Require(kept.Length == 1 && File.ReadAllText(kept[0]) == "{ not json" && notes.Count == 1 && notes[0].Contains(kept[0]), "copied aside once: " + string.Join(" | ", notes));
+    // A later version's draft (a setting this build does not know), as after going back: kept too.
+    store.Save(draft, null, null); var newer = File.ReadAllText(store.Path).Replace("\"profile\": {", "\"profile\": {\"settingFromLater\": 1,");
+    File.WriteAllText(store.Path, newer); Require(newer.Contains("settingFromLater") && store.Load(notes.Add) is null && Directory.GetFiles(folder, "draft.unreadable-*.json").Length == 2 && notes.Count == 2);
+    store.Save(draft, null, null); Require(store.Load(notes.Add) is not null && notes.Count == 2 && Directory.GetFiles(folder, "draft.unreadable-*.json").Length == 2, "a good draft copies nothing");
+    // Held by another program for a moment: read again, not treated as missing.
+    using (var held = new FileStream(store.Path, FileMode.Open, FileAccess.Read, FileShare.None))
+    {
+        var release = Task.Run(() => { Thread.Sleep(150); held.Dispose(); });
+        Require(store.Load(notes.Add) is not null && notes.Count == 2, "a file held for a moment is read once it is free"); release.Wait();
+    }
 });
 Test("Last flight: dcs.log session, Pimax frames, OFXR modes and frame time, DLSS 5, CPU Boost and the engine prefetch fix", () =>
 {
