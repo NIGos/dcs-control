@@ -19,45 +19,76 @@ public sealed record PimaxEyeFov(double Left, double Right, double Up, double Do
 /// Custom 1 − the stored value per side (its number is the part left out: 30 gives 70 %), with a preset the preset's
 /// own (<see cref="PimaxPresets"/>). 0 when unknown.</param>
 /// <param name="Preset">The name of the Pimax preset these values are (<see cref="PimaxPresets"/>); null for Custom.</param>
+/// <param name="FixedWidth">A preset's focus without eye tracking, used by a profile with a fixed focus (a preset has two
+/// sizes; <see cref="Width"/> is the eye-tracked one). 0 for Custom, whose one size serves both.</param>
 public sealed record PimaxConversion(double Width, double Height, double FocusScale, double PeripheralScale, bool Transition,
-    double RequestedWidth, double RequestedHeight, bool Clamped, bool Asymmetric, double NativeWidth = 0, double NativeHeight = 0, string? Preset = null);
+    double RequestedWidth, double RequestedHeight, bool Clamped, bool Asymmetric, double NativeWidth = 0, double NativeHeight = 0, string? Preset = null, double FixedWidth = 0, double FixedHeight = 0)
+{
+    /// <summary>The focus size a profile gets: a preset's fixed-focus size without eye tracking, else the one size.</summary>
+    public (double Width, double Height) For(GazeMode gaze) => gaze == GazeMode.Fixed && FixedWidth > 0 && FixedHeight > 0 ? (FixedWidth, FixedHeight) : (Width, Height);
+}
 
-/// <summary>One of Pimax's Quad View presets as Pimax's own Quad Views renders it.</summary>
-public sealed record PimaxPreset(int Level, string Name, double FocusDensity, double PeripheralDensity);
+/// <summary>One of Pimax's Quad View presets as Pimax's runtime logs it: the two densities and the half field of view of the
+/// focus with a tracked gaze ("foveated focus fov"), in radians, across and up.</summary>
+public sealed record PimaxPreset(int Level, string Name, double FocusDensity, double PeripheralDensity, double TrackedHalfFovH, double TrackedHalfFovV)
+{
+    /// <summary>The focus share of the view with a tracked gaze, derived (<see cref="PimaxPresets"/>), not measured.</summary>
+    public double TrackedWidth => PimaxPresets.Share(TrackedHalfFovH, PimaxPresets.ViewHalfAngleH);
+    public double TrackedHeight => PimaxPresets.Share(TrackedHalfFovV, PimaxPresets.ViewHalfAngleV);
+}
 
 /// <summary>
-/// Pimax's Quad View presets (runtime_quadviews_rendering_level 0 to 3), measured on 2026-11-16/17 with Pimax Play
-/// 2.0.4.329 on a Crystal Super, stock DCS, no DCS Control component and an observer layer that logs the views
-/// (artifacts/issues/fovea-presets, README.md). Nothing of a preset is saved in global.json: these are the runtime's.
-/// Geometry, the same for all four: whole view, left eye, tangents L −1.5293 R 1.0324 U 1.2648 D −1.2648; focus view
-/// L −0.6277 R 0.5438 U 0.5750 D −0.5750 (the right eye mirrored): 45.73 % × 45.47 % of the view, no vertical offset.
-/// Its centre is at tangent −0.042 in the left eye, 2.4 degrees outwards of straight ahead (8.06 % of the view's width
-/// towards the nose from the view's own centre, the view being wider outwards). The bundled layer puts a focus without
-/// a gaze at straight ahead as projected in each eye's view; whether that already is the same spot was not measured, so no
+/// Pimax's Quad View presets (runtime_quadviews_rendering_level 0 to 3). Nothing of a preset is saved in global.json:
+/// these are the runtime's own values, from its log and from a measurement on 2026-11-16/17 with Pimax Play 2.0.4.329
+/// on a Crystal Super, stock DCS, no DCS Control component and an observer layer that logs the views
+/// (artifacts/issues/fovea-presets, README.md and P0 to P3).
+/// The runtime's log, per preset: "non-foveated focus fov = [0.41, 0.41, 0.41, 0.41]" (the same for all four, used
+/// while eye tracking is not available), "foveated focus fov = [...]" (with eye tracking: Performance [0.24, 0.24,
+/// 0.27, 0.27], Balanced [0.28, 0.28, 0.29, 0.29], Quality [0.30 × 4], Extreme [0.35, 0.35, 0.30, 0.30]), "full fov =
+/// [-0.991678, 0.801335, 0.901787, -0.901787]" (the view's angles in radians: left, right, up, down) and "ffr config
+/// params using, m_peripheralPixelDensity = …, m_focusPixelDensity = …" (one pair per preset, whatever the gaze):
+/// Performance 0.30 / 1.0, Balanced 0.32 / 1.1, Quality 0.32 / 1.225, Extreme 0.32 / 1.35.
+/// MEASURED, without eye tracking (the headset on its stand), the same for all four: whole view, left eye, tangents
+/// L −1.5293 R 1.0324 U 1.2648 D −1.2648; focus view L −0.6277 R 0.5438 U 0.5750 D −0.5750 (the right eye mirrored):
+/// 45.73 % × 45.47 % of the view, no vertical offset; recommended sizes of a 5424 × 5356 view, periphery / focus:
+/// 1628 × 1606 / 2480 × 2436, 1736 × 1714 / 2728 × 2678, 1736 × 1714 / 3038 × 2984, 1736 × 1714 / 3348 × 3288.
+/// THE RULE that turns a "focus fov" number into that rectangle, fitted to the measurement: the number is a half field
+/// of view in radians, the four are left, right, up, down like "full fov", and the focus share of the view on an axis
+/// is the number divided by half the view's angle on that axis (across (0.991678 + 0.801335) / 2 = 0.896507, up
+/// 0.901787), applied as a share of the view's tangent width about the focus centre. 0.41 gives 45.733 % × 45.465 %
+/// against the measured 45.731 % × 45.462 %: every side of both eyes within 0.0001 of a tangent. (Not fitting: a
+/// share of each side's own tangent, 0.627 / 0.423 / 0.519 against 0.6277 / 0.5438 / 0.5750; a plain share of the
+/// half width, 41 %.) Custom is another path in the runtime ("fine fov", a plain share: 0.70 measured as 70.00 %).
+/// DERIVED, not measured: the focus with a tracked gaze, the rule applied to each preset's "foveated focus fov":
+/// Performance 26.8 % × 29.9 %, Balanced 31.2 % × 32.2 %, Quality 33.5 % × 33.3 %, Extreme 39.0 % × 33.3 %. No run with a
+/// worn headset has confirmed these, nor whether the runtime widens the focus near the view's edge as Quad Views does.
+/// The view's angles are a Crystal Super's; another headset's differ a little.
+/// The focus centre without a gaze is at tangent −0.042 in the left eye, 2.4 degrees outwards of straight ahead, in
+/// presets and Custom alike; whether the bundled layer's fixed focus already sits there was not measured, so no
 /// horizontal offset is written.
-/// Densities per preset, from the runtime's log ("ffr config params using, m_peripheralPixelDensity = …,
-/// m_focusPixelDensity = …") and its recommended sizes of a 5424 × 5356 view (periphery / focus): Performance 0.30 / 1.0
-/// (1628 × 1606 / 2480 × 2436), Balanced 0.32 / 1.1 (1736 × 1714 / 2728 × 2678), Quality 0.32 / 1.225 (1736 × 1714 /
-/// 3038 × 2984), Extreme 0.32 / 1.35 (1736 × 1714 / 3348 × 3288).
-/// Limit of the measurement: the headset was not worn ("eye tracking is not available" in the runtime's log), and the
-/// log names two focus sizes per preset: "non-foveated focus fov = [0.41, 0.41, 0.41, 0.41]", the one measured, and
-/// "foveated focus fov" ([0.24, 0.24, 0.27, 0.27] Performance, [0.28, 0.28, 0.29, 0.29] Balanced, [0.30 × 4] Quality,
-/// [0.35, 0.35, 0.30, 0.30] Extreme), which a working eye tracker would select and which was not measured.
 /// </summary>
 public static class PimaxPresets
 {
+    /// <summary>Half the view's angle across and up, radians (the runtime's "full fov", Crystal Super).</summary>
+    public const double ViewHalfAngleH = (0.991678 + 0.801335) / 2, ViewHalfAngleV = 0.901787;
+    /// <summary>The runtime's "non-foveated focus fov", radians: the focus without eye tracking, every preset.</summary>
+    public const double FixedHalfFov = 0.41;
+    /// <summary>The focus without eye tracking as measured (the observer's tangents): 45.73 % × 45.47 % of the view.</summary>
     public const double FocusWidth = (0.6277 + 0.5438) / (1.5293 + 1.0324);
     public const double FocusHeight = (0.5750 + 0.5750) / (1.2648 + 1.2648);
-    public static readonly PimaxPreset Performance = new(0, "Performance", 1.0, .30);
-    public static readonly PimaxPreset Balanced = new(1, "Balanced", 1.1, .32);
-    public static readonly PimaxPreset Quality = new(2, "Quality", 1.225, .32);
-    public static readonly PimaxPreset Extreme = new(3, "Extreme", 1.35, .32);
+    /// <summary>The fitted rule: a "focus fov" half angle as a share of the view on that axis.</summary>
+    public static double Share(double halfFov, double viewHalfAngle) => halfFov / viewHalfAngle;
+    public static readonly PimaxPreset Performance = new(0, "Performance", 1.0, .30, .24, .27);
+    public static readonly PimaxPreset Balanced = new(1, "Balanced", 1.1, .32, .28, .29);
+    public static readonly PimaxPreset Quality = new(2, "Quality", 1.225, .32, .30, .30);
+    public static readonly PimaxPreset Extreme = new(3, "Extreme", 1.35, .32, .35, .30);
     public static IReadOnlyList<PimaxPreset> All { get; } = [Performance, Balanced, Quality, Extreme];
     public static PimaxPreset? Find(int? level) => All.FirstOrDefault(p => p.Level == level);
-    /// <summary>The bundled Quad Views values of a preset. Its edge keeps the profile's blending (a preset's own
-    /// transition is not known).</summary>
+    /// <summary>The bundled Quad Views values of a preset: the eye-tracked focus (derived) as the size, the measured one
+    /// without eye tracking as the fixed size. Its edge keeps the profile's blending (a preset's own transition is not known).</summary>
     public static PimaxConversion Convert(PimaxPreset preset) =>
-        new(FocusWidth, FocusHeight, preset.FocusDensity, preset.PeripheralDensity, true, FocusWidth, FocusHeight, false, false, FocusWidth, FocusHeight, preset.Name);
+        new(preset.TrackedWidth, preset.TrackedHeight, preset.FocusDensity, preset.PeripheralDensity, true, preset.TrackedWidth, preset.TrackedHeight, false, false,
+            preset.TrackedWidth, preset.TrackedHeight, preset.Name, FocusWidth, FocusHeight);
 }
 
 /// <summary>One control of Pimax Play's Quad View page: Pimax Play's own label and the value exactly as it displays it.</summary>
@@ -323,7 +354,9 @@ public static class PimaxFovea
         var c = pimax.Converted;
         // The vertical offset is one of the profile's own focus values: with Pimax Play's it is not written (Pimax Play's
         // own Vertical Offset is shown, not converted, as before).
-        var effective = profile with { FoveaWidth = c.Width, FoveaHeight = c.Height, QuadFocusScale = c.FocusScale, PeripheralScale = c.PeripheralScale, QuadEdgeBlend = c.Transition ? profile.QuadEdgeBlend : 0, QuadVerticalOffset = 0 };
+        // A preset has one focus size with eye tracking and another without: the profile's Focus movement picks.
+        var (width, height) = c.For(profile.Gaze);
+        var effective = profile with { FoveaWidth = width, FoveaHeight = height, QuadFocusScale = c.FocusScale, PeripheralScale = c.PeripheralScale, QuadEdgeBlend = c.Transition ? profile.QuadEdgeBlend : 0, QuadVerticalOffset = 0 };
         return new(effective, true, pimax, Notes(pimax));
     }
 
@@ -331,23 +364,23 @@ public static class PimaxFovea
     public const string NativeOffWarning = "Quad View is Off in Pimax, so Pimax native Quad Views renders no focus area and DCS gets no Quad Views benefit. Choose a Quad View preset or Custom in Pimax Play or Pimax EVO, then Re-read.";
 
     /// <summary>"46% × 45% of the view": the focus size bundled Quad Views renders for these values.</summary>
-    public static string FocusShort(PimaxConversion c) => FocusShort(c.Width, c.Height);
+    public static string FocusShort(PimaxConversion c, GazeMode gaze = GazeMode.EyeTracked) => FocusShort(c.For(gaze).Width, c.For(gaze).Height);
     public static string FocusShort(double width, double height) => FormattableString.Invariant($"{PimaxPlayUnits.JsRound(width * 100)}% × {PimaxPlayUnits.JsRound(height * 100)}% of the view");
     /// <summary>What Launch DCS will do about focus values that differ from those written at Apply.</summary>
-    public static string WillUpdate(PimaxQuadViewsSettings pimax) => pimax.QuadViewsOff ? "Quad View is Off in Pimax: focus will be updated to this profile's own values at launch."
+    public static string WillUpdate(PimaxQuadViewsSettings pimax, GazeMode gaze = GazeMode.EyeTracked) => pimax.QuadViewsOff ? "Quad View is Off in Pimax: focus will be updated to this profile's own values at launch."
         : pimax.Unreadable ? $"Pimax uses its Quad View {pimax.Short}, which cannot be read: focus will be updated to this profile's own values at launch."
-        : pimax.Measured is { } preset ? $"Pimax uses its Quad View preset {preset.Name}: focus will be updated to {FocusShort(pimax.Converted)} at launch."
+        : pimax.Measured is { } preset ? $"Pimax uses its Quad View preset {preset.Name}: focus will be updated to {FocusShort(pimax.Converted, gaze)} at launch."
         : $"Pimax Play changed: focus will be updated to {pimax.Play.Short} at launch.";
     /// <summary>What Launch DCS did (<see cref="WillUpdate"/>).</summary>
-    public static string Updated(PimaxQuadViewsSettings pimax) => pimax.QuadViewsOff ? "Quad View is Off in Pimax: focus updated to this profile's own values."
+    public static string Updated(PimaxQuadViewsSettings pimax, GazeMode gaze = GazeMode.EyeTracked) => pimax.QuadViewsOff ? "Quad View is Off in Pimax: focus updated to this profile's own values."
         : pimax.Unreadable ? $"Pimax uses its Quad View {pimax.Short}, which cannot be read: focus updated to this profile's own values."
-        : pimax.Measured is { } preset ? $"Pimax uses its Quad View preset {preset.Name}: focus updated to {FocusShort(pimax.Converted)}."
+        : pimax.Measured is { } preset ? $"Pimax uses its Quad View preset {preset.Name}: focus updated to {FocusShort(pimax.Converted, gaze)}."
         : $"Pimax Play changed: focus updated to {pimax.Play.Short}.";
 
     /// <summary>A known preset: what bundled Quad Views renders for it. Otherwise why there are no Pimax values to use,
     /// and what is used instead.</summary>
     public static string PresetNote(PimaxQuadViewsSettings pimax) => pimax.Measured is { } known
-        ? FormattableString.Invariant($"Pimax's Quad View preset is {known.Name}. Bundled Quad Views renders it as Pimax's own Quad Views does: a focus {FocusShort(pimax.Converted)} at {known.FocusDensity}× and the periphery at {known.PeripheralDensity}×.")
+        ? FormattableString.Invariant($"Pimax's Quad View preset is {known.Name}. Bundled Quad Views renders it as Pimax's own Quad Views does: with eye tracking a focus {FocusShort(pimax.Converted)}, with a fixed focus {FocusShort(pimax.Converted, GazeMode.Fixed)}, at {known.FocusDensity}× and the periphery at {known.PeripheralDensity}×.")
         : pimax.QuadViewsOff
         ? "Quad View is Off in Pimax, so there are no Pimax focus values to follow: bundled Quad Views uses this profile's own focus values (Set here)."
         : $"Pimax's Quad View setting is {pimax.PresetName}, which this version of DCS Control has no values for, so bundled Quad Views uses this profile's own focus values (Set here). To follow Pimax, choose a preset or Custom in Pimax's Quad View settings (Pimax Play or Pimax EVO), then Re-read.";
@@ -403,7 +436,7 @@ public static class PimaxFovea
         ? "Pimax · Quad View is Off."
         : pimax.Preset
         ? pimax.Measured is { } known
-            ? FormattableString.Invariant($"Pimax · Quad View preset {known.Name}: focus {FocusShort(pimax.Converted)}, center {known.FocusDensity}×, periphery {known.PeripheralDensity}×.")
+            ? FormattableString.Invariant($"Pimax · Quad View preset {known.Name}: focus {FocusShort(pimax.Converted)} with eye tracking, {FocusShort(pimax.Converted, GazeMode.Fixed)} fixed, center {known.FocusDensity}×, periphery {known.PeripheralDensity}×.")
             : $"Pimax · Quad View {pimax.PresetName} (no values to read)."
         : $"Pimax Play · {pimax.Play.Mode}: {string.Join(", ", pimax.Play.Controls.Select(x => x.Label + " " + x.Value))}.";
 
@@ -422,7 +455,7 @@ public static class PimaxFovea
             : resolved.Pimax.Unreadable
             ? $"Pimax now uses its Quad View {resolved.Pimax.Short}, which cannot be read. Launch DCS updates the focus area to this profile's own values."
             : resolved.Pimax.Measured is { } preset
-            ? $"Pimax uses its Quad View preset {preset.Name}. Launch DCS updates the focus area to it ({FocusShort(resolved.Pimax.Converted)})."
+            ? $"Pimax uses its Quad View preset {preset.Name}. Launch DCS updates the focus area to it ({FocusShort(resolved.Pimax.Converted, applied.Gaze)})."
             : $"Pimax Play's Quad View settings changed since Apply (Pimax Play now: {resolved.Pimax.Play.Short}). Launch DCS updates the focus area to these values.";
     }
 

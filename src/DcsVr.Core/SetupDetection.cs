@@ -147,13 +147,13 @@ public static class SetupDetection
             profile = profile with
             {
                 FoveaSource = FoveaSource.PimaxPlay, QuadFocusScale = c.FocusScale, PeripheralScale = c.PeripheralScale,
-                FoveaWidth = c.Width, FoveaHeight = c.Height, QuadEdgeBlend = c.Transition ? profile.QuadEdgeBlend : 0
+                FoveaWidth = c.For(profile.Gaze).Width, FoveaHeight = c.For(profile.Gaze).Height, QuadEdgeBlend = c.Transition ? profile.QuadEdgeBlend : 0
             };
             // Shown in Pimax Play's own units and labels; the converted values are in the Quad Views page's details.
             var source = "Pimax Play " + quad.Play.Mode + " mode (" + sources.PimaxPlaySettings + ")";
             Set("foveaSource", "Focus area source", "Pimax Play (read again at every launch)", sources.PimaxPlaySettings);
             // A preset: its name and what it renders (the Custom page's saved sliders are not in use).
-            if (quad.Measured is { } known) Set("pimax:preset", "Pimax Quad View preset", known.Name + " · focus " + PimaxFovea.FocusShort(c), sources.PimaxPlaySettings);
+            if (quad.Measured is { } known) Set("pimax:preset", "Pimax Quad View preset", known.Name + " · focus " + PimaxFovea.FocusShort(c, profile.Gaze), sources.PimaxPlaySettings);
             else foreach (var control in quad.Play.Controls)
                 Set("pimax:" + control.Label, control.Label, control.Value, source);
             Set("quadEdgeBlend", "Edge blending", Format(profile.QuadEdgeBlend), c.Transition ? "Pimax Transition Mode is " + quad.Play.TransitionMode + "; this profile's blending is kept" : "Pimax Transition Mode is Off");

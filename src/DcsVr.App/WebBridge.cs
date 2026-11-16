@@ -457,7 +457,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     private static string? FoveaChanged(AppliedProfile? applied) =>
         applied is not null && PimaxFovea.UsesPimaxPlay(applied.Profile) && PimaxFovea.Resolve(applied.Profile) is { Pimax: { } pimax } resolved
             && !PimaxFovea.SameFovea(resolved.Profile, applied.Fovea ?? AppliedFovea.From(applied.Profile, null))
-            ? PimaxFovea.WillUpdate(pimax) : null;
+            ? PimaxFovea.WillUpdate(pimax, applied.Profile.Gaze) : null;
     /// <summary>A running DCS.exe; the offline verification host reports none.</summary>
     private bool DcsRunning() => offline ? _offlineDcs : DcsProcess.AnyRunning();
     private readonly DcsStuckTracker _stuck = new();

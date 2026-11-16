@@ -868,7 +868,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                 (foveaFile, utf8.GetBytes(JsonData.Serialize(AppliedFovea.From(now, pimax.Stamp))))]);
         }
         catch (Exception e) when (e is IOException or InvalidOperationException or InvalidDataException or UnauthorizedAccessException) { return false; }
-        message = PimaxFovea.Updated(pimax);
+        message = PimaxFovea.Updated(pimax, profile.Gaze);
         return true;
     }
 
