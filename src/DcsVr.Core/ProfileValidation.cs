@@ -231,7 +231,7 @@ public static class ProfileValidation
         if (profile.UsesLowerMonitor && (profile.FlightDisplayWidth is < 640 or > 15360 || profile.FlightDisplayHeight is < 480 or > 8640 || profile.FlightDisplayRefresh is < 24 or > 1000))
             Error("monitor-mode", "Select a monitor mode from the list for Lower the monitor while flying.");
         if (profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory) && (profile.FoveaWidth > .9 || profile.FoveaHeight > .9))
-            issues.Add(new("quad-coverage-cap", IssueSeverity.Warning, "Bundled Quad Views renders a focus area of at most 90% of the view in each direction. Larger values stay in the profile but are rendered as 90%."));
+            issues.Add(new("quad-coverage-cap", IssueSeverity.Warning, "Bundled Quad Views renders a focus area of at most 90% of the view in each direction, which is Horizontal and Vertical FOV 10% in Pimax Play's Quick units. Lower values stay in the profile but are rendered as 10%."));
         // The focus area is fully sharp up to 1 - 2 x edge blending of its half-height (Quad Views' composition), and the
         // offset is in the same units as that half-height: beyond it the point looked at is in the fading edge or outside.
         if (profile.UsesBundledQuadViews && !PimaxFovea.UsesPimaxPlay(profile) && double.IsFinite(profile.QuadVerticalOffset)

@@ -458,7 +458,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         applied is not null && PimaxFovea.UsesPimaxPlay(applied.Profile) && PimaxFovea.Resolve(applied.Profile) is { Pimax: { } pimax } resolved
             && !PimaxFovea.SameFovea(resolved.Profile, applied.Fovea ?? AppliedFovea.From(applied.Profile, null))
             ? (pimax.Preset ? $"Pimax uses its Quad View {pimax.Short}, which cannot be read: focus will be updated to this profile's own values at launch."
-                : PimaxFovea.WillUpdate(pimax, applied.Fovea)) : null;
+                : $"Pimax Play changed: focus will be updated to {pimax.Play.Short} at launch.") : null;
     /// <summary>A running DCS.exe; the offline verification host reports none.</summary>
     private bool DcsRunning() => offline ? _offlineDcs : DcsProcess.AnyRunning();
     private readonly DcsStuckTracker _stuck = new();

@@ -869,7 +869,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         }
         catch (Exception e) when (e is IOException or InvalidOperationException or InvalidDataException or UnauthorizedAccessException) { return false; }
         message = pimax.Preset ? $"Pimax uses its Quad View {pimax.Short}, which cannot be read: focus updated to this profile's own values."
-            : PimaxFovea.Updated(pimax, written);
+            : $"Pimax Play changed: focus updated to {pimax.Play.Short}.";
         return true;
     }
 

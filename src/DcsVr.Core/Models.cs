@@ -129,8 +129,8 @@ public sealed record VrProfile
     public bool NeuralRendering { get; init; }
     public bool QuadFocusAdapter { get; init; }
     // Used when the focus area source is this profile (or Pimax Play's settings cannot be read). The defaults are
-    // Pimax Play's Fine values on a Crystal Super (stored 0.66 / 0.20 per side and 0.66 up and down, gaze scale 0.25,
-    // periphery 0.1919) as Pimax's runtime renders them and PimaxFovea converts them: 0.57 x 0.34 focus at 1.125x, periphery 0.19.
+    // Pimax Play's Fine values on a Crystal Super (0.66 / 0.20 per side shares left out, gaze scale 0.25, periphery
+    // 0.1919) converted the same way PimaxFovea converts them: 0.57 x 0.34 focus at 1.125x, periphery 0.19.
     public double FoveaWidth { get; init; } = 0.57;
     public double FoveaHeight { get; init; } = 0.34;
     /// <summary>Quad Views' vertical_focus_offset (eye-tracked) and vertical_fixed_offset (fixed focus), in the layer's own

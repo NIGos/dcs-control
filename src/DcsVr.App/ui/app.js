@@ -42,8 +42,8 @@ const NO_TIMEOUT = new Set(['browse','save','import','export','importSboys','pre
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const empty = value => value.trim() || null;
 const num = value => String(Number(Number(value).toFixed(4)));
-/** A profile's own focus values as the page edits them (4 decimals, as Pimax stores its sliders): Horizontal/Vertical FOV q is a
- *  focus q % of the view (Pimax Play's own FOV sliders count the other way: its q is a focus 100 - q); Center Resolution c is a pixel density of c / 100
+/** A profile's own focus values in Pimax Play's Quick units, converted exactly like Pimax Quick (Pimax stores 4 decimals):
+ *  Horizontal/Vertical FOV q is a focus q of the view (the percentage Pimax Play shows); Center Resolution c is a pixel density of c / 100
  *  (120% → 1.2); Peripheral Resolution r is a density of 0.01 + 0.98 × (r − 1) / 99 (15% → 0.1486). */
 // <uses-rules>
 const fixed4 = v => Number(v.toFixed(4));
@@ -266,7 +266,7 @@ function featureSummary(key, p) {
     if (p.quadViews === 'PimaxNative') return 'Pimax native · ' + (state?.pimax?.found ? 'Pimax ' + state.pimax.short : 'uses Pimax Play settings');
     const e = effectiveFovea(p), gaze = p.gaze === 'EyeTracked' ? 'eye tracked' : 'fixed';
     if (p.quadViewsLayerDirectory) return 'Alternative provider · '+gaze;
-    // Pimax Play's own values as it shows them ("Quick 33% × 33% · 113% · 20%"), or this profile's own.
+    // In Pimax Play's units: "Pimax Quick 33% × 33% · 113% · 20%", or this profile's values in the same Quick units.
     if (pimaxSource(p)) return `Bundled · ${gaze} · ` + (state?.pimax?.found ? (state.pimax.preset ? `Pimax ${state.pimax.short}${state.pimax.quadViewsOff ? '' : " can't be read"}, values set here · ${profileQuick(p)}` : 'from Pimax Play\'s settings: ' + state.pimax.short) : 'Pimax Play not found, values set here');
     return `Bundled · ${gaze} · set here · ${profileQuick(p)}`;
   }
@@ -646,15 +646,15 @@ function buildFields() {
   field(toggles,'quadTurbo','Turbo mode',['Can help when the CPU limits FPS.','DCS starts the next frame while the headset still shows the previous one. Not with frame generation, which paces the frames itself.'],'toggle',null,p => quad(p) && p.frameGen === 'Off');
   let more = disclosure(c,'Alternative provider','Only to test another Quad Views build.',p => p.quadViews !== 'QuadViewsFoveated' ? 'Not used' : p.quadViewsLayerDirectory ? p.quadViewsLayerDirectory.split(/[\\/]/).filter(Boolean).pop() : 'Bundled');
   field(more,'quadViewsLayerDirectory','Alternative Quad Views provider','Folder of another Quad Views build. Leave empty for the bundled one, which DLSS 5 needs.','path',null,p => p.quadViews === 'QuadViewsFoveated');
-  c = card('focusControls','Focus area','Size and detail of the sharp area.');
-  segmented(field(c,'foveaSource','Focus area values',['Read from Pimax Play at every launch, or set here.','From Pimax Play: the Quad View values you set there, read again at every launch. The focus area gets the size Pimax\'s own Quad Views renders with them. Nothing is written to Pimax Play. Set here: choose them below.'],'select',[['PimaxPlay','From Pimax Play (recommended)'],['Profile','Set here']],quad),{PimaxPlay:'From Pimax Play',Profile:'Set here'});
+  c = card('focusControls','Focus area','Size and detail of the sharp area, in Pimax Play\'s units.');
+  segmented(field(c,'foveaSource','Focus area values',['Read from Pimax Play at every launch, or set here.','From Pimax Play: the Quad View values you set there, read again at every launch. Nothing is written to Pimax Play. Set here: choose them below, in the same units.'],'select',[['PimaxPlay','From Pimax Play (recommended)'],['Profile','Set here']],quad),{PimaxPlay:'From Pimax Play',Profile:'Set here'});
   const pimaxBox = document.createElement('div'); pimaxBox.id = 'pimaxFovea'; pimaxBox.className = 'pimax-fovea'; pimaxBox.hidden = true; c.append(pimaxBox);
-  // This profile's own focus with bundled Quad Views: sizes as shares of the view, the resolutions on Pimax Play's scales.
+  // This profile's own focus with bundled Quad Views, edited like Pimax Play's Quick sliders and converted exactly as Pimax converts them.
   const ownFocusHidden = p => p.quadViews !== 'QuadViewsFoveated' || pimaxSource(p);
   field(c,'quadFocusScale','Center resolution','Detail inside the focus area. Above 100% is sharper and costs more GPU.','number',[50,200,1],quad,'%',ownFocusHidden,{prop:'quadFocusScale',get:p => whole(PIMAX.centerFromDensity(p.quadFocusScale)),set:(p,v) => p.quadFocusScale = PIMAX.densityFromCenter(v)});
   field(c,'pimaxPeripheral','Peripheral resolution',['Resolution around the focus area. Lower saves GPU.','As in Pimax Play. Bundled Quad Views needs at least 16%.'],'number',[16,100,1],quad,'%',ownFocusHidden,{prop:'peripheralScale',get:p => whole(PIMAX.peripheralPercent(p.peripheralScale)),set:(p,v) => p.peripheralScale = PIMAX.peripheryFromPercent(v)});
-  field(c,'pimaxHorizontalFov','Horizontal FOV',['The focus area\'s share of the view\'s width.','25% is a focus area a quarter of the view wide. Pimax Play\'s own slider counts the other way: its 25% leaves a focus area 75% wide.'],'number',[10,90,1],quad,'%',ownFocusHidden,{prop:'foveaWidth',get:p => whole(PIMAX.quickFromShare(p.foveaWidth)),set:(p,v) => p.foveaWidth = PIMAX.shareFromQuick(v)});
-  field(c,'pimaxVerticalFov','Vertical FOV',['The focus area\'s share of the view\'s height.','Top to bottom: 34% is a focus area a third of the view high. Pimax Play\'s own slider counts the other way.'],'number',[10,90,1],quad,'%',ownFocusHidden,{prop:'foveaHeight',get:p => whole(PIMAX.quickFromShare(p.foveaHeight)),set:(p,v) => p.foveaHeight = PIMAX.shareFromQuick(v)});
+  field(c,'pimaxHorizontalFov','Horizontal FOV',['The focus area\'s share of the view\'s width.','As in Pimax Play\'s Quick mode: 25% is a focus area a quarter of the view wide.'],'number',[10,90,1],quad,'%',ownFocusHidden,{prop:'foveaWidth',get:p => whole(PIMAX.quickFromShare(p.foveaWidth)),set:(p,v) => p.foveaWidth = PIMAX.shareFromQuick(v)});
+  field(c,'pimaxVerticalFov','Vertical FOV',['The focus area\'s share of the view\'s height.','As in Pimax Play\'s Quick mode, top to bottom.'],'number',[10,90,1],quad,'%',ownFocusHidden,{prop:'foveaHeight',get:p => whole(PIMAX.quickFromShare(p.foveaHeight)),set:(p,v) => p.foveaHeight = PIMAX.shareFromQuick(v)});
   field(c,'pimaxVerticalOffset','Vertical offset',['Moves the focus area down (negative) or up from where you look.','As Pimax Play\'s Vertical Offset: 100 is a quarter of the view\'s height. In an aircraft, about -10 to -20 keeps the gauges sharp while you look outside. With a fixed focus area it moves from the center of the view.'],'number',[-100,100,1],quad,'',ownFocusHidden,{prop:'quadVerticalOffset',get:p => whole(PIMAX.offsetFromStored(Number(p.quadVerticalOffset) || 0)),set:(p,v) => p.quadVerticalOffset = PIMAX.storedFromOffset(v)});
   field(c,'quadEdgeBlend','Focus edge blending',['How softly the focus area fades into the periphery.','Wider is softer but leaves a little less area in full detail. With values from Pimax Play and its Transition Mode Off, the edge is hard (0).'],'number',[0,.5,.01],quad,'ratio');
   field(c,'quadRoundFocus','Round focus area',['On: a circle. Off: a rounded rectangle, with more detail in the corners.','Either way its edge fades out over Focus edge blending. A central DLSS 5 area follows the same shape.'],'toggle',null,quad);
@@ -1045,7 +1045,7 @@ function renderPimax() {
       + (r ? `<p class="fine">${r.width} × ${r.height} is the per-eye resolution the headset runtime recommended in DCS's last session; sizes are rounded to an even pixel count as Pimax's runtime does.</p>` : '')
       + `${notes}<p class="fine">${escape(pimax.explanation)}</p></details>`;
   }
-  box.innerHTML = `<div class="pimax-head"><div><b>Pimax Play · ${escape(pimax.mode)} mode</b><small title="${escape(pimax.path)}">Saved ${new Date(pimax.modified).toLocaleString('en-GB')}</small></div>${reread}</div>${controls}${mode === 'bundled' ? '<p class="fine">Focus area = the size Pimax\'s own Quad Views renders with these values.</p>' : ''}${warnings}${how}`;
+  box.innerHTML = `<div class="pimax-head"><div><b>Pimax Play · ${escape(pimax.mode)} mode</b><small title="${escape(pimax.path)}">Saved ${new Date(pimax.modified).toLocaleString('en-GB')}</small></div>${reread}</div>${controls}${mode === 'bundled' ? '<p class="fine">Focus area = the percentage shown in Pimax Play.</p>' : ''}${warnings}${how}`;
 }
 // ---- Saved DLSS 5 runtime -----------------------------------------------------------------------------------------
 /** Verifies the file and keeps it as the app's copy; the draft is not changed. */
@@ -1371,7 +1371,7 @@ function updateControls() {
     help.textContent = f.description + (clamped ? ` Without Quad Views the minimum is ${CHEEKY_MIN}, so ${CHEEKY_MIN} is written.` : '');
     f.element.classList.toggle('clamped', clamped);
   });
-  // Bundled Quad Views renders at most 90% of the view per axis: Horizontal or Vertical FOV 90% here.
+  // Bundled Quad Views renders at most 90% of the view per axis: Horizontal or Vertical FOV 90% in Pimax Play's Quick units.
   fields.filter(f => ['pimaxHorizontalFov','pimaxVerticalFov'].includes(f.path)).forEach(f => {
     const value = f.map.get(profile), capped = quad(profile) && !pimaxSource(profile) && PIMAX.quickFromShare(profile[f.path === 'pimaxHorizontalFov' ? 'foveaWidth' : 'foveaHeight']) > 90 + 1e-9;
     $('help-'+f.path).textContent = f.description + (capped ? ` Bundled Quad Views renders a focus area of at most 90% of the view, so ${value}% renders as 90%.` : '');
@@ -1390,9 +1390,9 @@ function updateControls() {
     const shift = e.offset ? num(Math.abs(e.offset)*50)+'% '+(e.offset < 0 ? 'below' : 'above') : '';
     $('coverageGaze').textContent = quad(profile) || owns ? (profile.gaze === 'EyeTracked' ? (shift ? 'Follows your eyes, '+shift : 'Follows your eyes') : shift ? 'Fixed '+shift+' the center' : 'Fixed in the center') : '';
     $('coveragePeriphery').hidden = $('focusBox').hidden; }
-  // Pimax Play's own values, or this profile's, for Quad Views; fractions of the view for stereo Cheeky without Quad Views.
+  // Pimax Play's units for Quad Views; fractions of the view for stereo Cheeky without Quad Views.
   const pimaxFound = state?.pimax?.found;
-  $('coverageDetail').textContent = quad(profile) ? (e.pimax ? `Pimax Play ${state.pimax.short}: a focus area ${Math.round(e.w*100)}% × ${Math.round(e.h*100)}% of the view, as Pimax renders it` : `Horizontal FOV ${whole(PIMAX.quickFromShare(profile.foveaWidth))}% · Vertical FOV ${whole(PIMAX.quickFromShare(profile.foveaHeight))}% · Center ${whole(PIMAX.centerFromDensity(profile.quadFocusScale))}% · Peripheral ${whole(PIMAX.peripheralPercent(profile.peripheralScale))}%${e.offset ? ' · Vertical offset '+whole(PIMAX.offsetFromStored(e.offset)) : ''}`)
+  $('coverageDetail').textContent = quad(profile) ? (e.pimax ? `Pimax Play ${state.pimax.short}` : `Horizontal FOV ${whole(PIMAX.quickFromShare(profile.foveaWidth))}% · Vertical FOV ${whole(PIMAX.quickFromShare(profile.foveaHeight))}% · Center ${whole(PIMAX.centerFromDensity(profile.quadFocusScale))}% · Peripheral ${whole(PIMAX.peripheralPercent(profile.peripheralScale))}%${e.offset ? ' · Vertical offset '+whole(PIMAX.offsetFromStored(e.offset)) : ''} (Pimax Quick units)`)
     : owns ? `${Math.round(e.w*100)}% width · ${Math.round(e.h*100)}% height · ${Math.round(e.periphery*100)}% peripheral scale` : profile.quadViews === 'PimaxNative' && pimaxFound ? `Pimax native · Pimax Play ${state.pimax.short}` : 'Coverage is controlled by the selected provider.';
   // Pixels DCS renders for the four views, against normal stereo at the same resolution (before DLSS; overlap counts twice).
   const pixels = quad(profile) ? e.periphery**2 + e.w*e.h*e.focus**2 : null;
@@ -1528,7 +1528,7 @@ function updateWorkflow() {
   renderLive();
   $('statusDot').classList.toggle('ready', !busy && !error && mode === 'ready');
   $('launch').title = mode === 'running' ? 'DCS is already running'
-    : mode === 'ready' ? 'Launch DCS with '+profile.name+(state.foveaChanged ? ' (the new focus values are written first)' : '')
+    : mode === 'ready' ? 'Launch DCS with '+profile.name+(state.foveaChanged ? ' (Pimax Play\'s new focus values are written first)' : '')
     : applied ? 'Apply '+(profile?.name || 'this profile')+' over '+applied+', then launch DCS' : 'Back up the original files, apply '+(profile?.name || 'this profile')+', then launch DCS';
 }
 // ---- Live mode: while DCS runs, settings its components re-read in flight are written at once -------------------------
