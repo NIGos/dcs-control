@@ -1,0 +1,280 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d383b18..4ee42a1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1387,6 +1387,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+                 "-DSINGLE_SLOW_MS=250"
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_two_layers.cmake")
+         set_tests_properties(xrfg_layer_two_layers_deep_hold_arming_single PROPERTIES TIMEOUT 180)
++        # DCS Control (0089): the first frame's focus layer comes with an
++        # unfilled, wide field of view (a headset not tracked when the session
++        # starts); the periphery role must still go to the periphery
++        # swapchain (tests/layer_two_layers.cmake, ROLES).
++        add_test(
++            NAME xrfg_layer_two_layers_deep_hold_roles
++            COMMAND "${CMAKE_COMMAND}"
++                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                "-DBASE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_shallow_pipeline.ini"
++                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/xrfg_layer_two_layers_deep_hold_roles"
++                "-DMODE=dcs"
++                "-DTWO=1"
++                "-DROLES=1"
++                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_two_layers.cmake")
++        set_tests_properties(xrfg_layer_two_layers_deep_hold_roles PROPERTIES TIMEOUT 180)
+         # is heavy, light, then heavy again; tests/layer_release_offset.cmake)
+         # in the two-layer shape, where the tree has that patch: the flight
+         # that showed the stale offset was a two-layer one.
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+index 932853c..b6548ea 100644
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -864,6 +864,14 @@ enum class BridgeFlightOperation : std::uint32_t {
+     //     (the runtime refused a private swapchain, or the session's budget:
+     //     the frame passes through); b= the frame's projection layers; c= its
+     //     swapchains.
++    //   result=3 (DCS Control 0089), the role a swapchain is about to be armed
++    //     with, once per swapchain and role: a= the application's swapchain,
++    //     b= 1 the periphery layer's (the optical flow at
++    //     `foveated_periphery_flow_scale`, the small-sprite cursor detection),
++    //     0 the focus layer's, plus 256 when the widest field of view alone
++    //     would have named another layer in that frame (the focus views came
++    //     unfilled: a headset not tracked at the session's first frame);
++    //     c= the swapchain's width << 32 | height.
+     foveated_mode,
+ };
+ 
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index dadcde0..12239b4 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -2934,6 +2934,9 @@ struct SwapchainState {
+     // and kept: it picks the optical flow's input scale the synthesizer is
+     // made with (swapchain_nvidia_options).
+     std::atomic<bool> foveated_periphery{false};
++    // DCS Control (0089): the role last written to the flight log for this
++    // swapchain (0 none, 1 periphery, 2 focus); under `mutex`.
++    std::uint32_t foveated_role_logged{};
+     // DCS VR Control (0008): a lazy bridged swapchain (`[ofxr]
+     // lazy_runtime_swapchains`). The application's handle names no runtime
+     // swapchain: it is the layer's own (this state's address with the low
+@@ -5252,6 +5255,7 @@ void retire_async_arm(const std::shared_ptr<SwapchainState>& state) noexcept {
+ 
+ // Foveated layers: defined with prepare_projection_frame, below.
+ [[nodiscard]] std::size_t foveated_periphery_layer(const ProjectionSnapshot& snapshot) noexcept;
++[[nodiscard]] std::size_t foveated_widest_layer(const ProjectionSnapshot& snapshot) noexcept; // 0089
+ 
+ // Foveated layers: which of the frame's swapchains carry the periphery layer,
+ // noted on each swapchain that is still to be armed (the role picks the
+@@ -5278,9 +5282,26 @@ void note_foveated_periphery_swapchains(
+             std::scoped_lock lock(swapchain->mutex);
+             // Not under an arming thread, which took its options already.
+             if (!swapchain->frame_generation && !swapchain->async_arm) {
+-                swapchain->foveated_periphery.store(
+-                    mapping.views.front().projection_index == periphery_layer,
+-                    std::memory_order_relaxed);
++                const bool periphery = mapping.views.front().projection_index == periphery_layer;
++                swapchain->foveated_periphery.store(periphery, std::memory_order_relaxed);
++                // DCS Control (0089): the role this swapchain is about to be
++                // armed with, once per swapchain and role (foveated_mode
++                // result=3: a= the swapchain, b= 1 the periphery layer's, 0
++                // the focus layer's, plus 256 when the widest field of view
++                // alone would have named another layer in this frame, c= the
++                // swapchain's width << 32 | height).
++                const std::uint32_t logged = periphery ? 1U : 2U;
++                if (swapchain->foveated_role_logged != logged) {
++                    swapchain->foveated_role_logged = logged;
++                    xrfg::bridge_flight_logger().event(
++                        xrfg::BridgeFlightOperation::foveated_mode,
++                        3,
++                        handle_value(mapping.application_swapchain),
++                        (periphery ? 1U : 0U) |
++                            (foveated_widest_layer(snapshot) != periphery_layer ? 256U : 0U),
++                        (static_cast<std::uint64_t>(swapchain->create_info.width) << 32U) |
++                            swapchain->create_info.height);
++                }
+             }
+         }
+     } catch (...) {
+@@ -15865,11 +15886,47 @@ void drop_idle_cockpit_mask(SessionState& session) noexcept {
+     return display_interpolation_fraction(
+         state, previous_snapshot, current_snapshot, frames, index, own_cadence);
+ }
++// Foveated layers: which of the frame's projection layers has the widest
++// views (the mean of tan(right) - tan(left); the first of equals).
++[[nodiscard]] std::size_t foveated_widest_layer(const ProjectionSnapshot& snapshot) noexcept;
++
+ // Foveated layers: which of the frame's projection layers is the periphery
+-// layer: the one whose views are widest (the mean of tan(right) - tan(left);
+-// the first of equals). The focus layer's field of view is a part of it. One
++// layer. The focus layer is blended over it by its alpha, so the periphery
++// layer is the one projection layer of the frame that does NOT blend by its
++// alpha (XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT), where the
++// frame has exactly one such; otherwise the one whose views are widest, as
++// before (the focus layer's field of view is a part of the periphery's). One
+ // projection layer is always the periphery layer.
++// DCS Control (0089): the flag comes first because the fields of view cannot
++// be trusted in every frame. Flown 2026-11-16: with a headset that is not
++// tracked when the session starts (on its stand, or not yet put on), the
++// runtime's first xrLocateViews carries no valid pose, Quad Views then leaves
++// the two focus views as the application handed them in, and the first
++// frame's focus layer came with a field of view wider than the periphery's.
++// That frame is the one that arms the swapchains: the periphery role (the
++// optical flow's input scale, the small-sprite cursor detection) went to the
++// focus layer's swapchain and stayed there for the session (20 of 20 flights:
++// 15 untracked wrong, 5 tracked right), and the cursor outside the focus
++// image was never redrawn (0 of 360 pairs).
+ [[nodiscard]] std::size_t foveated_periphery_layer(const ProjectionSnapshot& snapshot) noexcept {
++    std::size_t opaque = 0;
++    std::size_t opaque_count = 0;
++    for (std::size_t index = 0; index < snapshot.layers.size(); ++index) {
++        if ((snapshot.layers[index].layer_flags &
++                XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) == 0) {
++            if (opaque_count == 0) {
++                opaque = index;
++            }
++            ++opaque_count;
++        }
++    }
++    if (snapshot.layers.size() >= 2 && opaque_count == 1) {
++        return opaque;
++    }
++    return foveated_widest_layer(snapshot);
++}
++
++[[nodiscard]] std::size_t foveated_widest_layer(const ProjectionSnapshot& snapshot) noexcept {
+     std::size_t widest = 0;
+     float widest_span = -1.0F;
+     for (std::size_t index = 0; index < snapshot.layers.size(); ++index) {
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+index 2934066..edd2337 100644
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -171,6 +171,17 @@ std::array<std::array<bool, 4>, 2> g_two_layer_live{};
+ // counted (g_two_layer_route_overflow), as is one made on the application's
+ // thread while another thread is making that layer's.
+ bool g_two_layer_single = false;
++// DCS Control (0089): XRFG_TEST_TWO_LAYER_UNFILLED_FOCUS=1, the application's
++// first frame carries the focus layer with a field of view that was never
++// filled in (wider than the periphery's: 1.4 rad each way), as DCS submits it
++// when the runtime's first xrLocateViews has no valid pose and Quad Views
++// leaves the focus views alone. The swapchains are armed by that frame; the
++// roles they are armed with are in the flight log (foveated_mode result=3)
++// and judged by tests/layer_two_layers.cmake (ROLES=1). The fake runtime does
++// not judge that frame's focus field of view.
++bool g_two_layer_unfilled_focus = false;
++constexpr float kTwoLayerUnfilledAngle = 1.4F;
++std::atomic<std::uint32_t> g_two_layer_unfilled_submitted{0};
+ std::atomic<int> g_two_layer_creating{0};
+ std::atomic<std::uint32_t> g_two_layer_single_submitted{0};
+ std::atomic<std::uint32_t> g_two_layer_single_seen{0};
+@@ -3239,6 +3250,10 @@ void two_layer_check(const XrFrameEndInfo* end_info) {
+         const XrFovf expected =
+             two_layer_focus_fov(layers[0]->views[view].pose, layers[0]->views[view].fov);
+         const XrFovf& found = layers[1]->views[view].fov;
++        if (g_two_layer_unfilled_focus && found.angleRight == kTwoLayerUnfilledAngle &&
++            found.angleLeft == -kTwoLayerUnfilledAngle) {
++            break; // 0089: the unfilled first frame, passed through as it came
++        }
+         if (std::abs(found.angleLeft - expected.angleLeft) > 1.0e-5F ||
+             std::abs(found.angleRight - expected.angleRight) > 1.0e-5F ||
+             std::abs(found.angleUp - expected.angleUp) > 1.0e-5F ||
+@@ -3400,6 +3415,8 @@ int main(int argc, char** argv) {
+         g_two_layer_light = std::strcmp(argv[3], "dcs-cadence-pause") == 0 ||
+             std::strcmp(argv[3], "dcs-cadence-exit") == 0;
+         g_two_layer_single = GetEnvironmentVariableA("XRFG_TEST_TWO_LAYER_SINGLE", nullptr, 0) != 0;
++        g_two_layer_unfilled_focus =
++            GetEnvironmentVariableA("XRFG_TEST_TWO_LAYER_UNFILLED_FOCUS", nullptr, 0) != 0; // 0089
+     }
+     const int result = call_chain_main(argc, argv);
+     if (!g_two_layer_mode) {
+@@ -4551,6 +4568,14 @@ int call_chain_main(int argc, char** argv) {
+                 two_layer_views[index].fov =
+                     two_layer_focus_fov(projection_views[index].pose, projection_views[index].fov);
+             }
++            // 0089: the first frame's focus views as nobody filled them.
++            if (g_two_layer_unfilled_focus &&
++                g_two_layer_unfilled_submitted.fetch_add(1, std::memory_order_acq_rel) == 0) {
++                for (XrCompositionLayerProjectionView& view : two_layer_views) {
++                    view.fov = XrFovf{-kTwoLayerUnfilledAngle, kTwoLayerUnfilledAngle,
++                        kTwoLayerUnfilledAngle, -kTwoLayerUnfilledAngle};
++                }
++            }
+             std::uint32_t focus_index = 0;
+             const auto focus_started = std::chrono::steady_clock::now();
+             if (XR_FAILED(acquire_image(two_layer_focus, &acquire_info, &focus_index)) ||
+diff --git a/tests/layer_two_layers.cmake b/tests/layer_two_layers.cmake
+index 3a1b841..2d78803 100644
+--- a/tests/layer_two_layers.cmake
++++ b/tests/layer_two_layers.cmake
+@@ -17,6 +17,11 @@
+ # the one that started the arming names its first swapchain alone
+ # (XRFG_TEST_TWO_LAYER_SINGLE); the call chain fails if a swapchain is armed
+ # twice.
++# ROLES=1 (DCS Control 0089): the application's first frame has a focus layer
++# with an unfilled, wide field of view (XRFG_TEST_TWO_LAYER_UNFILLED_FOCUS).
++# Judged on the flight log's " op=foveated_mode result=3 " records: one per
++# swapchain, the periphery role (b bit 0) on the 4x4 swapchain and not on the
++# 8x8 focus swapchain, and the frame seen (b bit 8 on one of them at least).
+ foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN BASE_INI WORK_DIR MODE TWO)
+     if(NOT DEFINED ${required_variable})
+         message(FATAL_ERROR "${required_variable} was not provided")
+@@ -45,6 +50,9 @@ if(TWO)
+ else()
+     set(scenario "${MODE}")
+ endif()
++if(DEFINED ROLES)
++    set(ENV{XRFG_TEST_TWO_LAYER_UNFILLED_FOCUS} "1")
++endif()
+ if(DEFINED SINGLE_SLOW_MS)
+     set(ENV{XRFG_TEST_TWO_LAYER_SINGLE} "1")
+     set(ENV{XRFG_TEST_SLOW_PRIVATE_CREATE_MS} "${SINGLE_SLOW_MS}")
+@@ -77,6 +85,8 @@ set(not_applied 0)
+ foreach(line IN LISTS mode_lines)
+     if(line MATCHES " op=foveated_mode result=1 ")
+         math(EXPR active "${active} + 1")
++    elseif(line MATCHES " op=foveated_mode result=3 ")
++        # 0089: a swapchain's role, judged below with ROLES.
+     else()
+         math(EXPR not_applied "${not_applied} + 1")
+     endif()
+@@ -91,3 +101,39 @@ elseif(NOT active EQUAL 0 OR NOT not_applied EQUAL 0)
+     message(FATAL_ERROR "foveated_mode records without the key: ${mode_lines}")
+ endif()
+ message(STATUS "Two layers '${scenario}': foveated mode active ${active}, not applied ${not_applied}")
++
++if(DEFINED ROLES)
++    # c = width << 32 | height: the periphery swapchain is 4x4, the focus 8x8.
++    set(periphery_size 17179869188)
++    set(focus_size 34359738376)
++    set(periphery_right 0)
++    set(focus_right 0)
++    set(wrong 0)
++    set(disagreed 0)
++    foreach(line IN LISTS mode_lines)
++        if(line MATCHES " op=foveated_mode result=3 .* b=([0-9]+) c=([0-9]+)")
++            set(role_bits "${CMAKE_MATCH_1}")
++            set(role_size "${CMAKE_MATCH_2}")
++            math(EXPR role "${role_bits} % 2")
++            math(EXPR other_rule "(${role_bits} / 256) % 2")
++            math(EXPR disagreed "${disagreed} + ${other_rule}")
++            if(role_size STREQUAL periphery_size AND role EQUAL 1)
++                math(EXPR periphery_right "${periphery_right} + 1")
++            elseif(role_size STREQUAL focus_size AND role EQUAL 0)
++                math(EXPR focus_right "${focus_right} + 1")
++            else()
++                math(EXPR wrong "${wrong} + 1")
++            endif()
++        endif()
++    endforeach()
++    if(NOT wrong EQUAL 0 OR periphery_right LESS 1 OR focus_right LESS 1 OR disagreed LESS 1)
++        message(FATAL_ERROR
++            "Two layers, roles: periphery role on the periphery swapchain ${periphery_right}, "
++            "focus role on the focus swapchain ${focus_right}, wrong ${wrong}, records where the widest "
++            "field of view named another layer ${disagreed} (expected: 1 or more, 1 or more, 0, 1 or more): "
++            "${mode_lines}")
++    endif()
++    message(STATUS
++        "Two layers, roles with an unfilled first focus field of view: periphery ${periphery_right}, "
++        "focus ${focus_right}, wrong 0, the widest-field-of-view rule would have erred in ${disagreed}")
++endif()
