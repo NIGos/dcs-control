@@ -1,0 +1,34 @@
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+index 670af38..2c7bf39 100644
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -166,6 +166,9 @@ struct ConfiguredNvidiaOptions {
+ // synthetic's output and lose its slot, the application is released earlier
+ // by what that output was late (xrfg::latency::LeaderLead). On unless set to
+ // 0; nothing changes on a runtime that does not wait. Read once per session.
++// Not at a fixed 2X with adaptive control off (`adaptive_frame_gen=0`): the
++// detector has no readiness fence to read there and never arms (see
++// xrfg::latency::HandOverBlock).
+ [[nodiscard]] bool read_leader_lead(
+     const std::filesystem::path& module_directory) noexcept;
+ 
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+index 6190e04..b480791 100644
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -2376,6 +2376,15 @@ struct CaptureEpochStep {
+ //
+ // A runtime that returns before the output is written never latches, and
+ // nothing changes for it.
++//
++// A limit (review of 2026-11-15, not lifted): the detector and the lead read
++// the first synthetic's readiness fence, and a pair carries one only in the
++// deeper pipeline, at 3X, or while adaptive control is active
++// (prepare_frame_generation: `deep_pipeline || frames > 2 ||
++// adaptive_active`). At a fixed 2X with adaptive control off and the buffer
++// off a pair has none: the first synthetic always reads as written, nothing
++// is observed, no 410 is written and the release is not moved, on this
++// runtime too. The 36 fps case above is answered under Auto only.
+ struct HandOverBlock {
+     // Observations of a held call that lost its slot before the lead arms;
+     // one that returned unwritten takes kFreeStep back, so a runtime that

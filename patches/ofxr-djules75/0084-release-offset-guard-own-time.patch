@@ -1,0 +1,444 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c556943..3708ba2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1165,7 +1165,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             "return_off|${release_offset_return}|off|adaptive_frame_gen=0,release_offset_guard=0"
+             "light|12000:300/7000:100/3000:300/12000:600|dropped|adaptive_frame_gen=0"
+             "lasting|12000:300/17000:600|stays|adaptive_frame_gen=0"
+-            "shallow|${release_offset_return}|fixed|adaptive_frame_gen=0,deep_pipeline=0,pipelined_deep_hold=0")
++            "shallow|${release_offset_return}|fixed|adaptive_frame_gen=0,deep_pipeline=0,pipelined_deep_hold=0"
++            # Bugfix round (review finding 1 on 0081): with the buffer pacing
++            # the application, a completion on the pop is stepped away from.
++            "boundary|3000:300/B800:700|steps|adaptive_frame_gen=0")
+         foreach(release_offset_case IN LISTS release_offset_cases)
+             string(REPLACE "|" ";" release_offset_fields "${release_offset_case}")
+             list(GET release_offset_fields 0 release_offset_name)
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+index b480791..4de32c9 100644
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -2705,6 +2705,16 @@ struct ReleaseRephase {
+ // Neither acts on a frame that does not fit its slots by itself: there the
+ // offset and its steering are as they were. A hold that waited (no surplus)
+ // charges nothing, so an offset that fits is never dropped.
++// Bugfix round: the own time `fits` is given, from the time between a
++// release and the next hold and the part of it the application spent waiting
++// for the presenter's capacity (which the presenter's pop ends, not the
++// application). Never less than 1: a frame was there.
++[[nodiscard]] constexpr Nanoseconds release_offset_own_time(
++    Nanoseconds released_to_hold, Nanoseconds capacity_waited) noexcept {
++    const Nanoseconds waited = capacity_waited > 0 ? capacity_waited : 0;
++    return released_to_hold > waited ? released_to_hold - waited : 1;
++}
++
+ struct ReleaseOffsetGuard {
+     static constexpr std::uint32_t kCharged = 3;
+     static constexpr std::uint32_t kWindow = 64;
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 1cffbee..47259ba 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1796,6 +1796,16 @@ struct SessionState {
+     // xrEndFrame past the slot arms it without a GPU slow enough to leave
+     // the output unwritten (the call chain's dcs-cadence-held).
+     bool test_leader_unwritten{};
++    // Bugfix round: tests only (XRFG_TEST_HOLD_AT_ADMISSION set when the
++    // session is created): the deeper pipeline's once-per-pair hold at
++    // admission on a D3D12 session as well (presenter_hold_at_admission),
++    // which is the order DCS runs in (D3D11 through the bridge) and the one
++    // in which the buffer's capacity, not the hold, paces the application
++    // (the wait after the hand-over, whose bound is one less with this: the
++    // call chain's queue settles one submission shallower than DCS's did in
++    // the flights of 2026-11-15, where that wait took 7-9.5 ms of every
++    // frame). The call chain's application is D3D12.
++    bool test_hold_at_admission{};
+     bool cadence_accountable_enabled{};
+     std::atomic<std::uint32_t> leader_late_streak{0};
+     xrfg::latency::ReleaseRephase release_rephase;
+@@ -1838,6 +1848,12 @@ struct SessionState {
+     // When the once-per-pair hold last released the application; the start
+     // of its work. The application's xrEndFrame thread only.
+     std::chrono::steady_clock::time_point application_released_at{};
++    // DCS Control (0081, bugfix round): how long the application has waited
++    // in wait_for_presenter_capacity since the hold last took this. That
++    // wait is ended by the presenter's pop: with the Smoothness buffer on it
++    // is what paces the application, and it is not the application's own
++    // time (ReleaseOffsetGuard::fits). Guarded by presenter_mutex.
++    std::chrono::nanoseconds application_capacity_wait{0};
+     std::chrono::steady_clock::time_point latency_status_at{};
+     // DCS VR Control (0004): throughput evidence (the xrEndFrame thread), and
+     // the layer's own GPU time - synthesis, where it is harvested, and the
+@@ -6263,6 +6279,8 @@ XrResult layer_create_session_impl(
+         xrfg::implicit_layer::read_release_offset_guard(current_layer_directory());
+     // DCS Control (0079): see SessionState::cadence_accountable_enabled and
+     // test_leader_unwritten.
++    state->test_hold_at_admission = // bugfix round: tests only
++        GetEnvironmentVariableW(L"XRFG_TEST_HOLD_AT_ADMISSION", nullptr, 0) != 0;
+     state->test_leader_unwritten =
+         GetEnvironmentVariableW(L"XRFG_TEST_LEADER_UNWRITTEN", nullptr, 0) != 0;
+     state->cadence_accountable_enabled = !dispatch->steamvr_runtime &&
+@@ -13099,7 +13117,8 @@ void stop_continuous_presenter(
+     // application's queue and waits there for synthesis.
+     return state.deep_pipeline &&
+         (state.graphics_binding == SessionGraphicsBinding::d3d11 ||
+-         state.graphics_binding == SessionGraphicsBinding::vulkan);
++         state.graphics_binding == SessionGraphicsBinding::vulkan ||
++         state.test_hold_at_admission); // bugfix round: tests only
+ }
+ 
+ // Holds the application until the presenter has run a whole pair since it was
+@@ -13152,6 +13171,11 @@ void stop_continuous_presenter(
+         // next hold has it.
+         xrfg::latency::LeaderLeadRelease lead{};
+         bool lead_active = false;
++        // DCS Control (0081, bugfix round): the capacity waits since the
++        // last hold, taken by every hold whatever becomes of it.
++        const xrfg::latency::Nanoseconds capacity_waited =
++            state->application_capacity_wait.count();
++        state->application_capacity_wait = std::chrono::nanoseconds::zero();
+         if (after_hand_over && state->leader_lead_enabled &&
+             !state->deep_pipeline && kPresenterFramesPerPair >= 2 &&
+             state->frames_per_application_frame == 2 &&
+@@ -13334,8 +13358,18 @@ void stop_continuous_presenter(
+                         ? std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               entered - state->application_released_at).count()
+                         : 0;
++                // Bugfix round: what `fits` judges a step on is the
++                // application's own time, without the capacity wait. With
++                // the buffer on that wait takes up whatever the frame leaves
++                // of its slots, the time from release to hold was the
++                // slots less the offset whatever the frame, and no step up
++                // ever fitted (805 once a second in every flight with the
++                // buffer on). `observe` keeps the whole time, as flown: it
++                // acts only on a release that found the application behind
++                // its count, and that one has not waited for capacity.
+                 if (own > 0) {
+-                    state->release_offset_guard.note(own);
++                    state->release_offset_guard.note(
++                        xrfg::latency::release_offset_own_time(own, capacity_waited));
+                 }
+                 const auto offset_before = state->application_release_offset;
+                 if (state->release_offset_guard.observe(
+@@ -13526,12 +13560,17 @@ void stop_continuous_presenter(
+         ApplicationBlockedScope blocked; // DCS VR Control (0004)
+         std::unique_lock lock(state->presenter_mutex);
+         bool stall_tripped = false;
++        const auto capacity_entered = std::chrono::steady_clock::now(); // 0081, bugfix round
+         const bool room = wait_presenter_bounded(*state, lock, [&] {
+             return state->outstanding_presenter_submissions <=
+                        maximum_outstanding ||
+                    XR_FAILED(state->presenter_failure) ||
+                    state->presenter_stop_requested;
+         }, stall_tripped);
++        // DCS Control (0081, bugfix round): see application_capacity_wait.
++        state->application_capacity_wait +=
++            std::chrono::duration_cast<std::chrono::nanoseconds>(
++                std::chrono::steady_clock::now() - capacity_entered);
+         if (!room) {
+             const std::uint32_t trips = state->generation_stall.trips;
+             lock.unlock();
+@@ -18795,9 +18834,15 @@ XrResult layer_end_frame_impl(
+                 // With 3X the whole frame is three submissions.
+                 // DCS Control (0032): the frame's own, under adaptive
+                 // cadence.
++                // Bugfix round, tests only (test_hold_at_admission): one
++                // less, which is where a queue one submission deeper (the
++                // flights of 2026-11-15 with the buffer on) leaves the
++                // application: waiting here for the presenter's next pop.
+                 result = wait_for_presenter_capacity(
+                     state,
+-                    state->deep_pipeline ? 3 : frames_per_frame);
++                    state->deep_pipeline
++                        ? (state->test_hold_at_admission ? 2 : 3)
++                        : frames_per_frame);
+                 // DCS Control (0040): the pair is queued; a bound that ran
+                 // out only lets the application go on.
+                 if (result == XR_TIMEOUT_EXPIRED) {
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+index b0150ce..8429d84 100644
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -5037,6 +5037,29 @@ void release_offset_guard_tests() {
+         require(!guard.observe(true, 0, 13'600'000, kBudget) && guard.judged == 0,
+             "guard: nothing to judge without an offset");
+     }
++    // Bugfix round (review finding 1): the buffer on, flight9 of 2026-11-15:
++    // 18.8 ms from release to hold of which 7.5 waiting for the presenter's
++    // capacity, 3.05 ms of offset in force, a step to 3.5 ms asked. On the
++    // whole time no step up fits (805 once a second); on the application's
++    // own time it does, and a frame that fills its slots is still refused.
++    {
++        ReleaseOffsetGuard whole;
++        ReleaseOffsetGuard own;
++        for (int index = 0; index < 8; ++index) {
++            whole.note(18'800'000);
++            own.note(release_offset_own_time(18'800'000, 7'500'000));
++        }
++        require(!whole.fits(3'500'000, kBudget),
++            "guard: the time with the capacity wait in it refuses the step (the defect)");
++        require(own.longest() == 11'300'000 && own.fits(3'500'000, kBudget),
++            "guard: the step fits the application's own time");
++        require(!own.fits(11'000'000, kBudget),
++            "guard: a step past the slots is still refused on the own time");
++        require(release_offset_own_time(5 * kMs, 0) == 5 * kMs &&
++                release_offset_own_time(5 * kMs, -kMs) == 5 * kMs &&
++                release_offset_own_time(5 * kMs, 6 * kMs) == 1,
++            "guard: own time without a wait, and never under 1");
++    }
+     // A frame that does not fit its slots by itself is not the offset's.
+     {
+         ReleaseOffsetGuard guard;
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+index ebf3237..02b2760 100644
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -447,6 +447,17 @@ bool g_deep_hold_expected = false;
+ // each one's first display time printed for layer_release_offset.cmake,
+ // which judges the flight log.
+ bool g_release_offset_mode = false;
++// Bugfix round (0081, review finding 1): a phase "B<us>:<frames>" of the
++// shape is an application whose xrEndFrame arrives <us> after the
++// presenter's pop, the place the steering steps away from. The application
++// cannot see the pop; it sees the runtime, so the fake notes when the
++// presenter's thread begins a frame (right after its pop), the phase's first
++// frames measure where the application's xrEndFrame falls against that with
++// a fixed render time, and the render time is then set once and left alone
++// (an application that kept correcting would undo every step the layer
++// takes). RELEASE_OFFSET_BOUNDARY_FROM is the display time of the first
++// frame after that.
++std::atomic<long long> g_presenter_begin_ns{0};
+ std::atomic<bool> g_deep_hold_destroy_check{false};
+ // dcs-async-arm (0050): dcs-latency's shape with every private swapchain's
+ // creation taking g_slow_private_create_ms; with `async_arm=1` in the ini no
+@@ -1215,6 +1226,10 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_properties(
+ XRAPI_ATTR XrResult XRAPI_CALL fake_begin_frame(XrSession, const XrFrameBeginInfo*) {
+     g_begin_frame_calls.fetch_add(1, std::memory_order_relaxed);
+     record_frame_call_thread();
++    if (g_release_offset_mode && GetCurrentThreadId() != g_test_application_thread_id) {
++        g_presenter_begin_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
++            std::chrono::steady_clock::now().time_since_epoch()).count(), std::memory_order_release);
++    }
+     if (g_throw_from_begin_frame) {
+         throw std::runtime_error("intentional fake-runtime exception");
+     }
+@@ -5349,6 +5364,10 @@ int main(int argc, char** argv) {
+             int phase_index = 0;
+             for (const char* cursor = shape; sequence_succeeded && *cursor != 0;) {
+                 char* after = nullptr;
++                const bool boundary = *cursor == 'B'; // bugfix round
++                if (boundary) {
++                    ++cursor;
++                }
+                 const long render_us = std::strtol(cursor, &after, 10);
+                 if (after == cursor || *after != ':') {
+                     sequence_succeeded = false;
+@@ -5363,6 +5382,59 @@ int main(int argc, char** argv) {
+                 cursor = (*after == ';' || *after == '/') ? after + 1 : after;
+                 std::cout << "RELEASE_OFFSET_PHASE" << phase_index++ << "_FROM="
+                           << pending.predictedDisplayTime << '\n';
++                if (boundary) {
++                    // Measured over kMeasured frames after kSettled with a
++                    // render time of kFirstUs, then set once.
++                    constexpr long kSettled = 30;
++                    constexpr long kMeasured = 41;
++                    // Light: on the WARP device the layer's own part of
++                    // a frame is 9 to 10 ms of the application's thread,
++                    // and the frame must leave its two slots room.
++                    constexpr int kFirstUs = 3000;
++                    g_simulated_render_us = kFirstUs;
++                    std::vector<long long> phases;
++                    long index = 0;
++                    for (; sequence_succeeded && index < frames && index < kSettled + kMeasured; ++index) {
++                        sequence_succeeded = run_frame(true);
++                        const long long begun = g_presenter_begin_ns.load(std::memory_order_acquire);
++                        const long long entered = g_last_end_entered_ns;
++                        // The presenter has begun later frames since (the
++                        // application waited in its xrEndFrame): it begins
++                        // one a period, so the phase is the remainder.
++                        if (index >= kSettled && begun != 0 && entered != 0) {
++                            const long long apart = (entered - begun) % kFakeDisplayPeriod;
++                            phases.push_back((apart < 0 ? apart + kFakeDisplayPeriod : apart) / 1000);
++                        }
++                    }
++                    if (phases.empty()) {
++                        std::cerr << "release offset: no phase measured for the boundary phase\n";
++                        sequence_succeeded = false;
++                        break;
++                    }
++                    std::sort(phases.begin(), phases.end());
++                    const long long measured = phases[phases.size() / 2];
++                    // The shortest move to the phase asked for, either way.
++                    const long long period_us = kFakeDisplayPeriod / 1000;
++                    long long move = (render_us - measured) % period_us;
++                    if (move > period_us / 2) {
++                        move -= period_us;
++                    } else if (move < -(period_us / 2)) {
++                        move += period_us;
++                    }
++                    if (kFirstUs + move < 500) {
++                        move += period_us;
++                    }
++                    g_simulated_render_us = kFirstUs + static_cast<int>(move);
++                    std::cout << "RELEASE_OFFSET_BOUNDARY: measured " << measured << " us after the presenter's "
++                              << "xrBeginFrame (" << phases.front() << " to " << phases.back() << " over "
++                              << phases.size() << " frames) with " << kFirstUs << " us of render; render now "
++                              << g_simulated_render_us << " us for " << render_us << " us\n";
++                    std::cout << "RELEASE_OFFSET_BOUNDARY_FROM=" << pending.predictedDisplayTime << '\n';
++                    for (; sequence_succeeded && index < frames; ++index) {
++                        sequence_succeeded = run_frame(true);
++                    }
++                    continue;
++                }
+                 g_simulated_render_us = static_cast<int>(render_us);
+                 for (long index = 0; sequence_succeeded && index < frames; ++index) {
+                     sequence_succeeded = run_frame(true);
+diff --git a/tests/layer_release_offset.cmake b/tests/layer_release_offset.cmake
+index 7203c7d..6d00166 100644
+--- a/tests/layer_release_offset.cmake
++++ b/tests/layer_release_offset.cmake
+@@ -20,6 +20,23 @@
+ #   EXPECT=stuck: off, with that regime required (for runs by hand).
+ #   EXPECT=stays: the guard does not act: no 804 anywhere.
+ #   EXPECT=report: nothing required (the counts are printed).
++#   EXPECT=steps (bugfix round, review finding 1 on 0081): the last phase is a
++#     boundary phase ("B<us>:<frames>": the application's xrEndFrame arrives
++#     <us> after the presenter's pop, the buffer's capacity pacing it). From
++#     RELEASE_OFFSET_BOUNDARY_FROM on the steering must step (800) at least
++#     once, and where the guard refuses steps (805, once a second while it
++#     does) it must refuse them on the application's own time: the median of
++#     the own times the 805 records carry is at most the phase's render time
++#     plus OWN_MARGIN_US (6000: on the WARP device the layer's part of a
++#     frame is about 4 ms of own time; with the wait for capacity counted in,
++#     as before the fix, the own time read 5 to 10 ms more than that, the
++#     slots less the offset whatever the frame). At most two 805 records are
++#     not judged. Neither a step nor a refusal: "NOT ARMED" (the completion
++#     was not put in the band).
++#     In this rig a step does not move the completion while the capacity
++#     paces the application (the offset only shortens that wait), so with
++#     the fix the offset goes up step by step until the frame's own time and
++#     the offset fill the slots, and the refusals after that are right.
+ # TWO=1 (foveated frame generation's two-layer shape, where the tree has it):
+ # the scenario as "two:dcs-release-offset" with `foveated_layers=1`.
+ # EXTRA_KEYS ("key=value,key=value") go under [ofxr].
+@@ -62,6 +79,13 @@ endif()
+ string(REPLACE "/" ";" shape_phases "${SHAPE}")
+ list(LENGTH shape_phases phase_count)
+ set(ENV{XRFG_TEST_RELEASE_OFFSET_SHAPE} "${SHAPE}")
++# EXPECT=steps: the hold at admission, as on a D3D11 session (DCS): there the
++# buffer's capacity paces the application (SessionState::test_hold_at_admission).
++if(EXPECT STREQUAL "steps")
++    set(ENV{XRFG_TEST_HOLD_AT_ADMISSION} "1")
++else()
++    unset(ENV{XRFG_TEST_HOLD_AT_ADMISSION})
++endif()
+ get_filename_component(layer_name "${LAYER_DLL}" NAME)
+ execute_process(
+     COMMAND "${CALL_CHAIN}"
+@@ -88,7 +112,7 @@ if(NOT call_chain_output MATCHES "RELEASE_OFFSET_END=([0-9]+)")
+ endif()
+ set(mark_end "${CMAKE_MATCH_1}")
+ list(GET shape_phases ${return_phase} return_shape)
+-string(REGEX REPLACE "^[0-9]+:" "" return_frames "${return_shape}")
++string(REGEX REPLACE "^B?[0-9]+:" "" return_frames "${return_shape}")
+ math(EXPR settle_releases "${return_frames} / 3")
+ 
+ file(GLOB flight_logs "${WORK_DIR}/ofxr-bridge-flight-*.log")
+@@ -105,6 +129,23 @@ file(STRINGS "${flight_log}" lines
+     REGEX " op=(projection_mapping|presenter_transition|presenter_pair_release) result=")
+ set(field_pattern "result=(-?[0-9]+) dur_us=([0-9]+) a=([0-9]+) b=([0-9]+) c=([0-9]+)")
+ set(phase 0)            # 0 before the return, 1 in it, 2 after it
++set(mark_boundary "")
++if(call_chain_output MATCHES "RELEASE_OFFSET_BOUNDARY_FROM=([0-9]+)")
++    set(mark_boundary "${CMAKE_MATCH_1}")
++endif()
++set(boundary 0)         # 1 from the boundary phase's set render time on
++set(boundary_steps 0)
++set(boundary_refusals 0)
++set(boundary_refused 0)
++set(boundary_text "")
++set(boundary_owns "")
++set(boundary_render -1)
++if(call_chain_output MATCHES "render now ([0-9]+) us")
++    set(boundary_render "${CMAKE_MATCH_1}")
++endif()
++if(NOT DEFINED OWN_MARGIN_US)
++    set(OWN_MARGIN_US 6000)
++endif()
+ set(offset_now 0)
+ set(offset_at_return -1)
+ set(offset_highest 0)
+@@ -134,6 +175,9 @@ foreach(line IN LISTS lines)
+     set(b "${CMAKE_MATCH_6}")
+     set(c "${CMAKE_MATCH_7}")
+     if(op STREQUAL "projection_mapping")
++        if(a STREQUAL mark_boundary)
++            set(boundary 1)
++        endif()
+         if(phase EQUAL 0 AND a STREQUAL mark_return)
+             set(phase 1)
+             set(offset_at_return ${offset_now})
+@@ -152,6 +196,10 @@ foreach(line IN LISTS lines)
+             elseif(phase EQUAL 1)
+                 math(EXPR steps_return "${steps_return} + 1")
+             endif()
++            if(boundary AND phase EQUAL 1)
++                math(EXPR boundary_steps "${boundary_steps} + 1")
++                string(APPEND boundary_text " step ${a}>${b}")
++            endif()
+         elseif(result EQUAL 804)
+             set(offset_now 0)
+             if(phase EQUAL 0)
+@@ -162,6 +210,12 @@ foreach(line IN LISTS lines)
+             endif()
+         elseif(result EQUAL 805)
+             math(EXPR refused "${refused} + ${a}")
++            if(boundary AND phase EQUAL 1)
++                math(EXPR boundary_refusals "${boundary_refusals} + 1")
++                math(EXPR boundary_refused "${boundary_refused} + ${a}")
++                string(APPEND boundary_text " refused ${a} (own ${b} us, to ${c} us)")
++                list(APPEND boundary_owns ${b})
++            endif()
+         elseif(result EQUAL 406 AND phase EQUAL 1)
+             math(EXPR held "${held} + 1")
+             if(releases GREATER_EQUAL settle_releases)
+@@ -238,6 +292,39 @@ elseif(EXPECT STREQUAL "stays")
+     if(NOT drops_total EQUAL 0)
+         message(FATAL_ERROR "Expected no 804. ${summary}")
+     endif()
++elseif(EXPECT STREQUAL "steps")
++    set(boundary_summary
++        "boundary phase: ${boundary_steps} steps (800), ${boundary_refusals} x 805 "
++        "(${boundary_refused} steps refused):${boundary_text}")
++    string(CONCAT boundary_summary ${boundary_summary})
++    message(STATUS "${boundary_summary}")
++    if(mark_boundary STREQUAL "" OR NOT boundary)
++        message(FATAL_ERROR "The boundary phase was not found. ${summary}")
++    endif()
++    if(boundary_steps EQUAL 0 AND boundary_refusals EQUAL 0)
++        message(FATAL_ERROR
++            "NOT ARMED: neither a step nor a refusal in the boundary phase (the completion "
++            "was not in the band); nothing is judged. ${boundary_summary}. ${summary}")
++    endif()
++    if(boundary_steps LESS 1)
++        message(FATAL_ERROR
++            "Expected the steering to step (800 once or more). ${boundary_summary}. ${summary}")
++    endif()
++    if(boundary_refusals GREATER 2)
++        list(SORT boundary_owns COMPARE NATURAL)
++        math(EXPR middle "${boundary_refusals} / 2")
++        list(GET boundary_owns ${middle} own_median)
++        math(EXPR own_limit "${boundary_render} + ${OWN_MARGIN_US}")
++        message(STATUS
++            "boundary phase: median own time of the 805 records ${own_median} us, limit ${own_limit} us "
++            "(render ${boundary_render} us + ${OWN_MARGIN_US})")
++        if(boundary_render LESS 0 OR own_median GREATER own_limit)
++            message(FATAL_ERROR
++                "Steps refused on an own time that is not the application's own (median "
++                "${own_median} us over a render of ${boundary_render} us, limit ${own_limit} us): "
++                "the wait for the presenter's capacity is in it. ${boundary_summary}. ${summary}")
++        endif()
++    endif()
+ elseif(NOT EXPECT STREQUAL "report")
+     message(FATAL_ERROR "Unknown EXPECT=${EXPECT}")
+ endif()
