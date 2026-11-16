@@ -94,6 +94,9 @@ public sealed class ApplicationInstaller(string destination)
         {
             var now = DateTimeOffset.UtcNow;
             Rollback.Record(Root, replaced, manifest.Version, now);
+            // An install that changed the version ends any going back: the note above may not have been written, and
+            // the next start must not take this for a going back that did not happen.
+            if (stateRoot is not null) Rollback.Forget(stateRoot);
             if (stateRoot is not null && installed.CompareTo(before) > 0)
                 try { Rollback.Snapshot(stateRoot, replaced, setAside: false, now); }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }

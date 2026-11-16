@@ -68,6 +68,14 @@ public sealed class Rollback
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 
+    /// <summary>The installer, after an install that changed the version: a going back that was started is over,
+    /// whichever way the install went. Never fails an installation.</summary>
+    public static void Forget(string stateRoot)
+    {
+        try { File.Delete(Path.Combine(VersionsIn(Path.GetFullPath(stateRoot)), "going-back.json")); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+    }
+
     /// <summary>What this installation replaced; null when not on record (or for an unzipped copy).</summary>
     public PreviousVersion? Recorded => _install is null ? null : Read<PreviousVersion>(RecordPath(_install)) is { Version: not null, ReplacedBy: not null } r && ReleaseVersion.Parse(r.Version) is not null ? r : null;
 

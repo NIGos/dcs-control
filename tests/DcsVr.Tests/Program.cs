@@ -4626,8 +4626,9 @@ Test("Going back, then uninstalling and installing the newer version afresh: wha
     File.WriteAllText(Path.Combine(state, "draft.json"), "draft-7"); File.WriteAllText(Path.Combine(state, "presets", "Night.json"), "night-7"); settings.Save(new(false, "0.6.7-preview"));
     var went = new DateTimeOffset(2026, 11, 20, 10, 0, 0, TimeSpan.Zero);
     new Rollback(state, target, "0.6.7-preview", () => went).Prepare("0.6.6-preview", settings);
-    // 0.6.6 runs for a while, then is uninstalled and 0.6.7 installed afresh: nothing says an installation replaced it.
-    installer.Install(six, stateRoot: state);
+    // 0.6.6 runs for a while, then is uninstalled and 0.6.7 installed afresh: nothing says an installation replaced it
+    // (0.6.6's setup knows nothing about going back, so it leaves the note of it where it is).
+    installer.Install(six);
     File.WriteAllText(Path.Combine(state, "draft.json"), "draft-6b"); File.WriteAllText(Path.Combine(state, "presets", "Dusk.json"), "dusk-6");
     Require(installer.Uninstall().Complete); installer.Install(seven, stateRoot: state);
     Require(new Rollback(state, target, "0.6.7-preview").Recorded is null, "a first installation has no note");
@@ -4636,6 +4637,28 @@ Test("Going back, then uninstalling and installing the newer version afresh: wha
     var kept = Directory.GetDirectories(Path.Combine(state, "versions"), "0.6.6-preview kept *").Single();
     Require(File.ReadAllText(Path.Combine(kept, "draft.json")) == "draft-6b" && File.ReadAllText(Path.Combine(kept, "presets", "Dusk.json")) == "dusk-6" && !File.Exists(Path.Combine(kept, "presets", "Day.json")), "what 0.6.6 saved since is kept, and only that");
     Require(back.Reconcile(settings) is { Undone: false } again && again.ReturnedPresets.SequenceEqual(["Dusk"]) && StateText(state, "presets/Dusk.json") == "dusk-6" && StateText(state, "draft.json") == "draft-7", "its new preset returns at the next start; nothing is overwritten");
+});
+Test("Updating again after going back never undoes it, even when the installer's note could not be written", () =>
+{
+    var six = ReleaseFixture("rollback-again-6", "0.6.6-preview", "six"); var seven = ReleaseFixture("rollback-again-7", "0.6.7-preview", "seven");
+    var target = Path.Combine(root, "rollback/again/app"); var installer = new ApplicationInstaller(target);
+    var state = RollbackState("again", "draft-6", ("Day.json", "day-6")); var settings = new AppSettingsStore(state);
+    installer.Install(six, stateRoot: state); installer.Install(seven, stateRoot: state);
+    File.WriteAllText(Path.Combine(state, "draft.json"), "draft-7"); settings.Save(new(false, "0.6.7-preview"));
+    new Rollback(state, target, "0.6.7-preview").Prepare("0.6.6-preview", settings);
+    // 0.6.6's own setup (it leaves the note of the going back), a flight's worth of edits, then the update again.
+    installer.Install(six);
+    File.WriteAllText(Path.Combine(state, "draft.json"), "draft-6b"); File.WriteAllText(Path.Combine(state, "presets", "Dusk.json"), "dusk-6");
+    Require(File.Exists(Path.Combine(state, "versions", "going-back.json")));
+    installer.Install(seven, stateRoot: state);
+    Require(!File.Exists(Path.Combine(state, "versions", "going-back.json")), "the install that changed the version ends the going back");
+    // The note of what was replaced was not written (a full disk, a scanner holding the folder).
+    File.Delete(Rollback.RecordPath(target));
+    Require(new Rollback(state, target, "0.6.7-preview").Reconcile(settings) is { Undone: false } && StateText(state, "draft.json") == "draft-6b" && StateText(state, "presets/Dusk.json") == "dusk-6", "the draft and the preset saved since stay");
+    // A reinstall of the same version changes nothing about a going back that is pending.
+    new Rollback(state, target, "0.6.7-preview").Prepare("0.6.6-preview", settings);
+    installer.Install(seven, stateRoot: state);
+    Require(File.Exists(Path.Combine(state, "versions", "going-back.json")), "same version: the going back is still to be decided at the next start");
 });
 Test("Go back is refused with the reason when there is nothing to go back to", () =>
 {
