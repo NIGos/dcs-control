@@ -710,6 +710,12 @@ nav{display:flex;flex-direction:column;gap:1px}
 .topbar .workflow-status strong{display:block;font-size:13px;line-height:1.25;white-space:nowrap}
 .topbar .workflow-status p{margin:0;font-size:12px;line-height:1.3;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .topbar .status-dot{order:2;margin:0;box-shadow:none;background:var(--warn)}
+/* A DCS that looks stuck (GitHub #21): said in the title, the dot ringed, and End DCS on the second line (it stays where a narrow window hides that line). */
+.topbar .status-dot.stuck{box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 30%,transparent)}
+.topbar .workflow-status.stuck strong{color:var(--warn)}
+.topbar .workflow-status.stuck .status-line{display:flex;justify-content:flex-end;align-items:baseline;gap:8px;min-width:0}
+.topbar .workflow-status.stuck .status-line p{min-width:0}
+.topbar .status-end{flex-shrink:0;padding:0;font-size:12px;line-height:1.3;white-space:nowrap}
 .topbar .status-dot.ready{background:var(--green)}
 .topbar .status-dot.error{background:var(--red)}
 .topbar .workflow-actions{display:flex;gap:0;flex-shrink:0}
