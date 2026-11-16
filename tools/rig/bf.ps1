@@ -8,7 +8,7 @@
 param([string]$What = 'run', [string]$BuildDir = 'split-a-build', [string[]]$Targets = @(), [string]$Tests = '',
       [int]$Repeat = 1, [string]$Tag = 'x', [int]$Minutes = 10, [int]$WaitMinutes = 30, [switch]$All,
       [scriptblock]$Extra = $null, [string]$WorkRoot = $env:DCSC_RIG_BUILDS, [string]$DcsBin)
-$r = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')); $lock = "$r\artifacts\.lane\quiet.lock"
+$r = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')); $lock = if ($env:DCSC_QUIET_LOCK) { [IO.Path]::GetFullPath($env:DCSC_QUIET_LOCK) } else { "$r\artifacts\.lane\quiet.lock" }      # one lock for every checkout of a machine: DCSC_QUIET_LOCK
 $port = if ($WorkRoot) { [IO.Path]::GetFullPath($WorkRoot) } else { "$r\artifacts\rig\builds" }
 $b = "$port\$BuildDir"
 for ($i = 0; $i -lt ($WaitMinutes * 3) -and (Test-Path $lock); $i++) { Start-Sleep -Seconds 20 }
@@ -16,7 +16,7 @@ if (Test-Path $lock) { "STILL LOCKED: " + (Get-Content $lock); exit 3 }
 for ($i = 0; $i -lt 30 -and (Get-Process cl, link, ninja, ctest, MSBuild -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Seconds 10 }
 if (Get-Process DCS, cl, link, ninja, ctest, MSBuild -ErrorAction SilentlyContinue) { "machine busy (DCS or a build): not starting"; exit 4 }
 if (Test-Path $lock) { "LOCKED meanwhile: " + (Get-Content $lock); exit 3 }
-"rig bf.ps1, $What, started $(Get-Date -Format HH:mm), $Minutes min" | Set-Content $lock
+[IO.Directory]::CreateDirectory((Split-Path $lock -Parent)) | Out-Null; "rig bf.ps1, $What, started $(Get-Date -Format HH:mm), $Minutes min" | Set-Content $lock
 try {
   "lock taken $(Get-Date -Format HH:mm:ss)"
   if ($Targets.Count -gt 0) {

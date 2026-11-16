@@ -26,6 +26,9 @@
 #   -PimaxCtl      DCSC_PIMAX_CTL          pimax_ctl.exe (get / set / reboot); default <repo>\tools\runtime-probe\bin
 #   -PimaxClient   DCSC_PIMAX_CLIENT       PimaxClient.exe; default under %ProgramFiles%
 #   -PimaxReboot   DCSC_PIMAX_REBOOT       another program that restarts the headset; default: `pimax_ctl reboot`
+#   -QuietLock     DCSC_QUIET_LOCK         the quiet-machine lock file; default <repo>\artifacts\.lane\quiet.lock. A second
+#                                          checkout or worktree on the same machine names the first one's file here, so
+#                                          that there is one lock for the machine
 # The installed DCS Control (CLI and state) is found under %LOCALAPPDATA%, as the app itself does.
 #
 # What it does per flight: profile = the backup draft + overrides, applied with the INSTALLED CLI; a COPY of the
@@ -49,7 +52,7 @@ param([Parameter(Mandatory)][string]$Scenario, [string]$Arm, [switch]$Both, [swi
   # Where things are on this machine (see the head of the file): parameter, else environment variable, else default.
   [string]$StateBackup = $env:DCSC_RIG_STATE_BACKUP, [string]$MissionDir = $env:DCSC_RIG_MISSIONS, [string]$RunsDir = $env:DCSC_RIG_RUNS,
   [string]$TapDir = $env:DCSC_RIG_TAP_DIR, [string]$SavedGamesDcs = $env:DCSC_SAVED_GAMES_DCS, [string]$PimaxCtl = $env:DCSC_PIMAX_CTL,
-  [string]$PimaxClient = $env:DCSC_PIMAX_CLIENT, [string]$PimaxReboot = $env:DCSC_PIMAX_REBOOT)
+  [string]$PimaxClient = $env:DCSC_PIMAX_CLIENT, [string]$PimaxReboot = $env:DCSC_PIMAX_REBOOT, [string]$QuietLock = $env:DCSC_QUIET_LOCK)
 $ErrorActionPreference = 'Stop'
 if ($FlyArms) { $FlyArms = @($FlyArms | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }      # pwsh -File hands a list over as one string
 $Rig     = [IO.Path]::GetFullPath($PSScriptRoot)
@@ -64,7 +67,7 @@ $QvLog   = Join-Path $SavedGamesDcs 'Scripts\DcsQvCull\DcsQvCull.log'
 $DcsLog  = Join-Path $SavedGamesDcs 'Logs\dcs.log'
 $Ctl     = if ($PimaxCtl) { $PimaxCtl } else { Join-Path $Repo 'tools\runtime-probe\bin\pimax_ctl.exe' }
 if (-not $PimaxClient) { $PimaxClient = Join-Path $env:ProgramFiles 'Pimax\PimaxClient\pimaxui\PimaxClient.exe' }
-$Lock    = Join-Path $Repo 'artifacts\.lane\quiet.lock'
+$Lock    = if ($QuietLock) { [IO.Path]::GetFullPath($QuietLock) } else { Join-Path $Repo 'artifacts\.lane\quiet.lock' }
 if (-not $TapDir) { $TapDir = Join-Path $RigData 'capture-layer\bin' }
 $TapDir  = [IO.Path]::GetFullPath($TapDir)
 $TapDll  = Join-Path $TapDir 'XR_APILAYER_RIG_capture.dll'
@@ -740,7 +743,8 @@ try {
   # quiet lock (artifacts\.lane\README.md): wait while another holds it, then take it
   $t0 = Get-Date; while (Test-Path -LiteralPath $Lock) { if (((Get-Date) - $t0).TotalMinutes -gt 60) { throw "quiet.lock still held after 60 min: $(Get-Content -LiteralPath $Lock -TotalCount 1)" }; Write-Host "quiet.lock held ($(Get-Content -LiteralPath $Lock -TotalCount 1)): waiting"; Start-Sleep 20 }
   while (Get-Process cl, link, MSBuild, ninja, ctest -ErrorAction SilentlyContinue) { Write-Host 'a build or test is running: waiting'; Start-Sleep 20 }
-  Set-Content -LiteralPath $Lock -Value "rig scenario $($sc.name) (live flight, run-scenario.ps1), started $(Get-Date -Format HH:mm), expected $([int](($options.Count * $(if ($FlyArms) { $FlyArms.Count } else { 1 }) * ([double]$sc.seconds + 150) + 240) / 60) + 1) minutes"; $lockMine = $true
+  [IO.Directory]::CreateDirectory((Split-Path $Lock -Parent)) | Out-Null      # a fresh clone or a worktree has no artifacts\.lane yet
+Set-Content -LiteralPath $Lock -Value "rig scenario $($sc.name) (live flight, run-scenario.ps1), started $(Get-Date -Format HH:mm), expected $([int](($options.Count * $(if ($FlyArms) { $FlyArms.Count } else { 1 }) * ([double]$sc.seconds + 150) + 240) / 60) + 1) minutes"; $lockMine = $true
   Note "==== scenario $($sc.name), arm $($armDef.name), flights $($options.Count); quiet lock held"
   foreach ($n in $StateFiles) { $to = Join-Path $snapshot $n; [IO.Directory]::CreateDirectory((Split-Path $to -Parent)) | Out-Null; Copy-Item -LiteralPath (Join-Path $State $n) -Destination $to -Force }
   foreach ($n in $StateFiles) { if ((Sha (Join-Path $State $n)) -ne (Sha (Join-Path $Backup $n))) { Note "note: $n already differs from user-state-backup before this run (the profile used is the BACKUP draft)" } }

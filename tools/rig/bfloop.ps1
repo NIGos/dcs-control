@@ -5,13 +5,13 @@
 # -BuildDir is a build folder under -WorkRoot (default <repo>\artifacts\rig\builds); what is kept goes to -WorkRoot.
 param([string]$BuildDir = 'split-b-build', [string]$Test = '', [string]$WorkDir = '', [string]$Tag = 'x', [int]$Max = 150,
       [int]$Minutes = 6, [int]$WaitMinutes = 30, [switch]$KeepPass, [int]$Fails = 1, [string]$WorkRoot = $env:DCSC_RIG_BUILDS, [string]$DcsBin)
-$r = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')); $lock = "$r\artifacts\.lane\quiet.lock"
+$r = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')); $lock = if ($env:DCSC_QUIET_LOCK) { [IO.Path]::GetFullPath($env:DCSC_QUIET_LOCK) } else { "$r\artifacts\.lane\quiet.lock" }      # one lock for every checkout of a machine: DCSC_QUIET_LOCK
 $port = if ($WorkRoot) { [IO.Path]::GetFullPath($WorkRoot) } else { "$r\artifacts\rig\builds" }
 $b = "$port\$BuildDir"
 for ($i = 0; $i -lt ($WaitMinutes * 3) -and (Test-Path $lock); $i++) { Start-Sleep -Seconds 20 }
 if (Test-Path $lock) { "STILL LOCKED: " + (Get-Content $lock); exit 3 }
 if (Get-Process DCS, cl, link, ninja, ctest, MSBuild -ErrorAction SilentlyContinue) { "machine busy (DCS or a build): not starting"; exit 4 }
-"rig bfloop.ps1, loop $Test until it fails, started $(Get-Date -Format HH:mm), $Minutes min" | Set-Content $lock
+[IO.Directory]::CreateDirectory((Split-Path $lock -Parent)) | Out-Null; "rig bfloop.ps1, loop $Test until it fails, started $(Get-Date -Format HH:mm), $Minutes min" | Set-Content $lock
 try {
   if ($DcsBin) { $env:XRFG_TEST_DCS_BIN = $DcsBin }
   $pass = 0; $fail = 0

@@ -5,7 +5,8 @@
 #
 #   -Test    runs the offline tests afterwards: the harness on WARP with a byte check, and OFXR's own call-chain test
 #            with the capture layer below OFXR (needs a built OFXR fork, see -OfxrBuild; skipped with a line if absent)
-#   -NoWait  does not wait for artifacts\.lane\quiet.lock (the caller holds it)
+#   -NoWait  does not wait for the quiet lock (the caller holds it); the lock is <repo>\artifacts\.lane\quiet.lock, or the
+#            file DCSC_QUIET_LOCK names (one lock for every checkout of a machine)
 #
 # Nothing of this machine is written in the script. Where things are comes from a parameter, else from an environment
 # variable, else from the default given here:
@@ -25,7 +26,7 @@ $Rig  = [IO.Path]::GetFullPath($PSScriptRoot)
 $Repo = [IO.Path]::GetFullPath((Join-Path $Rig '..\..'))
 $Src  = Join-Path $Rig 'capture-layer'
 $Bin  = if ($OutDir) { [IO.Path]::GetFullPath($OutDir) } else { Join-Path $Repo 'artifacts\rig\capture-layer\bin' }
-$Lock = Join-Path $Repo 'artifacts\.lane\quiet.lock'
+$Lock = if ($env:DCSC_QUIET_LOCK) { [IO.Path]::GetFullPath($env:DCSC_QUIET_LOCK) } else { Join-Path $Repo 'artifacts\.lane\quiet.lock' }
 $Inc  = if ($OpenXrInclude) { [IO.Path]::GetFullPath($OpenXrInclude) } else { Join-Path $Repo 'external\ofxr-djules75\external\OpenXR-SDK\include' }
 $Msvc = Join-Path $Repo 'scripts\msvc.cmd'
 function Wait-Quiet { if ($NoWait) { return }; $told = $false; while (Test-Path -LiteralPath $Lock) { if (-not $told) { Write-Host "quiet.lock held ($((Get-Content -LiteralPath $Lock -ErrorAction SilentlyContinue | Select-Object -First 1))): waiting"; $told = $true }; Start-Sleep 20 } }

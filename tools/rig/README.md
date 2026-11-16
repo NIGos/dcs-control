@@ -45,6 +45,7 @@ standard Windows folder:
 | `-PimaxCtl` | `DCSC_PIMAX_CTL` | `tools\runtime-probe\bin\pimax_ctl.exe` |
 | `-PimaxClient` | `DCSC_PIMAX_CLIENT` | `%ProgramFiles%\Pimax\PimaxClient\pimaxui\PimaxClient.exe` |
 | `-PimaxReboot` | `DCSC_PIMAX_REBOOT` | none: `pimax_ctl reboot` is used |
+| `-QuietLock` | `DCSC_QUIET_LOCK` | `artifacts\.lane\quiet.lock` of this checkout. A second checkout or worktree on the same machine names the first one's file, so that the machine has one lock (`bf.ps1`, `bfloop.ps1` and `build-capture-layer.ps1` read the variable too) |
 
 `build-capture-layer.ps1`: `-OutDir` (`DCSC_RIG_TAP_DIR`, default `artifacts\rig\capture-layer\bin`, the runner's default
 `-TapDir`), `-OpenXrInclude` (`DCSC_OPENXR_INCLUDE`, default the OFXR fork's `external\OpenXR-SDK\include`), `-OfxrBuild`
