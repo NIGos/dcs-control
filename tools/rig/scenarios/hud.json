@@ -1,0 +1,65 @@
+{
+  "name": "hud",
+  "status": "ready",
+  "measures": "Scenario 1, HUD in view. Sharp HUD on two layers: (a) flight log cockpit_mask result=19/20/24 (views present, cleaned = 4 x frames, fallback reason != 1, lost restores 0); (b) OFXR hud_capture triples (BMP, no alpha) for PEER tools/live/analyze/smear.py; (c) capture: HUD crop sharpness of the synthetic focus layer against its real neighbours (>= 0.9), HUD position (still: <= 2 px), seam and layer mismatch in the band, alpha equal to the next real frame.",
+  "cannotJudge": "Legibility at the eye. DCS's HUD steps at 20 Hz against 45 Hz frames in both arms. The HUD locator has only seen a drawn HUD and real pictures WITHOUT one: its thresholds are guesses until a flight with the HUD in view.",
+  "mission": "qvbench_i23_f16_ap.miz",
+  "seconds": 60,
+  "arms": [
+    {
+      "name": "2x",
+      "profileOverrides": {
+        "frameGenFactor": 2
+      }
+    },
+    {
+      "name": "user",
+      "profileOverrides": {}
+    },
+    {
+      "name": "3x",
+      "profileOverrides": {
+        "frameGenFactor": 3
+      }
+    }
+  ],
+  "profileOverrides": {},
+  "ofxr": {},
+  "diagnostics": {
+    "hud_capture": 20
+  },
+  "quadviews": {},
+  "windowAtOrigin": false,
+  "schedule": [
+    {
+      "at": 8,
+      "do": "recenter"
+    },
+    {
+      "at": 13,
+      "do": "shot",
+      "name": "cockpit",
+      "require": "hud"
+    },
+    {
+      "at": 30,
+      "do": "capture",
+      "frames": 40,
+      "tag": "hud"
+    }
+  ],
+  "verdict": {
+    "crops": [
+      "hud:focus:auto",
+      "hudPeriphery:periphery:auto"
+    ],
+    "cropsAre": "found by the HUD locator (saturated green thin strokes) in the first real submission of each layer; NOT JUDGED when it finds none"
+  },
+  "sideEffects": [
+    "recenter VR at FLY+8 s: the key bound to \"recenter VR Headset\" in Saved Games\\DCS\\Config\\Input\\UiLayer\\keyboard\\Keyboard.diff.lua (DCS has no default key: bind one) is pressed twice with DCS in the foreground (Scroll Lock ends as it was)",
+    "at FLY+13 s a picture of DCS's window is tested for HUD symbology: none = the flight ends there with \"HUD not in view\" (first flight 2026-11-15: tracked headset on its stand = eye under the aircraft)",
+    "hud_capture=20 writes BMP triples next to the flight log (moved to the run folder's ofxr-captures)",
+    "the capture delays xrEndFrame for 40 submissions at FLY+30 s: pacing numbers of that second are void"
+  ],
+  "neverRun": "flown once 2026-11-15 17:17 without recenter (no HUD in view); the recenter, the HUD test and the twin plan have not flown"
+}

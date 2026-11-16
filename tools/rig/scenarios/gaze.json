@@ -1,0 +1,97 @@
+{
+  "name": "gaze",
+  "status": "ready",
+  "neverRun": true,
+  "measures": "Scenario 3, gaze jumping (Quad Views' upstream debug_simulate_tracking=1 in the COPIED settings.cfg: the gaze is the OS cursor, tangent t -> desktop x = 500 + 350 t). Quad Views log: 'DCSVR gaze: ... saccades' > 0, about 2 per 1.4 s, widened > 0. Capture around each jump: focus field of view of the real frame after the jump moved by the commanded tangent (+ lead); synthetic focus field of view == the next real frame's; synthetic alpha == the next frame's; the zone the previous frame did not cover: not black where alpha > 0, layer mismatch <= 2 x the interior's. Flight log: foveated_mode result=1 and no result=2. Arm fill1 = foveated_uncovered_fill=1 as the second remedy.",
+  "cannotJudge": "Visibility of the fill during a real saccade (saccadic suppression); real saccade dynamics (the cursor is stepped in 3 moves 10 ms apart, harsher than an eye); the real tracker's latency and noise. Sign and scale of the cursor-to-gaze mapping are read in the code only: the first run draws Quad Views' gaze marker (debug_eye_gaze=1, a 20 px square) into the submitted image; look at compose.py's picture.",
+  "mission": "qvbench_i23_f16_ap.miz",
+  "seconds": 55,
+  "arms": [
+    {
+      "name": "fill2",
+      "profileOverrides": {
+        "frameGenFactor": 2
+      }
+    },
+    {
+      "name": "fill1",
+      "profileOverrides": {
+        "frameGenFactor": 2
+      },
+      "ofxr": {
+        "foveated_uncovered_fill": 1
+      }
+    },
+    {
+      "name": "nomarker",
+      "profileOverrides": {
+        "frameGenFactor": 2
+      },
+      "quadviews": {
+        "debug_eye_gaze": 0
+      }
+    }
+  ],
+  "profileOverrides": {},
+  "ofxr": {
+    "smooth_cursor": 0
+  },
+  "diagnostics": {},
+  "quadviews": {
+    "debug_simulate_tracking": 1,
+    "debug_eye_gaze": 1
+  },
+  "windowAtOrigin": true,
+  "schedule": [
+    {
+      "at": 8,
+      "do": "recenter"
+    },
+    {
+      "at": 13,
+      "do": "shot",
+      "name": "cockpit"
+    },
+    {
+      "at": 19.5,
+      "do": "capture",
+      "frames": 90,
+      "scale": 2,
+      "delay_ms": 3000,
+      "tag": "jump8"
+    },
+    {
+      "at": 20,
+      "do": "gaze-alternate",
+      "seconds": 12,
+      "deg": 8,
+      "periodMs": 700,
+      "steps": 3
+    },
+    {
+      "at": 33.5,
+      "do": "capture",
+      "frames": 90,
+      "scale": 2,
+      "delay_ms": 3000,
+      "tag": "jump15"
+    },
+    {
+      "at": 34,
+      "do": "gaze-alternate",
+      "seconds": 12,
+      "deg": 15,
+      "periodMs": 700,
+      "steps": 3
+    }
+  ],
+  "verdict": {
+    "crops": []
+  },
+  "sideEffects": [
+    "debug_simulate_tracking calls ClipCursor(1,1,999,999) on every located frame, from the briefing on: the mouse is confined to the top-left 1000 x 1000 px of the desktop while DCS runs. The runner moves DCS's window to the desktop origin before the FLY click and calls ClipCursor(NULL) after DCS has closed",
+    "gaze and DCS's mouse cursor are the same device: the cockpit cursor moves with every jump; smooth_cursor=0 in the copied ofxr_bridge.ini so OFXR's cursor path stays out of this scenario",
+    "everything fed by Quad Views' gaze export follows the simulated gaze (eye-focus blur, G vision, fixation depth, Depth boost)",
+    "90 submissions per capture = about 1 s at 90 Hz, so each window holds one or two jumps; scale 2 keeps it at 0.9 GB per capture"
+  ]
+}

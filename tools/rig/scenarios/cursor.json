@@ -1,0 +1,168 @@
+{
+  "name": "cursor",
+  "status": "ready",
+  "neverRun": true,
+  "measures": "Scenario 4, the cockpit cursor in five stretches, each a slow path with a slow approach (120 window px/s; the path 50 px/s) and a capture window in both layers around the whole path (56 consecutive submissions, full resolution in both arms over the same tangent window): a-panel = on the up-front panel at the lower edge of the focus image, HUD symbology out of the capture window; b-hud = over the HUD; c-periphery = on the centre panel below the focus image; d-border = slowly to and fro across the focus image's lower border; e-jump = a deliberate jump (the mouse is set in one step) to the sky left of the HUD, then a slow circle. Places are tangents of the view (rig\\cursor-calibration.json, measured in a cursor-calib flight). mouse.csv has every mouse step with the capture's clock. cursor_verdict.py: smooth_cursor result=1 / result=6 per second and per stretch, ON against the twin.",
+  "cannotJudge": "The cursor crossing the focus edge with a moving gaze (needs the gaze scenario without the mouse coupling = a new Quad Views test key). The feel of the cursor. The blob measure only works while the cursor is the brightest mark of the crop: in a lit cockpit read the counters and the cursor-capture pictures first.",
+  "mission": "qvbench_i23_f16_ap.miz",
+  "seconds": 96,
+  "arms": [
+    {
+      "name": "2x",
+      "profileOverrides": {
+        "frameGenFactor": 2
+      }
+    },
+    {
+      "name": "3x",
+      "profileOverrides": {
+        "frameGenFactor": 3
+      }
+    }
+  ],
+  "profileOverrides": {
+    "smoothCursor": true
+  },
+  "ofxr": {},
+  "diagnostics": {},
+  "quadviews": {},
+  "windowAtOrigin": false,
+  "schedule": [
+    {
+      "at": 8,
+      "do": "recenter"
+    },
+    {
+      "at": 13,
+      "do": "shot",
+      "name": "cockpit"
+    },
+    {
+      "at": 16,
+      "do": "cursor-stretch",
+      "label": "a-panel",
+      "shape": "circle",
+      "centreTan": [
+        0.1,
+        -0.355
+      ],
+      "radiusTan": [
+        0.1,
+        0.006
+      ],
+      "marginTan": [
+        0.13,
+        0.055
+      ],
+      "seconds": 9,
+      "speedPx": 50,
+      "approachSpeedPx": 120,
+      "frames": 56,
+      "captureDelayMs": 2500
+    },
+    {
+      "at": 32,
+      "do": "cursor-stretch",
+      "label": "b-hud",
+      "shape": "circle",
+      "centreTan": [
+        0.04,
+        -0.11
+      ],
+      "radiusTan": [
+        0.07,
+        0.05
+      ],
+      "marginTan": [
+        0.13,
+        0.09
+      ],
+      "seconds": 9,
+      "speedPx": 50,
+      "approachSpeedPx": 120,
+      "frames": 56,
+      "captureDelayMs": 2500
+    },
+    {
+      "at": 48,
+      "do": "cursor-stretch",
+      "label": "c-periphery",
+      "shape": "circle",
+      "centreTan": [
+        0.05,
+        -0.55
+      ],
+      "radiusTan": [
+        0.08,
+        0.04
+      ],
+      "marginTan": [
+        0.13,
+        0.09
+      ],
+      "seconds": 9,
+      "speedPx": 50,
+      "approachSpeedPx": 120,
+      "frames": 56,
+      "captureDelayMs": 2500
+    },
+    {
+      "at": 64,
+      "do": "cursor-stretch",
+      "label": "d-border",
+      "shape": "line",
+      "centreTan": [
+        0.05,
+        -0.38
+      ],
+      "radiusTan": [
+        0.0,
+        0.07
+      ],
+      "marginTan": [
+        0.13,
+        0.07
+      ],
+      "seconds": 9,
+      "speedPx": 50,
+      "approachSpeedPx": 120,
+      "frames": 56,
+      "captureDelayMs": 2500
+    },
+    {
+      "at": 80,
+      "do": "cursor-stretch",
+      "label": "e-jump",
+      "shape": "circle",
+      "centreTan": [
+        -0.2,
+        -0.1
+      ],
+      "radiusTan": [
+        0.05,
+        0.05
+      ],
+      "marginTan": [
+        0.13,
+        0.09
+      ],
+      "seconds": 9,
+      "speedPx": 50,
+      "approachSpeedPx": 120,
+      "frames": 56,
+      "captureDelayMs": 2500,
+      "approach": "jump"
+    }
+  ],
+  "verdict": {
+    "crops": [],
+    "cropsAre": "a guess (tangents around the view centre): set from the first capture",
+    "cursorLog": true
+  },
+  "sideEffects": [
+    "the OS mouse cursor is driven for 80 s with DCS in the foreground: do not touch the mouse",
+    "with the untracked headset the focus box is centred and the HUD is always inside the focus image; the instrument panel proper is below it (stretch c)",
+    "the cursor seen in the calibration flight is the yellow cross (about 48 px in the focus image), over the HUD and the sky and on the panels alike; the white dot (image 149) appears elsewhere: the fixtures say which shape each frame holds"
+  ],
+  "requireCockpit": true
+}

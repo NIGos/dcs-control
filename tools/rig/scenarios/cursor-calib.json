@@ -1,0 +1,212 @@
+{
+  "name": "cursor-calib",
+  "status": "ready",
+  "requireCockpit": true,
+  "measures": "Calibration of the cursor scenario: the mouse is moved slowly to nine places of DCS's window and both layers are captured whole (2 submissions each); cursor_calib.py finds the white cursor dot in the focus image and fits where a window position puts the cockpit cursor in the left eye's tangents (rig\\cursor-calibration.json). Option ON only: run without -Both.",
+  "cannotJudge": "Nothing is judged.",
+  "mission": "qvbench_i23_f16_ap.miz",
+  "seconds": 56,
+  "arms": [
+    {
+      "name": "2x",
+      "profileOverrides": {
+        "frameGenFactor": 2
+      }
+    }
+  ],
+  "profileOverrides": {
+    "smoothCursor": true
+  },
+  "ofxr": {},
+  "diagnostics": {},
+  "quadviews": {},
+  "windowAtOrigin": false,
+  "schedule": [
+    {
+      "at": 8,
+      "do": "recenter"
+    },
+    {
+      "at": 13,
+      "do": "shot",
+      "name": "cockpit"
+    },
+    {
+      "at": 16,
+      "do": "mouse-path",
+      "label": "c0",
+      "points": [
+        [
+          0.38,
+          0.32
+        ]
+      ],
+      "speedPx": 220,
+      "settleMs": 300
+    },
+    {
+      "at": 19.0,
+      "do": "capture",
+      "frames": 2,
+      "tag": "c0"
+    },
+    {
+      "at": 20,
+      "do": "mouse-path",
+      "label": "c1",
+      "points": [
+        [
+          0.56,
+          0.32
+        ]
+      ],
+      "speedPx": 220,
+      "settleMs": 300
+    },
+    {
+      "at": 23.0,
+      "do": "capture",
+      "frames": 2,
+      "tag": "c1"
+    },
+    {
+      "at": 24,
+      "do": "mouse-path",
+      "label": "c2",
+      "points": [
+        [
+          0.74,
+          0.32
+        ]
+      ],
+      "speedPx": 220,
+      "settleMs": 300
+    },
+    {
+      "at": 27.0,
+      "do": "capture",
+      "frames": 2,
+      "tag": "c2"
+    },
+    {
+      "at": 28,
+      "do": "mouse-path",
+      "label": "c3",
+      "points": [
+        [
+          0.38,
+          0.5
+        ]
+      ],
+      "speedPx": 220,
+      "settleMs": 300
+    },
+    {
+      "at": 31.0,
+      "do": "capture",
+      "frames": 2,
+      "tag": "c3"
+    },
+    {
+      "at": 32,
+      "do": "mouse-path",
+      "label": "c4",
+      "points": [
+        [
+          0.56,
+          0.5
+        ]
+      ],
+      "speedPx": 220,
+      "settleMs": 300
+    },
+    {
+      "at": 35.0,
+      "do": "capture",
+      "frames": 2,
+      "tag": "c4"
+    },
+    {
+      "at": 36,
+      "do": "mouse-path",
+      "label": "c5",
+      "points": [
+        [
+          0.74,
+          0.5
+        ]
+      ],
+      "speedPx": 220,
+      "settleMs": 300
+    },
+    {
+      "at": 39.0,
+      "do": "capture",
+      "frames": 2,
+      "tag": "c5"
+    },
+    {
+      "at": 40,
+      "do": "mouse-path",
+      "label": "c6",
+      "points": [
+        [
+          0.38,
+          0.68
+        ]
+      ],
+      "speedPx": 220,
+      "settleMs": 300
+    },
+    {
+      "at": 43.0,
+      "do": "capture",
+      "frames": 2,
+      "tag": "c6"
+    },
+    {
+      "at": 44,
+      "do": "mouse-path",
+      "label": "c7",
+      "points": [
+        [
+          0.56,
+          0.68
+        ]
+      ],
+      "speedPx": 220,
+      "settleMs": 300
+    },
+    {
+      "at": 47.0,
+      "do": "capture",
+      "frames": 2,
+      "tag": "c7"
+    },
+    {
+      "at": 48,
+      "do": "mouse-path",
+      "label": "c8",
+      "points": [
+        [
+          0.74,
+          0.68
+        ]
+      ],
+      "speedPx": 220,
+      "settleMs": 300
+    },
+    {
+      "at": 51.0,
+      "do": "capture",
+      "frames": 2,
+      "tag": "c8"
+    }
+  ],
+  "verdict": {
+    "crops": []
+  },
+  "sideEffects": [
+    "the OS mouse is driven for 40 s with DCS in the foreground"
+  ]
+}
