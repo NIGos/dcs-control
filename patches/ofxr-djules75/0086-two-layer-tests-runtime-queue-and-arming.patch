@@ -1,0 +1,457 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index da815f2..5e9e48f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1338,6 +1338,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             endforeach()
+         endforeach()
+         # The 2X release offset's scenario (0081: an application whose frame
++        # Bugfix round (review finding 3 on 0080): a frame with one
++        # projection layer while the swapchains of a two-layer frame are still
++        # arming on their threads (the runtime slow at creating private
++        # swapchains: 250 ms each, past the 400 ms the first frame waits).
++        add_test(
++            NAME xrfg_layer_two_layers_deep_hold_arming_single
++            COMMAND "${CMAKE_COMMAND}"
++                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                "-DBASE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_shallow_pipeline.ini"
++                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/xrfg_layer_two_layers_deep_hold_arming_single"
++                "-DMODE=dcs"
++                "-DTWO=1"
++                "-DSINGLE_SLOW_MS=250"
++                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_two_layers.cmake")
++        set_tests_properties(xrfg_layer_two_layers_deep_hold_arming_single PROPERTIES TIMEOUT 180)
+         # is heavy, light, then heavy again; tests/layer_release_offset.cmake)
+         # in the two-layer shape, where the tree has that patch: the flight
+         # that showed the stale offset was a two-layer one.
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+index 96224d7..b1f30e9 100644
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -109,6 +109,9 @@ std::atomic<std::uint32_t> g_two_layer_slot_apart{0};    // one kind, the two la
+ std::atomic<std::uint32_t> g_two_layer_fov_wrong{0};     // the focus FOV is not that of the periphery layer's frame
+ std::atomic<std::uint32_t> g_two_layer_alpha_checked{0};
+ std::atomic<std::uint32_t> g_two_layer_alpha_wrong{0};
++std::atomic<std::uint32_t> g_two_layer_alpha_released_wrong{0}; // by the release order
++std::atomic<std::uint32_t> g_two_layer_alpha_unordered_wrong{0}; // read through the application's queue
++std::atomic<std::uint32_t> g_two_layer_alpha_index_apart{0};    // acquired last != released last
+ // Where the application's own time went (us): waiting for its queue before a
+ // capture, and handing the focus image over.
+ std::atomic<long long> g_two_layer_idle_us{0};
+@@ -124,9 +127,56 @@ std::array<std::atomic<int>, 2> g_two_layer_synthetic_index{};
+ // The same, acquired and not yet released (what a layer names is the image
+ // released last).
+ std::array<std::atomic<int>, 2> g_two_layer_synthetic_acquired{};
++// Bugfix round: a swapchain's images are released in the order they were
++// acquired, and a layer names the image released last. The two atomics above
++// take "the image acquired last" for it, which is another image whenever the
++// layer under test holds two of a swapchain at once (the application's thread
++// acquires the next synthetic's image while the presenter has not released
++// this one's yet). Here: the images acquired and not released, oldest first,
++// the one released last, and the acquires and releases as they came.
++struct TwoLayerImageEvent {
++    char kind{};          // 'A' acquired, 'R' released
++    int index{};
++    DWORD thread{};
++    long long us{};
++};
++std::mutex g_two_layer_image_mutex;
++std::array<std::deque<int>, 2> g_two_layer_outstanding;
++std::array<int, 2> g_two_layer_released{-1, -1};
++std::array<std::deque<TwoLayerImageEvent>, 2> g_two_layer_image_events;
++[[nodiscard]] long long two_layer_now_us() {
++    static const auto origin = std::chrono::steady_clock::now();
++    return std::chrono::duration_cast<std::chrono::microseconds>(
++        std::chrono::steady_clock::now() - origin).count();
++}
++void two_layer_note_image(std::size_t slot, char kind, int index) {
++    // The caller holds g_two_layer_image_mutex.
++    auto& events = g_two_layer_image_events[slot];
++    events.push_back({kind, index, GetCurrentThreadId(), two_layer_now_us()});
++    if (events.size() > 8) {
++        events.pop_front();
++    }
++}
+ // Which private swapchains of each layer are alive (current a, b, synthetic a, b).
+ std::mutex g_two_layer_route_mutex;
+ std::array<std::array<bool, 4>, 2> g_two_layer_live{};
++// Bugfix round (review finding 3 on 0080): XRFG_TEST_TWO_LAYER_SINGLE=1, with
++// XRFG_TEST_SLOW_PRIVATE_CREATE_MS making the runtime slow at creating
++// private swapchains. The first frame the application submits while a
++// private swapchain is being created (the arming threads still running after
++// the frame that started them stopped waiting) names its first swapchain
++// alone: one projection layer, as a loading screen does. That frame must not
++// arm the swapchain a second time on the frame path: a layer's private
++// swapchains are made once, so a fifth one asked for while four are alive is
++// counted (g_two_layer_route_overflow), as is one made on the application's
++// thread while another thread is making that layer's.
++bool g_two_layer_single = false;
++std::atomic<int> g_two_layer_creating{0};
++std::atomic<std::uint32_t> g_two_layer_single_submitted{0};
++std::atomic<std::uint32_t> g_two_layer_single_seen{0};
++std::atomic<std::uint32_t> g_two_layer_route_overflow{0};
++std::atomic<std::uint32_t> g_two_layer_created_beside{0};
++std::array<std::atomic<int>, 2> g_two_layer_side_creating{};
+ // The focus layer of a frame, from the periphery layer's view of it: its
+ // field of view (a third of the eye's, shifted by the frame's own yaw, so no
+ // two frames have the same) and the alpha the application writes.
+@@ -139,7 +189,8 @@ std::array<std::array<bool, 4>, 2> g_two_layer_live{};
+     return static_cast<std::uint8_t>(
+         48U + static_cast<std::uint32_t>(std::abs(pose.orientation.y) * 8192.0F) % 160U);
+ }
+-[[nodiscard]] bool d3d12_image_first_alpha(ID3D12Resource* image, std::uint8_t* alpha);
++[[nodiscard]] bool d3d12_image_first_alpha(
++    ID3D12Resource* image, std::uint8_t* alpha, bool application_queue = false);
+ [[nodiscard]] bool d3d12_fill_image(ID3D12Resource* image, std::uint8_t alpha);
+ void two_layer_check(const XrFrameEndInfo* end_info);
+ // Whether the layer under test runs the deeper pipeline. Read from the same
+@@ -664,6 +715,16 @@ std::string g_log_path;
+ const XrCompositionLayerBaseHeader* g_expected_passthrough_layer = nullptr;
+ ComPtr<ID3D12Device> g_device;
+ ComPtr<ID3D12CommandQueue> g_queue;
++// Bugfix round: the queue the runtime was given at xrCreateSession. On a
++// SteamVR runtime (and on the D3D11 bridge) that is a queue of the layer's
++// own, not the application's (SessionState::binding_queue): the layer joins
++// THAT queue to a synthetic's synthesis before it releases the image, and a
++// runtime reads its images through the queue it was given. The two-layer
++// alpha check read through g_queue, the application's queue, which nothing
++// orders behind the synthesis: a synthetic handed over within a millisecond
++// or two of its synthesis (the presenter's first, always) read back as the
++// image's old content, 1 run in 20 to 40 on the WARP device.
++ComPtr<ID3D12CommandQueue> g_runtime_queue;
+ ComPtr<ID3D11Device> g_d3d11_device;
+ ComPtr<ID3D11DeviceContext> g_d3d11_context;
+ std::array<ComPtr<ID3D11Texture2D>, 3> g_d3d11_application_swapchain_images;
+@@ -748,6 +809,15 @@ std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_right_b_images;
+         return (display_time / kFakeDisplayPeriod) * 10;
+     }
+     if (g_steamvr_presenter_mode || g_flight_simulator_mode) {
++        // Bugfix round, "two:dcs": every frame its own yaw, so its own focus
++        // alpha (two_layer_focus_alpha), and every synthetic's alpha a
++        // comparison. The runtime's times step by 100 a wait within a period
++        // here; before, the camera stood still but for the first two frames,
++        // and a focus layer one frame behind compared equal.
++        if (g_two_layer_alpha) {
++            return (display_time / kFakeDisplayPeriod) * 100 +
++                ((display_time % kFakeDisplayPeriod) / 100) * 3;
++        }
+         return (display_time / kFakeDisplayPeriod) * 100;
+     }
+     return display_time % kGenerationCooldownDuration;
+@@ -824,6 +894,16 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_session(
+         }
+         g_bridge_session_bound.store(true, std::memory_order_release);
+     }
++    // Bugfix round: the queue this runtime reads its images through.
++    for (auto* next = create_info
++             ? static_cast<const XrBaseInStructure*>(create_info->next)
++             : nullptr;
++         next != nullptr; next = next->next) {
++        if (next->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
++            g_runtime_queue =
++                reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(next)->queue;
++        }
++    }
+     *session = g_session;
+     return XR_SUCCESS;
+ }
+@@ -1600,7 +1680,18 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
+     // asks for a transfer destination) takes the runtime this long.
+     if (g_slow_private_create_ms > 0 && create_info != nullptr &&
+         (create_info->usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) != 0) {
++        // Bugfix round: and who else is making this layer's meanwhile.
++        const std::size_t side = create_info->width == 8 ? 1U : 0U;
++        if (g_two_layer_mode &&
++            g_two_layer_side_creating[side].fetch_add(1, std::memory_order_acq_rel) > 0) {
++            g_two_layer_created_beside.fetch_add(1, std::memory_order_relaxed);
++        }
++        g_two_layer_creating.fetch_add(1, std::memory_order_acq_rel);
+         std::this_thread::sleep_for(std::chrono::milliseconds(g_slow_private_create_ms));
++        g_two_layer_creating.fetch_sub(1, std::memory_order_acq_rel);
++        if (g_two_layer_mode) {
++            g_two_layer_side_creating[side].fetch_sub(1, std::memory_order_acq_rel);
++        }
+     }
+     // The depth swapchain sits outside the call numbering the private slots
+     // are routed by.
+@@ -1662,6 +1753,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
+             *swapchain = routes[side][index];
+             return XR_SUCCESS;
+         }
++        g_two_layer_route_overflow.fetch_add(1, std::memory_order_relaxed); // bugfix round
+         return XR_ERROR_LIMIT_REACHED;
+     }
+     if (g_split_eye_mode) {
+@@ -2012,6 +2104,12 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_acquire_swapchain_image(
+         } else if (swapchain == g_synthetic_swapchain_right_b) {
+             g_two_layer_synthetic_acquired[1].store(static_cast<int>(*index), std::memory_order_release);
+         }
++        if (swapchain == g_synthetic_swapchain_right || swapchain == g_synthetic_swapchain_right_b) {
++            const std::size_t slot = swapchain == g_synthetic_swapchain_right ? 0U : 1U;
++            std::scoped_lock lock(g_two_layer_image_mutex);
++            g_two_layer_outstanding[slot].push_back(static_cast<int>(*index));
++            two_layer_note_image(slot, 'A', static_cast<int>(*index));
++        }
+         return XR_SUCCESS;
+     }
+     if (g_concurrent_acquire_mode.load(std::memory_order_acquire)) {
+@@ -2058,6 +2156,15 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_release_swapchain_image(
+             g_two_layer_synthetic_index[1].store(
+                 g_two_layer_synthetic_acquired[1].load(std::memory_order_acquire), std::memory_order_release);
+         }
++        if (swapchain == g_synthetic_swapchain_right || swapchain == g_synthetic_swapchain_right_b) {
++            const std::size_t slot = swapchain == g_synthetic_swapchain_right ? 0U : 1U;
++            std::scoped_lock lock(g_two_layer_image_mutex);
++            if (!g_two_layer_outstanding[slot].empty()) {
++                g_two_layer_released[slot] = g_two_layer_outstanding[slot].front();
++                g_two_layer_outstanding[slot].pop_front();
++            }
++            two_layer_note_image(slot, 'R', g_two_layer_released[slot]);
++        }
+         (synthetic ? g_synthetic_release_calls : g_current_release_calls)
+             .fetch_add(1, std::memory_order_relaxed);
+         if (!g_log_path.empty()) {
+@@ -2970,10 +3077,17 @@ template <typename Record>
+     return completed;
+ }
+ 
+-[[nodiscard]] bool d3d12_image_first_alpha(ID3D12Resource* image, std::uint8_t* alpha) {
++// Read as the runtime reads it: through the queue it was given
++// (g_runtime_queue), or with `application_queue` through the application's
++// own (what the check did before the bugfix round; kept for the diagnostic
++// that tells the two apart).
++[[nodiscard]] bool d3d12_image_first_alpha(
++    ID3D12Resource* image, std::uint8_t* alpha, bool application_queue) {
+     if (image == nullptr || alpha == nullptr || !g_device || !g_queue) {
+         return false;
+     }
++    ID3D12CommandQueue* const queue =
++        !application_queue && g_runtime_queue ? g_runtime_queue.Get() : g_queue.Get();
+     const D3D12_RESOURCE_DESC description = image->GetDesc();
+     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+     UINT64 total = 0;
+@@ -3026,8 +3140,8 @@ template <typename Record>
+         return false;
+     }
+     ID3D12CommandList* const lists[] = {list.Get()};
+-    g_queue->ExecuteCommandLists(1, lists);
+-    if (FAILED(g_queue->Signal(fence.Get(), 1))) {
++    queue->ExecuteCommandLists(1, lists);
++    if (FAILED(queue->Signal(fence.Get(), 1))) {
+         return false;
+     }
+     const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+@@ -3082,6 +3196,15 @@ void two_layer_check(const XrFrameEndInfo* end_info) {
+         return;
+     }
+     g_two_layer_frames.fetch_add(1, std::memory_order_relaxed);
++    // Bugfix round: the frame the application submitted with one layer
++    // (g_two_layer_single) passes through as it is.
++    if (count == 1 && layers[0]->viewCount == 2 && layers[0]->views != nullptr &&
++        layers[0]->views[0].subImage.swapchain == g_application_swapchain &&
++        g_two_layer_single_seen.load(std::memory_order_acquire) <
++            g_two_layer_single_submitted.load(std::memory_order_acquire)) {
++        g_two_layer_single_seen.fetch_add(1, std::memory_order_acq_rel);
++        return;
++    }
+     constexpr XrCompositionLayerFlags kFocusFlags =
+         XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+         XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+@@ -3152,6 +3275,14 @@ void two_layer_check(const XrFrameEndInfo* end_info) {
+             const auto& images = slot == 0U ? g_synthetic_swapchain_right_images
+                                             : g_synthetic_swapchain_right_b_images;
+             std::uint8_t alpha = 0;
++            // Bugfix round: first through the application's queue, as the
++            // check read before (unordered: counted, not judged), then
++            // through the runtime's.
++            std::uint8_t unordered = 0;
++            const bool unordered_read = index >= 0 &&
++                static_cast<std::size_t>(index) < images.size() && g_runtime_queue &&
++                g_runtime_queue != g_queue &&
++                d3d12_image_first_alpha(images[static_cast<std::size_t>(index)].Get(), &unordered, true);
+             if (index >= 0 && static_cast<std::size_t>(index) < images.size() &&
+                 d3d12_image_first_alpha(images[static_cast<std::size_t>(index)].Get(), &alpha)) {
+                 g_two_layer_alpha_checked.fetch_add(1, std::memory_order_relaxed);
+@@ -3160,11 +3291,61 @@ void two_layer_check(const XrFrameEndInfo* end_info) {
+                 if (wrong) {
+                     g_two_layer_alpha_wrong.fetch_add(1, std::memory_order_relaxed);
+                 }
+-                if (!g_log_path.empty()) {
+-                    std::ofstream stream(g_log_path, std::ios::out | std::ios::app);
+-                    stream << "[XRFG-FAKE] two layers: focus synthetic alpha " << static_cast<int>(alpha)
+-                           << " expected " << expected << (wrong ? " WRONG" : "") << " slot " << slot
+-                           << " image " << index << '\n';
++                const bool unordered_wrong = unordered_read &&
++                    std::abs(static_cast<int>(unordered) - expected) > 1;
++                if (unordered_wrong) {
++                    g_two_layer_alpha_unordered_wrong.fetch_add(1, std::memory_order_relaxed);
++                }
++                // Bugfix round: every image's alpha, the image by the
++                // release order against the one acquired last, and who
++                // acquired and released what, when.
++                int released = -1;
++                std::size_t outstanding = 0;
++                std::deque<TwoLayerImageEvent> events;
++                {
++                    std::scoped_lock lock(g_two_layer_image_mutex);
++                    released = g_two_layer_released[slot];
++                    outstanding = g_two_layer_outstanding[slot].size();
++                    events = g_two_layer_image_events[slot];
++                }
++                std::array<int, 3> all{-1, -1, -1};
++                for (std::size_t image = 0; image < images.size(); ++image) {
++                    std::uint8_t value = 0;
++                    if (d3d12_image_first_alpha(images[image].Get(), &value)) {
++                        all[image] = value;
++                    }
++                }
++                const bool released_wrong = released < 0 || released >= 3 ||
++                    std::abs(all[static_cast<std::size_t>(released)] - expected) > 1;
++                if (released != index) {
++                    g_two_layer_alpha_index_apart.fetch_add(1, std::memory_order_relaxed);
++                }
++                if (released_wrong) {
++                    g_two_layer_alpha_released_wrong.fetch_add(1, std::memory_order_relaxed);
++                }
++                {
++                    std::ostringstream line;
++                    line << "[XRFG-FAKE] two layers: focus synthetic alpha " << static_cast<int>(alpha)
++                         << " expected " << expected << (wrong ? " WRONG" : "") << " slot " << slot
++                         << " image " << index
++                         << (unordered_wrong ? " (through the application's queue " : "")
++                         << (unordered_wrong ? std::to_string(static_cast<int>(unordered)) + ": not yet written)" : "")
++                         << " released-in-order " << released
++                         << (released_wrong ? " RELEASED-WRONG" : "") << " held " << outstanding
++                         << " images " << all[0] << ',' << all[1] << ',' << all[2]
++                         << " thread " << GetCurrentThreadId() << " app-thread " << g_test_application_thread_id
++                         << " at " << two_layer_now_us() << " us display " << end_info->displayTime << " events";
++                    for (const TwoLayerImageEvent& event : events) {
++                        line << ' ' << event.kind << event.index << '@' << event.us << "/t" << event.thread;
++                    }
++                    line << '\n';
++                    if (wrong || released_wrong) {
++                        std::cout << line.str();
++                    }
++                    if (!g_log_path.empty()) {
++                        std::ofstream stream(g_log_path, std::ios::out | std::ios::app);
++                        stream << line.str();
++                    }
+                 }
+             }
+         }
+@@ -3233,6 +3414,7 @@ int main(int argc, char** argv) {
+         g_two_layer_alpha = std::strcmp(argv[3], "dcs") == 0;
+         g_two_layer_light = std::strcmp(argv[3], "dcs-cadence-pause") == 0 ||
+             std::strcmp(argv[3], "dcs-cadence-exit") == 0;
++        g_two_layer_single = GetEnvironmentVariableA("XRFG_TEST_TWO_LAYER_SINGLE", nullptr, 0) != 0;
+     }
+     const int result = call_chain_main(argc, argv);
+     if (!g_two_layer_mode) {
+@@ -3249,7 +3431,11 @@ int main(int argc, char** argv) {
+               << " synthetic; shape or flags or order wrong " << shape << ", layers of different kinds " << mixed << " (on different private slots "
+               << g_two_layer_slot_apart.load() << ")"
+               << ", focus field of view not the frame's " << fov << ", focus alpha checked " << alpha_checked
+-              << " wrong " << alpha_wrong << "; the application waited " << g_two_layer_idle_us.load() / 1000
++              << " wrong " << alpha_wrong << " (by the image released last: wrong "
++              << g_two_layer_alpha_released_wrong.load() << ", not the image acquired last "
++              << g_two_layer_alpha_index_apart.load() << "; read through the application's queue instead of the "
++              << "runtime's: wrong " << g_two_layer_alpha_unordered_wrong.load() << ")"
++              << "; the application waited " << g_two_layer_idle_us.load() / 1000
+               << " ms for its queue, " << g_two_layer_periphery_us.load() / 1000
+               << " ms handing its first swapchain's images over and " << g_two_layer_focus_us.load() / 1000
+               << " ms its focus images; before xrBeginFrame " << g_two_layer_before_begin_us.load() / 1000
+@@ -3257,6 +3443,33 @@ int main(int argc, char** argv) {
+               << " ms, in a frame's submission before xrEndFrame " << g_two_layer_pre_end_us.load() / 1000
+               << " ms, in its simulated render " << g_two_layer_render_us.load() / 1000 << " ms, over "
+               << g_two_layer_app_frames.load() << " frames\n";
++    // Bugfix round (review finding 3 on 0080).
++    const std::uint32_t overflow = g_two_layer_route_overflow.load();
++    const std::uint32_t beside = g_two_layer_created_beside.load();
++    if (g_two_layer_single || overflow != 0 || beside != 0) {
++        std::cout << "two layers, one frame with the first layer alone: submitted "
++                  << g_two_layer_single_submitted.load() << ", reached the runtime "
++                  << g_two_layer_single_seen.load() << "; private swapchains asked for beyond a layer's four "
++                  << overflow << ", made while another thread was making that layer's " << beside << '\n';
++    }
++    if (overflow != 0 || beside != 0) {
++        std::cerr << "two layers: a swapchain was armed twice\n";
++        return EXIT_FAILURE;
++    }
++    if (g_two_layer_single && g_two_layer_single_submitted.load() == 0) {
++        std::cerr << "two layers: NOT ARMED, no frame fell while private swapchains were being made\n";
++        return EXIT_FAILURE;
++    }
++    // That case is judged on the arming and on what reached the runtime: the
++    // scenario's own verdict wants a presenter promoted within its first
++    // frames, which a runtime this slow at creating swapchains does not give.
++    if (g_two_layer_single) {
++        if (frames == 0 || synthetics == 0 || shape != 0 || mixed != 0 || fov != 0 || alpha_wrong != 0) {
++            std::cerr << "two layers: validation failed\n";
++            return EXIT_FAILURE;
++        }
++        return EXIT_SUCCESS;
++    }
+     if (result != EXIT_SUCCESS) {
+         return result;
+     }
+@@ -3360,6 +3573,15 @@ int call_chain_main(int argc, char** argv) {
+         g_deep_hold_mode = g_deep_hold_mode || g_release_offset_mode;
+         g_async_arm_mode = argc == 4 && std::strcmp(argv[3], "dcs-async-arm") == 0;
+         g_slow_private_create_ms = g_async_arm_mode ? 80 : 0;
++        // Bugfix round: or as the test asks.
++        {
++            char slow[16]{};
++            const DWORD length = GetEnvironmentVariableA(
++                "XRFG_TEST_SLOW_PRIVATE_CREATE_MS", slow, sizeof(slow));
++            if (length > 0 && length < sizeof(slow)) {
++                g_slow_private_create_ms = std::atoi(slow);
++            }
++        }
+     }
+     {
+         const bool throughput_down =
+@@ -4329,7 +4551,15 @@ int call_chain_main(int argc, char** argv) {
+         frame_end_info.layers = layers;
+         // Two layers: the frame's focus image (its field of view from this
+         // frame's views; in "two:dcs" its alpha written), then both layers.
+-        if (g_two_layer_mode && !g_submit_no_layers) {
++        // Bugfix round: once, while the runtime is making private
++        // swapchains, the first layer alone (see g_two_layer_single).
++        const bool two_layer_single_now = g_two_layer_mode && g_two_layer_single &&
++            !g_submit_no_layers && g_two_layer_single_submitted.load(std::memory_order_acquire) == 0 &&
++            g_two_layer_creating.load(std::memory_order_acquire) > 0;
++        if (two_layer_single_now) {
++            g_two_layer_single_submitted.fetch_add(1, std::memory_order_acq_rel);
++        }
++        if (g_two_layer_mode && !g_submit_no_layers && !two_layer_single_now) {
+             two_layer_projection.space = projection.space;
+             for (std::size_t index = 0; index < two_layer_views.size(); ++index) {
+                 two_layer_views[index].pose = projection_views[index].pose;
+diff --git a/tests/layer_two_layers.cmake b/tests/layer_two_layers.cmake
+index 549ce92..3a1b841 100644
+--- a/tests/layer_two_layers.cmake
++++ b/tests/layer_two_layers.cmake
+@@ -12,6 +12,11 @@
+ #   log " op=foveated_mode result=1 " (active) and never " result=2 ".
+ #   TWO=0: the composed twin: the same scenario, ini and keys, one layer, no
+ #   foveated key, for the scenarios the suite does not already run that way.
++# SINGLE_SLOW_MS (bugfix round, review finding 3 on 0080): the runtime takes
++# that long per private swapchain, and the application's first frame after
++# the one that started the arming names its first swapchain alone
++# (XRFG_TEST_TWO_LAYER_SINGLE); the call chain fails if a swapchain is armed
++# twice.
+ foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN BASE_INI WORK_DIR MODE TWO)
+     if(NOT DEFINED ${required_variable})
+         message(FATAL_ERROR "${required_variable} was not provided")
+@@ -40,6 +45,10 @@ if(TWO)
+ else()
+     set(scenario "${MODE}")
+ endif()
++if(DEFINED SINGLE_SLOW_MS)
++    set(ENV{XRFG_TEST_TWO_LAYER_SINGLE} "1")
++    set(ENV{XRFG_TEST_SLOW_PRIVATE_CREATE_MS} "${SINGLE_SLOW_MS}")
++endif()
+ get_filename_component(layer_name "${LAYER_DLL}" NAME)
+ execute_process(
+     COMMAND "${CALL_CHAIN}"

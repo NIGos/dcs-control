@@ -387,6 +387,7 @@ public static class ConfigurationWriters
         ; Panel only (no frame generation): DCS's instance gets no extension it did not ask for.
         visibility_mask={(p.FrameGen == FrameGeneration.Off ? 0 : 1)}
         smooth_cursor={(p.SmoothCursor ? 1 : 0)}
+        cursor_follow_mouse={(p.SmoothCursor ? 1 : 0)}
         cursor_templates={cursorTemplates ?? ""}
 
         [diagnostics]

@@ -1,0 +1,2136 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index edc3293..900aacd 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -167,6 +167,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+     set(XRFG_CURSOR_CAPTURE_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_capture_shader.hpp")
+     # Foveated layers, round 4: the periphery layer follows the focus layer's cursor (CursorImportCS).
+     set(XRFG_CURSOR_IMPORT_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_import_shader.hpp")
++    # Foveated layers, round 8: the passes that read the frames, for a periphery layer (XRFG_CURSOR_ENLARGE).
++    set(XRFG_CURSOR_MOTION_ENLARGED_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_motion_enlarged_shader.hpp")
++    set(XRFG_CURSOR_SEARCH_ENLARGED_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_search_enlarged_shader.hpp")
++    set(XRFG_CURSOR_PICK_ENLARGED_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_pick_enlarged_shader.hpp")
++    set(XRFG_CURSOR_VERIFY_ENLARGED_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_verify_enlarged_shader.hpp")
+     set(XRFG_CURSOR_REGION_VERTEX_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_region_vertex_shader.hpp")
+     set(XRFG_CURSOR_COMPOSITE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_composite_pixel_shader.hpp")
+     # DCS Control (0031): the cockpit mask's resample, and the compositions
+@@ -362,6 +367,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             "${XRFG_CURSOR_GATE_HEADER}"
+             "${XRFG_CURSOR_CAPTURE_HEADER}"
+             "${XRFG_CURSOR_IMPORT_HEADER}"
++            "${XRFG_CURSOR_MOTION_ENLARGED_HEADER}"
++            "${XRFG_CURSOR_SEARCH_ENLARGED_HEADER}"
++            "${XRFG_CURSOR_PICK_ENLARGED_HEADER}"
++            "${XRFG_CURSOR_VERIFY_ENLARGED_HEADER}"
+             "${XRFG_CURSOR_REGION_VERTEX_HEADER}"
+             "${XRFG_CURSOR_COMPOSITE_PIXEL_HEADER}"
+             "${XRFG_COCKPIT_MASK_RESAMPLE_HEADER}"
+@@ -460,6 +469,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+             /Fh "${XRFG_CURSOR_IMPORT_HEADER}" /Vn g_xrfg_cursor_import_shader
+             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CursorMotionCS /D XRFG_CURSOR_ENLARGE=1
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_CURSOR_MOTION_ENLARGED_HEADER}" /Vn g_xrfg_cursor_motion_enlarged_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CursorSearchCS /D XRFG_CURSOR_ENLARGE=1
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_CURSOR_SEARCH_ENLARGED_HEADER}" /Vn g_xrfg_cursor_search_enlarged_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CursorPickCS /D XRFG_CURSOR_ENLARGE=1
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_CURSOR_PICK_ENLARGED_HEADER}" /Vn g_xrfg_cursor_pick_enlarged_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CursorVerifyCS /D XRFG_CURSOR_ENLARGE=1
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_CURSOR_VERIFY_ENLARGED_HEADER}" /Vn g_xrfg_cursor_verify_enlarged_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
+         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T vs_5_1 /E CursorRegionVS
+             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+             /Fh "${XRFG_CURSOR_REGION_VERTEX_HEADER}" /Vn g_xrfg_cursor_region_vertex_shader
+@@ -513,6 +538,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         "${XRFG_CURSOR_GATE_HEADER}"
+         "${XRFG_CURSOR_CAPTURE_HEADER}"
+         "${XRFG_CURSOR_IMPORT_HEADER}"
++        "${XRFG_CURSOR_MOTION_ENLARGED_HEADER}"
++        "${XRFG_CURSOR_SEARCH_ENLARGED_HEADER}"
++        "${XRFG_CURSOR_PICK_ENLARGED_HEADER}"
++        "${XRFG_CURSOR_VERIFY_ENLARGED_HEADER}"
+         "${XRFG_CURSOR_REGION_VERTEX_HEADER}"
+         "${XRFG_CURSOR_COMPOSITE_PIXEL_HEADER}"
+         "${XRFG_COCKPIT_MASK_RESAMPLE_HEADER}"
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+index 076b552..932853c 100644
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -495,6 +495,18 @@ enum class BridgeFlightOperation : std::uint32_t {
+     //     second while it acts: a= the frame-views where the candidate taken
+     //     for the cursor (the one that moves with the mouse) was not the one
+     //     with the best score, b= pairs judged | drawn << 16 that second.
++    //   result=6 (foveated frame generation, round 8), once a second and per
++    //     swapchain while two layers are linked and something was judged:
++    //     a= 1 the periphery layer's swapchain (its detection decides for
++    //     both layers), 2 the focus layer's (it follows that decision), the
++    //     image's width in bits 16-31 and height in bits 32-47; b= pairs this
++    //     swapchain's own gate judged | accepted << 16; c= on a focus
++    //     swapchain, the views of the pairs it redrew by how: from its own
++    //     detection (the cursor wholly inside the focus image and found
++    //     there too) | from the periphery's record with the cursor's box
++    //     inside the focus image << 16 | cut by the focus image's border <<
++    //     32 | with no pixel in the focus image (the periphery layer alone
++    //     shows it) << 48.
+     smooth_cursor,
+     // DCS VR Control (0011). Video memory once a second with `[ofxr]
+     // diag_vram` (what the panel shows), in MiB: a= this process's resident
+diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
+index 7e007e6..a8e4c37 100644
+--- a/include/xrfg/d3d12_frame_synthesizer.hpp
++++ b/include/xrfg/d3d12_frame_synthesizer.hpp
+@@ -132,6 +132,20 @@ struct D3D12SmoothCursorOptions {
+     // that stands still while the mouse moves is passed over, and the place
+     // the last match is expected at counts for a candidate.
+     bool follow_mouse{};
++    // Foveated layers, round 8: this synthesizer's images show the cursor
++    // small (a periphery layer's: about 12 pixels of a 1040-pixel image, a
++    // cross with bars under a pixel wide). The detection then reads the
++    // image enlarged with a bilinear filter to the focus layer's scale (the
++    // focus layer's pixels per tangent over this image's, taken once from
++    // the D3D12FoveatedLink: about five), as the composed mode's detection
++    // reads the periphery after Quad Views has enlarged it, with the same
++    // templates, scales and rules; nothing runs until that scale is known.
++    // Set by the layer for a periphery layer's swapchains under
++    // `foveated_layers`; never otherwise.
++    bool small_sprite{};
++    // Tests only: that scale given directly (0: from the link), for a
++    // synthesizer that is not linked.
++    float small_sprite_enlarge{};
+ };
+ 
+ // DCS Control (0053): `[diagnostics] hud_capture=N`, a developer's diagnostic
+@@ -202,6 +216,17 @@ struct D3D12SmoothCursorStats {
+     // DCS Control (0082): frame-views where another candidate than the best
+     // score was taken (follow_mouse).
+     std::uint32_t picked{};
++    // Foveated layers, round 8, on a focus layer's swapchain that follows the
++    // periphery layer's decision, per view of a pair it drew: its own
++    // detection agreed and its own record was used; the periphery's record
++    // was used with the cursor's box inside this image in both frames; cut by
++    // the image's border in a frame; with no pixel of it in the image (the
++    // cursor is drawn by the periphery layer alone). The two middle ones
++    // count modulo 65536.
++    std::uint32_t follow_own{};
++    std::uint32_t follow_inside{};
++    std::uint32_t follow_cut{};
++    std::uint32_t follow_outside{};
+ };
+ 
+ enum class D3D12OpticalFlowBackend {
+@@ -658,6 +683,18 @@ public:
+     // focus layer ran no detection): the focus layer's swapchain of the same
+     // frame then runs no detection either, so the two layers never disagree
+     // about a pair whichever was submitted first.
++    // Round 8: the focus layer's pixels per tangent (horizontal), per eye, as
++    // its synthesizer last saw them; 0 until it has. The periphery layer's
++    // detection enlarges its image to it (D3D12SmoothCursorOptions::
++    // small_sprite).
++    void note_focus_density(std::uint32_t eye, float pixels_per_tangent) noexcept {
++        if (eye < kEyes) {
++            focus_density_[eye].store(pixels_per_tangent, std::memory_order_relaxed);
++        }
++    }
++    [[nodiscard]] float focus_density(std::uint32_t eye) const noexcept {
++        return eye < kEyes ? focus_density_[eye].load(std::memory_order_relaxed) : 0.0F;
++    }
+     void decline_cursor(std::uint32_t eye, std::uint64_t token) noexcept {
+         if (eye < kEyes) {
+             cursor_declined_[eye].store(token, std::memory_order_relaxed);
+@@ -684,6 +721,7 @@ private:
+     std::array<FlowRecord, kEyes> flow_{};
+     std::array<CursorReader, kEyes> flow_reader_{};
+     std::array<std::atomic<std::uint64_t>, kEyes> cursor_declined_{};
++    std::array<std::atomic<float>, kEyes> focus_density_{};
+     std::array<std::atomic<bool>, 2> hud_refused_{};
+ };
+ 
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+index 3d492c5..5b2532c 100644
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -32,6 +32,10 @@
+ #include "cursor_composite_pixel_shader.hpp"
+ #include "cursor_gate_shader.hpp"
+ #include "cursor_import_shader.hpp" // foveated layers, round 4
++#include "cursor_motion_enlarged_shader.hpp" // foveated layers, round 8
++#include "cursor_pick_enlarged_shader.hpp"
++#include "cursor_search_enlarged_shader.hpp"
++#include "cursor_verify_enlarged_shader.hpp"
+ #include "cursor_capture_shader.hpp"
+ #include "cursor_motion_shader.hpp"
+ #include "cursor_region_vertex_shader.hpp"
+@@ -558,7 +562,7 @@ constexpr UINT kCursorStateWords = 1024;
+ // each with a candidate per template.
+ constexpr UINT kCursorListEntries = 400;
+ constexpr UINT kCursorStatsBase = 192;
+-constexpr UINT kCursorStatsWords = 14; // DCS Control (0082): 13 before (kStatPicked)
++constexpr UINT kCursorStatsWords = 16; // 13 before: 0082's kStatPicked, round 8's three counters in two words
+ static_assert(kCursorStatsWords * sizeof(std::uint32_t) <= 64U); // one slot's readback region
+ constexpr UINT kCursorTileSize = 32;
+ // (0011) The diagnostic capture's layout (smooth_cursor.hlsl CursorCaptureCS).
+@@ -581,7 +585,7 @@ struct CursorParameters {
+     std::array<float, 2> mouse_delta{};
+     // The views (bits 0-7) and each one's array slice (8-15, 16-23).
+     UINT view_info{};
+-    UINT padding{};
++    float enlarge{}; // foveated layers, round 8 (padding before)
+     std::array<CameraMapping, kMaxReprojectionViews> mappings{};
+ };
+ constexpr UINT kCursorConstantCount =
+@@ -592,6 +596,10 @@ static_assert(offsetof(CursorParameters, mappings) == sizeof(UINT) * 12U);
+ static_assert(1U + 2U * 4U + kCursorConstantCount <= 64U);
+ // DCS Control (0082): D3D12SmoothCursorOptions::follow_mouse.
+ constexpr UINT kCursorFlagFollowMouse = 64U;
++// Foveated layers: the pixels per tangent at which the game's cockpit cursor
++// image (32 texels over about 2 degrees) is 80 pixels across, scale step
++// 2.52 of the detection's ladder (plan_foveated_cursor).
++constexpr float kCursorNominalDensity = 2117.0F;
+ constexpr UINT kCursorFlagLinear = 1U;
+ constexpr UINT kCursorFlagPrevious = 2U;
+ constexpr UINT kCursorFlagMouseKnown = 4U;
+@@ -601,6 +609,9 @@ constexpr UINT kCursorFlagMouseKnown = 4U;
+ // found by its tangents, and the gate also writes its record as tangents for
+ // the periphery layer's synthesizer (CursorImportCS). Never set otherwise.
+ constexpr UINT kCursorFlagFoveatedFocus = 8U;
++// Round 8: CursorImportCS after the layer's own detection (its own record
++// stays where it agrees with the one followed).
++constexpr UINT kCursorFlagRefine = 32U;
+ 
+ [[nodiscard]] bool srgb_view_format(DXGI_FORMAT format) noexcept {
+     return format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+@@ -2143,10 +2154,86 @@ struct D3D12FrameSynthesizer::Impl {
+         // (one per view) and converts it (record_cursor_import).
+         bool follow{};
+         std::array<D3D12FoveatedLink::CursorRecord, kMaxReprojectionViews> sources{};
++        // Round 8: the roles are the other way round (the periphery layer
++        // detects, the focus layer follows its record), and the focus layer
++        // also runs its own detection first: `refine`, the import comes
++        // after it and leaves its record where the two agree.
++        bool refine{};
+     };
+     CursorPlan cursor_plan{};
++    // Round 8: D3D12SmoothCursorOptions::small_sprite.
++    bool cursor_small{};
++    // The scale its detection enlarges the image to, fixed the first time it
++    // is known (the tracking and the mouse's gain are in enlarged pixels);
++    // 0 until then, and the detection does not run.
++    float cursor_enlarge{};
++    // A view's pixels per tangent across its image.
++    [[nodiscard]] float view_density(const D3D12ReprojectionView& view) const noexcept {
++        const float span = std::tan(view.fov.angle_right) - std::tan(view.fov.angle_left);
++        const float width = view.image_rect.width != 0
++            ? static_cast<float>(view.image_rect.width)
++            : static_cast<float>(image_description.Width);
++        return span > 1.0e-6F ? width / span : 0.0F;
++    }
++    // Fixes the scale: a quarter step, 1 to 8, and no more tiles than the
++    // search's 16 bits name. False: not usable (the detection stays off).
++    [[nodiscard]] bool fix_cursor_enlarge(float wanted) noexcept {
++        if (!(wanted > 1.0F)) {
++            return false;
++        }
++        float factor = std::clamp(std::round(wanted * 4.0F) / 4.0F, 1.25F, 8.0F);
++        const auto tiles = [&](float by) {
++            const UINT64 across = (static_cast<UINT64>(std::lround(
++                static_cast<float>(image_description.Width) * by)) + kCursorTileSize - 1U) / kCursorTileSize;
++            const UINT64 down = (static_cast<UINT64>(std::lround(
++                static_cast<float>(image_description.Height) * by)) + kCursorTileSize - 1U) / kCursorTileSize;
++            return std::pair<UINT64, UINT64>{across, down};
++        };
++        while (factor > 1.25F && tiles(factor).first * tiles(factor).second > 0x10000U) {
++            factor -= 0.25F;
++        }
++        if (tiles(factor).first * tiles(factor).second > 0x10000U) {
++            return false;
++        }
++        cursor_enlarge = factor;
++        cursor_tiles_x = static_cast<UINT>(tiles(factor).first);
++        cursor_tiles_y = static_cast<UINT>(tiles(factor).second);
++        return true;
++    }
+     // Foveated layers, round 4: CursorImportCS, made when first needed.
+     ComPtr<ID3D12PipelineState> cursor_import_pipeline;
++    // Round 8: the passes that read the frames, built for an enlarged image
++    // (smooth_cursor.hlsl, XRFG_CURSOR_ENLARGE); made with small_sprite.
++    ComPtr<ID3D12PipelineState> cursor_motion_enlarged_pipeline;
++    ComPtr<ID3D12PipelineState> cursor_search_enlarged_pipeline;
++    ComPtr<ID3D12PipelineState> cursor_verify_enlarged_pipeline;
++    ComPtr<ID3D12PipelineState> cursor_pick_enlarged_pipeline;
++    [[nodiscard]] HRESULT create_cursor_enlarged_pipelines(UINT node_mask) noexcept {
++        const auto pipeline = [&](const BYTE* code, std::size_t size,
++                                  ComPtr<ID3D12PipelineState>* output) {
++            D3D12_COMPUTE_PIPELINE_STATE_DESC compute{};
++            compute.pRootSignature = cursor_root_signature.Get();
++            compute.CS = {code, size};
++            compute.NodeMask = node_mask;
++            return device->CreateComputePipelineState(
++                &compute, IID_PPV_ARGS(output->GetAddressOf()));
++        };
++        HRESULT result = pipeline(g_xrfg_cursor_motion_enlarged_shader,
++            sizeof(g_xrfg_cursor_motion_enlarged_shader), &cursor_motion_enlarged_pipeline);
++        if (SUCCEEDED(result)) {
++            result = pipeline(g_xrfg_cursor_search_enlarged_shader,
++                sizeof(g_xrfg_cursor_search_enlarged_shader), &cursor_search_enlarged_pipeline);
++        }
++        if (SUCCEEDED(result)) {
++            result = pipeline(g_xrfg_cursor_verify_enlarged_shader,
++                sizeof(g_xrfg_cursor_verify_enlarged_shader), &cursor_verify_enlarged_pipeline);
++        }
++        if (SUCCEEDED(result)) {
++            result = pipeline(g_xrfg_cursor_pick_enlarged_shader,
++                sizeof(g_xrfg_cursor_pick_enlarged_shader), &cursor_pick_enlarged_pipeline);
++        }
++        return result;
++    }
+     bool cursor_import_failed{};
+     D3D12SmoothCursorStats cursor_stats{};
+     std::uint64_t cursor_stats_order{};
+@@ -3526,6 +3613,12 @@ struct D3D12FrameSynthesizer::Impl {
+             if (FAILED(result)) {
+                 return result;
+             }
++            if (options.small_sprite) { // foveated layers, round 8
++                result = create_cursor_enlarged_pipelines(node_mask);
++                if (FAILED(result)) {
++                    return result;
++                }
++            }
+             const D3D12_HEAP_PROPERTIES heap = default_heap_properties(node_mask);
+             D3D12_RESOURCE_DESC description = buffer_description(
+                 static_cast<UINT64>(kCursorListEntries) * kD3D12MaxCursorTemplates * 2U *
+@@ -3636,6 +3729,11 @@ struct D3D12FrameSynthesizer::Impl {
+             cursor_template_count = static_cast<UINT>(options.templates.size());
+             cursor_active_milliseconds = options.active_milliseconds;
+             cursor_follow_mouse = options.follow_mouse; // DCS Control (0082)
++            cursor_small = options.small_sprite; // round 8
++            cursor_enlarge = 0.0F;
++            if (options.small_sprite && options.small_sprite_enlarge > 1.0F) {
++                static_cast<void>(fix_cursor_enlarge(options.small_sprite_enlarge));
++            }
+             cursor_stats = {};
+             cursor_stats.templates = cursor_template_count;
+             cursor_stats.matchable_templates = matchable;
+@@ -3753,58 +3851,92 @@ struct D3D12FrameSynthesizer::Impl {
+         return true;
+     }
+ 
+-    // Foveated layers, round 4, after plan_cursor: the frame of this capture
+-    // is noted, and on the periphery layer's swapchains the plan is replaced:
+-    // no detection there (a 2-degree cursor is about 12 pixels of a 1040-pixel
+-    // periphery image, below what the templates' scales match). The pair
+-    // follows the focus layer's record of the same two frames for every one
+-    // of its views, or does nothing about the cursor at all - so the two
+-    // layers never disagree about a pair.
++    // Foveated layers, after plan_cursor: the frame of this capture is noted,
++    // and the two layers' plans are tied together.
++    // Round 8 (round 4 had it the other way round, and smoothed the cursor
++    // only while it was wholly inside the focus image): the PERIPHERY layer's
++    // swapchain runs the detection as planned, on its own images (the whole
++    // field of view: small-sprite scales and templates), and its gate is the
++    // one decision for the eye and the pair. A FOCUS layer's swapchain
++    // follows the periphery layer's record of the same two frames for every
++    // one of its views (the layer submits the periphery swapchains first),
++    // or does nothing about the cursor at all - so the two layers never
++    // disagree about a pair. Where its own plan runs too, its own detection
++    // comes first and CursorImportCS keeps its record where it agrees with
++    // the one followed (`refine`): the same decision, the position at the
++    // focus image's own precision. Outside that (the cursor outside the
++    // focus image, cut by its border, in the fade) the periphery layer's
++    // position stands on both layers.
+     void plan_foveated_cursor(const RollingSource& previous_source, std::uint64_t current_serial) noexcept {
+         const std::uint64_t previous_token = foveated_token_of(previous_source.ticket.serial);
+         note_foveated_token(current_serial);
+-        // Round 7: a focus swapchain whose frame's periphery swapchain went
+-        // first and followed no record runs no detection for this pair.
+         if (foveated_focus_layer()) {
+-            const UINT views = std::min<UINT>(previous_source.view_count, kMaxReprojectionViews);
+-            for (UINT view = 0; view < views; ++view) {
+-                if (foveated_link->cursor_declined(
+-                        cockpit_mask_eye(previous_source.views[view], view), foveated_frame_token)) {
++            for (UINT view = 0; view < std::min<UINT>(previous_source.view_count, kMaxReprojectionViews); ++view) {
++                foveated_link->note_focus_density(
++                    cockpit_mask_eye(previous_source.views[view], view),
++                    view_density(previous_source.views[view]));
++            }
++        }
++        if (!foveated_focus_layer()) {
++            // The periphery layer's detection reads its image enlarged to
++            // the focus layer's scale; until that is known it does not run.
++            if (cursor_plan.run && cursor_small && cursor_enlarge <= 1.0F) {
++                bool fixed = false;
++                if (foveated_periphery_layer() && previous_source.view_count != 0) {
++                    const float own_density = view_density(previous_source.views[0]);
++                    const float focus_density = foveated_link->focus_density(
++                        cockpit_mask_eye(previous_source.views[0], 0));
++                    fixed = own_density > 0.0F && focus_density > own_density &&
++                        fix_cursor_enlarge(focus_density / own_density);
++                    // With `cursor_follow_mouse`: to the scale the composed
++                    // mode's detection sees the cockpit cursor at, not the
++                    // focus layer's. Flown at the focus layer's scale (6
++                    // times), the cross was 57 pixels across: scale 3.6,
++                    // above the ladder's top step (3.17), and the layer
++                    // that decides accepted nothing in any stretch, while
++                    // the composed twin had it at 40 pixels on step 2.52.
++                    // The composed image is not known here; the cursor's
++                    // angle is (the game draws its 32-texel image over about
++                    // 2 degrees: 80 pixels at 2117 pixels a tangent, the
++                    // composed image's density in that flight, step 2.52):
++                    // the image is enlarged to that density. 5 times there.
++                    if (cursor_follow_mouse && own_density > 0.0F) {
++                        fixed = own_density * 1.25F <= kCursorNominalDensity &&
++                            fix_cursor_enlarge(kCursorNominalDensity / own_density);
++                    }
++                }
++                if (!fixed) {
+                     cursor_plan = {};
+                     cursor_capture_now = false;
+-                    break;
+                 }
+             }
+-        }
+-        if (!foveated_periphery_layer()) {
++            // (No diagnostic capture of an enlarged detection: its crops are
++            // taken in real pixels.)
++            if (cursor_small) {
++                cursor_capture_now = false;
++            }
+             return;
+         }
++        const CursorPlan own = cursor_plan;
+         cursor_plan = {};
+-        cursor_capture_now = false;
+-        // Round 7: until this pair is known to follow a record, it declined.
+-        for (UINT view = 0; view < std::min<UINT>(previous_source.view_count, kMaxReprojectionViews); ++view) {
+-            foveated_link->decline_cursor(
+-                cockpit_mask_eye(previous_source.views[view], view), foveated_frame_token);
+-        }
+         const UINT view_count = previous_source.view_count;
+         if (!cursor_enabled || view_count == 0 || view_count > kMaxReprojectionViews ||
+             !ensure_cursor_import_pipeline()) {
++            cursor_capture_now = false;
+             return;
+         }
+-        CursorPlan plan{};
++        CursorPlan plan = own;
+         for (UINT view = 0; view < view_count; ++view) {
+             const UINT eye = cockpit_mask_eye(previous_source.views[view], view);
+             if (!foveated_link->cursor(eye, previous_token, foveated_frame_token, &plan.sources[view])) {
++                cursor_capture_now = false;
+                 return;
+             }
+         }
++        plan.refine = own.run;
+         plan.run = true;
+         plan.follow = true;
+         cursor_plan = plan;
+-        // Round 7: it follows a record: not declined.
+-        for (UINT view = 0; view < view_count; ++view) {
+-            foveated_link->decline_cursor(cockpit_mask_eye(previous_source.views[view], view), 0);
+-        }
+     }
+ 
+     // Foveated layers, round 4: the GPU waits of the linked cursor, queued
+@@ -3822,7 +3954,7 @@ struct D3D12FrameSynthesizer::Impl {
+             HRESULT result = S_OK;
+             if (cursor_plan.follow) {
+                 result = wait_once(cursor_plan.sources[view].fence.Get(), cursor_plan.sources[view].fence_value);
+-            } else if (foveated_focus) {
++            } else if (!foveated_focus) { // round 8: the detecting layer is the periphery's
+                 D3D12FoveatedLink::CursorReader reader{};
+                 if (foveated_link->cursor_reader(cockpit_mask_eye(previous_source.views[view], view), &reader)) {
+                     result = wait_once(reader.fence.Get(), reader.fence_value);
+@@ -3849,7 +3981,7 @@ struct D3D12FrameSynthesizer::Impl {
+         const bool recorded = submitted && cursor_plan.run && slot.cursor_recorded;
+         for (UINT view = 0; view < view_count; ++view) {
+             const UINT eye = cockpit_mask_eye(previous_source.views[view], view);
+-            if (foveated_focus) {
++            if (!foveated_focus) { // round 8: the detecting layer is the periphery's
+                 if (!recorded || cursor_plan.follow) {
+                     foveated_link->clear_cursor(eye);
+                     continue;
+@@ -4208,7 +4340,7 @@ struct D3D12FrameSynthesizer::Impl {
+         std::span<const D3D12ReprojectionView> target_views) noexcept {
+         // Foveated layers, round 4: the periphery layer follows the focus
+         // layer's detection instead of running its own.
+-        if (cursor_plan.follow) {
++        if (cursor_plan.follow && !cursor_plan.refine) { // round 8: with no detection of its own
+             record_cursor_import(list, slot, previous_source, target_views);
+             return;
+         }
+@@ -4245,9 +4377,29 @@ struct D3D12FrameSynthesizer::Impl {
+                 previous_source.views[view], target_views[view],
+                 static_cast<UINT>(image_description.Width), image_description.Height);
+         }
++        // Foveated layers, round 8: the detection's image is the real one
++        // enlarged (smooth_cursor.hlsl, enlarge_factor): its size, its tiles
++        // (fix_cursor_enlarge) and the views' rectangles with it.
++        if (cursor_small && cursor_enlarge > 1.0F) {
++            parameters.enlarge = cursor_enlarge;
++            parameters.width = static_cast<UINT>(std::lround(
++                static_cast<float>(image_description.Width) * cursor_enlarge));
++            parameters.height = static_cast<UINT>(std::lround(
++                static_cast<float>(image_description.Height) * cursor_enlarge));
++            for (UINT view = 0; view < view_count; ++view) {
++                for (float& value : parameters.mappings[view].source_rect) {
++                    value *= cursor_enlarge;
++                }
++                for (float& value : parameters.mappings[view].target_rect) {
++                    value *= cursor_enlarge;
++                }
++            }
++        }
+         const UINT base_flags = (srgb_view_format(view_format) ? kCursorFlagLinear : 0U) |
+             (cursor_plan.mouse_known ? kCursorFlagMouseKnown : 0U) |
+-            (foveated_focus_layer() ? kCursorFlagFoveatedFocus : 0U); // foveated layers, round 4
++            // Foveated layers, round 4 (round 8: on both linked layers: the
++            // periphery layer's record is the one followed now, by tangents).
++            (foveated_linked() ? kCursorFlagFoveatedFocus : 0U);
+         const std::array<D3D12_RESOURCE_BARRIER, 2> uav{
+             uav_barrier(cursor_state.Get()), uav_barrier(cursor_candidates.Get())};
+         // The dispatch sizes go from written (UAV) to read as arguments and
+@@ -4262,6 +4414,16 @@ struct D3D12FrameSynthesizer::Impl {
+             transition_barrier(cursor_arguments.Get(),
+                 D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
++        // Round 8: an enlarged image is read by its own builds of the passes.
++        const bool enlarged = parameters.enlarge > 1.0F && cursor_verify_enlarged_pipeline != nullptr;
++        ID3D12PipelineState* const motion_pipeline =
++            enlarged ? cursor_motion_enlarged_pipeline.Get() : cursor_motion_pipeline.Get();
++        ID3D12PipelineState* const search_pipeline =
++            enlarged ? cursor_search_enlarged_pipeline.Get() : cursor_search_pipeline.Get();
++        ID3D12PipelineState* const verify_pipeline =
++            enlarged ? cursor_verify_enlarged_pipeline.Get() : cursor_verify_pipeline.Get();
++        ID3D12PipelineState* const pick_pipeline =
++            enlarged ? cursor_pick_enlarged_pipeline.Get() : cursor_pick_pipeline.Get();
+         const auto detect = [&](UINT entry, UINT track, bool previous,
+                                 std::array<float, 2> mouse) {
+             parameters.entry_index = entry;
+@@ -4273,24 +4435,24 @@ struct D3D12FrameSynthesizer::Impl {
+             list->SetPipelineState(cursor_begin_pipeline.Get());
+             list->Dispatch(1, 1, 1);
+             list->ResourceBarrier(static_cast<UINT>(to_arguments.size()), to_arguments.data());
+-            list->SetPipelineState(cursor_motion_pipeline.Get());
++            list->SetPipelineState(motion_pipeline);
+             list->ExecuteIndirect(cursor_dispatch_signature.Get(), 1,
+                 cursor_arguments.Get(), 0, nullptr, 0);
+             list->ResourceBarrier(static_cast<UINT>(from_arguments.size()), from_arguments.data());
+             list->SetPipelineState(cursor_arguments_pipeline.Get());
+             list->Dispatch(1, 1, 1);
+             list->ResourceBarrier(static_cast<UINT>(to_arguments.size()), to_arguments.data());
+-            list->SetPipelineState(cursor_search_pipeline.Get());
++            list->SetPipelineState(search_pipeline);
+             list->ExecuteIndirect(cursor_dispatch_signature.Get(), 1,
+                 cursor_arguments.Get(), sizeof(D3D12_DISPATCH_ARGUMENTS), nullptr, 0);
+             list->ResourceBarrier(static_cast<UINT>(from_arguments.size()), from_arguments.data());
+             // DCS Control (0082): which candidate the verification takes.
+             if (cursor_follow_mouse) {
+-                list->SetPipelineState(cursor_pick_pipeline.Get());
++                list->SetPipelineState(pick_pipeline);
+                 list->Dispatch(1, 1, view_count);
+                 list->ResourceBarrier(static_cast<UINT>(uav.size()), uav.data());
+             }
+-            list->SetPipelineState(cursor_verify_pipeline.Get());
++            list->SetPipelineState(verify_pipeline);
+             list->Dispatch(1, 1, view_count);
+             list->ResourceBarrier(static_cast<UINT>(uav.size()), uav.data());
+         };
+@@ -4324,6 +4486,27 @@ struct D3D12FrameSynthesizer::Impl {
+             list->SetComputeRootUnorderedAccessView(3, cursor_candidates->GetGPUVirtualAddress());
+             slot.cursor_capture = true;
+         }
++        // Foveated layers, round 8: a focus layer's pair that ran its own
++        // detection: the periphery layer's record of the same pair, per view,
++        // over the gate's (CursorImportCS with kCursorFlagRefine; the foreign
++        // buffer stands where the templates are for these dispatches, as in
++        // record_cursor_import).
++        if (cursor_plan.follow) {
++            list->ResourceBarrier(static_cast<UINT>(uav.size()), uav.data());
++            list->SetPipelineState(cursor_import_pipeline.Get());
++            parameters.flags = base_flags | kCursorFlagRefine;
++            for (UINT view = 0; view < view_count; ++view) {
++                slot.cursor_foreign[view] = cursor_plan.sources[view].state;
++                list->SetComputeRootShaderResourceView(
++                    1, cursor_plan.sources[view].state->GetGPUVirtualAddress());
++                parameters.entry_index = view;
++                parameters.track_index = cursor_plan.sources[view].view;
++                list->SetComputeRoot32BitConstants(5, kCursorConstantCount, &parameters, 0);
++                list->Dispatch(1, 1, 1);
++                list->ResourceBarrier(static_cast<UINT>(uav.size()), uav.data());
++            }
++            list->SetComputeRootShaderResourceView(1, cursor_templates->GetGPUVirtualAddress());
++        }
+         // The counters go to this slot's readback region, read when the slot
+         // is next taken.
+         const D3D12_RESOURCE_BARRIER to_copy = transition_barrier(
+@@ -4387,6 +4570,10 @@ struct D3D12FrameSynthesizer::Impl {
+                 cursor_stats.weak_scale_steps = values[11];
+                 cursor_stats.last_weak = values[12];
+                 cursor_stats.picked = values[13]; // DCS Control (0082)
++                cursor_stats.follow_inside = values[14] & 0xffffU; // round 8
++                cursor_stats.follow_cut = values[14] >> 16U;
++                cursor_stats.follow_outside = values[15] & 0xffffU;
++                cursor_stats.follow_own = values[15] >> 16U;
+             }
+         }
+         slot.cursor_order = 0;
+@@ -4504,6 +4691,33 @@ struct D3D12FrameSynthesizer::Impl {
+                 static_cast<std::uint64_t>(c.picked - l.picked),
+                 field(c.pairs, l.pairs) | (field(c.drawn, l.drawn) << 16U), 0);
+         }
++        // Foveated layers, round 8: on linked layers, which layer this is
++        // and, for a focus layer's swapchain, how its pairs were drawn.
++        // result=6: a= 1 the periphery layer's (it detects and decides), 2
++        // the focus layer's (it follows), then the image's width in bits
++        // 16-31 and height in bits 32-47; b= this second's pairs the gate
++        // judged | drawn << 16 (the layer's own gate); c= views of pairs the
++        // focus layer drew, by how: its own record (the cursor wholly in the
++        // focus image, found there too) | the periphery's with the box
++        // inside the image << 16 | cut by the image's border << 32 | no pixel
++        // of it in the image (the periphery layer alone shows it) << 48.
++        if (foveated_linked()) {
++            const auto wrapped = [](std::uint32_t now_value, std::uint32_t then_value) {
++                return static_cast<std::uint64_t>((now_value - then_value) & 0xffffU);
++            };
++            const std::uint64_t judged = field(c.pairs, l.pairs) | (field(c.drawn, l.drawn) << 16U);
++            const std::uint64_t how = wrapped(c.follow_own, l.follow_own) |
++                (wrapped(c.follow_inside, l.follow_inside) << 16U) |
++                (wrapped(c.follow_cut, l.follow_cut) << 32U) |
++                (wrapped(c.follow_outside, l.follow_outside) << 48U);
++            if (judged != 0U || how != 0U) {
++                bridge_flight_logger().event(BridgeFlightOperation::smooth_cursor, 6,
++                    (foveated_focus ? 2U : 1U) |
++                        ((static_cast<std::uint64_t>(image_description.Width) & 0xffffU) << 16U) |
++                        ((static_cast<std::uint64_t>(image_description.Height) & 0xffffU) << 32U),
++                    judged, how);
++            }
++        }
+         cursor_logged = cursor_stats;
+     }
+     // ---------------------------------------------------------------------
+@@ -9664,6 +9878,17 @@ struct D3D12FrameSynthesizer::Impl {
+         // DCS Control (0031): consumed by this submission whatever happens.
+         std::shared_ptr<D3D12CockpitMaskFrame> prime_mask = std::move(pending_cockpit_mask);
+         pending_cockpit_mask.reset();
++        // Foveated layers, round 8: the focus layer's scale, for the
++        // periphery layer's detection (also said by every pair's plan; here
++        // so that the first pair has it). Nothing without a link.
++        if (foveated_focus_layer()) {
++            for (std::size_t view = 0;
++                 view < std::min<std::size_t>(current_source_views.size(), kMaxReprojectionViews); ++view) {
++                foveated_link->note_focus_density(
++                    cockpit_mask_eye(current_source_views[view], static_cast<UINT>(view)),
++                    view_density(current_source_views[view]));
++            }
++        }
+         if (output_ticket == nullptr) {
+             return E_POINTER;
+         }
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+index da7d69f..cd7ae6d 100644
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -1752,6 +1752,21 @@ float4 cursor_draw(CursorComposite cursor, float2 pixel, float4 colour) {
+                 CurrentFrame.Load(int4(int2(source), int(Slice), 0)),
+                 alpha));
+         }
++        // Foveated layers, round 8: a cursor cut by the focus image's border
++        // in the current frame (it is leaving the image, or the image moved
++        // off it): the pixels the current frame does not hold are taken from
++        // the previous frame, where the box lies further inside. The same
++        // texel of the sprite, in the previous frame's own pixels.
++        [branch] if (alpha > 0.0 && !inside && foveated_alpha_flag()) {
++            float2 earlier = source + round(cursor.previous.position - cursor.current.position);
++            bool held = all(earlier >= float2(0.0, 0.0)) &&
++                earlier.x < float(Width) && earlier.y < float(Height);
++            if (held) {
++                float4 colour = PreviousFrame.Load(int4(int2(earlier), int(Slice), 0));
++                // The alpha is the current frame's (foveated_alpha).
++                output = saturate(lerp(output, float4(colour.rgb, output.a), alpha));
++            }
++        }
+     }
+     return output;
+ }
+diff --git a/src/d3d12/smooth_cursor.hlsl b/src/d3d12/smooth_cursor.hlsl
+index 7a0a028..f0712f1 100644
+--- a/src/d3d12/smooth_cursor.hlsl
++++ b/src/d3d12/smooth_cursor.hlsl
+@@ -75,7 +75,11 @@ cbuffer CursorParameters : register(b0) {
+     float2 MouseDelta;
+     // The views (bits 0-7) and each one's array slice (bits 8-15, 16-23).
+     uint ViewInfo;
+-    uint Padding;
++    // Foveated layers, round 8: above 1, the detection runs on the image
++    // enlarged this many times with a bilinear filter (see frame_colour);
++    // Width, Height, the tiles and the mappings' rectangles are then the
++    // enlarged image's. 0 or 1: the image as it is.
++    float Enlarge;
+     // Target: the current frame's camera. Source: the previous frame's.
+     CameraMapping Mappings[2];
+ };
+@@ -183,6 +187,11 @@ static const uint kStatLastWeak = 12;
+ // DCS Control (0082): frame-views where CursorPickCS chose another candidate
+ // than the search's best score.
+ static const uint kStatPicked = 13;
++// Foveated layers, round 8 (CursorImportCS): see there. Two counters of 16
++// bits a word: kStatFollowImport low inside, high cut; kStatFollowOutside
++// low outside, high own.
++static const uint kStatFollowImport = 14;
++static const uint kStatFollowOutside = 15;
+ // The tiles the search visits: (view << 16) | tile.
+ static const uint kListCount = 256;
+ static const uint kListEntries = 260;
+@@ -265,6 +274,38 @@ bool foveated_focus_flag() {
+     return (Flags & 8u) != 0u;
+ }
+ 
++// Foveated layers, round 8: the periphery layer's detection. The cockpit
++// cursor is about 12 pixels of a 1040-pixel periphery image: a cross whose
++// bars are under a pixel wide, which no template matches there (tried: the
++// templates averaged down to 8..16 pixels score 0.56 to 0.71 on it). The
++// composed mode finds the same cursor in the same pixels because Quad Views
++// has enlarged the periphery image about five times with a bilinear filter
++// before the detection sees it (ProjectionPS.hlsl, its linear-clamp sampler),
++// and the templates' scales 2.0 / 2.52 match that enlarged cross. So the
++// periphery layer's detection reads its image the same way: every pixel the
++// passes below name is a pixel of the image enlarged `Enlarge` times (the
++// focus layer's pixels per tangent over the periphery's: what the runtime's
++// blend shows), taken with a bilinear filter from the real one. Nothing else
++// changes: the same templates, scales, scores and pixel rules as the
++// composed mode's, in the enlarged image's pixels. The gate's record for
++// this layer's own redraw goes back to real pixels (CursorGateCS); its
++// record as tangents needs nothing (the rectangles are enlarged with it).
++float enlarge_factor() {
++    return Enlarge > 1.0 ? Enlarge : 1.0;
++}
++
++float cursor_scale(uint index) {
++    return kScales[min(index, kScaleCount - 1u)];
++}
++
++float cursor_box_side(uint template_index, uint scale_index) {
++    return float(kTemplateSize) * cursor_scale(scale_index);
++}
++
++uint cursor_session_template(uint template_index) {
++    return template_index;
++}
++
+ float2 cursor_tangent(float2 position, float4 rect, float4 tangents) {
+     float2 uv = (position - rect.xy) / rect.zw;
+     return float2(
+@@ -332,7 +373,43 @@ float luma(float3 colour) {
+     return dot(colour, float3(0.2126, 0.7152, 0.0722));
+ }
+ 
+-// DCS Control (0082): one pixel of either frame of the pair.
++// One pixel of the image the detection works on (see enlarge_factor). The
++// passes that read the frames (CursorMotionCS, CursorSearchCS,
++// CursorVerifyCS) are built twice: as they were, reading the real image; and
++// with XRFG_CURSOR_ENLARGE for a periphery layer, where a pixel is the
++// bilinear sample of the real image at its centre, as a linear-clamp sampler
++// gives it. Two builds so that the composed mode's passes stay the code they
++// were (the bilinear read takes the verification's 1024 threads past the
++// compiler's register guideline, X4714, which is silenced for that build
++// alone).
++#ifdef XRFG_CURSOR_ENLARGE
++#pragma warning(disable: 4714)
++float4 frame_colour(int2 pixel, uint slice, bool previous) {
++    float scale = enlarge_factor();
++    float2 real = (float2(pixel) + 0.5) / scale - 0.5;
++    int2 low = int2(floor(real));
++    float2 weight = real - float2(low);
++    int2 limit = int2(round(float2(float(Width), float(Height)) / scale)) - 1;
++    int2 p00 = clamp(low, int2(0, 0), limit);
++    int2 p11 = clamp(low + 1, int2(0, 0), limit);
++    float4 c00;
++    float4 c10;
++    float4 c01;
++    float4 c11;
++    if (previous) {
++        c00 = PreviousFrame.Load(int4(p00, int(slice), 0));
++        c10 = PreviousFrame.Load(int4(p11.x, p00.y, int(slice), 0));
++        c01 = PreviousFrame.Load(int4(p00.x, p11.y, int(slice), 0));
++        c11 = PreviousFrame.Load(int4(p11, int(slice), 0));
++    } else {
++        c00 = CurrentFrame.Load(int4(p00, int(slice), 0));
++        c10 = CurrentFrame.Load(int4(p11.x, p00.y, int(slice), 0));
++        c01 = CurrentFrame.Load(int4(p00.x, p11.y, int(slice), 0));
++        c11 = CurrentFrame.Load(int4(p11, int(slice), 0));
++    }
++    return lerp(lerp(c00, c10, weight.x), lerp(c01, c11, weight.x), weight.y);
++}
++#else
+ float4 frame_colour(int2 pixel, uint slice, bool previous) {
+     float4 colour;
+     if (previous) {
+@@ -342,10 +419,7 @@ float4 frame_colour(int2 pixel, uint slice, bool previous) {
+     }
+     return colour;
+ }
+-
+-float cursor_scale(uint index) {
+-    return kScales[min(index, kScaleCount - 1u)];
+-}
++#endif
+ 
+ float frame_luma(int2 pixel, uint slice) {
+     int2 bounded = clamp(pixel, int2(0, 0), int2(int(Width) - 1, int(Height) - 1));
+@@ -364,14 +438,14 @@ float temporal_difference(int2 pixel, uint view) {
+         int2 at = int2(round(target));
+         valid = valid && all(at >= int2(0, 0)) && at.x < int(Width) && at.y < int(Height);
+         if (valid) {
+-            other = luma(CurrentFrame.Load(int4(at, int(slice), 0)).rgb);
++            other = luma(frame_colour(at, slice, false).rgb);
+         }
+     } else {
+         float2 source = target_to_source(float2(pixel), Mappings[view], valid);
+         int2 at = int2(round(source));
+         valid = valid && all(at >= int2(0, 0)) && at.x < int(Width) && at.y < int(Height);
+         if (valid) {
+-            other = luma(PreviousFrame.Load(int4(at, int(slice), 0)).rgb);
++            other = luma(frame_colour(at, slice, true).rgb);
+         }
+     }
+     return valid ? abs(frame_luma(pixel, slice) - other) : 0.0;
+@@ -535,9 +609,7 @@ float shape_colour_match(uint template_index, int2 position, float scale, uint s
+             uint2 texel = uint2(packed & 0xffu, packed >> 8);
+             int2 pixel = clamp(position + sample_offset(texel, scale), int2(0, 0),
+                 int2(int(Width) - 1, int(Height) - 1));
+-            float4 colour = detecting_previous()
+-                ? PreviousFrame.Load(int4(pixel, int(slice), 0))
+-                : CurrentFrame.Load(int4(pixel, int(slice), 0));
++            float4 colour = frame_colour(pixel, slice, detecting_previous());
+             image += colour.rgb;
+             sprite += template_colour(template_index, texel);
+         }
+@@ -864,7 +936,7 @@ void CursorSearchCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+     uint best_scale = scale_first;
+     if (inside) {
+         for (uint scale_index = scale_first; scale_index <= scale_last; ++scale_index) {
+-            float scale = kScales[scale_index];
++            float scale = cursor_scale(scale_index);
+             int extent = int(ceil(float(kTemplateSize) * scale));
+             if (all(position + extent <= rect_max)) {
+                 float score = 0.0;
+@@ -1199,7 +1271,7 @@ void CursorVerifyCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+     int2 position = int2(int(packed & 0xffffu), int(packed >> 16));
+     uint template_index = min(meta & 0xffu, max(TemplateCount, 1u) - 1u);
+     uint scale_index = min((meta >> 8) & 0xffu, kScaleCount - 1u);
+-    float scale = kScales[scale_index];
++    float scale = cursor_scale(scale_index);
+     int extent = int(ceil(float(kTemplateSize) * scale));
+ 
+     uint count = load_template(template_index, thread_index);
+@@ -1520,6 +1592,16 @@ uint judge_detection(Detection detection) {
+     return reason;
+ }
+ 
++// Foveated layers, round 8: the second eye's position against the first's as
++// directions (tangents of the current frame), in the first eye's pixels.
++float2 stereo_offset_by_tangent(float2 first, float2 second) {
++    float2 first_tangent = cursor_tangent(first, Mappings[0].TargetRect, Mappings[0].TargetTangents);
++    float2 second_tangent = cursor_tangent(second, Mappings[1].TargetRect, Mappings[1].TargetTangents);
++    float2 moved = cursor_position(second_tangent, Mappings[0].TargetRect, Mappings[0].TargetTangents);
++    float2 here = cursor_position(first_tangent, Mappings[0].TargetRect, Mappings[0].TargetTangents);
++    return moved - here;
++}
++
+ // EntryIndex: the current frame's entry; TrackIndex: the previous frame's.
+ [numthreads(1, 1, 1)]
+ void CursorGateCS() {
+@@ -1664,6 +1746,14 @@ void CursorGateCS() {
+             (current[0].position.y - Mappings[0].TargetRect.y);
+         float dx = current[1].position.x - Mappings[1].TargetRect.x -
+             (current[0].position.x - Mappings[0].TargetRect.x);
++        // Foveated layers, round 8: by the tangents, in the first eye's
++        // pixels. Each eye's focus image follows its own gaze ray, so the
++        // two images' pixels say nothing about each other; the directions do.
++        [branch] if (foveated_focus_flag()) {
++            float2 offset = stereo_offset_by_tangent(current[0].position, current[1].position);
++            dx = offset.x;
++            dy = offset.y;
++        }
+         float scale_ratio = current[1].scale / current[0].scale;
+         bool stereo_known = CursorState[kStereoBase + 1u] != 0u;
+         float vertical_tolerance = stereo_known
+@@ -1742,29 +1832,14 @@ void CursorGateCS() {
+             CursorState[record + 11u] = held ? CursorState[seen + 2u] : 0u;
+             CursorState[record + 12u] = held ? CursorState[entry_base(EntryIndex, view3) + kEntryHeld] : 0u;
+         }
+-    }
+-    // DCS Control (0082): see kConfirmBase.
+-    [branch] if ((Flags & 64u) != 0u) {
+-        for (uint view6 = 0; view6 < views; ++view6) {
+-            uint confirm = kConfirmBase + view6 * kConfirmStride;
+-            uint left = CursorState[confirm];
+-            if (reason == kReasonNone) {
+-                CursorState[confirm] = kConfirmPairs;
+-                CursorState[confirm + 2u] = asuint(current[view6].position.x);
+-                CursorState[confirm + 3u] = asuint(current[view6].position.y);
+-                CursorState[confirm + 5u] = current[view6].scale_index;
+-            } else {
+-                // Nothing at all where it was believed: sooner unsure.
+-                uint drop = current[view6].status == kStatusFound ? 1u : 3u;
+-                CursorState[confirm] = left > drop ? left - drop : 0u;
+-                uint learned = kLearnBase + view6 * 8u;
+-                if ((Flags & 4u) != 0u && CursorState[learned + 2u] != 0u) {
+-                    CursorState[confirm + 2u] = asuint(asfloat(CursorState[confirm + 2u]) +
+-                        MouseDelta.x * asfloat(CursorState[learned]));
+-                    CursorState[confirm + 3u] = asuint(asfloat(CursorState[confirm + 3u]) +
+-                        MouseDelta.y * asfloat(CursorState[learned + 1u]));
+-                }
+-            }
++        // Round 8: found in the enlarged image, redrawn in the real one.
++        [branch] if (Enlarge > 1.0) {
++            CursorState[record + 1u] = asuint(previous[view3].position.x / Enlarge);
++            CursorState[record + 2u] = asuint(previous[view3].position.y / Enlarge);
++            CursorState[record + 3u] = asuint(current[view3].position.x / Enlarge);
++            CursorState[record + 4u] = asuint(current[view3].position.y / Enlarge);
++            CursorState[record + 7u] = asuint(previous[view3].scale / Enlarge);
++            CursorState[record + 8u] = asuint(current[view3].scale / Enlarge);
+         }
+     }
+     // Foveated layers, round 4: the same record as tangents, for the
+@@ -1773,15 +1848,15 @@ void CursorGateCS() {
+     [branch] if (foveated_focus_flag()) {
+         for (uint view5 = 0; view5 < 2u; ++view5) {
+             uint angular = kAngularBase + view5 * 16u;
+-            bool draw = reason == kReasonNone && view5 < views;
++            bool draw = reason == kReasonNone && view5 < views && !left_to_flow;
+             float2 previous_low = float2(0.0, 0.0);
+             float2 previous_high = float2(0.0, 0.0);
+             float2 current_low = float2(0.0, 0.0);
+             float2 current_high = float2(0.0, 0.0);
+             if (draw) {
+                 CameraMapping mapping = Mappings[view5];
+-                float previous_side = float(kTemplateSize) * kScales[previous[view5].scale_index];
+-                float current_side = float(kTemplateSize) * kScales[current[view5].scale_index];
++                float previous_side = float(kTemplateSize) * previous[view5].scale;
++                float current_side = float(kTemplateSize) * current[view5].scale;
+                 previous_low = cursor_tangent(
+                     previous[view5].position, mapping.SourceRect, mapping.SourceTangents);
+                 previous_high = cursor_tangent(
+@@ -1800,8 +1875,34 @@ void CursorGateCS() {
+             CursorState[angular + 6u] = asuint(current_low.y);
+             CursorState[angular + 7u] = asuint(current_high.x);
+             CursorState[angular + 8u] = asuint(current_high.y);
+-            CursorState[angular + 9u] = min(previous[view5].template_index, kMaxTemplates - 1u);
+-            CursorState[angular + 10u] = min(current[view5].template_index, kMaxTemplates - 1u);
++            CursorState[angular + 9u] = min(
++                cursor_session_template(previous[view5].template_index), kMaxTemplates - 1u);
++            CursorState[angular + 10u] = min(
++                cursor_session_template(current[view5].template_index), kMaxTemplates - 1u);
++        }
++    }
++    // DCS Control (0082): see kConfirmBase.
++    [branch] if ((Flags & 64u) != 0u) {
++        for (uint view6 = 0; view6 < views; ++view6) {
++            uint confirm = kConfirmBase + view6 * kConfirmStride;
++            uint left = CursorState[confirm];
++            if (reason == kReasonNone) {
++                CursorState[confirm] = kConfirmPairs;
++                CursorState[confirm + 2u] = asuint(current[view6].position.x);
++                CursorState[confirm + 3u] = asuint(current[view6].position.y);
++                CursorState[confirm + 5u] = current[view6].scale_index;
++            } else {
++                // Nothing at all where it was believed: sooner unsure.
++                uint drop = current[view6].status == kStatusFound ? 1u : 3u;
++                CursorState[confirm] = left > drop ? left - drop : 0u;
++                uint learned = kLearnBase + view6 * 8u;
++                if ((Flags & 4u) != 0u && CursorState[learned + 2u] != 0u) {
++                    CursorState[confirm + 2u] = asuint(asfloat(CursorState[confirm + 2u]) +
++                        MouseDelta.x * asfloat(CursorState[learned]));
++                    CursorState[confirm + 3u] = asuint(asfloat(CursorState[confirm + 3u]) +
++                        MouseDelta.y * asfloat(CursorState[learned + 1u]));
++                }
++            }
+         }
+     }
+     if (reason == kReasonNone) {
+@@ -1855,6 +1956,9 @@ void CursorGateCS() {
+         if (views == 2u) {
+             float dy = current[1].position.y - Mappings[1].TargetRect.y -
+                 (current[0].position.y - Mappings[0].TargetRect.y);
++            [branch] if (foveated_focus_flag()) { // round 8: as the test above
++                dy = stereo_offset_by_tangent(current[0].position, current[1].position).y;
++            }
+             bool stereo_known = CursorState[kStereoBase + 1u] != 0u;
+             float learned = stereo_known ? lerp(asfloat(CursorState[kStereoBase]), dy, 0.2) : dy;
+             CursorState[kStereoBase] = asuint(learned);
+@@ -1916,7 +2020,7 @@ uint pack_capture(float4 colour) {
+ bool capture_centre(uint ring, out float2 centre) {
+     uint entry = entry_base(ring, 0u);
+     uint status = CursorState[entry + kEntryStatus];
+-    float scale = kScales[min(CursorState[entry + kEntryScale], kScaleCount - 1u)];
++    float scale = cursor_scale(min(CursorState[entry + kEntryScale], kScaleCount - 1u));
+     centre = float2(float(asint(CursorState[entry + kEntryX])), float(asint(CursorState[entry + kEntryY]))) +
+         0.5 * float(kTemplateSize) * scale;
+     return status == kStatusFound;
+@@ -2008,6 +2112,38 @@ void CursorCaptureCS(uint3 id : SV_DispatchThreadID) {
+ // both. The scale is the box's width in this image's pixels over the
+ // template's 32 texels (the two axes agree to a part in a thousand).
+ // EntryIndex: the view written; TrackIndex: the view of the focus record.
++// Round 8 (see CursorImportCS): this layer's own gate accepted the pair for
++// `view`, and the current frame's alpha is 1 over the redraw's rectangle,
++// which lies inside the image.
++bool own_record_hidden(uint view) {
++    uint record = kCompositeBase + view * 16u;
++    bool hidden = CursorState[record + 0u] != 0u;
++    [branch] if (hidden) {
++        CameraMapping mapping = Mappings[view];
++        float2 own_previous = view_locked_to_target(float2(
++            asfloat(CursorState[record + 1u]), asfloat(CursorState[record + 2u])), mapping);
++        float2 own_current = float2(
++            asfloat(CursorState[record + 3u]), asfloat(CursorState[record + 4u]));
++        float own_side = float(kTemplateSize) * max(
++            asfloat(CursorState[record + 7u]), asfloat(CursorState[record + 8u]));
++        float2 low = min(own_previous, own_current) - 24.0;
++        float2 high = max(own_previous, own_current) + own_side + 24.0;
++        float4 rect = mapping.TargetRect;
++        hidden = all(low >= rect.xy) && all(high <= rect.xy + rect.zw);
++        [branch] if (hidden) {
++            float least = 1.0;
++            for (uint iy = 0; iy < 5u; ++iy) {
++                for (uint ix = 0; ix < 5u; ++ix) {
++                    float2 at = lerp(low, high - 1.0, float2(float(ix), float(iy)) * 0.25);
++                    least = min(least, CurrentFrame.Load(int4(int2(at), int(view_slice(view)), 0)).a);
++                }
++            }
++            hidden = least >= 0.998;
++        }
++    }
++    return hidden;
++}
++
+ [numthreads(1, 1, 1)]
+ void CursorImportCS() {
+     uint view = min(EntryIndex, 1u);
+@@ -2033,6 +2169,88 @@ void CursorImportCS() {
+     draw = draw && previous_scale > 0.0 && previous_scale < 64.0 &&
+         current_scale > 0.0 && current_scale < 64.0;
+     uint record = kCompositeBase + view * 16u;
++    // Round 8: the periphery layer's gate refused the pair (or found
++    // nothing: the game's own cursors are a cross of sub-pixel bars or a
++    // three-pixel dot in its image), this layer's own gate accepted it, and
++    // the periphery layer does not show anywhere the redraw reaches: the
++    // current frame's alpha is 1 over the redraw's rectangle (25 points of
++    // it; the synthetic's alpha is the current frame's), which lies inside
++    // the image. Then this layer's own record stands, as in round 4: the
++    // periphery layer under it is hidden, so nothing can be seen to
++    // disagree. Counted with kStatFollowOutside (its high half).
++    // Both views of the swapchain, or neither.
++    [branch] if (!draw && (Flags & 32u) != 0u) {
++        bool hidden = true;
++        for (uint other = 0; other < min(ViewCount, 2u); ++other) {
++            hidden = hidden && own_record_hidden(other);
++        }
++        if (hidden) {
++            CursorState[kStatsBase + kStatFollowOutside] += 0x10000u;
++            return;
++        }
++    }
++    // Round 8: the record followed is the periphery layer's (one decision per
++    // eye and pair: its gate's), and this layer ran its own detection first
++    // (Flags bit 5). Where its own gate accepted the pair too and found the
++    // cursor at the place the followed record names, within a fifth of the
++    // box (two pixels at least), its own record stays: the same decision at
++    // this image's own precision. Anywhere else the followed record stands:
++    // the cursor outside this image, cut by its border, or not recognised
++    // here. Counted per view for the flight log: kStatFollowOutside (its high half), and
++    // kStatFollowImport's low half (the box inside the image in both frames)
++    // and high half (cut by the border), kStatFollowOutside (no pixel of
++    // either box in the image).
++    [branch] if (draw) {
++        float previous_side = float(kTemplateSize) * previous_scale;
++        float current_side = float(kTemplateSize) * current_scale;
++        bool own = false;
++        [branch] if ((Flags & 32u) != 0u && CursorState[record + 0u] != 0u) {
++            float2 own_previous = float2(
++                asfloat(CursorState[record + 1u]), asfloat(CursorState[record + 2u]));
++            float2 own_current = float2(
++                asfloat(CursorState[record + 3u]), asfloat(CursorState[record + 4u]));
++            float tolerance = max(2.0, 0.2 * min(previous_side, current_side));
++            own = all(abs(own_previous - previous_low) <= tolerance) &&
++                all(abs(own_current - current_low) <= tolerance);
++        }
++        float4 previous_rect = mapping.SourceRect;
++        float4 current_rect = mapping.TargetRect;
++        bool previous_out = any(previous_low + previous_side <= previous_rect.xy) ||
++            any(previous_low >= previous_rect.xy + previous_rect.zw);
++        bool current_out = any(current_low + current_side <= current_rect.xy) ||
++            any(current_low >= current_rect.xy + current_rect.zw);
++        bool previous_in = all(previous_low >= previous_rect.xy) &&
++            all(previous_low + previous_side <= previous_rect.xy + previous_rect.zw);
++        bool current_in = all(current_low >= current_rect.xy) &&
++            all(current_low + current_side <= current_rect.xy + current_rect.zw);
++        if (own) {
++            CursorState[kStatsBase + kStatFollowOutside] += 0x10000u;
++            return;
++        } else if (previous_out && current_out) {
++            uint outside = CursorState[kStatsBase + kStatFollowOutside];
++            CursorState[kStatsBase + kStatFollowOutside] =
++                (outside & 0xffff0000u) | ((outside + 1u) & 0xffffu);
++        } else if (previous_in && current_in) {
++            uint packed = CursorState[kStatsBase + kStatFollowImport];
++            CursorState[kStatsBase + kStatFollowImport] =
++                (packed & 0xffff0000u) | ((packed + 1u) & 0xffffu);
++        } else {
++            CursorState[kStatsBase + kStatFollowImport] += 0x10000u;
++        }
++    }
++    // DCS Control (0082): this layer's own sprite colour (the gate's, words
++    // 9-11) stays with the followed record only where its own match in the
++    // current frame is that cursor: within half the box of it.
++    [branch] if (draw) {
++        float2 own_current = float2(asfloat(CursorState[record + 3u]), asfloat(CursorState[record + 4u])) +
++            0.5 * float(kTemplateSize) * asfloat(CursorState[record + 8u]);
++        float2 followed = current_low + 0.5 * float(kTemplateSize) * current_scale;
++        if (any(abs(own_current - followed) > 0.5 * float(kTemplateSize) * current_scale)) {
++            CursorState[record + 9u] = 0u;
++            CursorState[record + 10u] = 0u;
++            CursorState[record + 11u] = 0u;
++        }
++    }
+     CursorState[record + 0u] = draw ? 1u : 0u;
+     CursorState[record + 1u] = draw ? asuint(previous_low.x) : 0u;
+     CursorState[record + 2u] = draw ? asuint(previous_low.y) : 0u;
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index eed4dda..52394e7 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1898,13 +1898,6 @@ struct SessionState {
+     // other about the smooth cursor and the HUD symbology (null without
+     // foveated_layers; xrfg::D3D12FoveatedLink). Fixed for the session.
+     std::shared_ptr<xrfg::D3D12FoveatedLink> foveated_link;
+-    // Foveated layers, round 7 (foveated_uncovered_fill = 2): the Windows
+-    // cursor as the last frame saw it and when it last moved (ms, tick
+-    // count), for foveated_cursor_moving. The application's xrEndFrame only.
+-    long foveated_pointer_x{};
+-    long foveated_pointer_y{};
+-    std::uint64_t foveated_pointer_moved_ms{};
+-    bool foveated_pointer_known{};
+     // The foveated mode's state as last written to the flight log
+     // (note_foveated_mode): 0 nothing yet, else result in bits 0-7 and the
+     // reason in bits 8-15. The application's xrEndFrame only.
+@@ -3673,9 +3666,12 @@ void configure_hud_capture(xrfg::D3D12FrameSynthesizer& synthesizer) noexcept {
+ // the ini asks for it, with the game's own cursor images (loaded once a
+ // session; see load_dcs_cursor_templates). Logged as smooth_cursor result=2.
+ // DCS Control (0053): every new synthesizer passes here: its HUD captures too.
++// Foveated layers, round 8: `small_sprite`, the swapchain is a periphery
++// layer's (D3D12SmoothCursorOptions::small_sprite).
+ void configure_smooth_cursor(
+     SessionState& session,
+-    xrfg::D3D12FrameSynthesizer& synthesizer) noexcept {
++    xrfg::D3D12FrameSynthesizer& synthesizer,
++    bool small_sprite = false) noexcept {
+     configure_hud_capture(synthesizer); // DCS Control (0053)
+     if (!session.smooth_cursor) {
+         return;
+@@ -3696,6 +3692,7 @@ void configure_smooth_cursor(
+         options.follow_mouse =
+             xrfg::implicit_layer::read_cursor_follow_mouse(current_layer_directory());
+         options.enabled = !options.templates.empty();
++        options.small_sprite = small_sprite; // foveated layers, round 8
+         // DCS VR Control (0011): with the flight log on, a few captures of
+         // what the detection sees go next to it.
+         if (xrfg::bridge_flight_logger().enabled()) {
+@@ -4170,7 +4167,9 @@ create_d3d12_frame_generation_swapchains(
+         // DCS Control (0050): with `async`, set when the generation is taken
+         // in. DCS Control (0057): 0038's optical-flow order (level 2) is gone.
+         if (async == nullptr && state && state->session) {
+-            configure_smooth_cursor(*state->session, *synthesizer); // 0010
++            configure_smooth_cursor(*state->session, *synthesizer, // 0010
++                state->session->foveated_layers && // round 8
++                    state->foveated_periphery.load(std::memory_order_relaxed));
+         }
+         generation->synthesizer = std::move(synthesizer);
+         if (failure_reason != nullptr) {
+@@ -4372,7 +4371,9 @@ create_d3d11_frame_generation_swapchains(
+         adopt_synthetic_ring(generation, synthetic);
+         generation->private_info = private_info; // DCS Control (0034)
+         if (state && state->session) {
+-            configure_smooth_cursor(*state->session, *synthesizer); // 0010
++            configure_smooth_cursor(*state->session, *synthesizer, // 0010
++                state->session->foveated_layers && // round 8
++                    state->foveated_periphery.load(std::memory_order_relaxed));
+         }
+         generation->synthesizer = std::move(synthesizer);
+         generation->interop = std::move(interop);
+@@ -4649,7 +4650,9 @@ create_vulkan_frame_generation_swapchains(
+         adopt_synthetic_ring(generation, synthetic);
+         generation->private_info = private_info; // DCS Control (0034)
+         if (state && state->session) {
+-            configure_smooth_cursor(*state->session, *synthesizer); // 0010
++            configure_smooth_cursor(*state->session, *synthesizer, // 0010
++                state->session->foveated_layers && // round 8
++                    state->foveated_periphery.load(std::memory_order_relaxed));
+         }
+         generation->synthesizer = std::move(synthesizer);
+         generation->interop = std::move(interop);
+@@ -5153,7 +5156,9 @@ void retire_async_arm(const std::shared_ptr<SwapchainState>& state) noexcept {
+                     wanted, wanted_options));
+             }
+             if (taken) {
+-                configure_smooth_cursor(*session, *generation->synthesizer); // 0010
++                configure_smooth_cursor(*session, *generation->synthesizer, // 0010
++                    session->foveated_layers && // round 8
++                        state->foveated_periphery.load(std::memory_order_relaxed));
+             }
+         }
+         if (!taken) {
+@@ -15508,14 +15513,13 @@ void drop_idle_cockpit_mask(SessionState& session) noexcept {
+             // the detection off.
+             // Foveated layers: not for a swapchain of the focus layer, whose
+             // synthesizer leaves the cursor out (set_foveated_focus).
+-            // Round 4: with two layers linked it is the other way round: the
+-            // focus layer's synthesizer runs the detection (and needs the
+-            // mouse), the periphery layer's follows it (and does not).
++            // Round 4: with two layers linked the features run on both.
+             const bool foveated_linked = state->session->foveated_layers && foveated_two_layers &&
+                 state->session->foveated_link != nullptr;
++            // Round 8: both linked layers run a detection (the periphery
++            // layer's decides, the focus layer's refines), so both are told.
+             const bool cursor_sampled = state->session->smooth_cursor &&
+-                (foveated_linked ? foveated_focus
+-                                 : !(state->session->foveated_layers && foveated_focus));
++                (foveated_linked || !(state->session->foveated_layers && foveated_focus));
+             DWORD foreground_process = 0;
+             if (HWND foreground = cursor_sampled ? GetForegroundWindow() : nullptr;
+                 foreground != nullptr) {
+@@ -16000,28 +16004,6 @@ void note_foveated_mode(
+     }
+ }
+ 
+-[[nodiscard]] bool foveated_cursor_moving(SessionState& session) noexcept {
+-    if (!session.smooth_cursor) {
+-        return false;
+-    }
+-    const std::uint64_t now = GetTickCount64();
+-    DWORD foreground_process = 0;
+-    if (const HWND foreground = GetForegroundWindow(); foreground != nullptr) {
+-        GetWindowThreadProcessId(foreground, &foreground_process);
+-    }
+-    POINT pointer{};
+-    if (foreground_process == GetCurrentProcessId() && GetCursorPos(&pointer)) {
+-        if (!session.foveated_pointer_known || pointer.x != session.foveated_pointer_x ||
+-            pointer.y != session.foveated_pointer_y) {
+-            session.foveated_pointer_moved_ms = session.foveated_pointer_known ? now : 0;
+-            session.foveated_pointer_x = pointer.x;
+-            session.foveated_pointer_y = pointer.y;
+-            session.foveated_pointer_known = true;
+-        }
+-    }
+-    return session.foveated_pointer_moved_ms != 0 && now - session.foveated_pointer_moved_ms < 500;
+-}
+-
+ [[nodiscard]] PreparedProjectionFrame prepare_projection_frame(
+     const ProjectionSnapshot& snapshot,
+     std::span<const ProjectionResourceMapping> mappings,
+@@ -16053,10 +16035,10 @@ void note_foveated_mode(
+             frame_cockpit_mask_shared = true;
+         }
+         // Foveated layers, round 4: with the key and two projection layers or
+-        // more, the focus layer's swapchains are submitted before the
+-        // periphery layer's (the periphery layer's synthesizer follows the
+-        // smooth cursor the focus layer's detected in the same pair, so that
+-        // pair has to be queued first), each group in the frame's own order;
++        // more, the periphery layer's swapchains are submitted before the
++        // focus layer's (round 8: the focus layer's synthesizer follows the
++        // smooth cursor the periphery layer's detected in the same pair, so
++        // that pair has to be queued first), each group in the frame's own order;
+         // `order` stays empty otherwise and the loop below walks the frame's
+         // own mappings as before (it is not changed: with two layers
+         // `mappings` names a reordered copy). The results are put back in the
+@@ -16067,15 +16049,13 @@ void note_foveated_mode(
+         if (foveated_two_layers) {
+             order.reserve(mappings.size());
+             focus_first.reserve(mappings.size());
+-            // Round 7: at foveated_uncovered_fill = 2 the periphery layer's
+-            // swapchains first, unless the cursor is in play (see
+-            // foveated_cursor_moving).
+-            bool periphery_first = false;
+-            if (const auto first = find_swapchain(mappings.front().application_swapchain);
+-                first && first->session &&
+-                first->session->nvidia_options.foveated_uncovered_fill >= 2U) {
+-                periphery_first = !foveated_cursor_moving(*first->session);
+-            }
++            // Round 8: the periphery layer's swapchains first, always: its
++            // synthesizer makes the smooth cursor's decision the focus
++            // layer's follows in the same pair, and leaves the flow
++            // foveated_uncovered_fill = 2 takes (round 7 had this order only
++            // for the fill and only while the mouse was still; round 4 had
++            // the focus layer first).
++            const bool periphery_first = true;
+             for (const bool focus_group : {!periphery_first, periphery_first}) {
+                 for (std::size_t index = 0; index < mappings.size(); ++index) {
+                     const bool focus = !mappings[index].views.empty() &&
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+index 1874f38..be5621e 100644
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -5138,8 +5138,8 @@ void test_cursor_reacquire(D3D12WarpFixture& fixture) {
+ // rows) for the names focus, periphery, composed; made by
+ // artifacts\foveated\rig\make_cursor_replay.py from the cursor rig's
+ // captures (too large for the repository: 30 to 220 MB each). Nothing is
+-// required: the counts are printed. `enlarge` is for the periphery
+-// layer of foveated frame generation (not in this tree: read and ignored).
++// required: the counts are printed. `enlarge` (the periphery layer's
++// detection, D3D12SmoothCursorOptions::small_sprite_enlarge).
+ void test_cursor_replay(D3D12WarpFixture& fixture) {
+     std::array<wchar_t, 512> folder_text{};
+     const DWORD folder_length = GetEnvironmentVariableW(L"XRFG_TEST_CURSOR_REPLAY", folder_text.data(),
+@@ -5223,7 +5223,9 @@ void test_cursor_replay(D3D12WarpFixture& fixture) {
+             options.enabled = true;
+             options.templates = dcs.templates;
+             options.follow_mouse = reacquire;
+-            static_cast<void>(enlarge);
++            // Foveated layers, round 8: the periphery layer's detection.
++            options.small_sprite = enlarge > 1.0F;
++            options.small_sprite_enlarge = enlarge;
+             require(synthesizer.set_smooth_cursor(options) == S_OK, "cursor replay: set_smooth_cursor");
+             ReprojectionViews views = make_reprojection_views();
+             for (UINT eye = 0; eye < kEyeCount; ++eye)
+@@ -5260,6 +5262,7 @@ void test_cursor_replay(D3D12WarpFixture& fixture) {
+ }
+ 
+ // >>> cursor replay full
++#define XRFG_CURSOR_REPLAY_TWO_LAYERS // this tree has the two layers
+ // DCS Control (0082): XRFG_TEST_CURSOR_REPLAY_FULL=<folder> (with
+ // XRFG_TEST_DCS_BIN), NVIDIA hardware: real captured frame crops through the
+ // detection as the flight ran it. Each crop sits at its origin inside an
+diff --git a/tests/vertical_fov_tests.cpp b/tests/vertical_fov_tests.cpp
+index f462660..5e8d26d 100644
+--- a/tests/vertical_fov_tests.cpp
++++ b/tests/vertical_fov_tests.cpp
+@@ -547,8 +547,16 @@ ReprojectionViews layer_focus_views(LayerBox box) {
+     return views;
+ }
+ 
++// Round 8, for test_two_layer_cursor_focus_alone: the focus layer opaque
++// (alpha 255 everywhere: the periphery layer hidden under it), and the
++// periphery layer's images without the cursor (a cursor its detection cannot
++// find, as the game's own at 12 pixels).
++bool g_layer_opaque_focus = false;
++bool g_layer_no_periphery_cursor = false;
++
+ // The focus layer's alpha: anything that is a function of the pixel alone.
+ std::uint8_t layer_focus_alpha(UINT x, UINT y) {
++    if (g_layer_opaque_focus) return 255U;
+     return static_cast<std::uint8_t>(96U + (x * 7U + y * 13U) % 160U);
+ }
+ 
+@@ -564,6 +572,25 @@ StereoPattern layer_world(const ReprojectionViews& views, bool focus) {
+     return pattern;
+ }
+ 
++// Round 8: the two-layer rig's cursor. A plain disc of one colour, 16 texels
++// across: a shape template, as the game's own cursors are (its crosses and
++// its dot: one colour, matched on their shape). The built-in arrow is matched
++// on its one-texel dark outline, which a periphery image three times coarser
++// does not hold - in this mode or in the composed one (enlarged again it
++// scores 0.52 against the 0.72 bar).
++xrfg::D3D12CursorTemplate layer_cursor_template() {
++    xrfg::D3D12CursorTemplate disc{};
++    constexpr int kSize = static_cast<int>(xrfg::kD3D12CursorTemplateSize);
++    for (int y = 0; y < kSize; ++y)
++        for (int x = 0; x < kSize; ++x) {
++            const float dx = static_cast<float>(x) + 0.5F - 16.0F, dy = static_cast<float>(y) + 0.5F - 16.0F;
++            if (dx * dx + dy * dy <= 64.0F)
++                disc.rgba[static_cast<std::size_t>(y * kSize + x)] = 0xff20f0ffU; // opaque, yellow
++        }
++    disc.source_id = 9000;
++    return disc;
++}
++
+ void layer_draw_cursor(StereoPattern* pattern, CursorPosition at, const Sprite& sprite) {
+     for (UINT eye = 0; eye < kEyeCount; ++eye)
+         draw_cursor_sized(pattern, eye, kLayerWidth, kLayerHeight, at, sprite);
+@@ -573,14 +600,14 @@ void layer_draw_cursor(StereoPattern* pattern, CursorPosition at, const Sprite&
+ struct LayerPipeline {
+     std::array<ComPtr<ID3D12Resource>, 2> sources;
+     std::array<ComPtr<ID3D12Resource>, 2> currents;
+-    std::array<ComPtr<ID3D12Resource>, 1> synthetics;
++    std::array<ComPtr<ID3D12Resource>, 2> synthetics; // round 8: the second one is 3X's
+     std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
+     xrfg::D3D12FrameSynthesizer synthesizer;
+ };
+ 
+ void layer_initialize(D3D12WarpFixture& fixture, LayerPipeline& pipeline, const StereoPattern& a,
+     const StereoPattern& b, xrfg::D3D12OpticalFlowBackend backend,
+-    const xrfg::D3D12NvidiaOpticalFlowOptions& options, bool feature) {
++    const xrfg::D3D12NvidiaOpticalFlowOptions& options, bool feature, bool small_sprite = false) {
+     for (auto& texture : pipeline.sources) texture = create_source_texture(fixture, kLayerWidth, kLayerHeight);
+     for (auto& texture : pipeline.currents) texture = create_source_texture(fixture, kLayerWidth, kLayerHeight);
+     for (auto& texture : pipeline.synthetics) texture = create_source_texture(fixture, kLayerWidth, kLayerHeight);
+@@ -588,7 +615,7 @@ void layer_initialize(D3D12WarpFixture& fixture, LayerPipeline& pipeline, const
+     upload_pattern(fixture, pipeline.sources[1].Get(), b);
+     std::array<ID3D12Resource*, 2> inputs{pipeline.sources[0].Get(), pipeline.sources[1].Get()};
+     std::array<ID3D12Resource*, 2> outputs{pipeline.currents[0].Get(), pipeline.currents[1].Get()};
+-    std::array<ID3D12Resource*, 1> middle{pipeline.synthetics[0].Get()};
++    std::array<ID3D12Resource*, 2> middle{pipeline.synthetics[0].Get(), pipeline.synthetics[1].Get()};
+     pipeline.history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+     require_hresult(pipeline.history->initialize(fixture.device(), fixture.queue(), inputs,
+         D3D12_RESOURCE_STATE_RENDER_TARGET), "two layers: history initialization");
+@@ -598,7 +625,8 @@ void layer_initialize(D3D12WarpFixture& fixture, LayerPipeline& pipeline, const
+     if (feature) {
+         xrfg::D3D12SmoothCursorOptions cursor{};
+         cursor.enabled = true;
+-        cursor.templates.push_back(xrfg::built_in_arrow_template());
++        cursor.templates.push_back(layer_cursor_template());
++        cursor.small_sprite = small_sprite; // round 8: the periphery layer's
+         require(pipeline.synthesizer.set_smooth_cursor(cursor) == S_OK, "two layers: set_smooth_cursor");
+     }
+ }
+@@ -619,32 +647,90 @@ struct LayerCursorRun {
+     std::array<int, 4> periphery_region{};
+     xrfg::D3D12SmoothCursorStats focus_stats{};
+     xrfg::D3D12SmoothCursorStats periphery_stats{};
++    // Round 8, 3X: the second synthetic (2/3; the first is then 1/3).
++    StereoPattern focus_synthetic_late;
++    StereoPattern periphery_synthetic_late;
++    StereoPattern focus_expected_late;
++    StereoPattern periphery_expected_late;
+ };
+ 
++// Round 8: the sprite as an image that shows it small holds it: every pixel
++// the mean of the template's texels it covers (colour weighted by alpha).
++Sprite make_sprite_filtered(const xrfg::D3D12CursorTemplate& source, float scale) {
++    Sprite sprite;
++    constexpr int kTexels = static_cast<int>(xrfg::kD3D12CursorTemplateSize);
++    sprite.size = static_cast<int>(std::ceil(static_cast<float>(kTexels) * scale));
++    sprite.rgba.assign(static_cast<std::size_t>(sprite.size) * static_cast<std::size_t>(sprite.size), 0U);
++    constexpr int kSub = 8;
++    for (int y = 0; y < sprite.size; ++y) {
++        for (int x = 0; x < sprite.size; ++x) {
++            std::array<float, 3> colour{};
++            float alpha = 0.0F;
++            for (int sy = 0; sy < kSub; ++sy) {
++                for (int sx = 0; sx < kSub; ++sx) {
++                    const int tx = static_cast<int>(std::floor(
++                        (static_cast<float>(x) + (static_cast<float>(sx) + 0.5F) / kSub) / scale));
++                    const int ty = static_cast<int>(std::floor(
++                        (static_cast<float>(y) + (static_cast<float>(sy) + 0.5F) / kSub) / scale));
++                    if (tx >= kTexels || ty >= kTexels) continue;
++                    const std::uint32_t texel =
++                        source.rgba[static_cast<std::size_t>(ty) * kTexels + static_cast<std::size_t>(tx)];
++                    const float a = static_cast<float>(texel >> 24U) / 255.0F;
++                    alpha += a;
++                    for (std::size_t channel = 0; channel < 3; ++channel)
++                        colour[channel] += a * static_cast<float>((texel >> (8U * channel)) & 0xffU);
++                }
++            }
++            if (alpha <= 0.0F) continue;
++            std::uint32_t rgba = static_cast<std::uint32_t>(
++                std::lround(std::min(alpha / static_cast<float>(kSub * kSub), 1.0F) * 255.0F)) << 24U;
++            for (std::size_t channel = 0; channel < 3; ++channel)
++                rgba |= static_cast<std::uint32_t>(std::lround(std::min(colour[channel] / alpha, 255.0F)))
++                    << (8U * channel);
++            sprite.rgba[static_cast<std::size_t>(y * sprite.size + x)] = rgba;
++        }
++    }
++    return sprite;
++}
++
++// Round 8: the periphery layer's swapchain goes first and detects (small
++// sprite), the focus layer's follows it; both are told the mouse.
++// `inset`, `top`: the cursor's corner in frame A, in periphery pixels from
++// the focus box's corner in frame A (negative: outside it). `move`: its move
++// to frame B in periphery pixels. `triple`: 3X (synthetics at 1/3 and 2/3).
++// `filtered`: the periphery layer's cursor drawn as a small image holds it
++// (make_sprite_filtered) instead of point-sampled.
+ LayerCursorRun run_layer_cursor(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlowBackend backend,
+     xrfg::D3D12NvidiaOpticalFlowOptions options, LayerBox box_a, LayerBox box_b, bool feature, bool linked,
+     bool mouse_moves,
+     // Round 5: the cursor's corner, this many periphery pixels right of the
+     // focus box's left edge in frame A.
+-    int inset = 20) {
++    int inset = 20,
++    int top = 20, CursorPosition move = {16, 8}, bool triple = false, bool filtered = true) {
+     options.foveated_layers = true;
+     // The cursor's corner in periphery pixels (view-locked: the gaze does not
+     // move it), and in each frame's focus image.
+-    const CursorPosition periphery_a{box_a.left + inset, box_a.top + 20};
+-    const CursorPosition periphery_to{periphery_a[0] + 16, periphery_a[1] + 8};
++    const CursorPosition periphery_a{box_a.left + inset, box_a.top + top};
++    const CursorPosition periphery_to{periphery_a[0] + move[0], periphery_a[1] + move[1]};
+     const auto in_focus = [](CursorPosition at, LayerBox box) {
+         return CursorPosition{(at[0] - box.left) * kLayerRatio, (at[1] - box.top) * kLayerRatio};
+     };
+     const CursorPosition focus_a = in_focus(periphery_a, box_a);
+     const CursorPosition focus_to = in_focus(periphery_to, box_b);
+-    // A's place in B's focus image, and the 2X synthetic's place in both.
++    // A's place in B's focus image, and a synthetic's place in both: the
++    // current frame's pixels moved by a whole number of pixels, as the
++    // composition does (cursor_draw).
+     const CursorPosition focus_a_in_b = in_focus(periphery_a, box_b);
+-    const CursorPosition periphery_middle{(periphery_a[0] + periphery_to[0]) / 2,
+-        (periphery_a[1] + periphery_to[1]) / 2};
+-    const CursorPosition focus_middle{(focus_a_in_b[0] + focus_to[0]) / 2, (focus_a_in_b[1] + focus_to[1]) / 2};
+-    const Sprite focus_sprite = make_sprite(xrfg::built_in_arrow_template(), 1.0F);
+-    const Sprite periphery_sprite =
+-        make_sprite(xrfg::built_in_arrow_template(), 1.0F / static_cast<float>(kLayerRatio));
++    const auto between = [](CursorPosition from, CursorPosition to, float fraction) {
++        return CursorPosition{
++            to[0] + static_cast<int>(std::lround(static_cast<float>(from[0] - to[0]) * (1.0F - fraction))),
++            to[1] + static_cast<int>(std::lround(static_cast<float>(from[1] - to[1]) * (1.0F - fraction)))};
++    };
++    const float first_fraction = triple ? 1.0F / 3.0F : 0.5F;
++    const Sprite focus_sprite = make_sprite(layer_cursor_template(), 1.0F);
++    const Sprite periphery_sprite = filtered
++        ? make_sprite_filtered(layer_cursor_template(), 1.0F / static_cast<float>(kLayerRatio))
++        : make_sprite(layer_cursor_template(), 1.0F / static_cast<float>(kLayerRatio));
+ 
+     const ReprojectionViews periphery_views = layer_periphery_views();
+     const ReprojectionViews focus_views_a = layer_focus_views(box_a);
+@@ -656,18 +742,26 @@ LayerCursorRun run_layer_cursor(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlo
+     run.periphery_b = layer_world(periphery_views, false);
+     run.focus_expected = run.focus_b;
+     run.periphery_expected = run.periphery_b;
++    run.focus_expected_late = run.focus_b;
++    run.periphery_expected_late = run.periphery_b;
+     layer_draw_cursor(&focus_frame_a, focus_a, focus_sprite);
+-    layer_draw_cursor(&periphery_frame_a, periphery_a, periphery_sprite);
+     layer_draw_cursor(&run.focus_b, focus_to, focus_sprite);
+-    layer_draw_cursor(&run.periphery_b, periphery_to, periphery_sprite);
+-    layer_draw_cursor(&run.focus_expected, focus_middle, focus_sprite);
+-    layer_draw_cursor(&run.periphery_expected, periphery_middle, periphery_sprite);
++    layer_draw_cursor(&run.focus_expected, between(focus_a_in_b, focus_to, first_fraction), focus_sprite);
++    layer_draw_cursor(&run.focus_expected_late, between(focus_a_in_b, focus_to, 2.0F / 3.0F), focus_sprite);
++    if (!g_layer_no_periphery_cursor) {
++        layer_draw_cursor(&periphery_frame_a, periphery_a, periphery_sprite);
++        layer_draw_cursor(&run.periphery_b, periphery_to, periphery_sprite);
++        layer_draw_cursor(&run.periphery_expected, between(periphery_a, periphery_to, first_fraction),
++            periphery_sprite);
++        layer_draw_cursor(&run.periphery_expected_late, between(periphery_a, periphery_to, 2.0F / 3.0F),
++            periphery_sprite);
++    }
+     const auto region = [](CursorPosition from, CursorPosition to, int side, int margin) {
+         return std::array<int, 4>{
+-            std::max(std::min(from[0], to[0]) - margin, 0),
+-            std::max(std::min(from[1], to[1]) - margin, 0),
+-            std::min(std::max(from[0], to[0]) + side + margin, static_cast<int>(kLayerWidth)),
+-            std::min(std::max(from[1], to[1]) + side + margin, static_cast<int>(kLayerHeight))};
++            std::clamp(std::min(from[0], to[0]) - margin, 0, static_cast<int>(kLayerWidth)),
++            std::clamp(std::min(from[1], to[1]) - margin, 0, static_cast<int>(kLayerHeight)),
++            std::clamp(std::max(from[0], to[0]) + side + margin, 0, static_cast<int>(kLayerWidth)),
++            std::clamp(std::max(from[1], to[1]) + side + margin, 0, static_cast<int>(kLayerHeight))};
+     };
+     run.focus_region = region(focus_a_in_b, focus_to, focus_sprite.size, 8);
+     run.periphery_region = region(periphery_a, periphery_to, periphery_sprite.size, 4);
+@@ -675,7 +769,7 @@ LayerCursorRun run_layer_cursor(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlo
+     LayerPipeline focus;
+     LayerPipeline periphery;
+     layer_initialize(fixture, focus, focus_frame_a, run.focus_b, backend, options, feature);
+-    layer_initialize(fixture, periphery, periphery_frame_a, run.periphery_b, backend, options, feature);
++    layer_initialize(fixture, periphery, periphery_frame_a, run.periphery_b, backend, options, feature, true);
+     const std::shared_ptr<xrfg::D3D12FoveatedLink> link =
+         linked ? std::make_shared<xrfg::D3D12FoveatedLink>() : nullptr;
+     // What the layer does before every submission of a swapchain.
+@@ -683,42 +777,57 @@ LayerCursorRun run_layer_cursor(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlo
+         pipeline.synthesizer.set_foveated_focus(is_focus);
+         pipeline.synthesizer.set_foveated_link(link, true, token);
+     };
++    const auto submit_pair = [&](LayerPipeline& pipeline, const xrfg::D3D12HistoryCaptureTicket& capture,
++                                 const ReprojectionViews& views, xrfg::D3D12FrameSynthesisTicket* ticket) {
++        return pipeline.synthesizer.submit_pair(capture, views, views, 0, 1, ticket, std::nullopt, {}, false,
++            first_fraction,
++            triple ? std::optional<xrfg::D3D12ExtraSynthetic>(xrfg::D3D12ExtraSynthetic{1, 2.0F / 3.0F})
++                   : std::nullopt);
++    };
+     focus.synthesizer.note_cursor_position(1200, 700, 100'000);
++    periphery.synthesizer.note_cursor_position(1200, 700, 100'000);
+     xrfg::D3D12HistoryCaptureTicket focus_capture{}, periphery_capture{};
+     xrfg::D3D12FrameSynthesisTicket focus_ticket{}, periphery_ticket{};
+-    // Frame A: the focus layer's swapchain first, then the periphery's.
+-    require_hresult(focus.history->capture(0, &focus_capture), "two layers: focus capture A");
+-    require_hresult(focus.history->commit(focus_capture), "two layers: focus commit A");
+-    name_frame(focus, true, 1000);
+-    require_hresult(focus.synthesizer.submit_prime(focus_capture, focus_views_a, 0, &focus_ticket),
+-        "two layers: focus prime");
++    // Frame A: the periphery layer's swapchain first, then the focus layer's.
+     require_hresult(periphery.history->capture(0, &periphery_capture), "two layers: periphery capture A");
+     require_hresult(periphery.history->commit(periphery_capture), "two layers: periphery commit A");
+     name_frame(periphery, false, 1000);
+     require_hresult(periphery.synthesizer.submit_prime(periphery_capture, periphery_views, 0, &periphery_ticket),
+         "two layers: periphery prime");
+-    require_frame_start_gate(focus.synthesizer, "two layers: focus frame-start gate");
++    require_hresult(focus.history->capture(0, &focus_capture), "two layers: focus capture A");
++    require_hresult(focus.history->commit(focus_capture), "two layers: focus commit A");
++    name_frame(focus, true, 1000);
++    require_hresult(focus.synthesizer.submit_prime(focus_capture, focus_views_a, 0, &focus_ticket),
++        "two layers: focus prime");
+     require_frame_start_gate(periphery.synthesizer, "two layers: periphery frame-start gate");
++    require_frame_start_gate(focus.synthesizer, "two layers: focus frame-start gate");
+     // Frame B. The mouse moved the cursor's way (or not at all).
+-    focus.synthesizer.note_cursor_position(mouse_moves ? 1248 : 1200, mouse_moves ? 724 : 700, 100'011);
+-    require_hresult(focus.history->capture(1, &focus_capture), "two layers: focus capture B");
+-    require_hresult(focus.history->commit(focus_capture), "two layers: focus commit B");
+-    name_frame(focus, true, 2000);
+-    require_hresult(focus.synthesizer.submit_pair(focus_capture, focus_views_b, focus_views_b, 0, 1, &focus_ticket),
+-        "two layers: focus pair");
++    const int mouse_x = mouse_moves ? 1200 + move[0] * 3 : 1200;
++    const int mouse_y = mouse_moves ? 700 + move[1] * 3 : 700;
++    focus.synthesizer.note_cursor_position(mouse_x, mouse_y, 100'011);
++    periphery.synthesizer.note_cursor_position(mouse_x, mouse_y, 100'011);
+     require_hresult(periphery.history->capture(1, &periphery_capture), "two layers: periphery capture B");
+     require_hresult(periphery.history->commit(periphery_capture), "two layers: periphery commit B");
+     name_frame(periphery, false, 2000);
+-    require_hresult(periphery.synthesizer.submit_pair(periphery_capture, periphery_views, periphery_views, 0, 1,
+-            &periphery_ticket),
++    require_hresult(submit_pair(periphery, periphery_capture, periphery_views, &periphery_ticket),
+         "two layers: periphery pair");
+-    require_hresult(focus.synthesizer.wait_for_idle(), "two layers: focus idle");
++    require_hresult(focus.history->capture(1, &focus_capture), "two layers: focus capture B");
++    require_hresult(focus.history->commit(focus_capture), "two layers: focus commit B");
++    name_frame(focus, true, 2000);
++    require_hresult(submit_pair(focus, focus_capture, focus_views_b, &focus_ticket), "two layers: focus pair");
+     require_hresult(periphery.synthesizer.wait_for_idle(), "two layers: periphery idle");
++    require_hresult(focus.synthesizer.wait_for_idle(), "two layers: focus idle");
+     run.focus_real = readback_pattern(fixture, focus.currents[1].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+     run.periphery_real = readback_pattern(fixture, periphery.currents[1].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+     run.focus_synthetic = readback_pattern(fixture, focus.synthetics[0].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+     run.periphery_synthetic =
+         readback_pattern(fixture, periphery.synthetics[0].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
++    if (triple) {
++        run.focus_synthetic_late =
++            readback_pattern(fixture, focus.synthetics[1].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
++        run.periphery_synthetic_late =
++            readback_pattern(fixture, periphery.synthetics[1].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
++    }
+     if (feature) {
+         require_hresult(focus.synthesizer.smooth_cursor_stats(&run.focus_stats), "two layers: focus stats");
+         require_hresult(periphery.synthesizer.smooth_cursor_stats(&run.periphery_stats),
+@@ -729,6 +838,11 @@ LayerCursorRun run_layer_cursor(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlo
+     return run;
+ }
+ 
++// Round 8: the views of the pair the focus layer redrew, by any of the ways.
++std::uint32_t layer_focus_drawn(const xrfg::D3D12SmoothCursorStats& stats) {
++    return stats.follow_own + stats.follow_inside + stats.follow_cut;
++}
++
+ // Pixels of `region` (both eyes) with a colour byte more than 40 away from
+ // `expected`: a cursor missing where it should be, or showing where it should not.
+ std::size_t layer_wrong_pixels(const StereoPattern& image, const StereoPattern& expected,
+@@ -799,11 +913,27 @@ void test_two_layer_cursor(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlowBack
+                   << focus_wrong << " of " << focus_area << " (without the feature " << focus_wrong_without
+                   << "), periphery " << periphery_wrong << " of " << periphery_area << " (without "
+                   << periphery_wrong_without << "); focus alpha bytes not B's " << alpha_differences << '\n';
+-        require(with.focus_stats.pairs == 1 && with.focus_stats.drawn == 1,
+-            std::string("two-layer cursor ") + gaze.name + ": the focus layer's gate did not accept the pair");
+-        require(with.periphery_stats.pairs == 0 && with.periphery_stats.acquired == 0 &&
+-                with.periphery_stats.tracked == 0,
+-            std::string("two-layer cursor ") + gaze.name + ": the periphery layer ran a detection of its own");
++        std::cout << "  round 8: periphery gate drawn " << with.periphery_stats.drawn << " not found "
++                  << with.periphery_stats.not_found << " low score " << with.periphery_stats.low_score
++                  << " ambiguous " << with.periphery_stats.ambiguous << " stereo " << with.periphery_stats.stereo
++                  << " jump " << with.periphery_stats.jump << " (last weak: scale step "
++                  << ((with.periphery_stats.last_weak >> 8U) & 0xffU) << " score "
++                  << static_cast<float>((with.periphery_stats.last_weak >> 16U) & 0xffU) / 255.0F
++                  << " look-alike " << static_cast<float>(with.periphery_stats.last_weak >> 24U) / 255.0F
++                  << "); focus views drawn from its own record "
++                  << with.focus_stats.follow_own << ", from the periphery's " << with.focus_stats.follow_inside
++                  << " inside / " << with.focus_stats.follow_cut << " cut / " << with.focus_stats.follow_outside
++                  << " outside\n";
++        // Round 8: the periphery layer's gate decides; the focus layer finds
++        // the cursor too (it is wholly inside its image) and keeps its own
++        // record for both views.
++        require(with.periphery_stats.pairs == 1 && with.periphery_stats.drawn == 1,
++            std::string("two-layer cursor ") + gaze.name + ": the periphery layer's gate did not accept the pair");
++        require(with.focus_stats.pairs == 1 && with.focus_stats.drawn == 1 &&
++                with.focus_stats.follow_own == kEyeCount && with.focus_stats.follow_inside == 0 &&
++                with.focus_stats.follow_cut == 0 && with.focus_stats.follow_outside == 0,
++            std::string("two-layer cursor ") + gaze.name +
++                ": the focus layer did not draw both views from its own record");
+         require(focus_wrong <= focus_area / 100,
+             std::string("two-layer cursor ") + gaze.name + ": the focus synthetic's cursor is not once, half way");
+         require(periphery_wrong <= periphery_area / 100,
+@@ -814,7 +944,8 @@ void test_two_layer_cursor(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlowBack
+         require(focus_wrong_without >= 60,
+             std::string("two-layer cursor ") + gaze.name +
+                 ": without the feature the focus synthetic is right too, so this case proves nothing");
+-        require(idle.focus_stats.pairs == 0 && idle.focus_stats.idle_pairs == 1,
++        require(idle.focus_stats.pairs == 0 && idle.focus_stats.idle_pairs == 1 &&
++                idle.periphery_stats.pairs == 0 && idle.periphery_stats.idle_pairs == 1,
+             std::string("two-layer cursor ") + gaze.name + ": a still mouse ran the detection");
+         require(idle.focus_synthetic == without.focus_synthetic &&
+                 idle.periphery_synthetic == without.periphery_synthetic,
+@@ -1209,19 +1340,425 @@ void test_two_layer_cursor_uncovered(D3D12WarpFixture& fixture, xrfg::D3D12Optic
+               << "; blended wrong " << composite_wrong << "; colour bytes changed " << colour_differences << '\n';
+     require(on.periphery_synthetic == off.periphery_synthetic,
+         "cursor in the strip: the key changed the periphery layer's synthetic");
+-    require(on.focus_stats.pairs == off.focus_stats.pairs && on.focus_stats.drawn == off.focus_stats.drawn,
+-        "cursor in the strip: the key changed the focus gate's decision");
++    require(on.focus_stats.pairs == off.focus_stats.pairs && on.focus_stats.drawn == off.focus_stats.drawn &&
++            on.periphery_stats.drawn == off.periphery_stats.drawn &&
++            layer_focus_drawn(on.focus_stats) == layer_focus_drawn(off.focus_stats),
++        "cursor in the strip: the key changed a gate's decision");
+     require(colour_differences == 0, "cursor in the strip: the key changed a colour of the focus synthetic");
+     require(above == 0, "cursor in the strip: an alpha is above B's times its cover");
+     require(region_low >= 100, "cursor in the strip: the cursor is not in the strip, so this case proves nothing");
+-    require(off.focus_stats.drawn == 1,
+-        "cursor in the strip: the focus gate refused the pair (round 4's detection near the image's edge), "
+-        "so the redraw in the strip was not exercised");
++    require(layer_focus_drawn(off.focus_stats) == kEyeCount,
++        "cursor in the strip: the focus layer did not redraw the pair (round 8: its own record or the "
++        "periphery layer's), so the redraw in the strip was not exercised");
+     require(region_off == 0, "cursor in the strip: the redraw's alpha does not follow the ramp");
+     require(composite_wrong <= region_pixels / 50,
+         "cursor in the strip: blended, the cursor is not once, half way");
+ }
+ 
++// ---------------------------------------------------------------------------
++// Round 8: the cursor anywhere in the view.
++
++// What the runtime shows of one synthetic of the pair: alpha x focus +
++// (1 - alpha) x periphery (the nearest periphery pixel) inside the focus box
++// of frame B, the periphery layer elsewhere; counted over the periphery
++// region and the focus region: pixels more than 40 codes off the same blend
++// of the two expected images, and how many pixels were looked at.
++struct LayerShown {
++    std::size_t wrong{};
++    std::size_t pixels{};
++};
++
++LayerShown layer_shown_wrong(const StereoPattern& focus, const StereoPattern& periphery,
++    const StereoPattern& focus_expected, const StereoPattern& periphery_expected,
++    const std::array<int, 4>& focus_region, const std::array<int, 4>& periphery_region, LayerBox box_b) {
++    LayerShown shown;
++    const auto differs = [](float a, float b) { return std::abs(a - b) > 40.0F; };
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        // Outside the focus box: the periphery layer alone.
++        for (int y = periphery_region[1]; y < periphery_region[3]; ++y)
++            for (int x = periphery_region[0]; x < periphery_region[2]; ++x) {
++                if (x >= box_b.left && x < box_b.left + kLayerBoxWidth && y >= box_b.top &&
++                    y < box_b.top + kLayerBoxHeight)
++                    continue;
++                const std::size_t at = (static_cast<std::size_t>(y) * kLayerWidth + static_cast<std::size_t>(x)) *
++                    kBytesPerPixel;
++                bool wrong = false;
++                for (UINT channel = 0; channel < 3; ++channel)
++                    wrong = wrong || differs(static_cast<float>(periphery[eye][at + channel]),
++                        static_cast<float>(periphery_expected[eye][at + channel]));
++                shown.wrong += wrong ? 1U : 0U;
++                ++shown.pixels;
++            }
++        // Inside it: the blend, per focus pixel.
++        for (int y = focus_region[1]; y < focus_region[3]; ++y)
++            for (int x = focus_region[0]; x < focus_region[2]; ++x) {
++                const std::size_t at = (static_cast<std::size_t>(y) * kLayerWidth + static_cast<std::size_t>(x)) *
++                    kBytesPerPixel;
++                const std::size_t under =
++                    (static_cast<std::size_t>(box_b.top + y / kLayerRatio) * kLayerWidth +
++                        static_cast<std::size_t>(box_b.left + x / kLayerRatio)) * kBytesPerPixel;
++                const float alpha = static_cast<float>(focus[eye][at + 3]);
++                bool wrong = false;
++                for (UINT channel = 0; channel < 3; ++channel) {
++                    const float is = (alpha * static_cast<float>(focus[eye][at + channel]) +
++                        (255.0F - alpha) * static_cast<float>(periphery[eye][under + channel])) / 255.0F;
++                    const float wanted = (alpha * static_cast<float>(focus_expected[eye][at + channel]) +
++                        (255.0F - alpha) * static_cast<float>(periphery_expected[eye][under + channel])) / 255.0F;
++                    wrong = wrong || differs(is, wanted);
++                }
++                shown.wrong += wrong ? 1U : 0U;
++                ++shown.pixels;
++            }
++    }
++    return shown;
++}
++
++// (i) The cursor outside the focus image, cut by its border, crossing it
++// within the pair, and with the focus box moving, at 2X and 3X. The cursor
++// is the rig's disc (layer_cursor_template), drawn into the periphery layer
++// as a small image holds it (filtered): 5 pixels across in an 11-pixel box.
++//  - the real frames are B, bit for bit;
++//  - the periphery layer's gate accepts the pair (the one decision);
++//  - the focus layer draws both views, or neither where no pixel of the
++//    cursor is in its image, and says which way (printed; required where the
++//    case fixes it);
++//  - what the runtime shows (layer_shown_wrong) is B's world and the cursor
++//    once, at the synthetic's instant: at most 2 % of the pixels around its
++//    places more than 40 codes off (a GUESS, as round 5's), each synthetic;
++//  - the focus synthetic's alpha is B's at every byte;
++//  - without the feature the same count is 30 pixels or more (or the case
++//    proves nothing).
++void test_two_layer_cursor_everywhere(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlowBackend backend,
++    const xrfg::D3D12NvidiaOpticalFlowOptions& base) {
++    struct Case {
++        const char* name;
++        LayerBox a;
++        LayerBox b;
++        int inset;
++        int top;
++        CursorPosition move;
++        // The focus layer's views, by way: -1 not required.
++        int own;
++        int outside;
++    };
++    int refused = 0;
++    for (const Case& item : {
++             Case{"inside", {80, 60}, {80, 60}, 20, 20, {18, 6}, 2, 0},
++             Case{"periphery only", {80, 60}, {80, 60}, -60, -30, {18, 6}, 0, 2},
++             Case{"cut by the border", {80, 60}, {80, 60}, -5, 20, {0, 12}, 0, 0},
++             Case{"crossing in", {80, 60}, {80, 60}, -14, 20, {18, 6}, 0, 0},
++             Case{"crossing out", {80, 60}, {80, 60}, 4, 20, {-18, 6}, 0, 0},
++             Case{"inside, box moving", {80, 60}, {83, 63}, 30, 20, {18, 6}, 2, 0},
++             Case{"cut, box moving off it", {80, 60}, {96, 60}, 12, 20, {0, 12}, -1, 0},
++             Case{"periphery only, box moving", {80, 60}, {86, 63}, -60, -30, {18, 6}, 0, 2}}) {
++        for (const bool triple : {false, true}) {
++            const LayerCursorRun with = run_layer_cursor(fixture, backend, base, item.a, item.b, true, true, true,
++                item.inset, item.top, item.move, triple, true);
++            const LayerCursorRun without = run_layer_cursor(fixture, backend, base, item.a, item.b, false, true,
++                true, item.inset, item.top, item.move, triple, true);
++            const std::string name = std::string("cursor everywhere, ") + item.name + (triple ? ", 3X" : ", 2X");
++            require(with.focus_real == with.focus_b && with.periphery_real == with.periphery_b,
++                name + ": a real frame is not B bit for bit");
++            const LayerShown first = layer_shown_wrong(with.focus_synthetic, with.periphery_synthetic,
++                with.focus_expected, with.periphery_expected, with.focus_region, with.periphery_region, item.b);
++            const LayerShown first_without = layer_shown_wrong(without.focus_synthetic,
++                without.periphery_synthetic, without.focus_expected, without.periphery_expected,
++                without.focus_region, without.periphery_region, item.b);
++            LayerShown late{}, late_without{};
++            if (triple) {
++                late = layer_shown_wrong(with.focus_synthetic_late, with.periphery_synthetic_late,
++                    with.focus_expected_late, with.periphery_expected_late, with.focus_region,
++                    with.periphery_region, item.b);
++                late_without = layer_shown_wrong(without.focus_synthetic_late, without.periphery_synthetic_late,
++                    without.focus_expected_late, without.periphery_expected_late, without.focus_region,
++                    without.periphery_region, item.b);
++            }
++            std::size_t alpha_differences = 0;
++            for (UINT eye = 0; eye < kEyeCount; ++eye)
++                for (std::size_t at = 3; at < with.focus_synthetic[eye].size(); at += kBytesPerPixel) {
++                    alpha_differences += with.focus_synthetic[eye][at] != with.focus_b[eye][at];
++                    if (triple) alpha_differences += with.focus_synthetic_late[eye][at] != with.focus_b[eye][at];
++                }
++            const xrfg::D3D12SmoothCursorStats& p = with.periphery_stats;
++            const xrfg::D3D12SmoothCursorStats& f = with.focus_stats;
++            std::cout << name << ": periphery gate pairs " << p.pairs << " drawn " << p.drawn << " (not found "
++                      << p.not_found << ", low score " << p.low_score << ", ambiguous " << p.ambiguous
++                      << ", stereo " << p.stereo << ", jump " << p.jump << "); focus own gate drawn " << f.drawn
++                      << ", views from its own record " << f.follow_own << ", from the periphery's "
++                      << f.follow_inside << " inside / " << f.follow_cut << " cut / " << f.follow_outside
++                      << " outside; shown wrong " << first.wrong << " of " << first.pixels << " (without "
++                      << first_without.wrong << ")";
++            if (triple)
++                std::cout << ", at 2/3 " << late.wrong << " of " << late.pixels << " (without "
++                          << late_without.wrong << ")";
++            std::cout << "; focus alpha bytes not B's " << alpha_differences << '\n';
++            if (!(p.pairs == 1 && p.drawn == 1)) {
++                std::cout << "  NOT ACCEPTED by the periphery layer's gate (last weak: template "
++                          << (p.last_weak & 0xffU) << " score "
++                          << static_cast<float>((p.last_weak >> 16U) & 0xffU) / 255.0F << " look-alike "
++                          << static_cast<float>(p.last_weak >> 24U) / 255.0F << ")\n";
++                ++refused;
++                continue;
++            }
++            const std::uint32_t views = f.follow_own + f.follow_inside + f.follow_cut + f.follow_outside;
++            require(views == kEyeCount, name + ": the focus layer did not follow the pair for both views");
++            if (item.own >= 0)
++                require(f.follow_own == static_cast<std::uint32_t>(item.own),
++                    name + ": views drawn from the focus layer's own record");
++            require(f.follow_outside == static_cast<std::uint32_t>(item.outside),
++                name + ": views with the cursor outside the focus image");
++            require(alpha_differences == 0, name + ": the focus synthetic's alpha is not B's");
++            require(first.wrong <= first.pixels / 50, name + ": shown, the cursor is not once, at its instant");
++            require(first_without.wrong >= 30, name + ": without the feature it is right too: proves nothing");
++            if (triple) {
++                require(late.wrong <= late.pixels / 50, name + ": shown at 2/3, the cursor is not once");
++                require(late_without.wrong >= 30, name + ": at 2/3 without the feature it is right too");
++            }
++            if (item.outside == static_cast<int>(kEyeCount))
++                require(with.focus_synthetic == without.focus_synthetic,
++                    name + ": the focus synthetic changed although no pixel of the cursor is in it");
++        }
++    }
++    if (refused != 0) {
++        g_uncovered_guess_failures += refused;
++        std::cout << "cursor everywhere: the periphery layer's gate refused " << refused
++                  << " of the runs (listed above)\n";
++    }
++}
++
++// (i2) A cursor the periphery layer's detection does not find (none is drawn
++// into its images here; the game's own cursors at 12 pixels are the case),
++// wholly inside the focus image, 2X and 3X:
++//  - with the focus layer opaque over the redraw (alpha 255: the periphery
++//    layer is hidden there), the focus layer redraws from its own detection,
++//    as round 4 did: both views from its own record, the synthetic right
++//    within 1 % of the region's pixels, the periphery synthetic untouched;
++//  - with an alpha under 1 there (the test's pattern) it does not: its
++//    synthetics are the feature-off run's, byte for byte (never one layer
++//    without the other where both show).
++void test_two_layer_cursor_focus_alone(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlowBackend backend,
++    const xrfg::D3D12NvidiaOpticalFlowOptions& base) {
++    const LayerBox box{80, 60};
++    g_layer_no_periphery_cursor = true;
++    for (const bool triple : {false, true}) {
++        const std::string name = std::string("focus alone, ") + (triple ? "3X" : "2X");
++        g_layer_opaque_focus = true;
++        const LayerCursorRun opaque = run_layer_cursor(fixture, backend, base, box, box, true, true, true, 30, 20,
++            {18, 6}, triple);
++        const LayerCursorRun opaque_off = run_layer_cursor(fixture, backend, base, box, box, false, true, true, 30,
++            20, {18, 6}, triple);
++        g_layer_opaque_focus = false;
++        const LayerCursorRun shown = run_layer_cursor(fixture, backend, base, box, box, true, true, true, 30, 20,
++            {18, 6}, triple);
++        const LayerCursorRun shown_off = run_layer_cursor(fixture, backend, base, box, box, false, true, true, 30, 20,
++            {18, 6}, triple);
++        const std::size_t area = static_cast<std::size_t>(opaque.focus_region[2] - opaque.focus_region[0]) *
++            static_cast<std::size_t>(opaque.focus_region[3] - opaque.focus_region[1]) * kEyeCount;
++        std::size_t wrong = layer_wrong_pixels(opaque.focus_synthetic, opaque.focus_expected, opaque.focus_region);
++        std::size_t wrong_off =
++            layer_wrong_pixels(opaque_off.focus_synthetic, opaque_off.focus_expected, opaque_off.focus_region);
++        if (triple)
++            wrong += layer_wrong_pixels(opaque.focus_synthetic_late, opaque.focus_expected_late,
++                opaque.focus_region);
++        std::cout << name << ": opaque focus: periphery gate drawn " << opaque.periphery_stats.drawn
++                  << ", focus own gate drawn " << opaque.focus_stats.drawn << ", views from its own record "
++                  << opaque.focus_stats.follow_own << ", wrong pixels " << wrong << " of " << area
++                  << " (without the feature " << wrong_off << "); alpha under 1: focus own gate drawn "
++                  << shown.focus_stats.drawn << ", views drawn " << layer_focus_drawn(shown.focus_stats) << '\n';
++        require(opaque.periphery_stats.drawn == 0 && shown.periphery_stats.drawn == 0,
++            name + ": the periphery layer's gate accepted a pair without a cursor");
++        require(opaque.focus_stats.drawn == 1 && opaque.focus_stats.follow_own == kEyeCount,
++            name + ": the focus layer did not redraw from its own record under an opaque focus image");
++        require(wrong <= area / 100, name + ": the focus synthetic's cursor is not once, at its instant");
++        require(wrong_off >= 60, name + ": without the feature it is right too: proves nothing");
++        require(opaque.periphery_synthetic == opaque_off.periphery_synthetic,
++            name + ": the periphery synthetic changed");
++        require(shown.focus_stats.drawn == 1 && layer_focus_drawn(shown.focus_stats) == 0,
++            name + ": the focus layer redrew alone where the periphery layer shows");
++        require(shown.focus_synthetic == shown_off.focus_synthetic &&
++                shown.periphery_synthetic == shown_off.periphery_synthetic &&
++                (!triple || shown.focus_synthetic_late == shown_off.focus_synthetic_late),
++            name + ": a synthetic differs from the feature off although nothing was to be drawn");
++    }
++    g_layer_no_periphery_cursor = false;
++    g_layer_opaque_focus = false;
++}
++
++// An image enlarged `factor` times as a linear-clamp sampler enlarges it
++// (Quad Views' composition of the periphery; smooth_cursor.hlsl,
++// frame_colour).
++StereoPattern enlarge_pattern(const StereoPattern& pattern, UINT width, UINT height, UINT factor) {
++    StereoPattern output;
++    const UINT out_width = width * factor, out_height = height * factor;
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        output[eye].resize(static_cast<std::size_t>(out_width) * out_height * kBytesPerPixel);
++        for (UINT y = 0; y < out_height; ++y) {
++            const float real_y = (static_cast<float>(y) + 0.5F) / static_cast<float>(factor) - 0.5F;
++            const int low_y = static_cast<int>(std::floor(real_y));
++            const float weight_y = real_y - static_cast<float>(low_y);
++            const std::size_t y0 = static_cast<std::size_t>(std::clamp(low_y, 0, static_cast<int>(height) - 1));
++            const std::size_t y1 = static_cast<std::size_t>(std::clamp(low_y + 1, 0, static_cast<int>(height) - 1));
++            for (UINT x = 0; x < out_width; ++x) {
++                const float real_x = (static_cast<float>(x) + 0.5F) / static_cast<float>(factor) - 0.5F;
++                const int low_x = static_cast<int>(std::floor(real_x));
++                const float weight_x = real_x - static_cast<float>(low_x);
++                const std::size_t x0 = static_cast<std::size_t>(std::clamp(low_x, 0, static_cast<int>(width) - 1));
++                const std::size_t x1 =
++                    static_cast<std::size_t>(std::clamp(low_x + 1, 0, static_cast<int>(width) - 1));
++                const std::uint8_t* p00 = &pattern[eye][(y0 * width + x0) * kBytesPerPixel];
++                const std::uint8_t* p10 = &pattern[eye][(y0 * width + x1) * kBytesPerPixel];
++                const std::uint8_t* p01 = &pattern[eye][(y1 * width + x0) * kBytesPerPixel];
++                const std::uint8_t* p11 = &pattern[eye][(y1 * width + x1) * kBytesPerPixel];
++                std::uint8_t* out = &output[eye][(static_cast<std::size_t>(y) * out_width + x) * kBytesPerPixel];
++                for (UINT channel = 0; channel < kBytesPerPixel; ++channel) {
++                    const float top = static_cast<float>(p00[channel]) +
++                        (static_cast<float>(p10[channel]) - static_cast<float>(p00[channel])) * weight_x;
++                    const float bottom = static_cast<float>(p01[channel]) +
++                        (static_cast<float>(p11[channel]) - static_cast<float>(p01[channel])) * weight_x;
++                    out[channel] = static_cast<std::uint8_t>(std::lround(top + (bottom - top) * weight_y));
++                }
++            }
++        }
++    }
++    return output;
++}
++
++// (j) The detection at the periphery layer's real size: a swapchain of 1040
++// x 1028 (two views), the cursor's box 11, 12 and 14 pixels (scales 0.33,
++// 0.38, 0.45 of the 32-texel image), drawn as such an image holds it
++// (filtered), moving 9 x 3 pixels a frame over the test world, eight
++// independent pairs each; the built-in arrow, and with XRFG_TEST_DCS_BIN (a
++// DCS bin directory) the game's own cursor images. Three ways:
++//  - "enlarged": the periphery layer's detection as round 8 has it (the
++//    image read enlarged 5 times, D3D12SmoothCursorOptions::small_sprite);
++//  - "plain": the unchanged detection on the same images (the control: it
++//    should find nothing);
++//  - "composed twin" (at 0.38 only: each run holds 5200 x 5140 images): the
++//    same frames enlarged 5 times on the CPU as Quad Views' composition
++//    enlarges the periphery, through the unchanged detection: what the
++//    composed mode sees.
++// Required: the enlarged detection judges every pair, and accepts as many
++// pairs as the composed twin does (the parent's criterion: not worse than
++// the composed mode); counted as a failed guess rather than stopping the
++// run. Everything is printed.
++void test_periphery_cursor_real_size(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlowBackend backend,
++    const xrfg::D3D12NvidiaOpticalFlowOptions& base) {
++    constexpr UINT kWidth = 1040, kHeight = 1028, kFactor = 5;
++    constexpr int kPairs = 8;
++    auto views = make_reprojection_views();
++    for (UINT eye = 0; eye < kEyeCount; ++eye)
++        views[eye].image_rect = xrfg::D3D12ImageRect{0, 0, kWidth, kHeight};
++    auto twin_views = views;
++    for (UINT eye = 0; eye < kEyeCount; ++eye)
++        twin_views[eye].image_rect = xrfg::D3D12ImageRect{0, 0, kWidth * kFactor, kHeight * kFactor};
++    const StereoPattern world = ray_direction_pattern(kWidth, kHeight, views);
++    std::vector<xrfg::D3D12CursorTemplate> templates{xrfg::built_in_arrow_template()};
++    std::array<wchar_t, 512> dcs_bin{};
++    const DWORD length = GetEnvironmentVariableW(L"XRFG_TEST_DCS_BIN", dcs_bin.data(),
++        static_cast<DWORD>(dcs_bin.size()));
++    if (length > 0 && length < dcs_bin.size()) {
++        const xrfg::CursorTemplateSet dcs = xrfg::load_dcs_cursor_templates(std::filesystem::path(dcs_bin.data()));
++        if (dcs.source == xrfg::CursorTemplateSource::dcs_file)
++            templates.insert(templates.end(), dcs.templates.begin(), dcs.templates.end());
++    }
++    enum class Way { enlarged, plain, twin };
++    const auto run = [&](std::size_t drawn_template, float scale, Way way) {
++        const UINT factor = way == Way::twin ? kFactor : 1U;
++        const UINT width = kWidth * factor, height = kHeight * factor;
++        const auto& run_views = way == Way::twin ? twin_views : views;
++        std::array<ComPtr<ID3D12Resource>, 2> sources{create_source_texture(fixture, width, height),
++            create_source_texture(fixture, width, height)};
++        std::array<ComPtr<ID3D12Resource>, 2> currents{create_source_texture(fixture, width, height),
++            create_source_texture(fixture, width, height)};
++        std::array<ComPtr<ID3D12Resource>, 1> synthetics{create_source_texture(fixture, width, height)};
++        const Sprite sprite = make_sprite_filtered(templates[drawn_template], scale);
++        const auto frame = [&](int index) {
++            StereoPattern pattern = world;
++            for (UINT eye = 0; eye < kEyeCount; ++eye)
++                draw_cursor_sized(&pattern, eye, kWidth, kHeight,
++                    CursorPosition{300 + index * 9 + static_cast<int>(eye) * 3, 400 + index * 3}, sprite);
++            return way == Way::twin ? enlarge_pattern(pattern, kWidth, kHeight, kFactor) : pattern;
++        };
++        std::array<ID3D12Resource*, 2> inputs{sources[0].Get(), sources[1].Get()};
++        std::array<ID3D12Resource*, 2> outputs{currents[0].Get(), currents[1].Get()};
++        std::array<ID3D12Resource*, 1> middle{synthetics[0].Get()};
++        auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++        require_hresult(history->initialize(fixture.device(), fixture.queue(), inputs,
++            D3D12_RESOURCE_STATE_RENDER_TARGET), "real size: history initialization");
++        xrfg::D3D12FrameSynthesizer synthesizer;
++        require_hresult(synthesizer.initialize(fixture.device(), fixture.queue(), history, outputs, middle, kFormat,
++            D3D12_RESOURCE_STATE_RENDER_TARGET, backend, base, true), "real size: synthesizer initialization");
++        xrfg::D3D12SmoothCursorOptions cursor{};
++        cursor.enabled = true;
++        cursor.templates = templates;
++        cursor.small_sprite = way == Way::enlarged;
++        cursor.small_sprite_enlarge = way == Way::enlarged ? static_cast<float>(kFactor) : 0.0F;
++        require(synthesizer.set_smooth_cursor(cursor) == S_OK, "real size: set_smooth_cursor");
++        xrfg::D3D12HistoryCaptureTicket capture{};
++        xrfg::D3D12FrameSynthesisTicket ticket{};
++        // Each pair: frame A primed, frame B paired with it, the cursor 9 x 3
++        // pixels on (so every pair acquires: nothing is tracked from the
++        // pair before).
++        for (int index = 0; index < kPairs; ++index) {
++            upload_pattern(fixture, sources[0].Get(), frame(2 * index));
++            upload_pattern(fixture, sources[1].Get(), frame(2 * index + 1));
++            const std::uint64_t time = 100'000 + static_cast<std::uint64_t>(index) * 40U;
++            synthesizer.note_cursor_position(1000 + index * 54, 700 + index * 18, time);
++            require_hresult(history->capture(0, &capture), "real size: capture A");
++            require_hresult(history->commit(capture), "real size: commit A");
++            require_hresult(synthesizer.submit_prime(capture, run_views, 0, &ticket), "real size: prime");
++            require_frame_start_gate(synthesizer, "real size: frame-start gate");
++            synthesizer.note_cursor_position(1000 + index * 54 + 27, 700 + index * 18 + 9, time + 11U);
++            require_hresult(history->capture(1, &capture), "real size: capture B");
++            require_hresult(history->commit(capture), "real size: commit B");
++            require_hresult(synthesizer.submit_pair(capture, run_views, run_views, 0, 1, &ticket),
++                "real size: pair");
++            require_hresult(synthesizer.wait_for_idle(), "real size: idle");
++        }
++        xrfg::D3D12SmoothCursorStats stats{};
++        require_hresult(synthesizer.smooth_cursor_stats(&stats), "real size: stats");
++        require_hresult(history->invalidate(), "real size: history invalidate");
++        return stats;
++    };
++    const auto print = [](const char* way, const xrfg::D3D12SmoothCursorStats& stats) {
++        std::cout << way << " pairs " << stats.pairs << " drawn " << stats.drawn << " (not found "
++                  << stats.not_found << ", low score " << stats.low_score << ", ambiguous " << stats.ambiguous
++                  << ", stereo " << stats.stereo << ", jump " << stats.jump << ", busy " << stats.busy
++                  << "; last weak: template " << (stats.last_weak & 0xffU) << " scale step "
++                  << ((stats.last_weak >> 8U) & 0xffU) << " score "
++                  << static_cast<float>((stats.last_weak >> 16U) & 0xffU) / 255.0F << " look-alike "
++                  << static_cast<float>(stats.last_weak >> 24U) / 255.0F << "), detection GPU "
++                  << (stats.timed_pairs != 0 ? stats.detection_microseconds / stats.timed_pairs : 0U)
++                  << " us a pair over " << stats.timed_pairs << " pairs";
++    };
++    for (std::size_t drawn = 0; drawn < templates.size(); ++drawn) {
++        for (const float scale : {0.33F, 0.38F, 0.45F}) {
++            const xrfg::D3D12SmoothCursorStats enlarged = run(drawn, scale, Way::enlarged);
++            const xrfg::D3D12SmoothCursorStats plain = run(drawn, scale, Way::plain);
++            std::cout << "periphery cursor at 1040 x 1028, template " << drawn << " (id "
++                      << templates[drawn].source_id << "), box "
++                      << static_cast<int>(std::lround(32.0F * scale)) << " px: ";
++            print("enlarged x5:", enlarged);
++            std::cout << "; plain: drawn " << plain.drawn << " of " << plain.pairs << ", detection GPU "
++                      << (plain.timed_pairs != 0 ? plain.detection_microseconds / plain.timed_pairs : 0U)
++                      << " us a pair";
++            require(enlarged.pairs == static_cast<std::uint64_t>(kPairs),
++                "real size: the enlarged detection did not judge every pair");
++            if (scale == 0.38F) {
++                const xrfg::D3D12SmoothCursorStats twin = run(drawn, scale, Way::twin);
++                std::cout << "; ";
++                print("composed twin:", twin);
++                if (enlarged.drawn < twin.drawn) {
++                    ++g_uncovered_guess_failures;
++                    std::cout << "\n  GUESS EXCEEDED: the enlarged detection accepted fewer pairs than the "
++                                 "composed twin";
++                }
++            }
++            std::cout << '\n';
++        }
++    }
++}
++
+ // ---------------------------------------------------------------------------
+ // Round 6: the exact mask (`foveated_uncovered_exact`) and the fill
+ // (`foveated_uncovered_fill`).
+@@ -1741,6 +2278,28 @@ int main(int argc, char** argv) {
+                 return 77;
+             }
+             D3D12WarpFixture focus_fixture(true);
++            // XRFG_FOVEATED_PART: "cursor", the two-layer cursor cases alone;
++            // "real", the periphery cursor at its real size alone (minutes,
++            // and 5200 x 5140 images for its composed twin: not part of the
++            // plain run). Unset: everything but that one.
++            std::array<char, 16> part_text{};
++            const DWORD part_length = GetEnvironmentVariableA("XRFG_FOVEATED_PART", part_text.data(),
++                static_cast<DWORD>(part_text.size()));
++            const std::string_view part(part_text.data(), part_length < part_text.size() ? part_length : 0U);
++            if (part == "cursor" || part == "real") {
++                if (part == "cursor") {
++                    test_two_layer_cursor(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
++                    test_two_layer_cursor_uncovered(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
++                    test_two_layer_cursor_everywhere(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
++                    test_two_layer_cursor_focus_alone(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
++                } else {
++                    test_periphery_cursor_real_size(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
++                }
++                focus_fixture.require_no_debug_errors();
++                std::cout << "Foveated focus tests, part " << part << ": " << g_uncovered_guess_failures
++                          << " criteria with a guessed limit exceeded\n";
++                return g_uncovered_guess_failures == 0 ? 0 : 1;
++            }
+             test_moved_focus_fov(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
+             test_focus_alpha_edge(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
+             test_focus_uncovered_alpha(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
+@@ -1756,6 +2315,9 @@ int main(int argc, char** argv) {
+                 test_focus_fill_from_periphery(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
+             }
+             test_two_layer_cursor_uncovered(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
++            // Round 8.
++            test_two_layer_cursor_everywhere(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
++            test_two_layer_cursor_focus_alone(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
+             focus_fixture.require_no_debug_errors();
+             require(g_uncovered_guess_failures == 0, std::to_string(g_uncovered_guess_failures) +
+                 " criteria with a guessed limit were exceeded (lines GUESS EXCEEDED above)");

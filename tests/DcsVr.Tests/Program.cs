@@ -711,7 +711,7 @@ Test("Smooth mouse cursor is off by default, written as smooth_cursor with DCS.e
     var off = ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia });
     Require(off.Contains("\nsmooth_cursor=0") && off.Split('\n').Any(l => l.TrimEnd('\r') == "cursor_templates="), "off, no folder");
     var on = ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia, SmoothCursor = true }, @"E:\DCS World\bin");
-    Require(on.Contains("smooth_cursor=1") && on.Contains(@"cursor_templates=E:\DCS World\bin")
+    Require(on.Contains("smooth_cursor=1") && on.Contains("cursor_follow_mouse=1") && on.Contains(@"cursor_templates=E:\DCS World\bin")
         && on.IndexOf("smooth_cursor=1", StringComparison.Ordinal) < on.IndexOf("[diagnostics]", StringComparison.Ordinal), "in the [ofxr] section");
     var round = JsonData.Deserialize<VrProfile>(JsonData.Serialize(new VrProfile { SmoothCursor = true }));
     Require(round.SmoothCursor, "kept in the profile");

@@ -1,0 +1,2598 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5e9e48f..edc3293 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -161,6 +161,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+     set(XRFG_CURSOR_MOTION_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_motion_shader.hpp")
+     set(XRFG_CURSOR_ARGUMENTS_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_arguments_shader.hpp")
+     set(XRFG_CURSOR_SEARCH_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_search_shader.hpp")
++    set(XRFG_CURSOR_PICK_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_pick_shader.hpp") # DCS Control (0082)
+     set(XRFG_CURSOR_VERIFY_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_verify_shader.hpp")
+     set(XRFG_CURSOR_GATE_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_gate_shader.hpp")
+     set(XRFG_CURSOR_CAPTURE_HEADER "${XRFG_GENERATED_SHADER_DIR}/cursor_capture_shader.hpp")
+@@ -356,6 +357,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             "${XRFG_CURSOR_MOTION_HEADER}"
+             "${XRFG_CURSOR_ARGUMENTS_HEADER}"
+             "${XRFG_CURSOR_SEARCH_HEADER}"
++            "${XRFG_CURSOR_PICK_HEADER}"
+             "${XRFG_CURSOR_VERIFY_HEADER}"
+             "${XRFG_CURSOR_GATE_HEADER}"
+             "${XRFG_CURSOR_CAPTURE_HEADER}"
+@@ -438,6 +440,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+             /Fh "${XRFG_CURSOR_SEARCH_HEADER}" /Vn g_xrfg_cursor_search_shader
+             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CursorPickCS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_CURSOR_PICK_HEADER}" /Vn g_xrfg_cursor_pick_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/smooth_cursor.hlsl"
+         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E CursorVerifyCS
+             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+             /Fh "${XRFG_CURSOR_VERIFY_HEADER}" /Vn g_xrfg_cursor_verify_shader
+@@ -502,6 +508,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         "${XRFG_CURSOR_MOTION_HEADER}"
+         "${XRFG_CURSOR_ARGUMENTS_HEADER}"
+         "${XRFG_CURSOR_SEARCH_HEADER}"
++        "${XRFG_CURSOR_PICK_HEADER}"
+         "${XRFG_CURSOR_VERIFY_HEADER}"
+         "${XRFG_CURSOR_GATE_HEADER}"
+         "${XRFG_CURSOR_CAPTURE_HEADER}"
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+index 3e171f9..076b552 100644
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -491,6 +491,10 @@ enum class BridgeFlightOperation : std::uint32_t {
+     //   result=4 (0011), per diagnostic capture written next to the log
+     //     (cursor-capture-<pid>-<a>-*.bmp/-info.txt): a= its number, b= the
+     //     current frame's detection status, c= the previous frame's.
++    //   result=7 (DCS Control 0082, `[ofxr] cursor_follow_mouse`), once a
++    //     second while it acts: a= the frame-views where the candidate taken
++    //     for the cursor (the one that moves with the mouse) was not the one
++    //     with the best score, b= pairs judged | drawn << 16 that second.
+     smooth_cursor,
+     // DCS VR Control (0011). Video memory once a second with `[ofxr]
+     // diag_vram` (what the panel shows), in MiB: a= this process's resident
+diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
+index 4d2af11..7e007e6 100644
+--- a/include/xrfg/d3d12_frame_synthesizer.hpp
++++ b/include/xrfg/d3d12_frame_synthesizer.hpp
+@@ -126,6 +126,12 @@ struct D3D12SmoothCursorOptions {
+     std::filesystem::path capture_directory;
+     std::uint32_t capture_limit{8};
+     std::uint32_t capture_interval_ms{5000};
++    // DCS Control (0082), `[ofxr] cursor_follow_mouse`: of the search's
++    // candidates, the one that moves with the mouse is taken, not the one
++    // with the best score (smooth_cursor.hlsl, CursorPickCS): a look-alike
++    // that stands still while the mouse moves is passed over, and the place
++    // the last match is expected at counts for a candidate.
++    bool follow_mouse{};
+ };
+ 
+ // DCS Control (0053): `[diagnostics] hud_capture=N`, a developer's diagnostic
+@@ -193,6 +199,9 @@ struct D3D12SmoothCursorStats {
+     std::uint32_t last_weak{};
+     std::uint32_t templates{};      // templates uploaded
+     std::uint32_t matchable_templates{};
++    // DCS Control (0082): frame-views where another candidate than the best
++    // score was taken (follow_mouse).
++    std::uint32_t picked{};
+ };
+ 
+ enum class D3D12OpticalFlowBackend {
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+index c42b79b..2ae4257 100644
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -376,6 +376,15 @@ struct ConfiguredNvidiaOptions {
+ [[nodiscard]] bool read_smooth_cursor(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS Control (0082). `[ofxr] cursor_follow_mouse`: the smooth cursor's
++// detection takes, of what could be the cursor in a frame, the candidate
++// that moves with the mouse instead of the one that scores best (a HUD's
++// symbols and the cockpit's small lights look like the cursor's dot, and one
++// of them taken once was tracked for a whole flight). Off unless set to 1.
++// Read when a swapchain's synthesis is set up.
++[[nodiscard]] bool read_cursor_follow_mouse(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // DCS VR Control (0010). `[ofxr] cursor_templates`: a directory holding the
+ // game's Visualizer.dll, read for the cursor images when the running game has
+ // not loaded one of its own (see load_dcs_cursor_templates). Empty: none.
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+index 02a8772..3084736 100644
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -532,6 +532,11 @@ bool read_smooth_cursor(const std::filesystem::path& module_directory) noexcept
+     return read_ofxr_switch(module_directory, L"smooth_cursor", false);
+ }
+ 
++// DCS Control (0082).
++bool read_cursor_follow_mouse(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"cursor_follow_mouse", false);
++}
++
+ std::filesystem::path read_cursor_templates(
+     const std::filesystem::path& module_directory) noexcept {
+     try {
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+index 7f2fa50..3d492c5 100644
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -35,6 +35,7 @@
+ #include "cursor_capture_shader.hpp"
+ #include "cursor_motion_shader.hpp"
+ #include "cursor_region_vertex_shader.hpp"
++#include "cursor_pick_shader.hpp" // DCS Control (0082)
+ #include "cursor_search_shader.hpp"
+ #include "cursor_verify_shader.hpp"
+ // DCS Control (0031): the cockpit mask's resample (cockpit_mask.hlsl), and
+@@ -548,13 +549,16 @@ constexpr UINT kCursorSamplesPerTemplate = 64;
+ constexpr UINT kCursorSampleBase = kD3D12MaxCursorTemplates * kCursorTemplateTexels;
+ constexpr UINT kCursorInfoBase =
+     kCursorSampleBase + kD3D12MaxCursorTemplates * kCursorSamplesPerTemplate;
+-constexpr UINT kCursorTemplateWords = kCursorInfoBase + kD3D12MaxCursorTemplates;
++// DCS Control (0082): then, per template, the mean colour of its opaque
++// texels (smooth_cursor.hlsl, kColourBase).
++constexpr UINT kCursorColourBase = kCursorInfoBase + kD3D12MaxCursorTemplates;
++constexpr UINT kCursorTemplateWords = kCursorColourBase + kD3D12MaxCursorTemplates;
+ constexpr UINT kCursorStateWords = 1024;
+ // The tiles one detection can visit (smooth_cursor.hlsl kMaxListEntries),
+ // each with a candidate per template.
+ constexpr UINT kCursorListEntries = 400;
+ constexpr UINT kCursorStatsBase = 192;
+-constexpr UINT kCursorStatsWords = 13;
++constexpr UINT kCursorStatsWords = 14; // DCS Control (0082): 13 before (kStatPicked)
+ static_assert(kCursorStatsWords * sizeof(std::uint32_t) <= 64U); // one slot's readback region
+ constexpr UINT kCursorTileSize = 32;
+ // (0011) The diagnostic capture's layout (smooth_cursor.hlsl CursorCaptureCS).
+@@ -586,6 +590,8 @@ static_assert(sizeof(CursorParameters) == sizeof(UINT) * 52U);
+ static_assert(offsetof(CursorParameters, mappings) == sizeof(UINT) * 12U);
+ // One table, four root descriptors and the constants.
+ static_assert(1U + 2U * 4U + kCursorConstantCount <= 64U);
++// DCS Control (0082): D3D12SmoothCursorOptions::follow_mouse.
++constexpr UINT kCursorFlagFollowMouse = 64U;
+ constexpr UINT kCursorFlagLinear = 1U;
+ constexpr UINT kCursorFlagPrevious = 2U;
+ constexpr UINT kCursorFlagMouseKnown = 4U;
+@@ -615,9 +621,17 @@ constexpr UINT kCursorFlagFoveatedFocus = 8U;
+ // of the transparent ring around them, weighted 255 and 0 in bits 16-23, and
+ // is matched on that shape (info bit 16). A template with fewer than eight
+ // opaque texels has a count of 0: it is never matched, but lends its shape.
++// DCS Control (0082), `far_ring` (D3D12SmoothCursorOptions::follow_mouse): a
++// single-colour template's ring is taken three texels out instead of right
++// beside its opaque texels. The game draws the cockpit cursor fatter and
++// softer than its image wherever the image is a near surface's or comes from
++// a coarser layer (bars of 7 to 8 pixels for 5): the ring beside the bars
++// then lands on the bar's skirt and the match fails (0.52-0.64 measured on
++// real frames, 0.87-0.92 with the far ring; 0.97 against 0.99 on the sky).
+ [[nodiscard]] std::vector<std::uint32_t> cursor_template_words(
+     const std::vector<D3D12CursorTemplate>& templates,
+-    std::uint32_t* matchable) {
++    std::uint32_t* matchable,
++    bool far_ring = false) {
+     std::vector<std::uint32_t> words(kCursorTemplateWords, 0U);
+     std::uint32_t usable = 0;
+     const std::size_t count = std::min<std::size_t>(
+@@ -634,17 +648,44 @@ constexpr UINT kCursorFlagFoveatedFocus = 8U;
+         };
+         std::vector<std::uint32_t> opaque;
+         std::vector<std::uint32_t> ring;
++        std::vector<std::uint32_t> distant; // (0082) three texels from the nearest opaque one, none nearer
++        std::vector<std::uint32_t> rim;     // (0082) half-transparent, beside an opaque one
++        std::array<std::uint64_t, 3> colour_sum{};
++        const auto opaque_within = [&](int x, int y, int reach) {
++            for (int dy = -reach; dy <= reach; ++dy) {
++                for (int dx = -reach; dx <= reach; ++dx) {
++                    if (alpha(x + dx, y + dy) >= 192U) {
++                        return true;
++                    }
++                }
++            }
++            return false;
++        };
+         for (std::uint32_t texel = 0; texel < kCursorTemplateTexels; ++texel) {
+             const int x = static_cast<int>(texel % kSize);
+             const int y = static_cast<int>(texel / kSize);
+             if (alpha(x, y) >= 192U) {
+                 opaque.push_back(texel);
++                colour_sum[0] += texels[texel] & 0xffU;
++                colour_sum[1] += (texels[texel] >> 8U) & 0xffU;
++                colour_sum[2] += (texels[texel] >> 16U) & 0xffU;
+             } else if (alpha(x, y) == 0U &&
+                        (alpha(x - 1, y) >= 192U || alpha(x + 1, y) >= 192U ||
+                         alpha(x, y - 1) >= 192U || alpha(x, y + 1) >= 192U)) {
+                 ring.push_back(texel);
++            } else if (far_ring && alpha(x, y) == 0U && opaque_within(x, y, 3) && !opaque_within(x, y, 2)) {
++                distant.push_back(texel);
++            } else if (far_ring && alpha(x, y) != 0U &&
++                       (alpha(x - 1, y) >= 192U || alpha(x + 1, y) >= 192U ||
++                        alpha(x, y - 1) >= 192U || alpha(x, y + 1) >= 192U)) {
++                rim.push_back(texel);
+             }
+         }
++        if (!opaque.empty()) {
++            const std::uint64_t n = opaque.size();
++            words[kCursorColourBase + index] = static_cast<std::uint32_t>(
++                (colour_sum[0] / n) | ((colour_sum[1] / n) << 8U) | ((colour_sum[2] / n) << 16U));
++        }
+         const auto spread_out = [](const std::vector<std::uint32_t>& from, std::size_t wanted) {
+             std::vector<std::uint32_t> chosen;
+             wanted = std::min(wanted, from.size());
+@@ -668,6 +709,21 @@ constexpr UINT kCursorFlagFoveatedFocus = 8U;
+         const bool contrast = inner.size() >= 8U &&
+             sum_squares - n * mean * mean >= n * 4.0e-3F;
+         const bool shape = !contrast && opaque.size() >= 8U && ring.size() >= 8U;
++        // (0082) The far ring cannot tell the sprite's size: a template steps
++        // too small, laid inside a cross, has its ring on the background as
++        // the right one has (0.99 at step 2.0 for a cross of step 2.52: the
++        // redraw then moved a cross with its arms cut short). The image's
++        // own half-transparent rim texels (the yellow cross's dark end caps)
++        // are what lies right beyond the sprite: up to eight of them are
++        // sampled too, marked with weight 1. They take no part in the match
++        // (as ring samples they cost a soft cross 0.1 of its score); they
++        // say whether the template is too small: then they lie on the sprite
++        // (smooth_cursor.hlsl, follow_score's `undersize`).
++        std::size_t rim_samples = 0;
++        if (shape && distant.size() >= 8U) {
++            ring = distant;
++            rim_samples = std::min<std::size_t>(rim.size(), 8U);
++        }
+         // (texel, weight) pairs in raster order, then the even ones first.
+         std::vector<std::pair<std::uint32_t, std::uint32_t>> chosen;
+         if (contrast) {
+@@ -678,6 +734,9 @@ constexpr UINT kCursorFlagFoveatedFocus = 8U;
+             for (const std::uint32_t texel : spread_out(opaque, 40U)) {
+                 chosen.emplace_back(texel, 255U);
+             }
++            for (const std::uint32_t texel : spread_out(rim, rim_samples)) {
++                chosen.emplace_back(texel, 1U);
++            }
+             for (const std::uint32_t texel :
+                  spread_out(ring, kCursorSamplesPerTemplate - chosen.size())) {
+                 chosen.emplace_back(texel, 0U);
+@@ -779,6 +838,17 @@ void write_cursor_capture_files(
+                     static_cast<std::int32_t>(entry[2]), entry[3], entry[4], score, second, entry[9]);
+                 text += line;
+             }
++            if ((words[5] & 64U) != 0U) { // DCS Control (0082): the gate's record
++                float record[12]{};
++                float fat = 0.0F;
++                std::memcpy(&fat, words + 12, sizeof(fat));
++                std::memcpy(record, words + 52, sizeof(record));
++                std::snprintf(line, sizeof(line),
++                    "record: redraw %u from %.1f,%.1f to %.1f,%.1f scale %.3f %.3f colour %.3f %.3f %.3f held %.2f\n",
++                    words[52], record[1], record[2], record[3], record[4], record[7], record[8],
++                    record[9], record[10], record[11], fat);
++                text += line;
++            }
+             HANDLE handle = CreateFileW((directory / (stem + L"-info.txt")).c_str(),
+                 GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+             if (handle != INVALID_HANDLE_VALUE) {
+@@ -2043,6 +2113,8 @@ struct D3D12FrameSynthesizer::Impl {
+     ComPtr<ID3D12PipelineState> cursor_composite_pipeline;
+     bool cursor_enabled{};
+     UINT cursor_template_count{};
++    bool cursor_follow_mouse{}; // DCS Control (0082)
++    ComPtr<ID3D12PipelineState> cursor_pick_pipeline;
+     UINT cursor_tiles_x{};
+     UINT cursor_tiles_y{};
+     std::uint32_t cursor_active_milliseconds{5000};
+@@ -3340,6 +3412,10 @@ struct D3D12FrameSynthesizer::Impl {
+             result = pipeline(g_xrfg_cursor_verify_shader,
+                 sizeof(g_xrfg_cursor_verify_shader), &cursor_verify_pipeline);
+         }
++        if (SUCCEEDED(result)) { // DCS Control (0082)
++            result = pipeline(g_xrfg_cursor_pick_shader,
++                sizeof(g_xrfg_cursor_pick_shader), &cursor_pick_pipeline);
++        }
+         if (SUCCEEDED(result)) {
+             result = pipeline(g_xrfg_cursor_gate_shader,
+                 sizeof(g_xrfg_cursor_gate_shader), &cursor_gate_pipeline);
+@@ -3440,7 +3516,7 @@ struct D3D12FrameSynthesizer::Impl {
+         try {
+             std::uint32_t matchable = 0;
+             const std::vector<std::uint32_t> words =
+-                cursor_template_words(options.templates, &matchable);
++                cursor_template_words(options.templates, &matchable, options.follow_mouse);
+             const UINT node_mask = queue->GetDesc().NodeMask;
+             HRESULT result = create_cursor_pipelines(node_mask);
+             if (FAILED(result)) {
+@@ -3559,6 +3635,7 @@ struct D3D12FrameSynthesizer::Impl {
+             cursor_tiles_y = tiles_y;
+             cursor_template_count = static_cast<UINT>(options.templates.size());
+             cursor_active_milliseconds = options.active_milliseconds;
++            cursor_follow_mouse = options.follow_mouse; // DCS Control (0082)
+             cursor_stats = {};
+             cursor_stats.templates = cursor_template_count;
+             cursor_stats.matchable_templates = matchable;
+@@ -4189,7 +4266,8 @@ struct D3D12FrameSynthesizer::Impl {
+                                 std::array<float, 2> mouse) {
+             parameters.entry_index = entry;
+             parameters.track_index = track;
+-            parameters.flags = base_flags | (previous ? kCursorFlagPrevious : 0U);
++            parameters.flags = base_flags | (previous ? kCursorFlagPrevious : 0U) |
++                (cursor_follow_mouse ? kCursorFlagFollowMouse : 0U); // DCS Control (0082)
+             parameters.mouse_delta = mouse;
+             list->SetComputeRoot32BitConstants(5, kCursorConstantCount, &parameters, 0);
+             list->SetPipelineState(cursor_begin_pipeline.Get());
+@@ -4206,6 +4284,12 @@ struct D3D12FrameSynthesizer::Impl {
+             list->ExecuteIndirect(cursor_dispatch_signature.Get(), 1,
+                 cursor_arguments.Get(), sizeof(D3D12_DISPATCH_ARGUMENTS), nullptr, 0);
+             list->ResourceBarrier(static_cast<UINT>(from_arguments.size()), from_arguments.data());
++            // DCS Control (0082): which candidate the verification takes.
++            if (cursor_follow_mouse) {
++                list->SetPipelineState(cursor_pick_pipeline.Get());
++                list->Dispatch(1, 1, view_count);
++                list->ResourceBarrier(static_cast<UINT>(uav.size()), uav.data());
++            }
+             list->SetPipelineState(cursor_verify_pipeline.Get());
+             list->Dispatch(1, 1, view_count);
+             list->ResourceBarrier(static_cast<UINT>(uav.size()), uav.data());
+@@ -4219,7 +4303,7 @@ struct D3D12FrameSynthesizer::Impl {
+             cursor_plan.mouse_delta);
+         parameters.entry_index = cursor_plan.current_entry;
+         parameters.track_index = cursor_plan.previous_entry;
+-        parameters.flags = base_flags;
++        parameters.flags = base_flags | (cursor_follow_mouse ? kCursorFlagFollowMouse : 0U); // 0082: the gate too
+         parameters.mouse_delta = cursor_plan.mouse_delta;
+         list->SetComputeRoot32BitConstants(5, kCursorConstantCount, &parameters, 0);
+         list->SetPipelineState(cursor_gate_pipeline.Get());
+@@ -4302,6 +4386,7 @@ struct D3D12FrameSynthesizer::Impl {
+                 cursor_stats.weak_score_milli = values[10];
+                 cursor_stats.weak_scale_steps = values[11];
+                 cursor_stats.last_weak = values[12];
++                cursor_stats.picked = values[13]; // DCS Control (0082)
+             }
+         }
+         slot.cursor_order = 0;
+@@ -4410,6 +4495,15 @@ struct D3D12FrameSynthesizer::Impl {
+             bridge_flight_logger().event(BridgeFlightOperation::smooth_cursor, 3,
+                 score_sum / weak, step_sum * 100U / weak, c.last_weak);
+         }
++        // DCS Control (0082): result=7, once a second while it acts: a= the
++        // frame-views where the candidate that moves with the mouse was not
++        // the one with the best score (`[ofxr] cursor_follow_mouse`), b= the
++        // pairs the gate judged | drew << 16 in the same second.
++        if (cursor_follow_mouse && c.picked != l.picked) {
++            bridge_flight_logger().event(BridgeFlightOperation::smooth_cursor, 7,
++                static_cast<std::uint64_t>(c.picked - l.picked),
++                field(c.pairs, l.pairs) | (field(c.drawn, l.drawn) << 16U), 0);
++        }
+         cursor_logged = cursor_stats;
+     }
+     // ---------------------------------------------------------------------
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+index e82dee3..da7d69f 100644
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -1451,7 +1451,9 @@ struct CursorComposite {
+     CursorPlacement previous;
+     CursorPlacement current;
+     uint valid;
+-    uint3 padding;
++    // DCS Control (0082): the sprite's colour in the current frame, or zero
++    // (see cursor_soft).
++    float3 reference;
+ };
+ 
+ CursorComposite load_cursor_composite(uint view) {
+@@ -1467,6 +1469,7 @@ CursorComposite load_cursor_composite(uint view) {
+     output.current.template_index = second.z;
+     output.previous.scale = max(asfloat(second.w), 0.25);
+     output.current.scale = max(asfloat(last), 0.25);
++    output.reference = asfloat(CursorState.Load3(record + 36u));
+     return output;
+ }
+ 
+@@ -1504,26 +1507,152 @@ bool cursor_covers(CursorPlacement cursor, float2 coordinate) {
+     return coverage > 0.0;
+ }
+ 
++// DCS Control (0082), `[ofxr] cursor_follow_mouse` (the gate then gives the
++// sprite's colour as the current frame holds it; zero without the key, and
++// everything below is as before). The game draws the cockpit cursor fatter
++// and softer than its image wherever it lies on a near surface or comes from
++// a coarser layer: bars of 7 to 8 pixels for the template's 5, with a soft
++// rim. Taken out and redrawn by the template's texels alone, the rim stayed
++// behind at both real places and the redrawn cursor was a thinner one
++// (measured on real frames: 140 wrong pixels a pair for a cursor of 460).
++// So, further out than the template's texels (half a texel more), a pixel
++// that has the sprite's colour belongs to the sprite, by as much as it has
++// it: its chromaticity within 0.12 of the sprite's in full, none from 0.36,
++// times its brightness against half the sprite's. The template's own texels
++// count as before whatever their colour (the cross's dark end caps).
++bool cursor_soft(CursorComposite cursor) {
++    return cursor.reference.r + cursor.reference.g + cursor.reference.b > 0.0;
++}
++
++float cursor_likeness(float3 colour, float3 reference) {
++    float3 chroma = colour / max(colour.r + colour.g + colour.b, 1.0e-4);
++    float3 wanted = reference / max(reference.r + reference.g + reference.b, 1.0e-4);
++    float3 apart = abs(chroma - wanted);
++    float hue = saturate(1.0 - (apart.r + apart.g + apart.b - 0.12) / 0.24);
++    float level = dot(colour, float3(0.2126, 0.7152, 0.0722)) /
++        max(0.5 * dot(reference, float3(0.2126, 0.7152, 0.0722)), 1.0e-4);
++    return hue * saturate(level);
++}
++
++// As cursor_covers, further out and finer: whether a texel of the template
++// lies within the soft reach of `coordinate`, and the way to the nearest one
++// (`toward`, pixels; zero on the template itself). The reach is two and a
++// half texels: in the periphery part of a composed image the cross's bars are
++// 15 pixels wide where the template's are 6 (measured, real frames), and a
++// matte half a texel wide left the rest behind at both real places with a
++// dark moat between (more wrong pixels than the flow alone left).
++static const float kCursorSoftReach = 2.5;
++
++bool cursor_reaches(CursorPlacement cursor, float2 coordinate, out float2 toward) {
++    toward = float2(0.0, 0.0);
++    float2 relative = coordinate - cursor.position;
++    float side = float(kCursorTemplateSize) * cursor.scale;
++    float reach = 1.5 + kCursorSoftReach * cursor.scale;
++    float nearest = 1.0e9;
++    [branch] if (all(relative >= float2(-reach - 0.5, -reach - 0.5)) &&
++        all(relative <= float2(side + reach + 0.5, side + reach + 0.5))) {
++        [unroll] for (int dy = -3; dy <= 3; ++dy) {
++            [unroll] for (int dx = -3; dx <= 3; ++dx) {
++                float2 offset = float2(float(dx), float(dy)) * (reach / 3.0);
++                float apart = dot(offset, offset);
++                if (apart < nearest && cursor_texel_alpha(
++                        cursor.template_index, cursor_texel(cursor, coordinate + offset)) > 0.0) {
++                    nearest = apart;
++                    toward = offset;
++                }
++            }
++        }
++    }
++    return nearest < 1.0e8;
++}
++
++// How much a difference between the two frames at one place is the sprite's
++// colour: the sprite's faint rim over a dark panel has the panel's hue, not
++// the sprite's, but what it adds to the other frame's pixel has (full from
++// 12 % of the sprite's brightness: linear values, a fifth of that is plain
++// to see).
++float cursor_tint(float3 difference, float3 reference) {
++    float3 added = max(difference, float3(0.0, 0.0, 0.0));
++    float3 chroma = added / max(added.r + added.g + added.b, 1.0e-5);
++    float3 wanted = reference / max(reference.r + reference.g + reference.b, 1.0e-4);
++    float3 apart = abs(chroma - wanted);
++    float hue = saturate(1.0 - (apart.r + apart.g + apart.b - 0.12) / 0.24);
++    float level = dot(added, float3(0.2126, 0.7152, 0.0722)) /
++        max(0.12 * dot(reference, float3(0.2126, 0.7152, 0.0722)), 1.0e-5);
++    return hue * saturate(level);
++}
++
++// How much a pixel beyond the template's texels belongs to the sprite: it has
++// the sprite's colour, or has it more than the other frame's pixel there, and
++// the pixel half way to the template has it (a thing of the same colour that
++// only lies near the cursor does not join it). `other`: the other frame's
++// pixel at the place.
++float cursor_soft_amount(CursorComposite cursor, CursorPlacement placement, float2 coordinate,
++    float3 colour, float3 other, bool previous) {
++    float2 toward = float2(0.0, 0.0);
++    float amount = max(cursor_likeness(colour, cursor.reference),
++        cursor_tint(colour - other, cursor.reference));
++    bool hit = false;
++    // (Nested: && evaluates both sides, and the probes are the cost.)
++    [branch] if (amount > 0.02) {
++        [branch] if (cursor_reaches(placement, coordinate, toward)) {
++            float2 between = coordinate + 0.5 * toward;
++            float3 middle = colour;
++            [branch] if (previous) {
++                middle = bilinear_previous_source(between, Slice).rgb;
++            } else {
++                middle = bilinear_current_source(between, Slice).rgb;
++            }
++            hit = cursor_likeness(middle, cursor.reference) > 0.3;
++        }
++    }
++    return hit ? amount : 0.0;
++}
++
++void cursor_pair_hits(
++    CursorComposite cursor,
++    float2 previous_source,
++    float2 current_coordinate,
++    float4 previous_colour,
++    float4 current_colour,
++    out bool previous_hit,
++    out bool current_hit) {
++    previous_hit = cursor_covers(cursor.previous, previous_source);
++    current_hit = cursor_covers(cursor.current, current_coordinate);
++    [branch] if (cursor_soft(cursor)) { // DCS Control (0082)
++        previous_hit = previous_hit || cursor_soft_amount(cursor, cursor.previous, previous_source,
++            previous_colour.rgb, current_colour.rgb, true) > 0.3;
++        current_hit = current_hit || cursor_soft_amount(cursor, cursor.current, current_coordinate,
++            current_colour.rgb, previous_colour.rgb, false) > 0.3;
++    }
++}
++
+ // A pair of samples with the cursor taken out: where one frame's sample lands
+ // on that frame's cursor and the other's does not, both use the other's.
+ // Where both land on a cursor they are left (the redraw covers that overlap:
+-// it lies between the two positions). The previous sample is named in the
+-// previous frame's own coordinates.
+-void cursor_clean_pair(
++// it lies between the two positions; with the key, see cursor_fill). The
++// previous sample is named in the previous frame's own coordinates. Returns
++// whether both landed on a cursor.
++bool cursor_clean_pair(
+     CursorComposite cursor,
+     float2 previous_source,
+     float2 current_coordinate,
+     inout float4 previous_colour,
+     inout float4 current_colour) {
++    bool both = false;
+     if (cursor.valid != 0u) {
+-        bool previous_hit = cursor_covers(cursor.previous, previous_source);
+-        bool current_hit = cursor_covers(cursor.current, current_coordinate);
++        bool previous_hit = false;
++        bool current_hit = false;
++        cursor_pair_hits(cursor, previous_source, current_coordinate, previous_colour, current_colour,
++            previous_hit, current_hit);
+         if (previous_hit && !current_hit) {
+             previous_colour = current_colour;
+         } else if (current_hit && !previous_hit) {
+             current_colour = previous_colour;
+         }
++        both = previous_hit && current_hit;
+     }
++    return both;
+ }
+ 
+ // The pixels the cursor pass redraws: both real frames' template boxes (the
+@@ -1589,6 +1718,34 @@ float4 cursor_draw(CursorComposite cursor, float2 pixel, float4 colour) {
+             cursor.current.template_index, cursor_texel(cursor.current, source));
+         bool inside = all(source >= float2(0.0, 0.0)) &&
+             source.x < float(Width) && source.y < float(Height);
++        // DCS Control (0082): the sprite's soft rim (see cursor_soft).
++        // The template's own texels in full, the half-transparent ones too:
++        // in the frame the cross's end caps are as solid as its bars.
++        [branch] if (cursor_soft(cursor) && inside && alpha < 1.0) {
++            if (alpha > 0.0) {
++                alpha = 1.0;
++            } else if (cursor_covers(cursor.current, source)) {
++                // The pixel and a half around the template's texels that is
++                // taken out of both frames: the cross's dark outline lies
++                // there, and it travels with the cross. Where the previous
++                // frame shows the same there without its cursor, there is no
++                // outline, and what is behind stays where it is.
++                MappedCoordinate earlier = map_target_to_source(source, PreviousMappings[ViewIndex]);
++                alpha = 1.0;
++                [branch] if (earlier.valid >= 0.5 && !cursor_covers(cursor.previous, earlier.coordinate)) {
++                    float3 apart = abs(CurrentFrame.Load(int4(int2(source), int(Slice), 0)).rgb -
++                        bilinear_previous_source(earlier.coordinate, Slice).rgb);
++                    alpha = saturate((max(apart.r, max(apart.g, apart.b)) - 0.01) / 0.02);
++                }
++            } else {
++                float3 seen = CurrentFrame.Load(int4(int2(source), int(Slice), 0)).rgb;
++                // Its faint rim too: the frame's own pixel in full from a
++                // quarter of the sprite's share (what lies behind is still;
++                // a rim blended a second time came out as a dark line).
++                alpha = saturate(4.0 * cursor_soft_amount(cursor, cursor.current, source, seen,
++                    sample_previous_target(source, Slice, ViewIndex).color.rgb, false));
++            }
++        }
+         if (alpha > 0.0 && inside) {
+             output = saturate(lerp(
+                 output,
+@@ -2063,6 +2220,44 @@ FullscreenVertex CursorRegionVS(uint vertex_id : SV_VertexID) {
+     return output;
+ }
+ 
++// DCS Control (0082), with the key only: a pixel both real frames hold the
++// cursor at (one frame's upright bar across the other's level one), which the
++// redrawn cursor between them does not cover: neither frame shows what is
++// behind. Taken from the nearest pixels around that at least one frame shows
++// without its cursor: eight directions, further out until one is free, the
++// mean of the free ones (measured on real frames: about 15 pixels a pair that
++// kept the cursor's colour beside the redrawn cross).
++float4 cursor_fill(CursorComposite cursor, float2 pixel, float4 fallback) {
++    static const float2 directions[8] = {
++        float2(1.0, 0.0), float2(-1.0, 0.0), float2(0.0, 1.0), float2(0.0, -1.0),
++        float2(0.7071, 0.7071), float2(-0.7071, -0.7071), float2(0.7071, -0.7071), float2(-0.7071, 0.7071)};
++    float stride = 1.0 + cursor.current.scale;
++    float4 sum = float4(0.0, 0.0, 0.0, 0.0);
++    float found = 0.0;
++    [loop] for (uint ring = 1u; ring <= 6u && found == 0.0; ++ring) {
++        [loop] for (uint direction = 0u; direction < 8u; ++direction) {
++            float2 at = pixel + round(directions[direction] * stride * float(ring));
++            MappedCoordinate mapped = map_target_to_source(at, PreviousMappings[ViewIndex]);
++            CameraSample current = sample_current_target(at, Slice, ViewIndex);
++            [branch] if (mapped.valid >= 0.5 && current.valid >= 0.5) {
++                float4 previous_colour = sample_previous_target(at, Slice, ViewIndex).color;
++                float4 current_colour = current.color;
++                bool previous_hit = false;
++                bool current_hit = false;
++                cursor_pair_hits(cursor, mapped.coordinate, at, previous_colour, current_colour,
++                    previous_hit, current_hit);
++                if (!(previous_hit && current_hit)) {
++                    sum += previous_hit ? current_colour
++                        : (current_hit ? previous_colour
++                            : lerp(previous_colour, current_colour, synthesis_fraction()));
++                    found += 1.0;
++                }
++            }
++        }
++    }
++    return found > 0.0 ? saturate(sum / found) : fallback;
++}
++
+ float4 CursorCompositePS(FullscreenVertex input) : SV_Target {
+     uint2 integer_pixel = uint2(input.position.xy);
+     float2 pixel = float2(integer_pixel);
+@@ -2074,9 +2269,12 @@ float4 CursorCompositePS(FullscreenVertex input) : SV_Target {
+     if (previous_coverage.valid >= 0.5) {
+         float4 previous_colour = sample_previous_target(pixel, Slice, ViewIndex).color;
+         float4 current_colour = current.color;
+-        cursor_clean_pair(cursor, previous_coverage.coordinate, pixel,
++        bool both = cursor_clean_pair(cursor, previous_coverage.coordinate, pixel,
+             previous_colour, current_colour);
+         output_color = saturate(lerp(previous_colour, current_colour, synthesis_fraction()));
++        [branch] if (both && cursor_soft(cursor)) { // DCS Control (0082)
++            output_color = cursor_fill(cursor, pixel, output_color);
++        }
+     }
+     return foveated_alpha(input.position.xy, cursor_draw(cursor, pixel, output_color));
+ }
+diff --git a/src/d3d12/smooth_cursor.hlsl b/src/d3d12/smooth_cursor.hlsl
+index fd1d2eb..7a0a028 100644
+--- a/src/d3d12/smooth_cursor.hlsl
++++ b/src/d3d12/smooth_cursor.hlsl
+@@ -36,6 +36,10 @@
+ // synthesis reads, and the running counters are copied to a readback buffer
+ // that is read when the work slot is reused.
+ 
++// DCS Control (0082): the verification's 1024 threads with follow_score are
++// past the compiler's register guideline (X4714, a performance note).
++#pragma warning(disable: 4714)
++
+ Texture2DArray<float4> PreviousFrame : register(t0);
+ Texture2DArray<float4> CurrentFrame : register(t1);
+ StructuredBuffer<uint> CursorTemplates : register(t2);
+@@ -85,6 +89,9 @@ static const uint kSamplesPerTemplate = 64;
+ static const uint kCoarseSamples = 32;
+ static const uint kSampleBase = kMaxTemplates * kTemplateTexels;
+ static const uint kInfoBase = kSampleBase + kMaxTemplates * kSamplesPerTemplate;
++// DCS Control (0082): per template, the mean colour of its opaque texels
++// (bytes, red low), for follow_score.
++static const uint kColourBase = kInfoBase + kMaxTemplates;
+ 
+ static const uint kEntryStride = 32;
+ static const uint kEntryStatus = 0;
+@@ -102,6 +109,26 @@ static const uint kEntryWindowY0 = 11;
+ static const uint kEntryWindowX1 = 12;
+ static const uint kEntryWindowY1 = 13;
+ static const uint kEntryOverflow = 14;
++// DCS Control (0082): where the cursor is expected in this frame (the last
++// match moved as the mouse moved), for CursorPickCS; valid when kEntryExpected
++// is not 0.
++static const uint kEntryExpectedX = 15;
++static const uint kEntryExpectedY = 16;
++static const uint kEntryExpected = 17;
++// DCS Control (0082): the mean colour the frame holds under a single-colour
++// template's opaque samples at the match (three floats; CursorVerifyCS), for
++// the redraw's soft edge (the gate copies it into its record, words 9-11).
++static const uint kEntryColour = 18;
++// DCS Control (0082): the match's size as the refinement measured it, as a
++// scale (a float; 0: the step's own). Between two steps for a sprite that is
++// (the cockpit cross in a focus layer's image: 3.0, steps 2.52 and 3.17).
++static const uint kEntryFine = 21;
++// DCS Control (0082): how much of the match the other frame of the pair holds
++// at the same place (a float, 0 to 1): the share of the image's opaque
++// samples where the other frame's pixel has the sprite's colour too. High:
++// the sprite hardly left its place (see CursorGateCS, left_to_flow).
++static const uint kEntryHeld = 22;
++static const float kHeldByFlow = 0.6;
+ 
+ static const uint kStatusNone = 0;
+ static const uint kStatusFound = 1;
+@@ -113,7 +140,25 @@ static const uint kModeTrack = 1;
+ static const uint kModeAcquire = 2;
+ 
+ static const uint kLearnBase = 128;     // per view: gain x, gain y, known, refusals (0042)
++// DCS Control (0082), with the key, words 4-7 of a view's eight: the mouse's
++// and the match's movement summed over the accepted pairs since the gain was
++// last learned from them (x, y each), for a mouse that moves a pixel or two a
++// frame (CursorGateCS).
+ static const uint kStereoBase = 144;    // learned vertical offset, known
++// DCS Control (0082), with the key, per view, 6 (CursorGateCS writes them):
++// how many more refused pairs the last accepted match stays "where the
++// cursor is"; how far the mouse has travelled while the match stood still;
++// where the cursor is believed to be (the last accepted match, moved on by
++// the mouse through the learned gain while pairs are refused: the tracking
++// follows the mouse, not whatever was matched last), x and y; a spare; and
++// its scale step.
++static const uint kConfirmBase = 146;
++static const uint kConfirmStride = 6;
++static const uint kConfirmPairs = 8;
++// ... and per view, 4: the tiles listed for each of the first four templates'
++// colour (CursorMotionCS).
++static const uint kHotClassBase = 240;
++static const uint kMaxClassTiles = 16;
+ static const uint kCompositeBase = 160; // per view, 16
+ // Foveated layers, round 4: per view, 16: the gate's record as tangents
+ // (written only with Flags bit 3, read only by CursorImportCS).
+@@ -135,6 +180,9 @@ static const uint kStatTracked = 9;
+ static const uint kStatScoreSum = 10;
+ static const uint kStatScaleSum = 11;
+ static const uint kStatLastWeak = 12;
++// DCS Control (0082): frame-views where CursorPickCS chose another candidate
++// than the search's best score.
++static const uint kStatPicked = 13;
+ // The tiles the search visits: (view << 16) | tile.
+ static const uint kListCount = 256;
+ static const uint kListEntries = 260;
+@@ -160,6 +208,13 @@ static const float kAcceptScore = 0.72;
+ static const float kAcceptMargin = 0.15;
+ static const float kTrackScore = 0.6;
+ static const float kCandidateScore = 0.3;
++// DCS Control (0082), with the key: what a larger scale step is preferred by
++// when two score alike, per step, in the search (CursorSearchCS) and in the
++// refinement on every sample (CursorVerifyCS).
++static const float kStepBias = 0.012;
++static const float kRefineStepBias = 0.03;
++// ... and what a step loses whose rim samples lie wholly on the sprite.
++static const float kUndersize = 0.3;
+ 
+ #define ViewCount (ViewInfo & 0xffu)
+ 
+@@ -277,12 +332,24 @@ float luma(float3 colour) {
+     return dot(colour, float3(0.2126, 0.7152, 0.0722));
+ }
+ 
++// DCS Control (0082): one pixel of either frame of the pair.
++float4 frame_colour(int2 pixel, uint slice, bool previous) {
++    float4 colour;
++    if (previous) {
++        colour = PreviousFrame.Load(int4(pixel, int(slice), 0));
++    } else {
++        colour = CurrentFrame.Load(int4(pixel, int(slice), 0));
++    }
++    return colour;
++}
++
++float cursor_scale(uint index) {
++    return kScales[min(index, kScaleCount - 1u)];
++}
++
+ float frame_luma(int2 pixel, uint slice) {
+     int2 bounded = clamp(pixel, int2(0, 0), int2(int(Width) - 1, int(Height) - 1));
+-    float4 colour = detecting_previous()
+-        ? PreviousFrame.Load(int4(bounded, int(slice), 0))
+-        : CurrentFrame.Load(int4(bounded, int(slice), 0));
+-    return luma(colour.rgb);
++    return luma(frame_colour(bounded, slice, detecting_previous()).rgb);
+ }
+ 
+ // The frame this pass searches against the other one brought into its
+@@ -364,6 +431,8 @@ groupshared float gs_score[1024];
+ groupshared uint gs_position[1024];
+ groupshared uint gs_meta[1024];
+ groupshared uint gs_flag;
++groupshared uint gs_class[4]; // DCS Control (0082), CursorMotionCS
++groupshared float gs_raw[128]; // DCS Control (0082), CursorVerifyCS: the refinement's own scores
+ groupshared uint gs_shape;
+ groupshared uint gs_mode;
+ groupshared uint gs_view;
+@@ -504,6 +573,24 @@ void append_tile(uint view, uint tile) {
+     }
+ }
+ 
++// The mean colour of a template's opaque texels (cursor_template_words), as
++// the frames are read.
++float3 template_mean_colour(uint template_index) {
++    uint rgba = CursorTemplates[kColourBase + min(template_index, kMaxTemplates - 1u)];
++    float3 colour = float3(
++        float(rgba & 0xffu),
++        float((rgba >> 8) & 0xffu),
++        float((rgba >> 16) & 0xffu)) / 255.0;
++    if ((Flags & 1u) != 0u) {
++        colour = float3(srgb_to_linear(colour.r), srgb_to_linear(colour.g), srgb_to_linear(colour.b));
++    }
++    return colour;
++}
++
++float3 chromaticity(float3 colour) {
++    return colour / max(colour.r + colour.g + colour.b, 1.0e-4);
++}
++
+ [numthreads(1, 1, 1)]
+ void CursorBeginCS() {
+     CursorState[kListCount] = 0u;
+@@ -516,19 +603,41 @@ void CursorBeginCS() {
+         CursorState[entry + kEntryOverflow] = 0u;
+         CursorState[entry + kEntryScore] = asuint(0.0);
+         CursorState[entry + kEntrySecond] = asuint(0.0);
++        CursorState[entry + kEntryExpected] = 0u; // DCS Control (0082)
+         uint mode = kModeAcquire;
+         float4 rect = view_rect(view);
+         int2 rect_min = int2(rect.xy);
+         int2 window_min = rect_min;
+         int2 window_max = int2(rect.xy + rect.zw);
++        // DCS Control (0082), Flags bit 6: a view whose cursor the gate
++        // accepted lately is tracked from where the cursor is believed to
++        // be, whatever the other frame's detection held.
++        bool believed = false;
++        uint left = 0u;
++        [branch] if ((Flags & 64u) != 0u) {
++            uint confirm = kConfirmBase + view * kConfirmStride;
++            left = CursorState[confirm];
++            believed = left != 0u && TrackIndex < 2u;
++            for (uint hot_class = 0; hot_class < 4u; ++hot_class) {
++                CursorState[kHotClassBase + view * 4u + hot_class] = 0u;
++            }
++        }
+         if (TrackIndex < 2u) {
+             uint other = entry_base(TrackIndex, view);
+-            if (CursorState[other + kEntryStatus] == kStatusFound &&
+-                asfloat(CursorState[other + kEntryScore]) >= kTrackScore) {
++            // (0082: with the key a match the gate has not accepted is tracked
++            // from only at the gate's own bar; a weaker one - a wrong step, a
++            // look-alike - kept the search at its place and its step.)
++            float track_score = (Flags & 64u) != 0u ? kAcceptScore : kTrackScore;
++            if (believed || (CursorState[other + kEntryStatus] == kStatusFound &&
++                asfloat(CursorState[other + kEntryScore]) >= track_score)) {
+                 mode = kModeTrack;
+                 float2 centre = float2(
+                     float(asint(CursorState[other + kEntryX])),
+                     float(asint(CursorState[other + kEntryY])));
++                if (believed) {
++                    uint confirm = kConfirmBase + view * kConfirmStride;
++                    centre = float2(asfloat(CursorState[confirm + 2u]), asfloat(CursorState[confirm + 3u]));
++                }
+                 // Only the frames' own image rectangles differ between the
+                 // two (double-wide views); the cursor is view-locked.
+                 float4 other_rect = detecting_previous()
+@@ -547,16 +656,32 @@ void CursorBeginCS() {
+                 }
+                 float radius = 72.0;
+                 uint learn = kLearnBase + view * 8u;
+-                if ((Flags & 4u) != 0u && CursorState[learn + 2u] != 0u) {
++                // (0082: the believed place is the current frame's of the
++                // last pair; a pass over the previous frame adds nothing.)
++                if ((Flags & 4u) != 0u && CursorState[learn + 2u] != 0u && !(believed && detecting_previous())) {
+                     float2 predicted = MouseDelta * float2(
+                         asfloat(CursorState[learn]), asfloat(CursorState[learn + 1u]));
+                     centre += predicted;
+                     radius = 24.0 + 0.35 * length(predicted);
+                 }
++                if (believed) {
++                    // Less sure with every refused pair since.
++                    radius += 6.0 * float(kConfirmPairs - min(left, kConfirmPairs));
++                }
+                 radius = min(radius, 192.0);
++                // DCS Control (0082): for CursorPickCS.
++                CursorState[entry + kEntryExpectedX] = asuint(centre.x);
++                CursorState[entry + kEntryExpectedY] = asuint(centre.y);
++                // ... of a track the gate accepted lately. Without that the
++                // place of the last match is no evidence: a look-alike taken
++                // once would be preferred to the cursor for good (measured:
++                // a scene detail at 0.61-0.66 held against the cross at 0.95).
++                CursorState[entry + kEntryExpected] = believed ? 1u : 0u;
+                 window_min = max(window_min, int2(floor(centre - radius)));
+                 window_max = min(window_max, int2(ceil(centre + radius)) + 1);
+-                CursorState[entry + kEntryScale] = CursorState[other + kEntryScale];
++                CursorState[entry + kEntryScale] = believed
++                    ? CursorState[kConfirmBase + view * kConfirmStride + 5u]
++                    : CursorState[other + kEntryScale];
+                 // The tiles of candidate positions the window touches.
+                 if (all(window_max > window_min)) {
+                     uint2 first = uint2(window_min - rect_min) / 32u;
+@@ -569,7 +694,11 @@ void CursorBeginCS() {
+                 }
+             }
+         }
+-        acquiring = acquiring || mode == kModeAcquire;
++        // DCS Control (0082), Flags bit 6: the motion pass runs for a
++        // tracked view too, unless the cursor's place is believed: what
++        // moved elsewhere in the frame is then a candidate beside what
++        // stands in the window (see CursorPickCS).
++        acquiring = acquiring || mode == kModeAcquire || ((Flags & 64u) != 0u && !believed);
+         CursorState[entry + kEntryMode] = mode;
+         CursorState[entry + kEntryWindowX0] = asuint(window_min.x);
+         CursorState[entry + kEntryWindowY0] = asuint(window_min.y);
+@@ -597,9 +726,15 @@ void CursorMotionCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+     int2 tile_origin = int2(rect.xy) + int2(group_id.xy) * 32;
+     if (thread_index == 0u) {
+         bool wanted = group_id.z < ViewCount && all(tile_origin < rect_max) &&
+-            CursorState[entry + kEntryMode] == kModeAcquire;
++            (CursorState[entry + kEntryMode] == kModeAcquire ||
++             ((Flags & 64u) != 0u && CursorState[entry + kEntryMode] == kModeTrack &&
++              CursorState[entry + kEntryExpected] == 0u)); // 0082
+         gs_mode = wanted ? kModeAcquire : kModeOff;
+         gs_flag = 0u;
++        gs_class[0] = 0u;
++        gs_class[1] = 0u;
++        gs_class[2] = 0u;
++        gs_class[3] = 0u;
+     }
+     GroupMemoryBarrierWithGroupSync();
+     if (gs_mode == kModeOff) {
+@@ -611,17 +746,52 @@ void CursorMotionCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+         int2 p = tile_origin + int2(int(s % 16u), int(s / 16u)) * 4;
+         if (all(p < rect_max) && temporal_difference(p, view) > kHotDifference) {
+             ++local;
++            // DCS Control (0082), Flags bit 6: what changed here has the
++            // colour of one of the first four templates, if single-coloured.
++            [branch] if ((Flags & 64u) != 0u) {
++                float3 here = chromaticity(frame_colour(p, view_slice(view), detecting_previous()).rgb);
++                for (uint k = 0; k < min(TemplateCount, 4u); ++k) {
++                    float3 apart = abs(here - chromaticity(template_mean_colour(k)));
++                    if (template_is_shape(k) && apart.r + apart.g + apart.b <= 0.3) {
++                        InterlockedAdd(gs_class[k], 1u);
++                    }
++                }
++            }
+         }
+     }
+     InterlockedAdd(gs_flag, local);
+     GroupMemoryBarrierWithGroupSync();
+     if (thread_index == 0u && gs_flag >= kHotSamples) {
+-        uint order = kMaxHotTiles;
+-        InterlockedAdd(CursorState[entry + kEntryHot], 1u, order);
+-        if (order < kMaxHotTiles) {
+-            append_tile(view, group_id.y * TilesX + group_id.x);
++        // DCS Control (0082). At most kMaxHotTiles tiles are searched, and
++        // which of the tiles that changed is a matter of dispatch order:
++        // over terrain that moves past, and beside a HUD, the cursor's own
++        // tile was often not among them, and the search then took the best
++        // of what was. A tile where something of a single-colour template's
++        // own colour changed is listed apart, under that colour's own limit:
++        // a yellow cross is found among any number of changing tiles that
++        // are not yellow.
++        uint hot_class = 4u;
++        [branch] if ((Flags & 64u) != 0u) {
++            for (uint k = 0; k < 4u; ++k) {
++                if (hot_class == 4u && gs_class[k] >= 2u) {
++                    hot_class = k;
++                }
++            }
++        }
++        if (hot_class < 4u) {
++            uint class_order = kMaxClassTiles;
++            InterlockedAdd(CursorState[kHotClassBase + view * 4u + hot_class], 1u, class_order);
++            if (class_order < kMaxClassTiles) {
++                append_tile(view, group_id.y * TilesX + group_id.x);
++            }
+         } else {
+-            CursorState[entry + kEntryOverflow] = 1u;
++            uint order = kMaxHotTiles;
++            InterlockedAdd(CursorState[entry + kEntryHot], 1u, order);
++            if (order < kMaxHotTiles) {
++                append_tile(view, group_id.y * TilesX + group_id.x);
++            } else {
++                CursorState[entry + kEntryOverflow] = 1u;
++            }
+         }
+     }
+ }
+@@ -634,6 +804,10 @@ void CursorArgumentsCS() {
+     CursorArguments[5] = 1u;
+ }
+ 
++// DCS Control (0082): see CursorPickCS.
++float follow_score(uint template_index, int2 position, float scale, uint slice, bool previous,
++    uint count, bool footprint, out float undersize);
++
+ // One group per listed tile and template: every coarse candidate position
+ // of the tile (every second pixel, one per thread), at the tracked scale or
+ // all ten (kScaleCount), against the template's coarse samples.
+@@ -663,6 +837,13 @@ void CursorSearchCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+     int2 tile_origin = gs_origin;
+     int2 window_min = gs_window.xy;
+     int2 window_max = gs_window.zw;
++    // DCS Control (0082): a tracked view also searches the tiles where
++    // something moved, which lie outside its window.
++    [branch] if ((Flags & 64u) != 0u) {
++        float4 whole = view_rect(view);
++        window_min = int2(whole.xy);
++        window_max = int2(whole.xy + whole.zw);
++    }
+     uint scale_first = mode == kModeTrack ? gs_scale : 0u;
+     uint scale_last = mode == kModeTrack ? gs_scale : kScaleCount - 1u;
+     uint slice = view_slice(view);
+@@ -675,6 +856,7 @@ void CursorSearchCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+     float template_spread = 0.0;
+     template_statistics(count, template_mean, template_spread);
+     float best = -2.0;
++    float best_held = 0.0; // (0082)
+     uint best_position = 0u;
+     int2 position = tile_origin + int2(int(thread_index % 16u), int(thread_index / 16u)) * 2;
+     bool inside = mode != kModeOff && template_index < TemplateCount && template_spread > 0.0 &&
+@@ -685,7 +867,24 @@ void CursorSearchCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+             float scale = kScales[scale_index];
+             int extent = int(ceil(float(kTemplateSize) * scale));
+             if (all(position + extent <= rect_max)) {
+-                float score = correlation(position, scale, slice, count, template_mean, template_spread);
++                float score = 0.0;
++                [branch] if ((Flags & 64u) != 0u) { // DCS Control (0082)
++                    float undersize = 0.0;
++                    score = follow_score(template_index, position, scale, slice, detecting_previous(), count,
++                        false, undersize);
++                    // Which step: a single-colour sprite matches a template
++                    // laid inside it, steps too small, as well as its own
++                    // (measured: 0.91 at step 4 for a cross of step 8, 0.92;
++                    // never one too large), and the redraw then moved only
++                    // the sprite's middle. So a step whose rim samples lie
++                    // on the sprite loses by that, and of steps that score
++                    // alike the larger is taken. How sure the match is, is
++                    // another matter: the best score of all its steps.
++                    best_held = max(best_held, score);
++                    score += kStepBias * float(scale_index) - kUndersize * undersize;
++                } else {
++                    score = correlation(position, scale, slice, count, template_mean, template_spread);
++                }
+                 if (score > best) {
+                     best = score;
+                     best_scale = scale_index;
+@@ -694,6 +893,9 @@ void CursorSearchCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+         }
+         best_position = uint(position.x) | (uint(position.y) << 16);
+     }
++    [branch] if ((Flags & 64u) != 0u && inside && best > -2.0) {
++        best = best_held; // (0082) the score itself again
++    }
+     gs_score[thread_index] = best;
+     gs_position[thread_index] = best_position;
+     gs_meta[thread_index] = template_index | (best_scale << 8);
+@@ -716,6 +918,265 @@ void CursorSearchCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+     }
+ }
+ 
++// DCS Control (0082), `[ofxr] cursor_follow_mouse` (Flags bit 6): which of
++// the search's candidates is the cursor. Between the search and the
++// verification, one group per view.
++//
++// The search keeps one candidate per listed tile and template and the
++// verification took the one with the best score. With a HUD in view dozens
++// of small bright structures match the cockpit cursor's dot at 0.70 to 0.76,
++// and one of them, taken once, was then tracked for a whole flight 300 to
++// 450 pixels from the cursor (984 pairs judged, 78 drawn): the best score is
++// not what tells the cursor from the scene. What does is that the cursor
++// moves with the mouse and the scene does not:
++//  - a candidate that scores the same at the same place in the OTHER frame
++//    of the pair while the mouse moved stands still: a look-alike (the
++//    cockpit, a HUD symbol; a symbol that moves with the head does not move
++//    with the mouse either, and is then where the last match was not
++//    expected);
++//  - a candidate near where the last match is expected (it moved as the
++//    mouse moved, through the learned gain: CursorBeginCS) is the cursor
++//    again, before a better-scoring one elsewhere.
++// With a still mouse there is no such evidence and nothing is held against
++// a candidate that stands still: the one where the cursor was expected
++// keeps the lock. Every candidate is scored anew here on the coarse
++// samples, in this frame and, when the mouse moved, in the other one.
++//
++// The score itself is the other half (follow_score, used by the search, this
++// pass and the verification with the key). Measured on real frames of the
++// cockpit cursor (the yellow cross, both modes):
++//  - the game draws the cross fat and soft over a near panel and wherever
++//    the image comes from the periphery (bars 7 to 8 pixels where the
++//    template's are 5): the ring of transparent texels right beside the bars
++//    lands on the bar's skirt and the shape match falls to 0.52-0.64, under
++//    the bar in every frame. With the key a shape template's ring is sampled
++//    three texels out (cursor_template_words): 0.87-0.92 there, 0.99 on the
++//    sky;
++//  - over the HUD the ring lands on bright green symbology and brightness
++//    alone gives 0.75-0.9. A single-colour template is therefore also
++//    matched on its own colour: each sample's value along the template's
++//    colour against neutral (its chromaticity minus a third: no colour is
++//    written here, a green template gets a green axis), signed, so only a
++//    sprite MORE of that colour than its surroundings matches. The better of
++//    the two matches counts: where colour says nothing (a scene of one hue,
++//    a grey template) the brightness match stands as before;
++//  - every template's match is checked for the template's colour (as the
++//    verification already did for shape templates): the dot image (149),
++//    matched on the brightness inside an 8-texel disc, otherwise scores 0.85
++//    to 0.94 on any soft bright blob - HUD digits above all.
++static const float kPickStill = 0.05;        // "the same score" in the other frame
++static const float kPickStillPenalty = 0.25;
++static const float kPickNear = 0.3;          // at the expected place, falling to 0 at kPickReach
++static const float kPickReach = 96.0;
++static const float kPickHere = 16.0;         // "where the cursor is expected"
++
++float3 pick_rgb(int2 pixel, uint slice, bool previous) {
++    int2 bounded = clamp(pixel, int2(0, 0), int2(int(Width) - 1, int(Height) - 1));
++    return frame_colour(bounded, slice, previous).rgb;
++}
++
++float zero_mean_correlation(float n, float sum, float sum_squares, float cross_sum,
++    float template_sum, float template_squares, float least_spread) {
++    float mean = sum / n;
++    float template_mean = template_sum / n;
++    float spread = sum_squares - n * mean * mean;
++    float template_spread = template_squares - n * template_mean * template_mean;
++    bool structured = n >= 8.0 && spread >= n * least_spread && template_spread >= n * 4.0e-3;
++    return structured
++        ? (cross_sum - n * mean * template_mean) * rsqrt(max(spread * template_spread, 1.0e-12))
++        : 0.0;
++}
++
++// With the key: template `template_index`'s first `count` samples against
++// either frame at `position` (the template box's top-left) and `scale`; see
++// above. `footprint`: each texel by its first and last pixel, as
++// footprint_correlation.
++// `undersize`: 0 to 1, how much the template's rim samples (weight 1 of
++// 255: the texels right beyond the sprite in its image) look like the
++// sprite itself: the template is too small for what lies there. Not part of
++// the score; the search and the refinement choose the scale step by it.
++float follow_score(uint template_index, int2 position, float scale, uint slice, bool previous,
++    uint count, bool footprint, out float undersize) {
++    undersize = 0.0;
++    float rim_luma = 0.0;
++    float rim_axis = 0.0;
++    float rim_count = 0.0;
++    float used = 0.0;
++    bool shape = template_is_shape(template_index);
++    float3 sprite = template_mean_colour(template_index);
++    float3 axis = chromaticity(sprite) - 1.0 / 3.0;
++    float luma_sum = 0.0;
++    float luma_squares = 0.0;
++    float luma_cross = 0.0;
++    float axis_sum = 0.0;
++    float axis_squares = 0.0;
++    float axis_cross = 0.0;
++    float template_sum = 0.0;
++    float template_squares = 0.0;
++    float3 image = float3(0.0, 0.0, 0.0);
++    for (uint i = 0; i < count; ++i) {
++        uint3 texel = template_sample(template_index, i);
++        float weight = shape ? float(texel.z) / 255.0 : template_luma(template_index, texel.xy);
++        float3 colour;
++        [branch] if (footprint) {
++            float2 corner = float2(texel.xy);
++            int2 first = position + int2(ceil(corner * scale - 0.5));
++            int2 last = max(first, position + int2(ceil((corner + 1.0) * scale - 0.5)) - 1);
++            colour = 0.5 * (pick_rgb(first, slice, previous) + pick_rgb(last, slice, previous));
++        } else {
++            colour = pick_rgb(position + sample_offset(texel.xy, scale), slice, previous);
++        }
++        float value = luma(colour);
++        float along = dot(colour, axis);
++        if (shape && texel.z == 1u) {
++            rim_luma += value;
++            rim_axis += along;
++            rim_count += 1.0;
++            continue;
++        }
++        used += 1.0;
++        luma_sum += value;
++        luma_squares += value * value;
++        luma_cross += value * weight;
++        axis_sum += along;
++        axis_squares += along * along;
++        axis_cross += along * weight;
++        template_sum += weight;
++        template_squares += weight * weight;
++        if (!shape || weight > 0.5) {
++            image += colour;
++        }
++    }
++    float n = max(used, 1.0);
++    float score = zero_mean_correlation(
++        n, luma_sum, luma_squares, luma_cross, template_sum, template_squares, 1.0e-4);
++    if (shape) {
++        float coloured = zero_mean_correlation(
++            n, axis_sum, axis_squares, axis_cross, template_sum, template_squares, 2.0e-5);
++        // A correlation does not ask how much the sprite stands out, only
++        // whether it does in the right places: a template several steps too
++        // small, laid in the middle of a soft fat cross, has its ring on the
++        // bar's dimmer skirt and matched at 0.65 to 0.82 (measured; the
++        // tracking then kept that step). So each match counts by how far the
++        // opaque samples' mean is from the ring's, against the larger of the
++        // two: in full from 30 % (a cursor on any background that is not its
++        // own colour and brightness has far more).
++        float opaque = max(template_sum, 1.0);          // weights are 1 and 0
++        float ring = max(n - template_sum, 1.0);
++        float luma_inside = luma_cross / opaque;
++        float luma_outside = (luma_sum - luma_cross) / ring;
++        float axis_inside = axis_cross / opaque;
++        float axis_outside = (axis_sum - axis_cross) / ring;
++        float luma_contrast = abs(luma_inside - luma_outside) /
++            max(max(abs(luma_inside), abs(luma_outside)), 1.0e-4);
++        float axis_contrast = (axis_inside - axis_outside) /
++            max(max(abs(axis_inside), abs(axis_outside)), 1.0e-4);
++        float by_luma = abs(score) * saturate(luma_contrast / 0.3);
++        float by_colour = coloured * saturate(axis_contrast / 0.3);
++        score = max(by_luma, by_colour);
++        if (rim_count > 0.0) {
++            float inside = by_colour >= by_luma ? axis_inside : luma_inside;
++            float outside = by_colour >= by_luma ? axis_outside : luma_outside;
++            float rim = (by_colour >= by_luma ? rim_axis : rim_luma) / rim_count;
++            float span = inside - outside;
++            undersize = abs(span) > 1.0e-4 ? saturate((rim - outside) / span) : 0.0;
++        }
++    }
++    float3 apart = abs(chromaticity(image) - chromaticity(sprite));
++    float distance = apart.r + apart.g + apart.b;
++    return score * saturate(1.0 - max(distance - 0.3, 0.0) * 4.0);
++}
++
++[numthreads(256, 1, 1)]
++void CursorPickCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupIndex) {
++    uint view = min(group_id.z, 1u);
++    uint entry = entry_base(EntryIndex, view);
++    uint mode = group_id.z < ViewCount ? CursorState[entry + kEntryMode] : kModeOff;
++    uint slice = view_slice(view);
++    float4 rect = view_rect(view);
++    int2 rect_min = int2(rect.xy);
++    int2 rect_max = int2(rect.xy + rect.zw);
++    uint total = min(CursorState[kListCount], kMaxListEntries) * kMaxTemplates;
++    bool moved = (Flags & 4u) != 0u && length(MouseDelta) >= 1.0;
++    bool expected = CursorState[entry + kEntryExpected] != 0u;
++    float2 centre = float2(
++        asfloat(CursorState[entry + kEntryExpectedX]), asfloat(CursorState[entry + kEntryExpectedY]));
++    float best = -4.0;
++    float best_raw = 0.0;
++    uint best_slot = 0u;
++    if (mode != kModeOff) {
++        for (uint slot = thread_index; slot < total; slot += 256u) {
++            uint list_index = slot / kMaxTemplates;
++            uint template_index = slot % kMaxTemplates;
++            uint listed = CursorState[kListEntries + list_index];
++            uint packed = CursorCandidates[slot * 2u];
++            uint meta = CursorCandidates[slot * 2u + 1u];
++            int2 position = int2(int(packed & 0xffffu), int(packed >> 16));
++            uint tile = listed & 0xffffu;
++            int2 origin = rect_min + int2(int(tile % max(TilesX, 1u)), int(tile / max(TilesX, 1u))) * 32;
++            uint scale_index = min((meta >> 8) & 0xffu, kScaleCount - 1u);
++            float scale = kScales[scale_index];
++            int extent = int(ceil(float(kTemplateSize) * scale));
++            // This view's, this template's, written for this tile (a slot
++            // keeps what an earlier frame left in it), inside the image.
++            bool usable = (listed >> 16) == view && template_index < TemplateCount &&
++                (meta & 0xffu) == template_index &&
++                all(position >= origin) && all(position < origin + 32) &&
++                all(position >= rect_min) && all(position + extent <= rect_max);
++            if (usable) {
++                uint count = min(template_sample_count(template_index), kCoarseSamples);
++                float unused = 0.0;
++                float here = follow_score(
++                    template_index, position, scale, slice, detecting_previous(), count, false, unused);
++                if (here > kCandidateScore) {
++                    float adjusted = here;
++                    if (moved) {
++                        float there = follow_score(
++                            template_index, position, scale, slice, !detecting_previous(), count, false, unused);
++                        // (Not where the cursor is expected: the mouse and
++                        // the game's frame are sampled at different moments,
++                        // so the tracked cursor does stand still for a frame
++                        // now and then while the mouse reports a step.)
++                        bool at_expected = expected && length(float2(position) - centre) <= kPickHere;
++                        if (there >= here - kPickStill && !at_expected) {
++                            adjusted -= kPickStillPenalty;
++                        }
++                    }
++                    if (expected) {
++                        adjusted += kPickNear *
++                            saturate(1.0 - length(float2(position) - centre) / kPickReach);
++                    }
++                    if (adjusted > best) {
++                        best = adjusted;
++                        best_raw = here;
++                        best_slot = slot;
++                    }
++                }
++            }
++        }
++    }
++    gs_score[thread_index] = best;
++    gs_position[thread_index] = best_slot;
++    gs_meta[thread_index] = uint(saturate(best_raw) * 65535.0);
++    GroupMemoryBarrierWithGroupSync();
++    for (uint stride = 128u; stride > 0u; stride >>= 1) {
++        if (thread_index < stride && gs_score[thread_index + stride] > gs_score[thread_index]) {
++            gs_score[thread_index] = gs_score[thread_index + stride];
++            gs_position[thread_index] = gs_position[thread_index + stride];
++            gs_meta[thread_index] = gs_meta[thread_index + stride];
++        }
++        GroupMemoryBarrierWithGroupSync();
++    }
++    if (thread_index == 0u && mode != kModeOff && gs_score[0] > -3.0) {
++        uint searched = CursorState[entry + kEntryKey];
++        uint chosen = (max(gs_meta[0], 1u) << 16) | (gs_position[0] & 0xffffu);
++        if (searched != 0u && (searched & 0xffffu) != (chosen & 0xffffu)) {
++            CursorState[kStatsBase + kStatPicked] += 1u;
++        }
++        CursorState[entry + kEntryKey] = chosen;
++    }
++}
++
+ // One group per view: the best candidate refined to the pixel with every
+ // sample, and the best look-alike within 48 px that is not the cursor itself
+ // (more than a quarter of the template box away on either axis) - every
+@@ -752,19 +1213,73 @@ void CursorVerifyCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+ 
+     float score = -2.0;
+     int2 refined = position;
++    // DCS Control (0082), Flags bit 6: the refinement also measures the
++    // sprite's size: the scale step below and above and the two half steps
++    // between, about the same centre, on every sample (125 of the group's
++    // threads). A tracked view searches at the step of its last match alone,
++    // and the first match's step was kept for good; and the cockpit cross
++    // lies between two steps in a focus layer's image. The size is chosen
++    // by the rim samples (follow_score's `undersize`), the larger of sizes
++    // that score alike; how sure the match is, is the best score of all
++    // five (a soft cross scores 0.95 to 0.99 a size or two too small, and
++    // 0.8 to 0.95 at its own).
++    uint refined_step = scale_index;
++    float refined_undersize = 0.0;
++    float unused = 0.0;
++    // 0: the search's step; 1, 2: the step below, above; 3, 4: half a step.
++    uint variant = thread_index / 25u;
++    float variant_scale = scale;
++    float variant_bias = 0.0;
++    [branch] if ((Flags & 64u) != 0u && found && thread_index >= 25u && thread_index < 125u) {
++        bool above = variant == 2u || variant == 4u;
++        bool half_step = variant >= 3u;
++        uint local = thread_index - variant * 25u;
++        bool exists = half_step || (above ? scale_index + 1u < kScaleCount : scale_index > 0u);
++        if (exists) {
++            refined_step = half_step ? scale_index : (above ? scale_index + 1u : scale_index - 1u);
++            float other_scale = half_step
++                ? scale * (above ? 1.1225 : 0.8909)
++                : cursor_scale(refined_step);
++            variant_scale = other_scale;
++            variant_bias = (above ? 1.0 : -1.0) * (half_step ? 0.5 : 1.0);
++            int other_extent = int(ceil(float(kTemplateSize) * other_scale));
++            int2 shift = int2(round(float2(0.5, 0.5) * float(kTemplateSize) * (scale - other_scale)));
++            int2 candidate = position + shift + int2(int(local % 5u) - 2, int(local / 5u) - 2);
++            if (all(candidate >= rect_min) && all(candidate + other_extent <= rect_max)) {
++                score = follow_score(template_index, candidate, other_scale, slice, detecting_previous(),
++                    count, other_scale >= 1.5, refined_undersize);
++                refined = candidate;
++            }
++        }
++    }
+     if (found && thread_index < 25u) {
+         int2 candidate = position + int2(int(thread_index % 5u) - 2, int(thread_index / 5u) - 2);
+         if (all(candidate >= rect_min) && all(candidate + extent <= rect_max)) {
+-            score = scale >= 1.5
+-                ? footprint_correlation(candidate, scale, slice, count, template_mean, template_spread)
+-                : correlation(candidate, scale, slice, count, template_mean, template_spread);
++            [branch] if ((Flags & 64u) != 0u) { // DCS Control (0082): the colour check is in it
++                score = follow_score(
++                    template_index, candidate, scale, slice, detecting_previous(), count, scale >= 1.5,
++                    refined_undersize);
++            } else {
++                score = scale >= 1.5
++                    ? footprint_correlation(candidate, scale, slice, count, template_mean, template_spread)
++                    : correlation(candidate, scale, slice, count, template_mean, template_spread);
++            }
+             refined = candidate;
+         }
+     }
+     // A shape template must also be the sprite's colour.
+-    if (found && thread_index < 25u && score > 0.0) {
++    if (found && thread_index < 25u && score > 0.0 && (Flags & 64u) == 0u) {
+         score *= shape_colour_match(template_index, refined, scale, slice, count);
+     }
++    // (0082) Compared by size (see CursorSearchCS); the scores themselves
++    // are kept beside.
++    gs_meta[thread_index] = refined_step | (variant << 8);
++    if (thread_index < 128u) {
++        gs_raw[thread_index] = score;
++    }
++    [branch] if ((Flags & 64u) != 0u && score > -1.0) {
++        score += kRefineStepBias * variant_bias - kUndersize * refined_undersize;
++    }
+     gs_score[thread_index] = score;
+     gs_position[thread_index] = uint(refined.x) | (uint(refined.y) << 16);
+     GroupMemoryBarrierWithGroupSync();
+@@ -772,15 +1287,40 @@ void CursorVerifyCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+         if (thread_index < stride && gs_score[thread_index + stride] > gs_score[thread_index]) {
+             gs_score[thread_index] = gs_score[thread_index + stride];
+             gs_position[thread_index] = gs_position[thread_index + stride];
++            gs_meta[thread_index] = gs_meta[thread_index + stride];
+         }
+         GroupMemoryBarrierWithGroupSync();
+     }
+     float best = gs_score[0];
+     uint best_packed = gs_position[0];
+     int2 best_position = int2(int(best_packed & 0xffffu), int(best_packed >> 16));
++    // (0082) The size the refinement chose (without the key, the search's
++    // step), and the best score of all sizes tried.
++    float fine_scale = 0.0;
++    [branch] if ((Flags & 64u) != 0u && best > -1.0) {
++        uint chosen = gs_meta[0] >> 8;
++        float base_scale = cursor_scale(scale_index);
++        scale_index = min(gs_meta[0] & 0xffu, kScaleCount - 1u);
++        scale = chosen == 3u ? base_scale * 0.8909 : (chosen == 4u ? base_scale * 1.1225 : cursor_scale(scale_index));
++        fine_scale = scale;
++        best = -2.0;
++        for (uint tried = 0; tried < 125u; ++tried) {
++            best = max(best, gs_raw[tried]);
++        }
++    } else {
++        scale_index = min(gs_meta[0] & 0xffu, kScaleCount - 1u);
++        scale = cursor_scale(scale_index);
++    }
++    extent = int(ceil(float(kTemplateSize) * scale));
+     GroupMemoryBarrierWithGroupSync();
+ 
+     int exclusion = max(4, int(ceil(8.0 * scale)));
++    // DCS Control (0082), Flags bit 6: further out. A single-colour sprite
++    // matches itself a quarter of its box off (a cross along one of its
++    // arms: 0.6 to 0.8 on the coarse samples), and that is not a look-alike.
++    [branch] if ((Flags & 64u) != 0u && template_is_shape(template_index)) {
++        exclusion = max(4, int(ceil(12.0 * scale)));
++    }
+     float second = 0.0;
+     int2 second_position = best_position;
+     if (found) {
+@@ -789,7 +1329,13 @@ void CursorVerifyCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+             if (max(abs(offset.x), abs(offset.y)) > exclusion) {
+                 int2 candidate = best_position + offset;
+                 if (all(candidate >= rect_min) && all(candidate + extent <= rect_max)) {
+-                    float value = correlation(candidate, scale, slice, coarse, coarse_mean, coarse_spread);
++                    float value = 0.0;
++                    [branch] if ((Flags & 64u) != 0u) { // DCS Control (0082)
++                        value = follow_score(
++                            template_index, candidate, scale, slice, detecting_previous(), coarse, false, unused);
++                    } else {
++                        value = correlation(candidate, scale, slice, coarse, coarse_mean, coarse_spread);
++                    }
+                     if (value > second) {
+                         second = value;
+                         second_position = candidate;
+@@ -812,13 +1358,44 @@ void CursorVerifyCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+     uint coarse_packed = gs_position[0];
+     int2 coarse_position = int2(int(coarse_packed & 0xffffu), int(coarse_packed >> 16));
+     GroupMemoryBarrierWithGroupSync();
++    // DCS Control (0082), Flags bit 6: a look-alike that scores the same at
++    // the same place in the other frame while the mouse moved stands still:
++    // part of the scene (a HUD symbol, a light), not a second cursor, and
++    // no rival of a match that was taken because it moves (CursorPickCS).
++    // It then counts for nothing against the match.
++    bool still_look_alike = false;
++    // (Or while the match itself moved against the other frame's: the mouse's
++    // report for the frame can be a step late.)
++    bool match_moved = false;
++    [branch] if ((Flags & 64u) != 0u && TrackIndex < 2u) {
++        uint other_entry = entry_base(TrackIndex, view);
++        float2 other_position = float2(
++            float(asint(CursorState[other_entry + kEntryX])),
++            float(asint(CursorState[other_entry + kEntryY])));
++        match_moved = CursorState[other_entry + kEntryStatus] == kStatusFound &&
++            length(float2(best_position) - other_position) >= 2.0;
++    }
++    [branch] if ((Flags & 64u) != 0u && found && coarse_second > 0.0 &&
++        (((Flags & 4u) != 0u && length(MouseDelta) >= 1.0) || match_moved)) {
++        float elsewhere = follow_score(
++            template_index, coarse_position, scale, slice, !detecting_previous(), coarse, false, unused);
++        still_look_alike = elsewhere >= coarse_second - 0.05;
++    }
++    if (still_look_alike) {
++        coarse_second = 0.0;
++    }
+     float refined_second = 0.0;
+-    if (found && coarse_second > 0.0 && thread_index < 9u) {
++    if (found && coarse_second > 0.0 && !still_look_alike && thread_index < 9u) {
+         int2 candidate = coarse_position + int2(int(thread_index % 3u) - 1, int(thread_index / 3u) - 1);
+         int2 apart = abs(candidate - best_position);
+         if (max(apart.x, apart.y) > exclusion &&
+             all(candidate >= rect_min) && all(candidate + extent <= rect_max)) {
+-            refined_second = correlation(candidate, scale, slice, count, template_mean, template_spread);
++            [branch] if ((Flags & 64u) != 0u) { // DCS Control (0082)
++                refined_second = follow_score(
++                    template_index, candidate, scale, slice, detecting_previous(), count, false, unused);
++            } else {
++                refined_second = correlation(candidate, scale, slice, count, template_mean, template_spread);
++            }
+         }
+     }
+     gs_score[thread_index] = refined_second;
+@@ -845,7 +1422,47 @@ void CursorVerifyCS(uint3 group_id : SV_GroupID, uint thread_index : SV_GroupInd
+         CursorState[entry + kEntryScore] = asuint(found ? best : 0.0);
+         // The coarse score alone stands where the refinement found nothing
+         // better (it is never above the refined one at the same place).
+-        CursorState[entry + kEntrySecond] = asuint(max(gs_score[0], coarse_second));
++        // (0082: with the key the look-alike's score on every sample alone,
++        // where it was taken; the coarse one runs 0.1 to 0.2 high.)
++        CursorState[entry + kEntrySecond] = asuint((Flags & 64u) != 0u && gs_score[0] > 0.0
++            ? gs_score[0] : max(gs_score[0], coarse_second));
++        [branch] if ((Flags & 64u) != 0u) {
++            float3 seen = float3(0.0, 0.0, 0.0);
++            [branch] if (status == kStatusFound && template_is_shape(template_index)) {
++                float samples = 0.0;
++                for (uint i = 0; i < count; ++i) {
++                    uint3 texel = template_sample(template_index, i);
++                    if (texel.z > 127u) {
++                        seen += pick_rgb(best_position + sample_offset(texel.xy, scale), slice, detecting_previous());
++                        samples += 1.0;
++                    }
++                }
++                seen /= max(samples, 1.0);
++            }
++            float held = 0.0;
++            [branch] if (status == kStatusFound && template_is_shape(template_index)) {
++                float3 wanted = seen / max(seen.r + seen.g + seen.b, 1.0e-4);
++                float places = 0.0;
++                for (uint j = 0; j < count; ++j) {
++                    uint3 texel = template_sample(template_index, j);
++                    if (texel.z > 127u) {
++                        float3 there = pick_rgb(best_position + sample_offset(texel.xy, scale), slice,
++                            !detecting_previous());
++                        float3 apart = abs(there / max(there.r + there.g + there.b, 1.0e-4) - wanted);
++                        places += 1.0;
++                        if (apart.r + apart.g + apart.b < 0.24 && luma(there) > 0.5 * luma(seen)) {
++                            held += 1.0;
++                        }
++                    }
++                }
++                held /= max(places, 1.0);
++            }
++            CursorState[entry + kEntryHeld] = asuint(held);
++            CursorState[entry + kEntryFine] = asuint(status == kStatusFound ? fine_scale : 0.0);
++            CursorState[entry + kEntryColour] = asuint(seen.r);
++            CursorState[entry + kEntryColour + 1u] = asuint(seen.g);
++            CursorState[entry + kEntryColour + 2u] = asuint(seen.b);
++        }
+     }
+ }
+ 
+@@ -865,6 +1482,7 @@ struct Detection {
+     uint scale_index;
+     float score;
+     float second;
++    float scale; // DCS Control (0082): kEntryFine, or the step's
+ };
+ 
+ Detection load_detection(uint ring, uint view) {
+@@ -876,6 +1494,13 @@ Detection load_detection(uint ring, uint view) {
+         float(asint(CursorState[entry + kEntryY])));
+     output.template_index = CursorState[entry + kEntryTemplate];
+     output.scale_index = min(CursorState[entry + kEntryScale], kScaleCount - 1u);
++    output.scale = cursor_scale(output.scale_index);
++    [branch] if ((Flags & 64u) != 0u) {
++        float fine = asfloat(CursorState[entry + kEntryFine]);
++        if (fine > 0.2 && fine < 8.0) {
++            output.scale = fine;
++        }
++    }
+     output.score = asfloat(CursorState[entry + kEntryScore]);
+     output.second = asfloat(CursorState[entry + kEntrySecond]);
+     return output;
+@@ -906,6 +1531,21 @@ void CursorGateCS() {
+     [unroll] for (uint v = 0; v < 2u; ++v) {
+         previous[v] = load_detection(min(TrackIndex, 1u), v);
+         current[v] = load_detection(EntryIndex, v);
++        // DCS Control (0082), Flags bit 6: the two frames' matches at one
++        // scale step, the current frame's, about the previous one's centre.
++        // A position is the template box's corner: one step apart (the
++        // refinement chooses the step per frame, and a soft cross sits
++        // between two) the corners differ by 8 pixels for a cursor that
++        // stood, which the rules below took for a jump and the redraw for
++        // travel. Within a step and a half: further apart is not one sprite.
++        [branch] if ((Flags & 64u) != 0u && previous[v].status == kStatusFound &&
++            current[v].status == kStatusFound && previous[v].template_index == current[v].template_index &&
++            previous[v].scale != current[v].scale &&
++            previous[v].scale <= current[v].scale * 1.45 && current[v].scale <= previous[v].scale * 1.45) {
++            previous[v].position += 0.5 * float(kTemplateSize) * (previous[v].scale - current[v].scale);
++            previous[v].scale = current[v].scale;
++            previous[v].scale_index = current[v].scale_index;
++        }
+         // The previous position in the current frame's image rectangle
+         // (they differ only for double-wide views).
+         moved[v] = current[v].position -
+@@ -937,9 +1577,44 @@ void CursorGateCS() {
+             // View-locked: it moves only with the mouse. Still mouse, moving
+             // match: not the cursor.
+             bool still_mouse = (Flags & 4u) != 0u && all(MouseDelta == float2(0.0, 0.0));
+-            if (distance > limit || (still_mouse && distance > 4.0)) {
++            // DCS Control (0082), Flags bit 6. The game reads the mouse for
++            // its frame at one moment and the layer for the same frame at
++            // another: at a pixel or two of mouse travel a frame the two
++            // differ by a whole step every few frames (measured on real
++            // frames: a still mouse and a cursor that moved one step, 5 to
++            // 11 pixels; then a step of the mouse and a cursor that stood).
++            // So a step and a half of slack, a step being the learned gain
++            // (12 pixels before it is learned).
++            float step = 4.0;
++            float2 slack = float2(0.0, 0.0);
++            [branch] if ((Flags & 64u) != 0u) {
++                uint learned = kLearnBase + view2 * 8u;
++                bool gain_known = CursorState[learned + 2u] != 0u;
++                slack = gain_known
++                    ? 1.5 * abs(float2(asfloat(CursorState[learned]), asfloat(CursorState[learned + 1u])))
++                    : float2(12.0, 12.0);
++                step = max(4.0, length(slack) + 2.0);
++            }
++            if (distance > limit || (still_mouse && distance > step)) {
+                 reason = kReasonJump;
+             }
++            // DCS Control (0082): a match that stands while the mouse
++            // travels is part of the scene. One frame of standing is the
++            // sampling's (above); two and a half screen pixels of mouse
++            // travel without a pixel and a half of the match's are not (a
++            // step of two in one frame was seen with a cursor that stood;
++            // two such frames in a row were not). At a pixel or two a
++            // frame the direction rule below never speaks (it needs three in
++            // one frame), and such a match was drawn as the cursor.
++            [branch] if ((Flags & 64u) != 0u && (Flags & 4u) != 0u) {
++                uint confirm = kConfirmBase + view2 * kConfirmStride;
++                float travel = asfloat(CursorState[confirm + 1u]);
++                travel = distance < 1.5 ? travel + length(MouseDelta) : 0.0;
++                CursorState[confirm + 1u] = asuint(travel);
++                if (travel >= 2.5) {
++                    reason = kReasonJump;
++                }
++            }
+             // DCS Control (0042): a moving mouse, a match that does not move
+             // with it: a HUD symbol, not the cursor. On an axis whose gain is
+             // learned, the match moves MouseDelta x gain, within max(8 px,
+@@ -957,11 +1632,13 @@ void CursorGateCS() {
+                     float image = moved[view2][axis];
+                     float gain = asfloat(CursorState[learn + axis]);
+                     bool against = abs(mouse) >= 3.0 && image * sign(mouse) <= 0.0;
++                    // (0082) ... unless it stood, or moved less than the slack.
++                    against = against && ((Flags & 64u) == 0u || abs(image) > slack[axis]);
+                     direction_refused = direction_refused || against;
+                     if (known && gain > 0.0) {
+                         float expected = mouse * gain;
+                         gain_refused = gain_refused ||
+-                            abs(image - expected) > max(8.0, 0.35 * abs(expected));
++                            abs(image - expected) > max(8.0, 0.35 * abs(expected)) + slack[axis];
+                     }
+                 }
+                 if (direction_refused || gain_refused) {
+@@ -987,7 +1664,7 @@ void CursorGateCS() {
+             (current[0].position.y - Mappings[0].TargetRect.y);
+         float dx = current[1].position.x - Mappings[1].TargetRect.x -
+             (current[0].position.x - Mappings[0].TargetRect.x);
+-        float scale_ratio = kScales[current[1].scale_index] / kScales[current[0].scale_index];
++        float scale_ratio = current[1].scale / current[0].scale;
+         bool stereo_known = CursorState[kStereoBase + 1u] != 0u;
+         float vertical_tolerance = stereo_known
+             ? 4.0 + 0.01 * float(Height)
+@@ -1007,10 +1684,43 @@ void CursorGateCS() {
+         }
+     }
+ 
++    // DCS Control (0082), Flags bit 6: an accepted pair the redraw leaves to
++    // the flow. A sprite that comes from a coarser image (the cockpit cross in
++    // the periphery part of a composed image: one of its pixels is five of
++    // ours) does not travel as a shape: its outline stays on the coarse
++    // pixels and the light inside it shifts, and the match steps a few pixels
++    // one way and back the next frame while the mouse does not move on that
++    // axis (measured on real frames: +3, -3, +3 with the mouse's delta 0).
++    // Redrawn half a step back it showed sharp edges where both frames had
++    // none (200 wrong pixels a pair for the flow's 77); the flow carries such
++    // a step well, it is far smaller than the sprite. So: a step of two
++    // pixels or more on an axis, against the last pair's on that axis, that
++    // the mouse did not make, is not redrawn. Everything else about the pair
++    // is as accepted (the belief, the gain); it is counted in no column.
++    bool left_to_flow = false;
++    [branch] if ((Flags & 64u) != 0u) {
++        for (uint view7 = 0; view7 < views; ++view7) {
++            uint spare = kConfirmBase + view7 * kConfirmStride + 4u;
++            uint packed_last = CursorState[spare];
++            int2 last = int2(int(packed_last << 16) >> 16, int(packed_last) >> 16);
++            int2 now = int2(0, 0);
++            if (reason == kReasonNone) {
++                now = int2(clamp(round(moved[view7]), -30000.0, 30000.0));
++                [unroll] for (uint axis2 = 0; axis2 < 2u; ++axis2) {
++                    if ((Flags & 4u) != 0u && abs(now[axis2]) >= 2 && abs(last[axis2]) >= 2 &&
++                        now[axis2] * last[axis2] < 0 && MouseDelta[axis2] * float(now[axis2]) <= 0.0 &&
++                        asfloat(CursorState[entry_base(EntryIndex, view7) + kEntryHeld]) >= kHeldByFlow) {
++                        left_to_flow = true;
++                    }
++                }
++            }
++            CursorState[spare] = (uint(now.x) & 0xffffu) | (uint(now.y) << 16);
++        }
++    }
+     CursorState[kStatsBase + kStatPairs] += 1u;
+     for (uint view3 = 0; view3 < 2u; ++view3) {
+         uint record = kCompositeBase + view3 * 16u;
+-        bool draw = reason == kReasonNone && view3 < views;
++        bool draw = reason == kReasonNone && view3 < views && !left_to_flow;
+         CursorState[record + 0u] = draw ? 1u : 0u;
+         CursorState[record + 1u] = asuint(previous[view3].position.x);
+         CursorState[record + 2u] = asuint(previous[view3].position.y);
+@@ -1018,8 +1728,44 @@ void CursorGateCS() {
+         CursorState[record + 4u] = asuint(current[view3].position.y);
+         CursorState[record + 5u] = min(previous[view3].template_index, kMaxTemplates - 1u);
+         CursorState[record + 6u] = min(current[view3].template_index, kMaxTemplates - 1u);
+-        CursorState[record + 7u] = asuint(kScales[previous[view3].scale_index]);
+-        CursorState[record + 8u] = asuint(kScales[current[view3].scale_index]);
++        CursorState[record + 7u] = asuint(previous[view3].scale);
++        CursorState[record + 8u] = asuint(current[view3].scale);
++        // DCS Control (0082): the current frame's sprite colour (zero: none;
++        // then the redraw is by the template's texels alone, as before).
++        // Written for a refused pair too: a focus layer that follows the
++        // periphery layer's record keeps its own (CursorImportCS).
++        [branch] if ((Flags & 64u) != 0u) {
++            uint seen = entry_base(EntryIndex, view3) + kEntryColour;
++            bool held = view3 < views && current[view3].status == kStatusFound;
++            CursorState[record + 9u] = held ? CursorState[seen] : 0u;
++            CursorState[record + 10u] = held ? CursorState[seen + 1u] : 0u;
++            CursorState[record + 11u] = held ? CursorState[seen + 2u] : 0u;
++            CursorState[record + 12u] = held ? CursorState[entry_base(EntryIndex, view3) + kEntryHeld] : 0u;
++        }
++    }
++    // DCS Control (0082): see kConfirmBase.
++    [branch] if ((Flags & 64u) != 0u) {
++        for (uint view6 = 0; view6 < views; ++view6) {
++            uint confirm = kConfirmBase + view6 * kConfirmStride;
++            uint left = CursorState[confirm];
++            if (reason == kReasonNone) {
++                CursorState[confirm] = kConfirmPairs;
++                CursorState[confirm + 2u] = asuint(current[view6].position.x);
++                CursorState[confirm + 3u] = asuint(current[view6].position.y);
++                CursorState[confirm + 5u] = current[view6].scale_index;
++            } else {
++                // Nothing at all where it was believed: sooner unsure.
++                uint drop = current[view6].status == kStatusFound ? 1u : 3u;
++                CursorState[confirm] = left > drop ? left - drop : 0u;
++                uint learned = kLearnBase + view6 * 8u;
++                if ((Flags & 4u) != 0u && CursorState[learned + 2u] != 0u) {
++                    CursorState[confirm + 2u] = asuint(asfloat(CursorState[confirm + 2u]) +
++                        MouseDelta.x * asfloat(CursorState[learned]));
++                    CursorState[confirm + 3u] = asuint(asfloat(CursorState[confirm + 3u]) +
++                        MouseDelta.y * asfloat(CursorState[learned + 1u]));
++                }
++            }
++        }
+     }
+     // Foveated layers, round 4: the same record as tangents, for the
+     // periphery layer (CursorImportCS): each frame's template box by its
+@@ -1059,7 +1805,7 @@ void CursorGateCS() {
+         }
+     }
+     if (reason == kReasonNone) {
+-        CursorState[kStatsBase + kStatDrawn] += 1u;
++        CursorState[kStatsBase + kStatDrawn] += left_to_flow ? 0u : 1u;
+         // Learn the mouse-to-image gain (for the next tracking window) and
+         // the eyes' vertical offset (for the stereo test).
+         for (uint view4 = 0; view4 < views; ++view4) {
+@@ -1076,6 +1822,31 @@ void CursorGateCS() {
+                         gain[axis] = known && gain[axis] > 0.0 ? lerp(gain[axis], sample_gain, 0.3) : sample_gain;
+                         CursorState[learn + 2u] = 1u;
+                     }
++                    // DCS Control (0082): a slow mouse never moves 3 pixels
++                    // in a frame; over the accepted pairs it does. The sums
++                    // start again when the mouse turns round on the axis.
++                    [branch] if ((Flags & 64u) != 0u) {
++                        float mouse_sum = asfloat(CursorState[learn + 4u + axis]);
++                        float image_sum = asfloat(CursorState[learn + 6u + axis]);
++                        if (mouse * mouse_sum < 0.0) {
++                            mouse_sum = 0.0;
++                            image_sum = 0.0;
++                        }
++                        mouse_sum += mouse;
++                        image_sum += image;
++                        if (abs(mouse_sum) >= 6.0) {
++                            if (abs(image_sum) >= 4.0 && sign(mouse_sum) == sign(image_sum)) {
++                                float sample_gain = clamp(image_sum / mouse_sum, 0.05, 20.0);
++                                gain[axis] = CursorState[learn + 2u] != 0u && gain[axis] > 0.0
++                                    ? lerp(gain[axis], sample_gain, 0.3) : sample_gain;
++                                CursorState[learn + 2u] = 1u;
++                            }
++                            mouse_sum = 0.0;
++                            image_sum = 0.0;
++                        }
++                        CursorState[learn + 4u + axis] = asuint(mouse_sum);
++                        CursorState[learn + 6u + axis] = asuint(image_sum);
++                    }
+                 }
+             }
+             CursorState[learn] = asuint(gain.x);
+@@ -1194,6 +1965,13 @@ void CursorCaptureCS(uint3 id : SV_DispatchThreadID) {
+         CursorCandidates[49] = asuint(target_rect.y);
+         CursorCandidates[50] = asuint(target_rect.z);
+         CursorCandidates[51] = asuint(target_rect.w);
++        // DCS Control (0082): the gate's record of the pair, first view.
++        [branch] if ((Flags & 64u) != 0u) {
++            for (uint part = 0; part < 12u; ++part) { // (the header holds 64 words)
++                CursorCandidates[52u + part] = CursorState[kCompositeBase + part];
++            }
++            CursorCandidates[12] = CursorState[kCompositeBase + 12u];
++        }
+     }
+     uint base = kCaptureHeaderWords;
+     if (id.z < 2u) {
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 78a3872..eed4dda 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -3692,6 +3692,9 @@ void configure_smooth_cursor(
+             options.templates = session.cursor_templates->templates;
+             source = session.cursor_templates->source;
+         }
++        // DCS Control (0082): `[ofxr] cursor_follow_mouse`, off unless 1.
++        options.follow_mouse =
++            xrfg::implicit_layer::read_cursor_follow_mouse(current_layer_directory());
+         options.enabled = !options.templates.empty();
+         // DCS VR Control (0011): with the flight log on, a few captures of
+         // what the detection sees go next to it.
+diff --git a/tests/cockpit_mask_tests.cpp b/tests/cockpit_mask_tests.cpp
+index 8e85735..6471dd7 100644
+--- a/tests/cockpit_mask_tests.cpp
++++ b/tests/cockpit_mask_tests.cpp
+@@ -2082,6 +2082,18 @@ void test_ini() {
+     const bool hud_off = xrfg::implicit_layer::read_hud_symbology(directory);
+     require(!hud_missing && hud_on && !hud_off && !xrfg::implicit_layer::read_hud_symbology({}),
+         "ini: hud_symbology is 1 on, off otherwise");
++    // DCS Control (0082): and [ofxr] cursor_follow_mouse, off unless 1 (a
++    // key of a detection not yet flown: an ini without it keeps the search
++    // that takes the best score).
++    write("[ofxr]\nsmooth_cursor=1\n");
++    const bool follow_missing = xrfg::implicit_layer::read_cursor_follow_mouse(directory);
++    write("[ofxr]\ncursor_follow_mouse=1\n");
++    const bool follow_on = xrfg::implicit_layer::read_cursor_follow_mouse(directory);
++    write("[ofxr]\ncursor_follow_mouse=0\n");
++    const bool follow_off = xrfg::implicit_layer::read_cursor_follow_mouse(directory);
++    require(!follow_missing && follow_on && !follow_off &&
++            !xrfg::implicit_layer::read_cursor_follow_mouse({}),
++        "ini: cursor_follow_mouse is 1 on, off otherwise");
+     // DCS Control (0038): and [ofxr] parallel_eye_synthesis, 0 unless 1.
+     const std::uint32_t parallel_missing = xrfg::implicit_layer::read_parallel_eye_synthesis(directory);
+     write("[ofxr]\nparallel_eye_synthesis=1\n");
+diff --git a/tests/d3d12_history_tests.cpp b/tests/d3d12_history_tests.cpp
+index 728cbc0..1874f38 100644
+--- a/tests/d3d12_history_tests.cpp
++++ b/tests/d3d12_history_tests.cpp
+@@ -24,9 +24,11 @@
+ #include <future>
+ #include <iostream>
+ #include <limits>
++#include <map>
+ #include <memory>
+ #include <optional>
+ #include <span>
++#include <sstream>
+ #include <stdexcept>
+ #include <string>
+ #include <string_view>
+@@ -4623,6 +4625,8 @@ struct CursorRun {
+     if (scenario.feature) {
+         xrfg::D3D12SmoothCursorOptions options{};
+         options.enabled = true;
++        // DCS Control (0082): XRFG_TEST_CURSOR_FOLLOW=1 runs this rig with `cursor_follow_mouse`.
++        options.follow_mouse = GetEnvironmentVariableA("XRFG_TEST_CURSOR_FOLLOW", nullptr, 0) != 0;
+         options.templates.push_back(xrfg::built_in_arrow_template());
+         options.templates.push_back(marker_template());
+         options.templates.push_back(yellow_cross_template());
+@@ -4981,6 +4985,708 @@ void test_smooth_cursor(
+     }
+ }
+ 
++// DCS Control (0082): `[ofxr] cursor_follow_mouse`. A flight's case: the cursor
++// leaves the tracking window in one frame (the mouse jumped) while something
++// that looks like it stands still inside the window (there a HUD's symbols,
++// here a second arrow). The tracker takes the look-alike, the gate refuses
++// the pair (it moved against the mouse), and from then on:
++//  - without the key the look-alike is tracked for good: it is found again
++//    in every frame, the gate refuses every pair, and the cursor, moving
++//    slowly 200 pixels away, is never searched for;
++//  - with the key the frame after a refused pair is searched where
++//    something moved: the cursor is found again, and after one more pair
++//    (whose previous frame still holds the look-alike) every pair is drawn.
++// Twelve frames, eleven pairs; the jump is between frames 2 and 3.
++// Required: with the key at least 6 of the 9 pairs after the jump are drawn
++// (measured: 7; the first two are the refused pair and the one whose
++// previous frame still holds the look-alike) and accepted pairs are tracked
++// from again; without it at most 1 (measured: 0, nine refused as jumps).
++void test_cursor_reacquire(D3D12WarpFixture& fixture) {
++    constexpr UINT kWidth = 640, kHeight = 480, kFrames = 12;
++    const Sprite sprite = make_sprite(xrfg::built_in_arrow_template());
++    StereoPattern background;
++    for (UINT eye = 0; eye < kEyeCount; ++eye) {
++        background[eye].resize(static_cast<std::size_t>(kWidth) * kHeight * kBytesPerPixel);
++        for (UINT y = 0; y < kHeight; ++y) {
++            for (UINT x = 0; x < kWidth; ++x) {
++                const RgbaBytes texel = cursor_background_texel(x % kCursorWidth, y % kCursorHeight, eye);
++                std::copy(texel.begin(), texel.end(), background[eye].begin() +
++                    static_cast<std::ptrdiff_t>((static_cast<std::size_t>(y) * kWidth + x) * kBytesPerPixel));
++            }
++        }
++    }
++    // The look-alike, still, 40 pixels left of where the cursor starts.
++    const CursorPosition look_alike{100, 200};
++    std::array<CursorPosition, kFrames> positions{};
++    for (UINT frame = 0; frame < kFrames; ++frame) {
++        positions[frame] = frame < 3
++            ? CursorPosition{140 + static_cast<int>(frame) * 6, 200 + static_cast<int>(frame) * 2}
++            : CursorPosition{360 + static_cast<int>(frame) * 6, 150 + static_cast<int>(frame) * 4};
++    }
++    std::size_t last_wrong = 0;
++    const auto run = [&](bool reacquire) {
++        std::array<ComPtr<ID3D12Resource>, kFrames> sources;
++        std::array<ComPtr<ID3D12Resource>, 2> currents;
++        std::array<ComPtr<ID3D12Resource>, 2> synthetics;
++        std::array<ID3D12Resource*, kFrames> source_pointers{};
++        for (UINT frame = 0; frame < kFrames; ++frame) {
++            sources[frame] = create_source_texture(fixture, kWidth, kHeight);
++            StereoPattern image = background;
++            draw_cursor_into(&image, kWidth, kHeight, look_alike, sprite);
++            draw_cursor_into(&image, kWidth, kHeight, positions[frame], sprite);
++            upload_pattern(fixture, sources[frame].Get(), image);
++            source_pointers[frame] = sources[frame].Get();
++        }
++        for (auto& texture : currents) texture = create_source_texture(fixture, kWidth, kHeight);
++        for (auto& texture : synthetics) texture = create_source_texture(fixture, kWidth, kHeight);
++        std::array<ID3D12Resource*, 2> current_pointers{currents[0].Get(), currents[1].Get()};
++        std::array<ID3D12Resource*, 2> synthetic_pointers{synthetics[0].Get(), synthetics[1].Get()};
++        auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++        require_hresult(history->initialize(fixture.device(), fixture.queue(),
++            std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
++            D3D12_RESOURCE_STATE_RENDER_TARGET), "cursor reacquire: history");
++        xrfg::D3D12FrameSynthesizer synthesizer;
++        require_hresult(synthesizer.initialize(fixture.device(), fixture.queue(), history,
++            std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
++            std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
++            kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET), "cursor reacquire: synthesizer");
++        xrfg::D3D12SmoothCursorOptions options{};
++        options.enabled = true;
++        options.templates.push_back(xrfg::built_in_arrow_template());
++        options.follow_mouse = reacquire;
++        require(synthesizer.set_smooth_cursor(options) == S_OK, "cursor reacquire: set_smooth_cursor");
++        ReprojectionViews views = make_reprojection_views();
++        for (UINT eye = 0; eye < kEyeCount; ++eye)
++            views[eye].image_rect = xrfg::D3D12ImageRect{0, 0, kWidth, kHeight};
++        std::array<std::uint64_t, kFrames> drawn_after{};
++        xrfg::D3D12SmoothCursorStats stats{};
++        for (UINT frame = 0; frame < kFrames; ++frame) {
++            // The mouse moves as the cursor does (a gain of 1).
++            synthesizer.note_cursor_position(positions[frame][0], positions[frame][1],
++                300'000U + static_cast<std::uint64_t>(frame) * 11U);
++            xrfg::D3D12HistoryCaptureTicket capture{};
++            xrfg::D3D12FrameSynthesisTicket ticket{};
++            require_hresult(history->capture(frame, &capture), "cursor reacquire: capture");
++            require_hresult(history->commit(capture), "cursor reacquire: commit");
++            require_hresult(frame == 0
++                    ? synthesizer.submit_prime(capture, views, 0, &ticket)
++                    : synthesizer.submit_pair(capture, views, views, 0, frame % 2U, &ticket),
++                (std::string("cursor reacquire: submission of frame ") + std::to_string(frame)).c_str());
++            // (The first pair on WARP: 1.4 s, the cursor pass's pixel shader at its first use.)
++            require_hresult(synthesizer.wait_for_previous_submission(frame == 1U ? 10000U : 500U),
++                "cursor reacquire: frame-start gate");
++            // (As far as the GPU has got: a frame or two behind.)
++            require_hresult(synthesizer.smooth_cursor_stats(&stats), "cursor reacquire: stats");
++            drawn_after[frame] = stats.drawn;
++        }
++        require_hresult(synthesizer.wait_for_idle(), "cursor reacquire: idle");
++        require_hresult(synthesizer.smooth_cursor_stats(&stats), "cursor reacquire: stats");
++        // The last pair's synthetic against what it must show: the
++        // background, the look-alike where it stands, the cursor once, half
++        // way. Pixels more than 40 codes off, both eyes.
++        {
++            StereoPattern expected = background;
++            draw_cursor_into(&expected, kWidth, kHeight, look_alike, sprite);
++            draw_cursor_into(&expected, kWidth, kHeight,
++                CursorPosition{(positions[kFrames - 2][0] + positions[kFrames - 1][0]) / 2,
++                    (positions[kFrames - 2][1] + positions[kFrames - 1][1]) / 2}, sprite);
++            const StereoPattern shown =
++                readback_pattern(fixture, synthetics[0].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
++            last_wrong = 0;
++            for (UINT eye = 0; eye < kEyeCount; ++eye)
++                for (std::size_t at = 0; at < shown[eye].size(); at += kBytesPerPixel) {
++                    bool differs = false;
++                    for (UINT channel = 0; channel < 3; ++channel)
++                        differs = differs || std::abs(static_cast<int>(shown[eye][at + channel]) -
++                            static_cast<int>(expected[eye][at + channel])) > 40;
++                    last_wrong += differs ? 1U : 0U;
++                }
++        }
++        require_hresult(history->invalidate(), "cursor reacquire: history invalidate");
++        std::cout << "cursor reacquire " << (reacquire ? "on" : "off") << ": pairs " << stats.pairs << " drawn "
++                  << stats.drawn << " (drawn after each frame:";
++        for (const std::uint64_t value : drawn_after) std::cout << ' ' << value;
++        std::cout << "), not found " << stats.not_found << " low score " << stats.low_score << " ambiguous "
++                  << stats.ambiguous << " stereo " << stats.stereo << " jump " << stats.jump << ", acquired "
++                  << stats.acquired << " tracked " << stats.tracked << ", another candidate than the best score "
++                  << stats.picked << "; last synthetic: " << last_wrong << " pixels wrong\n";
++        return std::pair<xrfg::D3D12SmoothCursorStats, std::uint64_t>{stats, stats.drawn};
++    };
++    const auto with = run(true);
++    const std::size_t wrong_with = last_wrong;
++    const auto without = run(false);
++    const std::size_t wrong_without = last_wrong;
++    // (Measured: 10 pixels with the key, at the sprite's rim, and 339 without.)
++    require(wrong_with <= 20, "cursor reacquire: with the key the last synthetic is not the cursor once, half way");
++    require(wrong_without >= 60, "cursor reacquire: without the key the last synthetic is right too");
++    require(with.first.pairs == kFrames - 1U && without.first.pairs == kFrames - 1U,
++        "cursor reacquire: a pair was not judged");
++    // (The two pairs before the jump are refused either way: the look-alike
++    // is 40 pixels from the cursor, an identical sprite inside the window.)
++    require(without.second <= 1U,
++        "cursor reacquire: without the key the look-alike did not hold the tracker, so the case proves nothing");
++    require(with.second >= 6U, "cursor reacquire: with the key the cursor was not found again after the jump");
++    require(with.first.tracked > 0U, "cursor reacquire: accepted pairs are not tracked from");
++    std::cout << "smooth cursor reacquire after a refused pair passed\n";
++}
++
++// DCS Control (0082): XRFG_TEST_CURSOR_REPLAY=<folder>, with
++// XRFG_TEST_DCS_BIN (the game's cursor images): sequences of real captured
++// frames through the detection, with the key off and on. The folder holds
++// <name>.txt ("width height frames enlarge", then "mouse_x mouse_y cursor_x
++// cursor_y" per frame) and <name>.rgba (per frame, view 0 then view 1, RGBA
++// rows) for the names focus, periphery, composed; made by
++// artifacts\foveated\rig\make_cursor_replay.py from the cursor rig's
++// captures (too large for the repository: 30 to 220 MB each). Nothing is
++// required: the counts are printed. `enlarge` is for the periphery
++// layer of foveated frame generation (not in this tree: read and ignored).
++void test_cursor_replay(D3D12WarpFixture& fixture) {
++    std::array<wchar_t, 512> folder_text{};
++    const DWORD folder_length = GetEnvironmentVariableW(L"XRFG_TEST_CURSOR_REPLAY", folder_text.data(),
++        static_cast<DWORD>(folder_text.size()));
++    std::array<wchar_t, 512> dcs_bin{};
++    const DWORD bin_length = GetEnvironmentVariableW(L"XRFG_TEST_DCS_BIN", dcs_bin.data(),
++        static_cast<DWORD>(dcs_bin.size()));
++    if (folder_length == 0 || folder_length >= folder_text.size() || bin_length == 0 ||
++        bin_length >= dcs_bin.size()) {
++        return;
++    }
++    const xrfg::CursorTemplateSet dcs = xrfg::load_dcs_cursor_templates(std::filesystem::path(dcs_bin.data()));
++    require(dcs.source == xrfg::CursorTemplateSource::dcs_file, "cursor replay: the game's cursor images");
++    const std::filesystem::path folder(folder_text.data());
++    for (const char* name : {"focus", "periphery", "composed"}) {
++        std::ifstream list(folder / (std::string(name) + ".txt"));
++        UINT width = 0, height = 0, frames = 0;
++        float enlarge = 0.0F;
++        // The header's fifth number: 1, the swapchain is sRGB (the detection
++        // then reads linear values, as from the game's composed and periphery
++        // swapchains); 0 or missing, the bytes as they are (the focus layer).
++        int srgb = 0;
++        std::string header;
++        std::getline(list, header);
++        std::istringstream header_fields(header);
++        header_fields >> width >> height >> frames >> enlarge >> srgb;
++        if (width == 0 || height == 0 || frames < 3) {
++            std::cout << "cursor replay " << name << ": no fixture\n";
++            continue;
++        }
++        std::vector<std::array<int, 2>> mouse(frames);
++        for (UINT frame = 0; frame < frames; ++frame) {
++            float cursor_x = 0.0F, cursor_y = 0.0F;
++            list >> mouse[frame][0] >> mouse[frame][1] >> cursor_x >> cursor_y;
++        }
++        std::ifstream pixels(folder / (std::string(name) + ".rgba"), std::ios::binary);
++        const std::size_t view_bytes = static_cast<std::size_t>(width) * height * kBytesPerPixel;
++        std::vector<StereoPattern> images(frames);
++        for (UINT frame = 0; frame < frames; ++frame) {
++            for (UINT eye = 0; eye < kEyeCount; ++eye) {
++                images[frame][eye].resize(view_bytes);
++                pixels.read(reinterpret_cast<char*>(images[frame][eye].data()),
++                    static_cast<std::streamsize>(view_bytes));
++            }
++        }
++        require(static_cast<bool>(pixels), std::string("cursor replay ") + name + ": the pixel file is short");
++        // Typeless textures, so that an sRGB view of them can be asked for.
++        const auto create_replay_texture = [&]() {
++            const D3D12_HEAP_PROPERTIES properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
++            D3D12_RESOURCE_DESC description = stereo_texture_description(width, height);
++            description.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
++            ComPtr<ID3D12Resource> texture;
++            require_hresult(fixture.device()->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE,
++                &description, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
++                IID_PPV_ARGS(texture.GetAddressOf())), "cursor replay: texture");
++            return texture;
++        };
++        const DXGI_FORMAT view_format = srgb != 0 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : kFormat;
++        for (const bool reacquire : {false, true}) {
++            std::vector<ComPtr<ID3D12Resource>> sources(frames);
++            std::vector<ID3D12Resource*> source_pointers(frames);
++            for (UINT frame = 0; frame < frames; ++frame) {
++                sources[frame] = create_replay_texture();
++                upload_pattern(fixture, sources[frame].Get(), images[frame]);
++                source_pointers[frame] = sources[frame].Get();
++            }
++            std::array<ComPtr<ID3D12Resource>, 2> currents{create_replay_texture(), create_replay_texture()};
++            std::array<ComPtr<ID3D12Resource>, 2> synthetics{create_replay_texture(), create_replay_texture()};
++            std::array<ID3D12Resource*, 2> current_pointers{currents[0].Get(), currents[1].Get()};
++            std::array<ID3D12Resource*, 2> synthetic_pointers{synthetics[0].Get(), synthetics[1].Get()};
++            auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++            require_hresult(history->initialize(fixture.device(), fixture.queue(),
++                std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
++                D3D12_RESOURCE_STATE_RENDER_TARGET), "cursor replay: history");
++            xrfg::D3D12FrameSynthesizer synthesizer;
++            require_hresult(synthesizer.initialize(fixture.device(), fixture.queue(), history,
++                std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
++                std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
++                view_format, D3D12_RESOURCE_STATE_RENDER_TARGET), "cursor replay: synthesizer");
++            xrfg::D3D12SmoothCursorOptions options{};
++            options.enabled = true;
++            options.templates = dcs.templates;
++            options.follow_mouse = reacquire;
++            static_cast<void>(enlarge);
++            require(synthesizer.set_smooth_cursor(options) == S_OK, "cursor replay: set_smooth_cursor");
++            ReprojectionViews views = make_reprojection_views();
++            for (UINT eye = 0; eye < kEyeCount; ++eye)
++                views[eye].image_rect = xrfg::D3D12ImageRect{0, 0, width, height};
++            for (UINT frame = 0; frame < frames; ++frame) {
++                synthesizer.note_cursor_position(mouse[frame][0], mouse[frame][1],
++                    400'000U + static_cast<std::uint64_t>(frame) * 22U);
++                xrfg::D3D12HistoryCaptureTicket capture{};
++                xrfg::D3D12FrameSynthesisTicket ticket{};
++                require_hresult(history->capture(frame, &capture), "cursor replay: capture");
++                require_hresult(history->commit(capture), "cursor replay: commit");
++                require_hresult(frame == 0
++                        ? synthesizer.submit_prime(capture, views, 0, &ticket)
++                        : synthesizer.submit_pair(capture, views, views, 0, frame % 2U, &ticket),
++                    "cursor replay: submission");
++                require_frame_start_gate(synthesizer, "cursor replay: frame-start gate");
++            }
++            require_hresult(synthesizer.wait_for_idle(), "cursor replay: idle");
++            xrfg::D3D12SmoothCursorStats stats{};
++            require_hresult(synthesizer.smooth_cursor_stats(&stats), "cursor replay: stats");
++            require_hresult(history->invalidate(), "cursor replay: history invalidate");
++            std::cout << "cursor replay " << name << " " << width << " x " << height << (srgb != 0 ? " sRGB" : "")
++                      << " (enlarge " << enlarge
++                      << "), cursor_follow_mouse " << (reacquire ? "on" : "off") << ": pairs " << stats.pairs
++                      << " drawn " << stats.drawn << ", not found " << stats.not_found << " low score "
++                      << stats.low_score << " ambiguous " << stats.ambiguous << " stereo " << stats.stereo
++                      << " jump " << stats.jump << " busy " << stats.busy << ", acquired " << stats.acquired
++                      << " tracked " << stats.tracked << "; last weak: template " << (stats.last_weak & 0xffU)
++                      << " scale step " << ((stats.last_weak >> 8U) & 0xffU) << " score "
++                      << static_cast<float>((stats.last_weak >> 16U) & 0xffU) / 255.0F << " look-alike "
++                      << static_cast<float>(stats.last_weak >> 24U) / 255.0F << '\n';
++        }
++    }
++}
++
++// >>> cursor replay full
++// DCS Control (0082): XRFG_TEST_CURSOR_REPLAY_FULL=<folder> (with
++// XRFG_TEST_DCS_BIN), NVIDIA hardware: real captured frame crops through the
++// detection as the flight ran it. Each crop sits at its origin inside an
++// image of the swapchain's real size (the gate's rules scale with it); one
++// swapchain, one view and one detection per eye, as DCS submits; the real
++// mouse positions; a warm-up before the judged pairs (the file's `order` and
++// `judge`). Two layers: the periphery and the focus swapchain of an eye are
++// linked as the layer links them (periphery first). The folder is made by
++// artifacts\foveated\notes-r4\cursor-fix-tools\make_replay_full.py. Nothing
++// is required: one line per pair and unit is printed (what the gate did and
++// what each frame's detection held), and with XRFG_TEST_CURSOR_REPLAY_OUT
++// the judged pairs' synthetics around the cursor are written there.
++// XRFG_TEST_CURSOR_REPLAY_KEYS: "0", "1" or "01" (default) = follow_mouse.
++struct ReplayUnit {
++    std::string layer;
++    int eye{};
++    UINT full_width{}, full_height{}, crop_width{}, crop_height{}, origin_x{}, origin_y{};
++    int srgb{};
++    std::array<float, 4> tangents{};
++    std::array<int, 3> fill{};
++    std::string file;
++    std::string backdrop; // "-" or a file of two whole frames, alternated under the crop
++    std::vector<std::uint8_t> pixels;
++    std::map<UINT, std::array<UINT, 4>> windows;
++};
++
++struct ReplayPipeline {
++    std::array<ComPtr<ID3D12Resource>, 3> sources;
++    std::array<ComPtr<ID3D12Resource>, 2> backdrops;
++    std::array<ComPtr<ID3D12Resource>, 2> currents;
++    std::array<ComPtr<ID3D12Resource>, 2> synthetics;
++    std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
++    std::unique_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
++    xrfg::D3D12SmoothCursorStats last{};
++    std::filesystem::path captures;
++    UINT capture_index{};
++    std::uint64_t judged{}, drawn{};
++    // The composition's GPU time of every pair (it holds the cursor's redraw), and whether the pair was redrawn.
++    std::vector<std::uint64_t> composition;
++    std::vector<bool> redrawn;
++    void take_timings() {
++        xrfg::D3D12NvidiaGpuTiming timing{};
++        while (synthesizer->consume_nvidia_gpu_timing(&timing) == S_OK)
++            if (timing.previous_serial != 0) composition.push_back(timing.composition_microseconds);
++    }
++};
++
++void replay_copy_in(D3D12WarpFixture& fixture, ID3D12Resource* texture, const std::uint8_t* pixels, UINT width,
++    UINT height, UINT at_x, UINT at_y) {
++    const UINT pitch = (width * kBytesPerPixel + 255U) & ~255U;
++    ComPtr<ID3D12Resource> upload = create_buffer(fixture, D3D12_HEAP_TYPE_UPLOAD,
++        static_cast<UINT64>(pitch) * height, D3D12_RESOURCE_STATE_GENERIC_READ);
++    void* mapped = nullptr;
++    const D3D12_RANGE no_read{0, 0};
++    require_hresult(upload->Map(0, &no_read, &mapped), "cursor replay full: Map(upload)");
++    for (UINT y = 0; y < height; ++y)
++        std::memcpy(static_cast<std::byte*>(mapped) + static_cast<std::size_t>(y) * pitch,
++            pixels + static_cast<std::size_t>(y) * width * kBytesPerPixel,
++            static_cast<std::size_t>(width) * kBytesPerPixel);
++    upload->Unmap(0, nullptr);
++    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
++        const D3D12_RESOURCE_BARRIER in = transition_barrier(texture, D3D12_RESOURCE_STATE_RENDER_TARGET,
++            D3D12_RESOURCE_STATE_COPY_DEST);
++        list->ResourceBarrier(1, &in);
++        D3D12_TEXTURE_COPY_LOCATION source{};
++        source.pResource = upload.Get();
++        source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++        source.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_TYPELESS, width, height, 1, pitch};
++        D3D12_TEXTURE_COPY_LOCATION destination{};
++        destination.pResource = texture;
++        destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++        list->CopyTextureRegion(&destination, at_x, at_y, 0, &source, nullptr);
++        const D3D12_RESOURCE_BARRIER out = transition_barrier(texture, D3D12_RESOURCE_STATE_COPY_DEST,
++            D3D12_RESOURCE_STATE_RENDER_TARGET);
++        list->ResourceBarrier(1, &out);
++    });
++}
++
++std::vector<std::uint8_t> replay_copy_out(D3D12WarpFixture& fixture, ID3D12Resource* texture, UINT at_x, UINT at_y,
++    UINT width, UINT height) {
++    const UINT pitch = (width * kBytesPerPixel + 255U) & ~255U;
++    ComPtr<ID3D12Resource> readback = create_buffer(fixture, D3D12_HEAP_TYPE_READBACK,
++        static_cast<UINT64>(pitch) * height, D3D12_RESOURCE_STATE_COPY_DEST);
++    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
++        const D3D12_RESOURCE_BARRIER in = transition_barrier(texture, D3D12_RESOURCE_STATE_RENDER_TARGET,
++            D3D12_RESOURCE_STATE_COPY_SOURCE);
++        list->ResourceBarrier(1, &in);
++        D3D12_TEXTURE_COPY_LOCATION source{};
++        source.pResource = texture;
++        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++        D3D12_TEXTURE_COPY_LOCATION destination{};
++        destination.pResource = readback.Get();
++        destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++        destination.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_TYPELESS, width, height, 1, pitch};
++        const D3D12_BOX box{at_x, at_y, 0, at_x + width, at_y + height, 1};
++        list->CopyTextureRegion(&destination, 0, 0, 0, &source, &box);
++        const D3D12_RESOURCE_BARRIER out = transition_barrier(texture, D3D12_RESOURCE_STATE_COPY_SOURCE,
++            D3D12_RESOURCE_STATE_RENDER_TARGET);
++        list->ResourceBarrier(1, &out);
++    });
++    std::vector<std::uint8_t> result(static_cast<std::size_t>(width) * height * kBytesPerPixel);
++    void* mapped = nullptr;
++    require_hresult(readback->Map(0, nullptr, &mapped), "cursor replay full: Map(readback)");
++    for (UINT y = 0; y < height; ++y)
++        std::memcpy(result.data() + static_cast<std::size_t>(y) * width * kBytesPerPixel,
++            static_cast<const std::byte*>(mapped) + static_cast<std::size_t>(y) * pitch,
++            static_cast<std::size_t>(width) * kBytesPerPixel);
++    const D3D12_RANGE no_write{0, 0};
++    readback->Unmap(0, &no_write);
++    return result;
++}
++
++void test_cursor_replay_full(D3D12WarpFixture& fixture) {
++    std::array<wchar_t, 512> folder_text{}, dcs_bin{}, out_text{};
++    std::array<char, 8> keys_text{};
++    const DWORD folder_length = GetEnvironmentVariableW(L"XRFG_TEST_CURSOR_REPLAY_FULL", folder_text.data(),
++        static_cast<DWORD>(folder_text.size()));
++    const DWORD bin_length = GetEnvironmentVariableW(L"XRFG_TEST_DCS_BIN", dcs_bin.data(),
++        static_cast<DWORD>(dcs_bin.size()));
++    const DWORD out_length = GetEnvironmentVariableW(L"XRFG_TEST_CURSOR_REPLAY_OUT", out_text.data(),
++        static_cast<DWORD>(out_text.size()));
++    const DWORD keys_length = GetEnvironmentVariableA("XRFG_TEST_CURSOR_REPLAY_KEYS", keys_text.data(),
++        static_cast<DWORD>(keys_text.size()));
++    require(folder_length != 0 && folder_length < folder_text.size() && bin_length != 0 &&
++        bin_length < dcs_bin.size(), "cursor replay full: XRFG_TEST_CURSOR_REPLAY_FULL and XRFG_TEST_DCS_BIN");
++    const std::string keys = keys_length != 0 && keys_length < keys_text.size() ? keys_text.data() : "01";
++    const xrfg::CursorTemplateSet dcs = xrfg::load_dcs_cursor_templates(std::filesystem::path(dcs_bin.data()));
++    require(dcs.source == xrfg::CursorTemplateSource::dcs_file, "cursor replay full: the game's cursor images");
++    const std::filesystem::path folder(folder_text.data());
++    const std::filesystem::path out_folder(out_length != 0 && out_length < out_text.size() ? out_text.data() : L"");
++    const std::string stretch = folder.filename().string();
++    std::ifstream list(folder / "replay.txt");
++    UINT frames = 0, judge = 1;
++    std::vector<UINT> order;
++    std::string mode;
++    std::vector<ReplayUnit> units;
++    std::map<UINT, std::array<int, 2>> mouse;
++    for (std::string line; std::getline(list, line);) {
++        std::istringstream fields(line);
++        std::string word;
++        fields >> word;
++        if (word == "frames") {
++            fields >> frames;
++        } else if (word == "judge") {
++            fields >> judge;
++        } else if (word == "mode") {
++            fields >> mode;
++        } else if (word == "order") {
++            for (UINT value = 0; fields >> value;) order.push_back(value);
++        } else if (word == "mouse") {
++            UINT index = 0;
++            int x = 0, y = 0;
++            fields >> index >> x >> y;
++            mouse[index] = {x, y};
++        } else if (word == "unit") {
++            ReplayUnit unit;
++            fields >> unit.layer >> unit.eye >> unit.full_width >> unit.full_height >> unit.crop_width >>
++                unit.crop_height >> unit.origin_x >> unit.origin_y >> unit.srgb >> unit.tangents[0] >>
++                unit.tangents[1] >> unit.tangents[2] >> unit.tangents[3] >> unit.fill[0] >> unit.fill[1] >>
++                unit.fill[2] >> unit.file >> unit.backdrop;
++            units.push_back(std::move(unit));
++        } else if (word == "win") {
++            UINT unit = 0, position = 0;
++            std::array<UINT, 4> window{};
++            fields >> unit >> position >> window[0] >> window[1] >> window[2] >> window[3];
++            if (unit < units.size()) units[unit].windows[position] = window;
++        }
++    }
++    require(frames >= 3 && !order.empty() && !units.empty(), "cursor replay full: replay.txt");
++    const bool two_layers = mode == "two-layers";
++    for (ReplayUnit& unit : units) {
++        std::ifstream pixels(folder / unit.file, std::ios::binary);
++        unit.pixels.resize(static_cast<std::size_t>(unit.crop_width) * unit.crop_height * kBytesPerPixel * frames);
++        pixels.read(reinterpret_cast<char*>(unit.pixels.data()), static_cast<std::streamsize>(unit.pixels.size()));
++        require(static_cast<bool>(pixels), "cursor replay full: the pixel file is short: " + unit.file);
++    }
++    for (const char key : keys) {
++        const bool follow = key == '1';
++        std::vector<ReplayPipeline> pipelines(units.size());
++#ifdef XRFG_CURSOR_REPLAY_TWO_LAYERS
++        std::array<std::shared_ptr<xrfg::D3D12FoveatedLink>, 2> links{};
++#else
++        require(!two_layers, "cursor replay full: the two-layer mode is not in this tree");
++#endif
++        for (std::size_t index = 0; index < units.size(); ++index) {
++            const ReplayUnit& unit = units[index];
++            ReplayPipeline& pipeline = pipelines[index];
++            D3D12_RESOURCE_DESC description = stereo_texture_description(unit.full_width, unit.full_height);
++            description.DepthOrArraySize = 1;
++            description.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
++            const D3D12_HEAP_PROPERTIES properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
++            const auto texture = [&]() {
++                ComPtr<ID3D12Resource> created;
++                require_hresult(fixture.device()->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE,
++                    &description, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
++                    IID_PPV_ARGS(created.GetAddressOf())), "cursor replay full: texture");
++                return created;
++            };
++            std::vector<std::uint8_t> neutral(static_cast<std::size_t>(unit.full_width) * unit.full_height *
++                kBytesPerPixel);
++            for (std::size_t at = 0; at < neutral.size(); at += kBytesPerPixel) {
++                neutral[at] = static_cast<std::uint8_t>(unit.fill[0]);
++                neutral[at + 1] = static_cast<std::uint8_t>(unit.fill[1]);
++                neutral[at + 2] = static_cast<std::uint8_t>(unit.fill[2]);
++                neutral[at + 3] = 255U;
++            }
++            for (auto& source : pipeline.sources) {
++                source = texture();
++                replay_copy_in(fixture, source.Get(), neutral.data(), unit.full_width, unit.full_height, 0, 0);
++            }
++            if (!unit.backdrop.empty() && unit.backdrop != "-") {
++                std::ifstream whole(folder / unit.backdrop, std::ios::binary);
++                for (auto& backdrop : pipeline.backdrops) {
++                    whole.read(reinterpret_cast<char*>(neutral.data()), static_cast<std::streamsize>(neutral.size()));
++                    require(static_cast<bool>(whole), "cursor replay full: the backdrop file is short: " + unit.backdrop);
++                    backdrop = texture();
++                    replay_copy_in(fixture, backdrop.Get(), neutral.data(), unit.full_width, unit.full_height, 0, 0);
++                }
++            }
++            for (auto& current : pipeline.currents) current = texture();
++            for (auto& synthetic : pipeline.synthetics) synthetic = texture();
++            std::array<ID3D12Resource*, 3> source_pointers{
++                pipeline.sources[0].Get(), pipeline.sources[1].Get(), pipeline.sources[2].Get()};
++            std::array<ID3D12Resource*, 2> current_pointers{pipeline.currents[0].Get(), pipeline.currents[1].Get()};
++            std::array<ID3D12Resource*, 2> synthetic_pointers{
++                pipeline.synthetics[0].Get(), pipeline.synthetics[1].Get()};
++            pipeline.history = std::make_shared<xrfg::D3D12SwapchainHistory>();
++            require_hresult(pipeline.history->initialize(fixture.device(), fixture.queue(),
++                std::span<ID3D12Resource* const>(source_pointers.data(), source_pointers.size()),
++                D3D12_RESOURCE_STATE_RENDER_TARGET), "cursor replay full: history");
++            xrfg::D3D12NvidiaOpticalFlowOptions options{};
++#ifdef XRFG_CURSOR_REPLAY_TWO_LAYERS
++            options.foveated_layers = two_layers;
++#endif
++            pipeline.synthesizer = std::make_unique<xrfg::D3D12FrameSynthesizer>();
++            require_hresult(pipeline.synthesizer->initialize(fixture.device(), fixture.queue(), pipeline.history,
++                std::span<ID3D12Resource* const>(current_pointers.data(), current_pointers.size()),
++                std::span<ID3D12Resource* const>(synthetic_pointers.data(), synthetic_pointers.size()),
++                unit.srgb != 0 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
++                xrfg::D3D12OpticalFlowBackend::nvidia, options, true), "cursor replay full: synthesizer");
++            xrfg::D3D12SmoothCursorOptions cursor{};
++            cursor.enabled = true;
++            cursor.templates = dcs.templates;
++            cursor.follow_mouse = follow;
++#ifdef XRFG_CURSOR_REPLAY_TWO_LAYERS
++            cursor.small_sprite = two_layers && unit.layer == "periphery";
++#endif
++            pipeline.captures = std::filesystem::temp_directory_path() /
++                ("xrfg-replay-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(index) +
++                    (follow ? "-on" : "-off"));
++            std::filesystem::create_directories(pipeline.captures);
++            cursor.capture_directory = pipeline.captures;
++            cursor.capture_limit = 100000;
++            cursor.capture_interval_ms = 0;
++            require(pipeline.synthesizer->set_smooth_cursor(cursor) == S_OK, "cursor replay full: set_smooth_cursor");
++#ifdef XRFG_CURSOR_REPLAY_TWO_LAYERS
++            if (two_layers && unit.eye >= 0 && unit.eye < 2 && links[static_cast<std::size_t>(unit.eye)] == nullptr)
++                links[static_cast<std::size_t>(unit.eye)] = std::make_shared<xrfg::D3D12FoveatedLink>();
++#endif
++        }
++        for (UINT position = 0; position < order.size(); ++position) {
++            const UINT frame = order[position];
++            const std::array<int, 2> pointer = mouse[frame];
++            for (std::size_t index = 0; index < units.size(); ++index) {
++                const ReplayUnit& unit = units[index];
++                ReplayPipeline& pipeline = pipelines[index];
++                const std::size_t frame_bytes =
++                    static_cast<std::size_t>(unit.crop_width) * unit.crop_height * kBytesPerPixel;
++                if (pipeline.backdrops[0] != nullptr) {
++                    // The whole view under the crop: two real consecutive frames, alternately.
++                    ID3D12Resource* const from = pipeline.backdrops[position % 2U].Get();
++                    ID3D12Resource* const to = pipeline.sources[position % 3U].Get();
++                    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* commands) {
++                        const std::array<D3D12_RESOURCE_BARRIER, 2> in{
++                            transition_barrier(from, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE),
++                            transition_barrier(to, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST)};
++                        commands->ResourceBarrier(2, in.data());
++                        commands->CopyResource(to, from);
++                        const std::array<D3D12_RESOURCE_BARRIER, 2> out{
++                            transition_barrier(from, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
++                            transition_barrier(to, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET)};
++                        commands->ResourceBarrier(2, out.data());
++                    });
++                }
++                replay_copy_in(fixture, pipeline.sources[position % 3U].Get(),
++                    unit.pixels.data() + frame_bytes * frame, unit.crop_width, unit.crop_height, unit.origin_x,
++                    unit.origin_y);
++                xrfg::D3D12ReprojectionView view{};
++                view.pose.orientation.w = 1.0F;
++                view.pose.position.x = unit.eye == 0 ? -0.03275F : 0.03275F;
++                view.fov.angle_left = std::atan(unit.tangents[0]);
++                view.fov.angle_right = std::atan(unit.tangents[1]);
++                view.fov.angle_up = std::atan(unit.tangents[2]);
++                view.fov.angle_down = std::atan(unit.tangents[3]);
++                view.image_rect = xrfg::D3D12ImageRect{0, 0, unit.full_width, unit.full_height};
++                const std::span<const xrfg::D3D12ReprojectionView> views(&view, 1);
++#ifdef XRFG_CURSOR_REPLAY_TWO_LAYERS
++                if (two_layers) {
++                    pipeline.synthesizer->set_foveated_focus(unit.layer == "focus");
++                    pipeline.synthesizer->set_foveated_link(links[static_cast<std::size_t>(unit.eye)], true,
++                        1000U * (position + 1U));
++                }
++#endif
++                pipeline.synthesizer->note_cursor_position(pointer[0], pointer[1],
++                    500'000U + static_cast<std::uint64_t>(position) * 22U);
++                xrfg::D3D12HistoryCaptureTicket capture{};
++                xrfg::D3D12FrameSynthesisTicket ticket{};
++                require_hresult(pipeline.history->capture(position % 3U, &capture), "cursor replay full: capture");
++                require_hresult(pipeline.history->commit(capture), "cursor replay full: commit");
++                require_hresult(position == 0
++                        ? pipeline.synthesizer->submit_prime(capture, views, 0, &ticket)
++                        : pipeline.synthesizer->submit_pair(capture, views, views, 0, position % 2U, &ticket),
++                    ("cursor replay full: submission at position " + std::to_string(position) + " unit " +
++                        std::to_string(index)).c_str());
++            }
++            for (std::size_t index = 0; index < units.size(); ++index) {
++                const ReplayUnit& unit = units[index];
++                ReplayPipeline& pipeline = pipelines[index];
++                // (wait_for_idle would retire the previous frame: the next pair needs it.)
++                require_hresult(pipeline.synthesizer->wait_for_previous_submission(5000),
++                    "cursor replay full: frame-start gate");
++                xrfg::D3D12SmoothCursorStats stats{};
++                require_hresult(pipeline.synthesizer->smooth_cursor_stats(&stats), "cursor replay full: stats");
++                if (position == 0) continue;
++                // The detection's own record of this pair (its capture file).
++                std::string detail;
++                const bool enlarged = two_layers && unit.layer == "periphery"; // (no capture of an enlarged detection)
++                if (stats.pairs != pipeline.last.pairs && !enlarged) {
++                    const std::filesystem::path info = pipeline.captures /
++                        ("cursor-capture-" + std::to_string(GetCurrentProcessId()) + "-" +
++                            std::to_string(pipeline.capture_index + 1U) + "-info.txt");
++                    for (int wait = 0; wait < 400 && !std::filesystem::exists(info); ++wait) {
++                        Sleep(5);
++                        static_cast<void>(pipeline.synthesizer->smooth_cursor_stats(&stats));
++                    }
++                    if (std::filesystem::exists(info)) {
++                        Sleep(3);
++                        ++pipeline.capture_index;
++                        std::ifstream text(info);
++                        for (std::string row; std::getline(text, row);)
++                            if (row.rfind("previous:", 0) == 0 || row.rfind("current:", 0) == 0 ||
++                                row.rfind("mouse", 0) == 0 || row.rfind("record:", 0) == 0)
++                                detail += " | " + row;
++                    } else {
++                        detail = " | no capture";
++                    }
++                }
++                const char* verdict = "idle";
++                if (stats.drawn != pipeline.last.drawn) verdict = "drawn";
++                else if (stats.not_found != pipeline.last.not_found) verdict = "not-found";
++                else if (stats.low_score != pipeline.last.low_score) verdict = "low-score";
++                else if (stats.ambiguous != pipeline.last.ambiguous) verdict = "ambiguous";
++                else if (stats.stereo != pipeline.last.stereo) verdict = "stereo";
++                else if (stats.jump != pipeline.last.jump) verdict = "jump";
++                else if (stats.busy != pipeline.last.busy) verdict = "busy";
++                const bool judged = position >= judge;
++                std::cout << "RP " << stretch << " key " << (follow ? 1 : 0) << " unit " << unit.layer << "_eye"
++                          << unit.eye << " pos " << position << " frame " << order[position - 1U] << ">" << frame
++                          << (judged ? " J " : " W ") << verdict << " own "
++#ifdef XRFG_CURSOR_REPLAY_TWO_LAYERS
++                          << (stats.follow_own - pipeline.last.follow_own) << " in "
++                          << (stats.follow_inside - pipeline.last.follow_inside) << " cut "
++                          << (stats.follow_cut - pipeline.last.follow_cut) << " out "
++                          << (stats.follow_outside - pipeline.last.follow_outside) << " picked "
++#else
++                          << 0 << " in " << 0 << " cut " << 0 << " out " << 0 << " picked "
++#endif
++                          << (stats.picked - pipeline.last.picked) << detail << '\n';
++                if (judged && stats.pairs != pipeline.last.pairs) {
++                    ++pipeline.judged;
++                    pipeline.drawn += stats.drawn - pipeline.last.drawn;
++                }
++                if (stats.pairs != pipeline.last.pairs) pipeline.redrawn.push_back(stats.drawn != pipeline.last.drawn);
++                pipeline.take_timings();
++                pipeline.last = stats;
++                const auto window = unit.windows.find(position);
++                if (judged && !out_folder.empty() && window != unit.windows.end()) {
++                    const std::array<UINT, 4>& w = window->second;
++                    const std::vector<std::uint8_t> bytes = replay_copy_out(fixture,
++                        pipeline.synthetics[0].Get(), w[0], w[1], w[2], w[3]);
++                    std::filesystem::create_directories(out_folder / stretch);
++                    std::ofstream file(out_folder / stretch / (unit.layer + "_eye" + std::to_string(unit.eye) +
++                        "_key" + (follow ? "1" : "0") + "_pos" + std::to_string(position) + ".rgba"),
++                        std::ios::binary);
++                    file.write(reinterpret_cast<const char*>(bytes.data()),
++                        static_cast<std::streamsize>(bytes.size()));
++                }
++            }
++        }
++        for (std::size_t index = 0; index < units.size(); ++index) {
++            ReplayPipeline& pipeline = pipelines[index];
++            require_hresult(pipeline.synthesizer->wait_for_idle(), "cursor replay full: idle");
++            xrfg::D3D12SmoothCursorStats stats{};
++            require_hresult(pipeline.synthesizer->smooth_cursor_stats(&stats), "cursor replay full: stats");
++            std::cout << "RS " << stretch << " key " << (follow ? 1 : 0) << " unit " << units[index].layer << "_eye"
++                      << units[index].eye << " judged " << pipeline.judged << " drawn " << pipeline.drawn
++                      << " | all pairs " << stats.pairs << " drawn " << stats.drawn << " not found "
++                      << stats.not_found << " low score " << stats.low_score << " ambiguous " << stats.ambiguous
++                      << " stereo " << stats.stereo << " jump " << stats.jump << " busy " << stats.busy
++                      << " acquired " << stats.acquired << " tracked " << stats.tracked << " timed "
++                      << stats.timed_pairs << " us " << stats.detection_microseconds;
++            pipeline.take_timings();
++            {
++                // Composition time (it holds the redraw), pairs redrawn against the others; the first 24 pairs left out.
++                std::vector<std::uint64_t> with, without;
++                const std::size_t count = std::min(pipeline.composition.size(), pipeline.redrawn.size());
++                for (std::size_t pair = 24; pair < count; ++pair)
++                    (pipeline.redrawn[pair] ? with : without).push_back(pipeline.composition[pair]);
++                const auto median = [](std::vector<std::uint64_t>& values) -> std::uint64_t {
++                    if (values.empty()) return 0;
++                    std::sort(values.begin(), values.end());
++                    return values[values.size() / 2];
++                };
++                std::cout << " | composition median us redrawn " << median(with) << " (" << with.size() << ") other "
++                          << median(without) << " (" << without.size() << ") timings " << pipeline.composition.size()
++                          << " pairs " << pipeline.redrawn.size();
++            }
++            std::cout << '\n';
++            require_hresult(pipeline.history->invalidate(), "cursor replay full: history invalidate");
++            pipeline.synthesizer.reset();
++            std::error_code ignored;
++            std::filesystem::remove_all(pipeline.captures, ignored);
++        }
++    }
++}
++
++// <<< cursor replay full
+ void test_cursor_template_decoding() {
+     // A 32-bit cursor resource as Windows stores it: hotspot, header,
+     // bottom-up BGRA rows, then the AND mask.
+@@ -5427,6 +6133,7 @@ void bench_smooth_cursor(D3D12WarpFixture& fixture, UINT width, UINT height) {
+         if (index == 1) {
+             xrfg::D3D12SmoothCursorOptions options{};
+             options.enabled = true;
++            options.follow_mouse = GetEnvironmentVariableA("XRFG_TEST_CURSOR_FOLLOW", nullptr, 0) != 0; // (0082)
+             // The full cockpit set's worth of templates: the built-in arrow
+             // and fifteen shifted copies, so the cost is the real one.
+             for (UINT i = 0; i < xrfg::kD3D12MaxCursorTemplates; ++i) {
+@@ -6284,6 +6991,12 @@ int main() {
+             std::cout << "D3D12 NVIDIA smooth cursor tests passed\n";
+             return 0;
+         }
++        if (GetEnvironmentVariableA("XRFG_TEST_CURSOR_REPLAY_FULL", nullptr, 0)) {
++            D3D12WarpFixture replay_fixture(true);
++            test_cursor_replay_full(replay_fixture);
++            replay_fixture.require_no_debug_errors();
++            return 0;
++        }
+         if (GetEnvironmentVariableA("XRFG_TEST_TRIPLE_BENCH", nullptr, 0)) {
+             D3D12WarpFixture bench_fixture(true);
+             bench_triple_composition(bench_fixture, 2712, 2678);
+@@ -6326,6 +7039,8 @@ int main() {
+         test_rotation_aware_synthesis_beats_uncompensated_flow(fixture);
+         test_cursor_template_decoding(); // DCS VR Control (0010)
+         test_smooth_cursor(fixture); // 0010
++        test_cursor_reacquire(fixture); // DCS Control (0082)
++        test_cursor_replay(fixture); // optional: XRFG_TEST_CURSOR_REPLAY
+         test_submission_backpressure_and_recovery(
+             fixture,
+             xrfg::D3D12OpticalFlowBackend::fidelity_fx);

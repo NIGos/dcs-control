@@ -1,0 +1,44 @@
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 85f576b..78a3872 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -4986,16 +4986,24 @@ void retire_async_arm(const std::shared_ptr<SwapchainState>& state) noexcept {
+     const std::shared_ptr<SwapchainState>& state, bool force) noexcept {
+     try {
+         const std::shared_ptr<SessionState>& session = state->session;
+-        if ((!session->async_arm && !force) ||
+-            session->graphics_binding != SessionGraphicsBinding::d3d12 ||
+-            state->async_arm_failed) {
+-            return std::nullopt;
+-        }
++        // Bugfix round (review of 2026-11-15): an arming thread started for
++        // this swapchain is looked at first, whoever asks. Under
++        // foveated_arm_in_parallel the thread is started by a frame with
++        // several swapchains (`force`); a frame that then names this
++        // swapchain alone (one projection layer: a loading screen) comes
++        // here without `force`, and went on to arm the swapchain a second
++        // time on the frame path beside the thread, whose generation was
++        // then never taken in.
+         std::shared_ptr<AsyncArmState> arm;
+         {
+             std::scoped_lock lock(state->mutex);
+             arm = state->async_arm;
+         }
++        if ((!arm && !session->async_arm && !force) ||
++            session->graphics_binding != SessionGraphicsBinding::d3d12 ||
++            state->async_arm_failed) {
++            return std::nullopt;
++        }
+         if (!arm) {
+             arm = std::make_shared<AsyncArmState>();
+             // Taken here, on the thread that changes them.
+@@ -5101,7 +5109,8 @@ void retire_async_arm(const std::shared_ptr<SwapchainState>& state) noexcept {
+         }
+         // A history made by the thread is the one its synthesizer reads; one
+         // published meanwhile by another path would leave captures going
+-        // elsewhere (no path does while the thread runs, but never mixed).
++        // elsewhere (no path does while the thread runs: a frame that finds
++        // the thread waits for it here, see above; but never mixed).
+         bool taken = true;
+         if (inputs.history_new) {
+             std::scoped_lock lock(state->mutex);

@@ -1,11 +1,14 @@
 # 0.6.7 preview
 
-**Foveated frame generation (experimental).** A new switch on the Frame generation page. With it, frames are generated for the focus area and for the rest of the view separately, instead of for the whole image: about half the GPU time for generated frames and 4 GB less video memory on the test PC. It needs the bundled Quad Views, the Pimax route and NVIDIA frame generation. Off by default; a flight starts with a slightly longer hitch. Tell me how the edge of the focus area looks, and fast eye moves.
+**Foveated frame generation (experimental).** A new switch on the Frame generation page. With it, frames are generated for the focus area and for the rest of the view separately, instead of for the whole image: about half the GPU time for generated frames and 4 GB less video memory on the test PC. It needs the bundled Quad Views, the Pimax route and NVIDIA frame generation. Off by default; a flight starts with a slightly longer hitch. It helps most with a small focus area; with a very large one it can cost more than it saves. Tell me how the edge of the focus area looks, and fast eye moves.
+
+**Smooth mouse cursor now works in the cockpit.** It rarely recognised DCS's yellow cockpit cursor, so generated frames still showed it faded between two places. It now follows the mouse to find it: in test flights the cursor was redrawn in nearly every generated frame over the sky and the HUD, less often over bright panels. It works with foveated frame generation too.
 
 **Go back to the previous version.** If an update gives you trouble, **Help & support** now has **Go back** under Updates: it puts DCS back to stock, then installs the version you had before from its own signed setup (kept on your PC for a month after an update, otherwise downloaded again) and restarts. Your settings return to how they were in that version; the ones you changed since are kept in `%LOCALAPPDATA%\DcsControl\versions`, and presets you saved since come back when you update again. One step back only, and not to versions before 0.6.3. The update you left is not offered again by itself; **Check now** still shows it. Coming from 0.6.6, the previous version is downloaded and its own update banner returns after a few hours.
 
 **Fixes:**
 - With **Smoothness buffer** on, a short run of heavy frames (opening the F10 map, for example) could leave DCS at about 41 FPS instead of 45 with repeated frames, for up to a minute. Frame generation now recovers at once.
+- With foveated frame generation, a loading screen at the wrong moment while a flight started could leave the whole flight without generated frames.
 
 # 0.6.6 preview
 
