@@ -1,0 +1,86 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4ee42a1..d61161b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1948,3 +1948,81 @@ if(WIN32 AND EXISTS "${XRFG_OPENVR_INCLUDE_DIR}/openvr.h")
+             WIN32_LEAN_AND_MEAN)
+     endif()
+ endif()
++
++# DCS Control (0091): two ctest labels, so that the build script names no test.
++#   alone  - the test runs in the second phase, one at a time with no neighbour: every test that measures pacing, and
++#            the correctness tests that were given a quiet machine on purpose (two_layers_*, async_arm_*, release_offset_*).
++#   pacing - also in the second phase, and its verdict is a pacing measure (deadlines, missed slots, the time of a 408)
++#            that CPU contention can fail: the build script may run it again, up to 3 times in all.
++# A test with `alone` and without `pacing` is never run again: a failure there is a fault in the layer. The two_layers_*
++# tests check which image, role and alpha a layer names and warm_private_images a start-up record: they stay out of
++# `pacing` whatever they are named. A new test that needs either label is added here; a name that is no test stops
++# the configuration.
++set(XRFG_DCS_PACING_TESTS
++        xrfg_layer_pipelined_deep_hold
++        xrfg_layer_pipelined_deep_hold_off
++        xrfg_layer_adaptive_cadence
++        xrfg_layer_adaptive_cadence_exit
++        xrfg_layer_adaptive_cadence_jitter
++        xrfg_layer_adaptive_cadence_stall
++        xrfg_layer_adaptive_cadence_idle
++        xrfg_layer_adaptive_cadence_reidle
++        xrfg_layer_adaptive_cadence_pause
++        xrfg_layer_adaptive_cadence_close
++        xrfg_layer_adaptive_cadence_shallow
++        xrfg_layer_adaptive_cadence_held
++        xrfg_layer_adaptive_cadence_limit
++        xrfg_layer_adaptive_cadence_hitch
++        xrfg_layer_adaptive_cadence_shallow_off
++        xrfg_layer_adaptive_cadence_held_off
++        xrfg_layer_adaptive_cadence_limit_off
++        xrfg_layer_adaptive_cadence_hitch_off
++        xrfg_layer_scene_change_triple
++        xrfg_layer_scene_change_adaptive)
++set(XRFG_DCS_ALONE_ONLY_TESTS
++        xrfg_layer_dcs_pipelined_wait
++        xrfg_layer_adaptive_frame_gen
++        xrfg_layer_release_offset_deep_hold_return
++        xrfg_layer_release_offset_deep_hold_return_off
++        xrfg_layer_release_offset_deep_hold_light
++        xrfg_layer_release_offset_deep_hold_lasting
++        xrfg_layer_release_offset_deep_hold_shallow
++        xrfg_layer_release_offset_adaptive_quiet_hold
++        xrfg_layer_release_offset_adaptive_quiet_triple
++        xrfg_layer_release_offset_adaptive_quiet_cadence
++        xrfg_layer_release_offset_adaptive_quiet_held
++        xrfg_layer_async_arm
++        xrfg_layer_async_arm_off
++        xrfg_layer_async_arm_warm_private_images
++        xrfg_layer_async_arm_warm_private_images_off
++        xrfg_layer_two_layers_deep_hold_off
++        xrfg_layer_two_layers_deep_hold_plain
++        xrfg_layer_two_layers_deep_hold_plain_twin
++        xrfg_layer_two_layers_deep_hold_2x
++        xrfg_layer_two_layers_deep_hold_3x
++        xrfg_layer_two_layers_deep_hold_3x_twin
++        xrfg_layer_two_layers_deep_hold_auto
++        xrfg_layer_two_layers_deep_hold_arming_single
++        xrfg_layer_two_layers_deep_hold_roles
++        xrfg_layer_two_layers_deep_hold_release_offset
++        xrfg_layer_adaptive_lazy_slot
++        xrfg_layer_adaptive_frame_gen_cadence_off
++        xrfg_layer_adaptive_throughput_down
++        xrfg_layer_adaptive_throughput_gpu
++        xrfg_layer_adaptive_2x_default
++        xrfg_layer_adaptive_2x_steamvr-presenter
++        xrfg_layer_adaptive_2x_flight-simulator
++        xrfg_layer_adaptive_2x_dcs
++        xrfg_layer_triple_deep_steady
++        xrfg_layer_triple_deep_jitter
++        xrfg_layer_triple_deep_quad
++        xrfg_layer_triple_deep_shrink)
++if(TEST xrfg_layer_adaptive_cadence)
++    foreach(XRFG_DCS_TEST IN LISTS XRFG_DCS_PACING_TESTS XRFG_DCS_ALONE_ONLY_TESTS)
++        if(NOT TEST ${XRFG_DCS_TEST})
++            message(FATAL_ERROR "DCS Control: labelled test ${XRFG_DCS_TEST} is not registered")
++        endif()
++    endforeach()
++    set_property(TEST ${XRFG_DCS_PACING_TESTS} APPEND PROPERTY LABELS pacing alone)
++    set_property(TEST ${XRFG_DCS_ALONE_ONLY_TESTS} APPEND PROPERTY LABELS alone)
++endif()
