@@ -1,4 +1,10 @@
 #Requires -Version 7
+# -LocalOnly '<why>': a build for this machine only. When the second test phase does not pass (a pacing test fails 3
+# times, or DCSC_SKIP_TIMING_TESTS=1 skips the phase) the build ends with a local-only stamp carrying <why> and the
+# failed tests, instead of stopping without one. build-release.ps1 refuses a local-only stamp (scripts/build-stamp.ps1),
+# so nothing built this way can be published, and no stamp has to be written by hand. The first phase must still pass.
+# When everything passes the stamp is a full one, -LocalOnly or not.
+param([string]$LocalOnly)
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $sdkRoot = Join-Path $workspaceRoot 'external/ofxr/external/FidelityFX-SDK-v1.1.4'
@@ -148,7 +154,8 @@ if ($env:DCSC_SKIP_TIMING_TESTS -eq '1') {
     # An intermediate build while a game is running (the pacing tests need a quiet CPU): no stamp, so
     # build-release.ps1 refuses this DLL until a build with the pacing tests has passed.
     Write-Host 'Pacing tests skipped (DCSC_SKIP_TIMING_TESTS=1): this build is not stamped for a release.'
-    Remove-Item -LiteralPath (Get-BuildStampPath 'ofxr') -Force -ErrorAction SilentlyContinue
+    if ($LocalOnly) { Save-BuildStamp 'ofxr' -LocalOnly "$LocalOnly (pacing tests skipped)" }
+    else { Remove-Item -LiteralPath (Get-BuildStampPath 'ofxr') -Force -ErrorAction SilentlyContinue }
     return
 }
 # The second phase. These tests run the layer on the WARP software device against a fake runtime with a 10 ms frame
@@ -251,7 +258,14 @@ if ($LASTEXITCODE -ne 0) {
         Write-Host "  $($entry.Name): $outcome"
     }
     $broken = @($retried | Where-Object { -not $_.PassedAt })
-    if ($broken.Count) { throw "OFXR fork tests failed in the second phase: $(($broken | ForEach-Object Name) -join ', ')." }
+    if ($broken.Count) {
+        $brokenNames = ($broken | ForEach-Object Name) -join ', '
+        if (-not $LocalOnly) { throw "OFXR fork tests failed in the second phase: $brokenNames." }
+        Add-Content -LiteralPath $retryLog -Encoding utf8 -Value ('{0} local-only stamp written by the build script: {1} (failed: {2}); not for publishing' -f
+            (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $LocalOnly, $brokenNames)
+        Save-BuildStamp 'ofxr' -LocalOnly "$LocalOnly (failed: $brokenNames)"
+        return
+    }
 } else {
     Write-Host 'OFXR fork pacing tests, second phase: all passed at the first attempt, nothing retried.'
 }

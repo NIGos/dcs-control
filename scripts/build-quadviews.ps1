@@ -1,4 +1,9 @@
 #Requires -Version 7
+# -LocalOnly '<why>': a build for this machine only. When one of the tests that follow the build fails, the build ends
+# with a local-only stamp carrying <why> and the failure, instead of stopping without one. build-release.ps1 refuses a
+# local-only stamp (scripts/build-stamp.ps1), so nothing built this way can be published. The build itself and the
+# check of the DLL's content must still pass. When everything passes the stamp is a full one, -LocalOnly or not.
+param([string]$LocalOnly)
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $quadRoot = Join-Path $workspaceRoot 'external/quadviews'
@@ -3141,6 +3146,8 @@ $builtBytes = [IO.File]::ReadAllBytes($builtDll)
 foreach ($builtText in @([Text.Encoding]::ASCII.GetString($builtBytes), [Text.Encoding]::Unicode.GetString($builtBytes), [Text.Encoding]::Unicode.GetString($builtBytes, 1, $builtBytes.Length - 1))) {
     if ($builtText.IndexOf($repoRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0) { throw "The Quad Views DLL still contains $repoRoot." }
 }
+. (Join-Path $PSScriptRoot 'build-stamp.ps1')
+try {
 # The composition with our performance edits against the same shaders without them, on this machine's GPU (WARP
 # without one): every pixel identical for the round and rectangular focus area, with and without sharpening. With Far
 # depth built in, the composition with its constants at 0 (and a field bound that must not be read) against the shader
@@ -3176,5 +3183,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Perception test failed.' }
 # Half-size images and the GPU cost reported, not asserted: this build is also run with DCS flying, where timings say
 # nothing about the code (scripts/build-depthwarp-test.ps1 -Perf asserts them on an idle GPU).
 & (Join-Path $PSScriptRoot 'build-depthwarp-test.ps1') -Quick
+} catch {
+    # Without -LocalOnly a failed test stops the build as before. With it: the first failure ends the tests (the ones
+    # after it did not run) and the stamp says so.
+    if (-not $LocalOnly) { throw }
+    Write-Host "Quad Views test failed: $($_.Exception.Message)"
+    Save-BuildStamp 'quadviews' -LocalOnly "$LocalOnly (failed: $($_.Exception.Message))"
+    return
+}
 # Built and tested: build-release.ps1 ships this DLL only while its sources match this stamp.
-. (Join-Path $PSScriptRoot 'build-stamp.ps1'); Save-BuildStamp 'quadviews'
+Save-BuildStamp 'quadviews'
