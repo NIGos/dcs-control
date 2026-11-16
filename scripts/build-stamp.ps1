@@ -27,14 +27,28 @@ function Get-BuildInputsFingerprint([string]$Name) {
     return [Convert]::ToHexString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))))
 }
 function Get-BuildStampPath([string]$Name) { Join-Path (Split-Path -Parent $PSScriptRoot) "artifacts/build-stamps/$Name.txt" }
-# A stamp is the inputs' fingerprint on its first line. A LOCAL-ONLY stamp has a second line, "local-only <date> <why>":
+# A stamp is the inputs' fingerprint on its first line. A LOCAL-ONLY stamp also has a line, "local-only <date> <why>":
 # the component was built from these inputs but did not pass everything a release asks (a pacing test that failed, tests
 # skipped while a game was running). It is the marked form of what was otherwise done by editing the stamp by hand:
 # Assert-BuildStampCurrent refuses it unless the caller says -AllowLocalOnly, which a build to publish never does.
+# Every stamp also has a line "toolset <versions>": the compiler the component was built with (Get-BuildToolset). It is
+# a record, not a condition: two builds of the same inputs give the same bytes only with the same toolset, and the line
+# says which one a binary came from. Nothing compares it.
+function Get-BuildToolset {
+    $wrapper = Join-Path $PSScriptRoot 'msvc.cmd'
+    $tools = (& $wrapper cmd /c 'echo %VCToolsVersion%;%WindowsSDKVersion%' 2>$null | Select-Object -Last 1)
+    $banner = (& $wrapper cl 2>&1 | ForEach-Object { "$_" } | Where-Object { $_ -match 'Version\s+[\d.]+' } | Select-Object -First 1)
+    $vc, $sdk = "$tools".Trim() -split ';', 2
+    $cl = if ("$banner" -match 'Version\s+([\d.]+)') { $Matches[1] } else { 'unknown' }
+    if (-not $vc -or $vc -match '%') { $vc = 'unknown' }
+    $sdk = if ($sdk -and $sdk -notmatch '%') { $sdk.Trim().TrimEnd('\') } else { 'unknown' }
+    return "MSVC $vc, cl $cl, Windows SDK $sdk"
+}
 function Save-BuildStamp([string]$Name, [string]$LocalOnly) {
     $stamp = Get-BuildStampPath $Name
     New-Item -ItemType Directory -Path (Split-Path -Parent $stamp) -Force | Out-Null
     $lines = @(Get-BuildInputsFingerprint $Name)
+    $lines += 'toolset ' + (Get-BuildToolset)
     if ($LocalOnly) {
         $why = ($LocalOnly -replace '\s+', ' ').Trim()
         $lines += 'local-only {0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm'), $why
@@ -42,14 +56,20 @@ function Save-BuildStamp([string]$Name, [string]$LocalOnly) {
     }
     Set-Content -LiteralPath $stamp -Value $lines -Encoding ascii
 }
-# Fingerprint = the first line (null without a stamp); LocalOnly = the text after "local-only " (null for a full stamp).
+# Fingerprint = the first line (null without a stamp); LocalOnly = the text after "local-only " (null for a full stamp);
+# Toolset = the text after "toolset " (null in a stamp written before the line existed). Any other line makes the stamp
+# unreadable, which counts as local-only.
 function Get-BuildStamp([string]$Name) {
     $stamp = Get-BuildStampPath $Name
     $lines = @(if (Test-Path -LiteralPath $stamp) { Get-Content -LiteralPath $stamp | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
-    $local = @($lines | Select-Object -Skip 1 | Where-Object { $_ -like 'local-only*' }) | Select-Object -First 1
+    $rest = @($lines | Select-Object -Skip 1)
+    $local = @($rest | Where-Object { $_ -like 'local-only*' }) | Select-Object -First 1
+    $toolset = @($rest | Where-Object { $_ -like 'toolset *' }) | Select-Object -First 1
+    $unknown = @($rest | Where-Object { $_ -notlike 'local-only*' -and $_ -notlike 'toolset *' })
     [pscustomobject]@{
         Fingerprint = if ($lines.Count) { $lines[0] } else { $null }
-        LocalOnly   = if ($local) { ($local -replace '^local-only\s*', '') } elseif ($lines.Count -gt 1) { 'unreadable second line' } else { $null }
+        LocalOnly   = if ($local) { ($local -replace '^local-only\s*', '') } elseif ($unknown.Count) { 'unreadable line in the stamp' } else { $null }
+        Toolset     = if ($toolset) { ($toolset -replace '^toolset\s*', '') } else { $null }
     }
 }
 function Assert-BuildStampCurrent([string]$Name, [switch]$AllowLocalOnly) {
