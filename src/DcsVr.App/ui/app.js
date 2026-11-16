@@ -45,12 +45,16 @@ const num = value => String(Number(Number(value).toFixed(4)));
 /** A profile's own focus values in Pimax Play's Quick units, converted exactly like Pimax Quick (Pimax stores 4 decimals):
  *  Horizontal/Vertical FOV q is a focus q of the view (the percentage Pimax Play shows); Center Resolution c is a pixel density of c / 100
  *  (120% → 1.2); Peripheral Resolution r is a density of 0.01 + 0.98 × (r − 1) / 99 (15% → 0.1486). */
+// <uses-rules>
 const fixed4 = v => Number(v.toFixed(4));
+/** Twins of PimaxPlayUnits.QuickFovFromShare, ShareFromQuickFov, CenterFromDensity, DensityFromCenter, PeripheralPercent
+ *  and PeripheryFromPercent. */
 const PIMAX = {
   quickFromShare: s => s * 100, shareFromQuick: q => fixed4(q * .01),
   centerFromDensity: d => d * 100, densityFromCenter: c => fixed4(c / 100),
   peripheralPercent: d => 1 + (d - .01) / .98 * 99, peripheryFromPercent: v => fixed4(.01 + fixed4((v - 1) / 99) * .98)
 };
+// </uses-rules>
 /** Shown like Pimax Play shows its sliders: whole percent, rounded half up. Stored values change only when edited. */
 const whole = v => Math.round(v);
 const profileQuick = p => `${whole(PIMAX.quickFromShare(p.foveaWidth))}% × ${whole(PIMAX.quickFromShare(p.foveaHeight))}% · ${whole(PIMAX.centerFromDensity(p.quadFocusScale))}% · ${whole(PIMAX.peripheralPercent(p.peripheralScale))}%`;
@@ -527,7 +531,7 @@ function keyProblem([vk,mods]) {
 }
 const HOTKEYS = {
   neuralToggleKey:{others:['diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey','colorModeKey'],used:p => p.neuralRendering,name:'DLSS 5',fallback:'Ctrl+Shift+F12'},
-  diagnosticOverlayKey:{others:['neuralToggleKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey','colorModeKey'],used:p => !p.desktop && (p.frameGen !== 'Off' || p.headsetPanel),name:'headset panel',fallback:'Alt+Shift+F12'},
+  diagnosticOverlayKey:{others:['neuralToggleKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey','colorModeKey'],used:p => headsetPanelWanted(p),name:'headset panel',fallback:'Alt+Shift+F12'},
   engineToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey','colorModeKey'],used:p => p.engineOptimizations,name:'Engine Optimizations',fallback:'122:6'},
   pupilShiftToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','depthBoostToggleKey','farDepthToggleKey','colorModeKey'],used:p => usesPupilShift(p),name:'Pupil shift',fallback:'121:5'},
   depthBoostToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','farDepthToggleKey','colorModeKey'],used:p => usesDepthBoost(p),name:'Depth boost',fallback:'121:6'},
@@ -598,6 +602,18 @@ const nr = p => p.neuralRendering, flow = p => p.frameGen === 'Nvidia', quad = p
 const usesAdaptiveCadence = p => Boolean(p.frameGen !== 'Off' && !p.desktop && p.frameGenAdaptiveCadence && p.frameGenFactor === 0);
 /** The refresh rate divided by this is what DCS should render (FramePacing.CapDivider). */
 const capDivider = p => usesAdaptiveCadence(p) ? 1 : p.frameGen === 'Off' ? 1 : p.frameGenFactor === 3 ? 3 : 2;
+/** The headset panel is asked for: always with frame generation, else by its own switch. Its settings and its key can
+ *  be edited then (no C# twin: it only decides which controls are greyed out). */
+const headsetPanelWanted = p => Boolean(!p.desktop && (p.frameGen !== 'Off' || p.headsetPanel));
+/** The headset panel can be shown in this flight (VrProfile.UsesHeadsetPanel): without frame generation OFXR is loaded
+ *  for it only when its key is set or it is visible at start. */
+const usesHeadsetPanel = p => Boolean(!p.desktop && (p.frameGen !== 'Off' || (p.headsetPanel && (p.diagnosticOverlayAtStart || parseKey(p.diagnosticOverlayKey ?? 'Alt+Shift+F12')?.[0]))));
+/** Periphery stability runs (VrProfile.UsesPeripheryStability) and Far depth runs (VrProfile.UsesFarDepth). */
+const usesPeripheryStability = p => Boolean(p.peripheryStability && !p.desktop && quad(p));
+const usesFarDepth = p => Boolean(p.farDepth && !p.desktop && quad(p) && p.engineOptimizations);
+/** The recorders can run on emulated command lists (a recorder is on), and do (VrProfile.UsesRecordersEmulatedLists). */
+const emulatedListsCan = p => Boolean(p.engineOptimizations && (p.engineShadowRecorder || p.engineGBufferRecorder));
+const usesRecordersEmulatedLists = p => Boolean(p.engineRecordersEmulatedLists && emulatedListsCan(p));
 // </uses-rules>
 const coverageOwned = p => quad(p) || stereoCheeky(p);
 const boost = p => p.cpuBoost;
@@ -756,7 +772,7 @@ function buildFields() {
   field(c,'engineShadowCache','<span class="tag">EXPERIMENTAL</span> Cache distant shadows',['About 0.7 ms less GPU time; distant tree shadows sway less smoothly.','Reuses the distant shadows (about 70 m to 1.5 km) for a few frames. Off by default.'],'toggle',null,engine);
   // [Model] RecordersEmulatedLists: only where it can matter (EngineOptimizations.ShowsEmulatedListsOption): an AMD-only
   // PC, a module log with DriverCommandLists=0, or already on. Read when DCS starts, so not live.
-  field(c,'engineRecordersEmulatedLists','<span class="tag">EXPERIMENTAL</span> Multi-threaded shadows and G-buffer without driver support',['For AMD Radeon and other cards without D3D11 command lists. Smaller gain than on NVIDIA; not yet tested on Radeon.','Runs them on the command lists Windows emulates. Applies at the next DCS start. Off by default.'],'toggle',null,p => engine(p) && (p.engineShadowRecorder || p.engineGBufferRecorder),'',emulatedListsHidden);
+  field(c,'engineRecordersEmulatedLists','<span class="tag">EXPERIMENTAL</span> Multi-threaded shadows and G-buffer without driver support',['For AMD Radeon and other cards without D3D11 command lists. Smaller gain than on NVIDIA; not yet tested on Radeon.','Runs them on the command lists Windows emulates. Applies at the next DCS start. Off by default.'],'toggle',null,emulatedListsCan,'',emulatedListsHidden);
   // The parts, biggest measured gain first, folded: all on is the tested set.
   // The fold counts like the Engine row on the Overview: the terrain prefetch fix is one more part when it skips repeats.
   more = disclosure(c,'Individual optimizations','All on is best. Turn one off only if a problem points to it.',p => `${ENGINE_PARTS.filter(k => p[k]).length + (p.boostPrefetch === 'Skip' ? 1 : 0)} of ${ENGINE_PARTS.length + 1} on`);
@@ -888,7 +904,7 @@ function buildFields() {
   field(more,'gazeDofFoveaGuardDeg','Sharp zone around gaze','Nothing within this angle of where you look is ever blurred.','number',[0,5,.5],usesGazeDof,'°');
   field(more,'gazeDofPupilMm','Pupil size','0 = automatic from the scene brightness (about 2.5 mm by day, 6.5 mm at night), else 2 to 8 mm. A larger pupil blurs more.','number',[0,8,.5],usesGazeDof,'mm');
   // The in-headset panel (OFXR): with frame generation always; without it OFXR is loaded only to draw the panel.
-  const panelOn = p => !p.desktop && (p.frameGen !== 'Off' || p.headsetPanel);
+  const panelOn = headsetPanelWanted;
   c = card('panelControls','Headset panel (OSD)',['A small status panel in the headset. Its key shows or hides it in flight.','It shows FPS, DLSS 5, Engine Optimizations, Pupil shift, Depth boost and Far depth.']);
   field(c,'headsetPanel','Headset panel','Without Frame generation, turn this on to show the panel. Your frames are not touched.','toggle',null,p => !p.desktop && p.frameGen === 'Off','',p => p.frameGen !== 'Off');
   { const always = document.createElement('p'); always.className = 'fine'; always.id = 'headsetPanelAlways'; always.textContent = 'The headset panel is always on with Frame generation.'; $('setting-headsetPanel').after(always); }
@@ -1123,6 +1139,8 @@ const usesPupilShift = p => Boolean(p.pupilShift && eyeTrackedVr(p));
 const foveatedFgCan = p => Boolean(!p.desktop && p.frameGen === 'Nvidia' && p.runtime === 'Pimax' && p.quadViews === 'QuadViewsFoveated' && !String(p.quadViewsLayerDirectory ?? '').trim());
 const usesFoveatedFg = p => Boolean(p.frameGenFoveated && foveatedFgCan(p));
 const usesDepthBoost = p => Boolean(p.depthBoost && eyeTrackedVr(p));
+/** Sharp HUD runs (VrProfile.UsesHudSymbology): frame generation with Depth boost's dual camera. */
+const usesHudSymbology = p => Boolean(p.frameGenHudSymbology && p.frameGen !== 'Off' && usesDepthBoost(p));
 /** The strength of the selected Depth boost mode (VrProfile.DepthBoostActiveMax). */
 const depthMax = p => p.depthBoostMode === 'Enhanced' ? p.depthBoostMax : p.depthBoostRealisticMax;
 /** The strength the layer reaches with an eye distance of mm (1 when it is unknown): with the dual camera the world's
@@ -1888,7 +1906,7 @@ const FEATURE_GUIDE = [
    expect:'Smooth motion even when DCS can\'t keep up. With Auto and Only when needed (the default), DCS renders at the refresh rate and frames are generated only while it falls behind, so you get less latency whenever DCS keeps up.',
    cost:'A little latency while frames are generated (more in 3×); the mouse moves at DCS\'s own frame rate unless Smooth mouse cursor is on.',
    needs:'An NVIDIA RTX card, or FidelityFX on any card. Only when needed sets the DCS frame limit to the refresh rate unless you chose Custom or 300 FPS. With Engine Optimizations on, generated frames also use DCS\'s cockpit outline, depth and motion.'},
-  {section:'vr', page:'framegen', name:'Sharp HUD', impact:'Sharper HUD', on:p => p.frameGen !== 'Off' && p.frameGenHudSymbology && usesDepthBoost(p),
+  {section:'vr', page:'framegen', name:'Sharp HUD', impact:'Sharper HUD', on:usesHudSymbology,
    gives:'HUD and helmet symbols stay sharp in generated frames instead of smearing.',
    expect:'A clean HUD while you turn. The symbols update at DCS\'s own HUD rate, about 20 times a second.',
    cost:'About 0.15 ms of GPU and 160 MB of video memory.',
@@ -1909,7 +1927,7 @@ const FEATURE_GUIDE = [
    expect:'About 0.3 ms faster per frame. The edge of view can shimmer a little more on head turns.',
    cost:'A little more shimmer at the edge of view.',
    needs:'Quad Views, Engine Optimizations and DCS\'s Upscaling set to DLSS.'},
-  {section:'vr', page:'osd', name:'Headset panel', impact:'Status', vr:true, on:p => !p.desktop && (p.frameGen !== 'Off' || p.headsetPanel),
+  {section:'vr', page:'osd', name:'Headset panel', impact:'Status', vr:true, on:usesHeadsetPanel,
    gives:'A small panel in the headset: FPS and what each feature is doing right now.',
    expect:'A quick look to see that everything runs, and to compare features with their keys.',
    cost:'None.',
@@ -1920,7 +1938,7 @@ const FEATURE_GUIDE = [
    cost:'Little GPU time.',
    needs:'Quad Views with eye tracking.',
    keyPath:'depthBoostToggleKey', keyText:'off and on'},
-  {section:'perception', page:'pupil', name:'Far depth', impact:'More depth', on:p => !p.desktop && p.farDepth && quad(p) && p.engineOptimizations,
+  {section:'perception', page:'pupil', name:'Far depth', impact:'More depth', on:usesFarDepth,
    gives:'More depth for distant aircraft, ships and terrain, from about 50 m to 2 km.',
    expect:'Far objects stand out more. The cockpit and the HUD stay exactly as they are.',
    cost:'Under 0.1 ms per frame.',
@@ -1931,7 +1949,7 @@ const FEATURE_GUIDE = [
    expect:'The cockpit stays still when only your eyes move. Subtle, most visible on close panels.',
    cost:'No GPU cost.',
    needs:'Quad Views with eye tracking.'},
-  {section:'perception', page:'foveation', name:'Periphery stability', impact:'Calmer image', on:p => !p.desktop && p.peripheryStability && quad(p),
+  {section:'perception', page:'foveation', name:'Periphery stability', impact:'Calmer image', on:usesPeripheryStability,
    gives:'Calms the shimmer of thin lines (canopy frame, power lines, the horizon) outside the sharp area.',
    expect:'A quieter periphery; the sharp area is not touched.',
    cost:'Almost no GPU cost.',

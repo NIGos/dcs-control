@@ -5229,6 +5229,7 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
 {
     // Until the bridge sends the computed flags, the UI repeats these rules; this keeps the two in step.
     var eye = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked };
+    var fg = eye with { FrameGen = FrameGeneration.Nvidia, Runtime = RuntimeKind.Pimax };
     VrProfile[] table =
     [
         new(), new() { QuadViews = QuadProvider.None, FoveatedDlss = true }, new() { QuadViews = QuadProvider.QuadViewsFoveated, FoveatedDlss = true },
@@ -5246,6 +5247,25 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         eye with { PeripheryDlssPreset = PeripheryDlssPreset.E, EngineOptimizations = true }, new() { QuadViews = QuadProvider.QuadViewsFoveated, PeripheryDlssPreset = PeripheryDlssPreset.K, EngineOptimizations = true },
         new() { QuadViews = QuadProvider.PimaxNative, PeripheryDlssPreset = PeripheryDlssPreset.M, EngineOptimizations = true }, new() { QuadViews = QuadProvider.QuadViewsFoveated, PeripheryDlssPreset = PeripheryDlssPreset.E },
         new() { Desktop = true, QuadViews = QuadProvider.QuadViewsFoveated, PeripheryDlssPreset = PeripheryDlssPreset.F, EngineOptimizations = true }, eye with { QuadViewsLayerDirectory = @"C:\qv", PeripheryDlssPreset = PeripheryDlssPreset.E, EngineOptimizations = true },
+        // Foveated frame generation: on and off, each thing it needs missing in turn (NVIDIA, the Pimax route, the bundled Quad Views, VR).
+        fg with { FrameGenFoveated = true }, fg, fg with { FrameGenFoveated = true, FrameGen = FrameGeneration.FidelityFx }, fg with { FrameGenFoveated = true, FrameGen = FrameGeneration.Off },
+        fg with { FrameGenFoveated = true, Runtime = RuntimeKind.SboysSteamVr }, fg with { FrameGenFoveated = true, QuadViewsLayerDirectory = @"C:\qv" }, fg with { FrameGenFoveated = true, QuadViews = QuadProvider.PimaxNative },
+        fg with { FrameGenFoveated = true, QuadViews = QuadProvider.None }, fg with { FrameGenFoveated = true, Desktop = true },
+        // Sharp HUD: frame generation with Depth boost.
+        fg with { FrameGenHudSymbology = true, DepthBoost = true }, fg with { FrameGenHudSymbology = true }, fg with { FrameGenHudSymbology = true, DepthBoost = true, FrameGen = FrameGeneration.Off },
+        fg with { FrameGenHudSymbology = true, DepthBoost = true, Gaze = GazeMode.Fixed }, fg with { DepthBoost = true }, fg with { FrameGenHudSymbology = true, DepthBoost = true, Desktop = true },
+        // The headset panel: always with frame generation; without it by its switch, and then only with a key or visible at start.
+        new() { HeadsetPanel = true }, new() { HeadsetPanel = true, DiagnosticOverlayKey = "Off" }, new() { HeadsetPanel = true, DiagnosticOverlayKey = "0:0" }, new() { HeadsetPanel = true, DiagnosticOverlayKey = "0:0", DiagnosticOverlayAtStart = true },
+        new() { HeadsetPanel = true, DiagnosticOverlayKey = "junk" }, new() { HeadsetPanel = true, DiagnosticOverlayKey = "120:6" }, new() { DiagnosticOverlayAtStart = true }, new() { HeadsetPanel = true, Desktop = true },
+        new() { FrameGen = FrameGeneration.FidelityFx, DiagnosticOverlayKey = "Off" }, new() { FrameGen = FrameGeneration.Nvidia, Desktop = true, HeadsetPanel = true },
+        // Periphery stability and Far depth: the bundled Quad Views in VR; Far depth with Engine Optimizations.
+        eye with { PeripheryStability = true, FarDepth = true, EngineOptimizations = true }, eye with { PeripheryStability = true, FarDepth = true }, eye with { PeripheryStability = false, FarDepth = false, EngineOptimizations = true },
+        eye with { PeripheryStability = true, FarDepth = true, EngineOptimizations = true, QuadViewsLayerDirectory = @"C:\qv" }, eye with { PeripheryStability = true, FarDepth = true, EngineOptimizations = true, Desktop = true },
+        new() { QuadViews = QuadProvider.PimaxNative, PeripheryStability = true, FarDepth = true, EngineOptimizations = true },
+        // Recorders on emulated command lists: Engine Optimizations and a recorder on.
+        new() { EngineRecordersEmulatedLists = true, EngineOptimizations = true, EngineShadowRecorder = true, EngineGBufferRecorder = false }, new() { EngineRecordersEmulatedLists = true, EngineOptimizations = true, EngineShadowRecorder = false, EngineGBufferRecorder = true },
+        new() { EngineRecordersEmulatedLists = true, EngineOptimizations = true, EngineShadowRecorder = false, EngineGBufferRecorder = false }, new() { EngineRecordersEmulatedLists = true, EngineOptimizations = false, EngineShadowRecorder = true },
+        new() { EngineRecordersEmulatedLists = false, EngineOptimizations = true, EngineShadowRecorder = true },
     ];
     var dir = PathPolicy.UnderRoot(root, "uses-rules"); Directory.CreateDirectory(dir);
     var profiles = Path.Combine(dir, "profiles.json"); File.WriteAllText(profiles, "[" + string.Join(",", table.Select(JsonData.Serialize)) + "]");
@@ -5262,9 +5282,14 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
           return {eyeTrackedVr:eyeTrackedVr(p), usesPupilShift:usesPupilShift(p), usesDepthBoost:usesDepthBoost(p), usesPerceptionLayer:Boolean(usesPerceptionLayer(p)),
             usesColorKey:usesColorKey(p), colorOn:Boolean(colorOn(p)), usesGazeDof:usesGazeDof(p), gVisionOn:gVisionOn(p), usesVisualRealism:Boolean(usesVisualRealism(p)),
             usesGazePublish:Boolean(usesGazePublish(p)), usesPeripheryDlssPreset:usesPeripheryDlssPreset(p), foveatedSr:foveatedSr(p), dlss:featureState(p).dlss, stereoCheeky:stereoCheeky(p), quad:Boolean(quad(p)),
-            nativeAllowed:Boolean(nativeAllowed(p)), depthMax:depthMax(p), usesAdaptiveCadence:usesAdaptiveCadence(p), capDivider:capDivider(p), resolvedFoveatedDlss:Boolean(r.foveatedDlss), resolvedQuadViews:r.quadViews, resolvedQuadFocusAdapter:r.quadFocusAdapter};
+            nativeAllowed:Boolean(nativeAllowed(p)), depthMax:depthMax(p), usesAdaptiveCadence:usesAdaptiveCadence(p), capDivider:capDivider(p), resolvedFoveatedDlss:Boolean(r.foveatedDlss), resolvedQuadViews:r.quadViews, resolvedQuadFocusAdapter:r.quadFocusAdapter,
+            usesFoveatedFg:usesFoveatedFg(p), usesHudSymbology:usesHudSymbology(p), usesHeadsetPanel:usesHeadsetPanel(p), usesPeripheryStability:usesPeripheryStability(p), usesFarDepth:usesFarDepth(p), usesRecordersEmulatedLists:usesRecordersEmulatedLists(p)};
         })`, {profiles});
-        process.stdout.write(JSON.stringify(result));
+        // The slider values of Pimax Play, 1 to 100, through each conversion.
+        const pimax = vm.runInNewContext(regions.join('\n') + `
+        ;Array.from({length:100}, (_, i) => i + 1).map(v => ({quickFromShare:PIMAX.quickFromShare(v / 100), shareFromQuick:PIMAX.shareFromQuick(v), centerFromDensity:PIMAX.centerFromDensity(v / 50),
+          densityFromCenter:PIMAX.densityFromCenter(v * 2), peripheralPercent:PIMAX.peripheralPercent(PIMAX.peripheryFromPercent(v)), peripheryFromPercent:PIMAX.peripheryFromPercent(v)}))`, {});
+        process.stdout.write(JSON.stringify({result, pimax}));
         """);
     ProcessStartInfo start = new("node") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
     foreach (var argument in new[] { harness, Path.Combine(workspace, "src/DcsVr.App/ui/app.js"), profiles }) start.ArgumentList.Add(argument);
@@ -5280,8 +5305,19 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         Require(node.ExitCode == 0, "node: " + error);
     }
     using var json = System.Text.Json.JsonDocument.Parse(output);
-    var rows = json.RootElement.EnumerateArray().ToArray(); Require(rows.Length == table.Length, "one result per profile");
+    var rows = json.RootElement.GetProperty("result").EnumerateArray().ToArray(); Require(rows.Length == table.Length, "one result per profile");
     var mismatches = new List<string>();
+    var sliders = json.RootElement.GetProperty("pimax").EnumerateArray().ToArray(); Require(sliders.Length == 100, "one result per slider value");
+    for (var v = 1; v <= 100; v++)
+    {
+        var conversions = new Dictionary<string, double>
+        {
+            ["quickFromShare"] = PimaxPlayUnits.QuickFovFromShare(v / 100.0), ["shareFromQuick"] = PimaxPlayUnits.ShareFromQuickFov(v), ["centerFromDensity"] = PimaxPlayUnits.CenterFromDensity(v / 50.0),
+            ["densityFromCenter"] = PimaxPlayUnits.DensityFromCenter(v * 2), ["peripheralPercent"] = PimaxPlayUnits.PeripheralPercent(PimaxPlayUnits.PeripheryFromPercent(v)), ["peripheryFromPercent"] = PimaxPlayUnits.PeripheryFromPercent(v),
+        };
+        foreach (var (key, value) in conversions)
+            if (!sliders[v - 1].TryGetProperty(key, out var actual) || Math.Abs(actual.GetDouble() - value) > 1e-12) mismatches.Add($"Pimax slider {v}: {key} UI={(actual.ValueKind == System.Text.Json.JsonValueKind.Number ? actual.GetRawText() : "missing")} C#={value:R}");
+    }
     for (var i = 0; i < table.Length; i++)
     {
         var p = table[i]; var resolved = ProfileValidation.ResolveFeatures(p);
@@ -5292,6 +5328,8 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
             ["usesGazePublish"] = p.UsesGazePublish, ["usesPeripheryDlssPreset"] = p.UsesPeripheryDlssPreset, ["foveatedSr"] = p.UsesFoveatedDlss, ["dlss"] = p.UsesCheeky, ["stereoCheeky"] = p.UsesCheeky && p.QuadViews == QuadProvider.None,
             ["quad"] = p.UsesBundledQuadViews, ["nativeAllowed"] = ProfileValidation.ResolveFeatures(p with { QuadViews = QuadProvider.PimaxNative }).QuadViews == QuadProvider.PimaxNative,
             ["depthMax"] = p.DepthBoostActiveMax, ["usesAdaptiveCadence"] = p.UsesAdaptiveCadence, ["capDivider"] = (double)FramePacing.CapDivider(p), ["resolvedFoveatedDlss"] = resolved.FoveatedDlss, ["resolvedQuadViews"] = resolved.QuadViews.ToString(), ["resolvedQuadFocusAdapter"] = resolved.QuadFocusAdapter,
+            ["usesFoveatedFg"] = p.UsesFoveatedFrameGen, ["usesHudSymbology"] = p.UsesHudSymbology, ["usesHeadsetPanel"] = p.UsesHeadsetPanel, ["usesPeripheryStability"] = p.UsesPeripheryStability, ["usesFarDepth"] = p.UsesFarDepth,
+            ["usesRecordersEmulatedLists"] = p.UsesRecordersEmulatedLists,
         };
         foreach (var (key, value) in expected)
         {

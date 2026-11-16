@@ -138,16 +138,19 @@ public static class PimaxPlayUnits
 
     // A profile's own focus values in Pimax Play's Quick units, converted exactly like Pimax Quick (stored to 4 decimals as Pimax does).
     public static double QuickFovFromShare(double share) => share * 100;
-    public static double ShareFromQuickFov(double quickFov) => Math.Round(quickFov * .01, 4);
+    /// <summary>Four decimals exactly as the interface rounds them (JavaScript's Number(v.toFixed(4))): by the value's
+    /// exact decimal expansion. Math.Round(v, 4) scales first and rounds 0.25745 down where the interface stores 0.2575.</summary>
+    public static double Fixed4(double value) => double.Parse(value.ToString("F4", System.Globalization.CultureInfo.InvariantCulture), System.Globalization.CultureInfo.InvariantCulture);
+    public static double ShareFromQuickFov(double quickFov) => Fixed4(quickFov * .01);
     // Pimax's runtime turns the stored gaze and periphery values into pixel densities (pvr_client log, Pimax Play 2026-10:
     // gaze 0.28 → m_focusPixelDensity 1.2; periphery 0.1414 → m_peripheralPixelDensity 0.148572, 0.1919 → 0.198).
     public static double FocusDensity(double gaze) => .5 + gaze * 2.5;
     public static double PeripheryDensity(double periphery) => .01 + periphery * .98;
     /// <summary>Center Resolution is the focus pixel density in %, so 120% is 1.2×.</summary>
     public static double CenterFromDensity(double density) => density * 100;
-    public static double DensityFromCenter(double center) => Math.Round(center / 100, 4);
+    public static double DensityFromCenter(double center) => Fixed4(center / 100);
     public static double PeripheralPercent(double density) => 1 + (density - .01) / .98 * 99;
-    public static double PeripheryFromPercent(double percent) => Math.Round(PeripheryDensity(Math.Round((percent - 1) / 99, 4)), 4);
+    public static double PeripheryFromPercent(double percent) => Fixed4(PeripheryDensity(Fixed4((percent - 1) / 99)));
     /// <summary>A profile's own focus values in Pimax Play's Quick units, e.g. "57% × 34% · 113% · 19%" for 0.57 × 0.34, 1.125, 0.19.</summary>
     public static string ProfileShort(VrProfile p) =>
         FormattableString.Invariant($"{JsRound(QuickFovFromShare(p.FoveaWidth))}% × {JsRound(QuickFovFromShare(p.FoveaHeight))}% · {JsRound(CenterFromDensity(p.QuadFocusScale))}% · {JsRound(PeripheralPercent(p.PeripheralScale))}%");
