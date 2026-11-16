@@ -273,7 +273,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException)
             {
-                problems.Add(original.Path + ": " + error.Message);
+                problems.Add(FileProblem.Describe(original.Path, error));
                 Log("Could not restore " + original.Path + ": " + error.Message);
             }
         }

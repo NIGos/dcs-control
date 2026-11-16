@@ -111,3 +111,12 @@ public static class PathPolicy
         }
     }
 }
+
+public static class FileProblem
+{
+    /// <summary>A file that could not be changed, as a refusal names it: Windows' own messages usually quote the path
+    /// already, so it is put in front only when they do not.</summary>
+    public static string Describe(string path, Exception error) =>
+        Plain(error.Message).Contains(Plain(path), StringComparison.OrdinalIgnoreCase) ? error.Message : path + ": " + error.Message;
+    private static string Plain(string text) => text.Replace('/', '\\');
+}

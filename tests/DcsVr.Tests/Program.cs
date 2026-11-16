@@ -833,6 +833,17 @@ Test("The draft is kept across restarts and a damaged file is ignored", () =>
         Require(store.Load(notes.Add) is not null && notes.Count == 2, "a file held for a moment is read once it is free"); release.Wait();
     }
 });
+Test("A file that could not be changed is named once in the refusal", () =>
+{
+    var path = Path.Combine(root, "problem-text", "dxgi.dll"); Directory.CreateDirectory(Path.GetDirectoryName(path)!); File.WriteAllText(path, "held");
+    // Windows names the path in its own message: no second copy in front.
+    using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+    {
+        try { File.Delete(path); throw new Exception("No failure"); }
+        catch (IOException e) { var text = FileProblem.Describe(path, e); Require(text == e.Message && text.Split(Path.GetFullPath(path)).Length == 2, text); }
+    }
+    Require(FileProblem.Describe(path, new InvalidDataException("Backup integrity failed: restore stopped.")) == path + ": Backup integrity failed: restore stopped.", "a message without the path gets it in front");
+});
 Test("Last flight: dcs.log session, Pimax frames, OFXR modes and frame time, DLSS 5, CPU Boost and the engine prefetch fix", () =>
 {
     var start = new DateTimeOffset(2026, 10, 5, 17, 37, 28, TimeSpan.Zero);
@@ -5028,7 +5039,7 @@ Test("E2E: an apply or a Back to stock DCS cut short is finished by the next lau
     RestoreResult HeldRestore(string held) { using (new FileStream(held, FileMode.Open, FileAccess.Read, FileShare.Read)) return f.Service.RestoreOriginals(); }
     var launch = f.Service.Originals.ReadCurrent()!.Entries.Single(e => Path.GetFileName(e.Path) == "launch.json").Path;
     var partial = HeldRestore(launch);
-    Require(!partial.Complete && partial.Conflicts.Single().StartsWith(launch) && f.Service.Originals.Status() is { State: "restoring", Count: 1 }, "Only the held file is left: " + string.Join("; ", partial.Conflicts));
+    Require(!partial.Complete && partial.Conflicts.Single().Split(Path.GetFullPath(launch)).Length == 2 && f.Service.Originals.Status() is { State: "restoring", Count: 1 }, "Only the held file is left: " + string.Join("; ", partial.Conflicts));
     Throws<InvalidOperationException>(() => f.Service.PrepareLaunchApplied());
     // Launch after the half restore: A is written over what is left.
     var again = f.Service.SyncAndPrepareLaunch(E2eA(), E2eInventory(f)).Sync;

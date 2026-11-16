@@ -127,7 +127,7 @@ public static class Leftovers
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {
-                problems.Add(file.Path + ": " + error.Message);
+                problems.Add(FileProblem.Describe(file.Path, error));
                 log("Could not remove leftover " + file.Path + ": " + error.Message);
             }
         }
