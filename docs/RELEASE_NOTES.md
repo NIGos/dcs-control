@@ -6,6 +6,8 @@
 
 **Go back to the previous version.** If an update gives you trouble, **Help & support** now has **Go back** under Updates: it puts DCS back to stock, then installs the version you had before from its own signed setup (kept on your PC for a month after an update, otherwise downloaded again) and restarts. Your settings return to how they were in that version; the ones you changed since are kept in `%LOCALAPPDATA%\DcsControl\versions`, and presets you saved since come back when you update again. One step back only, and not to versions before 0.6.3. The update you left is not offered again by itself; **Check now** still shows it. Coming from 0.6.6, the previous version is downloaded and its own update banner returns after a few hours.
 
+**Vertical offset for the focus area.** With **Focus area values** on *Set here*, the Quad Views page has a new **Vertical offset** next to Horizontal and Vertical FOV: negative moves the focus area below where you look, positive above it. In an aircraft, about -10 to -20 keeps the gauges sharp while you look outside. It uses Pimax Play's Vertical Offset scale (100 is a quarter of the view's height), works with an eye-tracked and a fixed focus area, and the Coverage preview shows the shift. At 0, the default, nothing changes (GitHub #24).
+
 **Fixes:**
 - With **Smoothness buffer** on, a short run of heavy frames (opening the F10 map, for example) could leave DCS at about 41 FPS instead of 45 with repeated frames, for up to a minute. Frame generation now recovers at once.
 - With foveated frame generation, a loading screen at the wrong moment while a flight started could leave the whole flight without generated frames.
