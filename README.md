@@ -130,7 +130,7 @@ The first time the app writes a path it backs up the original (or notes that the
 ./scripts/test-release.ps1
 ```
 
-Build scripts pin upstream revisions. Tests use isolated DCS fixtures and never start DCS. Python scripts run with the Python launcher (`py -3 scripts/<name>.py`; PowerShell scripts start them through `scripts/python.ps1`): on a PC without Python on PATH, plain `python` is only the Microsoft Store stub.
+Build scripts pin upstream revisions. Tests use isolated DCS fixtures and never start DCS. Python scripts run with the Python launcher (`py -3 scripts/<name>.py`; `scripts/python.ps1` is the resolver for PowerShell scripts): on a PC without Python on PATH, plain `python` is only the Microsoft Store stub. `scripts/build-upstream.ps1 -Component cheeky` still calls plain `python` until Cheeky is next rebuilt (the script is an input of Cheeky's build stamp).
 
 `py -3 scripts/package-sources.py` builds the corresponding-source ZIP: the tracked files of this repository and the patched upstream trees in `external\`. It stops when the working tree has uncommitted changes or untracked files (`--allow-dirty` packs anyway, `--include-untracked` adds the untracked files), and when Quad Views, OFXR or Cheeky in `external\` were not built from the scripts and patches checked out (`scripts/assert-components-current.ps1`): `external\` holds whatever was built last, on any branch.
 
