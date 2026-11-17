@@ -196,6 +196,16 @@ internal static class WebVerification
         await Shot("v06-visual", "visual");
         await Shot("v06-dlss-periphery", "dlss", "(c=>{if(c)c.scrollIntoView({block:'start'});})(document.getElementById('dlssPresets'));");
         await Step("(()=>{"+Edit+"edit('colorMode','Off');edit('panelGamut',0);edit('gVision',false);edit('peripheryDlssPreset','Off');edit('fpsLimit','Preserve');})()");
+        // The tutorial video (vt-*): DCS & headset with Read settings from this PC, and Guided setup's first step.
+        await Shot("vt-setup", "setup");
+        await core.ExecuteScriptAsync("window.setupWizard.open(); window.setupWizard.choose({route:'Pimax',features:{quad:true,dlss:true,framegen:true,boost:true}});");
+        await Shot("vt-guided", null);
+        await core.ExecuteScriptAsync("document.getElementById('setupClose').click()");
+        // The manual's Presets page: two presets, the second one active (as in DocumentationViews).
+        await Step("window.dcsUi.run('presetDelete',{name:'Heavy mission'})");
+        await Step("window.dcsUi.run('presetSave',{name:'Day flying',replace:true})");
+        await Step("window.dcsUi.run('presetSave',{name:'Night flying',replace:true})");
+        await Shot("vt-presets", "presets");
         await Step("window.dcsUi.run('launch')");
         await Step("window.dcsUi.run('refresh',window.dcsUi.draft())");
         await Shot("v-overview-applied", "overview");
