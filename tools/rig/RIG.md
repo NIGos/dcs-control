@@ -5,8 +5,8 @@
 > changed. For how to run the promoted tools, their parameters and what is not promoted yet, read `README.md`.
 > Where this file and `README.md` differ, `README.md` is right. Paths below are the scratch ones:
 > `artifacts\foveated\rig\` is now `tools\rig\`; `rig\runs\` is now `artifacts\rig\runs\`; the capture layer
-> (`capture-layer\`), `gaze_sheets.py`, `cursor_calib.py`, `cursor_verdict.py` and the scenarios other than `hud`,
-> `motion`, `gaze`, `cursor`, `cursor-calib` were not promoted. Section 6 (the guards) was brought up to date with
+> (`capture-layer\`), `cursor_calib.py` and `cursor_verdict.py` were promoted in a second step (1cc03cd);
+> `gaze_sheets.py` and the scenarios other than `hud`, `motion`, `gaze`, `cursor`, `cursor-calib` were not. Section 6 (the guards) was brought up to date with
 > the promoted runner.
 
 Test-only tooling of RIG-RECON.md's build-order steps 2 and 3. Everything is under `artifacts\foveated\rig\`; no

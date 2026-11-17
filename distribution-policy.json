@@ -6,7 +6,7 @@
     { "id": "manager", "delivery": "Bundled", "license": "GPL-3.0-or-later", "notice": "licenses/Manager-GPL-3.0.txt" },
     { "id": "ofxr", "delivery": "Bundled", "license": "LGPL-3.0-or-later", "notice": "licenses/OFXR-LGPL-3.0.txt", "additionalNotices": "Inside original OFXR ZIP" },
     { "id": "cheeky", "delivery": "Bundled", "license": "GPL-3.0", "notice": "licenses/Cheeky-GPL-3.0.txt", "additionalNotices": "licenses/Cheeky-dependencies" },
-    { "id": "quadviews", "delivery": "Bundled", "license": "MIT", "notice": "licenses/QuadViews-MIT.txt", "additionalNotices": "licenses/QuadViews-THIRD-PARTY.txt" },
+    { "id": "quadviews", "delivery": "Bundled", "license": "MIT AND GPL-3.0-or-later", "notice": "licenses/QuadViews-MIT.txt", "additionalNotices": "licenses/QuadViews-THIRD-PARTY.txt", "reason": "Upstream is MIT. The shipped DLL also contains DCS Control's patches (patches/quadviews) and native/quadviews, GPL-3.0-or-later like the manager (licenses/Manager-GPL-3.0.txt)." },
     { "id": "sboys", "delivery": "OfficialDownloadOrImport", "reason": "Release contains private functionality; no redistribution grant established for those binaries.", "url": "https://github.com/sboys3/CustomHeadsetOpenVR/releases/tag/1.3.0" },
     { "id": "nvidia-dlssnr", "delivery": "UserSupplied", "reason": "Proprietary neural runtime; not included." },
     { "id": "pimax", "delivery": "OfficialInstall", "reason": "Vendor driver, service and runtime are installed separately." },

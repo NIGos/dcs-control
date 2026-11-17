@@ -12,7 +12,7 @@
 
 **The real focus size, on the page.** With *From Pimax Play*, the Quad Views page and the Coverage preview now state the focus size in percent of the view; with a preset they name it, and so does the Overview.
 
-**A stuck DCS, on every page (GitHub #21).** 0.6.6 pointed out a DCS left in the background on the Overview only. The status at the top of every page now says **DCS has no window** or **DCS is not responding**, with **End DCS** next to it. The app keeps counting while its window is minimised, so you are told as soon as you open it.
+**A stuck DCS, on every page (GitHub #21).** 0.6.6 pointed out a DCS left in the background on the Overview only. The status at the top of every page now says **DCS has no window** or **DCS is not responding**, with **End DCS** next to it. The app keeps counting while its window is minimised, so you are told as soon as you open it. A DCS without a window is now pointed out after a minute instead of half a minute, so one that is only slow to close is left alone.
 
 **Fixes:**
 - With **Smoothness buffer** on, a short run of heavy frames (opening the F10 map, for example) could leave DCS at about 41 FPS instead of 45 with repeated frames, for up to a minute. Frame generation now recovers at once.

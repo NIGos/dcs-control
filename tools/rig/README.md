@@ -1,7 +1,7 @@
 # Flight rig (test-only)
 
 Tools that fly DCS unattended with a capture layer in the OpenXR chain and judge what was captured. They are the
-only proof of the foveated frame-generation patches (OFXR 0080..0089). Nothing here is shipped, installed or built
+only proof of the foveated frame-generation patches (OFXR 0080..0091). Nothing here is shipped, installed or built
 into a component.
 
 The rig was moved here from git-ignored scratch in two steps: the runner, five scenarios and the analysis scripts,
