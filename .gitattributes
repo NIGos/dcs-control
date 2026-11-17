@@ -8,4 +8,7 @@ scripts/*.py text eol=lf
 # C# raw string literals become generated config files: keep LF so the output does not depend on the checkout.
 *.cs text eol=lf
 # The list of shipped component hashes only ever gets lines added, on every branch that builds a release: keep both sides.
-src/DcsVr.Core/KnownComponents.txt merge=union
+src/DcsVr.Core/KnownComponents.txt text eol=lf merge=union
+# It is embedded in DcsVr.Core, and the interface files are copied into the package as they are: LF on every checkout,
+# so the bytes that ship do not depend on core.autocrlf.
+src/DcsVr.App/ui/** text eol=lf
