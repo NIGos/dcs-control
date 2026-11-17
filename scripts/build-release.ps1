@@ -209,8 +209,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Release integrity check failed.' }
 # lines are for the next build and go into the release commit.
 # Only cheeky/, cheeky-focus/ and dcsqvcull/ are recorded (Leftovers.RecordedComponentFolders, the tests compare the two
 # lists). OFXR, Quad Views, pupil shift and CheekyOpenXRLayer.dll are installed only under DCS Control's own profile
-# folder, where nothing consults this list, and their builds are not reproducible: recording them added lines on every
-# build, on every branch, for no effect. Their earlier lines stay in the file (harmless).
+# folder, where nothing consults this list: recording them added lines on every branch for no effect (and on every
+# build, while their builds were not yet reproducible). Their earlier lines stay in the file (harmless).
 $recordedComponents = @('cheeky/', 'cheeky-focus/', 'dcsqvcull/')
 $knownList = Join-Path $workspaceRoot 'src/DcsVr.Core/KnownComponents.txt'
 $knownText = [IO.File]::ReadAllText($knownList)
