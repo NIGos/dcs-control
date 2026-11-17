@@ -112,7 +112,7 @@ DCS (DX11) → Cheeky (DLSS 5 on the Quad Views focus views, D3D11↔D3D12 trans
 
 Third-party changes are kept as reproducible patches: `scripts/patch-cheeky.py` with `patches/cheeky`, `patches/ofxr-djules75/*.patch` applied by `scripts/build-ofxr-djules75.ps1`, and `patches/quadviews/*.patch` applied by `scripts/build-quadviews.ps1`. The DCS engine optimizations (DcsQvCull, with the terrain prefetch fix) are in `native/dcsqvcull`.
 
-The unattended flight rig that tests frame generation in a real DCS (a capture layer, scenarios and verdict scripts) is in [tools/rig](tools/rig/README.md). Nothing of it is shipped.
+The unattended flight rig that tests frame generation in a real DCS (a capture layer, scenarios and verdict scripts) is in [tools/rig](tools/rig/README.md). Nothing of it is shipped. Branches, worktrees, the quiet lock and what a release is built from are in [docs/DEVELOPING.md](docs/DEVELOPING.md).
 
 ### Original files and recovery
 
