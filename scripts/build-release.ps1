@@ -5,10 +5,30 @@
 # (scripts/build-stamp.ps1: built with -LocalOnly, a test failed or was skipped), which a build without it refuses. The
 # setup and the ZIP are then left unsigned, also when the signing key is here, so DCS Control's updater never installs
 # them and they cannot be published by mistake. It cannot be combined with -Sign.
-param([switch]$NoRestore, [switch]$Sign, [switch]$LocalOnly)
+# -AllowDirty: with -Sign, build although the working tree has uncommitted changes or untracked files (see below).
+param([switch]$NoRestore, [switch]$Sign, [switch]$LocalOnly, [switch]$AllowDirty)
 $ErrorActionPreference = 'Stop'
 if ($LocalOnly -and $Sign) { throw '-LocalOnly and -Sign cannot be used together: a local-only package is never signed or published.' }
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
+# A release to publish is built from a clean tree, at the commit that is then tagged: the committed sources are the
+# sources of the binaries, and the sources ZIP can be made from them. With -Sign, uncommitted changes or untracked
+# files stop the build here, before anything is checked, built or deleted; -AllowDirty builds anyway. The commit goes
+# into release-manifest.json ("commit"), with "-dirty" after it when the tree was not clean; a build outside a git
+# checkout has none.
+$sourceCommit = $null; $sourceChanges = @()
+$sourceHead = try { "$(& git -C $workspaceRoot rev-parse HEAD 2>$null)".Trim() } catch { '' }
+if ($sourceHead -match '^[0-9a-f]{40,64}$') {
+    $sourceChanges = @(& git -C $workspaceRoot status --porcelain)
+    if ($LASTEXITCODE -ne 0) { throw 'git status failed: the state of the working tree could not be read.' }
+    $sourceCommit = if ($sourceChanges.Count) { "$sourceHead-dirty" } else { $sourceHead }
+}
+if ($Sign -and -not $AllowDirty) {
+    if (-not $sourceCommit) { throw 'A signed release is built from a git checkout, and the commit of this folder could not be read. -AllowDirty builds anyway.' }
+    if ($sourceChanges.Count) {
+        throw ("A signed release is built from a clean tree, and this one has $($sourceChanges.Count) uncommitted or untracked path(s):`n" +
+            (($sourceChanges | Select-Object -First 10) -join "`n") + "`nCommit them or move them out of the tree, then build again. -AllowDirty builds anyway and the manifest says so.")
+    }
+}
 $env:DOTNET_CLI_TELEMETRY_OPTOUT='1'
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'
 $env:DOTNET_GENERATE_ASPNET_CERTIFICATE='false'
@@ -201,7 +221,9 @@ Problems and results: https://github.com/NIGos/dcs-control/issues
 $files = Get-ChildItem -LiteralPath $releaseRoot -Recurse -File | Where-Object { $_.Name -ne 'release-manifest.json' } | ForEach-Object {
     @{ path=[IO.Path]::GetRelativePath($releaseRoot,$_.FullName); sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); bytes=$_.Length }
 }
-@{ schemaVersion=1; product='DcsControl'; version=$version; files=@($files) } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $releaseRoot 'release-manifest.json') -Encoding utf8
+$manifest = @{ schemaVersion=1; product='DcsControl'; version=$version; files=@($files) }
+if ($sourceCommit) { $manifest.commit = $sourceCommit }
+$manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $releaseRoot 'release-manifest.json') -Encoding utf8
 & (Join-Path $payloadRoot 'scripts/installer.ps1') -Action Verify -Destination (Join-Path $workspaceRoot 'artifacts/installer-verify') -NoShortcut
 if ($LASTEXITCODE -ne 0) { throw 'Release integrity check failed.' }
 # Every component of this release that can land in DCS's own folders joins src/DcsVr.Core/KnownComponents.txt, so later

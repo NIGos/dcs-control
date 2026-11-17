@@ -347,6 +347,20 @@ Test("Leftovers: every component DCS Control shipped is known, so any version's 
     var script = File.ReadAllText(Path.Combine(workspace, "scripts/build-release.ps1"));
     Require(script.Contains("$recordedComponents = @(" + string.Join(", ", recorded.Select(folder => "'" + folder + "'")) + ")"), "build-release.ps1 records the same component folders as Leftovers.RecordedComponentFolders");
 });
+Test("Release scripts: a signed release needs a clean tree, and the manifest names the commit", () =>
+{
+    var release = File.ReadAllText(Path.Combine(workspace, "scripts", "build-release.ps1"));
+    // Refused before anything is checked, built or deleted, and only -AllowDirty lifts it.
+    var refusal = release.IndexOf("if ($Sign -and -not $AllowDirty) {", StringComparison.Ordinal);
+    Require(refusal > 0 && refusal < release.IndexOf("check-contracts.ps1", StringComparison.Ordinal) && refusal < release.IndexOf("Remove-Item", StringComparison.Ordinal), "a dirty tree stops a signed build first");
+    Require(release.Contains("[switch]$AllowDirty)") && release.Contains("status --porcelain") && release.Contains("if ($sourceChanges.Count) {"), "the check is git's own list of changed and untracked paths");
+    Require(release.Contains("if ($sourceCommit) { $manifest.commit = $sourceCommit }") && release.Contains("\"$sourceHead-dirty\""), "the manifest gets the commit, marked when the tree was not clean");
+    // The manifest is read strictly: the installer of this version knows the field, and a manifest without it still reads.
+    const string file = "\"files\":[{\"path\":\"app.bin\",\"sha256\":\"00\",\"bytes\":1}]";
+    var named = JsonData.Deserialize<ReleaseManifest>("{\"schemaVersion\":1,\"product\":\"DcsControl\",\"version\":\"0.6.7-preview\",\"commit\":\"0123abc-dirty\"," + file + "}");
+    var earlier = JsonData.Deserialize<ReleaseManifest>("{\"schemaVersion\":1,\"product\":\"DcsControl\",\"version\":\"0.6.6-preview\"," + file + "}");
+    Require(named.Commit == "0123abc-dirty" && named.Files.Count == 1 && earlier.Commit is null && earlier.Files.Count == 1, "commit is read when present and optional");
+});
 Test("Release scripts: a local-only package is refused with -Sign and never signed; the OFXR patch set is hashed in one place", () =>
 {
     string Script(string name) => File.ReadAllText(Path.Combine(workspace, "scripts", name));
