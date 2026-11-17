@@ -16,7 +16,9 @@ public sealed record PimaxEyeFov(double Left, double Right, double Up, double Do
 /// <param name="Transition">Pimax blends the focus edge (Transition Mode Linear or Alpha, not Off).</param>
 /// <param name="RequestedWidth">Width before the bundled provider's 0.9 cap.</param>
 /// <param name="NativeWidth">The focus share of the view Pimax's own Quad Views renders from the same settings: with
-/// Custom 1 − the stored value per side (its number is the part left out: 30 gives 70 %), with a preset the preset's
+/// Custom 1 − the stored value per side (as measured, its number is the part left out: 30 gives 70 %; measured on a
+/// stand and in one worn Fine-mode flight, while a small focus is seen at Custom 30 in a worn headset: not settled, see
+/// docs/INTERFACE.md, "Pimax presets and the real focus size"), with a preset the preset's
 /// own (<see cref="PimaxPresets"/>). 0 when unknown.</param>
 /// <param name="Preset">The name of the Pimax preset these values are (<see cref="PimaxPresets"/>); null for Custom.</param>
 /// <param name="FixedWidth">A preset's focus without eye tracking, used by a profile with a fixed focus (a preset has two
@@ -293,6 +295,8 @@ public static class PimaxFovea
                 PimaxPlayUnits.FineFov(Read("piplay_quadviews_fine_fov_right_left_to_center"), inner: true), PimaxPlayUnits.FineFov(Read("piplay_quadviews_fine_fov_right_right_to_center")),
                 PimaxPlayUnits.TransitionMode(transitionType), PimaxPlayUnits.TransitionRange(Read("runtime_quadviews_focus_blend_area")),
                 PimaxPlayUnits.TransitionCurve(Read("runtime_quadviews_focus_blend_mode") is { } m ? (int)m : null), PimaxPlayUnits.Alpha(Read("runtime_quadviews_focus_transition_opacity_percent")));
+            // The level has two stores, Pimax's service and this file. Only this file is read; how Pimax Play writes the
+            // two has not been observed (docs/INTERFACE.md, "Pimax presets and the real focus size").
             int? level = Read("runtime_quadviews_rendering_level") is { } lv ? (int)lv : null;
             return new(Path.GetFullPath(path), File.GetLastWriteTimeUtc(path), type, quickH, quickV, left, right, fromQuick, gaze, periphery,
                 transitionType ?? 0, Read("runtime_quadviews_focus_blend_area"),

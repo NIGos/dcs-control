@@ -109,7 +109,11 @@ public static class DcsProcess
     public static int? EndStuck() => Health() == DcsHealth.Healthy ? null : EndAll();
 
     /// <summary>A DCS with no window at all (what ending it from Task Manager's app list can leave behind, GitHub #21),
-    /// or whose window does not answer Windows. One healthy DCS among several counts as healthy.</summary>
+    /// or whose window does not answer Windows. One healthy DCS among several counts as healthy.
+    /// Known limit: a DCS that crashed and still shows its own crash window ("DCS Crash" / "DCS failure", a #32770 dialog)
+    /// has a main window that answers, so it reads as healthy: no notice, and <see cref="EndStuck"/> leaves it running.
+    /// The pilot closes that window or ends DCS from Task Manager (User Guide, DCS doesn't start). Telling it apart needs
+    /// the window's class: a DCS.exe whose only top-level window is such a dialog would be a state of its own.</summary>
     private static DcsHealth ReadHealth()
     {
         var processes = Process.GetProcessesByName("DCS");

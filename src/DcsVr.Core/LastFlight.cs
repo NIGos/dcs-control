@@ -335,7 +335,9 @@ public static partial class LastFlight
     /// for there too. Without it the summary would name the default preference, whatever the flight used.</summary>
     private const string CadenceRecord = "op=adaptive_switch result=13 ";
 
-    /// <summary>ofxr-bridge-flight-…-pidN.log → ofxr-bridge-flight-…-pidN.prev.log, the segment OFXR rotated out last.</summary>
+    /// <summary>ofxr-bridge-flight-…-pidN.log → ofxr-bridge-flight-…-pidN.prev.log, the segment OFXR rotated out last.
+    /// Only that one is read: in a flight whose log was rotated more than once the earlier segments are gone, and the
+    /// summary covers the last two.</summary>
     public static string OfxrPreviousSegment(string path) => Path.Combine(Path.GetDirectoryName(path) ?? "", Path.GetFileNameWithoutExtension(path) + ".prev" + Path.GetExtension(path));
 
     /// <summary>The process id in a flight log's header record (its first line: op=logger, c = the process id), or null.</summary>

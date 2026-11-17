@@ -84,6 +84,15 @@ cursor calibration. No capture, log or run folder belongs in `tools\rig`.
   `py tools\rig\cursor_calib.py <its run folder> --write`. The calibration belongs to one headset and window size.
   On the one calibration flight flown so far (2026-11-15) the script found fewer than three points for its own fit
   (exit 1, nothing written): the calibration then in use was worked out by hand from that flight's captures.
+## Known failing checks
+
+- `crop.hud.position` (`verdict.py`, scenario `hud`) fails in both arms, two layers and twin: the HUD mark of a
+  generated frame is found at a real frame's place instead of half way. It failed with the installed build on
+  2026-11-15 as well. Not explained yet, so a FAIL of this check alone says nothing about a build.
+- `analyze.py` windows the Pimax server log by time of day only. That log runs over several days, so the same
+  minutes of an earlier day are counted in (a "Stale" rate far too high is the sign). Until the script takes the
+  date as well, count on the lines of the flight's own day.
+
 ## Checks that need no flight
 
 ```powershell

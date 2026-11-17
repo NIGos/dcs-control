@@ -7,6 +7,13 @@ The evidence files are flight notes and logs in the developer's `artifacts\` fol
 repository; the names are given so a number can be traced to its flight. Patch numbers are files in
 `patches/ofxr-djules75`.
 
+Two things about the numbers. The series has no 0052: no file with that number was ever committed (0050, 0051 and
+0053 arrived together); the patch it stood for was withdrawn before release and the number is not reused. And the
+code that 0087 and 0088 add is tagged `DCS Control (0082)` in its comments (84 lines of 0087, 3 of 0088, and the
+flight log's `result=7` comment): 0082 was the cursor work's number while it was a candidate. In this repository
+0082 is the lead's scene change, so read "(0082)" beside cursor code as 0087. The tags stay as they are until the
+layer is rebuilt for another reason.
+
 Terms: *two layers* = foveated frame generation (a periphery and a focus layer per frame, 0.6.7, off by default);
 *composed* or *twin* = the same flight with that option off; *buffer* = the Smoothness buffer (`deep_pipeline`).
 
@@ -62,8 +69,15 @@ Evidence: `artifacts\foveated\port\final\candidate-native-fixed-2x\README.md`;
 
 With the buffer on, the guard of 0081 measures the application's own time including its wait for the presenter's
 capacity (7 to 9.5 ms a frame at 90 Hz). It therefore refuses every step that would raise the release offset while
-the buffer paces the application (record 805, about once a second), and the offset stays at 1.7 to 3.6 ms. No harm
-was seen from this. 0084 as shipped is comments only: it states the limit at `ReleaseOffsetGuard` and
+the buffer paces the application (record 805, about once a second), and in steady flight the offset stays at 1.7 to
+3.6 ms. No harm was seen from this.
+
+Around the F10 map the offset does not stay there. As flown: the final 0.6.7 package reached 9.55 ms at the return
+from the map (two layers) and was back at 3.41 ms 26 s later; the build of the round before it reached 9.15 to
+9.76 ms composed. So with the buffer on, expect up to about 9.5 to 10 ms around a map visit and 3 to 4 ms again
+within half a minute.
+
+0084 as shipped is comments only: it states the limit at `ReleaseOffsetGuard` and
 `read_release_offset_guard`.
 
 The other form of 0084 (the guard's own time without that wait) was flown and dropped:
