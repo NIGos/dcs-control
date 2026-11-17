@@ -1,11 +1,13 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace DcsVr.Core;
 
 /// <summary>One running DCS.exe: its process id and full image path (null when it cannot be read).</summary>
 public sealed record RunningDcs(int Pid, string? ImagePath);
 
-public enum DcsHealth { NotRunning, Healthy, NoWindow, NotResponding }
+/// <summary>Crashed: DCS shows its own crash window in place of the game window (it answers Windows, so it is not NotResponding).</summary>
+public enum DcsHealth { NotRunning, Healthy, NoWindow, NotResponding, Crashed }
 
 /// <summary>Says when a running DCS has looked stuck for long enough to offer ending it. DCS has no window for a few
 /// seconds while it starts, and for longer while it closes after a large mission (a DCS that exits normally but slowly
@@ -15,6 +17,8 @@ public enum DcsHealth { NotRunning, Healthy, NoWindow, NotResponding }
 public sealed class DcsStuckTracker
 {
     public static readonly TimeSpan NoWindowPatience = TimeSpan.FromSeconds(60), NotRespondingPatience = TimeSpan.FromMinutes(4);
+    /// <summary>A crash window is not a passing state: two readings in a row are enough.</summary>
+    public static readonly TimeSpan CrashedPatience = TimeSpan.FromSeconds(8);
     /// <summary>Readings further apart than this are not one stretch of the same state.</summary>
     public static readonly TimeSpan MaxGap = TimeSpan.FromSeconds(20);
     private DcsHealth _state = DcsHealth.NotRunning; private DateTimeOffset _since, _last;
@@ -28,6 +32,7 @@ public sealed class DcsStuckTracker
         {
             DcsHealth.NoWindow when now - _since >= NoWindowPatience => DcsHealth.NoWindow,
             DcsHealth.NotResponding when now - _since >= NotRespondingPatience => DcsHealth.NotResponding,
+            DcsHealth.Crashed when now - _since >= CrashedPatience => DcsHealth.Crashed,
             _ => null
         };
     }
@@ -109,11 +114,8 @@ public static class DcsProcess
     public static int? EndStuck() => Health() == DcsHealth.Healthy ? null : EndAll();
 
     /// <summary>A DCS with no window at all (what ending it from Task Manager's app list can leave behind, GitHub #21),
-    /// or whose window does not answer Windows. One healthy DCS among several counts as healthy.
-    /// Known limit: a DCS that crashed and still shows its own crash window ("DCS Crash" / "DCS failure", a #32770 dialog)
-    /// has a main window that answers, so it reads as healthy: no notice, and <see cref="EndStuck"/> leaves it running.
-    /// The pilot closes that window or ends DCS from Task Manager (User Guide, DCS doesn't start). Telling it apart needs
-    /// the window's class: a DCS.exe whose only top-level window is such a dialog would be a state of its own.</summary>
+    /// whose window does not answer Windows, or that crashed and still shows its crash window. One healthy DCS among
+    /// several counts as healthy; of the others the most telling state wins (crashed, then not responding, then no window).</summary>
     private static DcsHealth ReadHealth()
     {
         var processes = Process.GetProcessesByName("DCS");
@@ -121,18 +123,41 @@ public static class DcsProcess
         {
             if (processes.Length == 0) return DcsHealth.NotRunning;
             var worst = DcsHealth.NoWindow;
+            static int Rank(DcsHealth health) => health switch { DcsHealth.Crashed => 2, DcsHealth.NotResponding => 1, _ => 0 };
             foreach (var process in processes)
             {
                 DcsHealth one;
-                try { one = process.MainWindowHandle == IntPtr.Zero ? DcsHealth.NoWindow : process.Responding ? DcsHealth.Healthy : DcsHealth.NotResponding; }
+                try
+                {
+                    var window = process.MainWindowHandle;
+                    one = window == IntPtr.Zero ? DcsHealth.NoWindow : Classify(WindowClass(window), process.MainWindowTitle, process.Responding);
+                }
                 catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or NotSupportedException) { one = DcsHealth.Healthy; }
                 if (one == DcsHealth.Healthy) return DcsHealth.Healthy;
-                if (one == DcsHealth.NotResponding) worst = DcsHealth.NotResponding;
+                if (Rank(one) > Rank(worst)) worst = one;
             }
             return worst;
         }
         finally { foreach (var process in processes) process.Dispose(); }
     }
+
+    /// <summary>What a DCS with a main window is, from that window. When DCS crashes the game window (class "DCS") goes
+    /// and a standard dialog (class "#32770") titled "DCS Crash" takes its place, then "DCS failure" once the report is
+    /// declined; it answers Windows and stays until someone closes it (measured on DCS 2.9.31, 2026-11-17). Any other
+    /// dialog, such as a message box at start-up, is not called a crash.</summary>
+    public static DcsHealth Classify(string? windowClass, string? title, bool responding) =>
+        windowClass == "#32770" && title is not null && CrashTitles.Any(t => title.StartsWith(t, StringComparison.OrdinalIgnoreCase)) ? DcsHealth.Crashed
+        : responding ? DcsHealth.Healthy : DcsHealth.NotResponding;
+
+    private static readonly string[] CrashTitles = ["DCS Crash", "DCS failure"];
+
+    private static string? WindowClass(IntPtr window)
+    {
+        var name = new char[64]; var length = GetClassName(window, name, name.Length);
+        return length > 0 ? new string(name, 0, length) : null;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, [Out] char[] name, int count);
 
     private static IReadOnlyList<RunningDcs> ReadRunning()
     {

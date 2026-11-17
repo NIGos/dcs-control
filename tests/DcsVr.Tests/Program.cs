@@ -942,6 +942,13 @@ Test("A DCS that looks stuck is offered to be ended only after it stayed that wa
     var health = DcsProcess.HealthProvider;
     try { DcsProcess.HealthProvider = () => DcsHealth.Healthy; Require(DcsProcess.EndStuck() is null, "a healthy DCS is left running"); }
     finally { DcsProcess.HealthProvider = health; }
+    // A DCS that crashed keeps its crash window open and answers Windows: told from the window, offered after two readings.
+    Require(DcsProcess.Classify("#32770", "DCS Crash", true) == DcsHealth.Crashed && DcsProcess.Classify("#32770", "DCS failure", true) == DcsHealth.Crashed, "the two crash windows of DCS");
+    Require(DcsProcess.Classify("DCS", "Digital Combat Simulator", true) == DcsHealth.Healthy && DcsProcess.Classify("DCS", "Digital Combat Simulator", false) == DcsHealth.NotResponding, "the game window as before");
+    Require(DcsProcess.Classify("#32770", "Digital Combat Simulator", true) == DcsHealth.Healthy && DcsProcess.Classify("DCS", "DCS Crash", true) == DcsHealth.Healthy && DcsProcess.Classify(null, null, true) == DcsHealth.Healthy, "another dialog is not called a crash");
+    var crash = start + TimeSpan.FromHours(3);
+    Require(tracker.Update(DcsHealth.Crashed, crash) is null && tracker.Update(DcsHealth.Crashed, crash + DcsStuckTracker.CrashedPatience) == DcsHealth.Crashed, "a crash window is offered at the second reading");
+    Require(DcsStuckTracker.CrashedPatience <= DcsStuckWatch.Interval && tracker.Update(DcsHealth.NotRunning, crash + TimeSpan.FromSeconds(12)) is null, "and gone once the window is closed");
 });
 Test("A stuck DCS is counted on the app's own clock, not by how often the page asks (GitHub #21)", () =>
 {

@@ -742,6 +742,8 @@ window.runWebSmoke = async function() {
         && dot.className === 'status-dot' && !dot.parentElement.classList.contains('stuck') && getComputedStyle(end.parentElement).display === 'block' && $('launch').disabled);
       await poll({stuck:'NotResponding'});
       check('A DCS that stopped answering is named in the top bar, with End DCS next to it',bar() === 'DCS is not responding|It may still be loading a mission.' && shown(end) && end.textContent === 'End DCS');
+      await poll({stuck:'Crashed'});
+      check('A DCS that crashed and still shows its crash window is named in the top bar, with End DCS next to it',bar() === 'DCS has crashed|Its crash window is still open.' && shown(end) && end.textContent === 'End DCS' && dot.classList.contains('stuck'));
       await poll({stuck:'NoWindow'});
       check('On a page other than the Overview the top bar says DCS has no window, with its dot marked and End DCS on the line',$('page-overview').hidden && bar() === 'DCS has no window|It still runs in the background.'
         && shown(end) && end.textContent === 'End DCS' && dot.classList.contains('stuck') && !dot.classList.contains('error') && $('launch').disabled && document.documentElement.scrollWidth <= innerWidth);

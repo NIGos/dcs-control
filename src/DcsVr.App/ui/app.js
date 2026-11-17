@@ -126,8 +126,8 @@ function setBusy(value) {
 /** The short state of the draft, in the footer and on the Overview. */
 const STATE_WORDS = {running:'DCS is running', ready:'Ready to fly', changes:'Changes apply at launch', invalid:'Check numeric values'};
 // A running DCS that looks stuck (GitHub #21), in the top bar of every page: the title, then the line next to End DCS.
-const STUCK_WORDS = {NoWindow:['DCS has no window','It still runs in the background.'], NotResponding:['DCS is not responding','It may still be loading a mission.']};
-/** 'NoWindow' or 'NotResponding' while the running DCS has looked stuck for long enough to offer ending it; else null. */
+const STUCK_WORDS = {NoWindow:['DCS has no window','It still runs in the background.'], NotResponding:['DCS is not responding','It may still be loading a mission.'], Crashed:['DCS has crashed','Its crash window is still open.']};
+/** 'NoWindow', 'NotResponding' or 'Crashed' while the running DCS has looked stuck for long enough to offer ending it; else null. */
 const stuckDcs = () => state?.dcsRunning && STUCK_WORDS[state.dcsStuck] ? state.dcsStuck : null;
 // Ending DCS asks once, in place: unsaved progress in a DCS that is only loading would be lost.
 let endDcsArmed = false;
@@ -1748,7 +1748,7 @@ function renderDashboard() {
     ready:state.foveaChanged ? state.foveaChanged : 'These settings are applied. Launch DCS starts DCS with them.', changes:state.appliedDraft ? 'You changed settings since the last launch. Launch DCS applies them.' : 'Nothing is applied yet. Launch DCS backs up DCS\'s original files, then applies these settings.',
     invalid:'Correct the marked values before launching.'};
   const chips = [fix ? `<button class="dash-chip fix" data-open-page="diagnostics">${fix} must fix</button>` : '', check ? `<button class="dash-chip check" data-open-page="diagnostics">${check} to check yourself</button>` : '', !fix && !check ? '<button class="dash-chip ok" data-open-page="diagnostics">Nothing to fix</button>' : ''].join('');
-  const stuck = mode === 'running' && state.dcsStuck ? `<span class="dash-stuck" role="status">${state.dcsStuck === 'NoWindow' ? 'DCS is still running, but has no window.' : 'DCS has not responded for a while.'}</span><button class="button secondary dash-end" data-end-dcs>${endDcsLabel()}</button>` : '';
+  const stuck = mode === 'running' && state.dcsStuck ? `<span class="dash-stuck" role="status">${state.dcsStuck === 'NoWindow' ? 'DCS is still running, but has no window.' : state.dcsStuck === 'Crashed' ? 'DCS has crashed. Its crash window is still open.' : 'DCS has not responded for a while.'}</span><button class="button secondary dash-end" data-end-dcs>${endDcsLabel()}</button>` : '';
   const reset = state.appliedDraft && mode === 'changes' ? '<button class="link-button" data-reset-applied="1">Undo changes</button>' : '';
   $('dashStatus').className = 'dash-status '+mode;
   $('dashStatus').innerHTML = `<span class="dash-dot" aria-hidden="true"></span><div class="dash-main"><b>${titleHtml}</b><p>${escape(details[mode])}</p>${small ? `<small>${escape(small)}</small>` : ''}</div><div class="dash-side">${stuck}${chips}${reset}${guided}</div>`;

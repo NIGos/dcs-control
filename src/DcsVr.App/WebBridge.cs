@@ -464,7 +464,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     /// again. The offline verification host has no DCS: its smoke test says what is stuck.</summary>
     private readonly DcsStuckWatch? _stuck = offline ? null : new DcsStuckWatch();
     private string? _offlineStuck;
-    /// <summary>"NoWindow" or "NotResponding" once DCS has looked stuck for long enough to offer ending it; else null.</summary>
+    /// <summary>"NoWindow", "NotResponding" or "Crashed" once DCS has looked stuck for long enough to offer ending it; else null.</summary>
     private string? DcsStuck(bool running) => _stuck is null ? running ? _offlineStuck : null : _stuck.Read(running)?.ToString();
     /// <summary>The same as last read, without asking DCS again: every reply with the state carries it, so the top bar
     /// and the Overview still say it after a command.</summary>
