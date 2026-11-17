@@ -67,7 +67,7 @@ public static class ConfigurationWriters
         """ : "";
 
     /// <summary>Quad Views' settings.cfg with a vertical offset (<see cref="VrProfile.QuadVerticalOffset"/>): the same value
-    /// for the fixed focus and the eye-tracked one, like the focus sizes, so the focus does not jump when the gaze is lost.
+    /// for the fixed focus and the eye-tracked one, so the focus does not move up or down when the gaze is lost.
     /// Written only when it is not 0: without it the file is byte for byte what it was, and the layer's own default applies.
     /// Bundled Quad Views only: its gaze export gives the pupil shift layer the gaze before the offset, while with another
     /// build without that export the layer reads the gaze from the focus views' centres, which the offset would move.</summary>
@@ -490,8 +490,8 @@ public static class ConfigurationWriters
         focus_view_shape={(p.QuadRoundFocus ? 2 : 8)}
         dcsvr_sharpen_taper={(p.QuadSharpenTaper ? 1 : 0)}
         dcsvr_periphery_sharpen={Number(p.QuadPeripheryContrast)}
-        horizontal_fixed_section={Number(Math.Min(p.FoveaWidth, .9))}
-        vertical_fixed_section={Number(Math.Min(p.FoveaHeight, .9))}
+        horizontal_fixed_section={Number(Math.Min(p.FoveaFixedWidth > 0 ? p.FoveaFixedWidth : p.FoveaWidth, .9))}
+        vertical_fixed_section={Number(Math.Min(p.FoveaFixedHeight > 0 ? p.FoveaFixedHeight : p.FoveaHeight, .9))}
         horizontal_focus_section={Number(Math.Min(p.FoveaWidth, .9))}
         vertical_focus_section={Number(Math.Min(p.FoveaHeight, .9))}{QuadOffsetLines(p)}
         force_no_eye_tracking={(p.Gaze == GazeMode.Fixed ? 1 : 0)}
