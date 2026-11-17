@@ -905,7 +905,9 @@ Test("A DCS that looks stuck is offered to be ended only after it stayed that wa
     }
     Require(tracker.Update(DcsHealth.Healthy, start) is null && tracker.Update(DcsHealth.NotRunning, start) is null);
     // No window: DCS has none for a few seconds while it starts.
-    Require(Steady(DcsHealth.NoWindow, start, TimeSpan.FromSeconds(29)) is null, "not yet");
+    // A minute: half of one, the patience up to 0.6.6, is what a DCS closing normally after a large mission can take.
+    Require(DcsStuckTracker.NoWindowPatience == TimeSpan.FromSeconds(60) && DcsStuckTracker.NotRespondingPatience == TimeSpan.FromMinutes(4), "the two patiences");
+    Require(Steady(DcsHealth.NoWindow, start, TimeSpan.FromSeconds(30)) is null && Steady(DcsHealth.NoWindow, start + TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(29)) is null, "not yet: a slow normal exit is not offered");
     Require(tracker.Update(DcsHealth.NoWindow, start + DcsStuckTracker.NoWindowPatience) == DcsHealth.NoWindow, "offered after the patience");
     // A healthy reading starts again.
     var later = start + TimeSpan.FromMinutes(10);

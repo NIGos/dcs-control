@@ -8,12 +8,13 @@ public sealed record RunningDcs(int Pid, string? ImagePath);
 public enum DcsHealth { NotRunning, Healthy, NoWindow, NotResponding }
 
 /// <summary>Says when a running DCS has looked stuck for long enough to offer ending it. DCS has no window for a few
-/// seconds while it starts and stops answering Windows for minutes while a mission loads, so each state has its own
-/// patience; any healthy reading starts again. So does a pause in the readings: DCS may have answered, closed or started
+/// seconds while it starts, and for longer while it closes after a large mission (a DCS that exits normally but slowly
+/// must not be offered: the notice is on every page and counted while the app is minimised), and it stops answering
+/// Windows for minutes while a mission loads, so each state has its own patience; any healthy reading starts again. So does a pause in the readings: DCS may have answered, closed or started
 /// again in between. <see cref="DcsStuckWatch"/> keeps the readings coming while the page is hidden or busy.</summary>
 public sealed class DcsStuckTracker
 {
-    public static readonly TimeSpan NoWindowPatience = TimeSpan.FromSeconds(30), NotRespondingPatience = TimeSpan.FromMinutes(4);
+    public static readonly TimeSpan NoWindowPatience = TimeSpan.FromSeconds(60), NotRespondingPatience = TimeSpan.FromMinutes(4);
     /// <summary>Readings further apart than this are not one stretch of the same state.</summary>
     public static readonly TimeSpan MaxGap = TimeSpan.FromSeconds(20);
     private DcsHealth _state = DcsHealth.NotRunning; private DateTimeOffset _since, _last;
