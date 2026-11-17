@@ -133,13 +133,6 @@ public sealed record VrProfile
     // 0.1919) converted the same way PimaxFovea converts them: 0.57 x 0.34 focus at 1.125x, periphery 0.19.
     public double FoveaWidth { get; init; } = 0.57;
     public double FoveaHeight { get; init; } = 0.34;
-    /// <summary>The focus size without a gaze (Quad Views' horizontal/vertical_fixed_section: its fallback while eye
-    /// tracking gives no gaze), when it is not the size above. Only a profile resolved from a Pimax preset has one
-    /// (<see cref="PimaxFovea.Resolve"/>): a preset's focus is smaller with eye tracking than without, and losing the gaze
-    /// then behaves as in Pimax's own Quad Views. 0, everywhere else, is the one size for both. Never saved: a profile
-    /// file has one focus size.</summary>
-    [System.Text.Json.Serialization.JsonIgnore] public double FoveaFixedWidth { get; init; }
-    [System.Text.Json.Serialization.JsonIgnore] public double FoveaFixedHeight { get; init; }
     /// <summary>Quad Views' vertical_focus_offset (eye-tracked) and vertical_fixed_offset (fixed focus), in the layer's own
     /// units: added to the gaze point (or the resting point) in the eye view's normalised coordinates, where the whole
     /// view is 2 high and up is positive. So a negative value moves the focus area down, and -0.1 is 5% of the view's

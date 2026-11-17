@@ -3387,27 +3387,16 @@ Test("A Pimax Quad View preset is not read as Custom values (issue 19, Pimax EVO
     var p = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FoveaWidth = .57, FoveaHeight = .34, QuadFocusScale = 1, PeripheralScale = .19, QuadVerticalOffset = -.1 };
     var path = Make("pimax-preset/global.json", Evo(2));
     var resolved = PimaxFovea.Resolve(p, path);
-    Require(resolved.Applies && resolved.Pimax is { Preset: true } && resolved.Profile == p with { FoveaWidth = PimaxPresets.Quality.TrackedWidth, FoveaHeight = PimaxPresets.Quality.TrackedHeight, FoveaFixedWidth = PimaxPresets.FocusWidth, FoveaFixedHeight = PimaxPresets.FocusHeight, QuadFocusScale = 1.225, PeripheralScale = .32, QuadVerticalOffset = 0 },
-        "an eye-tracked profile: the preset's eye-tracked focus and its fixed one for when the gaze is lost, the profile's edge blending, no offset");
+    Require(resolved.Applies && resolved.Pimax is { Preset: true } && resolved.Profile == p with { FoveaWidth = PimaxPresets.Quality.TrackedWidth, FoveaHeight = PimaxPresets.Quality.TrackedHeight, QuadFocusScale = 1.225, PeripheralScale = .32, QuadVerticalOffset = 0 }, "an eye-tracked profile: the preset's eye-tracked focus, the profile's edge blending, no offset");
     var still = PimaxFovea.Resolve(p with { Gaze = GazeMode.Fixed }, path).Profile;
-    Require(still.FoveaWidth == PimaxPresets.FocusWidth && still.FoveaHeight == PimaxPresets.FocusHeight && still.FoveaFixedWidth == 0 && still.FoveaFixedHeight == 0 && still.QuadFocusScale == 1.225 && ConfigurationWriters.QuadViews(still).Contains("horizontal_fixed_section=0.457313503")
-        && ConfigurationWriters.QuadViews(still).Contains("horizontal_focus_section=0.457313503") && ConfigurationWriters.QuadViews(still).Contains("force_no_eye_tracking=1"), "a fixed focus: the size measured without eye tracking");
+    Require(still.FoveaWidth == PimaxPresets.FocusWidth && still.FoveaHeight == PimaxPresets.FocusHeight && still.QuadFocusScale == 1.225 && ConfigurationWriters.QuadViews(still).Contains("horizontal_fixed_section=0.457313503") && ConfigurationWriters.QuadViews(still).Contains("force_no_eye_tracking=1"), "a fixed focus: the size measured without eye tracking");
     var quad = ConfigurationWriters.QuadViews(resolved.Profile);
-    Require(quad.Contains("horizontal_focus_section=0.334632264") && quad.Contains("vertical_focus_section=0.332672793") && quad.Contains("horizontal_fixed_section=0.457313503") && quad.Contains("vertical_fixed_section=0.454617331") && quad.Contains("force_no_eye_tracking=0") && quad.Contains("focus_multiplier=1.225") && quad.Contains("peripheral_multiplier=0.32") && !quad.Contains("_offset"), quad);
+    Require(quad.Contains("horizontal_focus_section=0.334632264") && quad.Contains("vertical_focus_section=0.332672793") && quad.Contains("horizontal_fixed_section=0.334632264") && quad.Contains("focus_multiplier=1.225") && quad.Contains("peripheral_multiplier=0.32") && !quad.Contains("_offset"), quad);
     // Values written before (the profile's own, by 0.6.6) are reported as changed, with a message that names the preset.
     var stale = new AppliedFovea("preset 2", .57, .34, 1, .19, .2);
     Require(!PimaxFovea.SameFovea(resolved.Profile, stale) && PimaxFovea.ChangedSinceApply(p, stale, path) == "Pimax uses its Quad View preset Quality. Launch DCS updates the focus area to it (33% × 33% of the view)."
         && PimaxFovea.WillUpdate(quality) == "Pimax uses its Quad View preset Quality: focus will be updated to 33% × 33% of the view at launch." && PimaxFovea.Updated(quality, GazeMode.Fixed) == "Pimax uses its Quad View preset Quality: focus updated to 46% × 45% of the view.");
     Require(PimaxFovea.ChangedSinceApply(p, AppliedFovea.From(resolved.Profile, quality.Stamp), path) is null, "applied with the preset: nothing to update");
-    // Written with the eye-tracked size for both (a build before the two sizes): the fixed one is still to be written, once.
-    var oneSize = AppliedFovea.From(resolved.Profile, quality.Stamp) with { FoveaFixedWidth = 0, FoveaFixedHeight = 0 };
-    Require(!PimaxFovea.SameFovea(resolved.Profile, oneSize) && PimaxFovea.ChangedSinceApply(p, oneSize, path) is { } fixedToo && fixedToo.Contains("preset Quality")
-        && JsonData.Deserialize<AppliedFovea>(JsonData.Serialize(AppliedFovea.From(resolved.Profile, quality.Stamp))) == AppliedFovea.From(resolved.Profile, quality.Stamp)
-        && JsonData.Serialize(AppliedFovea.From(resolved.Profile, quality.Stamp)).Contains("\"foveaFixedWidth\": 0.4573", StringComparison.Ordinal), "pimax-fovea.json records the fixed size written");
-    // The fixed size is the resolved profile's alone: a profile file has one focus size, and what an earlier version reads back is as before.
-    Require(!JsonData.Serialize(resolved.Profile).Contains("Fixed", StringComparison.Ordinal) && JsonData.Deserialize<VrProfile>(JsonData.Serialize(resolved.Profile)) == resolved.Profile with { FoveaFixedWidth = 0, FoveaFixedHeight = 0 }, "never saved in a profile");
-    // What Apply wrote before is reproduced to the byte from its pimax-fovea.json (the launch update compares it): one size for both.
-    Require(ConfigurationWriters.QuadViews(resolved.Profile with { FoveaFixedWidth = oneSize.FoveaFixedWidth, FoveaFixedHeight = oneSize.FoveaFixedHeight }).Contains("horizontal_fixed_section=0.334632264"), "a file without the fixed size: the one size, as written then");
     // Custom (5), the older Custom (4) and files without the key (older Pimax Play) still follow the saved values.
     foreach (var level in new int?[] { 5, 4, null })
     {
@@ -3471,32 +3460,14 @@ Test("Pimax's Quad View presets: the fixed focus as measured, the eye-tracked on
         // Eye tracked: derived from the runtime's "foveated focus fov" by the rule; the same densities.
         var tracked = PimaxFovea.Resolve(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked, QuadEdgeBlend = .15 }, read.Path).Profile;
         Require(Math.Abs(c.Width - m.TrackedW) < 5e-5 && Math.Abs(c.Height - m.TrackedH) < 5e-5 && c.Width == m.Preset.TrackedHalfFovH / PimaxPresets.ViewHalfAngleH && c.Height == m.Preset.TrackedHalfFovV / PimaxPresets.ViewHalfAngleV
-            && tracked.FoveaWidth == c.Width && tracked.FoveaHeight == c.Height && tracked.FoveaFixedWidth == PimaxPresets.FocusWidth && tracked.FoveaFixedHeight == PimaxPresets.FocusHeight && still.FoveaFixedWidth == 0 && tracked.QuadFocusScale == m.Focus && tracked.PeripheralScale == m.Periphery && c.NativeWidth == c.Width && c.NativeHeight == c.Height
+            && tracked.FoveaWidth == c.Width && tracked.FoveaHeight == c.Height && tracked.QuadFocusScale == m.Focus && tracked.PeripheralScale == m.Periphery && c.NativeWidth == c.Width && c.NativeHeight == c.Height
             && c.Width < c.FixedWidth && c.Height < c.FixedHeight && !ProfileValidation.Validate(tracked).Any(i => i.Severity == IssueSeverity.Error), $"{m.Preset.Name} eye tracked: {c.Width} x {c.Height}");
-    }
-    // Both sizes reach the bundled layer with an eye-tracked profile: horizontal/vertical_focus_section is the focus that
-    // follows the gaze (the layer's m_horizontalFovSection[1]), horizontal/vertical_fixed_section the one it falls back to
-    // while there is no gaze ([0], "when eye tracker is not available"), 46% x 45% for every preset as Pimax's own.
-    foreach (var preset in PimaxPresets.All)
-    {
-        string focusW = preset.TrackedWidth.ToString("G9", System.Globalization.CultureInfo.InvariantCulture), focusH = preset.TrackedHeight.ToString("G9", System.Globalization.CultureInfo.InvariantCulture);
-        Require(preset != PimaxPresets.Quality || (focusW == "0.334632264" && focusH == "0.332672793"), "Quality's numbers as written");
-        var file = Make("pimax-presets/both-" + preset.Name + ".json", PimaxJson(0, .30, .30, .30, .30, gaze: .28, periphery: .1919).TrimEnd('}') + ",\"runtime_quadviews_rendering_level\":" + preset.Level + "}");
-        var eyes = ConfigurationWriters.QuadViews(PimaxFovea.Resolve(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked }, file).Profile);
-        Require(eyes.Contains($"horizontal_focus_section={focusW}\n") && eyes.Contains($"vertical_focus_section={focusH}\n") && eyes.Contains("horizontal_fixed_section=0.457313503\n") && eyes.Contains("vertical_fixed_section=0.454617331\n")
-            && eyes.Contains("force_no_eye_tracking=0"), preset.Name + " eye tracked: " + eyes);
-        var fixedOnly = ConfigurationWriters.QuadViews(PimaxFovea.Resolve(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.Fixed }, file).Profile);
-        Require(fixedOnly.Contains("horizontal_focus_section=0.457313503\n") && fixedOnly.Contains("vertical_focus_section=0.454617331\n") && fixedOnly.Contains("horizontal_fixed_section=0.457313503\n") && fixedOnly.Contains("vertical_fixed_section=0.454617331\n")
-            && fixedOnly.Contains("force_no_eye_tracking=1"), preset.Name + " fixed: " + fixedOnly);
     }
     Require(PimaxFovea.FocusShort(PimaxPresets.Convert(PimaxPresets.Performance)) == "27% × 30% of the view" && PimaxFovea.FocusShort(PimaxPresets.Convert(PimaxPresets.Balanced)) == "31% × 32% of the view"
         && PimaxFovea.FocusShort(PimaxPresets.Convert(PimaxPresets.Quality)) == "33% × 33% of the view" && PimaxFovea.FocusShort(PimaxPresets.Convert(PimaxPresets.Extreme)) == "39% × 33% of the view");
     // Custom keeps the number Pimax Play shows (30 is 30 % of the view, as up to 0.6.6); Pimax's own Quad Views renders 100 minus it
     // (its log, same folder: "fine fov left eye: L=0.700000 ...", focus 4556 x 4500 at 1.2).
     var custom = PimaxFovea.Read(Make("pimax-presets/custom30.json", PimaxJson(0, .30, .30, .30, .30, gaze: .28, periphery: .1919).TrimEnd('}') + ",\"runtime_quadviews_rendering_level\":5}"))!;
-    var customQuad = PimaxFovea.Resolve(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated }, custom.Path).Profile;
-    Require(customQuad.FoveaFixedWidth == 0 && customQuad.FoveaFixedHeight == 0 && ConfigurationWriters.QuadViews(customQuad).Contains("horizontal_fixed_section=0.3\n") && ConfigurationWriters.QuadViews(customQuad).Contains("horizontal_focus_section=0.3\n")
-        && PimaxFovea.SameFovea(customQuad, new AppliedFovea(custom.Stamp, customQuad.FoveaWidth, customQuad.FoveaHeight, customQuad.QuadFocusScale, customQuad.PeripheralScale, customQuad.QuadEdgeBlend)), "Custom: one size for both, and what 0.6.6 wrote is still the same");
     Require(custom.Measured is null && !custom.Unreadable && custom.Converted.Preset is null && custom.Converted.FixedWidth == 0 && custom.Converted.For(GazeMode.Fixed) == custom.Converted.For(GazeMode.EyeTracked) && Math.Abs(custom.Converted.Width - .30) < 1e-9 && Math.Abs(custom.Converted.Height - .30) < 1e-9 && Math.Abs(custom.Converted.NativeWidth - .70) < 1e-9 && Math.Abs(custom.Converted.NativeHeight - .70) < 1e-9);
     Require(PimaxPlayUnits.FocusPixels(5424, custom.Converted.NativeWidth, custom.Converted.FocusScale) == 4556 && PimaxPlayUnits.FocusPixels(5356, custom.Converted.NativeHeight, custom.Converted.FocusScale) == 4500 && custom.Stamp.StartsWith("0.3|0.3|1.2|", StringComparison.Ordinal), custom.Stamp);
     Require(PimaxFovea.WillUpdate(custom) == "Pimax Play changed: focus will be updated to " + custom.Play.Short + " at launch." && PimaxFovea.Updated(custom) == "Pimax Play changed: focus updated to " + custom.Play.Short + ".", PimaxFovea.WillUpdate(custom));

@@ -851,8 +851,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
         if (applied.Fovea is not { } written) return PimaxFovea.ChangedSinceApply(profile) is null;
         var now = resolved.Profile;
         if (PimaxFovea.SameFovea(now, written)) return true;
-        var before = profile with { FoveaWidth = written.FoveaWidth, FoveaHeight = written.FoveaHeight, QuadFocusScale = written.QuadFocusScale, PeripheralScale = written.PeripheralScale, QuadEdgeBlend = written.QuadEdgeBlend, QuadVerticalOffset = written.QuadVerticalOffset,
-            FoveaFixedWidth = written.FoveaFixedWidth, FoveaFixedHeight = written.FoveaFixedHeight };
+        var before = profile with { FoveaWidth = written.FoveaWidth, FoveaHeight = written.FoveaHeight, QuadFocusScale = written.QuadFocusScale, PeripheralScale = written.PeripheralScale, QuadEdgeBlend = written.QuadEdgeBlend, QuadVerticalOffset = written.QuadVerticalOffset };
         if (profile.UsesCheeky && ConfigurationWriters.Cheeky(before) != ConfigurationWriters.Cheeky(now)) return false;
         if (ProfileValidation.Validate(ResolveNeuralRuntime(now)).Any(i => i.Severity == IssueSeverity.Error)) return false;
         var source = Path.Combine(DistributionRoot, "components/quadviews/settings.cfg");

@@ -181,15 +181,11 @@ public sealed record FoveaResolution(VrProfile Profile, bool Applies, PimaxQuadV
 /// folder). profile.json keeps the user's own values; this keeps what DCS actually uses, for "changed since Apply".</summary>
 /// <param name="QuadVerticalOffset">The vertical offset written: 0 with Pimax Play's values, the profile's own when its own
 /// values were written (Quad View Off in Pimax). A file saved before the setting existed has none, which is 0 as written then.</param>
-/// <param name="FoveaFixedWidth">The focus size without a gaze when it was written apart from the size above (a Pimax
-/// preset on an eye-tracked profile, <see cref="VrProfile.FoveaFixedWidth"/>); 0 when the one size was written for both,
-/// as every file saved before had it.</param>
-public sealed record AppliedFovea(string? Stamp, double FoveaWidth, double FoveaHeight, double QuadFocusScale, double PeripheralScale, double QuadEdgeBlend, double QuadVerticalOffset = 0,
-    double FoveaFixedWidth = 0, double FoveaFixedHeight = 0)
+public sealed record AppliedFovea(string? Stamp, double FoveaWidth, double FoveaHeight, double QuadFocusScale, double PeripheralScale, double QuadEdgeBlend, double QuadVerticalOffset = 0)
 {
     public const string FileName = "pimax-fovea.json";
     public static AppliedFovea From(VrProfile written, string? stamp) =>
-        new(stamp, written.FoveaWidth, written.FoveaHeight, written.QuadFocusScale, written.PeripheralScale, written.QuadEdgeBlend, written.QuadVerticalOffset, written.FoveaFixedWidth, written.FoveaFixedHeight);
+        new(stamp, written.FoveaWidth, written.FoveaHeight, written.QuadFocusScale, written.PeripheralScale, written.QuadEdgeBlend, written.QuadVerticalOffset);
 }
 
 /// <summary>
@@ -358,12 +354,9 @@ public static class PimaxFovea
         var c = pimax.Converted;
         // The vertical offset is one of the profile's own focus values: with Pimax Play's it is not written (Pimax Play's
         // own Vertical Offset is shown, not converted, as before).
-        // A preset has one focus size with eye tracking and another without: the profile's Focus movement picks. An
-        // eye-tracked profile gets both: the layer falls back to the fixed one while there is no gaze, as Pimax's own does.
+        // A preset has one focus size with eye tracking and another without: the profile's Focus movement picks.
         var (width, height) = c.For(profile.Gaze);
-        var both = profile.Gaze != GazeMode.Fixed && c.FixedWidth > 0 && c.FixedHeight > 0;
-        var effective = profile with { FoveaWidth = width, FoveaHeight = height, FoveaFixedWidth = both ? c.FixedWidth : 0, FoveaFixedHeight = both ? c.FixedHeight : 0,
-            QuadFocusScale = c.FocusScale, PeripheralScale = c.PeripheralScale, QuadEdgeBlend = c.Transition ? profile.QuadEdgeBlend : 0, QuadVerticalOffset = 0 };
+        var effective = profile with { FoveaWidth = width, FoveaHeight = height, QuadFocusScale = c.FocusScale, PeripheralScale = c.PeripheralScale, QuadEdgeBlend = c.Transition ? profile.QuadEdgeBlend : 0, QuadVerticalOffset = 0 };
         return new(effective, true, pimax, Notes(pimax));
     }
 
@@ -471,8 +464,7 @@ public static class PimaxFovea
     {
         static bool Same(double a, double b) => Math.Abs(a - b) < 1e-6;
         return Same(now.FoveaWidth, written.FoveaWidth) && Same(now.FoveaHeight, written.FoveaHeight) && Same(now.QuadFocusScale, written.QuadFocusScale)
-            && Same(now.PeripheralScale, written.PeripheralScale) && Same(now.QuadEdgeBlend, written.QuadEdgeBlend) && Same(now.QuadVerticalOffset, written.QuadVerticalOffset)
-            && Same(now.FoveaFixedWidth, written.FoveaFixedWidth) && Same(now.FoveaFixedHeight, written.FoveaFixedHeight);
+            && Same(now.PeripheralScale, written.PeripheralScale) && Same(now.QuadEdgeBlend, written.QuadEdgeBlend) && Same(now.QuadVerticalOffset, written.QuadVerticalOffset);
     }
 
     /// <summary>Reads pimax-fovea.json saved next to an applied profile.json; null when absent or unreadable.</summary>
