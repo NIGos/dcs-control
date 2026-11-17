@@ -75,7 +75,7 @@ cursor calibration. No capture, log or run folder belongs in `tools\rig`.
   `startup_measure.py` use the standard library only).
 - An installed DCS Control (its CLI applies and restores the profile), DCS, the Pimax runtime and client, a headset
   that is tracked, in a lit room.
-- `pimax_ctl.exe` (from `tools\runtime-probe`, not tracked yet).
+- `pimax_ctl.exe` (from `tools\runtime-probe`; build it with its `build.bat`).
 - The capture layer, built once on the machine that flies: `pwsh -File tools\rig\build-capture-layer.ps1 -Test`
   (MSVC through `scripts\msvc.cmd`; the OpenXR headers of the OFXR fork's checkout; `-Test` also wants a built OFXR
   fork). The runner finds it in `artifacts\rig\capture-layer\bin`; `-DryRun` says so when it is missing.
