@@ -555,7 +555,7 @@ void ApplyFxApplySkip(int mode, bool verify, int verifyEvery) {
 // W1 [Water] SkipHiddenWater (w1_water.h), gated by the kill switch like every engine key. The verify CSV goes next
 // to the dev ini when one is used, else next to the log.
 void ApplyWaterSkip(bool engineOff) {
-  w1::Apply(engineOff ? 0 : g_cfg.waterSkip, (g_devDir.empty() ? g_dir : g_devDir) + L"DcsQvCull_water.csv");
+  w1::Apply(engineOff ? 0 : g_cfg.waterSkip, g_cfg.waterProbe, (g_devDir.empty() ? g_dir : g_devDir) + L"DcsQvCull_water.csv");
 }
 
 // Bench mode 34 ended: sampled timing back on, the configured mode back.

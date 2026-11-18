@@ -44,8 +44,28 @@
 // is logged too. In verify mode the test is fed M's outputs as mode 1 would leave them (a private copy of M's targets,
 // updated only when mode 1 would have run M on the GPU), so "test 0, real > 0" counts exactly the frames mode 1 would
 // have drawn wrong. Other values: off.
+// 3 no-submit (0.7): a view that the earlier frames found dry is not submitted at all (DCS's water mask, refraction,
+// rivers and sea pass objects are not called), so the render thread saves their time as well. The decision comes from
+// earlier frames, read back on the CPU, so it is NOT exact: the guard is temporal only. While no view has seen water
+// (the gate's test state), each view is probed once every [Water] NoSubmitProbe frames (default 4, 1-16; staggered:
+// view v probes when (frame + v) % N == 0): the probe is mode 1's test alone (M's CPU side under a FALSE predicate,
+// the rivers / sea test with writes off, counted), the real passes are not drawn. In the other frames the view is not
+// submitted. A probe that sees a sample turns the gate to stock (every view drawn) when its queries are read back
+// (1-3 frames later); the start guard and the 90-dry-frame return work as in mode 1. Worst case after water enters
+// the view: the view stays undrawn until a probe of any view sees it and is read back: N - 1 + read-back latency
+// frames (N = 4, latency 2: up to 5 frames, ~55 ms at 90 Hz); there is no spatial margin, so the strip that enters
+// during that time (head turn rate x that time, e.g. 100 deg/s x 55 ms = 5.5 deg) is missing for those frames.
+// What the skipped passes write that later passes read: on the GPU nothing, the same as a predicated view without
+// water in mode 1 (M's and R's targets keep older contents, no stencil WATER); their constant-buffer uploads are not
+// made, so DCS's effect framework and the GPU buffers agree (both hold the last upload that did run).
+// 4 verify of 3: everything is drawn (the stock picture); the views mode 3 would probe run the test (fed M's outputs
+// as mode 3 leaves them), the views it would skip run their real passes counted; the line counts the view-frames
+// with real water that mode 3 would not have drawn (skipped or probed), the frames with any such view, the episodes
+// and the longest run of such frames.
 // The "water skip:" line every 10 s while on: per view tested / skipped / kept / forced / stock frames, forced reasons,
 // switches, start-guard arms, and in verify mode the frames with real water while the test saw none (rivers, sea).
+// In modes 3 / 4 "tested" = probe and start-guard frames, "skipped" = frames not submitted (4: that mode 3 would not
+// submit), "kept" = probes that saw water.
 //
 // Included once from main.cpp inside its anonymous namespace, after pass_timing.h, d3dstate.h, split_filter.h,
 // shadow_inst.h, scene_cut.h and gpu_pass_timing.h.
@@ -94,14 +114,41 @@ struct Gate {
   }
 };
 
-// What mode 1 does with one view in the current frame.
-enum ViewPlan : uint8_t { kPlanTest = 0, kPlanStock = 1, kPlanForced = 2 };
+// What mode 1 does with one view in the current frame (modes 3 / 4: kPlanTest = a probe, kPlanSkip = not submitted).
+enum ViewPlan : uint8_t { kPlanTest = 0, kPlanStock = 1, kPlanForced = 2, kPlanSkip = 3 };
 inline ViewPlan PlanView(const Gate& g) { return g.stock ? kPlanStock : g.forced ? kPlanForced : kPlanTest; }
 
 // Mode 1 skips a tested view when the test saw no sample: exact when that never happens while the real passes have one.
 inline bool Skips(ViewPlan p, uint64_t testSamples) { return p == kPlanTest && testSamples == 0; }
 
-inline int SanitizeMode(int m) { return m == 1 || m == 2 ? m : 0; }
+inline int SanitizeMode(int m) { return m >= 1 && m <= 4 ? m : 0; }
+inline bool IsVerify(int m) { return m == 2 || m == 4; }
+inline bool NoSubmit(int m) { return m == 3 || m == 4; }
+inline int SanitizeProbe(int n) { return n < 1 ? 1 : n > 16 ? 16 : n; }
+// Modes 3 / 4: a view the gate would test is probed one frame in `every` (staggered by view), else not submitted.
+inline ViewPlan PlanFor(const Gate& g, int mode, uint64_t frame, int view, int every) {
+  const ViewPlan p = PlanView(g);
+  if (p != kPlanTest || !NoSubmit(mode)) return p;
+  return every <= 1 || (frame + static_cast<uint64_t>(view)) % static_cast<uint64_t>(every) == 0 ? kPlanTest : kPlanSkip;
+}
+// Mode 3 draws a view's water only in its stock and start-guard frames: a probe or a skipped view with real water is
+// a frame drawn wrong.
+inline bool NoSubmitWrong(ViewPlan p, uint64_t realSamples) {
+  return (p == kPlanTest || p == kPlanSkip) && realSamples != 0;
+}
+// Runs of frames with at least one view drawn wrong (mode 4's account; also the offline replay).
+struct BadRuns {
+  uint64_t frames = 0, episodes = 0, longest = 0, cur = 0;
+  void Frame(bool bad) {
+    if (bad) {
+      if (!cur) ++episodes;
+      ++frames, ++cur;
+      if (cur > longest) longest = cur;
+    } else {
+      cur = 0;
+    }
+  }
+};
 
 // ---------------------------------------------------------------------------
 // Pass kinds (render thread)
@@ -109,13 +156,14 @@ inline int SanitizeMode(int m) { return m == 1 || m == 2 ? m : 0; }
 std::atomic<int> g_mode{0};       // wanted ([Water] SkipHiddenWater, kill switch applied)
 std::atomic<int> g_benchMode{-1};  // >= 0: the timing phase's arm (replaces g_mode while it runs)
 int g_rMode = 0;                  // render thread: the mode in force
+std::atomic<int> g_probeEvery{4};  // [Water] NoSubmitProbe (modes 3 / 4)
 enum PK : uint8_t { kNone, kMask, kRefr, kRivers, kSea, kOther };
 
 std::unordered_map<void*, PK> g_vtKind;  // vtable -> kind for the kinds with their own class
-// The timing phase: the water pass objects of its blocks (both arms), whose render-thread time it sums.
+// The timing phase: the water pass objects of its blocks (both arms) and their kind, whose render-thread time it sums.
 std::atomic<bool> g_timing{false};
 std::mutex g_passMu;
-std::unordered_set<void*> g_passObjs;  // guarded by g_passMu
+std::unordered_map<void*, PK> g_passObjs;  // guarded by g_passMu
 
 inline bool InlineName(void* pass, void** vt, char* name) {
   __try {
@@ -163,7 +211,12 @@ struct Rec {
   ID3D11Query* gtR = nullptr;       // the real rivers pass's samples (verify, stock views)
   ID3D11Query* gtS = nullptr;       // the real sea pass's samples
 };
-enum State : uint8_t { kStNone = 0, kStPredicated = 1, kStForced = 2, kStVerify = 3, kStStock = 4 };
+// kStSkipped: mode 3, not submitted. kStProbe: mode 3, the test alone. kStVerifySkip: mode 4, a view mode 3 would not
+// submit (its real passes run counted).
+enum State : uint8_t {
+  kStNone = 0, kStPredicated = 1, kStForced = 2, kStVerify = 3, kStStock = 4, kStSkipped = 5, kStProbe = 6,
+  kStVerifySkip = 7
+};
 enum Reason : uint8_t { kRsNone = 0, kRsUnknownDraw = 1, kRsHookTaken = 2, kRsPassOrder = 3, kRsStart = 4, kRsCount = 5 };
 struct FrameRec {
   uint64_t frame = 0;
@@ -486,12 +539,17 @@ void* g_pRiv = nullptr;
 uint64_t g_execArg = 0;
 bool g_testOk = false;   // the test hooks went in for this view
 bool g_testOpen = false; // the view's predicate is open
+bool g_skipView = false; // mode 3: this view is not submitted (its passes are held, then dropped at the sea)
+ViewPlan g_plan = kPlanTest;  // this view's plan, decided at its mask pass
 Gate g_gate;
 uint64_t g_lastCuts = 0;
 int64_t g_lastFrameQpc = 0;
 // Counters (read by the worker's log line)
 std::atomic<uint64_t> g_cTested[kViews], g_cSkipped[kViews], g_cKept[kViews], g_cForced[kViews], g_cStock[kViews],
     g_cViolR[kViews], g_cViolS[kViews], g_cReasons[kRsCount], g_cSwitchStock{0}, g_cSwitchTest{0}, g_cArms{0};
+// Mode 4: view-frames with real water that mode 3 would not have drawn (skipped / probed), and the frame runs.
+std::atomic<uint64_t> g_cWrongSkip[kViews], g_cWrongProbe[kViews], g_cBadFrames{0}, g_cBadEpisodes{0}, g_cBadLongest{0};
+BadRuns g_bad;  // render thread
 FILE* g_csv = nullptr;
 std::wstring g_csvPath;
 
@@ -538,6 +596,7 @@ void Flush(uint8_t reason) {
     g_st = kIdle;
     return;
   }
+  // A skipped view (mode 3) runs what it held, as any forced view: the view is drawn stock, nothing was tested.
   EndTest();
   if (view) {
     FrameRec& f = Cur();
@@ -548,6 +607,7 @@ void Flush(uint8_t reason) {
     f.state[g_view] = kStForced, f.reason[g_view] = reason;
   }
   g_testOpen = false;
+  g_skipView = false;
   g_cReasons[reason < kRsCount ? reason : 0].fetch_add(1, std::memory_order_relaxed);
   if (g_pM) ptiming::g_orig(g_pM, g_execArg);
   if (g_pR) ptiming::g_orig(g_pR, g_execArg);
@@ -559,7 +619,7 @@ void Flush(uint8_t reason) {
 void TestRivers(void* pass, uint64_t frame) {
   FrameRec& f = Cur();
   OpenTest(f);
-  if (g_rMode == 2) LoadMTargets();
+  if (IsVerify(g_rMode)) LoadMTargets();
   RunTest(pass, frame, f.r[g_view].occR);
   g_st = kWantSea;
 }
@@ -571,15 +631,23 @@ void SeaBlock(void* pass, uint64_t frame) {
   OpenTest(f);
   if (!riversTested) {  // no rivers pass: its query counts nothing
     g_ctx->Begin(r.occR), g_ctx->End(r.occR);
-    if (g_rMode == 2) LoadMTargets();
+    if (IsVerify(g_rMode)) LoadMTargets();
   }
   RunTest(pass, frame, r.occS);
   g_ctx->End(r.pred);
   g_testOpen = false;
-  const bool verify = g_rMode == 2;
-  const ViewPlan plan = PlanView(g_gate);
+  const bool verify = IsVerify(g_rMode);
+  const ViewPlan plan = g_plan;
   f.plan[g_view] = plan;
   uint8_t reason = !g_testOk ? kRsHookTaken : g_unknown ? kRsUnknownDraw : plan == kPlanForced ? kRsStart : kRsNone;
+  if (g_rMode == 3 && reason == kRsNone) {
+    // Mode 3's probe: the test alone; M ran its CPU side only, R and the real water passes are not drawn.
+    f.reason[g_view] = reason;
+    f.state[g_view] = kStProbe;
+    g_pM = g_pR = g_pRiv = nullptr;
+    g_st = kIdle;
+    return;
+  }
   bool predicated = !verify && reason == kRsNone;
   if (predicated && !BeginUnpred(r.pred)) predicated = false, reason = kRsHookTaken;
   if (!verify && reason != kRsNone) g_cReasons[reason].fetch_add(1, std::memory_order_relaxed);
@@ -589,11 +657,16 @@ void SeaBlock(void* pass, uint64_t frame) {
     ptiming::g_orig(g_pM, g_execArg);
     if (verify) {
       FindMTargets();
-      // Mode 1 runs M on the GPU in a forced view always, in a tested one only when its test saw water.
-      const bool pred = plan == kPlanTest && reason == kRsNone;
-      if (pred) g_ctx->SetPredication(r.pred, FALSE);
-      SaveMTargets(pred);
-      if (pred) g_ctx->SetPredication(nullptr, FALSE);
+      if (g_rMode == 4) {
+        // Mode 3 runs M on the GPU in its stock and forced views only (a probe runs M's CPU side alone).
+        if (plan != kPlanTest || reason != kRsNone) SaveMTargets(false);
+      } else {
+        // Mode 1 runs M on the GPU in a forced view always, in a tested one only when its test saw water.
+        const bool pred = plan == kPlanTest && reason == kRsNone;
+        if (pred) g_ctx->SetPredication(r.pred, FALSE);
+        SaveMTargets(pred);
+        if (pred) g_ctx->SetPredication(nullptr, FALSE);
+      }
     }
   }
   if (g_pR) ptiming::g_orig(g_pR, g_execArg);
@@ -653,6 +726,7 @@ void Poll() {
       f.used = false;           // too old: dropped
       continue;
     }
+    bool bad = false;  // mode 4: a view mode 3 would have drawn wrong
     for (int v = 0; v < kViews; ++v) {
       const uint8_t s = f.state[v];
       if (!s) continue;
@@ -660,6 +734,14 @@ void Poll() {
       if (s == kStStock) {
         g_cStock[v].fetch_add(1, std::memory_order_relaxed);
         if (real) water = true;
+      } else if (s == kStSkipped) {
+        g_cSkipped[v].fetch_add(1, std::memory_order_relaxed);  // nothing known: nothing for the gate
+      } else if (s == kStVerifySkip) {
+        g_cSkipped[v].fetch_add(1, std::memory_order_relaxed);  // what mode 3 knows: nothing
+        if (NoSubmitWrong(kPlanSkip, real)) g_cWrongSkip[v].fetch_add(1, std::memory_order_relaxed), bad = true;
+      } else if (s == kStProbe) {
+        g_cTested[v].fetch_add(1, std::memory_order_relaxed);
+        if (test) water = true, g_cKept[v].fetch_add(1, std::memory_order_relaxed);
       } else {
         g_cTested[v].fetch_add(1, std::memory_order_relaxed);
         if (s == kStForced) g_cForced[v].fetch_add(1, std::memory_order_relaxed);
@@ -670,6 +752,8 @@ void Poll() {
         if (s == kStVerify) {
           if (!oR[v] && gR[v] && !test) g_cViolR[v].fetch_add(1, std::memory_order_relaxed);
           if (!oS[v] && gS[v] && !test) g_cViolS[v].fetch_add(1, std::memory_order_relaxed);
+          if (g_rMode == 4 && f.reason[v] == kRsNone && NoSubmitWrong(static_cast<ViewPlan>(f.plan[v]), real))
+            g_cWrongProbe[v].fetch_add(1, std::memory_order_relaxed), bad = true;
         }
       }
       if (g_csv)
@@ -677,6 +761,12 @@ void Poll() {
                 f.reason[v], f.plan[v], static_cast<unsigned long long>(oR[v]), static_cast<unsigned long long>(oS[v]),
                 static_cast<unsigned long long>(gR[v]), static_cast<unsigned long long>(gS[v]),
                 f.testOn[v] ? (pr[v] ? 1 : 0) : -1);
+    }
+    if (g_rMode == 4) {
+      g_bad.Frame(bad);
+      g_cBadFrames.store(g_bad.frames, std::memory_order_relaxed);
+      g_cBadEpisodes.store(g_bad.episodes, std::memory_order_relaxed);
+      g_cBadLongest.store(g_bad.longest, std::memory_order_relaxed);
     }
     const bool wasStock = g_gate.stock;
     const uint64_t toTest = g_gate.toTest;
@@ -727,14 +817,15 @@ ExecFn Intercept(void* pass, uint64_t frame) {
     if (g_st != kIdle) Flush(kRsPassOrder);
     g_rMode = want;
     g_gate.Start();
-    if (g_csv && want != 2) fclose(g_csv), g_csv = nullptr;
-    if (want == 2) OpenCsv();
+    g_bad.cur = 0;
+    if (g_csv && !IsVerify(want)) fclose(g_csv), g_csv = nullptr;
+    if (IsVerify(want)) OpenCsv();
   }
   if (g_timing.load(std::memory_order_relaxed)) {  // the timing phase classifies in both arms
     const PK tk = KindOf(pass);
     if (tk != kOther) {
       std::lock_guard<std::mutex> lock(g_passMu);
-      g_passObjs.insert(pass);
+      g_passObjs[pass] = tk;
     }
   }
   if (!g_rMode) return nullptr;
@@ -759,12 +850,23 @@ ExecFn Intercept(void* pass, uint64_t frame) {
     case kMask: {
       if (++g_view >= kViews) return nullptr;
       g_execArg = frame;
-      if (g_rMode == 1 && PlanView(g_gate) == kPlanStock) {
+      g_skipView = false;
+      g_plan = PlanFor(g_gate, g_rMode, g_frame, g_view, g_probeEvery.load(std::memory_order_relaxed));
+      if ((g_rMode == 1 || g_rMode == 3) && g_plan == kPlanStock) {
         Cur().state[g_view] = kStStock;
         g_st = kStockRefr;
         return nullptr;
       }
+      if (g_rMode == 4 && g_plan == kPlanSkip) {  // verify: drawn, counted; mode 3 would not submit it
+        Cur().state[g_view] = kStVerifySkip;
+        g_st = kStockRefr;
+        return nullptr;
+      }
       g_pM = pass, g_pR = g_pRiv = nullptr, g_st = kWantRefr;
+      if (g_rMode == 3 && g_plan == kPlanSkip) {  // held (a foreign pass before the sea runs them), then dropped
+        g_skipView = true;
+        return &NoOp;
+      }
       g_testOk = true;
       return &MPrepass;
     }
@@ -780,10 +882,21 @@ ExecFn Intercept(void* pass, uint64_t frame) {
       if (g_st == kStockRefr || g_st == kStockRivers) return &StockRivers;
       if (g_st != kWantRefr && g_st != kWantRivers) return nullptr;
       g_pRiv = pass;
+      if (g_skipView) {
+        g_st = kWantSea;
+        return &NoOp;
+      }
       return &TestRivers;
     case kSea:
       if (g_st == kStockRefr || g_st == kStockRivers || g_st == kStockSea) return &StockSea;
       if (g_st != kWantRefr && g_st != kWantRivers && g_st != kWantSea) return nullptr;
+      if (g_skipView) {  // mode 3: the view's water passes are not submitted
+        Cur().state[g_view] = kStSkipped;
+        g_pM = g_pR = g_pRiv = nullptr;
+        g_skipView = false;
+        g_st = kIdle;
+        return &NoOp;
+      }
       return &SeaBlock;
     default:
       return nullptr;
@@ -792,8 +905,13 @@ ExecFn Intercept(void* pass, uint64_t frame) {
 
 // Worker thread: the key (kill switch applied by the caller). The intercept stays installed once set (one atomic load
 // per top-level pass while the key is 0); Shutdown takes it out.
-void Apply(int m, const std::wstring& csvPath) {
+void Apply(int m, int probe, const std::wstring& csvPath) {
   m = SanitizeMode(m);
+  probe = SanitizeProbe(probe);
+  if (probe != g_probeEvery.load()) {
+    g_probeEvery = probe;
+    if (NoSubmit(m)) Log("water skip: [Water] NoSubmitProbe=%d (a dry view is probed one frame in %d)", probe, probe);
+  }
   if (m == g_mode.load()) return;
   if (m && !ptiming::g_orig) ptiming::Install();
   static bool notedWait = false;
@@ -806,9 +924,17 @@ void Apply(int m, const std::wstring& csvPath) {
   if (g_csvPath.empty()) g_csvPath = csvPath;
   g_mode = m;
   if (m) ptiming::g_intercept.store(&Intercept);
-  Log("water skip: [Water] SkipHiddenWater=%d (%s)", m,
-      m == 0 ? "off" : m == 1 ? "on: a view's water mask, refraction and water passes are drawn only when its water test sees water"
-                              : "verify: the test runs and is logged next to the real water passes, nothing is skipped");
+  char probeNote[48] = "";
+  if (NoSubmit(m)) snprintf(probeNote, sizeof(probeNote), "; probe every %d frames", g_probeEvery.load());
+  Log("water skip: [Water] SkipHiddenWater=%d (%s)%s", m,
+      m == 0   ? "off"
+      : m == 1 ? "on: a view's water mask, refraction and water passes are drawn only when its water test sees water"
+      : m == 2 ? "verify: the test runs and is logged next to the real water passes, nothing is skipped"
+      : m == 3 ? "no-submit: a view found dry is not submitted, probed one frame in NoSubmitProbe; not exact after water "
+                 "enters the view"
+               : "verify of no-submit: everything drawn; the view-frames mode 3 would have drawn without their water are "
+                 "counted",
+      probeNote);
 }
 
 // Worker thread, every 10 s while the intercept is in: per view tested / skipped / kept / forced / stock frames.
@@ -830,6 +956,12 @@ void LogCounters() {
       t, u(g_cReasons[kRsUnknownDraw]), u(g_cReasons[kRsHookTaken]), u(g_cReasons[kRsPassOrder]), u(g_cReasons[kRsStart]),
       u(g_cArms), u(g_cSwitchStock), u(g_cSwitchTest), kDryFrames, u(g_cViolR[0]), u(g_cViolR[1]), u(g_cViolR[2]),
       u(g_cViolR[3]), u(g_cViolS[0]), u(g_cViolS[1]), u(g_cViolS[2]), u(g_cViolS[3]));
+  if (g_mode.load() == 4)
+    Log("water skip: no-submit verify (probe every %d): view-frames with real water mode 3 would not draw: skipped "
+        "%llu/%llu/%llu/%llu, probed %llu/%llu/%llu/%llu; frames with any: %llu in %llu episodes, longest %llu frames",
+        g_probeEvery.load(), u(g_cWrongSkip[0]), u(g_cWrongSkip[1]), u(g_cWrongSkip[2]), u(g_cWrongSkip[3]),
+        u(g_cWrongProbe[0]), u(g_cWrongProbe[1]), u(g_cWrongProbe[2]), u(g_cWrongProbe[3]), u(g_cBadFrames),
+        u(g_cBadEpisodes), u(g_cBadLongest));
 }
 
 // ---------------------------------------------------------------------------
@@ -841,6 +973,7 @@ struct Block {
   bool on = false;
   uint64_t frames = 0;
   double periodMs = 0, busyMs = 0, rtCpuMs = 0, waterPassMs = 0, topPassMs = 0;
+  double kindMs[4] = {};  // render-thread time per kind: mask, refraction, rivers, sea
   int periods = 0;
 };
 
@@ -887,13 +1020,18 @@ Block MeasureBlock(bool on, int frames, std::atomic<uint64_t>& frameCounter, dou
     snap.swap(ptiming::g_stats);
     top = ptiming::g_topLevelUs;
   }
-  double water = 0;
+  double water = 0, kind[4] = {};
   {
     std::lock_guard<std::mutex> lock(g_passMu);
-    for (const auto& kv : snap)
-      if (g_passObjs.count(kv.first)) water += kv.second.inclUs;
+    for (const auto& kv : snap) {
+      auto it = g_passObjs.find(kv.first);
+      if (it == g_passObjs.end()) continue;
+      water += kv.second.inclUs;
+      if (it->second >= kMask && it->second <= kSea) kind[it->second - kMask] += kv.second.inclUs;
+    }
   }
   const double f = b.frames ? static_cast<double>(b.frames) : 1.0;
+  for (int i = 0; i < 4; ++i) b.kindMs[i] = kind[i] / 1000.0 / f;
   b.rtCpuMs = tscHz > 0 && c1 > c0 ? (c1 - c0) / tscHz * 1000.0 / f : -1;
   b.waterPassMs = water / 1000.0 / f;
   b.topPassMs = top / 1000.0 / f;
@@ -914,7 +1052,7 @@ Block MeasureBlock(bool on, int frames, std::atomic<uint64_t>& frameCounter, dou
 
 void TimingPhase(int pairs, int cfgMode, int frames, std::atomic<uint64_t>& frameCounter, double tscHz,
                  const std::wstring& csvDir) {
-  const int onMode = cfgMode == 2 ? 2 : 1;
+  const int onMode = SanitizeMode(cfgMode) ? cfgMode : 1;
   if (!ptiming::g_orig) ptiming::Install();
   if (!ptiming::g_orig) {
     Log("  water skip timing: the pass execute hook is not installed; phase skipped");
@@ -965,9 +1103,18 @@ void TimingPhase(int pairs, int cfgMode, int frames, std::atomic<uint64_t>& fram
     dWater.Add(b.waterPassMs - (a.waterPassMs + c.waterPassMs) / 2);
     dTop.Add(b.topPassMs - (a.topPassMs + c.topPassMs) / 2);
   }
-  for (const Block& b : blocks)
+  double kOff[4] = {}, kOn[4] = {};
+  int nOn = 0;
+  for (const Block& b : blocks) {
     if (!b.on) offPeriod += b.periodMs, offCpu += b.rtCpuMs, offWater += b.waterPassMs, ++nOff;
+    else ++nOn;
+    for (int i = 0; i < 4; ++i) (b.on ? kOn : kOff)[i] += b.kindMs[i];
+  }
+  for (int i = 0; i < 4; ++i) kOff[i] /= nOff ? nOff : 1, kOn[i] /= nOn ? nOn : 1;
   if (nOff) offPeriod /= nOff, offCpu /= nOff, offWater /= nOff;
+  Log("  water skip timing: render-thread time per water pass kind, ms/frame, OFF -> ON: mask %.3f -> %.3f, refraction "
+      "%.3f -> %.3f, rivers %.3f -> %.3f, sea %.3f -> %.3f",
+      kOff[0], kOn[0], kOff[1], kOn[1], kOff[2], kOn[2], kOff[3], kOn[3]);
   SYSTEMTIME st;
   GetLocalTime(&st);
   wchar_t name[80];
@@ -976,11 +1123,13 @@ void TimingPhase(int pairs, int cfgMode, int frames, std::atomic<uint64_t>& fram
   FILE* csv = nullptr;
   _wfopen_s(&csv, (csvDir + name).c_str(), L"w");
   if (csv) {
-    fprintf(csv, "block,on,mode,frames,gpu_period_ms,gpu_busy_ms,render_thread_cpu_ms,water_pass_ms,top_pass_ms,periods\n");
+    fprintf(csv, "block,on,mode,frames,gpu_period_ms,gpu_busy_ms,render_thread_cpu_ms,water_pass_ms,top_pass_ms,periods,"
+                 "mask_ms,refraction_ms,rivers_ms,sea_ms\n");
     for (size_t i = 0; i < blocks.size(); ++i)
-      fprintf(csv, "%zu,%d,%d,%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%d\n", i, blocks[i].on ? 1 : 0, blocks[i].on ? onMode : 0,
-              static_cast<unsigned long long>(blocks[i].frames), blocks[i].periodMs, blocks[i].busyMs, blocks[i].rtCpuMs,
-              blocks[i].waterPassMs, blocks[i].topPassMs, blocks[i].periods);
+      fprintf(csv, "%zu,%d,%d,%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%.4f,%.4f,%.4f,%.4f\n", i, blocks[i].on ? 1 : 0,
+              blocks[i].on ? onMode : 0, static_cast<unsigned long long>(blocks[i].frames), blocks[i].periodMs,
+              blocks[i].busyMs, blocks[i].rtCpuMs, blocks[i].waterPassMs, blocks[i].topPassMs, blocks[i].periods,
+              blocks[i].kindMs[0], blocks[i].kindMs[1], blocks[i].kindMs[2], blocks[i].kindMs[3]);
     fclose(csv);
   }
   Log("  water skip timing: %zu pairs (ON = mode %d), %d frames per block; ON minus neighbouring OFF (+- standard "

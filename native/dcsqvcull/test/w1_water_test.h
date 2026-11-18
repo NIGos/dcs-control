@@ -100,9 +100,96 @@ void Pure() {
         "W1 gate: water seen -> every view stock; tested again only after 90 frames in a row without water");
   Check(w1::Skips(w1::kPlanTest, 0) && !w1::Skips(w1::kPlanTest, 1) && !w1::Skips(w1::kPlanForced, 0) &&
             !w1::Skips(w1::kPlanStock, 0) && w1::SanitizeMode(1) == 1 && w1::SanitizeMode(2) == 2 &&
-            w1::SanitizeMode(3) == 0 && w1::SanitizeMode(-1) == 0 && w1::SanitizeMode(0) == 0,
-        "W1 decisions: only a tested view whose test saw nothing is skipped; key values other than 1 and 2 are off "
-        "(the development-only 3 is gone)");
+            w1::SanitizeMode(3) == 3 && w1::SanitizeMode(4) == 4 && w1::SanitizeMode(5) == 0 &&
+            w1::SanitizeMode(-1) == 0 && w1::SanitizeMode(0) == 0,
+        "W1 decisions: only a tested view whose test saw nothing is skipped; key values other than 1-4 are off");
+  // Modes 3 / 4: a view the gate would test is probed one frame in N, staggered by view; stock and forced unchanged.
+  w1::Gate t;
+  t.Start();
+  t.warm = 0, t.forced = false;
+  int probes[4] = {}, perFrame = 0;
+  bool oneEach = true;
+  for (uint64_t fr = 0; fr < 40; ++fr) {
+    perFrame = 0;
+    for (int v = 0; v < 4; ++v)
+      if (w1::PlanFor(t, 3, fr, v, 4) == w1::kPlanTest) ++probes[v], ++perFrame;
+    oneEach = oneEach && perFrame == 1;
+  }
+  w1::Gate s = t;
+  s.stock = true;
+  w1::Gate fo = t;
+  fo.forced = true;
+  Check(oneEach && probes[0] == 10 && probes[3] == 10 && w1::PlanFor(t, 3, 1, 0, 4) == w1::kPlanSkip &&
+            w1::PlanFor(t, 1, 1, 0, 4) == w1::kPlanTest && w1::PlanFor(t, 3, 5, 0, 1) == w1::kPlanTest &&
+            w1::PlanFor(s, 3, 1, 0, 4) == w1::kPlanStock && w1::PlanFor(fo, 4, 1, 0, 4) == w1::kPlanForced &&
+            w1::SanitizeProbe(0) == 1 && w1::SanitizeProbe(99) == 16 &&
+            w1::NoSubmitWrong(w1::kPlanSkip, 1) && w1::NoSubmitWrong(w1::kPlanTest, 1) &&
+            !w1::NoSubmitWrong(w1::kPlanStock, 1) && !w1::NoSubmitWrong(w1::kPlanForced, 1) &&
+            !w1::NoSubmitWrong(w1::kPlanSkip, 0),
+        "W1 no-submit plan: probe every 4 frames staggered (one view per frame), every frame at 1; stock and forced "
+        "views drawn; a probed or skipped view with real water counts as drawn wrong");
+  w1::BadRuns b;
+  for (bool x : {false, true, true, false, true, true, true, false}) b.Frame(x);
+  Check(b.frames == 5 && b.episodes == 2 && b.longest == 3, "W1 no-submit verify: bad frames, episodes, longest run");
+}
+
+// Mode 3 over the recorded frames: probes every `every` frames, results read `lat` frames later.
+struct Replay3Out {
+  uint64_t frames = 0, skipped = 0, probes = 0, wrong = 0;
+  w1::BadRuns bad;
+};
+template <size_t N>
+Replay3Out Replay3(const FxRun (&runs)[N], int lat, int every) {
+  std::vector<uint8_t> seq;
+  for (const FxRun& r : runs) seq.insert(seq.end(), r.n, r.bits);
+  std::vector<bool> water(seq.size(), false);
+  w1::Gate g;
+  g.Start();
+  Replay3Out o;
+  for (size_t i = 0; i < seq.size(); ++i) {
+    if (i >= static_cast<size_t>(lat)) g.OnFrameRead(water[i - lat]);
+    g.BeginFrame();
+    bool w = false, frameBad = false;
+    for (int v = 0; v < 4; ++v) {
+      const bool test = (seq[i] >> v) & 1, real = (seq[i] >> (4 + v)) & 1;
+      const w1::ViewPlan p = w1::PlanFor(g, 3, i, v, every);
+      if (p == w1::kPlanStock) w = w || real;
+      else if (p == w1::kPlanForced || p == w1::kPlanTest) w = w || test;
+      if (p == w1::kPlanSkip) ++o.skipped;
+      if (p == w1::kPlanTest) ++o.probes;
+      if (w1::NoSubmitWrong(p, real)) ++o.wrong, frameBad = true;
+    }
+    o.bad.Frame(frameBad);
+    water[i] = w;
+    ++o.frames;
+  }
+  return o;
+}
+
+void Fixtures3() {
+  bool ok = true;
+  for (int every : {1, 2, 4, 8}) {
+    for (int lat = 1; lat <= 3; ++lat) {
+      const Replay3Out c = Replay3(kFxCoast, lat, every), a = Replay3(kFxLowA, lat, every),
+                       b = Replay3(kFxLowB, lat, every), r = Replay3(kFxRamp, lat, every);
+      const uint64_t bound = static_cast<uint64_t>(every - 1 + lat);
+      // The ramp never sees water: after the start guard every view-frame is a probe or skipped, none wrong.
+      const bool l = r.bad.frames == 0 && r.skipped + r.probes == (r.frames - w1::kStartFrames) * 4 &&
+                     b.bad.longest >= 1 && b.bad.longest <= bound && a.bad.longest <= bound && c.bad.longest <= bound;
+      if (!l || lat == 2)
+        printf("     no-submit replay probe %d latency %d: coast %llu wrong frames (%llu episodes, longest %llu); low A "
+               "%llu (%llu, %llu); low B %llu (%llu, %llu); ramp %llu skipped + %llu probes of %llu view-frames\n",
+               every, lat, (unsigned long long)c.bad.frames, (unsigned long long)c.bad.episodes,
+               (unsigned long long)c.bad.longest, (unsigned long long)a.bad.frames, (unsigned long long)a.bad.episodes,
+               (unsigned long long)a.bad.longest, (unsigned long long)b.bad.frames, (unsigned long long)b.bad.episodes,
+               (unsigned long long)b.bad.longest, (unsigned long long)r.skipped, (unsigned long long)r.probes,
+               (unsigned long long)r.frames * 4);
+      ok = ok && l;
+    }
+  }
+  Check(ok, "W1 no-submit replay of the recorded frames (probe 1-8, read-back latency 1-3): the ramp never draws "
+            "wrong; after water enters the longest run of frames drawn without it is at most probe - 1 + latency; "
+            "the dry-to-water turn over towns (low B) is one such run");
 }
 
 void Fixtures() {
@@ -401,6 +488,65 @@ void Device() {
         "W1 device: verify mode draws everything (stock picture), counts the test next to the real passes (no "
         "'test 0, real > 0'), and finds the mask pass's target for its mode-1 view of the test");
 
+  // 8. No-submit (mode 3, probe every 4): hidden water: after the guard the views are probed or not submitted, M is
+  // never drawn; water in view: the frame it appears is drawn without it, the next (read back) draws every view.
+  // (The water of the last verify frames, read back after the switch, keeps the views stock for 90 dry frames.)
+  auto untilTested = [&] {
+    for (int i = 0; i < 120 && (w1::g_gate.stock || w1::g_gate.warm > 0 || w1::g_gate.forced); ++i) Frame();
+  };
+  r.waterDepth = 0.3f;
+  w1::g_probeEvery = 4;
+  w1::g_mode = 3;
+  Frame();
+  untilTested();
+  const uint32_t mask8 = MaskTag(ReadTexel(r.mask));
+  const uint64_t sk8 = Sum(w1::g_cSkipped), te8 = Sum(w1::g_cTested), kept8 = Sum(w1::g_cKept);
+  for (int i = 0; i < 8; ++i) Frame();
+  const uint64_t skipped8 = Sum(w1::g_cSkipped) - sk8, probes8 = Sum(w1::g_cTested) - te8;
+  const bool m3dry = MaskTag(ReadTexel(r.mask)) == mask8 && mask8 != (r.tag & 0xffff) && skipped8 >= 21 &&
+                     skipped8 <= 24 && probes8 >= 7 && probes8 <= 12 && Sum(w1::g_cKept) == kept8 && !w1::g_gate.stock &&
+                     tableStock();
+  if (!m3dry)
+    printf("     no-submit dry: mask %x (was %x, tag %x), skipped %llu, probes %llu, kept +%llu, stock %d\n",
+           MaskTag(ReadTexel(r.mask)), mask8, r.tag, (unsigned long long)skipped8, (unsigned long long)probes8,
+           (unsigned long long)(Sum(w1::g_cKept) - kept8), w1::g_gate.stock ? 1 : 0);
+  r.waterDepth = 0.7f;
+  Frame();
+  const uint32_t ds8a = ReadTexel(r.ds), mask8a = MaskTag(ReadTexel(r.mask));
+  Frame();
+  const uint32_t ds8b = ReadTexel(r.ds);
+  const bool m3wet = ((ds8a >> 24) & 0x38) == 0 && mask8a == mask8 && w1::g_gate.stock &&
+                     ((ds8b >> 24) & 0x38) == 0x10 && MaskTag(ReadTexel(r.mask)) == (r.tag & 0xffff);
+  Check(m3dry, "W1 device no-submit: hidden water: after the 3 guard frames each frame probes one view and does not "
+               "submit the other three; the mask pass is never drawn");
+  Check(m3wet, "W1 device no-submit: water appears: that frame is drawn without it (the guard is temporal), the next "
+               "frame (read back) draws mask and water in every view");
+
+  // 9. Verify of no-submit (mode 4): the stock picture; the frame water appears in is counted as mode 3's error.
+  r.waterDepth = 0.3f;
+  w1::g_mode = 4;
+  Frame();
+  untilTested();
+  for (int i = 0; i < 8; ++i) Frame();
+  const uint64_t wS0 = Sum(w1::g_cWrongSkip), wP0 = Sum(w1::g_cWrongProbe), bf0 = w1::g_cBadFrames.load(),
+                 ep0 = w1::g_cBadEpisodes.load();
+  const bool v9dry = wS0 == 0 && wP0 == 0 && bf0 == 0 && MaskTag(ReadTexel(r.mask)) == (r.tag & 0xffff) &&
+                     !w1::g_gate.stock && Sum(w1::g_cSkipped) > 0;
+  r.waterDepth = 0.7f;
+  Frame();
+  const bool drawn9 = ((ReadTexel(r.ds) >> 24) & 0x38) == 0x10;
+  for (int i = 0; i < 3; ++i) Frame();
+  const uint64_t wS = Sum(w1::g_cWrongSkip), wP = Sum(w1::g_cWrongProbe);
+  if (!(v9dry && drawn9 && wS == 3 && wP == 1))
+    printf("     no-submit verify: dry ok %d, drawn %d, wrong skipped %llu probed %llu, bad frames %llu longest %llu, "
+           "stock %d\n", v9dry ? 1 : 0, drawn9 ? 1 : 0, (unsigned long long)wS, (unsigned long long)wP,
+           (unsigned long long)w1::g_cBadFrames.load(), (unsigned long long)w1::g_cBadLongest.load(),
+           w1::g_gate.stock ? 1 : 0);
+  Check(v9dry && drawn9 && wS == 3 && wP == 1 && w1::g_cBadFrames.load() == 1 && w1::g_cBadEpisodes.load() == ep0 + 1 &&
+            w1::g_cBadLongest.load() == 1 && w1::g_gate.stock,
+        "W1 device no-submit verify: everything drawn; dry frames count nothing; the frame water appears in counts "
+        "3 skipped and 1 probed view as mode 3's error (1 frame, 1 episode), then every view is stock");
+
   // 7. Key off: stock at the next pass, then Shutdown releases everything.
   w1::g_mode = 0;
   r.waterDepth = 0.3f;
@@ -432,6 +578,7 @@ void Device() {
 void Run() {
   Pure();
   Fixtures();
+  Fixtures3();
   Device();
 }
 

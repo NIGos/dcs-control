@@ -516,7 +516,7 @@ DWORD WINAPI SuiteThread(void*) {
   if (ok && g_cfg.suiteWaterSkipTiming > 0 && !g_benchAbort) {
     Log("-- W1 water skip: GPU frame period and render-thread time, OFF (key 0) / ON ([Water] SkipHiddenWater=%d) "
         "blocks (w1_water.h, %d pairs, %d frames per block) --",
-        g_cfg.waterSkip == 2 ? 2 : 1, g_cfg.suiteWaterSkipTiming, g_cfg.suiteWaterSkipTimingFrames);
+        g_cfg.waterSkip ? g_cfg.waterSkip : 1, g_cfg.suiteWaterSkipTiming, g_cfg.suiteWaterSkipTimingFrames);
     w1::TimingPhase(g_cfg.suiteWaterSkipTiming, g_cfg.waterSkip, g_cfg.suiteWaterSkipTimingFrames, g_quadFrame, g_tscHz,
                     g_devDir.empty() ? g_dir : g_devDir);
     Chime(1000, 60);
