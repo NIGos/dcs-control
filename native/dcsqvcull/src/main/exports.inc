@@ -192,6 +192,7 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   nighttone::Shutdown(); // R37: tone mapper fields and exposure bias back, addToneMappingPass import back (no-op unless used)
   chainderive::Shutdown(); // audit A2/B4 census: callbacks out, analysis thread stopped (no-op unless used)
   pcensus::Shutdown();     // audit B6 periphery census: boundary callback and table arms out (no-op unless used)
+  eshd::Shutdown();        // 0.7 early shaders: boundary callback, draw arms, creation record out, objects released
   chainfast::Shutdown(); // R34: CSSetShader and CreateComputeShader hooks out, kernel pairs released (no-op unless used)
   pflush::Shutdown();   // pass flush callback and xrBeginFrame hook out, our context reference released
   vramc::Shutdown();    // the VRAM count's device create hooks, if a phase was running

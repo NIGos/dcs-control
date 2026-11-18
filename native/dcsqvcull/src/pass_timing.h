@@ -64,6 +64,9 @@ std::atomic<BoundaryFn> g_censusBoundary{nullptr};
 // periph_census.h ([Suite] PeriphCensus, audit B6, measure only): called after g_censusBoundary at a pass start and
 // right before it at an end; nullptr unless the census key is non-zero.
 std::atomic<BoundaryFn> g_pcBoundary{nullptr};
+// early_shaders.h (0.7: [D3D] EarlyShaders, [Suite] EarlyShaderCensus): called before every other callback at a pass
+// start and after every other one at an end, so its draw arm encloses every other feature's per-pass arm.
+std::atomic<BoundaryFn> g_earlyBoundary{nullptr};
 // R139: observer of the UpdateSubresource(1) calls on a context, called (before forwarding, with DCS's own bytes) by
 // whichever hook of ours holds the slot: gpu_pass_timing.h's while it measures, fixation_depth.h's in its in-pass
 // arms, vrs_probe.h's one-shot arm. nullptr unless the VRS probe runs.
@@ -157,15 +160,17 @@ void __fastcall Hook(void* pass, uint64_t frame) {
   BoundaryFn vr = g_vrsBoundary.load(std::memory_order_relaxed);  // R139
   BoundaryFn cs = g_censusBoundary.load(std::memory_order_relaxed);  // chain_derive.h
   BoundaryFn pc = g_pcBoundary.load(std::memory_order_relaxed);      // periph_census.h
+  BoundaryFn eb = g_earlyBoundary.load(std::memory_order_relaxed);   // early_shaders.h
   if (!g_recording.load(std::memory_order_relaxed)) {
     AfterTopFn after = g_afterTop.load(std::memory_order_relaxed);
-    if (!after && !each && !bnd && !fl && !vb && !db && !vr && !cs && !pc) {
+    if (!after && !each && !bnd && !fl && !vb && !db && !vr && !cs && !pc && !eb) {
       if (run_ == g_orig) return g_orig(pass, frame);
       ++t_depth;  // W1's replacement runs DCS executes itself: their nested passes stay nested
       run_(pass, frame);
       --t_depth;
       return;
     }
+    if (eb) eb(pass, true, t_depth);
     BoundaryFn vp = vr ? g_vrsPre.load(std::memory_order_relaxed) : nullptr;
     if (vp) vp(pass, true, t_depth);
     if (each) each();
@@ -186,10 +191,12 @@ void __fastcall Hook(void* pass, uint64_t frame) {
     if (bnd) bnd(pass, false, t_depth);
     if (fl) fl(pass, false, t_depth);
     if (db) db(pass, false, t_depth);
+    if (eb) eb(pass, false, t_depth);
     if (each) each();
     if (top && after) after();
     return;
   }
+  if (eb) eb(pass, true, t_depth);
   BoundaryFn vp = vr ? g_vrsPre.load(std::memory_order_relaxed) : nullptr;
   if (vp) vp(pass, true, t_depth);
   if (each) each();
@@ -227,6 +234,7 @@ void __fastcall Hook(void* pass, uint64_t frame) {
   if (bnd) bnd(pass, false, d);
   if (fl) fl(pass, false, d);
   if (db) db(pass, false, d);
+  if (eb) eb(pass, false, d);
   if (each) each();
   if (d == 0)
     if (AfterTopFn after = g_afterTop.load(std::memory_order_relaxed)) after();

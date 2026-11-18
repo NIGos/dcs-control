@@ -229,6 +229,8 @@ void LoadConfig(bool initial) {
     c.suiteChainDeriveCensus = s <= 0 ? 0 : (std::max)(5, (std::min)(3600, s));
     c.suiteChainDeriveCensusMB = (std::max)(1, (std::min)(256, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ChainDeriveCensusMB", 24, ini.c_str()))));
   }
+  c.earlyShaders = qvini::Mask(L"D3D", L"EarlyShaders", 0, 0x1F, ini.c_str());  // 0.7 early_shaders.h, decimal or 0x hex
+  c.suiteEarlyShaderCensus = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"EarlyShaderCensus", 0, ini.c_str()));
   {  // periph_census.h (audit B6): seconds per census line, 0 = off (values 1..4 are taken as 5)
     const int s = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"PeriphCensus", 0, ini.c_str()));
     c.suitePeriphCensus = s <= 0 ? 0 : (std::max)(5, (std::min)(3600, s));
