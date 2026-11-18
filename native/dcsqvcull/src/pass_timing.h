@@ -105,6 +105,9 @@ size_t g_tlCap = 0;
 // around whatever runs. nullptr until the key is first set.
 using InterceptFn = ExecFn (*)(void* pass, uint64_t frame);
 std::atomic<InterceptFn> g_intercept{nullptr};
+// 0.7 hot-air idle skip (early_shaders.h, [D3D] EarlyShaders bit 1): asked when g_intercept kept the pass's own
+// execute. nullptr until the bit is first set.
+std::atomic<InterceptFn> g_intercept2{nullptr};
 // W1: while a block of DCS's water passes runs under a GPU predicate, that predicate; every UpdateSubresource on DCS's
 // context is then handled by UnpredUpload (in gpu_pass_timing.h's hook or W1's own).
 std::atomic<ID3D11Predicate*> g_unpred{nullptr};
@@ -151,6 +154,9 @@ void __fastcall Hook(void* pass, uint64_t frame) {
     g_execFrame.store(TopFrameId(frame, g_quadFrame.load(std::memory_order_relaxed)), std::memory_order_relaxed);
     if (InterceptFn ic = g_intercept.load(std::memory_order_relaxed))
       if (ExecFn r = ic(pass, frame)) run_ = r;
+    if (run_ == g_orig)
+      if (InterceptFn ic2 = g_intercept2.load(std::memory_order_relaxed))
+        if (ExecFn r = ic2(pass, frame)) run_ = r;
   }
   EachFn each = g_eachPass.load(std::memory_order_relaxed);
   BoundaryFn bnd = g_boundary.load(std::memory_order_relaxed);

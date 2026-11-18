@@ -40,8 +40,9 @@
 //    only when the key is non-zero then: a census armed later reports shaders created before the key as early.
 //
 // Idle-pass skeletons (EarlyIdle* below): only the detection of the idle condition from constants the module can
-// read at bind time, unit-tested; nothing is skipped (bits 1-4 of [D3D] EarlyShaders are refused and logged) until
-// the census shows that the passes really run while idle.
+// read at bind time, unit-tested. The live census (2026-11-18) showed canopy fogging, droplets and G-effect are not
+// drawn when idle; hot air is: bit 1 of [D3D] EarlyShaders is the hot-air idle skip (below). Bits 2-4 are refused and
+// logged.
 //
 // Included once from main.cpp (main/features.inc) after periph_census.h (uses ptiming, fixdepth, chainfast, gpt,
 // d3ds, sfilt, shadowinst, HookSlot, Log).
@@ -403,7 +404,7 @@ constexpr const char* kIdleNeeds[kHintCount] = {
 // D3D part
 // ===========================================================================
 using Ctx = ID3D11DeviceContext;
-std::atomic<uint32_t> g_mask{0};           // [D3D] EarlyShaders as applied (bit 0 SSAO water skip)
+std::atomic<uint32_t> g_mask{0};           // [D3D] EarlyShaders as applied (bit 0 SSAO water skip, bit 1 hot-air idle skip)
 std::atomic<bool> g_identWanted{false};    // SSAO identification runs (the skip, or a census key: identity column only)
 std::atomic<bool> g_installed{false};      // boundary callback in
 std::atomic<bool> g_stopping{false};
@@ -679,6 +680,9 @@ struct FpJob {
   size_t mapped = 0;          // render thread
   std::atomic<int> state{0};  // 1 recorded, 2 executed, 3 read back, -1 failed
   ULONGLONG t0 = 0;
+  // When the render thread executed the job (0: not yet). The 20 s read-back limit counts from here: a job that waits
+  // for its first pass through a long mission-load stall is not given up (0.7 small levers fix).
+  std::atomic<ULONGLONG> tExec{0};
   void ReleaseGpu() {
     for (auto*& s : stage)
       if (s) s->Release(), s = nullptr;
@@ -701,7 +705,8 @@ struct SsaoState {
   std::vector<void*> probed;              // render thread: never offered twice
   std::atomic<FpJob*> job{nullptr};
   std::vector<FpJob*> done;
-  int tested = 0, accepted = 0, rejected = 0;
+  int tested = 0, accepted = 0, rejected = 0, retried = 0;
+  std::unordered_map<void*, int> retries;  // worker: fingerprint attempts that failed to run or read back, per object
 };
 SsaoState g_ssao;
 std::atomic<uint64_t> g_swaps{0}, g_ssaoDraws{0}, g_ssaoPasses{0};
@@ -771,6 +776,7 @@ void FpRenderStep(Ctx* c) {
   if (!j) return;
   const int st = j->state.load(std::memory_order_acquire);
   if (st == 1) {
+    j->tExec.store(GetTickCount64(), std::memory_order_relaxed);
     j->state.store(2, std::memory_order_release);
     c->ExecuteCommandList(j->cl, TRUE);  // TRUE: DCS's context state is restored afterwards
     return;
@@ -999,6 +1005,82 @@ out:
 
 thread_local bool t_inHook = false;
 bool g_swapPass = false;  // render thread: this top-level pass is an SSAO pass with the swap armed
+
+// --- hot-air idle skip ([D3D] EarlyShaders bit 1, 0.7 small levers) ---
+// Per view DCS runs SimplePassData:HotAirPass (heat particles into a quarter-resolution heat map), then two top-level
+// passes of the HotAirModule: HotAirCopySourcePass (the scene copied to a scratch target) and HotAirComposePass
+// (enlight/hotair.fx psHeatAir: every pixel whose heat-map opacity is < 0.01 discards, so with an empty heat map the
+// scene target is left as it was and the scratch copy is read by nobody else). Live census 2026-11-18: no heat draw in
+// any view with no engine running nearby, and the module still costs ~0.08 ms per frame (6.6 M pixel-shader
+// invocations, 3.3 M samples written: the copy).
+// Rule: the copy and compose passes of a frame are not executed (their execute is replaced by an empty one through
+// pass_timing.h's second intercept) only when every HotAirPass of that frame so far was watched completely (draw
+// entries armed for the whole pass and still ours at its end; ExecuteCommandList on the context goes through
+// split_filter.h's hook, which counts it) and drew nothing, and at least as many HotAirPasses as compose passes were
+// seen. Anything else (a heat draw in any view, a command list executed inside the pass, an arm refused or lost, an
+// unknown order) runs DCS's passes: stock picture, no gain.
+bool g_heatPass = false;              // render thread: the current top-level pass is a watched HotAirPass
+uint64_t g_heatDraws = 0;             // render thread: draws seen in the current HotAirPass
+uint64_t g_heatEcl0 = 0;              // render thread: split filter's ExecuteCommandList count at its begin
+bool g_heatEclWatched = false;        // render thread: that count covers the context's ExecuteCommandList
+uint64_t g_heatFrame = ~0ull;         // render thread: frame of the counters below
+int g_heatSeen = 0, g_composeSeen = 0;
+bool g_heatAllIdle = true;            // every HotAirPass of g_heatFrame watched and empty
+std::atomic<uint64_t> g_heatSkipped{0}, g_heatRun{0}, g_heatBusy{0}, g_heatUnwatched{0}, g_heatOrder{0};
+std::unordered_map<void*, int> g_heatKind;  // render thread: pass -> 0 other, 1 HotAirPass, 2 copy, 3 compose
+// Pass label (RTTI name, ":" inline name) -> 0 other, 1 heat particles, 2 copy, 3 compose.
+inline int HeatKindOf(const std::string& label) {
+  if (label.compare(0, 14, "SimplePassData") == 0 && label.find(":HotAirPass") != std::string::npos) return 1;
+  if (label.compare(0, 12, "HotAirModule") != 0) return 0;
+  if (label.find(":HotAirCopySourcePass") != std::string::npos) return 2;
+  if (label.find(":HotAirComposePass") != std::string::npos) return 3;
+  return 0;
+}
+// Copy (2) or compose (3) pass: skip when at least one heat pass ran this frame, all of them were watched and empty,
+// and there have been at least as many heat passes as composes including this view's (composeSeen counts this
+// compose already; a copy precedes its view's compose).
+inline bool HeatSkipOk(int kind, int heatSeen, int composeSeen, bool allIdle) {
+  if (kind != 2 && kind != 3) return false;
+  return heatSeen > 0 && allIdle && heatSeen >= composeSeen + (kind == 2 ? 1 : 0);
+}
+int HeatKind(void* pass, const std::string& label) {
+  auto it = g_heatKind.find(pass);
+  if (it != g_heatKind.end()) return it->second;
+  const int k = HeatKindOf(label);
+  g_heatKind.emplace(pass, k);
+  return k;
+}
+void HeatFrame(uint64_t f) {
+  if (f == g_heatFrame) return;
+  g_heatFrame = f;
+  g_heatSeen = g_composeSeen = 0;
+  g_heatAllIdle = true;
+}
+void __fastcall HeatNoExecute(void*, uint64_t) {}
+const std::string& LabelOf(void* pass);
+// pass_timing.h second intercept (render thread, top-level passes, before any boundary callback).
+ptiming::ExecFn HeatIntercept(void* pass, uint64_t) {
+  if (!(g_mask.load(std::memory_order_relaxed) & 2u) || g_fault.load(std::memory_order_relaxed)) return nullptr;
+  ptiming::ExecFn r = nullptr;
+  __try {
+    const int k = HeatKind(pass, LabelOf(pass));
+    if (k == 2 || k == 3) {
+      HeatFrame(ptiming::g_execFrame.load(std::memory_order_relaxed));
+      if (k == 3) ++g_composeSeen;
+      if (HeatSkipOk(k, g_heatSeen, g_composeSeen, g_heatAllIdle)) {
+        r = &HeatNoExecute;
+        g_heatSkipped.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        g_heatRun.fetch_add(1, std::memory_order_relaxed);
+        if (g_heatAllIdle && g_heatSeen > 0) g_heatOrder.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    g_fault = true;
+    r = nullptr;
+  }
+  return r;
+}
 // The SSAO part of Pre: swap an identified kernel, offer an unknown one to the worker (each object once).
 ID3D11PixelShader* SsaoPre(Ctx* c) {
   g_ssaoDraws.fetch_add(1, std::memory_order_relaxed);
@@ -1027,6 +1109,7 @@ ID3D11PixelShader* SsaoPre(Ctx* c) {
 }
 ID3D11PixelShader* PreBody(Ctx* c, int kind, UINT count, UINT inst) {
   if (g_cState.load(std::memory_order_relaxed) == 2) Record(c, kind, count, inst);
+  if (g_heatPass && kind < kDDisp) ++g_heatDraws;
   return g_swapPass && kind < kDDisp ? SsaoPre(c) : nullptr;
 }
 // Before DCS's draw: census record, SSAO swap. Returns DCS's PS to restore (AddRef'd) or null.
@@ -1218,18 +1301,45 @@ void OnBoundaryBody(void* pass, bool begin, int depth) {
       }
       g_swapPass = false;
       if (ssao) g_ssaoPasses.fetch_add(1, std::memory_order_relaxed);
-      if (census || ssao) {
+      const bool heat = (g_mask.load(std::memory_order_relaxed) & 2u) && HeatKind(pass, label) == 1;
+      if (heat) {
+        HeatFrame(ptiming::g_execFrame.load(std::memory_order_relaxed));
+        ++g_heatSeen;
+        g_heatDraws = 0;
+        static const int eclSlot = DcsQv_ContextSlot("ExecuteCommandList");
+        void** vt = *reinterpret_cast<void***>(g_ctx);
+        g_heatEclWatched = eclSlot >= 0 && vt[eclSlot] == reinterpret_cast<void*>(&sfilt::H_ExecuteCommandList);
+        g_heatEcl0 = sfilt::g_eclCount.load(std::memory_order_relaxed);
+      }
+      if (census || ssao || heat) {
         const bool armed = Arm(0, census ? kDkCount : kDDisp);
         if (census && !armed) ++g_cRefusedPasses;
         g_swapPass = ssao && armed;
         g_armDepth = armed ? 0 : -1;
+        g_heatPass = heat && armed;
+        if (heat && !armed) {
+          g_heatAllIdle = false;
+          g_heatUnwatched.fetch_add(1, std::memory_order_relaxed);
+        }
       }
       return;
     }
     if (depth != g_armDepth) return;
     g_armDepth = -1;
     g_swapPass = false;
+    const bool wasHeat = g_heatPass;
+    g_heatPass = false;
     const bool kept = Disarm();
+    if (wasHeat) {
+      const bool ecl = !g_heatEclWatched || sfilt::g_eclCount.load(std::memory_order_relaxed) != g_heatEcl0;
+      if (!kept || ecl) {
+        g_heatAllIdle = false;
+        g_heatUnwatched.fetch_add(1, std::memory_order_relaxed);
+      } else if (g_heatDraws) {
+        g_heatAllIdle = false;
+        g_heatBusy.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
     if (!kept && g_cState.load(std::memory_order_relaxed) == 2) ++g_cLostPasses;
   }
 }
@@ -1436,20 +1546,22 @@ bool Install() {
 void Tick(uint32_t mask, int censusKey, const std::wstring& logDir) {
   g_logDir = logDir;
   static uint32_t lastMask = 0xffffffffu;
-  const uint32_t refused = mask & 0x1Eu;
+  const uint32_t refused = mask & 0x1Cu;
   if (mask != lastMask) {
     if (lastMask != 0xffffffffu || mask)
-      Log("early shaders: [D3D] EarlyShaders=0x%x (SSAO water skip %s)%s", mask, (mask & 1u) ? "on" : "off",
-          refused ? "; bits 1-4 (idle-pass skips) are not built yet: refused until the live census" : "");
+      Log("early shaders: [D3D] EarlyShaders=0x%x (SSAO water skip %s, hot-air idle skip %s)%s", mask,
+          (mask & 1u) ? "on" : "off", (mask & 2u) ? "on" : "off",
+          refused ? "; bits 2-4 (other idle-pass skips) are not built: refused" : "");
     lastMask = mask;
   }
-  g_mask = mask & 1u;
+  g_mask = mask & 3u;
   // With a census key set, DCS's SSAO shaders are identified too (the census's identity column); nothing is swapped
   // unless bit 0 is on.
   g_identWanted = (mask & 1u) || censusKey != 0;
   const bool wantCensus = censusKey != 0 && censusKey != g_cKey.load();
-  if (!g_identWanted.load() && !wantCensus && !g_installed.load() && g_cState.load() == 0) return;
+  if (!g_identWanted.load() && !wantCensus && !(mask & 2u) && !g_installed.load() && g_cState.load() == 0) return;
   if (!Install()) return;
+  if (mask & 2u) ptiming::g_intercept2.store(&HeatIntercept);  // stays in once set; it checks the bit itself
   // SSAO build (once per payload)
   if (g_identWanted.load() && g_ssao.build.load() == 0) {
     const std::wstring root = ShaderRoot();
@@ -1471,12 +1583,26 @@ void Tick(uint32_t mask, int censusKey, const std::wstring& logDir) {
   const ULONGLONG now = GetTickCount64();
   if (FpJob* j = g_ssao.job.load()) {
     const int st = j->state.load();
-    if (st == 3 || st == -1 || now - j->t0 > 20000) {
+    // A job still waiting for the render thread (state 1: no top-level pass yet, e.g. a mission-load stall) is never
+    // given up; one executed but not read back within 20 s, or whose read-back failed, is retried (up to 3 attempts
+    // per object) instead of leaving DCS's shader unidentified for the whole session.
+    const ULONGLONG te = j->tExec.load(std::memory_order_relaxed);
+    const bool stuck = st == 2 && te != 0 && now - te > 20000;
+    if (st == 3 || st == -1 || stuck) {
       g_ssao.job = nullptr;
       const int v = st == 3 ? FpVerdict(*j) : -1;
       ++g_ssao.tested;
       j->ReleaseGpu();
-      if (v >= 0 && g_ssao.nIdent.load() < 8) {
+      if (st != 3 && ++g_ssao.retries[j->dcs] < 3) {
+        ++g_ssao.retried;
+        Log("early shaders: fingerprint of SSAO-pass pixel shader %p %s: retried (attempt %d of 3)",
+            static_cast<void*>(j->dcs), st == -1 ? "failed to read back" : "not read back in 20 s",
+            g_ssao.retries[j->dcs] + 1);
+        {
+          std::lock_guard<std::mutex> lock(g_ssao.candMu);
+          g_ssao.cands.push_back(j->dcs);  // the candidate's reference moves back to the queue
+        }
+      } else if (v >= 0 && g_ssao.nIdent.load() < 8) {
         const int i = g_ssao.nIdent.load();
         g_ssao.ident[i] = j->dcs;  // keeps the reference
         g_ssao.identKind[i] = v;
@@ -1489,7 +1615,7 @@ void Tick(uint32_t mask, int censusKey, const std::wstring& logDir) {
         ++g_ssao.rejected;
         if (g_ssao.rejected <= 8)
           Log("early shaders: SSAO-pass pixel shader %p not identified (%s): left stock", static_cast<void*>(j->dcs),
-              st != 3 ? (st == -1 ? "read back failed" : "not run in 20 s")
+              st != 3 ? (st == -1 ? "read back failed 3 times" : "not read back in 20 s, 3 times")
               : v == -2 ? "equals both kernels" : v == -3 ? "cases do not tell the kernels apart" : "output differs from both kernels");
         j->dcs->Release();
       }
@@ -1538,6 +1664,15 @@ void Tick(uint32_t mask, int censusKey, const std::wstring& logDir) {
     g_classIdx.clear();
     g_cState = 0;
   }
+  static ULONGLONG lastHeat = 0;
+  if ((mask & 2u) && now - lastHeat >= 60000) {
+    lastHeat = now;
+    Log("early shaders: hot air: copy / compose passes skipped %llu, run %llu (heat drawn %llu, pass not watched %llu, "
+        "pass order %llu)",
+        static_cast<unsigned long long>(g_heatSkipped.load()), static_cast<unsigned long long>(g_heatRun.load()),
+        static_cast<unsigned long long>(g_heatBusy.load()), static_cast<unsigned long long>(g_heatUnwatched.load()),
+        static_cast<unsigned long long>(g_heatOrder.load()));
+  }
   static ULONGLONG lastLine = 0;
   if ((mask & 1u) && now - lastLine >= 60000) {
     lastLine = now;
@@ -1560,6 +1695,11 @@ void AtStart(int censusKey) {
 
 void Shutdown() {
   g_stopping = true;
+  g_mask = 0;  // the hot-air intercept passes everything through from now on
+  {
+    ptiming::InterceptFn me = &HeatIntercept;
+    ptiming::g_intercept2.compare_exchange_strong(me, nullptr);
+  }
   if (g_installed.exchange(false)) {
     ptiming::BoundaryFn me = &OnBoundary;
     ptiming::g_earlyBoundary.compare_exchange_strong(me, nullptr);

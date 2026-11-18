@@ -139,6 +139,19 @@ void HintTests() {
   Check(OverloadIdle(std::numeric_limits<float>::quiet_NaN(), 0, 0), "early: NaN defocus does not blur (defocus > 0 is false)");
   Check(DropletsCpuIdle(0.011f, 0) && DropletsCpuIdle(0, 3) && !DropletsCpuIdle(0.011f, 2.5f), "early: droplet streaking needs wind and time");
   Check(HotAirIdle(0) && !HotAirIdle(3), "early: hot air idle with no heat particle drawn");
+  // hot-air idle skip (bit 1): pass labels as the census printed them on 2.9.31, and the skip rule
+  Check(HeatKindOf("SimplePassData:HotAirPass") == 1 && HeatKindOf("HotAirModule:HotAirCopySourcePass") == 2 &&
+            HeatKindOf("HotAirModule:HotAirComposePass") == 3,
+        "early: hot-air pass labels recognised");
+  Check(HeatKindOf("SimplePassData:TransparentPass") == 0 && HeatKindOf("HotAirModule") == 0 &&
+            HeatKindOf("PassData:HotAirComposePass") == 0,
+        "early: other passes are not hot-air passes");
+  Check(HeatSkipOk(2, 1, 0, true) && HeatSkipOk(3, 1, 1, true), "early: hot air skipped after an empty heat pass");
+  Check(!HeatSkipOk(2, 1, 0, false) && !HeatSkipOk(3, 1, 1, false), "early: hot air kept when a heat pass drew");
+  Check(!HeatSkipOk(2, 0, 0, true) && !HeatSkipOk(3, 0, 1, true), "early: hot air kept with no heat pass seen this frame");
+  Check(!HeatSkipOk(3, 1, 2, true) && !HeatSkipOk(2, 1, 1, true), "early: hot air kept for a second view before its heat pass");
+  Check(HeatSkipOk(3, 4, 1, true) && HeatSkipOk(3, 4, 4, true), "early: four heat passes first, then four composes");
+  Check(!HeatSkipOk(0, 4, 0, true) && !HeatSkipOk(1, 4, 0, true), "early: only copy and compose passes are skipped");
   Check(kIcingOff == 496 && kOverloadOff == 36, "early: the reflected offsets (2.9.31) stay as proven");
 }
 

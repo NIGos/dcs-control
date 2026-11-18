@@ -383,7 +383,11 @@ void STDMETHODCALLTYPE H_ClearState(Ctx* c) {
   Orig<decltype(&H_ClearState)>(kHClearState)(c);
   if (Mine(c)) g_sh.ForgetAll();
 }
+// Command lists executed on DCS's immediate context through this hook (early_shaders.h hot-air skip: a heat pass
+// that executed one is not known to be empty).
+std::atomic<uint64_t> g_eclCount{0};
 void STDMETHODCALLTYPE H_ExecuteCommandList(Ctx* c, ID3D11CommandList* l, BOOL restore) {
+  g_eclCount.fetch_add(1, std::memory_order_relaxed);
   Reset(c);
   Orig<decltype(&H_ExecuteCommandList)>(kHExecuteCommandList)(c, l, restore);
   if (Mine(c)) g_sh.ForgetAll();
