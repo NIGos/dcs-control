@@ -8,6 +8,8 @@ void ChainFastAtStart() {
   if (g_cfg.chainFast) chainfast::Apply(g_cfg.chainFast);
   // R90 F4: the self tests' private device now, not when the first kernel turns up mid-flight.
   if (g_cfg.chainFast || g_cfg.shaderFast) chainfast::AcquirePrivate();
+  // 0.7 early shaders: the census's shader creation record, only when its key is set at payload start (dev ini).
+  eshd::AtStart(g_cfg.suiteEarlyShaderCensus);
 }
 
 DWORD WINAPI WorkerThread(void*) {
@@ -254,6 +256,10 @@ DWORD WINAPI WorkerThread(void*) {
         // Audit B6 periphery instance census (measure only, default 0: nothing installed).
         if (g_cfg.suitePeriphCensus || pcensus::g_installed.load())
           pcensus::Tick(g_cfg.suitePeriphCensus, g_benchRunningFlag.load());
+        // 0.7 early shaders (default 0: nothing installed): SSAO water skip (kill switch / benchmark: off), census.
+        if (g_cfg.earlyShaders || g_cfg.suiteEarlyShaderCensus || eshd::g_installed.load())
+          eshd::Tick(g_engineOff.load() || g_benchRunningFlag.load() ? 0 : g_cfg.earlyShaders,
+                     g_benchRunningFlag.load() ? 0 : g_cfg.suiteEarlyShaderCensus, g_dir);
         // R122 per-view DLSS preset (opt-in, default 0: nothing installed). The kill switch makes its hook pass
         // through; the features DCS creates at the next mission load get DCS's own hint again.
         dlssv::Tick(dlssv::ParsePreset(g_cfg.dlssPeripheryPreset.c_str()), dlssv::ParsePreset(g_cfg.dlssFocusPreset.c_str()),

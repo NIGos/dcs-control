@@ -56,5 +56,6 @@
 #include "vrs_probe.h"  // R139: [Suite] VrsProbe (measure only, default 0): NvAPI variable rate shading A/B probe
 #include "measure_kit.h"  // Perf audit 2026-11-10: pass timeline, chain census, GPU bundle (measure only, default 0)
 #include "periph_census.h"  // Perf audit B6: periphery instance census ([Suite] PeriphCensus, measure only, default 0)
+#include "early_shaders.h"  // 0.7: shaders DCS creates before load: identity by output, SSAO water skip, census ([D3D] EarlyShaders / [Suite] EarlyShaderCensus, default 0)
 #include "per_eye_pass.h"  // One geometry pass per eye, stage 0 (PER_EYE_PASS_DESIGN.md): pure parts, [Suite] PerEyePassCensus (default 0)
 #include "per_eye_live.h"  // ... stage 2: live captures C2 / C4 / C5 / C7 ([Suite] PerEyeC2 / C4 / C5 / C7 seconds, measure only, default 0)

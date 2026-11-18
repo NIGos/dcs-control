@@ -1,0 +1,24 @@
+# Input shaping for DCS's SSAO pixel shaders (deferred/SSAO.fx, PS(64 / 128, true, 3.0); 2.9.31 blobs 4f6d6b19 /
+# 72edc447) and the early_shaders.h water-skip variant:
+#   sx_equiv pair <stock.dxbc> <variant.dxbc> rules\ssao.txt -texsize 192x160
+# The render target of the harness is 192 x 160, so the viewport below maps every pixel to one texel.
+#
+# $Globals: depthDims (unused), radius, viewport = (0, 0, 192, 160)
+res $Globals 2 f 0.05 4
+res $Globals 4 constu 0
+res $Globals 5 constu 0
+res $Globals 6 constu 192
+res $Globals 7 constu 160
+# cPerView: gView at word 32 (rotation), gProj at word 64 and gProjInv at word 80 (one consistent pair per case)
+res cPerView 32 rot
+res cPerView 64 persp
+# depth: 0..1 with exact 0 and 1 (sky / far: the vPos.z > 50000 early exit), every component
+res DepthMap * fz 0 1
+# stencil byte in .g (component 1): water (16) 35 %, cockpit (40) 15 %, the six other composition types
+res StencilMap 1 stencil 35
+# G-buffer slices: encoded normals in 0..1 (slice 4 .xy), the sign flag (slice 2 .x) on both sides of 0.5
+res GBufferMap * f 0 1
+# projPos: screen position in -1.1..1.1, w 0.5..2 (projXY = xy / w)
+attr TEXCOORD0 0 f -1.1 1.1
+attr TEXCOORD0 1 f -1.1 1.1
+attr TEXCOORD0 3 f 0.5 2

@@ -118,6 +118,10 @@ int DcsQv_DeviceSlot(const char* name) {
   } table[] = {
       {"CreateComputeShader", (int)(offsetof(ID3D11DeviceVtbl, CreateComputeShader) / sizeof(void*))},
       {"CreateBuffer", (int)(offsetof(ID3D11DeviceVtbl, CreateBuffer) / sizeof(void*))},
+      /* early_shaders.h (0.7): the census's creation record */
+      {"CreateVertexShader", (int)(offsetof(ID3D11DeviceVtbl, CreateVertexShader) / sizeof(void*))},
+      {"CreatePixelShader", (int)(offsetof(ID3D11DeviceVtbl, CreatePixelShader) / sizeof(void*))},
+      {"CreateGeometryShader", (int)(offsetof(ID3D11DeviceVtbl, CreateGeometryShader) / sizeof(void*))},
   };
   for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
     const char* a = table[i].n;

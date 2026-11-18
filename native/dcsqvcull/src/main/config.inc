@@ -113,6 +113,8 @@ struct Config {
   int suiteChainFastVerify = 0;          // [Suite] ChainFastVerify: seconds of same-frame checks against the stock kernels (0 = off)
   int suiteChainDeriveCensus = 0;        // [Suite] ChainDeriveCensus (chain_derive.h, audit A2/B4: focus chain = filtered periphery chain? measure only; seconds per log line, 0 = off)
   int suiteChainDeriveCensusMB = 24;     // [Suite] ChainDeriveCensusMB: mainBuffer bytes read back per view (1-256 MB)
+  uint32_t earlyShaders = 0;             // [D3D] EarlyShaders (early_shaders.h, 0.7: bit 0 SSAO water skip on DCS's SSAO shaders identified at bind time; bits 1-4 reserved for the idle-pass skips, refused; default 0 = nothing installed)
+  int suiteEarlyShaderCensus = 0;        // [Suite] EarlyShaderCensus (early_shaders.h: each new non-zero value runs one census of one frame, early_census_<N>.csv; measure only; non-zero at payload start also installs the shader creation record)
   int suitePeriphCensus = 0;             // [Suite] PeriphCensus (periph_census.h, audit B6: zero-coverage periphery instances, instance and triangle share; measure only; seconds per log line, 0 = off)
   uint32_t shaderFast = 3;               // [D3D] ShaderFast (shader_fast.h, R36: wider grids for single-SM kernels; bit 0 grass cull, bit 1 IM2 counts clear; default 3; 0 = off)
   bool suiteShaderFastTiming = false;    // [Suite] ShaderFastTiming (shader_fast.h: GPU timing OFF/ON/OFF/ON/OFF, 5 s each)
