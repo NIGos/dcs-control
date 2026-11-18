@@ -248,6 +248,14 @@ DWORD WINAPI WorkerThread(void*) {
           chainfast::Apply(g_engineOff.load() ? 0 : g_cfg.chainFast);  // R34 (default 7; off at 0)
         if (!g_benchRunningFlag.load() && (g_cfg.shaderFast || sfast::g_mask.load()))
           sfast::Apply(g_engineOff.load() ? 0 : g_cfg.shaderFast);  // R36 (default 3; off at 0)
+        if (!g_benchRunningFlag.load()) ApplyWaterSkip(g_engineOff.load());  // W1 (default 0: nothing installed)
+        {  // W1: the "water skip:" line every 10 s while its intercept is in (only when counters moved)
+          static ULONGLONG lastW1 = 0;
+          if (ptiming::g_intercept.load() && GetTickCount64() - lastW1 >= 10000) {
+            lastW1 = GetTickCount64();
+            w1::LogCounters();
+          }
+        }
         // Audit A2/B4 census (measure only, default 0: nothing installed); needs chain fast's CSSetShader hook.
         if (g_cfg.suiteChainDeriveCensus || chainderive::g_state.load())
           chainderive::Tick(g_cfg.suiteChainDeriveCensus, g_cfg.suiteChainDeriveCensusMB);

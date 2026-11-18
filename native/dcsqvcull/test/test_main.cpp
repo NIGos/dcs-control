@@ -262,6 +262,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "deferred_rec_test.h"
 #include "shadow_rec_test.h"
 #include "gpu_pass_timing_test.h"
+#include "w1_water_test.h"  // W1: [Water] SkipHiddenWater (decision logic, recorded-frame replay, the device path)
 #include "gb_rec_count_test.h"
 #include "gb_rec_test.h"
 #include "gb_rec_cockpit_test.h"
@@ -648,6 +649,12 @@ int main() {
   // QV_PO_ONLY=1: only the [General] PerceptionOnly tests.
   if (getenv("QV_PO_ONLY")) {
     potest::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
+  // QV_W1_ONLY=1: only the W1 water skip tests.
+  if (getenv("QV_W1_ONLY")) {
+    w1test::Run();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -1954,6 +1961,8 @@ int main() {
   srtest::Run();
   // GPU pass timing: analysis on synthetic ticks, then ring readback and op counts on a real device.
   gpttest::Run();
+  // W1 water skip: the gate, recorded live frames through it, the predicated block on a device with fake passes.
+  w1test::Run();
   // G-buffer recorder S0 counters (R18): segments, gates, item walk, guard masks, setup probe and Execute(TRUE).
   grctest::Run();
   // G-buffer recorder (R18 S1-S3): texture table, keys, jobs, restores, device segments vs stock.

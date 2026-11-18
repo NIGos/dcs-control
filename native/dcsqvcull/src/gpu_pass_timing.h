@@ -279,7 +279,13 @@ void STDMETHODCALLTYPE H_UpdateSubresource(Ctx* c, ID3D11Resource* d, UINT ds, c
                                            UINT rp, UINT dp) {
   CountOp(c, kUpdateSubresource);
   if (auto o = ptiming::g_uploadObserver.load(std::memory_order_relaxed)) o(c, d, ds, b, p);  // R139 (VRS probe)
+  // W1 (w1_water.h): inside a predicated water block a buffer upload is kept for the replay after it, anything else
+  // goes through unpredicated.
+  ID3D11Predicate* unp = c == g_ctx ? ptiming::g_unpred.load(std::memory_order_relaxed) : nullptr;
+  if (unp && !ptiming::UnpredUpload(d, ds, b, p, rp, dp)) unp = nullptr;
+  if (unp) c->SetPredication(nullptr, FALSE);
   Orig<decltype(&H_UpdateSubresource)>(kUpdateSubresource)(c, d, ds, b, p, rp, dp);
+  if (unp) c->SetPredication(unp, FALSE);
   Rearm(c, kUpdateSubresource);
 }
 void STDMETHODCALLTYPE H_ClearRenderTargetView(Ctx* c, ID3D11RenderTargetView* v, const FLOAT col[4]) {

@@ -28,6 +28,7 @@
 #include "fwd_rec_count.h"
 #include "fwd_split.h"  // A5: forward pass split glass/terrain/flat/models/other per view ([Suite] ForwardSplit, default 0)
 #include "gpu_pass_timing.h"
+#include "w1_water.h"  // W1 ([Water] SkipHiddenWater, default 0): water mask / refraction / water passes only for views with water
 #include "periph_lod.h"
 #include "cascade_cache.h"  // R33: far shadow cascade static depth cache ([Shadows] CascadeCache, prototype)
 #include "chain_fast.h"  // R34: shorter terrain/forest culling chains ([D3D] ChainFast, default 7)

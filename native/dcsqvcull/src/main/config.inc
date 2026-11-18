@@ -193,6 +193,9 @@ struct Config {
   int fxApplySkipVerifyEvery = 64;         // [D3D] FxApplySkipVerifyEvery (1-100000)
   int fxApplySkipLogSec = 10;              // [D3D] FxApplySkipLogSec: the "fx repeat:" line period (1-600)
   bool suiteBenchFxApplySkip = false;      // [Suite] BenchFxApplySkip (bench mode 36)
+  int waterSkip = 0;                       // [Water] SkipHiddenWater (w1_water.h, W1): 0 off, 1 on (a view's water mask, refraction and water passes drawn only when its same-frame water test sees water), 2 verify (nothing skipped; test and real water logged per view and frame to DcsQvCull_water.csv); other values off
+  int suiteWaterSkipTiming = 0;            // [Suite] WaterSkipTiming: OFF/ON pairs (1-60, 0 = off) of GPU frame period and render-thread time, ON = SkipHiddenWater (1 when 0)
+  int suiteWaterSkipTimingFrames = 90;     // [Suite] WaterSkipTimingFrames: frames per block (20-1000)
   int prefetchMode = 0;                    // [Prefetch] Mode: off (0) | observe (1) | skip (2), prefetch_fix.h
   uint32_t prefetchWindowMs = 5000;        // [Prefetch] WindowMs: repeat window (1-60000; R107: default as shipped)
   bool suiteBenchPrefetch = false;         // [Suite] BenchPrefetch (bench mode 33: observe vs skip)
@@ -371,6 +374,7 @@ void ApplyGBufferRecorder();
 void ApplyPassFlush();
 void ApplySrvTailTrim(bool on);
 void ApplyFxApplySkip(int mode, bool verify, int verifyEvery);
+void ApplyWaterSkip(bool engineOff);  // W1 (wiring.inc)
 void FxApplySkipBenchEnd();
 void ApplyPrefetch();
 void ApplyHoldYaw(int deg);
@@ -538,6 +542,7 @@ Config PerceptionOnlyConfig(const Config& c) {
   // this list. ChainFast / ShaderFast were held off by the worker's PerceptionOnly guard only, and WorkerPlacement
   // (tplace::Tick, not guarded) only by the render thread staying unknown without the engine recorders.
   p.chainFast = p.shaderFast = 0;
+  p.waterSkip = 0;  // W1
   p.workerPlacement = 0;
   p.splitFilter = false;  // R49: its Config default is now on (the shipped setting)
   p.suiteBenchEngine = p.suiteQuick = false;  // R107: their Config defaults are now on (shipped); no suite here

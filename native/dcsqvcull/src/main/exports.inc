@@ -186,6 +186,7 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   cascache::Shutdown(); // R33 cascade cache: SceneRender slot and the innermost execute out, textures released (no-op unless used)
   fixdepth::Shutdown(); // depth callback out and drained, worker joined, D3D objects and file mappings released
   cpass::Shutdown();    // R42: our shaders and buffers (the draw hooks are out with fixation depth)
+  w1::Shutdown();       // W1: held-back water passes flushed by the render thread, the pass intercept out
   gpt::Shutdown();      // GPU pass timing's context-table hooks and xrEndFrame hook, if a phase was running
   sfast::Shutdown();     // R36: Dispatch hook out, identified kernels and variants released (no-op unless used)
   nighttone::Shutdown(); // R37: tone mapper fields and exposure bias back, addToneMappingPass import back (no-op unless used)
