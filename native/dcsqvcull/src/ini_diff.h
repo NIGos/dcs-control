@@ -18,7 +18,7 @@
 //
 // The engine key set (the keys whose change means "the pilot re-configured the engine optimizations"):
 //   - whole sections: [Cull] [Scene] [Model] [Texture] [Effects] [D3D] [Shadows] [Shadow] [Timing] [Prefetch]
-//     [Threads] [Governor] [Suite] [Bench]: every optimization the kill switch gates (engine.inc SetEngineOff,
+//     [Threads] [Governor] [Suite] [Bench] [Water]: every optimization the kill switch gates (engine.inc SetEngineOff,
 //     worker.inc's retries), the governor that steps them, and the suite / benchmark keys;
 //   - [General] LowPowerPacer and LowPowerPacerTimeoutUs (the pacer is gated by the kill switch).
 // Not engine keys (a change keeps the kill switch as it is): [Color] [ColorFix] [ColorEnhanced] [Night] [VrFx]
@@ -165,7 +165,7 @@ inline bool In(const std::wstring& low, std::initializer_list<const wchar_t*> na
 inline Class Classify(const std::wstring& sec, const std::wstring& key) {
   const std::wstring s = Lower(sec), k = Lower(key);
   if (In(s, {L"cull", L"scene", L"model", L"texture", L"effects", L"d3d", L"shadows", L"shadow", L"timing",
-             L"prefetch", L"threads", L"governor", L"suite", L"bench"}))
+             L"prefetch", L"threads", L"governor", L"suite", L"bench", L"water"}))
     return kEngine;
   if (s == L"general") return In(k, {L"lowpowerpacer", L"lowpowerpacertimeoutus"}) ? kEngine : kNotEngine;
   if (In(s, {L"color", L"colorfix", L"colorenhanced", L"night", L"vrfx", L"dlss", L"perception", L"depthboost",

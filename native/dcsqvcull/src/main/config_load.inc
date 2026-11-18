@@ -359,6 +359,11 @@ void LoadConfig(bool initial) {
   if (c.fxApplySkipLogSec < 1) c.fxApplySkipLogSec = 1;
   if (c.fxApplySkipLogSec > 600) c.fxApplySkipLogSec = 600;
   c.suiteBenchFxApplySkip = GetPrivateProfileIntW(L"Suite", L"BenchFxApplySkip", 0, ini.c_str()) != 0;
+  // W1 (w1_water.h): [Water] SkipHiddenWater 0 off, 1 on, 2 verify; any other value is off.
+  c.waterSkip = static_cast<int>(GetPrivateProfileIntW(L"Water", L"SkipHiddenWater", 0, ini.c_str()));
+  if (c.waterSkip != 1 && c.waterSkip != 2) c.waterSkip = 0;
+  c.suiteWaterSkipTiming = (std::max)(0, (std::min)(60, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"WaterSkipTiming", 0, ini.c_str()))));
+  c.suiteWaterSkipTimingFrames = (std::max)(20, (std::min)(1000, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"WaterSkipTimingFrames", 90, ini.c_str()))));
   {
     wchar_t mode[32] = {};
     GetPrivateProfileStringW(L"Prefetch", L"Mode", L"off", mode, 32, ini.c_str());
@@ -714,6 +719,7 @@ void LoadConfig(bool initial) {
   ApplyPassFlush();
   ApplySrvTailTrim(c.srvTailTrim && !g_engineOff.load());
   ApplyFxApplySkip(g_engineOff.load() ? 0 : c.fxApplySkip, c.fxApplySkipVerify, c.fxApplySkipVerifyEvery);
+  ApplyWaterSkip(g_engineOff.load());  // W1 (hot reload; nothing installed while the key stays 0)
   ApplyPrefetch();
   ApplyHoldYaw(c.holdYawDeg);
   ApplyPoseTest(c.holdPitchDeg, c.poseRotateDps, c.holdPose, c.poseWallClock);

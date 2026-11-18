@@ -68,6 +68,7 @@ void SetEngineOff(bool off) {
   ApplyPassFlush();
   ApplySrvTailTrim(g_cfg.srvTailTrim && !off);
   ApplyFxApplySkip(off ? 0 : g_cfg.fxApplySkip, g_cfg.fxApplySkipVerify, g_cfg.fxApplySkipVerifyEvery);
+  ApplyWaterSkip(off);  // W1 (nothing installed while the key stays 0)
   ApplyPrefetch();
   // The texture hook only does work when dedupe is on: otherwise remove it.
   ApplyTextureHook();

@@ -97,12 +97,57 @@ struct TlEvent {
 std::atomic<bool> g_timeline{false};
 std::vector<TlEvent> g_tl;
 size_t g_tlCap = 0;
+// W1 ([Water] SkipHiddenWater, w1_water.h): called for every top-level pass before any boundary callback; returns the
+// function to run in place of the pass's execute (nullptr: the execute itself). The boundary callbacks still fire
+// around whatever runs. nullptr until the key is first set.
+using InterceptFn = ExecFn (*)(void* pass, uint64_t frame);
+std::atomic<InterceptFn> g_intercept{nullptr};
+// W1: while a block of DCS's water passes runs under a GPU predicate, that predicate; every UpdateSubresource on DCS's
+// context is then handled by UnpredUpload (in gpu_pass_timing.h's hook or W1's own).
+std::atomic<ID3D11Predicate*> g_unpred{nullptr};
+// Uploads under the predicate: a buffer upload goes through predicated (the draws of a view with water need it in
+// place) and its bytes are kept; after the predicate is cleared the last upload of each (buffer, subresource, box) is
+// issued again unpredicated (w1::EndUnpred), so every buffer ends as without W1 in both outcomes. No predicate
+// toggling inside the block (each toggle cost the GPU a wait: +0.45 ms in four views, measured 2026-11-18). Anything
+// else (a texture, no data) is issued unpredicated in place (returns true: the caller toggles the predicate).
+struct UpRec {
+  ID3D11Resource* d;
+  UINT sub;
+  bool hasBox;
+  D3D11_BOX box;
+  UINT rp, dp;
+  std::vector<uint8_t> bytes;
+};
+std::vector<UpRec> g_upRec;  // render thread, while g_unpred is set
+inline bool UnpredUpload(ID3D11Resource* d, UINT ds, const D3D11_BOX* b, const void* p, UINT rp, UINT dp) {
+  D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+  d->GetType(&dim);
+  if (dim != D3D11_RESOURCE_DIMENSION_BUFFER || !p) return true;
+  D3D11_BUFFER_DESC bd{};
+  static_cast<ID3D11Buffer*>(d)->GetDesc(&bd);
+  const UINT from = b ? b->left : 0, to = b ? b->right : bd.ByteWidth;
+  if (to <= from || to > bd.ByteWidth) return true;
+  for (auto it = g_upRec.begin(); it != g_upRec.end(); ++it)  // the same destination again: only the last one counts
+    if (it->d == d && it->sub == ds && it->hasBox == (b != nullptr) && (!b || memcmp(&it->box, b, sizeof(*b)) == 0)) {
+      it->d->Release();
+      g_upRec.erase(it);
+      break;
+    }
+  UpRec r{d, ds, b != nullptr, b ? *b : D3D11_BOX{}, rp, dp, {}};
+  r.bytes.assign(static_cast<const uint8_t*>(p), static_cast<const uint8_t*>(p) + (to - from));
+  d->AddRef();
+  g_upRec.push_back(std::move(r));
+  return false;
+}
 
 void __fastcall Hook(void* pass, uint64_t frame) {
+  ExecFn run_ = g_orig;
   if (t_depth == 0) {
     qvalog::NoteFrameThread();  // R93: the render thread (main.cpp's async log: its lines never wait)
     g_topTid.store(GetCurrentThreadId(), std::memory_order_relaxed);
     g_execFrame.store(TopFrameId(frame, g_quadFrame.load(std::memory_order_relaxed)), std::memory_order_relaxed);
+    if (InterceptFn ic = g_intercept.load(std::memory_order_relaxed))
+      if (ExecFn r = ic(pass, frame)) run_ = r;
   }
   EachFn each = g_eachPass.load(std::memory_order_relaxed);
   BoundaryFn bnd = g_boundary.load(std::memory_order_relaxed);
@@ -114,7 +159,13 @@ void __fastcall Hook(void* pass, uint64_t frame) {
   BoundaryFn pc = g_pcBoundary.load(std::memory_order_relaxed);      // periph_census.h
   if (!g_recording.load(std::memory_order_relaxed)) {
     AfterTopFn after = g_afterTop.load(std::memory_order_relaxed);
-    if (!after && !each && !bnd && !fl && !vb && !db && !vr && !cs && !pc) return g_orig(pass, frame);
+    if (!after && !each && !bnd && !fl && !vb && !db && !vr && !cs && !pc) {
+      if (run_ == g_orig) return g_orig(pass, frame);
+      ++t_depth;  // W1's replacement runs DCS executes itself: their nested passes stay nested
+      run_(pass, frame);
+      --t_depth;
+      return;
+    }
     BoundaryFn vp = vr ? g_vrsPre.load(std::memory_order_relaxed) : nullptr;
     if (vp) vp(pass, true, t_depth);
     if (each) each();
@@ -126,7 +177,7 @@ void __fastcall Hook(void* pass, uint64_t frame) {
     if (pc) pc(pass, true, t_depth);
     if (vr) vr(pass, true, t_depth);
     ++t_depth;
-    g_orig(pass, frame);
+    run_(pass, frame);
     const bool top = --t_depth == 0;
     if (vr) vr(pass, false, t_depth);
     if (pc) pc(pass, false, t_depth);
@@ -153,7 +204,7 @@ void __fastcall Hook(void* pass, uint64_t frame) {
   if (d < 64) t_childUs[d] = 0;
   LARGE_INTEGER a, b;
   QueryPerformanceCounter(&a);
-  g_orig(pass, frame);
+  run_(pass, frame);
   QueryPerformanceCounter(&b);
   t_depth--;
   double us = (b.QuadPart - a.QuadPart) * g_qpcToUs;
