@@ -1271,6 +1271,9 @@ void TestPipeline() {
       ovlStateOk = true;
       symtrcfg::Configure(2, 15, 0, 0, base);
       for (int f = 0; f < 8; ++f) frame(order);  // request, learn, 2 traced, the maps
+      // The copies the GPU has not finished yet: live, PollCaps waits for them from 30 frames on; these 8 frames only
+      // poll without waiting, so how many were listed depended on the GPU's pace (0, 13 or 16 in past runs).
+      symtr::PollCaps(true);
       symtr::WriteFiles();
       symtrcfg::Configure(0, 15, 0, 1, base);
       const std::vector<std::wstring> ses = r94::Sessions(base);

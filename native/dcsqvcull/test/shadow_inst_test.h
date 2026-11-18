@@ -5,7 +5,11 @@
 // Included from test_main.cpp after Check() is defined.
 #pragma once
 
+#include <wincrypt.h>  // MD5 of a cached effect's recorded source files (StaleDeps)
+
 #include <set>
+
+#pragma comment(lib, "advapi32.lib")
 
 namespace gbtest {  // gb_inst_test.h: the G-buffer part of the lifecycle
 void LifecycleGb(const shadowinst::Compiler& cc, const std::wstring& shaders, ID3D11Device* dev);
@@ -193,6 +197,7 @@ std::vector<std::wstring> ListFiles(const std::wstring& dir, const wchar_t* patt
 struct FxoFile {
   std::string bytes, key;
   size_t fxOff = 0;
+  size_t keyEnd = 0;  // first byte after the key: the dependency list (path relative to Bazar, MD5 of the file)
 };
 bool LoadFxo(const std::wstring& path, FxoFile& f) {
   if (!ReadWholeFile(path, f.bytes) || f.bytes.size() < 16) return false;
@@ -204,11 +209,60 @@ bool LoadFxo(const std::wstring& path, FxoFile& f) {
   const size_t ko = 6 + vl + 4;
   if (ko + kl > f.bytes.size()) return false;
   f.key.assign(f.bytes.data() + ko, kl);
+  f.keyEnd = ko + kl;
   const uint32_t tag = kFx5Tag;
   const size_t at = f.bytes.find(std::string(reinterpret_cast<const char*>(&tag), 4), ko + kl);
   if (at == std::string::npos) return false;
   f.fxOff = at;
   return true;
+}
+
+// DCS records every file a cached effect was compiled from after the key: a zero byte, a u32 count, then per file a
+// u32 length, its path ("/shaders/..." relative to Bazar) and the MD5 of its bytes. An entry whose recorded MD5 no longer
+// matches the installed file is one DCS itself compiles again at its next use (a mod's file swapped in or out since):
+// it says nothing about our pipeline. Returns 1 for such an entry (the first file in *which), 0 when every "/shaders/"
+// file matches, -1 when the list cannot be read (then the entry is used as before).
+int StaleDeps(const FxoFile& f, const std::wstring& shaders, std::string* which) {
+  const auto* b = reinterpret_cast<const uint8_t*>(f.bytes.data());
+  const size_t n = f.bytes.size();
+  size_t p = f.keyEnd + 1;
+  uint32_t count = 0;
+  if (f.keyEnd == 0 || p + 4 > n) return -1;
+  memcpy(&count, b + p, 4);
+  p += 4;
+  if (count == 0 || count > 1000) return -1;
+  HCRYPTPROV prov = 0;
+  if (!CryptAcquireContextW(&prov, nullptr, nullptr, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) return -1;
+  int result = 0;
+  for (uint32_t i = 0; i < count && result == 0; ++i) {
+    uint32_t len = 0;
+    if (p + 4 > n) { result = -1; break; }
+    memcpy(&len, b + p, 4);
+    p += 4;
+    if (len == 0 || len > 1024 || p + len + 16 > n) { result = -1; break; }
+    const std::string path(f.bytes.data() + p, len);
+    const uint8_t* md5 = b + p + len;
+    p += len + 16;
+    static const char kPrefix[] = "/shaders/";
+    if (path.compare(0, sizeof(kPrefix) - 1, kPrefix) != 0) continue;
+    std::wstring file = shaders;
+    for (size_t k = sizeof(kPrefix) - 1; k < path.size(); ++k) file += path[k] == '/' ? L'\\' : static_cast<wchar_t>(path[k]);
+    std::string bytes;
+    if (!ReadWholeFile(file, bytes)) continue;  // not among the copied sources: cannot judge this file
+    BYTE got[16] = {};
+    DWORD gotLen = sizeof(got);
+    HCRYPTHASH h = 0;
+    const bool hashed = CryptCreateHash(prov, CALG_MD5, 0, 0, &h) &&
+                        CryptHashData(h, reinterpret_cast<const BYTE*>(bytes.data()), static_cast<DWORD>(bytes.size()), 0) &&
+                        CryptGetHashParam(h, HP_HASHVAL, got, &gotLen, 0);
+    if (h) CryptDestroyHash(h);
+    if (!hashed || memcmp(got, md5, 16) != 0) {
+      result = 1;
+      if (which) *which = path + (hashed ? " (MD5 differs)" : " (not hashed)");
+    }
+  }
+  CryptReleaseContext(prov, 0);
+  return result;
 }
 
 // D3D shader version type for an FX object type (-1 = not a shader).
@@ -1291,12 +1345,19 @@ void Run() {
   // ---- 2. Our compile pipeline reproduces DCS's compiles (one key per source) ----
   if (fxoCopied && srcCopied) {
     std::set<std::string> donePaths;
-    int tried = 0, same = 0, compiled = 0;
-    std::string firstDiff;
+    int tried = 0, same = 0, compiled = 0, stale = 0;
+    std::string firstDiff, firstStale;
     for (const std::wstring& name : ListFiles(root + L"fxo\\", L"*.fxo")) {
       FxoFile f;
       SourceKey k;
-      if (!LoadFxo(root + L"fxo\\" + name, f) || !ParseKey(f.key, k) || !donePaths.insert(k.path).second) continue;
+      if (!LoadFxo(root + L"fxo\\" + name, f) || !ParseKey(f.key, k) || donePaths.count(k.path)) continue;
+      std::string dep;
+      if (StaleDeps(f, shaders, &dep) > 0) {  // DCS recompiles it at its next use: another entry of the source, or none
+        ++stale;
+        if (firstStale.empty()) firstStale = k.path + ": " + dep;
+        continue;
+      }
+      donePaths.insert(k.path);
       ++tried;
       std::vector<uint8_t> out;
       std::string err;
@@ -1322,8 +1383,9 @@ void Run() {
              eq ? "byte-identical" : "DIFFER", whole ? ", whole effect identical" : "");
       if (!eq && firstDiff.empty()) firstDiff = k.path + ": shader bytecode differs";
     }
-    printf("     reproduce: %d sources, %d compiled, %d byte-identical to DCS's cache%s%s\n", tried, compiled, same,
-           firstDiff.empty() ? "" : "; first issue: ", firstDiff.c_str());
+    printf("     reproduce: %d sources, %d compiled, %d byte-identical to DCS's cache%s%s; %d stale entries skipped%s%s\n",
+           tried, compiled, same, firstDiff.empty() ? "" : "; first issue: ", firstDiff.c_str(), stale,
+           firstStale.empty() ? "" : ", first: ", firstStale.c_str());
     Check(tried > 0 && same == tried,
           "shadow inst: our D3DCompile2 pipeline (fx_5_0, O3, DCS include order) reproduces DCS's cached shaders");
   }
