@@ -1,10 +1,11 @@
 // Three views (native/quadviews/dcsvr_threeviews.h): the real fill pass on a D3D11 device (the GPU, else WARP) over a
 // synthetic pair of parallel periphery views with DCS's frusta (left -56.8..+45.9 deg, right mirrored, 64 mm apart):
-// a textured wall at 10 m and, in front of the left eye, a cockpit panel at 0.6 m (stencil COCKPIT). Checks:
+// a textured wall at 10 m and a cockpit panel at 0.6 m (stencil COCKPIT) seen by both eyes. Checks:
 //   1. the matrices: a world point's left NDC maps to its right NDC (double-precision transform, world origin far away);
 //   2. the strip and the right view's own cockpit pixels are DCS's, bit for bit;
 //   3. the filled pixels match the right view rendered directly (the wall) within a small error;
-//   4. the left eye's cockpit panel never appears in the right view's world (holes take the background);
+//   4. the panel never appears in the right view's world away from its edge (the wall the right eye sees past
+//      it, hidden from the left eye, takes the background);
 //   5. without the pushes (no THREE_VIEWS flag) nothing is filled.
 // Usage: threeviews_test.exe
 #define NOMINMAX
@@ -57,8 +58,11 @@ int main() {
     const Cam camL{-t1, t2, tv, -tv, kOrigin - 0.032}, camR{-t2, t1, tv, -tv, kOrigin + 0.032};
     const UINT W = 538, H = 530, DW = 312, DH = 308;  // half of DCS's 1076x1060 colour and 624x616 depth
     const float strip = 0.55f;
-    // The left cockpit panel: view-space x/z in [-0.35, -0.05] (tangent), y/z in [-0.5, -0.2], at 0.6 m.
-    auto panel = [](double tx, double ty) { return tx > -0.35 && tx < -0.05 && ty > -0.5 && ty < -0.2; };
+    // The cockpit panel, in the world at 0.6 m: what the left eye sees at tangents x [-0.35, -0.05], y [-0.5, -0.2].
+    auto panel = [&](const Cam& c, double tx, double ty) {
+        const double X = c.x + tx * 0.6 - camL.x;
+        return X > -0.35 * 0.6 && X < -0.05 * 0.6 && ty > -0.5 && ty < -0.2;
+    };
     auto render = [&](const Cam& c, bool left, UINT w, UINT h, std::vector<float>* col, std::vector<uint8_t>* depth) {
         for (UINT y = 0; y < h; ++y)
             for (UINT x = 0; x < w; ++x) {
@@ -66,7 +70,7 @@ int main() {
                 const double tx = c.l + u * (c.r - c.l), ty = c.u + v * (c.d - c.u);
                 bool ck = false;
                 double z = kWallZ, val = Wall(c.x + tx * kWallZ - kOrigin, ty * kWallZ);
-                if (left && panel(tx, ty)) ck = true, z = 0.6, val = 1.0;
+                if (panel(c, tx, ty)) ck = true, z = 0.6, val = 1.0;
                 if (!left && tx > 0.6 && tx < 0.8 && ty > -0.6 && ty < -0.3) ck = true, z = 0.6, val = 0.0;  // its own cockpit
                 if (col) {
                     float* p = &(*col)[(y * w + x) * 4];
@@ -212,9 +216,11 @@ int main() {
             // The left eye sees this wall point? (outside its frustum: not checked; near the panel: the hole test)
             const double X = camR.x + tx * kWallZ - kOrigin, txL = (X + kOrigin - camL.x) / kWallZ;
             if (txL < camL.l + 0.02 || txL > camL.r - 0.02) continue;
-            if (got > 0.95f) ++panelLeak;  // the white panel (the wall stays within 0.15..0.85)
             const bool nearPanel = std::fabs(ty + 0.35) < 0.2 && txL > -0.40 && txL < 0.0;
-            if (nearPanel) {
+            const double txP = (camR.x + tx * 0.6 - camL.x) / 0.6;  // where the panel is, in left tangents at 0.6 m
+            const bool panelEdge = std::fabs(ty + 0.35) < 0.17 && txP > -0.40 && txP < 0.0;  // 1-2 depth texels round it
+            if (got > 0.95f && !panelEdge) ++panelLeak;  // the white panel (the wall stays within 0.15..0.85)
+            if (nearPanel || panelEdge) {
                 ++edgeN;
                 continue;
             }
@@ -232,7 +238,7 @@ int main() {
     // Up to one depth texel around the right view's own cockpit keeps DCS's colour (the stencil is at depth resolution):
     // a fringe, counted, not an error of the fill.
     Check(fillN > 10000 && errSum / fillN < 0.01 && bigN < 60, b);
-    snprintf(b, sizeof(b), "the left eye's cockpit panel does not leak into the right view's world: %d px (%d near it)", panelLeak, edgeN);
+    snprintf(b, sizeof(b), "the cockpit panel does not leak into the right view's world away from its edge: %d px (%d near it)", panelLeak, edgeN);
     Check(panelLeak == 0, b);
     Check(run(false) == nullptr, "without the THREE_VIEWS flag the right periphery stays DCS's own");
     printf("%d failure(s)\n", g_fail);

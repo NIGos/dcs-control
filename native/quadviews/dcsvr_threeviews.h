@@ -5,7 +5,7 @@
 // composition), this pass builds the right periphery the composition samples instead of DCS's image:
 //   - DCS's own pixels where its stencil says cockpit (composition COCKPIT, (s & 0x38) == 0x28, copied before the
 //     transparent passes) and in the strip (a short cross-fade at its inner edge);
-//   - everywhere else the left periphery's colour, reprojected: the left depth (cockpit texels left out) is splatted
+//   - everywhere else the left periphery's colour, reprojected: the left depth is splatted
 //     into the right view at depth resolution (nearest wins), then each right pixel maps back into the left image with
 //     that depth (bilinear colour). A pixel no left texel reached (the right eye sees what the cockpit hides from the
 //     left one) takes the colour of the farther of its nearest reached neighbours on its row (background stretch);
@@ -122,7 +122,6 @@ bool Cockpit(uint s) { return (s & 0x38) == 0x28; }
 [numthreads(8, 8, 1)] void Splat(uint3 id : SV_DispatchThreadID) {
   if (id.x >= (uint)vpL.z || id.y >= (uint)vpL.w) return;
   int2 t = int2(vpL.xy) + int2(id.xy);
-  if (Cockpit(stL.Load(int3(t, 0)).g)) return;
   float d = max(depL.Load(int3(t, 0)), 1e-7);
   float2 uv = (float2(id.xy) + 0.5) / vpL.zw;
   float4 c = mul(float4(uv.x * 2 - 1, 1 - uv.y * 2, d, 1), M01);
@@ -140,19 +139,22 @@ bool Cockpit(uint s) { return (s & 0x38) == 0x28; }
   }
 }
 
-float2 ToLeft(float2 ndc, float d) {
+// uv in the left image and the point's depth there (reverse Z).
+float3 ToLeft(float2 ndc, float d) {
   float4 c = mul(float4(ndc, d, 1), M10);
-  float2 p = c.xy / max(c.w, 1e-12);
-  return float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+  float3 p = c.xyz / max(c.w, 1e-12);
+  return float3(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5, p.z);
 }
-// The left sample's bilinear footprint touches the left eye's cockpit: that colour is not this world point's (the
-// depth is splatted at depth resolution, one texel covers about 1.7 output pixels at an occlusion edge).
-bool LeftCockpit(float2 uvL) {
-  float2 t = uvL * vpL.zw;
+// The left eye does not see this point: something nearer covers the sample's bilinear footprint there (the depth is
+// splatted at depth resolution, one texel covers about 1.7 output pixels at an occlusion edge). Depth, not the stencil:
+// the own aircraft's outside parts carry the cockpit stencil in one eye and are culled world in the other.
+bool LeftOccluded(float3 l) {
+  float2 t = l.xy * vpL.zw;
   float2 h = 0.5 * vpL.zw * outSize.zw + 0.5;
   int2 a = int2(clamp(floor(t - h), 0, vpL.zw - 1)) + int2(vpL.xy), b = int2(clamp(floor(t + h), 0, vpL.zw - 1)) + int2(vpL.xy);
-  return Cockpit(stL.Load(int3(a.x, a.y, 0)).g) || Cockpit(stL.Load(int3(b.x, a.y, 0)).g) ||
-         Cockpit(stL.Load(int3(a.x, b.y, 0)).g) || Cockpit(stL.Load(int3(b.x, b.y, 0)).g);
+  float m = max(max(depL.Load(int3(a.x, a.y, 0)), depL.Load(int3(b.x, a.y, 0))),
+                max(depL.Load(int3(a.x, b.y, 0)), depL.Load(int3(b.x, b.y, 0))));
+  return m > l.z * 1.15 + 1e-6;
 }
 
 [numthreads(8, 8, 1)] void Fill(uint3 id : SV_DispatchThreadID) {
@@ -177,11 +179,12 @@ bool LeftCockpit(float2 uvL) {
   uint s = splat[rt];
   bool found = false;
   if (s != 0) {
-    uvL = ToLeft(ndc, asfloat(s));
-    found = !LeftCockpit(uvL);
+    float3 l = ToLeft(ndc, asfloat(s));
+    uvL = l.xy;
+    found = !LeftOccluded(l);
   }
   if (!found) {
-    // A hole (or a sample on the left cockpit): the farther of the nearest usable texels left and right on this row,
+    // A hole (or a sample the left eye sees covered): the farther of the nearest usable texels left and right on this row,
     // each with its own mapping (background stretch).
     int n = (int)strip.w;
     bool fl = false, fr = false;
@@ -194,13 +197,14 @@ bool LeftCockpit(float2 uvL) {
         if (x < 0 || x >= (int)vpR.z) continue;
         uint a = splat[int2(x, rt.y)];
         if (a == 0) continue;
-        float2 u = ToLeft(float2(((x + 0.5) / vpR.z) * 2 - 1, ndc.y), asfloat(a));
-        if (LeftCockpit(u)) continue;
+        float3 lu = ToLeft(float2(((x + 0.5) / vpR.z) * 2 - 1, ndc.y), asfloat(a));
+        if (LeftOccluded(lu)) continue;
+        float2 u = lu.xy;
         if (side == 0) { fl = true; dl = asfloat(a); ul = u; } else { fr = true; dr = asfloat(a); ur = u; }
       }
     }
     if (!fl && !fr) {
-      uvL = ToLeft(ndc, 1e-7);
+      uvL = ToLeft(ndc, 1e-7).xy;
       k = 4;
     } else {
       uvL = (!fr || (fl && dl <= dr)) ? ul : ur;
