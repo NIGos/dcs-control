@@ -134,6 +134,18 @@ DWORD WINAPI WorkerThread(void*) {
       }
       fK = kK;
     }
+    {  // 0.7 three views ([Views] ThreeViews, default 0): engage / disengage, its toggle key, a status line every 10 s
+      const bool tvKey = g_cfg.threeViewsKeyVk > 0 && KeyDown(g_cfg.threeViewsKeyVk) && ModifiersMatch(g_cfg.threeViewsKeyMods);
+      if (g_cfg.threeViews || tvc::g_cfgOn.load())
+        tviews::Tick(g_cfg.threeViews && !g_perceptionOnly.load(), g_cfg.threeViewsStripNdc, g_cfg.threeViewsKeyVk,
+                     g_cfg.threeViewsKeyMods, g_engineOff.load() || g_faulted.load(),
+                     g_cfg.cockpitMaskExport || g_cfg.cockpitMotionExport, fixdepth::g_installed.load(), tvKey);
+      static ULONGLONG lastTv = 0;
+      if (tvc::g_cfgOn.load() && GetTickCount64() - lastTv >= 10000) {
+        lastTv = GetTickCount64();
+        tviews::LogStatus();
+      }
+    }
     static bool f8 = false;
     if (k8 && !f8) {
       bool on = !g_shadowDebugInvert.load();

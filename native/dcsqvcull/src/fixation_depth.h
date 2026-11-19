@@ -1321,6 +1321,9 @@ void PushJob(Job&& j) {
 namespace cmask {  // R65 cockpit_mask.h (included after RunCs)
 void DropPending();
 }
+namespace tvexp {  // 0.7 three views (after FxKeepRun)
+void ReleaseAll();
+}
 void ReleaseRun(Run& r) {
   if (r.dsv) r.dsv->Release();
   if (r.cb) r.cb->Release();
@@ -1337,6 +1340,7 @@ void ReleaseD3D() {
   // Far depth: the layer's references first (every generation pushed), then
   // our copies (before the device reference goes).
   fdexport::ReleaseAll();
+  tvexp::ReleaseAll();  // 0.7 three views: the layer's references to our periphery copies, then the copies
   cmask::DropPending();  // R65: DCS's targets held for the mask (its own objects: cmask::Uninstall / EnsureBase)
   ReleaseRun(s.farPending);
   ReleaseRun(s.run);
@@ -3284,6 +3288,179 @@ void FxKeepRun(const Run& r, int idx) {
   cpass::FxNoteProj(g_s.ctx, idx, r.cb, r.cbFirst);
 }
 
+// ---------------------------------------------------------------------------
+// 0.7 three views ([Views] ThreeViews; three_views.h decides, tvc in views.inc holds the shared state): the periphery
+// views' depth + stencil for Quad Views, which fills the right periphery from the left one where DCS drew neither the
+// strip nor the cockpit. Render thread only. Per periphery view (HMD view 0 / 1 by the CopyToHMDPass ordinal, as Far
+// depth's focus views): the G-buffer run is kept (TvKeepRun) and copied, whole subresource, into our texture BEFORE the
+// view's transparent passes (DCS's transparent cockpit materials write COCKPIT into the stencil: the canopy glass would
+// become cockpit), at its WaterSeaPass end or else at the next pass that could change the target (TvFlush). Pushed at
+// once through Far depth's export (DcsVr_QuadViewsDepth, hmdView 0 / 1) under a generation of our own; the right view
+// carries DCSVR_DEPTH_THREE_VIEWS while the strip is engaged and for kTvTail frames after (a frame culled at collect
+// time may still be rendered after the disengage). Quad Views wants these views only when it can fill (bits 0 and 1 of
+// DcsVr_QuadViewsDepthWanted, asked once per frame: tvc::g_layerMask); without them nothing is copied or pushed, and
+// the worker never engages.
+namespace tvexp {
+constexpr int kTvTail = 6;
+constexpr int kTvSlots = 2;
+fdexport::Tex g_tex[2][kTvSlots];
+Run g_pend[2];
+bool g_hasPend[2] = {};
+uint32_t g_gen = 0x7e000001u;  // ours; DepthImport releases by generation, and the views 0 / 1 latches are ours alone
+bool g_held = false;           // a generation of ours may be held by the layer
+int g_tail = 0;                // frames the flag stays after a disengage
+uint64_t g_lastFrame = ~0ull;
+std::atomic<uint64_t> g_copies{0}, g_pushes{0}, g_accepted{0}, g_rejected{0}, g_flagged{0}, g_skipIdentity{0},
+    g_skipFormat{0}, g_skipProj{0}, g_skipArm{0}, g_afterWater{0}, g_texCreates{0}, g_releases{0};
+std::atomic<uint32_t> g_lastResult{0};
+std::atomic<bool> g_loggedFirst{false};
+
+bool Flag() { return tvc::g_engaged.load(std::memory_order_relaxed) || g_tail > 0; }
+
+void ReleaseAll() {
+  if (g_held) {
+    fdexport::QvRelease(g_gen);
+    g_held = false;
+  }
+  bool any = false;
+  for (auto& v : g_tex)
+    for (fdexport::Tex& t : v) {
+      if (t.t) t.t->Release(), any = true;
+      t = fdexport::Tex{};
+    }
+  for (int i = 0; i < 2; ++i)
+    if (g_hasPend[i]) ReleaseRun(g_pend[i]), g_hasPend[i] = false;
+  if (any) {
+    g_releases++;
+    g_gen = (g_gen + 2) | 1u;
+  }
+}
+
+// Once per frame (OnBoundaryInner's first boundary of a frame): Quad Views' wanted mask, the flag's tail.
+void FrameStart(uint64_t frame) {
+  if (frame == g_lastFrame) return;
+  g_lastFrame = frame;
+  if (tvc::g_engaged.load(std::memory_order_relaxed))
+    g_tail = kTvTail;
+  else if (g_tail > 0)
+    --g_tail;
+  tvc::g_layerMask.store(fdexport::QvWanted(), std::memory_order_relaxed);
+  if (!tvc::g_engaged.load(std::memory_order_relaxed) && g_tail == 0 && (frame % 240) == 0 && g_held) ReleaseAll();
+}
+
+void Capture(const Run& r, int idx, bool afterWater) {
+  State& s = g_s;
+  if (!s.ctx || !s.dev || !Flag() || (tvc::g_layerMask.load(std::memory_order_relaxed) & 3u) != 3u) return;
+  if (!r.armOk) {
+    g_skipArm++;
+    return;
+  }
+  if (s.lastHmdCount != 4 || g_hmdOffset.load() != 0) {
+    g_skipIdentity++;
+    return;
+  }
+  if (r.variant < 0 || r.variant == 2 || r.variant == 3 || !fdexport::FormatOk(r.rawFmt) || !r.tex) {
+    g_skipFormat++;
+    return;
+  }
+  const Proj p = ParseProj(r.proj);
+  if (!r.cpuProj || !p.ok) {
+    g_skipProj++;
+    return;
+  }
+  const int slot = static_cast<int>(s.frame % kTvSlots);
+  fdexport::Tex& t = g_tex[idx][slot];
+  if (!(t.t && t.fmt == r.rawFmt && t.w == r.texW && t.h == r.texH)) {
+    if (g_held) {  // the layer must not hold a texture of another size under the same generation
+      fdexport::QvRelease(g_gen);
+      g_held = false;
+      g_gen = (g_gen + 2) | 1u;
+    }
+    if (t.t) t.t->Release();
+    t = fdexport::Tex{};
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width = r.texW;
+    d.Height = r.texH;
+    d.MipLevels = 1;
+    d.ArraySize = 1;
+    d.Format = r.rawFmt;
+    d.SampleDesc.Count = 1;
+    d.Usage = D3D11_USAGE_DEFAULT;
+    d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    ID3D11Texture2D* nt = nullptr;
+    if (FAILED(s.dev->CreateTexture2D(&d, nullptr, &nt)) || !nt) {
+      g_skipFormat++;
+      return;
+    }
+    g_texCreates++;
+    t = fdexport::Tex{nt, r.rawFmt, r.texW, r.texH};
+  }
+  s.ctx->CopySubresourceRegion(t.t, 0, 0, 0, 0, r.tex, D3D11CalcSubresource(0, r.slice, r.mipLevels), nullptr);
+  g_copies++;
+  if (afterWater) g_afterWater++;
+  fdexport::CaptureInfo ci;
+  ci.hmdView = static_cast<uint32_t>(idx);
+  ci.engineFrame = s.frame;
+  ci.generation = g_gen;
+  ci.format = r.rawFmt;
+  ci.texture = t.t;
+  ci.texW = r.texW;
+  ci.texH = r.texH;
+  ci.vp = r.vp;
+  memcpy(ci.proj, r.proj, sizeof(ci.proj));
+  memcpy(ci.viewInv, r.viewInv, sizeof(ci.viewInv));
+  ci.viewInvValid = true;
+  ci.afterWater = afterWater;
+  ci.fallback = !afterWater;
+  DcsVrDepthView d{};
+  if (!fdexport::FillView(ci, d)) {
+    g_skipProj++;
+    return;
+  }
+  d.stripNdcX = static_cast<float>(tvc::g_stripNdc.load(std::memory_order_relaxed));
+  if (idx == 1) {
+    d.flags |= DCSVR_DEPTH_THREE_VIEWS;
+    g_flagged++;
+  }
+  const uint32_t res = fdexport::QvPush(d);
+  g_lastResult = res;
+  if (res == ~0u) return;
+  g_pushes++;
+  if (res == DCSVR_DEPTH_PUSH_ACCEPTED) {
+    g_accepted++;
+    g_held = true;
+  } else {
+    g_rejected++;
+  }
+  if (!g_loggedFirst.exchange(true))
+    Log("three views: first periphery depth push: view %d, depth %ux%u format %u, viewport %.1f,%.1f %.0fx%.0f, flags "
+        "0x%x, generation %u, %s; Quad Views result %u",
+        idx, d.texWidth, d.texHeight, d.format, d.viewport[0], d.viewport[1], d.viewport[2], d.viewport[3], d.flags,
+        d.generation, afterWater ? "after the water" : "before the lighting / next view", res);
+}
+
+// CloseRun: a periphery view's run is kept until its flush point.
+void KeepRun(const Run& r, int idx) {
+  if (g_hasPend[idx]) ReleaseRun(g_pend[idx]);
+  g_hasPend[idx] = false;
+  if (!Flag() || (tvc::g_layerMask.load(std::memory_order_relaxed) & 3u) != 3u) return;
+  g_pend[idx] = r;
+  if (r.dsv) r.dsv->AddRef();
+  if (r.cb) r.cb->AddRef();
+  g_hasPend[idx] = true;
+}
+bool HasPending() { return g_hasPend[0] || g_hasPend[1]; }
+void Flush(bool afterWater) {
+  for (int i = 0; i < 2; ++i) {
+    if (!g_hasPend[i]) continue;
+    Capture(g_pend[i], i, afterWater);
+    ReleaseRun(g_pend[i]);
+    g_hasPend[i] = false;
+  }
+}
+}  // namespace tvexp
+void TvKeepRun(const Run& r, int idx) { tvexp::KeepRun(r, idx); }
+
 void CloseRun() {
   State& s = g_s;
   Run& r = s.run;
@@ -3350,6 +3527,8 @@ void CloseRun() {
         s.waterSeen = false;
       }
     }
+    // 0.7 three views: the periphery views' depth for Quad Views, copied before their transparents (TvFlush).
+    if (hmd && (idx == 0 || idx == 1) && tvc::g_cfgOn.load(std::memory_order_relaxed)) TvKeepRun(r, idx);
     // R65 cockpit mask: the configured HMD views, sampled at their WaterSeaPass end (or before their transparents).
     if (hmd && cmask::Active()) cmask::NoteRun(r, idx, s.lastHmdCount, g_runMv);  // R70: with the run's MV target
     // R51 VrFx: every HMD view's run (GazeDof's depth; both effects' projection).
@@ -5386,6 +5565,8 @@ void EndFrame() {
   State& s = g_s;
   CloseRun();
   FlushPending(s.waterSeen);
+  for (int i = 0; i < 2; ++i)  // three views: a periphery copy not flushed by now would be read with the next frame
+    if (tvexp::g_hasPend[i]) ReleaseRun(tvexp::g_pend[i]), tvexp::g_hasPend[i] = false;
   if (!s.sampled && g_coneOn.load()) {
     g_noTarget++;
     QueueInvalid(nullptr, 2, false);
@@ -5597,6 +5778,24 @@ void DumpPassBoundary(void* pass, bool begin) {
 void OnBoundaryInner(void* pass, bool begin) {
   State& s = g_s;
   const int k = plod::KindRaw(pass);
+  // 0.7 three views: the frame's wanted mask, the right periphery's passes (three_views.h narrows their terrain
+  // chain), and the periphery depth copies (after the water, before the transparents, at the latest at the next view).
+  if (tvc::g_cfgOn.load(std::memory_order_relaxed)) {
+    tvexp::FrameStart(s.frame);
+    if (const auto f = tvc::g_onPass.load(std::memory_order_relaxed)) f(begin, s.lastHmdCount == 4 && s.hmdOrd == 1);
+    if (tvexp::HasPending()) {
+      if (!begin && PassIs(pass, "WaterSeaPass")) {
+        tvexp::Flush(true);
+      } else if (begin && (k == plod::kGBuffer || k == plod::kLights || k == plod::kHmd || k == plod::kCascade ||
+                           k == plod::kHeight)) {
+        tvexp::Flush(s.waterSeen);
+      } else if (begin && k == plod::kOther) {
+        char pn[48];
+        PassName(pass, pn, sizeof(pn));
+        if (strstr(pn, "Transparent")) tvexp::Flush(s.waterSeen);
+      }
+    }
+  }
   // R74b: mask v1.1 overlay symbology, an HMD view's OverlayHDRPass begin: its pre signature and its arm, before any
   // other work of this boundary (no arm held yet; far depth's and cockpit ipd's overlay arms nest in ours).
   if (begin && k == plod::kOther && cmask::covl::Wanted()) cmask::covl::Boundary(pass, true, s.hmdOrd);
@@ -6262,12 +6461,16 @@ void Tick(bool coneOn, bool gridOn, int verify, const wchar_t* testGaze, bool du
   const bool depthOn = cmask::DepthWanted();  // R69: [Perception] CockpitDepthExport (cmask::ConfigureDepth)
   const bool motionOn = cmask::MotionWanted();  // R70: [Perception] CockpitMotionExport (cmask::ConfigureMotion)
   const bool symOn = cmask::SymWanted();  // R95: [Perception] SymbologyExport (cmask::ConfigureSymbology)
-  const bool on = coneOn || gridOn || farOn || ckOn || maskOn || cpass::Wanted();  // R42: the colour modes use the pass hooks too
+  const bool tvOn = tvc::g_cfgOn.load();  // 0.7 three views: the periphery depth capture and the pass callback
+  const bool on = coneOn || gridOn || farOn || ckOn || maskOn || cpass::Wanted() || tvOn;  // R42: the colour modes use the pass hooks too
   // A change of which outputs are on: reinstall (mappings and state follow).
+  static bool tvWith = false;
   if (g_installed.load() &&
       (coneOn != g_coneOn.load() || gridOn != g_gridOn.load() || farOn != fdexport::g_on.load() || ckOn != g_ckWith ||
-       maskOn != g_maskWith || depthOn != g_depthWith || motionOn != g_motionWith || symOn != g_symWith))
+       maskOn != g_maskWith || depthOn != g_depthWith || motionOn != g_motionWith || symOn != g_symWith ||
+       tvOn != tvWith))
     Uninstall();
+  tvWith = tvOn;
   g_coneOn = coneOn;
   g_gridOn = gridOn;
   fdexport::g_on = farOn;
