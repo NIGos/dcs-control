@@ -1324,6 +1324,12 @@ void DropPending();
 namespace tvexp {  // 0.7 three views (after FxKeepRun)
 void ReleaseAll();
 }
+// 0.7 three views, the fill inside the engine (TvOnBind, after tvexp): armed for the periphery views'
+// TransparentCockpitPass; the OM entries call it after DCS's first render-target bind in that pass.
+bool g_tvArm = false, g_tvOwnArm = false;
+int g_tvView = -1;
+void TvOnBind(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* r, ID3D11DepthStencilView* d);
+void TvReleaseFill();
 void ReleaseRun(Run& r) {
   if (r.dsv) r.dsv->Release();
   if (r.cb) r.cb->Release();
@@ -1341,6 +1347,7 @@ void ReleaseD3D() {
   // our copies (before the device reference goes).
   fdexport::ReleaseAll();
   tvexp::ReleaseAll();  // 0.7 three views: the layer's references to our periphery copies, then the copies
+  TvReleaseFill();
   cmask::DropPending();  // R65: DCS's targets held for the mask (its own objects: cmask::Uninstall / EnsureBase)
   ReleaseRun(s.farPending);
   ReleaseRun(s.run);
@@ -2233,7 +2240,9 @@ void KeepDsv(ID3D11DeviceContext* c, ID3D11DepthStencilView* d) {
 }
 // R70: the MV target bound with the DSV just recorded (the latest bind of that entry that had one wins).
 void KeepMv(ID3D11DeviceContext* c, ID3D11DepthStencilView* d, UINT n, ID3D11RenderTargetView* const* r) {
-  if (!d || c != g_s.ctx || !g_mvWanted.load(std::memory_order_relaxed) || !g_seqN || g_seq[g_seqN - 1] != d) return;
+  if (!d || c != g_s.ctx || !(g_mvWanted.load(std::memory_order_relaxed) || tvc::g_engaged.load(std::memory_order_relaxed)) ||
+      !g_seqN || g_seq[g_seqN - 1] != d)
+    return;
   if (ID3D11RenderTargetView* mv = MvOfBind(n, r)) g_seqMv[g_seqN - 1] = mv;
 }
 // With DLSS each view renders at its own resolution (measured: periphery
@@ -2336,6 +2345,7 @@ void STDMETHODCALLTYPE OmHook(ID3D11DeviceContext* c, UINT n, ID3D11RenderTarget
     if (g_cmOvlArm) CmOvlBind(c, n, r);  // R74b
   }
   g_omOrig(c, n, r, d);
+  if (g_tvArm && c == g_s.ctx && n && r && r[0]) TvOnBind(c, n, r, d);  // 0.7 three views
   if (c == g_s.ctx) InPassRearm(), g_lastCall = 4;
   if (auto o = ptiming::g_omObserver.load(std::memory_order_relaxed)) o(c, n, r, d, false, ret);  // R140
 }
@@ -2353,6 +2363,7 @@ void STDMETHODCALLTYPE OmUavHook(ID3D11DeviceContext* c, UINT n, ID3D11RenderTar
     if (g_cmOvlArm) CmOvlBind(c, n, r);  // R74b
   }
   g_omUavOrig(c, n, r, d, us, un, u, ic);
+  if (g_tvArm && c == g_s.ctx && n && n != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL && r && r[0]) TvOnBind(c, n, r, d);
   if (c == g_s.ctx) InPassRearm();
   if (auto o = ptiming::g_omObserver.load(std::memory_order_relaxed)) o(c, n, r, d, true, ret);  // R140
 }
@@ -3502,6 +3513,141 @@ void Flush(bool afterWater) {
 }
 }  // namespace tvexp
 void TvKeepRun(const Run& r, int idx) { tvexp::KeepRun(r, idx); }
+
+#include "three_views_fill.h"  // 0.7 three views: the fill inside the engine (shaders, pipeline state, the draw)
+namespace tvexp {
+tvfill::Fill g_fill;
+ID3D11Texture2D *g_lcol = nullptr, *g_lmv = nullptr;  // the left view's lit colour / motion at its TransparentCockpitPass
+DXGI_FORMAT g_lcolFmt = DXGI_FORMAT_UNKNOWN, g_lmvFmt = DXGI_FORMAT_UNKNOWN;
+uint64_t g_leftFrame = ~0ull;
+DcsVrDepthView g_leftDesc{};
+ID3D11Texture2D* g_leftDepth = nullptr;  // this frame's pre copy of the left view (g_tex, no reference)
+D3D11_VIEWPORT g_leftVp{};
+std::atomic<uint64_t> g_fills{0}, g_fillSkips{0}, g_leftCopies{0}, g_noLeft{0}, g_badTarget{0}, g_noMv{0};
+std::atomic<int> g_fillLog{3};
+bool FloatColour(DXGI_FORMAT f) {
+  return f == DXGI_FORMAT_R16G16B16A16_FLOAT || f == DXGI_FORMAT_R11G11B10_FLOAT || f == DXGI_FORMAT_R32G32B32A32_FLOAT;
+}
+// A texture of format f (w x h) at *t, remade when it differs.
+bool EnsureCopy(ID3D11Device* dev, ID3D11Texture2D** t, DXGI_FORMAT f, UINT w, UINT h) {
+  if (*t) {
+    D3D11_TEXTURE2D_DESC d{};
+    (*t)->GetDesc(&d);
+    if (d.Format == f && d.Width == w && d.Height == h) return true;
+    (*t)->Release();
+    *t = nullptr;
+  }
+  D3D11_TEXTURE2D_DESC d{w, h, 1, 1, f, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0};
+  return SUCCEEDED(dev->CreateTexture2D(&d, nullptr, t)) && *t;
+}
+// The view-port box of render target view v's resource into *dst (format of the resource). Returns the view format.
+bool CopyBox(ID3D11DeviceContext* c, ID3D11RenderTargetView* v, const D3D11_VIEWPORT& vp, ID3D11Texture2D** dst, DXGI_FORMAT* viewFmt) {
+  D3D11_RENDER_TARGET_VIEW_DESC rd{};
+  v->GetDesc(&rd);
+  if (rd.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || rd.Texture2D.MipSlice != 0) return false;
+  ID3D11Resource* res = nullptr;
+  v->GetResource(&res);
+  ID3D11Texture2D* tex = nullptr;
+  if (res) res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex)), res->Release();
+  if (!tex) return false;
+  D3D11_TEXTURE2D_DESC td{};
+  tex->GetDesc(&td);
+  D3D11_BOX box{};
+  bool ok = td.SampleDesc.Count == 1 && fdexport::PreBox(vp, td.Width, td.Height, box);
+  ID3D11Device* dev = nullptr;
+  c->GetDevice(&dev);
+  ok = ok && dev && EnsureCopy(dev, dst, td.Format, box.right - box.left, box.bottom - box.top);
+  if (dev) dev->Release();
+  if (ok) c->CopySubresourceRegion(*dst, 0, 0, 0, 0, tex, 0, &box);
+  tex->Release();
+  *viewFmt = rd.Format;
+  return ok;
+}
+}  // namespace tvexp
+
+// DCS's first render-target bind in a periphery view's TransparentCockpitPass (render thread, OM entry, after DCS's own
+// call): the left view's lit colour and motion are copied; in the right view the fill runs before DCS's first draw.
+void TvOnBind(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* r, ID3D11DepthStencilView*) {
+  using namespace tvexp;
+  g_tvArm = false;  // once per pass
+  State& s = g_s;
+  const int v = g_tvView;
+  if ((v != 0 && v != 1) || !g_hasDesc[v]) return;
+  D3D11_RENDER_TARGET_VIEW_DESC rd{};
+  r[0]->GetDesc(&rd);
+  if (!FloatColour(rd.Format)) {
+    g_badTarget++;
+    return;
+  }
+  const Run& run = g_postRun[v];
+  ID3D11RenderTargetView* mv = g_runMv;
+  if (v == 0) {
+    DXGI_FORMAT cf{}, mf{};
+    if (!CopyBox(c, r[0], run.vp, &g_lcol, &cf)) {
+      g_badTarget++;
+      return;
+    }
+    g_lcolFmt = cf;
+    g_lmvFmt = DXGI_FORMAT_UNKNOWN;
+    if (mv && CopyBox(c, mv, run.vp, &g_lmv, &mf)) g_lmvFmt = mf;
+    else g_noMv++;
+    g_leftDesc = g_desc[0];
+    g_leftDepth = g_tex[0][static_cast<int>(s.frame % kTvSlots)].t;
+    g_leftVp = run.vp;
+    g_leftFrame = s.frame;
+    g_leftCopies++;
+    return;
+  }
+  if (g_leftFrame != s.frame || !g_leftDepth || !g_lcol) {
+    g_noLeft++;
+    return;
+  }
+  const DcsVrDepthView& R = g_desc[1];
+  tvfill::Inputs in;
+  if (!tvfill::Transform(g_leftDesc.proj, g_leftDesc.viewInv, R.proj, R.viewInv, in.M01) ||
+      !tvfill::Transform(R.proj, R.viewInv, g_leftDesc.proj, g_leftDesc.viewInv, in.M10)) {
+    g_fillSkips++;
+    return;
+  }
+  in.leftCol = g_lcol;
+  in.leftColFmt = g_lcolFmt;
+  in.leftMv = g_lmvFmt != DXGI_FORMAT_UNKNOWN ? g_lmv : nullptr;
+  in.leftMvFmt = g_lmvFmt;
+  in.leftDepth = g_leftDepth;
+  in.depthFmt = static_cast<DXGI_FORMAT>(g_leftDesc.format);
+  in.vpL = D3D11_VIEWPORT{g_leftDesc.viewport[0], g_leftDesc.viewport[1], g_leftDesc.viewport[2], g_leftDesc.viewport[3], 0, 1};
+  in.vpR = run.vp;
+  in.rCol = r[0];
+  in.rMv = n > 1 || mv ? mv : nullptr;
+  ID3D11Texture2D* rd2 = nullptr;
+  if (run.tex) run.tex->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&rd2));
+  in.rDepth = rd2;
+  in.rSlice = run.slice;
+  in.strip = R.stripNdcX;
+  const bool ok = rd2 && g_fill.Run(c, in);
+  if (rd2) rd2->Release();
+  if (!ok) {
+    g_fillSkips++;
+    if (g_fillLog.load() > 0 && g_fillLog.fetch_sub(1) > 0)
+      Log("three views: engine fill not run (%s; left colour %u, motion %u, right %u, viewport %.0fx%.0f)",
+          g_fill.lastError.empty() ? "inputs" : g_fill.lastError.c_str(), (unsigned)g_lcolFmt, (unsigned)g_lmvFmt,
+          (unsigned)rd.Format, run.vp.Width, run.vp.Height);
+    return;
+  }
+  g_desc[1].flags |= DCSVR_DEPTH_FILLED_IN_ENGINE;
+  if (g_fills++ == 0)
+    Log("three views: first engine fill: colour format %u (left %u), motion %s (left %u), viewport %.0f,%.0f %.0fx%.0f, depth "
+        "format %u, strip from NDC x %.3f",
+        (unsigned)rd.Format, (unsigned)g_lcolFmt, in.rMv ? "filled" : "NOT filled", (unsigned)g_lmvFmt, run.vp.TopLeftX,
+        run.vp.TopLeftY, run.vp.Width, run.vp.Height, g_leftDesc.format, in.strip);
+}
+void TvReleaseFill() {
+  tvexp::g_fill.Release();
+  for (ID3D11Texture2D** t : {&tvexp::g_lcol, &tvexp::g_lmv})
+    if (*t) (*t)->Release(), *t = nullptr;
+  tvexp::g_leftFrame = ~0ull;
+  tvexp::g_leftDepth = nullptr;
+}
 
 void CloseRun() {
   State& s = g_s;
@@ -5844,6 +5990,20 @@ void OnBoundaryInner(void* pass, bool begin) {
       tvexp::Post(s.hmdOrd, true);
     else if (begin && (k == plod::kGBuffer || k == plod::kLights || k == plod::kHmd) && (tvexp::g_hasDesc[0] || tvexp::g_hasDesc[1]))
       tvexp::PostAll();
+    // The fill inside the engine: the OM entries armed for the periphery views' TransparentCockpitPass (TvOnBind).
+    if (k == plod::kOther && (g_tvArm || g_tvOwnArm || (begin && tvc::g_engaged.load(std::memory_order_relaxed))) &&
+        PassIs(pass, "TransparentCockpitPass")) {
+      if (begin && (s.hmdOrd == 0 || s.hmdOrd == 1) && s.lastHmdCount == 4 && tvexp::g_hasDesc[s.hmdOrd]) {
+        if (!g_armTable) g_tvOwnArm = ArmOm(true);
+        if (g_armTable && !g_usOnlyArm) g_tvArm = true, g_tvView = s.hmdOrd;
+      } else if (!begin) {
+        g_tvArm = false;
+        if (g_tvOwnArm) {
+          g_tvOwnArm = false;
+          if (!g_overlayArm && !g_trOpen && !g_cmOvlArm) DisarmOm();
+        }
+      }
+    }
   }
   // R74b: mask v1.1 overlay symbology, an HMD view's OverlayHDRPass begin: its pre signature and its arm, before any
   // other work of this boundary (no arm held yet; far depth's and cockpit ipd's overlay arms nest in ours).

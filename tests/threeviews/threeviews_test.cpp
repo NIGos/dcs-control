@@ -241,6 +241,14 @@ int main() {
     snprintf(b, sizeof(b), "the cockpit panel does not leak into the right view's world away from its edge: %d px (%d near it)", panelLeak, edgeN);
     Check(panelLeak == 0, b);
     Check(run(false) == nullptr, "without the THREE_VIEWS flag the right periphery stays DCS's own");
+    {  // the engine filled the right periphery itself (before its glass): the layer leaves it as it is
+        DcsVrDepthView a = desc(0, camL, dL.Get(), false), b = desc(1, camR, dR.Get(), true);
+        b.flags |= DCSVR_DEPTH_FILLED_IN_ENGINE;
+        imp.Push(&a), imp.Push(&b);
+        pass.BeginFrame(imp);
+        Check(pass.Active() && pass.Fill(dev.Get(), ctx.Get(), sL.Get(), sR.Get(), W, H, samp.Get()) == nullptr,
+              "a frame the engine filled is taken but not filled again (the layer fill is the fallback)");
+    }
     printf("%d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;
 }

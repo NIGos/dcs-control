@@ -32,9 +32,12 @@ enum : uint32_t {
     DCSVR_DEPTH_THREE_VIEWS = 2048,           // v1.2, periphery views (hmdView 0 / 1) only: DCS rendered the right
                                               // periphery of this engine frame as a strip (NDC x >= stripNdcX) plus the
                                               // cockpit; Quad Views fills the rest of it from the left periphery
-    DCSVR_DEPTH_HAS_POST_TRANSPARENT = 4096   // v1.2, with THREE_VIEWS: postTransparent holds the same depth-stencil
+    DCSVR_DEPTH_HAS_POST_TRANSPARENT = 4096,  // v1.2, with THREE_VIEWS: postTransparent holds the same depth-stencil
                                               // copied again after the view's TransparentCockpitPass (the cockpit glass
                                               // writes the COCKPIT composition into the stencil there)
+    DCSVR_DEPTH_FILLED_IN_ENGINE = 8192       // v1.2, with THREE_VIEWS: the engine filled the right periphery itself
+                                              // (colour, depth, motion) before its glass was drawn: DCS's image is
+                                              // complete, Quad Views leaves it as it is
 };
 
 struct DcsVrDepthView {

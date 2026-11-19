@@ -238,6 +238,9 @@ class ThreeViews {
     void BeginFrame(DepthImport& import) {
         m_ok = import.TakeThreeViews(m_latch);
         m_ownRight = nullptr;
+        // The engine filled the right periphery itself (before its glass): DCS's image is complete, nothing to do here.
+        m_engineFilled = m_ok && (m_latch[1].desc.flags & DCSVR_DEPTH_FILLED_IN_ENGINE) != 0;
+        if (m_engineFilled) ++m_engineFrames;
         if (m_ok) ++m_framesTaken;
         if (!m_dir.empty() && (++m_flagPoll % 45) == 0 && !m_dumpPending) {
             const std::string flag = m_dir + "\\dump.flag";
@@ -255,6 +258,8 @@ class ThreeViews {
     ID3D11ShaderResourceView* Fill(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* left,
                                    ID3D11ShaderResourceView* right, UINT w, UINT h, ID3D11SamplerState* sampler) {
         if (!m_ok || !left || !right || !dev || !ctx) return nullptr;
+        m_ownRight = right;
+        if (m_engineFilled) return nullptr;  // the layer fill is the fallback for frames the engine could not fill
         if (!Ensure(dev)) return nullptr;
         const DcsVrDepthView& L = m_latch[0].desc;
         const DcsVrDepthView& R = m_latch[1].desc;
@@ -334,7 +339,9 @@ class ThreeViews {
                    ID3D11ShaderResourceView* rightUsed, bool filled, const float periphTan[4], const float focusTan[4]) {
         if (!m_dumpPending) return;
         m_dumpPending = false;
-        const std::string base = m_dir + "\\tv_" + std::to_string(++m_dumpN) + "_" + (filled ? "on" : "off");
+        const bool engaged = filled || m_engineFilled;  // "on": three views rendered this frame, in the engine or here
+        const std::string base = m_dir + "\\tv_" + std::to_string(++m_dumpN) + "_" + (engaged ? "on" : "off") +
+                                 (m_engineFilled ? "e" : "");
         {
             FILE* f = nullptr;
             if (fopen_s(&f, (base + "_fov.json").c_str(), "wb") == 0 && f) {
@@ -349,7 +356,7 @@ class ThreeViews {
         ok += DumpSrv(dev, ctx, rightUsed, base + "_right") ? 1 : 0;
         ok += DumpSrv(dev, ctx, left, base + "_left") ? 1 : 0;
         if (filled && m_clsSrv) ok += DumpSrv(dev, ctx, m_clsSrv.Get(), base + "_class") ? 1 : 0;
-        if (filled) {  // the inputs, for an offline replay of the pass: DCS's own right image, both depth-stencils
+        if (engaged) {  // the inputs, for an offline replay of the pass: DCS's own right image, both depth-stencils
             ok += DumpSrv(dev, ctx, m_ownRight, base + "_own") ? 1 : 0;
             const char* names[2][2] = {{"_depthL", "_depthLpost"}, {"_depthR", "_depthRpost"}};
             for (int v = 0; v < 2; ++v)
@@ -386,13 +393,14 @@ class ThreeViews {
 
     // Statistics, every few hundred filled frames.
     void Report() {
-        if (m_filled == 0 || m_filled == m_reported || (m_filled - m_reported) < 900) return;
-        m_reported = m_filled;
+        const uint64_t total = m_filled + m_engineFrames;
+        if (total == 0 || total == m_reported || (total - m_reported) < 900) return;
+        m_reported = total;
         char b[512];
         snprintf(b, sizeof(b),
-                 "DCSVR three views: %llu frames filled (%llu taken), GPU mean %.3f ms max %.3f ms over %llu timed; "
+                 "DCSVR three views: %llu frames filled here (%llu taken, %llu filled by the engine), GPU mean %.3f ms max %.3f ms over %llu timed; "
                  "matrix failures %llu, depth view failures %llu",
-                 (unsigned long long)m_filled, (unsigned long long)m_framesTaken, m_gpuN ? m_gpuSum / m_gpuN : -1.0,
+                 (unsigned long long)m_filled, (unsigned long long)m_framesTaken, (unsigned long long)m_engineFrames, m_gpuN ? m_gpuSum / m_gpuN : -1.0,
                  m_gpuMax, (unsigned long long)m_gpuN, (unsigned long long)m_badMatrix, (unsigned long long)m_badDepth);
         Say(b);
         m_gpuSum = 0, m_gpuMax = 0, m_gpuN = 0;
@@ -619,6 +627,8 @@ class ThreeViews {
     bool m_ok = false, m_failed = false, m_dumpPending = false;
     DepthViewLatch m_latch[2];
     ID3D11ShaderResourceView* m_ownRight = nullptr;  // this frame's right source (Fill), for the dump
+    bool m_engineFilled = false;                       // this frame's right periphery was filled by the engine
+    uint64_t m_engineFrames = 0;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> m_splatCs, m_fillCs;
     Microsoft::WRL::ComPtr<ID3D11Buffer> m_cb;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> m_splat, m_out, m_cls;
