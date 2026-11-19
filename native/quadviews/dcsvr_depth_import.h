@@ -94,7 +94,7 @@ inline void DepthSrvFormats(uint32_t f, DXGI_FORMAT& depth, DXGI_FORMAT& stencil
 // One latched view: the descriptor (pointer fields aside) and Quad Views' own references to the textures.
 struct DepthViewLatch {
     DcsVrDepthView desc{};
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture, preOverlay;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture, preOverlay, postTransparent;  // postTransparent: v1.2 three views
     bool fresh{false};  // pushed since the last frame consumed it
 };
 
@@ -166,12 +166,26 @@ class DepthImport {
         } else if (d->flags & DCSVR_DEPTH_PRE_POST_OVERLAY) {
             return DCSVR_DEPTH_PUSH_LAYOUT;  // the pair needs the copy it is part of
         }
+        // v1.2 three views: the same depth-stencil after the cockpit transparents (same format and size).
+        ID3D11Texture2D* postTransparent = nullptr;
+        if ((d->flags & DCSVR_DEPTH_HAS_POST_TRANSPARENT) && d->structSize >= sizeof(DcsVrDepthView)) {
+            postTransparent = d->postTransparent;
+            if (!postTransparent) return DCSVR_DEPTH_PUSH_NULL_OR_SIZE;
+            D3D11_TEXTURE2D_DESC pd{};
+            postTransparent->GetDesc(&pd);
+            if (pd.Format != td.Format || pd.Width != td.Width || pd.Height != td.Height || pd.SampleDesc.Count != 1 ||
+                !(pd.BindFlags & D3D11_BIND_SHADER_RESOURCE))
+                return DCSVR_DEPTH_PUSH_LAYOUT;
+        }
         std::lock_guard lock(m_mutex);
-        if (!OnDevice(d->texture) || (preOverlay && !OnDevice(preOverlay))) return DCSVR_DEPTH_PUSH_FOREIGN_DEVICE;
+        if (!OnDevice(d->texture) || (preOverlay && !OnDevice(preOverlay)) || (postTransparent && !OnDevice(postTransparent)))
+            return DCSVR_DEPTH_PUSH_FOREIGN_DEVICE;
         DepthViewLatch& latch = m_views[d->hmdView];
         latch.desc = DcsVrDepthView{};
         std::memcpy(&latch.desc, d, (std::min)((size_t)d->structSize, sizeof(DcsVrDepthView)));
-        latch.desc.texture = latch.desc.preOverlay = nullptr;  // only the ComPtrs own them
+        latch.desc.texture = latch.desc.preOverlay = latch.desc.postTransparent = nullptr;  // only the ComPtrs own them
+        if (!postTransparent) latch.desc.flags &= ~(uint32_t)DCSVR_DEPTH_HAS_POST_TRANSPARENT;
+        latch.postTransparent = postTransparent;
         if (!preOverlay) latch.desc.flags &= ~(uint32_t)(DCSVR_DEPTH_HAS_PRE_OVERLAY | DCSVR_DEPTH_PRE_POST_OVERLAY);
         latch.texture = d->texture;                            // AddRef; the previous texture is released
         latch.preOverlay = preOverlay;
@@ -245,6 +259,7 @@ class DepthImport {
     static void Drop(DepthViewLatch& v) {
         v.texture.Reset();
         v.preOverlay.Reset();
+        v.postTransparent.Reset();
         v.fresh = false;
     }
 

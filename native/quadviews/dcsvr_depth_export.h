@@ -29,9 +29,12 @@ enum : uint32_t {
     DCSVR_DEPTH_IDENTITY_BY_COPYTOHMD = 256,  // ordinal from the CopyToHMDPass order + MatchFov
     DCSVR_DEPTH_HAS_PRE_OVERLAY = 512,        // v1.1: preOverlay, preOverlayFormat and preOverlaySize are set
     DCSVR_DEPTH_PRE_POST_OVERLAY = 1024,      // v1.1, with HAS_PRE_OVERLAY: preOverlay also holds the colour after them
-    DCSVR_DEPTH_THREE_VIEWS = 2048            // v1.2, periphery views (hmdView 0 / 1) only: DCS rendered the right
+    DCSVR_DEPTH_THREE_VIEWS = 2048,           // v1.2, periphery views (hmdView 0 / 1) only: DCS rendered the right
                                               // periphery of this engine frame as a strip (NDC x >= stripNdcX) plus the
                                               // cockpit; Quad Views fills the rest of it from the left periphery
+    DCSVR_DEPTH_HAS_POST_TRANSPARENT = 4096   // v1.2, with THREE_VIEWS: postTransparent holds the same depth-stencil
+                                              // copied again after the view's TransparentCockpitPass (the cockpit glass
+                                              // writes the COCKPIT composition into the stencil there)
 };
 
 struct DcsVrDepthView {
@@ -68,8 +71,9 @@ struct DcsVrDepthView {
     // v1.2 (three views). An engine of v1.1 pushes 264 bytes: Quad Views reads these fields only from a larger push.
     float stripNdcX;            // with THREE_VIEWS: the right periphery's world is complete for NDC x >= this value
     uint32_t reserved;
+    ID3D11Texture2D* postTransparent;  // with HAS_POST_TRANSPARENT: same format and size as texture; Quad Views AddRefs it
 };
-static_assert(sizeof(DcsVrDepthView) == 272, "DcsVrDepthView layout (v1.2)");
+static_assert(sizeof(DcsVrDepthView) == 280, "DcsVrDepthView layout (v1.2)");
 constexpr uint32_t kDcsVrDepthViewSizeV11 = 264;  // the smallest push Quad Views accepts
 
 #pragma pack(pop)

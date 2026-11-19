@@ -113,6 +113,8 @@ Texture2D<float> depL : register(t2);
 Texture2D<uint2> stL : register(t3);
 Texture2D<float> depR : register(t4);
 Texture2D<uint2> stR : register(t5);
+Texture2D<uint2> stLp : register(t6);  // after the cockpit transparents
+Texture2D<uint2> stRp : register(t7);
 RWTexture2D<uint> splat : register(u0);
 RWTexture2D<float4> outC : register(u1);
 RWTexture2D<uint> cls : register(u2);
@@ -215,7 +217,8 @@ bool LeftOccluded(float3 l) {
   float4 rep = colL.SampleLevel(lin, saturate(uvL), 0);
   rep.a = 1;
   outC[id.xy] = lerp(rep, own, w);
-  cls[id.xy] = k;
+  // 6 = the right eye's cockpit glass (COCKPIT in the stencil only after the transparents), filled like the world
+  cls[id.xy] = Cockpit(stRp.Load(int3(int2(vpR.xy) + rt, 0)).g) ? 6 : k;
 }
 )";
 
@@ -234,6 +237,7 @@ class ThreeViews {
     // Once per xrEndFrame (before the eyes): this frame's pushes, or none.
     void BeginFrame(DepthImport& import) {
         m_ok = import.TakeThreeViews(m_latch);
+        m_ownRight = nullptr;
         if (m_ok) ++m_framesTaken;
         if (!m_dir.empty() && (++m_flagPoll % 45) == 0 && !m_dumpPending) {
             const std::string flag = m_dir + "\\dump.flag";
@@ -268,11 +272,16 @@ class ThreeViews {
         k.strip[1] = R.stripNdcX + 0.01f;
         k.strip[2] = R.stripNdcX + 0.06f;
         k.strip[3] = 24.f;
-        ID3D11ShaderResourceView *dL = nullptr, *sL = nullptr, *dR = nullptr, *sR = nullptr;
+        ID3D11ShaderResourceView *dL = nullptr, *sL = nullptr, *dR = nullptr, *sR = nullptr, *pdL = nullptr, *psL = nullptr,
+                                 *pdR = nullptr, *psR = nullptr;
         if (!DepthViews(dev, m_latch[0], dL, sL) || !DepthViews(dev, m_latch[1], dR, sR)) {
             ++m_badDepth;
             return nullptr;
         }
+        // After the cockpit transparents (glass in the stencil); without them the pre copies stand in (no glass).
+        if (!DepthViews(dev, m_latch[0], pdL, psL, true)) psL = sL;
+        if (!DepthViews(dev, m_latch[1], pdR, psR, true)) psR = sR;
+        m_ownRight = right;
         if (!EnsureTargets(dev, dw, dh, w, h)) return nullptr;
         {
             D3D11_MAPPED_SUBRESOURCE m{};
@@ -288,12 +297,12 @@ class ThreeViews {
         }
         const UINT zero[4] = {};
         ctx->ClearUnorderedAccessViewUint(m_splatUav.Get(), zero);
-        ID3D11ShaderResourceView* nullSrv[6] = {};
+        ID3D11ShaderResourceView* nullSrv[8] = {};
         ctx->PSSetShaderResources(0, 3, nullSrv);
-        ID3D11ShaderResourceView* srvs[6] = {left, right, dL, sL, dR, sR};
+        ID3D11ShaderResourceView* srvs[8] = {left, right, dL, sL, dR, sR, psL, psR};
         ID3D11UnorderedAccessView* uavs[3] = {m_splatUav.Get(), m_outUav.Get(), m_clsUav.Get()};
         ctx->CSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
-        ctx->CSSetShaderResources(0, 6, srvs);
+        ctx->CSSetShaderResources(0, 8, srvs);
         ctx->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
         ctx->CSSetSamplers(0, 1, &sampler);
         ctx->CSSetShader(m_splatCs.Get(), nullptr, 0);
@@ -302,7 +311,7 @@ class ThreeViews {
         ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
         ID3D11UnorderedAccessView* nullUav[3] = {};
         ctx->CSSetUnorderedAccessViews(0, 3, nullUav, nullptr);
-        ctx->CSSetShaderResources(0, 6, nullSrv);
+        ctx->CSSetShaderResources(0, 8, nullSrv);
         if (timed) {
             ctx->End(t.t1.Get());
             ctx->End(t.dj.Get());
@@ -340,8 +349,39 @@ class ThreeViews {
         ok += DumpSrv(dev, ctx, rightUsed, base + "_right") ? 1 : 0;
         ok += DumpSrv(dev, ctx, left, base + "_left") ? 1 : 0;
         if (filled && m_clsSrv) ok += DumpSrv(dev, ctx, m_clsSrv.Get(), base + "_class") ? 1 : 0;
+        if (filled) {  // the inputs, for an offline replay of the pass: DCS's own right image, both depth-stencils
+            ok += DumpSrv(dev, ctx, m_ownRight, base + "_own") ? 1 : 0;
+            const char* names[2][2] = {{"_depthL", "_depthLpost"}, {"_depthR", "_depthRpost"}};
+            for (int v = 0; v < 2; ++v)
+                for (int q = 0; q < 2; ++q) {
+                    ID3D11Texture2D* t = q ? m_latch[v].postTransparent.Get() : m_latch[v].texture.Get();
+                    ok += t && DumpTex(dev, ctx, t, base + names[v][q]) ? 1 : 0;
+                }
+            FILE* f = nullptr;
+            if (fopen_s(&f, (base + "_desc.json").c_str(), "wb") == 0 && f) {
+                fprintf(f, "{");
+                for (int v = 0; v < 2; ++v) {
+                    const DcsVrDepthView& d = m_latch[v].desc;
+                    fprintf(f, "%s\"%s\": {\"flags\": %u, \"format\": %u, \"viewport\": [%.3f, %.3f, %.3f, %.3f], \"proj\": [",
+                            v ? ", " : "", v ? "right" : "left", d.flags, d.format, d.viewport[0], d.viewport[1], d.viewport[2],
+                            d.viewport[3]);
+                    for (int i = 0; i < 16; ++i) fprintf(f, "%s%.9g", i ? ", " : "", d.proj[i]);
+                    fprintf(f, "], \"viewInv\": [");
+                    for (int i = 0; i < 16; ++i) fprintf(f, "%s%.9g", i ? ", " : "", d.viewInv[i]);
+                    fprintf(f, "], \"stripNdcX\": %.4f}", d.stripNdcX);
+                }
+                fprintf(f, "}\n");
+                fclose(f);
+            }
+        }
         Say("DCSVR three views: dump " + base + " (" + std::to_string(ok) + " files, " + (filled ? "filled" : "DCS's own") +
             ")");
+    }
+
+    // The last fill's output and pixel classes to <base>_right / <base>_class (offline replay of a dump).
+    void DumpTo(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* outSrv, const std::string& base) {
+        DumpSrv(dev, ctx, outSrv, base + "_right");
+        if (m_clsSrv) DumpSrv(dev, ctx, m_clsSrv.Get(), base + "_class");
     }
 
     // Statistics, every few hundred filled frames.
@@ -461,8 +501,9 @@ class ThreeViews {
 
     // Depth and stencil SRVs of a latched texture (cached by texture; the latches hold the textures).
     bool DepthViews(ID3D11Device* dev, const DepthViewLatch& l, ID3D11ShaderResourceView*& depth,
-                    ID3D11ShaderResourceView*& stencil) {
-        ID3D11Texture2D* t = l.texture.Get();
+                    ID3D11ShaderResourceView*& stencil, bool post = false) {
+        ID3D11Texture2D* t = post ? l.postTransparent.Get() : l.texture.Get();
+        if (!t) return false;
         auto it = m_views.find(t);
         if (it == m_views.end()) {
             if (m_views.size() > 16) m_views.clear();
@@ -477,7 +518,7 @@ class ThreeViews {
             if (FAILED(dev->CreateShaderResourceView(t, &sd, &v.depth))) return false;
             sd.Format = sf;
             if (FAILED(dev->CreateShaderResourceView(t, &sd, &v.stencil))) return false;
-            v.tex = l.texture;
+            v.tex = t;
             it = m_views.emplace(t, v).first;
         }
         depth = it->second.depth.Get();
@@ -499,6 +540,34 @@ class ThreeViews {
             const double ms = (double)(b - a) * 1000.0 / (double)dj.Frequency;
             m_gpuSum += ms, m_gpuMax = (std::max)(m_gpuMax, ms), ++m_gpuN;
         }
+    }
+
+    bool DumpTex(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, const std::string& base) {
+        D3D11_TEXTURE2D_DESC d{};
+        tex->GetDesc(&d);
+        D3D11_TEXTURE2D_DESC s = d;
+        s.Usage = D3D11_USAGE_STAGING;
+        s.BindFlags = 0;
+        s.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        s.MiscFlags = 0;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> st;
+        if (FAILED(dev->CreateTexture2D(&s, nullptr, &st))) return false;
+        ctx->CopyResource(st.Get(), tex);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(ctx->Map(st.Get(), 0, D3D11_MAP_READ, 0, &m))) return false;
+        FILE* f = nullptr;
+        bool ok = fopen_s(&f, (base + ".bin").c_str(), "wb") == 0 && f;
+        if (ok) {
+            fwrite(m.pData, 1, (size_t)m.RowPitch * d.Height, f);
+            fclose(f);
+        }
+        ctx->Unmap(st.Get(), 0);
+        if (ok && fopen_s(&f, (base + ".json").c_str(), "wb") == 0 && f) {
+            fprintf(f, "{\"width\": %u, \"height\": %u, \"rowPitch\": %u, \"format\": %u, \"viewFormat\": %u}\n", d.Width,
+                    d.Height, m.RowPitch, (unsigned)d.Format, (unsigned)d.Format);
+            fclose(f);
+        }
+        return ok;
     }
 
     bool DumpSrv(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* srv, const std::string& base) {
@@ -549,6 +618,7 @@ class ThreeViews {
     std::string m_dir;
     bool m_ok = false, m_failed = false, m_dumpPending = false;
     DepthViewLatch m_latch[2];
+    ID3D11ShaderResourceView* m_ownRight = nullptr;  // this frame's right source (Fill), for the dump
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> m_splatCs, m_fillCs;
     Microsoft::WRL::ComPtr<ID3D11Buffer> m_cb;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> m_splat, m_out, m_cls;
