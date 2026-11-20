@@ -204,6 +204,109 @@ void Run() {
   Check(depthBad == 0 && mvBad == 0, b);
   snprintf(b, sizeof(b), "three views fill: the cockpit panel does not leak into the world away from its edge (%d px)", leak);
   Check(leak == 0, b);
+
+  // Stress, as the live ON / OFF blocks and the hotkey drive it: 600 fills with DCS's state varied every time (an SRV
+  // of its own depth on several stages beside the read-only DSV, a geometry shader, a CS UAV, predication, several
+  // viewports), every 7th frame no fill (switched off), the fill's objects released every 50 (ReleaseD3D) and the right
+  // viewport changing size (the splat target remade). After each fill DCS's state must be exactly as it was and no
+  // reference of DCS's objects may be gained or lost.
+  {
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.Format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    sd.Texture2D.MipLevels = 1;
+    ID3D11ShaderResourceView* depSrv = nullptr;
+    dev->CreateShaderResourceView(tDepR, &sd, &depSrv);
+    D3D11_BUFFER_DESC ub{};
+    ub.ByteWidth = 256;
+    ub.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    ub.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+    ID3D11Buffer* ubuf = nullptr;
+    dev->CreateBuffer(&ub, nullptr, &ubuf);
+    D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+    ud.Format = DXGI_FORMAT_R32_TYPELESS;
+    ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+    ud.Buffer.NumElements = 64;
+    ud.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+    ID3D11UnorderedAccessView* uav = nullptr;
+    if (ubuf) dev->CreateUnorderedAccessView(ubuf, &ud, &uav);
+    D3D11_QUERY_DESC qd{D3D11_QUERY_OCCLUSION_PREDICATE, 0};
+    ID3D11Predicate* pred = nullptr;
+    dev->CreatePredicate(&qd, &pred);
+    auto refs = [](IUnknown* p) {
+      p->AddRef();
+      return p->Release();
+    };
+    const ULONG r0[6] = {refs(rCol), refs(rMv), refs(roDsv), refs(depSrv), refs(tDepR), uav ? refs(uav) : 0};
+    int bad = 0, fills = 0, notRun = 0;
+    std::string firstBad;
+    for (int i = 0; i < 600; ++i) {
+      ctx->OMSetRenderTargets(2, bound, roDsv);
+      D3D11_VIEWPORT vps[3] = {dcsVp, {1, 2, 30, 40, 0, 1}, {5, 6, 70, 80, 0, 1}};
+      const UINT nvps = 1 + (i % 3);
+      ctx->RSSetViewports(nvps, vps);
+      ctx->IASetPrimitiveTopology((i & 1) ? D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+      ctx->PSSetShaderResources(7, 1, &depSrv);
+      ctx->VSSetShaderResources(2, 1, &depSrv);
+      ctx->CSSetShaderResources(0, 1, &depSrv);
+      if (uav) ctx->CSSetUnorderedAccessViews(3, 1, &uav, nullptr);
+      ctx->SetPredication((i % 5 == 0) ? pred : nullptr, FALSE);
+      if (i % 50 == 49) fill.Release();
+      fixdepth::tvfill::Inputs in2 = in;
+      in2.nearLimit = float(kNear / 1.5);
+      if (i % 4 == 3) in2.vpR.Width = float(W - 8 * (i % 3)), in2.vpR.Height = float(H - 4 * (i % 2));
+      if (i % 7 != 6) {  // switched off every 7th frame: nothing at all runs
+        if (fill.Run(ctx, in2))
+          ++fills;
+        else
+          ++notRun;
+      }
+      ID3D11RenderTargetView* r2[2] = {};
+      ID3D11DepthStencilView* d2 = nullptr;
+      ctx->OMGetRenderTargets(2, r2, &d2);
+      D3D11_VIEWPORT v2[4] = {};
+      UINT n2 = 4;
+      ctx->RSGetViewports(&n2, v2);
+      ID3D11ShaderResourceView *ps7 = nullptr, *vs2 = nullptr, *cs0 = nullptr, *ps0 = nullptr;
+      ctx->PSGetShaderResources(7, 1, &ps7);
+      ctx->VSGetShaderResources(2, 1, &vs2);
+      ctx->CSGetShaderResources(0, 1, &cs0);
+      ctx->PSGetShaderResources(0, 1, &ps0);
+      ID3D11UnorderedAccessView* u3 = nullptr;
+      ctx->CSGetUnorderedAccessViews(3, 1, &u3);
+      ID3D11Predicate* p2 = nullptr;
+      BOOL pv = TRUE;
+      ctx->GetPredication(&p2, &pv);
+      D3D11_PRIMITIVE_TOPOLOGY tp{};
+      ctx->IAGetPrimitiveTopology(&tp);
+      std::string why;
+      if (r2[0] != rCol || r2[1] != rMv || d2 != roDsv) why = "targets";
+      else if (n2 != nvps || memcmp(v2, vps, nvps * sizeof(D3D11_VIEWPORT))) why = "viewports";
+      else if (ps7 != depSrv || vs2 != depSrv || cs0 != depSrv) why = "DCS's depth SRVs";
+      else if (ps0) why = "a fill SRV left bound";
+      else if (u3 != uav) why = "CS UAV";
+      else if (p2 != ((i % 5 == 0) ? pred : nullptr)) why = "predication";
+      else if (tp != ((i & 1) ? D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP)) why = "topology";
+      for (IUnknown* p : {static_cast<IUnknown*>(r2[0]), static_cast<IUnknown*>(r2[1]), static_cast<IUnknown*>(d2), static_cast<IUnknown*>(ps7),
+                          static_cast<IUnknown*>(vs2), static_cast<IUnknown*>(cs0), static_cast<IUnknown*>(ps0), static_cast<IUnknown*>(u3),
+                          static_cast<IUnknown*>(p2)})
+        if (p) p->Release();
+      if (!why.empty()) {
+        if (bad++ == 0) firstBad = "frame " + std::to_string(i) + ": " + why;
+      }
+      ctx->ClearState();
+    }
+    const ULONG r1[6] = {refs(rCol), refs(rMv), refs(roDsv), refs(depSrv), refs(tDepR), uav ? refs(uav) : 0};
+    // The fill's view caches may hold one reference on each source texture: none on DCS's views.
+    const bool refsOk = r1[0] == r0[0] && r1[1] == r0[1] && r1[2] == r0[2] && r1[3] == r0[3] && r1[5] == r0[5];
+    snprintf(b, sizeof(b),
+             "three views fill: 600-frame toggle stress: %d fills, %d not run, DCS's state exact after each (%d differ%s%s), "
+             "references of DCS's views unchanged (%s)",
+             fills, notRun, bad, bad ? ", first " : "", firstBad.c_str(), refsOk ? "yes" : "NO");
+    Check(fills > 450 && notRun == 0 && bad == 0 && refsOk, b);
+    for (IUnknown* p : {static_cast<IUnknown*>(depSrv), static_cast<IUnknown*>(uav), static_cast<IUnknown*>(ubuf), static_cast<IUnknown*>(pred)})
+      if (p) p->Release();
+  }
   fill.Release();
   for (IUnknown* p : {static_cast<IUnknown*>(rCol), static_cast<IUnknown*>(rMv), static_cast<IUnknown*>(roDsv), static_cast<IUnknown*>(tColL),
                       static_cast<IUnknown*>(tMvL), static_cast<IUnknown*>(tDepL), static_cast<IUnknown*>(tColR), static_cast<IUnknown*>(tMvR),

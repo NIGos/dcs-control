@@ -406,10 +406,11 @@ void LogStatus() {
       (unsigned long long)fixdepth::tvexp::g_skipProj.load(), tvc::g_layerMask.load());
   // The fill inside the engine (option C): per periphery TransparentCockpitPass, left copies and right fills.
   Log("three views: engine fill: left copies %llu, right fills %llu, not run %llu, no left copy %llu, target not float %llu, "
-      "left without motion %llu",
+      "left without motion %llu; right view not culled (DCS's own, not flagged) %llu",
       (unsigned long long)fixdepth::tvexp::g_leftCopies.load(), (unsigned long long)fixdepth::tvexp::g_fills.load(),
       (unsigned long long)fixdepth::tvexp::g_fillSkips.load(), (unsigned long long)fixdepth::tvexp::g_noLeft.load(),
-      (unsigned long long)fixdepth::tvexp::g_badTarget.load(), (unsigned long long)fixdepth::tvexp::g_noMv.load());
+      (unsigned long long)fixdepth::tvexp::g_badTarget.load(), (unsigned long long)fixdepth::tvexp::g_noMv.load(),
+      (unsigned long long)fixdepth::tvexp::g_notCulled.load());
 }
 
 // ---------------------------------------------------------------------------

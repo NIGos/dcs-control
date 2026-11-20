@@ -3331,6 +3331,11 @@ std::atomic<uint64_t> g_copies{0}, g_pushes{0}, g_accepted{0}, g_rejected{0}, g_
     g_skipFormat{0}, g_skipProj{0}, g_skipArm{0}, g_afterWater{0}, g_texCreates{0}, g_releases{0};
 std::atomic<uint32_t> g_lastResult{0};
 std::atomic<bool> g_loggedFirst{false};
+// The right view's own frame was collected with the strip volume (tvc::g_patched moved since the last right capture):
+// only then is it flagged for Quad Views and filled in the engine; a frame collected before an engage or after a
+// disengage is DCS's complete view and stays as it is.
+uint64_t g_patchedSeen = 0, g_culledFrame = ~0ull;
+std::atomic<uint64_t> g_notCulled{0};
 
 bool Flag() { return tvc::g_engaged.load(std::memory_order_relaxed) || g_tail > 0; }
 
@@ -3444,7 +3449,16 @@ void Capture(const Run& r, int idx, bool afterWater) {
     return;
   }
   d.stripNdcX = static_cast<float>(tvc::g_stripNdc.load(std::memory_order_relaxed));
-  if (idx == 1) d.flags |= DCSVR_DEPTH_THREE_VIEWS;
+  if (idx == 1) {
+    const uint64_t pc = tvc::g_patched.load(std::memory_order_relaxed);
+    if (pc != g_patchedSeen) {
+      d.flags |= DCSVR_DEPTH_THREE_VIEWS;
+      g_culledFrame = s.frame;
+    } else {
+      g_notCulled++;
+    }
+    g_patchedSeen = pc;
+  }
   if (g_hasDesc[idx]) ReleaseRun(g_postRun[idx]);
   g_desc[idx] = d;
   g_postRun[idx] = r;
@@ -3598,6 +3612,7 @@ void TvOnBind(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* r, 
     g_leftCopies++;
     return;
   }
+  if (g_culledFrame != s.frame) return;  // DCS's complete right view (counted at the capture)
   if (g_leftFrame != s.frame || !g_leftDepth || !g_lcol) {
     g_noLeft++;
     return;
@@ -3624,6 +3639,9 @@ void TvOnBind(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* r, 
   in.rDepth = rd2;
   in.rSlice = run.slice;
   in.strip = R.stripNdcX;
+  in.nearLimit = g_leftDesc.proj[14] > 0 ? g_leftDesc.proj[14] / 1.5f : 0.f;  // samples nearer than 1.5 m: cockpit
+  in.omSet = g_omOrig;  // DCS's own entries: our binds are not recorded as DCS's
+  in.vpSet = g_vpOrig;
   const bool ok = rd2 && g_fill.Run(c, in);
   if (rd2) rd2->Release();
   if (!ok) {
@@ -5991,7 +6009,7 @@ void OnBoundaryInner(void* pass, bool begin) {
     else if (begin && (k == plod::kGBuffer || k == plod::kLights || k == plod::kHmd) && (tvexp::g_hasDesc[0] || tvexp::g_hasDesc[1]))
       tvexp::PostAll();
     // The fill inside the engine: the OM entries armed for the periphery views' TransparentCockpitPass (TvOnBind).
-    if (k == plod::kOther && (g_tvArm || g_tvOwnArm || (begin && tvc::g_engaged.load(std::memory_order_relaxed))) &&
+    if (k == plod::kOther && (g_tvArm || g_tvOwnArm || (begin && tvexp::Flag())) &&
         PassIs(pass, "TransparentCockpitPass")) {
       if (begin && (s.hmdOrd == 0 || s.hmdOrd == 1) && s.lastHmdCount == 4 && tvexp::g_hasDesc[s.hmdOrd]) {
         if (!g_armTable) g_tvOwnArm = ArmOm(true);

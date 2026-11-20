@@ -7,11 +7,12 @@
 // the right eye's own glass, HUD, DLSS, tone mapping and overlays over a coherent view: the glass and the symbology are
 // DCS's own, at the right disparity, by construction.
 // The fill: a compute splat of the left depth into the right view (nearest wins), then one full-screen draw at the
-// view's render resolution with our own pipeline state (ID3DDeviceContextState swapped in and out: DCS's complete state
-// is back after it), stencil test NOT_EQUAL COCKPIT, depth test ALWAYS with writes, colour blended over DCS's only in a
+// view's render resolution; the state it touches is saved and put back exactly (SavedState; no device context state
+// swap), OM and viewport binds through DCS's own entries (our hooks do not see them as DCS's), stencil test NOT_EQUAL COCKPIT, depth test ALWAYS with writes, colour blended over DCS's only in a
 // short cross-fade at the strip's inner edge. A sample the left eye sees covered (its depth, bilinear footprint) is
 // refused; a pixel without a usable sample takes the farther of its nearest usable neighbours on the row (background
-// stretch), none within 24 texels: the direction at infinity.
+// stretch, softened across three rows), none within 24 texels: the direction at infinity. Samples nearer than 1.5 m
+// (cockpit structure only the left eye sees) are used only when nothing farther is found within 48 texels.
 #pragma once
 
 namespace tvfill {
@@ -32,6 +33,136 @@ struct Inputs {
   UINT rSlice = 0;
   float M01[16] = {}, M10[16] = {};  // left NDC -> right homogeneous NDC and back (row vectors)
   float strip = 0.55f;
+  // Reverse-Z depth of the nearest world point a fill sample may come from (d = near / distance): left samples nearer
+  // than that are cockpit structure seen only by the left eye (the right eye's own cockpit is DCS's), never stretched
+  // or reprojected into the right eye's world pixels. 0 = no limit.
+  float nearLimit = 0.f;
+  // DCS's own OM / viewport entries (our hooks bypassed: our binds are not DCS's); null = the context's.
+  void(STDMETHODCALLTYPE* omSet)(ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*) = nullptr;
+  void(STDMETHODCALLTYPE* vpSet)(ID3D11DeviceContext*, UINT, const D3D11_VIEWPORT*) = nullptr;
+};
+
+// The pipeline state the fill touches, saved before and put back exactly after (no ID3DDeviceContextState swap):
+// output merger, rasterizer, input assembler, every shader stage's shader, the shader resource views of all stages (a
+// writable depth-stencil view of DCS's depth makes the runtime unbind any SRV of it), PS/CS slot 0 constants, PS
+// sampler 0, CS UAVs 0-7 (counters kept), predication.
+struct SavedState {
+  static constexpr UINT kSrv = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
+  ID3D11RenderTargetView* rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+  ID3D11DepthStencilView* dsv = nullptr;
+  ID3D11DepthStencilState* ds = nullptr;
+  UINT sref = 0;
+  ID3D11BlendState* bs = nullptr;
+  float bf[4] = {};
+  UINT mask = 0;
+  ID3D11RasterizerState* rs = nullptr;
+  D3D11_VIEWPORT vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+  UINT nvp = 0;
+  D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+  ID3D11InputLayout* il = nullptr;
+  ID3D11VertexShader* vs = nullptr;
+  ID3D11PixelShader* ps = nullptr;
+  ID3D11GeometryShader* gs = nullptr;
+  ID3D11HullShader* hs = nullptr;
+  ID3D11DomainShader* dsh = nullptr;
+  ID3D11ComputeShader* cs = nullptr;
+  ID3D11ShaderResourceView* srv[6][kSrv] = {};  // VS PS GS HS DS CS
+  ID3D11Buffer *psCb = nullptr, *csCb = nullptr;
+  ID3D11SamplerState* psSamp = nullptr;
+  ID3D11UnorderedAccessView* csUav[8] = {};
+  ID3D11Predicate* pred = nullptr;
+  BOOL predValue = FALSE;
+
+  // False: an OM UAV is bound (not a state the fill expects there): nothing saved, nothing to put back.
+  bool Save(ID3D11DeviceContext* c) {
+    ID3D11UnorderedAccessView* omu[D3D11_PS_CS_UAV_REGISTER_COUNT] = {};
+    c->OMGetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, D3D11_PS_CS_UAV_REGISTER_COUNT, omu);
+    bool any = false;
+    for (auto* u : omu)
+      if (u) any = true, u->Release();
+    if (any) return false;
+    c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, &dsv);
+    c->OMGetDepthStencilState(&ds, &sref);
+    c->OMGetBlendState(&bs, bf, &mask);
+    c->RSGetState(&rs);
+    nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    c->RSGetViewports(&nvp, vp);
+    c->IAGetPrimitiveTopology(&topo);
+    c->IAGetInputLayout(&il);
+    c->VSGetShader(&vs, nullptr, nullptr);
+    c->PSGetShader(&ps, nullptr, nullptr);
+    c->GSGetShader(&gs, nullptr, nullptr);
+    c->HSGetShader(&hs, nullptr, nullptr);
+    c->DSGetShader(&dsh, nullptr, nullptr);
+    c->CSGetShader(&cs, nullptr, nullptr);
+    c->VSGetShaderResources(0, kSrv, srv[0]);
+    c->PSGetShaderResources(0, kSrv, srv[1]);
+    c->GSGetShaderResources(0, kSrv, srv[2]);
+    c->HSGetShaderResources(0, kSrv, srv[3]);
+    c->DSGetShaderResources(0, kSrv, srv[4]);
+    c->CSGetShaderResources(0, kSrv, srv[5]);
+    c->PSGetConstantBuffers(0, 1, &psCb);
+    c->CSGetConstantBuffers(0, 1, &csCb);
+    c->PSGetSamplers(0, 1, &psSamp);
+    c->CSGetUnorderedAccessViews(0, 8, csUav);
+    c->GetPredication(&pred, &predValue);
+    return true;
+  }
+  // The highest bound slot + 1 of an SRV array (so the restore sets no more than DCS had).
+  static UINT Span(ID3D11ShaderResourceView* const* a) {
+    UINT n = kSrv;
+    while (n && !a[n - 1]) --n;
+    return n;
+  }
+  void Restore(ID3D11DeviceContext* c, const Inputs& in) {
+    if (in.omSet)
+      in.omSet(c, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, dsv);
+    else
+      c->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, dsv);
+    c->OMSetDepthStencilState(ds, sref);
+    c->OMSetBlendState(bs, bf, mask);
+    c->RSSetState(rs);
+    if (in.vpSet)
+      in.vpSet(c, nvp, vp);
+    else
+      c->RSSetViewports(nvp, vp);
+    c->IASetPrimitiveTopology(topo);
+    c->IASetInputLayout(il);
+    c->VSSetShader(vs, nullptr, 0);
+    c->PSSetShader(ps, nullptr, 0);
+    c->GSSetShader(gs, nullptr, 0);
+    c->HSSetShader(hs, nullptr, 0);
+    c->DSSetShader(dsh, nullptr, 0);
+    c->CSSetShader(cs, nullptr, 0);
+    // Our slots first (always), then whatever DCS had beyond them.
+    ID3D11ShaderResourceView* const* s = srv[1];
+    c->PSSetShaderResources(0, std::max<UINT>(4u, Span(s)), s);
+    c->CSSetShaderResources(0, std::max<UINT>(1u, Span(srv[5])), srv[5]);
+    if (UINT n = Span(srv[0])) c->VSSetShaderResources(0, n, srv[0]);
+    if (UINT n = Span(srv[2])) c->GSSetShaderResources(0, n, srv[2]);
+    if (UINT n = Span(srv[3])) c->HSSetShaderResources(0, n, srv[3]);
+    if (UINT n = Span(srv[4])) c->DSSetShaderResources(0, n, srv[4]);
+    c->PSSetConstantBuffers(0, 1, &psCb);
+    c->CSSetConstantBuffers(0, 1, &csCb);
+    c->PSSetSamplers(0, 1, &psSamp);
+    const UINT keep[8] = {~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u};
+    c->CSSetUnorderedAccessViews(0, 8, csUav, keep);
+    c->SetPredication(pred, predValue);
+  }
+  void Drop() {
+    auto rel = [](IUnknown* p) {
+      if (p) p->Release();
+    };
+    for (auto* p : rtv) rel(p);
+    for (IUnknown* p : {static_cast<IUnknown*>(dsv), static_cast<IUnknown*>(ds), static_cast<IUnknown*>(bs), static_cast<IUnknown*>(rs),
+                        static_cast<IUnknown*>(il), static_cast<IUnknown*>(vs), static_cast<IUnknown*>(ps), static_cast<IUnknown*>(gs),
+                        static_cast<IUnknown*>(hs), static_cast<IUnknown*>(dsh), static_cast<IUnknown*>(cs), static_cast<IUnknown*>(psCb),
+                        static_cast<IUnknown*>(csCb), static_cast<IUnknown*>(psSamp), static_cast<IUnknown*>(pred)})
+      rel(p);
+    for (auto& st : srv)
+      for (auto* p : st) rel(p);
+    for (auto* p : csUav) rel(p);
+  }
 };
 
 const char kSrc[] = R"(
@@ -41,6 +172,7 @@ cbuffer C : register(b0) {
   float4 vpL;    // left depth viewport (x, y, w, h)
   float4 vpR;    // right viewport in its targets
   float4 strip;  // x strip NDC, y blend start, z blend end, w search texels
+  float4 misc;   // x: nearest usable sample depth (reverse Z; 0 = none)
 };
 Texture2D<float> depL : register(t0);
 Texture2D<float4> colL : register(t1);
@@ -71,6 +203,8 @@ float3 ToLeft(float2 ndc, float d) {
   float3 p = c.xyz / max(c.w, 1e-12);
   return float3(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5, p.z);
 }
+// A sample nearer than the limit: cockpit structure the left eye sees, never a right-eye world pixel.
+bool Near(float d) { return misc.x > 0 && d > misc.x; }
 bool LeftOccluded(float3 l) {
   float2 t = l.xy * vpL.zw;
   int2 a = int2(clamp(floor(t - 0.5), 0, vpL.zw - 1)) + int2(vpL.xy), b = int2(clamp(floor(t + 0.5), 0, vpL.zw - 1)) + int2(vpL.xy);
@@ -96,28 +230,36 @@ Out PS(float4 pos : SV_Position) {
   float3 l = 0;
   float d = 0;
   bool found = false;
+  // A sample nearer than misc.x (cockpit structure only the left eye sees) is used only when nothing farther is usable:
+  // the first search pass takes far samples only (twice the reach), the second is the plain search.
+  bool nearHere = false;
   if (s != 0) {
     d = asfloat(s);
     l = ToLeft(ndc, d);
     found = !LeftOccluded(l);
+    nearHere = found && Near(d);
+    if (nearHere) found = false;
   }
-  if (!found) {
-    int n = (int)strip.w;
-    bool fl = false, fr = false;
-    float dl = 0, dr = 0;
-    float3 ul = 0, ur = 0;
+  bool fl = false, fr = false;
+  float dl = 0, dr = 0;
+  float3 ul = 0, ur = 0;
+  [loop] for (int ph = (misc.x > 0 ? 0 : 1); ph < 2 && !found && !fl && !fr; ++ph) {
+    int n = ph == 0 ? 2 * (int)strip.w : (int)strip.w;
     for (int i = 1; i <= n && !(fl && fr); ++i) {
       [unroll] for (int side = 0; side < 2; ++side) {
         if (side == 0 ? fl : fr) continue;
         int x = side == 0 ? rt.x - i : rt.x + i;
         if (x < 0 || x >= (int)vpR.z) continue;
         uint a = splatR.Load(int3(x, rt.y, 0));
-        if (a == 0) continue;
+        if (a == 0 || (ph == 0 && Near(asfloat(a)))) continue;
         float3 lu = ToLeft(float2(((x + 0.5) / vpR.z) * 2 - 1, ndc.y), asfloat(a));
         if (LeftOccluded(lu)) continue;
         if (side == 0) { fl = true; dl = asfloat(a); ul = lu; } else { fr = true; dr = asfloat(a); ur = lu; }
       }
     }
+    if (ph == 0 && !fl && !fr && nearHere) found = true;  // nothing farther: the near sample here, as before
+  }
+  if (!found) {
     if (!fl && !fr) {
       d = 1e-7;
       l = ToLeft(ndc, d);
@@ -129,7 +271,12 @@ Out PS(float4 pos : SV_Position) {
   }
   float2 uvL = saturate(l.xy);
   Out o;
-  o.col = float4(colL.SampleLevel(lin, uvL, 0).rgb, 1 - w);
+  float3 c = colL.SampleLevel(lin, uvL, 0).rgb;
+  if (!found) {  // a stretched sample: softened across rows (one left column per row draws horizontal streaks)
+    float2 dy = float2(0, 1.5 / vpL.w);
+    c = (2 * c + colL.SampleLevel(lin, saturate(uvL - dy), 0).rgb + colL.SampleLevel(lin, saturate(uvL + dy), 0).rgb) * 0.25;
+  }
+  o.col = float4(c, 1 - w);
   o.mv = mvL.Load(int3(clamp(int2(uvL * vpL.zw), 0, int2(vpL.zw) - 1), 0));
   o.depth = d;
   return o;
@@ -138,7 +285,7 @@ Out PS(float4 pos : SV_Position) {
 
 struct Constants {
   float M01[16], M10[16];
-  float vpL[4], vpR[4], strip[4];
+  float vpL[4], vpR[4], strip[4], misc[4];
 };
 
 class Fill {
@@ -211,14 +358,6 @@ class Fill {
       rd.CullMode = D3D11_CULL_NONE;
       rd.DepthClipEnable = FALSE;
       ok = ok && SUCCEEDED(dev->CreateRasterizerState(&rd, &m_rs));
-      ID3D11Device1* d1 = nullptr;
-      if (ok && SUCCEEDED(dev->QueryInterface(__uuidof(ID3D11Device1), reinterpret_cast<void**>(&d1)))) {
-        const D3D_FEATURE_LEVEL fl = dev->GetFeatureLevel();
-        ok = SUCCEEDED(d1->CreateDeviceContextState(0, &fl, 1, D3D11_SDK_VERSION, __uuidof(ID3D11Device1), nullptr, &m_state));
-        d1->Release();
-      } else {
-        ok = false;
-      }
     }
     if (!ok) {
       m_failed = true;
@@ -245,19 +384,25 @@ class Fill {
       failures++;
       return false;
     }
-    ID3D11DeviceContext1* c1 = nullptr;
-    if (FAILED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&c1)))) {
-      failures++;
-      return false;
-    }
     Constants k{};
+
     memcpy(k.M01, in.M01, sizeof(k.M01));
     memcpy(k.M10, in.M10, sizeof(k.M10));
     k.vpL[0] = in.vpL.TopLeftX, k.vpL[1] = in.vpL.TopLeftY, k.vpL[2] = in.vpL.Width, k.vpL[3] = in.vpL.Height;
     k.vpR[0] = in.vpR.TopLeftX, k.vpR[1] = in.vpR.TopLeftY, k.vpR[2] = in.vpR.Width, k.vpR[3] = in.vpR.Height;
     k.strip[0] = in.strip, k.strip[1] = in.strip + 0.01f, k.strip[2] = in.strip + 0.06f, k.strip[3] = 24.f;
-    ID3DDeviceContextState* prev = nullptr;
-    c1->SwapDeviceContextState(m_state, &prev);  // our state from here on; DCS's is back after the second swap
+    k.misc[0] = in.nearLimit;
+    SavedState saved;
+    if (!saved.Save(ctx)) {
+      failures++;
+      lastError = "an OM UAV is bound";
+      return false;
+    }
+    ctx->SetPredication(nullptr, FALSE);
+    ctx->IASetInputLayout(nullptr);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
     D3D11_MAPPED_SUBRESOURCE m{};
     if (SUCCEEDED(ctx->Map(m_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
       memcpy(m.pData, &k, sizeof(k));
@@ -273,12 +418,18 @@ class Fill {
     ID3D11UnorderedAccessView* nu = nullptr;
     ctx->CSSetUnorderedAccessViews(0, 1, &nu, nullptr);
     ID3D11RenderTargetView* rtv[2] = {in.rCol, sMvL ? in.rMv : nullptr};
-    ctx->OMSetRenderTargets(2, rtv, dsv);
+    if (in.omSet)
+      in.omSet(ctx, 2, rtv, dsv);
+    else
+      ctx->OMSetRenderTargets(2, rtv, dsv);
     ctx->OMSetDepthStencilState(m_ds, 0x28);
     const float bf[4] = {};
     ctx->OMSetBlendState(m_blend, bf, 0xffffffff);
     ctx->RSSetState(m_rs);
-    ctx->RSSetViewports(1, &in.vpR);
+    if (in.vpSet)
+      in.vpSet(ctx, 1, &in.vpR);
+    else
+      ctx->RSSetViewports(1, &in.vpR);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx->VSSetShader(m_vs, nullptr, 0);
     ctx->PSSetShader(m_ps, nullptr, 0);
@@ -287,10 +438,10 @@ class Fill {
     ctx->PSSetShaderResources(0, 4, ps);
     ctx->PSSetSamplers(0, 1, &m_samp);
     ctx->Draw(3, 0);
-    ctx->ClearState();  // our state keeps no reference to DCS's targets
-    c1->SwapDeviceContextState(prev, nullptr);
-    if (prev) prev->Release();
-    c1->Release();
+    ID3D11ShaderResourceView* none[4] = {};
+    ctx->PSSetShaderResources(0, 4, none);  // our depth copy off the stage before DCS's DSV comes back
+    saved.Restore(ctx, in);
+    saved.Drop();
     runs++;
     return true;
   }
@@ -298,7 +449,7 @@ class Fill {
   void Release() {
     for (IUnknown** p : {reinterpret_cast<IUnknown**>(&m_cs), reinterpret_cast<IUnknown**>(&m_vs), reinterpret_cast<IUnknown**>(&m_ps),
                          reinterpret_cast<IUnknown**>(&m_cb), reinterpret_cast<IUnknown**>(&m_samp), reinterpret_cast<IUnknown**>(&m_ds),
-                         reinterpret_cast<IUnknown**>(&m_blend), reinterpret_cast<IUnknown**>(&m_rs), reinterpret_cast<IUnknown**>(&m_state),
+                         reinterpret_cast<IUnknown**>(&m_blend), reinterpret_cast<IUnknown**>(&m_rs),
                          reinterpret_cast<IUnknown**>(&m_splat), reinterpret_cast<IUnknown**>(&m_splatUav), reinterpret_cast<IUnknown**>(&m_splatSrv)})
       if (*p) (*p)->Release(), *p = nullptr;
     for (auto& e : m_srvs) e.v->Release();
@@ -397,7 +548,6 @@ class Fill {
   ID3D11DepthStencilState* m_ds = nullptr;
   ID3D11BlendState* m_blend = nullptr;
   ID3D11RasterizerState* m_rs = nullptr;
-  ID3DDeviceContextState* m_state = nullptr;
   ID3D11Texture2D* m_splat = nullptr;
   ID3D11UnorderedAccessView* m_splatUav = nullptr;
   ID3D11ShaderResourceView* m_splatSrv = nullptr;
