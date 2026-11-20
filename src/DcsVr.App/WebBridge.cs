@@ -578,6 +578,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         "gaze" => "https://github.com/mbucchia/Quad-Views-Foveated/wiki/Pimax-Crystal",
                         "pimax" => "https://pimax.com/pages/downloads",
                         "steamvr" => "https://store.steampowered.com/app/250820/SteamVR/",
+                        "virtualdesktop" => "https://www.vrdesktop.net/",
                         "vcredist" => "https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist",
                         "nvidia" => "https://www.nvidia.com/en-us/drivers/", _ => throw new InvalidDataException("Unknown setup guide.") };
                     using (var process = Process.Start(new ProcessStartInfo(url) { UseShellExecute = true })) { } break;
@@ -961,7 +962,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         // DCS running is read now: the scan's flag would keep "Close DCS" listed after DCS exits.
         var issues = ProfileValidation.Validate(service.ResolveNeuralRuntime(_profile), CurrentInventory with { DcsRunning = DcsRunning() }).ToList();
         if (!_profile.Desktop && activeRoute.Route is { } running && running != _profile.Runtime)
-            issues.Insert(0, new("route-mismatch", IssueSeverity.Warning, activeRoute.Summary + " This profile uses " + (_profile.Runtime == RuntimeKind.Pimax ? "the Pimax runtime" : "Sboys through SteamVR") + ". Switch the route or use Read settings from this PC before applying."));
+            issues.Insert(0, new("route-mismatch", IssueSeverity.Warning, activeRoute.Summary + " This profile uses " + HeadsetRoute.Describe(_profile.Runtime) + ". Switch the route or use Read settings from this PC before applying."));
         if (FoveaFact(_profile) is { } fact) issues.Add(fact);
         if (Leftovers() is { Count: > 0 } leftovers)
             issues.Insert(0, new("leftovers", IssueSeverity.Warning, $"DCS Control's files are in DCS without a record of what was there before ({string.Join(", ", leftovers.Take(3).Select(l => Path.GetFileName(l.Path)))}{(leftovers.Count > 3 ? $" and {leftovers.Count - 3} more" : "")}), for example after Windows was reinstalled. They stay active even when DCS starts from Steam. Back to stock DCS removes them."));

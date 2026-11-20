@@ -2,6 +2,8 @@ namespace DcsVr.Core;
 
 public static class ProfileValidation
 {
+    /// <summary>Refresh range of the Virtual Desktop route (Quest 3: 72, 80, 90 or 120 Hz); app.js uses the same.</summary>
+    public const int VdMinRefreshHz = 72, VdMaxRefreshHz = 120;
     /// <summary>Processes that start DCS (Steam, Explorer, Epic, the DCS launcher and updater, this app and its CPU Boost
     /// helper), DCS itself, and core Windows processes: CPU Boost never moves or closes them, whatever pattern matches.</summary>
     public static IReadOnlySet<string> BoostProtectedProcesses { get; } = new HashSet<string>(
@@ -21,8 +23,14 @@ public static class ProfileValidation
     {
         // Optimizations only keeps the VR settings for the next VR flight; VrProfile.ForLaunch is what runs.
         if (profile.FoveatedDlss && profile.QuadViews != QuadProvider.None) profile = profile with { FoveatedDlss = false };
-        if (profile.QuadViews == QuadProvider.PimaxNative && (profile.Runtime == RuntimeKind.SboysSteamVr || profile.UsesCheeky))
+        // Quest 3 VD: DLSS 5 stays off (no validly NVIDIA-signed nvngx_dlssnr.dll is available; see the Quest 3 plan, Phase 3).
+        if (profile.Runtime == RuntimeKind.VirtualDesktop && profile.NeuralRendering) profile = profile with { NeuralRendering = false };
+        if (profile.QuadViews == QuadProvider.PimaxNative && (profile.Runtime != RuntimeKind.Pimax || profile.UsesCheeky))
             profile = profile with { QuadViews = QuadProvider.QuadViewsFoveated };
+        // Quest 3 has no eye tracking and no Pimax Play: the Virtual Desktop route always uses a fixed focus and the
+        // profile's own focus values.
+        if (profile.Runtime == RuntimeKind.VirtualDesktop && profile.Gaze != GazeMode.Fixed) profile = profile with { Gaze = GazeMode.Fixed };
+        if (profile.Runtime == RuntimeKind.VirtualDesktop && profile.FoveaSource != FoveaSource.Profile) profile = profile with { FoveaSource = FoveaSource.Profile };
         return profile with { QuadFocusAdapter = profile.UsesCheeky && profile.QuadViews == QuadProvider.QuadViewsFoveated };
     }
 
@@ -86,8 +94,16 @@ public static class ProfileValidation
         if (!Enum.IsDefined(profile.FpsLimit)) Error("fps-mode", "Select a recognized DCS frame limit.");
         Range("refresh-rate", profile.HeadsetRefreshHz, 50, 240);
         Range("rendered-fps-cap", profile.RenderedFpsCap, 30, 300);
-        if (profile.Runtime == RuntimeKind.SboysSteamVr && profile.QuadViews == QuadProvider.PimaxNative)
+        if (profile.Runtime != RuntimeKind.Pimax && profile.QuadViews == QuadProvider.PimaxNative)
             Error("quad-runtime", "Pimax native Quad Views works only on the Pimax route. Select Bundled Quad Views as the Quad Views provider, or switch the route to Pimax.");
+        if (profile.Runtime == RuntimeKind.VirtualDesktop && profile.Gaze == GazeMode.EyeTracked)
+            Error("vd-gaze", "Quest 3 VD route: Quest 3 has no eye tracking. Select Fixed focus.");
+        // Quest 3 in Virtual Desktop runs at 72, 80, 90 or 120 Hz; a higher value (e.g. 144 from another headset) would
+        // set DCS's frame limit above what the headset can show.
+        if (profile.Runtime == RuntimeKind.VirtualDesktop && !profile.Desktop && profile.NeuralRendering)
+            Error("vd-dlss5", "Quest 3 VD route: DLSS 5 is turned off here (no NVIDIA-signed nvngx_dlssnr.dll is available). Turn off Use DLSS 5.");
+        if (profile.Runtime == RuntimeKind.VirtualDesktop && !profile.Desktop && profile.HeadsetRefreshHz is < VdMinRefreshHz or > VdMaxRefreshHz)
+            Error("vd-refresh", $"Quest 3 VD route: the headset refresh rate must be {VdMinRefreshHz} to {VdMaxRefreshHz} Hz (set 72, 80, 90 or 120 Hz, the same as in the VD app).");
         if (profile.UsesCheeky && profile.QuadViews != QuadProvider.None && !profile.UsesQuadFocus)
             Error("quad-cheeky", "DLSS 5 with Quad Views needs Bundled Quad Views as the Quad Views provider.");
         if (profile.UsesQuadFocus && !string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory))
@@ -355,6 +371,8 @@ public static class ProfileValidation
                 issues.Add(new("options-location", IssueSeverity.Warning, @"The selected options.lua is not in a DCS Saved Games folder (Saved Games\DCS\Config\options.lua). DCS reads only that one, and the engine optimizations and logs are found next to it: select the options.lua DCS uses."));
             if (profile.Runtime == RuntimeKind.SboysSteamVr && !profile.Desktop && inventory.SteamVrRuntime is null && profile.RuntimeManifestPath is null)
                 Error("steamvr-not-found", "SteamVR was not found on this PC, and the Sboys route needs it. Install SteamVR and start it once.");
+            if (profile.Runtime == RuntimeKind.VirtualDesktop && !profile.Desktop && inventory.VirtualDesktopRuntime is null && profile.RuntimeManifestPath is null)
+                Error("vd-not-found", "Virtual Desktop's OpenXR runtime (VDXR) was not found on this PC, and the Quest 3 VD route needs it. Install Virtual Desktop Streamer.");
             // The Periphery DLSS preset changes DCS's own DLSS: with another upscaler it does nothing (DCS Control does not
             // change DCS's Upscaling for it).
             var dlss = DcsUsesDlss(profile, inventory);

@@ -29,7 +29,7 @@
   function renderChoose() {
     const preview = plan(), notes = ui().featureNotes(preview), on = ui().featureState(preview);
     el('setupFeatures').innerHTML = ui().FEATURES.map(([key,title]) => `<label class="setup-feature ${on[key] ? 'on' : ''}"><input type="checkbox" id="setupFeature-${key}" data-feature="${key}" ${choices.features[key] ? 'checked' : ''}><span><b>${title}</b><small>${text(ui().featureSummary(key,preview))}</small>${notes[key].map(n => `<em class="${n[0]}">${text(n[1])}</em>`).join('')}</span></label>`).join('');
-    el('setupGazeRow').hidden = !choices.features.quad || choices.route === 'Desktop';
+    el('setupGazeRow').hidden = !choices.features.quad || choices.route === 'Desktop' || choices.route === 'VirtualDesktop';
     // Optimizations only: only Engine Optimizations and CPU Boost are offered.
     for (const [key] of ui().FEATURES) if (!['engine','boost'].includes(key)) el('setupFeature-'+key).closest('.setup-feature').hidden = choices.route === 'Desktop';
   }
@@ -46,7 +46,7 @@
     const body = el('setupBody');
     if (step === 0) {
       const live = ui().state?.activeRoute;
-      body.innerHTML = `<h3>What do you want to fly with?</h3><p>Your quality settings stay as they are. Only the route and the active features change.</p><div class="setup-grid"><label>How you fly<select id="setupRoute">${opts([['Pimax','Pimax (Pimax Play)'],['SboysSteamVr','Sboys (SteamVR)'],['Desktop','Optimizations only (monitor or any other headset)']],choices.route)}</select><small class="setup-hint">${text(live?.summary || '')}</small></label><label id="setupGazeRow">Focus movement<select id="setupGaze">${opts([['EyeTracked','Eye tracked'],['Fixed','Fixed (centered)']],choices.gaze)}</select></label></div><div class="setup-features" id="setupFeatures" role="group" aria-label="Features"></div>`;
+      body.innerHTML = `<h3>What do you want to fly with?</h3><p>Your quality settings stay as they are. Only the route and the active features change.</p><div class="setup-grid"><label>How you fly<select id="setupRoute">${opts([['Pimax','Pimax (Pimax Play)'],['SboysSteamVr','Sboys (SteamVR)'],['VirtualDesktop','Quest 3 VD (Virtual Desktop, VDXR)'],['Desktop','Optimizations only (monitor or any other headset)']],choices.route)}</select><small class="setup-hint">${text(live?.summary || '')}</small></label><label id="setupGazeRow">Focus movement<select id="setupGaze">${opts([['EyeTracked','Eye tracked'],['Fixed','Fixed (centered)']],choices.gaze)}</select></label></div><div class="setup-features" id="setupFeatures" role="group" aria-label="Features"></div>`;
       renderChoose();
       for (const [id,key] of [['setupRoute','route'],['setupGaze','gaze']]) el(id).addEventListener('change',e => { choices[key] = e.target.value; renderChoose(); });
       el('setupFeatures').addEventListener('change',e => { const key = e.target.dataset?.feature; if (!key) return; choices.features[key] = e.target.checked; renderChoose(); el('setupFeature-'+key).focus(); });
