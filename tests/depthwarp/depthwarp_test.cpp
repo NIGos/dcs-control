@@ -2769,8 +2769,13 @@ void ImportChecks(bool forceWarp) {
     }
     {
         auto v = view(2, engineL.Get(), 10);
-        v.structSize = sizeof(DcsVrDepthView) - 4;
+        v.structSize = kDcsVrDepthViewSizeV11 - 4;  // v1.2: a v1.1 engine's 264 bytes are still accepted, less is not
         const uint32_t size = imp.Push(&v);
+        v = view(2, engineL.Get(), 10);
+        v.structSize = kDcsVrDepthViewSizeV11;
+        v.stripNdcX = 0.5f;  // beyond the pushed size: not read
+        Check(imp.Push(&v) == DCSVR_DEPTH_PUSH_ACCEPTED && imp.View(2).desc.stripNdcX == 0.f,
+              "M8 a v1.1 push (264 bytes) is accepted, the v1.2 tail read as zero");
         v = view(2, engineL.Get(), 10);
         v.sampleCount = 4;
         const uint32_t msaa = imp.Push(&v);

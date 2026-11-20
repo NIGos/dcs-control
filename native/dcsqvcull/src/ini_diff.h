@@ -165,7 +165,7 @@ inline bool In(const std::wstring& low, std::initializer_list<const wchar_t*> na
 inline Class Classify(const std::wstring& sec, const std::wstring& key) {
   const std::wstring s = Lower(sec), k = Lower(key);
   if (In(s, {L"cull", L"scene", L"model", L"texture", L"effects", L"d3d", L"shadows", L"shadow", L"timing",
-             L"prefetch", L"threads", L"governor", L"suite", L"bench", L"water"}))
+             L"prefetch", L"threads", L"governor", L"suite", L"bench", L"water", L"views"}))
     return kEngine;
   if (s == L"general") return In(k, {L"lowpowerpacer", L"lowpowerpacertimeoutus"}) ? kEngine : kNotEngine;
   if (In(s, {L"color", L"colorfix", L"colorenhanced", L"night", L"vrfx", L"dlss", L"perception", L"depthboost",

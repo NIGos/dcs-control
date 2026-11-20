@@ -231,6 +231,16 @@ void LoadConfig(bool initial) {
   }
   c.earlyShaders = qvini::Mask(L"D3D", L"EarlyShaders", 0, 0x1F, ini.c_str());  // 0.7 early_shaders.h, decimal or 0x hex
   c.suiteEarlyShaderCensus = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"EarlyShaderCensus", 0, ini.c_str()));
+  c.threeViews = GetPrivateProfileIntW(L"Views", L"ThreeViews", 0, ini.c_str()) != 0;  // 0.7 three_views.h
+  c.threeViewsStripNdc = std::clamp(ReadDouble(L"Views", L"ThreeViewsStripNdc", 0.55, ini), 0.2, 0.9);
+  c.threeViewsIsolate = static_cast<int>(GetPrivateProfileIntW(L"Views", L"ThreeViewsIsolate", 0, ini.c_str())) & 15;
+  {
+    wchar_t hk[64];
+    GetPrivateProfileStringW(L"Views", L"ThreeViewsKey", L"0:0", hk, 64, ini.c_str());
+    if (!ParseHotkey(hk, c.threeViewsKeyVk, c.threeViewsKeyMods) && wcscmp(hk, L"0:0") != 0)
+      Log("config: [Views] ThreeViewsKey=%ls is invalid; key disabled", hk);
+  }
+  c.suiteThreeViewsTiming = (std::max)(0, (std::min)(60, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"ThreeViewsTiming", 0, ini.c_str()))));
   {  // periph_census.h (audit B6): seconds per census line, 0 = off (values 1..4 are taken as 5)
     const int s = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"PeriphCensus", 0, ini.c_str()));
     c.suitePeriphCensus = s <= 0 ? 0 : (std::max)(5, (std::min)(3600, s));

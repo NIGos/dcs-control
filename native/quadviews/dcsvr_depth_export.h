@@ -28,7 +28,16 @@ enum : uint32_t {
     DCSVR_DEPTH_JITTER_KNOWN = 128,
     DCSVR_DEPTH_IDENTITY_BY_COPYTOHMD = 256,  // ordinal from the CopyToHMDPass order + MatchFov
     DCSVR_DEPTH_HAS_PRE_OVERLAY = 512,        // v1.1: preOverlay, preOverlayFormat and preOverlaySize are set
-    DCSVR_DEPTH_PRE_POST_OVERLAY = 1024       // v1.1, with HAS_PRE_OVERLAY: preOverlay also holds the colour after them
+    DCSVR_DEPTH_PRE_POST_OVERLAY = 1024,      // v1.1, with HAS_PRE_OVERLAY: preOverlay also holds the colour after them
+    DCSVR_DEPTH_THREE_VIEWS = 2048,           // v1.2, periphery views (hmdView 0 / 1) only: DCS rendered the right
+                                              // periphery of this engine frame as a strip (NDC x >= stripNdcX) plus the
+                                              // cockpit; Quad Views fills the rest of it from the left periphery
+    DCSVR_DEPTH_HAS_POST_TRANSPARENT = 4096,  // v1.2, with THREE_VIEWS: postTransparent holds the same depth-stencil
+                                              // copied again after the view's TransparentCockpitPass (the cockpit glass
+                                              // writes the COCKPIT composition into the stencil there)
+    DCSVR_DEPTH_FILLED_IN_ENGINE = 8192       // v1.2, with THREE_VIEWS: the engine filled the right periphery itself
+                                              // (colour, depth, motion) before its glass was drawn: DCS's image is
+                                              // complete, Quad Views leaves it as it is
 };
 
 struct DcsVrDepthView {
@@ -62,15 +71,23 @@ struct DcsVrDepthView {
     ID3D11Texture2D* preOverlay;
     uint32_t preOverlayFormat;  // DXGI_FORMAT of the render target view the overlays draw with (e.g. R8G8B8A8_UNORM_SRGB)
     uint32_t preOverlaySize;    // w | (h << 16): the copied box, in output pixels
+    // v1.2 (three views). An engine of v1.1 pushes 264 bytes: Quad Views reads these fields only from a larger push.
+    float stripNdcX;            // with THREE_VIEWS: the right periphery's world is complete for NDC x >= this value
+    uint32_t reserved;
+    ID3D11Texture2D* postTransparent;  // with HAS_POST_TRANSPARENT: same format and size as texture; Quad Views AddRefs it
 };
-static_assert(sizeof(DcsVrDepthView) == 264, "DcsVrDepthView layout (v1.1)");
+static_assert(sizeof(DcsVrDepthView) == 280, "DcsVrDepthView layout (v1.2)");
+constexpr uint32_t kDcsVrDepthViewSizeV11 = 264;  // the smallest push Quad Views accepts
 
 #pragma pack(pop)
 
 // Quad Views' exports (XR_APILAYER_MBUCCHIA_quad_views_foveated.dll), resolved with GetModuleHandle + GetProcAddress,
 // noexcept, extern "C", render thread only:
 //   uint32_t DcsVr_QuadViewsDepthApi();                         1, the interface version
-//   uint32_t DcsVr_QuadViewsDepthWanted();                      bit mask of wanted hmdViews (0b1100 or 0), one atomic load
+//   uint32_t DcsVr_QuadViewsDepthWanted();                      bit mask of wanted hmdViews, one atomic load: 0b1100
+//                                                               for Far depth; v1.2: 0b0011 when Quad Views can fill the
+//                                                               right periphery (three views), pushed only by an engine
+//                                                               that renders three views
 //   uint32_t DcsVr_QuadViewsDepth(const DcsVrDepthView* d);     1 accepted, else a DcsVrDepthPushResult code
 //   void     DcsVr_QuadViewsDepthRelease(uint32_t generation);  drop every held texture of that generation
 typedef uint32_t (*PFN_DcsVr_QuadViewsDepthApi)();

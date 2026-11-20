@@ -284,6 +284,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "r94_test.h"  // R94: [Perception] SymbologyTrace, the dev live HUD trace (its helpers are used by far_depth_test / ovl_cpu_test)
 #include "scene_cut_test.h"
 #include "far_depth_test.h"  // Far depth engine export to Quad Views (layout, fake layer, WARP copy and push)
+#include "three_views_test.h"  // 0.7 three views: the fill inside the engine on WARP (colour, depth, motion, state restore)
 #include "r84_test.h"  // R84 (R1b): live-object / handle / VRAM probe of the depth-export reinstall (used by the next)
 #include "cockpit_mask_test.h"  // R65: cockpit mask export (contract, layout, WARP max filter, xrEndFrame commit, reader fence)
 #include "cockpit_ipd_test.h"  // R31 option 3: cockpit at the true eye distance (patch, matcher, WARP pipeline, split)
@@ -2008,6 +2009,8 @@ int main() {
   sctest::Run();
   // Far depth engine export (contract layout, CPU gProj capture, WARP copy/push, gating, ring, release, hot reload).
   fartest::Run();
+  // 0.7 three views: the fill inside the engine (WARP).
+  tvtest::Run();
   // R65 cockpit mask export (contract, layout, WARP max filter vs CPU, sample points, xrEndFrame commit, reader fence).
   mask65test::Run();
   // Cockpit at the true eye distance (R31 option 3: patch math, matcher, upload filter, WARP pipeline, stencil split, off path).

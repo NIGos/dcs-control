@@ -521,6 +521,14 @@ DWORD WINAPI SuiteThread(void*) {
                     g_devDir.empty() ? g_dir : g_devDir);
     Chime(1000, 60);
   }
+  if (ok && g_cfg.suiteThreeViewsTiming > 0 && !g_benchAbort) {  // 0.7 three views
+    Log("-- three views: OFF / ON blocks (ON = right periphery strip + cockpit, Quad Views' fill included), %d pairs, %d "
+        "frames per block --",
+        g_cfg.suiteThreeViewsTiming, g_cfg.suiteWaterSkipTimingFrames);
+    tviews::TimingPhase(g_cfg.suiteThreeViewsTiming, g_cfg.suiteWaterSkipTimingFrames, g_quadFrame, g_tscHz,
+                        g_devDir.empty() ? g_dir : g_devDir);
+    Chime(1000, 60);
+  }
   if (ok && g_cfg.suiteShaderFastVerify > 0 && !g_benchAbort) {
     Log("-- PROTOTYPE: wider grids for single-SM kernels, same-frame check against the stock kernels (shader_fast.h, "
         "mask 0x%x, %d s) --",

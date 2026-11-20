@@ -1,0 +1,95 @@
+Three views (0.7, native/quadviews/dcsvr_threeviews.h explains the pass): the periphery views' depth is always wanted
+from the engine (DcsVr_QuadViewsDepthWanted bits 0 and 1, besides Far depth's 2 and 3); only an engine that renders
+the right periphery as its outer strip plus the cockpit (DcsQvCull [Views] ThreeViews) pushes them, the right one
+flagged DCSVR_DEPTH_THREE_VIEWS (dcsvr_depth_export.h v1.2). In such a frame the right eye's periphery source is
+replaced, before periphery stability, contrast and the composition, by a layer-owned image: DCS's own pixels in the
+strip and on the cockpit, the left periphery reprojected with its depth everywhere else. Without those pushes nothing
+changes. The depth import's device is now set whether Far depth is on or not.
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -39,6 +39,7 @@
+ #include "dcsvr_depthwarp.h"
+ #include "dcsvr_depth_import.h"
+ #include "dcsvr_live.h"
++#include "dcsvr_threeviews.h"
+ 
+ #include <ProjectionVS.h>
+ #include <ProjectionPS.h>
+@@ -699,9 +700,14 @@
+                             // DCSVR Far depth: pushes must come from this device (or from the one its textures report
+                             // behind a proxy such as ReShade's), and only with Far depth enabled is the engine asked to
+                             // copy any depth. Off: the engine's DcsVr_QuadViewsDepthWanted() stays 0 and it copies nothing.
++                            // DCSVR three views (0.7): the periphery views are always wanted; only an engine that renders
++                            // three views pushes them (DcsQvCull [Views] ThreeViews), and then this layer fills the right one.
++                            dcsvr::SharedDepthImport().SetDevice(d3dBindings->device);
++                            dcsvr::SharedDepthImport().SetWanted(
++                                (m_dcsvrFarDepth.enabled ? dcsvr::DepthImport::WantedFocus : 0u) | dcsvr::DepthImport::WantedThreeViews);
++                            m_dcsvrThreeViews.Reset();
++                            m_dcsvrThreeViews.SetLog([](const std::string& s) { Log(s); });
+                             if (m_dcsvrFarDepth.enabled) {
+-                                dcsvr::SharedDepthImport().SetDevice(d3dBindings->device);
+-                                dcsvr::SharedDepthImport().SetWanted(dcsvr::DepthImport::WantedFocus);
+                                 Log("DCSVR Far depth: asking the engine for the depth of both focus views\n");
+                             }
+                             m_isSupportedGraphicsApi = true;
+@@ -784,6 +790,8 @@
+                     // session starts over at gain 0.
+                     dcsvr::SharedDepthImport().SetWanted(0u);
+                     dcsvr::SharedDepthImport().ReleaseAll();
++                    m_dcsvrThreeViews.Reset();  // DCSVR three views
++                    m_dcsvrThreeViewsLeft.Reset();
+                     dcsvr::SharedDepthImport().SetDevice(nullptr);
+                     dcsvr::SharedDepthImport().SetRenderThread(0);
+                     m_dcsvrDepthViews.clear();
+@@ -1703,6 +1711,9 @@
+ 
+                             // DCSVR Far depth: the engine's depth for both eyes or neither, the gain, both eyes' fields.
+                             dcsvrFarDepthFrame(proj, frameEndInfo->displayTime);
++                            // DCSVR three views: this frame's periphery depth pushes, or DCS's own right periphery.
++                            m_dcsvrThreeViews.BeginFrame(dcsvr::SharedDepthImport());
++                            m_dcsvrThreeViewsLeft.Reset();
+ 
+                             // DCSVR two layers: both eyes' output swapchains before either eye is drawn, so a runtime
+                             // that refuses one leaves the whole frame on the composed path.
+@@ -3398,6 +3409,29 @@
+                 focusSourceSrv =
+                     flattenSourceImage(sourceFocusImage, focusView, swapchainForFocusView, xr::StereoView::Count);
+ 
++                // DCSVR three views (dcsvr_threeviews.h): the right periphery from the left one where DCS drew neither
++                // its strip nor the cockpit. The left eye comes first: its source is kept for the right one.
++                if (viewIndex == 0) {
++                    m_dcsvrThreeViewsLeft = stereoSourceSrv;
++                } else {
++                    ID3D11ShaderResourceView* filled = nullptr;
++                    if (m_dcsvrThreeViews.Active() && m_dcsvrThreeViewsLeft) {
++                        filled = m_dcsvrThreeViews.Fill(m_applicationDevice.Get(), m_renderContext.Get(), m_dcsvrThreeViewsLeft.Get(),
++                                                        stereoSourceSrv.Get(), (UINT)stereoView.subImage.imageRect.extent.width,
++                                                        (UINT)stereoView.subImage.imageRect.extent.height, m_linearClampSampler.Get());
++                    }
++                    if (filled) {
++                        stereoSourceSrv = filled;
++                    }
++                    const float dcsvrPeriphTan[4] = {std::tan(stereoView.fov.angleLeft), std::tan(stereoView.fov.angleRight),
++                                                     std::tan(stereoView.fov.angleUp), std::tan(stereoView.fov.angleDown)};
++                    const float dcsvrFocusTan[4] = {std::tan(focusView.fov.angleLeft), std::tan(focusView.fov.angleRight),
++                                                    std::tan(focusView.fov.angleUp), std::tan(focusView.fov.angleDown)};
++                    m_dcsvrThreeViews.MaybeDump(m_applicationDevice.Get(), m_renderContext.Get(), m_dcsvrThreeViewsLeft.Get(),
++                                                stereoSourceSrv.Get(), filled != nullptr, dcsvrPeriphTan, dcsvrFocusTan);
++                    m_dcsvrThreeViews.Report();
++                }
++
+                 TraceLoggingWriteStop(local, "xrEndFrame_Flatten");
+             }
+ 
+@@ -4919,6 +4953,9 @@
+         // DCSVR gaze export: the process's one gaze history, also read by DcsVr_QuadViewsGaze.
+         dcsvr::GazeHistory& m_dcsvrGazeHistory{dcsvr::SharedGazeHistory()};
+         dcsvr::TemporalController m_dcsvrTemporalControl;
++        // DCSVR three views (dcsvr_threeviews.h): the fill pass and the left eye's source of this frame.
++        dcsvr::ThreeViews m_dcsvrThreeViews;
++        ComPtr<ID3D11ShaderResourceView> m_dcsvrThreeViewsLeft;
+         bool m_dcsvrTemporalActive{false};
+         bool m_dcsvrTemporalLogged{false};
+         bool m_dcsvrTemporalNoMemoryLogged{false};

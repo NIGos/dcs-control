@@ -184,6 +184,7 @@ extern "C" __declspec(dllexport) void DcsQvPayload_Stop() {
   fxskip::Shutdown();   // A3: SPassBlock Apply slot back to stock (no-op unless [D3D] FxApplySkip was on)
   plod::Shutdown();     // stock LOD tables back, view callback and vt[24] hook out (no-op unless used)
   cascache::Shutdown(); // R33 cascade cache: SceneRender slot and the innermost execute out, textures released (no-op unless used)
+  tviews::Shutdown();   // 0.7 three views: disengaged, CSSetConstantBuffers entry and CS bind callback out (no-op unless used)
   fixdepth::Shutdown(); // depth callback out and drained, worker joined, D3D objects and file mappings released
   cpass::Shutdown();    // R42: our shaders and buffers (the draw hooks are out with fixation depth)
   w1::Shutdown();       // W1: held-back water passes flushed by the render thread, the pass intercept out

@@ -134,6 +134,23 @@ DWORD WINAPI WorkerThread(void*) {
       }
       fK = kK;
     }
+    {  // 0.7 three views ([Views] ThreeViews, default 0): engage / disengage, its toggle key, a status line every 10 s
+      if (static_cast<uint32_t>(g_cfg.threeViewsIsolate) != tvc::g_isolate.load()) {
+        tvc::g_isolate = static_cast<uint32_t>(g_cfg.threeViewsIsolate);
+        Log("three views: isolate 0x%x (1 no post-transparent depth, 2 no engine fill, 4 no terrain chain narrowing, 8 no "
+            "motion target record)", tvc::g_isolate.load());
+      }
+      const bool tvKey = g_cfg.threeViewsKeyVk > 0 && KeyDown(g_cfg.threeViewsKeyVk) && ModifiersMatch(g_cfg.threeViewsKeyMods);
+      if (g_cfg.threeViews || tvc::g_cfgOn.load())
+        tviews::Tick(g_cfg.threeViews && !g_perceptionOnly.load(), g_cfg.threeViewsStripNdc, g_cfg.threeViewsKeyVk,
+                     g_cfg.threeViewsKeyMods, g_engineOff.load() || g_faulted.load(),
+                     g_cfg.cockpitMaskExport || g_cfg.cockpitMotionExport, fixdepth::g_installed.load(), tvKey);
+      static ULONGLONG lastTv = 0;
+      if (tvc::g_cfgOn.load() && GetTickCount64() - lastTv >= 10000) {
+        lastTv = GetTickCount64();
+        tviews::LogStatus();
+      }
+    }
     static bool f8 = false;
     if (k8 && !f8) {
       bool on = !g_shadowDebugInvert.load();

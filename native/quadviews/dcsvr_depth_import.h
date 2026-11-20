@@ -11,6 +11,7 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -93,7 +94,7 @@ inline void DepthSrvFormats(uint32_t f, DXGI_FORMAT& depth, DXGI_FORMAT& stencil
 // One latched view: the descriptor (pointer fields aside) and Quad Views' own references to the textures.
 struct DepthViewLatch {
     DcsVrDepthView desc{};
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture, preOverlay;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture, preOverlay, postTransparent;  // postTransparent: v1.2 three views
     bool fresh{false};  // pushed since the last frame consumed it
 };
 
@@ -107,6 +108,7 @@ struct DepthFrame {
 class DepthImport {
   public:
     static constexpr uint32_t WantedFocus = 0b1100u;
+    static constexpr uint32_t WantedThreeViews = 0b0011u;  // v1.2: the periphery views, pushed only by a three-views engine
 
     // The device and thread pushes must come from (Quad Views' application device, DCS's render thread: the thread
     // of xrEndFrame). Thread 0: not known yet, any thread. When the application's device is a proxy (ReShade wraps
@@ -135,7 +137,8 @@ class DepthImport {
 
     // DcsVr_QuadViewsDepth: checks, AddRefs the textures and drops the view's previous ones. No GPU work.
     uint32_t Push(const DcsVrDepthView* d) {
-        if (!d || d->structSize < sizeof(DcsVrDepthView) || d->version < 1 || !d->texture || d->hmdView > 3)
+        // v1.1 engines push 264 bytes: the v1.2 tail is then zero.
+        if (!d || d->structSize < kDcsVrDepthViewSizeV11 || d->version < 1 || !d->texture || d->hmdView > 3)
             return DCSVR_DEPTH_PUSH_NULL_OR_SIZE;
         const DWORD thread = m_thread.load(std::memory_order_relaxed);
         if (thread && thread != GetCurrentThreadId()) return DCSVR_DEPTH_PUSH_NOT_RENDER_THREAD;
@@ -163,11 +166,26 @@ class DepthImport {
         } else if (d->flags & DCSVR_DEPTH_PRE_POST_OVERLAY) {
             return DCSVR_DEPTH_PUSH_LAYOUT;  // the pair needs the copy it is part of
         }
+        // v1.2 three views: the same depth-stencil after the cockpit transparents (same format and size).
+        ID3D11Texture2D* postTransparent = nullptr;
+        if ((d->flags & DCSVR_DEPTH_HAS_POST_TRANSPARENT) && d->structSize >= sizeof(DcsVrDepthView)) {
+            postTransparent = d->postTransparent;
+            if (!postTransparent) return DCSVR_DEPTH_PUSH_NULL_OR_SIZE;
+            D3D11_TEXTURE2D_DESC pd{};
+            postTransparent->GetDesc(&pd);
+            if (pd.Format != td.Format || pd.Width != td.Width || pd.Height != td.Height || pd.SampleDesc.Count != 1 ||
+                !(pd.BindFlags & D3D11_BIND_SHADER_RESOURCE))
+                return DCSVR_DEPTH_PUSH_LAYOUT;
+        }
         std::lock_guard lock(m_mutex);
-        if (!OnDevice(d->texture) || (preOverlay && !OnDevice(preOverlay))) return DCSVR_DEPTH_PUSH_FOREIGN_DEVICE;
+        if (!OnDevice(d->texture) || (preOverlay && !OnDevice(preOverlay)) || (postTransparent && !OnDevice(postTransparent)))
+            return DCSVR_DEPTH_PUSH_FOREIGN_DEVICE;
         DepthViewLatch& latch = m_views[d->hmdView];
-        std::memcpy(&latch.desc, d, sizeof(DcsVrDepthView));
-        latch.desc.texture = latch.desc.preOverlay = nullptr;  // only the ComPtrs own them
+        latch.desc = DcsVrDepthView{};
+        std::memcpy(&latch.desc, d, (std::min)((size_t)d->structSize, sizeof(DcsVrDepthView)));
+        latch.desc.texture = latch.desc.preOverlay = latch.desc.postTransparent = nullptr;  // only the ComPtrs own them
+        if (!postTransparent) latch.desc.flags &= ~(uint32_t)DCSVR_DEPTH_HAS_POST_TRANSPARENT;
+        latch.postTransparent = postTransparent;
         if (!preOverlay) latch.desc.flags &= ~(uint32_t)(DCSVR_DEPTH_HAS_PRE_OVERLAY | DCSVR_DEPTH_PRE_POST_OVERLAY);
         latch.texture = d->texture;                            // AddRef; the previous texture is released
         latch.preOverlay = preOverlay;
@@ -200,11 +218,31 @@ class DepthImport {
         if (displayTime != 0 && displayTime == m_lastTime) return m_last;
         DepthFrame f;
         f.reject = Check(displayTime, focusAspect, requireCoverage, f);
-        for (auto& v : m_views) v.fresh = false;
+        m_views[2].fresh = m_views[3].fresh = false;  // the periphery views are three views' (TakeThreeViews)
         m_rejects[(int)f.reject]++;
         m_lastTime = displayTime;
         m_last = f;
         return f;
+    }
+
+    // Three views, once per xrEndFrame: both periphery views pushed since the last call, of one engine frame and one
+    // generation, valid reverse-Z with gViewInv, and the right one flagged THREE_VIEWS. Copies the two latches (their
+    // own references) into out and consumes the pushes. False: the right periphery is DCS's own this frame.
+    bool TakeThreeViews(DepthViewLatch out[2]) {
+        std::lock_guard lock(m_mutex);
+        const DepthViewLatch& l = m_views[0];
+        const DepthViewLatch& r = m_views[1];
+        const uint32_t need = DCSVR_DEPTH_VALID | DCSVR_DEPTH_REVERSE_Z | DCSVR_DEPTH_VIEWINV_VALID;
+        const bool ok = l.fresh && r.fresh && l.texture && r.texture && l.desc.engineFrame == r.desc.engineFrame &&
+                        l.desc.generation == r.desc.generation && (l.desc.flags & need) == need &&
+                        (r.desc.flags & need) == need && (r.desc.flags & DCSVR_DEPTH_THREE_VIEWS) &&
+                        (l.desc.flags & DCSVR_DEPTH_HAS_STENCIL) && (r.desc.flags & DCSVR_DEPTH_HAS_STENCIL) &&
+                        std::isfinite(r.desc.stripNdcX) && r.desc.stripNdcX > -1.f && r.desc.stripNdcX < 1.f;
+        m_views[0].fresh = m_views[1].fresh = false;
+        if (!ok) return false;
+        out[0] = l;
+        out[1] = r;
+        return true;
     }
 
     uint64_t Rejects(DepthReject r) const { return m_rejects[(int)r]; }
@@ -221,6 +259,7 @@ class DepthImport {
     static void Drop(DepthViewLatch& v) {
         v.texture.Reset();
         v.preOverlay.Reset();
+        v.postTransparent.Reset();
         v.fresh = false;
     }
 

@@ -63,7 +63,8 @@ foreach ($quadPatch in $quadPatches) {
 # The sources DCS Control adds are whole files in native/quadviews, copied beside the patched ones: the tests below
 # compile them from there, so a patch would only hold a second copy.
 foreach ($ownSource in @('dcsvr_gaze.h', 'dcsvr_perception.h', 'dcsvr_temporal_cs.hlsl', 'dcsvr_depthwarp.h', 'dcsvr_depthwarp_cs.hlsl', 'dcsvr_coverage_cs.hlsl',
-        'dcsvr_depthwarp_ps.hlsli', 'dcsvr_depth_import.h', 'dcsvr_depth_export.h', 'dcsvr_live.h', 'dcsvr_twolayer_ps.hlsl')) {
+        'dcsvr_depthwarp_ps.hlsli', 'dcsvr_depth_import.h', 'dcsvr_depth_export.h', 'dcsvr_live.h', 'dcsvr_twolayer_ps.hlsl',
+        'dcsvr_threeviews.h')) {
     Copy-Item -LiteralPath (Join-Path $workspaceRoot "native/quadviews/$ownSource") -Destination (Join-Path $quadRoot "openxr-api-layer/$ownSource") -Force
 }
 $layerSource = Join-Path $quadRoot 'openxr-api-layer/layer.cpp'
@@ -132,6 +133,13 @@ $perceptionTest = Join-Path $workspaceRoot 'artifacts/native/qv-test/perception_
 if ($LASTEXITCODE -ne 0) { throw 'Perception test build failed.' }
 & $perceptionTest (Join-Path $workspaceRoot 'native/quadviews')
 if ($LASTEXITCODE -ne 0) { throw 'Perception test failed.' }
+# Three views (0.7): the real fill pass on a synthetic pair of periphery views (matrices, DCS's pixels kept, the fill
+# against a direct render, no left-cockpit leak, nothing without the engine's flag).
+$threeViewsTest = Join-Path $workspaceRoot 'artifacts/native/qv-test/threeviews_test.exe'
+& (Join-Path $PSScriptRoot 'msvc.cmd') cl /nologo /std:c++20 /EHsc /O2 /W4 "/Fe:$threeViewsTest" "/Fo:$(Split-Path -Parent $threeViewsTest)/" (Join-Path $workspaceRoot 'tests/threeviews/threeviews_test.cpp') "/I$(Join-Path $workspaceRoot 'native/quadviews')" d3d11.lib
+if ($LASTEXITCODE -ne 0) { throw 'Three views test build failed.' }
+& $threeViewsTest
+if ($LASTEXITCODE -ne 0) { throw 'Three views test failed.' }
 # Far depth: its maths, the import of the engine's export and the real field shader and composition (this build's
 # ProjectionPS, checked to equal the test's own injection at the same anchors) on synthetic scenes.
 # Half-size images and the GPU cost reported, not asserted: this build is also run with DCS flying, where timings say

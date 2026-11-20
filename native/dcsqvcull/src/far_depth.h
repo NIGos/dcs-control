@@ -857,7 +857,8 @@ bool g_tracedThisFrame = false;  // an overlay trace window was open this frame
 // R65: cockpit_mask.h wants this pass's gProj too (the mask rect's FOV), with or without the export to Quad Views.
 std::atomic<bool> g_maskUploads{false};
 bool WantUploads() {
-  return (Active() && (g_mask || g_logProjLeft.load() > 0)) || g_maskUploads.load(std::memory_order_relaxed);
+  return (Active() && (g_mask || g_logProjLeft.load() > 0)) || g_maskUploads.load(std::memory_order_relaxed) ||
+         tvc::g_cfgOn.load(std::memory_order_relaxed);  // 0.7 three views: the periphery views' gProj / gViewInv
 }
 
 // Install: a clean render-thread state (no texture is held here: ReleaseAll ran at the uninstall).

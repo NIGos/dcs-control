@@ -1321,6 +1321,15 @@ void PushJob(Job&& j) {
 namespace cmask {  // R65 cockpit_mask.h (included after RunCs)
 void DropPending();
 }
+namespace tvexp {  // 0.7 three views (after FxKeepRun)
+void ReleaseAll();
+}
+// 0.7 three views, the fill inside the engine (TvOnBind, after tvexp): armed for the periphery views'
+// TransparentCockpitPass; the OM entries call it after DCS's first render-target bind in that pass.
+bool g_tvArm = false, g_tvOwnArm = false;
+int g_tvView = -1;
+void TvOnBind(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* r, ID3D11DepthStencilView* d);
+void TvReleaseFill();
 void ReleaseRun(Run& r) {
   if (r.dsv) r.dsv->Release();
   if (r.cb) r.cb->Release();
@@ -1337,6 +1346,8 @@ void ReleaseD3D() {
   // Far depth: the layer's references first (every generation pushed), then
   // our copies (before the device reference goes).
   fdexport::ReleaseAll();
+  tvexp::ReleaseAll();  // 0.7 three views: the layer's references to our periphery copies, then the copies
+  TvReleaseFill();
   cmask::DropPending();  // R65: DCS's targets held for the mask (its own objects: cmask::Uninstall / EnsureBase)
   ReleaseRun(s.farPending);
   ReleaseRun(s.run);
@@ -2229,7 +2240,11 @@ void KeepDsv(ID3D11DeviceContext* c, ID3D11DepthStencilView* d) {
 }
 // R70: the MV target bound with the DSV just recorded (the latest bind of that entry that had one wins).
 void KeepMv(ID3D11DeviceContext* c, ID3D11DepthStencilView* d, UINT n, ID3D11RenderTargetView* const* r) {
-  if (!d || c != g_s.ctx || !g_mvWanted.load(std::memory_order_relaxed) || !g_seqN || g_seq[g_seqN - 1] != d) return;
+  if (!d || c != g_s.ctx ||
+      !(g_mvWanted.load(std::memory_order_relaxed) ||
+        (tvc::g_engaged.load(std::memory_order_relaxed) && !(tvc::g_isolate.load(std::memory_order_relaxed) & 8u))) ||
+      !g_seqN || g_seq[g_seqN - 1] != d)
+    return;
   if (ID3D11RenderTargetView* mv = MvOfBind(n, r)) g_seqMv[g_seqN - 1] = mv;
 }
 // With DLSS each view renders at its own resolution (measured: periphery
@@ -2332,6 +2347,7 @@ void STDMETHODCALLTYPE OmHook(ID3D11DeviceContext* c, UINT n, ID3D11RenderTarget
     if (g_cmOvlArm) CmOvlBind(c, n, r);  // R74b
   }
   g_omOrig(c, n, r, d);
+  if (g_tvArm && c == g_s.ctx && n && r && r[0]) TvOnBind(c, n, r, d);  // 0.7 three views
   if (c == g_s.ctx) InPassRearm(), g_lastCall = 4;
   if (auto o = ptiming::g_omObserver.load(std::memory_order_relaxed)) o(c, n, r, d, false, ret);  // R140
 }
@@ -2349,6 +2365,7 @@ void STDMETHODCALLTYPE OmUavHook(ID3D11DeviceContext* c, UINT n, ID3D11RenderTar
     if (g_cmOvlArm) CmOvlBind(c, n, r);  // R74b
   }
   g_omUavOrig(c, n, r, d, us, un, u, ic);
+  if (g_tvArm && c == g_s.ctx && n && n != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL && r && r[0]) TvOnBind(c, n, r, d);
   if (c == g_s.ctx) InPassRearm();
   if (auto o = ptiming::g_omObserver.load(std::memory_order_relaxed)) o(c, n, r, d, true, ret);  // R140
 }
@@ -3284,6 +3301,392 @@ void FxKeepRun(const Run& r, int idx) {
   cpass::FxNoteProj(g_s.ctx, idx, r.cb, r.cbFirst);
 }
 
+// ---------------------------------------------------------------------------
+// 0.7 three views ([Views] ThreeViews; three_views.h decides, tvc in views.inc holds the shared state): the periphery
+// views' depth + stencil for Quad Views, which fills the right periphery from the left one where DCS drew neither the
+// strip nor the cockpit. Render thread only. Per periphery view (HMD view 0 / 1 by the CopyToHMDPass ordinal, as Far
+// depth's focus views): the G-buffer run is kept (TvKeepRun) and copied, whole subresource, into our texture BEFORE the
+// view's transparent passes (DCS's transparent cockpit materials write COCKPIT into the stencil: the canopy glass would
+// become cockpit), at its WaterSeaPass end or else at the next pass that could change the target (TvFlush). Pushed at
+// once through Far depth's export (DcsVr_QuadViewsDepth, hmdView 0 / 1) under a generation of our own; the right view
+// carries DCSVR_DEPTH_THREE_VIEWS while the strip is engaged and for kTvTail frames after (a frame culled at collect
+// time may still be rendered after the disengage). Quad Views wants these views only when it can fill (bits 0 and 1 of
+// DcsVr_QuadViewsDepthWanted, asked once per frame: tvc::g_layerMask); without them nothing is copied or pushed, and
+// the worker never engages.
+namespace tvexp {
+constexpr int kTvTail = 6;
+constexpr int kTvSlots = 2;
+fdexport::Tex g_tex[2][kTvSlots], g_post[2][kTvSlots];  // pre / post TransparentCockpitPass copies
+Run g_pend[2];
+// The pre copy's descriptor and DCS's depth (held by the run's DSV) until the post copy: after the view's
+// TransparentCockpitPass, else at the next pass that may reuse the target (pushed then, the post copy made there).
+DcsVrDepthView g_desc[2];
+Run g_postRun[2];
+bool g_hasDesc[2] = {};
+std::atomic<uint64_t> g_postCopies{0}, g_postFallback{0};
+bool g_hasPend[2] = {};
+uint32_t g_gen = 0x7e000001u;  // ours; DepthImport releases by generation, and the views 0 / 1 latches are ours alone
+bool g_held = false;           // a generation of ours may be held by the layer
+int g_tail = 0;                // frames the flag stays after a disengage
+uint64_t g_lastFrame = ~0ull;
+std::atomic<uint64_t> g_copies{0}, g_pushes{0}, g_accepted{0}, g_rejected{0}, g_flagged{0}, g_skipIdentity{0},
+    g_skipFormat{0}, g_skipProj{0}, g_skipArm{0}, g_afterWater{0}, g_texCreates{0}, g_releases{0};
+std::atomic<uint32_t> g_lastResult{0};
+std::atomic<bool> g_loggedFirst{false};
+// The right view's own frame was collected with the strip volume (tvc::g_patched moved since the last right capture):
+// only then is it flagged for Quad Views and filled in the engine; a frame collected before an engage or after a
+// disengage is DCS's complete view and stays as it is.
+uint64_t g_patchedSeen = 0, g_culledFrame = ~0ull;
+std::atomic<uint64_t> g_notCulled{0};
+// A copy texture (re)made in this frame: nothing of this frame is pushed (Quad Views first sees a texture one frame
+// after it was made and filled), counted.
+uint64_t g_madeFrame = ~0ull;
+std::atomic<uint64_t> g_deferredPushes{0}, g_idleReleases{0}, g_postSkipped{0};
+
+bool Flag() { return tvc::g_engaged.load(std::memory_order_relaxed) || g_tail > 0; }
+
+void ReleaseAll() {
+  if (g_held) {
+    fdexport::QvRelease(g_gen);
+    g_held = false;
+  }
+  bool any = false;
+  for (auto* ring : {&g_tex, &g_post})
+    for (auto& v : *ring)
+      for (fdexport::Tex& t : v) {
+        if (t.t) t.t->Release(), any = true;
+        t = fdexport::Tex{};
+      }
+  for (int i = 0; i < 2; ++i) {
+    if (g_hasPend[i]) ReleaseRun(g_pend[i]), g_hasPend[i] = false;
+    if (g_hasDesc[i]) ReleaseRun(g_postRun[i]), g_hasDesc[i] = false;
+  }
+  if (any) {
+    g_releases++;
+    g_gen = (g_gen + 2) | 1u;
+  }
+}
+
+// Once per frame (OnBoundaryInner's first boundary of a frame): Quad Views' wanted mask, the flag's tail.
+void FrameStart(uint64_t frame) {
+  if (frame == g_lastFrame) return;
+  g_lastFrame = frame;
+  if (tvc::g_engaged.load(std::memory_order_relaxed))
+    g_tail = kTvTail;
+  else if (g_tail > 0)
+    --g_tail;
+  tvc::g_layerMask.store(fdexport::QvWanted(), std::memory_order_relaxed);
+  // Idle: Quad Views drops its references to our copies, but the copies are kept (made once, remade only when DCS's
+  // depth changes size or format; released with the device): a switch-on reuses textures the GPU is long done with.
+  if (!tvc::g_engaged.load(std::memory_order_relaxed) && g_tail == 0 && (frame % 240) == 0 && g_held) {
+    fdexport::QvRelease(g_gen);
+    g_held = false;
+    g_gen = (g_gen + 2) | 1u;
+    g_idleReleases++;
+  }
+}
+
+// Our copy texture t matching DCS's depth of run r (made or remade; a remake drops the layer's references first).
+bool Ensure(fdexport::Tex& t, const Run& r) {
+  State& s = g_s;
+  if (t.t && t.fmt == r.rawFmt && t.w == r.texW && t.h == r.texH) return true;
+  if (g_held) {  // the layer must not hold a texture of another size under the same generation
+    fdexport::QvRelease(g_gen);
+    g_held = false;
+    g_gen = (g_gen + 2) | 1u;
+  }
+  if (t.t) t.t->Release();
+  t = fdexport::Tex{};
+  D3D11_TEXTURE2D_DESC d{};
+  d.Width = r.texW;
+  d.Height = r.texH;
+  d.MipLevels = 1;
+  d.ArraySize = 1;
+  d.Format = r.rawFmt;
+  d.SampleDesc.Count = 1;
+  d.Usage = D3D11_USAGE_DEFAULT;
+  d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  ID3D11Texture2D* nt = nullptr;
+  if (!s.dev || FAILED(s.dev->CreateTexture2D(&d, nullptr, &nt)) || !nt) {
+    g_skipFormat++;
+    return false;
+  }
+  g_texCreates++;
+  g_madeFrame = s.frame;
+  t = fdexport::Tex{nt, r.rawFmt, r.texW, r.texH};
+  return true;
+}
+
+void Capture(const Run& r, int idx, bool afterWater) {
+  State& s = g_s;
+  if (!s.ctx || !s.dev || !Flag() || (tvc::g_layerMask.load(std::memory_order_relaxed) & 3u) != 3u) return;
+  if (!r.armOk) {
+    g_skipArm++;
+    return;
+  }
+  if (s.lastHmdCount != 4 || g_hmdOffset.load() != 0) {
+    g_skipIdentity++;
+    return;
+  }
+  if (r.variant < 0 || r.variant == 2 || r.variant == 3 || !fdexport::FormatOk(r.rawFmt) || !r.tex) {
+    g_skipFormat++;
+    return;
+  }
+  const Proj p = ParseProj(r.proj);
+  if (!r.cpuProj || !p.ok) {
+    g_skipProj++;
+    return;
+  }
+  const int slot = static_cast<int>(s.frame % kTvSlots);
+  fdexport::Tex& t = g_tex[idx][slot];
+  if (!Ensure(t, r)) return;
+  s.ctx->CopySubresourceRegion(t.t, 0, 0, 0, 0, r.tex, D3D11CalcSubresource(0, r.slice, r.mipLevels), nullptr);
+  g_copies++;
+  if (afterWater) g_afterWater++;
+  fdexport::CaptureInfo ci;
+  ci.hmdView = static_cast<uint32_t>(idx);
+  ci.engineFrame = s.frame;
+  ci.generation = g_gen;
+  ci.format = r.rawFmt;
+  ci.texture = t.t;
+  ci.texW = r.texW;
+  ci.texH = r.texH;
+  ci.vp = r.vp;
+  memcpy(ci.proj, r.proj, sizeof(ci.proj));
+  memcpy(ci.viewInv, r.viewInv, sizeof(ci.viewInv));
+  ci.viewInvValid = true;
+  ci.afterWater = afterWater;
+  ci.fallback = !afterWater;
+  DcsVrDepthView d{};
+  if (!fdexport::FillView(ci, d)) {
+    g_skipProj++;
+    return;
+  }
+  d.stripNdcX = static_cast<float>(tvc::g_stripNdc.load(std::memory_order_relaxed));
+  if (idx == 1) {
+    const uint64_t pc = tvc::g_patched.load(std::memory_order_relaxed);
+    if (pc != g_patchedSeen) {
+      d.flags |= DCSVR_DEPTH_THREE_VIEWS;
+      g_culledFrame = s.frame;
+    } else {
+      g_notCulled++;
+    }
+    g_patchedSeen = pc;
+  }
+  if (g_hasDesc[idx]) ReleaseRun(g_postRun[idx]);
+  g_desc[idx] = d;
+  g_postRun[idx] = r;
+  if (r.dsv) r.dsv->AddRef();
+  if (r.cb) r.cb->AddRef();
+  g_hasDesc[idx] = true;
+}
+
+// The post copy and the push of view idx (render thread): after its TransparentCockpitPass (post = true), or at a
+// later point without one (the copy is made there all the same: what the target holds then).
+void Post(int idx, bool afterTransparent) {
+  if (!g_hasDesc[idx]) return;
+  State& s = g_s;
+  DcsVrDepthView d = g_desc[idx];
+  const Run& r = g_postRun[idx];
+  const int slot = static_cast<int>(s.frame % kTvSlots);
+  fdexport::Tex& t = g_post[idx][slot];
+  const bool noPost = (tvc::g_isolate.load(std::memory_order_relaxed) & 1u) != 0;  // [Views] ThreeViewsIsolate bit 1
+  if (noPost) g_postSkipped++;
+  if (s.ctx && !noPost && Ensure(t, r)) {
+    s.ctx->CopySubresourceRegion(t.t, 0, 0, 0, 0, r.tex, D3D11CalcSubresource(0, r.slice, r.mipLevels), nullptr);
+    d.postTransparent = t.t;
+    d.flags |= DCSVR_DEPTH_HAS_POST_TRANSPARENT;
+    (afterTransparent ? g_postCopies : g_postFallback)++;
+  }
+  d.generation = g_gen;  // a remake above may have moved it
+  ReleaseRun(g_postRun[idx]);
+  g_hasDesc[idx] = false;
+  if (idx == 1) g_flagged++;
+  if (g_madeFrame == s.frame) {  // a texture of ours was (re)made this frame: the push waits for the next frame
+    g_deferredPushes++;
+    return;
+  }
+  const uint32_t res = fdexport::QvPush(d);
+  g_lastResult = res;
+  if (res == ~0u) return;
+  g_pushes++;
+  if (res == DCSVR_DEPTH_PUSH_ACCEPTED) {
+    g_accepted++;
+    g_held = true;
+  } else {
+    g_rejected++;
+  }
+  if (!g_loggedFirst.exchange(true))
+    Log("three views: first periphery depth push: view %d, depth %ux%u format %u, viewport %.1f,%.1f %.0fx%.0f, flags "
+        "0x%x, generation %u, post copy %s; Quad Views result %u",
+        idx, d.texWidth, d.texHeight, d.format, d.viewport[0], d.viewport[1], d.viewport[2], d.viewport[3], d.flags,
+        d.generation, afterTransparent ? "after TransparentCockpitPass" : "at a later pass", res);
+}
+void PostAll() {
+  for (int i = 0; i < 2; ++i) Post(i, false);
+}
+
+// CloseRun: a periphery view's run is kept until its flush point.
+void KeepRun(const Run& r, int idx) {
+  if (g_hasPend[idx]) ReleaseRun(g_pend[idx]);
+  g_hasPend[idx] = false;
+  if (!Flag() || (tvc::g_layerMask.load(std::memory_order_relaxed) & 3u) != 3u) return;
+  g_pend[idx] = r;
+  if (r.dsv) r.dsv->AddRef();
+  if (r.cb) r.cb->AddRef();
+  g_hasPend[idx] = true;
+}
+bool HasPending() { return g_hasPend[0] || g_hasPend[1]; }
+void Flush(bool afterWater) {
+  for (int i = 0; i < 2; ++i) {
+    if (!g_hasPend[i]) continue;
+    Capture(g_pend[i], i, afterWater);
+    ReleaseRun(g_pend[i]);
+    g_hasPend[i] = false;
+  }
+}
+}  // namespace tvexp
+void TvKeepRun(const Run& r, int idx) { tvexp::KeepRun(r, idx); }
+
+#include "three_views_fill.h"  // 0.7 three views: the fill inside the engine (shaders, pipeline state, the draw)
+namespace tvexp {
+tvfill::Fill g_fill;
+ID3D11Texture2D *g_lcol = nullptr, *g_lmv = nullptr;  // the left view's lit colour / motion at its TransparentCockpitPass
+DXGI_FORMAT g_lcolFmt = DXGI_FORMAT_UNKNOWN, g_lmvFmt = DXGI_FORMAT_UNKNOWN;
+uint64_t g_leftFrame = ~0ull;
+DcsVrDepthView g_leftDesc{};
+ID3D11Texture2D* g_leftDepth = nullptr;  // this frame's pre copy of the left view (g_tex, no reference)
+D3D11_VIEWPORT g_leftVp{};
+std::atomic<uint64_t> g_fills{0}, g_fillSkips{0}, g_leftCopies{0}, g_noLeft{0}, g_badTarget{0}, g_noMv{0};
+std::atomic<int> g_fillLog{3};
+bool FloatColour(DXGI_FORMAT f) {
+  return f == DXGI_FORMAT_R16G16B16A16_FLOAT || f == DXGI_FORMAT_R11G11B10_FLOAT || f == DXGI_FORMAT_R32G32B32A32_FLOAT;
+}
+// A texture of format f (w x h) at *t, remade when it differs.
+bool EnsureCopy(ID3D11Device* dev, ID3D11Texture2D** t, DXGI_FORMAT f, UINT w, UINT h) {
+  if (*t) {
+    D3D11_TEXTURE2D_DESC d{};
+    (*t)->GetDesc(&d);
+    if (d.Format == f && d.Width == w && d.Height == h) return true;
+    (*t)->Release();
+    *t = nullptr;
+  }
+  D3D11_TEXTURE2D_DESC d{w, h, 1, 1, f, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0};
+  return SUCCEEDED(dev->CreateTexture2D(&d, nullptr, t)) && *t;
+}
+// The view-port box of render target view v's resource into *dst (format of the resource). Returns the view format.
+bool CopyBox(ID3D11DeviceContext* c, ID3D11RenderTargetView* v, const D3D11_VIEWPORT& vp, ID3D11Texture2D** dst, DXGI_FORMAT* viewFmt) {
+  D3D11_RENDER_TARGET_VIEW_DESC rd{};
+  v->GetDesc(&rd);
+  if (rd.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || rd.Texture2D.MipSlice != 0) return false;
+  ID3D11Resource* res = nullptr;
+  v->GetResource(&res);
+  ID3D11Texture2D* tex = nullptr;
+  if (res) res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex)), res->Release();
+  if (!tex) return false;
+  D3D11_TEXTURE2D_DESC td{};
+  tex->GetDesc(&td);
+  D3D11_BOX box{};
+  bool ok = td.SampleDesc.Count == 1 && fdexport::PreBox(vp, td.Width, td.Height, box);
+  ID3D11Device* dev = nullptr;
+  c->GetDevice(&dev);
+  ok = ok && dev && EnsureCopy(dev, dst, td.Format, box.right - box.left, box.bottom - box.top);
+  if (dev) dev->Release();
+  if (ok) c->CopySubresourceRegion(*dst, 0, 0, 0, 0, tex, 0, &box);
+  tex->Release();
+  *viewFmt = rd.Format;
+  return ok;
+}
+}  // namespace tvexp
+
+// DCS's first render-target bind in a periphery view's TransparentCockpitPass (render thread, OM entry, after DCS's own
+// call): the left view's lit colour and motion are copied; in the right view the fill runs before DCS's first draw.
+void TvOnBind(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* r, ID3D11DepthStencilView*) {
+  using namespace tvexp;
+  g_tvArm = false;  // once per pass
+  State& s = g_s;
+  const int v = g_tvView;
+  if ((v != 0 && v != 1) || !g_hasDesc[v]) return;
+  D3D11_RENDER_TARGET_VIEW_DESC rd{};
+  r[0]->GetDesc(&rd);
+  if (!FloatColour(rd.Format)) {
+    g_badTarget++;
+    return;
+  }
+  const Run& run = g_postRun[v];
+  ID3D11RenderTargetView* mv = g_runMv;
+  if (v == 0) {
+    DXGI_FORMAT cf{}, mf{};
+    if (!CopyBox(c, r[0], run.vp, &g_lcol, &cf)) {
+      g_badTarget++;
+      return;
+    }
+    g_lcolFmt = cf;
+    g_lmvFmt = DXGI_FORMAT_UNKNOWN;
+    if (mv && CopyBox(c, mv, run.vp, &g_lmv, &mf)) g_lmvFmt = mf;
+    else g_noMv++;
+    g_leftDesc = g_desc[0];
+    g_leftDepth = g_tex[0][static_cast<int>(s.frame % kTvSlots)].t;
+    g_leftVp = run.vp;
+    g_leftFrame = s.frame;
+    g_leftCopies++;
+    return;
+  }
+  if (g_culledFrame != s.frame) return;  // DCS's complete right view (counted at the capture)
+  if (g_leftFrame != s.frame || !g_leftDepth || !g_lcol) {
+    g_noLeft++;
+    return;
+  }
+  const DcsVrDepthView& R = g_desc[1];
+  tvfill::Inputs in;
+  if (!tvfill::Transform(g_leftDesc.proj, g_leftDesc.viewInv, R.proj, R.viewInv, in.M01) ||
+      !tvfill::Transform(R.proj, R.viewInv, g_leftDesc.proj, g_leftDesc.viewInv, in.M10)) {
+    g_fillSkips++;
+    return;
+  }
+  in.leftCol = g_lcol;
+  in.leftColFmt = g_lcolFmt;
+  in.leftMv = g_lmvFmt != DXGI_FORMAT_UNKNOWN ? g_lmv : nullptr;
+  in.leftMvFmt = g_lmvFmt;
+  in.leftDepth = g_leftDepth;
+  in.depthFmt = static_cast<DXGI_FORMAT>(g_leftDesc.format);
+  in.vpL = D3D11_VIEWPORT{g_leftDesc.viewport[0], g_leftDesc.viewport[1], g_leftDesc.viewport[2], g_leftDesc.viewport[3], 0, 1};
+  in.vpR = run.vp;
+  in.rCol = r[0];
+  in.rMv = n > 1 || mv ? mv : nullptr;
+  ID3D11Texture2D* rd2 = nullptr;
+  if (run.tex) run.tex->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&rd2));
+  in.rDepth = rd2;
+  in.rSlice = run.slice;
+  in.strip = R.stripNdcX;
+  in.nearLimit = g_leftDesc.proj[14] > 0 ? g_leftDesc.proj[14] / 1.5f : 0.f;  // samples nearer than 1.5 m: cockpit
+  in.omSet = g_omOrig;  // DCS's own entries: our binds are not recorded as DCS's
+  in.vpSet = g_vpOrig;
+  const bool ok = rd2 && g_fill.Run(c, in);
+  if (rd2) rd2->Release();
+  if (!ok) {
+    g_fillSkips++;
+    if (g_fillLog.load() > 0 && g_fillLog.fetch_sub(1) > 0)
+      Log("three views: engine fill not run (%s; left colour %u, motion %u, right %u, viewport %.0fx%.0f)",
+          g_fill.lastError.empty() ? "inputs" : g_fill.lastError.c_str(), (unsigned)g_lcolFmt, (unsigned)g_lmvFmt,
+          (unsigned)rd.Format, run.vp.Width, run.vp.Height);
+    return;
+  }
+  g_desc[1].flags |= DCSVR_DEPTH_FILLED_IN_ENGINE;
+  if (g_fills++ == 0)
+    Log("three views: first engine fill: colour format %u (left %u), motion %s (left %u), viewport %.0f,%.0f %.0fx%.0f, depth "
+        "format %u, strip from NDC x %.3f",
+        (unsigned)rd.Format, (unsigned)g_lcolFmt, in.rMv ? "filled" : "NOT filled", (unsigned)g_lmvFmt, run.vp.TopLeftX,
+        run.vp.TopLeftY, run.vp.Width, run.vp.Height, g_leftDesc.format, in.strip);
+}
+void TvReleaseFill() {
+  tvexp::g_fill.Release();
+  for (ID3D11Texture2D** t : {&tvexp::g_lcol, &tvexp::g_lmv})
+    if (*t) (*t)->Release(), *t = nullptr;
+  tvexp::g_leftFrame = ~0ull;
+  tvexp::g_leftDepth = nullptr;
+}
+
 void CloseRun() {
   State& s = g_s;
   Run& r = s.run;
@@ -3350,6 +3753,8 @@ void CloseRun() {
         s.waterSeen = false;
       }
     }
+    // 0.7 three views: the periphery views' depth for Quad Views, copied before their transparents (TvFlush).
+    if (hmd && (idx == 0 || idx == 1) && tvc::g_cfgOn.load(std::memory_order_relaxed)) TvKeepRun(r, idx);
     // R65 cockpit mask: the configured HMD views, sampled at their WaterSeaPass end (or before their transparents).
     if (hmd && cmask::Active()) cmask::NoteRun(r, idx, s.lastHmdCount, g_runMv);  // R70: with the run's MV target
     // R51 VrFx: every HMD view's run (GazeDof's depth; both effects' projection).
@@ -5386,6 +5791,10 @@ void EndFrame() {
   State& s = g_s;
   CloseRun();
   FlushPending(s.waterSeen);
+  for (int i = 0; i < 2; ++i) {  // three views: a periphery copy not flushed by now would be read with the next frame
+    if (tvexp::g_hasPend[i]) ReleaseRun(tvexp::g_pend[i]), tvexp::g_hasPend[i] = false;
+    if (tvexp::g_hasDesc[i]) ReleaseRun(tvexp::g_postRun[i]), tvexp::g_hasDesc[i] = false;
+  }
   if (!s.sampled && g_coneOn.load()) {
     g_noTarget++;
     QueueInvalid(nullptr, 2, false);
@@ -5597,6 +6006,44 @@ void DumpPassBoundary(void* pass, bool begin) {
 void OnBoundaryInner(void* pass, bool begin) {
   State& s = g_s;
   const int k = plod::KindRaw(pass);
+  // 0.7 three views: the frame's wanted mask, the right periphery's passes (three_views.h narrows their terrain
+  // chain), and the periphery depth copies (after the water, before the transparents, at the latest at the next view).
+  if (tvc::g_cfgOn.load(std::memory_order_relaxed)) {
+    tvexp::FrameStart(s.frame);
+    if (const auto f = tvc::g_onPass.load(std::memory_order_relaxed)) f(begin, s.lastHmdCount == 4 && s.hmdOrd == 1);
+    if (tvexp::HasPending()) {
+      if (!begin && PassIs(pass, "WaterSeaPass")) {
+        tvexp::Flush(true);
+      } else if (begin && (k == plod::kGBuffer || k == plod::kLights || k == plod::kHmd || k == plod::kCascade ||
+                           k == plod::kHeight)) {
+        tvexp::Flush(s.waterSeen);
+      } else if (begin && k == plod::kOther) {
+        char pn[48];
+        PassName(pass, pn, sizeof(pn));
+        if (strstr(pn, "Transparent")) tvexp::Flush(s.waterSeen);
+      }
+    }
+    // The post copy (after the pre copy above): after the view's TransparentCockpitPass (glass), else at the next view's or HMD pass begin.
+    if (!begin && (s.hmdOrd == 0 || s.hmdOrd == 1) && tvexp::g_hasDesc[s.hmdOrd] && PassIs(pass, "TransparentCockpitPass"))
+      tvexp::Post(s.hmdOrd, true);
+    else if (begin && (k == plod::kGBuffer || k == plod::kLights || k == plod::kHmd) && (tvexp::g_hasDesc[0] || tvexp::g_hasDesc[1]))
+      tvexp::PostAll();
+    // The fill inside the engine: the OM entries armed for the periphery views' TransparentCockpitPass (TvOnBind).
+    if (k == plod::kOther &&
+        (g_tvArm || g_tvOwnArm || (begin && tvexp::Flag() && !(tvc::g_isolate.load(std::memory_order_relaxed) & 2u))) &&
+        PassIs(pass, "TransparentCockpitPass")) {
+      if (begin && (s.hmdOrd == 0 || s.hmdOrd == 1) && s.lastHmdCount == 4 && tvexp::g_hasDesc[s.hmdOrd]) {
+        if (!g_armTable) g_tvOwnArm = ArmOm(true);
+        if (g_armTable && !g_usOnlyArm) g_tvArm = true, g_tvView = s.hmdOrd;
+      } else if (!begin) {
+        g_tvArm = false;
+        if (g_tvOwnArm) {
+          g_tvOwnArm = false;
+          if (!g_overlayArm && !g_trOpen && !g_cmOvlArm) DisarmOm();
+        }
+      }
+    }
+  }
   // R74b: mask v1.1 overlay symbology, an HMD view's OverlayHDRPass begin: its pre signature and its arm, before any
   // other work of this boundary (no arm held yet; far depth's and cockpit ipd's overlay arms nest in ours).
   if (begin && k == plod::kOther && cmask::covl::Wanted()) cmask::covl::Boundary(pass, true, s.hmdOrd);
@@ -6262,12 +6709,16 @@ void Tick(bool coneOn, bool gridOn, int verify, const wchar_t* testGaze, bool du
   const bool depthOn = cmask::DepthWanted();  // R69: [Perception] CockpitDepthExport (cmask::ConfigureDepth)
   const bool motionOn = cmask::MotionWanted();  // R70: [Perception] CockpitMotionExport (cmask::ConfigureMotion)
   const bool symOn = cmask::SymWanted();  // R95: [Perception] SymbologyExport (cmask::ConfigureSymbology)
-  const bool on = coneOn || gridOn || farOn || ckOn || maskOn || cpass::Wanted();  // R42: the colour modes use the pass hooks too
+  const bool tvOn = tvc::g_cfgOn.load();  // 0.7 three views: the periphery depth capture and the pass callback
+  const bool on = coneOn || gridOn || farOn || ckOn || maskOn || cpass::Wanted() || tvOn;  // R42: the colour modes use the pass hooks too
   // A change of which outputs are on: reinstall (mappings and state follow).
+  static bool tvWith = false;
   if (g_installed.load() &&
       (coneOn != g_coneOn.load() || gridOn != g_gridOn.load() || farOn != fdexport::g_on.load() || ckOn != g_ckWith ||
-       maskOn != g_maskWith || depthOn != g_depthWith || motionOn != g_motionWith || symOn != g_symWith))
+       maskOn != g_maskWith || depthOn != g_depthWith || motionOn != g_motionWith || symOn != g_symWith ||
+       tvOn != tvWith))
     Uninstall();
+  tvWith = tvOn;
   g_coneOn = coneOn;
   g_gridOn = gridOn;
   fdexport::g_on = farOn;

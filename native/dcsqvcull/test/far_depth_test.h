@@ -13,7 +13,7 @@
 #pragma once
 
 // Layout per dcsvr_depth_export.h (pack 8).
-static_assert(sizeof(DcsVrDepthView) == 264, "DcsVrDepthView 264 bytes");
+static_assert(sizeof(DcsVrDepthView) == 280, "DcsVrDepthView 280 bytes (v1.2: stripNdcX, reserved, postTransparent)");
 static_assert(offsetof(DcsVrDepthView, structSize) == 0 && offsetof(DcsVrDepthView, version) == 4 &&
                   offsetof(DcsVrDepthView, hmdView) == 8 && offsetof(DcsVrDepthView, flags) == 12 &&
                   offsetof(DcsVrDepthView, engineFrame) == 16 && offsetof(DcsVrDepthView, displayTime) == 24 &&
@@ -187,7 +187,7 @@ void TestFill() {
   const bool ok = fdexport::FillView(c, d);
   const uint32_t want = DCSVR_DEPTH_VALID | DCSVR_DEPTH_REVERSE_Z | DCSVR_DEPTH_INFINITE_FAR | DCSVR_DEPTH_AFTER_WATER |
                         DCSVR_DEPTH_HAS_STENCIL | DCSVR_DEPTH_VIEWINV_VALID | DCSVR_DEPTH_IDENTITY_BY_COPYTOHMD;
-  Check(ok && d.structSize == 264 && d.version == 1 && d.hmdView == 3 && d.flags == want && d.engineFrame == 77 &&
+  Check(ok && d.structSize == 280 && d.version == 1 && d.hmdView == 3 && d.flags == want && d.engineFrame == 77 &&
             d.displayTime == 0 && d.generation == 9 && d.format == DXGI_FORMAT_R32G8X24_TYPELESS &&
             d.texture == c.texture && d.texWidth == 1176 && d.texHeight == 1164 && d.arraySlice == 0 &&
             d.sampleCount == 1,
@@ -887,7 +887,7 @@ void TestPipeline() {
   const uint32_t flagsWant = DCSVR_DEPTH_VALID | DCSVR_DEPTH_REVERSE_Z | DCSVR_DEPTH_INFINITE_FAR |
                              DCSVR_DEPTH_AFTER_WATER | DCSVR_DEPTH_HAS_STENCIL | DCSVR_DEPTH_VIEWINV_VALID |
                              DCSVR_DEPTH_IDENTITY_BY_COPYTOHMD;
-  Check(a.d.flags == flagsWant && b.d.flags == flagsWant && a.d.displayTime == 0 && a.d.structSize == 264 &&
+  Check(a.d.flags == flagsWant && b.d.flags == flagsWant && a.d.displayTime == 0 && a.d.structSize == 280 &&
             a.d.format == DXGI_FORMAT_R32G8X24_TYPELESS && b.d.format == DXGI_FORMAT_R24G8_TYPELESS &&
             a.d.texWidth == 256 && a.d.texHeight == 250 && a.d.arraySlice == 0 && a.d.sampleCount == 1 &&
             a.d.viewport[2] == 256 && a.d.viewport[3] == 250 && a.d.viewport[5] == 1 && !a.d.preOverlay,
