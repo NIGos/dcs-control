@@ -115,35 +115,6 @@ std::atomic<bool> predict_wanted{};  // Depth boost on, PimaxPvrGaze=1 and the p
 std::atomic<unsigned> predict_poll_hz{500};
 FILE* log_file{};
 std::atomic<unsigned> restored_views{};
-// Frame timing, logged once a second with the stats ("timing:"): the layer's own time in xrLocateViews and xrEndFrame
-// (the runtime's and the layers' below excluded), and DCS's frame pacing as the display times it locates. A late frame is
-// a display time more than 1.5 periods after the previous one (the period: the smallest step of the previous second).
-// With the in-flight switch this tells whether stutter comes with the layer's work or with the rest of the frame.
-std::atomic<std::uint64_t> layer_ticks_sum{}, layer_ticks_max{}, layer_calls{};
-XrTime timing_last_display{};       // under the main mutex
-std::int64_t timing_min_step{}, timing_period{};
-unsigned timing_late{}, timing_steps{};
-void add_layer_ticks(const LARGE_INTEGER& start) {
-    LARGE_INTEGER now{};
-    QueryPerformanceCounter(&now);
-    const std::uint64_t ticks = static_cast<std::uint64_t>(now.QuadPart - start.QuadPart);
-    layer_ticks_sum.fetch_add(ticks, std::memory_order_relaxed);
-    layer_calls.fetch_add(1, std::memory_order_relaxed);
-    std::uint64_t seen = layer_ticks_max.load(std::memory_order_relaxed);
-    while (ticks > seen && !layer_ticks_max.compare_exchange_weak(seen, ticks, std::memory_order_relaxed)) {}
-}
-// Once per new display time, under the main mutex.
-void timing_display_locked(XrTime time) {
-    if (timing_last_display && time > timing_last_display) {
-        const std::int64_t step = time - timing_last_display;
-        if (step < 200'000'000) {  // a pause (menu, loading) is not a late frame
-            ++timing_steps;
-            if (!timing_min_step || step < timing_min_step) timing_min_step = step;
-            if (timing_period && step * 2 > timing_period * 3) ++timing_late;
-        }
-    }
-    if (time > timing_last_display) timing_last_display = time;
-}
 // PupilShift_Status(): the layout is in pupil_math.hpp (namespace status). Bits 0-4 and 8-15 are the pupil shift's
 // (bit 1 correction on), the rest Depth boost's; an older panel that knows only the first ones keeps working.
 std::atomic<std::uint64_t> status_word{};
@@ -648,20 +619,6 @@ void account_locked(const XrView* views, std::uint32_t count, const Vec3* gaze, 
                 "spikes ignored, smooth %.0f ms at rest\n",
                 f.noise_deg, k.noisy ? " (too noisy: pupil back to rest)" : "", f.samples, f.held, k.saccades - std::min(k.saccades, k.ignored),
                 k.ignored, settings.smooth_s * 1000);
-        }
-        {
-            LARGE_INTEGER frequency{};
-            QueryPerformanceFrequency(&frequency);
-            const double us = frequency.QuadPart ? 1e6 / static_cast<double>(frequency.QuadPart) : 0;
-            const std::uint64_t calls = layer_calls.exchange(0), sum = layer_ticks_sum.exchange(0), max = layer_ticks_max.exchange(0);
-            log("timing: layer %.0f us per call on average, %.0f us at most (%llu calls); display step %.2f ms, %u of %u frames late "
-                "(more than 1.5 steps)%s\n",
-                calls ? static_cast<double>(sum) / static_cast<double>(calls) * us : 0.0, static_cast<double>(max) * us,
-                static_cast<unsigned long long>(calls), static_cast<double>(timing_period) / 1e6, timing_late, timing_steps,
-                pupil_active() ? "; correction on" : "; correction off");
-            if (timing_min_step) timing_period = timing_min_step;
-            timing_min_step = 0;
-            timing_late = timing_steps = 0;
         }
         if (!stats.shifted)
             log("stats: frames=%u shifted=0 (%s); runtime left eye vs head x[%.2f..%.2f] mm; cant %.1f deg, runtime IPD %.1f mm, rendered IPD %.1f mm; %s\n",
@@ -1928,8 +1885,6 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_LocateViews(XrSession session, const XrViewL
         return result;
     }
 
-    LARGE_INTEGER layer_start{};
-    QueryPerformanceCounter(&layer_start);
     // The OpenXR eye gaze for this display time, in the views' base space (a runtime call: outside the main lock).
     const char* xr_absent{};
     const XrEyeGaze xr_gaze = locate_eye_gaze(session, info, views, xr_absent);
@@ -1952,7 +1907,6 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_LocateViews(XrSession session, const XrViewL
     std::lock_guard lock(mutex);
     reload_settings_locked(false);
     poll_hotkeys_locked();
-    timing_display_locked(info->displayTime);
     const std::uint32_t n = *count;
     const bool quad = info->viewConfigurationType == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO && n == 4;
     if (!qv_checked_late) { qv_checked_late = true; if (!qv_gaze_fn.load()) resolve_quad_views_locked(true); }
@@ -2077,7 +2031,6 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_LocateViews(XrSession session, const XrViewL
     write_boost_out_locked(info->displayTime, base_ipd, rendered_ipd_now);
     write_fov_located_locked(info->displayTime, frame.original.data(), views, n,
         (have_gaze ? dcsvr_pupil_fov::entry_flags::pupil : 0u) | (moved_ipd ? dcsvr_pupil_fov::entry_flags::ipd : 0u));
-    add_layer_ticks(layer_start);
     return result;
 }
 
@@ -2092,8 +2045,6 @@ bool matches(const XrView& a, const XrPosef& pose, const XrFovf& fov) {
 
 XRAPI_ATTR XrResult XRAPI_CALL hook_EndFrame(XrSession session, const XrFrameEndInfo* info) {
     if (info == nullptr || info->layerCount == 0) return next_end_frame(session, info);
-    LARGE_INTEGER layer_start{};
-    QueryPerformanceCounter(&layer_start);
     std::vector<XrCompositionLayerProjection> projections;
     std::vector<std::vector<XrCompositionLayerProjectionView>> view_copies;
     std::vector<const XrCompositionLayerBaseHeader*> layers(info->layers, info->layers + info->layerCount);
@@ -2139,13 +2090,12 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_EndFrame(XrSession session, const XrFrameEnd
         }
     }
     // The runtime's xrEndFrame (and every layer below) runs outside the lock, so xrLocateViews never waits on it.
-    if (passthrough) { add_layer_ticks(layer_start); return next_end_frame(session, info); }
+    if (passthrough) return next_end_frame(session, info);
     static unsigned logged{};
     if (logged < 3) { ++logged; log("end_frame: restored %u projection views\n", restored); }
     restored_views.fetch_add(restored, std::memory_order_relaxed);
     XrFrameEndInfo forwarded = *info;
     forwarded.layers = layers.data();
-    add_layer_ticks(layer_start);
     return next_end_frame(session, &forwarded);
 }
 

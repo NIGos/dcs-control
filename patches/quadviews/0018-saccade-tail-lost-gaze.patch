@@ -1,8 +1,10 @@
 Saccade tail and lost-gaze ease for the eye-tracked focus (native/quadviews/dcsvr_gaze.h, which explains them; tested by
-tests/quadviews-gaze; ported from GitHub PR #26): new keys dcsvr_saccade_end_speed (a saccade ends below this speed),
-dcsvr_saccade_latch (the leading edge never retreats during one saccade) and dcsvr_lost_ease_ms (without a gaze past
-Quad Views' cache the focus slides to the fixed one instead of jumping; 0 off). Each located focus box is recorded for
-the landing check, and the 30 s gaze line adds landings, landings outside the sharp area, repeated samples and eases.
+tests/quadviews-gaze; ported from GitHub PR #26). New keys, all off when absent (the filter as before):
+dcsvr_saccade_tail=1 (the lead's saccade ends below dcsvr_saccade_end_speed instead of dcsvr_saccade_speed, its leading
+edge never retreats during one saccade, repeated tracker samples are not speed samples; the plain saccade other code
+reads stays on dcsvr_saccade_speed) and dcsvr_lost_ease_ms (without a gaze past Quad Views' cache the focus slides to
+the fixed one over this time instead of jumping; 0 off). Each located focus box is recorded for the landing check, and
+the 30 s gaze line adds landings, landings outside the sharp area, repeated samples and eases.
 diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
 index 85a9872..ecc5b79 100644
 --- a/openxr-api-layer/layer.cpp
@@ -85,8 +87,8 @@ index 85a9872..ecc5b79 100644
 +                    } else if (name == "dcsvr_saccade_end_speed") {
 +                        m_dcsvrGaze.endSpeed = std::clamp(std::stof(value), 10.f, 1000.f);
 +                        parsed = true;
-+                    } else if (name == "dcsvr_saccade_latch") {
-+                        m_dcsvrGaze.latch = std::stoi(value) != 0;
++                    } else if (name == "dcsvr_saccade_tail") {
++                        m_dcsvrGaze.tail = std::stoi(value) != 0;
 +                        parsed = true;
                      } else if (name == "dcsvr_gaze_deadzone") {
                          m_dcsvrGaze.deadzoneDeg = std::clamp(std::stof(value), 0.f, 3.f);

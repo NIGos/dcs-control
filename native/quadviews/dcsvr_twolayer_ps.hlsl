@@ -18,6 +18,10 @@
 //
 // Without Far depth every texel is a Load at the pixel (1:1, no filtering).
 //
+// No edge match here (dcsvr_edge_match, patches/quadviews/0019-edge-match.patch): it needs the periphery's resolution
+// beside the focus image's, and in this mode the compositor enlarges the periphery after this pass. The focus layer
+// keeps its full detail up to the fade, as the composition does with edge match off.
+//
 // Far depth (dcsvrWarp.x = 1, the field at t2): the composition moves its two samples of an output pixel, the focus
 // image's and the periphery's, by one backward displacement b read from the field at the pixel's focus position
 // (dcsvr_depthwarp_ps.hlsli, the same function and the same constants here), and it takes the fade at the moved focus

@@ -136,6 +136,10 @@ int main(int argc, char** argv) {
         replace_once(projection_old, "[branch] if (!focusVisible && !debugFocusView) {", "[branch] if (false) {");
         replace_once(projection_old, "sourceFocusTexture.SampleLevel(sourceSampler, layer1TexCoord, 0)",
             "sourceFocusTexture.Sample(sourceSampler, layer1TexCoord)");
+        // The reference also has no edge match (0019-edge-match.patch): with dcsvr_edge_match 0 every case below must be
+        // pixel-identical to the composition without it.
+        if (projection_old.find("[branch] if (dcsvrEdgeMatch > 0 &&") != std::string::npos)
+            replace_once(projection_old, "[branch] if (dcsvrEdgeMatch > 0 &&", "[branch] if (false &&");
         const std::string vertex = read_text(layer_dir / "ProjectionVS.hlsl");
         const std::string sharpening = read_text(layer_dir / "SharpeningCS.hlsl");
 

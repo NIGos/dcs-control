@@ -500,13 +500,13 @@ public static class ConfigurationWriters
         dcsvr_two_layers={(p.UsesFoveatedFrameGen ? 2 : 0)}
         dcsvr_saccade_widening={(p.QuadSaccadeLead && p.Gaze == GazeMode.EyeTracked ? 1 : 0)}
         dcsvr_saccade_speed=120
-        dcsvr_saccade_end_speed={(p.QuadSaccadeTail ? 50 : 120)}
+        dcsvr_saccade_tail={(p.UsesQuadSaccadeTail ? 1 : 0)}
+        dcsvr_saccade_end_speed=50
         dcsvr_saccade_lead_ms={Int(p.QuadSaccadeLeadMs)}
         dcsvr_saccade_max_extend={Number(p.QuadSaccadeMaxExtend)}
         dcsvr_saccade_hold_ms={Int(p.QuadSaccadeHoldMs)}
-        dcsvr_saccade_latch={(p.QuadSaccadeTail ? 1 : 0)}
         dcsvr_gaze_deadzone={(p.QuadGazeStabilize && p.Gaze == GazeMode.EyeTracked ? "0.5" : "0")}
-        dcsvr_lost_ease_ms={(p.QuadLostGazeEase && p.Gaze == GazeMode.EyeTracked ? "150" : "0")}
+        dcsvr_lost_ease_ms={(p.UsesQuadLostGazeEase ? "150" : "0")}
         dcsvr_temporal={(p.UsesPeripheryStability ? 1 : 0)}
         dcsvr_temporal_tau_ms={Number(Math.Round(VrProfile.PeripheryStabilityMaxTauMs * Math.Clamp(p.PeripheryStabilityStrength, 0, 1), 1))}
         dcsvr_temporal_ramp_deg=8
