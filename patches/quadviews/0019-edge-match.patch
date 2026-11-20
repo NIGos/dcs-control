@@ -1,0 +1,158 @@
+Edge match (dcsvr_edge_match, round and rounded-rectangle focus shapes; ported from GitHub PR #26): inside the fade band
+the composition crossfades the full-detail focus view with a periphery of 3-6x fewer pixels per degree, which reads as a
+ring. With it the focus view's detail first tapers to the periphery's own resolution (a tent blur whose width grows from
+0 to one periphery texel over the first dcsvr_edge_match share of the band, sized from the screen-space derivatives of
+both views), then fades. Band pixels only; 0 (the default) leaves the shader's output unchanged.
+The constant goes before focusViewShape (offset 16; focusViewShape moves to 20, the layout stays 96 bytes), in
+ProjectionPS.hlsl and in the copy Far depth keeps (ProjectionPS.nofardepth.hlsl), so that focusViewShape stays last in
+that copy's cbuffer, where Far depth's constants are injected (tests/depthwarp checks that injection).
+The two-layer output pass (dcsvr_twolayer_ps.hlsl) has no edge match: the compositor enlarges the periphery there.
+diff --git a/openxr-api-layer/ProjectionPS.hlsl b/openxr-api-layer/ProjectionPS.hlsl
+index 5d563ec..f88429f 100644
+--- a/openxr-api-layer/ProjectionPS.hlsl
++++ b/openxr-api-layer/ProjectionPS.hlsl
+@@ -27,6 +27,7 @@ cbuffer ConstantBuffer : register(b0) {
+     bool ignoreAlpha;
+     bool isUnpremultipliedAlpha;
+     bool debugFocusView;
++    float dcsvrEdgeMatch; // DCSVR edge match: share of the fade band (0 off)
+     float focusViewShape;
+     float4 dcsvrWarp; // DCSVR Far depth: x on, yz focus uv -> periphery uv, w a held field
+     float4 dcsvrReuse[3]; // DCSVR Far depth: a held field's reprojection
+@@ -59,6 +60,14 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0,
+     float4 color0 = sourceStereoTexture.Sample(sourceSampler, dcsvrTexcoord);
+     float2 layer1TexCoord = layer1ProjectedCoordNdc * float2(0.5f, -0.5f) + 0.5f;
+     // For pixels outside of the focus view, the sampler will give us a fully transparent pixel.
++    // DCSVR edge match: a periphery texel in focus texels, from the derivatives of both views (before any branch).
++    float2 dcsvrStereoSize, dcsvrFocusSize;
++    sourceStereoTexture.GetDimensions(dcsvrStereoSize.x, dcsvrStereoSize.y);
++    sourceFocusTexture.GetDimensions(dcsvrFocusSize.x, dcsvrFocusSize.y);
++    const float2 dcsvrFx = ddx(layer1TexCoord) * dcsvrFocusSize, dcsvrFy = ddy(layer1TexCoord) * dcsvrFocusSize;
++    const float2 dcsvrSx = ddx(texcoord) * dcsvrStereoSize, dcsvrSy = ddy(texcoord) * dcsvrStereoSize;
++    const float dcsvrK = min(16, sqrt(abs(dcsvrFx.x * dcsvrFy.y - dcsvrFx.y * dcsvrFy.x) /
++                                      max(abs(dcsvrSx.x * dcsvrSy.y - dcsvrSx.y * dcsvrSy.x), 1e-12)));
+     // DCSVR early out: no focus contribution here, the stereo colour as the full path would leave it.
+     bool focusVisible = all(abs(layer1ProjectedCoordNdc) < 1);
+     if (focusVisible && focusViewShape >= 1) {
+@@ -76,6 +85,25 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0,
+         return float4(color0.rgb, color0.a);
+     }
+     float4 color1 = sourceFocusTexture.SampleLevel(sourceSampler, layer1TexCoord, 0);
++    // DCSVR edge match: inside the fade band the focus detail tapers to the periphery's resolution first.
++    [branch] if (dcsvrEdgeMatch > 0 && focusViewShape >= 1 && smoothingArea > 0 && !debugFocusView && dcsvrK > 1) {
++        const float2 m = abs(layer1ProjectedCoordNdc);
++        const float rm = pow(pow(m.x, focusViewShape) + pow(m.y, focusViewShape), 1 / focusViewShape);
++        const float b = saturate(smoothstep(1 - clamp(2 * smoothingArea, 0.01, 0.95), 1, rm) / dcsvrEdgeMatch);
++        [branch] if (b > 0) {
++            // A [1 2 1] tent of bilinear taps with the variance of the periphery's reconstruction (k^2 / 6).
++            const float2 stepUv = b * dcsvrK * 0.57735 / dcsvrFocusSize;
++            const float2 lo = 0.5 / dcsvrFocusSize, hi = 1 - lo;
++            float4 sum = 0;
++            [unroll] for (int j = -1; j <= 1; ++j) {
++                [unroll] for (int i = -1; i <= 1; ++i) {
++                    sum += (2 - abs(i)) * (2 - abs(j)) *
++                           sourceFocusTexture.SampleLevel(sourceSampler, clamp(layer1TexCoord + float2(i, j) * stepUv, lo, hi), 0);
++                }
++            }
++            color1 = sum / 16;
++        }
++    }
+ 
+     if (ignoreAlpha) {
+         color0.a = color1.a = 1;
+diff --git a/openxr-api-layer/ProjectionPS.nofardepth.hlsl b/openxr-api-layer/ProjectionPS.nofardepth.hlsl
+index 6368981..e5b769d 100644
+--- a/openxr-api-layer/ProjectionPS.nofardepth.hlsl
++++ b/openxr-api-layer/ProjectionPS.nofardepth.hlsl
+@@ -27,6 +27,7 @@ cbuffer ConstantBuffer : register(b0) {
+     bool ignoreAlpha;
+     bool isUnpremultipliedAlpha;
+     bool debugFocusView;
++    float dcsvrEdgeMatch; // DCSVR edge match: share of the fade band (0 off)
+     float focusViewShape;
+ };
+ 
+@@ -53,6 +54,14 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0,
+     float2 layer1ProjectedCoordNdc = projectedFocusCoord.xy / projectedFocusCoord.z;
+     float2 layer1TexCoord = layer1ProjectedCoordNdc * float2(0.5f, -0.5f) + 0.5f;
+     // For pixels outside of the focus view, the sampler will give us a fully transparent pixel.
++    // DCSVR edge match: a periphery texel in focus texels, from the derivatives of both views (before any branch).
++    float2 dcsvrStereoSize, dcsvrFocusSize;
++    sourceStereoTexture.GetDimensions(dcsvrStereoSize.x, dcsvrStereoSize.y);
++    sourceFocusTexture.GetDimensions(dcsvrFocusSize.x, dcsvrFocusSize.y);
++    const float2 dcsvrFx = ddx(layer1TexCoord) * dcsvrFocusSize, dcsvrFy = ddy(layer1TexCoord) * dcsvrFocusSize;
++    const float2 dcsvrSx = ddx(texcoord) * dcsvrStereoSize, dcsvrSy = ddy(texcoord) * dcsvrStereoSize;
++    const float dcsvrK = min(16, sqrt(abs(dcsvrFx.x * dcsvrFy.y - dcsvrFx.y * dcsvrFy.x) /
++                                      max(abs(dcsvrSx.x * dcsvrSy.y - dcsvrSx.y * dcsvrSy.x), 1e-12)));
+     // DCSVR early out: no focus contribution here, the stereo colour as the full path would leave it.
+     bool focusVisible = all(abs(layer1ProjectedCoordNdc) < 1);
+     if (focusVisible && focusViewShape >= 1) {
+@@ -70,6 +79,25 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0,
+         return float4(color0.rgb, color0.a);
+     }
+     float4 color1 = sourceFocusTexture.SampleLevel(sourceSampler, layer1TexCoord, 0);
++    // DCSVR edge match: inside the fade band the focus detail tapers to the periphery's resolution first.
++    [branch] if (dcsvrEdgeMatch > 0 && focusViewShape >= 1 && smoothingArea > 0 && !debugFocusView && dcsvrK > 1) {
++        const float2 m = abs(layer1ProjectedCoordNdc);
++        const float rm = pow(pow(m.x, focusViewShape) + pow(m.y, focusViewShape), 1 / focusViewShape);
++        const float b = saturate(smoothstep(1 - clamp(2 * smoothingArea, 0.01, 0.95), 1, rm) / dcsvrEdgeMatch);
++        [branch] if (b > 0) {
++            // A [1 2 1] tent of bilinear taps with the variance of the periphery's reconstruction (k^2 / 6).
++            const float2 stepUv = b * dcsvrK * 0.57735 / dcsvrFocusSize;
++            const float2 lo = 0.5 / dcsvrFocusSize, hi = 1 - lo;
++            float4 sum = 0;
++            [unroll] for (int j = -1; j <= 1; ++j) {
++                [unroll] for (int i = -1; i <= 1; ++i) {
++                    sum += (2 - abs(i)) * (2 - abs(j)) *
++                           sourceFocusTexture.SampleLevel(sourceSampler, clamp(layer1TexCoord + float2(i, j) * stepUv, lo, hi), 0);
++                }
++            }
++            color1 = sum / 16;
++        }
++    }
+ 
+     if (ignoreAlpha) {
+         color0.a = color1.a = 1;
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index ecc5b79..284febe 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -73,8 +73,11 @@ namespace openxr_api_layer {
+         alignas(4) bool ignoreAlpha;
+         alignas(4) bool isUnpremultipliedAlpha;
+         alignas(4) bool debugFocusView;
++        // DCSVR edge match (dcsvr_edge_match): before focusViewShape, so that ProjectionPS.nofardepth.hlsl keeps
++        // focusViewShape last in its cbuffer, where Far depth's constants are added (tests/depthwarp anchors there).
++        alignas(4) float dcsvrEdgeMatch;
+         alignas(4) float focusViewShape;
+-        alignas(4) float padding[3];
++        alignas(4) float padding[2];
+         // DCSVR Far depth (dcsvr_depthwarp_ps.hlsli): x 1 while a field is bound, yz focus uv to periphery uv, w 1 for a
+         // held field; the held field's reprojection. All 0 without Far depth.
+         alignas(4) float dcsvrWarp[4];
+@@ -3725,6 +3728,7 @@ namespace openxr_api_layer {
+                 ProjectionPSConstants drawing{};
+                 drawing.smoothingArea = m_smoothenFocusViewEdges;
+                 drawing.focusViewShape = m_focusViewShape;
++                drawing.dcsvrEdgeMatch = m_dcsvrEdgeMatch;
+                 drawing.ignoreAlpha = ~(layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT);
+                 drawing.isUnpremultipliedAlpha = layerFlags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+                 drawing.debugFocusView = m_debugFocusView;
+@@ -4851,6 +4855,9 @@ namespace openxr_api_layer {
+                     } else if (name == "dcsvr_sharpen_taper") {
+                         m_dcsvrSharpenTaper = std::stoi(value);
+                         parsed = true;
++                    } else if (name == "dcsvr_edge_match") {
++                        m_dcsvrEdgeMatch = std::clamp(std::stof(value), 0.f, 1.f);
++                        parsed = true;
+                     } else if (name == "focus_view_shape") {
+                         m_focusViewShape = std::clamp(std::stof(value), 0.f, 16.f);
+                         parsed = true;
+@@ -4948,6 +4955,7 @@ namespace openxr_api_layer {
+         bool m_forceNoEyeTracking{false};
+         float m_smoothenFocusViewEdges{0.2f};
+         float m_focusViewShape{0.f};
++        float m_dcsvrEdgeMatch{0.f};
+         bool m_dcsvrSharpenTaper{false};
+         float m_dcsvrPeripherySharpen{0.f};
+         // DCSVR periphery stability: settings, the gaze of each located display time, the per-frame decision, each

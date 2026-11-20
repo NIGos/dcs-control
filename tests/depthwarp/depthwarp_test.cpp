@@ -859,8 +859,9 @@ struct Image {
 struct PsConstants {
     float smoothingArea;
     uint32_t ignoreAlpha, unpremultiplied, debugFocusView;
+    float edgeMatch;  // dcsvr_edge_match (patches/quadviews/0019-edge-match.patch; 0 here: off)
     float focusViewShape;
-    float pad[3];
+    float pad[2];
     float warp[4];
     float reuse[3][4];
 };

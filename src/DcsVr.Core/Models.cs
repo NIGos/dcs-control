@@ -158,6 +158,11 @@ public sealed record VrProfile
     /// <summary>Bundled Quad Views: the focus sharpening fades out over the same edge band as the focus area, so detail
     /// steps down gradually into the periphery instead of ending at the edge (dcsvr_sharpen_taper).</summary>
     public bool QuadSharpenTaper { get; init; } = true;
+    /// <summary>Bundled Quad Views: inside the focus area's edge band its detail first tapers to the periphery's own
+    /// resolution, then fades out (dcsvr_edge_match; round and rounded-rectangle shapes). Without it the band crossfades
+    /// two images of very different sharpness, which reads as a ring around where you look. Off by default until seen in
+    /// the headset; no effect with <see cref="UsesFoveatedFrameGen"/> (the two-layer output pass has no edge match).</summary>
+    public bool QuadEdgeMatch { get; init; }
     /// <summary>DLSS 5 over the whole focus area: its look (tone, colour, structure) fades out toward the focus edge with
     /// the focus area itself, so the focus area is not a disc of a different look. Cheeky's NR feather over the whole
     /// focus view (NrFoveated with NrWidth=1), as wide as the Quad Views edge band allows (Cheeky caps it at 0.3).</summary>
@@ -170,8 +175,33 @@ public sealed record VrProfile
     /// noise does not make its edge shimmer. Real eye movements are followed in the same frame.</summary>
     public bool QuadGazeStabilize { get; init; } = true;
     /// <summary>The focus area's reach during a saccade, as gaze-to-headset latency: about one rendered frame without
-    /// frame generation, more with it (it waits for the next rendered frame), most in 3X.</summary>
-    public int QuadSaccadeLeadMs => FrameGen == FrameGeneration.Off ? 25 : FrameGenFactor == 2 ? 55 : 85;
+    /// frame generation, more with it (it waits for the next rendered frame), most in 3X. With the saccade tail (no frame
+    /// generation only) 40 ms: flown in GitHub PR #26 on a Crystal Super at 72 FPS, 25 ms still showed the periphery at
+    /// landings; tracker + one rendered frame + compositor is about 30-45 ms. The frame generation values are the ones
+    /// flown with frame generation and stay until the tail is flown with it.</summary>
+    public int QuadSaccadeLeadMs => FrameGen == FrameGeneration.Off ? (UsesQuadSaccadeTail ? 40 : 25) : FrameGenFactor == 2 ? 55 : 85;
+    /// <summary>Eye-tracked bundled Quad Views without frame generation, with <see cref="QuadSaccadeLead"/>: the focus area
+    /// stays ahead of the eyes until they land (dcsvr_saccade_tail; native/quadviews/dcsvr_gaze.h). The lead's saccade
+    /// ends below 50 deg/s instead of 120 (saccades decelerate sharply just before they land), its leading edge never
+    /// retreats during one saccade, repeated tracker samples are not taken for the eye stopping, the lead is 40 ms instead
+    /// of 25 with up to 0.5 instead of 0.35, and nothing is held after the landing (<see cref="QuadSaccadeHoldMs"/>).
+    /// Off, or with frame generation: the filter exactly as without these keys (tests/quadviews-gaze checks it).</summary>
+    public bool QuadSaccadeTail { get; init; } = true;
+    public bool UsesQuadSaccadeTail => QuadSaccadeTail && QuadSaccadeLead && Gaze == GazeMode.EyeTracked && FrameGen == FrameGeneration.Off;
+    /// <summary>How long the focus area stays widened after a saccade, fading out (dcsvr_saccade_hold_ms). Without the tail
+    /// 40 ms: the single threshold ends the saccade while the eye still decelerates. With it 0: the saccade already lasts
+    /// until the gaze samples show the landing, and every frame located after that is centred on the landed gaze. In
+    /// tests/quadviews-gaze (90 Hz, 40 ms lead and latency, 20-degree saccade) a hold adds widened frames after the landing
+    /// (4 without, 8 with 55 ms) and never moves the landed eye inside the box: it was inside on every frame either way.</summary>
+    public int QuadSaccadeHoldMs => UsesQuadSaccadeTail ? 0 : 40;
+    /// <summary>The farthest the focus area reaches during a saccade (NDC, per axis): 0.5 with the tail (its 40 ms lead
+    /// covers more angle than 25 ms), otherwise 0.35, also with frame generation until a wider one is flown there.</summary>
+    public double QuadSaccadeMaxExtend => UsesQuadSaccadeTail ? 0.5 : 0.35;
+    /// <summary>Eye-tracked bundled Quad Views without frame generation: when the tracker loses the eyes (past Quad Views'
+    /// 600 ms cache), the focus area slides to the fixed one over 150 ms instead of jumping (dcsvr_lost_ease_ms). A gaze
+    /// found again is followed at once. Off, or with frame generation: dcsvr_lost_ease_ms=0, the jump.</summary>
+    public bool QuadLostGazeEase { get; init; } = true;
+    public bool UsesQuadLostGazeEase => QuadLostGazeEase && Gaze == GazeMode.EyeTracked && FrameGen == FrameGeneration.Off;
     /// <summary>Quad Views turbo: DCS starts the next frame while the runtime still holds the previous one. Quad Views itself
     /// enables it on most runtimes and disables it on SteamVR; off by default until measured in the headset.</summary>
     public bool QuadTurbo { get; init; }

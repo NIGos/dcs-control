@@ -5,8 +5,8 @@ window.runWebSmoke = async function() {
   // here; a failure names the paths that differ. frameGenPipelinedDeepHold is deliberately absent: it follows the
   // Smoothness buffer and stays in the profile file only.
   const PROFILE_FIELDS = [
-    'quadViews','gaze','quadSaccadeLead','quadGazeStabilize','quadTurbo','quadViewsLayerDirectory','foveaSource','quadFocusScale','pimaxPeripheral','pimaxHorizontalFov','pimaxVerticalFov','pimaxVerticalOffset',
-    'quadEdgeBlend','quadRoundFocus','quadSharpening','quadSharpenTaper','quadPeripheryContrast',
+    'quadViews','gaze','quadSaccadeLead','quadSaccadeTail','quadGazeStabilize','quadLostGazeEase','quadTurbo','quadViewsLayerDirectory','foveaSource','quadFocusScale','pimaxPeripheral','pimaxHorizontalFov','pimaxVerticalFov','pimaxVerticalOffset',
+    'quadEdgeBlend','quadRoundFocus','quadEdgeMatch','quadSharpening','quadSharpenTaper','quadPeripheryContrast',
     'neuralRendering','neuralRuntimePath','keepOtherDxgi','neuralFocusArea','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity','neuralStyle',
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',

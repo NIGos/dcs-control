@@ -615,8 +615,10 @@ void account_locked(const XrView* views, std::uint32_t count, const Vec3* gaze, 
             // The pupil's gaze filter this second: saccades followed, single-frame spikes ignored (tracker noise).
             const auto f = pupil_filter.take_stats();
             const auto k = pupil_lock.take_stats();
-            log("pupil filter: tracker noise %.2f deg%s, %u samples, %u held (blinks), %u saccades moved the pupil, smooth %.0f ms at rest\n",
-                f.noise_deg, k.noisy ? " (too noisy: pupil back to rest)" : "", f.samples, f.held, k.saccades, settings.smooth_s * 1000);
+            log("pupil filter: tracker noise %.2f deg%s, %u samples, %u held (blinks), %u saccades moved the pupil, %u tracker "
+                "spikes ignored, smooth %.0f ms at rest\n",
+                f.noise_deg, k.noisy ? " (too noisy: pupil back to rest)" : "", f.samples, f.held, k.saccades - std::min(k.saccades, k.ignored),
+                k.ignored, settings.smooth_s * 1000);
         }
         if (!stats.shifted)
             log("stats: frames=%u shifted=0 (%s); runtime left eye vs head x[%.2f..%.2f] mm; cant %.1f deg, runtime IPD %.1f mm, rendered IPD %.1f mm; %s\n",
