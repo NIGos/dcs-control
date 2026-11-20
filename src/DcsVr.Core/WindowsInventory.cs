@@ -39,6 +39,37 @@ public sealed class WindowsInventory
         return standard;
     }
 
+    /// <summary>Virtual Desktop's OpenXR runtime manifest (VDXR): under Program Files, else wherever the registered
+    /// runtimes say; null when Virtual Desktop Streamer is not installed.</summary>
+    public static string? VirtualDesktopRuntimeManifest(string? activeRuntime)
+    {
+        var standard = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json");
+        if (File.Exists(standard)) return standard;
+        if (IsVirtualDesktopRuntime(activeRuntime) && File.Exists(activeRuntime)) return Path.GetFullPath(activeRuntime!);
+        try
+        {
+            using var runtimes = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Khronos\OpenXR\1\AvailableRuntimes");
+            if (runtimes?.GetValueNames().FirstOrDefault(p => IsVirtualDesktopRuntime(p) && File.Exists(p)) is { } found) return Path.GetFullPath(found);
+        }
+        catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or IOException) { }
+        return null;
+    }
+
+    /// <summary>True for VDXR's 64-bit manifest (virtualdesktop-openxr.json; the -32 one is for 32-bit games).</summary>
+    public static bool IsVirtualDesktopRuntime(string? manifest) =>
+        manifest is not null && Path.GetFileName(manifest).Equals("virtualdesktop-openxr.json", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The active OpenXR runtime manifest (HKLM ...\Khronos\OpenXR\1 ActiveRuntime); null when unset or unreadable.</summary>
+    public static string? ActiveOpenXrRuntime()
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Khronos\OpenXR\1");
+            return key?.GetValue("ActiveRuntime") as string;
+        }
+        catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or IOException) { return null; }
+    }
+
     public InventorySnapshot Capture(string? executableOverride = null, string? optionsOverride = null)
     {
         var observations = new List<string>();
@@ -130,6 +161,7 @@ public sealed class WindowsInventory
             DcsExecutable = executable, OptionsPath = options,
             ActiveRuntime = activeRuntime, PimaxRuntime = File.Exists(pimaxManifest) ? pimaxManifest : null,
             SteamVrRuntime = steamManifest is not null && File.Exists(steamManifest) ? steamManifest : null,
+            VirtualDesktopRuntime = VirtualDesktopRuntimeManifest(activeRuntime),
             PimaxVersion = pimax.Version,
             DcsRunning = dcsRunning,
             Files = files, Layers = layers, Drivers = drivers, DcsSettings = settings, Observations = observations,
