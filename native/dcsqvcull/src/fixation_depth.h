@@ -2240,7 +2240,9 @@ void KeepDsv(ID3D11DeviceContext* c, ID3D11DepthStencilView* d) {
 }
 // R70: the MV target bound with the DSV just recorded (the latest bind of that entry that had one wins).
 void KeepMv(ID3D11DeviceContext* c, ID3D11DepthStencilView* d, UINT n, ID3D11RenderTargetView* const* r) {
-  if (!d || c != g_s.ctx || !(g_mvWanted.load(std::memory_order_relaxed) || tvc::g_engaged.load(std::memory_order_relaxed)) ||
+  if (!d || c != g_s.ctx ||
+      !(g_mvWanted.load(std::memory_order_relaxed) ||
+        (tvc::g_engaged.load(std::memory_order_relaxed) && !(tvc::g_isolate.load(std::memory_order_relaxed) & 8u))) ||
       !g_seqN || g_seq[g_seqN - 1] != d)
     return;
   if (ID3D11RenderTargetView* mv = MvOfBind(n, r)) g_seqMv[g_seqN - 1] = mv;
@@ -3336,6 +3338,10 @@ std::atomic<bool> g_loggedFirst{false};
 // disengage is DCS's complete view and stays as it is.
 uint64_t g_patchedSeen = 0, g_culledFrame = ~0ull;
 std::atomic<uint64_t> g_notCulled{0};
+// A copy texture (re)made in this frame: nothing of this frame is pushed (Quad Views first sees a texture one frame
+// after it was made and filled), counted.
+uint64_t g_madeFrame = ~0ull;
+std::atomic<uint64_t> g_deferredPushes{0}, g_idleReleases{0}, g_postSkipped{0};
 
 bool Flag() { return tvc::g_engaged.load(std::memory_order_relaxed) || g_tail > 0; }
 
@@ -3370,7 +3376,14 @@ void FrameStart(uint64_t frame) {
   else if (g_tail > 0)
     --g_tail;
   tvc::g_layerMask.store(fdexport::QvWanted(), std::memory_order_relaxed);
-  if (!tvc::g_engaged.load(std::memory_order_relaxed) && g_tail == 0 && (frame % 240) == 0 && g_held) ReleaseAll();
+  // Idle: Quad Views drops its references to our copies, but the copies are kept (made once, remade only when DCS's
+  // depth changes size or format; released with the device): a switch-on reuses textures the GPU is long done with.
+  if (!tvc::g_engaged.load(std::memory_order_relaxed) && g_tail == 0 && (frame % 240) == 0 && g_held) {
+    fdexport::QvRelease(g_gen);
+    g_held = false;
+    g_gen = (g_gen + 2) | 1u;
+    g_idleReleases++;
+  }
 }
 
 // Our copy texture t matching DCS's depth of run r (made or remade; a remake drops the layer's references first).
@@ -3399,6 +3412,7 @@ bool Ensure(fdexport::Tex& t, const Run& r) {
     return false;
   }
   g_texCreates++;
+  g_madeFrame = s.frame;
   t = fdexport::Tex{nt, r.rawFmt, r.texW, r.texH};
   return true;
 }
@@ -3476,7 +3490,9 @@ void Post(int idx, bool afterTransparent) {
   const Run& r = g_postRun[idx];
   const int slot = static_cast<int>(s.frame % kTvSlots);
   fdexport::Tex& t = g_post[idx][slot];
-  if (s.ctx && Ensure(t, r)) {
+  const bool noPost = (tvc::g_isolate.load(std::memory_order_relaxed) & 1u) != 0;  // [Views] ThreeViewsIsolate bit 1
+  if (noPost) g_postSkipped++;
+  if (s.ctx && !noPost && Ensure(t, r)) {
     s.ctx->CopySubresourceRegion(t.t, 0, 0, 0, 0, r.tex, D3D11CalcSubresource(0, r.slice, r.mipLevels), nullptr);
     d.postTransparent = t.t;
     d.flags |= DCSVR_DEPTH_HAS_POST_TRANSPARENT;
@@ -3486,6 +3502,10 @@ void Post(int idx, bool afterTransparent) {
   ReleaseRun(g_postRun[idx]);
   g_hasDesc[idx] = false;
   if (idx == 1) g_flagged++;
+  if (g_madeFrame == s.frame) {  // a texture of ours was (re)made this frame: the push waits for the next frame
+    g_deferredPushes++;
+    return;
+  }
   const uint32_t res = fdexport::QvPush(d);
   g_lastResult = res;
   if (res == ~0u) return;
@@ -6009,7 +6029,8 @@ void OnBoundaryInner(void* pass, bool begin) {
     else if (begin && (k == plod::kGBuffer || k == plod::kLights || k == plod::kHmd) && (tvexp::g_hasDesc[0] || tvexp::g_hasDesc[1]))
       tvexp::PostAll();
     // The fill inside the engine: the OM entries armed for the periphery views' TransparentCockpitPass (TvOnBind).
-    if (k == plod::kOther && (g_tvArm || g_tvOwnArm || (begin && tvexp::Flag())) &&
+    if (k == plod::kOther &&
+        (g_tvArm || g_tvOwnArm || (begin && tvexp::Flag() && !(tvc::g_isolate.load(std::memory_order_relaxed) & 2u))) &&
         PassIs(pass, "TransparentCockpitPass")) {
       if (begin && (s.hmdOrd == 0 || s.hmdOrd == 1) && s.lastHmdCount == 4 && tvexp::g_hasDesc[s.hmdOrd]) {
         if (!g_armTable) g_tvOwnArm = ArmOm(true);

@@ -233,6 +233,7 @@ void LoadConfig(bool initial) {
   c.suiteEarlyShaderCensus = static_cast<int>(GetPrivateProfileIntW(L"Suite", L"EarlyShaderCensus", 0, ini.c_str()));
   c.threeViews = GetPrivateProfileIntW(L"Views", L"ThreeViews", 0, ini.c_str()) != 0;  // 0.7 three_views.h
   c.threeViewsStripNdc = std::clamp(ReadDouble(L"Views", L"ThreeViewsStripNdc", 0.55, ini), 0.2, 0.9);
+  c.threeViewsIsolate = static_cast<int>(GetPrivateProfileIntW(L"Views", L"ThreeViewsIsolate", 0, ini.c_str())) & 15;
   {
     wchar_t hk[64];
     GetPrivateProfileStringW(L"Views", L"ThreeViewsKey", L"0:0", hk, 64, ini.c_str());

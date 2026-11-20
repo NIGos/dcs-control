@@ -289,7 +289,8 @@ void UninstallCb() {
 std::atomic<bool> g_cbWanted{false};  // worker: the CSSetConstantBuffers entry should be on the table
 void OnPass(bool begin, bool inRight) {
   ++vstrip::g_passSeq;
-  const bool arm = begin && inRight && tvc::g_engaged.load(std::memory_order_relaxed);
+  const bool arm = begin && inRight && tvc::g_engaged.load(std::memory_order_relaxed) &&
+                   !(tvc::g_isolate.load(std::memory_order_relaxed) & 4u);  // [Views] ThreeViewsIsolate bit 4
   if (arm) {
     vstrip::g_s = static_cast<float>(tvc::g_stripNdc.load(std::memory_order_relaxed));
     vstrip::EnsureCb(chainfast::g_ctx);
@@ -406,11 +407,14 @@ void LogStatus() {
       (unsigned long long)fixdepth::tvexp::g_skipProj.load(), tvc::g_layerMask.load());
   // The fill inside the engine (option C): per periphery TransparentCockpitPass, left copies and right fills.
   Log("three views: engine fill: left copies %llu, right fills %llu, not run %llu, no left copy %llu, target not float %llu, "
-      "left without motion %llu; right view not culled (DCS's own, not flagged) %llu",
+      "left without motion %llu; right view not culled (DCS's own, not flagged) %llu; pushes deferred after a copy texture "
+      "was made %llu, idle layer releases %llu, post-transparent copies left out %llu (isolate 0x%x)",
       (unsigned long long)fixdepth::tvexp::g_leftCopies.load(), (unsigned long long)fixdepth::tvexp::g_fills.load(),
       (unsigned long long)fixdepth::tvexp::g_fillSkips.load(), (unsigned long long)fixdepth::tvexp::g_noLeft.load(),
       (unsigned long long)fixdepth::tvexp::g_badTarget.load(), (unsigned long long)fixdepth::tvexp::g_noMv.load(),
-      (unsigned long long)fixdepth::tvexp::g_notCulled.load());
+      (unsigned long long)fixdepth::tvexp::g_notCulled.load(), (unsigned long long)fixdepth::tvexp::g_deferredPushes.load(),
+      (unsigned long long)fixdepth::tvexp::g_idleReleases.load(), (unsigned long long)fixdepth::tvexp::g_postSkipped.load(),
+      tvc::g_isolate.load());
 }
 
 // ---------------------------------------------------------------------------

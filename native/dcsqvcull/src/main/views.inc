@@ -32,6 +32,10 @@ std::atomic<uint32_t> g_layerMask{0};  // Quad Views' DcsVr_QuadViewsDepthWanted
 std::atomic<double> g_stripNdc{0.55};  // [Views] ThreeViewsStripNdc: the right periphery's world is drawn for NDC x >= it
 std::atomic<uint64_t> g_patched{0}, g_refused{0}, g_ckKept{0}, g_notRight{0};
 std::atomic<int> g_logLeft{0};         // collect log lines left (set on each engage)
+// [Views] ThreeViewsIsolate (dev, default 0, hot): parts of the mode left out to isolate a fault. 1 no post-transparent
+// depth copy / push, 2 no fill inside the engine (Quad Views' fill only), 4 no terrain chain narrowing, 8 no motion
+// target recorded for the engine fill.
+std::atomic<uint32_t> g_isolate{0};
 // Fixation depth's pass boundary (render thread): begin / end of a top-level pass, inRight = the pass belongs to the
 // right periphery (HMD view 1 by the CopyToHMDPass ordinal, four HMD views in the last frame). three_views.h.
 std::atomic<void (*)(bool begin, bool inRight)> g_onPass{nullptr};
