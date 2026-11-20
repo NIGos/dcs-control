@@ -10,9 +10,9 @@
 // view's render resolution; the state it touches is saved and put back exactly (SavedState; no device context state
 // swap), OM and viewport binds through DCS's own entries (our hooks do not see them as DCS's), stencil test NOT_EQUAL COCKPIT, depth test ALWAYS with writes, colour blended over DCS's only in a
 // short cross-fade at the strip's inner edge. A sample the left eye sees covered (its depth, bilinear footprint) is
-// refused; a pixel without a usable sample takes the farther of its nearest usable neighbours on the row (background
-// stretch, softened across three rows), none within 24 texels: the direction at infinity. Samples nearer than 1.5 m
-// (cockpit structure only the left eye sees) are used only when nothing farther is found within 48 texels.
+// refused; a pixel without a usable sample (a hole) blends the background samples found around it in eight directions
+// (up to 48 texels; samples at an occluder's edge refused), none found: the direction at infinity. Samples nearer than
+// 1.5 m (cockpit structure only the left eye sees) are used only when nothing farther is found.
 #pragma once
 
 namespace tvfill {
@@ -205,13 +205,16 @@ float3 ToLeft(float2 ndc, float d) {
 }
 // A sample nearer than the limit: cockpit structure the left eye sees, never a right-eye world pixel.
 bool Near(float d) { return misc.x > 0 && d > misc.x; }
-bool LeftOccluded(float3 l) {
+bool LeftOccludedAt(float3 l, float e) {
   float2 t = l.xy * vpL.zw;
-  int2 a = int2(clamp(floor(t - 0.5), 0, vpL.zw - 1)) + int2(vpL.xy), b = int2(clamp(floor(t + 0.5), 0, vpL.zw - 1)) + int2(vpL.xy);
+  int2 a = int2(clamp(floor(t - e), 0, vpL.zw - 1)) + int2(vpL.xy), b = int2(clamp(floor(t + e), 0, vpL.zw - 1)) + int2(vpL.xy);
   float m = max(max(depL.Load(int3(a.x, a.y, 0)), depL.Load(int3(b.x, a.y, 0))),
                 max(depL.Load(int3(a.x, b.y, 0)), depL.Load(int3(b.x, b.y, 0))));
   return m > l.z * 1.15 + 1e-6;
 }
+// A hole's background sample: its bilinear footprint and the texels 2 away free of anything nearer.
+bool LeftOccludedWide(float3 l) { return LeftOccludedAt(l, 0.5) || LeftOccludedAt(l, 2.5); }
+bool LeftOccluded(float3 l) { return LeftOccludedAt(l, 0.5); }
 
 void VS(uint i : SV_VertexID, out float4 pos : SV_Position) {
   float2 t = float2((i << 1) & 2, i & 2);
@@ -230,8 +233,7 @@ Out PS(float4 pos : SV_Position) {
   float3 l = 0;
   float d = 0;
   bool found = false;
-  // A sample nearer than misc.x (cockpit structure only the left eye sees) is used only when nothing farther is usable:
-  // the first search pass takes far samples only (twice the reach), the second is the plain search.
+  // A sample nearer than misc.x (cockpit structure only the left eye sees) is used only when nothing farther is usable.
   bool nearHere = false;
   if (s != 0) {
     d = asfloat(s);
@@ -240,42 +242,66 @@ Out PS(float4 pos : SV_Position) {
     nearHere = found && Near(d);
     if (nearHere) found = false;
   }
-  bool fl = false, fr = false;
-  float dl = 0, dr = 0;
-  float3 ul = 0, ur = 0;
-  [loop] for (int ph = (misc.x > 0 ? 0 : 1); ph < 2 && !found && !fl && !fr; ++ph) {
-    int n = ph == 0 ? 2 * (int)strip.w : (int)strip.w;
-    for (int i = 1; i <= n && !(fl && fr); ++i) {
-      [unroll] for (int side = 0; side < 2; ++side) {
-        if (side == 0 ? fl : fr) continue;
-        int x = side == 0 ? rt.x - i : rt.x + i;
-        if (x < 0 || x >= (int)vpR.z) continue;
-        uint a = splatR.Load(int3(x, rt.y, 0));
-        if (a == 0 || (ph == 0 && Near(asfloat(a)))) continue;
-        float3 lu = ToLeft(float2(((x + 0.5) / vpR.z) * 2 - 1, ndc.y), asfloat(a));
-        if (LeftOccluded(lu)) continue;
-        if (side == 0) { fl = true; dl = asfloat(a); ul = lu; } else { fr = true; dr = asfloat(a); ur = lu; }
+  // A hole (no usable sample here, or only a near one): the background around it. Eight directions, each up to
+  // strip.w texels in growing steps; per direction the first usable far sample whose left footprint has no nearer
+  // pixel within 2 texels (a sample at an occluder's edge carries the occluder's colour: a canopy rail stretched into
+  // the sky). Of those found, the background ones (at least half as far as the farthest, or beyond 30 m: not a nearer
+  // surface beside the hole) are blended by inverse squared distance: a smooth fill, no row streaks. Its depth and
+  // motion are the nearest background sample's. Nothing far found: the near sample here, else the direction at infinity.
+  float2 uvL = 0;
+  float3 c = 0;
+  if (found) {
+    uvL = saturate(l.xy);
+    c = colL.SampleLevel(lin, uvL, 0).rgb;
+  } else {
+    float3 acc = 0;
+    float wsum = 0, dfar = 1e30;
+    float3 cs[8];
+    float ds[8], rs[8];
+    float2 us[8];
+    int nf = 0;
+    const int2 dirs[8] = {int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1), int2(1, 1), int2(-1, -1), int2(1, -1), int2(-1, 1)};
+    [loop] for (int k = 0; k < 8; ++k) {
+      float r = 1;
+      [loop] for (int it = 0; it < 12 && r <= strip.w; ++it) {
+        int2 q = rt + int2(dirs[k] * r);
+        r = r < 4 ? r + 1 : floor(r * 1.4);
+        if (any(q < 0) || any(q >= int2(vpR.zw))) break;
+        uint a = splatR.Load(int3(q, 0));
+        if (a == 0 || Near(asfloat(a))) continue;
+        float2 qn = (float2(q) + 0.5) / vpR.zw;
+        float3 lu = ToLeft(float2(qn.x * 2 - 1, 1 - qn.y * 2), asfloat(a));
+        if (LeftOccludedWide(lu)) continue;
+        ds[nf] = asfloat(a);
+        rs[nf] = length(float2(dirs[k]) * r);
+        us[nf] = saturate(lu.xy);
+        cs[nf] = colL.SampleLevel(lin, us[nf], 0).rgb;
+        dfar = min(dfar, ds[nf]);
+        ++nf;
+        break;
       }
     }
-    if (ph == 0 && !fl && !fr && nearHere) found = true;  // nothing farther: the near sample here, as before
-  }
-  if (!found) {
-    if (!fl && !fr) {
-      d = 1e-7;
-      l = ToLeft(ndc, d);
-    } else if (!fr || (fl && dl <= dr)) {
-      d = dl; l = ul;
+    if (nf > 0) {
+      float wbest = 0;
+      [loop] for (int j = 0; j < nf; ++j) {
+        // Background: at least half as far as the farthest (reverse Z), or beyond 30 m (misc.x is 1.5 m).
+        if (ds[j] > 2 * dfar + 1e-7 && !(misc.x > 0 && ds[j] < misc.x * 0.05)) continue;
+        float wj = 1 / (rs[j] * rs[j]);
+        acc += cs[j] * wj;
+        wsum += wj;
+        if (wj > wbest) wbest = wj, d = ds[j], uvL = us[j];  // depth and motion: the nearest background sample's
+      }
+      c = acc / wsum;
+    } else if (nearHere) {
+      uvL = saturate(l.xy);
+      c = colL.SampleLevel(lin, uvL, 0).rgb;
     } else {
-      d = dr; l = ur;
+      d = 1e-7;
+      uvL = saturate(ToLeft(ndc, d).xy);
+      c = colL.SampleLevel(lin, uvL, 0).rgb;
     }
   }
-  float2 uvL = saturate(l.xy);
   Out o;
-  float3 c = colL.SampleLevel(lin, uvL, 0).rgb;
-  if (!found) {  // a stretched sample: softened across rows (one left column per row draws horizontal streaks)
-    float2 dy = float2(0, 1.5 / vpL.w);
-    c = (2 * c + colL.SampleLevel(lin, saturate(uvL - dy), 0).rgb + colL.SampleLevel(lin, saturate(uvL + dy), 0).rgb) * 0.25;
-  }
   o.col = float4(c, 1 - w);
   o.mv = mvL.Load(int3(clamp(int2(uvL * vpL.zw), 0, int2(vpL.zw) - 1), 0));
   o.depth = d;
@@ -390,7 +416,7 @@ class Fill {
     memcpy(k.M10, in.M10, sizeof(k.M10));
     k.vpL[0] = in.vpL.TopLeftX, k.vpL[1] = in.vpL.TopLeftY, k.vpL[2] = in.vpL.Width, k.vpL[3] = in.vpL.Height;
     k.vpR[0] = in.vpR.TopLeftX, k.vpR[1] = in.vpR.TopLeftY, k.vpR[2] = in.vpR.Width, k.vpR[3] = in.vpR.Height;
-    k.strip[0] = in.strip, k.strip[1] = in.strip + 0.01f, k.strip[2] = in.strip + 0.06f, k.strip[3] = 24.f;
+    k.strip[0] = in.strip, k.strip[1] = in.strip + 0.01f, k.strip[2] = in.strip + 0.06f, k.strip[3] = 48.f;
     k.misc[0] = in.nearLimit;
     SavedState saved;
     if (!saved.Save(ctx)) {

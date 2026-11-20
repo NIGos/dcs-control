@@ -355,7 +355,7 @@ uint8_t* TvStripVolume(const ViewInfo& v, const ViewInfo& other, const uint8_t* 
 }
 
 // Three views, engaged: every collection of the right periphery (the second periphery view in collect order) except
-// the cockpit's (shading model 4: they keep DCS's full volume) culls with the strip volume. Returns the right
+// the cockpit's (shading model 4 or viewport tag 600: they keep DCS's full volume) culls with the strip volume. Returns the right
 // periphery's view index (R3's exclusion leaves it alone), or -1 when nothing was patched.
 int TvPatch(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, int* patchedOut,
             const std::vector<ViewInfo>& views) {
@@ -388,7 +388,10 @@ int TvPatch(uint32_t count, uint8_t* infos, Patch* patches, size_t maxPatches, i
   for (uint32_t i = 0; i < count && static_cast<size_t>(n) < maxPatches; ++i) {
     uint8_t* o = infos + i * kCollectionInfoStride;
     if (*reinterpret_cast<uint8_t**>(o + kCiClipVolume) != src) continue;
-    if (*reinterpret_cast<const uint16_t*>(o + kCiShadingModel) == 4) {
+    // The cockpit keeps DCS's full volume: shading model 4 (its opaque G-buffer) and every collection under the
+    // cockpit viewport tag 600 (shading models 9 / 10 there: the cockpit's transparent materials, the HUD combiner
+    // glass and its frame among them; culled to the strip they went missing from the right eye's view).
+    if (*reinterpret_cast<const uint16_t*>(o + kCiShadingModel) == 4 || *reinterpret_cast<const uint32_t*>(o + kCiViewportTag) == 600) {
       tvc::g_ckKept++;
       continue;
     }
