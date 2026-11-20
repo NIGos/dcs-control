@@ -482,28 +482,39 @@ class Fill {
     ID3D11Resource* r;
     UINT key;
     V* v;
+    uint64_t used;  // m_uses at its last lookup
   };
+  // Views are cached by texture (each holds its texture). Above `cap` entries, the ones not looked up in the last
+  // kStale lookups are released: never a view this fill just took (releasing it would free it before its bind), and
+  // DCS's textures from before a mission change or resize are let go.
+  static constexpr uint64_t kStale = 256;
+  template <class V>
+  void Trim(std::vector<Entry<V>>& c, size_t cap) {
+    if (c.size() <= cap) return;
+    for (size_t i = 0; i < c.size();)
+      if (m_uses - c[i].used > kStale) c[i].v->Release(), c[i] = c.back(), c.pop_back();
+      else ++i;
+  }
   bool Srv(ID3D11Device* dev, ID3D11Texture2D* t, DXGI_FORMAT f, ID3D11ShaderResourceView** out) {
     if (f == DXGI_FORMAT_UNKNOWN) return false;
+    ++m_uses;
     for (auto& e : m_srvs)
-      if (e.r == t && e.key == static_cast<UINT>(f)) return *out = e.v, true;
-    if (m_srvs.size() > 24) {
-      for (auto& e : m_srvs) e.v->Release();
-      m_srvs.clear();
-    }
+      if (e.r == t && e.key == static_cast<UINT>(f)) return e.used = m_uses, *out = e.v, true;
+    Trim(m_srvs, 24);
     D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
     sd.Format = f;
     sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     sd.Texture2D.MipLevels = 1;
     ID3D11ShaderResourceView* v = nullptr;
     if (FAILED(dev->CreateShaderResourceView(t, &sd, &v)) || !v) return false;
-    m_srvs.push_back({t, static_cast<UINT>(f), v});
+    m_srvs.push_back({t, static_cast<UINT>(f), v, m_uses});
     *out = v;
     return true;
   }
   bool Dsv(ID3D11Device* dev, ID3D11Texture2D* t, UINT slice, ID3D11DepthStencilView** out) {
+    ++m_uses;
     for (auto& e : m_dsvs)
-      if (e.r == t && e.key == slice) return *out = e.v, true;
+      if (e.r == t && e.key == slice) return e.used = m_uses, *out = e.v, true;
     D3D11_TEXTURE2D_DESC td{};
     t->GetDesc(&td);
     D3D11_DEPTH_STENCIL_VIEW_DESC dd{};
@@ -518,11 +529,8 @@ class Fill {
     }
     ID3D11DepthStencilView* v = nullptr;
     if (FAILED(dev->CreateDepthStencilView(t, &dd, &v)) || !v) return false;
-    if (m_dsvs.size() > 8) {
-      for (auto& e : m_dsvs) e.v->Release();
-      m_dsvs.clear();
-    }
-    m_dsvs.push_back({t, slice, v});
+    Trim(m_dsvs, 8);
+    m_dsvs.push_back({t, slice, v, m_uses});
     *out = v;
     return true;
   }
@@ -554,6 +562,7 @@ class Fill {
   UINT m_sw = 0, m_sh = 0;
   std::vector<Entry<ID3D11ShaderResourceView>> m_srvs;
   std::vector<Entry<ID3D11DepthStencilView>> m_dsvs;
+  uint64_t m_uses = 0;
 };
 
 // Left NDC (post-divide, reverse-Z depth) to right homogeneous NDC: inv(Pl) * VIl * inv(VIr) * Pr, row vectors; the camera

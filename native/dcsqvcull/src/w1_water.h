@@ -543,6 +543,10 @@ bool g_skipView = false; // mode 3: this view is not submitted (its passes are h
 ViewPlan g_plan = kPlanTest;  // this view's plan, decided at its mask pass
 Gate g_gate;
 uint64_t g_lastCuts = 0;
+// Another feature changed what a view draws (0.7 three views engage / disengage: the right periphery was strip-culled,
+// so the gate learnt it dry): bumped there, the gate re-arms at the next frame like after a camera cut.
+std::atomic<uint64_t> g_rearms{0};
+uint64_t g_lastRearms = 0;
 int64_t g_lastFrameQpc = 0;
 // Counters (read by the worker's log line)
 std::atomic<uint64_t> g_cTested[kViews], g_cSkipped[kViews], g_cKept[kViews], g_cForced[kViews], g_cStock[kViews],
@@ -786,12 +790,14 @@ void NewFrame(uint64_t frame) {
   LARGE_INTEGER q;
   QueryPerformanceCounter(&q);
   const bool gap = g_lastFrameQpc && (q.QuadPart - g_lastFrameQpc) * g_qpcToUs > g_gapMs * 1000.0;
-  if (cuts != g_lastCuts || gap) {
+  const uint64_t rearms = g_rearms.load(std::memory_order_relaxed);
+  if (cuts != g_lastCuts || rearms != g_lastRearms || gap) {
     if (gap) ReleaseMTargets();  // a mission load may have made new ones
     g_gate.Arm();
     g_cArms.fetch_add(1, std::memory_order_relaxed);
   }
   g_lastCuts = cuts;
+  g_lastRearms = rearms;
   g_lastFrameQpc = q.QuadPart;
   Poll();
   g_gate.BeginFrame();

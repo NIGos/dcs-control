@@ -6140,6 +6140,13 @@ void OnBoundaryInner(void* pass, bool begin) {
         if ((g_cpArmOwn || g_cpLearnArmOwn) && !g_overlayArm && !g_trOpen && !g_hdrArmOwn) DisarmOm();
         g_cpArmOwn = g_cpLearnArmOwn = false;
       }
+      if (g_tvArm || g_tvOwnArm) {  // 0.7 three views: a TransparentCockpitPass whose end did not come
+        g_tvArm = false;
+        if (g_tvOwnArm) {
+          g_tvOwnArm = false;
+          if (!g_overlayArm && !g_trOpen && !g_cmOvlArm && !g_hdrArmOwn) DisarmOm();
+        }
+      }
       if (g_dumpPass || g_dumpArm) {  // a frame dump's watched pass whose end did not come
         ckipd::DumpPassClose();
         g_dumpPass = false;

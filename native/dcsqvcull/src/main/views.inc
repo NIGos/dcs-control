@@ -34,7 +34,8 @@ std::atomic<uint64_t> g_patched{0}, g_refused{0}, g_ckKept{0}, g_notRight{0};
 std::atomic<int> g_logLeft{0};         // collect log lines left (set on each engage)
 // [Views] ThreeViewsIsolate (dev, default 0, hot): parts of the mode left out to isolate a fault. 1 no post-transparent
 // depth copy / push, 2 no fill inside the engine (Quad Views' fill only), 4 no terrain chain narrowing, 8 no motion
-// target recorded for the engine fill.
+// target recorded for the engine fill, 16 the narrowed terrain planes in a constant buffer of ours bound in place of
+// DCS's (three_views.h vstrip::OwnMode) instead of written into DCS's buffer.
 std::atomic<uint32_t> g_isolate{0};
 // Fixation depth's pass boundary (render thread): begin / end of a top-level pass, inRight = the pass belongs to the
 // right periphery (HMD view 1 by the CopyToHMDPass ordinal, four HMD views in the last frame). three_views.h.

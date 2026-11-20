@@ -514,7 +514,16 @@ class ThreeViews {
         if (!t) return false;
         auto it = m_views.find(t);
         if (it == m_views.end()) {
-            if (m_views.size() > 16) m_views.clear();
+            // Over 16 textures (each engage or resize brings new copies): the ones this frame's latches do not hold
+            // go. Never all of them: the views this Fill took a moment ago would be freed before their bind.
+            if (m_views.size() > 16) {
+                for (auto e = m_views.begin(); e != m_views.end();) {
+                    ID3D11Texture2D* k = e->first;
+                    const bool live = k == m_latch[0].texture.Get() || k == m_latch[1].texture.Get() ||
+                                      k == m_latch[0].postTransparent.Get() || k == m_latch[1].postTransparent.Get();
+                    e = live ? std::next(e) : m_views.erase(e);
+                }
+            }
             DXGI_FORMAT df, sf;
             DepthSrvFormats(l.desc.format, df, sf);
             if (df == DXGI_FORMAT_UNKNOWN || sf == DXGI_FORMAT_UNKNOWN) return false;

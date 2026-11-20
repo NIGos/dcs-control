@@ -138,7 +138,7 @@ DWORD WINAPI WorkerThread(void*) {
       if (static_cast<uint32_t>(g_cfg.threeViewsIsolate) != tvc::g_isolate.load()) {
         tvc::g_isolate = static_cast<uint32_t>(g_cfg.threeViewsIsolate);
         Log("three views: isolate 0x%x (1 no post-transparent depth, 2 no engine fill, 4 no terrain chain narrowing, 8 no "
-            "motion target record)", tvc::g_isolate.load());
+            "motion target record, 16 terrain planes in our own constant buffer)", tvc::g_isolate.load());
       }
       const bool tvKey = g_cfg.threeViewsKeyVk > 0 && KeyDown(g_cfg.threeViewsKeyVk) && ModifiersMatch(g_cfg.threeViewsKeyMods);
       if (g_cfg.threeViews || tvc::g_cfgOn.load())

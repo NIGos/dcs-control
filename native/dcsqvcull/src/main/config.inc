@@ -116,7 +116,7 @@ struct Config {
   uint32_t earlyShaders = 0;             // [D3D] EarlyShaders (early_shaders.h, 0.7: bit 0 SSAO water skip on DCS's SSAO shaders identified at bind time; bit 1 hot-air idle skip (copy / compose passes not run when every HotAirPass of the frame drew nothing); bits 2-4 reserved, refused; default 0 = nothing installed)
   bool threeViews = false;               // [Views] ThreeViews (three_views.h, 0.7: right periphery = strip + cockpit, the bundled Quad Views fills the rest; default 0)
   double threeViewsStripNdc = 0.55;      // [Views] ThreeViewsStripNdc (0.2-0.9): the right periphery's world is drawn for NDC x >= it
-  int threeViewsIsolate = 0;             // [Views] ThreeViewsIsolate (dev bitmask, default 0): 1 no post-transparent depth, 2 no engine fill, 4 no terrain chain narrowing, 8 no motion target record
+  int threeViewsIsolate = 0;             // [Views] ThreeViewsIsolate (dev bitmask, default 0): 1 no post-transparent depth, 2 no engine fill, 4 no terrain chain narrowing, 8 no motion target record, 16 terrain planes in our own constant buffer instead of DCS's
   int threeViewsKeyVk = 0, threeViewsKeyMods = 0;  // [Views] ThreeViewsKey (vk:mods, default 0:0 = none): toggles it in flight
   int suiteThreeViewsTiming = 0;         // [Suite] ThreeViewsTiming: OFF / ON pairs (0 = off), [Suite] WaterSkipTimingFrames frames per block
   int suiteEarlyShaderCensus = 0;        // [Suite] EarlyShaderCensus (early_shaders.h: each new non-zero value runs one census of one frame, early_census_<N>.csv; measure only; non-zero at payload start also installs the shader creation record)

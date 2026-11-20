@@ -40,6 +40,14 @@ bool g_failed = false, g_stPending = false;
 std::atomic<uint64_t> g_patches{0}, g_binds{0}, g_noTc{0}, g_skipIdent{0}, g_ok{0}, g_notOk{0}, g_otherView{0};
 ID3D11Buffer* g_lastBuf = nullptr;
 uint64_t g_lastSeq = ~0ull, g_sinceRead = 0;
+// [Views] ThreeViewsIsolate bit 16 (crash bisect): the narrowed planes go into a constant buffer of ours, bound at the
+// TerrainContext's slot in DCS's place, instead of being copied back into DCS's own buffer; DCS's buffer is bound again
+// at the pass end. g_ownFor / g_ownSlot: what g_own stands in for (render thread).
+ID3D11Buffer* g_own = nullptr;
+ID3D11Buffer* g_ownFor = nullptr;
+UINT g_ownSlot = 0;
+std::atomic<uint64_t> g_ownBinds{0}, g_ownRestores{0}, g_cbForeign{0};
+bool OwnMode() { return (tvc::g_isolate.load(std::memory_order_relaxed) & 16u) != 0; }
 constexpr UINT kTcBytes = 2176;
 
 // One thread: copies DCS's TerrainContext, finds among the culling planes (rows 28..33) the two matching the clip
@@ -105,6 +113,8 @@ bool Ensure(ID3D11DeviceContext* c) {
     ok = ok && SUCCEEDED(dev->CreateBuffer(&d, nullptr, &g_copy));
     d.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
     ok = ok && SUCCEEDED(dev->CreateBuffer(&d, nullptr, &g_out));
+    D3D11_BUFFER_DESC cd{kTcBytes, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
+    ok = ok && SUCCEEDED(dev->CreateBuffer(&cd, nullptr, &g_own));
     D3D11_BUFFER_DESC dd{256, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0,
                          D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, 0};
     ok = ok && SUCCEEDED(dev->CreateBuffer(&dd, nullptr, &g_diag));
@@ -168,8 +178,19 @@ bool IsTc(ID3D11Buffer* b) {
   b->GetDesc(&d);
   return d.ByteWidth == kTcBytes && (d.BindFlags & D3D11_BIND_CONSTANT_BUFFER) && d.Usage == D3D11_USAGE_DEFAULT;
 }
-// Copy, our kernel, copy back; DCS's compute state put back as it was.
-void PatchBuf(ID3D11DeviceContext* c, ID3D11Buffer* tc) {
+using CbFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11Buffer* const*);
+CbFn CbOrig(ID3D11DeviceContext* c);
+// Binds b at CS slot `slot` past our own CSSetConstantBuffers entry (DCS's d3d11 function, or the table's when ours
+// is not on it).
+void BindCb(ID3D11DeviceContext* c, UINT slot, ID3D11Buffer* b) {
+  const bool was = g_inOwn;
+  g_inOwn = true;
+  if (const CbFn o = CbOrig(c)) o(c, slot, 1, &b);
+  else c->CSSetConstantBuffers(slot, 1, &b);
+  g_inOwn = was;
+}
+// Copy, our kernel, copy back (or, own mode, into our buffer bound in DCS's place); DCS's compute state put back.
+void PatchBuf(ID3D11DeviceContext* c, ID3D11Buffer* tc, UINT slot) {
   if (chainfast::g_fpLive.load(std::memory_order_relaxed)) {  // a fingerprint job owns the render thread's CS state
     g_skipIdent.fetch_add(1, std::memory_order_relaxed);
     return;
@@ -196,7 +217,15 @@ void PatchBuf(ID3D11DeviceContext* c, ID3D11Buffer* tc) {
   c->CSSetUnorderedAccessViews(0, 2, puav, keep);
   c->CSSetShaderResources(0, 1, &psrv);
   chainfast::g_setOrig(c, pcs, nci ? pci : nullptr, nci);
-  c->CopyResource(tc, g_out);
+  const bool own = OwnMode() && g_own;
+  if (own) {
+    c->CopyResource(g_own, g_out);
+    BindCb(c, slot, g_own);
+    g_ownFor = tc, g_ownSlot = slot;
+    g_ownBinds.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    c->CopyResource(tc, g_out);
+  }
   if (!g_stPending && ++g_sinceRead >= 31) c->CopyResource(g_stDiag, g_diag), g_stPending = true, g_sinceRead = 0;
   ReadDiag(c);
   for (ID3D11UnorderedAccessView* v : puav)
@@ -216,18 +245,21 @@ void OnCsSet(ID3D11DeviceContext* c, ID3D11ComputeShader*) {
   g_binds.fetch_add(1, std::memory_order_relaxed);
   ID3D11Buffer* b = nullptr;
   c->CSGetConstantBuffers(11, 1, &b);
+  if (b && b == g_own) {  // own mode: ours already stands in for DCS's
+    b->Release();
+    return;
+  }
   if (!IsTc(b)) {
     g_noTc.fetch_add(1, std::memory_order_relaxed);
     if (b) b->Release();
     return;
   }
-  if (b != g_lastBuf || g_lastSeq != g_passSeq) PatchBuf(c, b);
+  if (b != g_lastBuf || g_lastSeq != g_passSeq) PatchBuf(c, b, 11);
   b->Release();
 }
 
 // Our CSSetConstantBuffers entry on DCS's immediate context's table (armed at each right-periphery pass begin: d3d11
 // rewrites the slot): a TerrainContext DCS binds there is patched after its bind, before its dispatch.
-using CbFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11Buffer* const*);
 void STDMETHODCALLTYPE H_CSSetConstantBuffers(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* const* b);
 struct CbT { void** vt; void* orig; };
 CbT g_cbt[8];
@@ -239,8 +271,13 @@ CbFn CbOrig(ID3D11DeviceContext* c) {
   const int n = g_ncbt.load(std::memory_order_acquire);
   for (int i = 0; i < n; ++i)
     if (g_cbt[i].vt == vt) return reinterpret_cast<CbFn>(g_cbt[i].orig);
+  // A table we never hooked carries our entry (d3d11 copied it): another table's d3d11 function stands in. Counted:
+  // a non-zero count in the status line is a lead for the switch-on crash.
   for (int i = 0; i < n; ++i)
-    if (g_cbt[i].orig != reinterpret_cast<void*>(&H_CSSetConstantBuffers)) return reinterpret_cast<CbFn>(g_cbt[i].orig);
+    if (g_cbt[i].orig != reinterpret_cast<void*>(&H_CSSetConstantBuffers)) {
+      g_cbForeign.fetch_add(1, std::memory_order_relaxed);
+      return reinterpret_cast<CbFn>(g_cbt[i].orig);
+    }
   return nullptr;
 }
 void STDMETHODCALLTYPE H_CSSetConstantBuffers(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* const* b) {
@@ -249,7 +286,7 @@ void STDMETHODCALLTYPE H_CSSetConstantBuffers(ID3D11DeviceContext* c, UINT s, UI
   if (g_inOwn || !g_arm.load(std::memory_order_relaxed) || c != chainfast::g_ctx || !b) return;
   g_cbBinds.fetch_add(1, std::memory_order_relaxed);
   for (UINT i = 0; i < n && i < 16; ++i)
-    if (IsTc(b[i])) PatchBuf(c, b[i]);
+    if (b[i] != g_own && IsTc(b[i])) PatchBuf(c, b[i], s + i);
 }
 bool EnsureCb(ID3D11DeviceContext* c) {
   if (!c) return false;
@@ -276,6 +313,18 @@ bool EnsureCb(ID3D11DeviceContext* c) {
   return true;
 }
 // Render thread or after the render thread stopped calling us (g_arm false first).
+// Own mode, render thread at the pass end (and before a disengage): DCS's buffer back at its slot if ours is there.
+void RestoreOwn(ID3D11DeviceContext* c) {
+  if (!g_ownFor || !c) return;
+  ID3D11Buffer* cur = nullptr;
+  c->CSGetConstantBuffers(g_ownSlot, 1, &cur);
+  if (cur == g_own) {
+    BindCb(c, g_ownSlot, g_ownFor);
+    g_ownRestores.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (cur) cur->Release();
+  g_ownFor = nullptr;
+}
 void UninstallCb() {
   for (int i = 0; i < g_ncbt.load(); ++i)
     if (g_cbSlot >= 0 && g_cbt[i].vt[g_cbSlot] == reinterpret_cast<void*>(&H_CSSetConstantBuffers))
@@ -295,6 +344,7 @@ void OnPass(bool begin, bool inRight) {
     vstrip::g_s = static_cast<float>(tvc::g_stripNdc.load(std::memory_order_relaxed));
     vstrip::EnsureCb(chainfast::g_ctx);
   }
+  if (!begin || !arm) vstrip::RestoreOwn(chainfast::g_ctx);  // own mode: DCS's TerrainContext bound again
   vstrip::g_arm.store(arm, std::memory_order_relaxed);
   if (!begin && !g_cbWanted.load(std::memory_order_relaxed) && vstrip::g_ncbt.load(std::memory_order_relaxed))
     vstrip::UninstallCb();  // disengaged: our entry off the table on the thread that uses it
@@ -341,6 +391,8 @@ void Tick(bool cfgOn, double stripNdc, int keyVk, int keyMods, bool engineOff, b
   else if ((mask & 3u) != 3u) why = "the Quad Views layer does not ask for the periphery views (not a three-views build)";
   const bool on = why.empty();
   if (on != tvc::g_engaged.load()) {
+    // W1's per-view gate learnt the right periphery while it drew only its strip (or the whole view): it tests again.
+    w1::g_rearms.fetch_add(1, std::memory_order_relaxed);
     if (on) {
       if (chainfast::g_onSetCensus.load() == nullptr) chainfast::g_onSetCensus = &vstrip::OnCsSet;
       tvc::g_logLeft = 2;
@@ -381,7 +433,7 @@ void Shutdown() {
   for (IUnknown** p : {reinterpret_cast<IUnknown**>(&vstrip::g_copySrv), reinterpret_cast<IUnknown**>(&vstrip::g_outUav),
                        reinterpret_cast<IUnknown**>(&vstrip::g_diagUav), reinterpret_cast<IUnknown**>(&vstrip::g_copy),
                        reinterpret_cast<IUnknown**>(&vstrip::g_out), reinterpret_cast<IUnknown**>(&vstrip::g_diag),
-                       reinterpret_cast<IUnknown**>(&vstrip::g_stDiag), reinterpret_cast<IUnknown**>(&vstrip::g_cs)})
+                       reinterpret_cast<IUnknown**>(&vstrip::g_stDiag), reinterpret_cast<IUnknown**>(&vstrip::g_cs), reinterpret_cast<IUnknown**>(&vstrip::g_own)})
     if (*p) (*p)->Release(), *p = nullptr;
 }
 
@@ -389,7 +441,7 @@ void Shutdown() {
 void LogStatus() {
   Log("three views: %s; collect: strip volumes %llu, refused %llu, cockpit collections kept %llu; terrain chain: "
       "patches %llu (binds %llu, CB binds %llu, no TerrainContext %llu, during identification %llu, diag ok %llu / "
-      "not matched %llu / other view %llu, kernel %s); periphery depth: copies %llu, pushes %llu, accepted %llu, "
+      "not matched %llu / other view %llu, kernel %s, own buffer binds %llu restores %llu, foreign table %llu); periphery depth: copies %llu, pushes %llu, accepted %llu, "
       "rejected %llu (last result %u), flagged %llu, after water %llu, skipped arm %llu identity %llu format %llu proj "
       "%llu; Quad Views wants 0x%x",
       tvc::g_engaged.load() ? "ENGAGED" : "off", (unsigned long long)tvc::g_patched.load(),
@@ -398,7 +450,8 @@ void LogStatus() {
       (unsigned long long)vstrip::g_cbBinds.load(), (unsigned long long)vstrip::g_noTc.load(),
       (unsigned long long)vstrip::g_skipIdent.load(), (unsigned long long)vstrip::g_ok.load(),
       (unsigned long long)vstrip::g_notOk.load(), (unsigned long long)vstrip::g_otherView.load(),
-      vstrip::g_failed ? "FAILED" : (vstrip::g_cs ? "ok" : "not built"),
+      vstrip::g_failed ? "FAILED" : (vstrip::g_cs ? "ok" : "not built"), (unsigned long long)vstrip::g_ownBinds.load(),
+      (unsigned long long)vstrip::g_ownRestores.load(), (unsigned long long)vstrip::g_cbForeign.load(),
       (unsigned long long)fixdepth::tvexp::g_copies.load(), (unsigned long long)fixdepth::tvexp::g_pushes.load(),
       (unsigned long long)fixdepth::tvexp::g_accepted.load(), (unsigned long long)fixdepth::tvexp::g_rejected.load(),
       fixdepth::tvexp::g_lastResult.load(), (unsigned long long)fixdepth::tvexp::g_flagged.load(),
