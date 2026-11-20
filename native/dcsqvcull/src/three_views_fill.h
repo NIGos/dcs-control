@@ -245,9 +245,8 @@ Out PS(float4 pos : SV_Position) {
   // A hole (no usable sample here, or only a near one): the background around it. Eight directions, each up to
   // strip.w texels in growing steps; per direction the first usable far sample whose left footprint has no nearer
   // pixel within 2 texels (a sample at an occluder's edge carries the occluder's colour: a canopy rail stretched into
-  // the sky). Of those found, the background ones (at least half as far as the farthest, or beyond 30 m: not a nearer
-  // surface beside the hole) are blended by inverse squared distance: a smooth fill, no row streaks. Its depth and
-  // motion are the nearest background sample's. Nothing far found: the near sample here, else the direction at infinity.
+  // the sky). Those found are blended by inverse squared distance and depth likeness to the row's background: a smooth
+  // fill, no row streaks. Nothing far found: the near sample here, else the direction at infinity.
   float2 uvL = 0;
   float3 c = 0;
   if (found) {
@@ -255,7 +254,7 @@ Out PS(float4 pos : SV_Position) {
     c = colL.SampleLevel(lin, uvL, 0).rgb;
   } else {
     float3 acc = 0;
-    float wsum = 0, dfar = 1e30;
+    float wsum = 0, dfar = 1e30, drow = 1e30;
     float3 cs[8];
     float ds[8], rs[8];
     float2 us[8];
@@ -277,19 +276,22 @@ Out PS(float4 pos : SV_Position) {
         us[nf] = saturate(lu.xy);
         cs[nf] = colL.SampleLevel(lin, us[nf], 0).rgb;
         dfar = min(dfar, ds[nf]);
+        if (k < 2) drow = min(drow, ds[nf]);  // the row's farther side: where a horizontal parallax hole's background is
         ++nf;
         break;
       }
     }
     if (nf > 0) {
-      float wbest = 0;
+      // The reference depth: the row's farther sample (else the farthest found). Samples more than twice as near are
+      // a nearer surface (refused) unless beyond 30 m (misc.x is 1.5 m); the rest are weighted by inverse squared
+      // distance and by depth likeness to the reference, so a hole at the horizon does not mix sky into terrain.
+      float dref = drow < 1e29 ? drow : dfar, wbest = 0;
       [loop] for (int j = 0; j < nf; ++j) {
-        // Background: at least half as far as the farthest (reverse Z), or beyond 30 m (misc.x is 1.5 m).
-        if (ds[j] > 2 * dfar + 1e-7 && !(misc.x > 0 && ds[j] < misc.x * 0.05)) continue;
-        float wj = 1 / (rs[j] * rs[j]);
+        if (ds[j] > 2 * dref + 1e-7 && !(misc.x > 0 && ds[j] < misc.x * 0.05)) continue;
+        float wj = exp(-2 * abs(log(max(ds[j], 1e-7) / max(dref, 1e-7)))) / (rs[j] * rs[j]);
         acc += cs[j] * wj;
         wsum += wj;
-        if (wj > wbest) wbest = wj, d = ds[j], uvL = us[j];  // depth and motion: the nearest background sample's
+        if (wj > wbest) wbest = wj, d = ds[j], uvL = us[j];  // depth and motion: the most weighted sample's
       }
       c = acc / wsum;
     } else if (nearHere) {
