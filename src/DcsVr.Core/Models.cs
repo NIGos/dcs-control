@@ -3,7 +3,9 @@ using System.Text.Json.Serialization;
 
 namespace DcsVr.Core;
 
-public enum RuntimeKind { Pimax, SboysSteamVr }
+/// <summary>The headset route. VirtualDesktop is a Quest (or other standalone headset) streamed by Virtual Desktop
+/// through its own OpenXR runtime, VDXR; no eye tracking, so the Quad Views focus is fixed.</summary>
+public enum RuntimeKind { Pimax, SboysSteamVr, VirtualDesktop }
 public enum QuadProvider { None, PimaxNative, QuadViewsFoveated }
 /// <summary>The corner of the view the in-headset panel is drawn in.</summary>
 public enum PanelPosition { UpperRight, UpperLeft, LowerRight, LowerLeft }
@@ -563,7 +565,7 @@ public sealed record VrProfile
     /// <summary>The boost helper is started with DCS: for CPU Boost, Free VRAM before flight or the monitor mode.</summary>
     public bool UsesBoostHelper => CpuBoost || FreeVram || UsesLowerMonitor || UsesTobiiPause;
     /// <summary>The desktop Tobii pause is for a Pimax next to a desktop tracker, never with <see cref="Desktop"/>.</summary>
-    public bool UsesTobiiPause => PauseTobiiDesktop && !Desktop;
+    public bool UsesTobiiPause => PauseTobiiDesktop && !Desktop && Runtime != RuntimeKind.VirtualDesktop;
     /// <summary>The monitor mode and the small DCS window are for the desktop mirror of a VR flight, never with
     /// <see cref="Desktop"/>, where they would shrink the game itself.</summary>
     public bool UsesLowerMonitor => LowerMonitor && !Desktop;
@@ -616,6 +618,8 @@ public sealed record InventorySnapshot
     public string? ActiveRuntime { get; init; }
     public string? PimaxRuntime { get; init; }
     public string? SteamVrRuntime { get; init; }
+    /// <summary>Virtual Desktop's OpenXR runtime manifest (VDXR, virtualdesktop-openxr.json); null when not installed.</summary>
+    public string? VirtualDesktopRuntime { get; init; }
     public string? PimaxVersion { get; init; }
     public bool DcsRunning { get; init; }
     public TrackingKind Tracking { get; init; }
@@ -715,6 +719,7 @@ public static class ProfilePresets
         new() { Id = "pimax-neural", Name = "Pimax · DLSS 5 + framegen (no Quad Views)", QuadViews = QuadProvider.None, FrameGen = FrameGeneration.Nvidia, FoveatedDlss = true, NeuralRendering = true },
         new() { Id = "sboys-neural", Name = "Sboys · DLSS 5 + framegen (no Quad Views)", Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.None, FrameGen = FrameGeneration.Nvidia, FoveatedDlss = true, NeuralRendering = true },
         new() { Id = "pimax-combined", Name = "Pimax · DLSS 5 + framegen + Quad Views", QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, FrameGen = FrameGeneration.Nvidia, NeuralRendering = true },
-        new() { Id = "sboys-combined", Name = "Sboys · DLSS 5 + framegen + Quad Views", Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, FrameGen = FrameGeneration.Nvidia, NeuralRendering = true }
+        new() { Id = "sboys-combined", Name = "Sboys · DLSS 5 + framegen + Quad Views", Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.QuadViewsFoveated, QuadFocusAdapter = true, FrameGen = FrameGeneration.Nvidia, NeuralRendering = true },
+        HeadsetRoute.WithQuest3Focus(new() { Id = "vd-quadviews", Name = "Quest 3 VD · Quad Views (fixed focus)", Runtime = RuntimeKind.VirtualDesktop, QuadViews = QuadProvider.QuadViewsFoveated })
     ];
 }

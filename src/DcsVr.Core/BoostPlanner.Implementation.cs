@@ -109,6 +109,8 @@ public static partial class BoostPlanner
         // VR runtime services.
         if (profile.Runtime == RuntimeKind.SboysSteamVr && !profile.Desktop)
             notes.Add("SteamVR route: the OpenXR compositor (vrcompositor) and vrserver are left untouched. Confining them has not been shown to be safe and can stall presentation.");
+        if (profile.Runtime == RuntimeKind.VirtualDesktop && !profile.Desktop)
+            notes.Add("Quest 3 VD route: the Virtual Desktop Streamer (video encoding) is left untouched; confining it can add stutter to the stream.");
         if (profile.Desktop)
             notes.Add("Optimizations only: no VR runtime runs, so none is moved.");
         else if (!profile.BoostMoveVrRuntime)
