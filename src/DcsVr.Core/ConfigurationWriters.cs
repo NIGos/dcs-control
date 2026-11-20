@@ -474,6 +474,7 @@ public static class ConfigurationWriters
         smoothen_focus_view_edges={Number(p.QuadEdgeBlend)}
         focus_view_shape={(p.QuadRoundFocus ? 2 : 8)}
         dcsvr_sharpen_taper={(p.QuadSharpenTaper ? 1 : 0)}
+        dcsvr_edge_match={(p.QuadEdgeMatch ? "0.6" : "0")}
         dcsvr_periphery_sharpen={Number(p.QuadPeripheryContrast)}
         horizontal_fixed_section={Number(Math.Min(p.FoveaWidth, .9))}
         vertical_fixed_section={Number(Math.Min(p.FoveaHeight, .9))}
@@ -483,10 +484,13 @@ public static class ConfigurationWriters
         turbo_mode={(p.UsesQuadTurbo ? 1 : 0)}
         dcsvr_saccade_widening={(p.QuadSaccadeLead && p.Gaze == GazeMode.EyeTracked ? 1 : 0)}
         dcsvr_saccade_speed=120
+        dcsvr_saccade_end_speed={(p.QuadSaccadeTail ? 50 : 120)}
         dcsvr_saccade_lead_ms={Int(p.QuadSaccadeLeadMs)}
-        dcsvr_saccade_max_extend=0.35
-        dcsvr_saccade_hold_ms=40
+        dcsvr_saccade_max_extend={Number(p.QuadSaccadeMaxExtend)}
+        dcsvr_saccade_hold_ms={Int(p.QuadSaccadeHoldMs)}
+        dcsvr_saccade_latch={(p.QuadSaccadeTail ? 1 : 0)}
         dcsvr_gaze_deadzone={(p.QuadGazeStabilize && p.Gaze == GazeMode.EyeTracked ? "0.5" : "0")}
+        dcsvr_lost_ease_ms={(p.QuadLostGazeEase && p.Gaze == GazeMode.EyeTracked ? "150" : "0")}
         dcsvr_temporal={(p.UsesPeripheryStability ? 1 : 0)}
         dcsvr_temporal_tau_ms={Number(Math.Round(VrProfile.PeripheryStabilityMaxTauMs * Math.Clamp(p.PeripheryStabilityStrength, 0, 1), 1))}
         dcsvr_temporal_ramp_deg=8

@@ -609,8 +609,8 @@ void ReplaceOnce(std::string& text, const std::string& from, const std::string& 
 // The composition with Far depth, as scripts/build-quadviews.ps1 injects it (same anchors, exact-match once; the test
 // checks the built shader equals this).
 std::string InjectProjectionPS(std::string ps) {
-    ReplaceOnce(ps, "    float focusViewShape;\n};",
-                "    float focusViewShape;\n    float4 dcsvrWarp; // DCSVR Far depth: x on, yz focus uv -> periphery uv, w a held field\n"
+    ReplaceOnce(ps, "    float dcsvrEdgeMatch;\n};",
+                "    float dcsvrEdgeMatch;\n    float4 dcsvrWarp; // DCSVR Far depth: x on, yz focus uv -> periphery uv, w a held field\n"
                 "    float4 dcsvrReuse[3]; // DCSVR Far depth: a held field's reprojection\n};");
     ReplaceOnce(ps, "Texture2D sourceFocusTexture : register(t1);",
                 "Texture2D sourceFocusTexture : register(t1);\nTexture2D<float2> dcsvrDisparityField : register(t2);\n#include \"dcsvr_depthwarp_ps.hlsli\"");
@@ -860,7 +860,8 @@ struct PsConstants {
     float smoothingArea;
     uint32_t ignoreAlpha, unpremultiplied, debugFocusView;
     float focusViewShape;
-    float pad[3];
+    float edgeMatch;  // dcsvr_edge_match (0 here: off, the composition as before)
+    float pad[2];
     float warp[4];
     float reuse[3][4];
 };

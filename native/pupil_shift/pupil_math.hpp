@@ -269,11 +269,18 @@ private:
 // inside post-saccadic suppression, onto the mean of the last two raw samples; while the eyes fixate it drifts at most
 // kDriftDegS towards the filtered gaze (far below what is seen), which also follows smooth pursuit slowly. A tracker
 // noisier than kNoisyDeg cannot place it reliably: it then drifts back to rest (Stats::noisy, logged).
+// The pupil moves onto the per-axis median of the last kMedian raw samples, not the raw samples themselves: a tracker
+// spike (one or two bad frames, well inside the plausibility limits) also jumps by more than 3 degrees and opened the
+// window, and following the raw samples moved the pupil to the spike and back within 2-3 frames (0.3-2.6 mm for 4-15
+// degree spikes, the cockpit visibly juddering). The median ignores one and two bad frames and reaches a real landing
+// two frames after it; the window lasts kPostFrames + 1 frames after the last jump (33 ms at 90 Hz, still inside
+// post-saccadic suppression), so the median has landed before it closes. Windows that end where they started are
+// counted as ignored (Stats::ignored, logged).
 class PupilLock {
 public:
     static constexpr float kSaccadeDeg = 3.0f, kSaccadeSigmas = 5.0f, kDriftDegS = 1.0f, kNoisyDeg = 1.5f;
-    static constexpr int kPostFrames = 2;
-    struct Stats { unsigned saccades{}; bool noisy{}; };
+    static constexpr int kPostFrames = 3, kMedian = 5;
+    struct Stats { unsigned saccades{}, ignored{}; bool noisy{}; };
 
     // raw: this frame's gaze (both eyes, their frames) or nullptr; filtered: PupilGazeFilter's output, valid or not;
     // rest: each eye's straight ahead; noise_deg: the filter's measured tracker noise. Returns whether out is set.
@@ -283,22 +290,26 @@ public:
         bool moved = false;
         stats_.noisy = noise_deg > kNoisyDeg;
         if (raw) {
+            push_history(raw);
             if (have_prev_ && !stats_.noisy) {
                 const float speed = std::max(angle_deg(raw[0], prev_raw_[0]), angle_deg(raw[1], prev_raw_[1]));
                 if (speed > std::max(kSaccadeDeg, kSaccadeSigmas * noise_deg)) {
-                    if (window_ == 0) ++stats_.saccades;
+                    if (window_ == 0) { ++stats_.saccades; window_start_[0] = committed_[0]; window_start_[1] = committed_[1]; }
                     window_ = kPostFrames + 1;
                 }
             }
             if (window_ > 0) {
                 --window_;
-                for (int e = 0; e < 2; ++e) committed_[e] = have_prev_ ? normalized(prev_raw_[e] + raw[e]) : normalized(raw[e]);
+                for (int e = 0; e < 2; ++e) committed_[e] = history_median(e);
                 moved = true;
+                if (window_ == 0 && std::max(angle_deg(committed_[0], window_start_[0]), angle_deg(committed_[1], window_start_[1])) < 0.5f)
+                    ++stats_.ignored;
             }
             prev_raw_[0] = normalized(raw[0]); prev_raw_[1] = normalized(raw[1]);
             have_prev_ = true;
         } else {
             have_prev_ = false;  // a gap: the next sample is not a speed
+            history_n_ = 0;      // nor is the history before it the eye's position after it
         }
         if (stats_.noisy) window_ = 0;  // a noisy tracker never moves it: back to rest, slowly
         if (!moved) {
@@ -312,11 +323,33 @@ public:
         out[0] = committed_[0]; out[1] = committed_[1];
         return true;
     }
-    Stats take_stats() { const Stats s = stats_; stats_.saccades = 0; return s; }
+    Stats take_stats() { const Stats s = stats_; stats_.saccades = stats_.ignored = 0; return s; }
 
 private:
     static float angle_deg(Vec3 a, Vec3 b) { return std::acos(std::clamp(dot(normalized(a), normalized(b)), -1.0f, 1.0f)) * 57.29578f; }
-    Vec3 committed_[2]{{0, 0, -1}, {0, 0, -1}}, prev_raw_[2]{{0, 0, -1}, {0, 0, -1}};
+    // Each eye's horizontal and vertical angle (degrees) of the last kMedian raw samples.
+    void push_history(const Vec3* raw) {
+        for (int e = 0; e < 2; ++e) {
+            const Vec3 g = normalized(raw[e]);
+            history_[e][0][history_n_ % kMedian] = std::atan2(g.x, -g.z) * 57.29578f;
+            history_[e][1][history_n_ % kMedian] = std::atan2(g.y, -g.z) * 57.29578f;
+        }
+        ++history_n_;
+    }
+    Vec3 history_median(int e) const {
+        const int m = std::min(history_n_, kMedian);
+        float angle[2];
+        for (int a = 0; a < 2; ++a) {
+            float v[kMedian];
+            std::copy(history_[e][a], history_[e][a] + m, v);
+            std::nth_element(v, v + m / 2, v + m);
+            angle[a] = v[m / 2];
+        }
+        return normalized({std::tan(angle[0] / 57.29578f), std::tan(angle[1] / 57.29578f), -1.0f});
+    }
+    Vec3 committed_[2]{{0, 0, -1}, {0, 0, -1}}, prev_raw_[2]{{0, 0, -1}, {0, 0, -1}}, window_start_[2]{{0, 0, -1}, {0, 0, -1}};
+    float history_[2][2][kMedian]{};
+    int history_n_{};
     bool have_{}, have_prev_{};
     int window_{};
     Stats stats_{};

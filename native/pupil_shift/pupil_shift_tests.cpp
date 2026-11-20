@@ -1161,15 +1161,39 @@ int main() {
             float worst = 0;
             for (int i = 0; i < 45; ++i) { frame(dir(0, -20)); worst = std::max(worst, length(pupil_offset(out[0], rest, r) - pupil_offset(before, rest, r))); }
             check(worst < 0.0001f, "pupil lock: a clean fixation keeps the pupil still", worst * 1000, 0.1);
-            // An 18-degree saccade over 3 frames, then the fixation: on the landing within 2 frames after it.
+            // An 18-degree saccade over 3 frames, then the fixation: on the landing within 3 frames of it (33 ms at 90 Hz,
+            // inside post-saccadic suppression; the median of 5 that ignores tracker spikes needs 3 landed samples).
             frame(dir(5, -17)); frame(dir(12, -13));
             int frames = 99;
             for (int i = 0; i < 6; ++i) { frame(dir(15, -10)); if (frames == 99 && deg(out[0], dir(15, -10)) < 0.5f) frames = i + 1; }
-            check(frames <= 2, "pupil lock: a saccade moves the pupil onto the landing within 2 frames", frames, 2);
+            check(frames <= 3, "pupil lock: a saccade moves the pupil onto the landing within 3 frames", frames, 3);
             const Vec3 landed = out[0];
             for (int i = 0; i < 45; ++i) frame(dir(15, -10));
             check(deg(out[0], landed) < 0.5f, "pupil lock: it stays after the landing", deg(out[0], landed), 0.5);
             check(lock.take_stats().saccades >= 1, "pupil lock: the saccade counted", 0, 0);
+        }
+        // Tracker spikes during a clean fixation: a single bad frame 8 degrees off, then a pair of bad frames, each
+        // well inside the plausibility limits. Each one looks like a saccade (a frame-to-frame jump above 3 degrees);
+        // the pupil must not jump to it and back (that shows as the cockpit juddering by about a millimetre).
+        {
+            PupilGazeFilter f;
+            PupilLock lock;
+            Vec3 filtered[2], out[2];
+            const Vec3 rests[2] = {rest, rest};
+            const auto frame = [&](Vec3 g) {
+                const Vec3 in[2] = {g, g};
+                const bool v = f.update(in, dt, 0.25f, filtered);
+                return lock.update(in, v, filtered, rests, f.noise_deg(), dt, out);
+            };
+            for (int i = 0; i < 90; ++i) frame(dir(0, -20));
+            const Vec3 before = out[0];
+            float worst = 0;
+            for (int i = 0; i < 60; ++i) {
+                frame((i == 10 || i == 40 || i == 41) ? dir(8, -20) : dir(0, -20));
+                worst = std::max(worst, length(pupil_offset(out[0], rest, r) - pupil_offset(before, rest, r)));
+            }
+            check(worst < 0.0001f, "pupil lock: single and paired tracker spikes never move the pupil", worst * 1000, 0.1);
+            check(lock.take_stats().ignored >= 2, "pupil lock: the spikes are counted as ignored", 0, 0);
         }
         {
             Random rng;

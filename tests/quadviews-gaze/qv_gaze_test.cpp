@@ -39,6 +39,7 @@ Frame Locate(dcsvr::GazeFilter& f, const dcsvr::GazeSettings& s, int64_t t, floa
         dcsvr::GazeVec2 lo{std::fmax(-1.f, g.x - section), std::fmax(-1.f, g.y - section)};
         dcsvr::GazeVec2 hi{std::fmin(1.f, g.x + section), std::fmin(1.f, g.y + section)};
         const bool widened = f.Extend(eye, t, lo, hi, s);
+        f.Record(eye, t, lo, hi);
         if (eye == 0) out = {widened, lo, hi, g};
     }
     return out;
@@ -64,11 +65,13 @@ int main() {
         const Frame b = Locate(f, on, t += dt, 20.f);
         Check(b.widened && b.max.x >= Ndc(25.f), "2X: the box rendered mid-saccade already covers the 25-degree landing");
         Check(b.max.x - (Ndc(20.f) + 0.34f) <= on.maxExtend + 1e-5f, "2X: the reach is clamped to maxExtend");
+        // At rest a real tracker never repeats a sample exactly: a hundredth of a degree of noise (an exact repeat
+        // is the tracker having nothing new, see the repeated-sample checks below).
         const Frame c = Locate(f, on, t += dt, 25.f);
-        const Frame d = Locate(f, on, t += dt, 25.f);
+        const Frame d = Locate(f, on, t += dt, 25.01f);
         Check(!f.InSaccade() && d.widened && d.max.x - (Ndc(25.f) + 0.34f) < c.max.x - (Ndc(25.f) + 0.34f),
               "2X: after the eye rests the reach fades out over the 40 ms hold");
-        const Frame e = Locate(f, on, t += dt, 25.f);
+        const Frame e = Locate(f, on, t += dt, 24.99f);
         Check(!e.widened && std::fabs(e.max.x - (Ndc(25.f) + 0.34f)) < 1e-5f, "2X: then the normal box again");
     }
 
@@ -153,6 +156,182 @@ int main() {
             Locate(f, on, t, 5.1f);
         }
         Check(f.Stats().held <= f.Stats().eyeFrames, "held frames never exceed eye-frames");
+    }
+
+    // Saccade tail: a saccade that decelerates before landing (0 -> 12 -> 20 -> 22.5 -> 23.5 degrees at 45 FPS, i.e. 540,
+    // 360, 112, 45 deg/s). The 112 deg/s frame is the last one rendered before the landing and reaches the headset as the
+    // eye arrives: it stays in the saccade and keeps the farthest reach; the old single threshold dropped it.
+    {
+        const int64_t dt = 22'222'222;
+        auto run = [&](const dcsvr::GazeSettings& s, bool& tailInSaccade, bool& landedInSaccade, Frame& peak, Frame& tail) {
+            dcsvr::GazeFilter f;
+            int64_t t = 1'000'000'000;
+            Locate(f, s, t, 0.f);
+            Locate(f, s, t += dt, 12.f);
+            peak = Locate(f, s, t += dt, 20.f);
+            tail = Locate(f, s, t += dt, 22.5f);
+            tailInSaccade = f.InSaccade();
+            Locate(f, s, t += dt, 23.5f);
+            landedInSaccade = f.InSaccade();
+        };
+        bool tailIn{}, landedIn{}, oldTailIn{}, oldLandedIn{};
+        Frame peak{}, tail{}, oldPeak{}, oldTail{};
+        run(on, tailIn, landedIn, peak, tail);
+        dcsvr::GazeSettings old = on;
+        old.endSpeed = old.speed;
+        old.latch = false;
+        run(old, oldTailIn, oldLandedIn, oldPeak, oldTail);
+        Check(tailIn && !landedIn, "tail: the decelerating frame stays in the saccade, the 45 deg/s landing ends it");
+        Check(!oldTailIn, "tail: with one threshold and no latch (the old behaviour) that frame had left the saccade");
+        Check(tail.widened && tail.max.x >= peak.max.x - 1e-5f, "tail: the leading edge does not retreat while the eye decelerates");
+        Check(tail.max.x > oldTail.max.x + 0.05f, "tail: the frame before the landing reaches farther than before");
+    }
+
+    // A saccade that turns back (0 -> 10 -> 20 -> 8 degrees, never slow enough to end): the latch lets go at once and
+    // the box reaches left only, never toward the abandoned point on the right.
+    {
+        dcsvr::GazeFilter f;
+        const int64_t dt = 22'222'222;
+        int64_t t = 1'000'000'000;
+        Locate(f, on, t, 0.f);
+        Locate(f, on, t += dt, 10.f);
+        Locate(f, on, t += dt, 20.f);
+        const Frame back = Locate(f, on, t += dt, 8.f);
+        Check(f.Stats().saccades == 1 && back.widened && back.min.x < Ndc(8.f) - 0.34f - 0.05f &&
+                  std::fabs(back.max.x - (Ndc(8.f) + 0.34f)) < 1e-5f,
+              "reversal: the box follows the new direction, the right edge is back to normal");
+    }
+
+    // The next saccade starts a new reach: a small 4-degree move right after a large one in the same direction gets
+    // its own lead, not the previous saccade's farther point.
+    {
+        dcsvr::GazeFilter f;
+        const int64_t dt = 22'222'222;
+        int64_t t = 1'000'000'000;
+        Locate(f, on, t, 0.f);
+        Locate(f, on, t += dt, 10.f);
+        Locate(f, on, t += dt, 20.f);
+        for (int i = 0; i < 6; ++i) Locate(f, on, t += dt, 20.f + ((i % 2) ? 0.f : 0.01f));  // ends on exactly 20
+        Check(!f.InSaccade(), "second saccade: the first one has ended");
+        const Frame small = Locate(f, on, t += dt, 24.f);
+        const float lead = std::fmin(on.maxExtend, (Ndc(24.f) - Ndc(20.f)) * on.leadMs / 1000.f / (dt / 1e9f));
+        Check(f.Stats().saccades == 2 && std::fabs(small.max.x - (Ndc(24.f) + 0.34f + lead)) < 1e-4f,
+              "second saccade: its reach is its own velocity times the latency");
+    }
+
+    // Tracker noise right after a landing (0.3 degrees RMS) ends the saccade and never keeps it going.
+    {
+        dcsvr::GazeFilter f;
+        std::mt19937 rng(11);
+        std::normal_distribution<float> noise(0.f, 0.3f);
+        const int64_t dt = 22'222'222;
+        int64_t t = 1'000'000'000;
+        Locate(f, on, t, 0.f);
+        Locate(f, on, t += dt, 10.f);
+        Locate(f, on, t += dt, 20.f);
+        int inSaccade = 0;
+        for (int i = 0; i < 200; ++i) {
+            Locate(f, on, t += dt, 20.f + std::fmax(-0.45f, std::fmin(0.45f, noise(rng))));
+            if (i >= 1 && f.InSaccade()) ++inSaccade;
+        }
+        Check(inSaccade == 0 && f.Stats().saccades == 1, "noise after a landing is below the end speed: the saccade ends");
+    }
+
+    // The hold outlasts the latency (3X: 85 ms lead, 100 ms hold): frames displayed up to 85 ms after the last saccade
+    // frame are still widened, so the frames in flight at the landing all reach toward it.
+    {
+        dcsvr::GazeFilter f;
+        dcsvr::GazeSettings s = on;
+        s.leadMs = 85.f;
+        s.holdMs = 100.f;
+        s.maxExtend = 0.6f;
+        const int64_t dt = 11'111'111;  // display times at 90 Hz (generated frames are located too)
+        int64_t t = 1'000'000'000;
+        Locate(f, s, t, 0.f);
+        Locate(f, s, t += 33'333'333, 15.f);
+        const int64_t last = t;
+        int widenedWithinLatency = 0, frames = 0;
+        for (t += dt; t - last <= 85'000'000; t += dt, ++frames)
+            if (Locate(f, s, t, 15.f + ((frames % 2) ? 0.01f : -0.01f)).widened) ++widenedWithinLatency;
+        Check(frames > 0 && widenedWithinLatency == frames, "hold: every frame within the latency after the saccade is widened");
+    }
+
+    // Repeated samples: the tracker has nothing new for one frame in the middle of a saccade at 90 Hz and Quad Views
+    // hands out the last gaze again. Before, that frame read as 0 deg/s and ended the saccade and its lead.
+    {
+        dcsvr::GazeFilter f;
+        dcsvr::GazeSettings s = on;
+        s.leadMs = 25.f;
+        const int64_t dt = 11'111'111;
+        int64_t t = 1'000'000'000;
+        Locate(f, s, t, 0.f);
+        Locate(f, s, t += dt, 4.f);
+        const Frame before = Locate(f, s, t += dt, 9.f);
+        const Frame repeat = Locate(f, s, t += dt, 9.f);  // the same sample again
+        Check(f.InSaccade() && repeat.widened && repeat.max.x >= before.max.x - 1e-5f && f.Stats().repeated == 1,
+              "repeat: a repeated sample keeps the saccade and its reach");
+        Locate(f, s, t += dt, 18.f);
+        Check(f.InSaccade() && f.Speed() > 300.f && f.Speed() < 500.f,
+              "repeat: the next real sample measures the speed over both frames (9 deg in 22 ms)");
+        // The tracker loses the eyes and Quad Views repeats the last gaze for up to 600 ms: the saccade ends after 100 ms.
+        for (int i = 0; i < 10; ++i) Locate(f, s, t += dt, 18.f);
+        Check(!f.InSaccade(), "repeat: a repeat lasting 100 ms ends the saccade");
+        Check(f.Stats().eyeFrames == 2 * 15, "repeat: repeated frames still count as frames");
+    }
+
+    // Landing check: a 30-degree saccade over 3 frames at 90 Hz with one frame of lead (25 ms). Without the lead the box
+    // on screen as the eye lands is still centred on the gaze of 25 ms before: a miss. With it, it reaches the landing.
+    {
+        auto landing = [&](bool widening, uint64_t& landings, uint64_t& missed) {
+            dcsvr::GazeFilter f;
+            dcsvr::GazeSettings s = on;
+            s.widening = widening;
+            s.leadMs = 25.f;
+            const int64_t dt = 11'111'111;
+            int64_t t = 1'000'000'000;
+            for (int i = 0; i < 5; ++i) Locate(f, s, t += dt, (i % 2) ? 0.01f : -0.01f);
+            Locate(f, s, t += dt, 10.f);
+            Locate(f, s, t += dt, 20.f);
+            Locate(f, s, t += dt, 30.f);
+            for (int i = 0; i < 12; ++i) Locate(f, s, t += dt, 30.f + ((i % 2) ? 0.01f : -0.01f));
+            landings = f.Stats().landings;
+            missed = f.Stats().missed;
+        };
+        uint64_t landingsOff{}, missedOff{}, landingsOn{}, missedOn{};
+        landing(false, landingsOff, missedOff);
+        landing(true, landingsOn, missedOn);
+        Check(landingsOff == 1 && missedOff == 1, "landing: without the lead the eye lands outside the box on screen");
+        Check(landingsOn == 1 && missedOn == 0, "landing: with the lead it lands inside");
+    }
+
+    // Lost gaze: the focus eases from the last gaze to the fixed focus over 150 ms, then the caller shows the fixed one;
+    // a gaze seen again resets it.
+    {
+        dcsvr::GazeFilter f;
+        dcsvr::GazeSettings s = on;
+        s.lostEaseMs = 150.f;
+        const int64_t dt = 11'111'111;
+        int64_t t = 1'000'000'000;
+        Locate(f, s, t, 20.f);
+        const dcsvr::GazeVec2 last{Ndc(20.f), 0.f}, fixed{-0.05f, 0.f};
+        dcsvr::GazeVec2 out{};
+        bool eased = true, monotonic = true;
+        float previous = last.x;
+        int frames = 0;
+        for (t += dt; f.Ease(0, t, last, fixed, s, out); t += dt, ++frames) {
+            monotonic = monotonic && out.x <= previous + 1e-6f && out.x >= fixed.x - 1e-6f;
+            previous = out.x;
+        }
+        eased = frames >= 12 && frames <= 14;
+        Check(eased && monotonic, "lost gaze: the focus eases to the fixed one over 150 ms (13 frames at 90 Hz)");
+        Check(f.Stats().eased == 1, "lost gaze: counted once");
+        Locate(f, s, t += dt, 5.f);
+        Check(f.Ease(0, t += dt, {Ndc(5.f), 0.f}, fixed, s, out) && std::fabs(out.x - Ndc(5.f)) < 1e-4f,
+              "lost gaze: after the gaze returns, the next loss eases from the new gaze");
+        dcsvr::GazeFilter g;
+        dcsvr::GazeSettings off = on;
+        Locate(g, off, t, 20.f);
+        Check(!g.Ease(0, t + dt, last, fixed, off, out), "lost gaze: with lostEaseMs 0 the fixed focus shows at once");
     }
 
     std::printf("%d failure(s)\n", failures);
