@@ -361,9 +361,10 @@ void LoadConfig(bool initial) {
   if (c.fxApplySkipLogSec < 1) c.fxApplySkipLogSec = 1;
   if (c.fxApplySkipLogSec > 600) c.fxApplySkipLogSec = 600;
   c.suiteBenchFxApplySkip = GetPrivateProfileIntW(L"Suite", L"BenchFxApplySkip", 0, ini.c_str()) != 0;
-  // W1 (w1_water.h): [Water] SkipHiddenWater 0 off, 1 on, 2 verify; any other value is off.
+  // W1 (w1_water.h): [Water] SkipHiddenWater 0 off, 1 on, 2 verify, 3 no-submit, 4 verify of 3; any other value is off.
   c.waterSkip = static_cast<int>(GetPrivateProfileIntW(L"Water", L"SkipHiddenWater", 0, ini.c_str()));
-  if (c.waterSkip != 1 && c.waterSkip != 2) c.waterSkip = 0;
+  if (c.waterSkip < 1 || c.waterSkip > 4) c.waterSkip = 0;
+  c.waterProbe = (std::max)(1, (std::min)(16, static_cast<int>(GetPrivateProfileIntW(L"Water", L"NoSubmitProbe", 4, ini.c_str()))));
   c.suiteWaterSkipTiming = (std::max)(0, (std::min)(60, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"WaterSkipTiming", 0, ini.c_str()))));
   c.suiteWaterSkipTimingFrames = (std::max)(20, (std::min)(1000, static_cast<int>(GetPrivateProfileIntW(L"Suite", L"WaterSkipTimingFrames", 90, ini.c_str()))));
   {

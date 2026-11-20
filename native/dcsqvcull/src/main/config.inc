@@ -195,7 +195,8 @@ struct Config {
   int fxApplySkipVerifyEvery = 64;         // [D3D] FxApplySkipVerifyEvery (1-100000)
   int fxApplySkipLogSec = 10;              // [D3D] FxApplySkipLogSec: the "fx repeat:" line period (1-600)
   bool suiteBenchFxApplySkip = false;      // [Suite] BenchFxApplySkip (bench mode 36)
-  int waterSkip = 0;                       // [Water] SkipHiddenWater (w1_water.h, W1): 0 off, 1 on (a view's water mask, refraction and water passes drawn only when its same-frame water test sees water), 2 verify (nothing skipped; test and real water logged per view and frame to DcsQvCull_water.csv); other values off
+  int waterSkip = 0;                       // [Water] SkipHiddenWater (w1_water.h, W1): 0 off, 1 on (a view's water mask, refraction and water passes drawn only when its same-frame water test sees water), 2 verify (nothing skipped; test and real water logged per view and frame to DcsQvCull_water.csv), 3 no-submit (a view found dry in earlier frames is not submitted, probed one frame in NoSubmitProbe; not exact after water enters the view), 4 verify of 3; other values off
+  int waterProbe = 4;                      // [Water] NoSubmitProbe (modes 3 / 4): a dry view is probed one frame in N (1-16)
   int suiteWaterSkipTiming = 0;            // [Suite] WaterSkipTiming: OFF/ON pairs (1-60, 0 = off) of GPU frame period and render-thread time, ON = SkipHiddenWater (1 when 0)
   int suiteWaterSkipTimingFrames = 90;     // [Suite] WaterSkipTimingFrames: frames per block (20-1000)
   int prefetchMode = 0;                    // [Prefetch] Mode: off (0) | observe (1) | skip (2), prefetch_fix.h
