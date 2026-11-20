@@ -715,7 +715,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
     {
         var a = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(draft))!.AsObject();
         var b = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(applied))!.AsObject();
-        string[] derived = ["id", "name", "quadSaccadeLeadMs", "depthBoostActiveMax", "neuralEdgeFeather", "boostHelperElevated"];
+        string[] derived = ["id", "name", "quadSaccadeLeadMs", "quadSaccadeHoldMs", "quadSaccadeMaxExtend", "depthBoostActiveMax", "neuralEdgeFeather", "boostHelperElevated"];
         return [.. a.Select(p => p.Key).Union(b.Select(p => p.Key))
             .Where(k => !derived.Contains(k) && !(k.StartsWith("uses", StringComparison.Ordinal) && k.Length > 4 && char.IsUpper(k[4])))
             .Where(k => !System.Text.Json.Nodes.JsonNode.DeepEquals(a[k], b[k]))];

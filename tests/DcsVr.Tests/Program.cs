@@ -742,11 +742,29 @@ Test("Triple frame generation writes the fork's triple_frame_gen and paces DCS a
     { var both = new VrProfile { QuadTurbo = true, FrameGen = generator }; Require(ConfigurationWriters.QuadViews(both).Contains("turbo_mode=0") && both.QuadTurbo && !both.UsesQuadTurbo, "Turbo is off with " + generator); }
     {
         var tracked = ConfigurationWriters.QuadViews(new VrProfile { FrameGen = FrameGeneration.Nvidia });
-        Require(tracked.Contains("dcsvr_saccade_widening=1") && tracked.Contains("dcsvr_saccade_lead_ms=85") && tracked.Contains("dcsvr_gaze_deadzone=0.5") && tracked.Contains("dcsvr_saccade_max_extend=0.35"));
-        Require(ConfigurationWriters.QuadViews(new VrProfile { FrameGen = FrameGeneration.Nvidia, FrameGenFactor = 2 }).Contains("dcsvr_saccade_lead_ms=55") && ConfigurationWriters.QuadViews(new VrProfile()).Contains("dcsvr_saccade_lead_ms=25"));
+        Require(tracked.Contains("dcsvr_saccade_widening=1") && tracked.Contains("dcsvr_saccade_lead_ms=85") && tracked.Contains("dcsvr_gaze_deadzone=0.5") && tracked.Contains("dcsvr_saccade_max_extend=0.6"));
+        // The fade-out outlasts the latency, the reach covers large glances with frame generation, the tail and latch are on.
+        Require(tracked.Contains("dcsvr_saccade_hold_ms=100") && tracked.Contains("dcsvr_saccade_end_speed=50") && tracked.Contains("dcsvr_saccade_latch=1"));
+        var noFrameGen = ConfigurationWriters.QuadViews(new VrProfile());
+        // Without frame generation: 40 ms lead (25 ms still showed the periphery at landings in a headset), hold 55, reach 0.5.
+        Require(Line(noFrameGen, "dcsvr_saccade_lead_ms=40") && Line(noFrameGen, "dcsvr_saccade_hold_ms=55") && Line(noFrameGen, "dcsvr_saccade_max_extend=0.5"), "without frame generation the lead covers the measured latency");
+        Require(ConfigurationWriters.QuadViews(new VrProfile { FrameGen = FrameGeneration.Nvidia, FrameGenFactor = 2 }).Contains("dcsvr_saccade_hold_ms=70"));
+        Require(ConfigurationWriters.QuadViews(new VrProfile { FrameGen = FrameGeneration.Nvidia, FrameGenFactor = 2 }).Contains("dcsvr_saccade_lead_ms=55"));
+        var noTailNoFrameGen = ConfigurationWriters.QuadViews(new VrProfile { QuadSaccadeTail = false });
+        Require(Line(noTailNoFrameGen, "dcsvr_saccade_lead_ms=25") && Line(noTailNoFrameGen, "dcsvr_saccade_hold_ms=40") && Line(noTailNoFrameGen, "dcsvr_saccade_max_extend=0.35"), "the tail off without frame generation: the earlier lead, hold and reach");
         var fixedGaze = ConfigurationWriters.QuadViews(new VrProfile { Gaze = GazeMode.Fixed });
         bool Line(string text, string line) => text.ReplaceLineEndings("\n").Split('\n').Any(l => l.Trim() == line);
         Require(Line(fixedGaze, "dcsvr_saccade_widening=0") && Line(fixedGaze, "dcsvr_gaze_deadzone=0"), "a fixed focus has no gaze to filter");
+        Require(Line(tracked, "dcsvr_lost_ease_ms=150") && Line(fixedGaze, "dcsvr_lost_ease_ms=0"), "a lost gaze eases back only with eye tracking");
+        // The app's switches: each one off gives the earlier behaviour.
+        var noTail = ConfigurationWriters.QuadViews(new VrProfile { FrameGen = FrameGeneration.Nvidia, QuadSaccadeTail = false });
+        Require(Line(noTail, "dcsvr_saccade_end_speed=120") && Line(noTail, "dcsvr_saccade_latch=0") && Line(noTail, "dcsvr_saccade_hold_ms=40") && Line(noTail, "dcsvr_saccade_max_extend=0.35"),
+            "Hold the reach until your eyes land, off: the earlier reach");
+        Require(Line(ConfigurationWriters.QuadViews(new VrProfile { QuadLostGazeEase = false }), "dcsvr_lost_ease_ms=0"), "Slide back when tracking is lost, off: the jump");
+        Require(new VrProfile() is { QuadSaccadeTail: true, QuadLostGazeEase: true, QuadEdgeMatch: true }, "the new switches are on by default");
+        // Computed values stay out of the draft comparison (a changed frame generation must not read as two more changes).
+        var changed = ControlService.ChangedSettings(new VrProfile { FrameGen = FrameGeneration.Nvidia }, new VrProfile());
+        Require(!changed.Contains("quadSaccadeHoldMs") && !changed.Contains("quadSaccadeMaxExtend"), string.Join(",", changed));
         var off = ConfigurationWriters.QuadViews(new VrProfile { QuadSaccadeLead = false, QuadGazeStabilize = false });
         Require(Line(off, "dcsvr_saccade_widening=0") && Line(off, "dcsvr_gaze_deadzone=0") && Line(tracked, "dcsvr_gaze_deadzone=0.5"));
     }
@@ -754,6 +772,7 @@ Test("Triple frame generation writes the fork's triple_frame_gen and paces DCS a
     Require(ConfigurationWriters.QuadViews(new VrProfile()).Contains("dcsvr_periphery_sharpen=0.3") && ConfigurationWriters.QuadViews(new VrProfile { QuadPeripheryContrast = 0 }).Split('\n').Any(l => l.Trim() == "dcsvr_periphery_sharpen=0"));
     Require(ProfileValidation.Validate(new VrProfile { QuadPeripheryContrast = 1.5 }).Any(i => i.Code == "quad-periphery-contrast"));
     Require(ConfigurationWriters.QuadViews(new VrProfile()).Contains("dcsvr_sharpen_taper=1") && ConfigurationWriters.QuadViews(new VrProfile { QuadSharpenTaper = false }).Contains("dcsvr_sharpen_taper=0"));
+    Require(ConfigurationWriters.QuadViews(new VrProfile()).Contains("dcsvr_edge_match=0.6") && ConfigurationWriters.QuadViews(new VrProfile { QuadEdgeMatch = false }).Split('\n').Any(l => l.Trim() == "dcsvr_edge_match=0"), "edge match on by default, 0 when off");
     {
         // Periphery stability: off by default; on only with the bundled Quad Views in a VR flight; strength 0..1 -> 0..80 ms.
         bool Line(string text, string line) => text.ReplaceLineEndings("\n").Split('\n').Any(l => l.Trim() == line);

@@ -1,0 +1,99 @@
+Saccade tail and lost-gaze ease for the eye-tracked focus (native/quadviews/dcsvr_gaze.h, which explains them; tested by
+tests/quadviews-gaze; ported from GitHub PR #26): new keys dcsvr_saccade_end_speed (a saccade ends below this speed),
+dcsvr_saccade_latch (the leading edge never retreats during one saccade) and dcsvr_lost_ease_ms (without a gaze past
+Quad Views' cache the focus slides to the fixed one instead of jumping; 0 off). Each located focus box is recorded for
+the landing check, and the 30 s gaze line adds landings, landings outside the sharp area, repeated samples and eases.
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 85a9872..ecc5b79 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -1073,9 +1073,12 @@ namespace openxr_api_layer {
+                                         if (m_dcsvrStatsAt.time_since_epoch().count() == 0) m_dcsvrStatsAt = statsNow;
+                                         const auto& stats = m_dcsvrFilter.Stats();
+                                         if (statsNow - m_dcsvrStatsAt >= std::chrono::seconds(30) && stats.eyeFrames > 0) {
+-                                            Log(fmt::format("DCSVR gaze: {} eye-frames, {} saccades, widened {} ({:.1f}%%), held {} ({:.1f}%%), peak {:.0f} deg/s\n",
++                                            Log(fmt::format("DCSVR gaze: {} eye-frames, {} saccades, widened {} ({:.1f}%%), held {} ({:.1f}%%), peak {:.0f} deg/s; "
++                                                            "landings {}, missed the sharp area {} ({:.1f}%%); repeated samples {}; lost gaze eased {}\n",
+                                                             stats.eyeFrames, stats.saccades, stats.widened, 100.0 * stats.widened / stats.eyeFrames,
+-                                                            stats.held, 100.0 * stats.held / stats.eyeFrames, stats.peakSpeed));
++                                                            stats.held, 100.0 * stats.held / stats.eyeFrames, stats.peakSpeed,
++                                                            stats.landings, stats.missed, stats.landings ? 100.0 * stats.missed / stats.landings : 0.0,
++                                                            stats.repeated, stats.eased));
+                                             m_dcsvrFilter.ResetStats();
+                                             m_dcsvrStatsAt = statsNow;
+                                         }
+@@ -1091,10 +1094,32 @@ namespace openxr_api_layer {
+                                         viewForGazeProjection.pose = m_cachedEyePoses[stereoViewIndex];
+                                         viewForGazeProjection.fov = views[stereoViewIndex].fov;
+                                         XrVector2f projectedGaze;
++                                        // DCSVR lost gaze: past Quad Views' cache, the focus eases to the fixed one.
++                                        bool dcsvrEased = false;
++                                        if (!isGazeValid) {
++                                            const XrFovf& sf = m_cachedEyeFov[stereoViewIndex];
++                                            const XrFovf& ff = m_cachedEyeFov[i];
++                                            const float sl = std::tan(sf.angleLeft), sr = std::tan(sf.angleRight);
++                                            const float sd = std::tan(sf.angleDown), su = std::tan(sf.angleUp);
++                                            const XrVector2f offset{stereoViewIndex == xr::StereoView::Left ? -m_horizontalFocusOffset
++                                                                                                             : m_horizontalFocusOffset,
++                                                                    m_verticalFocusOffset};
++                                            const dcsvr::GazeVec2 fixedCentre{
++                                                (std::tan(ff.angleLeft) + std::tan(ff.angleRight) - sl - sr) / (sr - sl) - offset.x,
++                                                (std::tan(ff.angleDown) + std::tan(ff.angleUp) - sd - su) / (su - sd) - offset.y};
++                                            const dcsvr::GazeVec2 lastGaze{m_eyeGaze[stereoViewIndex].x - offset.x,
++                                                                           m_eyeGaze[stereoViewIndex].y - offset.y};
++                                            dcsvr::GazeVec2 eased{};
++                                            if (sr > sl && su > sd &&
++                                                m_dcsvrFilter.Ease((int)stereoViewIndex, viewLocateInfo->displayTime, lastGaze, fixedCentre, m_dcsvrGaze, eased)) {
++                                                dcsvrEased = true;
++                                                projectedGaze = {eased.x, eased.y};
++                                            }
++                                        }
+                                         // DCSVR invalid gaze: a gaze that is not finite counts as no gaze.
+-                                        if (!isGazeValid ||
++                                        if (!dcsvrEased && (!isGazeValid ||
+                                             !ProjectPoint(viewForGazeProjection, gazeUnitVector, projectedGaze) ||
+-                                            !std::isfinite(projectedGaze.x) || !std::isfinite(projectedGaze.y)) {
++                                            !std::isfinite(projectedGaze.x) || !std::isfinite(projectedGaze.y))) {
+                                             views[i].fov = m_cachedEyeFov[i];
+ 
+                                         } else {
+@@ -1106,9 +1131,10 @@ namespace openxr_api_layer {
+                                                 "xrLocateViews",
+                                                 TLArg(i, "ViewIndex"),
+                                                 TLArg(xr::ToString(projectedGaze).c_str(), "ProjectedGaze"));
+-                                            {
++                                            if (!dcsvrEased) {
+                                                 // DCSVR saccade: the eye's velocity in this view gives the lead; at
+                                                 // fixation, movements inside the deadzone keep the focus where it is.
++                                                // (Not while the focus eases to the fixed one: there is no gaze.)
+                                                 const XrFovf& eyeFov = m_cachedEyeFov[stereoViewIndex];
+                                                 const dcsvr::GazeVec2 gazed = m_dcsvrFilter.Eye((int)stereoViewIndex, viewLocateInfo->displayTime,
+                                                     {projectedGaze.x, projectedGaze.y},
+@@ -1150,6 +1176,8 @@ namespace openxr_api_layer {
+                                                     min = {lo.x, lo.y};
+                                                     max = {hi.x, hi.y};
+                                                 }
++                                                // DCSVR landing check: the box this display time shows (statistics only).
++                                                m_dcsvrFilter.Record((int)stereoViewIndex, viewLocateInfo->displayTime, {min.x, min.y}, {max.x, max.y});
+                                             }
+                                             TraceLoggingWrite(g_traceProvider,
+                                                               "xrLocateViews",
+@@ -4678,9 +4706,18 @@ namespace openxr_api_layer {
+                     } else if (name == "dcsvr_saccade_hold_ms") {
+                         m_dcsvrGaze.holdMs = std::clamp(std::stof(value), 0.f, 200.f);
+                         parsed = true;
++                    } else if (name == "dcsvr_saccade_end_speed") {
++                        m_dcsvrGaze.endSpeed = std::clamp(std::stof(value), 10.f, 1000.f);
++                        parsed = true;
++                    } else if (name == "dcsvr_saccade_latch") {
++                        m_dcsvrGaze.latch = std::stoi(value) != 0;
++                        parsed = true;
+                     } else if (name == "dcsvr_gaze_deadzone") {
+                         m_dcsvrGaze.deadzoneDeg = std::clamp(std::stof(value), 0.f, 3.f);
+                         parsed = true;
++                    } else if (name == "dcsvr_lost_ease_ms") {
++                        m_dcsvrGaze.lostEaseMs = std::clamp(std::stof(value), 0.f, 1000.f);
++                        parsed = true;
+                     } else if (name == "dcsvr_far_depth") {
+                         m_dcsvrFarDepth.enabled = std::stoi(value);
+                         parsed = true;

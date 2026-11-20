@@ -7,7 +7,22 @@
 // a wider focus field only lowers its pixel density for the frames of a saccade (when the eye does not see).
 //  - Saccade lead: while the gaze turns faster than `speed` (deg/s), and for `holdMs` after, the focus box reaches
 //    ahead along the eye's motion by its velocity times `leadMs` (the display latency), at most `maxExtend` (NDC).
+//  - Saccade tail: a saccade starts above `speed` but only ends once the gaze turns slower than `endSpeed`. Saccades
+//    decelerate sharply before they land, so with a single threshold the last frames before the landing (the ones that
+//    reach the headset as the eye arrives) had no lead at all.
+//  - Latched reach: with `latch`, the leading edge of the focus box never retreats during one saccade. The lead is
+//    velocity times latency, and the velocity falls as the eye decelerates, so the reach shrank just before the landing;
+//    the farthest point reached so far is kept instead, until the eye passes it or turns back.
 //  - Fixation deadzone: outside saccades the focus stays put while the gaze moves less than `deadzoneDeg`.
+//  - Repeated samples: Quad Views hands out its last gaze again while the tracker has nothing new (no new sample yet,
+//    a blink, up to its 600 ms cache). Those frames are not speed samples: a repeat in the middle of a saccade read as
+//    the eye stopping (0 deg/s) and ended the saccade and its lead early. The next real sample measures the speed over
+//    the whole time since the last one; a repeat lasting 100 ms (longer than any saccade) ends the saccade.
+//  - Landing check (statistics): when a saccade ends, the gaze of the next 100 ms is compared with the focus box that
+//    was on screen at that moment (the box located for the display time `leadMs` earlier, since a gaze sample is that
+//    much older than the frame it is located for). A landing outside the box's inner 80 % is counted as missed.
+//  - Lost gaze: when the tracker loses the eyes for good (past Quad Views' cache), the focus eases from the last gaze to
+//    the fixed focus over `lostEaseMs` instead of jumping there. When the gaze returns the focus jumps straight to it.
 #pragma once
 
 #include <algorithm>
@@ -23,14 +38,18 @@ struct GazeVec2 {
 struct GazeSettings {
     bool widening{false};
     float speed{120.f};     // deg/s that start a saccade
+    float endSpeed{50.f};   // deg/s below which a saccade ends (at most `speed`; equal to it: one threshold)
     float leadMs{50.f};     // how far ahead the focus box reaches, as display latency
     float maxExtend{0.35f}; // NDC, per axis
     float holdMs{40.f};     // the lead fades out over this time after the saccade
+    bool latch{true};       // the leading edge never retreats during one saccade
     float deadzoneDeg{0.f}; // 0: off
+    float lostEaseMs{0.f};  // 0: the focus jumps to the fixed one when the gaze is lost
 };
 
 struct GazeStats {
     uint64_t eyeFrames{}, widened{}, held{}, saccades{};
+    uint64_t repeated{}, landings{}, missed{}, eased{};
     float peakSpeed{};
 };
 
@@ -51,11 +70,26 @@ class GazeFilter {
         if (m_lastTime != 0 && time > m_lastTime) {
             const float dt = (time - m_lastTime) / 1e9f;
             if (dt < MinSampleSeconds) return;
+            // The tracker's last sample handed out again: not a speed sample (see "Repeated samples").
+            if (x == m_lastRaw[0] && y == m_lastRaw[1] && z == m_lastRaw[2]) {
+                if (m_repeatTime != time) m_stats.repeated++;
+                m_repeatTime = time;
+                if (dt >= 0.1f) m_inSaccade = false;
+                return;
+            }
             if (dt < 0.2f) {
                 const float cosine = std::clamp((m_last[0] * x + m_last[1] * y + m_last[2] * z) / length, -1.f, 1.f);
                 m_speed = std::acos(cosine) * 57.2957795f / dt;
-                const bool saccade = m_speed >= s.speed;
-                if (saccade && !m_inSaccade) m_stats.saccades++;
+                // Hysteresis: once started, the saccade lasts through its deceleration down to endSpeed.
+                const float threshold = m_inSaccade ? std::min(s.endSpeed, s.speed) : s.speed;
+                const bool saccade = m_speed >= threshold;
+                if (saccade && !m_inSaccade) { m_stats.saccades++; m_saccadeId++; }
+                if (!saccade && m_inSaccade) {
+                    // The landing: checked against the boxes on screen for the next 100 ms (see "Landing check").
+                    m_stats.landings++;
+                    m_landingUntil = time + 100'000'000;
+                    m_landingMissed = false;
+                }
                 m_inSaccade = saccade;
                 if (saccade) m_until = time + static_cast<int64_t>(s.holdMs * 1e6f);
                 m_stats.peakSpeed = std::max(m_stats.peakSpeed, m_speed);
@@ -64,6 +98,7 @@ class GazeFilter {
             }
         }
         m_last[0] = x / length; m_last[1] = y / length; m_last[2] = z / length;
+        m_lastRaw[0] = x; m_lastRaw[1] = y; m_lastRaw[2] = z;
         m_lastTime = time;
     }
 
@@ -72,16 +107,30 @@ class GazeFilter {
     GazeVec2 Eye(int eye, int64_t time, GazeVec2 projected, float ndcPerDegX, float ndcPerDegY, const GazeSettings& s) {
         if (eye < 0 || eye >= Eyes) return projected;
         EyeState& e = m_eyes[eye];
-        // A display time within 4 ms of this eye's last frame counts as that frame again (see UpdateSpeed).
-        if (time != e.time && (e.time == 0 || time < e.time || (time - e.time) / 1e9f >= MinSampleSeconds)) {
+        e.hadGaze = true;
+        e.lostAt = 0;
+        CheckLanding(e, time, projected, s);
+        // A display time within 4 ms of this eye's last frame counts as that frame again (see UpdateSpeed), and so does a
+        // repeated tracker sample: the lead keeps the last real velocity, the next real sample measures over both.
+        const bool newFrame = time != e.time && (e.time == 0 || time < e.time || (time - e.time) / 1e9f >= MinSampleSeconds);
+        if (newFrame && time != e.counted) {
             m_stats.eyeFrames++;
+            e.counted = time;
+        }
+        if (newFrame && time != m_repeatTime) {
             const float dt = (time - e.time) / 1e9f;
             if (m_inSaccade && e.time != 0 && dt > 0.f && dt < 0.2f) {
                 const float lead = s.leadMs / 1000.f / dt;
-                e.lead = {std::clamp((projected.x - e.previous.x) * lead, -s.maxExtend, s.maxExtend),
-                          std::clamp((projected.y - e.previous.y) * lead, -s.maxExtend, s.maxExtend)};
+                const GazeVec2 now{std::clamp((projected.x - e.previous.x) * lead, -s.maxExtend, s.maxExtend),
+                                   std::clamp((projected.y - e.previous.y) * lead, -s.maxExtend, s.maxExtend)};
+                const bool same = s.latch && e.saccadeId == m_saccadeId;
+                e.lead = {Latch(same, projected.x, now.x, e.reach.x, s.maxExtend),
+                          Latch(same, projected.y, now.y, e.reach.y, s.maxExtend)};
+                e.saccadeId = m_saccadeId;
             } else if (m_inSaccade) {
                 e.lead = {};  // a saccade right after a gap: no lead yet, never the previous saccade's
+                e.reach = projected;
+                e.saccadeId = m_saccadeId;
             }
             e.previous = projected;
             e.time = time;
@@ -112,6 +161,35 @@ class GazeFilter {
         return true;
     }
 
+    // Per eye and located frame, after Extend: the focus box this display time shows (NDC), for the landing check.
+    void Record(int eye, int64_t time, GazeVec2 min, GazeVec2 max) {
+        if (eye < 0 || eye >= Eyes) return;
+        EyeState& e = m_eyes[eye];
+        Box& last = e.boxes[(e.boxNext + BoxHistory - 1) % BoxHistory];
+        if (last.time == time) { last.min = min; last.max = max; return; }
+        e.boxes[e.boxNext] = {time, min, max};
+        e.boxNext = (e.boxNext + 1) % BoxHistory;
+    }
+
+    // Per eye, on a frame without a gaze: while it lasts, the focus centre (NDC) easing from `from` (the last gaze's)
+    // to `to` (the fixed focus's) since the gaze was lost. False: no ease (off, no gaze seen yet, or finished), the
+    // caller shows the fixed focus.
+    bool Ease(int eye, int64_t time, GazeVec2 from, GazeVec2 to, const GazeSettings& s, GazeVec2& out) {
+        if (s.lostEaseMs <= 0.f || eye < 0 || eye >= Eyes) return false;
+        EyeState& e = m_eyes[eye];
+        if (!e.hadGaze) return false;
+        if (e.lostAt == 0) {
+            e.lostAt = time;
+            e.lostFrom = from;
+            if (eye == 0) m_stats.eased++;
+        }
+        const float t = std::clamp((time - e.lostAt) / (s.lostEaseMs * 1e6f), 0.f, 1.f);
+        if (t >= 1.f) return false;
+        const float k = t * t * (3.f - 2.f * t);
+        out = {e.lostFrom.x + (to.x - e.lostFrom.x) * k, e.lostFrom.y + (to.y - e.lostFrom.y) * k};
+        return true;
+    }
+
     // NDC units per degree near the centre of a view with these half-angle tangents.
     static float NdcPerDegree(float tanNear, float tanFar) {
         const float span = tanFar - tanNear;
@@ -124,16 +202,63 @@ class GazeFilter {
     void ResetStats() { m_stats = {}; }
 
   private:
+    // One axis of the lead. `now` is this frame's lead (velocity times latency) and `reach` the farthest point the
+    // leading edge reached so far in this saccade (NDC). Within the same saccade, while the eye still moves the same
+    // way and has not passed that point, the lead keeps reaching it; otherwise this frame's lead starts a new reach.
+    static float Latch(bool sameSaccade, float position, float now, float& reach, float maxExtend) {
+        if (sameSaccade && now != 0.f) {
+            const float kept = std::clamp(reach - position, -maxExtend, maxExtend);
+            if ((now > 0.f && kept > now) || (now < 0.f && kept < now)) return kept;
+        }
+        reach = position + now;
+        return now;
+    }
+
+    static constexpr int BoxHistory = 24;  // 260 ms at 90 Hz: more than any lead
+    struct Box {
+        int64_t time{0};
+        GazeVec2 min{}, max{};
+    };
     struct EyeState {
-        GazeVec2 previous{}, lead{}, stable{};
+        GazeVec2 previous{}, lead{}, stable{}, reach{}, lostFrom{};
         int64_t time{0};
         int64_t heldTime{0};
+        int64_t lostAt{0};
+        int64_t counted{0};  // the display time last counted in eyeFrames
+        uint64_t saccadeId{0};
         bool stableValid{false};
+        bool hadGaze{false};
+        Box boxes[BoxHistory]{};
+        int boxNext{0};
     };
-    float m_last[3]{};
+
+    // While a landing is checked: the gaze sampled for display time `time` is where the eye was about leadMs before it,
+    // so it is compared with the box located for that earlier display time. Outside the inner 80 % of the box's
+    // inscribed ellipse counts as a miss, once per landing.
+    void CheckLanding(const EyeState& e, int64_t time, GazeVec2 gaze, const GazeSettings& s) {
+        if (m_landingUntil == 0 || time > m_landingUntil || m_inSaccade || m_landingMissed) return;
+        const int64_t shown = time - static_cast<int64_t>(s.leadMs * 1e6f);
+        const Box* best = nullptr;
+        for (const Box& b : e.boxes)
+            if (b.time != 0 && b.time <= shown && (!best || b.time > best->time)) best = &b;
+        if (!best) return;
+        const float hx = (best->max.x - best->min.x) * 0.5f, hy = (best->max.y - best->min.y) * 0.5f;
+        if (hx <= 0.f || hy <= 0.f) return;
+        const float dx = (gaze.x - (best->min.x + hx)) / hx, dy = (gaze.y - (best->min.y + hy)) / hy;
+        if (dx * dx + dy * dy > 0.8f * 0.8f) {
+            m_landingMissed = true;
+            m_stats.missed++;
+        }
+    }
+
+    float m_last[3]{}, m_lastRaw[3]{};
     int64_t m_lastTime{0};
+    int64_t m_repeatTime{0};
+    int64_t m_landingUntil{0};
+    bool m_landingMissed{false};
     float m_speed{0.f};
     bool m_inSaccade{false};
+    uint64_t m_saccadeId{0};  // not reset with the statistics: tells one saccade from the next
     int64_t m_until{0};
     EyeState m_eyes[Eyes]{};
     GazeStats m_stats{};

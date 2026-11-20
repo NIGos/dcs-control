@@ -115,6 +115,7 @@ struct Case {
     bool sharpen;
     bool unpremultiplied;
     float taper = 0.f;  // dcsvr_sharpen_taper band (0: off)
+    float edge = 0.f;   // dcsvr_edge_match (0: off)
 };
 
 }  // namespace
@@ -297,13 +298,14 @@ int main(int argc, char** argv) {
             float column_major[16];
             for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) column_major[j * 4 + i] = m[i][j];
             context->UpdateSubresource(vs_constants.Get(), 0, nullptr, column_major, 0, 0);
-            // The upstream constants, then Far depth's (warp, reuse), all 0: Far depth off.
-            struct { float smoothing; std::uint32_t ignore_alpha, unpremultiplied, debug; float shape; float pad[3]; float warp[4]; float reuse[12]; } p{};
+            // The upstream constants with edge match before the shape (0019-edge-match.patch), then Far depth's (warp, reuse), all 0: Far depth off.
+            struct { float smoothing; std::uint32_t ignore_alpha, unpremultiplied, debug; float edge; float shape; float pad[2]; float warp[4]; float reuse[12]; } p{};
             static_assert(sizeof(p) == 96);
             p.smoothing = c.smoothing;
             p.ignore_alpha = 0xFFFFFFFEu;
             p.unpremultiplied = c.unpremultiplied ? 1u : 0u;
             p.shape = c.shape;
+            p.edge = c.edge;
             context->UpdateSubresource(ps_constants.Get(), 0, nullptr, &p, 0, 0);
             const float clear[4]{0.25f, 0.5f, 0.75f, 1.f};
             context->ClearRenderTargetView(rtv.Get(), clear);
@@ -433,7 +435,32 @@ int main(int argc, char** argv) {
             taper_ok = taper_ok && centre == 0 && band > 1000U;
         }
         std::printf(taper_ok ? "Quad Views sharpening taper only softens the edge band%s" : "Quad Views sharpening taper FAILED%s", "\n");
-        return all_identical && taper_ok && far_depth_off ? 0 : 1;
+
+        // Edge match: the focus view is 600 texels over 0.34 of a 1024-texel periphery (1.7 focus texels per periphery
+        // texel), so inside the fade band its detail is tapered. Nothing changes inside the band's inner edge or outside
+        // the focus area, and the band changes.
+        bool edge_ok = true;
+        for (const float shape : {2.f, 8.f}) {
+            Case on{shape, 0.2f, 0.f, 0.f, false, false, 0.f, 0.6f};
+            Case off = on;
+            off.edge = 0.f;
+            const auto plain = run(off, true), matched = run(on, true);
+            const float mid = kOut * 0.5f, half = kOut * 0.5f * 0.34f;
+            std::size_t inner = 0, band = 0, outside = 0;
+            for (UINT y = 0; y < kOut; ++y)
+                for (UINT x = 0; x < kOut; ++x) {
+                    const std::size_t p = static_cast<std::size_t>(y) * kOut + x;
+                    if (plain[p] == matched[p]) continue;
+                    const float ax = std::fabs(x + 0.5f - mid) / half, ay = std::fabs(y + 0.5f - mid) / half;
+                    const float d = std::pow(std::pow(ax, shape) + std::pow(ay, shape), 1.f / shape);
+                    if (d < 0.6f - 0.01f) ++inner; else if (d > 1.f + 0.01f) ++outside; else ++band;
+                }
+            std::printf("edge match shape=%.0f: %zu changed pixels inside the band, %zu in it, %zu outside the focus%s",
+                shape, inner, band, outside, "\n");
+            edge_ok = edge_ok && inner == 0 && outside == 0 && band > 1000U;
+        }
+        std::printf(edge_ok ? "Quad Views edge match only changes the fade band%s" : "Quad Views edge match FAILED%s", "\n");
+        return all_identical && taper_ok && edge_ok && far_depth_off ? 0 : 1;
     } catch (const std::exception& error) {
         std::printf("error: %s\n", error.what());
         return 2;
