@@ -177,12 +177,18 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
     Require(!off.Contains("frame_records") && off.Contains("max_file_mb=256\n"), "off: unchanged");
     Require(on.Contains("flush_each_event=0\nframe_records=1\n") && on.Contains("max_file_mb=1024\n"), "on");
     Require(off.Contains("\npipelined_deep_hold=1\nasync_arm=0\n") && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenDeepPipeline = false }).Contains("\npipelined_deep_hold=0\n"), "the deep hold follows the smoothness buffer; async arm off");
-    Require(off.Contains("\nhud_symbology=0\n") && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenHudSymbology = true }).Contains("\nhud_symbology=0\n"), "HUD symbology needs Depth boost's dual camera");
+    Require(off.Contains("\nhud_symbology=0\n"), "HUD symbology off by default");
     var hud = new VrProfile { FrameGen = FrameGeneration.Nvidia, FrameGenHudSymbology = true, DepthBoost = true, QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked };
     Require(hud.UsesHudSymbology && ConfigurationWriters.Ofxr(hud).Contains("\nhud_symbology=1\n"), "HUD symbology on with the dual camera");
-    bool HudNeeds(VrProfile p) => ProfileValidation.Validate(p).Any(i => i.Code == "hud-symbology-needs" && i.Severity == IssueSeverity.Warning);
-    Require(HudNeeds(hud with { DepthBoost = false }) && HudNeeds(hud with { Gaze = GazeMode.Fixed }) && !HudNeeds(hud), "Sharp HUD without a running Depth boost: warned");
-    Require(!HudNeeds(hud with { DepthBoost = false, FrameGen = FrameGeneration.Off }) && !HudNeeds(hud with { DepthBoost = false, FrameGenHudSymbology = false }) && !HudNeeds(hud with { DepthBoost = false, Desktop = true }), "no warning while frame generation or Sharp HUD is off");
+    // 0.7: without Depth boost too (the module hooks the overlay render point on its own), with the engine on or off.
+    foreach (var p in new[] { hud with { DepthBoost = false }, hud with { Gaze = GazeMode.Fixed }, hud with { DepthBoost = false, EngineOptimizations = true }, new VrProfile { FrameGen = FrameGeneration.Nvidia, FrameGenHudSymbology = true } })
+    {
+        var ini = ConfigurationWriters.DcsQvCull(p).ReplaceLineEndings("\n");
+        Require(p.UsesHudSymbology && p.UsesEngineModule && ConfigurationWriters.Ofxr(p).Contains("\nhud_symbology=1\n") && ini.Contains("\nSymbologyExport=1\n") && ini.Contains("\nCockpitMaskExport=1\n")
+            && ini.Contains("\nCockpitTrueIpd=" + (p.UsesDepthBoost ? 1 : 0) + "\n"), "Sharp HUD without Depth boost: the export and the mask, the dual camera only with Depth boost");
+    }
+    Require(!ProfileValidation.Validate(hud with { DepthBoost = false }).Any(i => i.Code == "hud-symbology-needs"), "no Depth boost warning any more");
+    Require(!(hud with { FrameGen = FrameGeneration.Off }).UsesHudSymbology && !(hud with { Desktop = true }).UsesHudSymbology, "only with frame generation in VR");
     Require(ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenPipelinedDeepHold = true, FrameGenAsyncArm = true }).Contains("\npipelined_deep_hold=1\nasync_arm=1\n"));
 });
 Test("Explicit manifest keeps extension metadata", () =>
@@ -4701,6 +4707,19 @@ Test("A panel-only profile with bundled Quad Views plans through the service wit
     plan = service.Preview(draft with { HeadsetPanel = false }, new() { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime });
     Require(!plan.LaunchEnvironment["XR_ENABLE_API_LAYERS"].Contains("XRFrameBridge") && plan.LaunchEnvironment["DCSVR_DIAG_HOTKEY"] == "0:0", "no OFXR without frame generation or the panel");
 });
+Test("0.7: frame generation's cockpit exports and Far depth with Engine Optimizations off install the module in Perception-only mode", () =>
+{
+    var fg = new VrProfile { FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.QuadViewsFoveated };
+    var ini = ConfigurationWriters.DcsQvCull(fg).ReplaceLineEndings("\n");
+    Require(fg.UsesEngineModule && !fg.EngineModuleRequired && ini.Contains("PerceptionOnly=1\n") && ini.Contains("\nCockpitMaskExport=1\n") && ini.Contains("\nCockpitDepthExport=1\n") && ini.Contains("\nCockpitMotionExport=1\n")
+        && ini.Contains("\nSymbologyExport=0\n") && ini.Contains("\nFarDepthExport=0\n") && ini.Contains("\nCockpitTrueIpd=0\n"), "frame generation alone: the three exports, nothing else");
+    var far = ConfigurationWriters.DcsQvCull(fg with { FrameGen = FrameGeneration.Off, FarDepth = true }).ReplaceLineEndings("\n");
+    Require((fg with { FrameGen = FrameGeneration.Off, FarDepth = true }).UsesEngineModule && far.Contains("PerceptionOnly=1\n") && far.Contains("\nFarDepthExport=1\n") && far.Contains("\nCockpitMaskExport=0\n"), "Far depth alone: its export only");
+    Require(!(fg with { Desktop = true }).UsesEngineModule && !new VrProfile().UsesEngineModule && !(fg with { FrameGen = FrameGeneration.Off }).UsesEngineModule, "not for a desktop flight or with everything off");
+    // The exports and their switch apply at the next start (not live keys); the engine parts stay out of live mode with the engine off.
+    Require(!LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Perception.CockpitMaskExport", "0", "1") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Perception.SymbologyExport", "0", "1")
+        && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Perception.FarDepthExport", "0", "1") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "General.PerceptionOnly", "0", "1"), "exports: at the next start");
+});
 Test("Far depth is off by default and switches the engine's depth export and Quad Views' pass together", () =>
 {
     var off = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, EngineOptimizations = true };
@@ -4710,8 +4729,12 @@ Test("Far depth is off by default and switches the engine's depth export and Qua
     // The HUD found in the HDR image (F-16: HUD after DLSS) and the image before the overlays: the module's defaults (hdr, 1).
     Require(!ConfigurationWriters.DcsQvCull(on).Contains("FarDepthCoverageMode") && !ConfigurationWriters.DcsQvCull(on).Contains("FarDepthPreOverlay"), "the HUD found in the HDR image (F-16: HUD after DLSS)");
     Require(ConfigurationWriters.DcsQvCull(on).ReplaceLineEndings("\n").Contains("FarDepthExport=1\n") &&ConfigurationWriters.QuadViews(on).ReplaceLineEndings("\n").Contains("dcsvr_far_depth=1\ndcsvr_far_depth_preset=strong\n") && !ConfigurationWriters.QuadViews(on).Contains("allow_unmasked", StringComparison.Ordinal), "both on, with the preset and the HUD kept out");
-    Require(!(on with { EngineOptimizations = false }).UsesFarDepth && ProfileValidation.Validate(on with { EngineOptimizations = false }).Any(i => i.Code == "far-depth-needs"), "needs the engine module");
-    Require(!(on with { QuadViews = QuadProvider.PimaxNative }).UsesFarDepth, "needs the bundled Quad Views");
+    // 0.7: with the engine off the module runs for it in its Perception-only mode (it exports the depth there too).
+    var po = on with { EngineOptimizations = false };
+    var poIni = ConfigurationWriters.DcsQvCull(po).ReplaceLineEndings("\n");
+    Require(po.UsesFarDepth && po.UsesEngineModule && poIni.Contains("PerceptionOnly=1\n") && poIni.Contains("\nFarDepthExport=1\n") && ConfigurationWriters.QuadViews(po).ReplaceLineEndings("\n").Contains("dcsvr_far_depth=1\n")
+        && !ProfileValidation.Validate(po).Any(i => i.Code == "far-depth-needs"), "Engine Optimizations off: Far depth runs, the module in Perception-only mode");
+    Require(!(on with { QuadViews = QuadProvider.PimaxNative }).UsesFarDepth && ProfileValidation.Validate(on with { QuadViews = QuadProvider.PimaxNative }).Any(i => i.Code == "far-depth-needs"), "needs the bundled Quad Views");
     Require(ConfigurationWriters.QuadViews(on).ReplaceLineEndings("\n").Contains("dcsvr_far_depth_toggle=119:6\n") && ConfigurationWriters.QuadViews(off).ReplaceLineEndings("\n").Contains("dcsvr_far_depth_toggle=0:0\n"), "its in-flight switch, Alt+Shift+F8");
     Require(ProfileValidation.Validate(on with { FarDepthToggleKey = NeuralHotkeys.EngineDefault }).Any(i => i.Code == "hotkey-conflict"), "the switch needs a key of its own");
     // The module's test suite starts on Ctrl+Alt+F11 with Shift held too, and from any in-flight key.
@@ -4963,7 +4986,10 @@ Test("Engine settings 0.7: Three views, Skip hidden water and Skip unused effect
     var d3d = on[on.IndexOf("[D3D]\n", StringComparison.Ordinal)..on.IndexOf("[Shadows]", StringComparison.Ordinal)];
     Require(d3d.Contains("\nEarlyShaders=3\n"), "Skip unused effects: both early-shader skips, in [D3D]");
     Require(on.Split('\n').Count(l => l is "[Views]" or "[Water]" or "[D3D]") == 3, "One section of each name (GetPrivateProfile reads the first)");
-    foreach (var (label, p) in new[] { ("frame generation", engine with { EngineThreeViews = true, FrameGen = FrameGeneration.Nvidia }), ("Pimax native", engine with { EngineThreeViews = true, QuadViews = QuadProvider.PimaxNative }),
+    // 0.7: with frame generation too (the right periphery's motion vectors are marked unproven by the module).
+    var withFg = engine with { EngineThreeViews = true, FrameGen = FrameGeneration.Nvidia };
+    Require(withFg.UsesThreeViews && ConfigurationWriters.DcsQvCull(withFg).ReplaceLineEndings("\n").Contains("\nThreeViews=1\n") && ConfigurationWriters.DcsQvCull(withFg).ReplaceLineEndings("\n").Contains("\nCockpitMotionExport=1\n"), "Three views written with frame generation, next to the cockpit exports");
+    foreach (var (label, p) in new[] { ("Pimax native", engine with { EngineThreeViews = true, QuadViews = QuadProvider.PimaxNative }),
         ("alternative layer", engine with { EngineThreeViews = true, QuadViewsLayerDirectory = "C:\\qv" }), ("engine off", engine with { EngineThreeViews = true, EngineOptimizations = false }) })
         Require(!ConfigurationWriters.DcsQvCull(p).Contains("ThreeViews"), "Three views not written with " + label);
     var perceptionOnly = ConfigurationWriters.DcsQvCull(engine with { EngineOptimizations = false, EngineWaterSkip = true, EngineIdleEffectSkip = true });

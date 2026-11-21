@@ -6786,6 +6786,7 @@ void Tick(bool coneOn, bool gridOn, int verify, const wchar_t* testGaze, bool du
     return;
   }
   if (ckOn) ckipd::TickCfg();
+  else if (symOn && maskOn) ckipd::TickSymbologyOnly();  // 0.7: Sharp HUD without the dual camera (its render point)
   if (maskOn) cmask::Tick();
   if (g_fault.load()) {
     if (!g_faultLogged) {

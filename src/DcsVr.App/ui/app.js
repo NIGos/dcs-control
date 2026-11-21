@@ -625,7 +625,7 @@ const headsetPanelWanted = p => Boolean(!p.desktop && (p.frameGen !== 'Off' || p
 const usesHeadsetPanel = p => Boolean(!p.desktop && (p.frameGen !== 'Off' || (p.headsetPanel && (p.diagnosticOverlayAtStart || parseKey(p.diagnosticOverlayKey ?? 'Alt+Shift+F12')?.[0]))));
 /** Periphery stability runs (VrProfile.UsesPeripheryStability) and Far depth runs (VrProfile.UsesFarDepth). */
 const usesPeripheryStability = p => Boolean(p.peripheryStability && !p.desktop && quad(p));
-const usesFarDepth = p => Boolean(p.farDepth && !p.desktop && quad(p) && p.engineOptimizations);
+const usesFarDepth = p => Boolean(p.farDepth && !p.desktop && quad(p));
 /** The recorders can run on emulated command lists (a recorder is on), and do (VrProfile.UsesRecordersEmulatedLists). */
 const emulatedListsCan = p => Boolean(p.engineOptimizations && (p.engineShadowRecorder || p.engineGBufferRecorder));
 const usesRecordersEmulatedLists = p => Boolean(p.engineRecordersEmulatedLists && emulatedListsCan(p));
@@ -748,8 +748,7 @@ function buildFields() {
   field(c,'headsetRefreshHz','Headset refresh rate','Used when the refresh rate is not read from the headset, or before the headset software has reported one.','number',[50,240,.5],p => !p.refreshFromHeadset || !state?.headsetRefresh,'Hz');
   field(c,'disableDcsVSync','Desktop VSync off','Stops the monitor\'s VSync holding back the frame rate. The headset keeps its own sync.','toggle');
   c = card('pacingControls','Image quality','How generated frames look.');
-  // Greyed out until Depth boost runs, but never while it is on (ProfileValidation's hud-symbology-needs says why), so it can be turned off.
-  field(c,'frameGenHudSymbology','<span class="tag">EXPERIMENTAL</span> Sharp HUD',['Stops HUD and helmet symbols smearing in generated frames. Needs Depth boost.','They update at DCS\'s own HUD rate (about 20 times a second). Costs about 0.15 ms of GPU and 160 MB of video memory.'],'toggle',null,p => p.frameGen !== 'Off' && (usesDepthBoost(p) || p.frameGenHudSymbology));
+  field(c,'frameGenHudSymbology','<span class="tag">EXPERIMENTAL</span> Sharp HUD',['Stops HUD and helmet symbols smearing in generated frames.','They update at DCS\'s own HUD rate (about 20 times a second). Costs about 0.15 ms of GPU and 160 MB of video memory.'],'toggle',null,p => p.frameGen !== 'Off');
   field(c,'smoothCursor','Smooth mouse cursor',['The mouse cursor moves smoothly in generated frames.','It is drawn at its in-between position. Where you click doesn\'t change.'],'toggle',null,p => p.frameGen !== 'Off');
   // NVIDIA Optical Flow only: gone with FidelityFX, greyed out while frame generation is off.
   const fidelity = p => p.frameGen === 'FidelityFx';
@@ -792,7 +791,7 @@ function buildFields() {
   // 0.7, experimental, off by default: [Views] ThreeViews (VR, bundled Quad Views, no frame generation), [Water]
   // SkipHiddenWater=3 (no-submit, not exact for a few frames) and [D3D] EarlyShaders=3 (SSAO water skip + hot-air idle
   // skip, both the stock picture; small, so one switch). Live like the other engine parts.
-  const threeViewsCan = p => engine(p) && quad(p) && p.frameGen === 'Off' && !p.desktop;
+  const threeViewsCan = p => engine(p) && quad(p) && !p.desktop;
   field(c,'engineThreeViews','<span class="tag">EXPERIMENTAL</span> Three views',['About 1 ms less GPU time in cockpit flight. The right eye reuses most of what the left eye sees.','DCS draws only the outer edge and the cockpit for the right eye; the rest is copied from the left eye. If something looks wrong in the right eye, turn it off. Off by default.'],'toggle',null,p => threeViewsCan(p) || (engine(p) && p.engineThreeViews && !p.desktop),'',p => p.desktop);
   field(c,'engineWaterSkip','<span class="tag">EXPERIMENTAL</span> Skip hidden water',['Less GPU time while no water is in view.','DCS skips its water work for an eye that sees no water. When water comes into view it can appear a few frames late. Off by default.'],'toggle',null,engine);
   field(c,'engineIdleEffectSkip','<span class="tag">EXPERIMENTAL</span> Skip unused effects',['A small GPU saving over the sea and away from engine heat. Same image.','Skips shading work on water that changes nothing, and the heat-haze passes when nothing is hot. Off by default.'],'toggle',null,engine);
@@ -977,14 +976,14 @@ function buildFields() {
   because(f => f.condition === coverageOwned,stereoWhy);
   because(at('frameGenAdaptiveCadence'),p => fgOff(p) ? fgWhy : 'Set Generated frames to Auto to use this.');
   because(at('frameGenPassThrough'),p => fgOff(p) ? fgWhy : p.frameGenFactor !== 0 ? 'Set Generated frames to Auto to use this.' : 'Turn on Only when needed to use this.');
-  because(at('frameGenHudSymbology'),p => fgOff(p) ? fgWhy : ['Needs Depth boost (Perception page).','depthBoost']);
+  because(at('frameGenHudSymbology'),fgWhy);
   because(at('diagnosticFrameRecords'),p => fgOff(p) ? fgWhy : 'Turn on Frame generation log to use this.');
   because(f => f.condition === flow,p => fgOff(p) ? fgWhy : 'NVIDIA Optical Flow only.');
   because(at('frameGenFoveated'),p => fgOff(p) ? fgWhy : p.frameGen !== 'Nvidia' ? 'NVIDIA frame generation only.' : p.runtime !== 'Pimax' ? 'Pimax route only.' : ['Needs the bundled Quad Views (Quad Views page).','quadViews']);
   because(at('frameGenFactor','frameGenDeepPipeline','smoothCursor','frameGenAsyncArm','showOverlay','diagnosticRecorder'),fgWhy);
   because(at('renderedFpsCap'),'Choose Custom limit in Frame limit to use this.');
   because(at('engineTaskQueueClock','engineTimerRefreshUs'),p => !engine(p) ? engineWhy : 'Turn on Streaming timer cache to use this.');
-  because(at('engineThreeViews'),p => !engine(p) ? engineWhy : !quad(p) ? [bundledWhy,'quadViews'] : 'Only without frame generation.');
+  because(at('engineThreeViews'),p => !engine(p) ? engineWhy : [bundledWhy,'quadViews']);
   because(at('engineDevPayloadPath','engineDevIniPath'),p => !engine(p) ? engineWhy : 'Turn on Developer mode to use this.');
   because(f => f.condition === engine,engineWhy);
   because(at('boostMoveVrRuntime'),p => !boost(p) ? boostWhy : 'Not with Optimizations only.');
@@ -1125,8 +1124,9 @@ function renderEngine() {
   const s = engineStatus, box = $('engineStatus'); if (!box) return;
   if (!s) { box.innerHTML = '<p class="fine">Select the DCS settings file on the DCS &amp; headset page first.</p>'; return; }
   const report = s.lastReport ? `<dt>Last test report</dt><dd>${escape(new Date(s.lastReportAt).toLocaleString('en-GB'))}</dd>` : '';
-  // Depth boost or Visual realism alone installs the module too, with none of the optimizations (its Perception-only mode).
-  const moduleUsed = Boolean(profile && (profile.engineOptimizations || usesDepthBoost(profile) || usesVisualRealism(profile)));
+  // Depth boost, Visual realism, Far depth or frame generation alone installs the module too, with none of the
+  // optimizations (its Perception-only mode; VrProfile.UsesEngineModule).
+  const moduleUsed = Boolean(profile && (profile.engineOptimizations || usesDepthBoost(profile) || usesVisualRealism(profile) || usesFarDepth(profile) || (profile.frameGen !== 'Off' && !profile.desktop)));
   const pending = profile && moduleUsed !== (s.state !== 'not-installed') ? `<p class="fine">${moduleUsed ? 'Launch DCS installs it with this profile.' : 'Launch DCS removes it with this profile.'}</p>` : '';
   const users = profile ? [usesDepthBoost(profile) ? 'Depth boost' : null, usesVisualRealism(profile) ? 'Visual realism' : null].filter(Boolean).join(' and ') : '';
   const perceptionOnly = profile && !profile.engineOptimizations && users ? `<p class="fine">Used by ${users} only: none of the optimizations run, and there is no test suite.</p>` : '';
@@ -1172,8 +1172,8 @@ const usesPupilShift = p => Boolean(p.pupilShift && eyeTrackedVr(p));
 const foveatedFgCan = p => Boolean(!p.desktop && p.frameGen === 'Nvidia' && p.runtime === 'Pimax' && p.quadViews === 'QuadViewsFoveated' && !String(p.quadViewsLayerDirectory ?? '').trim());
 const usesFoveatedFg = p => Boolean(p.frameGenFoveated && foveatedFgCan(p));
 const usesDepthBoost = p => Boolean(p.depthBoost && eyeTrackedVr(p));
-/** Sharp HUD runs (VrProfile.UsesHudSymbology): frame generation with Depth boost's dual camera. */
-const usesHudSymbology = p => Boolean(p.frameGenHudSymbology && p.frameGen !== 'Off' && usesDepthBoost(p));
+/** Sharp HUD runs (VrProfile.UsesHudSymbology): a VR flight with frame generation (no Depth boost needed since 0.7). */
+const usesHudSymbology = p => Boolean(p.frameGenHudSymbology && p.frameGen !== 'Off' && !p.desktop);
 /** The strength of the selected Depth boost mode (VrProfile.DepthBoostActiveMax). */
 const depthMax = p => p.depthBoostMode === 'Enhanced' ? p.depthBoostMax : p.depthBoostRealisticMax;
 /** The strength the layer reaches with an eye distance of mm (1 when it is unknown): with the dual camera the world's
@@ -1681,7 +1681,7 @@ const CHECK_INFO = {
   'depth-mode':['Depth boost',{reveal:'depthBoostMode',label:'Open'}], 'depth-realistic-max':['Depth boost',{reveal:'depthBoostRealisticMax',label:'Open'}], 'depth-far':['Depth boost',{reveal:'depthBoostFarStartM',label:'Open'}],
   'depth-hotkey':['Depth boost switch',{reveal:'depthBoostToggleKey',label:'Open'}], 'depth-hotkey-dcs':['Depth boost switch',{reveal:'depthBoostToggleKey',label:'Open'}],
   'color-hotkey':['Color mode key',{reveal:'colorModeKey',label:'Change'}], 'color-hotkey-dcs':['Color mode key',{reveal:'colorModeKey',label:'Change'}], 'visual-gaze':['Eye-focus blur',{page:'foveation',label:'Open'}],
-  'hud-symbology-needs':['Sharp HUD',{reveal:'depthBoost',label:'Open'}], 'foveated-fg-needs':['Foveated frame generation',{reveal:'frameGenFoveated',label:'Open'}],
+  'foveated-fg-needs':['Foveated frame generation',{reveal:'frameGenFoveated',label:'Open'}],
 
   'focus-preset':['Focus DLSS preset',{reveal:'focusDlssPreset',label:'Open'}],
   'periphery-preset':['Periphery DLSS preset',{reveal:'peripheryDlssPreset',label:'Open'}], 'periphery-preset-needs':['Periphery DLSS preset',{reveal:'peripheryDlssPreset',label:'Open'}],
@@ -1950,12 +1950,12 @@ const FEATURE_GUIDE = [
    gives:'Generated frames between the ones DCS renders, so the headset gets a frame at every refresh.',
    expect:'Smooth motion even when DCS can\'t keep up. With Auto and Only when needed (the default), DCS renders at the refresh rate and frames are generated only while it falls behind, so you get less latency whenever DCS keeps up.',
    cost:'A little latency while frames are generated (more in 3×); the mouse moves at DCS\'s own frame rate unless Smooth mouse cursor is on.',
-   needs:'An NVIDIA RTX card, or FidelityFX on any card. Only when needed sets the DCS frame limit to the refresh rate unless you chose Custom or 300 FPS. With Engine Optimizations on, generated frames also use DCS\'s cockpit outline, depth and motion.'},
+   needs:'An NVIDIA RTX card, or FidelityFX on any card. Only when needed sets the DCS frame limit to the refresh rate unless you chose Custom or 300 FPS. Generated frames also use DCS\'s cockpit outline, depth and motion.'},
   {section:'vr', page:'framegen', name:'Sharp HUD', impact:'Sharper HUD', on:usesHudSymbology,
    gives:'HUD and helmet symbols stay sharp in generated frames instead of smearing.',
    expect:'A clean HUD while you turn. The symbols update at DCS\'s own HUD rate, about 20 times a second.',
    cost:'About 0.15 ms of GPU and 160 MB of video memory.',
-   needs:'Frame generation and Depth boost.'},
+   needs:'Frame generation.'},
   {section:'vr', page:'framegen', name:'Foveated frame generation', impact:'Less GPU and video memory', on:p => usesFoveatedFg(p),
    gives:'Generated frames are made for the focus area and for the rest of the view separately, instead of for the whole image.',
    expect:'The same image and frame rate, with more GPU time and video memory left. New: look at the edge of the focus area and at fast eye moves.',
@@ -1987,7 +1987,7 @@ const FEATURE_GUIDE = [
    gives:'More depth for distant aircraft, ships and terrain, from about 50 m to 2 km.',
    expect:'Far objects stand out more. The cockpit and the HUD stay exactly as they are.',
    cost:'Under 0.1 ms per frame.',
-   needs:'The bundled Quad Views and Engine Optimizations.',
+   needs:'The bundled Quad Views.',
    keyPath:'farDepthToggleKey', keyText:'off and on'},
   {section:'perception', page:'pupil', name:'Pupil shift', impact:'Steadier cockpit', on:p => usesPupilShift(p),
    gives:'Each eye is rendered from where its pupil really is.',

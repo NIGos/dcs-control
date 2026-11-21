@@ -204,6 +204,24 @@ std::atomic<ULONGLONG> g_lastDepthMs{0};
 std::atomic<uint64_t> g_mCommits{0}, g_mViews{0}, g_mResets{0}, g_mResetPrev{0}, g_mResetGen{0}, g_mResetSeq{0},
     g_mResetJit{0}, g_mResetCut{0}, g_mNoMv{0}, g_mNoSrv{0}, g_mBadFmt{0}, g_mPartial{0};
 std::atomic<ULONGLONG> g_lastMotionMs{0};
+// 0.7 three views x frame generation: while the right periphery is drawn as strip + cockpit (tvc::g_engaged), DCS's
+// MVs of that view outside the strip are the culled view's (the engine fill writes its MVs later, at the view's
+// TransparentCockpitPass, after this sample point). The commit then publishes view 1 WITHOUT view_flags::valid (and
+// the slot partial, the contract's existing per-view rule): a reader uses flow for that eye. The mask and the cockpit
+// depth stay as they are (the cockpit is still drawn). The flag holds kTvMvTail commits after a disengage (a frame
+// culled before the worker's change may commit after it). g_mTvViews counts the views left out.
+constexpr int kTvMvTail = 3;
+int g_tvMvHold = 0;  // render thread (the commit)
+std::atomic<uint64_t> g_mTvViews{0};
+inline bool TvRightMvUnproven(bool engaged) {
+  if (engaged) {
+    g_tvMvHold = kTvMvTail;
+    return true;
+  }
+  if (g_tvMvHold <= 0) return false;
+  --g_tvMvHold;
+  return true;
+}
 // R70: the live checks (R70 §10): T1 (still frames, DLSS jitter 0.3-0.95 px between frames): DCS's MVs are 0 +- 0.001
 // px, i.e. JITTER-FREE (includes_jitter is never set; jitter_free is); T2 (synthetic yaw turns): every terrain / sky /
 // model texel's MV equals the head rotation's motion at infinity within 0.016 px (p99.9 at 20 deg/s), the sky included.
@@ -3593,6 +3611,13 @@ bool CommitMotion(const Frame& f, uint64_t seq, int64_t displayTime, bool paired
     if (!jitCurOk[v] || !(g_mPrev.valid && g_mPrev.jitOk[v])) rJit = true;
     ms.view[v] = m;
   }
+  // 0.7 three views: the right periphery's MVs are unproven while it is culled (see TvRightMvUnproven).
+  uint32_t mvMask = f.motionMask;
+  if (TvRightMvUnproven(tvc::g_engaged.load(std::memory_order_relaxed)) && (mvMask & 2u)) {
+    mvMask &= ~2u;
+    ms.view[1].flags &= ~cmv::view_flags::valid;
+    g_mTvViews++;
+  }
   const bool reset = rPrev || rGen || rSeq || rCut || rJit;
   ms.seq = seq;
   ms.engineFrame = f.engineFrame;
@@ -3600,10 +3625,10 @@ bool CommitMotion(const Frame& f, uint64_t seq, int64_t displayTime, bool paired
   ms.qpcCommit = qpc;
   ms.prevSeq = g_mPrev.valid ? g_mPrev.seq : 0;
   ms.prevDisplayTime = g_mPrev.valid ? g_mPrev.displayTime : 0;
-  ms.viewMask = f.motionMask;
+  ms.viewMask = mvMask;
   const uint32_t want = f.wantMask & 3u;
   ms.flags = cmv::slot_flags::valid | (paired && displayTime ? cmv::slot_flags::display_time : 0u) |
-             (paired ? 0u : cmv::slot_flags::late_commit) | ((f.motionMask & want) != want ? cmv::slot_flags::partial : 0u) |
+             (paired ? 0u : cmv::slot_flags::late_commit) | ((mvMask & want) != want ? cmv::slot_flags::partial : 0u) |
              (reset ? cmv::slot_flags::reset : 0u) | (kMvIncludesJitter ? cmv::slot_flags::includes_jitter : 0u) |
              (kMvJitterFree ? cmv::slot_flags::jitter_free : 0u) | (kMvSkyIsInfinity ? cmv::slot_flags::sky_is_infinity : 0u);
   g_mhdr.slotTime[f.slot] = ctime::ToMotion(ctime::g_rec);  // R74a: this frame's content time (seq == this seq)
@@ -3615,7 +3640,7 @@ bool CommitMotion(const Frame& f, uint64_t seq, int64_t displayTime, bool paired
     g_mResets++;
     (rPrev ? g_mResetPrev : rGen ? g_mResetGen : rSeq ? g_mResetSeq : rCut ? g_mResetCut : g_mResetJit)++;
   }
-  if ((f.motionMask & want) != want) g_mPartial++;
+  if ((mvMask & want) != want) g_mPartial++;
   g_lastMotionMs = GetTickCount64();
   DebugCommitMotion(f.slot, ms, xr);
   // This commit is the next one's previous.
@@ -4650,9 +4675,9 @@ void LogStats() {
       sprintf_s(age, "%.0f ms ago", (q.QuadPart - static_cast<int64_t>(hb)) * 1000.0 / static_cast<double>(g_qpcFreq));
     Log("cockpit mask: motion companion %llu commits, %llu views copied, %llu partial; reset %llu (first / after idle "
         "%llu, generation %llu, sequence %llu, camera cut %llu, jitter unknown %llu; origin rebases not counted as cuts %llu); no MV target %llu, no SRV %llu, "
-        "size %llu, ambiguous binds %llu; motion reader %s (heartbeat %s; %llu -> idle, %llu -> active)",
+        "size %llu, ambiguous binds %llu; three views: right view left out %llu; motion reader %s (heartbeat %s; %llu -> idle, %llu -> active)",
         u(g_mCommits), u(g_mViews), u(g_mPartial), u(g_mResets), u(g_mResetPrev), u(g_mResetGen), u(g_mResetSeq),
-        u(g_mResetCut), u(g_mResetJit), u(g_mRebaseNoCut.load()), u(g_mNoMv), u(g_mNoSrv), u(g_mBadFmt), u(fixdepth::g_mvAmbiguous),
+        u(g_mResetCut), u(g_mResetJit), u(g_mRebaseNoCut.load()), u(g_mNoMv), u(g_mNoSrv), u(g_mBadFmt), u(fixdepth::g_mvAmbiguous), u(g_mTvViews),
         g_mIdleA.load() ? "idle" : "active", age, u(g_mToIdle), u(g_mToActive));
   }
 }

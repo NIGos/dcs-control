@@ -141,7 +141,7 @@ public static class ProfileValidation
         if (profile.PeripheryStability && !profile.Desktop && !profile.UsesPeripheryStability)
             issues.Add(new("periphery-stability-provider", IssueSeverity.Warning, "Periphery stability runs in the bundled Quad Views only. With Pimax native Quad Views or with Quad Views off, it does not run."));
         if (profile.FarDepth && !profile.Desktop && !profile.UsesFarDepth)
-            issues.Add(new("far-depth-needs", IssueSeverity.Warning, "Far depth needs the bundled Quad Views and Engine Optimizations (they measure the depth). With these settings it does not run."));
+            issues.Add(new("far-depth-needs", IssueSeverity.Warning, "Far depth needs the bundled Quad Views. With these settings it does not run."));
         if (profile.FarDepth && !Enum.IsDefined(profile.FarDepthPreset)) Error("far-depth-preset", "Select Subtle, Default or Strong for Far depth.");
         if (!Enum.IsDefined(profile.PeripheryDlssPreset)) Error("periphery-preset", "Select Off, E, F, K or M for the periphery DLSS preset.");
         else if (profile.PeripheryDlssPreset != PeripheryDlssPreset.Off && !profile.Desktop && !profile.UsesPeripheryDlssPreset)
@@ -159,8 +159,6 @@ public static class ProfileValidation
             Error("depth-near", $"Depth boost's cockpit distance must be {VrProfile.DepthBoostNearMin}–{VrProfile.DepthBoostNearMax} m.");
         if (profile.DepthBoost && !profile.Desktop && !profile.UsesDepthBoost)
             issues.Add(new("depth-gaze", IssueSeverity.Warning, "Depth boost needs Quad Views with an eye-tracked focus area, because it reads where each eye looks from it. With these settings it does not run."));
-        if (profile.FrameGenHudSymbology && profile.FrameGen != FrameGeneration.Off && !profile.Desktop && !profile.UsesDepthBoost)
-            issues.Add(new("hud-symbology-needs", IssueSeverity.Warning, "Sharp HUD needs Depth boost (Perception page). Until then it does not run."));
         if (profile.FrameGenFoveated && profile.FrameGen != FrameGeneration.Off && !profile.Desktop && !profile.UsesFoveatedFrameGen)
             issues.Add(new("foveated-fg-needs", IssueSeverity.Warning, "Foveated frame generation needs NVIDIA frame generation, the Pimax route and bundled Quad Views. Until then it does not run."));
         // Visual realism: the module clamps out-of-range values itself; the profile refuses them, like the other settings.

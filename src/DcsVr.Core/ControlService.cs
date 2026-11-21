@@ -262,7 +262,8 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
                     throw new InvalidDataException("The OFXR layer is modified or incomplete.");
             }
             string? engine = null;
-            if (profile.UsesEngineModule)
+            // Frame generation's cockpit exports alone: optional (a distribution without the module flies without them).
+            if (profile.UsesEngineModule && (profile.EngineModuleRequired || Directory.Exists(Path.Combine(DistributionRoot, "components/dcsqvcull"))))
             {
                 // DCS engine optimizations (native/dcsqvcull), copied to Saved Games\DCS\Scripts.
                 engine = Path.Combine(DistributionRoot, "components/dcsqvcull");

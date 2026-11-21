@@ -213,10 +213,11 @@ public sealed class DeploymentPlanner(ComponentLocations components)
 
         // DCS engine optimizations: a Lua hook in Saved Games loads the module; nothing in the DCS install changes. The
         // loader and the hook are locked while DCS runs, like every file Apply writes (it refuses while DCS is open).
-        // Depth boost or a Visual realism feature alone installs it too, in its Perception-only mode.
-        if (profile.UsesEngineModule)
+        // Depth boost, a Visual realism feature or Far depth alone installs it too, in its Perception-only mode. For frame
+        // generation's cockpit exports alone it is optional: without the component, frame generation runs without them.
+        if (profile.UsesEngineModule && (profile.EngineModuleRequired || components.EngineDirectory is not null))
         {
-            var engine = RequireDirectory(components.EngineDirectory, profile.EngineOptimizations ? "The DCS engine optimizations are unavailable." : profile.UsesDepthBoost ? "Depth boost's engine module is unavailable." : "Visual realism's engine module is unavailable.");
+            var engine = RequireDirectory(components.EngineDirectory, profile.EngineOptimizations ? "The DCS engine optimizations are unavailable." : profile.UsesDepthBoost ? "Depth boost's engine module is unavailable." : profile.UsesVisualRealism ? "Visual realism's engine module is unavailable." : "Far depth's engine module is unavailable.");
             var module = Path.Combine(scripts, "DcsQvCull");
             Add(Path.Combine(module, "DcsQvCull.dll"), File.ReadAllBytes(Path.Combine(engine, "DcsQvCull.dll")), "DCS engine optimizations loader",
                 // What the module writes while DCS runs; all of it goes with the module on restore. Its shader cache is

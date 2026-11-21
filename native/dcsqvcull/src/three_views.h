@@ -13,9 +13,11 @@
 //   - fixation_depth.h (tvexp): the periphery views' depth + stencil pushed to Quad Views (DcsVr_QuadViewsDepth, hmdView
 //     0 / 1), the right one flagged DCSVR_DEPTH_THREE_VIEWS while engaged (and a few frames after);
 //   - this file's Tick (worker): engages only when every condition holds and logs each change with its reason:
-//     the key on, the hotkey state on, the engine on (kill switch), frame generation off (the cockpit mask / motion
-//     exports read the right periphery: a filled view would carry DCS's motion vectors of the culled one), Quad Views
-//     asking for both periphery views (a layer that cannot fill never sees a culled view), fixation depth installed.
+//     the key on, the hotkey state on, the engine on (kill switch), Quad Views asking for both periphery views (a layer
+//     that cannot fill never sees a culled view), fixation depth installed. Frame generation no longer gates it: the
+//     cockpit is still drawn in the right periphery (mask and cockpit depth stay right), and the motion companion
+//     publishes that view without view_flags::valid while engaged (cockpit_mask.h TvRightMvUnproven): its MVs outside
+//     the strip are the culled view's, so the reader uses flow for that eye.
 // [Views] ThreeViewsKey (vk:mods, default 0:0 = none): toggles the mode in flight (a high beep on, a low one off); an
 // ini change of ThreeViews resets the toggle to the ini value. [Suite] ThreeViewsTiming=<pairs>: OFF / ON blocks with
 // the GPU frame period (the layer's fill included: it follows the flag).
@@ -365,7 +367,7 @@ int g_lastCfg = -1;
 std::string g_lastWhy;
 
 // Worker, every loop: decides tvc::g_engaged and installs / removes the render-thread parts.
-void Tick(bool cfgOn, double stripNdc, int keyVk, int keyMods, bool engineOff, bool fgOn, bool fixInstalled,
+void Tick(bool cfgOn, double stripNdc, int keyVk, int keyMods, bool engineOff, bool fixInstalled,
           bool keyDown) {
   (void)keyMods;  // the caller matched the modifiers (keyDown)
   tvc::g_cfgOn = cfgOn;
@@ -392,7 +394,6 @@ void Tick(bool cfgOn, double stripNdc, int keyVk, int keyMods, bool engineOff, b
   if (!cfgOn) why = "[Views] ThreeViews=0";
   else if (!want) why = force >= 0 ? "timing OFF block" : "hotkey OFF";
   else if (engineOff) why = "engine optimizations off (kill switch)";
-  else if (fgOn) why = "frame generation is on (the right periphery's motion and mask would be the culled view's)";
   else if (!fixInstalled) why = "fixation depth's pass hooks not installed";
   else if ((mask & 3u) != 3u) why = "the Quad Views layer does not ask for the periphery views (not a three-views build)";
   const bool on = why.empty();
