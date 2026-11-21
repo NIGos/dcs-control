@@ -10,6 +10,9 @@ $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $sdkRoot = Join-Path $workspaceRoot 'external/ofxr/external/FidelityFX-SDK-v1.1.4'
 $wrapper = Join-Path $PSScriptRoot 'msvc.cmd'
+# Every key the app writes for this component must be read by it (scripts/written-keys.txt).
+& (Join-Path $PSScriptRoot 'check-written-keys.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'The app writes a key this component never reads (check-written-keys.ps1).' }
 if (-not (Test-Path -LiteralPath $sdkRoot)) {
     & git clone --depth 1 --filter=blob:none --sparse --branch v1.1.4 https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git $sdkRoot
     if ($LASTEXITCODE -ne 0) { throw 'FidelityFX download failed.' }

@@ -715,6 +715,9 @@ public sealed record InventorySnapshot
     public string? PimaxRuntime { get; init; }
     public string? SteamVrRuntime { get; init; }
     public string? PimaxVersion { get; init; }
+    /// <summary>The active OpenXR runtime's name when it is neither Pimax's nor SteamVR's (Varjo, Meta, Virtual Desktop,
+    /// Windows Mixed Reality…); null for those two or when none is registered.</summary>
+    public string? OtherOpenXrRuntime => OpenXrRuntimeNames.Other(ActiveRuntime);
     public bool DcsRunning { get; init; }
     public TrackingKind Tracking { get; init; }
     public IReadOnlyList<FileFact> Files { get; init; } = [];

@@ -103,7 +103,7 @@ public static partial class Diagnostics
 
     /// <summary>Writes the package to <paramref name="zipPath"/>: <paramref name="report"/> (the app's own report as
     /// JSON) plus logs and settings from the sources. Text only, each file cut to its last 8 MB, user and PC names removed.</summary>
-    public static IReadOnlyList<DiagnosticEntry> CreatePackage(DiagnosticSources sources, string report, string zipPath)
+    public static IReadOnlyList<DiagnosticEntry> CreatePackage(DiagnosticSources sources, string report, string zipPath, HeadsetRuntimeInfo? headset = null)
     {
         var entries = new List<DiagnosticEntry>();
         var redactor = Redactor();
@@ -144,6 +144,14 @@ public static partial class Diagnostics
             Text("report.json", "DCS Control", report);
             var local = sources.LocalAppData ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             var roaming = sources.RoamingAppData ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            var savedGamesRoot = sources.OptionsPath is { } o ? Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(o))) : null;
+            Text("summary.txt", "DCS Control", Summary(headset, ToggleLines(
+            [
+                ("DcsQvCull.prev.log", savedGamesRoot is null ? null : Path.Combine(savedGamesRoot, "Scripts", "DcsQvCull", "DcsQvCull.prev.log")),
+                ("DcsQvCull.log", savedGamesRoot is null ? null : Path.Combine(savedGamesRoot, "Scripts", "DcsQvCull", "DcsQvCull.log")),
+                ("PupilShift.log", sources.ManagedProfile is null ? null : Path.Combine(sources.ManagedProfile, PupilShiftStatus.FolderName, PupilShiftStatus.LogName)),
+                ("Quad-Views-Foveated.log", Path.Combine(local, "Quad-Views-Foveated", "Quad-Views-Foveated.log")),
+            ])));
 
             // DCS Control: the applied profile's deployed settings and component logs, and the app's own state.
             Folder("dcs-control/applied-profile", sources.ManagedProfile, "*", 60, SearchOption.AllDirectories);
@@ -211,9 +219,41 @@ public static partial class Diagnostics
         return entries;
     }
 
+    [GeneratedRegex(@"^(?<time>\d\d:\d\d:\d\d\.\d{3}) (?<what>(?:hotkey|toggle): (?!switch took).*?)\s*$")] private static partial Regex ToggleRegex();
+
+    /// <summary>The in-flight switches in the logs, in order: the engine kill switch with the module's "the 10 s
+    /// before / after" performance lines, the other engine keys, Pupil shift's keys and Quad Views' Far depth key.
+    /// At most 200 lines, the newest kept.</summary>
+    internal static IReadOnlyList<string> ToggleLines(IEnumerable<(string Name, string? Path)> logs)
+    {
+        var lines = new List<string>();
+        foreach (var (name, path) in logs)
+        {
+            if (path is null || !File.Exists(path)) continue;
+            string text;
+            try { text = Tail(path, TextLimit); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
+            foreach (var raw in text.Split('\n'))
+            {
+                var line = raw.TrimEnd('\r');
+                if (ToggleRegex().Match(line) is { Success: true } m) lines.Add($"[{name}] {m.Groups["time"].Value} {m.Groups["what"].Value}");
+                else if (line.Contains("DCSVR Far depth: switched", StringComparison.Ordinal)) lines.Add($"[{name}] {line.Trim()}");
+            }
+        }
+        return lines.Count > 200 ? lines[^200..] : lines;
+    }
+
+    /// <summary>summary.txt: the headset software and the in-flight switches, so a reader starts there.</summary>
+    internal static string Summary(HeadsetRuntimeInfo? headset, IReadOnlyList<string> toggles) =>
+        $"DCS Control {ProductInfo.Version} diagnostic summary\n"
+        + (headset?.Line ?? "Headset/runtime: not read") + "\n\n"
+        + "In-flight switches (DcsQvCull.prev.log is the DCS session before DcsQvCull.log):\n"
+        + (toggles.Count == 0 ? "  none in these logs\n" : string.Concat(toggles.Select(t => "  " + t + "\n")));
+
     private static string Readme(IReadOnlyList<DiagnosticEntry> entries) =>
         $"DCS Control {ProductInfo.Version} diagnostic package, {DateTimeOffset.Now:yyyy-MM-dd HH:mm zzz}.\n"
         + "Logs and settings of DCS, DCS Control's components and the headset software. The Windows user name, PC name and e-mail addresses are replaced by <user>, <pc> and <e-mail>; account tokens, account ids and the headset's serial number by <token>, <id> and <serial>.\n"
+        + "Start with summary.txt: the headset software and the in-flight switches of these logs.\n"
         + "Large logs are cut to their last 8 MB (marked below).\n\n"
         + string.Join("\n", entries.Select(e => string.Create(CultureInfo.InvariantCulture, $"{e.Name}  ({e.Bytes:N0} bytes{(e.Truncated ? ", last part" : "")})  from {e.Source}")));
 

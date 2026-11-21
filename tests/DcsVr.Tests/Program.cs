@@ -1766,11 +1766,20 @@ Test("The diagnostic package collects DCS, component and headset logs as text, w
     Make("diag/managed/profiles/p1/ofxr/ofxr-bridge-flight-1.prev.log", "ofxr earlier segment");
     Make("diag/managed/profiles/p1/ofxr/XR_APILAYER_x.dll", "binary");
     var local = Path.Combine(root, "diag/local");
-    Make("diag/local/Pimax/runtime/pvr_srv_log_26-10-10-14-12-32.txt", new string('a', 10) + "rendering fps:(a:90.0,c:89.99)");
+    Make("diag/local/Pimax/runtime/pvr_srv_log_26-10-10-14-12-32.txt", "[26-11-21 12:10:04.942][ 2752][info][PSRV] build time:Nov  6 2026 20:19:38\n[26-11-21 12:10:04.942][ 2752][info][PSRV] version detail: id_0a61d106_20261106\n[26-11-21 12:10:39.040][ 9692][info][PSRV] added hid device:13476:64:0-Pimax Crystal Super\n" + new string('a', 10) + "rendering fps:(a:90.0,c:89.99)");
+    Make("diag/Saved Games/DCS/Scripts/DcsQvCull/DcsQvCull.log", "16:24:12.223 payload: started\n16:30:01.100 hotkey: engine optimizations OFF\n16:30:01.101 hotkey: switch took 3.0 ms on the worker\n16:30:01.102 toggle: engine OFF; the 10 s before (engine ON): fps 61.0 (10 s)\n16:30:13.600 toggle: the 10 s after (engine OFF, 2 s settle): fps 44.0 (10 s) (fps -27.9%)\n");
+    Make("diag/managed/profiles/p1/pupilshift/PupilShift.log", "10:00:00.000 settings: enabled=1\n16:31:00.000 hotkey: correction OFF\n");
+    var headsetState = Path.Combine(root, "diag/state"); Directory.CreateDirectory(headsetState);
+    var firstSeen = HeadsetRuntime.Read("2.0.5.376", @"C:\Program Files\Pimax\Runtime\PiOpenXR_64.json", Path.Combine(local, "Pimax/runtime"), headsetState);
+    Require(firstSeen is { RuntimeBuild: "Nov 6 2026 20:19:38", RuntimeId: "id_0a61d106_20261106", Headset: "Pimax Crystal Super", OpenXrRuntime: "PiOpenXR_64.json", Changed: false } && firstSeen.Line.Contains("Pimax Play 2.0.5.376"), firstSeen.Line);
+    HeadsetRuntime.RememberFlight(firstSeen with { PimaxPlay = "2.0.4.100", RuntimeBuild = "Oct 1 2026 10:00:00" }, headsetState);
+    var headsetNow = HeadsetRuntime.Read("2.0.5.376", null, Path.Combine(local, "Pimax/runtime"), headsetState);
+    Require(headsetNow.Changed && headsetNow.Line.Contains("CHANGED since the last flight (was Pimax Play 2.0.4.100, runtime built Oct 1 2026 10:00:00)"), headsetNow.Line);
+    Require(!(headsetNow with { PreviousPimaxPlay = "2.0.5.376", PreviousRuntimeBuild = null }).Changed, "an unknown earlier build is no change");
     Make("diag/local/Pimax/runtime/pvr_srv_log_26-10-09-14-12-32.txt", "older");
     File.SetLastWriteTimeUtc(Path.Combine(local, "Pimax/runtime/pvr_srv_log_26-10-09-14-12-32.txt"), DateTime.UtcNow.AddDays(-1));
     var zip = Path.Combine(root, "diag/package.zip");
-    var entries = Diagnostics.CreatePackage(new(null, managed, options, exe, RuntimeKind.Pimax, local, Path.Combine(root, "diag/roaming")), "{\"report\":1}", zip);
+    var entries = Diagnostics.CreatePackage(new(null, managed, options, exe, RuntimeKind.Pimax, local, Path.Combine(root, "diag/roaming")), "{\"report\":1}", zip, headsetNow);
     using var archive = System.IO.Compression.ZipFile.OpenRead(zip);
     var names = archive.Entries.Select(e => e.FullName).ToHashSet();
     foreach (var name in new[] { "report.json", "dcs/Logs/dcs.log", "dcs/Config/options.lua", "dcs/Scripts/Hooks.txt", "dcs/bin/CheekyFoveatedDLSS/CheekyFoveatedDLSS-Standalone.log", "dcs/bin/modules.txt",
@@ -1778,6 +1787,9 @@ Test("The diagnostic package collects DCS, component and headset logs as text, w
         Require(names.Contains(name), "missing " + name);
     Require(!names.Any(n => n.EndsWith(".dll")) && !names.Contains("pimax/runtime/pvr_srv_log_26-10-09-14-12-32.txt"), "text only, newest runtime log");
     string Read(string name) { using var reader = new StreamReader(archive.GetEntry(name)!.Open()); return reader.ReadToEnd(); }
+    var summary = Read("summary.txt");
+    Require(summary.Contains("CHANGED since the last flight") && summary.Contains("[DcsQvCull.log] 16:30:01.100 hotkey: engine optimizations OFF") && summary.Contains("(fps -27.9%)")
+        && summary.Contains("[PupilShift.log] 16:31:00.000 hotkey: correction OFF") && !summary.Contains("switch took") && !summary.Contains("payload: started"), summary);
     var log = Read("dcs/Logs/dcs.log");
     Require(log.Contains("<user>") && log.Contains("<pc>") && log.Contains("<e-mail>") && !log.Contains(Environment.UserName, StringComparison.OrdinalIgnoreCase) && !log.Contains("someone@example.com"), log);
     Require(!Read("README.txt").Contains(Environment.UserName, StringComparison.OrdinalIgnoreCase) && entries.Count == archive.Entries.Count);
@@ -4959,6 +4971,65 @@ Test("The User Guide and the README name this version: the guide's version line,
     // link the 0.6.5 PDF; the test only makes sure they link the same one.
     var manuals = System.Text.RegularExpressions.Regex.Matches(guide + readme, @"releases/download/v[^/]+/DcsControl-[0-9.]+-User-Manual\.pdf").Select(m => m.Value).Distinct().ToArray();
     Require(manuals.Length == 1, "One User Manual link in the guide and the README: " + string.Join(", ", manuals));
+});
+Test("Every key the app writes is read by its component (scripts/written-keys.txt, scripts/check-written-keys.ps1)", () =>
+{
+    // Every ini key the five writers emit, over profiles that turn on every optional block (all switches on, then
+    // each route and gaze), against the committed list the build scripts check the components' sources with.
+    static VrProfile AllOn(VrProfile p)
+    {
+        object o = p with { };
+        foreach (var prop in typeof(VrProfile).GetProperties().Where(x => x.PropertyType == typeof(bool) && x.SetMethod is { IsPublic: true } && x.Name != nameof(VrProfile.Desktop))) prop.SetValue(o, true);
+        return (VrProfile)o;
+    }
+    var vr = AllOn(new VrProfile { FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked, Runtime = RuntimeKind.Pimax,
+        ColorMode = ColorMode.Enhanced, QuadVerticalOffset = -10, FocusDlssPreset = 11, EngineDevPayloadPath = "C:/dev/p.dll", EngineDevIniPath = "C:/dev/p.ini" });
+    var profiles = new[]
+    {
+        new VrProfile(), vr, vr with { Gaze = GazeMode.Fixed }, vr with { QuadViews = QuadProvider.None }, vr with { FrameGen = FrameGeneration.FidelityFx },
+        vr with { EngineOptimizations = false }, vr with { PupilShift = false, DepthBoost = false, GazeDof = false, GVisionUseGaze = false }, vr with { Runtime = RuntimeKind.SboysSteamVr },
+    };
+    var keys = new SortedSet<string>(StringComparer.Ordinal);
+    void Add(string writer, string ini)
+    {
+        var section = "";
+        foreach (var raw in ini.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line[0] == ';' || line[0] == '#') continue;
+            if (line[0] == '[' && line[^1] == ']') { section = line[1..^1]; continue; }
+            if (line.IndexOf('=') is var eq and > 0) keys.Add(writer + "\t" + section + "\t" + line[..eq].Trim());
+        }
+    }
+    foreach (var p in profiles)
+    {
+        Add("Cheeky", ConfigurationWriters.Cheeky(p)); Add("DcsQvCull", ConfigurationWriters.DcsQvCull(p, "C:/cache"));
+        Add("Ofxr", ConfigurationWriters.Ofxr(p, "C:/bin")); Add("PupilShift", ConfigurationWriters.PupilShift(p, 64)); Add("QuadViews", ConfigurationWriters.QuadViews(p));
+    }
+    var listPath = Path.Combine(workspace, "scripts/written-keys.txt");
+    var text = "# Every ini key DCS Control writes: writer, section, key. Made by DcsVr.Tests (DCSVR_UPDATE_WRITTEN_KEYS=1 rewrites it);\n# scripts/check-written-keys.ps1 checks that each one is read by its component.\n" + string.Concat(keys.Select(k => k + "\n"));
+    if (Environment.GetEnvironmentVariable("DCSVR_UPDATE_WRITTEN_KEYS") == "1") File.WriteAllText(listPath, text);
+    var committed = File.Exists(listPath) ? File.ReadAllText(listPath).Replace("\r\n", "\n") : "";
+    var listed = committed.Split('\n').Where(l => l.Length > 0 && l[0] != '#').ToHashSet(StringComparer.Ordinal);
+    Require(listed.SetEquals(keys), "scripts/written-keys.txt is not what the writers emit (run the tests with DCSVR_UPDATE_WRITTEN_KEYS=1): new "
+        + string.Join(", ", keys.Except(listed).Take(20)) + "; gone " + string.Join(", ", listed.Except(keys).Take(20)));
+    ProcessStartInfo start = new("pwsh") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+    foreach (var argument in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", Path.Combine(workspace, "scripts/check-written-keys.ps1"), "-Root", workspace }) start.ArgumentList.Add(argument);
+    try
+    {
+        using var process = Process.Start(start)!; var error = process.StandardError.ReadToEndAsync(); var output = process.StandardOutput.ReadToEnd();
+        process.WaitForExit();
+        Require(process.ExitCode == 0, output + error.Result);
+    }
+    catch (System.ComponentModel.Win32Exception) { Skip("PowerShell 7 (pwsh) is not on PATH"); }
+});
+Test("The OpenXR runtime of another headset is named (Varjo, Meta, Virtual Desktop, WMR); Pimax's and SteamVR's are not 'other'", () =>
+{
+    Require(OpenXrRuntimeNames.Other(@"C:\Program Files\Pimax\Runtime\PiOpenXR_64.json") is null && OpenXrRuntimeNames.Other(@"D:\Steam\steamapps\common\SteamVR\steamxr_win64.json") is null && OpenXrRuntimeNames.Other(null) is null);
+    Require(OpenXrRuntimeNames.Other(@"C:\Program Files\Varjo\varjo-openxr\VarjoOpenXR.json") == "Varjo" && OpenXrRuntimeNames.Other(@"C:\Program Files\Oculus\Support\oculus-runtime\oculus_openxr_64.json") == "Meta (Oculus)");
+    Require(OpenXrRuntimeNames.Other(@"C:\Program Files\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json") == "Virtual Desktop (VDXR)" && OpenXrRuntimeNames.Other(@"C:\Windows\system32\MixedRealityRuntime.json") == "Windows Mixed Reality");
+    Require(OpenXrRuntimeNames.Other(@"E:\Tools\SomeRuntime\some_runtime.json") == "some_runtime", "an unknown runtime by its file name");
+    Require(new InventorySnapshot { ActiveRuntime = @"C:\Program Files\Varjo\varjo-openxr\VarjoOpenXR.json" }.OtherOpenXrRuntime == "Varjo" && JsonData.Serialize(new InventorySnapshot { ActiveRuntime = "x/VarjoOpenXR.json" }).Replace(" ", "").Contains("\"otherOpenXrRuntime\":\"Varjo\""), "the interface gets it with the inventory");
 });
 Test("DLSS 5 focus: a central area is round with a round focus, and the focus preset reaches Cheeky", () =>
 {

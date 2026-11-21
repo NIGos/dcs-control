@@ -893,6 +893,7 @@ void SampleSecond(double t) {
     g_framesCapAt = perfgov::ReadIntervals(g_framesCapAt, iv);
     g_capTrack.Add(iv);
     s.cap = g_capTrack.last;
+    if (s.cap.fps > 0 && !perfgov::CapPlausible(s.renderPct, s.gpuPct, th)) s.cap = perfgov::Cap();  // #27
     if (s.cap.fps > 0 && s.verdict != perfgov::kNone) s.verdict = perfgov::kCapped;
   }
   s.stage = g_govStage.load();
@@ -930,7 +931,11 @@ void PerfLine(double t) {
   auto q = [&](double p) { return iv[(std::min)(iv.size() - 1, static_cast<size_t>(p * iv.size()))]; };
   const int v = Majority(a);
   // A frame-rate cap over the whole window wins over the thresholds (the GPU and the render thread have slack).
-  const perfgov::Cap cap = perfgov::DetectCap(iv);
+  perfgov::Thresholds th;
+  th.cpuBusyPct = g_cfg.govCpuBusyPct;
+  th.gpuFreePct = g_cfg.govGpuFreePct;
+  perfgov::Cap cap = perfgov::DetectCap(iv);
+  if (cap.fps > 0 && !perfgov::CapPlausible(a.Rt(), a.Gpu(), th)) cap = perfgov::Cap();  // both working: not a cap (#27)
   char vtext[64];
   if (cap.fps > 0)
     snprintf(vtext, sizeof(vtext), "capped %.1f fps = %d/%d", cap.fps, cap.hz, cap.div);

@@ -1,6 +1,6 @@
 # DCS Control — User Guide
 
-**Version 0.6.7-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`. The same content as a printable book, with a Quick Start and numbered screenshots: **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.6.5-preview/DcsControl-0.6.5-User-Manual.pdf)**.
+**Version 0.7.0-preview (early beta).** This guide is for pilots. It explains what the app does, how to set it up and how to get help. Developer documentation lives in the [README](../README.md#for-developers) and the other files in `docs/`. The same content as a printable book, with a Quick Start and numbered screenshots: **[User Manual (PDF)](https://github.com/NIGos/dcs-control/releases/download/v0.6.5-preview/DcsControl-0.6.5-User-Manual.pdf)**.
 
 > **Early beta.** DCS Control has been flown mostly on one PC (Pimax Crystal Super, RTX 5090, DCS 2.9 Steam edition). Expect rough edges. Every file it changes is backed up and can be put back with one click (**Back to stock DCS**), so trying it is safe — but please read [Requirements](#requirements) and [Launch DCS](#launch-dcs) before your first flight.
 
@@ -8,6 +8,7 @@
 
 ## Contents
 
+- [New in 0.7](#new-in-07)
 - [What the app does](#what-the-app-does)
 - [Requirements](#requirements)
 - [Install](#install)
@@ -22,6 +23,18 @@
 - [Troubleshooting and FAQ](#troubleshooting-and-faq)
 - [Reporting a problem](#reporting-a-problem)
 - [Support](#support)
+
+## New in 0.7
+
+- **Engine page** (experimental, off by default): **Three views** (the right eye reuses most of what the left eye sees, about 1 ms less GPU time in cockpit flight; needs the bundled Quad Views, also with frame generation), **Skip hidden water** and **Skip unused effects**. **Faster terrain and shader paths** (on by default) can now be turned off if a problem points to it.
+- **Sharp HUD** no longer needs Depth boost, and it, **Far depth** and frame generation's cockpit exports also run with Engine Optimizations off.
+- **Soft focus edge** also with foveated frame generation; **Stay ahead until your eyes land** and **Slide back when tracking is lost** also with frame generation.
+- **Pupil shift** and **Eye-focus blur** also with a fixed focus area, from the headset's own eye tracking (Pimax; not flown yet).
+- **Both eyes at once** (Frame generation page, experimental): each eye's generated frame on its own GPU queue, ready about 1 ms sooner.
+- **AltGr+Shift+F11** works as the in-flight switch, and AltGr no longer counts as Ctrl+Alt.
+- The engine's automatic A/B test also runs on a headset without quad views (it compares whole frames).
+- **DLSS 5 runtime file**: NVIDIA does not offer it on its own, and DCS Control cannot provide it. With a patched copy on an RTX 50, the app says to use NVIDIA's original file.
+- DLSS views now work when another program has hooked DLSS first, and fixes for GitHub issues #28, #30, #31, #32 and #33.
 
 ## What the app does
 
@@ -62,7 +75,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 ## Install
 
-**With the setup (recommended):** download `DcsControl-0.6.7-preview-Setup.exe` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and double-click it. Its first page lets you choose:
+**With the setup (recommended):** download `DcsControl-0.7.0-preview-Setup.exe` from the [Releases page](https://github.com/NIGos/dcs-control/releases) and double-click it. Its first page lets you choose:
 
 - the **install folder**: `%LOCALAPPDATA%\Programs\DcsControl` unless you pick another one with **Browse...** (it shows the space needed and free). Any folder your Windows user can write to works, for example `D:\Games\DcsControl`; `Program Files` needs administrator rights, so it is refused. A folder that already holds other files gets a `DcsControl` folder inside it;
 - whether DCS Control goes in the **Start menu** and on the **desktop**.
@@ -71,7 +84,7 @@ What it does **not** do: it does not change Windows settings, your GPU driver se
 
 It waits until DCS and DCS Control are closed (the page says which one is still open). Running it again over an installed copy updates it in place; if anything goes wrong the installation is rolled back to the version you had. Its log is `%TEMP%\DcsControl-Setup.log`.
 
-**Portable, from the ZIP:** download `DcsControl-0.6.7-preview-win-x64.zip` and extract it to a folder of your choice. Then either:
+**Portable, from the ZIP:** download `DcsControl-0.7.0-preview-win-x64.zip` and extract it to a folder of your choice. Then either:
 
 - **Run it directly:** double-click `DcsControl.exe` in the extracted folder (.NET is included), or
 - **Install it:** double-click `Install DCS Control.cmd`. It does what the setup does, in a console window, with the Start menu entry but no desktop shortcut.
@@ -294,7 +307,7 @@ Tested on DCS 2.9.30 and 2.9.31 in single player. Back to stock DCS (or turning 
 
 ### Pupil shift (experimental)
 
-When your eyes turn, each pupil moves a few millimetres, but DCS renders both eyes from fixed points, so near objects shift slightly against far ones as you look around. With eye-tracked Quad Views, Pupil shift renders each eye from where its pupil is, then gives the headset its own poses back so the image is placed exactly as before. No GPU cost; off by default.
+When your eyes turn, each pupil moves a few millimetres, but DCS renders both eyes from fixed points, so near objects shift slightly against far ones as you look around. With eye-tracked Quad Views (or, on Pimax, a fixed focus area or no Quad Views, from the headset's eye tracking), Pupil shift renders each eye from where its pupil is, then gives the headset its own poses back so the image is placed exactly as before. No GPU cost; off by default.
 
 - **Eye rotation radius** (about 10-11 mm) and **Lens image distance** (1-2 m) — the defaults suit most people.
 - **In-flight switch** (default Ctrl+Shift+F10) — turns it off and on to compare: a low beep off, a high beep on.

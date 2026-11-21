@@ -142,6 +142,10 @@ window.runWebSmoke = async function() {
     check('The focus size in pixels is the shown percentage of 5424 x 5356 at 1.125x',ui.state.pimax.eyeResolution?.width === 5424 && ui.state.pimax.eyeResolution.focusWidth === (fineFixture ? 2624 : 2014) && ui.state.pimax.eyeResolution.focusHeight === (fineFixture ? 3976 : 1988));
     { const before = ui.profile.runtime; edit('quadViews','PimaxNative'); document.querySelector('#routeSwitch [data-route="SboysSteamVr"]').click(); check('Switching to Sboys replaces Pimax native Quad Views',ui.profile.runtime === 'SboysSteamVr' && ui.profile.quadViews === 'QuadViewsFoveated');
       check('The Sboys driver card shows on the Sboys route',!$('sboysCard').hidden); document.querySelector('#routeSwitch [data-route="Pimax"]').click(); check('The Sboys driver card is hidden on the Pimax route',$('sboysCard').hidden); document.querySelector(`#routeSwitch [data-route="${before}"]`).click(); }
+    { const inventory = ui.state.inventory; check('No other-runtime line with Pimax\'s or SteamVR\'s runtime',$('otherRuntime').hidden || Boolean(inventory?.otherOpenXrRuntime));
+      ui.state.inventory = {...inventory,otherOpenXrRuntime:'Varjo'}; ui.invalidate();
+      check('Another headset\'s OpenXR runtime gets one plain line on the DCS & headset page',!$('otherRuntime').hidden && $('otherRuntime').textContent === 'Your OpenXR runtime is Varjo. Engine Optimizations and CPU Boost work with it; the VR features are made for Pimax Play and SteamVR.');
+      ui.state.inventory = inventory; ui.invalidate(); check('and it goes when the runtime is Pimax\'s again',$('otherRuntime').hidden === !inventory?.otherOpenXrRuntime); }
     { const before = {runtime:ui.profile.runtime,quadViews:ui.profile.quadViews,frameGen:ui.profile.frameGen,neural:ui.profile.neuralRendering};
       document.querySelector('#routeSwitch [data-route="Desktop"]').click();
       ui.navigate('framegen'); const vrPageOpened = !$('page-framegen').hidden; ui.navigate('overview');

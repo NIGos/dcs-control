@@ -933,6 +933,13 @@ void CapTests() {
   Check(var.fps == 0 && steady68.fps == 0 && near72.fps == 0,
         "cap: variable 12-20 ms and steady uncapped 68.5 / 69 fps (live airfield, GPU-bound) are not caps");
   Check(DetectCap(Steady(1000.0 / 30, 10)).fps == 0, "cap: too few frames is no cap");
+  {
+    const Thresholds th;
+    Check(!CapPlausible(97, 100, th) && !CapPlausible(96, 88, th) && CapPlausible(50, 99, th) && CapPlausible(97, 60, th) &&
+              CapPlausible(-1, -1, th) && CapPlausible(97, -1, th),
+          "cap: a plateau with the render thread full and the GPU busy is not a cap (GitHub #27: 60, 45, 26.7 fps at "
+          "72 Hz); with one of them waiting, or no reading, it still is");
+  }
   // A long tail (median at 30 fps, mean far below): not a cap.
   std::vector<float> tail = Steady(1000.0 / 30, 200);
   for (int i = 0; i < 40; ++i) tail[i * 5] = 120.0f;

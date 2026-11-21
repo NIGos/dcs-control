@@ -9,6 +9,9 @@ param([string]$LocalOnly, [switch]$PatchOnly, [string]$Checkout)
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $quadRoot = Join-Path $workspaceRoot 'external/quadviews'
+# Every key the app writes for this component must be read by it (scripts/written-keys.txt).
+& (Join-Path $PSScriptRoot 'check-written-keys.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'The app writes a key this component never reads (check-written-keys.ps1).' }
 if ($Checkout) { $quadRoot = [IO.Path]::GetFullPath($Checkout) }
 if (-not (Test-Path -LiteralPath $quadRoot)) {
     & git clone --depth 1 --branch 1.1.3 https://github.com/mbucchia/Quad-Views-Foveated.git $quadRoot
