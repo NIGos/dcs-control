@@ -5092,6 +5092,9 @@ Test("Three views is parked in 0.7: a profile saved with engineThreeViews=true l
         var ini = ConfigurationWriters.DcsQvCull(p);
         Require(!ini.Contains("ThreeViews") && !ini.Contains("[Views]"), "No [Views] ThreeViews key from the app");
     }
+    // An earlier 0.7 build saved the derived "usesThreeViews" too: such a draft must still load.
+    var earlier = JsonData.Deserialize<VrProfile>(json.Replace("\"engineThreeViews\": false", "\"engineThreeViews\": true, \"usesThreeViews\": true"));
+    Require(earlier.EngineThreeViews && !ConfigurationWriters.DcsQvCull(earlier).Contains("ThreeViews"), "A draft with usesThreeViews loads and writes no ThreeViews key");
 });
 Test("CPU Boost: processes changed by a helper that was ended are restored at the next start, only the same process", () =>
 {

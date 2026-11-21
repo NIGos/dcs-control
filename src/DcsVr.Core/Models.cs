@@ -749,10 +749,12 @@ public static class JsonData
     /// <summary>Settings earlier versions saved and this one no longer has: the self-reported limiter, its FPS and the
     /// runtime motion smoothing (preflight lists them as checks you do yourself), the experimental consent and the Sboys
     /// driver folder (the registered driver is used), and Depth boost's transition choice and its key (the dual camera
-    /// only moves the depth gradually), and the headset tracking (detected, never a setting: it lives on the inventory).
+    /// only moves the depth gradually), the headset tracking (detected, never a setting: it lives on the inventory), and
+    /// the derived "usesThreeViews" an earlier 0.7 build saved before Three views was parked.
     /// Dropped when a profile loads, in any casing.</summary>
     private static readonly HashSet<string> ObsoleteProfileKeys = new(["externalLimiter", "externalLimiterFps", "runtimeReprojection",
-        "experimentalAcknowledged", "sboysDriverDirectory", "depthBoostTransition", "depthBoostTransitionKey", "tracking"], StringComparer.OrdinalIgnoreCase);
+        "experimentalAcknowledged", "sboysDriverDirectory", "depthBoostTransition", "depthBoostTransitionKey", "tracking",
+        "usesThreeViews"], StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Reads a profile with the plain options, without the <see cref="ObsoleteProfileKeys"/> (unknown keys are
     /// refused), then marks a profile saved without "foveaSource" (written before the setting existed) as using its own
