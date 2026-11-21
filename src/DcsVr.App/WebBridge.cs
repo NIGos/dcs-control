@@ -461,6 +461,13 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             ? PimaxFovea.WillUpdate(pimax, applied.Profile.Gaze) : null;
     /// <summary>A running DCS.exe; the offline verification host reports none.</summary>
     private bool DcsRunning() => offline ? _offlineDcs : DcsProcess.AnyRunning();
+
+    /// <summary>What the headset software was at this DCS launch: the next diagnostic report flags a new Pimax Play or runtime.</summary>
+    private void RememberHeadsetRuntime()
+    {
+        try { var now = HeadsetRuntime.Read(CurrentInventory.PimaxVersion, CurrentInventory.ActiveRuntime, HeadsetRefresh.PimaxRuntimeFolder, service.StateRoot); AppLog.Info("DCS launch: " + now.Line); HeadsetRuntime.RememberFlight(now, service.StateRoot); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { AppLog.Error("Headset runtime record", e); }
+    }
     /// <summary>Counts how long DCS has looked stuck on its own timer, so a minimised window does not start the count
     /// again. The offline verification host has no DCS: its smoke test says what is stuck.</summary>
     private readonly DcsStuckWatch? _stuck = offline ? null : new DcsStuckWatch();
@@ -785,11 +792,12 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         packageOptions, packageDcs, _profile.Runtime, SteamVrSettings: HeadsetRefresh.SteamVrSettings);
                     var packageFocus = await Task.Run(() => Diagnostics.DiagnoseDlssFocus(packageDcs is null ? null : Path.GetDirectoryName(packageDcs)));
                     var packageRefresh = await Task.Run(() => HeadsetRefresh.Detect(_profile.Runtime));
-                    var packageReport = JsonData.Serialize(new { schemaVersion = 1, version = ProductInfo.Version, created = DateTimeOffset.Now, dcsRunning = DcsRunning(),
+                    var packageHeadset = await Task.Run(() => HeadsetRuntime.Read(CurrentInventory.PimaxVersion, CurrentInventory.ActiveRuntime, HeadsetRefresh.PimaxRuntimeFolder, service.StateRoot));
+                    var packageReport = JsonData.Serialize(new { schemaVersion = 1, version = ProductInfo.Version, created = DateTimeOffset.Now, summary = packageHeadset.Line, headsetRuntime = packageHeadset, dcsRunning = DcsRunning(),
                         draft = _profile, applied = packageApplied?.Profile, inventory = CurrentInventory, issues = ProfileValidation.Validate(_profile, CurrentInventory), readiness = _readiness,
                         lastFlight = await Task.Run(() => { try { return LastFlight.Read(FlightSourcesNow()); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; } }),
                         dlssFocus = packageFocus, headsetRefresh = packageRefresh, originals = service.Originals.Status(), leftovers = Leftovers(), packages = PackageCatalog.All });
-                    var packaged = await Task.Run(() => Diagnostics.CreatePackage(packageSources, packageReport, packageDialog.FileName));
+                    var packaged = await Task.Run(() => Diagnostics.CreatePackage(packageSources, packageReport, packageDialog.FileName, packageHeadset));
                     _status = $"Diagnostic package saved: {Path.GetFileName(packageDialog.FileName)} ({packaged.Count} files). Attach it to your report.";
                     using (var process = Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { "/select,", packageDialog.FileName }, UseShellExecute = false })) { }
                     break;
@@ -854,6 +862,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     }
                     var (launched, dcsProcess) = await WithWriteAccess(() => service.SyncAndLaunch(_profile, CurrentInventory), () => LaunchSafety.ProfileFolders(_profile, CurrentInventory));
                     dcsProcess.Dispose();
+                    await Task.Run(RememberHeadsetRuntime);
                     _status = LaunchStatus(launched, "DCS launched."); _report = SyncReport(launched); break;
                 case "launchCheck":
                     var start = await Task.Run(service.PrepareLaunchApplied); _report = "Launch contract verified: " + start.FileName; break;

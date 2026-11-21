@@ -1,6 +1,9 @@
 #Requires -Version 7
 # -Force: patch-cheeky.py discards local edits in external/cheeky instead of refusing to reset them.
 param([ValidateSet('ofxr-core','cheeky')][string]$Component = 'ofxr-core', [switch]$Force)
+# Every key the app writes for this component must be read by it (scripts/written-keys.txt).
+& (Join-Path $PSScriptRoot 'check-written-keys.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'The app writes a key this component never reads (check-written-keys.ps1).' }
 $ErrorActionPreference = 'Stop'
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
 $nativeWrapper = Join-Path $PSScriptRoot 'msvc.cmd'

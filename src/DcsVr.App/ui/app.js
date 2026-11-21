@@ -953,7 +953,9 @@ function buildFields() {
   { const fixed = document.createElement('p'); fixed.className = 'fine keys-reserved'; fixed.textContent = 'Not available: Ctrl+Alt with F8 to F12, Page Up or Page Down (used by Engine Optimizations).'; c.querySelector('.card-heading').after(fixed); }
   // The headset software this profile uses and what runs now; the Sboys driver (Sboys route only), then the override.
   c = card('headsetControls','Headset software','Follows how you fly, chosen at the top: Pimax Play, or SteamVR for Sboys.');
-  { const line = document.createElement('p'); line.className = 'headset-active'; line.id = 'headsetActive'; c.append(line, $('sboysCard')); }
+  { const line = document.createElement('p'); line.className = 'headset-active'; line.id = 'headsetActive';
+    // Another headset's OpenXR runtime (Varjo, Meta, Virtual Desktop…): one plain line on what works with it.
+    const other = document.createElement('p'); other.className = 'fine'; other.id = 'otherRuntime'; other.hidden = true; c.append(line, other, $('sboysCard')); }
   more = disclosure(c,'Runtime override','Only for an OpenXR runtime that is not registered in Windows.',p => p.runtimeManifestPath ? p.runtimeManifestPath.split(/[\\/]/).pop() : 'Registered runtime');
   field(more,'runtimeManifestPath','OpenXR runtime file','The JSON file of an OpenXR runtime to use instead of the registered one. Normally leave it empty. Not used with Optimizations only.','path',null,p => !p.desktop);
   // Why a greyed-out setting waits (field()'s why), for the fields that do not set one: what to turn on or choose first.
@@ -1486,6 +1488,9 @@ function renderHeadsetSoftware() {
   const version = state?.inventory?.pimaxVersion, summary = state?.activeRoute?.summary;
   const software = profile.runtime === 'SboysSteamVr' ? 'SteamVR' : 'Pimax Play' + (version ? ' '+version : '');
   $('headsetActive').innerHTML = `<b>${escape(software)}</b>${summary ? `<span>${escape(summary)}</span>` : ''}`;
+  const other = state?.inventory?.otherOpenXrRuntime, otherLine = $('otherRuntime');
+  otherLine.hidden = !other;
+  otherLine.textContent = other ? `Your OpenXR runtime is ${other}. Engine Optimizations and CPU Boost work with it; the VR features are made for Pimax Play and SteamVR.` : '';
 }
 /** The rail says at a glance what is on: ON or OFF next to each feature page (Perception and Visual realism are on when
  *  any of their features is). */
