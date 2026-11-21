@@ -234,12 +234,13 @@ public static partial class Diagnostics
         {
             if (string.IsNullOrEmpty(text)) return text;
             foreach (var (from, to) in paths) text = text.Replace(from, to, StringComparison.OrdinalIgnoreCase);
+            // The PC name goes before the user names: a PC named after its user ("JOHN-PC") would otherwise become "<user>-PC".
+            if (machine.Length >= 3) text = Regex.Replace(text, @"(?<![\w-])" + Regex.Escape(machine) + @"(?![\w-])", "<pc>", RegexOptions.IgnoreCase);
             // Short names are removed where they are a profile folder, anywhere else only from three letters up.
             if (folder.Length is > 0 and < 3) text = Regex.Replace(text, @"(?<=Users[\\/]{1,2})" + Regex.Escape(folder) + @"(?=[\\/""]|$)", "<user>", RegexOptions.IgnoreCase);
             foreach (var name in names) text = Regex.Replace(text, @"(?<![\w])" + Regex.Escape(name) + @"(?![\w])", "<user>", RegexOptions.IgnoreCase);
             // An 8.3 short name of the profile folder ("C:\Users\GIUSEP~1") starts with the name too.
             text = ShortProfileRegex().Replace(text, "<user>");
-            if (machine.Length >= 3) text = Regex.Replace(text, @"(?<![\w-])" + Regex.Escape(machine) + @"(?![\w-])", "<pc>", RegexOptions.IgnoreCase);
             text = TokenRegex().Replace(text, "${key}${sep}<token>");
             text = AccountRegex().Replace(text, "${key}${sep}<id>");
             // A serial number seen once (next to its label) is removed wherever else it appears, also in later files.

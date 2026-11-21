@@ -1654,6 +1654,9 @@ Test("Other environments: AMD/Intel graphics, OpenBeta Saved Games, 3× at 72 Hz
     Require(small.HasRanking && !small.BackgroundCores.Contains(3) && small.VrRuntimeCores.Count == 0, "small CPU");
     // An 8.3 short name of the profile folder is removed from the diagnostic package too.
     Require(!Diagnostics.Redactor("Giuseppe", @"C:\Users\Giuseppe", "PC-01")(@"TEMP=C:\Users\GIUSEP~1\AppData\Local\Temp").Contains("GIUSEP"));
+    // A PC named after its user becomes <pc>, not "<user>-PC" (GitHub #31).
+    var namedPc = Diagnostics.Redactor("John", @"C:\Users\John", "JOHN-PC")("COMPUTERNAME=JOHN-PC USERNAME=John");
+    Require(namedPc == "COMPUTERNAME=<pc> USERNAME=<user>", namedPc);
 });
 Test("Another program's dxgi.dll in DCS's bin is reported before Launch sets it aside; ours never is", () =>
 {
