@@ -16,6 +16,14 @@
 //                  encodeSrgb = 1 applies the transfer function here. With a UNORM application swapchain the source
 //                  already holds encoded values: encodeSrgb = 0.
 //
+// Focus alpha convention (dcsvr_two_layers_alpha, patches/quadviews/0023-two-layer-alpha.patch; dcsvrEdge.z):
+//  0 the above: encoded colour not premultiplied, flags SOURCE_ALPHA | UNPREMULTIPLIED, UNORM target.
+//  1 premultiplied on the encoded values (bytes = encoded colour x alpha), flags SOURCE_ALPHA alone, UNORM target.
+//  2 the same bytes in an R8G8B8A8_UNORM_SRGB target: the pass returns the linear value whose sRGB encoding is the
+//    encoded colour x alpha, so the render target view stores exactly mode 1's bytes in an sRGB swapchain.
+// The runtime probe (tools/runtime-probe) measured the Pimax compositor blending every variant on the stored (encoded)
+// values; 1 and 2 are the OpenXR default convention, which needs no UNPREMULTIPLIED handling in the compositor.
+//
 // Without Far depth every texel is a Load at the pixel (1:1, no filtering).
 //
 // Edge match (dcsvr_edge_match, patches/quadviews/0019-edge-match.patch; dcsvrEdge.x the share of the fade band, 0 off):
@@ -47,7 +55,8 @@ cbuffer ConstantBuffer : register(b0) {
     float4 dcsvrWarp; // as ProjectionPS.hlsl: x on, yz focus uv -> periphery uv, w a held field
     float4 dcsvrReuse[3]; // a held field's reprojection
     float4 dcsvrDebug; // x the periphery black, y the focus colour outside the fade from t1
-    float4 dcsvrEdge; // edge match: x the share of the fade band (0 off), y k (one periphery texel in focus texels)
+    float4 dcsvrEdge; // edge match: x the share of the fade band (0 off), y k (one periphery texel in focus texels);
+                      // z the focus alpha convention (0 unpremultiplied, 1 premultiplied, 2 premultiplied, sRGB target)
 };
 
 SamplerState sourceSampler : register(s0);
@@ -61,6 +70,13 @@ float3 DcsvrLinearToSrgb(float3 c) {
     float3 low = c * 12.92;
     float3 high = 1.055 * pow(c, 1.0 / 2.4) - 0.055;
     return float3(c.r <= 0.0031308 ? low.r : high.r, c.g <= 0.0031308 ? low.g : high.g, c.b <= 0.0031308 ? low.b : high.b);
+}
+
+float3 DcsvrSrgbToLinear(float3 c) {
+    c = saturate(c);
+    float3 low = c / 12.92;
+    float3 high = pow((c + 0.055) / 1.055, 2.4);
+    return float3(c.r <= 0.04045 ? low.r : high.r, c.g <= 0.04045 ? low.g : high.g, c.b <= 0.04045 ? low.b : high.b);
 }
 
 float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0, in float3 projectedFocusCoord : PROJ_COORD1) : SV_TARGET {
@@ -148,5 +164,10 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0, 
     }
 
     float3 rgb = encodeSrgb != 0 ? DcsvrLinearToSrgb(color.rgb) : saturate(color.rgb);
+    [branch] if (dcsvrEdge.z >= 2) {
+        return float4(DcsvrSrgbToLinear(rgb * alpha), alpha);
+    } else if (dcsvrEdge.z >= 1) {
+        return float4(rgb * alpha, alpha);
+    }
     return float4(rgb, alpha);
 }

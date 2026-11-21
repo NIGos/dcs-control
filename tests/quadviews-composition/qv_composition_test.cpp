@@ -477,6 +477,9 @@ int main(int argc, char** argv) {
             const std::string two_new = read_text(two_layer_path);
             std::string two_old = two_new;
             replace_once(two_old, "[branch] if (dcsvrEdge.x > 0 &&", "[branch] if (false &&");
+            // Without 0023's alpha conventions either: mode 0 (dcsvrEdge.z 0) must give the bytes of the pass before it.
+            replace_once(two_old, "[branch] if (dcsvrEdge.z >= 2) {", "[branch] if (false) {");
+            replace_once(two_old, "} else if (dcsvrEdge.z >= 1) {", "} else if (false) {");
             const auto two_new_code = compile(two_new, "main", "ps_5_0", includes);
             const auto two_old_code = compile(two_old, "main", "ps_5_0", includes);
             ComPtr<ID3D11PixelShader> two_new_ps, two_old_ps;
@@ -496,16 +499,29 @@ int main(int argc, char** argv) {
             check(device->CreateTexture2D(&desc, nullptr, &layer_staging), "layer staging");
             ComPtr<ID3D11RenderTargetView> layer_rtv;
             check(device->CreateRenderTargetView(layer_target.Get(), nullptr, &layer_rtv), "layer rtv");
+            // dcsvr_two_layers_alpha 2: the focus swapchain is R8G8B8A8_UNORM_SRGB; its raw bytes are read back.
+            ComPtr<ID3D11Texture2D> srgb_target, srgb_staging;
+            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.CPUAccessFlags = 0;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+            check(device->CreateTexture2D(&desc, nullptr, &srgb_target), "srgb target");
+            desc.BindFlags = 0;
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            check(device->CreateTexture2D(&desc, nullptr, &srgb_staging), "srgb staging");
+            ComPtr<ID3D11RenderTargetView> srgb_rtv;
+            check(device->CreateRenderTargetView(srgb_target.Get(), nullptr, &srgb_rtv), "srgb rtv");
             const auto layer_constants = buffer(112);
             struct TwoLayer { float smoothing, shape, layer, encode; float warp[4]; float reuse[12]; float debug[4]; float edge[4]; };
             static_assert(sizeof(TwoLayer) == 112);
-            const auto run_layer = [&](const TwoLayer& k, ID3D11PixelShader* shader) {
+            const auto run_layer = [&](const TwoLayer& k, ID3D11PixelShader* shader, bool srgb = false) {
                 const float identity[16]{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
                 context->UpdateSubresource(vs_constants.Get(), 0, nullptr, identity, 0, 0);
                 context->UpdateSubresource(layer_constants.Get(), 0, nullptr, &k, 0, 0);
                 const float clear[4]{0.25f, 0.5f, 0.75f, 1.f};
-                context->ClearRenderTargetView(layer_rtv.Get(), clear);
-                context->OMSetRenderTargets(1, layer_rtv.GetAddressOf(), nullptr);
+                context->ClearRenderTargetView(srgb ? srgb_rtv.Get() : layer_rtv.Get(), clear);
+                context->OMSetRenderTargets(1, srgb ? srgb_rtv.GetAddressOf() : layer_rtv.GetAddressOf(), nullptr);
                 D3D11_VIEWPORT viewport{0, 0, static_cast<float>(kFocus), static_cast<float>(kFocus), 0, 1};
                 context->RSSetViewports(1, &viewport);
                 context->RSSetState(rasterizer.Get());
@@ -520,14 +536,15 @@ int main(int argc, char** argv) {
                 context->Draw(3, 0);
                 ID3D11ShaderResourceView* none[3]{};
                 context->PSSetShaderResources(0, 3, none);
-                context->CopyResource(layer_staging.Get(), layer_target.Get());
+                ID3D11Texture2D* const staging = srgb ? srgb_staging.Get() : layer_staging.Get();
+                context->CopyResource(staging, srgb ? srgb_target.Get() : layer_target.Get());
                 D3D11_MAPPED_SUBRESOURCE mapped{};
-                check(context->Map(layer_staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "map layer");
+                check(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped), "map layer");
                 std::vector<std::uint32_t> out(static_cast<std::size_t>(kFocus) * kFocus);
                 for (UINT y = 0; y < kFocus; ++y)
                     std::memcpy(&out[static_cast<std::size_t>(y) * kFocus],
                         static_cast<const std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch, kFocus * 4);
-                context->Unmap(layer_staging.Get(), 0);
+                context->Unmap(staging, 0);
                 return out;
             };
             std::size_t off_cases = 0, off_differing = 0;
@@ -575,6 +592,57 @@ int main(int argc, char** argv) {
                     shape, inner, band, outside, "\n");
                 two_layer_ok = two_layer_ok && inner == 0 && outside == 0 && band > 1000U;
             }
+            // Two-layer alpha conventions (0023, dcsvrEdge.z): 1 and 2 give the same image as 0 once a compositor blends
+            // them by the rule the runtime probe measured on the Pimax runtime, on the stored (encoded) bytes:
+            // 0 unpremultiplied out = c * a + P * (1 - a); 1 and 2 premultiplied out = p + P * (1 - a). The alpha bytes are
+            // equal in 0 and 1 (within one code in 2's sRGB target), 2's raw bytes equal 1's within one code; the blends agree
+            // within 8-bit quantisation: colour, alpha and the product each rounded (1.5 codes; 2.5 with the sRGB store).
+            bool alpha_ok = true;
+            if (alpha_ok) {
+                double worst_blend = 0.0, worst_blend2 = 0.0;
+                int worst_bytes = 0, worst_alpha2 = 0;
+                std::size_t alpha_differing = 0, band_pixels = 0, cases = 0;
+                for (const float shape : {0.f, 2.f, 8.f})
+                    for (const float encode : {0.f, 1.f})
+                        for (const float fill : {0.f, 1.f}) {
+                            TwoLayer c{};
+                            c.smoothing = 0.2f;
+                            c.shape = shape;
+                            c.layer = 1.f;
+                            c.encode = encode;
+                            c.debug[1] = fill;
+                            TwoLayer m1 = c, m2 = c;
+                            m1.edge[2] = 1.f;
+                            m2.edge[2] = 2.f;
+                            const auto u = run_layer(c, two_new_ps.Get()), p1 = run_layer(m1, two_new_ps.Get()), p2 = run_layer(m2, two_new_ps.Get(), true);
+                            ++cases;
+                            for (std::size_t px = 0; px < u.size(); ++px) {
+                                const int a = static_cast<int>(u[px] >> 24);
+                                const int a1 = static_cast<int>(p1[px] >> 24), a2 = static_cast<int>(p2[px] >> 24);
+                                if (a1 != a) ++alpha_differing;
+                                worst_alpha2 = (std::max)(worst_alpha2, std::abs(a2 - a));
+                                if (a > 0 && a < 255) ++band_pixels;
+                                for (int ch = 0; ch < 3; ++ch) {
+                                    const int cu = static_cast<int>((u[px] >> (8 * ch)) & 255U), c1 = static_cast<int>((p1[px] >> (8 * ch)) & 255U),
+                                              c2 = static_cast<int>((p2[px] >> (8 * ch)) & 255U);
+                                    worst_bytes = (std::max)(worst_bytes, std::abs(c1 - c2));
+                                    for (const int periphery : {0, 64, 128, 255}) {
+                                        const double ref = cu * a / 255.0 + periphery * (1.0 - a / 255.0);
+                                        const double got1 = c1 + periphery * (1.0 - a / 255.0);
+                                        const double got2 = c2 + periphery * (1.0 - a2 / 255.0);
+                                        worst_blend = (std::max)(worst_blend, std::abs(got1 - ref));
+                                        worst_blend2 = (std::max)(worst_blend2, std::abs(got2 - ref));
+                                    }
+                                }
+                            }
+                        }
+                std::printf("two-layer alpha: %zu cases, %zu fade pixels, alpha differing %zu (sRGB target worst %d), blend worst %.2f codes (sRGB target %.2f), sRGB vs UNORM bytes worst %d%s",
+                    cases, band_pixels, alpha_differing, worst_alpha2, worst_blend, worst_blend2, worst_bytes, "\n");
+                alpha_ok = alpha_differing == 0 && band_pixels > 1000U && worst_alpha2 <= 1 && worst_blend <= 1.5 && worst_blend2 <= 2.5 && worst_bytes <= 1;
+            }
+            std::printf(alpha_ok ? "Quad Views two-layer alpha conventions: premultiplied equals unpremultiplied after the blend%s"
+                                 : "Quad Views two-layer alpha conventions FAILED%s", "\n");
+            two_layer_ok = two_layer_ok && alpha_ok;
         }
         std::printf(two_layer_ok ? "Quad Views two-layer edge match: off identical, on only the fade band%s"
                                  : "Quad Views two-layer edge match FAILED%s", "\n");

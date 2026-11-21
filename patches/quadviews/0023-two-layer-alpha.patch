@@ -1,0 +1,76 @@
+Two-layer focus alpha convention (dcsvr_two_layers_alpha, with dcsvr_two_layers; native/quadviews/dcsvr_twolayer_ps.hlsl,
+dcsvrEdge.z): 0 (default, missing key) the focus layer as 0017 submits it, encoded colour not premultiplied in an
+R8G8B8A8_UNORM swapchain, flags BLEND_TEXTURE_SOURCE_ALPHA | UNPREMULTIPLIED_ALPHA; 1 the colour premultiplied by the
+fade on the encoded values, flags BLEND_TEXTURE_SOURCE_ALPHA alone (the OpenXR default convention); 2 the same bytes
+in an R8G8B8A8_UNORM_SRGB swapchain. Read at start only (it picks the swapchain format), one log line when the key is
+read. With 0 the submission and every output byte are as before (tests/quadviews-composition).
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 0000000..0000000 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -1941,11 +1941,16 @@ namespace openxr_api_layer {
+                                 reinterpret_cast<XrCompositionLayerBaseHeader*>(&projectionAllocator.back()));
+                             if (dcsvrTwoLayers) {
+                                 // The focus directly after its periphery and before the application's other layers:
+-                                // blended by its alpha, colour not premultiplied.
++                                // blended by its alpha, colour not premultiplied (dcsvr_two_layers_alpha 0) or
++                                // premultiplied (1, 2: the OpenXR default, no UNPREMULTIPLIED bit).
+                                 projectionViewAllocator.push_back(dcsvrFocusViews);
+                                 projectionAllocator.push_back(*proj);
+-                                projectionAllocator.back().layerFlags |= XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+-                                                                         XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
++                                projectionAllocator.back().layerFlags |= XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
++                                if (m_dcsvrTwoLayersAlpha == 0) {
++                                    projectionAllocator.back().layerFlags |= XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
++                                } else {
++                                    projectionAllocator.back().layerFlags &= ~XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
++                                }
+                                 projectionAllocator.back().views = projectionViewAllocator.back().data();
+                                 projectionAllocator.back().viewCount = xr::StereoView::Count;
+                                 layers.push_back(
+@@ -4024,7 +4029,8 @@ namespace openxr_api_layer {
+                 // The focus: R8G8B8A8_UNORM, not sRGB (dcsvr_twolayer_ps.hlsl), with our alpha.
+                 XrSwapchainCreateInfo focusInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+                 focusInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+-                focusInfo.format = (int64_t)DXGI_FORMAT_R8G8B8A8_UNORM;
++                // dcsvr_two_layers_alpha 2: the same bytes in an sRGB swapchain (dcsvr_twolayer_ps.hlsl).
++                focusInfo.format = (int64_t)(m_dcsvrTwoLayersAlpha == 2 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM);
+                 focusInfo.sampleCount = 1;
+                 focusInfo.width = (uint32_t)std::max(focusView.subImage.imageRect.extent.width, 0);
+                 focusInfo.height = (uint32_t)std::max(focusView.subImage.imageRect.extent.height, 0);
+@@ -4259,6 +4265,9 @@ namespace openxr_api_layer {
+                 focus.focusLayer = 1.f;
+                 // The source views read linear from an sRGB (or float) swapchain; the UNORM target takes encoded bytes.
+                 focus.encodeSrgb = linearSource ? 1.f : 0.f;
++                // DCSVR two-layer alpha: the focus alpha convention (0 unpremultiplied, 1 premultiplied, 2 the same
++                // bytes in an sRGB swapchain).
++                focus.dcsvrEdge[2] = (float)m_dcsvrTwoLayersAlpha;
+                 // Sharpened: outside the rounded shape the sharpening skips tiles, the plain image fills them.
+                 const bool fill = plainFocusSource && m_focusViewShape >= 1.f && !m_debugFocusView;
+                 focus.dcsvrDebug[1] = fill ? 1.f : 0.f;
+@@ -4798,6 +4807,14 @@ namespace openxr_api_layer {
+                         const int dcsvrLayers = std::stoi(value);
+                         m_dcsvrTwoLayers = dcsvrLayers == 2 ? 2 : dcsvrLayers != 0 ? 1 : 0;
+                         parsed = true;
++                    } else if (name == "dcsvr_two_layers_alpha") {
++                        const int dcsvrAlpha = std::stoi(value);
++                        m_dcsvrTwoLayersAlpha = dcsvrAlpha == 1 || dcsvrAlpha == 2 ? dcsvrAlpha : 0;
++                        Log(fmt::format("DCSVR two layers: focus alpha {}\n",
++                                        m_dcsvrTwoLayersAlpha == 2   ? "premultiplied, sRGB swapchain"
++                                        : m_dcsvrTwoLayersAlpha == 1 ? "premultiplied"
++                                                                     : "unpremultiplied"));
++                        parsed = true;
+                     } else if (name == "stereo_output_multiplier") {
+                         m_stereoOutputMultiplier = std::max(0.1f, std::stof(value));
+                         parsed = true;
+@@ -5085,6 +5102,10 @@ namespace openxr_api_layer {
+         // left, slice 1 right). Read at start only; 2 falls to 1 and 1 to 0 for the session if the runtime refuses a
+         // swapchain.
+         int m_dcsvrTwoLayers{0};
++        // DCSVR two layers (dcsvr_two_layers_alpha): the focus layer's alpha convention. 0 colour not premultiplied
++        // (SOURCE_ALPHA | UNPREMULTIPLIED, UNORM swapchain); 1 premultiplied on the encoded values (SOURCE_ALPHA alone,
++        // UNORM); 2 the same bytes in an R8G8B8A8_UNORM_SRGB swapchain. Read at start only (it picks the swapchain).
++        int m_dcsvrTwoLayersAlpha{0};
+         // The outputs of the eye being drawn ([0] periphery, [1] focus), set by xrEndFrame under the swapchains' lock.
+         DcsvrOutSwapchain* m_dcsvrEyeOut[2]{};
+         ComPtr<ID3D11Buffer> m_dcsvrTwoLayerConstants;
