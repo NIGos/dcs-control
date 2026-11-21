@@ -547,6 +547,16 @@ void Run() {
     Check(full.chainFast == 7 && full.shaderFast == 3 && full.workerPlacement == 2 && p.chainFast == 0 &&
               p.shaderFast == 0 && p.workerPlacement == 0,
           "R48 perception only: ChainFast, ShaderFast and WorkerPlacement off");
+    // Sharp HUD and the frame-generation exports are [Perception] keys: kept (SymbologyExport was dropped before).
+    Config in;
+    in.cockpitMaskExport = in.cockpitDepthExport = in.cockpitMotionExport = true;
+    in.symbologyExport = in.symbologyPublishAlways = true;
+    in.symbologyAlpha = false;
+    in.cockpitFgDump = 3;
+    const Config q = PerceptionOnlyConfig(in);
+    Check(q.cockpitMaskExport && q.cockpitDepthExport && q.cockpitMotionExport && q.symbologyExport &&
+              !q.symbologyAlpha && q.symbologyPublishAlways && q.cockpitFgDump == 3,
+          "perception only: Sharp HUD (SymbologyExport, SymbologyAlpha, SymbologyPublishAlways) and the FG exports kept");
   }
   StatusAndKeys();
   Collect();

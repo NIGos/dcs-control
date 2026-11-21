@@ -597,6 +597,11 @@ Config PerceptionOnlyConfig(const Config& c) {
   p.cockpitMotionExport = c.cockpitMotionExport;  // R70
   p.cockpitMotionClass = c.cockpitMotionClass;
   p.cockpitMotionDump = c.cockpitMotionDump;
+  p.cockpitFgDump = c.cockpitFgDump;  // R71
+  // R95 / R97: Sharp HUD (was missing here: the app writes it with the engine off and nothing was exported).
+  p.symbologyExport = c.symbologyExport;
+  p.symbologyAlpha = c.symbologyAlpha;
+  p.symbologyPublishAlways = c.symbologyPublishAlways;
   p.cockpitTrueIpd = c.cockpitTrueIpd;
   p.cockpitTrueIpdLighting = c.cockpitTrueIpdLighting;
   p.cockpitTrueIpdForward = c.cockpitTrueIpdForward;
