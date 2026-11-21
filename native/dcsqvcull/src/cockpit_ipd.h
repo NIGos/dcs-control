@@ -6456,4 +6456,20 @@ void TickCfg() {
   }
 }
 
+// 0.7: Sharp HUD without the dual camera. The symbology export (symbology.h) needs only the record render point of
+// ovl_cpu.h (RenderObject::render inside DCS's overlay replay, with the replay's end), not the boosted eye. With
+// CockpitTrueIpd=0 fixation_depth.h's Tick calls this each second while SymbologyExport (with the mask) is wanted:
+// ocpu's hooks go in on their own and only pass through (ReplayBegin needs g_on, which stays false: no record is
+// decided, moved or sampled; the filters see no open replay). Taken out by Stop, at fixation_depth.h's uninstall
+// (any change of the outputs: SymbologyExport off, CockpitTrueIpd on).
+std::atomic<uint64_t> g_symOnlyInstalls{0};
+void TickSymbologyOnly() {
+  if (g_on.load() || Wanted() || !ocpu::NeedsInstall()) return;
+  if (ocpu::Install()) {
+    g_symOnlyInstalls++;
+    Log("cockpit ipd overlays (cpu): installed for Sharp HUD alone (no dual camera): the hooks pass DCS's records "
+        "through and only report them to the symbology export");
+  }
+}
+
 }  // namespace ckipd

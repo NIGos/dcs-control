@@ -2516,6 +2516,52 @@ void TestReplica() {
           "ovl cpu: uninstall puts DCS's slots back; CockpitTrueIpd=0 with the hooks in draws bit-identically to no "
           "module at all");
     oc::Uninstall();
+    // 0.7 Sharp HUD without the dual camera: CockpitTrueIpd=0, the hooks in WITH the record render point (as
+    // ck::TickSymbologyOnly installs them): DCS's draws bit-identical, nothing moved, and every record of an overlay
+    // view reaches the symbology export's callback (with its replay ends).
+    {
+      static uint64_t recs = 0, ends = 0;
+      recs = ends = 0;
+      oc::InstallAt(&g_handlerVt[3], &g_visVt[2], &g_compVt[2], &g_curCtx, g_visVt, false, g_renderIat, nullptr);
+      const bool rp = oc::Installed() && oc::g_slotRender != nullptr;
+      auto* const rec0 = oc::g_symRec;
+      auto* const end0 = oc::g_symReplayEnd;
+      const DWORD top0 = ptiming::g_topTid.load();
+      oc::g_symRec = [](int, int) { ++recs; };
+      oc::g_symReplayEnd = [](int) { ++ends; };
+      oc::g_symViews = 0xF;
+      oc::t_ovlOpen = true;
+      oc::t_ovlLdr = false;
+      oc::t_ovlView = 0;
+      ptiming::g_topTid = GetCurrentThreadId();
+      // The standalone install is a no-op while the hooks are in, and while the dual camera is wanted.
+      const uint64_t si0 = ck::g_symOnlyInstalls.load();
+      ck::TickSymbologyOnly();
+      const uint64_t moved1 = oc::g_os.moved.load();
+      std::vector<std::array<float, 4>> c;
+      run(c);
+      const bool same = a.size() == c.size() && !a.empty() && !memcmp(a.data(), c.data(), a.size() * 16);
+      oc::g_symViews = 0;
+      oc::t_ovlOpen = false;
+      oc::t_ovlView = -1;
+      oc::g_symRec = rec0;
+      oc::g_symReplayEnd = end0;
+      ptiming::g_topTid = top0;
+      printf("     (Sharp HUD alone: %llu records and %llu replay ends reported)\n", (unsigned long long)recs,
+             (unsigned long long)ends);
+      Check(rp && same && oc::g_os.moved.load() == moved1 && !ck::g_on.load() && recs > 0 && ends > 0 &&
+                ck::g_symOnlyInstalls.load() == si0,
+            "ovl cpu, Sharp HUD without the dual camera: the hooks with the render point and CockpitTrueIpd=0 draw "
+            "bit-identically, move nothing, and report every overlay record and replay end to the symbology export; "
+            "the standalone install does nothing while the hooks are in");
+      oc::Uninstall();
+      ck::Configure(1, false, true, 0, 0, false);
+      const bool wanted = ck::Wanted();
+      ck::TickSymbologyOnly();  // the dual camera wanted: its own Start installs the hooks, not this
+      Check(wanted && !oc::Installed() && ck::g_symOnlyInstalls.load() == si0,
+            "ovl cpu, Sharp HUD alone: with CockpitTrueIpd on the standalone install stays out (the dual camera owns it)");
+      ck::Configure(0, false, true, 0, 0, false);
+    }
   }
 
   // ---- R32 r3 (9): far depth with CockpitTrueIpd=0 behaves as before R32. Its in-pass arm (ArmOm) takes the

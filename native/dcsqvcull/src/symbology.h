@@ -2296,9 +2296,10 @@ void TickRenderPoint() {
   if (!now && last < 0 && GetTickCount64() - g_rpSince < kRpGraceMs) return;
   g_rpLogged = now;
   if (now)
-    Log("symbology: record render point hooked (ovl_cpu.h, the cockpit dual camera's cpu overlay path): E per view");
+    Log("symbology: record render point hooked (ovl_cpu.h: the dual camera's cpu overlay path, or its own install "
+        "without the dual camera): E per view");
   else
-    Log("symbology: record render point NOT hooked (needs CockpitTrueIpd with the cpu overlay path)%s: no E",
+    Log("symbology: record render point NOT hooked (DCS build not verified, or the cpu overlay path off)%s: no E",
         last == 1 ? " any more" : "");
 }
 
