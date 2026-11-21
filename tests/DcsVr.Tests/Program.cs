@@ -4931,6 +4931,26 @@ Test("Engine settings: Cache distant shadows is off by default and written expli
     var on = ConfigurationWriters.DcsQvCull(new VrProfile { EngineOptimizations = true, EngineShadowCache = true }).ReplaceLineEndings("\n");
     Require(on.Contains("[Shadows]\nCascadeCache=1\n") && !on.Contains("CascadeCacheMask") && !on.Contains("CascadeCacheMaxAge"), "On when chosen; the sub-keys keep the module's defaults");
 });
+Test("Engine settings 0.7: Three views, Skip hidden water and Skip unused effects are written only when on and usable", () =>
+{
+    var engine = new VrProfile { EngineOptimizations = true, FrameGen = FrameGeneration.Off, QuadViews = QuadProvider.QuadViewsFoveated };
+    var off = ConfigurationWriters.DcsQvCull(engine).ReplaceLineEndings("\n");
+    Require(!off.Contains("ThreeViews") && !off.Contains("[Views]") && !off.Contains("SkipHiddenWater") && !off.Contains("[Water]") && !off.Contains("EarlyShaders"), "Off: the file is as before");
+    var on = ConfigurationWriters.DcsQvCull(engine with { EngineThreeViews = true, EngineWaterSkip = true, EngineIdleEffectSkip = true }).ReplaceLineEndings("\n");
+    Require(on.Contains("\n[Views]\n") && on.Contains("\nThreeViews=1\n") && !on.Contains("ThreeViewsStripNdc") && !on.Contains("ThreeViewsKey") && !on.Contains("ThreeViewsIsolate"), "Three views: only the switch, the tuning keys stay the module's");
+    Require(on.Contains("\n[Water]\n") && on.Contains("\nSkipHiddenWater=3\n"), "Skip hidden water: the no-submit mode");
+    var d3d = on[on.IndexOf("[D3D]\n", StringComparison.Ordinal)..on.IndexOf("[Shadows]", StringComparison.Ordinal)];
+    Require(d3d.Contains("\nEarlyShaders=3\n"), "Skip unused effects: both early-shader skips, in [D3D]");
+    Require(on.Split('\n').Count(l => l is "[Views]" or "[Water]" or "[D3D]") == 3, "One section of each name (GetPrivateProfile reads the first)");
+    foreach (var (label, p) in new[] { ("frame generation", engine with { EngineThreeViews = true, FrameGen = FrameGeneration.Nvidia }), ("Pimax native", engine with { EngineThreeViews = true, QuadViews = QuadProvider.PimaxNative }),
+        ("alternative layer", engine with { EngineThreeViews = true, QuadViewsLayerDirectory = "C:\\qv" }), ("engine off", engine with { EngineThreeViews = true, EngineOptimizations = false }) })
+        Require(!ConfigurationWriters.DcsQvCull(p).Contains("ThreeViews"), "Three views not written with " + label);
+    var perceptionOnly = ConfigurationWriters.DcsQvCull(engine with { EngineOptimizations = false, EngineWaterSkip = true, EngineIdleEffectSkip = true });
+    Require(!perceptionOnly.Contains("SkipHiddenWater") && !perceptionOnly.Contains("EarlyShaders"), "Engine parts: not with the engine off");
+    Require(LiveSettings.Find("engineThreeViews") is { Kind: LiveSettings.Kind.Engine } && LiveSettings.Find("engineWaterSkip") is not null && LiveSettings.Find("engineIdleEffectSkip") is not null
+        && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Views.ThreeViews", "1", null) && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Water.SkipHiddenWater", null, "3")
+        && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "D3D.EarlyShaders", "3", null) && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Views.ThreeViewsIsolate", "1", null), "Live like the other engine parts");
+});
 Test("CPU Boost: processes changed by a helper that was ended are restored at the next start, only the same process", () =>
 {
     var state = PathPolicy.UnderRoot(root, "boost-ledger/state"); Directory.CreateDirectory(Path.Combine(state, "boost"));

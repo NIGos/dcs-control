@@ -381,6 +381,25 @@ public sealed record VrProfile
     /// second, so their wind sway can look stepped. Off by default; forced off with the engine switched off or in the
     /// Perception-only mode.</summary>
     public bool EngineShadowCache { get; init; }
+    /// <summary>[Views] ThreeViews (0.7, experimental): the right eye's periphery is mostly reused from the left eye's
+    /// (reprojected by the bundled Quad Views layer); DCS draws only its outer strip and the cockpit. Measured about
+    /// −0.6 to −1.3 ms of GPU in cockpit flight. Off by default; written only when it can engage (<see cref="UsesThreeViews"/>).
+    /// ThreeViewsStripNdc, ThreeViewsKey and ThreeViewsIsolate stay developer keys.</summary>
+    public bool EngineThreeViews { get; init; }
+    /// <summary>The module engages it only with the engine on, frame generation off (the cockpit exports read the right
+    /// periphery) and the bundled Quad Views layer (the one that fills the reused part).</summary>
+    public bool UsesThreeViews => EngineThreeViews && EngineOptimizations && !Desktop && UsesBundledQuadViews && FrameGen == FrameGeneration.Off;
+    /// <summary>[Water] SkipHiddenWater=3 (0.7, experimental, no-submit): DCS's water passes are not submitted for a view
+    /// that earlier frames found dry (probed one frame in four). Not exact for a few frames when water comes into view.
+    /// Off by default.</summary>
+    public bool EngineWaterSkip { get; init; }
+    public bool UsesWaterSkip => EngineWaterSkip && EngineOptimizations;
+    /// <summary>[D3D] EarlyShaders=3 (0.7, experimental): bit 0 SSAO water skip (SSAO not computed on water pixels, where
+    /// it adds nothing: proven bit-identical) and bit 1 hot-air idle skip (the heat-haze copy and compose passes skipped
+    /// when no heat was drawn that frame: the stock picture). Small gains (about 0.23 ms on open sea, 0.02-0.08 ms for
+    /// hot air), so one switch for both. Off by default.</summary>
+    public bool EngineIdleEffectSkip { get; init; }
+    public bool UsesIdleEffectSkip => EngineIdleEffectSkip && EngineOptimizations;
     /// <summary>[DLSS] ReleaseIdleSets (engine module R132): DCS sets up DLSS twice per mission load and never releases the
     /// first set, so each restart keeps about 0.7 to 1.4 GB more memory; on, the module releases a set DCS no longer
     /// evaluates once the newest set has taken over (ReleaseAfterEvals, the module's default 300). The image does not
