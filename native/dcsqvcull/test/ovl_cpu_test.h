@@ -711,7 +711,7 @@ void RunFrame(const FrameOpts& o) {
     ck::g_f.h = h;
     for (int pass = 0; pass < 3; ++pass) {
       fdtest::FakePass& p = pass == 0 ? g_h->hdr : pass == 1 ? g_h->ldr : g_h->gui;
-      fixdepth::CockpitIpdBoundary(&p, true, plod::kOther);
+      fixdepth::CockpitIpdGate(&p, true, plod::kOther);  // (OnBoundaryInner's call)
       fixdepth::CockpitIpdOverlayBegin(&p);
       // updateBuffers: the pass's cPerView (b7) from the context (one upload per pass).
       {
@@ -773,7 +773,7 @@ void RunFrame(const FrameOpts& o) {
           g_log.push_back(d);
         }
       }
-      fixdepth::CockpitIpdBoundary(&p, false, plod::kOther);
+      fixdepth::CockpitIpdGate(&p, false, plod::kOther);
     }
   }
   ID3D11Buffer* none = nullptr;
@@ -2521,18 +2521,27 @@ void TestReplica() {
     // view reaches the symbology export's callback (with its replay ends).
     {
       static uint64_t recs = 0, ends = 0;
+      static uint32_t recViews = 0, endViews = 0;
       recs = ends = 0;
+      recViews = endViews = 0;
       oc::InstallAt(&g_handlerVt[3], &g_visVt[2], &g_compVt[2], &g_curCtx, g_visVt, false, g_renderIat, nullptr);
       const bool rp = oc::Installed() && oc::g_slotRender != nullptr;
       auto* const rec0 = oc::g_symRec;
       auto* const end0 = oc::g_symReplayEnd;
       const DWORD top0 = ptiming::g_topTid.load();
-      oc::g_symRec = [](int, int) { ++recs; };
-      oc::g_symReplayEnd = [](int) { ++ends; };
+      oc::g_symRec = [](int v, int) {
+        ++recs;
+        if (v >= 0 && v < 4) recViews |= 1u << v;
+      };
+      oc::g_symReplayEnd = [](int v) {
+        ++ends;
+        if (v >= 0 && v < 4) endViews |= 1u << v;
+      };
       oc::g_symViews = 0xF;
-      oc::t_ovlOpen = true;
-      oc::t_ovlLdr = false;
-      oc::t_ovlView = 0;
+      // Which overlay pass of which view is open comes from the rig's pass boundaries through OnBoundaryInner's
+      // gate, as live (live 2026-11-21: set only with the dual camera on, so the export saw no record).
+      oc::t_ovlOpen = false;
+      oc::t_ovlView = -1;
       ptiming::g_topTid = GetCurrentThreadId();
       // The standalone install is a no-op while the hooks are in, and while the dual camera is wanted.
       const uint64_t si0 = ck::g_symOnlyInstalls.load();
@@ -2547,12 +2556,14 @@ void TestReplica() {
       oc::g_symRec = rec0;
       oc::g_symReplayEnd = end0;
       ptiming::g_topTid = top0;
-      printf("     (Sharp HUD alone: %llu records and %llu replay ends reported)\n", (unsigned long long)recs,
-             (unsigned long long)ends);
+      const bool closed = !oc::t_ovlOpen && oc::t_ovlView == -1;  // (each pass end closed its view)
+      printf("     (Sharp HUD alone: %llu records and %llu replay ends reported, views 0x%x / 0x%x)\n",
+             (unsigned long long)recs, (unsigned long long)ends, recViews, endViews);
       Check(rp && same && oc::g_os.moved.load() == moved1 && !ck::g_on.load() && recs > 0 && ends > 0 &&
-                ck::g_symOnlyInstalls.load() == si0,
+                recViews == 0xF && endViews == 0xF && closed && ck::g_symOnlyInstalls.load() == si0,
             "ovl cpu, Sharp HUD without the dual camera: the hooks with the render point and CockpitTrueIpd=0 draw "
-            "bit-identically, move nothing, and report every overlay record and replay end to the symbology export; "
+            "bit-identically, move nothing, and report every overlay record and replay end of all 4 HMD views to the "
+            "symbology export (the overlay pass boundaries through OnBoundaryInner's gate, not set by the test); "
             "the standalone install does nothing while the hooks are in");
       oc::Uninstall();
       ck::Configure(1, false, true, 0, 0, false);

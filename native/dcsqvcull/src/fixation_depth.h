@@ -5938,6 +5938,17 @@ void CockpitIpdBoundary(void* pass, bool begin, int k) {
     DisarmOm();
   }
 }
+// The cockpit ipd boundary as OnBoundaryInner calls it. Dual camera on: CockpitIpdBoundary (it also passes the overlay
+// pass boundaries on to ovl_cpu.h). 0.7 Sharp HUD without the dual camera (ckipd::TickSymbologyOnly): ovl_cpu.h's hooks
+// are in but g_on stays false, so only the overlay pass boundary goes on. Which overlay pass of which HMD view is open
+// is what lets the record render point report records and replay ends to the symbology export (without it the export
+// saw none: views present 0, live 2026-11-21).
+void CockpitIpdGate(void* pass, bool begin, int k) {
+  if (ckipd::g_on.load(std::memory_order_relaxed))
+    CockpitIpdBoundary(pass, begin, k);
+  else if (k == plod::kOther && ckipd::ocpu::Installed())
+    ckipd::ocpu::PassBoundary(pass, begin, g_s.hmdOrd);
+}
 // Cockpit ipd's overlay passes (OverlayHDRPass, OverlayLDRPass, GUIPass of an
 // HMD view): begun after far depth's own begin work for the same boundary, so
 // far depth's overlay / trace arm (ArmOm, no upload entries) is already held
@@ -6059,7 +6070,7 @@ void OnBoundaryInner(void* pass, bool begin) {
     PassName(pass, pn, sizeof(pn));
     ckipd::DumpNotePass(s.hmdOrd, pn, begin);
   }
-  if (ckipd::g_on.load(std::memory_order_relaxed)) CockpitIpdBoundary(pass, begin, k);
+  CockpitIpdGate(pass, begin, k);  // (0.7: also the Sharp HUD alone's overlay pass boundaries)
   // [Perception] CockpitTrueIpdFrameDump: the views' final image at their CopyToHMDPass begin.
   if (begin && k == plod::kHmd && ckipd::g_on.load(std::memory_order_relaxed) && ckipd::Active())
     ckipd::DumpAtHmd(s.hmdOrd);
