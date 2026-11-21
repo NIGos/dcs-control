@@ -134,12 +134,13 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         if (found.ReturnedPresets.Count > 0) AppLog.Info("Presets set aside when going back are back: " + string.Join(", ", found.ReturnedPresets));
         return rollback;
     }
-    /// <summary>The version the offline verification goes back to: one patch (or minor, or major) before this one; its
+    /// <summary>The version the offline verification goes back to: one patch before this one, or for an x.y.0 the earlier minor's .9 (0.7.0 -> 0.6.9:
+    /// 0.6.0 would be older than the oldest version Go back can reach, 0.6.3); its
     /// fixture release list carries a signed setup for it.</summary>
     internal static string OfflinePrevious()
     {
         var v = ReleaseVersion.Parse(ProductInfo.Version) ?? throw new InvalidOperationException("The product version is not a release version.");
-        return (v.Patch > 0 ? v with { Patch = v.Patch - 1 } : v.Minor > 0 ? v with { Minor = v.Minor - 1 } : v with { Major = Math.Max(0, v.Major - 1), Minor = 99 }).ToString();
+        return (v.Patch > 0 ? v with { Patch = v.Patch - 1 } : v.Minor > 0 ? v with { Minor = v.Minor - 1, Patch = 9 } : v with { Major = Math.Max(0, v.Major - 1), Minor = 99, Patch = 9 }).ToString();
     }
     private CancellationTokenSource? _downloadCancel;
     private (long Done, long Total)? _downloaded;
