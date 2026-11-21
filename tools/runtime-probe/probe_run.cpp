@@ -873,7 +873,7 @@ int main(int argc, char** argv) {
     if (!SetMirror("enable_undistorted_mirror", 1)) exitCode = 4;
     Frames(90);
     struct V { int64_t fmt; bool array; int premult; bool full; };
-    std::vector<V> variants = {{29, false, 1, true}, {29, false, 0, false}, {29, false, 2, false}, {28, false, 1, false}, {28, false, 0, false}, {28, false, 2, false}, {29, true, 2, false}, {29, true, 0, false}};
+    std::vector<V> variants = {{29, false, 1, getenv("PROBE_NO_REFERENCE") == nullptr}, {29, false, 0, false}, {29, false, 2, false}, {28, false, 1, false}, {28, false, 0, false}, {28, false, 2, false}, {29, true, 2, false}, {29, true, 0, false}, {28, true, 0, false}, {28, true, 2, false}};
     if (quick) variants.resize(3);
     int64_t curFmt = -1; bool curArray = false; bool haveChains = false;
     for (size_t vi = 0; vi < variants.size() && exitCode == 0; ++vi) {

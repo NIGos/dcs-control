@@ -24,12 +24,15 @@ param(
   [ValidateSet('lattice', 'scene')][string]$MotionPattern = 'lattice', [switch]$MotionDiag, [uint32]$MotionSeed = 0,
   [switch]$Triple,                            # [ofxr] triple_frame_gen=1: 3X (two generated frames per application frame)
   [switch]$AsyncArm,                          # [ofxr] async_arm=1: frame generation armed on a thread of its own
+  [switch]$AllowUntracked,                    # probe_run --allow-untracked: the new Pimax runtime (2.0.5) composites the probe untracked
   # Appended to the staged Quad Views settings, after everything else (last wins).
   [string[]]$QuadSet = @('turbo_mode=0', 'force_no_eye_tracking=1', 'dcsvr_far_depth=0'),
   # Written into [ofxr] of the staged ofxr_bridge.ini, for example 'triple_frame_gen=1'.
   [string[]]$FrameGenSet = @(),
   [string]$OutRoot)
 $ErrorActionPreference = 'Stop'
+# pwsh -File hands a list over as one string: split it.
+$QuadSet = @($QuadSet | ForEach-Object { $_ -split ',' } | Where-Object { $_ }); $FrameGenSet = @($FrameGenSet | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $bin = Join-Path $repo 'tools\runtime-probe\bin'
 foreach ($exe in 'probe_run.exe', 'probe_analyze.exe') { if (-not (Test-Path (Join-Path $bin $exe))) { throw "missing ${exe}: run tools\runtime-probe\build.bat" } }
@@ -64,8 +67,9 @@ function Say([string]$m) { $line = "$(Get-Date -Format 'HH:mm:ss') $m"; Add-Cont
 $staged = Join-Path $out 'quad-settings.cfg'
 $lines = @(Get-Content $settingsPath) | ForEach-Object { if ($_ -match '^\[exe:DCS[^\]]*\]\s*$') { '[exe:probe_run]' } else { $_ } }
 $lines += '', '# added by run-chain-probe.ps1', '[exe:probe_run]'
-$lines += $QuadSet
 $lines += "dcsvr_two_layers=$(if ($TwoLayers) { 1 } else { 0 })"
+# QuadSet last, so it can override the mode (dcsvr_two_layers=2, the array swapchains DCS Control uses).
+$lines += $QuadSet
 Set-Content -Path $staged -Value $lines -Encoding ascii
 Say "Quad Views: $qvLayer"
 Say "settings: $settingsPath -> $staged (two layers: $([bool]$TwoLayers); added: $($QuadSet -join ', '))"
@@ -116,6 +120,7 @@ if ($MotionPattern -eq 'scene') {
   if ($MotionSeed) { $probeArgs += '--motion-seed', $MotionSeed }
 } elseif ($Motion -or $MotionOnly) { $probeArgs += '--motion-phases', $MotionPhases, '--motion-frames', $MotionFrames }
 $probeArgs += '--format', $Format
+if ($AllowUntracked) { $probeArgs += '--allow-untracked' }
 Say ("probe_run " + ($probeArgs -join ' '))
 
 $qvLogDir = Join-Path $env:LOCALAPPDATA 'Quad-Views-Foveated'
