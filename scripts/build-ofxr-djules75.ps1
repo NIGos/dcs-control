@@ -23,15 +23,27 @@ if ($revision -ne 'c6efa6bf7f2027b3ec94f28578bb5965eabb9e55') { throw 'Unexpecte
 $toolchainPath = Join-Path $sdkRoot 'sdk/toolchain.cmake'
 $toolchainText = [IO.File]::ReadAllText($toolchainPath)
 $originalPlatform = 'set(CMAKE_GENERATOR_PLATFORM "x64" CACHE STRING "" FORCE)'
+# Add /machine:x64 only when missing and without a leading space: FidelityFX's platform check wants exactly
+# "/machine:x64" (GitHub #30). Folders patched by an earlier run carry the old appending line and are upgraded.
+$ninjaLinker = @'
+if(NOT CMAKE_EXE_LINKER_FLAGS MATCHES "/machine:x64")
+            string(STRIP "${CMAKE_EXE_LINKER_FLAGS} /machine:x64" CMAKE_EXE_LINKER_FLAGS)
+        endif()
+'@
+$ninjaLinkerMark = 'string(STRIP "${CMAKE_EXE_LINKER_FLAGS} /machine:x64" CMAKE_EXE_LINKER_FLAGS)'
+$oldNinjaLinker = 'set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /machine:x64")'
 $ninjaPlatform = @'
 if(CMAKE_GENERATOR STREQUAL "Ninja")
         set(CMAKE_GENERATOR_PLATFORM "" CACHE STRING "" FORCE)
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /machine:x64")
+        @LINKER@
     else()
         set(CMAKE_GENERATOR_PLATFORM "x64" CACHE STRING "" FORCE)
     endif()
 '@
-if (-not $toolchainText.Contains('/machine:x64")')) {
+$ninjaPlatform = $ninjaPlatform.Replace('@LINKER@', $ninjaLinker)
+if ($toolchainText.Contains($oldNinjaLinker)) {
+    [IO.File]::WriteAllText($toolchainPath, $toolchainText.Replace($oldNinjaLinker, $ninjaLinker))
+} elseif (-not $toolchainText.Contains($ninjaLinkerMark)) {
     if (-not $toolchainText.Contains($originalPlatform)) { throw 'Pinned SDK toolchain layout changed.' }
     [IO.File]::WriteAllText($toolchainPath, $toolchainText.Replace($originalPlatform, $ninjaPlatform))
 }
