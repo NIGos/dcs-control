@@ -6,7 +6,7 @@ both views), then fades. Band pixels only; 0 (the default) leaves the shader's o
 The constant goes before focusViewShape (offset 16; focusViewShape moves to 20, the layout stays 96 bytes), in
 ProjectionPS.hlsl and in the copy Far depth keeps (ProjectionPS.nofardepth.hlsl), so that focusViewShape stays last in
 that copy's cbuffer, where Far depth's constants are injected (tests/depthwarp checks that injection).
-The two-layer output pass (dcsvr_twolayer_ps.hlsl) has no edge match: the compositor enlarges the periphery there.
+The two-layer output pass (dcsvr_twolayer_ps.hlsl) gets its own, with k from the CPU (0021-two-layer-edge-match.patch).
 diff --git a/openxr-api-layer/ProjectionPS.hlsl b/openxr-api-layer/ProjectionPS.hlsl
 index 5d563ec..f88429f 100644
 --- a/openxr-api-layer/ProjectionPS.hlsl

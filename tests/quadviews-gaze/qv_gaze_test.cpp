@@ -369,6 +369,84 @@ int main() {
         dcsvr::GazeFilter g;
         Locate(g, on, t, 20.f);
         Check(!g.Ease(0, t + dt, last, fixed, on, out), "lost gaze: with lostEaseMs 0 the fixed focus shows at once");
+        // With frame generation the focus is placed once per rendered frame: in 3X (30 FPS) the same 150 ms are 4-5 steps,
+        // still a slide (the generated frames in between blend two of them), never a jump.
+        dcsvr::GazeFilter h;
+        const int64_t dt3 = 33'333'333;
+        int64_t t3 = 1'000'000'000;
+        Locate(h, s, t3, 20.f);
+        int steps = 0;
+        monotonic = true;
+        previous = last.x;
+        for (t3 += dt3; h.Ease(0, t3, last, fixed, s, out); t3 += dt3, ++steps) {
+            monotonic = monotonic && out.x <= previous + 1e-6f && out.x >= fixed.x - 1e-6f;
+            previous = out.x;
+        }
+        Check(steps >= 4 && steps <= 5 && monotonic, "lost gaze, 3X: the focus eases to the fixed one over 150 ms (4-5 frames at 30 FPS)");
+    }
+
+    // The saccade tail with frame generation (Models.cs: UsesQuadSaccadeTail, QuadSaccadeLeadMs/HoldMs/MaxExtend). DCS
+    // places the focus once per rendered frame (45 FPS in 2X, 30 FPS in 3X at 90 Hz) and every box is shown on 2 or 3
+    // refreshes; the gaze is 55 / 85 ms old (the frame generation leads) at the first of them (A) or at the last (B).
+    // Minimum-jerk saccades of 10-40 degrees, both ways, starting at 8 phases of the rendered frame. Counted on every
+    // refresh: the eye outside the box's sharp part (inside the fade band, 0.2 of the half size), from the first widened
+    // box on (before it no filter can know: a saccade shorter than the latency has landed before its first sample), and
+    // the widened rendered frames. Today's frame generation values (no tail, 0.35, hold 40) against the tail with the
+    // same lead, reach 0.5 and no hold: the tail must never put the eye outside more often and must widen fewer
+    // frames. The misses left are the latency's, the same either way (2X: a few 20-30 degree saccades at some phases).
+    {
+        struct Totals { int outside = 0, outsideSmall = 0, widened = 0; };
+        const auto sweep = [&](int factor, bool tail, float maxExtend, float holdMs) {
+            Totals totals;
+            const float lead = factor == 2 ? 55.f : 85.f, latency = lead / 1000.f, refresh = 1.f / 90.f;
+            for (const int model : {0, 1})
+                for (const float amplitude : {10.f, 15.f, 20.f, 30.f, 40.f})
+                    for (const float sign : {1.f, -1.f})
+                        for (int phase = 0; phase < 8; ++phase) {
+                            dcsvr::GazeSettings s = on;
+                            s.tail = tail;
+                            s.leadMs = lead;
+                            s.maxExtend = maxExtend;
+                            s.holdMs = holdMs;
+                            dcsvr::GazeFilter f;
+                            const float start = 0.2f + phase * factor * refresh / 8.f, duration = (2.2f * amplitude + 21.f) / 1000.f;
+                            const auto eyeAt = [&](float time) {
+                                const float u = std::fmin(1.f, std::fmax(0.f, (time - start) / duration));
+                                return sign * amplitude * u * u * u * (10.f - 15.f * u + 6.f * u * u);
+                            };
+                            bool seen = false;
+                            for (int i = 0; i < 40; ++i) {
+                                const float time = i * factor * refresh;
+                                const int64_t t = 1'000'000'000 + static_cast<int64_t>(time * 1e9f);
+                                const Frame fr = Locate(f, s, t, eyeAt(time - latency) + ((i % 2) ? 0.01f : -0.01f));
+                                if (fr.widened) {
+                                    seen = true;
+                                    ++totals.widened;
+                                }
+                                for (int k = 0; k < factor; ++k) {
+                                    const float shown = time + (k - (model ? factor - 1 : 0)) * refresh;
+                                    const float eye = Ndc(eyeAt(shown));
+                                    const bool outside = eye < fr.min.x + 0.2f * 0.34f || eye > fr.max.x - 0.2f * 0.34f;
+                                    if (seen && outside) {
+                                        ++totals.outside;
+                                        if (amplitude <= 30.f) ++totals.outsideSmall;
+                                    }
+                                }
+                            }
+                        }
+            return totals;
+        };
+        for (const int factor : {2, 3}) {
+            const Totals today = sweep(factor, false, 0.35f, 40.f), tail = sweep(factor, true, 0.5f, 0.f);
+            std::printf("     %dX: eye outside after detection %d (up to 30 deg %d), widened frames %d; with the tail %d (%d), %d\n",
+                        factor, today.outside, today.outsideSmall, today.widened, tail.outside, tail.outsideSmall, tail.widened);
+            Check(tail.outside <= today.outside && tail.outsideSmall <= today.outsideSmall,
+                  factor == 2 ? "frame generation 2X: with the tail the eye is never outside the sharp part more often"
+                              : "frame generation 3X: with the tail the eye is never outside the sharp part more often");
+            Check(tail.widened < today.widened,
+                  factor == 2 ? "frame generation 2X: the tail widens fewer rendered frames (no hold)"
+                              : "frame generation 3X: the tail widens fewer rendered frames (no hold)");
+        }
     }
 
     // Switched off, exactly the filter before the tail: the same random gaze (saccades of every size, fixation noise,

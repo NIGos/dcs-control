@@ -18,9 +18,11 @@
 //
 // Without Far depth every texel is a Load at the pixel (1:1, no filtering).
 //
-// No edge match here (dcsvr_edge_match, patches/quadviews/0019-edge-match.patch): it needs the periphery's resolution
-// beside the focus image's, and in this mode the compositor enlarges the periphery after this pass. The focus layer
-// keeps its full detail up to the fade, as the composition does with edge match off.
+// Edge match (dcsvr_edge_match, patches/quadviews/0019-edge-match.patch; dcsvrEdge.x the share of the fade band, 0 off):
+// the focus pass blurs the focus image in the band with the composition's tent. Its width needs only k, one periphery
+// texel in focus texels, which the composition takes from both views' derivatives; here the compositor enlarges the
+// periphery after this pass, so the CPU computes k from the two source sizes and fields of view (dcsvrEdge.y,
+// patches/quadviews/0021-two-layer-edge-match.patch). Off, the output is the pass as before (tests/quadviews-composition).
 //
 // Far depth (dcsvrWarp.x = 1, the field at t2): the composition moves its two samples of an output pixel, the focus
 // image's and the periphery's, by one backward displacement b read from the field at the pixel's focus position
@@ -45,6 +47,7 @@ cbuffer ConstantBuffer : register(b0) {
     float4 dcsvrWarp; // as ProjectionPS.hlsl: x on, yz focus uv -> periphery uv, w a held field
     float4 dcsvrReuse[3]; // a held field's reprojection
     float4 dcsvrDebug; // x the periphery black, y the focus colour outside the fade from t1
+    float4 dcsvrEdge; // edge match: x the share of the fade band (0 off), y k (one periphery texel in focus texels)
 };
 
 SamplerState sourceSampler : register(s0);
@@ -120,6 +123,27 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0, 
             color = source.SampleLevel(sourceSampler, layer1TexCoord, 0);
         } else {
             color = source.Load(int3(position.xy, 0));
+        }
+        // Edge match: in the fade band the detail tapers to the periphery's resolution first (ProjectionPS.hlsl's tent).
+        [branch] if (dcsvrEdge.x > 0 && focusViewShape >= 1 && smoothingArea > 0 && dcsvrEdge.y > 1) {
+            const float2 m = abs(layer1ProjectedCoordNdc);
+            const float rm = pow(pow(m.x, focusViewShape) + pow(m.y, focusViewShape), 1 / focusViewShape);
+            const float b = saturate(smoothstep(1 - clamp(2 * smoothingArea, 0.01, 0.95), 1, rm) / dcsvrEdge.x);
+            [branch] if (b > 0) {
+                float2 focusSize;
+                source.GetDimensions(focusSize.x, focusSize.y);
+                // A [1 2 1] tent of bilinear taps with the variance of the periphery's reconstruction (k^2 / 6).
+                const float2 stepUv = b * dcsvrEdge.y * 0.57735 / focusSize;
+                const float2 lo = 0.5 / focusSize, hi = 1 - lo;
+                float4 sum = 0;
+                [unroll] for (int j = -1; j <= 1; ++j) {
+                    [unroll] for (int i = -1; i <= 1; ++i) {
+                        sum += (2 - abs(i)) * (2 - abs(j)) *
+                               source.SampleLevel(sourceSampler, clamp(layer1TexCoord + float2(i, j) * stepUv, lo, hi), 0);
+                    }
+                }
+                color = sum / 16;
+            }
         }
     }
 
