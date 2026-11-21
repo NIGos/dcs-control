@@ -1,0 +1,149 @@
+Submission log: one "DCSVR submission:" line at a session's first frame and whenever it changes, with every layer
+the frame goes out with: its type, flags (source-alpha, unpremultiplied, ...), and per view the swapchain's format
+(the DXGI number on D3D11, as in the "DCSVR two layers: ... swapchain" lines), array size, slice and rectangle. The
+formats come from the application's swapchains and the layer's own (the composited output, the two-layer outputs).
+At most 16 lines a session, so a layout that alternates frame to frame cannot flood the log. Nothing else changes:
+the log is built from the frame end info just before it is passed on.diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 0000000..0000000 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -837,6 +837,12 @@ namespace openxr_api_layer {
+ 
+                     m_gazeSpaces.clear();
+                     m_swapchains.clear();
++                    {
++                        std::unique_lock lock(m_dcsvrSubmitMutex);
++                        m_dcsvrSubmitFormats.clear();
++                        m_dcsvrSubmitLast.clear();
++                        m_dcsvrSubmitLines = 0;
++                    }
+ 
+                     m_session = XR_NULL_HANDLE;
+                 }
+@@ -1294,6 +1300,7 @@ namespace openxr_api_layer {
+                     newEntry.createInfo = *createInfo;
+                     m_swapchains.insert_or_assign(*swapchain, std::move(newEntry));
+                 }
++                dcsvrNoteSwapchain(*swapchain, *createInfo);
+             }
+ 
+             return result;
+@@ -1802,6 +1809,7 @@ namespace openxr_api_layer {
+                                                       TLArg(m_fullFovResolution.height, "Height"));
+                                     CHECK_XRCMD(OpenXrApi::xrCreateSwapchain(
+                                         session, &createInfo, &swapchainForStereoView.fullFovSwapchain[viewIndex]));
++                                    dcsvrNoteSwapchain(swapchainForStereoView.fullFovSwapchain[viewIndex], createInfo);
+                                 }
+ 
+                                 XrCompositionLayerProjectionView focusView = proj->views[focusViewIndex];
+@@ -2038,6 +2046,7 @@ namespace openxr_api_layer {
+                     if (XR_SUCCEEDED(result)) {
+                         TraceLocalActivity(local);
+                         TraceLoggingWriteStart(local, "xrEndFrame_EndFrame");
++                        dcsvrLogSubmission(chainFrameEndInfo);
+                         result = OpenXrApi::xrEndFrame(session, &chainFrameEndInfo);
+                         TraceLoggingWriteStop(local, "xrEndFrame_EndFrame");
+                     }
+@@ -3870,6 +3879,78 @@ namespace openxr_api_layer {
+             }
+         }
+ 
++        // DCSVR submission log: remembers a swapchain's format and array size for the submission line.
++        void dcsvrNoteSwapchain(XrSwapchain handle, const XrSwapchainCreateInfo& createInfo) {
++            if (handle == XR_NULL_HANDLE) {
++                return;
++            }
++            std::unique_lock lock(m_dcsvrSubmitMutex);
++            m_dcsvrSubmitFormats.insert_or_assign(handle, std::make_pair(createInfo.format, createInfo.arraySize));
++        }
++
++        // DCSVR submission log: what goes to the runtime, one line at the session's first frame and whenever it
++        // changes: per layer its type, flags, and per view the swapchain's format (DXGI number on D3D11), array
++        // size, slice and rectangle. "DCSVR submission: 2 layer(s) | layer 0: projection flags 0x2
++        // (source-alpha), 2 views; view 0: format 29 x2 slice 0 rect 0,0 2624x2592; ..."
++        void dcsvrLogSubmission(const XrFrameEndInfo& info) {
++            const auto flagNames = [](XrCompositionLayerFlags flags) {
++                std::string names;
++                const auto add = [&](XrCompositionLayerFlags bit, const char* name) {
++                    if (flags & bit) {
++                        names += (names.empty() ? "" : "+") + std::string(name);
++                    }
++                };
++                add(XR_COMPOSITION_LAYER_CORRECT_CHROMATIC_ABERRATION_BIT, "chromatic");
++                add(XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT, "source-alpha");
++                add(XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT, "unpremultiplied");
++                add(0x8, "inverted-alpha"); // XR_COMPOSITION_LAYER_INVERTED_ALPHA_BIT_EXT, not in every SDK
++                return names.empty() ? std::string("none") : names;
++            };
++            std::unique_lock lock(m_dcsvrSubmitMutex);
++            if (m_dcsvrSubmitLines >= kDcsvrSubmitLogLines) {
++                return;
++            }
++            const auto image = [&](const XrSwapchainSubImage& sub) {
++                const auto it = m_dcsvrSubmitFormats.find(sub.swapchain);
++                return fmt::format("{} slice {} rect {},{} {}x{}",
++                                   it == m_dcsvrSubmitFormats.end()
++                                       ? std::string("format ? x?")
++                                       : fmt::format("format {} x{}", it->second.first, it->second.second),
++                                   sub.imageArrayIndex,
++                                   sub.imageRect.offset.x,
++                                   sub.imageRect.offset.y,
++                                   sub.imageRect.extent.width,
++                                   sub.imageRect.extent.height);
++            };
++            std::string text;
++            for (uint32_t i = 0; i < info.layerCount; i++) {
++                const XrCompositionLayerBaseHeader* base = info.layers[i];
++                if (!base) {
++                    continue;
++                }
++                text += fmt::format(" | layer {}: ", i);
++                if (base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
++                    const auto* proj = reinterpret_cast<const XrCompositionLayerProjection*>(base);
++                    text += fmt::format("projection flags 0x{:x} ({}), {} views", proj->layerFlags, flagNames(proj->layerFlags), proj->viewCount);
++                    for (uint32_t v = 0; v < proj->viewCount; v++) {
++                        text += fmt::format("; view {}: {}", v, image(proj->views[v].subImage));
++                    }
++                } else if (base->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
++                    const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(base);
++                    text += fmt::format("quad flags 0x{:x} ({}), eye {}: {}", quad->layerFlags, flagNames(quad->layerFlags), (int)quad->eyeVisibility, image(quad->subImage));
++                } else {
++                    text += fmt::format("type {} flags 0x{:x} ({})", (int)base->type, base->layerFlags, flagNames(base->layerFlags));
++                }
++            }
++            if (text == m_dcsvrSubmitLast) {
++                return;
++            }
++            m_dcsvrSubmitLast = text;
++            m_dcsvrSubmitLines++;
++            Log(fmt::format("DCSVR submission: {} layer(s){}{}\n", info.layerCount, text,
++                            m_dcsvrSubmitLines == kDcsvrSubmitLogLines ? " (the last line this session: further changes are not logged)" : ""));
++        }
++
+         // DCSVR two layers: one output swapchain, made at first use and again if the view's size changes.
+         bool dcsvrTwoLayerEnsure(XrSession session, DcsvrOutSwapchain& out, XrSwapchainCreateInfo createInfo, const char* what) {
+             if (out.handle != XR_NULL_HANDLE && out.extent.width == (int32_t)createInfo.width &&
+@@ -3892,6 +3973,7 @@ namespace openxr_api_layer {
+                 return false;
+             }
+             out.handle = handle;
++            dcsvrNoteSwapchain(handle, createInfo);
+             out.extent = {(int32_t)createInfo.width, (int32_t)createInfo.height};
+             out.format = createInfo.format;
+             out.arraySize = createInfo.arraySize;
+@@ -5101,6 +5183,15 @@ namespace openxr_api_layer {
+         int m_dcsvrFarKeyMods{0};
+         bool m_dcsvrFarKeyOff{false};
+         bool m_dcsvrFarKeyDown{false};
++
++        // DCSVR submission log: the format and array size of every swapchain a submitted layer can name (the
++        // application's and the layer's own), and the last logged description (one line per session and per change,
++        // at most kDcsvrSubmitLogLines lines a session, so a layout that alternates never floods the log).
++        std::mutex m_dcsvrSubmitMutex;
++        std::unordered_map<XrSwapchain, std::pair<int64_t, uint32_t>> m_dcsvrSubmitFormats;
++        std::string m_dcsvrSubmitLast;
++        uint32_t m_dcsvrSubmitLines{0};
++        static constexpr uint32_t kDcsvrSubmitLogLines = 16;
+         std::chrono::steady_clock::time_point m_dcsvrFarKeyAt{};
+         uint32_t m_dcsvrFarToggles{0};
+         // The extended panel status (DcsVr_QuadViewsDisparityStatus2): frames warped and held in the last whole second.
