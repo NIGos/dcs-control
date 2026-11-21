@@ -1642,6 +1642,15 @@ Test("Other environments: AMD/Intel graphics, OpenBeta Saved Games, 3× at 72 Hz
         Require(!ProfileValidation.Validate(new VrProfile { FrameGen = FrameGeneration.Nvidia }).Any(i => i.Code.EndsWith("-gpu")), "unknown adapters block nothing");
         GpuInfo.Adapters = () => [new("NVIDIA GeForce GTX 1080 Ti", "NVIDIA", "32.0")];
         Require(!GpuInfo.HasNvidiaRtx && GpuInfo.IsNvidiaRtx(new("NVIDIA RTX A4000", "NVIDIA", null)) && !GpuInfo.IsNvidiaRtx(new("Intel Arc A770", "Intel", null)));
+        // GitHub #33: a compatibility-patched DLSS 5 runtime on an RTX 50 card gets one info line; never on RTX 20-40.
+        GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 5070 Ti", "NVIDIA", "32.0")];
+        Require(GpuInfo.PatchedRuntimeNote(true) == "Patched copy for RTX 20-40 cards. Your RTX 50 runs NVIDIA's original file." && GpuInfo.PatchedRuntimeNote(false) is null, "RTX 50 note");
+        GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 4090", "NVIDIA", "32.0")];
+        Require(GpuInfo.PatchedRuntimeNote(true) is null, "RTX 40 needs the patch: no note");
+        GpuInfo.Adapters = () => [new("NVIDIA GeForce RTX 5090", "NVIDIA", "32.0"), new("NVIDIA GeForce RTX 3060", "NVIDIA", "32.0")];
+        Require(GpuInfo.PatchedRuntimeNote(true) is null, "an older RTX card next to it: no note");
+        GpuInfo.Adapters = () => [];
+        Require(GpuInfo.PatchedRuntimeNote(true) is null, "unknown adapters: no note");
     }
     finally { GpuInfo.Adapters = previous; }
     // The Saved Games folder DCS uses comes from dcs_variant.txt.

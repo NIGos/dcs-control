@@ -23,11 +23,18 @@ public static partial class GpuInfo
     /// <summary>The adapters could not be read: nothing is blocked on the GPU's account.</summary>
     public static bool Unknown => Adapters().Count == 0;
     public static bool IsNvidiaRtx(GpuAdapter a) => a.Vendor == "NVIDIA" && RtxRegex().IsMatch(a.Name);
+    /// <summary>Every NVIDIA RTX adapter is an RTX 50 card (NVIDIA's DLSS 5 runtime runs as released, no patch needed).</summary>
+    public static bool OnlyRtx50 => Adapters().Where(IsNvidiaRtx).ToList() is { Count: > 0 } rtx && rtx.All(a => Rtx50Regex().IsMatch(a.Name));
+    /// <summary>The DLSS 5 runtime's info line for a compatibility-patched (or unsigned) copy on a PC whose RTX cards are
+    /// all RTX 50 (GitHub #33): the patch is only for RTX 20-40. Null otherwise.</summary>
+    public static string? PatchedRuntimeNote(bool modified) =>
+        modified && OnlyRtx50 ? "Patched copy for RTX 20-40 cards. Your RTX 50 runs NVIDIA's original file." : null;
     /// <summary>"AMD Radeon RX 7900 XTX" (the names of the real adapters, for messages).</summary>
     public static string Names => string.Join(", ", Adapters().Select(a => a.Name));
 
     [GeneratedRegex(@"\bRTX\b|\bTITAN RTX\b|\b(?:A|L)\d{2,4}\b|\bH100\b", RegexOptions.IgnoreCase)] private static partial Regex RtxRegex();
     [GeneratedRegex(@"VEN_([0-9A-F]{4})", RegexOptions.IgnoreCase)] private static partial Regex VendorRegex();
+    [GeneratedRegex(@"\bRTX\s*50\d0\b", RegexOptions.IgnoreCase)] private static partial Regex Rtx50Regex();
 
     private static IReadOnlyList<GpuAdapter> ReadRegistry()
     {
