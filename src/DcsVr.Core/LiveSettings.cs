@@ -121,7 +121,7 @@ public static class LiveSettings
         // [D3D] ChainFast / ShaderFast: re-applied by the worker every second (worker.inc).
         "D3D.ChainFast", "D3D.ShaderFast",
     };
-    // PupilShift.ini keys the layer re-reads (pupil_shift_layer.cpp:241-320). Not OpenXrEyeGaze or [DlssPreset] (instance creation).
+    // PupilShift.ini keys the layer re-reads (pupil_shift_layer.cpp:241-320). Not OpenXrEyeGaze, QuadViewsFixedFocus or [DlssPreset] (instance creation).
     private static readonly HashSet<string> PupilKeys = new(StringComparer.OrdinalIgnoreCase)
     {
         "PupilShift.Enabled", "PupilShift.Toggle", "PupilShift.EyeRadiusMm", "PupilShift.VirtualImageM", "PupilShift.MaxGazeDeg", "PupilShift.Ipd",

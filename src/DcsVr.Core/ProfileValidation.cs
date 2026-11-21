@@ -137,7 +137,7 @@ public static class ProfileValidation
         if (profile.PupilShift && profile.PupilShiftVirtualImageM is < VrProfile.PupilShiftVirtualImageMin or > VrProfile.PupilShiftVirtualImageMax)
             Error("pupil-image", $"Lens image distance must be {VrProfile.PupilShiftVirtualImageMin}–{VrProfile.PupilShiftVirtualImageMax} m.");
         if (profile.PupilShift && !profile.Desktop && !profile.UsesPupilShift)
-            issues.Add(new("pupil-gaze", IssueSeverity.Warning, "Pupil shift needs Quad Views with an eye-tracked focus area, because it reads your gaze from it. With these settings it does not run."));
+            issues.Add(new("pupil-gaze", IssueSeverity.Warning, "Pupil shift needs your gaze: Quad Views with an eye-tracked focus area, or the Pimax runtime's eye tracking. With these settings it does not run."));
         if (profile.PeripheryStability && !profile.Desktop && !profile.UsesPeripheryStability)
             issues.Add(new("periphery-stability-provider", IssueSeverity.Warning, "Periphery stability runs in the bundled Quad Views only. With Pimax native Quad Views or with Quad Views off, it does not run."));
         if (profile.FarDepth && !profile.Desktop && !profile.UsesFarDepth)
@@ -204,7 +204,7 @@ public static class ProfileValidation
         Visual(nameof(VrProfile.GVisionStrength), profile.GVisionStrength, 0, 1);
         Visual(nameof(VrProfile.GVisionTolerance), profile.GVisionTolerance, 4, 10, " G");
         if (profile.GazeDof && !profile.Desktop && !profile.UsesGazeDof)
-            issues.Add(new("visual-gaze", IssueSeverity.Warning, "Eye-focus blur needs Quad Views with an eye-tracked focus area, because it reads your gaze from it. With these settings it does not run."));
+            issues.Add(new("visual-gaze", IssueSeverity.Warning, "Eye-focus blur needs your gaze: Quad Views with an eye-tracked focus area, or the Pimax runtime's eye tracking. With these settings it does not run."));
         if (profile.EngineOptimizations && !Enum.IsDefined(profile.BoostPrefetch)) Error("engine-prefetch", "Select a recognized terrain prefetch fix mode.");
         if (profile.EngineOptimizations && profile.EngineTimerRefreshUs is < VrProfile.EngineTimerRefreshMin or > VrProfile.EngineTimerRefreshMax)
             Error("engine-timer", $"Streaming timer refresh must be {VrProfile.EngineTimerRefreshMin}–{VrProfile.EngineTimerRefreshMax} µs.");

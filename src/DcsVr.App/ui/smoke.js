@@ -11,7 +11,7 @@ window.runWebSmoke = async function() {
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
     'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenDeepPipeline','frameGenFoveated','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
-    'frameGenHudSymbology','smoothCursor','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
+    'frameGenHudSymbology','smoothCursor','frameGenParallelEyes','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
     'cpuBoost','boostDcsPriority','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVram','freeVramApps','freeVramReopen',
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
     'engineOptimizations','engineReleaseIdleDlss','engineShadowCache','engineThreeViews','engineWaterSkip','engineIdleEffectSkip','engineRecordersEmulatedLists','engineGBufferRecorder','engineModelAllocator','engineShaderTimeCache','engineTaskQueueClock','boostPrefetch','engineShadowRecorder',
@@ -305,9 +305,9 @@ window.runWebSmoke = async function() {
         const b = $('packageCard').querySelector('.card-heading .more-toggle'), detail = $(b.getAttribute('aria-controls')); b.click(); const opened = !detail.hidden && b.textContent === 'Less'; b.click();
         check('More works on the static cards of the page too',opened && detail.hidden && b.textContent === 'More' && detail.textContent.includes('DCS starts its log anew')); }
       { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-engineRecordersEmulatedLists','setting-frameGenHudSymbology','setting-frameGenFoveated',
-          'setting-quadSaccadeTail','setting-quadLostGazeEase','setting-quadEdgeMatch','setting-engineThreeViews','setting-engineWaterSkip','setting-engineIdleEffectSkip'];
+          'setting-quadSaccadeTail','setting-quadLostGazeEase','setting-quadEdgeMatch','setting-engineThreeViews','setting-engineWaterSkip','setting-engineIdleEffectSkip','setting-frameGenParallelEyes'];
         const tags = [...document.querySelectorAll('#pages .tag')].filter(t => t.textContent.trim() === 'EXPERIMENTAL' && !t.closest('#page-guide'));
-        check('EXPERIMENTAL stays on exactly its fifteen settings and cards',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
+        check('EXPERIMENTAL stays on exactly its sixteen settings and cards',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
       ui.navigate('framegen'); const refreshInput = getComputedStyle($('input-headsetRefreshHz')).minHeight, row = getComputedStyle($('setting-headsetRefreshHz'));
       ui.navigate('boost'); const monitorSelect = getComputedStyle($('input-flightDisplayMode')).minHeight;
       check('Density: 34 px controls and 11 px setting rows at 1320 x 920',innerWidth === 1320 && refreshInput === '34px' && monitorSelect === '34px' && row.paddingTop === '11px' && row.paddingBottom === '11px'); }
@@ -369,7 +369,10 @@ window.runWebSmoke = async function() {
       edit('pupilShift',true); edit('quadViews','PimaxNative'); edit('gaze','EyeTracked'); ui.navigate('pupil'); const k = $('input-pupilShiftToggleKey');
       check('Pupil shift has its own page, marked experimental, with its switch as a capture field (Ctrl+Shift+F10)',!$('page-pupil').hidden && $('pupilControls').textContent.includes('EXPERIMENTAL') && $('pupilNeeds').hidden && ui.fields.find(f => f.path === 'pupilShiftToggleKey').type === 'hotkey' && ui.profile.pupilShiftToggleKey === '121:5' && k.textContent === 'Ctrl+Shift+F10');
       k.click(); press(122,'as'); check('The pupil shift switch refuses a key another switch uses',k.classList.contains('capturing') && ui.profile.pupilShiftToggleKey === '121:5'); press(27);
-      edit('gaze','Fixed'); check('Without an eye-tracked gaze the page says why and links to the setting',!$('pupilNeeds').hidden && $('pupilNeeds').textContent.includes('Focus movement') && ($('pupilFix').click(), !$('page-foveation').hidden));
+      edit('gaze','Fixed'); ui.navigate('pupil'); check('A fixed focus on the Pimax runtime needs nothing: the layer reads the OpenXR eye gaze',$('pupilNeeds').hidden);
+      const route = ui.profile.runtime; document.querySelector('#routeSwitch [data-route="SboysSteamVr"]').click(); edit('gaze','Fixed'); ui.navigate('pupil');
+      check('Without an eye-tracked gaze the page says why and links to the setting',!$('pupilNeeds').hidden && $('pupilNeeds').textContent.includes('Focus movement') && ($('pupilFix').click(), !$('page-foveation').hidden));
+      document.querySelector(`#routeSwitch [data-route="${route}"]`).click();
       edit('gaze',was.gaze); edit('quadViews',was.quadViews); edit('pupilShift',was.pupilShift); edit('engineOptimizations',was.engine); ui.navigate('pupil');
       await new Promise(r => setTimeout(r,300)); check('The pupil shift status reads the log through the bridge',!!$('pupilStatus').querySelector('.engine-state')); }
     { const was = {on:ui.profile.peripheryStability, quadViews:ui.profile.quadViews, strength:ui.profile.peripheryStabilityStrength, neural:ui.profile.neuralRendering, foveated:ui.profile.foveatedDlss}; ui.navigate('foveation');

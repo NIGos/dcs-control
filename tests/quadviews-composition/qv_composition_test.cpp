@@ -464,7 +464,121 @@ int main(int argc, char** argv) {
             edge_ok = edge_ok && inner == 0 && outside == 0 && band > 1000U;
         }
         std::printf(edge_ok ? "Quad Views edge match only changes the fade band%s" : "Quad Views edge match FAILED%s", "\n");
-        return all_identical && taper_ok && edge_ok && far_depth_off ? 0 : 1;
+
+        // Two layers (dcsvr_twolayer_ps.hlsl), the focus layer's pass: with edge match off (dcsvrEdge 0, or k <= 1) the
+        // output equals the pass without edge match (the same source with its branch removed) for every shape, band,
+        // sRGB encoding and fill; with it on (0021: k from the CPU) only the fade band changes.
+        bool two_layer_ok = true;
+        const auto two_layer_path = layer_dir / "dcsvr_twolayer_ps.hlsl";
+        if (!std::filesystem::exists(two_layer_path)) {
+            std::printf("two layers: dcsvr_twolayer_ps.hlsl not in the layer folder%s", "\n");
+            two_layer_ok = false;
+        } else {
+            const std::string two_new = read_text(two_layer_path);
+            std::string two_old = two_new;
+            replace_once(two_old, "[branch] if (dcsvrEdge.x > 0 &&", "[branch] if (false &&");
+            const auto two_new_code = compile(two_new, "main", "ps_5_0", includes);
+            const auto two_old_code = compile(two_old, "main", "ps_5_0", includes);
+            ComPtr<ID3D11PixelShader> two_new_ps, two_old_ps;
+            check(device->CreatePixelShader(two_new_code->GetBufferPointer(), two_new_code->GetBufferSize(), nullptr, &two_new_ps), "ps two new");
+            check(device->CreatePixelShader(two_old_code->GetBufferPointer(), two_old_code->GetBufferSize(), nullptr, &two_old_ps), "ps two old");
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = desc.Height = kFocus;
+            desc.MipLevels = desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.SampleDesc.Count = 1;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+            ComPtr<ID3D11Texture2D> layer_target, layer_staging;
+            check(device->CreateTexture2D(&desc, nullptr, &layer_target), "layer target");
+            desc.BindFlags = 0;
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            check(device->CreateTexture2D(&desc, nullptr, &layer_staging), "layer staging");
+            ComPtr<ID3D11RenderTargetView> layer_rtv;
+            check(device->CreateRenderTargetView(layer_target.Get(), nullptr, &layer_rtv), "layer rtv");
+            const auto layer_constants = buffer(112);
+            struct TwoLayer { float smoothing, shape, layer, encode; float warp[4]; float reuse[12]; float debug[4]; float edge[4]; };
+            static_assert(sizeof(TwoLayer) == 112);
+            const auto run_layer = [&](const TwoLayer& k, ID3D11PixelShader* shader) {
+                const float identity[16]{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                context->UpdateSubresource(vs_constants.Get(), 0, nullptr, identity, 0, 0);
+                context->UpdateSubresource(layer_constants.Get(), 0, nullptr, &k, 0, 0);
+                const float clear[4]{0.25f, 0.5f, 0.75f, 1.f};
+                context->ClearRenderTargetView(layer_rtv.Get(), clear);
+                context->OMSetRenderTargets(1, layer_rtv.GetAddressOf(), nullptr);
+                D3D11_VIEWPORT viewport{0, 0, static_cast<float>(kFocus), static_cast<float>(kFocus), 0, 1};
+                context->RSSetViewports(1, &viewport);
+                context->RSSetState(rasterizer.Get());
+                context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+                context->VSSetShader(vs.Get(), nullptr, 0);
+                context->VSSetConstantBuffers(0, 1, vs_constants.GetAddressOf());
+                context->PSSetShader(shader, nullptr, 0);
+                context->PSSetConstantBuffers(0, 1, layer_constants.GetAddressOf());
+                ID3D11ShaderResourceView* views[3] = {focus_srv.Get(), focus_srv.Get(), field_srv.Get()};
+                context->PSSetShaderResources(0, 3, views);
+                context->PSSetSamplers(0, 1, sampler.GetAddressOf());
+                context->Draw(3, 0);
+                ID3D11ShaderResourceView* none[3]{};
+                context->PSSetShaderResources(0, 3, none);
+                context->CopyResource(layer_staging.Get(), layer_target.Get());
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                check(context->Map(layer_staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "map layer");
+                std::vector<std::uint32_t> out(static_cast<std::size_t>(kFocus) * kFocus);
+                for (UINT y = 0; y < kFocus; ++y)
+                    std::memcpy(&out[static_cast<std::size_t>(y) * kFocus],
+                        static_cast<const std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch, kFocus * 4);
+                context->Unmap(layer_staging.Get(), 0);
+                return out;
+            };
+            std::size_t off_cases = 0, off_differing = 0;
+            for (const float shape : {0.f, 2.f, 8.f})
+                for (const float smoothing : {0.f, 0.05f, 0.2f})
+                    for (const float encode : {0.f, 1.f})
+                        for (const float fill : {0.f, 1.f})
+                            for (const float k : {0.f, 1.f, 3.f}) {
+                                TwoLayer c{};
+                                c.smoothing = smoothing;
+                                c.shape = shape;
+                                c.layer = 1.f;
+                                c.encode = encode;
+                                c.debug[1] = fill;
+                                c.edge[0] = k == 3.f ? 0.f : 0.6f;  // off by the share, or by k <= 1
+                                c.edge[1] = k;
+                                const auto before = run_layer(c, two_old_ps.Get()), after = run_layer(c, two_new_ps.Get());
+                                ++off_cases;
+                                for (std::size_t p = 0; p < before.size(); ++p) off_differing += before[p] != after[p] ? 1U : 0U;
+                            }
+            std::printf("two layers, edge match off: %zu cases, %zu differing pixels%s", off_cases, off_differing, "\n");
+            two_layer_ok = off_differing == 0;
+            for (const float shape : {2.f, 8.f}) {
+                TwoLayer on{};
+                on.smoothing = 0.2f;
+                on.shape = shape;
+                on.layer = 1.f;
+                on.debug[1] = 1.f;
+                on.edge[0] = 0.6f;
+                on.edge[1] = 3.f;
+                TwoLayer off = on;
+                off.edge[0] = 0.f;
+                const auto plain = run_layer(off, two_new_ps.Get()), matched = run_layer(on, two_new_ps.Get());
+                const float mid = kFocus * 0.5f;
+                std::size_t inner = 0, band = 0, outside = 0;
+                for (UINT y = 0; y < kFocus; ++y)
+                    for (UINT x = 0; x < kFocus; ++x) {
+                        const std::size_t p = static_cast<std::size_t>(y) * kFocus + x;
+                        if (plain[p] == matched[p]) continue;
+                        const float ax = std::fabs(x + 0.5f - mid) / mid, ay = std::fabs(y + 0.5f - mid) / mid;
+                        const float d = std::pow(std::pow(ax, shape) + std::pow(ay, shape), 1.f / shape);
+                        if (d < 0.6f - 0.01f) ++inner; else if (d > 1.f + 0.01f) ++outside; else ++band;
+                    }
+                std::printf("two layers, edge match shape=%.0f: %zu changed pixels inside the band, %zu in it, %zu outside%s",
+                    shape, inner, band, outside, "\n");
+                two_layer_ok = two_layer_ok && inner == 0 && outside == 0 && band > 1000U;
+            }
+        }
+        std::printf(two_layer_ok ? "Quad Views two-layer edge match: off identical, on only the fade band%s"
+                                 : "Quad Views two-layer edge match FAILED%s", "\n");
+        return all_identical && taper_ok && edge_ok && far_depth_off && two_layer_ok ? 0 : 1;
     } catch (const std::exception& error) {
         std::printf("error: %s\n", error.what());
         return 2;

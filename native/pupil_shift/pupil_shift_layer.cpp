@@ -72,7 +72,11 @@ struct EyeGazeDispatch {
 // The bundled Quad Views' gaze export (pupil_math.hpp, qv_gaze), resolved when the instance is created (the loader has
 // loaded every layer by then) and once more at the first xrLocateViews; null with Pimax's native quad views.
 std::atomic<QuadViewsGazeFn> qv_gaze_fn{};
-std::atomic<int> live_instances{};          // instances created through the layer and not destroyed yet
+// PupilShift.ini QuadViewsFixedFocus=1 (the app writes it when the bundled Quad Views runs a fixed focus, its
+// force_no_eye_tracking): the export has no gaze then, so the layer reads the OpenXR eye gaze, which that Quad Views
+// enables below the layer, and never the focus views (a fixed focus would read as a gaze). Read at instance creation.
+std::atomic<bool> qv_fixed_focus{};
+std::atomic<int> live_instances{};         // instances created through the layer and not destroyed yet
 std::atomic<XrTime> pvr_sampled_time{};     // the latest display time PVR was sampled for (reset with each instance)
 bool qv_checked_late{};
 
@@ -385,7 +389,8 @@ void resolve_quad_views_locked(bool late = false) {
     const auto fn = qv ? reinterpret_cast<QuadViewsGazeFn>(GetProcAddress(qv, qv_gaze::export_name)) : nullptr;
     qv_gaze_fn.store(fn);
     if (late && !fn) return;
-    log("gaze: %s\n", fn ? "Quad Views gaze export found (source qv; its fixed focus is no gaze)"
+    log("gaze: %s\n", fn && qv_fixed_focus.load() ? "Quad Views gaze export found, fixed focus (QuadViewsFixedFocus=1): OpenXR eye gaze, never the focus views"
+                    : fn ? "Quad Views gaze export found (source qv; its fixed focus is no gaze)"
                          : qv ? "Quad Views without the gaze export: OpenXR eye gaze, else the focus views"
                               : "no bundled Quad Views: OpenXR eye gaze, else the focus views");
 }
@@ -1925,7 +1930,10 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_LocateViews(XrSession session, const XrViewL
     // layer), else the focus views' centres in each primary view's frame.
     std::uint32_t qv_flags{};
     float qv_left[3]{0, 0, -1}, qv_right[3]{0, 0, -1};
-    if (const QuadViewsGazeFn qv = qv_gaze_fn.load()) qv_flags = qv(info->displayTime, qv_left, qv_right);
+    const bool fixed_qv = qv_fixed_focus.load();
+    if (const QuadViewsGazeFn qv = qv_gaze_fn.load(); qv && !fixed_qv) qv_flags = qv(info->displayTime, qv_left, qv_right);
+    // With a fixed Quad Views focus the focus views are never a gaze (no fallback to their centres).
+    const bool focus_gaze = quad && !fixed_qv;
     if ((qv_flags & qv_gaze::valid) && std::isfinite(qv_left[0] + qv_left[1] + qv_left[2]) && qv_left[2] != 0.0f) {
         // For the statistics: where Quad Views says the left eye looks (refused ones are logged).
         const float x = std::atan2(qv_left[0], -qv_left[2]) * 57.29578f, y = std::atan2(qv_left[1], -qv_left[2]) * 57.29578f;
@@ -1942,14 +1950,14 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_LocateViews(XrSession session, const XrViewL
             focus_local[eye] = rotate(conjugate(to_quat(views[eye].pose.orientation)),
                 rotate(to_quat(views[eye + 2].pose.orientation), gaze_from_focus_fov(to_fov(views[eye + 2].fov))));
     const Vec3 simulated{std::tan(settings.simulate_x_deg / 57.2958f), std::tan(settings.simulate_y_deg / 57.2958f), -1};
-    const EyeGazes eye_gaze = plausible_gaze(select_gaze(settings.simulate, simulated, qv_flags, qv_left, qv_right, quad, focus_local, xr_gaze));
+    const EyeGazes eye_gaze = plausible_gaze(select_gaze(settings.simulate, simulated, qv_flags, qv_left, qv_right, focus_gaze, focus_local, xr_gaze));
     log_gaze_source_locked(eye_gaze.source, xr_gaze.present, xr_absent);
     // The eye distance: DCS's custom IPD (Ipd=; DCS replaces the eyes' sideways position after this layer, so its
     // option is off and the layer applies the same value) or the runtime's own, times Depth boost's scale. Applied
     // whatever the pupil shift's switch says: that switch compares the pupil shift only, at the same IPD.
     const float runtime_ipd = length(to_vec(views[1].pose.position) - to_vec(views[0].pose.position));
     const float base_ipd = settings.ipd > 0 ? settings.ipd : runtime_ipd;
-    update_depth_locked(views, n, plausible_gaze(select_gaze(false, {}, qv_flags, qv_left, qv_right, quad, focus_local, xr_gaze)), info->displayTime, base_ipd, pvr_sample,
+    update_depth_locked(views, n, plausible_gaze(select_gaze(false, {}, qv_flags, qv_left, qv_right, focus_gaze, focus_local, xr_gaze)), info->displayTime, base_ipd, pvr_sample,
         stream, now_s);
     const float scale = depth.scale();
     bool moved_ipd{};
@@ -2157,15 +2165,20 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_CreateApiLayerInstance(const XrInstanceCreat
     next_info.nextInfo = layer_info->nextInfo->next;
     // XR_EXT_eye_gaze_interaction: wanted unless the bundled Quad Views' export is loaded (it has the gaze and enables
     // the extension itself, below this layer) or PupilShift.ini says OpenXrEyeGaze=0. Added when the runtime offers it
-    // (or cannot say); if the runtime refuses it, the instance is created as the application asked.
+    // (or cannot say); if the runtime refuses it, the instance is created as the application asked. With that Quad
+    // Views' fixed focus (QuadViewsFixedFocus=1) it is wanted too, but never added here: Quad Views requests it below
+    // this layer whenever the runtime offers it (its implicit extensions), and the runtime must not get it twice.
     const HMODULE qv_module = GetModuleHandleW(qv_gaze::module_name);
     const bool qv_export = qv_module && GetProcAddress(qv_module, qv_gaze::export_name);
-    const bool wanted = !qv_export && ini_float(L"OpenXrEyeGaze", 1, module_dir + L"PupilShift.ini") != 0;
+    const bool qv_fixed = qv_export && ini_float(L"QuadViewsFixedFocus", 0, module_dir + L"PupilShift.ini") != 0;
+    qv_fixed_focus.store(qv_fixed);
+    const bool wanted = (!qv_export || qv_fixed) && ini_float(L"OpenXrEyeGaze", 1, module_dir + L"PupilShift.ini") != 0;
     bool app_enabled{};
     for (std::uint32_t i = 0; i < info->enabledExtensionCount; ++i)
         app_enabled |= std::strcmp(info->enabledExtensionNames[i], XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME) == 0;
     const Availability availability = app_enabled ? Availability::present : wanted ? probe_eye_gaze(next_gipa) : Availability::absent;
-    bool inject = wanted && !app_enabled && availability != Availability::absent;
+    bool inject = wanted && !app_enabled && !qv_fixed && availability != Availability::absent;
+    const bool below = wanted && !app_enabled && qv_fixed && availability == Availability::present;
     std::vector<const char*> extensions;
     if (info->enabledExtensionCount && info->enabledExtensionNames)
         extensions.assign(info->enabledExtensionNames, info->enabledExtensionNames + info->enabledExtensionCount);
@@ -2220,11 +2233,12 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_CreateApiLayerInstance(const XrInstanceCreat
             fov_open_locked();
         }
         log("eye gaze: XR_EXT_eye_gaze_interaction %s (runtime %s)\n",
-            app_enabled ? "enabled by the application" : inject ? "added by the layer" : refused ? "refused by the runtime" : "not enabled",
+            app_enabled ? "enabled by the application" : inject ? "added by the layer" : below ? "enabled by the bundled Quad Views below (fixed focus)" :
+            refused ? "refused by the runtime" : "not enabled",
             availability == Availability::present ? "offers it" : availability == Availability::unknown ? "did not say" : "does not offer it, or not asked");
-        setup_eye_gaze(*instance, wanted, app_enabled || inject, !wanted ? (qv_export ? "the bundled Quad Views' export has the gaze" :
+        setup_eye_gaze(*instance, wanted, app_enabled || inject || below, !wanted ? (qv_export && !qv_fixed ? "the bundled Quad Views' export has the gaze" :
             "OpenXrEyeGaze=0 in PupilShift.ini") : refused ? "the runtime refused XR_EXT_eye_gaze_interaction" :
-            !(app_enabled || inject) ? "the runtime does not offer XR_EXT_eye_gaze_interaction" : nullptr);
+            !(app_enabled || inject || below) ? "the runtime does not offer XR_EXT_eye_gaze_interaction" : nullptr);
         install_drs_filter();
     }
     return result;

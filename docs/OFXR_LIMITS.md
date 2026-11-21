@@ -165,7 +165,7 @@ line each, and the off arm is what the `*_off` tests run) unless marked otherwis
 | `cockpit_mask` | 0031 | `1` | constant (costs nothing without the engine module) |
 | `cockpit_depth` | 0035 | `1` | constant |
 | `[diagnostics] flush_each_event` | upstream | `0` | constant |
-| `parallel_eye_synthesis` | 0038 | `0` | unshipped experiment ("off until flown" since 0038) |
+| `parallel_eye_synthesis` | 0038 | `0` | experimental app option *Both eyes at once* (Framegen page, off by default; writes `1`); not flown yet |
 | `foveated_periphery_flow_scale` | 0080 | `100` | the reader accepts 50, 75 and 100; only 100 is written |
 
 **Written from a profile field that has no control in the app:** `pipelined_deep_hold`, `diag_vram`.
