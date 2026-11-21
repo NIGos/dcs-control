@@ -1,6 +1,14 @@
 # 0.7.0 preview
 
-**0.7.0-preview (local test build).** Not published: a package for a headset test on the developer's PC. It adds **Three views** on the Engine page (bundled Quad Views, engine on, frame generation off), **Skip hidden water** and **Skip unused effects**, and soft focus edge and gaze options for eye tracking. Notes for the published release follow.
+**0.7.0-preview (local test build).** Not published: a package for a headset test on the developer's PC. Notes for the published release follow. It contains:
+- **Three views** on the Engine page (experimental): the right eye's periphery mostly reused from the left eye. Needs the engine on and the bundled Quad Views; it now also runs with frame generation.
+- **Skip hidden water** and **Skip unused effects** on the Engine page (experimental).
+- **Sharp HUD** no longer needs Depth boost. Far depth and frame generation's cockpit exports also run with Engine Optimizations off.
+- **Soft focus edge** also with foveated frame generation; **Stay ahead until your eyes land** and **Slide back when tracking is lost** also with frame generation.
+- **Pupil shift** and **Eye-focus blur** also with a fixed focus area, from the headset's own eye tracking (Pimax).
+- **Both eyes at once** on the Frame generation page (experimental): each eye's generated frame on its own GPU queue.
+- DLSS views now work when another program has hooked DLSS first.
+- Fixes for GitHub issues #28, #30, #31, #32 and #33, and Go back from an x.y.0 version.
 
 # 0.6.7 preview
 
