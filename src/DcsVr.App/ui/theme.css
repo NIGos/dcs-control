@@ -668,7 +668,7 @@ details.boost-details[open]>summary{margin-bottom:6px}
    blue = an explanation. Everything here overrides the rules above; ids and class names are unchanged. */
 :root{
   --bg:#131416;--rail:#17181b;--panel:#17181b;--s0:#1c1e22;--s1:#23262b;--s2:#2a2e34;--field:#131416;
-  --line:#2c3036;--line-strong:#3a3f47;--text:#eceef1;--soft:#b8bdc6;--muted:#8d939d;--faint:#747a84;
+  --line:#2c3036;--line-strong:#3a3f47;--text:#eceef1;--soft:#b8bdc6;--muted:#8d939d;--faint:#868c96;
   --accent:#f5a01a;--accent-hi:#ffb94a;--accent-dim:#f5a01a22;--accent-dark:#6b4a12;--cyan:#6bb8e6;--green:#4cc38a;--red:#f0857a;--warn:#f2c14e;
   --radius:8px;--row-y:11px;--card-gap:14px;--control-h:34px;--help-size:13px}
 body{font-size:14px;line-height:1.45}
@@ -755,13 +755,15 @@ select:hover,input[type=text]:hover,input[type=number]:hover,input.number-input:
 .setting-number input[type=number],.setting-number input.number-input{color:var(--text);border-radius:8px}
 input[type=range]::-webkit-slider-runnable-track{background:linear-gradient(var(--accent),var(--accent)) 0/var(--fill,50%) 100% no-repeat,var(--line-strong)}
 input[type=range]::-webkit-slider-thumb{width:16px;height:16px;margin-top:-6px}
-.switch{width:36px;height:20px;background:transparent;border:1px solid #5a606a}
+.switch{width:36px;height:20px;background:transparent;border:1px solid #6b717b}
 .switch:before{width:14px;height:14px;left:2px;top:2px;background:var(--muted)}
 .switch:checked{background:var(--accent);border-color:var(--accent)}
 .switch:checked:before{transform:translateX(16px);background:#131416}
 .segmented{gap:2px;padding:3px;border:1px solid var(--line);border-radius:8px}
 .segmented button{min-height:26px;border:0;border-radius:6px;font:500 13px "Segoe UI",Interface,sans-serif}
 .segmented button[aria-checked=true]{background:var(--accent);color:#131416;font-weight:600}
+/* Keyboard focus on the chosen (orange) segment: a dark inner ring, since the accent ring vanished on the accent fill. */
+.segmented button[aria-checked=true]:focus-visible{outline:2px solid #131416;outline-offset:-4px}
 .button{border-radius:8px;font:500 13.5px "Segoe UI",Interface,sans-serif;letter-spacing:0;text-transform:none}
 .button.secondary,.button.quiet{border:1px solid #5a606a;border-radius:8px;padding:7px 16px}
 .button.quiet{min-height:32px;border-color:var(--line-strong);font-size:13px;padding:5px 14px}

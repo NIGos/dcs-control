@@ -475,7 +475,7 @@ function field(panel,path,title,description,type,values,condition,unit='',hide=n
   else {
     inputMarkup = `<label class="setting-label" id="label-${path}" for="${id}">${title}</label>${help}`;
     if (type === 'select') inputMarkup += `<select id="${id}" aria-describedby="${described}">${values.map(([v,t]) => `<option value="${v}">${t}</option>`).join('')}</select>`;
-    if (type === 'number') inputMarkup += `<div class="setting-number"><input id="range-${path}" type="range" min="${values[0]}" max="${values[1]}" step="${values[2]}" aria-label="${title} slider"><input id="${id}" class="number-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" min="${values[0]}" max="${values[1]}" aria-describedby="${described} error-${path}"><span class="number-unit">${unit === 'ratio' ? '×' : unit}</span></div><span id="error-${path}" class="input-error" hidden></span>`;
+    if (type === 'number') inputMarkup += `<div class="setting-number"><input id="range-${path}" type="range" min="${values[0]}" max="${values[1]}" step="${values[2]}" aria-label="${plainTitle(title)} slider"><input id="${id}" class="number-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" min="${values[0]}" max="${values[1]}" aria-describedby="${described} error-${path}"><span class="number-unit">${unit === 'ratio' ? '×' : unit}</span></div><span id="error-${path}" class="input-error" hidden></span>`;
     if (type === 'path') inputMarkup += `<div class="path-row"><input id="${id}" type="text" spellcheck="false" aria-describedby="${described}"><button class="button secondary" id="browse-${path}">Browse</button></div>`;
     // A list starts folded into a one-line summary; Edit opens the textarea.
     if (type === 'list') inputMarkup += `<button type="button" class="list-summary" id="listsum-${path}" aria-expanded="false" aria-controls="${id}" aria-labelledby="label-${path} listsum-${path}"><span class="list-summary-text"></span><span class="list-summary-action">Edit</span></button><textarea id="${id}" class="list-input" rows="5" spellcheck="false" aria-describedby="${described}" hidden></textarea>`;
@@ -1436,7 +1436,7 @@ function updateControls() {
     const list = FEATURE_GUIDE.filter(g => test(g) && g.on(profile)).map(g => g.name === 'Color modes' ? 'Color: '+profile.colorMode : g.name);
     return [target,label,list.length > 0,name,list.length ? list.join(' · ') : offer];
   });
-  const extra = `<div class="stage-group extra"><div class="stage-group-label">Perception &amp; look</div><div class="stage-row">${look.map(tile).join('')}</div></div>`;
+  const extra = `<div class="stage-group extra"><div class="stage-group-label">In the headset</div><div class="stage-row">${look.map(tile).join('')}</div></div>`;
   $('pipeline').innerHTML = profile.desktop ? '' : extra;
   // What DLSS 5 still needs, on its own page; everything else to fix is listed once, in Checks.
   const notes = featureNotes(profile);
