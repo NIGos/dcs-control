@@ -105,9 +105,10 @@ public sealed record VrProfile
     public bool UsesAdaptiveCadence => FrameGen != FrameGeneration.Off && !Desktop && FrameGenAdaptiveCadence && FrameGenFactor == FrameGenAuto;
     /// <summary>HUD symbology for frame generation (engine module R95, OFXR fork patch 0049): the HUD and helmet symbols
     /// are taken out of the real frames, the generated frames are made from the world alone and the symbols put back, so
-    /// they stop smearing. Needs Depth boost's dual camera (the overlay render point). "Sharp HUD" on the Framegen page, off by default.</summary>
+    /// they stop smearing. 0.7: no longer needs Depth boost; without its dual camera the engine module hooks the overlay
+    /// render point on its own, passing DCS's records through. "Sharp HUD" on the Framegen page, experimental, off by default.</summary>
     public bool FrameGenHudSymbology { get; init; }
-    public bool UsesHudSymbology => FrameGenHudSymbology && FrameGen != FrameGeneration.Off && !Desktop && UsesDepthBoost;
+    public bool UsesHudSymbology => FrameGenHudSymbology && FrameGen != FrameGeneration.Off && !Desktop;
     /// <summary>Foveated frame generation: the bundled Quad Views submits the focus area and the rest of the view as two
     /// projection layers (dcsvr_two_layers) and OFXR generates each on its own (foveated_layers), instead of generating
     /// the composed full image. Measured 2026-11-15: about half the GPU time per generated pair and 4-5 GB less video
@@ -390,9 +391,10 @@ public sealed record VrProfile
     /// −0.6 to −1.3 ms of GPU in cockpit flight. Off by default; written only when it can engage (<see cref="UsesThreeViews"/>).
     /// ThreeViewsStripNdc, ThreeViewsKey and ThreeViewsIsolate stay developer keys.</summary>
     public bool EngineThreeViews { get; init; }
-    /// <summary>The module engages it only with the engine on, frame generation off (the cockpit exports read the right
-    /// periphery) and the bundled Quad Views layer (the one that fills the reused part).</summary>
-    public bool UsesThreeViews => EngineThreeViews && EngineOptimizations && !Desktop && UsesBundledQuadViews && FrameGen == FrameGeneration.Off;
+    /// <summary>The module engages it only with the engine on and the bundled Quad Views layer (the one that fills the
+    /// reused part). 0.7: also with frame generation; the cockpit is still drawn in the right periphery, and that view's
+    /// motion vectors are marked unproven while it engages, so frame generation uses optical flow for the right eye.</summary>
+    public bool UsesThreeViews => EngineThreeViews && EngineOptimizations && !Desktop && UsesBundledQuadViews;
     /// <summary>[Water] SkipHiddenWater=3 (0.7, experimental, no-submit): DCS's water passes are not submitted for a view
     /// that earlier frames found dry (probed one frame in four). Not exact for a few frames when water comes into view.
     /// Off by default.</summary>
@@ -494,8 +496,9 @@ public sealed record VrProfile
     public FarDepthPreset FarDepthPreset { get; init; } = FarDepthPreset.Default;
     /// <summary>Turns Far depth off and on in flight, to compare (bundled Quad Views' dcsvr_far_depth_toggle).</summary>
     public string FarDepthToggleKey { get; init; } = NeuralHotkeys.FarDepthDefault;
-    /// <summary>It runs: a VR flight with the bundled Quad Views and Engine Optimizations (the depth comes from the engine module).</summary>
-    public bool UsesFarDepth => FarDepth && !Desktop && UsesBundledQuadViews && EngineOptimizations;
+    /// <summary>It runs: a VR flight with the bundled Quad Views. The depth comes from the engine module, installed for it
+    /// in its Perception-only mode when Engine Optimizations are off (<see cref="UsesEngineModule"/>).</summary>
+    public bool UsesFarDepth => FarDepth && !Desktop && UsesBundledQuadViews;
     /// <summary>Depth boost (docs/PERCEPTION.md, docs/FIXATION_DEPTH.md), the dual camera: the world outside is rendered
     /// at a larger eye distance (<see cref="DepthBoostMode"/>), following where the eyes look and changing slowly, while
     /// the engine module draws the cockpit at the true eye distance (DcsQvCull.ini [Perception] CockpitTrueIpd=1). The
@@ -539,9 +542,13 @@ public sealed record VrProfile
     /// whenever Depth boost runs, with or without the engine optimizations.</summary>
     public bool UsesFixationDepth => UsesDepthBoost;
     /// <summary>The engine module is installed: for Engine Optimizations, or for Depth boost's dual camera and scene
-    /// depth or a Visual realism feature alone, in its Perception-only mode ([General] PerceptionOnly=1: none of the
-    /// engine optimizations, no test suite or engine keys).</summary>
-    public bool UsesEngineModule => EngineOptimizations || UsesDepthBoost || UsesVisualRealism;
+    /// depth, a Visual realism feature, Far depth's depth or frame generation's cockpit exports (mask, depth, DCS's
+    /// motion vectors, Sharp HUD) alone, in its Perception-only mode ([General] PerceptionOnly=1: none of the engine
+    /// optimizations, no test suite or engine keys).</summary>
+    public bool UsesEngineModule => EngineModuleRequired || (FrameGen != FrameGeneration.Off && !Desktop);
+    /// <summary>A feature that cannot run without the module wants it. Frame generation's exports alone do not: without
+    /// the component (a development distribution) frame generation runs without them, as before 0.7.</summary>
+    public bool EngineModuleRequired => EngineOptimizations || UsesDepthBoost || UsesVisualRealism || UsesFarDepth;
     /// <summary>The eye distance DCS renders with. Headset (default): the IPD the headset measured or was set to, the
     /// realistic one; DCS's custom IPD is turned off while the profile is applied. DcsCustom: DCS's own custom IPD as it
     /// is (the pupil shift layer applies it itself when it runs). Manual: <see cref="EyeDistanceMm"/>. VR flights only;

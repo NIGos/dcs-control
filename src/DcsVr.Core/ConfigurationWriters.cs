@@ -316,7 +316,7 @@ public static class ConfigurationWriters
         StreamDedupe={(p.EngineTextureDedupe ? 1 : 0)}
 
         [Effects]
-        SkipSameConstantBuffer={(p.EngineEffectBufferSkip ? 1 : 0)}{(p.UsesWaterSkip ? "\n\n[Water]\n; Skip hidden water (0.7, no-submit): a view with no water in sight does not draw DCS's water passes; not exact for\n; a few frames when water comes into view.\nSkipHiddenWater=3" : "")}{(p.UsesThreeViews ? "\n\n[Views]\n; Three views (0.7): the right eye's periphery is mostly reused from the left eye; DCS draws its outer strip and the\n; cockpit. Engages only with frame generation off and the bundled Quad Views.\nThreeViews=1" : "")}
+        SkipSameConstantBuffer={(p.EngineEffectBufferSkip ? 1 : 0)}{(p.UsesWaterSkip ? "\n\n[Water]\n; Skip hidden water (0.7, no-submit): a view with no water in sight does not draw DCS's water passes; not exact for\n; a few frames when water comes into view.\nSkipHiddenWater=3" : "")}{(p.UsesThreeViews ? "\n\n[Views]\n; Three views (0.7): the right eye's periphery is mostly reused from the left eye; DCS draws its outer strip and the\n; cockpit. Engages only with the bundled Quad Views; with frame generation the right eye uses optical flow.\nThreeViews=1" : "")}
 
         [Prefetch]
         ; Terrain prefetch fix: skip (repeats of a range within 5 s are skipped; a prefetch is only a hint), observe
@@ -339,7 +339,7 @@ public static class ConfigurationWriters
         ; them (its heartbeats), so they cost nothing otherwise.
         CockpitDepthExport={(p.FrameGen != FrameGeneration.Off && !p.Desktop ? 1 : 0)}
         CockpitMotionExport={(p.FrameGen != FrameGeneration.Off && !p.Desktop ? 1 : 0)}
-        ; The HUD and helmet symbols as their own layer for frame generation (R95); needs the dual camera.
+        ; The HUD and helmet symbols as their own layer for frame generation (R95); with or without the dual camera.
         SymbologyExport={(p.UsesHudSymbology ? 1 : 0)}
         ; Depth boost's dual camera: the cockpit, its lighting and its displays at the true eye distance while the world
         ; is rendered boosted; the HUD stays at DCS's camera.
@@ -384,8 +384,8 @@ public static class ConfigurationWriters
         ; Moving edges: the flow endpoint solved per pixel (level 1). Measured better with the Medium preset and one-way
         ; flow, the defaults; other combinations keep the plain sample (0).
         nvidia_occlusion_aware={(p.FlowPreset == NvidiaFlowPreset.Medium && !p.BidirectionalFlow ? 1 : 0)}
-        ; The engine module's cockpit mask keeps the cockpit still in generated frames; without it (Engine Optimizations off)
-        ; nothing changes and nothing is spent.
+        ; The engine module's cockpit mask keeps the cockpit still in generated frames (with Engine Optimizations off the
+        ; module runs for it in its Perception-only mode).
         cockpit_mask=1
         ; The engine module's HUD symbols: taken out before frame generation and put back on the generated frames.
         hud_symbology={(p.UsesHudSymbology ? 1 : 0)}

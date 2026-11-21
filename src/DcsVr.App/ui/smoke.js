@@ -342,7 +342,7 @@ window.runWebSmoke = async function() {
       const base = {...ui.profile,engineOptimizations:true,desktop:false,quadViews:'QuadViewsFoveated',quadViewsLayerDirectory:'',frameGen:'Off'};
       const why = p => [].concat(typeof tv.why === 'function' ? tv.why(p) : tv.why)[0];
       check('0.7 engine options: toggles on the Engine page, off by default, live, and Three views says why it waits',fs.every(f => f && f.type === 'toggle' && f.page === 'engine' && ui.profile[f.path] === false)
-        && tv.condition(base) && !tv.condition({...base,frameGen:'Nvidia'}) && why({...base,frameGen:'Nvidia'}) === 'Only without frame generation.'
+        && tv.condition(base) && tv.condition({...base,frameGen:'Nvidia'})
         && !tv.condition({...base,quadViews:'PimaxNative'}) && String(why({...base,quadViews:'PimaxNative'})).includes('bundled Quad Views')
         && why({...base,engineOptimizations:false}) === 'Turn on Engine Optimizations to change these.' && tv.hide({...base,desktop:true})
         && fs.slice(1).every(f => f.condition(base) && !f.condition({...base,engineOptimizations:false}))); }
