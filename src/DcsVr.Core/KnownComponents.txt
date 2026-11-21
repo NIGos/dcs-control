@@ -105,3 +105,5 @@ e8d734f8e0c37a7058a916c721e114d2821ff3900087c170c1facc76f9e3b63b ofxr/XR_APILAYE
 6719e56a57dea7d65c537711426affea4e4a7701117cf73f4747db2cb80467f6 dcsqvcull/DcsQvCullPayload.dll (0.6.7-preview)
 c6cd17de7a9f6ec7b9e2b2c5e1ec84acc62d5e88192513a5f8c6c18de717e770 ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll (0.6.6-preview)
 74b1ab0ae9e32a23887bad1f2a3aae26fe98bffac5ad21fcbffd2e4e61ec32f2 quadviews/XR_APILAYER_MBUCCHIA_quad_views_foveated.dll (0.6.6-preview)
+4091ccbdc88b519a217742af5f7668e9226e958cd5a805c3995e298359e78fc4 dcsqvcull/DcsQvCull.dll (0.7.0-preview)
+ff7e872e736cc98fd57483a6f0d014dbb443f10178d2fafaa3a717cb3401f734 dcsqvcull/DcsQvCullPayload.dll (0.7.0-preview)
