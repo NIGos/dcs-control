@@ -6,6 +6,9 @@ $wrapper = Join-Path $PSScriptRoot 'msvc.cmd'
 # The shared-memory contract headers this module shares with the pupil shift layer must match (the OFXR copies are
 # checked by the OFXR build).
 & (Join-Path $PSScriptRoot 'check-contracts.ps1') -Only 'native/'
+# Every [Perception] key the module reads must reach it with Engine Optimizations off too (PerceptionOnlyConfig).
+& (Join-Path $PSScriptRoot 'check-perception-only-keys.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'A [Perception] key is dead with Engine Optimizations off (check-perception-only-keys.ps1).' }
 $build = Join-Path $workspaceRoot 'artifacts/native/dcsqvcull'
 & $wrapper cmake -S (Join-Path $workspaceRoot 'native/dcsqvcull') -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE -ne 0) { throw 'DcsQvCull configuration failed.' }

@@ -1,0 +1,71 @@
+{
+  "name": "twolayer-ab",
+  "status": "ready",
+  "neverRun": true,
+  "measures": "Is a per-eye artefact of the two-layer foveated submission in what we submit or in the runtime's composition (artifacts\\flash-07: white feathered disc on the right eye after the Pimax runtime of 2026-11-06)? Each arm captures 40 submissions twice (real and generated frames alternate at 2X): both projection layers, both eyes, colour AND alpha of the focus layer per array slice, the layer flags (capture.jsonl). verdict.py / compose.py: the focus layer of slice 1 (right eye) must match slice 0's statistics (alpha feather, colour not near-white where the periphery under it is not); a white disc in our submission = our bug (OFXR slice-1 synthesis), a clean submission while the headset shows the disc = the runtime. Arms: array2 = as shipped (dcsvr_two_layers=2: one array swapchain per layer, slice = eye); pereye = dcsvr_two_layers=1 (one swapchain per eye and layer: the runtime's array path is not used); fg1x = frame generation 1X with the same two layers (generated frames out of the picture). The simulated gaze keeps the focus moving the same way in every arm, with or without a tracker.",
+  "cannotJudge": "What the headset shows: the capture is what reaches the runtime. Pair it with the compositor mirror (memory: Pimax compositor mirror via PVR keys; black while the headset is untracked) or the user's eye. Whether OFXR's foveated mode accepts dcsvr_two_layers=1: the pereye arm's flight log must show foveated_mode result=3 with per-eye roles, else that arm only says 'not supported'.",
+  "mission": "qvbench_i23_f16_ap.miz",
+  "seconds": 45,
+  "simGaze": "mode=targets;targets=0,0|6,2|-6,-2;dwell_ms=900",
+  "arms": [
+    {
+      "name": "array2",
+      "profileOverrides": {
+        "frameGenFactor": 2
+      }
+    },
+    {
+      "name": "pereye",
+      "profileOverrides": {
+        "frameGenFactor": 2
+      },
+      "quadviews": {
+        "dcsvr_two_layers": 1
+      }
+    },
+    {
+      "name": "fg1x",
+      "profileOverrides": {
+        "frameGenFactor": 1
+      }
+    }
+  ],
+  "profileOverrides": {},
+  "ofxr": {
+    "smooth_cursor": 0
+  },
+  "diagnostics": {},
+  "quadviews": {},
+  "schedule": [
+    {
+      "at": 8,
+      "do": "recenter"
+    },
+    {
+      "at": 13,
+      "do": "shot",
+      "name": "cockpit"
+    },
+    {
+      "at": 20,
+      "do": "capture",
+      "frames": 40,
+      "scale": 2,
+      "tag": "a"
+    },
+    {
+      "at": 32,
+      "do": "capture",
+      "frames": 40,
+      "scale": 2,
+      "tag": "b"
+    }
+  ],
+  "verdict": {
+    "crops": []
+  },
+  "sideEffects": [
+    "the real eye tracker is ignored (simulated gaze); dcsvr_two_layers is changed only in the flown copy's settings.cfg",
+    "40 submissions per capture at scale 2: about 0.4 GB per capture"
+  ]
+}
