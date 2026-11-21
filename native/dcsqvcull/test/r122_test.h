@@ -426,6 +426,18 @@ void Hooks() {
     memcpy(mh + 1, &relRelay, 4);
     FlushInstructionCache(GetCurrentProcess(), mh, 4096);
     const auto mhCreate = reinterpret_cast<CreateFn>(mh);
+    {  // the "not hooked" line names who hooked it first: relay page, then the detour's module (this test program)
+      char code[200], plain[200];
+      DescribeCode(mh, code, sizeof code);
+      DescribeCode(kCreate2124, plain, sizeof plain);
+      const std::string c = code;
+      Check(c.rfind("e9 ", 0) == 0 && c.find("-> jmp to private memory") != std::string::npos && c.find(".exe+0x") != std::string::npos &&
+                std::string(plain) == "48 89 6c 24 18 56 57 41 56 48 83 ec",
+            "R122 hook failure line: first bytes, the jump through the relay page into the hooking module");
+      char none[200];
+      DescribeCode(nullptr, none, sizeof none);
+      Check(std::string(none) == "first bytes unreadable", "R122 hook failure line: an unreadable target");
+    }
     uint8_t mhBytes[16];
     memcpy(mhBytes, mh, 16);
     g_foreignCalls = 0, g_createCalls = 0;

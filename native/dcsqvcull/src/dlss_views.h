@@ -459,6 +459,58 @@ inline const char* DetourError(int r) {
     default: return "?";
   }
 }
+// For a "not hooked" line: the target's first 12 bytes and, when they start with a jump (another program hooked it
+// first: MinHook's E9 rel32, an FF 25 absolute jump, mov rax/r11 + jmp), where the jump leads, followed through up to
+// two relay pages: "48 89 ..." or "E9 .. .. -> jmp to private memory -> jmp to Cheeky.dll+0x1a2b0". Reads through
+// SafeRead, so an unreadable address is reported.
+inline bool ReadCode(const void* at, uint8_t* out, size_t n) { return SafeRead(at, out, n); }
+inline const uint8_t* JumpTarget(const uint8_t* at) {
+  uint8_t b[14];
+  if (!ReadCode(at, b, sizeof b)) return nullptr;
+  int32_t rel = 0;
+  uint64_t abs = 0;
+  if (b[0] == 0xE9) { memcpy(&rel, b + 1, 4); return at + 5 + rel; }
+  if (b[0] == 0xEB) return at + 2 + static_cast<int8_t>(b[1]);
+  if (b[0] == 0xFF && b[1] == 0x25) {
+    memcpy(&rel, b + 2, 4);
+    return ReadCode(at + 6 + rel, reinterpret_cast<uint8_t*>(&abs), 8) ? reinterpret_cast<const uint8_t*>(abs) : nullptr;
+  }
+  if (b[0] == 0x48 && b[1] == 0xB8 && b[10] == 0xFF && b[11] == 0xE0) { memcpy(&abs, b + 2, 8); return reinterpret_cast<const uint8_t*>(abs); }
+  if (b[0] == 0x49 && b[1] == 0xBB && b[10] == 0x41 && b[11] == 0xFF && b[12] == 0xE3) { memcpy(&abs, b + 2, 8); return reinterpret_cast<const uint8_t*>(abs); }
+  return nullptr;
+}
+inline size_t AppendCode(char* out, size_t cap, size_t len, const char* fmt, ...) {
+  if (len + 1 >= cap) return len;
+  va_list a;
+  va_start(a, fmt);
+  const int w = vsnprintf(out + len, cap - len, fmt, a);
+  va_end(a);
+  return w < 0 ? len : (std::min)(cap - 1, len + static_cast<size_t>(w));
+}
+inline void DescribeCode(const uint8_t* target, char* out, size_t cap) {
+  if (!out || !cap) return;
+  out[0] = 0;
+  uint8_t b[12];
+  if (!target || !ReadCode(target, b, sizeof b)) { snprintf(out, cap, "first bytes unreadable"); return; }
+  size_t len = 0;
+  for (size_t i = 0; i < sizeof b && len + 4 < cap; ++i) len = AppendCode(out, cap, len, i ? " %02x" : "%02x", b[i]);
+  const uint8_t* at = target;
+  for (int hop = 0; hop < 3 && len + 8 < cap; ++hop) {
+    const uint8_t* to = JumpTarget(at);
+    if (!to) break;
+    HMODULE m = nullptr;
+    wchar_t path[MAX_PATH] = {};
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(to), &m) &&
+        m && GetModuleFileNameW(m, path, MAX_PATH)) {
+      const wchar_t* name = wcsrchr(path, L'\\');
+      len = AppendCode(out, cap, len, " -> jmp to %ls+0x%llx", name ? name + 1 : path,
+                      static_cast<unsigned long long>(to - reinterpret_cast<const uint8_t*>(m)));
+      break;  // in a module: the program that hooked it
+    }
+    len = AppendCode(out, cap, len, " -> jmp to private memory (a hook's relay page)");
+    at = to;
+  }
+}
 // Pass-through (the hook pointer back to the trampoline); the patch and pages stay for the next payload.
 inline void Release(Detour* d) {
   if (d->slot && d->tramp) InterlockedExchangePointer(d->slot, d->tramp);
@@ -1790,7 +1842,9 @@ void Install() {
     const int r = InstallDetour(target, k ? reinterpret_cast<void*>(&ReleaseHook) : reinterpret_cast<void*>(&EvalHook), d);
     if (r < 0) {
       st = -1;
-      Log("dlss life: %s not hooked: %s; not instrumented", d->name, DetourError(r));
+      char code[200];
+      DescribeCode(target, code, sizeof code);
+      Log("dlss life: %s not hooked: %s (%s); not instrumented", d->name, DetourError(r), code);
       continue;
     }
     if (k)
@@ -2166,7 +2220,9 @@ bool TryInstallCreate() {
   const int r = InstallDetour(target, reinterpret_cast<void*>(&CreateHook), &g_create);
   if (r < 0) {
     g_createState = -1;
-    Log("dlss views: NVSDK_NGX_D3D11_CreateFeature not hooked: %s; DLSS left as DCS sets it", DetourError(r));
+    char code[200];
+    DescribeCode(target, code, sizeof code);
+    Log("dlss views: NVSDK_NGX_D3D11_CreateFeature not hooked: %s (%s); DLSS left as DCS sets it", DetourError(r), code);
     return false;
   }
   g_createOrig.store(reinterpret_cast<CreateFn>(g_create.tramp), std::memory_order_release);

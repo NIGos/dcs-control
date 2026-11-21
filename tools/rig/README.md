@@ -13,7 +13,7 @@ while the rig was built (dated, scratch paths); this file is the current one.
 | File | What it does |
 |---|---|
 | `run-scenario.ps1` | One unattended flight per scenario and arm: applies a profile with the installed DCS Control CLI, flies a copy of it with the capture layer appended, runs the timed schedule, collects logs, runs `verdict.py`, restores |
-| `scenarios\hud.json`, `motion.json`, `gaze.json`, `cursor.json`, `cursor-calib.json` | What a flight does and measures: mission, seconds, arms, schedule |
+| `scenarios\hud.json`, `motion.json`, `gaze.json`, `simgaze.json`, `cursor.json`, `cursor-calib.json` | What a flight does and measures: mission, seconds, arms, schedule (`"simGaze"` + `"do": "simgaze"` actions: the simulated eye gaze) |
 | `riglib.py` | Reads a capture (shared by the tools below) |
 | `verdict.py` | Per capture: interpolation ratio, layer mismatch, seam, alpha, cursor; writes `verdict.txt` / `verdict.json` |
 | `compose.py` | What the compositor shows for one captured submission (both layers composed) |
@@ -24,6 +24,7 @@ while the rig was built (dated, scratch paths); this file is the current one.
 | `late.py` | Per-submission reconstruction from an OFXR flight log, written as a pickle: `py late.py <log> <t0 s> <t1 s> <out.pickle>` |
 | `build-capture-layer.ps1` | Builds the capture layer, its harness and the chain shim into `artifacts\rig\capture-layer\bin` and writes the layer's manifest there; `-Test` runs the two offline tests (the harness on WARP with a byte check; OFXR's call-chain test with the layer below OFXR) |
 | `capture-layer\rigtap.cpp` | The capture layer: a pass-through OpenXR API layer that, when armed, records what reaches the runtime in `xrEndFrame` |
+| `capture-layer\simgaze.h`, `simgaze_harness.cpp` | Simulated eye gaze in the capture layer (`RIGTAP_SIMGAZE=1`, a scenario's `"simGaze"`; programs: fixed, main-sequence saccades between targets, sweeps, blinks, lost, replay of a CSV trace; `gaze.txt` in the tap folder switches the program in flight). The layer answers `XR_EXT_eye_gaze_interaction` itself, so every layer above it (Quad Views, Cheeky, Pupil shift; OFXR through Quad Views' focus) reads it as the runtime's gaze, with or without a tracker. `simgaze_harness` is its offline test (`build-capture-layer.ps1 -Test`, test 0) |
 | `capture-layer\rigtap_harness.cpp`, `check_harness.py` | A fake loader and runtime that drive the layer without a headset, and the byte check of what it captured |
 | `capture-layer\rig_chain_shim.cpp`, `check_chain.py` | Puts the capture layer below OFXR in OFXR's own call-chain test, and checks the capture taken there |
 | `cursor_calib.py` | From a `cursor-calib` flight: where DCS's cockpit cursor is for a place of the mouse in DCS's window; `--write` stores `artifacts\rig\cursor-calibration.json` |

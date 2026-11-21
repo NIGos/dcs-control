@@ -1,0 +1,76 @@
+{
+  "name": "simgaze",
+  "status": "ready",
+  "neverRun": true,
+  "measures": "Scenario 3 with the capture layer's simulated eye gaze instead of Quad Views' mouse simulation: every gaze consumer above the capture layer (Quad Views' focus, Cheeky's focus, Pupil shift, OFXR through Quad Views' focus layer) reads the same scripted gaze, with main-sequence saccades. rigtap.log: 'SIMULATED EYE GAZE ON', then 'ACTIVE ... served N (valid N ...)' once a second, N > 0 after the briefing. Quad Views log: 'Eye tracking is supported' even on a runtime that says it is not; 'DCSVR gaze: ... saccades' > 0. Capture around each jump: the focus field of view of the real frame after the jump moved by the commanded angle (+ lead). simgaze_trace.csv: what was served, for the verdict.",
+  "cannotJudge": "The Pimax runtime's own foveated rendering and PVR eye API (not OpenXR); Cheeky's gaze when the runtime does not list XR_EXT_eye_gaze_interaction at all (its probe asks the loader, which may not report a layer's extension: check Cheeky's 'probe extension=' line); xrLocateSpaces (OpenXR 1.1) is not answered.",
+  "mission": "qvbench_i23_f16_ap.miz",
+  "seconds": 55,
+  "simGaze": "mode=fixed;x=0;y=0",
+  "arms": [
+    {
+      "name": "fill2",
+      "profileOverrides": {
+        "frameGenFactor": 2
+      }
+    }
+  ],
+  "profileOverrides": {},
+  "ofxr": {
+    "smooth_cursor": 0
+  },
+  "diagnostics": {},
+  "quadviews": {
+    "debug_eye_gaze": 1
+  },
+  "schedule": [
+    {
+      "at": 8,
+      "do": "recenter"
+    },
+    {
+      "at": 13,
+      "do": "shot",
+      "name": "cockpit"
+    },
+    {
+      "at": 19.5,
+      "do": "capture",
+      "frames": 90,
+      "scale": 2,
+      "delay_ms": 3000,
+      "tag": "jump8"
+    },
+    {
+      "at": 20,
+      "do": "simgaze",
+      "program": "mode=targets;targets=-4,0|4,0;dwell_ms=700"
+    },
+    {
+      "at": 33.5,
+      "do": "capture",
+      "frames": 90,
+      "scale": 2,
+      "delay_ms": 3000,
+      "tag": "jump15"
+    },
+    {
+      "at": 34,
+      "do": "simgaze",
+      "program": "mode=targets;targets=-7.5,0|7.5,0;dwell_ms=700;blink_every_ms=4000;blink_ms=150"
+    },
+    {
+      "at": 47,
+      "do": "simgaze",
+      "program": "mode=lost"
+    }
+  ],
+  "verdict": {
+    "crops": []
+  },
+  "sideEffects": [
+    "the real eye tracker is ignored for the whole flight (the layer answers every eye-gaze query); nothing outside the flown copy changes",
+    "PupilShift.ini in the flown copy gets [DepthBoost] PimaxPvrGaze=0 so that Depth boost reads the same gaze",
+    "90 submissions per capture = about 1 s at 90 Hz, so each window holds one or two jumps; scale 2 keeps it at 0.9 GB per capture"
+  ]
+}
