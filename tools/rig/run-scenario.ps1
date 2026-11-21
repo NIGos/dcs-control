@@ -306,6 +306,15 @@ function New-RigCopy([string]$RunDir, $Sc, [string]$SwapDll, $Rec) {
   $launch.environment | Add-Member -NotePropertyName RIGTAP_DIR -NotePropertyValue $tap -Force
   $launch.environment | Add-Member -NotePropertyName RIGTAP_MAX_MB -NotePropertyValue ([string]$(if ($Sc.maxDiskMb) { $Sc.maxDiskMb } else { 6144 })) -Force
   if ($Sc.tapEnv) { foreach ($p in $Sc.tapEnv.PSObject.Properties) { $launch.environment | Add-Member -NotePropertyName $p.Name -NotePropertyValue ([string]$p.Value) -Force }; Note "capture layer environment: $(($Sc.tapEnv.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ' ')" }
+  # simulated eye gaze (capture layer, TEST-ONLY): "simGaze": true or a program (tools\rig\capture-layer\simgaze.h syntax).
+  # Pimax PVR's eye API is not OpenXR: Depth boost's PVR gaze is switched off in the flown copy so that it reads the same gaze.
+  if ($Sc.simGaze) {
+    $launch.environment | Add-Member -NotePropertyName RIGTAP_SIMGAZE -NotePropertyValue '1' -Force
+    if ($Sc.simGaze -is [string]) { $launch.environment | Add-Member -NotePropertyName RIGTAP_SIMGAZE_PROGRAM -NotePropertyValue $Sc.simGaze -Force }
+    $psIni = Join-Path $dst 'pupilshift\PupilShift.ini'
+    if (Test-Path -LiteralPath $psIni) { Edit-IniFile $psIni 'DepthBoost' ([pscustomobject]@{ PimaxPvrGaze = '0' }) }
+    Note "SIMULATED EYE GAZE in this flight (capture layer): $(if ($Sc.simGaze -is [string]) { $Sc.simGaze } else { 'mode=fixed;x=0;y=0' })$(if (Test-Path -LiteralPath $psIni) { '; PupilShift.ini PimaxPvrGaze=0 in the copy' })"
+  }
   Write-Utf8 $lp ($launch | ConvertTo-Json -Depth 8)
   # checks: nothing points into the source; every layer library exists; the settings file is the copy's
   foreach ($p in $launch.environment.PSObject.Properties) { foreach ($part in ([string]$p.Value -split ';')) { if ($part -and $part.StartsWith($src + '\', [StringComparison]::OrdinalIgnoreCase)) { throw "launch.json $($p.Name) still points into the source: $part" } } }
@@ -487,6 +496,11 @@ function Do-Action([string]$RunDir, $Rec, $A) {
       Arm-Capture (Join-Path $RunDir 'tap') $A $twin
     }
     'recenter' { Invoke-Recenter $Rec $A }
+    'simgaze' {   # a new simulated-gaze program (needs the scenario's simGaze): { program: "mode=targets;targets=0,0|10,0;dwell_ms=700" }
+      $tap = Join-Path $RunDir 'tap'; $tmp = Join-Path $tap 'gaze.tmp'
+      [IO.File]::WriteAllText($tmp, (([string]$A.program) -replace ';', "`n") + "`n", [Text.Encoding]::ASCII); Move-Item -LiteralPath $tmp -Destination (Join-Path $tap 'gaze.txt') -Force
+      Note "$($Rec.run) simulated gaze program: $($A.program)"
+    }
     'mouse-path' {   # slow, logged mouse path through window fractions: { label, points: [[fx,fy],...], speedPx, settleMs }
       Focus-Dcs | Out-Null; $c = Get-DcsClient
       $plist = @($A.points); if ($plist.Count -eq 2 -and $plist[0] -isnot [array]) { $plist = @(, $plist) }      # one point given flat

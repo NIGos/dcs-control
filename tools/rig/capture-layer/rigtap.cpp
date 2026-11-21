@@ -23,6 +23,23 @@
 //   window0 / window1 = tangents l,r,u,d kept of view 0 / 1 of every projection layer (instead of crop: the same
 //   angular window whatever the image size), scale2 (+ crop2) = a second file per view (whole sub-image at that scale),
 //   budget_mb (default 2048) = size of the whole capture: the first stream's scale is raised until it fits.
+//
+// Simulated eye gaze (RIGTAP_SIMGAZE=1 with RIGTAP_DIR; read at instance creation; off otherwise, and then none of
+// the hooks below is handed out). The layer answers XR_EXT_eye_gaze_interaction itself, so every layer ABOVE it
+// (Quad Views, Cheeky, Pupil shift; OFXR follows Quad Views' focus) reads the scripted gaze as the runtime's:
+//   - xrCreateInstance: the extension is stripped and the call retried when the runtime refuses it;
+//   - xrGetSystemProperties: supportsEyeGazeInteraction = TRUE;
+//   - xrSuggestInteractionProfileBindings: actions bound to /user/eyes_ext/input/gaze_ext/pose become gaze actions;
+//     the eye-gaze profile's suggestion is forwarded only when the runtime enabled the extension (and never fails);
+//   - xrGetActionStatePose: a gaze action is active; xrGetCurrentInteractionProfile(/user/eyes_ext) = eye gaze;
+//   - xrLocateSpace on a gaze action's space: head (a VIEW space of the layer's own) x scripted gaze, VALID|TRACKED,
+//     or no flags while the program says lost/blink; XrEyeGazeSampleTimeEXT = time - latency_ms.
+//   RIGTAP_SIMGAZE_PROGRAM  the first program (simgaze.h syntax, ';' between keys), default mode=fixed;x=0;y=0
+//   <RIGTAP_DIR>\gaze.txt   a new program, polled four times a second; renamed gaze.taken-<n>.txt (or
+//                           gaze.rejected-<n>.txt with the error in the log). The program's clock restarts.
+// The log says SIMULATED EYE GAZE once a second while it serves; simgaze_trace.csv holds every served sample.
+// Pimax PVR's own eye API (Pupil shift's Depth boost with [DepthBoost] PimaxPvrGaze=1) is not OpenXR and is not
+// covered: the rig runner sets PimaxPvrGaze=0 in the flown copy when a scenario uses simGaze.
 // A scale is a box average done on the GPU when the texture takes a raw (UNORM) shader view, so only the small image
 // is read back; else the region is read at full size and averaged on the writer thread.
 // The file is renamed to arm.taken-<n>.txt when read. Each capture goes to <RIGTAP_DIR>\cap<n>[_tag]\ with
@@ -53,6 +70,8 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 #include <openxr/openxr_loader_negotiation.h>
+#include <set>
+#include "simgaze.h"
 
 namespace {
 const uint32_t kDefaultFrames = 40, kHardCap = 120;
@@ -71,6 +90,22 @@ PFN_xrCreateReferenceSpace g_nextCreateRef = nullptr;
 // itself answers while the headset is not tracked yet. Nothing else of the answer is touched. Off without the key.
 PFN_xrLocateViews g_nextLocate = nullptr; double g_invalidMs = 0; long long g_invalidFrom = 0; std::atomic<unsigned> g_invalidCalls{0}; std::map<XrSpace, int> g_spaceTypeOf; std::mutex g_spaceMu;
 
+// Simulated eye gaze state (the functions are further down, after Log and Qpc).
+bool g_sim = false;                    // decided at instance creation
+bool g_simRuntimeExt = false;          // the runtime's instance has XR_EXT_eye_gaze_interaction enabled
+std::mutex g_simMu;                    // everything below
+simgaze::Program g_simProg; bool g_simRestart = true; XrTime g_simStart = 0; unsigned g_simProgN = 0, g_simFileN = 0;
+XrPath g_pathProfile = XR_NULL_PATH, g_pathGaze = XR_NULL_PATH, g_pathEyes = XR_NULL_PATH;
+std::set<XrAction> g_gazeActions;
+struct SimSpace { XrAction action; XrSession session; };
+std::map<XrSpace, SimSpace> g_actionSpaces; std::map<XrSession, XrSpace> g_simView;
+unsigned long long g_simServed = 0, g_simValid = 0, g_simInvalid = 0, g_simHeadLost = 0, g_simPose = 0, g_simSecServed = 0;
+float g_simLastX = 0, g_simLastY = 0; long long g_simStatQpc = 0, g_simPollQpc = 0; bool g_simLoggedProps = false;
+FILE* g_simTrace = nullptr;
+PFN_xrGetSystemProperties g_nextSysProps = nullptr; PFN_xrStringToPath g_nextStrToPath = nullptr;
+PFN_xrSuggestInteractionProfileBindings g_nextSuggest = nullptr; PFN_xrCreateActionSpace g_nextCreateActionSpace = nullptr;
+PFN_xrDestroySpace g_nextDestroySpace = nullptr; PFN_xrGetActionStatePose g_nextPose = nullptr; PFN_xrLocateSpace g_nextLocateSpace = nullptr;
+PFN_xrGetCurrentInteractionProfile g_nextCurProfile = nullptr;
 struct Sc {
   uint64_t id = 0; XrSession session = XR_NULL_HANDLE; uint32_t w = 0, h = 0, array = 0, mips = 0, samples = 0, faces = 0; int64_t fmt = 0; uint64_t usage = 0, createFlags = 0;
   long long createdQpc = 0; int dxgiFormat = 0; std::vector<ID3D12Resource*> images; std::deque<uint32_t> acquired; int lastReleased = -1; uint64_t releaseSeq = 0; bool alive = true;
@@ -452,9 +487,16 @@ XrResult XRAPI_CALL MyCreateSession(XrInstance inst, const XrSessionCreateInfo* 
       else if (n->type == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) g_api = 11;
     }
     Log("session %llx created: graphics binding %s", (unsigned long long)*out, g_api == 12 ? "D3D12 (pixels can be read)" : g_api == 11 ? "D3D11 (metadata only)" : "other (metadata only)"); } catch (...) {} }
+  if (XR_SUCCEEDED(r) && out && g_sim) {   // the head pose the simulated gaze is relative to
+    XrReferenceSpaceCreateInfo vi{XR_TYPE_REFERENCE_SPACE_CREATE_INFO}; vi.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW; vi.poseInReferenceSpace = XrPosef{{0, 0, 0, 1}, {0, 0, 0}};
+    XrSpace v = XR_NULL_HANDLE; const XrResult vr = g_nextCreateRef(*out, &vi, &v);
+    { std::lock_guard<std::mutex> l(g_simMu); if (XR_SUCCEEDED(vr)) g_simView[*out] = v; }
+    Log("SIMULATED EYE GAZE: session %llx: head (VIEW) space %s", (unsigned long long)*out, XR_SUCCEEDED(vr) ? "created" : "NOT created: gaze stays invalid");
+  }
   return r;
 }
 XrResult XRAPI_CALL MyDestroySession(XrSession s) {
+  if (g_sim) { std::lock_guard<std::mutex> l(g_simMu); g_simView.erase(s); for (auto it = g_actionSpaces.begin(); it != g_actionSpaces.end();) it = it->second.session == s ? g_actionSpaces.erase(it) : std::next(it); }
   try { std::lock_guard<std::mutex> l(g_mu); if (s == g_session) { if (g_state == Capturing) EndCapture("session destroyed"); else if (g_state == Armed) g_state = Idle;
     // the queue is idle for our list: every capture waited for its own copy
     for (auto& kv : g_sc) if (kv.second.session == s) { for (auto* r : kv.second.images) r->Release(); kv.second.images.clear(); kv.second.alive = false; }
@@ -510,6 +552,128 @@ XrResult XRAPI_CALL MyCreateRef(XrSession s, const XrReferenceSpaceCreateInfo* c
   return r;
 }
 
+// ---- simulated eye gaze (see the header comment) -------------------------------------------------------------------
+
+// g_simMu held. Takes gaze.txt when present (at most four times a second).
+void SimPollLocked() {
+  const long long now = Qpc(); if (g_simPollQpc && now - g_simPollQpc < g_qpf / 4) return; g_simPollQpc = now;
+  const std::wstring path = g_dir + L"\\gaze.txt"; if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+  std::string text; if (FILE* f = _wfopen(path.c_str(), L"rb")) { char b[4096]; size_t n; while ((n = fread(b, 1, sizeof b, f)) > 0) text.append(b, n); fclose(f); } else return;
+  simgaze::Program p; std::string err; const bool ok = simgaze::parse(text, p, err);
+  wchar_t to[64]; swprintf(to, 64, ok ? L"\\gaze.taken-%u.txt" : L"\\gaze.rejected-%u.txt", ++g_simFileN); MoveFileExW(path.c_str(), (g_dir + to).c_str(), MOVEFILE_REPLACE_EXISTING);
+  if (!ok) { Log("SIMULATED EYE GAZE: gaze.txt #%u rejected (%s); program #%u stays", g_simFileN, err.c_str(), g_simProgN); return; }
+  g_simProg = std::move(p); g_simRestart = true; ++g_simProgN;
+  Log("SIMULATED EYE GAZE: program #%u from gaze.txt #%u: mode=%s (%s)", g_simProgN, g_simFileN, simgaze::mode_name(g_simProg.mode), g_simProg.text.c_str());
+}
+// g_simMu held: the once-a-second line.
+void SimStatLocked() {
+  const long long now = Qpc(); if (g_simStatQpc && now - g_simStatQpc < g_qpf) return; g_simStatQpc = now;
+  if (g_simSecServed == 0 && g_simServed != 0) return;  // quiet while nobody asks
+  Log("SIMULATED EYE GAZE ACTIVE: program #%u mode=%s; served %llu (valid %llu, invalid %llu, head untracked %llu), pose queries %llu; last x %.2f y %.2f deg; runtime extension %s",
+    g_simProgN, simgaze::mode_name(g_simProg.mode), g_simServed, g_simValid, g_simInvalid, g_simHeadLost, g_simPose, g_simLastX, g_simLastY, g_simRuntimeExt ? "enabled" : "absent (answered by the layer)");
+  g_simSecServed = 0; if (g_simTrace) fflush(g_simTrace);
+}
+bool SimIsGazeAction(XrAction a) { return a != XR_NULL_HANDLE && g_gazeActions.count(a) != 0; }
+
+XrResult XRAPI_CALL SimGetSystemProperties(XrInstance inst, XrSystemId id, XrSystemProperties* props) {
+  const XrResult r = g_nextSysProps(inst, id, props);
+  if (XR_SUCCEEDED(r) && props) for (auto* n = (XrBaseOutStructure*)props->next; n; n = n->next) if (n->type == XR_TYPE_SYSTEM_EYE_GAZE_INTERACTION_PROPERTIES_EXT) {
+    auto* e = (XrSystemEyeGazeInteractionPropertiesEXT*)n; std::lock_guard<std::mutex> l(g_simMu);
+    if (!g_simLoggedProps) { g_simLoggedProps = true; Log("SIMULATED EYE GAZE: xrGetSystemProperties: runtime says supportsEyeGazeInteraction=%d, the layer answers 1", (int)e->supportsEyeGazeInteraction); }
+    e->supportsEyeGazeInteraction = XR_TRUE;
+  }
+  return r;
+}
+XrResult XRAPI_CALL SimSuggest(XrInstance inst, const XrInteractionProfileSuggestedBinding* s) {
+  if (!s) return g_nextSuggest(inst, s);
+  bool profile = false; unsigned added = 0;
+  { std::lock_guard<std::mutex> l(g_simMu); profile = s->interactionProfile == g_pathProfile;
+    for (uint32_t i = 0; i < s->countSuggestedBindings && s->suggestedBindings; ++i) if (s->suggestedBindings[i].binding == g_pathGaze && g_gazeActions.insert(s->suggestedBindings[i].action).second) ++added; }
+  if (!profile) return g_nextSuggest(inst, s);
+  XrResult r = XR_SUCCESS; if (g_simRuntimeExt) r = g_nextSuggest(inst, s);
+  Log("SIMULATED EYE GAZE: eye-gaze profile suggestion (%u bindings, %u new gaze actions): %s", s->countSuggestedBindings, added,
+    !g_simRuntimeExt ? "answered by the layer (runtime has no extension)" : XR_SUCCEEDED(r) ? "forwarded" : "forwarded, refused by the runtime, answered by the layer");
+  return XR_SUCCESS;
+}
+XrResult XRAPI_CALL SimCreateActionSpace(XrSession s, const XrActionSpaceCreateInfo* ci, XrSpace* out) {
+  const XrResult r = g_nextCreateActionSpace(s, ci, out);
+  if (XR_SUCCEEDED(r) && ci && out) { std::lock_guard<std::mutex> l(g_simMu); g_actionSpaces[*out] = {ci->action, s}; }
+  return r;
+}
+XrResult XRAPI_CALL SimDestroySpace(XrSpace sp) {
+  { std::lock_guard<std::mutex> l(g_simMu); g_actionSpaces.erase(sp); }
+  return g_nextDestroySpace(sp);
+}
+XrResult XRAPI_CALL SimGetPose(XrSession s, const XrActionStateGetInfo* gi, XrActionStatePose* st) {
+  if (gi && st) { std::lock_guard<std::mutex> l(g_simMu);
+    if (g_simProg.mode != simgaze::Mode::off && SimIsGazeAction(gi->action)) { st->isActive = XR_TRUE; ++g_simPose; return XR_SUCCESS; } }
+  return g_nextPose(s, gi, st);
+}
+XrResult XRAPI_CALL SimCurProfile(XrSession s, XrPath top, XrInteractionProfileState* st) {
+  if (st && top == g_pathEyes) { std::lock_guard<std::mutex> l(g_simMu); if (g_simProg.mode != simgaze::Mode::off && !g_gazeActions.empty()) { st->interactionProfile = g_pathProfile; return XR_SUCCESS; } }
+  return g_nextCurProfile(s, top, st);
+}
+XrResult XRAPI_CALL SimLocateSpace(XrSpace space, XrSpace base, XrTime time, XrSpaceLocation* loc) {
+  XrSession session = XR_NULL_HANDLE; XrSpace view = XR_NULL_HANDLE; simgaze::Sample g; double tp = 0; double latencyMs = 0;
+  { std::lock_guard<std::mutex> l(g_simMu);
+    auto it = g_actionSpaces.find(space);
+    if (it == g_actionSpaces.end() || !SimIsGazeAction(it->second.action) || !loc) { SimStatLocked(); return g_nextLocateSpace(space, base, time, loc); }
+    SimPollLocked();
+    if (g_simProg.mode == simgaze::Mode::off) { SimStatLocked(); return g_nextLocateSpace(space, base, time, loc); }
+    session = it->second.session; auto v = g_simView.find(session); if (v != g_simView.end()) view = v->second;
+    if (g_simRestart) { g_simRestart = false; g_simStart = time; }
+    tp = double(time - g_simStart) * 1e-9; g = simgaze::evaluate(g_simProg, tp); latencyMs = g_simProg.latency_ms; }
+  XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+  const XrResult hr = view != XR_NULL_HANDLE ? g_nextLocateSpace(view, base, time, &head) : XR_ERROR_HANDLE_INVALID;
+  const bool headOk = XR_SUCCEEDED(hr) && (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
+  const bool serve = headOk && g.valid;
+  if (serve) {
+    const simgaze::Quat h{head.pose.orientation.x, head.pose.orientation.y, head.pose.orientation.z, head.pose.orientation.w};
+    const simgaze::Quat q = simgaze::multiply(h, simgaze::gaze_orientation(g.x, g.y));
+    loc->pose.orientation = {q.x, q.y, q.z, q.w}; loc->pose.position = head.pose.position;
+    loc->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
+      (head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT ? XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT : 0);
+  } else { loc->pose = XrPosef{{0, 0, 0, 1}, {0, 0, 0}}; loc->locationFlags = 0; }
+  for (auto* n = (XrBaseOutStructure*)loc->next; n; n = n->next) {
+    if (n->type == XR_TYPE_EYE_GAZE_SAMPLE_TIME_EXT) ((XrEyeGazeSampleTimeEXT*)n)->time = serve ? time - (XrTime)(latencyMs * 1e6) : 0;
+    else if (n->type == XR_TYPE_SPACE_VELOCITY) ((XrSpaceVelocity*)n)->velocityFlags = 0;
+  }
+  { std::lock_guard<std::mutex> l(g_simMu); ++g_simServed; ++g_simSecServed; if (serve) ++g_simValid; else if (!headOk) ++g_simHeadLost; else ++g_simInvalid;
+    if (serve) { g_simLastX = g.x; g_simLastY = g.y; }
+    if (g_simTrace) fprintf(g_simTrace, "%lld,%lld,%llx,%.6f,%.4f,%.4f,%d,%d,%d,%llu\n", Qpc(), (long long)time, (unsigned long long)space, tp, g.x, g.y, serve ? 1 : 0, g.saccade ? 1 : 0, headOk ? 1 : 0, (unsigned long long)head.locationFlags);
+    SimStatLocked(); }
+  return XR_SUCCESS;
+}
+// At instance creation (instance exists, next functions resolved): the paths, the first program, the trace file.
+void SimInit(XrInstance inst) {
+  std::lock_guard<std::mutex> l(g_simMu);
+  g_gazeActions.clear(); g_actionSpaces.clear(); g_simView.clear(); g_simServed = g_simValid = g_simInvalid = g_simHeadLost = g_simPose = g_simSecServed = 0;
+  g_simRestart = true; g_simStatQpc = g_simPollQpc = 0; g_simLoggedProps = false;
+  g_nextStrToPath(inst, "/interaction_profiles/ext/eye_gaze_interaction", &g_pathProfile);
+  g_nextStrToPath(inst, "/user/eyes_ext/input/gaze_ext/pose", &g_pathGaze);
+  g_nextStrToPath(inst, "/user/eyes_ext", &g_pathEyes);
+  std::string text = EnvA("RIGTAP_SIMGAZE_PROGRAM"); if (text.empty()) text = "mode=fixed;x=0;y=0";
+  simgaze::Program p; std::string err;
+  if (!simgaze::parse(text, p, err)) { Log("SIMULATED EYE GAZE: RIGTAP_SIMGAZE_PROGRAM rejected (%s): mode=fixed x=0 y=0 instead", err.c_str()); simgaze::parse("mode=fixed", p, err); }
+  g_simProg = std::move(p); g_simProgN = 1;
+  if (!g_simTrace) { g_simTrace = _wfopen((g_dir + L"\\simgaze_trace.csv").c_str(), L"a"); if (g_simTrace) fprintf(g_simTrace, "qpc,xr_time,space,program_s,x_deg,y_deg,valid,saccade,head_ok,head_flags\n"); }
+  Log("SIMULATED EYE GAZE ON (RIGTAP_SIMGAZE=1): every layer above this one reads a scripted gaze, not the eye tracker. runtime extension %s; program #1 mode=%s (%s)",
+    g_simRuntimeExt ? "enabled" : "absent (answered by the layer)", simgaze::mode_name(g_simProg.mode), g_simProg.text.c_str());
+}
+// Null-instance extension list (a layer above probing before the instance exists): the extension is added.
+PFN_xrEnumerateInstanceExtensionProperties g_simInnerEnum = nullptr;
+XrResult XRAPI_CALL SimEnumerate(const char* layer, uint32_t cap, uint32_t* count, XrExtensionProperties* props) {
+  if (!count) return XR_ERROR_VALIDATION_FAILURE;
+  uint32_t n = 0; XrResult r = g_simInnerEnum(layer, 0, &n, nullptr); if (XR_FAILED(r)) return r;
+  std::vector<XrExtensionProperties> v(n, XrExtensionProperties{XR_TYPE_EXTENSION_PROPERTIES});
+  if (n) { r = g_simInnerEnum(layer, n, &n, v.data()); if (XR_FAILED(r)) return r; v.resize(n); }
+  bool has = false; for (auto& e : v) if (!strcmp(e.extensionName, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)) has = true;
+  if (!has && !layer) { XrExtensionProperties e{XR_TYPE_EXTENSION_PROPERTIES}; strcpy_s(e.extensionName, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME); e.extensionVersion = 1; v.push_back(e); }
+  *count = (uint32_t)v.size(); if (cap == 0) return XR_SUCCESS; if (cap < v.size() || !props) return XR_ERROR_SIZE_INSUFFICIENT;
+  for (size_t i = 0; i < v.size(); ++i) { void* next = props[i].next; props[i] = v[i]; props[i].next = next; }
+  return XR_SUCCESS;
+}
+
 // Before the instance exists the layer above (OFXR) asks, with a null instance, for
 // xrEnumerateInstanceExtensionProperties (does the runtime list XR_KHR_D3D12_enable, XR_KHR_visibility_mask). There is
 // no next entry yet, so the answer comes from the loader in the process (as OFXR itself does for the layer above it);
@@ -533,12 +697,13 @@ XrResult XRAPI_CALL MyGipa(XrInstance inst, const char* name, PFN_xrVoidFunction
   if (!g_nextGipa || inst == XR_NULL_HANDLE) {
     *fn = nullptr;
     if (strcmp(name, "xrEnumerateInstanceExtensionProperties") && strcmp(name, "xrEnumerateApiLayerProperties")) return XR_ERROR_FUNCTION_UNSUPPORTED;
-    if (auto loader = FindLoader()) { if (XR_SUCCEEDED(loader(XR_NULL_HANDLE, name, fn)) && *fn) return XR_SUCCESS; *fn = nullptr; }
+    const bool simEnum = !strcmp(name, "xrEnumerateInstanceExtensionProperties") && EnvA("RIGTAP_SIMGAZE") == "1";
+    if (auto loader = FindLoader()) { if (XR_SUCCEEDED(loader(XR_NULL_HANDLE, name, fn)) && *fn) { if (simEnum) { g_simInnerEnum = (PFN_xrEnumerateInstanceExtensionProperties)*fn; *fn = (PFN_xrVoidFunction)SimEnumerate; } return XR_SUCCESS; } *fn = nullptr; }
     if (!strcmp(name, "xrEnumerateInstanceExtensionProperties")) {
       if (g_fallbackExt.empty()) { std::string e = EnvA("RIGTAP_EXTENSIONS");
         if (e.empty()) e = "XR_KHR_D3D11_enable;XR_KHR_D3D12_enable;XR_KHR_vulkan_enable;XR_KHR_vulkan_enable2;XR_KHR_opengl_enable;XR_KHR_composition_layer_depth;XR_KHR_win32_convert_performance_counter_time;XR_KHR_visibility_mask;XR_FB_display_refresh_rate;XR_EXT_hand_tracking;XR_EXT_hand_joints_motion_range;XR_EXT_eye_gaze_interaction;XR_EXT_win32_appcontainer_compatible;XR_VARJO_quad_views;XR_VARJO_foveated_rendering";
         size_t a = 0; while (a <= e.size()) { size_t z = e.find(';', a); if (z == std::string::npos) z = e.size(); if (z > a) g_fallbackExt.push_back(e.substr(a, z - a)); a = z + 1; } }
-      *fn = (PFN_xrVoidFunction)FallbackEnumerate; return XR_SUCCESS; }
+      *fn = (PFN_xrVoidFunction)FallbackEnumerate; if (simEnum) { g_simInnerEnum = FallbackEnumerate; *fn = (PFN_xrVoidFunction)SimEnumerate; } return XR_SUCCESS; }
     return XR_ERROR_FUNCTION_UNSUPPORTED;
   }
   XrResult r = g_nextGipa(inst, name, fn); if (XR_FAILED(r) || !*fn) return r;
@@ -546,20 +711,38 @@ XrResult XRAPI_CALL MyGipa(XrInstance inst, const char* name, PFN_xrVoidFunction
   HOOK("xrEndFrame", g_nextEnd, MyEnd) HOOK("xrCreateSession", g_nextCreateSession, MyCreateSession) HOOK("xrDestroySession", g_nextDestroySession, MyDestroySession)
   HOOK("xrCreateSwapchain", g_nextCreateSc, MyCreateSc) HOOK("xrDestroySwapchain", g_nextDestroySc, MyDestroySc) HOOK("xrAcquireSwapchainImage", g_nextAcquire, MyAcquire)
   HOOK("xrReleaseSwapchainImage", g_nextRelease, MyRelease) HOOK("xrCreateReferenceSpace", g_nextCreateRef, MyCreateRef) HOOK("xrLocateViews", (g_invalidMs > 0 ? g_nextLocate : nullptr), MyLocateViews)
+  if (g_sim) {
+    HOOK("xrGetSystemProperties", g_nextSysProps, SimGetSystemProperties) HOOK("xrSuggestInteractionProfileBindings", g_nextSuggest, SimSuggest)
+    HOOK("xrCreateActionSpace", g_nextCreateActionSpace, SimCreateActionSpace) HOOK("xrDestroySpace", g_nextDestroySpace, SimDestroySpace)
+    HOOK("xrGetActionStatePose", g_nextPose, SimGetPose) HOOK("xrLocateSpace", g_nextLocateSpace, SimLocateSpace) HOOK("xrGetCurrentInteractionProfile", g_nextCurProfile, SimCurProfile)
+  }
 #undef HOOK
   return r;
 }
 XrResult XRAPI_CALL MyCreateInstance(const XrInstanceCreateInfo* info, const XrApiLayerCreateInfo* li, XrInstance* inst) {
   if (!li || !li->nextInfo || !li->nextInfo->nextCreateApiLayerInstance || !li->nextInfo->nextGetInstanceProcAddr) return XR_ERROR_INITIALIZATION_FAILED;
   PFN_xrGetInstanceProcAddr gipa = li->nextInfo->nextGetInstanceProcAddr; XrApiLayerCreateInfo next = *li; next.nextInfo = li->nextInfo->next;
+  // Simulated gaze: RIGTAP_SIMGAZE=1 and an output folder (its log is the loud record), decided here for the instance.
+  g_sim = EnvA("RIGTAP_SIMGAZE") == "1" && !EnvA("RIGTAP_DIR").empty(); g_simRuntimeExt = false;
+  bool askedGaze = false; if (info) for (uint32_t i = 0; i < info->enabledExtensionCount; ++i) if (info->enabledExtensionNames[i] && !strcmp(info->enabledExtensionNames[i], XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)) askedGaze = true;
   XrResult r = li->nextInfo->nextCreateApiLayerInstance(info, &next, inst);
+  bool stripped = false;
+  if (g_sim && askedGaze && r == XR_ERROR_EXTENSION_NOT_PRESENT) {   // the runtime has no eye gaze: the layer answers it
+    std::vector<const char*> ext; for (uint32_t i = 0; i < info->enabledExtensionCount; ++i) if (strcmp(info->enabledExtensionNames[i], XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)) ext.push_back(info->enabledExtensionNames[i]);
+    XrInstanceCreateInfo ci = *info; ci.enabledExtensionCount = (uint32_t)ext.size(); ci.enabledExtensionNames = ext.empty() ? nullptr : ext.data();
+    r = li->nextInfo->nextCreateApiLayerInstance(&ci, &next, inst); stripped = true;
+  }
   if (XR_FAILED(r) || !inst) return r;
+  g_simRuntimeExt = askedGaze && !stripped;
   LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_qpf = f.QuadPart;
   // Every next function is resolved here, once: a hook is only handed out when its next exists.
   auto get = [&](const char* n) { PFN_xrVoidFunction p = nullptr; return XR_SUCCEEDED(gipa(*inst, n, &p)) ? p : nullptr; };
   g_nextEnd = (PFN_xrEndFrame)get("xrEndFrame"); g_nextCreateSession = (PFN_xrCreateSession)get("xrCreateSession"); g_nextDestroySession = (PFN_xrDestroySession)get("xrDestroySession");
   g_nextCreateSc = (PFN_xrCreateSwapchain)get("xrCreateSwapchain"); g_nextDestroySc = (PFN_xrDestroySwapchain)get("xrDestroySwapchain"); g_nextEnumImages = (PFN_xrEnumerateSwapchainImages)get("xrEnumerateSwapchainImages");
   g_nextAcquire = (PFN_xrAcquireSwapchainImage)get("xrAcquireSwapchainImage"); g_nextRelease = (PFN_xrReleaseSwapchainImage)get("xrReleaseSwapchainImage"); g_nextCreateRef = (PFN_xrCreateReferenceSpace)get("xrCreateReferenceSpace");
+  g_nextSysProps = (PFN_xrGetSystemProperties)get("xrGetSystemProperties"); g_nextStrToPath = (PFN_xrStringToPath)get("xrStringToPath"); g_nextSuggest = (PFN_xrSuggestInteractionProfileBindings)get("xrSuggestInteractionProfileBindings");
+  g_nextCreateActionSpace = (PFN_xrCreateActionSpace)get("xrCreateActionSpace"); g_nextDestroySpace = (PFN_xrDestroySpace)get("xrDestroySpace"); g_nextPose = (PFN_xrGetActionStatePose)get("xrGetActionStatePose");
+  g_nextLocateSpace = (PFN_xrLocateSpace)get("xrLocateSpace"); g_nextCurProfile = (PFN_xrGetCurrentInteractionProfile)get("xrGetCurrentInteractionProfile");
   g_nextLocate = (PFN_xrLocateViews)get("xrLocateViews"); g_invalidMs = atof(EnvA("RIGTAP_INVALID_MS").c_str()); g_invalidFrom = 0;
   g_nextGipa = gipa;
   std::string dir = EnvA("RIGTAP_DIR");
@@ -574,6 +757,10 @@ XrResult XRAPI_CALL MyCreateInstance(const XrInstanceCreateInfo* info, const XrA
     Log("instance created (result %d) pid %lu; hooks: end %d session %d swapchain %d images %d acquire %d release %d; env arm %u after %.1f s; disk budget %llu MB",
       (int)r, GetCurrentProcessId(), g_nextEnd != nullptr, g_nextCreateSession != nullptr, g_nextCreateSc != nullptr, g_nextEnumImages != nullptr, g_nextAcquire != nullptr, g_nextRelease != nullptr, g_envFrames, g_envAfterS, (unsigned long long)(g_maxBytes >> 20));
   }
+  if (g_sim) {
+    if (!g_log || !g_nextStrToPath || !g_nextLocateSpace || !g_nextCreateRef || !g_nextCreateSession) { g_sim = false; Log("SIMULATED EYE GAZE requested but not possible (log %d, xrStringToPath %d, xrLocateSpace %d, xrCreateReferenceSpace %d): off", g_log != nullptr, g_nextStrToPath != nullptr, g_nextLocateSpace != nullptr, g_nextCreateRef != nullptr); }
+    else SimInit(*inst);
+  }
   return r;
 }
 }  // namespace
@@ -581,3 +768,4 @@ extern "C" __declspec(dllexport) XrResult XRAPI_CALL xrNegotiateLoaderApiLayerIn
   if (!li || !req) return XR_ERROR_INITIALIZATION_FAILED;
   req->layerInterfaceVersion = XR_CURRENT_LOADER_API_LAYER_VERSION; req->layerApiVersion = XR_CURRENT_API_VERSION; req->getInstanceProcAddr = MyGipa; req->createApiLayerInstance = MyCreateInstance; return XR_SUCCESS;
 }
+extern "C" __declspec(dllexport) int RigTap_SimGazeActive() { return g_sim && g_simProg.mode != simgaze::Mode::off ? 1 : 0; }

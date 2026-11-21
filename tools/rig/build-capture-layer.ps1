@@ -42,6 +42,7 @@ Set-Content -LiteralPath $inner -Encoding ascii -Value @(
   ($cl + ' /LD "' + (Join-Path $Src 'rigtap.cpp') + '" /Fe:XR_APILAYER_RIG_capture.dll d3d12.lib d3dcompiler.lib dxguid.lib psapi.lib || exit /b 1'),
   ($cl + ' /LD "' + (Join-Path $Src 'rig_chain_shim.cpp') + '" /Fe:rig_chain_shim.dll || exit /b 1'),
   ($cl + ' "' + (Join-Path $Src 'rigtap_harness.cpp') + '" /Fe:rigtap_harness.exe d3d12.lib dxgi.lib dxguid.lib || exit /b 1'),
+  ($cl + ' "' + (Join-Path $Src 'simgaze_harness.cpp') + '" /Fe:simgaze_harness.exe || exit /b 1'),
   'echo built')
 $outer = Join-Path $Bin '_run.cmd'
 Set-Content -LiteralPath $outer -Encoding ascii -Value ('@call "' + $Msvc + '" "' + $inner + '"')
@@ -56,6 +57,13 @@ Write-Host "manifest folder for XR_API_LAYER_PATH: $Bin   name for XR_ENABLE_API
 if (-not $Test) { return }
 
 $TestRoot = if ($TestOut) { [IO.Path]::GetFullPath($TestOut) } else { Join-Path $Repo 'artifacts\rig\capture-layer\test-out' }
+# ---- offline test 0: simulated eye gaze (fake runtime without eye tracking; no GPU) ---------------------------------
+$t0 = Join-Path $TestRoot 'simgaze'
+if (Test-Path -LiteralPath $t0) { Remove-Item -LiteralPath $t0 -Recurse -Force -Confirm:$false }
+New-Item -ItemType Directory -Force $t0 | Out-Null
+& (Join-Path $Bin 'simgaze_harness.exe') $dll $t0; $g = $LASTEXITCODE
+Write-Host "simgaze harness exit $g"
+
 # ---- offline test 1: the harness (fake loader + fake runtime + OFXR's part), WARP, byte comparison ----------------
 Wait-Quiet
 $t1 = Join-Path $TestRoot 'harness'
@@ -92,5 +100,6 @@ if ((Test-Path -LiteralPath $chain) -and (Test-Path -LiteralPath $ofxr) -and (Te
     if ($arm -eq 'armed') { if ((Test-Path -LiteralPath (Join-Path $capDir 'done.txt')) -and $fl) { & py (Join-Path $Rig 'verdict.py') $capDir --flight-log $fl.FullName --quiet; & py (Join-Path $Src 'check_chain.py') $capDir; $c2['check'] = $LASTEXITCODE } else { Write-Host 'armed run: no complete capture or no flight log'; $c2['check'] = 1 } }
   }
 } else { Write-Host "call-chain test skipped: $chain or $ofxr or $baseIni missing (build the OFXR fork, or give -OfxrBuild)" }
+if ($g -ne 0) { throw 'offline test 0 (simulated eye gaze) failed' }
 if ($h -ne 0 -or $c -ne 0) { throw 'offline test 1 failed' }
 if ($c2.Count -and ($c2['idle'] -ne 0 -or $c2['armed'] -ne 0 -or $c2['check'] -ne 0)) { throw 'offline test 2 failed' }
