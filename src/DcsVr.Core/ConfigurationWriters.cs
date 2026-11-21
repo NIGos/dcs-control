@@ -291,7 +291,7 @@ public static class ConfigurationWriters
         CostWeights={(p.EngineCostWeights ? 1 : 0)}
 
         [D3D]
-        SplitFilter={(p.EngineStateFilter ? 1 : 0)}{(p.UsesIdleEffectSkip ? "\n; Skip idle effect work (0.7): SSAO on water pixels and the heat-haze passes when nothing is hot (same picture).\nEarlyShaders=3" : "")}
+        SplitFilter={(p.EngineStateFilter ? 1 : 0)}{(p.EngineFastShaderPaths ? "" : "\n; Faster terrain and shader paths off (Engine page).\nChainFast=0\nShaderFast=0")}{(p.UsesIdleEffectSkip ? "\n; Skip idle effect work (0.7): SSAO on water pixels and the heat-haze passes when nothing is hot (same picture).\nEarlyShaders=3" : "")}
 
         [Shadows]
         CascadeCache={(p.EngineShadowCache ? 1 : 0)}

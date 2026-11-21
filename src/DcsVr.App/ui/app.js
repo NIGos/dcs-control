@@ -31,7 +31,7 @@ const FEATURES = [
   ['framegen','Frame generation','generated frames · VR','framegen']
 ];
 /** The engine optimizations a profile turns on (Engine Optimizations page). */
-const ENGINE_PARTS = ['engineShaderTimeCache','enginePartitionBoost','engineCostWeights','engineShadowInstancing','engineFrameHeap','engineTaskQueueClock','engineModelAllocator','engineTextureDedupe','engineEffectBufferSkip','enginePlainCounter','engineStateFilter','engineShadowRecorder','engineGBufferRecorder'];
+const ENGINE_PARTS = ['engineShaderTimeCache','enginePartitionBoost','engineCostWeights','engineShadowInstancing','engineFrameHeap','engineTaskQueueClock','engineModelAllocator','engineTextureDedupe','engineEffectBufferSkip','enginePlainCounter','engineStateFilter','engineFastShaderPaths','engineShadowRecorder','engineGBufferRecorder'];
 let state, profile, dcs = '', options = '', page = 'overview', busy = false, plan = null;
 let sequence = 0, toastTimer, searchResults = [], lastProvider = 'QuadViewsFoveated', lastFrameGen = 'Nvidia', savedDraftJson = null, draftTimer, flight = null;
 const pending = new Map(), fields = [], invalid = new Set();
@@ -817,6 +817,7 @@ function buildFields() {
   field(more,'enginePlainCounter','Statistics counter without lock','Removes a wait between model threads. Small gain.','toggle',null,engine);
   field(more,'engineFrameHeap','Frame memory per thread','Gives each thread its own short-lived memory. About 1.5% more FPS.','toggle',null,engine);
   field(more,'engineStateFilter','Redundant state filter','Skips graphics state that is already set. Same image. About 1% more FPS. Turns itself off after a DCS update.','toggle',null,engine);
+  field(more,'engineFastShaderPaths','Faster terrain and shader paths','GPU shortcuts that give the same image. Turn off only if a problem points to it.','toggle',null,engine);
   field(more,'engineBeeps','Beeps for the in-flight switch','One beep off, two beeps on.','toggle',null,engine);
   // Shader preparation ([Model] ShaderCachePrewarm / ShaderCompileWorkers): read when DCS starts, so not live.
   more = disclosure(c,'Advanced','How shaders are prepared. The defaults suit most PCs.',p => `${p.engineShaderCachePrewarm ? 'Menu prep on' : 'Menu prep off'} · ${p.engineShaderCompileWorkers ? p.engineShaderCompileWorkers + ' threads' : 'Auto threads'}`);

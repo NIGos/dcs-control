@@ -376,6 +376,10 @@ public sealed record VrProfile
     /// set; the repeat is skipped at DCS's own call sites. Verified exact live (362 frames, 0 mismatches); measured
     /// about CPU −1.2 %, +0.5 to 1 % FPS. Turns itself off after a DCS update.</summary>
     public bool EngineStateFilter { get; init; } = true;
+    /// <summary>[D3D] ChainFast and ShaderFast (module defaults 7 and 3: faster terrain compute chains and wider shader
+    /// grids, the same image). On writes nothing, so the module's defaults apply; off writes ChainFast=0 and
+    /// ShaderFast=0, so someone isolating a problem can turn them off too (GitHub #28). Re-read every second.</summary>
+    public bool EngineFastShaderPaths { get; init; } = true;
     /// <summary>[Shadows] CascadeCache: the far shadow cascades (about 70 to 1500 m) are drawn every few frames and reused
     /// in between. Measured −0.72 ms of GPU, 0.16 % of shadow texels differ; distant tree shadows update about 11 times a
     /// second, so their wind sway can look stepped. Off by default; forced off with the engine switched off or in the

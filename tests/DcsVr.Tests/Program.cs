@@ -2354,6 +2354,15 @@ Test("DCS engine optimizations install in Saved Games Scripts with the profile's
     var trimmed = ConfigurationWriters.DcsQvCull(on with { EngineModelAllocator = false, EngineTextureDedupe = false, EngineEffectBufferSkip = false, EnginePlainCounter = false, EngineCostWeights = false, EngineBeeps = false, EngineFrameHeap = false, EngineShadowInstancing = false, EngineStateFilter = false, EngineShadowRecorder = false, EngineGBufferRecorder = false });
     Require(trimmed.Contains("SplitFilter=0") && trimmed.Contains("ShadowRecorder=0") && trimmed.Contains("GBufferRecorder=0") && !trimmed.Contains("\nAllocSlabs=1") && trimmed.Contains("PlainTriangleCounter=0") && trimmed.Contains("StreamDedupe=0") && trimmed.Contains("SkipSameConstantBuffer=0") && trimmed.Contains("CostWeights=0") && trimmed.Contains("Beeps=0") && trimmed.Contains("FrameHeapSlabs=0") && trimmed.Contains("BigModelPages=0") && trimmed.Contains("ShadowInstancing=0") && trimmed.Contains("ShadowBatching=0") && trimmed.Contains("ShadowPlanAsync=0") && trimmed.Contains("ShadowTextureSkip=0")
         && ConfigurationWriters.DcsQvCull(on with { EngineShaderTimeCache = false }).Contains("TaskQueueClock=0"));
+    // GitHub #28: Faster terrain and shader paths ([D3D] ChainFast / ShaderFast, module defaults 7 / 3): on (default)
+    // writes nothing, so the ini is unchanged; off writes both keys 0 under [D3D]. Live like its siblings.
+    var fastOff = ConfigurationWriters.DcsQvCull(on with { EngineFastShaderPaths = false }).ReplaceLineEndings("\n");
+    var d3dSection = fastOff[fastOff.IndexOf("\n[D3D]\n", StringComparison.Ordinal)..];
+    d3dSection = d3dSection[..d3dSection.IndexOf("\n[", 1, StringComparison.Ordinal)];
+    Require(new VrProfile().EngineFastShaderPaths && !ini.Contains("ChainFast") && !ini.Contains("ShaderFast")
+        && d3dSection.Contains("\nChainFast=0\n") && d3dSection.Contains("\nShaderFast=0"), "ChainFast / ShaderFast off under [D3D] only when the toggle is off");
+    Require(LiveSettings.Find("engineFastShaderPaths") is { Kind: LiveSettings.Kind.Engine } && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "D3D.ChainFast", null, "0")
+        && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "D3D.ShaderFast", "0", null), "Faster terrain and shader paths is live");
     // Developer mode: [Dev] paths only while it is on; full paths to existing files, otherwise refused or flagged.
     Require(ini.Contains("PayloadPath=\r\n") || ini.Contains("PayloadPath=\n"));
     var devPayload = Make("engine/dev/build/DcsQvCullPayload.dll", "dev"); var devIni = Make("engine/dev/DcsQvCull.dev.ini", "[Timing]");
