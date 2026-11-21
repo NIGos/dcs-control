@@ -291,7 +291,7 @@ public static class ConfigurationWriters
         CostWeights={(p.EngineCostWeights ? 1 : 0)}
 
         [D3D]
-        SplitFilter={(p.EngineStateFilter ? 1 : 0)}
+        SplitFilter={(p.EngineStateFilter ? 1 : 0)}{(p.UsesIdleEffectSkip ? "\n; Skip idle effect work (0.7): SSAO on water pixels and the heat-haze passes when nothing is hot (same picture).\nEarlyShaders=3" : "")}
 
         [Shadows]
         CascadeCache={(p.EngineShadowCache ? 1 : 0)}
@@ -316,7 +316,7 @@ public static class ConfigurationWriters
         StreamDedupe={(p.EngineTextureDedupe ? 1 : 0)}
 
         [Effects]
-        SkipSameConstantBuffer={(p.EngineEffectBufferSkip ? 1 : 0)}
+        SkipSameConstantBuffer={(p.EngineEffectBufferSkip ? 1 : 0)}{(p.UsesWaterSkip ? "\n\n[Water]\n; Skip hidden water (0.7, no-submit): a view with no water in sight does not draw DCS's water passes; not exact for\n; a few frames when water comes into view.\nSkipHiddenWater=3" : "")}{(p.UsesThreeViews ? "\n\n[Views]\n; Three views (0.7): the right eye's periphery is mostly reused from the left eye; DCS draws its outer strip and the\n; cockpit. Engages only with frame generation off and the bundled Quad Views.\nThreeViews=1" : "")}
 
         [Prefetch]
         ; Terrain prefetch fix: skip (repeats of a range within 5 s are skipped; a prefetch is only a hint), observe

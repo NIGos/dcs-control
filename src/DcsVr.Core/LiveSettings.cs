@@ -46,7 +46,7 @@ public static class LiveSettings
         E("engineTaskQueueClock"), E("boostPrefetch"), E("engineShadowRecorder"), E("engineShadowInstancing"), E("engineCostWeights"),
         E("enginePartitionBoost"), E("engineTextureDedupe"), E("engineEffectBufferSkip"), E("enginePlainCounter"), E("engineFrameHeap"),
         E("engineStateFilter"), E("engineBeeps"), E("engineTimerRefreshUs"), E("engineDevPayloadPath"), E("engineDevIniPath"), E("engineToggleKey"),
-        E("engineDiagnosticHooks"),
+        E("engineDiagnosticHooks"), E("engineThreeViews"), E("engineWaterSkip"), E("engineIdleEffectSkip"),
         V("colorMode"), V("panelGamut"), V("colorModeKey"),
         V("colorFixExposureEv"), V("colorFixNightEv"), V("colorFixSaturation"), V("colorFixWarmth"), V("colorFixAdaptBright"), V("colorFixAdaptDark"),
         V("colorEnhancedExposureEv"), V("colorEnhancedNightEv"), V("colorEnhancedSaturation"), V("colorEnhancedWarmth"), V("colorEnhancedAdaptBright"), V("colorEnhancedAdaptDark"),
@@ -116,6 +116,8 @@ public static class LiveSettings
         "Color.Mode", "Color.PanelGamut", "Color.ModeKey", "ColorFix.*", "ColorEnhanced.*", "VrFx.*",
         "Perception.FixationDepth", "Perception.CockpitTrueIpd", "Perception.CockpitTrueIpdOwnship",
         "DLSS.ReleaseIdleSets", "Dev.PayloadPath", "Dev.IniPath",
+        // 0.7: three views (worker tick; an ini change resets its key toggle), water no-submit (hot reload), early shaders (worker tick).
+        "Views.ThreeViews", "Water.SkipHiddenWater", "D3D.EarlyShaders",
     };
     // PupilShift.ini keys the layer re-reads (pupil_shift_layer.cpp:241-320). Not OpenXrEyeGaze or [DlssPreset] (instance creation).
     private static readonly HashSet<string> PupilKeys = new(StringComparer.OrdinalIgnoreCase)

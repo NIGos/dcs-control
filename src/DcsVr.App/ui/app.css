@@ -60,7 +60,7 @@ nav{display:grid;gap:7px;flex:1;min-height:0;overflow-y:auto;align-content:start
 @keyframes page-in{from{opacity:0;transform:translateY(7px)}
 to{opacity:1;transform:none}
 }
-.tag{display:inline-block;font:9px Bahnschrift,sans-serif;letter-spacing:1px;padding:5px 7px;border:1px solid #705638;color:#edc183;border-radius:3px;background:#2f2921}
+.tag{display:inline-block;font:10px Bahnschrift,sans-serif;letter-spacing:.8px;padding:4px 6px;border:1px solid #705638;color:#edc183;border-radius:3px;background:#2f2921}
 .tag.soft{border-color:#374650;color:#a0b7c3;background:#1c2932;font-size:8px}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:20px;margin-bottom:16px;box-shadow:0 3px 16px #00000018}
 .card>p{font-size:12px;margin-top:8px}
