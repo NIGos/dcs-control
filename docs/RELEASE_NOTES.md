@@ -1,3 +1,7 @@
+# 0.7.0 preview
+
+**0.7.0-preview (local test build).** Not published: a package for a headset test on the developer's PC. It adds **Three views** on the Engine page (bundled Quad Views, engine on, frame generation off), **Skip hidden water** and **Skip unused effects**, and soft focus edge and gaze options for eye tracking. Notes for the published release follow.
+
 # 0.6.7 preview
 
 **Foveated frame generation (experimental).** A new switch on the Frame generation page, off by default. Frames are generated for the focus area and for the rest of the view separately, instead of for the whole image: about half the GPU time for generated frames and 4 GB less video memory on the test PC. It needs the bundled Quad Views, the Pimax route and NVIDIA frame generation. It gets ready on the loading screen, which pauses once for half a second, so the flight itself starts with only a short hitch. It helps most with a small focus area; with a very large one it can cost more than it saves. Tell me how the edge of the focus area looks, and fast eye moves.
