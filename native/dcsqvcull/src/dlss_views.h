@@ -16,7 +16,9 @@
 // Hook point. The driver's NGX core (_nvngx.dll, loaded by dx11backend's static NGX loader through the NGXCore registry
 // path) exports NVSDK_NGX_D3D11_CreateFeature. We detour that export inline (14-byte absolute jump to a persistent
 // stub, the pose_sweep.h / alloc_slab.h scheme: code and target pointer on separate pages, the patch written with every
-// other thread suspended, an earlier payload's patch found again and reused after a hot reload). In the detour, for
+// other thread suspended, an earlier payload's patch found again and reused after a hot reload). When another program
+// already hooked the export with a 5-byte jmp rel32 (Cheeky's DLSS layer MinHooks it before DcsQvCull starts), only
+// that jump is redirected to our stub and our trampoline continues to its old destination ("chained"). In the detour, for
 // NVSDK_NGX_Feature_SuperSampling only: read OutWidth/OutHeight through the parameter object's virtual Get, classify
 // the view by its output size, Set the six DLSS.Hint.Render.Preset.* values for a class that has a preset, call the
 // original, log one line. The core is the same whichever nvngx_dlss.dll it then loads (DCS's 310.2.1 or the driver's
@@ -278,11 +280,107 @@ bool SafeRead(const void* p, void* out, size_t n) {
   }
 }
 
-// Result: 1 = patched now, 2 = an earlier payload's patch reused, < 0 = nothing installed (-1 unreadable, -2 prologue
-// not accepted, -3 a foreign patch, -4 no memory, -5 the write failed).
-int InstallDetour(uint8_t* target, void* hook, Detour* d) {
+// ---- chained detour (behind another program's 5-byte jump) -----------------------------------------------------------
+// MinHook / Detours hooks begin the target with jmp rel32 (E9) and return to target + 5 from their trampoline, so only
+// those 5 bytes may change: they are pointed at our stub, on pages within +-2 GB, and our trampoline is
+// jmp [rip+0] -> the other hook's destination (decoded from the jump as found). Call order: DCS -> ours -> theirs ->
+// the original. Measured 2026-11-21: Cheeky's DLSS layer MinHooks NVSDK_NGX_D3D11_CreateFeature about 40 s before
+// DcsQvCull starts. If the other program unhooks (writes its 5 saved bytes back), ours is gone too: harmless.
+// Same page layout as below; the data page header carries kMagicChain and n = 5, the saved bytes are the jump as found.
+constexpr uint32_t kMagicChain = 0x33325152;  // "RQ23"
+// Two pages (code + data) whose every byte is within rel32 reach of `from` (the end of the jump), or nullptr.
+inline uint8_t* AllocNear(const uint8_t* from) {
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  const uintptr_t gran = si.dwAllocationGranularity, size = 2 * kPage, reach = 0x7FF00000;
+  const uintptr_t f = reinterpret_cast<uintptr_t>(from);
+  const uintptr_t minA = reinterpret_cast<uintptr_t>(si.lpMinimumApplicationAddress);
+  const uintptr_t maxA = reinterpret_cast<uintptr_t>(si.lpMaximumApplicationAddress);
+  const uintptr_t lo = (f > reach + minA ? f - reach : minA + gran - 1) / gran * gran;
+  const uintptr_t hi = f + reach - size < maxA ? f + reach - size : maxA - size;
+  auto tryAt = [&](uintptr_t a) -> uint8_t* {
+    MEMORY_BASIC_INFORMATION m;
+    if (!VirtualQuery(reinterpret_cast<void*>(a), &m, sizeof(m)) || m.State != MEM_FREE ||
+        reinterpret_cast<uintptr_t>(m.BaseAddress) + m.RegionSize < a + size)
+      return nullptr;
+    return static_cast<uint8_t*>(
+        VirtualAlloc(reinterpret_cast<void*>(a), size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+  };
+  for (uintptr_t a = f / gran * gran; a >= lo && a >= gran; a -= gran)  // below first (MinHook's order)
+    if (uint8_t* p = tryAt(a)) return p;
+  for (uintptr_t a = (f + gran - 1) / gran * gran; a <= hi; a += gran)
+    if (uint8_t* p = tryAt(a)) return p;
+  return nullptr;
+}
+inline uint8_t* Rel32Dest(const uint8_t* at, const uint8_t* jmp5) {
+  int32_t rel = 0;
+  memcpy(&rel, jmp5 + 1, 4);
+  return const_cast<uint8_t*>(at) + 5 + rel;
+}
+// Target begins with E9 (cur: its first bytes). Result as InstallDetour (2 reuse, 3 chained now).
+int InstallChained(uint8_t* target, const uint8_t* cur, void* hook, Detour* d, bool reuseOnly) {
+  uint8_t* dest = Rel32Dest(target, cur);
+  uint8_t stub[6] = {}, tr[14] = {}, orig[5] = {};
+  uint32_t hdr[2] = {};
+  const int32_t wantRel = static_cast<int32_t>(kPage - 6);
+  const bool looksOurs = !(reinterpret_cast<uintptr_t>(dest) & (kPage - 1)) && SafeRead(dest, stub, 6) &&
+                         stub[0] == 0xFF && stub[1] == 0x25 && memcmp(stub + 2, &wantRel, 4) == 0 &&
+                         SafeRead(dest + kPage + 8, hdr, 8) && hdr[0] == kMagicChain;
+  if (looksOurs) {  // an earlier payload's chain: its trampoline must lead to the jump it saved
+    uint8_t* back = nullptr;
+    if (hdr[1] != 5 || !SafeRead(dest + kPage + 16, orig, 5) || !SafeRead(dest + 16, tr, 14) || orig[0] != 0xE9 ||
+        tr[0] != 0xFF || tr[1] != 0x25 || tr[2] || tr[3] || tr[4] || tr[5])
+      return -3;
+    memcpy(&back, tr + 6, 8);
+    if (back != Rel32Dest(target, orig)) return -3;
+    d->slot = reinterpret_cast<void**>(dest + kPage);
+    d->tramp = dest + 16;
+    InterlockedExchangePointer(d->slot, hook);
+    return 2;
+  }
+  if (reuseOnly) return -6;
+  uint8_t* page = AllocNear(target + 5);
+  if (!page) return -4;
+  memset(page, 0xCC, kPage);
+  page[0] = 0xFF, page[1] = 0x25;
+  memcpy(page + 2, &wantRel, 4);
+  uint8_t* t = page + 16;
+  t[0] = 0xFF, t[1] = 0x25;
+  memset(t + 2, 0, 4);
+  memcpy(t + 6, &dest, 8);
+  void** slot = reinterpret_cast<void**>(page + kPage);
+  *slot = t;
+  const uint32_t h[2] = {kMagicChain, 5};
+  memcpy(page + kPage + 8, h, 8);
+  memcpy(page + kPage + 16, cur, 5);
+  DWORD old;
+  if (!VirtualProtect(page, kPage, PAGE_EXECUTE_READ, &old)) {
+    VirtualFree(page, 0, MEM_RELEASE);
+    return -4;
+  }
+  FlushInstructionCache(GetCurrentProcess(), page, kPage);
+  uint8_t patch[5] = {0xE9};
+  const int64_t rel = reinterpret_cast<intptr_t>(page) - reinterpret_cast<intptr_t>(target + 5);
+  const int32_t rel32 = static_cast<int32_t>(rel);
+  memcpy(patch + 1, &rel32, 4);
+  const qvpatch::Site site{target, patch, 5};
+  if (rel != rel32 || !qvpatch::WriteSuspended(&site, 1, 20)) {
+    VirtualFree(page, 0, MEM_RELEASE);  // the target was not written: nobody can reach the page
+    return -5;
+  }
+  d->slot = slot;
+  d->tramp = t;
+  InterlockedExchangePointer(d->slot, hook);
+  return 3;
+}
+
+// Result: 1 = patched now, 2 = an earlier payload's patch reused, 3 = chained now behind another program's jump,
+// < 0 = nothing installed (-1 unreadable, -2 prologue not accepted, -3 a foreign patch, -4 no memory, -5 the write
+// failed, -6 reuseOnly and no earlier patch of ours). reuseOnly: only an earlier payload's patch may be taken up.
+int InstallDetour(uint8_t* target, void* hook, Detour* d, bool reuseOnly = false) {
   uint8_t cur[kMaxCopy] = {};
   if (!target || !SafeRead(target, cur, sizeof(cur))) return -1;
+  if (cur[0] == 0xE9) return InstallChained(target, cur, hook, d, reuseOnly);
   if (cur[0] == 0xFF && cur[1] == 0x25 && !cur[2] && !cur[3] && !cur[4] && !cur[5]) {
     uint8_t* page = nullptr;
     memcpy(&page, cur + 6, 8);
@@ -309,6 +407,7 @@ int InstallDetour(uint8_t* target, void* hook, Detour* d) {
     InterlockedExchangePointer(d->slot, hook);
     return 2;
   }
+  if (reuseOnly) return -6;
   const size_t n = PrologueLen(cur);
   if (!n) return -2;
   auto* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 2 * kPage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
@@ -356,6 +455,7 @@ inline const char* DetourError(int r) {
     case -3: return "it carries a patch that is not ours";
     case -4: return "no memory for the stub";
     case -5: return "the patch could not be written safely";
+    case -6: return "no earlier patch of ours to take up";
     default: return "?";
   }
 }
@@ -2072,7 +2172,7 @@ bool TryInstallCreate() {
   g_createOrig.store(reinterpret_cast<CreateFn>(g_create.tramp), std::memory_order_release);
   g_createState = 1;
   Log("dlss views: NVSDK_NGX_D3D11_CreateFeature hooked (%s); presets apply from the next mission load",
-      r == 2 ? "earlier payload's patch reused" : "patched");
+      r == 2 ? "earlier payload's patch reused" : (r == 3 ? "chained in front of another program's hook" : "patched"));
   return true;
 }
 
@@ -2087,8 +2187,13 @@ bool TryInstallGetSetting() {
   }
   const bool ngxUp = g_testGetSettingTarget ? g_testNgxUp : GetModuleHandleW(kNgxCore) != nullptr;
   uint8_t first[2] = {};
-  const bool ourPatchMaybe = SafeRead(target, first, 2) && first[0] == 0xFF && first[1] == 0x25;
-  if (ngxUp && !ourPatchMaybe) {
+  const bool ourPatchMaybe =
+      SafeRead(target, first, 2) && ((first[0] == 0xFF && first[1] == 0x25) || first[0] == 0xE9);
+  // NGX up: only an earlier payload's patch (absolute, or chained behind a jump) can still be taken up.
+  const int r = !ngxUp || ourPatchMaybe
+                    ? InstallDetour(target, reinterpret_cast<void*>(&GetSettingHook), &g_getSetting, ngxUp)
+                    : -6;
+  if (ngxUp && r == -6) {
     g_getSettingState = -2;
     // R126: DCS Control's OpenXR layer hosts the same filter (it loads before NGX) and says so in the environment.
     wchar_t hosted[4] = {};
@@ -2101,7 +2206,6 @@ bool TryInstallGetSetting() {
           "driver profile, once) before DcsQvCull started. Nothing installed; the driver's preset stays in force");
     return false;
   }
-  const int r = InstallDetour(target, reinterpret_cast<void*>(&GetSettingHook), &g_getSetting);
   if (r < 0 || (ngxUp && r != 2)) {
     if (r == 1) Release(&g_getSetting);  // cannot happen (ngxUp needs our patch), kept pass-through if it did
     g_getSettingState = -1;

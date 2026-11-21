@@ -92,6 +92,23 @@ const uint8_t kCreatePrologue[16] = {0x48, 0x89, 0x6c, 0x24, 0x18, 0x56, 0x57, 0
 // nvapi64_impl.dll's NvAPI_DRS_GetSetting prologue (15 bytes of stores to the home area).
 const uint8_t kGetSettingPrologue[15] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c,
                                          0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18};
+// _nvngx.dll 32.0.16.2124 (driver 621.24, 2026-11-07): the first 32 bytes of NVSDK_NGX_D3D11_CreateFeature as read
+// from the file (RVA 0x67b30); its first 16 are kCreatePrologue. nvapi64_impl.dll 621.24's GetSetting starts with
+// kGetSettingPrologue too.
+const uint8_t kCreate2124[32] = {0x48, 0x89, 0x6c, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xec, 0x40, 0x48, 0x8b, 0x01,
+                                 0x44, 0x8b, 0xf2, 0x48, 0x8d, 0x54, 0x24, 0x60, 0x49, 0x8b, 0xf1, 0x49, 0x8b, 0xe8, 0x48, 0x8b};
+const uint8_t kGetSetting2124[32] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x48,
+                                     0x89, 0x7c, 0x24, 0x20, 0x41, 0x56, 0x48, 0x83, 0xec, 0x40, 0x49, 0x8b, 0xd9, 0x41, 0x8b, 0xf8};
+// Another program's MinHook-style hook in front of the fake (as Cheeky's DLSS layer does on the real export): what it saw.
+int g_foreignCalls = 0;
+unsigned g_foreignHint = 0;
+void* g_foreignTramp = nullptr;
+int __cdecl ForeignDetour(void* ctx, int feature, NgxParam* params, void** handle) {
+  ++g_foreignCalls;
+  g_foreignHint = 0;
+  if (params) params->Get(dlssv::kHintKeys[2], &g_foreignHint);
+  return reinterpret_cast<int(__cdecl*)(void*, int, NgxParam*, void**)>(g_foreignTramp)(ctx, feature, params, handle);
+}
 uint8_t* MakeFake(const uint8_t* prologue, size_t n, const uint8_t* undo, size_t undoLen, void* body) {
   auto* p = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
   if (!p) return nullptr;
@@ -205,6 +222,11 @@ void Pure() {
   Check(PrologueLen(cp) == 16 && PrologueLen(gp) == 15 && PrologueLen(evalP) == 15 && PrologueLen(initP) == 14,
         "R122 decoder: the NGX core's CreateFeature / EvaluateFeature / Init and NvAPI's GetSetting prologues");
   Check(PrologueLen(allocP) == 0 && PrologueLen(jmp) == 0, "R122 decoder: a RIP-relative operand or a jump is refused");
+  uint8_t hooked2124[32];
+  memcpy(hooked2124, kCreate2124, 32);
+  hooked2124[0] = 0xE9;  // MinHook's 5-byte jump over mov [rsp+18h],rbp
+  Check(PrologueLen(kCreate2124) == 16 && PrologueLen(kGetSetting2124) == 15 && PrologueLen(hooked2124) == 0,
+        "R122 decoder: driver 621.24's CreateFeature / GetSetting prologues (16 / 15 bytes); MinHooked: not relocated");
 
   // The driver-profile rule (the snippet's order: application profile, then base profile).
   DrsInfo d;
@@ -382,6 +404,86 @@ void Hooks() {
   DcsFeature(p, 604, 596, 1040, 1028);
   create(&ctxDummy, kFeatureSuperSampling, &p, &h);
   Check(g_seenHint == 3, "R122 stop: the hook passes through (DCS's hint)");
+
+  // Another program's MinHook-style hook already on the export (Cheeky's DLSS layer, measured 2026-11-21): its 5-byte
+  // jmp rel32 -> relay (jmp [rip] -> its detour) and its trampoline (the 5 saved bytes, then back to target + 5). We
+  // chain in front of it: only those 5 bytes change, the real prologue still runs (in its trampoline).
+  if (uint8_t* mh = MakeFakeCreate()) {
+    uint8_t* mhTramp = mh + 0x800;
+    uint8_t* relay = mh + 0x880;
+    memcpy(mhTramp, mh, 5);
+    mhTramp[5] = 0xFF, mhTramp[6] = 0x25;
+    memset(mhTramp + 7, 0, 4);
+    uint8_t* back5 = mh + 5;
+    memcpy(mhTramp + 11, &back5, 8);
+    relay[0] = 0xFF, relay[1] = 0x25;
+    memset(relay + 2, 0, 4);
+    void* fd = reinterpret_cast<void*>(&ForeignDetour);
+    memcpy(relay + 6, &fd, 8);
+    g_foreignTramp = mhTramp;
+    const int32_t relRelay = static_cast<int32_t>(relay - (mh + 5));
+    mh[0] = 0xE9;
+    memcpy(mh + 1, &relRelay, 4);
+    FlushInstructionCache(GetCurrentProcess(), mh, 4096);
+    const auto mhCreate = reinterpret_cast<CreateFn>(mh);
+    uint8_t mhBytes[16];
+    memcpy(mhBytes, mh, 16);
+    g_foreignCalls = 0, g_createCalls = 0;
+    DcsFeature(p, 604, 596, 1040, 1028);
+    r = mhCreate(&ctxDummy, kFeatureSuperSampling, &p, &h);
+    const bool aloneOk = r == kNgxSuccess && g_foreignCalls == 1 && g_createCalls == 1 && g_seenHint == 3;
+    NewGeneration();
+    g_testQvfrLog = WriteQvfrLog(kQvfrText);
+    g_testCreateTarget = mh;
+    StartReportCapture();
+    Tick(5, 0, false, false);
+    const std::string mhLog = StopReportCapture();
+    uint8_t* ourStub = dlssv::Rel32Dest(mh, mh);
+    const bool shapeOk = g_createState.load() == 1 && mh[0] == 0xE9 && ourStub != relay &&
+                         !(reinterpret_cast<uintptr_t>(ourStub) & 4095) && memcmp(mh + 5, mhBytes + 5, 11) == 0 &&
+                         mhLog.find("chained in front of another program's hook") != std::string::npos;
+    Check(aloneOk && shapeOk, "R122 behind a MinHook jump: only its 5 bytes redirected to our stub, the rest untouched");
+    DcsFeature(p, 604, 596, 1040, 1028);
+    h = nullptr;
+    r = mhCreate(&ctxDummy, kFeatureSuperSampling, &p, &h);
+    Check(r == kNgxSuccess && h == &ctxDummy && g_seenHint == 5 && g_foreignHint == 5 && g_foreignCalls == 2 &&
+              g_createCalls == 2,
+          "R122 chained: our preset E set first, the other hook and the real prologue then run (both see E)");
+    DcsFeature(p, 1176, 1164, 2028, 2004);
+    r = mhCreate(&ctxDummy, kFeatureSuperSampling, &p, &h);
+    Check(r == kNgxSuccess && g_seenHint == 3 && g_foreignCalls == 3, "R122 chained: the focus keeps DCS's hint");
+    uint8_t chained[16];
+    memcpy(chained, mh, 16);
+    NewGeneration();
+    g_testQvfrLog = WriteQvfrLog(kQvfrText);
+    g_testCreateTarget = mh;
+    StartReportCapture();
+    Tick(13, 0, false, false);
+    const std::string mhLog2 = StopReportCapture();
+    DcsFeature(p, 604, 596, 1040, 1028);
+    mhCreate(&ctxDummy, kFeatureSuperSampling, &p, &h);
+    Check(g_createState.load() == 1 && memcmp(chained, mh, 16) == 0 && g_seenHint == 13 && g_foreignCalls == 4 &&
+              mhLog2.find("earlier payload's patch reused") != std::string::npos,
+          "R122 chained, hot reload: the next payload takes up its chain (same bytes), not stacked");
+    Stop();
+    DcsFeature(p, 604, 596, 1040, 1028);
+    mhCreate(&ctxDummy, kFeatureSuperSampling, &p, &h);
+    const bool stopOk = g_seenHint == 3 && g_foreignCalls == 5;
+    memcpy(mh, kCreatePrologue, 5);  // the other program unhooks: writes its saved bytes back
+    FlushInstructionCache(GetCurrentProcess(), mh, 16);
+    DcsFeature(p, 604, 596, 1040, 1028);
+    r = mhCreate(&ctxDummy, kFeatureSuperSampling, &p, &h);
+    Check(stopOk && r == kNgxSuccess && g_seenHint == 3 && g_foreignCalls == 5 && g_createCalls == 6,
+          "R122 chained: stop passes through the other hook; its unhook leaves the original code working");
+    NewGeneration();
+    g_testCreateTarget = mh;
+    mh[0] = 0xE9;
+    memcpy(mh + 1, &relRelay, 4);
+    Tick(5, 0, false, false);  // no QVFR log needed: installing is what is checked
+    Check(g_createState.load() == 1 && dlssv::Rel32Dest(mh, mh) != relay,
+          "R122 chained: a fresh install after the other program re-hooked chains again");
+    NewGeneration();
+  }
 
   // A foreign patch: nothing installed.
   uint8_t* foreign = MakeFakeCreate();
