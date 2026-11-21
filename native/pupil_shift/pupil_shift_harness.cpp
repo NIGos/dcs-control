@@ -207,6 +207,7 @@ struct Fake {
     unsigned end_frames{}, checked_views{}, foreign_views{};
     // OpenXR eye gaze (XR_EXT_eye_gaze_interaction) and the action system, as the runtime sees them.
     bool xr_offered{};                        // the runtime lists the extension
+    bool qv_fixed{};                          // the fake Quad Views has a fixed focus (no gaze) and requests the extension
     bool xr_never_valid{};                    // nobody wearing the headset: the gaze is never valid
     std::vector<std::string> enabled;         // extensions the instance was created with
     std::map<std::string, XrPath> paths;
@@ -371,6 +372,7 @@ std::uint32_t fake_qv_gaze(std::int64_t time, float left[3], float right[3]) {
     if (it == fake.qv.begin()) return 0;
     --it;
     if (time - it->first >= 100'000'000) return 0;
+    if (fake.qv_fixed) return kQvSample;  // a fixed focus: a sample, never a gaze (left and right stay as given)
     left[0] = it->second.local[0].x; left[1] = it->second.local[0].y; left[2] = it->second.local[0].z;
     right[0] = it->second.local[1].x; right[1] = it->second.local[1].y; right[2] = it->second.local[1].z;
     return it->second.flags;
@@ -556,6 +558,9 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_proc_addr(XrInstance, const cha
 }
 XRAPI_ATTR XrResult XRAPI_CALL fake_create_instance(const XrInstanceCreateInfo* info, const XrApiLayerCreateInfo*, XrInstance* instance) {
     std::vector<std::string> enabled(info->enabledExtensionNames, info->enabledExtensionNames + info->enabledExtensionCount);
+    // The bundled Quad Views sits between the layer and the runtime and requests the extension itself when offered.
+    if (fake.qv_fixed && fake.xr_offered && !std::count(enabled.begin(), enabled.end(), std::string(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)))
+        enabled.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
     if (!fake.xr_offered && std::count(enabled.begin(), enabled.end(), std::string(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)))
         return XR_ERROR_EXTENSION_NOT_PRESENT;
     fake.enabled = enabled;
@@ -711,6 +716,8 @@ struct Options {
     bool double_locate{true}, perturb{true}, foreign{true}, pipelined{true};
     bool qv_style{};                 // the runtime behaves like the bundled Quad Views (combined gaze, fixed focus)
     bool qv_export{};                // and its gaze export is loaded (the fake Quad Views DLL)
+    bool qv_fixed{};                 // that Quad Views runs a fixed focus: its export never has a gaze, it enables the eye
+                                     // gaze extension below the layer (QuadViewsFixedFocus=1)
     bool xr_offered{};               // the runtime offers XR_EXT_eye_gaze_interaction (Pimax)
     bool xr_never_valid{};           // and its gaze is never valid (nobody wearing the headset)
     bool app_gaze{};                 // the application enables the extension and binds its own gaze action
@@ -732,7 +739,7 @@ struct Options {
 std::string ini_text(const Options& o, bool depth_enabled) {
     std::ostringstream s;
     s << "[PupilShift]\nEnabled=" << (o.pupil ? 1 : 0) << "\nToggle=121:5\nEyeRadiusMm=10.5\nVirtualImageM=1.5\nMaxGazeDeg=35\nIpd=" << o.ini_ipd_mm
-      << "\nSimulateGaze=" << (o.simulate ? 1 : 0) << "\nSimulateGazeXDeg=10\nSimulateGazeYDeg=-5\n" << (o.publish_gaze ? "PublishGaze=1\n" : "") << "\n[DepthBoost]\nEnabled=" << (depth_enabled ? 1 : 0)
+      << "\nSimulateGaze=" << (o.simulate ? 1 : 0) << "\nSimulateGazeXDeg=10\nSimulateGazeYDeg=-5\n" << (o.publish_gaze ? "PublishGaze=1\n" : "") << (o.qv_fixed ? "QuadViewsFixedFocus=1\n" : "") << "\n[DepthBoost]\nEnabled=" << (depth_enabled ? 1 : 0)
       << "\nToggle=121:6\nMode=" << o.mode << "\nMaxScale=" << o.max_scale
       << "\nNearM=1.5\nUpMmPerS=" << o.up << "\nDownMmPerS=" << o.down << "\nSaccadeStepMm=" << o.saccade_step << "\nRecoverMs=800\nHoldMs=500\nStepped=" << (o.stepped ? 1 : 0) << "\nLegacy=" << (o.legacy ? 1 : 0) << "\n";
     if (o.trace) s << "Trace=1\n";
@@ -905,6 +912,7 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
     fake.rng.seed(o.seed);
     fake.qv_style = o.qv_style;
     fake.xr_offered = o.xr_offered;
+    fake.qv_fixed = o.qv_fixed;
     fake.xr_never_valid = o.xr_never_valid;
     // The fake Pimax PVR client: through its table, or through copies taken before the layer is loaded.
     std::array<std::array<void*, 4>, 2> pvr_before{};
@@ -954,7 +962,7 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
     SegmentCheck seg;
     sum.has_scene = static_cast<bool>(o.scene);
     // The layer reads the OpenXR eye gaze when the runtime offers it and the Quad Views export is not there.
-    const bool xr_used = o.xr_offered && !o.qv_export;
+    const bool xr_used = o.xr_offered && (!o.qv_export || o.qv_fixed);
     const fs::path folder = out / o.name;
     fs::create_directories(folder);
     const fs::path copy = folder / "XR_APILAYER_DCSVR_pupil_shift.dll";
@@ -1195,7 +1203,7 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
                 const XrFovf& ff = truth.views[eye + 2].fov;
                 const bool finite = std::isfinite(ff.angleLeft + ff.angleRight + ff.angleUp + ff.angleDown);
                 if (o.qv_export || xr_used) {
-                    if (o.pupil && (qs.flags & kQvValid)) { gaze_world[eye] = rotate(quat(truth.views[eye].pose.orientation), qs.local[eye]); gaze_has[eye] = true; }
+                    if (o.pupil && (qs.flags & kQvValid) && (!o.qv_fixed || xr_used)) { gaze_world[eye] = rotate(quat(truth.views[eye].pose.orientation), qs.local[eye]); gaze_has[eye] = true; }
                 } else if (o.pupil && finite) {
                     const float tx = 0.5f * (std::tan(ff.angleLeft) + std::tan(ff.angleRight)), ty = 0.5f * (std::tan(ff.angleUp) + std::tan(ff.angleDown));
                     gaze_world[eye] = rotate(quat(truth.views[eye + 2].pose.orientation), normalized({tx, ty, -1}));
@@ -1512,11 +1520,13 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
     } else if (o.pvr == 2) {
         CHECK(text.find("pvr: no runtime session seen through the interface table") != std::string::npos, "log: copied table, no session", 0, 0, -1);
     }
-    if (o.qv_export && o.xr_offered)
+    if (o.qv_export && o.xr_offered && !o.qv_fixed)
         CHECK(text.find("not used (the bundled Quad Views' export has the gaze)") != std::string::npos, "log: export wins, no eye-gaze extension", 0, 0, -1);
     if (xr_used) {
-        CHECK(text.find(o.app_gaze ? "XR_EXT_eye_gaze_interaction enabled by the application" : "XR_EXT_eye_gaze_interaction added by the layer") != std::string::npos,
+        CHECK(text.find(o.app_gaze ? "XR_EXT_eye_gaze_interaction enabled by the application" : o.qv_fixed ?
+            "XR_EXT_eye_gaze_interaction enabled by the bundled Quad Views below (fixed focus)" : "XR_EXT_eye_gaze_interaction added by the layer") != std::string::npos,
             "log: extension", 0, 0, -1);
+        if (o.qv_fixed) CHECK(text.find("fixed focus (QuadViewsFixedFocus=1)") != std::string::npos, "log: fixed Quad Views focus", 0, 0, -1);
         CHECK(text.find("gaze: OpenXR eye gaze in use") != std::string::npos, "log: OpenXR eye gaze in use", 0, 0, -1);
         CHECK(std::regex_search(text, std::regex("xr invalid [1-9]")), "log: frames without a valid OpenXR gaze counted", 0, 0, -1);
         CHECK(std::regex_search(text, std::regex("focus 0, simulated 0")) && !std::regex_search(text, std::regex("focus [1-9]")), "log: the focus views are never read", 0, 0, -1);
@@ -1527,6 +1537,11 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
         } else if (o.pupil) {
             CHECK(std::regex_search(text, std::regex("\\(qv 0, xr [1-9]")), "log: source xr frames counted", 0, 0, -1);
         }
+    } else if (o.qv_fixed) {
+        CHECK(text.find("fixed focus (QuadViewsFixedFocus=1)") != std::string::npos, "log: fixed Quad Views focus", 0, 0, -1);
+        CHECK(text.find("not used (the runtime does not offer XR_EXT_eye_gaze_interaction)") != std::string::npos, "log: extension not offered", 0, 0, -1);
+        CHECK(std::regex_search(text, std::regex("\\(qv 0, xr 0, focus 0, simulated 0, none [1-9]")), "log: no gaze source, the focus views never read", 0, 0, -1);
+        CHECK(text.find("WARNING") == std::string::npos, "log: no fallback warning", 0, 0, -1);
     } else if (o.qv_export) {
         CHECK(text.find("Quad Views gaze export found") != std::string::npos, "log: export found", 0, 0, -1);
         if (o.pupil) CHECK(text.find("gaze source=qv") != std::string::npos || text.find("gaze source=none") != std::string::npos, "log: source qv", 0, 0, -1);
@@ -2188,6 +2203,14 @@ int main(int argc, char** argv) {
     Options xq = q; xq.name = "xr_offered_qv_export"; xq.description = "the export wins: the layer does not enable the eye gaze";
     xq.xr_offered = true;
     if (!fake_qv_dll.empty()) results.push_back(run(dll, out, xq));
+    // The bundled Quad Views with a fixed focus (force_no_eye_tracking): its export never has a gaze; the layer reads the
+    // OpenXR eye gaze that Quad Views enables below it, and never the fixed focus views.
+    Options qf = xq; qf.name = "qv_fixed_xr_gaze"; qf.description = "bundled Quad Views, fixed focus (QuadViewsFixedFocus=1): the OpenXR eye gaze";
+    qf.qv_fixed = true;
+    if (!fake_qv_dll.empty()) results.push_back(run(dll, out, qf));
+    Options qn = qf; qn.name = "qv_fixed_no_xr"; qn.description = "the same without the OpenXR eye gaze: no gaze at all (the fixed focus is never one)";
+    qn.xr_offered = false;
+    if (!fake_qv_dll.empty()) results.push_back(run(dll, out, qn));
 
     // Pimax PVR per-eye gaze (the focus views share one gaze, as with Quad Views; PVR has each eye's own).
     Options pv = a; pv.name = "pvr_per_eye"; pv.description = "one shared focus gaze, Pimax PVR per-eye gaze through the interface table";
@@ -2320,7 +2343,11 @@ int main(int argc, char** argv) {
         CHECK(qv.fixed_ipd_min > 1e8 || (std::fabs(qv.fixed_ipd_min - 64.0) < 1e-3 && std::fabs(qv.fixed_ipd_max - 64.0) < 1e-3), "export: rendered IPD exactly 64.0 mm without a gaze", qv.fixed_ipd_min, qv.fixed_ipd_max, -1);
         CHECK(!get("qv_export").source_proven && !get("qv_export_depth_only").source_proven, "Quad Views' combined gaze never boosts", 0, 0, -1);
     }
-    for (const char* name : {"xr_gaze", "xr_app_gaze"}) {
+    if (!fake_qv_dll.empty()) {
+        const auto& fixed = get("qv_fixed_no_xr");
+        CHECK(fixed.fixed_ipd_min > 1e8 || (std::fabs(fixed.fixed_ipd_min - 64.0) < 1e-3 && std::fabs(fixed.fixed_ipd_max - 64.0) < 1e-3), "fixed focus, no OpenXR gaze: rendered IPD exactly 64.0 mm", fixed.fixed_ipd_min, fixed.fixed_ipd_max, -1);
+    }
+    for (const char* name : {"xr_gaze", "xr_app_gaze", "qv_fixed_xr_gaze"}) {
         const auto& r = get(name);
         CHECK(r.qv_valid > 0 && r.qv_invalid > 0, "the OpenXR script has frames with and without a gaze", r.qv_valid, r.qv_invalid, -1);
         CHECK(r.fixed_ipd_min > 1e8 || (std::fabs(r.fixed_ipd_min - 64.0) < 1e-3 && std::fabs(r.fixed_ipd_max - 64.0) < 1e-3), "OpenXR gaze: rendered IPD exactly 64.0 mm without a gaze", r.fixed_ipd_min, r.fixed_ipd_max, -1);
