@@ -396,15 +396,10 @@ public sealed record VrProfile
     /// second, so their wind sway can look stepped. Off by default; forced off with the engine switched off or in the
     /// Perception-only mode.</summary>
     public bool EngineShadowCache { get; init; }
-    /// <summary>[Views] ThreeViews (0.7, experimental): the right eye's periphery is mostly reused from the left eye's
-    /// (reprojected by the bundled Quad Views layer); DCS draws only its outer strip and the cockpit. Measured about
-    /// −0.6 to −1.3 ms of GPU in cockpit flight. Off by default; written only when it can engage (<see cref="UsesThreeViews"/>).
-    /// ThreeViewsStripNdc, ThreeViewsKey and ThreeViewsIsolate stay developer keys.</summary>
+    /// <summary>Ignored since 0.7: Three views ([Views] ThreeViews, the right periphery reused from the left eye) was parked
+    /// after the headset test on 2026-11-21 (too many artefacts). Kept only so profiles saved with it still load; the app
+    /// never writes the key (a developer can still set it by hand in DcsQvCull.ini).</summary>
     public bool EngineThreeViews { get; init; }
-    /// <summary>The module engages it only with the engine on and the bundled Quad Views layer (the one that fills the
-    /// reused part). 0.7: also with frame generation; the cockpit is still drawn in the right periphery, and that view's
-    /// motion vectors are marked unproven while it engages, so frame generation uses optical flow for the right eye.</summary>
-    public bool UsesThreeViews => EngineThreeViews && EngineOptimizations && !Desktop && UsesBundledQuadViews;
     /// <summary>[Water] SkipHiddenWater=3 (0.7, experimental, no-submit): DCS's water passes are not submitted for a view
     /// that earlier frames found dry (probed one frame in four). Not exact for a few frames when water comes into view.
     /// Off by default.</summary>

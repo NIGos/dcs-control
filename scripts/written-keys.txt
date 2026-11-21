@@ -300,7 +300,6 @@ DcsQvCull	Threads	WorkerPlacement
 DcsQvCull	Timing	CacheUs
 DcsQvCull	Timing	ShaderTimeCache
 DcsQvCull	Timing	TaskQueueClock
-DcsQvCull	Views	ThreeViews
 DcsQvCull	VrFx	GVision
 DcsQvCull	VrFx	GVisionMode
 DcsQvCull	VrFx	GVisionRedout

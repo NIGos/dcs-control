@@ -789,11 +789,9 @@ function buildFields() {
   field(c,'engineOptimizations','Turn on',['Stays on whenever DCS starts, until you turn it off here.','Also from Steam or a shortcut; Back to stock DCS turns it off too. Nothing in the DCS folder changes. Tested on DCS 2.9.30, single player.'],'toggle');
   field(c,'engineReleaseIdleDlss','Free unused DLSS memory',['Frees the unused DLSS copy each mission load leaves (0.7–1.4 GB).','Helps long sessions with many restarts. The image doesn\'t change. On by default.'],'toggle',null,engine);
   field(c,'engineShadowCache','<span class="tag">EXPERIMENTAL</span> Cache distant shadows',['About 0.7 ms less GPU time; distant tree shadows sway less smoothly.','Reuses the distant shadows (about 70 m to 1.5 km) for a few frames. Off by default.'],'toggle',null,engine);
-  // 0.7, experimental, off by default: [Views] ThreeViews (VR, bundled Quad Views, no frame generation), [Water]
+  // 0.7, experimental, off by default: [Water]
   // SkipHiddenWater=3 (no-submit, not exact for a few frames) and [D3D] EarlyShaders=3 (SSAO water skip + hot-air idle
   // skip, both the stock picture; small, so one switch). Live like the other engine parts.
-  const threeViewsCan = p => engine(p) && quad(p) && !p.desktop;
-  field(c,'engineThreeViews','<span class="tag">EXPERIMENTAL</span> Three views',['About 1 ms less GPU time in cockpit flight. The right eye reuses most of what the left eye sees.','DCS draws only the outer edge and the cockpit for the right eye; the rest is copied from the left eye. If something looks wrong in the right eye, turn it off. Off by default.'],'toggle',null,p => threeViewsCan(p) || (engine(p) && p.engineThreeViews && !p.desktop),'',p => p.desktop);
   field(c,'engineWaterSkip','<span class="tag">EXPERIMENTAL</span> Skip hidden water',['Less GPU time while no water is in view.','DCS skips its water work for an eye that sees no water. When water comes into view it can appear a few frames late. Off by default.'],'toggle',null,engine);
   field(c,'engineIdleEffectSkip','<span class="tag">EXPERIMENTAL</span> Skip unused effects',['A small GPU saving over the sea and away from engine heat. Same image.','Skips shading work on water that changes nothing, and the heat-haze passes when nothing is hot. Off by default.'],'toggle',null,engine);
   // [Model] RecordersEmulatedLists: only where it can matter (EngineOptimizations.ShowsEmulatedListsOption): an AMD-only
@@ -986,7 +984,6 @@ function buildFields() {
   because(at('frameGenFactor','frameGenDeepPipeline','smoothCursor','frameGenParallelEyes','frameGenAsyncArm','showOverlay','diagnosticRecorder'),fgWhy);
   because(at('renderedFpsCap'),'Choose Custom limit in Frame limit to use this.');
   because(at('engineTaskQueueClock','engineTimerRefreshUs'),p => !engine(p) ? engineWhy : 'Turn on Streaming timer cache to use this.');
-  because(at('engineThreeViews'),p => !engine(p) ? engineWhy : [bundledWhy,'quadViews']);
   because(at('engineDevPayloadPath','engineDevIniPath'),p => !engine(p) ? engineWhy : 'Turn on Developer mode to use this.');
   because(f => f.condition === engine,engineWhy);
   because(at('boostMoveVrRuntime'),p => !boost(p) ? boostWhy : 'Not with Optimizations only.');

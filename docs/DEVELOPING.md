@@ -68,3 +68,10 @@ the first one's file. The rig's scripts read it (`tools\rig`).
   a comment included, means a rebuild of that component and its tests.
 - Before a commit: `pwsh -File scripts/check-personal-data.ps1`. No user path, e-mail address or key belongs in the
   repository, in a release or in the sources ZIP.
+
+## Parked features
+
+- **Three views** (DcsQvCull `[Views] ThreeViews=1`, `native/quadviews/dcsvr_threeviews.h`, Quad Views patch 0020):
+  parked after the headset test on 2026-11-21 (too many artefacts in the right eye). The code stays in place and off;
+  the app has no control for it and never writes the key, so only a hand edit of
+  `DcsQvCull.ini` (lost at the next apply) or of the Developer-mode ini turns it on.

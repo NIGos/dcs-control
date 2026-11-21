@@ -1,7 +1,6 @@
 # 0.7.0 preview
 
 **0.7.0-preview (local test build).** Not published: a package for a headset test on the developer's PC. Notes for the published release follow. It contains:
-- **Three views** on the Engine page (experimental): the right eye's periphery mostly reused from the left eye. Needs the engine on and the bundled Quad Views; it now also runs with frame generation.
 - **Skip hidden water** and **Skip unused effects** on the Engine page (experimental).
 - **Sharp HUD** no longer needs Depth boost. Far depth and frame generation's cockpit exports also run with Engine Optimizations off.
 - **Soft focus edge** also with foveated frame generation; **Stay ahead until your eyes land** and **Slide back when tracking is lost** also with frame generation.

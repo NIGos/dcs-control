@@ -46,7 +46,7 @@ public static class LiveSettings
         E("engineTaskQueueClock"), E("boostPrefetch"), E("engineShadowRecorder"), E("engineShadowInstancing"), E("engineCostWeights"),
         E("enginePartitionBoost"), E("engineTextureDedupe"), E("engineEffectBufferSkip"), E("enginePlainCounter"), E("engineFrameHeap"),
         E("engineStateFilter"), E("engineBeeps"), E("engineTimerRefreshUs"), E("engineDevPayloadPath"), E("engineDevIniPath"), E("engineToggleKey"),
-        E("engineDiagnosticHooks"), E("engineFastShaderPaths"), E("engineThreeViews"), E("engineWaterSkip"), E("engineIdleEffectSkip"),
+        E("engineDiagnosticHooks"), E("engineFastShaderPaths"), E("engineWaterSkip"), E("engineIdleEffectSkip"),
         V("colorMode"), V("panelGamut"), V("colorModeKey"),
         V("colorFixExposureEv"), V("colorFixNightEv"), V("colorFixSaturation"), V("colorFixWarmth"), V("colorFixAdaptBright"), V("colorFixAdaptDark"),
         V("colorEnhancedExposureEv"), V("colorEnhancedNightEv"), V("colorEnhancedSaturation"), V("colorEnhancedWarmth"), V("colorEnhancedAdaptBright"), V("colorEnhancedAdaptDark"),
@@ -116,8 +116,8 @@ public static class LiveSettings
         "Color.Mode", "Color.PanelGamut", "Color.ModeKey", "ColorFix.*", "ColorEnhanced.*", "VrFx.*",
         "Perception.FixationDepth", "Perception.CockpitTrueIpd", "Perception.CockpitTrueIpdOwnship",
         "DLSS.ReleaseIdleSets", "Dev.PayloadPath", "Dev.IniPath",
-        // 0.7: three views (worker tick; an ini change resets its key toggle), water no-submit (hot reload), early shaders (worker tick).
-        "Views.ThreeViews", "Water.SkipHiddenWater", "D3D.EarlyShaders",
+        // 0.7: water no-submit (hot reload), early shaders (worker tick). [Views] ThreeViews is parked: the app no longer writes it.
+        "Water.SkipHiddenWater", "D3D.EarlyShaders",
         // [D3D] ChainFast / ShaderFast: re-applied by the worker every second (worker.inc).
         "D3D.ChainFast", "D3D.ShaderFast",
     };

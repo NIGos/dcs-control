@@ -26,7 +26,7 @@
 
 ## New in 0.7
 
-- **Engine page** (experimental, off by default): **Three views** (the right eye reuses most of what the left eye sees, about 1 ms less GPU time in cockpit flight; needs the bundled Quad Views, also with frame generation), **Skip hidden water** and **Skip unused effects**. **Faster terrain and shader paths** (on by default) can now be turned off if a problem points to it.
+- **Engine page** (experimental, off by default): **Skip hidden water** and **Skip unused effects**. **Faster terrain and shader paths** (on by default) can now be turned off if a problem points to it.
 - **Sharp HUD** no longer needs Depth boost, and it, **Far depth** and frame generation's cockpit exports also run with Engine Optimizations off.
 - **Soft focus edge** also with foveated frame generation; **Stay ahead until your eyes land** and **Slide back when tracking is lost** also with frame generation.
 - **Pupil shift** and **Eye-focus blur** also with a fixed focus area, from the headset's own eye tracking (Pimax; not flown yet).
