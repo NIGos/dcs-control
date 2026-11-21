@@ -187,6 +187,14 @@ inline Cap DetectCap(std::vector<float> iv, double tolPct = 1.5, double iqrPct =
   return c;
 }
 
+// A plateau is a cap only while the render thread or the GPU waits. With the render thread at or above cpuBusyPct
+// and the GPU at or above gpuFreePct both are working: the frame rate is DCS's own limit sitting near refresh/N by
+// chance (GitHub #27, AMD at 72 Hz: "capped" at 60 = 120/2, 45 = 90/2 and 26.7 = 80/3 with the render thread
+// 96-98% busy and the GPU 88-100%; the governor then held for seconds). Unknown readings (< 0) do not refute a cap.
+inline bool CapPlausible(double renderPct, double gpuPct, const Thresholds& t) {
+  return !(renderPct >= t.cpuBusyPct && gpuPct >= t.gpuFreePct);
+}
+
 // The last `seconds` seconds of intervals (one Add per second): the cap of
 // that rolling window. A change of cap shows within `seconds` (the window
 // spanning both rates is not steady: no cap meanwhile).
