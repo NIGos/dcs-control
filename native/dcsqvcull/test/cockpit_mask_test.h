@@ -1462,6 +1462,40 @@ void TestPipeline() {
               mvBad[0], mvBad[1], clsBad[0], clsBad[1]);
     Check(fenced && mvBad[0] == 0 && mvBad[1] == 0 && clsBad[0] == 0 && clsBad[1] == 0, what);
   }
+  // 0.7 three views x frame generation: while the right periphery is culled (tvc::g_engaged) its MVs are published
+  // without view_flags::valid (slot partial: the reader uses flow for that eye); the left eye's stay usable; the mask
+  // keeps both periphery views. After a disengage the flag holds kTvMvTail commits, then view 1 is valid again.
+  {
+    const bool eng0 = tvc::g_engaged.load();
+    const uint64_t tv0 = cmask::g_mTvViews.load();
+    tvc::g_engaged = true;
+    frame(1250, true);
+    frame(1251, true);
+    cmv::Header hv{};
+    cm::Header hm{};
+    cmv::seqlock_read(mblk, hv);
+    cm::seqlock_read(blk, hm);
+    const int s1 = cmv::find_slot(hv, 1251), m1 = cm::find_slot(hm, 1251);
+    const bool engaged = s1 >= 0 && m1 >= 0 && (hv.slot[s1].flags & cmv::slot_flags::partial) &&
+                         hv.slot[s1].viewMask == 1u && cmv::view_usable(hv, s1, 0) && !cmv::view_usable(hv, s1, 1) &&
+                         !(hv.slot[s1].view[1].flags & cmv::view_flags::valid) && cmv::usable_for_pair(hv, s1, 1250) &&
+                         cm::view_usable(hm, m1, 0) && cm::view_usable(hm, m1, 1) &&
+                         cmask::g_mTvViews.load() == tv0 + 2;
+    tvc::g_engaged = false;
+    for (int k = 0; k < cmask::kTvMvTail; ++k) frame(1252 + k, true);
+    cmv::seqlock_read(mblk, hv);
+    const int st = cmv::find_slot(hv, 1252 + cmask::kTvMvTail - 1);
+    const bool tail = st >= 0 && !cmv::view_usable(hv, st, 1);
+    frame(1252 + cmask::kTvMvTail, true);
+    cmv::seqlock_read(mblk, hv);
+    const int sb = cmv::find_slot(hv, 1252 + cmask::kTvMvTail);
+    const bool back = sb >= 0 && hv.slot[sb].viewMask == 3u && !(hv.slot[sb].flags & cmv::slot_flags::partial) &&
+                      cmv::view_usable(hv, sb, 0) && cmv::view_usable(hv, sb, 1);
+    tvc::g_engaged = eng0;
+    Check(engaged && tail && back,
+          "three views x FG: engaged -> the right periphery's MVs not valid (slot partial, viewMask 1; left eye usable "
+          "and pairable; the mask keeps both views); held for the tail after a disengage, then both views valid again");
+  }
   // R70: reset reasons. A camera cut between two frames, then a steady frame; the motion reader stops (idle: nothing
   // copied, one Signal per frame still) and resumes (the first slot after it is a reset).
   {
