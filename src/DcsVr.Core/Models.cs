@@ -121,6 +121,10 @@ public sealed record VrProfile
     /// and draw it at its in-between position, so it moves at the headset's rate instead of fading between two places.
     /// Only the generated frames change; where a click lands does not. Off by default until flown.</summary>
     public bool SmoothCursor { get; init; }
+    /// <summary>OFXR parallel_eye_synthesis=1 (fork patch 0038): each eye's generated frame on a GPU queue of its own, so
+    /// one eye no longer waits for the other: about 1 ms sooner, the same pixels (the fork's byte-for-byte test on NVIDIA).
+    /// Not flown yet; off by default. "Both eyes at once" on the Framegen page.</summary>
+    public bool FrameGenParallelEyes { get; init; }
     public GazeMode Gaze { get; init; } = GazeMode.EyeTracked;
     /// <summary>Foveated Super Resolution (Cheeky's own foveated DLSS SR), for stereo without Quad Views only. With Quad Views
     /// it would make Cheeky redo DCS's DLSS of the focus views privately instead of building DLSS 5 on it, so it is ignored
@@ -161,7 +165,8 @@ public sealed record VrProfile
     /// <summary>Bundled Quad Views: inside the focus area's edge band its detail first tapers to the periphery's own
     /// resolution, then fades out (dcsvr_edge_match; round and rounded-rectangle shapes). Without it the band crossfades
     /// two images of very different sharpness, which reads as a ring around where you look. Off by default until seen in
-    /// the headset; no effect with <see cref="UsesFoveatedFrameGen"/> (the two-layer output pass has no edge match).</summary>
+    /// the headset. With <see cref="UsesFoveatedFrameGen"/> the focus layer's output pass does the same taper, with the
+    /// periphery's resolution computed from the two views' sizes and fields of view (patch 0021).</summary>
     public bool QuadEdgeMatch { get; init; }
     /// <summary>DLSS 5 over the whole focus area: its look (tone, colour, structure) fades out toward the focus edge with
     /// the focus area itself, so the focus area is not a disc of a different look. Cheeky's NR feather over the whole
@@ -177,17 +182,20 @@ public sealed record VrProfile
     /// <summary>The focus area's reach during a saccade, as gaze-to-headset latency: about one rendered frame without
     /// frame generation, more with it (it waits for the next rendered frame), most in 3X. With the saccade tail (no frame
     /// generation only) 40 ms: flown in GitHub PR #26 on a Crystal Super at 72 FPS, 25 ms still showed the periphery at
-    /// landings; tracker + one rendered frame + compositor is about 30-45 ms. The frame generation values are the ones
-    /// flown with frame generation and stay until the tail is flown with it.</summary>
+    /// landings; tracker + one rendered frame + compositor is about 30-45 ms. With frame generation the values flown with
+    /// it, with or without the tail: they are the latency, which the tail does not change.</summary>
     public int QuadSaccadeLeadMs => FrameGen == FrameGeneration.Off ? (UsesQuadSaccadeTail ? 40 : 25) : FrameGenFactor == 2 ? 55 : 85;
-    /// <summary>Eye-tracked bundled Quad Views without frame generation, with <see cref="QuadSaccadeLead"/>: the focus area
+    /// <summary>Eye-tracked bundled Quad Views with <see cref="QuadSaccadeLead"/>: the focus area
     /// stays ahead of the eyes until they land (dcsvr_saccade_tail; native/quadviews/dcsvr_gaze.h). The lead's saccade
     /// ends below 50 deg/s instead of 120 (saccades decelerate sharply just before they land), its leading edge never
     /// retreats during one saccade, repeated tracker samples are not taken for the eye stopping, the lead is 40 ms instead
-    /// of 25 with up to 0.5 instead of 0.35, and nothing is held after the landing (<see cref="QuadSaccadeHoldMs"/>).
-    /// Off, or with frame generation: the filter exactly as without these keys (tests/quadviews-gaze checks it).</summary>
+    /// of 25 with up to 0.5 instead of 0.35 (with frame generation the lead stays 55 / 85 ms), and nothing is held after
+    /// the landing (<see cref="QuadSaccadeHoldMs"/>). Off: the filter exactly as without these keys (tests/quadviews-gaze
+    /// checks it). With frame generation tests/quadviews-gaze places the focus once per rendered frame (2X, 3X) with
+    /// the 55 / 85 ms leads: the tail never leaves the eye outside the sharp part more often than without it, and widens
+    /// about a quarter fewer rendered frames (no hold). Not flown with frame generation yet.</summary>
     public bool QuadSaccadeTail { get; init; } = true;
-    public bool UsesQuadSaccadeTail => QuadSaccadeTail && QuadSaccadeLead && Gaze == GazeMode.EyeTracked && FrameGen == FrameGeneration.Off;
+    public bool UsesQuadSaccadeTail => QuadSaccadeTail && QuadSaccadeLead && Gaze == GazeMode.EyeTracked;
     /// <summary>How long the focus area stays widened after a saccade, fading out (dcsvr_saccade_hold_ms). Without the tail
     /// 40 ms: the single threshold ends the saccade while the eye still decelerates. With it 0: the saccade already lasts
     /// until the gaze samples show the landing, and every frame located after that is centred on the landed gaze. In
@@ -195,13 +203,15 @@ public sealed record VrProfile
     /// (4 without, 8 with 55 ms) and never moves the landed eye inside the box: it was inside on every frame either way.</summary>
     public int QuadSaccadeHoldMs => UsesQuadSaccadeTail ? 0 : 40;
     /// <summary>The farthest the focus area reaches during a saccade (NDC, per axis): 0.5 with the tail (its 40 ms lead
-    /// covers more angle than 25 ms), otherwise 0.35, also with frame generation until a wider one is flown there.</summary>
+    /// covers more angle than 25 ms; with frame generation too: 0.35 and 0.6 landed the same in an offline sweep),
+    /// otherwise 0.35.</summary>
     public double QuadSaccadeMaxExtend => UsesQuadSaccadeTail ? 0.5 : 0.35;
-    /// <summary>Eye-tracked bundled Quad Views without frame generation: when the tracker loses the eyes (past Quad Views'
+    /// <summary>Eye-tracked bundled Quad Views: when the tracker loses the eyes (past Quad Views'
     /// 600 ms cache), the focus area slides to the fixed one over 150 ms instead of jumping (dcsvr_lost_ease_ms). A gaze
-    /// found again is followed at once. Off, or with frame generation: dcsvr_lost_ease_ms=0, the jump.</summary>
+    /// found again is followed at once. With frame generation the focus moves once per rendered frame, so the slide is
+    /// 4-5 steps in 3X (the generated frames in between blend them). Off: dcsvr_lost_ease_ms=0, the jump.</summary>
     public bool QuadLostGazeEase { get; init; } = true;
-    public bool UsesQuadLostGazeEase => QuadLostGazeEase && Gaze == GazeMode.EyeTracked && FrameGen == FrameGeneration.Off;
+    public bool UsesQuadLostGazeEase => QuadLostGazeEase && Gaze == GazeMode.EyeTracked;
     /// <summary>Quad Views turbo: DCS starts the next frame while the runtime still holds the previous one. Quad Views itself
     /// enables it on most runtimes and disables it on SteamVR; off by default until measured in the headset.</summary>
     public bool QuadTurbo { get; init; }
@@ -459,8 +469,9 @@ public sealed record VrProfile
 
     /// <summary>Pupil shift (native/pupil_shift, an OpenXR layer at the top of the chain): each eye is rendered from where
     /// its pupil is for the current gaze instead of from one fixed eye point, which removes the perspective error on the
-    /// cockpit and the image shift against the lens when the eyes turn. The gaze comes from the focus views of a
-    /// foveated quad-view configuration, so it needs eye-tracked Quad Views.</summary>
+    /// cockpit and the image shift against the lens when the eyes turn. The gaze comes from the eye-tracked Quad Views,
+    /// or, without Quad Views or with a fixed Quad Views focus, from the runtime's OpenXR eye gaze, which the layer reads
+    /// itself (<see cref="UsesLayerOwnGaze"/>).</summary>
     public bool PupilShift { get; init; }
     /// <summary>Distance from the pupil to the eye's rotation centre (anatomy: about 10 to 11 mm).</summary>
     public double PupilShiftEyeRadiusMm { get; init; } = 10.5;
@@ -470,8 +481,8 @@ public sealed record VrProfile
     /// <summary>Turns the correction off and on in flight, to compare (PupilShift.ini Toggle; the panel names it).</summary>
     public string PupilShiftToggleKey { get; init; } = NeuralHotkeys.PupilDefault;
     public const double PupilShiftEyeRadiusMin = 5, PupilShiftEyeRadiusMax = 15, PupilShiftVirtualImageMin = 0.5, PupilShiftVirtualImageMax = 5;
-    /// <summary>The pupil correction runs: only for a VR flight with eye-tracked Quad Views.</summary>
-    public bool UsesPupilShift => PupilShift && !Desktop && QuadViews != QuadProvider.None && Gaze == GazeMode.EyeTracked;
+    /// <summary>The pupil correction runs: a VR flight in which the layer has a gaze (<see cref="UsesLayerGaze"/>).</summary>
+    public bool UsesPupilShift => PupilShift && UsesLayerGaze;
 
     /// <summary>Periphery stability (bundled Quad Views; native/quadviews/dcsvr_perception.h, docs/PERCEPTION.md): a
     /// temporal low-pass on the periphery outside the focus area, against the shimmer its enlargement makes visible.
@@ -619,13 +630,21 @@ public sealed record VrProfile
     public bool UsesColorMode => !Desktop && (ColorMode != ColorMode.Off || UsesColorModeKey);
     /// <summary>A VR flight with an eye-tracked Quad Views focus: the pupil shift layer has a gaze to work with.</summary>
     public bool UsesEyeTrackedVr => !Desktop && QuadViews != QuadProvider.None && Gaze == GazeMode.EyeTracked;
+    /// <summary>The pupil shift layer reads the gaze itself, with no eye-tracked Quad Views focus to take it from: without
+    /// Quad Views, or with a fixed Quad Views focus ([PupilShift] QuadViewsFixedFocus=1), on the Pimax runtime, whose
+    /// OpenXR eye gaze (XR_EXT_eye_gaze_interaction) it reads (docs/PUPIL_SHIFT.md, harness scenarios xr_gaze and
+    /// qv_fixed_xr_gaze). Without a gaze from it the eyes stay at rest. Not flown yet. Depth boost keeps needing
+    /// eye-tracked Quad Views.</summary>
+    public bool UsesLayerOwnGaze => !Desktop && Runtime == RuntimeKind.Pimax && (QuadViews == QuadProvider.None || Gaze == GazeMode.Fixed);
+    /// <summary>A VR flight in which the pupil shift layer has a gaze: eye-tracked Quad Views, or its own.</summary>
+    public bool UsesLayerGaze => UsesEyeTrackedVr || UsesLayerOwnGaze;
     /// <summary>Gaze DoF runs: it needs the gaze, which the pupil shift layer publishes for the module (with Depth boost,
     /// or its [PupilShift] PublishGaze for Visual realism alone).</summary>
-    public bool UsesGazeDof => GazeDof && UsesEyeTrackedVr;
+    public bool UsesGazeDof => GazeDof && UsesLayerGaze;
     public bool UsesGVision => GVision && !Desktop;
     /// <summary>The pupil shift layer publishes the gaze for the engine module ([PupilShift] PublishGaze=1): for Gaze DoF,
     /// and for G vision's tunnel following the eyes.</summary>
-    public bool UsesGazePublish => UsesGazeDof || (UsesGVision && GVisionUseGaze && UsesEyeTrackedVr);
+    public bool UsesGazePublish => UsesGazeDof || (UsesGVision && GVisionUseGaze && UsesLayerGaze);
     /// <summary>Any Visual realism feature runs, so the engine module is installed for it (<see cref="UsesEngineModule"/>).</summary>
     public bool UsesVisualRealism => UsesColorMode || UsesGazeDof || UsesGVision;
 

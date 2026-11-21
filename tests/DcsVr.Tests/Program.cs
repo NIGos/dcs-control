@@ -184,6 +184,8 @@ Test("OFXR per-frame records only on request, with a larger log", () =>
     Require(HudNeeds(hud with { DepthBoost = false }) && HudNeeds(hud with { Gaze = GazeMode.Fixed }) && !HudNeeds(hud), "Sharp HUD without a running Depth boost: warned");
     Require(!HudNeeds(hud with { DepthBoost = false, FrameGen = FrameGeneration.Off }) && !HudNeeds(hud with { DepthBoost = false, FrameGenHudSymbology = false }) && !HudNeeds(hud with { DepthBoost = false, Desktop = true }), "no warning while frame generation or Sharp HUD is off");
     Require(ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenPipelinedDeepHold = true, FrameGenAsyncArm = true }).Contains("\npipelined_deep_hold=1\nasync_arm=1\n"));
+    Require(ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia }).Contains("\nparallel_eye_synthesis=0") && ConfigurationWriters.Ofxr(new() { FrameGen = FrameGeneration.Nvidia, FrameGenParallelEyes = true }).Contains("\nparallel_eye_synthesis=1")
+        && ConfigurationWriters.Ofxr(new() { FrameGenParallelEyes = true }).Contains("\nparallel_eye_synthesis=0") && !new VrProfile().FrameGenParallelEyes, "Both eyes at once: off by default, 1 only with frame generation");
 });
 Test("Explicit manifest keeps extension metadata", () =>
 {
@@ -742,13 +744,16 @@ Test("Triple frame generation writes the fork's triple_frame_gen and paces DCS a
     { var both = new VrProfile { QuadTurbo = true, FrameGen = generator }; Require(ConfigurationWriters.QuadViews(both).Contains("turbo_mode=0") && both.QuadTurbo && !both.UsesQuadTurbo, "Turbo is off with " + generator); }
     {
         var tracked = ConfigurationWriters.QuadViews(new VrProfile { FrameGen = FrameGeneration.Nvidia });
-        Require(tracked.Contains("dcsvr_saccade_widening=1") && tracked.Contains("dcsvr_saccade_lead_ms=85") && tracked.Contains("dcsvr_gaze_deadzone=0.5") && tracked.Contains("dcsvr_saccade_max_extend=0.35"));
+        Require(tracked.Contains("dcsvr_saccade_widening=1") && tracked.Contains("dcsvr_saccade_lead_ms=85") && tracked.Contains("dcsvr_gaze_deadzone=0.5") && tracked.Contains("dcsvr_saccade_max_extend=0.5"));
         var fixedGaze = ConfigurationWriters.QuadViews(new VrProfile { Gaze = GazeMode.Fixed });
         bool Line(string text, string line) => text.ReplaceLineEndings("\n").Split('\n').Any(l => l.Trim() == line);
-        // With frame generation the saccade values stay the ones flown with it: no tail, no lost-gaze ease, 40 ms hold.
-        Require(Line(tracked, "dcsvr_saccade_tail=0") && Line(tracked, "dcsvr_saccade_hold_ms=40") && Line(tracked, "dcsvr_lost_ease_ms=0"), "frame generation keeps its flown saccade values");
+        // With frame generation: the tail and the ease too, the lead the frame generation latency (55 / 85 ms), no hold, up to 0.5.
+        Require(Line(tracked, "dcsvr_saccade_tail=1") && Line(tracked, "dcsvr_saccade_hold_ms=0") && Line(tracked, "dcsvr_lost_ease_ms=150"), "frame generation: the tail and the ease");
         var twoX = ConfigurationWriters.QuadViews(new VrProfile { FrameGen = FrameGeneration.Nvidia, FrameGenFactor = 2 });
-        Require(Line(twoX, "dcsvr_saccade_lead_ms=55") && Line(twoX, "dcsvr_saccade_hold_ms=40") && Line(twoX, "dcsvr_saccade_max_extend=0.35") && Line(twoX, "dcsvr_saccade_tail=0"));
+        Require(Line(twoX, "dcsvr_saccade_lead_ms=55") && Line(twoX, "dcsvr_saccade_hold_ms=0") && Line(twoX, "dcsvr_saccade_max_extend=0.5") && Line(twoX, "dcsvr_saccade_tail=1"));
+        // Frame generation with the tail off: the values flown with it before the tail.
+        var fgNoTail = ConfigurationWriters.QuadViews(new VrProfile { FrameGen = FrameGeneration.Nvidia, FrameGenFactor = 2, QuadSaccadeTail = false, QuadLostGazeEase = false });
+        Require(Line(fgNoTail, "dcsvr_saccade_tail=0") && Line(fgNoTail, "dcsvr_saccade_lead_ms=55") && Line(fgNoTail, "dcsvr_saccade_hold_ms=40") && Line(fgNoTail, "dcsvr_saccade_max_extend=0.35") && Line(fgNoTail, "dcsvr_lost_ease_ms=0"), "frame generation, tail off: the flown values");
         // Eye-tracked without frame generation: the tail with a 40 ms lead, no hold, up to 0.5, and the lost-gaze ease.
         var noFrameGen = ConfigurationWriters.QuadViews(new VrProfile());
         Require(Line(noFrameGen, "dcsvr_saccade_tail=1") && Line(noFrameGen, "dcsvr_saccade_end_speed=50") && Line(noFrameGen, "dcsvr_saccade_lead_ms=40") &&
@@ -1612,10 +1617,21 @@ Test("Pupil shift is deployed first in the layer chain with its ini, only for ey
     Require(ini.Contains("[PupilShift]\nEnabled=1") && ini.Contains("EyeRadiusMm=11") && ini.Contains("VirtualImageM=1.2") && ini.Contains("SimulateGaze=0"));
     var manifest = Encoding.UTF8.GetString(plan.Files.Single(f => f.Path.EndsWith("pupil-shift.json")).Content);
     Require(manifest.Contains("XR_APILAYER_DCSVR_pupil_shift") && manifest.Contains("XR_APILAYER_DCSVR_pupil_shift.dll"));
-    // Without a gaze (fixed focus, no Quad Views, desktop) the layer is not installed and the profile says why.
-    foreach (var off in new[] { on with { Gaze = GazeMode.Fixed }, on with { QuadViews = QuadProvider.None }, on with { PupilShift = false } })
-        Require(!planner.Build(off, inventory, Path.Combine(root, "pupil/managed-off")).Files.Any(f => f.Path.Contains("pupilshift")));
-    Require(ProfileValidation.Validate(on with { Gaze = GazeMode.Fixed }).Any(i => i.Code == "pupil-gaze" && i.Severity == IssueSeverity.Warning));
+    // Without a gaze (fixed focus or no Quad Views off the Pimax runtime, off) the layer is not installed and the profile says why.
+    Require(!planner.Build(on with { PupilShift = false }, inventory, Path.Combine(root, "pupil/managed-off")).Files.Any(f => f.Path.Contains("pupilshift")));
+    foreach (var off in new[] { on with { Gaze = GazeMode.Fixed, Runtime = RuntimeKind.SboysSteamVr }, on with { QuadViews = QuadProvider.None, Runtime = RuntimeKind.SboysSteamVr }, on with { Desktop = true } })
+        Require(!off.UsesPupilShift && !off.UsesPerceptionLayer, "no gaze: no layer");
+    Require(ProfileValidation.Validate(on with { Gaze = GazeMode.Fixed, Runtime = RuntimeKind.SboysSteamVr }).Any(i => i.Code == "pupil-gaze" && i.Severity == IssueSeverity.Warning));
+    // On the Pimax runtime the layer reads the OpenXR eye gaze itself: stereo, and a fixed Quad Views focus with
+    // QuadViewsFixedFocus=1 (only then).
+    foreach (var own in new[] { on with { Gaze = GazeMode.Fixed }, on with { QuadViews = QuadProvider.None } })
+    {
+        Require(own.UsesPupilShift && own.UsesLayerOwnGaze && !ProfileValidation.Validate(own).Any(i => i.Code == "pupil-gaze"), "the layer's own gaze");
+        var ownIni = Encoding.UTF8.GetString(planner.Build(own, inventory, Path.Combine(root, "pupil/managed-own")).Files.Single(f => f.Path.EndsWith("PupilShift.ini")).Content).ReplaceLineEndings("\n");
+        Require(ownIni.Contains("[PupilShift]\nEnabled=1") && ownIni.Contains("QuadViewsFixedFocus=1") == (own.QuadViews != QuadProvider.None), "QuadViewsFixedFocus with a fixed Quad Views focus only");
+    }
+    Require(!ini.Contains("QuadViewsFixedFocus"), "eye-tracked Quad Views: no QuadViewsFixedFocus");
+    Require(!(on with { Gaze = GazeMode.Fixed, DepthBoost = true }).UsesDepthBoost, "Depth boost still needs eye-tracked Quad Views");
     Require(ProfileValidation.Validate(on with { PupilShiftEyeRadiusMm = 30 }).Any(i => i.Code == "pupil-radius" && i.Severity == IssueSeverity.Error));
     Require(ProfileValidation.Validate(on with { PupilShiftVirtualImageM = 0.1 }).Any(i => i.Code == "pupil-image"));
     Require(!ProfileValidation.Validate(on).Any(i => i.Code.StartsWith("pupil")));
@@ -1983,7 +1999,7 @@ Test("Visual realism: all off writes the ini as before; each mode, the key and [
     var vr = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked };
     string Ini(VrProfile p) => ConfigurationWriters.DcsQvCull(p).ReplaceLineEndings("\n");
     // Everything off (or unable to run): [Color] exactly as before Visual realism, no new section, and no value leaks in.
-    foreach (var off in new[] { new VrProfile(), vr with { EngineOptimizations = true }, vr with { DepthBoost = true }, vr with { GazeDof = true, Gaze = GazeMode.Fixed },
+    foreach (var off in new[] { new VrProfile(), vr with { EngineOptimizations = true }, vr with { DepthBoost = true }, vr with { GazeDof = true, Gaze = GazeMode.Fixed, Runtime = RuntimeKind.SboysSteamVr },
         vr with { Desktop = true, EngineOptimizations = true, ColorMode = ColorMode.Enhanced, GVision = true, ColorModeKey = "120:6" } })
     {
         var ini = Ini(off);
@@ -1995,7 +2011,10 @@ Test("Visual realism: all off writes the ini as before; each mode, the key and [
             GVisionMode = GVisionMode.Full, GVisionUseGaze = false
         }), "values of features that are off change nothing");
     }
-    Require(!new VrProfile().UsesEngineModule && !(vr with { GazeDof = true, Gaze = GazeMode.Fixed }).UsesEngineModule, "nothing installed while everything is off");
+    Require(!new VrProfile().UsesEngineModule && !(vr with { GazeDof = true, Gaze = GazeMode.Fixed, Runtime = RuntimeKind.SboysSteamVr }).UsesEngineModule, "nothing installed while everything is off");
+    // A fixed focus on the Pimax runtime: the layer reads the OpenXR eye gaze, so eye-focus blur runs and publishes it.
+    Require((vr with { GazeDof = true, Gaze = GazeMode.Fixed }).UsesGazeDof && ConfigurationWriters.PupilShift(vr with { GazeDof = true, Gaze = GazeMode.Fixed }).Contains("QuadViewsFixedFocus=1")
+        && !ConfigurationWriters.PupilShift(vr with { GazeDof = true }).Contains("QuadViewsFixedFocus"), "eye-focus blur with the layer's own gaze under a fixed focus");
     // Fix: Mode=1 and both modes' values (the module's defaults); the tuning curve, developer probes and [VrFx] are not written.
     var fix = Ini(vr with { ColorMode = ColorMode.Fix });
     Require(fix.Contains("\n[Color]\nMode=1\nModeKey=0:0\n\n; Color modes"), "Fix: [Color]");
@@ -2040,7 +2059,7 @@ Test("Visual realism: all off writes the ini as before; each mode, the key and [
         Require(module is not null && plan.Files.Any(f => f.Path.EndsWith(Path.Combine("Hooks", "DcsQvCull.lua"))) && plan.Files.Any(f => f.Path.EndsWith("DcsQvCullPayload.dll")), "the module for a visual feature alone");
         Require(Encoding.Unicode.GetString(module!.Content.AsSpan(2)).ReplaceLineEndings("\n").Contains("PerceptionOnly=1\n"), "in its Perception-only mode");
     }
-    foreach (var off in new[] { vr, vr with { GazeDof = true, Gaze = GazeMode.Fixed }, vr with { Desktop = true, ColorMode = ColorMode.Fix, GVision = true } })
+    foreach (var off in new[] { vr, vr with { Desktop = true, ColorMode = ColorMode.Fix, GVision = true } })
         Require(!planner.Build(off, inventory, Path.Combine(root, "visual/managed-off")).Files.Any(f => f.Path.EndsWith("DcsQvCull.ini")), "no module while nothing visual runs");
 });
 Test("Visual realism: the pupil shift layer publishes the gaze for eye-focus blur and G vision, without Depth boost and without taking DCS's IPD", () =>
@@ -2048,12 +2067,12 @@ Test("Visual realism: the pupil shift layer publishes the gaze for eye-focus blu
     var vr = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked };
     string Pupil(VrProfile p) => ConfigurationWriters.PupilShift(p).ReplaceLineEndings("\n");
     // No gaze needed: the layer's file exactly as before, for every profile that deploys the layer.
-    foreach (var p in new[] { vr with { PupilShift = true }, vr with { DepthBoost = true }, vr with { DepthBoost = true, GVision = true, GVisionUseGaze = false }, vr with { PupilShift = true, GazeDof = true, Gaze = GazeMode.Fixed } })
+    foreach (var p in new[] { vr with { PupilShift = true }, vr with { DepthBoost = true }, vr with { DepthBoost = true, GVision = true, GVisionUseGaze = false }, vr with { PupilShift = true, GazeDof = true, Gaze = GazeMode.Fixed, Runtime = RuntimeKind.SboysSteamVr } })
         Require(!p.UsesGazePublish && !Pupil(p).Contains("PublishGaze") && Pupil(p) == Pupil(p with { GazeDof = false, GVision = false }), "no PublishGaze line while no gaze is needed");
     foreach (var p in new[] { vr with { GazeDof = true }, vr with { GVision = true }, vr with { DepthBoost = true, GazeDof = true }, vr with { PupilShift = true, GVision = true } })
         Require(p.UsesGazePublish && p.UsesPerceptionLayer && Pupil(p).Contains("SimulateGazeYDeg=0\n\n; The gaze for the engine module's eye-focus blur and G vision, also without Depth boost.\nPublishGaze=1\n\n; Depth boost"), "PublishGaze=1");
-    Require(!(vr with { GVision = true, GVisionUseGaze = false }).UsesPerceptionLayer && !(vr with { GazeDof = true, Gaze = GazeMode.Fixed }).UsesPerceptionLayer
-        && !(vr with { GVision = true, QuadViews = QuadProvider.None }).UsesGazePublish && !(vr with { GazeDof = true, Desktop = true }).UsesPerceptionLayer, "no layer when no gaze is needed or there is none");
+    Require(!(vr with { GVision = true, GVisionUseGaze = false }).UsesPerceptionLayer && !(vr with { GazeDof = true, Gaze = GazeMode.Fixed, Runtime = RuntimeKind.SboysSteamVr }).UsesPerceptionLayer
+        && !(vr with { GVision = true, QuadViews = QuadProvider.None, Runtime = RuntimeKind.SboysSteamVr }).UsesGazePublish && !(vr with { GazeDof = true, Desktop = true }).UsesPerceptionLayer, "no layer when no gaze is needed or there is none");
     Require(ConfigurationWriters.DcsQvCull(vr with { GazeDof = true }).ReplaceLineEndings("\n").Contains("[VrFx]\nGazeDof=1\n"), "GazeDof=1 without Depth boost");
     // Eye-focus blur alone: the engine module and the layer (Pupil shift and Depth boost off, PublishGaze on); DCS's
     // custom IPD stays DCS's, since the layer moves nothing.
@@ -2201,8 +2220,9 @@ Test("Visual realism: an older profile loads unchanged, the settings round-trip,
     Require(Refused(vr with { GazeDofPupilMm = 1 }, "visual-gazeDofPupilMm") && Refused(vr with { GazeDofPupilMm = 9 }, "visual-gazeDofPupilMm")
         && !Refused(vr with { GazeDofPupilMm = 0 }, "visual-gazeDofPupilMm") && !Refused(vr with { GazeDofPupilMm = 6.5 }, "visual-gazeDofPupilMm"), "pupil 0 (automatic) or 2-8 mm");
     // Gaze DoF without Depth boost's gaze: said, not refused.
-    Require(ProfileValidation.Validate(vr with { GazeDof = true, Gaze = GazeMode.Fixed }).Any(i => i.Code == "visual-gaze" && i.Severity == IssueSeverity.Warning)
-        && ProfileValidation.Validate(vr with { GazeDof = true, QuadViews = QuadProvider.None }).Any(i => i.Code == "visual-gaze")
+    Require(ProfileValidation.Validate(vr with { GazeDof = true, Gaze = GazeMode.Fixed, Runtime = RuntimeKind.SboysSteamVr }).Any(i => i.Code == "visual-gaze" && i.Severity == IssueSeverity.Warning)
+        && ProfileValidation.Validate(vr with { GazeDof = true, QuadViews = QuadProvider.None, Runtime = RuntimeKind.SboysSteamVr }).Any(i => i.Code == "visual-gaze")
+        && !ProfileValidation.Validate(vr with { GazeDof = true, Gaze = GazeMode.Fixed }).Any(i => i.Code == "visual-gaze")
         && !ProfileValidation.Validate(vr with { GazeDof = true }).Any(i => i.Code == "visual-gaze"), "Gaze DoF needs an eye-tracked focus, not Depth boost");
     // The color mode key: a key of its own, never the engine module's.
     Require(ProfileValidation.Validate(vr with { ColorModeKey = "121:6", DepthBoost = true }).Any(i => i.Code == "hotkey-conflict" && i.Message.StartsWith("The color mode key")), "not Depth boost's key");
@@ -5725,6 +5745,10 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         new() { EngineRecordersEmulatedLists = true, EngineOptimizations = true, EngineShadowRecorder = true, EngineGBufferRecorder = false }, new() { EngineRecordersEmulatedLists = true, EngineOptimizations = true, EngineShadowRecorder = false, EngineGBufferRecorder = true },
         new() { EngineRecordersEmulatedLists = true, EngineOptimizations = true, EngineShadowRecorder = false, EngineGBufferRecorder = false }, new() { EngineRecordersEmulatedLists = true, EngineOptimizations = false, EngineShadowRecorder = true },
         new() { EngineRecordersEmulatedLists = false, EngineOptimizations = true, EngineShadowRecorder = true },
+        // The layer's own gaze (OpenXR eye gaze): stereo or a fixed Quad Views focus on the Pimax runtime, not on Sboys.
+        new() { QuadViews = QuadProvider.None, PupilShift = true, GazeDof = true }, new() { QuadViews = QuadProvider.None, PupilShift = true, Runtime = RuntimeKind.SboysSteamVr },
+        new() { Gaze = GazeMode.Fixed, GVision = true, GVisionUseGaze = true }, new() { Gaze = GazeMode.Fixed, GazeDof = true, Runtime = RuntimeKind.SboysSteamVr },
+        new() { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.Fixed, PupilShift = true }, new() { QuadViews = QuadProvider.None, PupilShift = true, Desktop = true },
     ];
     var dir = PathPolicy.UnderRoot(root, "uses-rules"); Directory.CreateDirectory(dir);
     var profiles = Path.Combine(dir, "profiles.json"); File.WriteAllText(profiles, "[" + string.Join(",", table.Select(JsonData.Serialize)) + "]");
@@ -5738,7 +5762,7 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         const result = vm.runInNewContext(regions.join('\n') + `
         ;profiles.map(p0 => {
           const p = JSON.parse(JSON.stringify(p0)), r = resolveFeatures(JSON.parse(JSON.stringify(p0)));
-          return {eyeTrackedVr:eyeTrackedVr(p), usesPupilShift:usesPupilShift(p), usesDepthBoost:usesDepthBoost(p), usesPerceptionLayer:Boolean(usesPerceptionLayer(p)),
+          return {eyeTrackedVr:eyeTrackedVr(p), layerOwnGaze:layerOwnGaze(p), layerGaze:layerGaze(p), usesPupilShift:usesPupilShift(p), usesDepthBoost:usesDepthBoost(p), usesPerceptionLayer:Boolean(usesPerceptionLayer(p)),
             usesColorKey:usesColorKey(p), colorOn:Boolean(colorOn(p)), usesGazeDof:usesGazeDof(p), gVisionOn:gVisionOn(p), usesVisualRealism:Boolean(usesVisualRealism(p)),
             usesGazePublish:Boolean(usesGazePublish(p)), usesPeripheryDlssPreset:usesPeripheryDlssPreset(p), foveatedSr:foveatedSr(p), dlss:featureState(p).dlss, stereoCheeky:stereoCheeky(p), quad:Boolean(quad(p)),
             nativeAllowed:Boolean(nativeAllowed(p)), depthMax:depthMax(p), usesAdaptiveCadence:usesAdaptiveCadence(p), capDivider:capDivider(p), resolvedFoveatedDlss:Boolean(r.foveatedDlss), resolvedQuadViews:r.quadViews, resolvedQuadFocusAdapter:r.quadFocusAdapter,
@@ -5785,7 +5809,7 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         var p = table[i]; var resolved = ProfileValidation.ResolveFeatures(p);
         var expected = new Dictionary<string, object>
         {
-            ["eyeTrackedVr"] = p.UsesEyeTrackedVr, ["usesPupilShift"] = p.UsesPupilShift, ["usesDepthBoost"] = p.UsesDepthBoost, ["usesPerceptionLayer"] = p.UsesPerceptionLayer,
+            ["eyeTrackedVr"] = p.UsesEyeTrackedVr, ["layerOwnGaze"] = p.UsesLayerOwnGaze, ["layerGaze"] = p.UsesLayerGaze, ["usesPupilShift"] = p.UsesPupilShift, ["usesDepthBoost"] = p.UsesDepthBoost, ["usesPerceptionLayer"] = p.UsesPerceptionLayer,
             ["usesColorKey"] = p.UsesColorModeKey, ["colorOn"] = p.UsesColorMode, ["usesGazeDof"] = p.UsesGazeDof, ["gVisionOn"] = p.UsesGVision, ["usesVisualRealism"] = p.UsesVisualRealism,
             ["usesGazePublish"] = p.UsesGazePublish, ["usesPeripheryDlssPreset"] = p.UsesPeripheryDlssPreset, ["foveatedSr"] = p.UsesFoveatedDlss, ["dlss"] = p.UsesCheeky, ["stereoCheeky"] = p.UsesCheeky && p.QuadViews == QuadProvider.None,
             ["quad"] = p.UsesBundledQuadViews, ["nativeAllowed"] = ProfileValidation.ResolveFeatures(p with { QuadViews = QuadProvider.PimaxNative }).QuadViews == QuadProvider.PimaxNative,

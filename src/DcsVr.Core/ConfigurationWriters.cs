@@ -85,6 +85,16 @@ public static class ConfigurationWriters
         IgnoreDriverPreset=1
         """ : "";
 
+    /// <summary>[PupilShift] QuadViewsFixedFocus=1 when the layer reads the gaze itself under a fixed Quad Views focus
+    /// (<see cref="VrProfile.UsesLayerOwnGaze"/>): the OpenXR eye gaze instead of Quad Views' export, never the fixed focus
+    /// views. Written only then: otherwise the file stays as it was.</summary>
+    private static string FixedFocusLines(VrProfile p) => p.UsesLayerOwnGaze && p.QuadViews != QuadProvider.None && (p.UsesPupilShift || p.UsesGazePublish) ? """
+
+
+        ; Fixed Quad Views focus: the gaze from the headset's OpenXR eye gaze, never from the fixed focus area.
+        QuadViewsFixedFocus=1
+        """ : "";
+
     /// <summary>[PupilShift] OpenXrEyeGaze=0 when the layer runs only for the Periphery DLSS preset: it then needs no gaze,
     /// so DCS's instance gets no eye gaze extension or action from it.</summary>
     private static string LayerGazeOffLine(VrProfile p) => p.UsesPeripheryDlssPreset && !p.UsesPupilShift && !p.UsesDepthBoost && !p.UsesGazePublish ? """
@@ -368,8 +378,8 @@ public static class ConfigurationWriters
         adaptive_cadence={(p.UsesAdaptiveCadence ? 1 : 0)}
         ; When it stops generating (patch 0070): 0 only with room to spare (under 80% of a refresh), 1 when the estimate is within reach and frames arrive on time, 2 whenever it may hold.
         cadence_preference={(p.UsesAdaptiveCadence && Enum.IsDefined(p.FrameGenPassThrough) ? (int)p.FrameGenPassThrough : 0)}
-        ; Both eyes synthesized on their own queues, about 1 ms sooner with identical output (patch 0038): off until flown.
-        parallel_eye_synthesis=0
+        ; Both eyes synthesized on their own queues, about 1 ms sooner with identical output (patch 0038): off unless chosen, not flown yet.
+        parallel_eye_synthesis={(p.FrameGenParallelEyes && p.FrameGen != FrameGeneration.Off ? 1 : 0)}
         ; Foveated frame generation (experimental, patch 0080): one generator per Quad Views layer; the periphery's flow at full scale. After a fast eye move the newly covered strip is filled from the new frame: 2 moves it with the periphery's flow (not with bidirectional flow), 1 leaves it in place.
         foveated_layers={(p.UsesFoveatedFrameGen ? 1 : 0)}
         foveated_periphery_flow_scale=100
@@ -432,7 +442,7 @@ public static class ConfigurationWriters
         ; Testing only: a fixed gaze instead of the eye tracker.
         SimulateGaze=0
         SimulateGazeXDeg=0
-        SimulateGazeYDeg=0{PublishGazeLines(p)}{LayerGazeOffLine(p)}
+        SimulateGazeYDeg=0{PublishGazeLines(p)}{FixedFocusLines(p)}{LayerGazeOffLine(p)}
 
         ; Depth boost: the eye distance above (Ipd, or the headset's) times a scale that rises while the eyes fixate far
         ; and returns to 1 when they fixate nearer than NearM (the cockpit). docs/PERCEPTION.md, docs/FIXATION_DEPTH.md.

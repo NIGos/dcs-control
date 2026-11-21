@@ -401,7 +401,7 @@ function showNeeds(id, need, waits) {
   if (box.dataset.html !== html) { box.dataset.html = html; box.innerHTML = html; }
 }
 /** What an eye-tracked feature (Pupil shift, Depth boost, Eye-focus blur) needs for a gaze, with the setting that gives it. */
-const gazeNeed = (p, bid) => p.desktop ? null : p.quadViews === 'None' ? ['Needs Quad Views.',[bid,'quadViews','Turn on Quad Views']]
+const gazeNeed = (p, bid, own) => p.desktop || (own && layerOwnGaze(p)) ? null : p.quadViews === 'None' ? ['Needs Quad Views.',[bid,'quadViews','Turn on Quad Views']]
   : p.gaze !== 'EyeTracked' ? ['Needs an eye-tracked focus area.',[bid,'gaze','Set Focus movement']] : null;
 /** A closed disclosure inside a card for settings that are real but rarely changed. Search and links open it. */
 /** `value` (profile => text) shows the fold's current state in its closed summary (updateControls). */
@@ -655,9 +655,9 @@ function buildFields() {
   const tracked = p => quad(p) && p.gaze === 'EyeTracked';
   let toggles = toggleList(c);
   field(toggles,'quadSaccadeLead','Focus ahead of fast eye movements',['Lands you in full detail after a fast eye jump.','When your eyes jump, the focus area reaches ahead along the jump for a moment, instead of waiting a frame or two (most noticeable with frame generation). No GPU cost: for that moment the focus area is a little less sharp.'],'toggle',null,tracked);
-  field(toggles,'quadSaccadeTail','<span class="tag">EXPERIMENTAL</span> Stay ahead until your eyes land',['Keeps the focus area ahead of your eyes until they stop.','Eyes slow down just before they land. The focus area stays ahead of them through that last part of the jump and is back to its normal size as soon as they have landed.'],'toggle',null,p => tracked(p) && p.quadSaccadeLead && p.frameGen === 'Off');
+  field(toggles,'quadSaccadeTail','<span class="tag">EXPERIMENTAL</span> Stay ahead until your eyes land',['Keeps the focus area ahead of your eyes until they stop.','Eyes slow down just before they land. The focus area stays ahead of them through that last part of the jump and is back to its normal size as soon as they have landed.'],'toggle',null,p => tracked(p) && p.quadSaccadeLead);
   field(toggles,'quadGazeStabilize','Steady focus while looking',['Stops the focus edge shimmering while your eyes rest.','Movements under half a degree are ignored, so eye-tracker noise does not move the focus area. Real eye movements are followed at once.'],'toggle',null,tracked);
-  field(toggles,'quadLostGazeEase','<span class="tag">EXPERIMENTAL</span> Slide back when tracking is lost',['The focus area slides to the center instead of jumping.','When the eye tracker loses your eyes for more than a moment (a long blink, the headset shifting), the focus area moves to the center over 150 ms. When your eyes are found again it follows them at once.'],'toggle',null,p => tracked(p) && p.frameGen === 'Off');
+  field(toggles,'quadLostGazeEase','<span class="tag">EXPERIMENTAL</span> Slide back when tracking is lost',['The focus area slides to the center instead of jumping.','When the eye tracker loses your eyes for more than a moment (a long blink, the headset shifting), the focus area moves to the center over 150 ms. When your eyes are found again it follows them at once.'],'toggle',null,p => tracked(p));
   field(toggles,'quadTurbo','Turbo mode',['Can help when the CPU limits FPS.','DCS starts the next frame while the headset still shows the previous one. Not with frame generation, which paces the frames itself.'],'toggle',null,p => quad(p) && p.frameGen === 'Off');
   let more = disclosure(c,'Alternative provider','Only to test another Quad Views build.',p => p.quadViews !== 'QuadViewsFoveated' ? 'Not used' : p.quadViewsLayerDirectory ? p.quadViewsLayerDirectory.split(/[\\/]/).filter(Boolean).pop() : 'Bundled');
   field(more,'quadViewsLayerDirectory','Alternative Quad Views provider','Folder of another Quad Views build. Leave empty for the bundled one, which DLSS 5 needs.','path',null,p => p.quadViews === 'QuadViewsFoveated');
@@ -673,7 +673,7 @@ function buildFields() {
   field(c,'pimaxVerticalOffset','Vertical offset',['Moves the focus area down (negative) or up from where you look.','As Pimax Play\'s Vertical Offset: 100 is a quarter of the view\'s height. In an aircraft, about -10 to -20 keeps the gauges sharp while you look outside. With a fixed focus area it moves from the center of the view.'],'number',[-100,100,1],quad,'',ownFocusHidden,{prop:'quadVerticalOffset',get:p => whole(PIMAX.offsetFromStored(Number(p.quadVerticalOffset) || 0)),set:(p,v) => p.quadVerticalOffset = PIMAX.storedFromOffset(v)});
   field(c,'quadEdgeBlend','Focus edge blending',['How softly the focus area fades into the periphery.','Wider is softer but leaves a little less area in full detail. With values from Pimax Play and its Transition Mode Off, the edge is hard (0).'],'number',[0,.5,.01],quad,'ratio');
   field(c,'quadRoundFocus','Round focus area',['On: a circle. Off: a rounded rectangle, with more detail in the corners.','Either way its edge fades out over Focus edge blending. A central DLSS 5 area follows the same shape.'],'toggle',null,quad);
-  field(c,'quadEdgeMatch','<span class="tag">EXPERIMENTAL</span> Soft focus edge',['Makes the ring around where you look harder to see.','In the edge band the focus area first loses detail down to the periphery\'s resolution, then fades out, so you see one image getting softer instead of a sharp one over a blurry one. The finest detail near the edge is a little softer.'],'toggle',null,p => quad(p) && effectiveFovea(p).blend > 0 && !usesFoveatedFg(p));
+  field(c,'quadEdgeMatch','<span class="tag">EXPERIMENTAL</span> Soft focus edge',['Makes the ring around where you look harder to see.','In the edge band the focus area first loses detail down to the periphery\'s resolution, then fades out, so you see one image getting softer instead of a sharp one over a blurry one. The finest detail near the edge is a little softer.'],'toggle',null,p => quad(p) && effectiveFovea(p).blend > 0);
   c = card('sharpnessControls','Sharpness','Detail in and around the focus area. Almost no GPU cost.');
   field(c,'quadSharpening','Focus sharpening','Extra sharpening inside the focus area. 0 is off.','number',[0,1,.01],quad,'ratio');
   field(c,'quadSharpenTaper','Sharpening fades at the edge',['Fades the sharpening toward the focus edge, so the edge is harder to see.','Detail steps down gradually. Almost no GPU cost.'],'toggle',null,quad);
@@ -751,6 +751,7 @@ function buildFields() {
   // Greyed out until Depth boost runs, but never while it is on (ProfileValidation's hud-symbology-needs says why), so it can be turned off.
   field(c,'frameGenHudSymbology','<span class="tag">EXPERIMENTAL</span> Sharp HUD',['Stops HUD and helmet symbols smearing in generated frames. Needs Depth boost.','They update at DCS\'s own HUD rate (about 20 times a second). Costs about 0.15 ms of GPU and 160 MB of video memory.'],'toggle',null,p => p.frameGen !== 'Off' && (usesDepthBoost(p) || p.frameGenHudSymbology));
   field(c,'smoothCursor','Smooth mouse cursor',['The mouse cursor moves smoothly in generated frames.','It is drawn at its in-between position. Where you click doesn\'t change.'],'toggle',null,p => p.frameGen !== 'Off');
+  field(c,'frameGenParallelEyes','<span class="tag">EXPERIMENTAL</span> Both eyes at once',['Generated frames are ready about 1 ms sooner.','Each eye\'s frame is made on its own GPU queue instead of one after the other. The image is the same.'],'toggle',null,p => p.frameGen !== 'Off');
   // NVIDIA Optical Flow only: gone with FidelityFX, greyed out while frame generation is off.
   const fidelity = p => p.frameGen === 'FidelityFx';
   segmented(field(c,'nvidiaFlowScale','Optical flow resolution',['The resolution motion is estimated at (NVIDIA only). Higher costs more GPU.','With Foveated frame generation this sets the focus area; the rest of the view always uses its own full resolution.'],'select',[[50,'50% · default'],[75,'75%'],[100,'100% · full']],flow,'',fidelity),{50:'50%',75:'75%',100:'100%'});
@@ -917,10 +918,10 @@ function buildFields() {
   segmented(field(more,'gVisionMode','Mode',['Auto follows DCS\'s G-EFFECT option.','Complement: DCS darkens, this adds the tunnel and color loss. Full: this does all of it, for DCS\'s G-EFFECT set to None (which also turns off DCS\'s G-LOC).'],'select',[['Auto','Auto · default'],['Complement','Complement DCS'],['Full','Full']],gVisionOn),{Auto:'Auto',Complement:'Complement',Full:'Full'});
   field(more,'gVisionTolerance','G tolerance','The sustained G at which you black out; grey-out starts about 1.2 G lower. 7.5: g-suit and straining. About 5: relaxed, no g-suit.','number',[4,10,.5],gVisionOn,'G');
   field(more,'gVisionRedout','Red-out (negative G)','A red tint below about −2 G, when G vision does all of it (Full, or Auto with DCS\'s G effect off).','toggle',null,gVisionOn);
-  field(more,'gVisionUseGaze','Follow my eyes','The tunnel moves with your eyes. Needs Quad Views with eye tracking; without it the tunnel stays straight ahead.','toggle',null,gVisionOn);
-  c = card('gazeDofControls','<span class="tag">EXPERIMENTAL</span> Eye-focus blur','Nearer or farther things go slightly soft, like a real eye. Needs Quad Views with eye tracking.');
+  field(more,'gVisionUseGaze','Follow my eyes','The tunnel moves with your eyes. Needs eye tracking; without it the tunnel stays straight ahead.','toggle',null,gVisionOn);
+  c = card('gazeDofControls','<span class="tag">EXPERIMENTAL</span> Eye-focus blur','Nearer or farther things go slightly soft, like a real eye. Needs eye tracking.');
   needsNote(c,'gazeDofNeeds');
-  field(c,'gazeDof','Eye-focus blur',['Subtle, and clears at once when your eyes move. Some people find it uncomfortable. About 0.18 ms.','Blurs what is at a different distance from the point you look at. Try it for a few minutes.'],'toggle',null,p => eyeTrackedVr(p) || Boolean(p.gazeDof));
+  field(c,'gazeDof','Eye-focus blur',['Subtle, and clears at once when your eyes move. Some people find it uncomfortable. About 0.18 ms.','Blurs what is at a different distance from the point you look at. Try it for a few minutes.'],'toggle',null,p => layerGaze(p) || Boolean(p.gazeDof));
   field(c,'gazeDofStrength','Blur strength','0.5 is subtle; 1 is what a real eye would see.','number',[0,1,.05],usesGazeDof,'ratio');
   more = disclosure(c,'Advanced','The defaults are the module\'s own.',() => `${shown('gazeDofMaxArcmin')} · settle ${shown('gazeDofSettleMs')}`);
   field(more,'gazeDofMaxArcmin','Maximum blur','Upper limit of the blur, in arc minutes. Raise it for a stronger effect at night.','number',[1,20,1],usesGazeDof,'arcmin');
@@ -963,9 +964,9 @@ function buildFields() {
   const enhancedWhy = 'Choose Enhanced in Color mode to change these.';
   because(at('quadTurbo'),p => !quad(p) ? qvWhy(p) : 'Off while frame generation is on: the two fight over frame timing.');
   because(at('quadSaccadeLead','quadGazeStabilize'),p => !quad(p) ? qvWhy(p) : 'Needs Focus movement: Eye tracked.');
-  because(at('quadLostGazeEase'),p => !quad(p) ? qvWhy(p) : p.gaze !== 'EyeTracked' ? 'Needs Focus movement: Eye tracked.' : 'Only without frame generation.');
-  because(at('quadEdgeMatch'),p => !quad(p) ? qvWhy(p) : usesFoveatedFg(p) ? 'Not with Foveated frame generation.' : 'Needs Focus edge blending above 0.');
-  because(at('quadSaccadeTail'),p => !quad(p) ? qvWhy(p) : p.gaze !== 'EyeTracked' ? 'Needs Focus movement: Eye tracked.' : !p.quadSaccadeLead ? 'Turn on Focus ahead of fast eye movements to use this.' : 'Only without frame generation.');
+  because(at('quadLostGazeEase'),p => !quad(p) ? qvWhy(p) : 'Needs Focus movement: Eye tracked.');
+  because(at('quadEdgeMatch'),p => !quad(p) ? qvWhy(p) : 'Needs Focus edge blending above 0.');
+  because(at('quadSaccadeTail'),p => !quad(p) ? qvWhy(p) : p.gaze !== 'EyeTracked' ? 'Needs Focus movement: Eye tracked.' : 'Turn on Focus ahead of fast eye movements to use this.');
   because(f => f.condition === quad,qvWhy);
   because(at('neuralFocusArea'),p => !nr(p) ? dlssWhy : p.quadViews !== 'QuadViewsFoveated' ? bundledWhy : null);
   because(at('quadNeuralEdgeFade'),p => !nr(p) ? dlssWhy : p.quadViews !== 'QuadViewsFoveated' ? bundledWhy : p.neuralFocusArea < 100 ? 'Set DLSS 5 area to Whole focus area to use this.' : effectiveFovea(p).blend > 0 ? null : 'Needs Focus edge blending above 0 (Quad Views page).');
@@ -981,7 +982,7 @@ function buildFields() {
   because(at('diagnosticFrameRecords'),p => fgOff(p) ? fgWhy : 'Turn on Frame generation log to use this.');
   because(f => f.condition === flow,p => fgOff(p) ? fgWhy : 'NVIDIA Optical Flow only.');
   because(at('frameGenFoveated'),p => fgOff(p) ? fgWhy : p.frameGen !== 'Nvidia' ? 'NVIDIA frame generation only.' : p.runtime !== 'Pimax' ? 'Pimax route only.' : ['Needs the bundled Quad Views (Quad Views page).','quadViews']);
-  because(at('frameGenFactor','frameGenDeepPipeline','smoothCursor','frameGenAsyncArm','showOverlay','diagnosticRecorder'),fgWhy);
+  because(at('frameGenFactor','frameGenDeepPipeline','smoothCursor','frameGenParallelEyes','frameGenAsyncArm','showOverlay','diagnosticRecorder'),fgWhy);
   because(at('renderedFpsCap'),'Choose Custom limit in Frame limit to use this.');
   because(at('engineTaskQueueClock','engineTimerRefreshUs'),p => !engine(p) ? engineWhy : 'Turn on Streaming timer cache to use this.');
   because(at('engineThreeViews'),p => !engine(p) ? engineWhy : !quad(p) ? [bundledWhy,'quadViews'] : 'Only without frame generation.');
@@ -1003,7 +1004,7 @@ function buildFields() {
   because(f => f.condition === enhancedOn,enhancedWhy);
   because(f => f.path.startsWith('nightVision'),p => !enhancedOn(p) ? null : 'Turn on Night vision to change these.');
   because(f => f.path.startsWith('glare'),p => !enhancedOn(p) ? null : 'Turn on Light glare to change these.');
-  because(f => f.condition === usesGazeDof,p => !eyeTrackedVr(p) ? null : 'Turn on Eye-focus blur to change these.');
+  because(f => f.condition === usesGazeDof,p => !layerGaze(p) ? null : 'Turn on Eye-focus blur to change these.');
   because(f => f.condition === gVisionOn,'Turn on G vision to change these.');
   because(at('headsetPanel'),'In VR only.');
   because(f => f.condition === panelOn,p => p.desktop ? 'In VR only.' : 'Turn on the headset panel, or Frame generation, to change these.');
@@ -1167,7 +1168,11 @@ async function engineAction(action, data) {
 /** The layer is installed only for a VR flight with eye-tracked Quad Views (VrProfile.UsesPupilShift, UsesDepthBoost,
  *  UsesPerceptionLayer: it carries both). */
 const eyeTrackedVr = p => Boolean(!p.desktop && p.quadViews !== 'None' && p.gaze === 'EyeTracked');
-const usesPupilShift = p => Boolean(p.pupilShift && eyeTrackedVr(p));
+/** The layer reads the gaze itself (VrProfile.UsesLayerOwnGaze): no Quad Views or a fixed focus, Pimax runtime. */
+const layerOwnGaze = p => Boolean(!p.desktop && p.runtime === 'Pimax' && (p.quadViews === 'None' || p.gaze === 'Fixed'));
+/** The layer has a gaze (VrProfile.UsesLayerGaze): Pupil shift, Eye-focus blur and G vision's gaze can run. */
+const layerGaze = p => eyeTrackedVr(p) || layerOwnGaze(p);
+const usesPupilShift = p => Boolean(p.pupilShift && layerGaze(p));
 /** Foveated frame generation can run: NVIDIA frame generation, Pimax route, bundled Quad Views (VrProfile.UsesFoveatedFrameGen). */
 const foveatedFgCan = p => Boolean(!p.desktop && p.frameGen === 'Nvidia' && p.runtime === 'Pimax' && p.quadViews === 'QuadViewsFoveated' && !String(p.quadViewsLayerDirectory ?? '').trim());
 const usesFoveatedFg = p => Boolean(p.frameGenFoveated && foveatedFgCan(p));
@@ -1190,11 +1195,11 @@ const fixOn = p => !p.desktop && (p.colorMode === 'Fix' || usesColorKey(p));
 const enhancedOn = p => !p.desktop && (p.colorMode === 'Enhanced' || usesColorKey(p));
 const colorOn = p => !p.desktop && (p.colorMode !== 'Off' || usesColorKey(p));
 /** Gaze DoF needs the gaze, which the pupil shift layer publishes from the eye-tracked Quad Views focus. */
-const usesGazeDof = p => Boolean(p.gazeDof && eyeTrackedVr(p));
+const usesGazeDof = p => Boolean(p.gazeDof && layerGaze(p));
 const gVisionOn = p => Boolean(!p.desktop && p.gVision);
 const usesVisualRealism = p => colorOn(p) || usesGazeDof(p) || gVisionOn(p);
 /** The layer publishes the gaze for the engine module (VrProfile.UsesGazePublish): eye-focus blur, G vision following the eyes. */
-const usesGazePublish = p => usesGazeDof(p) || Boolean(gVisionOn(p) && p.gVisionUseGaze && eyeTrackedVr(p));
+const usesGazePublish = p => usesGazeDof(p) || Boolean(gVisionOn(p) && p.gVisionUseGaze && layerGaze(p));
 // </uses-rules>
 /** What the profile still needs for a gaze, with a link to the setting that gives it. */
 function renderPupilNeeds() {
@@ -1202,7 +1207,7 @@ function renderPupilNeeds() {
   if (ipd && profile?.eyeDistance && profile.eyeDistance !== 'DcsCustom') { const set = profile.eyeDistance === 'Manual'; ipd.hidden = !(profile.pupilShift || profile.depthBoost); ipd.textContent = set ? `DCS renders with an eye distance of ${profile.eyeDistanceMm} mm (Set here)${profile.depthBoost ? `; Depth boost renders the world with up to ×${Number(depthMaxAt(profile, profile.eyeDistanceMm)).toFixed(2)}` : ''}. DCS's own custom IPD is off while this profile is applied.` : `DCS renders with the headset's own eye distance${profile.depthBoost ? '; Depth boost raises it while you look far' : ''}.${state?.dcsCustomIpd ? ` DCS's custom IPD (${state.dcsCustomIpd} mm) is off while this profile is applied; Back to stock DCS turns it on again.` : ''}`; }
   else if (ipd) { const mm = state?.dcsCustomIpd; ipd.hidden = !mm || !(profile?.pupilShift || profile?.depthBoost); ipd.textContent = mm ? `DCS renders with your custom IPD of ${mm} mm, but DCS Control sets it instead of DCS: otherwise DCS would undo the pupil's sideways move${profile?.depthBoost ? ' and Depth boost' : ''}.${profile?.depthBoost ? ` Depth boost renders the world with ×${Number(depthMaxAt(profile, mm)).toFixed(2)}: ${(mm * depthMaxAt(profile, mm)).toFixed(1)} mm.` : ''} DCS's own option is off while this profile is applied; Back to stock DCS turns it on again.` : ''; }
   if (!profile) return;
-  showNeeds('pupilNeeds', gazeNeed(profile,'pupilFix'), profile.pupilShift);
+  showNeeds('pupilNeeds', gazeNeed(profile,'pupilFix',true), profile.pupilShift);
   showNeeds('depthNeeds', gazeNeed(profile,'depthFix'), profile.depthBoost);
   const noQuad = !quad(profile), noEngine = !profile.engineOptimizations;
   showNeeds('farDepthNeeds', profile.desktop || (!noQuad && !noEngine) ? null : [noQuad && noEngine ? 'Needs the bundled Quad Views and Engine Optimizations.' : noQuad ? 'Needs the bundled Quad Views.' : 'Needs Engine Optimizations.',
@@ -1219,7 +1224,7 @@ function renderPupilNeeds() {
 function renderVisualNeeds() {
   if (!profile) return;
   showNeeds('enhancedNeeds', profile.desktop || enhancedOn(profile) ? null : ['Part of the Enhanced color mode.',['enhancedFix','colorMode','Set Color mode']], false);
-  showNeeds('gazeDofNeeds', gazeNeed(profile,'gazeDofFix'), profile.gazeDof);
+  showNeeds('gazeDofNeeds', gazeNeed(profile,'gazeDofFix',true), profile.gazeDof);
 }
 /** Periphery stability is a pass of the bundled Quad Views (VrProfile.UsesPeripheryStability). */
 function renderStabilityNeeds() {
