@@ -307,6 +307,47 @@ void Run() {
     for (IUnknown* p : {static_cast<IUnknown*>(depSrv), static_cast<IUnknown*>(uav), static_cast<IUnknown*>(ubuf), static_cast<IUnknown*>(pred)})
       if (p) p->Release();
   }
+  // Mission change / resize: DCS's right depth texture is replaced by a new one. The fill's view caches must let the
+  // old texture go once it is no longer used (they held it, with a count cap only, until the device was released).
+  {
+    // A sentinel in the old texture's private data: D3D releases it when the texture is destroyed (the views a
+    // cache holds keep their texture alive; public reference counts do not show them).
+    struct Sentinel : IUnknown {
+      bool gone = false;
+      ULONG refs = 1;
+      HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** o) override { return *o = nullptr, E_NOINTERFACE; }
+      ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+      ULONG STDMETHODCALLTYPE Release() override {
+        if (--refs == 0) gone = true;
+        return refs;
+      }
+    };
+    static Sentinel sentinel;  // static: a texture that outlives this block (a failure) never releases a dead object
+    static const GUID kSentinelGuid = {0x6c1b7e2a, 0x3f4d, 0x4e8b, {0x9a, 0x51, 0x2d, 0x7c, 0x10, 0xe4, 0x88, 0x37}};
+    fill.Release();
+    ID3D11Texture2D* old =
+        tex(DXGI_FORMAT_R32G8X24_TYPELESS, depR.data(), W * 8, D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
+    const bool tagged = old && SUCCEEDED(old->SetPrivateDataInterface(kSentinelGuid, &sentinel));
+    sentinel.Release();  // the texture holds the only reference now
+    fixdepth::tvfill::Inputs in2 = in;
+    in2.rDepth = old;
+    const bool first = old && fill.Run(ctx, in2);
+    ctx->ClearState();
+    if (old) old->Release();  // DCS let it go (a mission change): only the fill's cache may still hold it
+    ctx->Flush();
+    const bool heldByCache = !sentinel.gone;
+    int runs = 0;
+    for (int i = 0; i < 80; ++i) {
+      runs += fill.Run(ctx, in) ? 1 : 0;
+      ctx->ClearState();
+    }
+    ctx->Flush();
+    snprintf(b, sizeof(b),
+             "three views fill: a replaced DCS depth texture is let go by the view caches (held while cached %d, "
+             "destroyed after %d fills on the new one %d)",
+             heldByCache ? 1 : 0, runs, sentinel.gone ? 1 : 0);
+    Check(tagged && first && heldByCache && runs == 80 && sentinel.gone, b);
+  }
   fill.Release();
   for (IUnknown* p : {static_cast<IUnknown*>(rCol), static_cast<IUnknown*>(rMv), static_cast<IUnknown*>(roDsv), static_cast<IUnknown*>(tColL),
                       static_cast<IUnknown*>(tMvL), static_cast<IUnknown*>(tDepL), static_cast<IUnknown*>(tColR), static_cast<IUnknown*>(tMvR),

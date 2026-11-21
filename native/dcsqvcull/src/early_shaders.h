@@ -1063,7 +1063,16 @@ ptiming::ExecFn HeatIntercept(void* pass, uint64_t) {
   if (!(g_mask.load(std::memory_order_relaxed) & 2u) || g_fault.load(std::memory_order_relaxed)) return nullptr;
   ptiming::ExecFn r = nullptr;
   __try {
-    const int k = HeatKind(pass, LabelOf(pass));
+    int k = HeatKind(pass, LabelOf(pass));
+    // The kind is cached per pass object at its first sight. An object freed and another one made at its address
+    // (passes rebuilt on a mission load) would keep a copy / compose kind and not be executed: those two kinds are
+    // checked by name again, and a mismatch classes the pass afresh.
+    if ((k == 2 || k == 3) && !fixdepth::PassIs(pass, k == 2 ? "HotAirCopySourcePass" : "HotAirComposePass")) {
+      g_heatKind.erase(pass);
+      g_passLabel.erase(pass);
+      g_passSsao.erase(pass);
+      k = HeatKind(pass, LabelOf(pass));
+    }
     if (k == 2 || k == 3) {
       HeatFrame(ptiming::g_execFrame.load(std::memory_order_relaxed));
       if (k == 3) ++g_composeSeen;

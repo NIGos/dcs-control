@@ -330,6 +330,12 @@ void UninstallCb() {
     if (g_cbSlot >= 0 && g_cbt[i].vt[g_cbSlot] == reinterpret_cast<void*>(&H_CSSetConstantBuffers))
       d3ds::WriteTablePointer(&g_cbt[i].vt[g_cbSlot], g_cbt[i].orig);
 }
+// Our entry is on one of the tables we hooked.
+bool CbOnTable() {
+  for (int i = 0; i < g_ncbt.load(); ++i)
+    if (g_cbSlot >= 0 && g_cbt[i].vt[g_cbSlot] == reinterpret_cast<void*>(&H_CSSetConstantBuffers)) return true;
+  return false;
+}
 }  // namespace vstrip
 
 // ---------------------------------------------------------------------------
@@ -417,6 +423,20 @@ void Tick(bool cfgOn, double stripNdc, int keyVk, int keyMods, bool engineOff, b
     Log("three views: not engaged (%s)", why.c_str());
     g_lastWhy = why;
   }
+  // [Views] ThreeViews set to 0: the pass callback is out from this tick, so the render thread never takes our
+  // CSSetConstantBuffers entry off the table (OnPass does that at a pass end only while the key is on). It goes here
+  // one tick later (the worker loop sleeps 50-100 ms: a pass boundary that loaded the callback and saw the mode
+  // engaged has long finished); the caller keeps calling while the entry is on (CbOnTable).
+  static bool offSeen = false;
+  if (!cfgOn) {
+    if (offSeen && vstrip::CbOnTable()) {
+      vstrip::UninstallCb();
+      Log("three views: constant-buffer entry off DCS's context table ([Views] ThreeViews=0)");
+    }
+    offSeen = true;
+  } else {
+    offSeen = false;
+  }
 }
 
 // Payload stop (before fixdepth::Shutdown and chainfast::Shutdown): disengaged, our table entry and callback out,
@@ -461,13 +481,16 @@ void LogStatus() {
   // The fill inside the engine (option C): per periphery TransparentCockpitPass, left copies and right fills.
   Log("three views: engine fill: left copies %llu, right fills %llu, not run %llu, no left copy %llu, target not float %llu, "
       "left without motion %llu; right view not culled (DCS's own, not flagged) %llu; pushes deferred after a copy texture "
-      "was made %llu, idle layer releases %llu, post-transparent copies left out %llu (isolate 0x%x)",
+      "was made %llu, idle layer releases %llu, post-transparent copies left out %llu, after the glass %llu / later %llu; "
+      "copy textures made %llu, released %llu; constant-buffer entry refused %llu (isolate 0x%x)",
       (unsigned long long)fixdepth::tvexp::g_leftCopies.load(), (unsigned long long)fixdepth::tvexp::g_fills.load(),
       (unsigned long long)fixdepth::tvexp::g_fillSkips.load(), (unsigned long long)fixdepth::tvexp::g_noLeft.load(),
       (unsigned long long)fixdepth::tvexp::g_badTarget.load(), (unsigned long long)fixdepth::tvexp::g_noMv.load(),
       (unsigned long long)fixdepth::tvexp::g_notCulled.load(), (unsigned long long)fixdepth::tvexp::g_deferredPushes.load(),
       (unsigned long long)fixdepth::tvexp::g_idleReleases.load(), (unsigned long long)fixdepth::tvexp::g_postSkipped.load(),
-      tvc::g_isolate.load());
+      (unsigned long long)fixdepth::tvexp::g_postCopies.load(), (unsigned long long)fixdepth::tvexp::g_postFallback.load(),
+      (unsigned long long)fixdepth::tvexp::g_texCreates.load(), (unsigned long long)fixdepth::tvexp::g_releases.load(),
+      (unsigned long long)vstrip::g_cbRefused.load(), tvc::g_isolate.load());
 }
 
 // ---------------------------------------------------------------------------

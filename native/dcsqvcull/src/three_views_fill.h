@@ -401,6 +401,10 @@ class Fill {
     ctx->GetDevice(&dev);
     if (!dev) return false;
     bool ok = Ensure(dev);
+    // Before this fill's lookups: views not used for kStale lookups go (DCS's depth from before a mission change or a
+    // resize, our replaced copies), whatever the cache size.
+    Trim(m_srvs);
+    Trim(m_dsvs);
     ID3D11ShaderResourceView *sDepL = nullptr, *sColL = nullptr, *sMvL = nullptr;
     ID3D11DepthStencilView* dsv = nullptr;
     const UINT w = static_cast<UINT>(in.vpR.Width + 0.5f), h = static_cast<UINT>(in.vpR.Height + 0.5f);
@@ -512,13 +516,12 @@ class Fill {
     V* v;
     uint64_t used;  // m_uses at its last lookup
   };
-  // Views are cached by texture (each holds its texture). Above `cap` entries, the ones not looked up in the last
-  // kStale lookups are released: never a view this fill just took (releasing it would free it before its bind), and
-  // DCS's textures from before a mission change or resize are let go.
+  // Views are cached by texture (each holds its texture). At the start of each fill the ones not looked up in the last
+  // kStale lookups (about 64 fills) are released: never a view this fill takes (none is taken yet), and DCS's textures
+  // from before a mission change or resize are let go (an entry count cap kept them while the cache stayed small).
   static constexpr uint64_t kStale = 256;
   template <class V>
-  void Trim(std::vector<Entry<V>>& c, size_t cap) {
-    if (c.size() <= cap) return;
+  void Trim(std::vector<Entry<V>>& c) {
     for (size_t i = 0; i < c.size();)
       if (m_uses - c[i].used > kStale) c[i].v->Release(), c[i] = c.back(), c.pop_back();
       else ++i;
@@ -528,7 +531,6 @@ class Fill {
     ++m_uses;
     for (auto& e : m_srvs)
       if (e.r == t && e.key == static_cast<UINT>(f)) return e.used = m_uses, *out = e.v, true;
-    Trim(m_srvs, 24);
     D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
     sd.Format = f;
     sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
@@ -557,7 +559,6 @@ class Fill {
     }
     ID3D11DepthStencilView* v = nullptr;
     if (FAILED(dev->CreateDepthStencilView(t, &dd, &v)) || !v) return false;
-    Trim(m_dsvs, 8);
     m_dsvs.push_back({t, slice, v, m_uses});
     *out = v;
     return true;

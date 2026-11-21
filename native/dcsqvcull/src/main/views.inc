@@ -30,7 +30,7 @@ std::atomic<bool> g_cfgOn{false};      // [Views] ThreeViews: the module runs th
 std::atomic<bool> g_engaged{false};    // the right periphery is rendered as strip + cockpit (collect and terrain chain)
 std::atomic<uint32_t> g_layerMask{0};  // Quad Views' DcsVr_QuadViewsDepthWanted() of the last frame (render thread)
 std::atomic<double> g_stripNdc{0.55};  // [Views] ThreeViewsStripNdc: the right periphery's world is drawn for NDC x >= it
-std::atomic<uint64_t> g_patched{0}, g_refused{0}, g_ckKept{0}, g_notRight{0};
+std::atomic<uint64_t> g_patched{0}, g_refused{0}, g_ckKept{0};
 std::atomic<int> g_logLeft{0};         // collect log lines left (set on each engage)
 // [Views] ThreeViewsIsolate (dev, default 0, hot): parts of the mode left out to isolate a fault. 1 no post-transparent
 // depth copy / push, 2 no fill inside the engine (Quad Views' fill only), 4 no terrain chain narrowing, 8 no motion

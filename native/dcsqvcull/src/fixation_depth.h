@@ -3601,7 +3601,7 @@ bool CopyBox(ID3D11DeviceContext* c, ID3D11RenderTargetView* v, const D3D11_VIEW
 
 // DCS's first render-target bind in a periphery view's TransparentCockpitPass (render thread, OM entry, after DCS's own
 // call): the left view's lit colour and motion are copied; in the right view the fill runs before DCS's first draw.
-void TvOnBind(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* r, ID3D11DepthStencilView*) {
+void TvOnBind(ID3D11DeviceContext* c, UINT, ID3D11RenderTargetView* const* r, ID3D11DepthStencilView*) {
   using namespace tvexp;
   g_tvArm = false;  // once per pass
   State& s = g_s;
@@ -3653,7 +3653,7 @@ void TvOnBind(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* r, 
   in.vpL = D3D11_VIEWPORT{g_leftDesc.viewport[0], g_leftDesc.viewport[1], g_leftDesc.viewport[2], g_leftDesc.viewport[3], 0, 1};
   in.vpR = run.vp;
   in.rCol = r[0];
-  in.rMv = n > 1 || mv ? mv : nullptr;
+  in.rMv = mv;  // the run's motion target (bound by the fill itself next to DCS's colour)
   ID3D11Texture2D* rd2 = nullptr;
   if (run.tex) run.tex->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&rd2));
   in.rDepth = rd2;

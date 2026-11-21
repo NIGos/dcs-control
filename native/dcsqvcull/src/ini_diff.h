@@ -18,7 +18,7 @@
 //
 // The engine key set (the keys whose change means "the pilot re-configured the engine optimizations"):
 //   - whole sections: [Cull] [Scene] [Model] [Texture] [Effects] [D3D] [Shadows] [Shadow] [Timing] [Prefetch]
-//     [Threads] [Governor] [Suite] [Bench] [Water]: every optimization the kill switch gates (engine.inc SetEngineOff,
+//     [Threads] [Governor] [Suite] [Bench] [Water] [Views]: every optimization the kill switch gates (engine.inc SetEngineOff,
 //     worker.inc's retries), the governor that steps them, and the suite / benchmark keys;
 //   - [General] LowPowerPacer and LowPowerPacerTimeoutUs (the pacer is gated by the kill switch).
 // Not engine keys (a change keeps the kill switch as it is): [Color] [ColorFix] [ColorEnhanced] [Night] [VrFx]

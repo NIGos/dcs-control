@@ -249,6 +249,28 @@ int main() {
         Check(pass.Active() && pass.Fill(dev.Get(), ctx.Get(), sL.Get(), sR.Get(), W, H, samp.Get()) == nullptr,
               "a frame the engine filled is taken but not filled again (the layer fill is the fallback)");
     }
+    {  // the engine remade its copies (a resize): the layer's depth views of the old ones let them go
+        auto refs = [](IUnknown* p) {
+            p->AddRef();
+            return p->Release();
+        };
+        run(true);
+        const ULONG held = refs(dL.Get());
+        auto dL2 = texture(DXGI_FORMAT_R32G8X24_TYPELESS, DW, DH, depL.data(), DW * 8);
+        auto dR2 = texture(DXGI_FORMAT_R32G8X24_TYPELESS, DW, DH, depR.data(), DW * 8);
+        int filled = 0;
+        for (int i = 0; i < 130; ++i) {
+            DcsVrDepthView a = desc(0, camL, dL2.Get(), false), b = desc(1, camR, dR2.Get(), true);
+            imp.Push(&a), imp.Push(&b);
+            pass.BeginFrame(imp);
+            filled += pass.Fill(dev.Get(), ctx.Get(), sL.Get(), sR.Get(), W, H, samp.Get()) ? 1 : 0;
+        }
+        const ULONG after = refs(dL.Get()), afterR = refs(dR.Get());
+        char m2[200];
+        snprintf(m2, sizeof(m2), "old depth copies are let go by the layer's view cache (left refs %lu while used, %lu / right %lu after %d fills on new copies)",
+                 held, after, afterR, filled);
+        Check(filled == 130 && held > 1 && after == 1 && afterR == 1, m2);
+    }
     printf("%d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;
 }

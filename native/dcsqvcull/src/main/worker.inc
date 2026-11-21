@@ -141,7 +141,7 @@ DWORD WINAPI WorkerThread(void*) {
             "motion target record, 16 terrain planes in our own constant buffer)", tvc::g_isolate.load());
       }
       const bool tvKey = g_cfg.threeViewsKeyVk > 0 && KeyDown(g_cfg.threeViewsKeyVk) && ModifiersMatch(g_cfg.threeViewsKeyMods);
-      if (g_cfg.threeViews || tvc::g_cfgOn.load())
+      if (g_cfg.threeViews || tvc::g_cfgOn.load() || tviews::vstrip::CbOnTable())
         tviews::Tick(g_cfg.threeViews && !g_perceptionOnly.load(), g_cfg.threeViewsStripNdc, g_cfg.threeViewsKeyVk,
                      g_cfg.threeViewsKeyMods, g_engineOff.load() || g_faulted.load(),
                      g_cfg.cockpitMaskExport || g_cfg.cockpitMotionExport, fixdepth::g_installed.load(), tvKey);

@@ -237,6 +237,12 @@ class ThreeViews {
     // Once per xrEndFrame (before the eyes): this frame's pushes, or none.
     void BeginFrame(DepthImport& import) {
         m_ok = import.TakeThreeViews(m_latch);
+        // Depth views not used for kViewIdleFrames frames go, with the reference they hold on the engine's copy (a
+        // resize or a remade copy left the old ones held until 16 piled up, or the session ended). The engine's copies
+        // alternate between two per view from frame to frame: those in use are never that old.
+        ++m_frameNo;
+        for (auto e = m_views.begin(); e != m_views.end();)
+            e = m_frameNo - e->second.lastUse > kViewIdleFrames ? m_views.erase(e) : std::next(e);
         m_ownRight = nullptr;
         // The engine filled the right periphery itself (before its glass): DCS's image is complete, nothing to do here.
         m_engineFilled = m_ok && (m_latch[1].desc.flags & DCSVR_DEPTH_FILLED_IN_ENGINE) != 0;
@@ -538,6 +544,7 @@ class ThreeViews {
             v.tex = t;
             it = m_views.emplace(t, v).first;
         }
+        it->second.lastUse = m_frameNo;
         depth = it->second.depth.Get();
         stencil = it->second.stencil.Get();
         return true;
@@ -629,7 +636,10 @@ class ThreeViews {
     struct Views {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth, stencil;
+        uint64_t lastUse = 0;  // m_frameNo of its last lookup
     };
+    static constexpr uint64_t kViewIdleFrames = 120;
+    uint64_t m_frameNo = 0;
 
     LogFn m_log = nullptr;
     std::string m_dir;

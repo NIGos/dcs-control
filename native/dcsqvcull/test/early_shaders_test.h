@@ -450,7 +450,42 @@ void CensusWarpTest() {
     if (p) p->Release();
 }
 
+// The hot-air intercept on a pass object whose cached kind is stale: another pass made at a freed compose pass's
+// address (a mission load) must be executed, not skipped.
+struct FakeHeatPass {
+  void* vt;
+  uint64_t len;
+  char name[32];
+};
+char g_fakeVt[2];
+void HeatInterceptTests() {
+  const uint32_t savedMask = g_mask.load();
+  g_mask = 2;
+  FakeHeatPass p{&g_fakeVt[0], 17, "HotAirComposePass"};
+  void* key = &p;
+  g_heatKind[key] = 3;
+  g_passLabel[key] = "HotAirModule:HotAirComposePass";
+  g_passSsao[key] = false;
+  auto arm = [] {  // this frame: one watched, empty heat pass seen, no compose yet
+    HeatFrame(ptiming::g_execFrame.load());
+    g_heatSeen = 1, g_composeSeen = 0, g_heatAllIdle = true;
+  };
+  arm();
+  const bool skipped = HeatIntercept(key, 0) == &HeatNoExecute;
+  memset(p.name, 0, sizeof(p.name));
+  memcpy(p.name, "SomeOtherPass", 13);
+  p.len = 13;
+  arm();
+  const bool other = HeatIntercept(key, 0) == nullptr;
+  const auto it = g_heatKind.find(key);
+  Check(skipped && other && it != g_heatKind.end() && it->second == 0,
+        "early: hot air: a compose pass is skipped; another pass at its address afterwards runs (kind re-checked)");
+  g_heatKind.erase(key), g_passLabel.erase(key), g_passSsao.erase(key);
+  g_mask = savedMask;
+}
+
 void Run() {
+  HeatInterceptTests();
   CensusWarpTest();
   PatchTests();
   DecideTests();
