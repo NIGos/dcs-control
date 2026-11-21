@@ -312,9 +312,11 @@ void __fastcall HookCollect(void* self, uint32_t count, uint8_t* infos, uint8_t*
   if (pairs >= 1 && !po) PublishQuadViews(infos, views, t1.QuadPart);  // the G-buffer recorder's filter
   if (pairs >= 2 && fixdepth::ckipd::g_on.load(std::memory_order_relaxed)) NoteCullSeparation(views);
   // R30 L1: every frame's main call (quad or not) for the perf line and the governor.
-  perfgov::OnCollect(count, classified ? static_cast<int>(views.size()) : -1, classified ? pairs : -1, t1.QuadPart);
+  const bool mainFrame =
+      perfgov::OnCollect(count, classified ? static_cast<int>(views.size()) : -1, classified ? pairs : -1, t1.QuadPart);
 
   uint64_t us = static_cast<uint64_t>((t1.QuadPart - t0.QuadPart) * g_qpcToUs);
+  if (mainFrame) BenchOnWholeFrame(t1.QuadPart, us);  // every frame, quad views or not (the stereo fallback)
   CensusRecord(count, infos, us);
   if (g_entryDumpRequest.exchange(false)) DumpEntries(static_cast<uint8_t*>(self));
   if (g_infoSnapRequest.load() && infos && count <= kMaxCollectInfos) {

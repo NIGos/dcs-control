@@ -196,6 +196,17 @@ void StatusAndKeys() {
   Check(t.toggle && !t.f11 && f11.f11 && !f11.toggle && f9.f9 && up.up && !f9nd.f9 && f11nd.f11 &&
             !Press({VK_CONTROL, VK_MENU, VK_SHIFT, VK_F11}, dev, false).f11,
         "PerceptionOnly=0: engine toggle, Ctrl+Alt+F11 (always) and the developer keys (DeveloperKeys=1) as before");
+  {  // GitHub #32: AltGr = Right Alt + a Left Ctrl Windows adds (GetAsyncKeyState sees both, and the generic keys).
+    const HeldKeys gs = Press({VK_RMENU, VK_MENU, VK_LCONTROL, VK_CONTROL, VK_SHIFT, VK_F11}, dev, false);
+    const HeldKeys g = Press({VK_RMENU, VK_MENU, VK_LCONTROL, VK_CONTROL, VK_F11}, dev, false);  // Shift let go first
+    const HeldKeys g9 = Press({VK_RMENU, VK_MENU, VK_LCONTROL, VK_CONTROL, VK_F9}, dev, false);
+    const HeldKeys rr = Press({VK_RMENU, VK_MENU, VK_RCONTROL, VK_CONTROL, VK_F11}, dev, false);  // Right Ctrl + Right Alt
+    const HeldKeys ll = Press({VK_LMENU, VK_MENU, VK_LCONTROL, VK_CONTROL, VK_F11}, dev, false);  // Left Ctrl + Left Alt
+    const HeldKeys ls = Press({VK_LMENU, VK_MENU, VK_SHIFT, VK_F11}, dev, false);                // Left Alt + Shift
+    Check(gs.toggle && !gs.f11 && !g.f11 && !g.toggle && !g9.f9 && rr.f11 && ll.f11 && ls.toggle && !ls.f11,
+          "keys: AltGr+Shift+F11 is the Alt+Shift+F11 kill switch; AltGr+F11 (Shift released first) starts nothing; "
+          "AltGr is never Ctrl+Alt; Ctrl+Alt+F11 with real Ctrl keys and Alt+Shift+F11 as before");
+  }
   // The toggle and the benchmark refuse.
   Check(!ToggleEngine() && !g_engineOff.load(), "perception only: the engine toggle is refused");
   StartBench();

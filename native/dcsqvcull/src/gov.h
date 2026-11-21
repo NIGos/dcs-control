@@ -52,9 +52,9 @@ inline void Init() {
 }
 
 // Collect hook, after the original returned. count = collections in the call,
-// views/pairs = Classify's result (-1 when the call was not classified).
-inline void OnCollect(uint32_t count, int views, int pairs, int64_t qpc) {
-  if (count < 4) return;
+// views/pairs = Classify's result (-1 when the call was not classified). True: counted as a frame.
+inline bool OnCollect(uint32_t count, int views, int pairs, int64_t qpc) {
+  if (count < 4) return false;
   uint32_t m = g_maxCount.load(std::memory_order_relaxed);
   while (count > m && !g_maxCount.compare_exchange_weak(m, count, std::memory_order_relaxed)) {
   }
@@ -62,7 +62,7 @@ inline void OnCollect(uint32_t count, int views, int pairs, int64_t qpc) {
   // (MFD or mirror views, if DCS ever collects them in their own call, are
   // far smaller and do not count as frames).
   const uint32_t main = g_mainCount.load(std::memory_order_relaxed);
-  if (main && count * 2 < main) return;
+  if (main && count * 2 < main) return false;
   const DWORD tid = GetCurrentThreadId();
   if (g_tid.exchange(tid, std::memory_order_relaxed) != tid) g_otherThread.fetch_add(1, std::memory_order_relaxed);
   const int64_t prev = g_lastQpc.exchange(qpc, std::memory_order_relaxed);
@@ -71,6 +71,7 @@ inline void OnCollect(uint32_t count, int views, int pairs, int64_t qpc) {
   g_ring[n % kRing] = ms;
   g_views.store(views, std::memory_order_relaxed);
   g_pairs.store(pairs, std::memory_order_relaxed);
+  return true;
 }
 
 // Worker: start of a new main-call window (every 10 s): the largest count of

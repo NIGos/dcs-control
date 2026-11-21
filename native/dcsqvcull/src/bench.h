@@ -24,6 +24,12 @@ struct BenchBlock {
   uint64_t rtThreadCycles = 0;
   bool rtThreadOk = false;
   double passTopUs = -1, passGbUs = -1;
+  // Every frame, quad views or not (BenchOnWholeFrame): the stereo fallback's frames, intervals and collect-thread
+  // cycles (a stereo runtime has no focus / peripheral pairs, so BenchOnFrame never counts a frame there).
+  uint64_t wholeFrames = 0;
+  std::vector<float> wholeIntervalsMs;
+  uint64_t wholeRtCycles = 0, wholeRtFrames = 0;
+  double wholeCollectMs = 0;
 };
 
 // Measurement kit (defined at the end of pass_timing.h): the render thread's id (0 = not known yet), and
@@ -40,6 +46,9 @@ struct BenchState {
   int64_t lastFrameQpc = 0;
   DWORD lastTid = 0;
   uint64_t lastThreadCycles = 0;
+  int64_t lastWholeQpc = 0;
+  DWORD lastWholeTid = 0;
+  uint64_t lastWholeCycles = 0;
 };
 BenchState g_bench;
 std::atomic<bool> g_benchAbort{false};
@@ -68,6 +77,43 @@ void BenchOnFrame(int64_t qpcNow, uint64_t periph, uint64_t focus, uint64_t coll
   b.focusRend += static_cast<double>(focus);
   b.shadowRend += static_cast<double>(g_frameShadowRend.load());
   b.collectMs += collectUs / 1000.0;
+}
+
+// Called for every frame's main collect call (wiring.inc, after perfgov::OnCollect counted it); one relaxed load while
+// no bench runs.
+std::atomic<bool> g_benchRunning{false};
+void BenchOnWholeFrame(int64_t qpcNow, uint64_t collectUs) {
+  if (!g_benchRunning.load(std::memory_order_relaxed)) return;
+  DWORD tid = GetCurrentThreadId();
+  ULONG64 cyc = 0;
+  QueryThreadCycleTime(GetCurrentThread(), &cyc);
+  std::lock_guard<std::mutex> lock(g_bench.mutex);
+  const int64_t prev = g_bench.lastWholeQpc;
+  const DWORD prevTid = g_bench.lastWholeTid;
+  const uint64_t prevCyc = g_bench.lastWholeCycles;
+  g_bench.lastWholeQpc = qpcNow;
+  g_bench.lastWholeTid = tid;
+  g_bench.lastWholeCycles = cyc;
+  if (!g_bench.recording) return;
+  BenchBlock& b = g_bench.cur;
+  b.wholeFrames++;
+  if (prev) b.wholeIntervalsMs.push_back(static_cast<float>((qpcNow - prev) * g_qpcToUs / 1000.0));
+  if (prevTid == tid && cyc > prevCyc) {
+    b.wholeRtCycles += cyc - prevCyc;
+    b.wholeRtFrames++;
+  }
+  b.wholeCollectMs += collectUs / 1000.0;
+}
+
+// The stereo fallback: a block measured on whole frames (frame count, frame period, process and render-thread
+// cycles); the quad-view-only figures (renderables per view type) are left at zero.
+inline void UseWholeFrames(BenchBlock& b) {
+  b.frames = b.wholeFrames;
+  b.intervalsMs.swap(b.wholeIntervalsMs);
+  b.rtCycles = b.wholeRtCycles;
+  b.rtFrames = b.wholeRtFrames;
+  b.collectMs = b.wholeCollectMs;
+  b.periphRend = b.focusRend = b.shadowRend = 0;
 }
 
 uint64_t ProcessCycles() {
@@ -110,7 +156,8 @@ BlockMetrics Metrics(const BenchBlock& b, double tscHz) {
   return m;
 }
 
-void Summarize(const std::vector<BenchBlock>& blocks, double tscHz, bool restoreOn, const char* what) {
+void Summarize(const std::vector<BenchBlock>& blocks, double tscHz, bool restoreOn, const char* what,
+               bool wholeFrame = false) {
   std::vector<BlockMetrics> ms;
   for (const auto& b : blocks) ms.push_back(Metrics(b, tscHz));
 
@@ -143,6 +190,7 @@ void Summarize(const std::vector<BenchBlock>& blocks, double tscHz, bool restore
     const char* name;
     double BlockMetrics::*ptr;
     bool optional;  // measurement kit: left out when no block measured it (-1)
+    bool quadOnly = false;  // a quad-view figure: left out of a whole-frame (stereo) comparison
   };
   const Field fields[] = {{"fps", &BlockMetrics::fps, false},
                           {"frame_ms", &BlockMetrics::frameMs, false},
@@ -150,15 +198,18 @@ void Summarize(const std::vector<BenchBlock>& blocks, double tscHz, bool restore
                           {"process_cpu_ms/frame", &BlockMetrics::procCpuMs, false},
                           {"collect_thread_cpu_ms/frame", &BlockMetrics::rtCpuMs, false},
                           {"collect_ms/frame", &BlockMetrics::collectMs, false},
-                          {"periph_renderables", &BlockMetrics::periph, false},
-                          {"focus_renderables", &BlockMetrics::focus, false},
-                          {"shadow_renderables", &BlockMetrics::shadow, false},
+                          {"periph_renderables", &BlockMetrics::periph, false, true},
+                          {"focus_renderables", &BlockMetrics::focus, false, true},
+                          {"shadow_renderables", &BlockMetrics::shadow, false, true},
                           {"gpu_util_%", &BlockMetrics::gpuUtil, false},
                           {"render_thread_cpu_ms/frame", &BlockMetrics::renderCpuMs, true},
                           {"render_thread_busy_%", &BlockMetrics::renderBusyPct, true},
                           {"pass_ms/frame", &BlockMetrics::passMs, true},
                           {"gbuffer_pass_ms/frame", &BlockMetrics::gbPassMs, true}};
   Log("==== BENCH RESULT: %s (%zu blocks, file %ls) ====", what, blocks.size(), name);
+  if (wholeFrame)
+    Log("NOTE: stereo runtime (no quad views): this is a whole-frame comparison (fps, frame time, process and "
+        "render-thread CPU per frame); the per-view figures are left out");
   // R30: a frame-rate cap in both states (VD/SteamVR at refresh/N with SSW or a cap) pins fps: say so first.
   {
     std::vector<float> offIv, onIv;
@@ -182,6 +233,7 @@ void Summarize(const std::vector<BenchBlock>& blocks, double tscHz, bool restore
     }
   }
   for (const Field& fd : fields) {
+    if (wholeFrame && fd.quadOnly) continue;
     if (fd.optional) {
       bool any = false;
       for (size_t i = 0; i < blocks.size(); ++i) any = any || (blocks[i].frames && ms[i].*fd.ptr >= 0);
@@ -306,10 +358,18 @@ bool RunBenchmark(int mode, bool beeps) {
   uint64_t tsc0 = __rdtsc();
   std::vector<BenchBlock> done;
   int zeroQuad = 0;  // consecutive focused blocks without a quad-view frame
+  // The stereo fallback: decided by the first block that counted (not discarded): no quad-view frame in it but whole
+  // frames drawn -> every block is compared on whole frames. Quad views found there: the quad-view bench as before.
+  bool decided = false, wholeFrame = false;
   const uint64_t frames0 = perfgov::g_frames.load();
   // Measurement kit: the render thread's handle for its cycle count (0 / nullptr: not known, column left out).
   const DWORD rtTid = BenchRenderTid();
   HANDLE rtThread = rtTid ? OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, rtTid) : nullptr;
+  {
+    std::lock_guard<std::mutex> lock(g_bench.mutex);
+    g_bench.lastWholeQpc = 0;  // no interval across two benches
+  }
+  g_benchRunning = true;
   for (int i = 0; i < blocks && !g_benchAbort; ++i) {
     bool on = (i % 2) == 1;
     SetBenchVariant(on);
@@ -362,6 +422,17 @@ bool RunBenchmark(int mode, bool beeps) {
     if (!focusedAtStart || g_focusLosses.load() != losses0 || !g_xrFocused.load()) {
       Log("bench: block %d/%d discarded (OpenXR session not FOCUSED)", i + 1, blocks);
       blk.frames = 0;
+    } else if (!decided && (blk.frames || blk.wholeFrames)) {
+      decided = true;
+      wholeFrame = !blk.frames;
+      if (wholeFrame) {
+        Log("bench: no quad-view frame in the first block (%d views per frame): stereo runtime, comparing whole "
+            "frames",
+            perfgov::g_views.load());
+        UseWholeFrames(blk);
+      }
+    } else if (wholeFrame) {
+      UseWholeFrames(blk);
     } else if (!blk.frames && ++zeroQuad >= 2 && !g_benchAbort) {
       // R30 L8: focused, but no frame was classified as quad views: nothing to compare.
       const int views = perfgov::g_views.load(), pairs = perfgov::g_pairs.load();
@@ -381,6 +452,7 @@ bool RunBenchmark(int mode, bool beeps) {
         static_cast<unsigned long long>(blk.frames));
     done.push_back(std::move(blk));
   }
+  g_benchRunning = false;
   if (rtThread) CloseHandle(rtThread);
   LARGE_INTEGER q1;
   QueryPerformanceCounter(&q1);
@@ -484,7 +556,8 @@ bool RunBenchmark(int mode, bool beeps) {
             : mode == 34 ? "prefetch repeat table 2^16 vs TableBits (R41 p95)"
             : mode == 35 ? "g-buffer recorder cockpit part (R24)"
             : mode == 36 ? "FX Apply repeat skip (A3, lean Apply)"
-                        : "peripheral exclusion OFF/ON");
+                        : "peripheral exclusion OFF/ON",
+            wholeFrame);
   if (beeps)
     for (int k = 0; k < 3; ++k) Chime(1500, 90);
   return true;

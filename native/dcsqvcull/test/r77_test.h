@@ -90,10 +90,60 @@ inline void DepthBoostShift() {
         "NaN, boost flag clear");
 }
 
+// GitHub #32: on a stereo runtime (no focus / peripheral pairs, so BenchOnFrame never counts a frame) the A/B bench
+// compares whole frames instead of stopping "nothing to compare", and says so in its report.
+inline void BenchStereo() {
+  const int blocks0 = g_cfg.benchBlocks, sec0 = g_cfg.benchBlockSec;
+  const auto settle0 = g_cfg.benchSettleSec;
+  const bool enabled0 = g_enabled.load(), focused0 = g_xrFocused.load();
+  g_xrFocused = true;
+  g_cfg.benchBlocks = 4, g_cfg.benchBlockSec = 2, g_cfg.benchSettleSec = 0;
+  g_benchAbort = false;
+  std::atomic<bool> stop{false};
+  std::thread frames([&] {  // the collect hook's main call of a stereo frame, about 200 fps
+    while (!stop.load()) {
+      LARGE_INTEGER q;
+      QueryPerformanceCounter(&q);
+      BenchOnWholeFrame(q.QuadPart, 300);
+      Sleep(5);
+    }
+  });
+  {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    g_reportCapture = true;
+    g_reportThread = GetCurrentThreadId();
+    g_reportBuf.clear();
+  }
+  const bool completed = RunBenchmark(0, false);
+  std::string captured;
+  {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    g_reportCapture = false;
+    captured.swap(g_reportBuf);
+  }
+  stop = true;
+  frames.join();
+  const bool note = captured.find("whole-frame comparison") != std::string::npos &&
+                    captured.find("comparing whole frames") != std::string::npos;
+  const bool noStop = captured.find("nothing to compare") == std::string::npos;
+  const bool fps = captured.find("  fps ") != std::string::npos &&
+                   captured.find("process_cpu_ms/frame") != std::string::npos;
+  const bool noQuadFields = captured.find("periph_renderables") == std::string::npos;
+  const bool blocksCounted = captured.find("frames=0") == std::string::npos;
+  Check(completed && note && noStop && fps && noQuadFields && blocksCounted,
+        "bench on a stereo runtime: whole-frame fallback (fps, frame time, process CPU per block), the report says so, "
+        "no 'nothing to compare' stop");
+  g_cfg.benchBlocks = blocks0, g_cfg.benchBlockSec = sec0, g_cfg.benchSettleSec = settle0;
+  g_enabled = enabled0;
+  g_xrFocused = focused0;
+  g_benchAbort = false;
+}
+
 inline void Run() {
   TexIdle();
   DepthBoostShift();
   BenchKillSwitch();
+  BenchStereo();
 }
 
 }  // namespace r77

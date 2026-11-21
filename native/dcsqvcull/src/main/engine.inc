@@ -212,11 +212,17 @@ bool ToggleEngine() {
   return true;
 }
 
-// True when exactly the configured modifiers are held (either side).
-bool ModifiersMatch(int mods) {
-  int held = (KeyDown(VK_CONTROL) ? 1 : 0) | (KeyDown(VK_MENU) ? 2 : 0) | (KeyDown(VK_SHIFT) ? 4 : 0);
-  return held == mods;
+using KeyDownFn = bool (*)(int vk);
+// The modifiers held (1 Ctrl, 2 Alt, 4 Shift; either side). AltGr is Right Alt plus a Left Ctrl Windows adds itself:
+// it counts as Alt only, so AltGr+Shift+F11 is the Alt+Shift+F11 kill switch and AltGr never makes a Ctrl+Alt key
+// (GitHub #32). A Left Ctrl held with Right Alt reads the same (the two cannot be told apart).
+int HeldModifiers(KeyDownFn down) {
+  const bool altGr = down(VK_RMENU) && down(VK_LCONTROL) && !down(VK_RCONTROL) && !down(VK_LMENU);
+  return (down(VK_CONTROL) && !altGr ? 1 : 0) | (down(VK_MENU) ? 2 : 0) | (down(VK_SHIFT) ? 4 : 0);
 }
+
+// True when exactly the configured modifiers are held (either side).
+bool ModifiersMatch(int mods) { return HeldModifiers(&KeyDown) == mods; }
 
 // The worker's keys this poll (held, not edges). PerceptionOnly: only the
 // cockpit ipd's own toggle ([Perception] CockpitTrueIpdToggle); the engine
@@ -225,16 +231,14 @@ struct HeldKeys {
   bool toggle = false, cockpit = false, f8 = false, f9 = false, f10 = false, f11 = false, f12 = false, up = false,
        down = false;
 };
-using KeyDownFn = bool (*)(int vk);
 HeldKeys ReadKeys(const Config& c, bool perceptionOnly, KeyDownFn down) {
   HeldKeys k;
-  auto mods = [&](int m) {
-    return ((down(VK_CONTROL) ? 1 : 0) | (down(VK_MENU) ? 2 : 0) | (down(VK_SHIFT) ? 4 : 0)) == m;
-  };
+  const int held = HeldModifiers(down);
+  auto mods = [&](int m) { return held == m; };
   k.cockpit = c.cockpitTrueIpd == 1 && c.cockpitTrueIpdToggleVk > 0 && down(c.cockpitTrueIpdToggleVk) &&
               mods(c.cockpitTrueIpdToggleMods);
   if (perceptionOnly) return k;
-  const bool chord = down(VK_CONTROL) && down(VK_MENU) && !down(VK_SHIFT);  // exactly Ctrl+Alt
+  const bool chord = held == 3;  // exactly Ctrl+Alt (AltGr is not Ctrl+Alt: HeldModifiers)
   const bool dev = c.developerKeys;
   k.toggle = c.toggleVk > 0 && down(c.toggleVk) && mods(c.toggleMods);
   k.f8 = dev && chord && down(VK_F8);
