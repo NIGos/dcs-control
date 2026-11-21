@@ -108,3 +108,4 @@ c6cd17de7a9f6ec7b9e2b2c5e1ec84acc62d5e88192513a5f8c6c18de717e770 ofxr/XR_APILAYE
 4091ccbdc88b519a217742af5f7668e9226e958cd5a805c3995e298359e78fc4 dcsqvcull/DcsQvCull.dll (0.7.0-preview)
 ff7e872e736cc98fd57483a6f0d014dbb443f10178d2fafaa3a717cb3401f734 dcsqvcull/DcsQvCullPayload.dll (0.7.0-preview)
 9bf7eccc7e34e4e5b31754c788fd9a369a2c2f32846d7c168cb22c6cf41ecd87 dcsqvcull/DcsQvCullPayload.dll (0.7.0-preview)
+68de99689cd661d2816a7860c10961b05bb12c0c44c679c9bc01295ad8f12121 dcsqvcull/DcsQvCullPayload.dll (0.7.0-preview)
