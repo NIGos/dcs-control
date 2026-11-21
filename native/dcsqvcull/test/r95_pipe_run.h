@@ -35,7 +35,13 @@ void Test(D3D_DRIVER_TYPE drv, bool hw) {
     return;
   }
   const char* tag = hw ? "R95 pipeline (hardware)" : "R95 pipeline";
-  p.settleMs = hw ? 5 : 25;  // a frame pace (DCS: >= 11 ms): the non-blocking read-backs keep up
+  p.settleMs = hw ? 5 : 25;  // a frame pace (DCS: >= 11 ms)
+  // The learning's statistics read-backs are waited for (one frame late every frame), so the "learnt after N frames"
+  // checks do not depend on how fast WARP runs under CPU load (GitHub #31); the module itself never waits.
+  struct WaitReadbacks {
+    WaitReadbacks() { cmask::sym::g_waitReadbacks = true; }
+    ~WaitReadbacks() { cmask::sym::g_waitReadbacks = false; }
+  } waitReadbacks;
   Rig& r = p.r;
   // The live install path (fixation_depth.h Tick), the mask export as the master: view 0 sampled; the symbology on.
   const ptiming::ExecFn execSave = ptiming::g_orig;

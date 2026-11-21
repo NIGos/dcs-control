@@ -49,6 +49,10 @@ constexpr uint32_t kTile = 8;          // scan tile (output px)
 constexpr uint32_t kScanTiles = 512;   // the scan signature texture: 512 x 512 tiles (views up to 4096 px)
 constexpr int kStatU = 32;             // statistics words per view
 constexpr int kRing = 4;               // statistics / timing frames in flight
+// Tests only (never set by the module): the poll below waits for each older frame's statistics copy instead of
+// skipping one not ready, so the learning sees every frame one frame late whatever the GPU's pace (WARP under CPU load
+// lagged several frames and the pipeline tests' "learnt after N frames" checks failed, GitHub #31).
+std::atomic<bool> g_waitReadbacks{false};
 constexpr int kTsOps = 24;             // timestamped GPU operations per frame
 constexpr uint64_t kScanEvery = 64;    // frames between a view's periodic scans
 constexpr uint64_t kScanRetry = 4;     // frames between scans while nothing is learnt
@@ -1981,7 +1985,8 @@ void FrameEnd(bool committed) {
       RingMeta& m = g_ring[i];
       if (!m.pending || i == (g_ringCur + kRing - 1) % kRing) continue;
       D3D11_MAPPED_SUBRESOURCE mp{};
-      if (c->Map(g_b.stage[i], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mp) != S_OK) break;
+      const UINT mapFlags = g_waitReadbacks.load(std::memory_order_relaxed) ? 0 : D3D11_MAP_FLAG_DO_NOT_WAIT;
+      if (c->Map(g_b.stage[i], 0, D3D11_MAP_READ, mapFlags, &mp) != S_OK) break;
       uint32_t w[kViews * kStatU];
       memcpy(w, mp.pData, sizeof(w));
       c->Unmap(g_b.stage[i], 0);
