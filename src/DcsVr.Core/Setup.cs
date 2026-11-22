@@ -51,7 +51,7 @@ public static class Readiness
             Add("route-mismatch", CheckState.Error, "Headset route", running.Summary + " This profile uses " + HeadsetRoute.Describe(profile.Runtime) + ". Change How you fly in the right panel, or close the other headset software, before launching.");
         else if (running.Route is not null) Add("route-mismatch", CheckState.Pass, "Headset route", running.Summary);
         else if (profile.Runtime == RuntimeKind.VirtualDesktop && !profile.Desktop)
-            Add("virtual-desktop", CheckState.Warning, "Virtual Desktop", "Virtual Desktop is not streaming through VDXR. Connect the Quest to this PC in Virtual Desktop, and in the Streamer app set OpenXR Runtime to VDXR.", "virtualdesktop");
+            Add("virtual-desktop", CheckState.Warning, "Virtual Desktop", "Virtual Desktop is not streaming through VDXR. Connect the Quest, and set OpenXR Runtime to VDXR in the Streamer app.", "virtualdesktop");
         if (inventory.DcsExecutable?.Contains(@"\steamapps\", StringComparison.OrdinalIgnoreCase) == true)
             Add("steam-relaunch", CheckState.Manual, "Steam edition launch", "Keep Steam running and start DCS with Launch DCS in this app. DCS then starts with this profile instead of restarting through Steam without it.");
         if (profile.KeepDcsLauncher && LaunchSafety.LauncherRestartBlocked)
@@ -117,7 +117,7 @@ public static class Readiness
         if (profile.Desktop)
             Add("desktop", CheckState.Manual, "Optimizations only", "DCS runs as you set it up, on the monitor or with another headset, with your own VR settings and headset software. DCS Control adds only Engine Optimizations, CPU Boost and the flight helpers you turned on.");
         else if (profile.Runtime == RuntimeKind.VirtualDesktop)
-        Add("headset", CheckState.Manual, "Headset and tracking", "Connect the Quest in Virtual Desktop. Before launching DCS, check the refresh rate and resolution in Virtual Desktop's Streaming settings. Synchronous Spacewarp halves DCS's frame rate (90 Hz → 45 FPS); leave it off when comparing frame rates.", HeadsetRoute.HeadsetGuide(profile.Runtime));
+        Add("headset", CheckState.Manual, "Headset and tracking", "Connect the Quest in Virtual Desktop and check its refresh rate and resolution there. Keep Synchronous Spacewarp off: it halves the frame rate.", HeadsetRoute.HeadsetGuide(profile.Runtime));
         else
         Add("headset", CheckState.Manual, "Headset and tracking", "Connect your headset. Before launching DCS, check the image, eye distance, tracking and resolution in Pimax Play (or SteamVR).", HeadsetRoute.HeadsetGuide(profile.Runtime));
         if (profile.Gaze == GazeMode.EyeTracked && profile.QuadViews != QuadProvider.None)

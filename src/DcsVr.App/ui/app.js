@@ -1428,7 +1428,7 @@ function updateControls() {
     [f.values[0], f.values[1]] = vdRoute(profile) ? [QUEST3_REFRESH[0], QUEST3_REFRESH.at(-1)] : [50, 240];
     for (const el of [f.range, f.input]) { el.min = f.values[0]; el.max = f.values[1]; }
     f.range.value = profile.headsetRefreshHz; paintRange(f.range);
-    $('help-headsetRefreshHz').textContent = vdRoute(profile) ? 'Quest 3 VD: the refresh rate set in the VD app on the headset (72, 80, 90 or 120 Hz). It is not read from the headset.'
+    $('help-headsetRefreshHz').textContent = vdRoute(profile) ? 'The rate set in Virtual Desktop: 72, 80, 90 or 120 Hz.'
       : !profile.refreshFromHeadset ? f.description : hz ? `Read from the headset: ${num(hz)} Hz.` : 'Not read yet: this value is used until the headset software reports one.'; }
   // Stereo Cheeky clamps these ratios to 0.2 or more: say which value is written when the field holds less.
   fields.filter(f => ['foveaWidth','foveaHeight','peripheralScale'].includes(f.path)).forEach(f => {

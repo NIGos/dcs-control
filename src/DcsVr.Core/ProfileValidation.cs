@@ -383,7 +383,7 @@ public static class ProfileValidation
             if (profile.Runtime == RuntimeKind.SboysSteamVr && !profile.Desktop && inventory.SteamVrRuntime is null && profile.RuntimeManifestPath is null)
                 Error("steamvr-not-found", "SteamVR was not found on this PC, and the Sboys route needs it. Install SteamVR and start it once.");
             if (profile.Runtime == RuntimeKind.VirtualDesktop && !profile.Desktop && inventory.VirtualDesktopRuntime is null && profile.RuntimeManifestPath is null)
-                Error("vd-not-found", "Virtual Desktop's OpenXR runtime (VDXR) was not found on this PC, and the Quest 3 VD route needs it. Install Virtual Desktop Streamer.");
+                Error("vd-not-found", "Virtual Desktop's OpenXR runtime (VDXR) was not found. Install the Virtual Desktop Streamer.");
             // The Periphery DLSS preset changes DCS's own DLSS: with another upscaler it does nothing (DCS Control does not
             // change DCS's Upscaling for it).
             var dlss = DcsUsesDlss(profile, inventory);
