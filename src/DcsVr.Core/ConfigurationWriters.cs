@@ -74,11 +74,12 @@ public static class ConfigurationWriters
     private static string QuadOffsetLines(VrProfile p) => p.QuadVerticalOffset == 0 || !double.IsFinite(p.QuadVerticalOffset) || !p.UsesBundledQuadViews ? "" :
         $"\nvertical_fixed_offset={Number(Math.Clamp(p.QuadVerticalOffset, -.5, .5))}\nvertical_focus_offset={Number(Math.Clamp(p.QuadVerticalOffset, -.5, .5))}";
     /// <summary>Focus layer (<see cref="VrProfile.FrameGenFocusLayer"/>): dcsvr_two_layers_alpha (Quad Views patch 0023) only
-    /// for the premultiplied variants, so Standard keeps settings.cfg byte-identical to the file before the option.</summary>
+    /// for the premultiplied variants and Opaque focus, so Standard keeps settings.cfg byte-identical to the file before the option.</summary>
     private static string FocusAlphaLine(VrProfile p) => !p.UsesFoveatedFrameGen ? "" : p.FrameGenFocusLayer switch
     {
         FocusLayerMode.Premultiplied => "\ndcsvr_two_layers_alpha=1",
         FocusLayerMode.PremultipliedSrgb => "\ndcsvr_two_layers_alpha=2",
+        FocusLayerMode.OpaqueFocus => "\ndcsvr_two_layers_alpha=3",
         _ => "",
     };
     private static int TwoLayers(VrProfile p) => !p.UsesFoveatedFrameGen ? 0 : p.FrameGenFocusLayer == FocusLayerMode.PerEye ? 1 : 2;

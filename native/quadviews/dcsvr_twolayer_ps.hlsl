@@ -24,6 +24,15 @@
 // The runtime probe (tools/runtime-probe) measured the Pimax compositor blending every variant on the stored (encoded)
 // values; 1 and 2 are the OpenXR default convention, which needs no UNPREMULTIPLIED handling in the compositor.
 //
+// Opaque focus (dcsvr_two_layers_alpha 3, patches/quadviews/0024-opaque-focus.patch; dcsvrEdge.w = 1, z 0, focus pass
+// only): the runtime never blends. The focus layer is submitted opaque over its whole rectangle and the focus pass
+// writes the composed result there itself: the focus colour as in 0 (edge match tent, Far depth, fill) blended over the
+// periphery image (t3, the source the periphery layer shows) with the composition's fade, focus * a + periphery * (1 - a),
+// alpha 1. The periphery is read where the composition reads it for the same direction: the pixel's (moved) focus uv
+// times dcsvrBand.xy plus dcsvrBand.zw (the focus view's span and offset in the periphery's uv), bilinear. Where the fade
+// is 1 the colour is the focus colour exactly; outside the shape (the corners of a round focus) it is the periphery.
+// The periphery layer stays as in 0. dcsvrEdge.w 0: the pass is unchanged.
+//
 // Without Far depth every texel is a Load at the pixel (1:1, no filtering).
 //
 // Edge match (dcsvr_edge_match, patches/quadviews/0019-edge-match.patch; dcsvrEdge.x the share of the fade band, 0 off):
@@ -57,12 +66,15 @@ cbuffer ConstantBuffer : register(b0) {
     float4 dcsvrDebug; // x the periphery black, y the focus colour outside the fade from t1
     float4 dcsvrEdge; // edge match: x the share of the fade band (0 off), y k (one periphery texel in focus texels);
                       // z the focus alpha convention (0 unpremultiplied, 1 premultiplied, 2 premultiplied, sRGB target)
+                      // w 1: opaque focus (0024), the composed result written by the focus pass
+    float4 dcsvrBand; // opaque focus: focus uv -> periphery uv, xy scale, zw offset
 };
 
 SamplerState sourceSampler : register(s0);
 Texture2D source : register(t0);
 Texture2D plainFocus : register(t1);
 Texture2D<float2> dcsvrDisparityField : register(t2);
+Texture2D bandPeriphery : register(t3); // opaque focus: the periphery image, for the focus pass
 #include "dcsvr_depthwarp_ps.hlsli"
 
 float3 DcsvrLinearToSrgb(float3 c) {
@@ -163,6 +175,17 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0, 
         }
     }
 
+    [branch] if (dcsvrEdge.w != 0) {
+        // Opaque focus: the composition's blend over the periphery (black for debug_focus_view, as it shows the focus
+        // alone), in the sources' own values, then encoded as in 0.
+        float4 periphery = 0;
+        [branch] if (dcsvrDebug.x == 0 && alpha < 1) {
+            periphery = bandPeriphery.SampleLevel(sourceSampler, layer1TexCoord * dcsvrBand.xy + dcsvrBand.zw, 0);
+        }
+        const float3 premultiplied = color.rgb * alpha;
+        const float3 composed = premultiplied + periphery.rgb * (1 - alpha);
+        return float4(encodeSrgb != 0 ? DcsvrLinearToSrgb(composed) : saturate(composed), 1);
+    }
     float3 rgb = encodeSrgb != 0 ? DcsvrLinearToSrgb(color.rgb) : saturate(color.rgb);
     [branch] if (dcsvrEdge.z >= 2) {
         return float4(DcsvrSrgbToLinear(rgb * alpha), alpha);
