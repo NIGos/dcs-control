@@ -1,13 +1,42 @@
 # 0.7.0 preview
 
-**0.7.0-preview (local test build).** Not published: a package for a headset test on the developer's PC. Notes for the published release follow. It contains:
-- **Skip hidden water** and **Skip unused effects** on the Engine page (experimental).
-- **Sharp HUD** no longer needs Depth boost. Far depth and frame generation's cockpit exports also run with Engine Optimizations off.
-- **Soft focus edge** also with foveated frame generation; **Stay ahead until your eyes land** and **Slide back when tracking is lost** also with frame generation.
-- **Pupil shift** and **Eye-focus blur** also with a fixed focus area, from the headset's own eye tracking (Pimax).
-- **Both eyes at once** on the Frame generation page (experimental): each eye's generated frame on its own GPU queue.
-- DLSS views now work when another program has hooked DLSS first.
-- Fixes for GitHub issues #28, #30, #31, #32 and #33, and Go back from an x.y.0 version.
+**Quest 3 through Virtual Desktop.** A new route in the top bar, **Quest 3 VD**, for a Meta Quest 3 streamed by Virtual Desktop through its OpenXR runtime, VDXR. Contributed by @Mav87th (GitHub PR #29), who flew it on a Quest 3 with an RTX 5070 Ti. The Quest 3 has no eye tracking, so Quad Views uses a fixed focus in the centre, starting at 55% × 75% of the view to keep the instruments sharp. Frame generation, foveated frame generation and the engine optimizations work as on the other routes; the features that follow your eyes are off. The refresh rate is one of 72, 80, 90 or 120 Hz, as in Virtual Desktop. Keep Synchronous Spacewarp off in the Virtual Desktop app; Checks reminds you. DLSS 5 is offered but has not been tried on this route, and foveated frame generation has not been flown there yet. **Read settings from this PC** finds the route when VDXR is the active OpenXR runtime.
+
+**Focus layer for foveated frame generation (experimental).** A new choice under Foveated frame generation on the Frame generation page: how the focus area is handed to the headset. **Standard** stays the default and is what 0.6.7 did. If a rectangle or a spot flickers around the focus area, as it does on some Pimax setups, choose **Opaque focus**: the soft edge is drawn into the focus image itself, and the headset only fades a thin outer rim. **Premultiplied**, **Premultiplied sRGB** and **One swapchain per eye** are there to compare. The choice applies at the next DCS start. Tell me which one looks right on your headset.
+
+**Eye-tracked Quad Views, from @Heartbreak-1's GitHub PR #26.**
+- **Soft focus edge** (experimental, off by default): in the edge band the focus area first loses detail down to the periphery's resolution, then fades out, so the ring around where you look is harder to see. It also works with foveated frame generation.
+- **Stay ahead until your eyes land** (experimental, on by default): the focus area stays ahead of a fast eye movement until your eyes have landed.
+- **Slide back when tracking is lost** (experimental, on by default): when the eye tracker loses your eyes for more than a moment, the focus area slides to the centre over 150 ms instead of jumping.
+- These two sit with Focus ahead of fast eye movements and Steady focus while looking in a new **Eye-tracking options** fold, and all four also work with frame generation.
+
+**GPU savings on the Engine Optimizations page (experimental, off by default).** A new fold holds Cache distant shadows and two new switches. **Skip hidden water**: DCS skips its water work for an eye that sees no water; when water comes into view it can appear a few frames late. **Skip unused effects**: skips water shading that changes nothing and the heat-haze passes when nothing is hot, with the same image and a small saving (about 0.2 ms over open sea).
+
+**Faster terrain and shader paths can be turned off.** These GPU shortcuts give the same image and stay on by default. The switch, under Individual optimizations, is there so a problem like GitHub #28 can be ruled in or out.
+
+**Fewer requirements.**
+- **Sharp HUD** no longer needs Depth boost.
+- **Sharp HUD**, **Far depth** and frame generation's use of DCS's cockpit outline, depth and motion also run with Engine Optimizations off. The engine module is then installed for them alone, with none of the optimizations running.
+- **Pupil shift** and **Eye-focus blur** also work on Pimax with a fixed focus area or without Quad Views, from the headset's own eye tracking. Not flown yet.
+- Eye-focus blur is now off in DCS's main menu.
+
+**Both eyes at once (experimental, off by default).** On the Frame generation page: each eye's generated frame is made on its own GPU queue, so generated frames are ready about 1 ms sooner, with the same image. Not flown yet.
+
+**More settings apply in flight.** With Live on, these now change while DCS runs: the four eye-tracking options, Far depth's strength and key, the headset panel's position, FPS counter and VRAM counter, Faster terrain and shader paths (its full gain comes within a few minutes of flying), Skip hidden water and Skip unused effects. Another Focus or Periphery DLSS preset chosen in flight is used from the next mission start. The eye-tracking options, Far depth and the headset panel apply live once the profile has been launched from 0.7.
+
+**DLSS presets with DLSS 5.** When DLSS 5 (Cheeky) had hooked DCS's DLSS first, the Focus and Periphery DLSS presets could stay at DCS's preset. The engine module now chains its hook behind Cheeky's, so both work. Cheeky also no longer starts in the helper processes of DCS's built-in browser.
+
+**Going back to 0.6.7.** 0.6.7 cannot open a profile or preset saved by 0.7, because it refuses the settings new in 0.7. **Go back** (Help & support, Updates) handles this: DCS is put back to stock and 0.6.7 gets the settings and presets you had in 0.6.7, or its defaults if there is no copy of them. Your 0.7 settings are kept, and presets saved in 0.7 come back when you update again. A file exported from 0.7 cannot be imported in 0.6.7.
+
+**Fixes:**
+- The engine module's GPU-bound guard took a steady CPU- or GPU-bound frame rate that happened to sit near half or a third of the refresh rate for a frame-rate cap, and held back for seconds (GitHub #27, reported by @deamonesque).
+- The engine's test suite stopped at once on a headset without quad views ("nothing to compare"). It now compares whole frames there, and the report says so (GitHub #32, reported by @Mav87th).
+- AltGr+Shift+F11 now works as the in-flight switch, and AltGr no longer counts as Ctrl+Alt, so it cannot trigger the engine module's reserved Ctrl+Alt keys (GitHub #32).
+- In the diagnostic package, a PC named after its user ("JOHN-PC") is now replaced as `<pc>` instead of `<user>-PC` (GitHub #31, reported by @Mav87th).
+- The DLSS 5 page and the guide now say plainly that NVIDIA does not offer `nvngx_dlssnr.dll` on its own and that DCS Control cannot provide it. With a patched copy on an RTX 50 card, the page says to use NVIDIA's original file (GitHub #33, reported by @Mav87th).
+- For developers: the OFXR build script works with CMake 4.3 (GitHub #30, reported by @Mav87th).
+- Back to stock DCS also removes the engine module's new 0.7 log files.
+- On the Quest 3 VD route, Pimax's logs and Pimax Play's version are no longer read, and leaving the route gives back the focus values you had before it.
 
 # 0.6.7 preview
 
