@@ -6,7 +6,7 @@ On this development PC the prerequisites are already present. Their missing-prer
 
 Open **Guided setup** in the right-hand panel:
 
-1. **Choose**: the headset route (Pimax Play or Sboys/SteamVR; the running route is preselected), the features (Engine Optimizations, CPU Boost, Quad Views, DLSS 5, frame generation; or Optimizations only for a monitor or another headset) and, for pipelines with Quad Views, eye-tracked or fixed focus. Your current quality values are kept. Changing routes clears a runtime override that belonged to the previous route.
+1. **Choose**: the headset route (Pimax Play, Sboys/SteamVR or Quest 3 VD; the running route is preselected), the features (Engine Optimizations, CPU Boost, Quad Views, DLSS 5, frame generation; or Optimizations only for a monitor or another headset) and, for pipelines with Quad Views, eye-tracked or fixed focus. Your current quality values are kept. Changing routes clears a runtime override that belonged to the previous route.
 2. **Check**: the app checks files, runtime architecture, package hashes, the neural DLL signature/version, Sboys registration, SteamVR add-on blocking and the gaze bridge. Problems are listed first; passed checks and file paths are folded away and open by themselves when a path is the problem. DLSS 5 needs your signed NVIDIA nvngx_dlssnr.dll (tested contract 310.8). NVIDIA does not offer it for download on its own, and the app cannot provide it or point you to one. Nothing is written in this step.
 3. **Fly**: start the headset software and press **Launch DCS** here. It is the same button as in the top bar: the checked profile is written over whatever is applied (originals are backed up the first time a file is written), and DCS starts (DCS skips its own launcher window while a profile is applied) so DCS receives its private OpenXR environment. Keep Steam running for the Steam edition, and run neither DCS nor the app as administrator. The headset checks listed there need your eyes; they are never reported as automatic passes. **Back to stock DCS** in Recovery puts the original files back at any time.
 
@@ -35,6 +35,14 @@ For eye-tracked focus, enable and calibrate eye tracking in Pimax and verify tha
 5. Dynamic OpenXR gaze requires a valid gaze provider. Quad Views documents OpenXR-Eye-Trackers for the original Crystal on SteamVR. That archived guide does **not** establish Crystal Super compatibility. Verify its test application and your hardware/provider combination. If gaze is unavailable, explicitly choose Fixed focus for the initial tests. An enabled DLL alone cannot establish valid eye data.
 
 The manager chooses the OpenXR runtime for its DCS process; it does not activate Sboys merely because the route was selected, or change the global runtime. An existing unrelated OpenXR layer can still affect the process. Review detected layers and competing overlays/injectors if the live result differs from the preview.
+
+## Quest 3 VD route
+
+1. Install the Virtual Desktop Streamer. DCS Control finds its OpenXR runtime, VDXR, under Program Files or among the registered OpenXR runtimes; without it, Checks says "Virtual Desktop's OpenXR runtime (VDXR) was not found".
+2. Connect the Quest 3 in Virtual Desktop and set the OpenXR runtime to VDXR in the Streamer app. Set the refresh rate there (72, 80, 90 or 120 Hz) and use the same one in DCS Control. Keep Synchronous Spacewarp off: it halves the frame rate.
+3. The route uses a fixed focus (the Quest 3 has no eye tracking) and never reads Pimax Play. Pupil shift, Depth boost, Eye-focus blur and the eye-tracking options are off or hidden.
+
+As on the other routes, the manager sets VDXR for its own DCS process only and does not change the global OpenXR runtime.
 
 ## Readiness and recovery
 
