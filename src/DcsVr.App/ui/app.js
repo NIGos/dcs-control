@@ -246,7 +246,7 @@ const questRefresh = hz => QUEST3_REFRESH.reduce((best, r) => Math.abs(r - hz) <
 const preVdFocus = new WeakMap();
 /** Switches the headset route. Virtual Desktop starts from the Quest 3 focus values and the nearest Quest 3 refresh rate; leaving it gives back the
  *  focus the profile had before VD. A profile that started on VD follows Pimax Play again, with eye tracking on the Pimax route only (on Sboys
- *  it depends on the Sboys version: Detect my setup finds it). Every other setting is kept. */
+ *  it depends on the Sboys version: Read settings from this PC finds it). Every other setting is kept. */
 function switchRoute(p, target) {
   if (target === p.runtime) return;
   const leavingVd = vdRoute(p);
@@ -584,7 +584,7 @@ const HOTKEYS = {
   engineToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey','colorModeKey'],used:p => p.engineOptimizations,name:'Engine Optimizations',fallback:'122:6'},
   pupilShiftToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','depthBoostToggleKey','farDepthToggleKey','colorModeKey'],used:p => usesPupilShift(p),name:'Pupil shift',fallback:'121:5'},
   depthBoostToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','farDepthToggleKey','colorModeKey'],used:p => usesDepthBoost(p),name:'Depth boost',fallback:'121:6'},
-  farDepthToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','colorModeKey'],used:p => !p.desktop && p.farDepth && quad(p) && p.engineOptimizations,name:'Far depth',fallback:'119:6'},
+  farDepthToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','colorModeKey'],used:p => usesFarDepth(p),name:'Far depth',fallback:'119:6'},
   colorModeKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey'],used:p => !p.desktop,name:'Color mode',fallback:'Off'}
 };
 /** Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down, with or without Shift, belong to the engine optimizations module itself. */
@@ -779,7 +779,7 @@ function buildFields() {
   // Greyed out until it can run, but never while it is on (ProfileValidation's foveated-fg-needs says why), so it can be turned off.
   field(c,'frameGenFoveated','<span class="tag">EXPERIMENTAL</span> Foveated frame generation',['Generates the focus area and the rest of the view separately: about half the GPU time for generated frames and less video memory.','Needs bundled Quad Views on the Pimax or Quest 3 VD route and NVIDIA frame generation. Helps most with a small focus area; with a very large one it can cost more than it saves. The loading screen pauses once for half a second.'],'toggle',null,p => p.frameGen !== 'Off' && (foveatedFgCan(p) || p.frameGenFoveated));
   // Focus layer: how Quad Views hands the focus layer to the runtime (VrProfile.FrameGenFocusLayer), shown only while foveated frame generation runs.
-  field(c,'frameGenFocusLayer','<span class="tag">EXPERIMENTAL</span> Focus layer',['How the focus area is handed to the headset. Try Opaque focus if a rectangle or a spot flickers around the focus area. Applies at the next DCS start.','Standard: as before. Premultiplied and Premultiplied sRGB: another way of blending its edge. One swapchain per eye: a separate focus image for each eye. Opaque focus: the soft edge is drawn into the focus image; the headset only fades a thin outer rim.'],'select',[['Standard','Standard · default'],['Premultiplied','Premultiplied'],['PremultipliedSrgb','Premultiplied sRGB'],['PerEye','One swapchain per eye'],['OpaqueFocus','Opaque focus']],usesFoveatedFg,'',p => !usesFoveatedFg(p));
+  field(c,'frameGenFocusLayer','<span class="tag">EXPERIMENTAL</span> Focus layer',['How the focus area is handed to the headset. Try Opaque focus if a rectangle or a spot flickers around the focus area. Applies at the next DCS start.','Standard: as in 0.6.7. Premultiplied and Premultiplied sRGB: another way of blending its edge. One swapchain per eye: a separate focus image for each eye. Opaque focus: the soft edge is drawn into the focus image; the headset only fades a thin outer rim.'],'select',[['Standard','Standard · default'],['Premultiplied','Premultiplied'],['PremultipliedSrgb','Premultiplied sRGB'],['PerEye','One swapchain per eye'],['OpaqueFocus','Opaque focus']],usesFoveatedFg,'',p => !usesFoveatedFg(p));
   // frameGenPipelinedDeepHold has no control: it follows the Smoothness buffer (on with it, off without it) and stays in
   // the profile file only (ConfigurationWriters.Ofxr writes pipelined_deep_hold only with frameGenDeepPipeline).
   // The custom limit right under the select that enables it; the refresh rate source before the value it replaces.
@@ -991,7 +991,7 @@ function buildFields() {
   field(c,'neuralToggleKey','DLSS 5','Off and on, to compare.','hotkey',null,HOTKEYS.neuralToggleKey.used,'',vrKey);
   field(c,'pupilShiftToggleKey','Pupil shift','Off and on, to compare. Beeps: low = off, high = on.','hotkey',null,HOTKEYS.pupilShiftToggleKey.used,'',vrKey);
   field(c,'depthBoostToggleKey','Depth boost','Off and on, to compare. Beeps: low = off, high = on.','hotkey',null,HOTKEYS.depthBoostToggleKey.used,'',vrKey);
-  field(c,'farDepthToggleKey','Far depth','Off and on, to compare. Beeps: one = off, two = on.','hotkey',null,HOTKEYS.farDepthToggleKey.used,'',vrKey);
+  field(c,'farDepthToggleKey','Far depth','Off and on, to compare. One low beep off, two high beeps on.','hotkey',null,HOTKEYS.farDepthToggleKey.used,'',vrKey);
   field(c,'colorModeKey','Color mode','Cycles Off, Fix and Enhanced (Visual realism page). Beeps: 1, 2 or 3.','hotkey',null,HOTKEYS.colorModeKey.used,'',vrKey);
   // The module's own keys apply to every key above, so the note sits under the card heading, not under the last key.
   { const fixed = document.createElement('p'); fixed.className = 'fine keys-reserved'; fixed.textContent = 'Not available: Ctrl+Alt with F8 to F12, Page Up or Page Down (used by Engine Optimizations).'; c.querySelector('.card-heading').after(fixed); }
@@ -1254,9 +1254,8 @@ function renderPupilNeeds() {
   if (!profile) return;
   showNeeds('pupilNeeds', gazeNeed(profile,'pupilFix',true), profile.pupilShift);
   showNeeds('depthNeeds', gazeNeed(profile,'depthFix'), profile.depthBoost);
-  const noQuad = !quad(profile), noEngine = !profile.engineOptimizations;
-  showNeeds('farDepthNeeds', profile.desktop || (!noQuad && !noEngine) ? null : [noQuad && noEngine ? 'Needs the bundled Quad Views and Engine Optimizations.' : noQuad ? 'Needs the bundled Quad Views.' : 'Needs Engine Optimizations.',
-    ...(noQuad ? [['farDepthFix','quadViews','Choose provider']] : []), ...(noEngine ? [['farDepthEngineFix','engineOptimizations','Turn on Engine Optimizations']] : [])], profile.farDepth);
+  // Far depth needs only the bundled Quad Views: with Engine Optimizations off the engine module runs for it alone (VrProfile.UsesFarDepth).
+  showNeeds('farDepthNeeds', profile.desktop || quad(profile) ? null : ['Needs the bundled Quad Views.', ['farDepthFix','quadViews','Choose provider']], profile.farDepth);
   // How to check each feature in flight, with the key it has now.
   const key = path => { const k = parseKey(profile[path] ?? HOTKEYS[path].fallback); return k && k[0] ? keyLabel(k) : 'no key set'; };
   const lines = [['Pupil shift','pupilShiftToggleKey','look at a switch and move only your eyes left and right; the cockpit stays still. It does not fix lens blur or edge distortion.'],

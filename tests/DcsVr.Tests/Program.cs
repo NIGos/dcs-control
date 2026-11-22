@@ -5226,6 +5226,23 @@ Test("Three views is parked in 0.7: a profile saved with engineThreeViews=true l
     var earlier = JsonData.Deserialize<VrProfile>(json.Replace("\"engineThreeViews\": false", "\"engineThreeViews\": true, \"usesThreeViews\": true"));
     Require(earlier.EngineThreeViews && !ConfigurationWriters.DcsQvCull(earlier).Contains("ThreeViews"), "A draft with usesThreeViews loads and writes no ThreeViews key");
 });
+Test("Profiles from 0.6.7 load in 0.7: without the 0.7 settings (and with 0.6.7's headset tracking key) they take the 0.7 defaults", () =>
+{
+    // The settings new in 0.7 (VrProfile on foveated-fg, the 0.6.7 line, has none of them).
+    string[] new07 = ["frameGenFocusLayer", "frameGenParallelEyes", "quadEdgeMatch", "quadSaccadeTail", "quadLostGazeEase", "engineFastShaderPaths",
+        "engineThreeViews", "engineWaterSkip", "engineIdleEffectSkip"];
+    var node = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Nvidia, FrameGenFoveated = true }))!.AsObject();
+    foreach (var key in new07) Require(node.Remove(key), "0.7 still writes " + key);
+    node["tracking"] = "None";
+    var loaded = JsonData.Deserialize<VrProfile>(node.ToJsonString());
+    var defaults = new VrProfile();
+    Require(loaded.FrameGenFocusLayer == FocusLayerMode.Standard && !loaded.FrameGenParallelEyes && !loaded.QuadEdgeMatch && !loaded.EngineThreeViews
+        && !loaded.EngineWaterSkip && !loaded.EngineIdleEffectSkip, "the off-by-default 0.7 settings are off");
+    Require(loaded.QuadSaccadeTail == defaults.QuadSaccadeTail && loaded.QuadLostGazeEase == defaults.QuadLostGazeEase
+        && loaded.EngineFastShaderPaths == defaults.EngineFastShaderPaths, "the on-by-default 0.7 settings take the 0.7 defaults");
+    Require(loaded.UsesFoveatedFrameGen && ConfigurationWriters.QuadViews(loaded).Contains("dcsvr_two_layers=2") && !ConfigurationWriters.QuadViews(loaded).Contains("dcsvr_two_layers_alpha"),
+        "foveated frame generation from 0.6.7 keeps the Standard focus layer (the settings.cfg 0.6.7 wrote)");
+});
 Test("Profiles for 0.6.7: no derived value new since 0.6.7 is written (0.6.7 refuses keys it does not know); drafts that have them still load", () =>
 {
     // The derived (get-only) values 0.6.7 itself wrote, and so reads: no other may be written (checked against 0.6.7's
@@ -5997,7 +6014,7 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         new() { HeadsetPanel = true }, new() { HeadsetPanel = true, DiagnosticOverlayKey = "Off" }, new() { HeadsetPanel = true, DiagnosticOverlayKey = "0:0" }, new() { HeadsetPanel = true, DiagnosticOverlayKey = "0:0", DiagnosticOverlayAtStart = true },
         new() { HeadsetPanel = true, DiagnosticOverlayKey = "junk" }, new() { HeadsetPanel = true, DiagnosticOverlayKey = "120:6" }, new() { DiagnosticOverlayAtStart = true }, new() { HeadsetPanel = true, Desktop = true },
         new() { FrameGen = FrameGeneration.FidelityFx, DiagnosticOverlayKey = "Off" }, new() { FrameGen = FrameGeneration.Nvidia, Desktop = true, HeadsetPanel = true },
-        // Periphery stability and Far depth: the bundled Quad Views in VR; Far depth with Engine Optimizations.
+        // Periphery stability and Far depth: the bundled Quad Views in VR, with or without Engine Optimizations.
         eye with { PeripheryStability = true, FarDepth = true, EngineOptimizations = true }, eye with { PeripheryStability = true, FarDepth = true }, eye with { PeripheryStability = false, FarDepth = false, EngineOptimizations = true },
         eye with { PeripheryStability = true, FarDepth = true, EngineOptimizations = true, QuadViewsLayerDirectory = @"C:\qv" }, eye with { PeripheryStability = true, FarDepth = true, EngineOptimizations = true, Desktop = true },
         new() { QuadViews = QuadProvider.PimaxNative, PeripheryStability = true, FarDepth = true, EngineOptimizations = true },
