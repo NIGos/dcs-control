@@ -47,6 +47,10 @@ public static class HeadsetRoute
         FoveaWidth = 0.55, FoveaHeight = 0.75, PeripheralScale = 0.40, QuadFocusScale = 1.0, QuadEdgeBlend = 0.2
     };
 
+    /// <summary>The Quest 3 rate (72, 80, 90, 120 Hz) nearest to <paramref name="hz"/>; the lower one on a tie.</summary>
+    public static double NearestQuest3RefreshHz(double hz) =>
+        ProfileValidation.Quest3RefreshHz.OrderBy(rate => Math.Abs(rate - hz)).ThenBy(rate => rate).First();
+
     /// <summary>What to do when the route's runtime manifest was not found.</summary>
     public static string RuntimeMissing(RuntimeKind route) => route switch
     {

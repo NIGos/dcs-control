@@ -3863,9 +3863,21 @@ Test("Virtual Desktop route: readiness checks and Detect my setup", () =>
     // Detect my setup with VD streaming: the route is VD and Pimax Play's values (present on this fixture) are not used.
     var pimaxPlay = Make("vd-detect/global.json", PimaxJson(1, .66, .20, .66, .66));
     var sources = new DetectionSources { SteamVrServerLog = Path.Combine(root, "missing.txt"), PimaxPlaySettings = pimaxPlay, NeuralRuntimeFolders = [],
-        ProcessRunning = name => name is "VirtualDesktop.Streamer" or "pi_server", ActiveOpenXrRuntime = () => Vdxr };
+        ProcessRunning = name => name is "VirtualDesktop.Streamer", ActiveOpenXrRuntime = () => Vdxr };
     var detected = SetupDetection.Detect(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated }, new InventorySnapshot { VirtualDesktopRuntime = Vdxr }, sources).Profile;
     Require(detected.Runtime == RuntimeKind.VirtualDesktop && detected == HeadsetRoute.WithQuest3Focus(detected), "Quest 3 values, not Pimax Play's: " + detected.FoveaWidth + " x " + detected.FoveaHeight);
+    // Pimax Play running beside VD: either headset may be in use, nothing is picked (the profile keeps its route).
+    var both = SetupDetection.Detect(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated }, new InventorySnapshot { VirtualDesktopRuntime = Vdxr },
+        sources with { ProcessRunning = name => name is "VirtualDesktop.Streamer" or "pi_server" });
+    Require(both.Active.Route is null && both.Profile.Runtime == RuntimeKind.Pimax && both.Notes.Any(n => n.Contains("both running")), "VD and Pimax Play both running: ambiguous");
+    // The refresh rate of another headset (144 Hz) moves to the nearest Quest 3 rate, so the detected profile validates.
+    var fromPimax = SetupDetection.Detect(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, HeadsetRefreshHz = 144 }, new InventorySnapshot { VirtualDesktopRuntime = Vdxr }, sources);
+    Require(fromPimax.Profile.HeadsetRefreshHz == 120 && fromPimax.Detected.Any(d => d.Field == "headsetRefreshHz") && !ProfileValidation.Validate(fromPimax.Profile).Any(i => i.Code == "vd-refresh"), "144 Hz snapped to 120 Hz");
+    Require(HeadsetRoute.NearestQuest3RefreshHz(85) == 80 && HeadsetRoute.NearestQuest3RefreshHz(60) == 72 && HeadsetRoute.NearestQuest3RefreshHz(100) == 90 && HeadsetRoute.NearestQuest3RefreshHz(90) == 90, "nearest Quest 3 rate (lower on a tie)");
+    // Detecting again on a VD profile keeps the focus tuned in the headset; only the route change sets the starting values.
+    var tuned = detected with { FoveaWidth = .62, FoveaHeight = .8, PeripheralScale = .35, HeadsetRefreshHz = 90 };
+    var again = SetupDetection.Detect(tuned, new InventorySnapshot { VirtualDesktopRuntime = Vdxr }, sources).Profile;
+    Require(again is { FoveaWidth: .62, FoveaHeight: .8, PeripheralScale: .35, HeadsetRefreshHz: 90, Gaze: GazeMode.Fixed }, "a tuned VD focus survives Detect: " + again.FoveaWidth + " x " + again.FoveaHeight);
 });
 Test("Cheeky package never extracts the version.dll fallback loader", () =>
 {
