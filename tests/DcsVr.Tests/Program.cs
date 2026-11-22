@@ -6112,8 +6112,9 @@ Test("Live: the live table names real profile settings, each a field of the inte
     }
     Require(LiveSettings.Fields.Select(f => f.Name).Distinct().Count() == LiveSettings.Fields.Count, "listed twice");
     // Read only at start, or carried by Quad Views, OFXR, Cheeky or options.lua: never live.
-    foreach (var name in new[] { "engineOptimizations", "engineDevMode", "foveaWidth", "frameGenFactor", "frameGen", "showOverlay", "farDepth", "frameGenHudSymbology", "fpsLimit", "eyeDistance",
-        "quadRoundFocus", "quadTurbo", "quadFocusScale", "peripheralScale", "neuralFocusArea", "neuralWorkingScale", "neuralBeforeUpscaling", "quadNeuralEdgeFade", "flowPreset" })
+    foreach (var name in new[] { "engineOptimizations", "engineDevMode", "foveaWidth", "frameGenFactor", "frameGen", "farDepth", "frameGenHudSymbology", "fpsLimit", "eyeDistance",
+        "quadRoundFocus", "quadTurbo", "quadFocusScale", "peripheralScale", "neuralFocusArea", "neuralWorkingScale", "neuralBeforeUpscaling", "quadNeuralEdgeFade", "flowPreset",
+        "smoothCursor", "diagnosticOverlayKey", "gaze", "headsetPanel" })
         Require(LiveSettings.Find(name) is null, "must wait for the next launch: " + name);
     // R142: CostWeights and StreamDedupe turn on live. R144 (a current install): AllocSlabs too; before, off only.
     Require(LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Scene.CostWeights", "1", "0") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Texture.StreamDedupe", "1", "0")
@@ -6128,7 +6129,8 @@ Test("Live: the live table names real profile settings, each a field of the inte
         && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Perception.FarDepthExport", "1", "0") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "DLSS.PeripheryPreset", "K", "E") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "DLSS.FocusPreset", "K", "M")
         && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "DLSS.IgnoreDriverPreset", null, "1"));
     Require(LiveSettings.IsLiveKey(LiveSettings.PupilFile, "DepthBoost.NearM", "1.2", null) && !LiveSettings.IsLiveKey(LiveSettings.PupilFile, "PupilShift.OpenXrEyeGaze", "0", null)
-        && !LiveSettings.IsLiveKey(LiveSettings.PupilFile, "DlssPreset.IgnoreDriverPreset", "1", null) && !LiveSettings.IsLiveKey("ofxr_bridge.ini", "overlay.position", "off", null));
+        && !LiveSettings.IsLiveKey(LiveSettings.PupilFile, "DlssPreset.IgnoreDriverPreset", "1", null) && !LiveSettings.IsLiveKey("ofxr_bridge.ini", "overlay.position", "off", null, current07: false)
+        && LiveSettings.IsLiveKey("ofxr_bridge.ini", "overlay.position", "off", null));
     // The applied profile's live settings: engine parts only with Engine Optimizations, and only the installed components.
     var journal = new TransactionJournal { Id = "j", ProfileId = "p", Entries = [new() { Path = Path.Combine(root, "x", "DcsQvCull.ini"), InstalledSha256 = "0" }] };
     var visualOnly = LiveSettings.AvailableFields(new VrProfile { ColorMode = ColorMode.Fix }, journal);
@@ -6249,14 +6251,23 @@ Test("Live phase 2: the key lists match the components, and the tags follow the 
     // Quad Views: exactly the eight keys of dcsvr_live.h, in any section; never its sizes, shape, turbo, gaze or debug keys.
     foreach (var key in new[] { "sharpen_focus_view", "smoothen_focus_view_edges", "dcsvr_sharpen_taper", "dcsvr_periphery_sharpen", "dcsvr_temporal", "dcsvr_temporal_tau_ms", "dcsvr_temporal_ramp_deg", "dcsvr_temporal_clip" })
         Require(LiveSettings.IsLiveKey(LiveSettings.QuadFile, "exe:DCS." + key, "1", null) && LiveSettings.IsLiveKey(LiveSettings.QuadFile, "." + key, "1", null) && !LiveSettings.IsLiveKey(LiveSettings.QuadFile, "exe:DCS." + key, "1", null, current: false), key);
-    foreach (var key in new[] { "focus_view_shape", "turbo_mode", "focus_multiplier", "peripheral_multiplier", "horizontal_focus_section", "force_no_eye_tracking", "dcsvr_saccade_widening", "dcsvr_gaze_deadzone", "dcsvr_far_depth", "dcsvr_temporal_debug" })
+    foreach (var key in new[] { "focus_view_shape", "turbo_mode", "focus_multiplier", "peripheral_multiplier", "horizontal_focus_section", "force_no_eye_tracking", "dcsvr_far_depth", "dcsvr_temporal_debug", "dcsvr_two_layers", "dcsvr_edge_match" })
         Require(!LiveSettings.IsLiveKey(LiveSettings.QuadFile, "exe:DCS." + key, "1", null), key);
+    // 0.7 (Quad Views 0026): the eye-tracking filter, Far depth's curve and key; only with a 0.7 install.
+    var hpp07 = File.ReadAllText(Path.Combine(workspace, "native/quadviews/dcsvr_live.h"));
+    foreach (var key in new[] { "dcsvr_saccade_widening", "dcsvr_saccade_speed", "dcsvr_saccade_lead_ms", "dcsvr_saccade_max_extend", "dcsvr_saccade_hold_ms", "dcsvr_saccade_end_speed", "dcsvr_saccade_tail", "dcsvr_gaze_deadzone", "dcsvr_lost_ease_ms", "dcsvr_far_depth_preset", "dcsvr_far_depth_world_ipd", "dcsvr_far_depth_z0_m", "dcsvr_far_depth_gamma", "dcsvr_far_depth_toggle" })
+        Require(LiveSettings.IsLiveKey(LiveSettings.QuadFile, "exe:DCS." + key, "1", null) && !LiveSettings.IsLiveKey(LiveSettings.QuadFile, "exe:DCS." + key, "1", null, current07: false) && hpp07.Contains('"' + key + '"'), key);
     // The text Quad Views gets has every live key the profile writes.
     var quadKeys = IniFile.Parse(ConfigurationWriters.QuadViews(new VrProfile())).Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.QuadFile, k, "1", null)).Count();
-    Require(quadKeys == 8, "Quad Views writes " + quadKeys + " live keys");
-    // OFXR: the NVIDIA flow keys only, not the preset (R148: OFXR re-initialises the flow for it, DCS froze for 6.8 s).
+    var quadKeys06 = IniFile.Parse(ConfigurationWriters.QuadViews(new VrProfile())).Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.QuadFile, k, "1", null, current07: false)).Count();
+    Require(quadKeys == 19 && quadKeys06 == 8, "Quad Views writes " + quadKeys + " live keys, " + quadKeys06 + " for an older install");
+    // OFXR: the NVIDIA flow keys, not the preset (R148: OFXR re-initialises the flow for it, DCS froze for 6.8 s); from 0.7
+    // the headset panel's keys; the flow keys only when DCS started with NVIDIA frame generation.
     var ofxr = IniFile.Parse(ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia }));
-    Require(ofxr.Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.FlowFile, k, "1", null)).Order().SequenceEqual(new[] { "ofxr.nvidia_bidirectional", "ofxr.nvidia_input_scale", "ofxr.nvidia_occlusion_aware" }));
+    Require(ofxr.Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.FlowFile, k, "1", null)).Order().SequenceEqual(new[] { "ofxr.diag_vram", "ofxr.nvidia_bidirectional", "ofxr.nvidia_input_scale", "ofxr.nvidia_occlusion_aware", "overlay.panel_position", "overlay.position" }));
+    Require(ofxr.Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.FlowFile, k, "1", null, current07: false)).Order().SequenceEqual(new[] { "ofxr.nvidia_bidirectional", "ofxr.nvidia_input_scale", "ofxr.nvidia_occlusion_aware" }));
+    Require(ofxr.Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.FlowFile, k, "1", null, nvidiaFlow: false)).Order().SequenceEqual(new[] { "ofxr.diag_vram", "overlay.panel_position", "overlay.position" }));
+    Require(!LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.smooth_cursor", "1", null) && !LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.cursor_follow_mouse", "1", null), "the smooth cursor waits");
     Require(!LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.nvidia_preset", "fast", null), "the preset waits");
     Require(!LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.backend", "nvidia", null) && !LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.triple_frame_gen", "1", null) && !LiveSettings.IsLiveKey(LiveSettings.FlowFile, "ofxr.nvidia_preset", "fast", null, current: false));
     // Cheeky: the fifteen keys of dcs_live_keys, each one Cheeky's writer emits; its start-only keys never.
@@ -6276,6 +6287,17 @@ Test("Live phase 2: the key lists match the components, and the tags follow the 
     var old = LiveSettings.AvailableFields(nvidia, Journal(null, all));
     Require(old.Contains("engineBeeps") && old.Contains("engineModelAllocator") && !old.Contains("quadSharpening") && !old.Contains("flowPreset") && !old.Contains("neuralIntensity") && !old.Contains("engineDiagnosticHooks"), string.Join(", ", old));
     Require(!LiveSettings.AvailableFields(nvidia with { FrameGen = FrameGeneration.FidelityFx }, Journal(ProductInfo.Version, all)).Contains("nvidiaFlowScale"), "FidelityFX: the flow keys mean nothing");
+    // 0.7: the eye-tracking refinements, Far depth's strength and key, the headset panel (whenever OFXR runs, FidelityFX
+    // too); none of them for an install by an older app, whose Quad Views and OFXR read them at start.
+    string[] live07 = ["quadSaccadeLead", "quadSaccadeTail", "quadGazeStabilize", "quadLostGazeEase", "farDepthPreset", "farDepthToggleKey", "showOverlay", "headsetPanelPosition", "diagnosticVram"];
+    Require(LiveSettings.Live07.SetEquals(live07) && live07.All(tags.Contains), string.Join(", ", tags));
+    var ffxTags = LiveSettings.AvailableFields(nvidia with { FrameGen = FrameGeneration.FidelityFx }, Journal(ProductInfo.Version, all));
+    Require(ffxTags.Contains("showOverlay") && ffxTags.Contains("diagnosticVram") && ffxTags.Contains("headsetPanelPosition"), "FidelityFX: the panel is live");
+    var old067 = LiveSettings.AvailableFields(nvidia, Journal("0.6.7", all));
+    Require(old067.Contains("quadSharpening") && old067.Contains("nvidiaFlowScale") && !live07.Any(old067.Contains), string.Join(", ", old067));
+    var noOfxr = LiveSettings.AvailableFields(nvidia with { FrameGen = FrameGeneration.Off }, Journal(ProductInfo.Version, all));
+    Require(!noOfxr.Contains("showOverlay") && !noOfxr.Contains("diagnosticVram") && noOfxr.Contains("quadSaccadeLead"), "without OFXR no panel tags");
+    Require(!LiveSettings.Current07(Journal("0.6.7")) && LiveSettings.Current07(Journal("0.7.0-preview")) && LiveSettings.Current07(Journal("0.7.0")) && LiveSettings.Current07(Journal(ProductInfo.Version)));
     Require(!LiveSettings.AvailableFields(nvidia with { EngineDiagnosticHooks = true }, Journal(ProductInfo.Version, all)).Contains("engineDiagnosticHooks"), "on at start: off waits");
     Require(!LiveSettings.Current(Journal("0.6.1")) && LiveSettings.Current(Journal("0.6.2-preview")) && LiveSettings.Current(Journal("0.6.2")) && !LiveSettings.Current(Journal("garbage")));
     // Setting values in an INI keeps everything else (Cheeky's own keys, comments, line endings) and adds a missing key.
@@ -6410,6 +6432,32 @@ Test("Live phase 2: OFXR's NVIDIA flow is written live only when DCS started wit
     Require(both.Written.Count == 0 && both.Applied.Count == 0 && both.Waiting.SequenceEqual(["bidirectionalFlow"]), both.Message);
     var scale = WhileDcsRuns(h, () => h.Service.ApplyLive(foveated with { NvidiaFlowScale = 75 }, E2eInventory(h)));
     Require(scale.Written.Count == 1 && scale.Applied.SequenceEqual(["nvidiaFlowScale"]) && scale.Waiting.Count == 0, scale.Message);
+});
+Test("Live 0.7: Quad Views' eye-tracking refinements and Far depth's strength are written live, Far depth on/off waits; OFXR's panel live with FidelityFX too", () =>
+{
+    var f = E2e("live-07-quad"); var draft = LiveDraft() with { FarDepth = true }; var inventory = E2eInventory(f);
+    Require(f.Service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Applied && draft.UsesFarDepth, "applied with Far depth");
+    var settings = LiveEntry(f, LiveSettings.QuadFile).Path;
+    var edited = draft with { QuadSaccadeTail = !draft.QuadSaccadeTail, QuadGazeStabilize = !draft.QuadGazeStabilize, QuadLostGazeEase = !draft.QuadLostGazeEase, FarDepthPreset = FarDepthPreset.Strong };
+    var result = WhileDcsRuns(f, () => f.Service.ApplyLive(edited, inventory));
+    Require(result.Written.SequenceEqual([settings]) && result.Waiting.Count == 0
+        && result.Applied.Order(StringComparer.Ordinal).SequenceEqual(new[] { "farDepthPreset", "quadGazeStabilize", "quadLostGazeEase", "quadSaccadeTail" }), result.Message);
+    var values = IniFile.Parse(File.ReadAllText(settings));
+    Require(values["exe:DCS.dcsvr_far_depth_preset"] == "strong" && values["exe:DCS.dcsvr_far_depth"] == "1", "new values");
+    var off = WhileDcsRuns(f, () => f.Service.ApplyLive(edited with { FarDepth = false }, inventory));
+    Require(off.Written.Count == 0 && off.Waiting.Contains("farDepth"), off.Message);
+
+    var g = E2e("live-07-panel"); var ffx = LiveCheekyDraft() with { FrameGen = FrameGeneration.FidelityFx }; g.Service.SyncApplied(ffx, E2eInventory(g));
+    var ofxr = LiveEntry(g, LiveSettings.FlowFile).Path;
+    var panel = WhileDcsRuns(g, () => g.Service.ApplyLive(ffx with { ShowOverlay = !ffx.ShowOverlay, DiagnosticVram = !ffx.DiagnosticVram, HeadsetPanelPosition = PanelPosition.LowerLeft }, E2eInventory(g)));
+    Require(panel.Written.SequenceEqual([ofxr]) && panel.Waiting.Count == 0 && panel.Applied.Order(StringComparer.Ordinal).SequenceEqual(new[] { "diagnosticVram", "headsetPanelPosition", "showOverlay" }), panel.Message);
+    var ini = IniFile.Parse(IniFile.Decode(File.ReadAllBytes(ofxr)));
+    Require(ini["overlay.panel_position"] == "lower_left" && ini["ofxr.diag_vram"] == (ffx.DiagnosticVram ? "0" : "1"), "panel values");
+    // The flow keys still wait with FidelityFX, and so does the smooth cursor.
+    var flow = WhileDcsRuns(g, () => g.Service.ApplyLive(ffx with { NvidiaFlowScale = 75 }, E2eInventory(g)));
+    Require(flow.Written.Count == 0, flow.Message);
+    var cursor = WhileDcsRuns(g, () => g.Service.ApplyLive(ffx with { SmoothCursor = !ffx.SmoothCursor }, E2eInventory(g)));
+    Require(cursor.Written.Count == 0 && cursor.Waiting.Contains("smoothCursor"), cursor.Message);
 });
 Test("Live phase 2: Cheeky's DLSS 5 tuning is written live into its own INI, its saves tolerated, a dropped value written once more", () =>
 {
