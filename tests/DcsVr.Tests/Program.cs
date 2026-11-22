@@ -1776,6 +1776,9 @@ Test("The diagnostic package collects DCS, component and headset logs as text, w
     var headsetNow = HeadsetRuntime.Read("2.0.5.376", null, Path.Combine(local, "Pimax/runtime"), headsetState);
     Require(headsetNow.Changed && headsetNow.Line.Contains("CHANGED since the last flight (was Pimax Play 2.0.4.100, runtime built Oct 1 2026 10:00:00)"), headsetNow.Line);
     Require(!(headsetNow with { PreviousPimaxPlay = "2.0.5.376", PreviousRuntimeBuild = null }).Changed, "an unknown earlier build is no change");
+    // The Quest 3 VD route: Pimax's server log (an earlier Pimax session) and Pimax Play's version are not this flight's.
+    var onVd = HeadsetRuntime.Read("2.0.5.376", @"C:\Program Files\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json", Path.Combine(local, "Pimax/runtime"), headsetState, RuntimeKind.VirtualDesktop);
+    Require(onVd is { PimaxPlay: null, RuntimeBuild: null, Headset: null, Changed: false } && !onVd.Line.Contains("Pimax"), "VD route: nothing of Pimax's read: " + onVd.Line);
     // regress-07: the first hid device the Pimax server adds can be another vendor's (a Razer headset, VID 5426): the
     // headset is the Pimax one (VID 13476), and none without one.
     const string razer = "[26-11-22 09:00:01.000][ 9692][info][PSRV] added hid device:5426:1316:0-Razer Freyja\n";
@@ -2458,6 +2461,9 @@ Test("DCS engine optimizations install in Saved Games Scripts with the profile's
     Make("engine/sg/DCS/Scripts/DcsQvCull/DcsQvCull.prev.log", "earlier"); Make("engine/sg/DCS/Scripts/DcsQvCull/DcsQvCullPrefetch.prev.log", "earlier");
     // The shadow shader cache, including a temp file left by a write that was cut short.
     Make("engine/sg/DCS/Scripts/DcsQvCull/cache/s_0123456789abcdef.qvc", "entry"); Make("engine/sg/DCS/Scripts/DcsQvCull/cache/g_0123456789abcdef.qvc.12345.tmp", "partial");
+    // What the 0.7 checks write next to the log (water skip verify and timing, early census, three views timing / log).
+    foreach (var written in new[] { "DcsQvCull_water.csv", "water_timing_20261122_101500.csv", "early_census_4242.csv", "three_views_timing_20261122_101500.csv", "three_views.log" })
+        Make("engine/sg/DCS/Scripts/DcsQvCull/" + written, "written by the module");
     File.AppendAllText(log, "\n21:07:30.000 cockpit ipd: ownship matching off (SceneRenderable vtable not in this NGModel build)");
     Require(EngineOptimizations.Read(options, dcsLog, dcsRunning: true).Warnings.Any(w => w.Contains("recognise your own aircraft", StringComparison.Ordinal)), "Ownship matching off is reported");
     // A later payload that failed to start (a reload): the last loader outcome counts.
@@ -3863,9 +3869,21 @@ Test("Virtual Desktop route: readiness checks and Detect my setup", () =>
     // Detect my setup with VD streaming: the route is VD and Pimax Play's values (present on this fixture) are not used.
     var pimaxPlay = Make("vd-detect/global.json", PimaxJson(1, .66, .20, .66, .66));
     var sources = new DetectionSources { SteamVrServerLog = Path.Combine(root, "missing.txt"), PimaxPlaySettings = pimaxPlay, NeuralRuntimeFolders = [],
-        ProcessRunning = name => name is "VirtualDesktop.Streamer" or "pi_server", ActiveOpenXrRuntime = () => Vdxr };
+        ProcessRunning = name => name is "VirtualDesktop.Streamer", ActiveOpenXrRuntime = () => Vdxr };
     var detected = SetupDetection.Detect(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated }, new InventorySnapshot { VirtualDesktopRuntime = Vdxr }, sources).Profile;
     Require(detected.Runtime == RuntimeKind.VirtualDesktop && detected == HeadsetRoute.WithQuest3Focus(detected), "Quest 3 values, not Pimax Play's: " + detected.FoveaWidth + " x " + detected.FoveaHeight);
+    // Pimax Play running beside VD: either headset may be in use, nothing is picked (the profile keeps its route).
+    var both = SetupDetection.Detect(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated }, new InventorySnapshot { VirtualDesktopRuntime = Vdxr },
+        sources with { ProcessRunning = name => name is "VirtualDesktop.Streamer" or "pi_server" });
+    Require(both.Active.Route is null && both.Profile.Runtime == RuntimeKind.Pimax && both.Notes.Any(n => n.Contains("both running")), "VD and Pimax Play both running: ambiguous");
+    // The refresh rate of another headset (144 Hz) moves to the nearest Quest 3 rate, so the detected profile validates.
+    var fromPimax = SetupDetection.Detect(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, HeadsetRefreshHz = 144 }, new InventorySnapshot { VirtualDesktopRuntime = Vdxr }, sources);
+    Require(fromPimax.Profile.HeadsetRefreshHz == 120 && fromPimax.Detected.Any(d => d.Field == "headsetRefreshHz") && !ProfileValidation.Validate(fromPimax.Profile).Any(i => i.Code == "vd-refresh"), "144 Hz snapped to 120 Hz");
+    Require(HeadsetRoute.NearestQuest3RefreshHz(85) == 80 && HeadsetRoute.NearestQuest3RefreshHz(60) == 72 && HeadsetRoute.NearestQuest3RefreshHz(100) == 90 && HeadsetRoute.NearestQuest3RefreshHz(90) == 90, "nearest Quest 3 rate (lower on a tie)");
+    // Detecting again on a VD profile keeps the focus tuned in the headset; only the route change sets the starting values.
+    var tuned = detected with { FoveaWidth = .62, FoveaHeight = .8, PeripheralScale = .35, HeadsetRefreshHz = 90 };
+    var again = SetupDetection.Detect(tuned, new InventorySnapshot { VirtualDesktopRuntime = Vdxr }, sources).Profile;
+    Require(again is { FoveaWidth: .62, FoveaHeight: .8, PeripheralScale: .35, HeadsetRefreshHz: 90, Gaze: GazeMode.Fixed }, "a tuned VD focus survives Detect: " + again.FoveaWidth + " x " + again.FoveaHeight);
 });
 Test("Cheeky package never extracts the version.dll fallback loader", () =>
 {
@@ -5207,6 +5225,32 @@ Test("Three views is parked in 0.7: a profile saved with engineThreeViews=true l
     // An earlier 0.7 build saved the derived "usesThreeViews" too: such a draft must still load.
     var earlier = JsonData.Deserialize<VrProfile>(json.Replace("\"engineThreeViews\": false", "\"engineThreeViews\": true, \"usesThreeViews\": true"));
     Require(earlier.EngineThreeViews && !ConfigurationWriters.DcsQvCull(earlier).Contains("ThreeViews"), "A draft with usesThreeViews loads and writes no ThreeViews key");
+});
+Test("Profiles for 0.6.7: no derived value new since 0.6.7 is written (0.6.7 refuses keys it does not know); drafts that have them still load", () =>
+{
+    // The derived (get-only) values 0.6.7 itself wrote, and so reads: no other may be written (checked against 0.6.7's
+    // loader, branch foveated-fg, with profiles saved by this build). The 0.7 settings (frameGenFocusLayer,
+    // frameGenParallelEyes, quadEdgeMatch, quadSaccadeTail, quadLostGazeEase, engineFastShaderPaths, engineThreeViews,
+    // engineWaterSkip, engineIdleEffectSkip) and the Quest 3 VD route are still unknown to 0.6.7 (docs/INTERFACE.md).
+    string[] derived067 = ["boostHelperElevated", "depthBoostActiveMax", "neuralEdgeFeather", "quadSaccadeLeadMs", "usesAdaptiveCadence", "usesBoostHelper",
+        "usesBundledQuadViews", "usesCentralNeuralArea", "usesCheeky", "usesColorMode", "usesColorModeKey", "usesDepthBoost", "usesEngineModule", "usesEyeTrackedVr",
+        "usesFarDepth", "usesFixationDepth", "usesFoveatedDlss", "usesFoveatedFrameGen", "usesGazeDof", "usesGazePublish", "usesGVision", "usesHeadsetPanel",
+        "usesHudSymbology", "usesLayerEyeDistance", "usesLowerMonitor", "usesNeuralEdgeFade", "usesPerceptionLayer", "usesPeripheryDlssPreset",
+        "usesPeripheryStability", "usesPrefetchFix", "usesPupilShift", "usesQuadFocus", "usesQuadTurbo", "usesRecordersEmulatedLists", "usesReleaseIdleDlss",
+        "usesSmallDcsWindow", "usesTobiiPause", "usesVisualRealism"];
+    var written = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(new VrProfile { QuadSaccadeTail = true, EngineWaterSkip = true }))!.AsObject().Select(k => k.Key).ToHashSet();
+    var derivedWritten = typeof(VrProfile).GetProperties(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public)
+        .Where(p => p.SetMethod is null && p.GetIndexParameters().Length == 0)
+        .Select(p => System.Text.Json.JsonNamingPolicy.CamelCase.ConvertName(p.Name)).Where(written.Contains).ToArray();
+    var extra = derivedWritten.Except(derived067).ToArray();
+    Require(extra.Length == 0, "derived values 0.6.7 cannot read are written: " + string.Join(", ", extra));
+    // A draft saved by an earlier 0.7 build, with them: still loads (dropped as obsolete keys).
+    var json = JsonData.Serialize(new VrProfile { EngineOptimizations = true });
+    var earlier = JsonData.Deserialize<VrProfile>(json.TrimEnd().TrimEnd('}') + ", \"usesWaterSkip\": false, \"usesIdleEffectSkip\": false, \"engineModuleRequired\": true, \"usesQuadSaccadeTail\": false, " +
+        "\"usesQuadLostGazeEase\": false, \"usesLayerOwnGaze\": true, \"usesLayerGaze\": true, \"quadSaccadeHoldMs\": 40, \"quadSaccadeMaxExtend\": 0.35}");
+    Require(earlier.EngineOptimizations && earlier.EngineModuleRequired, "an earlier 0.7 draft with the derived values loads");
+    // The waiting list of live mode compares serialized drafts: a derived value is never a setting there.
+    Require(!ControlService.ChangedSettings(new VrProfile { EngineOptimizations = true }, new VrProfile()).Contains("engineModuleRequired"), "engineModuleRequired is no changed setting");
 });
 Test("CPU Boost: processes changed by a helper that was ended are restored at the next start, only the same process", () =>
 {

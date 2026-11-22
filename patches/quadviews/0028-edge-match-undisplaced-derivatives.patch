@@ -1,0 +1,79 @@
+Edge match (0019) with Far depth (0015): the scale k (one periphery texel in focus texels) comes from the derivatives
+of the focus coordinate as the view projects it, never from the one Far depth displaced. The displacement jumps across
+a depth edge, and its derivative read as a huge k there: a halo of blur, patchy along depth edges inside the fade band.
+The same text in ProjectionPS.hlsl and in the copy Far depth keeps (ProjectionPS.nofardepth.hlsl), after the anchors
+Far depth's injection uses. With dcsvr_edge_match 0 the sizes and derivatives are no longer computed at all (one
+branch on the constant for the draw); the composition is unchanged (tests/quadviews-composition).
+
+diff --git a/openxr-api-layer/ProjectionPS.hlsl b/openxr-api-layer/ProjectionPS.hlsl
+index f88429f..8f678df 100644
+--- a/openxr-api-layer/ProjectionPS.hlsl
++++ b/openxr-api-layer/ProjectionPS.hlsl
+@@ -60,14 +60,23 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0,
+     float4 color0 = sourceStereoTexture.Sample(sourceSampler, dcsvrTexcoord);
+     float2 layer1TexCoord = layer1ProjectedCoordNdc * float2(0.5f, -0.5f) + 0.5f;
+     // For pixels outside of the focus view, the sampler will give us a fully transparent pixel.
+-    // DCSVR edge match: a periphery texel in focus texels, from the derivatives of both views (before any branch).
+-    float2 dcsvrStereoSize, dcsvrFocusSize;
+-    sourceStereoTexture.GetDimensions(dcsvrStereoSize.x, dcsvrStereoSize.y);
+-    sourceFocusTexture.GetDimensions(dcsvrFocusSize.x, dcsvrFocusSize.y);
+-    const float2 dcsvrFx = ddx(layer1TexCoord) * dcsvrFocusSize, dcsvrFy = ddy(layer1TexCoord) * dcsvrFocusSize;
+-    const float2 dcsvrSx = ddx(texcoord) * dcsvrStereoSize, dcsvrSy = ddy(texcoord) * dcsvrStereoSize;
+-    const float dcsvrK = min(16, sqrt(abs(dcsvrFx.x * dcsvrFy.y - dcsvrFx.y * dcsvrFy.x) /
+-                                      max(abs(dcsvrSx.x * dcsvrSy.y - dcsvrSx.y * dcsvrSy.x), 1e-12)));
++    // DCSVR edge match: a periphery texel in focus texels, from the derivatives of both views (before any branch
++    // that depends on the pixel; dcsvrEdgeMatch is one value for the draw, so with edge match off none of this runs).
++    // The derivatives come from the interpolated coordinates as the views project them, never from the ones Far depth
++    // displaced: across a depth edge the displacement jumps, and its derivative would read as a huge scale (a halo of
++    // blur along every edge).
++    float2 dcsvrFocusSize = 1;
++    float dcsvrK = 0;
++    [branch] if (dcsvrEdgeMatch > 0) {
++        float2 dcsvrStereoSize;
++        sourceStereoTexture.GetDimensions(dcsvrStereoSize.x, dcsvrStereoSize.y);
++        sourceFocusTexture.GetDimensions(dcsvrFocusSize.x, dcsvrFocusSize.y);
++        const float2 dcsvrEdgeUv = (projectedFocusCoord.xy / projectedFocusCoord.z) * float2(0.5f, -0.5f);
++        const float2 dcsvrFx = ddx(dcsvrEdgeUv) * dcsvrFocusSize, dcsvrFy = ddy(dcsvrEdgeUv) * dcsvrFocusSize;
++        const float2 dcsvrSx = ddx(texcoord) * dcsvrStereoSize, dcsvrSy = ddy(texcoord) * dcsvrStereoSize;
++        dcsvrK = min(16, sqrt(abs(dcsvrFx.x * dcsvrFy.y - dcsvrFx.y * dcsvrFy.x) /
++                              max(abs(dcsvrSx.x * dcsvrSy.y - dcsvrSx.y * dcsvrSy.x), 1e-12)));
++    }
+     // DCSVR early out: no focus contribution here, the stereo colour as the full path would leave it.
+     bool focusVisible = all(abs(layer1ProjectedCoordNdc) < 1);
+     if (focusVisible && focusViewShape >= 1) {
+diff --git a/openxr-api-layer/ProjectionPS.nofardepth.hlsl b/openxr-api-layer/ProjectionPS.nofardepth.hlsl
+index e5b769d..c54339c 100644
+--- a/openxr-api-layer/ProjectionPS.nofardepth.hlsl
++++ b/openxr-api-layer/ProjectionPS.nofardepth.hlsl
+@@ -54,14 +54,23 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0,
+     float2 layer1ProjectedCoordNdc = projectedFocusCoord.xy / projectedFocusCoord.z;
+     float2 layer1TexCoord = layer1ProjectedCoordNdc * float2(0.5f, -0.5f) + 0.5f;
+     // For pixels outside of the focus view, the sampler will give us a fully transparent pixel.
+-    // DCSVR edge match: a periphery texel in focus texels, from the derivatives of both views (before any branch).
+-    float2 dcsvrStereoSize, dcsvrFocusSize;
+-    sourceStereoTexture.GetDimensions(dcsvrStereoSize.x, dcsvrStereoSize.y);
+-    sourceFocusTexture.GetDimensions(dcsvrFocusSize.x, dcsvrFocusSize.y);
+-    const float2 dcsvrFx = ddx(layer1TexCoord) * dcsvrFocusSize, dcsvrFy = ddy(layer1TexCoord) * dcsvrFocusSize;
+-    const float2 dcsvrSx = ddx(texcoord) * dcsvrStereoSize, dcsvrSy = ddy(texcoord) * dcsvrStereoSize;
+-    const float dcsvrK = min(16, sqrt(abs(dcsvrFx.x * dcsvrFy.y - dcsvrFx.y * dcsvrFy.x) /
+-                                      max(abs(dcsvrSx.x * dcsvrSy.y - dcsvrSx.y * dcsvrSy.x), 1e-12)));
++    // DCSVR edge match: a periphery texel in focus texels, from the derivatives of both views (before any branch
++    // that depends on the pixel; dcsvrEdgeMatch is one value for the draw, so with edge match off none of this runs).
++    // The derivatives come from the interpolated coordinates as the views project them, never from the ones Far depth
++    // displaced: across a depth edge the displacement jumps, and its derivative would read as a huge scale (a halo of
++    // blur along every edge).
++    float2 dcsvrFocusSize = 1;
++    float dcsvrK = 0;
++    [branch] if (dcsvrEdgeMatch > 0) {
++        float2 dcsvrStereoSize;
++        sourceStereoTexture.GetDimensions(dcsvrStereoSize.x, dcsvrStereoSize.y);
++        sourceFocusTexture.GetDimensions(dcsvrFocusSize.x, dcsvrFocusSize.y);
++        const float2 dcsvrEdgeUv = (projectedFocusCoord.xy / projectedFocusCoord.z) * float2(0.5f, -0.5f);
++        const float2 dcsvrFx = ddx(dcsvrEdgeUv) * dcsvrFocusSize, dcsvrFy = ddy(dcsvrEdgeUv) * dcsvrFocusSize;
++        const float2 dcsvrSx = ddx(texcoord) * dcsvrStereoSize, dcsvrSy = ddy(texcoord) * dcsvrStereoSize;
++        dcsvrK = min(16, sqrt(abs(dcsvrFx.x * dcsvrFy.y - dcsvrFx.y * dcsvrFy.x) /
++                              max(abs(dcsvrSx.x * dcsvrSy.y - dcsvrSx.y * dcsvrSy.x), 1e-12)));
++    }
+     // DCSVR early out: no focus contribution here, the stereo colour as the full path would leave it.
+     bool focusVisible = all(abs(layer1ProjectedCoordNdc) < 1);
+     if (focusVisible && focusViewShape >= 1) {

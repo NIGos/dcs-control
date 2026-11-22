@@ -58,7 +58,13 @@ public static class SetupDetection
         // Virtual Desktop: its streamer running with VDXR as the active OpenXR runtime. With VD set to stream through
         // SteamVR instead, the active runtime is SteamVR's and the checks below apply.
         if (sources.ProcessRunning("VirtualDesktop.Streamer") && WindowsInventory.IsVirtualDesktopRuntime(sources.ActiveOpenXrRuntime()))
+        {
+            // Pimax Play running too: either headset may be the one in use (Pimax Play can switch the active runtime back
+            // when its headset starts), so nothing is picked.
+            if (sources.ProcessRunning("pi_server"))
+                return new(null, "Virtual Desktop (VDXR active) and Pimax Play are both running. Close the one you are not flying with, then detect again.", TrackingKind.Unknown);
             return new(RuntimeKind.VirtualDesktop, "Virtual Desktop is running and VDXR is the active OpenXR runtime.", TrackingKind.Unknown);
+        }
         // Only SteamVR's own log is positive evidence. Pimax Play (pi_server) also runs underneath Sboys, so it
         // never proves the Pimax route on its own.
         if (sources.ProcessRunning("vrserver"))
@@ -118,10 +124,16 @@ public static class SetupDetection
         {
             if (profile.Runtime == RuntimeKind.VirtualDesktop)
             {
-                profile = HeadsetRoute.WithQuest3Focus(profile);
+                // The Quest 3 starting values only when the route changes to VD: a VD profile keeps the focus tuned in the
+                // headset (detecting again must not reset it); it is only held to a fixed focus.
+                if (current.Runtime != RuntimeKind.VirtualDesktop)
+                {
+                    profile = HeadsetRoute.WithQuest3Focus(profile);
+                    Set("foveaSource", "Focus area source", "Set here (Quest 3 starting values: focus " + Format(profile.FoveaWidth) + " × " + Format(profile.FoveaHeight)
+                        + ", periphery " + Format(profile.PeripheralScale) + ")", "Quest 3 VD route (no Pimax Play to read)");
+                }
+                else profile = profile with { Gaze = GazeMode.Fixed, FoveaSource = FoveaSource.Profile };
                 Set("gaze", "Focus movement", "Fixed", "Quest 3 VD route (Quest 3 has no eye tracking)");
-                Set("foveaSource", "Focus area source", "Set here (Quest 3 starting values: focus " + Format(profile.FoveaWidth) + " × " + Format(profile.FoveaHeight)
-                    + ", periphery " + Format(profile.PeripheralScale) + ")", "Quest 3 VD route (no Pimax Play to read)");
             }
             else if (profile.Runtime == RuntimeKind.SboysSteamVr && GazeBridge.RuntimeProvidesGaze(inventory))
             {
@@ -146,6 +158,15 @@ public static class SetupDetection
                 profile = profile with { Gaze = GazeMode.Fixed };
                 Set("gaze", "Focus movement", "Fixed", "No eye-gaze source for this Sboys version");
             }
+        }
+
+        // Quest 3 runs at 72, 80, 90 or 120 Hz (ProfileValidation's vd-refresh): a rate from another headset (144) is
+        // moved to the nearest of them, so the detected profile validates. VD's own rate is not readable here.
+        if (profile.Runtime == RuntimeKind.VirtualDesktop && !profile.Desktop && !ProfileValidation.Quest3RefreshHz.Contains(profile.HeadsetRefreshHz))
+        {
+            var snapped = HeadsetRoute.NearestQuest3RefreshHz(profile.HeadsetRefreshHz);
+            profile = profile with { HeadsetRefreshHz = snapped };
+            Set("headsetRefreshHz", "Headset refresh rate", snapped.ToString("0.#", CultureInfo.InvariantCulture) + " Hz", "Quest 3 VD route: the nearest Quest 3 rate (confirm it matches the rate set in Virtual Desktop)");
         }
 
         if (profile.Runtime == RuntimeKind.SboysSteamVr && ReadSteamVrRefresh(sources.SteamVrSettings) is { } refresh)

@@ -149,7 +149,10 @@ public static class LiveSettings
         "DLSS.ReleaseIdleSets", "DLSS.PeripheryPreset", "DLSS.FocusPreset", "Dev.PayloadPath", "Dev.IniPath",
         // 0.7: water no-submit (hot reload), early shaders (worker tick). [Views] ThreeViews is parked: the app no longer writes it.
         "Water.SkipHiddenWater", "D3D.EarlyShaders",
-        // [D3D] ChainFast / ShaderFast: re-applied by the worker every second (worker.inc).
+        // [D3D] ChainFast / ShaderFast: re-applied by the worker every second (worker.inc). Off takes effect at once. On: kinds
+        // DCS creates afterwards are taken at creation, the ones it made earlier by the bind-time identification, which counts
+        // only flight time (180 s) and, once ended with kinds missing, opens again at the next mission load (regfix 82c5345).
+        // So live, and the interface says the full gain can take a few minutes of flight.
         "D3D.ChainFast", "D3D.ShaderFast",
     };
     // PupilShift.ini keys the layer re-reads (pupil_shift_layer.cpp:241-320). Not OpenXrEyeGaze, QuadViewsFixedFocus or [DlssPreset] (instance creation).

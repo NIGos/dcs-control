@@ -1,0 +1,24 @@
+Two layers (0017) with three views (0020, parked): a frame where three views filled the right periphery asks for the
+layer's own periphery pass, so the periphery layer carries the filled image. Before, without another periphery pass
+(stability, sharpening, Far depth, debug view) the periphery layer named the application's swapchain, whose right
+view three views leaves unfilled (DCS draws only its strip there). Once made, the periphery output stays for the
+session (dcsvrTwoLayerPrepare keeps any periphery output), so the swapchain the layer names changes once at most.
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 241d3af..83c2978 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -3877,8 +3888,12 @@ namespace openxr_api_layer {
+         // periphery (stability, contrast, Far depth's displacement inside the focus rectangle) or the focus debug view
+         // (the periphery black). By settings only (never by what a frame's passes did), so the swapchain the periphery
+         // layer names does not change from frame to frame.
++        // Three views (dcsvr_threeviews.h) fills the right periphery in our copy of it: the application's own image
++        // is not what the composition would have shown, so a frame with three views engaged asks for the pass too
++        // (and keeps it for the session once made, as dcsvrTwoLayerPrepare holds any periphery output).
+         bool dcsvrTwoLayerPeripheryPass() const {
+-            return m_dcsvrTemporal.enabled || m_dcsvrPeripherySharpen > 0.f || m_dcsvrFarDepth.enabled || m_debugFocusView;
++            return m_dcsvrTemporal.enabled || m_dcsvrPeripherySharpen > 0.f || m_dcsvrFarDepth.enabled || m_debugFocusView ||
++                   m_dcsvrThreeViews.Active();
+         }
+ 
+         // DCSVR two layers: the colour the passes read from this swapchain is linear (an sRGB or a float format).

@@ -178,7 +178,10 @@ class GazeFilter {
     // Per eye, on a frame without a gaze: while it lasts, the focus centre (NDC) easing from `from` (the last gaze's)
     // to `to` (the fixed focus's) since the gaze was lost. False: no ease (off, no gaze seen yet, or finished), the
     // caller shows the fixed focus.
-    bool Ease(int eye, int64_t time, GazeVec2 from, GazeVec2 to, const GazeSettings& s, GazeVec2& out) {
+    // progress (optional): the ease's share done, 0 .. 1, for EaseSection: the fixed focus is bigger than the tracked
+    // one (Quad Views' fixed and foveated sections), so the box's size eases with its centre, and the hand-over to the
+    // fixed focus at the end is not a step from the tracked size to the fixed size.
+    bool Ease(int eye, int64_t time, GazeVec2 from, GazeVec2 to, const GazeSettings& s, GazeVec2& out, float* progress = nullptr) {
         if (s.lostEaseMs <= 0.f || eye < 0 || eye >= Eyes) return false;
         EyeState& e = m_eyes[eye];
         if (!e.hadGaze) return false;
@@ -191,7 +194,15 @@ class GazeFilter {
         if (t >= 1.f) return false;
         const float k = t * t * (3.f - 2.f * t);
         out = {e.lostFrom.x + (to.x - e.lostFrom.x) * k, e.lostFrom.y + (to.y - e.lostFrom.y) * k};
+        if (progress) *progress = k;
         return true;
+    }
+
+    // The focus box's half size (NDC) while the focus eases: the tracked size (with its widening) at progress 0, the
+    // fixed focus's at 1.
+    static float EaseSection(float tracked, float fixed, float progress) {
+        const float k = std::clamp(progress, 0.f, 1.f);
+        return tracked + (fixed - tracked) * k;
     }
 
     // NDC units per degree near the centre of a view with these half-angle tangents.

@@ -149,7 +149,7 @@ window.runWebSmoke = async function() {
         check('No other-runtime line on the Quest 3 VD route, which runs on VDXR',$('otherRuntime').hidden); ui.profile.runtime = runtime; }
       ui.state.inventory = inventory; ui.invalidate(); check('and it goes when the runtime is Pimax\'s again',$('otherRuntime').hidden === !inventory?.otherOpenXrRuntime); }
     { const keys = ['runtime','quadViews','gaze','foveaSource','foveaWidth','foveaHeight','peripheralScale','quadFocusScale','quadEdgeBlend','headsetRefreshHz','neuralRendering','foveatedDlss','frameGen','frameGenFoveated'], before = Object.fromEntries(keys.map(k => [k,ui.profile[k]]));
-      edit('quadViews','PimaxNative'); ui.profile.headsetRefreshHz = 144; document.querySelector('#routeSwitch [data-route="VirtualDesktop"]').click(); const p = ui.profile;
+      edit('quadViews','PimaxNative'); ui.profile.headsetRefreshHz = 144; const preVd = Object.fromEntries(['gaze','foveaSource','foveaWidth','foveaHeight','peripheralScale','quadFocusScale','quadEdgeBlend'].map(k => [k,ui.profile[k]])); document.querySelector('#routeSwitch [data-route="VirtualDesktop"]').click(); const p = ui.profile;
       check('Quest 3 VD snaps 144 Hz to 120 and its slider stops at 120',p.headsetRefreshHz === 120 && $('range-headsetRefreshHz').max === '120' && $('range-headsetRefreshHz').min === '72');
       { const range = $('range-headsetRefreshHz'); range.value = 100; range.dispatchEvent(new Event('input',{bubbles:true}));
         check('Quest 3 VD: the refresh slider snaps to a Quest 3 rate (100 to 90)',ui.profile.headsetRefreshHz === 90 && range.value === '90');
@@ -161,7 +161,9 @@ window.runWebSmoke = async function() {
       edit('neuralRendering',true); check('Quest 3 VD leaves DLSS 5 available, as on the other routes',ui.profile.neuralRendering && !$('input-neuralRendering').disabled && !$('featureCheck-dlss').disabled);
       check('Switching to Virtual Desktop loads the Quest 3 focus values with a fixed focus',p.runtime === 'VirtualDesktop' && p.quadViews === 'QuadViewsFoveated' && p.gaze === 'Fixed' && p.foveaSource === 'Profile' && p.foveaWidth === .55 && p.foveaHeight === .75 && p.peripheralScale === .4 && p.quadFocusScale === 1);
       check('Virtual Desktop hides eye tracking, the Pimax Play source and the Sboys card',$('setting-gaze').hidden && $('setting-foveaSource').hidden && $('setting-refreshFromHeadset').hidden && $('sboysCard').hidden && p.name.startsWith('Quest 3 VD · '));
-      document.querySelector('#routeSwitch [data-route="Pimax"]').click(); check('Leaving Virtual Desktop follows Pimax Play with eye tracking again',ui.profile.foveaSource === 'PimaxPlay' && ui.profile.gaze === 'EyeTracked' && !$('setting-gaze').hidden);
+      document.querySelector('#routeSwitch [data-route="Pimax"]').click(); check('Leaving Virtual Desktop gives back the focus, focus movement and refresh rate the profile had before it',Object.entries(preVd).every(([k,v]) => ui.profile[k] === v) && ui.profile.headsetRefreshHz === 144 && !$('setting-gaze').hidden);
+      { const sboys = ui.withFeatures({...ui.profile, runtime:'VirtualDesktop', gaze:'Fixed', foveaSource:'Profile'}, {route:'SboysSteamVr', features:ui.featureState(ui.profile)});
+        check('A profile that started on Virtual Desktop keeps its fixed focus on Sboys (no Pimax eye tracking forced) and follows Pimax Play',sboys.runtime === 'SboysSteamVr' && sboys.gaze === 'Fixed' && sboys.foveaSource === 'PimaxPlay'); }
       document.querySelector(`#routeSwitch [data-route="${before.runtime}"]`).click(); Object.assign(ui.profile,before); ui.invalidate(); ui.showProfile(); }
     { const before = {runtime:ui.profile.runtime,quadViews:ui.profile.quadViews,frameGen:ui.profile.frameGen,neural:ui.profile.neuralRendering};
       document.querySelector('#routeSwitch [data-route="Desktop"]').click();

@@ -1886,6 +1886,76 @@ replace('cmake/Standalone.cmake',
     '    add_test(NAME CheekyRuntimeStandalone-TransportDcsDeferredTransportFail COMMAND CheekyRuntimeHostTests --transport-dcs-deferred-transport-fail)\n'
     '    add_test(NAME CheekyRuntimeStandalone-DcsLiveReload COMMAND CheekyRuntimeHostTests --dcs-live-reload)\n')
 
+# Chromium child processes (DCS's embedded browser, CEF: its gpu-process, renderer and utility processes, started with
+# --type=...) load the DCS folder's dxgi.dll too (regress-07). There the proxy only forwards DXGI: Cheeky's host never
+# starts (no hooks, no host log), the Vulkan layer path is not published, and the loader log DCS's own process wrote is
+# not overwritten. Bootstrap status 4 says so.
+replace('bootstrap/loader.hpp', '''// 0 = idle, 1 = worker queued/starting, 2 = host started, 3 = startup failed.''',
+    '''// DCS Control: true in a Chromium child process (a "--type=" argument on the command line).
+bool cheeky_bootstrap_chromium_child() noexcept;
+
+// 0 = idle, 1 = worker queued/starting, 2 = host started, 3 = startup failed,
+// 4 = not started: a Chromium child process (DCS Control).''')
+replace('bootstrap/loader.cpp', '''void cheeky_bootstrap_attach(HMODULE module) noexcept {
+    g_module = module;
+    enable_local_vulkan(module);
+}''', '''bool cheeky_bootstrap_chromium_child() noexcept {
+    const wchar_t* line = GetCommandLineW();
+    for (const wchar_t* at = line ? wcsstr(line, L"--type=") : nullptr; at; at = wcsstr(at + 1, L"--type="))
+        if (at > line && (at[-1] == L' ' || at[-1] == L'\\t' || at[-1] == L'"')) return true;
+    return false;
+}
+
+void cheeky_bootstrap_attach(HMODULE module) noexcept {
+    g_module = module;
+    if (!cheeky_bootstrap_chromium_child()) enable_local_vulkan(module);
+}''')
+replace('bootstrap/loader.cpp', '''void cheeky_bootstrap_start(CheekyBootstrapHost host) noexcept {
+    if (InterlockedCompareExchange(&g_state, 1, 0) != 0) return;
+''', '''void cheeky_bootstrap_start(CheekyBootstrapHost host) noexcept {
+    if (cheeky_bootstrap_chromium_child()) {
+        if (InterlockedCompareExchange(&g_state, 4, 0) == 0)
+            report(L"Cheeky: a Chromium child process (--type=): not started; DXGI is only forwarded.\\n");
+        return;
+    }
+    if (InterlockedCompareExchange(&g_state, 1, 0) != 0) return;
+''')
+replace('bootstrap/dxgi_proxy.cpp', '''            OutputDebugStringW(line);
+            wcscpy_s(filename + 1, remaining, L"CheekyFoveatedDLSS-Loader.log");''', '''            OutputDebugStringW(line);
+            // DCS Control: a Chromium child process never rewrites the game process's loader log.
+            if (cheeky_bootstrap_chromium_child()) { g_loading_chain = false; return TRUE; }
+            wcscpy_s(filename + 1, remaining, L"CheekyFoveatedDLSS-Loader.log");''')
+# The test: the dxgi proxy loaded by a process with "--type=gpu-process" on its command line forwards DXGI, never
+# starts the host and writes no loader log.
+replace('bootstrap/tests.cpp', '''        require(argc == 5 || argc == 6, "Usage''', '''        const bool chromium_child = std::wstring(argv[1]) == L"chromium-child";
+        require(argc == 5 || argc == 6, "Usage''')
+replace('bootstrap/tests.cpp', '''        if (argc == 6) fs::copy_file(argv[5], chain_path);''', '''        if (argc == 6 && !chromium_child) fs::copy_file(argv[5], chain_path);''')
+replace('bootstrap/tests.cpp', '''            require(fs::file_size(directory / L"CheekyFoveatedDLSS-Loader.log") > 2, "loader log missing");
+            require(wait_for_start(status) == (missing ? 3U : 2U), "proxy host startup status");
+        }
+        if (!missing) {''', '''            if (chromium_child) {
+                require(std::wstring(GetCommandLineW()).find(L" --type=") != std::wstring::npos, "test run without --type=");
+                require(status() == 4U, "Chromium child: the host must not start (bootstrap status 4)");
+                require(!fs::exists(directory / L"CheekyFoveatedDLSS-Loader.log"), "Chromium child: no loader log");
+                require(GetModuleHandleW(host_path.c_str()) == nullptr, "Chromium child: the host must not load");
+                FreeLibrary(loader);
+                std::puts("PASS bootstrap in a Chromium child process: DXGI forwarded, Cheeky not started");
+                return 0;
+            }
+            require(fs::file_size(directory / L"CheekyFoveatedDLSS-Loader.log") > 2, "loader log missing");
+            require(wait_for_start(status) == (missing ? 3U : 2U), "proxy host startup status");
+        }
+        if (!missing) {''')
+replace('cmake/Standalone.cmake', '''foreach(mode proxy asi missing)
+    add_test(NAME CheekyBootstrap-${mode} COMMAND CheekyBootstrapTests ${mode}
+        $<TARGET_FILE:CheekyStandaloneProxy> $<TARGET_FILE:CheekyOptiScaler> $<TARGET_FILE:CheekyBootstrapFakeHost>)
+endforeach()''', '''foreach(mode proxy asi missing)
+    add_test(NAME CheekyBootstrap-${mode} COMMAND CheekyBootstrapTests ${mode}
+        $<TARGET_FILE:CheekyStandaloneProxy> $<TARGET_FILE:CheekyOptiScaler> $<TARGET_FILE:CheekyBootstrapFakeHost>)
+endforeach()
+add_test(NAME CheekyBootstrap-chromium-child COMMAND CheekyBootstrapTests chromium-child
+    $<TARGET_FILE:CheekyStandaloneProxy> $<TARGET_FILE:CheekyOptiScaler> $<TARGET_FILE:CheekyBootstrapFakeHost> --type=gpu-process)''')
+
 # The D3D shaders are embedded as bytecode (src/d3d_shaders.hpp, generated by Cheeky's scripts/build-d3d-shaders.py
 # with the Windows SDK fxc); the build never compiles HLSL. Regenerate it whenever the patched shader sources no
 # longer match it, so the shader patches above reach the GPU. (Until 2026-10-18 nothing did this: the 2026-10-07

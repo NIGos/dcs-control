@@ -208,6 +208,7 @@ struct Fake {
     // OpenXR eye gaze (XR_EXT_eye_gaze_interaction) and the action system, as the runtime sees them.
     bool xr_offered{};                        // the runtime lists the extension
     bool qv_fixed{};                          // the fake Quad Views has a fixed focus (no gaze) and requests the extension
+    bool enumerate_fails{};                   // the runtime's extension list cannot be read (the layer's probe: unknown)
     bool xr_never_valid{};                    // nobody wearing the headset: the gaze is never valid
     std::vector<std::string> enabled;         // extensions the instance was created with
     std::map<std::string, XrPath> paths;
@@ -433,6 +434,7 @@ Quat look_along(Vec3 d) {
 
 XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_extensions(const char* layer, uint32_t capacity, uint32_t* count, XrExtensionProperties* properties) {
     if (layer) return XR_ERROR_API_LAYER_NOT_PRESENT;
+    if (fake.enumerate_fails) return XR_ERROR_RUNTIME_FAILURE;
     const char* names[] = {"XR_KHR_D3D11_enable", "XR_VARJO_quad_views", XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME};
     const uint32_t n = fake.xr_offered ? 3 : 2;
     *count = n;
@@ -719,6 +721,7 @@ struct Options {
     bool qv_fixed{};                 // that Quad Views runs a fixed focus: its export never has a gaze, it enables the eye
                                      // gaze extension below the layer (QuadViewsFixedFocus=1)
     bool xr_offered{};               // the runtime offers XR_EXT_eye_gaze_interaction (Pimax)
+    bool enumerate_fails{};          // but its extension list cannot be read (the layer's probe: unknown)
     bool xr_never_valid{};           // and its gaze is never valid (nobody wearing the headset)
     bool app_gaze{};                 // the application enables the extension and binds its own gaze action
     std::function<void(const fs::path& ini, int frame)> on_frame;  // live ini edits
@@ -913,6 +916,7 @@ Summary run(const fs::path& dll, const fs::path& out, const Options& o) {
     fake.qv_style = o.qv_style;
     fake.xr_offered = o.xr_offered;
     fake.qv_fixed = o.qv_fixed;
+    fake.enumerate_fails = o.enumerate_fails;
     fake.xr_never_valid = o.xr_never_valid;
     // The fake Pimax PVR client: through its table, or through copies taken before the layer is loaded.
     std::array<std::array<void*, 4>, 2> pvr_before{};
@@ -2208,6 +2212,11 @@ int main(int argc, char** argv) {
     Options qf = xq; qf.name = "qv_fixed_xr_gaze"; qf.description = "bundled Quad Views, fixed focus (QuadViewsFixedFocus=1): the OpenXR eye gaze";
     qf.qv_fixed = true;
     if (!fake_qv_dll.empty()) results.push_back(run(dll, out, qf));
+    // The runtime's extension list cannot be read (the probe says unknown): Quad Views still enables the extension below,
+    // so the layer must read the OpenXR gaze as when the runtime lists it (before: 'unknown' counted as absent, no gaze).
+    Options qu = qf; qu.name = "qv_fixed_probe_unknown"; qu.description = "the same with the runtime's extension list unreadable: the OpenXR eye gaze still";
+    qu.enumerate_fails = true;
+    if (!fake_qv_dll.empty()) results.push_back(run(dll, out, qu));
     Options qn = qf; qn.name = "qv_fixed_no_xr"; qn.description = "the same without the OpenXR eye gaze: no gaze at all (the fixed focus is never one)";
     qn.xr_offered = false;
     if (!fake_qv_dll.empty()) results.push_back(run(dll, out, qn));
@@ -2347,7 +2356,7 @@ int main(int argc, char** argv) {
         const auto& fixed = get("qv_fixed_no_xr");
         CHECK(fixed.fixed_ipd_min > 1e8 || (std::fabs(fixed.fixed_ipd_min - 64.0) < 1e-3 && std::fabs(fixed.fixed_ipd_max - 64.0) < 1e-3), "fixed focus, no OpenXR gaze: rendered IPD exactly 64.0 mm", fixed.fixed_ipd_min, fixed.fixed_ipd_max, -1);
     }
-    for (const char* name : {"xr_gaze", "xr_app_gaze", "qv_fixed_xr_gaze"}) {
+    for (const char* name : {"xr_gaze", "xr_app_gaze", "qv_fixed_xr_gaze", "qv_fixed_probe_unknown"}) {
         const auto& r = get(name);
         CHECK(r.qv_valid > 0 && r.qv_invalid > 0, "the OpenXR script has frames with and without a gaze", r.qv_valid, r.qv_invalid, -1);
         CHECK(r.fixed_ipd_min > 1e8 || (std::fabs(r.fixed_ipd_min - 64.0) < 1e-3 && std::fabs(r.fixed_ipd_max - 64.0) < 1e-3), "OpenXR gaze: rendered IPD exactly 64.0 mm without a gaze", r.fixed_ipd_min, r.fixed_ipd_max, -1);

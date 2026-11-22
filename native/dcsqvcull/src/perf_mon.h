@@ -912,6 +912,44 @@ void LogVram() {
         v.usage * 10 >= v.budget * 9 ? "   <-- near the budget (textures may be demoted or paged)" : "");
 }
 
+// The process's handle and thread counts and private memory, for the perf line: a leak over a long session (a handle
+// or thread per mission, a private heap that only grows) shows as a trend across the lines (regress-07).
+struct ProcCounts {
+  unsigned long handles = 0, threads = 0;
+  double privateMb = 0;
+  bool ok = false;
+};
+ProcCounts ReadProcCounts() {
+  ProcCounts c;
+  DWORD h = 0;
+  if (GetProcessHandleCount(GetCurrentProcess(), &h)) c.handles = h;
+  PROCESS_MEMORY_COUNTERS_EX pmc{};
+  if (K32GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc)))
+    c.privateMb = pmc.PrivateUsage / 1048576.0;
+  // Threads: the process entry of a process snapshot (no per-thread walk).
+  const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap != INVALID_HANDLE_VALUE) {
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    const DWORD self = GetCurrentProcessId();
+    for (BOOL more = Process32FirstW(snap, &pe); more; more = Process32NextW(snap, &pe))
+      if (pe.th32ProcessID == self) {
+        c.threads = pe.cntThreads;
+        break;
+      }
+    CloseHandle(snap);
+  }
+  c.ok = c.handles > 0 && c.threads > 0 && c.privateMb > 0;
+  return c;
+}
+// " handles=1234 threads=56 private=7890 MB", or "" when nothing could be read.
+std::string ProcCountsText(const ProcCounts& c) {
+  if (!c.ok) return std::string();
+  char text[96];
+  snprintf(text, sizeof(text), " handles=%lu threads=%lu private=%.0f MB", c.handles, c.threads, c.privateMb);
+  return text;
+}
+
 void PerfLine(double t) {
   const double secs = t - g_lastPerfT;
   g_lastPerfT = t;
@@ -942,11 +980,11 @@ void PerfLine(double t) {
   else
     snprintf(vtext, sizeof(vtext), "%s", perfgov::VerdictName(v));
   Log("perf: fps=%.1f ft p50/p95=%.1f/%.1f ms render-thread busy=%s gpu util=%s (dcs %s) verdict=%s (%d s GPU, %d CPU, "
-      "%d capped, %d mixed of %d) engine=%s governor=%d views=%d pairs=%d",
+      "%d capped, %d mixed of %d) engine=%s governor=%d views=%d pairs=%d%s",
       frames / (secs > 0 ? secs : 1.0), q(0.5), q(0.95), Pct(a.Rt()).c_str(), Pct(a.Gpu()).c_str(),
       Pct(a.Dcs()).c_str(), vtext, a.verdicts[perfgov::kGpu], a.verdicts[perfgov::kCpu],
       a.verdicts[perfgov::kCapped], a.verdicts[perfgov::kMixed], a.n, g_engineOff.load() ? "off" : "on",
-      g_govStage.load(), perfgov::g_views.load(), perfgov::g_pairs.load());
+      g_govStage.load(), perfgov::g_views.load(), perfgov::g_pairs.load(), ProcCountsText(ReadProcCounts()).c_str());
 }
 
 void Start() {

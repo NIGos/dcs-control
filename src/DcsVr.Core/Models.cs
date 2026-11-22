@@ -211,23 +211,23 @@ public sealed record VrProfile
     /// the 55 / 85 ms leads: the tail never leaves the eye outside the sharp part more often than without it, and widens
     /// about a quarter fewer rendered frames (no hold). Not flown with frame generation yet.</summary>
     public bool QuadSaccadeTail { get; init; } = true;
-    public bool UsesQuadSaccadeTail => QuadSaccadeTail && QuadSaccadeLead && Gaze == GazeMode.EyeTracked;
+    [JsonIgnore] public bool UsesQuadSaccadeTail => QuadSaccadeTail && QuadSaccadeLead && Gaze == GazeMode.EyeTracked;
     /// <summary>How long the focus area stays widened after a saccade, fading out (dcsvr_saccade_hold_ms). Without the tail
     /// 40 ms: the single threshold ends the saccade while the eye still decelerates. With it 0: the saccade already lasts
     /// until the gaze samples show the landing, and every frame located after that is centred on the landed gaze. In
     /// tests/quadviews-gaze (90 Hz, 40 ms lead and latency, 20-degree saccade) a hold adds widened frames after the landing
     /// (4 without, 8 with 55 ms) and never moves the landed eye inside the box: it was inside on every frame either way.</summary>
-    public int QuadSaccadeHoldMs => UsesQuadSaccadeTail ? 0 : 40;
+    [JsonIgnore] public int QuadSaccadeHoldMs => UsesQuadSaccadeTail ? 0 : 40;
     /// <summary>The farthest the focus area reaches during a saccade (NDC, per axis): 0.5 with the tail (its 40 ms lead
     /// covers more angle than 25 ms; with frame generation too: 0.35 and 0.6 landed the same in an offline sweep),
     /// otherwise 0.35.</summary>
-    public double QuadSaccadeMaxExtend => UsesQuadSaccadeTail ? 0.5 : 0.35;
+    [JsonIgnore] public double QuadSaccadeMaxExtend => UsesQuadSaccadeTail ? 0.5 : 0.35;
     /// <summary>Eye-tracked bundled Quad Views: when the tracker loses the eyes (past Quad Views'
     /// 600 ms cache), the focus area slides to the fixed one over 150 ms instead of jumping (dcsvr_lost_ease_ms). A gaze
     /// found again is followed at once. With frame generation the focus moves once per rendered frame, so the slide is
     /// 4-5 steps in 3X (the generated frames in between blend them). Off: dcsvr_lost_ease_ms=0, the jump.</summary>
     public bool QuadLostGazeEase { get; init; } = true;
-    public bool UsesQuadLostGazeEase => QuadLostGazeEase && Gaze == GazeMode.EyeTracked;
+    [JsonIgnore] public bool UsesQuadLostGazeEase => QuadLostGazeEase && Gaze == GazeMode.EyeTracked;
     /// <summary>Quad Views turbo: DCS starts the next frame while the runtime still holds the previous one. Quad Views itself
     /// enables it on most runtimes and disables it on SteamVR; off by default until measured in the headset.</summary>
     public bool QuadTurbo { get; init; }
@@ -419,13 +419,13 @@ public sealed record VrProfile
     /// that earlier frames found dry (probed one frame in four). Not exact for a few frames when water comes into view.
     /// Off by default.</summary>
     public bool EngineWaterSkip { get; init; }
-    public bool UsesWaterSkip => EngineWaterSkip && EngineOptimizations;
+    [JsonIgnore] public bool UsesWaterSkip => EngineWaterSkip && EngineOptimizations;
     /// <summary>[D3D] EarlyShaders=3 (0.7, experimental): bit 0 SSAO water skip (SSAO not computed on water pixels, where
     /// it adds nothing: proven bit-identical) and bit 1 hot-air idle skip (the heat-haze copy and compose passes skipped
     /// when no heat was drawn that frame: the stock picture). Small gains (about 0.23 ms on open sea, 0.02-0.08 ms for
     /// hot air), so one switch for both. Off by default.</summary>
     public bool EngineIdleEffectSkip { get; init; }
-    public bool UsesIdleEffectSkip => EngineIdleEffectSkip && EngineOptimizations;
+    [JsonIgnore] public bool UsesIdleEffectSkip => EngineIdleEffectSkip && EngineOptimizations;
     /// <summary>[DLSS] ReleaseIdleSets (engine module R132): DCS sets up DLSS twice per mission load and never releases the
     /// first set, so each restart keeps about 0.7 to 1.4 GB more memory; on, the module releases a set DCS no longer
     /// evaluates once the newest set has taken over (ReleaseAfterEvals, the module's default 300). The image does not
@@ -569,7 +569,7 @@ public sealed record VrProfile
     public bool UsesEngineModule => EngineModuleRequired || (FrameGen != FrameGeneration.Off && !Desktop);
     /// <summary>A feature that cannot run without the module wants it. Frame generation's exports alone do not: without
     /// the component (a development distribution) frame generation runs without them, as before 0.7.</summary>
-    public bool EngineModuleRequired => EngineOptimizations || UsesDepthBoost || UsesVisualRealism || UsesFarDepth;
+    [JsonIgnore] public bool EngineModuleRequired => EngineOptimizations || UsesDepthBoost || UsesVisualRealism || UsesFarDepth;
     /// <summary>The eye distance DCS renders with. Headset (default): the IPD the headset measured or was set to, the
     /// realistic one; DCS's custom IPD is turned off while the profile is applied. DcsCustom: DCS's own custom IPD as it
     /// is (the pupil shift layer applies it itself when it runs). Manual: <see cref="EyeDistanceMm"/>. VR flights only;
@@ -652,9 +652,9 @@ public sealed record VrProfile
     /// OpenXR eye gaze (XR_EXT_eye_gaze_interaction) it reads (docs/PUPIL_SHIFT.md, harness scenarios xr_gaze and
     /// qv_fixed_xr_gaze). Without a gaze from it the eyes stay at rest. Not flown yet. Depth boost keeps needing
     /// eye-tracked Quad Views.</summary>
-    public bool UsesLayerOwnGaze => !Desktop && Runtime == RuntimeKind.Pimax && (QuadViews == QuadProvider.None || Gaze == GazeMode.Fixed);
+    [JsonIgnore] public bool UsesLayerOwnGaze => !Desktop && Runtime == RuntimeKind.Pimax && (QuadViews == QuadProvider.None || Gaze == GazeMode.Fixed);
     /// <summary>A VR flight in which the pupil shift layer has a gaze: eye-tracked Quad Views, or its own.</summary>
-    public bool UsesLayerGaze => UsesEyeTrackedVr || UsesLayerOwnGaze;
+    [JsonIgnore] public bool UsesLayerGaze => UsesEyeTrackedVr || UsesLayerOwnGaze;
     /// <summary>Gaze DoF runs: it needs the gaze, which the pupil shift layer publishes for the module (with Depth boost,
     /// or its [PupilShift] PublishGaze for Visual realism alone).</summary>
     public bool UsesGazeDof => GazeDof && UsesLayerGaze;
@@ -767,11 +767,13 @@ public static class JsonData
     /// runtime motion smoothing (preflight lists them as checks you do yourself), the experimental consent and the Sboys
     /// driver folder (the registered driver is used), and Depth boost's transition choice and its key (the dual camera
     /// only moves the depth gradually), the headset tracking (detected, never a setting: it lives on the inventory), and
-    /// the derived "usesThreeViews" an earlier 0.7 build saved before Three views was parked.
+    /// the derived "usesThreeViews" an earlier 0.7 build saved before Three views was parked, and the derived values earlier 0.7
+    /// builds saved and no longer write ([JsonIgnore]: 0.6.7 refuses a key it does not know, and these were new in 0.7).
     /// Dropped when a profile loads, in any casing.</summary>
     private static readonly HashSet<string> ObsoleteProfileKeys = new(["externalLimiter", "externalLimiterFps", "runtimeReprojection",
         "experimentalAcknowledged", "sboysDriverDirectory", "depthBoostTransition", "depthBoostTransitionKey", "tracking",
-        "usesThreeViews"], StringComparer.OrdinalIgnoreCase);
+        "usesThreeViews", "usesQuadSaccadeTail", "usesQuadLostGazeEase", "usesWaterSkip", "usesIdleEffectSkip", "engineModuleRequired",
+        "usesLayerOwnGaze", "usesLayerGaze", "quadSaccadeHoldMs", "quadSaccadeMaxExtend"], StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Reads a profile with the plain options, without the <see cref="ObsoleteProfileKeys"/> (unknown keys are
     /// refused), then marks a profile saved without "foveaSource" (written before the setting existed) as using its own

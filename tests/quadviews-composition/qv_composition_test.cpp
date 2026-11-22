@@ -132,6 +132,41 @@ int main(int argc, char** argv) {
         const bool far_depth = projection_new.find("dcsvrDisparityField") != std::string::npos;
         const std::string projection_base = far_depth ? read_text(layer_dir / "ProjectionPS.nofardepth.hlsl") : projection_new;
         if (projection_base.empty()) throw std::runtime_error("ProjectionPS.nofardepth.hlsl missing: run scripts/build-quadviews.ps1");
+        // Edge match's scale comes from the coordinates as the views project them, never from the ones Far depth
+        // displaced (the displacement jumps across depth edges: its derivative read as a huge scale, a blur halo), and
+        // with edge match off none of it runs.
+        for (const std::string* ps : {&projection_new, &projection_base}) {
+            if (ps->find("ddx(layer1TexCoord)") != std::string::npos || ps->find("ddy(layer1TexCoord)") != std::string::npos ||
+                ps->find("ddx(layer1ProjectedCoordNdc)") != std::string::npos)
+                throw std::runtime_error("edge match takes its derivatives from the displaced focus coordinate");
+            if (ps->find("projectedFocusCoord.xy / projectedFocusCoord.z) * float2(0.5f, -0.5f)") == std::string::npos)
+                throw std::runtime_error("edge match: no derivative of the undisplaced focus coordinate");
+            if (ps->find("[branch] if (dcsvrEdgeMatch > 0) {") == std::string::npos)
+                throw std::runtime_error("edge match off still computes its scale");
+        }
+        {
+            // layer.cpp's per-frame paths (no device needed): the submission log (0022, 0027) compares a fixed signature
+            // before it formats anything and forgets destroyed swapchains; two layers with three views (0029) asks for
+            // the periphery pass, so the filled right periphery is what the layer sends.
+            const std::string layer = read_text(layer_dir / "layer.cpp");
+            const auto body = [&](const std::string& head) {
+                const auto at = layer.find(head);
+                if (at == std::string::npos) throw std::runtime_error("layer.cpp: no " + head);
+                const auto end = layer.find("\n        }\n", at) == std::string::npos ? layer.find("\r\n        }\r\n", at)
+                                                                                     : layer.find("\n        }\n", at);
+                return layer.substr(at, end - at);
+            };
+            const std::string log = body("void dcsvrLogSubmission(const XrFrameEndInfo& info) {");
+            const auto compare = log.find("if (sig == m_dcsvrSubmitSig)");
+            if (compare == std::string::npos || log.find("fmt::format(\"", 0) < compare)
+                throw std::runtime_error("submission log formats text before it compares the frame's signature");
+            if (body("XrResult xrDestroySwapchain(XrSwapchain swapchain) override {").find("dcsvrForgetSwapchain(swapchain)") == std::string::npos)
+                throw std::runtime_error("submission log: a destroyed swapchain stays in the format map");
+            if (body("bool dcsvrTwoLayerPeripheryPass() const {").find("m_dcsvrThreeViews.Active()") == std::string::npos)
+                throw std::runtime_error("two layers: three views does not ask for the periphery pass");
+            if (layer.find("focus.dcsvrEdge[2] = m_dcsvrTwoLayersAlpha == 3 ? 0.f") == std::string::npos)
+                throw std::runtime_error("opaque focus without a periphery source takes mode 2's sRGB encoding");
+        }
         std::string projection_old = projection_base;
         replace_once(projection_old, "[branch] if (!focusVisible && !debugFocusView) {", "[branch] if (false) {");
         replace_once(projection_old, "sourceFocusTexture.SampleLevel(sourceSampler, layer1TexCoord, 0)",

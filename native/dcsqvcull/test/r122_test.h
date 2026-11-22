@@ -483,6 +483,25 @@ void Hooks() {
     DcsFeature(p, 1176, 1164, 2028, 2004);
     r = mhCreate(&ctxDummy, kFeatureSuperSampling, &p, &h);
     Check(r == kNgxSuccess && g_seenHint == 3 && g_foreignCalls == 3, "R122 chained: the focus keeps DCS's hint");
+    {
+      // regress-07: the other program writes its jump again over ours (MinHook re-enabling its hook): the worker's tick
+      // chains in front of it again, on the same page, and says so; a tick with the chain in place changes nothing.
+      mh[0] = 0xE9;
+      memcpy(mh + 1, &relRelay, 4);
+      FlushInstructionCache(GetCurrentProcess(), mh, 16);
+      StartReportCapture();
+      Tick(5, 0, false, false);
+      Tick(5, 0, false, false);
+      const std::string again = StopReportCapture();
+      DcsFeature(p, 604, 596, 1040, 1028);
+      r = mhCreate(&ctxDummy, kFeatureSuperSampling, &p, &h);
+      size_t lines = 0;
+      for (size_t at = again.find("chained in front of it again"); at != std::string::npos; at = again.find("chained in front of it again", at + 1)) ++lines;
+      Check(dlssv::Rel32Dest(mh, mh) == ourStub && lines == 1 && r == kNgxSuccess && g_seenHint == 5 && g_foreignCalls == 4 &&
+                g_createCalls == 4,
+            "R122 chained (regress-07): the other program's jump written again is chained again on the same page, once, ours first");
+      g_foreignCalls = 3, g_createCalls = 3;  // the counts the checks below expect
+    }
     uint8_t chained[16];
     memcpy(chained, mh, 16);
     NewGeneration();
@@ -510,9 +529,13 @@ void Hooks() {
     g_testCreateTarget = mh;
     mh[0] = 0xE9;
     memcpy(mh + 1, &relRelay, 4);
+    StartReportCapture();
     Tick(5, 0, false, false);  // no QVFR log needed: installing is what is checked
+    const std::string fresh = StopReportCapture();
     Check(g_createState.load() == 1 && dlssv::Rel32Dest(mh, mh) != relay,
           "R122 chained: a fresh install after the other program re-hooked chains again");
+    Check(dlssv::Rel32Dest(mh, mh) == ourStub && fresh.find("on an earlier payload's page") != std::string::npos,
+          "R122 chained (regress-07): that install reuses the earlier payload's chain page (no new pages per reload)");
     NewGeneration();
   }
 

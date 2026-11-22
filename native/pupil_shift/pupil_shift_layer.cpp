@@ -2178,7 +2178,9 @@ XRAPI_ATTR XrResult XRAPI_CALL hook_CreateApiLayerInstance(const XrInstanceCreat
         app_enabled |= std::strcmp(info->enabledExtensionNames[i], XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME) == 0;
     const Availability availability = app_enabled ? Availability::present : wanted ? probe_eye_gaze(next_gipa) : Availability::absent;
     bool inject = wanted && !app_enabled && !qv_fixed && availability != Availability::absent;
-    const bool below = wanted && !app_enabled && qv_fixed && availability == Availability::present;
+    // A runtime whose extension list cannot be read (unknown) is taken as offering it, as for the layer's own request:
+    // Quad Views asks for it on its own list, so an unknown here must not leave the fixed focus without a gaze.
+    const bool below = wanted && !app_enabled && qv_fixed && availability != Availability::absent;
     std::vector<const char*> extensions;
     if (info->enabledExtensionCount && info->enabledExtensionNames)
         extensions.assign(info->enabledExtensionNames, info->enabledExtensionNames + info->enabledExtensionCount);

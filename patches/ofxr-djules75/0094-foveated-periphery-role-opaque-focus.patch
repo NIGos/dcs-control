@@ -6,6 +6,7 @@ first projection layer is the periphery. The flight log's role records (foveated
 when the order named the role. New test xrfg_layer_two_layers_deep_hold_roles_opaque: 0089's roles test (unfilled,
 wide first focus field of view) with the focus layer opaque and cut to a rectangle (imageRect 2,2 4x4 of 8x8), the
 rectangle checked on every frame the fake runtime gets (its focus alpha check is left out: the runtime ignores an opaque layer's alpha). A frame with a blending focus layer is decided as before.
+Since Quad Views 0025 (opaque focus rim) the focus layer of dcsvr_two_layers_alpha=3 is no longer opaque: it goes out with mode 0's flags (SOURCE_ALPHA | UNPREMULTIPLIED, alpha 0 in a thin rim), so 0089's rule names its periphery as for the other modes; the order rule here decides only a focus submitted with no blend flags (0024 alone, or another layer that does so).
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index d61161b..9af218c 100644

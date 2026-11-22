@@ -4,9 +4,8 @@
 # The Python launcher (py -3, installed with python.org's Python) comes first: on a PC without Python on PATH, plain
 # "python" is the Microsoft Store stub, which only opens the Store. A real python on PATH is used when py is missing.
 # By hand the same applies: py -3 scripts\package-sources.py
-# Not yet used by scripts/build-upstream.ps1 (it still runs plain "python" for patch-cheeky.py): that file is an input of
-# Cheeky's build stamp (scripts/build-stamp.ps1), so editing it makes build-release.ps1 refuse the Cheeky binaries until
-# they are rebuilt. Switch it to Invoke-Python together with the next change that rebuilds Cheeky anyway.
+# scripts/build-upstream.ps1 uses it for patch-cheeky.py too (since the 0.7 Cheeky rebuild for Chromium child processes).
+
 function Get-PythonCommand {
     if (Get-Command py -CommandType Application -ErrorAction SilentlyContinue) { return @('py', '-3') }
     $python = Get-Command python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1

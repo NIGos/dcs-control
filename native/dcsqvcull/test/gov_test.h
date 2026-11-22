@@ -1177,6 +1177,15 @@ void LinesRun() {
   Check(has("perf: fps=45.0 ft p50/p95=22.2/22.2 ms render-thread busy=58% gpu util=97% (dcs 90%) verdict=capped 45.0 fps = 90/2 (9 s GPU") &&
             has("views=4 pairs=2"),
         "perf line: fps, frame p50/p95, busy, gpu, verdict with its seconds, views (exactly 45 fps: a 90/2 cap wins over GPU)");
+  {
+    // regress-07: the process's handles, threads and private memory at the end of the line (this test process's own).
+    const perfmon::ProcCounts c = perfmon::ReadProcCounts();
+    const auto at = text.find("views=4 pairs=2 handles=");
+    Check(c.ok && c.handles > 10 && c.threads >= 1 && c.privateMb > 1 && at != std::string::npos &&
+              text.find(" threads=", at) != std::string::npos && text.find(" private=", at) != std::string::npos &&
+              text.find(" MB", at) != std::string::npos,
+          "perf line: handle, thread and private memory counts of the process (a leak shows as a trend)");
+  }
   Check(has("quad views recognised yes") && has("quad views recognised NO (stereo"), "env views line: quad and stereo");
   Check(has("env: DCS ") && has("OpenXR runtime ") && has("streamers/runtimes running: "), "env start line");
   Check(!ad || (has("env: GPU ") && has("driver ") && has("VRAM budget")), "env GPU line (first adapter here)");
