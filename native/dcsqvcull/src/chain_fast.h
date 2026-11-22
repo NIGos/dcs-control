@@ -1034,8 +1034,11 @@ void LogCounters(const char* tag) {
 // Saved Games\DCS\fxo), about 25 s before Scripts\Hooks load the payload: in
 // the first live run the creation hook saw 0 of the 57 compute shaders DCS
 // bound [M]. So the stock kernels are also found at bind time:
-// - Probe (render thread, only while kinds are missing, at most kIdentMs and
-//   never while a suite runs): Dispatch and DispatchIndirect hooks on DCS's
+// - Probe (render thread, only while kinds are missing, for kIdentMs of
+//   flight (FlightClock: seconds in which a Quad Views world frame was
+//   culled; menus, loading screens and the F10 map do not count; at most
+//   kIdentWallMs in all) and never while a suite runs; reopened at each
+//   mission load while kinds are still missing): Dispatch and DispatchIndirect hooks on DCS's
 //   immediate context, re-armed from the CSSetShader hook (d3d11 rewrites
 //   draw/dispatch entries). The first dispatch of each shader DCS binds is
 //   classified by its shape and bindings: calcoffsets Dispatch(1,1,1), a
@@ -1052,10 +1055,32 @@ void LogCounters(const char* tag) {
 //   untouched tail, i for invalid ids). An accepted object becomes a pair like
 //   one seen at creation and goes through the same self test of the variant.
 // ---------------------------------------------------------------------------
-constexpr ULONGLONG kIdentMs = 180000;
+constexpr ULONGLONG kIdentMs = 180000;       // of flight
+constexpr ULONGLONG kIdentWallMs = 1800000;  // backstop (no quad frames at all: Quad Views off)
+// The identification windows' clock (here and in shader_fast.h): the kernels run only in flight, and a window that
+// started in the main menu and ran out there (regress-07) found nothing for the session. Worker thread, once per
+// tick: the time since the previous tick counts when a Quad Views world frame was culled meanwhile (g_quadFrame).
+struct FlightClock {
+  uint64_t q = 0;
+  ULONGLONG last = 0, t0 = 0, flightMs = 0;
+  void Start(ULONGLONG now) {
+    q = g_quadFrame.load(std::memory_order_relaxed);
+    last = t0 = now;
+    flightMs = 0;
+  }
+  void Tick(ULONGLONG now) {
+    const uint64_t cur = g_quadFrame.load(std::memory_order_relaxed);
+    if (cur != q) flightMs += std::min<ULONGLONG>(now - last, 2000);
+    q = cur;
+    last = now;
+  }
+  bool Expired(ULONGLONG now) const { return flightMs > kIdentMs || now - t0 > kIdentWallMs; }
+};
 std::atomic<bool> g_identStop{false};
-bool g_identDone = false;  // worker: the probe ran (once per payload)
+bool g_identDone = false;  // worker: the probe ran (once per payload, again after a mission load while kinds miss)
 ULONGLONG g_identT0 = 0;
+FlightClock g_identClock;                   // worker
+std::atomic<bool> g_identReopen{false};     // a mission load since the window ended (NoteMissionEvent)
 void** g_idVt = nullptr;
 int g_idSlot[2] = {-1, -1};  // Dispatch, DispatchIndirect
 void* volatile g_idOrig[2] = {};
@@ -1459,20 +1484,28 @@ uint32_t KindsWithPair() {
 void IdentTick(uint32_t mask) {
   const ULONGLONG now = GetTickCount64();
   const uint32_t missing = mask & ~KindsWithPair();
+  if (!g_identOn.load() && g_identDone && missing && g_identReopen.exchange(false)) {
+    g_identDone = false;
+    Log("chain fast: a mission load with kinds 0x%x still missing: identification at bind time opens again", missing);
+  }
   if (!g_identOn.load() && !g_identDone && missing && !g_benchRunningFlag.load() && g_ctx) {
     if (InstallId()) {
       g_identT0 = now;
+      g_identClock.Start(now);
       g_identDone = true;
+      g_identReopen = false;
       Log("chain fast: kinds 0x%x not seen at creation (DCS created them before the payload started); identifying "
           "them at bind time by their output",
           missing);
     }
   }
-  if (g_identOn.load() && !g_identStop.load() && (!missing || now - g_identT0 > kIdentMs)) {
+  if (g_identOn.load()) g_identClock.Tick(now);
+  if (g_identOn.load() && !g_identStop.load() && (!missing || g_identClock.Expired(now))) {
     g_identStop = true;  // the render thread withdraws the probe hooks
-    Log("chain fast: identification at bind time ended after %llu s: kinds found 0x%x, %llu shaders probed, %d "
-        "candidates tested, %d rejected",
-        static_cast<unsigned long long>((now - g_identT0) / 1000), g_found.load(),
+    Log("chain fast: identification at bind time ended after %llu s (%llu s of them in flight): kinds found 0x%x, "
+        "%llu shaders probed, %d candidates tested, %d rejected",
+        static_cast<unsigned long long>((now - g_identT0) / 1000),
+        static_cast<unsigned long long>(g_identClock.flightMs / 1000), g_found.load(),
         static_cast<unsigned long long>(g_probed.load()), g_candTested, g_candRejected);
   }
   // Fingerprint job: finish the current one, else start the next.
@@ -1919,7 +1952,14 @@ void VerifyPhase(int seconds, uint32_t cfgMask, std::atomic<uint64_t>& frameCoun
       static_cast<unsigned long long>(g_mismatch[1].load()));
 }
 
+// A mission ends, loads or the player changes slot (main/exports.inc OnMissionEvent, any thread): a window that ended
+// with kinds missing opens again at the next tick (the kernels may run only in this mission's flight).
+void NoteMissionEvent() {
+  if (!g_identOn.load() || g_identStop.load()) g_identReopen = true;  // a running window keeps counting flight time
+}
+
 void Shutdown() {
+  g_identReopen = false;
   void (*me)() = &RearmSet;
   sfilt::g_afterRewrite.compare_exchange_strong(me, nullptr);
   g_mask = 0;

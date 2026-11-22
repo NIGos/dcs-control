@@ -21,7 +21,8 @@
 //   with fewer than kClearMin groups (the 8- and 2-group clears) stay stock.
 //
 // Mechanism. DCS creates these shaders before the payload loads (R34), so they are identified at dispatch
-// time by their output: while kinds are missing (at most kIdentMs, never during a suite), a dispatch whose
+// time by their output: while kinds are missing (chainfast::kIdentMs of flight by chainfast::FlightClock, reopened at each
+// mission load while kinds still miss, never during a suite), a dispatch whose
 // grid and bindings have a kind's shape makes DCS's bound shader object a candidate; the worker records it
 // on a deferred context of DCS's device together with our variant on synthetic inputs, the render thread
 // executes that list (ExecuteCommandList(.., TRUE) restores DCS's state) and reads it back without waiting,
@@ -49,7 +50,6 @@ const char* const kName[kKinds] = {"grass cull (grass2 grassPrepareCullDataTech)
                                    "IM2 counts clear (instancemanager2.clear)"};
 constexpr UINT kGrassRows = 32;      // variant grid: one group per row of 32 cells
 constexpr UINT kClearMin = 256;      // smaller clears stay stock (they are at the dispatch floor)
-constexpr ULONGLONG kIdentMs = 180000;
 constexpr int kMaxStock = 4;         // identified stock objects per kind
 
 // ---------------------------------------------------------------------------
@@ -188,6 +188,8 @@ inline ID3D11ComputeShader* ClearVariant(UINT n) {
 std::atomic<bool> g_identOn{false};
 bool g_identDone = false;
 ULONGLONG g_identT0 = 0;
+chainfast::FlightClock g_identClock;      // worker
+std::atomic<bool> g_identReopen{false};   // a mission event since the window ended (NoteMissionEvent)
 std::atomic<uint32_t> g_found{0};
 int g_candTested = 0, g_candRejected = 0;
 struct Cand {
@@ -547,17 +549,25 @@ void LogState(const char* tag);
 void IdentTick(uint32_t mask) {
   const ULONGLONG now = GetTickCount64();
   const uint32_t missing = mask & ~g_found.load();
+  if (!g_identOn.load() && g_identDone && missing && g_identReopen.exchange(false)) {
+    g_identDone = false;
+    Log("shader fast: a mission load with kinds 0x%x still missing: identification opens again", missing);
+  }
   if (!g_identOn.load() && !g_identDone && missing && !g_benchRunningFlag.load()) {
     g_identOn = true;
     g_identDone = true;
+    g_identReopen = false;
     g_identT0 = now;
+    g_identClock.Start(now);
     Log("shader fast: kinds 0x%x: identifying DCS's shader objects at dispatch time by their output", missing);
   }
-  if (g_identOn.load() && (!missing || now - g_identT0 > kIdentMs || g_benchRunningFlag.load())) {
+  if (g_identOn.load()) g_identClock.Tick(now);
+  if (g_identOn.load() && (!missing || g_identClock.Expired(now) || g_benchRunningFlag.load())) {
     g_identOn = false;
-    Log("shader fast: identification ended after %llu s: kinds found 0x%x, %llu candidates queued, %d tested, %d "
-        "rejected",
-        static_cast<unsigned long long>((now - g_identT0) / 1000), g_found.load(),
+    Log("shader fast: identification ended after %llu s (%llu s of them in flight): kinds found 0x%x, %llu "
+        "candidates queued, %d tested, %d rejected",
+        static_cast<unsigned long long>((now - g_identT0) / 1000),
+        static_cast<unsigned long long>(g_identClock.flightMs / 1000), g_found.load(),
         static_cast<unsigned long long>(g_probed.load()), g_candTested, g_candRejected);
     LogState("identification end");
   }
@@ -1082,7 +1092,13 @@ void VerifyPhase(int seconds, uint32_t cfgMask, std::atomic<uint64_t>& frameCoun
   Apply(cfgMask);
 }
 
+// A mission event (main/exports.inc OnMissionEvent, any thread): a window that ended with kinds missing opens again.
+void NoteMissionEvent() {
+  if (!g_identOn.load()) g_identReopen = true;  // a running window keeps counting flight time
+}
+
 void Shutdown() {
+  g_identReopen = false;
   g_live = false;
   g_mask = 0;
   g_verify = false;

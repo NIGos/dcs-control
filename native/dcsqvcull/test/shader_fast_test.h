@@ -439,6 +439,50 @@ void Run() {
           "shader fast: shutdown restores the Dispatch entry and releases kernels and variants");
     chainfast::Shutdown();
   }
+  // --- identification windows count flight time only, and reopen at a mission load while kinds miss (regress-07: a
+  //     window opened in the main menu ran out there and the session had no ShaderFast / ChainFast)
+  {
+    chainfast::FlightClock fc;
+    const uint64_t q0 = g_quadFrame.load();
+    fc.Start(1000);
+    for (ULONGLONG t = 2000; t <= 400000; t += 1000) fc.Tick(t);  // 400 s in the menu: no quad frame
+    const bool menuOk = fc.flightMs == 0 && !fc.Expired(400000);
+    for (ULONGLONG t = 401000; t <= 580000; t += 1000) {  // 180 s of flight
+      g_quadFrame.fetch_add(3);
+      fc.Tick(t);
+    }
+    const bool flyOk = fc.flightMs == 180000 && !fc.Expired(580000);
+    g_quadFrame.fetch_add(3);
+    fc.Tick(581000);
+    const bool endOk = fc.Expired(581000);
+    chainfast::FlightClock wall;
+    wall.Start(0);
+    const bool backstop = !wall.Expired(chainfast::kIdentWallMs) && wall.Expired(chainfast::kIdentWallMs + 1);
+    Check(menuOk && flyOk && endOk && backstop,
+          "identification clock: 400 s in the menu count nothing, 180 s of flight end the window, 30 min backstop");
+    // ShaderFast's window: opened, 200 s of menu (the old 180 s wall-clock limit) leave it open.
+    IdentTick(0x3);
+    const bool opened = g_identOn.load();
+    g_identT0 -= 200000;
+    g_identClock.t0 -= 200000;
+    g_identClock.last -= 200000;
+    IdentTick(0x3);
+    const bool stillOn = g_identOn.load();
+    g_quadFrame.fetch_add(1);
+    g_identClock.flightMs = chainfast::kIdentMs + 1;  // flown past the window
+    IdentTick(0x3);
+    const bool ended = !g_identOn.load();
+    IdentTick(0x3);
+    const bool staysClosed = !g_identOn.load();
+    NoteMissionEvent();
+    IdentTick(0x3);
+    const bool reopened = g_identOn.load();
+    Check(opened && stillOn && ended && staysClosed && reopened,
+          "shader fast: 200 s in the menu keep the window open, flight time ends it, a mission load reopens it while "
+          "kinds miss");
+    Shutdown();
+    g_quadFrame = q0;
+  }
   shadowinst::g_device = saveDev;
   sfilt::g_ctx = saveSf;
   cbuf.Release();
