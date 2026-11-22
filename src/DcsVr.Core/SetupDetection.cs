@@ -38,6 +38,8 @@ public sealed record DetectionSources
     /// <see cref="BoostPlanner.MatchesProcessName"/>): Pimax's eye-tracking services carry the headset's model in their
     /// name (platform_runtime_VR4PIMAXP3B_service), so they are asked for by prefix.</summary>
     public Func<string, bool> ProcessRunning { get; init; } = AnyProcess;
+    /// <summary>The active OpenXR runtime manifest (registry ActiveRuntime); tests set a fixed value.</summary>
+    public Func<string?> ActiveOpenXrRuntime { get; init; } = WindowsInventory.ActiveOpenXrRuntime;
 
     /// <summary>One toolhelp snapshot, matched with the CPU Boost matcher.</summary>
     public static bool AnyProcess(string pattern) => AnyMatches(pattern, BoostPlanner.CaptureProcesses(testAccess: false).Processes.Select(p => p.Name));
@@ -53,6 +55,10 @@ public static class SetupDetection
     public static ActiveRouteState DetectActiveRoute(DetectionSources? sources = null)
     {
         sources ??= new();
+        // Virtual Desktop: its streamer running with VDXR as the active OpenXR runtime. With VD set to stream through
+        // SteamVR instead, the active runtime is SteamVR's and the checks below apply.
+        if (sources.ProcessRunning("VirtualDesktop.Streamer") && WindowsInventory.IsVirtualDesktopRuntime(sources.ActiveOpenXrRuntime()))
+            return new(RuntimeKind.VirtualDesktop, "Virtual Desktop is running and VDXR is the active OpenXR runtime.", TrackingKind.Unknown);
         // Only SteamVR's own log is positive evidence. Pimax Play (pi_server) also runs underneath Sboys, so it
         // never proves the Pimax route on its own.
         if (sources.ProcessRunning("vrserver"))
@@ -68,8 +74,16 @@ public static class SetupDetection
         }
         if (sources.ProcessRunning("pi_server"))
             return new(null, "Pimax Play is running and SteamVR is not. Use the Pimax route, or start SteamVR first for Sboys.", TrackingKind.Unknown);
-        return new(null, "No running headset software was detected. Start Pimax Play, or SteamVR with Sboys, then detect again.", TrackingKind.Unknown);
+        return new(null, "No running headset software was detected. Start Pimax Play, SteamVR with Sboys, or Virtual Desktop (VDXR), then detect again.", TrackingKind.Unknown);
     }
+
+    /// <summary>The route as the interface names it.</summary>
+    public static string RouteName(RuntimeKind route) => route switch
+    {
+        RuntimeKind.SboysSteamVr => "Sboys · SteamVR OpenXR",
+        RuntimeKind.VirtualDesktop => "Quest 3 VD · VDXR OpenXR",
+        _ => "Pimax OpenXR"
+    };
 
     public static SetupDetectionResult Detect(VrProfile current, InventorySnapshot inventory, DetectionSources? sources = null)
     {
@@ -85,12 +99,12 @@ public static class SetupDetection
             // A running Pimax or SteamVR route is what this PC flies with: it replaces Optimizations only, whose VR settings
             // were kept in the profile and come back with it.
             profile = profile with { Desktop = false, Runtime = route, RuntimeManifestPath = route == profile.Runtime ? profile.RuntimeManifestPath : null };
-            Set("runtime", "How you fly", (route == RuntimeKind.SboysSteamVr ? "Sboys · SteamVR OpenXR" : "Pimax OpenXR") + (current.Desktop ? " (instead of Optimizations only)" : ""), active.Summary);
+            Set("runtime", "How you fly", RouteName(route) +(current.Desktop ? " (instead of Optimizations only)" : ""), active.Summary);
         }
         else
         {
             notes.Add(active.Summary);
-            if (current.Desktop) notes.Add("Optimizations only stays selected: no Pimax or SteamVR runtime is running.");
+            if (current.Desktop) notes.Add("Optimizations only stays selected: no Pimax, SteamVR or Virtual Desktop runtime is running.");
         }
 
         var tracking = active.Tracking != TrackingKind.Unknown ? active.Tracking : inventory.Tracking;
@@ -102,7 +116,14 @@ public static class SetupDetection
 
         if (profile.QuadViews != QuadProvider.None)
         {
-            if (profile.Runtime == RuntimeKind.SboysSteamVr && GazeBridge.RuntimeProvidesGaze(inventory))
+            if (profile.Runtime == RuntimeKind.VirtualDesktop)
+            {
+                profile = HeadsetRoute.WithQuest3Focus(profile);
+                Set("gaze", "Focus movement", "Fixed", "Quest 3 VD route (Quest 3 has no eye tracking)");
+                Set("foveaSource", "Focus area source", "Set here (Quest 3 starting values: focus " + Format(profile.FoveaWidth) + " × " + Format(profile.FoveaHeight)
+                    + ", periphery " + Format(profile.PeripheralScale) + ")", "Quest 3 VD route (no Pimax Play to read)");
+            }
+            else if (profile.Runtime == RuntimeKind.SboysSteamVr && GazeBridge.RuntimeProvidesGaze(inventory))
             {
                 profile = profile with { Gaze = GazeMode.EyeTracked };
                 Set("gaze", "Focus movement", "Eye tracked", "Sboys 1.3 or newer exposes eye gaze through SteamVR OpenXR");
@@ -133,13 +154,13 @@ public static class SetupDetection
             Set("headsetRefreshHz", "Headset refresh rate", refresh.ToString("0.#", CultureInfo.InvariantCulture) + " Hz", "SteamVR preferred refresh rate (confirm it matches the headset)");
         }
 
-        if (profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory) && PimaxFovea.Read(sources.PimaxPlaySettings) is { Unreadable: true } preset)
+        if (profile.Runtime != RuntimeKind.VirtualDesktop && profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory) && PimaxFovea.Read(sources.PimaxPlaySettings) is { Unreadable: true } preset)
         {
             // Quad View Off or an unknown level: no Pimax values to read, the profile keeps its own focus values.
             Set("foveaSource", "Focus area source", "Pimax Quad View " + preset.PresetName + ": this profile's own values", sources.PimaxPlaySettings);
             notes.Add(PimaxFovea.PresetNote(preset));
         }
-        else if (profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory) && PimaxFovea.Read(sources.PimaxPlaySettings) is { } quad)
+        else if (profile.Runtime != RuntimeKind.VirtualDesktop && profile.QuadViews == QuadProvider.QuadViewsFoveated && string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory) && PimaxFovea.Read(sources.PimaxPlaySettings) is { } quad)
         {
             // The focus area follows Pimax Play (read again at every launch); the converted values are also stored so
             // the profile keeps them if the source is later switched to "This profile".

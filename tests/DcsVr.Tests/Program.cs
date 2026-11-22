@@ -3785,6 +3785,80 @@ Test("Readiness blocks a profile whose route does not match the running headset"
     }
     finally { Readiness.ActiveRouteProvider = previous; }
 });
+const string Vdxr = @"C:\Program Files\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json";
+Test("Virtual Desktop route: found only while the Streamer runs with VDXR as the active OpenXR runtime", () =>
+{
+    var sources = new DetectionSources { SteamVrServerLog = Path.Combine(root, "missing.txt"), PimaxPlaySettings = Path.Combine(root, "missing.json"), NeuralRuntimeFolders = [],
+        ProcessRunning = name => name == "VirtualDesktop.Streamer", ActiveOpenXrRuntime = () => Vdxr };
+    var active = SetupDetection.DetectActiveRoute(sources);
+    Require(active.Route == RuntimeKind.VirtualDesktop && SetupDetection.RouteName(RuntimeKind.VirtualDesktop).StartsWith("Quest 3 VD"), "Streamer + VDXR");
+    Require(SetupDetection.DetectActiveRoute(sources with { ActiveOpenXrRuntime = () => @"C:\Program Files\Pimax\Runtime\PiOpenXR_64.json" }).Route is null, "Streamer with another runtime active");
+    Require(SetupDetection.DetectActiveRoute(sources with { ActiveOpenXrRuntime = () => null }).Route is null, "no active runtime");
+    Require(SetupDetection.DetectActiveRoute(sources with { ProcessRunning = _ => false }).Route is null, "VDXR active but the Streamer not running");
+    Require(WindowsInventory.IsVirtualDesktopRuntime(Vdxr) && WindowsInventory.IsVirtualDesktopRuntime(Vdxr.ToUpperInvariant()) && !WindowsInventory.IsVirtualDesktopRuntime(null)
+        && !WindowsInventory.IsVirtualDesktopRuntime(@"C:\Program Files (x86)\Steam\steamapps\common\SteamVR\steamxr_win64.json"), "VDXR is known by its manifest's file name");
+    var inventory = new InventorySnapshot { VirtualDesktopRuntime = Vdxr, PimaxRuntime = @"C:\pimax.json", SteamVrRuntime = @"C:\steam.json" };
+    Require(HeadsetRoute.Manifest(new VrProfile { Runtime = RuntimeKind.VirtualDesktop }, inventory) == Vdxr && HeadsetRoute.Manifest(new VrProfile(), inventory) == @"C:\pimax.json", "DCS is pointed at VDXR");
+});
+Test("Virtual Desktop route: fixed focus, own focus values, no Pimax-only parts", () =>
+{
+    var vd = new VrProfile { Runtime = RuntimeKind.VirtualDesktop, QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, FoveaSource = FoveaSource.PimaxPlay, PauseTobiiDesktop = true };
+    Require(ProfileValidation.Validate(vd).Any(i => i.Code == "vd-gaze" && i.Severity == IssueSeverity.Error) && ProfileValidation.Validate(vd).Any(i => i.Code == "quad-runtime"), "raw profile errors");
+    var resolved = ProfileValidation.ResolveFeatures(vd);
+    Require(resolved is { QuadViews: QuadProvider.QuadViewsFoveated, Gaze: GazeMode.Fixed, FoveaSource: FoveaSource.Profile }, "ResolveFeatures settles it");
+    Require(!ProfileValidation.Validate(resolved).Any(i => i.Code is "vd-gaze" or "quad-runtime"), "the settled profile has no route errors");
+    Require(!PimaxFovea.UsesPimaxPlay(vd with { QuadViews = QuadProvider.QuadViewsFoveated }) && !PimaxFovea.Resolve(vd with { QuadViews = QuadProvider.QuadViewsFoveated }).Applies, "Pimax Play is never read");
+    Require(!vd.UsesTobiiPause && (vd with { Runtime = RuntimeKind.Pimax }).UsesTobiiPause, "the desktop Tobii pause is Pimax-only");
+    Require(HeadsetRefresh.Detect(RuntimeKind.VirtualDesktop) is null, "the refresh rate is the profile's");
+    var quest = HeadsetRoute.WithQuest3Focus(new VrProfile());
+    Require(quest is { Gaze: GazeMode.Fixed, FoveaSource: FoveaSource.Profile, FoveaWidth: .55, FoveaHeight: .75, PeripheralScale: .40, QuadFocusScale: 1.0, QuadEdgeBlend: .2 }, "Quest 3 starting values");
+    var preset = ProfilePresets.All.Single(p => p.Id == "vd-quadviews");
+    Require(preset.Runtime == RuntimeKind.VirtualDesktop && preset == HeadsetRoute.WithQuest3Focus(preset) && ProfileValidation.ResolveFeatures(preset) == preset, "the preset uses them and is already settled");
+    Require(!ProfileValidation.Validate(preset).Any(i => i.Severity == IssueSeverity.Error), "the preset validates");
+    // The runtime must be on this PC (or the profile names its own file).
+    Require(ProfileValidation.Validate(preset, new InventorySnapshot()).Any(i => i.Code == "vd-not-found" && i.Severity == IssueSeverity.Error), "VDXR missing");
+    Require(!ProfileValidation.Validate(preset, new InventorySnapshot { VirtualDesktopRuntime = Vdxr }).Any(i => i.Code == "vd-not-found"), "VDXR found");
+    Require(!ProfileValidation.Validate(preset with { Desktop = true }, new InventorySnapshot()).Any(i => i.Code == "vd-not-found"), "Optimizations only needs no headset");
+    // Quest 3 VD: DLSS 5 is off (no NVIDIA-signed runtime); ResolveFeatures turns it off, Validate refuses it; Pimax keeps it.
+    Require(!ProfileValidation.ResolveFeatures(preset with { NeuralRendering = true }).NeuralRendering, "VD resolves DLSS 5 off");
+    Require(ProfileValidation.Validate(preset with { NeuralRendering = true }).Any(i => i.Code == "vd-dlss5" && i.Severity == IssueSeverity.Error), "VD refuses DLSS 5");
+    Require(ProfileValidation.ResolveFeatures(new VrProfile { NeuralRendering = true }).NeuralRendering, "Pimax keeps DLSS 5");
+    // Pupil shift needs eye tracking, which VD never has (fixed focus).
+    Require(!ProfileValidation.ResolveFeatures(preset with { PupilShift = true }).UsesPupilShift, "no pupil shift on VD");
+    // Quest 3 refresh: 72-120 Hz on VD (144 from another headset is refused); other routes and Optimizations only keep 50-240.
+    Require(ProfileValidation.Validate(preset with { HeadsetRefreshHz = 144 }).Any(i => i.Code == "vd-refresh" && i.Severity == IssueSeverity.Error), "144 Hz refused on VD");
+    Require(new[] { 72.0, 80, 90, 120 }.All(hz => !ProfileValidation.Validate(preset with { HeadsetRefreshHz = hz }).Any(i => i.Code == "vd-refresh")), "Quest 3 rates accepted");
+    Require(!ProfileValidation.Validate(preset with { HeadsetRefreshHz = 144, Desktop = true }).Any(i => i.Code == "vd-refresh"), "Optimizations only ignores the refresh rate");
+    Require(!ProfileValidation.Validate(new VrProfile { HeadsetRefreshHz = 144 }).Any(i => i.Code == "vd-refresh"), "Pimax keeps 144 Hz");
+    // Frame generation checks name the VD app and its own reprojection (SSW), not Pimax Play / SteamVR.
+    var vdFg = FramePacing.Checks(preset with { FrameGen = FrameGeneration.Nvidia }, new InventorySnapshot());
+    Require(vdFg.Single(c => c.Id == "refresh-rate").Detail.Contains("in the Virtual Desktop app") && !vdFg.Single(c => c.Id == "refresh-rate").Detail.Contains("Pimax"), "VD refresh check names the VD app");
+    Require(vdFg.Single(c => c.Id == "runtime-reprojection").Detail.Contains("Synchronous Spacewarp (SSW)") && !vdFg.Single(c => c.Id == "runtime-reprojection").Detail.Contains("Pimax"), "VD reprojection check names SSW");
+    Require(FramePacing.Checks(new VrProfile { FrameGen = FrameGeneration.Nvidia }, new InventorySnapshot()).Single(c => c.Id == "runtime-reprojection").Detail.Contains("Smart Smoothing"), "Pimax wording unchanged");
+});
+Test("Virtual Desktop route: readiness checks and Detect my setup", () =>
+{
+    var previous = Readiness.ActiveRouteProvider;
+    try
+    {
+        var preset = ProfilePresets.All.Single(p => p.Id == "vd-quadviews");
+        Readiness.ActiveRouteProvider = () => new(null, "No headset route is running.", TrackingKind.Unknown);
+        var idle = Readiness.Check(preset, new() { VirtualDesktopRuntime = Vdxr }, new ControlService(root, Path.Combine(root, "vd-route/state")));
+        Require(idle.Checks.Single(c => c.Id == "virtual-desktop") is { State: CheckState.Warning, Guide: "virtualdesktop" }, "not streaming yet: a warning with VD's guide");
+        Readiness.ActiveRouteProvider = () => new(RuntimeKind.VirtualDesktop, "Virtual Desktop is running and VDXR is the active OpenXR runtime.", TrackingKind.Unknown);
+        var streaming = Readiness.Check(preset, new() { VirtualDesktopRuntime = Vdxr }, new ControlService(root, Path.Combine(root, "vd-route/state2")));
+        Require(streaming.Checks.Single(c => c.Id == "route-mismatch").State == CheckState.Pass && streaming.Checks.All(c => c.Id != "virtual-desktop"), "streaming: the route matches");
+        var pimax = Readiness.Check(new VrProfile(), new(), new ControlService(root, Path.Combine(root, "vd-route/state3")));
+        Require(pimax.Checks.Single(c => c.Id == "route-mismatch") is { State: CheckState.Error } m && m.Detail.Contains("the Pimax runtime"), "a Pimax profile while VD streams is blocked");
+    }
+    finally { Readiness.ActiveRouteProvider = previous; }
+    // Detect my setup with VD streaming: the route is VD and Pimax Play's values (present on this fixture) are not used.
+    var pimaxPlay = Make("vd-detect/global.json", PimaxJson(1, .66, .20, .66, .66));
+    var sources = new DetectionSources { SteamVrServerLog = Path.Combine(root, "missing.txt"), PimaxPlaySettings = pimaxPlay, NeuralRuntimeFolders = [],
+        ProcessRunning = name => name is "VirtualDesktop.Streamer" or "pi_server", ActiveOpenXrRuntime = () => Vdxr };
+    var detected = SetupDetection.Detect(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated }, new InventorySnapshot { VirtualDesktopRuntime = Vdxr }, sources).Profile;
+    Require(detected.Runtime == RuntimeKind.VirtualDesktop && detected == HeadsetRoute.WithQuest3Focus(detected), "Quest 3 values, not Pimax Play's: " + detected.FoveaWidth + " x " + detected.FoveaHeight);
+});
 Test("Cheeky package never extracts the version.dll fallback loader", () =>
 {
     Require(PackageCatalog.Get("cheeky").ExcludedEntries!.Contains("version.dll"));
@@ -4102,7 +4176,8 @@ Test("Desktop Tobii pause: only the desktop tracker's services, never the headse
 
 Test("Profiles saved without foveaSource keep their own focus values; new profiles follow Pimax Play", () =>
 {
-    Require(new VrProfile().FoveaSource == FoveaSource.PimaxPlay && ProfilePresets.All.All(p => p.FoveaSource == FoveaSource.PimaxPlay), "New profiles and presets follow Pimax Play");
+    Require(new VrProfile().FoveaSource == FoveaSource.PimaxPlay && ProfilePresets.All.All(p => p.FoveaSource == (p.Runtime == RuntimeKind.VirtualDesktop ? FoveaSource.Profile : FoveaSource.PimaxPlay)),
+        "New profiles and presets follow Pimax Play (Virtual Desktop presets use their own values)");
     var node = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FoveaWidth = .44 }))!.AsObject();
     Require(JsonData.Deserialize<VrProfile>(node.ToJsonString()).FoveaSource == FoveaSource.PimaxPlay, "A saved source is kept");
     node.Remove("foveaSource");

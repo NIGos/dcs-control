@@ -61,7 +61,7 @@ public static class FramePacing
         var checks = new List<ReadinessCheck>
         {
             new("fps-cap", plan.DcsCap is null ? CheckState.Manual : CheckState.Pass, "DCS frame limit", plan.CapDescription + (plan.DcsCap is null ? "." : string.Create(CultureInfo.InvariantCulture, $": {plan.DcsCap:0.###} FPS.")) + " Your original value is backed up and comes back with Back to stock DCS."),
-            new("refresh-rate", HeadsetRefresh.ReadFor(profile) is null ? CheckState.Manual : CheckState.Pass, "Refresh rate", (HeadsetRefresh.ReadFor(profile) is { } read ? string.Create(CultureInfo.InvariantCulture, $"{read.Source}: {profile.HeadsetRefreshHz:0.###} Hz.") : string.Create(CultureInfo.InvariantCulture, $"Make sure the headset runs at {profile.HeadsetRefreshHz:0.###} Hz in Pimax Play or SteamVR.")) + string.Create(CultureInfo.InvariantCulture, $" DCS needs to render {plan.RequiredRenderedFps:0.###} FPS") + (plan.FrameGeneration ? (profile.UsesAdaptiveCadence ? "; frames are generated only while it falls behind (2×, 3× when needed)." : profile.FrameGenFactor == VrProfile.FrameGenAuto ? ", plus one generated frame per rendered frame (two while DCS falls behind)." : Multiplier(profile) == 3 ? ", plus two generated frames per rendered frame (3×)." : ", plus one generated frame per rendered frame (2×).") : "; frame generation is off.") + " " + plan.Note)
+            new("refresh-rate", HeadsetRefresh.ReadFor(profile) is null ? CheckState.Manual : CheckState.Pass, "Refresh rate", (HeadsetRefresh.ReadFor(profile) is { } read ? string.Create(CultureInfo.InvariantCulture, $"{read.Source}: {profile.HeadsetRefreshHz:0.###} Hz.") : string.Create(CultureInfo.InvariantCulture, $"Make sure the headset runs at {profile.HeadsetRefreshHz:0.###} Hz ") + RefreshSoftware(profile.Runtime) + ".") + string.Create(CultureInfo.InvariantCulture, $" DCS needs to render {plan.RequiredRenderedFps:0.###} FPS") + (plan.FrameGeneration ? (profile.UsesAdaptiveCadence ? "; frames are generated only while it falls behind (2×, 3× when needed)." : profile.FrameGenFactor == VrProfile.FrameGenAuto ? ", plus one generated frame per rendered frame (two while DCS falls behind)." : Multiplier(profile) == 3 ? ", plus two generated frames per rendered frame (3×)." : ", plus one generated frame per rendered frame (2×).") : "; frame generation is off.") + " " + plan.Note)
         };
         // With frame generation only when needed, a lower limit still reaches the refresh rate (frames are then always
         // generated), so the check says what it costs instead of "too low".
@@ -85,7 +85,10 @@ public static class FramePacing
             + (inventory.LimiterProcesses.Count == 0 ? " RTSS is not running, but other limits may still be on." : " Running: " + string.Join(", ", inventory.LimiterProcesses) + " (it may or may not limit the frame rate).")));
         if (plan.FrameGeneration)
             checks.Add(new("runtime-reprojection", CheckState.Manual, "Runtime motion smoothing / Smart Smoothing",
-                "With frame generation, turn off Smart Smoothing in Pimax Play (or Motion Smoothing in SteamVR): two kinds of generated frames on top of each other add latency and stutter. DCS Control does not change this setting."));
+                "With frame generation, " + (profile.Runtime == RuntimeKind.VirtualDesktop
+                    ? "turn off Synchronous Spacewarp (SSW) in the Virtual Desktop app"
+                    : "turn off Smart Smoothing in Pimax Play (or Motion Smoothing in SteamVR)")
+                + ": two kinds of generated frames on top of each other add latency and stutter. DCS Control does not change this setting."));
         // Pimax's own Quad Views returns from xrEndFrame only when the submitted image is written: without the buffer the
         // first generated frame arrives late and a display period is lost (GitHub #23; measured 2026-11-15: buffer on
         // 45 FPS for 73 % of a flight, buffer off 30 FPS with OFXR patch 0078 and down to 22.5 without it).
@@ -94,6 +97,9 @@ public static class FramePacing
                 string.Create(CultureInfo.InvariantCulture, $"With Pimax native Quad Views, frame generation holds a higher frame rate with Smoothness buffer on (Frame generation page). With it off, DCS renders {profile.HeadsetRefreshHz / 3:0.#} FPS or less in scenes where it could hold {profile.HeadsetRefreshHz / 2:0.#}.")));
         return checks;
     }
+
+    private static string RefreshSoftware(RuntimeKind route) =>
+        route == RuntimeKind.VirtualDesktop ? "in the Virtual Desktop app" : "in Pimax Play or SteamVR";
 
     /// <summary>autoexec.cfg turns on HUD_MFD_after_DLSS: its last assignment outside comments says true.</summary>
     public static bool HudAfterDlss(string text) =>

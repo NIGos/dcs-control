@@ -48,8 +48,10 @@ public static class Readiness
                 : $"DCS's bin folder has a dxgi.dll from {dxgi.Name} ({dxgi.Path}). DLSS 5 needs that file name, so Launch DCS backs it up and sets it aside while this profile is applied: {dxgi.Name} is off in DCS until Back to stock DCS puts it back.");
         var running = profile.Desktop ? new ActiveRouteState(null, "", default) : ActiveRouteProvider();
         if (running.Route is { } activeRoute && activeRoute != profile.Runtime)
-            Add("route-mismatch", CheckState.Error, "Headset route", running.Summary + " This profile uses " + (profile.Runtime == RuntimeKind.Pimax ? "the Pimax runtime" : "Sboys through SteamVR") + ". Change How you fly in the right panel, or close the other headset software, before launching.");
+            Add("route-mismatch", CheckState.Error, "Headset route", running.Summary + " This profile uses " + HeadsetRoute.Describe(profile.Runtime) + ". Change How you fly in the right panel, or close the other headset software, before launching.");
         else if (running.Route is not null) Add("route-mismatch", CheckState.Pass, "Headset route", running.Summary);
+        else if (profile.Runtime == RuntimeKind.VirtualDesktop && !profile.Desktop)
+            Add("virtual-desktop", CheckState.Warning, "Virtual Desktop", "Virtual Desktop is not streaming through VDXR. Connect the Quest to this PC in Virtual Desktop, and in the Streamer app set OpenXR Runtime to VDXR.", "virtualdesktop");
         if (inventory.DcsExecutable?.Contains(@"\steamapps\", StringComparison.OrdinalIgnoreCase) == true)
             Add("steam-relaunch", CheckState.Manual, "Steam edition launch", "Keep Steam running and start DCS with Launch DCS in this app. DCS then starts with this profile instead of restarting through Steam without it.");
         if (profile.KeepDcsLauncher && LaunchSafety.LauncherRestartBlocked)
@@ -67,17 +69,17 @@ public static class Readiness
         var foreign = inventory.Layers.Where(l => l.Enabled && !GazeBridge.IsManaged(l, profile) && !VectorXr.Is(l)).Select(l => l.Name ?? Path.GetFileName(l.ManifestPath)).ToArray();
         if (foreign.Length > 0 && !profile.Desktop)
             Add("implicit-layers", CheckState.Warning, "Other VR add-ons (OpenXR layers)", "Other OpenXR add-ons are installed: " + string.Join(", ", foreign) + ". They load before this profile's add-ons and can change the image, eye tracking or frame timing. If something looks wrong, turn them off (for example with OpenXR API Layers GUI).");
-        var manifest = profile.RuntimeManifestPath ?? (profile.Runtime == RuntimeKind.Pimax ? inventory.PimaxRuntime : inventory.SteamVrRuntime);
+        var manifest = HeadsetRoute.Manifest(profile, inventory);
         if (!profile.Desktop) try
         {
-            using var json = JsonDocument.Parse(File.ReadAllText(manifest ?? throw new InvalidDataException("The headset's OpenXR runtime was not found. Start Pimax Play (or SteamVR) once, then press Check this PC.")));
+            using var json = JsonDocument.Parse(File.ReadAllText(manifest ?? throw new InvalidDataException(HeadsetRoute.RuntimeMissing(profile.Runtime))));
             var relative = json.RootElement.GetProperty("runtime").GetProperty("library_path").GetString();
             var dll = Path.GetFullPath(relative ?? throw new InvalidDataException("Runtime library path is empty."), Path.GetDirectoryName(manifest)!);
             if (!NativeBinary.IsX64(dll)) throw new InvalidDataException("The selected runtime library is missing or is not x64: " + dll);
             Add("runtime", CheckState.Pass, "Selected OpenXR runtime", manifest! + " → " + dll);
         }
         catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or JsonException or KeyNotFoundException or ArgumentException or InvalidOperationException)
-        { Add("runtime", CheckState.Error, "Selected OpenXR runtime", e.Message, profile.Runtime == RuntimeKind.Pimax ? "pimax" : "steamvr"); }
+        { Add("runtime", CheckState.Error, "Selected OpenXR runtime", e.Message, HeadsetRoute.RuntimeGuide(profile.Runtime)); }
         var missingVc = new[] { "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll" }.Where(n => !NativeBinary.IsX64(Path.Combine(Environment.SystemDirectory, n))).ToArray();
         var vcFile = Path.Combine(Environment.SystemDirectory, "vcruntime140.dll");
         // The numeric parts: older runtimes report "14.29.30139.0 built by: vcwrkspc" as FileVersion.
@@ -114,8 +116,10 @@ public static class Readiness
         }
         if (profile.Desktop)
             Add("desktop", CheckState.Manual, "Optimizations only", "DCS runs as you set it up, on the monitor or with another headset, with your own VR settings and headset software. DCS Control adds only Engine Optimizations, CPU Boost and the flight helpers you turned on.");
+        else if (profile.Runtime == RuntimeKind.VirtualDesktop)
+        Add("headset", CheckState.Manual, "Headset and tracking", "Connect the Quest in Virtual Desktop. Before launching DCS, check the refresh rate and resolution in Virtual Desktop's Streaming settings. Synchronous Spacewarp halves DCS's frame rate (90 Hz → 45 FPS); leave it off when comparing frame rates.", HeadsetRoute.HeadsetGuide(profile.Runtime));
         else
-        Add("headset", CheckState.Manual, "Headset and tracking", "Connect your headset. Before launching DCS, check the image, eye distance, tracking and resolution in Pimax Play (or SteamVR).", profile.Runtime == RuntimeKind.Pimax ? "pimax" : "sboys");
+        Add("headset", CheckState.Manual, "Headset and tracking", "Connect your headset. Before launching DCS, check the image, eye distance, tracking and resolution in Pimax Play (or SteamVR).", HeadsetRoute.HeadsetGuide(profile.Runtime));
         if (profile.Gaze == GazeMode.EyeTracked && profile.QuadViews != QuadProvider.None)
             Add("gaze-live", CheckState.Manual, "Eye tracking calibration", "Turn on and calibrate eye tracking in Pimax Play. Then check in the headset that the focus area follows your eyes.", "gaze");
         if (!profile.Desktop)

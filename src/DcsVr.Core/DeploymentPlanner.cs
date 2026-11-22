@@ -50,7 +50,7 @@ public sealed class DeploymentPlanner(ComponentLocations components)
         // no OpenXR variable at all, so none is required or pinned.
         if (!profile.Desktop)
         {
-            var runtime = profile.RuntimeManifestPath ?? (profile.Runtime == RuntimeKind.Pimax ? inventory.PimaxRuntime : inventory.SteamVrRuntime);
+            var runtime = HeadsetRoute.Manifest(profile, inventory);
             if (runtime is null || !File.Exists(runtime)) throw new InvalidDataException("OpenXR runtime manifest unavailable.");
             using (var document = JsonDocument.Parse(File.ReadAllText(runtime)))
             {
