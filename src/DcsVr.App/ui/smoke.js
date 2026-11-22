@@ -10,7 +10,7 @@ window.runWebSmoke = async function() {
     'neuralRendering','neuralRuntimePath','keepOtherDxgi','neuralFocusArea','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity','neuralStyle',
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
-    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenDeepPipeline','frameGenFoveated','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
+    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenDeepPipeline','frameGenFoveated','frameGenFocusLayer','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
     'frameGenHudSymbology','smoothCursor','frameGenParallelEyes','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
     'cpuBoost','boostDcsPriority','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVram','freeVramApps','freeVramReopen',
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
@@ -308,10 +308,10 @@ window.runWebSmoke = async function() {
         check('Card subtitles with more to say keep it behind More'+(bad.length ? ' ('+bad.join(', ')+')' : ''),!bad.length);
         const b = $('packageCard').querySelector('.card-heading .more-toggle'), detail = $(b.getAttribute('aria-controls')); b.click(); const opened = !detail.hidden && b.textContent === 'Less'; b.click();
         check('More works on the static cards of the page too',opened && detail.hidden && b.textContent === 'More' && detail.textContent.includes('DCS starts its log anew')); }
-      { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-engineRecordersEmulatedLists','setting-frameGenHudSymbology','setting-frameGenFoveated',
+      { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-engineRecordersEmulatedLists','setting-frameGenHudSymbology','setting-frameGenFoveated','setting-frameGenFocusLayer',
           'setting-quadSaccadeTail','setting-quadLostGazeEase','setting-quadEdgeMatch','setting-engineWaterSkip','setting-engineIdleEffectSkip','setting-frameGenParallelEyes'];
         const tags = [...document.querySelectorAll('#pages .tag')].filter(t => t.textContent.trim() === 'EXPERIMENTAL' && !t.closest('#page-guide'));
-        check('EXPERIMENTAL stays on exactly its fifteen settings and cards',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
+        check('EXPERIMENTAL stays on exactly its sixteen settings and cards',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
       ui.navigate('framegen'); const refreshInput = getComputedStyle($('input-headsetRefreshHz')).minHeight, row = getComputedStyle($('setting-headsetRefreshHz'));
       ui.navigate('boost'); const monitorSelect = getComputedStyle($('input-flightDisplayMode')).minHeight;
       check('Density: 34 px controls and 11 px setting rows at 1320 x 920',innerWidth === 1320 && refreshInput === '34px' && monitorSelect === '34px' && row.paddingTop === '11px' && row.paddingBottom === '11px'); }
@@ -700,6 +700,12 @@ window.runWebSmoke = async function() {
       const needs = () => ui.checkItems().find(c => c.id === 'foveated-fg-needs');
       await set({desktop:false,frameGen:'Nvidia',runtime:'Pimax',quadViews:'QuadViewsFoveated',quadViewsLayerDirectory:null,frameGenFoveated:false});
       const can = why() === null && !needs();
+      // Focus layer: only while foveated frame generation runs, Standard by default, four choices.
+      const layer = $('setting-frameGenFocusLayer'), layerInput = $('input-frameGenFocusLayer'), hiddenOff = layer.hidden;
+      await set({frameGenFoveated:true});
+      const shown = !layer.hidden && !layerInput.disabled && (ui.profile.frameGenFocusLayer ?? 'Standard') === 'Standard' && [...layerInput.options].map(o => o.value).join() === 'Standard,Premultiplied,PremultipliedSrgb,PerEye' && $('help-frameGenFocusLayer').textContent.includes('next DCS start');
+      await set({frameGenFoveated:false});
+      check('Focus layer shows only while foveated frame generation runs, Standard by default, and applies at the next DCS start',hiddenOff && shown && layer.hidden);
       await set({frameGen:'FidelityFx'}); const other = why() === 'NVIDIA frame generation only.' && !needs();
       await set({frameGen:'Nvidia',quadViews:'PimaxNative'}); const native = String(why()).includes('bundled Quad Views');
       await set({frameGenFoveated:true}); const idle = needs();

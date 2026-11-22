@@ -403,6 +403,7 @@ QuadViews	exe:DCS	dcsvr_temporal_debug
 QuadViews	exe:DCS	dcsvr_temporal_ramp_deg
 QuadViews	exe:DCS	dcsvr_temporal_tau_ms
 QuadViews	exe:DCS	dcsvr_two_layers
+QuadViews	exe:DCS	dcsvr_two_layers_alpha
 QuadViews	exe:DCS	focus_multiplier
 QuadViews	exe:DCS	focus_view_shape
 QuadViews	exe:DCS	force_no_eye_tracking

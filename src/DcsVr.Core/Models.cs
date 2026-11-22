@@ -17,6 +17,12 @@ public enum NvidiaFlowPreset { Fast, Medium, Slow }
 /// <summary>How readily frame generation only when needed passes DCS's frames through ungenerated
 /// (<see cref="VrProfile.FrameGenPassThrough"/>; OFXR <c>cadence_preference</c> 0, 1, 2, fork patch 0070).</summary>
 public enum PassThroughPreference { Steady, Balanced, PreferRefresh }
+/// <summary>How Quad Views hands the focus layer to the runtime with foveated frame generation
+/// (<see cref="VrProfile.FrameGenFocusLayer"/>): Standard dcsvr_two_layers=2 with colour not premultiplied
+/// (dcsvr_two_layers_alpha 0); Premultiplied alpha 1; PremultipliedSrgb alpha 2 (premultiplied, sRGB swapchain); PerEye
+/// dcsvr_two_layers=1 (one swapchain per eye), alpha 0. Variants for finding which runtime path draws the white disc over
+/// the fovea (artifacts\perf-07\flicker.md).</summary>
+public enum FocusLayerMode { Standard, Premultiplied, PremultipliedSrgb, PerEye }
 /// <summary>The DLSS preset of the Quad Views periphery (<see cref="VrProfile.PeripheryDlssPreset"/>); Off keeps DCS's.</summary>
 public enum PeripheryDlssPreset { Off, E, F, K, M }
 public enum FpsLimitMode { Preserve, RuntimeHeadroom, MatchRefresh, Custom }
@@ -118,6 +124,11 @@ public sealed record VrProfile
     /// <summary>The two halves (Quad Views and OFXR) are written together or not at all: two layers without OFXR's rule
     /// give a wrong image on generated frames.</summary>
     public bool UsesFoveatedFrameGen => FrameGenFoveated && FrameGen == FrameGeneration.Nvidia && !Desktop && Runtime == RuntimeKind.Pimax && UsesBundledQuadViews;
+    /// <summary>"Focus layer" on the Framegen page (experimental, shown with foveated frame generation): how the focus layer
+    /// reaches the runtime (<see cref="FocusLayerMode"/>). Quad Views reads it at start only. Standard writes the same
+    /// settings.cfg as before the option. With a premultiplied layer OFXR scales the generated colour with its alpha
+    /// (fork patch 0092, from the layer's flags).</summary>
+    public FocusLayerMode FrameGenFocusLayer { get; init; } = FocusLayerMode.Standard;
     /// <summary>OFXR smooth_cursor (fork patch 0010): generated frames find DCS's mouse cursor in the two real frames
     /// and draw it at its in-between position, so it moves at the headset's rate instead of fading between two places.
     /// Only the generated frames change; where a click lands does not. Off by default until flown.</summary>

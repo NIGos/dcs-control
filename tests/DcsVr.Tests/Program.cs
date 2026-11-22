@@ -3198,6 +3198,23 @@ Test("Other limiters and motion smoothing stay manual checks", () =>
     var fovOfxr = ConfigurationWriters.Ofxr(fov);
     Require(ConfigurationWriters.QuadViews(fov).Contains("dcsvr_two_layers=2") && fovOfxr.Contains("\nfoveated_layers=1\n") && fovOfxr.Contains("\nfoveated_uncovered_fill=2\n") && fovOfxr.Contains("\nfoveated_periphery_flow_scale=100\n") && fovOfxr.Contains("\ndeep_pipeline=1\n") && fovOfxr.Contains("\npipelined_deep_hold=1\n"), "two layers, per-layer generation, the buffer as chosen");
     Require(ConfigurationWriters.Ofxr(fov with { BidirectionalFlow = true }).Contains("\nfoveated_uncovered_fill=1\n") && ConfigurationWriters.Ofxr(fov with { FrameGenDeepPipeline = false }).Contains("\ndeep_pipeline=0\n"), "the periphery-flow fill is not for bidirectional flow");
+    // Focus layer: Standard writes settings.cfg as before the option (no alpha line, array swapchains); the variants change
+    // only their own line; without foveated frame generation the choice writes nothing; an unknown value is refused.
+    {
+        var standard = ConfigurationWriters.QuadViews(fov);
+        string Quad(FocusLayerMode m) => ConfigurationWriters.QuadViews(fov with { FrameGenFocusLayer = m });
+        Require(fov.FrameGenFocusLayer == FocusLayerMode.Standard && Quad(FocusLayerMode.Standard) == standard && standard.Contains("\ndcsvr_two_layers=2\ndcsvr_saccade_widening=") && !standard.Contains("dcsvr_two_layers_alpha"), "Standard: settings.cfg as before");
+        Require(Quad(FocusLayerMode.Premultiplied) == standard.Replace("\ndcsvr_two_layers=2\n", "\ndcsvr_two_layers=2\ndcsvr_two_layers_alpha=1\n")
+            && Quad(FocusLayerMode.PremultipliedSrgb) == standard.Replace("\ndcsvr_two_layers=2\n", "\ndcsvr_two_layers=2\ndcsvr_two_layers_alpha=2\n")
+            && Quad(FocusLayerMode.PerEye) == standard.Replace("\ndcsvr_two_layers=2\n", "\ndcsvr_two_layers=1\n"), "each variant changes its own line");
+        foreach (var m in Enum.GetValues<FocusLayerMode>())
+            Require(ConfigurationWriters.QuadViews(fov with { FrameGenFoveated = false, FrameGenFocusLayer = m }) == ConfigurationWriters.QuadViews(fov with { FrameGenFoveated = false })
+                && ConfigurationWriters.Ofxr(fov with { FrameGenFocusLayer = m }) == fovOfxr, "the choice writes nothing without foveated frame generation, and nothing for OFXR");
+        Require(ProfileValidation.Validate(fov with { FrameGenFocusLayer = (FocusLayerMode)9 }).Any(i => i.Code == "framegen-focus-layer" && i.Severity == IssueSeverity.Error)
+            && !ProfileValidation.Validate(fov).Any(i => i.Code == "framegen-focus-layer"), "an unknown focus layer is refused");
+        Require(JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"x\",\"name\":\"X\"}").FrameGenFocusLayer == FocusLayerMode.Standard
+            && JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"x\",\"name\":\"X\",\"frameGenFocusLayer\":\"PerEye\"}").FrameGenFocusLayer == FocusLayerMode.PerEye, "an older profile gets Standard");
+    }
     // A flight starts with a shorter hitch when the private images are named once during the loading screen and the
     // runtime swapchains are kept through the load (measured 2026-11-16: 105 ms against 483-528).
     Require(fovOfxr.Contains("\nwarm_private_images=1\n") && fovOfxr.Contains("\nlazy_runtime_reclaim_ms=60000\n") && ConfigurationWriters.Ofxr(fov with { FrameGenFoveated = false }).Contains("\nwarm_private_images=0\n") && ConfigurationWriters.Ofxr(fov with { FrameGenFoveated = false }).Contains("\nlazy_runtime_reclaim_ms=5000\n"), "the start-up keys go with foveated frame generation only");
@@ -4988,6 +5005,7 @@ Test("Every key the app writes is read by its component (scripts/written-keys.tx
     {
         new VrProfile(), vr, vr with { Gaze = GazeMode.Fixed }, vr with { QuadViews = QuadProvider.None }, vr with { FrameGen = FrameGeneration.FidelityFx },
         vr with { EngineOptimizations = false }, vr with { PupilShift = false, DepthBoost = false, GazeDof = false, GVisionUseGaze = false }, vr with { Runtime = RuntimeKind.SboysSteamVr },
+        vr with { FrameGenFocusLayer = FocusLayerMode.Premultiplied },
     };
     var keys = new SortedSet<string>(StringComparer.Ordinal);
     void Add(string writer, string ini)
