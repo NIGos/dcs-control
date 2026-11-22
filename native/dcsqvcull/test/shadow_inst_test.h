@@ -1122,6 +1122,49 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
         g_collectGb = c0g;
         g_prewarmSkipped = skipped0;
       }
+      // An A/B runs (bench.h BenchHoldPrewarm): nothing is taken in either arm, also with the kind collected; the
+      // queue and the in-flight count are reported, and the entry is taken again once the hold is released.
+      {
+        int state0 = 0, busy0 = 0;
+        bool on0 = false, c0s = false;
+        {
+          std::lock_guard<std::mutex> lock(g_mutex);
+          state0 = g_prewarmState, busy0 = g_prewarmBusy;
+          on0 = g_prewarmOn.load(), c0s = g_collect.load();
+          g_prewarmState = 2;
+          g_prewarmBusy = 1;
+          g_prewarmOn = true;
+          g_prewarm.clear();
+          PrewarmItem it;
+          it.s = new Snapshot;
+          memset(it.s, 0, sizeof(*it.s));
+          it.s->kind = kKindShadow;
+          g_prewarm.push_back(it);
+          g_collect = true;
+        }
+        int busy = -1;
+        const size_t queued = PrewarmSetHold(true, &busy);
+        PrewarmItem a, b;
+        bool heldOk = false, takenOk = false;
+        {
+          std::lock_guard<std::mutex> lock(g_mutex);
+          heldOk = !PrewarmTakeLocked(a) && g_prewarm.size() == 1 && g_prewarmBusy == 1;
+        }
+        const bool reported = queued == 1 && busy == 1 && PrewarmBusyNow() == 1;
+        const size_t left = PrewarmSetHold(false, nullptr);
+        {
+          std::lock_guard<std::mutex> lock(g_mutex);
+          takenOk = PrewarmTakeLocked(b) && b.s->kind == kKindShadow && g_prewarm.empty() && g_prewarmBusy == 2;
+          delete b.s;
+          g_prewarmState = state0;
+          g_prewarmBusy = busy0;
+          g_prewarmOn = on0;
+          g_collect = c0s;
+        }
+        Check(heldOk && reported && left == 1 && takenOk && !g_prewarmHold.load(),
+              "shadow inst prewarm: held while an A/B runs (no entry taken in either arm, queue and in-flight compiles "
+              "reported), taken again once released");
+      }
       g_prewarmWantShadow = wantShadow0;
       g_prewarmWantGb = wantGb0;
       // The old last-use time goes back only on the prewarm's own write: a live write or hit after it keeps its time.

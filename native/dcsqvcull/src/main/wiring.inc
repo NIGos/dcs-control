@@ -627,6 +627,27 @@ void ApplyShadowInst() {
   if (on != shadowinst::g_on.load() || (on && shadowinst::g_state.load() == 0)) shadowinst::SetOn(on);
 }
 
+// bench.h RunBenchmark: the shader cache prewarm waits while an A/B runs (shadow_inst.h g_prewarmHold). The compiles
+// already running finish first (one per worker, a few seconds each), at most 15 s, so they do not land in block 1.
+void BenchHoldPrewarm(bool hold) {
+  int busy = 0;
+  const size_t queued = shadowinst::PrewarmSetHold(hold, &busy);
+  if (!hold) {
+    if (queued) Log("bench: shader cache prewarm resumed (%zu stale entries left)", queued);
+    return;
+  }
+  if (!queued && !busy) return;
+  const ULONGLONG until = GetTickCount64() + 15000;
+  while (busy && GetTickCount64() < until && !g_benchAbort.load()) {
+    Sleep(50);
+    busy = shadowinst::PrewarmBusyNow();
+  }
+  Log("bench: shader cache prewarm held for the A/B (%zu stale entries wait, %d compiles still running): its compiles "
+      "would run only in ON blocks",
+      queued, busy);
+}
+const bool g_benchHoldPrewarmSet = (g_benchHoldPrewarm = &BenchHoldPrewarm, true);
+
 // [Suite] HoldYawDeg: constant view yaw for unattended benchmark views.
 void ApplyHoldYaw(int deg) {
   if (deg >= 0)
