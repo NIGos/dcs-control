@@ -692,15 +692,26 @@ int main(int argc, char** argv) {
             //     is 512 (the composition enlarges it, k = 2 for the edge match). Every focus pixel must equal the
             //     composed pixel at the same place (fade band, sharp area, corners outside the shape), for every shape,
             //     band, offset, with sharpening and with edge match.
-            //  3. Where mode 0's fade is 1 and the rim's alpha is 1, the colour is mode 0's exactly (the sharp area).
-            //  4. The rim (0025): alpha is 0 on the outer half of 1.5 % of each side, so every texel of the outer border
-            //     (the rows and columns a runtime's distortion pass may read past) is transparent, rising to 1 across the
-            //     inner half; 1 everywhere else. Where alpha is 0 the colour is the composed one (check 2, so a display
-            //     path that ignores the alpha shows the right image); where it is between 0 and 1 the runtime's blend of
-            //     the stored bytes over the periphery (bilinear, as the runtime's periphery layer shows it here) gives the
-            //     composed colour, wherever the colour did not have to be clamped.
+            //  3. Where mode 0's fade is 1 and the layer's alpha is 1, the colour is mode 0's exactly (the sharp area).
+            //  4. The alpha (0031): the composition's fade at the texel's own place, over the composition's band but never
+            //     a narrower one than edge blend 0.2's (the outer 0.4 of the radius; the largest of |x| and |y| for the
+            //     rectangle of shape 0), so every texel of the outer border is transparent. Where alpha is 0 or 1 the
+            //     colour is the composed one (check 2, so a display path that ignores the alpha shows the right image
+            //     there); where it is between 0 and 1 the runtime's blend of the stored bytes over the periphery
+            //     (bilinear, as the runtime's periphery layer shows it here) gives the composed colour, wherever the
+            //     colour did not have to be clamped (round and rounded areas; upstream's rectangle, shape 0, does not
+            //     fade to 0 at its edge, so its ramp trades the composed colour for no line). Where the ramp is the
+            //     composition's own band (edge blend 0.2, round or rounded) the alpha is the fade to 8 bits, so every
+            //     texel there, clamped or not, must blend to the composed colour within 2 codes.
+            //  5. Chromatic aberration (0031): the Pimax runtime samples each colour channel at its own place (red a few
+            //     texels towards the lens centre, blue a few outwards) but blends with green's alpha, so a channel gets
+            //     the background times a(x_c) - a(x_G) too much or too little (the warm line of the 2026-11-22 flights:
+            //     green unchanged, red +35 %, blue -41 % of the background along all four edges with 0025's rim). With
+            //     offsets of 2 texels of 600 radially (the flights' 5 of 1928, rounded up) the stored alpha must never
+            //     differ by more than 0.04 between a texel and its offset places (10 codes over a white background);
+            //     0025's rim (alpha 0 to 1 over 0.75 % of the side) gives about 0.44, a hard edge 1.
             // Before 0025 the layer had alpha 1 up to its edge and went out with no blending: the Pimax runtime drew a
-            // line along its bottom edge (rig 2026-11-22). Check 4 fails on that pass.
+            // line along its bottom edge (rig 2026-11-22). Checks 4 and 5 fail on that pass, and 5 on 0025's.
             bool opaque_ok = true;
             {
                 const auto stereo_half = make_texture(kOut / 2, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, true);
@@ -737,11 +748,52 @@ int main(int argc, char** argv) {
                     return (texel(x0, y0) * (1 - fx) + texel(x0 + 1, y0) * fx) * (1 - fy) +
                            (texel(x0, y0 + 1) * (1 - fx) + texel(x0 + 1, y0 + 1) * fx) * fy;
                 };
-                // The rim's alpha byte as the shader computes it (kDcsvrOpaqueRim 0.015).
-                const auto rim_alpha = [&](UINT x, UINT y) {
-                    const float u = (x + 0.5f) / kFocus, v = (y + 0.5f) / kFocus;
+                // The layer's alpha byte as the shader computes it (kDcsvrOpaqueRamp 0.4).
+                const auto smooth_step = [](float e0, float e1, float v) {
+                    const float s = (std::clamp)((v - e0) / (e1 - e0), 0.f, 1.f);
+                    return s * s * (3 - 2 * s);
+                };
+                const auto layer_alpha = [&](UINT x, UINT y, float shape, float smoothing) {
+                    const float ox = std::abs((x + 0.5f) / kFocus * 2 - 1), oy = std::abs((y + 0.5f) / kFocus * 2 - 1);
+                    if (ox >= 1 || oy >= 1) return 0;
+                    const float r = shape >= 1 ? std::pow(std::pow(ox, shape) + std::pow(oy, shape), 1 / shape) : (std::max)(ox, oy);
+                    const float ramp = (std::max)((std::clamp)(2 * smoothing, 0.01f, 0.95f), 0.4f);
+                    return static_cast<int>(std::lround((1 - smooth_step(1 - ramp, 1, r)) * 255));
+                };
+                // 0025's rim, for check 5's reference only.
+                const auto rim_alpha_0025 = [&](float u, float v) {
                     const float d = (std::min)((std::min)(u, 1 - u), (std::min)(v, 1 - v)) / 0.015f;
-                    return static_cast<int>(std::lround((std::clamp)(2 * d - 1, 0.f, 1.f) * 255));
+                    return std::lround((std::clamp)(2 * d - 1, 0.f, 1.f) * 255) / 255.f;
+                };
+                // Check 5: the stored alpha bilinear at texel coordinates (outside the layer 0, as the runtime reads it).
+                const auto alpha_at = [&](const std::vector<std::uint32_t>& img, float fx, float fy) {
+                    const float x = fx - 0.5f, y = fy - 0.5f;
+                    const int x0 = static_cast<int>(std::floor(x)), y0 = static_cast<int>(std::floor(y));
+                    const float wx = x - x0, wy = y - y0;
+                    const auto texel = [&](int tx, int ty) {
+                        if (tx < 0 || ty < 0 || tx >= static_cast<int>(kFocus) || ty >= static_cast<int>(kFocus)) return 0.f;
+                        return static_cast<float>(img[static_cast<std::size_t>(ty) * kFocus + tx] >> 24) / 255.f;
+                    };
+                    return (texel(x0, y0) * (1 - wx) + texel(x0 + 1, y0) * wx) * (1 - wy) +
+                           (texel(x0, y0 + 1) * (1 - wx) + texel(x0 + 1, y0 + 1) * wx) * wy;
+                };
+                // The worst |a(x_c) - a(x_G)| over the layer and a margin around it, red and blue kAberration texels
+                // inwards and outwards along the ray from the layer's centre.
+                const float kAberration = 2.f;
+                const auto aberration_error = [&](const auto& alpha_of) {
+                    double worst = 0;
+                    const int margin = 8;
+                    for (int y = -margin; y < static_cast<int>(kFocus) + margin; ++y)
+                        for (int x = -margin; x < static_cast<int>(kFocus) + margin; ++x) {
+                            const float gx = x + 0.5f, gy = y + 0.5f;
+                            const float dx = gx - kFocus * 0.5f, dy = gy - kFocus * 0.5f, len = std::sqrt(dx * dx + dy * dy);
+                            if (len < 1) continue;
+                            const float ux = dx / len * kAberration, uy = dy / len * kAberration;
+                            const float a_green = alpha_of(gx, gy);
+                            worst = (std::max)(worst, static_cast<double>(std::abs(alpha_of(gx - ux, gy - uy) - a_green)));
+                            worst = (std::max)(worst, static_cast<double>(std::abs(alpha_of(gx + ux, gy + uy) - a_green)));
+                        }
+                    return worst;
                 };
                 const float area = static_cast<float>(kFocus) / static_cast<float>(kOut);
                 const auto run_opaque = [&](const TwoLayer& k, ID3D11ShaderResourceView* focus_view, ID3D11ShaderResourceView* plain) {
@@ -779,9 +831,10 @@ int main(int argc, char** argv) {
                 // texels' 600 / 1024 of the view.
                 const float k_cpu = static_cast<float>(kFocus) / static_cast<float>(kOut / 2) / area;
                 std::size_t cases = 0, blended = 0, exact_off = 0, total_off = 0, alpha_not_one = 0, sharp = 0, sharp_differing = 0;
-                std::size_t rim_alpha_wrong = 0, border_opaque = 0, rim_ramp = 0, rim_clamped = 0;
+                std::size_t rim_alpha_wrong = 0, border_opaque = 0, rim_ramp = 0, rim_clamped = 0, band_ramp = 0, band_clamped = 0;
+                double worst_aberration = 0;
                 int worst_off = 0, worst_edge = 0, worst_sharp = 0;
-                double worst_rim_blend = 0;
+                double worst_rim_blend = 0, worst_band_blend = 0;
                 focus_area = area;
                 stereo_view = stereo_half_srv.Get();
                 for (const float shape : {0.f, 2.f, 8.f})
@@ -813,12 +866,14 @@ int main(int argc, char** argv) {
                                     const auto standard_sharp = run_opaque(k, focus_view, focus_srv.Get());
                                     const auto opaque = run_opaque(o, focus_view, focus_srv.Get());
                                     ++cases;
+                                    worst_aberration = (std::max)(worst_aberration, aberration_error([&](float fx, float fy) { return alpha_at(opaque, fx, fy); }));
+                                    const bool own_band = shape >= 1.f && smoothing >= 0.2f;
                                     const int x0 = static_cast<int>(std::lround(o.band[2] * kOut)), y0 = static_cast<int>(std::lround(o.band[3] * kOut));
                                     for (UINT y = 0; y < kFocus; ++y)
                                         for (UINT x = 0; x < kFocus; ++x) {
                                             const std::size_t p = static_cast<std::size_t>(y) * kFocus + x;
                                             const std::uint32_t r = reference[static_cast<std::size_t>(y0 + y) * kOut + x0 + x];
-                                            const int a_out = static_cast<int>(opaque[p] >> 24), a_rim = rim_alpha(x, y);
+                                            const int a_out = static_cast<int>(opaque[p] >> 24), a_rim = layer_alpha(x, y, shape, smoothing);
                                             if (std::abs(a_out - a_rim) > 1) ++rim_alpha_wrong;
                                             if ((x == 0 || y == 0 || x + 1 == kFocus || y + 1 == kFocus) && a_out != 0) ++border_opaque;
                                             if (a_rim > 0 && a_rim < 255) {
@@ -837,7 +892,16 @@ int main(int argc, char** argv) {
                                                     worst_here = (std::max)(worst_here, std::abs(shown - static_cast<double>((r >> (8 * ch)) & 255U)));
                                                 }
                                                 if (clamped) ++rim_clamped;
-                                                else if (edge <= 0.f) worst_rim_blend = (std::max)(worst_rim_blend, worst_here);
+                                                // Upstream's rectangle (shape 0) does not fade to 0 at its edge: the ramp
+                                                // there trades the composed colour for no line, so it is not compared.
+                                                else if (edge <= 0.f && shape >= 1.f) worst_rim_blend = (std::max)(worst_rim_blend, worst_here);
+                                                // In the composition's own band the alpha is the fade to 8 bits, so even
+                                                // a clamped colour is shown within the rounding: every texel compared.
+                                                if (own_band && edge <= 0.f) {
+                                                    ++band_ramp;
+                                                    band_clamped += clamped ? 1U : 0U;
+                                                    worst_band_blend = (std::max)(worst_band_blend, worst_here);
+                                                }
                                                 continue;
                                             }
                                             int worst = 0;
@@ -872,10 +936,20 @@ int main(int argc, char** argv) {
                 stereo_view = nullptr;
                 std::printf("opaque focus vs composition: %zu cases, %zu sharp pixels (%zu differing from mode 0, worst %d codes), %zu blended or periphery pixels, edge match off worst %d codes (%zu of %zu exact), on worst %d codes, alpha not 1 %zu%s",
                     cases, sharp, sharp_differing, worst_sharp, blended, worst_off, exact_off, total_off, worst_edge, alpha_not_one, "\n");
-                std::printf("opaque focus rim: alpha off the rim's %zu, opaque border texels %zu, ramp texels %zu (%zu clamped), runtime blend vs composed worst %.2f codes%s",
-                    rim_alpha_wrong, border_opaque, rim_ramp, rim_clamped, worst_rim_blend, "\n");
+                // Check 5's reference: 0025's rim (and a hard edge) on the same metric.
+                const double rim_aberration = aberration_error([&](float fx, float fy) {
+                    return fx < 0 || fy < 0 || fx >= kFocus || fy >= kFocus ? 0.f : rim_alpha_0025(fx / kFocus, fy / kFocus);
+                });
+                const double hard_aberration = aberration_error([&](float fx, float fy) {
+                    return fx < 0 || fy < 0 || fx >= kFocus || fy >= kFocus ? 0.f : 1.f;
+                });
+                std::printf("opaque focus ramp: alpha off the ramp's %zu, opaque border texels %zu, ramp texels %zu (%zu clamped; in the composition's own band %zu, %zu clamped), runtime blend vs composed worst %.2f codes (own band, clamped too: %.2f)%s",
+                    rim_alpha_wrong, border_opaque, rim_ramp, rim_clamped, band_ramp, band_clamped, worst_rim_blend, worst_band_blend, "\n");
+                std::printf("opaque focus chromatic aberration (red and blue %.0f texels off green, blend with green's alpha): worst alpha mismatch %.3f (%.1f codes on white); 0025's rim %.3f, a hard edge %.3f%s",
+                    kAberration, worst_aberration, worst_aberration * 255, rim_aberration, hard_aberration, "\n");
                 opaque_ok = worst_off <= 1 && worst_edge <= 2 && alpha_not_one == 0 && worst_sharp <= 1 && sharp > 1000000U && blended > 1000000U &&
-                            rim_alpha_wrong == 0 && border_opaque == 0 && rim_ramp > 10000U && worst_rim_blend <= 2.0 && rim_clamped * 2 < rim_ramp;
+                            rim_alpha_wrong == 0 && border_opaque == 0 && rim_ramp > 10000U && worst_rim_blend <= 2.0 && band_ramp > 10000U &&
+                            worst_band_blend <= 2.0 && worst_aberration <= 0.04 && rim_aberration > 0.3 && hard_aberration > 0.9;
             }
             std::printf(opaque_ok ? "Quad Views opaque focus: the focus layer holds the composed image over its rectangle%s"
                                   : "Quad Views opaque focus FAILED%s", "\n");            two_layer_ok = two_layer_ok && opaque_ok;
