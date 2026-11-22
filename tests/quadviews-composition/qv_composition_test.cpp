@@ -162,6 +162,8 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("submission log formats text before it compares the frame's signature");
             if (body("XrResult xrDestroySwapchain(XrSwapchain swapchain) override {").find("dcsvrForgetSwapchain(swapchain)") == std::string::npos)
                 throw std::runtime_error("submission log: a destroyed swapchain stays in the format map");
+            if (body("bool dcsvrTwoLayerPeripheryPass() const {").find("m_dcsvrThreeViews.Active()") == std::string::npos)
+                throw std::runtime_error("two layers: three views does not ask for the periphery pass");
         }
         std::string projection_old = projection_base;
         replace_once(projection_old, "[branch] if (!focusVisible && !debugFocusView) {", "[branch] if (false) {");
