@@ -131,6 +131,13 @@ window.runWebSmoke = async function() {
     const folds = [...document.querySelectorAll('details.advanced')], foldDiff = listDiff(ADVANCED_FOLDS,folds.map(d => d.id || d.querySelector('.setting')?.id.replace('setting-','') || '(empty fold)'));
     check('Background preparation and per-frame records sit in the one Framegen Diagnostics fold; the deep hold has no control',$('setting-frameGenAsyncArm').closest('details') && $('setting-frameGenAsyncArm').closest('details').querySelector('summary').textContent.startsWith('Diagnostics') && $('setting-frameGenAsyncArm').closest('details') === $('setting-diagnosticFrameRecords').closest('details') && $('setting-showOverlay').closest('details') === $('setting-frameGenAsyncArm').closest('details') && !$('setting-frameGenPipelinedDeepHold') && ui.fields.find(f => f.path === 'frameGenAsyncArm').page === 'framegen' && ui.fields.find(f => f.path === 'diagnosticFrameRecords').page === 'framegen');
     check('Rarely changed settings start folded away'+foldDiff,!foldDiff && folds.every(d => !d.open) &&$('setting-quadViewsLayerDirectory').closest('details') && $('setting-runtimeManifestPath').closest('details') && $('setting-neuralLocalTone').closest('details') && $('setting-diagnosticRecorder').closest('details') && $('setting-engineTimerRefreshUs').closest('details') && $('setting-colorFixSaturation').closest('details') && $('setting-gazeDofSettleMs').closest('details') && !$('setting-colorMode').closest('details'));
+    // Developer options (VrProfile.DeveloperOptions, set by hand in the profile): without it Turbo, the Alternative provider,
+    // DLSS 5's depth and motion guides, the Engine page's Developer options and the prefetch fix's Observe are hidden.
+    { const shown = () => [!$('setting-quadTurbo').hidden, !$('setting-quadViewsLayerDirectory').closest('details').hidden, !$('setting-neuralDepth').closest('.card').hidden,
+        !$('setting-engineDevMode').closest('details').hidden, !$('seg-boostPrefetch').querySelector('[data-value="Observe"]').hidden];
+      const off = shown(); ui.profile.developerOptions = true; ui.invalidate(); const on = shown(); delete ui.profile.developerOptions; ui.invalidate(); const back = shown();
+      check('Developer-only settings are hidden without developerOptions and shown with it',off.every(x => !x) && on.every(x => x) && back.every(x => !x)
+        && [...$('seg-boostPrefetch').querySelectorAll('button')].filter(b => !b.hidden).map(b => b.dataset.value).join() === 'Off,Skip'); }
     // Pimax Play's page exactly as Pimax Play shows it (labels, order, rounding), from the fixture's Quick 33 % or Fine 33/10 · 33/33.
     const fineFixture = window.offlineFixture.pimaxMode === 'Fine', pimaxShows = () => ui.state.pimax.controls.map(x => x.label+' '+x.value).join(', ');
     const expectedControls = fineFixture
@@ -591,7 +598,8 @@ window.runWebSmoke = async function() {
     // launch. The offline host has no DCS: the smoke says when one "runs" (dcsStatus simulate), so the 4 s poll agrees.
     { const route = ui.profile.runtime, features = ui.featureState(ui.profile), title = path => ui.fields.find(f => f.path === path).title.replace(/<[^>]+>/g,'').trim();
       const afterLabel = path => getComputedStyle($('setting-'+path).querySelector('.setting-label'),'::after').content;
-      select('Pimax',{engine:true,quad:true}); $('launch').click(); await waitIdle();
+      // Turbo and Diagnostic hooks are developer options: without developerOptions they load at their safe values.
+      select('Pimax',{engine:true,quad:true}); ui.profile.developerOptions = true; ui.invalidate(); $('launch').click(); await waitIdle();
       check('Live: the applied profile lists its live settings (engine parts, Quad Views sharpening, Diagnostic hooks on) but not settings read at launch',ui.state.launchReady && ui.state.liveFields.includes('engineBeeps') && ui.state.liveFields.includes('engineShadowCache') && ui.state.liveFields.includes('engineDiagnosticHooks')
         && ui.state.liveFields.includes('quadSharpening') && ui.state.liveFields.includes('quadEdgeBlend') && !ui.state.liveFields.includes('foveaWidth') && !ui.state.liveFields.includes('quadTurbo') && !ui.state.liveFields.includes('quadFocusScale'));
       check('Live: nothing changes while DCS is not running (no switch, no tags)',$('liveSwitch').hidden && !document.body.classList.contains('live-mode') && afterLabel('engineBeeps') === 'none');

@@ -55,6 +55,22 @@ public enum PrefetchFix { Off, Observe, Skip }
 public sealed record VrProfile
 {
     public int SchemaVersion { get; init; } = 1;
+    /// <summary>Developer options (0.7): shows the settings that are for working on DCS Control, not for flying: Turbo mode,
+    /// the Alternative Quad Views provider, DLSS 5's Depth convention and Motion scale X/Y, the Observe choice of the terrain
+    /// prefetch fix and the Engine page's Developer options. Not in the interface: set "developerOptions": true in the
+    /// profile by hand. Without it those settings load at their safe values (<see cref="ForPilots"/>), whatever a draft or
+    /// preset says. Written only when on, so a profile without it is what earlier versions read.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public bool DeveloperOptions { get; init; }
+    /// <summary>The profile with the developer-only settings at their safe values (<see cref="DeveloperOptions"/> off):
+    /// Turbo off, the bundled Quad Views, DLSS 5 depth and motion as the game gives them, the terrain prefetch fix Observe
+    /// read as Off, and the Engine page's Developer options at their defaults (Developer mode off, measurement hooks off,
+    /// timer refresh 1000 us). The developer paths are kept: they do nothing without Developer mode.</summary>
+    public VrProfile ForPilots() => DeveloperOptions ? this : this with
+    {
+        QuadTurbo = false, QuadViewsLayerDirectory = null, NeuralDepth = NeuralDepthMode.Game, NeuralMotionScaleX = 1, NeuralMotionScaleY = 1,
+        BoostPrefetch = BoostPrefetch == PrefetchFix.Observe ? PrefetchFix.Off : BoostPrefetch,
+        EngineDevMode = false, EngineDiagnosticHooks = false, EngineTimerRefreshUs = 1000,
+    };
     public string Id { get; init; } = "pimax-baseline";
     public string Name { get; init; } = "Pimax · original configuration";
     public RuntimeKind Runtime { get; init; } = RuntimeKind.Pimax;
@@ -775,7 +791,8 @@ public static class JsonData
                 profile = profile with { FoveaSource = FoveaSource.Profile };
             // Periphery DLSS preset K or M (no longer offered: heavier than E, which the periphery is for) loads as E.
             if (profile.PeripheryDlssPreset is PeripheryDlssPreset.K or PeripheryDlssPreset.M) profile = profile with { PeripheryDlssPreset = PeripheryDlssPreset.E };
-            return MigrateCloseApps(profile, document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.TryGetProperty("freeVram", out _));
+            // Without Developer options the developer-only settings load at their safe values (VrProfile.ForPilots).
+            return MigrateCloseApps(profile.ForPilots(), document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.TryGetProperty("freeVram", out _));
         }
         public override void Write(Utf8JsonWriter writer, VrProfile value, JsonSerializerOptions options) => JsonSerializer.Serialize(writer, value, plain);
 

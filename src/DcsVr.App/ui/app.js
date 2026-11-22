@@ -699,8 +699,8 @@ function buildFields() {
   field(toggles,'quadSaccadeTail','<span class="tag">EXPERIMENTAL</span> Stay ahead until your eyes land',['Keeps the focus area ahead of your eyes until they stop.','Eyes slow down just before they land. The focus area stays ahead of them through that last part of the jump and is back to its normal size as soon as they have landed.'],'toggle',null,p => tracked(p) && p.quadSaccadeLead,'',vdRoute);
   field(toggles,'quadGazeStabilize','Steady focus while looking',['Stops the focus edge shimmering while your eyes rest.','Movements under half a degree are ignored, so eye-tracker noise does not move the focus area. Real eye movements are followed at once.'],'toggle',null,tracked,'',vdRoute);
   field(toggles,'quadLostGazeEase','<span class="tag">EXPERIMENTAL</span> Slide back when tracking is lost',['The focus area slides to the center instead of jumping.','When the eye tracker loses your eyes for more than a moment (a long blink, the headset shifting), the focus area moves to the center over 150 ms. When your eyes are found again it follows them at once.'],'toggle',null,p => tracked(p),'',vdRoute);
-  field(c,'quadTurbo','Turbo mode',['Can help when the CPU limits FPS.','DCS starts the next frame while the headset still shows the previous one. Not with frame generation, which paces the frames itself.'],'toggle',null,p => quad(p) && p.frameGen === 'Off');
-  more = disclosure(c,'Alternative provider','Only to test another Quad Views build.',p => p.quadViews !== 'QuadViewsFoveated' ? 'Not used' : p.quadViewsLayerDirectory ? p.quadViewsLayerDirectory.split(/[\\/]/).filter(Boolean).pop() : 'Bundled');
+  field(c,'quadTurbo','Turbo mode',['Can help when the CPU limits FPS.','DCS starts the next frame while the headset still shows the previous one. Not with frame generation, which paces the frames itself.'],'toggle',null,p => quad(p) && p.frameGen === 'Off','',devHidden);
+  more = disclosure(c,'Alternative provider','Only to test another Quad Views build.',p => p.quadViews !== 'QuadViewsFoveated' ? 'Not used' : p.quadViewsLayerDirectory ? p.quadViewsLayerDirectory.split(/[\\/]/).filter(Boolean).pop() : 'Bundled'); more.dataset.dev = '1';
   field(more,'quadViewsLayerDirectory','Alternative Quad Views provider','Folder of another Quad Views build. Leave empty for the bundled one, which DLSS 5 needs.','path',null,p => p.quadViews === 'QuadViewsFoveated');
   c = card('focusControls','Focus area','Size and detail of the sharp area, in Pimax Play\'s units.');
   segmented(field(c,'foveaSource','Focus area values',['Read from Pimax Play at every launch, or set here.','From Pimax Play: the Quad View values you set there, read again at every launch. With Custom, the focus area is the number Pimax Play shows: 30 is 30% of the view. With a Pimax preset, it is the preset as Pimax renders it, smaller with eye tracking than with a fixed focus. Nothing is written to Pimax Play. Set here: choose them below, in the same units.'],'select',[['PimaxPlay','From Pimax Play (recommended)'],['Profile','Set here']],quad,'',vdRoute),{PimaxPlay:'From Pimax Play',Profile:'Set here'});
@@ -760,7 +760,7 @@ function buildFields() {
   field(c,'neuralColorStrength','Color strength','Color reconstruction strength.','number',[0,2,.01],nr,'×');
   field(c,'neuralTransferStrength','Transfer strength','Transfer response strength.','number',[0,2,.01],nr,'×');
   field(c,'neuralPaperWhiteScale','Paper white scale','White-level multiplier.','number',[.01,8,.01],nr,'×');
-  c = card('neuralRight','Depth & motion guides','Defaults: follow the game, 1×. Change only to fix a known guide issue.');
+  c = card('neuralRight','Depth & motion guides','Defaults: follow the game, 1×. Change only to fix a known guide issue.'); c.dataset.dev = '1';
   segmented(field(c,'neuralDepth','Depth convention','Follow the game or force a convention.','select',[['Game','Follow the game · default'],['Normal','Normal depth'],['Reversed','Reversed depth']],nr),{Game:'Game',Normal:'Normal',Reversed:'Reversed'});
   field(c,'neuralMotionScaleX','Motion scale X','Horizontal motion vector multiplier.','number',[-4,4,.01],nr,'×');
   field(c,'neuralMotionScaleY','Motion scale Y','Vertical motion vector multiplier.','number',[-4,4,.01],nr,'×');
@@ -839,7 +839,7 @@ function buildFields() {
   field(more,'engineModelAllocator','Model data allocator (parallel)','Gives each model thread its own memory, so they stop waiting for each other. About 6% more FPS.','toggle',null,engine);
   field(more,'engineShaderTimeCache','Streaming timer cache','Reads the clock less often while streaming textures. About 5% more FPS.','toggle',null,engine);
   field(more,'engineTaskQueueClock','Task queue clock cache (camera motion)','The same for the task queue at the start of each frame. Helps when the view moves fast. Needs Streaming timer cache.','toggle',null,p => engine(p) && p.engineShaderTimeCache);
-  segmented(field(more,'boostPrefetch','Terrain prefetch fix','Skips repeated terrain memory hints. About 4% less CPU. Observe only counts them.','select',[['Off','Off'],['Observe','Observe · count only'],['Skip','Skip repeats · recommended']],engine),{Off:'Off',Observe:'Observe',Skip:'Skip'});
+  segmented(field(more,'boostPrefetch','Terrain prefetch fix','Skips repeated terrain memory hints. About 4% less CPU.','select',[['Off','Off'],['Observe','Observe · count only'],['Skip','Skip repeats · recommended']],engine),{Off:'Off',Observe:'Observe',Skip:'Skip'});
   field(more,'engineShadowRecorder','Multi-threaded shadows','Prepares the shadows on other CPU cores. Same image. 3 to 5% more FPS; total CPU use rises a little.','toggle',null,engine);
   field(more,'engineShadowInstancing','Shadow caster instancing (exact)','Draws identical shadow casters together. Same image. About 3% more FPS, from about 2.5 minutes after DCS starts.','toggle',null,engine);
   field(more,'engineCostWeights','Culling partition by real cost','Splits the search for visible objects by what each object really costs. About 3% more FPS.','toggle',null,engine);
@@ -864,7 +864,7 @@ function buildFields() {
   more = disclosure(c,'Advanced','How shaders are prepared. The defaults suit most PCs.',p => `${p.engineShaderCachePrewarm ? 'Menu prep on' : 'Menu prep off'} · ${p.engineShaderCompileWorkers ? p.engineShaderCompileWorkers + ' threads' : 'Auto threads'}`);
   field(more,'engineShaderCachePrewarm','Prepare shaders in the main menu',['After a DCS or app update, gets shaders ready while you are still in the menu.','Off: they are prepared during the first minutes of the flight instead.'],'toggle',null,engine);
   segmented(field(more,'engineShaderCompileWorkers','Compile threads',['CPU threads that prepare shaders. Auto suits most PCs.','More finishes sooner but leaves DCS less CPU meanwhile.'],'select',[[0,'Auto · recommended'],[2,'2'],[4,'4'],[6,'6']],engine),{0:'Auto',2:'2',4:'4',6:'6'});
-  more = disclosure(c,'Developer options','For working on the module. Leave as they are for flying.',p => p.engineDevMode ? 'Developer mode on' : 'Off');
+  more = disclosure(c,'Developer options','For working on the module. Leave as they are for flying.',p => p.engineDevMode ? 'Developer mode on' : 'Off'); more.dataset.dev = '1';
   field(more,'engineTimerRefreshUs','Streaming timer refresh','How often the cached time is refreshed. 1000 µs (1 ms) is far below one frame.','number',[250,2000,50],p => engine(p) && p.engineShaderTimeCache,'µs');
   field(more,'engineDevMode','Developer mode',['For working on the module; off for flying.','On: DCS hot-reloads the payload below whenever it changes and takes every engine setting from the settings file below instead of this page. Off for normal flying and for testing a release.'],'toggle',null,engine);
   field(more,'engineDevPayloadPath','Developer payload','A DcsQvCullPayload.dll built elsewhere. While it is missing, the installed copy runs.','path',null,p => engine(p) && p.engineDevMode);
@@ -1218,6 +1218,8 @@ const layerGaze = p => eyeTrackedVr(p) || layerOwnGaze(p);
 const usesPupilShift = p => Boolean(p.pupilShift && layerGaze(p));
 /** Foveated frame generation can run: NVIDIA frame generation, Pimax or Quest 3 VD route, bundled Quad Views (VrProfile.UsesFoveatedFrameGen). */
 const foveatedFgCan = p => Boolean(!p.desktop && p.frameGen === 'Nvidia' && (p.runtime === 'Pimax' || p.runtime === 'VirtualDesktop') && p.quadViews === 'QuadViewsFoveated' && !String(p.quadViewsLayerDirectory ?? '').trim());
+/** The settings for working on DCS Control are hidden unless the profile has developerOptions (VrProfile.DeveloperOptions). */
+const devHidden = p => !p.developerOptions;
 const usesFoveatedFg = p => Boolean(p.frameGenFoveated && foveatedFgCan(p));
 const usesDepthBoost = p => Boolean(p.depthBoost && eyeTrackedVr(p));
 /** Sharp HUD runs (VrProfile.UsesHudSymbology): a VR flight with frame generation (no Depth boost needed since 0.7). */
@@ -1429,6 +1431,10 @@ function updateControls() {
   fields.forEach(f => { const inactive = Boolean(f.condition && !f.condition(profile)); f.element.classList.toggle('inactive',inactive); f.input.disabled = busy || inactive; if (f.range) f.range.disabled = busy || inactive; f.element.hidden = Boolean(f.hide && f.hide(profile)); });
   // A fold that follows a choice (the color mode's fine-tuning) is gone while all its settings are.
   document.querySelectorAll('details[data-hide]').forEach(d => { d.hidden = [...d.querySelectorAll('.setting')].every(e => e.hidden); });
+  // Settings for working on DCS Control (VrProfile.DeveloperOptions, set by hand in the profile): hidden without it, and
+  // the profile then loads them at their safe values. The prefetch fix's Observe choice is one of them.
+  document.querySelectorAll('[data-dev]').forEach(e => { e.hidden = !profile.developerOptions; });
+  { const observe = $('seg-boostPrefetch')?.querySelector('[data-value="Observe"]'); if (observe) observe.hidden = !profile.developerOptions; }
   if ($('colorTuneTip')) $('colorTuneTip').hidden = !profile || profile.desktop || profile.colorMode !== 'Off';
   // With Optimizations only there is no headset panel; the Keys & headset panel page keeps the keys that work on a monitor.
   $('panelControls').hidden = Boolean(profile.desktop);

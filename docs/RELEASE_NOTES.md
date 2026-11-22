@@ -30,6 +30,7 @@
 
 **Fewer options.**
 - **Free unused DLSS memory** is gone from the Engine page: on DCS 2.9.31 it frees nothing. A profile that has it still loads.
+- Settings for working on DCS Control are hidden: Turbo mode, the Alternative Quad Views provider, DLSS 5's Depth convention and Motion scale, the terrain prefetch fix's Observe choice and the Engine page's Developer options. A profile that has one of them changed loads it at its safe value (Turbo off, the bundled Quad Views, Observe as Off, Developer mode off).
 - **Periphery DLSS preset** offers Off, E and F. K and M were heavier than E, which the periphery is for; a profile saved with one uses E.
 
 **Fixes:**

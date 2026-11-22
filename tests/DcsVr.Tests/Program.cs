@@ -131,7 +131,7 @@ Test("Unknown profile schema and invalid numbers rejected", () => { var p = new 
 Test("Profile JSON roundtrip", () => Require(JsonData.Deserialize<VrProfile>(JsonData.Serialize(ProfilePresets.All[1])) == ProfilePresets.All[1]));
 Test("Advanced DLSS 5 tuning reaches the renderer", () =>
 {
-    var profile = ProfilePresets.All[5] with { NeuralIntensity = .6, NeuralLocalTone = 1.3, NeuralLocalStructure = .8, NeuralSkinStructure = 1.1, NeuralAutomaticMask = true, NeuralUiCorrection = true,
+    var profile = ProfilePresets.All[5] with { DeveloperOptions = true, NeuralIntensity = .6, NeuralLocalTone = 1.3, NeuralLocalStructure = .8, NeuralSkinStructure = 1.1, NeuralAutomaticMask = true, NeuralUiCorrection = true,
         NeuralColorStrength = 1.2, NeuralTransferStrength = .9, NeuralPaperWhiteScale = 2, NeuralDepth = NeuralDepthMode.Reversed, NeuralMotionScaleX = -1, NeuralMotionScaleY = 1 };
     var ini = ConfigurationWriters.Cheeky(profile);
     foreach (var expected in new[] { "NrIntensity=0.6", "NrLocalToneStrength=1.3", "NrLocalStructureStrength=0.8", "NrSkinStructureStrength=1.1", "NrAutomaticMask=1", "NrUiCorrection=1", "NrColorStrength=1.2", "NrHdrTransferStrength=0.9", "NrPaperWhiteScale=2", "NrDepthConvention=2", "NrMotionScaleXMultiplier=-1", "NrMotionScaleYMultiplier=1" }) Require(ini.Contains(expected), expected);
@@ -2131,6 +2131,27 @@ Test("Free unused DLSS memory is gone (0.7): an older profile with it loads, and
     foreach (var p in new[] { engine, engine with { Desktop = true }, qv, qv with { PeripheryDlssPreset = PeripheryDlssPreset.E }, qv with { EngineOptimizations = false, DepthBoost = true } })
         Require(!Module(p).Contains("ReleaseIdleSets"), "no ReleaseIdleSets: the module's default (0) applies");
     Require(!Module(engine).Contains("[DLSS]") && Module(qv with { PeripheryDlssPreset = PeripheryDlssPreset.E }).Split('\n').Count(l => l.Trim() == "[DLSS]") == 1, "[DLSS] only with the periphery preset, once");
+});
+Test("Developer options: without developerOptions the developer-only settings load at their safe values; with it they are kept", () =>
+{
+    var dev = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, EngineOptimizations = true, QuadTurbo = true, QuadViewsLayerDirectory = "C:/qv", NeuralDepth = NeuralDepthMode.Reversed,
+        NeuralMotionScaleX = 2, NeuralMotionScaleY = -1, BoostPrefetch = PrefetchFix.Observe, EngineDevMode = true, EngineDiagnosticHooks = true, EngineTimerRefreshUs = 500,
+        EngineDevPayloadPath = "C:/dev/p.dll", EngineDevIniPath = "C:/dev/p.ini" };
+    // A draft of an earlier build (no developerOptions key) with every one of them set.
+    var json = JsonData.Serialize(dev);
+    Require(!json.Contains("developerOptions", StringComparison.OrdinalIgnoreCase), "developerOptions is not written while off");
+    var pilot = JsonData.Deserialize<VrProfile>(json)!;
+    Require(!pilot.QuadTurbo && pilot.QuadViewsLayerDirectory is null && pilot.UsesBundledQuadViews && pilot.NeuralDepth == NeuralDepthMode.Game
+        && pilot.NeuralMotionScaleX == 1 && pilot.NeuralMotionScaleY == 1 && pilot.BoostPrefetch == PrefetchFix.Off && !pilot.EngineDevMode
+        && !pilot.EngineDiagnosticHooks && pilot.EngineTimerRefreshUs == 1000, "every developer-only setting at its safe value");
+    Require(pilot.EngineDevPayloadPath == dev.EngineDevPayloadPath && pilot.EngineDevIniPath == dev.EngineDevIniPath, "the developer paths are kept (inert without Developer mode)");
+    var ini = ConfigurationWriters.DcsQvCull(pilot).ReplaceLineEndings("\n");
+    Require(ConfigurationWriters.QuadViews(pilot).Contains("turbo_mode=0") && ini.Contains("\nMode=off\n") && !ini.Contains("PayloadPath=C:") && ini.Contains("\nDiagnostics=0\n"), "and so written: turbo off, prefetch off, no developer paths, no hooks");
+    Require(JsonData.Deserialize<VrProfile>(json.Replace("\"boostPrefetch\": \"Observe\"", "\"boostPrefetch\": \"Skip\""))!.BoostPrefetch == PrefetchFix.Skip, "Skip stays Skip");
+    // With developerOptions (set by hand) everything is kept, and the key is written.
+    var withDev = dev with { DeveloperOptions = true };
+    var kept = JsonData.Deserialize<VrProfile>(JsonData.Serialize(withDev))!;
+    Require(JsonData.Serialize(withDev).Contains("\"developerOptions\": true") && kept == withDev, "with developerOptions the profile round-trips unchanged");
 });
 Test("Periphery DLSS preset: Off, E and F are offered; a saved K or M loads as E", () =>
 {
@@ -6146,7 +6167,8 @@ Test("E2E: a DCS install removed from its folder drops its entries at Back to st
 // ---- Live mode: settings the engine module and the pupil shift layer re-read in flight, written while DCS runs ----------
 VrProfile LiveDraft() => ProfileValidation.ResolveFeatures(new VrProfile
 {
-    Id = "e2e-live", Name = "Live", QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked, EngineOptimizations = true, DepthBoost = true,
+    // Developer options: these tests switch Diagnostic hooks and Turbo, which load at their safe values without it.
+    DeveloperOptions = true, Id = "e2e-live", Name = "Live", QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked, EngineOptimizations = true, DepthBoost = true,
     ColorMode = ColorMode.Fix, FoveaSource = FoveaSource.Profile, RefreshFromHeadset = false, FpsLimit = FpsLimitMode.Custom, RenderedFpsCap = 45
 });
 // Runs with a DCS "running" from the fixture's install: Live mode never needs DCS closed.
