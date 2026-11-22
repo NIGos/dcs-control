@@ -6112,8 +6112,8 @@ Test("Live: the live table names real profile settings, each a field of the inte
     }
     Require(LiveSettings.Fields.Select(f => f.Name).Distinct().Count() == LiveSettings.Fields.Count, "listed twice");
     // Read only at start, or carried by Quad Views, OFXR, Cheeky or options.lua: never live.
-    foreach (var name in new[] { "engineOptimizations", "engineDevMode", "foveaWidth", "frameGenFactor", "frameGen", "showOverlay", "farDepth", "frameGenHudSymbology", "peripheryDlssPreset", "fpsLimit", "eyeDistance",
-        "quadRoundFocus", "quadTurbo", "quadFocusScale", "peripheralScale", "neuralFocusArea", "neuralWorkingScale", "neuralBeforeUpscaling", "focusDlssPreset", "quadNeuralEdgeFade", "flowPreset" })
+    foreach (var name in new[] { "engineOptimizations", "engineDevMode", "foveaWidth", "frameGenFactor", "frameGen", "showOverlay", "farDepth", "frameGenHudSymbology", "fpsLimit", "eyeDistance",
+        "quadRoundFocus", "quadTurbo", "quadFocusScale", "peripheralScale", "neuralFocusArea", "neuralWorkingScale", "neuralBeforeUpscaling", "quadNeuralEdgeFade", "flowPreset" })
         Require(LiveSettings.Find(name) is null, "must wait for the next launch: " + name);
     // R142: CostWeights and StreamDedupe turn on live. R144 (a current install): AllocSlabs too; before, off only.
     Require(LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Scene.CostWeights", "1", "0") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Texture.StreamDedupe", "1", "0")
@@ -6125,7 +6125,8 @@ Test("Live: the live table names real profile settings, each a field of the inte
         && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "General.Diagnostics", "1", "0", current: false));
     Require(LiveSettings.IsLiveKey(LiveSettings.EngineFile, "ColorFix.Saturation", "1.2", null) && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "VrFx.GazeDof", "1", null)
         && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "General.PerceptionOnly", "0", "1")
-        && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Perception.FarDepthExport", "1", "0") && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "DLSS.PeripheryPreset", "K", null));
+        && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "Perception.FarDepthExport", "1", "0") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "DLSS.PeripheryPreset", "K", "E") && LiveSettings.IsLiveKey(LiveSettings.EngineFile, "DLSS.FocusPreset", "K", "M")
+        && !LiveSettings.IsLiveKey(LiveSettings.EngineFile, "DLSS.IgnoreDriverPreset", null, "1"));
     Require(LiveSettings.IsLiveKey(LiveSettings.PupilFile, "DepthBoost.NearM", "1.2", null) && !LiveSettings.IsLiveKey(LiveSettings.PupilFile, "PupilShift.OpenXrEyeGaze", "0", null)
         && !LiveSettings.IsLiveKey(LiveSettings.PupilFile, "DlssPreset.IgnoreDriverPreset", "1", null) && !LiveSettings.IsLiveKey("ofxr_bridge.ini", "overlay.position", "off", null));
     // The applied profile's live settings: engine parts only with Engine Optimizations, and only the installed components.
@@ -6162,6 +6163,22 @@ Test("Live: a live change is written at once while DCS runs, only to its files, 
     var sync = f.Service.SyncApplied(edited, E2eInventory(f));
     Require(sync.Kind == LaunchSyncKind.Applied && ControlService.SameDraft(f.Service.ReadAppliedProfile()!.Profile, edited), sync.Message);
     Require(f.Service.SyncApplied(edited, E2eInventory(f)).Kind == LaunchSyncKind.Unchanged, "Up to date afterwards");
+});
+Test("Live: another Periphery or Focus DLSS preset is written live; turning the preset on or off waits", () =>
+{
+    var f = E2e("live-dlss"); var draft = LiveDraft() with { PeripheryDlssPreset = PeripheryDlssPreset.E }; var inventory = E2eInventory(f);
+    Require(draft.UsesPeripheryDlssPreset && f.Service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Applied);
+    var journal = f.Service.Originals.ReadCurrent()!;
+    var engine = LiveEntry(f, LiveSettings.EngineFile).Path; var pupil = LiveEntry(f, LiveSettings.PupilFile);
+    Require(LiveSettings.AvailableFields(f.Service.ReadAppliedProfile()!.Profile, journal).Contains("peripheryDlssPreset"), "offered live");
+    // Another letter, and a focus preset: only DcsQvCull.ini changes (the module takes them at its next tick).
+    var letter = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { PeripheryDlssPreset = PeripheryDlssPreset.F, FocusDlssPreset = 11 }, inventory));
+    Require(letter.Applied.Order().SequenceEqual(new[] { "focusDlssPreset", "peripheryDlssPreset" }) && letter.Waiting.Count == 0 && letter.Written.Single() == engine, letter.Message);
+    var ini = IniFile.Parse(IniFile.Decode(File.ReadAllBytes(engine)));
+    Require(ini["DLSS.PeripheryPreset"] == "F" && ini["DLSS.FocusPreset"] == "K" && Hashing.FileSha256(pupil.Path) == pupil.InstalledSha256, "new letters; PupilShift.ini untouched");
+    // Off: the pupil shift layer's [DlssPreset] (instance creation) and the engine's IgnoreDriverPreset change too: waits.
+    var off = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { PeripheryDlssPreset = PeripheryDlssPreset.Off }, inventory));
+    Require(off.Written.Count == 0 && off.Waiting.Contains("peripheryDlssPreset") && !off.Applied.Contains("peripheryDlssPreset"), off.Message);
 });
 Test("Live: a setting read at launch writes nothing and waits; a live one in the same edit still applies", () =>
 {

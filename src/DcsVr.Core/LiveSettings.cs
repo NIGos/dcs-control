@@ -47,6 +47,10 @@ public static class LiveSettings
         E("enginePartitionBoost"), E("engineTextureDedupe"), E("engineEffectBufferSkip"), E("enginePlainCounter"), E("engineFrameHeap"),
         E("engineStateFilter"), E("engineBeeps"), E("engineTimerRefreshUs"), E("engineDevPayloadPath"), E("engineDevIniPath"), E("engineToggleKey"),
         E("engineDiagnosticHooks"), E("engineFastShaderPaths"), E("engineWaterSkip"), E("engineIdleEffectSkip"),
+        // R122 per-view DLSS presets: the module takes another letter at its next tick, and DCS's next mission load creates
+        // its DLSS with it (DCS never recreates DLSS in a mission). Turning the preset on or off also changes the pupil shift
+        // layer's [DlssPreset] (read at instance creation), and the focus preset also Cheeky's CenterPreset: those wait.
+        E("peripheryDlssPreset"), E("focusDlssPreset"),
         V("colorMode"), V("panelGamut"), V("colorModeKey"),
         V("colorFixExposureEv"), V("colorFixNightEv"), V("colorFixSaturation"), V("colorFixWarmth"), V("colorFixAdaptBright"), V("colorFixAdaptDark"),
         V("colorEnhancedExposureEv"), V("colorEnhancedNightEv"), V("colorEnhancedSaturation"), V("colorEnhancedWarmth"), V("colorEnhancedAdaptBright"), V("colorEnhancedAdaptDark"),
@@ -115,7 +119,7 @@ public static class LiveSettings
         "Texture.StreamDedupe", "Effects.SkipSameConstantBuffer", "Prefetch.Mode",
         "Color.Mode", "Color.PanelGamut", "Color.ModeKey", "ColorFix.*", "ColorEnhanced.*", "VrFx.*",
         "Perception.FixationDepth", "Perception.CockpitTrueIpd", "Perception.CockpitTrueIpdOwnship",
-        "DLSS.ReleaseIdleSets", "Dev.PayloadPath", "Dev.IniPath",
+        "DLSS.ReleaseIdleSets", "DLSS.PeripheryPreset", "DLSS.FocusPreset", "Dev.PayloadPath", "Dev.IniPath",
         // 0.7: water no-submit (hot reload), early shaders (worker tick). [Views] ThreeViews is parked: the app no longer writes it.
         "Water.SkipHiddenWater", "D3D.EarlyShaders",
         // [D3D] ChainFast / ShaderFast: re-applied by the worker every second (worker.inc).

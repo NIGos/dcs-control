@@ -147,6 +147,7 @@ void NewGeneration() {
   g_qvfrLogTime = 0;
   g_creates = 0, g_applied = 0, g_hiddenReads = 0, g_getSettingCalls = 0;
   g_waitLogged = false, g_warned = false, g_offLogged = true, g_badKeyLogged = false;
+  g_loggedPeriph = g_loggedFocus = 0;
   g_testCreateTarget = nullptr, g_testGetSettingTarget = nullptr;
   g_testNgxUp = false, g_testAnyCaller = false, g_testNoQvfrModule = false;
   g_testQvfrLog.clear();
@@ -383,6 +384,24 @@ void Hooks() {
   DcsFeature(p, 604, 596, 1040, 1028);
   create(&ctxDummy, kFeatureSuperSampling, &p, &h);
   Check(killOk && g_seenHint == 5, "R122 kill switch: DCS's hint while on, the preset again when off");
+
+  // Live mode: another letter while on is taken at the next tick (the next creation gets it), with one log line; the
+  // same keys again log nothing.
+  StartReportCapture();
+  Tick(6, 11, false, false);
+  Tick(6, 11, false, false);
+  const std::string liveLog = StopReportCapture();
+  DcsFeature(p, 604, 596, 1040, 1028);
+  create(&ctxDummy, kFeatureSuperSampling, &p, &h);
+  const bool livePeriph = g_seenHint == 6;
+  DcsFeature(p, 1176, 1164, 2028, 2004);
+  create(&ctxDummy, kFeatureSuperSampling, &p, &h);
+  const std::string liveLine = "dlss views: changed live: periphery preset F, focus K (applies at the next mission load)";
+  const size_t liveAt = liveLog.find(liveLine);
+  Check(livePeriph && g_seenHint == 11 && liveAt != std::string::npos &&
+            liveLog.find("changed live", liveAt + liveLine.size()) == std::string::npos,
+        "R122 live change: F on the periphery and K on the focus from the next creation, one log line");
+  Tick(5, 0, false, false);
 
   // A second payload generation (hot reload): the patch is found again and reused, not stacked.
   uint8_t patched[16];

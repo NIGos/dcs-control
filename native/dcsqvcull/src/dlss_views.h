@@ -550,6 +550,8 @@ std::atomic<uint64_t> g_qvfrLogTime{0};
 std::atomic<uint32_t> g_creates{0}, g_applied{0}, g_hiddenReads{0}, g_getSettingCalls{0};
 std::mutex g_sizeMutex;
 bool g_waitLogged = false, g_warned = false, g_offLogged = true, g_badKeyLogged = false;
+// The presets the last log line named: another letter while on (DCS Control's Live mode) gets its own line.
+int g_loggedPeriph = 0, g_loggedFocus = 0;
 // Tests only (null / empty / false in the payload): stand-ins for the modules, the caller check and QVFR's log.
 uint8_t* g_testCreateTarget = nullptr;
 uint8_t* g_testGetSettingTarget = nullptr;
@@ -2312,7 +2314,11 @@ void Tick(int periph, int focus, bool ignore, bool engineOff, bool instrument = 
     Log("dlss views: on: periphery preset %s, focus %s, IgnoreDriverPreset=%d (applies at the next mission load)",
         PresetName(static_cast<uint32_t>(periph)), focus ? PresetName(static_cast<uint32_t>(focus)) : "unchanged",
         ignore ? 1 : 0);
+  } else if (periph != g_loggedPeriph || focus != g_loggedFocus) {
+    Log("dlss views: changed live: periphery preset %s, focus %s (applies at the next mission load)",
+        PresetName(static_cast<uint32_t>(periph)), focus ? PresetName(static_cast<uint32_t>(focus)) : "unchanged");
   }
+  g_loggedPeriph = periph, g_loggedFocus = focus;
   if (g_drsState.load() == 0) ReadDrs();
   if (ignore && g_getSettingState.load() == 0 && g_drsState.load() == 1) TryInstallGetSetting();  // before NGX, or never
   if (g_createState.load() == 0) TryInstallCreate();
