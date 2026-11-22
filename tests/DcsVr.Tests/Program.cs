@@ -3206,7 +3206,8 @@ Test("Other limiters and motion smoothing stay manual checks", () =>
         Require(fov.FrameGenFocusLayer == FocusLayerMode.Standard && Quad(FocusLayerMode.Standard) == standard && standard.Contains("\ndcsvr_two_layers=2\ndcsvr_saccade_widening=") && !standard.Contains("dcsvr_two_layers_alpha"), "Standard: settings.cfg as before");
         Require(Quad(FocusLayerMode.Premultiplied) == standard.Replace("\ndcsvr_two_layers=2\n", "\ndcsvr_two_layers=2\ndcsvr_two_layers_alpha=1\n")
             && Quad(FocusLayerMode.PremultipliedSrgb) == standard.Replace("\ndcsvr_two_layers=2\n", "\ndcsvr_two_layers=2\ndcsvr_two_layers_alpha=2\n")
-            && Quad(FocusLayerMode.PerEye) == standard.Replace("\ndcsvr_two_layers=2\n", "\ndcsvr_two_layers=1\n"), "each variant changes its own line");
+            && Quad(FocusLayerMode.PerEye) == standard.Replace("\ndcsvr_two_layers=2\n", "\ndcsvr_two_layers=1\n")
+            && Quad(FocusLayerMode.OpaqueFocus) == standard.Replace("\ndcsvr_two_layers=2\n", "\ndcsvr_two_layers=2\ndcsvr_two_layers_alpha=3\n"), "each variant changes its own line");
         foreach (var m in Enum.GetValues<FocusLayerMode>())
             Require(ConfigurationWriters.QuadViews(fov with { FrameGenFoveated = false, FrameGenFocusLayer = m }) == ConfigurationWriters.QuadViews(fov with { FrameGenFoveated = false })
                 && ConfigurationWriters.Ofxr(fov with { FrameGenFocusLayer = m }) == fovOfxr, "the choice writes nothing without foveated frame generation, and nothing for OFXR");

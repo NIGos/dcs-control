@@ -1,0 +1,231 @@
+Opaque focus (dcsvr_two_layers_alpha=3 with dcsvr_two_layers; native/quadviews/dcsvr_twolayer_ps.hlsl and
+dcsvr_opaque_focus.h): the runtime is never asked to alpha-blend. The focus layer goes out with no blend flags (neither
+BLEND_TEXTURE_SOURCE_ALPHA nor UNPREMULTIPLIED_ALPHA), its view cut to the rectangle of the focus image where the
+composition's fade is exactly 1 (imageRect and a field of view of that rectangle; the swapchain and the pass stay the
+same, the pass writes alpha 1). The periphery always gets its own output pass, which draws the rest of the fade the way
+the composition does at the periphery's pixels: the focus image (t3, the view the focus pass reads) over the periphery
+with the composition's weights, edge match tent (k from the CPU, now computed before both passes) and Far depth
+displacement. The two layers shown together give the composed image, at the focus resolution inside the rectangle
+(tests/quadviews-composition). The rectangle depends only on the focus image's size, shape and smoothing area, so it
+stays the same from frame to frame. Read at start only, one log line; 0, 1 and 2 are as before, byte for byte.
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 0000000..0000000 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -48,6 +48,7 @@
+ #include <dcsvr_depthwarp_cs.h>
+ #include <dcsvr_coverage_cs.h>
+ #include <dcsvr_twolayer_ps.h>
++#include "dcsvr_opaque_focus.h"
+ 
+ namespace openxr_api_layer {
+ 
+@@ -1879,6 +1880,20 @@ namespace openxr_api_layer {
+                                     dcsvrFocusOutView.subImage.imageArrayIndex = m_dcsvrEyeOut[1]->arraySize > 1 ? viewIndex : 0;
+                                     dcsvrFocusOutView.subImage.imageRect.offset = {0, 0};
+                                     dcsvrFocusOutView.subImage.imageRect.extent = m_dcsvrEyeOut[1]->extent;
++                                    if (m_dcsvrTwoLayersAlpha == 3) {
++                                        // DCSVR opaque focus: only the rectangle where the fade is 1, with its own
++                                        // field of view (dcsvr_opaque_focus.h); the periphery pass draws the fade.
++                                        const XrExtent2Di extent = m_dcsvrEyeOut[1]->extent;
++                                        const dcsvr::OpaqueFocusRect crop =
++                                            dcsvr::OpaqueFocusCrop(m_focusViewShape, m_smoothenFocusViewEdges, extent.width, extent.height);
++                                        const float fov[4] = {focusView.fov.angleLeft, focusView.fov.angleRight,
++                                                              focusView.fov.angleUp, focusView.fov.angleDown};
++                                        float cropped[4];
++                                        dcsvr::OpaqueFocusFov(fov, crop, extent.width, extent.height, cropped);
++                                        dcsvrFocusOutView.fov = {cropped[0], cropped[1], cropped[2], cropped[3]};
++                                        dcsvrFocusOutView.subImage.imageRect.offset = {crop.x0, crop.y0};
++                                        dcsvrFocusOutView.subImage.imageRect.extent = {crop.x1 - crop.x0, crop.y1 - crop.y0};
++                                    }
+                                 } else {
+                                 patchedView.subImage.swapchain = swapchainForStereoView.fullFovSwapchain[viewIndex];
+                                 patchedView.subImage.imageArrayIndex = 0;
+@@ -1951,6 +1966,11 @@ namespace openxr_api_layer {
+                                 } else {
+                                     projectionAllocator.back().layerFlags &= ~XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+                                 }
++                                if (m_dcsvrTwoLayersAlpha == 3) {
++                                    // DCSVR opaque focus: no blending in the runtime at all.
++                                    projectionAllocator.back().layerFlags &= ~(XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
++                                                                               XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT);
++                                }
+                                 projectionAllocator.back().views = projectionViewAllocator.back().data();
+                                 projectionAllocator.back().viewCount = xr::StereoView::Count;
+                                 layers.push_back(
+@@ -3864,9 +3884,11 @@ namespace openxr_api_layer {
+         // DCSVR two layers: whether the settings ask for our own periphery output pass: a pass that changes the
+         // periphery (stability, contrast, Far depth's displacement inside the focus rectangle) or the focus debug view
+         // (the periphery black). By settings only (never by what a frame's passes did), so the swapchain the periphery
+-        // layer names does not change from frame to frame.
++        // layer names does not change from frame to frame. Opaque focus (dcsvr_two_layers_alpha 3) always: that pass
++        // draws the fade.
+         bool dcsvrTwoLayerPeripheryPass() const {
+-            return m_dcsvrTemporal.enabled || m_dcsvrPeripherySharpen > 0.f || m_dcsvrFarDepth.enabled || m_debugFocusView;
++            return m_dcsvrTemporal.enabled || m_dcsvrPeripherySharpen > 0.f || m_dcsvrFarDepth.enabled || m_debugFocusView ||
++                   m_dcsvrTwoLayersAlpha == 3;
+         }
+ 
+         // DCSVR two layers: the colour the passes read from this swapchain is linear (an sRGB or a float format).
+@@ -4076,7 +4098,8 @@ namespace openxr_api_layer {
+                                ID3D11ShaderResourceView* field,
+                                const DcsvrTwoLayerConstants& constants,
+                                const D3D11_RECT* marker,
+-                               const float* markerColor) {
++                               const float* markerColor,
++                               ID3D11ShaderResourceView* bandFocus = nullptr) {
+             if (!out.acquired) {
+                 CHECK_XRCMD(OpenXrApi::xrAcquireSwapchainImage(out.handle, nullptr, &out.acquiredIndex));
+                 XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+@@ -4128,8 +4151,9 @@ namespace openxr_api_layer {
+             m_renderContext->VSSetShader(m_projectionVS.Get(), nullptr, 0);
+             m_renderContext->PSSetConstantBuffers(0, 1, m_dcsvrTwoLayerConstants.GetAddressOf());
+             m_renderContext->PSSetSamplers(0, 1, m_linearClampSampler.GetAddressOf());
+-            ID3D11ShaderResourceView* srvs[] = {source, plainFocus, field};
+-            m_renderContext->PSSetShaderResources(0, 3, srvs);
++            // t3: the focus image for the opaque focus's fade in the periphery pass (none otherwise).
++            ID3D11ShaderResourceView* srvs[] = {source, plainFocus, field, bandFocus};
++            m_renderContext->PSSetShaderResources(0, 4, srvs);
+             m_renderContext->PSSetShader(m_dcsvrTwoLayerPS.Get(), nullptr, 0);
+             m_renderContext->Draw(3, 0);
+             if (marker) {
+@@ -4137,8 +4161,8 @@ namespace openxr_api_layer {
+             }
+             // Neither the sources (the next eye's passes write some of them, the next frame's FieldMain the field) nor
+             // the target stay bound.
+-            ID3D11ShaderResourceView* none[] = {nullptr, nullptr, nullptr};
+-            m_renderContext->PSSetShaderResources(0, 3, none);
++            ID3D11ShaderResourceView* none[] = {nullptr, nullptr, nullptr, nullptr};
++            m_renderContext->PSSetShaderResources(0, 4, none);
+             m_renderContext->OMSetRenderTargets(0, nullptr, nullptr);
+             if (slice + 1 >= out.arraySize) {
+                 out.acquired = false;
+@@ -4232,6 +4256,39 @@ namespace openxr_api_layer {
+             const float focusEncoded = linearSource ? 0.7353569f : 0.5f;
+             const float focusMarkerColor[] = {focusEncoded, 0, focusEncoded, 1};
+ 
++            // Opaque focus (dcsvr_two_layers_alpha 3): the periphery pass draws the fade, with the same edge match.
++            const bool opaqueFocus = m_dcsvrTwoLayersAlpha == 3;
++            float edgeShare = 0.f, edgeK = 0.f;
++            // DCSVR edge match: k, one periphery texel in focus texels, as the composition takes it from the
++            // derivatives of both views. Both views look the same way, so per axis it is the focus texels per tangent
++            // over the periphery's (source texture sizes, as the composition's GetDimensions): k = sqrt(kx * ky).
++            if (m_dcsvrEdgeMatch > 0.f && !m_debugFocusView && peripherySource && focusSource) {
++                const auto size = [](ID3D11ShaderResourceView* srv, float& width, float& height) {
++                    ComPtr<ID3D11Resource> resource;
++                    srv->GetResource(resource.ReleaseAndGetAddressOf());
++                    ComPtr<ID3D11Texture2D> texture;
++                    D3D11_TEXTURE2D_DESC desc{};
++                    if (FAILED(resource.As(&texture))) {
++                        return false;
++                    }
++                    texture->GetDesc(&desc);
++                    width = (float)desc.Width;
++                    height = (float)desc.Height;
++                    return width > 0 && height > 0;
++                };
++                float peripheryWidth, peripheryHeight, focusWidth, focusHeight;
++                const float eyeAcross = std::tan(eyeFov.angleRight) - std::tan(eyeFov.angleLeft);
++                const float eyeDown = std::tan(eyeFov.angleUp) - std::tan(eyeFov.angleDown);
++                const float focusAcross = std::tan(focusView.fov.angleRight) - std::tan(focusView.fov.angleLeft);
++                const float focusDown = std::tan(focusView.fov.angleUp) - std::tan(focusView.fov.angleDown);
++                if (size(peripherySource, peripheryWidth, peripheryHeight) && size(focusSource, focusWidth, focusHeight) &&
++                    focusAcross > 0.f && focusDown > 0.f) {
++                    const float kx = focusWidth / peripheryWidth * eyeAcross / focusAcross;
++                    const float ky = focusHeight / peripheryHeight * eyeDown / focusDown;
++                    edgeShare = m_dcsvrEdgeMatch;
++                    edgeK = std::min(16.f, std::sqrt(std::abs(kx * ky)));
++                }
++            }
+             if (peripheryOut.handle != XR_NULL_HANDLE) {
+                 // The pixel's focus projection, as the composition's vertex shader gets it.
+                 ProjectionVSConstants projection;
+@@ -4255,8 +4312,16 @@ namespace openxr_api_layer {
+                 }
+                 DcsvrTwoLayerConstants periphery = shared;
+                 periphery.dcsvrDebug[0] = m_debugFocusView ? 1.f : 0.f;
++                if (opaqueFocus) {
++                    // The composition's fade over the periphery, from the focus image the focus pass reads (t3).
++                    periphery.smoothingArea = m_smoothenFocusViewEdges;
++                    periphery.focusViewShape = m_focusViewShape;
++                    periphery.dcsvrEdge[0] = edgeShare;
++                    periphery.dcsvrEdge[1] = edgeK;
++                    periphery.dcsvrEdge[3] = 1.f;
++                }
+                 dcsvrTwoLayerDraw(peripheryOut, peripheryOut.arraySize > 1 ? viewIndex : 0, peripherySource, nullptr, field, periphery,
+-                                  markPeriphery ? &peripheryMarker : nullptr, peripheryMarkerColor);
++                                  markPeriphery ? &peripheryMarker : nullptr, peripheryMarkerColor, opaqueFocus ? focusSource : nullptr);
+             }
+             if (focusOut.handle != XR_NULL_HANDLE) {
+                 DcsvrTwoLayerConstants focus = shared;
+@@ -4268,39 +4333,16 @@ namespace openxr_api_layer {
+                 // DCSVR two-layer alpha: the focus alpha convention (0 unpremultiplied, 1 premultiplied, 2 the same
+                 // bytes in an sRGB swapchain).
+                 focus.dcsvrEdge[2] = (float)m_dcsvrTwoLayersAlpha;
++                if (opaqueFocus) {
++                    // Opaque focus: alpha 1, the colour as with 0.
++                    focus.dcsvrEdge[2] = 0.f;
++                    focus.dcsvrEdge[3] = 1.f;
++                }
+                 // Sharpened: outside the rounded shape the sharpening skips tiles, the plain image fills them.
+                 const bool fill = plainFocusSource && m_focusViewShape >= 1.f && !m_debugFocusView;
+                 focus.dcsvrDebug[1] = fill ? 1.f : 0.f;
+-                // DCSVR edge match: k, one periphery texel in focus texels, as the composition takes it from the
+-                // derivatives of both views. Both views look the same way, so per axis it is the focus texels per tangent
+-                // over the periphery's (source texture sizes, as the composition's GetDimensions): k = sqrt(kx * ky).
+-                if (m_dcsvrEdgeMatch > 0.f && !m_debugFocusView && peripherySource && focusSource) {
+-                    const auto size = [](ID3D11ShaderResourceView* srv, float& width, float& height) {
+-                        ComPtr<ID3D11Resource> resource;
+-                        srv->GetResource(resource.ReleaseAndGetAddressOf());
+-                        ComPtr<ID3D11Texture2D> texture;
+-                        D3D11_TEXTURE2D_DESC desc{};
+-                        if (FAILED(resource.As(&texture))) {
+-                            return false;
+-                        }
+-                        texture->GetDesc(&desc);
+-                        width = (float)desc.Width;
+-                        height = (float)desc.Height;
+-                        return width > 0 && height > 0;
+-                    };
+-                    float peripheryWidth, peripheryHeight, focusWidth, focusHeight;
+-                    const float eyeAcross = std::tan(eyeFov.angleRight) - std::tan(eyeFov.angleLeft);
+-                    const float eyeDown = std::tan(eyeFov.angleUp) - std::tan(eyeFov.angleDown);
+-                    const float focusAcross = std::tan(focusView.fov.angleRight) - std::tan(focusView.fov.angleLeft);
+-                    const float focusDown = std::tan(focusView.fov.angleUp) - std::tan(focusView.fov.angleDown);
+-                    if (size(peripherySource, peripheryWidth, peripheryHeight) && size(focusSource, focusWidth, focusHeight) &&
+-                        focusAcross > 0.f && focusDown > 0.f) {
+-                        const float kx = focusWidth / peripheryWidth * eyeAcross / focusAcross;
+-                        const float ky = focusHeight / peripheryHeight * eyeDown / focusDown;
+-                        focus.dcsvrEdge[0] = m_dcsvrEdgeMatch;
+-                        focus.dcsvrEdge[1] = std::min(16.f, std::sqrt(std::abs(kx * ky)));
+-                    }
+-                }
++                focus.dcsvrEdge[0] = edgeShare;
++                focus.dcsvrEdge[1] = edgeK;
+                 dcsvrTwoLayerDraw(focusOut, focusOut.arraySize > 1 ? viewIndex : 0, focusSource, fill ? plainFocusSource : nullptr, field, focus,
+                                   markFocus ? &focusMarker : nullptr, focusMarkerColor);
+             }
+@@ -4809,9 +4851,10 @@ namespace openxr_api_layer {
+                         parsed = true;
+                     } else if (name == "dcsvr_two_layers_alpha") {
+                         const int dcsvrAlpha = std::stoi(value);
+-                        m_dcsvrTwoLayersAlpha = dcsvrAlpha == 1 || dcsvrAlpha == 2 ? dcsvrAlpha : 0;
++                        m_dcsvrTwoLayersAlpha = dcsvrAlpha >= 1 && dcsvrAlpha <= 3 ? dcsvrAlpha : 0;
+                         Log(fmt::format("DCSVR two layers: focus alpha {}\n",
+-                                        m_dcsvrTwoLayersAlpha == 2   ? "premultiplied, sRGB swapchain"
++                                        m_dcsvrTwoLayersAlpha == 3   ? "none, opaque focus (the fade drawn in the periphery)"
++                                        : m_dcsvrTwoLayersAlpha == 2 ? "premultiplied, sRGB swapchain"
+                                         : m_dcsvrTwoLayersAlpha == 1 ? "premultiplied"
+                                                                      : "unpremultiplied"));
+                         parsed = true;
+@@ -5104,7 +5147,9 @@ namespace openxr_api_layer {
+         int m_dcsvrTwoLayers{0};
+         // DCSVR two layers (dcsvr_two_layers_alpha): the focus layer's alpha convention. 0 colour not premultiplied
+         // (SOURCE_ALPHA | UNPREMULTIPLIED, UNORM swapchain); 1 premultiplied on the encoded values (SOURCE_ALPHA alone,
+-        // UNORM); 2 the same bytes in an R8G8B8A8_UNORM_SRGB swapchain. Read at start only (it picks the swapchain).
++        // UNORM); 2 the same bytes in an R8G8B8A8_UNORM_SRGB swapchain; 3 opaque focus (0024: no blend flags, the layer
++        // cut to where the fade is 1, the fade drawn by the periphery pass, UNORM). Read at start only (it picks the
++        // swapchain).
+         int m_dcsvrTwoLayersAlpha{0};
+         // The outputs of the eye being drawn ([0] periphery, [1] focus), set by xrEndFrame under the swapchains' lock.
+         DcsvrOutSwapchain* m_dcsvrEyeOut[2]{};

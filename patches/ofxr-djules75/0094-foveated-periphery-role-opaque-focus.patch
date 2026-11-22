@@ -1,0 +1,271 @@
+Foveated layers, opaque focus (Quad Views 0024, dcsvr_two_layers_alpha=3): the focus layer comes with no blend flags,
+so 0089's rule (the one projection layer that does not blend is the periphery) names no layer and the widest field of
+view, which an untracked first frame gets wrong, would decide. With every projection layer of the frame opaque the layer
+order decides instead: Quad Views submits each periphery layer first and its focus layer directly after it, so the
+first projection layer is the periphery. The flight log's role records (foveated_mode result=3) carry b bit 9 (512)
+when the order named the role. New test xrfg_layer_two_layers_deep_hold_roles_opaque: 0089's roles test (unfilled,
+wide first focus field of view) with the focus layer opaque and cut to a rectangle (imageRect 2,2 4x4 of 8x8), the
+rectangle checked on every frame the fake runtime gets (its focus alpha check is left out: the runtime ignores an opaque layer's alpha). A frame with a blending focus layer is decided as before.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d61161b..9af218c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1403,6 +1403,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+                 "-DROLES=1"
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_two_layers.cmake")
+         set_tests_properties(xrfg_layer_two_layers_deep_hold_roles PROPERTIES TIMEOUT 180)
++        # DCS Control (0094): the same with Quad Views' opaque focus: no layer
++        # blends, the focus layer cut to a rectangle; the layer order names the
++        # periphery (tests/layer_two_layers.cmake, OPAQUE).
++        add_test(
++            NAME xrfg_layer_two_layers_deep_hold_roles_opaque
++            COMMAND "${CMAKE_COMMAND}"
++                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                "-DBASE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_shallow_pipeline.ini"
++                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/xrfg_layer_two_layers_deep_hold_roles_opaque"
++                "-DMODE=dcs"
++                "-DTWO=1"
++                "-DROLES=1"
++                "-DOPAQUE=1"
++                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_two_layers.cmake")
++        set_tests_properties(xrfg_layer_two_layers_deep_hold_roles_opaque PROPERTIES TIMEOUT 180)
+         # is heavy, light, then heavy again; tests/layer_release_offset.cmake)
+         # in the two-layer shape, where the tree has that patch: the flight
+         # that showed the stale offset was a two-layer one.
+@@ -2004,6 +2020,7 @@ set(XRFG_DCS_ALONE_ONLY_TESTS
+         xrfg_layer_two_layers_deep_hold_auto
+         xrfg_layer_two_layers_deep_hold_arming_single
+         xrfg_layer_two_layers_deep_hold_roles
++        xrfg_layer_two_layers_deep_hold_roles_opaque
+         xrfg_layer_two_layers_deep_hold_release_offset
+         xrfg_layer_adaptive_lazy_slot
+         xrfg_layer_adaptive_frame_gen_cadence_off
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+index b6548ea..fe2d3db 100644
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -870,7 +870,9 @@ enum class BridgeFlightOperation : std::uint32_t {
+     //     `foveated_periphery_flow_scale`, the small-sprite cursor detection),
+     //     0 the focus layer's, plus 256 when the widest field of view alone
+     //     would have named another layer in that frame (the focus views came
+-    //     unfilled: a headset not tracked at the session's first frame);
++    //     unfilled: a headset not tracked at the session's first frame), plus
++    //     512 (0094) when every projection layer was opaque and the layer
++    //     order named the periphery (Quad Views' opaque focus);
+     //     c= the swapchain's width << 32 | height.
+     foveated_mode,
+ };
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 552e6e5..d865df5 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -5485,6 +5485,7 @@ void retire_async_arm(const std::shared_ptr<SwapchainState>& state) noexcept {
+ // Foveated layers: defined with prepare_projection_frame, below.
+ [[nodiscard]] std::size_t foveated_periphery_layer(const ProjectionSnapshot& snapshot) noexcept;
+ [[nodiscard]] std::size_t foveated_widest_layer(const ProjectionSnapshot& snapshot) noexcept; // 0089
++[[nodiscard]] bool foveated_periphery_by_order(const ProjectionSnapshot& snapshot) noexcept; // 0094
+ 
+ // Foveated layers: which of the frame's swapchains carry the periphery layer,
+ // noted on each swapchain that is still to be armed (the role picks the
+@@ -5517,8 +5518,9 @@ void note_foveated_periphery_swapchains(
+                 // armed with, once per swapchain and role (foveated_mode
+                 // result=3: a= the swapchain, b= 1 the periphery layer's, 0
+                 // the focus layer's, plus 256 when the widest field of view
+-                // alone would have named another layer in this frame, c= the
+-                // swapchain's width << 32 | height).
++                // alone would have named another layer in this frame, plus 512
++                // (0094) when the layer order named it (every layer opaque), c=
++                // the swapchain's width << 32 | height).
+                 const std::uint32_t logged = periphery ? 1U : 2U;
+                 if (swapchain->foveated_role_logged != logged) {
+                     swapchain->foveated_role_logged = logged;
+@@ -5527,7 +5529,8 @@ void note_foveated_periphery_swapchains(
+                         3,
+                         handle_value(mapping.application_swapchain),
+                         (periphery ? 1U : 0U) |
+-                            (foveated_widest_layer(snapshot) != periphery_layer ? 256U : 0U),
++                            (foveated_widest_layer(snapshot) != periphery_layer ? 256U : 0U) |
++                            (foveated_periphery_by_order(snapshot) ? 512U : 0U), // 0094: by layer order
+                         (static_cast<std::uint64_t>(swapchain->create_info.width) << 32U) |
+                             swapchain->create_info.height);
+                 }
+@@ -16177,9 +16180,33 @@ void drop_idle_cockpit_mask(SessionState& session) noexcept {
+     if (snapshot.layers.size() >= 2 && opaque_count == 1) {
+         return opaque;
+     }
++    // DCS Control (0094): every projection layer opaque (Quad Views'
++    // dcsvr_two_layers_alpha 3, "Opaque focus": the focus layer has no blend
++    // flags, its fade is drawn into the periphery layer). The flag then names
++    // no layer and the fields of view are not to be trusted on the first
++    // frame (above), so the order decides: Quad Views submits each periphery
++    // layer first and its focus layer directly after it, so the first
++    // projection layer is the periphery.
++    if (snapshot.layers.size() >= 2 && opaque_count == snapshot.layers.size()) {
++        return 0;
++    }
+     return foveated_widest_layer(snapshot);
+ }
+ 
++// DCS Control (0094): whether foveated_periphery_layer decided by the layer
++// order (every projection layer opaque), for the flight log.
++[[nodiscard]] bool foveated_periphery_by_order(const ProjectionSnapshot& snapshot) noexcept {
++    if (snapshot.layers.size() < 2) {
++        return false;
++    }
++    for (const auto& layer : snapshot.layers) {
++        if ((layer.layer_flags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) != 0) {
++            return false;
++        }
++    }
++    return true;
++}
++
+ // DCS Control (0092): whether `mapping`'s swapchain belongs to a focus layer
+ // (not `periphery_layer`) whose colour is premultiplied by its alpha: the
+ // layer blends by its alpha (SOURCE_ALPHA) and does not say its colour is
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+index edd2337..c900206 100644
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -182,6 +182,13 @@ bool g_two_layer_single = false;
+ bool g_two_layer_unfilled_focus = false;
+ constexpr float kTwoLayerUnfilledAngle = 1.4F;
+ std::atomic<std::uint32_t> g_two_layer_unfilled_submitted{0};
++// DCS Control (0094): XRFG_TEST_TWO_LAYER_OPAQUE_FOCUS=1, the focus layer as
++// Quad Views' opaque focus submits it: no blend flags, its views cut to the
++// centre of the focus image (imageRect 2,2 4x4 of the 8x8 swapchain). With
++// ROLES the periphery role must still go to the periphery swapchain (the
++// blend flag names no layer: the layer order does); the fake runtime checks
++// the flags and the rectangle of every frame.
++bool g_two_layer_opaque_focus = false;
+ std::atomic<int> g_two_layer_creating{0};
+ std::atomic<std::uint32_t> g_two_layer_single_submitted{0};
+ std::atomic<std::uint32_t> g_two_layer_single_seen{0};
+@@ -3206,7 +3213,8 @@ void two_layer_check(const XrFrameEndInfo* end_info) {
+         XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+     if (count != 2 || layers[0]->viewCount != 2 || layers[1]->viewCount != 2 ||
+         layers[0]->views == nullptr || layers[1]->views == nullptr ||
+-        layers[0]->layerFlags != 0 || layers[1]->layerFlags != kFocusFlags) {
++        layers[0]->layerFlags != 0 ||
++        layers[1]->layerFlags != (g_two_layer_opaque_focus ? XrCompositionLayerFlags{0} : kFocusFlags)) {
+         g_two_layer_shape_wrong.fetch_add(1, std::memory_order_relaxed);
+         return;
+     }
+@@ -3223,6 +3231,16 @@ void two_layer_check(const XrFrameEndInfo* end_info) {
+         }
+         return -1;
+     };
++    // 0094: the opaque focus layer's rectangle comes through on every frame.
++    if (g_two_layer_opaque_focus) {
++        for (std::uint32_t view = 0; view < 2; ++view) {
++            const XrRect2Di& rect = layers[1]->views[view].subImage.imageRect;
++            if (rect.offset.x != 2 || rect.offset.y != 2 || rect.extent.width != 4 || rect.extent.height != 4) {
++                g_two_layer_shape_wrong.fetch_add(1, std::memory_order_relaxed);
++                return;
++            }
++        }
++    }
+     const int periphery_kind = kind(layers[0]->views[0].subImage.swapchain, false);
+     const int focus_kind = kind(layers[1]->views[0].subImage.swapchain, true);
+     if (periphery_kind < 0 || focus_kind < 0 ||
+@@ -3269,7 +3287,9 @@ void two_layer_check(const XrFrameEndInfo* end_info) {
+         // back unwritten here with the key off and one layer's worth of
+         // code as well (the runtime is not made to wait for them through
+         // this queue), so they say nothing about the two layers.
+-        if (g_two_layer_alpha && GetCurrentThreadId() != g_test_application_thread_id) {
++        // 0094: not with an opaque focus, whose alpha the runtime ignores (and whose
++        // image outside its rectangle, where the first pixel is, is never shown).
++        if (g_two_layer_alpha && !g_two_layer_opaque_focus && GetCurrentThreadId() != g_test_application_thread_id) {
+             const std::size_t slot = focus_kind == 3 ? 0U : 1U;
+             const int index = g_two_layer_synthetic_index[slot].load(std::memory_order_acquire);
+             const auto& images = slot == 0U ? g_synthetic_swapchain_right_images
+@@ -3417,6 +3437,8 @@ int main(int argc, char** argv) {
+         g_two_layer_single = GetEnvironmentVariableA("XRFG_TEST_TWO_LAYER_SINGLE", nullptr, 0) != 0;
+         g_two_layer_unfilled_focus =
+             GetEnvironmentVariableA("XRFG_TEST_TWO_LAYER_UNFILLED_FOCUS", nullptr, 0) != 0; // 0089
++        g_two_layer_opaque_focus =
++            GetEnvironmentVariableA("XRFG_TEST_TWO_LAYER_OPAQUE_FOCUS", nullptr, 0) != 0; // 0094
+     }
+     const int result = call_chain_main(argc, argv);
+     if (!g_two_layer_mode) {
+@@ -3476,7 +3498,7 @@ int main(int argc, char** argv) {
+         return result;
+     }
+     if (frames == 0 || synthetics == 0 || shape != 0 || mixed != 0 || fov != 0 || alpha_wrong != 0 ||
+-        (g_two_layer_alpha && alpha_checked == 0)) {
++        (g_two_layer_alpha && !g_two_layer_opaque_focus && alpha_checked == 0)) {
+         std::cerr << "two layers: validation failed\n";
+         return EXIT_FAILURE;
+     }
+@@ -4504,6 +4526,13 @@ int call_chain_main(int argc, char** argv) {
+     XrCompositionLayerProjection two_layer_projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+     two_layer_projection.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+         XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
++    if (g_two_layer_opaque_focus) { // 0094: opaque, cut to the centre
++        two_layer_projection.layerFlags = 0;
++        for (XrCompositionLayerProjectionView& view : two_layer_views) {
++            view.subImage.imageRect.offset = {2, 2};
++            view.subImage.imageRect.extent = {4, 4};
++        }
++    }
+     two_layer_projection.space = application_space;
+     two_layer_projection.viewCount = static_cast<std::uint32_t>(two_layer_views.size());
+     two_layer_projection.views = two_layer_views.data();
+diff --git a/tests/layer_two_layers.cmake b/tests/layer_two_layers.cmake
+index 2d78803..5812794 100644
+--- a/tests/layer_two_layers.cmake
++++ b/tests/layer_two_layers.cmake
+@@ -22,6 +22,10 @@
+ # Judged on the flight log's " op=foveated_mode result=3 " records: one per
+ # swapchain, the periphery role (b bit 0) on the 4x4 swapchain and not on the
+ # 8x8 focus swapchain, and the frame seen (b bit 8 on one of them at least).
++# OPAQUE=1 (DCS Control 0094, with ROLES): the focus layer is opaque and cut to
++# a rectangle (XRFG_TEST_TWO_LAYER_OPAQUE_FOCUS), as Quad Views' opaque focus
++# submits it; the same judgement, and every role record says the layer order
++# decided (b bit 9).
+ foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN BASE_INI WORK_DIR MODE TWO)
+     if(NOT DEFINED ${required_variable})
+         message(FATAL_ERROR "${required_variable} was not provided")
+@@ -53,6 +57,9 @@ endif()
+ if(DEFINED ROLES)
+     set(ENV{XRFG_TEST_TWO_LAYER_UNFILLED_FOCUS} "1")
+ endif()
++if(DEFINED OPAQUE)
++    set(ENV{XRFG_TEST_TWO_LAYER_OPAQUE_FOCUS} "1")
++endif()
+ if(DEFINED SINGLE_SLOW_MS)
+     set(ENV{XRFG_TEST_TWO_LAYER_SINGLE} "1")
+     set(ENV{XRFG_TEST_SLOW_PRIVATE_CREATE_MS} "${SINGLE_SLOW_MS}")
+@@ -110,6 +117,7 @@ if(DEFINED ROLES)
+     set(focus_right 0)
+     set(wrong 0)
+     set(disagreed 0)
++    set(by_order 0)
+     foreach(line IN LISTS mode_lines)
+         if(line MATCHES " op=foveated_mode result=3 .* b=([0-9]+) c=([0-9]+)")
+             set(role_bits "${CMAKE_MATCH_1}")
+@@ -117,6 +125,8 @@ if(DEFINED ROLES)
+             math(EXPR role "${role_bits} % 2")
+             math(EXPR other_rule "(${role_bits} / 256) % 2")
+             math(EXPR disagreed "${disagreed} + ${other_rule}")
++            math(EXPR order_rule "(${role_bits} / 512) % 2")
++            math(EXPR by_order "${by_order} + ${order_rule}")
+             if(role_size STREQUAL periphery_size AND role EQUAL 1)
+                 math(EXPR periphery_right "${periphery_right} + 1")
+             elseif(role_size STREQUAL focus_size AND role EQUAL 0)
+@@ -133,6 +143,13 @@ if(DEFINED ROLES)
+             "field of view named another layer ${disagreed} (expected: 1 or more, 1 or more, 0, 1 or more): "
+             "${mode_lines}")
+     endif()
++    # 0094: with an opaque focus every role was named by the layer order.
++    math(EXPR role_records "${periphery_right} + ${focus_right}")
++    if(DEFINED OPAQUE AND NOT by_order EQUAL role_records)
++        message(FATAL_ERROR "Two layers, opaque focus: ${by_order} of ${role_records} role records named by the layer order: ${mode_lines}")
++    elseif(NOT DEFINED OPAQUE AND NOT by_order EQUAL 0)
++        message(FATAL_ERROR "Two layers: ${by_order} role records named by the layer order with a blended focus: ${mode_lines}")
++    endif()
+     message(STATUS
+         "Two layers, roles with an unfilled first focus field of view: periphery ${periphery_right}, "
+         "focus ${focus_right}, wrong 0, the widest-field-of-view rule would have erred in ${disagreed}")

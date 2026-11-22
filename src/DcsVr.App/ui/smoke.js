@@ -703,7 +703,7 @@ window.runWebSmoke = async function() {
       // Focus layer: only while foveated frame generation runs, Standard by default, four choices.
       const layer = $('setting-frameGenFocusLayer'), layerInput = $('input-frameGenFocusLayer'), hiddenOff = layer.hidden;
       await set({frameGenFoveated:true});
-      const shown = !layer.hidden && !layerInput.disabled && (ui.profile.frameGenFocusLayer ?? 'Standard') === 'Standard' && [...layerInput.options].map(o => o.value).join() === 'Standard,Premultiplied,PremultipliedSrgb,PerEye' && $('help-frameGenFocusLayer').textContent.includes('next DCS start');
+      const shown = !layer.hidden && !layerInput.disabled && (ui.profile.frameGenFocusLayer ?? 'Standard') === 'Standard' && [...layerInput.options].map(o => o.value).join() === 'Standard,Premultiplied,PremultipliedSrgb,PerEye,OpaqueFocus' && $('help-frameGenFocusLayer').textContent.includes('next DCS start');
       await set({frameGenFoveated:false});
       check('Focus layer shows only while foveated frame generation runs, Standard by default, and applies at the next DCS start',hiddenOff && shown && layer.hidden);
       await set({frameGen:'FidelityFx'}); const other = why() === 'NVIDIA frame generation only.' && !needs();
