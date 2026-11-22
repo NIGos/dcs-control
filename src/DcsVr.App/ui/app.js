@@ -1674,6 +1674,8 @@ async function applyLive() {
       if (applied.some(p => LIVE_HITCH.has(p))) parts.push('Expect a short hitch.');
       // DCS sets up its DLSS once per mission: a DLSS preset written live is used from the next mission start.
       if (applied.some(p => p === 'peripheryDlssPreset' || p === 'focusDlssPreset')) parts.push('DLSS presets change at the next mission start.');
+      // ChainFast / ShaderFast switched on in flight: the shaders DCS made before are found by their output over about three minutes of flight.
+      if (applied.includes('engineFastShaderPaths') && profile.engineFastShaderPaths) parts.push('Faster terrain and shader paths reach their full gain within a few minutes of flight.');
       liveStatus = parts.join(' ') || (r.written.length ? 'Applied live.' : '');
     } catch (error) {
       liveStatus = (edited.length ? 'Waits for the next launch: '+liveNames(edited)+'. ' : '')+error.message;
