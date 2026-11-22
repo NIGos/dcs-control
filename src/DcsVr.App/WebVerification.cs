@@ -276,6 +276,9 @@ internal static class WebVerification
         var runtime = At("runtime.json", @"Pimax\Runtime\PiOpenXR_64.json"); File.WriteAllText(runtime,JsonData.Serialize(new { runtime = new { library_path = runtimeDll } }));
         var inventory = new InventorySnapshot { DcsExecutable = exe, OptionsPath = options, PimaxRuntime = runtime, SteamVrRuntime = runtime, PimaxVersion = "1.0.1.103", Tracking = TrackingKind.Lighthouse, Observations = ["Offline fixture. No DCS process or headset session."] };
         var service = new ControlService(AppContext.BaseDirectory,Path.Combine(fixture,demoRoot is null ? "state" : @"AppData\Local\DcsControl"));
+        // The bridge logs what it does (Live: lines, errors) to AppLog: into the fixture, never the user's real app.log
+        // (regress-07: web smoke runs wrote Live: lines there).
+        AppLog.Path = Path.Combine(service.StateRoot, "app.log");
         Readiness.ActiveRouteProvider = () => new(null, "Offline verification: no headset route.", TrackingKind.Unknown);
         // Pimax Play as saved on a Crystal Super (float32 values as Pimax writes them), never the user's own file: Quick 33 %,
         // or with DCSVR_TEST_PIMAX_MODE=fine the Fine tab at 33/10 · 33/33. runtime_* is what Pimax's runtime renders.
