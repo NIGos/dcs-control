@@ -12,7 +12,9 @@ $nativeBuild = Join-Path $workspaceRoot ('artifacts/native/' + $Component)
 $nativeOptions = @('-DCMAKE_BUILD_TYPE=Release')
 if ($Component -eq 'cheeky') {
     $patchOptions = @(if ($Force) { '--force' })
-    & python (Join-Path $PSScriptRoot 'patch-cheeky.py') @patchOptions
+    # The Python launcher, not plain "python" (on a PC without Python on PATH that is the Store stub): scripts/python.ps1.
+    . (Join-Path $PSScriptRoot 'python.ps1')
+    Invoke-Python (Join-Path $PSScriptRoot 'patch-cheeky.py') @patchOptions
     if ($LASTEXITCODE -ne 0) { throw 'Cheeky adaptation failed.' }
 }
 if ($Component -eq 'ofxr-core') { $nativeOptions += @('-DXRFG_BUILD_LAYER=OFF','-DXRFG_BUILD_STANDALONE=OFF') }
@@ -29,7 +31,8 @@ if ($Component -eq 'cheeky') {
     $testFile = Join-Path $nativeBuild 'CTestTestfile.cmake'
     # patch-cheeky.py already raises it to 300 in CMakeLists.txt; this pins it whatever the generated value is, and
     # fails loudly when CMake's output no longer has the anchor (the old silent Replace never matched).
-    $timeoutAnchor = [regex]'(CheekyMixedCalibrationTests\]=\] PROPERTIES  TIMEOUT )"\d+"'
+    # CMake quotes the test name as [=[...]=] or "..." depending on its version: both are taken.
+    $timeoutAnchor = [regex]'(CheekyMixedCalibrationTests(?:\]=\]|")\s+PROPERTIES\s+TIMEOUT )"\d+"'
     $testText = [IO.File]::ReadAllText($testFile)
     if ($timeoutAnchor.Matches($testText).Count -ne 1) { throw "CTestTestfile.cmake: the MixedCalibration timeout anchor was not found exactly once ($timeoutAnchor)." }
     [IO.File]::WriteAllText($testFile, $timeoutAnchor.Replace($testText, '$1"300"'))
