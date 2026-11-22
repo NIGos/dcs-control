@@ -1797,6 +1797,11 @@ Test("The diagnostic package collects DCS, component and headset logs as text, w
         "dcs-control/applied-profile/ofxr/ofxr-bridge-flight-1.log", "dcs-control/applied-profile/ofxr/ofxr-bridge-flight-1.prev.log", "pimax/runtime/pvr_srv_log_26-10-10-14-12-32.txt", "openxr.txt", "system.txt", "README.txt" })
         Require(names.Contains(name), "missing " + name);
     Require(!names.Any(n => n.EndsWith(".dll")) && !names.Contains("pimax/runtime/pvr_srv_log_26-10-09-14-12-32.txt"), "text only, newest runtime log");
+    // The Quest 3 VD route: Pimax's logs on this PC come from other sessions, so none goes into the package.
+    var vdZip = zip + ".vd.zip";
+    Diagnostics.CreatePackage(new(null, managed, options, exe, RuntimeKind.VirtualDesktop, local, Path.Combine(root, "diag/roaming")), "{\"report\":1}", vdZip, headsetNow);
+    using (var vdArchive = System.IO.Compression.ZipFile.OpenRead(vdZip))
+        Require(!vdArchive.Entries.Any(e => e.FullName.StartsWith("pimax/", StringComparison.OrdinalIgnoreCase)) && vdArchive.Entries.Any(e => e.FullName == "dcs/Logs/dcs.log"), "VD route: no Pimax logs, the rest as on Pimax");
     string Read(string name) { using var reader = new StreamReader(archive.GetEntry(name)!.Open()); return reader.ReadToEnd(); }
     var summary = Read("summary.txt");
     Require(summary.Contains("CHANGED since the last flight") && summary.Contains("[DcsQvCull.log] 16:30:01.100 hotkey: engine optimizations OFF") && summary.Contains("(fps -27.9%)")

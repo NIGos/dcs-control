@@ -198,11 +198,16 @@ public static partial class Diagnostics
                 if (sources.SteamVrSettings is { } settings && Path.GetDirectoryName(Path.GetDirectoryName(settings)) is { } steam)
                     foreach (var name in new[] { "vrserver.txt", "vrcompositor.txt", "vrclient_DCS.txt" }) File_("steamvr/logs/" + name, Path.Combine(steam, "logs", name));
             }
-            Folder("pimax/runtime", Path.Combine(local, "Pimax", "runtime"), "pvr_srv_log_*", 1);
-            File_("pimax/runtime/pvr_client_DCS_log.txt", Path.Combine(local, "Pimax", "runtime", "pvr_client_DCS_log.txt"));
-            File_("pimax/runtime/profile.json", Path.Combine(local, "Pimax", "runtime", "profile.json"));
-            Folder("pimax/PiService", Path.Combine(local, "Pimax", "PiService", "Log"), "PiService__*", 2);
-            File_("pimax/AppConfig/global.json", Path.Combine(roaming, "Pimax", "AppConfig", "global.json"));
+            // Pimax's logs, except on the Quest 3 VD route: there they come from other sessions (a Pimax used another day)
+            // and would mislead. Virtual Desktop's own logs are not collected: their location is not known here.
+            if (sources.Runtime != RuntimeKind.VirtualDesktop)
+            {
+                Folder("pimax/runtime", Path.Combine(local, "Pimax", "runtime"), "pvr_srv_log_*", 1);
+                File_("pimax/runtime/pvr_client_DCS_log.txt", Path.Combine(local, "Pimax", "runtime", "pvr_client_DCS_log.txt"));
+                File_("pimax/runtime/profile.json", Path.Combine(local, "Pimax", "runtime", "profile.json"));
+                Folder("pimax/PiService", Path.Combine(local, "Pimax", "PiService", "Log"), "PiService__*", 2);
+                File_("pimax/AppConfig/global.json", Path.Combine(roaming, "Pimax", "AppConfig", "global.json"));
+            }
 
             Text("openxr.txt", "Windows registry", OpenXrRegistry());
             Text("system.txt", "Windows", SystemSummary());
