@@ -1,0 +1,61 @@
+Small fixes. Lost gaze (0018): while the focus eases to the fixed one, its size eases too, from the tracked section
+(with its widening) to the fixed section (Quad Views' fixed and foveated sizes differ, 0.5 and 0.35 by default): the
+hand-over to the fixed focus at the end of the ease was a step in size. Opaque focus (0024, dcsvr_two_layers_alpha 3)
+when it cannot compose (no periphery source): the focus pass is mode 0's, as its flags are, instead of falling into
+mode 2's encoding for an sRGB swapchain on a UNORM one.
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 241d3af..83c2978 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -1120,6 +1122,7 @@ namespace openxr_api_layer {
+                                         XrVector2f projectedGaze;
+                                         // DCSVR lost gaze: past Quad Views' cache, the focus eases to the fixed one.
+                                         bool dcsvrEased = false;
++                                        float dcsvrEaseProgress = 0.f;
+                                         if (!isGazeValid) {
+                                             const XrFovf& sf = m_cachedEyeFov[stereoViewIndex];
+                                             const XrFovf& ff = m_cachedEyeFov[i];
+@@ -1135,7 +1138,8 @@ namespace openxr_api_layer {
+                                                                            m_eyeGaze[stereoViewIndex].y - offset.y};
+                                             dcsvr::GazeVec2 eased{};
+                                             if (sr > sl && su > sd &&
+-                                                m_dcsvrFilter.Ease((int)stereoViewIndex, viewLocateInfo->displayTime, lastGaze, fixedCentre, m_dcsvrGaze, eased)) {
++                                                m_dcsvrFilter.Ease((int)stereoViewIndex, viewLocateInfo->displayTime, lastGaze, fixedCentre, m_dcsvrGaze, eased,
++                                                                   &dcsvrEaseProgress)) {
+                                                 dcsvrEased = true;
+                                                 projectedGaze = {eased.x, eased.y};
+                                             }
+@@ -1175,14 +1179,17 @@ namespace openxr_api_layer {
+                                                            m_verticalFocusOffset};
+                                             const XrVector2f v =
+                                                 m_eyeGaze[stereoViewIndex] - m_centerOfFov[stereoViewIndex];
+-                                            const float horizontalFovSection =
++                                            // DCSVR lost gaze: while the focus eases, its size eases to the fixed focus's too.
++                                            const float horizontalFovSection = dcsvr::GazeFilter::EaseSection(
+                                                 m_horizontalFovSection[1] *
+                                                 (1.f + (std::clamp(abs(v.x) - m_focusWideningDeadzone, 0.f, 1.f) *
+-                                                        m_horizontalFocusWideningMultiplier));
+-                                            const float verticalFovSection =
++                                                        m_horizontalFocusWideningMultiplier)),
++                                                m_horizontalFovSection[0], dcsvrEased ? dcsvrEaseProgress : 0.f);
++                                            const float verticalFovSection = dcsvr::GazeFilter::EaseSection(
+                                                 m_verticalFovSection[1] *
+                                                 (1.f + (std::clamp(abs(v.y) - m_focusWideningDeadzone, 0.f, 1.f) *
+-                                                        m_verticalFocusWideningMultiplier));
++                                                        m_verticalFocusWideningMultiplier)),
++                                                m_verticalFovSection[0], dcsvrEased ? dcsvrEaseProgress : 0.f);
+                                             XrVector2f min{
+                                                 std::clamp(
+                                                     m_eyeGaze[stereoViewIndex].x - horizontalFovSection, -1.f, 1.f),
+@@ -4281,7 +4349,9 @@ namespace openxr_api_layer {
+                 focus.encodeSrgb = linearSource ? 1.f : 0.f;
+                 // DCSVR two-layer alpha: the focus alpha convention (0 unpremultiplied, 1 premultiplied, 2 the same
+                 // bytes in an sRGB swapchain).
+-                focus.dcsvrEdge[2] = (float)m_dcsvrTwoLayersAlpha;
++                // 3 (opaque focus) goes out with 0's flags: when it cannot compose (no periphery source below) the pass
++                // is 0's, never 2's sRGB-target encoding on a UNORM swapchain.
++                focus.dcsvrEdge[2] = m_dcsvrTwoLayersAlpha == 3 ? 0.f : (float)m_dcsvrTwoLayersAlpha;
+                 // DCSVR opaque focus (0024): alpha 1, the composed result over the whole rectangle: the periphery image
+                 // (t3) read at the same direction, focus uv * span + offset in the periphery's uv (both views look the
+                 // same way, as for the edge match's k).

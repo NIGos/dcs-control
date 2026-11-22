@@ -363,6 +363,23 @@ int main() {
         }
         Check(frames >= 12 && frames <= 14 && monotonic, "lost gaze: the focus eases to the fixed one over 150 ms (13 frames at 90 Hz)");
         Check(f.Stats().eased == 1, "lost gaze: counted once");
+        {
+            // The box's size eases with its centre: tracked 0.35 to fixed 0.5 (Quad Views' defaults). The last eased
+            // frame is within 5 % of the fixed size, so the hand-over to the fixed focus is no step in size.
+            dcsvr::GazeFilter p;
+            Locate(p, s, 1'000'000'000, 20.f);
+            float progress = -1.f, lastProgress = 0.f, lastSection = 0.f;
+            bool rising = true;
+            for (int64_t tp = 1'000'000'000 + dt; p.Ease(0, tp, last, fixed, s, out, &progress); tp += dt) {
+                const float section = dcsvr::GazeFilter::EaseSection(0.35f, 0.5f, progress);
+                rising = rising && progress >= lastProgress && section >= lastSection;
+                lastProgress = progress;
+                lastSection = section;
+            }
+            Check(rising && lastProgress > 0.95f && std::fabs(lastSection - 0.5f) < 0.025f &&
+                      dcsvr::GazeFilter::EaseSection(0.35f, 0.5f, 0.f) == 0.35f && dcsvr::GazeFilter::EaseSection(0.35f, 0.5f, 1.f) == 0.5f,
+                  "lost gaze: the focus size eases to the fixed focus's with the centre (no size step at the hand-over)");
+        }
         Locate(f, s, t += dt, 5.f);
         Check(f.Ease(0, t += dt, {Ndc(5.f), 0.f}, fixed, s, out) && std::fabs(out.x - Ndc(5.f)) < 1e-4f,
               "lost gaze: after the gaze returns, the next loss eases from the new gaze");

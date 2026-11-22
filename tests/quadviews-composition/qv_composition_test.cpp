@@ -164,6 +164,8 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("submission log: a destroyed swapchain stays in the format map");
             if (body("bool dcsvrTwoLayerPeripheryPass() const {").find("m_dcsvrThreeViews.Active()") == std::string::npos)
                 throw std::runtime_error("two layers: three views does not ask for the periphery pass");
+            if (layer.find("focus.dcsvrEdge[2] = m_dcsvrTwoLayersAlpha == 3 ? 0.f") == std::string::npos)
+                throw std::runtime_error("opaque focus without a periphery source takes mode 2's sRGB encoding");
         }
         std::string projection_old = projection_base;
         replace_once(projection_old, "[branch] if (!focusVisible && !debugFocusView) {", "[branch] if (false) {");
