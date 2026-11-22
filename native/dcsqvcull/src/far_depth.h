@@ -574,18 +574,131 @@ void ReleaseAll() {
   }
 }
 
-// Our texture for (view, slot) matching DCS's depth; a mismatch recreates all
-// of them under a new generation. R91: the view's first `slots` slots are made
-// together (one stall, not one per slot at its first use).
+// 0.7 (fardepth): copies are remade only where they no longer fit, and never without a flight frame.
+// The user's flight (artifacts\perf-07\vram.md) remade all 8 copies (~280-360 MB) at every menu <-> mission
+// transition: DCS renders the focus views at their native size in the menu and loading frames (1952x1928 there)
+// and at the DLSS input size in flight (1132x1120 in the rig), so the depth copies change size while the HDR pair
+// copies (DLSS output size) stay the same; the old EnsureTex freed both rings of both views. Now a mismatch frees
+// only the mismatched copies of that ring (the layer's references to every generation first, then a new
+// generation, as EnsurePreTex always did; the copies kept are pushed again under the new generation), and while
+// no flight frame is drawn (the F10 map, loading screens, menus: no Quad Views world frame culled, cockpit_mask.h
+// R88's signal) a copy that would have to be remade is kept and the view is not pushed until flight frames come
+// back (a mission -> menu -> mission round trip remakes nothing). No signal (no quad frame culled yet in this
+// payload) or a closed gate for more than g_holdMaxMs: remade at once, as before.
+std::atomic<bool> g_flightGate{true};             // tests: false = no gate (remade at once)
+std::atomic<uint32_t> g_holdMaxMs{15u * 60000u};  // backstop, as cockpit_mask.h's g_mapHoldMaxMs
+std::atomic<uint64_t> g_remakesDepth{0}, g_remakesPre{0}, g_texKept{0}, g_deferredViews{0}, g_holdTimeouts{0};
+uint64_t g_quadSeen = 0;       // render thread: g_quadFrame (main.cpp) at the previous frame's first boundary
+uint32_t g_flightBits = 0;     // render thread: bit 0 = this frame culled a quad world frame, bit 1 the one before
+ULONGLONG g_gateClosedMs = 0;  // render thread: since when the gate is closed (0: open)
+bool g_gateTimedOut = false;
+bool g_deferredNow = false;  // the last EnsureTex / EnsurePreTex returned null because of the gate
+bool g_deferLogged[2] = {};  // a deferral stretch of the view was logged (reset by its next fitting depth copy)
+int g_remakeLogs = 0;        // remake / deferral lines logged in this install (at most 16)
+
+// Once per frame, at its first pass boundary (DecideFrame): DCS culls a frame's world before its passes (R39), so
+// the quad frames counted since the previous sample are this frame's.
+void NoteFlight() {
+  const uint64_t q = g_quadFrame.load(std::memory_order_relaxed);
+  g_flightBits = (g_flightBits << 1) | (q != g_quadSeen ? 1u : 0u);
+  g_quadSeen = q;
+  if ((g_flightBits & 3u) == 3u) {
+    g_gateClosedMs = 0;
+    g_gateTimedOut = false;
+  }
+}
+
+// A copy may be remade now: a flight frame (this frame and the one before culled a Quad Views world frame), no
+// signal (gate off, no quad frame culled yet in this payload), or a hold past g_holdMaxMs.
+bool RemakeAllowed() {
+  if (!g_flightGate.load(std::memory_order_relaxed) || g_quadFrame.load(std::memory_order_relaxed) == 0) return true;
+  if ((g_flightBits & 3u) == 3u) return true;
+  const ULONGLONG now = GetTickCount64();
+  if (!g_gateClosedMs) g_gateClosedMs = now;
+  if (now - g_gateClosedMs <= g_holdMaxMs.load(std::memory_order_relaxed)) return false;
+  if (!g_gateTimedOut) {
+    g_gateTimedOut = true;
+    if (g_holdTimeouts++ == 0)
+      Log("far depth: no flight frame for %u s with copies of another size wanted: remade as they are (backstop; "
+          "logged once)",
+          g_holdMaxMs.load() / 1000u);
+  }
+  return true;
+}
+
+// Ring `ring` (depth or HDR pre, of HMD view `view`) has a copy that does not fit fmt / w x h: deferred without a
+// flight frame (false, g_deferredNow), else the layer's references to every generation go, then only the
+// mismatched copies of this ring, under a new generation (true).
+bool RemakeRing(Tex* ring, int view, bool pre, DXGI_FORMAT fmt, UINT w, UINT h) {
+  auto fits = [&](const Tex& t) { return t.t && t.fmt == fmt && t.w == w && t.h == h; };
+  if (!RemakeAllowed()) {
+    g_deferredNow = true;
+    g_deferredViews++;
+    if (!g_deferLogged[view - 2]) {
+      g_deferLogged[view - 2] = true;
+      if (g_remakeLogs < 16) {
+        ++g_remakeLogs;
+        Log("far depth: HMD view %d %s now %ux%u format %u without a flight frame (F10 map, loading or menu): the "
+            "copies are kept, the view waits for flight frames",
+            view, pre ? "HDR source" : "depth", w, h, static_cast<unsigned>(fmt));
+      }
+    }
+    return false;
+  }
+  ReleaseHeld();
+  // A depth remake comes before this view's descriptor of the frame (FarCapture makes it next); an older one may
+  // name a copy freed here. A pre remake is made for the waiting descriptor itself: kept (as before 0.7).
+  if (!pre) ClearPend(g_pend[view - 2]);
+  UINT ow = 0, oh = 0;
+  DXGI_FORMAT of = DXGI_FORMAT_UNKNOWN;
+  int freed = 0, kept = 0;
+  for (int k = 0; k < kMaxSlots; ++k) {
+    if (!ring[k].t) continue;
+    if (fits(ring[k])) {
+      ++kept;
+      continue;
+    }
+    ow = ring[k].w, oh = ring[k].h, of = ring[k].fmt;
+    ring[k].t->Release();
+    ring[k] = Tex{};
+    ++freed;
+  }
+  for (int v = 0; v < 2; ++v)  // the other rings stay as they are
+    for (int k = 0; k < kMaxSlots; ++k) {
+      if (g_tex[v] != ring && g_tex[v][k].t) ++kept;
+      if (g_pre[v] != ring && g_pre[v][k].t) ++kept;
+    }
+  g_texKept += static_cast<uint64_t>(kept);
+  (pre ? g_remakesPre : g_remakesDepth)++;
+  g_releases++;
+  NewGeneration();
+  if (g_remakeLogs < 16) {
+    ++g_remakeLogs;
+    Log("far depth: HMD view %d %s copies remade: %ux%u format %u -> %ux%u format %u (%d freed, %d kept); "
+        "generation %u",
+        view, pre ? "HDR" : "depth", ow, oh, static_cast<unsigned>(of), w, h, static_cast<unsigned>(fmt), freed,
+        kept, g_gen);
+  }
+  return true;
+}
+
+// Our texture for (view, slot) matching DCS's depth. R91: the view's first `slots` slots are made together (one
+// stall, not one per slot at its first use). 0.7: a mismatch remakes only this ring's mismatched copies, and not
+// without a flight frame (RemakeRing: null, g_deferredNow).
 ID3D11Texture2D* EnsureTex(ID3D11Device* dev, int view, int slot, DXGI_FORMAT fmt, UINT w, UINT h, int slots = 1) {
+  g_deferredNow = false;
   Tex* ring = g_tex[view - 2];
   auto fits = [&](const Tex& t) { return t.t && t.fmt == fmt && t.w == w && t.h == h; };
-  if (fits(ring[slot])) return ring[slot].t;
+  if (fits(ring[slot])) {
+    g_deferLogged[view - 2] = false;
+    return ring[slot].t;
+  }
   for (int k = 0; k < kMaxSlots; ++k)
     if (ring[k].t && !fits(ring[k])) {
-      ReleaseAll();  // size or format changed: the layer must not mix generations
+      if (!RemakeRing(ring, view, false, fmt, w, h)) return nullptr;
       break;
     }
+  g_deferLogged[view - 2] = false;
   D3D11_TEXTURE2D_DESC d{};
   d.Width = w;
   d.Height = h;
@@ -609,25 +722,20 @@ ID3D11Texture2D* EnsureTex(ID3D11Device* dev, int view, int slot, DXGI_FORMAT fm
   return ring[slot].t;
 }
 
-// Our pre-overlay texture for (view, slot); a mismatch recreates it under a
-// new generation (the layer's references to the old one are dropped first).
+// Our pre-overlay texture for (view, slot); a mismatch remakes this ring's
+// mismatched copies under a new generation (the layer's references to the old
+// one are dropped first), not without a flight frame (0.7, RemakeRing).
 // R91: the view's first `slots` slots are made together (as EnsureTex).
 ID3D11Texture2D* EnsurePreTex(ID3D11Device* dev, int view, int slot, DXGI_FORMAT fmt, UINT w, UINT h, int slots = 1) {
+  g_deferredNow = false;
   Tex* ring = g_pre[view - 2];
   auto fits = [&](const Tex& t) { return t.t && t.fmt == fmt && t.w == w && t.h == h; };
   if (fits(ring[slot])) return ring[slot].t;
-  bool released = false;
   for (int k = 0; k < kMaxSlots; ++k)
     if (ring[k].t && !fits(ring[k])) {
-      if (!released) ReleaseHeld();
-      released = true;
-      ring[k].t->Release();
-      ring[k] = Tex{};
+      if (!RemakeRing(ring, view, true, fmt, w, h)) return nullptr;
+      break;
     }
-  if (released) {
-    NewGeneration();
-    g_releases++;
-  }
   D3D11_TEXTURE2D_DESC d{};
   d.Width = w;
   d.Height = h;
@@ -829,6 +937,7 @@ bool g_decided = false;       // the Wanted call of this frame was made
 void DecideFrame() {
   if (g_decided) return;
   g_decided = true;
+  NoteFlight();       // 0.7 fardepth: RemakeRing's flight gate
   DropFrameModule();  // (a frame whose end did not come)
   g_mask = 0;
   if (Active()) {
@@ -869,6 +978,13 @@ void ResetFrameState() {
   g_loggedThisFrame = false;
   g_tracedThisFrame = false;
   g_unwanted = 0;
+  g_quadSeen = g_quadFrame.load(std::memory_order_relaxed);  // 0.7 fardepth: the flight signal starts again
+  g_flightBits = 0;
+  g_gateClosedMs = 0;
+  g_gateTimedOut = false;
+  g_deferredNow = false;
+  g_deferLogged[0] = g_deferLogged[1] = false;
+  g_remakeLogs = 0;
   g_passSerial = 0;
   g_useClock = 0;
   for (KnownCb& k : g_known) k = KnownCb{};

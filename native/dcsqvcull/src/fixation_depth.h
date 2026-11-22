@@ -3941,7 +3941,7 @@ void FarCapture(const Run& r, int idx, bool seaEnd) {
   const int slot = static_cast<int>(s.frame % static_cast<uint64_t>(slots));
   ID3D11Texture2D* t = fdexport::EnsureTex(s.dev, idx, slot, r.rawFmt, r.texW, r.texH, slots);  // R91: all slots
   if (!t) {
-    fdexport::g_skipFormat++;
+    if (!fdexport::g_deferredNow) fdexport::g_skipFormat++;  // 0.7 fardepth: a deferred remake is counted apart
     return;
   }
   ID3D11DeviceContext* c = s.ctx;
@@ -4044,7 +4044,7 @@ void FarPreCopy(int view, ID3D11RenderTargetView* rtv, ID3D11Resource* res, cons
   }
   ID3D11Texture2D* pre = fdexport::EnsurePreTex(s.dev, view, slot, dstFmt, post ? 2 * bw : bw, bh, slots);  // R91
   if (!pre) {
-    fdexport::g_preSkipFormat++;
+    if (!fdexport::g_deferredNow) fdexport::g_preSkipFormat++;  // 0.7 fardepth: as FarCapture
     return;
   }
   ID3D11DeviceContext* c = s.ctx;
@@ -5430,7 +5430,7 @@ void FarHdrPre(int view) {
   const DXGI_FORMAT dstFmt = fdexport::TypelessOf(h.texFmt);
   ID3D11Texture2D* pre = fdexport::EnsurePreTex(s.dev, view, slot, dstFmt, 2 * bw, bh, slots);  // R91
   if (!pre) {
-    fdexport::g_preSkipFormat++;
+    if (!fdexport::g_deferredNow) fdexport::g_preSkipFormat++;  // 0.7 fardepth: as FarCapture
     return;
   }
   ID3D11DeviceContext* c = s.ctx;
@@ -6586,6 +6586,11 @@ void FarLogStats() {
       u(fdexport::g_skipNoProj), u(fdexport::g_skipArm), u(fdexport::g_skipIdentity), u(fdexport::g_skipMismatch), u(fdexport::g_skipMsaa), u(fdexport::g_skipFormat),
       u(fdexport::g_uploadsSeen), u(fdexport::g_texCreates), u(fdexport::g_releases), u(fdexport::g_releaseCalls), fdexport::g_gen, fdexport::g_slots.load(), u(fdexport::g_stateChecks),
       u(fdexport::g_stateDiffs), avg, mx);
+  // 0.7 fardepth: copies remade only where they no longer fit, never without a flight frame (far_depth.h RemakeRing).
+  Log("far depth: remakes: depth %llu, HDR %llu (only the copies that no longer fit; %llu kept through them); "
+      "view-frames deferred without a flight frame %llu, backstop %llu",
+      u(fdexport::g_remakesDepth), u(fdexport::g_remakesPre), u(fdexport::g_texKept), u(fdexport::g_deferredViews),
+      u(fdexport::g_holdTimeouts));
   Log("far depth: in-pass hooks: upload entries switched by d3d11 and re-armed %llu, still lost at a pass end %llu, "
       "OM entries lost %llu; pre-overlay %s: overlay arms %llu, copies %llu, pushed with %llu / without %llu, skipped "
       "MSAA %llu, format %llu, no viewport %llu; dropped at the frame end %llu; post-overlay %s: copies %llu, "

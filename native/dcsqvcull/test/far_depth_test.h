@@ -1988,13 +1988,162 @@ void TestRealLayer() {
   RemoveDirectoryW(dir);
 }
 
+// 0.7 fardepth: the churn of the user's flight (artifacts\perf-07\vram.md: 6 generations of all 8 copies in
+// 4 minutes). DCS draws the focus views at the native size in the menu / loading frames and at the DLSS input size
+// in flight; the HDR pair copies (output size) keep their size. Only the copies that no longer fit are remade, and
+// none without a flight frame (g_quadFrame not moving: F10 map, loading, menu).
+void TestRemake() {
+  ID3D11Device* dev = nullptr;
+  ID3D11DeviceContext* imm = nullptr;
+  const D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_1};
+  if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, want, 1, D3D11_SDK_VERSION, &dev, nullptr,
+                               &imm))) {
+    QvSkip("far depth remake: no WARP 11.1 device\n");
+    return;
+  }
+  const uint64_t q0 = g_quadFrame.load();
+  const uint32_t hold0 = fdexport::g_holdMaxMs.load();
+  fdexport::ReleaseAll();
+  fdexport::ResetFrameState();
+  fdexport::g_flightGate = true;
+  const DXGI_FORMAT dF = DXGI_FORMAT_R32G8X24_TYPELESS, hF = DXGI_FORMAT_R16G16B16A16_TYPELESS;
+  const UINT menuW = 96, menuH = 96, flyW = 56, flyH = 55, pairW = 192, pairH = 96;
+  typedef ID3D11Texture2D* Set[2][2];
+  // One frame of both focus views, 2 slots, as the pipeline calls them: the pre copy only after a depth copy.
+  auto frame = [&](bool quad, UINT w, UINT h, Set& dt, Set& pt, UINT pw = 0) {
+    if (!pw) pw = pairW;
+    if (quad) g_quadFrame++;
+    fdexport::NoteFlight();
+    for (int v = 2; v <= 3; ++v)
+      for (int s = 0; s < 2; ++s) {
+        dt[v - 2][s] = fdexport::EnsureTex(dev, v, s, dF, w, h, 2);
+        pt[v - 2][s] = dt[v - 2][s] ? fdexport::EnsurePreTex(dev, v, s, hF, pw, pairH, 2) : nullptr;
+      }
+  };
+  auto same = [](const Set& a, const Set& b) {
+    for (int v = 0; v < 2; ++v)
+      for (int s = 0; s < 2; ++s)
+        if (!a[v][s] || a[v][s] != b[v][s]) return false;
+    return true;
+  };
+  auto none = [](const Set& a) {
+    for (int v = 0; v < 2; ++v)
+      for (int s = 0; s < 2; ++s)
+        if (a[v][s]) return false;
+    return true;
+  };
+  Set d0{}, p0{}, d1{}, p1{}, d2{}, p2{}, d3{}, p3{};
+
+  // A. No signal (no quad frame culled yet in this payload: the first menu): made at once, as before.
+  g_quadFrame = 0;
+  const uint64_t c0 = fdexport::g_texCreates.load();
+  frame(false, menuW, menuH, d0, p0);
+  Check(fdexport::g_texCreates.load() - c0 == 8 && !none(d0) && !none(p0),
+        "far depth remake: no flight signal yet -> the 8 copies made at once (as before)");
+  // B. DCS recreates its targets with the same size (the HDR source re-learnt): nothing remade.
+  const uint64_t c1 = fdexport::g_texCreates.load(), r1 = fdexport::g_releases.load();
+  const uint32_t g1 = fdexport::g_gen;
+  bool stable = true;
+  for (int f = 0; f < 20; ++f) {
+    frame(f & 1, menuW, menuH, d1, p1);
+    stable = stable && same(d0, d1) && same(p0, p1);
+  }
+  Check(stable && fdexport::g_texCreates.load() == c1 && fdexport::g_releases.load() == r1 && fdexport::g_gen == g1,
+        "far depth remake: 20 frames of the same size -> 0 textures made, 0 released, the same generation");
+
+  // C. Into flight: the depth copies change size (DLSS input), the HDR pair copies do not.
+  frame(true, menuW, menuH, d1, p1);
+  const uint64_t c2 = fdexport::g_texCreates.load(), rd2 = fdexport::g_remakesDepth.load(),
+                 rp2 = fdexport::g_remakesPre.load();
+  frame(true, flyW, flyH, d2, p2);
+  printf("     remake into flight: %llu made, depth remakes %llu, HDR remakes %llu, kept %llu\n",
+         static_cast<unsigned long long>(fdexport::g_texCreates.load() - c2),
+         static_cast<unsigned long long>(fdexport::g_remakesDepth.load() - rd2),
+         static_cast<unsigned long long>(fdexport::g_remakesPre.load() - rp2),
+         static_cast<unsigned long long>(fdexport::g_texKept.load()));
+  Check(fdexport::g_texCreates.load() - c2 == 4 && fdexport::g_remakesDepth.load() - rd2 == 2 &&
+            fdexport::g_remakesPre.load() == rp2 && same(p0, p2) && !none(d2) && fdexport::g_gen != g1 &&
+            fdexport::g_tex[0][0].w == flyW && fdexport::g_tex[1][1].h == flyH && fdexport::g_pre[0][0].w == pairW,
+        "far depth remake: a depth size change in flight -> only the 4 depth copies remade (new generation), the 4 "
+        "HDR pair copies kept");
+
+  // D. Mission end -> menu / loading (no quad frame): the menu size is not made; the flight copies are kept.
+  const uint64_t c3 = fdexport::g_texCreates.load(), dv3 = fdexport::g_deferredViews.load(),
+                 r3 = fdexport::g_releases.load();
+  const uint32_t g3 = fdexport::g_gen;
+  bool deferred = true;
+  for (int f = 0; f < 30; ++f) {
+    frame(false, menuW, menuH, d3, p3);
+    deferred = deferred && none(d3) && none(p3) && fdexport::g_deferredNow;
+  }
+  Check(deferred && fdexport::g_texCreates.load() == c3 && fdexport::g_releases.load() == r3 &&
+            fdexport::g_gen == g3 && fdexport::g_deferredViews.load() - dv3 == 30 * 4 &&
+            fdexport::g_tex[0][0].w == flyW && fdexport::HaveTextures(),
+        "far depth remake: no flight frame (F10 / loading / menu) and another size -> nothing remade or freed, the "
+        "views wait (deferred, not counted as a format skip)");
+  // E. The next mission at the flight size: the kept copies are used again, nothing made.
+  frame(true, flyW, flyH, d3, p3);  // one flight frame (bits 01): the copies fit, no remake is needed
+  frame(true, flyW, flyH, d3, p3);
+  Check(same(d2, d3) && same(p2, p3) && fdexport::g_texCreates.load() == c3 && fdexport::g_gen == g3,
+        "far depth remake: mission -> menu -> mission round trip -> 0 textures made, the same generation");
+
+  // F. A real size change on the first flight frame after the menu waits one frame (this and the previous frame
+  // must have culled a quad world frame), then remakes the depth copies only.
+  frame(false, flyW, flyH, d3, p3);
+  frame(true, 64, 64, d3, p3);
+  const bool waited = none(d3);
+  const uint64_t c4 = fdexport::g_texCreates.load();
+  frame(true, 64, 64, d3, p3);
+  Check(waited && !none(d3) && same(p2, p3) && fdexport::g_texCreates.load() - c4 == 4,
+        "far depth remake: first flight frame after the menu -> deferred one frame, then only the depth copies");
+
+  // G. Backstop: a closed gate held past g_holdMaxMs remakes as before.
+  fdexport::g_holdMaxMs = 0;
+  frame(false, 64, 64, d3, p3);
+  frame(false, 72, 72, d3, p3);  // the closed stretch starts here
+  const bool heldFirst = none(d3);
+  Sleep(30);
+  frame(false, 72, 72, d3, p3);
+  Check(heldFirst && !none(d3) && fdexport::g_tex[1][0].w == 72 && fdexport::g_holdTimeouts.load() >= 1,
+        "far depth remake: no flight frame for longer than the backstop -> remade at once (logged once)");
+  fdexport::g_holdMaxMs = hold0;
+
+  // H. An HDR pair size change in flight remakes that view's pair copies only; the depth copies stay.
+  frame(true, 72, 72, d1, p1);
+  frame(true, 72, 72, d1, p1);
+  const uint64_t c5 = fdexport::g_texCreates.load();
+  Set d5{}, p5{};
+  frame(true, 72, 72, d5, p5, pairW + 8);
+  Check(same(d1, d5) && !none(p5) && fdexport::g_texCreates.load() - c5 == 4 &&
+            fdexport::g_pre[0][0].w == pairW + 8 && fdexport::g_pre[1][1].w == pairW + 8,
+        "far depth remake: an HDR pair size change -> only the pair copies remade, the depth copies kept");
+
+  // I. Gate off (tests / no gate): a menu-size frame remakes at once, as before 0.7 (depth only here).
+  fdexport::g_flightGate = false;
+  const uint64_t c6 = fdexport::g_texCreates.load();
+  frame(false, menuW, menuH, d5, p5, pairW + 8);
+  Check(!none(d5) && fdexport::g_texCreates.load() - c6 == 4, "far depth remake: gate off -> remade at once");
+  fdexport::g_flightGate = true;
+
+  fdexport::ReleaseAll();
+  fdexport::ResetFrameState();
+  g_quadFrame = q0;
+  imm->Release();
+  dev->Release();
+}
+
 void Run() {
   printf("-- far_depth.h --\n");
   TestRealLayer();
   TestFill();
   TestUploads();
   TestDebugLayer();
+  // The pipeline drives size / format changes without a Quad Views world frame (g_quadFrame does not move): no
+  // flight gate there (TestRemake covers it). TestRemake after it: the pipeline checks absolute texture counts.
+  fdexport::g_flightGate = false;
   TestPipeline();
+  fdexport::g_flightGate = true;
+  TestRemake();
 }
 
 }  // namespace fartest
