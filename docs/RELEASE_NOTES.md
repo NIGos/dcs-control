@@ -12,7 +12,7 @@
 
 **GPU savings on the Engine Optimizations page (experimental, off by default).** A new fold holds Cache distant shadows and two new switches. **Skip hidden water**: DCS skips its water work for an eye that sees no water; when water comes into view it can appear a few frames late. **Skip unused effects**: skips water shading that changes nothing and the heat-haze passes when nothing is hot, with the same image and a small saving (about 0.2 ms over open sea).
 
-**Faster terrain and shader paths can be turned off.** These GPU shortcuts give the same image and stay on by default. The switch, under Individual optimizations, is there so a problem like GitHub #28 can be ruled in or out.
+**Faster terrain and shader paths can be turned off.** These GPU shortcuts give the same image and stay on by default. The switch, in the GPU savings fold, is there so a problem like GitHub #28 can be ruled in or out.
 
 **Fewer requirements.**
 - **Sharp HUD** no longer needs Depth boost.

@@ -31,9 +31,10 @@ const FEATURES = [
   ['framegen','Frame generation','generated frames · VR','framegen']
 ];
 /** The engine optimizations a profile turns on (Engine Optimizations page). */
-const ENGINE_PARTS = ['engineShaderTimeCache','enginePartitionBoost','engineCostWeights','engineShadowInstancing','engineFrameHeap','engineTaskQueueClock','engineModelAllocator','engineTextureDedupe','engineEffectBufferSkip','enginePlainCounter','engineStateFilter','engineFastShaderPaths','engineShadowRecorder','engineGBufferRecorder'];
-// The Engine page's experimental GPU savings (their own fold), off by default.
-const GPU_SAVINGS = ['engineShadowCache','engineWaterSkip','engineIdleEffectSkip'];
+const ENGINE_PARTS = ['engineShaderTimeCache','enginePartitionBoost','engineCostWeights','engineShadowInstancing','engineFrameHeap','engineTaskQueueClock','engineModelAllocator','engineTextureDedupe','engineEffectBufferSkip','enginePlainCounter','engineStateFilter','engineShadowRecorder','engineGBufferRecorder'];
+// The Engine page's GPU savings (their own fold): Faster terrain and shader paths (on by default) and the experimental
+// ones, off by default.
+const GPU_SAVINGS = ['engineFastShaderPaths','engineShadowCache','engineWaterSkip','engineIdleEffectSkip'];
 let state, profile, dcs = '', options = '', page = 'overview', busy = false, plan = null;
 let sequence = 0, toastTimer, searchResults = [], lastProvider = 'QuadViewsFoveated', lastFrameGen = 'Nvidia', savedDraftJson = null, draftTimer, flight = null;
 const pending = new Map(), fields = [], invalid = new Set();
@@ -302,7 +303,7 @@ function featureSummary(key, p) {
     if (!p.engineOptimizations) return 'Off · DCS as shipped';
     // The terrain prefetch fix counts as one more part when it skips repeats (Observe only counts calls).
     const n = ENGINE_PARTS.filter(k => p[k]).length + (p.boostPrefetch === 'Skip' ? 1 : 0);
-    // The experimental GPU savings (their own fold on the Engine page) only when some are on.
+    // The GPU savings (their own fold on the Engine page) only when some are on.
     const gpu = GPU_SAVINGS.filter(k => p[k]).length;
     return `${n} of ${ENGINE_PARTS.length + 1} on${gpu ? ` · ${gpu} GPU saving${gpu > 1 ? 's' : ''}` : ''} · stays on outside the app`;
   }
@@ -851,11 +852,11 @@ function buildFields() {
   field(more,'enginePlainCounter','Statistics counter without lock','Removes a wait between model threads. Small gain.','toggle',null,engine);
   field(more,'engineFrameHeap','Frame memory per thread','Gives each thread its own short-lived memory. About 1.5% more FPS.','toggle',null,engine);
   field(more,'engineStateFilter','Redundant state filter','Skips graphics state that is already set. Same image. About 1% more FPS. Turns itself off after a DCS update.','toggle',null,engine);
-  field(more,'engineFastShaderPaths','Faster terrain and shader paths','GPU shortcuts that give the same image. Turn off only if a problem points to it.','toggle',null,engine);
   field(more,'engineBeeps','Beeps for the in-flight switch','One beep off, two beeps on.','toggle',null,engine);
-  // GPU savings (experimental, off by default) in their own fold after the CPU parts, with how many are on: the card
-  // itself is about the CPU, and three experimental rows at its top pushed the parts below the fold.
-  const gpuFold = toggleList(disclosure(c,'GPU savings','Experimental, off by default. Less GPU time in some scenes.',p => `${GPU_SAVINGS.filter(k => p[k]).length} of ${GPU_SAVINGS.length} on`));
+  // GPU savings in their own fold after the CPU parts, with how many are on: the card itself is about the CPU, and the
+  // experimental rows at its top pushed the parts below the fold. Faster terrain and shader paths first (on by default).
+  const gpuFold = toggleList(disclosure(c,'GPU savings','Less GPU time in some scenes. The experimental ones are off by default.',p => `${GPU_SAVINGS.filter(k => p[k]).length} of ${GPU_SAVINGS.length} on`));
+  field(gpuFold,'engineFastShaderPaths','Faster terrain and shader paths','GPU shortcuts that give the same image. Turn off only if a problem points to it.','toggle',null,engine);
   field(gpuFold,'engineShadowCache','<span class="tag">EXPERIMENTAL</span> Cache distant shadows',['About 0.7 ms less GPU time; distant tree shadows sway less smoothly.','Reuses the distant shadows (about 70 m to 1.5 km) for a few frames. Off by default.'],'toggle',null,engine);
   // 0.7, experimental, off by default: [Water]
   // SkipHiddenWater=3 (no-submit, not exact for a few frames) and [D3D] EarlyShaders=3 (SSAO water skip + hot-air idle
