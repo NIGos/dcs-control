@@ -3951,6 +3951,17 @@ Test("Boost plan lists Pimax services, DCS and admin need, and excludes an ances
     // The prefetch fix is an engine optimization now, no longer part of what CPU Boost does.
     Require(plan.Notes.All(n => !n.Contains("refetch", StringComparison.Ordinal)));
 });
+Test("Boost plan never moves Virtual Desktop's streamer or service on the Quest 3 VD route, even when listed", () =>
+{
+    var fixture = BoostFixture() with { Processes = [.. BoostFixture().Processes, new(400, "VirtualDesktop.Streamer", 1, true), new(401, "VirtualDesktop.Service", 1, true)] };
+    var vd = HeadsetRoute.WithQuest3Focus(new VrProfile { CpuBoost = true, Runtime = RuntimeKind.VirtualDesktop, QuadViews = QuadProvider.QuadViewsFoveated, BoostMoveBackgroundApps = true, BoostBackgroundApps = ["VirtualDesktop.*"] });
+    var plan = BoostPlanner.Compose(vd, boostTopo, fixture);
+    Require(!plan.Processes.Any(p => p.Name.StartsWith("VirtualDesktop", StringComparison.Ordinal) && p.Running) && !plan.Processes.Any(p => p.Category == "VR runtime"), "nothing of VD is moved");
+    Require(plan.Notes.Any(n => n.Contains("Quest 3 VD route")), "the plan says so");
+    Require(BoostPlanner.IsProtectedName("VirtualDesktop.Streamer.exe", vd) && !BoostPlanner.IsProtectedName("VirtualDesktop.Streamer", vd with { Runtime = RuntimeKind.Pimax }), "protected on this route only");
+    Require(ProfileValidation.Validate(vd).Any(i => i.Code == "boost-vd-stream" && i.Severity == IssueSeverity.Error), "validation refuses the listing");
+    Require(!ProfileValidation.Validate(vd with { Runtime = RuntimeKind.Pimax }).Any(i => i.Code == "boost-vd-stream"), "other routes may list it");
+});
 Test("Boost plan leaves SteamVR compositor untouched on the Sboys route", () =>
 {
     var plan = BoostPlanner.Compose(new VrProfile { CpuBoost = true, Runtime = RuntimeKind.SboysSteamVr, QuadViews = QuadProvider.None }, boostTopo, BoostFixture());

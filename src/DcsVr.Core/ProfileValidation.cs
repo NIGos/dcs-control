@@ -14,6 +14,11 @@ public static class ProfileValidation
         "System Idle Process", "Registry", "Memory Compression", "fontdrvhost", "audiodg"
     ], StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>The route's own streaming processes, protected like <see cref="BoostProtectedProcesses"/> on that route:
+    /// on Quest 3 VD, Virtual Desktop's streamer (it encodes the image) and its service.</summary>
+    public static IReadOnlyList<string> RouteProtectedProcesses(VrProfile profile) =>
+        profile.Runtime == RuntimeKind.VirtualDesktop && !profile.Desktop ? ["VirtualDesktop.Streamer", "VirtualDesktop.Service"] : [];
+
     /// <summary>Settles feature combinations that cannot run, exactly like the interface's checklist (resolveFeatures in
     /// ui/app.js): Foveated Super Resolution is for stereo only, so Quad Views turns it off (with Quad Views it would redo
     /// DCS's DLSS of the focus views instead of DLSS 5 building on it); Pimax native Quad Views exists only on the Pimax
@@ -132,7 +137,9 @@ public static class ProfileValidation
                     { Error("boost-app-wildcard", $"{feature} cannot {label} '{name}': it would match every program. Enter a program name; * and ? work only as part of a name."); continue; }
                     // Wildcards are matched exactly as at run time, so "D*" or "s*" is refused like "DCS" or "steam".
                     var hit = BoostProtectedProcesses.FirstOrDefault(p => BoostPlanner.MatchesProcessName(name, p));
-                    if (hit is not null)
+                    if (hit is null && RouteProtectedProcesses(profile).FirstOrDefault(p => BoostPlanner.MatchesProcessName(name, p)) is { } stream)
+                        Error("boost-vd-stream", $"{feature} cannot {label} '{name}': {stream} streams the image to the Quest. Remove it from {list}.");
+                    else if (hit is not null)
                         Error("boost-launcher", (string.Equals(hit, name, StringComparison.OrdinalIgnoreCase)
                             ? $"{feature} cannot {label} {name}: it "
                             : $"{feature} cannot {label} '{name}': it matches {hit}, which ") + $"starts DCS, is DCS itself or is a protected Windows process. Remove it from {list}.");

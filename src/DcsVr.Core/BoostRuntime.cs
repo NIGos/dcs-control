@@ -630,7 +630,7 @@ public sealed class BoostRuntime
         foreach (var fact in snapshot.Processes)
         {
             // Another signed-in user's programs are never moved; services (session 0) are, for the VR runtime.
-            if (excluded.Contains(fact.Pid) || BoostPlanner.IsProtectedName(fact.Name) || snapshot.OtherSession(fact, services: true)) continue;
+            if (excluded.Contains(fact.Pid) || BoostPlanner.IsProtectedName(fact.Name, _profile) || snapshot.OtherSession(fact, services: true)) continue;
             if (vrPatterns.Any(p => BoostPlanner.MatchesProcessName(p, fact.Name))) Confine(fact, _vrMask, priority: null, ourMasks);
             else if (backgroundPatterns.Any(p => BoostPlanner.MatchesProcessName(p, fact.Name))) Confine(fact, _bgMask, ProcessPriorityClass.BelowNormal, ourMasks);
         }
@@ -649,7 +649,7 @@ public sealed class BoostRuntime
             var added = false;
             foreach (var fact in snapshot.Processes)
             {
-                if (!parents.Contains(fact.ParentPid) || fact.ParentPid == fact.Pid || excluded.Contains(fact.Pid) || BoostPlanner.IsProtectedName(fact.Name)
+                if (!parents.Contains(fact.ParentPid) || fact.ParentPid == fact.Pid || excluded.Contains(fact.Pid) || BoostPlanner.IsProtectedName(fact.Name, _profile)
                     || snapshot.OtherSession(fact, services: true) || _failed.Contains((fact.Pid, fact.Name))) continue;
                 Process? process = null;
                 try

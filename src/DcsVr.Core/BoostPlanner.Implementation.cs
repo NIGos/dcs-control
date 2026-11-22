@@ -23,11 +23,13 @@ public static partial class BoostPlanner
 {
     public const string DcsProcessName = "DCS";
 
-    /// <summary>True for a process name CPU Boost never moves or closes, whatever pattern matched it.</summary>
-    internal static bool IsProtectedName(string name)
+    /// <summary>True for a process name CPU Boost never moves or closes, whatever pattern matched it; with a profile, also
+    /// its route's own streaming processes (<see cref="ProfileValidation.RouteProtectedProcesses"/>).</summary>
+    internal static bool IsProtectedName(string name, VrProfile? profile = null)
     {
         var trimmed = TrimExe(name.Trim());
-        return ProfileValidation.BoostProtectedProcesses.Contains(trimmed);
+        return ProfileValidation.BoostProtectedProcesses.Contains(trimmed)
+            || (profile is not null && ProfileValidation.RouteProtectedProcesses(profile).Contains(trimmed, StringComparer.OrdinalIgnoreCase));
     }
 
     /// <summary>The one process-name matcher CPU Boost uses (plan, runtime and validation): <c>*</c> matches any run
@@ -90,7 +92,7 @@ public static partial class BoostPlanner
             BoostProcessFact? first = null;
             foreach (var p in snapshot.Processes.Where(p => Matches(pattern, p.Name) && !snapshot.OtherSession(p, services: true)))
             {
-                if (p.Pid == snapshot.DcsPid || ancestors.Contains(p.Pid) || IsProtectedName(p.Name)) { skippedAsLauncher = true; continue; }
+                if (p.Pid == snapshot.DcsPid || ancestors.Contains(p.Pid) || IsProtectedName(p.Name, profile)) { skippedAsLauncher = true; continue; }
                 first ??= p;
             }
             return first;
@@ -110,7 +112,7 @@ public static partial class BoostPlanner
         if (profile.Runtime == RuntimeKind.SboysSteamVr && !profile.Desktop)
             notes.Add("SteamVR route: the OpenXR compositor (vrcompositor) and vrserver are left untouched. Confining them has not been shown to be safe and can stall presentation.");
         if (profile.Runtime == RuntimeKind.VirtualDesktop && !profile.Desktop)
-            notes.Add("Quest 3 VD route: the Virtual Desktop Streamer (video encoding) is left untouched; confining it can add stutter to the stream.");
+            notes.Add("Quest 3 VD route: Virtual Desktop's Streamer and Service are never moved; confining them can make the stream stutter.");
         if (profile.Desktop)
             notes.Add("Optimizations only: no VR runtime runs, so none is moved.");
         else if (!profile.BoostMoveVrRuntime)
