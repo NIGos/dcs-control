@@ -48,10 +48,14 @@ public static partial class HeadsetRuntime
 
     private sealed record Seen(string? PimaxPlay, string? RuntimeBuild);
 
-    /// <summary>The headset software now, compared with the state folder's record of the last flight (none: no flag).</summary>
-    public static HeadsetRuntimeInfo Read(string? pimaxPlay, string? activeRuntime, string runtimeLogFolder, string? stateRoot)
+    /// <summary>The headset software now, compared with the state folder's record of the last flight (none: no flag).
+    /// On the Quest 3 VD route nothing of Pimax's is read: a Pimax Play installed beside it and its newest server log
+    /// (an earlier Pimax session) say nothing about this flight, and would flag a "change" that did not happen.</summary>
+    public static HeadsetRuntimeInfo Read(string? pimaxPlay, string? activeRuntime, string runtimeLogFolder, string? stateRoot, RuntimeKind? route = null)
     {
-        var (build, id, headset) = ReadServerLog(runtimeLogFolder);
+        var pimaxRoute = route != RuntimeKind.VirtualDesktop;
+        if (!pimaxRoute) pimaxPlay = null;
+        var (build, id, headset) = pimaxRoute ? ReadServerLog(runtimeLogFolder) : (null, null, null);
         Seen? before = null;
         try
         {

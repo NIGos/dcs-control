@@ -242,14 +242,21 @@ const QUEST3_FOCUS = {foveaSource:'Profile', gaze:'Fixed', foveaWidth:.55, fovea
 const QUEST3_REFRESH = [72, 80, 90, 120];
 /** The Quest 3 rate nearest to hz (144 becomes 120). */
 const questRefresh = hz => QUEST3_REFRESH.reduce((best, r) => Math.abs(r - hz) < Math.abs(best - hz) ? r : best);
-/** Switches the headset route. Virtual Desktop starts from the Quest 3 focus values and the nearest Quest 3 refresh rate; leaving it goes back to following
- *  Pimax Play with eye tracking (the defaults of the other routes). Every other setting is kept. */
+/** The focus values (and refresh rate) a profile had before it switched to Virtual Desktop, so leaving VD gives them back (this session only). */
+const preVdFocus = new WeakMap();
+/** Switches the headset route. Virtual Desktop starts from the Quest 3 focus values and the nearest Quest 3 refresh rate; leaving it gives back the
+ *  focus the profile had before VD. A profile that started on VD follows Pimax Play again, with eye tracking on the Pimax route only (on Sboys
+ *  it depends on the Sboys version: Detect my setup finds it). Every other setting is kept. */
 function switchRoute(p, target) {
   if (target === p.runtime) return;
   const leavingVd = vdRoute(p);
+  if (target === 'VirtualDesktop') preVdFocus.set(p, Object.fromEntries([...Object.keys(QUEST3_FOCUS), 'headsetRefreshHz'].map(k => [k, p[k]])));
   p.runtime = target; p.runtimeManifestPath = null;
   if (vdRoute(p)) Object.assign(p, QUEST3_FOCUS, {headsetRefreshHz: questRefresh(p.headsetRefreshHz)});
-  else if (leavingVd) Object.assign(p, {foveaSource:'PimaxPlay', gaze:'EyeTracked'});
+  else if (leavingVd) {
+    const before = preVdFocus.get(p); preVdFocus.delete(p);
+    Object.assign(p, before || (target === 'Pimax' ? {foveaSource:'PimaxPlay', gaze:'EyeTracked'} : {foveaSource:'PimaxPlay'}));
+  }
 }
 /** Profile name and id follow the route and the features, e.g. "Pimax · Quad Views + DLSS 5 + Frame generation + CPU Boost". */
 function deriveIdentity(p) {

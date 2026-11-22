@@ -465,7 +465,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
     /// <summary>What the headset software was at this DCS launch: the next diagnostic report flags a new Pimax Play or runtime.</summary>
     private void RememberHeadsetRuntime()
     {
-        try { var now = HeadsetRuntime.Read(CurrentInventory.PimaxVersion, CurrentInventory.ActiveRuntime, HeadsetRefresh.PimaxRuntimeFolder, service.StateRoot); AppLog.Info("DCS launch: " + now.Line); HeadsetRuntime.RememberFlight(now, service.StateRoot); }
+        try { var now = HeadsetRuntime.Read(CurrentInventory.PimaxVersion, CurrentInventory.ActiveRuntime, HeadsetRefresh.PimaxRuntimeFolder, service.StateRoot, _profile.Runtime); AppLog.Info("DCS launch: " + now.Line); HeadsetRuntime.RememberFlight(now, service.StateRoot); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { AppLog.Error("Headset runtime record", e); }
     }
     /// <summary>Counts how long DCS has looked stuck on its own timer, so a minimised window does not start the count
@@ -793,7 +793,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         packageOptions, packageDcs, _profile.Runtime, SteamVrSettings: HeadsetRefresh.SteamVrSettings);
                     var packageFocus = await Task.Run(() => Diagnostics.DiagnoseDlssFocus(packageDcs is null ? null : Path.GetDirectoryName(packageDcs)));
                     var packageRefresh = await Task.Run(() => HeadsetRefresh.Detect(_profile.Runtime));
-                    var packageHeadset = await Task.Run(() => HeadsetRuntime.Read(CurrentInventory.PimaxVersion, CurrentInventory.ActiveRuntime, HeadsetRefresh.PimaxRuntimeFolder, service.StateRoot));
+                    var packageHeadset = await Task.Run(() => HeadsetRuntime.Read(CurrentInventory.PimaxVersion, CurrentInventory.ActiveRuntime, HeadsetRefresh.PimaxRuntimeFolder, service.StateRoot, _profile.Runtime));
                     var packageReport = JsonData.Serialize(new { schemaVersion = 1, version = ProductInfo.Version, created = DateTimeOffset.Now, summary = packageHeadset.Line, headsetRuntime = packageHeadset, dcsRunning = DcsRunning(),
                         draft = _profile, applied = packageApplied?.Profile, inventory = CurrentInventory, issues = ProfileValidation.Validate(_profile, CurrentInventory), readiness = _readiness,
                         lastFlight = await Task.Run(() => { try { return LastFlight.Read(FlightSourcesNow()); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; } }),

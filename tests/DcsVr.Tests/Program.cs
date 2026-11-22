@@ -1776,6 +1776,9 @@ Test("The diagnostic package collects DCS, component and headset logs as text, w
     var headsetNow = HeadsetRuntime.Read("2.0.5.376", null, Path.Combine(local, "Pimax/runtime"), headsetState);
     Require(headsetNow.Changed && headsetNow.Line.Contains("CHANGED since the last flight (was Pimax Play 2.0.4.100, runtime built Oct 1 2026 10:00:00)"), headsetNow.Line);
     Require(!(headsetNow with { PreviousPimaxPlay = "2.0.5.376", PreviousRuntimeBuild = null }).Changed, "an unknown earlier build is no change");
+    // The Quest 3 VD route: Pimax's server log (an earlier Pimax session) and Pimax Play's version are not this flight's.
+    var onVd = HeadsetRuntime.Read("2.0.5.376", @"C:\Program Files\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json", Path.Combine(local, "Pimax/runtime"), headsetState, RuntimeKind.VirtualDesktop);
+    Require(onVd is { PimaxPlay: null, RuntimeBuild: null, Headset: null, Changed: false } && !onVd.Line.Contains("Pimax"), "VD route: nothing of Pimax's read: " + onVd.Line);
     // regress-07: the first hid device the Pimax server adds can be another vendor's (a Razer headset, VID 5426): the
     // headset is the Pimax one (VID 13476), and none without one.
     const string razer = "[26-11-22 09:00:01.000][ 9692][info][PSRV] added hid device:5426:1316:0-Razer Freyja\n";
@@ -2458,6 +2461,9 @@ Test("DCS engine optimizations install in Saved Games Scripts with the profile's
     Make("engine/sg/DCS/Scripts/DcsQvCull/DcsQvCull.prev.log", "earlier"); Make("engine/sg/DCS/Scripts/DcsQvCull/DcsQvCullPrefetch.prev.log", "earlier");
     // The shadow shader cache, including a temp file left by a write that was cut short.
     Make("engine/sg/DCS/Scripts/DcsQvCull/cache/s_0123456789abcdef.qvc", "entry"); Make("engine/sg/DCS/Scripts/DcsQvCull/cache/g_0123456789abcdef.qvc.12345.tmp", "partial");
+    // What the 0.7 checks write next to the log (water skip verify and timing, early census, three views timing / log).
+    foreach (var written in new[] { "DcsQvCull_water.csv", "water_timing_20261122_101500.csv", "early_census_4242.csv", "three_views_timing_20261122_101500.csv", "three_views.log" })
+        Make("engine/sg/DCS/Scripts/DcsQvCull/" + written, "written by the module");
     File.AppendAllText(log, "\n21:07:30.000 cockpit ipd: ownship matching off (SceneRenderable vtable not in this NGModel build)");
     Require(EngineOptimizations.Read(options, dcsLog, dcsRunning: true).Warnings.Any(w => w.Contains("recognise your own aircraft", StringComparison.Ordinal)), "Ownship matching off is reported");
     // A later payload that failed to start (a reload): the last loader outcome counts.
