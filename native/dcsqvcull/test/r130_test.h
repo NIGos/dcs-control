@@ -230,6 +230,10 @@ void TwoSets(const Rig& rig) {
             Has(totals, "set 2 ids 5-8 (P,P,F,F): VRAM +400.0 MB, private +200.0 MB, DLSS stats +320.0 MB;") &&
             Has(totals, "load total VRAM +800.0 MB, private +400.0 MB, DLSS stats +640.0 MB"),
         "R130 VRAM delta: the per-set and per-load totals are logged when the load closes");
+  Check(Has(totals, "measured around the creation calls: NGX allocates most of a feature's memory at its first "
+                    "evaluation"),
+        "R130 VRAM delta (regress-07): the load line says the deltas are around creation, allocation comes at the "
+        "first evaluation");
 
   // The 10 s summary flags set 1 as idle and the release rule as eligible.
   Advance(10.0);

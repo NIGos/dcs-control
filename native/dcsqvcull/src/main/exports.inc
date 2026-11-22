@@ -63,6 +63,9 @@ void OnMissionEvent(uint32_t event) {
   // R77: the recorders' texture tables hold references on this scene's textures: released at their next entry.
   gbrec::NoteMissionEvent();
   shrec::NoteMissionEvent();
+  // regress-07: the ChainFast / ShaderFast identification windows open again while kinds are missing.
+  chainfast::NoteMissionEvent();
+  sfast::NoteMissionEvent();
   Log("payload: %s; recorder jobs in flight are dropped",
       event == 2 ? "mission load begins" : event == 3 ? "local player changed slot" : "simulation stopped");
 }

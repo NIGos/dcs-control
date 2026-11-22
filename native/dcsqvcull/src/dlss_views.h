@@ -1272,7 +1272,10 @@ void LoadTotalsLocked(int64_t now) {
     l.Add(" set %u ids %u-%u (%s): VRAM %s%+.1f MB, private %s%+.1f MB, DLSS stats %s%+.1f MB;", f.set, firstId, lastId,
           pat, sv ? "" : "~", MB(v), sp ? "" : "~", MB(p), ss ? "" : "~", MB(s));
   }
-  l.Add(" load total VRAM %s%+.1f MB, private %s%+.1f MB, DLSS stats %s%+.1f MB (~ = some readings missing)",
+  // regress-07: "VRAM +0.0 MB" read as "DLSS uses no memory": these are measured around each creation call, and NGX
+  // allocates most of a feature's memory at its first evaluation (the summary lines show it).
+  l.Add(" load total VRAM %s%+.1f MB, private %s%+.1f MB, DLSS stats %s%+.1f MB (~ = some readings missing; measured "
+        "around the creation calls: NGX allocates most of a feature's memory at its first evaluation)",
         okv ? "" : "~", MB(tv), okp ? "" : "~", MB(tp), oks ? "" : "~", MB(ts));
   (void)sets;
   (void)now;

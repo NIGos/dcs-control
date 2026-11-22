@@ -21,7 +21,8 @@
 //   with fewer than kClearMin groups (the 8- and 2-group clears) stay stock.
 //
 // Mechanism. DCS creates these shaders before the payload loads (R34), so they are identified at dispatch
-// time by their output: while kinds are missing (at most kIdentMs, never during a suite), a dispatch whose
+// time by their output: while kinds are missing (chainfast::kIdentMs of flight by chainfast::FlightClock, reopened at each
+// mission load while kinds still miss, never during a suite), a dispatch whose
 // grid and bindings have a kind's shape makes DCS's bound shader object a candidate; the worker records it
 // on a deferred context of DCS's device together with our variant on synthetic inputs, the render thread
 // executes that list (ExecuteCommandList(.., TRUE) restores DCS's state) and reads it back without waiting,
@@ -49,7 +50,6 @@ const char* const kName[kKinds] = {"grass cull (grass2 grassPrepareCullDataTech)
                                    "IM2 counts clear (instancemanager2.clear)"};
 constexpr UINT kGrassRows = 32;      // variant grid: one group per row of 32 cells
 constexpr UINT kClearMin = 256;      // smaller clears stay stock (they are at the dispatch floor)
-constexpr ULONGLONG kIdentMs = 180000;
 constexpr int kMaxStock = 4;         // identified stock objects per kind
 
 // ---------------------------------------------------------------------------
@@ -143,6 +143,7 @@ ClearVar g_clear[kMaxClear];
 std::atomic<int> g_nClear{0};
 std::atomic<UINT> g_wantN{0};
 std::atomic<uint64_t> g_subs[kKinds], g_rearms{0}, g_probed{0};
+std::atomic<uint64_t> g_viaChainProbe{0};  // dispatches seen through chain_fast.h's identification probe
 std::string g_err;
 
 // Dispatch hook on DCS's immediate context.
@@ -187,6 +188,8 @@ inline ID3D11ComputeShader* ClearVariant(UINT n) {
 std::atomic<bool> g_identOn{false};
 bool g_identDone = false;
 ULONGLONG g_identT0 = 0;
+chainfast::FlightClock g_identClock;      // worker
+std::atomic<bool> g_identReopen{false};   // a mission event since the window ended (NoteMissionEvent)
 std::atomic<uint32_t> g_found{0};
 int g_candTested = 0, g_candRejected = 0;
 struct Cand {
@@ -541,22 +544,32 @@ void TakeCandidate(const FpJob& j, int cases) {
       k == kGrassCull ? "the 32-group variant (same count, same cell set)" : "the CPU reference");
 }
 
+void LogState(const char* tag);
 // Worker, every second: identification window, one fingerprint job at a time.
 void IdentTick(uint32_t mask) {
   const ULONGLONG now = GetTickCount64();
   const uint32_t missing = mask & ~g_found.load();
+  if (!g_identOn.load() && g_identDone && missing && g_identReopen.exchange(false)) {
+    g_identDone = false;
+    Log("shader fast: a mission load with kinds 0x%x still missing: identification opens again", missing);
+  }
   if (!g_identOn.load() && !g_identDone && missing && !g_benchRunningFlag.load()) {
     g_identOn = true;
     g_identDone = true;
+    g_identReopen = false;
     g_identT0 = now;
+    g_identClock.Start(now);
     Log("shader fast: kinds 0x%x: identifying DCS's shader objects at dispatch time by their output", missing);
   }
-  if (g_identOn.load() && (!missing || now - g_identT0 > kIdentMs || g_benchRunningFlag.load())) {
+  if (g_identOn.load()) g_identClock.Tick(now);
+  if (g_identOn.load() && (!missing || g_identClock.Expired(now) || g_benchRunningFlag.load())) {
     g_identOn = false;
-    Log("shader fast: identification ended after %llu s: kinds found 0x%x, %llu candidates queued, %d tested, %d "
-        "rejected",
-        static_cast<unsigned long long>((now - g_identT0) / 1000), g_found.load(),
+    Log("shader fast: identification ended after %llu s (%llu s of them in flight): kinds found 0x%x, %llu "
+        "candidates queued, %d tested, %d rejected",
+        static_cast<unsigned long long>((now - g_identT0) / 1000),
+        static_cast<unsigned long long>(g_identClock.flightMs / 1000), g_found.load(),
         static_cast<unsigned long long>(g_probed.load()), g_candTested, g_candRejected);
+    LogState("identification end");
   }
   if (FpJob* j = g_fpJob.load()) {
     const int st = j->state.load();
@@ -938,13 +951,20 @@ bool TryDispatch(ID3D11DeviceContext* c, UINT x, UINT y, UINT z, DispFn next) {
 }
 
 void STDMETHODCALLTYPE H_Dispatch(ID3D11DeviceContext* c, UINT x, UINT y, UINT z) {
+  // chain_fast.h's identification probe does not go in over this hook: it is run from here.
+  chainfast::IdProbeDispatch(c, x, y, z);
   const DispFn next = reinterpret_cast<DispFn>(g_orig);
   if (!TryDispatch(c, x, y, z, next)) next(c, x, y, z);
 }
+// Called from chain_fast.h's identification probe while that one holds the Dispatch entry.
+bool TryDispatchViaChainProbe(ID3D11DeviceContext* c, UINT x, UINT y, UINT z, DispFn next) {
+  if (!g_live.load(std::memory_order_relaxed)) return false;
+  g_viaChainProbe.fetch_add(1, std::memory_order_relaxed);
+  return TryDispatch(c, x, y, z, next);
+}
 
-// Our Dispatch hook goes back in where d3d11 wrote its own entry; another hook of this payload on top
-// (gpu_pass_timing.h's, chain_fast.h's identification probe) is left alone: the former calls TryDispatch,
-// under the latter DCS's dispatches simply run stock.
+// Our Dispatch hook goes back in where d3d11 wrote its own entry; another hook of this payload on top is left alone:
+// gpu_pass_timing.h's calls TryDispatch, chain_fast.h's identification probe calls TryDispatchViaChainProbe.
 void Rearm(ID3D11DeviceContext* c) {
   if (!g_vt || g_slot < 0 || *reinterpret_cast<void***>(c) != g_vt) return;
   void* cur = g_vt[g_slot];
@@ -979,6 +999,22 @@ void LogCounters(const char* tag) {
       tag, g_mask.load(), UsableMask(), static_cast<unsigned long long>(g_subs[kGrassCull].load()),
       static_cast<unsigned long long>(g_subs[kImClear].load()), static_cast<unsigned long long>(g_rearms.load()));
 }
+// The state line at the identification window's end and at shutdown: what was found and through which hook.
+void LogState(const char* tag) {
+  const char* entry = "not hooked";
+  if (g_vt && g_slot >= 0) {
+    void* cur = g_vt[g_slot];
+    entry = cur == reinterpret_cast<void*>(&H_Dispatch) ? "ours"
+            : InThisModule(cur)                          ? "another payload hook (calls ours)"
+                                                         : "d3d11's (re-armed at the next bind)";
+  }
+  Log("shader fast state (%s): kinds found 0x%x of mask 0x%x, usable 0x%x; identification %s; %llu dispatches seen "
+      "through ChainFast's probe; substitutions grass %llu, clear %llu; Dispatch entry %s",
+      tag, g_found.load(), g_mask.load(), UsableMask(), g_identOn.load() ? "running" : "not running",
+      static_cast<unsigned long long>(g_viaChainProbe.load()),
+      static_cast<unsigned long long>(g_subs[kGrassCull].load()),
+      static_cast<unsigned long long>(g_subs[kImClear].load()), entry);
+}
 
 // Worker thread, every second. mask = [D3D] ShaderFast (0 = off: TryDispatch passes everything through).
 void Apply(uint32_t mask) {
@@ -994,6 +1030,7 @@ void Apply(uint32_t mask) {
     if (g_slot < 0 || !chainfast::g_ctx) return;
     g_vt = *reinterpret_cast<void***>(chainfast::g_ctx);
     chainfast::g_onSet = &OnSet;
+    chainfast::g_onDispatch = &TryDispatchViaChainProbe;
     Log("shader fast: mask 0x%x; Dispatch hook re-armed from the CSSetShader hook", mask);
   }
   if (mask & (1u << kGrassCull)) PrepareGrass();
@@ -1055,14 +1092,23 @@ void VerifyPhase(int seconds, uint32_t cfgMask, std::atomic<uint64_t>& frameCoun
   Apply(cfgMask);
 }
 
+// A mission event (main/exports.inc OnMissionEvent, any thread): a window that ended with kinds missing opens again.
+void NoteMissionEvent() {
+  if (!g_identOn.load()) g_identReopen = true;  // a running window keeps counting flight time
+}
+
 void Shutdown() {
+  g_identReopen = false;
   g_live = false;
   g_mask = 0;
   g_verify = false;
   g_fpLive = false;
   g_identOn = false;
+  if (g_vt) LogState("shutdown");
   void (*me)(ID3D11DeviceContext*, ID3D11ComputeShader*) = &OnSet;
   chainfast::g_onSet.compare_exchange_strong(me, nullptr);
+  chainfast::TryDispFn meD = &TryDispatchViaChainProbe;
+  chainfast::g_onDispatch.compare_exchange_strong(meD, nullptr);
   Withdraw();
   Sleep(50);  // a dispatch already inside the hook finishes
   for (int k = 0; k < kKinds; ++k) {

@@ -295,6 +295,13 @@ void Run() {
   Apply(0x3);
   Check(g_vt && chainfast::g_ctx == ctx && chainfast::g_onSet.load() == &OnSet && g_grassVar.load() && g_identOn.load(),
         "shader fast: CSSetShader hook and re-arm callback in place, grass variant on the device, identification on");
+  // ChainFast's identification probe (its own window, opened at the same time) holds the Dispatch entry: neither hook
+  // goes in over the other, so ShaderFast must work through the probe (regress-07: it saw no dispatch at all and
+  // found nothing in about 1 session in 3).
+  const uint64_t via0 = g_viaChainProbe.load();
+  Check(chainfast::InstallId() &&
+            (*reinterpret_cast<void***>(ctx))[g_slot] == reinterpret_cast<void*>(&chainfast::H_IdDispatch),
+        "shader fast: ChainFast's identification probe holds the Dispatch entry");
   for (int i = 0; i < 600 && (g_found.load() != 0x3 || g_candTested < 4); ++i) {
     frame();
     Apply(0x3);
@@ -305,6 +312,20 @@ void Run() {
   Check(g_found.load() == 0x3 && g_candTested == 4 && g_candRejected == 2 && KindOf(gstock) == kGrassCull &&
             KindOf(cstock) == kImClear && KindOf(gdecoy) < 0 && KindOf(cdecoy) < 0,
         what);
+  {
+    void** vt = *reinterpret_cast<void***>(ctx);
+    const uint64_t s0 = g_subs[kGrassCull].load();
+    GrassOut o = GrassBufs(dev, 0);
+    BindGrass(ctx, gstock, in, 0, o);
+    ctx->Dispatch(1, 1, 1);
+    o.Release();
+    sprintf_s(what, "shader fast: under ChainFast's probe the kinds were found and a grass dispatch is substituted "
+              "(%llu dispatches through the probe)", static_cast<unsigned long long>(g_viaChainProbe.load() - via0));
+    Check(vt[g_slot] == reinterpret_cast<void*>(&chainfast::H_IdDispatch) && g_viaChainProbe.load() > via0 &&
+              g_subs[kGrassCull].load() == s0 + 1,
+          what);
+    chainfast::WithdrawId();  // ChainFast's window ends: our hook goes in at the next bind (checked below)
+  }
 
   // --- substitution: grass
   auto runGrass = [&](size_t i, std::vector<uint32_t>& a0, std::vector<uint32_t>& a1) {
@@ -417,6 +438,50 @@ void Run() {
               !g_grassVar.load() && chainfast::g_onSet.load() == nullptr && KindOf(gstock) < 0,
           "shader fast: shutdown restores the Dispatch entry and releases kernels and variants");
     chainfast::Shutdown();
+  }
+  // --- identification windows count flight time only, and reopen at a mission load while kinds miss (regress-07: a
+  //     window opened in the main menu ran out there and the session had no ShaderFast / ChainFast)
+  {
+    chainfast::FlightClock fc;
+    const uint64_t q0 = g_quadFrame.load();
+    fc.Start(1000);
+    for (ULONGLONG t = 2000; t <= 400000; t += 1000) fc.Tick(t);  // 400 s in the menu: no quad frame
+    const bool menuOk = fc.flightMs == 0 && !fc.Expired(400000);
+    for (ULONGLONG t = 401000; t <= 580000; t += 1000) {  // 180 s of flight
+      g_quadFrame.fetch_add(3);
+      fc.Tick(t);
+    }
+    const bool flyOk = fc.flightMs == 180000 && !fc.Expired(580000);
+    g_quadFrame.fetch_add(3);
+    fc.Tick(581000);
+    const bool endOk = fc.Expired(581000);
+    chainfast::FlightClock wall;
+    wall.Start(0);
+    const bool backstop = !wall.Expired(chainfast::kIdentWallMs) && wall.Expired(chainfast::kIdentWallMs + 1);
+    Check(menuOk && flyOk && endOk && backstop,
+          "identification clock: 400 s in the menu count nothing, 180 s of flight end the window, 30 min backstop");
+    // ShaderFast's window: opened, 200 s of menu (the old 180 s wall-clock limit) leave it open.
+    IdentTick(0x3);
+    const bool opened = g_identOn.load();
+    g_identT0 -= 200000;
+    g_identClock.t0 -= 200000;
+    g_identClock.last -= 200000;
+    IdentTick(0x3);
+    const bool stillOn = g_identOn.load();
+    g_quadFrame.fetch_add(1);
+    g_identClock.flightMs = chainfast::kIdentMs + 1;  // flown past the window
+    IdentTick(0x3);
+    const bool ended = !g_identOn.load();
+    IdentTick(0x3);
+    const bool staysClosed = !g_identOn.load();
+    NoteMissionEvent();
+    IdentTick(0x3);
+    const bool reopened = g_identOn.load();
+    Check(opened && stillOn && ended && staysClosed && reopened,
+          "shader fast: 200 s in the menu keep the window open, flight time ends it, a mission load reopens it while "
+          "kinds miss");
+    Shutdown();
+    g_quadFrame = q0;
   }
   shadowinst::g_device = saveDev;
   sfilt::g_ctx = saveSf;
