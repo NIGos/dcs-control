@@ -6,17 +6,17 @@ window.runWebSmoke = async function() {
   // Smoothness buffer and stays in the profile file only.
   const PROFILE_FIELDS = [
     'quadViews','gaze','quadSaccadeLead','quadSaccadeTail','quadGazeStabilize','quadLostGazeEase','quadTurbo','quadViewsLayerDirectory','foveaSource','quadFocusScale','pimaxPeripheral','pimaxHorizontalFov','pimaxVerticalFov','pimaxVerticalOffset',
-    'quadEdgeBlend','quadRoundFocus','quadEdgeMatch','quadSharpening','quadSharpenTaper','quadPeripheryContrast',
+    'quadEdgeBlend','quadEdgeMatch','quadRoundFocus','quadSharpening','quadSharpenTaper','quadPeripheryContrast',
     'neuralRendering','neuralRuntimePath','keepOtherDxgi','neuralFocusArea','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity','neuralStyle',
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
-    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenDeepPipeline','frameGenFoveated','frameGenFocusLayer','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
-    'frameGenHudSymbology','smoothCursor','frameGenParallelEyes','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
+    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenDeepPipeline','frameGenParallelEyes','frameGenFoveated','frameGenFocusLayer','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
+    'frameGenHudSymbology','smoothCursor','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
     'cpuBoost','boostDcsPriority','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVram','freeVramApps','freeVramReopen',
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
-    'engineOptimizations','engineReleaseIdleDlss','engineShadowCache','engineWaterSkip','engineIdleEffectSkip','engineRecordersEmulatedLists','engineGBufferRecorder','engineModelAllocator','engineShaderTimeCache','engineTaskQueueClock','boostPrefetch','engineShadowRecorder',
+    'engineOptimizations','engineReleaseIdleDlss','engineRecordersEmulatedLists','engineGBufferRecorder','engineModelAllocator','engineShaderTimeCache','engineTaskQueueClock','boostPrefetch','engineShadowRecorder',
     'engineShadowInstancing','engineCostWeights','enginePartitionBoost','engineTextureDedupe','engineEffectBufferSkip','enginePlainCounter','engineFrameHeap',
-    'engineStateFilter','engineFastShaderPaths','engineBeeps','engineShaderCachePrewarm','engineShaderCompileWorkers','engineTimerRefreshUs','engineDevMode','engineDevPayloadPath','engineDevIniPath','engineDiagnosticHooks',
+    'engineStateFilter','engineFastShaderPaths','engineBeeps','engineShadowCache','engineWaterSkip','engineIdleEffectSkip','engineShaderCachePrewarm','engineShaderCompileWorkers','engineTimerRefreshUs','engineDevMode','engineDevPayloadPath','engineDevIniPath','engineDiagnosticHooks',
     'dcs','options','keepDcsLauncher',
     'eyeDistance','eyeDistanceMm','pupilShift','pupilShiftEyeRadiusMm','pupilShiftVirtualImageM','peripheryStability','peripheryStabilityStrength','farDepth','farDepthPreset',
     'depthBoost','ownAircraftTrueDepth','depthBoostMode','depthBoostRealisticMax','depthBoostFarStartM','depthBoostFarFullM','depthBoostMax','depthBoostNearM',
@@ -28,7 +28,7 @@ window.runWebSmoke = async function() {
     'headsetPanel','diagnosticOverlayAtStart','headsetPanelPosition','diagnosticVram','diagnosticOverlayKey','engineToggleKey','neuralToggleKey','pupilShiftToggleKey','farDepthToggleKey',
     'depthBoostToggleKey','colorModeKey','runtimeManifestPath'];
   // Every folded disclosure (details.advanced), named by its id or the first setting inside it.
-  const ADVANCED_FOLDS = ['quadViewsLayerDirectory','neuralAdvanced','showOverlay','engineGBufferRecorder','engineShaderCachePrewarm','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
+  const ADVANCED_FOLDS = ['quadSaccadeLead','quadViewsLayerDirectory','neuralAdvanced','showOverlay','engineGBufferRecorder','engineShadowCache','engineShaderCachePrewarm','engineTimerRefreshUs','colorFixExposureEv','colorEnhancedExposureEv',
     'nightVisionBlue','gazeDofMaxArcmin','gVisionMode','pupilShiftVirtualImageM','depthBoostFarStartM','runtimeManifestPath'];
   /** " (missing: …; extra: …)" between an expected list and the actual one; '' when they hold the same names once each. */
   const listDiff = (expected,actual) => { const missing = expected.filter(x => !actual.includes(x)), extra = actual.filter(x => !expected.includes(x)), twice = actual.filter((x,i) => actual.indexOf(x) !== i);
@@ -307,7 +307,8 @@ window.runWebSmoke = async function() {
         ui.setBusy(true); ui.invalidate(); const locked = sum.disabled && $('listsum-freeVramApps').disabled; ui.setBusy(false);
         check('A folded program list cannot be opened while a command runs',locked && !sum.disabled && !$('listsum-freeVramApps').disabled && $('input-boostBackgroundApps').hidden); }
       { const list = p => $('setting-'+p).parentElement;
-        check('Runs of simple switches share one compact toggle list',list('quadSaccadeLead').classList.contains('toggle-list') && ['quadGazeStabilize','quadTurbo'].every(p => list(p) === list('quadSaccadeLead'))
+        check('Runs of simple switches share one compact toggle list',list('quadSaccadeLead').classList.contains('toggle-list') && ['quadSaccadeTail','quadGazeStabilize','quadLostGazeEase'].every(p => list(p) === list('quadSaccadeLead')) && list('quadSaccadeLead').parentElement === $('setting-quadSaccadeLead').closest('details') && !$('setting-quadTurbo').closest('details')
+          && list('engineWaterSkip').classList.contains('toggle-list') && ['engineShadowCache','engineIdleEffectSkip'].every(p => list(p) === list('engineWaterSkip')) && list('engineWaterSkip').parentElement === $('setting-engineWaterSkip').closest('details')
           && list('showOverlay').classList.contains('toggle-list') && ['diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm'].every(p => list(p) === list('showOverlay')) && list('showOverlay').parentElement === $('setting-showOverlay').closest('details'));
         const parts = [...ui.ENGINE_PARTS,'boostPrefetch','engineBeeps'];
         check('The individual engine optimizations share one toggle list inside their fold',list('engineGBufferRecorder').classList.contains('toggle-list') && parts.every(p => list(p) === list('engineGBufferRecorder')) && list('engineGBufferRecorder').parentElement === $('setting-engineGBufferRecorder').closest('details')); }
@@ -319,6 +320,9 @@ window.runWebSmoke = async function() {
         const onParts = ui.ENGINE_PARTS.filter(k => ui.profile[k]).length + (ui.profile.boostPrefetch === 'Skip' ? 1 : 0);
         check('The DLSS 5 corrections fold counts the settings away from their defaults, and the engine fold its parts',/^(All at defaults|\d+ changed)$/.test(nv) && nv2 !== nv && /^(All at defaults|\d+ changed)$/.test(nv2)
           && $('neuralAdvanced').querySelector(':scope > summary > .fold-value').textContent === nv && engineFold.textContent === `${onParts} of ${ui.ENGINE_PARTS.length + 1} on`); }
+      { const value = p => $('setting-'+p).closest('details').querySelector(':scope > summary > .fold-value').textContent, gpu = ['engineShadowCache','engineWaterSkip','engineIdleEffectSkip'].filter(k => ui.profile[k]).length;
+        const tracked = ui.profile.quadViews === 'QuadViewsFoveated' && !ui.profile.quadViewsLayerDirectory && ui.profile.gaze === 'EyeTracked', gaze = ['quadSaccadeLead','quadSaccadeTail','quadGazeStabilize','quadLostGazeEase'].filter(k => ui.profile[k]).length;
+        check('The GPU savings fold counts its switches; the eye-tracking fold counts its own, or says it needs eye tracking',value('engineWaterSkip') === `${gpu} of 3 on` && value('quadSaccadeLead') === (tracked ? `${gaze} of 4 on` : 'Eye tracked only')); }
       { const cards = ['engineControls','pupilControls','stabilityControls','farDepthControls','panelControls','packageCard','updatesCard','dlssFocusCard'];
         const bad = cards.filter(id => { const card = $(id), b = card?.querySelector('.card-heading .more-toggle'), detail = b && $(b.getAttribute('aria-controls'));
           return !b || b.type !== 'button' || b.getAttribute('aria-expanded') !== 'false' || !detail || !detail.hidden || !detail.textContent.trim() || !card.querySelector('.card-heading').contains(detail); });
