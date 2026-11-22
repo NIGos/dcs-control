@@ -643,8 +643,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     if (offline && doc.RootElement.TryGetProperty("data", out var stuckData) && stuckData.ValueKind == JsonValueKind.Object
                         && stuckData.TryGetProperty("stuck", out var stuckNow)) _offlineStuck = stuckNow.ValueKind == JsonValueKind.String ? stuckNow.GetString() : null;
                     var runningNow = DcsRunning();
-                    // Off the window's thread: asking a DCS that has just stopped answering waits up to 5 seconds.
-                    var stuckFor = offline || !runningNow ? DcsStuck(runningNow) : await Task.Run(() => DcsStuck(true));
+                    // While DCS runs, the watch's own 8 s reading (one at a time: asking a DCS that does not answer waits
+                    // up to 5 seconds), not a second one beside it; gone, the count starts again at once.
+                    var stuckFor = runningNow ? DcsStuckLast(true) : DcsStuck(false);
                     return Reply(statusId, new { dcsRunning = runningNow, dcsStuck = stuckFor });
                 }
             }
