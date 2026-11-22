@@ -1,0 +1,41 @@
+Opaque focus rim (dcsvr_two_layers_alpha=3, after 0024; native/quadviews/dcsvr_twolayer_ps.hlsl): 0024 sent the focus layer
+with no blend flags and alpha 1 up to its edge. On the Pimax runtime that drew a fixed coloured line along the layer's
+bottom edge, following the gaze (user, headset, 2026-11-22). The rig (artifacts/opaque-live) showed the submitted focus
+layer clean on real and generated frames (bottom rows: no step above 3 codes), the undistorted compositor mirror clean,
+and the distorted mirror one row with blue 0 and the next with red 255 along the focus rectangle's bottom edge: the
+runtime's distortion pass reads past the edge of a layer that does not blend. Mode 0, whose alpha is 0 at the edges,
+never showed it. Now mode 3 goes out with mode 0's flags (SOURCE_ALPHA | UNPREMULTIPLIED) and the focus pass writes alpha 1
+except in a rim of 1.5 % of the rectangle per side: 0 in its outer half, rising to 1 across its inner half, the colour
+there chosen so that the runtime's blend over the periphery layer gives the composed colour (the colour is the composed
+one where alpha is 0, so a display path that ignores the alpha still shows the right image). The log line says so.
+0, 1 and 2 are unchanged, byte for byte (tests/quadviews-composition, which now also checks the rim: every border texel
+transparent, the blend in the ramp within 1 code of the composition).
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 029bd2d..f5efda4 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -1954,10 +1954,11 @@ namespace openxr_api_layer {
+                                     projectionAllocator.back().layerFlags &= ~XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+                                 }
+                                 if (m_dcsvrTwoLayersAlpha == 3) {
+-                                    // DCSVR opaque focus: no blending in the runtime at all; the focus pass wrote the
+-                                    // composed image over the whole focus rectangle.
+-                                    projectionAllocator.back().layerFlags &= ~(XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+-                                                                               XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT);
++                                    // DCSVR opaque focus (0025): blended like 0 (SOURCE_ALPHA | UNPREMULTIPLIED), but the
++                                    // focus pass wrote the composed image with alpha 1 everywhere except a thin outer rim
++                                    // (alpha 0, colour the periphery). Without blending the Pimax runtime drew a coloured
++                                    // line along the layer's bottom edge (its distortion pass reads past the edge).
++                                    projectionAllocator.back().layerFlags |= XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+                                 }
+                                 projectionAllocator.back().views = projectionViewAllocator.back().data();
+                                 projectionAllocator.back().viewCount = xr::StereoView::Count;
+@@ -4840,7 +4841,7 @@ namespace openxr_api_layer {
+                         const int dcsvrAlpha = std::stoi(value);
+                         m_dcsvrTwoLayersAlpha = dcsvrAlpha >= 1 && dcsvrAlpha <= 3 ? dcsvrAlpha : 0;
+                         Log(fmt::format("DCSVR two layers: focus alpha {}\n",
+-                                        m_dcsvrTwoLayersAlpha == 3   ? "none, opaque focus (composed in the focus pass)"
++                                        m_dcsvrTwoLayersAlpha == 3   ? "opaque focus (composed in the focus pass, alpha 1 inside a transparent rim)"
+                                         : m_dcsvrTwoLayersAlpha == 2 ? "premultiplied, sRGB swapchain"
+                                         : m_dcsvrTwoLayersAlpha == 1 ? "premultiplied"
+                                                                      : "unpremultiplied"));

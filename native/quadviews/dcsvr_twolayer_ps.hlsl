@@ -24,14 +24,23 @@
 // The runtime probe (tools/runtime-probe) measured the Pimax compositor blending every variant on the stored (encoded)
 // values; 1 and 2 are the OpenXR default convention, which needs no UNPREMULTIPLIED handling in the compositor.
 //
-// Opaque focus (dcsvr_two_layers_alpha 3, patches/quadviews/0024-opaque-focus.patch; dcsvrEdge.w = 1, z 0, focus pass
-// only): the runtime never blends. The focus layer is submitted opaque over its whole rectangle and the focus pass
-// writes the composed result there itself: the focus colour as in 0 (edge match tent, Far depth, fill) blended over the
-// periphery image (t3, the source the periphery layer shows) with the composition's fade, focus * a + periphery * (1 - a),
-// alpha 1. The periphery is read where the composition reads it for the same direction: the pixel's (moved) focus uv
-// times dcsvrBand.xy plus dcsvrBand.zw (the focus view's span and offset in the periphery's uv), bilinear. Where the fade
-// is 1 the colour is the focus colour exactly; outside the shape (the corners of a round focus) it is the periphery.
-// The periphery layer stays as in 0. dcsvrEdge.w 0: the pass is unchanged.
+// Opaque focus (dcsvr_two_layers_alpha 3, patches/quadviews/0024-opaque-focus.patch and 0025-opaque-focus-rim.patch;
+// dcsvrEdge.w = 1, z 0, focus pass only): the runtime does not do the fade. The focus pass writes the composed result
+// over the whole focus rectangle itself: the focus colour as in 0 (edge match tent, Far depth, fill) blended over the
+// periphery image (t3, the source the periphery layer shows) with the composition's fade, focus * a + periphery * (1 - a).
+// The periphery is read where the composition reads it for the same direction: the pixel's (moved) focus uv times
+// dcsvrBand.xy plus dcsvrBand.zw (the focus view's span and offset in the periphery's uv), bilinear. Where the fade is 1
+// the colour is the focus colour exactly; outside the shape (the corners of a round focus) it is the periphery.
+// Alpha is 1, except in a rim of kDcsvrOpaqueRim of the rectangle on each side (0025): 0 in its outer half, rising to 1
+// across its inner half. The layer goes out with mode 0's flags. Where alpha a is between 0 and 1 the colour is chosen so
+// that the runtime's blend over the periphery layer (on the encoded values, as measured) gives the composed colour:
+// P + (C - P) / a, P the periphery, C the composed colour, encoded, a as stored (8 bits). Where a is 0 the colour is
+// the composed one: the periphery layer shows there (the composed colour is the periphery to within the fade's last
+// percent there for a round focus area), and the same colour shows if a display path ever ignores the alpha (the
+// flickering rectangle of mode 0, whose transparent texels hold the focus image). Submitted with no blending at
+// all (0024 alone) the Pimax runtime drew a coloured line along the layer's bottom edge: its distortion pass reads
+// past the edge of an opaque layer (rig 2026-11-22: the submitted pixels clean, the distorted mirror one row blue 0
+// and the next red 255). The periphery layer stays as in 0. dcsvrEdge.w 0: the pass is unchanged.
 //
 // Without Far depth every texel is a Load at the pixel (1:1, no filtering).
 //
@@ -76,6 +85,10 @@ Texture2D plainFocus : register(t1);
 Texture2D<float2> dcsvrDisparityField : register(t2);
 Texture2D bandPeriphery : register(t3); // opaque focus: the periphery image, for the focus pass
 #include "dcsvr_depthwarp_ps.hlsli"
+
+// Opaque focus (0025): the rim, a share of the focus rectangle on each side (1.5 %: 29 rows of 1928), alpha 0 in its
+// outer half.
+static const float kDcsvrOpaqueRim = 0.015;
 
 float3 DcsvrLinearToSrgb(float3 c) {
     c = saturate(c);
@@ -178,13 +191,21 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0, 
     [branch] if (dcsvrEdge.w != 0) {
         // Opaque focus: the composition's blend over the periphery (black for debug_focus_view, as it shows the focus
         // alone), in the sources' own values, then encoded as in 0.
+        // The rim's alpha by the pixel's own place in the layer (not the moved one).
+        const float2 rimDistance = min(texcoord, 1 - texcoord) / kDcsvrOpaqueRim;
+        const float rimAlpha = round(saturate(2 * min(rimDistance.x, rimDistance.y) - 1) * 255) / 255;
         float4 periphery = 0;
-        [branch] if (dcsvrDebug.x == 0 && alpha < 1) {
+        [branch] if (dcsvrDebug.x == 0 && (alpha < 1 || rimAlpha < 1)) {
             periphery = bandPeriphery.SampleLevel(sourceSampler, layer1TexCoord * dcsvrBand.xy + dcsvrBand.zw, 0);
         }
         const float3 premultiplied = color.rgb * alpha;
         const float3 composed = premultiplied + periphery.rgb * (1 - alpha);
-        return float4(encodeSrgb != 0 ? DcsvrLinearToSrgb(composed) : saturate(composed), 1);
+        const float3 composedEncoded = encodeSrgb != 0 ? DcsvrLinearToSrgb(composed) : saturate(composed);
+        [branch] if (rimAlpha > 0 && rimAlpha < 1) {
+            const float3 peripheryEncoded = encodeSrgb != 0 ? DcsvrLinearToSrgb(periphery.rgb) : saturate(periphery.rgb);
+            return float4(saturate(peripheryEncoded + (composedEncoded - peripheryEncoded) / rimAlpha), rimAlpha);
+        }
+        return float4(composedEncoded, rimAlpha);
     }
     float3 rgb = encodeSrgb != 0 ? DcsvrLinearToSrgb(color.rgb) : saturate(color.rgb);
     [branch] if (dcsvrEdge.z >= 2) {
