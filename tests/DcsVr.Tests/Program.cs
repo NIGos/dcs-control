@@ -3210,23 +3210,22 @@ Test("Other limiters and motion smoothing stay manual checks", () =>
     var fovOfxr = ConfigurationWriters.Ofxr(fov);
     Require(ConfigurationWriters.QuadViews(fov).Contains("dcsvr_two_layers=2") && fovOfxr.Contains("\nfoveated_layers=1\n") && fovOfxr.Contains("\nfoveated_uncovered_fill=2\n") && fovOfxr.Contains("\nfoveated_periphery_flow_scale=100\n") && fovOfxr.Contains("\ndeep_pipeline=1\n") && fovOfxr.Contains("\npipelined_deep_hold=1\n"), "two layers, per-layer generation, the buffer as chosen");
     Require(ConfigurationWriters.Ofxr(fov with { BidirectionalFlow = true }).Contains("\nfoveated_uncovered_fill=1\n") && ConfigurationWriters.Ofxr(fov with { FrameGenDeepPipeline = false }).Contains("\ndeep_pipeline=0\n"), "the periphery-flow fill is not for bidirectional flow");
-    // Focus layer: Standard writes settings.cfg as before the option (no alpha line, array swapchains); the variants change
-    // only their own line; without foveated frame generation the choice writes nothing; an unknown value is refused.
+    // Focus layer: no choice any more. Foveated frame generation always writes Opaque focus (dcsvr_two_layers=2 with
+    // dcsvr_two_layers_alpha=3), without it nothing; OFXR's file does not depend on it. A draft or preset of an earlier 0.7
+    // build with frameGenFocusLayer (any value, Standard included) loads, the key is dropped, and Opaque focus is written.
     {
-        var standard = ConfigurationWriters.QuadViews(fov);
-        string Quad(FocusLayerMode m) => ConfigurationWriters.QuadViews(fov with { FrameGenFocusLayer = m });
-        Require(fov.FrameGenFocusLayer == FocusLayerMode.Standard && Quad(FocusLayerMode.Standard) == standard && standard.Contains("\ndcsvr_two_layers=2\ndcsvr_saccade_widening=") && !standard.Contains("dcsvr_two_layers_alpha"), "Standard: settings.cfg as before");
-        Require(Quad(FocusLayerMode.Premultiplied) == standard.Replace("\ndcsvr_two_layers=2\n", "\ndcsvr_two_layers=2\ndcsvr_two_layers_alpha=1\n")
-            && Quad(FocusLayerMode.PremultipliedSrgb) == standard.Replace("\ndcsvr_two_layers=2\n", "\ndcsvr_two_layers=2\ndcsvr_two_layers_alpha=2\n")
-            && Quad(FocusLayerMode.PerEye) == standard.Replace("\ndcsvr_two_layers=2\n", "\ndcsvr_two_layers=1\n")
-            && Quad(FocusLayerMode.OpaqueFocus) == standard.Replace("\ndcsvr_two_layers=2\n", "\ndcsvr_two_layers=2\ndcsvr_two_layers_alpha=3\n"), "each variant changes its own line");
-        foreach (var m in Enum.GetValues<FocusLayerMode>())
-            Require(ConfigurationWriters.QuadViews(fov with { FrameGenFoveated = false, FrameGenFocusLayer = m }) == ConfigurationWriters.QuadViews(fov with { FrameGenFoveated = false })
-                && ConfigurationWriters.Ofxr(fov with { FrameGenFocusLayer = m }) == fovOfxr, "the choice writes nothing without foveated frame generation, and nothing for OFXR");
-        Require(ProfileValidation.Validate(fov with { FrameGenFocusLayer = (FocusLayerMode)9 }).Any(i => i.Code == "framegen-focus-layer" && i.Severity == IssueSeverity.Error)
-            && !ProfileValidation.Validate(fov).Any(i => i.Code == "framegen-focus-layer"), "an unknown focus layer is refused");
-        Require(JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"x\",\"name\":\"X\"}").FrameGenFocusLayer == FocusLayerMode.Standard
-            && JsonData.Deserialize<VrProfile>("{\"schemaVersion\":1,\"id\":\"x\",\"name\":\"X\",\"frameGenFocusLayer\":\"PerEye\"}").FrameGenFocusLayer == FocusLayerMode.PerEye, "an older profile gets Standard");
+        var quad = ConfigurationWriters.QuadViews(fov);
+        Require(quad.Contains("\ndcsvr_two_layers=2\ndcsvr_two_layers_alpha=3\ndcsvr_saccade_widening="), "foveated frame generation: Opaque focus");
+        var off = ConfigurationWriters.QuadViews(fov with { FrameGenFoveated = false });
+        Require(!off.Contains("dcsvr_two_layers_alpha") && !off.Contains("dcsvr_two_layers=1") && !off.Contains("dcsvr_two_layers=2"), "without foveated frame generation no two-layer line");
+        foreach (var old in new[] { "Standard", "Premultiplied", "PremultipliedSrgb", "PerEye", "OpaqueFocus" })
+        {
+            var oldJson = JsonData.Serialize(fov).Replace("\"frameGenFoveated\": true", "\"frameGenFoveated\": true, \"frameGenFocusLayer\": \"" + old + "\"");
+            Require(oldJson.Contains("\"frameGenFocusLayer\": \"" + old + "\""), "the older draft carries frameGenFocusLayer");
+            var loaded = JsonData.Deserialize<VrProfile>(oldJson);
+            Require(loaded.UsesFoveatedFrameGen && ConfigurationWriters.QuadViews(loaded) == quad && ConfigurationWriters.Ofxr(loaded) == fovOfxr, "an older Focus layer " + old + " loads and ends up as Opaque focus");
+            Require(!JsonData.Serialize(loaded).Contains("frameGenFocusLayer", StringComparison.OrdinalIgnoreCase), "frameGenFocusLayer is not written again");
+        }
     }
     // A flight starts with a shorter hitch when the private images are named once during the loading screen and the
     // runtime swapchains are kept through the load (measured 2026-11-16: 105 ms against 483-528).
@@ -5117,7 +5116,6 @@ Test("Every key the app writes is read by its component (scripts/written-keys.tx
     {
         new VrProfile(), vr, vr with { Gaze = GazeMode.Fixed }, vr with { QuadViews = QuadProvider.None }, vr with { FrameGen = FrameGeneration.FidelityFx },
         vr with { EngineOptimizations = false }, vr with { PupilShift = false, DepthBoost = false, GazeDof = false, GVisionUseGaze = false }, vr with { Runtime = RuntimeKind.SboysSteamVr },
-        vr with { FrameGenFocusLayer = FocusLayerMode.Premultiplied },
     };
     var keys = new SortedSet<string>(StringComparer.Ordinal);
     void Add(string writer, string ini)
@@ -5229,25 +5227,25 @@ Test("Three views is parked in 0.7: a profile saved with engineThreeViews=true l
 Test("Profiles from 0.6.7 load in 0.7: without the 0.7 settings (and with 0.6.7's headset tracking key) they take the 0.7 defaults", () =>
 {
     // The settings new in 0.7 (VrProfile on foveated-fg, the 0.6.7 line, has none of them).
-    string[] new07 = ["frameGenFocusLayer", "frameGenParallelEyes", "quadEdgeMatch", "quadSaccadeTail", "quadLostGazeEase", "engineFastShaderPaths",
+    string[] new07 = ["frameGenParallelEyes", "quadEdgeMatch", "quadSaccadeTail", "quadLostGazeEase", "engineFastShaderPaths",
         "engineThreeViews", "engineWaterSkip", "engineIdleEffectSkip"];
     var node = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Nvidia, FrameGenFoveated = true }))!.AsObject();
     foreach (var key in new07) Require(node.Remove(key), "0.7 still writes " + key);
     node["tracking"] = "None";
     var loaded = JsonData.Deserialize<VrProfile>(node.ToJsonString());
     var defaults = new VrProfile();
-    Require(loaded.FrameGenFocusLayer == FocusLayerMode.Standard && !loaded.FrameGenParallelEyes && !loaded.QuadEdgeMatch && !loaded.EngineThreeViews
+    Require(!loaded.FrameGenParallelEyes && !loaded.QuadEdgeMatch && !loaded.EngineThreeViews
         && !loaded.EngineWaterSkip && !loaded.EngineIdleEffectSkip, "the off-by-default 0.7 settings are off");
     Require(loaded.QuadSaccadeTail == defaults.QuadSaccadeTail && loaded.QuadLostGazeEase == defaults.QuadLostGazeEase
         && loaded.EngineFastShaderPaths == defaults.EngineFastShaderPaths, "the on-by-default 0.7 settings take the 0.7 defaults");
-    Require(loaded.UsesFoveatedFrameGen && ConfigurationWriters.QuadViews(loaded).Contains("dcsvr_two_layers=2") && !ConfigurationWriters.QuadViews(loaded).Contains("dcsvr_two_layers_alpha"),
-        "foveated frame generation from 0.6.7 keeps the Standard focus layer (the settings.cfg 0.6.7 wrote)");
+    Require(loaded.UsesFoveatedFrameGen && ConfigurationWriters.QuadViews(loaded).Contains("\ndcsvr_two_layers=2\ndcsvr_two_layers_alpha=3\n"),
+        "foveated frame generation from 0.6.7 is sent as Opaque focus, as every 0.7 profile");
 });
 Test("Profiles for 0.6.7: no derived value new since 0.6.7 is written (0.6.7 refuses keys it does not know); drafts that have them still load", () =>
 {
     // The derived (get-only) values 0.6.7 itself wrote, and so reads: no other may be written (checked against 0.6.7's
-    // loader, branch foveated-fg, with profiles saved by this build). The 0.7 settings (frameGenFocusLayer,
-    // frameGenParallelEyes, quadEdgeMatch, quadSaccadeTail, quadLostGazeEase, engineFastShaderPaths, engineThreeViews,
+    // loader, branch foveated-fg, with profiles saved by this build). The 0.7 settings (frameGenParallelEyes,
+    // quadEdgeMatch, quadSaccadeTail, quadLostGazeEase, engineFastShaderPaths, engineThreeViews,
     // engineWaterSkip, engineIdleEffectSkip) and the Quest 3 VD route are still unknown to 0.6.7 (docs/INTERFACE.md).
     string[] derived067 = ["boostHelperElevated", "depthBoostActiveMax", "neuralEdgeFeather", "quadSaccadeLeadMs", "usesAdaptiveCadence", "usesBoostHelper",
         "usesBundledQuadViews", "usesCentralNeuralArea", "usesCheeky", "usesColorMode", "usesColorModeKey", "usesDepthBoost", "usesEngineModule", "usesEyeTrackedVr",

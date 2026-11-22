@@ -10,7 +10,7 @@ window.runWebSmoke = async function() {
     'neuralRendering','neuralRuntimePath','keepOtherDxgi','neuralFocusArea','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity','neuralStyle',
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
-    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenDeepPipeline','frameGenParallelEyes','frameGenFoveated','frameGenFocusLayer','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
+    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenDeepPipeline','frameGenParallelEyes','frameGenFoveated','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
     'frameGenHudSymbology','smoothCursor','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
     'cpuBoost','boostDcsPriority','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVram','freeVramApps','freeVramReopen',
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
@@ -331,7 +331,7 @@ window.runWebSmoke = async function() {
         check('Card subtitles with more to say keep it behind More'+(bad.length ? ' ('+bad.join(', ')+')' : ''),!bad.length);
         const b = $('packageCard').querySelector('.card-heading .more-toggle'), detail = $(b.getAttribute('aria-controls')); b.click(); const opened = !detail.hidden && b.textContent === 'Less'; b.click();
         check('More works on the static cards of the page too',opened && detail.hidden && b.textContent === 'More' && detail.textContent.includes('DCS starts its log anew')); }
-      { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-engineRecordersEmulatedLists','setting-frameGenHudSymbology','setting-frameGenFoveated','setting-frameGenFocusLayer',
+      { const tagged = ['pupilControls','stabilityControls','depthControls','farDepthControls','gazeDofControls','setting-engineShadowCache','setting-engineRecordersEmulatedLists','setting-frameGenHudSymbology','setting-frameGenFoveated',
           'setting-quadSaccadeTail','setting-quadLostGazeEase','setting-quadEdgeMatch','setting-engineWaterSkip','setting-engineIdleEffectSkip','setting-frameGenParallelEyes'];
         const tags = [...document.querySelectorAll('#pages .tag')].filter(t => t.textContent.trim() === 'EXPERIMENTAL' && !t.closest('#page-guide'));
         check('EXPERIMENTAL stays on exactly its sixteen settings and cards',tagged.every(id => [...$(id).querySelectorAll('.tag')].some(t => t.textContent.trim() === 'EXPERIMENTAL')) && tags.length === tagged.length); }
@@ -723,12 +723,10 @@ window.runWebSmoke = async function() {
       const needs = () => ui.checkItems().find(c => c.id === 'foveated-fg-needs');
       await set({desktop:false,frameGen:'Nvidia',runtime:'Pimax',quadViews:'QuadViewsFoveated',quadViewsLayerDirectory:null,frameGenFoveated:false});
       const can = why() === null && !needs();
-      // Focus layer: only while foveated frame generation runs, Standard by default, four choices.
-      const layer = $('setting-frameGenFocusLayer'), layerInput = $('input-frameGenFocusLayer'), hiddenOff = layer.hidden;
-      await set({frameGenFoveated:true});
-      const shown = !layer.hidden && !layerInput.disabled && (ui.profile.frameGenFocusLayer ?? 'Standard') === 'Standard' && [...layerInput.options].map(o => o.value).join() === 'Standard,Premultiplied,PremultipliedSrgb,PerEye,OpaqueFocus' && $('help-frameGenFocusLayer').textContent.includes('next DCS start');
-      await set({frameGenFoveated:false});
-      check('Focus layer shows only while foveated frame generation runs, Standard by default, and applies at the next DCS start',hiddenOff && shown && layer.hidden);
+      // Focus layer: no choice any more (foveated frame generation always sends Opaque focus), with it on or off.
+      const noLayerOff = !$('setting-frameGenFocusLayer'); await set({frameGenFoveated:true});
+      const noLayerOn = !$('setting-frameGenFocusLayer') && !ui.fields.some(f => f.path === 'frameGenFocusLayer'); await set({frameGenFoveated:false});
+      check('Foveated frame generation has no Focus layer choice (Opaque focus is built in)',noLayerOff && noLayerOn);
       await set({frameGen:'FidelityFx'}); const other = why() === 'NVIDIA frame generation only.' && !needs();
       await set({frameGen:'Nvidia',quadViews:'PimaxNative'}); const native = String(why()).includes('bundled Quad Views');
       await set({frameGenFoveated:true}); const idle = needs();

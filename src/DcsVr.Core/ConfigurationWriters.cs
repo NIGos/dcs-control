@@ -73,16 +73,13 @@ public static class ConfigurationWriters
     /// build without that export the layer reads the gaze from the focus views' centres, which the offset would move.</summary>
     private static string QuadOffsetLines(VrProfile p) => p.QuadVerticalOffset == 0 || !double.IsFinite(p.QuadVerticalOffset) || !p.UsesBundledQuadViews ? "" :
         $"\nvertical_fixed_offset={Number(Math.Clamp(p.QuadVerticalOffset, -.5, .5))}\nvertical_focus_offset={Number(Math.Clamp(p.QuadVerticalOffset, -.5, .5))}";
-    /// <summary>Focus layer (<see cref="VrProfile.FrameGenFocusLayer"/>): dcsvr_two_layers_alpha (Quad Views patch 0023) only
-    /// for the premultiplied variants and Opaque focus, so Standard keeps settings.cfg byte-identical to the file before the option.</summary>
-    private static string FocusAlphaLine(VrProfile p) => !p.UsesFoveatedFrameGen ? "" : p.FrameGenFocusLayer switch
-    {
-        FocusLayerMode.Premultiplied => "\ndcsvr_two_layers_alpha=1",
-        FocusLayerMode.PremultipliedSrgb => "\ndcsvr_two_layers_alpha=2",
-        FocusLayerMode.OpaqueFocus => "\ndcsvr_two_layers_alpha=3",
-        _ => "",
-    };
-    private static int TwoLayers(VrProfile p) => !p.UsesFoveatedFrameGen ? 0 : p.FrameGenFocusLayer == FocusLayerMode.PerEye ? 1 : 2;
+    /// <summary>Foveated frame generation always sends the focus as Opaque focus: dcsvr_two_layers=2 with
+    /// dcsvr_two_layers_alpha=3 (Quad Views patches 0024/0025: the soft edge composed into the focus image, the runtime
+    /// blends only a thin rim). There is no choice in the app; an older draft's frameGenFocusLayer is dropped on load. Quad
+    /// Views still has the other conventions for hand edits by developers: alpha 0 (colour not premultiplied, 0.6.7's),
+    /// 1 premultiplied, 2 premultiplied in an sRGB swapchain, and dcsvr_two_layers=1 (one swapchain per eye).</summary>
+    private static string FocusAlphaLine(VrProfile p) => p.UsesFoveatedFrameGen ? "\ndcsvr_two_layers_alpha=3" : "";
+    private static int TwoLayers(VrProfile p) => p.UsesFoveatedFrameGen ? 2 : 0;
 
     /// <summary>PupilShift.ini with the Periphery DLSS preset (<see cref="VrProfile.UsesPeripheryDlssPreset"/>): the layer
     /// hides the driver profile's forced DLSS preset from DLSS inside DCS. Written only then: off, the file stays as it was.</summary>
