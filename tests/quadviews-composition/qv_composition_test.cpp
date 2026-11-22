@@ -17,8 +17,6 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 
-#include "../../native/quadviews/dcsvr_opaque_focus.h"
-
 #include <algorithm>
 #include <cctype>
 #include <array>
@@ -265,6 +263,9 @@ int main(int argc, char** argv) {
             check(device->CreateShaderResourceView(field.Get(), nullptr, &field_srv), "field srv");
         }
 
+        // The opaque focus check (below) composes with a focus area of another size over another periphery texture.
+        float focus_area = 0.34f;
+        ID3D11ShaderResourceView* stereo_view = nullptr;
         const auto run = [&](const Case& c, bool optimized, ID3D11PixelShader* shader = nullptr) {
             // Sharpening (skipping tiles only in the optimized chain).
             ID3D11ShaderResourceView* focus_view = focus_srv.Get();
@@ -298,8 +299,8 @@ int main(int argc, char** argv) {
                 context->CSSetUnorderedAccessViews(0, 1, none, nullptr);
                 focus_view = sharpened_srv.Get();
             }
-            // Focus area: 0.34 of the view, possibly off centre.
-            const float sx = 1.f / 0.34f, sy = 1.f / 0.34f;
+            // Focus area: 0.34 of the view (focus_area), possibly off centre.
+            const float sx = 1.f / focus_area, sy = 1.f / focus_area;
             const float m[4][4] = {{sx, 0, 0, 0}, {0, sy, 0, 0}, {0, 0, 1, 0}, {-c.offset_x * sx, -c.offset_y * sy, 0, 1}};
             float column_major[16];
             for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) column_major[j * 4 + i] = m[i][j];
@@ -324,7 +325,7 @@ int main(int argc, char** argv) {
             context->VSSetConstantBuffers(0, 1, vs_constants.GetAddressOf());
             context->PSSetShader(shader ? shader : optimized ? ps_new.Get() : ps_old.Get(), nullptr, 0);
             context->PSSetConstantBuffers(0, 1, ps_constants.GetAddressOf());
-            ID3D11ShaderResourceView* views[3] = {stereo_srv.Get(), focus_view, field_srv.Get()};
+            ID3D11ShaderResourceView* views[3] = {stereo_view ? stereo_view : stereo_srv.Get(), focus_view, field_srv.Get()};
             context->PSSetShaderResources(0, 3, views);
             context->PSSetSamplers(0, 1, sampler.GetAddressOf());
             context->Draw(3, 0);
@@ -482,8 +483,7 @@ int main(int argc, char** argv) {
             // Without 0023's alpha conventions either: mode 0 (dcsvrEdge.z 0) must give the bytes of the pass before it.
             replace_once(two_old, "[branch] if (dcsvrEdge.z >= 2) {", "[branch] if (false) {");
             replace_once(two_old, "} else if (dcsvrEdge.z >= 1) {", "} else if (false) {");
-            // Nor 0024's opaque focus (dcsvrEdge.w): with it 0 both passes must give the bytes of the passes before it.
-            replace_once(two_old, "[branch] if (dcsvrEdge.w != 0) {", "[branch] if (false) {");
+            // Nor 0024's opaque focus (dcsvrEdge.w): with it 0 the pass must give the bytes of the pass before it.
             replace_once(two_old, "[branch] if (dcsvrEdge.w != 0) {", "[branch] if (false) {");
             const auto two_new_code = compile(two_new, "main", "ps_5_0", includes);
             const auto two_old_code = compile(two_old, "main", "ps_5_0", includes);
@@ -517,9 +517,9 @@ int main(int argc, char** argv) {
             check(device->CreateTexture2D(&desc, nullptr, &srgb_staging), "srgb staging");
             ComPtr<ID3D11RenderTargetView> srgb_rtv;
             check(device->CreateRenderTargetView(srgb_target.Get(), nullptr, &srgb_rtv), "srgb rtv");
-            const auto layer_constants = buffer(112);
-            struct TwoLayer { float smoothing, shape, layer, encode; float warp[4]; float reuse[12]; float debug[4]; float edge[4]; };
-            static_assert(sizeof(TwoLayer) == 112);
+            const auto layer_constants = buffer(128);
+            struct TwoLayer { float smoothing, shape, layer, encode; float warp[4]; float reuse[12]; float debug[4]; float edge[4]; float band[4]; };
+            static_assert(sizeof(TwoLayer) == 128);
             const auto run_layer = [&](const TwoLayer& k, ID3D11PixelShader* shader, bool srgb = false) {
                 const float identity[16]{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
                 context->UpdateSubresource(vs_constants.Get(), 0, nullptr, identity, 0, 0);
@@ -649,40 +649,29 @@ int main(int argc, char** argv) {
                                  : "Quad Views two-layer alpha conventions FAILED%s", "\n");
             two_layer_ok = two_layer_ok && alpha_ok;
 
-            // Opaque focus (0024, dcsvrEdge.w = 1; dcsvr_opaque_focus.h). Three checks:
-            //  1. dcsvrEdge.w 0: the periphery pass gives the bytes of the pass before 0024 (the focus pass is checked
-            //     above): mode 0 unchanged.
-            //  2. The periphery pass with w 1 at the periphery's pixels equals the composition (ProjectionPS.hlsl, the
-            //     built one, ignoreAlpha) at the same pixels: inside the fade band, inside the opaque rectangle and
-            //     outside the focus, for every shape, band, offset, with sharpening and with edge match.
-            //  3. The focus pass with w 1 has the colour of mode 0 and alpha 1 everywhere, and inside the rectangle the
-            //     layer is cut to (OpaqueFocusCrop) the fade of mode 0 is exactly 1 (255): the opaque layer shows only
-            //     pixels the composition shows unblended, so (2) and (3) together are the composed image.
+            // Opaque focus (0024, dcsvrEdge.w = 1): the focus pass writes the composed result over the whole focus
+            // rectangle. Checks:
+            //  1. The pass with w 0 is the pass before 0024 (two_old above has the branch removed): modes 0-2 unchanged.
+            //  2. Against the composition (the built ProjectionPS.hlsl, ignoreAlpha): the focus area is 600 of 1024 output
+            //     pixels and starts on a whole pixel, so each focus texel is one output pixel, and the periphery texture
+            //     is 512 (the composition enlarges it, k = 2 for the edge match). Every focus pixel must equal the
+            //     composed pixel at the same place (fade band, sharp area, corners outside the shape), for every shape,
+            //     band, offset, with sharpening and with edge match.
+            //  3. Alpha 1 everywhere, and where mode 0's fade is 1 the colour is mode 0's exactly (the sharp area).
             bool opaque_ok = true;
             {
-                std::size_t identity_differing = 0;
-                for (const float debug : {0.f, 1.f}) {
-                    TwoLayer c{};
-                    c.debug[0] = debug;
-                    const auto before = run_layer(c, two_old_ps.Get()), after = run_layer(c, two_new_ps.Get());
-                    for (std::size_t p = 0; p < before.size(); ++p) identity_differing += before[p] != after[p] ? 1U : 0U;
-                }
-                std::printf("opaque focus off, periphery pass: %zu differing pixels%s", identity_differing, "\n");
-                opaque_ok = identity_differing == 0;
-
-                // The periphery pass at the composition's output grid (kOut, the periphery texture's own size), the same
-                // focus projection as run().
-                const auto run_band = [&](const Case& c, const TwoLayer& k, ID3D11ShaderResourceView* focus_view) {
-                    const float sx = 1.f / 0.34f, sy = 1.f / 0.34f;
-                    const float m[4][4] = {{sx, 0, 0, 0}, {0, sy, 0, 0}, {0, 0, 1, 0}, {-c.offset_x * sx, -c.offset_y * sy, 0, 1}};
-                    float column_major[16];
-                    for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) column_major[j * 4 + i] = m[i][j];
-                    context->UpdateSubresource(vs_constants.Get(), 0, nullptr, column_major, 0, 0);
+                const auto stereo_half = make_texture(kOut / 2, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, true);
+                ComPtr<ID3D11ShaderResourceView> stereo_half_srv;
+                check(device->CreateShaderResourceView(stereo_half.Get(), nullptr, &stereo_half_srv), "srv half");
+                const float area = static_cast<float>(kFocus) / static_cast<float>(kOut);
+                const auto run_opaque = [&](const TwoLayer& k, ID3D11ShaderResourceView* focus_view, ID3D11ShaderResourceView* plain) {
+                    const float identity[16]{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                    context->UpdateSubresource(vs_constants.Get(), 0, nullptr, identity, 0, 0);
                     context->UpdateSubresource(layer_constants.Get(), 0, nullptr, &k, 0, 0);
                     const float clear[4]{0.25f, 0.5f, 0.75f, 1.f};
-                    context->ClearRenderTargetView(rtv.Get(), clear);
-                    context->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
-                    D3D11_VIEWPORT viewport{0, 0, static_cast<float>(kOut), static_cast<float>(kOut), 0, 1};
+                    context->ClearRenderTargetView(layer_rtv.Get(), clear);
+                    context->OMSetRenderTargets(1, layer_rtv.GetAddressOf(), nullptr);
+                    D3D11_VIEWPORT viewport{0, 0, static_cast<float>(kFocus), static_cast<float>(kFocus), 0, 1};
                     context->RSSetViewports(1, &viewport);
                     context->RSSetState(rasterizer.Get());
                     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
@@ -690,30 +679,33 @@ int main(int argc, char** argv) {
                     context->VSSetConstantBuffers(0, 1, vs_constants.GetAddressOf());
                     context->PSSetShader(two_new_ps.Get(), nullptr, 0);
                     context->PSSetConstantBuffers(0, 1, layer_constants.GetAddressOf());
-                    ID3D11ShaderResourceView* views[4] = {stereo_srv.Get(), nullptr, field_srv.Get(), focus_view};
+                    ID3D11ShaderResourceView* views[4] = {focus_view, plain, field_srv.Get(), stereo_half_srv.Get()};
                     context->PSSetShaderResources(0, 4, views);
                     context->PSSetSamplers(0, 1, sampler.GetAddressOf());
                     context->Draw(3, 0);
                     ID3D11ShaderResourceView* none[4]{};
                     context->PSSetShaderResources(0, 4, none);
-                    context->CopyResource(staging.Get(), target.Get());
+                    context->CopyResource(layer_staging.Get(), layer_target.Get());
                     D3D11_MAPPED_SUBRESOURCE mapped{};
-                    check(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "map band");
-                    std::vector<std::uint32_t> out(static_cast<std::size_t>(kOut) * kOut);
-                    for (UINT y = 0; y < kOut; ++y)
-                        std::memcpy(&out[static_cast<std::size_t>(y) * kOut],
-                            static_cast<const std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch, kOut * 4);
-                    context->Unmap(staging.Get(), 0);
+                    check(context->Map(layer_staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "map opaque");
+                    std::vector<std::uint32_t> out(static_cast<std::size_t>(kFocus) * kFocus);
+                    for (UINT y = 0; y < kFocus; ++y)
+                        std::memcpy(&out[static_cast<std::size_t>(y) * kFocus],
+                            static_cast<const std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch, kFocus * 4);
+                    context->Unmap(layer_staging.Get(), 0);
                     return out;
                 };
-                // One periphery texel in focus texels, as layer.cpp computes it for the edge match (kOut over 1 tangent
-                // unit, kFocus over 0.34 of it).
-                const float k_cpu = static_cast<float>(kFocus) / static_cast<float>(kOut) / 0.34f;
-                std::size_t cases = 0, band_pixels = 0, exact_off = 0, total_off = 0;
-                int worst_off = 0, worst_edge = 0;
+                // One periphery texel in focus texels, as layer.cpp computes it: 600 focus texels over 512 periphery
+                // texels' 600 / 1024 of the view.
+                const float k_cpu = static_cast<float>(kFocus) / static_cast<float>(kOut / 2) / area;
+                std::size_t cases = 0, blended = 0, exact_off = 0, total_off = 0, alpha_not_one = 0, sharp = 0, sharp_differing = 0;
+                int worst_off = 0, worst_edge = 0, worst_sharp = 0;
+                focus_area = area;
+                stereo_view = stereo_half_srv.Get();
                 for (const float shape : {0.f, 2.f, 8.f})
                     for (const float smoothing : {0.f, 0.05f, 0.2f})
-                        for (const auto& offset : {std::array<float, 2>{0.f, 0.f}, std::array<float, 2>{0.15f, -0.1f}})
+                        // Offsets of whole output pixels (NDC 0.125 = 64 px, -0.0625 = 32 px).
+                        for (const auto& offset : {std::array<float, 2>{0.f, 0.f}, std::array<float, 2>{0.125f, -0.0625f}})
                             for (const bool sharpen : {false, true})
                                 for (const float edge : {0.f, 0.6f}) {
                                     if (edge > 0.f && (shape < 1.f || smoothing <= 0.f)) continue;
@@ -721,87 +713,65 @@ int main(int argc, char** argv) {
                                     const auto reference = run(c, true);
                                     // run() left the sharpened focus in `sharpened` when it sharpened.
                                     ID3D11ShaderResourceView* const focus_view = sharpen ? sharpened_srv.Get() : focus_srv.Get();
+                                    const bool fill = sharpen && shape >= 1.f;
                                     TwoLayer k{};
                                     k.smoothing = smoothing;
                                     k.shape = shape;
+                                    k.layer = 1.f;
+                                    k.debug[1] = fill ? 1.f : 0.f;
                                     k.edge[0] = edge;
                                     k.edge[1] = edge > 0.f ? k_cpu : 0.f;
-                                    k.edge[3] = 1.f;
-                                    const auto band = run_band(c, k, focus_view);
+                                    TwoLayer o = k;
+                                    o.edge[3] = 1.f;
+                                    o.band[0] = o.band[1] = area;
+                                    o.band[2] = (1.f - area + offset[0]) * 0.5f;
+                                    o.band[3] = (1.f - area - offset[1]) * 0.5f;
+                                    // Mode 0's pass on the same inputs (the sharpened image at t0 when sharpened, as
+                                    // layer.cpp binds it).
+                                    const auto standard_sharp = run_opaque(k, focus_view, focus_srv.Get());
+                                    const auto opaque = run_opaque(o, focus_view, focus_srv.Get());
                                     ++cases;
-                                    // Pixels where the focus shows at all: the composition with the focus pushed away differs.
-                                    Case away = c;
-                                    away.offset_x = 50.f;
-                                    const auto periphery_only = run(away, true);
-                                    for (std::size_t p = 0; p < band.size(); ++p) {
-                                        int worst = 0;
-                                        for (int ch = 0; ch < 4; ++ch)
-                                            worst = (std::max)(worst, std::abs(static_cast<int>((band[p] >> (8 * ch)) & 255U) -
-                                                                               static_cast<int>((reference[p] >> (8 * ch)) & 255U)));
-                                        if (reference[p] != periphery_only[p]) ++band_pixels;
-                                        if (edge > 0.f) {
-                                            worst_edge = (std::max)(worst_edge, worst);
-                                        } else {
-                                            worst_off = (std::max)(worst_off, worst);
-                                            ++total_off;
-                                            exact_off += worst == 0 ? 1U : 0U;
+                                    const int x0 = static_cast<int>(std::lround(o.band[2] * kOut)), y0 = static_cast<int>(std::lround(o.band[3] * kOut));
+                                    for (UINT y = 0; y < kFocus; ++y)
+                                        for (UINT x = 0; x < kFocus; ++x) {
+                                            const std::size_t p = static_cast<std::size_t>(y) * kFocus + x;
+                                            const std::uint32_t r = reference[static_cast<std::size_t>(y0 + y) * kOut + x0 + x];
+                                            int worst = 0;
+                                            for (int ch = 0; ch < 4; ++ch)
+                                                worst = (std::max)(worst, std::abs(static_cast<int>((opaque[p] >> (8 * ch)) & 255U) -
+                                                                                   static_cast<int>((r >> (8 * ch)) & 255U)));
+                                            if (edge > 0.f) {
+                                                worst_edge = (std::max)(worst_edge, worst);
+                                            } else {
+                                                worst_off = (std::max)(worst_off, worst);
+                                                ++total_off;
+                                                exact_off += worst == 0 ? 1U : 0U;
+                                            }
+                                            if ((opaque[p] >> 24) != 255U) ++alpha_not_one;
+                                            const std::uint32_t a0 = standard_sharp[p] >> 24;
+                                            if (a0 == 255U) {
+                                                ++sharp;
+                                                // A fade byte of 255 is a fade of 1 within rounding (0.998 or more): the
+                                                // periphery may add a code there.
+                                                int d = 0;
+                                                for (int ch = 0; ch < 3; ++ch)
+                                                    d = (std::max)(d, std::abs(static_cast<int>((standard_sharp[p] >> (8 * ch)) & 255U) -
+                                                                               static_cast<int>((opaque[p] >> (8 * ch)) & 255U)));
+                                                if (d != 0) ++sharp_differing;
+                                                worst_sharp = (std::max)(worst_sharp, d);
+                                            } else {
+                                                ++blended;
+                                            }
                                         }
-                                    }
                                 }
-                std::printf("opaque focus, periphery pass vs composition: %zu cases, %zu focus pixels, edge match off worst %d codes (%zu of %zu exact), on worst %d codes%s",
-                    cases, band_pixels, worst_off, exact_off, total_off, worst_edge, "\n");
-                opaque_ok = opaque_ok && worst_off <= 1 && worst_edge <= 2 && band_pixels > 100000U;
-
-                // The focus pass and the rectangle.
-                std::size_t colour_differing = 0, alpha_not_one = 0, rect_not_faded_one = 0, rect_pixels = 0, focus_cases = 0;
-                for (const float shape : {0.f, 2.f, 4.f, 8.f})
-                    for (const float smoothing : {0.f, 0.05f, 0.2f, 0.45f})
-                        for (const float encode : {0.f, 1.f}) {
-                            TwoLayer c{};
-                            c.smoothing = smoothing;
-                            c.shape = shape;
-                            c.layer = 1.f;
-                            c.encode = encode;
-                            c.debug[1] = shape >= 1.f ? 1.f : 0.f;
-                            TwoLayer o = c;
-                            o.edge[3] = 1.f;
-                            const auto standard = run_layer(c, two_new_ps.Get()), opaque = run_layer(o, two_new_ps.Get());
-                            ++focus_cases;
-                            const dcsvr::OpaqueFocusRect rect =
-                                dcsvr::OpaqueFocusCrop(shape, smoothing, static_cast<int>(kFocus), static_cast<int>(kFocus));
-                            for (UINT y = 0; y < kFocus; ++y)
-                                for (UINT x = 0; x < kFocus; ++x) {
-                                    const std::size_t p = static_cast<std::size_t>(y) * kFocus + x;
-                                    if ((standard[p] & 0xFFFFFFU) != (opaque[p] & 0xFFFFFFU)) ++colour_differing;
-                                    if ((opaque[p] >> 24) != 255U) ++alpha_not_one;
-                                    if (static_cast<int>(x) >= rect.x0 && static_cast<int>(x) < rect.x1 && static_cast<int>(y) >= rect.y0 &&
-                                        static_cast<int>(y) < rect.y1) {
-                                        ++rect_pixels;
-                                        if ((standard[p] >> 24) != 255U) ++rect_not_faded_one;
-                                    }
-                                }
-                            if (shape == 2.f && smoothing == 0.2f && encode == 0.f)
-                                std::printf("opaque focus rectangle shape 2, smoothing 0.2: [%d, %d) x [%d, %d) of %u (%.1f %% of the image)%s",
-                                    rect.x0, rect.x1, rect.y0, rect.y1, kFocus,
-                                    100.0 * (rect.x1 - rect.x0) * (rect.y1 - rect.y0) / (static_cast<double>(kFocus) * kFocus), "\n");
-                        }
-                // The rectangle's field of view: the focus view's tangents at its pixel edges.
-                const float fov[4] = {-0.6f, 0.5f, 0.55f, -0.45f};
-                const dcsvr::OpaqueFocusRect quarter{150, 100, 450, 500};
-                float cut[4];
-                dcsvr::OpaqueFocusFov(fov, quarter, 600, 600, cut);
-                const float tl = std::tan(fov[0]), tr = std::tan(fov[1]), tu = std::tan(fov[2]), td = std::tan(fov[3]);
-                const double fov_error = (std::max)({std::fabs(std::tan(cut[0]) - (tl + 0.25f * (tr - tl))),
-                    std::fabs(std::tan(cut[1]) - (tl + 0.75f * (tr - tl))), std::fabs(std::tan(cut[2]) - (tu - (100.f / 600.f) * (tu - td))),
-                    std::fabs(std::tan(cut[3]) - (tu - (500.f / 600.f) * (tu - td)))});
-                std::printf("opaque focus, focus pass: %zu cases, colour differing %zu, alpha not 1 %zu, rectangle pixels %zu with a fade below 1 %zu, rectangle FOV error %.2g%s",
-                    focus_cases, colour_differing, alpha_not_one, rect_pixels, rect_not_faded_one, fov_error, "\n");
-                opaque_ok = opaque_ok && colour_differing == 0 && alpha_not_one == 0 && rect_not_faded_one == 0 && rect_pixels > 100000U &&
-                            fov_error < 1e-5;
+                focus_area = 0.34f;
+                stereo_view = nullptr;
+                std::printf("opaque focus vs composition: %zu cases, %zu sharp pixels (%zu differing from mode 0, worst %d codes), %zu blended or periphery pixels, edge match off worst %d codes (%zu of %zu exact), on worst %d codes, alpha not 1 %zu%s",
+                    cases, sharp, sharp_differing, worst_sharp, blended, worst_off, exact_off, total_off, worst_edge, alpha_not_one, "\n");
+                opaque_ok = worst_off <= 1 && worst_edge <= 2 && alpha_not_one == 0 && worst_sharp <= 1 && sharp > 1000000U && blended > 1000000U;
             }
-            std::printf(opaque_ok ? "Quad Views opaque focus: periphery pass equals the composition, focus rectangle unblended%s"
-                                  : "Quad Views opaque focus FAILED%s", "\n");
-            two_layer_ok = two_layer_ok && opaque_ok;
+            std::printf(opaque_ok ? "Quad Views opaque focus: the focus layer holds the composed image over its rectangle%s"
+                                  : "Quad Views opaque focus FAILED%s", "\n");            two_layer_ok = two_layer_ok && opaque_ok;
         }
         std::printf(two_layer_ok ? "Quad Views two-layer edge match: off identical, on only the fade band%s"
                                  : "Quad Views two-layer edge match FAILED%s", "\n");

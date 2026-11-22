@@ -67,7 +67,7 @@ foreach ($quadPatch in $quadPatches) {
 # compile them from there, so a patch would only hold a second copy.
 foreach ($ownSource in @('dcsvr_gaze.h', 'dcsvr_perception.h', 'dcsvr_temporal_cs.hlsl', 'dcsvr_depthwarp.h', 'dcsvr_depthwarp_cs.hlsl', 'dcsvr_coverage_cs.hlsl',
         'dcsvr_depthwarp_ps.hlsli', 'dcsvr_depth_import.h', 'dcsvr_depth_export.h', 'dcsvr_live.h', 'dcsvr_twolayer_ps.hlsl',
-        'dcsvr_threeviews.h', 'dcsvr_opaque_focus.h')) {
+        'dcsvr_threeviews.h')) {
     Copy-Item -LiteralPath (Join-Path $workspaceRoot "native/quadviews/$ownSource") -Destination (Join-Path $quadRoot "openxr-api-layer/$ownSource") -Force
 }
 $layerSource = Join-Path $quadRoot 'openxr-api-layer/layer.cpp'

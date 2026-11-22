@@ -24,12 +24,14 @@
 // The runtime probe (tools/runtime-probe) measured the Pimax compositor blending every variant on the stored (encoded)
 // values; 1 and 2 are the OpenXR default convention, which needs no UNPREMULTIPLIED handling in the compositor.
 //
-// Opaque focus (dcsvr_two_layers_alpha 3, patches/quadviews/0024-opaque-focus.patch, dcsvr_opaque_focus.h; dcsvrEdge.w
-// = 1 in both passes, z 0): the runtime never blends. The focus pass writes alpha 1 (colour as in 0), and the layer is
-// submitted opaque, cut to the rectangle where the fade is exactly 1. The periphery pass draws the rest of the fade
-// itself, as the composition does at the periphery's pixels: the focus image (t3, the same view the focus pass reads)
-// sampled at the pixel's focus position, with the composition's fade, edge match tent and Far depth displacement, over
-// the periphery: focus * a + periphery * (1 - a), alpha 1. dcsvrEdge.w 0: neither pass changes.
+// Opaque focus (dcsvr_two_layers_alpha 3, patches/quadviews/0024-opaque-focus.patch; dcsvrEdge.w = 1, z 0, focus pass
+// only): the runtime never blends. The focus layer is submitted opaque over its whole rectangle and the focus pass
+// writes the composed result there itself: the focus colour as in 0 (edge match tent, Far depth, fill) blended over the
+// periphery image (t3, the source the periphery layer shows) with the composition's fade, focus * a + periphery * (1 - a),
+// alpha 1. The periphery is read where the composition reads it for the same direction: the pixel's (moved) focus uv
+// times dcsvrBand.xy plus dcsvrBand.zw (the focus view's span and offset in the periphery's uv), bilinear. Where the fade
+// is 1 the colour is the focus colour exactly; outside the shape (the corners of a round focus) it is the periphery.
+// The periphery layer stays as in 0. dcsvrEdge.w 0: the pass is unchanged.
 //
 // Without Far depth every texel is a Load at the pixel (1:1, no filtering).
 //
@@ -64,74 +66,16 @@ cbuffer ConstantBuffer : register(b0) {
     float4 dcsvrDebug; // x the periphery black, y the focus colour outside the fade from t1
     float4 dcsvrEdge; // edge match: x the share of the fade band (0 off), y k (one periphery texel in focus texels);
                       // z the focus alpha convention (0 unpremultiplied, 1 premultiplied, 2 premultiplied, sRGB target)
-                      // w 1: opaque focus (0024), the fade drawn by the periphery pass
+                      // w 1: opaque focus (0024), the composed result written by the focus pass
+    float4 dcsvrBand; // opaque focus: focus uv -> periphery uv, xy scale, zw offset
 };
 
 SamplerState sourceSampler : register(s0);
 Texture2D source : register(t0);
 Texture2D plainFocus : register(t1);
 Texture2D<float2> dcsvrDisparityField : register(t2);
-Texture2D bandFocus : register(t3); // opaque focus: the focus image, for the periphery pass
+Texture2D bandPeriphery : register(t3); // opaque focus: the periphery image, for the focus pass
 #include "dcsvr_depthwarp_ps.hlsli"
-
-// Opaque focus: the periphery pass's pixel as the composition gives it (ProjectionPS.hlsl with ignoreAlpha), the focus
-// image's fade drawn over the periphery. Called only with dcsvrEdge.w != 0.
-float4 DcsvrOpaqueBand(float4 position, float2 texcoord, float3 projectedFocusCoord) {
-    float2 ndc = projectedFocusCoord.xy / projectedFocusCoord.z;
-    float2 peripheryUv = texcoord;
-    [branch] if (dcsvrWarp.x > 0) {
-        DcsvrApplyDisparity(dcsvrWarp, dcsvrReuse, dcsvrDisparityField, sourceSampler, ndc, peripheryUv);
-    }
-    float4 periphery;
-    [branch] if (any(peripheryUv != texcoord)) {
-        periphery = source.SampleLevel(sourceSampler, peripheryUv, 0);
-    } else {
-        periphery = source.Load(int3(position.xy, 0));
-    }
-    if (dcsvrDebug.x != 0) {
-        periphery = 0; // debug_focus_view: the composition shows the focus alone
-    }
-    const float2 uv = ndc * float2(0.5f, -0.5f) + 0.5f;
-    float alpha;
-    const float isInside = all(abs(ndc) < 1);
-    if (focusViewShape >= 1) {
-        float2 d = abs(ndc);
-        float r = pow(pow(d.x, focusViewShape) + pow(d.y, focusViewShape), 1 / focusViewShape);
-        float width = clamp(2 * smoothingArea, 0.01, 0.95);
-        alpha = isInside * (1 - smoothstep(1 - width, 1, r));
-    } else if (smoothingArea) {
-        float2 s = smoothstep(float2(0, 0), float2(smoothingArea, smoothingArea), uv) -
-                   smoothstep(float2(1, 1) - float2(smoothingArea, smoothingArea), float2(1, 1), uv);
-        alpha = isInside * max(0.5, s.x * s.y);
-    } else {
-        alpha = isInside;
-    }
-    [branch] if (alpha <= 0) {
-        return float4(periphery.rgb, 1);
-    }
-    float4 focus = bandFocus.SampleLevel(sourceSampler, uv, 0);
-    // Edge match: the composition's tent, k from the CPU (as the focus pass takes it).
-    [branch] if (dcsvrEdge.x > 0 && focusViewShape >= 1 && smoothingArea > 0 && dcsvrEdge.y > 1 && dcsvrDebug.x == 0) {
-        const float2 m = abs(ndc);
-        const float rm = pow(pow(m.x, focusViewShape) + pow(m.y, focusViewShape), 1 / focusViewShape);
-        const float b = saturate(smoothstep(1 - clamp(2 * smoothingArea, 0.01, 0.95), 1, rm) / dcsvrEdge.x);
-        [branch] if (b > 0) {
-            float2 focusSize;
-            bandFocus.GetDimensions(focusSize.x, focusSize.y);
-            const float2 stepUv = b * dcsvrEdge.y * 0.57735 / focusSize;
-            const float2 lo = 0.5 / focusSize, hi = 1 - lo;
-            float4 sum = 0;
-            [unroll] for (int j = -1; j <= 1; ++j) {
-                [unroll] for (int i = -1; i <= 1; ++i) {
-                    sum += (2 - abs(i)) * (2 - abs(j)) * bandFocus.SampleLevel(sourceSampler, clamp(uv + float2(i, j) * stepUv, lo, hi), 0);
-                }
-            }
-            focus = sum / 16;
-        }
-    }
-    const float3 premultiplied = focus.rgb * alpha;
-    return float4(premultiplied + periphery.rgb * (1 - alpha), 1);
-}
 
 float3 DcsvrLinearToSrgb(float3 c) {
     c = saturate(c);
@@ -149,9 +93,6 @@ float3 DcsvrSrgbToLinear(float3 c) {
 
 float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0, in float3 projectedFocusCoord : PROJ_COORD1) : SV_TARGET {
     if (focusLayer == 0) {
-        [branch] if (dcsvrEdge.w != 0) {
-            return DcsvrOpaqueBand(position, texcoord, projectedFocusCoord);
-        }
         if (dcsvrDebug.x != 0) {
             return float4(0, 0, 0, 1);
         }
@@ -234,10 +175,18 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0, 
         }
     }
 
-    float3 rgb = encodeSrgb != 0 ? DcsvrLinearToSrgb(color.rgb) : saturate(color.rgb);
     [branch] if (dcsvrEdge.w != 0) {
-        return float4(rgb, 1);
+        // Opaque focus: the composition's blend over the periphery (black for debug_focus_view, as it shows the focus
+        // alone), in the sources' own values, then encoded as in 0.
+        float4 periphery = 0;
+        [branch] if (dcsvrDebug.x == 0 && alpha < 1) {
+            periphery = bandPeriphery.SampleLevel(sourceSampler, layer1TexCoord * dcsvrBand.xy + dcsvrBand.zw, 0);
+        }
+        const float3 premultiplied = color.rgb * alpha;
+        const float3 composed = premultiplied + periphery.rgb * (1 - alpha);
+        return float4(encodeSrgb != 0 ? DcsvrLinearToSrgb(composed) : saturate(composed), 1);
     }
+    float3 rgb = encodeSrgb != 0 ? DcsvrLinearToSrgb(color.rgb) : saturate(color.rgb);
     [branch] if (dcsvrEdge.z >= 2) {
         return float4(DcsvrSrgbToLinear(rgb * alpha), alpha);
     } else if (dcsvrEdge.z >= 1) {
