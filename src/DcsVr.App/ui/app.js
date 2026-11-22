@@ -584,7 +584,7 @@ const HOTKEYS = {
   engineToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey','colorModeKey'],used:p => p.engineOptimizations,name:'Engine Optimizations',fallback:'122:6'},
   pupilShiftToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','depthBoostToggleKey','farDepthToggleKey','colorModeKey'],used:p => usesPupilShift(p),name:'Pupil shift',fallback:'121:5'},
   depthBoostToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','farDepthToggleKey','colorModeKey'],used:p => usesDepthBoost(p),name:'Depth boost',fallback:'121:6'},
-  farDepthToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','colorModeKey'],used:p => !p.desktop && p.farDepth && quad(p) && p.engineOptimizations,name:'Far depth',fallback:'119:6'},
+  farDepthToggleKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','colorModeKey'],used:p => usesFarDepth(p),name:'Far depth',fallback:'119:6'},
   colorModeKey:{others:['neuralToggleKey','diagnosticOverlayKey','engineToggleKey','pupilShiftToggleKey','depthBoostToggleKey','farDepthToggleKey'],used:p => !p.desktop,name:'Color mode',fallback:'Off'}
 };
 /** Ctrl+Alt+F8 to F12 and Ctrl+Alt+Page Up/Down, with or without Shift, belong to the engine optimizations module itself. */
@@ -1254,9 +1254,8 @@ function renderPupilNeeds() {
   if (!profile) return;
   showNeeds('pupilNeeds', gazeNeed(profile,'pupilFix',true), profile.pupilShift);
   showNeeds('depthNeeds', gazeNeed(profile,'depthFix'), profile.depthBoost);
-  const noQuad = !quad(profile), noEngine = !profile.engineOptimizations;
-  showNeeds('farDepthNeeds', profile.desktop || (!noQuad && !noEngine) ? null : [noQuad && noEngine ? 'Needs the bundled Quad Views and Engine Optimizations.' : noQuad ? 'Needs the bundled Quad Views.' : 'Needs Engine Optimizations.',
-    ...(noQuad ? [['farDepthFix','quadViews','Choose provider']] : []), ...(noEngine ? [['farDepthEngineFix','engineOptimizations','Turn on Engine Optimizations']] : [])], profile.farDepth);
+  // Far depth needs only the bundled Quad Views: with Engine Optimizations off the engine module runs for it alone (VrProfile.UsesFarDepth).
+  showNeeds('farDepthNeeds', profile.desktop || quad(profile) ? null : ['Needs the bundled Quad Views.', ['farDepthFix','quadViews','Choose provider']], profile.farDepth);
   // How to check each feature in flight, with the key it has now.
   const key = path => { const k = parseKey(profile[path] ?? HOTKEYS[path].fallback); return k && k[0] ? keyLabel(k) : 'no key set'; };
   const lines = [['Pupil shift','pupilShiftToggleKey','look at a switch and move only your eyes left and right; the cockpit stays still. It does not fix lens blur or edge distortion.'],

@@ -5997,7 +5997,7 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         new() { HeadsetPanel = true }, new() { HeadsetPanel = true, DiagnosticOverlayKey = "Off" }, new() { HeadsetPanel = true, DiagnosticOverlayKey = "0:0" }, new() { HeadsetPanel = true, DiagnosticOverlayKey = "0:0", DiagnosticOverlayAtStart = true },
         new() { HeadsetPanel = true, DiagnosticOverlayKey = "junk" }, new() { HeadsetPanel = true, DiagnosticOverlayKey = "120:6" }, new() { DiagnosticOverlayAtStart = true }, new() { HeadsetPanel = true, Desktop = true },
         new() { FrameGen = FrameGeneration.FidelityFx, DiagnosticOverlayKey = "Off" }, new() { FrameGen = FrameGeneration.Nvidia, Desktop = true, HeadsetPanel = true },
-        // Periphery stability and Far depth: the bundled Quad Views in VR; Far depth with Engine Optimizations.
+        // Periphery stability and Far depth: the bundled Quad Views in VR, with or without Engine Optimizations.
         eye with { PeripheryStability = true, FarDepth = true, EngineOptimizations = true }, eye with { PeripheryStability = true, FarDepth = true }, eye with { PeripheryStability = false, FarDepth = false, EngineOptimizations = true },
         eye with { PeripheryStability = true, FarDepth = true, EngineOptimizations = true, QuadViewsLayerDirectory = @"C:\qv" }, eye with { PeripheryStability = true, FarDepth = true, EngineOptimizations = true, Desktop = true },
         new() { QuadViews = QuadProvider.PimaxNative, PeripheryStability = true, FarDepth = true, EngineOptimizations = true },
