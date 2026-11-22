@@ -129,6 +129,10 @@ public static class EngineOptimizations
         // leaves that matching off (the dual camera itself keeps running).
         if (Has("cockpit ipd: ownship matching off"))
             warnings.Add("This DCS version changed something the dual camera uses to recognise your own aircraft, so that part is off. Depth boost still runs.");
+        // The frame-timing helpers (frame start, view profile, frame timeline, cockpit outline) know the DCS builds they were
+        // analysed on; on another (a newer DCS) they stay off or fall back. One line, whichever said so.
+        if (Has("is not an analysed build"))
+            warnings.Add("DCS Control has not been checked against this DCS version yet, so some frame timing helpers are off. Everything else runs.");
         if (Has("ERROR: Scene.dll exports not found"))
             warnings.Add("This DCS version is not supported by the culling hook, so Culling partition boost is off. The other optimizations still run.");
         // A suite is running from its start line until its report line (statistics keep arriving after both).

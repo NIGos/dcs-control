@@ -2485,6 +2485,10 @@ Test("DCS engine optimizations install in Saved Games Scripts with the profile's
         Make("engine/sg/DCS/Scripts/DcsQvCull/" + written, "written by the module");
     File.AppendAllText(log, "\n21:07:30.000 cockpit ipd: ownship matching off (SceneRenderable vtable not in this NGModel build)");
     Require(EngineOptimizations.Read(options, dcsLog, dcsRunning: true).Warnings.Any(w => w.Contains("recognise your own aircraft", StringComparison.Ordinal)), "Ownship matching off is reported");
+    // A DCS build the timing helpers were not analysed for (a future DCS): one plain line, once, whichever helpers said so.
+    Require(!EngineOptimizations.Read(options, dcsLog, dcsRunning: true).Warnings.Any(w => w.Contains("not been checked", StringComparison.Ordinal)), "no unknown-build line before the module says so");
+    File.AppendAllText(log, "\n21:07:40.000   frame start: Visualizer.dll is not an analysed build; OpenXR calls not timed\n21:07:41.000   view profile: Visualizer.dll is not an analysed build; pacer wait not read");
+    Require(EngineOptimizations.Read(options, dcsLog, dcsRunning: true).Warnings.Count(w => w.Contains("not been checked against this DCS version", StringComparison.Ordinal)) == 1, "an unknown DCS build is reported once");
     // A later payload that failed to start (a reload): the last loader outcome counts.
     File.AppendAllText(log, "\n21:08:00.000 loader: payload start reported an error (Start returned 0)\n");
     Require(EngineOptimizations.Read(options, dcsLog, dcsRunning: true) is { State: "failed" } startFailed && startFailed.Summary.Contains("payload start reported an error"));
