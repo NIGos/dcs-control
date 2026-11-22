@@ -49,6 +49,9 @@ param([Parameter(Mandatory)][string]$Scenario, [string]$Arm, [switch]$Both, [swi
   [string[]]$FlyArms,
   # -QvDll: the Quad Views layer DLL flown instead of the installed one (both flights); only the COPY is changed.
   [string]$QvDll,
+  # -ClickFly: start the mission by clicking FLY in DCS's window (the old way, needs DCS in the foreground) instead of
+  # the engine hook's rig autostart; the click is also the fallback when the autostart does not confirm.
+  [switch]$ClickFly,
   # Where things are on this machine (see the head of the file): parameter, else environment variable, else default.
   [string]$StateBackup = $env:DCSC_RIG_STATE_BACKUP, [string]$MissionDir = $env:DCSC_RIG_MISSIONS, [string]$RunsDir = $env:DCSC_RIG_RUNS,
   [string]$TapDir = $env:DCSC_RIG_TAP_DIR, [string]$SavedGamesDcs = $env:DCSC_SAVED_GAMES_DCS, [string]$PimaxCtl = $env:DCSC_PIMAX_CTL,
@@ -339,6 +342,13 @@ function Start-RigFlight([string]$RunDir, [string]$LaunchJson, [string]$Mission,
   $psi = New-Object Diagnostics.ProcessStartInfo
   $psi.FileName = $launch.executable; $psi.Arguments = "--mission `"$Mission`""; $psi.WorkingDirectory = Split-Path $launch.executable; $psi.UseShellExecute = $false
   foreach ($p in $launch.environment.PSObject.Properties) { $psi.EnvironmentVariables[$p.Name] = [string]$p.Value }
+  # The engine hook's rig autostart (native/dcsqvcull/lua/DcsQvCull.lua): only this DCS gets the variable, and the file
+  # it names exists only during this flight (Stop-RigFlight deletes it), so no other DCS start is ever affected.
+  $Rec.autostartFlag = $null
+  if (-not $ClickFly) {
+    $flag = Join-Path $RunDir 'autostart.flag'; Set-Content -LiteralPath $flag -Value "rig run $($Rec.run)"
+    $psi.EnvironmentVariables['DCSC_RIG_AUTOSTART'] = $flag; $Rec.autostartFlag = $flag
+  }
   $Rec.started = (Get-Date).ToString('o')
   $proc = [Diagnostics.Process]::Start($psi); $Rec.pid = $proc.Id
   Note "$($Rec.run) DCS started pid $($proc.Id), environment from $LaunchJson"
@@ -368,6 +378,45 @@ function Start-RigFlight([string]$RunDir, [string]$LaunchJson, [string]$Mission,
   $tapLog = Read-Shared (Join-Path $RunDir 'tap\rigtap.log')
   if ($tapLog -notmatch 'graphics binding D3D12') { throw "the capture layer did not see a D3D12 session (rigtap.log: $(($tapLog -split "`n" | Select-Object -Last 2) -join ' | ')): no flight" }
   Note "$($Rec.run) capture layer loaded: $((($tapLog -split "`n") | Select-String 'graphics binding' | Select-Object -Last 1).Line)"
+}
+# The flight's start in dcs.log: the line "WWT (Main): <aircraft>" (fly4.ps1), with its time. dcs.log writes UTC.
+function Get-FlyLine {
+  $m = [regex]::Match((Read-Shared $DcsLog), '(?m)^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}) \S+\s+WWT \(Main\): (?!Wwt export|Export )(\S+)')
+  if (-not $m.Success) { return $null }
+  $at = [DateTime]::SpecifyKind([DateTime]::ParseExact($m.Groups[1].Value, 'yyyy-MM-dd HH:mm:ss.fff', [Globalization.CultureInfo]::InvariantCulture), 'Utc').ToLocalTime()
+  [pscustomobject]@{ At = $at; Aircraft = $m.Groups[2].Value }
+}
+# FLY without a click: the engine hook presses the briefing's FLY in DCS's GUI state (rig autostart, DcsQvCull.lua), so
+# neither the window focus nor windows on top of DCS matter. The start is confirmed only by the aircraft line; without it
+# within 45 s (the hook tries 3 times, a briefing-less paused mission after 15 s) the click path below takes over.
+function Start-Fly([string]$RunDir, $Rec, [bool]$AtOrigin) {
+  $Rec.flyMethod = 'click'
+  if ($Rec.autostartFlag) {
+    $t0 = Get-Date; $fl = $null
+    while (((Get-Date) - $t0).TotalSeconds -lt 45) { $fl = Get-FlyLine; if ($fl) { break }; Start-Sleep -Milliseconds 500 }
+    $log = Read-Shared $DcsLog
+    $said = @(($log -split "`n") | Select-String 'DcsQvCull \(Main\): rig autostart: ' | ForEach-Object { ($_.Line -replace '^.*rig autostart: ', '').Trim() })
+    $Rec.autostartLog = $said
+    if ($fl) {
+      $now = Get-Date; $flyAt = $(if ($fl.At -le $now -and $fl.At -ge [datetime]$Rec.started) { $fl.At } else { $now })
+      Note "$($Rec.run) FLY by the rig autostart: confirmed in dcs.log ($($fl.Aircraft) at $($flyAt.ToString('HH:mm:ss.fff'))); hook: $($said -join ' | ')"
+      if ($AtOrigin) {   # debug_simulate_tracking confines the mouse to the desktop's top-left 1000 x 1000 px: the window has to be there
+        $t1 = Get-Date; $c = $null; while (((Get-Date) - $t1).TotalSeconds -lt 40) { $c = Get-DcsClient; if ($c -and $c.W -ge 800) { break }; Start-Sleep 2 }
+        if ($c) {
+          $wr = New-Object Rig.W+RECT; [Rig.W]::GetWindowRect($c.H, [ref]$wr) | Out-Null
+          [Rig.W]::SetWindowPos($c.H, [IntPtr]::Zero, $wr.L - $c.X, $wr.T - $c.Y, 0, 0, 0x0001 -bor 0x0004 -bor 0x0010) | Out-Null   # NOSIZE | NOZORDER | NOACTIVATE
+          Start-Sleep 1; $c = Get-DcsClient; Note "$($Rec.run) DCS window moved: client origin now $($c.X),$($c.Y)"
+        }
+      }
+      $c = Get-DcsClient; if ($c) { $Rec.window = "$($c.W)x$($c.Ht)" }
+      $Rec.poseAtBriefing = 'not looked at (rig autostart)'; $Rec.flyMethod = 'autostart'
+      $Rec.fly = $flyAt.ToString('o'); $Rec.flyConfirmed = $true
+      return $flyAt
+    }
+    Note "$($Rec.run) rig autostart did not start the flight in 45 s ($(if ($said.Count) { 'hook: ' + ($said -join ' | ') } else { 'no autostart line in dcs.log: the deployed engine hook has none, or the engine is off' })): clicking FLY"
+    $Rec.flyMethod = 'click (autostart fallback)'
+  }
+  Click-Fly $RunDir $Rec $AtOrigin
 }
 # FLY: the real start is the line "WWT (Main): <aircraft>" in dcs.log (fly4.ps1; Pause/Break does not start these missions).
 function Click-Fly([string]$RunDir, $Rec, [bool]$AtOrigin) {
@@ -631,6 +680,7 @@ function Do-Action([string]$RunDir, $Rec, $A) {
   }
 }
 function Stop-RigFlight([string]$RunDir, $Rec, [string]$CopyDir) {
+  if ($Rec.autostartFlag) { Remove-Item -LiteralPath $Rec.autostartFlag -Force -ErrorAction SilentlyContinue }   # disarmed before DCS closes
   $t0 = [datetime]$Rec.started
   $p = Get-Process DCS -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($p) { $p.CloseMainWindow() | Out-Null; if (-not $p.WaitForExit(90000)) { Note "$($Rec.run) DCS did not close in 90 s: killed"; $p | Stop-Process -Force -Confirm:$false } else { Note "$($Rec.run) DCS closed normally" } } else { Note "$($Rec.run) DCS was not running at stop" }
@@ -675,7 +725,7 @@ function Flight([string]$RunName, $ScBase, $ArmDef, [bool]$Option) {
     $mission = if ([IO.Path]::IsPathRooted([string]$Sc.mission)) { [string]$Sc.mission } else { Join-Path $MissionDir ([string]$Sc.mission) }
     if (-not (Test-Path -LiteralPath $mission)) { throw "mission not found: $mission" }
     Start-RigFlight $run (Join-Path $copy 'launch.json') $mission $rec; & $save
-    $flyAt = Click-Fly $run $rec ([bool]$Sc.windowAtOrigin); & $save
+    $flyAt = Start-Fly $run $rec ([bool]$Sc.windowAtOrigin); & $save
     Note "$RunName flying since $($flyAt.ToString('HH:mm:ss')); tracking $(Slam)"
     # the composed image's width of this flight (the twin's capture plan needs it): the widest swapchain the capture layer logged
     $ws = @([regex]::Matches((Read-Shared (Join-Path $run 'tap\rigtap.log')), 'swapchain #\d+ \S+ (\d+)x(\d+) ') | ForEach-Object { [int]$_.Groups[1].Value }); if ($ws.Count) { $rec.composedWidth = ($ws | Measure-Object -Maximum).Maximum }

@@ -92,3 +92,99 @@ if ok then
     pcall(DCS.setUserCallbacks, cb)
   end
 end
+
+-- Test rig only: start a single-player mission past its briefing without a click, in DCS's own GUI state (the FLY
+-- button's function), so no window focus or mouse is involved. Off unless DCS was started with the environment
+-- variable DCSC_RIG_AUTOSTART naming a file that exists (tools/rig/run-scenario.ps1 sets it on the DCS it starts);
+-- deleting that file disarms it. Each mission load presses FLY once the briefing is shown, checks that the
+-- simulation runs, and tries again (at most 3 times); a mission with no briefing that stays paused is started with the
+-- same calls. Every step is logged as "DcsQvCull rig autostart:" in dcs.log.
+local function rigAutostart()
+  local okE, flag = pcall(function() return os.getenv('DCSC_RIG_AUTOSTART') end)
+  if not okE or type(flag) ~= 'string' or flag == '' then return end
+  local function armed()
+    local f = io.open(flag, 'r')
+    if f then f:close() return true end
+    return false
+  end
+  if not armed() then return end
+  local function say(msg) log.write('DcsQvCull', log.INFO, 'rig autostart: ' .. msg) end
+  local function now()
+    local okT, t = pcall(DCS.getRealTime)
+    if okT and type(t) == 'number' then return t end
+    return os.clock()
+  end
+  local function paused() local okP, p = pcall(DCS.getPause) return okP and p == true end
+  local function briefing()
+    local b = package.loaded['BriefingDialog']
+    if type(b) ~= 'table' then return nil end
+    return b
+  end
+  local function visible(b)
+    local okV, v = pcall(b.getVisible)
+    return okV and v == true
+  end
+  local st = {phase = 0, t = 0, tries = 0, waitSince = 0}
+  local cb = {}
+  function cb.onMissionLoadEnd()
+    if not armed() then st.phase = 0 return end
+    local mp, track = false, false
+    pcall(function() mp = DCS.isMultiplayer() == true end)
+    pcall(function() track = DCS.isTrackPlaying() == true end)
+    if mp or track then say('not single-player (multiplayer ' .. tostring(mp) .. ', track ' .. tostring(track) .. '): off') st.phase = 0 return end
+    st.phase, st.tries, st.waitSince, st.t = 1, 0, now(), now()
+    say('armed, waiting for the briefing')
+  end
+  function cb.onSimulationStop() st.phase = 0 end
+  function cb.onSimulationFrame()
+    if st.phase == 0 then return end
+    local t = now()
+    if st.phase == 1 then  -- wait for the briefing (GameGUI shows it at the simulation start), then let it draw a frame
+      local b = briefing()
+      if b and visible(b) then
+        if t - st.t >= 1 then
+          st.tries = st.tries + 1
+          local okF, err = pcall(b.Fly_onChange)
+          say(string.format('FLY pressed (try %d): %s %s', st.tries, tostring(okF), tostring(err)))
+          st.phase, st.t = 2, t
+        end
+      else
+        st.t = t
+        if t - st.waitSince > 15 then
+          if paused() then  -- no briefing came: the FLY button's calls by hand
+            st.tries = st.tries + 1
+            local okS, err = pcall(function()
+              if b and type(b.hide) == 'function' then b.hide() end
+              DCS.spawnPlayer()
+              DCS.setPause(false)
+            end)
+            say(string.format('no briefing after 15 s, paused: spawn and unpause (try %d): %s %s', st.tries,
+                              tostring(okS), tostring(err)))
+            st.phase, st.t = 2, t
+          else
+            say('no briefing after 15 s and not paused: nothing to do')
+            st.phase = 0
+          end
+        end
+      end
+    elseif st.phase == 2 and t - st.t >= 3 then  -- the check: running, briefing gone
+      local b = briefing()
+      if not paused() and not (b and visible(b)) then
+        local unit = nil
+        pcall(function() unit = DCS.getPlayerUnit() end)
+        say('flying (simulation running, player unit ' .. tostring(unit) .. ')')
+        st.phase = 0
+      elseif st.tries >= 3 then
+        say('still paused after 3 tries: giving up')
+        st.phase = 0
+      else
+        st.phase, st.t, st.waitSince = 1, t, t
+      end
+    end
+  end
+  pcall(DCS.setUserCallbacks, cb)
+  say('on (' .. flag .. ')')
+end
+if DCS and type(DCS.setUserCallbacks) == 'function' and log and type(log.write) == 'function' then
+  pcall(rigAutostart)
+end
