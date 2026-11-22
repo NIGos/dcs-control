@@ -1773,6 +1773,8 @@ Test("The diagnostic package collects DCS, component and headset logs as text, w
     var firstSeen = HeadsetRuntime.Read("2.0.5.376", @"C:\Program Files\Pimax\Runtime\PiOpenXR_64.json", Path.Combine(local, "Pimax/runtime"), headsetState);
     Require(firstSeen is { RuntimeBuild: "Nov 6 2026 20:19:38", RuntimeId: "id_0a61d106_20261106", Headset: "Pimax Crystal Super", OpenXrRuntime: "PiOpenXR_64.json", Changed: false } && firstSeen.Line.Contains("Pimax Play 2.0.5.376"), firstSeen.Line);
     HeadsetRuntime.RememberFlight(firstSeen with { PimaxPlay = "2.0.4.100", RuntimeBuild = "Oct 1 2026 10:00:00" }, headsetState);
+    // Written like the app's other state (AtomicFile): one file, no temporary one left beside it.
+    Require(Directory.GetFiles(headsetState).Length == 1 && !Directory.GetFiles(headsetState).Any(f => f.Contains(".tmp", StringComparison.OrdinalIgnoreCase)), "the headset record is written atomically: " + string.Join(", ", Directory.GetFiles(headsetState).Select(Path.GetFileName)));
     var headsetNow = HeadsetRuntime.Read("2.0.5.376", null, Path.Combine(local, "Pimax/runtime"), headsetState);
     Require(headsetNow.Changed && headsetNow.Line.Contains("CHANGED since the last flight (was Pimax Play 2.0.4.100, runtime built Oct 1 2026 10:00:00)"), headsetNow.Line);
     Require(!(headsetNow with { PreviousPimaxPlay = "2.0.5.376", PreviousRuntimeBuild = null }).Changed, "an unknown earlier build is no change");

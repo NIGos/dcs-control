@@ -73,7 +73,7 @@ public static partial class HeadsetRuntime
         var seen = new Seen(info.PimaxPlay ?? info.PreviousPimaxPlay, info.RuntimeBuild ?? info.PreviousRuntimeBuild);
         if (seen.PimaxPlay is null && seen.RuntimeBuild is null) return;
         Directory.CreateDirectory(stateRoot);
-        File.WriteAllText(Path.Combine(stateRoot, StateFile), JsonSerializer.Serialize(seen, JsonData.Options));
+        AtomicFile.WriteText(Path.Combine(stateRoot, StateFile), JsonSerializer.Serialize(seen, JsonData.Options));
     }
 
     /// <summary>The build date, build id and headset model from the start of the newest Pimax server log.</summary>
