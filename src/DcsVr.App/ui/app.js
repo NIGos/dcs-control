@@ -1524,8 +1524,9 @@ function renderHeadsetSoftware() {
   const software = routeOf(profile).software + (profile.runtime === 'Pimax' && version ? ' '+version : '');
   $('headsetActive').innerHTML = `<b>${escape(software)}</b>${summary ? `<span>${escape(summary)}</span>` : ''}`;
   const other = state?.inventory?.otherOpenXrRuntime, otherLine = $('otherRuntime');
-  otherLine.hidden = !other;
-  otherLine.textContent = other ? `Your OpenXR runtime is ${other}. Engine Optimizations and CPU Boost work with it; the VR features are made for Pimax Play and SteamVR.` : '';
+  // The Quest 3 VD route runs on VDXR by design: the line is for headsets without a route of their own.
+  otherLine.hidden = !other || vdRoute(profile);
+  otherLine.textContent = !otherLine.hidden ? `Your OpenXR runtime is ${other}. Engine Optimizations and CPU Boost work with it; the VR features are made for Pimax Play and SteamVR.` : '';
 }
 /** The rail says at a glance what is on: ON or OFF next to each feature page (Perception and Visual realism are on when
  *  any of their features is). */

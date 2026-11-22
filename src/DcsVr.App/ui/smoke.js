@@ -145,6 +145,8 @@ window.runWebSmoke = async function() {
     { const inventory = ui.state.inventory; check('No other-runtime line with Pimax\'s or SteamVR\'s runtime',$('otherRuntime').hidden || Boolean(inventory?.otherOpenXrRuntime));
       ui.state.inventory = {...inventory,otherOpenXrRuntime:'Varjo'}; ui.invalidate();
       check('Another headset\'s OpenXR runtime gets one plain line on the DCS & headset page',!$('otherRuntime').hidden && $('otherRuntime').textContent === 'Your OpenXR runtime is Varjo. Engine Optimizations and CPU Boost work with it; the VR features are made for Pimax Play and SteamVR.');
+      ui.state.inventory = {...inventory,otherOpenXrRuntime:'Virtual Desktop (VDXR)'}; { const runtime = ui.profile.runtime; ui.profile.runtime = 'VirtualDesktop'; ui.invalidate();
+        check('No other-runtime line on the Quest 3 VD route, which runs on VDXR',$('otherRuntime').hidden); ui.profile.runtime = runtime; }
       ui.state.inventory = inventory; ui.invalidate(); check('and it goes when the runtime is Pimax\'s again',$('otherRuntime').hidden === !inventory?.otherOpenXrRuntime); }
     { const keys = ['runtime','quadViews','gaze','foveaSource','foveaWidth','foveaHeight','peripheralScale','quadFocusScale','quadEdgeBlend','headsetRefreshHz','neuralRendering','foveatedDlss'], before = Object.fromEntries(keys.map(k => [k,ui.profile[k]]));
       edit('quadViews','PimaxNative'); ui.profile.headsetRefreshHz = 144; document.querySelector('#routeSwitch [data-route="VirtualDesktop"]').click(); const p = ui.profile;
