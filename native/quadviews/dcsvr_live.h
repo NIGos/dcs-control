@@ -2,9 +2,12 @@
 // tests/quadviews-live).
 //
 // Upstream reads settings.cfg once, when the system is set up. DCS Control changes some settings while DCS runs, so the
-// layer now re-reads its files when they change and applies the keys that only feed the per-frame post-process passes
-// (sharpening, edge blend, periphery contrast, periphery stability). Every other key keeps its start value until the
-// next start: sizes, multipliers, sections, shape, turbo and eye tracking decide swapchains, views and resources.
+// layer now re-reads its files when they change and applies the keys that only feed per-frame work: the post-process
+// passes (sharpening, edge blend, periphery contrast, periphery stability), the eye-tracking filter (saccade lead and
+// tail, gaze deadzone, lost-gaze ease: read by xrLocateViews from one settings struct) and Far depth's curve (preset,
+// world eye distance, Z0, gamma: constant-buffer values) and its in-flight key. Every other key keeps its start value
+// until the next start: sizes, multipliers, sections, shape, turbo, eye tracking itself and Far depth on/off decide
+// swapchains, views and resources.
 //
 //  - Off the hot path: the render thread (xrEndFrame) only reads a clock and an atomic. At most once per second it
 //    hands a poll to the Windows thread pool, which compares each file's write time and size and parses only when one
@@ -22,6 +25,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -31,6 +35,8 @@
 #include <mutex>
 #include <string>
 #include <vector>
+
+#include "dcsvr_gaze.h"
 
 namespace dcsvr::live {
 
@@ -43,9 +49,19 @@ namespace dcsvr::live {
 //   dcsvr_temporal_tau_ms      m_dcsvrTemporal.tauMs     its strength (DCS Control: 80 ms x strength)
 //   dcsvr_temporal_ramp_deg    m_dcsvrTemporal.rampDeg   from the focus edge to full weight
 //   dcsvr_temporal_clip        m_dcsvrTemporal.clip      neighbourhood clamp, standard deviations
+//   dcsvr_saccade_* , dcsvr_gaze_deadzone, dcsvr_lost_ease_ms
+//                              m_dcsvrGaze (dcsvr_gaze.h GazeSettings), handed to xrLocateViews' thread
+//   dcsvr_far_depth_preset, dcsvr_far_depth_world_ipd, dcsvr_far_depth_z0_m, dcsvr_far_depth_gamma
+//                              m_dcsvrFarDepth's curve (preset, world IPD, near guard, Z0, gamma)
+//   dcsvr_far_depth_toggle     m_dcsvrFarKeyVk, m_dcsvrFarKeyMods
 inline constexpr const char* Keys[] = {"sharpen_focus_view",      "smoothen_focus_view_edges", "dcsvr_sharpen_taper",
                                        "dcsvr_periphery_sharpen", "dcsvr_temporal",            "dcsvr_temporal_tau_ms",
-                                       "dcsvr_temporal_ramp_deg", "dcsvr_temporal_clip"};
+                                       "dcsvr_temporal_ramp_deg", "dcsvr_temporal_clip",       "dcsvr_saccade_widening",
+                                       "dcsvr_saccade_speed",     "dcsvr_saccade_lead_ms",     "dcsvr_saccade_max_extend",
+                                       "dcsvr_saccade_hold_ms",   "dcsvr_saccade_end_speed",   "dcsvr_saccade_tail",
+                                       "dcsvr_gaze_deadzone",     "dcsvr_lost_ease_ms",        "dcsvr_far_depth_preset",
+                                       "dcsvr_far_depth_world_ipd", "dcsvr_far_depth_z0_m",    "dcsvr_far_depth_gamma",
+                                       "dcsvr_far_depth_toggle"};
 
 inline bool IsLiveKey(const std::string& name) {
     for (const char* key : Keys) {
@@ -63,12 +79,58 @@ struct Values {
     float tauMs{40.f};
     float rampDeg{8.f};
     float clip{1.f};
+    // The eye-tracking filter's settings, as m_dcsvrGaze holds them.
+    dcsvr::GazeSettings gaze{};
+    // Far depth's curve as the parse leaves it (layer.cpp ParseConfigurationStatement): the last valid preset line (-1:
+    // none, Quad Views' defaults, which are the Default preset's curve), a world_ipd line after it (a preset line resets
+    // it), an explicit Z0 or gamma from any line (0: none; it wins over the preset). FarCurve applies them.
+    int farPreset{-1};
+    bool farWorldIpdSet{false};
+    float farWorldIpd{0.f};
+    float farZ0{0.f};
+    float farGamma{0.f};
+    // Far depth's in-flight key, virtual-key and modifiers (1 Ctrl, 2 Alt, 4 Shift); 0: none.
+    int farKeyVk{0};
+    int farKeyMods{0};
 };
+
+inline bool SameGaze(const dcsvr::GazeSettings& a, const dcsvr::GazeSettings& b) {
+    return a.widening == b.widening && a.speed == b.speed && a.leadMs == b.leadMs && a.maxExtend == b.maxExtend &&
+           a.holdMs == b.holdMs && a.deadzoneDeg == b.deadzoneDeg && a.tail == b.tail && a.endSpeed == b.endSpeed &&
+           a.lostEaseMs == b.lostEaseMs;
+}
+
+inline bool SameFarCurve(const Values& a, const Values& b) {
+    return a.farPreset == b.farPreset && a.farWorldIpdSet == b.farWorldIpdSet && a.farWorldIpd == b.farWorldIpd &&
+           a.farZ0 == b.farZ0 && a.farGamma == b.farGamma;
+}
 
 inline bool operator==(const Values& a, const Values& b) {
     return a.sharpen == b.sharpen && a.smoothing == b.smoothing && a.taper == b.taper &&
            a.peripherySharpen == b.peripherySharpen && a.temporal == b.temporal && a.tauMs == b.tauMs &&
-           a.rampDeg == b.rampDeg && a.clip == b.clip;
+           a.rampDeg == b.rampDeg && a.clip == b.clip && SameGaze(a.gaze, b.gaze) && SameFarCurve(a, b) &&
+           a.farKeyVk == b.farKeyVk && a.farKeyMods == b.farKeyMods;
+}
+
+// Far depth's curve for a parse's values (dcsvr_depthwarp.h DisparitySettings, any struct with these members and
+// ApplyPreset(FarDepthPreset)): the preset (Default without a line), then the world IPD line after it, then the explicit
+// Z0 and gamma, as the start-up parse leaves them. Every other member stays as it is.
+template <typename Settings, typename Preset>
+void FarCurve(const Values& v, Settings& s) {
+    s.ApplyPreset(static_cast<Preset>(v.farPreset >= 0 ? v.farPreset : 1));
+    if (v.farWorldIpdSet) s.worldIpdScale = v.farWorldIpd;
+    if (v.farZ0 > 0.f) s.z0M = v.farZ0;
+    if (v.farGamma > 0.f) s.gamma = v.farGamma;
+}
+
+// dcsvrSettingWord: blanks trimmed, lower case.
+inline std::string Word(std::string value) {
+    while (!value.empty() && std::isspace((unsigned char)value.back())) value.pop_back();
+    size_t first = 0;
+    while (first < value.size() && std::isspace((unsigned char)value[first])) first++;
+    value.erase(0, first);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    return value;
 }
 
 // What the section rules compare against (layer.cpp ParseConfigurationStatement).
@@ -128,6 +190,65 @@ inline bool ApplyKey(const std::string& name, const std::string& value, Values& 
     } else if (name == "dcsvr_temporal_clip") {
         if (!ToFloat(value, f)) return false;
         io.clip = std::clamp(f, 0.25f, 4.f);
+    } else if (name == "dcsvr_saccade_widening") {
+        if (!ToInt(value, i)) return false;
+        io.gaze.widening = i != 0;
+    } else if (name == "dcsvr_saccade_speed") {
+        if (!ToFloat(value, f)) return false;
+        io.gaze.speed = std::clamp(f, 30.f, 1000.f);
+    } else if (name == "dcsvr_saccade_lead_ms") {
+        if (!ToFloat(value, f)) return false;
+        io.gaze.leadMs = std::clamp(f, 0.f, 200.f);
+    } else if (name == "dcsvr_saccade_max_extend") {
+        if (!ToFloat(value, f)) return false;
+        io.gaze.maxExtend = std::clamp(f, 0.f, 1.f);
+    } else if (name == "dcsvr_saccade_hold_ms") {
+        if (!ToFloat(value, f)) return false;
+        io.gaze.holdMs = std::clamp(f, 0.f, 200.f);
+    } else if (name == "dcsvr_saccade_end_speed") {
+        if (!ToFloat(value, f)) return false;
+        io.gaze.endSpeed = std::clamp(f, 10.f, 1000.f);
+    } else if (name == "dcsvr_saccade_tail") {
+        if (!ToInt(value, i)) return false;
+        io.gaze.tail = i != 0;
+    } else if (name == "dcsvr_gaze_deadzone") {
+        if (!ToFloat(value, f)) return false;
+        io.gaze.deadzoneDeg = std::clamp(f, 0.f, 3.f);
+    } else if (name == "dcsvr_lost_ease_ms") {
+        if (!ToFloat(value, f)) return false;
+        io.gaze.lostEaseMs = std::clamp(f, 0.f, 1000.f);
+    } else if (name == "dcsvr_far_depth_preset") {
+        // subtle, default, strong, near or 0-3 (anything else is skipped, as Quad Views' parse throws on it).
+        const std::string word = Word(value);
+        static constexpr const char* Names[] = {"subtle", "default", "strong", "near"};
+        int preset = -1;
+        for (int p = 0; p < 4; p++) {
+            if (word == Names[p] || word == std::string(1, (char)('0' + p))) preset = p;
+        }
+        if (preset < 0) return false;
+        io.farPreset = preset;
+        io.farWorldIpdSet = false;
+    } else if (name == "dcsvr_far_depth_world_ipd") {
+        if (!ToFloat(value, f)) return false;
+        io.farWorldIpdSet = true;
+        io.farWorldIpd = std::clamp(f, 0.f, 2.f);
+    } else if (name == "dcsvr_far_depth_z0_m") {
+        if (!ToFloat(value, f)) return false;
+        io.farZ0 = std::clamp(f, 5.f, 2000.f);
+    } else if (name == "dcsvr_far_depth_gamma") {
+        if (!ToFloat(value, f)) return false;
+        io.farGamma = std::clamp(f, 0.05f, 0.95f);
+    } else if (name == "dcsvr_far_depth_toggle") {
+        // virtual-key:modifiers in decimal; the key alone when the modifiers do not parse (Quad Views sets it first).
+        const size_t colon = value.find(':');
+        if (!ToInt(value.substr(0, colon), i)) return false;
+        io.farKeyVk = std::clamp(i, 0, 255);
+        int mods = 0;
+        if (colon == std::string::npos) {
+            io.farKeyMods = 0;
+        } else if (ToInt(value.substr(colon + 1), mods)) {
+            io.farKeyMods = std::clamp(mods, 0, 7);
+        }
     } else {
         return false;
     }
@@ -238,6 +359,22 @@ inline std::string Changes(const Values& before, const Values& after) {
     add("dcsvr_temporal_tau_ms", before.tauMs, after.tauMs, "%.1f");
     add("dcsvr_temporal_ramp_deg", before.rampDeg, after.rampDeg, "%.1f");
     add("dcsvr_temporal_clip", before.clip, after.clip, "%.2f");
+    add("dcsvr_saccade_widening", before.gaze.widening, after.gaze.widening, "%.0f");
+    add("dcsvr_saccade_speed", before.gaze.speed, after.gaze.speed, "%.0f");
+    add("dcsvr_saccade_lead_ms", before.gaze.leadMs, after.gaze.leadMs, "%.0f");
+    add("dcsvr_saccade_max_extend", before.gaze.maxExtend, after.gaze.maxExtend, "%.2f");
+    add("dcsvr_saccade_hold_ms", before.gaze.holdMs, after.gaze.holdMs, "%.0f");
+    add("dcsvr_saccade_end_speed", before.gaze.endSpeed, after.gaze.endSpeed, "%.0f");
+    add("dcsvr_saccade_tail", before.gaze.tail, after.gaze.tail, "%.0f");
+    add("dcsvr_gaze_deadzone", before.gaze.deadzoneDeg, after.gaze.deadzoneDeg, "%.2f");
+    add("dcsvr_lost_ease_ms", before.gaze.lostEaseMs, after.gaze.lostEaseMs, "%.0f");
+    add("dcsvr_far_depth_preset", before.farPreset, after.farPreset, "%.0f");
+    add("dcsvr_far_depth_world_ipd", before.farWorldIpdSet ? before.farWorldIpd : -1.f,
+        after.farWorldIpdSet ? after.farWorldIpd : -1.f, "%.2f");
+    add("dcsvr_far_depth_z0_m", before.farZ0, after.farZ0, "%.0f");
+    add("dcsvr_far_depth_gamma", before.farGamma, after.farGamma, "%.2f");
+    add("dcsvr_far_depth_toggle", before.farKeyVk * 8 + before.farKeyMods, after.farKeyVk * 8 + after.farKeyMods,
+        "%.0f");
     return out;
 }
 
@@ -266,7 +403,12 @@ class Reloader : public std::enable_shared_from_this<Reloader> {
             std::string text;
             if (m_stamps[i].exists && ReadAll(m_files[i], text)) ParseText(text, m_context, values, &m_start);
         }
+        m_startValues = values;
     }
+
+    // The live values the layer starts with (Prime's parse): what the first reload is compared against for the keys
+    // whose parse state the layer's members do not hold (Far depth's curve) or that another thread owns (the gaze).
+    const Values& StartValues() const { return m_startValues; }
 
     // Off the hot path (one poll at a time): stats the files and parses them only when a stamp changed. True: parsed
     // and published.
@@ -355,6 +497,7 @@ class Reloader : public std::enable_shared_from_this<Reloader> {
     const std::chrono::milliseconds m_interval;
     std::vector<Stamp> m_stamps;                    // Prime, then the poll (one at a time)
     std::map<std::string, std::string> m_start;     // every key the layer started with
+    Values m_startValues{};                         // Prime
     std::mutex m_mutex;
     Result m_pending;                               // under m_mutex
     std::atomic<uint64_t> m_generation{0};
