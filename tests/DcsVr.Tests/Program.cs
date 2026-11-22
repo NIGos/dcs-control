@@ -5226,6 +5226,32 @@ Test("Three views is parked in 0.7: a profile saved with engineThreeViews=true l
     var earlier = JsonData.Deserialize<VrProfile>(json.Replace("\"engineThreeViews\": false", "\"engineThreeViews\": true, \"usesThreeViews\": true"));
     Require(earlier.EngineThreeViews && !ConfigurationWriters.DcsQvCull(earlier).Contains("ThreeViews"), "A draft with usesThreeViews loads and writes no ThreeViews key");
 });
+Test("Profiles for 0.6.7: no derived value new since 0.6.7 is written (0.6.7 refuses keys it does not know); drafts that have them still load", () =>
+{
+    // The derived (get-only) values 0.6.7 itself wrote, and so reads: no other may be written (checked against 0.6.7's
+    // loader, branch foveated-fg, with profiles saved by this build). The 0.7 settings (frameGenFocusLayer,
+    // frameGenParallelEyes, quadEdgeMatch, quadSaccadeTail, quadLostGazeEase, engineFastShaderPaths, engineThreeViews,
+    // engineWaterSkip, engineIdleEffectSkip) and the Quest 3 VD route are still unknown to 0.6.7 (docs/INTERFACE.md).
+    string[] derived067 = ["boostHelperElevated", "depthBoostActiveMax", "neuralEdgeFeather", "quadSaccadeLeadMs", "usesAdaptiveCadence", "usesBoostHelper",
+        "usesBundledQuadViews", "usesCentralNeuralArea", "usesCheeky", "usesColorMode", "usesColorModeKey", "usesDepthBoost", "usesEngineModule", "usesEyeTrackedVr",
+        "usesFarDepth", "usesFixationDepth", "usesFoveatedDlss", "usesFoveatedFrameGen", "usesGazeDof", "usesGazePublish", "usesGVision", "usesHeadsetPanel",
+        "usesHudSymbology", "usesLayerEyeDistance", "usesLowerMonitor", "usesNeuralEdgeFade", "usesPerceptionLayer", "usesPeripheryDlssPreset",
+        "usesPeripheryStability", "usesPrefetchFix", "usesPupilShift", "usesQuadFocus", "usesQuadTurbo", "usesRecordersEmulatedLists", "usesReleaseIdleDlss",
+        "usesSmallDcsWindow", "usesTobiiPause", "usesVisualRealism"];
+    var written = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(new VrProfile { QuadSaccadeTail = true, EngineWaterSkip = true }))!.AsObject().Select(k => k.Key).ToHashSet();
+    var derivedWritten = typeof(VrProfile).GetProperties(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public)
+        .Where(p => p.SetMethod is null && p.GetIndexParameters().Length == 0)
+        .Select(p => System.Text.Json.JsonNamingPolicy.CamelCase.ConvertName(p.Name)).Where(written.Contains).ToArray();
+    var extra = derivedWritten.Except(derived067).ToArray();
+    Require(extra.Length == 0, "derived values 0.6.7 cannot read are written: " + string.Join(", ", extra));
+    // A draft saved by an earlier 0.7 build, with them: still loads (dropped as obsolete keys).
+    var json = JsonData.Serialize(new VrProfile { EngineOptimizations = true });
+    var earlier = JsonData.Deserialize<VrProfile>(json.TrimEnd().TrimEnd('}') + ", \"usesWaterSkip\": false, \"usesIdleEffectSkip\": false, \"engineModuleRequired\": true, \"usesQuadSaccadeTail\": false, " +
+        "\"usesQuadLostGazeEase\": false, \"usesLayerOwnGaze\": true, \"usesLayerGaze\": true, \"quadSaccadeHoldMs\": 40, \"quadSaccadeMaxExtend\": 0.35}");
+    Require(earlier.EngineOptimizations && earlier.EngineModuleRequired, "an earlier 0.7 draft with the derived values loads");
+    // The waiting list of live mode compares serialized drafts: a derived value is never a setting there.
+    Require(!ControlService.ChangedSettings(new VrProfile { EngineOptimizations = true }, new VrProfile()).Contains("engineModuleRequired"), "engineModuleRequired is no changed setting");
+});
 Test("CPU Boost: processes changed by a helper that was ended are restored at the next start, only the same process", () =>
 {
     var state = PathPolicy.UnderRoot(root, "boost-ledger/state"); Directory.CreateDirectory(Path.Combine(state, "boost"));
