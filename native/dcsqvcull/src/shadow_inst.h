@@ -4588,6 +4588,22 @@ bool Install() {
   return true;
 }
 
+// The selection mirror's checks that failed (bits), and their names for the log (regress-07: the line said only
+// "differs", not which part).
+enum : uint32_t { kSelSlot = 1, kSelSceneRenderable = 2, kSelCodeBits = 4, kSelDrawDispatch = 8, kSelDrawTable = 16 };
+std::string SelFailText(uint32_t failed) {
+  static const char* const kNames[5] = {
+      "ModelMaterialMT vtable slot 4 is not the analysed draw (another hook or another build)",
+      "SceneRenderable code hash", "selection code hash", "draw dispatch code hash", "draw table hash"};
+  std::string s;
+  for (int i = 0; i < 5; ++i)
+    if (failed & (1u << i)) {
+      if (!s.empty()) s += ", ";
+      s += kNames[i];
+    }
+  return s.empty() ? "none" : s;
+}
+
 // G-buffer part: the shared pipeline plus gb_count.h's SceneRenderable hook
 // with our observer (one HookSlot for both). The selection mirror is enabled
 // only when the mirrored NGModel code matches its hashes.
@@ -4599,13 +4615,19 @@ bool InstallGb() {
     return false;
   }
   auto** matVt = reinterpret_cast<void**>(g_ng + g_at.model);
-  g_selOk = reinterpret_cast<uint8_t*>(SlotOriginal(&matVt[4])) == g_ng + kModelDraw &&
-            shadowtex::CodeIs(g_ng, kSceneRenderable, kSceneRenderableEnd, kSceneRenderableHash) &&
-            shadowtex::CodeIs(g_ng, kSelCode, kSelCodeEnd, kSelCodeHash) &&
-            shadowtex::CodeIs(g_ng, kDrawDispatch, kDrawDispatchEnd, kDrawDispatchHash) &&
-            shadowtex::CodeIs(g_ng, kDrawTable, kDrawTableEnd, kDrawTableHash);
+  uint32_t selFailed = 0;
+  if (reinterpret_cast<uint8_t*>(SlotOriginal(&matVt[4])) != g_ng + kModelDraw) selFailed |= kSelSlot;
+  if (!shadowtex::CodeIs(g_ng, kSceneRenderable, kSceneRenderableEnd, kSceneRenderableHash))
+    selFailed |= kSelSceneRenderable;
+  if (!shadowtex::CodeIs(g_ng, kSelCode, kSelCodeEnd, kSelCodeHash)) selFailed |= kSelCodeBits;
+  if (!shadowtex::CodeIs(g_ng, kDrawDispatch, kDrawDispatchEnd, kDrawDispatchHash)) selFailed |= kSelDrawDispatch;
+  if (!shadowtex::CodeIs(g_ng, kDrawTable, kDrawTableEnd, kDrawTableHash)) selFailed |= kSelDrawTable;
+  g_selOk = selFailed == 0;
   if (g_selOk) memcpy(&g_flirThreshold, g_ng + kFlirThreshold, 4);
-  if (!g_selOk) Log("gbuffer inst: ModelMaterialMT::draw selection code differs from the analysed build; no selection log");
+  if (!g_selOk)
+    Log("gbuffer inst: ModelMaterialMT::draw selection code differs from the analysed build (failed: %s); no "
+        "selection log",
+        SelFailText(selFailed).c_str());
   gbcount::g_observer.store(&GbObserver);
   g_gbInstalled = true;
   Log("gbuffer inst: ready (SceneRenderable observer on gb_count's hook; selection mirror %s)",

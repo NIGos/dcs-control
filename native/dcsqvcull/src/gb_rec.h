@@ -6245,7 +6245,17 @@ double HeapResetsPerFrame(double f) {
   return r;
 }
 
+// No quad frame in the interval (main menu, loading screens, the F10 map): the per-frame figures divided by 1 and
+// printed totals as per-frame values (regress-07). One line instead.
+bool LogNoFrames(const char* who, const char* label, double frames) {
+  if (frames > 0) return false;
+  Log("  %s %s: no Quad Views frame in this interval (menu, loading screen or F10 map): no per-frame figures", who,
+      label);
+  return true;
+}
+
 void LogSummary(const char* label, double frames) {
+  if (LogNoFrames("gbuffer recorder", label, frames)) return;
   const double f = frames > 0 ? frames : 1.0;
   const uint32_t scope = g_scope.load();
   uint64_t passes = 0, exec = 0, partial = 0, late = 0, refused = 0, items = 0, draws = 0;
@@ -6299,6 +6309,7 @@ void LogSummary(const char* label, double frames) {
 
 void LogCounters(const char* label, double frames) {
   PollStateDump();
+  if (LogNoFrames("gbuffer recorder", label, frames)) return;
   const double f = frames > 0 ? frames : 1.0;
   const uint32_t scope = g_scope.load();
   Log("  gbuffer recorder %s: scope 0x%x, %.0f frames%s; %.2f render entries and %.2f G-buffer executions/frame "

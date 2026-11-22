@@ -323,6 +323,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "r83_test.h"  // R83: R82 D1, no false MISSED tone-map swaps at VrFx transitions in Mode 0
 #include "r90_test.h"  // R90: lossless hitch fixes (patching, placement, async log, readbacks, Lua, disk, shadow inst)
 #include "r93_test.h"  // R93: R92's D1 (async log ring at DCS start) and D2 (FrameTimeline behind the cockpit mask)
+#include "regress07_test.h"  // regress-07 offline fixes: recorder lines without frames, gbuffer inst check names
 #include "r95_test.h"       // R95: the symbology emission export (contract, pure parts, ovl_cpu record point)
 #include "r95_tone_test.h"  // R95: the tone map's second evaluation on WARP (every colour mode and effect)
 #include "r95_pipe_test.h"  // R95: the whole path, the lifecycle (WARP; QV_R95_HW=1: also the GPU)
@@ -637,6 +638,13 @@ int main() {
   // QV_NT_ONLY=1: only the R37 night tone tests.
   if (getenv("QV_NT_ONLY")) {
     nttest::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
+  // QV_REGRESS07_ONLY=1: only the regress-07 log-line tests (and R130's DLSS load line).
+  if (getenv("QV_REGRESS07_ONLY")) {
+    regress07test::Run();
+    r130test::Run();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -2071,6 +2079,7 @@ int main() {
   r83::Run();  // R83 (R82 D1): miss accounting decides "due" from the state the swap goes by
   r90::Run();  // R90: lossless hitch fixes
   r93::Run();  // R93: async log start burst and render-thread no-I/O; FrameTimeline with the cockpit mask export
+  regress07test::Run();  // regress-07: recorder lines without frames, gbuffer inst selection check names
   r94::Run();  // R94: SymbologyTrace (dev live HUD trace)
   r95test::Run();  // R95: the symbology emission export (last: it installs and stops the cockpit mask export itself)
   r97test::Run();  // R97: its fixes after the first live run

@@ -5577,7 +5577,17 @@ void ResetCounters() {
 // why the others were drawn stock (late = the job missed the wait budget),
 // jobs refused (worker still busy), casters drawn from lists (on helper
 // lists), the render thread's wait and replay/execute time, CB ring bytes.
+// No quad frame in the interval (main menu, loading screens, the F10 map): the per-frame figures divided by 1 and
+// printed totals as per-frame values (regress-07). One line instead.
+bool LogNoFrames(const char* who, const char* label, double frames) {
+  if (frames > 0) return false;
+  Log("  %s %s: no Quad Views frame in this interval (menu, loading screen or F10 map): no per-frame figures", who,
+      label);
+  return true;
+}
+
 void LogSummary(const char* label, double frames) {
+  if (LogNoFrames("shadow recorder", label, frames)) return;
   const double f = frames > 0 ? frames : 1.0;
   const uint32_t scope = g_scope.load();
   uint64_t passes = 0, exec = 0, late = 0, refused = 0, casters = 0, recorded = 0, helperDraws = 0, draws = 0;
@@ -5635,6 +5645,7 @@ void LogNest(const char* label, double frames) {
 }
 
 void LogCounters(const char* label, double frames) {
+  if (LogNoFrames("shadow recorder", label, frames)) return;
   const double f = frames > 0 ? frames : 1.0;
   const uint32_t scope = g_scope.load();
   Log("  shadow recorder %s: scope 0x%x, %.0f frames%s; probes %llu (batching leaders drawn alone %llu, unusable "
