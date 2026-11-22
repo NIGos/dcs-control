@@ -22,8 +22,8 @@ public enum PassThroughPreference { Steady, Balanced, PreferRefresh }
 /// <summary>How Quad Views hands the focus layer to the runtime with foveated frame generation
 /// (<see cref="VrProfile.FrameGenFocusLayer"/>): Standard dcsvr_two_layers=2 with colour not premultiplied
 /// (dcsvr_two_layers_alpha 0); Premultiplied alpha 1; PremultipliedSrgb alpha 2 (premultiplied, sRGB swapchain); PerEye
-/// dcsvr_two_layers=1 (one swapchain per eye), alpha 0; OpaqueFocus alpha 3 (Quad Views patch 0024: the focus layer opaque,
-/// holding the composed image over its rectangle, so the runtime blends nothing). Variants for
+/// dcsvr_two_layers=1 (one swapchain per eye), alpha 0; OpaqueFocus alpha 3 (Quad Views patches 0024/0025: the focus layer opaque but for a thin transparent rim,
+/// holding the composed image over its rectangle, so the runtime blends only the rim). Variants for
 /// finding which runtime path draws the white disc over the fovea (artifacts\perf-07\flicker.md).</summary>
 public enum FocusLayerMode { Standard, Premultiplied, PremultipliedSrgb, PerEye, OpaqueFocus }
 /// <summary>The DLSS preset of the Quad Views periphery (<see cref="VrProfile.PeripheryDlssPreset"/>); Off keeps DCS's.</summary>

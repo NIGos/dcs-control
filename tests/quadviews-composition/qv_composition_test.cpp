@@ -657,12 +657,57 @@ int main(int argc, char** argv) {
             //     is 512 (the composition enlarges it, k = 2 for the edge match). Every focus pixel must equal the
             //     composed pixel at the same place (fade band, sharp area, corners outside the shape), for every shape,
             //     band, offset, with sharpening and with edge match.
-            //  3. Alpha 1 everywhere, and where mode 0's fade is 1 the colour is mode 0's exactly (the sharp area).
+            //  3. Where mode 0's fade is 1 and the rim's alpha is 1, the colour is mode 0's exactly (the sharp area).
+            //  4. The rim (0025): alpha is 0 on the outer half of 1.5 % of each side, so every texel of the outer border
+            //     (the rows and columns a runtime's distortion pass may read past) is transparent, rising to 1 across the
+            //     inner half; 1 everywhere else. Where alpha is 0 the colour is the composed one (check 2, so a display
+            //     path that ignores the alpha shows the right image); where it is between 0 and 1 the runtime's blend of
+            //     the stored bytes over the periphery (bilinear, as the runtime's periphery layer shows it here) gives the
+            //     composed colour, wherever the colour did not have to be clamped.
+            // Before 0025 the layer had alpha 1 up to its edge and went out with no blending: the Pimax runtime drew a
+            // line along its bottom edge (rig 2026-11-22). Check 4 fails on that pass.
             bool opaque_ok = true;
             {
                 const auto stereo_half = make_texture(kOut / 2, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, true);
                 ComPtr<ID3D11ShaderResourceView> stereo_half_srv;
                 check(device->CreateShaderResourceView(stereo_half.Get(), nullptr, &stereo_half_srv), "srv half");
+                // The periphery's texels on the CPU, for the rim's blend check.
+                const UINT half = kOut / 2;
+                std::vector<std::uint32_t> periphery_texels(static_cast<std::size_t>(half) * half);
+                {
+                    D3D11_TEXTURE2D_DESC desc{};
+                    stereo_half->GetDesc(&desc);
+                    desc.BindFlags = 0;
+                    desc.Usage = D3D11_USAGE_STAGING;
+                    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                    ComPtr<ID3D11Texture2D> read;
+                    check(device->CreateTexture2D(&desc, nullptr, &read), "periphery read");
+                    context->CopyResource(read.Get(), stereo_half.Get());
+                    D3D11_MAPPED_SUBRESOURCE mapped{};
+                    check(context->Map(read.Get(), 0, D3D11_MAP_READ, 0, &mapped), "map periphery");
+                    for (UINT y = 0; y < half; ++y)
+                        std::memcpy(&periphery_texels[static_cast<std::size_t>(y) * half],
+                            static_cast<const std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch, half * 4);
+                    context->Unmap(read.Get(), 0);
+                }
+                // Bilinear, border black (the test's sampler), channel ch, at uv.
+                const auto periphery_at = [&](float u, float v, int ch) {
+                    const float x = u * half - 0.5f, y = v * half - 0.5f;
+                    const int x0 = static_cast<int>(std::floor(x)), y0 = static_cast<int>(std::floor(y));
+                    const float fx = x - x0, fy = y - y0;
+                    const auto texel = [&](int tx, int ty) {
+                        if (tx < 0 || ty < 0 || tx >= static_cast<int>(half) || ty >= static_cast<int>(half)) return 0.f;
+                        return static_cast<float>((periphery_texels[static_cast<std::size_t>(ty) * half + tx] >> (8 * ch)) & 255U);
+                    };
+                    return (texel(x0, y0) * (1 - fx) + texel(x0 + 1, y0) * fx) * (1 - fy) +
+                           (texel(x0, y0 + 1) * (1 - fx) + texel(x0 + 1, y0 + 1) * fx) * fy;
+                };
+                // The rim's alpha byte as the shader computes it (kDcsvrOpaqueRim 0.015).
+                const auto rim_alpha = [&](UINT x, UINT y) {
+                    const float u = (x + 0.5f) / kFocus, v = (y + 0.5f) / kFocus;
+                    const float d = (std::min)((std::min)(u, 1 - u), (std::min)(v, 1 - v)) / 0.015f;
+                    return static_cast<int>(std::lround((std::clamp)(2 * d - 1, 0.f, 1.f) * 255));
+                };
                 const float area = static_cast<float>(kFocus) / static_cast<float>(kOut);
                 const auto run_opaque = [&](const TwoLayer& k, ID3D11ShaderResourceView* focus_view, ID3D11ShaderResourceView* plain) {
                     const float identity[16]{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -699,7 +744,9 @@ int main(int argc, char** argv) {
                 // texels' 600 / 1024 of the view.
                 const float k_cpu = static_cast<float>(kFocus) / static_cast<float>(kOut / 2) / area;
                 std::size_t cases = 0, blended = 0, exact_off = 0, total_off = 0, alpha_not_one = 0, sharp = 0, sharp_differing = 0;
+                std::size_t rim_alpha_wrong = 0, border_opaque = 0, rim_ramp = 0, rim_clamped = 0;
                 int worst_off = 0, worst_edge = 0, worst_sharp = 0;
+                double worst_rim_blend = 0;
                 focus_area = area;
                 stereo_view = stereo_half_srv.Get();
                 for (const float shape : {0.f, 2.f, 8.f})
@@ -736,8 +783,30 @@ int main(int argc, char** argv) {
                                         for (UINT x = 0; x < kFocus; ++x) {
                                             const std::size_t p = static_cast<std::size_t>(y) * kFocus + x;
                                             const std::uint32_t r = reference[static_cast<std::size_t>(y0 + y) * kOut + x0 + x];
+                                            const int a_out = static_cast<int>(opaque[p] >> 24), a_rim = rim_alpha(x, y);
+                                            if (std::abs(a_out - a_rim) > 1) ++rim_alpha_wrong;
+                                            if ((x == 0 || y == 0 || x + 1 == kFocus || y + 1 == kFocus) && a_out != 0) ++border_opaque;
+                                            if (a_rim > 0 && a_rim < 255) {
+                                                // The runtime's blend of the stored bytes over the periphery must give the
+                                                // composed colour (unless the colour was clamped).
+                                                ++rim_ramp;
+                                                const float a = a_out / 255.f;
+                                                const float u = (x + 0.5f) / kFocus * o.band[0] + o.band[2];
+                                                const float v = (y + 0.5f) / kFocus * o.band[1] + o.band[3];
+                                                bool clamped = false;
+                                                double worst_here = 0;
+                                                for (int ch = 0; ch < 3; ++ch) {
+                                                    const int stored = static_cast<int>((opaque[p] >> (8 * ch)) & 255U);
+                                                    clamped = clamped || stored == 0 || stored == 255;
+                                                    const double shown = stored * a + periphery_at(u, v, ch) * (1 - a);
+                                                    worst_here = (std::max)(worst_here, std::abs(shown - static_cast<double>((r >> (8 * ch)) & 255U)));
+                                                }
+                                                if (clamped) ++rim_clamped;
+                                                else if (edge <= 0.f) worst_rim_blend = (std::max)(worst_rim_blend, worst_here);
+                                                continue;
+                                            }
                                             int worst = 0;
-                                            for (int ch = 0; ch < 4; ++ch)
+                                            for (int ch = 0; ch < 3; ++ch)
                                                 worst = (std::max)(worst, std::abs(static_cast<int>((opaque[p] >> (8 * ch)) & 255U) -
                                                                                    static_cast<int>((r >> (8 * ch)) & 255U)));
                                             if (edge > 0.f) {
@@ -747,9 +816,9 @@ int main(int argc, char** argv) {
                                                 ++total_off;
                                                 exact_off += worst == 0 ? 1U : 0U;
                                             }
-                                            if ((opaque[p] >> 24) != 255U) ++alpha_not_one;
+                                            if (a_rim == 255 && (opaque[p] >> 24) != 255U) ++alpha_not_one;
                                             const std::uint32_t a0 = standard_sharp[p] >> 24;
-                                            if (a0 == 255U) {
+                                            if (a0 == 255U && a_rim == 255) {
                                                 ++sharp;
                                                 // A fade byte of 255 is a fade of 1 within rounding (0.998 or more): the
                                                 // periphery may add a code there.
@@ -768,7 +837,10 @@ int main(int argc, char** argv) {
                 stereo_view = nullptr;
                 std::printf("opaque focus vs composition: %zu cases, %zu sharp pixels (%zu differing from mode 0, worst %d codes), %zu blended or periphery pixels, edge match off worst %d codes (%zu of %zu exact), on worst %d codes, alpha not 1 %zu%s",
                     cases, sharp, sharp_differing, worst_sharp, blended, worst_off, exact_off, total_off, worst_edge, alpha_not_one, "\n");
-                opaque_ok = worst_off <= 1 && worst_edge <= 2 && alpha_not_one == 0 && worst_sharp <= 1 && sharp > 1000000U && blended > 1000000U;
+                std::printf("opaque focus rim: alpha off the rim's %zu, opaque border texels %zu, ramp texels %zu (%zu clamped), runtime blend vs composed worst %.2f codes%s",
+                    rim_alpha_wrong, border_opaque, rim_ramp, rim_clamped, worst_rim_blend, "\n");
+                opaque_ok = worst_off <= 1 && worst_edge <= 2 && alpha_not_one == 0 && worst_sharp <= 1 && sharp > 1000000U && blended > 1000000U &&
+                            rim_alpha_wrong == 0 && border_opaque == 0 && rim_ramp > 10000U && worst_rim_blend <= 2.0 && rim_clamped * 2 < rim_ramp;
             }
             std::printf(opaque_ok ? "Quad Views opaque focus: the focus layer holds the composed image over its rectangle%s"
                                   : "Quad Views opaque focus FAILED%s", "\n");            two_layer_ok = two_layer_ok && opaque_ok;
