@@ -113,3 +113,7 @@ eb0db0ef1909448b16d9f8847adee6b3e428f69255cb45996c61816752416e29 dcsqvcull/DcsQv
 57430df10cef95d56338edb4ccfa686516a3f0740b9af547f3ac90c480750fcd dcsqvcull/DcsQvCull.dll (0.7.0-preview)
 3dadafa5b3e0c7368a309ad038632d08de6dece74c5cb2b170a2f3fffe8d0b9e dcsqvcull/DcsQvCull.lua (0.7.0-preview)
 505c1b8a5445838375e046924cfb1563386be1e51fe510d87bbae8bb1e3f38ea dcsqvcull/DcsQvCullPayload.dll (0.7.0-preview)
+894d79cb91a2b3ad339c89aa6b31fa17d54a98dcabccbbb5824b10b749c924ee cheeky-focus/CheekyFoveatedDLSS/CheekyFoveatedDLSSHost.dll (0.7.0-preview)
+5e538bc8bc65a36ed4993eb207380a53d68bb831bbad4908c5cc4ad59232a337 cheeky-focus/CheekyFoveatedDLSS/CheekyFoveatedDLSSRuntime.dll (0.7.0-preview)
+f544cd5ef55dd9e6918eb0938e99159b5f61242bcdc3af3eb2ac297db8effac4 dcsqvcull/DcsQvCull.dll (0.7.0-preview)
+0ee03752535d3a140831767e08645576cd2733ebf76ccac1c5c9dcca5ef54f88 dcsqvcull/DcsQvCullPayload.dll (0.7.0-preview)
