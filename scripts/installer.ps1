@@ -92,6 +92,16 @@ try {
 } finally {
     if ($temporaryCli) { Remove-Item -LiteralPath $temporaryCli -Recurse -Force -ErrorAction SilentlyContinue }
 }
+if ($Action -eq 'Uninstall') {
+    # The signed setups kept for Go back (state\setups, 90-180 MB) go with the installation; the rest of the state stays.
+    # Only for the pilot's own installation (the standard folder, or the one the real Apps entry names): a test
+    # installation in a scratch folder or with a scratch Apps key leaves the pilot's state alone. Also with -NoShortcut.
+    $standard = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Programs/DcsControl')).TrimEnd('\','/')
+    $registered = if ($UninstallKey -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DcsControl' -and (Test-Path -LiteralPath $UninstallKey)) { (Get-ItemProperty -LiteralPath $UninstallKey -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation }
+    $ownInstall = $UninstallKey -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DcsControl' -and ($installRoot -eq $standard -or ($registered -and [IO.Path]::GetFullPath($registered).TrimEnd('\','/') -eq $installRoot))
+    $setups = Join-Path $env:LOCALAPPDATA 'DcsControl\setups'
+    if ($ownInstall -and (Test-Path -LiteralPath $setups)) { Remove-Item -LiteralPath $setups -Recurse -Force -ErrorAction SilentlyContinue }
+}
 if ($NoShortcut -or $Action -eq 'Verify') { exit 0 }
 $appPath = Join-Path $installRoot 'DcsControl.exe'
 $shortcutPath = Join-Path $StartMenuFolder 'DCS Control.lnk'
@@ -151,12 +161,5 @@ if ($Action -eq 'Install') {
     }
     $location = if (Test-Path -LiteralPath $UninstallKey) { (Get-ItemProperty -LiteralPath $UninstallKey -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation }
     if ($location -and [IO.Path]::GetFullPath($location).TrimEnd('\','/') -eq $installRoot) { Remove-Item -LiteralPath $UninstallKey -Recurse }
-    # The signed setups kept for Go back (state\setups, 90-180 MB) go with the installation; the rest of the state stays.
-    # Only for the pilot's own installation (the standard folder, or the one the Apps entry names, with the real Apps key):
-    # a test installation with a scratch key or folder leaves the pilot's state alone.
-    $standard = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Programs/DcsControl')).TrimEnd('\','/')
-    $ownInstall = $UninstallKey -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DcsControl' -and ($installRoot -eq $standard -or ($location -and [IO.Path]::GetFullPath($location).TrimEnd('\','/') -eq $installRoot))
-    $setups = Join-Path $env:LOCALAPPDATA 'DcsControl\setups'
-    if ($ownInstall -and (Test-Path -LiteralPath $setups)) { Remove-Item -LiteralPath $setups -Recurse -Force -ErrorAction SilentlyContinue }
     Write-Output 'Owned application files removed. Game-mod backup state is retained.'
 }
