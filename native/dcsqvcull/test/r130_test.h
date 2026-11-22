@@ -374,6 +374,38 @@ void RuleVerdicts() {
   ResetForTest();
 }
 
+// regress-07: Cheeky's stand-in handles for the focus views (DLSS 5: { id >= 0x7FD00000, 'DCSF' }, no NGX feature behind
+// them) are never tracked, so R132 can never release one; one line says the lifetime and VRAM lines cover only DCS's
+// real features; DCS releasing one is no "untracked handle" line.
+void CheekyStandIns(const Rig& rig) {
+  using namespace dlssv;
+  using namespace dlssv::life;
+  Fresh(rig);
+  Tick(0, 0, false, false, true);
+  const auto create = reinterpret_cast<CreateFn>(rig.create);
+  const auto release = reinterpret_cast<ReleaseFn>(rig.rel);
+  r122test::FakeParam p;
+  FakeHandle standIn[2] = {{0x7FD00001u, {0x44435346u, 0, 0}}, {0x7FD00002u, {0x44435346u, 0, 0}}};
+  FakeHandle real{77, {0, 0, 0}};
+  StartReportCapture();
+  for (auto& h : standIn) {
+    void* out = nullptr;
+    r122test::DcsFeature(p, 1176, 1164, 2028, 2004);
+    create(&h, kFeatureSuperSampling, &p, &out);
+    Advance(0.007);
+  }
+  void* out = nullptr;
+  r122test::DcsFeature(p, 604, 596, 1040, 1028);
+  create(&real, kFeatureSuperSampling, &p, &out);
+  release(&standIn[0]);
+  const std::string log = StopReportCapture();
+  size_t once = 0;
+  for (size_t at = log.find("Cheeky defers"); at != std::string::npos; at = log.find("Cheeky defers", at + 1)) ++once;
+  Check(g_n.load() == 1 && g_f[0].id == 77 && once == 1 && Has(log, "life: Cheeky's stand-in handle (id 0x7fd00001), not tracked") &&
+            !Has(log, "untracked DLSS handle"),
+        "R130 / R132 (regress-07): Cheeky's stand-in handles are not tracked (never released by us), said once; the real one is");
+}
+
 void Run() {
   printf("-- R130 DLSS feature lifetime instrumentation (read-only) --\n");
   const Rig rig = MakeRig();
@@ -384,6 +416,7 @@ void Run() {
   KeysOff(rig);
   TwoSets(rig);
   RuleVerdicts();
+  CheekyStandIns(rig);
   dlssv::life::ResetForTest();
   r122test::NewGeneration();
 }

@@ -269,6 +269,7 @@ struct Detour {
   const char* name = "";
   void** slot = nullptr;
   void* tramp = nullptr;
+  uint8_t* target = nullptr;  // the patched function (CheckChained)
 };
 
 bool SafeRead(const void* p, void* out, size_t n) {
@@ -317,7 +318,38 @@ inline uint8_t* Rel32Dest(const uint8_t* at, const uint8_t* jmp5) {
   memcpy(&rel, jmp5 + 1, 4);
   return const_cast<uint8_t*>(at) + 5 + rel;
 }
-// Target begins with E9 (cur: its first bytes). Result as InstallDetour (2 reuse, 3 chained now).
+int CheckChained(Detour* d);
+// regress-07: the chain page of a target, kept in the process environment (DCSQVCULL_CHAIN_<target address>) so that
+// a later payload finds it again even when another program's jump replaced our chain in between (a hot reload: without
+// it every payload start in that state took a new pair of pages).
+inline void ChainPageName(const uint8_t* target, wchar_t* name, size_t n) {
+  swprintf_s(name, n, L"DCSQVCULL_CHAIN_%llx", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(target)));
+}
+inline void RememberChainPage(const uint8_t* target, const uint8_t* page) {
+  wchar_t name[48], value[24];
+  ChainPageName(target, name, 48);
+  swprintf_s(value, L"%llx", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(page)));
+  SetEnvironmentVariableW(name, value);
+}
+inline uint8_t* PriorChainPage(const uint8_t* target) {
+  wchar_t name[48], value[24] = {};
+  ChainPageName(target, name, 48);
+  const DWORD n = GetEnvironmentVariableW(name, value, 24);
+  if (!n || n >= 24) return nullptr;
+  auto* page = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(wcstoull(value, nullptr, 16)));
+  uint8_t stub[6] = {};
+  uint32_t hdr[2] = {};
+  const int32_t wantRel = static_cast<int32_t>(kPage - 6);
+  MEMORY_BASIC_INFORMATION m{};
+  if (!page || (reinterpret_cast<uintptr_t>(page) & (kPage - 1)) || !VirtualQuery(page, &m, sizeof m) || m.State != MEM_COMMIT ||
+      !SafeRead(page, stub, 6) || stub[0] != 0xFF || stub[1] != 0x25 || memcmp(stub + 2, &wantRel, 4) != 0 ||
+      !SafeRead(page + kPage + 8, hdr, 8) || hdr[0] != kMagicChain || hdr[1] != 5)
+    return nullptr;
+  return page;
+}
+
+// Target begins with E9 (cur: its first bytes). Result as InstallDetour (2 reuse, 3 chained now, 4 chained again on
+// the page an earlier payload had chained it on).
 int InstallChained(uint8_t* target, const uint8_t* cur, void* hook, Detour* d, bool reuseOnly) {
   uint8_t* dest = Rel32Dest(target, cur);
   uint8_t stub[6] = {}, tr[14] = {}, orig[5] = {};
@@ -335,10 +367,22 @@ int InstallChained(uint8_t* target, const uint8_t* cur, void* hook, Detour* d, b
     if (back != Rel32Dest(target, orig)) return -3;
     d->slot = reinterpret_cast<void**>(dest + kPage);
     d->tramp = dest + 16;
+    d->target = target;
     InterlockedExchangePointer(d->slot, hook);
     return 2;
   }
   if (reuseOnly) return -6;
+  if (uint8_t* prior = PriorChainPage(target)) {
+    Detour again = *d;
+    again.slot = reinterpret_cast<void**>(prior + kPage);
+    again.tramp = prior + 16;
+    again.target = target;
+    if (CheckChained(&again) >= 0) {
+      d->slot = again.slot, d->tramp = again.tramp, d->target = target;
+      InterlockedExchangePointer(d->slot, hook);
+      return 4;
+    }
+  }
   uint8_t* page = AllocNear(target + 5);
   if (!page) return -4;
   memset(page, 0xCC, kPage);
@@ -370,11 +414,46 @@ int InstallChained(uint8_t* target, const uint8_t* cur, void* hook, Detour* d, b
   }
   d->slot = slot;
   d->tramp = t;
+  d->target = target;
+  RememberChainPage(target, page);
   InterlockedExchangePointer(d->slot, hook);
   return 3;
 }
 
-// Result: 1 = patched now, 2 = an earlier payload's patch reused, 3 = chained now behind another program's jump,
+// regress-07: the other program can write its jump at the target again after we chained in front of it (MinHook writes
+// the 5 bytes again whenever its hook is re-enabled), and then our hook no longer runs. The worker checks it: 0 the
+// target still jumps to our chain page; 1 it jumped somewhere else and is chained again, on the SAME page (no new
+// allocation per re-chain, and a later payload's reuse check above still finds the page consistent: its trampoline and
+// its saved jump are both the new ones); -1 not a chained detour (nothing to check); -2 the target no longer starts
+// with a jump (the other program unhooked: ours went with it, as documented above); -3 / -4 the re-chain could not be
+// written (out of reach, or no clear moment). The trampoline and the target are written in one suspended write.
+int CheckChained(Detour* d) {
+  uint8_t* target = d->target;
+  if (!target || !d->slot) return -1;
+  uint8_t* page = reinterpret_cast<uint8_t*>(d->slot) - kPage;
+  uint32_t hdr[2] = {};
+  if (!SafeRead(page + kPage + 8, hdr, 8) || hdr[0] != kMagicChain) return -1;
+  uint8_t cur[5] = {};
+  if (!SafeRead(target, cur, 5)) return -1;
+  if (cur[0] == 0xE9 && Rel32Dest(target, cur) == page) return 0;
+  if (cur[0] != 0xE9) return -2;
+  uint8_t* dest = Rel32Dest(target, cur);
+  if (dest == page + 16) return -2;  // never chain to ourselves
+  uint8_t tr[14] = {0xFF, 0x25, 0, 0, 0, 0};
+  memcpy(tr + 6, &dest, 8);
+  uint8_t patch[5] = {0xE9};
+  const int64_t rel = reinterpret_cast<intptr_t>(page) - reinterpret_cast<intptr_t>(target + 5);
+  const int32_t rel32 = static_cast<int32_t>(rel);
+  if (rel != rel32) return -3;
+  memcpy(patch + 1, &rel32, 4);
+  const qvpatch::Site sites[2] = {{page + 16, tr, sizeof tr}, {target, patch, sizeof patch}};
+  if (!qvpatch::WriteSuspended(sites, 2, 20)) return -4;
+  memcpy(page + kPage + 16, cur, 5);  // the jump now chained to (the data page is read-write)
+  return 1;
+}
+
+// Result: 1 = patched now, 2 = an earlier payload's patch reused, 3 = chained now behind another program's jump, 4 =
+// chained again on an earlier payload's chain page,
 // < 0 = nothing installed (-1 unreadable, -2 prologue not accepted, -3 a foreign patch, -4 no memory, -5 the write
 // failed, -6 reuseOnly and no earlier patch of ours). reuseOnly: only an earlier payload's patch may be taken up.
 int InstallDetour(uint8_t* target, void* hook, Detour* d, bool reuseOnly = false) {
@@ -1297,6 +1376,15 @@ void RelStatus(const char* why) {
 
 // A DLSS-SR creation (from CreateHook, after the original). t0: just before the original. Returns the text appended to
 // the create line.
+// Cheeky's deferred focus-view handle (patches/cheeky/dcs_deferred_feature.inc: struct DcsDeferredHandle { unsigned id;
+// unsigned magic; }, ids from 0x7FD00000, magic 'DCSF').
+constexpr uint32_t kCheekyFirstId = 0x7FD00000u, kCheekyMagic = 0x44435346u;
+bool g_cheekyLogged = false;
+inline bool IsCheekyStandIn(const void* h) {
+  uint32_t v[2] = {};
+  return h && SafeRead(h, v, sizeof v) && (v[1] == kCheekyMagic || v[0] >= kCheekyFirstId);
+}
+
 void NoteCreate(int64_t t0, uint32_t seq, void** handle, int cls, uint32_t outW, uint32_t outH, int r, const Meas& m0,
                 const Meas& m1, char* tail, size_t tn) {
   std::lock_guard<std::mutex> lock(g_mx);
@@ -1334,6 +1422,18 @@ void NoteCreate(int64_t t0, uint32_t seq, void** handle, int cls, uint32_t outW,
   uint32_t id = 0;
   const bool haveH = handle && SafeRead(handle, &h, sizeof(h)) && h;
   if (haveH) SafeRead(h, &id, sizeof(id));
+  // regress-07: Cheeky's stand-in for a focus view (DLSS 5 / Foveated SR defer DCS's own feature): an opaque handle
+  // { id >= 0x7FD00000, 'DCSF' }, not an NGX feature. Never tracked (so never released by R132), and its creation
+  // measures nothing (the real feature, if any, is made later inside Cheeky): said once.
+  if (haveH && IsCheekyStandIn(h)) {
+    snprintf(tail, tn, "; life: Cheeky's stand-in handle (id 0x%x), not tracked", id);
+    if (!g_cheekyLogged) {
+      g_cheekyLogged = true;
+      Log("dlss life: Cheeky defers DCS's DLSS feature of the focus views (stand-in handles, ids from 0x7FD00000): those "
+          "are not NGX features; the lifetime, release and VRAM lines here cover only DCS's real features (the periphery)");
+    }
+    return;
+  }
   const int64_t dv = static_cast<int64_t>(m1.local - m0.local), dp = static_cast<int64_t>(m1.privBytes - m0.privBytes),
                 ds = static_cast<int64_t>(m1.statsBytes - m0.statsBytes);
   const bool okv = m0.vram && m1.vram, okp = m0.priv && m1.priv, oks = m0.stats && m1.stats;
@@ -1367,7 +1467,8 @@ void NoteRelease(int i, const void* h, int r) {
   }
   g_releases.fetch_add(1);
   if (i < 0) {
-    Log("dlss life: DCS released an untracked DLSS handle 0x%llx", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(h)));
+    if (!IsCheekyStandIn(h))  // regress-07: Cheeky's stand-ins are never tracked (NoteCreate)
+      Log("dlss life: DCS released an untracked DLSS handle 0x%llx", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(h)));
     return;
   }
   Feat& f = g_f[i];
@@ -1857,7 +1958,8 @@ void Install() {
     else
       g_evalOrig.store(reinterpret_cast<EvalFn>(d->tramp), std::memory_order_release);
     st = 1;
-    Log("dlss life: %s hooked (%s; %s)", d->name, r == 2 ? "earlier payload's patch reused" : "patched",
+    Log("dlss life: %s hooked (%s; %s)", d->name,
+        r == 2 ? "earlier payload's patch reused" : r == 3 || r == 4 ? "chained in front of another program's hook" : "patched",
         g_verbose || !g_relKey ? "observation only, pass-through" : "lifetime tracking for [DLSS] ReleaseIdleSets");
   }
 }
@@ -1963,7 +2065,7 @@ void ResetForTest() {
   g_load = g_set = g_setFirst = g_loadFirst = 0, g_prevW = g_prevH = 0;
   g_lastCreate = g_loadStart = 0, g_loadOpen = false, g_lastSummary = 0;
   g_evalAtSummary = g_untrackedAtSummary = g_failAtSummary = g_releasesAtSummary = 0, g_changes = 0;
-  g_lastIdle = g_onLogged = g_pausedLogged = g_fullLogged = false;
+  g_lastIdle = g_onLogged = g_pausedLogged = g_fullLogged = g_cheekyLogged = false;
   g_cap = nullptr, g_statsCb = nullptr, g_capTries = 0;
   g_testEvalTarget = g_testReleaseTarget = nullptr;
   g_testClock = nullptr, g_testVram = nullptr, g_testPriv = nullptr, g_testCapParams = nullptr;
@@ -2233,7 +2335,10 @@ bool TryInstallCreate() {
   g_createOrig.store(reinterpret_cast<CreateFn>(g_create.tramp), std::memory_order_release);
   g_createState = 1;
   Log("dlss views: NVSDK_NGX_D3D11_CreateFeature hooked (%s); presets apply from the next mission load",
-      r == 2 ? "earlier payload's patch reused" : (r == 3 ? "chained in front of another program's hook" : "patched"));
+      r == 2 ? "earlier payload's patch reused"
+             : r == 3 ? "chained in front of another program's hook"
+             : r == 4 ? "chained again in front of another program's hook, on an earlier payload's page"
+                      : "patched");
   return true;
 }
 
@@ -2282,6 +2387,32 @@ bool TryInstallGetSetting() {
   return true;
 }
 
+// regress-07, worker (about once a second): a hook we chained in front of another program's (Cheeky's MinHook) is still
+// in front of it; if that program wrote its jump again, chained again (CheckChained), with a line (the first three
+// times, then every 100th: two programs re-writing in turn would otherwise fill the log).
+struct ChainWatch {
+  uint32_t again = 0;
+  bool goneLogged = false, failLogged = false;
+};
+ChainWatch g_chainWatch[3];
+void KeepChained(Detour* d, ChainWatch& w) {
+  const int r = CheckChained(d);
+  if (r == 1) {
+    ++w.again;
+    if (w.again <= 3 || w.again % 100 == 0)
+      Log("dlss views: %s: another program wrote its jump over our chained hook; chained in front of it again (%u "
+          "time(s) this session)",
+          d->name, w.again);
+  } else if (r == -2 && !w.goneLogged) {
+    w.goneLogged = true;
+    Log("dlss views: %s: the program we chained behind unhooked it; our hook went with it (not chained again)", d->name);
+  } else if (r <= -3 && !w.failLogged) {
+    w.failLogged = true;
+    Log("dlss views: %s: another program wrote its jump over our chained hook and it could not be chained again (%s)",
+        d->name, r == -3 ? "out of reach" : "no clear moment to write");
+  }
+}
+
 // Worker tick (about once per second). periph / focus: the parsed keys (-1 = a value we cannot use). instrument: R130
 // [DLSS] Instrument (read-only lifetime counters). release / releaseAfter: R132 [DLSS] ReleaseIdleSets /
 // ReleaseAfterEvals. Nothing is installed while PeripheryPreset, Instrument and ReleaseIdleSets are 0.
@@ -2296,6 +2427,9 @@ void Tick(int periph, int focus, bool ignore, bool engineOff, bool instrument = 
   focus = focus > 0 ? focus : 0;
   const bool was = g_periph.load() > 0;
   g_periph = periph, g_focus = focus, g_ignore = ignore && periph > 0, g_killed = engineOff;
+  if (g_createState.load() == 1) KeepChained(&g_create, g_chainWatch[0]);
+  if (life::g_evalState.load() == 1) KeepChained(&life::g_eval, g_chainWatch[1]);
+  if (life::g_releaseState.load() == 1) KeepChained(&life::g_release, g_chainWatch[2]);
   // R130: the CreateFeature hook carries the creation side of the instrumentation, so it is installed for either key.
   const bool track = instrument || release;  // R132: releasing needs the tracking
   if ((track || periph > 0) && !life::g_guardBase) life::GuardAdopt();  // R132: an earlier payload's released handles
