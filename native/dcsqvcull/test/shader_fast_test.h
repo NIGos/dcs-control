@@ -295,6 +295,13 @@ void Run() {
   Apply(0x3);
   Check(g_vt && chainfast::g_ctx == ctx && chainfast::g_onSet.load() == &OnSet && g_grassVar.load() && g_identOn.load(),
         "shader fast: CSSetShader hook and re-arm callback in place, grass variant on the device, identification on");
+  // ChainFast's identification probe (its own window, opened at the same time) holds the Dispatch entry: neither hook
+  // goes in over the other, so ShaderFast must work through the probe (regress-07: it saw no dispatch at all and
+  // found nothing in about 1 session in 3).
+  const uint64_t via0 = g_viaChainProbe.load();
+  Check(chainfast::InstallId() &&
+            (*reinterpret_cast<void***>(ctx))[g_slot] == reinterpret_cast<void*>(&chainfast::H_IdDispatch),
+        "shader fast: ChainFast's identification probe holds the Dispatch entry");
   for (int i = 0; i < 600 && (g_found.load() != 0x3 || g_candTested < 4); ++i) {
     frame();
     Apply(0x3);
@@ -305,6 +312,20 @@ void Run() {
   Check(g_found.load() == 0x3 && g_candTested == 4 && g_candRejected == 2 && KindOf(gstock) == kGrassCull &&
             KindOf(cstock) == kImClear && KindOf(gdecoy) < 0 && KindOf(cdecoy) < 0,
         what);
+  {
+    void** vt = *reinterpret_cast<void***>(ctx);
+    const uint64_t s0 = g_subs[kGrassCull].load();
+    GrassOut o = GrassBufs(dev, 0);
+    BindGrass(ctx, gstock, in, 0, o);
+    ctx->Dispatch(1, 1, 1);
+    o.Release();
+    sprintf_s(what, "shader fast: under ChainFast's probe the kinds were found and a grass dispatch is substituted "
+              "(%llu dispatches through the probe)", static_cast<unsigned long long>(g_viaChainProbe.load() - via0));
+    Check(vt[g_slot] == reinterpret_cast<void*>(&chainfast::H_IdDispatch) && g_viaChainProbe.load() > via0 &&
+              g_subs[kGrassCull].load() == s0 + 1,
+          what);
+    chainfast::WithdrawId();  // ChainFast's window ends: our hook goes in at the next bind (checked below)
+  }
 
   // --- substitution: grass
   auto runGrass = [&](size_t i, std::vector<uint32_t>& a0, std::vector<uint32_t>& a1) {

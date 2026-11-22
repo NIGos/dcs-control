@@ -1139,9 +1139,22 @@ void Probe(ID3D11DeviceContext* c, bool indirect) {
 using DispFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT);
 using DispIndFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Buffer*, UINT);
 void RearmId(ID3D11DeviceContext* c);
-void STDMETHODCALLTYPE H_IdDispatch(ID3D11DeviceContext* c, UINT x, UINT y, UINT z) {
+// shader_fast.h's dispatch-time work (its identification and substitution, sfast::TryDispatch; true when it ran the
+// dispatch itself). While this probe sits in the Dispatch entry, ShaderFast's own hook never goes in (neither hook
+// re-arms over another hook of the payload), so without this call ShaderFast saw no dispatch for the whole ChainFast
+// window and its own window ran out with nothing found (regress-07: about 1 session in 3 without ShaderFast).
+using TryDispFn = bool (*)(ID3D11DeviceContext*, UINT, UINT, UINT, DispFn next);
+std::atomic<TryDispFn> g_onDispatch{nullptr};
+// The probe of a plain Dispatch (also called from shader_fast.h's hook when that one is on top).
+inline void IdProbeDispatch(ID3D11DeviceContext* c, UINT x, UINT y, UINT z) {
   if (c == g_ctx && x == 1 && y == 1 && z == 1 && g_identOn.load(std::memory_order_relaxed)) Probe(c, false);
-  reinterpret_cast<DispFn>(g_idOrig[0])(c, x, y, z);
+}
+void STDMETHODCALLTYPE H_IdDispatch(ID3D11DeviceContext* c, UINT x, UINT y, UINT z) {
+  IdProbeDispatch(c, x, y, z);
+  const DispFn next = reinterpret_cast<DispFn>(g_idOrig[0]);
+  // ShaderFast's hook below this one (installed first) does its own work.
+  const TryDispFn sf = g_onDispatch.load(std::memory_order_acquire);
+  if (!sf || d3ds::InPayload(reinterpret_cast<void*>(next)) || !sf(c, x, y, z, next)) next(c, x, y, z);
   RearmId(c);
 }
 void STDMETHODCALLTYPE H_IdDispatchIndirect(ID3D11DeviceContext* c, ID3D11Buffer* b, UINT o) {
