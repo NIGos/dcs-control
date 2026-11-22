@@ -1,0 +1,41 @@
+Opaque focus wide ramp (dcsvr_two_layers_alpha=3, after 0025; native/quadviews/dcsvr_twolayer_ps.hlsl): 0025's thin rim did
+not remove the line: the verification flights of 2026-11-22 showed a thin warm line along all four edges of the focus
+rectangle in both eyes in the Pimax screen mirror, none in the undistorted mirror. Across every edge green is unchanged,
+red rises by 35 % and blue falls by 41 % of the background (sky 138/178/222 -> 193/178/131, a dark edge 18/30/52 ->
+25/30/32), red's band one mirror pixel outside blue's. That is the runtime's distortion sampling each colour channel at
+its own place (chromatic aberration correction) and blending with one alpha, green's: shown_c = F_c(x_c) a(x_c) +
+D_c(x_c) (1 - a(x_G)), so any alpha that changes within a few texels gives red and blue D (a(x_c) - a(x_G)) too much or
+too little. The same formula gives 0024's blue 0 / red 255 (hard edge) and 0025's line (a ramp of 15 texels against an
+offset of about 5). The focus pass now stores as alpha the composition's own fade at the pixel's own place, never
+steeper than the band of edge blend 0.2 (the outer 0.4 of the radius), and the colour for that alpha as before
+(P + (C - P) / a), so the residual is a few codes spread over the band. Here: the flag comment and the log line.
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 83c2978..e8ece39 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -1968,10 +1968,12 @@ namespace openxr_api_layer {
+                                     projectionAllocator.back().layerFlags &= ~XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+                                 }
+                                 if (m_dcsvrTwoLayersAlpha == 3) {
+-                                    // DCSVR opaque focus (0025): blended like 0 (SOURCE_ALPHA | UNPREMULTIPLIED), but the
+-                                    // focus pass wrote the composed image with alpha 1 everywhere except a thin outer rim
+-                                    // (alpha 0, colour the periphery). Without blending the Pimax runtime drew a coloured
+-                                    // line along the layer's bottom edge (its distortion pass reads past the edge).
++                                    // DCSVR opaque focus (0025, 0031): blended like 0 (SOURCE_ALPHA | UNPREMULTIPLIED); the
++                                    // focus pass wrote the composed image with an alpha that falls slowly to 0 over the
++                                    // composition's band (at least its band at edge blend 0.2), each texel's colour chosen
++                                    // for its alpha. The Pimax runtime samples each colour channel at its own place but
++                                    // blends with green's alpha, so a steep alpha (no blending, or 0025's thin rim) drew a
++                                    // red/blue line along the layer's edges (dcsvr_twolayer_ps.hlsl).
+                                     projectionAllocator.back().layerFlags |= XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+                                 }
+                                 projectionAllocator.back().views = projectionViewAllocator.back().data();
+@@ -4954,7 +4956,7 @@ namespace openxr_api_layer {
+                         const int dcsvrAlpha = std::stoi(value);
+                         m_dcsvrTwoLayersAlpha = dcsvrAlpha >= 1 && dcsvrAlpha <= 3 ? dcsvrAlpha : 0;
+                         Log(fmt::format("DCSVR two layers: focus alpha {}\n",
+-                                        m_dcsvrTwoLayersAlpha == 3   ? "opaque focus (composed in the focus pass, alpha 1 inside a transparent rim)"
++                                        m_dcsvrTwoLayersAlpha == 3   ? "opaque focus (composed in the focus pass, alpha ramped over the fade band)"
+                                         : m_dcsvrTwoLayersAlpha == 2 ? "premultiplied, sRGB swapchain"
+                                         : m_dcsvrTwoLayersAlpha == 1 ? "premultiplied"
+                                                                      : "unpremultiplied"));

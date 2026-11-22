@@ -27,7 +27,7 @@
 ## New in 0.7
 
 - **Quest 3 VD**, a new route in the top bar: a Meta Quest 3 streamed by Virtual Desktop (VDXR), with Quad Views at a fixed focus, frame generation and the engine optimizations. Contributed by @Mav87th (GitHub PR #29). See [Quest 3 through Virtual Desktop](#quest-3-through-virtual-desktop).
-- **Opaque focus** built into foveated frame generation: the soft edge of the focus area is drawn into the focus image, and the headset only fades a thin outer rim. It is against the flicker some Pimax setups showed around the focus area; there is no choice to make. Foveated frame generation also runs on the Quest 3 VD route.
+- **Opaque focus** built into foveated frame generation: the soft edge of the focus area is drawn into the focus image, and the headset blends it with colours worked out in advance. It is against the flicker some Pimax setups showed around the focus area; there is no choice to make. Foveated frame generation also runs on the Quest 3 VD route.
 - **Quad Views**: **Soft focus edge** (experimental, off by default), and in a new **Eye-tracking options** fold **Stay ahead until your eyes land** and **Slide back when tracking is lost** (both experimental, on by default), from @Heartbreak-1's GitHub PR #26. All three also work with frame generation.
 - **Engine Optimizations**, in a new **GPU savings** fold (experimental, off by default): **Skip hidden water** and **Skip unused effects**, next to Cache distant shadows. **Faster terrain and shader paths** (on by default, now in the same fold) can be turned off if a problem points to it.
 - **Sharp HUD** no longer needs Depth boost. Sharp HUD, **Far depth** and frame generation's cockpit outline, depth and motion also run with Engine Optimizations off.
@@ -257,7 +257,7 @@ OFXR generates frames between the frames DCS renders. The top of the page shows 
 - **Smoothness buffer** (on by default) — holds one extra frame to even out uneven DCS frame times: smoother, but about one refresh more latency (about 11 ms at 90 Hz) while frames are generated. In 3× it holds it only while frames keep arriving late; while Only when needed generates no frames, it adds nothing. Off = lower latency, more stutter when frame times jump.
 - **Both eyes at once** (EXPERIMENTAL, off by default) — each eye's generated frame is made on its own GPU queue instead of one after the other, so generated frames are ready about 1 ms sooner. The image is the same. Not flown yet.
 - **Foveated frame generation** (EXPERIMENTAL, off by default) — frames are generated for the focus area and for the rest of the view separately, instead of for the whole image: about half the GPU time for generated frames and 4 GB less video memory on the test PC. It needs the bundled Quad Views, the Pimax or Quest 3 VD route and NVIDIA frame generation; without them the switch is greyed out, and Checks says when it is on but cannot run. It gets ready on the loading screen, which pauses once for half a second. It helps most with a small focus area; with a very large one it can cost more than it saves. Smooth mouse cursor and Soft focus edge work with it. It has not been flown on the Quest 3 VD route yet.
-  The focus area is handed to the headset as **Opaque focus**: its soft edge is drawn into the focus image itself, and the headset only fades a thin outer rim. This is what stops the rectangle or spot that flickered around the focus area on some Pimax setups. There is no setting for it (the Focus layer choice of earlier 0.7 test builds is gone; a profile that has it loads and uses Opaque focus).
+  The focus area is handed to the headset as **Opaque focus**: its soft edge is drawn into the focus image itself, and the headset blends it with colours worked out in advance. This is what stops the rectangle or spot that flickered around the focus area on some Pimax setups. There is no setting for it (the Focus layer choice of earlier 0.7 test builds is gone; a profile that has it loads and uses Opaque focus).
 
 The **Image quality** card holds how generated frames look:
 
@@ -512,7 +512,7 @@ On the **Perception** page. It adds depth to distant scenery (about 50 m to 2 km
 
 ### A rectangle or a spot flickers around the focus area
 
-With **Foveated frame generation** on, some Pimax setups showed a flickering rectangle or spot around the focus area. 0.7 always hands the focus area over as **Opaque focus** (the soft edge drawn into the focus image, the headset only fades a thin outer rim), which is meant to stop it; there is nothing to set. If it still flickers, turn foveated frame generation off and please [report it](#reporting-a-problem).
+With **Foveated frame generation** on, some Pimax setups showed a flickering rectangle or spot around the focus area. 0.7 always hands the focus area over as **Opaque focus** (the soft edge drawn into the focus image, with colours worked out in advance for the headset's blend), which is meant to stop it; there is nothing to set. If it still flickers, turn foveated frame generation off and please [report it](#reporting-a-problem).
 
 ### Quest 3: half the frame rate, or the route is not found
 
