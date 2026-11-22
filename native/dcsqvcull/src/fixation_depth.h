@@ -6612,11 +6612,14 @@ void FarLogStats() {
       u(fdexport::g_hdrOverlayFrames), u(fdexport::g_hdrNoPair[0]), u(fdexport::g_hdrNoPair[1]),
       u(fdexport::g_hdrNoPair[2]), u(fdexport::g_hdrNoPair[3]));
   static const char* const kMode[3] = {"learning", "viewport", "after composite"};
+  // In hdr coverage the copy point is not used (the colour comes from the DLSS output): "learning" read as a
+  // learning that never ends (regress-07).
+  auto modeName = [&](int v) { return fdexport::ViewHdr(v) ? "not used (hdr coverage)" : kMode[fdexport::g_preMode[v - 2]]; };
   Log("far depth: pre-overlay copy point: view 2 %s, view 3 %s (learning passes with a draw into the target %d/%d, "
       "full-screen first %d/%d); copies after the composite %llu (while learning %llu), before a non-full-screen "
       "first draw %llu, composite expected but no draw into the target %llu, gave up %llu; draw hooks armed %llu, "
       "re-armed %llu, lost %llu, not armed (other module's table hooks) %llu; upload hook not armed (same) %llu",
-      kMode[fdexport::g_preMode[0]], kMode[fdexport::g_preMode[1]], fdexport::g_learnSeen[0],
+      modeName(2), modeName(3), fdexport::g_learnSeen[0],
       fdexport::g_learnSeen[1], fdexport::g_learnFull[0], fdexport::g_learnFull[1], u(fdexport::g_cmpCopies),
       u(fdexport::g_learnCopies), u(fdexport::g_cmpMiss), u(fdexport::g_cmpNoDraw), u(fdexport::g_cmpGaveUp),
       u(fdexport::g_drawArms), u(fdexport::g_drawRearms), u(fdexport::g_drawLost), u(fdexport::g_drawSkipForeign),

@@ -1183,6 +1183,7 @@ void TestPipeline() {
     frame(order);
     frame(order);
     bool ok = true, sz = true;
+    const uint64_t preArms0 = fdexport::g_preArms.load(), drawArms0 = fdexport::g_drawArms.load();
     for (int f = 0; f < 3; ++f) {
       frame(order);
       for (int view = 2; view <= 3; ++view) {
@@ -1204,6 +1205,13 @@ void TestPipeline() {
     Check(fdexport::g_stateChecks.load() >= sc0 + 12 && fdexport::g_stateDiffs.load() == sd0 &&
               !DrawHooksIn(ctxTable),
           "far depth hdr coverage: DCS's bindings identical around both copies; no draw hook left");
+    // regress-07 item 8 ("pre-overlay learning never ends in hdr mode, re-armed every frame"): in hdr mode the
+    // OverlayLDRPass copy-point learning never arms (its mode stays "learning", unused); the per-frame arms are the
+    // HDR source check at each focus view's ToneMappingPass (one per view and frame), which voids a frame whose
+    // source changed.
+    Check(fdexport::g_preArms.load() == preArms0 && fdexport::g_drawArms.load() - drawArms0 == 6,
+          "far depth hdr coverage: no overlay-pass arm in hdr mode; one draw arm per focus view and frame (the "
+          "ToneMappingPass source check)");
     // No DLSSPass (DLAA / no upscaler): the pre copy at the OverlayHDRPass begin.
     dlssOn = false;
     const uint64_t fb0 = fdexport::g_hdrFallback.load();
