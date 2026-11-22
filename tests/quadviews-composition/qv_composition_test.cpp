@@ -132,6 +132,18 @@ int main(int argc, char** argv) {
         const bool far_depth = projection_new.find("dcsvrDisparityField") != std::string::npos;
         const std::string projection_base = far_depth ? read_text(layer_dir / "ProjectionPS.nofardepth.hlsl") : projection_new;
         if (projection_base.empty()) throw std::runtime_error("ProjectionPS.nofardepth.hlsl missing: run scripts/build-quadviews.ps1");
+        // Edge match's scale comes from the coordinates as the views project them, never from the ones Far depth
+        // displaced (the displacement jumps across depth edges: its derivative read as a huge scale, a blur halo), and
+        // with edge match off none of it runs.
+        for (const std::string* ps : {&projection_new, &projection_base}) {
+            if (ps->find("ddx(layer1TexCoord)") != std::string::npos || ps->find("ddy(layer1TexCoord)") != std::string::npos ||
+                ps->find("ddx(layer1ProjectedCoordNdc)") != std::string::npos)
+                throw std::runtime_error("edge match takes its derivatives from the displaced focus coordinate");
+            if (ps->find("projectedFocusCoord.xy / projectedFocusCoord.z) * float2(0.5f, -0.5f)") == std::string::npos)
+                throw std::runtime_error("edge match: no derivative of the undisplaced focus coordinate");
+            if (ps->find("[branch] if (dcsvrEdgeMatch > 0) {") == std::string::npos)
+                throw std::runtime_error("edge match off still computes its scale");
+        }
         {
             // layer.cpp's per-frame paths (no device needed): the submission log (0022, 0027) compares a fixed signature
             // before it formats anything and forgets destroyed swapchains; two layers with three views (0029) asks for
