@@ -171,6 +171,7 @@ void ColorTick() {
       const bool flight = vrfx::FlightSignal(q != quadAt, q != 0, vrfx::g_missionPhase.load(std::memory_order_relaxed));
       at = now, quadAt = q;
       vrfx::g_inFlight.store(flight, std::memory_order_relaxed);
+      shadowinst::PrewarmSetFlight(flight);  // the shader cache prewarm on 1 compile worker in flight
       if (vrfx::g_wantDof.load() && logged != (flight ? 1 : 0)) {
         if (logged >= 0 || !flight)
           Log("vrfx: GazeDof %s", flight ? "on again (in flight)" : "held: not in flight (menu, loading or the F10 map)");

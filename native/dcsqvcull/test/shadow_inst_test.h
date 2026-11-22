@@ -1165,6 +1165,55 @@ void CacheTests(const Compiler& cc, const std::wstring& shaders, const std::wstr
               "shadow inst prewarm: held while an A/B runs (no entry taken in either arm, queue and in-flight compiles "
               "reported), taken again once released");
       }
+      // In flight the prewarm uses one compile worker at a time; in the menu, loading or F10 all of them.
+      {
+        const bool flight0 = g_prewarmInFlight.load();
+        int state0 = 0, busy0 = 0;
+        bool on0 = false, c0s = false;
+        auto item = [] {
+          PrewarmItem it;
+          it.s = new Snapshot;
+          memset(it.s, 0, sizeof(*it.s));
+          it.s->kind = kKindShadow;
+          return it;
+        };
+        {
+          std::lock_guard<std::mutex> lock(g_mutex);
+          state0 = g_prewarmState, busy0 = g_prewarmBusy;
+          on0 = g_prewarmOn.load(), c0s = g_collect.load();
+          g_prewarmState = 2;
+          g_prewarmOn = true;
+          g_collect = true;
+          g_prewarm.clear();
+          g_prewarm.push_back(item());
+          g_prewarm.push_back(item());
+          g_prewarmBusy = 0;
+        }
+        PrewarmSetFlight(false);
+        const bool changedIn = PrewarmSetFlight(true), again = !PrewarmSetFlight(true);
+        PrewarmItem a, b, c;
+        bool firstTaken = false, secondRefused = false, takenOnGround = false;
+        {
+          std::lock_guard<std::mutex> lock(g_mutex);
+          firstTaken = PrewarmTakeLocked(a) && g_prewarmBusy == 1;
+          secondRefused = !PrewarmTakeLocked(b) && g_prewarm.size() == 1;
+        }
+        const bool changedOut = PrewarmSetFlight(false);
+        {
+          std::lock_guard<std::mutex> lock(g_mutex);
+          takenOnGround = PrewarmTakeLocked(c) && g_prewarmBusy == 2 && g_prewarm.empty();
+          delete a.s;
+          delete c.s;
+          g_prewarmState = state0;
+          g_prewarmBusy = busy0;
+          g_prewarmOn = on0;
+          g_collect = c0s;
+        }
+        g_prewarmInFlight = flight0;
+        Check(changedIn && again && firstTaken && secondRefused && changedOut && takenOnGround,
+              "shader cache prewarm: one compile worker in flight (a second entry waits), every worker in the menu, "
+              "loading or F10");
+      }
       g_prewarmWantShadow = wantShadow0;
       g_prewarmWantGb = wantGb0;
       // The old last-use time goes back only on the prewarm's own write: a live write or hit after it keeps its time.
