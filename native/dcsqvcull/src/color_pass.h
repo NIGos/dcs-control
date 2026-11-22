@@ -1541,7 +1541,8 @@ inline void FxFrame(bool sunValid, float sunY) {
   QueryPerformanceFrequency(&fq);
   double dt = f.last.QuadPart ? (now.QuadPart - f.last.QuadPart) / static_cast<double>(fq.QuadPart) : 0.0;
   f.last = now;
-  f.dofOn = f.p.dof && vrfx::g_wantDof.load(std::memory_order_relaxed);
+  // regress-07: not outside flight (the main menu, loading, the F10 map): vrfx::g_inFlight.
+  f.dofOn = f.p.dof && vrfx::g_wantDof.load(std::memory_order_relaxed) && vrfx::g_inFlight.load(std::memory_order_relaxed);
   if (g_fxHold) {
     f.gvOn = f.p.gv && vrfx::g_wantGv.load(std::memory_order_relaxed);
     return;

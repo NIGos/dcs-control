@@ -161,6 +161,23 @@ void ColorTick() {
   cpass::Cfg c = g_colorCfg;
   if (g_colorKeyMode.load() >= 0) c.mode = g_colorKeyMode.load();
   float y = 0;
+  {  // regress-07: GazeDof's flight signal (vrfx::FlightSignal), sampled every 500 ms
+    static ULONGLONG at = 0;
+    static uint64_t quadAt = 0;
+    static int logged = -1;
+    const ULONGLONG now = GetTickCount64();
+    if (now - at >= 500) {
+      const uint64_t q = g_quadFrame.load(std::memory_order_relaxed);
+      const bool flight = vrfx::FlightSignal(q != quadAt, q != 0, vrfx::g_missionPhase.load(std::memory_order_relaxed));
+      at = now, quadAt = q;
+      vrfx::g_inFlight.store(flight, std::memory_order_relaxed);
+      if (vrfx::g_wantDof.load() && logged != (flight ? 1 : 0)) {
+        if (logged >= 0 || !flight)
+          Log("vrfx: GazeDof %s", flight ? "on again (in flight)" : "held: not in flight (menu, loading or the F10 map)");
+        logged = flight ? 1 : 0;
+      }
+    }
+  }
   const bool sun = (c.mode != 0 || c.timing != 0 || vrfx::Wanted()) && nighttone::SunY(&y);  // R51: pupil estimate
   if (vrfx::g_wantGv.load()) {  // R51: DCS's G-EFFECT option (options.lua, read only; every 10 s)
     static ULONGLONG last = 0;

@@ -551,6 +551,34 @@ inline void GVisionR58() {
   cpass::FxFrame(false, 0);
   Check(f.g.loss == 0 && Neutral(f.shape) && f.dof.gain == 0,
         "vrfx G (R58): a mission / slot event drops the previous blackout (pre-event samples not new)");
+  {
+    // regress-07: GazeDof only in flight. The signal: with Quad Views its world frames; without, the mission phase.
+    Check(FlightSignal(true, true, 0) && !FlightSignal(false, true, 1) && !FlightSignal(false, false, 0) &&
+              FlightSignal(false, false, 1) && !FlightSignal(false, false, 2) && FlightSignal(true, true, 2),
+          "vrfx GazeDof flight signal: quad frames when Quad Views runs (menu / F10 cull none), else a loaded mission");
+    Params d = p;
+    d.dof = 1;
+    while (g_paramLock.test_and_set()) {
+    }
+    g_params = d;
+    g_paramLock.clear();
+    g_paramVer++;
+    const bool wantWas = g_wantDof.load();
+    g_wantDof = true;
+    g_inFlight = false;
+    cpass::FxFrame(false, 0);
+    const bool menuOff = !f.dofOn && !cpass::FxActive();
+    g_inFlight = true;
+    cpass::FxFrame(false, 0);
+    const bool flightOn = f.dofOn && cpass::FxActive();
+    Check(menuOff && flightOn, "vrfx GazeDof (regress-07): no blur pass outside flight (main menu), on again in flight");
+    g_wantDof = wantWas;
+    NoteMissionPhase(false);
+    const bool stopped = g_missionPhase.load() == 2;
+    NoteMissionPhase(true);
+    Check(stopped && g_missionPhase.load() == 1, "vrfx mission phase: a stop -> menu (2), a load or a slot -> mission (1)");
+    g_missionPhase = 0;
+  }
   g_gExternal = false;
   while (g_paramLock.test_and_set()) {
   }

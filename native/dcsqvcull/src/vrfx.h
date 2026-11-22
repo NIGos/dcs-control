@@ -740,6 +740,17 @@ inline std::atomic<bool> g_gExternal{false};
 // (a blackout or a focus of the previous aircraft or mission).
 inline std::atomic<uint32_t> g_fxResetGen{0};
 inline void NoteMissionEvent() { g_fxResetGen.fetch_add(1, std::memory_order_acq_rel); }
+// regress-07: GazeDof only in flight (it blurred DCS's main menu). The worker's colour tick (main/engine.inc) sets
+// g_inFlight about every half second from FlightSignal; FxFrame takes it. True until the first tick (tests).
+inline std::atomic<bool> g_inFlight{true};
+// The mission phase from the mission events (main/exports.inc): 0 none yet, 1 a mission loads or the player took a
+// slot, 2 the simulation stopped (back to the menu).
+inline std::atomic<int> g_missionPhase{0};
+inline void NoteMissionPhase(bool running) { g_missionPhase.store(running ? 1 : 2, std::memory_order_relaxed); }
+// In flight: with Quad Views (a quad world frame culled at some point in this payload), a quad world frame culled since
+// the previous sample (the menu, loading screens and the F10 map cull none); without (Quad Views off, or none culled
+// yet: DCS's first main menu), a mission loaded and not stopped since.
+inline bool FlightSignal(bool quadAdvanced, bool quadEver, int phase) { return quadEver ? quadAdvanced : phase == 1; }
 inline std::atomic<float> g_adapted{0};  // DCS's adapted luminance (readback)
 inline bool Wanted() { return g_wantDof.load(std::memory_order_relaxed) || g_wantGv.load(std::memory_order_relaxed); }
 
