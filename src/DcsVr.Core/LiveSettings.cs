@@ -47,7 +47,7 @@ public static class LiveSettings
     /// edge blend also sets Cheeky's DLSS 5 edge feather (live too); if it also turns the edge fade on or off, it waits.</summary>
     public static IReadOnlyList<Field> Fields { get; } =
     [
-        E("engineReleaseIdleDlss"), E("engineShadowCache"), E("engineGBufferRecorder"), E("engineModelAllocator"), E("engineShaderTimeCache"),
+        E("engineShadowCache"), E("engineGBufferRecorder"), E("engineModelAllocator"), E("engineShaderTimeCache"),
         E("engineTaskQueueClock"), E("boostPrefetch"), E("engineShadowRecorder"), E("engineShadowInstancing"), E("engineCostWeights"),
         E("enginePartitionBoost"), E("engineTextureDedupe"), E("engineEffectBufferSkip"), E("enginePlainCounter"), E("engineFrameHeap"),
         E("engineStateFilter"), E("engineBeeps"), E("engineTimerRefreshUs"), E("engineDevPayloadPath"), E("engineDevIniPath"), E("engineToggleKey"),

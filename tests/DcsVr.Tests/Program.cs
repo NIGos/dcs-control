@@ -1966,7 +1966,6 @@ Test("Depth boost with the dual camera: always gradual, no transition switch; th
 Test("DcsQvCull.ini trim: the module reads the same values as from the old full template", () =>
 {
     // The keys the old template wrote as constants, dropped from the ini (R107 F07), with the default the payload uses for
-    // The old template predates Free unused DLSS memory (on by default since 0.6.5): these profiles keep it off.
     // a missing key (ConfigurationWriters.DcsQvCullConstantTable; each checked against its read). Retired keys are not
     // read at all; a missing one is the same as the old constant 0. Developer mode writes them all again.
     var dropped = ConfigurationWriters.DcsQvCullConstants.ToDictionary(c => (c.Section, c.Key), c => c.Value);
@@ -1985,11 +1984,11 @@ Test("DcsQvCull.ini trim: the module reads the same values as from the old full 
         }
         return keys;
     }
-    var qv = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, EngineOptimizations = true, EngineReleaseIdleDlss = false };
+    var qv = new VrProfile { QuadViews = QuadProvider.PimaxNative, Gaze = GazeMode.EyeTracked, EngineOptimizations = true };
     var profiles = new (string Name, VrProfile Profile)[]
     {
-        ("Optimizations only", new VrProfile { EngineOptimizations = true, EngineReleaseIdleDlss = false }),
-        ("VR stereo, tuned", new VrProfile { EngineOptimizations = true, EngineReleaseIdleDlss = false, EngineDiagnosticHooks = true, EngineBeeps = false, EngineShaderTimeCache = false, EngineTimerRefreshUs = 500, EngineToggleKey = "Off", BoostPrefetch = PrefetchFix.Observe, EngineShadowInstancing = false, EngineGBufferRecorder = false }),
+        ("Optimizations only", new VrProfile { EngineOptimizations = true }),
+        ("VR stereo, tuned", new VrProfile { EngineOptimizations = true, EngineDiagnosticHooks = true, EngineBeeps = false, EngineShaderTimeCache = false, EngineTimerRefreshUs = 500, EngineToggleKey = "Off", BoostPrefetch = PrefetchFix.Observe, EngineShadowInstancing = false, EngineGBufferRecorder = false }),
         ("QV + FG + DLSS 5", qv with { FrameGen = FrameGeneration.Nvidia, NeuralRendering = true, FarDepth = true }),
         ("Depth boost alone", qv with { EngineOptimizations = false, DepthBoost = true }),
         ("Depth boost with the engine, own aircraft off", qv with { DepthBoost = true, OwnAircraftTrueDepth = false, FrameGen = FrameGeneration.FidelityFx }),
@@ -2119,39 +2118,23 @@ Test("Visual realism: the pupil shift layer publishes the gaze for eye-focus blu
     Require((withPupil.Files.Single(f => f.Path.EndsWith("options.lua")).LuaChanges ?? []).Any(c => c.Path == "VR.custom_IPD_enable" && c.InstalledRaw == "false"), "with Pupil shift the layer still takes over DCS's IPD");
     Require(!planner.Build(vr with { GVision = true, GVisionUseGaze = false }, inventory, Path.Combine(root, "publish/managed-g")).Files.Any(f => f.Path.Contains("pupilshift")), "G vision straight ahead needs no layer");
 });
-Test("Free unused DLSS memory: on by default, [DLSS] ReleaseIdleSets=1 only with Engine Optimizations, one [DLSS] with the periphery preset, off as before", () =>
+Test("Free unused DLSS memory is gone (0.7): an older profile with it loads, and [DLSS] ReleaseIdleSets is never written", () =>
 {
     string Module(VrProfile p) => ConfigurationWriters.DcsQvCull(p).ReplaceLineEndings("\n");
-    // On by default (0.6.5), also for an older profile without the field; a profile that says off stays off.
-    Require(new VrProfile().EngineReleaseIdleDlss && JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true}")!.EngineReleaseIdleDlss, "on by default, also for an older profile");
-    Require(!JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true,\"engineReleaseIdleDlss\":false}")!.UsesReleaseIdleDlss, "a saved off stays off");
-    Require(JsonData.Deserialize<VrProfile>("{\"engineOptimizations\":true,\"engineReleaseIdleDlss\":true}")!.UsesReleaseIdleDlss, "loads from profile.json");
-    const string block = "\n; Free unused DLSS memory: DCS sets up DLSS twice per mission load and never frees the first set; it is released\n; once DCS evaluates only the newest one. The image does not change.\nReleaseIdleSets=1";
-    var engine = new VrProfile { EngineOptimizations = true, EngineReleaseIdleDlss = false };
-    var qv = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked, EngineOptimizations = true, EngineReleaseIdleDlss = false };
-    // On: [DLSS] ReleaseIdleSets=1 after [Perception], on a monitor and in VR; with it removed, the file as before.
-    foreach (var p in new[] { engine, engine with { Desktop = true }, qv, qv with { EngineDevMode = true } })
+    var engine = new VrProfile { EngineOptimizations = true };
+    var qv = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked, EngineOptimizations = true };
+    foreach (var json in new[] { "{\"engineOptimizations\":true,\"engineReleaseIdleDlss\":true}", "{\"engineOptimizations\":true,\"engineReleaseIdleDlss\":false,\"usesReleaseIdleDlss\":false}" })
     {
-        var on = Module(p with { EngineReleaseIdleDlss = true });
-        Require(on.Contains("\n\n[DLSS]" + block + "\n\n[Dev]\n") && on.Replace("\n\n[DLSS]" + block, "") == Module(p), "on: the key in its own [DLSS], nothing else changed");
-        Require(on.Split('\n').Count(l => l.Trim() == "[DLSS]") == 1 && !on.Contains("ReleaseAfterEvals"), "one [DLSS], ReleaseAfterEvals left to the module");
+        var loaded = JsonData.Deserialize<VrProfile>(json)!;
+        Require(Module(loaded) == Module(engine) && !JsonData.Serialize(loaded).Contains("ReleaseIdle", StringComparison.OrdinalIgnoreCase), "an older profile with the key loads, writes no ReleaseIdleSets and is saved without it");
     }
-    // Off, or set where it cannot run (Perception-only mode): byte-identical to a profile without it.
-    foreach (var p in new[] { engine, qv, qv with { EngineOptimizations = false, DepthBoost = true }, new VrProfile { ColorMode = ColorMode.Fix, EngineReleaseIdleDlss = false } })
-    {
-        Require(!Module(p).Contains("[DLSS]") && !Module(p).Contains("ReleaseIdleSets"), "off: no [DLSS]");
-        var set = p with { EngineReleaseIdleDlss = true };
-        Require(set.UsesReleaseIdleDlss == p.EngineOptimizations && (p.EngineOptimizations || Module(set) == Module(p)), "set without Engine Optimizations: byte-identical");
-    }
-    // With the Periphery DLSS preset: one [DLSS] with both, the preset's lines exactly as without this option.
-    var preset = qv with { PeripheryDlssPreset = PeripheryDlssPreset.E };
-    var both = Module(preset with { EngineReleaseIdleDlss = true });
-    Require(preset.UsesPeripheryDlssPreset && both.Split('\n').Count(l => l.Trim() == "[DLSS]") == 1, "a single [DLSS] section");
-    Require(both.Contains("IgnoreDriverPreset=1" + block + "\n\n[Dev]\n") && both.Replace(block, "") == Module(preset), "the preset's keys, then ReleaseIdleSets=1; without it, the file as before");
+    foreach (var p in new[] { engine, engine with { Desktop = true }, qv, qv with { PeripheryDlssPreset = PeripheryDlssPreset.E }, qv with { EngineOptimizations = false, DepthBoost = true } })
+        Require(!Module(p).Contains("ReleaseIdleSets"), "no ReleaseIdleSets: the module's default (0) applies");
+    Require(!Module(engine).Contains("[DLSS]") && Module(qv with { PeripheryDlssPreset = PeripheryDlssPreset.E }).Split('\n').Count(l => l.Trim() == "[DLSS]") == 1, "[DLSS] only with the periphery preset, once");
 });
 Test("Periphery DLSS preset: [DLSS] and the layer's [DlssPreset] only while it runs, the focus preset fallback, and off every file as before", () =>
 {
-    var qv = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.Fixed, EngineOptimizations = true, EngineReleaseIdleDlss = false };
+    var qv = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.Fixed, EngineOptimizations = true };
     string Module(VrProfile p) => ConfigurationWriters.DcsQvCull(p).ReplaceLineEndings("\n");
     string Layer(VrProfile p) => ConfigurationWriters.PupilShift(p).ReplaceLineEndings("\n");
     // Off (the default), and set where it cannot run: the files exactly as without the setting.

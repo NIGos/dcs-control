@@ -414,15 +414,6 @@ public sealed record VrProfile
     /// hot air), so one switch for both. Off by default.</summary>
     public bool EngineIdleEffectSkip { get; init; }
     [JsonIgnore] public bool UsesIdleEffectSkip => EngineIdleEffectSkip && EngineOptimizations;
-    /// <summary>[DLSS] ReleaseIdleSets (engine module R132): DCS sets up DLSS twice per mission load and never releases the
-    /// first set, so each restart keeps about 0.7 to 1.4 GB more memory; on, the module releases a set DCS no longer
-    /// evaluates once the newest set has taken over (ReleaseAfterEvals, the module's default 300). The image does not
-    /// change. Monitor and VR alike; an engine feature, so not in the Perception-only mode. On by default since 0.6.5
-    /// (off until 0.6.4), also for a profile saved without the field.</summary>
-    public bool EngineReleaseIdleDlss { get; init; } = true;
-    /// <summary>It runs: <see cref="EngineReleaseIdleDlss"/> with Engine Optimizations (the module's worker ticks the
-    /// DLSS release only outside its Perception-only mode; the in-flight engine switch pauses it).</summary>
-    public bool UsesReleaseIdleDlss => EngineReleaseIdleDlss && EngineOptimizations;
     /// <summary>[Model] ShadowRecorder: the shadow cascades' draws are recorded on 8 worker threads (D3D11 deferred
     /// contexts) instead of DCS's render thread; cascade 1 stays as DCS draws it. Verified texel-identical live;
     /// measured +3 to +5 % FPS, p95 −4 to −7 %, at 4-7 % more total CPU and about 30 MB of memory.</summary>
@@ -758,12 +749,14 @@ public static class JsonData
     /// the derived "usesThreeViews" an earlier 0.7 build saved before Three views was parked, and the derived values earlier 0.7
     /// builds saved and no longer write ([JsonIgnore]: 0.6.7 refuses a key it does not know, and these were new in 0.7).
     /// "frameGenFocusLayer", the Focus layer choice of earlier 0.7 builds: foveated frame generation now always sends the
-    /// focus as Opaque focus (ConfigurationWriters.QuadViews), whatever an older draft or preset chose.
+    /// focus as Opaque focus (ConfigurationWriters.QuadViews), whatever an older draft or preset chose. "engineReleaseIdleDlss"
+    /// (Free unused DLSS memory, removed in 0.7: on DCS 2.9.31 it released nothing) and its derived "usesReleaseIdleDlss".
     /// Dropped when a profile loads, in any casing.</summary>
     private static readonly HashSet<string> ObsoleteProfileKeys = new(["externalLimiter", "externalLimiterFps", "runtimeReprojection",
         "experimentalAcknowledged", "sboysDriverDirectory", "depthBoostTransition", "depthBoostTransitionKey", "tracking",
         "usesThreeViews", "usesQuadSaccadeTail", "usesQuadLostGazeEase", "usesWaterSkip", "usesIdleEffectSkip", "engineModuleRequired",
-        "usesLayerOwnGaze", "usesLayerGaze", "quadSaccadeHoldMs", "quadSaccadeMaxExtend", "frameGenFocusLayer"], StringComparer.OrdinalIgnoreCase);
+        "usesLayerOwnGaze", "usesLayerGaze", "quadSaccadeHoldMs", "quadSaccadeMaxExtend", "frameGenFocusLayer",
+        "engineReleaseIdleDlss", "usesReleaseIdleDlss"], StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Reads a profile with the plain options, without the <see cref="ObsoleteProfileKeys"/> (unknown keys are
     /// refused), then marks a profile saved without "foveaSource" (written before the setting existed) as using its own

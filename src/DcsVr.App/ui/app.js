@@ -828,7 +828,6 @@ function buildFields() {
   const engine = p => p.engineOptimizations;
   c = card('engineControls','Engine Optimizations',['More FPS from the same CPU; the image does not change.','About 50 to 60% more FPS on a busy airfield in VR, until the GPU is the limit.']);
   field(c,'engineOptimizations','Turn on',['Stays on whenever DCS starts, until you turn it off here.','Also from Steam or a shortcut; Back to stock DCS turns it off too. Nothing in the DCS folder changes. Tested on DCS 2.9.30, single player.'],'toggle');
-  field(c,'engineReleaseIdleDlss','Free unused DLSS memory',['Frees the unused DLSS copy each mission load leaves (0.7–1.4 GB).','Helps long sessions with many restarts. The image doesn\'t change. On by default.'],'toggle',null,engine);
   // [Model] RecordersEmulatedLists: only where it can matter (EngineOptimizations.ShowsEmulatedListsOption): an AMD-only
   // PC, a module log with DriverCommandLists=0, or already on. Read when DCS starts, so not live.
   field(c,'engineRecordersEmulatedLists','<span class="tag">EXPERIMENTAL</span> Multi-threaded shadows and G-buffer without driver support',['For AMD Radeon and other cards without D3D11 command lists. Smaller gain than on NVIDIA; not yet tested on Radeon.','Runs them on the command lists Windows emulates. Applies at the next DCS start. Off by default.'],'toggle',null,emulatedListsCan,'',emulatedListsHidden);

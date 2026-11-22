@@ -28,6 +28,9 @@
 
 **Going back to 0.6.7.** 0.6.7 cannot open a profile or preset saved by 0.7, because it refuses the settings new in 0.7. **Go back** (Help & support, Updates) handles this: DCS is put back to stock and 0.6.7 gets the settings and presets you had in 0.6.7, or its defaults if there is no copy of them. Your 0.7 settings are kept, and presets saved in 0.7 come back when you update again. A file exported from 0.7 cannot be imported in 0.6.7.
 
+**Fewer options.**
+- **Free unused DLSS memory** is gone from the Engine page: on DCS 2.9.31 it frees nothing. A profile that has it still loads.
+
 **Fixes:**
 - The engine module's GPU-bound guard took a steady CPU- or GPU-bound frame rate that happened to sit near half or a third of the refresh rate for a frame-rate cap, and held back for seconds (GitHub #27, reported by @deamonesque).
 - The engine's test suite stopped at once on a headset without quad views ("nothing to compare"). It now compares whole frames there, and the report says so (GitHub #32, reported by @Mav87th).

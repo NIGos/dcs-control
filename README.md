@@ -51,7 +51,6 @@ Everything the app changes is backed up and comes back with **Back to stock DCS*
 - **Engine Optimizations:** a small module DCS loads by itself from Saved Games. It takes CPU work off DCS's render and model threads (multi-threaded G-buffer and shadows, faster culling, leaner memory and state handling) and leaves the image exactly the same. Measured at a busy airfield in VR: about **+50-60 % FPS** and **p95 frame time −34 %**; with everything on, the GPU becomes the limit. How much you gain depends on how CPU-bound you are.
 - **CPU Boost:** gives DCS priority and its fastest cores while it runs, and fixes a DCS terrain loop that wastes CPU time (the fix also works when DCS starts from Steam).
 - **Free VRAM:** closes memory-hungry apps before the flight and reopens them after.
-- **Free unused DLSS memory** (on by default since 0.6.5): DCS keeps an unused copy of DLSS in video memory after every mission load, about 0.7-1.4 GB each time. This frees it once DCS has switched to the new one.
 - **Cache distant shadows** (experimental, off by default): reuses distant shadows for a few frames, about 0.7 ms less GPU time per frame.
 
 Not on a Pimax? Choose **Optimizations only**: DCS runs exactly as you set it up (monitor, or your headset with its own software) and the app adds only these optimizations.

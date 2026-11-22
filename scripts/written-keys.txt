@@ -87,7 +87,6 @@ DcsQvCull	D3D	PeriphInstFilter
 DcsQvCull	D3D	ShaderFast
 DcsQvCull	D3D	SplitFilter
 DcsQvCull	D3D	SplitFilterOps
-DcsQvCull	DLSS	ReleaseIdleSets
 DcsQvCull	Dev	IniPath
 DcsQvCull	Dev	PayloadPath
 DcsQvCull	Effects	SkipSameConstantBuffer
