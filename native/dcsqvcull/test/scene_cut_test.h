@@ -143,6 +143,130 @@ void Run() {
     const std::vector<int> c = RunSeq(s, t, &why);
     Check(c.size() == 1 && c[0] == 50 && why[0] == scenecut::kTurn, "scene cut: an instant 90° turn is one cut (turn)");
   }
+  // 7. A heavy flight as DCS renders it (regress-07: 130-341 false cuts a
+  //    minute): the camera moves by simulation steps, not by wall time. Wall
+  //    frames at 45-90 fps; per frame the simulation clock (camera content)
+  //    either follows the wall clock, holds for 1-2 frames and catches up in
+  //    one (stall + double step), advances one 11-22 ms step after a 65-110
+  //    ms wall frame (slow motion under load), or a full step after a 3-6 ms
+  //    wall frame (bunched). 450-600 m/s in a 3 g turn with head sway on top.
+  //    Shapes from live cut lines ("moved 5.5 m, dt 111 ms", "moved 14.3 m,
+  //    dt 14 ms", "moved 15.3 m, dt 33 ms"). Then the true cuts inside the same
+  //    flight: F2 (18 m behind, 4 m up), F10 (30 km up, looking down), back to
+  //    F1, a mission restart (3 s gap).
+  {
+    struct Flight {
+      std::vector<Cam> s;
+      std::vector<double> t;
+    };
+    auto makeFlight = [&](double speed, int n, uint32_t seed, std::vector<int>* cutAt) {
+      Flight fl;
+      double wall = 50.0, sim = 0.0, held = 0.0;
+      uint32_t x = seed;
+      auto rnd = [&]() {
+        x = x * 1664525u + 1013904223u;
+        return (x >> 8) / 16777216.0;
+      };
+      const double r = speed * speed / (3 * 9.81), w = speed / r;
+      for (int i = 0; i < n; ++i) {
+        const double u = rnd();
+        double wdt = 1.0 / (45 + 45 * rnd()), sdt = wdt;
+        if (u < 0.15) {  // stall: the simulation did not step
+          held += wdt;
+          sdt = 0;
+        } else if (u < 0.22) {  // slow motion: one step after a long wall frame
+          wdt = 0.065 + 0.045 * rnd();
+          sdt = 0.011 + 0.011 * rnd();
+        } else if (u < 0.30) {  // bunched: a full step after a short wall frame
+          wdt = 0.003 + 0.003 * rnd();
+          sdt = 0.011 + 0.006 * rnd();
+        }
+        if (sdt > 0) {
+          sdt += held;  // catch-up
+          held = 0;
+        }
+        if (cutAt && i == cutAt->back()) wall += 3.0;  // restart gap
+        wall += wdt;
+        sim += sdt;
+        const double a = w * sim, yaw = a + 0.3 * std::sin(2.0 * wall);
+        Cam c{{r * std::sin(a) + 0.05 * std::sin(9 * wall), 3000.0, r * (1 - std::cos(a))}, {std::cos(yaw), 0, std::sin(yaw)}};
+        if (cutAt) {
+          const std::vector<int>& k = *cutAt;  // F2, F10, F1, restart
+          if (i >= k[0] && i < k[1]) {         // F2: chase camera behind and above
+            c.p[0] -= 18.0 * std::cos(a);
+            c.p[2] -= 18.0 * std::sin(a);
+            c.p[1] += 4.0;
+          } else if (i >= k[1] && i < k[2]) {  // F10: map camera high above, looking down
+            c.p[1] += 30000.0;
+            c.f[0] = 0.05;
+            c.f[1] = -1;
+            c.f[2] = 0;
+          }
+          if (i >= k[3]) {  // restart: a new spawn 12 km away
+            c.p[0] += 12000.0;
+          }
+        }
+        fl.s.push_back(c);
+        fl.t.push_back(wall);
+      }
+      return fl;
+    };
+    int falseCuts = 0, frames = 0;
+    for (const double speed : {450.0, 600.0}) {
+      for (uint32_t seed : {7u, 99u, 4242u}) {
+        const Flight fl = makeFlight(speed, 3000, seed, nullptr);
+        falseCuts += static_cast<int>(RunSeq(fl.s, fl.t).size());
+        frames += 3000;
+      }
+    }
+    char name[160];
+    snprintf(name, sizeof(name), "scene cut: jet flight with stalled / slow-motion / bunched frames is no cut (%d in %d frames)",
+             falseCuts, frames);
+    Check(falseCuts == 0, name);
+    std::vector<int> k = {1000, 1500, 2000, 2500};
+    const Flight fl = makeFlight(600.0, 3000, 31337u, &k);
+    std::vector<int> why;
+    const std::vector<int> c = RunSeq(fl.s, fl.t, &why);
+    std::string got;
+    for (size_t i = 0; i < c.size(); ++i) got += std::to_string(c[i]) + ":" + scenecut::kReasonName[why[i]] + " ";
+    snprintf(name, sizeof(name), "scene cut: in that flight F2, F10, back to F1 and a restart are one cut each (got %s)",
+             got.c_str());
+    Check(c.size() == 4 && c[0] == 1000 && c[1] == 1500 && c[2] == 2000 && c[3] == 2500 && why[3] == scenecut::kGap, name);
+  }
+  // 8. Paused in flight (the camera holds, head only) for 5 s, then resumes at
+  //    600 m/s: no cut during the pause, at most one when the track resumes
+  //    (the velocity decayed to none).
+  {
+    const int n = 900;
+    std::vector<double> t = Times(n, 90, 0.1);
+    std::vector<Cam> s(n);
+    double x = 0;
+    for (int i = 0; i < n; ++i) {
+      if (i > 0 && (i < 300 || i >= 750)) x += 600.0 * (t[i] - t[i - 1]);
+      s[i] = {{x + 0.03 * std::sin(5 * t[i]), 3000.0, 0}, {1, 0, 0}};
+    }
+    const std::vector<int> c = RunSeq(s, t);
+    Check(c.size() <= 1 && (c.empty() || c[0] == 750), "scene cut: a 5 s pause in flight is no cut, resuming at most one");
+  }
+  // 9. A stall frame keeps the velocity: the logged stall flag, then the
+  //    double step after it is on the track.
+  {
+    Detector d;
+    const double f[3] = {1, 0, 0};
+    double tt = 1.0, px = 0;
+    for (int i = 0; i < 10; ++i, tt += 0.011, px += 6.6) {
+      const double p[3] = {px, 3000, 0};
+      d.Update(p, f, tt);
+    }
+    const double vBefore = d.v[0];
+    const double pStall[3] = {px - 6.6, 3000, 0};  // no move
+    const int rs = d.Update(pStall, f, tt);
+    const bool stalled = d.lastStall && rs == scenecut::kNone && fdtest::Near(d.v[0], vBefore, 1e-9);
+    const double pCatch[3] = {px + 6.6, 3000, 0};  // two steps in one frame
+    const int rc = d.Update(pCatch, f, tt + 0.011);
+    Check(stalled && rc == scenecut::kNone && !d.lastStall && fdtest::Near(d.v[0], 600.0, 1.0),
+          "scene cut: a zero move is a stall (velocity kept), the catch-up double step is on the track");
+  }
   // The logged numbers: the turn is the angle between the view directions
   // before and after (live: F1 -> the bench's F2 camera, 41 m in front of the
   // cockpit facing back at the aircraft, read 179.3°), the move and its part
