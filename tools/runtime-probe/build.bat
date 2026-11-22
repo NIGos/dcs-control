@@ -10,4 +10,5 @@ cl /nologo /O2 /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS /I"%INC%" probe_run.cpp /Fo:b
 cl /nologo /O2 /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS probe_analyze.cpp /Fo:bin\ /Fe:bin\probe_analyze.exe ole32.lib windowscodecs.lib || exit /b 1
 cl /nologo /O2 /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS pimax_ctl.cpp /Fo:bin\ /Fe:bin\pimax_ctl.exe || exit /b 1
 cl /nologo /O2 /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS pvr_cfg.cpp /Fo:bin\ /Fe:bin\pvr_cfg.exe || exit /b 1
+cl /nologo /O2 /EHsc /W3 /std:c++17 /D_CRT_SECURE_NO_WARNINGS /I"%INC%" fovreplay.cpp /Fo:bin\ /Fe:bin\fovreplay.exe d3d11.lib dxgi.lib ole32.lib windowscodecs.lib || exit /b 1
 echo built all
