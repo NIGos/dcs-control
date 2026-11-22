@@ -1776,6 +1776,12 @@ Test("The diagnostic package collects DCS, component and headset logs as text, w
     var headsetNow = HeadsetRuntime.Read("2.0.5.376", null, Path.Combine(local, "Pimax/runtime"), headsetState);
     Require(headsetNow.Changed && headsetNow.Line.Contains("CHANGED since the last flight (was Pimax Play 2.0.4.100, runtime built Oct 1 2026 10:00:00)"), headsetNow.Line);
     Require(!(headsetNow with { PreviousPimaxPlay = "2.0.5.376", PreviousRuntimeBuild = null }).Changed, "an unknown earlier build is no change");
+    // regress-07: the first hid device the Pimax server adds can be another vendor's (a Razer headset, VID 5426): the
+    // headset is the Pimax one (VID 13476), and none without one.
+    const string razer = "[26-11-22 09:00:01.000][ 9692][info][PSRV] added hid device:5426:1316:0-Razer Freyja\n";
+    Require(HeadsetRuntime.ParseServerLog(razer + "[26-11-22 09:00:01.100][ 9692][info][PSRV] added hid device:13476:64:0-Pimax Crystal Super\n").Headset == "Pimax Crystal Super",
+        "headset: a non-Pimax hid device first -> the Pimax one is named");
+    Require(HeadsetRuntime.ParseServerLog(razer).Headset is null, "headset: only a non-Pimax hid device -> no headset name");
     Make("diag/local/Pimax/runtime/pvr_srv_log_26-10-09-14-12-32.txt", "older");
     File.SetLastWriteTimeUtc(Path.Combine(local, "Pimax/runtime/pvr_srv_log_26-10-09-14-12-32.txt"), DateTime.UtcNow.AddDays(-1));
     var zip = Path.Combine(root, "diag/package.zip");

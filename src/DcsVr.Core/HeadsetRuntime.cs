@@ -43,7 +43,8 @@ public static partial class HeadsetRuntime
 
     [GeneratedRegex(@"\[PSRV\] build time:\s*(?<build>.+?)\s*$", RegexOptions.Multiline)] private static partial Regex BuildRegex();
     [GeneratedRegex(@"\[PSRV\] version detail:\s*(?<id>\S+)", RegexOptions.Multiline)] private static partial Regex IdRegex();
-    [GeneratedRegex(@"added hid device:[\d:]+-(?<name>[^\r\n]+?)\s*$", RegexOptions.Multiline)] private static partial Regex HeadsetRegex();
+    // Pimax's USB vendor id (13476 = 0x34A4) only: the server also adds other hid devices, e.g. a Razer headset first.
+    [GeneratedRegex(@"added hid device:13476(?::\d+)*-(?<name>[^\r\n]+?)\s*$", RegexOptions.Multiline)] private static partial Regex HeadsetRegex();
 
     private sealed record Seen(string? PimaxPlay, string? RuntimeBuild);
 
