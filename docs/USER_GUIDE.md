@@ -244,7 +244,7 @@ The **DLSS presets** card sets the DLSS model DCS upscales with, for the focus a
 
 OFXR generates frames between the frames DCS renders. The top of the page shows what DCS needs to render for your headset refresh rate (90 FPS for 90 Hz with Only when needed, 45 FPS with 2×).
 
-- **Method** — *Off*, *NVIDIA Optical Flow* (needs an RTX card) or *FidelityFX Optical Flow* (any card).
+- **Method** — *Off*, *NVIDIA Optical Flow* (needs an RTX card) or *FidelityFX Optical Flow* (for cards without RTX; less tested).
 - **Generated frames**
   - **2×** — DCS renders half the refresh rate (45 FPS at 90 Hz).
   - **3×** — DCS renders a third (30 FPS at 90 Hz): more headroom, but **more latency and more artifacts in sideways motion**.

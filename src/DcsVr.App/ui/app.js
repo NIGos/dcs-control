@@ -771,7 +771,7 @@ function buildFields() {
   // Frame generation page. Left: how many frames are generated. Right: the DCS frame limit, how generated frames look,
   // then one fold for troubleshooting.
   c = card('framegenControls','Frame generation','Frames added between the ones DCS renders, so the headset gets one at every refresh.');
-  segmented(field(c,'frameGen','Method','NVIDIA Optical Flow needs an RTX card; FidelityFX works on any card.','select',[['Off','Off'],['Nvidia','NVIDIA Optical Flow · RTX cards'],['FidelityFx','FidelityFX Optical Flow · any card']]),{Off:'Off',Nvidia:'NVIDIA',FidelityFx:'FidelityFX'});
+  segmented(field(c,'frameGen','Method','NVIDIA Optical Flow needs an RTX card. FidelityFX is for other cards and less tested.','select',[['Off','Off'],['Nvidia','NVIDIA Optical Flow · RTX cards'],['FidelityFx','FidelityFX Optical Flow · non-RTX cards, less tested']]),{Off:'Off',Nvidia:'NVIDIA',FidelityFx:'FidelityFX'});
   segmented(field(c,'frameGenFactor','Generated frames',['Auto: frames are generated only as much as DCS needs.','Without Only when needed, DCS renders half the refresh rate, a third while it falls behind. 2× or 3×: fixed, DCS renders half or a third. 3× adds latency and smearing in sideways motion.'],'select',[[0,'Auto · default'],[2,'2× · one generated frame'],[3,'3× · two generated frames']],p => p.frameGen !== 'Off'),{0:'Auto',2:'2×',3:'3×'});
   field(c,'frameGenAdaptiveCadence','Only when needed',['Frames are generated only while DCS falls behind: lower latency. Needs Generated frames on Auto; with Keep, the frame limit is set to the refresh rate for you.','DCS renders the full refresh rate, so latency is lower whenever DCS keeps up.'],'toggle',null,p => p.frameGen !== 'Off' && p.frameGenFactor === 0);
   segmented(field(c,'frameGenPassThrough','Stop generating',['When DCS\'s own frames go straight to the headset. Applies at the next DCS start.','Steady: only with plenty of room, rarely on a PC that just holds the refresh rate. Balanced: when DCS looks able to hold the refresh rate, as long as frames arrive on time. Prefer refresh rate: tries whenever it might hold, and generates again only when frames come late. A try that fails is not repeated for a while, and after a few failed tries not until the next mission or a few clean minutes.'],'select',[['Steady','Steady'],['Balanced','Balanced · default'],['PreferRefresh','Prefer refresh rate']],p => usesAdaptiveCadence(p)),{Steady:'Steady',Balanced:'Balanced',PreferRefresh:'Prefer refresh rate'});
@@ -790,7 +790,7 @@ function buildFields() {
   field(c,'headsetRefreshHz','Headset refresh rate','Used when the refresh rate is not read from the headset, or before the headset software has reported one.','number',[50,240,.5],p => !p.refreshFromHeadset || !state?.headsetRefresh,'Hz');
   field(c,'disableDcsVSync','Desktop VSync off','Stops the monitor\'s VSync holding back the frame rate. The headset keeps its own sync.','toggle');
   c = card('pacingControls','Image quality','How generated frames look.');
-  field(c,'frameGenHudSymbology','<span class="tag">EXPERIMENTAL</span> Sharp HUD',['Stops HUD and helmet symbols smearing in generated frames.','They update at DCS\'s own HUD rate (about 20 times a second). Costs about 0.15 ms of GPU and 160 MB of video memory.'],'toggle',null,p => p.frameGen !== 'Off');
+  field(c,'frameGenHudSymbology','<span class="tag">EXPERIMENTAL</span> Sharp HUD',['HUD and helmet symbols stay crisper in fast motion. The difference is small.','They update at DCS\'s own HUD rate (about 20 times a second). Costs about 0.15 ms of GPU and 160 MB of video memory.'],'toggle',null,p => p.frameGen !== 'Off');
   field(c,'smoothCursor','Smooth mouse cursor',['The mouse cursor moves smoothly in generated frames.','It is drawn at its in-between position. Where you click doesn\'t change.'],'toggle',null,p => p.frameGen !== 'Off');
   // NVIDIA Optical Flow only: gone with FidelityFX, greyed out while frame generation is off.
   const fidelity = p => p.frameGen === 'FidelityFx';
@@ -827,7 +827,7 @@ function buildFields() {
   // Engine Optimizations page: the DcsQvCull module, installed in Saved Games with the profile.
   const engine = p => p.engineOptimizations;
   c = card('engineControls','Engine Optimizations',['More FPS from the same CPU; the image does not change.','About 50 to 60% more FPS on a busy airfield in VR, until the GPU is the limit.']);
-  field(c,'engineOptimizations','Turn on',['Stays on whenever DCS starts, until you turn it off here.','Also from Steam or a shortcut; Back to stock DCS turns it off too. Nothing in the DCS folder changes. Tested on DCS 2.9.30, single player.'],'toggle');
+  field(c,'engineOptimizations','Turn on',['Stays on whenever DCS starts, until you turn it off here.','Also from Steam or a shortcut; Back to stock DCS turns it off too. Nothing in the DCS folder changes. Tested on DCS 2.9.30 and 2.9.31, single player.'],'toggle');
   // [Model] RecordersEmulatedLists: only where it can matter (EngineOptimizations.ShowsEmulatedListsOption): an AMD-only
   // PC, a module log with DriverCommandLists=0, or already on. Read when DCS starts, so not live.
   field(c,'engineRecordersEmulatedLists','<span class="tag">EXPERIMENTAL</span> Multi-threaded shadows and G-buffer without driver support',['For AMD Radeon and other cards without D3D11 command lists. Smaller gain than on NVIDIA; not yet tested on Radeon.','Runs them on the command lists Windows emulates. Applies at the next DCS start. Off by default.'],'toggle',null,emulatedListsCan,'',emulatedListsHidden);
@@ -2011,9 +2011,9 @@ const FEATURE_GUIDE = [
    gives:'Generated frames between the ones DCS renders, so the headset gets a frame at every refresh.',
    expect:'Smooth motion even when DCS can\'t keep up. With Auto and Only when needed (the default), DCS renders at the refresh rate and frames are generated only while it falls behind, so you get less latency whenever DCS keeps up.',
    cost:'A little latency while frames are generated (more in 3×); the mouse moves at DCS\'s own frame rate unless Smooth mouse cursor is on.',
-   needs:'An NVIDIA RTX card, or FidelityFX on any card. Only when needed sets the DCS frame limit to the refresh rate unless you chose Custom or 300 FPS. Generated frames also use DCS\'s cockpit outline, depth and motion.'},
+   needs:'An NVIDIA RTX card, or FidelityFX (other cards, less tested). Only when needed sets the DCS frame limit to the refresh rate unless you chose Custom or 300 FPS. Generated frames also use DCS\'s cockpit outline, depth and motion.'},
   {section:'vr', page:'framegen', name:'Sharp HUD', impact:'Sharper HUD', on:usesHudSymbology,
-   gives:'HUD and helmet symbols stay sharp in generated frames instead of smearing.',
+   gives:'HUD and helmet symbols a little crisper in fast motion.',
    expect:'A clean HUD while you turn. The symbols update at DCS\'s own HUD rate, about 20 times a second.',
    cost:'About 0.15 ms of GPU and 160 MB of video memory.',
    needs:'Frame generation.'},
