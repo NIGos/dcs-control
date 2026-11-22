@@ -62,7 +62,7 @@ public static class SetupDetection
             // Pimax Play running too: either headset may be the one in use (Pimax Play can switch the active runtime back
             // when its headset starts), so nothing is picked.
             if (sources.ProcessRunning("pi_server"))
-                return new(null, "Virtual Desktop (VDXR active) and Pimax Play are both running. Close the one you are not flying with, then detect again.", TrackingKind.Unknown);
+                return new(null, "Virtual Desktop (VDXR active) and Pimax Play are both running. Close the one you are not flying with, then press Read settings from this PC again.", TrackingKind.Unknown);
             return new(RuntimeKind.VirtualDesktop, "Virtual Desktop is running and VDXR is the active OpenXR runtime.", TrackingKind.Unknown);
         }
         // Only SteamVR's own log is positive evidence. Pimax Play (pi_server) also runs underneath Sboys, so it
@@ -80,7 +80,7 @@ public static class SetupDetection
         }
         if (sources.ProcessRunning("pi_server"))
             return new(null, "Pimax Play is running and SteamVR is not. Use the Pimax route, or start SteamVR first for Sboys.", TrackingKind.Unknown);
-        return new(null, "No running headset software was detected. Start Pimax Play, SteamVR with Sboys, or Virtual Desktop (VDXR), then detect again.", TrackingKind.Unknown);
+        return new(null, "No running headset software was detected. Start Pimax Play, SteamVR with Sboys, or Virtual Desktop (VDXR), then press Read settings from this PC again.", TrackingKind.Unknown);
     }
 
     /// <summary>The route as the interface names it.</summary>

@@ -311,7 +311,7 @@ public sealed record VrProfile
     public string? NeuralRuntimePath { get; init; }
     public string? RuntimeManifestPath { get; init; }
     public string? QuadViewsLayerDirectory { get; init; }
-    /// <summary>New profiles (presets, the checklist, Detect my setup) follow Pimax Play. A saved profile without this
+    /// <summary>New profiles (presets, the checklist, Read settings from this PC) follow Pimax Play. A saved profile without this
     /// property predates it and always used its own values, so <see cref="JsonData"/> loads it as <see cref="FoveaSource.Profile"/>.</summary>
     public FoveaSource FoveaSource { get; init; } = FoveaSource.PimaxPlay;
 
