@@ -120,12 +120,13 @@ public sealed record VrProfile
     /// <summary>Foveated frame generation: the bundled Quad Views submits the focus area and the rest of the view as two
     /// projection layers (dcsvr_two_layers) and OFXR generates each on its own (foveated_layers), instead of generating
     /// the composed full image. Measured 2026-11-15: about half the GPU time per generated pair and 4-5 GB less video
-    /// memory. Probed and flown on the Pimax runtime with NVIDIA Optical Flow only. The Smoothness buffer keeps the pilot's choice
+    /// memory. Probed and flown on the Pimax runtime with NVIDIA Optical Flow only; also offered on Quest 3 VD (VDXR takes
+    /// projection layers like any OpenXR runtime), not yet flown there. The Smoothness buffer keeps the pilot's choice
     /// (fork patch 0080 tests it with the buffer at fixed 2x, 3x and Auto between them). Experimental, off by default.</summary>
     public bool FrameGenFoveated { get; init; }
     /// <summary>The two halves (Quad Views and OFXR) are written together or not at all: two layers without OFXR's rule
     /// give a wrong image on generated frames.</summary>
-    public bool UsesFoveatedFrameGen => FrameGenFoveated && FrameGen == FrameGeneration.Nvidia && !Desktop && Runtime == RuntimeKind.Pimax && UsesBundledQuadViews;
+    public bool UsesFoveatedFrameGen => FrameGenFoveated && FrameGen == FrameGeneration.Nvidia && !Desktop && (Runtime is RuntimeKind.Pimax or RuntimeKind.VirtualDesktop) && UsesBundledQuadViews;
     /// <summary>"Focus layer" on the Framegen page (experimental, shown with foveated frame generation): how the focus layer
     /// reaches the runtime (<see cref="FocusLayerMode"/>). Quad Views reads it at start only. Standard writes the same
     /// settings.cfg as before the option. With a premultiplied layer OFXR scales the generated colour with its alpha

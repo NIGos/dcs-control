@@ -3225,6 +3225,7 @@ Test("Other limiters and motion smoothing stay manual checks", () =>
     Require(!FovNeeds(fov) && !FovNeeds(fov with { FrameGenFoveated = false, FrameGen = FrameGeneration.FidelityFx }) && !FovNeeds(fov with { FrameGen = FrameGeneration.Off }) && !FovNeeds(fov with { Desktop = true }), "no warning while it runs, is off, or frame generation is off");
     foreach (var idle in new[] { fov with { FrameGen = FrameGeneration.FidelityFx }, fov with { QuadViews = QuadProvider.PimaxNative }, fov with { QuadViews = QuadProvider.None }, fov with { Runtime = RuntimeKind.SboysSteamVr }, fov with { QuadViewsLayerDirectory = @"C:\other" } })
         Require(FovNeeds(idle) && !idle.UsesFoveatedFrameGen, "on but not running: warned");
+    { var vd = HeadsetRoute.WithQuest3Focus(fov with { Runtime = RuntimeKind.VirtualDesktop }); Require(vd.UsesFoveatedFrameGen && !FovNeeds(vd), "Quest 3 VD runs it too"); }
     // Pimax native Quad Views with frame generation and the buffer off: said once, as a warning (GitHub #23).
     var native = new VrProfile { FrameGen = FrameGeneration.Nvidia, QuadViews = QuadProvider.PimaxNative, FrameGenDeepPipeline = false };
     Require(FramePacing.Checks(native, new()).Single(c => c.Id == "native-quad-buffer").State == CheckState.Warning, "native Quad Views without the buffer is warned about");
@@ -5936,7 +5937,7 @@ Test("UI rules match C#: app.js's <uses-rules> give VrProfile.Uses* and ResolveF
         new() { Desktop = true, QuadViews = QuadProvider.QuadViewsFoveated, PeripheryDlssPreset = PeripheryDlssPreset.F, EngineOptimizations = true }, eye with { QuadViewsLayerDirectory = @"C:\qv", PeripheryDlssPreset = PeripheryDlssPreset.E, EngineOptimizations = true },
         // Foveated frame generation: on and off, each thing it needs missing in turn (NVIDIA, the Pimax route, the bundled Quad Views, VR).
         fg with { FrameGenFoveated = true }, fg, fg with { FrameGenFoveated = true, FrameGen = FrameGeneration.FidelityFx }, fg with { FrameGenFoveated = true, FrameGen = FrameGeneration.Off },
-        fg with { FrameGenFoveated = true, Runtime = RuntimeKind.SboysSteamVr }, fg with { FrameGenFoveated = true, QuadViewsLayerDirectory = @"C:\qv" }, fg with { FrameGenFoveated = true, QuadViews = QuadProvider.PimaxNative },
+        fg with { FrameGenFoveated = true, Runtime = RuntimeKind.SboysSteamVr }, HeadsetRoute.WithQuest3Focus(fg with { FrameGenFoveated = true, Runtime = RuntimeKind.VirtualDesktop }), fg with { FrameGenFoveated = true, QuadViewsLayerDirectory = @"C:\qv" }, fg with { FrameGenFoveated = true, QuadViews = QuadProvider.PimaxNative },
         fg with { FrameGenFoveated = true, QuadViews = QuadProvider.None }, fg with { FrameGenFoveated = true, Desktop = true },
         // Sharp HUD: frame generation with Depth boost.
         fg with { FrameGenHudSymbology = true, DepthBoost = true }, fg with { FrameGenHudSymbology = true }, fg with { FrameGenHudSymbology = true, DepthBoost = true, FrameGen = FrameGeneration.Off },

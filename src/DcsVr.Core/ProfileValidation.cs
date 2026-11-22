@@ -180,7 +180,7 @@ public static class ProfileValidation
         if (profile.DepthBoost && !profile.Desktop && !profile.UsesDepthBoost)
             issues.Add(new("depth-gaze", IssueSeverity.Warning, "Depth boost needs Quad Views with an eye-tracked focus area, because it reads where each eye looks from it. With these settings it does not run."));
         if (profile.FrameGenFoveated && profile.FrameGen != FrameGeneration.Off && !profile.Desktop && !profile.UsesFoveatedFrameGen)
-            issues.Add(new("foveated-fg-needs", IssueSeverity.Warning, "Foveated frame generation needs NVIDIA frame generation, the Pimax route and bundled Quad Views. Until then it does not run."));
+            issues.Add(new("foveated-fg-needs", IssueSeverity.Warning, "Foveated frame generation needs NVIDIA frame generation, the Pimax or Quest 3 VD route and bundled Quad Views. Until then it does not run."));
         // Visual realism: the module clamps out-of-range values itself; the profile refuses them, like the other settings.
         // Codes are "visual-" + the profile property (camelCase), so the Checks page can open the field.
         void Visual(string property, double value, double min, double max, string unit = "")
