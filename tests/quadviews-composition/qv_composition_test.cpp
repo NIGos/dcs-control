@@ -132,6 +132,25 @@ int main(int argc, char** argv) {
         const bool far_depth = projection_new.find("dcsvrDisparityField") != std::string::npos;
         const std::string projection_base = far_depth ? read_text(layer_dir / "ProjectionPS.nofardepth.hlsl") : projection_new;
         if (projection_base.empty()) throw std::runtime_error("ProjectionPS.nofardepth.hlsl missing: run scripts/build-quadviews.ps1");
+        {
+            // layer.cpp's per-frame paths (no device needed): the submission log (0022, 0027) compares a fixed signature
+            // before it formats anything and forgets destroyed swapchains; two layers with three views (0029) asks for
+            // the periphery pass, so the filled right periphery is what the layer sends.
+            const std::string layer = read_text(layer_dir / "layer.cpp");
+            const auto body = [&](const std::string& head) {
+                const auto at = layer.find(head);
+                if (at == std::string::npos) throw std::runtime_error("layer.cpp: no " + head);
+                const auto end = layer.find("\n        }\n", at) == std::string::npos ? layer.find("\r\n        }\r\n", at)
+                                                                                     : layer.find("\n        }\n", at);
+                return layer.substr(at, end - at);
+            };
+            const std::string log = body("void dcsvrLogSubmission(const XrFrameEndInfo& info) {");
+            const auto compare = log.find("if (sig == m_dcsvrSubmitSig)");
+            if (compare == std::string::npos || log.find("fmt::format(\"", 0) < compare)
+                throw std::runtime_error("submission log formats text before it compares the frame's signature");
+            if (body("XrResult xrDestroySwapchain(XrSwapchain swapchain) override {").find("dcsvrForgetSwapchain(swapchain)") == std::string::npos)
+                throw std::runtime_error("submission log: a destroyed swapchain stays in the format map");
+        }
         std::string projection_old = projection_base;
         replace_once(projection_old, "[branch] if (!focusVisible && !debugFocusView) {", "[branch] if (false) {");
         replace_once(projection_old, "sourceFocusTexture.SampleLevel(sourceSampler, layer1TexCoord, 0)",

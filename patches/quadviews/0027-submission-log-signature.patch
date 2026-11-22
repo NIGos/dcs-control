@@ -1,0 +1,130 @@
+Submission log (0022), cost: the frame's layout is first taken as a fixed signature of numbers (per layer type, flags,
+view count, per view swapchain, format, array size, slice and rectangle) and compared with the last one logged; the
+text is formatted only when it differs. Before, every frame formatted some ten strings under a mutex, for as long as
+the session ran (the 16-line cap only stopped the Log calls). Once the 16th line is out, the call returns before the
+mutex. A destroyed swapchain (the application's, the full-FOV and two-layer outputs, an output remade at a new size)
+leaves the format map, so it no longer grows over a session and a reused handle is not given an old format.
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index 241d3af..83c2978 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -846,6 +846,8 @@ namespace openxr_api_layer {
+                         m_dcsvrSubmitFormats.clear();
+                         m_dcsvrSubmitLast.clear();
+                         m_dcsvrSubmitLines = 0;
++                        m_dcsvrSubmitSig.clear();
++                        m_dcsvrSubmitDone.store(false, std::memory_order_relaxed);
+                     }
+ 
+                     m_session = XR_NULL_HANDLE;
+@@ -1339,17 +1346,21 @@ namespace openxr_api_layer {
+                     for (uint32_t i = 0; i < xr::StereoView::Count; i++) {
+                         if (entry.fullFovSwapchain[i] != XR_NULL_HANDLE) {
+                             OpenXrApi::xrDestroySwapchain(entry.fullFovSwapchain[i]);
++                            dcsvrForgetSwapchain(entry.fullFovSwapchain[i]);
+                         }
+                         // DCSVR two layers: the output swapchains hung on this entry.
+                         if (entry.dcsvrPeripheryOut[i].handle != XR_NULL_HANDLE) {
+                             OpenXrApi::xrDestroySwapchain(entry.dcsvrPeripheryOut[i].handle);
++                            dcsvrForgetSwapchain(entry.dcsvrPeripheryOut[i].handle);
+                         }
+                         if (entry.dcsvrFocusOut[i].handle != XR_NULL_HANDLE) {
+                             OpenXrApi::xrDestroySwapchain(entry.dcsvrFocusOut[i].handle);
++                            dcsvrForgetSwapchain(entry.dcsvrFocusOut[i].handle);
+                         }
+                     }
+                     m_swapchains.erase(it);
+                 }
++                dcsvrForgetSwapchain(swapchain);
+             }
+ 
+             return result;
+@@ -3905,6 +3920,16 @@ namespace openxr_api_layer {
+             m_dcsvrSubmitFormats.insert_or_assign(handle, std::make_pair(createInfo.format, createInfo.arraySize));
+         }
+ 
++        // DCSVR submission log: a destroyed swapchain leaves the map (a session that remakes its swapchains, or our
++        // outputs remade at a new size, no longer piles entries up, and a reused handle is not given the old format).
++        void dcsvrForgetSwapchain(XrSwapchain handle) {
++            if (handle == XR_NULL_HANDLE) {
++                return;
++            }
++            std::unique_lock lock(m_dcsvrSubmitMutex);
++            m_dcsvrSubmitFormats.erase(handle);
++        }
++
+         // DCSVR submission log: what goes to the runtime, one line at the session's first frame and whenever it
+         // changes: per layer its type, flags, and per view the swapchain's format (DXGI number on D3D11), array
+         // size, slice and rectangle. "DCSVR submission: 2 layer(s) | layer 0: projection flags 0x2
+@@ -3923,10 +3948,52 @@ namespace openxr_api_layer {
+                 add(0x8, "inverted-alpha"); // XR_COMPOSITION_LAYER_INVERTED_ALPHA_BIT_EXT, not in every SDK
+                 return names.empty() ? std::string("none") : names;
+             };
++            if (m_dcsvrSubmitDone.load(std::memory_order_relaxed)) {
++                return;
++            }
+             std::unique_lock lock(m_dcsvrSubmitMutex);
+             if (m_dcsvrSubmitLines >= kDcsvrSubmitLogLines) {
++                m_dcsvrSubmitDone.store(true, std::memory_order_relaxed);
++                return;
++            }
++            // The frame's fixed signature first (numbers only, no text, no allocation once the vector has grown):
++            // the text below is made only when it differs from the last frame's, so a steady submission costs a
++            // compare instead of a dozen formats a frame.
++            std::vector<uint64_t>& sig = m_dcsvrSubmitSigScratch;
++            sig.clear();
++            const auto sigImage = [&](const XrSwapchainSubImage& sub) {
++                const auto it = m_dcsvrSubmitFormats.find(sub.swapchain);
++                sig.push_back((uint64_t)sub.swapchain);
++                sig.push_back(it == m_dcsvrSubmitFormats.end() ? ~0ull : (uint64_t)it->second.first);
++                sig.push_back(it == m_dcsvrSubmitFormats.end() ? ~0ull : (uint64_t)it->second.second);
++                sig.push_back(((uint64_t)(uint32_t)sub.imageArrayIndex << 32) | (uint32_t)sub.imageRect.offset.x);
++                sig.push_back(((uint64_t)(uint32_t)sub.imageRect.offset.y << 32) | (uint32_t)sub.imageRect.extent.width);
++                sig.push_back((uint64_t)(uint32_t)sub.imageRect.extent.height);
++            };
++            sig.push_back(info.layerCount);
++            for (uint32_t i = 0; i < info.layerCount; i++) {
++                const XrCompositionLayerBaseHeader* base = info.layers[i];
++                if (!base) {
++                    sig.push_back(~0ull);
++                    continue;
++                }
++                sig.push_back(((uint64_t)(uint32_t)base->type << 32) | (uint32_t)base->layerFlags);
++                if (base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
++                    const auto* proj = reinterpret_cast<const XrCompositionLayerProjection*>(base);
++                    sig.push_back(proj->viewCount);
++                    for (uint32_t v = 0; v < proj->viewCount; v++) {
++                        sigImage(proj->views[v].subImage);
++                    }
++                } else if (base->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
++                    const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(base);
++                    sig.push_back((uint64_t)quad->eyeVisibility);
++                    sigImage(quad->subImage);
++                }
++            }
++            if (sig == m_dcsvrSubmitSig) {
+                 return;
+             }
++            m_dcsvrSubmitSig.swap(sig);
+             const auto image = [&](const XrSwapchainSubImage& sub) {
+                 const auto it = m_dcsvrSubmitFormats.find(sub.swapchain);
+                 return fmt::format("{} slice {} rect {},{} {}x{}",
+@@ -3977,6 +4044,7 @@ namespace openxr_api_layer {
+             }
+             if (out.handle != XR_NULL_HANDLE) {
+                 OpenXrApi::xrDestroySwapchain(out.handle);
++                dcsvrForgetSwapchain(out.handle);
+                 out = {};
+             }
+             if (!createInfo.width || !createInfo.height) {
+@@ -5288,6 +5358,9 @@ namespace openxr_api_layer {
+         std::unordered_map<XrSwapchain, std::pair<int64_t, uint32_t>> m_dcsvrSubmitFormats;
+         std::string m_dcsvrSubmitLast;
+         uint32_t m_dcsvrSubmitLines{0};
++        std::vector<uint64_t> m_dcsvrSubmitSig;         // the last logged frame's signature
++        std::vector<uint64_t> m_dcsvrSubmitSigScratch;  // this frame's, reused
++        std::atomic<bool> m_dcsvrSubmitDone{false};     // the session's last line logged: no lock, no work
+         static constexpr uint32_t kDcsvrSubmitLogLines = 16;
+         std::chrono::steady_clock::time_point m_dcsvrFarKeyAt{};
+         uint32_t m_dcsvrFarToggles{0};
