@@ -1,6 +1,7 @@
 // Offline checks of native/quadviews/dcsvr_live.h: Quad Views' live post-process settings. The parser against Quad
 // Views' section rules and file order, non-live keys never applied, no parse while the files' stamps stay, the
 // non-blocking hand-over and the thread-pool poll. Built and run by scripts/build-quadviews.ps1.
+#define NOMINMAX  // dcsvr_depthwarp.h (Far depth's curve, 0026)
 #include <windows.h>
 
 #include <chrono>
@@ -11,6 +12,7 @@
 #include <string>
 #include <thread>
 
+#include "dcsvr_depthwarp.h"
 #include "dcsvr_live.h"
 
 namespace {
@@ -104,6 +106,56 @@ int main() {
         Check(effective.size() == 2 && effective["focus_multiplier"] == "1.25", "parser: every active key is recorded");
     }
 
+    // --- 0026: the eye-tracking filter's keys, Far depth's curve and key, as the layer's start-up parse reads them.
+    {
+        Values g;
+        dcsvr::live::ParseText("[exe:DCS]\ndcsvr_saccade_widening=1\ndcsvr_saccade_speed=5\ndcsvr_saccade_tail=1\n"
+                               "dcsvr_saccade_end_speed=50\ndcsvr_saccade_lead_ms=85\ndcsvr_saccade_max_extend=0.5\n"
+                               "dcsvr_saccade_hold_ms=0\ndcsvr_gaze_deadzone=0.5\ndcsvr_lost_ease_ms=150\n"
+                               "dcsvr_far_depth_toggle=123:5\n",
+                               Dcs, g);
+        Check(g.gaze.widening && Near(g.gaze.speed, 30.f) && g.gaze.tail && Near(g.gaze.endSpeed, 50.f) &&
+                  Near(g.gaze.leadMs, 85.f) && Near(g.gaze.maxExtend, 0.5f) && Near(g.gaze.holdMs, 0.f) &&
+                  Near(g.gaze.deadzoneDeg, 0.5f) && Near(g.gaze.lostEaseMs, 150.f),
+              "0026 parser: the gaze filter's keys, the saccade speed clamped to 30");
+        Check(g.farKeyVk == 123 && g.farKeyMods == 5, "0026 parser: Far depth's key, virtual-key:modifiers");
+        Values none;
+        dcsvr::live::ParseText("dcsvr_far_depth_toggle=0:0\n", Dcs, none);
+        Check(none.farKeyVk == 0 && none.farKeyMods == 0 && !(none == g), "0026 parser: 0:0 is no key");
+
+        // Far depth's curve: the start-up parse's order rules, against the layer's own DisparitySettings.
+        const auto curve = [](const char* text) {
+            Values v;
+            dcsvr::live::ParseText(text, Dcs, v);
+            dcsvr::DisparitySettings s;
+            s.maxArcmin = 7.f;  // not a curve member: stays
+            dcsvr::live::FarCurve<dcsvr::DisparitySettings, dcsvr::FarDepthPreset>(v, s);
+            return s;
+        };
+        dcsvr::DisparitySettings expect;
+        dcsvr::DisparitySettings s = curve("");
+        Check(Near(s.gamma, expect.gamma) && Near(s.z0M, expect.z0M) && Near(s.nearGuardM, expect.nearGuardM) &&
+                  Near(s.worldIpdScale, 0.f) && Near(s.maxArcmin, 7.f),
+              "0026 far curve: no line is Quad Views' defaults; other members stay");
+        s = curve("dcsvr_far_depth_preset= Strong \n");
+        expect.ApplyPreset(dcsvr::FarDepthPreset::Strong);
+        Check(s.preset == dcsvr::FarDepthPreset::Strong && Near(s.gamma, expect.gamma) && Near(s.z0M, expect.z0M),
+              "0026 far curve: a preset word, trimmed, any case");
+        s = curve("dcsvr_far_depth_world_ipd=1.8\ndcsvr_far_depth_preset=near\n");
+        Check(s.preset == dcsvr::FarDepthPreset::Near && Near(s.worldIpdScale, 1.4f) && Near(s.nearGuardM, 4.f),
+              "0026 far curve: a world IPD line before the preset is reset by it");
+        s = curve("dcsvr_far_depth_preset=3\ndcsvr_far_depth_world_ipd=1.8\n");
+        Check(Near(s.worldIpdScale, 1.8f), "0026 far curve: a world IPD line after the preset wins");
+        s = curve("dcsvr_far_depth_gamma=0.6\ndcsvr_far_depth_z0_m=90\ndcsvr_far_depth_preset=subtle\n");
+        Check(s.preset == dcsvr::FarDepthPreset::Subtle && Near(s.gamma, 0.6f) && Near(s.z0M, 90.f),
+              "0026 far curve: an explicit gamma or Z0 wins over the preset, whichever line comes first");
+        s = curve("dcsvr_far_depth_preset=strong\ndcsvr_far_depth_preset=bogus\n");
+        Check(s.preset == dcsvr::FarDepthPreset::Strong, "0026 far curve: a preset that does not parse is skipped");
+        Check(dcsvr::live::Changes(Values{}, g).find("dcsvr_saccade_widening 0 -> 1") != std::string::npos &&
+                  dcsvr::live::Changes(Values{}, g).find("dcsvr_far_depth_toggle") != std::string::npos,
+              "0026: the log text names gaze and Far depth key changes");
+    }
+
     // --- Files: the layer's folder, then the profile's (the second wins), as LoadConfiguration.
     wchar_t temp[MAX_PATH];
     GetTempPathW(MAX_PATH, temp);
@@ -151,6 +203,20 @@ int main() {
     Check(reloader->Poll() && reloader->Parses() == 2 && reloader->Take(result) &&
               Near(result.values.sharpen, 0.4f),
           "a rewrite with the same text: parsed, same values");
+
+    // 0026: the start values, and a gaze / Far depth change read live (not reported as kept until the next start).
+    Check(Near(reloader->StartValues().sharpen, 0.7f) && !reloader->StartValues().gaze.widening,
+          "0026: StartValues are Prime's parse");
+    WriteText(profileFile, edited + "dcsvr_saccade_widening=1\ndcsvr_far_depth_preset=strong\ndcsvr_far_depth_toggle=70:3\n");
+    Touch(profileFile, 3);
+    Check(reloader->Poll() && reloader->Take(result) && result.values.gaze.widening && result.values.farPreset == 2 &&
+              result.values.farKeyVk == 70 && result.values.farKeyMods == 3 && result.ignored.size() == 2,
+          "0026: gaze and Far depth keys reload live, only the two non-live keys are kept");
+    WriteText(profileFile, edited);
+    Touch(profileFile, 4);
+    Check(reloader->Poll() && reloader->Take(result) && !result.values.gaze.widening && result.values.farPreset == -1 &&
+              result.values.farKeyVk == 0,
+          "0026: the keys removed: back to Quad Views' defaults");
 
     // A file held by a writer without sharing: no parse, the stamps stay, the next poll reads it.
     WriteText(profileFile, profile);

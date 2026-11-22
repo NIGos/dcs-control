@@ -1,0 +1,103 @@
+Live eye-tracking filter and Far depth curve (native/quadviews/dcsvr_live.h; tested by tests/quadviews-live): the reload
+of 0016 now also applies dcsvr_saccade_widening/speed/lead_ms/max_extend/hold_ms/end_speed/tail, dcsvr_gaze_deadzone and
+dcsvr_lost_ease_ms (handed to xrLocateViews' thread, which takes them with a try-lock before its next frame; the filter's
+state stays), and Far depth's curve (dcsvr_far_depth_preset, _world_ipd, _z0_m, _gamma: constant-buffer values, the
+start-up parse's rules) and its key (dcsvr_far_depth_toggle; held until released, no key: Far depth back on). Far depth
+on/off, eye tracking itself and every other key still wait for the next start.
+
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -274,6 +274,8 @@ namespace openxr_api_layer {
+                             dcsvr::live::Context{GetApplicationName(), GetApplicationExecutableName(), m_runtimeName, m_systemName},
+                             m_dcsvrLiveDefaults);
+                         m_dcsvrLive->Prime();
++                        // DCSVR live settings (0026): what the gaze filter, Far depth's curve and its key start with.
++                        m_dcsvrLiveLast = m_dcsvrLive->StartValues();
+                     }
+                     LoadConfiguration(dllHome / "settings.cfg");
+                     const DWORD profileLength = GetEnvironmentVariableW(L"DCSVR_QUAD_SETTINGS", nullptr, 0);
+@@ -1005,6 +1007,7 @@ namespace openxr_api_layer {
+             if (isSessionHandled(session)) {
+                 if (viewLocateInfo->viewConfigurationType == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_QUAD_VARJO) {
+                     if (m_useQuadViews) {
++                        dcsvrLiveGazeTake();
+                         XrViewLocateInfo chainViewLocateInfo = *viewLocateInfo;
+                         chainViewLocateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+ 
+@@ -4624,8 +4627,10 @@ namespace openxr_api_layer {
+         }
+ 
+         // DCSVR live settings (dcsvr_live.h): the live keys as the layer holds them now.
++        // The gaze filter's settings, Far depth's curve and its key: as the last parse left them (the gaze belongs to
++        // xrLocateViews' thread, the curve's parse state is not in the members).
+         dcsvr::live::Values dcsvrLiveCurrent() const {
+-            dcsvr::live::Values values;
++            dcsvr::live::Values values = m_dcsvrLiveLast;
+             values.sharpen = m_sharpenFocusView;
+             values.smoothing = m_smoothenFocusViewEdges;
+             values.taper = m_dcsvrSharpenTaper;
+@@ -4671,6 +4676,30 @@ namespace openxr_api_layer {
+                 before.clip != values.clip) {
+                 m_dcsvrTemporalLogged = false;  // its "on" line again, with the new values
+             }
++            // 0026: the gaze filter's settings go to xrLocateViews' thread, which takes them before its next frame
++            // (dcsvrLiveGazeTake); the filter's state (speeds, a saccade in progress) stays.
++            if (!dcsvr::live::SameGaze(before.gaze, values.gaze)) {
++                std::lock_guard lock(m_dcsvrGazeLiveMutex);
++                m_dcsvrGazeLive = values.gaze;
++                m_dcsvrGazeLiveReady.store(true, std::memory_order_release);
++            }
++            // 0026: Far depth's curve, read by this thread's Far depth pass from the next frame (constant-buffer values;
++            // the gain controller keeps its gain), and its "on" line again.
++            if (!dcsvr::live::SameFarCurve(before, values)) {
++                dcsvr::live::FarCurve<dcsvr::DisparitySettings, dcsvr::FarDepthPreset>(values, m_dcsvrFarDepth);
++                m_dcsvrFarLogged = false;
++            }
++            // 0026: Far depth's key, polled by this thread; counted as held until released, so the press that set it in
++            // DCS Control does not switch. Without a key the switch can no longer turn Far depth back on: on.
++            if (before.farKeyVk != values.farKeyVk || before.farKeyMods != values.farKeyMods) {
++                m_dcsvrFarKeyVk = values.farKeyVk;
++                m_dcsvrFarKeyMods = values.farKeyMods;
++                m_dcsvrFarKeyDown = m_dcsvrFarKeyVk != 0;
++                if (!m_dcsvrFarKeyVk) {
++                    m_dcsvrFarKeyOff = false;
++                }
++            }
++            m_dcsvrLiveLast = values;
+             const std::string changed = dcsvr::live::Changes(before, values);
+             std::string ignored;
+             for (const auto& name : reload.ignored) {
+@@ -4682,6 +4711,20 @@ namespace openxr_api_layer {
+                 ignored.c_str());
+         }
+ 
++        // DCSVR live settings (0026): on xrLocateViews' thread, before the gaze filter runs: a reload's gaze settings, if
++        // one is waiting (an atomic read otherwise; a try-lock: busy, the next frame takes them).
++        void dcsvrLiveGazeTake() {
++            if (!m_dcsvrGazeLiveReady.load(std::memory_order_acquire)) {
++                return;
++            }
++            std::unique_lock lock(m_dcsvrGazeLiveMutex, std::try_to_lock);
++            if (!lock.owns_lock()) {
++                return;
++            }
++            m_dcsvrGaze = m_dcsvrGazeLive;
++            m_dcsvrGazeLiveReady.store(false, std::memory_order_relaxed);
++        }
++
+         void handleDebugKeys() {
+             if (m_debugKeys) {
+                 bool log = false;
+@@ -5340,6 +5383,11 @@ namespace openxr_api_layer {
+         std::shared_ptr<dcsvr::live::Reloader> m_dcsvrLive;
+         dcsvr::live::Values m_dcsvrLiveDefaults{};
+         bool m_dcsvrLiveDefaultsTaken{false};
++        // 0026: the last parse's values (xrEndFrame's thread), and the gaze settings handed to xrLocateViews' thread.
++        dcsvr::live::Values m_dcsvrLiveLast{};
++        std::mutex m_dcsvrGazeLiveMutex;
++        dcsvr::GazeSettings m_dcsvrGazeLive{};
++        std::atomic<bool> m_dcsvrGazeLiveReady{false};
+ 
+         std::shared_ptr<general::ITimer> m_appFrameCpuTimer;
+         std::shared_ptr<general::ITimer> m_appRenderCpuTimer;

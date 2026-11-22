@@ -4,8 +4,8 @@ namespace DcsVr.Core;
 /// Live mode: the settings whose component re-reads its file while DCS runs, so the app can write that file at once
 /// (ControlService.ApplyLive). Phase 1: the engine module's DcsQvCull.ini (re-read every second) and the pupil shift
 /// layer's PupilShift.ini (about every 90 frames). Phase 2: Quad Views' settings.cfg (about every second), OFXR's
-/// ofxr_bridge.ini (every 250 ms, NVIDIA flow keys only) and Cheeky's CheekyFoveatedDLSS.ini (about every second, DLSS 5
-/// tuning). Phase 2 files are written only for a profile applied by an app whose bundled components reload them
+/// ofxr_bridge.ini (every 250 ms: NVIDIA flow keys; from 0.7 the headset panel's) and Cheeky's CheekyFoveatedDLSS.ini
+/// (about every second, DLSS 5 tuning). Phase 2 files are written only for a profile applied by an app whose bundled components reload them
 /// (<see cref="Reloads"/>). Everything else (options.lua, layers, DLLs, other keys) waits for the next launch. One table
 /// for the backend's whitelist and the interface's "Live" tags: the interface gets <see cref="AvailableFields"/>.
 /// </summary>
@@ -19,12 +19,16 @@ public static class LiveSettings
     public static IReadOnlyList<string> Files { get; } = [EngineFile, PupilFile, QuadFile, FlowFile, NeuralFile];
     /// <summary>The first app version whose bundled Quad Views, OFXR, Cheeky and engine module (R144) reload their files.</summary>
     public const string ReloadVersion = "0.6.2-preview";
+    /// <summary>The first app version whose bundled Quad Views (0026) and OFXR (0095) also reload the 0.7 live settings
+    /// (<see cref="Live07"/>): the eye-tracking refinements, Far depth's strength and key, the headset panel.</summary>
+    public const string Reload07Version = "0.7.0-preview";
 
     /// <summary>Engine: an engine part, live only when DCS started with Engine Optimizations on (PerceptionOnly=0).
     /// Visual: a VR image effect of the engine module. Pupil: the pupil shift layer (and, for some, the module too).
-    /// Quad: Quad Views' post-processing. Flow: OFXR's NVIDIA optical flow (DCS started with NVIDIA frame generation).
-    /// Neural: Cheeky's DLSS 5 tuning.</summary>
-    public enum Kind { Engine, Visual, Pupil, Quad, Flow, Neural }
+    /// Quad: Quad Views' post-processing, eye-tracking refinements and Far depth's strength and key. Flow: OFXR's NVIDIA
+    /// optical flow (DCS started with NVIDIA frame generation). Panel: OFXR's headset panel (whenever OFXR runs, with frame
+    /// generation or for the panel alone). Neural: Cheeky's DLSS 5 tuning.</summary>
+    public enum Kind { Engine, Visual, Pupil, Quad, Flow, Neural, Panel }
 
     /// <summary>A live setting: its profile property (camelCase, as in profile.json and the interface's field ids) and the
     /// component files it lives in. A setting in two files is live only while both components run.</summary>
@@ -35,6 +39,7 @@ public static class LiveSettings
     private static Field P(string name) => new(name, Kind.Pupil, PupilFile);
     private static Field Q(string name) => new(name, Kind.Quad, QuadFile);
     private static Field F(string name) => new(name, Kind.Flow, FlowFile);
+    private static Field H(string name) => new(name, Kind.Panel, FlowFile);
     private static Field N(string name) => new(name, Kind.Neural, NeuralFile);
 
     /// <summary>Every live setting (docs: the live-reload map). Cost weights and Texture dedupe switch on and off live; the
@@ -64,6 +69,13 @@ public static class LiveSettings
         new("depthBoost", Kind.Pupil, PupilFile, EngineFile), P("depthBoostMode"), P("depthBoostRealisticMax"), P("depthBoostMax"),
         P("depthBoostFarStartM"), P("depthBoostFarFullM"), P("depthBoostNearM"), P("depthBoostToggleKey"),
         Q("quadSharpening"), Q("quadEdgeBlend"), Q("quadSharpenTaper"), Q("quadPeripheryContrast"), Q("peripheryStability"), Q("peripheryStabilityStrength"),
+        // 0.7 (Quad Views 0026): the eye-tracking refinements, Far depth's strength and its key. Far depth on/off waits. The
+        // key's name on OFXR's panel (DCSVR_FARDEPTH_HOTKEY, read at launch) keeps the old key until the next launch.
+        Q("quadSaccadeLead"), Q("quadSaccadeTail"), Q("quadGazeStabilize"), Q("quadLostGazeEase"), Q("farDepthPreset"), Q("farDepthToggleKey"),
+        // 0.7: OFXR's headset panel. The FPS counter and the panel's corner are re-read with the panel (every 250 ms), the
+        // VRAM counter by the live ini watcher (OFXR 0095). Not the panel's key (an environment variable read at launch)
+        // or the smooth cursor (its pipelines and images are made before the first generated frame).
+        H("showOverlay"), H("headsetPanelPosition"), H("diagnosticVram"),
         // R148: the flow quality preset is not here: OFXR re-initialises its NVIDIA flow for it (5.5 s), and DCS froze for
         // 6.8 s. Resolution and bidirectional flow cost a single frame of about 0.5 s.
         F("nvidiaFlowScale"), F("bidirectionalFlow"),
@@ -75,19 +87,32 @@ public static class LiveSettings
     private static readonly Dictionary<string, Field> ByName = Fields.ToDictionary(f => f.Name, StringComparer.Ordinal);
     public static Field? Find(string name) => ByName.GetValueOrDefault(name);
 
+    /// <summary>The settings live only with components installed by a 0.7 app (<see cref="Current07"/>).</summary>
+    public static IReadOnlySet<string> Live07 { get; } = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "quadSaccadeLead", "quadSaccadeTail", "quadGazeStabilize", "quadLostGazeEase", "farDepthPreset", "farDepthToggleKey",
+        "showOverlay", "headsetPanelPosition", "diagnosticVram",
+    };
+
     /// <summary>The applied profile was installed by an app whose bundled components reload their files in flight (the
     /// journal records the app version since <see cref="ReloadVersion"/>; older journals have none).</summary>
-    public static bool Current(TransactionJournal? journal) =>
-        ReleaseVersion.Parse(journal?.AppVersion) is { } installed && installed.CompareTo(ReleaseVersion.Parse(ReloadVersion)) >= 0;
+    public static bool Current(TransactionJournal? journal) => InstalledSince(journal, ReloadVersion);
+    /// <summary>The applied profile was installed by an app whose Quad Views and OFXR also reload <see cref="Live07"/>.</summary>
+    public static bool Current07(TransactionJournal? journal) => InstalledSince(journal, Reload07Version);
+    private static bool InstalledSince(TransactionJournal? journal, string version) =>
+        ReleaseVersion.Parse(journal?.AppVersion) is { } installed && installed.CompareTo(ReleaseVersion.Parse(version)) >= 0;
 
     /// <summary>The component behind <paramref name="file"/> re-reads it in a DCS started from <paramref name="applied"/>:
     /// always for phase 1; Quad Views, OFXR and Cheeky only when installed by a current app (<see cref="Current"/>); OFXR
-    /// only when DCS started with NVIDIA frame generation (its flow keys mean nothing otherwise).</summary>
+    /// when DCS started with NVIDIA frame generation (its flow keys), or, installed by a 0.7 app, whenever it runs (its
+    /// headset panel keys; <see cref="IsLiveKey"/> then takes the flow keys only with NVIDIA frame generation).</summary>
     public static bool Reloads(string file, VrProfile applied, TransactionJournal journal)
     {
         if (file.Equals(EngineFile, StringComparison.OrdinalIgnoreCase) || file.Equals(PupilFile, StringComparison.OrdinalIgnoreCase)) return true;
         if (!Current(journal)) return false;
-        return !file.Equals(FlowFile, StringComparison.OrdinalIgnoreCase) || applied.ForLaunch().FrameGen == FrameGeneration.Nvidia;
+        if (!file.Equals(FlowFile, StringComparison.OrdinalIgnoreCase)) return true;
+        var launch = applied.ForLaunch();
+        return launch.FrameGen == FrameGeneration.Nvidia || Current07(journal) && launch.UsesHeadsetPanel;
     }
 
     /// <summary>The live settings for the applied profile: their components were installed with it (so they run in a DCS
@@ -98,13 +123,15 @@ public static class LiveSettings
         if (applied is null || journal is null) return [];
         var launch = applied.ForLaunch();
         var installed = journal.Entries.Select(e => Path.GetFileName(e.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return [.. Fields.Where(f => f.In.All(file => installed.Contains(file) && Reloads(file, applied, journal)) && f.Kind switch
+        var current07 = Current07(journal);
+        return [.. Fields.Where(f => f.In.All(file => installed.Contains(file) && Reloads(file, applied, journal)) && (current07 || !Live07.Contains(f.Name)) && f.Kind switch
         {
             Kind.Engine => launch.EngineOptimizations && (f.Name != "engineDiagnosticHooks" || Current(journal) && !launch.EngineDiagnosticHooks),
             Kind.Visual => !launch.Desktop,
             // With foveated frame generation, bidirectional flow also picks how the strip a fast eye move uncovers is
             // filled (foveated_uncovered_fill), which OFXR reads at start: the whole file waits.
-            Kind.Flow => f.Name != "bidirectionalFlow" || !launch.UsesFoveatedFrameGen,
+            Kind.Flow => launch.FrameGen == FrameGeneration.Nvidia && (f.Name != "bidirectionalFlow" || !launch.UsesFoveatedFrameGen),
+            Kind.Panel => launch.UsesHeadsetPanel,
             _ => true
         }).Select(f => f.Name)];
     }
@@ -138,6 +165,19 @@ public static class LiveSettings
         "sharpen_focus_view", "smoothen_focus_view_edges", "dcsvr_sharpen_taper", "dcsvr_periphery_sharpen",
         "dcsvr_temporal", "dcsvr_temporal_tau_ms", "dcsvr_temporal_ramp_deg", "dcsvr_temporal_clip",
     };
+    // Quad Views 0026 (0.7): the eye-tracking filter, Far depth's curve and key. The engine module's mirror reads none of them.
+    private static readonly HashSet<string> Quad07Keys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "dcsvr_saccade_widening", "dcsvr_saccade_speed", "dcsvr_saccade_lead_ms", "dcsvr_saccade_max_extend", "dcsvr_saccade_hold_ms",
+        "dcsvr_saccade_end_speed", "dcsvr_saccade_tail", "dcsvr_gaze_deadzone", "dcsvr_lost_ease_ms",
+        "dcsvr_far_depth_preset", "dcsvr_far_depth_world_ipd", "dcsvr_far_depth_z0_m", "dcsvr_far_depth_gamma", "dcsvr_far_depth_toggle",
+    };
+    // ofxr_bridge.ini keys of the headset panel (0.7): [overlay] position and panel_position, read with the panel every
+    // 250 ms (openxr_fps_overlay.cpp); [ofxr] diag_vram, taken by the live ini watcher (OFXR 0095). Whenever OFXR runs.
+    private static readonly HashSet<string> PanelKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "overlay.position", "overlay.panel_position", "ofxr.diag_vram",
+    };
     // ofxr_bridge.ini keys OFXR polls (patch 0066): the NVIDIA flow, rebuilt with a short hitch. Not nvidia_preset, which
     // OFXR also polls: a preset change re-initialises the flow (R148: 5.5 s, a 6.8 s freeze of DCS), so it waits for the
     // next launch. The occlusion choice follows the preset and bidirectional flow: live with a bidirectional change, and
@@ -160,11 +200,17 @@ public static class LiveSettings
     /// <summary>True when the component applies this key (section-qualified, as <see cref="IniFile.Parse"/> names it) while
     /// DCS runs. <paramref name="value"/> is the new value (null: removed); <paramref name="atStart"/> what DCS started with
     /// (engine file); <paramref name="current"/> whether the profile was installed by a current app (<see cref="Current"/>):
-    /// without it Quad Views, OFXR and Cheeky never reload, the Model allocator only switches off and Diagnostics waits.</summary>
-    public static bool IsLiveKey(string file, string key, string? value, string? atStart, bool current = true)
+    /// without it Quad Views, OFXR and Cheeky never reload, the Model allocator only switches off and Diagnostics waits.
+    /// <paramref name="current07"/>: installed by a 0.7 app (<see cref="Current07"/>), for the 0.7 keys of Quad Views and
+    /// OFXR's headset panel; <paramref name="nvidiaFlow"/>: DCS started with NVIDIA frame generation, for OFXR's flow keys.</summary>
+    public static bool IsLiveKey(string file, string key, string? value, string? atStart, bool current = true, bool current07 = true, bool nvidiaFlow = true)
     {
-        if (file.Equals(QuadFile, StringComparison.OrdinalIgnoreCase)) return current && QuadKeys.Contains(key.Contains('.') ? key[(key.LastIndexOf('.') + 1)..] : key);
-        if (file.Equals(FlowFile, StringComparison.OrdinalIgnoreCase)) return current && FlowKeys.Contains(key);
+        if (file.Equals(QuadFile, StringComparison.OrdinalIgnoreCase))
+        {
+            var name = key.Contains('.') ? key[(key.LastIndexOf('.') + 1)..] : key;
+            return current && (QuadKeys.Contains(name) || current07 && Quad07Keys.Contains(name));
+        }
+        if (file.Equals(FlowFile, StringComparison.OrdinalIgnoreCase)) return current && (nvidiaFlow && FlowKeys.Contains(key) || current07 && PanelKeys.Contains(key));
         if (file.Equals(NeuralFile, StringComparison.OrdinalIgnoreCase)) return current && NeuralKeys.Contains(key);
         var engine = file.Equals(EngineFile, StringComparison.OrdinalIgnoreCase);
         var keys = engine ? EngineKeys : file.Equals(PupilFile, StringComparison.OrdinalIgnoreCase) ? PupilKeys : null;

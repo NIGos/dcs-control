@@ -546,6 +546,8 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             throw new InvalidOperationException("Launch DCS once to apply this profile; its changes wait for the next launch.");
         var journal = applied.Journal;
         var current = LiveSettings.Current(journal);
+        var current07 = LiveSettings.Current07(journal);
+        var nvidiaFlow = applied.Profile.ForLaunch().FrameGen == FrameGeneration.Nvidia;
         // DCS may run: the plan is built as for Launch, without the "close DCS" check (nothing outside the live files is written).
         var live = inventory with { DcsRunning = false };
         var plan = Preview(draft, live);
@@ -582,7 +584,7 @@ public sealed class ControlService(string distributionRoot, string stateRoot)
             // Only comments differ: the values are the same, the text is Launch DCS's to rewrite.
             if (changed.Length == 0) continue;
             if (!LiveSettings.Reloads(name, applied.Profile, journal)
-                || changed.Any(k => !LiveSettings.IsLiveKey(name, k, after.GetValueOrDefault(k), name == LiveSettings.EngineFile ? atStart.GetValueOrDefault(k) : null, current))) { blocked.Add(name); continue; }
+                || changed.Any(k => !LiveSettings.IsLiveKey(name, k, after.GetValueOrDefault(k), name == LiveSettings.EngineFile ? atStart.GetValueOrDefault(k) : null, current, current07, nvidiaFlow))) { blocked.Add(name); continue; }
             if (!selfWritten) { updates.Add(new(entry.Path, wanted.Content, entry.InstalledSha256)); continue; }
             // Only the changed keys, in the file as it is now (Cheeky's learned calibration and formatting stay).
             var values = changed.Where(after.ContainsKey).ToDictionary(k => k, k => after[k], StringComparer.OrdinalIgnoreCase);

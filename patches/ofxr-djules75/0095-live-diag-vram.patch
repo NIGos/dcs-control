@@ -1,0 +1,280 @@
+DCS Control (0095): [ofxr] diag_vram (the headset panel's VRAM line) live. The live ini watcher of 0066 reads it with
+the flow keys (no file IO on a frame thread); each session's xrEndFrame turns the panel's VRAM line and the GPU
+statistics sampler's memory reading on or off (GpuStatsSampler::set_sample_vram; a sampler not made yet is made, its
+thread does the DXGI work). One live_settings result=3 record per change; diag_vram no longer counts in result=2.
+Tested by xrfg_live_flow_ini_* (OFXR_LiveDiagVramV1, the record) and xrfg_gpu_stats_sampler_tests.
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -844,6 +844,11 @@ enum class BridgeFlightOperation : std::uint32_t {
+     //     cockpit_depth, 2048 dcs_motion, 4096 smooth_cursor, 8192
+     //     cursor_templates, 16384 diag_vram, 32768 visibility_mask, 65536
+     //     parallel_eye_synthesis). Not applied: they wait for the next launch.
++    //     Since 0095 bit 16384 (diag_vram) is never set here: see result=3.
++    //   result=3 (0095), `[ofxr] diag_vram` changed and taken in live: a= the
++    //     new value (0 or 1), b= the old. Each session's panel shows or drops
++    //     its VRAM line, and its sampler reads memory or stops, from its next
++    //     xrEndFrame (apply_live_diag_vram).
+     live_settings,
+     // Foveated frame generation (`[ofxr] foveated_layers`): the session's
+     // state, one record each time it changes (the application's xrEndFrame).
+diff --git a/include/xrfg/embedded_control.hpp b/include/xrfg/embedded_control.hpp
+--- a/include/xrfg/embedded_control.hpp
++++ b/include/xrfg/embedded_control.hpp
+@@ -67,6 +67,12 @@ LiveAdoption adopt_live(const LiveFlow& flow, bool first = false);
+ // 16, occlusion_aware in bits 24-31.
+ [[nodiscard]] std::uint64_t live_flow_code(const LiveFlow& flow) noexcept;
+ 
++// DCS Control (0095): `[ofxr] diag_vram` as the live watcher last read it (0
++// or 1); -1 before any read. Each session compares it with what it shows on
++// its xrEndFrame thread and turns the panel's VRAM line and the sampler's
++// memory reading on or off (an atomic read: no file IO on a frame thread).
++[[nodiscard]] int live_diag_vram() noexcept;
++
+ // DCS Control (0066): one per session. It reads ofxr_bridge.ini once when made
+ // (on the xrCreateSession thread), then every 250 ms on a thread of its own:
+ // only when the file's time or size changed, and then the [ofxr] section in
+diff --git a/include/xrfg/gpu_stats_sampler.hpp b/include/xrfg/gpu_stats_sampler.hpp
+--- a/include/xrfg/gpu_stats_sampler.hpp
++++ b/include/xrfg/gpu_stats_sampler.hpp
+@@ -47,6 +47,11 @@ public:
+     GpuStatsSampler& operator=(const GpuStatsSampler&) = delete;
+ 
+     [[nodiscard]] GpuStatsSnapshot snapshot() const noexcept;
++    // DCS Control (0095): memory sampling on or off while the sampler runs
++    // (`[ofxr] diag_vram` changed live). Its thread takes it at its next
++    // wake, within kBusyIntervalMs; off keeps the last reading. A sampler
++    // made with neither busy time nor memory has no thread: nothing changes.
++    void set_sample_vram(bool sample_vram) noexcept;
+ 
+     static constexpr std::int64_t kBusyIntervalMs = 250;
+     // At most twice a second.
+diff --git a/src/common/embedded_control.cpp b/src/common/embedded_control.cpp
+--- a/src/common/embedded_control.cpp
++++ b/src/common/embedded_control.cpp
+@@ -5,6 +5,7 @@
+ #include <map>
+ #include <mutex>
+ #include <algorithm>
++#include <atomic>
+ #include <chrono>
+ #include <condition_variable>
+ #include <thread>
+@@ -136,8 +137,26 @@ LiveFlow live_flow_of(const implicit_layer::OfxrSectionValues& values) noexcept
+     return {static_cast<int>(values.nvidia.preset), static_cast<int>(values.nvidia.input_scale),
+         values.nvidia.bidirectional, values.occlusion_aware};
+ }
++// DCS Control (0095): diag_vram's place in kOfxrStartOnlyKeys (its bit stays
++// in the list, so the live_settings record's bits keep their meaning; it is
++// masked out of result=2 and reported by result=3 instead).
++constexpr std::size_t diag_vram_index() noexcept {
++    for (std::size_t i = 0; i < implicit_layer::kOfxrStartOnlyKeys.size(); ++i) {
++        const wchar_t* key = implicit_layer::kOfxrStartOnlyKeys[i];
++        const wchar_t* want = L"diag_vram";
++        std::size_t k = 0;
++        while (key[k] != 0 && key[k] == want[k]) ++k;
++        if (key[k] == 0 && want[k] == 0) return i;
++    }
++    return implicit_layer::kOfxrStartOnlyKeys.size();
++}
++constexpr std::size_t kDiagVramIndex = diag_vram_index();
++static_assert(kDiagVramIndex < implicit_layer::kOfxrStartOnlyKeys.size(), "diag_vram is in kOfxrStartOnlyKeys");
++std::atomic<int> g_live_diag_vram{-1};
+ }
+ 
++int live_diag_vram() noexcept { return g_live_diag_vram.load(std::memory_order_acquire); }
++
+ struct LiveIniWatcher::Impl {
+     std::filesystem::path directory, ini;
+     std::mutex mutex;
+@@ -178,6 +197,15 @@ struct LiveIniWatcher::Impl {
+                     live_flow_code(adoption.after), live_flow_code(adoption.before),
+                     static_cast<std::uint64_t>(adoption.keys) | (adoption.revision << 32));
+             }
++            // DCS Control (0095): diag_vram, read as GetPrivateProfileIntW reads
++            // it (a missing key: 0). live_settings result=3: a= the new value,
++            // b= the one before (bridge_flight_logger.hpp); none for the first read.
++            const int diag_vram = _wtoi(values.start_only[kDiagVramIndex].c_str()) != 0 ? 1 : 0;
++            const int diag_vram_before = g_live_diag_vram.exchange(diag_vram, std::memory_order_acq_rel);
++            if (diag_vram_before >= 0 && diag_vram_before != diag_vram) {
++                bridge_flight_logger().event(BridgeFlightOperation::live_settings, 3,
++                    static_cast<std::uint64_t>(diag_vram), static_cast<std::uint64_t>(diag_vram_before), 0);
++            }
+             if (!baseline_known) {
+                 baseline = values.start_only;
+                 baseline_known = true;
+@@ -185,6 +213,7 @@ struct LiveIniWatcher::Impl {
+             }
+             std::uint32_t differing = 0;
+             for (std::size_t i = 0; i < baseline.size(); ++i) {
++                if (i == kDiagVramIndex) continue; // live since 0095
+                 if (_wcsicmp(baseline[i].c_str(), values.start_only[i].c_str()) != 0) differing |= 1U << i;
+             }
+             if (differing != start_only_logged) {
+@@ -233,6 +262,13 @@ LiveIniWatcher::~LiveIniWatcher() {
+ }
+ }
+ 
++// DCS Control (0095): private, for the live-ini test: diag_vram as the live
++// watcher last read it (-1 before any read); each session follows it on its
++// next xrEndFrame.
++extern "C" __declspec(dllexport) int OFXR_LiveDiagVramV1() noexcept {
++    return xrfg::embedded::live_diag_vram();
++}
++
+ // Private, versioned POD ABI for the combined-module host regression harness.
+ extern "C" __declspec(dllexport) int OFXR_EmbeddedRequestV1(int enabled, int backend, int preset, int scale, int backward) noexcept {
+     try { return xrfg::embedded::request({enabled != 0, backend, preset, scale, backward != 0, 0, 0}) ? 1 : 0; }
+diff --git a/src/layer/gpu_stats_sampler.cpp b/src/layer/gpu_stats_sampler.cpp
+--- a/src/layer/gpu_stats_sampler.cpp
++++ b/src/layer/gpu_stats_sampler.cpp
+@@ -34,7 +34,8 @@ constexpr ULONG kMaximumSegments = 32;
+ struct GpuStatsSampler::Impl {
+     LUID adapter{};
+     bool sample_busy{};
+-    bool sample_vram{};
++    // DCS Control (0095): set_sample_vram changes it while the thread runs.
++    std::atomic<bool> sample_vram{};
+     const std::atomic<std::uint64_t>* frames{};
+     QueryStatistics query{};
+     ULONG nodes{};
+@@ -214,13 +215,17 @@ struct GpuStatsSampler::Impl {
+                     sample_busy_once();
+                     next_busy = now + std::chrono::milliseconds(kBusyIntervalMs);
+                 }
+-                if (sample_vram && now >= next_vram) {
++                const bool vram_on = sample_vram.load(std::memory_order_relaxed);
++                if (vram_on && now >= next_vram) {
+                     sample_vram_once();
+                     next_vram = now + std::chrono::milliseconds(kVramIntervalMs);
+                 }
+                 auto wake = sample_busy ? next_busy : next_vram;
+-                if (sample_busy && sample_vram) {
++                if (sample_busy && vram_on) {
+                     wake = std::min(next_busy, next_vram);
++                } else if (!sample_busy && !vram_on) {
++                    // Memory turned off with nothing else to sample: idle until on again.
++                    wake = now + std::chrono::milliseconds(kBusyIntervalMs);
+                 }
+                 std::unique_lock lock(mutex);
+                 if (condition.wait_until(lock, wake, [&] { return stop; })) {
+@@ -265,6 +270,12 @@ GpuStatsSampler::~GpuStatsSampler() {
+     }
+ }
+ 
++void GpuStatsSampler::set_sample_vram(bool sample_vram) noexcept {
++    if (impl_) {
++        impl_->sample_vram.store(sample_vram, std::memory_order_relaxed);
++    }
++}
++
+ GpuStatsSnapshot GpuStatsSampler::snapshot() const noexcept {
+     GpuStatsSnapshot snapshot{};
+     if (!impl_) {
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1908,7 +1908,8 @@ struct SessionState {
+     std::atomic<bool> generation_stalled{false};
+     std::atomic<std::uint32_t> generation_stall_serial{0};
+     std::uint32_t generation_stall_cleared{};
+-    // `[ofxr] diag_vram`. Fixed for the session.
++    // `[ofxr] diag_vram`: read at the start, then followed live on the
++    // xrEndFrame thread (0095, apply_live_diag_vram).
+     bool diag_vram{};
+     // DCS Control (0031): `[ofxr] cockpit_mask`, fixed for the session, and
+     // its consumer, made on first use on the synthesis device (once; null if
+@@ -18751,6 +18752,27 @@ void log_vram_status(SessionState& state) noexcept {
+         foreground_process == GetCurrentProcessId() ? 1U : 0U);
+ }
+ 
++// DCS Control (0095): `[ofxr] diag_vram` changed while the session runs, as
++// the live ini watcher read it (an atomic; no file IO here). On: the sampler
++// (made now if nothing wanted it yet, its thread does the DXGI work) samples
++// memory too, and the panel shows the VRAM line from its next reading. Off:
++// the line goes, the sampler stops reading memory.
++void apply_live_diag_vram(SessionState& state) noexcept {
++    const int live = xrfg::embedded::live_diag_vram();
++    if (live < 0 || (live != 0) == state.diag_vram) {
++        return;
++    }
++    state.diag_vram = live != 0;
++    if (state.gpu_stats) {
++        state.gpu_stats->set_sample_vram(state.diag_vram);
++    } else if (state.diag_vram && (state.d3d12_device || state.d3d11_device)) {
++        ensure_gpu_stats(state);
++    }
++    if (!state.diag_vram && state.fps_overlay) {
++        state.fps_overlay->set_vram_status({}, false);
++    }
++}
++
+ // DCS VR Control (0004): one application frame's throughput evidence, taken
+ // as its xrEndFrame is entered: the CPU time since the previous one less what
+ // this thread spent blocked in the layer (ApplicationBlockedScope), and the
+@@ -19065,6 +19087,7 @@ XrResult layer_end_frame_impl(
+     apply_scene_change(state); // DCS VR Control (0009)
+     apply_live_frame_multiplier(state, use_continuous_presenter);
+     apply_embedded_control(state);
++    apply_live_diag_vram(*state); // DCS Control (0095)
+     log_vram_status(*state); // DCS VR Control (0011)
+     const bool manually_disarmed = state->manual_control.stop_requested();
+     if (manually_disarmed && !state->manual_stop_applied) {
+diff --git a/tests/gpu_stats_sampler_tests.cpp b/tests/gpu_stats_sampler_tests.cpp
+--- a/tests/gpu_stats_sampler_tests.cpp
++++ b/tests/gpu_stats_sampler_tests.cpp
+@@ -121,6 +121,20 @@ int main() {
+         require(snapshot.vram.adapter_total >= (1ULL << 30), "adapter dedicated memory");
+         require(snapshot.vram.adapter_used == 0 || snapshot.vram.adapter_used >= snapshot.vram.process_usage / 2,
+             "adapter-wide resident memory");
++        // DCS Control (0095): memory turned on and off while the sampler runs
++        // (busy time only at first, as the layer makes it without diag_vram).
++        {
++            std::atomic<std::uint64_t> live_frames{0};
++            xrfg::GpuStatsSampler live(device->GetAdapterLuid(), true, false, &live_frames);
++            std::this_thread::sleep_for(std::chrono::milliseconds(400));
++            require(!live.snapshot().vram.known, "0095: no memory reading without diag_vram");
++            live.set_sample_vram(true);
++            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
++            while (!live.snapshot().vram.known && std::chrono::steady_clock::now() < deadline)
++                std::this_thread::sleep_for(std::chrono::milliseconds(20));
++            require(live.snapshot().vram.known, "0095: memory sampled once turned on live");
++            live.set_sample_vram(false);
++        }
+         std::cout << "GPU statistics sampler passed: busy " << snapshot.busy.per_frame / 1000
+                   << " us/frame, process " << snapshot.busy.process_load * 100.0 << "%, adapter "
+                   << snapshot.busy.adapter_load * 100.0 << "%, VRAM app "
+diff --git a/tests/layer_manual_disarm_tests.cpp b/tests/layer_manual_disarm_tests.cpp
+--- a/tests/layer_manual_disarm_tests.cpp
++++ b/tests/layer_manual_disarm_tests.cpp
+@@ -240,7 +240,7 @@ int main(int argc, char** argv) {
+                 std::ostringstream text;
+                 text << "[ofxr]\nbackend=nvidia\ncontrol_event=" << ascii_control
+                      << "\nnvidia_preset=fast\nnvidia_input_scale=75\nnvidia_bidirectional=1\n"
+-                        "nvidia_occlusion_aware=1\n[diagnostics]\nlogging_enabled=1\n[overlay]\nposition=off\n";
++                        "nvidia_occlusion_aware=1\ndiag_vram=1\n[diagnostics]\nlogging_enabled=1\n[overlay]\nposition=off\n";
+                 live_ini_written = text.str();
+                 const auto temporary = root / L"ofxr_bridge.ini.tmp";
+                 { std::ofstream(temporary, std::ios::binary | std::ios::trunc) << live_ini_written; }
+@@ -276,6 +276,11 @@ int main(int argc, char** argv) {
+             require(after.desired.backend == 0 && after.desired.enabled == 1, "live ini: backend is start-only");
+             require(after.errors == 0 && after.ready == 1, "live ini: the rebuild succeeded, generation on");
+             require(after.revision == before.revision + 1, "live ini: one revision for one change");
++            // DCS Control (0095): diag_vram taken in live, without a rebuild.
++            using LiveDiagVram = int (*)();
++            const auto live_diag_vram =
++                reinterpret_cast<LiveDiagVram>(GetProcAddress(module, "OFXR_LiveDiagVramV1"));
++            require(live_diag_vram != nullptr && live_diag_vram() == 1, "live ini: diag_vram taken in live");
+             for (int i = 0; i < 6; ++i) {
+                 if (g_flight_simulator_mode) {
+                     XrFrameState frame{XR_TYPE_FRAME_STATE};
+@@ -402,6 +407,9 @@ int main(int argc, char** argv) {
+         if (count(flow) != 1 || count(" op=live_settings result=1 ") != 1 ||
+             count(" op=live_settings result=2 dur_us=0 a=0 b=0 c=2\r\n") != 1 ||
+             count(" op=live_settings result=2 ") != 1 ||
++            // 0095: diag_vram 0 -> 1 is its own record, not a start-only key.
++            count(" op=live_settings result=3 dur_us=0 a=1 b=0 c=0\r\n") != 1 ||
++            count(" op=live_settings result=3 ") != 1 ||
+             count(" op=embedded_configuration result=0 dur_us=0 a=2 ") != 1) {
+             std::cerr << mode << ": live ini: the flight log lacks the live_settings records\n" << log << '\n';
+             result = 1;
