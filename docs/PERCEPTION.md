@@ -17,7 +17,7 @@ The periphery is rendered at about 15 to 20 % of the headset's resolution per ax
 
 Periphery stability blends each periphery frame with the previous result, outside the focus area only. It runs once per rendered frame inside the bundled Quad Views, so frame generation receives the steadier image without extra work.
 
-Off by default. The setting is on the Pupil shift page, in the **Periphery stability** card: one switch and one **Strength** slider. It works with a fixed or an eye-tracked focus. It runs in the bundled Quad Views only. With Pimax's own quad views, or without Quad Views, it is not applied, and Checks and the page say so.
+Off by default. The setting is on the Quad Views page, in the **Periphery stability** card: one switch and one **Strength** slider. It works with a fixed or an eye-tracked focus. It runs in the bundled Quad Views only. With Pimax's own quad views, or without Quad Views, it is not applied, and Checks and the page say so.
 
 ### Why there
 
