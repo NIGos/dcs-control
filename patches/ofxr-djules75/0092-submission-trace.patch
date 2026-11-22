@@ -1,0 +1,297 @@
+Submission trace (dev switch, off by default): one line per runtime xrEndFrame in a ring file next to the layer,
+for the foveated flicker hunt (tools/runtime-probe/REPLAY.md). On with [ofxr] dev_submission_trace=1 in ofxr_bridge.ini
+or a file ofxr_submission_trace.flag next to the layer, read every 2 s on the application thread; switches are logged
+as slow_step result=40. src/layer/openxr_layer.cpp only.
+
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 950c1d8..a784bef 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -33,6 +33,8 @@
+ #include <chrono>
+ #include <condition_variable>
+ #include <cstdint>
++#include <cstdio>
++#include <share.h>
+ #include <cstring>
+ #include <deque>
+ #include <filesystem>
+@@ -2534,10 +2536,16 @@ struct PrivateImageLogEntry {
+ std::mutex g_private_image_log_mutex;
+ std::vector<PrivateImageLogEntry> g_private_image_log;
+ 
++// DCS Control (0092): the submission trace (trace_runtime_submission) is on;
++// it needs the image index table below as the slow_step records do.
++std::atomic<bool> g_submission_trace_active{false};
++
+ // A private swapchain was made (`fresh`: its handle may be an older one's
+ // value again) or one of its images acquired.
+ void note_private_image(XrSwapchain handle, std::uint32_t index, bool fresh) noexcept {
+-    if (handle == XR_NULL_HANDLE || !xrfg::bridge_flight_logger().enabled()) {
++    if (handle == XR_NULL_HANDLE ||
++        (!xrfg::bridge_flight_logger().enabled() &&
++         !g_submission_trace_active.load(std::memory_order_relaxed))) {
+         return;
+     }
+     try {
+@@ -2690,6 +2698,211 @@ void log_runtime_end_frame_images(
+     }
+ }
+ 
++// DCS Control (0092): submission trace, a development switch for the
++// foveated flicker hunt (a disc over the focus that the compositor mirror
++// does not show). One text line per runtime xrEndFrame, so a flight can be
++// laid next to what was seen: which frame was real, synthetic or a repeat,
++// and for every layer its flags and, per view, the swapchain (an ordinal in
++// order of first appearance), the image index last acquired on it, the
++// array slice, the rectangle, the FOV and the orientation.
++// On with `[ofxr] dev_submission_trace=1` in ofxr_bridge.ini or a file
++// ofxr_submission_trace.flag next to the layer; both are looked at every
++// two seconds on the application's thread, so it can be switched during a
++// flight, and every switch writes a line. The file, ofxr_submission_trace.txt
++// next to the layer, is a ring: a header line, then kSubmissionTraceRecords
++// lines of kSubmissionTraceLine bytes, line `seq % records` overwritten; the
++// header names the next sequence. Off by default; off, it costs one clock
++// read per submission.
++// Line: seq, steady time (us), site (1 presenter, 2 internal cycle, 3 the
++// application's frame passed on, 4 the application's frame replaced by a
++// synthetic), kind (R real, S synthetic, P repeat), display time (ns), layer
++// count, ov (the diagnostic panel quad is added after this), then per layer
++// `|P f=<flags> <views>` or `|Q f=<flags> s<id>:i<index> <w>x<h>`, a view
++// being `s<id>:i<index>:a<slice> <w>x<h> fov=<l>,<r>,<u>,<d> (mrad)
++// q=<x>,<y>,<z>,<w> (x1e4)`. i? = an image this table never saw acquired.
++constexpr std::uint64_t kSubmissionTraceRecords = 65536; // 12 min at 90 Hz
++constexpr std::size_t kSubmissionTraceLine = 512;
++constexpr std::size_t kSubmissionTraceHeader = 256;
++struct SubmissionTrace {
++    std::mutex mutex;
++    std::FILE* file{};
++    std::filesystem::path directory;
++    std::chrono::steady_clock::time_point next_check{};
++    std::uint64_t sequence{};
++    std::uint32_t since_flush{};
++    std::vector<XrSwapchain> ids;
++};
++SubmissionTrace g_submission_trace;
++
++void write_submission_trace_header(SubmissionTrace& trace, const char* note) noexcept {
++    if (trace.file == nullptr) {
++        return;
++    }
++    char header[kSubmissionTraceHeader];
++    std::memset(header, ' ', sizeof(header));
++    const int n = std::snprintf(
++        header, sizeof(header),
++        "# ofxr submission trace v1 records=%llu line=%zu next=%llu %s",
++        static_cast<unsigned long long>(kSubmissionTraceRecords), kSubmissionTraceLine,
++        static_cast<unsigned long long>(trace.sequence), note);
++    if (n > 0 && static_cast<std::size_t>(n) < sizeof(header)) {
++        header[n] = ' ';
++    }
++    header[sizeof(header) - 1] = '\n';
++    std::fseek(trace.file, 0, SEEK_SET);
++    std::fwrite(header, 1, sizeof(header), trace.file);
++}
++
++// The switch, read on the application's thread (`may_check`).
++void update_submission_trace_switch(SubmissionTrace& trace) noexcept {
++    try {
++        if (trace.directory.empty()) {
++            trace.directory = current_layer_directory();
++        }
++        if (trace.directory.empty()) {
++            return;
++        }
++        const auto ini = trace.directory / L"ofxr_bridge.ini";
++        std::error_code error;
++        const bool wanted =
++            GetPrivateProfileIntW(L"ofxr", L"dev_submission_trace", 0, ini.c_str()) != 0 ||
++            std::filesystem::exists(trace.directory / L"ofxr_submission_trace.flag", error);
++        if (wanted && trace.file == nullptr) {
++            const auto path = trace.directory / L"ofxr_submission_trace.txt";
++            trace.file = _wfsopen(path.c_str(), L"wb", _SH_DENYNO); // readable during the flight
++            if (trace.file == nullptr) {
++                return;
++            }
++            trace.sequence = 0;
++            trace.ids.clear();
++            write_submission_trace_header(trace, "on");
++            g_submission_trace_active.store(true, std::memory_order_relaxed);
++            // The line that says it is on: the flight log, as every other
++            // development switch's (slow_step result=40: a=1 on).
++            xrfg::bridge_flight_logger().timed_event(
++                xrfg::BridgeFlightOperation::slow_step, 40, 0, 1, kSubmissionTraceRecords,
++                kSubmissionTraceLine);
++        } else if (!wanted && trace.file != nullptr) {
++            write_submission_trace_header(trace, "off");
++            std::fclose(trace.file);
++            trace.file = nullptr;
++            g_submission_trace_active.store(false, std::memory_order_relaxed);
++            xrfg::bridge_flight_logger().timed_event(
++                xrfg::BridgeFlightOperation::slow_step, 40, 0, 0, trace.sequence, 0);
++        }
++    } catch (...) {
++    }
++}
++
++void trace_runtime_submission(
++    const XrFrameEndInfo* info,
++    char kind,
++    std::uint32_t site,
++    bool overlay) noexcept {
++    try {
++        SubmissionTrace& trace = g_submission_trace;
++        const auto now = std::chrono::steady_clock::now();
++        // Site 0: the application's xrEndFrame entry, which only looks at the
++        // switch; the submissions themselves are sites 1-4.
++        const bool may_check = site == 0 && now >= trace.next_check;
++        if (!may_check && !g_submission_trace_active.load(std::memory_order_relaxed)) {
++            return;
++        }
++        std::scoped_lock lock(trace.mutex);
++        if (may_check) {
++            trace.next_check = now + std::chrono::seconds(2);
++            update_submission_trace_switch(trace);
++        }
++        if (trace.file == nullptr || info == nullptr) {
++            return;
++        }
++        auto id_of = [&](XrSwapchain handle) {
++            for (std::size_t i = 0; i < trace.ids.size(); ++i) {
++                if (trace.ids[i] == handle) {
++                    return static_cast<int>(i);
++                }
++            }
++            if (trace.ids.size() >= 256) {
++                return -1;
++            }
++            trace.ids.push_back(handle);
++            return static_cast<int>(trace.ids.size() - 1);
++        };
++        char line[kSubmissionTraceLine];
++        std::size_t used = 0;
++        auto put = [&](const char* format, auto... values) {
++            if (used + 1 >= sizeof(line)) {
++                return;
++            }
++            const int n = std::snprintf(line + used, sizeof(line) - used, format, values...);
++            used = n < 0 ? used : (std::min)(sizeof(line) - 1, used + static_cast<std::size_t>(n));
++        };
++        auto image = [&](XrSwapchain handle) {
++            std::scoped_lock table(g_private_image_log_mutex);
++            for (const PrivateImageLogEntry& entry : g_private_image_log) {
++                if (entry.handle == handle) {
++                    return static_cast<int>(entry.last_index);
++                }
++            }
++            return -1;
++        };
++        auto put_image = [&](XrSwapchain handle) {
++            const int index = image(handle);
++            if (index < 0) {
++                put("s%d:i?", id_of(handle));
++            } else {
++                put("s%d:i%d", id_of(handle), index);
++            }
++        };
++        const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(
++            now.time_since_epoch()).count();
++        put("%llu %lld %u %c %lld n=%u ov=%d",
++            static_cast<unsigned long long>(trace.sequence), static_cast<long long>(micros), site, kind,
++            static_cast<long long>(info->displayTime), info->layerCount, overlay ? 1 : 0);
++        for (std::uint32_t l = 0; info->layers != nullptr && l < info->layerCount; ++l) {
++            const XrCompositionLayerBaseHeader* const layer = info->layers[l];
++            if (layer == nullptr) {
++                put(" |-");
++                continue;
++            }
++            if (layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
++                const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
++                put(" |P f=%llx", static_cast<unsigned long long>(projection->layerFlags));
++                for (std::uint32_t v = 0; projection->views != nullptr && v < projection->viewCount; ++v) {
++                    const XrCompositionLayerProjectionView& view = projection->views[v];
++                    put(" ");
++                    put_image(view.subImage.swapchain);
++                    put(":a%u %dx%d fov=%d,%d,%d,%d q=%d,%d,%d,%d", view.subImage.imageArrayIndex,
++                        view.subImage.imageRect.extent.width, view.subImage.imageRect.extent.height,
++                        static_cast<int>(view.fov.angleLeft * 1000.f), static_cast<int>(view.fov.angleRight * 1000.f),
++                        static_cast<int>(view.fov.angleUp * 1000.f), static_cast<int>(view.fov.angleDown * 1000.f),
++                        static_cast<int>(view.pose.orientation.x * 1e4f), static_cast<int>(view.pose.orientation.y * 1e4f),
++                        static_cast<int>(view.pose.orientation.z * 1e4f), static_cast<int>(view.pose.orientation.w * 1e4f));
++                }
++            } else if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
++                const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(layer);
++                put(" |Q f=%llx ", static_cast<unsigned long long>(quad->layerFlags));
++                put_image(quad->subImage.swapchain);
++                put(" %dx%d", quad->subImage.imageRect.extent.width, quad->subImage.imageRect.extent.height);
++            } else {
++                put(" |T%d", static_cast<int>(layer->type));
++            }
++        }
++        std::memset(line + used, ' ', sizeof(line) - used);
++        line[sizeof(line) - 1] = '\n';
++        const std::uint64_t slot = trace.sequence % kSubmissionTraceRecords;
++        std::fseek(trace.file, static_cast<long>(kSubmissionTraceHeader + slot * kSubmissionTraceLine), SEEK_SET);
++        std::fwrite(line, 1, sizeof(line), trace.file);
++        ++trace.sequence;
++        if (++trace.since_flush >= 90) {
++            trace.since_flush = 0;
++            write_submission_trace_header(trace, "on");
++            std::fflush(trace.file);
++        }
++    } catch (...) {
++    }
++}
++
+ // Each output alternates between private swapchains so the application can
+ // release frame N+1's output while the presenter still holds frame N's
+ // submission. A composition layer names a swapchain rather than an image
+@@ -12251,6 +12464,9 @@ void continuous_presenter_main(
+                     request ? request->sequence : 0,
+                     fresh_synthetic ? 2u : (request ? 1u : 0u));
+             }
++            trace_runtime_submission( // DCS Control (0092)
++                downstream, request == nullptr ? 'P' : (fresh_synthetic ? 'S' : 'R'), 1,
++                state->fps_overlay != nullptr);
+             end_result = with_runtime_entry(state, [&] {
+                 return state->fps_overlay
+                     // No request is the presenter repeating what it already
+@@ -16470,6 +16686,8 @@ struct InternalCycleResult {
+     const auto runtime_end_started = log_end_images
+         ? std::chrono::steady_clock::now()
+         : std::chrono::steady_clock::time_point{};
++    trace_runtime_submission( // DCS Control (0092)
++        downstream, synthetic ? 'S' : 'R', 2, state->fps_overlay != nullptr);
+     const XrResult end_result = with_runtime_entry(state, [&] {
+         return state->fps_overlay
+             ? state->fps_overlay->end_frame(downstream, synthetic)
+@@ -18636,6 +18854,9 @@ XrResult layer_end_frame_impl(
+     if (!state || state->dispatch->end_frame == nullptr) {
+         return XR_ERROR_HANDLE_INVALID;
+     }
++    // DCS Control (0092): the submission trace's switch, on this thread only
++    // (the presenter's never reads the file).
++    trace_runtime_submission(nullptr, 'R', 0, false);
+     // DCS Control (0060): the application's activity, for the 1X deadline
+     // (cadence_application_idle_now): inside from here to every return, and
+     // the time it entered and returned.
+@@ -18983,6 +19204,10 @@ XrResult layer_end_frame_impl(
+             const auto runtime_end_started = log_end_images
+                 ? std::chrono::steady_clock::now()
+                 : std::chrono::steady_clock::time_point{};
++            if (!use_continuous_presenter) {
++                trace_runtime_submission( // DCS Control (0092)
++                    downstream, 'R', 3, state->fps_overlay != nullptr);
++            }
+             const XrResult end_result = use_continuous_presenter
+                 ? submit_borrowed_to_presenter()
+                 : with_runtime_entry(state, [&] {
+@@ -19816,6 +20041,8 @@ XrResult layer_end_frame_impl(
+         const auto runtime_end_started = log_end_images
+             ? std::chrono::steady_clock::now()
+             : std::chrono::steady_clock::time_point{};
++        trace_runtime_submission( // DCS Control (0092)
++            downstream, pair_ready ? 'S' : 'R', 4, state->fps_overlay != nullptr);
+         result = with_runtime_entry(state, [&] {
+             return state->fps_overlay
+                 ? state->fps_overlay->end_frame(downstream, pair_ready)

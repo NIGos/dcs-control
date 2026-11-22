@@ -15,6 +15,11 @@ It is a development tool: not part of the app, not shipped, touches neither DCS 
 - `tools/runtime-probe/run-runtime-probe.ps1` does a whole unattended run: starts Pimax, wakes the headset, runs both programs,
   puts back what it changed and closes Pimax.
 
+## Foveated replay
+
+`fovreplay.exe` replays OFXR's foveated two-layer submission (four swapchain sets, real and generated frames) and
+measures the compositor mirrors for a flickering focus disc. See `REPLAY.md`.
+
 ## Chain mode
 
 `probe_run --quad --layer ...` tests the whole layer chain without DCS: the probe loads the Quad Views layer (and the
