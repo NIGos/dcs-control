@@ -210,8 +210,6 @@ function resolveFeatures(p) {
   // Optimizations only keeps the VR settings for the next VR flight; they do not run (C# VrProfile.ForLaunch).
   // Foveated Super Resolution is for stereo only (same rule as ProfileValidation.ResolveFeatures).
   if (p.quadViews !== 'None') p.foveatedDlss = false;
-  // Quest 3 VD: DLSS 5 stays off, no NVIDIA-signed runtime file is available (same rule as C#).
-  if (p.runtime === 'VirtualDesktop') p.neuralRendering = false;
   const cheeky = p.neuralRendering || p.foveatedDlss;
   // Pimax native Quad Views exists only in Pimax Play, and it cannot host the focus adapter that DLSS 5 needs.
   if (p.quadViews === 'PimaxNative' && (p.runtime !== 'Pimax' || cheeky)) p.quadViews = 'QuadViewsFoveated';
@@ -225,8 +223,7 @@ function resolveFeatures(p) {
 function setFeature(p, key, on) {
   if (key === 'quad') p.quadViews = on ? (p.quadViews !== 'None' ? p.quadViews : lastProvider) : 'None';
   // Checking it turns DLSS 5 on unless Foveated Super Resolution already runs; unchecking turns both off.
-  // Quest 3 VD has no DLSS 5: there checking it turns on Foveated Super Resolution (stereo only).
-  if (key === 'dlss') { if (!on) { p.neuralRendering = false; p.foveatedDlss = false; } else if (!p.neuralRendering && !p.foveatedDlss) { if (vdRoute(p)) p.foveatedDlss = true; else p.neuralRendering = true; } }
+  if (key === 'dlss') { if (!on) { p.neuralRendering = false; p.foveatedDlss = false; } else if (!p.neuralRendering && !p.foveatedDlss) p.neuralRendering = true; }
   // Without an NVIDIA RTX card, frame generation starts as FidelityFX (it runs on any graphics card).
   if (key === 'framegen') p.frameGen = on ? (p.frameGen !== 'Off' ? p.frameGen : state?.gpu?.nvidiaRtx === false && lastFrameGen === 'Nvidia' ? 'FidelityFx' : lastFrameGen) : 'Off';
   if (key === 'boost') p.cpuBoost = on;
@@ -331,11 +328,6 @@ function featureNotes(p) {
   if (p.quadViews === 'QuadViewsFoveated' && lastProvider === 'PimaxNative' && !nativeAllowed(p))
     notes.quad.push(['info',cheeky ? "Bundled: Pimax native can't host DLSS 5." : 'Bundled: Pimax native is Pimax-route only.']);
   if (p.quadViews === 'QuadViewsFoveated' && cheeky && p.quadViewsLayerDirectory) notes.quad.push(['needs','DLSS 5 needs the bundled provider.','quadViewsLayerDirectory','Open']);
-  // Quest 3 VD: Quad Views and frame generation are tested in the headset; DLSS 5 is off (no NVIDIA-signed runtime file),
-  // and Foveated Super Resolution is not tested there yet.
-  if (vdRoute(p) && !p.desktop) {
-    notes.dlss.push(['info', p.quadViews !== 'None' ? 'DLSS 5 is off on Quest 3 VD (no NVIDIA-signed runtime file).' : 'DLSS 5 is off on Quest 3 VD. Foveated Super Resolution not tested here yet.']);
-  }
   if (pimaxSource(p) && state?.pimax && !state.pimax.found) notes.quad.push(['needs','Pimax Play values not found.','foveaSource','Open']);
   // The app keeps a verified copy of the runtime file, so it is asked for only when there is neither that copy nor a file of the profile's own.
   if (p.neuralRendering && !p.neuralRuntimePath && !state?.savedRuntime) notes.dlss.push(['needs','Runtime file missing.','neuralRuntimePath','Select file']);
@@ -350,8 +342,7 @@ function renderFeatures() {
     // On a monitor or with another headset only the optimizations are features here.
     item.hidden = Boolean(profile.desktop) && !['engine','boost'].includes(key);
     if (key === 'quad') $('featureGroup-vr').hidden = Boolean(profile.desktop);
-    // Quest 3 VD with Quad Views: nothing in the DLSS row can run (no DLSS 5; Foveated SR is stereo only).
-    const box = $('featureCheck-'+key); box.checked = on[key]; box.disabled = busy || (key === 'dlss' && vdRoute(profile) && profile.quadViews !== 'None' && !on.dlss);
+    const box = $('featureCheck-'+key); box.checked = on[key]; box.disabled = busy;
     const summary = featureSummary(key,profile); $('featureSummary-'+key).textContent = summary; $('featureSummary-'+key).title = summary;
     $('featureNotes-'+key).innerHTML = notes[key].map(noteHtml).join('');
   });
@@ -711,7 +702,7 @@ function buildFields() {
   // DLSS page: DLSS 5 (on/off, runtime file, the dxgi switch) and its image, then DCS's DLSS presets, then Foveated Super
   // Resolution (stereo only) with the focus area it uses without Quad Views.
   c = card('dlssControls','DLSS 5','NVIDIA\'s neural rendering. Its runtime file is not included: you provide it.');
-  field(c,'neuralRendering','Use DLSS 5','Runs DLSS 5 on the image. With Quad Views, only on the focus area. Off on the Quest 3 VD route.','toggle',null,p => !vdRoute(p));
+  field(c,'neuralRendering','Use DLSS 5','Runs DLSS 5 on the image. With Quad Views, only on the focus area.','toggle');
   field(c,'neuralRuntimePath','Runtime file',['NVIDIA\'s nvngx_dlssnr.dll, 310.8 or 310.9. Select it once.','310.9 is NVIDIA\'s newer, faster model; 310.8 is the one tested most. On RTX 20, 30 and 40 cards, NVIDIA\'s file patched for them works too. DCS Control keeps a verified copy and uses it while this field is empty.'],'path',null,nr);
   const savedBox = document.createElement('div'); savedBox.id = 'savedRuntime'; savedBox.className = 'saved-runtime'; savedBox.hidden = true; $('setting-neuralRuntimePath').append(savedBox);
   field(c,'keepOtherDxgi','Keep another program\'s dxgi.dll working',['For ReShade or an overlay with its own dxgi.dll in DCS.','On: it keeps working with DLSS 5. Off: it is set aside while you fly. Back to stock DCS puts it back.'],'toggle',null,p => Boolean(p.neuralRendering || p.foveatedDlss));

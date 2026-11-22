@@ -3819,10 +3819,9 @@ Test("Virtual Desktop route: fixed focus, own focus values, no Pimax-only parts"
     Require(ProfileValidation.Validate(preset, new InventorySnapshot()).Any(i => i.Code == "vd-not-found" && i.Severity == IssueSeverity.Error), "VDXR missing");
     Require(!ProfileValidation.Validate(preset, new InventorySnapshot { VirtualDesktopRuntime = Vdxr }).Any(i => i.Code == "vd-not-found"), "VDXR found");
     Require(!ProfileValidation.Validate(preset with { Desktop = true }, new InventorySnapshot()).Any(i => i.Code == "vd-not-found"), "Optimizations only needs no headset");
-    // Quest 3 VD: DLSS 5 is off (no NVIDIA-signed runtime); ResolveFeatures turns it off, Validate refuses it; Pimax keeps it.
-    Require(!ProfileValidation.ResolveFeatures(preset with { NeuralRendering = true }).NeuralRendering, "VD resolves DLSS 5 off");
-    Require(ProfileValidation.Validate(preset with { NeuralRendering = true }).Any(i => i.Code == "vd-dlss5" && i.Severity == IssueSeverity.Error), "VD refuses DLSS 5");
-    Require(ProfileValidation.ResolveFeatures(new VrProfile { NeuralRendering = true }).NeuralRendering, "Pimax keeps DLSS 5");
+    // DLSS 5 is the same OpenXR path as on the other routes: available on VD too, with the focus adapter under Quad Views.
+    Require(ProfileValidation.ResolveFeatures(preset with { NeuralRendering = true }) is { NeuralRendering: true, QuadFocusAdapter: true }, "VD keeps DLSS 5");
+    Require(!ProfileValidation.Validate(ProfileValidation.ResolveFeatures(preset with { NeuralRendering = true })).Any(i => i.Code.StartsWith("vd-", StringComparison.Ordinal)), "no VD error for DLSS 5");
     // Pupil shift needs eye tracking, which VD never has (fixed focus).
     Require(!ProfileValidation.ResolveFeatures(preset with { PupilShift = true }).UsesPupilShift, "no pupil shift on VD");
     // Quest 3 refresh: 72-120 Hz on VD (144 from another headset is refused); other routes and Optimizations only keep 50-240.

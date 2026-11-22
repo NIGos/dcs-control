@@ -23,8 +23,6 @@ public static class ProfileValidation
     {
         // Optimizations only keeps the VR settings for the next VR flight; VrProfile.ForLaunch is what runs.
         if (profile.FoveatedDlss && profile.QuadViews != QuadProvider.None) profile = profile with { FoveatedDlss = false };
-        // Quest 3 VD: DLSS 5 stays off (no validly NVIDIA-signed nvngx_dlssnr.dll is available; see the Quest 3 plan, Phase 3).
-        if (profile.Runtime == RuntimeKind.VirtualDesktop && profile.NeuralRendering) profile = profile with { NeuralRendering = false };
         if (profile.QuadViews == QuadProvider.PimaxNative && (profile.Runtime != RuntimeKind.Pimax || profile.UsesCheeky))
             profile = profile with { QuadViews = QuadProvider.QuadViewsFoveated };
         // Quest 3 has no eye tracking and no Pimax Play: the Virtual Desktop route always uses a fixed focus and the
@@ -103,8 +101,6 @@ public static class ProfileValidation
             Error("vd-gaze", "Quest 3 VD route: Quest 3 has no eye tracking. Select Fixed focus.");
         // Quest 3 in Virtual Desktop runs at 72, 80, 90 or 120 Hz; a higher value (e.g. 144 from another headset) would
         // set DCS's frame limit above what the headset can show.
-        if (profile.Runtime == RuntimeKind.VirtualDesktop && !profile.Desktop && profile.NeuralRendering)
-            Error("vd-dlss5", "Quest 3 VD route: DLSS 5 is turned off here (no NVIDIA-signed nvngx_dlssnr.dll is available). Turn off Use DLSS 5.");
         if (profile.Runtime == RuntimeKind.VirtualDesktop && !profile.Desktop && profile.HeadsetRefreshHz is < VdMinRefreshHz or > VdMaxRefreshHz)
             Error("vd-refresh", $"Quest 3 VD route: the headset refresh rate must be {VdMinRefreshHz} to {VdMaxRefreshHz} Hz (set 72, 80, 90 or 120 Hz, the same as in the VD app).");
         if (profile.UsesCheeky && profile.QuadViews != QuadProvider.None && !profile.UsesQuadFocus)
