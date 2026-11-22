@@ -379,12 +379,17 @@ function Start-RigFlight([string]$RunDir, [string]$LaunchJson, [string]$Mission,
   if ($tapLog -notmatch 'graphics binding D3D12') { throw "the capture layer did not see a D3D12 session (rigtap.log: $(($tapLog -split "`n" | Select-Object -Last 2) -join ' | ')): no flight" }
   Note "$($Rec.run) capture layer loaded: $((($tapLog -split "`n") | Select-String 'graphics binding' | Select-Object -Last 1).Line)"
 }
-# The flight's start in dcs.log: the line "WWT (Main): <aircraft>" (fly4.ps1), with its time. dcs.log writes UTC.
+# The flight's start in dcs.log, with its time (dcs.log writes UTC): the line "WWT (Main): <aircraft>" (fly4.ps1), else the engine hook's measured model time.
 function Get-FlyLine {
   $m = [regex]::Match((Read-Shared $DcsLog), '(?m)^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}) \S+\s+WWT \(Main\): (?!Wwt export|Export )(\S+)')
-  if (-not $m.Success) { return $null }
-  $at = [DateTime]::SpecifyKind([DateTime]::ParseExact($m.Groups[1].Value, 'yyyy-MM-dd HH:mm:ss.fff', [Globalization.CultureInfo]::InvariantCulture), 'Utc').ToLocalTime()
-  [pscustomobject]@{ At = $at; Aircraft = $m.Groups[2].Value }
+  $utc = { param([string]$s) [DateTime]::SpecifyKind([DateTime]::ParseExact($s, 'yyyy-MM-dd HH:mm:ss.fff', [Globalization.CultureInfo]::InvariantCulture), 'Utc').ToLocalTime() }
+  if ($m.Success) { return [pscustomobject]@{ At = (& $utc $m.Groups[1].Value); Aircraft = $m.Groups[2].Value; By = 'aircraft line' } }
+  # The aircraft line comes from a third-party export script (WWT): with Scripts\Export.lua broken or without that tool
+  # it never appears (2026-11-22 12:18: Export.lua line 7 corrupted by another tool, the mission ran without it). The
+  # engine hook's own proof: the model time measured running after its FLY; the start = that line's time minus the run.
+  $h = [regex]::Match((Read-Shared $DcsLog), '(?m)^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}) \S+\s+DcsQvCull \(Main\): rig autostart: flying \(model time ([\d.]+) s, \+([\d.]+) s in')
+  if ($h.Success) { return [pscustomobject]@{ At = (& $utc $h.Groups[1].Value).AddSeconds(-[double]$h.Groups[3].Value); Aircraft = "(model time $($h.Groups[2].Value) s)"; By = 'model time (rig autostart)' } }
+  $null
 }
 # FLY without a click: the engine hook presses the briefing's FLY in DCS's GUI state (rig autostart, DcsQvCull.lua), so
 # neither the window focus nor windows on top of DCS matter. The start is confirmed only by the aircraft line; without it
@@ -406,7 +411,7 @@ function Start-Fly([string]$RunDir, $Rec, [bool]$AtOrigin) {
     $Rec.autostartLog = $said
     if ($fl) {
       $now = Get-Date; $flyAt = $(if ($fl.At -le $now -and $fl.At -ge [datetime]$Rec.started) { $fl.At } else { $now })
-      Note "$($Rec.run) FLY by the rig autostart: confirmed in dcs.log ($($fl.Aircraft) at $($flyAt.ToString('HH:mm:ss.fff'))); hook: $($said -join ' | ')"
+      $Rec.flyConfirmedBy = $fl.By; Note "$($Rec.run) FLY by the rig autostart: confirmed in dcs.log by the $($fl.By) ($($fl.Aircraft) at $($flyAt.ToString('HH:mm:ss.fff'))); hook: $($said -join ' | ')"
       if ($AtOrigin) {   # debug_simulate_tracking confines the mouse to the desktop's top-left 1000 x 1000 px: the window has to be there
         $t1 = Get-Date; $c = $null; while (((Get-Date) - $t1).TotalSeconds -lt 40) { $c = Get-DcsClient; if ($c -and $c.W -ge 800) { break }; Start-Sleep 2 }
         if ($c) {

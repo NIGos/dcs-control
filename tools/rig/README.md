@@ -18,7 +18,7 @@ while the rig was built (dated, scratch paths); this file is the current one.
 | `verdict.py` | Per capture: interpolation ratio, layer mismatch, seam, alpha, cursor; writes `verdict.txt` / `verdict.json` |
 | `compose.py` | What the compositor shows for one captured submission (both layers composed) |
 | `hudfind.py` | Finds HUD symbology, or the briefing's FLY button, in a picture; used by the runner |
-| `test_autostart_hook.lua` | 19 checks of the engine hook's rig autostart (FLY pressed in DCS's GUI state, no click) against stand-ins for DCS: `<DCS>\bin\luae.exe tools\rig\test_autostart_hook.lua native\dcsqvcull\lua\DcsQvCull.lua` |
+| `test_autostart_hook.lua` | 20 checks of the engine hook's rig autostart (FLY pressed in DCS's GUI state, no click) against stand-ins for DCS: `<DCS>\bin\luae.exe tools\rig\test_autostart_hook.lua native\dcsqvcull\lua\DcsQvCull.lua` |
 | `selftest.py` | 26 checks of `compose.py` and `verdict.py` on generated data: `py tools\rig\selftest.py` |
 | `analyze.py` | Numbers of one flight in a time window, from its logs (the engine module's perf lines, the Pimax frame counters, the OFXR flight log) |
 | `startup_measure.py` | The start-of-flight stall from an OFXR flight log |
@@ -99,11 +99,12 @@ cursor calibration. No capture, log or run folder belongs in `tools\rig`.
 
 ```powershell
 py tools\rig\selftest.py                                             # 26 checks, 0 failed
-<DCS>\bin\luae.exe tools\rig\test_autostart_hook.lua native\dcsqvcull\lua\DcsQvCull.lua   # 19 checks, 0 failed
+<DCS>\bin\luae.exe tools\rig\test_autostart_hook.lua native\dcsqvcull\lua\DcsQvCull.lua   # 20 checks, 0 failed
 pwsh -File tools\rig\build-capture-layer.ps1 -Test                   # builds the capture layer; harness and call-chain checks
 pwsh -File tools\rig\run-scenario.ps1 -Scenario hud -Both -DryRun    # the plan and what is missing; starts nothing
 ```
 
 ## Starting the mission (FLY)
 
-The runner starts DCS with `DCSC_RIG_AUTOSTART` naming `<run>\autostart.flag`; the engine hook (`DcsQvCull.lua`, deployed by app) then presses the briefing's FLY in DCS's own GUI state (`BriefingDialog.Fly_onChange`), so window focus and on top of DCS do not matter. Off in every other DCS start: no variable, or the file gone (deleted when the stops). The flight counts as started only on dcs.log's `WWT (Main): <aircraft>` line; without it in 45 s the clicks FLY as before (`-ClickFly` goes straight to the click). The hook logs `DcsQvCull (Main): rig autostart: ...`.
+The runner starts DCS with `DCSC_RIG_AUTOSTART` naming `<run>\autostart.flag`; the engine hook (`DcsQvCull.lua`, deployed by app) then presses the briefing's FLY in DCS's own GUI state (`BriefingDialog.Fly_onChange`), so window focus and on top of DCS do not matter. Off in every other DCS start: no variable, or the file gone (deleted when the stops). The flight counts as started on dcs.log's `WWT (Main): <aircraft>` line, or on the hook's `rig autostart: flying (model time ...)`
+line (the model time measured running; the WWT line needs a working third-party Export.lua). Without either in 45 s the clicks FLY as before (`-ClickFly` goes straight to the click). The hook logs `DcsQvCull (Main): rig autostart: ...`.

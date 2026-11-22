@@ -115,8 +115,13 @@ local function rigAutostart()
     return os.clock()
   end
   local function paused() local okP, p = pcall(DCS.getPause) return okP and p == true end
+  local function modelTime() local okM, m = pcall(DCS.getModelTime) if okM and type(m) == 'number' then return m end return nil end
   local function briefing()
     local b = package.loaded['BriefingDialog']
+    if type(b) ~= 'table' then  -- (2.9.31 live, 2026-11-22: not found there; GameGUI holds it from require)
+      local okR, r = pcall(require, 'BriefingDialog')
+      b = okR and r or nil
+    end
     if type(b) ~= 'table' then return nil end
     return b
   end
@@ -146,11 +151,11 @@ local function rigAutostart()
           st.tries = st.tries + 1
           local okF, err = pcall(b.Fly_onChange)
           say(string.format('FLY pressed (try %d): %s %s', st.tries, tostring(okF), tostring(err)))
-          st.phase, st.t = 2, t
+          st.phase, st.t, st.m0 = 2, t, modelTime()
         end
       else
         st.t = t
-        if t - st.waitSince > 15 then
+        if t - st.waitSince > 10 then
           if paused() then  -- no briefing came: the FLY button's calls by hand
             st.tries = st.tries + 1
             local okS, err = pcall(function()
@@ -158,21 +163,24 @@ local function rigAutostart()
               DCS.spawnPlayer()
               DCS.setPause(false)
             end)
-            say(string.format('no briefing after 15 s, paused: spawn and unpause (try %d): %s %s', st.tries,
+            say(string.format('no briefing after 10 s, paused: spawn and unpause (try %d): %s %s', st.tries,
                               tostring(okS), tostring(err)))
-            st.phase, st.t = 2, t
+            st.phase, st.t, st.m0 = 2, t, modelTime()
           else
-            say('no briefing after 15 s and not paused: nothing to do')
+            say('no briefing after 10 s and not paused: nothing to do')
             st.phase = 0
           end
         end
       end
-    elseif st.phase == 2 and t - st.t >= 3 then  -- the check: running, briefing gone
+    elseif st.phase == 2 and t - st.t >= 3 then  -- the check: model time runs, briefing gone
       local b = briefing()
-      if not paused() and not (b and visible(b)) then
+      local m = modelTime()
+      local runs = st.m0 and m and m - st.m0 > 1
+      if not paused() and runs and not (b and visible(b)) then
         local unit = nil
         pcall(function() unit = DCS.getPlayerUnit() end)
-        say('flying (simulation running, player unit ' .. tostring(unit) .. ')')
+        say(string.format('flying (model time %.1f s, +%.1f s in %.1f s real; player unit %s)', m, m - st.m0, t - st.t,
+                          tostring(unit)))
         st.phase = 0
       elseif st.tries >= 3 then
         say('still paused after 3 tries: giving up')

@@ -17,7 +17,7 @@ local flagPath = os.tmpname()
 -- flyWorks (how many FLY presses do nothing before one starts the mission), noModule.
 local function session(env, opts)
   opts = opts or {}
-  local s = {t = 0, paused = false, logs = {}, cbs = {}, fly = 0, spawn = 0, unpaused = false}
+  local s = {t = 0, mt = 0, frozen = opts.frozen, paused = false, logs = {}, cbs = {}, fly = 0, spawn = 0, unpaused = false}
   local ignore = opts.flyWorks or 0
   local B = {visible = false}
   function B.getVisible() return B.visible end
@@ -38,7 +38,7 @@ local function session(env, opts)
     isMultiplayer = function() return opts.mp == true end,
     isTrackPlaying = function() return opts.track == true end,
     getPlayerUnit = function() return 16777472 end,
-    getModelTime = function() return s.t end,
+    getModelTime = function() return s.mt end,
   }
   lfs = {writedir = function() return 'C:\\SavedGames\\DCS\\' end}
   log = {INFO = 1, ERROR = 2, write = function(_, _, m) table.insert(s.logs, m) end}
@@ -57,7 +57,12 @@ local function session(env, opts)
     s.call('onMissionLoadEnd')
     if opts.briefing ~= false then B.show() end
     local n = math.floor(sec * 45)
-    for _ = 1, n do s.t = s.t + 1 / 45 s.call('onSimulationFrame') end
+    for _ = 1, n do s.tick() end
+  end
+  function s.tick()  -- one frame: model time runs only while not paused (and not frozen)
+    s.t = s.t + 1 / 45
+    if not s.paused and not s.frozen then s.mt = s.mt + 1 / 45 end
+    s.call('onSimulationFrame')
   end
   function s.has(pat)
     for _, l in ipairs(s.logs) do if string.find(l, pat) then return true end end
@@ -84,7 +89,7 @@ s = session(flagPath)
 check(#s.cbs == 1, 'armed: one callback table')
 s.mission(10)
 check(s.fly == 1 and not s.paused and s.unpaused, 'armed: FLY pressed once, simulation running')
-check(s.has('flying %(simulation running, player unit 16777472%)'), 'armed: "flying" logged')
+check(s.has('^rig autostart: flying %(model time [%d%.]+ s, %+[%d%.]+ s in [%d%.]+ s real; player unit 16777472%)'), 'armed: "flying" logged with the model time')
 check(s.has('^rig autostart: on %('), 'armed: "on" logged')
 -- FLY is not pressed in the first second the briefing is shown.
 s = session(flagPath)
@@ -98,12 +103,12 @@ check(s.fly == 2 and not s.paused, 'first press ignored: pressed again, running'
 s = session(flagPath, {flyWorks = 99})
 s.mission(60)
 check(s.fly == 3 and s.has('giving up'), 'never starts: 3 presses, then gives up')
--- 6. No briefing, paused: spawn and unpause after 15 s.
+-- 6. No briefing, paused: spawn and unpause after 10 s.
 s = session(flagPath, {briefing = false})
-s.mission(14)
-check(s.spawn == 0, 'no briefing: nothing before 15 s')
-for _ = 1, 45 * 5 do s.t = s.t + 1 / 45 s.call('onSimulationFrame') end
-check(s.spawn == 1 and not s.paused and s.has('no briefing after 15 s, paused'), 'no briefing: spawn and unpause')
+s.mission(9.5)
+check(s.spawn == 0, 'no briefing: nothing before 10 s')
+for _ = 1, 45 * 5 do s.tick() end
+check(s.spawn == 1 and not s.paused and s.has('no briefing after 10 s, paused'), 'no briefing: spawn and unpause')
 -- 7. No BriefingDialog module loaded: the same fallback.
 s = session(flagPath, {noModule = true, briefing = false})
 s.mission(20)
@@ -132,13 +137,18 @@ s.paused = true
 s.call('onMissionLoadEnd')
 s.call('onSimulationStop')
 package.loaded['BriefingDialog'].show()
-for _ = 1, 45 * 5 do s.t = s.t + 1 / 45 s.call('onSimulationFrame') end
+for _ = 1, 45 * 5 do s.tick() end
 check(s.fly == 0, 'simulation stop before the briefing: nothing pressed')
 -- 11. Errors inside DCS's calls do not escape the callbacks.
 s = session(flagPath)
 package.loaded['BriefingDialog'].Fly_onChange = function() error('boom') end
 local ok = pcall(s.mission, 30)
 check(ok and s.has('FLY pressed %(try 1%): false'), 'an error in FLY is caught and logged')
+
+-- 12. Unpaused but the model time does not run: never reported "flying".
+s = session(flagPath, {frozen = true})
+s.mission(60)
+check(s.fly >= 1 and not s.has('flying'), 'model time frozen: never reported flying')
 
 os.remove(flagPath)
 print(string.format('%d checks, %d failed', checks, fails))
