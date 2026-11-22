@@ -236,7 +236,7 @@ const routeOf = p => ROUTES[p.runtime] || ROUTES.Pimax;
 const vdRoute = p => p.runtime === 'VirtualDesktop';
 /** Quest 3 starting focus values, the same as C# HeadsetRoute.WithQuest3Focus (fixed focus 0.55 × 0.75, periphery 0.40). */
 const QUEST3_FOCUS = {foveaSource:'Profile', gaze:'Fixed', foveaWidth:.55, foveaHeight:.75, peripheralScale:.4, quadFocusScale:1, quadEdgeBlend:.2};
-/** Quest 3 refresh rates in Virtual Desktop; the VD route's slider runs from the first to the last (C# ProfileValidation.VdMin/MaxRefreshHz). */
+/** Quest 3 refresh rates in Virtual Desktop, the only ones the VD route accepts (C# ProfileValidation.Quest3RefreshHz); its slider snaps to them. */
 const QUEST3_REFRESH = [72, 80, 90, 120];
 /** The Quest 3 rate nearest to hz (144 becomes 120). */
 const questRefresh = hz => QUEST3_REFRESH.reduce((best, r) => Math.abs(r - hz) < Math.abs(best - hz) ? r : best);
@@ -512,9 +512,10 @@ function field(panel,path,title,description,type,values,condition,unit='',hide=n
     if (type === 'number') {
       // "0,5" (a decimal comma, typed on many European keyboards and number pads) reads as 0.5.
       // A whole-number step (the slider's) takes whole numbers only: the profile stores some of these as integers.
-      const n = Number(String(value).trim().replace(',', '.')), whole = Number.isInteger(values[2]), valid = String(value).trim() !== '' && Number.isFinite(n) && n >= values[0] && n <= values[1] && (!whole || Number.isInteger(n));
+      const n = Number(String(value).trim().replace(',', '.')), whole = Number.isInteger(values[2]), quest = path === 'headsetRefreshHz' && vdRoute(profile),
+        valid = String(value).trim() !== '' && Number.isFinite(n) && n >= values[0] && n <= values[1] && (!whole || Number.isInteger(n)) && (!quest || QUEST3_REFRESH.includes(n));
       element.classList.toggle('invalid',!valid); input.setAttribute('aria-invalid',String(!valid)); error.hidden = valid;
-      if (!valid) { invalid.add(path); error.textContent = `Enter a ${whole ? 'whole number' : 'value'} from ${values[0]} to ${values[1]}.`; change(); return; }
+      if (!valid) { invalid.add(path); error.textContent = quest ? 'Quest 3: 72, 80, 90 or 120 Hz.' : `Enter a ${whole ? 'whole number' : 'value'} from ${values[0]} to ${values[1]}.`; change(); return; }
       invalid.delete(path); value = n; range.value = n; paintRange(range);
     } else if (type === 'select' && typeof values[0][0] === 'number') value = Number(value);
     else if (type === 'list') value = value.split(/[\n,;]/).map(s => s.trim()).filter(Boolean);
@@ -526,7 +527,8 @@ function field(panel,path,title,description,type,values,condition,unit='',hide=n
     if (path === 'quadViews' && value !== 'None') lastProvider = value;
     change(); if (f.page === 'boost') boostChanged();
   });
-  if (range) range.addEventListener('input',() => { input.value = range.value; input.dispatchEvent(new Event('input',{bubbles:true})); });
+  // On the Quest 3 VD route the refresh slider snaps to the Quest 3 rates.
+  if (range) range.addEventListener('input',() => { if (path === 'headsetRefreshHz' && vdRoute(profile)) range.value = questRefresh(Number(range.value)); input.value = range.value; input.dispatchEvent(new Event('input',{bubbles:true})); });
   if (type === 'path') $('browse-'+path).addEventListener('click',async () => {
     if (busy) return; setBusy(true);
     try {

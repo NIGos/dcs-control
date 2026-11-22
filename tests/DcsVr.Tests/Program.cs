@@ -3827,6 +3827,7 @@ Test("Virtual Desktop route: fixed focus, own focus values, no Pimax-only parts"
     // Quest 3 refresh: 72-120 Hz on VD (144 from another headset is refused); other routes and Optimizations only keep 50-240.
     Require(ProfileValidation.Validate(preset with { HeadsetRefreshHz = 144 }).Any(i => i.Code == "vd-refresh" && i.Severity == IssueSeverity.Error), "144 Hz refused on VD");
     Require(new[] { 72.0, 80, 90, 120 }.All(hz => !ProfileValidation.Validate(preset with { HeadsetRefreshHz = hz }).Any(i => i.Code == "vd-refresh")), "Quest 3 rates accepted");
+    Require(new[] { 100.0, 85, 72.5 }.All(hz => ProfileValidation.Validate(preset with { HeadsetRefreshHz = hz }).Any(i => i.Code == "vd-refresh")), "rates between them refused");
     Require(!ProfileValidation.Validate(preset with { HeadsetRefreshHz = 144, Desktop = true }).Any(i => i.Code == "vd-refresh"), "Optimizations only ignores the refresh rate");
     Require(!ProfileValidation.Validate(new VrProfile { HeadsetRefreshHz = 144 }).Any(i => i.Code == "vd-refresh"), "Pimax keeps 144 Hz");
     // Frame generation checks name the VD app and its own reprojection (SSW), not Pimax Play / SteamVR.

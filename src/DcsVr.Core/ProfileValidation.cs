@@ -2,8 +2,8 @@ namespace DcsVr.Core;
 
 public static class ProfileValidation
 {
-    /// <summary>Refresh range of the Virtual Desktop route (Quest 3: 72, 80, 90 or 120 Hz); app.js uses the same.</summary>
-    public const int VdMinRefreshHz = 72, VdMaxRefreshHz = 120;
+    /// <summary>The refresh rates of the Virtual Desktop route (Quest 3), the only ones it accepts; app.js QUEST3_REFRESH.</summary>
+    public static IReadOnlyList<double> Quest3RefreshHz { get; } = [72, 80, 90, 120];
     /// <summary>Processes that start DCS (Steam, Explorer, Epic, the DCS launcher and updater, this app and its CPU Boost
     /// helper), DCS itself, and core Windows processes: CPU Boost never moves or closes them, whatever pattern matches.</summary>
     public static IReadOnlySet<string> BoostProtectedProcesses { get; } = new HashSet<string>(
@@ -101,8 +101,8 @@ public static class ProfileValidation
             Error("vd-gaze", "Quest 3 VD route: Quest 3 has no eye tracking. Select Fixed focus.");
         // Quest 3 in Virtual Desktop runs at 72, 80, 90 or 120 Hz; a higher value (e.g. 144 from another headset) would
         // set DCS's frame limit above what the headset can show.
-        if (profile.Runtime == RuntimeKind.VirtualDesktop && !profile.Desktop && profile.HeadsetRefreshHz is < VdMinRefreshHz or > VdMaxRefreshHz)
-            Error("vd-refresh", $"Quest 3 VD route: the headset refresh rate must be {VdMinRefreshHz} to {VdMaxRefreshHz} Hz (set 72, 80, 90 or 120 Hz, the same as in the VD app).");
+        if (profile.Runtime == RuntimeKind.VirtualDesktop && !profile.Desktop && !Quest3RefreshHz.Contains(profile.HeadsetRefreshHz))
+            Error("vd-refresh", "Quest 3 runs at 72, 80, 90 or 120 Hz. Pick the rate set in Virtual Desktop.");
         if (profile.UsesCheeky && profile.QuadViews != QuadProvider.None && !profile.UsesQuadFocus)
             Error("quad-cheeky", "DLSS 5 with Quad Views needs Bundled Quad Views as the Quad Views provider.");
         if (profile.UsesQuadFocus && !string.IsNullOrWhiteSpace(profile.QuadViewsLayerDirectory))

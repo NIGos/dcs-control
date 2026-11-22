@@ -151,6 +151,10 @@ window.runWebSmoke = async function() {
     { const keys = ['runtime','quadViews','gaze','foveaSource','foveaWidth','foveaHeight','peripheralScale','quadFocusScale','quadEdgeBlend','headsetRefreshHz','neuralRendering','foveatedDlss'], before = Object.fromEntries(keys.map(k => [k,ui.profile[k]]));
       edit('quadViews','PimaxNative'); ui.profile.headsetRefreshHz = 144; document.querySelector('#routeSwitch [data-route="VirtualDesktop"]').click(); const p = ui.profile;
       check('Quest 3 VD snaps 144 Hz to 120 and its slider stops at 120',p.headsetRefreshHz === 120 && $('range-headsetRefreshHz').max === '120' && $('range-headsetRefreshHz').min === '72');
+      { const range = $('range-headsetRefreshHz'); range.value = 100; range.dispatchEvent(new Event('input',{bubbles:true}));
+        check('Quest 3 VD: the refresh slider snaps to a Quest 3 rate (100 to 90)',ui.profile.headsetRefreshHz === 90 && range.value === '90');
+        edit('headsetRefreshHz','100'); check('and a typed 100 Hz is refused',ui.profile.headsetRefreshHz === 90 && $('setting-headsetRefreshHz').classList.contains('invalid'));
+        edit('headsetRefreshHz','120'); check('while 120 Hz is taken',ui.profile.headsetRefreshHz === 120 && !$('setting-headsetRefreshHz').classList.contains('invalid')); }
       check('Quest 3 VD greys out Pupil shift and Depth boost',$('input-pupilShift').disabled && $('input-depthBoost').disabled);
       edit('neuralRendering',true); check('Quest 3 VD leaves DLSS 5 available, as on the other routes',ui.profile.neuralRendering && !$('input-neuralRendering').disabled && !$('featureCheck-dlss').disabled);
       check('Switching to Virtual Desktop loads the Quest 3 focus values with a fixed focus',p.runtime === 'VirtualDesktop' && p.quadViews === 'QuadViewsFoveated' && p.gaze === 'Fixed' && p.foveaSource === 'Profile' && p.foveaWidth === .55 && p.foveaHeight === .75 && p.peripheralScale === .4 && p.quadFocusScale === 1);
