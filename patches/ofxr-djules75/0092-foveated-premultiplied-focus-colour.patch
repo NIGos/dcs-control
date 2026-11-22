@@ -1,0 +1,307 @@
+diff --git a/include/xrfg/d3d12_frame_synthesizer.hpp b/include/xrfg/d3d12_frame_synthesizer.hpp
+index a8e4c37..27db336 100644
+--- a/include/xrfg/d3d12_frame_synthesizer.hpp
++++ b/include/xrfg/d3d12_frame_synthesizer.hpp
+@@ -920,6 +920,12 @@ public:
+     // D3D12NvidiaOpticalFlowOptions::foveated_layers; survives reconfigure
+     // only if set again (the layer sets it before every submission).
+     void set_foveated_focus(bool focus) noexcept;
++    // DCS Control (0092): whether this focus swapchain's layer carries colour
++    // premultiplied by its alpha (SOURCE_ALPHA without UNPREMULTIPLIED). With
++    // it the generated colour is scaled with the alpha foveated_alpha sets, so
++    // colour never exceeds alpha (no bright fringe). Read only together with
++    // set_foveated_focus(true); set again by the layer before every submission.
++    void set_foveated_premultiplied(bool premultiplied) noexcept;
+     // Foveated layers: the session's ledger of queued Waits (see
+     // D3D12QueueWaitLedger), or null: every Wait queued as before. As
+     // set_foveated_focus, set again by the layer before every submission.
+diff --git a/src/d3d12/d3d12_frame_synthesizer.cpp b/src/d3d12/d3d12_frame_synthesizer.cpp
+index 5b2532c..9737d90 100644
+--- a/src/d3d12/d3d12_frame_synthesizer.cpp
++++ b/src/d3d12/d3d12_frame_synthesizer.cpp
+@@ -427,7 +427,17 @@ constexpr UINT kSynthesisFoveatedAlphaFlag = 8U;
+ // foveated_cover); 0 = off. Above the fraction's bits, so the per-output
+ // fraction updates keep them as well as the low byte (kSynthesisKeptBits).
+ constexpr UINT kSynthesisFoveatedUncoveredShift = 24U;
+-constexpr UINT kSynthesisFoveatedUncoveredMax = 64U;
++// DCS Control (0092): 63, not the key's 64, so that bit 30 is free for
++// kSynthesisFoveatedPremultipliedFlag (a ramp of 63 pixels for 64 is the
++// only change, and the app does not write the key).
++constexpr UINT kSynthesisFoveatedUncoveredMax = 63U;
++// DCS Control (0092): bit 30, the focus layer is submitted with premultiplied
++// colour (XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT without
++// XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT, Quad Views'
++// dcsvr_two_layers_alpha 1 or 2): foveated_alpha scales the colour by the same
++// factor as the alpha it sets (frame_synthesis.hlsl). Focus swapchains only,
++// with bit 3; kept by the fraction updates (inside kSynthesisKeptBits).
++constexpr UINT kSynthesisFoveatedPremultipliedFlag = 1U << 30;
+ // Round 6: bit 5 (free since 0057), `[ofxr] foveated_uncovered_exact`: the
+ // ramp by the pixel's own cover alone. Bit 31, `[ofxr]
+ // foveated_uncovered_fill`: the uncovered zone filled from the current frame
+@@ -1580,6 +1590,9 @@ struct D3D12FrameSynthesizer::Impl {
+     // layer's (set_foveated_focus): no smooth cursor and no HUD symbology
+     // there, both of which model the composed image.
+     bool foveated_focus{};
++    // DCS Control (0092): the focus layer's colour is premultiplied by its
++    // alpha (set_foveated_premultiplied).
++    bool foveated_premultiplied{};
+     [[nodiscard]] UINT foveated_alpha_flag() const noexcept {
+         if (!nvidia_options.foveated_layers) {
+             return 0U;
+@@ -1597,7 +1610,12 @@ struct D3D12FrameSynthesizer::Impl {
+         const UINT fill = foveated_focus && nvidia_options.foveated_uncovered_fill != 0U
+             ? kSynthesisFoveatedFillFlag
+             : 0U;
+-        return kSynthesisFoveatedAlphaFlag | (width << kSynthesisFoveatedUncoveredShift) | exact | fill;
++        // DCS Control (0092): a premultiplied focus layer (set_foveated_premultiplied).
++        const UINT premultiplied = foveated_focus && foveated_premultiplied
++            ? kSynthesisFoveatedPremultipliedFlag
++            : 0U;
++        return kSynthesisFoveatedAlphaFlag | (width << kSynthesisFoveatedUncoveredShift) | exact | fill |
++            premultiplied;
+     }
+     [[nodiscard]] bool foveated_bypass() const noexcept {
+         return nvidia_options.foveated_layers && foveated_focus;
+@@ -10788,6 +10806,17 @@ void D3D12FrameSynthesizer::set_foveated_focus(bool focus) noexcept {
+     }
+ }
+ 
++// DCS Control (0092).
++void D3D12FrameSynthesizer::set_foveated_premultiplied(bool premultiplied) noexcept {
++    try {
++        std::scoped_lock lock(mutex_);
++        if (impl_ != nullptr) {
++            impl_->foveated_premultiplied = premultiplied;
++        }
++    } catch (...) {
++    }
++}
++
+ // Foveated layers, round 4.
+ void D3D12FrameSynthesizer::set_foveated_link(std::shared_ptr<D3D12FoveatedLink> link, bool two_layers,
+     std::uint64_t frame_token) noexcept {
+diff --git a/src/d3d12/frame_synthesis.hlsl b/src/d3d12/frame_synthesis.hlsl
+index 03b69de..5355203 100644
+--- a/src/d3d12/frame_synthesis.hlsl
++++ b/src/d3d12/frame_synthesis.hlsl
+@@ -117,7 +117,17 @@ bool foveated_alpha_flag() {
+ // just the same). Colour is never touched; alpha only where the ramp is
+ // below 1 (a factor of exactly 1 elsewhere).
+ uint foveated_uncovered_width() {
+-    return (SynthesisFlags >> 24) & 0x7fu;
++    return (SynthesisFlags >> 24) & 0x3fu; // DCS Control (0092): bit 30 is the next flag
++}
++
++// DCS Control (0092). SynthesisFlags bit 30: the focus layer's colour is
++// premultiplied by its alpha (the layer has SOURCE_ALPHA without
++// UNPREMULTIPLIED). foveated_alpha then brings the colour to the alpha it
++// sets: the composed colour carries the alpha it was composed with, so it is
++// scaled by new / composed alpha (where the composed alpha is about 0, the
++// current frame's own pixel scaled the same way), and never left above it.
++bool foveated_premultiplied_flag() {
++    return (SynthesisFlags & 0x40000000u) != 0u;
+ }
+ 
+ // Round 6. SynthesisFlags bit 5 (`[ofxr] foveated_uncovered_exact`, with a
+@@ -163,7 +173,9 @@ float4 foveated_alpha(float2 position, float4 color, float cover, float keep) {
+     [branch] if (foveated_alpha_flag()) {
+         uint2 at = uint2(position);
+         if (at.x < Width && at.y < Height && Slice < ArraySize) {
+-            color.a = CurrentFrame.Load(int4(int2(at), int(Slice), 0)).a;
++            float4 current = CurrentFrame.Load(int4(int2(at), int(Slice), 0));
++            float composed = saturate(color.a); // DCS Control (0092)
++            color.a = current.a;
+             [branch] if (foveated_uncovered_width() != 0u) {
+                 float covered = min(saturate(cover), foveated_cover(float2(at)));
+                 [branch] if (covered < 1.0) {
+@@ -171,6 +183,14 @@ float4 foveated_alpha(float2 position, float4 color, float cover, float keep) {
+                 }
+                 color.a *= covered;
+             }
++            // DCS Control (0092): premultiplied colour follows the alpha.
++            [branch] if (foveated_premultiplied_flag()) {
++                const float kAlphaFloor = 1.0 / 512.0;
++                color.rgb = composed > kAlphaFloor
++                    ? color.rgb * (color.a / composed)
++                    : (current.a > kAlphaFloor ? current.rgb * (color.a / current.a) : float3(0.0, 0.0, 0.0));
++                color.rgb = min(color.rgb, color.aaa);
++            }
+         }
+     }
+     return color;
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 950c1d8..becf05a 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -15305,7 +15305,10 @@ void drop_idle_cockpit_mask(SessionState& session) noexcept {
+     // Foveated layers, round 4: the frame has two projection layers or more
+     // (a focus layer beside the periphery layer): the smooth cursor and the
+     // HUD symbology then run on both layers (set_foveated_link).
+-    bool foveated_two_layers = false) noexcept {
++    bool foveated_two_layers = false,
++    // DCS Control (0092): this swapchain's layer is a focus layer with
++    // premultiplied colour (SOURCE_ALPHA without UNPREMULTIPLIED).
++    bool foveated_premultiplied = false) noexcept {
+     PreparedGeneration output{};
+     try {
+         const auto state = find_swapchain(application_swapchain);
+@@ -15556,6 +15559,8 @@ void drop_idle_cockpit_mask(SessionState& session) noexcept {
+                 // c= the periphery layer's index among the projection layers).
+                 if (state->session->foveated_layers) {
+                     generation->synthesizer->set_foveated_focus(foveated_focus);
++                    generation->synthesizer->set_foveated_premultiplied(
++                        foveated_focus && foveated_premultiplied); // 0092
+                     // And the session's queued Waits: the same wait is not
+                     // queued again by each swapchain of the frame.
+                     generation->synthesizer->set_queue_wait_ledger(
+@@ -15578,7 +15583,8 @@ void drop_idle_cockpit_mask(SessionState& session) noexcept {
+                             handle_value(application_swapchain),
+                             (state->session->smooth_cursor ? 1U : 0U) |
+                                 (state->session->nvidia_options.hud_symbology ? 2U : 0U) |
+-                                (foveated_linked ? 4U : 0U),
++                                (foveated_linked ? 4U : 0U) |
++                                (foveated_premultiplied ? 8U : 0U), // 0092: premultiplied focus layer
+                             static_cast<std::uint64_t>(periphery_layer));
+                     }
+                 }
+@@ -15958,6 +15964,25 @@ void drop_idle_cockpit_mask(SessionState& session) noexcept {
+     return foveated_widest_layer(snapshot);
+ }
+ 
++// DCS Control (0092): whether `mapping`'s swapchain belongs to a focus layer
++// (not `periphery_layer`) whose colour is premultiplied by its alpha: the
++// layer blends by its alpha (SOURCE_ALPHA) and does not say its colour is
++// unpremultiplied (no UNPREMULTIPLIED), the OpenXR default. Quad Views'
++// dcsvr_two_layers_alpha 1 and 2 submit it so; 0 sets UNPREMULTIPLIED.
++[[nodiscard]] bool foveated_premultiplied_layer(const ProjectionSnapshot& snapshot,
++    const ProjectionResourceMapping& mapping, std::size_t periphery_layer) noexcept {
++    if (mapping.views.empty()) {
++        return false;
++    }
++    const std::size_t layer = mapping.views.front().projection_index;
++    if (layer == periphery_layer || layer >= snapshot.layers.size()) {
++        return false;
++    }
++    const XrCompositionLayerFlags flags = snapshot.layers[layer].layer_flags;
++    return (flags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) != 0 &&
++        (flags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT) == 0;
++}
++
+ [[nodiscard]] std::size_t foveated_widest_layer(const ProjectionSnapshot& snapshot) noexcept {
+     std::size_t widest = 0;
+     float widest_span = -1.0F;
+@@ -16139,7 +16164,8 @@ void note_foveated_mode(
+                 !mapping.views.empty() && mapping.views.front().projection_index != periphery_layer,
+                 periphery_layer, // Foveated layers
+                 frame_cockpit_mask_shared ? &frame_cockpit_mask : nullptr,
+-                foveated_two_layers); // round 4
++                foveated_two_layers, // round 4
++                foveated_premultiplied_layer(snapshot, mapping, periphery_layer)); // 0092
+             all_expected_kind =
+                 all_expected_kind && generation.kind == expected_kind;
+             all_anchor_current =
+diff --git a/tests/vertical_fov_tests.cpp b/tests/vertical_fov_tests.cpp
+index 5e8d26d..e2e3f99 100644
+--- a/tests/vertical_fov_tests.cpp
++++ b/tests/vertical_fov_tests.cpp
+@@ -268,7 +268,10 @@ FocusPairResult run_focus_pair(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlow
+     // head roll), and a cockpit mask per capture (A's, B's), set as the layer
+     // sets them: before the prime and before the pair.
+     const ReprojectionViews* given_views_b = nullptr,
+-    const std::array<std::shared_ptr<xrfg::D3D12CockpitMaskFrame>, 2>* masks = nullptr) {
++    const std::array<std::shared_ptr<xrfg::D3D12CockpitMaskFrame>, 2>* masks = nullptr,
++    // DCS Control (0092): the focus layer's colour is premultiplied (as the
++    // layer says for SOURCE_ALPHA without UNPREMULTIPLIED).
++    bool premultiplied = false) {
+     const auto views_a = focus_views(gaze_a, false);
+     const auto views_b = given_views_b != nullptr ? *given_views_b : focus_views(gaze_b, rotated);
+     FocusPairResult output;
+@@ -298,6 +301,7 @@ FocusPairResult run_focus_pair(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlow
+     // As the layer names a focus swapchain (no cursor, no HUD symbology
+     // there; neither is on in this test).
+     synth.set_foveated_focus(true);
++    synth.set_foveated_premultiplied(premultiplied); // 0092
+     xrfg::D3D12HistoryCaptureTicket a{}, b{};
+     require_hresult(history->capture(0, &a), "focus capture A");
+     require_hresult(history->commit(a), "focus commit A");
+@@ -418,6 +422,72 @@ void test_focus_alpha_edge(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlowBack
+         }
+ }
+ 
++// DCS Control (0092): a premultiplied focus layer. The alpha is the same as
++// without it (B's at the pixel, every byte); the colour composed without it
++// is brought to that alpha: scaled by B's alpha over the alpha it was
++// composed with (the alpha the pair has without foveated_layers), or B's own
++// pixel where that alpha is 0, and never above the alpha. Every byte within
++// one byte plus what the bytes read back cannot say (half a byte of colour and
++// of composed alpha, carried through the ratio; checked where the composed
++// alpha is at least 16 of 255), never above the alpha; the real frame stays B
++// bit for bit. The saccade case must scale a good part of the fade, or this
++// test proves nothing.
++void test_focus_premultiplied_alpha(D3D12WarpFixture& fixture, xrfg::D3D12OpticalFlowBackend backend,
++    const xrfg::D3D12NvidiaOpticalFlowOptions& base) {
++    const std::size_t pixels = static_cast<std::size_t>(kFocusWidth) * kFocusHeight;
++    const auto value_at = [](const StereoPattern& image, UINT eye, std::size_t pixel, UINT channel) {
++        return static_cast<int>(image[eye][pixel * kBytesPerPixel + channel]);
++    };
++    for (const bool triple : {false, true}) for (const FocusCase& c : kFocusCases) {
++        xrfg::D3D12NvidiaOpticalFlowOptions off = base, on = base;
++        off.foveated_layers = false;
++        on.foveated_layers = true;
++        const FocusPairResult plain = run_focus_pair(fixture, backend, off, c.a, c.b, false, true, triple);
++        const FocusPairResult layers = run_focus_pair(fixture, backend, on, c.a, c.b, false, true, triple);
++        const FocusPairResult premultiplied =
++            run_focus_pair(fixture, backend, on, c.a, c.b, false, true, triple, nullptr, nullptr, true);
++        require(premultiplied.real == premultiplied.current, "premultiplied focus: the real frame is not B bit for bit");
++        require(premultiplied.synthetics.size() == layers.synthetics.size() &&
++                plain.synthetics.size() == layers.synthetics.size(), "premultiplied focus: outputs missing");
++        for (std::size_t s = 0; s < layers.synthetics.size(); ++s) for (UINT eye = 0; eye < kEyeCount; ++eye) {
++            int worst_alpha = 0;
++            double worst_colour = -1.0; // the largest error beyond the tolerance
++            std::size_t scaled = 0;
++            for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
++                const int alpha = value_at(layers.synthetics[s], eye, pixel, 3);
++                worst_alpha = std::max(worst_alpha, std::abs(value_at(premultiplied.synthetics[s], eye, pixel, 3) - alpha));
++                const double composed = value_at(plain.synthetics[s], eye, pixel, 3) / 255.0;
++                const double target = alpha / 255.0;
++                const double own = value_at(layers.current, eye, pixel, 3) / 255.0;
++                bool changed = false;
++                for (UINT channel = 0; channel < 3; ++channel) {
++                    double expected = composed > 1.0 / 512.0
++                        ? value_at(layers.synthetics[s], eye, pixel, channel) / 255.0 * (target / composed)
++                        : (own > 1.0 / 512.0 ? value_at(layers.current, eye, pixel, channel) / 255.0 * (target / own) : 0.0);
++                    const double ratio = composed > 1.0 / 512.0 ? target / composed : 0.0;
++                    const double tolerance = 1.0 + 0.5 * ratio + (composed > 1.0 / 512.0 ? expected * 255.0 * 0.5 / (composed * 255.0) : 0.0);
++                    expected = std::min(expected, target) * 255.0;
++                    const int got = value_at(premultiplied.synthetics[s], eye, pixel, channel);
++                    if (composed >= 16.0 / 255.0)
++                        worst_colour = std::max(worst_colour, std::abs(got - expected) - tolerance);
++                    require(got <= alpha + 1, std::string("premultiplied focus ") + c.name + ": colour above alpha");
++                    changed = changed || got != value_at(layers.synthetics[s], eye, pixel, channel);
++                }
++                scaled += changed && composed > 1.0 / 512.0 && std::abs(composed - target) > 4.0 / 255.0;
++            }
++            std::cout << "focus premultiplied " << c.name << (triple ? " 3X" : " 2X") << " synthetic=" << s
++                      << " eye=" << eye << " worst alpha change=" << worst_alpha << " worst colour error beyond tolerance="
++                      << worst_colour << " pixels rescaled in the fade=" << scaled << '\n';
++            require(worst_alpha == 0, std::string("premultiplied focus ") + c.name + ": the alpha changed");
++            require(worst_colour <= 0.0, std::string("premultiplied focus ") + c.name +
++                ": the colour is not the composed colour brought to the alpha");
++            if (std::string_view(c.name) == "saccade")
++                require(scaled >= 100, "premultiplied focus saccade: no pixel of the fade was rescaled, "
++                    "so this case cannot tell the two behaviours apart");
++        }
++    }
++}
++
+ // (iii) `[ofxr] foveated_uncovered_alpha`: where A's image does not hold what
+ // a pixel of B shows, the focus synthetic's alpha is 0 (the runtime then
+ // shows the periphery layer), with a ramp of the key's width inside A's edge.
+@@ -2302,6 +2372,7 @@ int main(int argc, char** argv) {
+             }
+             test_moved_focus_fov(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
+             test_focus_alpha_edge(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
++            test_focus_premultiplied_alpha(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options); // 0092
+             test_focus_uncovered_alpha(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options);
+             test_two_layer_cursor(focus_fixture, xrfg::D3D12OpticalFlowBackend::nvidia, options); // round 4
+             // Round 5: foveated_uncovered_alpha (jitter, head rotation, cockpit, cursor).

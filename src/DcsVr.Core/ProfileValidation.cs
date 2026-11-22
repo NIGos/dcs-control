@@ -84,6 +84,7 @@ public static class ProfileValidation
         if (!VrProfile.NeuralAreas.Contains(profile.NeuralFocusArea)) Error("neural-area", "DLSS 5 area must be the whole focus area or its central 90%, 80%, 70% or 50%.");
         if (profile.NvidiaFlowScale is not (50 or 75 or 100)) Error("flow-scale", "Optical flow resolution must be 50%, 75%, or 100%.");
         if (!Enum.IsDefined(profile.FlowPreset)) Error("flow-preset", "Select fast, medium, or slow optical flow.");
+        if (!Enum.IsDefined(profile.FrameGenFocusLayer)) Error("framegen-focus-layer", "Select Standard, Premultiplied, Premultiplied sRGB or One swapchain per eye for Focus layer.");
         if (!Enum.IsDefined(profile.FrameGenPassThrough)) Error("framegen-pass-through", "Select Steady, Balanced or Prefer refresh rate for Stop generating.");
         if (!Enum.IsDefined(profile.FpsLimit)) Error("fps-mode", "Select a recognized DCS frame limit.");
         Range("refresh-rate", profile.HeadsetRefreshHz, 50, 240);
