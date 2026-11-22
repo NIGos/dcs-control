@@ -292,6 +292,9 @@ std::atomic<int> g_benchActiveMode{0};  // read by SetBenchVariant
 // recorded (valid = not discarded).
 void (*g_benchBlockBegin)(bool on) = nullptr;
 void (*g_benchBlockEnd)(bool on, bool valid) = nullptr;
+// The engine shader cache prewarm held for the whole A/B, both arms (set by main/wiring.inc, after shadow_inst.h):
+// its compiles would otherwise run in the ON blocks only (the kill switch parks them), and read as the engine's cost.
+void (*g_benchHoldPrewarm)(bool hold) = nullptr;
 
 // Blocks until done. mode: 0 = exclusion OFF/ON, 1 = collect threads.
 // Returns false if aborted.
@@ -369,6 +372,7 @@ bool RunBenchmark(int mode, bool beeps) {
     std::lock_guard<std::mutex> lock(g_bench.mutex);
     g_bench.lastWholeQpc = 0;  // no interval across two benches
   }
+  if (g_benchHoldPrewarm) g_benchHoldPrewarm(true);
   g_benchRunning = true;
   for (int i = 0; i < blocks && !g_benchAbort; ++i) {
     bool on = (i % 2) == 1;
@@ -453,6 +457,7 @@ bool RunBenchmark(int mode, bool beeps) {
     done.push_back(std::move(blk));
   }
   g_benchRunning = false;
+  if (g_benchHoldPrewarm) g_benchHoldPrewarm(false);
   if (rtThread) CloseHandle(rtThread);
   LARGE_INTEGER q1;
   QueryPerformanceCounter(&q1);

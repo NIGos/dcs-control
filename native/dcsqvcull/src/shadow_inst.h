@@ -3619,6 +3619,12 @@ ULONGLONG g_prewarmAt = 0, g_prewarmT0 = 0;  // GetTickCount64: scan not before 
 uint32_t g_prewarmDelayMs = kPrewarmDelayMs;
 std::atomic<bool> g_prewarmOn{true};  // [Model] ShaderCachePrewarm
 std::atomic<uint32_t> g_prewarmFound{0}, g_prewarmCurrent{0}, g_prewarmCompiled{0}, g_prewarmSkipped{0};
+// Benchmark hold (bench.h RunBenchmark through BenchHoldPrewarm): no prewarm entry is taken while an A/B runs. The
+// prewarm takes entries only while their kind is collected, and the kill switch stops collecting, so in the suite's
+// engine A/B (mode 11) every prewarm compile ran in the ON blocks only: 2026-11-22, Germany, first stock flight after
+// the ATMOSX swap, 4 workers recompiled 535 stale entries for 469 s and the ON blocks read +3.8 ms render thread and
+// +3 cores of process CPU. Live keys are not held (they are the measured feature's own cost).
+std::atomic<bool> g_prewarmHold{false};
 
 // The inverse of WriteIdentity. false: malformed, or a field longer than a
 // Snapshot holds. s is zeroed first (shader pointers stay null).
@@ -3800,6 +3806,7 @@ inline bool PrewarmKindOff(int kind) { return (kind == kKindGb ? g_prewarmWantGb
 // not collected yet stay queued for a later call.
 inline bool PrewarmTakeLocked(PrewarmItem& out) {
   if (g_prewarmState != 2 || !g_prewarmOn.load(std::memory_order_relaxed)) return false;
+  if (g_prewarmHold.load(std::memory_order_relaxed)) return false;  // an A/B runs: entries wait (BenchHoldPrewarm)
   for (size_t i = g_prewarm.size(); i-- > 0;) {
     const int kind = g_prewarm[i].s->kind;
     if (PrewarmCollectedNow(kind)) {
@@ -3852,6 +3859,20 @@ inline PrewarmProgress PrewarmSnap() {
   p.processed = p.current + p.compiled + g_prewarmSkipped.load();
   if (p.processed > p.found) p.processed = p.found;
   return p;
+}
+
+// The benchmark hold (g_prewarmHold above). Returns the entries still queued; *busy = prewarm compiles in flight
+// (they finish: a compile is not interrupted).
+inline size_t PrewarmSetHold(bool hold, int* busy) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  g_prewarmHold = hold;
+  if (!hold) g_cv.notify_all();
+  if (busy) *busy = g_prewarmBusy;
+  return g_prewarmState == 2 ? g_prewarm.size() : 0;
+}
+inline int PrewarmBusyNow() {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  return g_prewarmBusy;
 }
 
 inline void LogPrewarm() {
