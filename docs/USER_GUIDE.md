@@ -445,7 +445,7 @@ All in-flight keys are on the **Keys & headset panel** page, under **In-flight k
 | **Alt+Shift+F11** | Engine Optimizations off/on (one beep off, two on); AltGr+Shift+F11 works too |
 | **Ctrl+Shift+F12** | DLSS 5 off/on, to compare |
 | **Ctrl+Shift+F10** | Pupil shift off/on (low beep off, high beep on) |
-| **Alt+Shift+F8** | Far depth off/on, to compare (low beep off, two beeps on) |
+| **Alt+Shift+F8** | Far depth off/on, to compare (one low beep off, two high beeps on) |
 | **Alt+Shift+F10** | Depth boost off/on (low beep off, high beep on) |
 | *(off)* | Color mode: Off, Fix, Enhanced in turn (1, 2 or 3 beeps); Alt+Shift+F9 is free |
 | **Ctrl+Alt+F11** | Start or stop the Engine Optimizations test suite (fixed) |
