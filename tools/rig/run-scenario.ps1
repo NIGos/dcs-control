@@ -49,9 +49,11 @@ param([Parameter(Mandatory)][string]$Scenario, [string]$Arm, [switch]$Both, [swi
   [string[]]$FlyArms,
   # -QvDll: the Quad Views layer DLL flown instead of the installed one (both flights); only the COPY is changed.
   [string]$QvDll,
-  # -ClickFly: start the mission by clicking FLY in DCS's window (the old way, needs DCS in the foreground) instead of
-  # the engine hook's rig autostart; the click is also the fallback when the autostart does not confirm.
-  [switch]$ClickFly,
+  # The rig never takes the focus or sends input to DCS by default (user, 2026-11-22). -ClickFly: start the mission by
+  # clicking FLY in DCS's window (the old way: focuses DCS, clicks, Pause key) instead of the engine hook's rig autostart.
+  # -AllowInput: lets the schedule's input actions run (recenter key, mouse paths and cursor tests, focus, key, gaze by
+  # the cursor) and moves the window for windowAtOrigin scenarios; without it (and without -ClickFly) they are skipped.
+  [switch]$ClickFly, [switch]$AllowInput,
   # Where things are on this machine (see the head of the file): parameter, else environment variable, else default.
   [string]$StateBackup = $env:DCSC_RIG_STATE_BACKUP, [string]$MissionDir = $env:DCSC_RIG_MISSIONS, [string]$RunsDir = $env:DCSC_RIG_RUNS,
   [string]$TapDir = $env:DCSC_RIG_TAP_DIR, [string]$SavedGamesDcs = $env:DCSC_SAVED_GAMES_DCS, [string]$PimaxCtl = $env:DCSC_PIMAX_CTL,
@@ -225,6 +227,52 @@ function Invoke-Recenter($Rec, $A) {
   }
   Note "$($Rec.run) recenter VR: key $(($all) -join '+') sent $taps time(s), Scroll Lock state now $([Rig.W]::GetKeyState(0x91) -band 1) (binding from $($b.File); DCS in the foreground: $fg)"
 }
+if (-not ('Rig.P' -as [type])) { Add-Type -Namespace Rig -Name P -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)] public struct PT { public int X, Y; }
+[DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(PT p);
+[DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+'@ }
+# PASSIVE focus record (user, 2026-11-22: the rig never steals focus or puts anything on screen): every 0.5 s from the
+# DCS start until the flight is confirmed, which window is in the foreground and which window is seen at the centre of
+# DCS's client area (WindowFromPoint), written to <run>\foreground.tsv. Reads only; no input, no window changes.
+$FgSampler = {
+  param([string]$Out, [string]$StopFile)
+  "time`tforeground`tforegroundTitle`tdcsForeground`tdcsCentre`tdcsIconic" | Set-Content -LiteralPath $Out
+  $name = { param([IntPtr]$h) $procId = 0; [Rig.W]::GetWindowThreadProcessId($h, [ref]$procId) | Out-Null; $p = Get-Process -Id $procId -ErrorAction SilentlyContinue; if ($p) { $p.ProcessName } else { "pid $procId" } }
+  $t0 = Get-Date
+  while (-not (Test-Path -LiteralPath $StopFile) -and ((Get-Date) - $t0).TotalMinutes -lt 20) {
+    try {
+      $f = [Rig.W]::GetForegroundWindow(); $sb = New-Object Text.StringBuilder 200; [Rig.W]::GetWindowTextW($f, $sb, 200) | Out-Null
+      $d = Get-Process DCS -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+      $centre = ''; $isFg = ''; $icon = ''
+      if ($d) {
+        $h = $d.MainWindowHandle; $isFg = [string]($f -eq $h); $icon = [string][Rig.W]::IsIconic($h)
+        $r = New-Object Rig.W+RECT; [Rig.W]::GetClientRect($h, [ref]$r) | Out-Null; $p = New-Object Rig.W+POINT; [Rig.W]::ClientToScreen($h, [ref]$p) | Out-Null
+        $pt = New-Object Rig.P+PT; $pt.X = $p.X + [int]($r.R / 2); $pt.Y = $p.Y + [int]($r.B / 2)
+        $w = [Rig.P]::GetAncestor([Rig.P]::WindowFromPoint($pt), 2); $centre = & $name $w
+      }
+      "{0:o}`t{1}`t{2}`t{3}`t{4}`t{5}" -f (Get-Date), (& $name $f), ($sb.ToString() -replace '\t', ' '), $isFg, $centre, $icon | Add-Content -LiteralPath $Out
+    } catch { }
+    Start-Sleep -Milliseconds 500
+  }
+}
+# The hook's press (FLY or spawn-and-unpause) in dcs.log, as local time; $null without one.
+function Get-HookPress([string]$LogText) {
+  $m = [regex]::Match($LogText, '(?m)^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}) \S+\s+DcsQvCull \(Main\): rig autostart: (FLY pressed \(try \d+\)|no briefing after \d+ s, paused: spawn and unpause \(try \d+\))')
+  if (-not $m.Success) { return $null }
+  [pscustomobject]@{ At = [DateTime]::SpecifyKind([DateTime]::ParseExact($m.Groups[1].Value, 'yyyy-MM-dd HH:mm:ss.fff', [Globalization.CultureInfo]::InvariantCulture), 'Utc').ToLocalTime(); What = $m.Groups[2].Value }
+}
+# The foreground sample nearest to a moment (within 1.5 s), from foreground.tsv; $null when none is that close.
+function Get-FocusAt([string]$Tsv, [datetime]$At) {
+  if (-not (Test-Path -LiteralPath $Tsv)) { return $null }
+  $best = $null; $bd = 1.5
+  foreach ($row in @(Import-Csv -LiteralPath $Tsv -Delimiter "`t")) {
+    $d = [Math]::Abs(([datetime]::Parse($row.time, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) - $At).TotalSeconds)
+    if ($d -le $bd) { $bd = $d; $best = $row }
+  }
+  if (-not $best) { return $null }
+  $best | Add-Member -NotePropertyName offsetSec -NotePropertyValue ([Math]::Round($bd, 2)) -PassThru
+}
 function Get-DcsWin { $p = Get-Process DCS -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1; if ($p) { $p.MainWindowHandle } else { [IntPtr]::Zero } }
 function Get-DcsClient { $h = Get-DcsWin; if ($h -eq [IntPtr]::Zero) { return $null }
   $r = New-Object Rig.W+RECT; [Rig.W]::GetClientRect($h, [ref]$r) | Out-Null; $p = New-Object Rig.W+POINT; [Rig.W]::ClientToScreen($h, [ref]$p) | Out-Null
@@ -351,6 +399,10 @@ function Start-RigFlight([string]$RunDir, [string]$LaunchJson, [string]$Mission,
   }
   $Rec.started = (Get-Date).ToString('o')
   $proc = [Diagnostics.Process]::Start($psi); $Rec.pid = $proc.Id
+  if ($Rec.autostartFlag) {   # the passive foreground record ($FgSampler)
+    $Script:FgStop = Join-Path $RunDir 'foreground.stop'; Remove-Item -LiteralPath $Script:FgStop -ErrorAction SilentlyContinue
+    $Script:FgJob = Start-ThreadJob -ScriptBlock $FgSampler -ArgumentList (Join-Path $RunDir 'foreground.tsv'), $Script:FgStop
+  }
   Note "$($Rec.run) DCS started pid $($proc.Id), environment from $LaunchJson"
   $layers = -2; $t0 = Get-Date
   while (((Get-Date) - $t0).TotalSeconds -lt 150) {
@@ -379,6 +431,7 @@ function Start-RigFlight([string]$RunDir, [string]$LaunchJson, [string]$Mission,
   if ($tapLog -notmatch 'graphics binding D3D12') { throw "the capture layer did not see a D3D12 session (rigtap.log: $(($tapLog -split "`n" | Select-Object -Last 2) -join ' | ')): no flight" }
   Note "$($Rec.run) capture layer loaded: $((($tapLog -split "`n") | Select-String 'graphics binding' | Select-Object -Last 1).Line)"
 }
+function Stop-FgSampler { if ($Script:FgJob) { Set-Content -LiteralPath $Script:FgStop -Value 'stop'; $Script:FgJob | Wait-Job -Timeout 5 | Out-Null; $Script:FgJob | Remove-Job -Force -ErrorAction SilentlyContinue; $Script:FgJob = $null } }
 # The flight's start in dcs.log, with its time (dcs.log writes UTC): the line "WWT (Main): <aircraft>" (fly4.ps1), else the engine hook's measured model time.
 function Get-FlyLine {
   $m = [regex]::Match((Read-Shared $DcsLog), '(?m)^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}) \S+\s+WWT \(Main\): (?!Wwt export|Export )(\S+)')
@@ -392,43 +445,40 @@ function Get-FlyLine {
   $null
 }
 # FLY without a click: the engine hook presses the briefing's FLY in DCS's GUI state (rig autostart, DcsQvCull.lua), so
-# neither the window focus nor windows on top of DCS matter. The start is confirmed only by the aircraft line; without it
-# within 45 s (the hook tries 3 times, a briefing-less paused mission after 15 s) the click path below takes over.
+# neither the window focus nor windows on top of DCS matter. Confirmed by the aircraft line or the hook's model-time
+# line within 45 s; otherwise the flight fails: the rig never clicks or types into DCS unless -ClickFly asks for it
+# (user, 2026-11-22). The proof of focus independence is passive: the foreground window and the window seen at DCS's
+# centre at the hook's press, from foreground.tsv (run.json focusAtFly; steps.log "at the hook's press").
 function Start-Fly([string]$RunDir, $Rec, [bool]$AtOrigin) {
-  $Rec.flyMethod = 'click'
-  # The hook logs "rig autostart: on" when DCS's GUI loads it, long before the mission: without that line the deployed
-  # hook has no autostart (an older app) or the engine is off, and the click comes at once.
-  if ($Rec.autostartFlag -and (Read-Shared $DcsLog) -notmatch 'rig autostart: on \(') {
-    Note "$($Rec.run) no 'rig autostart: on' line in dcs.log (the deployed engine hook has no autostart, or the engine is off): clicking FLY"
-    $Rec.flyMethod = 'click (no autostart in the hook)'
-    return (Click-Fly $RunDir $Rec $AtOrigin)
+  if ($ClickFly) { $Rec.flyMethod = 'click (-ClickFly)'; return (Click-Fly $RunDir $Rec $AtOrigin) }
+  $Rec.flyMethod = 'autostart'
+  if ((Read-Shared $DcsLog) -notmatch 'rig autostart: on \(') { throw "no 'rig autostart: on' line in dcs.log: the deployed engine hook has no rig autostart, or the engine is off (fly with -ClickFly to click instead)" }
+  $t0 = Get-Date; $fl = $null
+  while (((Get-Date) - $t0).TotalSeconds -lt 45) { $fl = Get-FlyLine; if ($fl) { break }; Start-Sleep -Milliseconds 500 }
+  Start-Sleep 1; Stop-FgSampler
+  $log = Read-Shared $DcsLog
+  $said = @(($log -split "`n") | Select-String 'DcsQvCull \(Main\): rig autostart: ' | ForEach-Object { ($_.Line -replace '^.*rig autostart: ', '').Trim() })
+  $Rec.autostartLog = $said
+  $press = Get-HookPress $log
+  if ($press) {
+    $s = Get-FocusAt (Join-Path $RunDir 'foreground.tsv') $press.At
+    if ($s) {
+      $Rec.focusAtFly = [ordered]@{ press = $press.At.ToString('o'); what = $press.What; sampleOffsetSec = $s.offsetSec; foreground = $s.foreground; foregroundTitle = $s.foregroundTitle; dcsForeground = $s.dcsForeground; dcsCentre = $s.dcsCentre; dcsIconic = $s.dcsIconic
+        focusIndependent = ($s.dcsForeground -eq 'False') }
+      Note "$($Rec.run) at the hook's press ($($press.What), $($press.At.ToString('HH:mm:ss.fff'))): foreground '$($s.foregroundTitle)' of $($s.foreground) (DCS in the foreground: $($s.dcsForeground)); window at DCS's centre: $($s.dcsCentre) (sample $($s.offsetSec) s away)"
+    } else { Note "$($Rec.run) at the hook's press ($($press.At.ToString('HH:mm:ss.fff'))): no foreground sample within 1.5 s" }
   }
-  if ($Rec.autostartFlag) {
-    $t0 = Get-Date; $fl = $null
-    while (((Get-Date) - $t0).TotalSeconds -lt 45) { $fl = Get-FlyLine; if ($fl) { break }; Start-Sleep -Milliseconds 500 }
-    $log = Read-Shared $DcsLog
-    $said = @(($log -split "`n") | Select-String 'DcsQvCull \(Main\): rig autostart: ' | ForEach-Object { ($_.Line -replace '^.*rig autostart: ', '').Trim() })
-    $Rec.autostartLog = $said
-    if ($fl) {
-      $now = Get-Date; $flyAt = $(if ($fl.At -le $now -and $fl.At -ge [datetime]$Rec.started) { $fl.At } else { $now })
-      $Rec.flyConfirmedBy = $fl.By; Note "$($Rec.run) FLY by the rig autostart: confirmed in dcs.log by the $($fl.By) ($($fl.Aircraft) at $($flyAt.ToString('HH:mm:ss.fff'))); hook: $($said -join ' | ')"
-      if ($AtOrigin) {   # debug_simulate_tracking confines the mouse to the desktop's top-left 1000 x 1000 px: the window has to be there
-        $t1 = Get-Date; $c = $null; while (((Get-Date) - $t1).TotalSeconds -lt 40) { $c = Get-DcsClient; if ($c -and $c.W -ge 800) { break }; Start-Sleep 2 }
-        if ($c) {
-          $wr = New-Object Rig.W+RECT; [Rig.W]::GetWindowRect($c.H, [ref]$wr) | Out-Null
-          [Rig.W]::SetWindowPos($c.H, [IntPtr]::Zero, $wr.L - $c.X, $wr.T - $c.Y, 0, 0, 0x0001 -bor 0x0004 -bor 0x0010) | Out-Null   # NOSIZE | NOZORDER | NOACTIVATE
-          Start-Sleep 1; $c = Get-DcsClient; Note "$($Rec.run) DCS window moved: client origin now $($c.X),$($c.Y)"
-        }
-      }
-      $c = Get-DcsClient; if ($c) { $Rec.window = "$($c.W)x$($c.Ht)" }
-      $Rec.poseAtBriefing = 'not looked at (rig autostart)'; $Rec.flyMethod = 'autostart'
-      $Rec.fly = $flyAt.ToString('o'); $Rec.flyConfirmed = $true
-      return $flyAt
-    }
-    Note "$($Rec.run) rig autostart did not start the flight in 45 s ($(if ($said.Count) { 'hook: ' + ($said -join ' | ') } else { 'no autostart line in dcs.log: the deployed engine hook has none, or the engine is off' })): clicking FLY"
-    $Rec.flyMethod = 'click (autostart fallback)'
+  if (-not $fl) { throw "rig autostart did not start the flight in 45 s (hook: $($said -join ' | '))" }
+  $now = Get-Date; $flyAt = $(if ($fl.At -le $now -and $fl.At -ge [datetime]$Rec.started) { $fl.At } else { $now })
+  $Rec.flyConfirmedBy = $fl.By; Note "$($Rec.run) FLY by the rig autostart: confirmed in dcs.log by the $($fl.By) ($($fl.Aircraft) at $($flyAt.ToString('HH:mm:ss.fff'))); hook: $($said -join ' | ')"
+  if ($AtOrigin -and $AllowInput) {   # debug_simulate_tracking confines the mouse to the desktop's top-left 1000 x 1000 px: the window has to be there
+    $t1 = Get-Date; $c = $null; while (((Get-Date) - $t1).TotalSeconds -lt 40) { $c = Get-DcsClient; if ($c -and $c.W -ge 800) { break }; Start-Sleep 2 }
+    if ($c) { $wr = New-Object Rig.W+RECT; [Rig.W]::GetWindowRect($c.H, [ref]$wr) | Out-Null; [Rig.W]::SetWindowPos($c.H, [IntPtr]::Zero, $wr.L - $c.X, $wr.T - $c.Y, 0, 0, 0x0001 -bor 0x0004 -bor 0x0010) | Out-Null; Start-Sleep 1; $c = Get-DcsClient; Note "$($Rec.run) DCS window moved: client origin now $($c.X),$($c.Y)" }
   }
-  Click-Fly $RunDir $Rec $AtOrigin
+  $c = Get-DcsClient; if ($c) { $Rec.window = "$($c.W)x$($c.Ht)" }
+  $Rec.poseAtBriefing = 'not looked at (rig autostart)'
+  $Rec.fly = $flyAt.ToString('o'); $Rec.flyConfirmed = $true
+  $flyAt
 }
 # FLY: the real start is the line "WWT (Main): <aircraft>" in dcs.log (fly4.ps1; Pause/Break does not start these missions).
 function Click-Fly([string]$RunDir, $Rec, [bool]$AtOrigin) {
@@ -544,7 +594,10 @@ function Arm-Capture([string]$Tap, $A, $Twin) {
   $tmp = Join-Path $Tap 'arm.tmp'; [IO.File]::WriteAllText($tmp, ($lines -join "`n") + "`n", [Text.Encoding]::ASCII)
   Move-Item -LiteralPath $tmp -Destination (Join-Path $Tap 'arm.txt') -Force
 }
+# Schedule actions that take the focus or send keys / mouse input: only with -AllowInput or -ClickFly.
+$InputActions = 'recenter', 'mouse-path', 'cursor-stretch', 'cursor-fast', 'mouse-zone', 'focus', 'key', 'mouse-move', 'mouse-circle', 'gaze-alternate'
 function Do-Action([string]$RunDir, $Rec, $A) {
+  if ([string]$A.do -in $InputActions -and -not ($AllowInput -or $ClickFly)) { Note "$($Rec.run) skipped '$($A.do)': it sends input to DCS or takes the focus (fly with -AllowInput to run it)"; return }
   switch ([string]$A.do) {
     'capture' {
       $twin = $null
@@ -692,6 +745,7 @@ function Do-Action([string]$RunDir, $Rec, $A) {
   }
 }
 function Stop-RigFlight([string]$RunDir, $Rec, [string]$CopyDir) {
+  Stop-FgSampler
   if ($Rec.autostartFlag) { Remove-Item -LiteralPath $Rec.autostartFlag -Force -ErrorAction SilentlyContinue }   # disarmed before DCS closes
   $t0 = [datetime]$Rec.started
   $p = Get-Process DCS -ErrorAction SilentlyContinue | Select-Object -First 1
