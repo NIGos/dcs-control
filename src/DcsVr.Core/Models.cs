@@ -19,7 +19,9 @@ public enum NvidiaFlowPreset { Fast, Medium, Slow }
 /// <summary>How readily frame generation only when needed passes DCS's frames through ungenerated
 /// (<see cref="VrProfile.FrameGenPassThrough"/>; OFXR <c>cadence_preference</c> 0, 1, 2, fork patch 0070).</summary>
 public enum PassThroughPreference { Steady, Balanced, PreferRefresh }
-/// <summary>The DLSS preset of the Quad Views periphery (<see cref="VrProfile.PeripheryDlssPreset"/>); Off keeps DCS's.</summary>
+/// <summary>The DLSS preset of the Quad Views periphery (<see cref="VrProfile.PeripheryDlssPreset"/>); Off keeps DCS's.
+/// The app offers Off, E and F; K and M (offered until 0.7, slower than E: R122, E 0.138 ms against M 0.261 ms per view)
+/// stay so a saved one parses, and a profile that has one loads as E (JsonData).</summary>
 public enum PeripheryDlssPreset { Off, E, F, K, M }
 public enum FpsLimitMode { Preserve, RuntimeHeadroom, MatchRefresh, Custom }
 public enum IssueSeverity { Info, Warning, Error }
@@ -771,6 +773,8 @@ public static class JsonData
                 : document.Deserialize<VrProfile>(plain)) ?? throw new JsonException("The profile is empty.");
             if (document.RootElement.ValueKind == JsonValueKind.Object && !document.RootElement.TryGetProperty("foveaSource", out _))
                 profile = profile with { FoveaSource = FoveaSource.Profile };
+            // Periphery DLSS preset K or M (no longer offered: heavier than E, which the periphery is for) loads as E.
+            if (profile.PeripheryDlssPreset is PeripheryDlssPreset.K or PeripheryDlssPreset.M) profile = profile with { PeripheryDlssPreset = PeripheryDlssPreset.E };
             return MigrateCloseApps(profile, document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.TryGetProperty("freeVram", out _));
         }
         public override void Write(Utf8JsonWriter writer, VrProfile value, JsonSerializerOptions options) => JsonSerializer.Serialize(writer, value, plain);

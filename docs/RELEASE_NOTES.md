@@ -30,6 +30,7 @@
 
 **Fewer options.**
 - **Free unused DLSS memory** is gone from the Engine page: on DCS 2.9.31 it frees nothing. A profile that has it still loads.
+- **Periphery DLSS preset** offers Off, E and F. K and M were heavier than E, which the periphery is for; a profile saved with one uses E.
 
 **Fixes:**
 - The engine module's GPU-bound guard took a steady CPU- or GPU-bound frame rate that happened to sit near half or a third of the refresh rate for a frame-rate cap, and held back for seconds (GitHub #27, reported by @deamonesque).

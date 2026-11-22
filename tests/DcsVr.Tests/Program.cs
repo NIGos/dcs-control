@@ -2132,6 +2132,14 @@ Test("Free unused DLSS memory is gone (0.7): an older profile with it loads, and
         Require(!Module(p).Contains("ReleaseIdleSets"), "no ReleaseIdleSets: the module's default (0) applies");
     Require(!Module(engine).Contains("[DLSS]") && Module(qv with { PeripheryDlssPreset = PeripheryDlssPreset.E }).Split('\n').Count(l => l.Trim() == "[DLSS]") == 1, "[DLSS] only with the periphery preset, once");
 });
+Test("Periphery DLSS preset: Off, E and F are offered; a saved K or M loads as E", () =>
+{
+    foreach (var (saved, loaded) in new[] { ("Off", PeripheryDlssPreset.Off), ("E", PeripheryDlssPreset.E), ("F", PeripheryDlssPreset.F), ("K", PeripheryDlssPreset.E), ("M", PeripheryDlssPreset.E) })
+    {
+        var p = JsonData.Deserialize<VrProfile>("{\"quadViews\":\"QuadViewsFoveated\",\"engineOptimizations\":true,\"peripheryDlssPreset\":\"" + saved + "\"}")!;
+        Require(p.PeripheryDlssPreset == loaded && (loaded == PeripheryDlssPreset.Off || ConfigurationWriters.DcsQvCull(p).ReplaceLineEndings("\n").Contains("\nPeripheryPreset=" + loaded + "\n")), "periphery preset " + saved + " loads as " + loaded);
+    }
+});
 Test("Periphery DLSS preset: [DLSS] and the layer's [DlssPreset] only while it runs, the focus preset fallback, and off every file as before", () =>
 {
     var qv = new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.Fixed, EngineOptimizations = true };
