@@ -391,6 +391,13 @@ function Get-FlyLine {
 # within 45 s (the hook tries 3 times, a briefing-less paused mission after 15 s) the click path below takes over.
 function Start-Fly([string]$RunDir, $Rec, [bool]$AtOrigin) {
   $Rec.flyMethod = 'click'
+  # The hook logs "rig autostart: on" when DCS's GUI loads it, long before the mission: without that line the deployed
+  # hook has no autostart (an older app) or the engine is off, and the click comes at once.
+  if ($Rec.autostartFlag -and (Read-Shared $DcsLog) -notmatch 'rig autostart: on \(') {
+    Note "$($Rec.run) no 'rig autostart: on' line in dcs.log (the deployed engine hook has no autostart, or the engine is off): clicking FLY"
+    $Rec.flyMethod = 'click (no autostart in the hook)'
+    return (Click-Fly $RunDir $Rec $AtOrigin)
+  }
   if ($Rec.autostartFlag) {
     $t0 = Get-Date; $fl = $null
     while (((Get-Date) - $t0).TotalSeconds -lt 45) { $fl = Get-FlyLine; if ($fl) { break }; Start-Sleep -Milliseconds 500 }
