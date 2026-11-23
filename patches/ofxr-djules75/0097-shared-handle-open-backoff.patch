@@ -1,0 +1,279 @@
+Shared-handle open back-off (bugfix round 0.7). A block whose header was usable but whose handles failed to open
+(OpenSharedHandle, or a check of what it opened) was opened again on every acquire, so every frame, for as long as
+the producer's handles stayed unusable: up to one OpenSharedHandle per slot and fence of the mask, depth
+(0035), motion (0036) and HUD (0049) blocks a frame on the render path. Each block now tries a generation that
+failed again at most once a retry interval (retry_milliseconds, 1 s, as a missing block is looked for); a new
+generation is tried at once. Counted: open_failures and open_retry_waits per block (stats).
+Also the GPU stats sampler (0007) loads gdi32.dll from System32 only (LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32).
+
+--- a/include/xrfg/cockpit_mask.hpp
++++ b/include/xrfg/cockpit_mask.hpp
+@@ -700,6 +700,18 @@ struct CockpitMaskConsumerStats {
+     std::uint64_t hud_copies_made{};
+     std::uint64_t hud_copies_freed{};
+     std::uint64_t hud_copies_reused{};
++    // DCS Control (0097): shared-handle opens of a generation that failed
++    // (an OpenSharedHandle or a check of what it opened), and the acquires
++    // that did not try that generation again before its retry interval
++    // (retry_milliseconds) was over. Per block: mask, depth, motion, HUD.
++    std::uint64_t open_failures{};
++    std::uint64_t open_retry_waits{};
++    std::uint64_t depth_open_failures{};
++    std::uint64_t depth_open_retry_waits{};
++    std::uint64_t motion_open_failures{};
++    std::uint64_t motion_open_retry_waits{};
++    std::uint64_t hud_open_failures{};
++    std::uint64_t hud_open_retry_waits{};
+ };
+ 
+ struct CockpitMaskConsumerOptions {
+@@ -707,7 +719,9 @@ struct CockpitMaskConsumerOptions {
+     // DCSVR_PERCEPTION_SHM_SUFFIX, as the producer does.
+     bool suffix_from_environment{true};
+     std::wstring suffix;
+-    // How often to look for a missing block.
++    // How often to look for a missing block. DCS Control (0097): and to try
++    // again the handles of a generation that failed to open (a new
++    // generation is tried at once).
+     std::uint32_t retry_milliseconds{1000};
+     // The heartbeat's allowed age.
+     double heartbeat_milliseconds{500.0};
+--- a/src/d3d12/cockpit_mask.cpp
++++ b/src/d3d12/cockpit_mask.cpp
+@@ -155,6 +155,27 @@ template <typename Header>
+         header.adapterLuid == adapter_luid;
+ }
+ 
++// DCS Control (0097): a block's handles that failed to open are tried again
++// at most once a retry interval for the same generation. They were tried on
++// every acquire (every frame): up to five OpenSharedHandle calls a frame on
++// the render path for as long as the producer's handles stayed unusable. A
++// new generation is tried at once.
++struct OpenBackoff {
++    bool armed{};
++    std::uint32_t generation{};
++    std::uint64_t retry_at_ms{};
++
++    [[nodiscard]] bool waiting(std::uint32_t header_generation, std::uint64_t now_ms) const noexcept {
++        return armed && header_generation == generation && now_ms < retry_at_ms;
++    }
++    void failed(std::uint32_t header_generation, std::uint64_t now_ms, std::uint32_t interval_ms) noexcept {
++        armed = true;
++        generation = header_generation;
++        retry_at_ms = now_ms + interval_ms;
++    }
++    void clear() noexcept { armed = false; }
++};
++
+ }  // namespace
+ 
+ struct CockpitMaskConsumer::Impl {
+@@ -206,6 +227,7 @@ struct CockpitMaskConsumer::Impl {
+     std::optional<Opened> opened;
+     std::vector<Opened> retired;
+     std::uint32_t open_failure_logged_generation{};
++    OpenBackoff open_backoff; // DCS Control (0097)
+     std::vector<RingEntry> ring;
+     std::uint32_t next_ring{};
+     std::shared_ptr<D3D12CockpitMaskFrame> last_frame;
+@@ -266,6 +288,7 @@ struct CockpitMaskConsumer::Impl {
+     std::optional<DepthOpened> depth_opened;
+     std::vector<DepthOpened> depth_retired;
+     std::uint32_t depth_open_failure_logged_generation{};
++    OpenBackoff depth_open_backoff; // DCS Control (0097)
+ 
+     // DCS Control (0036): the motion block, opened only with
+     // options.dcs_motion and once the mask's block is.
+@@ -298,6 +321,7 @@ struct CockpitMaskConsumer::Impl {
+     std::optional<MotionOpened> motion_opened;
+     std::vector<MotionOpened> motion_retired;
+     std::uint32_t motion_open_failure_logged_generation{};
++    OpenBackoff motion_open_backoff; // DCS Control (0097)
+ 
+     // DCS Control (0049): the symbology block, opened only with
+     // options.hud_symbology and once the mask's block is.
+@@ -329,6 +353,7 @@ struct CockpitMaskConsumer::Impl {
+     std::optional<HudOpened> hud_opened;
+     std::vector<HudOpened> hud_retired;
+     std::uint32_t hud_open_failure_logged_generation{};
++    OpenBackoff hud_open_backoff; // DCS Control (0097)
+     // DCS Control (0054): the bytes of the frames' private symbology copies
+     // and of the producer atlases opened (result=22's owner total).
+     std::uint64_t hud_copy_bytes{};
+@@ -694,7 +719,21 @@ struct CockpitMaskConsumer::Impl {
+             return pairing;
+         }
+         if (!motion_opened || motion_opened->generation != header.generation) {
++            // DCS Control (0097): a generation that failed to open waits for
++            // its retry interval.
++            const std::uint64_t now_ms = GetTickCount64();
++            if (motion_open_backoff.waiting(header.generation, now_ms)) {
++                ++stats.motion_open_retry_waits;
++                pairing.result = CockpitMotionLookup::open_failed;
++                return pairing;
++            }
+             const CockpitMotionLookup opened_result = open_motion_handles(header);
++            if (opened_result == CockpitMotionLookup::open_failed) {
++                ++stats.motion_open_failures;
++                motion_open_backoff.failed(header.generation, now_ms, options.retry_milliseconds);
++            } else if (opened_result == CockpitMotionLookup::paired) {
++                motion_open_backoff.clear();
++            }
+             if (opened_result != CockpitMotionLookup::paired) {
+                 pairing.result = opened_result;
+                 return pairing;
+@@ -1058,7 +1097,21 @@ struct CockpitMaskConsumer::Impl {
+             return pairing;
+         }
+         if (!hud_opened || hud_opened->generation != header.generation) {
++            // DCS Control (0097): a generation that failed to open waits for
++            // its retry interval.
++            const std::uint64_t now_ms = GetTickCount64();
++            if (hud_open_backoff.waiting(header.generation, now_ms)) {
++                ++stats.hud_open_retry_waits;
++                pairing.result = CockpitHudLookup::open_failed;
++                return pairing;
++            }
+             const CockpitHudLookup opened_result = open_hud_handles(header);
++            if (opened_result == CockpitHudLookup::open_failed) {
++                ++stats.hud_open_failures;
++                hud_open_backoff.failed(header.generation, now_ms, options.retry_milliseconds);
++            } else if (opened_result == CockpitHudLookup::paired) {
++                hud_open_backoff.clear();
++            }
+             if (opened_result != CockpitHudLookup::paired) {
+                 pairing.result = opened_result;
+                 return pairing;
+@@ -1375,7 +1428,21 @@ struct CockpitMaskConsumer::Impl {
+             return pairing;
+         }
+         if (!depth_opened || depth_opened->generation != header.generation) {
++            // DCS Control (0097): a generation that failed to open waits for
++            // its retry interval.
++            const std::uint64_t now_ms = GetTickCount64();
++            if (depth_open_backoff.waiting(header.generation, now_ms)) {
++                ++stats.depth_open_retry_waits;
++                pairing.result = CockpitDepthLookup::open_failed;
++                return pairing;
++            }
+             const CockpitDepthLookup opened_result = open_depth_handles(header);
++            if (opened_result == CockpitDepthLookup::open_failed) {
++                ++stats.depth_open_failures;
++                depth_open_backoff.failed(header.generation, now_ms, options.retry_milliseconds);
++            } else if (opened_result == CockpitDepthLookup::paired) {
++                depth_open_backoff.clear();
++            }
+             if (opened_result != CockpitDepthLookup::paired) {
+                 pairing.result = opened_result;
+                 return pairing;
+@@ -1829,7 +1896,19 @@ struct CockpitMaskConsumer::Impl {
+         last_usable_ms = now_ms;
+         stats.generation = header.generation;
+         if (!opened || opened->generation != header.generation) {
++            // DCS Control (0097): a generation that failed to open waits for
++            // its retry interval.
++            if (open_backoff.waiting(header.generation, now_ms)) {
++                ++stats.open_retry_waits;
++                return CockpitMaskLookup::open_failed;
++            }
+             const CockpitMaskLookup opened_result = open_handles(header);
++            if (opened_result == CockpitMaskLookup::open_failed) {
++                ++stats.open_failures;
++                open_backoff.failed(header.generation, now_ms, options.retry_milliseconds);
++            } else if (opened_result == CockpitMaskLookup::paired) {
++                open_backoff.clear();
++            }
+             if (opened_result != CockpitMaskLookup::paired) {
+                 return opened_result;
+             }
+--- a/src/layer/gpu_stats_sampler.cpp
++++ b/src/layer/gpu_stats_sampler.cpp
+@@ -79,7 +79,7 @@ struct GpuStatsSampler::Impl {
+     void initialize() noexcept {
+         HMODULE gdi = GetModuleHandleW(L"gdi32.dll");
+         if (gdi == nullptr) {
+-            gdi = LoadLibraryW(L"gdi32.dll");
++            gdi = LoadLibraryExW(L"gdi32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+         }
+         if (gdi != nullptr) {
+             query = reinterpret_cast<QueryStatistics>(
+--- a/tests/cockpit_mask_tests.cpp
++++ b/tests/cockpit_mask_tests.cpp
+@@ -789,6 +789,69 @@ void test_missing_block_retries_once_a_second(Gpu& gpu) {
+     std::cout << "cockpit mask: a missing block is looked for once a second\n";
+ }
+ 
++// DCS Control (0097): handles that fail to open are tried again at most once
++// a retry interval for the same generation (they were tried every frame); a
++// new generation is tried at once. The mask's block and the depth companion's.
++void test_open_failure_backs_off(Gpu& gpu) {
++    constexpr std::uintptr_t bogus = 0x7FFFFFFCU; // no handle of this process
++    const std::wstring suffix = test_suffix(L"openbackoff");
++    FakeProducer producer(gpu, suffix);
++    auto options = test_options(suffix);
++    options.retry_milliseconds = 1000;
++    {
++        xrfg::CockpitMaskConsumer consumer;
++        require_hresult(consumer.initialize(gpu.device.Get(), {}, options), "consumer initialize");
++        const std::uintptr_t good = producer.header_.textureHandle[0];
++        producer.header_.textureHandle[0] = bogus;
++        std::uint64_t seq = producer.commit(100, 255);
++        producer.signal(seq);
++        require(consumer.acquire(100) == nullptr && consumer.stats().last == xrfg::CockpitMaskLookup::open_failed &&
++                consumer.stats().open_failures == 1 && consumer.stats().open_retry_waits == 0,
++            "open backoff: the first open of a bad handle fails");
++        for (int frame = 0; frame < 5; ++frame) {
++            producer.publish();
++            require(consumer.acquire(100) == nullptr && consumer.stats().last == xrfg::CockpitMaskLookup::open_failed,
++                "open backoff: the generation stays without masks");
++        }
++        require(consumer.stats().open_failures == 1 && consumer.stats().open_retry_waits == 5,
++            "open backoff: not tried again within the retry interval");
++        Sleep(1100);
++        producer.publish();
++        require(consumer.acquire(100) == nullptr && consumer.stats().open_failures == 2,
++            "open backoff: tried again once the interval is over");
++        producer.header_.textureHandle[0] = good;
++        producer.make_resources(); // a new generation
++        seq = producer.commit(200, 255);
++        producer.signal(seq);
++        auto frame = consumer.acquire(200);
++        require(frame != nullptr && consumer.stats().open_failures == 2 && consumer.stats().generations_opened == 1,
++            "open backoff: a new generation is tried at once, and pairs");
++        gpu.wait(frame->ready_fence.Get(), frame->ready_value);
++    }
++    {
++        FakeProducer mask(gpu, suffix + L"_d");
++        FakeDepthProducer depth(gpu, suffix + L"_d", mask);
++        auto depth_options = test_options(suffix + L"_d");
++        depth_options.retry_milliseconds = 1000;
++        depth_options.cockpit_depth = true;
++        xrfg::CockpitMaskConsumer consumer;
++        require_hresult(consumer.initialize(gpu.device.Get(), {}, depth_options), "consumer initialize");
++        depth.header_.textureHandle[0] = bogus;
++        for (int frame = 0; frame < 4; ++frame) {
++            const std::uint64_t seq = mask.commit(300 + frame, 255);
++            depth.commit(mask);
++            mask.signal(seq);
++            auto got = consumer.acquire(300 + frame);
++            require(got != nullptr && !got->depth && consumer.stats().depth_last == xrfg::CockpitDepthLookup::open_failed,
++                "open backoff: the mask without depth while depth fails to open");
++            gpu.wait(got->ready_fence.Get(), got->ready_value);
++        }
++        require(consumer.stats().depth_open_failures == 1 && consumer.stats().depth_open_retry_waits == 3,
++            "open backoff: depth tried once within the retry interval");
++    }
++    std::cout << "cockpit mask: a failed open is tried again once a retry interval, a new generation at once\n";
++}
++
+ void test_pairing_gpu_wait_release_and_heartbeat(Gpu& gpu) {
+     const std::wstring suffix = test_suffix(L"pair");
+     FakeProducer producer(gpu, suffix);
+@@ -2374,6 +2437,7 @@ int main() {
+         test_foveated_cursor_positions(); // foveated layers, round 4
+         Gpu gpu;
+         test_missing_block_retries_once_a_second(gpu);
++        test_open_failure_backs_off(gpu); // DCS Control (0097)
+         test_pairing_gpu_wait_release_and_heartbeat(gpu);
+         test_heartbeat_is_throttled(gpu);
+         test_focus_views_and_counters(gpu); // DCS Control (0034)

@@ -1,0 +1,51 @@
+Far depth key beep (bugfix round 0.7): the beep thread the in-flight switch starts (0015) held no reference to
+the layer DLL. Beep blocks for up to ~230 ms; a loader unloading the layer meanwhile (session end, OpenXR loader
+teardown) would leave the thread running in freed code. The thread now takes a reference before it starts and drops
+it with FreeLibraryAndExitThread, as the pupil shift layer's beep() does.
+
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -2807,20 +2807,34 @@ namespace openxr_api_layer {
+                 }
+                 Log(fmt::format("DCSVR Far depth: switched {} by the key\n", m_dcsvrFarKeyOff ? "off" : "on"));
+                 const uintptr_t tone = m_dcsvrFarKeyOff ? (500u | (1u << 16)) : (1100u | (2u << 16));
+-                if (HANDLE thread = CreateThread(nullptr, 0, [](LPVOID parameter) -> DWORD {
+-                        const auto packed = reinterpret_cast<uintptr_t>(parameter);
+-                        for (uintptr_t i = 0; i < (packed >> 16); i++) {
+-                            if (i) Sleep(70);
+-                            Beep((DWORD)(packed & 0xFFFF), 80);
+-                        }
+-                        return 0;
+-                    }, reinterpret_cast<LPVOID>(tone), 0, nullptr)) {
+-                    CloseHandle(thread);
++                // The thread holds a reference to this DLL (taken here, dropped as it ends): the loader unloading the
++                // layer while it beeps can't remove its code first.
++                HMODULE self{};
++                if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&dcsvrBeepThread), &self)) {
++                    if (HANDLE thread = CreateThread(nullptr, 0, &dcsvrBeepThread, reinterpret_cast<LPVOID>(tone), 0, nullptr)) {
++                        CloseHandle(thread);
++                    } else {
++                        FreeLibrary(self);
++                    }
+                 }
+             }
+             m_dcsvrFarKeyDown = down;
+         }
+ 
++        // DCSVR Far depth: the key's beeps, frequency in the low 16 bits, the count above. Ends by dropping the DLL
++        // reference dcsvrFarDepthKey took for it.
++        static DWORD WINAPI dcsvrBeepThread(LPVOID parameter) {
++            const auto packed = reinterpret_cast<uintptr_t>(parameter);
++            for (uintptr_t i = 0; i < (packed >> 16); i++) {
++                if (i) Sleep(70);
++                Beep((DWORD)(packed & 0xFFFF), 80);
++            }
++            HMODULE module{};
++            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                               reinterpret_cast<LPCWSTR>(&dcsvrBeepThread), &module);
++            FreeLibraryAndExitThread(module, 0);
++        }
++
+         // DCSVR Far depth: the extended panel status (DcsVr_QuadViewsDisparityStatus2), once per frame.
+         void dcsvrFarDepthStatus(bool warped, bool depthValid) {
+             const auto now = std::chrono::steady_clock::now();

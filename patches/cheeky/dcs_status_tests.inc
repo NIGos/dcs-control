@@ -35,9 +35,49 @@ void dcs_session_settings_test() {
     require(overrides.empty(), "Defaults that leave the key unchanged still end the override");
 }
 
+// Log rotation (dcs_log_roll.hpp): the .prev name, the size threshold, an older .prev replaced, the crash log header.
+void dcs_log_roll_test() {
+    using namespace cheeky::dcsvr;
+    wchar_t out[64]{};
+    require(dcs_prev_log_path(L"C:\\t\\CheekyFoveatedDLSS_crash.log", out, std::size(out)) &&
+        std::wstring(out) == L"C:\\t\\CheekyFoveatedDLSS_crash.prev.log", "Log roll: name.log -> name.prev.log");
+    require(dcs_prev_log_path(L"C:\\t\\x", out, std::size(out)) && std::wstring(out) == L"C:\\t\\x.prev.log",
+        "Log roll: a name without .log gets .prev.log");
+    wchar_t tiny[8]{};
+    require(!dcs_prev_log_path(L"C:\\t\\x.log", tiny, std::size(tiny)), "Log roll: a path that does not fit is refused");
+    wchar_t temp[MAX_PATH]{};
+    require(GetTempPathW(MAX_PATH, temp) > 0U, "Log roll: temp folder");
+    const auto dir = std::filesystem::path(temp) / (L"dcs-log-roll-" + std::to_wstring(GetCurrentProcessId()));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const auto log = dir / L"CheekyFoveatedDLSS-Standalone.log", prev = dir / L"CheekyFoveatedDLSS-Standalone.prev.log";
+    const auto write = [](const std::filesystem::path& path, std::size_t bytes, char fill) {
+        std::ofstream(path, std::ios::binary | std::ios::trunc) << std::string(bytes, fill);
+    };
+    require(!dcs_roll_log_above(log.c_str(), 16U), "Log roll: a missing log is not rolled");
+    write(log, 15U, 'a');
+    require(!dcs_roll_log_above(log.c_str(), 16U) && std::filesystem::file_size(log) == 15U && !std::filesystem::exists(prev),
+        "Log roll: a log below the limit stays");
+    write(log, 16U, 'b');
+    write(prev, 3U, 'z');
+    require(dcs_roll_log_above(log.c_str(), 16U) && !std::filesystem::exists(log) && std::filesystem::file_size(prev) == 16U,
+        "Log roll: a log at the limit replaces the older .prev.log");
+    std::filesystem::remove_all(dir);
+    SYSTEMTIME time{};
+    time.wYear = 2026, time.wMonth = 11, time.wDay = 23, time.wHour = 9, time.wMinute = 5, time.wSecond = 7, time.wMilliseconds = 42;
+    char header[256]{};
+    const auto length = dcs_crash_log_header(header, sizeof(header), time, 4242U, L"E:\\Games\\DCS World\\bin\\DCS.exe");
+    require(length > 0U && std::string(header, length) == "=== 2026-11-23 09:05:07.042 process 4242 (DCS.exe) ===\r\n",
+        "Log roll: crash log header has time, pid and exe name");
+    char tight[16]{};
+    require(dcs_crash_log_header(tight, sizeof(tight), time, 1U, nullptr) == 0U, "Log roll: a header that does not fit is dropped");
+    require(dcs_crash_log_roll_bytes == (1ULL << 20) && dcs_runtime_log_roll_bytes == (8ULL << 20), "Log roll: limits 1 MiB / 8 MiB");
+}
+
 void dcs_status_block_test() {
     using namespace cheeky::dcsvr;
     dcs_session_settings_test();
+    dcs_log_roll_test();
     // ABI shared with the OFXR fork patch (include/xrfg/dcsvr_status.hpp pins the same values).
     require(sizeof(DcsVrStatusV1) == 128U && offsetof(DcsVrStatusV1, reason) == 72U && status_magic == 0x53525644U,
         "Status block layout changed");
