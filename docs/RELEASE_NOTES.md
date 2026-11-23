@@ -80,6 +80,9 @@ There was no 0.6.7: what it was going to bring is in this version too, under **A
 - Other hardware: CPU Boost no longer lists headset services as moving on CPUs too small to move them, and Move VR runtime is for the Pimax route only; DLSS 5 says when NVIDIA's original file cannot run on an RTX 20-40 card; Read settings from this PC tells Index, Varjo, Reverb and Meta users to choose Optimizations only.
 - One long preset name copied in by hand no longer breaks the app's pages. End DCS only ever looks at DCS in your own Windows session.
 - DLSS 5's crash and runtime logs are rotated, so a real crash is still logged after a long time; DCS Control's modules load Windows DLLs only from System32.
+- The terrain prefetch fix's spin cap now also works when the engine's pass timing is not running (for example on AMD graphics without D3D11 command lists).
+- The Checks "DCS version" line names only parts that do not recognise this DCS build; a safety check that turned a part off shows on the Engine page only.
+- After going back and forth with 0.6.6, an outdated copy of the record of originals is no longer used. The diagnostic package includes DLSS 5's crash log. End DCS no longer reports a failure because another Windows user runs DCS.
 
 # 0.6.6 preview
 
