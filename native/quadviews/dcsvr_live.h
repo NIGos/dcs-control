@@ -57,6 +57,7 @@ namespace dcsvr::live {
 //   dcsvr_far_depth_toggle     m_dcsvrFarKeyVk, m_dcsvrFarKeyMods
 //   dcsvr_two_layers_opaque_ramp m_dcsvrOpaqueRamp      opaque focus: the alpha ramp's width in the focus radius, 0: no
 //                              blending (0034; read by the focus pass and the submission of every frame)
+//   dcsvr_focus_fade_in        m_dcsvrFocusFadeIn        0036: frames a newly covered border strip takes to full, 0 off
 inline constexpr const char* Keys[] = {"sharpen_focus_view",      "smoothen_focus_view_edges", "dcsvr_sharpen_taper",
                                        "dcsvr_periphery_sharpen", "dcsvr_temporal",            "dcsvr_temporal_tau_ms",
                                        "dcsvr_temporal_ramp_deg", "dcsvr_temporal_clip",       "dcsvr_saccade_widening",
@@ -65,7 +66,7 @@ inline constexpr const char* Keys[] = {"sharpen_focus_view",      "smoothen_focu
                                        "dcsvr_gaze_deadzone",     "dcsvr_lost_ease_ms",        "dcsvr_far_depth_preset",
                                        "dcsvr_far_depth_world_ipd", "dcsvr_far_depth_z0_m",    "dcsvr_far_depth_gamma",
                                        "dcsvr_far_depth_toggle",  "dcsvr_two_layers_opaque_ramp",
-                                       "dcsvr_temporal_saccade_reset", "dcsvr_gaze_glide_ms"};
+                                       "dcsvr_temporal_saccade_reset", "dcsvr_gaze_glide_ms", "dcsvr_focus_fade_in"};
 
 inline bool IsLiveKey(const std::string& name) {
     for (const char* key : Keys) {
@@ -99,6 +100,8 @@ struct Values {
     int farKeyMods{0};
     // Opaque focus's alpha ramp (0034): the width in the focus radius, 0 none (alpha 1, no blending).
     float opaqueRamp{0.4f};
+    // 0036 (fovea temporal): rendered frames a newly covered border strip of the focus takes to full, 0 off (0-3).
+    float focusFadeIn{0.f};
 };
 
 // dcsvr_two_layers_opaque_ramp's clamp: 0 or less is 0 (no ramp, no blending); otherwise 0.02 to 0.95 of the radius.
@@ -130,7 +133,8 @@ inline bool operator==(const Values& a, const Values& b) {
            a.peripherySharpen == b.peripherySharpen && a.temporal == b.temporal && a.tauMs == b.tauMs &&
            a.rampDeg == b.rampDeg && a.clip == b.clip && a.temporalSaccadeReset == b.temporalSaccadeReset &&
            SameGaze(a.gaze, b.gaze) && SameFarCurve(a, b) &&
-           a.farKeyVk == b.farKeyVk && a.farKeyMods == b.farKeyMods && a.opaqueRamp == b.opaqueRamp;
+           a.farKeyVk == b.farKeyVk && a.farKeyMods == b.farKeyMods && a.opaqueRamp == b.opaqueRamp &&
+           a.focusFadeIn == b.focusFadeIn;
 }
 
 // Far depth's curve for a parse's values (dcsvr_depthwarp.h DisparitySettings, any struct with these members and
@@ -279,6 +283,9 @@ inline bool ApplyKey(const std::string& name, const std::string& value, Values& 
     } else if (name == "dcsvr_two_layers_opaque_ramp") {
         if (!ToFloat(value, f)) return false;
         io.opaqueRamp = OpaqueRamp(f);
+    } else if (name == "dcsvr_focus_fade_in") {
+        if (!ToFloat(value, f)) return false;
+        io.focusFadeIn = std::clamp(f, 0.f, 3.f);
     } else {
         return false;
     }
@@ -408,6 +415,7 @@ inline std::string Changes(const Values& before, const Values& after) {
     add("dcsvr_far_depth_toggle", before.farKeyVk * 8 + before.farKeyMods, after.farKeyVk * 8 + after.farKeyMods,
         "%.0f");
     add("dcsvr_two_layers_opaque_ramp", before.opaqueRamp, after.opaqueRamp, "%.2f");
+    add("dcsvr_focus_fade_in", before.focusFadeIn, after.focusFadeIn, "%.1f");
     return out;
 }
 

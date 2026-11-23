@@ -315,6 +315,12 @@ int main() {
                   !dcsvr::live::SameGaze(Values{}.gaze, glide.gaze) &&
                   dcsvr::live::Changes(Values{}, glide) == "dcsvr_gaze_glide_ms 0 -> 40",
               "fovea temporal: each is a reload's change and named in the log; the glide is a gaze setting");
+        Values fade, fadeHigh;
+        const bool fadeParsed = dcsvr::live::ApplyKey("dcsvr_focus_fade_in", "2", fade);
+        dcsvr::live::ApplyKey("dcsvr_focus_fade_in", "9", fadeHigh);
+        Check(Values{}.focusFadeIn == 0.f && fadeParsed && Near(fade.focusFadeIn, 2.f) && Near(fadeHigh.focusFadeIn, 3.f) &&
+                  !(fade == Values{}) && dcsvr::live::Changes(Values{}, fade) == "dcsvr_focus_fade_in 0.0 -> 2.0",
+              "fovea temporal: focus fade-in off by default, 0-3 frames, a reload's change named in the log");
     }
 
     DeleteFileW(layerFile.c_str());

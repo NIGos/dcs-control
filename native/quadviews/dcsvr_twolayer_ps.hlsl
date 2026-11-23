@@ -94,6 +94,10 @@ cbuffer ConstantBuffer : register(b0) {
                       // z the focus alpha convention (0 unpremultiplied, 1 premultiplied, 2 premultiplied, sRGB target)
                       // w 1: opaque focus (0024), the composed result written by the focus pass
     float4 dcsvrBand; // opaque focus: focus uv -> periphery uv, xy scale, zw offset
+    float4 dcsvrFade; // focus fade-in (dcsvr_focus_fade_in, opaque focus): x rendered frames to full (0 off), y z the
+                      // radius it starts and is full at, w how many earlier frames' areas below hold
+    float4 dcsvrFadeRect[3]; // those frames' focus areas in this focus view's NDC (nearest first): xy centre, zw 1 / half
+                             // size (dcsvr_perception.h DcsvrFocusFadeLimit, FocusFadeHistory)
 };
 
 SamplerState sourceSampler : register(s0);
@@ -102,6 +106,7 @@ Texture2D plainFocus : register(t1);
 Texture2D<float2> dcsvrDisparityField : register(t2);
 Texture2D bandPeriphery : register(t3); // opaque focus: the periphery image, for the focus pass
 #include "dcsvr_depthwarp_ps.hlsli"
+#include "dcsvr_perception.h"
 
 // Opaque focus (0031): the default alpha ramp, in the focus view's radius (1 at its edge): the outer 0.4 of it, 390
 // texels of 1928 (the composition's band at edge blend 0.2). Since 0034 the layer sets it (dcsvrEdge.w = 1 + width,
@@ -227,6 +232,21 @@ float4 main(in float4 position : SV_POSITION, in float2 texcoord : PROJ_COORD0, 
         // 0034: the ramp's width is dcsvrEdge.w - 1 (dcsvr_two_layers_opaque_ramp, default kDcsvrOpaqueRamp), no longer
         // widened to the composition's band; 0: alpha 1 everywhere, and the layer goes out without blending (0024).
         const float ramp = dcsvrEdge.w - 1;
+        // Focus fade-in (fovea temporal): outside the inner part of the area, a direction the focus area did not cover
+        // in the last rendered frames gains at most 1 / dcsvrFade.x of the fade per frame (the composed colour shows the
+        // periphery for the rest), so a newly covered strip fades in while DLSS builds its history there.
+        [branch] if (dcsvrFade.x > 0 && dcsvrFade.w > 0 && focusViewShape >= 1 && alpha > 0) {
+            const float2 p = texcoord * float2(2, -2) + float2(-1, 1);
+            const float width = clamp(2 * smoothingArea, 0.01, 0.95);
+            float limited = alpha;
+            [unroll] for (int i = 0; i < 3; ++i) {
+                [branch] if (i < dcsvrFade.w) {
+                    limited = DcsvrFocusFadeLimit(limited, p.x, p.y, dcsvrFadeRect[i].x, dcsvrFadeRect[i].y, dcsvrFadeRect[i].z,
+                                                  dcsvrFadeRect[i].w, focusViewShape, width, (i + 1) / dcsvrFade.x);
+                }
+            }
+            alpha = DcsvrFocusFadeIn(alpha, limited, ownRadius, dcsvrFade.y, dcsvrFade.z);
+        }
         const float layerAlpha = ramp <= 0 ? 1 : round((all(own < 1) ? 1 - smoothstep(1 - ramp, 1, ownRadius) : 0) * 255) / 255;
         float4 periphery = 0;
         [branch] if (dcsvrDebug.x == 0 && (alpha < 1 || layerAlpha < 1)) {

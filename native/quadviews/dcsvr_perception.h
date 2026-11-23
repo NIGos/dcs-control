@@ -96,6 +96,33 @@ DCSVR_FN float DcsvrClipConfidence(float clipDistance, float sigma, float k) {
     return 1.0f - DcsvrSmoothstep(0.0f, max(k, 0.001f), clipDistance / (sigma + 0.002f));
 }
 
+// Focus fade-in (dcsvr_focus_fade_in, fovea temporal; dcsvr_twolayer_ps.hlsl's opaque focus pass). The composition's
+// fade at a point (x, y) of a focus view's NDC: 1 inside, falling to 0 at the edge of the shape (superellipse of
+// exponent shape >= 1, or the rectangle below 1) over the outer `width` of the radius, 0 outside the view.
+DCSVR_FN float DcsvrFocusFadeAt(float x, float y, float shape, float width) {
+    const float ax = abs(x), ay = abs(y);
+    if (!(ax < 1.0f && ay < 1.0f)) return 0.0f;
+    const float r = shape >= 1.0f ? pow(pow(ax, shape) + pow(ay, shape), 1.0f / shape) : max(ax, ay);
+    return 1.0f - DcsvrSmoothstep(1.0f - width, 1.0f, r);
+}
+
+// One earlier frame's limit on the fade at this frame's NDC point (x, y): that frame's focus area is the rectangle of
+// centre (cx, cy) and inverse half size (ihx, ihy) in this frame's focus NDC; its fade at the same direction plus
+// `rise` (the share the fade may gain over the frames since then). A part of the focus area newly covered after a move
+// (no focus history in DLSS yet: aliased, settling over several frames; and a step from periphery to focus resolution)
+// so fades in over a few rendered frames instead of appearing in one.
+DCSVR_FN float DcsvrFocusFadeLimit(float limit, float x, float y, float cx, float cy, float ihx, float ihy, float shape,
+                                   float width, float rise) {
+    return min(limit, DcsvrFocusFadeAt((x - cx) * ihx, (y - cy) * ihy, shape, width) + rise);
+}
+
+// The fade shown: the limited one from the radius innerStart outwards (full from innerEnd), the composition's own
+// inside it, so the eye landing in the middle of the focus area after a saccade sees it sharp at once.
+DCSVR_FN float DcsvrFocusFadeIn(float fade, float limited, float radius, float innerStart, float innerEnd) {
+    const float w = DcsvrSmoothstep(innerStart, max(innerEnd, innerStart + 0.001f), radius);
+    return fade + (min(fade, limited) - fade) * w;
+}
+
 #ifdef __cplusplus
 
 // ---- C++ only ------------------------------------------------------------------------------------------------------
@@ -510,6 +537,64 @@ class TemporalController {
     TemporalReset m_reset{TemporalReset::Inactive};
     bool m_valid{false};
     TemporalStats m_stats{};
+};
+
+// Focus fade-in: per eye, the focus field of the last rendered frames (tangents), for the rectangles of the fade-in
+// limit. Push once per eye and frame (after its focus pass; the same display time again replaces it); Rects gives the
+// frames before `time` in the NDC of the focus field `current`, nearest first, within 200 ms (a longer gap: none).
+class FocusFadeHistory {
+  public:
+    static constexpr int Depth = 3;
+    static constexpr int64_t MaxGapNs = 200'000'000;
+    void Push(int eye, int64_t time, const TanFov& focus) {
+        if (eye < 0 || eye > 1) return;
+        Eye& e = m_eyes[eye];
+        if (e.count && e.time[0] == time) {
+            e.fov[0] = focus;
+            return;
+        }
+        if (e.count && (time < e.time[0] || time - e.time[0] > MaxGapNs)) e.count = 0;
+        for (int i = Depth - 1; i > 0; --i) {
+            e.time[i] = e.time[i - 1];
+            e.fov[i] = e.fov[i - 1];
+        }
+        e.time[0] = time;
+        e.fov[0] = focus;
+        e.count = std::min(e.count + 1, Depth);
+    }
+    // out[i]: centre x, y and inverse half size x, y (DcsvrFocusFadeLimit's cx, cy, ihx, ihy); rise[i] = (i + 1) /
+    // frames is the caller's. Returns how many.
+    int Rects(int eye, int64_t time, const TanFov& current, float out[Depth][4]) const {
+        if (eye < 0 || eye > 1) return 0;
+        const Eye& e = m_eyes[eye];
+        const float w = current.right - current.left, h = current.up - current.down;
+        if (!(w > 0.f) || !(h > 0.f)) return 0;
+        int n = 0;
+        int64_t newer = time;
+        for (int i = 0; i < e.count && n < Depth; ++i) {
+            if (e.time[i] >= time) continue;  // this frame itself (pushed already), or a later one
+            if (newer - e.time[i] > MaxGapNs) break;
+            const TanFov& f = e.fov[i];
+            const float hx = (f.right - f.left) / w, hy = (f.up - f.down) / h;
+            if (!(hx > 0.f) || !(hy > 0.f)) break;
+            out[n][0] = ((f.left + f.right) - (current.left + current.right)) / w;
+            out[n][1] = ((f.up + f.down) - (current.up + current.down)) / h;
+            out[n][2] = 1.f / hx;
+            out[n][3] = 1.f / hy;
+            newer = e.time[i];
+            ++n;
+        }
+        return n;
+    }
+    void Reset() { m_eyes[0].count = m_eyes[1].count = 0; }
+
+  private:
+    struct Eye {
+        int64_t time[Depth]{};
+        TanFov fov[Depth]{};
+        int count{0};
+    };
+    Eye m_eyes[2]{};
 };
 
 } // namespace dcsvr

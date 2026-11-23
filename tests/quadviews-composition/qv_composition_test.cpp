@@ -556,9 +556,11 @@ int main(int argc, char** argv) {
             check(device->CreateTexture2D(&desc, nullptr, &srgb_staging), "srgb staging");
             ComPtr<ID3D11RenderTargetView> srgb_rtv;
             check(device->CreateRenderTargetView(srgb_target.Get(), nullptr, &srgb_rtv), "srgb rtv");
-            const auto layer_constants = buffer(128);
-            struct TwoLayer { float smoothing, shape, layer, encode; float warp[4]; float reuse[12]; float debug[4]; float edge[4]; float band[4]; };
-            static_assert(sizeof(TwoLayer) == 128);
+            const auto layer_constants = buffer(192);
+            // 0036: fade (the focus fade-in) and fadeRect (the earlier frames' areas), 0 everywhere else: off.
+            struct TwoLayer { float smoothing, shape, layer, encode; float warp[4]; float reuse[12]; float debug[4]; float edge[4]; float band[4];
+                              float fade[4]; float fadeRect[12]; };
+            static_assert(sizeof(TwoLayer) == 192);
             const auto run_layer = [&](const TwoLayer& k, ID3D11PixelShader* shader, bool srgb = false) {
                 const float identity[16]{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
                 context->UpdateSubresource(vs_constants.Get(), 0, nullptr, identity, 0, 0);
@@ -1146,6 +1148,56 @@ int main(int argc, char** argv) {
                 const bool narrow_ok = narrow_cases == 8 && none_cases == 8 && narrow_alpha_wrong == 0 && narrow_border_opaque == 0 &&
                                        narrow_opaque > 1000000U && narrow_worst_off <= 1 && narrow_ramp > 10000U && narrow_worst_blend <= 2.0 &&
                                        none_alpha_not_one == 0 && none_worst <= 1;
+                // 0036 focus fade-in (fovea temporal), the pass's wiring: round shape, edge blend 0.2, the 0.4 ramp. The
+                // area of the frame before 0.6 NDC to the left: a strip on the right that it did not cover. With 2
+                // frames to full the composed colour changes there (more periphery), never inside 0.4 of the radius,
+                // never where the earlier area covered too, nowhere with the area unmoved or the key off, and the stored
+                // alpha (the ramp by the pixel's own place) never.
+                bool fade_ok = false;
+                {
+                    TwoLayer o{};
+                    o.smoothing = 0.2f;
+                    o.shape = 2.f;
+                    o.layer = 1.f;
+                    o.edge[3] = 1.4f;
+                    o.band[0] = o.band[1] = area;
+                    o.band[2] = (1.f - area) * 0.5f;
+                    o.band[3] = (1.f - area) * 0.5f;
+                    const auto base = run_opaque(o, focus_srv.Get(), focus_srv.Get());
+                    TwoLayer moved = o;
+                    moved.fade[0] = 2.f, moved.fade[1] = 0.4f, moved.fade[2] = 0.6f, moved.fade[3] = 1.f;
+                    moved.fadeRect[0] = -0.6f, moved.fadeRect[1] = 0.f, moved.fadeRect[2] = 1.f, moved.fadeRect[3] = 1.f;
+                    TwoLayer still = moved;
+                    still.fadeRect[0] = 0.f;
+                    TwoLayer off = moved;
+                    off.fade[0] = 0.f;
+                    const auto faded = run_opaque(moved, focus_srv.Get(), focus_srv.Get());
+                    const auto unmoved = run_opaque(still, focus_srv.Get(), focus_srv.Get());
+                    const auto keyOff = run_opaque(off, focus_srv.Get(), focus_srv.Get());
+                    std::size_t inner_changed = 0, covered_changed = 0, strip = 0, strip_changed = 0, alpha_changed = 0, unmoved_changed = 0, off_changed = 0;
+                    for (UINT y = 0; y < kFocus; ++y)
+                        for (UINT x = 0; x < kFocus; ++x) {
+                            const std::size_t p = static_cast<std::size_t>(y) * kFocus + x;
+                            const float nx = 2.f * (x + 0.5f) / kFocus - 1.f, ny = 1.f - 2.f * (y + 0.5f) / kFocus;
+                            const float r = std::sqrt(nx * nx + ny * ny);
+                            const float px = nx + 0.6f, pr = std::sqrt(px * px + ny * ny);  // in the earlier area's NDC
+                            const bool changed = (faded[p] & 0xFFFFFFU) != (base[p] & 0xFFFFFFU);
+                            if ((faded[p] >> 24) != (base[p] >> 24)) ++alpha_changed;
+                            if (unmoved[p] != base[p]) ++unmoved_changed;
+                            if (keyOff[p] != base[p]) ++off_changed;
+                            if (r < 0.4f && changed) ++inner_changed;
+                            if (pr < 0.55f && changed) ++covered_changed;  // the earlier area's fade 1 there: no limit
+                            if (r > 0.6f && r < 0.75f && px > 1.05f && std::fabs(ny) < 0.3f) {
+                                ++strip;
+                                if (changed) ++strip_changed;
+                            }
+                        }
+                    std::printf("focus fade-in (0036): strip of %zu texels newly covered, %zu changed; changed inside 0.4 of the radius %zu, "
+                                "where the earlier area covered %zu; stored alpha changed %zu; unmoved area %zu, key off %zu%s",
+                        strip, strip_changed, inner_changed, covered_changed, alpha_changed, unmoved_changed, off_changed, "\n");
+                    fade_ok = strip > 1000U && strip_changed * 10 >= strip * 9 && inner_changed == 0 && covered_changed == 0 && alpha_changed == 0 &&
+                              unmoved_changed == 0 && off_changed == 0;
+                }
                 focus_area = 0.34f;
                 stereo_view = nullptr;
                 std::printf("opaque focus vs composition: %zu cases, %zu sharp pixels (%zu differing from mode 0, worst %d codes), %zu blended or periphery pixels, edge match off worst %d codes (%zu of %zu exact), on worst %d codes, alpha not 1 %zu%s",
@@ -1164,7 +1216,7 @@ int main(int argc, char** argv) {
                 opaque_ok = worst_off <= 1 && worst_edge <= 2 && alpha_not_one == 0 && worst_sharp <= 1 && sharp > 1000000U && blended > 1000000U &&
                             rim_alpha_wrong == 0 && border_opaque == 0 && rim_ramp > 10000U && worst_rim_blend <= 2.0 && band_ramp > 10000U &&
                             worst_band_blend <= 2.0 && worst_aberration <= 0.04 && rim_aberration > 0.3 && hard_aberration > 0.9 &&
-                            narrow_ok;
+                            narrow_ok && fade_ok;
                 // OFXR 0099: the single layer against the composition.
                 if (fold_available) {
                     const auto print = [](const char* name, const FoldResult& r) {

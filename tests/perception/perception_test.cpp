@@ -186,6 +186,38 @@ void MathChecks() {
         const auto& st = c.Stats();
         Check(st.gap == 1 && st.saccade == 1 && st.size == 1 && st.turn == 1 && st.other == 2, "statistics count each reason");
         {
+            // Focus fade-in (0036, fovea temporal): the history's areas in the current focus NDC, and the limit.
+            FocusFadeHistory h;
+            const TanFov now{-0.3f, 0.3f, 0.3f, -0.3f};
+            float rects[FocusFadeHistory::Depth][4]{};
+            Check(h.Rects(0, 1000, now, rects) == 0, "fade-in: no history, no areas");
+            h.Push(0, 1'000'000'000, {-0.45f, 0.15f, 0.3f, -0.3f});  // the area 0.15 tan to the left, frame before
+            h.Push(0, 1'022'000'000, now);                           // this frame, pushed already: skipped
+            const int n = h.Rects(0, 1'022'000'000, now, rects);
+            Check(n == 1 && Near(rects[0][0], -0.5f, 1e-5f) && Near(rects[0][1], 0.f, 1e-6f) && Near(rects[0][2], 1.f, 1e-5f) &&
+                      Near(rects[0][3], 1.f, 1e-5f),
+                  "fade-in: the frame before, 0.15 tan to the left, is centred at NDC -0.5 with the same size");
+            Check(h.Rects(1, 1'022'000'000, now, rects) == 0 && h.Rects(0, 1'300'000'000, now, rects) == 0,
+                  "fade-in: per eye; after a 200 ms gap no area");
+            // A point at NDC 0.7 right of centre was outside the earlier area (its NDC there 1.2): with 2 frames to
+            // full its fade may be at most 0.5 now; at NDC -0.3 (inside the inner part) nothing changes; at 0.7 with
+            // fade-in off (no areas) nothing changes.
+            const float shape = 2.f, width = 0.4f;
+            const float fadeOuter = DcsvrFocusFadeAt(0.7f, 0.f, shape, width);
+            const float limitedOuter = DcsvrFocusFadeLimit(fadeOuter, 0.7f, 0.f, rects[0][0], rects[0][1], rects[0][2], rects[0][3], shape, width, 0.5f);
+            const float shownOuter = DcsvrFocusFadeIn(fadeOuter, limitedOuter, 0.7f, 0.4f, 0.6f);
+            const float fadeInner = DcsvrFocusFadeAt(-0.3f, 0.f, shape, width);
+            const float shownInner = DcsvrFocusFadeIn(fadeInner,
+                DcsvrFocusFadeLimit(fadeInner, -0.3f, 0.f, rects[0][0], rects[0][1], rects[0][2], rects[0][3], shape, width, 0.5f), 0.3f, 0.4f, 0.6f);
+            Check(Near(fadeOuter, 0.84375f, 1e-4f) && Near(shownOuter, 0.5f, 1e-5f) && shownInner == fadeInner,
+                  "fade-in: a newly covered point outside the inner part rises at most 1/2 per frame, the inner part is kept");
+            const float again = DcsvrFocusFadeLimit(fadeOuter, 0.7f, 0.f, 0.f, 0.f, 1.f, 1.f, shape, width, 0.5f);
+            Check(again == fadeOuter, "fade-in: an area that did not move limits nothing");
+            Check(DcsvrFocusFadeAt(1.f, 0.f, shape, width) == 0.f && DcsvrFocusFadeAt(0.f, 0.f, shape, width) == 1.f &&
+                      Near(DcsvrFocusFadeAt(0.8f, 0.f, shape, width), 0.5f, 1e-5f),
+                  "fade-in: the composition's fade, 1 inside, 0.5 mid-band, 0 at the edge");
+        }
+        {
             // dcsvr_temporal_saccade_reset 0 (fovea temporal): the history is kept through saccades, every other reset
             // stays; the saccade frames are counted as kept.
             TemporalSettings keep = s;

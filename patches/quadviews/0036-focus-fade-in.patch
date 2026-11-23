@@ -1,0 +1,103 @@
+Focus fade-in (fovea temporal, after 0035; native/quadviews/dcsvr_twolayer_ps.hlsl, dcsvr_perception.h, dcsvr_live.h): new
+key dcsvr_focus_fade_in (live, settings.cfg, 0-3 rendered frames, default 0 = off). Opaque focus (dcsvr_two_layers_alpha=3)
+with a rounded focus area only. After the focus area moves, the part of it that the last rendered frames' areas did not
+cover has no focus history in DLSS yet (aliased, settling over several frames) and steps from periphery to focus
+resolution in one frame; on the border that showed as a flash after each landing. The focus pass now limits the
+composition's fade there to rise by at most 1 / frames per rendered frame from what each of the last three frames' areas
+gave the same direction (FocusFadeHistory: per eye, the focus fields of the frames before, within 200 ms), from 0.4 of
+the radius outwards (full at 0.6): the middle, where a saccade lands, is never held back. The stored alpha (the ramp by
+the pixel's own place) is unchanged; only the composed colour shows more periphery while the strip fades in. The
+constants grow by 64 bytes (dcsvrFade, dcsvrFadeRect[3], 192 in all). Log: "DCSVR focus fade-in: ..." once when on.
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -101,8 +101,12 @@ namespace openxr_api_layer {
+         alignas(4) float dcsvrEdge[4];
+         // DCSVR opaque focus (0024): focus uv -> periphery uv, xy scale, zw offset.
+         alignas(4) float dcsvrBand[4];
++        // 0036 focus fade-in: x frames to full (0 off), y z the radius it starts and is full at, w earlier areas held;
++        // those areas in this focus view's NDC, xy centre, zw 1 / half size.
++        alignas(4) float dcsvrFade[4];
++        alignas(4) float dcsvrFadeRect[3][4];
+     };
+-    static_assert(sizeof(DcsvrTwoLayerConstants) == 128, "DcsvrTwoLayerConstants must match dcsvr_twolayer_ps.hlsl's cbuffer");
++    static_assert(sizeof(DcsvrTwoLayerConstants) == 192, "DcsvrTwoLayerConstants must match dcsvr_twolayer_ps.hlsl's cbuffer");
+ 
+     struct SharpeningCSConstants {
+         alignas(4) uint32_t Const0[4];
+@@ -1674,6 +1678,7 @@ namespace openxr_api_layer {
+ 
+                 handleDebugKeys();
+                 dcsvrLiveTick();
++                m_dcsvrFadeTime = frameEndInfo->displayTime;  // 0036: the frame the focus fade-in's history is kept for
+             }
+ 
+             // We will allocate structures to pass to the real xrEndFrame().
+@@ -4399,6 +4404,26 @@ namespace openxr_api_layer {
+                     // 0034: w = 1 + the alpha ramp's width (dcsvr_two_layers_opaque_ramp; 1 alone: alpha 1, no blending).
+                     focus.dcsvrEdge[3] = 1.f + m_dcsvrOpaqueRamp;
+                     focus.dcsvrDebug[0] = m_debugFocusView ? 1.f : 0.f;
++                    // 0036 focus fade-in: the last frames' focus areas in this one's NDC; from 0.4 of the radius
++                    // outwards (full at 0.6), so the middle, where a saccade lands, is never held back.
++                    if (m_dcsvrFocusFadeIn > 0.f && m_focusViewShape >= 1.f && !m_debugFocusView) {
++                        const dcsvr::TanFov current{focusLeft, focusRight, focusUp, focusDown};
++                        float rects[dcsvr::FocusFadeHistory::Depth][4]{};
++                        const int count = m_dcsvrFadeHistory.Rects((int)viewIndex, m_dcsvrFadeTime, current, rects);
++                        if (count > 0) {
++                            focus.dcsvrFade[0] = m_dcsvrFocusFadeIn;
++                            focus.dcsvrFade[1] = 0.4f;
++                            focus.dcsvrFade[2] = 0.6f;
++                            focus.dcsvrFade[3] = (float)count;
++                            memcpy(focus.dcsvrFadeRect, rects, sizeof(focus.dcsvrFadeRect));
++                        }
++                        if (!m_dcsvrFadeLogged) {
++                            Log(fmt::format("DCSVR focus fade-in: a newly covered border strip fades in over {:.1f} rendered frames\n",
++                                            m_dcsvrFocusFadeIn));
++                            m_dcsvrFadeLogged = true;
++                        }
++                    }
++                    m_dcsvrFadeHistory.Push((int)viewIndex, m_dcsvrFadeTime, {focusLeft, focusRight, focusUp, focusDown});
+                 }
+                 // Sharpened: outside the rounded shape the sharpening skips tiles, the plain image fills them.
+                 const bool fill = plainFocusSource && m_focusViewShape >= 1.f && !m_debugFocusView;
+@@ -4740,6 +4765,7 @@ namespace openxr_api_layer {
+             values.clip = m_dcsvrTemporal.clip;
+             values.temporalSaccadeReset = m_dcsvrTemporal.saccadeReset;
+             values.opaqueRamp = m_dcsvrOpaqueRamp;
++            values.focusFadeIn = m_dcsvrFocusFadeIn;
+             return values;
+         }
+ 
+@@ -4769,6 +4795,9 @@ namespace openxr_api_layer {
+             m_dcsvrTemporal.saccadeReset = values.temporalSaccadeReset;
+             // 0034: the opaque focus's ramp, read by this thread's focus pass and submission from this frame on.
+             m_dcsvrOpaqueRamp = values.opaqueRamp;
++            // 0036: the focus fade-in, read by this thread's focus pass from this frame on (its line again).
++            if (m_dcsvrFocusFadeIn != values.focusFadeIn) m_dcsvrFadeLogged = false;
++            m_dcsvrFocusFadeIn = values.focusFadeIn;
+             if (before.temporal && !values.temporal) {
+                 // Periphery stability off: its history's memory goes back now; on again, it starts over.
+                 for (auto& history : m_dcsvrHistory) {
+@@ -4997,6 +5026,9 @@ namespace openxr_api_layer {
+                         m_dcsvrOpaqueRamp = dcsvr::live::OpaqueRamp(std::stof(value));
+                         Log(fmt::format("DCSVR two layers: opaque focus alpha ramp {}\n", dcsvr::live::OpaqueRampText(m_dcsvrOpaqueRamp)));
+                         parsed = true;
++                    } else if (name == "dcsvr_focus_fade_in") {
++                        m_dcsvrFocusFadeIn = std::clamp(std::stof(value), 0.f, 3.f);
++                        parsed = true;
+                     } else if (name == "stereo_output_multiplier") {
+                         m_stereoOutputMultiplier = std::max(0.1f, std::stof(value));
+                         parsed = true;
+@@ -5299,6 +5331,12 @@ namespace openxr_api_layer {
+         // DCSVR opaque focus (0034, dcsvr_two_layers_opaque_ramp, live): the width of the focus layer's alpha ramp in the
+         // focus radius (0.4: 0031's ramp at edge blend 0.2); 0: alpha 1 everywhere and no blend flags (0024).
+         float m_dcsvrOpaqueRamp{0.4f};
++        // 0036 (fovea temporal): dcsvr_focus_fade_in, rendered frames a newly covered border strip takes to full (0 off,
++        // live); the focus fields of the last frames per eye; the display time of the frame being drawn.
++        float m_dcsvrFocusFadeIn{0.f};
++        dcsvr::FocusFadeHistory m_dcsvrFadeHistory;
++        int64_t m_dcsvrFadeTime{0};
++        bool m_dcsvrFadeLogged{false};
+         // The outputs of the eye being drawn ([0] periphery, [1] focus), set by xrEndFrame under the swapchains' lock.
+         DcsvrOutSwapchain* m_dcsvrEyeOut[2]{};
+         ComPtr<ID3D11Buffer> m_dcsvrTwoLayerConstants;
