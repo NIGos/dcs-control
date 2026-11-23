@@ -387,6 +387,8 @@ void LoadConfig(bool initial) {
     c.prefetchWindowMs = static_cast<uint32_t>(std::max(1, std::min(60000, w)));
     const int tb = static_cast<int>(GetPrivateProfileIntW(L"Prefetch", L"TableBits", 20, ini.c_str()));
     c.prefetchTableBits = std::max(16, std::min(22, tb));
+    const int sc = static_cast<int>(GetPrivateProfileIntW(L"Prefetch", L"SpinCap", 0, ini.c_str()));
+    c.prefetchSpinCap = sc <= 0 ? 0 : std::max(64, std::min(100000, sc));
   }
   c.suiteBenchPrefetch = GetPrivateProfileIntW(L"Suite", L"BenchPrefetch", 0, ini.c_str()) != 0;
   // Measurement kit (measure_kit.h, LIVE_MEASUREMENT_PLAN.md): measure-only, default off.

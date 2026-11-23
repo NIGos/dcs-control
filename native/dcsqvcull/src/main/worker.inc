@@ -230,6 +230,7 @@ DWORD WINAPI WorkerThread(void*) {
       lastCfg = now;
       ftl::TaskScope ts(ftl::kTConfig);
       LoadConfig(false);
+      if (!po) pffix::g_noSleepTid.store(BenchRenderTid(), std::memory_order_relaxed);  // SpinCap: never sleeps there
       if (!po) pffix::Tick();  // new modules (terrain DLLs per mission), slot verify, 10 s statistics line
       g_statusSink.Publish(StatusWordNow());  // last second's states (the retries below show next time)
       g_dualStatusSink.Publish(fixdepth::ckipd::DualCameraStatusNow());  // [Perception] CockpitTrueIpd
