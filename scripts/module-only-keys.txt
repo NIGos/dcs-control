@@ -1,0 +1,90 @@
+# Keys the engine module reads (native/dcsqvcull/src/main/config_load.inc) in a section DCS Control writes, but that
+# the app never writes: section, key, why the module default is what ships. scripts/check-written-keys.ps1 fails when
+# config_load.inc reads a key of such a section that is neither written (scripts/written-keys.txt) nor listed here, and
+# when a line here is stale (the key is written now, or no longer read). Add a key here only with a reason.
+Bench	PassMs	measure only (measurement kit, dev ini)
+Color	ArmRepair	dev A/B of the tone-map arm repair (R47); default 3 is the shipped behaviour
+Color	Timing	measure only (colour pass GPU timing, dev ini)
+Color	ToneProbeHdr	measure only (R41 tone probe, dev ini)
+Color	ToneProbeViews	measure only (R41 tone probe, dev ini)
+D3D	FxApplySkip	opt-in research part (A3), default 0 = nothing installed; no app option
+D3D	FxApplySkipLogSec	tuning of FxApplySkip (log period)
+D3D	FxApplySkipVerify	tuning of FxApplySkip (test only)
+D3D	FxApplySkipVerifyEvery	tuning of FxApplySkip (test only)
+D3D	ProxyGuard	safety guard (R146), default 1 ships; 0 only for an A/B in a dev ini
+Dev	SymbologyPublishAlways	developer key (R97: publish without the reader's heartbeat)
+DLSS	Instrument	measure only (R130 read-only DLSS lifetime counters, dev ini)
+DLSS	ReleaseAfterEvals	tuning of ReleaseIdleSets
+DLSS	ReleaseIdleSets	opt-in (R132), never written since 0.7 (released nothing on DCS 2.9.31); default 0
+General	PatchMode	lossless infrastructure (R90), default 1 ships; 0 only for an A/B in a dev ini
+Log	Async	lossless infrastructure (R90 async log), default 1 ships; 0 only for an A/B in a dev ini
+Model	FocusTwin	opt-in research part (R123, shelved R151), default 0 = nothing installed; no app option
+Model	FocusTwinInstancer	tuning of FocusTwin
+Model	PeripheralLodScale	opt-in LOSSY prototype, default 0 = nothing installed; no app option
+Model	ShadowPlanWaitUs	tuning of ShadowPlanAsync (R90 H1), default ships
+Model	ShadowRecorderNest	opt-in measurement variant of the shadow recorder (perf audit A6 b), default 0
+Model	SmallGpuBundle	opt-in measurement variant of the shadow recorder (perf audit A6), default 0
+Perception	CockpitIpdDormant	tuning of CockpitTrueIpd (R128), default 1 ships
+Perception	CockpitTrueIpdFrameDump	developer dump (dev ini)
+Perception	CockpitTrueIpdFrameDumpViews	developer dump (dev ini)
+Perception	CockpitTrueIpdLog	developer trace (dev ini)
+Perception	CockpitTrueIpdMvpDump	developer dump (dev ini)
+Perception	CockpitTrueIpdOverlayMvp	tuning of CockpitTrueIpd overlays, default 1 ships
+Perception	CockpitTrueIpdOverlayRestore	developer A/B (dev ini), default 0
+Perception	CockpitTrueIpdPrevLog	developer trace (dev ini)
+Perception	CockpitTrueIpdTestShiftMm	developer test shift (dev ini), default 0
+Perception	FarDepthOverlayTrace	developer trace (dev ini)
+Perception	FarDepthPostOverlay	tuning of FarDepthExport, default 1 ships
+Perception	FixationDepthTestGaze	developer test gaze (dev ini)
+Perception	SymbologyTrace	developer trace (R94, dev ini)
+Perception	SymbologyTraceSegments	developer trace (R94, dev ini)
+Perception	SymbologyTraceTone	developer trace (R94, dev ini)
+Perception	SymbologyTraceViews	developer trace (R94, dev ini)
+Prefetch	SpinCap	opt-in tuning of the prefetch fix (0.7), default 0 = off
+Shadow	FloorY	tuning of TightCasters (research, off)
+Shadow	MarginFrac	tuning of TightCasters (research, off)
+Shadow	MarginMin	tuning of TightCasters (research, off)
+Shadows	CascadeCacheMarginPct	tuning of CascadeCache, default ships
+Shadows	CascadeCacheMask	tuning of CascadeCache, default ships
+Shadows	CascadeCacheMaxAge	tuning of CascadeCache, default ships
+Shadows	CascadeCacheVerify	test only (CascadeCache verify), default 0
+Suite	BenchFxApplySkip	measure only (suite / bench, dev ini)
+Suite	BenchGBufferRecorderCockpit	measure only (suite / bench, dev ini)
+Suite	BenchPeripheralLod	measure only (suite / bench, dev ini)
+Suite	BenchPrefetchTableBits	measure only (suite / bench, dev ini)
+Suite	ChainCensusSec	measure only (suite / census, dev ini)
+Suite	ChainDeriveCensus	measure only (suite / census, dev ini)
+Suite	ChainDeriveCensusMB	measure only (suite / census, dev ini)
+Suite	EarlyShaderCensus	measure only (suite / census, dev ini)
+Suite	FocusTwinAuditEvery	tuning of FocusTwin (research, off)
+Suite	FocusTwinChunk	tuning of FocusTwin (research, off)
+Suite	FocusTwinEarlyStop	tuning of FocusTwin (research, off)
+Suite	FocusTwinIsland	tuning of FocusTwin (research, off)
+Suite	FocusTwinPatches	tuning of FocusTwin (research, off)
+Suite	FocusTwinPredTol	tuning of FocusTwin (research, off)
+Suite	FocusTwinShadow	tuning of FocusTwin (research, off)
+Suite	FocusTwinTapBaseline	tuning of FocusTwin (research, off)
+Suite	FocusTwinTrust	tuning of FocusTwin (research, off)
+Suite	FocusTwinVerify	tuning of FocusTwin (research, off)
+Suite	ForwardSplit	measure only (suite, dev ini)
+Suite	GBufferRecVerifyDump	test only (recorder verify, dev ini)
+Suite	GBufferRecVerifyDumpAll	test only (recorder verify, dev ini)
+Suite	GBufferRecVerifyLive	test only (recorder verify, dev ini)
+Suite	GBufferRecVerifyNoLatch	test only (recorder verify, dev ini)
+Suite	GpuBundlePairs	measure only (suite, dev ini)
+Suite	GpuBundleTiming	measure only (suite, dev ini)
+Suite	HoldPitchDeg	test only (synthetic pose, dev ini)
+Suite	HoldPose	test only (synthetic pose, dev ini)
+Suite	Label	measure only (suite report label, dev ini)
+Suite	PassTimelineSec	measure only (suite, dev ini)
+Suite	PerEyePassCensus	measure only (suite / census, dev ini)
+Suite	PeriphLodImage	measure only (suite, dev ini)
+Suite	PeriphLodTiming	measure only (suite, dev ini)
+Suite	PoseRotateDps	test only (synthetic pose, dev ini)
+Suite	PoseWallClock	test only (synthetic pose, dev ini)
+Suite	ThreeViewsTiming	measure only (suite, dev ini)
+Suite	WaterSkipTiming	measure only (suite, dev ini)
+Suite	WaterSkipTimingFrames	measure only (suite, dev ini)
+Threads	CensusSec	measure only (thread census period)
+Threads	PlaceRecheckMode	lossless infrastructure (R90), default 1 ships; 0 only for an A/B in a dev ini
+Water	NoSubmitProbe	tuning of SkipHiddenWater, default 4 ships

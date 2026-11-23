@@ -44,6 +44,7 @@ DcsQvCull	Bench	SettleSec
 DcsQvCull	Bench	ThreadsB
 DcsQvCull	Color	Mode
 DcsQvCull	Color	ModeKey
+DcsQvCull	Color	PanelGamut
 DcsQvCull	Color	SwapProbe
 DcsQvCull	Color	ToneProbe
 DcsQvCull	ColorEnhanced	AdaptBright
@@ -87,6 +88,9 @@ DcsQvCull	D3D	PeriphInstFilter
 DcsQvCull	D3D	ShaderFast
 DcsQvCull	D3D	SplitFilter
 DcsQvCull	D3D	SplitFilterOps
+DcsQvCull	DLSS	FocusPreset
+DcsQvCull	DLSS	IgnoreDriverPreset
+DcsQvCull	DLSS	PeripheryPreset
 DcsQvCull	Dev	IniPath
 DcsQvCull	Dev	PayloadPath
 DcsQvCull	Effects	SkipSameConstantBuffer
@@ -139,6 +143,8 @@ DcsQvCull	Model	PassFlush
 DcsQvCull	Model	PlainTriangleCounter
 DcsQvCull	Model	RecordersEmulatedLists
 DcsQvCull	Model	ShaderCacheDir
+DcsQvCull	Model	ShaderCachePrewarm
+DcsQvCull	Model	ShaderCompileWorkers
 DcsQvCull	Model	ShadowBatching
 DcsQvCull	Model	ShadowInstancing
 DcsQvCull	Model	ShadowPlanAsync
@@ -370,6 +376,7 @@ PupilShift	DepthBoost	Toggle
 PupilShift	DepthBoost	Transition
 PupilShift	DepthBoost	TransitionToggle
 PupilShift	DepthBoost	UpMmPerS
+PupilShift	DlssPreset	IgnoreDriverPreset
 PupilShift	PupilShift	Enabled
 PupilShift	PupilShift	EyeRadiusMm
 PupilShift	PupilShift	Ipd

@@ -349,6 +349,7 @@ void Build(Scene& s, int count, const int64_t* handles, int props8, int transp, 
 #include "measure_kit_test.h"  // Perf audit 2026-11-10: the measurement kit's pure parts (measure_kit.h, bench.h)
 #include "periph_census_test.h"  // Perf audit B6: periphery instance census (pure parts, kernels, one WARP run)
 #include "early_shaders_test.h"  // 0.7 early shaders (SSAO patch and build, identity by output on WARP, swap, census)
+#include "invariants_test.h"  // engine parts: all off = stock, kill switch = stock, app ini round trip, defaults
 
 // R60: QV_TEST_LOAD=<n> (off by default): n busy threads of normal priority inside this process for the whole run.
 // An in-process stand-in for a machine loaded by another program (as DCS loading a mission); never an external load
@@ -664,6 +665,12 @@ int main() {
   // QV_PO_ONLY=1: only the [General] PerceptionOnly tests.
   if (getenv("QV_PO_ONLY")) {
     potest::Run();
+    PrintSummary();
+    return g_fail ? 1 : 0;
+  }
+  // QV_INVARIANTS_ONLY=1: only the engine-part invariants (invariants_test.h).
+  if (getenv("QV_INVARIANTS_ONLY")) {
+    invtest::Run();
     PrintSummary();
     return g_fail ? 1 : 0;
   }
@@ -2089,6 +2096,7 @@ int main() {
   mktest::Run();  // the measurement kit's pure parts (perf audit 2026-11-10)
   pctest::Run();  // audit B6 periphery instance census
   estest::Run();  // 0.7 early shaders: SSAO patch, identity by output, swap, census parts
+  invtest::Run();  // engine parts: all off and the kill switch = stock, the app's ini read back, defaults (last: it reloads the config)
 
   // Suite: configuration check + short profile, report file written.
   {

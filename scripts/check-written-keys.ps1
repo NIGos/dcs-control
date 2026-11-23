@@ -60,6 +60,37 @@ foreach ($line in [IO.File]::ReadAllLines($list)) {
   $read = if ($reader.Pair -and $section) { $reader.Text -match ('L"' + [regex]::Escape($section) + '",\s*L"' + $k + '"') -or $reader.Text -match ('L"' + $k + '"') } else { $reader.Text -match ('"' + $k + '"') }
   if (-not $read) { $problems.Add("$writer [$section] $key is written by ConfigurationWriters.cs but never read by the component") }
 }
+# The other direction for the engine module: every key native/dcsqvcull/src/main/config_load.inc reads in a section the
+# app writes for it is written (the list above) or named in scripts/module-only-keys.txt with a reason; a stale line
+# there (written now, or not read any more) is a problem too. Sections the app never writes (Night, Perf, Profile,
+# Views) are the module's own.
+$loadPath = Join-Path $Root 'native/dcsqvcull/src/main/config_load.inc'
+$onlyPath = Join-Path $Root 'scripts/module-only-keys.txt'
+if ((Test-Path -LiteralPath $loadPath) -and (Test-Path -LiteralPath $onlyPath)) {
+  $writtenQv = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($line in [IO.File]::ReadAllLines($list)) { if ($line.StartsWith("DcsQvCull`t")) { [void]$writtenQv.Add($line.Substring(10)) } }
+  $sections = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($k in $writtenQv) { [void]$sections.Add($k.Split("`t")[0]) }
+  $readQv = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($m in [regex]::Matches([IO.File]::ReadAllText($loadPath), 'L"(\w+)",\s*L"(\w+)"')) { [void]$readQv.Add($m.Groups[1].Value + "`t" + $m.Groups[2].Value) }
+  $only = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($line in [IO.File]::ReadAllLines($onlyPath)) {
+    if (-not $line.Trim() -or $line.StartsWith('#')) { continue }
+    $f = $line.Split("`t")
+    if ($f.Count -lt 3 -or -not $f[2].Trim()) { $problems.Add("module-only-keys.txt: '$line' needs section, key and a reason (tab separated)"); continue }
+    $k = $f[0] + "`t" + $f[1]; [void]$only.Add($k)
+    if ($writtenQv.Contains($k)) { $problems.Add("module-only-keys.txt: [$($f[0])] $($f[1]) is written by the app now; remove the line") }
+    elseif (-not $readQv.Contains($k)) { $problems.Add("module-only-keys.txt: [$($f[0])] $($f[1]) is not read by config_load.inc any more; remove the line") }
+  }
+  $moduleOnly = 0
+  foreach ($k in $readQv) {
+    if (-not $sections.Contains($k.Split("`t")[0]) -or $writtenQv.Contains($k)) { continue }
+    if ($only.Contains($k)) { ++$moduleOnly; continue }
+    $s, $n = $k.Split("`t")
+    $problems.Add("DcsQvCull [$s] $n is read by config_load.inc but never written by the app: write it, or list it in scripts/module-only-keys.txt with the reason its module default is what ships")
+  }
+  Write-Host "engine module keys read in the app's sections: $($readQv.Count) read in config_load.inc, $moduleOnly module-only (listed)"
+}
 Write-Host ("written keys checked: " + (($counts.GetEnumerator() | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ', ') + $(if ($skipped.Count) { "; sources not here (external checkout missing), skipped: $($skipped -join ', ')" } else { '' }))
 if ($problems.Count) { $problems | ForEach-Object { Write-Host "PROBLEM: $_" }; exit 1 }
 Write-Host 'written keys: every one is read'

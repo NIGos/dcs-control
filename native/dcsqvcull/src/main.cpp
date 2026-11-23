@@ -72,6 +72,7 @@ using namespace layout;
 #include "main/wiring.inc"                    // Apply helpers, census, Quad Views publishing, Install, Apply* wiring
 #include "main/passflush_bench.inc"           // bench mode 30, pass flush (R-class, F18)
 #include "main/engine.inc"                    // shadow texture skip, engine switch, status word, colour tick, toggle, key reading
+#include "main/parts.inc"                     // kEngineParts: every engine part, for the offline invariant tests
 #include "main/xr_state.inc"                  // profile thread, XR state from dcs.log, CheckConfiguration
 #include "main/suite.inc"                     // suite helpers and SuiteThread
 #include "main/perception_tick.inc"           // StartBench, the perception configuration and tick
