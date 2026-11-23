@@ -1,0 +1,396 @@
+Adaptive cadence leaves 3 on the work it would cost at 2 (`[ofxr] cadence_3x_exit`, on unless 0; balanced and rate
+preferences only). User flight 2026-11-23 16:50 (Pimax 90 Hz, ATMOSX, deep pipeline): the same view read 16.5 ms of
+work at 2 and 20.7 ms at 3 (busy time per frame grows at the lower rate; +1.4 to +8.4 ms over every 2 -> 3 of the
+flights), so the 18.9 ms (0.85 of two periods) a return to 2 asks was never met: 95 % of the mission at 3, 28 fps,
+where 2 held 45 whenever it was reached; and four of the five returns went back up within a second on the switch's
+own late frames, each able to double the next stay at 3. CadenceConfig::three_exit_learned (CadenceController::
+set_three_exit_learned): the work at 3, a whole window past three_settle, less the work at 2 behind the move up is
+the excess (0 to 4 ms, per scene); a return to 2 asks for at most 0.85 of two periods once it is taken off (never
+more than up_fraction, 0.95, in all); until measured, 0.90 of two periods. Slots missed in the first 300 ms after a
+3 -> 2 send nothing to 3 and double no run. Steady, and `cadence_3x_exit=0`, keep the rule before. New tests in
+latency_control_tests (cadence_3x_exit_tests): the 16:50 replay stays at 3 with the old rule and returns to 2 for
+good with the new one; work that needs 3 keeps it; the unmeasured limit; misses past the settle still go to 3.
+
+diff --git a/include/xrfg/latency_control.hpp b/include/xrfg/latency_control.hpp
+--- a/include/xrfg/latency_control.hpp
++++ b/include/xrfg/latency_control.hpp
+@@ -1566,6 +1566,30 @@ struct CadenceConfig {
+     // left by the run as before, doubling included.
+     bool three_accountable{false};
+     Nanoseconds three_settle{300 * kMillisecond};
++    // DCS Control (0098, `[ofxr] cadence_3x_exit`, on by default for the
++    // balanced and rate preferences; off here: the layer turns it on).
++    // A user flight (2026-11-23, Pimax 90 Hz, ATMOSX): the same view read
++    // 16.5 ms of work at 2 and 20.7 ms at 3 - busy time per frame grows at
++    // the lower rate (+1.4 to +8.4 ms over every 2 -> 3 of the flights) -
++    // so the 18.9 ms a return to 2 asks was never met: 95% of the mission
++    // at 3 (28 fps) where 2 held 45 whenever it was reached. And four of
++    // the five returns to 2 went back up within a second on the switch's
++    // own late frames. With this on:
++    //  - the 3 -> 2 test takes off the work's own excess at 3: the work at
++    //    3 (from three_settle on, a whole window of it) less the work at 2
++    //    just before the move up, 0 to three_exit_offset_cap; a return to 2
++    //    asks for at most down_fraction of two periods once that is taken
++    //    off, never more than up_fraction of two periods in all. Until a
++    //    move up has measured it (a move up without the work at 2 behind
++    //    it), the limit is three_exit_plain_fraction of two periods. A scene
++    //    change forgets the excess.
++    //  - slots missed in the first two_settle_after_three after a 3 -> 2
++    //    are the switch's own re-phasing (as at 3, three_settle; at 1X,
++    //    one_grace): they send nothing to 3 and double no run.
++    bool three_exit_learned{false};
++    Nanoseconds three_exit_offset_cap{4 * kMillisecond};
++    double three_exit_plain_fraction{0.90};
++    Nanoseconds two_settle_after_three{300 * kMillisecond};
+ };
+ 
+ // DCS Control (0070): how readily adaptive cadence passes frames through
+@@ -1732,6 +1756,15 @@ public:
+     [[nodiscard]] bool miss_hold() const noexcept {
+         return config_.three_accountable && miss_hold_;
+     }
++    // DCS Control (0098): CadenceConfig::three_exit_learned, for a caller
++    // that learns it after the configuration is made.
++    void set_three_exit_learned(bool learned) noexcept {
++        config_.three_exit_learned = learned;
++    }
++    // DCS Control (0098): the work's excess at 3 over 2 as measured (-1:
++    // not yet), and the limit a return to 2 asks the work at 3 for now.
++    [[nodiscard]] Nanoseconds three_excess() const noexcept { return three_excess_; }
++    [[nodiscard]] Nanoseconds three_exit_limit(Nanoseconds period) const noexcept;
+ 
+     [[nodiscard]] std::uint32_t level() const noexcept { return level_; }
+     [[nodiscard]] Nanoseconds backoff() const noexcept { return backoff_; }
+@@ -1796,6 +1829,13 @@ private:
+     // and missed slots alone do not send 2 to 3 (three_accountable).
+     bool three_on_misses_{};
+     bool miss_hold_{};
++    // DCS Control (0098): the work at 2 at the last move up (-1: not
++    // enough samples then); the 3 in force has its excess still to measure;
++    // the excess measured (-1: none yet); the 2 in force came from 3.
++    Nanoseconds work_before_three_{-1};
++    bool excess_pending_{};
++    Nanoseconds three_excess_{-1};
++    bool two_from_three_{};
+ };
+ 
+ // DCS Control (0032): the display time a frame of cadence `frames` is told,
+diff --git a/src/core/latency_control.cpp b/src/core/latency_control.cpp
+--- a/src/core/latency_control.cpp
++++ b/src/core/latency_control.cpp
+@@ -1014,6 +1014,24 @@ void CadenceController::start(Nanoseconds now) noexcept {
+     last_late_at_ = -1;
+     three_on_misses_ = false; // DCS Control (0079)
+     miss_hold_ = false;
++    work_before_three_ = -1; // DCS Control (0098)
++    excess_pending_ = false;
++    three_excess_ = -1;
++    two_from_three_ = false;
++}
++
++// DCS Control (0098): CadenceConfig::three_exit_learned.
++Nanoseconds CadenceController::three_exit_limit(Nanoseconds period) const noexcept {
++    const Nanoseconds two_periods = period * 2;
++    const Nanoseconds down = fraction_of(config_.down_fraction, two_periods);
++    if (!config_.three_exit_learned) {
++        return down;
++    }
++    if (three_excess_ < 0) {
++        return std::max(down, fraction_of(config_.three_exit_plain_fraction, two_periods));
++    }
++    return std::max(down, std::min(down + three_excess_,
++                                   fraction_of(config_.up_fraction, two_periods)));
+ }
+ 
+ void CadenceController::add_frame(
+@@ -1186,9 +1204,13 @@ CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexc
+     step.predicted_cpu = stats.cpu;
+     step.predicted_gpu_one = stats.gpu_one;
+     // Misses since the level was entered: at 2 they are 2's; at 3 they
+-    // decide nothing.
++    // decide nothing. DCS Control (0098): a 2 entered from 3 counts them
++    // from two_settle_after_three on (CadenceConfig::three_exit_learned).
++    const Nanoseconds misses_from = level_ == 2 && two_from_three_ && config_.three_exit_learned
++        ? level_since_ + config_.two_settle_after_three
++        : level_since_;
+     step.late_episodes = late_episodes_between(
+-        std::max(now - config_.late_window, level_since_), now);
++        std::max(now - config_.late_window, misses_from), now);
+     const bool enough = stats.judged_samples >= config_.min_samples;
+     if (level_ == 2) {
+         // DCS Control (0072): and, where the preference asks for it, only
+@@ -1247,6 +1269,11 @@ CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexc
+             level_since_ = now;
+             run_three_ = 0;
+             one_fit_since_ = -1;
++            // DCS Control (0098): the work at 2 behind the move, for the
++            // excess at 3 (none without enough samples).
++            work_before_three_ = enough ? stats.judged : -1;
++            excess_pending_ = true;
++            two_from_three_ = false;
+             fill(step);
+             return step;
+         }
+@@ -1300,8 +1327,19 @@ CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexc
+     // 3.
+     ++run_three_;
+     one_fit_since_ = -1;
+-    const bool light = enough &&
+-        stats.judged <= fraction_of(config_.down_fraction, two_periods);
++    // DCS Control (0098): once a whole window of 3 lies past three_settle,
++    // its work less the work at 2 behind the move is the excess (0 to the
++    // cap), kept until the scene changes; without the work at 2 the last
++    // excess stays.
++    if (excess_pending_ && enough &&
++        now - level_since_ >= config_.three_settle + config_.window) {
++        excess_pending_ = false;
++        if (work_before_three_ >= 0) {
++            three_excess_ = std::clamp<Nanoseconds>(
++                stats.judged - work_before_three_, 0, config_.three_exit_offset_cap);
++        }
++    }
++    const bool light = enough && stats.judged <= three_exit_limit(period);
+     // DCS Control (0079): entered on missed slots alone, and the evidence
+     // that sent 2 here is there again at 3 (its own slots, from
+     // three_settle after the switch) while the work fits 2: 3 gives time,
+@@ -1320,6 +1358,8 @@ CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexc
+             run_required_ = config_.min_run_three;
+             three_on_misses_ = false;
+             miss_hold_ = true;
++            two_from_three_ = true; // DCS Control (0098)
++            excess_pending_ = false;
+             step.late_episodes = at_three;
+             step.event = CadenceEvent::three_left_no_gain;
+             fill(step);
+@@ -1332,6 +1372,8 @@ CadenceStep CadenceController::decide(Nanoseconds now, Nanoseconds period) noexc
+         last_down_at_ = now;
+         run_three_ = 0;
+         three_on_misses_ = false; // DCS Control (0079)
++        two_from_three_ = true; // DCS Control (0098)
++        excess_pending_ = false;
+     }
+     fill(step);
+     return step;
+@@ -1353,6 +1395,10 @@ CadenceStep CadenceController::scene_changed(Nanoseconds now) noexcept {
+     last_late_at_ = -1;
+     three_on_misses_ = false; // DCS Control (0079)
+     miss_hold_ = false;
++    work_before_three_ = -1; // DCS Control (0098): a new scene, a new excess
++    excess_pending_ = false;
++    three_excess_ = -1;
++    two_from_three_ = false;
+     level_ = 2;
+     level_since_ = now;
+     run_three_ = 0;
+@@ -1528,6 +1574,8 @@ CadenceStep CadenceController::stop(Nanoseconds now) noexcept {
+     one_fit_since_ = -1;
+     three_on_misses_ = false; // DCS Control (0079)
+     miss_hold_ = false;
++    excess_pending_ = false; // DCS Control (0098)
++    two_from_three_ = false;
+     fill(step);
+     return step;
+ }
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -334,6 +334,11 @@ bool read_cadence_accountable(
+     return read_ofxr_switch(module_directory, L"cadence_accountable", true);
+ }
+ 
++// DCS Control (0098).
++bool read_cadence_3x_exit(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"cadence_3x_exit", true);
++}
++
+ // DCS Control (0081).
+ bool read_release_offset_guard(
+     const std::filesystem::path& module_directory) noexcept {
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -186,6 +186,15 @@ struct ConfiguredNvidiaOptions {
+ [[nodiscard]] bool read_cadence_accountable(
+     const std::filesystem::path& module_directory) noexcept;
+ 
++// DCS Control (0098). `[ofxr] cadence_3x_exit`: adaptive cadence under the
++// balanced and rate preferences leaves 3 on the work less its own excess at 3
++// (measured per scene, at most 4 ms; 0.90 of two periods until measured), and
++// slots missed in the first 300 ms after a return to 2 send nothing back to 3
++// (xrfg::latency::CadenceConfig::three_exit_learned). On unless set to 0 (the
++// rule before: 0.85 of two periods). Read once per session.
++[[nodiscard]] bool read_cadence_3x_exit(
++    const std::filesystem::path& module_directory) noexcept;
++
+ // DCS Control (0081). `[ofxr] release_offset_guard`: at 2X off SteamVR, the
+ // release offset is not stepped to where a frame that fits the slots of its
+ // cadence would no longer fit them, and is dropped when it is what keeps
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -6909,6 +6909,11 @@ XrResult layer_create_session_impl(
+     state->cadence_controller = xrfg::latency::CadenceController(
+         xrfg::latency::cadence_config_for(
+             xrfg::latency::cadence_preference_from(state->cadence_preference)));
++    // DCS Control (0098): `[ofxr] cadence_3x_exit`, balanced and rate only.
++    state->cadence_controller.set_three_exit_learned(
++        xrfg::latency::cadence_preference_from(state->cadence_preference) !=
++            xrfg::latency::CadencePreference::steady &&
++        xrfg::implicit_layer::read_cadence_3x_exit(current_layer_directory()));
+     // DCS Control (0038): taken up with the synthesis queue below.
+     const std::uint32_t parallel_eye_synthesis =
+         xrfg::implicit_layer::read_parallel_eye_synthesis(current_layer_directory());
+diff --git a/tests/latency_control_tests.cpp b/tests/latency_control_tests.cpp
+--- a/tests/latency_control_tests.cpp
++++ b/tests/latency_control_tests.cpp
+@@ -4682,6 +4682,142 @@ std::string describe_accountable(const AccountableRun& run) {
+         std::to_string(run.miss_hold ? 1 : 0) + ")";
+ }
+ 
++// ---------------------------------------------------------------------------
++// DCS Control (0098): CadenceConfig::three_exit_learned (`[ofxr]
++// cadence_3x_exit`). The user's flight of 2026-11-23 16:50 replayed: the
++// view reads 16.5 ms of work at 2 and 20.7 ms at 3 (CPU and GPU alike), two
++// missed-slot episodes send 2 to 3, and every return to 2 brings the switch's
++// own late frames (0, 120 and 240 ms after it).
++
++struct ExitRun {
++    std::uint32_t frames_last{};
++    std::uint32_t three_last{};
++    std::uint32_t returns{};
++    std::uint32_t ups{};
++    std::uint32_t final_level{};
++    Nanoseconds excess{-1};
++};
++
++// `work(level)`: the frame's work at that level. `first_misses`: the frame
++// indices (from the start) whose end misses a slot. `return_misses`: offsets
++// after each 3 -> 2 at which a frame misses.
++template <typename Work>
++ExitRun run_exit(bool learned, Nanoseconds duration, Work work,
++    std::vector<std::uint64_t> first_misses, std::vector<Nanoseconds> return_misses,
++    CadencePreference preference = CadencePreference::balanced) {
++    CadenceConfig config = cadence_config_for(preference);
++    CadenceSim sim(config);
++    sim.controller.set_three_exit_learned(learned);
++    ExitRun run{};
++    const Nanoseconds end = sim.now + duration;
++    const Nanoseconds half = sim.now + duration / 2;
++    Nanoseconds returned_at = -1;
++    std::size_t return_next = 0;
++    std::uint64_t index = 0;
++    while (sim.now < end) {
++        const std::uint32_t level = sim.controller.level();
++        const Nanoseconds at = sim.now + kPeriod * level;
++        bool miss = std::find(first_misses.begin(), first_misses.end(), index) != first_misses.end();
++        if (returned_at >= 0 && return_next < return_misses.size() &&
++            at - returned_at >= return_misses[return_next]) {
++            miss = true;
++            ++return_next;
++        }
++        if (miss) {
++            sim.controller.add_late(at, 1);
++        }
++        const Nanoseconds cost = work(level);
++        const CadenceStep step = sim.frame(cost, cost);
++        if (step.previous == 3 && step.level == 2) {
++            ++run.returns;
++            returned_at = sim.now;
++            return_next = 0;
++        }
++        run.ups += step.previous == 2 && step.level == 3 ? 1U : 0U;
++        if (sim.now > half) {
++            ++run.frames_last;
++            run.three_last += step.level == 3 ? 1U : 0U;
++        }
++        ++index;
++    }
++    run.final_level = sim.controller.level();
++    run.excess = sim.controller.three_excess();
++    return run;
++}
++
++std::string describe_exit(const ExitRun& run) {
++    return " (level " + std::to_string(run.final_level) + ", ups " + std::to_string(run.ups) +
++        ", returns " + std::to_string(run.returns) + ", frames of 3 in the second half " +
++        std::to_string(run.three_last) + " of " + std::to_string(run.frames_last) +
++        ", excess " + std::to_string(run.excess) + " ns)";
++}
++
++void cadence_3x_exit_tests() {
++    require(!CadenceConfig{}.three_exit_learned &&
++            !cadence_config_for(CadencePreference::balanced).three_exit_learned &&
++            !cadence_config_for(CadencePreference::rate).three_exit_learned,
++        "3x exit: off in every configuration until the caller turns it on");
++    static constexpr Nanoseconds kAtTwo = 16'500'000;
++    static constexpr Nanoseconds kAtThree = 20'700'000;
++    const auto flight = [](std::uint32_t level) { return level == 3 ? kAtThree : kAtTwo; };
++    // Two episodes 150 ms apart, after 3 s at 2 (135 frames of 22.2 ms).
++    const std::vector<std::uint64_t> burst{135, 142};
++    const std::vector<Nanoseconds> own{0, 120 * kMillisecond, 240 * kMillisecond};
++
++    for (const CadencePreference preference : {CadencePreference::balanced, CadencePreference::rate}) {
++        const std::string name = " [preference " + std::to_string(static_cast<std::uint32_t>(preference)) + "]";
++        // (a) The 16:50 flight, rule 0: 3 for good (20.7 ms never meets 18.9).
++        {
++            const auto r = run_exit(false, 60 * kSecond, flight, burst, own, preference);
++            std::cout << "3x exit, 16:50 replay, cadence_3x_exit=0" << name << ":" << describe_exit(r) << '\n';
++            require(r.ups == 1 && r.returns == 0 && r.final_level == 3 && r.three_last == r.frames_last,
++                "3x exit: the old rule never leaves 3" + name + describe_exit(r));
++        }
++        // (b) Rule 1: the excess (4.2 ms, capped at 4) is measured, 2 comes
++        // back, the switch's own late frames do not send it up again.
++        {
++            const auto r = run_exit(true, 60 * kSecond, flight, burst, own, preference);
++            std::cout << "3x exit, 16:50 replay, cadence_3x_exit=1" << name << ":" << describe_exit(r) << '\n';
++            require(r.excess == 4 * kMillisecond,
++                "3x exit: the excess measured and capped" + name + describe_exit(r));
++            require(r.ups == 1 && r.returns == 1 && r.final_level == 2 && r.three_last == 0,
++                "3x exit: back at 2 and it stays" + name + describe_exit(r));
++        }
++        // (c) Rule 1, work that does need 3 (25 ms at 2, 27 at 3): it goes up
++        // on the work and stays.
++        {
++            const auto heavy = [](std::uint32_t level) { return level == 3 ? 27 * kMillisecond : 25 * kMillisecond; };
++            const auto r = run_exit(true, 30 * kSecond, heavy, {}, own, preference);
++            std::cout << "3x exit, heavy, cadence_3x_exit=1" << name << ":" << describe_exit(r) << '\n';
++            require(r.ups == 1 && r.returns == 0 && r.final_level == 3 && r.excess == 2 * kMillisecond,
++                "3x exit: work that needs 3 keeps it" + name + describe_exit(r));
++        }
++        // (d) Up on misses without the work at 2 behind them (no sample the
++        // controller takes at 2: -1): no excess, the plain limit (0.90 of two
++        // periods, 20.0 ms) lets 19.5 ms go back to 2; the old rule keeps 3.
++        {
++            const auto plain = [](std::uint32_t level) -> Nanoseconds { return level == 3 ? 19'500'000 : -1; };
++            const std::vector<std::uint64_t> early{0, 6};
++            const auto off = run_exit(false, 30 * kSecond, plain, early, {}, preference);
++            const auto on = run_exit(true, 30 * kSecond, plain, early, {}, preference);
++            std::cout << "3x exit, unmeasured, 0 / 1" << name << ":" << describe_exit(off) << describe_exit(on) << '\n';
++            require(off.ups == 1 && off.returns == 0 && off.final_level == 3,
++                "3x exit: unmeasured, the old rule keeps 3" + name + describe_exit(off));
++            require(on.ups == 1 && on.returns == 1 && on.final_level == 2 && on.excess < 0,
++                "3x exit: unmeasured, the plain limit returns" + name + describe_exit(on));
++        }
++        // (e) Rule 1: misses after the settle still count: two episodes 400
++        // and 550 ms after the return send 2 back to 3.
++        {
++            const std::vector<Nanoseconds> late_after{400 * kMillisecond, 550 * kMillisecond};
++            const auto r = run_exit(true, 30 * kSecond, flight, burst, late_after, preference);
++            std::cout << "3x exit, misses after the settle" << name << ":" << describe_exit(r) << '\n';
++            require(r.ups >= 2 && r.returns >= 1,
++                "3x exit: misses past the settle still go to 3" + name + describe_exit(r));
++        }
++    }
++}
++
+ void cadence_accountable_tests() {
+     const auto light = [](std::uint64_t, Nanoseconds) { return kAccountLight; };
+     const auto between = [](std::uint64_t, Nanoseconds) { return kAccountBetween; };
+@@ -5233,6 +5369,7 @@ int main() {
+         leader_lead_tests(); // DCS Control (0078)
+         leader_lead_model_tests(); // DCS Control (0078)
+         cadence_accountable_tests(); // DCS Control (0079)
++        cadence_3x_exit_tests(); // DCS Control (0098)
+         release_rephase_tests(); // DCS Control (0079)
+         release_offset_guard_tests(); // DCS Control (0081)
+         std::cout << "Latency control tests passed\n";
