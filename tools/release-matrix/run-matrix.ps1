@@ -245,7 +245,7 @@ function New-SceneFiles($S, [string]$Dir, [string]$DevIni, [string]$DevPay) {
   $sc = [ordered]@{ name = "rm_$($S.id -replace '-', '_')"; status = 'ready'; measures = "release matrix v$($M.version), scene $($S.id): the engine test suite with one A/B per part"
     mission = $missionPath[[string]$S.mission]; seconds = [double]$S.suiteAt + 5; windowAtOrigin = $false; simGaze = [string]$M.simGaze
     arms = @([ordered]@{ name = 'suite'; options = @([bool]$M.foveatedFrameGen); seconds = [double]$S.suiteAt + 5; schedule = $sch
-        profileOverrides = [ordered]@{ developerOptions = $true; engineDevMode = $true; engineDevIniPath = $DevIni; engineDevPayloadPath = $DevPay } })
+        profileOverrides = [ordered]@{ freeVram = $false; developerOptions = $true; engineDevMode = $true; engineDevIniPath = $DevIni; engineDevPayloadPath = $DevPay } })
     profileOverrides = [ordered]@{}; ofxr = [ordered]@{}; diagnostics = [ordered]@{}; quadviews = [ordered]@{}; schedule = @(); verdict = [ordered]@{ crops = @() }
     sideEffects = @('no input, no focus; rig autostart; simulated gaze; the app''s StartSuite; engine developer mode with a developer ini and payload in the run folder (test copy of the profile only)') }
   $p = Join-Path $Dir 'scenario.json'; Write-Utf8 $p ($sc | ConvertTo-Json -Depth 8); $p
