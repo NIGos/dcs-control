@@ -5719,6 +5719,23 @@ Test("Profiles from 0.6.6 load in 0.7 (0.6.7 was not released, so 0.6.6 is the v
     Require(!JsonData.Serialize(loaded).Contains("ReleaseIdleDlss", StringComparison.OrdinalIgnoreCase) && !JsonData.Serialize(loaded).Contains("\"tracking\"", StringComparison.Ordinal),
         "the keys 0.7 dropped are not written back");
 });
+Test("Hide the focus edge: a profile saved without it (0.6.6, earlier 0.7 drafts) gets the flown values; out-of-range parts reach Quad Views clamped", () =>
+{
+    string[] edge = ["quadHideFocusEdge", "quadGazeGlideMs", "quadFocusFadeIn", "quadKeepHistoryOnSaccade", "quadBandMatch", "quadBandMatchColor"];
+    var node = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked }))!.AsObject();
+    foreach (var key in edge) Require(node.Remove(key), "0.7 writes " + key);
+    var loaded = JsonData.Deserialize<VrProfile>(node.ToJsonString());
+    Require(loaded is { QuadHideFocusEdge: true, QuadGazeGlideMs: 40, QuadFocusFadeIn: 2, QuadKeepHistoryOnSaccade: true, QuadBandMatch: 1, QuadBandMatchColor: false }, "the defaults the pilot flew");
+    var text = ConfigurationWriters.QuadViews(loaded);
+    static bool Has(string text, string line) => text.Split('\n').Any(l => l.Trim() == line);
+    Require(Has(text, "dcsvr_gaze_glide_ms=40") && Has(text, "dcsvr_focus_fade_in=2") && Has(text, "dcsvr_temporal_saccade_reset=0") && Has(text, "dcsvr_band_match=1"), text);
+    Require(ControlService.SameDraft(loaded, new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, Gaze = GazeMode.EyeTracked }), "the same draft as a fresh 0.7 one: no change to apply");
+    // Values a hand-edited profile may hold: Quad Views gets them inside its own ranges, and the checks name them.
+    var wild = loaded with { QuadGazeGlideMs = 500, QuadFocusFadeIn = 9, QuadBandMatch = -1, QuadBandMatchColor = true };
+    var clamped = ConfigurationWriters.QuadViews(wild);
+    Require(Has(clamped, "dcsvr_gaze_glide_ms=100") && Has(clamped, "dcsvr_focus_fade_in=3") && Has(clamped, "dcsvr_band_match=0") && Has(clamped, "dcsvr_band_match_color=0"), clamped);
+    Require(new[] { "quad-gaze-glide", "quad-focus-fade-in", "quad-band-match" }.All(code => ProfileValidation.Validate(wild).Any(i => i.Code == code && i.Severity == IssueSeverity.Error)), "out of range");
+});
 Test("Profiles for 0.6.7: no derived value new since 0.6.7 is written (0.6.7 refuses keys it does not know); drafts that have them still load", () =>
 {
     // The derived (get-only) values 0.6.7 itself wrote, and so reads: no other may be written (checked against 0.6.7's
@@ -7027,6 +7044,32 @@ Test("Live 0.7: Quad Views' eye-tracking refinements and Far depth's strength ar
     Require(flow.Written.Count == 0, flow.Message);
     var cursor = WhileDcsRuns(g, () => g.Service.ApplyLive(ffx with { SmoothCursor = !ffx.SmoothCursor }, E2eInventory(g)));
     Require(cursor.Written.Count == 0 && cursor.Waiting.Contains("smoothCursor"), cursor.Message);
+});
+Test("Live 0.7: Hide the focus edge and its parts switch live with a 0.7 install; an install by 0.6.6 keeps them for the next launch", () =>
+{
+    var f = E2e("live-07-edge"); var draft = LiveDraft(); var inventory = E2eInventory(f);
+    Require(draft.QuadHideFocusEdge && f.Service.SyncApplied(draft, inventory).Kind == LaunchSyncKind.Applied, "applied with Hide the focus edge on (default)");
+    var settings = LiveEntry(f, LiveSettings.QuadFile).Path;
+    Require(LiveSettings.AvailableFields(f.Service.ReadAppliedProfile()!.Profile, f.Service.ReadAppliedProfile()!.Journal).Contains("quadHideFocusEdge"), "tagged live");
+    var off = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { QuadHideFocusEdge = false }, inventory));
+    Require(off.Written.SequenceEqual([settings]) && off.Applied.SequenceEqual(["quadHideFocusEdge"]) && off.Waiting.Count == 0, off.Message);
+    var values = IniFile.Parse(File.ReadAllText(settings));
+    Require(values["exe:DCS.dcsvr_gaze_glide_ms"] == "0" && values["exe:DCS.dcsvr_focus_fade_in"] == "0" && values["exe:DCS.dcsvr_band_match"] == "0" && values["exe:DCS.dcsvr_temporal_saccade_reset"] == "1", "off: Quad Views as before");
+    // Back on with another glide: both are in effect now (the switch was off in flight, not in profile.json).
+    var on = WhileDcsRuns(f, () => f.Service.ApplyLive(draft with { QuadGazeGlideMs = 60 }, inventory));
+    Require(on.Written.SequenceEqual([settings]) && on.Applied.Order(StringComparer.Ordinal).SequenceEqual(new[] { "quadGazeGlideMs", "quadHideFocusEdge" }) && on.Waiting.Count == 0, on.Message);
+    Require(IniFile.Parse(File.ReadAllText(settings))["exe:DCS.dcsvr_gaze_glide_ms"] == "60", "the new glide");
+
+    // The same switch with Quad Views installed by 0.6.6 (it reads none of these keys while it runs): waits, file untouched.
+    var g = E2e("live-07-edge-066"); g.Service.SyncApplied(draft, E2eInventory(g));
+    var baseline = Path.Combine(g.Service.Originals.Directory, "baseline.json");
+    var record = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(baseline))!;
+    record["current"]!["appVersion"] = "0.6.6-preview";
+    AtomicFile.WriteText(baseline, record.ToJsonString(JsonData.Options));
+    var old = LiveEntry(g, LiveSettings.QuadFile);
+    var waits = WhileDcsRuns(g, () => g.Service.ApplyLive(draft with { QuadHideFocusEdge = false, QuadSharpening = 0.45 }, E2eInventory(g)));
+    Require(waits.Waiting.Contains("quadHideFocusEdge") && !waits.Applied.Contains("quadHideFocusEdge") && Hashing.FileSha256(old.Path) == old.InstalledSha256, waits.Message);
+    Require(!LiveSettings.AvailableFields(g.Service.ReadAppliedProfile()!.Profile, g.Service.ReadAppliedProfile()!.Journal).Contains("quadHideFocusEdge"), "no Live tag");
 });
 Test("Live phase 2: Cheeky's DLSS 5 tuning is written live into its own INI, its saves tolerated, a dropped value written once more", () =>
 {
