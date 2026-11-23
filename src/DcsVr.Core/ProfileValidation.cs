@@ -86,6 +86,9 @@ public static class ProfileValidation
         Range("quad-sharpening", profile.QuadSharpening, 0, 1);
         Range("quad-periphery-contrast", profile.QuadPeripheryContrast, 0, 1);
         Range("quad-edge-blend", profile.QuadEdgeBlend, 0, .5);
+        Range("quad-gaze-glide", profile.QuadGazeGlideMs, 0, 100);
+        Range("quad-focus-fade-in", profile.QuadFocusFadeIn, 0, 3);
+        Range("quad-band-match", profile.QuadBandMatch, 0, 1);
         Range("periphery-stability-strength", profile.PeripheryStabilityStrength, 0, 1);
         Range("neural-scale", profile.NeuralWorkingScale, .1, 1);
         Range("neural-intensity", profile.NeuralIntensity, 0, 1);

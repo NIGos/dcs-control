@@ -195,6 +195,22 @@ public sealed record VrProfile
     /// the headset. With <see cref="UsesFoveatedFrameGen"/> the focus layer's output pass does the same taper, with the
     /// periphery's resolution computed from the two views' sizes and fields of view (patch 0021).</summary>
     public bool QuadEdgeMatch { get; init; }
+    /// <summary>Eye-tracked bundled Quad Views: after an eye jump the focus area glides to the new place over this many
+    /// milliseconds instead of jumping there (dcsvr_gaze_glide_ms, Quad Views 0035; 0 = off). Rig 2026-11-23, 10-degree
+    /// saccades with DLSS 5: 40 ms halved the border flash; no effect on 20-degree ones.</summary>
+    public int QuadGazeGlideMs { get; init; }
+    /// <summary>Bundled Quad Views: a strip the focus area newly covers fades in over this many frames instead of
+    /// appearing at once (dcsvr_focus_fade_in, Quad Views 0036; 0 = off, up to 3). Rig: 2 frames halved the 10-degree
+    /// saccade border flash with DLSS 5.</summary>
+    public double QuadFocusFadeIn { get; init; }
+    /// <summary>Bundled Quad Views: an eye jump does not start the focus area's temporal history over
+    /// (dcsvr_temporal_saccade_reset=0, Quad Views 0035). Rig: halved the 10-degree saccade border flash with DLSS 5.</summary>
+    public bool QuadKeepHistoryOnSaccade { get; init; }
+    /// <summary>Bundled Quad Views: the focus area's brightness is matched to the periphery where the two meet
+    /// (dcsvr_band_match strength 0..1, Quad Views 0037; 0 = off). Rig: 1 cut the 10-degree border flash by a third.</summary>
+    public double QuadBandMatch { get; init; }
+    /// <summary>With <see cref="QuadBandMatch"/>: the colour is matched too, not only the brightness (dcsvr_band_match_color).</summary>
+    public bool QuadBandMatchColor { get; init; }
     /// <summary>DLSS 5 over the whole focus area: its look (tone, colour, structure) fades out toward the focus edge with
     /// the focus area itself, so the focus area is not a disc of a different look. Cheeky's NR feather over the whole
     /// focus view (NrFoveated with NrWidth=1), as wide as the Quad Views edge band allows (Cheeky caps it at 0.3).</summary>

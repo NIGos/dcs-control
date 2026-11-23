@@ -891,6 +891,22 @@ Test("Triple frame generation writes the fork's triple_frame_gen and paces DCS a
     Require(ProfileValidation.Validate(new VrProfile { QuadPeripheryContrast = 1.5 }).Any(i => i.Code == "quad-periphery-contrast"));
     Require(ConfigurationWriters.QuadViews(new VrProfile()).Contains("dcsvr_sharpen_taper=1") && ConfigurationWriters.QuadViews(new VrProfile { QuadSharpenTaper = false }).Contains("dcsvr_sharpen_taper=0"));
     Require(ConfigurationWriters.QuadViews(new VrProfile()).Split('\n').Any(l => l.Trim() == "dcsvr_edge_match=0") && ConfigurationWriters.QuadViews(new VrProfile { QuadEdgeMatch = true }).Contains("dcsvr_edge_match=0.6"), "edge match off by default, 0.6 when on");
+    // Quad Views 0035-0037 (focus edge when the eyes jump): off by default, written as set, live.
+    static bool QLine(string text, string line) => text.Split('\n').Any(l => l.Trim() == line);
+    var jumpOff = ConfigurationWriters.QuadViews(new VrProfile { Gaze = GazeMode.EyeTracked });
+    Require(QLine(jumpOff, "dcsvr_temporal_saccade_reset=1") && QLine(jumpOff, "dcsvr_gaze_glide_ms=0") && QLine(jumpOff, "dcsvr_focus_fade_in=0")
+        && QLine(jumpOff, "dcsvr_band_match=0") && QLine(jumpOff, "dcsvr_band_match_color=0"), "eye-jump options off by default: Quad Views as before");
+    var jumpOn = ConfigurationWriters.QuadViews(new VrProfile { Gaze = GazeMode.EyeTracked, QuadGazeGlideMs = 40, QuadFocusFadeIn = 2, QuadKeepHistoryOnSaccade = true, QuadBandMatch = .5, QuadBandMatchColor = true });
+    Require(QLine(jumpOn, "dcsvr_temporal_saccade_reset=0") && QLine(jumpOn, "dcsvr_gaze_glide_ms=40") && QLine(jumpOn, "dcsvr_focus_fade_in=2")
+        && QLine(jumpOn, "dcsvr_band_match=0.5") && QLine(jumpOn, "dcsvr_band_match_color=1"), "eye-jump options written as set");
+    Require(QLine(ConfigurationWriters.QuadViews(new VrProfile { Gaze = GazeMode.Fixed, QuadGazeGlideMs = 40 }), "dcsvr_gaze_glide_ms=0")
+        && QLine(ConfigurationWriters.QuadViews(new VrProfile { QuadBandMatchColor = true }), "dcsvr_band_match_color=0"), "no glide with a fixed focus; colour only with band match");
+    Require(new[] { "dcsvr_temporal_saccade_reset", "dcsvr_gaze_glide_ms", "dcsvr_focus_fade_in", "dcsvr_band_match", "dcsvr_band_match_color" }
+        .All(k => LiveSettings.IsLiveKey("settings.cfg", "exe:DCS." + k, "1", null)) && !LiveSettings.IsLiveKey("settings.cfg", "exe:DCS.dcsvr_band_match", "1", null, current07: false),
+        "eye-jump keys apply live with a 0.7 Quad Views");
+    Require(new[] { "quadGazeGlideMs", "quadFocusFadeIn", "quadKeepHistoryOnSaccade", "quadBandMatch", "quadBandMatchColor" }.All(n => LiveSettings.Find(n) is not null && LiveSettings.Live07.Contains(n)),
+        "eye-jump settings are live fields (0.7 components)");
+    Require(ProfileValidation.Validate(new VrProfile { QuadGazeGlideMs = 500 }).Any(e => e.Code == "quad-gaze-glide") && ProfileValidation.Validate(new VrProfile { QuadBandMatch = 2 }).Any(e => e.Code == "quad-band-match"), "eye-jump ranges validated");
     {
         // Periphery stability: off by default; on only with the bundled Quad Views in a VR flight; strength 0..1 -> 0..80 ms.
         bool Line(string text, string line) => text.ReplaceLineEndings("\n").Split('\n').Any(l => l.Trim() == line);
@@ -6803,12 +6819,13 @@ Test("Live phase 2: the key lists match the components, and the tags follow the 
         Require(!LiveSettings.IsLiveKey(LiveSettings.QuadFile, "exe:DCS." + key, "1", null), key);
     // 0.7 (Quad Views 0026): the eye-tracking filter, Far depth's curve and key; only with a 0.7 install.
     var hpp07 = File.ReadAllText(Path.Combine(workspace, "native/quadviews/dcsvr_live.h"));
-    foreach (var key in new[] { "dcsvr_saccade_widening", "dcsvr_saccade_speed", "dcsvr_saccade_lead_ms", "dcsvr_saccade_max_extend", "dcsvr_saccade_hold_ms", "dcsvr_saccade_end_speed", "dcsvr_saccade_tail", "dcsvr_gaze_deadzone", "dcsvr_lost_ease_ms", "dcsvr_far_depth_preset", "dcsvr_far_depth_world_ipd", "dcsvr_far_depth_z0_m", "dcsvr_far_depth_gamma", "dcsvr_far_depth_toggle" })
+    foreach (var key in new[] { "dcsvr_saccade_widening", "dcsvr_saccade_speed", "dcsvr_saccade_lead_ms", "dcsvr_saccade_max_extend", "dcsvr_saccade_hold_ms", "dcsvr_saccade_end_speed", "dcsvr_saccade_tail", "dcsvr_gaze_deadzone", "dcsvr_lost_ease_ms", "dcsvr_far_depth_preset", "dcsvr_far_depth_world_ipd", "dcsvr_far_depth_z0_m", "dcsvr_far_depth_gamma", "dcsvr_far_depth_toggle",
+        "dcsvr_temporal_saccade_reset", "dcsvr_gaze_glide_ms", "dcsvr_focus_fade_in", "dcsvr_band_match", "dcsvr_band_match_color" })
         Require(LiveSettings.IsLiveKey(LiveSettings.QuadFile, "exe:DCS." + key, "1", null) && !LiveSettings.IsLiveKey(LiveSettings.QuadFile, "exe:DCS." + key, "1", null, current07: false) && hpp07.Contains('"' + key + '"'), key);
     // The text Quad Views gets has every live key the profile writes.
     var quadKeys = IniFile.Parse(ConfigurationWriters.QuadViews(new VrProfile())).Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.QuadFile, k, "1", null)).Count();
     var quadKeys06 = IniFile.Parse(ConfigurationWriters.QuadViews(new VrProfile())).Keys.Where(k => LiveSettings.IsLiveKey(LiveSettings.QuadFile, k, "1", null, current07: false)).Count();
-    Require(quadKeys == 19 && quadKeys06 == 8, "Quad Views writes " + quadKeys + " live keys, " + quadKeys06 + " for an older install");
+    Require(quadKeys == 24 && quadKeys06 == 8, "Quad Views writes " + quadKeys + " live keys, " + quadKeys06 + " for an older install");
     // OFXR: the NVIDIA flow keys, not the preset (R148: OFXR re-initialises the flow for it, DCS froze for 6.8 s); from 0.7
     // the headset panel's keys; the flow keys only when DCS started with NVIDIA frame generation.
     var ofxr = IniFile.Parse(ConfigurationWriters.Ofxr(new VrProfile { FrameGen = FrameGeneration.Nvidia }));
@@ -6837,7 +6854,8 @@ Test("Live phase 2: the key lists match the components, and the tags follow the 
     Require(!LiveSettings.AvailableFields(nvidia with { FrameGen = FrameGeneration.FidelityFx }, Journal(ProductInfo.Version, all)).Contains("nvidiaFlowScale"), "FidelityFX: the flow keys mean nothing");
     // 0.7: the eye-tracking refinements, Far depth's strength and key, the headset panel (whenever OFXR runs, FidelityFX
     // too); none of them for an install by an older app, whose Quad Views and OFXR read them at start.
-    string[] live07 = ["quadSaccadeLead", "quadSaccadeTail", "quadGazeStabilize", "quadLostGazeEase", "farDepthPreset", "farDepthToggleKey", "showOverlay", "headsetPanelPosition", "diagnosticVram"];
+    string[] live07 = ["quadSaccadeLead", "quadSaccadeTail", "quadGazeStabilize", "quadLostGazeEase", "farDepthPreset", "farDepthToggleKey", "showOverlay", "headsetPanelPosition", "diagnosticVram",
+        "quadGazeGlideMs", "quadFocusFadeIn", "quadKeepHistoryOnSaccade", "quadBandMatch", "quadBandMatchColor"];
     Require(LiveSettings.Live07.SetEquals(live07) && live07.All(tags.Contains), string.Join(", ", tags));
     var ffxTags = LiveSettings.AvailableFields(nvidia with { FrameGen = FrameGeneration.FidelityFx }, Journal(ProductInfo.Version, all));
     Require(ffxTags.Contains("showOverlay") && ffxTags.Contains("diagnosticVram") && ffxTags.Contains("headsetPanelPosition"), "FidelityFX: the panel is live");

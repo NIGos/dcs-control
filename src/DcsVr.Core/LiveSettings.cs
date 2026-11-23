@@ -72,6 +72,8 @@ public static class LiveSettings
         // 0.7 (Quad Views 0026): the eye-tracking refinements, Far depth's strength and its key. Far depth on/off waits. The
         // key's name on OFXR's panel (DCSVR_FARDEPTH_HOTKEY, read at launch) keeps the old key until the next launch.
         Q("quadSaccadeLead"), Q("quadSaccadeTail"), Q("quadGazeStabilize"), Q("quadLostGazeEase"), Q("farDepthPreset"), Q("farDepthToggleKey"),
+        // 0.7 (Quad Views 0035-0037): how the focus area follows a jump of the eyes and meets the periphery.
+        Q("quadGazeGlideMs"), Q("quadFocusFadeIn"), Q("quadKeepHistoryOnSaccade"), Q("quadBandMatch"), Q("quadBandMatchColor"),
         // 0.7: OFXR's headset panel. The FPS counter and the panel's corner are re-read with the panel (every 250 ms), the
         // VRAM counter by the live ini watcher (OFXR 0095). Not the panel's key (an environment variable read at launch)
         // or the smooth cursor (its pipelines and images are made before the first generated frame).
@@ -91,6 +93,7 @@ public static class LiveSettings
     public static IReadOnlySet<string> Live07 { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
         "quadSaccadeLead", "quadSaccadeTail", "quadGazeStabilize", "quadLostGazeEase", "farDepthPreset", "farDepthToggleKey",
+        "quadGazeGlideMs", "quadFocusFadeIn", "quadKeepHistoryOnSaccade", "quadBandMatch", "quadBandMatchColor",
         "showOverlay", "headsetPanelPosition", "diagnosticVram",
     };
 
@@ -173,6 +176,7 @@ public static class LiveSettings
     {
         "dcsvr_saccade_widening", "dcsvr_saccade_speed", "dcsvr_saccade_lead_ms", "dcsvr_saccade_max_extend", "dcsvr_saccade_hold_ms",
         "dcsvr_saccade_end_speed", "dcsvr_saccade_tail", "dcsvr_gaze_deadzone", "dcsvr_lost_ease_ms",
+        "dcsvr_temporal_saccade_reset", "dcsvr_gaze_glide_ms", "dcsvr_focus_fade_in", "dcsvr_band_match", "dcsvr_band_match_color",
         "dcsvr_far_depth_preset", "dcsvr_far_depth_world_ipd", "dcsvr_far_depth_z0_m", "dcsvr_far_depth_gamma", "dcsvr_far_depth_toggle",
     };
     // ofxr_bridge.ini keys of the headset panel (0.7): [overlay] position and panel_position, read with the panel every

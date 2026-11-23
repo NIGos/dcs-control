@@ -389,11 +389,15 @@ PupilShift	PupilShift	SimulateGazeXDeg
 PupilShift	PupilShift	SimulateGazeYDeg
 PupilShift	PupilShift	Toggle
 PupilShift	PupilShift	VirtualImageM
+QuadViews	exe:DCS	dcsvr_band_match
+QuadViews	exe:DCS	dcsvr_band_match_color
 QuadViews	exe:DCS	dcsvr_edge_match
 QuadViews	exe:DCS	dcsvr_far_depth
 QuadViews	exe:DCS	dcsvr_far_depth_preset
 QuadViews	exe:DCS	dcsvr_far_depth_toggle
+QuadViews	exe:DCS	dcsvr_focus_fade_in
 QuadViews	exe:DCS	dcsvr_gaze_deadzone
+QuadViews	exe:DCS	dcsvr_gaze_glide_ms
 QuadViews	exe:DCS	dcsvr_lost_ease_ms
 QuadViews	exe:DCS	dcsvr_periphery_sharpen
 QuadViews	exe:DCS	dcsvr_saccade_end_speed
@@ -408,6 +412,7 @@ QuadViews	exe:DCS	dcsvr_temporal
 QuadViews	exe:DCS	dcsvr_temporal_clip
 QuadViews	exe:DCS	dcsvr_temporal_debug
 QuadViews	exe:DCS	dcsvr_temporal_ramp_deg
+QuadViews	exe:DCS	dcsvr_temporal_saccade_reset
 QuadViews	exe:DCS	dcsvr_temporal_tau_ms
 QuadViews	exe:DCS	dcsvr_two_layers
 QuadViews	exe:DCS	dcsvr_two_layers_alpha

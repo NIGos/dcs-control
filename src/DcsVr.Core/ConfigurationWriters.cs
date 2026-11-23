@@ -519,6 +519,11 @@ public static class ConfigurationWriters
         dcsvr_temporal_ramp_deg=8
         dcsvr_temporal_clip=1
         dcsvr_temporal_debug=0
+        dcsvr_temporal_saccade_reset={(p.QuadKeepHistoryOnSaccade ? 0 : 1)}
+        dcsvr_gaze_glide_ms={(p.Gaze == GazeMode.EyeTracked ? Int(Math.Clamp(p.QuadGazeGlideMs, 0, 100)) : "0")}
+        dcsvr_focus_fade_in={Number(Math.Clamp(p.QuadFocusFadeIn, 0, 3))}
+        dcsvr_band_match={Number(Math.Clamp(p.QuadBandMatch, 0, 1))}
+        dcsvr_band_match_color={(p.QuadBandMatchColor && p.QuadBandMatch > 0 ? 1 : 0)}
         dcsvr_far_depth={(p.UsesFarDepth ? 1 : 0)}
         dcsvr_far_depth_preset={p.FarDepthPreset.ToString().ToLowerInvariant()}
         dcsvr_far_depth_toggle={(p.UsesFarDepth ? NeuralHotkeys.Environment(p.FarDepthToggleKey, NeuralHotkeys.FarDepthDefault) : "0:0")}
