@@ -904,7 +904,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                         if (await Task.Run(DcsProcess.EndStuck) is not { } ended) throw new InvalidOperationException("DCS is responding again, so it was not ended.");
                         int? elevatedExit = null; var declined = false;
                         // A DCS with administrator rights (GitHub #21): ended by the CLI with them, after one Windows prompt.
-                        if (ended.Denied > 0 && DcsProcess.AnyRunning() && DcsProcess.ElevatedEndStart() is { } elevated)
+                        if (ended.Denied > 0 && DcsProcess.AnyRunningHere() && DcsProcess.ElevatedEndStart() is { } elevated)
                         {
                             _status = "Asking Windows for permission to end DCS…";
                             (elevatedExit, declined) = await Task.Run(() =>
@@ -913,7 +913,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                                 catch (System.ComponentModel.Win32Exception e) when (e.NativeErrorCode == 1223) { return (null, true); } // the prompt was declined
                             });
                         }
-                        if (DcsProcess.EndFailure(ended, DcsProcess.AnyRunning(), elevatedExit, declined) is { } failure) { Invalidate(); _status = failure; throw new InvalidOperationException(failure); }
+                        if (DcsProcess.EndFailure(ended, DcsProcess.AnyRunningHere(), elevatedExit, declined) is { } failure) { Invalidate(); _status = failure; throw new InvalidOperationException(failure); }
                     }
                     Invalidate(); _status = "DCS ended."; break;
                 case "presetSave":

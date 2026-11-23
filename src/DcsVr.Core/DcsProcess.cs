@@ -4,7 +4,8 @@ using System.Runtime.InteropServices;
 namespace DcsVr.Core;
 
 /// <summary>One running DCS.exe: its process id and full image path (null when it cannot be read).</summary>
-public sealed record RunningDcs(int Pid, string? ImagePath);
+/// <param name="SessionId">Its Windows session; -1 when unknown (counted as this session's).</param>
+public sealed record RunningDcs(int Pid, string? ImagePath, int SessionId = -1);
 
 /// <summary>Crashed: DCS shows its own crash window in place of the game window (it answers Windows, so it is not NotResponding).</summary>
 public enum DcsHealth { NotRunning, Healthy, NoWindow, NotResponding, Crashed }
@@ -94,6 +95,10 @@ public static class DcsProcess
 
     public static bool AnyRunning() => Running().Count > 0;
 
+    /// <summary>A DCS of this Windows session runs (one whose session is unknown counts): what End DCS can end, so what
+    /// says whether it ended. Another signed-in user's DCS is left alone (<see cref="InThisSession(int)"/>).</summary>
+    public static bool AnyRunningHere() => Running().Any(r => r.SessionId < 0 || InThisSession(r.SessionId));
+
     /// <summary>How the running DCS looks from outside. Replaceable for tests, like <see cref="Provider"/>.</summary>
     public static Func<DcsHealth> HealthProvider { get; set; } = ReadHealth;
     public static DcsHealth Health() => HealthProvider();
@@ -155,7 +160,7 @@ public static class DcsProcess
     {
         if (EndStuck() is not { } result) { output.WriteLine("DCS is responding, so it was not ended."); return HealthyCode; }
         output.WriteLine($"DCS.exe ended: {result.Ended}, refused: {result.Denied}, still closing: {result.Lingering}.");
-        return AnyRunning() ? NotEndedCode : EndedCode;
+        return AnyRunningHere() ? NotEndedCode : EndedCode;
     }
 
     /// <summary>What End DCS tells the pilot when DCS is still running after it. <paramref name="result"/>: this app's own
@@ -248,7 +253,10 @@ public static class DcsProcess
                 string? image = null;
                 try { image = SystemPaths.ProcessImagePath(process.Id); }
                 catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or ArgumentException) { }
-                running.Add(new(process.Id, image));
+                var session = -1;
+                try { session = process.SessionId; }
+                catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException) { }
+                running.Add(new(process.Id, image, session));
             }
             return running;
         }

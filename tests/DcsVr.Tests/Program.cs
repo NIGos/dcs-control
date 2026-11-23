@@ -511,6 +511,13 @@ Test("Originals: a damaged or deleted baseline.json falls back to its previous c
     File.Delete(baseline);
     Require(store.ReadCurrent() is not null && store.Status() is { State: "applied", Count: 1 }, "A deleted record comes back from its copy");
     Require(store.RestoreOriginals().Complete && File.ReadAllText(dxgi) == "ReShade");
+    // A round trip through 0.6.6 (saves baseline.json, never .prev) leaves the copy behind: a record damaged after that
+    // shows the damaged state instead of adopting the outdated copy.
+    store.Apply(Plan("cheeky", Write(dxgi, "cheeky loader", bin)));
+    File.SetLastWriteTimeUtc(baseline + ".prev", DateTime.UtcNow.AddMinutes(-10));
+    File.WriteAllText(baseline, File.ReadAllText(baseline)[..40]);
+    Require(store.Status() is { State: "damaged", Problem: { } stale } && stale.Contains("older than the record"), "A stale copy is refused");
+    Require(store.ReadCurrent() is null, "Quick reads do not take the stale copy either");
 });
 Test("Back to stock DCS with a damaged record (and its copy) removes only DCS Control's own files and starts a new record", () =>
 {
@@ -1113,6 +1120,14 @@ Test("End DCS: a DCS Windows refuses to end (administrator rights, GitHub #21) i
         Require(DcsProcess.EndFromCommand(output) == DcsProcess.EndedCode, "the command ends a stuck DCS");
         DcsProcess.Ender = () => new(0, 1, 0); DcsProcess.Provider = () => [new(4242, null)];
         Require(DcsProcess.EndFromCommand(output) == DcsProcess.NotEndedCode, "and says when it could not");
+        // Another signed-in user's DCS is not this pilot's to end: it does not make the command report a failure.
+        using (var self = Process.GetCurrentProcess())
+        {
+            DcsProcess.Ender = () => new(1, 0, 0); DcsProcess.Provider = () => [new(4243, null, self.SessionId + 1)];
+            Require(DcsProcess.EndFromCommand(output) == DcsProcess.EndedCode && DcsProcess.AnyRunning() && !DcsProcess.AnyRunningHere(), "another session's DCS is not counted");
+            DcsProcess.Provider = () => [new(4243, null, self.SessionId + 1), new(4244, null, self.SessionId)];
+            Require(DcsProcess.EndFromCommand(output) == DcsProcess.NotEndedCode, "this session's DCS still running is");
+        }
     }
     finally { DcsProcess.HealthProvider = health; DcsProcess.Ender = ender; DcsProcess.Provider = provider; }
 });
@@ -1969,6 +1984,14 @@ Test("The diagnostic package collects DCS, component and headset logs as text, w
     var steamId = "7656119" + "8000000001";
     var steam = redact($"SteamInternal_SetMinidumpSteamID:  Caching Steam ID:  {steamId} [API loaded no] | [U:1:39734273] | frame {steamId}2 | 1234567890123456");
     Require(!steam.Contains(steamId + " ") && !steam.Contains("39734273") && steam.Contains("Steam ID:  <steam id> [API") && steam.Contains("[U:1:<id>]") && steam.Contains(steamId + "2") && steam.Contains("1234567890123456"), steam);
+    // A placeholder or short "serial" is removed at its label only, never from every number in every file; a real one
+    // is removed where it stands as a token, not inside a longer number.
+    var serials = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var learnt = Diagnostics.Redactor("pilot", @"C:\Users\pilot", "RIG-01", serials);
+    var placeholder = learnt("serial: 000000 | sn=1234567 | frame 1000000 took 12345678 us | build 2.9.31.1234567");
+    Require(serials.Count == 0 && placeholder.Contains("serial: <serial>") && placeholder.Contains("sn=<serial>") && placeholder.Contains("frame 1000000 took 12345678 us") && placeholder.Contains("2.9.31.1234567"), placeholder);
+    var real = learnt("serial: 20230417 | seen 20230417 | id 920230417 | 202304170 | map 20230417platMap");
+    Require(serials.SetEquals(["20230417"]) && real == "serial: <serial> | seen <serial> | id 920230417 | 202304170 | map <serial>platMap", real);
 });
 Test("The diagnostic package removes a headset serial everywhere, also where it is bare and was written before its label, and network addresses", () =>
 {
@@ -1986,6 +2009,17 @@ Test("The diagnostic package removes a headset serial everywhere, also where it 
     Require(!log.Contains("203.0.113.7") && !log.Contains("192.168.1.23") && !log.Contains("0A-1B-2C") && log.Contains("<ip>:443") && log.Contains("<mac>"), "addresses: " + log);
     Require(log.Contains("2.9.31.12345") && log.Contains("3.7.10.0") && log.Contains("127.0.0.1"), "versions and loopback stay: " + log);
     Require(!Read(zip, "pimax/PiService/PiService__1.log").Contains("PSX7TEST"), "labelled serial");
+    // Cheeky's crash log in DCS's %TEMP% and its rolled copy: start and last part only, redacted like the others.
+    var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+    Make("diag-serial/local/Temp/CheekyFoveatedDLSS_crash.log", "header pid 1 exe " + profile + @"\DCS.exe headset PSX7TEST00042" + "\n"
+        + string.Concat(Enumerable.Repeat("HOOKDBG first-chance 0xC0000005 at 0x7FF600001000\n", 40000)) + "last line\n");
+    Make("diag-serial/local/Temp/CheekyFoveatedDLSS_crash.prev.log", "older storm\n");
+    var withCrash = Path.Combine(root, "diag-serial/crash.zip");
+    var crashEntries = Diagnostics.CreatePackage(new(null, null, options, exe, RuntimeKind.Pimax, local, Path.Combine(root, "diag-serial/roaming")), "{}", withCrash);
+    var crash = Read(withCrash, "temp/CheekyFoveatedDLSS_crash.log");
+    Require(crash.StartsWith("header pid 1") && crash.TrimEnd().EndsWith("last line") && crash.Contains("bytes left out by the diagnostic package") && crash.Length < 1200 * 1024
+        && !crash.Contains(profile, StringComparison.OrdinalIgnoreCase) && !crash.Contains("PSX7TEST") && crashEntries.Single(e => e.Name == "temp/CheekyFoveatedDLSS_crash.log").Truncated, "crash log: " + crash[..200]);
+    Require(Read(withCrash, "temp/CheekyFoveatedDLSS_crash.prev.log").Contains("older storm"), "the rolled crash log");
     // SteamVR (Sboys route): the active HMD and the serial property name it without a serial label.
     var steamSettings = Make("diag-serial/steam/config/steamvr.vrsettings", "{ }");
     Make("diag-serial/steam/logs/vrserver.txt", "Tue Nov 03 2026 10:00:00.000 - Active HMD set to lighthouse.LHR-9F00TEST\nProp_SerialNumber_String = 'TESTCTRL0071'\nActive HMD set to null.Null Serial Number");
@@ -3573,6 +3607,16 @@ Test("Checks say when the engine module's build-specific parts stayed off, also 
     // Depth boost's dual camera on a build whose G-buffer pass it does not know: off, said on the Engine page and in Checks.
     File.AppendAllText(log, "21:08:00.000 cockpit ipd: build mismatch (G-buffer pass execute not hooked); off\n");
     Require(EngineOptimizations.Read(options, null, false).VersionWarnings.Single().Contains("Depth boost is off"), "dual camera build mismatch");
+    // A safety check that latched in flight is not a DCS version problem: Engine page only, not the Checks line.
+    File.AppendAllText(log, "21:09:00.000 shadow recorder: verify mismatch latched; off\n21:09:01.000 frame heap: exception 0xc0000005 contained; off\n");
+    var latched = EngineOptimizations.Read(options, null, false);
+    Require(latched.VersionWarnings.Count == 1 && latched.Warnings.Any(w => w.StartsWith("Multi-threaded shadow recorder turned itself off: one of its safety checks failed", StringComparison.Ordinal))
+        && latched.Warnings.Any(w => w.StartsWith("Frame memory per thread turned itself off: one of its safety", StringComparison.Ordinal)), "latched: " + string.Join(" | ", latched.Warnings));
+    Require(Readiness.Check(frameGen, inventory, service).Checks.Single(c => c.Id == "engine-dcs-version") is var dv && !dv.Detail.Contains("shadow recorder") && !dv.Detail.Contains("Frame memory"), "Checks line without the latches");
+    // A part whose code bytes do not match the analysed build is one.
+    File.AppendAllText(log, "21:09:02.000 model allocator: Visualizer.dll code does not match the analysed build; off\n");
+    var build = EngineOptimizations.Read(options, null, false);
+    Require(build.VersionWarnings.Count == 2 && build.VersionWarnings.Any(w => w.StartsWith("Model data allocator turned itself off: it does not recognise this DCS version", StringComparison.Ordinal)), "build mismatch: " + string.Join(" | ", build.VersionWarnings));
     // HUD after DLSS: the autoexec.cfg of the selected Saved Games folder (an open beta here), not always Saved Games\DCS.
     var hud = Readiness.Check(new VrProfile { NeuralRendering = true }, inventory, service).Checks.Single(c => c.Id == "hud-after-dlss");
     Require(hud.Detail.Contains(Path.Combine("DCS.openbeta", "Config", "autoexec.cfg")) && !hud.Detail.Contains(@"Saved Games\DCS\Config"), hud.Detail);

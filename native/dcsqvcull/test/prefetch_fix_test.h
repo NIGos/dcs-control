@@ -259,6 +259,46 @@ void Modes(void** imp, void* impKernel) {
     Check(pffix::g_capSleeps.load() == sl2, "prefetch spin cap: off at 0");
     pffix::t_capSkips = 0;
   }
+  // The render thread without pass timing (AMD: no D3D11 command lists, so ptiming::Install never runs): the quad-view
+  // collect thread is used; it wins over a top-level pass thread that may be a loading thread; unknown logs once.
+  {
+    const uint32_t cap0 = pffix::g_spinCap.load();
+    pffix::g_spinCap = 600;
+    Check(pffix::PickNoSleepTid(0, 0) == 0 && pffix::PickNoSleepTid(7, 0) == 7 && pffix::PickNoSleepTid(0, 9) == 9 &&
+              pffix::PickNoSleepTid(7, 9) == 7,
+          "prefetch spin cap: render thread = quad-view collect thread, else pass timing's, else unknown");
+    pffix::UpdateNoSleepTid(1234, 0);
+    Check(pffix::g_noSleepTid.load() == 1234, "prefetch spin cap: render thread known without pass timing");
+    pffix::g_unknownLogged = false;
+    pffix::g_unknownSec = 0;
+    bool logged = false;
+    int at = 0;
+    for (int s = 1; s <= 2 * static_cast<int>(pffix::kUnknownLogSec) && !logged; ++s) {
+      ProbeStored(g_buffer + 8192, 4096);  // DCS calls the hook this second
+      logged = pffix::UpdateNoSleepTid(0, 0);
+      at = s;
+    }
+    Check(logged && at == static_cast<int>(pffix::kUnknownLogSec) && pffix::g_noSleepTid.load() == 0,
+          "prefetch spin cap: unknown render thread logged after kUnknownLogSec streaming seconds, nobody sleeps");
+    ProbeStored(g_buffer + 8192, 4096);
+    Check(!pffix::UpdateNoSleepTid(0, 0), "prefetch spin cap: the unknown line is logged once");
+    pffix::g_unknownLogged = false;
+    pffix::g_unknownSec = 0;
+    bool any = false;
+    for (int s = 0; s < 2 * static_cast<int>(pffix::kUnknownLogSec); ++s) any |= pffix::UpdateNoSleepTid(0, 0);
+    Check(!any, "prefetch spin cap: no line while DCS does not call the hook");
+    pffix::g_spinCap = 0;
+    any = false;
+    for (int s = 0; s < 2 * static_cast<int>(pffix::kUnknownLogSec); ++s) {
+      ProbeStored(g_buffer + 8192, 4096);
+      any |= pffix::UpdateNoSleepTid(0, 0);
+    }
+    Check(!any, "prefetch spin cap: no line with SpinCap 0");
+    pffix::g_unknownLogged = false;
+    pffix::g_unknownSec = 0;
+    pffix::g_noSleepTid = 0;
+    pffix::g_spinCap = cap0;
+  }
   pffix::Apply(pffix::kSkip, 1000);
 }
 
