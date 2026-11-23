@@ -95,6 +95,8 @@ the first one's file. The rig's scripts read it (`tools\rig`).
 - The components (Quad Views, OFXR, Cheeky) are not rebuilt by a release: it takes them as built and refuses one
   that is older than its inputs (`scripts/build-stamp.ps1` lists the inputs of each). An edit to one of those files,
   a comment included, means a rebuild of that component and its tests.
+- Before a release is published, the release flight matrix must pass: `tools/release-matrix/run-matrix.ps1` with the
+  package's CLI and `-Baseline` set to the previous release's `results.json` (see [its README](../tools/release-matrix/README.md)).
 - Before a commit: `pwsh -File scripts/check-personal-data.ps1`. No user path, e-mail address or key belongs in the
   repository, in a release or in the sources ZIP.
 

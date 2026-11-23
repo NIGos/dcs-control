@@ -29,6 +29,11 @@
 #   -QuietLock     DCSC_QUIET_LOCK         the quiet-machine lock file; default <repo>\artifacts\.lane\quiet.lock. A second
 #                                          checkout or worktree on the same machine names the first one's file here, so
 #                                          that there is one lock for the machine
+#   -Cli           DCSC_CLI                DcsVr.Cli.exe to apply / restore with (a package under test); default the installed one
+# Schedule actions for the engine's test suite (no input, no focus): `suite` (the app's EngineOptimizations.StartSuite
+# from the DcsVr.Core.dll next to the CLI), `waitsuite` { seconds, count } (until DcsQvCull.log shows the Nth suite end;
+# fails when DCS is gone or wrote a new dcs.*.crash), `devini` { path, section, key, value, settle } (one key of a
+# developer ini OUTSIDE Saved Games; the module hot-reloads it). An arm may name its own "mission".
 # The installed DCS Control (CLI and state) is found under %LOCALAPPDATA%, as the app itself does.
 #
 # What it does per flight: profile = the backup draft + overrides, applied with the INSTALLED CLI; a COPY of the
@@ -57,7 +62,11 @@ param([Parameter(Mandatory)][string]$Scenario, [string]$Arm, [switch]$Both, [swi
   # Where things are on this machine (see the head of the file): parameter, else environment variable, else default.
   [string]$StateBackup = $env:DCSC_RIG_STATE_BACKUP, [string]$MissionDir = $env:DCSC_RIG_MISSIONS, [string]$RunsDir = $env:DCSC_RIG_RUNS,
   [string]$TapDir = $env:DCSC_RIG_TAP_DIR, [string]$SavedGamesDcs = $env:DCSC_SAVED_GAMES_DCS, [string]$PimaxCtl = $env:DCSC_PIMAX_CTL,
-  [string]$PimaxClient = $env:DCSC_PIMAX_CLIENT, [string]$PimaxReboot = $env:DCSC_PIMAX_REBOOT, [string]$QuietLock = $env:DCSC_QUIET_LOCK)
+  [string]$PimaxClient = $env:DCSC_PIMAX_CLIENT, [string]$PimaxReboot = $env:DCSC_PIMAX_REBOOT, [string]$QuietLock = $env:DCSC_QUIET_LOCK,
+  # -Cli (DCSC_CLI): the DcsVr.Cli.exe of the package under test instead of the installed one (its DcsVr.Core.dll next to it
+  # runs the `suite` action). -NoLock: the caller already holds the quiet lock (tools\release-matrix\run-matrix.ps1).
+  # -StopOnFailure: a failed flight (crash, DCS gone, FLY not confirmed) ends the run: no further arms are flown.
+  [string]$Cli = $env:DCSC_CLI, [switch]$NoLock, [switch]$StopOnFailure)
 $ErrorActionPreference = 'Stop'
 if ($FlyArms) { $FlyArms = @($FlyArms | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }      # pwsh -File hands a list over as one string
 $Rig     = [IO.Path]::GetFullPath($PSScriptRoot)
@@ -65,7 +74,7 @@ $Repo    = [IO.Path]::GetFullPath((Join-Path $Rig '..\..'))
 $RigData = Join-Path $Repo 'artifacts\rig'      # what a run leaves behind: git-ignored, never under tools\
 $Runs    = if ($RunsDir) { [IO.Path]::GetFullPath($RunsDir) } else { Join-Path $RigData 'runs' }
 $Backup  = if ($StateBackup) { [IO.Path]::GetFullPath($StateBackup) } else { $null }
-$Cli     = Join-Path $env:LOCALAPPDATA 'Programs\DcsControl\files\DcsVr.Cli.exe'
+$Cli     = if ($Cli) { [IO.Path]::GetFullPath($Cli) } else { Join-Path $env:LOCALAPPDATA 'Programs\DcsControl\files\DcsVr.Cli.exe' }
 $State   = Join-Path $env:LOCALAPPDATA 'DcsControl'
 if (-not $SavedGamesDcs) { $SavedGamesDcs = Join-Path $env:USERPROFILE 'Saved Games\DCS' }
 $QvLog   = Join-Path $SavedGamesDcs 'Scripts\DcsQvCull\DcsQvCull.log'
@@ -710,6 +719,34 @@ function Do-Action([string]$RunDir, $Rec, $A) {
       $Rec.stretches += [ordered]@{ zone = [string]$A.zone; start = $start.ToString('o'); end = (Get-Date).ToString('o'); box = "centre $([Math]::Round($fb.cx, 3)),$([Math]::Round($fb.cy, 3)) half $([Math]::Round($fb.hw, 3)),$([Math]::Round($fb.hh, 3)) of DCS's window ($($fb.from))" }
     }
     'focus' { Focus-Dcs | Out-Null }
+    'suite' {   # the app's own "Run test suite" (EngineOptimizations.StartSuite of the DcsVr.Core.dll next to the CLI)
+      $core = Join-Path (Split-Path $Cli -Parent) 'DcsVr.Core.dll'; $d = Get-Content (Join-Path $State 'draft.json') -Raw | ConvertFrom-Json
+      if (-not (Test-Path -LiteralPath $core)) { throw "suite: DcsVr.Core.dll not found next to the CLI ($core)" }
+      $cmd = "Add-Type -Path '$($core.Replace("'", "''"))'; [DcsVr.Core.EngineOptimizations]::StartSuite('$(([string]$d.options).Replace("'", "''"))', `$true)"
+      $o = & pwsh -NoProfile -Command $cmd 2>&1 | Out-String
+      Note "$($Rec.run) test suite requested through the app's StartSuite: $($o.Trim())"
+    }
+    'waitsuite' {   # until the module logs the Nth suite end of this DCS session ({ count }, default 1) or { seconds } pass
+      $tw = Get-Date; $max = [double]$(if ($A.seconds) { $A.seconds } else { 900 }); $done = $false
+      $want = [int]$(if ($A.count) { $A.count } else { 1 }); $logs = Join-Path $SavedGamesDcs 'Logs'; $t0 = [datetime]$Rec.started
+      while (((Get-Date) - $tw).TotalSeconds -lt $max) {
+        if ([regex]::Matches((Read-Shared $QvLog), '==== suite (finished|aborted)').Count -ge $want) { $done = $true; break }
+        if (-not (Get-Process DCS -ErrorAction SilentlyContinue)) { throw 'DCS is gone while the suite runs' }
+        $crash = @(Get-ChildItem -LiteralPath $logs -Filter 'dcs.*.crash' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt $t0 })
+        if ($crash.Count) { throw "DCS crashed while the suite runs ($($crash[0].Name))" }
+        Start-Sleep 5
+      }
+      $how = [regex]::Matches((Read-Shared $QvLog), '==== suite (finished|aborted)') | Select-Object -Last 1
+      Note "$($Rec.run) suite $(if ($done) { "ended ($($how.Groups[1].Value))" } else { 'NOT ended' }) after $([int]((Get-Date) - $tw).TotalSeconds) s"
+      if (-not $done) { throw "the suite did not end within $max s" }
+    }
+    'devini' {   # one key of the developer ini (outside Saved Games; the module hot-reloads it): { path, section, key, value, settle }
+      $p = [IO.Path]::GetFullPath([string]$A.path)
+      if ($p.StartsWith([IO.Path]::GetFullPath($SavedGamesDcs), [StringComparison]::OrdinalIgnoreCase)) { throw "devini: $p is under Saved Games: never written by hand" }
+      Edit-IniFile $p ([string]$A.section) ([pscustomobject]@{ ([string]$A.key) = [string]$A.value })
+      Note "$($Rec.run) developer ini: [$($A.section)] $($A.key)=$($A.value) written"
+      if ($A.settle) { Start-Sleep ([int]$A.settle) }
+    }
     'key' { Focus-Dcs | Out-Null; Key-Tap ([byte]$A.vk) ([byte[]]@($A.mods | Where-Object { $_ })) }
     'shot' {
       $png = Join-Path $RunDir "$($A.name).png"; Shot-Dcs $png | Out-Null
@@ -749,9 +786,15 @@ function Stop-RigFlight([string]$RunDir, $Rec, [string]$CopyDir) {
   if ($Rec.autostartFlag) { Remove-Item -LiteralPath $Rec.autostartFlag -Force -ErrorAction SilentlyContinue }   # disarmed before DCS closes
   $t0 = [datetime]$Rec.started
   $p = Get-Process DCS -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($p) { $p.CloseMainWindow() | Out-Null; if (-not $p.WaitForExit(90000)) { Note "$($Rec.run) DCS did not close in 90 s: killed"; $p | Stop-Process -Force -Confirm:$false } else { Note "$($Rec.run) DCS closed normally" } } else { Note "$($Rec.run) DCS was not running at stop" }
+  if ($p) { $p.CloseMainWindow() | Out-Null; if (-not $p.WaitForExit(90000)) { Note "$($Rec.run) DCS did not close in 90 s: killed"; $Rec['killed'] = $true; $p | Stop-Process -Force -Confirm:$false } else { Note "$($Rec.run) DCS closed normally" } } else { Note "$($Rec.run) DCS was not running at stop"; $Rec['goneAtStop'] = $true }
   Start-Sleep 8
   Copy-Item -LiteralPath $QvLog -Destination (Join-Path $RunDir 'DcsQvCull.log') -Force -ErrorAction SilentlyContinue
+  # the engine's suite reports and side files of this flight, copied (read only there) before the restore can remove them
+  $modDir = Split-Path $QvLog -Parent; $md = Join-Path $RunDir 'module'
+  $kept = @(Get-ChildItem -LiteralPath $modDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(report_.*\.txt|.*\.csv|DcsQvCullPrefetch\.log)$' -and $_.LastWriteTime -gt $t0 })
+  if ($kept.Count) { New-Item -ItemType Directory -Force $md | Out-Null; $kept | Copy-Item -Destination $md -Force; Note "$($Rec.run) module files kept: $(($kept | ForEach-Object { "$($_.Name) $($_.Length)" }) -join ', ')" }
+  $crash = @(Get-ChildItem -LiteralPath (Join-Path $SavedGamesDcs 'Logs') -Filter 'dcs.*.crash' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt $t0 })
+  if ($crash.Count) { $Rec['crash'] = $crash[0].Name; Note "$($Rec.run) DCS CRASH file written during this flight: $($crash[0].Name)" }
   Copy-Item -LiteralPath $DcsLog -Destination (Join-Path $RunDir 'dcs.log') -Force -ErrorAction SilentlyContinue
   foreach ($q in @(Get-ChildItem $env:LOCALAPPDATA -Filter '*quad*views*' -Directory -ErrorAction SilentlyContinue)) { Get-ChildItem $q.FullName -Filter *.log | ForEach-Object { Copy-Item $_.FullName (Join-Path $RunDir ('qv_' + $_.Name)) -Force } }
   Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Pimax\runtime\pvr_srv_log_*.txt') -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName (Join-Path $RunDir 'pvr_srv_log.txt') -Force }
@@ -765,6 +808,7 @@ function Flight([string]$RunName, $ScBase, $ArmDef, [bool]$Option) {
   $Sc = $ScBase | ConvertTo-Json -Depth 10 | ConvertFrom-Json
   foreach ($sec in 'ofxr', 'diagnostics', 'quadviews', 'tapEnv') { if ($ArmDef.$sec) { if (-not $Sc.$sec) { $Sc | Add-Member -NotePropertyName $sec -NotePropertyValue ([pscustomobject]@{}) -Force }; foreach ($p in $ArmDef.$sec.PSObject.Properties) { $Sc.$sec | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force } } }
   if ($ArmDef.schedule) { $Sc.schedule = $ArmDef.schedule }; if ($null -ne $ArmDef.seconds) { $Sc.seconds = $ArmDef.seconds }
+  if ($ArmDef.mission) { $Sc.mission = $ArmDef.mission }   # a mission per arm
   # an arm's "tracked" block (schedule, quadviews, ofxr) replaces / tops the above when the headset is tracked at this moment
   # (slam warning flags 0: pose pitched on the stand, the cockpit lower in the view) (B2 round, 2026-11-16)
   $trackedNow = -not ((Slam) -match 'slam warning flags: 1')
@@ -805,6 +849,8 @@ function Flight([string]$RunName, $ScBase, $ArmDef, [bool]$Option) {
     $left = [double]$Sc.seconds - ((Get-Date) - $flyAt).TotalSeconds; if ($left -gt 0) { Start-Sleep ([int]$left) }
     Note ("$RunName perf lines: " + ((((Read-Shared $QvLog) -split "`n" | Select-String ' perf: fps' | Select-Object -Last 8 | ForEach-Object { ($_.Line -replace ' ft .*verdict=', ' ' -replace ' \(.*', '') }) -join ' | ')))
     Stop-RigFlight $run $rec $copy
+    if ($rec['crash']) { throw "DCS crashed during the flight ($($rec['crash']))" }
+    if ($rec['killed'] -and $StopOnFailure) { throw 'DCS did not close by itself (killed after 90 s)' }
     # after DCS has closed: every capture must be complete, then the verdicts
     $flight = Get-ChildItem -LiteralPath $run -Filter 'ofxr-bridge-flight-*.log' | Sort-Object Length -Descending | Select-Object -First 1
     foreach ($cap in @(Get-ChildItem -LiteralPath (Join-Path $run 'tap') -Directory -Filter 'cap*' -ErrorAction SilentlyContinue)) {
@@ -848,7 +894,9 @@ foreach ($x in @($sc.schedule | Sort-Object { [double]$_.at })) { Write-Host (" 
 foreach ($x in @($sc.sideEffects | Where-Object { $_ })) { Write-Host "  side effect: $x" }
 # checks that need nothing running
 $problems = @()
-if (-not (Test-Path -LiteralPath $Cli)) { $problems += "installed CLI missing: $Cli" }
+if (-not (Test-Path -LiteralPath $Cli)) { $problems += "CLI missing: $Cli" }
+$allActs = @($sc.schedule) + @($arms | ForEach-Object { $_.schedule }) | Where-Object { $_ }
+if (@($allActs | Where-Object { $_.do -eq 'suite' }).Count -and -not (Test-Path -LiteralPath (Join-Path (Split-Path $Cli -Parent) 'DcsVr.Core.dll'))) { $problems += "the schedule runs the suite but DcsVr.Core.dll is not next to the CLI ($Cli)" }
 if (-not (Test-Path -LiteralPath $TapDll) -or -not (Test-Path -LiteralPath (Join-Path $TapDir "$TapName.json"))) { $problems += "capture layer not found in $TapDir (-TapDir or DCSC_RIG_TAP_DIR; build it with tools\rig\build-capture-layer.ps1)" }
 elseif ([string]((Get-Content (Join-Path $TapDir "$TapName.json") -Raw | ConvertFrom-Json).api_layer.library_path) -ne $TapDll) { $problems += 'capture layer manifest points elsewhere: rebuild' }
 if (-not $Backup) { $problems += 'no user-state backup folder given (-StateBackup or DCSC_RIG_STATE_BACKUP)' }
@@ -871,10 +919,13 @@ $pimaxWasOpen = [bool](Get-Process PimaxClient -ErrorAction SilentlyContinue)
 $screenOffBefore = $null      # read under -Prep, just before the key is set to 0
 try {
   # quiet lock (artifacts\.lane\README.md): wait while another holds it, then take it
-  $t0 = Get-Date; while (Test-Path -LiteralPath $Lock) { if (((Get-Date) - $t0).TotalMinutes -gt 60) { throw "quiet.lock still held after 60 min: $(Get-Content -LiteralPath $Lock -TotalCount 1)" }; Write-Host "quiet.lock held ($(Get-Content -LiteralPath $Lock -TotalCount 1)): waiting"; Start-Sleep 20 }
+  if ($NoLock) { Note 'quiet lock: held by the caller (-NoLock)' }
+  $t0 = Get-Date; while (-not $NoLock -and (Test-Path -LiteralPath $Lock)) { if (((Get-Date) - $t0).TotalMinutes -gt 60) { throw "quiet.lock still held after 60 min: $(Get-Content -LiteralPath $Lock -TotalCount 1)" }; Write-Host "quiet.lock held ($(Get-Content -LiteralPath $Lock -TotalCount 1)): waiting"; Start-Sleep 20 }
   while (Get-Process cl, link, MSBuild, ninja, ctest -ErrorAction SilentlyContinue) { Write-Host 'a build or test is running: waiting'; Start-Sleep 20 }
+  if (-not $NoLock) {
   [IO.Directory]::CreateDirectory((Split-Path $Lock -Parent)) | Out-Null      # a fresh clone or a worktree has no artifacts\.lane yet
 Set-Content -LiteralPath $Lock -Value "rig scenario $($sc.name) (live flight, run-scenario.ps1), started $(Get-Date -Format HH:mm), expected $([int](($options.Count * $(if ($FlyArms) { $FlyArms.Count } else { 1 }) * ([double]$sc.seconds + 150) + 240) / 60) + 1) minutes"; $lockMine = $true
+  }
   Note "==== scenario $($sc.name), arm $($armDef.name), flights $($options.Count); quiet lock held"
   foreach ($n in $StateFiles) { $to = Join-Path $snapshot $n; [IO.Directory]::CreateDirectory((Split-Path $to -Parent)) | Out-Null; Copy-Item -LiteralPath (Join-Path $State $n) -Destination $to -Force }
   foreach ($n in $StateFiles) { if ((Sha (Join-Path $State $n)) -ne (Sha (Join-Path $Backup $n))) { Note "note: $n already differs from user-state-backup before this run (the profile used is the BACKUP draft)" } }
@@ -894,7 +945,7 @@ Set-Content -LiteralPath $Lock -Value "rig scenario $($sc.name) (live flight, ru
   }
   $armList = @($armDef); if ($FlyArms) { $armList = @(foreach ($n in $FlyArms) { $d = $arms | Where-Object { $_.name -eq $n } | Select-Object -First 1; if (-not $d) { throw "arm '$n' not in the scenario (have: $($arms.name -join ', '))" }; $d }) }
   # an arm may name its own flights ("options": [true, false] = option ON then its twin; [true] = ON only) (B2 round, 2026-11-16)
-  foreach ($ad in $armList) { foreach ($opt in $(if ($null -ne $ad.options) { @($ad.options | ForEach-Object { [bool]$_ }) } else { $options })) { Flight ("{0}_{1}_{2}_{3}" -f $sc.name, $ad.name, $stamp, $(if ($opt) { 'on' } else { 'off' })) $sc $ad $opt } }
+  foreach ($ad in $armList) { if ($StopOnFailure -and $Script:Failed.Count) { Note "a flight failed ($($Script:Failed[0])): no further arms (-StopOnFailure)"; break }; foreach ($opt in $(if ($null -ne $ad.options) { @($ad.options | ForEach-Object { [bool]$_ }) } else { $options })) { Flight ("{0}_{1}_{2}_{3}" -f $sc.name, $ad.name, $stamp, $(if ($opt) { 'on' } else { 'off' })) $sc $ad $opt } }
 } catch { Note "run FAILED: $_"; $Script:Failed.Add("run: $_") }
 finally {
   $p = Get-Process DCS -ErrorAction SilentlyContinue | Select-Object -First 1

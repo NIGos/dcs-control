@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "name": "release-matrix",
+  "about": "Fixed release flight matrix: per scene one DCS start, the engine's in-flight test suite with one A/B per engine part (render-thread CPU per frame, p95 frame time, process CPU). Changing anything here makes results incomparable with earlier baselines: bump 'version' when you do.",
+  "version": 1,
+  "foveatedFrameGen": true,
+  "simGaze": "mode=fixed;x=0;y=0",
+  "missions": {
+    "dense": { "file": "qvbench_i23_f16_ap_map.miz", "sha256": "7ed8eb26548e4711b21db32e9b633c61dc15a437d1cafbc4a20115974849afb5", "theatre": "Caucasus", "note": "F-16 on ALT HOLD autopilot; the F10 map opens at model time 60-87 s, so the suite starts at FLY+95 s" },
+    "sparse": { "file": "qvbench_ff_land.miz", "sha256": "d619e5281a271d29a2b5cf3caa95aa102e210d32b118c84c4a81f55f2e9a7b26", "theatre": "Germany", "note": "F-16 low level; ~75 periphery renderables" }
+  },
+  "scenes": [
+    { "id": "atmosx-dense",  "atmosx": true,  "mission": "dense",  "suiteAt": 95 },
+    { "id": "atmosx-sparse", "atmosx": true,  "mission": "sparse", "suiteAt": 30 },
+    { "id": "stock-dense",   "atmosx": false, "mission": "dense",  "suiteAt": 95 },
+    { "id": "stock-sparse",  "atmosx": false, "mission": "sparse", "suiteAt": 30 }
+  ],
+  "suite": {
+    "ini": {
+      "Suite": {
+        "Quick": "1",
+        "PassTimelineSec": "0",
+        "WaterSkipTiming": "8",
+        "BenchSplitFilter": "1",
+        "BenchPrefetch": "1",
+        "BenchShadowRecorder": "1",
+        "BenchGBufferRecorder": "1",
+        "BenchEngine": "1"
+      },
+      "Bench": { "Blocks": "16", "BlockSec": "5", "PassMs": "1" }
+    },
+    "waitSeconds": 1200
+  },
+  "parts": [
+    { "id": "water",          "kind": "water", "label": "W1 skip hidden water (timing pairs)",  "offArm": "SkipHiddenWater=0", "benchMode": "W1" },
+    { "id": "splitFilter",    "kind": "bench", "label": "split-path D3D11 state filter",       "offArm": "stock", "benchMode": 27, "bench": "^split-path D3D11 state filter" },
+    { "id": "prefetch",       "kind": "bench", "label": "terrain prefetch fix, observe -> skip", "offArm": "observe (hook installed, no skip)", "benchMode": 33, "bench": "^terrain prefetch fix" },
+    { "id": "shadowRecorder", "kind": "bench", "label": "shadow recorder",                     "offArm": "stock", "benchMode": 28, "bench": "^shadow recorder" },
+    { "id": "gbufferRecorder","kind": "bench", "label": "G-buffer recorder",                   "offArm": "stock", "benchMode": 29, "bench": "^g-buffer recorder \\(" },
+    { "id": "engine",         "kind": "bench", "label": "engine on vs off (all parts)",        "offArm": "stock", "benchMode": 11, "bench": "^all engine optimizations" }
+  ],
+  "metrics": {
+    "render_thread_ms": { "csv": "render_thread_cpu_ms_per_frame", "waterCsv": "render_thread_cpu_ms" },
+    "p95_ms":           { "csv": "p95_ms" },
+    "process_cpu_ms":   { "csv": "process_cpu_ms_per_frame" },
+    "pass_ms":          { "csv": "pass_ms_per_frame", "waterCsv": "top_pass_ms" },
+    "fps":              { "csv": "fps" },
+    "gpu_period_ms":    { "waterCsv": "gpu_period_ms" }
+  },
+  "gate": {
+    "regressionMetrics": [ "render_thread_ms", "p95_ms" ],
+    "regressionSeFactor": 2.0,
+    "regressionFloorPct": 3.0,
+    "costMetric": "render_thread_ms",
+    "costMaxPct": 2.0,
+    "costSeFactor": 2.0
+  }
+}
