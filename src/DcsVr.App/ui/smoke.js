@@ -10,7 +10,7 @@ window.runWebSmoke = async function() {
     'neuralRendering','neuralRuntimePath','keepOtherDxgi','neuralFocusArea','quadNeuralEdgeFade','neuralWorkingScale','neuralBeforeUpscaling','neuralIntensity','neuralStyle',
     'focusDlssPreset','peripheryDlssPreset','foveatedDlss','foveaWidth','foveaHeight','peripheralScale','neuralLocalTone','neuralLocalStructure','neuralSkinStructure','neuralAutomaticMask','neuralUiCorrection','neuralColorStrength',
     'neuralTransferStrength','neuralPaperWhiteScale','neuralBrightnessMatch','neuralDepth','neuralMotionScaleX','neuralMotionScaleY',
-    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenDeepPipeline','frameGenParallelEyes','frameGenFoveated','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
+    'frameGen','frameGenFactor','frameGenAdaptiveCadence','frameGenPassThrough','frameGenFoveated','frameGenDeepPipeline','frameGenParallelEyes','fpsLimit','renderedFpsCap','refreshFromHeadset','headsetRefreshHz','disableDcsVSync',
     'frameGenHudSymbology','smoothCursor','nvidiaFlowScale','flowPreset','bidirectionalFlow','showOverlay','diagnosticRecorder','diagnosticFrameRecords','frameGenAsyncArm',
     'cpuBoost','boostDcsPriority','boostMoveVrRuntime','boostMoveBackgroundApps','boostBackgroundApps','boostElevated','freeVram','freeVramApps','freeVramReopen',
     'freeVramForce','pauseTobiiDesktop','smallDcsWindow','lowerMonitor','flightDisplayMode',
@@ -380,7 +380,7 @@ window.runWebSmoke = async function() {
         && why({...base,engineOptimizations:false}) === 'Turn on Engine Optimizations to change these.'
         && fs.every(f => f.condition(base) && !f.condition({...base,engineOptimizations:false}))); }
     { const lists = $('setting-engineRecordersEmulatedLists');
-      check('Multi-threaded shadows and G-buffer without driver support: on the Engine page, off by default, hidden on NVIDIA with command lists, not live',lists && ui.fields.find(f => f.path === 'engineRecordersEmulatedLists').page === 'engine' && ui.profile.engineRecordersEmulatedLists === false && (ui.state?.gpu?.amdOnly || lists.hidden) && !(ui.state?.liveFields || []).includes('engineRecordersEmulatedLists')); }
+      check('Multi-threading without driver support: on the Engine page, off by default, hidden on NVIDIA with command lists, not live',lists && ui.fields.find(f => f.path === 'engineRecordersEmulatedLists').page === 'engine' && ui.profile.engineRecordersEmulatedLists === false && (ui.state?.gpu?.amdOnly || lists.hidden) && !(ui.state?.liveFields || []).includes('engineRecordersEmulatedLists')); }
     { const prewarm = $('setting-engineShaderCachePrewarm'), threads = $('setting-engineShaderCompileWorkers');
       check('Shader preparation sits in the Engine page\'s Advanced fold: menu prep on, Auto threads by default, not live',prewarm && threads && prewarm.closest('details') && prewarm.closest('details') === threads.closest('details') && prewarm.closest('details') !== $('setting-engineDevMode').closest('details') && ui.profile.engineShaderCachePrewarm === true && ui.profile.engineShaderCompileWorkers === 0 && !(ui.state?.liveFields || []).some(p => p.startsWith('engineShader')));
       const box = document.createElement('div');
