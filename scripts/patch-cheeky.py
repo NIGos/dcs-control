@@ -1962,7 +1962,8 @@ add_test(NAME CheekyBootstrap-chromium-child COMMAND CheekyBootstrapTests chromi
 # With the key on, a one-group pass (MatchMain, 32x32 samples of the NR region, weighted by the decode's edge fade)
 # runs between DLSS-NR and the decode: it recomputes what the decode would write, takes the weighted mean log ratio
 # input / output (luminance, or per channel with 2), clamps it to 0.9..1.1 and smooths it per evaluation (rate 0.05;
-# snapped on the first frame of a codec, on an NR history reset and after a frame with nothing to measure is skipped).
+# snapped on the first frame of a codec, on an NR history reset and when the key is turned on again or changes mode;
+# a frame with nothing to measure keeps the gain).
 # The gain lives in a 16-byte buffer per codec (u2, descriptor 8); the decode multiplies its processed colour by it
 # before the edge fade. Off, the decode reads no gain and writes the same bits as before; DLSS 5 off runs none of it.
 nr_codec = 'src/nr_codec_shader.hpp'
@@ -2239,12 +2240,16 @@ replace(nr, '''    dispatch_codec(
         *gpu,
         gpu->decode_pipeline,''', '''    // DCS Control: brightness match, measured on this frame's codec inputs, used by the decode below.
     if (settings.nr_brightness_match != 0U && gpu->dcs_match_pipeline && gpu->dcs_match_state) {
+        // Turned on again (the live key) or to the other mode: the gain kept from before is another scene's or
+        // another measure's, so the first measurement snaps as on an NR history reset.
+        bool dcs_match_snap = reset;
         if (gpu->dcs_match_mode != settings.nr_brightness_match) {
             trace_event("DLSS-NR brightness match on (mode %u) view=%llu", settings.nr_brightness_match,
                 static_cast<unsigned long long>(frame.view_id));
             gpu->dcs_match_mode = settings.nr_brightness_match;
+            dcs_match_snap = true;
         }
-        dispatch_codec(frame, *gpu, gpu->dcs_match_pipeline, 1U, 6U, settings, codec_region, reset ? 1U : 0U, true);
+        dispatch_codec(frame, *gpu, gpu->dcs_match_pipeline, 1U, 6U, settings, codec_region, dcs_match_snap ? 1U : 0U, true);
         uav_barrier(frame.command_list, gpu->dcs_match_state);
         const auto phase = gpu->dcs_match_evaluations++ % 450U;
         if (phase == 440U && gpu->dcs_match_readback) {
