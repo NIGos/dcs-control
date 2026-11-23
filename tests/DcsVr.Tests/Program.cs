@@ -492,6 +492,92 @@ Test("Back to stock DCS with a lost record removes DCS Control's files in the DC
     Require(service.LeftoverFiles(exe, options).Count == 0 && File.ReadAllText(Path.Combine(f.Bin, "dxgi.dll")).StartsWith("MZ ReShade"), "Removed, and the pilot's dxgi.dll is back");
     Require(File.ReadAllText(service.Originals.LogPath).Contains("Leftover without a record: removed"), "Each one is logged");
 });
+Test("Originals: a damaged or deleted baseline.json falls back to its previous copy, so no original is lost", () =>
+{
+    var bin = Path.Combine(root, "originals/record-prev/bin"); var dxgi = Make("originals/record-prev/bin/dxgi.dll", "ReShade");
+    var store = new OriginalsStore(Path.Combine(root, "originals/record-prev/state"));
+    var baseline = Path.Combine(store.Directory, "baseline.json");
+    store.Apply(Plan("cheeky", Write(dxgi, "cheeky loader", bin)));
+    Require(File.Exists(baseline + ".prev") && store.Status() is { State: "applied", Count: 1 }, "The previous generation is kept next to the record");
+    // Cut short (a disk error, a sync tool): before 0.7 every Status() threw and the whole interface failed.
+    File.WriteAllText(baseline, File.ReadAllText(baseline)[..40]);
+    Require(store.Status() is { Count: 1, Problem: null } status && status.State != "damaged", "The previous copy is used");
+    Require(File.Exists(baseline) && Directory.EnumerateFiles(store.Directory, "baseline.json.damaged-*").Any(), "Put back in place; the damaged file is kept");
+    Require(File.ReadAllText(store.LogPath).Contains("its previous copy was put back"), "Logged");
+    Require(store.RestoreOriginals().Complete && File.ReadAllText(dxgi) == "ReShade", "Back to stock DCS puts the original back");
+    // Deleted by hand: the next apply would otherwise take DCS Control's own file for the original.
+    store.Apply(Plan("cheeky", Write(dxgi, "cheeky loader", bin)));
+    store.Apply(Plan("cheeky", Write(dxgi, "cheeky loader 2", bin)));
+    File.Delete(baseline);
+    Require(store.ReadCurrent() is not null && store.Status() is { State: "applied", Count: 1 }, "A deleted record comes back from its copy");
+    Require(store.RestoreOriginals().Complete && File.ReadAllText(dxgi) == "ReShade");
+});
+Test("Back to stock DCS with a damaged record (and its copy) removes only DCS Control's own files and starts a new record", () =>
+{
+    var f = LeftoverFixture("damaged-record");
+    foreach (var (hash, i) in f.Own.Select((h, i) => (h, i))) Make($"leftovers/damaged-record-distribution/components/c{i}.dll.sha256", hash);
+    var service = new ControlService(Path.Combine(root, "leftovers/damaged-record-distribution"), Path.Combine(root, "leftovers/damaged-record-state"));
+    var exe = Path.Combine(f.Bin, "DCS.exe"); var options = Path.Combine(f.SavedGames, "Config/options.lua");
+    var baseline = Path.Combine(service.Originals.Directory, "baseline.json");
+    Directory.CreateDirectory(service.Originals.Directory);
+    // A newer version's record is not damage: nothing is touched, and the page says to install that version.
+    File.WriteAllText(baseline, "{\"schemaVersion\": 3, \"files\": [], \"state\": \"clean\"}");
+    Require(service.Originals.Status() is { State: "damaged", Problem: { } newer } && newer.Contains("newer version"), "Newer record shown, no exception");
+    Require(service.RestoreOriginals(exe, options) is { Complete: false } refused && refused.Conflicts.Single() == OriginalsStore.NewerMessage && service.LeftoverFiles(exe, options).Count == 12, "Refused, nothing removed");
+    File.WriteAllText(baseline, "{\"schemaVersion\": 2, \"files\": [{\"path\": "); File.WriteAllText(baseline + ".prev", "\0\0\0");
+    Require(service.Originals.Status() is { State: "damaged", Count: 0, Problem: { } problem } && problem.StartsWith(OriginalsStore.DamagedMessage), "A plain damaged state, never an exception");
+    Require(service.Originals.ReadCurrent() is null && service.ReadAppliedProfile() is null && service.LeftoverFiles(exe, options).Count == 12, "Reads that only look keep working");
+    Throws<OriginalsDamagedException>(() => service.SyncApplied(new VrProfile { FpsLimit = FpsLimitMode.Custom, RenderedFpsCap = 60 }, new() { DcsExecutable = exe, OptionsPath = options }));
+    Require(File.ReadAllText(options) == Lua, "Launch refuses: nothing guessed, nothing written");
+    var result = service.RestoreOriginals(exe, options);
+    Require(result.Complete && result.Conflicts[0].Contains("damaged") && result.Conflicts[0].Contains("options.lua"), string.Join("; ", result.Conflicts));
+    Require(service.LeftoverFiles(exe, options).Count == 0 && File.ReadAllText(Path.Combine(f.Bin, "dxgi.dll")).StartsWith("MZ ReShade"), "DCS Control's own files went, the pilot's dxgi.dll is back");
+    Require(service.Originals.Status() is { State: "clean", Count: 0, Problem: null } && Directory.EnumerateFiles(service.Originals.Directory, "baseline.json.damaged-*").Count() == 2, "A new record starts; the damaged one and its copy are kept");
+});
+Test("Back to stock DCS leaves an owned options.lua setting the pilot changed after DCS Control set it", () =>
+{
+    var config = Path.Combine(root, "originals/lua-pilot/Config"); var path = Make("originals/lua-pilot/Config/options.lua", Lua);
+    var store = new OriginalsStore(Path.Combine(root, "originals/lua-pilot/state"));
+    FileMutation Settings(params (string Key, string? Before, string After)[] changes)
+    {
+        var text = File.ReadAllText(path); foreach (var c in changes) text = new LuaOptions(text).SetLiteral(c.Key.Split('.'), c.After);
+        return new(path, Hashing.FileSha256(path), Encoding.UTF8.GetBytes(text), "options", changes.Select(c => new LuaValueChange(c.Key, c.Before, c.After)).ToArray(), Root: config);
+    }
+    store.Apply(Plan("a", Settings(("graphics.maxFPS", "89", "60"), ("VR.enable", "false", "true"), ("VR.openxr_eyeGaze", null, "true"))));
+    // The pilot sets Max FPS in DCS afterwards; DCS Control's other values stay as it set them.
+    AtomicFile.WriteText(path, new LuaOptions(File.ReadAllText(path)).SetLiteral(["graphics", "maxFPS"], "120"));
+    // A profile that no longer owns Max FPS stops owning it without undoing the pilot's value.
+    AtomicFile.WriteText(path, new LuaOptions(File.ReadAllText(path)).SetLiteral(["VR", "openxr_eyeGaze"], "false"));
+    store.Apply(Plan("b", Settings(("graphics.maxFPS", "89", "120"), ("VR.enable", "false", "true"))));
+    Require(new LuaOptions(File.ReadAllText(path)).Get("VR", "openxr_eyeGaze") == "false", "Dropped by the new profile, the pilot's value stays");
+    AtomicFile.WriteText(path, new LuaOptions(File.ReadAllText(path)).SetLiteral(["graphics", "maxFPS"], "144"));
+    Require(store.RestoreOriginals().Complete);
+    var lua = new LuaOptions(File.ReadAllText(path));
+    Require(lua.Get("graphics", "maxFPS") == "144" && lua.Get("VR", "enable") == "false", "The pilot's 144 stays; the untouched setting goes back");
+    Require(File.ReadAllText(store.LogPath).Contains("graphics.maxFPS changed after DCS Control set it"), "Logged");
+    // Unchanged since: back to the exact original bytes, as before.
+    AtomicFile.WriteText(path, Lua);
+    store.Apply(Plan("c", Settings(("graphics.maxFPS", "89", "60"))));
+    Require(store.RestoreOriginals().Complete && File.ReadAllText(path) == Lua);
+});
+Test("Importing a profile in the interface drops Developer options and the developer paths; the CLI keeps them", () =>
+{
+    var dev = new VrProfile { DeveloperOptions = true, EngineOptimizations = true, EngineDevMode = true, EngineDevPayloadPath = @"\\server\share\payload.dll", EngineDevIniPath = @"C:\dev\DcsQvCull.ini" };
+    var file = Make("import-dev/profile.json", JsonData.Serialize(dev));
+    var service = new ControlService(root, Path.Combine(root, "import-dev/state"));
+    var imported = service.LoadProfile(file, keepDeveloper: false);
+    Require(imported is { DeveloperOptions: false, EngineDevMode: false, EngineDevPayloadPath: null, EngineDevIniPath: null }, "Imported without them");
+    Require(!ConfigurationWriters.DcsQvCull(imported).Contains(@"\\server"), "Nothing for DCS to load");
+    // A developer's own profile keeps them, but a payload on a network share is refused.
+    Throws<InvalidDataException>(() => service.LoadProfile(file));
+    Require(ProfileValidation.Validate(dev).Any(i => i.Code == "engine-dev" && i.Message.Contains("network share")), "UNC payload refused");
+    Require(ProfileValidation.Validate(dev with { EngineDevPayloadPath = @"\\?\UNC\server\share\payload.dll" }).Any(i => i.Code == "engine-dev"), "Long UNC form refused");
+    var local = dev with { EngineDevPayloadPath = @"C:\dev\DcsQvCullPayload.dll" };
+    Require(!ProfileValidation.Validate(local).Any(i => i.Code == "engine-dev"), "A local path is fine");
+    var localFile = Make("import-dev/local.json", JsonData.Serialize(local));
+    Require(service.LoadProfile(localFile) is { DeveloperOptions: true, EngineDevMode: true, EngineDevPayloadPath: @"C:\dev\DcsQvCullPayload.dll" }, "CLI and rigs (--profile) keep a hand-set profile");
+    Require(service.LoadProfile(localFile, keepDeveloper: true).DeveloperOptions, "Kept when the current profile already has them");
+});
 Test("Originals: another program's file updated after DCS Control replaced it is backed up again and never downgraded", () =>
 {
     var bin = Path.Combine(root, "originals/foreign-update/bin"); var dxgi = Make("originals/foreign-update/bin/dxgi.dll", "ReShade 6.0");
@@ -2961,12 +3047,13 @@ Test("Back to stock DCS merges owned settings back and keeps later graphics edit
     AtomicFile.WriteText(path, File.ReadAllText(path).Replace("maxFPS=89", "maxFPS=120")); Require(store.RestoreOriginals().Complete);
     var result = new LuaOptions(File.ReadAllText(path)); Require(result.Get("VR", "enable") == "false"); Require(result.Get("VR", "openxr_eyeGaze") is null); Require(result.Get("graphics", "maxFPS") == "120"); Require(File.ReadAllText(path).Contains("preserve comment"));
 });
-Test("Back to stock DCS sets an edited owned setting back, never refusing", () =>
+Test("Back to stock DCS keeps an owned setting the pilot edited since, never refusing", () =>
 {
     var path = Make("lua-conflict/options.lua", Lua); var change = new LuaValueChange("graphics.Upscaling", "\"DLSS\"", "\"DLSS\""); var store = new OriginalsStore(Path.Combine(root, "originals/lua-conflict"));
     store.Apply(new("lua", "Lua test", [new(path, Hashing.FileSha256(path), Encoding.UTF8.GetBytes(Lua), "options", [change])], new Dictionary<string, string>(), "fixture"));
     AtomicFile.WriteText(path, Lua.Replace("\"DLSS\"", "\"FSR\"").Replace("maxFPS=89", "maxFPS=120")); Require(store.RestoreOriginals().Complete);
-    Require(new LuaOptions(File.ReadAllText(path)).Get("graphics", "Upscaling") == "\"DLSS\"" && new LuaOptions(File.ReadAllText(path)).Get("graphics", "maxFPS") == "120");
+    // 0.7: the pilot's later value stays (before, Back to stock DCS overwrote it with the original).
+    Require(new LuaOptions(File.ReadAllText(path)).Get("graphics", "Upscaling") == "\"FSR\"" && new LuaOptions(File.ReadAllText(path)).Get("graphics", "maxFPS") == "120");
 });
 Test("Back to stock DCS recognizes equivalent Lua string quoting", () =>
 {
@@ -3373,11 +3460,11 @@ Test("FPS cap insertion restores absent cap and VSync fields", () =>
     var f = PacingFixture("missing-fields", new() { FpsLimit = FpsLimitMode.Custom, DisableDcsVSync = true }, missingCap: true); var before = File.ReadAllText(f.Options);
     var journal = f.Service.Apply(f.Plan); Require(new LuaOptions(File.ReadAllText(f.Options)).Get("graphics", "maxFPS") == "45"); Require(f.Service.RestoreOriginals().Complete && File.ReadAllText(f.Options) == before);
 });
-Test("Saved launch rejects owned FPS edits; Back to stock DCS sets the owned cap back and keeps the rest", () =>
+Test("Saved launch rejects owned FPS edits; Back to stock DCS keeps the pilot's new cap and the rest", () =>
 {
     var f = PacingFixture("edited-cap", new() { FpsLimit = FpsLimitMode.Custom }); f.Service.Apply(f.Plan);
     AtomicFile.WriteText(f.Options, new LuaOptions(File.ReadAllText(f.Options)).Set(["graphics", "maxFPS"], 61).Replace("-- preserve comment", "-- user"));
-    Throws<IOException>(() => f.Service.PrepareLaunchApplied()); Require(f.Service.RestoreOriginals().Complete && new LuaOptions(File.ReadAllText(f.Options)).Get("graphics", "maxFPS") == "89" && File.ReadAllText(f.Options).Contains("-- user"));
+    Throws<IOException>(() => f.Service.PrepareLaunchApplied()); Require(f.Service.RestoreOriginals().Complete && new LuaOptions(File.ReadAllText(f.Options)).Get("graphics", "maxFPS") == "61" && File.ReadAllText(f.Options).Contains("-- user"));
 });
 foreach (var exists in new[] { false, true })
     Test("Saved launch rejects " + (exists ? "edited" : "new") + " legacy pacing file", () =>

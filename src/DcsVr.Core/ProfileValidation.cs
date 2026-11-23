@@ -45,6 +45,13 @@ public static class ProfileValidation
         return Path.GetFileName(path).Equals("options.lua", StringComparison.OrdinalIgnoreCase) && config is not null && profileRoot is not null
             && Path.GetFileName(config).Equals("Config", StringComparison.OrdinalIgnoreCase) && Path.GetFileName(profileRoot).StartsWith("DCS", StringComparison.OrdinalIgnoreCase);
     }
+    /// <summary>A UNC or device path (\\server\share, \\?\UNC\..., \\.\...) or a drive letter mapped to a network share.</summary>
+    internal static bool IsRemotePath(string path)
+    {
+        if (path.StartsWith(@"\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal)) return true;
+        try { return Path.GetPathRoot(path) is { Length: > 0 } root && new DriveInfo(root).DriveType == DriveType.Network; }
+        catch (Exception e) when (e is ArgumentException or IOException or UnauthorizedAccessException) { return false; }
+    }
     public static IReadOnlyList<ValidationIssue> Validate(VrProfile profile, InventorySnapshot? inventory = null)
     {
         // The messages are English with numbers like the fields show them ("0.1", not an Italian Windows' "0,1").
@@ -236,6 +243,9 @@ public static class ProfileValidation
                 if (string.IsNullOrWhiteSpace(path)) { Error("engine-dev", $"Developer mode needs the {what}."); return; }
                 if (!Path.IsPathFullyQualified(path.Trim()) || !path.Trim().EndsWith(extension, StringComparison.OrdinalIgnoreCase) || path.Any(char.IsControl) || path.Contains(';'))
                     Error("engine-dev", $"The {what} must be a full path to a {extension} file.");
+                // DCS would load the payload from anywhere the path points: only a folder on this PC.
+                else if (IsRemotePath(path.Trim()))
+                    Error("engine-dev", $"The {what} must be on this PC, not on a network share.");
                 // DCS is not long-path aware: the module cannot open a path of 260 characters or more.
                 else if (path.Trim().Length >= 260)
                     Error("engine-dev", $"The {what} path is too long for DCS (260 characters or more); use a shorter folder.");

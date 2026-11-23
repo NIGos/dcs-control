@@ -762,16 +762,19 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     Invalidate();
                     // The DCS shown is also searched for DCS Control's files the record does not list (a lost record).
                     var (restoreDcs, restoreOptions) = (CurrentInventory.DcsExecutable, CurrentInventory.OptionsPath);
+                    var damagedRecord = await Task.Run(() => service.Originals.Status().State == "damaged");
                     var restored = await Task.Run(() => service.RestoreOriginals(restoreDcs, restoreOptions));
                     // A file left behind in a protected folder (DCS under Program Files): one Windows prompt, then the rest.
                     if (!restored.Complete && !offline)
                     {
-                        var restoreFolders = await Task.Run(() => service.Originals.Read().Files.Select(f => f.Path)
+                        var restoreFolders = await Task.Run(() => service.Originals.Status().Files.Select(f => f.Path)
                             .Concat(service.LeftoverFiles(restoreDcs, restoreOptions).Select(f => f.Path)).Select(Path.GetDirectoryName).OfType<string>().ToList());
                         if (await Task.Run(() => { LaunchSafety.ForgetWriteProbes(); return LaunchSafety.UnwritableFolders(restoreFolders); }) is { Count: > 0 }
                             && await EnsureWritable(restoreFolders, askedByPilot: false, throwWhenBlocked: false))
                             restored = await Task.Run(() => service.RestoreOriginals(restoreDcs, restoreOptions));
                     }
+                    // A damaged record: only DCS Control's own files went, and the page says what could not be put back.
+                    if (damagedRecord) { _status = restored.Complete ? "Back to stock DCS: DCS Control's own files are removed. Check DCS's settings: the damaged record could not say what they were before." : "Back to stock DCS could not finish with the damaged record."; _report = string.Join("\n", restored.Conflicts); break; }
                     _status = restored.Complete ? "Back to stock DCS: every file and setting DCS Control changed is back to its original. DCS runs as if the app had never been used." : "Some original files could not be restored; they are still listed on the Stock DCS page.";
                     _report = restored.Complete ? "Every file DCS Control changed is back to its original; owned DCS settings in options.lua were set back, your other edits kept." : string.Join("\n", restored.Conflicts); break;
                 case "dlssFocus":
@@ -925,7 +928,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     {
                         var presets = Presets; var name = PresetStore.Clean(data.GetProperty("name").GetString());
                         if (!presets.Exists(name)) throw new InvalidDataException($"The preset {name} no longer exists.");
-                        lock (_draftLock) { _profile = service.LoadProfile(presets.PathOf(name)); presets.SetActive(name); Drafts.Save(_profile, _dcs, _options); }
+                        lock (_draftLock) { _profile = service.LoadProfile(presets.PathOf(name), keepDeveloper: _profile.DeveloperOptions); presets.SetActive(name); Drafts.Save(_profile, _dcs, _options); }
                         Invalidate(); _status = $"Preset {name} loaded. Launch DCS applies it."; break;
                     }
                 case "presetRename":
@@ -951,7 +954,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
                     if (save.ShowDialog(owner) == true) { service.SaveProfile(_profile, save.FileName); _status = "Settings exported."; } break;
                 case "import":
                     EnsureInteractive(); var import = new OpenFileDialog { Filter = "DCS Control profile|*.json" };
-                    if (import.ShowDialog(owner) == true) { _profile = service.LoadProfile(import.FileName); lock (_draftLock) Presets.SetActive(null); Invalidate(); _status = "Settings imported. Save them as a preset to keep them by name."; } break;
+                    if (import.ShowDialog(owner) == true) { _profile = service.LoadProfile(import.FileName, keepDeveloper: _profile.DeveloperOptions); lock (_draftLock) Presets.SetActive(null); Invalidate(); _status = "Settings imported. Save them as a preset to keep them by name."; } break;
                 case "export":
                     EnsureInteractive(); var export = new SaveFileDialog { Filter = "Diagnostic report|*.json", FileName = "dcs-control-report.json" };
                     if (export.ShowDialog(owner) == true) { await Capture(); _readiness = await Task.Run(() => Readiness.Check(_profile, CurrentInventory, service));
@@ -1132,6 +1135,9 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
         if (!_profile.Desktop && activeRoute.Route is { } running && running != _profile.Runtime)
             issues.Insert(0, new("route-mismatch", IssueSeverity.Warning, activeRoute.Summary + " This profile uses " + HeadsetRoute.Describe(_profile.Runtime) + ". Switch the route or use Read settings from this PC before applying."));
         if (FoveaFact(_profile) is { } fact) issues.Add(fact);
+        // The record of originals cannot be read: Launch and Apply refuse until Back to stock DCS starts a new one.
+        if (service.Originals.Status() is { State: "damaged", Problem: { } damaged })
+            issues.Insert(0, new("originals-damaged", IssueSeverity.Error, damaged.StartsWith(OriginalsStore.NewerMessage, StringComparison.Ordinal) ? OriginalsStore.NewerMessage : OriginalsStore.DamagedMessage));
         if (Leftovers() is { Count: > 0 } leftovers)
             issues.Insert(0, new("leftovers", IssueSeverity.Warning, $"DCS Control's files are in DCS without a record of what was there before ({string.Join(", ", leftovers.Take(3).Select(l => Path.GetFileName(l.Path)))}{(leftovers.Count > 3 ? $" and {leftovers.Count - 3} more" : "")}), for example after Windows was reinstalled. They stay active even when DCS starts from Steam. Back to stock DCS removes them."));
         // A helper ended mid-flight (Task Manager, a crash) left the desktop Tobii services stopped; starting them needs
@@ -1161,7 +1167,7 @@ internal sealed class WebBridge(ControlService service, Window? owner = null,
             issues, cadence = Enum.IsDefined(_profile.FpsLimit) ? FramePacing.Describe(HeadsetRefresh.Resolve(_profile), CurrentInventory) : null, headsetRefresh = HeadsetRefresh.Detect(_profile.Runtime), foreignDxgi = service.ForeignDxgi(_profile, CurrentInventory), dcsCustomIpd = CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD_enable") == "true" ? CurrentInventory.DcsSettings.GetValueOrDefault("VR.custom_IPD")?.Trim('"') : null, gpu = new { nvidiaRtx = GpuInfo.Unknown || GpuInfo.HasNvidiaRtx, names = GpuInfo.Names, amdOnly = EngineOptimizations.AmdOnly(GpuInfo.Adapters()) }, status = _status, report = _report,
             plan = _plan is null ? null : new { foveaStamp = _previewFoveaStamp, files = _plan.Files.Select(f => new { f.Path, f.Purpose, bytes = f.Content.Length, replaces = f.ExpectedSha256 is not null, f.LuaChanges }), environment = _plan.LaunchEnvironment },
             // Recovery: one record of original files, restored with one action.
-            originals = new { count = originals.Count + leftovers.Count, files = originals.Files.Concat(leftovers.Select(l => new OriginalItem(l.Path, l.RenameTo is null ? "remove" : "restore", false, l.Detail + "; not in the record of originals"))).ToArray(), state = originals.State, lastAction = originals.LastAction, lastActionAt = originals.LastActionAt, folder = originals.Folder },
+            originals = new { count = originals.Count + leftovers.Count, files = originals.Files.Concat(leftovers.Select(l => new OriginalItem(l.Path, l.RenameTo is null ? "remove" : "restore", false, l.Detail + "; not in the record of originals"))).ToArray(), state = originals.State, problem = originals.Problem, lastAction = originals.LastAction, lastActionAt = originals.LastActionAt, folder = originals.Folder },
             launchReady = applied is not null, appliedProfile = applied?.Journal.ProfileId, appliedName = applied?.Profile?.Name ?? applied?.Journal.ProfileId,
             // The applied profile.json content, so the page labels a draft "Applied" only when it matches it.
             appliedDraft = applied?.Profile, appliedDcs = applied?.Executable, appliedOptions = applied?.OptionsPath, foveaChanged = FoveaChanged(applied), dcsRunning = dcsNow, dcsStuck = DcsStuckLast(dcsNow),

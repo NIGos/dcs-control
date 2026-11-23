@@ -231,7 +231,7 @@ pause
 # One line ending in exit: the uninstaller removes this file, and cmd must not read it again afterwards.
 @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\installer.ps1" -Action Uninstall & pause & exit /b
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\installer.ps1" -Action Uninstall -RestoreDcs & pause & exit /b
 '@ | Set-Content -LiteralPath (Join-Path $payloadRoot 'Uninstall.cmd') -Encoding ascii
 # The top of the release folder also holds a short README next to the launcher and the installer command.
 @"

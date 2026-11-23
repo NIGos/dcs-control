@@ -41,12 +41,28 @@ public sealed record OriginalsBaseline
     /// refuses unknown members, and Back to stock DCS after a downgrade must still read baseline.json.</summary>
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, HashSet<string>>? LastInstalled { get; set; }
+    /// <summary>The options.lua values the last complete apply installed (path → setting → value), kept like
+    /// <see cref="LastInstalled"/>: a resumed Back to stock DCS still leaves a setting the pilot changed since. Not
+    /// written while null.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, Dictionary<string, string>>? LastInstalledSettings { get; set; }
+}
+
+/// <summary>The record of originals (baseline.json) and its previous copy cannot be read. Nothing is guessed from it:
+/// applying is refused, and Back to stock DCS only removes DCS Control's own files (known by their bytes).</summary>
+/// <param name="detail">What is wrong with the file, for the log and the diagnostics.</param>
+/// <param name="newer">The record was written by a newer DCS Control (an unknown format), not damaged.</param>
+public sealed class OriginalsDamagedException(string message, string detail, bool newer) : IOException(message)
+{
+    public string Detail { get; } = detail;
+    public bool Newer { get; } = newer;
 }
 
 /// <param name="Action">restore (the backup is put back), remove (DCS Control created it) or settings (owned
 /// options.lua settings are set back, other edits kept).</param>
 public sealed record OriginalItem(string Path, string Action, bool Foreign, string? Detail);
-public sealed record OriginalsStatus(int Count, IReadOnlyList<OriginalItem> Files, string? ProfileId, string State, DateTimeOffset? LastActionAt, string? LastAction, string Folder, TransactionJournal? Current);
+/// <param name="State">clean, applying, applied, restoring, or damaged (the record cannot be read: <paramref name="Problem"/>).</param>
+public sealed record OriginalsStatus(int Count, IReadOnlyList<OriginalItem> Files, string? ProfileId, string State, DateTimeOffset? LastActionAt, string? LastAction, string Folder, TransactionJournal? Current, string? Problem = null);
 /// <param name="ReplacedForeign">Files of another program this apply backed up and replaced.</param>
 /// <param name="PutBack">Paths an earlier profile wrote that this one does not use: set back to their originals.</param>
 public sealed record OriginalsApply(TransactionJournal Current, IReadOnlyList<string> ReplacedForeign, IReadOnlyList<string> PutBack);
@@ -65,6 +81,10 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
     public const int Schema = 2;
     public string Directory { get; } = System.IO.Path.GetFullPath(directory);
     private string BaselinePath => System.IO.Path.Combine(Directory, "baseline.json");
+    /// <summary>A copy of the record from its last good save: used when baseline.json is damaged or missing.</summary>
+    private string PreviousPath => BaselinePath + ".prev";
+    public const string DamagedMessage = "DCS Control's record of the files it changed in DCS is damaged, so nothing was written. Press Back to stock DCS on the Stock DCS page: it removes DCS Control's own files and starts a new record.";
+    public const string NewerMessage = "DCS Control's record of the files it changed in DCS was written by a newer version. Install that version again to go back to stock DCS.";
     /// <summary>What conversions and restores did, appended (kept under 1 MB).</summary>
     public string LogPath => System.IO.Path.Combine(Directory, "originals.log");
 
@@ -78,13 +98,27 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
     /// <summary>The applied profile without locking or converting anything: for the CPU Boost helper and quick checks.</summary>
     public TransactionJournal? ReadCurrent()
     {
-        try { return File.Exists(BaselinePath) && JsonData.Deserialize<OriginalsBaseline>(File.ReadAllText(BaselinePath)) is { State: "applied", Current: { } current } ? current : null; }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidDataException) { return null; }
+        try
+        {
+            // The previous copy when baseline.json is damaged or missing, as LoadCore reads it.
+            foreach (var path in new[] { BaselinePath, PreviousPath })
+            {
+                if (!File.Exists(path)) continue;
+                if (Parse(File.ReadAllBytes(path), out _, out var newer) is { } baseline) return baseline is { State: "applied", Current: { } current } ? current : null;
+                if (newer) return null;
+            }
+            return null;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
     }
 
+    /// <summary>What is recorded, for the interface, the CLI and diagnostics. A record that cannot be read is State
+    /// "damaged" with the reason in Problem, never an exception: the app stays usable.</summary>
     public OriginalsStatus Status()
     {
-        var baseline = Read();
+        OriginalsBaseline baseline;
+        try { baseline = Read(); }
+        catch (OriginalsDamagedException e) { return new(0, [], null, "damaged", null, null, Directory, null, e.Message + " (" + e.Detail + ")"); }
         var items = baseline.Files.AsEnumerable().Reverse().Select(f => new OriginalItem(f.Path,
             f.Settings is not null ? "settings" : f.BackupFile is not null ? "restore" : "remove", f.Foreign,
             f.Settings is { Count: > 0 } settings ? string.Join(", ", settings.Keys) : f.Settings is not null ? "no settings changed now"
@@ -151,7 +185,8 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         }
         // What the last apply installed, read before the record is cleared: a stale file replaced since is the pilot's.
         var installedBefore = InstalledHashes(baseline) ?? Recorded(baseline.LastInstalled);
-        baseline.LastInstalled = installedBefore;
+        var settingsBefore = InstalledSettings(baseline) ?? Recorded(baseline.LastInstalledSettings);
+        baseline.LastInstalled = installedBefore; baseline.LastInstalledSettings = settingsBefore;
         baseline.State = "applying"; baseline.Current = null; Save(baseline);
         // The backups of originals a newer file took over from are no longer referenced once the record is saved.
         foreach (var old in superseded) DeleteBackup(old);
@@ -176,7 +211,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                         // Updated by its program after DCS Control installed its file (a ReShade update): the newer file
                         // stays, never the older original over it.
                         Log($"{stale.Path} was replaced after DCS Control installed it; the newer file is left as it is.");
-                    else RestoreEntry(stale, out _);
+                    else RestoreEntry(stale, SettingsAt(settingsBefore, stale.Path), out _);
                 }
                 catch (Exception error) when (error is InvalidDataException or FileNotFoundException or DirectoryNotFoundException or IOException or UnauthorizedAccessException)
                 {
@@ -200,14 +235,14 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                 var full = System.IO.Path.GetFullPath(file.Path);
                 PathPolicy.RejectReparsePoints(full, file.Root);
                 var released = new List<string>();
-                var bytes = file.LuaChanges is { } changes ? MergeSettings(full, original, changes, released) : file.Content;
+                var bytes = file.LuaChanges is { } changes ? MergeSettings(full, original, changes, SettingsAt(settingsBefore, full), released) : file.Content;
                 AtomicFile.Write(full, bytes);
                 // Settings set back are forgotten only once the file says so: a failed write keeps their originals.
                 foreach (var key in released) original.Settings!.Remove(key);
                 entries.Add(new() { Path = full, InstalledSha256 = Hashing.BytesSha256(bytes), PreviousSha256 = original.OriginalSha256, LuaChanges = file.LuaChanges, IniValues = file.IniValues, RuntimeLogs = file.RuntimeLogs, Root = file.Root is null ? null : System.IO.Path.GetFullPath(file.Root), Applied = true });
             }
             baseline.Current = new() { Id = Guid.NewGuid().ToString("N"), ProfileId = plan.ProfileId, AppVersion = ProductInfo.Version, Status = "applied", Entries = entries };
-            baseline.LastInstalled = null;
+            baseline.LastInstalled = null; baseline.LastInstalledSettings = null;
             baseline.State = "applied"; baseline.LastAction = "Applied " + plan.Description; baseline.LastActionAt = DateTimeOffset.UtcNow;
             Save(baseline);
             Log($"Applied {plan.ProfileId}: {entries.Count} files written, {putBack.Count} put back, {replaced.Count} other programs' files replaced.");
@@ -241,8 +276,9 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         var baseline = LoadCore();
         // What the applied profile installed, read before the record is cleared: a file replaced since is the pilot's.
         var installed = InstalledHashes(baseline) ?? Recorded(baseline.LastInstalled);
+        var installedSettings = InstalledSettings(baseline) ?? Recorded(baseline.LastInstalledSettings);
         var own = ownHashes?.Invoke() ?? new HashSet<string>();
-        baseline.LastInstalled = installed;
+        baseline.LastInstalled = installed; baseline.LastInstalledSettings = installedSettings;
         baseline.State = "restoring"; baseline.Current = null; Save(baseline);
         var problems = new List<string>();
         var count = 0;
@@ -266,7 +302,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                 }
                 else
                 {
-                    RestoreEntry(original, out var note);
+                    RestoreEntry(original, SettingsAt(installedSettings, original.Path), out var note);
                     if (note is not null) Log(note);
                 }
                 baseline.Files.Remove(original); Save(baseline); DeleteBackup(original); count++;
@@ -277,7 +313,7 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
                 Log("Could not restore " + original.Path + ": " + error.Message);
             }
         }
-        if (problems.Count == 0) baseline.LastInstalled = null;
+        if (problems.Count == 0) { baseline.LastInstalled = null; baseline.LastInstalledSettings = null; }
         baseline.State = problems.Count == 0 ? "clean" : "restoring";
         baseline.LastAction = problems.Count == 0 ? $"Restored {count} original files" : $"Restored {count} original files; {problems.Count} could not be restored";
         baseline.LastActionAt = DateTimeOffset.UtcNow;
@@ -462,14 +498,16 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
 
     /// <summary>options.lua as it is now, with owned settings this plan no longer changes set back to their originals and
     /// the plan's settings set to the installed values.</summary>
-    private static byte[] MergeSettings(string path, OriginalFile original, IReadOnlyList<LuaValueChange> changes, List<string> released)
+    private static byte[] MergeSettings(string path, OriginalFile original, IReadOnlyList<LuaValueChange> changes, IReadOnlyDictionary<string, string>? installed, List<string> released)
     {
         var utf8 = StrictUtf8.Encoding;
         var text = utf8.GetString(File.ReadAllBytes(path));
         var planned = changes.Select(c => c.Path).ToHashSet(StringComparer.Ordinal);
+        var pilots = PilotsSettings(original, text, installed);
         foreach (var (key, value) in (original.Settings ?? []).Where(s => !planned.Contains(s.Key)).ToArray())
         {
-            text = SetBack(text, key, value);
+            // A setting the pilot changed since keeps the pilot's value; DCS Control just stops owning it.
+            if (!pilots.Contains(key)) text = SetBack(text, key, value);
             released.Add(key);
         }
         foreach (var change in changes) text = new LuaOptions(text).SetLiteral(change.Path.Split('.'), change.InstalledRaw);
@@ -485,9 +523,36 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         return value is null ? lua.Remove(keys) : lua.SetLiteral(keys, value);
     }
 
+    /// <summary>The owned settings the pilot (or DCS) changed after DCS Control installed its value: they hold neither
+    /// that value nor the original. Back to stock DCS leaves them as they are. Settings without a recorded installed value
+    /// (an older record) are not listed: they go back as before.</summary>
+    private static HashSet<string> PilotsSettings(OriginalFile original, string text, IReadOnlyDictionary<string, string>? installed)
+    {
+        var pilots = new HashSet<string>(StringComparer.Ordinal);
+        if (installed is null || original.Settings is not { Count: > 0 }) return pilots;
+        var lua = new LuaOptions(text);
+        foreach (var (key, value) in original.Settings)
+        {
+            if (!installed.TryGetValue(key, out var mine)) continue;
+            var now = lua.Get(key.Split('.'));
+            if (!SameLiteral(now, mine) && !SameLiteral(now, value)) pilots.Add(key);
+        }
+        return pilots;
+    }
+
+    private static bool SameLiteral(string? a, string? b)
+    {
+        try { return LuaOptions.NormalizeLiteral(a) == LuaOptions.NormalizeLiteral(b); }
+        catch (InvalidDataException) { return a == b; }
+    }
+
+    /// <summary>The installed options.lua values recorded for <paramref name="path"/> (null when none are known).</summary>
+    private static IReadOnlyDictionary<string, string>? SettingsAt(Dictionary<string, Dictionary<string, string>>? settings, string path) =>
+        settings is not null && settings.TryGetValue(SystemPaths.Canonical(path), out var values) ? values : null;
+
     /// <summary>Puts one path back to its original. <paramref name="note"/> says when options.lua could not be read and the
-    /// whole original file was written back.</summary>
-    private void RestoreEntry(OriginalFile original, out string? note)
+    /// whole original file was written back, or which settings the pilot changed since were left as they are.</summary>
+    private void RestoreEntry(OriginalFile original, IReadOnlyDictionary<string, string>? installedSettings, out string? note)
     {
         note = null;
         // Its folder is missing but not removed (RootGone said no: a drive or top folder that is not there now, an unmounted
@@ -508,10 +573,13 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
             try
             {
                 var current = File.ReadAllBytes(original.Path); var text = utf8.GetString(current);
+                // A setting the pilot changed after DCS Control set it (in DCS's options, by hand) is the pilot's now: it stays.
+                var pilots = PilotsSettings(original, text, installedSettings);
+                if (pilots.Count > 0) note = $"{original.Path}: {string.Join(", ", pilots.Order(StringComparer.Ordinal))} changed after DCS Control set {(pilots.Count == 1 ? "it" : "them")}; the new value is kept.";
                 // Nothing but the owned settings differs from the original: the original bytes go back exactly (a
                 // setting DCS Control inserted leaves no trace of its line).
-                if (OnlyOwnedSettingsDiffer(original, text) is { } exact) { AtomicFile.Write(original.Path, exact); return; }
-                foreach (var (key, value) in original.Settings) text = SetBack(text, key, value);
+                if (pilots.Count == 0 && OnlyOwnedSettingsDiffer(original, text) is { } exact) { AtomicFile.Write(original.Path, exact); return; }
+                foreach (var (key, value) in original.Settings) if (!pilots.Contains(key)) text = SetBack(text, key, value);
                 _ = new LuaOptions(text);
                 var merged = utf8.GetBytes(text);
                 if (!merged.AsSpan().SequenceEqual(current)) AtomicFile.Write(original.Path, merged);
@@ -555,15 +623,80 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException or DecoderFallbackException or ArgumentException) { return null; }
     }
 
+    /// <summary>The record, or the previous copy when baseline.json is damaged or missing (then put back in its place, the
+    /// damaged file kept as baseline.json.damaged-&lt;time&gt;). Throws <see cref="OriginalsDamagedException"/> when neither
+    /// can be read, or when the record has a newer version's format.</summary>
     private OriginalsBaseline LoadCore()
     {
-        if (File.Exists(BaselinePath))
+        var hasMain = File.Exists(BaselinePath);
+        if (!hasMain && !File.Exists(PreviousPath)) return Convert();
+        var problem = "baseline.json is missing";
+        if (hasMain)
         {
-            var baseline = JsonData.Deserialize<OriginalsBaseline>(File.ReadAllText(BaselinePath));
-            if (baseline.SchemaVersion != Schema) throw new InvalidDataException("The originals record has an unknown format: " + BaselinePath);
+            if (Parse(File.ReadAllBytes(BaselinePath), out var mainProblem, out var newer) is { } main) return main;
+            problem = "baseline.json: " + mainProblem;
+            if (newer) throw new OriginalsDamagedException(NewerMessage, problem, newer: true);
+        }
+        if (!File.Exists(PreviousPath)) throw new OriginalsDamagedException(DamagedMessage, problem + "; no previous copy", newer: false);
+        var bytes = File.ReadAllBytes(PreviousPath);
+        if (Parse(bytes, out var previousProblem, out _) is not { } previous)
+            throw new OriginalsDamagedException(DamagedMessage, problem + "; baseline.json.prev: " + previousProblem, newer: false);
+        try
+        {
+            string? kept = null;
+            if (hasMain) File.Move(BaselinePath, kept = DamagedName(), overwrite: true);
+            AtomicFile.Write(BaselinePath, bytes);
+            Log($"The record of originals could not be read ({problem}); its previous copy was put back" + (kept is null ? "." : $", the damaged file is kept as {kept}."));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log($"The record of originals could not be read ({problem}); its previous copy is used ({e.Message})."); }
+        return previous;
+    }
+
+    private string DamagedName() => BaselinePath + ".damaged-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>A record file's content, or null with what is wrong with it. <paramref name="newer"/>: a newer version's
+    /// format (not damage).</summary>
+    private static OriginalsBaseline? Parse(byte[] bytes, out string? problem, out bool newer)
+    {
+        problem = null; newer = false;
+        try
+        {
+            var baseline = JsonData.Deserialize<OriginalsBaseline>(Encoding.UTF8.GetString(bytes).TrimStart('﻿'));
+            if (baseline.SchemaVersion != Schema)
+            {
+                newer = baseline.SchemaVersion > Schema;
+                problem = "unknown format " + baseline.SchemaVersion;
+                return null;
+            }
+            if (baseline.Files is null || baseline.Files.Any(f => f is null || string.IsNullOrWhiteSpace(f.Path)) || string.IsNullOrEmpty(baseline.State))
+            {
+                problem = "incomplete";
+                return null;
+            }
             return baseline;
         }
-        return Convert();
+        catch (Exception e) when (e is System.Text.Json.JsonException or InvalidDataException or NotSupportedException or ArgumentException or InvalidOperationException)
+        {
+            problem = e.Message;
+            return null;
+        }
+    }
+
+    /// <summary>Back to stock DCS with a damaged record, once DCS Control's own files are removed: the record and its
+    /// previous copy are kept aside (renamed, never deleted) and a new, empty record starts, so the app can apply again.
+    /// Returns the kept name; null when the record reads now (nothing set aside). Never for a newer version's record.</summary>
+    public string? SetAsideDamaged()
+    {
+        using var exclusive = Lock();
+        try { LoadCore(); return null; }
+        catch (OriginalsDamagedException e) when (!e.Newer) { }
+        var kept = DamagedName();
+        if (File.Exists(BaselinePath)) File.Move(BaselinePath, kept, overwrite: true);
+        if (File.Exists(PreviousPath)) File.Move(PreviousPath, kept + ".prev", overwrite: true);
+        // A new record, so the journals of an earlier version are not converted again.
+        Save(new OriginalsBaseline { LastAction = "Started a new record: the old one was damaged", LastActionAt = DateTimeOffset.UtcNow });
+        Log($"The damaged record of originals was set aside as {kept}; a new record starts.");
+        return kept;
     }
 
     /// <summary>
@@ -764,6 +897,22 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
     /// <summary>The recorded install hashes with the case-insensitive comparers the live ones use (JSON loses them).</summary>
     private static Dictionary<string, HashSet<string>>? Recorded(Dictionary<string, HashSet<string>>? recorded) =>
         recorded?.ToDictionary(p => p.Key, p => new HashSet<string>(p.Value, StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
+    private static Dictionary<string, Dictionary<string, string>>? Recorded(Dictionary<string, Dictionary<string, string>>? recorded) =>
+        recorded?.ToDictionary(p => p.Key, p => new Dictionary<string, string>(p.Value, StringComparer.Ordinal), StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The options.lua values the applied profile installed, by path (null when no complete apply is recorded).</summary>
+    private static Dictionary<string, Dictionary<string, string>>? InstalledSettings(OriginalsBaseline baseline)
+    {
+        if (baseline.Current is not { } journal) return null;
+        var installed = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in journal.Entries.Where(e => e.LuaChanges is { Count: > 0 }))
+        {
+            var path = SystemPaths.Canonical(entry.Path);
+            if (!installed.TryGetValue(path, out var values)) installed[path] = values = new(StringComparer.Ordinal);
+            foreach (var change in entry.LuaChanges!) values[change.Path] = change.InstalledRaw;
+        }
+        return installed;
+    }
 
     private static bool PilotsNewerFile(Dictionary<string, HashSet<string>>? installed, OriginalFile original, IReadOnlySet<string> own)
     {
@@ -832,7 +981,13 @@ public sealed class OriginalsStore(string directory, Func<IEnumerable<string>>? 
     private void Save(OriginalsBaseline baseline)
     {
         System.IO.Directory.CreateDirectory(Directory);
-        AtomicFile.WriteText(BaselinePath, JsonData.Serialize(baseline));
+        var text = JsonData.Serialize(baseline);
+        AtomicFile.WriteText(BaselinePath, text);
+        // The last good save is also kept as baseline.json.prev, written after the record itself (each file atomically):
+        // a record damaged later (a disk error, a sync tool, an edit by hand) or deleted falls back to it instead of
+        // losing every original. A stop in between leaves it one save behind, which a resumed run handles.
+        try { AtomicFile.WriteText(PreviousPath, text); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 
     /// <summary>Appends a line to <see cref="LogPath"/> (Back to stock DCS's leftover sweep).</summary>
