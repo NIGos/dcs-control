@@ -1981,6 +1981,24 @@ void NormalizeTable(void** vt) {
     g_us1Normal = vt[g_us1Slot];
   }
 }
+// r2-nodlss5: d3d11 can leave the WHOLE table in a "first call" state. After a SwapDeviceContextState round trip (the
+// state save / restore a middleware such as NGX's D3D11 DLSS makes around its work; DCS evaluates its own DLSS on the
+// route without the Cheeky layer) each of the context's entries holds a variant whose first call, a getter included,
+// writes d3d11's normal entries into all of them (offline probe 2026-11-23, this PC's driver and WARP, unprotected and
+// multithread protected: an upload puts back only the 22 toggled draw / copy / update entries, and a draw hook armed
+// after it was gone at the pass's first state call; the colour pass's "draw bypassed the hook" on that route). One
+// getter through d3d11's current entry re-validates every entry and changes no state. Called before an arm writes
+// any entry (ArmOm; early_shaders.h Normalize); counted when it changed the table.
+std::atomic<uint64_t> g_tblRevalidated{0};
+void RevalidateTable(ID3D11DeviceContext* c) {
+  if (!c) return;
+  void** vt = *reinterpret_cast<void***>(c);
+  static const int ps = DcsQv_ContextSlot("PSSetShaderResources");  // not among the 22 toggled entries
+  void* const before = ps >= 0 ? vt[ps] : nullptr;
+  D3D11_PRIMITIVE_TOPOLOGY t;
+  c->IAGetPrimitiveTopology(&t);
+  if (ps >= 0 && vt[ps] != before) g_tblRevalidated.fetch_add(1, std::memory_order_relaxed);
+}
 // After a toggle point on DCS's context while an arm of ours is held (render
 // thread). sure: the call always toggles (Flush, ExecuteCommandList); else
 // only a table that shows the toggle is repaired (Map / GetData usually do not).
@@ -2555,6 +2573,8 @@ bool ArmOm(bool overlay = false) {
     g_omSkipForeign++;
     return false;
   }
+  // r2-nodlss5: a table in d3d11's first-call state is re-validated before any entry of this arm is written.
+  if (GetCurrentThreadId() == ptiming::g_topTid.load(std::memory_order_relaxed)) RevalidateTable(s.ctx);
   void** vt = *reinterpret_cast<void***>(s.ctx);
   if (!ArmOmEntries(vt)) return false;
   g_armTable = vt;
@@ -4840,6 +4860,36 @@ int g_cpLearnView = -1;    // CopyToHMDPass of this view: its first draw's PS SR
 bool g_cpLearnArmOwn = false;
 bool g_cpTpAdded = false;  // R47: the state-call toggle points were added to the arm for this ToneMappingPass
 uint64_t g_cpArmFail = 0;  // arms refused (another module's context hooks hold the table)
+// r2-nodlss5: this ToneMappingPass's draw arm was another feature's, held already (ArmDraws took nothing); how often.
+bool g_cpInherited = false;
+std::atomic<uint64_t> g_cpInheritedN{0};
+// r2-nodlss5: who held DCS's draw entries at the end of a ToneMappingPass whose tone map went past our hook (the first
+// few in a session): proves on the next flight whether d3d11 (and which state) or another module took them.
+int g_cpBypassLogs = 0;
+void LogBypassOwners(int v) {
+  if (g_cpBypassLogs >= 3 || !g_s.ctx) return;
+  ++g_cpBypassLogs;
+  void** vt = *reinterpret_cast<void***>(g_s.ctx);
+  if (g_dSlot[0] < 0)
+    for (int k = 0; k < fdexport::kDkCount; ++k) g_dSlot[k] = DcsQv_ContextSlot(fdexport::kDrawNames[k]);
+  std::string b;
+  for (int k = 0; k < fdexport::kDkCount; ++k) {
+    char d[MAX_PATH + 48];
+    void* cur = g_dSlot[k] >= 0 ? vt[g_dSlot[k]] : nullptr;
+    d3ds::DescribeAddress(cur, d, sizeof(d));
+    b += k ? ", " : "";
+    b += fdexport::kDrawNames[k];
+    b += " ";
+    b += cur == DrawHookOf(k) ? "ours" : d;
+  }
+  static const int ps = DcsQv_ContextSlot("PSSetShaderResources");
+  char p[MAX_PATH + 48];
+  d3ds::DescribeAddress(ps >= 0 ? vt[ps] : nullptr, p, sizeof(p));
+  Log("colour: tone map of view %d went past the hook (%s arm); at the pass end the draw entries were: %s; "
+      "PSSetShaderResources %s; table re-validated at arms so far %llu",
+      v, g_cpInherited ? "another feature's" : "its own", b.c_str(), p,
+      static_cast<unsigned long long>(g_tblRevalidated.load()));
+}
 
 // ---------------------------------------------------------------------------
 // R94: [Perception] SymbologyTrace (sym_trace.h; dev, measure only). In each HMD view's ToneMappingPass of a learn or
@@ -4979,8 +5029,9 @@ void ColorBoundary(void* pass, bool begin, int k) {
     g_cpView = -1;
     if (g_cpTpAdded && g_armTable) DisarmTpExtended(g_armTable);  // R47
     g_cpTpAdded = false;
+    const int tv = cpass::g_tp.v;
+    if (cpass::TonePassEnd() == cpass::kMissBypass) LogBypassOwners(tv);  // R46: a miss when a mode was on, not swapped
     ProbeDisarm(g_cpArmOwn);
-    cpass::TonePassEnd();  // R46: a miss when a mode was on and this view's tone map was not swapped
     return;
   }
   if (!cpass::Wanted()) return;
@@ -4998,6 +5049,8 @@ void ColorBoundary(void* pass, bool begin, int k) {
       UsSlots() &&
       GetCurrentThreadId() == ptiming::g_topTid.load(std::memory_order_relaxed))
     NormalizeTable(g_armTable);
+  g_cpInherited = g_drawArmed;
+  if (g_cpInherited) g_cpInheritedN.fetch_add(1, std::memory_order_relaxed);
   ArmDraws();
   if (g_drawArmed) {
     g_cpView = v;
@@ -6645,6 +6698,10 @@ void LogStats() {
         snprintf(b + n, sizeof(b) - n, " [%d] %llu", k, static_cast<unsigned long long>(v));
       }
     Log("fixation depth: ... and the hook passed before it (1 upload, 3 draw, 4 OM, 5 viewport, 10+ point):%s", b);
+    // r2-nodlss5
+    Log("fixation depth: table found in d3d11's first-call state at an arm and re-validated %llu; tone-map arms "
+        "inside another feature's draw arm %llu",
+        static_cast<unsigned long long>(g_tblRevalidated.load()), static_cast<unsigned long long>(g_cpInheritedN.load()));
   }
   if (!g_coneOn.load() && !g_gridOn.load()) return;
   // R91 (R90 phase 2): what g_statMutex guards is copied (and reset) under it, then logged without it: the render

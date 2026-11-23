@@ -501,6 +501,138 @@ void CacheResetTests() {
         "early: a mission event drops the pass caches at the render thread's next pass (none without one)");
 }
 
+// r2-nodlss5 (the route without the Cheeky layer: every draw slot refused, the colour pass's tone map past its hook).
+// A code page outside every module stands in for another module's hook: an absolute jump to d3d11's entry.
+struct ForeignThunk {
+  uint8_t* p = nullptr;
+  explicit ForeignThunk(void* target) {
+    p = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!p) return;
+    const uint8_t jmp[6] = {0xFF, 0x25, 0, 0, 0, 0};  // jmp [rip+0]
+    memcpy(p, jmp, 6);
+    memcpy(p + 6, &target, 8);
+    FlushInstructionCache(GetCurrentProcess(), p, 14);
+  }
+  ~ForeignThunk() {
+    if (p) VirtualFree(p, 0, MEM_RELEASE);
+  }
+};
+// NGX-style state save / restore around a piece of work: d3d11 leaves every entry in its first-call state.
+bool SwapRoundTrip(Warp& w) {
+  ID3D11Device1* d1 = nullptr;
+  ID3D11DeviceContext1* c1 = nullptr;
+  ID3DDeviceContextState *other = nullptr, *prev = nullptr, *mine = nullptr;
+  bool ok = SUCCEEDED(w.d->QueryInterface(__uuidof(ID3D11Device1), reinterpret_cast<void**>(&d1))) &&
+            SUCCEEDED(w.c->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&c1)));
+  const D3D_FEATURE_LEVEL fl[] = {D3D_FEATURE_LEVEL_11_0};
+  D3D_FEATURE_LEVEL got{};
+  ok = ok && SUCCEEDED(d1->CreateDeviceContextState(0, fl, 1, D3D11_SDK_VERSION, __uuidof(ID3D11Device1), &got, &other));
+  if (ok) {
+    c1->SwapDeviceContextState(other, &prev);
+    c1->SwapDeviceContextState(prev, &mine);
+  }
+  for (IUnknown* u : std::initializer_list<IUnknown*>{mine, prev, other, c1, d1})
+    if (u) u->Release();
+  return ok;
+}
+void OwnerTests(Warp& w) {
+  void** vt = *reinterpret_cast<void***>(w.c);
+  Normalize();
+  void* const d3dDraw = vt[g_slot[kDDraw]];
+  Check(TableInContext(vt), "early: d3d11 keeps the immediate context's table inside the context object");
+  // another module's hook in d3d11's own table: chained in front of it, every draw seen, put back at the disarm
+  {
+    ForeignThunk th(d3dDraw);
+    d3ds::WriteTablePointer(&vt[g_slot[kDDraw]], th.p);
+    const uint64_t f0 = g_armForeign.load(), r0 = g_armRefused.load();
+    const bool armed = Arm(0, 1);
+    g_armDepth = armed ? 0 : -1;
+    const bool over = g_armed[kDDraw] && vt[g_slot[kDDraw]] == kHooks[kDDraw] && g_orig[kDDraw] == th.p;
+    g_heatPass = true;
+    g_heatDraws = 0;
+    w.c->Draw(3, 0);
+    const bool seen = g_heatDraws == 1;
+    g_heatPass = false;
+    const bool kept = Disarm();
+    g_armDepth = -1;
+    const bool back = vt[g_slot[kDDraw]] == th.p;
+    d3ds::WriteTablePointer(&vt[g_slot[kDDraw]], d3dDraw);
+    Check(over && g_armForeign.load() == f0 + 1 && g_armRefused.load() == r0,
+          "early: a slot holding another module's hook is armed in front of it (no longer refused)");
+    Check(seen && kept && back, "early: DCS's draw reaches our hook and the other module's; the disarm puts its hook back");
+  }
+  // our own hook still in a slot from an earlier arm: taken back as armed, d3d11's entry back at the disarm
+  {
+    g_orig[kDDraw] = d3dDraw;
+    d3ds::WriteTablePointer(&vt[g_slot[kDDraw]], kHooks[kDDraw]);
+    const uint64_t s0 = g_armStaleOwn.load(), r0 = g_armRefused.load();
+    Arm(0, 1);
+    const bool taken = g_armed[kDDraw] && g_armStaleOwn.load() == s0 + 1 && g_armRefused.load() == r0;
+    Disarm();
+    Check(taken && vt[g_slot[kDDraw]] == d3dDraw, "early: our own stale hook in a slot is taken back as armed and removed at the disarm");
+    d3ds::WriteTablePointer(&vt[g_slot[kDDraw]], d3dDraw);
+  }
+  // a proxy's table (a class vtable outside the context object): another module's entry there stays refused
+  {
+    ForeignThunk th(d3dDraw);
+    std::vector<void*> copy(vt, vt + DcsQv_ContextSlotCount());
+    copy[g_slot[kDDraw]] = th.p;
+    struct FakeCtx {
+      void** vptr;
+    } fake{copy.data()};
+    Ctx* const realCtx = g_ctx;
+    ID3D11Device* const realDev = g_dev;
+    if (g_tiny) g_tiny->Release(), g_tiny = nullptr;
+    g_dev = nullptr;  // Normalize makes no call through the fake table
+    g_ctx = reinterpret_cast<Ctx*>(&fake);
+    const uint64_t r0 = g_armRefused.load();
+    const bool armed = Arm(0, 1);
+    const bool refused = !armed && !g_armed[kDDraw] && copy[g_slot[kDDraw]] == th.p && g_armRefused.load() == r0 + 1;
+    g_ctx = realCtx, g_dev = realDev;
+    Check(refused, "early: another module's entry in a proxy's table (outside the context) is still refused");
+  }
+  // d3d11's first-call state (a SwapDeviceContextState round trip, as DCS's own DLSS on the route without Cheeky)
+  if (!SwapRoundTrip(w)) {
+    QvSkip("early: SwapDeviceContextState not available: first-call state checks\n");
+    return;
+  }
+  {  // control: the old normalize (one upload) and an arm: the first state call takes the draw arm out
+    static const uint32_t zero[4] = {};
+    if (!g_tiny && g_dev) {
+      D3D11_BUFFER_DESC bd{16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
+      g_dev->CreateBuffer(&bd, nullptr, &g_tiny);
+    }
+    if (g_tiny) w.c->UpdateSubresource(g_tiny, 0, nullptr, zero, 0, 0);
+    void* const cur = vt[g_slot[kDDraw]];
+    d3ds::WriteTablePointer(&vt[g_slot[kDDraw]], kHooks[kDDraw]);
+    ID3D11ShaderResourceView* none = nullptr;
+    w.c->PSSetShaderResources(0, 1, &none);
+    const bool gone = vt[g_slot[kDDraw]] != kHooks[kDDraw];
+    if (!gone) d3ds::WriteTablePointer(&vt[g_slot[kDDraw]], cur);
+    // Informational: on this PC's hardware driver the hook is gone here (offline probe 2026-11-23); WARP at feature
+    // level 11_0 may re-validate at the upload already. The checks below hold either way.
+    printf("  early: after a SwapDeviceContextState an upload alone %s\n",
+           gone ? "left the first-call state (the first state call took the draw hook out)" : "re-validated the table");
+  }
+  if (!SwapRoundTrip(w)) return;
+  const uint64_t v0 = fixdepth::g_tblRevalidated.load();
+  const bool armed = Arm(0, kDDisp);
+  g_armDepth = armed ? 0 : -1;
+  ID3D11ShaderResourceView* none = nullptr;
+  w.c->PSSetShaderResources(0, 1, &none);
+  w.c->PSSetShader(nullptr, nullptr, 0);
+  const bool kept = armed && vt[g_slot[kDDraw]] == kHooks[kDDraw] && vt[g_slot[kDIdx]] == kHooks[kDIdx];
+  g_heatPass = true;
+  g_heatDraws = 0;
+  w.c->Draw(3, 0);
+  const bool seen = g_heatDraws == 1;
+  g_heatPass = false;
+  Disarm();
+  g_armDepth = -1;
+  Check(fixdepth::g_tblRevalidated.load() == v0 + 1, "early: the arm found the first-call state and re-validated the table (counted)");
+  Check(kept && seen, "early: after a SwapDeviceContextState the arm survives DCS's state calls and sees the draw");
+}
+
 // bugfix-07: on a WARP context, a HotAirPass whose draw entries are armed only in part (DrawIndexed held by another
 // hook) is not watched: a heat draw through the refused slot would not be counted and the frame would read idle.
 // And a fault inside a draw hook mid-pass: the pass end still takes the arms out.
@@ -545,6 +677,7 @@ void ArmTests() {
   g_fault = false;
   Check(armed && out, "early: a fault in a draw hook mid-pass: the pass end takes the arms out of DCS's table");
   g_heatKind.erase(pass), g_passLabel.erase(pass), g_passSsao.erase(pass);
+  OwnerTests(w);
   if (g_tiny) g_tiny->Release(), g_tiny = nullptr;
   g_mask = savedMask;
   ptiming::g_topTid = savedTop;

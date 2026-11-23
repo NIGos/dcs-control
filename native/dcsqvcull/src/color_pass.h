@@ -1132,19 +1132,24 @@ inline void TonePassBegin(int v) {
 inline void TonePassArmed(bool armed) {
   if (g_tp.open) g_tp.armed = armed;
 }
-inline void TonePassEnd() {
-  if (!g_tp.open) return;
+// Returns the miss's MissWhy, -1 when nothing was missed (r2-nodlss5: the caller names the draw entries' owners at a
+// bypass).
+inline int TonePassEnd() {
+  if (!g_tp.open) return -1;
   g_tp.open = false;
   if (g_tp.modeOn && !g_tp.swapped && !g_fault.load(std::memory_order_relaxed)) {
     if (!g_obj.load(std::memory_order_acquire)) {  // the first switch to a mode: objects being created, not a dropout
       g_missPending++;
-      return;
+      return -1;
     }
     g_miss[g_tp.v]++;
     g_missMode = g_tp.mode;  // R83: before the total (the config thread logs when the total changes)
     g_missTotal++;
-    g_missWhy[g_tp.reached ? kMissReject : g_tp.armed ? kMissBypass : kMissArm]++;
+    const int why = g_tp.reached ? kMissReject : g_tp.armed ? kMissBypass : kMissArm;
+    g_missWhy[why]++;
+    return why;
   }
+  return -1;
 }
 // The device the render thread sees; the config thread creates our objects for it.
 inline void NoteDevice(ID3D11Device* dev) {

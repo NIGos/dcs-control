@@ -831,6 +831,13 @@ bool g_armed[kDkCount] = {};
 void** g_vt = nullptr;
 int g_armDepth = -1;  // depth of the pass that armed (render thread), -1 none
 std::atomic<uint64_t> g_armRefused{0}, g_armLost{0};
+// r2-nodlss5: slots armed over another module's hook (chained in front of it), slots that still held our own hook
+// from an earlier arm (taken back as armed), and the first owners of a refused or chained slot (named by the worker).
+std::atomic<uint64_t> g_armForeign{0}, g_armStaleOwn{0};
+std::mutex g_ownerMu;
+std::vector<std::string> g_ownerNotes;  // under g_ownerMu: render thread adds (at most kOwnerNotes), Tick logs
+int g_ownerNoted = 0;                   // render thread
+constexpr int kOwnerNotes = 4;
 
 // census state (render thread while running; worker after g_cState == 3)
 struct ClassRec {
@@ -1222,22 +1229,73 @@ void Normalize() {
     if (FAILED(g_dev->CreateBuffer(&bd, nullptr, &g_tiny))) g_tiny = nullptr;
   }
   if (!g_tiny) return;
+  // r2-nodlss5: a table left in d3d11's first-call state (after a SwapDeviceContextState: DCS's own DLSS on the route
+  // without Cheeky) is re-validated by one getter first; the upload alone puts back only the toggled draw entries.
+  fixdepth::RevalidateTable(g_ctx);
   static const uint32_t zero[4] = {};
   g_ctx->UpdateSubresource(g_tiny, 0, nullptr, zero, 0, 0);
 }
-// Arms the slots that hold d3d11's own entry (never over another hook, ours or a proxy's). k0..k1: slot range.
+// What holds a slot Arm finds not d3d11's own (r2-nodlss5).
+enum SlotOwner { kOwnD3d11, kOwnStale, kOwnPayload, kOwnForeign };
+inline SlotOwner OwnerOf(int k, const void* cur) {
+  if (cur == kHooks[k]) return kOwnStale;
+  if (d3ds::InPayload(cur)) return kOwnPayload;
+  return fixdepth::InD3d11(cur) ? kOwnD3d11 : kOwnForeign;
+}
+// d3d11 keeps the immediate context's table inside the context object (right after its vtable pointer); a device
+// proxy's (ReShade: d3d_proxy.h) is a class vtable in its own image.
+inline bool TableInContext(void** vt) { return vt == reinterpret_cast<void**>(g_ctx) + 1; }
+// The first few slots not d3d11's own: slot, entry (module + offset), what was done; logged by the worker (Tick).
+void NoteOwner(int k, void* cur, SlotOwner o, bool inContext, const char* done) {
+  if (g_ownerNoted >= kOwnerNotes) return;
+  ++g_ownerNoted;
+  char where[MAX_PATH + 48];
+  d3ds::DescribeAddress(cur, where, sizeof(where));
+  const char* what = o == kOwnStale     ? "our own hook from an earlier arm"
+                     : o == kOwnPayload ? (k < fixdepth::fdexport::kDkCount && cur == fixdepth::DrawHookOf(k)
+                                               ? "fixation depth's draw hook (another feature's arm is open)"
+                                               : "another hook of this payload")
+                                        : "another module's hook";
+  char line[MAX_PATH + 400];
+  snprintf(line, sizeof(line),
+           "early shaders: %s entry of DCS's context at a pass begin: %s = %s (table %s, context %p); %s", kDkNames[k],
+           where, what, inContext ? "inside the context: d3d11's" : "outside the context: a proxy's", static_cast<void*>(g_ctx),
+           done);
+  std::lock_guard<std::mutex> lock(g_ownerMu);
+  g_ownerNotes.emplace_back(line);
+}
+// Arms the slots that hold d3d11's own entry. k0..k1: slot range.
+// r2-nodlss5 (the route without the Cheeky layer: every draw slot refused, 7 per SSAO / heat pass): never over another
+// hook of this payload (two of ours adopting each other as the original forward to each other: R47 / R48); our own
+// hook still in a slot from an earlier arm is taken back as armed (calls through it already reach g_orig); over
+// another module's hook in d3d11's own table it chains in front, as fixation depth's draw arms always did (Disarm puts
+// that hook back; Rearm never adopts one, so a module that writes its hook again only takes ours out: "lost").
 bool Arm(int k0, int k1) {
   if (!g_ctx || ForeignTable()) return false;
   Normalize();
   void** vt = *reinterpret_cast<void***>(g_ctx);
   g_vt = vt;
+  const bool inContext = TableInContext(vt);
   bool any = false;
   for (int k = k0; k < k1; ++k) {
     if (g_slot[k] < 0 || g_armed[k]) continue;
     void* cur = vt[g_slot[k]];
-    if (cur == kHooks[k] || d3ds::InPayload(cur) || !fixdepth::InD3d11(cur)) {
-      g_armRefused.fetch_add(1, std::memory_order_relaxed);
+    const SlotOwner o = OwnerOf(k, cur);
+    if (o == kOwnStale) {
+      g_armed[k] = true;
+      any = true;
+      g_armStaleOwn.fetch_add(1, std::memory_order_relaxed);
+      NoteOwner(k, cur, o, inContext, "taken back as armed");
       continue;
+    }
+    if (o == kOwnPayload || (o == kOwnForeign && !inContext)) {
+      g_armRefused.fetch_add(1, std::memory_order_relaxed);
+      NoteOwner(k, cur, o, inContext, "refused");
+      continue;
+    }
+    if (o == kOwnForeign) {
+      g_armForeign.fetch_add(1, std::memory_order_relaxed);
+      NoteOwner(k, cur, o, inContext, "chained in front of it");
     }
     g_orig[k] = cur;
     d3ds::WriteTablePointer(&vt[g_slot[k]], kHooks[k]);
@@ -1593,6 +1651,14 @@ bool Install() {
 // Worker, every second. mask: [D3D] EarlyShaders (kill switch / benchmark: 0); censusKey: [Suite] EarlyShaderCensus.
 void Tick(uint32_t mask, int censusKey, const std::wstring& logDir) {
   g_logDir = logDir;
+  {  // r2-nodlss5: the owners the render thread noted (never logged from the render thread)
+    std::vector<std::string> notes;
+    {
+      std::lock_guard<std::mutex> lock(g_ownerMu);
+      notes.swap(g_ownerNotes);
+    }
+    for (const std::string& n : notes) Log("%s", n.c_str());
+  }
   static uint32_t lastMask = 0xffffffffu;
   const uint32_t refused = mask & 0x1Cu;
   if (mask != lastMask) {
@@ -1727,10 +1793,13 @@ void Tick(uint32_t mask, int censusKey, const std::wstring& logDir) {
   if ((mask & 1u) && now - lastLine >= 60000) {
     lastLine = now;
     Log("early shaders: SSAO passes %llu, draws seen %llu, variant draws %llu; identified %d, rejected %d; arms refused "
-        "%llu, lost to a d3d11 toggle %llu",
+        "%llu, lost to a d3d11 toggle %llu; armed over another module's hook %llu, own hook taken back %llu; table "
+        "re-validated at an arm (all arms so far) %llu",
         static_cast<unsigned long long>(g_ssaoPasses.load()), static_cast<unsigned long long>(g_ssaoDraws.load()),
         static_cast<unsigned long long>(g_swaps.load()), g_ssao.accepted, g_ssao.rejected,
-        static_cast<unsigned long long>(g_armRefused.load()), static_cast<unsigned long long>(g_armLost.load()));
+        static_cast<unsigned long long>(g_armRefused.load()), static_cast<unsigned long long>(g_armLost.load()),
+        static_cast<unsigned long long>(g_armForeign.load()), static_cast<unsigned long long>(g_armStaleOwn.load()),
+        static_cast<unsigned long long>(fixdepth::g_tblRevalidated.load()));
   }
 }
 
