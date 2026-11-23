@@ -5,7 +5,7 @@ namespace DcsVr.Core;
 
 public sealed record ReleaseFile(string Path, string Sha256, long Bytes);
 /// <param name="Commit">The commit the release was built from, "-dirty" after it when the tree had uncommitted changes
-/// (scripts/build-release.ps1); null in releases before 0.6.7 and in a build outside a git checkout. A record, never a condition.</param>
+/// (scripts/build-release.ps1); null in releases before 0.7 (0.6.6 and earlier) and in a build outside a git checkout. A record, never a condition.</param>
 public sealed record ReleaseManifest(int SchemaVersion, string Product, string Version, List<ReleaseFile> Files, string? Commit = null);
 
 /// <summary>Installs only application payload files. Never changes DCS, registry, or VR drivers.</summary>

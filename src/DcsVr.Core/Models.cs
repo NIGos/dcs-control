@@ -768,7 +768,7 @@ public static class JsonData
     /// driver folder (the registered driver is used), and Depth boost's transition choice and its key (the dual camera
     /// only moves the depth gradually), the headset tracking (detected, never a setting: it lives on the inventory), and
     /// the derived "usesThreeViews" an earlier 0.7 build saved before Three views was parked, and the derived values earlier 0.7
-    /// builds saved and no longer write ([JsonIgnore]: 0.6.7 refuses a key it does not know, and these were new in 0.7).
+    /// builds saved and no longer write ([JsonIgnore]: 0.6.6, the release before 0.7, refuses a key it does not know, and these were new in 0.7).
     /// "frameGenFocusLayer", the Focus layer choice of earlier 0.7 builds: foveated frame generation now always sends the
     /// focus as Opaque focus (ConfigurationWriters.QuadViews), whatever an older draft or preset chose. "engineReleaseIdleDlss"
     /// (Free unused DLSS memory, removed in 0.7: on DCS 2.9.31 it released nothing) and its derived "usesReleaseIdleDlss".

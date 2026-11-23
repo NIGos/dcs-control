@@ -1,8 +1,10 @@
 # 0.7.0 preview
 
+There was no 0.6.7: what it was going to bring is in this version too, under **Also new since 0.6.6** further down.
+
 **Quest 3 through Virtual Desktop.** A new route in the top bar, **Quest 3 VD**, for a Meta Quest 3 streamed by Virtual Desktop through its OpenXR runtime, VDXR. Contributed by @Mav87th (GitHub PR #29), who flew it on a Quest 3 with an RTX 5070 Ti. The Quest 3 has no eye tracking, so Quad Views uses a fixed focus in the centre, starting at 55% × 75% of the view to keep the instruments sharp. Frame generation, foveated frame generation and the engine optimizations work as on the other routes; the features that follow your eyes are off. The refresh rate is one of 72, 80, 90 or 120 Hz, as in Virtual Desktop. Keep Synchronous Spacewarp off in the Virtual Desktop app; Checks reminds you. DLSS 5 is offered but has not been tried on this route, and foveated frame generation has not been flown there yet. **Read settings from this PC** finds the route when VDXR is the active OpenXR runtime.
 
-**Opaque focus for foveated frame generation.** Foveated frame generation now hands the focus area to the headset as **Opaque focus**: the soft edge is drawn into the focus image itself, with colours worked out in advance for the headset's blend. It is against the rectangle or spot that flickered around the focus area on some Pimax setups. There is nothing to choose; tell me how it looks on your headset.
+**Foveated frame generation (experimental).** A new switch on the Frame generation page, off by default. Frames are generated for the focus area and for the rest of the view separately, instead of for the whole image: about half the GPU time for generated frames and 4 GB less video memory on the test PC. It needs the bundled Quad Views, the Pimax or Quest 3 VD route and NVIDIA frame generation. It gets ready on the loading screen, which pauses once for half a second, so the flight itself starts with only a short hitch. It helps most with a small focus area; with a very large one it can cost more than it saves. The focus area goes to the headset as **Opaque focus**: the soft edge is drawn into the focus image itself, with colours worked out in advance for the headset's blend. It is against the rectangle or spot that flickered around the focus area on some Pimax setups in testing. There is nothing to choose; tell me how the edge of the focus area looks on your headset, and fast eye moves.
 
 **Eye-tracked Quad Views, from @Heartbreak-1's GitHub PR #26.**
 - **Soft focus edge** (experimental, off by default): in the edge band the focus area first loses detail down to the periphery's resolution, then fades out, so the ring around where you look is harder to see. It also works with foveated frame generation.
@@ -32,32 +34,14 @@
 
 **DLSS presets with DLSS 5.** When DLSS 5 (Cheeky) had hooked DCS's DLSS first, the Focus and Periphery DLSS presets could stay at DCS's preset. The engine module now chains its hook behind Cheeky's, so both work. Cheeky also no longer starts in the helper processes of DCS's built-in browser.
 
-**Going back to 0.6.7.** 0.6.7 cannot open a profile or preset saved by 0.7, because it refuses the settings new in 0.7. **Go back** (Help & support, Updates) handles this: DCS is put back to stock and 0.6.7 gets the settings and presets you had in 0.6.7, or its defaults if there is no copy of them. Your 0.7 settings are kept, and presets saved in 0.7 come back when you update again. A file exported from 0.7 cannot be imported in 0.6.7.
-
 **Fewer options.**
 - **Free unused DLSS memory** is gone from the Engine page: on DCS 2.9.31 it frees nothing. A profile that has it still loads.
 - Settings for working on DCS Control are hidden: Turbo mode, the Alternative Quad Views provider, DLSS 5's Depth convention and Motion scale, the terrain prefetch fix's Observe choice and the Engine page's Developer options. A profile that has one of them changed loads it at its safe value (Turbo off, the bundled Quad Views, Observe as Off, Developer mode off).
 - **Periphery DLSS preset** offers Off, E and F. K and M were heavier than E, which the periphery is for; a profile saved with one uses E.
 
-**Fixes:**
-- The engine module's GPU-bound guard took a steady CPU- or GPU-bound frame rate that happened to sit near half or a third of the refresh rate for a frame-rate cap, and held back for seconds (GitHub #27, reported by @deamonesque).
-- A step the GPU-bound guard took without a measured gain (loading, the menu, too few frames) no longer carries over into the next mission: it is undone when a mission loads, you change slot or the mission ends.
-- The engine's test suite stopped at once on a headset without quad views ("nothing to compare"). It now compares whole frames there, and the report says so (GitHub #32, reported by @Mav87th).
-- AltGr+Shift+F11 now works as the in-flight switch, and AltGr no longer counts as Ctrl+Alt, so it cannot trigger the engine module's reserved Ctrl+Alt keys (GitHub #32).
-- In the diagnostic package, a PC named after its user ("JOHN-PC") is now replaced as `<pc>` instead of `<user>-PC` (GitHub #31, reported by @Mav87th).
-- The DLSS 5 page and the guide now say plainly that NVIDIA does not offer `nvngx_dlssnr.dll` on its own and that DCS Control cannot provide it. With a patched copy on an RTX 50 card, the page says to use NVIDIA's original file (GitHub #33, reported by @Mav87th).
-- For developers: the OFXR build script works with CMake 4.3 (GitHub #30, reported by @Mav87th).
-- Back to stock DCS also removes the engine module's new 0.7 log files.
-- On the Quest 3 VD route, Pimax's logs and Pimax Play's version are no longer read, and leaving the route gives back the focus values you had before it.
-- After a DCS update, Status in DCS on the Engine page says when some frame timing helpers are off because DCS Control has not been checked against that DCS version yet. Before, they stopped without a word.
-- Uninstalling also removes the setups kept for Go back.
-- **End DCS** could not end a DCS running with administrator rights and only said Windows did not allow it (GitHub #21, reported by @whitedear). It now asks Windows for permission once and ends it; if the prompt is declined, it says why. A healthy DCS with administrator rights is also no longer taken for "not responding".
+**Also new since 0.6.6:**
 
-# 0.6.7 preview
-
-**Foveated frame generation (experimental).** A new switch on the Frame generation page, off by default. Frames are generated for the focus area and for the rest of the view separately, instead of for the whole image: about half the GPU time for generated frames and 4 GB less video memory on the test PC. It needs the bundled Quad Views, the Pimax route and NVIDIA frame generation. It gets ready on the loading screen, which pauses once for half a second, so the flight itself starts with only a short hitch. It helps most with a small focus area; with a very large one it can cost more than it saves. Tell me how the edge of the focus area looks, and fast eye moves.
-
-**Go back to the previous version.** If an update gives you trouble, **Help & support** now has **Go back** under Updates: it puts DCS back to stock, then installs the version you had before from its own signed setup (kept on your PC for a month after an update, otherwise downloaded again) and restarts. Your settings return to how they were in that version; the ones you changed since are kept in `%LOCALAPPDATA%\DcsControl\versions`, and presets you saved since come back when you update again. One step back only, and not to versions before 0.6.3. The update you left is not offered again by itself; **Check now** still shows it. Coming from 0.6.6, the previous version is downloaded and its own update banner returns after a few hours.
+**Go back to the previous version.** If an update gives you trouble, **Help & support** now has **Go back** under Updates: it puts DCS back to stock, then installs the version you had before from its own signed setup and restarts. Your settings return to how they were in that version; the ones you changed since are kept in `%LOCALAPPDATA%\DcsControl\versions`, and presets you saved since come back when you update again. One step back only, and not to versions before 0.6.3. The update you left is not offered again by itself; **Check now** still shows it. From 0.7 on, the setup is kept on your PC for a month after an update. Coming from 0.6.6 or earlier, it is downloaded again, and that version shows its own update banner again after a few hours. An earlier version cannot open a profile or preset saved by 0.7, because it refuses the settings new in 0.7: Go back gives it the copy taken when 0.7 was installed, or its defaults if there is none. A file exported from 0.7 cannot be imported in an earlier version. Uninstalling also removes the setups kept for Go back.
 
 **Smooth mouse cursor now works in the cockpit.** It rarely recognised DCS's yellow cockpit cursor, so generated frames still showed it faded between two places. It now follows the mouse to find it: in test flights the cursor was redrawn in nearly every generated frame over the sky and the HUD, less often over bright panels. It works with foveated frame generation too.
 
@@ -70,8 +54,18 @@
 **A stuck DCS, on every page (GitHub #21).** 0.6.6 pointed out a DCS left in the background on the Overview only. The status at the top of every page now says **DCS has no window** or **DCS is not responding**, with **End DCS** next to it. The app keeps counting while its window is minimised, so you are told as soon as you open it. A DCS without a window is now pointed out after a minute instead of half a minute, so one that is only slow to close is left alone. A DCS that crashed and still has its crash window open is named as well (**DCS has crashed**), with the same **End DCS**: until now it counted as running and kept the app waiting.
 
 **Fixes:**
+- **End DCS** could not end a DCS running with administrator rights and only said Windows did not allow it (GitHub #21, reported by @whitedear). It now asks Windows for permission once and ends it; if the prompt is declined, it says why. A healthy DCS with administrator rights is also no longer taken for "not responding".
+- The engine module's GPU-bound guard took a steady CPU- or GPU-bound frame rate that happened to sit near half or a third of the refresh rate for a frame-rate cap, and held back for seconds (GitHub #27, reported by @deamonesque).
+- A step the GPU-bound guard took without a measured gain (loading, the menu, too few frames) no longer carries over into the next mission: it is undone when a mission loads, you change slot or the mission ends.
 - With **Smoothness buffer** on, a short run of heavy frames (opening the F10 map, for example) could leave DCS at about 41 FPS instead of 45 with repeated frames, for up to a minute. Frame generation now recovers at once.
-- With foveated frame generation, a loading screen at the wrong moment while a flight started could leave the whole flight without generated frames.
+- The engine's test suite stopped at once on a headset without quad views ("nothing to compare"). It now compares whole frames there, and the report says so (GitHub #32, reported by @Mav87th).
+- AltGr+Shift+F11 now works as the in-flight switch, and AltGr no longer counts as Ctrl+Alt, so it cannot trigger the engine module's reserved Ctrl+Alt keys (GitHub #32).
+- In the diagnostic package, a PC named after its user ("JOHN-PC") is now replaced as `<pc>` instead of `<user>-PC` (GitHub #31, reported by @Mav87th).
+- The DLSS 5 page and the guide now say plainly that NVIDIA does not offer `nvngx_dlssnr.dll` on its own and that DCS Control cannot provide it. With a patched copy on an RTX 50 card, the page says to use NVIDIA's original file (GitHub #33, reported by @Mav87th).
+- For developers: the OFXR build script works with CMake 4.3 (GitHub #30, reported by @Mav87th).
+- Back to stock DCS also removes the engine module's new 0.7 log files.
+- On the Quest 3 VD route, Pimax's logs and Pimax Play's version are no longer read, and leaving the route gives back the focus values you had before it.
+- After a DCS update, Status in DCS on the Engine page says when some frame timing helpers are off because DCS Control has not been checked against that DCS version yet. Before, they stopped without a word.
 
 # 0.6.6 preview
 

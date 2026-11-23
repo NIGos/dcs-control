@@ -5330,6 +5330,23 @@ Test("Profiles from 0.6.7 load in 0.7: without the 0.7 settings (and with 0.6.7'
     Require(loaded.UsesFoveatedFrameGen && ConfigurationWriters.QuadViews(loaded).Contains("\ndcsvr_two_layers=2\ndcsvr_two_layers_alpha=3\n"),
         "foveated frame generation from 0.6.7 is sent as Opaque focus, as every 0.7 profile");
 });
+Test("Profiles from 0.6.6 load in 0.7 (0.6.7 was not released, so 0.6.6 is the version users update from)", () =>
+{
+    // VrProfile at v0.6.6-preview: none of the settings new in 0.6.7 builds or 0.7, nor the derived usesFoveatedFrameGen;
+    // it still has the headset tracking key and Free unused DLSS memory (setting and derived value), on by default there.
+    string[] since066 = ["frameGenFoveated", "quadVerticalOffset", "usesFoveatedFrameGen", "frameGenParallelEyes", "quadEdgeMatch",
+        "quadSaccadeTail", "quadLostGazeEase", "engineFastShaderPaths", "engineThreeViews", "engineWaterSkip", "engineIdleEffectSkip", "neuralBrightnessMatch"];
+    var node = System.Text.Json.Nodes.JsonNode.Parse(JsonData.Serialize(new VrProfile { QuadViews = QuadProvider.QuadViewsFoveated, FrameGen = FrameGeneration.Nvidia, EngineOptimizations = true }))!.AsObject();
+    foreach (var key in since066) Require(node.Remove(key), "0.7 still writes " + key);
+    node["tracking"] = "None"; node["engineReleaseIdleDlss"] = true; node["usesReleaseIdleDlss"] = true;
+    var loaded = JsonData.Deserialize<VrProfile>(node.ToJsonString());
+    var defaults = new VrProfile();
+    Require(!loaded.FrameGenFoveated && !loaded.UsesFoveatedFrameGen && loaded.QuadVerticalOffset == defaults.QuadVerticalOffset && !loaded.NeuralBrightnessMatch,
+        "a 0.6.6 profile takes the defaults of what came since: foveated frame generation off, no vertical offset");
+    Require(loaded.EngineOptimizations && loaded.QuadViews == QuadProvider.QuadViewsFoveated && loaded.FrameGen == FrameGeneration.Nvidia, "its own settings are kept");
+    Require(!JsonData.Serialize(loaded).Contains("ReleaseIdleDlss", StringComparison.OrdinalIgnoreCase) && !JsonData.Serialize(loaded).Contains("\"tracking\"", StringComparison.Ordinal),
+        "the keys 0.7 dropped are not written back");
+});
 Test("Profiles for 0.6.7: no derived value new since 0.6.7 is written (0.6.7 refuses keys it does not know); drafts that have them still load", () =>
 {
     // The derived (get-only) values 0.6.7 itself wrote, and so reads: no other may be written (checked against 0.6.7's

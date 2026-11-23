@@ -15,7 +15,7 @@ release is built from. Building and testing themselves are in the [README](../RE
 
 ## Maintenance lines
 
-A maintenance line (a 0.6.6.x next to 0.6.7, say) gets its own permanent worktree in its own folder:
+A maintenance line (a 0.7.0.x next to 0.7.1, say) gets its own permanent worktree in its own folder:
 
 ```powershell
 git worktree add -b release/0.6.6.1 ..\DcsControl-0.6.6 v0.6.6-preview

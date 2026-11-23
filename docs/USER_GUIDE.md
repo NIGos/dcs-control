@@ -27,7 +27,13 @@
 ## New in 0.7
 
 - **Quest 3 VD**, a new route in the top bar: a Meta Quest 3 streamed by Virtual Desktop (VDXR), with Quad Views at a fixed focus, frame generation and the engine optimizations. Contributed by @Mav87th (GitHub PR #29). See [Quest 3 through Virtual Desktop](#quest-3-through-virtual-desktop).
-- **Opaque focus** built into foveated frame generation: the soft edge of the focus area is drawn into the focus image, and the headset blends it with colours worked out in advance. It is against the flicker some Pimax setups showed around the focus area; there is no choice to make. Foveated frame generation also runs on the Quest 3 VD route.
+There was no 0.6.7: what it was going to bring is in 0.7 too, so coming from 0.6.6 everything below is new.
+
+- **Foveated frame generation** (Frame generation page, experimental, off by default): frames are generated for the focus area and for the rest of the view separately, about half the GPU time for generated frames and less video memory. The focus area goes to the headset as **Opaque focus** (its soft edge drawn into the focus image, with colours worked out in advance for the headset's blend), against the flicker some Pimax setups showed around it; there is no choice to make. It runs on the Pimax and Quest 3 VD routes.
+- **Go back** (Help & support, Updates): returns to the version you had before an update. See [Updates](#updates).
+- **Vertical offset** for the focus area (Quad Views page, *Set here*; GitHub #24), Pimax's Quad View presets rendered by the bundled Quad Views, and the real focus size shown on the page.
+- **Smooth mouse cursor** now works in the cockpit.
+- **A stuck DCS** (no window, not responding, crashed) is pointed out at the top of every page with **End DCS**, which also ends a DCS running as administrator (GitHub #21).
 - **Quad Views**: **Soft focus edge** (experimental, off by default), and in a new **Eye-tracking options** fold **Stay ahead until your eyes land** and **Slide back when tracking is lost** (both experimental, on by default), from @Heartbreak-1's GitHub PR #26. All three also work with frame generation.
 - **Engine Optimizations**, in a new **GPU savings** fold (experimental, off by default): **Skip hidden water** and **Skip unused effects**, next to Cache distant shadows. **Faster terrain and shader paths** (on by default, now in the same fold) can be turned off if a problem points to it.
 - **Sharp HUD** no longer needs Depth boost. Sharp HUD, **Far depth** and frame generation's cockpit outline, depth and motion also run with Engine Optimizations off.
@@ -38,7 +44,7 @@
 - **Less CPU**: the terrain prefetch fix no longer lets DCS's terrain threads spin (about 45 % less DCS CPU in test flights), and after an update the shaders are prepared with one thread while you fly.
 - **AltGr+Shift+F11** works as the in-flight switch, and AltGr no longer counts as Ctrl+Alt. The engine's test suite also runs on a headset without quad views (it compares whole frames).
 - Fixes for GitHub issues #27, #30, #31, #32 and #33. See the [release notes](RELEASE_NOTES.md).
-- **Going back to 0.6.7**: 0.6.7 cannot open profiles or presets saved by 0.7. **Go back** handles this for you (see [Updates](#updates)).
+- **Going back to 0.6.6** (or another earlier version): it cannot open profiles or presets saved by 0.7. **Go back** handles this for you (see [Updates](#updates)).
 
 ## What the app does
 
@@ -117,13 +123,13 @@ When DCS Control starts it asks GitHub whether a newer release is out (at most e
 
 Update refuses while DCS runs and while Launch DCS, Apply or Back to stock DCS is still working. If the update fails, the installation rolls back and the DCS Control you had opens again. A copy started from an unzipped folder is updated by installing DCS Control where the setup installed it before (Settings → Apps knows), otherwise in the standard folder (`%LOCALAPPDATA%\Programs\DcsControl`, with Start menu and desktop shortcuts); the dialog names the folder, and afterwards you can delete the unzipped one.
 
-Releases before 0.5.6 cannot update themselves: install 0.5.6 once with the setup (or the ZIP); from then on updates arrive in the app. **0.6.3 has a new release signing key**: from 0.6.2 or earlier, **Update** refuses it ("the signature does not match DCS Control's release key") and installs nothing, so install 0.6.3 or later (for example 0.6.7) once with its setup; your settings and profiles are kept, and later updates install from the app again. A dot next to the version number at the bottom of the left rail also means an update is available; × hides the banner until the next start.
+Releases before 0.5.6 cannot update themselves: install 0.5.6 once with the setup (or the ZIP); from then on updates arrive in the app. **0.6.3 has a new release signing key**: from 0.6.2 or earlier, **Update** refuses it ("the signature does not match DCS Control's release key") and installs nothing, so install 0.6.3 or later (for example 0.7.0) once with its setup; your settings and profiles are kept, and later updates install from the app again. A dot next to the version number at the bottom of the left rail also means an update is available; × hides the banner until the next start.
 
 On the **Help & support** page, under **Updates**, **Check for updates when DCS Control starts** turns the automatic check off (it is on by default) and **Check now** asks GitHub at once. Without internet nothing happens: no update is shown.
 
-**Go back**, at the bottom of the same card, returns to the version you had before the last update, for when an update gives you trouble. Close DCS first. DCS is put back to stock, then the earlier version's own signed setup installs it again (it is kept on your PC for a month after an update, otherwise downloaded) and DCS Control restarts. Your settings return to how they were in that version; the ones you changed since stay in `%LOCALAPPDATA%\DcsControl\versions`, and presets you saved since come back when you update again. It goes one step back only, and not to versions before 0.6.3. The update you left is not offered again by itself; **Check now** shows it.
+**Go back**, at the bottom of the same card, returns to the version you had before the last update, for when an update gives you trouble. Close DCS first. DCS is put back to stock, then the earlier version's own signed setup installs it again (from 0.7 on it is kept on your PC for a month after an update; otherwise, as when you came from 0.6.6 or earlier, it is downloaded) and DCS Control restarts. A version from before 0.7 shows its own update banner again after a few hours. Your settings return to how they were in that version; the ones you changed since stay in `%LOCALAPPDATA%\DcsControl\versions`, and presets you saved since come back when you update again. It goes one step back only, and not to versions before 0.6.3. The update you left is not offered again by itself; **Check now** shows it.
 
-**From 0.7 back to 0.6.7.** 0.6.7 cannot open a profile or preset saved by 0.7: it refuses the settings that are new in 0.7. Go back takes care of this: DCS is put back to stock, and 0.6.7 gets back the settings and presets you had in 0.6.7 (the copy taken when 0.7 was installed). If there is no such copy, 0.6.7 starts with its default settings. Your 0.7 settings and presets are kept in `%LOCALAPPDATA%\DcsControl\versions`, and the presets come back when you update again. A file you exported from 0.7 (**Export to a file**) cannot be imported in 0.6.7.
+**From 0.7 back to an earlier version** (0.6.6, for example). An earlier version cannot open a profile or preset saved by 0.7: it refuses the settings that are new in 0.7. Go back takes care of this: DCS is put back to stock, and the earlier version gets back the settings and presets you had in it (the copy taken when 0.7 was installed). If there is no such copy, it starts with its default settings. Your 0.7 settings and presets are kept in `%LOCALAPPDATA%\DcsControl\versions`, and the presets come back when you update again. A file you exported from 0.7 (**Export to a file**) cannot be imported in an earlier version.
 
 **What's new** after an update: the first start of a new version shows its release notes once. Click the version number at the bottom of the left rail (or **What's new in this version** on the Help & support page) to see them again.
 
@@ -523,9 +529,9 @@ With **Foveated frame generation** on, some Pimax setups showed a flickering rec
 - **Read settings from this PC picks no route**: Virtual Desktop and Pimax Play are both running. Close the one you are not flying with and read again.
 - **The refresh rate is refused**: the route takes 72, 80, 90 or 120 Hz. Pick the rate set in Virtual Desktop.
 
-### 0.6.7 does not open my profile or preset
+### An earlier version does not open my profile or preset
 
-0.6.7 refuses settings it does not know, and every profile or preset saved by 0.7 has some (for example Both eyes at once or the Quest 3 VD route). Use **Go back** on the Help & support page instead of installing 0.6.7 by hand: it gives 0.6.7 the settings and presets you had in that version (see [Updates](#updates)). A file exported from 0.7 can only be imported in 0.7 or later.
+Versions before 0.7 (0.6.6, for example) refuse settings they do not know, and every profile or preset saved by 0.7 has some (for example Both eyes at once or the Quest 3 VD route). Use **Go back** on the Help & support page instead of installing the earlier version by hand: it gives that version the settings and presets you had in it (see [Updates](#updates)). A file exported from 0.7 can only be imported in 0.7 or later.
 
 ### Eye distance (IPD)
 

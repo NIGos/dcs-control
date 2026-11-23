@@ -1,4 +1,4 @@
-# OFXR layer: known limits (0.6.6 / 0.6.7)
+# OFXR layer: known limits (0.6.6 and the 0.6.7 builds)
 
 What the frame-generation layer (the patched OFXR Bridge fork, `patches/ofxr-djules75`) is known not to do well, as
 measured in the bug-fix round of 2026-11-15/16. Each limit has its numbers and the file they come from.
@@ -14,7 +14,7 @@ flight log's `result=7` comment): 0082 was the cursor work's number while it was
 0082 is the lead's scene change, so read "(0082)" beside cursor code as 0087. The tags stay as they are until the
 layer is rebuilt for another reason.
 
-Terms: *two layers* = foveated frame generation (a periphery and a focus layer per frame, 0.6.7, off by default);
+Terms: *two layers* = foveated frame generation (a periphery and a focus layer per frame; built for 0.6.7, which was not released, and first shipped in 0.7; off by default);
 *composed* or *twin* = the same flight with that option off; *buffer* = the Smoothness buffer (`deep_pipeline`).
 
 ## 1. Smooth mouse cursor (0087, 0088)
