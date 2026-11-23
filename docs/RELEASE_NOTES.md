@@ -85,6 +85,7 @@ There was no 0.6.7: what it was going to bring is in this version too, under **A
 - After going back and forth with 0.6.6, an outdated copy of the record of originals is no longer used. The diagnostic package includes DLSS 5's crash log. End DCS no longer reports a failure because another Windows user runs DCS.
 - Adaptive frame generation leaves 3X sooner when 2X would hold (Balanced and Prefer refresh): the switch back now allows for the higher frame time measured at 3X, and the late frames of the switch itself no longer send it straight back.
 - Opaque focus: the width of its soft edge can be set in Quad Views' settings file (dcsvr_two_layers_opaque_ramp), and applies in flight.
+- Foveated frame generation: the focus and periphery are joined into one image before the headset runtime, removing the coloured line and the flicker at the focus edge (about 0.13 ms of GPU per frame).
 
 # 0.6.6 preview
 
