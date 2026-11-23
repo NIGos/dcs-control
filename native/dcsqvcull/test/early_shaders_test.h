@@ -535,10 +535,39 @@ bool SwapRoundTrip(Warp& w) {
     if (u) u->Release();
   return ok;
 }
+// r2-nodlss5 flight: a third-party d3d11.dll in DCS's bin folder (a D3D12 proxy) was the module named "d3d11.dll", so
+// every entry of the system d3d11.dll read "not d3d11's own". Here: another image loaded as ...\d3d11.dll (a copy of a
+// small system DLL, mapped without running its code).
+void ShadowD3d11Tests(void* d3dEntry) {
+  wchar_t sys[MAX_PATH] = {}, tmp[MAX_PATH] = {};
+  GetSystemDirectoryW(sys, MAX_PATH);
+  GetTempPathW(MAX_PATH, tmp);
+  const std::wstring dir = std::wstring(tmp) + L"qv_shadow_d3d11_" + std::to_wstring(GetCurrentProcessId());
+  CreateDirectoryW(dir.c_str(), nullptr);
+  const std::wstring copy = dir + L"\\d3d11.dll";
+  HMODULE shadow = nullptr;
+  if (CopyFileW((std::wstring(sys) + L"\\version.dll").c_str(), copy.c_str(), FALSE))
+    shadow = LoadLibraryExW(copy.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+  if (!shadow) {
+    QvSkip("early: could not map a second d3d11.dll: shadowing check\n");
+  } else {
+    const HMODULE byName = GetModuleHandleW(L"d3d11.dll");
+    printf("  early: GetModuleHandleW(d3d11.dll) names %s\n", byName == shadow ? "the other d3d11.dll" : "the system's");
+    const uint8_t* inShadow = reinterpret_cast<const uint8_t*>(shadow) + 0x1000;
+    Check(d3ds::SystemD3d11() && d3ds::SystemD3d11() != shadow && fixdepth::InD3d11(d3dEntry) &&
+              !fixdepth::InD3d11(inShadow),
+          "early: d3d11's own entries are told by the system d3d11.dll's path, not by another module named d3d11.dll");
+    Check(OwnerOf(kDDraw, d3dEntry) == kOwnD3d11, "early: d3d11's own draw entry is not classed as another module's hook");
+    FreeLibrary(shadow);
+  }
+  DeleteFileW(copy.c_str());
+  RemoveDirectoryW(dir.c_str());
+}
 void OwnerTests(Warp& w) {
   void** vt = *reinterpret_cast<void***>(w.c);
   Normalize();
   void* const d3dDraw = vt[g_slot[kDDraw]];
+  ShadowD3d11Tests(d3dDraw);
   Check(TableInContext(vt), "early: d3d11 keeps the immediate context's table inside the context object");
   // another module's hook in d3d11's own table: chained in front of it, every draw seen, put back at the disarm
   {

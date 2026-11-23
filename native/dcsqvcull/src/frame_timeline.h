@@ -1112,7 +1112,7 @@ void* const kCreateHook[kCreateSlots] = {
 int InstallCreates(ID3D11Device* dev, std::string* skipped) {
   if (!dev) return 0;
   void** vt = *reinterpret_cast<void***>(dev);
-  const HMODULE d3d = GetModuleHandleW(L"d3d11.dll");
+  const HMODULE d3d = d3ds::SystemD3d11();
   int n = 0;
   for (int i = 0; i < kCreateSlots; ++i) {
     if (g_cSlot[i]) {

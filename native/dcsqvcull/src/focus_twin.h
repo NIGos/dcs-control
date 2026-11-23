@@ -3541,7 +3541,7 @@ bool BuildTable(ID3D11DeviceContext* ctx) {
   }
   for (int i = 0; i < t.n; ++i) t.expect[i] = t.page + 4096 + 16 * i, t.tapped[i] = false;
   for (int s = 0; s < sCount; ++s) t.expect[t.slot[s]] = kTap[s], t.tapped[t.slot[s]] = true;
-  HMODULE d3d = GetModuleHandleW(L"d3d11.dll");
+  HMODULE d3d = d3ds::SystemD3d11();
   if (d3d) {
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(d3d);
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(reinterpret_cast<const uint8_t*>(d3d) + dos->e_lfanew);

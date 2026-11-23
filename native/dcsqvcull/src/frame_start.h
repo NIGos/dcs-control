@@ -689,7 +689,7 @@ void InstallDriver(ID3D11Device* dev) {
   IDXGIDevice2* dx = nullptr;
   if (dev && SUCCEEDED(dev->QueryInterface(__uuidof(IDXGIDevice2), reinterpret_cast<void**>(&dx))) && dx) {
     void** vt = *reinterpret_cast<void***>(dx);
-    const HMODULE d3d = GetModuleHandleW(L"d3d11.dll");
+    const HMODULE d3d = d3ds::SystemD3d11();
     void* cur = SlotOriginal(&vt[16]);
     if (d3d && OwnerOf(vt) == d3d && OwnerOf(cur) == d3d) {
       g_enqOrig = reinterpret_cast<EnqFn>(cur);

@@ -565,6 +565,27 @@ inline bool InPayload(const void* p) {
   return a >= lo && a < hi;
 }
 
+// r2-nodlss5: the SYSTEM d3d11.dll, by its full path. GetModuleHandleW(L"d3d11.dll") returns the first module of that
+// base name, and a game folder can hold another one: the user's flight PC has DCS\bin\d3d11.dll ("SCSKiller D3D12
+// proxy", a third-party file). Loaded before the system's (the route without Cheeky), every d3d11 entry of DCS's
+// context was "not d3d11's own": every early-shaders arm and every R47 tone-map toggle point was left out (the colour
+// pass's tone map then went past its hook after a d3d11 toggle). Null until the system d3d11.dll is loaded.
+inline HMODULE SystemD3d11() {
+  static HMODULE cached = nullptr;
+  if (cached) return cached;
+  wchar_t sys[MAX_PATH + 16] = {};
+  const UINT n = GetSystemDirectoryW(sys, MAX_PATH);
+  if (!n || n >= MAX_PATH) return nullptr;
+  wcscat_s(sys, L"\\d3d11.dll");
+  cached = GetModuleHandleW(sys);
+  return cached;
+}
+// The module GetModuleHandleW(L"d3d11.dll") names when it is not the system's (diagnostics), else null.
+inline HMODULE ShadowingD3d11() {
+  const HMODULE byName = GetModuleHandleW(L"d3d11.dll");
+  return byName && byName != SystemD3d11() ? byName : nullptr;
+}
+
 // One pointer write; false when the page refused it (made read-only again by another writer meanwhile).
 bool WritePointerSeh(void** slot, void* value) {
   __try {
