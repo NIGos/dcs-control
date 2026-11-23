@@ -14,7 +14,11 @@
 
 **Faster terrain and shader paths can be turned off.** These GPU shortcuts give the same image and stay on by default. The switch, in the GPU savings fold, is there so a problem like GitHub #28 can be ruled in or out.
 
-**Terrain prefetch fix: less render-thread time in sparse scenes.** With the fix on, DCS's terrain threads could spin on the skipped calls, and in a sparse scene (Germany at low level, no mod) that cost the render thread about 1.3 ms per frame. A thread that keeps hitting skips now pauses for 1 ms every 600 of them, never the render thread. Measured: render thread 7.5 % below the fix's Observe mode instead of 18 % above, and about half the DCS CPU. In Caucasus with ATMOSX there was no cost before or after; the cap only lowered CPU use further. `[Prefetch] SpinCap=0` in `DcsQvCull.ini` turns the pause off.
+**Terrain prefetch fix: less render-thread time in sparse scenes.** With the fix on, DCS's terrain threads could spin on the skipped calls, and in a sparse scene (Germany at low level, no mod) that cost the render thread about 1.3 ms per frame. A thread that keeps hitting skips now pauses for 1 ms every 600 of them, never the render thread. Measured in the release test flights (Germany and Caucasus, with and without ATMOSX), against the fix's count-only mode: the render thread 6 to 11 % faster instead of up to 18 % slower, and DCS using about 45 % less CPU.
+
+**Shader preparation in flight uses one thread.** After a DCS or app update the engine module prepares its shaders again. It now does that with one thread while you fly, and with all of them in the main menu and on loading screens, so the first flights after an update cost DCS's render thread less. The engine's test suite pauses it while it measures.
+
+**Match brightness for DLSS 5** (off by default, in Advanced image controls on the DLSS page): keeps the DLSS 5 area as bright as the view around it, against the slightly darker disc some setups show there. In a test flight the disc became much fainter but did not go away completely: part of it is DLSS 5 softening fine cloud detail, which brightness cannot change.
 
 **Fewer requirements.**
 - **Sharp HUD** no longer needs Depth boost.
@@ -44,6 +48,8 @@
 - For developers: the OFXR build script works with CMake 4.3 (GitHub #30, reported by @Mav87th).
 - Back to stock DCS also removes the engine module's new 0.7 log files.
 - On the Quest 3 VD route, Pimax's logs and Pimax Play's version are no longer read, and leaving the route gives back the focus values you had before it.
+- After a DCS update, Status in DCS on the Engine page says when some frame timing helpers are off because DCS Control has not been checked against that DCS version yet. Before, they stopped without a word.
+- Uninstalling also removes the setups kept for Go back.
 
 # 0.6.7 preview
 

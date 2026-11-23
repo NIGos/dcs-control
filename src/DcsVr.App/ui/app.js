@@ -840,7 +840,7 @@ function buildFields() {
   field(more,'engineModelAllocator','Model data allocator (parallel)','Gives each model thread its own memory, so they stop waiting for each other. About 6% more FPS.','toggle',null,engine);
   field(more,'engineShaderTimeCache','Streaming timer cache','Reads the clock less often while streaming textures. About 5% more FPS.','toggle',null,engine);
   field(more,'engineTaskQueueClock','Task queue clock cache (camera motion)','The same for the task queue at the start of each frame. Helps when the view moves fast. Needs Streaming timer cache.','toggle',null,p => engine(p) && p.engineShaderTimeCache);
-  segmented(field(more,'boostPrefetch','Terrain prefetch fix','Skips repeated terrain memory hints. About 4% less CPU.','select',[['Off','Off'],['Observe','Observe · count only'],['Skip','Skip repeats · recommended']],engine),{Off:'Off',Observe:'Observe',Skip:'Skip'});
+  segmented(field(more,'boostPrefetch','Terrain prefetch fix','Skips repeated terrain memory hints. DCS uses much less CPU.','select',[['Off','Off'],['Observe','Observe · count only'],['Skip','Skip repeats · recommended']],engine),{Off:'Off',Observe:'Observe',Skip:'Skip'});
   field(more,'engineShadowRecorder','Multi-threaded shadows','Prepares the shadows on other CPU cores. Same image. 3 to 5% more FPS; total CPU use rises a little.','toggle',null,engine);
   field(more,'engineShadowInstancing','Shadow caster instancing (exact)','Draws identical shadow casters together. Same image. About 3% more FPS, from about 2.5 minutes after DCS starts.','toggle',null,engine);
   field(more,'engineCostWeights','Culling partition by real cost','Splits the search for visible objects by what each object really costs. About 3% more FPS.','toggle',null,engine);
