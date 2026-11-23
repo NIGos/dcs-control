@@ -2813,6 +2813,37 @@ void ImportChecks(bool forceWarp) {
     Check(RefCount(engineL.Get()) == base && RefCount(engineR.Get()) == base, "M8 session end: every reference released (counts back to the engine's own)");
     const auto counts = std::array<uint64_t, 4>{imp.Rejects(DepthReject::Missing), imp.Rejects(DepthReject::Frame), imp.Rejects(DepthReject::Flags), imp.Rejects(DepthReject::None)};
     Check(counts[0] == 2 && counts[1] == 1 && counts[2] == 1 && counts[3] == 1, "M8 one statistics counter per reason");
+    {
+        // r2-lifecycle: the engine's uninstall releases from its config thread when the render thread did not reach a
+        // pass boundary within 300 ms (fixation_depth.h FarReleaseOnRenderThread), then drops its own references. The
+        // render thread may still be composing with the latches Validate handed out: they stay valid until the render
+        // thread's next call, which drops them.
+        ComPtr<ID3D11Texture2D> tl = tex(device.Get(), DXGI_FORMAT_R32G8X24_TYPELESS, 1192, 1173);
+        ComPtr<ID3D11Texture2D> tr = tex(device.Get(), DXGI_FORMAT_R32G8X24_TYPELESS, 1192, 1173);
+        auto l = view(2, tl.Get(), 12, 7), r = view(3, tr.Get(), 12, 7);
+        imp.Push(&l), imp.Push(&r);
+        const DepthFrame held = imp.Validate(5000, aspect);
+        const uint64_t deferred0 = imp.ReleasesDeferred();
+        std::thread([&] { imp.Release(7); }).join();
+        ID3D11Texture2D* rawL = tl.Get();
+        tl.Reset();  // the engine's own references go right after (fdexport::ReleaseAll)
+        tr.Reset();
+        const bool kept = held.reject == DepthReject::None && held.view[0] && held.view[0]->texture.Get() == rawL &&
+                          held.view[1] && held.view[1]->texture && RefCount(rawL) == 1;
+        const DepthFrame again = imp.Validate(5000, aspect);  // a second projection layer of the same display time
+        Check(kept && imp.ReleasesDeferred() == deferred0 + 1 && again.reject == DepthReject::Missing &&
+                  !imp.View(2).texture && !imp.View(3).texture,
+              "M8 a release from another thread: the latches in use stay valid (Quad Views' reference keeps them alive), "
+              "the render thread's next call drops them, the cached frame of that display time is not handed out again");
+        auto l2 = view(2, engineL.Get(), 13, 8), r2 = view(3, engineR.Get(), 13, 8);
+        imp.Push(&l2), imp.Push(&r2);
+        imp.Validate(6000, aspect);
+        std::thread([&] { imp.Release(8); }).join();
+        const bool stillHeld = imp.View(2).texture && imp.View(3).texture;
+        imp.SetRenderThread(GetCurrentThreadId());  // the next frame's first call
+        Check(stillHeld && !imp.View(2).texture && !imp.View(3).texture,
+              "M8 ... SetRenderThread at the next frame applies it too (Far depth on but this frame not warped)");
+    }
 
     // Generations are opaque ids: a reload whose counter restarts lower is accepted; Release drops only its own.
     {
