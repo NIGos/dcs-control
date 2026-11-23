@@ -1,0 +1,346 @@
+Band match (dcsvr_band_match, dcsvr_band_match_color, dcsvr_band_stats; two layers only; native/quadviews/dcsvr_bandmatch.h,
+dcsvr_bandmatch_cs.hlsl, dcsvr_twolayer_ps.hlsl, dcsvr_live.h). The fovea's faint flash at its border when the eyes move
+comes from any static difference between the focus image and the periphery in the edge band: the band moves over the
+scene with the gaze and turns each point it crosses from one look to the other. A brightness or tint difference (DLSS 5
+on the focus views only, which Cheeky's Match brightness evens out only on average over the whole DLSS 5 area; another
+DLSS preset; a per-view difference of DCS's own) is the one a single gain can remove. Once per eye and frame, before the
+eye's focus pass, one 16 x 16 compute group samples the band (32 x 32 grid, weight 4 a (1 - a)) and compares the focus at
+the periphery's resolution (the edge match's tent at full width) with the periphery in the same direction; the weighted
+mean log ratio is the target gain (luminance, or per colour channel with dcsvr_band_match_color=1), within 1 +- 0.1,
+approached at 0.05 per frame, snapped on the first measurement, after a scene cut and when the mode changes. The focus
+pass multiplies the focus colour by gain^dcsvr_band_match (0..1; 0, the default, changes nothing: the pass is the one
+before). dcsvr_band_stats=1 measures without the gain. Both write a log line every 30 s ("DCSVR band match ..."), per
+eye the measured ratio periphery/focus, its spread and the gain. All three keys are live. The gain sits in t4 and
+dcsvrDebug.zw of the focus pass (the constant buffer keeps its size).
+diff --git a/openxr-api-layer/layer.cpp b/openxr-api-layer/layer.cpp
+index c9bebbf..d5c55a0 100644
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -40,6 +40,7 @@
+ #include "dcsvr_depth_import.h"
+ #include "dcsvr_live.h"
+ #include "dcsvr_threeviews.h"
++#include "dcsvr_bandmatch.h"
+ 
+ #include <ProjectionVS.h>
+ #include <ProjectionPS.h>
+@@ -48,6 +49,7 @@
+ #include <dcsvr_depthwarp_cs.h>
+ #include <dcsvr_coverage_cs.h>
+ #include <dcsvr_twolayer_ps.h>
++#include <dcsvr_bandmatch_cs.h>
+ 
+ namespace openxr_api_layer {
+ 
+@@ -805,6 +807,18 @@ namespace openxr_api_layer {
+                     // the ended session's device.
+                     m_dcsvrTwoLayerConstants.Reset();
+                     m_dcsvrTwoLayerPS.Reset();
++                    // DCSVR band match (0035): its resources go with the session's device; the next one measures afresh.
++                    m_dcsvrBandCS.Reset();
++                    m_dcsvrBandConstants.Reset();
++                    m_dcsvrBandState.Reset();
++                    m_dcsvrBandUav.Reset();
++                    m_dcsvrBandSrv.Reset();
++                    for (auto& staging : m_dcsvrBandStaging) {
++                        staging.Reset();
++                    }
++                    m_dcsvrBandFrames = 0;
++                    m_dcsvrBandSnap[0] = m_dcsvrBandSnap[1] = true;
++                    m_dcsvrBandStatsEye[0] = m_dcsvrBandStatsEye[1] = {};
+                     dcsvr::SharedDepthImport().SetDevice(nullptr);
+                     dcsvr::SharedDepthImport().SetRenderThread(0);
+                     m_dcsvrDepthViews.clear();
+@@ -4183,7 +4197,8 @@ namespace openxr_api_layer {
+                                const DcsvrTwoLayerConstants& constants,
+                                const D3D11_RECT* marker,
+                                const float* markerColor,
+-                               ID3D11ShaderResourceView* bandPeriphery = nullptr) {
++                               ID3D11ShaderResourceView* bandPeriphery = nullptr,
++                               ID3D11ShaderResourceView* bandMatch = nullptr) {
+             if (!out.acquired) {
+                 CHECK_XRCMD(OpenXrApi::xrAcquireSwapchainImage(out.handle, nullptr, &out.acquiredIndex));
+                 XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+@@ -4236,8 +4251,9 @@ namespace openxr_api_layer {
+             m_renderContext->PSSetConstantBuffers(0, 1, m_dcsvrTwoLayerConstants.GetAddressOf());
+             m_renderContext->PSSetSamplers(0, 1, m_linearClampSampler.GetAddressOf());
+             // t3: the periphery image for the opaque focus's blend in the focus pass (none otherwise).
+-            ID3D11ShaderResourceView* srvs[] = {source, plainFocus, field, bandPeriphery};
+-            m_renderContext->PSSetShaderResources(0, 4, srvs);
++            // t4: the band match's state (0035), focus pass only.
++            ID3D11ShaderResourceView* srvs[] = {source, plainFocus, field, bandPeriphery, bandMatch};
++            m_renderContext->PSSetShaderResources(0, 5, srvs);
+             m_renderContext->PSSetShader(m_dcsvrTwoLayerPS.Get(), nullptr, 0);
+             m_renderContext->Draw(3, 0);
+             if (marker) {
+@@ -4245,8 +4261,8 @@ namespace openxr_api_layer {
+             }
+             // Neither the sources (the next eye's passes write some of them, the next frame's FieldMain the field) nor
+             // the target stay bound.
+-            ID3D11ShaderResourceView* none[] = {nullptr, nullptr, nullptr, nullptr};
+-            m_renderContext->PSSetShaderResources(0, 4, none);
++            ID3D11ShaderResourceView* none[] = {nullptr, nullptr, nullptr, nullptr, nullptr};
++            m_renderContext->PSSetShaderResources(0, 5, none);
+             m_renderContext->OMSetRenderTargets(0, nullptr, nullptr);
+             if (slice + 1 >= out.arraySize) {
+                 out.acquired = false;
+@@ -4270,6 +4286,110 @@ namespace openxr_api_layer {
+             return rect.left < rect.right && rect.top < rect.bottom;
+         }
+ 
++        // DCSVR band match (0035, dcsvr_bandmatch.h): this eye's measurement and gain step (dcsvr_bandmatch_cs.hlsl), one
++        // 16 x 16 group, before the eye's focus pass reads the gain. Once per frame (the second eye) the state is copied
++        // for the CPU and an older copy is read without waiting, for the log line every 30 s.
++        void dcsvrBandMeasure(uint32_t eye, const XrFovf& eyeFov, const XrFovf& focusFov, ID3D11ShaderResourceView* peripherySource,
++                              ID3D11ShaderResourceView* focusSource) {
++            if (eye > 1) {
++                return;
++            }
++            const auto size = [](ID3D11ShaderResourceView* srv, float& width, float& height) {
++                ComPtr<ID3D11Resource> resource;
++                srv->GetResource(resource.ReleaseAndGetAddressOf());
++                ComPtr<ID3D11Texture2D> texture;
++                D3D11_TEXTURE2D_DESC desc{};
++                if (FAILED(resource.As(&texture))) {
++                    return false;
++                }
++                texture->GetDesc(&desc);
++                width = (float)desc.Width;
++                height = (float)desc.Height;
++                return width > 0 && height > 0;
++            };
++            const float eyeLeft = std::tan(eyeFov.angleLeft), eyeRight = std::tan(eyeFov.angleRight);
++            const float eyeUp = std::tan(eyeFov.angleUp), eyeDown = std::tan(eyeFov.angleDown);
++            const float focusLeft = std::tan(focusFov.angleLeft), focusRight = std::tan(focusFov.angleRight);
++            const float focusUp = std::tan(focusFov.angleUp), focusDown = std::tan(focusFov.angleDown);
++            float peripheryWidth, peripheryHeight, focusWidth, focusHeight;
++            if (!(eyeRight > eyeLeft && eyeUp > eyeDown && focusRight > focusLeft && focusUp > focusDown) ||
++                !size(peripherySource, peripheryWidth, peripheryHeight) || !size(focusSource, focusWidth, focusHeight)) {
++                return;
++            }
++            // A scene cut (the engine's DcsVr_QuadViewsTemporalReset), or the match just turned on: both eyes snap.
++            const uint32_t cuts = dcsvr::SceneCuts().load(std::memory_order_relaxed);
++            if (cuts != m_dcsvrBandSceneCuts || !m_dcsvrBandWasOn) {
++                m_dcsvrBandSceneCuts = cuts;
++                m_dcsvrBandSnap[0] = m_dcsvrBandSnap[1] = true;
++                m_dcsvrBandWasOn = true;
++            }
++            dcsvr::BandMatchConstants constants{};
++            constants.shape[0] = m_smoothenFocusViewEdges;
++            constants.shape[1] = m_focusViewShape;
++            // k as the edge match takes it (0021): focus texels per tangent over the periphery's, per axis.
++            const float kx = focusWidth / peripheryWidth * (eyeRight - eyeLeft) / (focusRight - focusLeft);
++            const float ky = focusHeight / peripheryHeight * (eyeUp - eyeDown) / (focusUp - focusDown);
++            constants.shape[2] = std::min(16.f, std::sqrt(std::abs(kx * ky)));
++            constants.shape[3] = m_dcsvrBandMatchColor ? 1.f : 0.f;
++            constants.band[0] = (focusRight - focusLeft) / (eyeRight - eyeLeft);
++            constants.band[1] = (focusUp - focusDown) / (eyeUp - eyeDown);
++            constants.band[2] = (focusLeft - eyeLeft) / (eyeRight - eyeLeft);
++            constants.band[3] = (eyeUp - focusUp) / (eyeUp - eyeDown);
++            constants.params[0] = dcsvr::kDcsvrBandRate;
++            constants.params[1] = dcsvr::kDcsvrBandLimit;
++            constants.params[2] = m_dcsvrBandSnap[eye] ? 1.f : 0.f;
++            constants.slot[0] = eye * dcsvr::kBandStateStride;
++            m_dcsvrBandSnap[eye] = false;
++            {
++                D3D11_MAPPED_SUBRESOURCE mapped;
++                CHECK_HRCMD(m_renderContext->Map(m_dcsvrBandConstants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
++                memcpy(mapped.pData, &constants, sizeof(constants));
++                m_renderContext->Unmap(m_dcsvrBandConstants.Get(), 0);
++            }
++            ID3D11ShaderResourceView* srvs[] = {focusSource, peripherySource};
++            m_renderContext->CSSetConstantBuffers(0, 1, m_dcsvrBandConstants.GetAddressOf());
++            m_renderContext->CSSetShaderResources(0, 2, srvs);
++            m_renderContext->CSSetSamplers(0, 1, m_linearClampSampler.GetAddressOf());
++            m_renderContext->CSSetUnorderedAccessViews(0, 1, m_dcsvrBandUav.GetAddressOf(), nullptr);
++            m_renderContext->CSSetShader(m_dcsvrBandCS.Get(), nullptr, 0);
++            m_renderContext->Dispatch(1, 1, 1);
++            ID3D11ShaderResourceView* noSrvs[] = {nullptr, nullptr};
++            ID3D11UnorderedAccessView* noUav[] = {nullptr};
++            m_renderContext->CSSetShaderResources(0, 2, noSrvs);
++            m_renderContext->CSSetUnorderedAccessViews(0, 1, noUav, nullptr);
++            m_renderContext->CSSetShader(nullptr, nullptr, 0);
++
++            if (eye != 1) {
++                return;
++            }
++            // The state for the log: this frame's copy, and the one of two frames ago read if the GPU is done with it.
++            const uint64_t frame = m_dcsvrBandFrames++;
++            m_renderContext->CopyResource(m_dcsvrBandStaging[frame % 3].Get(), m_dcsvrBandState.Get());
++            if (frame >= 2) {
++                D3D11_MAPPED_SUBRESOURCE mapped;
++                ID3D11Buffer* const older = m_dcsvrBandStaging[(frame + 1) % 3].Get();
++                if (SUCCEEDED(m_renderContext->Map(older, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped))) {
++                    dcsvr::BandState states[2];
++                    memcpy(states, mapped.pData, sizeof(states));
++                    m_renderContext->Unmap(older, 0);
++                    m_dcsvrBandStatsEye[0].Add(states[0]);
++                    m_dcsvrBandStatsEye[1].Add(states[1]);
++                }
++            }
++            const auto now = std::chrono::steady_clock::now();
++            if (m_dcsvrBandStatsAt.time_since_epoch().count() == 0) {
++                m_dcsvrBandStatsAt = now;
++            } else if (now - m_dcsvrBandStatsAt >= std::chrono::seconds(30)) {
++                Log(fmt::format("DCSVR band match ({}{}): {}; {}\n",
++                                m_dcsvrBandMatch > 0.f ? fmt::format("gain applied at strength {:.2f}", m_dcsvrBandMatch) : std::string("measured only"),
++                                m_dcsvrBandMatchColor ? ", per colour channel" : ", luminance",
++                                dcsvr::BandStatsText("L", m_dcsvrBandStatsEye[0]), dcsvr::BandStatsText("R", m_dcsvrBandStatsEye[1])));
++                m_dcsvrBandStatsEye[0].Clear();
++                m_dcsvrBandStatsEye[1].Clear();
++                m_dcsvrBandStatsAt = now;
++            }
++        }
++
+         // DCSVR two layers: this eye's outputs. The periphery when it has a pass (else the application's own image is
+         // submitted); the focus always, sharpened or not, with the composition's fade as its alpha.
+         //  - Far depth: the composition's constants (dcsvrWarp, dcsvrReuse) and field for both passes, so the focus and,
+@@ -4431,8 +4551,22 @@ namespace openxr_api_layer {
+                         focus.dcsvrEdge[1] = std::min(16.f, std::sqrt(std::abs(kx * ky)));
+                     }
+                 }
++                // DCSVR band match (0035, live): measured whenever the match or its statistics are on; the gain goes to
++                // the focus pass (t4, dcsvrDebug.zw) only with a strength above 0.
++                ID3D11ShaderResourceView* bandMatch = nullptr;
++                if ((m_dcsvrBandMatch > 0.f || m_dcsvrBandStats) && m_dcsvrBandCS && m_dcsvrBandUav && !m_debugFocusView &&
++                    peripherySource && focusSource) {
++                    dcsvrBandMeasure(viewIndex, eyeFov, focusView.fov, peripherySource, focusSource);
++                    if (m_dcsvrBandMatch > 0.f && viewIndex <= 1) {
++                        focus.dcsvrDebug[2] = m_dcsvrBandMatch;
++                        focus.dcsvrDebug[3] = (float)(viewIndex * dcsvr::kBandStateStride);
++                        bandMatch = m_dcsvrBandSrv.Get();
++                    }
++                } else {
++                    m_dcsvrBandWasOn = false;
++                }
+                 dcsvrTwoLayerDraw(focusOut, focusOut.arraySize > 1 ? viewIndex : 0, focusSource, fill ? plainFocusSource : nullptr, field, focus,
+-                                  markFocus ? &focusMarker : nullptr, focusMarkerColor, opaqueFocus ? peripherySource : nullptr);
++                                  markFocus ? &focusMarker : nullptr, focusMarkerColor, opaqueFocus ? peripherySource : nullptr, bandMatch);
+             }
+         }
+ 
+@@ -4529,6 +4663,37 @@ namespace openxr_api_layer {
+                 CHECK_HRCMD(m_applicationDevice->CreateBuffer(&desc, nullptr, m_dcsvrTwoLayerConstants.ReleaseAndGetAddressOf()));
+                 CHECK_HRCMD(m_applicationDevice->CreatePixelShader(
+                     g_dcsvr_twolayer_ps, sizeof(g_dcsvr_twolayer_ps), nullptr, m_dcsvrTwoLayerPS.ReleaseAndGetAddressOf()));
++                // DCSVR band match (0035): small and always made in this mode, so the live keys can turn it on.
++                desc.ByteWidth = (UINT)sizeof(dcsvr::BandMatchConstants);
++                CHECK_HRCMD(m_applicationDevice->CreateBuffer(&desc, nullptr, m_dcsvrBandConstants.ReleaseAndGetAddressOf()));
++                CHECK_HRCMD(m_applicationDevice->CreateComputeShader(
++                    g_dcsvr_bandmatch_cs, sizeof(g_dcsvr_bandmatch_cs), nullptr, m_dcsvrBandCS.ReleaseAndGetAddressOf()));
++                D3D11_BUFFER_DESC stateDesc{};
++                stateDesc.ByteWidth = 2 * dcsvr::kBandStateStride;
++                stateDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
++                stateDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
++                const dcsvr::BandState initial[2]{};
++                D3D11_SUBRESOURCE_DATA initialData{initial, 0, 0};
++                CHECK_HRCMD(m_applicationDevice->CreateBuffer(&stateDesc, &initialData, m_dcsvrBandState.ReleaseAndGetAddressOf()));
++                D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
++                uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
++                uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
++                uavDesc.Buffer.NumElements = stateDesc.ByteWidth / 4;
++                uavDesc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
++                CHECK_HRCMD(m_applicationDevice->CreateUnorderedAccessView(m_dcsvrBandState.Get(), &uavDesc, m_dcsvrBandUav.ReleaseAndGetAddressOf()));
++                D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
++                srvDesc.Format = DXGI_FORMAT_R32_TYPELESS;
++                srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
++                srvDesc.BufferEx.NumElements = stateDesc.ByteWidth / 4;
++                srvDesc.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
++                CHECK_HRCMD(m_applicationDevice->CreateShaderResourceView(m_dcsvrBandState.Get(), &srvDesc, m_dcsvrBandSrv.ReleaseAndGetAddressOf()));
++                D3D11_BUFFER_DESC stagingDesc{};
++                stagingDesc.ByteWidth = stateDesc.ByteWidth;
++                stagingDesc.Usage = D3D11_USAGE_STAGING;
++                stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++                for (auto& staging : m_dcsvrBandStaging) {
++                    CHECK_HRCMD(m_applicationDevice->CreateBuffer(&stagingDesc, nullptr, staging.ReleaseAndGetAddressOf()));
++                }
+             }
+ 
+             // For CAS sharpening.
+@@ -4737,6 +4902,9 @@ namespace openxr_api_layer {
+             values.rampDeg = m_dcsvrTemporal.rampDeg;
+             values.clip = m_dcsvrTemporal.clip;
+             values.opaqueRamp = m_dcsvrOpaqueRamp;
++            values.bandMatch = m_dcsvrBandMatch;
++            values.bandMatchColor = m_dcsvrBandMatchColor;
++            values.bandStats = m_dcsvrBandStats;
+             return values;
+         }
+ 
+@@ -4765,6 +4933,13 @@ namespace openxr_api_layer {
+             m_dcsvrTemporal.clip = values.clip;
+             // 0034: the opaque focus's ramp, read by this thread's focus pass and submission from this frame on.
+             m_dcsvrOpaqueRamp = values.opaqueRamp;
++            // 0035: the band match from the next frame; another mode (luminance / per channel) snaps the gain.
++            m_dcsvrBandMatch = values.bandMatch;
++            m_dcsvrBandStats = values.bandStats;
++            if (m_dcsvrBandMatchColor != values.bandMatchColor) {
++                m_dcsvrBandMatchColor = values.bandMatchColor;
++                m_dcsvrBandSnap[0] = m_dcsvrBandSnap[1] = true;
++            }
+             if (before.temporal && !values.temporal) {
+                 // Periphery stability off: its history's memory goes back now; on again, it starts over.
+                 for (auto& history : m_dcsvrHistory) {
+@@ -4993,6 +5168,15 @@ namespace openxr_api_layer {
+                         m_dcsvrOpaqueRamp = dcsvr::live::OpaqueRamp(std::stof(value));
+                         Log(fmt::format("DCSVR two layers: opaque focus alpha ramp {}\n", dcsvr::live::OpaqueRampText(m_dcsvrOpaqueRamp)));
+                         parsed = true;
++                    } else if (name == "dcsvr_band_match") {
++                        m_dcsvrBandMatch = std::clamp(std::stof(value), 0.f, 1.f);
++                        parsed = true;
++                    } else if (name == "dcsvr_band_match_color") {
++                        m_dcsvrBandMatchColor = std::stoi(value) != 0;
++                        parsed = true;
++                    } else if (name == "dcsvr_band_stats") {
++                        m_dcsvrBandStats = std::stoi(value) != 0;
++                        parsed = true;
+                     } else if (name == "stereo_output_multiplier") {
+                         m_stereoOutputMultiplier = std::max(0.1f, std::stof(value));
+                         parsed = true;
+@@ -5289,6 +5473,24 @@ namespace openxr_api_layer {
+         // DCSVR opaque focus (0034, dcsvr_two_layers_opaque_ramp, live): the width of the focus layer's alpha ramp in the
+         // focus radius (0.4: 0031's ramp at edge blend 0.2); 0: alpha 1 everywhere and no blend flags (0024).
+         float m_dcsvrOpaqueRamp{0.4f};
++        // DCSVR band match (0035, dcsvr_bandmatch.h; two layers only, live): dcsvr_band_match the strength of the focus
++        // gain (0 off), dcsvr_band_match_color per colour channel instead of the luminance, dcsvr_band_stats the
++        // measurement and its log line without the gain. The state buffer holds both eyes (kBandStateStride each).
++        float m_dcsvrBandMatch{0.f};
++        bool m_dcsvrBandMatchColor{false};
++        bool m_dcsvrBandStats{false};
++        ComPtr<ID3D11ComputeShader> m_dcsvrBandCS;
++        ComPtr<ID3D11Buffer> m_dcsvrBandConstants;
++        ComPtr<ID3D11Buffer> m_dcsvrBandState;
++        ComPtr<ID3D11UnorderedAccessView> m_dcsvrBandUav;
++        ComPtr<ID3D11ShaderResourceView> m_dcsvrBandSrv;
++        ComPtr<ID3D11Buffer> m_dcsvrBandStaging[3];
++        uint64_t m_dcsvrBandFrames{0};
++        uint32_t m_dcsvrBandSceneCuts{0};
++        bool m_dcsvrBandSnap[2]{true, true};
++        bool m_dcsvrBandWasOn{false};
++        dcsvr::BandStats m_dcsvrBandStatsEye[2];
++        std::chrono::steady_clock::time_point m_dcsvrBandStatsAt{};
+         // The outputs of the eye being drawn ([0] periphery, [1] focus), set by xrEndFrame under the swapchains' lock.
+         DcsvrOutSwapchain* m_dcsvrEyeOut[2]{};
+         ComPtr<ID3D11Buffer> m_dcsvrTwoLayerConstants;
+diff --git a/openxr-api-layer/openxr-api-layer.vcxproj b/openxr-api-layer/openxr-api-layer.vcxproj
+index b239c33..d3a87b7 100644
+--- a/openxr-api-layer/openxr-api-layer.vcxproj
++++ b/openxr-api-layer/openxr-api-layer.vcxproj
+@@ -558,6 +558,17 @@ for /f "usebackq delims== tokens=1,2" %%G in ("$(SolutionDir)\version.info") do
+       </ObjectFileOutput>
+     </FxCompile>
+   </ItemGroup>
++  <ItemGroup>
++    <FxCompile Include="dcsvr_bandmatch_cs.hlsl">
++      <ShaderType>Compute</ShaderType>
++      <ShaderModel>5.0</ShaderModel>
++      <VariableName>g_%(Filename)</VariableName>
++      <HeaderFileOutput>$(IntDir)%(Filename).h</HeaderFileOutput>
++      <ObjectFileOutput>
++      </ObjectFileOutput>
++    </FxCompile>
++    <ClInclude Include="dcsvr_bandmatch.h" />
++  </ItemGroup>
+   <ItemGroup>
+     <ResourceCompile Include="resource.rc" />
+   </ItemGroup>

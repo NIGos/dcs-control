@@ -28,7 +28,7 @@ $quadPatches = @(Get-ChildItem -LiteralPath (Join-Path $workspaceRoot 'patches/q
 if ($quadPatches.Count -eq 0) { throw 'No Quad Views patches found in patches/quadviews: the build would ship Quad Views without DCS Control''s changes.' }
 $ownSources = @('dcsvr_gaze.h', 'dcsvr_perception.h', 'dcsvr_temporal_cs.hlsl', 'dcsvr_depthwarp.h', 'dcsvr_depthwarp_cs.hlsl', 'dcsvr_coverage_cs.hlsl',
     'dcsvr_depthwarp_ps.hlsli', 'dcsvr_depth_import.h', 'dcsvr_depth_export.h', 'dcsvr_live.h', 'dcsvr_twolayer_ps.hlsl',
-    'dcsvr_threeviews.h')
+    'dcsvr_threeviews.h', 'dcsvr_bandmatch.h', 'dcsvr_bandmatch_cs.hlsl')
 # What the patched tree is made from: every patch (name and LF text) and every own source, as one hash.
 function Get-QuadPatchInputs {
     $parts = @($quadPatches | ForEach-Object { 'patch ' + $_.Name + "`n" + [IO.File]::ReadAllText($_.FullName).Replace("`r`n", "`n") })

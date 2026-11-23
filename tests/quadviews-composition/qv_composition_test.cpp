@@ -524,6 +524,8 @@ int main(int argc, char** argv) {
             replace_once(two_old, "} else if (dcsvrEdge.z >= 1) {", "} else if (false) {");
             // Nor 0024's opaque focus (dcsvrEdge.w): with it 0 the pass must give the bytes of the pass before it.
             replace_once(two_old, "[branch] if (dcsvrEdge.w != 0) {", "[branch] if (false) {");
+            // Nor 0035's band match (dcsvrDebug.z): with it 0 the pass must give the bytes of the pass before it.
+            replace_once(two_old, "[branch] if (dcsvrDebug.z > 0) {", "[branch] if (false) {");
             const auto two_new_code = compile(two_new, "main", "ps_5_0", includes);
             const auto two_old_code = compile(two_old, "main", "ps_5_0", includes);
             ComPtr<ID3D11PixelShader> two_new_ps, two_old_ps;
@@ -1248,6 +1250,230 @@ int main(int argc, char** argv) {
                     std::printf("OFXR single layer: skipped (no foveated_compose.hlsl given)%s", "\n");
                 }
             }
+            // Band match (0035, dcsvr_bandmatch_cs.hlsl and the focus pass's gain): the measurement on synthetic focus /
+            // periphery pairs (a gain, a tint, the step, only the band counts, the limit, a dark frame), and the focus pass
+            // applying gain^strength only with a strength and a valid gain.
+            bool band_ok = true;
+            {
+                const auto band_path = layer_dir / "dcsvr_bandmatch_cs.hlsl";
+                if (!std::filesystem::exists(band_path)) {
+                    std::printf("band match: dcsvr_bandmatch_cs.hlsl not in the layer folder%s", "\n");
+                    band_ok = false;
+                } else {
+                    const auto band_code = compile(read_text(band_path), "main", "cs_5_0", includes);
+                    ComPtr<ID3D11ComputeShader> band_cs;
+                    check(device->CreateComputeShader(band_code->GetBufferPointer(), band_code->GetBufferSize(), nullptr, &band_cs), "band cs");
+                    const auto half = [](float f) {
+                        std::uint32_t x;
+                        std::memcpy(&x, &f, 4);
+                        const std::uint32_t sign = (x >> 16) & 0x8000U;
+                        const int exponent = static_cast<int>((x >> 23) & 0xFF) - 127 + 15;
+                        if (exponent <= 0) return static_cast<std::uint16_t>(sign);
+                        if (exponent >= 31) return static_cast<std::uint16_t>(sign | 0x7C00U);
+                        return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(exponent) << 10) | ((x >> 13) & 0x3FFU));
+                    };
+                    // A float image of size x size over the same field of view as the others: colour(u, v).
+                    const auto image = [&](UINT size, const auto& colour) {
+                        D3D11_TEXTURE2D_DESC desc{};
+                        desc.Width = desc.Height = size;
+                        desc.MipLevels = desc.ArraySize = 1;
+                        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                        desc.SampleDesc.Count = 1;
+                        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                        std::vector<std::uint16_t> texels(static_cast<std::size_t>(size) * size * 4);
+                        for (UINT y = 0; y < size; ++y)
+                            for (UINT x = 0; x < size; ++x) {
+                                const std::array<float, 3> c = colour((x + 0.5f) / size, (y + 0.5f) / size);
+                                for (int ch = 0; ch < 4; ++ch)
+                                    texels[(static_cast<std::size_t>(y) * size + x) * 4 + ch] = half(ch < 3 ? c[ch] : 1.f);
+                            }
+                        D3D11_SUBRESOURCE_DATA data{texels.data(), size * 8U, 0};
+                        ComPtr<ID3D11Texture2D> texture;
+                        check(device->CreateTexture2D(&desc, &data, &texture), "band image");
+                        ComPtr<ID3D11ShaderResourceView> view;
+                        check(device->CreateShaderResourceView(texture.Get(), nullptr, &view), "band image srv");
+                        return view;
+                    };
+                    const auto base = [](float u, float v) { return std::array<float, 3>{0.2f + 0.5f * u, 0.3f + 0.3f * v, 0.6f - 0.4f * u}; };
+                    const auto scaled = [&](float r, float g, float b) {
+                        return [=](float u, float v) { const auto c = base(u, v); return std::array<float, 3>{c[0] * r, c[1] * g, c[2] * b}; };
+                    };
+                    const UINT kPeriphery = kFocus / 4;
+                    const auto focus_base = image(kFocus, base);
+                    // The state: both eyes, a raw UAV for the measurement, a raw SRV for the focus pass, a staging copy.
+                    D3D11_BUFFER_DESC state_desc{};
+                    state_desc.ByteWidth = 96;
+                    state_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+                    state_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+                    ComPtr<ID3D11Buffer> state, state_staging;
+                    check(device->CreateBuffer(&state_desc, nullptr, &state), "band state");
+                    D3D11_BUFFER_DESC staging_desc{};
+                    staging_desc.ByteWidth = 96;
+                    staging_desc.Usage = D3D11_USAGE_STAGING;
+                    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                    check(device->CreateBuffer(&staging_desc, nullptr, &state_staging), "band staging");
+                    D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc{};
+                    uav_desc.Format = DXGI_FORMAT_R32_TYPELESS;
+                    uav_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+                    uav_desc.Buffer.NumElements = 24;
+                    uav_desc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+                    ComPtr<ID3D11UnorderedAccessView> state_uav;
+                    check(device->CreateUnorderedAccessView(state.Get(), &uav_desc, &state_uav), "band uav");
+                    D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc{};
+                    srv_desc.Format = DXGI_FORMAT_R32_TYPELESS;
+                    srv_desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
+                    srv_desc.BufferEx.NumElements = 24;
+                    srv_desc.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
+                    ComPtr<ID3D11ShaderResourceView> state_srv;
+                    check(device->CreateShaderResourceView(state.Get(), &srv_desc, &state_srv), "band srv");
+                    D3D11_SAMPLER_DESC clamp_desc{};
+                    clamp_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+                    clamp_desc.AddressU = clamp_desc.AddressV = clamp_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+                    clamp_desc.MaxLOD = D3D11_FLOAT32_MAX;
+                    ComPtr<ID3D11SamplerState> clamp_sampler;
+                    check(device->CreateSamplerState(&clamp_desc, &clamp_sampler), "band sampler");
+                    const auto band_constants = buffer(64);
+                    struct BandState { float gain[3]; std::uint32_t valid; float ratio[4]; float weight, level; std::uint32_t measured, skipped; };
+                    static_assert(sizeof(BandState) == 48);
+                    const auto reset_state = [&] {
+                        const std::uint32_t zero[4]{};
+                        context->ClearUnorderedAccessViewUint(state_uav.Get(), zero);
+                    };
+                    // One eye's measurement (eye 0 at byte 0); the state read back.
+                    const auto measure = [&](ID3D11ShaderResourceView* f, ID3D11ShaderResourceView* p, bool color, bool snap,
+                                             float shape = 2.f, float smoothing = 0.2f, std::uint32_t slot = 0) {
+                        struct { float shape[4]; float band[4]; float params[4]; std::uint32_t slot[4]; } k{};
+                        k.shape[0] = smoothing;
+                        k.shape[1] = shape;
+                        k.shape[2] = 4.f;  // one periphery texel in focus texels (kFocus / kPeriphery)
+                        k.shape[3] = color ? 1.f : 0.f;
+                        k.band[0] = k.band[1] = 1.f;
+                        k.params[0] = 0.05f;
+                        k.params[1] = 0.1f;
+                        k.params[2] = snap ? 1.f : 0.f;
+                        k.slot[0] = slot;
+                        context->UpdateSubresource(band_constants.Get(), 0, nullptr, &k, 0, 0);
+                        ID3D11ShaderResourceView* views[2]{f, p};
+                        context->CSSetShader(band_cs.Get(), nullptr, 0);
+                        context->CSSetConstantBuffers(0, 1, band_constants.GetAddressOf());
+                        context->CSSetShaderResources(0, 2, views);
+                        context->CSSetSamplers(0, 1, clamp_sampler.GetAddressOf());
+                        context->CSSetUnorderedAccessViews(0, 1, state_uav.GetAddressOf(), nullptr);
+                        context->Dispatch(1, 1, 1);
+                        ID3D11ShaderResourceView* no_views[2]{};
+                        ID3D11UnorderedAccessView* no_uav[1]{};
+                        context->CSSetShaderResources(0, 2, no_views);
+                        context->CSSetUnorderedAccessViews(0, 1, no_uav, nullptr);
+                        context->CopyResource(state_staging.Get(), state.Get());
+                        D3D11_MAPPED_SUBRESOURCE mapped{};
+                        check(context->Map(state_staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "map band");
+                        BandState s[2];
+                        std::memcpy(s, mapped.pData, sizeof(s));
+                        context->Unmap(state_staging.Get(), 0);
+                        return s[slot / 48];
+                    };
+                    const auto near3 = [](const float* g, float r, float gg, float b, float tolerance) {
+                        return std::fabs(g[0] - r) <= tolerance && std::fabs(g[1] - gg) <= tolerance && std::fabs(g[2] - b) <= tolerance;
+                    };
+                    // 1. The periphery 5 % darker: the gain snaps to 0.95 on the first measurement.
+                    reset_state();
+                    const auto darker = image(kPeriphery, scaled(0.95f, 0.95f, 0.95f));
+                    const BandState first = measure(focus_base.Get(), darker.Get(), false, false);
+                    const bool gain_ok = first.valid == 1 && near3(first.gain, 0.95f, 0.95f, 0.95f, 2e-3f) &&
+                                         std::fabs(first.ratio[3] - 0.95f) <= 2e-3f && first.measured == 1 && first.weight > 50.f;
+                    // 2. The step: the periphery equal again, no snap: 0.95 + 0.05 x (1 - 0.95).
+                    const auto equal = image(kPeriphery, base);
+                    const BandState stepped = measure(focus_base.Get(), equal.Get(), false, false);
+                    const bool step_ok = near3(stepped.gain, 0.9525f, 0.9525f, 0.9525f, 1e-3f) && stepped.measured == 2;
+                    // 3. A tint, per channel and as luminance.
+                    reset_state();
+                    const auto tinted = image(kPeriphery, scaled(0.95f, 1.f, 1.04f));
+                    const BandState per_channel = measure(focus_base.Get(), tinted.Get(), true, true);
+                    const BandState luminance = measure(focus_base.Get(), tinted.Get(), false, true);
+                    const bool tint_ok = near3(per_channel.gain, 0.95f, 1.f, 1.04f, 2e-3f) &&
+                                         std::fabs(luminance.gain[0] - luminance.gain[2]) < 1e-6f && luminance.gain[0] > 0.985f &&
+                                         luminance.gain[0] < 0.998f;
+                    // 4. Only the band counts: the focus changed inside it (r < 0.5) and outside the shape (r > 1.02).
+                    const auto focus_odd = image(kFocus, [&](float u, float v) {
+                        const float x = std::fabs(u * 2 - 1), y = std::fabs(v * 2 - 1), r = std::sqrt(x * x + y * y);
+                        const auto c = base(u, v);
+                        const float s = r < 0.5f ? 2.f : r > 1.02f ? 0.3f : 1.f;
+                        return std::array<float, 3>{c[0] * s, c[1] * s, c[2] * s};
+                    });
+                    const BandState odd = measure(focus_odd.Get(), darker.Get(), false, true);
+                    const bool region_ok = near3(odd.gain, first.gain[0], first.gain[1], first.gain[2], 1e-3f);
+                    // 5. The limit: a periphery at half the focus gives 0.9.
+                    const auto half_bright = image(kPeriphery, scaled(0.5f, 0.5f, 0.5f));
+                    const BandState limited = measure(focus_base.Get(), half_bright.Get(), false, true);
+                    const bool limit_ok = near3(limited.gain, 0.9f, 0.9f, 0.9f, 1e-5f);
+                    // 6. A black periphery is not measured: the gain stays, the frame is counted as skipped.
+                    const auto black = image(kPeriphery, [](float, float) { return std::array<float, 3>{0.f, 0.f, 0.f}; });
+                    const BandState dark = measure(focus_base.Get(), black.Get(), false, false);
+                    const bool dark_ok = near3(dark.gain, 0.9f, 0.9f, 0.9f, 1e-5f) && dark.skipped == limited.skipped + 1 &&
+                                         dark.measured == limited.measured;
+                    // 7. The second eye's slot leaves the first eye's state alone.
+                    const BandState second = measure(focus_base.Get(), darker.Get(), false, true, 2.f, 0.2f, 48);
+                    const BandState first_kept = measure(focus_base.Get(), black.Get(), false, false);
+                    const bool slot_ok = near3(second.gain, 0.95f, 0.95f, 0.95f, 2e-3f) && near3(first_kept.gain, 0.9f, 0.9f, 0.9f, 1e-5f);
+                    std::printf("band match: gain %.4f (ratio %.4f, weight %.0f), step %.4f, tint per channel %.4f/%.4f/%.4f luminance %.4f, "
+                                "band only %.4f, limit %.4f, dark kept %.4f (skipped %u), second eye %.4f%s",
+                        first.gain[0], first.ratio[3], first.weight, stepped.gain[0], per_channel.gain[0], per_channel.gain[1],
+                        per_channel.gain[2], luminance.gain[0], odd.gain[0], limited.gain[0], dark.gain[0], dark.skipped,
+                        second.gain[0], "\n");
+                    // 8. The focus pass: a grey focus, mode 0 (no opaque focus), the state holding gain 0.81 for eye 0.
+                    const auto grey = image(kFocus, [](float, float) { return std::array<float, 3>{0.5f, 0.5f, 0.5f}; });
+                    const auto draw = [&](float strength, bool valid) {
+                        const float gain = 0.81f;
+                        std::uint32_t words[24]{};
+                        std::memcpy(&words[0], &gain, 4);
+                        std::memcpy(&words[1], &gain, 4);
+                        std::memcpy(&words[2], &gain, 4);
+                        words[3] = valid ? 1U : 0U;
+                        context->UpdateSubresource(state.Get(), 0, nullptr, words, 0, 0);
+                        TwoLayer c{};
+                        c.smoothing = 0.2f;
+                        c.shape = 2.f;
+                        c.layer = 1.f;
+                        c.debug[2] = strength;
+                        c.debug[3] = 0.f;
+                        const float identity[16]{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                        context->UpdateSubresource(vs_constants.Get(), 0, nullptr, identity, 0, 0);
+                        context->UpdateSubresource(layer_constants.Get(), 0, nullptr, &c, 0, 0);
+                        context->OMSetRenderTargets(1, layer_rtv.GetAddressOf(), nullptr);
+                        D3D11_VIEWPORT viewport{0, 0, static_cast<float>(kFocus), static_cast<float>(kFocus), 0, 1};
+                        context->RSSetViewports(1, &viewport);
+                        context->RSSetState(rasterizer.Get());
+                        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+                        context->VSSetShader(vs.Get(), nullptr, 0);
+                        context->VSSetConstantBuffers(0, 1, vs_constants.GetAddressOf());
+                        context->PSSetShader(two_new_ps.Get(), nullptr, 0);
+                        context->PSSetConstantBuffers(0, 1, layer_constants.GetAddressOf());
+                        ID3D11ShaderResourceView* views[5]{grey.Get(), grey.Get(), field_srv.Get(), nullptr, state_srv.Get()};
+                        context->PSSetShaderResources(0, 5, views);
+                        context->PSSetSamplers(0, 1, sampler.GetAddressOf());
+                        context->Draw(3, 0);
+                        ID3D11ShaderResourceView* none[5]{};
+                        context->PSSetShaderResources(0, 5, none);
+                        context->CopyResource(layer_staging.Get(), layer_target.Get());
+                        D3D11_MAPPED_SUBRESOURCE mapped{};
+                        check(context->Map(layer_staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "map band layer");
+                        const std::uint32_t centre = *reinterpret_cast<const std::uint32_t*>(
+                            static_cast<const std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(kFocus / 2) * mapped.RowPitch + (kFocus / 2) * 4);
+                        context->Unmap(layer_staging.Get(), 0);
+                        return static_cast<int>(centre & 255U);
+                    };
+                    const int plain = draw(0.f, true), half_strength = draw(0.5f, true), full = draw(1.f, true), invalid = draw(1.f, false);
+                    // 0.5 x 255: 128; x 0.9 (0.81^0.5): 115; x 0.81: 103.
+                    const bool apply_ok = std::abs(plain - 128) <= 1 && std::abs(half_strength - 115) <= 1 && std::abs(full - 103) <= 1 &&
+                                          invalid == plain;
+                    std::printf("band match in the focus pass: strength 0 -> %d, 0.5 -> %d, 1 -> %d, not valid -> %d%s", plain, half_strength,
+                        full, invalid, "\n");
+                    band_ok = gain_ok && step_ok && tint_ok && region_ok && limit_ok && dark_ok && slot_ok && apply_ok;
+                }
+            }
+            std::printf(band_ok ? "Quad Views band match: measures the band only, steps and clamps the gain, applies it only when on%s"
+                                : "Quad Views band match FAILED%s", "\n");
+            opaque_ok = opaque_ok && band_ok;
             std::printf(opaque_ok ? "Quad Views opaque focus: the focus layer holds the composed image over its rectangle%s"
                                   : "Quad Views opaque focus FAILED%s", "\n");            two_layer_ok = two_layer_ok && opaque_ok;
         }

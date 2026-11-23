@@ -323,6 +323,24 @@ int main() {
               "fovea temporal: focus fade-in off by default, 0-3 frames, a reload's change named in the log");
     }
 
+    // 0035: the band match's keys are live, off by default; the strength is clamped to 0..1.
+    {
+        Values v, high, bad;
+        const bool parsed = dcsvr::live::ApplyKey("dcsvr_band_match", "0.5", v) &&
+                            dcsvr::live::ApplyKey("dcsvr_band_match_color", "1", v) &&
+                            dcsvr::live::ApplyKey("dcsvr_band_stats", "1", v);
+        dcsvr::live::ApplyKey("dcsvr_band_match", "3", high);
+        const bool skipped = !dcsvr::live::ApplyKey("dcsvr_band_match", "x", bad);
+        Check(Values{}.bandMatch == 0.f && !Values{}.bandMatchColor && !Values{}.bandStats && parsed &&
+                  Near(v.bandMatch, 0.5f) && v.bandMatchColor && v.bandStats && Near(high.bandMatch, 1.f) && skipped &&
+                  bad.bandMatch == 0.f,
+              "band match: off by default, live, strength clamped to 0..1, unparsed kept");
+        Values one;
+        dcsvr::live::ApplyKey("dcsvr_band_match", "0.5", one);
+        Check(!(v == Values{}) && dcsvr::live::Changes(Values{}, one) == "dcsvr_band_match 0.00 -> 0.50",
+              "band match: a change is a reload's change and named in the log");
+    }
+
     DeleteFileW(layerFile.c_str());
     DeleteFileW(profileFile.c_str());
     RemoveDirectoryW(dir.c_str());
