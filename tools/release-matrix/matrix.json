@@ -6,13 +6,13 @@
   "foveatedFrameGen": true,
   "simGaze": "mode=fixed;x=0;y=0",
   "missions": {
-    "dense": { "file": "qvbench_i23_f16_ap_map.miz", "sha256": "7ed8eb26548e4711b21db32e9b633c61dc15a437d1cafbc4a20115974849afb5", "theatre": "Caucasus", "note": "F-16 on ALT HOLD autopilot; the F10 map opens at model time 60-87 s, so the suite starts at FLY+95 s" },
+    "dense": { "file": "qvbench_i23_f16_ap_map.miz", "sha256": "7ed8eb26548e4711b21db32e9b633c61dc15a437d1cafbc4a20115974849afb5", "theatre": "Caucasus", "note": "F-16 on ALT HOLD autopilot; the F10 map opens at model time 60-87 s (seen FLY+62..+90 in the first live run), so the suite starts at FLY+110 s" },
     "sparse": { "file": "qvbench_ff_land.miz", "sha256": "d619e5281a271d29a2b5cf3caa95aa102e210d32b118c84c4a81f55f2e9a7b26", "theatre": "Germany", "note": "F-16 low level; ~75 periphery renderables" }
   },
   "scenes": [
-    { "id": "atmosx-dense",  "atmosx": true,  "mission": "dense",  "suiteAt": 95 },
+    { "id": "atmosx-dense",  "atmosx": true,  "mission": "dense",  "suiteAt": 110 },
     { "id": "atmosx-sparse", "atmosx": true,  "mission": "sparse", "suiteAt": 30 },
-    { "id": "stock-dense",   "atmosx": false, "mission": "dense",  "suiteAt": 95 },
+    { "id": "stock-dense",   "atmosx": false, "mission": "dense",  "suiteAt": 110 },
     { "id": "stock-sparse",  "atmosx": false, "mission": "sparse", "suiteAt": 30 }
   ],
   "suite": {

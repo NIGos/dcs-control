@@ -12,9 +12,9 @@ every engine part on its own, in four scenes. TEST-ONLY. A live run needs the he
 
 | Scene | DCS | Mission | Suite starts |
 |---|---|---|---|
-| `atmosx-dense` | ATMOSX as installed | Caucasus, `qvbench_i23_f16_ap_map.miz` (F-16 on ALT HOLD autopilot) | FLY+95 s (the mission opens the F10 map at model time 60-87 s) |
+| `atmosx-dense` | ATMOSX as installed | Caucasus, `qvbench_i23_f16_ap_map.miz` (F-16 on ALT HOLD autopilot) | FLY+110 s (the mission opens the F10 map at model time 60-87 s, seen FLY+62..+90) |
 | `atmosx-sparse` | ATMOSX as installed | Germany low level, `qvbench_ff_land.miz` | FLY+30 s |
-| `stock-dense` | ATMOSX off | Caucasus, as above | FLY+95 s |
+| `stock-dense` | ATMOSX off | Caucasus, as above | FLY+110 s |
 | `stock-sparse` | ATMOSX off | Germany low level, as above | FLY+30 s |
 
 Each flight runs the module's suite through the app's own `StartSuite`. The suite keys come from the engine's
@@ -151,7 +151,7 @@ baseline: keep that run's `results.json` next to the release.
 ## Time
 
 Suite: 5 benches x (16 x 5 s + ~6 s) + W1 8 pairs ≈ 8 min. Per scene, add about 2 min from apply to FLY, the wait
-until the suite starts (30 or 95 s) and about 1 min for the close and the restore. Sparse scenes take about 11.6 min
+until the suite starts (30 or 110 s) and about 1 min for the close and the restore. Sparse scenes take about 11.6 min
 and dense ones about 12.7 min. With 5 min for Pimax tracking, backups and the final restore, the **estimate is about
 54 min**, which `-DryRun` prints. The target of about 40 min would need `[Bench] Blocks=12` (about 47 min; SE about
 15 % larger) and dropping the dense suite delay (using the mission without the F10 map). Either change is a new
