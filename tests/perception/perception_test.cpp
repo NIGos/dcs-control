@@ -218,6 +218,40 @@ void MathChecks() {
                   "fade-in: the composition's fade, 1 inside, 0.5 mid-band, 0 at the edge");
         }
         {
+            // Focus fade-in history (round 3): at most Depth areas, nearest first; the same display time again replaces
+            // its area; an older display time or a gap over 200 ms starts the history over; a gap between two older
+            // areas ends the list there; a degenerate field (now or then) gives no area, never a division by zero.
+            FocusFadeHistory h;
+            const TanFov now{-0.3f, 0.3f, 0.3f, -0.3f};
+            float rects[FocusFadeHistory::Depth][4]{};
+            const int64_t t0 = 2'000'000'000, step = 22'000'000;
+            for (int i = 0; i < 5; ++i) h.Push(0, t0 + i * step, {-0.3f + 0.01f * i, 0.3f + 0.01f * i, 0.3f, -0.3f});
+            const int full = h.Rects(0, t0 + 5 * step, now, rects);
+            Check(full == FocusFadeHistory::Depth && Near(rects[0][0], 0.04f / 0.6f * 2.f, 1e-5f) &&
+                      Near(rects[2][0], 0.02f / 0.6f * 2.f, 1e-5f),
+                  "fade-in history: the three latest areas, nearest first");
+            h.Push(0, t0 + 4 * step, now);  // the latest frame located again: replaced
+            Check(h.Rects(0, t0 + 5 * step, now, rects) == FocusFadeHistory::Depth && Near(rects[0][0], 0.f, 1e-6f),
+                  "fade-in history: the same display time again replaces its area");
+            h.Push(0, t0 + 3 * step, now);  // an older display time: the history starts over with it
+            Check(h.Rects(0, t0 + 4 * step, now, rects) == 1, "fade-in history: an older display time starts over");
+            h.Push(0, t0 + 3 * step + 300'000'000, now);  // a gap over 200 ms: over again
+            Check(h.Rects(0, t0 + 3 * step + 300'000'000 + step, now, rects) == 1, "fade-in history: a long gap starts over");
+            FocusFadeHistory g;
+            g.Push(1, t0, now);
+            g.Push(1, t0 + 150'000'000, now);
+            // From t0 + 300 ms both are within 200 ms of their newer neighbour (150 and 150 ms); from t0 + 360 ms the
+            // nearest is 210 ms back: none.
+            Check(g.Rects(1, t0 + 300'000'000, now, rects) == 2 && g.Rects(1, t0 + 360'000'000, now, rects) == 0,
+                  "fade-in history: an area more than 200 ms before the frame (or its newer neighbour) ends the list");
+            FocusFadeHistory d;
+            d.Push(0, t0, {0.1f, 0.1f, 0.3f, -0.3f});  // zero width
+            Check(d.Rects(0, t0 + step, now, rects) == 0 && h.Rects(0, t0 + 5 * step, {0.1f, 0.1f, 0.3f, -0.3f}, rects) == 0 &&
+                      h.Rects(0, t0 + 5 * step, {std::nanf(""), 0.3f, 0.3f, -0.3f}, rects) == 0 &&
+                      h.Rects(2, t0 + 5 * step, now, rects) == 0,
+                  "fade-in history: a degenerate or NaN field and an eye past 1 give no area");
+        }
+        {
             // dcsvr_temporal_saccade_reset 0 (fovea temporal): the history is kept through saccades, every other reset
             // stays; the saccade frames are counted as kept.
             TemporalSettings keep = s;
