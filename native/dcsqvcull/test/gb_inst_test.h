@@ -808,6 +808,25 @@ void Run() {
                 shadowtex::CodeIs(ng, kDrawTable, kDrawTableEnd, kDrawTableHash) && thr == 1.0f,
             "gbuffer inst: build checks pass (ModelMaterialMT vt[4], SceneRenderable vt[1], selection code, jump "
             "table, FLIR threshold)");
+      // In a flight [Model] PlainTriangleCounter has already turned the counter add's LOCK prefix (0x44371) into 3E
+      // when the G-buffer part installs: the check must still pass (it failed in every flight), and any other byte
+      // must still fail it.
+      uint8_t code[kSceneRenderableEnd - kSceneRenderable];
+      memcpy(code, ng + kSceneRenderable, sizeof(code));
+      const size_t at = kSceneRenderableTriPrefix - kSceneRenderable;
+      Check(code[at] == 0xF0, "gbuffer inst: the analysed SceneRenderable code holds the counter's LOCK prefix");
+      uint8_t plain[sizeof(code)], other[sizeof(code)], wrongPrefix[sizeof(code)];
+      memcpy(plain, code, sizeof(code));
+      plain[at] = 0x3E;
+      memcpy(other, plain, sizeof(code));
+      other[at + 2] ^= 0x01;
+      memcpy(wrongPrefix, code, sizeof(code));
+      wrongPrefix[at] = 0x90;
+      Check(shadowtex::Fnv(plain, sizeof(plain)) != kSceneRenderableHash && SceneRenderableBytesMatch(plain),
+            "gbuffer inst: SceneRenderable check passes with the plain triangle counter applied (prefix 3E)");
+      Check(!SceneRenderableBytesMatch(other) && !SceneRenderableBytesMatch(wrongPrefix),
+            "gbuffer inst: SceneRenderable check still fails on any other byte change");
+      Check(SceneRenderableIs(ng), "gbuffer inst: SceneRenderable check passes on the analysed image");
     }
   }
   if (GetFileAttributesW((shaders + L"model\\functions\\vertex_shader.hlsl").c_str()) == INVALID_FILE_ATTRIBUTES) {
