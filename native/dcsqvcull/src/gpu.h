@@ -16,7 +16,14 @@ void* g_device = nullptr;
 
 bool Init() {
   if (g_device) return true;
-  HMODULE m = LoadLibraryW(L"nvml.dll");
+  // System32 (current drivers), else the NVSMI folder of drivers before 2019; never the search path (DCS's folder).
+  HMODULE m = LoadLibraryExW(L"nvml.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+  if (!m) {
+    wchar_t pf[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(L"ProgramW6432", pf, MAX_PATH);
+    if (n && n < MAX_PATH - 48)
+      m = LoadLibraryExW((std::wstring(pf) + L"\\NVIDIA Corporation\\NVSMI\\nvml.dll").c_str(), nullptr, 0);
+  }
   if (!m) return false;
   auto init = reinterpret_cast<NvmlInit>(GetProcAddress(m, "nvmlInit_v2"));
   auto handle = reinterpret_cast<NvmlGetHandle>(GetProcAddress(m, "nvmlDeviceGetHandleByIndex_v2"));

@@ -45,7 +45,21 @@ static std::array<float, 16> Proj(const Cam& c) {
     return m;
 }
 
+// A copy of d3dcompiler_47.dll next to the exe stands for one in DCS's folder: the pass must load System32's, never it.
+static std::wstring g_decoy, g_systemCompiler;
+static void PlantDecoyCompiler() {
+    wchar_t exe[MAX_PATH] = {}, sys[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    GetSystemDirectoryW(sys, MAX_PATH);
+    std::wstring dir(exe);
+    dir = dir.substr(0, dir.find_last_of(L"\\/") + 1);
+    g_systemCompiler = std::wstring(sys) + L"\\d3dcompiler_47.dll";
+    g_decoy = dir + L"d3dcompiler_47.dll";
+    if (!CopyFileW(g_systemCompiler.c_str(), g_decoy.c_str(), FALSE)) g_decoy.clear();
+}
+
 int main() {
+    PlantDecoyCompiler();
     ComPtr<ID3D11Device> dev;
     ComPtr<ID3D11DeviceContext> ctx;
     if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &dev, nullptr, &ctx)) &&
@@ -178,6 +192,13 @@ int main() {
     };
     ID3D11ShaderResourceView* out = run(true);
     Check(out != nullptr, "the frame with both pushes and the flag is filled");
+    {
+        const bool sysLoaded = GetModuleHandleW(g_systemCompiler.c_str()) != nullptr;
+        const bool decoyLoaded = !g_decoy.empty() && GetModuleHandleW(g_decoy.c_str()) != nullptr;
+        Check(!g_decoy.empty() && sysLoaded && !decoyLoaded,
+              "the pass compiles with System32's d3dcompiler_47.dll, not a copy in the program's folder");
+        if (!decoyLoaded && !g_decoy.empty()) DeleteFileW(g_decoy.c_str());
+    }
     if (!out) return 1;
     // Read back the result.
     ComPtr<ID3D11Resource> res;

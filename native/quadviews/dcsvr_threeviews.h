@@ -439,7 +439,7 @@ class ThreeViews {
     bool Ensure(ID3D11Device* dev) {
         if (m_failed) return false;
         if (m_splatCs) return true;
-        HMODULE dc = LoadLibraryW(L"d3dcompiler_47.dll");
+        HMODULE dc = LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         using CompileFn = decltype(&D3DCompile);
         const auto compile = dc ? reinterpret_cast<CompileFn>(GetProcAddress(dc, "D3DCompile")) : nullptr;
         bool ok = compile != nullptr;

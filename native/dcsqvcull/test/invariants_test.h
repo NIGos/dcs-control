@@ -9,6 +9,7 @@
 // No DCS module is loaded: installs fail offline, so `requested` is set to "on" by hand first where its off path is a
 // plain assignment (the kill switch must clear it); the rest read the module's real state.
 #pragma once
+#include <filesystem>
 #include <regex>
 
 namespace invtest {
@@ -629,9 +630,44 @@ void Defaults() {
         "invariants: the module's default of every user-facing key (no ini) is the value in kKeys (change both on purpose)");
 }
 
+// ---- 6. system DLLs ---------------------------------------------------------------------------------------------
+// Inside DCS a bare LoadLibraryW(L"x.dll") searches DCS's own folder first: a stray x.dll there would be loaded into
+// the game. Every system DLL the module loads by name goes through LoadLibraryExW(..., LOAD_LIBRARY_SEARCH_SYSTEM32)
+// (or a full path). Returns the offending "file: call" lines; exposed for the self-check below.
+std::vector<std::string> BareSystemLoads(const std::string& text, const std::string& file) {
+  static const std::regex bare(R"(LoadLibrary[AW]?\s*\(\s*L?"[^"\\/]+"\s*\))");
+  static const std::regex exZero(R"(LoadLibraryEx[AW]\s*\(\s*L?"[^"\\/]+"\s*,\s*[A-Za-z_]+\s*,\s*0\s*\))");
+  std::vector<std::string> out;
+  for (const std::regex* re : {&bare, &exZero})
+    for (std::sregex_iterator it(text.begin(), text.end(), *re), end; it != end; ++it) out.push_back(file + ": " + it->str());
+  return out;
+}
+void SystemDllLoads() {
+  // Self-check of the pattern: the old forms are caught, the fixed ones are not.
+  const bool self = BareSystemLoads(R"(LoadLibraryW(L"nvml.dll");)", "t").size() == 1 &&
+                    BareSystemLoads(R"(LoadLibraryExW(L"version.dll", nullptr, 0))", "t").size() == 1 &&
+                    BareSystemLoads(R"(LoadLibraryExW(L"nvml.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))", "t").empty() &&
+                    BareSystemLoads(R"(LoadLibraryW((std::wstring(sys) + L"\\d3dcompiler_47.dll").c_str()))", "t").empty();
+  std::vector<std::string> bad;
+  int files = 0;
+  std::error_code ec;
+  for (auto it = std::filesystem::recursive_directory_iterator(SrcDir(), ec);
+       !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+    const auto ext = it->path().extension().wstring();
+    if (!it->is_regular_file() || (ext != L".h" && ext != L".inc" && ext != L".cpp" && ext != L".c")) continue;
+    ++files;
+    for (auto& b : BareSystemLoads(ReadText(it->path().wstring()), it->path().filename().string())) bad.push_back(b);
+  }
+  for (auto& b : bad) printf("     bare system DLL load: %s\n", b.c_str());
+  printf("     system DLL loads: %d source files scanned\n", files);
+  Check(self && files > 50 && bad.empty(),
+        "invariants: every system DLL the module loads by name is searched in System32 only (no DCS-folder hijack)");
+}
+
 void Run() {
   const std::string off = ReadText(IniDir() + L"engine_all_off.ini"), on = ReadText(IniDir() + L"engine_all_on.ini");
   Registration();
+  SystemDllLoads();
   if (off.size() < 200 || on.size() < 200) {
     Check(false, "invariants: the app's inis (app_ini/engine_all_off.ini, engine_all_on.ini) were found");
     return;

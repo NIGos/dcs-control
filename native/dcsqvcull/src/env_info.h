@@ -36,7 +36,7 @@ inline std::wstring BaseName(const std::wstring& p) {
 inline std::string ExeVersion() {
   wchar_t path[MAX_PATH * 2] = {};
   if (!GetModuleFileNameW(nullptr, path, MAX_PATH * 2)) return std::string();
-  HMODULE v = LoadLibraryW(L"version.dll");
+  HMODULE v = LoadLibraryExW(L"version.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);  // never one in DCS's folder
   if (!v) return std::string();
   using SizeFn = DWORD(WINAPI*)(LPCWSTR, LPDWORD);
   using InfoFn = BOOL(WINAPI*)(LPCWSTR, DWORD, DWORD, LPVOID);

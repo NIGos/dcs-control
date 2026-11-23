@@ -3604,7 +3604,7 @@ struct Targets2 {
 bool MakeGate(ID3D11Device* dev) {
   if (g_gateCs) return true;
   if (g_testNoGate) return false;
-  HMODULE m = LoadLibraryW(L"d3dcompiler_47.dll");
+  HMODULE m = LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
   auto compile = m ? reinterpret_cast<pD3DCompile>(GetProcAddress(m, "D3DCompile")) : nullptr;
   if (!compile) return false;
   ID3DBlob* blob = nullptr;

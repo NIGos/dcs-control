@@ -200,7 +200,7 @@ bool KmtOpen(LUID luid) {
   if (g_kmt.self) CloseHandle(g_kmt.self);
   g_kmt = Kmt();
   HMODULE g = GetModuleHandleW(L"gdi32.dll");
-  if (!g) g = LoadLibraryW(L"gdi32.dll");
+  if (!g) g = LoadLibraryExW(L"gdi32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
   if (!g) return false;
   g_kmt.qs = reinterpret_cast<Kmt::QsFn>(GetProcAddress(g, "D3DKMTQueryStatistics"));
   auto open = reinterpret_cast<Kmt::OpenFn>(GetProcAddress(g, "D3DKMTOpenAdapterFromLuid"));
