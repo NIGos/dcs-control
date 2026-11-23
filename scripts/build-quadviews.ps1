@@ -181,6 +181,10 @@ foreach ($builtText in @([Text.Encoding]::ASCII.GetString($builtBytes), [Text.En
 $testSources = @('tests/quadviews-composition', 'tests/quadviews-gaze', 'tests/quadviews-live', 'tests/perception', 'tests/threeviews', 'tests/depthwarp',
     'scripts/build-depthwarp-test.ps1', 'native/quadviews' | ForEach-Object { Join-Path $workspaceRoot $_ })
 $testSources += @((Join-Path $quadRoot 'openxr-api-layer'), (Join-Path $quadRoot 'external/FidelityFX-CAS/ffx-cas'), (Join-Path $quadRoot 'obj/x64/Release/ProjectionPS.h'))
+# OFXR's foveated single layer (patches/ofxr-djules75/0099): its composition of the two layers is checked against this
+# composition too, where the OFXR checkout (patched by scripts/build-ofxr-djules75.ps1) has it; the test says when not.
+$foveatedCompose = Join-Path $workspaceRoot 'external/ofxr-djules75/src/d3d12/foveated_compose.hlsl'
+if (Test-Path -LiteralPath $foveatedCompose) { $testSources += $foveatedCompose }
 $testFingerprint = Get-NativeTestFingerprint $quadOutput $testSources
 if (Test-NativeTestsCurrent $quadOutput $testFingerprint) {
     Save-BuildStamp 'quadviews'
@@ -195,7 +199,7 @@ $compositionTest = Join-Path $workspaceRoot 'artifacts/native/qv-test/qv_composi
 New-Item -ItemType Directory -Path (Split-Path -Parent $compositionTest) -Force | Out-Null
 & (Join-Path $PSScriptRoot 'msvc.cmd') cl /nologo /std:c++20 /EHsc /O2 "/Fe:$compositionTest" "/Fo:$(Split-Path -Parent $compositionTest)/" (Join-Path $workspaceRoot 'tests/quadviews-composition/qv_composition_test.cpp') d3d11.lib d3dcompiler.lib
 if ($LASTEXITCODE -ne 0) { throw 'Quad Views composition test build failed.' }
-& $compositionTest (Join-Path $quadRoot 'openxr-api-layer') (Join-Path $quadRoot 'external/FidelityFX-CAS/ffx-cas') (Join-Path $quadRoot 'obj/x64/Release/ProjectionPS.h')
+& $compositionTest (Join-Path $quadRoot 'openxr-api-layer') (Join-Path $quadRoot 'external/FidelityFX-CAS/ffx-cas') (Join-Path $quadRoot 'obj/x64/Release/ProjectionPS.h') $foveatedCompose
 if ($LASTEXITCODE -ne 0) { throw 'Quad Views composition test failed.' }
 # The saccade lead and the fixation deadzone on simulated gaze (2X and 3X frame times, tracker noise, blinks).
 $gazeTest = Join-Path $workspaceRoot 'artifacts/native/qv-test/qv_gaze_test.exe'

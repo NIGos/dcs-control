@@ -10,7 +10,11 @@
 // at 0 must equal it pixel for pixel, with a non-zero field bound at t2 that it must not read. Given the DLL's generated
 // shader header, the same holds for the DLL's own bytecode against the reference compiled as fxc compiles it.
 //
-//   qv_composition_test.exe <quad views openxr-api-layer dir> <FidelityFX-CAS ffx-cas dir> [<built ProjectionPS.h>]
+// Given OFXR's foveated_compose.hlsl (patches/ofxr-djules75/0099, the foveated single layer), its composition of the
+// opaque focus layer over the periphery against the composition as well (see "OFXR 0099" below).
+//
+//   qv_composition_test.exe <quad views openxr-api-layer dir> <FidelityFX-CAS ffx-cas dir> [<built ProjectionPS.h>
+//                           [<OFXR foveated_compose.hlsl>]]
 
 #include <windows.h>
 #include <d3d11.h>
@@ -838,6 +842,129 @@ int main(int argc, char** argv) {
                 double worst_rim_blend = 0, worst_band_blend = 0;
                 focus_area = area;
                 stereo_view = stereo_half_srv.Get();
+                // OFXR 0099, the foveated single layer: with foveated frame generation OFXR composes the periphery and
+                // this focus layer itself and hands the runtime ONE opaque layer
+                // (external/ofxr-djules75/src/d3d12/foveated_compose.hlsl, argv[4]: the runtime's blend, the focus
+                // layer's colour over the periphery by its stored alpha on the stored values, done before the
+                // runtime). Its output, at the composition's size and field of view, must be the composition
+                // (ProjectionPS) at every pixel but the outermost ring (the test's sampler reads black beyond the
+                // periphery, OFXR's clamps). Buckets by the focus layer's stored alpha: 255 (the sharp area), 0, in
+                // between (unclamped, or a colour the layer had to clamp to 0 or 255), and outside the focus area.
+                // Judged where the composition's fade reaches 0 at the area's edge and without edge match (round and
+                // rounded areas: as check 4 above); the rest is printed.
+                ComPtr<ID3D11VertexShader> fold_vs;
+                ComPtr<ID3D11PixelShader> fold_ps;
+                ComPtr<ID3D11Texture2D> fold_layer;
+                ComPtr<ID3D11ShaderResourceView> fold_layer_srv, fold_periphery_srv;
+                ComPtr<ID3D11Buffer> fold_constants;
+                const bool fold_available = argc > 4 && std::filesystem::exists(argv[4]);
+                if (fold_available) {
+                    const std::string fold_source = read_text(argv[4]);
+                    const auto fold_vs_code = compile(fold_source, "FoveatedComposeVS", "vs_5_0", includes);
+                    const auto fold_ps_code = compile(fold_source, "FoveatedComposePS", "ps_5_0", includes);
+                    check(device->CreateVertexShader(fold_vs_code->GetBufferPointer(), fold_vs_code->GetBufferSize(), nullptr, &fold_vs), "fold vs");
+                    check(device->CreatePixelShader(fold_ps_code->GetBufferPointer(), fold_ps_code->GetBufferSize(), nullptr, &fold_ps), "fold ps");
+                    D3D11_TEXTURE2D_DESC desc{};
+                    desc.Width = desc.Height = kFocus;
+                    desc.MipLevels = desc.ArraySize = 1;
+                    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                    desc.SampleDesc.Count = 1;
+                    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                    check(device->CreateTexture2D(&desc, nullptr, &fold_layer), "fold layer");
+                    D3D11_SHADER_RESOURCE_VIEW_DESC array_view{};
+                    array_view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                    array_view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+                    array_view.Texture2DArray.MipLevels = 1;
+                    array_view.Texture2DArray.ArraySize = 1;
+                    check(device->CreateShaderResourceView(fold_layer.Get(), &array_view, &fold_layer_srv), "fold layer srv");
+                    check(device->CreateShaderResourceView(stereo_half.Get(), &array_view, &fold_periphery_srv), "fold periphery srv");
+                    fold_constants = buffer(160);
+                }
+                // OFXR's composition of `layer` (the focus layer at x0, y0 of the output, 1:1) over the periphery;
+                // mode: 0 opaque focus layer, 1 unpremultiplied (the flags Quad Views gives a ramped opaque focus).
+                const auto fold = [&](const std::vector<std::uint32_t>& layer, int x0, int y0, std::uint32_t mode) {
+                    context->UpdateSubresource(fold_layer.Get(), 0, nullptr, layer.data(), kFocus * 4, 0);
+                    struct { float values[36]; std::uint32_t modes[4]; } k{};
+                    static_assert(sizeof(k) == 160);
+                    const float ph = 0.5f / half, fh = 0.5f / kFocus;
+                    const float x_left = -1.f + 2.f * x0 / kOut, y_top = 1.f - 2.f * y0 / kOut;
+                    const float values[36]{1, 1, 0, 0, ph, ph, 1 - ph, 1 - ph, 1, 1, 0, 0, fh, fh, 1 - fh, 1 - fh, -1, 1, 1, -1,
+                        x_left, x_left + 2.f * kFocus / kOut, y_top, y_top - 2.f * kFocus / kOut, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+                    std::memcpy(k.values, values, sizeof(values));
+                    k.modes[0] = mode;
+                    context->UpdateSubresource(fold_constants.Get(), 0, nullptr, &k, 0, 0);
+                    const float clear[4]{0.25f, 0.5f, 0.75f, 1.f};
+                    context->ClearRenderTargetView(rtv.Get(), clear);
+                    context->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
+                    D3D11_VIEWPORT viewport{0, 0, static_cast<float>(kOut), static_cast<float>(kOut), 0, 1};
+                    context->RSSetViewports(1, &viewport);
+                    context->RSSetState(rasterizer.Get());
+                    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                    context->VSSetShader(fold_vs.Get(), nullptr, 0);
+                    context->PSSetShader(fold_ps.Get(), nullptr, 0);
+                    context->PSSetConstantBuffers(0, 1, fold_constants.GetAddressOf());
+                    ID3D11ShaderResourceView* views[2] = {fold_periphery_srv.Get(), fold_layer_srv.Get()};
+                    context->PSSetShaderResources(0, 2, views);
+                    context->PSSetSamplers(0, 1, sampler.GetAddressOf());
+                    context->Draw(3, 0);
+                    ID3D11ShaderResourceView* none[2]{};
+                    context->PSSetShaderResources(0, 2, none);
+                    context->CopyResource(staging.Get(), target.Get());
+                    D3D11_MAPPED_SUBRESOURCE mapped{};
+                    check(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "map fold");
+                    std::vector<std::uint32_t> out(static_cast<std::size_t>(kOut) * kOut);
+                    for (UINT y = 0; y < kOut; ++y)
+                        std::memcpy(&out[static_cast<std::size_t>(y) * kOut],
+                            static_cast<const std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch, kOut * 4);
+                    context->Unmap(staging.Get(), 0);
+                    return out;
+                };
+                // `model`: the worst difference, over the focus area, from the runtime's blend of the two layers as
+                // the checks above compute it (the stored bytes times their alpha over the periphery, bilinear): where
+                // the composition's band is narrower than the ramp the layer had to clamp its colour (or store alpha 0
+                // where the composition still shows some focus), and there the two-layer runtime shows what this
+                // model says, not the composition; the single layer must show the same.
+                struct FoldResult {
+                    int outside = 0, sharp = 0, transparent = 0, ramp = 0, clamped = 0, alpha_not_255 = 0;
+                    double model = 0;
+                    std::size_t outside_n = 0, sharp_n = 0, transparent_n = 0, ramp_n = 0, clamped_n = 0;
+                };
+                const auto fold_compare = [&](const std::vector<std::uint32_t>& out, const std::vector<std::uint32_t>& reference,
+                                              const std::vector<std::uint32_t>& layer, int x0, int y0, FoldResult& r) {
+                    for (UINT y = 1; y + 1 < kOut; ++y)
+                        for (UINT x = 1; x + 1 < kOut; ++x) {
+                            const std::uint32_t o = out[static_cast<std::size_t>(y) * kOut + x];
+                            const std::uint32_t e = reference[static_cast<std::size_t>(y) * kOut + x];
+                            if ((o >> 24) != 255U) ++r.alpha_not_255;
+                            int d = 0;
+                            for (int ch = 0; ch < 3; ++ch)
+                                d = (std::max)(d, std::abs(static_cast<int>((o >> (8 * ch)) & 255U) - static_cast<int>((e >> (8 * ch)) & 255U)));
+                            const int fx = static_cast<int>(x) - x0, fy = static_cast<int>(y) - y0;
+                            if (fx < 0 || fy < 0 || fx >= static_cast<int>(kFocus) || fy >= static_cast<int>(kFocus)) {
+                                r.outside = (std::max)(r.outside, d);
+                                ++r.outside_n;
+                                continue;
+                            }
+                            const std::uint32_t l = layer[static_cast<std::size_t>(fy) * kFocus + fx];
+                            const std::uint32_t a = l >> 24;
+                            const float u = (x + 0.5f) / kOut, v = (y + 0.5f) / kOut, af = a / 255.f;
+                            for (int ch = 0; ch < 3; ++ch) {
+                                const double shown = ((l >> (8 * ch)) & 255U) * af + periphery_at(u, v, ch) * (1 - af);
+                                r.model = (std::max)(r.model, std::abs(shown - static_cast<double>((o >> (8 * ch)) & 255U)));
+                            }
+                            bool clamped = false;
+                            for (int ch = 0; ch < 3; ++ch) {
+                                const std::uint32_t v = (l >> (8 * ch)) & 255U;
+                                clamped = clamped || v == 0U || v == 255U;
+                            }
+                            if (a == 255U) { r.sharp = (std::max)(r.sharp, d); ++r.sharp_n; }
+                            else if (a == 0U) { r.transparent = (std::max)(r.transparent, d); ++r.transparent_n; }
+                            else if (clamped) { r.clamped = (std::max)(r.clamped, d); ++r.clamped_n; }
+                            else { r.ramp = (std::max)(r.ramp, d); ++r.ramp_n; }
+                        }
+                };
+                FoldResult fold_judged, fold_other, fold_none;
+                std::size_t fold_cases = 0, fold_none_cases = 0;
                 for (const float shape : {0.f, 2.f, 8.f})
                     for (const float smoothing : {0.f, 0.05f, 0.2f})
                         // Offsets of whole output pixels (NDC 0.125 = 64 px, -0.0625 = 32 px).
@@ -870,6 +997,12 @@ int main(int argc, char** argv) {
                                     worst_aberration = (std::max)(worst_aberration, aberration_error([&](float fx, float fy) { return alpha_at(opaque, fx, fy); }));
                                     const bool own_band = shape >= 1.f && smoothing >= 0.2f;
                                     const int x0 = static_cast<int>(std::lround(o.band[2] * kOut)), y0 = static_cast<int>(std::lround(o.band[3] * kOut));
+                                    // OFXR 0099: the single layer OFXR composes from this focus layer (flags 6).
+                                    if (fold_available) {
+                                        ++fold_cases;
+                                        fold_compare(fold(opaque, x0, y0, 1), reference, opaque, x0, y0,
+                                            edge <= 0.f && shape >= 1.f ? fold_judged : fold_other);
+                                    }
                                     for (UINT y = 0; y < kFocus; ++y)
                                         for (UINT x = 0; x < kFocus; ++x) {
                                             const std::size_t p = static_cast<std::size_t>(y) * kFocus + x;
@@ -965,6 +1098,12 @@ int main(int argc, char** argv) {
                                 if (ramp > 0)
                                     narrow_aberration = (std::max)(narrow_aberration, aberration_error([&](float fx, float fy) { return alpha_at(opaque, fx, fy); }));
                                 const int x0 = static_cast<int>(std::lround(o.band[2] * kOut)), y0 = static_cast<int>(std::lround(o.band[3] * kOut));
+                                // OFXR 0099: the single layer from this focus layer (ramp 0: no blend flags, mode 0).
+                                if (fold_available) {
+                                    ++(ramp > 0 ? fold_cases : fold_none_cases);
+                                    fold_compare(fold(opaque, x0, y0, ramp > 0 ? 1U : 0U), reference, opaque, x0, y0,
+                                        ramp > 0 ? fold_judged : fold_none);
+                                }
                                 for (UINT y = 0; y < kFocus; ++y)
                                     for (UINT x = 0; x < kFocus; ++x) {
                                         const std::size_t p = static_cast<std::size_t>(y) * kFocus + x;
@@ -1026,6 +1165,36 @@ int main(int argc, char** argv) {
                             rim_alpha_wrong == 0 && border_opaque == 0 && rim_ramp > 10000U && worst_rim_blend <= 2.0 && band_ramp > 10000U &&
                             worst_band_blend <= 2.0 && worst_aberration <= 0.04 && rim_aberration > 0.3 && hard_aberration > 0.9 &&
                             narrow_ok;
+                // OFXR 0099: the single layer against the composition.
+                if (fold_available) {
+                    const auto print = [](const char* name, const FoldResult& r) {
+                        std::printf("  %s: vs the composition: outside the focus area worst %d codes (%zu px), stored alpha 255 worst %d (%zu), "
+                                    "alpha 0 worst %d (%zu), ramp worst %d (%zu), clamped ramp worst %d (%zu); vs the runtime's two-layer "
+                                    "blend over the focus area worst %.2f; output alpha not 255 %d%s",
+                            name, r.outside, r.outside_n, r.sharp, r.sharp_n, r.transparent, r.transparent_n, r.ramp, r.ramp_n,
+                            r.clamped, r.clamped_n, r.model, r.alpha_not_255, "\n");
+                    };
+                    std::printf("OFXR single layer (foveated_compose.hlsl) vs the composition: %zu ramped cases, %zu with ramp 0%s",
+                        fold_cases, fold_none_cases, "\n");
+                    print("judged (round/rounded, no edge match)", fold_judged);
+                    print("rectangle or edge match (printed only)", fold_other);
+                    print("ramp 0 (no blend flags)", fold_none);
+                    const auto all_within = [](const FoldResult& r, int limit) {
+                        return r.outside <= 1 && r.sharp <= limit && r.alpha_not_255 == 0;
+                    };
+                    // Judged: the single layer is the runtime's two-layer blend everywhere (within rounding), and the
+                    // composition wherever the ramp did not have to clamp; with ramp 0 the composition everywhere.
+                    const bool fold_ok = fold_cases == cases + narrow_cases && fold_none_cases == none_cases && all_within(fold_judged, 1) &&
+                                         fold_judged.ramp <= 2 && fold_judged.ramp_n > 10000U && fold_judged.model <= 1.0 &&
+                                         fold_judged.sharp_n > 1000000U && fold_other.alpha_not_255 == 0 && fold_other.outside <= 1 &&
+                                         fold_other.model <= 1.0 && all_within(fold_none, 1) && fold_none.model <= 1.0 &&
+                                         fold_none.transparent_n == 0 && fold_none.ramp_n == 0 && fold_none.clamped_n == 0;
+                    std::printf(fold_ok ? "OFXR single layer: the composition within the runtime blend's rounding%s"
+                                        : "OFXR single layer vs the composition FAILED%s", "\n");
+                    opaque_ok = opaque_ok && fold_ok;
+                } else {
+                    std::printf("OFXR single layer: skipped (no foveated_compose.hlsl given)%s", "\n");
+                }
             }
             std::printf(opaque_ok ? "Quad Views opaque focus: the focus layer holds the composed image over its rectangle%s"
                                   : "Quad Views opaque focus FAILED%s", "\n");            two_layer_ok = two_layer_ok && opaque_ok;

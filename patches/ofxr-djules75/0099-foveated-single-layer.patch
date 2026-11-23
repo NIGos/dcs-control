@@ -1,0 +1,2582 @@
+Foveated single layer (`[ofxr] foveated_single_layer`, on unless 0, live; `foveated_single_layer_scale`, 25-100 %
+of the runtime's recommended view size, default 100, start only). With foveated frame generation Quad Views
+(dcsvr_two_layers) hands over a periphery and a focus projection layer per eye and each is synthesized on its own.
+Handed to the runtime as two layers, Pimax composes them with per-layer distortion: its chromatic aberration
+correction samples red and blue across the focus layer's border (the orange/red line around the focus area, flights
+of 2026-11-22) and, wherever the focus alpha is below 1 (0031's ramp), it shows its own periphery under the focus,
+which on some frames is not the one the focus was composed against (the flickering focus rectangle in the right eye,
+2026-11-23). The presenter now composes every fresh submission's two layers into one image per eye before it goes
+down (D3D12FoveatedComposer, src/d3d12/foveated_compose.hlsl: the runtime's blend on the stored values, the focus
+colour over the periphery by the focus layer's alpha, at the periphery's field of view and pose), while the frame's
+images are still the layer's (their release follows), and the frame names that image as ONE opaque projection layer.
+Real and generated frames alike; a repeat names the composed swapchain again, which shows the image of the frame it
+repeats (every repeat is of the last fresh submission). One composed swapchain per session (array of the views, the
+periphery's format), made on first use; the frame path defers the private images' release to the hand-over on a
+D3D12 binding without the layer's own queue too while the key is on. Flight log: foveated_mode result=4 (state),
+5 (swapchain made), 6 (GPU time every 900 compositions), live_settings result=4 (the key followed live).
+Tests: xrfg_foveated_composer_tests (WARP: both eyes, the three alpha modes, sub-images, a rotated focus view, typed
+sRGB, a ring of frames, each against a CPU reference of the runtime's blend; bench label: GPU time at a Crystal
+Super's sizes), xrfg_layer_two_layers_deep_hold_composed_{off,2x,3x,auto,opaque} (the fake runtime checks every
+composed frame: one layer without blend flags on the composed swapchain's two slices, alpha 255); the other
+two-layer tests run with the key off (unchanged). tests/quadviews-composition checks the shader against Quad Views'
+own composition.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9a75b3c..7efd84e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -342,6 +342,26 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/hud_symbology.hlsl"
+         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/hud_symbology.hlsl"
+         VERBATIM)
++    # DCS Control (0099): the foveated single layer's composition
++    # (src/d3d12/foveated_compose.hlsl, D3D12FoveatedComposer).
++    set(XRFG_FOVEATED_COMPOSE_HEADERS
++        "${XRFG_GENERATED_SHADER_DIR}/foveated_compose_vertex_shader.hpp"
++        "${XRFG_GENERATED_SHADER_DIR}/foveated_compose_pixel_shader.hpp")
++    add_custom_command(
++        OUTPUT ${XRFG_FOVEATED_COMPOSE_HEADERS}
++        COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T vs_5_1 /E FoveatedComposeVS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_GENERATED_SHADER_DIR}/foveated_compose_vertex_shader.hpp"
++            /Vn g_xrfg_foveated_compose_vertex_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/foveated_compose.hlsl"
++        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E FoveatedComposePS
++            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
++            /Fh "${XRFG_GENERATED_SHADER_DIR}/foveated_compose_pixel_shader.hpp"
++            /Vn g_xrfg_foveated_compose_pixel_shader
++            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/foveated_compose.hlsl"
++        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/foveated_compose.hlsl"
++        VERBATIM)
+     add_custom_command(
+         OUTPUT
+             "${XRFG_PACK_INPUT_HEADER}"
+@@ -514,6 +534,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         src/d3d12/smooth_cursor_templates.cpp
+         src/d3d12/cockpit_mask.cpp
+         src/d3d12/hud_symbology.cpp # DCS Control (0049)
++        src/d3d12/d3d12_foveated_composer.cpp # DCS Control (0099)
+         src/common/dlss_motion_vectors.cpp
+         "${XRFG_PACK_INPUT_HEADER}"
+         "${XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER}"
+@@ -548,7 +569,8 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+         ${XRFG_COCKPIT_MASK_HEADERS}
+         ${XRFG_COCKPIT_DEPTH_HEADERS}
+         ${XRFG_DCS_MOTION_HEADERS} # DCS Control (0036)
+-        ${XRFG_HUD_SYMBOLOGY_HEADERS}) # DCS Control (0049)
++        ${XRFG_HUD_SYMBOLOGY_HEADERS} # DCS Control (0049)
++        ${XRFG_FOVEATED_COMPOSE_HEADERS}) # DCS Control (0099)
+     target_include_directories(xrfg_d3d12_history
+         PUBLIC include "${XRFG_VULKAN_INCLUDE_DIR}"
+         PRIVATE
+@@ -1419,6 +1441,46 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+                 "-DOPAQUE=1"
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_two_layers.cmake")
+         set_tests_properties(xrfg_layer_two_layers_deep_hold_roles_opaque PROPERTIES TIMEOUT 180)
++        # DCS Control (0099): the foveated single layer (COMPOSED: the layer
++        # composes each frame's two layers into one): the shallow pipeline, the
++        # 2X hold, 3X, adaptive cadence and Quad Views' opaque focus, every
++        # frame checked by the fake runtime (one opaque layer on the composed
++        # swapchain's two slices, alpha 255) besides the scenario's own verdict.
++        set(two_layer_composed_cases
++            "off|dcs|ofxr_bridge_shallow_pipeline.ini|-|-"
++            "2x|dcs-deep-hold|ofxr_bridge_pipelined_deep_hold.ini|-|-"
++            "3x|dcs-triple-deep|ofxr_bridge_triple_deep.ini|pipelined_deep_hold=1|-"
++            "auto|dcs-cadence|ofxr_bridge_adaptive_cadence.ini|-|-"
++            "opaque|dcs|ofxr_bridge_shallow_pipeline.ini|-|-DOPAQUE=1")
++        foreach(two_layer_case IN LISTS two_layer_composed_cases)
++            string(REPLACE "|" ";" two_layer_fields "${two_layer_case}")
++            list(GET two_layer_fields 0 two_layer_name)
++            list(GET two_layer_fields 1 two_layer_mode)
++            list(GET two_layer_fields 2 two_layer_ini)
++            list(GET two_layer_fields 3 two_layer_extra)
++            list(GET two_layer_fields 4 two_layer_define)
++            if(two_layer_extra STREQUAL "-")
++                set(two_layer_extra "")
++            endif()
++            if(two_layer_define STREQUAL "-")
++                set(two_layer_define "-DUNUSED=1")
++            endif()
++            set(two_layer_test xrfg_layer_two_layers_deep_hold_composed_${two_layer_name})
++            add_test(
++                NAME ${two_layer_test}
++                COMMAND "${CMAKE_COMMAND}"
++                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
++                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
++                    "-DBASE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/${two_layer_ini}"
++                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/${two_layer_test}"
++                    "-DMODE=${two_layer_mode}"
++                    "-DTWO=1"
++                    "-DCOMPOSED=1"
++                    "${two_layer_define}"
++                    "-DEXTRA_KEYS=${two_layer_extra}"
++                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_two_layers.cmake")
++            set_tests_properties(${two_layer_test} PROPERTIES TIMEOUT 180)
++        endforeach()
+         # is heavy, light, then heavy again; tests/layer_release_offset.cmake)
+         # in the two-layer shape, where the tree has that patch: the flight
+         # that showed the stale offset was a two-layer one.
+@@ -1816,6 +1878,21 @@ if(WIN32 AND XRFG_BUILD_LAYER)
+                 WIN32_LEAN_AND_MEAN)
+         endif()
+         add_test(NAME xrfg_d3d12_history_tests COMMAND xrfg_d3d12_history_tests)
++        # DCS Control (0099): the foveated single layer's composition on WARP
++        # (both eyes against a CPU reference of the runtime's blend), and its
++        # GPU time at a Pimax flight's sizes on hardware (label bench).
++        add_executable(xrfg_foveated_composer_tests tests/foveated_composer_tests.cpp)
++        target_include_directories(xrfg_foveated_composer_tests PRIVATE include)
++        target_link_libraries(xrfg_foveated_composer_tests PRIVATE xrfg_d3d12_history d3d12 dxgi)
++        target_compile_features(xrfg_foveated_composer_tests PRIVATE cxx_std_20)
++        if(MSVC)
++            target_compile_options(xrfg_foveated_composer_tests PRIVATE /W4 /permissive- /EHsc)
++            target_compile_definitions(xrfg_foveated_composer_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
++        endif()
++        add_test(NAME xrfg_foveated_composer_tests COMMAND xrfg_foveated_composer_tests)
++        add_test(NAME xrfg_d3d12_bench_foveated_compose COMMAND xrfg_foveated_composer_tests)
++        set_tests_properties(xrfg_d3d12_bench_foveated_compose PROPERTIES
++            ENVIRONMENT "XRFG_TEST_FOVEATED_COMPOSE_BENCH=1" LABELS bench TIMEOUT 600 SKIP_RETURN_CODE 77)
+         # DCS Control (0057): 0033's xrfg_d3d12_fast_composition is gone with
+         # [ofxr] fast_composition. The NVIDIA-only tests below exit with 77
+         # without NVIDIA hardware, which ctest shows as skipped.
+@@ -2024,6 +2101,11 @@ set(XRFG_DCS_ALONE_ONLY_TESTS
+         xrfg_layer_two_layers_deep_hold_arming_single
+         xrfg_layer_two_layers_deep_hold_roles
+         xrfg_layer_two_layers_deep_hold_roles_opaque
++        xrfg_layer_two_layers_deep_hold_composed_off
++        xrfg_layer_two_layers_deep_hold_composed_2x
++        xrfg_layer_two_layers_deep_hold_composed_3x
++        xrfg_layer_two_layers_deep_hold_composed_auto
++        xrfg_layer_two_layers_deep_hold_composed_opaque
+         xrfg_layer_two_layers_deep_hold_release_offset
+         xrfg_layer_adaptive_lazy_slot
+         xrfg_layer_adaptive_frame_gen_cadence_off
+diff --git a/include/xrfg/bridge_flight_logger.hpp b/include/xrfg/bridge_flight_logger.hpp
+index 18435bc..fccae15 100644
+--- a/include/xrfg/bridge_flight_logger.hpp
++++ b/include/xrfg/bridge_flight_logger.hpp
+@@ -849,6 +849,9 @@ enum class BridgeFlightOperation : std::uint32_t {
+     //     new value (0 or 1), b= the old. Each session's panel shows or drops
+     //     its VRAM line, and its sampler reads memory or stops, from its next
+     //     xrEndFrame (apply_live_diag_vram).
++    //   result=4 (0099), `[ofxr] foveated_single_layer` changed and taken in
++    //     live: a= the new value (0 or 1), b= the old. Each session's presenter
++    //     follows it from its next fresh submission.
+     live_settings,
+     // Foveated frame generation (`[ofxr] foveated_layers`): the session's
+     // state, one record each time it changes (the application's xrEndFrame).
+@@ -879,6 +882,21 @@ enum class BridgeFlightOperation : std::uint32_t {
+     //     512 (0094) when every projection layer was opaque and the layer
+     //     order named the periphery (Quad Views' opaque focus);
+     //     c= the swapchain's width << 32 | height.
++    //   result=4 (DCS Control 0099), the foveated single layer's state, on the
++    //     presenter thread, each time it changes: a= 1 composing (the frame
++    //     went down as one opaque projection layer), 0 the two layers as
++    //     before (the key off, live or at the start), 2 not possible for this
++    //     frame (b says why: 1 not a D3D12 session, 2 an image the layer does
++    //     not hold, 3 the composition could not be prepared (composer,
++    //     swapchain or its image), 4 the views do not pair up); b= the reason
++    //     (0 none); c= the composed swapchain's width << 32 | height (0 none
++    //     yet), for b=2 instead the images the frame still held << 32 | 1
++    //     with a binding queue of the layer's own.
++    //   result=5 (0099), the composed swapchain made: a= its format, b= width
++    //     << 32 | height, c= array size << 32 | image count; or refused (a= 0,
++    //     b= the runtime's result).
++    //   result=6 (0099), every 900 compositions: a= how many so far, b= the
++    //     mean GPU time of the last ones in microseconds, c= the largest.
+     foveated_mode,
+ };
+ 
+diff --git a/include/xrfg/d3d12_foveated_composer.hpp b/include/xrfg/d3d12_foveated_composer.hpp
+new file mode 100644
+index 0000000..26eabe3
+--- /dev/null
++++ b/include/xrfg/d3d12_foveated_composer.hpp
+@@ -0,0 +1,132 @@
++#pragma once
++
++// DCS Control (0099): foveated single layer (`[ofxr] foveated_single_layer`).
++// Composes a frame's periphery and focus projection layers into one image per
++// eye (src/d3d12/foveated_compose.hlsl says how), on the queue the runtime
++// orders its swapchain images against, so the frame goes to the runtime as one
++// opaque projection layer. The caller owns every resource it names and keeps
++// them alive until the queue has run the work.
++
++#include <d3d12.h>
++#include <wrl/client.h>
++
++#include <array>
++#include <cstdint>
++#include <memory>
++#include <mutex>
++#include <span>
++
++namespace xrfg {
++
++// One source view: a slice of a texture (array or not), the sub-image the view
++// shows, its field of view as tangents and its orientation.
++struct D3D12FoveatedComposeSource {
++    ID3D12Resource* resource{};
++    std::uint32_t array_slice{};
++    std::int32_t x{};
++    std::int32_t y{};
++    std::uint32_t width{};
++    std::uint32_t height{};
++    // tan(angleLeft), tan(angleRight), tan(angleUp), tan(angleDown).
++    std::array<float, 4> tangents{};
++    // x, y, z, w of the view's orientation (XrQuaternionf).
++    std::array<float, 4> orientation{0.0F, 0.0F, 0.0F, 1.0F};
++};
++
++enum class D3D12FoveatedFocusAlpha : std::uint32_t {
++    opaque = 0,          // no SOURCE_ALPHA: the focus colour inside its field of view
++    unpremultiplied = 1, // SOURCE_ALPHA | UNPREMULTIPLIED: f * a + p * (1 - a)
++    premultiplied = 2,   // SOURCE_ALPHA: f + p * (1 - a)
++};
++
++// One eye: the output slice `target_slice` covers the periphery view's field
++// of view (its pose).
++struct D3D12FoveatedComposeView {
++    D3D12FoveatedComposeSource periphery;
++    D3D12FoveatedComposeSource focus;
++    D3D12FoveatedFocusAlpha alpha{D3D12FoveatedFocusAlpha::unpremultiplied};
++    std::uint32_t target_slice{};
++};
++
++struct D3D12FoveatedComposeTarget {
++    ID3D12Resource* resource{};
++    std::uint32_t width{};
++    std::uint32_t height{};
++};
++
++// The composition's GPU time, from timestamps on the queue, once the queue has
++// run it (consume_gpu_timing).
++struct D3D12FoveatedComposeTiming {
++    std::uint64_t microseconds{};
++    std::uint64_t sequence{};
++};
++
++// Root constants: the cbuffer of foveated_compose.hlsl, 40 32-bit values.
++struct D3D12FoveatedComposeConstants {
++    float periphery_rect[4];
++    float periphery_clamp[4];
++    float focus_rect[4];
++    float focus_clamp[4];
++    float output_tan[4];
++    float focus_tan[4];
++    float rotation0[4];
++    float rotation1[4];
++    float rotation2[4];
++    std::uint32_t modes[4];
++};
++static_assert(sizeof(D3D12FoveatedComposeConstants) == 160);
++
++// How a texture is viewed by the pass: the view format and whether the pass
++// converts (a typeless R8G8B8A8 texture: the UNORM view of the stored bytes; a
++// typed sRGB one: its own view, encoded / decoded in the shader).
++struct D3D12FoveatedViewFormat {
++    DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
++    bool srgb_typed{};
++};
++[[nodiscard]] D3D12FoveatedViewFormat foveated_view_format(DXGI_FORMAT resource_format) noexcept;
++
++// The constants for one eye (exposed for the tests): `source_width` /
++// `source_height` are the textures' full sizes.
++[[nodiscard]] D3D12FoveatedComposeConstants make_foveated_compose_constants(
++    const D3D12FoveatedComposeView& view,
++    std::uint32_t periphery_texture_width,
++    std::uint32_t periphery_texture_height,
++    std::uint32_t focus_texture_width,
++    std::uint32_t focus_texture_height,
++    bool periphery_encode,
++    bool focus_encode,
++    bool output_decode) noexcept;
++
++class D3D12FoveatedComposer final {
++public:
++    D3D12FoveatedComposer();
++    ~D3D12FoveatedComposer();
++    D3D12FoveatedComposer(const D3D12FoveatedComposer&) = delete;
++    D3D12FoveatedComposer& operator=(const D3D12FoveatedComposer&) = delete;
++
++    [[nodiscard]] HRESULT initialize(ID3D12Device* device) noexcept;
++
++    // Records and executes the composition of `views` into `target` on
++    // `queue`. Every source is in `source_state` before and after (a runtime's
++    // colour swapchain image: RENDER_TARGET), the target in RENDER_TARGET.
++    // Nothing waits on the CPU unless every recording slot is still in flight.
++    [[nodiscard]] HRESULT compose(
++        ID3D12CommandQueue* queue,
++        const D3D12FoveatedComposeTarget& target,
++        std::span<const D3D12FoveatedComposeView> views,
++        D3D12_RESOURCE_STATES source_state = D3D12_RESOURCE_STATE_RENDER_TARGET) noexcept;
++
++    // S_OK and a timing for each composition the queue has finished, in order;
++    // S_FALSE when none is waiting.
++    [[nodiscard]] HRESULT consume_gpu_timing(D3D12FoveatedComposeTiming* timing) noexcept;
++
++    // Blocks until every composition recorded so far has run (tests, teardown).
++    [[nodiscard]] HRESULT wait_idle() noexcept;
++
++private:
++    struct Impl;
++    std::mutex mutex_;
++    std::unique_ptr<Impl> impl_;
++};
++
++} // namespace xrfg
+diff --git a/include/xrfg/embedded_control.hpp b/include/xrfg/embedded_control.hpp
+index e152fe8..2e38c78 100644
+--- a/include/xrfg/embedded_control.hpp
++++ b/include/xrfg/embedded_control.hpp
+@@ -73,6 +73,11 @@ LiveAdoption adopt_live(const LiveFlow& flow, bool first = false);
+ // memory reading on or off (an atomic read: no file IO on a frame thread).
+ [[nodiscard]] int live_diag_vram() noexcept;
+ 
++// DCS Control (0099): `[ofxr] foveated_single_layer` as the live watcher last
++// read it (1 also when the key is missing, 0 when it is 0); -1 before any
++// read. Each session's presenter follows it from its next fresh submission.
++[[nodiscard]] int live_foveated_single_layer() noexcept;
++
+ // DCS Control (0066): one per session. It reads ofxr_bridge.ini once when made
+ // (on the xrCreateSession thread), then every 250 ms on a thread of its own:
+ // only when the file's time or size changed, and then the [ofxr] section in
+diff --git a/include/xrfg/implicit_layer.hpp b/include/xrfg/implicit_layer.hpp
+index 88794ce..9139495 100644
+--- a/include/xrfg/implicit_layer.hpp
++++ b/include/xrfg/implicit_layer.hpp
+@@ -261,6 +261,21 @@ struct ConfiguredNvidiaOptions {
+ // missing: everything exactly as before. Read once per session.
+ [[nodiscard]] bool read_foveated_layers(
+     const std::filesystem::path& module_directory) noexcept;
++// DCS Control (0099): `[ofxr] foveated_single_layer` (with foveated_layers):
++// a frame with a periphery and a focus projection layer is composed into one
++// image per eye before the runtime sees it and goes down as ONE opaque
++// projection layer (the runtime then has no layer border to sample across with
++// its chromatic aberration correction, and no focus alpha to blend over its own
++// periphery). 1 (also when the key is missing) on, 0 the two layers as before.
++// Read at the session's start, then followed live (embedded::
++// live_foveated_single_layer).
++[[nodiscard]] bool read_foveated_single_layer(
++    const std::filesystem::path& module_directory) noexcept;
++// DCS Control (0099): `[ofxr] foveated_single_layer_scale`, the composed
++// image's size in percent of the runtime's recommended view size: 25 to 100,
++// 100 when missing or out of range. Read once per session.
++[[nodiscard]] std::uint32_t read_foveated_single_layer_scale(
++    const std::filesystem::path& module_directory) noexcept;
+ // Foveated layers. `[ofxr] foveated_periphery_flow_scale` (with
+ // foveated_layers): the optical flow's input scale, in percent, for the
+ // swapchains of the periphery layer alone: 50, 75 or 100. The periphery image
+@@ -453,12 +468,14 @@ private:
+ // `start_only` holds the raw text of kOfxrStartOnlyKeys, in order (empty:
+ // the key is missing), so a change of one can be logged and left for the
+ // next launch.
+-inline constexpr std::array<const wchar_t*, 17> kOfxrStartOnlyKeys{
++// DCS Control (0099): foveated_single_layer last, read here to be followed
++// live (as diag_vram, it is never reported as a start-only change).
++inline constexpr std::array<const wchar_t*, 18> kOfxrStartOnlyKeys{
+     L"enabled", L"backend", L"motion_vectors", L"d3d11_bridge",
+     L"deep_pipeline", L"pipelined_deep_hold", L"async_arm",
+     L"adaptive_cadence", L"hud_symbology", L"cockpit_mask", L"cockpit_depth",
+     L"dcs_motion", L"smooth_cursor", L"cursor_templates", L"diag_vram",
+-    L"visibility_mask", L"parallel_eye_synthesis"};
++    L"visibility_mask", L"parallel_eye_synthesis", L"foveated_single_layer"};
+ struct OfxrSectionValues {
+     bool found{};
+     ConfiguredNvidiaOptions nvidia{};
+diff --git a/src/common/embedded_control.cpp b/src/common/embedded_control.cpp
+index 5e3844a..7ebe5db 100644
+--- a/src/common/embedded_control.cpp
++++ b/src/common/embedded_control.cpp
+@@ -153,9 +153,17 @@ constexpr std::size_t diag_vram_index() noexcept {
+ constexpr std::size_t kDiagVramIndex = diag_vram_index();
+ static_assert(kDiagVramIndex < implicit_layer::kOfxrStartOnlyKeys.size(), "diag_vram is in kOfxrStartOnlyKeys");
+ std::atomic<int> g_live_diag_vram{-1};
++// DCS Control (0099): foveated_single_layer, the last of kOfxrStartOnlyKeys.
++constexpr std::size_t kFoveatedSingleLayerIndex = implicit_layer::kOfxrStartOnlyKeys.size() - 1;
++static_assert(implicit_layer::kOfxrStartOnlyKeys[kFoveatedSingleLayerIndex][0] == L'f' &&
++                  implicit_layer::kOfxrStartOnlyKeys[kFoveatedSingleLayerIndex][8] == L'_' &&
++                  implicit_layer::kOfxrStartOnlyKeys[kFoveatedSingleLayerIndex][9] == L's',
++    "foveated_single_layer is the last of kOfxrStartOnlyKeys");
++std::atomic<int> g_live_foveated_single_layer{-1};
+ }
+ 
+ int live_diag_vram() noexcept { return g_live_diag_vram.load(std::memory_order_acquire); }
++int live_foveated_single_layer() noexcept { return g_live_foveated_single_layer.load(std::memory_order_acquire); }
+ 
+ struct LiveIniWatcher::Impl {
+     std::filesystem::path directory, ini;
+@@ -206,6 +214,17 @@ struct LiveIniWatcher::Impl {
+                 bridge_flight_logger().event(BridgeFlightOperation::live_settings, 3,
+                     static_cast<std::uint64_t>(diag_vram), static_cast<std::uint64_t>(diag_vram_before), 0);
+             }
++            // DCS Control (0099): foveated_single_layer, 1 unless it reads 0
++            // (a missing key: on). live_settings result=4: a= the new value,
++            // b= the old; none for the first read.
++            const std::wstring& single_text = values.start_only[kFoveatedSingleLayerIndex];
++            const int single_layer = single_text.empty() || _wtoi(single_text.c_str()) != 0 ? 1 : 0;
++            const int single_layer_before =
++                g_live_foveated_single_layer.exchange(single_layer, std::memory_order_acq_rel);
++            if (single_layer_before >= 0 && single_layer_before != single_layer) {
++                bridge_flight_logger().event(BridgeFlightOperation::live_settings, 4,
++                    static_cast<std::uint64_t>(single_layer), static_cast<std::uint64_t>(single_layer_before), 0);
++            }
+             if (!baseline_known) {
+                 baseline = values.start_only;
+                 baseline_known = true;
+@@ -214,6 +233,7 @@ struct LiveIniWatcher::Impl {
+             std::uint32_t differing = 0;
+             for (std::size_t i = 0; i < baseline.size(); ++i) {
+                 if (i == kDiagVramIndex) continue; // live since 0095
++                if (i == kFoveatedSingleLayerIndex) continue; // live since 0099
+                 if (_wcsicmp(baseline[i].c_str(), values.start_only[i].c_str()) != 0) differing |= 1U << i;
+             }
+             if (differing != start_only_logged) {
+diff --git a/src/common/implicit_layer.cpp b/src/common/implicit_layer.cpp
+index a92f89b..7cd3776 100644
+--- a/src/common/implicit_layer.cpp
++++ b/src/common/implicit_layer.cpp
+@@ -390,6 +390,26 @@ bool read_foveated_layers(const std::filesystem::path& module_directory) noexcep
+     return read_ofxr_switch(module_directory, L"foveated_layers", false);
+ }
+ 
++// DCS Control (0099).
++bool read_foveated_single_layer(const std::filesystem::path& module_directory) noexcept {
++    return read_ofxr_switch(module_directory, L"foveated_single_layer", true);
++}
++
++std::uint32_t read_foveated_single_layer_scale(
++    const std::filesystem::path& module_directory) noexcept {
++    try {
++        if (module_directory.empty()) {
++            return 100;
++        }
++        const auto ini_path = module_directory / L"ofxr_bridge.ini";
++        const INT value = static_cast<INT>(GetPrivateProfileIntW(
++            L"ofxr", L"foveated_single_layer_scale", 100, ini_path.c_str()));
++        return value < 25 || value > 100 ? 100U : static_cast<std::uint32_t>(value);
++    } catch (...) {
++        return 100;
++    }
++}
++
+ std::uint32_t read_foveated_periphery_flow_scale(
+     const std::filesystem::path& module_directory) noexcept {
+     try {
+diff --git a/src/d3d12/d3d12_foveated_composer.cpp b/src/d3d12/d3d12_foveated_composer.cpp
+new file mode 100644
+index 0000000..426d709
+--- /dev/null
++++ b/src/d3d12/d3d12_foveated_composer.cpp
+@@ -0,0 +1,514 @@
++// DCS Control (0099): foveated single layer. See d3d12_foveated_composer.hpp
++// and foveated_compose.hlsl.
++
++#include "xrfg/d3d12_foveated_composer.hpp"
++
++#include "foveated_compose_pixel_shader.hpp"
++#include "foveated_compose_vertex_shader.hpp"
++
++#include <algorithm>
++#include <cmath>
++#include <cstring>
++#include <vector>
++
++namespace xrfg {
++namespace {
++
++using Microsoft::WRL::ComPtr;
++
++// Compositions in flight at once before compose waits on the CPU: the
++// presenter composes one per display period, and the runtime holds a few.
++constexpr std::uint32_t kSlots = 8;
++constexpr std::uint32_t kMaxViews = 2;
++constexpr std::uint32_t kRootConstants = sizeof(D3D12FoveatedComposeConstants) / 4;
++
++struct Matrix3 {
++    float m[3][3];
++};
++
++Matrix3 rotation_of(const std::array<float, 4>& q) noexcept {
++    float x = q[0], y = q[1], z = q[2], w = q[3];
++    const float length = std::sqrt(x * x + y * y + z * z + w * w);
++    if (!(length > 1.0e-6F) || !std::isfinite(length)) {
++        return {{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
++    }
++    x /= length;
++    y /= length;
++    z /= length;
++    w /= length;
++    return {{{1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)},
++        {2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)},
++        {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)}}};
++}
++
++void set4(float* out, float a, float b, float c, float d) noexcept {
++    out[0] = a;
++    out[1] = b;
++    out[2] = c;
++    out[3] = d;
++}
++
++} // namespace
++
++D3D12FoveatedViewFormat foveated_view_format(DXGI_FORMAT resource_format) noexcept {
++    switch (resource_format) {
++    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
++        return {DXGI_FORMAT_R8G8B8A8_UNORM, false};
++    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
++        return {DXGI_FORMAT_B8G8R8A8_UNORM, false};
++    case DXGI_FORMAT_B8G8R8X8_TYPELESS:
++        return {DXGI_FORMAT_B8G8R8X8_UNORM, false};
++    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
++        return {DXGI_FORMAT_R10G10B10A2_UNORM, false};
++    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
++        return {DXGI_FORMAT_R16G16B16A16_FLOAT, false};
++    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
++    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
++    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
++        return {resource_format, true};
++    default:
++        return {resource_format, false};
++    }
++}
++
++D3D12FoveatedComposeConstants make_foveated_compose_constants(
++    const D3D12FoveatedComposeView& view,
++    std::uint32_t periphery_texture_width,
++    std::uint32_t periphery_texture_height,
++    std::uint32_t focus_texture_width,
++    std::uint32_t focus_texture_height,
++    bool periphery_encode,
++    bool focus_encode,
++    bool output_decode) noexcept {
++    D3D12FoveatedComposeConstants c{};
++    const auto rect = [](const D3D12FoveatedComposeSource& source, std::uint32_t width, std::uint32_t height,
++                          float* scale_offset, float* limits) {
++        const float w = static_cast<float>(std::max<std::uint32_t>(width, 1U));
++        const float h = static_cast<float>(std::max<std::uint32_t>(height, 1U));
++        const float x = static_cast<float>(source.x);
++        const float y = static_cast<float>(source.y);
++        const float sw = static_cast<float>(source.width);
++        const float sh = static_cast<float>(source.height);
++        set4(scale_offset, sw / w, sh / h, x / w, y / h);
++        // Half a texel inside the sub-image: a bilinear tap never reads a texel outside it.
++        set4(limits, (x + 0.5F) / w, (y + 0.5F) / h, (x + sw - 0.5F) / w, (y + sh - 0.5F) / h);
++    };
++    rect(view.periphery, periphery_texture_width, periphery_texture_height, c.periphery_rect, c.periphery_clamp);
++    rect(view.focus, focus_texture_width, focus_texture_height, c.focus_rect, c.focus_clamp);
++    const auto& pt = view.periphery.tangents;
++    const auto& ft = view.focus.tangents;
++    set4(c.output_tan, pt[0], pt[1], pt[2], pt[3]);
++    set4(c.focus_tan, ft[0], ft[1], ft[2], ft[3]);
++    // A direction in the output (periphery) view's frame to the focus view's:
++    // world = Rp d, focus = Rf^T world.
++    const Matrix3 rp = rotation_of(view.periphery.orientation);
++    const Matrix3 rf = rotation_of(view.focus.orientation);
++    float rows[3][3]{};
++    for (int i = 0; i < 3; ++i) {
++        for (int j = 0; j < 3; ++j) {
++            float sum = 0;
++            for (int k = 0; k < 3; ++k) {
++                sum += rf.m[k][i] * rp.m[k][j];
++            }
++            // Exactly the identity for equal orientations (no rounding noise
++            // on the shared-pose path every Quad Views frame takes).
++            rows[i][j] = std::abs(sum - (i == j ? 1.0F : 0.0F)) < 1.0e-6F ? (i == j ? 1.0F : 0.0F) : sum;
++        }
++    }
++    set4(c.rotation0, rows[0][0], rows[0][1], rows[0][2], 0);
++    set4(c.rotation1, rows[1][0], rows[1][1], rows[1][2], 0);
++    set4(c.rotation2, rows[2][0], rows[2][1], rows[2][2], 0);
++    c.modes[0] = static_cast<std::uint32_t>(view.alpha);
++    c.modes[1] = periphery_encode ? 1U : 0U;
++    c.modes[2] = focus_encode ? 1U : 0U;
++    c.modes[3] = output_decode ? 1U : 0U;
++    return c;
++}
++
++struct D3D12FoveatedComposer::Impl {
++    ComPtr<ID3D12Device> device;
++    ComPtr<ID3D12RootSignature> root_signature;
++    std::vector<std::pair<DXGI_FORMAT, ComPtr<ID3D12PipelineState>>> pipelines;
++    ComPtr<ID3D12DescriptorHeap> srv_heap;
++    ComPtr<ID3D12DescriptorHeap> rtv_heap;
++    UINT srv_increment{};
++    UINT rtv_increment{};
++    ComPtr<ID3D12GraphicsCommandList> list;
++    ComPtr<ID3D12QueryHeap> queries;
++    ComPtr<ID3D12Resource> readback;
++    ComPtr<ID3D12Fence> fence;
++    HANDLE event{};
++    std::uint64_t fence_value{};
++    struct Slot {
++        ComPtr<ID3D12CommandAllocator> allocator;
++        std::uint64_t fence_value{};
++        std::uint64_t sequence{};
++        std::uint64_t frequency{};
++        bool timed{};
++    };
++    std::array<Slot, kSlots> slots{};
++    std::uint64_t next{};
++    std::uint64_t harvested{};
++
++    ~Impl() {
++        if (event != nullptr) {
++            CloseHandle(event);
++        }
++    }
++
++    ID3D12PipelineState* pipeline(DXGI_FORMAT format) noexcept {
++        for (const auto& [known, state] : pipelines) {
++            if (known == format) {
++                return state.Get();
++            }
++        }
++        D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
++        desc.pRootSignature = root_signature.Get();
++        desc.VS = {g_xrfg_foveated_compose_vertex_shader, sizeof(g_xrfg_foveated_compose_vertex_shader)};
++        desc.PS = {g_xrfg_foveated_compose_pixel_shader, sizeof(g_xrfg_foveated_compose_pixel_shader)};
++        desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
++        desc.SampleMask = UINT_MAX;
++        desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++        desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
++        desc.RasterizerState.DepthClipEnable = TRUE;
++        desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
++        desc.NumRenderTargets = 1;
++        desc.RTVFormats[0] = format;
++        desc.SampleDesc.Count = 1;
++        ComPtr<ID3D12PipelineState> state;
++        if (FAILED(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(state.GetAddressOf())))) {
++            return nullptr;
++        }
++        pipelines.emplace_back(format, state);
++        return state.Get();
++    }
++
++    HRESULT wait_for(std::uint64_t value, DWORD milliseconds) noexcept {
++        if (value == 0 || fence->GetCompletedValue() >= value) {
++            return S_OK;
++        }
++        if (FAILED(fence->SetEventOnCompletion(value, event))) {
++            return E_FAIL;
++        }
++        return WaitForSingleObject(event, milliseconds) == WAIT_OBJECT_0 ? S_OK : HRESULT_FROM_WIN32(WAIT_TIMEOUT);
++    }
++};
++
++D3D12FoveatedComposer::D3D12FoveatedComposer() = default;
++
++D3D12FoveatedComposer::~D3D12FoveatedComposer() {
++    if (impl_ && impl_->fence) {
++        static_cast<void>(impl_->wait_for(impl_->fence_value, 2000));
++    }
++}
++
++HRESULT D3D12FoveatedComposer::initialize(ID3D12Device* device) noexcept {
++    std::scoped_lock lock(mutex_);
++    if (device == nullptr) {
++        return E_INVALIDARG;
++    }
++    try {
++        auto impl = std::make_unique<Impl>();
++        impl->device = device;
++        D3D12_DESCRIPTOR_RANGE range{};
++        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
++        range.NumDescriptors = 2;
++        range.BaseShaderRegister = 0;
++        std::array<D3D12_ROOT_PARAMETER, 2> parameters{};
++        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
++        parameters[0].Constants.Num32BitValues = kRootConstants;
++        parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
++        parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
++        parameters[1].DescriptorTable.NumDescriptorRanges = 1;
++        parameters[1].DescriptorTable.pDescriptorRanges = &range;
++        parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
++        D3D12_STATIC_SAMPLER_DESC sampler{};
++        sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
++        sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
++        sampler.MaxLOD = D3D12_FLOAT32_MAX;
++        sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
++        D3D12_ROOT_SIGNATURE_DESC root{};
++        root.NumParameters = static_cast<UINT>(parameters.size());
++        root.pParameters = parameters.data();
++        root.NumStaticSamplers = 1;
++        root.pStaticSamplers = &sampler;
++        ComPtr<ID3DBlob> blob, errors;
++        HRESULT result = D3D12SerializeRootSignature(&root, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &errors);
++        if (FAILED(result)) {
++            return result;
++        }
++        result = device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
++            IID_PPV_ARGS(impl->root_signature.GetAddressOf()));
++        if (FAILED(result)) {
++            return result;
++        }
++        D3D12_DESCRIPTOR_HEAP_DESC srv{};
++        srv.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
++        srv.NumDescriptors = kSlots * kMaxViews * 2;
++        srv.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
++        result = device->CreateDescriptorHeap(&srv, IID_PPV_ARGS(impl->srv_heap.GetAddressOf()));
++        if (FAILED(result)) {
++            return result;
++        }
++        D3D12_DESCRIPTOR_HEAP_DESC rtv{};
++        rtv.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
++        rtv.NumDescriptors = kSlots * kMaxViews;
++        result = device->CreateDescriptorHeap(&rtv, IID_PPV_ARGS(impl->rtv_heap.GetAddressOf()));
++        if (FAILED(result)) {
++            return result;
++        }
++        impl->srv_increment = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
++        impl->rtv_increment = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
++        for (auto& slot : impl->slots) {
++            result = device->CreateCommandAllocator(
++                D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(slot.allocator.GetAddressOf()));
++            if (FAILED(result)) {
++                return result;
++            }
++        }
++        result = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, impl->slots[0].allocator.Get(),
++            nullptr, IID_PPV_ARGS(impl->list.GetAddressOf()));
++        if (FAILED(result)) {
++            return result;
++        }
++        impl->list->Close();
++        D3D12_QUERY_HEAP_DESC queries{};
++        queries.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
++        queries.Count = kSlots * 2;
++        // Best effort: without timestamps the composition still runs, untimed.
++        if (FAILED(device->CreateQueryHeap(&queries, IID_PPV_ARGS(impl->queries.GetAddressOf())))) {
++            impl->queries.Reset();
++        }
++        if (impl->queries) {
++            D3D12_HEAP_PROPERTIES heap{};
++            heap.Type = D3D12_HEAP_TYPE_READBACK;
++            D3D12_RESOURCE_DESC buffer{};
++            buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++            buffer.Width = kSlots * 2 * sizeof(std::uint64_t);
++            buffer.Height = 1;
++            buffer.DepthOrArraySize = 1;
++            buffer.MipLevels = 1;
++            buffer.SampleDesc.Count = 1;
++            buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++            if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
++                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(impl->readback.GetAddressOf())))) {
++                impl->queries.Reset();
++            }
++        }
++        result = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(impl->fence.GetAddressOf()));
++        if (FAILED(result)) {
++            return result;
++        }
++        impl->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
++        if (impl->event == nullptr) {
++            return HRESULT_FROM_WIN32(GetLastError());
++        }
++        impl_ = std::move(impl);
++        return S_OK;
++    } catch (...) {
++        return E_OUTOFMEMORY;
++    }
++}
++
++HRESULT D3D12FoveatedComposer::compose(
++    ID3D12CommandQueue* queue,
++    const D3D12FoveatedComposeTarget& target,
++    std::span<const D3D12FoveatedComposeView> views,
++    D3D12_RESOURCE_STATES source_state) noexcept {
++    std::scoped_lock lock(mutex_);
++    if (!impl_) {
++        return E_NOT_VALID_STATE;
++    }
++    if (queue == nullptr || target.resource == nullptr || target.width == 0 || target.height == 0 ||
++        views.empty() || views.size() > kMaxViews) {
++        return E_INVALIDARG;
++    }
++    Impl& impl = *impl_;
++    try {
++        const std::uint32_t index = static_cast<std::uint32_t>(impl.next % kSlots);
++        Impl::Slot& slot = impl.slots[index];
++        // The slot's previous composition must have run before its allocator
++        // and descriptors are used again.
++        HRESULT result = impl.wait_for(slot.fence_value, 250);
++        if (FAILED(result)) {
++            return result;
++        }
++        const D3D12_RESOURCE_DESC target_desc = target.resource->GetDesc();
++        const D3D12FoveatedViewFormat output = foveated_view_format(target_desc.Format);
++        ID3D12PipelineState* pipeline = impl.pipeline(output.format);
++        if (pipeline == nullptr) {
++            return E_FAIL;
++        }
++        result = slot.allocator->Reset();
++        if (FAILED(result)) {
++            return result;
++        }
++        result = impl.list->Reset(slot.allocator.Get(), pipeline);
++        if (FAILED(result)) {
++            return result;
++        }
++        ID3D12GraphicsCommandList* list = impl.list.Get();
++        const bool timed = impl.queries != nullptr;
++        if (timed) {
++            list->EndQuery(impl.queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index * 2);
++        }
++        // Every distinct source to PIXEL_SHADER_RESOURCE and back.
++        std::array<ID3D12Resource*, kMaxViews * 2> sources{};
++        std::uint32_t source_count = 0;
++        for (const auto& view : views) {
++            for (ID3D12Resource* resource : {view.periphery.resource, view.focus.resource}) {
++                if (resource == nullptr) {
++                    list->Close();
++                    return E_INVALIDARG;
++                }
++                if (std::find(sources.begin(), sources.begin() + source_count, resource) ==
++                    sources.begin() + source_count) {
++                    sources[source_count++] = resource;
++                }
++            }
++        }
++        std::array<D3D12_RESOURCE_BARRIER, kMaxViews * 2> barriers{};
++        const bool transition = (source_state & D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) == 0;
++        if (transition) {
++            for (std::uint32_t i = 0; i < source_count; ++i) {
++                barriers[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++                barriers[i].Transition.pResource = sources[i];
++                barriers[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++                barriers[i].Transition.StateBefore = source_state;
++                barriers[i].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++            }
++            list->ResourceBarrier(source_count, barriers.data());
++        }
++        ID3D12DescriptorHeap* heaps[] = {impl.srv_heap.Get()};
++        list->SetDescriptorHeaps(1, heaps);
++        list->SetGraphicsRootSignature(impl.root_signature.Get());
++        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++        const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(target.width), static_cast<float>(target.height), 0, 1};
++        const D3D12_RECT scissor{0, 0, static_cast<LONG>(target.width), static_cast<LONG>(target.height)};
++        list->RSSetViewports(1, &viewport);
++        list->RSSetScissorRects(1, &scissor);
++        for (std::uint32_t v = 0; v < views.size(); ++v) {
++            const D3D12FoveatedComposeView& view = views[v];
++            const D3D12_RESOURCE_DESC periphery_desc = view.periphery.resource->GetDesc();
++            const D3D12_RESOURCE_DESC focus_desc = view.focus.resource->GetDesc();
++            const D3D12FoveatedViewFormat periphery_format = foveated_view_format(periphery_desc.Format);
++            const D3D12FoveatedViewFormat focus_format = foveated_view_format(focus_desc.Format);
++            const std::uint32_t base = (index * kMaxViews + v) * 2;
++            D3D12_CPU_DESCRIPTOR_HANDLE srv = impl.srv_heap->GetCPUDescriptorHandleForHeapStart();
++            srv.ptr += static_cast<SIZE_T>(base) * impl.srv_increment;
++            const auto make_srv = [&](const D3D12FoveatedComposeSource& source, DXGI_FORMAT format,
++                                      D3D12_CPU_DESCRIPTOR_HANDLE handle) {
++                D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
++                desc.Format = format;
++                desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
++                desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
++                desc.Texture2DArray.MipLevels = 1;
++                desc.Texture2DArray.FirstArraySlice = source.array_slice;
++                desc.Texture2DArray.ArraySize = 1;
++                impl.device->CreateShaderResourceView(source.resource, &desc, handle);
++            };
++            make_srv(view.periphery, periphery_format.format, srv);
++            D3D12_CPU_DESCRIPTOR_HANDLE focus_srv = srv;
++            focus_srv.ptr += impl.srv_increment;
++            make_srv(view.focus, focus_format.format, focus_srv);
++            D3D12_CPU_DESCRIPTOR_HANDLE rtv = impl.rtv_heap->GetCPUDescriptorHandleForHeapStart();
++            rtv.ptr += static_cast<SIZE_T>(index * kMaxViews + v) * impl.rtv_increment;
++            D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{};
++            rtv_desc.Format = output.format;
++            rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
++            rtv_desc.Texture2DArray.FirstArraySlice = view.target_slice;
++            rtv_desc.Texture2DArray.ArraySize = 1;
++            impl.device->CreateRenderTargetView(target.resource, &rtv_desc, rtv);
++            const D3D12FoveatedComposeConstants constants = make_foveated_compose_constants(view,
++                static_cast<std::uint32_t>(periphery_desc.Width), periphery_desc.Height,
++                static_cast<std::uint32_t>(focus_desc.Width), focus_desc.Height,
++                periphery_format.srgb_typed, focus_format.srgb_typed, output.srgb_typed);
++            D3D12_GPU_DESCRIPTOR_HANDLE table = impl.srv_heap->GetGPUDescriptorHandleForHeapStart();
++            table.ptr += static_cast<UINT64>(base) * impl.srv_increment;
++            list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
++            list->SetGraphicsRoot32BitConstants(0, kRootConstants, &constants, 0);
++            list->SetGraphicsRootDescriptorTable(1, table);
++            list->DrawInstanced(3, 1, 0, 0);
++        }
++        if (transition) {
++            for (std::uint32_t i = 0; i < source_count; ++i) {
++                std::swap(barriers[i].Transition.StateBefore, barriers[i].Transition.StateAfter);
++            }
++            list->ResourceBarrier(source_count, barriers.data());
++        }
++        if (timed) {
++            list->EndQuery(impl.queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index * 2 + 1);
++            list->ResolveQueryData(impl.queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index * 2, 2,
++                impl.readback.Get(), static_cast<UINT64>(index) * 2 * sizeof(std::uint64_t));
++        }
++        result = list->Close();
++        if (FAILED(result)) {
++            return result;
++        }
++        ID3D12CommandList* lists[] = {list};
++        queue->ExecuteCommandLists(1, lists);
++        const std::uint64_t value = ++impl.fence_value;
++        result = queue->Signal(impl.fence.Get(), value);
++        if (FAILED(result)) {
++            return result;
++        }
++        slot.fence_value = value;
++        slot.sequence = impl.next;
++        slot.timed = timed;
++        if (timed) {
++            UINT64 frequency = 0;
++            slot.frequency = SUCCEEDED(queue->GetTimestampFrequency(&frequency)) ? frequency : 0;
++        }
++        ++impl.next;
++        return S_OK;
++    } catch (...) {
++        return E_FAIL;
++    }
++}
++
++HRESULT D3D12FoveatedComposer::consume_gpu_timing(D3D12FoveatedComposeTiming* timing) noexcept {
++    std::scoped_lock lock(mutex_);
++    if (!impl_ || timing == nullptr) {
++        return E_INVALIDARG;
++    }
++    Impl& impl = *impl_;
++    while (impl.harvested < impl.next) {
++        Impl::Slot& slot = impl.slots[impl.harvested % kSlots];
++        if (slot.sequence != impl.harvested) {
++            // Overwritten before it was read (more than kSlots behind).
++            ++impl.harvested;
++            continue;
++        }
++        if (impl.fence->GetCompletedValue() < slot.fence_value) {
++            return S_FALSE;
++        }
++        ++impl.harvested;
++        if (!slot.timed || slot.frequency == 0) {
++            continue;
++        }
++        const std::uint32_t index = static_cast<std::uint32_t>(slot.sequence % kSlots);
++        const D3D12_RANGE range{index * 2 * sizeof(std::uint64_t), (index * 2 + 2) * sizeof(std::uint64_t)};
++        void* mapped = nullptr;
++        if (FAILED(impl.readback->Map(0, &range, &mapped)) || mapped == nullptr) {
++            continue;
++        }
++        std::uint64_t stamps[2]{};
++        std::memcpy(stamps, static_cast<const std::uint8_t*>(mapped) + range.Begin, sizeof(stamps));
++        const D3D12_RANGE none{0, 0};
++        impl.readback->Unmap(0, &none);
++        timing->sequence = slot.sequence;
++        timing->microseconds = stamps[1] > stamps[0] ? (stamps[1] - stamps[0]) * 1000000ULL / slot.frequency : 0;
++        return S_OK;
++    }
++    return S_FALSE;
++}
++
++HRESULT D3D12FoveatedComposer::wait_idle() noexcept {
++    std::scoped_lock lock(mutex_);
++    if (!impl_) {
++        return E_NOT_VALID_STATE;
++    }
++    return impl_->wait_for(impl_->fence_value, 5000);
++}
++
++} // namespace xrfg
+diff --git a/src/d3d12/foveated_compose.hlsl b/src/d3d12/foveated_compose.hlsl
+new file mode 100644
+index 0000000..b905275
+--- /dev/null
++++ b/src/d3d12/foveated_compose.hlsl
+@@ -0,0 +1,111 @@
++// DCS Control (0099): foveated single layer (`[ofxr] foveated_single_layer`).
++//
++// With foveated frame generation the application (Quad Views, dcsvr_two_layers) submits two projection layers per
++// eye, the periphery and the focus, and the layer synthesizes each on its own (the GPU saving). Handed to the runtime
++// as two layers, the runtime composes them itself, with per-layer distortion: its chromatic aberration correction
++// samples red and blue across the focus layer's border (a coloured line there), and wherever the focus alpha is below
++// 1 it shows its own periphery under the focus, which on some frames is not the one the focus was composed against
++// (a flickering rectangle). This pass does the runtime's composition before the runtime sees anything: one image per
++// eye at the periphery's field of view, at the runtime's recommended size, written with alpha 1, submitted as ONE
++// opaque projection layer. No layer border is left for the distortion to sample across, and nothing for the runtime
++// to blend.
++//
++// The blend is the one the runtime does with the two layers (measured on Pimax, tools/runtime-probe): on the stored
++// (encoded) values, the focus layer's colour over the periphery by the focus layer's alpha. Quad Views' opaque focus
++// (dcsvr_two_layers_alpha 3) chooses its focus colour so that exactly this blend gives its own single-layer
++// composition (ProjectionPS.hlsl's fade, sharpening, edge match, Far depth: all already in the focus layer), so the
++// result is Quad Views' composed image. Real and generated frames go through the same pass.
++//
++//   alpha mode 0  the focus layer is opaque (no SOURCE_ALPHA): its colour inside its field of view.
++//              1  SOURCE_ALPHA | UNPREMULTIPLIED: focus * a + periphery * (1 - a).
++//              2  SOURCE_ALPHA, premultiplied (the OpenXR default): focus + periphery * (1 - a).
++//
++// Each source and the target is read and written through a view chosen by the CPU (a typeless runtime texture gets
++// UNORM views: the stored bytes as they are). encode = 1: the view returns linear values (a typed sRGB resource) and
++// the pass encodes them first, so the blend is still on the encoded values; decode = 1: the target view is sRGB and
++// encodes on write, so the pass hands it the linear value of the encoded result.
++//
++// Geometry: the output covers the periphery view's field of view (its pose); a pixel's direction is rotated into the
++// focus view's frame (the identity when the two share a pose, as Quad Views' do) and projected with the focus view's
++// tangents. Both sources are sampled bilinear within their sub-images (clamped half a texel inside, so nothing outside
++// a sub-image is ever read).
++
++cbuffer ComposeConstants : register(b0) {
++    float4 peripheryRect;  // output uv -> periphery texture uv: xy scale, zw offset
++    float4 peripheryClamp; // texture uv limits: xy min, zw max
++    float4 focusRect;      // focus view uv -> focus texture uv: xy scale, zw offset
++    float4 focusClamp;     // texture uv limits: xy min, zw max
++    float4 outputTan;      // the output view's tangents: left, right, up, down
++    float4 focusTan;       // the focus view's tangents: left, right, up, down
++    float4 rotation0;      // rows of the rotation output view -> focus view (xyz)
++    float4 rotation1;
++    float4 rotation2;
++    uint4 modes;           // x alpha mode, y periphery encode, z focus encode, w output decode
++};
++
++Texture2DArray peripheryImage : register(t0);
++Texture2DArray focusImage : register(t1);
++SamplerState linearClamp : register(s0);
++
++float3 ComposeLinearToSrgb(float3 c) {
++    c = saturate(c);
++    float3 low = c * 12.92;
++    float3 high = 1.055 * pow(c, 1.0 / 2.4) - 0.055;
++    return float3(c.r <= 0.0031308 ? low.r : high.r, c.g <= 0.0031308 ? low.g : high.g,
++        c.b <= 0.0031308 ? low.b : high.b);
++}
++
++float3 ComposeSrgbToLinear(float3 c) {
++    c = saturate(c);
++    float3 low = c / 12.92;
++    float3 high = pow((c + 0.055) / 1.055, 2.4);
++    return float3(c.r <= 0.04045 ? low.r : high.r, c.g <= 0.04045 ? low.g : high.g,
++        c.b <= 0.04045 ? low.b : high.b);
++}
++
++struct ComposeVertex {
++    float4 position : SV_Position;
++    float2 uv : TEXCOORD0;
++};
++
++ComposeVertex FoveatedComposeVS(uint id : SV_VertexID) {
++    ComposeVertex output;
++    output.uv = float2((id << 1) & 2, id & 2);
++    output.position = float4(output.uv * float2(2, -2) + float2(-1, 1), 0, 1);
++    return output;
++}
++
++float3 FoveatedComposeColour(float2 uv) {
++    const float2 peripheryUv = clamp(uv * peripheryRect.xy + peripheryRect.zw, peripheryClamp.xy, peripheryClamp.zw);
++    float3 periphery = peripheryImage.SampleLevel(linearClamp, float3(peripheryUv, 0), 0).rgb;
++    if (modes.y != 0) {
++        periphery = ComposeLinearToSrgb(periphery);
++    }
++    float3 colour = periphery;
++    const float3 direction = float3(lerp(outputTan.x, outputTan.y, uv.x), lerp(outputTan.z, outputTan.w, uv.y), -1);
++    const float3 inFocus = float3(dot(rotation0.xyz, direction), dot(rotation1.xyz, direction), dot(rotation2.xyz, direction));
++    [branch] if (inFocus.z < 0) {
++        const float2 tangent = inFocus.xy / -inFocus.z;
++        const float2 focusUv = (tangent - focusTan.xz) / (focusTan.yw - focusTan.xz);
++        [branch] if (all(focusUv >= 0) && all(focusUv <= 1)) {
++            const float2 textureUv = clamp(focusUv * focusRect.xy + focusRect.zw, focusClamp.xy, focusClamp.zw);
++            float4 focus = focusImage.SampleLevel(linearClamp, float3(textureUv, 0), 0);
++            if (modes.z != 0) {
++                focus.rgb = ComposeLinearToSrgb(focus.rgb);
++            }
++            if (modes.x == 0) {
++                colour = focus.rgb;
++            } else if (modes.x == 1) {
++                colour = focus.rgb * focus.a + periphery * (1 - focus.a);
++            } else {
++                colour = focus.rgb + periphery * (1 - focus.a);
++            }
++        }
++    }
++    colour = saturate(colour);
++    return modes.w != 0 ? ComposeSrgbToLinear(colour) : colour;
++}
++
++float4 FoveatedComposePS(ComposeVertex input) : SV_Target {
++    return float4(FoveatedComposeColour(input.uv), 1);
++}
+diff --git a/src/layer/openxr_layer.cpp b/src/layer/openxr_layer.cpp
+index 9e261fb..55579cf 100644
+--- a/src/layer/openxr_layer.cpp
++++ b/src/layer/openxr_layer.cpp
+@@ -1,5 +1,6 @@
+ #include "xrfg/d3d12_history.hpp"
+ #include "xrfg/d3d12_frame_synthesizer.hpp"
++#include "xrfg/d3d12_foveated_composer.hpp" // DCS Control (0099)
+ #include "xrfg/dlss_motion_vectors.hpp"
+ #include "xrfg/d3d11_bridge.hpp"
+ #include "xrfg/d3d11_d3d12_interop.hpp"
+@@ -1888,6 +1889,31 @@ struct SessionState {
+     // (note_foveated_mode): 0 nothing yet, else result in bits 0-7 and the
+     // reason in bits 8-15. The application's xrEndFrame only.
+     std::uint32_t foveated_mode_logged{};
++    // DCS Control (0099): the foveated single layer
++    // (compose_foveated_single_layer). `[ofxr] foveated_single_layer` as the
++    // session started (then embedded::live_foveated_single_layer) and
++    // `foveated_single_layer_scale`; the runtime's recommended view size for
++    // the composed image (0: not known). The rest is the presenter thread's
++    // own, and the session's teardown's once the presenter has stopped.
++    bool foveated_single_layer_start{true};
++    std::uint32_t foveated_single_layer_scale{100};
++    std::uint32_t recommended_view_width{};
++    std::uint32_t recommended_view_height{};
++    std::unique_ptr<xrfg::D3D12FoveatedComposer> foveated_composer;
++    std::atomic<bool> foveated_composer_failed{false}; // read by the frame path too
++    XrSwapchain composed_swapchain{XR_NULL_HANDLE};
++    std::vector<XrSwapchain> retired_composed_swapchains;
++    std::vector<ID3D12Resource*> composed_images;
++    std::uint32_t composed_width{};
++    std::uint32_t composed_height{};
++    std::uint32_t composed_array_size{};
++    std::int64_t composed_format{};
++    // The last foveated_mode result=4 record: a | b << 8 (UINT32_MAX: none).
++    std::uint32_t composed_logged{UINT32_MAX};
++    std::uint64_t composed_frames{};
++    std::uint64_t composed_gpu_sum_us{};
++    std::uint64_t composed_gpu_max_us{};
++    std::uint64_t composed_gpu_count{};
+     std::filesystem::path cursor_templates_directory;
+     std::mutex cursor_templates_mutex;
+     std::optional<xrfg::CursorTemplateSet> cursor_templates;
+@@ -6714,6 +6740,33 @@ XrResult layer_create_session_impl(
+             state->foveated_link = std::make_shared<xrfg::D3D12FoveatedLink>();
+         } catch (...) {
+         }
++        // DCS Control (0099): the foveated single layer, and the size of the
++        // image it composes: the runtime's recommended stereo view (what an
++        // application that composes the two itself, Quad Views without
++        // dcsvr_two_layers, renders), scaled by the ini.
++        state->foveated_single_layer_start =
++            xrfg::implicit_layer::read_foveated_single_layer(current_layer_directory());
++        state->foveated_single_layer_scale =
++            xrfg::implicit_layer::read_foveated_single_layer_scale(current_layer_directory());
++        try {
++            PFN_xrEnumerateViewConfigurationViews enumerate_views = nullptr;
++            if (create_info != nullptr && dispatch->get_instance_proc_addr != nullptr &&
++                XR_SUCCEEDED(dispatch->get_instance_proc_addr(instance, "xrEnumerateViewConfigurationViews",
++                    reinterpret_cast<PFN_xrVoidFunction*>(&enumerate_views))) &&
++                enumerate_views != nullptr) {
++                std::uint32_t count = 0;
++                if (XR_SUCCEEDED(enumerate_views(instance, create_info->systemId,
++                        XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &count, nullptr)) && count != 0) {
++                    std::vector<XrViewConfigurationView> views(count, {XR_TYPE_VIEW_CONFIGURATION_VIEW});
++                    if (XR_SUCCEEDED(enumerate_views(instance, create_info->systemId,
++                            XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, count, &count, views.data()))) {
++                        state->recommended_view_width = views[0].recommendedImageRectWidth;
++                        state->recommended_view_height = views[0].recommendedImageRectHeight;
++                    }
++                }
++            }
++        } catch (...) {
++        }
+     }
+     {
+         xrfg::latency::AdaptiveConfig adaptive_config{};
+@@ -7194,6 +7247,21 @@ XrResult layer_destroy_session_impl(XrSession session) {
+         destroy_frame_generation_swapchains(swapchain_state);
+     }
+     drain_binding_queue(state.get());
++    // DCS Control (0099): the foveated single layer's composer and swapchains
++    // (the presenter, their only user, has stopped).
++    if (state->foveated_composer) {
++        static_cast<void>(state->foveated_composer->wait_idle());
++        state->foveated_composer.reset();
++    }
++    state->retired_composed_swapchains.push_back(state->composed_swapchain);
++    for (const XrSwapchain composed : state->retired_composed_swapchains) {
++        if (composed != XR_NULL_HANDLE && state->dispatch->destroy_swapchain != nullptr) {
++            static_cast<void>(state->dispatch->destroy_swapchain(composed));
++        }
++    }
++    state->retired_composed_swapchains.clear();
++    state->composed_swapchain = XR_NULL_HANDLE;
++    state->composed_images.clear();
+ 
+     const XrResult result = state->dispatch->destroy_session(session);
+     if (XR_SUCCEEDED(result)) {
+@@ -9768,6 +9836,11 @@ struct GeneratedFrameEndInfo {
+     // DCS Control (0063): the resync offset its application frame was told
+     // with (PendingApplicationFrame::resync_periods).
+     std::int64_t cadence_resync_periods{};
++    // DCS Control (0099): under `[ofxr] foveated_layers`, a frame of exactly
++    // two projection layers: which of `projections` is the periphery
++    // (foveated_periphery_layer); -1 otherwise. The presenter composes the two
++    // into one (compose_foveated_single_layer) and the frame then has one.
++    std::int32_t foveated_periphery_projection{-1};
+ };
+ 
+ // Whether every output a synthetic names has been written. A fence that
+@@ -9814,6 +9887,379 @@ void run_private_releases(
+     releases.clear();
+ }
+ 
++// DCS Control (0099): the foveated single layer.
++//
++// Under `[ofxr] foveated_layers` the application (Quad Views' two-layer mode)
++// hands over a periphery and a focus projection layer per eye, and the layer
++// synthesizes each on its own. Handed to the runtime as two layers, the runtime
++// composes them with per-layer distortion: its chromatic aberration correction
++// samples red and blue across the focus layer's border (the warm line around
++// the focus area, flights of 2026-11-22) and, wherever the focus alpha is below
++// 1, it shows its own periphery layer under the focus, which on some frames is
++// not the one the focus was composed against (the flickering focus rectangle,
++// 2026-11-23). No alpha choice removes both (0024 opaque: the line; 0031 ramp:
++// the flicker). So the frame is composed here, immediately before it goes
++// down: both layers' images (still held by the layer: their release follows)
++// are drawn into one image per eye at the periphery's field of view and the
++// runtime's recommended size, with the blend the runtime would have made
++// (xrfg::D3D12FoveatedComposer, foveated_compose.hlsl), and the frame names
++// that image as ONE opaque projection layer with the periphery's poses and
++// fields of view. Real and generated frames alike: every fresh submission of
++// the presenter passes here. A repeat names the composed swapchain again,
++// which shows its image released last: that of the frame it repeats (every
++// repeat is of the last fresh submission, and each fresh submission composes
++// right before it goes down).
++//
++// Returns whether the frame was rewritten; when not, it goes down as it came
++// (two layers). Presenter thread only.
++[[nodiscard]] bool foveated_single_layer_enabled(const SessionState& session) noexcept {
++    const int live = xrfg::embedded::live_foveated_single_layer();
++    return live >= 0 ? live != 0 : session.foveated_single_layer_start;
++}
++
++void note_single_layer(SessionState& session, std::uint32_t state, std::uint32_t reason,
++    std::uint64_t detail = UINT64_MAX) noexcept {
++    const std::uint32_t logged = state | (reason << 8);
++    if (session.composed_logged == logged) {
++        return;
++    }
++    session.composed_logged = logged;
++    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::foveated_mode, 4, state, reason,
++        detail != UINT64_MAX ? detail
++                             : (static_cast<std::uint64_t>(session.composed_width) << 32) | session.composed_height);
++}
++
++// The D3D12 texture of `handle`'s image `index` (nullptr: none).
++[[nodiscard]] ID3D12Resource* d3d12_swapchain_image(
++    SessionState& session, XrSwapchain handle, std::uint32_t index) noexcept {
++    try {
++        const auto& dispatch = session.dispatch;
++        if (!dispatch || dispatch->enumerate_swapchain_images == nullptr || handle == XR_NULL_HANDLE) {
++            return nullptr;
++        }
++        std::uint32_t count = 0;
++        if (XR_FAILED(dispatch->enumerate_swapchain_images(handle, 0, &count, nullptr)) || index >= count) {
++            return nullptr;
++        }
++        std::vector<XrSwapchainImageD3D12KHR> images(count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
++        if (XR_FAILED(dispatch->enumerate_swapchain_images(handle, count, &count,
++                reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()))) ||
++            index >= count) {
++            return nullptr;
++        }
++        return images[index].texture;
++    } catch (...) {
++        return nullptr;
++    }
++}
++
++// The composed swapchain for `format` and `array_size` views, made on first
++// use (and again if the format or view count ever changes: the old one is
++// left to the session's end, a repeat may still name it).
++[[nodiscard]] bool ensure_composed_swapchain(
++    SessionState& session, std::int64_t format, std::uint32_t array_size,
++    std::uint32_t width, std::uint32_t height) noexcept {
++    try {
++        if (session.composed_swapchain != XR_NULL_HANDLE && session.composed_format == format &&
++            session.composed_array_size == array_size) {
++            return true;
++        }
++        const auto& dispatch = session.dispatch;
++        if (!dispatch || dispatch->create_swapchain == nullptr) {
++            return false;
++        }
++        XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
++        info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
++        info.format = format;
++        info.sampleCount = 1;
++        info.width = width;
++        info.height = height;
++        info.faceCount = 1;
++        info.arraySize = array_size;
++        info.mipCount = 1;
++        XrSwapchain handle = XR_NULL_HANDLE;
++        const XrResult result = with_runtime_entry(&session, [&] {
++            return dispatch->create_swapchain(session.handle, &info, &handle);
++        });
++        if (XR_FAILED(result) || handle == XR_NULL_HANDLE) {
++            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::foveated_mode, 5, 0,
++                static_cast<std::uint64_t>(static_cast<std::int64_t>(result)), 0);
++            return false;
++        }
++        std::uint32_t count = 0;
++        std::vector<XrSwapchainImageD3D12KHR> images;
++        if (XR_SUCCEEDED(dispatch->enumerate_swapchain_images(handle, 0, &count, nullptr)) && count != 0) {
++            images.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
++            if (XR_FAILED(dispatch->enumerate_swapchain_images(handle, count, &count,
++                    reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())))) {
++                images.clear();
++            }
++        }
++        if (images.empty() || std::any_of(images.begin(), images.end(),
++                                  [](const XrSwapchainImageD3D12KHR& image) { return image.texture == nullptr; })) {
++            static_cast<void>(dispatch->destroy_swapchain(handle));
++            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::foveated_mode, 5, 0, 0, 1);
++            return false;
++        }
++        // An earlier one (another format) stays alive until the session ends.
++        if (session.composed_swapchain != XR_NULL_HANDLE) {
++            session.retired_composed_swapchains.push_back(session.composed_swapchain);
++        }
++        session.composed_swapchain = handle;
++        session.composed_images.clear();
++        for (const auto& image : images) {
++            session.composed_images.push_back(image.texture);
++        }
++        session.composed_width = width;
++        session.composed_height = height;
++        session.composed_array_size = array_size;
++        session.composed_format = format;
++        note_private_image(handle, 0, true); // the submission log's image table
++        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::foveated_mode, 5,
++            static_cast<std::uint64_t>(format), (static_cast<std::uint64_t>(width) << 32) | height,
++            (static_cast<std::uint64_t>(array_size) << 32) | images.size());
++        return true;
++    } catch (...) {
++        return false;
++    }
++}
++
++// The composed image's size: the runtime's recommended view size (times
++// `foveated_single_layer_scale`); without one, the periphery's field of view
++// at the focus layer's pixel density, never smaller than the periphery image,
++// at most 8192 a side.
++[[nodiscard]] std::pair<std::uint32_t, std::uint32_t> composed_size(
++    const SessionState& session, const XrCompositionLayerProjectionView& periphery,
++    const XrCompositionLayerProjectionView& focus) noexcept {
++    const double scale = session.foveated_single_layer_scale / 100.0;
++    if (session.recommended_view_width != 0 && session.recommended_view_height != 0) {
++        return {std::max<std::uint32_t>(16U, static_cast<std::uint32_t>(std::lround(session.recommended_view_width * scale))),
++            std::max<std::uint32_t>(16U, static_cast<std::uint32_t>(std::lround(session.recommended_view_height * scale)))};
++    }
++    const auto span = [](float low, float high) { return std::tan(high) - std::tan(low); };
++    const double px = span(periphery.fov.angleLeft, periphery.fov.angleRight);
++    const double py = span(periphery.fov.angleDown, periphery.fov.angleUp);
++    const double fx = span(focus.fov.angleLeft, focus.fov.angleRight);
++    const double fy = span(focus.fov.angleDown, focus.fov.angleUp);
++    const auto side = [&](double periphery_span, double focus_span, std::int32_t focus_pixels, std::int32_t periphery_pixels) {
++        double pixels = focus_span > 1.0e-6 && std::isfinite(focus_span) ? periphery_span / focus_span * focus_pixels : 0.0;
++        pixels = std::clamp(pixels * scale, static_cast<double>(std::max(periphery_pixels, 16)), 8192.0);
++        return static_cast<std::uint32_t>(std::lround(pixels));
++    };
++    return {side(px, fx, focus.subImage.imageRect.extent.width, periphery.subImage.imageRect.extent.width),
++        side(py, fy, focus.subImage.imageRect.extent.height, periphery.subImage.imageRect.extent.height)};
++}
++
++[[nodiscard]] bool compose_foveated_single_layer(
++    SessionState& session,
++    GeneratedFrameEndInfo& frame,
++    const std::vector<PendingPrivateRelease>& releases) noexcept {
++    try {
++        if (!session.foveated_layers || frame.foveated_periphery_projection < 0 ||
++            frame.projections.size() != 2) {
++            return false;
++        }
++        if (!foveated_single_layer_enabled(session)) {
++            note_single_layer(session, 0, 0);
++            return false;
++        }
++        if (session.graphics_binding != SessionGraphicsBinding::d3d12 || !session.d3d12_device ||
++            runtime_queue(session) == nullptr) {
++            note_single_layer(session, 2, 1);
++            return false;
++        }
++        if (session.foveated_composer_failed) {
++            note_single_layer(session, 2, 3);
++            return false;
++        }
++        const std::size_t periphery_index = static_cast<std::size_t>(frame.foveated_periphery_projection);
++        if (periphery_index > 1) {
++            return false;
++        }
++        const std::size_t focus_index = 1 - periphery_index;
++        ProjectionLayerCopy& periphery = frame.projections[periphery_index];
++        const ProjectionLayerCopy& focus = frame.projections[focus_index];
++        const std::size_t view_count = periphery.views.size();
++        if (view_count == 0 || view_count > 2 || focus.views.size() != view_count) {
++            note_single_layer(session, 2, 4);
++            return false;
++        }
++        // Each view's image: the one the layer holds for this frame (left
++        // acquired for this hand-over).
++        const auto held = [&](XrSwapchain handle) -> const PendingPrivateRelease* {
++            for (const auto& pending : releases) {
++                if (pending.image != nullptr && pending.image->handle == handle &&
++                    pending.image->phase != PrivateOwnershipPhase::idle) {
++                    return &pending;
++                }
++            }
++            return nullptr;
++        };
++        std::array<xrfg::D3D12FoveatedComposeView, 2> views{};
++        std::int64_t format = 0;
++        const auto tangents = [](const XrFovf& fov) {
++            return std::array<float, 4>{std::tan(fov.angleLeft), std::tan(fov.angleRight), std::tan(fov.angleUp),
++                std::tan(fov.angleDown)};
++        };
++        const auto source = [&](const XrCompositionLayerProjectionView& view, xrfg::D3D12FoveatedComposeSource* out,
++                                std::int64_t* private_format) {
++            const PendingPrivateRelease* pending = held(view.subImage.swapchain);
++            if (pending == nullptr) {
++                return false;
++            }
++            out->resource = d3d12_swapchain_image(session, view.subImage.swapchain, pending->image->acquired_index);
++            if (out->resource == nullptr) {
++                return false;
++            }
++            if (private_format != nullptr && pending->generation) {
++                *private_format = pending->generation->private_info.format;
++            }
++            out->array_slice = view.subImage.imageArrayIndex;
++            out->x = view.subImage.imageRect.offset.x;
++            out->y = view.subImage.imageRect.offset.y;
++            out->width = static_cast<std::uint32_t>(std::max(view.subImage.imageRect.extent.width, 0));
++            out->height = static_cast<std::uint32_t>(std::max(view.subImage.imageRect.extent.height, 0));
++            out->tangents = tangents(view.fov);
++            out->orientation = {view.pose.orientation.x, view.pose.orientation.y, view.pose.orientation.z,
++                view.pose.orientation.w};
++            return out->width != 0 && out->height != 0;
++        };
++        const XrCompositionLayerFlags focus_flags = focus.layer.layerFlags;
++        const auto alpha = (focus_flags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) == 0
++            ? xrfg::D3D12FoveatedFocusAlpha::opaque
++            : (focus_flags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT) != 0
++            ? xrfg::D3D12FoveatedFocusAlpha::unpremultiplied
++            : xrfg::D3D12FoveatedFocusAlpha::premultiplied;
++        for (std::size_t v = 0; v < view_count; ++v) {
++            if (!source(periphery.views[v], &views[v].periphery, &format) ||
++                !source(focus.views[v], &views[v].focus, nullptr)) {
++                note_single_layer(session, 2, 2,
++                    (static_cast<std::uint64_t>(releases.size()) << 32) | (session.binding_queue ? 1U : 0U));
++                return false;
++            }
++            views[v].alpha = alpha;
++            views[v].target_slice = static_cast<std::uint32_t>(v);
++        }
++        if (format == 0) {
++            note_single_layer(session, 2, 2);
++            return false;
++        }
++        if (!session.foveated_composer) {
++            auto composer = std::make_unique<xrfg::D3D12FoveatedComposer>();
++            if (FAILED(composer->initialize(session.d3d12_device.Get()))) {
++                session.foveated_composer_failed = true;
++                note_single_layer(session, 2, 3);
++                return false;
++            }
++            session.foveated_composer = std::move(composer);
++        }
++        const auto [width, height] = composed_size(session, periphery.views[0], focus.views[0]);
++        if (!ensure_composed_swapchain(session, format, static_cast<std::uint32_t>(view_count),
++                session.composed_swapchain != XR_NULL_HANDLE ? session.composed_width : width,
++                session.composed_swapchain != XR_NULL_HANDLE ? session.composed_height : height)) {
++            session.foveated_composer_failed = true;
++            note_single_layer(session, 2, 3);
++            return false;
++        }
++        const auto& dispatch = session.dispatch;
++        const XrSwapchain composed = session.composed_swapchain;
++        std::uint32_t index = 0;
++        XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
++        if (XR_FAILED(with_runtime_entry(&session, [&] {
++                return dispatch->acquire_swapchain_image(composed, &acquire_info, &index);
++            })) || index >= session.composed_images.size()) {
++            session.foveated_composer_failed = true;
++            note_single_layer(session, 2, 3);
++            return false;
++        }
++        XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
++        wait_info.timeout = 500'000'000; // 500 ms: the runtime gives an image back within a frame
++        const XrResult waited = with_runtime_entry(&session, [&] {
++            return dispatch->wait_swapchain_image(composed, &wait_info);
++        });
++        if (waited != XR_SUCCESS) {
++            // Still acquired and not waited for: it cannot be released, so the
++            // swapchain is out of use for the session.
++            session.foveated_composer_failed = true;
++            note_single_layer(session, 2, 3);
++            return false;
++        }
++        note_private_image(composed, index, false);
++        // The synthesis of every image read here before the composition, on
++        // the runtime's queue (run_private_releases joins them again for the
++        // release: a second wait for a value already waited for).
++        ID3D12CommandQueue* queue = runtime_queue(session);
++        if (session.d3d12_synthesis_queue) {
++            for (const auto& pending : releases) {
++                if (pending.generation && pending.generation->synthesizer) {
++                    static_cast<void>(pending.generation->synthesizer->synchronize_consumer_queue(queue, pending.ticket));
++                }
++            }
++        }
++        const HRESULT composed_result = session.foveated_composer->compose(queue,
++            {session.composed_images[index], session.composed_width, session.composed_height},
++            std::span<const xrfg::D3D12FoveatedComposeView>(views.data(), view_count));
++        XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
++        const XrResult released = with_runtime_entry(&session, [&] {
++            return dispatch->release_swapchain_image(composed, &release_info);
++        });
++        if (FAILED(composed_result) || XR_FAILED(released)) {
++            // The image went back unwritten: this frame and every later one go
++            // down as two layers, so no repeat names it.
++            session.foveated_composer_failed = true;
++            note_single_layer(session, 2, 3);
++            return false;
++        }
++        // The frame now: the periphery's projection layer on the composed
++        // swapchain, the focus layer gone.
++        for (std::size_t v = 0; v < view_count; ++v) {
++            XrSwapchainSubImage& sub_image = periphery.views[v].subImage;
++            sub_image.swapchain = composed;
++            sub_image.imageRect = {{0, 0},
++                {static_cast<std::int32_t>(session.composed_width), static_cast<std::int32_t>(session.composed_height)}};
++            sub_image.imageArrayIndex = static_cast<std::uint32_t>(v);
++        }
++        const std::uint32_t focus_layer_index = frame.projections[focus_index].layer_index;
++        std::vector<const XrCompositionLayerBaseHeader*> pointers;
++        pointers.reserve(frame.layer_pointers.size());
++        for (std::size_t i = 0; i < frame.layer_pointers.size(); ++i) {
++            if (i != focus_layer_index) {
++                pointers.push_back(frame.layer_pointers[i]);
++            }
++        }
++        frame.projections.erase(frame.projections.begin() + static_cast<std::ptrdiff_t>(focus_index));
++        ProjectionLayerCopy& kept = frame.projections.front();
++        if (kept.layer_index > focus_layer_index) {
++            --kept.layer_index;
++        }
++        kept.layer.views = kept.views.data();
++        pointers[kept.layer_index] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&kept.layer);
++        frame.layer_pointers = std::move(pointers);
++        frame.info.layerCount = static_cast<std::uint32_t>(frame.layer_pointers.size());
++        frame.info.layers = frame.layer_pointers.data();
++        frame.foveated_periphery_projection = -1;
++        ++session.composed_frames;
++        note_single_layer(session, 1, 0);
++        xrfg::D3D12FoveatedComposeTiming timing{};
++        while (session.foveated_composer->consume_gpu_timing(&timing) == S_OK) {
++            session.composed_gpu_sum_us += timing.microseconds;
++            session.composed_gpu_max_us = std::max(session.composed_gpu_max_us, timing.microseconds);
++            ++session.composed_gpu_count;
++        }
++        if (session.composed_frames % 900 == 0 && session.composed_gpu_count != 0) {
++            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::foveated_mode, 6,
++                session.composed_frames, session.composed_gpu_sum_us / session.composed_gpu_count,
++                session.composed_gpu_max_us);
++            session.composed_gpu_sum_us = 0;
++            session.composed_gpu_max_us = 0;
++            session.composed_gpu_count = 0;
++        }
++        return true;
++    } catch (...) {
++        return false;
++    }
++}
++
+ // Whatever was deferred for a frame and did not end up in a frame the
+ // presenter took is released when the frame call returns, on the application
+ // thread - which is exactly what every frame did before the handoff moved.
+@@ -12237,6 +12683,12 @@ void continuous_presenter_main(
+             // Never for a repeat - its images were released when it first
+             // went down, and the slot may have been reacquired since.
+             if (request && request->owned_frame) {
++                // DCS Control (0099): the foveated single layer, while the
++                // frame's images are still the layer's.
++                if (request->owned_frame->foveated_periphery_projection >= 0) {
++                    static_cast<void>(compose_foveated_single_layer(
++                        *state, *request->owned_frame, request->owned_frame->pending_releases));
++                }
+                 const bool joined =
+                     !request->owned_frame->pending_releases.empty() &&
+                     state->d3d12_synthesis_queue != nullptr;
+@@ -19690,7 +20142,15 @@ XrResult layer_end_frame_impl(
+         // prepare_frame_generation. The shallow pipeline admits the next
+         // pair while this one's real frame is still to be handed over, so
+         // joined here that pair's synthesis wait would sit in front of it.
+-        use_continuous_presenter && state->binding_queue != nullptr);
++        // DCS Control (0099): and on a D3D12 binding without that queue when
++        // the presenter composes the frame's two layers into one: it reads
++        // the images just before they are released (the application's
++        // queue then carries the join and the release, from the presenter).
++        use_continuous_presenter &&
++            (state->binding_queue != nullptr ||
++             (state->foveated_layers && current_snapshot.layers.size() == 2 &&
++              state->graphics_binding == SessionGraphicsBinding::d3d12 &&
++              !state->foveated_composer_failed && foveated_single_layer_enabled(*state))));
+     // Collected before anything below can reset `prepared`, so every image
+     // left acquired is accounted for on every path out of this call.
+     PrivateReleaseBatch synthetic_releases;
+@@ -19849,6 +20309,15 @@ XrResult layer_end_frame_impl(
+         clear_generation_continuity(state);
+     }
+ 
++    // DCS Control (0099): the periphery among the frame's two projection
++    // layers, for the presenter's single-layer composition (the projections
++    // are built in the snapshot's order).
++    if (state->foveated_layers && current_snapshot.layers.size() == 2) {
++        const auto periphery = static_cast<std::int32_t>(foveated_periphery_layer(current_snapshot));
++        first_generated.foveated_periphery_projection = periphery;
++        current_generated.foveated_periphery_projection = periphery;
++        extra_generated.foveated_periphery_projection = periphery;
++    }
+     // DCS Control (0050): the frame whose capture wrote these images.
+     first_generated.capture_epoch = frame_capture_epoch;
+     current_generated.capture_epoch = frame_capture_epoch;
+diff --git a/tests/foveated_composer_tests.cpp b/tests/foveated_composer_tests.cpp
+new file mode 100644
+index 0000000..e51e326
+--- /dev/null
++++ b/tests/foveated_composer_tests.cpp
+@@ -0,0 +1,603 @@
++// DCS Control (0099): the foveated single layer's composition
++// (D3D12FoveatedComposer, src/d3d12/foveated_compose.hlsl).
++//
++// Without arguments, on the WARP device: every output texel of both eyes
++// against a CPU reference of the runtime's blend (the focus layer over the
++// periphery by its alpha, on the stored bytes, each layer bilinear within its
++// sub-image), for the three alpha modes, per eye with each eye's own sources,
++// fields of view and slices, a rotated focus view, typed sRGB sources and
++// target, and a run of compositions into a ring of targets (a real frame and
++// two generated ones per application frame) each checked against its own
++// sources. The output's alpha must be 255 everywhere.
++//
++// XRFG_TEST_FOVEATED_COMPOSE_BENCH=1: on the first hardware adapter, the GPU
++// time of one composition at the sizes of a Pimax Crystal Super flight
++// (periphery 1076x1060, focus 1952x1928, output 5424x5356 per eye, two eyes),
++// and at smaller output scales; printed, nothing required. Exit code 77 without
++// a hardware adapter.
++
++#include "xrfg/d3d12_foveated_composer.hpp"
++
++#include <d3d12.h>
++#include <dxgi1_6.h>
++#include <wrl/client.h>
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cmath>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <random>
++#include <span>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++using Microsoft::WRL::ComPtr;
++
++namespace {
++
++void check(HRESULT result, const char* what) {
++    if (FAILED(result)) {
++        char text[256];
++        std::snprintf(text, sizeof(text), "%s failed (0x%08lX)", what, static_cast<unsigned long>(result));
++        throw std::runtime_error(text);
++    }
++}
++
++struct Gpu {
++    ComPtr<ID3D12Device> device;
++    ComPtr<ID3D12CommandQueue> queue;
++    ComPtr<ID3D12CommandAllocator> allocator;
++    ComPtr<ID3D12GraphicsCommandList> list;
++    ComPtr<ID3D12Fence> fence;
++    std::uint64_t value{};
++    HANDLE event{};
++
++    void begin() {
++        check(allocator->Reset(), "allocator reset");
++        check(list->Reset(allocator.Get(), nullptr), "list reset");
++    }
++    void submit_and_wait() {
++        check(list->Close(), "list close");
++        ID3D12CommandList* lists[] = {list.Get()};
++        queue->ExecuteCommandLists(1, lists);
++        wait();
++    }
++    void wait() {
++        check(queue->Signal(fence.Get(), ++value), "signal");
++        if (fence->GetCompletedValue() < value) {
++            check(fence->SetEventOnCompletion(value, event), "event");
++            WaitForSingleObject(event, INFINITE);
++        }
++    }
++};
++
++Gpu make_gpu(bool hardware) {
++    Gpu gpu;
++    ComPtr<IDXGIFactory4> factory;
++    check(CreateDXGIFactory2(0, IID_PPV_ARGS(factory.GetAddressOf())), "factory");
++    ComPtr<IDXGIAdapter1> adapter;
++    if (hardware) {
++        for (UINT i = 0; factory->EnumAdapters1(i, adapter.ReleaseAndGetAddressOf()) != DXGI_ERROR_NOT_FOUND; ++i) {
++            DXGI_ADAPTER_DESC1 desc{};
++            adapter->GetDesc1(&desc);
++            if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0 &&
++                SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(gpu.device.GetAddressOf())))) {
++                std::printf("adapter: %ls\n", desc.Description);
++                break;
++            }
++        }
++        if (!gpu.device) {
++            return gpu;
++        }
++    } else {
++        check(factory->EnumWarpAdapter(IID_PPV_ARGS(adapter.GetAddressOf())), "warp adapter");
++        check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(gpu.device.GetAddressOf())), "warp device");
++    }
++    D3D12_COMMAND_QUEUE_DESC queue{};
++    queue.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
++    check(gpu.device->CreateCommandQueue(&queue, IID_PPV_ARGS(gpu.queue.GetAddressOf())), "queue");
++    check(gpu.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(gpu.allocator.GetAddressOf())), "allocator");
++    check(gpu.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, gpu.allocator.Get(), nullptr,
++              IID_PPV_ARGS(gpu.list.GetAddressOf())), "list");
++    check(gpu.list->Close(), "list close");
++    check(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(gpu.fence.GetAddressOf())), "fence");
++    gpu.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
++    return gpu;
++}
++
++// An RGBA8 image of `slices` slices, texel (x, y, s) at [(s * h + y) * w + x].
++struct Image {
++    std::uint32_t width{}, height{}, slices{};
++    std::vector<std::uint32_t> texels;
++    [[nodiscard]] std::uint32_t at(std::uint32_t x, std::uint32_t y, std::uint32_t s) const {
++        return texels[(static_cast<std::size_t>(s) * height + y) * width + x];
++    }
++};
++
++void barrier(Gpu& gpu, ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
++    D3D12_RESOURCE_BARRIER b{};
++    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    b.Transition.pResource = resource;
++    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    b.Transition.StateBefore = before;
++    b.Transition.StateAfter = after;
++    gpu.list->ResourceBarrier(1, &b);
++}
++
++ComPtr<ID3D12Resource> make_texture(Gpu& gpu, std::uint32_t w, std::uint32_t h, std::uint32_t slices, DXGI_FORMAT format) {
++    D3D12_HEAP_PROPERTIES heap{};
++    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
++    D3D12_RESOURCE_DESC desc{};
++    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++    desc.Width = w;
++    desc.Height = h;
++    desc.DepthOrArraySize = static_cast<UINT16>(slices);
++    desc.MipLevels = 1;
++    desc.Format = format;
++    desc.SampleDesc.Count = 1;
++    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
++    ComPtr<ID3D12Resource> texture;
++    check(gpu.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_RENDER_TARGET,
++              nullptr, IID_PPV_ARGS(texture.GetAddressOf())), "texture");
++    return texture;
++}
++
++ComPtr<ID3D12Resource> make_buffer(Gpu& gpu, std::uint64_t bytes, D3D12_HEAP_TYPE type) {
++    D3D12_HEAP_PROPERTIES heap{};
++    heap.Type = type;
++    D3D12_RESOURCE_DESC desc{};
++    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++    desc.Width = bytes;
++    desc.Height = 1;
++    desc.DepthOrArraySize = 1;
++    desc.MipLevels = 1;
++    desc.SampleDesc.Count = 1;
++    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++    ComPtr<ID3D12Resource> buffer;
++    check(gpu.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
++              type == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COPY_DEST,
++              nullptr, IID_PPV_ARGS(buffer.GetAddressOf())), "buffer");
++    return buffer;
++}
++
++constexpr std::uint32_t kPitchAlign = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
++
++std::uint32_t pitch_of(std::uint32_t width) { return (width * 4 + kPitchAlign - 1) / kPitchAlign * kPitchAlign; }
++
++// The texture's format for the copies (typeless and typed RGBA8 share the bytes).
++DXGI_FORMAT copy_format(ID3D12Resource* texture) {
++    const auto format = texture->GetDesc().Format;
++    return format == DXGI_FORMAT_R8G8B8A8_TYPELESS ? DXGI_FORMAT_R8G8B8A8_UNORM : format;
++}
++
++void upload(Gpu& gpu, ID3D12Resource* texture, const Image& image) {
++    const std::uint32_t pitch = pitch_of(image.width);
++    const std::uint64_t slice_bytes = static_cast<std::uint64_t>(pitch) * image.height;
++    auto staging = make_buffer(gpu, slice_bytes * image.slices, D3D12_HEAP_TYPE_UPLOAD);
++    std::uint8_t* mapped = nullptr;
++    check(staging->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "map upload");
++    for (std::uint32_t s = 0; s < image.slices; ++s)
++        for (std::uint32_t y = 0; y < image.height; ++y)
++            std::memcpy(mapped + s * slice_bytes + static_cast<std::size_t>(y) * pitch,
++                &image.texels[(static_cast<std::size_t>(s) * image.height + y) * image.width], image.width * 4);
++    staging->Unmap(0, nullptr);
++    gpu.begin();
++    barrier(gpu, texture, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
++    for (std::uint32_t s = 0; s < image.slices; ++s) {
++        D3D12_TEXTURE_COPY_LOCATION dst{texture, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {}};
++        dst.SubresourceIndex = s;
++        D3D12_TEXTURE_COPY_LOCATION src{staging.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, {}};
++        src.PlacedFootprint.Offset = s * slice_bytes;
++        src.PlacedFootprint.Footprint = {copy_format(texture), image.width, image.height, 1, pitch};
++        gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
++    }
++    barrier(gpu, texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
++    gpu.submit_and_wait();
++}
++
++Image read_back(Gpu& gpu, ID3D12Resource* texture) {
++    const auto desc = texture->GetDesc();
++    Image image{static_cast<std::uint32_t>(desc.Width), desc.Height, desc.DepthOrArraySize, {}};
++    image.texels.resize(static_cast<std::size_t>(image.width) * image.height * image.slices);
++    const std::uint32_t pitch = pitch_of(image.width);
++    const std::uint64_t slice_bytes = static_cast<std::uint64_t>(pitch) * image.height;
++    auto staging = make_buffer(gpu, slice_bytes * image.slices, D3D12_HEAP_TYPE_READBACK);
++    gpu.begin();
++    barrier(gpu, texture, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
++    for (std::uint32_t s = 0; s < image.slices; ++s) {
++        D3D12_TEXTURE_COPY_LOCATION src{texture, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {}};
++        src.SubresourceIndex = s;
++        D3D12_TEXTURE_COPY_LOCATION dst{staging.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, {}};
++        dst.PlacedFootprint.Offset = s * slice_bytes;
++        dst.PlacedFootprint.Footprint = {copy_format(texture), image.width, image.height, 1, pitch};
++        gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
++    }
++    barrier(gpu, texture, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
++    gpu.submit_and_wait();
++    std::uint8_t* mapped = nullptr;
++    check(staging->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "map readback");
++    for (std::uint32_t s = 0; s < image.slices; ++s)
++        for (std::uint32_t y = 0; y < image.height; ++y)
++            std::memcpy(&image.texels[(static_cast<std::size_t>(s) * image.height + y) * image.width],
++                mapped + s * slice_bytes + static_cast<std::size_t>(y) * pitch, image.width * 4);
++    staging->Unmap(0, nullptr);
++    return image;
++}
++
++// Smooth random content (the bilinear reference is exact only to rounding).
++Image make_content(std::uint32_t w, std::uint32_t h, std::uint32_t slices, std::uint32_t seed, bool alpha_ramp) {
++    Image image{w, h, slices, std::vector<std::uint32_t>(static_cast<std::size_t>(w) * h * slices)};
++    std::mt19937 random(seed);
++    std::uniform_real_distribution<float> phase(0.f, 6.28f);
++    for (std::uint32_t s = 0; s < slices; ++s) {
++        const float p[4]{phase(random), phase(random), phase(random), phase(random)};
++        for (std::uint32_t y = 0; y < h; ++y)
++            for (std::uint32_t x = 0; x < w; ++x) {
++                const float fx = static_cast<float>(x) / w, fy = static_cast<float>(y) / h;
++                std::uint32_t texel = 0;
++                for (int ch = 0; ch < 3; ++ch) {
++                    const float v = 0.5f + 0.45f * std::sin(fx * (5 + ch * 3) + fy * (4 + ch) + p[ch] + s);
++                    texel |= static_cast<std::uint32_t>(std::lround(v * 255)) << (8 * ch);
++                }
++                std::uint32_t alpha = 255;
++                if (alpha_ramp) {
++                    // A ramp to 0 at the border over the outer 0.3, like Quad Views' opaque focus.
++                    const float ox = std::abs((x + 0.5f) / w * 2 - 1), oy = std::abs((y + 0.5f) / h * 2 - 1);
++                    const float r = std::sqrt(ox * ox + oy * oy) / std::sqrt(2.f) * 1.2f;
++                    const float t = std::clamp((r - 0.7f) / 0.3f, 0.f, 1.f);
++                    alpha = static_cast<std::uint32_t>(std::lround((1 - t * t * (3 - 2 * t)) * 255));
++                }
++                image.texels[(static_cast<std::size_t>(s) * h + y) * w + x] = texel | (alpha << 24);
++            }
++    }
++    return image;
++}
++
++float srgb_encode(float c) {
++    c = std::clamp(c, 0.f, 1.f);
++    return c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1 / 2.4f) - 0.055f;
++}
++float srgb_decode(float c) {
++    c = std::clamp(c, 0.f, 1.f);
++    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
++}
++
++// Bilinear at texture uv (clamped to the sub-image's half-texel limits first),
++// channel ch, as 0..1; `linear_view`: the texel read through an sRGB view
++// (decoded before filtering, encoded after).
++float sample(const Image& image, std::uint32_t slice, float u, float v, const float* limits, int ch, bool linear_view) {
++    u = std::clamp(u, limits[0], limits[2]);
++    v = std::clamp(v, limits[1], limits[3]);
++    const float x = u * image.width - 0.5f, y = v * image.height - 0.5f;
++    const int x0 = static_cast<int>(std::floor(x)), y0 = static_cast<int>(std::floor(y));
++    const float fx = x - x0, fy = y - y0;
++    const auto texel = [&](int tx, int ty) {
++        tx = std::clamp(tx, 0, static_cast<int>(image.width) - 1);
++        ty = std::clamp(ty, 0, static_cast<int>(image.height) - 1);
++        const float value = static_cast<float>((image.at(tx, ty, slice) >> (8 * ch)) & 255U) / 255.f;
++        return linear_view && ch < 3 ? srgb_decode(value) : value;
++    };
++    const float value = (texel(x0, y0) * (1 - fx) + texel(x0 + 1, y0) * fx) * (1 - fy) +
++                        (texel(x0, y0 + 1) * (1 - fx) + texel(x0 + 1, y0 + 1) * fx) * fy;
++    return linear_view && ch < 3 ? srgb_encode(value) : value;
++}
++
++struct Rotation {
++    float m[3][3];
++};
++Rotation rotation_of(const std::array<float, 4>& q) {
++    const float x = q[0], y = q[1], z = q[2], w = q[3];
++    return {{{1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)},
++        {2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)},
++        {2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)}}};
++}
++
++// The runtime's two-layer result at output texel (x, y) of one eye, as 0..255 per channel.
++std::array<float, 3> reference(const Image& periphery, const Image& focus, const xrfg::D3D12FoveatedComposeView& view,
++    std::uint32_t out_w, std::uint32_t out_h, std::uint32_t x, std::uint32_t y, bool srgb_views) {
++    const auto c = xrfg::make_foveated_compose_constants(view, periphery.width, periphery.height, focus.width,
++        focus.height, false, false, false);
++    const float u = (x + 0.5f) / out_w, v = (y + 0.5f) / out_h;
++    std::array<float, 3> p{}, out{};
++    for (int ch = 0; ch < 3; ++ch) {
++        p[ch] = sample(periphery, view.periphery.array_slice, u * c.periphery_rect[0] + c.periphery_rect[2],
++            v * c.periphery_rect[1] + c.periphery_rect[3], c.periphery_clamp, ch, srgb_views);
++        out[ch] = p[ch];
++    }
++    const auto& pt = view.periphery.tangents;
++    const auto& ft = view.focus.tangents;
++    const float d[3]{pt[0] + (pt[1] - pt[0]) * u, pt[2] + (pt[3] - pt[2]) * v, -1};
++    const Rotation rp = rotation_of(view.periphery.orientation), rf = rotation_of(view.focus.orientation);
++    float world[3]{}, local[3]{};
++    for (int i = 0; i < 3; ++i) world[i] = rp.m[i][0] * d[0] + rp.m[i][1] * d[1] + rp.m[i][2] * d[2];
++    for (int i = 0; i < 3; ++i) local[i] = rf.m[0][i] * world[0] + rf.m[1][i] * world[1] + rf.m[2][i] * world[2];
++    if (local[2] < 0) {
++        const float tx = local[0] / -local[2], ty = local[1] / -local[2];
++        const float fu = (tx - ft[0]) / (ft[1] - ft[0]), fv = (ty - ft[2]) / (ft[3] - ft[2]);
++        if (fu >= 0 && fu <= 1 && fv >= 0 && fv <= 1) {
++            const float su = fu * c.focus_rect[0] + c.focus_rect[2], sv = fv * c.focus_rect[1] + c.focus_rect[3];
++            const float a = sample(focus, view.focus.array_slice, su, sv, c.focus_clamp, 3, false);
++            for (int ch = 0; ch < 3; ++ch) {
++                const float f = sample(focus, view.focus.array_slice, su, sv, c.focus_clamp, ch, srgb_views);
++                switch (view.alpha) {
++                case xrfg::D3D12FoveatedFocusAlpha::opaque: out[ch] = f; break;
++                case xrfg::D3D12FoveatedFocusAlpha::unpremultiplied: out[ch] = f * a + p[ch] * (1 - a); break;
++                default: out[ch] = f + p[ch] * (1 - a); break;
++                }
++            }
++        }
++    }
++    for (auto& value : out) value = std::clamp(value, 0.f, 1.f) * 255.f;
++    return out;
++}
++
++struct Compared {
++    float worst{};
++    std::size_t focus_texels{}, alpha_wrong{}, differing{};
++};
++
++// Every texel of every view of `out` against the reference.
++Compared compare(const Image& out, const Image& periphery, const Image& focus,
++    std::span<const xrfg::D3D12FoveatedComposeView> views, bool srgb_views, float tolerance) {
++    Compared result;
++    for (const auto& view : views) {
++        const auto c = xrfg::make_foveated_compose_constants(view, periphery.width, periphery.height, focus.width,
++            focus.height, false, false, false);
++        (void)c;
++        for (std::uint32_t y = 0; y < out.height; ++y)
++            for (std::uint32_t x = 0; x < out.width; ++x) {
++                const std::uint32_t texel = out.at(x, y, view.target_slice);
++                if ((texel >> 24) != 255U) ++result.alpha_wrong;
++                const auto expected = reference(periphery, focus, view, out.width, out.height, x, y, srgb_views);
++                float worst = 0;
++                for (int ch = 0; ch < 3; ++ch)
++                    worst = std::max(worst, std::abs(static_cast<float>((texel >> (8 * ch)) & 255U) - expected[ch]));
++                result.worst = std::max(result.worst, worst);
++                if (worst > tolerance) ++result.differing;
++                // Focus texels: where the output differs from the periphery alone.
++                const float u = (x + 0.5f) / out.width, v = (y + 0.5f) / out.height;
++                const auto& pt = view.periphery.tangents;
++                const auto& ft = view.focus.tangents;
++                const float tx = pt[0] + (pt[1] - pt[0]) * u, ty = pt[2] + (pt[3] - pt[2]) * v;
++                if (tx > ft[0] && tx < ft[1] && ty < ft[2] && ty > ft[3]) ++result.focus_texels;
++            }
++    }
++    return result;
++}
++
++xrfg::D3D12FoveatedComposeView make_view(ID3D12Resource* periphery, ID3D12Resource* focus, std::uint32_t eye,
++    std::uint32_t pw, std::uint32_t ph, std::uint32_t fw, std::uint32_t fh, xrfg::D3D12FoveatedFocusAlpha alpha) {
++    xrfg::D3D12FoveatedComposeView view{};
++    view.periphery = {periphery, eye, 0, 0, pw, ph, {}, {0, 0, 0, 1}};
++    view.focus = {focus, eye, 0, 0, fw, fh, {}, {0, 0, 0, 1}};
++    // Each eye its own asymmetric field of view, the focus inside it and off centre.
++    const float s = eye == 0 ? 1.f : -1.f;
++    view.periphery.tangents = {eye == 0 ? -1.25f : -0.95f, eye == 0 ? 0.95f : 1.25f, 1.05f, -1.15f};
++    view.focus.tangents = {-0.42f + 0.05f * s, 0.38f + 0.05f * s, 0.35f, -0.45f};
++    view.alpha = alpha;
++    view.target_slice = eye;
++    return view;
++}
++
++int run_tests() {
++    Gpu gpu = make_gpu(false);
++    xrfg::D3D12FoveatedComposer composer;
++    check(composer.initialize(gpu.device.Get()), "composer initialize");
++    bool ok = true;
++    const auto report = [&](const char* name, const Compared& c, float tolerance, std::size_t min_focus) {
++        const bool pass = c.differing == 0 && c.alpha_wrong == 0 && c.focus_texels >= min_focus;
++        std::printf("%s: worst %.2f codes (limit %.1f), %zu over, alpha not 255: %zu, focus texels %zu -> %s\n", name,
++            c.worst, tolerance, c.differing, c.alpha_wrong, c.focus_texels, pass ? "ok" : "FAILED");
++        ok = ok && pass;
++    };
++    constexpr std::uint32_t pw = 72, ph = 64, fw = 96, fh = 88, ow = 200, oh = 176;
++    const Image periphery = make_content(pw, ph, 2, 1, false);
++    const Image focus = make_content(fw, fh, 2, 2, true);
++    auto periphery_texture = make_texture(gpu, pw, ph, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++    auto focus_texture = make_texture(gpu, fw, fh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++    upload(gpu, periphery_texture.Get(), periphery);
++    upload(gpu, focus_texture.Get(), focus);
++
++    // 1. The three alpha modes, both eyes, typeless (the stored bytes).
++    for (const auto mode : {xrfg::D3D12FoveatedFocusAlpha::unpremultiplied, xrfg::D3D12FoveatedFocusAlpha::premultiplied,
++             xrfg::D3D12FoveatedFocusAlpha::opaque}) {
++        auto target = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        const std::array<xrfg::D3D12FoveatedComposeView, 2> views{
++            make_view(periphery_texture.Get(), focus_texture.Get(), 0, pw, ph, fw, fh, mode),
++            make_view(periphery_texture.Get(), focus_texture.Get(), 1, pw, ph, fw, fh, mode)};
++        check(composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, views), "compose");
++        check(composer.wait_idle(), "wait");
++        const Image out = read_back(gpu, target.Get());
++        const char* names[] = {"opaque", "unpremultiplied", "premultiplied"};
++        char name[96];
++        std::snprintf(name, sizeof(name), "alpha mode %s, both eyes", names[static_cast<int>(mode)]);
++        report(name, compare(out, periphery, focus, views, false, 1.5f), 1.5f, 2000);
++        // Per eye: slice 1 must not equal slice 0 (each eye its own sources and fields of view).
++        std::size_t same = 0;
++        for (std::uint32_t y = 0; y < oh; ++y)
++            for (std::uint32_t x = 0; x < ow; ++x) same += out.at(x, y, 0) == out.at(x, y, 1) ? 1U : 0U;
++        const bool eyes_apart = same < static_cast<std::size_t>(ow) * oh / 20;
++        std::printf("  eyes apart: %zu of %u texels equal -> %s\n", same, ow * oh, eyes_apart ? "ok" : "FAILED");
++        ok = ok && eyes_apart;
++    }
++
++    // 2. Sub-images: each eye's view on a rectangle of one wide non-array texture (side by side).
++    {
++        const Image wide_p = make_content(pw * 2 + 6, ph + 4, 1, 3, false);
++        const Image wide_f = make_content(fw * 2 + 4, fh + 2, 1, 4, true);
++        auto wp = make_texture(gpu, wide_p.width, wide_p.height, 1, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        auto wf = make_texture(gpu, wide_f.width, wide_f.height, 1, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        upload(gpu, wp.Get(), wide_p);
++        upload(gpu, wf.Get(), wide_f);
++        auto target = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        std::array<xrfg::D3D12FoveatedComposeView, 2> views{};
++        for (std::uint32_t eye = 0; eye < 2; ++eye) {
++            views[eye] = make_view(wp.Get(), wf.Get(), eye, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied);
++            views[eye].periphery.array_slice = 0;
++            views[eye].focus.array_slice = 0;
++            views[eye].periphery.x = static_cast<std::int32_t>(eye * (pw + 6));
++            views[eye].periphery.y = 3;
++            views[eye].focus.x = static_cast<std::int32_t>(eye * (fw + 4));
++            views[eye].focus.y = 1;
++        }
++        check(composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, views), "compose sub-images");
++        check(composer.wait_idle(), "wait");
++        report("sub-images of one texture", compare(read_back(gpu, target.Get()), wide_p, wide_f, views, false, 1.5f), 1.5f, 2000);
++    }
++
++    // 3. A focus view rotated against the periphery's (5 degrees of yaw and 3 of roll).
++    {
++        auto target = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        std::array<xrfg::D3D12FoveatedComposeView, 2> views{
++            make_view(periphery_texture.Get(), focus_texture.Get(), 0, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied),
++            make_view(periphery_texture.Get(), focus_texture.Get(), 1, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied)};
++        const float yaw = 5.f * 3.14159265f / 180.f, roll = 3.f * 3.14159265f / 180.f;
++        // q = yaw (about y) * roll (about z).
++        const float cy = std::cos(yaw / 2), sy = std::sin(yaw / 2), cr = std::cos(roll / 2), sr = std::sin(roll / 2);
++        views[0].focus.orientation = {sy * sr, sy * cr, cy * sr, cy * cr};
++        views[1].periphery.orientation = {0, std::sin(-yaw / 4), 0, std::cos(-yaw / 4)};
++        check(composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, views), "compose rotated");
++        check(composer.wait_idle(), "wait");
++        report("rotated focus view", compare(read_back(gpu, target.Get()), periphery, focus, views, false, 1.5f), 1.5f, 2000);
++    }
++
++    // 4. Typed sRGB sources and target (the pass encodes what it reads and decodes what it writes): the result
++    //    is the blend on the encoded values within the round trips' rounding.
++    {
++        auto p_srgb = make_texture(gpu, pw, ph, 2, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
++        auto f_srgb = make_texture(gpu, fw, fh, 2, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
++        upload(gpu, p_srgb.Get(), periphery);
++        upload(gpu, f_srgb.Get(), focus);
++        auto target = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
++        const std::array<xrfg::D3D12FoveatedComposeView, 2> views{
++            make_view(p_srgb.Get(), f_srgb.Get(), 0, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied),
++            make_view(p_srgb.Get(), f_srgb.Get(), 1, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied)};
++        check(composer.compose(gpu.queue.Get(), {target.Get(), ow, oh}, views), "compose srgb");
++        check(composer.wait_idle(), "wait");
++        report("typed sRGB sources and target", compare(read_back(gpu, target.Get()), periphery, focus, views, true, 2.5f), 2.5f, 2000);
++    }
++
++    // 5. Frames in a row (a real frame and its two generated ones, 4 application frames, 3 target images in turn,
++    //    new sources every frame, nothing waited for between them): each output is its own sources' composition.
++    {
++        std::array<ComPtr<ID3D12Resource>, 3> targets{};
++        for (auto& t : targets) t = make_texture(gpu, ow, oh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        std::array<ComPtr<ID3D12Resource>, 3> ps{}, fs{};
++        std::array<Image, 3> pi{}, fi{};
++        bool frames_ok = true;
++        float worst = 0;
++        for (int frame = 0; frame < 12; ++frame) {
++            const std::size_t k = static_cast<std::size_t>(frame % 3);
++            pi[k] = make_content(pw, ph, 2, 100 + frame, false);
++            fi[k] = make_content(fw, fh, 2, 200 + frame, true);
++            if (!ps[k]) {
++                ps[k] = make_texture(gpu, pw, ph, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++                fs[k] = make_texture(gpu, fw, fh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++            }
++            upload(gpu, ps[k].Get(), pi[k]);
++            upload(gpu, fs[k].Get(), fi[k]);
++            const std::array<xrfg::D3D12FoveatedComposeView, 2> views{
++                make_view(ps[k].Get(), fs[k].Get(), 0, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied),
++                make_view(ps[k].Get(), fs[k].Get(), 1, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied)};
++            check(composer.compose(gpu.queue.Get(), {targets[k].Get(), ow, oh}, views), "compose frame");
++            if (k == 2) {
++                check(composer.wait_idle(), "wait");
++                for (std::size_t j = 0; j < 3; ++j) {
++                    const std::array<xrfg::D3D12FoveatedComposeView, 2> vj{
++                        make_view(ps[j].Get(), fs[j].Get(), 0, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied),
++                        make_view(ps[j].Get(), fs[j].Get(), 1, pw, ph, fw, fh, xrfg::D3D12FoveatedFocusAlpha::unpremultiplied)};
++                    const Compared c = compare(read_back(gpu, targets[j].Get()), pi[j], fi[j], vj, false, 1.5f);
++                    worst = std::max(worst, c.worst);
++                    frames_ok = frames_ok && c.differing == 0 && c.alpha_wrong == 0;
++                }
++            }
++        }
++        D3D12_RESOURCE_BARRIER none{};
++        (void)none;
++        std::size_t timed = 0;
++        xrfg::D3D12FoveatedComposeTiming timing{};
++        while (composer.consume_gpu_timing(&timing) == S_OK) ++timed;
++        std::printf("frames in a row (12, ring of 3 targets): worst %.2f codes, %zu timed -> %s\n", worst, timed,
++            frames_ok ? "ok" : "FAILED");
++        ok = ok && frames_ok;
++    }
++    std::printf(ok ? "foveated single layer composition: all checks passed\n" : "foveated single layer composition FAILED\n");
++    return ok ? 0 : 1;
++}
++
++int run_bench() {
++    Gpu gpu = make_gpu(true);
++    if (!gpu.device) {
++        std::printf("no hardware adapter: skipped\n");
++        return 77;
++    }
++    xrfg::D3D12FoveatedComposer composer;
++    check(composer.initialize(gpu.device.Get()), "composer initialize");
++    constexpr std::uint32_t pw = 1076, ph = 1060, fw = 1952, fh = 1928;
++    auto periphery = make_texture(gpu, pw, ph, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++    auto focus = make_texture(gpu, fw, fh, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++    upload(gpu, periphery.Get(), make_content(pw, ph, 2, 7, false));
++    upload(gpu, focus.Get(), make_content(fw, fh, 2, 8, true));
++    struct Size {
++        std::uint32_t w, h;
++        const char* name;
++    };
++    for (const Size size : {Size{5424, 5356, "100 % (runtime recommended)"}, Size{4068, 4017, "75 %"},
++             Size{3840, 3792, "Crystal Super panel"}, Size{2712, 2678, "50 %"}}) {
++        auto target = make_texture(gpu, size.w, size.h, 2, DXGI_FORMAT_R8G8B8A8_TYPELESS);
++        // Quad Views' geometry: the periphery's field of view, the focus a part of it (density 0.198 vs 1.2).
++        std::array<xrfg::D3D12FoveatedComposeView, 2> views{};
++        for (std::uint32_t eye = 0; eye < 2; ++eye) {
++            views[eye] = make_view(periphery.Get(), focus.Get(), eye, pw, ph, fw, fh,
++                xrfg::D3D12FoveatedFocusAlpha::unpremultiplied);
++            views[eye].periphery.tangents = {-1.6f, 1.6f, 1.6f, -1.6f};
++            const float half = 3.2f * (fw / 1.2f) / (pw / 0.198f) / 2;
++            views[eye].focus.tangents = {-half, half, half, -half};
++        }
++        std::vector<double> times;
++        double cpu_us = 0;
++        for (int i = 0; i < 260; ++i) {
++            const auto start = std::chrono::steady_clock::now();
++            check(composer.compose(gpu.queue.Get(), {target.Get(), size.w, size.h}, views), "compose");
++            cpu_us += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
++            if (i % 4 == 3) check(composer.wait_idle(), "wait");
++            xrfg::D3D12FoveatedComposeTiming timing{};
++            while (composer.consume_gpu_timing(&timing) == S_OK)
++                if (timing.sequence >= 20) times.push_back(static_cast<double>(timing.microseconds));
++        }
++        check(composer.wait_idle(), "wait");
++        xrfg::D3D12FoveatedComposeTiming timing{};
++        while (composer.consume_gpu_timing(&timing) == S_OK) times.push_back(static_cast<double>(timing.microseconds));
++        std::sort(times.begin(), times.end());
++        double sum = 0;
++        for (double t : times) sum += t;
++        const double vram_mb = 3.0 * 2 * size.w * size.h * 4 / (1024.0 * 1024.0);
++        std::printf("output %ux%u x2 (%s): GPU mean %.3f ms, p50 %.3f, p95 %.3f, max %.3f over %zu; CPU record %.1f us; "
++                    "3-image ring %.0f MiB\n",
++            size.w, size.h, size.name, sum / std::max<std::size_t>(times.size(), 1) / 1000.0,
++            times.empty() ? 0 : times[times.size() / 2] / 1000.0, times.empty() ? 0 : times[times.size() * 95 / 100] / 1000.0,
++            times.empty() ? 0 : times.back() / 1000.0, times.size(), cpu_us / 260, vram_mb);
++    }
++    return 0;
++}
++
++} // namespace
++
++int main() {
++    try {
++        char* bench = nullptr;
++        std::size_t length = 0;
++        const bool want_bench = _dupenv_s(&bench, &length, "XRFG_TEST_FOVEATED_COMPOSE_BENCH") == 0 && bench != nullptr &&
++            std::string(bench) == "1";
++        std::free(bench);
++        return want_bench ? run_bench() : run_tests();
++    } catch (const std::exception& error) {
++        std::printf("error: %s\n", error.what());
++        return 2;
++    }
++}
+diff --git a/tests/layer_call_chain.cpp b/tests/layer_call_chain.cpp
+index 8a3b4f9..581534d 100644
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -189,6 +189,17 @@ std::atomic<std::uint32_t> g_two_layer_unfilled_submitted{0};
+ // blend flag names no layer: the layer order does); the fake runtime checks
+ // the flags and the rectangle of every frame.
+ bool g_two_layer_opaque_focus = false;
++// DCS Control (0099): XRFG_TEST_TWO_LAYER_COMPOSED=1, `[ofxr]
++// foveated_single_layer=1`: the layer composes each frame's two layers into
++// one. The fake runtime makes the composed swapchain (any colour swapchain
++// that is neither 4 nor 8 wide, g_composed_swapchain) and checks every frame
++// that names it: one projection layer, no blend flags, both views on its two
++// slices over the whole image, alpha 255 in the image released last; a frame
++// that names it counts as the kind (current or synthetic) of the periphery
++// image the layer released last (the one it composed). A frame with the two
++// layers on private swapchains once composition has begun is counted
++// (g_composed_two_layer_private) and fails the run.
++bool g_two_layer_composed = false;
+ std::atomic<int> g_two_layer_creating{0};
+ std::atomic<std::uint32_t> g_two_layer_single_submitted{0};
+ std::atomic<std::uint32_t> g_two_layer_single_seen{0};
+@@ -788,6 +799,24 @@ std::array<ComPtr<ID3D12Resource>, 3> g_current_swapchain_right_images;
+ std::array<ComPtr<ID3D12Resource>, 3> g_current_swapchain_right_b_images;
+ std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_right_images;
+ std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_right_b_images;
++// DCS Control (0099): the composed swapchain (g_two_layer_composed).
++XrSwapchain g_composed_swapchain = fake_handle<XrSwapchain>(0x31f);
++std::array<ComPtr<ID3D12Resource>, 3> g_composed_images;
++std::atomic<std::uint32_t> g_composed_creates{0};
++std::atomic<std::uint32_t> g_composed_acquires{0};
++std::atomic<int> g_composed_acquired{-1};
++std::atomic<int> g_composed_released{-1};
++std::int32_t g_composed_width = 0;
++std::int32_t g_composed_height = 0;
++std::uint32_t g_composed_array = 0;
++std::atomic<XrSwapchain> g_last_released_periphery{XR_NULL_HANDLE};
++std::atomic<std::uint32_t> g_composed_frames{0};
++std::atomic<std::uint32_t> g_composed_synthetics{0};
++std::atomic<std::uint32_t> g_composed_shape_wrong{0};
++std::atomic<std::uint32_t> g_composed_alpha_checked{0};
++std::atomic<std::uint32_t> g_composed_alpha_wrong{0};
++std::atomic<std::uint32_t> g_composed_two_layer_private{0};
++std::atomic<std::uint32_t> g_composed_two_layer_before{0};
+ 
+ [[nodiscard]] bool is_application_swapchain(XrSwapchain swapchain) {
+     return swapchain == g_application_swapchain ||
+@@ -1482,7 +1511,11 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_frame(
+                         g_private_depth_submissions.fetch_add(1, std::memory_order_relaxed);
+                     }
+                 }
+-                const XrSwapchain handle = projection->views[view_index].subImage.swapchain;
++                XrSwapchain handle = projection->views[view_index].subImage.swapchain;
++                // DCS Control (0099): a composed frame is of its periphery image's kind.
++                if (handle == g_composed_swapchain) {
++                    handle = g_last_released_periphery.load(std::memory_order_acquire);
++                }
+                 // DCS Control (0034): the second synthetic slot shown.
+                 if (handle == g_synthetic_swapchain_b && view_index == 0) {
+                     g_synthetic_b_end_frames.fetch_add(1, std::memory_order_relaxed);
+@@ -1710,6 +1743,35 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
+             g_two_layer_side_creating[side].fetch_sub(1, std::memory_order_acq_rel);
+         }
+     }
++    // DCS Control (0099): the composed swapchain, outside every numbering.
++    if (g_two_layer_mode && g_two_layer_composed && create_info != nullptr &&
++        create_info->width != 4 && create_info->width != 8 &&
++        (create_info->usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) != 0) {
++        D3D12_HEAP_PROPERTIES heap{};
++        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
++        D3D12_RESOURCE_DESC desc{};
++        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++        desc.Width = create_info->width;
++        desc.Height = create_info->height;
++        desc.DepthOrArraySize = static_cast<UINT16>(create_info->arraySize);
++        desc.MipLevels = 1;
++        desc.Format = static_cast<DXGI_FORMAT>(create_info->format);
++        desc.SampleDesc.Count = 1;
++        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
++        for (auto& image : g_composed_images) {
++            image.Reset();
++            if (!g_device || FAILED(g_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
++                                 D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(image.GetAddressOf())))) {
++                return XR_ERROR_RUNTIME_FAILURE;
++            }
++        }
++        g_composed_width = static_cast<std::int32_t>(create_info->width);
++        g_composed_height = static_cast<std::int32_t>(create_info->height);
++        g_composed_array = create_info->arraySize;
++        g_composed_creates.fetch_add(1, std::memory_order_relaxed);
++        *swapchain = g_composed_swapchain;
++        return XR_SUCCESS;
++    }
+     // The depth swapchain sits outside the call numbering the private slots
+     // are routed by.
+     if (g_d3d11_bridge_mode && create_info != nullptr &&
+@@ -2006,7 +2068,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
+     std::uint32_t image_capacity_input,
+     std::uint32_t* image_count_output,
+     XrSwapchainImageBaseHeader* images) {
+-    if (!is_application_swapchain(swapchain) &&
++    if (swapchain != g_composed_swapchain && // DCS Control (0099)
++        !is_application_swapchain(swapchain) &&
+         swapchain != g_application_depth_swapchain &&
+         swapchain != g_application_unused_swapchain &&
+         !is_current_swapchain(swapchain) &&
+@@ -2095,6 +2158,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_enumerate_swapchain_images(
+             selected_images = &g_synthetic_swapchain_right_images;
+         } else if (swapchain == g_synthetic_swapchain_right_b) {
+             selected_images = &g_synthetic_swapchain_right_b_images;
++        } else if (swapchain == g_composed_swapchain) { // DCS Control (0099)
++            selected_images = &g_composed_images;
+         }
+         d3d12_images[index].texture = (*selected_images)[index].Get();
+     }
+@@ -2105,6 +2170,11 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_acquire_swapchain_image(
+     XrSwapchain swapchain,
+     const XrSwapchainImageAcquireInfo*,
+     std::uint32_t* index) {
++    if (swapchain == g_composed_swapchain) { // DCS Control (0099)
++        *index = g_composed_acquires.fetch_add(1, std::memory_order_relaxed) % 3U;
++        g_composed_acquired.store(static_cast<int>(*index), std::memory_order_release);
++        return XR_SUCCESS;
++    }
+     if (is_current_swapchain(swapchain)) {
+         static_cast<void>(current_acquires(swapchain, true)); // DCS Control (0050)
+         const std::uint32_t call =
+@@ -2164,8 +2234,17 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_swapchain_image(
+ XRAPI_ATTR XrResult XRAPI_CALL fake_release_swapchain_image(
+     XrSwapchain swapchain,
+     const XrSwapchainImageReleaseInfo*) {
++    if (swapchain == g_composed_swapchain) { // DCS Control (0099)
++        g_composed_released.store(g_composed_acquired.load(std::memory_order_acquire), std::memory_order_release);
++        return XR_SUCCESS;
++    }
+     if (is_current_swapchain(swapchain) || is_synthetic_swapchain(swapchain)) {
+         const bool synthetic = is_synthetic_swapchain(swapchain);
++        // DCS Control (0099): the periphery image released last (4 wide).
++        if (swapchain == g_current_swapchain || swapchain == g_current_swapchain_b ||
++            swapchain == g_synthetic_swapchain || swapchain == g_synthetic_swapchain_b) {
++            g_last_released_periphery.store(swapchain, std::memory_order_release);
++        }
+         if (swapchain == g_synthetic_swapchain_right) {
+             g_two_layer_synthetic_index[0].store(
+                 g_two_layer_synthetic_acquired[0].load(std::memory_order_acquire), std::memory_order_release);
+@@ -3213,6 +3292,38 @@ void two_layer_check(const XrFrameEndInfo* end_info) {
+         return;
+     }
+     g_two_layer_frames.fetch_add(1, std::memory_order_relaxed);
++    // DCS Control (0099): a composed frame.
++    if (g_two_layer_composed && count == 1 && layers[0]->views != nullptr && layers[0]->viewCount != 0 &&
++        layers[0]->views[0].subImage.swapchain == g_composed_swapchain) {
++        g_composed_frames.fetch_add(1, std::memory_order_relaxed);
++        bool shape_ok = layers[0]->viewCount == 2 && layers[0]->layerFlags == 0 && g_composed_array == 2;
++        for (std::uint32_t view = 0; shape_ok && view < layers[0]->viewCount; ++view) {
++            const XrSwapchainSubImage& sub = layers[0]->views[view].subImage;
++            shape_ok = sub.swapchain == g_composed_swapchain && sub.imageArrayIndex == view &&
++                sub.imageRect.offset.x == 0 && sub.imageRect.offset.y == 0 &&
++                sub.imageRect.extent.width == g_composed_width && sub.imageRect.extent.height == g_composed_height;
++        }
++        if (!shape_ok) {
++            g_composed_shape_wrong.fetch_add(1, std::memory_order_relaxed);
++            g_two_layer_shape_wrong.fetch_add(1, std::memory_order_relaxed);
++        }
++        if (is_synthetic_swapchain(g_last_released_periphery.load(std::memory_order_acquire))) {
++            g_composed_synthetics.fetch_add(1, std::memory_order_relaxed);
++            g_two_layer_synthetics.fetch_add(1, std::memory_order_relaxed);
++        }
++        // No alpha on the submitted layer: the image released last is opaque
++        // (through the runtime's queue, which the composition was put on).
++        const int index = g_composed_released.load(std::memory_order_acquire);
++        std::uint8_t alpha = 0;
++        if (index >= 0 && index < 3 && GetCurrentThreadId() != g_test_application_thread_id &&
++            d3d12_image_first_alpha(g_composed_images[static_cast<std::size_t>(index)].Get(), &alpha)) {
++            g_composed_alpha_checked.fetch_add(1, std::memory_order_relaxed);
++            if (alpha != 255U) {
++                g_composed_alpha_wrong.fetch_add(1, std::memory_order_relaxed);
++            }
++        }
++        return;
++    }
+     // Bugfix round: the frame the application submitted with one layer
+     // (g_two_layer_single) passes through as it is.
+     if (count == 1 && layers[0]->viewCount == 2 && layers[0]->views != nullptr &&
+@@ -3263,6 +3374,12 @@ void two_layer_check(const XrFrameEndInfo* end_info) {
+         g_two_layer_shape_wrong.fetch_add(1, std::memory_order_relaxed);
+         return;
+     }
++    // DCS Control (0099): the two layers on private swapchains, not composed.
++    if (g_two_layer_composed && periphery_kind > 0) {
++        (g_composed_frames.load(std::memory_order_relaxed) != 0 ? g_composed_two_layer_private
++                                                                : g_composed_two_layer_before)
++            .fetch_add(1, std::memory_order_relaxed);
++    }
+     // One kind for both layers (the application's images, current copies or
+     // synthetics): a frame that showed one layer's synthetic beside the other
+     // layer's real frame would be two times at once. The private slot (a or b)
+@@ -3453,6 +3570,8 @@ int main(int argc, char** argv) {
+             GetEnvironmentVariableA("XRFG_TEST_TWO_LAYER_UNFILLED_FOCUS", nullptr, 0) != 0; // 0089
+         g_two_layer_opaque_focus =
+             GetEnvironmentVariableA("XRFG_TEST_TWO_LAYER_OPAQUE_FOCUS", nullptr, 0) != 0; // 0094
++        g_two_layer_composed =
++            GetEnvironmentVariableA("XRFG_TEST_TWO_LAYER_COMPOSED", nullptr, 0) != 0; // 0099
+     }
+     const int result = call_chain_main(argc, argv);
+     if (!g_two_layer_mode) {
+@@ -3494,6 +3613,28 @@ int main(int argc, char** argv) {
+         std::cerr << "two layers: a swapchain was armed twice\n";
+         return EXIT_FAILURE;
+     }
++    // DCS Control (0099): the foveated single layer.
++    if (g_two_layer_composed) {
++        std::cout << "two layers composed into one: " << g_composed_frames.load() << " composed frames ("
++                  << g_composed_synthetics.load() << " synthetic), composed swapchain made "
++                  << g_composed_creates.load() << " time(s) at " << g_composed_width << 'x' << g_composed_height
++                  << " x" << g_composed_array << ", shape wrong " << g_composed_shape_wrong.load()
++                  << ", alpha checked " << g_composed_alpha_checked.load() << " not 255 "
++                  << g_composed_alpha_wrong.load() << "; two layers on private swapchains before the first "
++                  << "composed frame " << g_composed_two_layer_before.load() << ", after it "
++                  << g_composed_two_layer_private.load() << '\n';
++        if (result != EXIT_SUCCESS) {
++            return result;
++        }
++        if (frames == 0 || g_composed_frames.load() == 0 || g_composed_synthetics.load() == 0 ||
++            g_composed_creates.load() != 1 || shape != 0 || mixed != 0 || fov != 0 ||
++            g_composed_alpha_checked.load() == 0 || g_composed_alpha_wrong.load() != 0 ||
++            g_composed_two_layer_private.load() != 0) {
++            std::cerr << "two layers composed: validation failed\n";
++            return EXIT_FAILURE;
++        }
++        return EXIT_SUCCESS;
++    }
+     if (g_two_layer_single && g_two_layer_single_submitted.load() == 0) {
+         std::cerr << "two layers: NOT ARMED, no frame fell while private swapchains were being made\n";
+         return EXIT_FAILURE;
+diff --git a/tests/layer_release_offset.cmake b/tests/layer_release_offset.cmake
+index 7203c7d..e713035 100644
+--- a/tests/layer_release_offset.cmake
++++ b/tests/layer_release_offset.cmake
+@@ -41,7 +41,8 @@ file(COPY "${LAYER_DLL}" DESTINATION "${WORK_DIR}")
+ file(READ "${BASE_INI}" ini_text)
+ set(added "")
+ if(TWO)
+-    string(APPEND added "foveated_layers=1\n")
++    # DCS Control (0099): the two layers as before (the fake runtime checks two).
++    string(APPEND added "foveated_layers=1\nfoveated_single_layer=0\n")
+ endif()
+ if(DEFINED EXTRA_KEYS)
+     string(REPLACE "," ";" EXTRA_KEYS "${EXTRA_KEYS}")
+diff --git a/tests/layer_two_layers.cmake b/tests/layer_two_layers.cmake
+index 5812794..896cb00 100644
+--- a/tests/layer_two_layers.cmake
++++ b/tests/layer_two_layers.cmake
+@@ -39,6 +39,15 @@ file(READ "${BASE_INI}" ini_text)
+ set(added "")
+ if(TWO)
+     string(APPEND added "foveated_layers=1\n")
++    # DCS Control (0099): COMPOSED=1, the foveated single layer
++    # (`foveated_single_layer=1`, XRFG_TEST_TWO_LAYER_COMPOSED: the fake
++    # runtime checks the one composed layer); otherwise the two layers as
++    # before (the key's default is on, so the cases set it off).
++    if(DEFINED COMPOSED)
++        string(APPEND added "foveated_single_layer=1\n")
++    else()
++        string(APPEND added "foveated_single_layer=0\n")
++    endif()
+ endif()
+ if(DEFINED EXTRA_KEYS)
+     foreach(extra_key IN LISTS EXTRA_KEYS)
+@@ -60,6 +69,9 @@ endif()
+ if(DEFINED OPAQUE)
+     set(ENV{XRFG_TEST_TWO_LAYER_OPAQUE_FOCUS} "1")
+ endif()
++if(DEFINED COMPOSED)
++    set(ENV{XRFG_TEST_TWO_LAYER_COMPOSED} "1")
++endif()
+ if(DEFINED SINGLE_SLOW_MS)
+     set(ENV{XRFG_TEST_TWO_LAYER_SINGLE} "1")
+     set(ENV{XRFG_TEST_SLOW_PRIVATE_CREATE_MS} "${SINGLE_SLOW_MS}")
+@@ -89,11 +101,35 @@ list(GET flight_logs 0 flight_log)
+ file(STRINGS "${flight_log}" mode_lines REGEX " op=foveated_mode result=")
+ set(active 0)
+ set(not_applied 0)
++set(single_on 0)
++set(single_off 0)
++set(single_refused 0)
++set(single_made 0)
+ foreach(line IN LISTS mode_lines)
+     if(line MATCHES " op=foveated_mode result=1 ")
+         math(EXPR active "${active} + 1")
+     elseif(line MATCHES " op=foveated_mode result=3 ")
+         # 0089: a swapchain's role, judged below with ROLES.
++    elseif(line MATCHES " op=foveated_mode result=4 .* a=([0-9]+) ")
++        # 0099: the single layer's state.
++        # A frame the presenter took over before it ran (prepared with its
++        # images released, so not composed: b=2) may precede the first
++        # composition; any refusal after it counts.
++        if(CMAKE_MATCH_1 EQUAL 1)
++            math(EXPR single_on "${single_on} + 1")
++        elseif(CMAKE_MATCH_1 EQUAL 0)
++            math(EXPR single_off "${single_off} + 1")
++        elseif(single_on GREATER 0 OR NOT line MATCHES " b=2 ")
++            math(EXPR single_refused "${single_refused} + 1")
++        endif()
++    elseif(line MATCHES " op=foveated_mode result=5 .* a=([0-9]+) ")
++        if(NOT CMAKE_MATCH_1 EQUAL 0)
++            math(EXPR single_made "${single_made} + 1")
++        else()
++            math(EXPR single_refused "${single_refused} + 1")
++        endif()
++    elseif(line MATCHES " op=foveated_mode result=6 ")
++        # 0099: the composition's GPU time.
+     else()
+         math(EXPR not_applied "${not_applied} + 1")
+     endif()
+@@ -108,6 +144,18 @@ elseif(NOT active EQUAL 0 OR NOT not_applied EQUAL 0)
+     message(FATAL_ERROR "foveated_mode records without the key: ${mode_lines}")
+ endif()
+ message(STATUS "Two layers '${scenario}': foveated mode active ${active}, not applied ${not_applied}")
++# DCS Control (0099): composed, the swapchain made once and the state on
++# without a refusal; otherwise never composed.
++if(DEFINED COMPOSED)
++    if(NOT single_made EQUAL 1 OR single_on LESS 1 OR NOT single_refused EQUAL 0)
++        message(FATAL_ERROR
++            "foveated single layer: composed swapchain made ${single_made}, 'composing' records ${single_on}, "
++            "refusals ${single_refused} (1, 1 or more, 0 expected): ${mode_lines}")
++    endif()
++elseif(NOT single_on EQUAL 0 OR NOT single_made EQUAL 0)
++    message(FATAL_ERROR "foveated single layer composed with the key off: ${mode_lines}")
++endif()
++message(STATUS "Two layers '${scenario}': single layer on ${single_on}, off ${single_off}, made ${single_made}")
+ 
+ if(DEFINED ROLES)
+     # c = width << 32 | height: the periphery swapchain is 4x4, the focus 8x8.
