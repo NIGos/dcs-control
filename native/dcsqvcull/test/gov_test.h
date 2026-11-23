@@ -310,6 +310,30 @@ void FpsProof() {
     }
     Check(down && ev == kEvInconclusive && g.stage == 1,
           "governor fps proof: a trial without frames (menu, loading) keeps the step");
+    // bugfix-07: that unproven step does not survive a mission change.
+    const int d = g.MissionChange(41);
+    Check(d == -1 && g.stage == 0 && g.lastEvent == kEvMission && g.unprovenFrom == -1 && g.MissionChange(42) == 0,
+          "governor: a mission change reverts the step kept without an fps verdict (once)");
+  }
+  // bugfix-07: a step proven by its trial stays at a mission change; a trial running at it is dropped.
+  {
+    GovConfig c;
+    Governor g;
+    g.Reset(0);
+    int kept = 0;
+    for (int t = 1; t <= 60 && !kept; ++t) {
+      g.Tick(kGpu, g.stage == 1 ? 50.0 : 45.0, t, c, 0xf);
+      kept += g.lastEvent == kEvKept;
+    }
+    const int stageKept = g.stage;
+    const bool stays = kept && g.MissionChange(61) == 0 && g.stage == stageKept;
+    Governor h;
+    h.Reset(0);
+    for (int t = 1; t <= 12; ++t) h.Tick(kGpu, 45.0, t, c, 0xf);
+    const bool inTrial = h.trial && h.stage == 1;
+    const int dh = h.MissionChange(13);
+    Check(stays && stageKept == 1 && inTrial && dh == -1 && h.stage == 0 && !h.trial,
+          "governor: a mission change keeps a proven step and undoes a step still in its trial");
   }
   // 7. Drift: fps rises 0.1 fps/s on its own, the step does nothing. Before/after alone sees +5% and keeps it;
   //    the A-B-A reference (the old stage rechecked) cancels the drift and reverts.
@@ -1044,6 +1068,39 @@ void CapTests() {
     }
     Check(stepped && midTrial && off && !trialEvent && g_govStage.load() == 0,
           "governor: Enabled=0 during a trial -> stage 0 and the trial dropped (re-enabled, no stale verdict)");
+    perfmon::SetStage(0);
+    perfmon::g_gov = Governor();
+  }
+  // bugfix-07: a mission event (exports.inc OnMissionEvent) during a step's trial: the worker's next GovTick puts the
+  // stage back and says so.
+  {
+    perfmon::g_gov = Governor();
+    perfmon::SetStage(0);
+    perfmon::g_missionEventsSeen = perfmon::g_missionEvents.load();
+    double tg = 12000;
+    perfmon::g_gov.Reset(tg);
+    auto sec = [&](double fps, int verdict) {
+      perfmon::Sec s;
+      s.t = ++tg;
+      s.frames = static_cast<uint32_t>(fps);
+      s.fps = fps;
+      s.renderPct = 50;
+      s.gpuPct = verdict == kGpu ? 99 : 70;
+      s.verdict = verdict;
+      perfmon::GovTick(s);
+    };
+    bool stepped = false;
+    for (int i = 0; i < 120 && !stepped; ++i) {
+      sec(60, kGpu);
+      stepped = perfmon::g_gov.trial && g_govStage.load() == 1;
+    }
+    StartReportCapture();
+    perfmon::g_missionEvents.fetch_add(1);
+    sec(60, kGpu);
+    const std::string text = StopReportCapture();
+    Check(stepped && g_govStage.load() == 0 && !perfmon::g_gov.trial &&
+              text.find("governor: mission change: step 1 had no fps verdict") != std::string::npos,
+          "governor: a mission event during a step's trial -> back to stage 0 at the next second, logged");
     perfmon::SetStage(0);
     perfmon::g_gov = Governor();
   }

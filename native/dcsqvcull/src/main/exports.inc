@@ -59,6 +59,9 @@ void OnMissionEvent(uint32_t event) {
   cascache::OnMissionEvent();  // R33: every held cascade is re-rendered at the next frame
   vrfx::NoteMissionEvent();  // R58: VrFx's G / DoF state belongs to the previous mission or aircraft
   vrfx::NoteMissionPhase(event == 2 || event == 3);  // regress-07: GazeDof's flight signal without Quad Views
+  perfmon::g_missionEvents.fetch_add(1, std::memory_order_release);  // the governor's unproven step goes back
+  w1::g_rearms.fetch_add(1, std::memory_order_relaxed);  // W1: the start guard again (without [Perception] SceneCutReset)
+  eshd::NoteMissionEvent();  // early shaders: the pass caches belong to the previous scene's pass objects
   cpass::NoteMissionEvent();  // R77: so does the colour mode's eye-like adaptation
   fixdepth::cmask::sym::NoteMissionEvent();  // R95: the symbology's learnt HUD field / helmet extent: another aircraft
   // R77: the recorders' texture tables hold references on this scene's textures: released at their next entry.

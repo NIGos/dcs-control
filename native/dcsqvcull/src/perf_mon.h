@@ -707,10 +707,27 @@ std::string RecheckText() {
   return b;
 }
 
+// Mission events (main/exports.inc OnMissionEvent: mission load, slot change, simulation stopped), taken by GovTick.
+std::atomic<uint32_t> g_missionEvents{0};
+uint32_t g_missionEventsSeen = 0;  // worker
+
 void GovTick(const Sec& s) {
   if (g_perceptionOnly.load()) {  // [General] PerceptionOnly: no recorder to govern, no governor action
     g_gov.Reset(s.t);
     return;
+  }
+  {  // a step down no fps trial proved was taken for the previous scene: back to the stage below it
+    const uint32_t ev = g_missionEvents.load(std::memory_order_acquire);
+    if (ev != g_missionEventsSeen) {
+      g_missionEventsSeen = ev;
+      const int from = g_gov.stage;
+      if (g_gov.MissionChange(s.t)) {
+        SetStage(g_gov.stage);
+        Log("governor: mission change: step %d had no fps verdict (no trial, too few frames or still in its trial) -> "
+            "%s (from stage %d)",
+            g_gov.evStage, StageText(g_gov.stage).c_str(), from);
+      }
+    }
   }
   perfgov::GovConfig c;
   c.enabled = g_cfg.govEnabled;

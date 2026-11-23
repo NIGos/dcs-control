@@ -113,6 +113,7 @@ struct Gate {
     }
   }
 };
+Gate g_gate;  // render thread
 
 // What mode 1 does with one view in the current frame (modes 3 / 4: kPlanTest = a probe, kPlanSkip = not submitted).
 enum ViewPlan : uint8_t { kPlanTest = 0, kPlanStock = 1, kPlanForced = 2, kPlanSkip = 3 };
@@ -331,6 +332,13 @@ ID3D11BlendState* MaskedBs(ID3D11BlendState* s) {
 // Test: DCS's depth-stencil and blend states are swapped while its RiversPass / SeaPass run as the test
 // ---------------------------------------------------------------------------
 int g_slotDss = -1, g_slotBs = -1, g_slotUpd = -1;
+bool g_updOurs = false;                   // H_Upd holds the UpdateSubresource slot (a predicated block, render thread)
+// bugfix-07: blocks whose upload hook was gone at their end. A Flush (also GetData, ExecuteCommandList or a waiting
+// Map) inside the block makes d3d11 switch its table to its "after flush" entries at once (offline: a Flush in the
+// mask pass); the block's later uploads then went out predicated and unrecorded (dropped under a FALSE predicate,
+// never replayed). Such a block cannot be repaired afterwards: the gate turns stock (every view drawn, nothing
+// predicated) until 90 dry frames, so it cannot repeat every frame, and the first one is logged.
+std::atomic<uint64_t> g_cUpdLost{0};
 void* volatile g_origDss = nullptr;
 void* volatile g_origBs = nullptr;
 void* volatile g_origUpd = nullptr;
@@ -418,7 +426,6 @@ void EndTest() {
 // Predicated block: every UpdateSubresource on DCS's context goes through gpu_pass_timing.h's hook (when its session
 // holds the slot) or ours. False (nothing set) when the slot holds another hook of ours: the block then runs
 // unpredicated ("hook taken").
-bool g_updOurs = false;
 bool BeginUnpred(ID3D11Predicate* p) {
   if (g_slotUpd < 0) g_slotUpd = DcsQv_ContextSlot("UpdateSubresource");
   if (g_slotUpd < 0) return false;
@@ -451,7 +458,14 @@ void EndUnpred() {
   ptiming::g_upRec.clear();
   if (g_updOurs) {
     void** vt = *reinterpret_cast<void***>(g_ctx);
-    if (vt[g_slotUpd] == reinterpret_cast<void*>(&H_Upd)) d3ds::WriteTablePointer(&vt[g_slotUpd], g_origUpd);
+    if (vt[g_slotUpd] == reinterpret_cast<void*>(&H_Upd)) {
+      d3ds::WriteTablePointer(&vt[g_slotUpd], g_origUpd);
+    } else {  // lost inside the block (g_cUpdLost above): stock until 90 dry frames
+      if (g_cUpdLost.fetch_add(1, std::memory_order_relaxed) == 0)
+        Log("water skip: d3d11 switched its context table inside a predicated block (a Flush or a read-back in DCS's "
+            "water passes): its later uploads were not kept; views run stock until 90 frames without water");
+      g_gate.stock = true, g_gate.dry = 0;
+    }
     g_updOurs = false;
   }
 }
@@ -541,7 +555,6 @@ bool g_testOk = false;   // the test hooks went in for this view
 bool g_testOpen = false; // the view's predicate is open
 bool g_skipView = false; // mode 3: this view is not submitted (its passes are held, then dropped at the sea)
 ViewPlan g_plan = kPlanTest;  // this view's plan, decided at its mask pass
-Gate g_gate;
 uint64_t g_lastCuts = 0;
 // Another feature changed what a view draws (0.7 three views engage / disengage: the right periphery was strip-culled,
 // so the gate learnt it dry): bumped there, the gate re-arms at the next frame like after a camera cut.

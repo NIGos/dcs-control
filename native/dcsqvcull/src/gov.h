@@ -318,6 +318,7 @@ enum GovEvent : int {
   kEvRecheck,       // B measured: back to the old stage for the A' window (temporary)
   kEvUnsteady,      // A and A' disagree (the scene changed during the trial): no verdict; a step down is
                     // undone, a step up (toward the configuration) stays; its stage waits unsteadySec
+  kEvMission,       // a mission change reverted a step down that no fps trial proved (MissionChange)
 };
 
 struct Governor {
@@ -349,6 +350,13 @@ struct Governor {
   double evFpsBefore = 0, evFpsAfter = 0, evBlockSec = 0;
   int evStage = 0;  // the stage a trial or revert was about
   int evWaitStage = 0;  // kEvUnsteady: the stage that waits
+  // The stage below the step(s) down in force that no fps trial has proven (a trial running, ended without enough
+  // fps seconds, or never started for want of a baseline); -1 = none. A mission change reverts to it (MissionChange):
+  // a step taken for another scene must not stay unproven into the next mission (GitHub #27 context).
+  int unprovenFrom = -1;
+  void SettleUnproven() {
+    if (unprovenFrom >= 0 && stage <= unprovenFrom) unprovenFrom = -1;
+  }
 
   void Clear() {
     filled = head = 0;
@@ -391,6 +399,31 @@ struct Governor {
     trialTo = to;
     trialT0 = now;
     trialBase = base;
+    if (to > from) {
+      if (unprovenFrom < 0) unprovenFrom = from;  // the lowest unproven base is kept
+    } else if (unprovenFrom >= 0 && to <= unprovenFrom) {
+      unprovenFrom = -1;
+    }
+  }
+  // A mission load, slot change or the simulation stopping: an unproven step down goes back to the stage below it,
+  // and a running trial is dropped (its fps windows span two scenes). Returns the stage change (-1 or 0).
+  int MissionChange(double now) {
+    lastEvent = kEvNone;
+    const bool hadTrial = trial;
+    trial = false;
+    trialPhase = 0;
+    if (unprovenFrom < 0 || stage <= unprovenFrom) {
+      unprovenFrom = -1;
+      if (hadTrial) lastChange = now, Clear();
+      return 0;
+    }
+    evStage = stage;
+    stage = unprovenFrom;
+    unprovenFrom = -1;
+    lastChange = now;
+    Clear();
+    lastEvent = kEvMission;
+    return -1;
   }
   void Block(const GovConfig& c, int st, double now) {
     double b = backoff[st] > 0 ? backoff[st] : static_cast<double>(c.revertBackoffSec);
@@ -419,6 +452,7 @@ struct Governor {
       if (down) backoff[trialTo] = 0;  // a kept step down forgets the stage's earlier reverts
       stage = trialTo;
       lastEvent = kEvKept;
+      if (unprovenFrom == trialFrom) unprovenFrom = -1;  // this step is proven (an earlier unproven one stays)
     } else {
       Block(c, trialTo, now);
       stage = trialFrom;
@@ -426,6 +460,7 @@ struct Governor {
       if (down) lastUpFrom = -1;  // not a bounce: the stage is blocked instead
     }
     (void)atFrom;
+    SettleUnproven();
     return stage > was ? +1 : stage < was ? -1 : 0;
   }
   // +1 = stepped down (to a later stage), -1 = stepped up, 0 = no change;
@@ -457,6 +492,7 @@ struct Governor {
       trial = false;
       lastEvent = kEvUnusable;
       Clear();
+      SettleUnproven();
       return -1;
     }
     // A running trial decides first; no other step until it has.
@@ -512,6 +548,7 @@ struct Governor {
           evWaitStage = waits;
           lastChange = now;
           Clear();
+          SettleUnproven();
           lastEvent = kEvUnsteady;
           return stage > was ? +1 : stage < was ? -1 : 0;
         } else {

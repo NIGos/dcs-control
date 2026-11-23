@@ -237,6 +237,7 @@ struct Rig {
   ID3D11DepthStencilState *dssMark = nullptr, *dssOff = nullptr, *dssPlain = nullptr;
   float waterDepth = 0.3f;  // reversed Z, GREATER_EQUAL: visible above the terrain's 0.5
   bool unknownDraw = false;
+  bool flushInM = false;  // bugfix-07: M uploads, Flushes (d3d11 toggles its table), uploads twice more
   uint32_t tag = 0;  // this frame's value: M's colour, R's clear, the uploads
 };
 Rig g_rig;
@@ -264,6 +265,11 @@ void __fastcall FakeExec(void* pass, uint64_t) {
     const float black[4] = {0, 0, 0, 0};
     c->ClearRenderTargetView(g_rig.gbRtv, black);
   } else if (pass == &g_pM) {
+    if (g_rig.flushInM) {
+      Upload(g_rig.cbM, 0.5f, g_rig.tag ^ 0x5a);
+      c->Flush();
+      Upload(g_rig.cbM, 0.5f, g_rig.tag ^ 0xa5);  // the first call after the Flush: d3d11 rewrites its table here
+    }
     Upload(g_rig.cbM, 0.5f, g_rig.tag);
     c->OMSetRenderTargets(1, &g_rig.maskRtv, nullptr);
     c->OMSetDepthStencilState(g_rig.dssOff, 0);
@@ -474,6 +480,29 @@ void Device() {
   Check(unk && ord && tableStock(),
         "W1 device: a non-water depth-stencil state in the test and a foreign pass between the water passes both run "
         "the view stock (mask drawn), counted by reason");
+
+  // 5b. bugfix-07: a Flush inside a tested view's mask pass. d3d11 switches its table at once, so the block's later
+  //     uploads bypass the hook (dropped under the FALSE predicate, not replayed): the block is counted and the gate
+  //     turns stock, so the next frames draw every view for real and the buffer ends with DCS's last upload again.
+  {
+    const bool testing = !w1::g_gate.stock;
+    const uint64_t lost0 = w1::g_cUpdLost.load();
+    r.flushInM = true;
+    Frame();
+    r.flushInM = false;
+    const bool lost = w1::g_cUpdLost.load() > lost0 && w1::g_gate.stock;
+    Frame();
+    float m2[4] = {};
+    const bool rb = ReadBuffer(r.cbM, m2);
+    const float want2 = (r.tag & 0xff) / 255.0f;
+    printf("     W1 flush in M: %llu blocks lost their upload hook; cbM after a stock frame %.4f (want %.4f)\n",
+           static_cast<unsigned long long>(w1::g_cUpdLost.load() - lost0), m2[1], want2);
+    Check(testing && lost && rb && fabsf(m2[1] - want2) < 1e-6f && MaskTag(ReadTexel(r.mask)) == (r.tag & 0xffff) &&
+              tableStock(),
+          "W1 device: a Flush inside a tested view's mask pass: the lost upload hook is counted, the views run stock "
+          "(mask drawn, the buffer holds DCS's last upload), the table is stock after the block");
+    for (int i = 0; i < 92; ++i) Frame();  // 90 dry frames: tested again for the verify part
+  }
 
   // 6. Verify: nothing skipped, the test and the real passes counted; M's target found for the mode-1 view.
   w1::g_mode = 2;
