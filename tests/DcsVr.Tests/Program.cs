@@ -1884,6 +1884,37 @@ Test("The diagnostic package collects DCS, component and headset logs as text, w
     var steam = redact($"SteamInternal_SetMinidumpSteamID:  Caching Steam ID:  {steamId} [API loaded no] | [U:1:39734273] | frame {steamId}2 | 1234567890123456");
     Require(!steam.Contains(steamId + " ") && !steam.Contains("39734273") && steam.Contains("Steam ID:  <steam id> [API") && steam.Contains("[U:1:<id>]") && steam.Contains(steamId + "2") && steam.Contains("1234567890123456"), steam);
 });
+Test("The diagnostic package removes a headset serial everywhere, also where it is bare and was written before its label, and network addresses", () =>
+{
+    // Pimax: the serial is labelled only in Pimax's logs, which the package writes last; DCS's log (written first) has it bare.
+    var options = Make("diag-serial/Saved Games/DCS/Config/options.lua", "options = { }");
+    Make("diag-serial/Saved Games/DCS/Logs/dcs.log", "INFO VR: headset PSX7TEST00042 found\nconnected to 203.0.113.7:443 from 192.168.1.23, adapter 0A-1B-2C-3D-4E-5F\nDCS 2.9.31.12345, nvngx 3.7.10.0, ip 127.0.0.1");
+    var exe = Make("diag-serial/game/bin/DCS.exe", "fixture");
+    var local = Path.Combine(root, "diag-serial/local");
+    Make("diag-serial/local/Pimax/PiService/Log/PiService__1.log", "device info: serial number: PSX7TEST00042");
+    var zip = Path.Combine(root, "diag-serial/package.zip");
+    Diagnostics.CreatePackage(new(null, null, options, exe, RuntimeKind.Pimax, local, Path.Combine(root, "diag-serial/roaming")), "{}", zip);
+    string Read(string file, string name) { using var archive = System.IO.Compression.ZipFile.OpenRead(file); using var reader = new StreamReader(archive.GetEntry(name)!.Open()); return reader.ReadToEnd(); }
+    var log = Read(zip, "dcs/Logs/dcs.log");
+    Require(!log.Contains("PSX7TEST") && log.Contains("headset <serial> found"), "bare serial before its label: " + log);
+    Require(!log.Contains("203.0.113.7") && !log.Contains("192.168.1.23") && !log.Contains("0A-1B-2C") && log.Contains("<ip>:443") && log.Contains("<mac>"), "addresses: " + log);
+    Require(log.Contains("2.9.31.12345") && log.Contains("3.7.10.0") && log.Contains("127.0.0.1"), "versions and loopback stay: " + log);
+    Require(!Read(zip, "pimax/PiService/PiService__1.log").Contains("PSX7TEST"), "labelled serial");
+    // SteamVR (Sboys route): the active HMD and the serial property name it without a serial label.
+    var steamSettings = Make("diag-serial/steam/config/steamvr.vrsettings", "{ }");
+    Make("diag-serial/steam/logs/vrserver.txt", "Tue Nov 03 2026 10:00:00.000 - Active HMD set to lighthouse.LHR-9F00TEST\nProp_SerialNumber_String = 'TESTCTRL0071'\nActive HMD set to null.Null Serial Number");
+    Make("diag-serial/steam/logs/vrcompositor.txt", "HMD LHR-9F00TEST ready, controller TESTCTRL0071, Null Serial Number");
+    var steamZip = Path.Combine(root, "diag-serial/steam.zip");
+    Diagnostics.CreatePackage(new(null, null, options, exe, RuntimeKind.SboysSteamVr, local, null, steamSettings), "{}", steamZip);
+    var compositor = Read(steamZip, "steamvr/logs/vrcompositor.txt");
+    Require(!compositor.Contains("9F00TEST") && !compositor.Contains("TESTCTRL") && compositor.Contains("Null Serial Number"), "SteamVR serials without a serial label: " + compositor);
+    Require(!Read(steamZip, "dcs/Logs/dcs.log").Contains("PSX7TEST"), "the Pimax log is read on the Sboys route too");
+    // Address forms and look-alikes, one by one.
+    var redact = Diagnostics.Redactor("Pilot", @"C:\Users\Pilot", "RIG-01");
+    var text = redact("host=10.0.0.5 | \"address\": \"100.70.1.2\" | mac: 0a1b2c3d4e5f | aa:bb:cc:dd:ee:ff | version 10.1.2.3 | 1.2.3.4.5 | 10.0.26100.1 | 0.0.0.0 | 4.0.1.2 in modules");
+    Require(!text.Contains("10.0.0.5") && !text.Contains("100.70.1.2") && !text.Contains("0a1b2c3d4e5f") && !text.Contains("aa:bb") && text.Contains("mac: <mac>"), text);
+    Require(text.Contains("version 10.1.2.3") && text.Contains("1.2.3.4.5") && text.Contains("10.0.26100.1") && text.Contains("0.0.0.0") && text.Contains("4.0.1.2 in modules"), text);
+});
 Test("The Diagnostic report (and the CLI's diagnostic) has the user's folder and name removed, as the package has", () =>
 {
     var profileFolder = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -3432,6 +3463,32 @@ Test("Readiness rejects a gaze bridge that cannot be reordered", () =>
     var report = Readiness.Check(p, new() { Layers = [new("Fixture", manifest, true, "XR_APILAYER_MBUCCHIA_eye_trackers", dll, true), new("Fixture", "toolkit.json", true, "XR_APILAYER_NOVENDOR_toolkit", dll, true)] }, new ControlService(root, Path.Combine(root, "gaze-unorderable/state")));
     Require(report.Checks.Single(c => c.Id == "gaze-bridge").State == CheckState.Error);
     var foreign = report.Checks.Single(c => c.Id == "implicit-layers"); Require(foreign.State == CheckState.Warning && foreign.Detail.Contains("toolkit") && !foreign.Detail.Contains("eye_trackers"));
+});
+Test("Checks say when the engine module's build-specific parts stayed off, also with Engine Optimizations off; the HUD after DLSS line names this Saved Games folder", () =>
+{
+    var options = Make("ready-build/sg/DCS.openbeta/Config/options.lua", Lua);
+    var loader = Make("ready-build/sg/DCS.openbeta/Scripts/DcsQvCull/DcsQvCull.dll", "loader"); Make("ready-build/sg/DCS.openbeta/Scripts/Hooks/DcsQvCull.lua", "-- hook");
+    File.SetLastWriteTimeUtc(loader, DateTime.UtcNow.AddMinutes(-5));
+    var log = Make("ready-build/sg/DCS.openbeta/Scripts/DcsQvCull/DcsQvCull.log", "21:07:00.000 loader: starting payload active_1.dll (generation 1)\n"
+        + "21:07:40.000 cockpit mask: Visualizer.dll is not an analysed build; frames committed late (no displayTime pairing)\n"
+        + "21:07:41.000 symbology: record render point NOT hooked (DCS build not verified, or the cpu overlay path off): no E\n"
+        + "21:07:42.000 gbuffer recorder: the D3D11 device lacks what the recorder needs (DriverCommandLists=0)\n");
+    var inventory = new InventorySnapshot { OptionsPath = options };
+    var service = new ControlService(root, Path.Combine(root, "ready-build/state"));
+    var frameGen = new VrProfile { FrameGen = FrameGeneration.FidelityFx, EngineOptimizations = false, FrameGenHudSymbology = true };
+    var line = Readiness.Check(frameGen, inventory, service).Checks.SingleOrDefault(c => c.Id == "engine-dcs-version");
+    Require(line is { State: CheckState.Warning } && line.Detail.Contains("not been checked against this DCS version") && line.Detail.Contains("Sharp HUD did not find")
+        && !line.Detail.Contains("command lists"), "frame generation, Engine Optimizations off: " + line?.Detail);
+    // Nothing to say: a profile without the module, or a log without such lines.
+    Require(!Readiness.Check(new VrProfile { FrameGen = FrameGeneration.Off }, inventory, service).Checks.Any(c => c.Id == "engine-dcs-version"), "no module, no line");
+    File.WriteAllText(log, "21:07:00.000 loader: starting payload active_1.dll (generation 1)\n");
+    Require(!Readiness.Check(frameGen, inventory, service).Checks.Any(c => c.Id == "engine-dcs-version"), "a known build, no line");
+    // Depth boost's dual camera on a build whose G-buffer pass it does not know: off, said on the Engine page and in Checks.
+    File.AppendAllText(log, "21:08:00.000 cockpit ipd: build mismatch (G-buffer pass execute not hooked); off\n");
+    Require(EngineOptimizations.Read(options, null, false).VersionWarnings.Single().Contains("Depth boost is off"), "dual camera build mismatch");
+    // HUD after DLSS: the autoexec.cfg of the selected Saved Games folder (an open beta here), not always Saved Games\DCS.
+    var hud = Readiness.Check(new VrProfile { NeuralRendering = true }, inventory, service).Checks.Single(c => c.Id == "hud-after-dlss");
+    Require(hud.Detail.Contains(Path.Combine("DCS.openbeta", "Config", "autoexec.cfg")) && !hud.Detail.Contains(@"Saved Games\DCS\Config"), hud.Detail);
 });
 Test("Readiness reports elevation and write access", () =>
 {

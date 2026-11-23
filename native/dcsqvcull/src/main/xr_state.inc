@@ -134,18 +134,20 @@ std::wstring ProcessImageDir() {
 // One-key test suite: configuration check, CPU profile, exclusion A/B and
 // collect-threads A/B, summarised in one report file.
 void CheckConfiguration() {
+  // wanted: 1 should be loaded, 0 should not, -1 depends on the profile (reported, never marked "check").
   struct Mod {
     const wchar_t* file;
     const char* what;
-    bool wanted;
+    int wanted;
   };
   const Mod mods[] = {
-      {L"XR_APILAYER_MBUCCHIA_quad_views_foveated.dll", "Quad-Views-Foveated layer", true},
+      {L"XR_APILAYER_MBUCCHIA_quad_views_foveated.dll", "Quad-Views-Foveated layer", 1},
       // The old loader-chain prefetch fix; replaced by [Prefetch] (prefetch_fix.h), which takes over its slots.
-      {L"dxgi2.dll", "old prefetch fix (bin/dxgi2.dll, now in the payload)", false},
-      {L"PiOpenXR_64.dll", "Pimax OpenXR runtime", true},
-      {L"CheekyOpenXRLayer.dll", "Cheeky OpenXR layer (absent in base)", false},
-      {L"XR_APILAYER_XRFrameBridge_diagnostic.dll", "OFXR frame bridge / frame-gen (absent in base)", false},
+      {L"dxgi2.dll", "old prefetch fix (bin/dxgi2.dll, now in the payload)", 0},
+      {L"PiOpenXR_64.dll", "Pimax OpenXR runtime", 1},
+      // Shipped by DCS Control and loaded when the profile uses them (DLSS 5 / Foveated SR, frame generation).
+      {L"CheekyOpenXRLayer.dll", "Cheeky OpenXR layer (DLSS 5, Foveated SR)", -1},
+      {L"XR_APILAYER_XRFrameBridge_diagnostic.dll", "OFXR frame bridge (frame generation)", -1},
   };
   Log("-- configuration --");
   // R30 L8: name the runtime; Pimax and QVFR are only expected on a Pimax runtime (no false warnings for others).
@@ -158,7 +160,7 @@ void CheckConfiguration() {
     bool present = GetModuleHandleW(m.file) != nullptr;
     const bool pimaxOnly = wcscmp(m.file, L"PiOpenXR_64.dll") == 0 ||
                            wcscmp(m.file, L"XR_APILAYER_MBUCCHIA_quad_views_foveated.dll") == 0;
-    const bool check = pimaxOnly && !pimax ? false : present != m.wanted;
+    const bool check = m.wanted < 0 || (pimaxOnly && !pimax) ? false : present != (m.wanted == 1);
     Log("  %-50s %s%s", m.what, present ? "loaded" : "not loaded", check ? "   <-- check" : "");
   }
   WIN32_FILE_ATTRIBUTE_DATA fad{};

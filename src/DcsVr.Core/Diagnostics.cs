@@ -106,25 +106,30 @@ public static partial class Diagnostics
     public static IReadOnlyList<DiagnosticEntry> CreatePackage(DiagnosticSources sources, string report, string zipPath, HeadsetRuntimeInfo? headset = null)
     {
         var entries = new List<DiagnosticEntry>();
-        var redactor = Redactor();
+        // Serial numbers are learnt from every file first, then removed everywhere: a serial is labelled in one log
+        // (Pimax's, written last) and bare in others.
+        var serials = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var redactor = Redactor(Environment.UserName, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Environment.MachineName, serials);
         var temp = zipPath + ".tmp";
+        var learning = true;
+        var scanned = new HashSet<string>(StringComparer.Ordinal);
+        ZipArchive? zip = null;
         try
-        {
-        using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write))
-        using (var zip = new ZipArchive(stream, ZipArchiveMode.Create))
         {
             void Text(string name, string source, string content, bool truncated = false)
             {
+                if (learning) { LearnSerials(content, serials); return; }
                 var bytes = Encoding.UTF8.GetBytes(redactor(content));
-                var entry = zip.CreateEntry(name, CompressionLevel.Optimal);
+                var entry = zip!.CreateEntry(name, CompressionLevel.Optimal);
                 using (var output = entry.Open()) output.Write(bytes);
                 entries.Add(new(name, redactor(source), bytes.Length, truncated));
             }
             void File_(string name, string? path)
             {
-                if (path is null || !File.Exists(path) || entries.Any(e => e.Name == name)) return;
+                if (path is null || !File.Exists(path)) return;
+                if (learning ? !scanned.Add(name) : entries.Any(e => e.Name == name)) return;
                 // The package stays small enough to attach: once 150 MB of text is in, the remaining (older) files are listed only.
-                if (entries.Sum(e => e.Bytes) > 150L * 1024 * 1024) { entries.Add(new(name + " (left out: package size limit)", redactor(path), 0, true)); return; }
+                if (!learning && entries.Sum(e => e.Bytes) > 150L * 1024 * 1024) { entries.Add(new(name + " (left out: package size limit)", redactor(path), 0, true)); return; }
                 try
                 {
                     var length = new FileInfo(path).Length;
@@ -141,6 +146,16 @@ public static partial class Diagnostics
                 foreach (var file in files) File_(prefix + "/" + Path.GetRelativePath(folder, file.FullName).Replace('\\', '/'), file.FullName);
             }
 
+            // Two passes over the same sources: the first only learns serial numbers, the second writes the package.
+            Collect();
+            learning = false;
+            using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write))
+            using (zip = new ZipArchive(stream, ZipArchiveMode.Create))
+                Collect();
+            File.Move(temp, zipPath, true);
+
+            void Collect()
+            {
             Text("report.json", "DCS Control", report);
             var local = sources.LocalAppData ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             var roaming = sources.RoamingAppData ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
@@ -188,7 +203,7 @@ public static partial class Diagnostics
             {
                 Folder("dcs/bin/CheekyFoveatedDLSS", Path.Combine(bin, "CheekyFoveatedDLSS"));
                 File_("dcs/bin/CheekyFoveatedDLSS-Loader.log", Path.Combine(bin, "CheekyFoveatedDLSS-Loader.log"));
-                Text("dcs/bin/modules.txt", bin, BinaryVersions(bin));
+                Text("dcs/bin/modules.txt", bin, learning ? "" : BinaryVersions(bin));
             }
 
             // Headset software.
@@ -209,11 +224,11 @@ public static partial class Diagnostics
                 File_("pimax/AppConfig/global.json", Path.Combine(roaming, "Pimax", "AppConfig", "global.json"));
             }
 
+            if (learning) return;
             Text("openxr.txt", "Windows registry", OpenXrRegistry());
             Text("system.txt", "Windows", SystemSummary());
             Text("README.txt", "DCS Control", Readme(entries));
-        }
-        File.Move(temp, zipPath, true);
+            }
         }
         catch
         {
@@ -257,7 +272,7 @@ public static partial class Diagnostics
 
     private static string Readme(IReadOnlyList<DiagnosticEntry> entries) =>
         $"DCS Control {ProductInfo.Version} diagnostic package, {DateTimeOffset.Now:yyyy-MM-dd HH:mm zzz}.\n"
-        + "Logs and settings of DCS, DCS Control's components and the headset software. The Windows user name, PC name and e-mail addresses are replaced by <user>, <pc> and <e-mail>; account tokens, account ids, Steam IDs and the headset's serial number by <token>, <id>, <steam id> and <serial>.\n"
+        + "Logs and settings of DCS, DCS Control's components and the headset software. The Windows user name, PC name and e-mail addresses are replaced by <user>, <pc> and <e-mail>; account tokens, account ids, Steam IDs and the headset's serial number by <token>, <id>, <steam id> and <serial>; network and MAC addresses by <ip> and <mac>.\n"
         + "Start with summary.txt: the headset software and the in-flight switches of these logs.\n"
         + "Large logs are cut to their last 8 MB (marked below).\n\n"
         + string.Join("\n", entries.Select(e => string.Create(CultureInfo.InvariantCulture, $"{e.Name}  ({e.Bytes:N0} bytes{(e.Truncated ? ", last part" : "")})  from {e.Source}")));
@@ -272,12 +287,12 @@ public static partial class Diagnostics
     /// <summary>Removes what identifies the pilot: the user's profile folder in every spelling a log or JSON uses (\, \\,
     /// /), the user and profile folder names, the PC name, e-mail addresses, and what Pimax's service logs carry
     /// (session tokens, account ids, the headset's serial number).</summary>
-    internal static Func<string, string> Redactor(string user, string profile, string machine)
+    internal static Func<string, string> Redactor(string user, string profile, string machine, HashSet<string>? knownSerials = null)
     {
         var folder = Path.GetFileName(profile.TrimEnd('\\', '/'));
         var names = new[] { user, folder }.Where(n => n.Length >= 3).Distinct(StringComparer.OrdinalIgnoreCase)
             .SelectMany(n => new[] { n, System.Text.Json.JsonEncodedText.Encode(n).ToString() }).Distinct(StringComparer.Ordinal).ToArray();
-        var serials = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var serials = knownSerials ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var paths = profile.Length > 3 ?new[] { (profile, @"C:\Users\<user>"), (profile.Replace("\\", "\\\\"), @"C:\\Users\\<user>"), (profile.Replace('\\', '/'), "C:/Users/<user>") } : [];
         return text =>
         {
@@ -293,13 +308,43 @@ public static partial class Diagnostics
             text = TokenRegex().Replace(text, "${key}${sep}<token>");
             text = AccountRegex().Replace(text, "${key}${sep}<id>");
             // A serial number seen once (next to its label) is removed wherever else it appears, also in later files.
-            foreach (Match m in SerialRegex().Matches(text)) serials.Add(m.Value[(m.Groups["key"].Length + m.Groups["sep"].Length)..]);
-            foreach (var serial in serials) text = text.Replace(serial, "<serial>", StringComparison.OrdinalIgnoreCase);
+            LearnSerials(text, serials);
+            foreach (var serial in serials.OrderByDescending(s => s.Length)) text = text.Replace(serial, "<serial>", StringComparison.OrdinalIgnoreCase);
             // Steam IDs: what Steam's API prints into DCS's output ("Caching Steam ID: 7656119…"), in both spellings.
             text = SteamId64Regex().Replace(text, "<steam id>");
             text = SteamId3Regex().Replace(text, "[U:1:<id>]");
+            // Network addresses: MAC addresses, and IPv4 addresses where they are one (never a version such as 2.9.31.12345).
+            text = MacRegex().Replace(text, "<mac>");
+            text = MacLabelledRegex().Replace(text, "${key}${sep}<mac>");
+            text = Ipv4Regex().Replace(text, m => IsAddress(text, m) ? "<ip>" : m.Value);
             return EmailRegex().Replace(text, "<e-mail>");
         };
+    }
+
+    /// <summary>Adds the headset serial numbers <paramref name="text"/> names to <paramref name="serials"/>: next to a
+    /// serial label (Pimax), as SteamVR's active HMD ("Active HMD set to lighthouse.LHR-…") and as its
+    /// Prop_SerialNumber_String property. Only values with a digit, so a word ("Null Serial Number") is never learnt.</summary>
+    internal static void LearnSerials(string text, ISet<string> serials)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        foreach (Match m in SerialRegex().Matches(text)) serials.Add(m.Groups["serial"].Value);
+        foreach (Match m in SteamVrSerialRegex().Matches(text)) serials.Add(m.Groups["serial"].Value);
+    }
+
+    /// <summary>Whether a dotted quad is a network address rather than a file or DCS version ("3.7.10.0" in
+    /// modules.txt, "2.9.31.12345"): one with a port, one after an address word ("ip", "host", "connect to"…), or one in
+    /// a home or local network range (10.x, 172.16-31.x, 192.168.x, 169.254.x, 100.64-127.x) not after "version".
+    /// Loopback and 0.0.0.0 stay: they are no one's address.</summary>
+    private static bool IsAddress(string text, Match m)
+    {
+        var o = m.Groups["o"].Captures.Select(c => int.Parse(c.Value, CultureInfo.InvariantCulture)).ToArray();
+        if (o[0] is 127 or 0 or 255) return false;
+        var after = m.Index + m.Length;
+        if (after + 1 < text.Length && text[after] == ':' && char.IsAsciiDigit(text[after + 1])) return true;
+        var before = text[Math.Max(0, m.Index - 24)..m.Index];
+        if (AddressWordRegex().IsMatch(before)) return true;
+        var local = o[0] == 10 || (o[0] == 172 && o[1] is >= 16 and <= 31) || (o[0] == 192 && o[1] == 168) || (o[0] == 169 && o[1] == 254) || (o[0] == 100 && o[1] is >= 64 and <= 127);
+        return local && !VersionWordRegex().IsMatch(before);
     }
     [GeneratedRegex(@"(?<!\d)7656119\d{10}(?!\d)")] private static partial Regex SteamId64Regex();
     [GeneratedRegex(@"\[U:1:\d+\]")] private static partial Regex SteamId3Regex();
@@ -307,7 +352,13 @@ public static partial class Diagnostics
     [GeneratedRegex(@"(?<=Users[\\/]{1,2})[^\\/\s]{1,6}~\d+", RegexOptions.IgnoreCase)] private static partial Regex ShortProfileRegex();
     [GeneratedRegex(@"(?<key>\b(?:access_?token|refresh_?token|token|authorization|bearer)\b)(?<sep>[""']?\s*[:=]\s*[""']?\s*)(?!<token>)[^\s,""'}]+", RegexOptions.IgnoreCase)] private static partial Regex TokenRegex();
     [GeneratedRegex(@"(?<key>\b(?:user_?id|account_?id)\b)(?<sep>[""']?\s*[:=]\s*[""']?)\w+", RegexOptions.IgnoreCase)] private static partial Regex AccountRegex();
-    [GeneratedRegex(@"(?<key>\b(?:serial(?:[ _]?number)?|hmd_?sn|device_?sn|sn)\b)(?<sep>[""']?\s*[:=]\s*[""']?)[A-Z0-9][A-Z0-9-]{5,}", RegexOptions.IgnoreCase)] private static partial Regex SerialRegex();
+    [GeneratedRegex(@"(?<key>\b(?:serial(?:[ _]?number)?|hmd_?sn|device_?sn|sn)\b)(?<sep>[""']?\s*[:=]\s*[""']?)(?<serial>(?=[A-Z0-9-]*\d)[A-Z0-9][A-Z0-9-]{5,})", RegexOptions.IgnoreCase)] private static partial Regex SerialRegex();
+    [GeneratedRegex(@"(?:\bActive HMD set to [\w-]+\.|\bProp_SerialNumber_String[\s""':=]{1,40})(?<serial>(?=[\w-]*\d)[A-Za-z0-9][\w-]{5,})", RegexOptions.IgnoreCase)] private static partial Regex SteamVrSerialRegex();
+    [GeneratedRegex(@"(?<![\w.])(?:(?<o>25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?<o>25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?!\w|\.\d)")] private static partial Regex Ipv4Regex();
+    [GeneratedRegex(@"(?:\b(?:ip|ipv4|addr|address|host|hostname|server|client|peer|remote|gateway|dns|connect(?:ed|ing)?\s+to)|@)\W{0,4}$", RegexOptions.IgnoreCase)] private static partial Regex AddressWordRegex();
+    [GeneratedRegex(@"\b(?:version|ver|build)\W{0,3}$", RegexOptions.IgnoreCase)] private static partial Regex VersionWordRegex();
+    [GeneratedRegex(@"(?<![\w:-])[0-9A-F]{2}(?<s>[:-])(?:[0-9A-F]{2}\k<s>){4}[0-9A-F]{2}(?![\w:-])", RegexOptions.IgnoreCase)] private static partial Regex MacRegex();
+    [GeneratedRegex(@"(?<key>\bmac(?:[ _]?addr(?:ess)?)?\b)(?<sep>[""']?\s*[:=]\s*[""']?)[0-9A-F]{12}\b", RegexOptions.IgnoreCase)] private static partial Regex MacLabelledRegex();
 
     /// <summary>A file another program may be writing: whole up to <paramref name="head"/> + <paramref name="tail"/> bytes,
     /// otherwise its first <paramref name="head"/> and last <paramref name="tail"/> bytes with a line saying what was left out.</summary>

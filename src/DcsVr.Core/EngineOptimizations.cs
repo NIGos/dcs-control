@@ -9,7 +9,12 @@ namespace DcsVr.Core;
 /// (DriverCommandLists=0): the option to run the recorders on emulated lists can matter.</param>
 public sealed record EngineStatus(string State, string Summary, IReadOnlyList<string> Warnings, bool TimerCacheAvailable, bool TimerCacheActive,
     bool SceneHooked, bool SuiteRunning, string ModuleDirectory, string? LogPath, string? LastReport, DateTime? LastReportAt, string? LastStats,
-    bool NoDriverCommandLists = false);
+    bool NoDriverCommandLists = false, IReadOnlyList<string>? VersionWarnings = null)
+{
+    /// <summary>The warnings that say a part stayed off because it does not know this DCS build (a subset of
+    /// <see cref="Warnings"/>): the Checks page repeats them, as they matter also with Engine Optimizations off.</summary>
+    public IReadOnlyList<string> VersionWarnings { get; init; } = VersionWarnings ?? [];
+}
 
 /// <summary>The module's shader warm-up (warmup.json next to its log, native/dcsqvcull/src/warmup_status.h).</summary>
 /// <param name="State">"prewarm" (stale variants rechecked, usually in the main menu) or "warming" (the scene's variants
@@ -112,8 +117,10 @@ public static class EngineOptimizations
         var settings = lines.LastOrDefault(l => l.Contains("config: dev mode", StringComparison.Ordinal));
         var devIni = settings is not null && settings.Contains("dev mode, settings from ", StringComparison.Ordinal)
             ? settings[(settings.IndexOf("dev mode, settings from ", StringComparison.Ordinal) + 24)..].Trim() : null;
+        var version = new List<string>();
+        void Version(string warning) { warnings.Add(warning); version.Add(warning); }
         if (Has("partition boost: unexpected scene layout"))
-            warnings.Add("This DCS version changed something Culling partition boost relies on, so it turned itself off. The other optimizations still run.");
+            Version("This DCS version changed something Culling partition boost relies on, so it turned itself off. The other optimizations still run.");
         // A graphics driver without D3D11 command lists (common on AMD) cannot run the multi-threaded recorders: not an
         // error, DCS draws shadows and the G-buffer as usual.
         // The module's line names each capability, the device's creation flags and DCS's adapter (before 0.5.7: one
@@ -124,29 +131,35 @@ public static class EngineOptimizations
         foreach (var (prefix, name) in new[] { ("model allocator:", "model data allocator"), ("triangle counter:", "statistics counter"),
                      ("constant buffer skip:", "effect constant-buffer skip"), ("texture binds:", "texture streaming dedupe"), ("partition weights:", "culling partition by real cost"), ("frame heap:", "frame memory per thread"), ("task-queue clock:", "task queue clock cache"), ("shadow batching:", "shadow caster instancing"), ("shadow inst:", "shadow caster instancing"), ("big model pages:", "shadow caster instancing"), ("split filter", "redundant state filter"), ("shadow recorder", "multi-threaded shadow recorder"), ("gbuffer recorder", "multi-threaded G-buffer") })
             if (lines.Any(l => l.Contains(prefix, StringComparison.Ordinal) && !l.Contains("not recordable", StringComparison.Ordinal) && !l.Contains("texture classes the table refused", StringComparison.Ordinal) && !l.Contains("the driver lacks command lists", StringComparison.Ordinal) && !l.Contains("the D3D11 device lacks what the recorder needs", StringComparison.Ordinal) && !l.Contains("quad-view filter", StringComparison.Ordinal) && !l.Contains("execution identity", StringComparison.Ordinal) && (l.Contains("does not match", StringComparison.Ordinal) || l.Contains("unexpected bytes", StringComparison.Ordinal) || l.Contains("unknown patch", StringComparison.Ordinal) || l.Contains("could not", StringComparison.Ordinal) || l.Contains("FAILED", StringComparison.Ordinal) || l.Contains("disabled for this session", StringComparison.Ordinal) || l.Contains("off for this session", StringComparison.Ordinal) || l.Contains("NOT SAFE", StringComparison.Ordinal) || l.Contains("latched", StringComparison.Ordinal) || (l.Contains("exception", StringComparison.OrdinalIgnoreCase) && l.Contains("contained", StringComparison.Ordinal)) || l.Contains("DISABLED", StringComparison.Ordinal) || l.EndsWith("; unavailable", StringComparison.Ordinal) || l.Contains("; jobs start at RenderGraph::render entry", StringComparison.Ordinal) || l.EndsWith("; off", StringComparison.Ordinal) || l.EndsWith("; skipped", StringComparison.Ordinal) || l.Contains("not installed", StringComparison.Ordinal) && !l.Contains("counters not installed", StringComparison.Ordinal))))
-                warnings.Add($"{char.ToUpperInvariant(name[0])}{name[1..]} turned itself off: it does not recognise this DCS version, or one of its safety checks failed. The other optimizations still run.");
+                Version($"{char.ToUpperInvariant(name[0])}{name[1..]} turned itself off: it does not recognise this DCS version, or one of its safety checks failed. The other optimizations still run.");
         // Depth boost's dual camera finds the pilot's own aircraft through a table in NGModel.dll; a DCS build that moved it
         // leaves that matching off (the dual camera itself keeps running).
         if (Has("cockpit ipd: ownship matching off"))
-            warnings.Add("This DCS version changed something the dual camera uses to recognise your own aircraft, so that part is off. Depth boost still runs.");
+            Version("This DCS version changed something the dual camera uses to recognise your own aircraft, so that part is off. Depth boost still runs.");
         // The frame-timing helpers (frame start, view profile, frame timeline, cockpit outline) know the DCS builds they were
         // analysed on; on another (a newer DCS) they stay off or fall back. One line, whichever said so.
         if (Has("is not an analysed build"))
-            warnings.Add("DCS Control has not been checked against this DCS version yet, so some frame timing helpers are off. Everything else runs.");
+            Version("DCS Control has not been checked against this DCS version yet, so some frame timing helpers are off. Everything else runs.");
+        // Depth boost's dual camera hooks a G-buffer pass of a known build (cockpit_ipd.h Start); Sharp HUD hooks DCS's HUD
+        // record render point (symbology.h). On another build each stays off, and said so only in the module's log.
+        if (Has("cockpit ipd: build mismatch"))
+            Version("This DCS version changed something Depth boost's dual camera needs, so Depth boost is off.");
+        if (lines.LastOrDefault(l => l.Contains("symbology: record render point ", StringComparison.Ordinal)) is { } hud && hud.Contains("NOT hooked", StringComparison.Ordinal))
+            Version("Sharp HUD did not find where this DCS version draws the HUD, so it is off. Frame generation still runs.");
         if (Has("ERROR: Scene.dll exports not found"))
-            warnings.Add("This DCS version is not supported by the culling hook, so Culling partition boost is off. The other optimizations still run.");
+            Version("This DCS version is not supported by the culling hook, so Culling partition boost is off. The other optimizations still run.");
         // A suite is running from its start line until its report line (statistics keep arriving after both).
         var started = lines.FindLastIndex(l => l.Contains("==== DcsQvCull test suite", StringComparison.Ordinal));
         var written = lines.FindLastIndex(l => l.Contains("report written to report_", StringComparison.Ordinal) || l.Contains("==== suite aborted", StringComparison.Ordinal));
         var running = dcsRunning && (File.Exists(Path.Combine(module, SuiteFlag)) || (started >= 0 && started > written));
-        if (!loaded) return new("installed", "Installed, but DCS has not started it yet.", warnings, false, false, false, running, module, log, report, reportAt, lastStats, noLists);
+        if (!loaded) return new("installed", "Installed, but DCS has not started it yet.", warnings, false, false, false, running, module, log, report, reportAt, lastStats, noLists, version);
         var parts = new List<string> { dcsRunning ? "Loaded in the running DCS" : "Loaded at the last DCS start" };
         if (devPayload is not null) parts.Add("developer payload " + devPayload);
         if (devIni is not null) parts.Add("developer settings " + devIni);
         if (dcsRunning && switchedOff) parts.Add("switched off in flight (press the in-flight switch again)");
         parts.Add(timerAvailable ? (timerActive || lastStats is null ? "streaming timer cache on" : "streaming timer cache off") : "streaming timer cache not available");
         parts.Add(scene ? "culling hook on" : "culling hook not seen yet");
-        return new("loaded", string.Join(" · ", parts) + ".", warnings, timerAvailable, timerActive, scene, running, module, log, report, reportAt, lastStats, noLists);
+        return new("loaded", string.Join(" · ", parts) + ".", warnings, timerAvailable, timerActive, scene, running, module, log, report, reportAt, lastStats, noLists, version);
     }
 
     /// <summary>Starts the in-game test suite: DcsQvCull checks for run_suite.flag next to its DLL every second.</summary>

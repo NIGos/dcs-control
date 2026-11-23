@@ -808,7 +808,8 @@ function buildFields() {
   c = card('boostControls','CPU Boost','Applied by Launch DCS, undone when DCS exits.');
   field(c,'cpuBoost','CPU Boost','Gives DCS priority and its best CPU cores; other programs move aside.','toggle');
   segmented(field(c,'boostDcsPriority','DCS priority','Above normal suits most setups. High can starve audio, input and headset services when DCS uses every core.','select',[['Normal','Normal'],['AboveNormal','Above normal · recommended'],['High','High']],boost),{Normal:'Normal',AboveNormal:'Above normal',High:'High'});
-  field(c,'boostMoveVrRuntime','Move VR runtime and headset services','Keeps Pimax or SteamVR services off DCS\'s main and render cores.','toggle',null,p => boost(p) && !p.desktop,'',p => p.desktop);
+  // Pimax route only: BoostPlanner.VrRuntimeServices moves nothing on the SteamVR and Quest 3 VD routes (their compositors stay put).
+  field(c,'boostMoveVrRuntime','Move VR runtime and headset services','Keeps Pimax\'s runtime and headset services off DCS\'s main and render cores.','toggle',null,p => boost(p) && !p.desktop && p.runtime === 'Pimax','',p => p.desktop);
   field(c,'boostMoveBackgroundApps','Move background apps','Moves the apps below to the slowest cores, at below-normal priority, while DCS runs.','toggle',null,boost);
   field(c,'boostBackgroundApps','Background apps','Names as in Task Manager\'s Details tab, one per line, without .exe.','list',null,p => boost(p) && p.boostMoveBackgroundApps);
   field(c,'boostElevated','Administrator rights',['Lets system services be moved too (asks UAC when DCS starts).','DCS itself still runs as your user. Off: those services are left as they are.'],'toggle',null,boost);
@@ -1031,7 +1032,7 @@ function buildFields() {
   because(at('engineTaskQueueClock','engineTimerRefreshUs'),p => !engine(p) ? engineWhy : 'Turn on Streaming timer cache to use this.');
   because(at('engineDevPayloadPath','engineDevIniPath'),p => !engine(p) ? engineWhy : 'Turn on Developer mode to use this.');
   because(f => f.condition === engine,engineWhy);
-  because(at('boostMoveVrRuntime'),p => !boost(p) ? boostWhy : 'Not with Optimizations only.');
+  because(at('boostMoveVrRuntime'),p => !boost(p) ? boostWhy : p.desktop ? 'Not with Optimizations only.' : 'Pimax route only. On the SteamVR and Quest 3 VD routes nothing is moved.');
   because(at('boostBackgroundApps'),p => !boost(p) ? boostWhy : 'Turn on Move background apps to edit this list.');
   because(f => f.condition === boost,boostWhy);
   because(f => f.condition === vram,'Turn on Free VRAM before flight to change these.');
@@ -1173,7 +1174,11 @@ function renderEngine() {
   // optimizations (its Perception-only mode; VrProfile.UsesEngineModule).
   const moduleUsed = Boolean(profile && (profile.engineOptimizations || usesDepthBoost(profile) || usesVisualRealism(profile) || usesFarDepth(profile) || (profile.frameGen !== 'Off' && !profile.desktop)));
   const pending = profile && moduleUsed !== (s.state !== 'not-installed') ? `<p class="fine">${moduleUsed ? 'Launch DCS installs it with this profile.' : 'Launch DCS removes it with this profile.'}</p>` : '';
-  const users = profile ? [usesDepthBoost(profile) ? 'Depth boost' : null, usesVisualRealism(profile) ? 'Visual realism' : null].filter(Boolean).join(' and ') : '';
+  const frameGenOn = Boolean(profile && profile.frameGen !== 'Off' && !profile.desktop);
+  // Every feature VrProfile.UsesEngineModule counts: frame generation takes the cockpit outline, depth and motion from it.
+  const names = profile ? [usesDepthBoost(profile) ? 'Depth boost' : null, usesVisualRealism(profile) ? 'Visual realism' : null, usesFarDepth(profile) ? 'Far depth' : null,
+    frameGenOn ? 'frame generation' : null, usesHudSymbology(profile) ? 'Sharp HUD' : null].filter(Boolean) : [];
+  const users = names.length > 1 ? names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1] : names.join('');
   const perceptionOnly = profile && !profile.engineOptimizations && users ? `<p class="fine">Used by ${users} only: none of the optimizations run, and there is no test suite.</p>` : '';
   const devNote = profile?.engineOptimizations && profile.engineDevMode ? '<p class="pimax-note warn">Developer mode is on: DCS loads the module and its settings from the developer paths, not the ones this release installs. Turn it off on the left for normal flying.</p>' : '';
   box.innerHTML = devNote + `<div class="engine-state ${escape(s.state)}"><b>${escape(ENGINE_STATE[s.state] || s.state)}</b><span>${escape(s.summary)}</span></div>${pending}${perceptionOnly}`

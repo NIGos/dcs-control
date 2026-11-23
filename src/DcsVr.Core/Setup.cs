@@ -63,7 +63,13 @@ public static class Readiness
         if (profile.NeuralRendering && inventory.OptionsPath is not null)
             Add("hud-after-dlss", inventory.AutoexecHudAfterDlss == true ? CheckState.Pass : CheckState.Warning, "HUD after DLSS",
                 inventory.AutoexecHudAfterDlss == true ? "autoexec.cfg draws the HUD and MFDs after DLSS, so DLSS 5 leaves them sharp."
-                    : "DLSS 5 can blur or ghost the HUD and MFDs. To keep them sharp, add HUD_MFD_after_DLSS = true to Saved Games\\DCS\\Config\\autoexec.cfg (create the file if needed).");
+                    // The Config folder of the selected options.lua: Saved Games\DCS.openbeta for an open beta, not always DCS.
+                    : $"DLSS 5 can blur or ghost the HUD and MFDs. To keep them sharp, add HUD_MFD_after_DLSS = true to {Path.Combine(Path.GetDirectoryName(Path.GetFullPath(inventory.OptionsPath)) ?? "", "autoexec.cfg")} (create the file if needed).");
+        // Parts of the engine module made for known DCS builds stay off on another one. The Engine page says so, but a pilot
+        // with frame generation and Engine Optimizations off has no reason to open it (open item 9).
+        if (profile.UsesEngineModule && inventory.OptionsPath is { } engineOptions && File.Exists(engineOptions)
+            && EngineOptimizations.Read(engineOptions, null, inventory.DcsRunning).VersionWarnings is { Count: > 0 } offOnThisBuild)
+            Add("engine-dcs-version", CheckState.Warning, "DCS version", "At the last DCS start: " + string.Join(" ", offOnThisBuild));
         if (!profile.Desktop && inventory.Layers.Any(l => l.Enabled && VectorXr.Is(l)))
             Add("vectorxr", CheckState.Pass, "VectorXR", "Installed. Launch DCS keeps it off in DCS so it doesn't stack with these settings. Started from Steam or a shortcut, DCS still loads it; other games keep it.");
         var foreign = inventory.Layers.Where(l => l.Enabled && !GazeBridge.IsManaged(l, profile) && !VectorXr.Is(l)).Select(l => l.Name ?? Path.GetFileName(l.ManifestPath)).ToArray();

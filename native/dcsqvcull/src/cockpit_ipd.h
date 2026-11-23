@@ -2156,7 +2156,7 @@ void CapturePrev(int t, const uint8_t* s) {
         err = std::max(err, std::fabs(pvp.a[r][c] - st.vp.a[r][c]));
         sc = std::max(sc, std::fabs(pvp.a[r][c]));
       }
-    (err <= 1e-5 * sc ? g_st.prevOk : g_st.prevBad)++;
+    (err <= 1e-5 * sc ? g_st.prevOk : g_st.prevBad)++;  // legacy counters, logged as "legacy prev VP exact-equality"
   }
   // gPrevFrameTransform against gViewProjInv * gPrevFrameViewProj (diagnostic).
   double xfRes = 0;
@@ -6305,8 +6305,8 @@ void LogStats() {
   Log("cockpit ipd: G-buffer execs %llu (cockpit %llu, not HMD %llu, other tag %llu, no identity %llu) passes "
       "gb/fwd %llu/%llu (forward passes %llu, not armed %llu, nested %llu, handed over %llu) uploads %llu patched %llu observed %llu tail %llu "
       "restored %llu; skipped: partialBox %llu sub %llu big %llu unknown %llu selfchk %llu (camera far %llu) no "
-      "upload %llu ambiguous %llu restFull %llu fwdFail %llu (not armed %llu, arm lost %llu, unpatched %llu); stencil ok %llu mismatch %llu world40 %llu; prev VP ok "
-      "%llu bad %llu; boost reads %llu torn %llu dry %llu, gaze %llu; lightSplit %llu lightSkip %llu (no copy %llu) "
+      "upload %llu ambiguous %llu restFull %llu fwdFail %llu (not armed %llu, arm lost %llu, unpatched %llu); stencil ok %llu mismatch %llu world40 %llu; legacy prev VP exact-equality (not a fault; the gPrevFrameViewProj line is the check) equal "
+      "%llu differ %llu; boost reads %llu torn %llu dry %llu, gaze %llu; lightSplit %llu lightSkip %llu (no copy %llu) "
       "arms %llu; uploads from another thread %llu",
       u(g_st.gbExecs), u(g_st.ckExecs), u(g_st.ckNotHmd), u(g_st.tagOther), u(g_st.idFail), u(g_st.gbPatched),
       u(g_st.fwdPatched), u(g_st.fwdPasses), u(g_st.fwdNoArm), u(g_st.fwdNested), u(g_st.fwdHandover), u(g_st.uploadsSeen), u(g_st.patched),
