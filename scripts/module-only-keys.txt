@@ -40,7 +40,7 @@ Perception	SymbologyTrace	developer trace (R94, dev ini)
 Perception	SymbologyTraceSegments	developer trace (R94, dev ini)
 Perception	SymbologyTraceTone	developer trace (R94, dev ini)
 Perception	SymbologyTraceViews	developer trace (R94, dev ini)
-Prefetch	SpinCap	opt-in tuning of the prefetch fix (0.7), default 0 = off
+Prefetch	SpinCap	tuning of the prefetch fix (0.7), default 600 ships, 0 = off, hand edit only
 Shadow	FloorY	tuning of TightCasters (research, off)
 Shadow	MarginFrac	tuning of TightCasters (research, off)
 Shadow	MarginMin	tuning of TightCasters (research, off)
