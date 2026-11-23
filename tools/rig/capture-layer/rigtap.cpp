@@ -40,6 +40,27 @@
 // The log says SIMULATED EYE GAZE once a second while it serves; simgaze_trace.csv holds every served sample.
 // Pimax PVR's own eye API (Pupil shift's Depth boost with [DepthBoost] PimaxPvrGaze=1) is not OpenXR and is not
 // covered: the rig runner sets PimaxPvrGaze=0 in the flown copy when a scenario uses simGaze.
+//
+// Simulated head (RIGTAP_SIMHEAD=1 with RIGTAP_DIR; read at instance creation; off otherwise). Every layer above this
+// one (OFXR, Quad Views, DCS) sees a scripted head, tracked, also in a dark room where the runtime has lost tracking:
+//   - xrLocateViews on a non-VIEW space: the runtime's eye poses in the head (located in a VIEW space of the layer's
+//     own) placed on the simulated head; view state VALID|TRACKED (none while the program says lost);
+//   - xrLocateSpace of an application VIEW reference space against a non-VIEW space (or the reverse): the simulated
+//     head (with the space's own pose offset); velocities are reported as unknown;
+//   - the simulated gaze (above) is placed on the simulated head;
+//   - xrEndFrame: projection layers' view poses are moved from the simulated head to the runtime's real head
+//     (pose' = real x simulated^-1 x pose), so the compositor reprojects nothing and shows what the application drew.
+// The simulated head = base x turn(program x, y): x = yaw right, y = pitch up (degrees, simgaze.h program syntax;
+// move_ms gives head-speed turns), evaluated at the time asked (the display time), so every layer and every frame
+// generation step sees one consistent motion.
+//   RIGTAP_SIMHEAD_PROGRAM  the first program, default mode=fixed;x=0;y=0 (mode=off: the runtime's head passes through)
+//   RIGTAP_SIMHEAD_BASE     frozen (default): the runtime's head at the first query for each base space, held for the
+//                           session (identity when the runtime gives no usable orientation: dark room, no headset);
+//                           live: the runtime's head of the moment (the program turns it further)
+//   <RIGTAP_DIR>\head.txt   a new program, polled four times a second; renamed head.taken-<n>.txt / head.rejected-<n>.txt.
+// One clock for both: a new head or gaze program moves the shared program epoch to the next query of either, so a head
+// program and a gaze program written together (eyes countering a head sweep) run in phase.
+// The log says SIMULATED HEAD once a second while it serves; simhead_trace.csv holds every served pose.
 // A scale is a box average done on the GPU when the texture takes a raw (UNORM) shader view, so only the small image
 // is read back; else the region is read at full size and averaged on the writer thread.
 // The file is renamed to arm.taken-<n>.txt when read. Each capture goes to <RIGTAP_DIR>\cap<n>[_tag]\ with
@@ -72,6 +93,7 @@
 #include <openxr/openxr_loader_negotiation.h>
 #include <set>
 #include "simgaze.h"
+#include "simhead.h"
 
 namespace {
 const uint32_t kDefaultFrames = 40, kHardCap = 120;
@@ -94,7 +116,7 @@ PFN_xrLocateViews g_nextLocate = nullptr; double g_invalidMs = 0; long long g_in
 bool g_sim = false;                    // decided at instance creation
 bool g_simRuntimeExt = false;          // the runtime's instance has XR_EXT_eye_gaze_interaction enabled
 std::mutex g_simMu;                    // everything below
-simgaze::Program g_simProg; bool g_simRestart = true; XrTime g_simStart = 0; unsigned g_simProgN = 0, g_simFileN = 0;
+simgaze::Program g_simProg; unsigned g_simProgN = 0, g_simFileN = 0;
 XrPath g_pathProfile = XR_NULL_PATH, g_pathGaze = XR_NULL_PATH, g_pathEyes = XR_NULL_PATH;
 std::set<XrAction> g_gazeActions;
 struct SimSpace { XrAction action; XrSession session; };
@@ -106,6 +128,19 @@ PFN_xrGetSystemProperties g_nextSysProps = nullptr; PFN_xrStringToPath g_nextStr
 PFN_xrSuggestInteractionProfileBindings g_nextSuggest = nullptr; PFN_xrCreateActionSpace g_nextCreateActionSpace = nullptr;
 PFN_xrDestroySpace g_nextDestroySpace = nullptr; PFN_xrGetActionStatePose g_nextPose = nullptr; PFN_xrLocateSpace g_nextLocateSpace = nullptr;
 PFN_xrGetCurrentInteractionProfile g_nextCurProfile = nullptr;
+
+// Simulated head state (functions after Log and Qpc). Reference spaces of the application: type, session, pose offset.
+struct RefInfo { int type = 0; XrSession session = XR_NULL_HANDLE; simhead::Pose offset; };
+std::map<XrSpace, RefInfo> g_refInfo; std::map<XrSession, XrSpace> g_ownView;   // g_spaceMu
+bool g_head = false, g_headLive = false;    // decided at instance creation
+std::mutex g_headMu;                         // everything below
+simgaze::Program g_headProg; unsigned g_headProgN = 0, g_headFileN = 0;
+std::map<XrSpace, simhead::Pose> g_headFrozen;
+// One clock: a new program of either (or the first ones) moves the shared epoch to the next query.
+std::atomic<bool> g_epochPending{true}; std::atomic<long long> g_epoch{0};
+XrTime ProgramTime(XrTime time) { if (g_epochPending.exchange(false) || g_epoch.load() == 0) g_epoch = (long long)time; return time - (XrTime)g_epoch.load(); }
+unsigned long long g_headViews = 0, g_headSpaces = 0, g_headFrames = 0, g_headFramesKept = 0, g_headUntracked = 0, g_headSec = 0;
+float g_headLastX = 0, g_headLastY = 0; long long g_headStatQpc = 0, g_headPollQpc = 0; FILE* g_headTrace = nullptr;
 struct Sc {
   uint64_t id = 0; XrSession session = XR_NULL_HANDLE; uint32_t w = 0, h = 0, array = 0, mips = 0, samples = 0, faces = 0; int64_t fmt = 0; uint64_t usage = 0, createFlags = 0;
   long long createdQpc = 0; int dxgiFormat = 0; std::vector<ID3D12Resource*> images; std::deque<uint32_t> acquired; int lastReleased = -1; uint64_t releaseSeq = 0; bool alive = true;
@@ -460,11 +495,120 @@ bool CaptureFrame(const XrFrameEndInfo* info, const char** why) {
   return true;
 }
 
+// ---- simulated head (see the header comment) -----------------------------------------------------------------------
+simhead::Pose FromXr(const XrPosef& p) { simhead::Pose r; r.q = {p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w}; r.p[0] = p.position.x; r.p[1] = p.position.y; r.p[2] = p.position.z; return r; }
+XrPosef ToXr(const simhead::Pose& p) { return XrPosef{{p.q.x, p.q.y, p.q.z, p.q.w}, {p.p[0], p.p[1], p.p[2]}}; }
+bool RefOf(XrSpace sp, RefInfo& out) { std::lock_guard<std::mutex> l(g_spaceMu); auto it = g_refInfo.find(sp); if (it == g_refInfo.end()) return false; out = it->second; return true; }
+XrSpace OwnView(XrSession s) { std::lock_guard<std::mutex> l(g_spaceMu); auto it = g_ownView.find(s); return it == g_ownView.end() ? XR_NULL_HANDLE : it->second; }
+// g_headMu held. Takes head.txt when present (at most four times a second).
+void HeadPollLocked() {
+  const long long now = Qpc(); if (g_headPollQpc && now - g_headPollQpc < g_qpf / 4) return; g_headPollQpc = now;
+  const std::wstring path = g_dir + L"\\head.txt"; if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+  std::string text; if (FILE* f = _wfopen(path.c_str(), L"rb")) { char b[4096]; size_t n; while ((n = fread(b, 1, sizeof b, f)) > 0) text.append(b, n); fclose(f); } else return;
+  simgaze::Program p; std::string err; const bool ok = simgaze::parse(text, p, err);
+  wchar_t to[64]; swprintf(to, 64, ok ? L"\\head.taken-%u.txt" : L"\\head.rejected-%u.txt", ++g_headFileN); MoveFileExW(path.c_str(), (g_dir + to).c_str(), MOVEFILE_REPLACE_EXISTING);
+  if (!ok) { Log("SIMULATED HEAD: head.txt #%u rejected (%s); program #%u stays", g_headFileN, err.c_str(), g_headProgN); return; }
+  g_headProg = std::move(p); ++g_headProgN; g_epochPending = true;
+  Log("SIMULATED HEAD: program #%u from head.txt #%u: mode=%s (%s)", g_headProgN, g_headFileN, simgaze::mode_name(g_headProg.mode), g_headProg.text.c_str());
+}
+// g_headMu held: the once-a-second line.
+void HeadStatLocked() {
+  const long long now = Qpc(); if (g_headStatQpc && now - g_headStatQpc < g_qpf) return; g_headStatQpc = now;
+  if (g_headSec == 0 && (g_headViews | g_headSpaces | g_headFrames)) return;
+  Log("SIMULATED HEAD ACTIVE: program #%u mode=%s base %s; views located %llu, head located %llu, frames moved to the real head %llu (left %llu), untracked answers %llu; frozen bases %zu; last yaw %.2f pitch %.2f deg",
+    g_headProgN, simgaze::mode_name(g_headProg.mode), g_headLive ? "live" : "frozen", g_headViews, g_headSpaces, g_headFrames, g_headFramesKept, g_headUntracked, g_headFrozen.size(), g_headLastX, g_headLastY);
+  g_headSec = 0; if (g_headTrace) fflush(g_headTrace);
+}
+// The simulated head in `base` at `time`. false: not simulated here (mode off, unknown space, no own VIEW space): the
+// caller passes the runtime's answer through. *tracked false while the program says lost.
+bool HeadPose(XrSession session, XrSpace base, XrTime time, const char* what, simhead::Pose& out, bool& tracked) {
+  if (!g_head) return false;
+  const XrSpace view = OwnView(session); if (view == XR_NULL_HANDLE) return false;
+  simgaze::Sample g; double tp = 0; bool needBase = true; simhead::Pose b;
+  { std::lock_guard<std::mutex> l(g_headMu); HeadPollLocked();
+    if (g_headProg.mode == simgaze::Mode::off) { HeadStatLocked(); return false; }
+    tp = double(ProgramTime(time)) * 1e-9; g = simgaze::evaluate(g_headProg, tp);
+    if (!g_headLive) { auto it = g_headFrozen.find(base); if (it != g_headFrozen.end()) { b = it->second; needBase = false; } } }
+  if (needBase) {
+    XrSpaceLocation real{XR_TYPE_SPACE_LOCATION}; const XrResult r = g_nextLocateSpace(view, base, time, &real);
+    const simhead::Pose rp = FromXr(real.pose); const bool ok = XR_SUCCEEDED(r) && simhead::usable(rp.q);
+    std::lock_guard<std::mutex> l(g_headMu);
+    auto it = g_headFrozen.find(base);
+    if (g_headLive) { if (ok) { b = rp; b.q = simhead::normalized(b.q); g_headFrozen[base] = b; } else if (it != g_headFrozen.end()) b = it->second; }  // the last good head stands in
+    else if (it != g_headFrozen.end()) b = it->second;
+    else { if (ok) b = rp; b.q = simhead::normalized(b.q); g_headFrozen[base] = b;
+      Log("SIMULATED HEAD: base for space %llx frozen at the runtime's head (result %d, flags %llu%s): q %.4f %.4f %.4f %.4f p %.3f %.3f %.3f",
+        (unsigned long long)base, (int)r, (unsigned long long)real.locationFlags, ok ? "" : ", no usable orientation: identity", b.q.x, b.q.y, b.q.z, b.q.w, b.p[0], b.p[1], b.p[2]); }
+  }
+  tracked = g.valid;
+  out = simhead::compose(b, simhead::turn(g.valid ? g.x : 0.f, g.valid ? g.y : 0.f));
+  { std::lock_guard<std::mutex> l(g_headMu); ++g_headSec; if (!tracked) ++g_headUntracked; else { g_headLastX = g.x; g_headLastY = g.y; }
+    if (g_headTrace) fprintf(g_headTrace, "%lld,%lld,%s,%llx,%.6f,%.4f,%.4f,%d\n", Qpc(), (long long)time, what, (unsigned long long)base, tp, g.x, g.y, tracked ? 1 : 0);
+    HeadStatLocked(); }
+  return true;
+}
+// An application VIEW reference space located against a non-VIEW one (or the reverse): answered with the simulated head.
+bool HeadLocateSpace(XrSpace space, XrSpace base, XrTime time, XrSpaceLocation* loc) {
+  if (!g_head || !loc) return false;
+  RefInfo si, bi; const bool sRef = RefOf(space, si), bRef = RefOf(base, bi);
+  const bool sView = sRef && si.type == (int)XR_REFERENCE_SPACE_TYPE_VIEW, bView = bRef && bi.type == (int)XR_REFERENCE_SPACE_TYPE_VIEW;
+  if (sView == bView) return false;
+  simhead::Pose h; bool tracked = false; simhead::Pose pose;
+  if (sView) { if (!bRef || !HeadPose(si.session, base, time, "space", h, tracked)) return false; pose = simhead::compose(h, si.offset); }
+  else { if (!sRef || !HeadPose(bi.session, space, time, "space-inv", h, tracked)) return false; pose = simhead::inverse(simhead::compose(h, bi.offset)); }
+  loc->pose = ToXr(pose);
+  loc->locationFlags = tracked ? (XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT) : 0;
+  for (auto* n = (XrBaseOutStructure*)loc->next; n; n = n->next) if (n->type == XR_TYPE_SPACE_VELOCITY) ((XrSpaceVelocity*)n)->velocityFlags = 0;
+  { std::lock_guard<std::mutex> l(g_headMu); ++g_headSpaces; }
+  return true;
+}
+// xrEndFrame: projection layers' view poses moved from the simulated head to the runtime's real one. Storage for the
+// rewritten structures lives in `keep` until the call returns.
+struct HeadFrame { std::vector<XrCompositionLayerProjection> proj; std::vector<std::vector<XrCompositionLayerProjectionView>> views; std::vector<const XrCompositionLayerBaseHeader*> layers; XrFrameEndInfo info{}; };
+const XrFrameEndInfo* HeadMoveFrame(XrSession s, const XrFrameEndInfo* info, HeadFrame& keep) {
+  if (!g_head || !info || !info->layers || info->layerCount == 0) return info;
+  const XrSpace view = OwnView(s); if (view == XR_NULL_HANDLE) return info;
+  keep.proj.reserve(info->layerCount); keep.views.reserve(info->layerCount); keep.layers.assign(info->layers, info->layers + info->layerCount);
+  bool changed = false; unsigned kept = 0;
+  for (uint32_t i = 0; i < info->layerCount; ++i) {
+    const XrCompositionLayerBaseHeader* L = info->layers[i];
+    if (!L || L->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
+    const auto* p = (const XrCompositionLayerProjection*)L; RefInfo ri;
+    if (!p->views || !RefOf(p->space, ri) || ri.type == (int)XR_REFERENCE_SPACE_TYPE_VIEW) { ++kept; continue; }
+    simhead::Pose sim; bool tracked = false;
+    if (!HeadPose(s, p->space, info->displayTime, "end", sim, tracked)) { ++kept; continue; }
+    XrSpaceLocation real{XR_TYPE_SPACE_LOCATION}; const XrResult r = g_nextLocateSpace(view, p->space, info->displayTime, &real);
+    simhead::Pose rp = FromXr(real.pose); if (XR_FAILED(r) || !simhead::usable(rp.q)) { ++kept; continue; }
+    const simhead::Pose d = simhead::compose(rp, simhead::inverse(sim));
+    keep.views.emplace_back(p->views, p->views + p->viewCount);
+    for (auto& v : keep.views.back()) v.pose = ToXr(simhead::compose(d, FromXr(v.pose)));
+    keep.proj.push_back(*p); keep.proj.back().views = keep.views.back().data();
+    keep.layers[i] = (const XrCompositionLayerBaseHeader*)&keep.proj.back(); changed = true;
+  }
+  { std::lock_guard<std::mutex> l(g_headMu); if (changed) ++g_headFrames; if (kept) ++g_headFramesKept; }
+  if (!changed) return info;
+  keep.info = *info; keep.info.layers = keep.layers.data(); return &keep.info;
+}
+void HeadInit() {
+  std::lock_guard<std::mutex> l(g_headMu);
+  g_headFrozen.clear(); g_headViews = g_headSpaces = g_headFrames = g_headFramesKept = g_headUntracked = g_headSec = 0; g_epochPending = true; g_headStatQpc = g_headPollQpc = 0;
+  g_headLive = EnvA("RIGTAP_SIMHEAD_BASE") == "live";
+  std::string text = EnvA("RIGTAP_SIMHEAD_PROGRAM"); if (text.empty()) text = "mode=fixed;x=0;y=0";
+  simgaze::Program p; std::string err;
+  if (!simgaze::parse(text, p, err)) { Log("SIMULATED HEAD: RIGTAP_SIMHEAD_PROGRAM rejected (%s): mode=fixed x=0 y=0 instead", err.c_str()); simgaze::parse("mode=fixed", p, err); }
+  g_headProg = std::move(p); g_headProgN = 1;
+  if (!g_headTrace) { g_headTrace = _wfopen((g_dir + L"\\simhead_trace.csv").c_str(), L"a"); if (g_headTrace) fprintf(g_headTrace, "qpc,xr_time,call,base_space,program_s,yaw_deg,pitch_deg,tracked\n"); }
+  Log("SIMULATED HEAD ON (RIGTAP_SIMHEAD=1): every layer above this one sees a scripted head, not the headset's tracking; base %s; program #1 mode=%s (%s)",
+    g_headLive ? "live (runtime head + program)" : "frozen (runtime head at the first query, held)", simgaze::mode_name(g_headProg.mode), g_headProg.text.c_str());
+}
+
 // ---- hooks -------------------------------------------------------------------------------------------------------
 XrResult XRAPI_CALL MyEnd(XrSession s, const XrFrameEndInfo* info) {
   g_endFrames.fetch_add(1, std::memory_order_relaxed);
   int st = g_state.load(std::memory_order_relaxed);
-  if (st == Idle) { if (g_enabled) PollTrigger(); return g_nextEnd(s, info); }
+  HeadFrame keep; const XrFrameEndInfo* fwd = info;   // the capture records what the application sent; the runtime gets the real head
+  if (g_head) { try { fwd = HeadMoveFrame(s, info, keep); } catch (...) { fwd = info; } }
+  if (st == Idle) { if (g_enabled) PollTrigger(); return g_nextEnd(s, fwd); }
   if (info) {
     try {
       std::lock_guard<std::mutex> l(g_mu);
@@ -477,7 +621,7 @@ XrResult XRAPI_CALL MyEnd(XrSession s, const XrFrameEndInfo* info) {
       }
     } catch (...) { g_state = Idle; Log("capture stopped: exception"); }
   }
-  return g_nextEnd(s, info);
+  return g_nextEnd(s, fwd);
 }
 XrResult XRAPI_CALL MyCreateSession(XrInstance inst, const XrSessionCreateInfo* ci, XrSession* out) {
   XrResult r = g_nextCreateSession(inst, ci, out);
@@ -487,16 +631,19 @@ XrResult XRAPI_CALL MyCreateSession(XrInstance inst, const XrSessionCreateInfo* 
       else if (n->type == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) g_api = 11;
     }
     Log("session %llx created: graphics binding %s", (unsigned long long)*out, g_api == 12 ? "D3D12 (pixels can be read)" : g_api == 11 ? "D3D11 (metadata only)" : "other (metadata only)"); } catch (...) {} }
-  if (XR_SUCCEEDED(r) && out && g_sim) {   // the head pose the simulated gaze is relative to
+  if (XR_SUCCEEDED(r) && out && (g_sim || g_head)) {   // the head pose the simulated gaze is relative to; the eyes in the head
     XrReferenceSpaceCreateInfo vi{XR_TYPE_REFERENCE_SPACE_CREATE_INFO}; vi.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW; vi.poseInReferenceSpace = XrPosef{{0, 0, 0, 1}, {0, 0, 0}};
     XrSpace v = XR_NULL_HANDLE; const XrResult vr = g_nextCreateRef(*out, &vi, &v);
-    { std::lock_guard<std::mutex> l(g_simMu); if (XR_SUCCEEDED(vr)) g_simView[*out] = v; }
-    Log("SIMULATED EYE GAZE: session %llx: head (VIEW) space %s", (unsigned long long)*out, XR_SUCCEEDED(vr) ? "created" : "NOT created: gaze stays invalid");
+    if (g_sim) { std::lock_guard<std::mutex> l(g_simMu); if (XR_SUCCEEDED(vr)) g_simView[*out] = v; }
+    { std::lock_guard<std::mutex> l(g_spaceMu); if (XR_SUCCEEDED(vr)) g_ownView[*out] = v; }
+    Log("SIMULATED %s: session %llx: head (VIEW) space %s", g_sim && g_head ? "EYE GAZE + HEAD" : g_sim ? "EYE GAZE" : "HEAD", (unsigned long long)*out, XR_SUCCEEDED(vr) ? "created" : "NOT created: not simulated");
   }
   return r;
 }
 XrResult XRAPI_CALL MyDestroySession(XrSession s) {
   if (g_sim) { std::lock_guard<std::mutex> l(g_simMu); g_simView.erase(s); for (auto it = g_actionSpaces.begin(); it != g_actionSpaces.end();) it = it->second.session == s ? g_actionSpaces.erase(it) : std::next(it); }
+  { std::vector<XrSpace> gone; { std::lock_guard<std::mutex> l(g_spaceMu); g_ownView.erase(s); for (auto it = g_refInfo.begin(); it != g_refInfo.end();) { if (it->second.session == s) { gone.push_back(it->first); it = g_refInfo.erase(it); } else ++it; } }
+    std::lock_guard<std::mutex> l(g_headMu); for (XrSpace sp : gone) g_headFrozen.erase(sp); }
   try { std::lock_guard<std::mutex> l(g_mu); if (s == g_session) { if (g_state == Capturing) EndCapture("session destroyed"); else if (g_state == Armed) g_state = Idle;
     // the queue is idle for our list: every capture waited for its own copy
     for (auto& kv : g_sc) if (kv.second.session == s) { for (auto* r : kv.second.images) r->Release(); kv.second.images.clear(); kv.second.alive = false; }
@@ -532,7 +679,24 @@ XrResult XRAPI_CALL MyRelease(XrSwapchain h, const XrSwapchainImageReleaseInfo* 
   return r;
 }
 XrResult XRAPI_CALL MyLocateViews(XrSession s, const XrViewLocateInfo* li, XrViewState* vs, uint32_t cap, uint32_t* count, XrView* views) {
-  XrResult r = g_nextLocate(s, li, vs, cap, count, views);
+  XrResult r = XR_SUCCESS; bool done = false;
+  if (g_head && li && vs) {   // the runtime's eyes in the head, placed on the simulated head
+    RefInfo ri; simhead::Pose h; bool tracked = false; const XrSpace view = OwnView(s);
+    if (view != XR_NULL_HANDLE && RefOf(li->space, ri) && ri.type != (int)XR_REFERENCE_SPACE_TYPE_VIEW && HeadPose(s, li->space, li->displayTime, "views", h, tracked)) {
+      XrViewLocateInfo inHead = *li; inHead.space = view;
+      r = g_nextLocate(s, &inHead, vs, cap, count, views); done = true;
+      if (XR_SUCCEEDED(r) && cap && views && count) {
+        for (uint32_t i = 0; i < *count && i < cap; ++i) {
+          simhead::Pose eye = FromXr(views[i].pose);
+          if (!simhead::usable(eye.q)) { eye = simhead::Pose{}; eye.p[0] = (i % 2 == 0) ? -0.032f : 0.032f; }   // no usable eye pose: a 64 mm IPD
+          views[i].pose = ToXr(simhead::compose(h, eye));
+        }
+        vs->viewStateFlags = tracked ? (XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT) : 0;
+        std::lock_guard<std::mutex> l(g_headMu); ++g_headViews;
+      }
+    }
+  }
+  if (!done) r = g_nextLocate(s, li, vs, cap, count, views);
   if (g_invalidMs > 0 && XR_SUCCEEDED(r) && li && vs && cap) {
     int type = 0; { std::lock_guard<std::mutex> l(g_spaceMu); auto it = g_spaceTypeOf.find(li->space); if (it != g_spaceTypeOf.end()) type = it->second; }
     if (type != (int)XR_REFERENCE_SPACE_TYPE_VIEW) {
@@ -547,7 +711,8 @@ XrResult XRAPI_CALL MyLocateViews(XrSession s, const XrViewLocateInfo* li, XrVie
 }
 XrResult XRAPI_CALL MyCreateRef(XrSession s, const XrReferenceSpaceCreateInfo* ci, XrSpace* sp) {
   XrResult r = g_nextCreateRef(s, ci, sp);
-  if (XR_SUCCEEDED(r) && ci && sp) { std::lock_guard<std::mutex> l(g_spaceMu); g_spaceTypeOf[*sp] = (int)ci->referenceSpaceType; }
+  if (XR_SUCCEEDED(r) && ci && sp) { std::lock_guard<std::mutex> l(g_spaceMu); g_spaceTypeOf[*sp] = (int)ci->referenceSpaceType;
+    RefInfo ri; ri.type = (int)ci->referenceSpaceType; ri.session = s; ri.offset = FromXr(ci->poseInReferenceSpace); if (!simhead::usable(ri.offset.q)) ri.offset.q = {}; g_refInfo[*sp] = ri; }
   if (XR_SUCCEEDED(r) && ci && sp) { try { std::lock_guard<std::mutex> l(g_mu); g_space[*sp] = (int)ci->referenceSpaceType; } catch (...) {} }
   return r;
 }
@@ -562,7 +727,7 @@ void SimPollLocked() {
   simgaze::Program p; std::string err; const bool ok = simgaze::parse(text, p, err);
   wchar_t to[64]; swprintf(to, 64, ok ? L"\\gaze.taken-%u.txt" : L"\\gaze.rejected-%u.txt", ++g_simFileN); MoveFileExW(path.c_str(), (g_dir + to).c_str(), MOVEFILE_REPLACE_EXISTING);
   if (!ok) { Log("SIMULATED EYE GAZE: gaze.txt #%u rejected (%s); program #%u stays", g_simFileN, err.c_str(), g_simProgN); return; }
-  g_simProg = std::move(p); g_simRestart = true; ++g_simProgN;
+  g_simProg = std::move(p); ++g_simProgN; g_epochPending = true;
   Log("SIMULATED EYE GAZE: program #%u from gaze.txt #%u: mode=%s (%s)", g_simProgN, g_simFileN, simgaze::mode_name(g_simProg.mode), g_simProg.text.c_str());
 }
 // g_simMu held: the once-a-second line.
@@ -602,6 +767,8 @@ XrResult XRAPI_CALL SimCreateActionSpace(XrSession s, const XrActionSpaceCreateI
 }
 XrResult XRAPI_CALL SimDestroySpace(XrSpace sp) {
   { std::lock_guard<std::mutex> l(g_simMu); g_actionSpaces.erase(sp); }
+  { std::lock_guard<std::mutex> l(g_spaceMu); g_refInfo.erase(sp); }
+  { std::lock_guard<std::mutex> l(g_headMu); g_headFrozen.erase(sp); }
   return g_nextDestroySpace(sp);
 }
 XrResult XRAPI_CALL SimGetPose(XrSession s, const XrActionStateGetInfo* gi, XrActionStatePose* st) {
@@ -615,17 +782,23 @@ XrResult XRAPI_CALL SimCurProfile(XrSession s, XrPath top, XrInteractionProfileS
 }
 XrResult XRAPI_CALL SimLocateSpace(XrSpace space, XrSpace base, XrTime time, XrSpaceLocation* loc) {
   XrSession session = XR_NULL_HANDLE; XrSpace view = XR_NULL_HANDLE; simgaze::Sample g; double tp = 0; double latencyMs = 0;
+  bool gazeSpace = false;
+  if (g_sim) { std::lock_guard<std::mutex> l(g_simMu); auto it = g_actionSpaces.find(space); gazeSpace = it != g_actionSpaces.end() && SimIsGazeAction(it->second.action) && loc; if (!gazeSpace) SimStatLocked(); }
+  if (!gazeSpace) { try { if (HeadLocateSpace(space, base, time, loc)) return XR_SUCCESS; } catch (...) {} return g_nextLocateSpace(space, base, time, loc); }
   { std::lock_guard<std::mutex> l(g_simMu);
     auto it = g_actionSpaces.find(space);
     if (it == g_actionSpaces.end() || !SimIsGazeAction(it->second.action) || !loc) { SimStatLocked(); return g_nextLocateSpace(space, base, time, loc); }
     SimPollLocked();
     if (g_simProg.mode == simgaze::Mode::off) { SimStatLocked(); return g_nextLocateSpace(space, base, time, loc); }
     session = it->second.session; auto v = g_simView.find(session); if (v != g_simView.end()) view = v->second;
-    if (g_simRestart) { g_simRestart = false; g_simStart = time; }
-    tp = double(time - g_simStart) * 1e-9; g = simgaze::evaluate(g_simProg, tp); latencyMs = g_simProg.latency_ms; }
-  XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
-  const XrResult hr = view != XR_NULL_HANDLE ? g_nextLocateSpace(view, base, time, &head) : XR_ERROR_HANDLE_INVALID;
-  const bool headOk = XR_SUCCEEDED(hr) && (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
+    tp = double(ProgramTime(time)) * 1e-9; g = simgaze::evaluate(g_simProg, tp); latencyMs = g_simProg.latency_ms; }
+  XrSpaceLocation head{XR_TYPE_SPACE_LOCATION}; simhead::Pose sh; bool shTracked = false; bool headOk;
+  if (HeadPose(session, base, time, "gaze", sh, shTracked)) {   // the gaze sits on the simulated head
+    head.pose = ToXr(sh); head.locationFlags = shTracked ? (XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT) : 0; headOk = shTracked;
+  } else {
+    const XrResult hr = view != XR_NULL_HANDLE ? g_nextLocateSpace(view, base, time, &head) : XR_ERROR_HANDLE_INVALID;
+    headOk = XR_SUCCEEDED(hr) && (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
+  }
   const bool serve = headOk && g.valid;
   if (serve) {
     const simgaze::Quat h{head.pose.orientation.x, head.pose.orientation.y, head.pose.orientation.z, head.pose.orientation.w};
@@ -648,7 +821,7 @@ XrResult XRAPI_CALL SimLocateSpace(XrSpace space, XrSpace base, XrTime time, XrS
 void SimInit(XrInstance inst) {
   std::lock_guard<std::mutex> l(g_simMu);
   g_gazeActions.clear(); g_actionSpaces.clear(); g_simView.clear(); g_simServed = g_simValid = g_simInvalid = g_simHeadLost = g_simPose = g_simSecServed = 0;
-  g_simRestart = true; g_simStatQpc = g_simPollQpc = 0; g_simLoggedProps = false;
+  g_epochPending = true; g_simStatQpc = g_simPollQpc = 0; g_simLoggedProps = false;
   g_nextStrToPath(inst, "/interaction_profiles/ext/eye_gaze_interaction", &g_pathProfile);
   g_nextStrToPath(inst, "/user/eyes_ext/input/gaze_ext/pose", &g_pathGaze);
   g_nextStrToPath(inst, "/user/eyes_ext", &g_pathEyes);
@@ -710,11 +883,12 @@ XrResult XRAPI_CALL MyGipa(XrInstance inst, const char* name, PFN_xrVoidFunction
 #define HOOK(n, next, mine) if (!strcmp(name, n)) { if (next) *fn = (PFN_xrVoidFunction)mine; return r; }
   HOOK("xrEndFrame", g_nextEnd, MyEnd) HOOK("xrCreateSession", g_nextCreateSession, MyCreateSession) HOOK("xrDestroySession", g_nextDestroySession, MyDestroySession)
   HOOK("xrCreateSwapchain", g_nextCreateSc, MyCreateSc) HOOK("xrDestroySwapchain", g_nextDestroySc, MyDestroySc) HOOK("xrAcquireSwapchainImage", g_nextAcquire, MyAcquire)
-  HOOK("xrReleaseSwapchainImage", g_nextRelease, MyRelease) HOOK("xrCreateReferenceSpace", g_nextCreateRef, MyCreateRef) HOOK("xrLocateViews", (g_invalidMs > 0 ? g_nextLocate : nullptr), MyLocateViews)
+  HOOK("xrReleaseSwapchainImage", g_nextRelease, MyRelease) HOOK("xrCreateReferenceSpace", g_nextCreateRef, MyCreateRef) HOOK("xrLocateViews", (g_invalidMs > 0 || g_head ? g_nextLocate : nullptr), MyLocateViews)
+  if (g_sim || g_head) { HOOK("xrDestroySpace", g_nextDestroySpace, SimDestroySpace) HOOK("xrLocateSpace", g_nextLocateSpace, SimLocateSpace) }
   if (g_sim) {
     HOOK("xrGetSystemProperties", g_nextSysProps, SimGetSystemProperties) HOOK("xrSuggestInteractionProfileBindings", g_nextSuggest, SimSuggest)
-    HOOK("xrCreateActionSpace", g_nextCreateActionSpace, SimCreateActionSpace) HOOK("xrDestroySpace", g_nextDestroySpace, SimDestroySpace)
-    HOOK("xrGetActionStatePose", g_nextPose, SimGetPose) HOOK("xrLocateSpace", g_nextLocateSpace, SimLocateSpace) HOOK("xrGetCurrentInteractionProfile", g_nextCurProfile, SimCurProfile)
+    HOOK("xrCreateActionSpace", g_nextCreateActionSpace, SimCreateActionSpace)
+    HOOK("xrGetActionStatePose", g_nextPose, SimGetPose) HOOK("xrGetCurrentInteractionProfile", g_nextCurProfile, SimCurProfile)
   }
 #undef HOOK
   return r;
@@ -724,6 +898,7 @@ XrResult XRAPI_CALL MyCreateInstance(const XrInstanceCreateInfo* info, const XrA
   PFN_xrGetInstanceProcAddr gipa = li->nextInfo->nextGetInstanceProcAddr; XrApiLayerCreateInfo next = *li; next.nextInfo = li->nextInfo->next;
   // Simulated gaze: RIGTAP_SIMGAZE=1 and an output folder (its log is the loud record), decided here for the instance.
   g_sim = EnvA("RIGTAP_SIMGAZE") == "1" && !EnvA("RIGTAP_DIR").empty(); g_simRuntimeExt = false;
+  g_head = EnvA("RIGTAP_SIMHEAD") == "1" && !EnvA("RIGTAP_DIR").empty();
   bool askedGaze = false; if (info) for (uint32_t i = 0; i < info->enabledExtensionCount; ++i) if (info->enabledExtensionNames[i] && !strcmp(info->enabledExtensionNames[i], XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)) askedGaze = true;
   XrResult r = li->nextInfo->nextCreateApiLayerInstance(info, &next, inst);
   bool stripped = false;
@@ -761,6 +936,10 @@ XrResult XRAPI_CALL MyCreateInstance(const XrInstanceCreateInfo* info, const XrA
     if (!g_log || !g_nextStrToPath || !g_nextLocateSpace || !g_nextCreateRef || !g_nextCreateSession) { g_sim = false; Log("SIMULATED EYE GAZE requested but not possible (log %d, xrStringToPath %d, xrLocateSpace %d, xrCreateReferenceSpace %d): off", g_log != nullptr, g_nextStrToPath != nullptr, g_nextLocateSpace != nullptr, g_nextCreateRef != nullptr); }
     else SimInit(*inst);
   }
+  if (g_head) {
+    if (!g_log || !g_nextLocateSpace || !g_nextCreateRef || !g_nextCreateSession || !g_nextLocate || !g_nextEnd) { g_head = false; Log("SIMULATED HEAD requested but not possible (log %d, xrLocateSpace %d, xrLocateViews %d, xrCreateReferenceSpace %d, xrEndFrame %d): off", g_log != nullptr, g_nextLocateSpace != nullptr, g_nextLocate != nullptr, g_nextCreateRef != nullptr, g_nextEnd != nullptr); }
+    else HeadInit();
+  }
   return r;
 }
 }  // namespace
@@ -769,3 +948,4 @@ extern "C" __declspec(dllexport) XrResult XRAPI_CALL xrNegotiateLoaderApiLayerIn
   req->layerInterfaceVersion = XR_CURRENT_LOADER_API_LAYER_VERSION; req->layerApiVersion = XR_CURRENT_API_VERSION; req->getInstanceProcAddr = MyGipa; req->createApiLayerInstance = MyCreateInstance; return XR_SUCCESS;
 }
 extern "C" __declspec(dllexport) int RigTap_SimGazeActive() { return g_sim && g_simProg.mode != simgaze::Mode::off ? 1 : 0; }
+extern "C" __declspec(dllexport) int RigTap_SimHeadActive() { if (!g_head) return 0; std::lock_guard<std::mutex> l(g_headMu); return g_headProg.mode != simgaze::Mode::off ? 1 : 0; }

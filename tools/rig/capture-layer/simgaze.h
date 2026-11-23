@@ -7,7 +7,8 @@
 //   mode=targets    targets=x,y|x,y|...  dwell_ms (default 600)  loop (default 1)
 //                   Fixates targets[0], then jumps to each next target with a main-sequence saccade (duration
 //                   21 ms + 2.2 ms/deg, minimum-jerk profile: peak speed 1.875 x mean, about 440 deg/s for 10 deg), dwells.
-//   mode=sweep      amp_x, amp_y (deg), period_ms (default 4000), phase_deg (of y against x, default 90), x, y = centre:
+//                   move_ms > 0: every move lasts this long instead (same profile; for head turns, e.g. 30 deg in 300 ms).
+//   mode=sweep      amp_x, amp_y (deg; negative = opposite phase, e.g. eyes countering a head sweep), period_ms (default 4000), phase_deg (of y against x, default 90), x, y = centre:
 //                   smooth pursuit (sinusoid). The peak speed is logged; pursuit above ~30 deg/s is not human.
 //   mode=replay     file=<csv: t_s,x_deg,y_deg[,valid]> loop (default 0): linear interpolation, invalid where either
 //                   neighbour is invalid; past the end the last sample holds (or it loops).
@@ -40,6 +41,7 @@ struct Program {
     Point at{};                         // fixed gaze, sweep centre
     std::vector<Point> targets;
     double dwell_ms = 600;
+    double move_ms = 0;                 // > 0: fixed move duration instead of the main sequence
     bool loop = true;
     bool loop_set = false;
     float amp_x = 0, amp_y = 0;
@@ -170,9 +172,10 @@ inline bool parse(const std::string& text, Program& out, std::string& error) {
                 a = z + 1;
             }
         } else if (k == "dwell_ms") { if (!num(p.dwell_ms, 0, 600000)) return false; }
+        else if (k == "move_ms") { if (!num(p.move_ms, 0, 60000)) return false; }
         else if (k == "loop") { double t = 0; if (!num(t, 0, 1)) return false; p.loop = t != 0; p.loop_set = true; }
-        else if (k == "amp_x") { if (!numf(p.amp_x, 0, 60)) return false; }
-        else if (k == "amp_y") { if (!numf(p.amp_y, 0, 60)) return false; }
+        else if (k == "amp_x") { if (!numf(p.amp_x, -60, 60)) return false; }
+        else if (k == "amp_y") { if (!numf(p.amp_y, -60, 60)) return false; }
         else if (k == "period_ms") { if (!num(p.period_ms, 50, 600000)) return false; }
         else if (k == "phase_deg") { if (!num(p.phase_deg, -360, 360)) return false; }
         else if (k == "file") p.file = v;
@@ -198,6 +201,8 @@ inline bool parse(const std::string& text, Program& out, std::string& error) {
 
 // Main-sequence saccade duration (seconds) for an amplitude in degrees.
 inline double saccade_duration_s(double amplitude_deg) { return 0.021 + 0.0022 * amplitude_deg; }
+// The duration of a move between targets: the main sequence, or the program's fixed move_ms.
+inline double move_duration_s(const Program& p, double amplitude_deg) { return p.move_ms > 0 ? p.move_ms / 1000.0 : saccade_duration_s(amplitude_deg); }
 // Minimum-jerk position fraction for a time fraction u in [0, 1].
 inline double min_jerk(double u) { u = std::min(1.0, std::max(0.0, u)); return u * u * u * (10 - 15 * u + 6 * u * u); }
 
@@ -238,7 +243,7 @@ inline Sample evaluate(const Program& p, double t) {
         auto seg_len = [&](size_t k) {
             if (k == 0) return dwell;
             const Point& a = p.targets[(k - 1) % n]; const Point& b = p.targets[k % n];
-            return saccade_duration_s(std::hypot(b.x - a.x, b.y - a.y)) + dwell;
+            return move_duration_s(p, std::hypot(b.x - a.x, b.y - a.y)) + dwell;
         };
         double rest = t;
         if (p.loop && n > 1) {
@@ -251,7 +256,7 @@ inline Sample evaluate(const Program& p, double t) {
         while (k < last && rest >= seg_len(k)) { rest -= seg_len(k); ++k; }
         if (k == 0 || (k == last && rest >= seg_len(k))) { const Point& q = p.targets[k % n]; s.x = q.x; s.y = q.y; break; }
         const Point& a = p.targets[(k - 1) % n]; const Point& b = p.targets[k % n];
-        const double d = saccade_duration_s(std::hypot(b.x - a.x, b.y - a.y));
+        const double d = move_duration_s(p, std::hypot(b.x - a.x, b.y - a.y));
         if (rest < d) {
             const double f = min_jerk(rest / d);
             s.x = static_cast<float>(a.x + (b.x - a.x) * f); s.y = static_cast<float>(a.y + (b.y - a.y) * f);

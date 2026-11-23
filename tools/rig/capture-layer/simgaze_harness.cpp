@@ -14,6 +14,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_loader_negotiation.h>
 #include "simgaze.h"
+#include "simhead.h"
 
 static int g_fail = 0, g_pass = 0;
 static void check(bool ok, const char* what) { if (ok) ++g_pass; else { ++g_fail; std::printf("FAIL: %s\n", what); } }
@@ -24,7 +25,8 @@ static bool g_offered = false;                         // the runtime lists XR_E
 static std::vector<std::string> g_rtExt;               // extensions of the last successful instance
 static unsigned g_rtCreates = 0, g_rtSuggests = 0, g_rtActionLocates = 0, g_rtPoseCalls = 0;
 static std::map<std::string, XrPath> g_paths; static std::map<XrSpace, int> g_refType; static std::map<XrSpace, XrAction> g_actSpace;
-static uint64_t g_h = 0x5000; static double g_headYawDeg = 30; static bool g_headLost = false;
+static uint64_t g_h = 0x5000; static double g_headYawDeg = 30; static bool g_headLost = false; static bool g_rtZeroPose = false;
+static std::vector<XrCompositionLayerProjectionView> g_rtEndViews; static XrSpace g_rtEndSpace = XR_NULL_HANDLE; static unsigned g_rtEnds = 0;
 static XrPath Path(const char* s) { auto it = g_paths.find(s); if (it != g_paths.end()) return it->second; XrPath p = (XrPath)(g_paths.size() + 100); g_paths[s] = p; return p; }
 static XrResult XRAPI_CALL RtStringToPath(XrInstance, const char* s, XrPath* p) { *p = Path(s); return XR_SUCCESS; }
 static XrResult XRAPI_CALL RtCreateSession(XrInstance, const XrSessionCreateInfo*, XrSession* s) { *s = (XrSession)0x51; return XR_SUCCESS; }
@@ -47,7 +49,25 @@ static XrResult XRAPI_CALL RtLocateSpace(XrSpace sp, XrSpace base, XrTime, XrSpa
   const bool viewInLocal = g_refType[sp] == XR_REFERENCE_SPACE_TYPE_VIEW && g_refType[base] == XR_REFERENCE_SPACE_TYPE_LOCAL;
   const double h = viewInLocal ? g_headYawDeg * 3.14159265358979 / 360 : 0;
   loc->pose = XrPosef{{0, (float)std::sin(h), 0, (float)std::cos(h)}, {0, viewInLocal ? 1.6f : 0.0f, 0}};
-  loc->locationFlags = g_headLost ? 0 : 0xF;
+  if (g_rtZeroPose) loc->pose = XrPosef{{0, 0, 0, 0}, {0, 0, 0}};   // a dark room: nothing usable
+  loc->locationFlags = g_headLost || g_rtZeroPose ? 0 : 0xF;
+  return XR_SUCCESS;
+}
+// Two eyes 64 mm apart on the head above; in a VIEW space just the offsets.
+static XrResult XRAPI_CALL RtLocateViews(XrSession, const XrViewLocateInfo* li, XrViewState* vs, uint32_t cap, uint32_t* count, XrView* v) {
+  *count = 2; if (!cap) return XR_SUCCESS;
+  XrSpaceLocation head{XR_TYPE_SPACE_LOCATION}; XrSpace probe = (XrSpace)0; bool inView = g_refType[li->space] == XR_REFERENCE_SPACE_TYPE_VIEW;
+  (void)probe; simhead::Pose h;
+  if (!inView && !g_rtZeroPose) { const double a = g_headYawDeg * 3.14159265358979 / 360; h.q = {0, (float)std::sin(a), 0, (float)std::cos(a)}; h.p[1] = 1.6f; }
+  (void)head;
+  for (uint32_t i = 0; i < 2 && i < cap; ++i) { simhead::Pose e; e.p[0] = i == 0 ? -0.032f : 0.032f; const simhead::Pose w = simhead::compose(h, e);
+    v[i].pose = XrPosef{{w.q.x, w.q.y, w.q.z, w.q.w}, {w.p[0], w.p[1], w.p[2]}}; v[i].fov = XrFovf{-0.9f, 0.9f, 0.9f, -0.9f}; }
+  vs->viewStateFlags = inView ? 0xF : (g_headLost || g_rtZeroPose ? 0 : 0xF);
+  return XR_SUCCESS;
+}
+static XrResult XRAPI_CALL RtEndFrame(XrSession, const XrFrameEndInfo* fi) {
+  ++g_rtEnds; g_rtEndViews.clear();
+  for (uint32_t i = 0; i < fi->layerCount; ++i) if (fi->layers[i]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) { auto* p = (const XrCompositionLayerProjection*)fi->layers[i]; g_rtEndSpace = p->space; g_rtEndViews.assign(p->views, p->views + p->viewCount); }
   return XR_SUCCESS;
 }
 static XrResult XRAPI_CALL RtGipa(XrInstance, const char* name, PFN_xrVoidFunction* fn) {
@@ -57,7 +77,7 @@ static XrResult XRAPI_CALL RtGipa(XrInstance, const char* name, PFN_xrVoidFuncti
     {"xrCreateActionSpace", (PFN_xrVoidFunction)RtCreateActionSpace}, {"xrDestroySpace", (PFN_xrVoidFunction)RtDestroySpace},
     {"xrGetSystemProperties", (PFN_xrVoidFunction)RtGetSystemProperties}, {"xrSuggestInteractionProfileBindings", (PFN_xrVoidFunction)RtSuggest},
     {"xrGetActionStatePose", (PFN_xrVoidFunction)RtGetPose}, {"xrGetCurrentInteractionProfile", (PFN_xrVoidFunction)RtCurProfile},
-    {"xrLocateSpace", (PFN_xrVoidFunction)RtLocateSpace}};
+    {"xrLocateSpace", (PFN_xrVoidFunction)RtLocateSpace}, {"xrLocateViews", (PFN_xrVoidFunction)RtLocateViews}, {"xrEndFrame", (PFN_xrVoidFunction)RtEndFrame}};
   auto it = table.find(name); *fn = it == table.end() ? nullptr : it->second; return *fn ? XR_SUCCESS : XR_ERROR_FUNCTION_UNSUPPORTED;
 }
 static XrResult XRAPI_CALL RtCreateApiLayerInstance(const XrInstanceCreateInfo* ci, const XrApiLayerCreateInfo*, XrInstance* inst) {
@@ -95,6 +115,12 @@ static void ModelTests(const std::string& out) {
   const double cycle = 2 * (d + 0.3);
   check(approx(simgaze::evaluate(p, 0.3 + cycle + 0.02).x, simgaze::evaluate(p, 0.3 + 0.02).x, 1e-4), "loop repeats the same saccade");
   check(simgaze::evaluate(p, 0.3 + d + 0.3 + d + 0.1).x == 0, "loop returns to the first target");
+  check(simgaze::parse("mode=targets;targets=0,0|30,0;dwell_ms=100;move_ms=300;loop=0", p, err) && approx(simgaze::evaluate(p, 0.25).x, 15, 1e-3) && simgaze::evaluate(p, 0.25).saccade && approx(simgaze::evaluate(p, 0.41).x, 30, 1e-3), "move_ms: a 30 deg move lasting 300 ms (midpoint 15 deg at 150 ms)");
+  check(!simgaze::parse("mode=fixed;move_ms=-1", p, err), "move_ms below 0 is an error");
+  check(simgaze::parse("mode=sweep;amp_x=-10;period_ms=2000", p, err) && approx(simgaze::evaluate(p, 0.5).x, -10, 1e-4), "sweep: a negative amplitude runs in opposite phase");
+  { simhead::Pose a; a.q = simgaze::gaze_orientation(20, -7); a.p[0] = 0.3f; a.p[1] = 1.2f; a.p[2] = -0.4f; simhead::Pose e; e.p[0] = 0.032f; e.p[2] = 0.01f;
+    const simhead::Pose b = simhead::compose(simhead::inverse(a), simhead::compose(a, e));
+    check(approx(b.p[0], 0.032, 1e-5) && approx(b.p[1], 0, 1e-5) && approx(b.p[2], 0.01, 1e-5) && approx(std::fabs(b.q.w), 1, 1e-5), "pose math: inverse(a) x (a x e) = e"); }
   check(simgaze::parse("mode=sweep;amp_x=10;amp_y=5;period_ms=2000", p, err) && approx(simgaze::evaluate(p, 0.5).x, 10, 1e-4) && approx(simgaze::evaluate(p, 0.5).y, 0, 1e-4) && approx(simgaze::evaluate(p, 0).y, 5, 1e-4), "sweep (x sine, y 90 deg ahead)");
   check(simgaze::parse("mode=fixed;blink_every_ms=1000;blink_ms=150", p, err) && simgaze::evaluate(p, 0.5).valid && !simgaze::evaluate(p, 1.05).valid && simgaze::evaluate(p, 1.2).valid && !simgaze::evaluate(p, 2.1).valid, "blinks every second for 150 ms");
   { simgaze::parse("mode=fixed;noise_deg=0.2;seed=7", p, err); double sx = 0, sxx = 0; const int n = 6000;
@@ -136,6 +162,105 @@ static std::string ReadAll(const std::string& p) { std::string s; if (FILE* f = 
 static void WriteGaze(const std::string& dir, const char* text) { const std::string tmp = dir + "\\gaze.tmp"; FILE* f = std::fopen(tmp.c_str(), "wb"); std::fputs(text, f); std::fclose(f); MoveFileExA(tmp.c_str(), (dir + "\\gaze.txt").c_str(), MOVEFILE_REPLACE_EXISTING); }
 // The direction (-Z axis) of a located pose.
 static void Dir(const XrPosef& p, float o[3]) { const float f[3] = {0, 0, -1}; simgaze::rotate({p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w}, f, o); }
+
+// ---- the simulated head (RIGTAP_SIMHEAD) -----------------------------------------------------------------------------
+static double YawOf(const XrPosef& p) { float o[3]; Dir(p, o); return std::atan2(o[0], -o[2]) * 180 / 3.14159265358979; }
+static simhead::Pose PoseOf(const XrPosef& p) { simhead::Pose r; r.q = {p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w}; r.p[0] = p.position.x; r.p[1] = p.position.y; r.p[2] = p.position.z; return r; }
+static void WriteHead(const std::string& dir, const char* text) { const std::string tmp = dir + "\\head.tmp"; FILE* f = std::fopen(tmp.c_str(), "wb"); std::fputs(text, f); std::fclose(f); MoveFileExA(tmp.c_str(), (dir + "\\head.txt").c_str(), MOVEFILE_REPLACE_EXISTING); }
+static void HeadTests(HMODULE mod, const std::string& out) {
+  const double R = 3.14159265358979 / 180;
+  auto headActive = (int (*)())GetProcAddress(mod, "RigTap_SimHeadActive"); check(headActive != nullptr, "RigTap_SimHeadActive exported"); if (!headActive) return;
+  SetEnvironmentVariableA("RIGTAP_SIMGAZE", nullptr); SetEnvironmentVariableA("RIGTAP_SIMHEAD", nullptr); SetEnvironmentVariableA("RIGTAP_SIMHEAD_BASE", nullptr);
+  g_offered = false; g_headLost = false; g_rtZeroPose = false; g_headYawDeg = 30;
+  // -- 4. Off: nothing of the head is touched.
+  { Layer l; check(XR_SUCCEEDED(Create(mod, l, false)), "head off: instance");
+    check(Get<PFN_xrLocateViews>(l, "xrLocateViews") == RtLocateViews && Get<PFN_xrLocateSpace>(l, "xrLocateSpace") == RtLocateSpace, "head off: the locate functions are the runtime's");
+    check(headActive() == 0, "head off: RigTap_SimHeadActive 0"); }
+
+  // -- 5. On, frozen base; program 10 deg right; the runtime's head is yawed 30 deg left at 1.6 m.
+  SetEnvironmentVariableA("RIGTAP_SIMHEAD", "1"); SetEnvironmentVariableA("RIGTAP_SIMHEAD_PROGRAM", "mode=fixed;x=10;y=0");
+  Layer l; check(XR_SUCCEEDED(Create(mod, l, false)) && headActive() == 1, "head on: instance, RigTap_SimHeadActive 1");
+  auto cs = Get<PFN_xrCreateSession>(l, "xrCreateSession"); auto cr = Get<PFN_xrCreateReferenceSpace>(l, "xrCreateReferenceSpace"); auto lo = Get<PFN_xrLocateSpace>(l, "xrLocateSpace");
+  auto lv = Get<PFN_xrLocateViews>(l, "xrLocateViews"); auto ef = Get<PFN_xrEndFrame>(l, "xrEndFrame"); auto ds = Get<PFN_xrDestroySession>(l, "xrDestroySession");
+  check(lv && lo && ef && lv != RtLocateViews && lo != RtLocateSpace && ef != RtEndFrame, "head on: locate views / space and end frame are hooked");
+  XrSessionCreateInfo sci{XR_TYPE_SESSION_CREATE_INFO}; XrSession s{}; cs(l.inst, &sci, &s);
+  XrReferenceSpaceCreateInfo rci{XR_TYPE_REFERENCE_SPACE_CREATE_INFO}; rci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL; rci.poseInReferenceSpace = XrPosef{{0, 0, 0, 1}, {0, 0, 0}};
+  XrSpace local{}; cr(s, &rci, &local);
+  rci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW; rci.poseInReferenceSpace = XrPosef{{0, 0, 0, 1}, {0, 0, -0.1f}}; XrSpace appView{}; cr(s, &rci, &appView);
+  const XrTime T = 3'000'000'000; const double a = -20 * R;
+  XrSpaceVelocity vel{XR_TYPE_SPACE_VELOCITY}; vel.velocityFlags = 3; XrSpaceLocation q{XR_TYPE_SPACE_LOCATION}; q.next = &vel;
+  check(XR_SUCCEEDED(lo(appView, local, T, &q)) && q.locationFlags == 0xF && vel.velocityFlags == 0, "head on: an application VIEW space is tracked, velocity unknown");
+  check(approx(YawOf(q.pose), -20, 1e-3), "head on: yaw = the runtime's 30 left + the program's 10 right");
+  check(approx(q.pose.position.x, 0.1 * std::sin(a), 1e-5) && approx(q.pose.position.y, 1.6, 1e-5) && approx(q.pose.position.z, -0.1 * std::cos(a), 1e-5), "head on: the space's own offset rides on the head");
+  { XrSpaceLocation qi{XR_TYPE_SPACE_LOCATION}; check(XR_SUCCEEDED(lo(local, appView, T, &qi)) && qi.locationFlags == 0xF, "head on: the reverse query is answered too");
+    const simhead::Pose c = simhead::compose(PoseOf(q.pose), PoseOf(qi.pose));
+    check(approx(c.p[0], 0, 1e-5) && approx(c.p[1], 0, 1e-5) && approx(c.p[2], 0, 1e-5) && approx(std::fabs(c.q.w), 1, 1e-5), "head on: ... as the exact inverse"); }
+  g_headYawDeg = 90; g_headLost = true; q = {XR_TYPE_SPACE_LOCATION};
+  check(XR_SUCCEEDED(lo(appView, local, T + 1'000'000, &q)) && approx(YawOf(q.pose), -20, 1e-3) && q.locationFlags == 0xF, "frozen base: the runtime's later head (moved, then lost) changes nothing");
+  XrViewLocateInfo vli{XR_TYPE_VIEW_LOCATE_INFO}; vli.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO; vli.displayTime = T; vli.space = local;
+  XrViewState vs{XR_TYPE_VIEW_STATE}; XrView v[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}; uint32_t n = 0;
+  check(XR_SUCCEEDED(lv(s, &vli, &vs, 0, &n, nullptr)) && n == 2, "views: the count query passes");
+  check(XR_SUCCEEDED(lv(s, &vli, &vs, 2, &n, v)) && n == 2 && vs.viewStateFlags == 0xF, "views: two, tracked although the runtime lost the head");
+  check(approx(v[0].pose.position.x, -0.032 * std::cos(a), 1e-5) && approx(v[0].pose.position.z, -0.032 * std::sin(a), 1e-5) && approx(v[0].pose.position.y, 1.6, 1e-5) &&
+        approx(v[1].pose.position.x, 0.032 * std::cos(a), 1e-5) && approx(YawOf(v[1].pose), -20, 1e-3) && approx(v[0].fov.angleLeft, -0.9, 1e-6), "views: the runtime's eyes on the simulated head, fov kept");
+  // End frame: the runtime gets the views on its real head (yaw 90 left now); the application's structures stay.
+  g_headLost = false;
+  XrCompositionLayerProjectionView pv[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+  for (int i = 0; i < 2; ++i) { pv[i].pose = v[i].pose; pv[i].fov = v[i].fov; }
+  XrCompositionLayerProjection pl{XR_TYPE_COMPOSITION_LAYER_PROJECTION}; pl.space = local; pl.viewCount = 2; pl.views = pv;
+  const XrCompositionLayerBaseHeader* ls[] = {(const XrCompositionLayerBaseHeader*)&pl};
+  XrFrameEndInfo fi{XR_TYPE_FRAME_END_INFO}; fi.displayTime = T; fi.layerCount = 1; fi.layers = ls; fi.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+  const unsigned e0 = g_rtEnds; const double b = -90 * R;
+  check(XR_SUCCEEDED(ef(s, &fi)) && g_rtEnds == e0 + 1 && g_rtEndViews.size() == 2 && g_rtEndSpace == local, "end frame: forwarded");
+  check(g_rtEndViews.size() == 2 && approx(YawOf(g_rtEndViews[0].pose), -90, 1e-3) && approx(g_rtEndViews[0].pose.position.x, -0.032 * std::cos(b), 1e-5) &&
+        approx(g_rtEndViews[0].pose.position.z, -0.032 * std::sin(b), 1e-5) && approx(g_rtEndViews[0].pose.position.y, 1.6, 1e-5), "end frame: the views moved onto the runtime's real head");
+  check(approx(YawOf(pv[0].pose), -20, 1e-3) && fi.layers == ls && ls[0] == (const XrCompositionLayerBaseHeader*)&pl, "end frame: the application's own structures are untouched");
+  pl.space = appView; ef(s, &fi);
+  check(g_rtEndViews.size() == 2 && approx(YawOf(g_rtEndViews[0].pose), -20, 1e-3), "end frame: a head-locked (VIEW) layer is left alone");
+  // A head turn at head speed through head.txt, on the display-time clock.
+  Sleep(300); WriteHead(out, "mode=targets\ntargets=0,0|30,0\ndwell_ms=100\nmove_ms=300\nloop=0\n"); Sleep(300);
+  auto yawAt = [&](XrTime t) { XrSpaceLocation z{XR_TYPE_SPACE_LOCATION}; lo(appView, local, t, &z); return YawOf(z.pose); };
+  const XrTime T1 = 10'000'000'000;
+  check(approx(yawAt(T1), -30, 1e-3) && GetFileAttributesA((out + "\\head.taken-1.txt").c_str()) != INVALID_FILE_ATTRIBUTES, "head.txt taken; the turn starts at the frozen base (30 left)");
+  check(approx(yawAt(T1 + 250'000'000), -15, 1e-2) && approx(yawAt(T1 + 500'000'000), 0, 1e-3), "head turn: midpoint after 150 ms of a 300 ms move, then straight ahead");
+  Sleep(300); WriteHead(out, "mode=lost\n"); Sleep(300); q = {XR_TYPE_SPACE_LOCATION}; lo(appView, local, T1 + 600'000'000, &q); vs.viewStateFlags = 0xF; lv(s, &vli, &vs, 2, &n, v);
+  check(q.locationFlags == 0 && vs.viewStateFlags == 0, "mode=lost: the head is reported untracked");
+  Sleep(300); WriteHead(out, "mode=off\n"); Sleep(300); g_headYawDeg = 45; q = {XR_TYPE_SPACE_LOCATION}; lo(appView, local, T1 + 700'000'000, &q);
+  check(approx(YawOf(q.pose), -45, 1e-3) && headActive() == 0, "mode=off: the runtime's head passes through");
+  ds(s);
+
+  // -- 6. A dark room from the start (the runtime gives no usable head at all), with the simulated gaze on the head.
+  g_rtZeroPose = true; g_headYawDeg = 0; SetEnvironmentVariableA("RIGTAP_SIMGAZE", "1"); SetEnvironmentVariableA("RIGTAP_SIMGAZE_PROGRAM", "mode=fixed;x=5");
+  Layer d; check(XR_SUCCEEDED(Create(mod, d, true)) && headActive() == 1, "dark: instance with head and gaze");
+  auto cs2 = Get<PFN_xrCreateSession>(d, "xrCreateSession"); auto cr2 = Get<PFN_xrCreateReferenceSpace>(d, "xrCreateReferenceSpace"); auto lo2 = Get<PFN_xrLocateSpace>(d, "xrLocateSpace");
+  auto lv2 = Get<PFN_xrLocateViews>(d, "xrLocateViews"); auto cas = Get<PFN_xrCreateActionSpace>(d, "xrCreateActionSpace"); auto sg = Get<PFN_xrSuggestInteractionProfileBindings>(d, "xrSuggestInteractionProfileBindings");
+  auto stp = Get<PFN_xrStringToPath>(d, "xrStringToPath"); auto ef2 = Get<PFN_xrEndFrame>(d, "xrEndFrame"); auto ds2 = Get<PFN_xrDestroySession>(d, "xrDestroySession");
+  XrSession s2{}; cs2(d.inst, &sci, &s2); rci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL; rci.poseInReferenceSpace = XrPosef{{0, 0, 0, 1}, {0, 0, 0}}; XrSpace local2{}; cr2(s2, &rci, &local2);
+  rci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW; XrSpace view2{}; cr2(s2, &rci, &view2);
+  q = {XR_TYPE_SPACE_LOCATION}; check(XR_SUCCEEDED(lo2(view2, local2, T, &q)) && q.locationFlags == 0xF && approx(YawOf(q.pose), 10, 1e-3) && approx(q.pose.position.y, 0, 1e-6), "dark: the head is tracked, the program's turn on an identity base");
+  n = 0; vs.viewStateFlags = 0; check(XR_SUCCEEDED(lv2(s2, &vli, &vs, 2, &n, v)) == true, "dark: views located");
+  vli.space = local2; lv2(s2, &vli, &vs, 2, &n, v);
+  check(vs.viewStateFlags == 0xF && approx(v[0].pose.position.x, -0.032 * std::cos(10 * R), 1e-5) && approx(YawOf(v[0].pose), 10, 1e-3), "dark: eyes on the simulated head, tracked");
+  const XrAction gazeAction = (XrAction)0x7101; XrActionSpaceCreateInfo aci{XR_TYPE_ACTION_SPACE_CREATE_INFO}; aci.action = gazeAction; aci.poseInActionSpace = XrPosef{{0, 0, 0, 1}, {0, 0, 0}};
+  XrSpace gz{}; cas(s2, &aci, &gz); XrPath profile{}, gazePath{}; stp(d.inst, "/interaction_profiles/ext/eye_gaze_interaction", &profile); stp(d.inst, "/user/eyes_ext/input/gaze_ext/pose", &gazePath);
+  XrActionSuggestedBinding bnd{gazeAction, gazePath}; XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING}; sb.interactionProfile = profile; sb.countSuggestedBindings = 1; sb.suggestedBindings = &bnd; sg(d.inst, &sb);
+  q = {XR_TYPE_SPACE_LOCATION}; check(XR_SUCCEEDED(lo2(gz, local2, T, &q)) && q.locationFlags != 0 && approx(YawOf(q.pose), 15, 1e-3), "dark: the simulated gaze sits on the simulated head (10 + 5 right)");
+  pv[0].pose = v[0].pose; pv[1].pose = v[1].pose; pl.space = local2; ef2(s2, &fi);
+  check(g_rtEndViews.size() == 2 && approx(YawOf(g_rtEndViews[0].pose), 10, 1e-3), "dark: no usable real head, the frame goes to the runtime as drawn");
+  // Eyes countering a head sweep (vestibulo-ocular reflex): written together, the two programs share one clock.
+  Sleep(300); WriteHead(out, "mode=sweep;amp_x=10;period_ms=2000"); WriteGaze(out, "mode=sweep;amp_x=-10;period_ms=2000"); Sleep(300);
+  { const XrTime T2 = 20'000'000'000; double worst = 0, headMax = 0;
+    for (int k = 0; k <= 8; ++k) { const XrTime t = T2 + k * 125'000'000; XrSpaceLocation g{XR_TYPE_SPACE_LOCATION}, h{XR_TYPE_SPACE_LOCATION};
+      lo2(gz, local2, t, &g); lo2(view2, local2, t, &h); worst = std::max(worst, std::fabs(YawOf(g.pose))); headMax = std::max(headMax, std::fabs(YawOf(h.pose))); }
+    check(headMax > 9.9 && worst < 1e-3, "one clock: a head sweep and a countering gaze sweep keep the gaze fixed in the world"); }
+  ds2(s2);
+  g_rtZeroPose = false; SetEnvironmentVariableA("RIGTAP_SIMGAZE", nullptr); SetEnvironmentVariableA("RIGTAP_SIMHEAD", nullptr);
+
+  const std::string log = ReadAll(out + "\\rigtap.log"), trace = ReadAll(out + "\\simhead_trace.csv");
+  check(log.find("SIMULATED HEAD ON") != std::string::npos && log.find("frozen at the runtime's head") != std::string::npos && log.find("no usable orientation: identity") != std::string::npos, "head: the log says it loudly, with the frozen bases");
+  check(log.find("SIMULATED HEAD: program #2 from head.txt #1") != std::string::npos, "head: the log names the head.txt program");
+  check(std::count(trace.begin(), trace.end(), '\n') > 10, "head: the trace holds the served poses");
+}
 
 int main(int argc, char** argv) {
   if (argc < 3) { std::printf("usage: simgaze_harness <layer dll> <out dir>\n"); return 2; }
@@ -244,6 +369,7 @@ int main(int argc, char** argv) {
     g_headYawDeg = 0; XrSpaceLocation q{XR_TYPE_SPACE_LOCATION}; g_rtActionLocates = 0; lo(g2, loc2, 9'000'000'000, &q); float o[3]; Dir(q.pose, o);
     check(g_rtActionLocates == 0 && q.locationFlags != 0 && approx(std::atan2(o[0], -o[2]) * 180 / 3.14159265358979, -7, 1e-3), "offered: the scripted gaze replaces the runtime's"); }
 
+  HeadTests(mod, out);
   const std::string log = ReadAll(out + "\\rigtap.log"), trace = ReadAll(out + "\\simgaze_trace.csv");
   check(log.find("SIMULATED EYE GAZE ON") != std::string::npos && log.find("runtime says supportsEyeGazeInteraction=0") != std::string::npos, "the log says it loudly");
   check(log.find("rejected (unknown mode: bogus)") != std::string::npos, "the log names a rejected program");

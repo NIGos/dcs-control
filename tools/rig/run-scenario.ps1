@@ -375,6 +375,15 @@ function New-RigCopy([string]$RunDir, $Sc, [string]$SwapDll, $Rec) {
     if (Test-Path -LiteralPath $psIni) { Edit-IniFile $psIni 'DepthBoost' ([pscustomobject]@{ PimaxPvrGaze = '0' }) }
     Note "SIMULATED EYE GAZE in this flight (capture layer): $(if ($Sc.simGaze -is [string]) { $Sc.simGaze } else { 'mode=fixed;x=0;y=0' })$(if (Test-Path -LiteralPath $psIni) { '; PupilShift.ini PimaxPvrGaze=0 in the copy' })"
   }
+  # simulated head (capture layer, TEST-ONLY): "simHead": true or a program (simgaze.h syntax: x = yaw right, y = pitch up),
+  # "simHeadBase": "frozen" (default; also in a dark room) or "live". Everything above the capture layer then sees a tracked
+  # head whatever the headset's own tracking says; the compositor gets the frames moved back onto the real head.
+  if ($Sc.simHead) {
+    $launch.environment | Add-Member -NotePropertyName RIGTAP_SIMHEAD -NotePropertyValue '1' -Force
+    if ($Sc.simHead -is [string]) { $launch.environment | Add-Member -NotePropertyName RIGTAP_SIMHEAD_PROGRAM -NotePropertyValue $Sc.simHead -Force }
+    if ($Sc.simHeadBase) { $launch.environment | Add-Member -NotePropertyName RIGTAP_SIMHEAD_BASE -NotePropertyValue ([string]$Sc.simHeadBase) -Force }
+    Note "SIMULATED HEAD in this flight (capture layer): $(if ($Sc.simHead -is [string]) { $Sc.simHead } else { 'mode=fixed;x=0;y=0' }), base $(if ($Sc.simHeadBase) { $Sc.simHeadBase } else { 'frozen' })"
+  }
   Write-Utf8 $lp ($launch | ConvertTo-Json -Depth 8)
   # checks: nothing points into the source; every layer library exists; the settings file is the copy's
   foreach ($p in $launch.environment.PSObject.Properties) { foreach ($part in ([string]$p.Value -split ';')) { if ($part -and $part.StartsWith($src + '\', [StringComparison]::OrdinalIgnoreCase)) { throw "launch.json $($p.Name) still points into the source: $part" } } }
@@ -623,6 +632,11 @@ function Do-Action([string]$RunDir, $Rec, $A) {
       $tap = Join-Path $RunDir 'tap'; $tmp = Join-Path $tap 'gaze.tmp'
       [IO.File]::WriteAllText($tmp, (([string]$A.program) -replace ';', "`n") + "`n", [Text.Encoding]::ASCII); Move-Item -LiteralPath $tmp -Destination (Join-Path $tap 'gaze.txt') -Force
       Note "$($Rec.run) simulated gaze program: $($A.program)"
+    }
+    'simhead' {   # a new simulated-head program (needs the scenario's simHead): { program: "mode=targets;targets=-15,0|15,0;move_ms=350;dwell_ms=600" }
+      $tap = Join-Path $RunDir 'tap'; $tmp = Join-Path $tap 'head.tmp'
+      [IO.File]::WriteAllText($tmp, (([string]$A.program) -replace ';', "`n") + "`n", [Text.Encoding]::ASCII); Move-Item -LiteralPath $tmp -Destination (Join-Path $tap 'head.txt') -Force
+      Note "$($Rec.run) simulated head program: $($A.program)"
     }
     'mouse-path' {   # slow, logged mouse path through window fractions: { label, points: [[fx,fy],...], speedPx, settleMs }
       Focus-Dcs | Out-Null; $c = Get-DcsClient
