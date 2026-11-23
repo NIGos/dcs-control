@@ -175,7 +175,7 @@ bool InstallTexCreate(ID3D11Device* dev) {
   HMODULE owner = nullptr;
   if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                           static_cast<LPCWSTR>(cur), &owner) ||
-      owner != GetModuleHandleW(L"d3d11.dll")) {
+      owner != d3ds::SystemD3d11()) {
     Log("  view profile: ID3D11Device::CreateTexture2D is not d3d11's own entry (another layer hooks it); texture "
         "creations not counted");
     return false;

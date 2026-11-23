@@ -1658,6 +1658,17 @@ void Tick(uint32_t mask, int censusKey, const std::wstring& logDir) {
       notes.swap(g_ownerNotes);
     }
     for (const std::string& n : notes) Log("%s", n.c_str());
+    static bool shadowLogged = false;
+    if (!shadowLogged && d3ds::SystemD3d11()) {
+      shadowLogged = true;
+      if (const HMODULE other = d3ds::ShadowingD3d11()) {
+        wchar_t path[MAX_PATH] = {};
+        GetModuleFileNameW(other, path, MAX_PATH);
+        Log("d3d11: another program's d3d11.dll is loaded in DCS (%ls); d3d11's own entries are told by the system "
+            "d3d11.dll's path",
+            path);
+      }
+    }
   }
   static uint32_t lastMask = 0xffffffffu;
   const uint32_t refused = mask & 0x1Cu;

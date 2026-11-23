@@ -2498,7 +2498,8 @@ bool g_tpAddedExt = false;
 bool InD3d11(const void* p) {
   static uintptr_t lo = 0, hi = 0;  // d3d11.dll's image (loaded before any context exists; never unloaded under DCS)
   if (!lo) {
-    if (const HMODULE d3d = GetModuleHandleW(L"d3d11.dll")) {
+    // r2-nodlss5: the system's by full path (a game folder's d3d11.dll of another program must not stand in for it).
+    if (const HMODULE d3d = d3ds::SystemD3d11()) {
       const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(d3d);
       const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(reinterpret_cast<const uint8_t*>(d3d) + dos->e_lfanew);
       hi = reinterpret_cast<uintptr_t>(d3d) + nt->OptionalHeader.SizeOfImage;
