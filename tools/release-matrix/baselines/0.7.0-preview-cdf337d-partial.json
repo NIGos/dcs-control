@@ -1,0 +1,818 @@
+{
+  "schema": 1,
+  "matrix": "release-matrix",
+  "matrixVersion": 1,
+  "label": "0.7.0-preview cdf337d (partial, from SHORT-CHECK Parts 2-3)",
+  "created": "2026-11-23T02:25:00",
+  "partial": true,
+  "partialWhy": "derived from two earlier live flights, not a matrix run: only the stock-sparse scene (stock DCS, Germany low level, qvbench_ff_land.miz); the engine A/B is from a different DCS start (Part 2, 24 blocks) than the five part A/Bs (Part 3, 16 blocks); suite ini of those rounds (PassTimelineSec 20 in Part 3), not matrix v1 exactly. No atmosx-dense, atmosx-sparse, stock-dense.",
+  "package": {
+    "cliVersion": "DCS Control 0.7.0-preview",
+    "commit": "cdf337d",
+    "payloadSha256": null,
+    "payloadFrom": "installed by the cdf337d package (Part 3 developer payload = a copy, same hash)",
+    "iniSha256": null
+  },
+  "profileId": "pimax-qv-dlss5-fg-boost-opt",
+  "profileSha256": null,
+  "dcsVersion": "2.9.31.29434",
+  "gate": {
+    "regressionMetrics": [
+      "render_thread_ms",
+      "p95_ms"
+    ],
+    "regressionSeFactor": 2.0,
+    "regressionFloorPct": 3.0,
+    "costMetric": "render_thread_ms",
+    "costMaxPct": 2.0,
+    "costSeFactor": 2.0
+  },
+  "scenes": [
+    {
+      "id": "stock-sparse",
+      "atmosx": false,
+      "mission": "qvbench_ff_land.miz",
+      "missionSha256": "d619e5281a271d29a2b5cf3caa95aa102e210d32b118c84c4a81f55f2e9a7b26",
+      "suiteAt": 30,
+      "status": "ok",
+      "why": null,
+      "fpsCap": 45.0,
+      "parts": {
+        "water": {
+          "status": "ok",
+          "label": "W1 skip hidden water (timing pairs)",
+          "offArm": "SkipHiddenWater=0",
+          "benchMode": "W1",
+          "csv": "water_timing_20261123_021812.csv",
+          "metrics": {
+            "render_thread_ms": {
+              "off": 12.4083,
+              "on": 12.3836,
+              "deltaAbs": -0.0247,
+              "changePct": 0.145,
+              "sePct": 0.145,
+              "ci95Pct": 0.342,
+              "nPairs": 8,
+              "nBlocks": 17
+            },
+            "pass_ms": {
+              "off": 7.2368,
+              "on": 7.2076,
+              "deltaAbs": -0.0292,
+              "changePct": 0.016,
+              "sePct": 0.326,
+              "ci95Pct": 0.769,
+              "nPairs": 8,
+              "nBlocks": 17
+            },
+            "gpu_period_ms": {
+              "off": 22.2198,
+              "on": 22.2207,
+              "deltaAbs": 0.0009,
+              "changePct": -0.004,
+              "sePct": 0.018,
+              "ci95Pct": 0.042,
+              "nPairs": 8,
+              "nBlocks": 17
+            }
+          },
+          "nBlocks": 17,
+          "engaged": true,
+          "source": "artifacts/live-07/short2/runs/sc2_parts_1123-0214_on (SHORT-CHECK Part 3)"
+        },
+        "splitFilter": {
+          "status": "ok",
+          "label": "split-path D3D11 state filter",
+          "offArm": "stock",
+          "benchMode": 27,
+          "bench": "split-path D3D11 state filter",
+          "csv": "bench_20261123_021933.csv",
+          "fpsCap": 45.0,
+          "capText": "refresh 90 Hz / 2",
+          "module": {
+            "fps": {
+              "off": 45.008,
+              "on": 45.005,
+              "changePct": -0.04,
+              "ci95Pct": 0.11
+            },
+            "frame_ms": {
+              "off": 22.223,
+              "on": 22.224,
+              "changePct": 0.0,
+              "ci95Pct": 0.02
+            },
+            "p95_frame_ms": {
+              "off": 23.116,
+              "on": 23.222,
+              "changePct": 0.48,
+              "ci95Pct": 0.23
+            },
+            "process_cpu_ms/frame": {
+              "off": 73.981,
+              "on": 73.624,
+              "changePct": -0.39,
+              "ci95Pct": 0.89
+            },
+            "collect_thread_cpu_ms/frame": {
+              "off": 0.463,
+              "on": 0.463,
+              "changePct": 0.22,
+              "ci95Pct": 1.74
+            },
+            "collect_ms/frame": {
+              "off": 0.414,
+              "on": 0.412,
+              "changePct": -0.28,
+              "ci95Pct": 0.26
+            },
+            "periph_renderables": {
+              "off": 74.74,
+              "on": 74.575,
+              "changePct": -0.31,
+              "ci95Pct": 0.87
+            },
+            "focus_renderables": {
+              "off": 68.0,
+              "on": 68.0,
+              "changePct": 0.0,
+              "ci95Pct": 0.0
+            },
+            "shadow_renderables": {
+              "off": 149.737,
+              "on": 149.856,
+              "changePct": -0.0,
+              "ci95Pct": 0.11
+            },
+            "gpu_util_%": {
+              "off": 66.125,
+              "on": 63.547,
+              "changePct": -4.09,
+              "ci95Pct": 0.72
+            },
+            "render_thread_cpu_ms/frame": {
+              "off": 12.25,
+              "on": 12.293,
+              "changePct": 0.5,
+              "ci95Pct": 0.69
+            },
+            "render_thread_busy_%": {
+              "off": 55.135,
+              "on": 55.321,
+              "changePct": 0.47,
+              "ci95Pct": 0.68
+            },
+            "pass_ms/frame": {
+              "off": 7.378,
+              "on": 7.438,
+              "changePct": 1.01,
+              "ci95Pct": 0.87
+            },
+            "gbuffer_pass_ms/frame": {
+              "off": 0.394,
+              "on": 0.388,
+              "changePct": 3.9,
+              "ci95Pct": 40.54
+            }
+          },
+          "metrics": {
+            "render_thread_ms": {
+              "off": 12.2504,
+              "on": 12.2929,
+              "deltaAbs": 0.0425,
+              "changePct": 0.502,
+              "sePct": 0.293,
+              "ci95Pct": 0.691,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "p95_ms": {
+              "off": 23.116,
+              "on": 23.2221,
+              "deltaAbs": 0.1061,
+              "changePct": 0.477,
+              "sePct": 0.099,
+              "ci95Pct": 0.233,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "process_cpu_ms": {
+              "off": 73.9805,
+              "on": 73.6239,
+              "deltaAbs": -0.3566,
+              "changePct": -0.393,
+              "sePct": 0.376,
+              "ci95Pct": 0.887,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "pass_ms": {
+              "off": 7.3775,
+              "on": 7.4384,
+              "deltaAbs": 0.0609,
+              "changePct": 1.008,
+              "sePct": 0.367,
+              "ci95Pct": 0.866,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "fps": {
+              "off": 45.0063,
+              "on": 45.005,
+              "deltaAbs": -0.0013,
+              "changePct": -0.032,
+              "sePct": 0.049,
+              "ci95Pct": 0.116,
+              "nPairs": 8,
+              "nBlocks": 16
+            }
+          },
+          "nBlocks": 16,
+          "source": "artifacts/live-07/short2/runs/sc2_parts_1123-0214_on (SHORT-CHECK Part 3)"
+        },
+        "prefetch": {
+          "status": "ok",
+          "label": "terrain prefetch fix, observe -> skip",
+          "offArm": "observe (hook installed, no skip)",
+          "benchMode": 33,
+          "bench": "terrain prefetch fix (observe vs skip)",
+          "csv": "bench_20261123_022054.csv",
+          "fpsCap": 45.0,
+          "capText": "refresh 90 Hz / 2",
+          "module": {
+            "fps": {
+              "off": 44.984,
+              "on": 44.998,
+              "changePct": 0.06,
+              "ci95Pct": 0.24
+            },
+            "frame_ms": {
+              "off": 22.224,
+              "on": 22.223,
+              "changePct": -0.01,
+              "ci95Pct": 0.02
+            },
+            "p95_frame_ms": {
+              "off": 23.207,
+              "on": 23.178,
+              "changePct": -0.14,
+              "ci95Pct": 0.35
+            },
+            "process_cpu_ms/frame": {
+              "off": 85.231,
+              "on": 70.881,
+              "changePct": -16.8,
+              "ci95Pct": 1.69
+            },
+            "collect_thread_cpu_ms/frame": {
+              "off": 0.435,
+              "on": 0.46,
+              "changePct": 5.93,
+              "ci95Pct": 2.32
+            },
+            "collect_ms/frame": {
+              "off": 0.381,
+              "on": 0.405,
+              "changePct": 6.48,
+              "ci95Pct": 0.79
+            },
+            "periph_renderables": {
+              "off": 70.566,
+              "on": 70.363,
+              "changePct": 0.28,
+              "ci95Pct": 0.57
+            },
+            "focus_renderables": {
+              "off": 68.0,
+              "on": 68.0,
+              "changePct": 0.0,
+              "ci95Pct": 0.0
+            },
+            "shadow_renderables": {
+              "off": 151.0,
+              "on": 151.0,
+              "changePct": 0.0,
+              "ci95Pct": 0.0
+            },
+            "gpu_util_%": {
+              "off": 62.633,
+              "on": 62.281,
+              "changePct": -0.81,
+              "ci95Pct": 1.29
+            },
+            "render_thread_cpu_ms/frame": {
+              "off": 9.92,
+              "on": 11.221,
+              "changePct": 13.37,
+              "ci95Pct": 1.71
+            },
+            "render_thread_busy_%": {
+              "off": 44.625,
+              "on": 50.492,
+              "changePct": 13.44,
+              "ci95Pct": 1.8
+            },
+            "pass_ms/frame": {
+              "off": 5.618,
+              "on": 6.518,
+              "changePct": 16.37,
+              "ci95Pct": 2.32
+            },
+            "gbuffer_pass_ms/frame": {
+              "off": 0.214,
+              "on": 0.321,
+              "changePct": 56.99,
+              "ci95Pct": 66.66
+            }
+          },
+          "metrics": {
+            "render_thread_ms": {
+              "off": 9.92,
+              "on": 11.2206,
+              "deltaAbs": 1.3006,
+              "changePct": 13.37,
+              "sePct": 0.724,
+              "ci95Pct": 1.709,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "p95_ms": {
+              "off": 23.207,
+              "on": 23.178,
+              "deltaAbs": -0.029,
+              "changePct": -0.141,
+              "sePct": 0.147,
+              "ci95Pct": 0.348,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "process_cpu_ms": {
+              "off": 85.231,
+              "on": 70.881,
+              "deltaAbs": -14.35,
+              "changePct": -16.802,
+              "sePct": 0.718,
+              "ci95Pct": 1.695,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "pass_ms": {
+              "off": 5.618,
+              "on": 6.518,
+              "deltaAbs": 0.9,
+              "changePct": 16.372,
+              "sePct": 0.982,
+              "ci95Pct": 2.318,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "fps": {
+              "off": 44.9838,
+              "on": 44.9988,
+              "deltaAbs": 0.015,
+              "changePct": 0.061,
+              "sePct": 0.103,
+              "ci95Pct": 0.244,
+              "nPairs": 8,
+              "nBlocks": 16
+            }
+          },
+          "nBlocks": 16,
+          "source": "artifacts/live-07/short2/runs/sc2_parts_1123-0214_on (SHORT-CHECK Part 3)"
+        },
+        "shadowRecorder": {
+          "status": "ok",
+          "label": "shadow recorder",
+          "offArm": "stock",
+          "benchMode": 28,
+          "bench": "shadow recorder (R17 S3)",
+          "csv": "bench_20261123_022216.csv",
+          "fpsCap": 45.0,
+          "capText": "refresh 90 Hz / 2",
+          "module": {
+            "fps": {
+              "off": 45.005,
+              "on": 45.011,
+              "changePct": 0.01,
+              "ci95Pct": 0.23
+            },
+            "frame_ms": {
+              "off": 22.223,
+              "on": 22.223,
+              "changePct": -0.0,
+              "ci95Pct": 0.01
+            },
+            "p95_frame_ms": {
+              "off": 23.196,
+              "on": 23.178,
+              "changePct": -0.14,
+              "ci95Pct": 0.43
+            },
+            "process_cpu_ms/frame": {
+              "off": 69.774,
+              "on": 70.237,
+              "changePct": 0.81,
+              "ci95Pct": 2.22
+            },
+            "collect_thread_cpu_ms/frame": {
+              "off": 0.45,
+              "on": 0.456,
+              "changePct": 1.32,
+              "ci95Pct": 2.13
+            },
+            "collect_ms/frame": {
+              "off": 0.402,
+              "on": 0.403,
+              "changePct": 0.17,
+              "ci95Pct": 0.4
+            },
+            "periph_renderables": {
+              "off": 68.0,
+              "on": 68.0,
+              "changePct": 0.0,
+              "ci95Pct": 0.0
+            },
+            "focus_renderables": {
+              "off": 68.0,
+              "on": 68.0,
+              "changePct": 0.0,
+              "ci95Pct": 0.0
+            },
+            "shadow_renderables": {
+              "off": 151.0,
+              "on": 151.0,
+              "changePct": 0.0,
+              "ci95Pct": 0.0
+            },
+            "gpu_util_%": {
+              "off": 62.383,
+              "on": 62.797,
+              "changePct": 0.76,
+              "ci95Pct": 1.61
+            },
+            "render_thread_cpu_ms/frame": {
+              "off": 11.348,
+              "on": 11.386,
+              "changePct": 0.44,
+              "ci95Pct": 1.69
+            },
+            "render_thread_busy_%": {
+              "off": 51.069,
+              "on": 51.248,
+              "changePct": 0.44,
+              "ci95Pct": 1.6
+            },
+            "pass_ms/frame": {
+              "off": 6.731,
+              "on": 6.748,
+              "changePct": 0.33,
+              "ci95Pct": 1.96
+            },
+            "gbuffer_pass_ms/frame": {
+              "off": 0.315,
+              "on": 0.4,
+              "changePct": 30.16,
+              "ci95Pct": 38.85
+            }
+          },
+          "metrics": {
+            "render_thread_ms": {
+              "off": 11.3475,
+              "on": 11.3857,
+              "deltaAbs": 0.0382,
+              "changePct": 0.438,
+              "sePct": 0.716,
+              "ci95Pct": 1.69,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "p95_ms": {
+              "off": 23.1958,
+              "on": 23.1786,
+              "deltaAbs": -0.0171,
+              "changePct": -0.138,
+              "sePct": 0.183,
+              "ci95Pct": 0.431,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "process_cpu_ms": {
+              "off": 69.7737,
+              "on": 70.2366,
+              "deltaAbs": 0.4629,
+              "changePct": 0.808,
+              "sePct": 0.939,
+              "ci95Pct": 2.216,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "pass_ms": {
+              "off": 6.7311,
+              "on": 6.7484,
+              "deltaAbs": 0.0172,
+              "changePct": 0.333,
+              "sePct": 0.828,
+              "ci95Pct": 1.954,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "fps": {
+              "off": 45.0063,
+              "on": 45.0113,
+              "deltaAbs": 0.005,
+              "changePct": 0.004,
+              "sePct": 0.101,
+              "ci95Pct": 0.238,
+              "nPairs": 8,
+              "nBlocks": 16
+            }
+          },
+          "nBlocks": 16,
+          "source": "artifacts/live-07/short2/runs/sc2_parts_1123-0214_on (SHORT-CHECK Part 3)"
+        },
+        "gbufferRecorder": {
+          "status": "ok",
+          "label": "G-buffer recorder",
+          "offArm": "stock",
+          "benchMode": 29,
+          "bench": "g-buffer recorder (R18 S3)",
+          "csv": "bench_20261123_022342.csv",
+          "fpsCap": 45.0,
+          "capText": "refresh 90 Hz / 2",
+          "module": {
+            "fps": {
+              "off": 44.993,
+              "on": 45.019,
+              "changePct": 0.05,
+              "ci95Pct": 0.17
+            },
+            "frame_ms": {
+              "off": 22.224,
+              "on": 22.223,
+              "changePct": -0.0,
+              "ci95Pct": 0.01
+            },
+            "p95_frame_ms": {
+              "off": 23.215,
+              "on": 23.267,
+              "changePct": 0.22,
+              "ci95Pct": 0.5
+            },
+            "process_cpu_ms/frame": {
+              "off": 69.751,
+              "on": 71.724,
+              "changePct": 2.38,
+              "ci95Pct": 1.5
+            },
+            "collect_thread_cpu_ms/frame": {
+              "off": 0.457,
+              "on": 0.455,
+              "changePct": -0.6,
+              "ci95Pct": 1.71
+            },
+            "collect_ms/frame": {
+              "off": 0.409,
+              "on": 0.41,
+              "changePct": -0.06,
+              "ci95Pct": 0.62
+            },
+            "periph_renderables": {
+              "off": 82.729,
+              "on": 85.669,
+              "changePct": 0.5,
+              "ci95Pct": 3.9
+            },
+            "focus_renderables": {
+              "off": 68.0,
+              "on": 68.0,
+              "changePct": 0.0,
+              "ci95Pct": 0.0
+            },
+            "shadow_renderables": {
+              "off": 151.0,
+              "on": 151.0,
+              "changePct": 0.0,
+              "ci95Pct": 0.0
+            },
+            "gpu_util_%": {
+              "off": 61.969,
+              "on": 62.984,
+              "changePct": 1.18,
+              "ci95Pct": 0.8
+            },
+            "render_thread_cpu_ms/frame": {
+              "off": 11.743,
+              "on": 11.873,
+              "changePct": 0.85,
+              "ci95Pct": 1.52
+            },
+            "render_thread_busy_%": {
+              "off": 52.839,
+              "on": 53.45,
+              "changePct": 0.91,
+              "ci95Pct": 1.59
+            },
+            "pass_ms/frame": {
+              "off": 7.08,
+              "on": 7.2,
+              "changePct": 1.22,
+              "ci95Pct": 1.77
+            },
+            "gbuffer_pass_ms/frame": {
+              "off": 0.451,
+              "on": 0.498,
+              "changePct": 12.28,
+              "ci95Pct": 16.62
+            }
+          },
+          "metrics": {
+            "render_thread_ms": {
+              "off": 11.7435,
+              "on": 11.8728,
+              "deltaAbs": 0.1293,
+              "changePct": 0.853,
+              "sePct": 0.643,
+              "ci95Pct": 1.518,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "p95_ms": {
+              "off": 23.2155,
+              "on": 23.2665,
+              "deltaAbs": 0.051,
+              "changePct": 0.22,
+              "sePct": 0.214,
+              "ci95Pct": 0.504,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "process_cpu_ms": {
+              "off": 69.7514,
+              "on": 71.724,
+              "deltaAbs": 1.9726,
+              "changePct": 2.383,
+              "sePct": 0.634,
+              "ci95Pct": 1.495,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "pass_ms": {
+              "off": 7.0804,
+              "on": 7.1996,
+              "deltaAbs": 0.1192,
+              "changePct": 1.217,
+              "sePct": 0.749,
+              "ci95Pct": 1.767,
+              "nPairs": 8,
+              "nBlocks": 16
+            },
+            "fps": {
+              "off": 44.9938,
+              "on": 45.02,
+              "deltaAbs": 0.0262,
+              "changePct": 0.056,
+              "sePct": 0.073,
+              "ci95Pct": 0.172,
+              "nPairs": 8,
+              "nBlocks": 16
+            }
+          },
+          "nBlocks": 16,
+          "source": "artifacts/live-07/short2/runs/sc2_parts_1123-0214_on (SHORT-CHECK Part 3)"
+        },
+        "engine": {
+          "status": "ok",
+          "label": "engine on vs off (all parts)",
+          "offArm": "stock",
+          "benchMode": 11,
+          "bench": "all engine optimizations vs stock DCS",
+          "csv": "bench_20261123_013439.csv",
+          "fpsCap": 45.0,
+          "capText": "refresh 90 Hz / 2",
+          "module": {
+            "fps": {
+              "off": 45.006,
+              "on": 45.024,
+              "changePct": 0.06,
+              "ci95Pct": 0.16
+            },
+            "frame_ms": {
+              "off": 22.223,
+              "on": 22.222,
+              "changePct": -0.01,
+              "ci95Pct": 0.01
+            },
+            "p95_frame_ms": {
+              "off": 23.186,
+              "on": 23.108,
+              "changePct": -0.34,
+              "ci95Pct": 0.23
+            },
+            "process_cpu_ms/frame": {
+              "off": 84.126,
+              "on": 75.01,
+              "changePct": -10.89,
+              "ci95Pct": 3.49
+            },
+            "collect_thread_cpu_ms/frame": {
+              "off": 0.453,
+              "on": 0.472,
+              "changePct": 4.28,
+              "ci95Pct": 2.62
+            },
+            "collect_ms/frame": {
+              "off": 0.405,
+              "on": 0.417,
+              "changePct": 3.04,
+              "ci95Pct": 0.87
+            },
+            "periph_renderables": {
+              "off": 73.166,
+              "on": 73.828,
+              "changePct": 0.17,
+              "ci95Pct": 0.52
+            },
+            "focus_renderables": {
+              "off": 68.0,
+              "on": 68.0,
+              "changePct": 0.0,
+              "ci95Pct": 0.0
+            },
+            "shadow_renderables": {
+              "off": 150.012,
+              "on": 150.144,
+              "changePct": 0.03,
+              "ci95Pct": 0.06
+            },
+            "gpu_util_%": {
+              "off": 62.562,
+              "on": 60.833,
+              "changePct": -2.61,
+              "ci95Pct": 0.6
+            },
+            "render_thread_cpu_ms/frame": {
+              "off": 10.122,
+              "on": 12.02,
+              "changePct": 18.73,
+              "ci95Pct": 1.74
+            },
+            "render_thread_busy_%": {
+              "off": 45.554,
+              "on": 54.122,
+              "changePct": 18.82,
+              "ci95Pct": 1.84
+            }
+          },
+          "metrics": {
+            "render_thread_ms": {
+              "off": 10.1222,
+              "on": 12.0204,
+              "deltaAbs": 1.8983,
+              "changePct": 18.734,
+              "sePct": 0.792,
+              "ci95Pct": 1.742,
+              "nPairs": 12,
+              "nBlocks": 24
+            },
+            "p95_ms": {
+              "off": 23.1855,
+              "on": 23.1084,
+              "deltaAbs": -0.0771,
+              "changePct": -0.337,
+              "sePct": 0.106,
+              "ci95Pct": 0.233,
+              "nPairs": 12,
+              "nBlocks": 24
+            },
+            "process_cpu_ms": {
+              "off": 84.1263,
+              "on": 75.0097,
+              "deltaAbs": -9.1167,
+              "changePct": -10.888,
+              "sePct": 1.585,
+              "ci95Pct": 3.487,
+              "nPairs": 12,
+              "nBlocks": 24
+            },
+            "fps": {
+              "off": 45.0058,
+              "on": 45.0242,
+              "deltaAbs": 0.0183,
+              "changePct": 0.065,
+              "sePct": 0.074,
+              "ci95Pct": 0.162,
+              "nPairs": 12,
+              "nBlocks": 24
+            }
+          },
+          "nBlocks": 24,
+          "source": "artifacts/live-07/short/runs/sc_main_1123-0128_on (SHORT-CHECK Part 2 C, 24 blocks, prewarm held)"
+        }
+      },
+      "suiteEnded": "finished"
+    }
+  ],
+  "run": {
+    "note": "SHORT-CHECK.md Parts 2 and 3; foveated FG on, simulated gaze 0,0, tracked pose, capped 45 fps"
+  }
+}
