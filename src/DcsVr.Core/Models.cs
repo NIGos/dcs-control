@@ -195,9 +195,10 @@ public sealed record VrProfile
     /// the headset. With <see cref="UsesFoveatedFrameGen"/> the focus layer's output pass does the same taper, with the
     /// periphery's resolution computed from the two views' sizes and fields of view (patch 0021).</summary>
     public bool QuadEdgeMatch { get; init; }
-    /// <summary>Eye-tracked bundled Quad Views: after an eye jump the focus area glides to the new place over this many
-    /// milliseconds instead of jumping there (dcsvr_gaze_glide_ms, Quad Views 0035; 0 = off). Rig 2026-11-23, 10-degree
-    /// saccades with DLSS 5: 40 ms halved the border flash; no effect on 20-degree ones.</summary>
+    /// <summary>Eye-tracked bundled Quad Views: small focus moves outside saccades (the deadzone's steps, drift, slow
+    /// pursuit) approach the gaze with this time constant instead of in one frame (dcsvr_gaze_glide_ms, Quad Views 0035;
+    /// 0 = off). Saccades and moves over 2 degrees still jump (native/quadviews/dcsvr_gaze.h, GlideMaxDeg). Rig
+    /// 2026-11-23, 10-degree saccades with DLSS 5: 40 ms halved the border flash; no effect on 20-degree ones.</summary>
     public int QuadGazeGlideMs { get; init; }
     /// <summary>Bundled Quad Views: a strip the focus area newly covers fades in over this many frames instead of
     /// appearing at once (dcsvr_focus_fade_in, Quad Views 0036; 0 = off, up to 3). Rig: 2 frames halved the 10-degree
