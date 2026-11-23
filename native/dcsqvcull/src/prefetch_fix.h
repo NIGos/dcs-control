@@ -163,7 +163,7 @@ thread_local uint64_t t_spinStart = 0;
 // the mixed A/B: ~7.6 M calls/s in skip blocks, ~1.2 M/s in observe blocks), and the render thread read +1.30 ms per
 // frame (bench 33, observe -> skip). With a cap N, a thread that skipped N calls within kSpinWindowMs (pass-throughs
 // in between do not reset it) sleeps 1 ms, so it skips at most about N per ms. Never on g_noSleepTid (the render
-// thread, when known): a hint is never worth a stall there.
+// thread), and not at all while it is unknown (0): a hint is never worth a stall there.
 std::atomic<uint32_t> g_spinCap{0};
 std::atomic<DWORD> g_noSleepTid{0};
 std::atomic<uint64_t> g_capSleeps{0};
@@ -174,7 +174,9 @@ inline bool CapSkip(uint64_t now, uint32_t cap) {
   if (!cap) return false;
   if (t_capSkips == 0) t_capStart = now;
   if (++t_capSkips < cap) return false;
-  const bool slept = now - t_capStart < kSpinWindowMs && GetCurrentThreadId() != g_noSleepTid.load(std::memory_order_relaxed);
+  // Until the render thread is known (pass timing not installed yet, or at all) nobody sleeps: it might be the caller.
+  const DWORD rt = g_noSleepTid.load(std::memory_order_relaxed);
+  const bool slept = rt != 0 && now - t_capStart < kSpinWindowMs && GetCurrentThreadId() != rt;
   if (slept) {
     g_capSleeps.fetch_add(1, std::memory_order_relaxed);
     Sleep(1);

@@ -229,6 +229,15 @@ void Modes(void** imp, void* impKernel) {
     const uint64_t sl0 = pffix::g_capSleeps.load();
     pffix::g_spinCap = 64;
     pffix::t_capSkips = 0;
+    // render thread unknown (0): nobody sleeps
+    pffix::g_noSleepTid = 0;
+    {
+      const uint64_t s = pffix::g_capSleeps.load();
+      for (int i = 0; i < 200; ++i) ProbeStored(g_buffer + 8192, 4096);
+      Check(pffix::g_capSleeps.load() == s, "prefetch spin cap: nobody sleeps while the render thread is unknown");
+      pffix::t_capSkips = 0;
+    }
+    pffix::g_noSleepTid = GetCurrentThreadId() + 1;  // some other thread is the render thread
     const uint64_t sk0 = Skipped();
     int fresh = 0;
     for (int i = 0; i < 200; ++i) {
