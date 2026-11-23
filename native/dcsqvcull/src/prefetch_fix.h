@@ -157,7 +157,7 @@ bool SetTableBits(unsigned bits) {
 thread_local uint32_t t_skipRun = 0;
 thread_local uint64_t t_spinStart = 0;
 
-// [Prefetch] SpinCap (default 0 = off: only the back-to-back guard above). The back-to-back guard never fires when a
+// [Prefetch] SpinCap (default 600 since 0.7; 0 = off: only the back-to-back guard above). The back-to-back guard never fires when a
 // new range passes every few calls: 2026-11-23, stock Germany low level, about 4.5 % of the calls pass, so a run ends
 // every ~22 calls. DCS's callers then loop about 6x faster with skip than with every call in the kernel (derived from
 // the mixed A/B: ~7.6 M calls/s in skip blocks, ~1.2 M/s in observe blocks), and the render thread read +1.30 ms per

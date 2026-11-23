@@ -14,6 +14,8 @@
 
 **Faster terrain and shader paths can be turned off.** These GPU shortcuts give the same image and stay on by default. The switch, in the GPU savings fold, is there so a problem like GitHub #28 can be ruled in or out.
 
+**Terrain prefetch fix: less render-thread time in sparse scenes.** With the fix on, DCS's terrain threads could spin on the skipped calls, and in a sparse scene (Germany at low level, no mod) that cost the render thread about 1.3 ms per frame. A thread that keeps hitting skips now pauses for 1 ms every 600 of them, never the render thread. Measured: render thread 7.5 % below the fix's Observe mode instead of 18 % above, and about half the DCS CPU. In Caucasus with ATMOSX there was no cost before or after; the cap only lowered CPU use further. `[Prefetch] SpinCap=0` in `DcsQvCull.ini` turns the pause off.
+
 **Fewer requirements.**
 - **Sharp HUD** no longer needs Depth boost.
 - **Sharp HUD**, **Far depth** and frame generation's use of DCS's cockpit outline, depth and motion also run with Engine Optimizations off. The engine module is then installed for them alone, with none of the optimizations running.

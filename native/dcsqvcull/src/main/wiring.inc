@@ -9,7 +9,7 @@ void ApplyR90Config() {
 // slot restored to the real function; observe = installed, pass-through.
 void ApplyPrefetch() {
   pffix::Apply(g_engineOff.load() ? pffix::kOff : g_cfg.prefetchMode, g_cfg.prefetchWindowMs);
-  // [Prefetch] SpinCap (default 0): skipped calls per thread before a 1 ms sleep (prefetch_fix.h CapSkip).
+  // [Prefetch] SpinCap (default 600, 0 = off): skipped calls per thread before a 1 ms sleep (prefetch_fix.h CapSkip).
   const uint32_t cap = static_cast<uint32_t>(g_cfg.prefetchSpinCap);
   if (pffix::g_spinCap.exchange(cap) != cap) {
     if (cap)
