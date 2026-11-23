@@ -55,6 +55,8 @@ public static class HeadsetRoute
     public static string RuntimeMissing(RuntimeKind route) => route switch
     {
         RuntimeKind.VirtualDesktop => "Virtual Desktop's OpenXR runtime (VDXR) was not found. Install Virtual Desktop Streamer, then press Check this PC.",
-        _ => "The headset's OpenXR runtime was not found. Start Pimax Play (or SteamVR) once, then press Check this PC."
+        // Each route reads only its own runtime: SteamVR never provides the Pimax route's, nor Pimax Play the Sboys route's.
+        RuntimeKind.SboysSteamVr => "SteamVR's OpenXR runtime was not found. Install SteamVR and start it once, then press Check this PC.",
+        _ => "Pimax's OpenXR runtime was not found. Start Pimax Play once, then press Check this PC. With another headset, choose Optimizations only in How you fly."
     };
 }
