@@ -367,7 +367,8 @@ public sealed class DeploymentPlanner(ComponentLocations components)
             // originals brings it back. Removed last on restore (reverse order), after Cheeky's own files.
             const string loader = "dxgi.dll";
             Add(PathPolicy.UnderRoot(bin, loader), File.ReadAllBytes(PathPolicy.UnderRoot(source, loader)), "Cheeky loader " + loader, ownHashes: Variants(loader),
-                runtimeLogs: new[] { "CheekyFoveatedDLSS-Loader.log", "CheekyFoveatedDLSS/CheekyFoveatedDLSS-Host.log", "CheekyFoveatedDLSS/CheekyFoveatedDLSS-Standalone.log" }
+                runtimeLogs: new[] { "CheekyFoveatedDLSS-Loader.log", "CheekyFoveatedDLSS/CheekyFoveatedDLSS-Host.log", "CheekyFoveatedDLSS/CheekyFoveatedDLSS-Standalone.log",
+                    "CheekyFoveatedDLSS/CheekyFoveatedDLSS-Host.prev.log", "CheekyFoveatedDLSS/CheekyFoveatedDLSS-Standalone.prev.log" }
                     .Select(log => PathPolicy.UnderRoot(bin, log)).ToArray());
             // The pilot's own dxgi.dll (ReShade, an overlay) keeps working: the loader chains to bin\dxgi2.dll, so it is
             // installed there; Back to stock DCS removes this copy and puts the original back as dxgi.dll.
