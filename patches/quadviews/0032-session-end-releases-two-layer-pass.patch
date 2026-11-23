@@ -1,0 +1,17 @@
+Session end (bugfix round 0.7): the two-layer output pass (its pixel shader and constant buffer, 0017) is made with
+each session's device but was not released when the session ended, unlike every other pass of the layer: it kept the
+ended session's D3D11 device alive until the next session made new ones (or the process ended).
+
+--- a/openxr-api-layer/layer.cpp
++++ b/openxr-api-layer/layer.cpp
+@@ -801,6 +801,10 @@
+                     dcsvr::SharedDepthImport().ReleaseAll();
+                     m_dcsvrThreeViews.Reset();  // DCSVR three views
+                     m_dcsvrThreeViewsLeft.Reset();
++                    // DCSVR two layers: the output pass is made again with the next session's device; kept, it held
++                    // the ended session's device.
++                    m_dcsvrTwoLayerConstants.Reset();
++                    m_dcsvrTwoLayerPS.Reset();
+                     dcsvr::SharedDepthImport().SetDevice(nullptr);
+                     dcsvr::SharedDepthImport().SetRenderThread(0);
+                     m_dcsvrDepthViews.clear();

@@ -1,0 +1,47 @@
+Tests, made deterministic (bugfix round 0.7). xrfg_layer_two_layers_deep_hold_arming_single (review finding 3 on 0080)
+failed on fast PCs every time: the fake runtime slept 250 ms per private swapchain, four per layer, so arming ended
+about 1080 ms into a run whose last frame is at about 870 ms on such a PC, and no synthetic frame could come. The
+creation now lasts until the frame that names one layer alone was submitted (past the first frame's 400 ms wait,
+bounded at 5 s) and the rest come at once, so the remaining frames always see the swapchains armed.
+xrfg_layer_presenter_stall expects exactly one presenter stall (result 950); in the first phase, two at a time beside
+other builds, a second real stall was seen (a=1, then a=4 11 s later), alone it passes: it is labelled pacing (0091).
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1994,7 +1994,10 @@
+         xrfg_layer_adaptive_cadence_limit_off
+         xrfg_layer_adaptive_cadence_hitch_off
+         xrfg_layer_scene_change_triple
+-        xrfg_layer_scene_change_adaptive)
++        xrfg_layer_scene_change_adaptive
++        # 0096: one presenter stall expected, judged by count; a busy PC adds a second real one (seen in the
++        # first phase, two at a time beside other builds: a=1 then a=4 11 s later; alone it passes).
++        xrfg_layer_presenter_stall)
+ set(XRFG_DCS_ALONE_ONLY_TESTS
+         xrfg_layer_dcs_pipelined_wait
+         xrfg_layer_adaptive_frame_gen
+--- a/tests/layer_call_chain.cpp
++++ b/tests/layer_call_chain.cpp
+@@ -1690,7 +1690,21 @@
+             g_two_layer_created_beside.fetch_add(1, std::memory_order_relaxed);
+         }
+         g_two_layer_creating.fetch_add(1, std::memory_order_acq_rel);
+-        std::this_thread::sleep_for(std::chrono::milliseconds(g_slow_private_create_ms));
++        if (g_two_layer_mode && g_two_layer_single) {
++            // DCS Control (0096): the single-layer case does not race the run's length. A fixed
++            // sleep per swapchain (four per layer) made arming end at 80 + 4 x 250 ms, after a fast
++            // PC's last frame (about 870 ms): no synthetic, a failure only some machines saw. Now
++            // the creation lasts until the frame that names one layer alone was submitted (so past
++            // the first frame's 400 ms wait, bounded at 5 s), and the rest of the swapchains come
++            // at once: the run's remaining frames see them armed on every machine.
++            const auto started = std::chrono::steady_clock::now();
++            while (std::chrono::steady_clock::now() - started < std::chrono::seconds(5) &&
++                   g_two_layer_single_submitted.load(std::memory_order_acquire) == 0) {
++                std::this_thread::sleep_for(std::chrono::milliseconds(2));
++            }
++        } else {
++            std::this_thread::sleep_for(std::chrono::milliseconds(g_slow_private_create_ms));
++        }
+         g_two_layer_creating.fetch_sub(1, std::memory_order_acq_rel);
+         if (g_two_layer_mode) {
+             g_two_layer_side_creating[side].fetch_sub(1, std::memory_order_acq_rel);
