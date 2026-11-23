@@ -864,7 +864,7 @@ function buildFields() {
   field(more,'engineBeeps','Beeps for the in-flight switch','One beep off, two beeps on.','toggle',null,engine);
   // GPU savings in their own fold after the CPU parts, with how many are on: the card itself is about the CPU, and the
   // rows at its top pushed the parts below the fold. Faster terrain and shader paths first (on by default).
-  const gpuFold = toggleList(disclosure(c,'GPU savings','Less GPU time in some scenes.',p => `${GPU_SAVINGS.filter(k => p[k]).length} of ${GPU_SAVINGS.length} on`));
+  const gpuFold = toggleList(disclosure(c,'GPU savings','Less GPU time in some scenes. Some are off by default.',p => `${GPU_SAVINGS.filter(k => p[k]).length} of ${GPU_SAVINGS.length} on`));
   field(gpuFold,'engineFastShaderPaths','Faster terrain and shader paths','GPU shortcuts that give the same image. Turn off only if a problem points to it.','toggle',null,engine);
   field(gpuFold,'engineShadowCache','Cache distant shadows',['About 0.7 ms less GPU time; distant tree shadows sway less smoothly.','Reuses the distant shadows (about 70 m to 1.5 km) for a few frames.'],'toggle',null,engine);
   // 0.7, off by default: [Water]
@@ -2014,7 +2014,7 @@ function renderSearch() {
 const GUIDE_SECTIONS = [
   ['every','Every pilot','On a monitor or any headset.'],
   ['vr','VR','Pimax, Sboys (SteamVR) and Quest 3 through Virtual Desktop.'],
-  ['perception','Perception','More depth and a calmer image. Off by default.'],
+  ['perception','Perception','More depth and a calmer image. Off by default; try one at a time.'],
   ['visual','Visual realism','Off by default. The color mode key switches color modes in flight.'],
   ['safety','Safety net','']
 ];
